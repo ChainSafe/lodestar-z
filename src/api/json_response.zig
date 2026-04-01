@@ -16,6 +16,8 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const response_meta = @import("response_meta.zig");
 const ResponseMeta = response_meta.ResponseMeta;
+const fork_types = @import("fork_types");
+const AnyAttesterSlashing = fork_types.AnyAttesterSlashing;
 
 const isFixedType = @import("ssz").isFixedType;
 
@@ -148,6 +150,31 @@ pub fn writeBlockEnvelope(
     return aw.toOwnedSlice();
 }
 
+/// Write a Beacon API JSON envelope around fork-polymorphic attester slashings.
+pub fn writeAnyAttesterSlashingArrayEnvelope(
+    alloc: Allocator,
+    items: []const AnyAttesterSlashing,
+    meta: ResponseMeta,
+) ![]u8 {
+    var aw: std.Io.Writer.Allocating = .init(alloc);
+    errdefer aw.deinit();
+    var stream: std.json.Stringify = .{ .writer = &aw.writer };
+
+    try stream.beginObject();
+    try stream.objectField("data");
+    try stream.beginArray();
+
+    for (items) |*item| {
+        try serializeAnyAttesterSlashing(alloc, &stream, item.*);
+    }
+
+    try stream.endArray();
+    try writeMetaFields(&stream, meta);
+    try stream.endObject();
+
+    return aw.toOwnedSlice();
+}
+
 // ── Internal helpers ─────────────────────────────────────────────────────
 
 /// Serialize the active variant of an AnySignedBeaconBlock union.
@@ -166,6 +193,18 @@ fn serializeAnyBlock(alloc: Allocator, stream: *std.json.Stringify, any_block: a
         .blinded_electra => |blk| try ct.electra.SignedBlindedBeaconBlock.serializeIntoJson(alloc, stream, blk),
         .full_fulu => |blk| try ct.fulu.SignedBeaconBlock.serializeIntoJson(alloc, stream, blk),
         .blinded_fulu => |blk| try ct.fulu.SignedBlindedBeaconBlock.serializeIntoJson(alloc, stream, blk),
+    }
+}
+
+fn serializeAnyAttesterSlashing(
+    alloc: Allocator,
+    stream: *std.json.Stringify,
+    slashing: AnyAttesterSlashing,
+) !void {
+    const ct = @import("consensus_types");
+    switch (slashing) {
+        .phase0 => |item| try ct.phase0.AttesterSlashing.serializeIntoJson(alloc, stream, &item),
+        .electra => |item| try ct.electra.AttesterSlashing.serializeIntoJson(alloc, stream, &item),
     }
 }
 

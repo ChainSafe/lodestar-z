@@ -14,10 +14,12 @@ const Allocator = std.mem.Allocator;
 
 const types = @import("consensus_types");
 const preset = @import("preset").preset;
+const fork_types = @import("fork_types");
 
 const Slot = types.primitive.Slot.Type;
 const ValidatorIndex = types.primitive.ValidatorIndex.Type;
 const Epoch = types.primitive.Epoch.Type;
+const AnyAttesterSlashing = fork_types.AnyAttesterSlashing;
 
 const OpPool = @import("op_pool.zig").OpPool;
 const SyncContributionAndProofPool = @import("sync_contribution_pool.zig").SyncContributionAndProofPool;
@@ -47,7 +49,7 @@ pub const ProducedBlockBody = struct {
     attestations: []types.phase0.Attestation.Type,
     voluntary_exits: []types.phase0.SignedVoluntaryExit.Type,
     proposer_slashings: []types.phase0.ProposerSlashing.Type,
-    attester_slashings: []types.phase0.AttesterSlashing.Type,
+    attester_slashings: []AnyAttesterSlashing,
     bls_to_execution_changes: []types.capella.SignedBLSToExecutionChange.Type,
 
     /// Free all owned slices.
@@ -55,6 +57,7 @@ pub const ProducedBlockBody = struct {
         if (self.attestations.len > 0) allocator.free(self.attestations);
         if (self.voluntary_exits.len > 0) allocator.free(self.voluntary_exits);
         if (self.proposer_slashings.len > 0) allocator.free(self.proposer_slashings);
+        for (self.attester_slashings) |*slashing| slashing.deinit(allocator);
         if (self.attester_slashings.len > 0) allocator.free(self.attester_slashings);
         if (self.bls_to_execution_changes.len > 0) allocator.free(self.bls_to_execution_changes);
     }
@@ -230,7 +233,10 @@ pub fn produceBlockBody(
     errdefer allocator.free(proposer_slashings);
 
     const attester_slashings = try op_pool.attester_slashing_pool.getForBlock(allocator, MAX_ATTESTER_SLASHINGS);
-    errdefer allocator.free(attester_slashings);
+    errdefer {
+        for (attester_slashings) |*slashing| slashing.deinit(allocator);
+        allocator.free(attester_slashings);
+    }
 
     const bls_changes = try op_pool.bls_change_pool.getForBlock(allocator, MAX_BLS_TO_EXECUTION_CHANGES);
 
@@ -243,16 +249,14 @@ pub fn produceBlockBody(
     };
 }
 
-
 // ---------------------------------------------------------------------------
 // Format conversion helpers: Phase0 → Electra
 //
-// The op pool stores attestations and attester slashings in Phase0 format
-// (the format they arrive in from gossip). Electra blocks require a different
-// layout:
+// The op pool stores attestations in Phase0 format and attester slashings in a
+// fork-polymorphic wrapper. Electra blocks require a different layout:
 //   - Attestation: aggregation_bits is over ALL committees (not one),
 //     committee_bits indicates which committee(s) are represented.
-//   - AttesterSlashing: uses Electra IndexedAttestation (larger max indices).
+//   - AttesterSlashing: Electra uses a larger IndexedAttestation list bound.
 //   - IndexedAttestation: max attesting_indices = MAX_VALIDATORS_PER_COMMITTEE * MAX_COMMITTEES_PER_SLOT
 //
 // These helpers convert Phase0 items to Electra format for block inclusion.
@@ -393,7 +397,14 @@ fn assembleCommonBlockBody(
         electra_slashings.deinit(allocator);
     }
     for (ops.attester_slashings) |sl| {
-        const electra_sl = try phase0ToElectraAttesterSlashing(allocator, sl);
+        const electra_sl = switch (sl) {
+            .phase0 => |phase0_sl| try phase0ToElectraAttesterSlashing(allocator, phase0_sl),
+            .electra => |electra_sl| blk: {
+                var cloned = types.electra.AttesterSlashing.default_value;
+                try types.electra.AttesterSlashing.clone(allocator, &electra_sl, &cloned);
+                break :blk cloned;
+            },
+        };
         try electra_slashings.append(allocator, electra_sl);
     }
 

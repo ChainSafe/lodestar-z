@@ -156,7 +156,7 @@ pub const OpPoolCallback = struct {
     pub const Phase0Attestation = consensus.phase0.Attestation.Type;
     pub const SignedVoluntaryExit = consensus.phase0.SignedVoluntaryExit.Type;
     pub const ProposerSlashing = consensus.phase0.ProposerSlashing.Type;
-    pub const Phase0AttesterSlashing = consensus.phase0.AttesterSlashing.Type;
+    pub const AnyAttesterSlashing = fork_types.AnyAttesterSlashing;
     pub const SignedBLSToExecutionChange = consensus.capella.SignedBLSToExecutionChange.Type;
 
     ptr: *anyopaque,
@@ -170,7 +170,7 @@ pub const OpPoolCallback = struct {
     /// Returns all pending proposer slashings. Caller owns the returned slice.
     getProposerSlashingsFn: ?*const fn (ptr: *anyopaque, allocator: std.mem.Allocator) anyerror![]ProposerSlashing = null,
     /// Returns all pending attester slashings. Caller owns the returned slice.
-    getAttesterSlashingsFn: ?*const fn (ptr: *anyopaque, allocator: std.mem.Allocator) anyerror![]Phase0AttesterSlashing = null,
+    getAttesterSlashingsFn: ?*const fn (ptr: *anyopaque, allocator: std.mem.Allocator) anyerror![]AnyAttesterSlashing = null,
     /// Returns all pending BLS-to-execution changes. Caller owns the returned slice.
     getBlsToExecutionChangesFn: ?*const fn (ptr: *anyopaque, allocator: std.mem.Allocator) anyerror![]SignedBLSToExecutionChange = null,
 };

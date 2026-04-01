@@ -454,8 +454,9 @@ pub fn submitBlindedBlock(
 /// POST /eth/v1/beacon/pool/sync_committees
 ///
 /// All pool submission endpoints follow the same pattern: accept an encoded
-/// object (JSON or SSZ), validate/process, return 200 on success.
-/// These are stubs — full implementation requires op pool write callbacks.
+/// object, import it through the node callback surface, and return 200 on
+/// success. A non-empty request without a wired pool-submit callback is a
+/// misconfigured node and returns `error.NotImplemented`.
 /// POST /eth/v1/beacon/pool/attestations
 ///
 /// Submit attestations to the local op pool.
@@ -463,55 +464,9 @@ pub fn submitBlindedBlock(
 /// Validates and forwards to the pool_submit callback if available.
 pub fn submitPoolAttestations(ctx: *ApiContext, body: []const u8) !HandlerResult(void) {
     if (body.len == 0) return .{ .data = {} };
-
-    // Forward to pool_submit callback if wired.
-    if (ctx.pool_submit) |cb| {
-        if (cb.submitAttestationFn) |submit_fn| {
-            try submit_fn(cb.ptr, body);
-            return .{ .data = {} };
-        }
-    }
-
-    // Parse and add directly to the local op pool (if no callback is set).
-    // Use a local arena for the parsed JSON.
-    var arena = std.heap.ArenaAllocator.init(ctx.allocator);
-    defer arena.deinit();
-    const alloc = arena.allocator();
-
-    const parsed = std.json.parseFromSlice([]AttestationJsonWire, alloc, body, .{
-        .ignore_unknown_fields = true,
-    }) catch return error.InvalidRequest;
-    defer parsed.deinit();
-
-    for (parsed.value) |att_wire| {
-        const data_root = try parseRoot(att_wire.data.beacon_block_root);
-        const source_root = try parseRoot(att_wire.data.source.root);
-        const target_root = try parseRoot(att_wire.data.target.root);
-        const sig = try parseSignature(att_wire.signature);
-
-        const phase0_att = consensus_types.phase0.Attestation.Type{
-            .aggregation_bits = .{
-                .data = std.ArrayListUnmanaged(u8).empty,
-                .bit_len = 0,
-            },
-            .data = .{
-                .slot = att_wire.data.slot,
-                .index = att_wire.data.index,
-                .beacon_block_root = data_root,
-                .source = .{
-                    .epoch = att_wire.data.source.epoch,
-                    .root = source_root,
-                },
-                .target = .{
-                    .epoch = att_wire.data.target.epoch,
-                    .root = target_root,
-                },
-            },
-            .signature = sig,
-        };
-        _ = phase0_att; // attestation parsed; pool add requires op_pool callback
-    }
-
+    const cb = ctx.pool_submit orelse return error.NotImplemented;
+    const submit_fn = cb.submitAttestationFn orelse return error.NotImplemented;
+    try submit_fn(cb.ptr, body);
     return .{ .data = {} };
 }
 
@@ -523,64 +478,10 @@ pub fn submitPoolAttestations(ctx: *ApiContext, body: []const u8) !HandlerResult
 /// For pre-Electra slots, falls back to phase0 Attestation[] format.
 pub fn submitPoolAttestationsV2(ctx: *ApiContext, body: []const u8) !HandlerResult(void) {
     if (body.len == 0) return .{ .data = {} };
-
-    // Forward to pool_submit callback if wired.
-    if (ctx.pool_submit) |cb| {
-        if (cb.submitAttestationFn) |submit_fn| {
-            try submit_fn(cb.ptr, body);
-            return .{ .data = {} };
-        }
-    }
-
-    // Parse attestations from the request body.
-    var arena = std.heap.ArenaAllocator.init(ctx.allocator);
-    defer arena.deinit();
-    const alloc = arena.allocator();
-
-    // Try SingleAttestation format first (Electra v2 format).
-    if (std.json.parseFromSlice([]SingleAttestationJsonWire, alloc, body, .{
-        .ignore_unknown_fields = true,
-    })) |parsed| {
-        defer parsed.deinit();
-
-        for (parsed.value) |sa_wire| {
-            const data_root = try parseRoot(sa_wire.data.beacon_block_root);
-            const source_root = try parseRoot(sa_wire.data.source.root);
-            const target_root = try parseRoot(sa_wire.data.target.root);
-            const sig = try parseSignature(sa_wire.signature);
-
-            // Convert SingleAttestation → internal phase0 Attestation format.
-            // Set the committee bit for committee_index.
-            // Set the aggregation bit for the single attester position.
-            // Note: we don't know committee_length here, so we store minimal info
-            // and let the pool/gossip layer handle full validation.
-            const phase0_att = consensus_types.phase0.Attestation.Type{
-                .aggregation_bits = .{
-                    .data = std.ArrayListUnmanaged(u8).empty,
-                    .bit_len = 0,
-                },
-                .data = .{
-                    .slot = sa_wire.data.slot,
-                    .index = sa_wire.committee_index,
-                    .beacon_block_root = data_root,
-                    .source = .{
-                        .epoch = sa_wire.data.source.epoch,
-                        .root = source_root,
-                    },
-                    .target = .{
-                        .epoch = sa_wire.data.target.epoch,
-                        .root = target_root,
-                    },
-                },
-                .signature = sig,
-            };
-            _ = phase0_att; // Parsed; full pool insertion via op_pool callback.
-        }
-        return .{ .data = {} };
-    } else |_| {}
-
-    // Fall back to pre-Electra Attestation[] format.
-    return submitPoolAttestations(ctx, body);
+    const cb = ctx.pool_submit orelse return error.NotImplemented;
+    const submit_fn = cb.submitAttestationFn orelse return error.NotImplemented;
+    try submit_fn(cb.ptr, body);
+    return .{ .data = {} };
 }
 
 /// POST /eth/v1/beacon/pool/voluntary_exits
@@ -588,24 +489,9 @@ pub fn submitPoolAttestationsV2(ctx: *ApiContext, body: []const u8) !HandlerResu
 /// Submit a signed voluntary exit to the local op pool.
 pub fn submitPoolVoluntaryExits(ctx: *ApiContext, body: []const u8) !HandlerResult(void) {
     if (body.len == 0) return .{ .data = {} };
-
-    if (ctx.pool_submit) |cb| {
-        if (cb.submitVoluntaryExitFn) |submit_fn| {
-            try submit_fn(cb.ptr, body);
-            return .{ .data = {} };
-        }
-    }
-
-    // Parse for validation even without a callback.
-    var arena = std.heap.ArenaAllocator.init(ctx.allocator);
-    defer arena.deinit();
-    const parsed = std.json.parseFromSlice(SignedVoluntaryExitJsonWire, arena.allocator(), body, .{
-        .ignore_unknown_fields = true,
-    }) catch return error.InvalidRequest;
-    defer parsed.deinit();
-
-    _ = parsed.value; // parsed; would add to pool if callback available
-
+    const cb = ctx.pool_submit orelse return error.NotImplemented;
+    const submit_fn = cb.submitVoluntaryExitFn orelse return error.NotImplemented;
+    try submit_fn(cb.ptr, body);
     return .{ .data = {} };
 }
 
@@ -614,23 +500,9 @@ pub fn submitPoolVoluntaryExits(ctx: *ApiContext, body: []const u8) !HandlerResu
 /// Submit a proposer slashing to the local op pool.
 pub fn submitPoolProposerSlashings(ctx: *ApiContext, body: []const u8) !HandlerResult(void) {
     if (body.len == 0) return .{ .data = {} };
-
-    if (ctx.pool_submit) |cb| {
-        if (cb.submitProposerSlashingFn) |submit_fn| {
-            try submit_fn(cb.ptr, body);
-            return .{ .data = {} };
-        }
-    }
-
-    var arena = std.heap.ArenaAllocator.init(ctx.allocator);
-    defer arena.deinit();
-    const parsed = std.json.parseFromSlice(ProposerSlashingJsonWire, arena.allocator(), body, .{
-        .ignore_unknown_fields = true,
-    }) catch return error.InvalidRequest;
-    defer parsed.deinit();
-
-    _ = parsed.value;
-
+    const cb = ctx.pool_submit orelse return error.NotImplemented;
+    const submit_fn = cb.submitProposerSlashingFn orelse return error.NotImplemented;
+    try submit_fn(cb.ptr, body);
     return .{ .data = {} };
 }
 
@@ -639,23 +511,9 @@ pub fn submitPoolProposerSlashings(ctx: *ApiContext, body: []const u8) !HandlerR
 /// Submit an attester slashing to the local op pool.
 pub fn submitPoolAttesterSlashings(ctx: *ApiContext, body: []const u8) !HandlerResult(void) {
     if (body.len == 0) return .{ .data = {} };
-
-    if (ctx.pool_submit) |cb| {
-        if (cb.submitAttesterSlashingFn) |submit_fn| {
-            try submit_fn(cb.ptr, body);
-            return .{ .data = {} };
-        }
-    }
-
-    var arena = std.heap.ArenaAllocator.init(ctx.allocator);
-    defer arena.deinit();
-    const parsed = std.json.parseFromSlice(AttesterSlashingJsonWire, arena.allocator(), body, .{
-        .ignore_unknown_fields = true,
-    }) catch return error.InvalidRequest;
-    defer parsed.deinit();
-
-    _ = parsed.value;
-
+    const cb = ctx.pool_submit orelse return error.NotImplemented;
+    const submit_fn = cb.submitAttesterSlashingFn orelse return error.NotImplemented;
+    try submit_fn(cb.ptr, body);
     return .{ .data = {} };
 }
 
@@ -664,23 +522,9 @@ pub fn submitPoolAttesterSlashings(ctx: *ApiContext, body: []const u8) !HandlerR
 /// Submit BLS-to-execution changes to the local op pool.
 pub fn submitPoolBlsToExecutionChanges(ctx: *ApiContext, body: []const u8) !HandlerResult(void) {
     if (body.len == 0) return .{ .data = {} };
-
-    if (ctx.pool_submit) |cb| {
-        if (cb.submitBlsChangeFn) |submit_fn| {
-            try submit_fn(cb.ptr, body);
-            return .{ .data = {} };
-        }
-    }
-
-    var arena = std.heap.ArenaAllocator.init(ctx.allocator);
-    defer arena.deinit();
-    const parsed = std.json.parseFromSlice([]SignedBLSToExecutionChangeJsonWire, arena.allocator(), body, .{
-        .ignore_unknown_fields = true,
-    }) catch return error.InvalidRequest;
-    defer parsed.deinit();
-
-    _ = parsed.value;
-
+    const cb = ctx.pool_submit orelse return error.NotImplemented;
+    const submit_fn = cb.submitBlsChangeFn orelse return error.NotImplemented;
+    try submit_fn(cb.ptr, body);
     return .{ .data = {} };
 }
 
@@ -689,23 +533,9 @@ pub fn submitPoolBlsToExecutionChanges(ctx: *ApiContext, body: []const u8) !Hand
 /// Submit sync committee messages to the local pool.
 pub fn submitPoolSyncCommittees(ctx: *ApiContext, body: []const u8) !HandlerResult(void) {
     if (body.len == 0) return .{ .data = {} };
-
-    if (ctx.pool_submit) |cb| {
-        if (cb.submitSyncCommitteeMessageFn) |submit_fn| {
-            try submit_fn(cb.ptr, body);
-            return .{ .data = {} };
-        }
-    }
-
-    var arena = std.heap.ArenaAllocator.init(ctx.allocator);
-    defer arena.deinit();
-    const parsed = std.json.parseFromSlice([]SyncCommitteeMessageJsonWire, arena.allocator(), body, .{
-        .ignore_unknown_fields = true,
-    }) catch return error.InvalidRequest;
-    defer parsed.deinit();
-
-    _ = parsed.value;
-
+    const cb = ctx.pool_submit orelse return error.NotImplemented;
+    const submit_fn = cb.submitSyncCommitteeMessageFn orelse return error.NotImplemented;
+    try submit_fn(cb.ptr, body);
     return .{ .data = {} };
 }
 
@@ -771,11 +601,29 @@ pub fn getPoolProposerSlashings(ctx: *ApiContext) !HandlerResult([]const OpPoolC
 /// GET /eth/v1/beacon/pool/attester_slashings
 ///
 /// Returns pending attester slashings from the operation pool.
-pub fn getPoolAttesterSlashings(ctx: *ApiContext) !HandlerResult([]const OpPoolCallback.Phase0AttesterSlashing) {
+/// Post-Electra callers must use the v2 endpoint.
+pub fn getPoolAttesterSlashings(ctx: *ApiContext) !HandlerResult([]const OpPoolCallback.AnyAttesterSlashing) {
+    const head_slot = ctx.currentHeadTracker().head_slot;
+    if (ctx.beacon_config.forkSeq(head_slot).gte(.electra)) return error.InvalidRequest;
+
     const cb = ctx.op_pool orelse return .{ .data = &.{} };
     const get_fn = cb.getAttesterSlashingsFn orelse return .{ .data = &.{} };
     const items = try get_fn(cb.ptr, ctx.allocator);
     return .{ .data = items };
+}
+
+/// GET /eth/v2/beacon/pool/attester_slashings
+///
+/// Returns pending attester slashings from the operation pool in fork-aware format.
+pub fn getPoolAttesterSlashingsV2(ctx: *ApiContext) !HandlerResult([]const OpPoolCallback.AnyAttesterSlashing) {
+    const cb = ctx.op_pool orelse return .{ .data = &.{} };
+    const get_fn = cb.getAttesterSlashingsFn orelse return .{ .data = &.{} };
+    const items = try get_fn(cb.ptr, ctx.allocator);
+    const slot = ctx.currentHeadTracker().head_slot;
+    return .{
+        .data = items,
+        .meta = .{ .version = forkNameFromSlot(ctx, slot) },
+    };
 }
 
 /// GET /eth/v1/beacon/pool/bls_to_execution_changes
@@ -961,12 +809,52 @@ fn resolveStateSlot(ctx: *ApiContext, state_id: types.StateId) !u64 {
 
 const test_helpers = @import("../test_helpers.zig");
 
+const PoolSubmitProbe = struct {
+    saw_body: ?[]const u8 = null,
+
+    fn submitAttestation(ptr: *anyopaque, json_bytes: []const u8) anyerror!void {
+        const self: *PoolSubmitProbe = @ptrCast(@alignCast(ptr));
+        self.saw_body = json_bytes;
+    }
+};
+
 test "getGenesis returns genesis data from config" {
     var tc = test_helpers.makeTestContext(std.testing.allocator);
     defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
     const resp = getGenesis(&tc.ctx);
     try std.testing.expectEqual(@as(u64, 1606824000), resp.data.genesis_time);
     try std.testing.expect(resp.meta.finalized orelse false);
+}
+
+test "submitPoolAttestations returns NotImplemented without callback when body non-empty" {
+    var tc = test_helpers.makeTestContext(std.testing.allocator);
+    defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
+
+    const result = submitPoolAttestations(&tc.ctx, "[]");
+    try std.testing.expectError(error.NotImplemented, result);
+}
+
+test "submitPoolAttestations forwards body to pool_submit callback" {
+    var tc = test_helpers.makeTestContext(std.testing.allocator);
+    defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
+
+    var probe = PoolSubmitProbe{};
+    tc.ctx.pool_submit = .{
+        .ptr = @ptrCast(&probe),
+        .submitAttestationFn = &PoolSubmitProbe.submitAttestation,
+    };
+
+    const body = "[{\"committee_index\":\"0\"}]";
+    _ = try submitPoolAttestations(&tc.ctx, body);
+    try std.testing.expectEqualStrings(body, probe.saw_body.?);
+}
+
+test "submitPoolAttestationsV2 returns NotImplemented without callback when body non-empty" {
+    var tc = test_helpers.makeTestContext(std.testing.allocator);
+    defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
+
+    const result = submitPoolAttestationsV2(&tc.ctx, "[]");
+    try std.testing.expectError(error.NotImplemented, result);
 }
 
 test "getStateRoot for head returns head state root" {

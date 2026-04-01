@@ -14,12 +14,17 @@ const state_transition = @import("state_transition");
 const CachedBeaconState = state_transition.CachedBeaconState;
 const computeEpochAtSlot = state_transition.computeEpochAtSlot;
 const computeStartSlotAtEpoch = state_transition.computeStartSlotAtEpoch;
+const isFixedType = @import("ssz").isFixedType;
 const chain_mod = @import("chain");
 const ChainQuery = chain_mod.Query;
 const networking = @import("networking");
 const StatusMessage = networking.messages.StatusMessage;
 const SubnetService = networking.SubnetService;
-const AnySignedBeaconBlock = @import("fork_types").AnySignedBeaconBlock;
+const fork_types = @import("fork_types");
+const AnyAttesterSlashing = fork_types.AnyAttesterSlashing;
+const AnyGossipAttestation = fork_types.AnyGossipAttestation;
+const AnySignedAggregateAndProof = fork_types.AnySignedAggregateAndProof;
+const AnySignedBeaconBlock = fork_types.AnySignedBeaconBlock;
 const api_mod = @import("api");
 const ApiContext = api_mod.context.ApiContext;
 const ApiHeadTracker = api_mod.context.HeadTracker;
@@ -197,6 +202,10 @@ pub const ApiBindings = struct {
             .submitAttestationFn = &submitAttestationCallback,
             .submitAggregateAndProofFn = &submitAggregateAndProofCallback,
             .submitVoluntaryExitFn = &submitVoluntaryExitCallback,
+            .submitProposerSlashingFn = &submitProposerSlashingCallback,
+            .submitAttesterSlashingFn = &submitAttesterSlashingCallback,
+            .submitBlsChangeFn = &submitBlsChangeCallback,
+            .submitSyncCommitteeMessageFn = &submitSyncCommitteeMessageCallback,
             .submitContributionAndProofFn = &submitContributionAndProofCallback,
         };
         api_ctx.subnet_subscriptions = .{
@@ -275,6 +284,115 @@ pub const OpPoolCallbackCtx = struct {
 fn computeAttestationSubnet(slot: u64, committees_at_slot: u64, committee_index: u64) u8 {
     const committees_since_epoch_start = committees_at_slot * (slot % preset.SLOTS_PER_EPOCH);
     return @intCast((committees_since_epoch_start + committee_index) % networking.peer_info.ATTESTATION_SUBNET_COUNT);
+}
+
+fn parseJsonValue(comptime SszType: type, allocator: std.mem.Allocator, json_bytes: []const u8) !SszType.Type {
+    var scanner = std.json.Scanner.initCompleteInput(allocator, json_bytes);
+    defer scanner.deinit();
+
+    var value = SszType.default_value;
+    errdefer if (!comptime isFixedType(SszType)) SszType.deinit(allocator, &value);
+
+    if (comptime isFixedType(SszType)) {
+        SszType.deserializeFromJson(&scanner, &value) catch return error.InvalidRequest;
+    } else {
+        SszType.deserializeFromJson(allocator, &scanner, &value) catch return error.InvalidRequest;
+    }
+
+    switch (scanner.next() catch return error.InvalidRequest) {
+        .end_of_document => {},
+        else => return error.InvalidRequest,
+    }
+
+    return value;
+}
+
+fn parseJsonArray(comptime SszType: type, allocator: std.mem.Allocator, json_bytes: []const u8) !std.ArrayListUnmanaged(SszType.Type) {
+    var scanner = std.json.Scanner.initCompleteInput(allocator, json_bytes);
+    defer scanner.deinit();
+
+    var items = std.ArrayListUnmanaged(SszType.Type).empty;
+    errdefer deinitParsedArray(SszType, allocator, &items);
+
+    switch (scanner.next() catch return error.InvalidRequest) {
+        .array_begin => {},
+        else => return error.InvalidRequest,
+    }
+
+    while (true) {
+        switch (scanner.peekNextTokenType() catch return error.InvalidRequest) {
+            .array_end => {
+                _ = scanner.next() catch return error.InvalidRequest;
+                break;
+            },
+            else => {},
+        }
+
+        const idx = items.items.len;
+        try items.append(allocator, SszType.default_value);
+        errdefer if (!comptime isFixedType(SszType)) SszType.deinit(allocator, &items.items[idx]);
+
+        if (comptime isFixedType(SszType)) {
+            SszType.deserializeFromJson(&scanner, &items.items[idx]) catch return error.InvalidRequest;
+        } else {
+            SszType.deserializeFromJson(allocator, &scanner, &items.items[idx]) catch return error.InvalidRequest;
+        }
+    }
+
+    switch (scanner.next() catch return error.InvalidRequest) {
+        .end_of_document => {},
+        else => return error.InvalidRequest,
+    }
+
+    return items;
+}
+
+fn deinitParsedArray(comptime SszType: type, allocator: std.mem.Allocator, items: *std.ArrayListUnmanaged(SszType.Type)) void {
+    if (!comptime isFixedType(SszType)) {
+        for (items.items) |*item| SszType.deinit(allocator, item);
+    }
+    items.deinit(allocator);
+}
+
+fn serializeSszValue(comptime SszType: type, allocator: std.mem.Allocator, value: *const SszType.Type) ![]u8 {
+    const size = if (comptime isFixedType(SszType)) SszType.fixed_size else SszType.serializedSize(value);
+    const bytes = try allocator.alloc(u8, size);
+    _ = SszType.serializeIntoBytes(value, bytes);
+    return bytes;
+}
+
+fn publishSsz(
+    node: *BeaconNode,
+    topic_type: networking.gossip_topics.GossipTopicType,
+    subnet_id: ?u8,
+    ssz_bytes: []const u8,
+) !void {
+    if (node.p2p_service) |*p2p| {
+        try p2p.publishGossip(topic_type, subnet_id, ssz_bytes);
+    }
+}
+
+fn importAttestationFromApi(node: *BeaconNode, attestation: *const AnyGossipAttestation) !void {
+    const gh = node.gossip_handler orelse return error.NotImplemented;
+    const import_fn = gh.importAttestationFn orelse return error.NotImplemented;
+    try import_fn(gh.node, attestation);
+}
+
+fn importAggregateFromApi(node: *BeaconNode, aggregate: *const AnySignedAggregateAndProof) !void {
+    const gh = node.gossip_handler orelse return error.NotImplemented;
+    const import_fn = gh.importAggregateFn orelse return error.NotImplemented;
+    try import_fn(gh.node, aggregate);
+}
+
+fn syncCommitteePositionsForValidator(
+    node: *BeaconNode,
+    slot: u64,
+    validator_index: u64,
+) ![]const u32 {
+    const cached = node.headState() orelse return error.StateNotAvailable;
+    const indexed = try cached.epoch_cache.getIndexedSyncCommittee(slot);
+    const positions = indexed.getValidatorIndexMap().get(validator_index) orelse return error.ValidatorNotFound;
+    return positions.items;
 }
 
 fn prepareBeaconCommitteeSubnetsCallback(ptr: *anyopaque, subscriptions: []const api_mod.types.BeaconCommitteeSubscription) anyerror!void {
@@ -712,7 +830,7 @@ fn produceBlockCallback(
     const selection = params.builder_selection orelse .executiononly;
     prod_config.builder_boost_factor = switch (selection) {
         .executionalways, .executiononly => 0,
-        .@"default" => 90,
+        .default => 90,
         .maxprofit => params.builder_boost_factor,
         .builderalways, .builderonly => params.builder_boost_factor,
     };
@@ -881,57 +999,174 @@ fn getAttestationDataCallback(
 fn submitAttestationCallback(ptr: *anyopaque, json_bytes: []const u8) anyerror!void {
     const ctx: *PoolSubmitCallbackCtx = @ptrCast(@alignCast(ptr));
     const node = ctx.node;
-    if (node.p2p_service) |*p2p| {
-        p2p.publishGossip(
-            networking.gossip_topics.GossipTopicType.beacon_attestation,
-            null,
-            json_bytes,
-        ) catch |err| {
-            std.log.warn("pool_submit: gossip publish attestation failed: {}", .{err});
-        };
+    const cached = node.headState() orelse return error.StateNotAvailable;
+
+    if (parseJsonArray(types.electra.SingleAttestation, node.allocator, json_bytes)) |single_attestations| {
+        var parsed_single_attestations = single_attestations;
+        defer deinitParsedArray(types.electra.SingleAttestation, node.allocator, &parsed_single_attestations);
+
+        for (parsed_single_attestations.items) |*single| {
+            const committees_at_slot = try cached.epoch_cache.getCommitteeCountPerSlot(computeEpochAtSlot(single.data.slot));
+            const subnet = computeAttestationSubnet(single.data.slot, committees_at_slot, single.committee_index);
+            const gossip_attestation = AnyGossipAttestation{ .electra_single = single.* };
+            try importAttestationFromApi(node, &gossip_attestation);
+
+            const ssz_bytes = try serializeSszValue(types.electra.SingleAttestation, node.allocator, single);
+            defer node.allocator.free(ssz_bytes);
+            try publishSsz(node, .beacon_attestation, subnet, ssz_bytes);
+        }
+        return;
+    } else |_| {}
+
+    var attestations = try parseJsonArray(types.phase0.Attestation, node.allocator, json_bytes);
+    defer deinitParsedArray(types.phase0.Attestation, node.allocator, &attestations);
+
+    for (attestations.items) |*attestation| {
+        const committees_at_slot = try cached.epoch_cache.getCommitteeCountPerSlot(computeEpochAtSlot(attestation.data.slot));
+        const subnet = computeAttestationSubnet(attestation.data.slot, committees_at_slot, attestation.data.index);
+        const gossip_attestation = AnyGossipAttestation{ .phase0 = attestation.* };
+        try importAttestationFromApi(node, &gossip_attestation);
+
+        const ssz_bytes = try serializeSszValue(types.phase0.Attestation, node.allocator, attestation);
+        defer node.allocator.free(ssz_bytes);
+        try publishSsz(node, .beacon_attestation, subnet, ssz_bytes);
     }
 }
 
 fn submitAggregateAndProofCallback(ptr: *anyopaque, json_bytes: []const u8) anyerror!void {
     const ctx: *PoolSubmitCallbackCtx = @ptrCast(@alignCast(ptr));
     const node = ctx.node;
-    if (node.p2p_service) |*p2p| {
-        p2p.publishGossip(
-            networking.gossip_topics.GossipTopicType.beacon_aggregate_and_proof,
-            null,
-            json_bytes,
-        ) catch |err| {
-            std.log.warn("pool_submit: gossip publish aggregate failed: {}", .{err});
-        };
+
+    if (parseJsonArray(types.electra.SignedAggregateAndProof, node.allocator, json_bytes)) |aggregates| {
+        var parsed_aggregates = aggregates;
+        defer deinitParsedArray(types.electra.SignedAggregateAndProof, node.allocator, &parsed_aggregates);
+
+        for (parsed_aggregates.items) |*aggregate| {
+            const any_aggregate = AnySignedAggregateAndProof{ .electra = aggregate.* };
+            try importAggregateFromApi(node, &any_aggregate);
+
+            const ssz_bytes = try serializeSszValue(types.electra.SignedAggregateAndProof, node.allocator, aggregate);
+            defer node.allocator.free(ssz_bytes);
+            try publishSsz(node, .beacon_aggregate_and_proof, null, ssz_bytes);
+        }
+        return;
+    } else |_| {}
+
+    var aggregates = try parseJsonArray(types.phase0.SignedAggregateAndProof, node.allocator, json_bytes);
+    defer deinitParsedArray(types.phase0.SignedAggregateAndProof, node.allocator, &aggregates);
+
+    for (aggregates.items) |*aggregate| {
+        const any_aggregate = AnySignedAggregateAndProof{ .phase0 = aggregate.* };
+        try importAggregateFromApi(node, &any_aggregate);
+
+        const ssz_bytes = try serializeSszValue(types.phase0.SignedAggregateAndProof, node.allocator, aggregate);
+        defer node.allocator.free(ssz_bytes);
+        try publishSsz(node, .beacon_aggregate_and_proof, null, ssz_bytes);
     }
 }
 
 fn submitVoluntaryExitCallback(ptr: *anyopaque, json_bytes: []const u8) anyerror!void {
     const ctx: *PoolSubmitCallbackCtx = @ptrCast(@alignCast(ptr));
     const node = ctx.node;
-    _ = json_bytes;
+    const exit = try parseJsonValue(types.phase0.SignedVoluntaryExit, node.allocator, json_bytes);
+    try node.chainService().importVoluntaryExit(exit);
 
-    node.event_bus.emit(.{ .voluntary_exit = .{
-        .epoch = 0,
-        .validator_index = 0,
-        .signature = [_]u8{0} ** 96,
-    } });
+    const ssz_bytes = try serializeSszValue(types.phase0.SignedVoluntaryExit, node.allocator, &exit);
+    defer node.allocator.free(ssz_bytes);
+    try publishSsz(node, .voluntary_exit, null, ssz_bytes);
+}
+
+fn submitProposerSlashingCallback(ptr: *anyopaque, json_bytes: []const u8) anyerror!void {
+    const ctx: *PoolSubmitCallbackCtx = @ptrCast(@alignCast(ptr));
+    const node = ctx.node;
+    const slashing = try parseJsonValue(types.phase0.ProposerSlashing, node.allocator, json_bytes);
+    try node.chainService().importProposerSlashing(slashing);
+
+    const ssz_bytes = try serializeSszValue(types.phase0.ProposerSlashing, node.allocator, &slashing);
+    defer node.allocator.free(ssz_bytes);
+    try publishSsz(node, .proposer_slashing, null, ssz_bytes);
+}
+
+fn submitAttesterSlashingCallback(ptr: *anyopaque, json_bytes: []const u8) anyerror!void {
+    const ctx: *PoolSubmitCallbackCtx = @ptrCast(@alignCast(ptr));
+    const node = ctx.node;
+
+    if (parseJsonValue(types.electra.AttesterSlashing, node.allocator, json_bytes)) |electra_slashing| {
+        var parsed_electra_slashing = electra_slashing;
+        defer types.electra.AttesterSlashing.deinit(node.allocator, &parsed_electra_slashing);
+        const any_slashing = AnyAttesterSlashing{ .electra = parsed_electra_slashing };
+        try node.chainService().importAttesterSlashing(&any_slashing);
+
+        const ssz_bytes = try serializeSszValue(types.electra.AttesterSlashing, node.allocator, &parsed_electra_slashing);
+        defer node.allocator.free(ssz_bytes);
+        try publishSsz(node, .attester_slashing, null, ssz_bytes);
+        return;
+    } else |_| {}
+
+    var phase0_slashing = try parseJsonValue(types.phase0.AttesterSlashing, node.allocator, json_bytes);
+    defer types.phase0.AttesterSlashing.deinit(node.allocator, &phase0_slashing);
+
+    const any_slashing = AnyAttesterSlashing{ .phase0 = phase0_slashing };
+    try node.chainService().importAttesterSlashing(&any_slashing);
+
+    const ssz_bytes = try serializeSszValue(types.phase0.AttesterSlashing, node.allocator, &phase0_slashing);
+    defer node.allocator.free(ssz_bytes);
+    try publishSsz(node, .attester_slashing, null, ssz_bytes);
+}
+
+fn submitBlsChangeCallback(ptr: *anyopaque, json_bytes: []const u8) anyerror!void {
+    const ctx: *PoolSubmitCallbackCtx = @ptrCast(@alignCast(ptr));
+    const node = ctx.node;
+    var changes = try parseJsonArray(types.capella.SignedBLSToExecutionChange, node.allocator, json_bytes);
+    defer deinitParsedArray(types.capella.SignedBLSToExecutionChange, node.allocator, &changes);
+
+    for (changes.items) |*change| {
+        try node.chainService().importBlsChange(change.*);
+        const ssz_bytes = try serializeSszValue(types.capella.SignedBLSToExecutionChange, node.allocator, change);
+        defer node.allocator.free(ssz_bytes);
+        try publishSsz(node, .bls_to_execution_change, null, ssz_bytes);
+    }
+}
+
+fn submitSyncCommitteeMessageCallback(ptr: *anyopaque, json_bytes: []const u8) anyerror!void {
+    const ctx: *PoolSubmitCallbackCtx = @ptrCast(@alignCast(ptr));
+    const node = ctx.node;
+    var messages = try parseJsonArray(types.altair.SyncCommitteeMessage, node.allocator, json_bytes);
+    defer deinitParsedArray(types.altair.SyncCommitteeMessage, node.allocator, &messages);
+
+    const subcommittee_size = @divFloor(preset.SYNC_COMMITTEE_SIZE, networking.peer_info.SYNC_COMMITTEE_SUBNET_COUNT);
+    for (messages.items) |*msg| {
+        const ssz_bytes = try serializeSszValue(types.altair.SyncCommitteeMessage, node.allocator, msg);
+        defer node.allocator.free(ssz_bytes);
+
+        const positions = try syncCommitteePositionsForValidator(node, msg.slot, msg.validator_index);
+        for (positions) |position| {
+            const subnet: u64 = @divFloor(position, subcommittee_size);
+            const index_in_subcommittee: u64 = position % subcommittee_size;
+            try node.chainService().importSyncCommitteeMessage(
+                subnet,
+                msg.slot,
+                msg.beacon_block_root,
+                index_in_subcommittee,
+                msg.signature,
+            );
+            try publishSsz(node, .sync_committee, @intCast(subnet), ssz_bytes);
+        }
+    }
 }
 
 fn submitContributionAndProofCallback(ptr: *anyopaque, json_bytes: []const u8) anyerror!void {
     const ctx: *PoolSubmitCallbackCtx = @ptrCast(@alignCast(ptr));
     const node = ctx.node;
-    _ = json_bytes;
+    var contributions = try parseJsonArray(types.altair.SignedContributionAndProof, node.allocator, json_bytes);
+    defer deinitParsedArray(types.altair.SignedContributionAndProof, node.allocator, &contributions);
 
-    node.event_bus.emit(.{ .contribution_and_proof = .{
-        .aggregator_index = 0,
-        .slot = 0,
-        .beacon_block_root = [_]u8{0} ** 32,
-        .subcommittee_index = 0,
-        .aggregation_bits = [_]u8{0} ** 16,
-        .contribution_signature = [_]u8{0} ** 96,
-        .selection_proof = [_]u8{0} ** 96,
-    } });
+    for (contributions.items) |*contribution| {
+        try node.chainService().importSyncContribution(&contribution.message.contribution);
+        const ssz_bytes = try serializeSszValue(types.altair.SignedContributionAndProof, node.allocator, contribution);
+        defer node.allocator.free(ssz_bytes);
+        try publishSsz(node, .sync_committee_contribution_and_proof, null, ssz_bytes);
+    }
 }
 
 fn builderRegisterValidatorsCallback(
@@ -997,7 +1232,7 @@ fn opPoolGetProposerSlashingsCallback(
 fn opPoolGetAttesterSlashingsCallback(
     ptr: *anyopaque,
     allocator: std.mem.Allocator,
-) anyerror![]types.phase0.AttesterSlashing.Type {
+) anyerror![]fork_types.AnyAttesterSlashing {
     const ctx: *OpPoolCallbackCtx = @ptrCast(@alignCast(ptr));
     return ctx.query.attesterSlashings(allocator);
 }

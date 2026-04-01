@@ -99,6 +99,28 @@ pub const AnyAttestation = union(enum) {
         };
     }
 
+    /// Returns the number of participating validators represented by the
+    /// aggregation bitfield.
+    pub fn participantCount(self: *const AnyAttestation) u32 {
+        const bytes = self.aggregationBitsBytes();
+        const bit_len = self.aggregationBitLen();
+        var count: u32 = 0;
+
+        const full_bytes = bit_len / 8;
+        const remainder = bit_len % 8;
+
+        for (bytes[0..@min(full_bytes, bytes.len)]) |byte| {
+            count += @popCount(byte);
+        }
+
+        if (remainder > 0 and bytes.len > full_bytes) {
+            const mask: u8 = (@as(u8, 1) << @intCast(remainder)) - 1;
+            count += @popCount(bytes[full_bytes] & mask);
+        }
+
+        return count;
+    }
+
     /// Returns the signature.
     pub fn signature(self: *const AnyAttestation) [96]u8 {
         return switch (self.*) {

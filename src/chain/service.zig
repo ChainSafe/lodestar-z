@@ -28,7 +28,7 @@ const ValidatorIndex = consensus_types.primitive.ValidatorIndex.Type;
 const KZGCommitment = consensus_types.primitive.KZGCommitment.Type;
 const SignedVoluntaryExit = consensus_types.phase0.SignedVoluntaryExit.Type;
 const ProposerSlashing = consensus_types.phase0.ProposerSlashing.Type;
-const AttesterSlashing = consensus_types.phase0.AttesterSlashing.Type;
+const AnyAttesterSlashing = fork_types.AnyAttesterSlashing;
 const SignedBLSToExecutionChange = consensus_types.capella.SignedBLSToExecutionChange.Type;
 const SyncCommitteeContribution = consensus_types.altair.SyncCommitteeContribution.Type;
 const Eth1Data = consensus_types.phase0.Eth1Data;
@@ -339,7 +339,7 @@ pub const Service = struct {
         try self.chain.op_pool.proposer_slashing_pool.add(slashing);
     }
 
-    pub fn importAttesterSlashing(self: Service, slashing: AttesterSlashing) !void {
+    pub fn importAttesterSlashing(self: Service, slashing: *const AnyAttesterSlashing) !void {
         try self.chain.op_pool.attester_slashing_pool.add(slashing);
     }
 

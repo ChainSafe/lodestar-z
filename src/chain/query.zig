@@ -8,7 +8,9 @@ const consensus_types = @import("consensus_types");
 const preset = @import("preset").preset;
 const state_transition = @import("state_transition");
 const networking = @import("networking");
-const AnySignedBeaconBlock = @import("fork_types").AnySignedBeaconBlock;
+const fork_types = @import("fork_types");
+const AnySignedBeaconBlock = fork_types.AnySignedBeaconBlock;
+const AnyAttesterSlashing = fork_types.AnyAttesterSlashing;
 
 const Chain = @import("chain.zig").Chain;
 const chain_types = @import("types.zig");
@@ -21,7 +23,6 @@ const Root = [32]u8;
 const Phase0Attestation = consensus_types.phase0.Attestation.Type;
 const SignedVoluntaryExit = consensus_types.phase0.SignedVoluntaryExit.Type;
 const ProposerSlashing = consensus_types.phase0.ProposerSlashing.Type;
-const AttesterSlashing = consensus_types.phase0.AttesterSlashing.Type;
 const SignedBLSToExecutionChange = consensus_types.capella.SignedBLSToExecutionChange.Type;
 
 pub const Query = struct {
@@ -322,7 +323,7 @@ pub const Query = struct {
     pub fn attesterSlashings(
         self: Query,
         allocator: std.mem.Allocator,
-    ) ![]AttesterSlashing {
+    ) ![]AnyAttesterSlashing {
         return self.chain.op_pool.attester_slashing_pool.getAll(allocator);
     }
 

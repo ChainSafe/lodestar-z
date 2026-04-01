@@ -2194,6 +2194,8 @@ fn initGossipHandler(self: *BeaconNode) void {
         &callbacks.getProposerIndex,
         &callbacks.isKnownBlockRoot,
         &callbacks.getValidatorCount,
+        &callbacks.computeAttestationSubnet,
+        &callbacks.isValidSyncCommitteeSubnet,
     ) catch |err| {
         std.log.warn("Failed to create GossipHandler: {}", .{err});
         return;

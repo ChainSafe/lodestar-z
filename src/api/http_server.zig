@@ -650,6 +650,7 @@ pub const HttpServer = struct {
         .{ "publishBlindedBlockV2", &hPublishBlindedBlockV2 },
         .{ "getPoolAttestations", &hGetPoolAttestations },
         .{ "getPoolAttestationsV2", &hGetPoolAttestationsV2 },
+        .{ "getPoolAttesterSlashingsV2", &hGetPoolAttesterSlashingsV2 },
         .{ "getPoolVoluntaryExits", &hGetPoolVoluntaryExits },
         .{ "getPoolProposerSlashings", &hGetPoolProposerSlashings },
         .{ "getPoolAttesterSlashings", &hGetPoolAttesterSlashings },
@@ -987,8 +988,24 @@ pub const HttpServer = struct {
     fn hGetPoolAttesterSlashings(self: *HttpServer, _: DispatchContext) !HandlerResult {
         const alloc = self.allocator;
         const handler_res = try handlers.beacon.getPoolAttesterSlashings(self.api_context);
-        defer alloc.free(handler_res.data);
-        const body = try json_response.writeBeaconArrayEnvelope(alloc, consensus_types.phase0.AttesterSlashing, handler_res.data, handler_res.meta);
+        const items = @constCast(handler_res.data);
+        defer {
+            for (items) |*slashing| slashing.deinit(alloc);
+            alloc.free(items);
+        }
+        const body = try json_response.writeAnyAttesterSlashingArrayEnvelope(alloc, items, handler_res.meta);
+        return .{ .status = 200, .content_type = "application/json", .body = body, .meta = handler_res.meta };
+    }
+
+    fn hGetPoolAttesterSlashingsV2(self: *HttpServer, _: DispatchContext) !HandlerResult {
+        const alloc = self.allocator;
+        const handler_res = try handlers.beacon.getPoolAttesterSlashingsV2(self.api_context);
+        const items = @constCast(handler_res.data);
+        defer {
+            for (items) |*slashing| slashing.deinit(alloc);
+            alloc.free(items);
+        }
+        const body = try json_response.writeAnyAttesterSlashingArrayEnvelope(alloc, items, handler_res.meta);
         return .{ .status = 200, .content_type = "application/json", .body = body, .meta = handler_res.meta };
     }
 
@@ -2470,7 +2487,7 @@ test "handleRequest pool submission POST attestations with body" {
     const resp = try server.handleRequest("POST", "/eth/v1/beacon/pool/attestations", body);
     defer resp.deinit(std.testing.allocator);
 
-    try std.testing.expectEqual(@as(u16, 204), resp.status);
+    try std.testing.expectEqual(@as(u16, 501), resp.status);
 }
 
 test "handleRequest pool submission POST voluntary_exits with body" {
@@ -2484,7 +2501,7 @@ test "handleRequest pool submission POST voluntary_exits with body" {
     const resp = try server.handleRequest("POST", "/eth/v1/beacon/pool/voluntary_exits", body);
     defer resp.deinit(std.testing.allocator);
 
-    try std.testing.expectEqual(@as(u16, 204), resp.status);
+    try std.testing.expectEqual(@as(u16, 501), resp.status);
 }
 
 test "DispatchContext.getQuery parses query params" {
@@ -2545,7 +2562,7 @@ test "handleRequest POST /eth/v1/beacon/rewards/attestations/1 returns 501" {
     // Rewards require RewardCache which is not yet implemented.
     try std.testing.expectEqual(@as(u16, 501), resp.status);
 }
-test "handleRequest POST /eth/v1/validator/prepare_beacon_proposer returns 204" {
+test "handleRequest POST /eth/v1/validator/prepare_beacon_proposer returns 501 without callback" {
     var tc = test_helpers.makeTestContext(std.testing.allocator);
     defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
 
@@ -2553,7 +2570,7 @@ test "handleRequest POST /eth/v1/validator/prepare_beacon_proposer returns 204" 
     const resp = try server.handleRequest("POST", "/eth/v1/validator/prepare_beacon_proposer", "[]");
     defer resp.deinit(std.testing.allocator);
 
-    try std.testing.expectEqual(@as(u16, 204), resp.status);
+    try std.testing.expectEqual(@as(u16, 501), resp.status);
 }
 
 test "handleRequest POST /eth/v1/validator/register_validator returns 204" {

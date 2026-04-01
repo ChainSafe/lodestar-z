@@ -50,6 +50,20 @@ pub const SyncDuty = struct {
     validator_sync_committee_indices: []const u64,
 };
 
+const PoolSubmitProbe = struct {
+    saw_body: ?[]const u8 = null,
+
+    fn submitAggregate(ptr: *anyopaque, json_bytes: []const u8) anyerror!void {
+        const self: *PoolSubmitProbe = @ptrCast(@alignCast(ptr));
+        self.saw_body = json_bytes;
+    }
+
+    fn submitContribution(ptr: *anyopaque, json_bytes: []const u8) anyerror!void {
+        const self: *PoolSubmitProbe = @ptrCast(@alignCast(ptr));
+        self.saw_body = json_bytes;
+    }
+};
+
 // ---------------------------------------------------------------------------
 // Handlers
 // ---------------------------------------------------------------------------
@@ -493,20 +507,9 @@ pub fn publishAggregateAndProofs(
     body: []const u8,
 ) !HandlerResult(void) {
     if (body.len == 0) return .{ .data = {} };
-
-    if (ctx.pool_submit) |cb| {
-        if (cb.submitAggregateAndProofFn) |submit_fn| {
-            try submit_fn(cb.ptr, body);
-            return .{ .data = {} };
-        }
-    }
-
-    // Parse to validate even without a callback.
-    var arena = std.heap.ArenaAllocator.init(ctx.allocator);
-    defer arena.deinit();
-    _ = std.json.parseFromSlice(std.json.Value, arena.allocator(), body, .{}) catch
-        return error.InvalidRequest;
-
+    const cb = ctx.pool_submit orelse return error.NotImplemented;
+    const submit_fn = cb.submitAggregateAndProofFn orelse return error.NotImplemented;
+    try submit_fn(cb.ptr, body);
     return .{ .data = {} };
 }
 
@@ -535,19 +538,9 @@ pub fn publishContributionAndProofs(
     body: []const u8,
 ) !HandlerResult(void) {
     if (body.len == 0) return .{ .data = {} };
-
-    if (ctx.pool_submit) |cb| {
-        if (cb.submitContributionAndProofFn) |submit_fn| {
-            try submit_fn(cb.ptr, body);
-            return .{ .data = {} };
-        }
-    }
-
-    var arena = std.heap.ArenaAllocator.init(ctx.allocator);
-    defer arena.deinit();
-    _ = std.json.parseFromSlice(std.json.Value, arena.allocator(), body, .{}) catch
-        return error.InvalidRequest;
-
+    const cb = ctx.pool_submit orelse return error.NotImplemented;
+    const submit_fn = cb.submitContributionAndProofFn orelse return error.NotImplemented;
+    try submit_fn(cb.ptr, body);
     return .{ .data = {} };
 }
 
@@ -670,11 +663,57 @@ test "publishAggregateAndProofs with empty body returns ok" {
     _ = result;
 }
 
+test "publishAggregateAndProofs returns NotImplemented without callback when body non-empty" {
+    var tc = test_helpers.makeTestContext(std.testing.allocator);
+    defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
+
+    const result = publishAggregateAndProofs(&tc.ctx, "[]");
+    try std.testing.expectError(error.NotImplemented, result);
+}
+
+test "publishAggregateAndProofs forwards body to pool_submit callback" {
+    var tc = test_helpers.makeTestContext(std.testing.allocator);
+    defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
+
+    var probe = PoolSubmitProbe{};
+    tc.ctx.pool_submit = .{
+        .ptr = @ptrCast(&probe),
+        .submitAggregateAndProofFn = &PoolSubmitProbe.submitAggregate,
+    };
+
+    const body = "[{\"message\":{}}]";
+    _ = try publishAggregateAndProofs(&tc.ctx, body);
+    try std.testing.expectEqualStrings(body, probe.saw_body.?);
+}
+
 test "publishContributionAndProofs with empty body returns ok" {
     var tc = test_helpers.makeTestContext(std.testing.allocator);
     defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
     const result = try publishContributionAndProofs(&tc.ctx, "");
     _ = result;
+}
+
+test "publishContributionAndProofs returns NotImplemented without callback when body non-empty" {
+    var tc = test_helpers.makeTestContext(std.testing.allocator);
+    defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
+
+    const result = publishContributionAndProofs(&tc.ctx, "[]");
+    try std.testing.expectError(error.NotImplemented, result);
+}
+
+test "publishContributionAndProofs forwards body to pool_submit callback" {
+    var tc = test_helpers.makeTestContext(std.testing.allocator);
+    defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
+
+    var probe = PoolSubmitProbe{};
+    tc.ctx.pool_submit = .{
+        .ptr = @ptrCast(&probe),
+        .submitContributionAndProofFn = &PoolSubmitProbe.submitContribution,
+    };
+
+    const body = "[{\"message\":{}}]";
+    _ = try publishContributionAndProofs(&tc.ctx, body);
+    try std.testing.expectEqualStrings(body, probe.saw_body.?);
 }
 
 test "getSyncCommitteeContribution returns NotImplemented without callback" {

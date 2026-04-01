@@ -1107,7 +1107,10 @@ fn handleQueuedVoluntaryExit(node: *BeaconNode, work: processor_mod.work_item.Vo
     };
 }
 
-fn handleQueuedAttesterSlashingSsz(node: *BeaconNode, ssz_bytes: []const u8) void {
+fn handleQueuedAttesterSlashingTyped(
+    node: *BeaconNode,
+    slashing: *const fork_types.AnyAttesterSlashing,
+) void {
     const gh = node.gossip_handler orelse {
         return;
     };
@@ -1115,7 +1118,7 @@ fn handleQueuedAttesterSlashingSsz(node: *BeaconNode, ssz_bytes: []const u8) voi
         return;
     };
 
-    importFn(gh.node, ssz_bytes) catch |err| {
+    importFn(gh.node, slashing) catch |err| {
         std.log.warn("Processor: attester slashing import failed: {}", .{err});
     };
 }
@@ -1140,9 +1143,9 @@ fn handleQueuedAttesterSlashing(
     node: *BeaconNode,
     work: processor_mod.work_item.AttesterSlashingWork,
 ) void {
-    var payload = work.payload;
-    defer payload.deinit();
-    handleQueuedAttesterSlashingSsz(node, payload.ssz.ssz_bytes);
+    var slashing = work.slashing;
+    defer slashing.deinit(node.allocator);
+    handleQueuedAttesterSlashingTyped(node, &slashing);
 }
 
 fn handleQueuedBlsChange(

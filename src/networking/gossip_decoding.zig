@@ -261,6 +261,11 @@ pub fn decompressGossipPayload(
     compressed_data: []const u8,
     max_decompressed_size: usize,
 ) DecodeError![]const u8 {
+    // `snappy.frame.uncompress()` asserts that the buffer is larger than the
+    // 10-byte identifier frame. Reject tiny inputs here so malformed gossip
+    // yields a decode error instead of aborting the process.
+    if (compressed_data.len <= 10) return error.BadIdentifier;
+
     const decompressed = snappy.uncompress(allocator, compressed_data) catch |err| return err;
     if (decompressed == null) return error.EmptyPayload;
     const result = decompressed.?;

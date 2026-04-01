@@ -21,7 +21,9 @@ const types = @import("consensus_types");
 const networking = @import("networking");
 const config_mod = @import("config");
 const ForkSeq = config_mod.ForkSeq;
+const preset = @import("preset").preset;
 const fork_types = @import("fork_types");
+const AnyAttesterSlashing = fork_types.AnyAttesterSlashing;
 const AnyGossipAttestation = fork_types.AnyGossipAttestation;
 const AnySignedAggregateAndProof = fork_types.AnySignedAggregateAndProof;
 const AnySignedBeaconBlock = fork_types.AnySignedBeaconBlock;
@@ -38,7 +40,6 @@ const processor_mod = @import("processor");
 const BeaconProcessor = processor_mod.BeaconProcessor;
 const WorkItem = processor_mod.WorkItem;
 const GossipSource = processor_mod.work_item.GossipSource;
-const AttesterSlashingPayload = processor_mod.work_item.AttesterSlashingPayload;
 const MessageId = processor_mod.work_item.MessageId;
 const GossipDataHandle = processor_mod.work_item.GossipDataHandle;
 const OwnedSszBytes = processor_mod.work_item.OwnedSszBytes;
@@ -120,8 +121,8 @@ pub const GossipHandler = struct {
     /// Called to import a validated proposer slashing into the op pool.
     importProposerSlashingFn: ?*const fn (ptr: *anyopaque, slashing: *const ProposerSlashing) anyerror!void,
 
-    /// Called to import raw attester slashing SSZ bytes into the op pool.
-    importAttesterSlashingFn: ?*const fn (ptr: *anyopaque, ssz_bytes: []const u8) anyerror!void,
+    /// Called to import a validated attester slashing into the op pool.
+    importAttesterSlashingFn: ?*const fn (ptr: *anyopaque, slashing: *const AnyAttesterSlashing) anyerror!void,
 
     /// Called to import a validated BLS-to-execution change into the op pool.
     importBlsChangeFn: ?*const fn (ptr: *anyopaque, change: *const SignedBLSToExecutionChange) anyerror!void,
@@ -150,7 +151,7 @@ pub const GossipHandler = struct {
     verifyProposerSlashingSignatureFn: ?*const fn (ptr: *anyopaque, ssz_bytes: []const u8) bool,
 
     /// Verify attester slashing BLS signatures (both indexed attestations). Returns true if valid.
-    verifyAttesterSlashingSignatureFn: ?*const fn (ptr: *anyopaque, ssz_bytes: []const u8) bool,
+    verifyAttesterSlashingSignatureFn: ?*const fn (ptr: *anyopaque, slashing: *const AnyAttesterSlashing) bool,
 
     /// Verify BLS-to-execution change signature. Returns true if valid.
     verifyBlsChangeSignatureFn: ?*const fn (ptr: *anyopaque, ssz_bytes: []const u8) bool,
@@ -159,13 +160,21 @@ pub const GossipHandler = struct {
     verifyAttestationSignatureFn: ?*const fn (ptr: *anyopaque, attestation: *const AnyGossipAttestation) bool,
 
     /// Verify aggregate and proof BLS signatures (selection proof + aggregator + aggregate). Returns true if valid.
-    verifyAggregateSignatureFn: ?*const fn (ptr: *anyopaque, ssz_bytes: []const u8) bool,
+    verifyAggregateSignatureFn: ?*const fn (ptr: *anyopaque, aggregate: *const AnySignedAggregateAndProof) bool,
 
     /// Called to import a validated aggregate into fork choice + aggregate pool.
     importAggregateFn: ?*const fn (ptr: *anyopaque, aggregate: *const AnySignedAggregateAndProof) anyerror!void,
 
+    /// Compute the expected attestation subnet for a slot and committee index.
+    /// Returns null when the local node cannot currently resolve committee data.
+    computeAttestationSubnetFn: *const fn (ptr: *anyopaque, slot: u64, committee_index: u64) ?u8,
+
     /// Verify sync committee message BLS signature. Returns true if valid.
     verifySyncCommitteeSignatureFn: ?*const fn (ptr: *anyopaque, ssz_bytes: []const u8) bool,
+
+    /// Returns true if the validator is a member of the sync committee subnet
+    /// for the given slot.
+    isValidSyncCommitteeSubnetFn: *const fn (ptr: *anyopaque, slot: u64, validator_index: u64, subnet: u64) bool,
 
     /// Called to import a validated sync committee contribution into the pool.
     importSyncContributionFn: ?*const fn (ptr: *anyopaque, signed_contribution: *const SignedContributionAndProof) anyerror!void,
@@ -206,6 +215,8 @@ pub const GossipHandler = struct {
         getProposerIndex: *const fn (ptr: *anyopaque, slot: u64) ?u32,
         isKnownBlockRoot: *const fn (ptr: *anyopaque, root: [32]u8) bool,
         getValidatorCount: *const fn (ptr: *anyopaque) u32,
+        computeAttestationSubnetFn: *const fn (ptr: *anyopaque, slot: u64, committee_index: u64) ?u8,
+        isValidSyncCommitteeSubnetFn: *const fn (ptr: *anyopaque, slot: u64, validator_index: u64, subnet: u64) bool,
     ) !*GossipHandler {
         const self = try allocator.create(GossipHandler);
         self.* = .{
@@ -227,7 +238,9 @@ pub const GossipHandler = struct {
             .verifyAttestationSignatureFn = null,
             .verifyAggregateSignatureFn = null,
             .importAggregateFn = null,
+            .computeAttestationSubnetFn = computeAttestationSubnetFn,
             .verifySyncCommitteeSignatureFn = null,
+            .isValidSyncCommitteeSubnetFn = isValidSyncCommitteeSubnetFn,
             .importSyncContributionFn = null,
             .importSyncCommitteeMessageFn = null,
             .seen_cache = SeenCache.init(allocator),
@@ -322,18 +335,8 @@ pub const GossipHandler = struct {
         return slashing;
     }
 
-    fn makeAttesterSlashingPayload(
-        self: *GossipHandler,
-        decoded: gossip_decoding.DecodedAttesterSlashing,
-        ssz_bytes: []const u8,
-    ) ?AttesterSlashingPayload {
-        return .{
-            .decoded = .{
-                .is_slashable = decoded.is_slashable,
-                .slashable_key = decoded.slashable_key,
-            },
-            .ssz = self.dupeOwnedSszBytes(ssz_bytes) orelse return null,
-        };
+    fn parseAttesterSlashing(self: *GossipHandler, ssz_bytes: []const u8) ?AnyAttesterSlashing {
+        return AnyAttesterSlashing.deserialize(self.allocator, self.current_fork_seq, ssz_bytes) catch null;
     }
 
     fn parseBlsChange(ssz_bytes: []const u8) ?SignedBLSToExecutionChange {
@@ -442,9 +445,6 @@ pub const GossipHandler = struct {
         message_data: []const u8,
         metadata: GossipIngressMetadata,
     ) !void {
-        // TODO: Validate attestation is on the correct subnet.
-        // Spec: compute_subnet_for_attestation(committees_per_slot, slot, committee_index) == subnet_id
-        // Requires epoch cache access (committee count per slot) — needs a callback or state query.
         // Decompress once — reused for decode, BLS verify, and import.
         const ssz_bytes = gossip_decoding.decompressGossipPayload(self.allocator, message_data, gossip_decoding.MAX_GOSSIP_SIZE_ATTESTATION) catch
             return GossipHandlerError.DecodeFailed;
@@ -457,6 +457,12 @@ pub const GossipHandler = struct {
         defer if (attestation_owned) attestation.deinit(self.allocator);
         const data = attestation.data();
         const committee_index = attestation.committeeIndex();
+
+        const expected_subnet = self.computeAttestationSubnetFn(self.node, data.slot, committee_index) orelse
+            return GossipHandlerError.ValidationIgnored;
+        if (expected_subnet != subnet_id) {
+            return GossipHandlerError.ValidationRejected;
+        }
 
         // Phase 1b: Fast validation.
         var chain_state = self.makeChainState();
@@ -525,35 +531,47 @@ pub const GossipHandler = struct {
             return GossipHandlerError.DecodeFailed;
         defer self.allocator.free(ssz_bytes);
 
-        // Phase 1a: Decode from already-decompressed SSZ bytes.
-        const decoded = gossip_decoding.decodeFromSszBytes(self.allocator, .beacon_aggregate_and_proof, ssz_bytes, self.current_fork_seq) catch
-            return GossipHandlerError.DecodeFailed;
-        const agg = decoded.beacon_aggregate_and_proof;
+        // Parse the full aggregate once so validation, verification, and import
+        // all work from the same fork-typed object.
+        var signed_aggregate = self.parseSignedAggregateAndProof(ssz_bytes) orelse return GossipHandlerError.DecodeFailed;
+        var aggregate_owned = true;
+        defer if (aggregate_owned) signed_aggregate.deinit(self.allocator);
 
         // Phase 1b: Fast validation.
         var chain_state = self.makeChainState();
-        const action = chain_gossip.validateGossipAggregate(
-            agg.aggregator_index,
-            agg.attestation_slot,
-            agg.attestation_target_epoch,
-            agg.aggregation_bits_count,
-            &chain_state,
-        );
+        const action = switch (signed_aggregate) {
+            .phase0 => chain_gossip.validateGossipAggregate(
+                signed_aggregate.aggregatorIndex(),
+                signed_aggregate.slot(),
+                signed_aggregate.targetEpoch(),
+                signed_aggregate.participantCount(),
+                &chain_state,
+            ),
+            .electra => chain_gossip.validateGossipElectraAggregate(
+                signed_aggregate.aggregatorIndex(),
+                signed_aggregate.slot(),
+                signed_aggregate.targetEpoch(),
+                signed_aggregate.dataIndex(),
+                signed_aggregate.committeeCount(),
+                signed_aggregate.participantCount(),
+                &chain_state,
+            ),
+        };
         try checkAction(action);
 
         // Phase 1c: BLS signature verification.
         // [REJECT] selection_proof, aggregator signature, and aggregate signature are all valid.
         if (self.verifyAggregateSignatureFn) |verifyFn| {
-            if (!verifyFn(self.node, ssz_bytes)) {
-                std.log.warn("Gossip aggregate rejected: invalid signature aggregator={d}", .{agg.aggregator_index});
+            if (!verifyFn(self.node, &signed_aggregate)) {
+                std.log.warn("Gossip aggregate rejected: invalid signature aggregator={d}", .{signed_aggregate.aggregatorIndex()});
                 return GossipHandlerError.ValidationRejected;
             }
         }
 
         // Phase 2: Import aggregate to fork choice + attestation pool.
         // When processor is available, enqueue for priority-ordered batch processing.
-        const signed_aggregate = self.parseSignedAggregateAndProof(ssz_bytes) orelse return GossipHandlerError.DecodeFailed;
         if (self.beacon_processor) |bp| {
+            aggregate_owned = false;
             bp.ingest(.{ .aggregate = .{
                 .source = metadata.source,
                 .message_id = metadata.message_id,
@@ -566,13 +584,10 @@ pub const GossipHandler = struct {
         // Fallback: inline processing.
         if (self.importAggregateFn) |importFn| {
             importFn(self.node, &signed_aggregate) catch |err| {
-                std.log.warn("Aggregate import failed for aggregator {d}: {}", .{ agg.aggregator_index, err });
+                std.log.warn("Aggregate import failed for aggregator {d}: {}", .{ signed_aggregate.aggregatorIndex(), err });
             };
             return;
         }
-
-        var aggregate_to_drop = signed_aggregate;
-        aggregate_to_drop.deinit(self.allocator);
     }
 
     /// Called when a voluntary_exit gossip message arrives.
@@ -727,24 +742,22 @@ pub const GossipHandler = struct {
         message_data: []const u8,
         metadata: GossipIngressMetadata,
     ) !void {
-        // Decompress once — reused for decode, BLS verify, and import.
+        // Decompress once — reused for parse, BLS verify, and import.
         const ssz_bytes = gossip_decoding.decompressGossipPayload(self.allocator, message_data, gossip_decoding.MAX_GOSSIP_SIZE_DEFAULT) catch
             return GossipHandlerError.DecodeFailed;
         defer self.allocator.free(ssz_bytes);
 
-        // Phase 1a: Decode from already-decompressed SSZ bytes.
-        const decoded = gossip_decoding.decodeFromSszBytes(self.allocator, .attester_slashing, ssz_bytes, self.current_fork_seq) catch
-            return GossipHandlerError.DecodeFailed;
-        const as = decoded.attester_slashing;
+        var slashing = self.parseAttesterSlashing(ssz_bytes) orelse return GossipHandlerError.DecodeFailed;
+        var slashing_owned = true;
+        defer if (slashing_owned) slashing.deinit(self.allocator);
+
+        var slashing_root: [32]u8 = undefined;
+        slashing.hashTreeRoot(self.allocator, &slashing_root) catch return GossipHandlerError.DecodeFailed;
 
         // Phase 1: fast validation via chain gossip validation layer.
-        // Compute a dedup key from SSZ bytes (use first 32 bytes of snappy-free data as root).
-        var slashing_root: [32]u8 = std.mem.zeroes([32]u8);
-        const key_len = @min(ssz_bytes.len, 32);
-        @memcpy(slashing_root[0..key_len], ssz_bytes[0..key_len]);
         var chain_state_as = self.makeChainState();
         const action_as = chain_gossip.validateGossipAttesterSlashing(
-            as.is_slashable,
+            slashing.isSlashable(),
             slashing_root,
             &chain_state_as,
         );
@@ -753,26 +766,27 @@ pub const GossipHandler = struct {
         // Phase 1c: BLS signature verification.
         // [REJECT] Both indexed attestation signatures are valid.
         if (self.verifyAttesterSlashingSignatureFn) |verifyFn| {
-            if (!verifyFn(self.node, ssz_bytes)) {
+            if (!verifyFn(self.node, &slashing)) {
                 std.log.warn("Gossip attester slashing rejected: invalid signature", .{});
                 return GossipHandlerError.ValidationRejected;
             }
         }
 
-        // Phase 2: import raw SSZ bytes.
+        // Phase 2: import the fully typed slashing.
         if (self.beacon_processor) |bp| {
             bp.ingest(.{ .gossip_attester_slashing = .{
                 .source = metadata.source,
                 .message_id = metadata.message_id,
-                .payload = self.makeAttesterSlashingPayload(as, ssz_bytes) orelse return,
+                .slashing = slashing,
                 .seen_timestamp_ns = metadata.seen_timestamp_ns,
             } });
+            slashing_owned = false;
             return;
         }
 
         // Fallback: inline processing.
         if (self.importAttesterSlashingFn) |importFn| {
-            importFn(self.node, ssz_bytes) catch |err| {
+            importFn(self.node, &slashing) catch |err| {
                 std.log.warn("Attester slashing import failed: {}", .{err});
             };
         }
@@ -911,7 +925,7 @@ pub const GossipHandler = struct {
     /// Pipeline:
     /// 1. Snappy decompress + SSZ decode → extract slot, validator index
     /// 2. Phase 1: basic bounds check
-    /// 3. Phase 2: log acceptance (no sync committee message pool yet)
+    /// 3. Phase 2: import into the sync committee message pool
     pub fn onSyncCommitteeMessage(self: *GossipHandler, subnet_id: u64, message_data: []const u8) !void {
         return self.onSyncCommitteeMessageWithMetadata(subnet_id, message_data, .{});
     }
@@ -940,6 +954,10 @@ pub const GossipHandler = struct {
             &chain_state_sm,
         );
         try checkAction(action_sm);
+
+        if (!self.isValidSyncCommitteeSubnetFn(self.node, msg.slot, msg.validator_index, subnet_id)) {
+            return GossipHandlerError.ValidationRejected;
+        }
 
         // Phase 1c: BLS signature verification.
         // [REJECT] The sync committee message signature is valid.
@@ -1200,6 +1218,16 @@ fn stubGetValidatorCount(_: *anyopaque) u32 {
     return 1000;
 }
 
+fn stubComputeAttestationSubnet(_: *anyopaque, slot: u64, committee_index: u64) ?u8 {
+    const slots_since_epoch_start = slot % preset.SLOTS_PER_EPOCH;
+    return @intCast((slots_since_epoch_start + committee_index) % networking.peer_info.ATTESTATION_SUBNET_COUNT);
+}
+
+fn stubIsValidSyncCommitteeSubnet(_: *anyopaque, _: u64, validator_index: u64, subnet: u64) bool {
+    const subcommittee_size = preset.SYNC_COMMITTEE_SIZE / networking.peer_info.SYNC_COMMITTEE_SUBNET_COUNT;
+    return @divFloor(validator_index, subcommittee_size) == subnet;
+}
+
 fn makeTestHandler(allocator: Allocator) !*GossipHandler {
     var dummy_node: u8 = 0;
     return GossipHandler.create(
@@ -1209,6 +1237,8 @@ fn makeTestHandler(allocator: Allocator) !*GossipHandler {
         &stubGetProposerIndex,
         &stubIsKnownBlockRoot,
         &stubGetValidatorCount,
+        &stubComputeAttestationSubnet,
+        &stubIsValidSyncCommitteeSubnet,
     );
 }
 
@@ -1338,7 +1368,7 @@ test "GossipHandler: onAttestation rejects stale epoch" {
     const compressed = try snappy.compress(alloc, &ssz_buf);
     defer alloc.free(compressed);
 
-    const result = handler.onAttestation(0, compressed);
+    const result = handler.onAttestation(5, compressed);
     try testing.expectError(GossipHandlerError.ValidationIgnored, result);
 }
 
@@ -1370,6 +1400,56 @@ test "GossipHandler: onAttestation rejects pre-electra aggregated attestations" 
     defer alloc.free(compressed);
 
     try testing.expectError(GossipHandlerError.ValidationRejected, handler.onAttestation(0, compressed));
+}
+
+test "GossipHandler: onAttestation rejects wrong subnet" {
+    const alloc = testing.allocator;
+    const snappy = @import("snappy").frame;
+    const handler = try makeTestHandler(alloc);
+    defer handler.deinit();
+
+    handler.updateClock(100, 3, 64);
+    handler.updateForkSeq(.electra);
+
+    var att: consensus_types.electra.SingleAttestation.Type = consensus_types.electra.SingleAttestation.default_value;
+    att.committee_index = 0;
+    att.attester_index = 5;
+    att.data.slot = 96;
+    att.data.target.epoch = 3;
+    att.data.target.root = [_]u8{0xAA} ** 32;
+    att.data.beacon_block_root = [_]u8{0xBB} ** 32;
+
+    var ssz_buf: [consensus_types.electra.SingleAttestation.fixed_size]u8 = undefined;
+    _ = consensus_types.electra.SingleAttestation.serializeIntoBytes(&att, &ssz_buf);
+
+    const compressed = try snappy.compress(alloc, &ssz_buf);
+    defer alloc.free(compressed);
+
+    try testing.expectError(GossipHandlerError.ValidationRejected, handler.onAttestation(1, compressed));
+}
+
+test "GossipHandler: onSyncCommitteeMessage rejects wrong subnet" {
+    const alloc = testing.allocator;
+    const snappy = @import("snappy").frame;
+    const handler = try makeTestHandler(alloc);
+    defer handler.deinit();
+
+    handler.updateClock(100, 3, 64);
+
+    const msg = consensus_types.altair.SyncCommitteeMessage.Type{
+        .slot = 100,
+        .beacon_block_root = [_]u8{0xAB} ** 32,
+        .validator_index = 7,
+        .signature = [_]u8{0xCD} ** 96,
+    };
+
+    var ssz_buf: [consensus_types.altair.SyncCommitteeMessage.fixed_size]u8 = undefined;
+    _ = consensus_types.altair.SyncCommitteeMessage.serializeIntoBytes(&msg, &ssz_buf);
+
+    const compressed = try snappy.compress(alloc, &ssz_buf);
+    defer alloc.free(compressed);
+
+    try testing.expectError(GossipHandlerError.ValidationRejected, handler.onSyncCommitteeMessage(1, compressed));
 }
 
 test "GossipHandler: onGossipMessage routes beacon_block" {
@@ -1428,6 +1508,36 @@ test "GossipHandler: onAggregateAndProof validates and accepts" {
     const ssz_buf = try alloc.alloc(u8, ssz_size);
     defer alloc.free(ssz_buf);
     _ = phase0.SignedAggregateAndProof.serializeIntoBytes(&signed_agg, ssz_buf);
+
+    const compressed = try snappy.compress(alloc, ssz_buf);
+    defer alloc.free(compressed);
+
+    try handler.onAggregateAndProof(compressed);
+}
+
+test "GossipHandler: onAggregateAndProof validates electra aggregates" {
+    const alloc = testing.allocator;
+    const snappy = @import("snappy").frame;
+    const handler = try makeTestHandler(alloc);
+    defer handler.deinit();
+
+    handler.updateClock(100, 3, 64);
+    handler.updateForkSeq(.electra);
+
+    var signed_agg: consensus_types.electra.SignedAggregateAndProof.Type = consensus_types.electra.SignedAggregateAndProof.default_value;
+    signed_agg.message.aggregator_index = 5;
+    signed_agg.message.aggregate.data.slot = 96;
+    signed_agg.message.aggregate.data.target.epoch = 3;
+    signed_agg.message.aggregate.data.index = 0;
+    try signed_agg.message.aggregate.committee_bits.set(0, true);
+    try signed_agg.message.aggregate.aggregation_bits.data.append(alloc, 0x01);
+    signed_agg.message.aggregate.aggregation_bits.bit_len = 1;
+    defer signed_agg.message.aggregate.aggregation_bits.data.deinit(alloc);
+
+    const ssz_size = consensus_types.electra.SignedAggregateAndProof.serializedSize(&signed_agg);
+    const ssz_buf = try alloc.alloc(u8, ssz_size);
+    defer alloc.free(ssz_buf);
+    _ = consensus_types.electra.SignedAggregateAndProof.serializeIntoBytes(&signed_agg, ssz_buf);
 
     const compressed = try snappy.compress(alloc, ssz_buf);
     defer alloc.free(compressed);

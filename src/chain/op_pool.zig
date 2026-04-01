@@ -27,6 +27,7 @@ const AttestationData = types.phase0.AttestationData;
 const Phase0Attestation = types.phase0.Attestation;
 const ElectraAttestation = types.electra.Attestation;
 const AnyAttestation = fork_types.AnyAttestation;
+const AnyAttesterSlashing = fork_types.AnyAttesterSlashing;
 const ProposerSlashing = types.phase0.ProposerSlashing;
 const SignedVoluntaryExit = types.phase0.SignedVoluntaryExit;
 
@@ -473,42 +474,53 @@ pub const ProposerSlashingPool = struct {
 /// Pool of pending attester slashings, keyed by hash-tree-root.
 pub const AttesterSlashingPool = struct {
     allocator: Allocator,
-    pool: std.AutoHashMap([32]u8, Phase0AttesterSlashing),
-
-    const Phase0AttesterSlashing = types.phase0.AttesterSlashing.Type;
+    pool: std.AutoHashMap([32]u8, AnyAttesterSlashing),
 
     pub fn init(allocator: Allocator) AttesterSlashingPool {
         return .{
             .allocator = allocator,
-            .pool = std.AutoHashMap([32]u8, Phase0AttesterSlashing).init(allocator),
+            .pool = std.AutoHashMap([32]u8, AnyAttesterSlashing).init(allocator),
         };
     }
 
     pub fn deinit(self: *AttesterSlashingPool) void {
+        var it = self.pool.iterator();
+        while (it.next()) |entry| {
+            entry.value_ptr.deinit(self.allocator);
+        }
         self.pool.deinit();
     }
 
     /// Insert an attester slashing.
-    pub fn add(self: *AttesterSlashingPool, slashing: Phase0AttesterSlashing) !void {
-        // Capacity limit: drop new entries when the pool is full.
-        if (self.pool.count() >= MAX_ATTESTER_SLASHING_POOL_SIZE) return;
+    pub fn add(self: *AttesterSlashingPool, slashing: *const AnyAttesterSlashing) !void {
         var root: [32]u8 = undefined;
-        try types.phase0.AttesterSlashing.hashTreeRoot(self.allocator, &slashing, &root);
-        try self.pool.put(root, slashing);
+        try slashing.hashTreeRoot(self.allocator, &root);
+
+        // Capacity limit: drop new unique entries when the pool is full.
+        if (self.pool.count() >= MAX_ATTESTER_SLASHING_POOL_SIZE and !self.pool.contains(root)) return;
+
+        var owned: AnyAttesterSlashing = undefined;
+        try slashing.clone(self.allocator, &owned);
+        errdefer owned.deinit(self.allocator);
+
+        if (try self.pool.fetchPut(root, owned)) |existing| {
+            var old = existing.value;
+            old.deinit(self.allocator);
+        }
     }
 
     /// Return up to `max` pending attester slashings. Caller owns the
     /// returned slice.
     ///
     /// Sorted by hash-tree-root for deterministic block ordering.
-    pub fn getForBlock(self: *AttesterSlashingPool, allocator: Allocator, max: u32) ![]Phase0AttesterSlashing {
-        const Entry = struct { root: [32]u8, slashing: Phase0AttesterSlashing };
+    pub fn getForBlock(self: *AttesterSlashingPool, allocator: Allocator, max: u32) ![]AnyAttesterSlashing {
+        const Entry = struct { root: [32]u8, slashing: *const AnyAttesterSlashing };
         var all = std.ArrayListUnmanaged(Entry).empty;
         defer all.deinit(allocator);
 
         var it = self.pool.iterator();
         while (it.next()) |entry| {
-            try all.append(allocator, .{ .root = entry.key_ptr.*, .slashing = entry.value_ptr.* });
+            try all.append(allocator, .{ .root = entry.key_ptr.*, .slashing = entry.value_ptr });
         }
 
         // Sort by hash-tree-root (lexicographic) for deterministic block production (DST requirement).
@@ -519,28 +531,42 @@ pub const AttesterSlashingPool = struct {
         }.lessThan);
 
         const take = @min(all.items.len, max);
-        var result = std.ArrayListUnmanaged(Phase0AttesterSlashing).empty;
-        errdefer result.deinit(allocator);
+        var result = std.ArrayListUnmanaged(AnyAttesterSlashing).empty;
+        errdefer {
+            for (result.items) |*slashing| slashing.deinit(allocator);
+            result.deinit(allocator);
+        }
         for (all.items[0..take]) |e| {
-            try result.append(allocator, e.slashing);
+            var cloned: AnyAttesterSlashing = undefined;
+            try e.slashing.clone(allocator, &cloned);
+            try result.append(allocator, cloned);
         }
         return result.toOwnedSlice(allocator);
     }
 
     /// Remove all entries (simple reset after finalization).
     pub fn pruneAll(self: *AttesterSlashingPool) void {
+        var it = self.pool.iterator();
+        while (it.next()) |entry| {
+            entry.value_ptr.deinit(self.allocator);
+        }
         self.pool.clearAndFree();
     }
 
     /// Return all pending attester slashings. Caller owns the returned slice.
     ///
     /// Used by GET /eth/v1/beacon/pool/attester_slashings.
-    pub fn getAll(self: *AttesterSlashingPool, allocator: Allocator) ![]Phase0AttesterSlashing {
-        var result = std.ArrayListUnmanaged(Phase0AttesterSlashing).empty;
-        errdefer result.deinit(allocator);
+    pub fn getAll(self: *AttesterSlashingPool, allocator: Allocator) ![]AnyAttesterSlashing {
+        var result = std.ArrayListUnmanaged(AnyAttesterSlashing).empty;
+        errdefer {
+            for (result.items) |*slashing| slashing.deinit(allocator);
+            result.deinit(allocator);
+        }
         var it = self.pool.iterator();
         while (it.next()) |entry| {
-            try result.append(allocator, entry.value_ptr.*);
+            var cloned: AnyAttesterSlashing = undefined;
+            try entry.value_ptr.clone(allocator, &cloned);
+            try result.append(allocator, cloned);
         }
         return result.toOwnedSlice(allocator);
     }
@@ -758,6 +784,25 @@ test "ProposerSlashingPool: add and getForBlock" {
     const selected = try pool.getForBlock(allocator, 10);
     defer allocator.free(selected);
     try std.testing.expectEqual(@as(usize, 2), selected.len);
+}
+
+test "AttesterSlashingPool: preserves electra slashings" {
+    const allocator = std.testing.allocator;
+    var pool = AttesterSlashingPool.init(allocator);
+    defer pool.deinit();
+
+    const slashing = AnyAttesterSlashing{ .electra = types.electra.AttesterSlashing.default_value };
+    try pool.add(&slashing);
+    try std.testing.expectEqual(@as(usize, 1), pool.size());
+
+    const selected = try pool.getAll(allocator);
+    defer {
+        for (selected) |*item| item.deinit(allocator);
+        allocator.free(selected);
+    }
+
+    try std.testing.expectEqual(@as(usize, 1), selected.len);
+    try std.testing.expect(selected[0] == .electra);
 }
 
 test "BlsChangePool: add, getForBlock, remove" {

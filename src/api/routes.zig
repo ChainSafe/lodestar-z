@@ -183,6 +183,11 @@ pub const routes = [_]Route{
     },
     .{
         .method = .GET,
+        .path = "/eth/v2/beacon/pool/attester_slashings",
+        .operation_id = "getPoolAttesterSlashingsV2",
+    },
+    .{
+        .method = .GET,
         .path = "/eth/v1/beacon/pool/bls_to_execution_changes",
         .operation_id = "getPoolBlsToExecutionChanges",
     },
@@ -239,6 +244,11 @@ pub const routes = [_]Route{
     .{
         .method = .POST,
         .path = "/eth/v1/validator/aggregate_and_proofs",
+        .operation_id = "publishAggregateAndProofs",
+    },
+    .{
+        .method = .POST,
+        .path = "/eth/v2/validator/aggregate_and_proofs",
         .operation_id = "publishAggregateAndProofs",
     },
     .{
@@ -676,5 +686,5 @@ test "findRoute wrong method" {
 
 test "route count" {
     // Verify we defined all expected routes.
-    try std.testing.expectEqual(@as(usize, 67), routes.len);
+    try std.testing.expectEqual(@as(usize, 83), routes.len);
 }

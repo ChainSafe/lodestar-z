@@ -14,6 +14,7 @@ const Root = consensus_types.primitive.Root.Type;
 const AnySignedBeaconBlock = fork_types.AnySignedBeaconBlock;
 const AnySignedAggregateAndProof = fork_types.AnySignedAggregateAndProof;
 const AnyGossipAttestation = fork_types.AnyGossipAttestation;
+const AnyAttesterSlashing = fork_types.AnyAttesterSlashing;
 const SignedVoluntaryExit = consensus_types.phase0.SignedVoluntaryExit.Type;
 const ProposerSlashing = consensus_types.phase0.ProposerSlashing.Type;
 const SignedBLSToExecutionChange = consensus_types.capella.SignedBLSToExecutionChange.Type;
@@ -161,20 +162,6 @@ pub const OwnedSszBytes = struct {
     }
 };
 
-pub const AttesterSlashingSummary = struct {
-    is_slashable: bool,
-    slashable_key: [32]u8,
-};
-
-pub const AttesterSlashingPayload = struct {
-    decoded: AttesterSlashingSummary,
-    ssz: OwnedSszBytes,
-
-    pub fn deinit(self: *AttesterSlashingPayload) void {
-        self.ssz.deinit();
-    }
-};
-
 // ---------------------------------------------------------------------------
 // Work payload structs — one per logical work type.
 // ---------------------------------------------------------------------------
@@ -293,7 +280,7 @@ pub const ProposerSlashingWork = struct {
 pub const AttesterSlashingWork = struct {
     source: GossipSource,
     message_id: MessageId,
-    payload: AttesterSlashingPayload,
+    slashing: AnyAttesterSlashing,
     seen_timestamp_ns: i64,
 };
 
@@ -584,8 +571,8 @@ pub const WorkItem = union(WorkType) {
             .sync_contribution => {},
             .sync_message => {},
             .gossip_attester_slashing => |work| {
-                var payload = work.payload;
-                payload.deinit();
+                var slashing = work.slashing;
+                slashing.deinit(allocator);
             },
             .gossip_proposer_slashing => {},
             .gossip_bls_to_exec => {},
