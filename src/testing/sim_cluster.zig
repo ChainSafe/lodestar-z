@@ -135,7 +135,7 @@ pub const SimCluster = struct {
 
         // Node 0: initialize from primary genesis state.
         const seed_0 = cluster_prng.random().int(u64);
-        const bn0 = try BeaconNode.init(allocator, primary.config, .{});
+        const bn0 = try BeaconNode.init(allocator, std.testing.io, primary.config, .{});
         try bn0.initFromGenesis(primary.cached_state);
         beacon_nodes[0] = bn0;
         nodes[0] = SimNodeHarness.init(allocator, bn0, seed_0);
@@ -149,7 +149,7 @@ pub const SimCluster = struct {
             const cloned = try genesis_state_0.clone(allocator, .{ .transfer_cache = false });
 
             const seed_i = cluster_prng.random().int(u64);
-            const bn_i = try BeaconNode.init(allocator, primary.config, .{});
+            const bn_i = try BeaconNode.init(allocator, std.testing.io, primary.config, .{});
             try bn_i.initFromGenesis(cloned);
             beacon_nodes[i] = bn_i;
             nodes[i] = SimNodeHarness.init(allocator, bn_i, seed_i);

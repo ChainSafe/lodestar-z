@@ -326,7 +326,7 @@ pub const ApiContext = struct {
     db: *BeaconDB,
 
     /// This node's identity on the P2P network.
-    node_identity: types.NodeIdentity,
+    node_identity: *types.NodeIdentity,
 
     /// Current sync status.
     sync_status: *SyncStatus,

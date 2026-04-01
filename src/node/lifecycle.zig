@@ -29,6 +29,7 @@ const SyncCommitteeMessagePool = chain_mod.SyncCommitteeMessagePool;
 const ValidatorMonitor = chain_mod.ValidatorMonitor;
 const api_mod = @import("api");
 const ApiContext = api_mod.context.ApiContext;
+const ApiNodeIdentity = api_mod.types.NodeIdentity;
 const identity_mod = @import("identity.zig");
 const data_dir_mod = @import("data_dir.zig");
 const DataDir = data_dir_mod.DataDir;
@@ -51,12 +52,28 @@ const QueueConfig = processor_mod.QueueConfig;
 const SlotClock = @import("clock.zig").SlotClock;
 const NodeOptions = @import("options.zig").NodeOptions;
 
-pub fn init(allocator: Allocator, beacon_config: *const BeaconConfig, opts: NodeOptions) !*BeaconNode {
+pub fn init(allocator: Allocator, io: std.Io, beacon_config: *const BeaconConfig, opts: NodeOptions) !*BeaconNode {
     var maybe_dd: ?DataDir = if (opts.data_dir.len > 0)
         try DataDir.resolve(allocator, opts)
     else
         null;
     defer if (maybe_dd) |*dd| dd.deinit();
+
+    if (maybe_dd) |dd| {
+        try dd.ensureDirs(io);
+    }
+
+    const bls_thread_pool = try initBlsThreadPool(allocator, io);
+    errdefer bls_thread_pool.deinit();
+
+    const node_identity = try loadNodeIdentity(allocator, io, opts, maybe_dd);
+    errdefer {
+        var mutable_identity = node_identity;
+        mutable_identity.deinit();
+    }
+    const jwt_secret = try loadJwtSecret(io, opts, maybe_dd);
+    const api_node_identity = try initApiNodeIdentity(allocator, opts, &node_identity);
+    errdefer deinitApiNodeIdentity(allocator, api_node_identity);
 
     var kv_backend: BeaconNode.KVBackend = undefined;
     var kv_iface: db_mod.KVStore = undefined;
@@ -200,17 +217,7 @@ pub fn init(allocator: Allocator, beacon_config: *const BeaconConfig, opts: Node
         .head_tracker = api_head,
         .regen = api_regen,
         .db = db,
-        .node_identity = .{
-            .peer_id = "BeaconNode-lodestar-z",
-            .enr = "",
-            .p2p_addresses = &.{},
-            .discovery_addresses = &.{},
-            .metadata = .{
-                .seq_number = 0,
-                .attnets = [_]u8{0} ** 8,
-                .syncnets = [_]u8{0} ** 1,
-            },
-        },
+        .node_identity = api_node_identity,
         .sync_status = api_sync,
         .beacon_config = beacon_config,
         .allocator = allocator,
@@ -235,6 +242,7 @@ pub fn init(allocator: Allocator, beacon_config: *const BeaconConfig, opts: Node
         const transport = try allocator.create(IoHttpTransport);
         errdefer allocator.destroy(transport);
         transport.* = IoHttpTransport.init(allocator);
+        transport.setIo(io);
         errdefer transport.deinit();
         io_transport_ptr = transport;
 
@@ -243,9 +251,10 @@ pub fn init(allocator: Allocator, beacon_config: *const BeaconConfig, opts: Node
         http_eng.* = HttpEngine.init(
             allocator,
             opts.execution_urls[0],
-            null,
+            jwt_secret,
             transport.transport(),
         );
+        http_eng.setIo(io);
         errdefer http_eng.deinit();
         http_engine_ptr = http_eng;
         engine = http_eng.engine();
@@ -281,17 +290,19 @@ pub fn init(allocator: Allocator, beacon_config: *const BeaconConfig, opts: Node
         .seen_cache = seen_cache,
         .chain = chain_struct,
         .clock = null,
+        .io = io,
+        .bls_thread_pool = bls_thread_pool,
+        .node_identity = node_identity,
         .mock_engine = mock_engine_ptr,
         .http_engine = http_engine_ptr,
         .io_transport = io_transport_ptr,
-        .jwt_secret_path = if (opts.execution_urls.len > 0) opts.jwt_secret_path else null,
-        .data_dir = opts.data_dir,
         .engine_api = engine,
         .cp_datastore = cp_datastore,
         .kv_backend = kv_backend,
         .api_context = api_ctx,
         .api_head_tracker = api_head,
         .api_sync_status = api_sync,
+        .api_node_identity = api_node_identity,
         .event_bus = event_bus_ptr,
         .unknown_block_sync = UnknownBlockSync.init(allocator),
         .unknown_chain_sync = UnknownChainSync.init(allocator),
@@ -369,6 +380,8 @@ pub fn deinit(self: *BeaconNode) void {
         allocator.destroy(bindings);
     }
 
+    deinitApiNodeIdentity(allocator, self.api_node_identity);
+    self.node_identity.deinit();
     allocator.destroy(self.api_context.regen);
     allocator.destroy(self.api_context);
     allocator.destroy(self.api_head_tracker);
@@ -416,72 +429,155 @@ pub fn deinit(self: *BeaconNode) void {
         allocator.destroy(vm);
     }
 
-    if (self.kzg) |*k| k.deinit();
-
-    if (self.bls_thread_pool) |pool| pool.deinit();
+    self.bls_thread_pool.deinit();
 
     allocator.destroy(self);
 }
 
-pub fn setIo(self: *BeaconNode, io: std.Io) void {
-    self.io = io;
-    if (self.http_engine) |he| he.setIo(io);
-    if (self.io_transport) |t| t.setIo(io);
+fn initBlsThreadPool(allocator: Allocator, io: std.Io) !*BlsThreadPool {
+    const cpu_count = std.Thread.getCpuCount() catch 4;
+    const n_workers: u16 = @intCast(@max(@min(cpu_count / 2, BlsThreadPool.MAX_WORKERS), 1));
+    const pool = try BlsThreadPool.init(allocator, io, .{ .n_workers = n_workers });
+    log.logger(.node).info("BLS thread pool initialized with {d} workers", .{pool.n_workers});
+    return pool;
+}
 
-    if (self.bls_thread_pool == null) {
-        const cpu_count = std.Thread.getCpuCount() catch 4;
-        const n_workers: u16 = @intCast(@max(@min(cpu_count / 2, BlsThreadPool.MAX_WORKERS), 1));
-        self.bls_thread_pool = BlsThreadPool.init(self.allocator, io, .{ .n_workers = n_workers }) catch |err| blk: {
-            log.logger(.node).err("Failed to initialize BLS thread pool: {}", .{err});
-            break :blk null;
-        };
-        if (self.bls_thread_pool) |pool| {
-            log.logger(.node).info("BLS thread pool initialized with {d} workers", .{pool.n_workers});
-        }
+fn loadNodeIdentity(
+    allocator: Allocator,
+    io: std.Io,
+    opts: NodeOptions,
+    maybe_dd: ?DataDir,
+) !identity_mod.NodeIdentity {
+    if (maybe_dd) |dd| {
+        return identity_mod.loadOrCreateIdentityAtPath(allocator, io, dd.enr_key, dd.enr, opts);
+    }
+    return identity_mod.loadOrCreateIdentity(allocator, io, "", opts);
+}
+
+fn loadJwtSecret(io: std.Io, opts: NodeOptions, maybe_dd: ?DataDir) !?[32]u8 {
+    if (opts.engine_mock or opts.execution_urls.len == 0) return null;
+
+    const jwt_path = if (opts.jwt_secret_path) |path|
+        path
+    else if (maybe_dd) |dd|
+        dd.jwt_secret
+    else
+        return null;
+
+    return try jwt_mod.loadOrGenerate(io, jwt_path);
+}
+
+fn initApiNodeIdentity(
+    allocator: Allocator,
+    opts: NodeOptions,
+    node_identity: *const identity_mod.NodeIdentity,
+) !*ApiNodeIdentity {
+    const identity = try allocator.create(ApiNodeIdentity);
+    errdefer allocator.destroy(identity);
+
+    const p2p_addresses = try buildAdvertisedAddresses(allocator, opts, node_identity.peer_id, .p2p);
+    errdefer freeAddressList(allocator, p2p_addresses);
+
+    const discovery_addresses = try buildAdvertisedAddresses(allocator, opts, node_identity.peer_id, .discovery);
+    errdefer freeAddressList(allocator, discovery_addresses);
+
+    identity.* = .{
+        .peer_id = try allocator.dupe(u8, node_identity.peer_id),
+        .enr = try allocator.dupe(u8, node_identity.enr),
+        .p2p_addresses = p2p_addresses,
+        .discovery_addresses = discovery_addresses,
+        .metadata = .{
+            .seq_number = 1,
+            .attnets = [_]u8{0} ** 8,
+            .syncnets = [_]u8{0} ** 1,
+        },
+    };
+    return identity;
+}
+
+fn deinitApiNodeIdentity(allocator: Allocator, identity: *ApiNodeIdentity) void {
+    if (identity.peer_id.len > 0) allocator.free(identity.peer_id);
+    if (identity.enr.len > 0) allocator.free(identity.enr);
+
+    freeAddressList(allocator, identity.p2p_addresses);
+    freeAddressList(allocator, identity.discovery_addresses);
+
+    allocator.destroy(identity);
+}
+
+const AddressKind = enum {
+    p2p,
+    discovery,
+};
+
+fn buildAdvertisedAddresses(
+    allocator: Allocator,
+    opts: NodeOptions,
+    peer_id: []const u8,
+    kind: AddressKind,
+) ![]const []const u8 {
+    var addresses: std.ArrayListUnmanaged([]const u8) = .empty;
+    errdefer freeAddressList(allocator, addresses.items);
+
+    if (opts.enr_ip) |ip| {
+        try appendAdvertisedAddress(allocator, &addresses, .ip4, ip, opts, peer_id, kind);
+    } else if (!std.mem.eql(u8, opts.p2p_host, "0.0.0.0")) {
+        try appendAdvertisedAddress(allocator, &addresses, .ip4, opts.p2p_host, opts, peer_id, kind);
     }
 
-    if (self.data_dir.len > 0) {
-        var dd = DataDir.resolve(self.allocator, self.node_options) catch |err| blk: {
-            log.logger(.node).err("Failed to resolve data dir paths: {}", .{err});
-            break :blk null;
-        };
-        if (dd) |*data_dir| {
-            defer data_dir.deinit();
-
-            if (self.node_identity == null) {
-                self.node_identity = identity_mod.loadOrCreateIdentityAtPath(io, data_dir.enr_key) catch |err| blk: {
-                    log.logger(.node).err("Failed to load node identity: {}", .{err});
-                    break :blk null;
-                };
-            }
-
-            if (self.http_engine) |he| {
-                const jwt_path = self.jwt_secret_path orelse data_dir.jwt_secret;
-                const secret = jwt_mod.loadOrGenerate(io, jwt_path) catch |err| blk: {
-                    std.log.err("Failed to load/generate JWT secret from '{s}': {}", .{ jwt_path, err });
-                    break :blk null;
-                };
-                if (secret) |s| he.jwt_secret = s;
-            }
-        }
-    } else {
-        if (self.node_identity == null) {
-            self.node_identity = identity_mod.loadOrCreateIdentity(io, "") catch |err| blk: {
-                std.log.err("Failed to generate ephemeral node identity: {}", .{err});
-                break :blk null;
-            };
-        }
-
-        if (self.http_engine) |he| {
-            if (self.jwt_secret_path) |jwt_path| {
-                const secret = jwt_mod.load(io, jwt_path) catch |err| blk: {
-                    std.log.err("Failed to load JWT secret from '{s}': {}", .{ jwt_path, err });
-                    break :blk null;
-                };
-                if (secret) |s| he.jwt_secret = s;
-            }
-        }
+    if (opts.enr_ip6) |ip6| {
+        try appendAdvertisedAddress(allocator, &addresses, .ip6, ip6, opts, peer_id, kind);
     }
+
+    return addresses.toOwnedSlice(allocator);
+}
+
+const IpFamily = enum {
+    ip4,
+    ip6,
+};
+
+fn appendAdvertisedAddress(
+    allocator: Allocator,
+    addresses: *std.ArrayListUnmanaged([]const u8),
+    family: IpFamily,
+    ip: []const u8,
+    opts: NodeOptions,
+    peer_id: []const u8,
+    kind: AddressKind,
+) !void {
+    const proto = switch (family) {
+        .ip4 => "ip4",
+        .ip6 => "ip6",
+    };
+    const transport = switch (kind) {
+        .p2p => "tcp",
+        .discovery => "udp",
+    };
+    const port = switch (kind) {
+        .p2p => switch (family) {
+            .ip4 => opts.enr_tcp orelse opts.p2p_port,
+            .ip6 => opts.enr_tcp6 orelse opts.p2p_port,
+        },
+        .discovery => switch (family) {
+            .ip4 => opts.enr_udp orelse opts.discovery_port orelse opts.p2p_port,
+            .ip6 => opts.enr_udp6 orelse opts.discovery_port orelse opts.p2p_port,
+        },
+    };
+
+    const address = try std.fmt.allocPrint(allocator, "/{s}/{s}/{s}/{d}/p2p/{s}", .{
+        proto,
+        ip,
+        transport,
+        port,
+        peer_id,
+    });
+    try addresses.append(allocator, address);
+}
+
+fn freeAddressList(allocator: Allocator, addresses: []const []const u8) void {
+    for (addresses) |address| allocator.free(address);
+    if (addresses.len > 0) allocator.free(addresses);
 }
 
 pub fn initFromGenesis(self: *BeaconNode, genesis_state: *CachedBeaconState) !void {

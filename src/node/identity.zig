@@ -1,18 +1,25 @@
-//! Node identity — persistent secp256k1 keypair for discv5 and libp2p.
+//! Persistent Ethereum network identity.
 //!
-//! On first run, generates a cryptographically random 32-byte secret key
-//! and writes it to `<data-dir>/node-identity/secret-key` as hex.
-//! On subsequent runs, loads the existing key from disk.
+//! The beacon node should know its advertised network identity before it is
+//! constructed. That means:
+//! - one persistent secp256k1 secret key
+//! - a peer ID derived from that key
+//! - a persisted local ENR derived from that key plus the current CLI overrides
 //!
-//! The identity is used for:
-//! - discv5 discovery (ENR signing, node ID)
-//! - libp2p peer identity (peer ID derivation)
+//! The libp2p transport stack in `zig-libp2p` still does not accept
+//! secp256k1 host keys for QUIC/TLS, so this module prepares the canonical
+//! Ethereum identity even though the transport layer cannot fully consume it yet.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+
 const discv5 = @import("discv5");
 const secp256k1 = discv5.secp256k1;
-const enr = discv5.enr;
+const enr_mod = discv5.enr;
+const EnrBuilder = enr_mod.Builder;
+const libp2p = @import("zig-libp2p");
+const libp2p_identity = libp2p.identity;
+const NodeOptions = @import("options.zig").NodeOptions;
 
 const log = std.log.scoped(.identity);
 
@@ -21,60 +28,241 @@ const identity_dir = "node-identity";
 /// Filename for the hex-encoded secret key.
 const secret_key_file = "secret-key";
 
-/// Persistent node identity derived from a secp256k1 keypair.
 pub const NodeIdentity = struct {
+    allocator: Allocator,
     secret_key: [32]u8,
     public_key: secp256k1.CompressedPubKey,
-    node_id: enr.NodeId,
+    node_id: enr_mod.NodeId,
+    peer_id: []const u8,
+    enr: []const u8,
+
+    pub fn deinit(self: *NodeIdentity) void {
+        self.allocator.free(self.peer_id);
+        self.allocator.free(self.enr);
+    }
 };
 
 /// Load an existing identity from disk, or generate and persist a new one.
 ///
-/// When `data_dir` is empty (e.g. in-memory/test mode), generates a random
-/// ephemeral key without persisting to disk.
-pub fn loadOrCreateIdentity(io: std.Io, data_dir: []const u8) !NodeIdentity {
-    var secret_key: [32]u8 = undefined;
+/// When `data_dir` is empty, uses an ephemeral key and ENR.
+pub fn loadOrCreateIdentity(
+    allocator: Allocator,
+    io: std.Io,
+    data_dir: []const u8,
+    opts: NodeOptions,
+) !NodeIdentity {
+    var key_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var enr_path_buf: [std.fs.max_path_bytes]u8 = undefined;
 
-    if (data_dir.len > 0) {
-        secret_key = loadFromDisk(io, data_dir) catch |err| switch (err) {
-            error.FileNotFound => blk: {
-                // First run — generate and persist.
-                const key = try generateRandomKey(io);
-                persistToDisk(io, data_dir, &key) catch |write_err| {
-                    log.err("Failed to persist node identity: {}", .{write_err});
-                    return write_err;
-                };
-                log.info("Generated new node identity in {s}/{s}", .{ data_dir, identity_dir });
-                break :blk key;
-            },
-            else => {
-                log.err("Failed to load node identity: {}", .{err});
-                return err;
-            },
-        };
-    } else {
-        // No data_dir — ephemeral identity (test/in-memory mode).
-        secret_key = try generateRandomKey(io);
-        log.info("Using ephemeral node identity (no data_dir)", .{});
+    if (data_dir.len == 0) {
+        return loadOrCreateIdentityAtPath(allocator, io, "", "", opts);
     }
 
-    return deriveIdentity(secret_key);
+    return loadOrCreateIdentityAtPath(
+        allocator,
+        io,
+        buildKeyPath(&key_path_buf, data_dir),
+        buildEnrPath(&enr_path_buf, data_dir),
+        opts,
+    );
 }
 
-/// Derive public key and node ID from a secret key.
-fn deriveIdentity(secret_key: [32]u8) !NodeIdentity {
-    const public_key = secp256k1.pubkeyFromSecret(&secret_key) catch
-        return error.InvalidSecretKey;
-    const node_id = enr.nodeIdFromCompressedPubkey(&public_key);
+/// Load or create a node identity using explicit secret-key and ENR file paths.
+pub fn loadOrCreateIdentityAtPath(
+    allocator: Allocator,
+    io: std.Io,
+    key_path: []const u8,
+    enr_path: []const u8,
+    opts: NodeOptions,
+) !NodeIdentity {
+    const secret_key = try loadOrCreateSecretKey(io, key_path);
+    return buildIdentity(allocator, io, secret_key, enr_path, opts);
+}
+
+fn buildIdentity(
+    allocator: Allocator,
+    io: std.Io,
+    secret_key: [32]u8,
+    enr_path: []const u8,
+    opts: NodeOptions,
+) !NodeIdentity {
+    const public_key = secp256k1.pubkeyFromSecret(&secret_key) catch return error.InvalidSecretKey;
+    const node_id = enr_mod.nodeIdFromCompressedPubkey(&public_key);
+    const peer_id = try derivePeerId(allocator, secret_key);
+    errdefer allocator.free(peer_id);
+
+    const enr_text = try loadOrBuildEnr(allocator, io, secret_key, &public_key, enr_path, opts);
+    errdefer allocator.free(enr_text);
 
     return .{
+        .allocator = allocator,
         .secret_key = secret_key,
         .public_key = public_key,
         .node_id = node_id,
+        .peer_id = peer_id,
+        .enr = enr_text,
     };
 }
 
-/// Generate a cryptographically random 32-byte secret key.
+fn derivePeerId(allocator: Allocator, secret_key: [32]u8) ![]const u8 {
+    const key_pair = libp2p_identity.KeyPair{
+        .key_type = .SECP256K1,
+        .backend = .secp256k1,
+        .storage = .{ .secp256k1 = .{ .secret = secret_key } },
+    };
+    const peer_id = try key_pair.peerId(allocator);
+    const scratch = try allocator.alloc(u8, peer_id.toBase58Len());
+    defer allocator.free(scratch);
+    const encoded = try peer_id.toBase58(scratch);
+    return allocator.dupe(u8, encoded);
+}
+
+fn loadOrBuildEnr(
+    allocator: Allocator,
+    io: std.Io,
+    secret_key: [32]u8,
+    public_key: *const secp256k1.CompressedPubKey,
+    enr_path: []const u8,
+    opts: NodeOptions,
+) ![]const u8 {
+    const existing = if (enr_path.len > 0) try loadEnrText(io, allocator, enr_path) else null;
+    defer if (existing) |text| allocator.free(text);
+
+    var seq: u64 = 1;
+    if (existing) |text| {
+        seq = parseExistingEnrSeq(allocator, text, public_key) catch |err| switch (err) {
+            error.PublicKeyMismatch, error.InvalidEnr => blk: {
+                log.warn("Ignoring persisted local ENR at '{s}': {}", .{ enr_path, err });
+                break :blk 1;
+            },
+            else => return err,
+        };
+    }
+
+    var builder = try initBuilderForOptions(allocator, secret_key, seq, opts);
+    var enr_text = try builder.encodeToString();
+    errdefer allocator.free(enr_text);
+
+    if (existing) |text| {
+        if (!std.mem.eql(u8, text, enr_text)) {
+            allocator.free(enr_text);
+            builder.seq = seq + 1;
+            enr_text = try builder.encodeToString();
+        }
+    }
+
+    if (enr_path.len > 0) {
+        try persistEnrText(io, enr_path, enr_text);
+    }
+
+    return enr_text;
+}
+
+fn parseExistingEnrSeq(
+    allocator: Allocator,
+    enr_text: []const u8,
+    expected_pubkey: *const secp256k1.CompressedPubKey,
+) !u64 {
+    const raw = try decodeEnrText(allocator, enr_text);
+    defer allocator.free(raw);
+
+    var parsed = enr_mod.decode(allocator, raw) catch return error.InvalidEnr;
+    defer parsed.deinit();
+
+    const pubkey = parsed.pubkey orelse return error.InvalidEnr;
+    if (!std.mem.eql(u8, pubkey[0..], expected_pubkey[0..])) {
+        return error.PublicKeyMismatch;
+    }
+    return parsed.seq;
+}
+
+fn initBuilderForOptions(
+    allocator: Allocator,
+    secret_key: [32]u8,
+    seq: u64,
+    opts: NodeOptions,
+) !EnrBuilder {
+    var builder = EnrBuilder.init(allocator, secret_key, seq);
+
+    if (try advertisedIp4(opts)) |ip4| {
+        builder.ip = ip4;
+        builder.udp = opts.enr_udp orelse opts.discovery_port orelse opts.p2p_port;
+        builder.tcp = opts.enr_tcp orelse opts.p2p_port;
+        builder.quic = opts.enr_tcp orelse opts.p2p_port;
+    }
+
+    if (try advertisedIp6(opts)) |ip6| {
+        builder.ip6 = ip6;
+        builder.udp6 = opts.enr_udp6 orelse opts.discovery_port orelse opts.p2p_port;
+        builder.tcp6 = opts.enr_tcp6 orelse opts.p2p_port;
+        builder.quic6 = opts.enr_tcp6 orelse opts.p2p_port;
+    }
+
+    return builder;
+}
+
+fn advertisedIp4(opts: NodeOptions) !?[4]u8 {
+    if (opts.enr_ip) |ip| return try parseIp4(ip);
+    if (std.mem.eql(u8, opts.p2p_host, "0.0.0.0")) return null;
+    return try parseIp4(opts.p2p_host);
+}
+
+fn advertisedIp6(opts: NodeOptions) !?[16]u8 {
+    if (opts.enr_ip6) |ip| return try parseIp6(ip);
+    return null;
+}
+
+fn parseIp4(raw: []const u8) ![4]u8 {
+    var out: [4]u8 = undefined;
+    var it = std.mem.splitScalar(u8, raw, '.');
+    var i: usize = 0;
+    while (it.next()) |part| {
+        if (i >= out.len) return error.InvalidIpAddress;
+        out[i] = std.fmt.parseInt(u8, part, 10) catch return error.InvalidIpAddress;
+        i += 1;
+    }
+    if (i != out.len) return error.InvalidIpAddress;
+    return out;
+}
+
+fn parseIp6(raw: []const u8) ![16]u8 {
+    var result: [16]u8 = [_]u8{0} ** 16;
+    if (std.mem.eql(u8, raw, "::")) return result;
+
+    var it = std.mem.splitSequence(u8, raw, ":");
+    var i: usize = 0;
+    while (it.next()) |part| {
+        if (part.len == 0) continue;
+        if (i >= 8) return error.InvalidIpAddress;
+        const value = std.fmt.parseInt(u16, part, 16) catch return error.InvalidIpAddress;
+        result[i * 2] = @intCast(value >> 8);
+        result[i * 2 + 1] = @intCast(value & 0xff);
+        i += 1;
+    }
+    return result;
+}
+
+fn loadOrCreateSecretKey(io: std.Io, key_path: []const u8) ![32]u8 {
+    if (key_path.len == 0) {
+        const key = try generateRandomKey(io);
+        log.info("Using ephemeral node identity (no key path)", .{});
+        return key;
+    }
+
+    return loadFromPath(io, key_path) catch |err| switch (err) {
+        error.FileNotFound => blk: {
+            const key = try generateRandomKey(io);
+            try persistToPath(io, key_path, &key);
+            log.info("Generated new node identity at {s}", .{key_path});
+            break :blk key;
+        },
+        else => {
+            log.err("Failed to load node identity from '{s}': {}", .{ key_path, err });
+            return err;
+        },
+    };
+}
+
 fn generateRandomKey(io: std.Io) ![32]u8 {
     var key: [32]u8 = undefined;
     const urandom = try std.Io.Dir.cwd().openFile(io, "/dev/urandom", .{});
@@ -84,113 +272,6 @@ fn generateRandomKey(io: std.Io) ![32]u8 {
     return key;
 }
 
-/// Read hex-encoded secret key from `<data_dir>/node-identity/secret-key`.
-fn loadFromDisk(io: std.Io, data_dir: []const u8) ![32]u8 {
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const path = buildPath(&path_buf, data_dir);
-
-    const file = std.Io.Dir.cwd().openFile(io, path, .{}) catch
-        return error.FileNotFound;
-    defer file.close(io);
-
-    // Hex-encoded 32 bytes = 64 hex chars + optional newline.
-    var buf: [128]u8 = undefined;
-    const stat = file.stat(io) catch return error.ReadFailed;
-    if (stat.size > buf.len) return error.ReadFailed;
-
-    const n = file.readPositionalAll(io, buf[0..@intCast(stat.size)], 0) catch
-        return error.ReadFailed;
-    const trimmed = std.mem.trim(u8, buf[0..n], " \t\n\r");
-
-    if (trimmed.len != 64) return error.InvalidKeyLength;
-
-    var secret_key: [32]u8 = undefined;
-    _ = std.fmt.hexToBytes(&secret_key, trimmed) catch return error.InvalidKeyHex;
-
-    log.info("Loaded node identity from {s}", .{path});
-    return secret_key;
-}
-
-/// Write hex-encoded secret key to `<data_dir>/node-identity/secret-key`.
-/// Creates the directory if it doesn't exist.
-fn persistToDisk(io: std.Io, data_dir: []const u8, secret_key: *const [32]u8) !void {
-    // Ensure directory exists.
-    // Note: directory creation is handled by the caller (data-dir setup).
-
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const path = buildPath(&path_buf, data_dir);
-
-    const file = std.Io.Dir.cwd().createFile(io, path, .{ .truncate = true }) catch
-        return error.WriteFailed;
-    defer file.close(io);
-
-    // Write hex-encoded key + newline.
-    var hex_buf: [65]u8 = undefined;
-    const hex = std.fmt.bufPrint(&hex_buf, "{s}\n", .{&std.fmt.bytesToHex(secret_key.*, .lower)}) catch
-        return error.WriteFailed;
-    file.writePositionalAll(io, hex, 0) catch
-        return error.WriteFailed;
-}
-
-/// Build the full path: `<data_dir>/node-identity/secret-key`
-fn buildPath(buf: *[std.fs.max_path_bytes]u8, data_dir: []const u8) []const u8 {
-    return bufJoin(buf, &.{ data_dir, identity_dir, secret_key_file });
-}
-
-/// Build the directory path: `<data_dir>/node-identity`
-fn buildDirPath(buf: *[std.fs.max_path_bytes]u8, data_dir: []const u8) []const u8 {
-    return bufJoin(buf, &.{ data_dir, identity_dir });
-}
-
-/// Simple stack-buffer path join (no allocator needed).
-fn bufJoin(buf: *[std.fs.max_path_bytes]u8, segments: []const []const u8) []const u8 {
-    var pos: usize = 0;
-    for (segments, 0..) |seg, i| {
-        if (i > 0) {
-            buf[pos] = '/';
-            pos += 1;
-        }
-        @memcpy(buf[pos..][0..seg.len], seg);
-        pos += seg.len;
-    }
-    return buf[0..pos];
-}
-
-/// Load or create a node identity using an explicit secret-key file path.
-///
-/// This is the DataDir-aware variant: instead of computing
-/// `<data_dir>/node-identity/secret-key` internally, the caller provides
-/// the exact path (e.g. `data_dir.enr_key`).
-///
-/// When `key_path` is empty, generates a random ephemeral identity.
-pub fn loadOrCreateIdentityAtPath(io: std.Io, key_path: []const u8) !NodeIdentity {
-    var secret_key: [32]u8 = undefined;
-
-    if (key_path.len > 0) {
-        secret_key = loadFromPath(io, key_path) catch |err| switch (err) {
-            error.FileNotFound => blk: {
-                const key = try generateRandomKey(io);
-                persistToPath(io, key_path, &key) catch |write_err| {
-                    log.err("Failed to persist node identity to '{s}': {}", .{ key_path, write_err });
-                    return write_err;
-                };
-                log.info("Generated new node identity at {s}", .{key_path});
-                break :blk key;
-            },
-            else => {
-                log.err("Failed to load node identity from '{s}': {}", .{ key_path, err });
-                return err;
-            },
-        };
-    } else {
-        secret_key = try generateRandomKey(io);
-        log.info("Using ephemeral node identity (no key path)", .{});
-    }
-
-    return deriveIdentity(secret_key);
-}
-
-/// Load a hex-encoded secret key from an explicit file path.
 fn loadFromPath(io: std.Io, path: []const u8) ![32]u8 {
     const file = std.Io.Dir.cwd().openFile(io, path, .{}) catch |err| switch (err) {
         error.FileNotFound => return error.FileNotFound,
@@ -202,10 +283,8 @@ fn loadFromPath(io: std.Io, path: []const u8) ![32]u8 {
     const stat = file.stat(io) catch return error.ReadFailed;
     if (stat.size > buf.len) return error.ReadFailed;
 
-    const n = file.readPositionalAll(io, buf[0..@intCast(stat.size)], 0) catch
-        return error.ReadFailed;
+    const n = file.readPositionalAll(io, buf[0..@intCast(stat.size)], 0) catch return error.ReadFailed;
     const trimmed = std.mem.trim(u8, buf[0..n], " \t\n\r");
-
     if (trimmed.len != 64) return error.InvalidKeyLength;
 
     var secret_key: [32]u8 = undefined;
@@ -215,15 +294,69 @@ fn loadFromPath(io: std.Io, path: []const u8) ![32]u8 {
     return secret_key;
 }
 
-/// Write a hex-encoded secret key to an explicit file path.
 fn persistToPath(io: std.Io, path: []const u8, secret_key: *const [32]u8) !void {
-    const file = std.Io.Dir.cwd().createFile(io, path, .{ .truncate = true }) catch
-        return error.WriteFailed;
+    const file = std.Io.Dir.cwd().createFile(io, path, .{ .truncate = true }) catch return error.WriteFailed;
     defer file.close(io);
 
     var hex_buf: [65]u8 = undefined;
     const hex = std.fmt.bufPrint(&hex_buf, "{s}\n", .{&std.fmt.bytesToHex(secret_key.*, .lower)}) catch
         return error.WriteFailed;
+    try file.writePositionalAll(io, hex, 0);
+}
 
-    file.writePositionalAll(io, hex, 0) catch return error.WriteFailed;
+fn loadEnrText(io: std.Io, allocator: Allocator, path: []const u8) !?[]u8 {
+    const file = std.Io.Dir.cwd().openFile(io, path, .{}) catch |err| switch (err) {
+        error.FileNotFound => return null,
+        else => return error.ReadFailed,
+    };
+    defer file.close(io);
+
+    const stat = file.stat(io) catch return error.ReadFailed;
+    if (stat.size == 0 or stat.size > 4096) return error.ReadFailed;
+
+    const buf = try allocator.alloc(u8, @intCast(stat.size));
+    defer allocator.free(buf);
+    const n = try file.readPositionalAll(io, buf, 0);
+    const trimmed = std.mem.trim(u8, buf[0..n], " \t\n\r");
+    return try allocator.dupe(u8, trimmed);
+}
+
+fn persistEnrText(io: std.Io, path: []const u8, enr_text: []const u8) !void {
+    const file = std.Io.Dir.cwd().createFile(io, path, .{ .truncate = true }) catch return error.WriteFailed;
+    defer file.close(io);
+    try file.writePositionalAll(io, enr_text, 0);
+}
+
+fn decodeEnrText(allocator: Allocator, enr_text: []const u8) ![]u8 {
+    var trimmed = std.mem.trim(u8, enr_text, " \t\n\r");
+    if (std.mem.startsWith(u8, trimmed, "enr:")) {
+        trimmed = trimmed[4..];
+    }
+
+    const decoded_len = std.base64.url_safe_no_pad.Decoder.calcSizeForSlice(trimmed) catch return error.InvalidEnr;
+    const raw = try allocator.alloc(u8, decoded_len);
+    errdefer allocator.free(raw);
+    std.base64.url_safe_no_pad.Decoder.decode(raw, trimmed) catch return error.InvalidEnr;
+    return raw;
+}
+
+fn buildKeyPath(buf: *[std.fs.max_path_bytes]u8, data_dir: []const u8) []const u8 {
+    return bufJoin(buf, &.{ data_dir, identity_dir, secret_key_file });
+}
+
+fn buildEnrPath(buf: *[std.fs.max_path_bytes]u8, data_dir: []const u8) []const u8 {
+    return bufJoin(buf, &.{ data_dir, identity_dir, "enr" });
+}
+
+fn bufJoin(buf: *[std.fs.max_path_bytes]u8, segments: []const []const u8) []const u8 {
+    var pos: usize = 0;
+    for (segments, 0..) |seg, i| {
+        if (i > 0) {
+            buf[pos] = '/';
+            pos += 1;
+        }
+        @memcpy(buf[pos..][0..seg.len], seg);
+        pos += seg.len;
+    }
+    return buf[0..pos];
 }

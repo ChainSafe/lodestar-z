@@ -12,6 +12,7 @@
 //! │   ├── db/              — LMDB chain database
 //! │   ├── network/
 //! │   │   ├── enr-key      — secp256k1 secret key for discv5/libp2p
+//! │   │   ├── enr          — persisted local ENR text
 //! │   │   └── peer-db/     — persistent peer store
 //! │   └── state-cache/     — (future) persistent checkpoint states
 //! ├── validator/
@@ -48,6 +49,8 @@ pub const DataDir = struct {
     beacon_db: []const u8,
     /// Path to the ENR secp256k1 key file (`<root>/beacon-node/network/enr-key`).
     enr_key: []const u8,
+    /// Path to the local ENR file (`<root>/beacon-node/network/enr`).
+    enr: []const u8,
     /// Path to the peer store directory (`<root>/beacon-node/network/peer-db`).
     peer_db: []const u8,
     /// Path to the state cache directory (`<root>/beacon-node/state-cache`).
@@ -95,6 +98,7 @@ pub const DataDir = struct {
         defer allocator.free(network_base);
 
         const enr_key = try std.fs.path.join(allocator, &.{ network_base, "enr-key" });
+        const enr = try std.fs.path.join(allocator, &.{ network_base, "enr" });
         const peer_db = try std.fs.path.join(allocator, &.{ network_base, "peer-db" });
         const state_cache = try std.fs.path.join(allocator, &.{ beacon_base, "state-cache" });
 
@@ -122,6 +126,7 @@ pub const DataDir = struct {
             .network = network,
             .beacon_db = beacon_db,
             .enr_key = enr_key,
+            .enr = enr,
             .peer_db = peer_db,
             .state_cache = state_cache,
             .slashing_protection = slashing_protection,
@@ -171,6 +176,7 @@ pub const DataDir = struct {
         a.free(self.network);
         a.free(self.beacon_db);
         a.free(self.enr_key);
+        a.free(self.enr);
         a.free(self.peer_db);
         a.free(self.state_cache);
         a.free(self.slashing_protection);
@@ -228,6 +234,7 @@ test "DataDir.resolve - explicit data_dir" {
     try testing.expectEqualStrings("mainnet", dd.network);
     try testing.expectEqualStrings("/tmp/test-datadir/beacon-node/db", dd.beacon_db);
     try testing.expectEqualStrings("/tmp/test-datadir/beacon-node/network/enr-key", dd.enr_key);
+    try testing.expectEqualStrings("/tmp/test-datadir/beacon-node/network/enr", dd.enr);
     try testing.expectEqualStrings("/tmp/test-datadir/beacon-node/network/peer-db", dd.peer_db);
     try testing.expectEqualStrings("/tmp/test-datadir/beacon-node/state-cache", dd.state_cache);
     try testing.expectEqualStrings("/tmp/test-datadir/validator/slashing-protection.db", dd.slashing_protection);

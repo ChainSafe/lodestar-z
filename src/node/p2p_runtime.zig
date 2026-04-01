@@ -58,6 +58,11 @@ pub fn start(self: *BeaconNode, io: std.Io, listen_addr: []const u8, port: u16) 
         self.genesis_validators_root,
     );
 
+    std.log.warn(
+        "libp2p transport still generates a separate TLS host key; local ENR/peer-id are prepared from the Ethereum network key but not yet consumed by zig-libp2p",
+        .{},
+    );
+
     const pctx = ssl.EVP_PKEY_CTX_new_id(ssl.EVP_PKEY_ED25519, null) orelse return error.KeyGenFailed;
     defer ssl.EVP_PKEY_CTX_free(pctx);
     if (ssl.EVP_PKEY_keygen_init(pctx) <= 0) return error.KeyGenFailed;
@@ -469,11 +474,6 @@ fn parseIp4(s: []const u8) ?[4]u8 {
 }
 
 fn initDiscoveryService(self: *BeaconNode) !void {
-    const secret_key = if (self.node_identity) |id| id.secret_key else {
-        std.log.err("Cannot init discovery: node identity not loaded (setIo not called?)", .{});
-        return error.NoNodeIdentity;
-    };
-
     const fork_digest = self.config.forkDigestAtSlot(
         self.head_tracker.head_slot,
         self.genesis_validators_root,
@@ -484,9 +484,9 @@ fn initDiscoveryService(self: *BeaconNode) !void {
     const disc_port = self.node_options.discovery_port orelse self.node_options.p2p_port;
     const local_ip = parseIp4(self.node_options.p2p_host) orelse [4]u8{ 0, 0, 0, 0 };
 
-    ds.* = try DiscoveryService.init(self.io.?, self.allocator, .{
+    ds.* = try DiscoveryService.init(self.io, self.allocator, .{
         .listen_port = disc_port,
-        .secret_key = secret_key,
+        .secret_key = self.node_identity.secret_key,
         .local_ip = local_ip,
         .p2p_port = self.node_options.p2p_port,
         .fork_digest = fork_digest,
@@ -496,8 +496,26 @@ fn initDiscoveryService(self: *BeaconNode) !void {
 
     ds.seedBootnodes();
     self.discovery_service = ds;
+    try refreshApiNodeIdentityFromDiscovery(self, ds);
 
     std.log.info("Discovery service initialized (known_peers={d})", .{ds.knownPeerCount()});
+}
+
+fn refreshApiNodeIdentityFromDiscovery(self: *BeaconNode, ds: *DiscoveryService) !void {
+    self.api_node_identity.metadata.seq_number = ds.enr_seq;
+
+    const raw_enr = ds.local_enr orelse return;
+    const encoded_len = std.base64.url_safe_no_pad.Encoder.calcSize(raw_enr.len);
+    const enr_buf = try self.allocator.alloc(u8, 4 + encoded_len);
+    errdefer self.allocator.free(enr_buf);
+
+    @memcpy(enr_buf[0..4], "enr:");
+    _ = std.base64.url_safe_no_pad.Encoder.encode(enr_buf[4..], raw_enr);
+
+    if (self.api_node_identity.enr.len > 0) {
+        self.allocator.free(self.api_node_identity.enr);
+    }
+    self.api_node_identity.enr = enr_buf;
 }
 
 fn initPeerManager(self: *BeaconNode) !void {

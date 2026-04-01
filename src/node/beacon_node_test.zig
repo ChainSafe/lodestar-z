@@ -36,7 +36,7 @@ const TestContext = struct {
             owned_state.deinit();
         }
 
-        const node = try BeaconNode.init(allocator, test_state.cached_state.config, opts);
+        const node = try BeaconNode.init(allocator, std.testing.io, test_state.cached_state.config, opts);
         errdefer node.deinit();
 
         return .{

@@ -115,6 +115,12 @@ pub fn run(io: Io, allocator: Allocator, opts: anytype) !void {
     const api_cors = opts.@"rest.cors" orelse opts.api_cors;
     const p2p_host = opts.listenAddress orelse opts.p2p_host;
     const p2p_port = opts.port orelse opts.p2p_port;
+    const enr_ip = opts.@"enr.ip";
+    const enr_tcp = opts.@"enr.tcp";
+    const enr_udp = opts.@"enr.udp";
+    const enr_ip6 = opts.@"enr.ip6";
+    const enr_tcp6 = opts.@"enr.tcp6";
+    const enr_udp6 = opts.@"enr.udp6";
     const target_peers = opts.targetPeers orelse opts.target_peers;
     const direct_peers_raw = opts.directPeers orelse opts.direct_peers;
     const checkpoint_state = opts.checkpointState orelse opts.checkpoint_state;
@@ -178,17 +184,6 @@ pub fn run(io: Io, allocator: Allocator, opts: anytype) !void {
         std.log.info("  jwt-secret: {s}", .{jwt});
     }
     std.log.info("  execution:  {s}", .{execution_urls});
-
-    if (data_dir.len > 0) {
-        var dd = try node_mod.DataDir.resolve(allocator, NodeOptions{
-            .data_dir = data_dir,
-            .network = network,
-            .db_path = db_path,
-        });
-        defer dd.deinit();
-        try dd.ensureDirs(io);
-        std.log.info("  data directory ready: {s}", .{data_dir});
-    }
 
     var pool = try Node.Pool.init(allocator, 200_000);
     defer pool.deinit();
@@ -255,6 +250,13 @@ pub fn run(io: Io, allocator: Allocator, opts: anytype) !void {
         .direct_peers = direct_peers,
         .enable_mdns = opts.mdns,
         .subscribe_all_subnets = subscribe_all_subnets,
+        .enr_ip = enr_ip,
+        .enr_tcp = enr_tcp,
+        .enr_udp = enr_udp,
+        .enr_ip6 = enr_ip6,
+        .enr_tcp6 = enr_tcp6,
+        .enr_udp6 = enr_udp6,
+        .nat = opts.nat,
         .suggested_fee_recipient = fee_recipient,
         .graffiti = graffiti_bytes,
         .metrics_enabled = opts.metrics,
@@ -290,13 +292,12 @@ pub fn run(io: Io, allocator: Allocator, opts: anytype) !void {
     }
     defer if (file_transport) |*ft| ft.close();
 
-    const node = try BeaconNode.init(allocator, beacon_config, node_opts);
+    const node = try BeaconNode.init(allocator, io, beacon_config, node_opts);
     defer node.deinit();
 
     std.log.info("BeaconNode initialized", .{});
-
-    node.setIo(io);
-    try node.loadKzgTrustedSetup();
+    std.log.info("  peer-id:    {s}", .{node.node_identity.peer_id});
+    std.log.info("  enr:        {s}", .{node.node_identity.enr});
 
     const force_checkpoint = force_checkpoint_sync;
 

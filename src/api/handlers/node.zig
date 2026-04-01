@@ -17,7 +17,7 @@ const HandlerResult = handler_result.HandlerResult;
 /// Returns the node's network identity: peer ID, ENR, listening addresses.
 pub fn getIdentity(ctx: *ApiContext) HandlerResult(types.NodeIdentity) {
     return .{
-        .data = ctx.node_identity,
+        .data = ctx.node_identity.*,
     };
 }
 

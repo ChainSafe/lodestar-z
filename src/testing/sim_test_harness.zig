@@ -54,7 +54,7 @@ pub const SimTestHarness = struct {
         var test_state = try TestCachedBeaconState.init(allocator, pool, validator_count);
 
         // Create the BeaconNode and initialize from genesis.
-        const node = try BeaconNode.init(allocator, test_state.config, .{});
+        const node = try BeaconNode.init(allocator, std.testing.io, test_state.config, .{});
         errdefer node.deinit();
 
         // initFromGenesis takes ownership of the genesis state (caches it).

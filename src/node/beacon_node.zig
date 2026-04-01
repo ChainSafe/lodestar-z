@@ -77,9 +77,6 @@ const ApiContext = api_mod.context.ApiContext;
 const SlotClock = @import("clock.zig").SlotClock;
 const NodeOptions = @import("options.zig").NodeOptions;
 const identity_mod = @import("identity.zig");
-const data_dir_mod = @import("data_dir.zig");
-const DataDir = data_dir_mod.DataDir;
-const jwt_mod = @import("jwt.zig");
 const NodeIdentity = identity_mod.NodeIdentity;
 const sync_mod = @import("sync");
 const UnknownBlockSync = sync_mod.UnknownBlockSync;
@@ -114,9 +111,6 @@ const BuilderApi = execution_mod.BuilderApi;
 const BuilderStatus = execution_mod.BuilderStatus;
 const constants = @import("constants");
 const Sha256 = std.crypto.hash.sha2.Sha256;
-const kzg_mod = @import("kzg");
-const Kzg = kzg_mod.Kzg;
-
 const metrics_mod = @import("metrics.zig");
 pub const BeaconMetrics = metrics_mod.BeaconMetrics;
 
@@ -209,6 +203,7 @@ pub const BeaconNode = struct {
     api_context: *ApiContext,
     api_head_tracker: *api_mod.context.HeadTracker,
     api_sync_status: *api_mod.context.SyncStatus,
+    api_node_identity: *api_mod.types.NodeIdentity,
     api_bindings: ?*api_callbacks_mod.ApiBindings = null,
     /// EventBus for SSE beacon chain events. Owned by BeaconNode, wired into
     /// ApiContext.event_bus and Chain.event_callback.
@@ -300,23 +295,15 @@ pub const BeaconNode = struct {
     /// Track whether the EL is offline (unreachable). Reset on successful Engine API call.
     el_offline: bool = false,
 
-    /// I/O context — set when the event loop starts (before services launch).
-    /// Required for std.http.Client, timing, and other I/O operations.
-    io: ?std.Io = null,
+    /// I/O context for runtime operations.
+    io: std.Io,
 
     /// BLS thread pool for parallel signature verification.
-    /// Initialized in setIo() once std.Io is available (ThreadPool requires Io for synchronization).
     /// Shared between BlockImporter (block import) and GossipHandler (gossip BLS — TODO).
-    bls_thread_pool: ?*BlsThreadPool = null,
+    bls_thread_pool: *BlsThreadPool,
 
-    /// JWT secret file path — loaded lazily in setIo() when Io becomes available.
-    jwt_secret_path: ?[]const u8 = null,
-
-    // Data directory path — needed for identity persistence and other disk ops.
-    data_dir: []const u8 = "",
-
-    // Node identity — secp256k1 keypair loaded/generated in setIo().
-    node_identity: ?NodeIdentity = null,
+    // Node identity — secp256k1 keypair loaded/generated during init().
+    node_identity: NodeIdentity,
 
     // Genesis validators root — set by initFromGenesis, used for fork digest computation.
     genesis_validators_root: [32]u8 = [_]u8{0} ** 32,
@@ -326,10 +313,6 @@ pub const BeaconNode = struct {
 
     // Bootnode ENRs — provided via --bootnodes CLI flag, used to dial initial peers.
     bootnodes: []const []const u8 = &.{},
-
-    /// KZG trusted setup — loaded once at startup, shared across all KZG operations.
-    /// Null until loadKzgTrustedSetup() is called (or if running pre-Deneb only).
-    kzg: ?Kzg = null,
 
     /// Set to true to request graceful shutdown of all event loops.
     shutdown_requested: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
@@ -350,38 +333,13 @@ pub const BeaconNode = struct {
     /// Uses MemoryKVStore for the database backend — production would
     /// swap this for LMDB or similar. All caches, pools, and trackers
     /// are heap-allocated and owned by the node.
-    pub fn init(allocator: Allocator, beacon_config: *const BeaconConfig, opts: NodeOptions) !*BeaconNode {
-        return lifecycle_mod.init(allocator, beacon_config, opts);
+    pub fn init(allocator: Allocator, io: std.Io, beacon_config: *const BeaconConfig, opts: NodeOptions) !*BeaconNode {
+        return lifecycle_mod.init(allocator, io, beacon_config, opts);
     }
 
     /// Clean up all owned resources.
     pub fn deinit(self: *BeaconNode) void {
         lifecycle_mod.deinit(self);
-    }
-
-    /// Load the bundled KZG trusted setup provided by the upstream dependency.
-    ///
-    /// Must be called before any KZG operations (blob verification, cell
-    /// verification).  Typically called once at node startup.
-    ///
-    /// The setup is stored in `self.kzg` and freed in `deinit()`.
-    ///
-    /// ```zig
-    /// try node.loadKzgTrustedSetup();
-    /// ```
-    pub fn loadKzgTrustedSetup(self: *BeaconNode) !void {
-        if (self.kzg != null) {
-            // Already loaded — free the old one first.
-            self.kzg.?.deinit();
-        }
-        self.kzg = try Kzg.initBundled();
-        log.logger(.node).info("KZG trusted setup loaded from upstream bundled module", .{});
-    }
-
-    /// Set the I/O context for the node and all sub-components.
-    /// Must be called before services start (importBlock, EL communication).
-    pub fn setIo(self: *BeaconNode, io: std.Io) void {
-        lifecycle_mod.setIo(self, io);
     }
 
     /// Initialize from a genesis state.
@@ -415,7 +373,7 @@ pub const BeaconNode = struct {
         any_signed: AnySignedBeaconBlock,
         source: BlockSource,
     ) !ImportResult {
-        const t0 = if (self.io) |io| std.Io.Clock.awake.now(io) else null;
+        const t0 = std.Io.Clock.awake.now(self.io);
         const result = try self.chain.importBlock(any_signed, source);
 
         // Notify EL of fork choice update after each block import.
@@ -423,10 +381,8 @@ pub const BeaconNode = struct {
             log.logger(.node).warn("forkchoiceUpdated failed: {}", .{err});
         };
 
-        const elapsed_s: f64 = if (t0) |start| blk: {
-            const t1 = std.Io.Clock.awake.now(self.io.?);
-            break :blk @as(f64, @floatFromInt(t1.nanoseconds - start.nanoseconds)) / 1e9;
-        } else 0.0;
+        const t1 = std.Io.Clock.awake.now(self.io);
+        const elapsed_s: f64 = @as(f64, @floatFromInt(t1.nanoseconds - t0.nanoseconds)) / 1e9;
 
         // Update metrics.
         if (self.metrics) |m| {

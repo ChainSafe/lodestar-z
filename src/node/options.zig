@@ -44,6 +44,20 @@ pub const NodeOptions = struct {
     enable_mdns: bool = false,
     /// Subscribe to all attestation subnets (--subscribe-all-subnets).
     subscribe_all_subnets: bool = false,
+    /// Override ENR IPv4 address.
+    enr_ip: ?[]const u8 = null,
+    /// Override ENR TCP port.
+    enr_tcp: ?u16 = null,
+    /// Override ENR UDP port.
+    enr_udp: ?u16 = null,
+    /// Override ENR IPv6 address.
+    enr_ip6: ?[]const u8 = null,
+    /// Override ENR IPv6 TCP port.
+    enr_tcp6: ?u16 = null,
+    /// Override ENR IPv6 UDP port.
+    enr_udp6: ?u16 = null,
+    /// Allow non-local ENR addresses without clearing them.
+    nat: bool = false,
 
     // ── Database ─────────────────────────────────────────────────
     data_dir: []const u8 = "",

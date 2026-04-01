@@ -25,17 +25,7 @@ pub fn makeTestContext(allocator: std.mem.Allocator) TestContext {
             .head_tracker = &default_head_tracker,
             .regen = &default_regen,
             .db = db,
-            .node_identity = .{
-                .peer_id = "test-peer-id",
-                .enr = "enr:-test",
-                .p2p_addresses = &[_][]const u8{"/ip4/127.0.0.1/tcp/9000"},
-                .discovery_addresses = &[_][]const u8{"/ip4/127.0.0.1/udp/9000"},
-                .metadata = .{
-                    .seq_number = 1,
-                    .attnets = [_]u8{0} ** 8,
-                    .syncnets = [_]u8{0} ** 1,
-                },
-            },
+            .node_identity = &default_node_identity,
             .sync_status = &default_sync_status,
             .beacon_config = &default_beacon_config,
             .allocator = allocator,
@@ -66,6 +56,18 @@ var default_head_tracker = ctx_mod.HeadTracker{
 };
 
 var default_regen = ctx_mod.StateRegen{};
+
+var default_node_identity = types.NodeIdentity{
+    .peer_id = "test-peer-id",
+    .enr = "enr:-test",
+    .p2p_addresses = &[_][]const u8{"/ip4/127.0.0.1/tcp/9000"},
+    .discovery_addresses = &[_][]const u8{"/ip4/127.0.0.1/udp/9000"},
+    .metadata = .{
+        .seq_number = 1,
+        .attnets = [_]u8{0} ** 8,
+        .syncnets = [_]u8{0} ** 1,
+    },
+};
 
 var default_sync_status = ctx_mod.SyncStatus{
     .head_slot = 1000,
