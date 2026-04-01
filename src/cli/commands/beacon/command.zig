@@ -5,6 +5,7 @@ const Allocator = std.mem.Allocator;
 
 const node_mod = @import("node");
 const log_mod = @import("log");
+const bootstrap = @import("bootstrap.zig");
 const BeaconNode = node_mod.BeaconNode;
 const NodeOptions = node_mod.NodeOptions;
 const config_mod = @import("config");
@@ -107,9 +108,9 @@ pub fn run(io: Io, allocator: Allocator, opts: anytype) !void {
     const network = opts.network.toNetworkName();
     const data_dir = opts.dataDir orelse opts.data_dir;
     const params_file = opts.paramsFile orelse opts.params_file;
-    const db_path = opts.dbDir orelse opts.db_path;
+    const db_path_override = opts.dbDir orelse opts.db_path;
     const execution_urls = opts.@"execution.urls" orelse opts.execution_urls;
-    const jwt_secret = opts.jwtSecret orelse opts.jwt_secret;
+    const jwt_secret_override = opts.jwtSecret orelse opts.jwt_secret;
     const api_port = opts.@"rest.port" orelse opts.api_port;
     const api_address = opts.@"rest.address" orelse opts.api_address;
     const api_cors = opts.@"rest.cors" orelse opts.api_cors;
@@ -177,10 +178,9 @@ pub fn run(io: Io, allocator: Allocator, opts: anytype) !void {
 
     std.log.info("lodestar-z v{s} starting", .{common.VERSION});
     std.log.info("  network:    {s}", .{@tagName(network)});
-    std.log.info("  data-dir:   {s}", .{if (data_dir.len > 0) data_dir else "(in-memory)"});
     std.log.info("  api:        http://{s}:{d}", .{ api_address, api_port });
     std.log.info("  p2p:        {s}:{d}", .{ p2p_host, p2p_port });
-    if (jwt_secret) |jwt| {
+    if (jwt_secret_override) |jwt| {
         std.log.info("  jwt-secret: {s}", .{jwt});
     }
     std.log.info("  execution:  {s}", .{execution_urls});
@@ -230,8 +230,6 @@ pub fn run(io: Io, allocator: Allocator, opts: anytype) !void {
     } else null;
 
     const node_opts = NodeOptions{
-        .data_dir = data_dir,
-        .db_path = db_path,
         .bootnodes = bootnodes,
         .verify_signatures = opts.verify_signatures,
         .rest_enabled = opts.rest,
@@ -239,7 +237,6 @@ pub fn run(io: Io, allocator: Allocator, opts: anytype) !void {
         .rest_address = api_address,
         .rest_cors_origin = api_cors,
         .execution_urls = &.{execution_urls},
-        .jwt_secret_path = jwt_secret,
         .engine_mock = engine_mock,
         .target_peers = target_peers,
         .network = network,
@@ -292,7 +289,20 @@ pub fn run(io: Io, allocator: Allocator, opts: anytype) !void {
     }
     defer if (file_transport) |*ft| ft.close();
 
-    const node = try BeaconNode.init(allocator, io, beacon_config, node_opts);
+    var prepared_runtime = try bootstrap.prepareRuntime(
+        allocator,
+        io,
+        network,
+        data_dir,
+        db_path_override,
+        jwt_secret_override,
+        node_opts,
+        !engine_mock and execution_urls.len > 0,
+    );
+    defer prepared_runtime.deinit();
+    std.log.info("  data-dir:   {s}", .{prepared_runtime.paths.root});
+
+    const node = try BeaconNode.init(allocator, io, beacon_config, prepared_runtime.takeInitConfig(node_opts));
     defer node.deinit();
 
     std.log.info("BeaconNode initialized", .{});

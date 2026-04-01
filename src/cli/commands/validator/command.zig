@@ -4,8 +4,8 @@ const Io = std.Io;
 const Allocator = std.mem.Allocator;
 
 const validator_mod = @import("validator");
-const node_mod = @import("node");
 const log_mod = @import("log");
+const cli_paths = @import("../../paths.zig");
 const config_mod = @import("config");
 const BeaconConfig = config_mod.BeaconConfig;
 const config_loader = config_mod.config_loader;
@@ -162,7 +162,7 @@ pub fn run(io: Io, allocator: Allocator, opts: anytype) !void {
         break :blk &custom_beacon_config;
     } else base_beacon_config;
 
-    var data_dir_info = try node_mod.DataDir.resolve(allocator, node_mod.NodeOptions{
+    var data_dir_info = try cli_paths.DataPaths.resolve(allocator, .{
         .data_dir = data_dir,
         .network = network,
     });

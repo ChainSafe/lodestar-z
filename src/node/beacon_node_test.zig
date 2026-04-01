@@ -11,6 +11,7 @@ const node_pkg = @import("root.zig");
 const BeaconNode = node_pkg.BeaconNode;
 const NodeOptions = node_pkg.NodeOptions;
 const block_production_mod = node_pkg.block_production_mod;
+const identity_mod = node_pkg.identity;
 
 const StatusMessage = networking.messages.StatusMessage;
 const freeResponseChunks = networking.freeResponseChunks;
@@ -36,7 +37,11 @@ const TestContext = struct {
             owned_state.deinit();
         }
 
-        const node = try BeaconNode.init(allocator, std.testing.io, test_state.cached_state.config, opts);
+        const node_identity = try identity_mod.createEphemeralIdentity(allocator, std.testing.io, opts);
+        const node = try BeaconNode.init(allocator, std.testing.io, test_state.cached_state.config, .{
+            .options = opts,
+            .node_identity = node_identity,
+        });
         errdefer node.deinit();
 
         return .{

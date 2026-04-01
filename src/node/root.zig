@@ -54,10 +54,6 @@ pub const WorkItem = processor_mod.WorkItem;
 pub const WorkType = processor_mod.WorkType;
 pub const QueueConfig = processor_mod.QueueConfig;
 
-pub const data_dir_mod = @import("data_dir.zig");
-pub const DataDir = data_dir_mod.DataDir;
-pub const defaultDataRoot = data_dir_mod.defaultRoot;
-
 pub const jwt_mod = @import("jwt.zig");
 
 pub const block_production_mod = @import("block_production.zig");

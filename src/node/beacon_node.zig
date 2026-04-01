@@ -167,6 +167,13 @@ pub const SyncStatus = struct {
 pub const HeadInfo = chain_mod.HeadInfo;
 
 pub const BeaconNode = struct {
+    pub const InitConfig = struct {
+        options: NodeOptions,
+        db_path: ?[]const u8 = null,
+        node_identity: NodeIdentity,
+        jwt_secret: ?[32]u8 = null,
+    };
+
     allocator: Allocator,
     config: *const BeaconConfig,
 
@@ -333,8 +340,8 @@ pub const BeaconNode = struct {
     /// Uses MemoryKVStore for the database backend — production would
     /// swap this for LMDB or similar. All caches, pools, and trackers
     /// are heap-allocated and owned by the node.
-    pub fn init(allocator: Allocator, io: std.Io, beacon_config: *const BeaconConfig, opts: NodeOptions) !*BeaconNode {
-        return lifecycle_mod.init(allocator, io, beacon_config, opts);
+    pub fn init(allocator: Allocator, io: std.Io, beacon_config: *const BeaconConfig, init_config: InitConfig) !*BeaconNode {
+        return lifecycle_mod.init(allocator, io, beacon_config, init_config);
     }
 
     /// Clean up all owned resources.

@@ -22,7 +22,9 @@ const state_transition = @import("state_transition");
 const CachedBeaconState = state_transition.CachedBeaconState;
 const Node = @import("persistent_merkle_tree").Node;
 
-const BeaconNode = @import("node").BeaconNode;
+const node_pkg = @import("node");
+const BeaconNode = node_pkg.BeaconNode;
+const identity_mod = node_pkg.identity;
 const SimNodeHarness = @import("sim_node_harness.zig").SimNodeHarness;
 const sim_network = @import("sim_network.zig");
 const SimNetwork = sim_network.SimNetwork;
@@ -135,7 +137,10 @@ pub const SimCluster = struct {
 
         // Node 0: initialize from primary genesis state.
         const seed_0 = cluster_prng.random().int(u64);
-        const bn0 = try BeaconNode.init(allocator, std.testing.io, primary.config, .{});
+        const bn0_identity = try identity_mod.createEphemeralIdentity(allocator, std.testing.io, .{});
+        const bn0 = try BeaconNode.init(allocator, std.testing.io, primary.config, .{
+            .node_identity = bn0_identity,
+        });
         try bn0.initFromGenesis(primary.cached_state);
         beacon_nodes[0] = bn0;
         nodes[0] = SimNodeHarness.init(allocator, bn0, seed_0);
@@ -149,7 +154,10 @@ pub const SimCluster = struct {
             const cloned = try genesis_state_0.clone(allocator, .{ .transfer_cache = false });
 
             const seed_i = cluster_prng.random().int(u64);
-            const bn_i = try BeaconNode.init(allocator, std.testing.io, primary.config, .{});
+            const bn_i_identity = try identity_mod.createEphemeralIdentity(allocator, std.testing.io, .{});
+            const bn_i = try BeaconNode.init(allocator, std.testing.io, primary.config, .{
+                .node_identity = bn_i_identity,
+            });
             try bn_i.initFromGenesis(cloned);
             beacon_nodes[i] = bn_i;
             nodes[i] = SimNodeHarness.init(allocator, bn_i, seed_i);

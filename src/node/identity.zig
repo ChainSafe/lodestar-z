@@ -23,11 +23,6 @@ const NodeOptions = @import("options.zig").NodeOptions;
 
 const log = std.log.scoped(.identity);
 
-/// Subdirectory under data_dir for identity files.
-const identity_dir = "node-identity";
-/// Filename for the hex-encoded secret key.
-const secret_key_file = "secret-key";
-
 pub const NodeIdentity = struct {
     allocator: Allocator,
     secret_key: [32]u8,
@@ -42,41 +37,29 @@ pub const NodeIdentity = struct {
     }
 };
 
-/// Load an existing identity from disk, or generate and persist a new one.
-///
-/// When `data_dir` is empty, uses an ephemeral key and ENR.
-pub fn loadOrCreateIdentity(
+pub const PersistentIdentityPaths = struct {
+    secret_key: []const u8,
+    enr: []const u8,
+};
+
+pub fn createEphemeralIdentity(
     allocator: Allocator,
     io: std.Io,
-    data_dir: []const u8,
     opts: NodeOptions,
 ) !NodeIdentity {
-    var key_path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    var enr_path_buf: [std.fs.max_path_bytes]u8 = undefined;
-
-    if (data_dir.len == 0) {
-        return loadOrCreateIdentityAtPath(allocator, io, "", "", opts);
-    }
-
-    return loadOrCreateIdentityAtPath(
-        allocator,
-        io,
-        buildKeyPath(&key_path_buf, data_dir),
-        buildEnrPath(&enr_path_buf, data_dir),
-        opts,
-    );
+    const secret_key = try loadOrCreateSecretKey(io, "");
+    return buildIdentity(allocator, io, secret_key, "", opts);
 }
 
-/// Load or create a node identity using explicit secret-key and ENR file paths.
-pub fn loadOrCreateIdentityAtPath(
+/// Load an existing identity from disk, or generate and persist a new one.
+pub fn loadOrCreatePersistentIdentity(
     allocator: Allocator,
     io: std.Io,
-    key_path: []const u8,
-    enr_path: []const u8,
+    paths: PersistentIdentityPaths,
     opts: NodeOptions,
 ) !NodeIdentity {
-    const secret_key = try loadOrCreateSecretKey(io, key_path);
-    return buildIdentity(allocator, io, secret_key, enr_path, opts);
+    const secret_key = try loadOrCreateSecretKey(io, paths.secret_key);
+    return buildIdentity(allocator, io, secret_key, paths.enr, opts);
 }
 
 fn buildIdentity(
@@ -338,25 +321,4 @@ fn decodeEnrText(allocator: Allocator, enr_text: []const u8) ![]u8 {
     errdefer allocator.free(raw);
     std.base64.url_safe_no_pad.Decoder.decode(raw, trimmed) catch return error.InvalidEnr;
     return raw;
-}
-
-fn buildKeyPath(buf: *[std.fs.max_path_bytes]u8, data_dir: []const u8) []const u8 {
-    return bufJoin(buf, &.{ data_dir, identity_dir, secret_key_file });
-}
-
-fn buildEnrPath(buf: *[std.fs.max_path_bytes]u8, data_dir: []const u8) []const u8 {
-    return bufJoin(buf, &.{ data_dir, identity_dir, "enr" });
-}
-
-fn bufJoin(buf: *[std.fs.max_path_bytes]u8, segments: []const []const u8) []const u8 {
-    var pos: usize = 0;
-    for (segments, 0..) |seg, i| {
-        if (i > 0) {
-            buf[pos] = '/';
-            pos += 1;
-        }
-        @memcpy(buf[pos..][0..seg.len], seg);
-        pos += seg.len;
-    }
-    return buf[0..pos];
 }

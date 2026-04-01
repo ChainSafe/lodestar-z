@@ -31,9 +31,6 @@ const api_mod = @import("api");
 const ApiContext = api_mod.context.ApiContext;
 const ApiNodeIdentity = api_mod.types.NodeIdentity;
 const identity_mod = @import("identity.zig");
-const data_dir_mod = @import("data_dir.zig");
-const DataDir = data_dir_mod.DataDir;
-const jwt_mod = @import("jwt.zig");
 const sync_mod = @import("sync");
 const UnknownBlockSync = sync_mod.UnknownBlockSync;
 const UnknownChainSync = sync_mod.UnknownChainSync;
@@ -51,35 +48,25 @@ const BeaconProcessor = processor_mod.BeaconProcessor;
 const QueueConfig = processor_mod.QueueConfig;
 const SlotClock = @import("clock.zig").SlotClock;
 const NodeOptions = @import("options.zig").NodeOptions;
+const InitConfig = @import("beacon_node.zig").BeaconNode.InitConfig;
 
-pub fn init(allocator: Allocator, io: std.Io, beacon_config: *const BeaconConfig, opts: NodeOptions) !*BeaconNode {
-    var maybe_dd: ?DataDir = if (opts.data_dir.len > 0)
-        try DataDir.resolve(allocator, opts)
-    else
-        null;
-    defer if (maybe_dd) |*dd| dd.deinit();
-
-    if (maybe_dd) |dd| {
-        try dd.ensureDirs(io);
-    }
-
+pub fn init(allocator: Allocator, io: std.Io, beacon_config: *const BeaconConfig, init_config: InitConfig) !*BeaconNode {
+    const opts = init_config.options;
     const bls_thread_pool = try initBlsThreadPool(allocator, io);
     errdefer bls_thread_pool.deinit();
 
-    const node_identity = try loadNodeIdentity(allocator, io, opts, maybe_dd);
+    var node_identity = init_config.node_identity;
     errdefer {
-        var mutable_identity = node_identity;
-        mutable_identity.deinit();
+        node_identity.deinit();
     }
-    const jwt_secret = try loadJwtSecret(io, opts, maybe_dd);
     const api_node_identity = try initApiNodeIdentity(allocator, opts, &node_identity);
     errdefer deinitApiNodeIdentity(allocator, api_node_identity);
 
     var kv_backend: BeaconNode.KVBackend = undefined;
     var kv_iface: db_mod.KVStore = undefined;
 
-    if (maybe_dd) |dd| {
-        const z_path = try allocator.dupeZ(u8, dd.beacon_db);
+    if (init_config.db_path) |db_path| {
+        const z_path = try allocator.dupeZ(u8, db_path);
         defer allocator.free(z_path);
 
         const lmdb_store = try allocator.create(LmdbKVStore);
@@ -251,7 +238,7 @@ pub fn init(allocator: Allocator, io: std.Io, beacon_config: *const BeaconConfig
         http_eng.* = HttpEngine.init(
             allocator,
             opts.execution_urls[0],
-            jwt_secret,
+            init_config.jwt_secret,
             transport.transport(),
         );
         http_eng.setIo(io);
@@ -440,31 +427,6 @@ fn initBlsThreadPool(allocator: Allocator, io: std.Io) !*BlsThreadPool {
     const pool = try BlsThreadPool.init(allocator, io, .{ .n_workers = n_workers });
     log.logger(.node).info("BLS thread pool initialized with {d} workers", .{pool.n_workers});
     return pool;
-}
-
-fn loadNodeIdentity(
-    allocator: Allocator,
-    io: std.Io,
-    opts: NodeOptions,
-    maybe_dd: ?DataDir,
-) !identity_mod.NodeIdentity {
-    if (maybe_dd) |dd| {
-        return identity_mod.loadOrCreateIdentityAtPath(allocator, io, dd.enr_key, dd.enr, opts);
-    }
-    return identity_mod.loadOrCreateIdentity(allocator, io, "", opts);
-}
-
-fn loadJwtSecret(io: std.Io, opts: NodeOptions, maybe_dd: ?DataDir) !?[32]u8 {
-    if (opts.engine_mock or opts.execution_urls.len == 0) return null;
-
-    const jwt_path = if (opts.jwt_secret_path) |path|
-        path
-    else if (maybe_dd) |dd|
-        dd.jwt_secret
-    else
-        return null;
-
-    return try jwt_mod.loadOrGenerate(io, jwt_path);
 }
 
 fn initApiNodeIdentity(

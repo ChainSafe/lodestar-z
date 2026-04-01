@@ -168,7 +168,7 @@ pub const SyncCallbackCtx = struct {
         const node: *BeaconNode = @ptrCast(@alignCast(ctx.node));
         const pm = node.peer_manager orelse return;
         const now_ms = blk: {
-            const ms = std.Io.Timestamp.now(std.Options.debug_io, .real).toMilliseconds();
+            const ms = std.Io.Timestamp.now(node.io, .real).toMilliseconds();
             break :blk if (ms >= 0) @as(u64, @intCast(ms)) else 0;
         };
         _ = pm.reportPeer(peer_id, .mid_tolerance, .sync, now_ms);

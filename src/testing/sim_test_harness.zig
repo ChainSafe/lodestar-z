@@ -12,7 +12,9 @@ const config_mod = @import("config");
 const state_transition = @import("state_transition");
 const Node = @import("persistent_merkle_tree").Node;
 
-const BeaconNode = @import("node").BeaconNode;
+const node_pkg = @import("node");
+const BeaconNode = node_pkg.BeaconNode;
+const identity_mod = node_pkg.identity;
 const SimNodeHarness = @import("sim_node_harness.zig").SimNodeHarness;
 const TestCachedBeaconState = state_transition.test_utils.TestCachedBeaconState;
 
@@ -54,7 +56,10 @@ pub const SimTestHarness = struct {
         var test_state = try TestCachedBeaconState.init(allocator, pool, validator_count);
 
         // Create the BeaconNode and initialize from genesis.
-        const node = try BeaconNode.init(allocator, std.testing.io, test_state.config, .{});
+        const node_identity = try identity_mod.createEphemeralIdentity(allocator, std.testing.io, .{});
+        const node = try BeaconNode.init(allocator, std.testing.io, test_state.config, .{
+            .node_identity = node_identity,
+        });
         errdefer node.deinit();
 
         // initFromGenesis takes ownership of the genesis state (caches it).

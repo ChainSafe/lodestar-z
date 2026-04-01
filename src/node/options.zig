@@ -2,7 +2,7 @@
 //!
 //! Runtime configuration for the beacon node. Distinct from BeaconConfig
 //! (which is the chain/consensus config derived from the spec) — this covers
-//! operational settings: networking, database paths, API binding, etc.
+//! node behavior and transport policy after launcher/bootstrap preparation.
 
 const std = @import("std");
 
@@ -18,9 +18,10 @@ pub const NetworkName = enum {
 
 /// Top-level node configuration.
 ///
-/// These are operational settings — where to listen, how many peers to target,
-/// which database directory to use, etc. The actual chain parameters come from
-/// `BeaconConfig` (derived from ChainConfig + preset).
+/// These are runtime behavior settings — where to listen, how many peers to
+/// target, which sync/discovery features to enable, etc. Filesystem paths,
+/// persisted identity, and JWT secret loading are launcher concerns and are
+/// prepared before `BeaconNode.init`.
 pub const NodeOptions = struct {
     // ── Network ──────────────────────────────────────────────────
     listen_addresses: []const []const u8 = &.{"/ip4/0.0.0.0/tcp/9000"},
@@ -59,17 +60,11 @@ pub const NodeOptions = struct {
     /// Allow non-local ENR addresses without clearing them.
     nat: bool = false,
 
-    // ── Database ─────────────────────────────────────────────────
-    data_dir: []const u8 = "",
-    /// Override beacon DB path (default: <data_dir>/beacon-node/db).
-    db_path: ?[]const u8 = null,
-
     // ── Chain ────────────────────────────────────────────────────
     network: NetworkName = .mainnet,
 
     // ── Execution ────────────────────────────────────────────────
     execution_urls: []const []const u8 = &.{"http://localhost:8551"},
-    jwt_secret_path: ?[]const u8 = null,
     /// Use mock execution engine instead of real EL (--engine-mock).
     engine_mock: bool = false,
 
@@ -93,20 +88,6 @@ pub const NodeOptions = struct {
     /// Set via --graffiti CLI option. When null, defaults to "lodestar-z".
     graffiti: ?[32]u8 = null,
 
-    // ── Validator Client (VC mode) ────────────────────────────────
-    /// Path to directory containing EIP-2335 keystore files (--validator-keys).
-    validator_keys_dir: ?[]const u8 = null,
-    /// Path to directory containing keystore password files (--validator-secrets).
-    validator_secrets_dir: ?[]const u8 = null,
-    /// Beacon node REST API URL for the VC to connect to (--beacon-node-url).
-    beacon_node_url: []const u8 = "http://localhost:5052",
-    /// Enable doppelganger protection: wait one epoch before attesting to detect
-    /// another instance signing for the same validator (--doppelganger-detection).
-    doppelganger_detection: bool = false,
-    /// URL of a Web3Signer remote signing service (--web3signer-url).
-    /// When set, signing is delegated to the external service instead of local keys.
-    web3signer_url: ?[]const u8 = null,
-
     // ── Sync ─────────────────────────────────────────────────────
     /// URL to fetch checkpoint state from a beacon API (--checkpoint-sync-url).
     checkpoint_sync_url: ?[]const u8 = null,
@@ -119,22 +100,6 @@ pub const NodeOptions = struct {
     /// When true, BLS signatures are verified during block import.
     /// Defaults to false for performance / test convenience.
     verify_signatures: bool = false,
-
-    // ── Logging ──────────────────────────────────────────────────
-    /// Global log level (default: info). Set via --log-level.
-    log_level: []const u8 = "info",
-    /// Log output format: "human" or "json". Set via --log-format.
-    log_format: []const u8 = "human",
-    /// Path to log file (optional). Set via --log-file.
-    log_file: ?[]const u8 = null,
-    /// Log level for file output (default: same as log_level). Set via --log-file-level.
-    log_file_level: ?[]const u8 = null,
-    /// Max size in bytes before rotating log file (default 100MB).
-    log_rotate_max_size: u64 = 100 * 1024 * 1024,
-    /// Number of rotated log files to keep (default 7).
-    log_rotate_max_files: u32 = 7,
-    /// Enable daily rotation (default: true when --log-file set).
-    log_rotate_daily: bool = true,
 
     // ── Validator Monitor ─────────────────────────────────────
     /// Validator indices to monitor for on-chain performance tracking.
