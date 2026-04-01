@@ -324,28 +324,19 @@ pub const SyncChain = struct {
         if (front.status != .awaiting_processing) return;
 
         front.startProcessing();
-        // Import each block individually. Per-block errors are tolerated to avoid
-        // stalling the pipeline on a single bad block; the segment succeeds unless
-        // every block fails (covered by isProcessingExhausted checks on retry).
-        var any_ok = false;
-        for (front.blocks) |batch_block| {
-            self.callbacks.importBlockFn(self.callbacks.ptr, batch_block.block_bytes) catch |err| {
-                std.log.warn("SyncChain: failed to import block (slot={d}): {}", .{
-                    batch_block.slot, err,
-                });
-                continue;
-            };
-            any_ok = true;
-        }
-        // If no blocks in segment imported, treat as processing failure.
-        if (front.blocks.len > 0 and !any_ok) {
+        self.callbacks.processChainSegment(front.blocks, self.sync_type) catch |err| {
+            std.log.warn("SyncChain: failed to import segment {d}..{d}: {}", .{
+                front.start_slot,
+                front.endSlot(),
+                err,
+            });
             front.onProcessingError();
             if (front.isProcessingExhausted()) {
                 if (front.download_peer) |p| self.callbacks.reportPeer(p);
                 self.status = .err;
             }
-            return error.AllBlocksFailed;
-        }
+            return err;
+        };
         front.onProcessingSuccess();
 
         // If a previous batch was awaiting validation, it's now validated
@@ -392,8 +383,10 @@ const TestSyncCallbacks = struct {
     last_generation: u32 = 0,
     should_fail_processing: bool = false,
 
-    fn processChainSegmentFn(_: *anyopaque, _: []const BatchBlock, _: RangeSyncType) anyerror!void {
-        // Block import is done directly via importBlockFn; this shim is unused.
+    fn processChainSegmentFn(ptr: *anyopaque, blocks: []const BatchBlock, _: RangeSyncType) anyerror!void {
+        const self: *TestSyncCallbacks = @ptrCast(@alignCast(ptr));
+        if (self.should_fail_processing) return error.ProcessingFailed;
+        self.processed_count += @intCast(blocks.len);
     }
 
     fn downloadByRangeFn(
@@ -420,7 +413,6 @@ const TestSyncCallbacks = struct {
     fn importBlockFnTest(ptr: *anyopaque, _: []const u8) anyerror!void {
         const self: *TestSyncCallbacks = @ptrCast(@alignCast(ptr));
         if (self.should_fail_processing) return error.ProcessingFailed;
-        self.processed_count += 1;
     }
 
     fn callbacks(self: *TestSyncCallbacks) SyncChainCallbacks {
@@ -513,6 +505,6 @@ test "SyncChain: completes when all batches processed" {
     const done = try chain.tick();
     try std.testing.expect(done);
     try std.testing.expectEqual(SyncChainStatus.done, chain.status);
-    // 2 blocks were imported (one importBlockFn call per block).
+    // 2 blocks were imported through the segment callback.
     try std.testing.expectEqual(@as(u32, 2), tc.processed_count);
 }

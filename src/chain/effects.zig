@@ -44,6 +44,23 @@ pub const ImportOutcome = struct {
     effects: ImportEffects,
 };
 
+pub const SegmentImportEffects = struct {
+    /// The canonical head root after the segment completes.
+    notify_forkchoice_update_root: Root,
+    /// Archive any epoch-transition post-states imported in the segment.
+    archive_states: []const ArchiveStateRequest = &.{},
+    /// Finalized checkpoint snapshot after the segment, when relevant.
+    finalized_checkpoint: ?CheckpointSnapshot = null,
+};
+
+pub const SegmentImportOutcome = struct {
+    imported_count: usize,
+    skipped_count: usize,
+    failed_count: usize,
+    snapshot: ChainSnapshot,
+    effects: SegmentImportEffects,
+};
+
 pub const BootstrapOutcome = struct {
     snapshot: ChainSnapshot,
     genesis_time: u64,

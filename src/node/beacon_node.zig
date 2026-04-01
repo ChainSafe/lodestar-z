@@ -347,6 +347,16 @@ pub const BeaconNode = struct {
         return self.finishImportOutcome(t0, outcome);
     }
 
+    pub fn importRawBlockBytes(
+        self: *BeaconNode,
+        block_bytes: []const u8,
+        source: BlockSource,
+    ) !ImportResult {
+        const t0 = std.Io.Clock.awake.now(self.io);
+        const outcome = try self.chainService().importRawBlockBytes(block_bytes, source);
+        return self.finishImportOutcome(t0, outcome);
+    }
+
     pub fn importReadyBlock(
         self: *BeaconNode,
         ready: chain_mod.ReadyBlockInput,
@@ -354,6 +364,17 @@ pub const BeaconNode = struct {
         const t0 = std.Io.Clock.awake.now(self.io);
         const outcome = try self.chainService().importReadyBlock(ready);
         return self.finishImportOutcome(t0, outcome);
+    }
+
+    pub fn processRangeSyncSegment(
+        self: *BeaconNode,
+        raw_blocks: []const chain_mod.RawBlockBytes,
+    ) !void {
+        const t0 = std.Io.Clock.awake.now(self.io);
+        const outcome = try self.chainService().processRangeSyncSegment(raw_blocks);
+        const all_failed = outcome.imported_count == 0 and outcome.skipped_count == 0 and outcome.failed_count > 0;
+        self.finishSegmentImportOutcome(t0, outcome);
+        if (all_failed) return error.AllBlocksFailed;
     }
 
     fn finishImportOutcome(
@@ -381,6 +402,7 @@ pub const BeaconNode = struct {
             // Encode first 8 bytes of block root as u64 for change detection.
             m.head_root.set(std.mem.readInt(u64, outcome.snapshot.head.root[0..8], .big));
         }
+        self.updateSyncProgress(outcome.snapshot);
 
         if (result.epoch_transition) {
             // Archive the post-epoch state for cold-path recovery.
@@ -405,6 +427,55 @@ pub const BeaconNode = struct {
         });
 
         return result;
+    }
+
+    fn finishSegmentImportOutcome(
+        self: *BeaconNode,
+        t0: std.Io.Timestamp,
+        outcome: chain_mod.SegmentImportOutcome,
+    ) void {
+        defer if (outcome.effects.archive_states.len > 0) self.allocator.free(outcome.effects.archive_states);
+
+        self.notifyForkchoiceUpdate(outcome.effects.notify_forkchoice_update_root) catch |err| {
+            log.logger(.node).warn("forkchoiceUpdated failed after range sync segment: {}", .{err});
+        };
+
+        const t1 = std.Io.Clock.awake.now(self.io);
+        const elapsed_s: f64 = @as(f64, @floatFromInt(t1.nanoseconds - t0.nanoseconds)) / 1e9;
+
+        if (self.metrics) |m| {
+            if (outcome.imported_count > 0) {
+                m.blocks_imported_total.incrBy(@intCast(outcome.imported_count));
+                m.block_import_seconds.observe(elapsed_s);
+            }
+            m.head_slot.set(outcome.snapshot.head.slot);
+            m.finalized_epoch.set(outcome.snapshot.finalized.epoch);
+            m.justified_epoch.set(outcome.snapshot.justified.epoch);
+            m.head_root.set(std.mem.readInt(u64, outcome.snapshot.head.root[0..8], .big));
+        }
+        self.updateSyncProgress(outcome.snapshot);
+
+        for (outcome.effects.archive_states) |archive_state| {
+            self.chainService().archiveState(archive_state.slot, archive_state.state_root) catch {};
+        }
+        if (outcome.effects.finalized_checkpoint) |finalized| {
+            self.unknown_chain_sync.onFinalized(finalized.slot);
+        }
+
+        log.logger(.chain).info("range sync segment imported", .{
+            .imported = outcome.imported_count,
+            .skipped = outcome.skipped_count,
+            .failed = outcome.failed_count,
+            .head_slot = outcome.snapshot.head.slot,
+            .finalized_epoch = outcome.snapshot.finalized.epoch,
+        });
+    }
+
+    fn updateSyncProgress(self: *BeaconNode, snapshot: chain_mod.ChainSnapshot) void {
+        if (self.sync_service_inst) |svc| {
+            svc.onHeadUpdate(snapshot.head.slot);
+            svc.onFinalizedUpdate(snapshot.finalized.epoch);
+        }
     }
 
     /// Store a blob sidecar received via gossip or req/resp.

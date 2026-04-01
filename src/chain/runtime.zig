@@ -31,6 +31,8 @@ const ValidatorMonitor = @import("validator_monitor.zig").ValidatorMonitor;
 const BeaconProposerCache = @import("beacon_proposer_cache.zig").BeaconProposerCache;
 const DataAvailabilityManager = @import("data_availability.zig").DataAvailabilityManager;
 const PendingDaBlocks = @import("pending_da_blocks.zig").PendingDaBlocks;
+const kzg_mod = @import("kzg");
+const Kzg = kzg_mod.Kzg;
 
 pub const RuntimeOptions = struct {
     max_block_states: u32 = 64,
@@ -82,6 +84,7 @@ pub const Runtime = struct {
     sync_committee_message_pool: *SyncCommitteeMessagePool,
     beacon_proposer_cache: *BeaconProposerCache,
     custody_columns: []u64,
+    kzg: *Kzg,
     da_manager: *DataAvailabilityManager,
     pending_da_blocks: *PendingDaBlocks,
     validator_monitor: ?*ValidatorMonitor = null,
@@ -163,6 +166,11 @@ pub const Runtime = struct {
         const custody_columns = try allocator.dupe(u64, opts.custody_columns);
         errdefer allocator.free(custody_columns);
 
+        const kzg = try allocator.create(Kzg);
+        errdefer allocator.destroy(kzg);
+        kzg.* = try Kzg.initBundled();
+        errdefer kzg.deinit();
+
         const da_manager = try allocator.create(DataAvailabilityManager);
         errdefer allocator.destroy(da_manager);
         da_manager.* = DataAvailabilityManager.init(
@@ -198,6 +206,7 @@ pub const Runtime = struct {
         chain.queued_regen = queued_regen;
         chain.sync_contribution_pool = sync_contrib_pool;
         chain.sync_committee_message_pool = sync_msg_pool;
+        chain.kzg = kzg;
         chain.da_manager = da_manager;
         chain.pending_da_blocks = pending_da_blocks;
 
@@ -218,6 +227,7 @@ pub const Runtime = struct {
             .sync_committee_message_pool = sync_msg_pool,
             .beacon_proposer_cache = proposer_cache,
             .custody_columns = custody_columns,
+            .kzg = kzg,
             .da_manager = da_manager,
             .pending_da_blocks = pending_da_blocks,
             .chain = chain,
@@ -267,6 +277,9 @@ pub const Runtime = struct {
 
         self.da_manager.deinit();
         self.allocator.destroy(self.da_manager);
+
+        self.kzg.deinit();
+        self.allocator.destroy(self.kzg);
 
         self.allocator.free(self.custody_columns);
 

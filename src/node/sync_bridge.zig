@@ -5,12 +5,10 @@
 //! batch requests so the main loop can drain them via actual network calls.
 
 const std = @import("std");
+const chain_mod = @import("chain");
 const sync_mod = @import("sync");
 const SyncServiceCallbacks = sync_mod.SyncServiceCallbacks;
 const BatchBlock = sync_mod.BatchBlock;
-
-const fork_types = @import("fork_types");
-const AnySignedBeaconBlock = fork_types.AnySignedBeaconBlock;
 
 pub const PendingBatchRequest = struct {
     chain_id: u32,
@@ -61,6 +59,7 @@ pub const SyncCallbackCtx = struct {
         return .{
             .ptr = @ptrCast(self),
             .importBlockFn = &syncImportBlock,
+            .processChainSegmentFn = &syncProcessChainSegment,
             .requestBlocksByRangeFn = &syncRequestBlocksByRange,
             .requestBlockByRootFn = &syncRequestBlockByRoot,
             .reportPeerFn = &syncReportPeer,
@@ -72,32 +71,39 @@ pub const SyncCallbackCtx = struct {
     fn syncImportBlock(ptr: *anyopaque, block_bytes: []const u8) anyerror!void {
         const ctx: *SyncCallbackCtx = @ptrCast(@alignCast(ptr));
         const node = ctx.node;
-        const allocator = node.allocator;
 
-        const block_slot: u64 = if (block_bytes.len >= 108)
-            std.mem.readInt(u64, block_bytes[100..108], .little)
-        else
-            node.currentHeadSlot();
-        const fork_seq = node.config.forkSeq(block_slot);
-
-        const any_signed = AnySignedBeaconBlock.deserialize(
-            allocator,
-            .full,
-            fork_seq,
-            block_bytes,
-        ) catch |err| {
-            std.log.warn("SyncCallbackCtx: block deserialize error: {}", .{err});
-            return err;
-        };
-        defer any_signed.deinit(allocator);
-
-        const result = node.importBlock(any_signed, .range_sync) catch |err| {
+        const result = node.importRawBlockBytes(block_bytes, .unknown_block_sync) catch |err| {
             if (err != error.BlockAlreadyKnown and err != error.BlockAlreadyFinalized) {
                 std.log.warn("SyncCallbackCtx: import error: {}", .{err});
             }
             return err;
         };
         std.log.info("SyncCallbackCtx: imported slot={d}", .{result.slot});
+    }
+
+    fn syncProcessChainSegment(
+        ptr: *anyopaque,
+        blocks: []const BatchBlock,
+        sync_type: sync_mod.RangeSyncType,
+    ) anyerror!void {
+        const ctx: *SyncCallbackCtx = @ptrCast(@alignCast(ptr));
+        const node = ctx.node;
+
+        const raw_blocks = try node.allocator.alloc(chain_mod.RawBlockBytes, blocks.len);
+        defer node.allocator.free(raw_blocks);
+
+        for (blocks, 0..) |block, i| {
+            raw_blocks[i] = .{
+                .slot = block.slot,
+                .bytes = block.block_bytes,
+            };
+        }
+
+        try node.processRangeSyncSegment(raw_blocks);
+        std.log.info("SyncCallbackCtx: processed {d} {s} blocks", .{
+            blocks.len,
+            @tagName(sync_type),
+        });
     }
 
     fn syncRequestBlocksByRange(

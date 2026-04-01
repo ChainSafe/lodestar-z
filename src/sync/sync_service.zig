@@ -59,8 +59,15 @@ pub const SyncMode = enum {
 pub const SyncServiceCallbacks = struct {
     ptr: *anyopaque,
 
-    /// Import a block through the chain pipeline.
+    /// Import a single block through the chain pipeline.
     importBlockFn: *const fn (ptr: *anyopaque, block_bytes: []const u8) anyerror!void,
+
+    /// Import a contiguous range-sync segment through the chain pipeline.
+    processChainSegmentFn: *const fn (
+        ptr: *anyopaque,
+        blocks: []const BatchBlock,
+        sync_type: RangeSyncType,
+    ) anyerror!void,
 
     /// Request blocks by range from a peer.
     requestBlocksByRangeFn: *const fn (
@@ -91,6 +98,14 @@ pub const SyncServiceCallbacks = struct {
 
     pub fn importBlock(self: SyncServiceCallbacks, block_bytes: []const u8) !void {
         return self.importBlockFn(self.ptr, block_bytes);
+    }
+
+    pub fn processChainSegment(
+        self: SyncServiceCallbacks,
+        blocks: []const BatchBlock,
+        sync_type: RangeSyncType,
+    ) !void {
+        return self.processChainSegmentFn(self.ptr, blocks, sync_type);
     }
 
     pub fn requestBlocksByRange(
@@ -145,12 +160,10 @@ pub const SyncService = struct {
         local_head_slot: u64,
         local_finalized_epoch: u64,
     ) SyncService {
-        // Build range sync callbacks. processChainSegmentImpl is kept as a
-        // compatibility shim but importBlockFn is called directly in SyncChain.
         const range_callbacks = RangeSyncCallbacks{
             .ptr = callbacks.ptr,
             .importBlockFn = callbacks.importBlockFn,
-            .processChainSegmentFn = &processChainSegmentImpl,
+            .processChainSegmentFn = callbacks.processChainSegmentFn,
             .downloadByRangeFn = callbacks.requestBlocksByRangeFn,
             .reportPeerFn = callbacks.reportPeerFn,
         };
@@ -381,16 +394,13 @@ pub const SyncService = struct {
 
         _ = old_mode;
     }
-
-    /// Compatibility shim for RangeSyncCallbacks.processChainSegmentFn.
-    /// Block import is done directly by SyncChain.processNextBatch via importBlockFn.
-    fn processChainSegmentImpl(_: *anyopaque, _: []const BatchBlock, _: RangeSyncType) anyerror!void {}
 };
 
 // ── Tests ────────────────────────────────────────────────────────────
 
 const TestSyncServiceCallbacks = struct {
     imported_count: u32 = 0,
+    processed_segments: u32 = 0,
     requested_count: u32 = 0,
     reported_count: u32 = 0,
     gossip_enabled: ?bool = null,
@@ -398,6 +408,12 @@ const TestSyncServiceCallbacks = struct {
     fn importBlockFn(ptr: *anyopaque, _: []const u8) anyerror!void {
         const self: *TestSyncServiceCallbacks = @ptrCast(@alignCast(ptr));
         self.imported_count += 1;
+    }
+
+    fn processChainSegmentFn(ptr: *anyopaque, blocks: []const BatchBlock, _: RangeSyncType) anyerror!void {
+        const self: *TestSyncServiceCallbacks = @ptrCast(@alignCast(ptr));
+        self.processed_segments += 1;
+        self.imported_count += @intCast(blocks.len);
     }
 
     fn requestBlocksByRangeFn(ptr: *anyopaque, _: u32, _: BatchId, _: u32, _: []const u8, _: u64, _: u64) void {
@@ -425,6 +441,7 @@ const TestSyncServiceCallbacks = struct {
         return .{
             .ptr = self,
             .importBlockFn = &importBlockFn,
+            .processChainSegmentFn = &processChainSegmentFn,
             .requestBlocksByRangeFn = &requestBlocksByRangeFn,
             .requestBlockByRootFn = &requestBlockByRootFn,
             .reportPeerFn = &reportPeerFn,

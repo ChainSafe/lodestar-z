@@ -152,16 +152,6 @@ pub const PeerSyncInfo = struct {
     }
 };
 
-// ── Portable time ────────────────────────────────────────────────────
-
-/// Get current time in milliseconds since Unix epoch.
-///
-/// Uses std.time.milliTimestamp() which is portable across platforms.
-pub fn currentTimeMs() u64 {
-    const ms = std.time.milliTimestamp();
-    return if (ms >= 0) @intCast(ms) else 0;
-}
-
 // ── Tests ────────────────────────────────────────────────────────────
 
 test "PeerSyncInfo: owned lifetime" {
@@ -187,10 +177,4 @@ test "ChainTarget: equality" {
     const c = ChainTarget{ .slot = 200, .root = [_]u8{1} ** 32 };
     try std.testing.expect(a.eql(b));
     try std.testing.expect(!a.eql(c));
-}
-
-test "currentTimeMs: returns value" {
-    const t = currentTimeMs();
-    // On Linux, this is non-zero. On other platforms, may be 0.
-    _ = t;
 }

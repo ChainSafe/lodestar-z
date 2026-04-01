@@ -89,6 +89,8 @@ const reprocess_mod = @import("reprocess.zig");
 const ReprocessQueue = reprocess_mod.ReprocessQueue;
 const pending_da_blocks_mod = @import("pending_da_blocks.zig");
 const PendingDaBlocks = pending_da_blocks_mod.PendingDaBlocks;
+const kzg_mod = @import("kzg");
+const Kzg = kzg_mod.Kzg;
 
 fn unixTimestampSeconds() u64 {
     var ts: std.posix.timespec = undefined;
@@ -141,6 +143,10 @@ pub const Chain = struct {
     da_manager: ?*DataAvailabilityManager,
     /// Pending blocks whose DA is incomplete.
     pending_da_blocks: ?*PendingDaBlocks,
+
+    /// Shared KZG context for blob / column verification.
+    /// Owned by chain.Runtime.
+    kzg: ?*const Kzg,
 
     // --- Reprocessing --- (P1-10 fix)
     /// Reprocess queue — optional. When set, blocks that fail with ParentUnknown
@@ -209,6 +215,7 @@ pub const Chain = struct {
             .beacon_proposer_cache = beacon_proposer_cache,
             .da_manager = null,
             .pending_da_blocks = null,
+            .kzg = null,
             .reprocess_queue = null,
             .sync_contribution_pool = null,
             .sync_committee_message_pool = null,
@@ -748,15 +755,7 @@ pub const Chain = struct {
 
         // Compute wall-clock slot from genesis_time_s.
         // Falls back to head_slot (distance = 0) when genesis is not yet known.
-        const wall_slot: u64 = blk: {
-            const gt = self.genesis_time_s;
-            if (gt == 0) break :blk head_slot;
-            const sps = self.config.chain.SECONDS_PER_SLOT;
-            if (sps == 0) break :blk head_slot;
-            const now_s = unixTimestampSeconds();
-            if (now_s < gt) break :blk head_slot;
-            break :blk (now_s - gt) / sps;
-        };
+        const wall_slot = self.currentWallSlot() orelse head_slot;
 
         const sync_distance = if (wall_slot > head_slot) wall_slot - head_slot else 0;
         return .{
@@ -766,6 +765,19 @@ pub const Chain = struct {
             .is_optimistic = false,
             .el_offline = false,
         };
+    }
+
+    pub fn currentWallSlot(self: *const Chain) ?u64 {
+        const gt = self.genesis_time_s;
+        if (gt == 0) return null;
+
+        const sps = self.config.chain.SECONDS_PER_SLOT;
+        if (sps == 0) return null;
+
+        const now_s = unixTimestampSeconds();
+        if (now_s < gt) return null;
+
+        return (now_s - gt) / sps;
     }
 
     /// Build a StatusMessage reflecting the current chain state.

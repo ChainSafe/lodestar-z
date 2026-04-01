@@ -41,6 +41,24 @@ pub const ReadyBlockInput = struct {
     seen_timestamp_sec: u64 = 0,
 };
 
+pub const RawBlockBytes = struct {
+    slot: Slot,
+    bytes: []const u8,
+};
+
+pub const BlockAttachmentRequirement = enum {
+    none,
+    blobs,
+    columns,
+    /// Future-separated execution payload plus custody data ingress.
+    payload_and_columns,
+};
+
+pub const BlockIngressReadiness = struct {
+    da_status: DataAvailabilityStatus,
+    attachment_requirement: BlockAttachmentRequirement,
+};
+
 pub const BlockIngressResult = union(enum) {
     ready: ReadyBlockInput,
     pending_data: Root,

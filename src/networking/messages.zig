@@ -78,7 +78,7 @@ pub const BlobSidecarsByRangeRequest = ssz.FixedContainerType(struct {
 /// BlobSidecarsByRootRequest is a list of blob identifiers.
 pub const BlobSidecarsByRootRequest = ssz.FixedListType(
     deneb.BlobIdentifier,
-    preset.MAX_REQUEST_BLOB_SIDECARS,
+    constants.MAX_REQUEST_BLOCKS_DENEB * preset.MAX_BLOBS_PER_BLOCK,
 );
 
 // === Fulu / PeerDAS messages ===
