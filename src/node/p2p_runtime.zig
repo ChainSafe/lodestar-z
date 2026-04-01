@@ -18,7 +18,6 @@ const DiscoveryService = networking.DiscoveryService;
 const PeerManager = networking.PeerManager;
 const ReqRespContext = networking.ReqRespContext;
 const discv5 = @import("discv5");
-const ssl = @import("ssl");
 const Multiaddr = @import("multiaddr").Multiaddr;
 const sync_mod = @import("sync");
 const SyncService = sync_mod.SyncService;
@@ -58,23 +57,24 @@ pub fn start(self: *BeaconNode, io: std.Io, listen_addr: []const u8, port: u16) 
         self.genesis_validators_root,
     );
 
-    std.log.warn(
-        "libp2p transport still generates a separate TLS host key; local ENR/peer-id are prepared from the Ethereum network key but not yet consumed by zig-libp2p",
-        .{},
-    );
-
-    const pctx = ssl.EVP_PKEY_CTX_new_id(ssl.EVP_PKEY_ED25519, null) orelse return error.KeyGenFailed;
-    defer ssl.EVP_PKEY_CTX_free(pctx);
-    if (ssl.EVP_PKEY_keygen_init(pctx) <= 0) return error.KeyGenFailed;
-    var host_key: ?*ssl.EVP_PKEY = null;
-    if (ssl.EVP_PKEY_keygen(pctx, &host_key) <= 0) return error.KeyGenFailed;
+    var host_identity = self.node_identity.libp2pKeyPair();
+    {
+        const derived_peer_id = try host_identity.peerId(self.allocator);
+        const base58_len = derived_peer_id.toBase58Len();
+        const base58_buf = try self.allocator.alloc(u8, base58_len);
+        defer self.allocator.free(base58_buf);
+        const peer_id_text = try derived_peer_id.toBase58(base58_buf);
+        if (!std.mem.eql(u8, peer_id_text, self.node_identity.peer_id)) {
+            return error.PeerIdMismatch;
+        }
+    }
 
     self.p2p_service = try networking.p2p_service.P2pService.init(self.allocator, .{
         .fork_digest = fork_digest,
         .fork_seq = self.config.forkSeq(self.head_tracker.head_slot),
         .req_resp_context = req_resp_ctx,
         .validator = &validator.ctx,
-        .host_key = host_key,
+        .host_identity = host_identity,
         .gossipsub_config = .{
             .mesh_degree = 8,
             .mesh_degree_lo = 6,

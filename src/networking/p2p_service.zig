@@ -27,6 +27,7 @@ const Io = std.Io;
 const libp2p = @import("zig-libp2p");
 const quic_mod = libp2p.quic_new;
 const QuicTransport = quic_mod.QuicTransport;
+const identity_mod = libp2p.identity;
 const gossipsub_mod = libp2p.gossipsub;
 const GossipsubHandler = gossipsub_mod.Handler;
 const GossipsubService = gossipsub_mod.Service;
@@ -187,9 +188,9 @@ pub const P2pConfig = struct {
     req_resp_context: *const ReqRespContext,
     /// Gossip message validator. Use `createPassthroughValidator` for a no-op stub.
     validator: *GossipValidationContext,
-    /// Optional: host keypair for TLS (*ssl.EVP_PKEY cast to *anyopaque).
-    /// Null = eth-p2p-z generates an ephemeral key.
-    host_key: ?*@import("ssl").EVP_PKEY = null,
+    /// Optional libp2p host identity for QUIC/TLS and peer-id derivation.
+    /// When null, eth-p2p-z generates an ephemeral host identity.
+    host_identity: ?identity_mod.KeyPair = null,
     /// GossipSub router configuration.
     gossipsub_config: GossipsubConfig = .{},
 };
@@ -203,14 +204,26 @@ pub const P2pService = struct {
     network: Eth2Switch,
     gossipsub: *GossipsubService,
     gossip_adapter: EthGossipAdapter,
+    host_identity: ?*identity_mod.KeyPair,
 
     pub fn init(allocator: Allocator, config: P2pConfig) !Self {
         const gossipsub = try GossipsubService.init(allocator, config.gossipsub_config);
         errdefer gossipsub.deinit();
 
+        const host_identity = if (config.host_identity) |identity| blk: {
+            const ptr = try allocator.create(identity_mod.KeyPair);
+            errdefer allocator.destroy(ptr);
+            ptr.* = identity;
+            break :blk ptr;
+        } else null;
+        errdefer if (host_identity) |ptr| {
+            ptr.deinit();
+            allocator.destroy(ptr);
+        };
+
         const network = Eth2Switch.init(
             allocator,
-            .{ .host_key = config.host_key },
+            .{ .host_identity = host_identity },
             .{
                 StatusProtocol.init(allocator, config.req_resp_context),
                 GoodbyeProtocol.init(allocator, config.req_resp_context),
@@ -269,6 +282,7 @@ pub const P2pService = struct {
             .network = network,
             .gossipsub = gossipsub,
             .gossip_adapter = gossip_adapter,
+            .host_identity = host_identity,
         };
     }
 
@@ -354,6 +368,10 @@ pub const P2pService = struct {
         self.network.deinit(io);
         self.network.getHandler(IdentifyHandler).deinit();
         self.gossipsub.deinit();
+        if (self.host_identity) |host_identity| {
+            host_identity.deinit();
+            self.allocator.destroy(host_identity);
+        }
     }
 
     /// Spawn a background fiber for the gossipsub heartbeat timer.

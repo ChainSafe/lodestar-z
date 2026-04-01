@@ -6,9 +6,7 @@
 //! - a peer ID derived from that key
 //! - a persisted local ENR derived from that key plus the current CLI overrides
 //!
-//! The libp2p transport stack in `zig-libp2p` still does not accept
-//! secp256k1 host keys for QUIC/TLS, so this module prepares the canonical
-//! Ethereum identity even though the transport layer cannot fully consume it yet.
+//! The same secp256k1 key is used for ENR advertisement and libp2p host identity.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -34,6 +32,14 @@ pub const NodeIdentity = struct {
     pub fn deinit(self: *NodeIdentity) void {
         self.allocator.free(self.peer_id);
         self.allocator.free(self.enr);
+    }
+
+    pub fn libp2pKeyPair(self: *const NodeIdentity) libp2p_identity.KeyPair {
+        return .{
+            .key_type = .SECP256K1,
+            .backend = .secp256k1,
+            .storage = .{ .secp256k1 = .{ .secret = self.secret_key } },
+        };
     }
 };
 
