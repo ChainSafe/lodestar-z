@@ -511,12 +511,7 @@ pub const Service = struct {
 
         const node_id = parsed.nodeId() orelse return false;
         const pubkey = parsed.pubkey orelse return false;
-        const addr = if (parsed.ip) |ip|
-            Address{ .ip4 = .{ .bytes = ip, .port = parsed.udp orelse parsed.tcp orelse return false } }
-        else if (parsed.ip6) |ip6|
-            Address{ .ip6 = .{ .bytes = ip6, .port = parsed.udp6 orelse return false } }
-        else
-            return false;
+        const addr = self.contactAddressFromParsedEnr(&parsed) orelse return false;
 
         self.addNode(node_id, &pubkey, addr, enr_bytes);
         return true;
@@ -1137,6 +1132,27 @@ pub const Service = struct {
             self.protocol.handlePacket(result.data, result.from, socket) catch {};
         }
     }
+
+    fn contactAddressFromParsedEnr(self: *const Service, parsed: *const enr_mod.Enr) ?Address {
+        const addr_ip4 = if (parsed.ip) |ip|
+            if (parsed.udp orelse parsed.tcp) |port|
+                Address{ .ip4 = .{ .bytes = ip, .port = port } }
+            else
+                null
+        else
+            null;
+        const addr_ip6 = if (parsed.ip6) |ip6|
+            if (parsed.udp6) |port|
+                Address{ .ip6 = .{ .bytes = ip6, .port = port } }
+            else
+                null
+        else
+            null;
+
+        if (self.socket_ip4 != null and self.socket_ip6 == null) return addr_ip4 orelse addr_ip6;
+        if (self.socket_ip6 != null and self.socket_ip4 == null) return addr_ip6 orelse addr_ip4;
+        return addr_ip4 orelse addr_ip6;
+    }
 };
 
 fn currentTimestampNs(io: Io) i64 {
@@ -1599,6 +1615,52 @@ test "discv5 service: dual bind exposes both listener families" {
     try std.testing.expect(service.boundPort(.ip6) != null);
     try std.testing.expect(service.boundAddress(.ip4) != null);
     try std.testing.expect(service.boundAddress(.ip6) != null);
+}
+
+test "discv5 service: addEnr prefers available bind family" {
+    const alloc = std.testing.allocator;
+    const io = std.Options.debug_io;
+    const hex = @import("hex.zig");
+    const secp = @import("secp256k1.zig");
+
+    const sk_local = hex.hexToBytesComptime(32, "eef77acb6c6a6eebc5b363a475ac583ec7eccdb42b6481424c60f59aa326547f");
+    const pk_local = try secp.pubkeyFromSecret(&sk_local);
+    const node_id_local = enr_mod.nodeIdFromCompressedPubkey(&pk_local);
+
+    const sk_peer = hex.hexToBytesComptime(32, "66fb62bfbd66b9177a138c1e5cddbe4f7c30c343e94e68df8769459cb14571f7");
+    const loopback6 = [_]u8{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 };
+    var builder = enr_mod.Builder.init(alloc, sk_peer, 1);
+    builder.ip = .{ 127, 0, 0, 1 };
+    builder.udp = 30303;
+    builder.ip6 = loopback6;
+    builder.udp6 = 30304;
+    const peer_enr = try builder.encode();
+    defer alloc.free(peer_enr);
+
+    var service = try Service.init(io, alloc, .{
+        .bind_addresses = .{
+            .ip6 = .{ .ip6 = .{ .bytes = loopback6, .port = 0 } },
+        },
+        .protocol_config = .{
+            .local_secret_key = sk_local,
+            .local_node_id = node_id_local,
+        },
+    });
+    defer service.deinit();
+
+    try std.testing.expect(service.addEnr(peer_enr));
+
+    var parsed = try enr_mod.decode(alloc, peer_enr);
+    defer parsed.deinit();
+    const peer_id = parsed.nodeId() orelse return error.MissingNodeId;
+    const known = service.protocol.getKnownNode(&peer_id) orelse return error.UnknownNode;
+    switch (known.addr) {
+        .ip6 => |ip6| {
+            try std.testing.expectEqual(loopback6, ip6.bytes);
+            try std.testing.expectEqual(@as(u16, 30304), ip6.port);
+        },
+        .ip4 => return error.WrongAddressFamily,
+    }
 }
 
 test "discv5 service: addr votes update local ENR" {

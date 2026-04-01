@@ -485,12 +485,18 @@ fn buildAdvertisedAddresses(
 
     if (opts.enr_ip) |ip| {
         try appendAdvertisedAddress(allocator, &addresses, .ip4, ip, opts, peer_id, kind);
-    } else if (!std.mem.eql(u8, opts.p2p_host, "0.0.0.0")) {
-        try appendAdvertisedAddress(allocator, &addresses, .ip4, opts.p2p_host, opts, peer_id, kind);
+    } else if (opts.p2p_host) |host| {
+        if (!std.mem.eql(u8, host, "0.0.0.0")) {
+            try appendAdvertisedAddress(allocator, &addresses, .ip4, host, opts, peer_id, kind);
+        }
     }
 
     if (opts.enr_ip6) |ip6| {
         try appendAdvertisedAddress(allocator, &addresses, .ip6, ip6, opts, peer_id, kind);
+    } else if (opts.p2p_host6) |host6| {
+        if (!std.mem.eql(u8, host6, "::")) {
+            try appendAdvertisedAddress(allocator, &addresses, .ip6, host6, opts, peer_id, kind);
+        }
     }
 
     return addresses.toOwnedSlice(allocator);
@@ -521,11 +527,11 @@ fn appendAdvertisedAddress(
     const port = switch (kind) {
         .p2p => switch (family) {
             .ip4 => opts.enr_tcp orelse opts.p2p_port,
-            .ip6 => opts.enr_tcp6 orelse opts.p2p_port,
+            .ip6 => opts.enr_tcp6 orelse opts.p2p_port6 orelse opts.p2p_port,
         },
         .discovery => switch (family) {
             .ip4 => opts.enr_udp orelse opts.discovery_port orelse opts.p2p_port,
-            .ip6 => opts.enr_udp6 orelse opts.discovery_port orelse opts.p2p_port,
+            .ip6 => opts.enr_udp6 orelse opts.discovery_port6 orelse opts.discovery_port orelse opts.p2p_port6 orelse opts.p2p_port,
         },
     };
 

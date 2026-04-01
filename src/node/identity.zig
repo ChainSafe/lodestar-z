@@ -182,9 +182,9 @@ fn initBuilderForOptions(
 
     if (try advertisedIp6(opts)) |ip6| {
         builder.ip6 = ip6;
-        builder.udp6 = opts.enr_udp6 orelse opts.discovery_port orelse opts.p2p_port;
-        builder.tcp6 = opts.enr_tcp6 orelse opts.p2p_port;
-        builder.quic6 = opts.enr_tcp6 orelse opts.p2p_port;
+        builder.udp6 = opts.enr_udp6 orelse opts.discovery_port6 orelse opts.discovery_port orelse opts.p2p_port6 orelse opts.p2p_port;
+        builder.tcp6 = opts.enr_tcp6 orelse opts.p2p_port6 orelse opts.p2p_port;
+        builder.quic6 = opts.enr_tcp6 orelse opts.p2p_port6 orelse opts.p2p_port;
     }
 
     return builder;
@@ -192,43 +192,32 @@ fn initBuilderForOptions(
 
 fn advertisedIp4(opts: NodeOptions) !?[4]u8 {
     if (opts.enr_ip) |ip| return try parseIp4(ip);
-    if (std.mem.eql(u8, opts.p2p_host, "0.0.0.0")) return null;
-    return try parseIp4(opts.p2p_host);
+    const host = opts.p2p_host orelse return null;
+    if (std.mem.eql(u8, host, "0.0.0.0")) return null;
+    return try parseIp4(host);
 }
 
 fn advertisedIp6(opts: NodeOptions) !?[16]u8 {
     if (opts.enr_ip6) |ip| return try parseIp6(ip);
-    return null;
+    const host = opts.p2p_host6 orelse return null;
+    if (std.mem.eql(u8, host, "::")) return null;
+    return try parseIp6(host);
 }
 
 fn parseIp4(raw: []const u8) ![4]u8 {
-    var out: [4]u8 = undefined;
-    var it = std.mem.splitScalar(u8, raw, '.');
-    var i: usize = 0;
-    while (it.next()) |part| {
-        if (i >= out.len) return error.InvalidIpAddress;
-        out[i] = std.fmt.parseInt(u8, part, 10) catch return error.InvalidIpAddress;
-        i += 1;
-    }
-    if (i != out.len) return error.InvalidIpAddress;
-    return out;
+    const addr = std.Io.net.IpAddress.parseIp4(raw, 0) catch return error.InvalidIpAddress;
+    return switch (addr) {
+        .ip4 => |ip4| ip4.bytes,
+        .ip6 => return error.InvalidIpAddress,
+    };
 }
 
 fn parseIp6(raw: []const u8) ![16]u8 {
-    var result: [16]u8 = [_]u8{0} ** 16;
-    if (std.mem.eql(u8, raw, "::")) return result;
-
-    var it = std.mem.splitSequence(u8, raw, ":");
-    var i: usize = 0;
-    while (it.next()) |part| {
-        if (part.len == 0) continue;
-        if (i >= 8) return error.InvalidIpAddress;
-        const value = std.fmt.parseInt(u16, part, 16) catch return error.InvalidIpAddress;
-        result[i * 2] = @intCast(value >> 8);
-        result[i * 2 + 1] = @intCast(value & 0xff);
-        i += 1;
-    }
-    return result;
+    const addr = std.Io.net.IpAddress.parseIp6(raw, 0) catch return error.InvalidIpAddress;
+    return switch (addr) {
+        .ip4 => return error.InvalidIpAddress,
+        .ip6 => |ip6| ip6.bytes,
+    };
 }
 
 fn loadOrCreateSecretKey(io: std.Io, key_path: []const u8) ![32]u8 {

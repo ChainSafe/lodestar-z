@@ -28,16 +28,22 @@ pub const NodeOptions = struct {
     target_peers: u32 = 50,
 
     // ── P2P ──────────────────────────────────────────────────────
-    /// P2P listen address (IPv4), from --p2p-host.
-    p2p_host: []const u8 = "0.0.0.0",
+    /// P2P listen address (IPv4), from --p2p-host. Null disables IPv4.
+    p2p_host: ?[]const u8 = null,
+    /// P2P listen address (IPv6), from --p2p-host6. Null disables IPv6.
+    p2p_host6: ?[]const u8 = null,
     /// P2P listen port (TCP/UDP), from --p2p-port.
     p2p_port: u16 = 9000,
+    /// P2P listen port (TCP/UDP) for IPv6, from --p2p-port6.
+    p2p_port6: ?u16 = null,
 
     // ── Discovery ────────────────────────────────────────────────
     /// Enable discv5 peer discovery (default: true).
     enable_discv5: bool = true,
     /// UDP port for discv5 (default: same as p2p port, set via --discovery-port).
     discovery_port: ?u16 = null,
+    /// UDP port for discv5 IPv6 (default: same as p2p-port6 or p2p-port).
+    discovery_port6: ?u16 = null,
     /// Direct peers to always connect to (multiaddr strings from --direct-peers).
     direct_peers: []const []const u8 = &.{},
     /// Enable mDNS local discovery.

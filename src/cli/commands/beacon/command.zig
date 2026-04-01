@@ -94,6 +94,19 @@ fn readFile(io: Io, allocator: Allocator, path: []const u8) ![]u8 {
     return buf;
 }
 
+fn parseOptionalPort(raw: ?[]const u8) ?u16 {
+    const value = raw orelse return null;
+    return std.fmt.parseInt(u16, value, 10) catch null;
+}
+
+fn formatP2pListenMultiaddr(buf: []u8, host: []const u8, port: u16) ![]const u8 {
+    _ = Io.net.IpAddress.parseIp4(host, 0) catch {
+        _ = Io.net.IpAddress.parseIp6(host, 0) catch return error.InvalidListenAddress;
+        return std.fmt.bufPrint(buf, "/ip6/{s}/udp/{d}/quic-v1", .{ host, port });
+    };
+    return std.fmt.bufPrint(buf, "/ip4/{s}/udp/{d}/quic-v1", .{ host, port });
+}
+
 fn slotClockLoop(io: Io, node: *BeaconNode) !void {
     const clock = node.clock orelse return error.ClockNotInitialized;
 
@@ -160,8 +173,10 @@ pub fn run(io: Io, allocator: Allocator, opts: anytype) !void {
     const api_port = opts.@"rest.port" orelse opts.api_port;
     const api_address = opts.@"rest.address" orelse opts.api_address;
     const api_cors = opts.@"rest.cors" orelse opts.api_cors;
-    const p2p_host = opts.listenAddress orelse opts.p2p_host;
+    const p2p_host4 = opts.listenAddress orelse opts.p2p_host;
+    const p2p_host6 = opts.listenAddress6 orelse opts.p2p_host6;
     const p2p_port = opts.port orelse opts.p2p_port;
+    const p2p_port6 = opts.port6 orelse parseOptionalPort(opts.p2p_port6);
     const bootnodes_file = opts.bootnodesFile;
     const enr_ip = opts.@"enr.ip";
     const enr_tcp = opts.@"enr.tcp";
@@ -217,7 +232,11 @@ pub fn run(io: Io, allocator: Allocator, opts: anytype) !void {
     std.log.info("lodestar-z v{s} starting", .{common.VERSION});
     std.log.info("  network:    {s}", .{@tagName(network)});
     std.log.info("  api:        http://{s}:{d}", .{ api_address, api_port });
-    std.log.info("  p2p:        {s}:{d}", .{ p2p_host, p2p_port });
+    if (p2p_host4) |host| std.log.info("  p2p4:       {s}:{d}", .{ host, p2p_port });
+    if (p2p_host6) |host| std.log.info("  p2p6:       [{s}]:{d}", .{ host, p2p_port6 orelse p2p_port });
+    if (p2p_host4 == null and p2p_host6 == null) {
+        std.log.info("  p2p4:       0.0.0.0:{d}", .{p2p_port});
+    }
     if (jwt_secret_override) |jwt| {
         std.log.info("  jwt-secret: {s}", .{jwt});
     }
@@ -242,6 +261,12 @@ pub fn run(io: Io, allocator: Allocator, opts: anytype) !void {
     } else if (opts.discovery_port) |port_str| blk: {
         break :blk std.fmt.parseInt(u16, port_str, 10) catch null;
     } else null;
+    const discovery_port6 = opts.discoveryPort6;
+    const p2p_bind_host = p2p_host4 orelse p2p_host6 orelse "0.0.0.0";
+    const p2p_bind_port = if (p2p_host4 != null or p2p_host6 == null)
+        p2p_port
+    else
+        p2p_port6 orelse p2p_port;
 
     const fee_recipient: ?[20]u8 = if (suggest_fee_recipient) |hex_str| blk: {
         const stripped = if (hex_str.len >= 2 and hex_str[0] == '0' and (hex_str[1] == 'x' or hex_str[1] == 'X'))
@@ -277,10 +302,13 @@ pub fn run(io: Io, allocator: Allocator, opts: anytype) !void {
         .engine_mock = engine_mock,
         .target_peers = target_peers,
         .network = network,
-        .p2p_host = p2p_host,
+        .p2p_host = p2p_host4,
+        .p2p_host6 = p2p_host6,
         .p2p_port = p2p_port,
+        .p2p_port6 = p2p_port6,
         .enable_discv5 = opts.discv5,
         .discovery_port = discovery_port,
+        .discovery_port6 = discovery_port6,
         .direct_peers = direct_peers,
         .enable_mdns = opts.mdns,
         .subscribe_all_subnets = subscribe_all_subnets,
@@ -500,13 +528,15 @@ pub fn run(io: Io, allocator: Allocator, opts: anytype) !void {
         .api_port = api_port,
         .api_address = api_address,
         .api_cors_origin = api_cors,
-        .p2p_port = p2p_port,
-        .p2p_host = p2p_host,
+        .p2p_port = p2p_bind_port,
+        .p2p_host = p2p_bind_host,
     };
 
     std.log.info("Starting services concurrently...", .{});
     std.log.info("  REST API: http://{s}:{d}", .{ api_address, api_port });
-    std.log.info("  P2P:      /ip4/{s}/udp/{d}/quic-v1", .{ p2p_host, p2p_port });
+    var p2p_multiaddr_buf: [160]u8 = undefined;
+    const p2p_multiaddr = try formatP2pListenMultiaddr(&p2p_multiaddr_buf, p2p_bind_host, p2p_bind_port);
+    std.log.info("  P2P:      {s}", .{p2p_multiaddr});
 
     var group: Io.Group = .init;
     group.async(io, runApiServer, .{ io, &run_ctx });

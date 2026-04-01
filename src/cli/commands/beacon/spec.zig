@@ -162,12 +162,12 @@ pub const spec = cli.command(.{
             .description = "P2P TCP/UDP listen port",
             .group = "network",
         }, null),
-        .p2p_host = cli.option([]const u8, .{
+        .p2p_host = cli.option(?[]const u8, .{
             .long = "p2p-host",
-            .description = "P2P listen address (IPv4)",
+            .description = "P2P listen address (IPv4); omit to disable IPv4 if IPv6 is configured",
             .env = "LODESTAR_Z_P2P_HOST",
             .group = "network",
-        }, "0.0.0.0"),
+        }, null),
         .listenAddress = cli.option(?[]const u8, .{
             .long = "listenAddress",
             .description = "P2P listen address (IPv4)",
@@ -175,7 +175,7 @@ pub const spec = cli.command(.{
         }, null),
         .p2p_host6 = cli.option(?[]const u8, .{
             .long = "p2p-host6",
-            .description = "P2P listen address (IPv6)",
+            .description = "P2P listen address (IPv6); omit to disable IPv6",
             .env = "LODESTAR_Z_P2P_HOST6",
             .group = "network",
         }, null),

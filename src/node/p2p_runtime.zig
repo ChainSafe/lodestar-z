@@ -30,9 +30,48 @@ const reqresp_callbacks_mod = @import("reqresp_callbacks.zig");
 const gossip_node_callbacks_mod = @import("gossip_node_callbacks.zig");
 const SyncCallbackCtx = @import("sync_bridge.zig").SyncCallbackCtx;
 
+fn parseIp4(raw: []const u8) ?[4]u8 {
+    const addr = std.Io.net.IpAddress.parseIp4(raw, 0) catch return null;
+    return switch (addr) {
+        .ip4 => |ip4| ip4.bytes,
+        .ip6 => null,
+    };
+}
+
+fn parseIp6(raw: []const u8) ?[16]u8 {
+    const addr = std.Io.net.IpAddress.parseIp6(raw, 0) catch return null;
+    return switch (addr) {
+        .ip4 => null,
+        .ip6 => |ip6| ip6.bytes,
+    };
+}
+
+fn formatListenMultiaddr(buf: []u8, host: []const u8, port: u16) ![]const u8 {
+    _ = std.Io.net.IpAddress.parseIp4(host, 0) catch {
+        _ = std.Io.net.IpAddress.parseIp6(host, 0) catch return error.InvalidListenAddress;
+        return std.fmt.bufPrint(buf, "/ip6/{s}/udp/{d}/quic-v1", .{ host, port });
+    };
+    return std.fmt.bufPrint(buf, "/ip4/{s}/udp/{d}/quic-v1", .{ host, port });
+}
+
+fn formatDiscv5DialMultiaddr(buf: []u8, addr: discv5.Address) ![]const u8 {
+    return switch (addr) {
+        .ip4 => |ip4| std.fmt.bufPrint(buf, "/ip4/{d}.{d}.{d}.{d}/udp/{d}/quic-v1", .{
+            ip4.bytes[0], ip4.bytes[1], ip4.bytes[2], ip4.bytes[3], ip4.port,
+        }),
+        .ip6 => |ip6| std.fmt.bufPrint(buf, "/ip6/{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}/udp/{d}/quic-v1", .{
+            ip6.bytes[0],  ip6.bytes[1],  ip6.bytes[2],  ip6.bytes[3],
+            ip6.bytes[4],  ip6.bytes[5],  ip6.bytes[6],  ip6.bytes[7],
+            ip6.bytes[8],  ip6.bytes[9],  ip6.bytes[10], ip6.bytes[11],
+            ip6.bytes[12], ip6.bytes[13], ip6.bytes[14], ip6.bytes[15],
+            ip6.port,
+        }),
+    };
+}
+
 pub fn start(self: *BeaconNode, io: std.Io, listen_addr: []const u8, port: u16) !void {
-    var ma_buf: [64]u8 = undefined;
-    const ma_str = try std.fmt.bufPrint(&ma_buf, "/ip4/{s}/udp/{d}/quic-v1", .{ listen_addr, port });
+    var ma_buf: [160]u8 = undefined;
+    const ma_str = try formatListenMultiaddr(&ma_buf, listen_addr, port);
     const listen_multiaddr = try Multiaddr.fromString(self.allocator, ma_str);
     defer listen_multiaddr.deinit();
 
@@ -297,6 +336,11 @@ fn runLoop(self: *BeaconNode, io: std.Io, svc: *networking.P2pService) void {
                 if (self.metrics) |metrics| metrics.peers_connected.set(@intCast(peer_count));
             }
             ds.discoverPeers();
+            if (ds.takeLocalEnrChanged()) {
+                refreshApiNodeIdentityFromDiscovery(self, ds) catch |err| {
+                    std.log.warn("Failed to refresh API node identity from discovery ENR: {}", .{err});
+                };
+            }
         }
 
         if (self.p2p_service) |p2p| {
@@ -405,13 +449,10 @@ fn dialBootnodeEnr(self: *BeaconNode, io: std.Io, svc: *networking.P2pService, e
     var enr = try discv5.enr.decode(self.allocator, raw);
     defer enr.deinit();
 
-    const ip = enr.ip orelse return error.NoIpInEnr;
-    const quic_port = enr.quic orelse enr.udp orelse return error.NoPortInEnr;
+    const dial_addr = preferredBootnodeDialAddress(self, &enr) orelse return error.NoDialableAddressInEnr;
 
-    var ma_buf: [64]u8 = undefined;
-    const ma_str = try std.fmt.bufPrint(&ma_buf, "/ip4/{d}.{d}.{d}.{d}/udp/{d}/quic-v1", .{
-        ip[0], ip[1], ip[2], ip[3], quic_port,
-    });
+    var ma_buf: [160]u8 = undefined;
+    const ma_str = try formatDiscv5DialMultiaddr(&ma_buf, dial_addr);
 
     std.log.info("Dialing bootnode at {s}", .{ma_str});
 
@@ -457,23 +498,6 @@ fn dialBootnodeEnr(self: *BeaconNode, io: std.Io, svc: *networking.P2pService, e
     std.log.info("Opened outbound gossipsub stream to peer", .{});
 }
 
-fn parseIp4(s: []const u8) ?[4]u8 {
-    var result: [4]u8 = undefined;
-    var octet_idx: usize = 0;
-    var segment_start: usize = 0;
-    for (s, 0..) |c, i| {
-        if (c == '.') {
-            if (octet_idx >= 3) return null;
-            result[octet_idx] = std.fmt.parseInt(u8, s[segment_start..i], 10) catch return null;
-            octet_idx += 1;
-            segment_start = i + 1;
-        }
-    }
-    if (octet_idx != 3) return null;
-    result[3] = std.fmt.parseInt(u8, s[segment_start..], 10) catch return null;
-    return result;
-}
-
 fn initDiscoveryService(self: *BeaconNode) !void {
     const fork_digest = self.config.forkDigestAtSlot(
         self.head_tracker.head_slot,
@@ -483,13 +507,36 @@ fn initDiscoveryService(self: *BeaconNode) !void {
     const ds = try self.allocator.create(DiscoveryService);
     errdefer self.allocator.destroy(ds);
     const disc_port = self.node_options.discovery_port orelse self.node_options.p2p_port;
-    const local_ip = parseIp4(self.node_options.p2p_host) orelse [4]u8{ 0, 0, 0, 0 };
+    const disc_port6 = self.node_options.discovery_port6 orelse self.node_options.p2p_port6;
+    const local_ip = if (self.node_options.p2p_host) |host|
+        parseIp4(host) orelse return error.InvalidListenAddress
+    else
+        null;
+    const local_ip6 = if (self.node_options.p2p_host6) |host|
+        parseIp6(host) orelse return error.InvalidListenAddress
+    else
+        null;
+    const enr_ip = if (self.node_options.enr_ip) |raw|
+        parseIp4(raw) orelse return error.InvalidEnrAddress
+    else
+        null;
+    const enr_ip6 = if (self.node_options.enr_ip6) |raw|
+        parseIp6(raw) orelse return error.InvalidEnrAddress
+    else
+        null;
 
     ds.* = try DiscoveryService.init(self.io, self.allocator, .{
         .listen_port = disc_port,
+        .listen_port6 = disc_port6,
         .secret_key = self.node_identity.secret_key,
         .local_ip = local_ip,
+        .local_ip6 = local_ip6,
+        .enr_ip = enr_ip,
+        .enr_ip6 = enr_ip6,
+        .enr_udp = self.node_options.enr_udp,
+        .enr_udp6 = self.node_options.enr_udp6,
         .p2p_port = self.node_options.p2p_port,
+        .p2p_port6 = self.node_options.p2p_port6,
         .fork_digest = fork_digest,
         .target_peers = self.node_options.target_peers,
         .bootnodes = self.discovery_bootnodes,
@@ -505,6 +552,7 @@ fn initDiscoveryService(self: *BeaconNode) !void {
 fn refreshApiNodeIdentityFromDiscovery(self: *BeaconNode, ds: *DiscoveryService) !void {
     self.api_node_identity.metadata.seq_number = ds.service.localEnrSeq();
 
+    const raw_enr = ds.service.localEnr() orelse return;
     const enr_buf = ds.buildLocalEnrString() catch |err| switch (err) {
         error.NoLocalEnr => return,
         else => return err,
@@ -515,6 +563,72 @@ fn refreshApiNodeIdentityFromDiscovery(self: *BeaconNode, ds: *DiscoveryService)
         self.allocator.free(self.api_node_identity.enr);
     }
     self.api_node_identity.enr = enr_buf;
+
+    try refreshApiDiscoveryAddressesFromEnr(self, raw_enr);
+}
+
+fn refreshApiDiscoveryAddressesFromEnr(self: *BeaconNode, raw_enr: []const u8) !void {
+    var parsed = try discv5.enr.decode(self.allocator, raw_enr);
+    defer parsed.deinit();
+
+    var addresses: std.ArrayListUnmanaged([]const u8) = .empty;
+    errdefer {
+        for (addresses.items) |address| self.allocator.free(address);
+        addresses.deinit(self.allocator);
+    }
+
+    if (parsed.ip) |ip4| {
+        if (parsed.udp) |port| {
+            try addresses.append(self.allocator, try std.fmt.allocPrint(
+                self.allocator,
+                "/ip4/{d}.{d}.{d}.{d}/udp/{d}/p2p/{s}",
+                .{ ip4[0], ip4[1], ip4[2], ip4[3], port, self.api_node_identity.peer_id },
+            ));
+        }
+    }
+    if (parsed.ip6) |ip6| {
+        if (parsed.udp6) |port| {
+            try addresses.append(self.allocator, try std.fmt.allocPrint(
+                self.allocator,
+                "/ip6/{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}/udp/{d}/p2p/{s}",
+                .{
+                    ip6[0],  ip6[1],                         ip6[2],  ip6[3],
+                    ip6[4],  ip6[5],                         ip6[6],  ip6[7],
+                    ip6[8],  ip6[9],                         ip6[10], ip6[11],
+                    ip6[12], ip6[13],                        ip6[14], ip6[15],
+                    port,    self.api_node_identity.peer_id,
+                },
+            ));
+        }
+    }
+
+    for (self.api_node_identity.discovery_addresses) |address| self.allocator.free(address);
+    if (self.api_node_identity.discovery_addresses.len > 0) {
+        self.allocator.free(self.api_node_identity.discovery_addresses);
+    }
+    self.api_node_identity.discovery_addresses = try addresses.toOwnedSlice(self.allocator);
+}
+
+fn preferredBootnodeDialAddress(self: *BeaconNode, enr: *const discv5.enr.Enr) ?discv5.Address {
+    const addr_ip4 = if (enr.ip) |ip4|
+        if (enr.quic orelse enr.udp orelse enr.tcp) |port|
+            discv5.Address{ .ip4 = .{ .bytes = ip4, .port = port } }
+        else
+            null
+    else
+        null;
+    const addr_ip6 = if (enr.ip6) |ip6|
+        if (enr.quic6 orelse enr.udp6 orelse enr.tcp6) |port|
+            discv5.Address{ .ip6 = .{ .bytes = ip6, .port = port } }
+        else
+            null
+    else
+        null;
+
+    const wants_ip6 = self.node_options.p2p_host == null and self.node_options.p2p_host6 != null;
+    if (wants_ip6) return addr_ip6 orelse addr_ip4;
+    if (self.node_options.p2p_host != null and self.node_options.p2p_host6 == null) return addr_ip4 orelse addr_ip6;
+    return addr_ip4 orelse addr_ip6;
 }
 
 fn initPeerManager(self: *BeaconNode) !void {
