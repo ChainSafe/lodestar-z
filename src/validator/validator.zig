@@ -62,11 +62,11 @@ const SigningContext = signing_mod.SigningContext;
 
 const bls = @import("bls");
 
-const key_discovery_mod = @import("key_discovery.zig");
-const KeyDiscovery = key_discovery_mod.KeyDiscovery;
-
 const remote_signer_mod = @import("remote_signer.zig");
 const RemoteSigner = remote_signer_mod.RemoteSigner;
+const startup_signers_mod = @import("startup_signers.zig");
+const StartupSigners = startup_signers_mod.StartupSigners;
+const KeystoreLock = @import("keystore_lock.zig").KeystoreLock;
 
 const syncing_tracker_mod = @import("syncing_tracker.zig");
 const SyncingTracker = syncing_tracker_mod.SyncingTracker;
@@ -88,6 +88,8 @@ const log = std.log.scoped(.validator_client);
 // ---------------------------------------------------------------------------
 
 pub const ValidatorClient = struct {
+    pub const ValidatorCounts = store_mod.ValidatorStore.ValidatorCounts;
+
     allocator: Allocator,
     config: ValidatorConfig,
 
@@ -132,6 +134,8 @@ pub const ValidatorClient = struct {
 
     /// Heap-allocated remote signer (web3signer). Null if not configured.
     remote_signer: ?*RemoteSigner = null,
+    /// Local keystore ownership locks held for the process lifetime.
+    local_keystore_locks: []KeystoreLock = &.{},
 
     // ---------------------------------------------------------------------------
     // Lifecycle
@@ -144,7 +148,16 @@ pub const ValidatorClient = struct {
     /// or supply from config.
     ///
     /// TS: Validator.init(opts, genesis)
-    pub fn init(io: Io, allocator: Allocator, config: ValidatorConfig, signing_ctx: SigningContext) !*ValidatorClient {
+    pub fn init(
+        io: Io,
+        allocator: Allocator,
+        config: ValidatorConfig,
+        signing_ctx: SigningContext,
+        startup_signers: StartupSigners,
+    ) !*ValidatorClient {
+        var signers = startup_signers;
+        defer signers.deinit(io);
+
         const self = try allocator.create(ValidatorClient);
         errdefer allocator.destroy(self);
 
@@ -161,6 +174,7 @@ pub const ValidatorClient = struct {
         self.sse_thread_handle = null;
         self.session_start_ns = time.realtimeNs();
         self.remote_signer = null;
+        self.local_keystore_locks = &.{};
 
         self.api = if (config.beacon_node_fallback_urls.len > 0)
             .{
@@ -255,23 +269,14 @@ pub const ValidatorClient = struct {
         self.syncing_tracker = SyncingTracker.init(allocator, &self.api);
 
         var loaded_count: usize = 0;
-        if (config.keystores_dir) |ks_dir| {
-            if (config.secrets_dir) |sec_dir| {
-                const loaded_keys = try KeyDiscovery.loadAllKeys(io, allocator, ks_dir, sec_dir);
-                defer {
-                    for (loaded_keys) |k| k.deinit(allocator);
-                    allocator.free(loaded_keys);
-                }
-                for (loaded_keys) |k| {
-                    try self.validator_store.addKey(k.secret_key);
-                    if (self.doppelganger) |*doppelganger| {
-                        try doppelganger.registerValidator(k.pubkey);
-                    }
-                    loaded_count += 1;
-                }
+        for (signers.local_keys) |k| {
+            try self.validator_store.addKey(k.secret_key);
+            if (self.doppelganger) |*doppelganger| {
+                try doppelganger.registerValidator(k.pubkey);
             }
+            loaded_count += 1;
         }
-        log.info("validator keys loaded from disk: {d}", .{loaded_count});
+        log.info("validator local keys loaded at startup: {d}", .{loaded_count});
 
         if (config.interchange_import_path) |ipath| {
             const interchange_data = fs.readFileAlloc(io, allocator, ipath, 16 * 1024 * 1024) catch |err| blk: {
@@ -316,6 +321,24 @@ pub const ValidatorClient = struct {
             self.liveness_tracker.register(v.pubkey);
         }
 
+        if (config.web3signer_url) |url| {
+            const rs = try self.allocator.create(RemoteSigner);
+            errdefer self.allocator.destroy(rs);
+
+            rs.* = RemoteSigner.init(self.allocator, url);
+            self.remote_signer = rs;
+            self.validator_store.remote_signer = rs;
+            for (signers.remote_pubkeys) |pk| {
+                try self.validator_store.addRemotePubkey(pk);
+                if (self.doppelganger) |*doppelganger| {
+                    try doppelganger.registerValidator(pk);
+                }
+            }
+        }
+
+        self.local_keystore_locks = signers.local_keystore_locks;
+        signers.local_keystore_locks = &.{};
+
         return self;
     }
 
@@ -327,6 +350,8 @@ pub const ValidatorClient = struct {
         if (self.doppelganger) |*d| d.deinit();
         self.index_tracker.deinit();
         self.liveness_tracker.deinit();
+        for (self.local_keystore_locks) |*lock| lock.deinit(self.io);
+        if (self.local_keystore_locks.len > 0) self.allocator.free(self.local_keystore_locks);
         self.validator_store.deinit();
         self.api.deinit();
         // Free the heap-allocated RemoteSigner if web3signer was configured.
@@ -337,6 +362,10 @@ pub const ValidatorClient = struct {
         const allocator = self.allocator;
         self.deinit();
         allocator.destroy(self);
+    }
+
+    pub fn validatorCounts(self: *ValidatorClient) ValidatorCounts {
+        return self.validator_store.counts();
     }
 
     /// Request graceful shutdown of the validator client.
@@ -475,7 +504,7 @@ pub const ValidatorClient = struct {
         for (remote_pubkeys) |pk| {
             if (sliceContainsPubkey(existing_remote_pubkeys, pk)) continue;
 
-            self.validator_store.addRemotePubkey(io, pk) catch |err| {
+            self.validator_store.addRemotePubkey(pk) catch |err| {
                 log.warn("addRemotePubkey failed pubkey=0x{s}: {s}", .{
                     std.fmt.bytesToHex(pk, .lower), @errorName(err),
                 });
@@ -578,21 +607,6 @@ pub const ValidatorClient = struct {
 
         // Syncing status tracker — poll every slot, gate signing when BN is behind.
         self.clock.onSlot(.{ .ctx = self, .fn_ptr = onSlotSyncingTracker });
-
-        // Fetch remote signer keys before the initial index resolution so remote
-        // validators participate in the very first duty refresh.
-        if (self.config.web3signer_url) |url| {
-            log.info("fetching remote keys from web3signer url={s}", .{url});
-
-            const rs = try self.allocator.create(RemoteSigner);
-            rs.* = RemoteSigner.init(self.allocator, url);
-            self.remote_signer = rs;
-            self.validator_store.remote_signer = rs;
-            if (self.builder_registration) |*br| {
-                br.remote_signer = rs;
-            }
-            try self.syncRemoteSignerKeys(self.io);
-        }
 
         // Resolve validator indices at startup.
         // This is required before duties can be fetched (duties use validator index, not pubkey).

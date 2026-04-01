@@ -39,23 +39,30 @@ const log = std.log.scoped(.validator_store);
 // ValidatorRecord
 // ---------------------------------------------------------------------------
 
+pub const ValidatorSigner = union(enum) {
+    local: SecretKey,
+    remote: void,
+};
+
 /// Per-validator in-memory state.
 pub const ValidatorRecord = struct {
     /// BLS public key (48 bytes).
     pubkey: [48]u8,
-    /// BLS secret key for local signing.
-    /// For remote-only validators (is_remote = true), this field is zeroed and
-    /// must NOT be used for signing. Signing is delegated to RemoteSigner.
-    secret_key: SecretKey,
+    /// Signing source for this validator.
+    signer: ValidatorSigner,
     /// Validator index on the beacon chain (null until resolved).
     index: ?u64,
     /// Current activation status.
     status: ValidatorStatus,
     /// Slashing protection data.
     slashing: SlashingProtectionRecord,
-    /// True if this validator's signing is delegated to a remote signer (Web3Signer).
-    /// Secret key is zeroed; calls to signXxx will fail with error.RemoteSignerRequired.
-    is_remote: bool = false,
+
+    pub fn isRemote(self: *const ValidatorRecord) bool {
+        return switch (self.signer) {
+            .remote => true,
+            .local => false,
+        };
+    }
 };
 
 // ---------------------------------------------------------------------------
@@ -63,6 +70,12 @@ pub const ValidatorRecord = struct {
 // ---------------------------------------------------------------------------
 
 pub const ValidatorStore = struct {
+    pub const ValidatorCounts = struct {
+        total: usize,
+        local: usize,
+        remote: usize,
+    };
+
     allocator: Allocator,
     validators: std.array_list.Managed(ValidatorRecord),
     /// Cached pubkey slice kept in sync with validators for non-allocating pubkeys() access.
@@ -92,11 +105,27 @@ pub const ValidatorStore = struct {
     pub fn deinit(self: *ValidatorStore) void {
         // Zero all BLS secret keys before freeing the list.
         for (self.validators.items) |*v| {
-            std.crypto.secureZero(u8, &v.secret_key.value.b);
+            self.clearSigner(v);
         }
         self.validators.deinit();
         self.pubkeys_cache.deinit();
         self.slashing_db.close();
+    }
+
+    pub fn counts(self: *ValidatorStore) ValidatorCounts {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        var remote: usize = 0;
+        for (self.validators.items) |v| {
+            if (v.isRemote()) remote += 1;
+        }
+
+        return .{
+            .total = self.validators.items.len,
+            .local = self.validators.items.len - remote,
+            .remote = remote,
+        };
     }
 
     // -----------------------------------------------------------------------
@@ -125,7 +154,7 @@ pub const ValidatorStore = struct {
 
         try self.validators.append(.{
             .pubkey = pubkey_bytes,
-            .secret_key = secret_key,
+            .signer = .{ .local = secret_key },
             .index = null,
             .status = .unknown,
             .slashing = .{
@@ -154,7 +183,7 @@ pub const ValidatorStore = struct {
     ///
     /// TS: ValidatorStore init with `ExternalSignerSigner` entries — pubkey tracked but
     ///     signing goes through the external signer HTTP client.
-    pub fn addRemotePubkey(self: *ValidatorStore, io: Io, pubkey: [48]u8) !void {
+    pub fn addRemotePubkey(self: *ValidatorStore, pubkey: [48]u8) !void {
         self.mutex.lock();
         defer self.mutex.unlock();
 
@@ -163,21 +192,11 @@ pub const ValidatorStore = struct {
             if (std.mem.eql(u8, &v.pubkey, &pubkey)) return; // already present
         }
 
-        // Build a random SecretKey placeholder — never used for signing but must be
-        // a valid non-zero BLS scalar. Using random bytes avoids the scalar=1 pitfall
-        // where all remote validators would share the same (trivially recoverable) key.
-        var random_sk_bytes: [32]u8 = undefined;
-        io.random(&random_sk_bytes);
-        // Ensure non-zero (astronomically unlikely, but be safe).
-        random_sk_bytes[31] |= 1;
-        const placeholder_sk = SecretKey.deserialize(&random_sk_bytes) catch return error.InvalidPubkey;
-
         try self.validators.append(.{
             .pubkey = pubkey,
-            .secret_key = placeholder_sk,
+            .signer = .remote,
             .index = null,
             .status = .unknown,
-            .is_remote = true,
             .slashing = .{
                 .pubkey = pubkey,
                 .last_signed_block_slot = null,
@@ -194,7 +213,7 @@ pub const ValidatorStore = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
         for (self.validators.items) |v| {
-            if (std.mem.eql(u8, &v.pubkey, &pubkey)) return v.is_remote;
+            if (std.mem.eql(u8, &v.pubkey, &pubkey)) return v.isRemote();
         }
         return false;
     }
@@ -212,7 +231,7 @@ pub const ValidatorStore = struct {
         for (self.validators.items, 0..) |v, i| {
             if (std.mem.eql(u8, &v.pubkey, &pubkey)) {
                 // Zero secret key memory before removing the entry.
-                std.crypto.secureZero(u8, &self.validators.items[i].secret_key.value.b);
+                self.clearSigner(&self.validators.items[i]);
                 _ = self.validators.swapRemove(i);
                 // Keep pubkeys_cache in sync.
                 _ = self.pubkeys_cache.swapRemove(i);
@@ -248,7 +267,7 @@ pub const ValidatorStore = struct {
             out.* = .{
                 .pubkey = v.pubkey,
                 .derivation_path = "",
-                .readonly = v.is_remote,
+                .readonly = v.isRemote(),
             };
         }
         return result;
@@ -288,13 +307,13 @@ pub const ValidatorStore = struct {
 
         var count: usize = 0;
         for (self.validators.items) |v| {
-            if (v.is_remote) count += 1;
+            if (v.isRemote()) count += 1;
         }
 
         const result = try allocator.alloc([48]u8, count);
         var out_idx: usize = 0;
         for (self.validators.items) |v| {
-            if (v.is_remote) {
+            if (v.isRemote()) {
                 result[out_idx] = v.pubkey;
                 out_idx += 1;
             }
@@ -370,16 +389,7 @@ pub const ValidatorStore = struct {
         // Also update the in-memory SlashingProtectionRecord for quick reference.
         validator.slashing.last_signed_block_slot = slot;
 
-        if (validator.is_remote) {
-            const rs = self.remote_signer orelse return error.RemoteSignerRequired;
-            return rs.sign(io, pubkey, signing_root, .BLOCK_V2) catch |err| {
-                log.warn("remote signer signBlock error={s}", .{@errorName(err)});
-                return err;
-            };
-        }
-
-        // Sign the root locally.
-        return validator.secret_key.sign(&signing_root, bls.DST, null);
+        return self.signWithValidator(io, validator, pubkey, signing_root, .BLOCK_V2);
     }
 
     /// Produce a RANDAO reveal for the given epoch.
@@ -394,14 +404,7 @@ pub const ValidatorStore = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
         const validator = self.findValidator(pubkey) orelse return error.ValidatorNotFound;
-        if (validator.is_remote) {
-            const rs = self.remote_signer orelse return error.RemoteSignerRequired;
-            return rs.sign(io, pubkey, signing_root, .RANDAO_REVEAL) catch |err| {
-                log.warn("remote signer signRandao error={s}", .{@errorName(err)});
-                return err;
-            };
-        }
-        return validator.secret_key.sign(&signing_root, bls.DST, null);
+        return self.signWithValidator(io, validator, pubkey, signing_root, .RANDAO_REVEAL);
     }
 
     /// Sign attestation data.
@@ -443,15 +446,7 @@ pub const ValidatorStore = struct {
         validator.slashing.last_signed_attestation_source_epoch = source_epoch;
         validator.slashing.last_signed_attestation_target_epoch = target_epoch;
 
-        if (validator.is_remote) {
-            const rs = self.remote_signer orelse return error.RemoteSignerRequired;
-            return rs.sign(io, pubkey, signing_root, .ATTESTATION) catch |err| {
-                log.warn("remote signer signAttestation error={s}", .{@errorName(err)});
-                return err;
-            };
-        }
-
-        return validator.secret_key.sign(&signing_root, bls.DST, null);
+        return self.signWithValidator(io, validator, pubkey, signing_root, .ATTESTATION);
     }
 
     /// Sign a sync committee message.
@@ -466,14 +461,7 @@ pub const ValidatorStore = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
         const validator = self.findValidator(pubkey) orelse return error.ValidatorNotFound;
-        if (validator.is_remote) {
-            const rs = self.remote_signer orelse return error.RemoteSignerRequired;
-            return rs.sign(io, pubkey, signing_root, .SYNC_COMMITTEE_MESSAGE) catch |err| {
-                log.warn("remote signer signSyncCommitteeMessage error={s}", .{@errorName(err)});
-                return err;
-            };
-        }
-        return validator.secret_key.sign(&signing_root, bls.DST, null);
+        return self.signWithValidator(io, validator, pubkey, signing_root, .SYNC_COMMITTEE_MESSAGE);
     }
 
     /// Sign a selection proof for aggregation eligibility.
@@ -493,14 +481,7 @@ pub const ValidatorStore = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
         const validator = self.findValidator(pubkey) orelse return error.ValidatorNotFound;
-        if (validator.is_remote) {
-            const rs = self.remote_signer orelse return error.RemoteSignerRequired;
-            return rs.sign(io, pubkey, signing_root, signing_type) catch |err| {
-                log.warn("remote signer signSelectionProof error={s}", .{@errorName(err)});
-                return err;
-            };
-        }
-        return validator.secret_key.sign(&signing_root, bls.DST, null);
+        return self.signWithValidator(io, validator, pubkey, signing_root, signing_type);
     }
 
     /// Sign an aggregate and proof.
@@ -515,14 +496,7 @@ pub const ValidatorStore = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
         const validator = self.findValidator(pubkey) orelse return error.ValidatorNotFound;
-        if (validator.is_remote) {
-            const rs = self.remote_signer orelse return error.RemoteSignerRequired;
-            return rs.sign(io, pubkey, signing_root, .AGGREGATE_AND_PROOF) catch |err| {
-                log.warn("remote signer signAggregateAndProof error={s}", .{@errorName(err)});
-                return err;
-            };
-        }
-        return validator.secret_key.sign(&signing_root, bls.DST, null);
+        return self.signWithValidator(io, validator, pubkey, signing_root, .AGGREGATE_AND_PROOF);
     }
 
     /// Sign a sync committee contribution and proof.
@@ -537,14 +511,7 @@ pub const ValidatorStore = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
         const validator = self.findValidator(pubkey) orelse return error.ValidatorNotFound;
-        if (validator.is_remote) {
-            const rs = self.remote_signer orelse return error.RemoteSignerRequired;
-            return rs.sign(io, pubkey, signing_root, .SYNC_COMMITTEE_CONTRIBUTION_AND_PROOF) catch |err| {
-                log.warn("remote signer signContributionAndProof error={s}", .{@errorName(err)});
-                return err;
-            };
-        }
-        return validator.secret_key.sign(&signing_root, bls.DST, null);
+        return self.signWithValidator(io, validator, pubkey, signing_root, .SYNC_COMMITTEE_CONTRIBUTION_AND_PROOF);
     }
 
     /// Get the on-chain validator index for a given pubkey, or null if not yet resolved.
@@ -572,14 +539,19 @@ pub const ValidatorStore = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
         const validator = self.findValidator(pubkey) orelse return error.ValidatorNotFound;
-        if (validator.is_remote) {
-            const rs = self.remote_signer orelse return error.RemoteSignerRequired;
-            return rs.sign(io, pubkey, signing_root, .VOLUNTARY_EXIT) catch |err| {
-                log.warn("remote signer signVoluntaryExit error={s}", .{@errorName(err)});
-                return err;
-            };
-        }
-        return validator.secret_key.sign(&signing_root, bls.DST, null);
+        return self.signWithValidator(io, validator, pubkey, signing_root, .VOLUNTARY_EXIT);
+    }
+
+    pub fn signBuilderRegistration(
+        self: *ValidatorStore,
+        io: Io,
+        pubkey: [48]u8,
+        signing_root: [32]u8,
+    ) !Signature {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        const validator = self.findValidator(pubkey) orelse return error.ValidatorNotFound;
+        return self.signWithValidator(io, validator, pubkey, signing_root, .VALIDATOR_REGISTRATION);
     }
 
     // -----------------------------------------------------------------------
@@ -591,6 +563,34 @@ pub const ValidatorStore = struct {
             if (std.mem.eql(u8, &v.pubkey, &pubkey)) return v;
         }
         return null;
+    }
+
+    fn clearSigner(self: *ValidatorStore, validator: *ValidatorRecord) void {
+        _ = self;
+        switch (validator.signer) {
+            .local => |*secret_key| std.crypto.secureZero(u8, &secret_key.value.b),
+            .remote => {},
+        }
+    }
+
+    fn signWithValidator(
+        self: *ValidatorStore,
+        io: Io,
+        validator: *const ValidatorRecord,
+        pubkey: [48]u8,
+        signing_root: [32]u8,
+        signing_type: SigningType,
+    ) !Signature {
+        return switch (validator.signer) {
+            .local => |secret_key| secret_key.sign(&signing_root, bls.DST, null),
+            .remote => blk: {
+                const rs = self.remote_signer orelse return error.RemoteSignerRequired;
+                break :blk rs.sign(io, pubkey, signing_root, signing_type) catch |err| {
+                    log.warn("remote signer {s} error={s}", .{ signing_type.asStr(), @errorName(err) });
+                    return err;
+                };
+            },
+        };
     }
 };
 

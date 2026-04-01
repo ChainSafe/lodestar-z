@@ -503,15 +503,13 @@ fn initDiscoveryService(self: *BeaconNode) !void {
 }
 
 fn refreshApiNodeIdentityFromDiscovery(self: *BeaconNode, ds: *DiscoveryService) !void {
-    self.api_node_identity.metadata.seq_number = ds.enr_seq;
+    self.api_node_identity.metadata.seq_number = ds.service.localEnrSeq();
 
-    const raw_enr = ds.local_enr orelse return;
-    const encoded_len = std.base64.url_safe_no_pad.Encoder.calcSize(raw_enr.len);
-    const enr_buf = try self.allocator.alloc(u8, 4 + encoded_len);
+    const enr_buf = ds.buildLocalEnrString() catch |err| switch (err) {
+        error.NoLocalEnr => return,
+        else => return err,
+    };
     errdefer self.allocator.free(enr_buf);
-
-    @memcpy(enr_buf[0..4], "enr:");
-    _ = std.base64.url_safe_no_pad.Encoder.encode(enr_buf[4..], raw_enr);
 
     if (self.api_node_identity.enr.len > 0) {
         self.allocator.free(self.api_node_identity.enr);

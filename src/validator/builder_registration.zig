@@ -19,8 +19,6 @@ const api_client = @import("api_client.zig");
 const BeaconApiClient = api_client.BeaconApiClient;
 const ValidatorStore = @import("validator_store.zig").ValidatorStore;
 const signing_mod = @import("signing.zig");
-const remote_signer_mod = @import("remote_signer.zig");
-const RemoteSigner = remote_signer_mod.RemoteSigner;
 
 const log = std.log.scoped(.builder_registration);
 
@@ -45,8 +43,6 @@ pub const BuilderRegistrationService = struct {
     fee_recipient: [20]u8,
     /// Default gas limit for all validators.
     gas_limit: u64,
-    /// Optional remote signer for builder registrations of remote validators.
-    remote_signer: ?*RemoteSigner = null,
 
     pub fn init(
         allocator: Allocator,
@@ -87,23 +83,10 @@ pub const BuilderRegistrationService = struct {
     fn registerValidators(self: *BuilderRegistrationService, io: Io, epoch: u64) !void {
         _ = epoch;
 
-        // Snapshot validators under mutex to prevent data races with concurrent
-        // Keymanager API add/remove operations (ArrayList reallocation → dangling ptr).
-        self.validator_store.mutex.lock();
-        defer self.validator_store.mutex.unlock();
-        const validators = try self.allocator.dupe(
-            @import("validator_store.zig").ValidatorRecord,
-            self.validator_store.validators.items,
-        );
-        defer {
-            // Zero secret keys before freeing — defence in depth against heap scanning.
-            for (validators) |*v| {
-                std.crypto.secureZero(u8, std.mem.asBytes(&v.secret_key));
-            }
-            self.allocator.free(validators);
-        }
+        const pubkeys = try self.validator_store.allPubkeys(self.allocator);
+        defer self.allocator.free(pubkeys);
 
-        if (validators.len == 0) {
+        if (pubkeys.len == 0) {
             log.debug("no validators — skipping builder registration", .{});
             return;
         }
@@ -114,52 +97,38 @@ pub const BuilderRegistrationService = struct {
         // Build signed registrations.
         var registrations = try std.array_list.Managed(RegistrationEntry).initCapacity(
             self.allocator,
-            validators.len,
+            pubkeys.len,
         );
         defer registrations.deinit();
 
-        for (validators) |v| {
+        for (pubkeys) |pubkey| {
             // Compute signing root (same path for local and remote).
             var signing_root: [32]u8 = undefined;
             signing_mod.builderRegistrationSigningRoot(
                 self.fee_recipient,
                 self.gas_limit,
                 timestamp,
-                v.pubkey,
+                pubkey,
                 &signing_root,
             ) catch |err| {
                 log.warn("failed to compute builder registration signing root for {x}: {s}", .{
-                    v.pubkey,
+                    pubkey,
                     @errorName(err),
                 });
                 continue;
             };
 
-            // Sign: delegate to remote signer if this is a remote validator.
-            const sig_bytes = blk: {
-                if (v.is_remote) {
-                    const rs = self.remote_signer orelse {
-                        log.warn("skipping builder registration for remote key {x} — no remote signer configured", .{
-                            v.pubkey,
-                        });
-                        continue;
-                    };
-                    const sig = rs.sign(io, v.pubkey, signing_root, .VALIDATOR_REGISTRATION) catch |err| {
-                        log.warn("remote signer failed builder registration for {x}: {s}", .{
-                            v.pubkey,
-                            @errorName(err),
-                        });
-                        continue;
-                    };
-                    break :blk sig.compress();
-                } else {
-                    const sig = v.secret_key.sign(&signing_root, @import("bls").DST, null);
-                    break :blk sig.compress();
-                }
+            const sig = self.validator_store.signBuilderRegistration(io, pubkey, signing_root) catch |err| {
+                log.warn("failed builder registration signature for {x}: {s}", .{
+                    pubkey,
+                    @errorName(err),
+                });
+                continue;
             };
+            const sig_bytes = sig.compress();
 
             try registrations.append(.{
-                .pubkey = v.pubkey,
+                .pubkey = pubkey,
                 .fee_recipient = self.fee_recipient,
                 .gas_limit = self.gas_limit,
                 .timestamp = timestamp,

@@ -25,9 +25,6 @@ pub const DataPaths = struct {
     enr: []const u8,
     peer_db: []const u8,
     state_cache: []const u8,
-    validator_db_dir: []const u8,
-    keystores: []const u8,
-    secrets: []const u8,
     jwt_secret: []const u8,
     log_file: []const u8,
 
@@ -55,13 +52,6 @@ pub const DataPaths = struct {
         const peer_db = try std.fs.path.join(allocator, &.{ network_base, "peer-db" });
         const state_cache = try std.fs.path.join(allocator, &.{ beacon_base, "state-cache" });
 
-        const validator_base = try std.fs.path.join(allocator, &.{ root, "validator" });
-        defer allocator.free(validator_base);
-
-        const validator_db_dir = try std.fs.path.join(allocator, &.{ validator_base, "validator-db" });
-        const keystores = try std.fs.path.join(allocator, &.{ validator_base, "keystores" });
-        const secrets = try std.fs.path.join(allocator, &.{ validator_base, "secrets" });
-
         const jwt_secret: []const u8 = if (opts.jwt_secret) |p|
             try allocator.dupe(u8, p)
         else
@@ -80,9 +70,6 @@ pub const DataPaths = struct {
             .enr = enr,
             .peer_db = peer_db,
             .state_cache = state_cache,
-            .validator_db_dir = validator_db_dir,
-            .keystores = keystores,
-            .secrets = secrets,
             .jwt_secret = jwt_secret,
             .log_file = log_file,
         };
@@ -95,9 +82,6 @@ pub const DataPaths = struct {
         try cwd.createDirPath(io, self.beacon_db);
         try cwd.createDirPath(io, self.peer_db);
         try cwd.createDirPath(io, self.state_cache);
-        try cwd.createDirPath(io, self.validator_db_dir);
-        try cwd.createDirPath(io, self.keystores);
-        try cwd.createDirPath(io, self.secrets);
 
         if (std.fs.path.dirname(self.log_file)) |logs_dir| {
             try cwd.createDirPath(io, logs_dir);
@@ -118,9 +102,6 @@ pub const DataPaths = struct {
         a.free(self.enr);
         a.free(self.peer_db);
         a.free(self.state_cache);
-        a.free(self.validator_db_dir);
-        a.free(self.keystores);
-        a.free(self.secrets);
         a.free(self.jwt_secret);
         a.free(self.log_file);
     }
@@ -166,9 +147,6 @@ test "DataPaths.resolve - explicit data_dir" {
     try testing.expectEqualStrings("/tmp/test-datadir/beacon-node/network/enr", paths.enr);
     try testing.expectEqualStrings("/tmp/test-datadir/beacon-node/network/peer-db", paths.peer_db);
     try testing.expectEqualStrings("/tmp/test-datadir/beacon-node/state-cache", paths.state_cache);
-    try testing.expectEqualStrings("/tmp/test-datadir/validator/validator-db", paths.validator_db_dir);
-    try testing.expectEqualStrings("/tmp/test-datadir/validator/keystores", paths.keystores);
-    try testing.expectEqualStrings("/tmp/test-datadir/validator/secrets", paths.secrets);
     try testing.expectEqualStrings("/tmp/test-datadir/jwt.hex", paths.jwt_secret);
     try testing.expectEqualStrings("/tmp/test-datadir/logs/lodestar-z.log", paths.log_file);
 }

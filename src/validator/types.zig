@@ -138,10 +138,6 @@ pub const ValidatorConfig = struct {
     doppelganger_protection: bool = true,
     /// Path to slashing protection DB file (null = in-memory only).
     slashing_protection_path: ?[]const u8 = null,
-    /// Path to keystores directory.
-    keystores_dir: ?[]const u8 = null,
-    /// Path to secrets directory.
-    secrets_dir: ?[]const u8 = null,
     /// URL of Web3Signer remote signing service (null = disabled).
     /// When set, public keys are fetched from the signer at startup.
     web3signer_url: ?[]const u8 = null,

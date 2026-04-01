@@ -25,6 +25,11 @@ Current gaps:
 4. Keymanager API, proposer settings files, strict fee-recipient checks,
    distributed-validator flags, broadcast validation controls, blinded-local
    controls, and mnemonic / interop signer sources are not implemented yet.
+   The validator launcher now resolves Lodestar-style `cache/`, `remoteKeys/`,
+   and `proposerConfigs/` paths, but those directories are still reserved for
+   the missing keymanager and proposer-settings flows. The CLI exposes the
+   major Lodestar-compatible flags for these features and rejects them at
+   startup instead of silently ignoring them.
 
 5. Beacon-node config verification is implemented only against the subset of
    `/eth/v1/config/spec` that lodestar-z currently exposes and consumes.
@@ -35,6 +40,12 @@ Current gaps:
    Slashing protection uses an append-only file, and validator metadata
    (`genesis_time`, `genesis_validators_root`) is stored in a small sidecar file
    under `validator-db/`.
+
+Non-gap note:
+
+1. Local keystores are now locked at startup and held for the process lifetime.
+   `--force` bypasses those ownership locks intentionally and should be treated
+   as an operator escape hatch, not the default mode.
 
 ## Architecture Overview
 

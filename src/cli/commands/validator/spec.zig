@@ -30,6 +30,18 @@ pub const spec = cli.command(.{
             .long = "validatorsDbDir",
             .description = "Data directory for validator databases",
         }, null),
+        .remoteKeysDir = cli.option(?[]const u8, .{
+            .long = "remoteKeysDir",
+            .description = "Directory for validator remote signer definitions",
+        }, null),
+        .proposerDir = cli.option(?[]const u8, .{
+            .long = "proposerDir",
+            .description = "Directory for validator proposer configs",
+        }, null),
+        .force = cli.flag(.{
+            .long = "force",
+            .description = "Load local keystores even if another process already holds their ownership lock",
+        }),
         .graffiti = cli.option(?[]const u8, .{
             .long = "graffiti",
             .description = "Validator graffiti string",
@@ -47,10 +59,70 @@ pub const spec = cli.command(.{
             .long = "doppelgangerProtection",
             .description = "Enable doppelganger protection",
         }),
+        .proposerSettingsFile = cli.option(?[]const u8, .{
+            .long = "proposerSettingsFile",
+            .description = "Compatibility flag only. Proposer settings files are not implemented yet",
+        }, null),
+        .strictFeeRecipientCheck = cli.flag(.{
+            .long = "strictFeeRecipientCheck",
+            .description = "Compatibility flag only. Strict fee recipient checks are not implemented yet",
+        }),
+        .builder = cli.flag(.{
+            .long = "builder",
+            .description = "Compatibility flag only. Builder selection policy is not implemented yet",
+            .group = "builder",
+        }),
+        .@"builder.selection" = cli.option(?[]const u8, .{
+            .long = "builder.selection",
+            .description = "Compatibility flag only. Builder selection policy is not implemented yet",
+            .group = "builder",
+        }, null),
         .@"builder.boostFactor" = cli.option(?[]const u8, .{
             .long = "builder.boostFactor",
             .description = "Builder boost factor percentage",
             .group = "builder",
+        }, null),
+        .broadcastValidation = cli.option(?[]const u8, .{
+            .long = "broadcastValidation",
+            .description = "Compatibility flag only. Broadcast validation controls are not implemented yet",
+        }, null),
+        .blindedLocal = cli.flag(.{
+            .long = "blindedLocal",
+            .description = "Compatibility flag only. Blinded-local controls are not implemented yet",
+        }),
+        .distributed = cli.flag(.{
+            .long = "distributed",
+            .description = "Compatibility flag only. Distributed validator mode is not implemented yet",
+        }),
+        .keymanager = cli.flag(.{
+            .long = "keymanager",
+            .description = "Compatibility flag only. Validator keymanager API server is not implemented yet",
+            .group = "keymanager",
+        }),
+        .@"keymanager.auth" = cli.flag(.{
+            .long = "keymanager.auth",
+            .description = "Compatibility flag only. Validator keymanager API server is not implemented yet",
+            .group = "keymanager",
+        }),
+        .@"keymanager.tokenFile" = cli.option(?[]const u8, .{
+            .long = "keymanager.tokenFile",
+            .description = "Compatibility flag only. Validator keymanager API server is not implemented yet",
+            .group = "keymanager",
+        }, null),
+        .@"keymanager.port" = cli.option(?u16, .{
+            .long = "keymanager.port",
+            .description = "Compatibility flag only. Validator keymanager API server is not implemented yet",
+            .group = "keymanager",
+        }, null),
+        .@"keymanager.address" = cli.option(?[]const u8, .{
+            .long = "keymanager.address",
+            .description = "Compatibility flag only. Validator keymanager API server is not implemented yet",
+            .group = "keymanager",
+        }, null),
+        .@"keymanager.cors" = cli.option(?[]const u8, .{
+            .long = "keymanager.cors",
+            .description = "Compatibility flag only. Validator keymanager API server is not implemented yet",
+            .group = "keymanager",
         }, null),
         .@"externalSigner.urls" = cli.option(?[]const u8, .{
             .long = "externalSigner.urls",
