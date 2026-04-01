@@ -15,6 +15,7 @@ const ForkSeq = @import("./fork_seq.zig").ForkSeq;
 const ChainConfig = @import("./ChainConfig.zig");
 
 const BeaconConfig = @This();
+pub const FORK_EPOCH_LOOKAHEAD: u64 = 2;
 
 chain: ChainConfig,
 forks_ascending_epoch_order: [ForkSeq.count]ForkInfo,
@@ -37,6 +38,21 @@ pub const ForkInfo = struct {
     prev_version: Version,
     /// The fork identifier immediately preceding this fork.
     prev_fork_seq: ForkSeq,
+};
+
+pub const ActiveGossipFork = struct {
+    fork_seq: ForkSeq,
+    epoch: Epoch,
+    digest: [4]u8,
+};
+
+pub const ActiveGossipForks = struct {
+    count: usize,
+    items: [ForkSeq.count]ActiveGossipFork,
+
+    pub fn asSlice(self: *const ActiveGossipForks) []const ActiveGossipFork {
+        return self.items[0..self.count];
+    }
 };
 
 /// Domain cache with precomputed domain values for all forks and all domain types.
@@ -288,11 +304,74 @@ pub fn computeForkDigest(fork_version: [4]u8, genesis_validators_root: [32]u8) [
 pub fn forkDigestAtSlot(self: *const BeaconConfig, slot: u64, genesis_validators_root: [32]u8) [4]u8 {
     const fi = self.forkInfo(slot);
     const version = fi.version;
-    var base_digest = computeForkDigest(version, genesis_validators_root);
-
-    // Apply blob schedule masking for Fulu and later forks
     const epoch = @divFloor(slot, preset.SLOTS_PER_EPOCH);
-    if (@intFromEnum(fi.fork_seq) >= @intFromEnum(ForkSeq.fulu)) {
+    const base_digest = self.forkDigestForForkInfo(fi, epoch, genesis_validators_root);
+
+    std.log.info("forkDigestAtSlot: slot={d} fork_seq={d} version={x:0>2}{x:0>2}{x:0>2}{x:0>2} digest={x:0>2}{x:0>2}{x:0>2}{x:0>2}", .{
+        slot,           @intFromEnum(fi.fork_seq), version[0],     version[1],     version[2], version[3],
+        base_digest[0], base_digest[1],            base_digest[2], base_digest[3],
+    });
+    return base_digest;
+}
+
+pub fn activeGossipForksAtEpoch(self: *const BeaconConfig, epoch: Epoch, genesis_validators_root: [32]u8) ActiveGossipForks {
+    var active = ActiveGossipForks{
+        .count = 0,
+        .items = undefined,
+    };
+
+    for (&self.forks_ascending_epoch_order, 0..) |*fork, i| {
+        const next_fork = if (i + 1 < self.forks_ascending_epoch_order.len)
+            &self.forks_ascending_epoch_order[i + 1]
+        else
+            null;
+
+        if (next_fork != null and fork.epoch == next_fork.?.epoch) {
+            continue;
+        }
+
+        const next_epoch = if (next_fork) |nf| nf.epoch else std.math.maxInt(Epoch);
+        const earliest_epoch = fork.epoch -| FORK_EPOCH_LOOKAHEAD;
+        const latest_epoch = if (next_epoch == std.math.maxInt(Epoch))
+            std.math.maxInt(Epoch)
+        else
+            next_epoch +| FORK_EPOCH_LOOKAHEAD;
+
+        if (epoch < earliest_epoch or epoch > latest_epoch) continue;
+
+        active.items[active.count] = .{
+            .fork_seq = fork.fork_seq,
+            .epoch = fork.epoch,
+            .digest = self.forkDigestForForkInfo(fork, fork.epoch, genesis_validators_root),
+        };
+        active.count += 1;
+    }
+
+    return active;
+}
+
+pub fn forkSeqForGossipDigestAtEpoch(
+    self: *const BeaconConfig,
+    epoch: Epoch,
+    digest: [4]u8,
+    genesis_validators_root: [32]u8,
+) ?ForkSeq {
+    const active = self.activeGossipForksAtEpoch(epoch, genesis_validators_root);
+    for (active.asSlice()) |fork| {
+        if (std.mem.eql(u8, &fork.digest, &digest)) return fork.fork_seq;
+    }
+    return null;
+}
+
+fn forkDigestForForkInfo(
+    self: *const BeaconConfig,
+    fork_info: *const ForkInfo,
+    epoch: Epoch,
+    genesis_validators_root: [32]u8,
+) [4]u8 {
+    var base_digest = computeForkDigest(fork_info.version, genesis_validators_root);
+
+    if (@intFromEnum(fork_info.fork_seq) >= @intFromEnum(ForkSeq.fulu)) {
         if (self.getBlobParameters(epoch)) |bp| {
             var blob_input: [16]u8 = undefined;
             std.mem.writeInt(u64, blob_input[0..8], bp.epoch, .little);
@@ -306,10 +385,6 @@ pub fn forkDigestAtSlot(self: *const BeaconConfig, slot: u64, genesis_validators
         }
     }
 
-    std.log.info("forkDigestAtSlot: slot={d} fork_seq={d} version={x:0>2}{x:0>2}{x:0>2}{x:0>2} digest={x:0>2}{x:0>2}{x:0>2}{x:0>2}", .{
-        slot, @intFromEnum(fi.fork_seq), version[0], version[1], version[2], version[3],
-        base_digest[0], base_digest[1], base_digest[2], base_digest[3],
-    });
     return base_digest;
 }
 
@@ -372,4 +447,22 @@ test "forkDigestAtSlot: returns consistent fork digest" {
     // Same slot same digest
     const digest0b = cfg.forkDigestAtSlot(0, mainnet_gvr);
     try std.testing.expectEqualSlices(u8, &digest0, &digest0b);
+}
+
+test "activeGossipForksAtEpoch includes next fork during lookahead" {
+    const mainnet_gvr = [_]u8{0} ** 32;
+    const cfg = BeaconConfig.init(@import("./networks/mainnet.zig").chain_config, mainnet_gvr);
+
+    const altair_epoch = cfg.chain.ALTAIR_FORK_EPOCH;
+    const active = cfg.activeGossipForksAtEpoch(altair_epoch - FORK_EPOCH_LOOKAHEAD, mainnet_gvr);
+    try std.testing.expectEqual(@as(usize, 2), active.count);
+    try std.testing.expectEqual(ForkSeq.phase0, active.items[0].fork_seq);
+    try std.testing.expectEqual(ForkSeq.altair, active.items[1].fork_seq);
+
+    const resolved = cfg.forkSeqForGossipDigestAtEpoch(
+        altair_epoch - FORK_EPOCH_LOOKAHEAD,
+        active.items[1].digest,
+        mainnet_gvr,
+    );
+    try std.testing.expectEqual(ForkSeq.altair, resolved.?);
 }

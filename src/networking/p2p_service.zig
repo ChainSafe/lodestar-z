@@ -46,6 +46,7 @@ const ForkSeq = config_mod.ForkSeq;
 
 const EthGossipAdapter = eth_gossip.EthGossipAdapter;
 pub const GossipTopicType = eth_gossip.GossipTopicType;
+pub const ActiveGossipFork = eth_gossip.EthGossipAdapter.ActiveFork;
 pub const QuicStream = quic_mod.Stream;
 const ReqRespContext = req_resp_handler.ReqRespContext;
 const GossipValidationContext = gossip_validation.GossipValidationContext;
@@ -392,17 +393,12 @@ pub const P2pService = struct {
         try self.gossip_adapter.unsubscribeSubnet(topic_type, subnet_id);
     }
 
-    /// Handle a fork transition: migrate all gossip topic subscriptions to the new fork.
-    ///
-    /// Unsubscribes from old fork topics, updates fork digest, and resubscribes to
-    /// all global topics under the new fork digest. The beacon node should call this
-    /// when a fork activates (e.g., at the Electra activation epoch).
-    ///
-    /// After calling this, also resubscribe to active attestation/sync subnets
-    /// via `subscribeSubnet` — those are not handled here.
-    pub fn onForkTransition(self: *Self, new_fork_digest: [4]u8, new_fork_seq: ForkSeq) !void {
-        self.gossip_adapter.updateForkSeq(new_fork_seq);
-        try self.gossip_adapter.onForkTransition(new_fork_digest);
+    pub fn setPublishFork(self: *Self, new_fork_digest: [4]u8, new_fork_seq: ForkSeq) void {
+        self.gossip_adapter.setPublishFork(new_fork_digest, new_fork_seq);
+    }
+
+    pub fn setActiveGossipForks(self: *Self, forks: []const ActiveGossipFork) !void {
+        try self.gossip_adapter.setActiveForks(forks);
     }
 
     /// Gracefully shut down (cancel background fibers, close QUIC engines).

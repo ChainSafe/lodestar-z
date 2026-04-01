@@ -7,6 +7,7 @@ const std = @import("std");
 const log = @import("log");
 
 const preset = @import("preset").preset;
+const consensus_types = @import("consensus_types");
 const fork_types = @import("fork_types");
 const config_mod = @import("config");
 const BeaconConfig = config_mod.BeaconConfig;
@@ -312,7 +313,7 @@ fn subscribeInitialSubnets(self: *BeaconNode, svc: *networking.P2pService) void 
 fn initSubnetService(self: *BeaconNode) !void {
     const svc = try self.allocator.create(SubnetService);
     errdefer self.allocator.destroy(svc);
-    svc.* = SubnetService.init(self.allocator);
+    svc.* = SubnetService.init(self.allocator, self.node_identity.node_id);
     if (self.clock) |clock| {
         if (clock.currentSlot(self.io)) |slot| {
             svc.onSlot(slot);
@@ -416,9 +417,34 @@ fn syncnetsBytesFromSubnets(subnets: []const SubnetId) [1]u8 {
     return bytes;
 }
 
+fn syncGossipForkState(self: *BeaconNode, svc: *networking.P2pService) bool {
+    const slot = currentNetworkSlot(self, self.io) orelse return false;
+    const epoch = computeEpochAtSlot(slot);
+    const active = self.config.activeGossipForksAtEpoch(epoch, self.genesis_validators_root);
+
+    var active_forks: [config_mod.ForkSeq.count]networking.p2p_service.ActiveGossipFork = undefined;
+    for (active.asSlice(), 0..) |fork, i| {
+        active_forks[i] = .{
+            .fork_digest = fork.digest,
+            .fork_seq = fork.fork_seq,
+        };
+    }
+
+    svc.setActiveGossipForks(active_forks[0..active.count]) catch |err| {
+        std.log.warn("Failed to update active gossip fork boundaries: {}", .{err});
+        return false;
+    };
+    svc.setPublishFork(
+        self.config.forkDigestAtSlot(slot, self.genesis_validators_root),
+        self.config.forkSeq(slot),
+    );
+    return true;
+}
+
 fn syncSubnetState(self: *BeaconNode, svc: *networking.P2pService) bool {
     const subnet_service = self.subnet_service orelse return false;
     const slot = currentNetworkSlot(self, self.io) orelse return false;
+    var did_work = syncGossipForkState(self, svc);
     if (subnet_service.current_slot != slot) {
         subnet_service.onSlot(slot);
     }
@@ -446,8 +472,6 @@ fn syncSubnetState(self: *BeaconNode, svc: *networking.P2pService) bool {
         break :blk bitsetFromSubnets(networking.peer_info.AttnetsBitfield, gossip_attnets);
     };
     const desired_gossip_syncnets = bitsetFromSubnets(networking.peer_info.SyncnetsBitfield, active_syncnets);
-
-    var did_work = false;
 
     var subnet: usize = 0;
     while (subnet < ATTESTATION_SUBNET_COUNT) : (subnet += 1) {
@@ -493,7 +517,13 @@ fn syncSubnetState(self: *BeaconNode, svc: *networking.P2pService) bool {
         did_work = true;
     }
 
-    const attnets_bytes = attnetsBytesFromSubnets(active_attnets);
+    const metadata_attnets = subnet_service.getMetadataAttestationSubnets() catch |err| {
+        std.log.warn("Failed to collect metadata attestation subnets: {}", .{err});
+        return false;
+    };
+    defer if (metadata_attnets.len > 0) self.allocator.free(metadata_attnets);
+
+    const attnets_bytes = attnetsBytesFromSubnets(metadata_attnets);
     const syncnets_bytes = syncnetsBytesFromSubnets(active_syncnets);
     if (!std.mem.eql(u8, &self.api_node_identity.metadata.attnets, &attnets_bytes) or
         !std.mem.eql(u8, &self.api_node_identity.metadata.syncnets, &syncnets_bytes))
@@ -732,6 +762,7 @@ fn runLoop(self: *BeaconNode, io: std.Io, svc: *networking.P2pService) void {
 
 fn maybeHandleForkTransition(self: *BeaconNode, svc: *networking.P2pService) void {
     const head_slot = self.currentHeadSlot();
+    const current_fork_seq = self.config.forkSeq(head_slot);
     const current_digest = self.config.forkDigestAtSlot(
         head_slot,
         self.genesis_validators_root,
@@ -746,14 +777,9 @@ fn maybeHandleForkTransition(self: *BeaconNode, svc: *networking.P2pService) voi
             &last_digest_hex,
             &current_digest_hex,
         });
-        svc.onForkTransition(current_digest, self.config.forkSeq(head_slot)) catch |err| {
-            std.log.warn("onForkTransition failed: {}", .{err});
-            return;
-        };
-        subscribeInitialSubnets(self, svc);
-        _ = syncSubnetState(self, svc);
+        _ = syncGossipForkState(self, svc);
         if (self.gossip_handler) |gh| {
-            gh.updateForkSeq(self.config.forkSeq(head_slot));
+            gh.updateForkSeq(current_fork_seq);
         }
     }
     self.last_active_fork_digest = current_digest;
@@ -1591,12 +1617,15 @@ fn processGossipEventsFromSlice(self: *BeaconNode, io: std.Io, events: anytype) 
                 };
 
                 const parsed = gossip_topics.parseTopic(msg.topic) orelse continue;
+                const fork_seq = resolveGossipForkSeq(self, parsed) orelse continue;
                 switch (parsed.topic_type) {
-                    .beacon_block => handleGossipBlock(self, gossip_decoding, msg.data, metadata),
+                    .beacon_block => handleGossipBlock(self, gossip_decoding, msg.data, metadata, fork_seq),
+                    .data_column_sidecar => handleGossipDataColumn(self, gossip_decoding, msg.data, parsed.subnet_id, fork_seq),
                     else => {
                         if (self.gossip_handler) |gh| {
                             const slot = self.currentHeadSlot();
                             gh.updateClock(slot, computeEpochAtSlot(slot), self.currentFinalizedSlot());
+                            gh.updateForkSeq(fork_seq);
                             gh.onGossipMessageWithSubnetAndMetadata(parsed.topic_type, parsed.subnet_id, msg.data, metadata) catch |err| {
                                 switch (err) {
                                     error.ValidationIgnored => {},
@@ -1622,11 +1651,18 @@ fn processGossipEventsFromSlice(self: *BeaconNode, io: std.Io, events: anytype) 
     return processed_messages;
 }
 
+fn resolveGossipForkSeq(self: *BeaconNode, parsed: networking.GossipTopic) ?config_mod.ForkSeq {
+    const slot = currentNetworkSlot(self, self.io) orelse self.currentHeadSlot();
+    const epoch = computeEpochAtSlot(slot);
+    return self.config.forkSeqForGossipDigestAtEpoch(epoch, parsed.fork_digest, self.genesis_validators_root);
+}
+
 fn handleGossipBlock(
     self: *BeaconNode,
     gossip_decoding: anytype,
     data: []const u8,
     metadata: GossipIngressMetadata,
+    fork_seq: config_mod.ForkSeq,
 ) void {
     const ssz_bytes = gossip_decoding.decompressGossipPayload(
         self.allocator,
@@ -1637,11 +1673,6 @@ fn handleGossipBlock(
         return;
     };
 
-    const block_slot: u64 = if (ssz_bytes.len >= 108)
-        std.mem.readInt(u64, ssz_bytes[100..108], .little)
-    else
-        self.currentHeadSlot();
-    const fork_seq = self.config.forkSeq(block_slot);
     const any_signed = AnySignedBeaconBlock.deserialize(
         self.allocator,
         .full,
@@ -1696,6 +1727,44 @@ fn handleGossipBlock(
         result.block_root[2],
         result.block_root[3],
     });
+}
+
+fn handleGossipDataColumn(
+    self: *BeaconNode,
+    gossip_decoding_mod: anytype,
+    data: []const u8,
+    subnet_id: ?u8,
+    fork_seq: config_mod.ForkSeq,
+) void {
+    _ = subnet_id;
+    if (!fork_seq.gte(.fulu)) return;
+    const ssz_bytes = gossip_decoding_mod.decompressGossipPayload(
+        self.allocator,
+        data,
+        gossip_decoding_mod.MAX_GOSSIP_SIZE_DEFAULT,
+    ) catch {
+        std.log.warn("Gossip: failed to decompress data column sidecar", .{});
+        return;
+    };
+    defer self.allocator.free(ssz_bytes);
+
+    var sidecar = consensus_types.fulu.DataColumnSidecar.default_value;
+    consensus_types.fulu.DataColumnSidecar.deserializeFromBytes(self.allocator, ssz_bytes, &sidecar) catch |err| {
+        std.log.warn("Gossip: failed to decode data column sidecar: {}", .{err});
+        return;
+    };
+    defer consensus_types.fulu.DataColumnSidecar.deinit(self.allocator, &sidecar);
+
+    const column_index = sidecar.index;
+    var block_root: [32]u8 = undefined;
+    consensus_types.phase0.BeaconBlockHeader.hashTreeRoot(&sidecar.signed_block_header.message, &block_root) catch |err| {
+        std.log.warn("Gossip: failed to hash data column block header: {}", .{err});
+        return;
+    };
+
+    self.importDataColumnSidecar(block_root, column_index, ssz_bytes) catch |err| {
+        std.log.warn("Gossip data column import error: {}", .{err});
+    };
 }
 
 fn currentUnixTimeNs(io: std.Io) i64 {
