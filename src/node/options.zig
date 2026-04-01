@@ -25,7 +25,6 @@ pub const NetworkName = enum {
 pub const NodeOptions = struct {
     // ── Network ──────────────────────────────────────────────────
     listen_addresses: []const []const u8 = &.{"/ip4/0.0.0.0/tcp/9000"},
-    bootnodes: []const []const u8 = &.{},
     target_peers: u32 = 50,
 
     // ── P2P ──────────────────────────────────────────────────────

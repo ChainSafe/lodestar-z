@@ -262,7 +262,9 @@ pub fn init(allocator: Allocator, io: std.Io, beacon_config: *const BeaconConfig
     node.* = .{
         .allocator = allocator,
         .config = beacon_config,
-        .bootnodes = opts.bootnodes,
+        .bootstrap_peers = init_config.bootstrap_peers,
+        .discovery_bootnodes = init_config.discovery_bootnodes,
+        .identify_agent_version = init_config.identify_agent_version,
         .node_options = opts,
         .db = db,
         .state_regen = regen,

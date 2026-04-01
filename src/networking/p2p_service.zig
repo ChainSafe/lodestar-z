@@ -73,6 +73,25 @@ fn unixTimeMs(io: Io) u64 {
     return if (ms >= 0) @intCast(ms) else 0;
 }
 
+const identify_supported_protocols = &.{
+    "/eth2/beacon_chain/req/status/1/ssz_snappy",
+    "/eth2/beacon_chain/req/goodbye/1/ssz_snappy",
+    "/eth2/beacon_chain/req/ping/1/ssz_snappy",
+    "/eth2/beacon_chain/req/metadata/2/ssz_snappy",
+    "/eth2/beacon_chain/req/beacon_blocks_by_range/2/ssz_snappy",
+    "/eth2/beacon_chain/req/beacon_blocks_by_root/2/ssz_snappy",
+    "/eth2/beacon_chain/req/blob_sidecars_by_range/1/ssz_snappy",
+    "/eth2/beacon_chain/req/blob_sidecars_by_root/1/ssz_snappy",
+    "/eth2/beacon_chain/req/data_column_sidecars_by_range/1/ssz_snappy",
+    "/eth2/beacon_chain/req/data_column_sidecars_by_root/1/ssz_snappy",
+    "/eth2/beacon_chain/req/light_client_bootstrap/1/ssz_snappy",
+    "/eth2/beacon_chain/req/light_client_updates_by_range/1/ssz_snappy",
+    "/eth2/beacon_chain/req/light_client_finality_update/1/ssz_snappy",
+    "/eth2/beacon_chain/req/light_client_optimistic_update/1/ssz_snappy",
+    "/meshsub/1.2.0",
+    "/ipfs/id/1.0.0",
+};
+
 // ─── Switch type ─────────────────────────────────────────────────────────────
 
 pub const Eth2Switch = swarm_mod.Switch(.{
@@ -191,6 +210,8 @@ pub const P2pConfig = struct {
     /// Optional libp2p host identity for QUIC/TLS and peer-id derivation.
     /// When null, eth-p2p-z generates an ephemeral host identity.
     host_identity: ?identity_mod.KeyPair = null,
+    /// Identify agent version to advertise. Null hides implementation details.
+    identify_agent_version: ?[]const u8 = null,
     /// GossipSub router configuration.
     gossipsub_config: GossipsubConfig = .{},
 };
@@ -244,25 +265,8 @@ pub const P2pService = struct {
                     .allocator = allocator,
                     .config = .{
                         .protocol_version = "eth2/1.0.0",
-                        .agent_version = "lodestar-z/0.0.1",
-                        .supported_protocols = &.{
-                            "/eth2/beacon_chain/req/status/1/ssz_snappy",
-                            "/eth2/beacon_chain/req/goodbye/1/ssz_snappy",
-                            "/eth2/beacon_chain/req/ping/1/ssz_snappy",
-                            "/eth2/beacon_chain/req/metadata/2/ssz_snappy",
-                            "/eth2/beacon_chain/req/beacon_blocks_by_range/2/ssz_snappy",
-                            "/eth2/beacon_chain/req/beacon_blocks_by_root/2/ssz_snappy",
-                            "/eth2/beacon_chain/req/blob_sidecars_by_range/1/ssz_snappy",
-                            "/eth2/beacon_chain/req/blob_sidecars_by_root/1/ssz_snappy",
-                            "/eth2/beacon_chain/req/data_column_sidecars_by_range/1/ssz_snappy",
-                            "/eth2/beacon_chain/req/data_column_sidecars_by_root/1/ssz_snappy",
-                            "/eth2/beacon_chain/req/light_client_bootstrap/1/ssz_snappy",
-                            "/eth2/beacon_chain/req/light_client_updates_by_range/1/ssz_snappy",
-                            "/eth2/beacon_chain/req/light_client_finality_update/1/ssz_snappy",
-                            "/eth2/beacon_chain/req/light_client_optimistic_update/1/ssz_snappy",
-                            "/meshsub/1.2.0",
-                            "/ipfs/id/1.0.0",
-                        },
+                        .agent_version = config.identify_agent_version,
+                        .supported_protocols = identify_supported_protocols,
                     },
                     .peer_results = std.StringHashMap(identify_mod.IdentifyResult).init(allocator),
                 },

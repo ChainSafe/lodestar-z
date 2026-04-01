@@ -23,8 +23,7 @@ const EnrBuilder = discv5.enr.Builder;
 const NodeId = discv5.enr.NodeId;
 const enr_mod = discv5.enr;
 const UdpSocket = discv5.UdpSocket;
-const bootnodes = @import("bootnodes.zig");
-const BootnodeInfo = bootnodes.BootnodeInfo;
+const bootnodes_mod = @import("bootnodes.zig");
 
 const log = std.log.scoped(.discovery);
 
@@ -40,8 +39,7 @@ const LOOKUP_PARALLELISM: usize = 3;
 
 pub const DiscoveryConfig = struct {
     listen_port: u16 = 9000,
-    bootnode_enrs: []const BootnodeInfo = &bootnodes.mainnet,
-    cli_bootnodes: []const []const u8 = &.{},
+    bootnodes: []const []const u8 = &.{},
     target_peers: u32 = 50,
     lookup_interval_ms: u64 = DEFAULT_LOOKUP_INTERVAL_MS,
     secret_key: [32]u8 = [_]u8{0} ** 32,
@@ -235,10 +233,7 @@ pub const DiscoveryService = struct {
 
     pub fn seedBootnodes(self: *DiscoveryService) void {
         var seeded: u32 = 0;
-        for (self.config.bootnode_enrs) |bn| {
-            if (self.decodeAndInsertEnr(bn.enr)) seeded += 1;
-        }
-        for (self.config.cli_bootnodes) |enr_str| {
+        for (self.config.bootnodes) |enr_str| {
             if (self.decodeAndInsertEnr(enr_str)) seeded += 1;
         }
         log.info("Seeded routing table with {d} bootnodes ({d} known peers total)", .{
@@ -594,14 +589,14 @@ pub const DiscoveryStats = struct {
 // ── Tests ───────────────────────────────────────────────────────────────────
 
 test "DiscoveryService: init and deinit" {
-    var svc = try DiscoveryService.init(std.Options.debug_io, std.testing.allocator, .{ .listen_port = 0 });
+    var svc = try DiscoveryService.init(std.testing.io, std.testing.allocator, .{ .listen_port = 0 });
     defer svc.deinit();
     try std.testing.expectEqual(@as(u32, 0), svc.connected_peers);
     try std.testing.expectEqual(@as(u64, 1), svc.enr_seq);
 }
 
 test "DiscoveryService: seedBootnodes runs without crash" {
-    var svc = try DiscoveryService.init(std.Options.debug_io, std.testing.allocator, .{ .listen_port = 0 });
+    var svc = try DiscoveryService.init(std.testing.io, std.testing.allocator, .{ .listen_port = 0 });
     defer svc.deinit();
     svc.seedBootnodes();
 }
@@ -609,14 +604,18 @@ test "DiscoveryService: seedBootnodes runs without crash" {
 test "DiscoveryService: seedBootnodes with real key inserts peers" {
     const hex_mod = discv5.hex;
     const secret_key = hex_mod.hexToBytesComptime(32, "b71c71a67e1177ad4e901695e1b4b9ee17ae16c6668d313eac2f96dbcda3f291");
-    var svc = try DiscoveryService.init(std.Options.debug_io, std.testing.allocator, .{ .listen_port = 0, .secret_key = secret_key });
+    var svc = try DiscoveryService.init(std.testing.io, std.testing.allocator, .{
+        .listen_port = 0,
+        .secret_key = secret_key,
+        .bootnodes = &.{bootnodes_mod.mainnet[0].enr},
+    });
     defer svc.deinit();
     svc.seedBootnodes();
     try std.testing.expect(svc.knownPeerCount() > 0);
 }
 
 test "DiscoveryService: updateForkDigest bumps seq" {
-    var svc = try DiscoveryService.init(std.Options.debug_io, std.testing.allocator, .{ .listen_port = 0 });
+    var svc = try DiscoveryService.init(std.testing.io, std.testing.allocator, .{ .listen_port = 0 });
     defer svc.deinit();
     try std.testing.expectEqual(@as(u64, 1), svc.enr_seq);
     svc.updateForkDigest([4]u8{ 0xAB, 0xCD, 0xEF, 0x01 }, [4]u8{ 0, 0, 0, 0 }, FAR_FUTURE_EPOCH);
@@ -625,7 +624,7 @@ test "DiscoveryService: updateForkDigest bumps seq" {
 }
 
 test "DiscoveryService: discoverPeers respects target_peers" {
-    var svc = try DiscoveryService.init(std.Options.debug_io, std.testing.allocator, .{ .listen_port = 0, .target_peers = 5 });
+    var svc = try DiscoveryService.init(std.testing.io, std.testing.allocator, .{ .listen_port = 0, .target_peers = 5 });
     defer svc.deinit();
     svc.connected_peers = 5;
     svc.discoverPeers();
@@ -636,14 +635,14 @@ test "DiscoveryService: discoverPeers respects target_peers" {
 }
 
 test "DiscoveryService: discoverPeers disabled" {
-    var svc = try DiscoveryService.init(std.Options.debug_io, std.testing.allocator, .{ .listen_port = 0, .enabled = false });
+    var svc = try DiscoveryService.init(std.testing.io, std.testing.allocator, .{ .listen_port = 0, .enabled = false });
     defer svc.deinit();
     svc.discoverPeers();
     try std.testing.expectEqual(@as(u64, 0), svc.total_lookups);
 }
 
 test "DiscoveryService: drainDiscoveredPeers returns and clears queue" {
-    var svc = try DiscoveryService.init(std.Options.debug_io, std.testing.allocator, .{ .listen_port = 0 });
+    var svc = try DiscoveryService.init(std.testing.io, std.testing.allocator, .{ .listen_port = 0 });
     defer svc.deinit();
     svc.protocol.addNode([_]u8{0x11} ** 32, null, .{ .ip4 = .{ .bytes = .{ 1, 2, 3, 4 }, .port = 9000 } }, null);
     svc.protocol.addNode([_]u8{0x22} ** 32, null, .{ .ip4 = .{ .bytes = .{ 5, 6, 7, 8 }, .port = 9001 } }, null);
@@ -654,7 +653,7 @@ test "DiscoveryService: drainDiscoveredPeers returns and clears queue" {
 }
 
 test "DiscoveryService: requestSubnetPeers queues a query" {
-    var svc = try DiscoveryService.init(std.Options.debug_io, std.testing.allocator, .{ .listen_port = 0 });
+    var svc = try DiscoveryService.init(std.testing.io, std.testing.allocator, .{ .listen_port = 0 });
     defer svc.deinit();
     svc.requestSubnetPeers(5, 2);
     try std.testing.expectEqual(@as(usize, 1), svc.pending_subnet_queries.items.len);
@@ -662,7 +661,7 @@ test "DiscoveryService: requestSubnetPeers queues a query" {
 }
 
 test "DiscoveryService: filterEnr accepts valid ENR" {
-    var svc = try DiscoveryService.init(std.Options.debug_io, std.testing.allocator, .{
+    var svc = try DiscoveryService.init(std.testing.io, std.testing.allocator, .{
         .listen_port = 0,
         .fork_digest = [4]u8{ 0x6a, 0x95, 0xa1, 0xb0 },
     });
@@ -677,6 +676,7 @@ test "DiscoveryService: filterEnr accepts valid ENR" {
         .tcp = null,
         .ip6 = null,
         .udp6 = null,
+        .tcp6 = null,
         .quic = 9001,
         .quic6 = null,
         .eth2_fork_digest = [4]u8{ 0x6a, 0x95, 0xa1, 0xb0 },
@@ -699,7 +699,7 @@ test "DiscoveryService: filterEnr accepts valid ENR" {
 test "DiscoveryService: buildLocalEnr produces valid ENR" {
     const hex_mod = discv5.hex;
     const secret_key = hex_mod.hexToBytesComptime(32, "b71c71a67e1177ad4e901695e1b4b9ee17ae16c6668d313eac2f96dbcda3f291");
-    var svc = try DiscoveryService.init(std.Options.debug_io, std.testing.allocator, .{
+    var svc = try DiscoveryService.init(std.testing.io, std.testing.allocator, .{
         .secret_key = secret_key,
         .local_ip = [4]u8{ 127, 0, 0, 1 },
         .listen_port = 0,
@@ -720,7 +720,7 @@ test "DiscoveryService: buildLocalEnr produces valid ENR" {
 }
 
 test "DiscoveryService: getStats returns valid state" {
-    var svc = try DiscoveryService.init(std.Options.debug_io, std.testing.allocator, .{ .listen_port = 0 });
+    var svc = try DiscoveryService.init(std.testing.io, std.testing.allocator, .{ .listen_port = 0 });
     defer svc.deinit();
     const stats = svc.getStats();
     try std.testing.expectEqual(@as(u64, 0), stats.total_lookups);

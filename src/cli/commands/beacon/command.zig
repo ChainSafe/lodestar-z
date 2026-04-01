@@ -29,6 +29,50 @@ const RunContext = struct {
     p2p_host: []const u8,
 };
 
+fn unsupportedOption(name: []const u8, reason: []const u8) noreturn {
+    std.log.err("{s} is not supported: {s}", .{ name, reason });
+    std.process.exit(1);
+}
+
+fn rejectUnsupportedOptions(opts: anytype) void {
+    if (opts.configFile != null) {
+        unsupportedOption("--configFile", "use --params-file/--paramsFile or RC config instead");
+    }
+    if (opts.genesisStateFile != null) {
+        unsupportedOption("--genesisStateFile", "use --checkpoint-state/--checkpointState instead");
+    }
+    if (opts.checkpoint_block != null) {
+        unsupportedOption("--checkpoint-block", "paired checkpoint block import is not wired yet");
+    }
+    if (opts.unsafeCheckpointState != null) {
+        unsupportedOption("--unsafeCheckpointState", "unsafe anchor-state startup is not implemented");
+    }
+    if (opts.ignoreWeakSubjectivityCheck) {
+        unsupportedOption("--ignoreWeakSubjectivityCheck", "weak-subjectivity bypass is not implemented");
+    }
+    if (opts.lastPersistedCheckpointState) {
+        unsupportedOption("--lastPersistedCheckpointState", "DB resume already happens automatically when safe state exists");
+    }
+    if (opts.sync_is_single_node or opts.@"sync.isSingleNode") {
+        unsupportedOption("--sync-single-node", "single-node sync override is not wired yet");
+    }
+    if (opts.sync_disable_range or opts.@"sync.disableRangeSync") {
+        unsupportedOption("--sync-disable-range", "range-sync disabling is not wired yet");
+    }
+    if (opts.beaconDir != null) {
+        unsupportedOption("--beaconDir", "use --data-dir/--dataDir and --dbDir instead");
+    }
+    if (opts.validatorMonitorLogs) {
+        unsupportedOption("--validatorMonitorLogs", "validator monitor log promotion is not wired yet");
+    }
+    if (opts.attachToGlobalThis) {
+        unsupportedOption("--attachToGlobalThis", "JavaScript-only debug attachment does not exist in Zig");
+    }
+    if (opts.disableLightClientServer) {
+        unsupportedOption("--disableLightClientServer", "light client server toggling is not wired yet");
+    }
+}
+
 fn loadBeaconConfig(network: common.Network) *const BeaconConfig {
     return switch (network) {
         .mainnet => &config_mod.mainnet.config,
@@ -105,6 +149,8 @@ fn runSlotClock(io: Io, node: *BeaconNode) void {
 }
 
 pub fn run(io: Io, allocator: Allocator, opts: anytype) !void {
+    rejectUnsupportedOptions(opts);
+
     const network = opts.network.toNetworkName();
     const data_dir = opts.dataDir orelse opts.data_dir;
     const params_file = opts.paramsFile orelse opts.params_file;
@@ -116,6 +162,7 @@ pub fn run(io: Io, allocator: Allocator, opts: anytype) !void {
     const api_cors = opts.@"rest.cors" orelse opts.api_cors;
     const p2p_host = opts.listenAddress orelse opts.p2p_host;
     const p2p_port = opts.port orelse opts.p2p_port;
+    const bootnodes_file = opts.bootnodesFile;
     const enr_ip = opts.@"enr.ip";
     const enr_tcp = opts.@"enr.tcp";
     const enr_udp = opts.@"enr.udp";
@@ -138,6 +185,8 @@ pub fn run(io: Io, allocator: Allocator, opts: anytype) !void {
     const log_file_daily_rotate = opts.logFileDailyRotate orelse opts.log_file_daily_rotate;
     const subscribe_all_subnets = opts.subscribeAllSubnets or opts.subscribe_all_subnets;
     const engine_mock = opts.@"execution.engineMock" or opts.engine_mock;
+    const persist_network_identity = opts.persistNetworkIdentity orelse true;
+    const private_identify = opts.private;
 
     var custom_chain_config: config_mod.ChainConfig = undefined;
     var custom_beacon_config: BeaconConfig = undefined;
@@ -164,17 +213,6 @@ pub fn run(io: Io, allocator: Allocator, opts: anytype) !void {
     } else loadBeaconConfig(opts.network);
 
     ShutdownHandler.installSignalHandlers();
-
-    const bootnodes: []const []const u8 = if (opts.bootnodes) |raw| blk: {
-        var list: std.ArrayListUnmanaged([]const u8) = .empty;
-        var it = std.mem.splitScalar(u8, raw, ',');
-        while (it.next()) |enr| {
-            const trimmed = std.mem.trim(u8, enr, " \t");
-            if (trimmed.len > 0) try list.append(allocator, trimmed);
-        }
-        break :blk try list.toOwnedSlice(allocator);
-    } else &.{};
-    defer if (bootnodes.len > 0) allocator.free(bootnodes);
 
     std.log.info("lodestar-z v{s} starting", .{common.VERSION});
     std.log.info("  network:    {s}", .{@tagName(network)});
@@ -230,7 +268,6 @@ pub fn run(io: Io, allocator: Allocator, opts: anytype) !void {
     } else null;
 
     const node_opts = NodeOptions{
-        .bootnodes = bootnodes,
         .verify_signatures = opts.verify_signatures,
         .rest_enabled = opts.rest,
         .rest_port = api_port,
@@ -292,15 +329,25 @@ pub fn run(io: Io, allocator: Allocator, opts: anytype) !void {
     var prepared_runtime = try bootstrap.prepareRuntime(
         allocator,
         io,
-        network,
-        data_dir,
-        db_path_override,
-        jwt_secret_override,
-        node_opts,
-        !engine_mock and execution_urls.len > 0,
+        .{
+            .network = network,
+            .data_dir = data_dir,
+            .db_path_override = db_path_override,
+            .jwt_secret_override = jwt_secret_override,
+            .cli_bootnodes = opts.bootnodes,
+            .bootnodes_file = bootnodes_file,
+            .node_options = node_opts,
+            .needs_execution_auth = !engine_mock and execution_urls.len > 0,
+            .persist_network_identity = persist_network_identity,
+            .private = private_identify,
+        },
     );
     defer prepared_runtime.deinit();
     std.log.info("  data-dir:   {s}", .{prepared_runtime.paths.root});
+    std.log.info("  bootstrap:  {d} explicit, {d} discovery", .{
+        prepared_runtime.bootstrap_peers.len,
+        prepared_runtime.discovery_bootnodes.len,
+    });
 
     const node = try BeaconNode.init(allocator, io, beacon_config, prepared_runtime.takeInitConfig(node_opts));
     defer node.deinit();

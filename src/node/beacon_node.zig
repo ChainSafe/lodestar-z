@@ -172,6 +172,9 @@ pub const BeaconNode = struct {
         db_path: ?[]const u8 = null,
         node_identity: NodeIdentity,
         jwt_secret: ?[32]u8 = null,
+        bootstrap_peers: []const []const u8 = &.{},
+        discovery_bootnodes: []const []const u8 = &.{},
+        identify_agent_version: ?[]const u8 = null,
     };
 
     allocator: Allocator,
@@ -318,8 +321,14 @@ pub const BeaconNode = struct {
     // Node configuration options — stored for lazy-initialized components.
     node_options: NodeOptions = .{},
 
-    // Bootnode ENRs — provided via --bootnodes CLI flag, used to dial initial peers.
-    bootnodes: []const []const u8 = &.{},
+    // Explicit bootstrap peers to dial during startup.
+    bootstrap_peers: []const []const u8 = &.{},
+
+    // Discovery seed ENRs prepared by the launcher.
+    discovery_bootnodes: []const []const u8 = &.{},
+
+    // Identify agent version exposed on libp2p identify. Null hides it.
+    identify_agent_version: ?[]const u8 = null,
 
     /// Set to true to request graceful shutdown of all event loops.
     shutdown_requested: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),

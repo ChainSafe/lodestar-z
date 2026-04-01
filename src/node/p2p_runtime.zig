@@ -75,6 +75,7 @@ pub fn start(self: *BeaconNode, io: std.Io, listen_addr: []const u8, port: u16) 
         .req_resp_context = req_resp_ctx,
         .validator = &validator.ctx,
         .host_identity = host_identity,
+        .identify_agent_version = self.identify_agent_version,
         .gossipsub_config = .{
             .mesh_degree = 8,
             .mesh_degree_lo = 6,
@@ -270,10 +271,10 @@ fn closeOwnedQuicStream(io: std.Io, stream: *networking.QuicStream) void {
 }
 
 fn bootstrapBootnodes(self: *BeaconNode, io: std.Io, svc: *networking.P2pService) void {
-    if (self.bootnodes.len == 0) return;
+    if (self.bootstrap_peers.len == 0) return;
 
-    std.log.info("Dialing {d} bootnode(s)...", .{self.bootnodes.len});
-    for (self.bootnodes) |enr_str| {
+    std.log.info("Dialing {d} bootstrap peer(s)...", .{self.bootstrap_peers.len});
+    for (self.bootstrap_peers) |enr_str| {
         dialBootnodeEnr(self, io, svc, enr_str) catch |err| {
             std.log.warn("Failed to dial bootnode: {}", .{err});
         };
@@ -491,7 +492,7 @@ fn initDiscoveryService(self: *BeaconNode) !void {
         .p2p_port = self.node_options.p2p_port,
         .fork_digest = fork_digest,
         .target_peers = self.node_options.target_peers,
-        .cli_bootnodes = self.bootnodes,
+        .bootnodes = self.discovery_bootnodes,
     });
 
     ds.seedBootnodes();

@@ -928,6 +928,7 @@ pub fn build(b: *std.Build) void {
     module_node_main.addImport("preset", module_preset);
     module_node_main.addImport("log", module_log);
     module_node_main.addImport("discv5", module_discv5);
+    module_node_main.addImport("networking", module_networking);
     module_node_main.addImport("validator", module_validator);
     module_node_main.addImport("constants", module_constants);
 
