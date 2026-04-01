@@ -135,7 +135,6 @@ const sync_bridge_mod = @import("sync_bridge.zig");
 const reqresp_callbacks_mod = @import("reqresp_callbacks.zig");
 const gossip_node_callbacks_mod = @import("gossip_node_callbacks.zig");
 
-
 // BeaconProcessor — central priority scheduling loop.
 const processor_mod = @import("processor");
 const BeaconProcessor = processor_mod.BeaconProcessor;
@@ -254,7 +253,7 @@ pub const BeaconNode = struct {
     // Sync subsystem components (lazily initialized when P2P starts).
 
     sync_service_inst: ?*SyncService = null,
-    sync_callback_ctx: ?*SyncCallbackCtx = null,  // bridges to P2P transport
+    sync_callback_ctx: ?*SyncCallbackCtx = null, // bridges to P2P transport
 
     // GossipHandler — lazily initialized when P2P starts (owns its SeenSets).
     gossip_handler: ?*GossipHandler = null,
@@ -322,7 +321,6 @@ pub const BeaconNode = struct {
     // Genesis validators root — set by initFromGenesis, used for fork digest computation.
     genesis_validators_root: [32]u8 = [_]u8{0} ** 32,
 
-
     // Node configuration options — stored for lazy-initialized components.
     node_options: NodeOptions = .{},
 
@@ -361,7 +359,7 @@ pub const BeaconNode = struct {
         lifecycle_mod.deinit(self);
     }
 
-    /// Load the KZG trusted setup from a file path.
+    /// Load the bundled KZG trusted setup provided by the upstream dependency.
     ///
     /// Must be called before any KZG operations (blob verification, cell
     /// verification).  Typically called once at node startup.
@@ -369,15 +367,15 @@ pub const BeaconNode = struct {
     /// The setup is stored in `self.kzg` and freed in `deinit()`.
     ///
     /// ```zig
-    /// try node.loadKzgTrustedSetup("trusted_setup.txt");
+    /// try node.loadKzgTrustedSetup();
     /// ```
-    pub fn loadKzgTrustedSetup(self: *BeaconNode, trusted_setup_path: []const u8) !void {
+    pub fn loadKzgTrustedSetup(self: *BeaconNode) !void {
         if (self.kzg != null) {
             // Already loaded — free the old one first.
-            self.kzg.?.deinit(self.allocator);
+            self.kzg.?.deinit();
         }
-        self.kzg = try Kzg.initFromFile(self.allocator, trusted_setup_path);
-        log.logger(.node).info("KZG trusted setup loaded from '{s}'", .{trusted_setup_path});
+        self.kzg = try Kzg.initBundled();
+        log.logger(.node).info("KZG trusted setup loaded from upstream bundled module", .{});
     }
 
     /// Set the I/O context for the node and all sub-components.
@@ -476,7 +474,6 @@ pub const BeaconNode = struct {
 
         return result;
     }
-
 
     /// Store a blob sidecar received via gossip or req/resp.
     ///
@@ -613,7 +610,7 @@ pub const BeaconNode = struct {
         try p2p_runtime_mod.start(self, io, listen_addr, port);
     }
 
-        /// Queue an orphan block whose parent is not yet known.
+    /// Queue an orphan block whose parent is not yet known.
     ///
     /// Computes the block root and stores the raw SSZ bytes in the
     /// UnknownBlockSync pending set. The parent will be fetched via
@@ -936,8 +933,10 @@ pub fn processorHandlerCallback(item: WorkItem, context: *anyopaque) void {
             node.processPendingChildren(result.block_root);
             std.log.info("PROCESSOR: block imported slot={d} root={x:0>2}{x:0>2}{x:0>2}{x:0>2}...", .{
                 result.slot,
-                result.block_root[0], result.block_root[1],
-                result.block_root[2], result.block_root[3],
+                result.block_root[0],
+                result.block_root[1],
+                result.block_root[2],
+                result.block_root[3],
             });
         },
         .attestation_batch => |batch| {

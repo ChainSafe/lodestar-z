@@ -296,6 +296,7 @@ pub fn run(io: Io, allocator: Allocator, opts: anytype) !void {
     std.log.info("BeaconNode initialized", .{});
 
     node.setIo(io);
+    try node.loadKzgTrustedSetup();
 
     const force_checkpoint = force_checkpoint_sync;
 

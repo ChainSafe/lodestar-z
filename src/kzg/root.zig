@@ -8,8 +8,8 @@
 //! Usage:
 //! ```zig
 //! const kzg = @import("kzg");
-//! var ctx = try kzg.Kzg.initFromFile(allocator, "trusted_setup.txt");
-//! defer ctx.deinit(allocator);
+//! var ctx = try kzg.Kzg.initBundled();
+//! defer ctx.deinit();
 //! const commitment = try ctx.blobToCommitment(&blob);
 //! ```
 

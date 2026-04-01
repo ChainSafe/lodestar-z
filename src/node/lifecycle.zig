@@ -416,7 +416,7 @@ pub fn deinit(self: *BeaconNode) void {
         allocator.destroy(vm);
     }
 
-    if (self.kzg) |*k| k.deinit(allocator);
+    if (self.kzg) |*k| k.deinit();
 
     if (self.bls_thread_pool) |pool| pool.deinit();
 

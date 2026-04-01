@@ -164,8 +164,8 @@ pub fn build(b: *std.Build) void {
     module_kzg.linkLibrary(dep_c_kzg.artifact("c_kzg"));
     module_kzg.linkLibrary(dep_blst.artifact("blst"));
     module_kzg.addIncludePath(dep_c_kzg.artifact("c_kzg").getEmittedIncludeTree());
+    module_kzg.addImport("trusted_setup", dep_c_kzg.module("trusted_setup"));
     b.modules.put(b.dupe("kzg"), module_kzg) catch @panic("OOM");
-    b.getInstallStep().dependOn(&b.addInstallFile(dep_c_kzg.namedLazyPath("trusted_setup"), "trusted_setup.txt").step);
 
     const module_state_transition = b.createModule(.{
         .root_source_file = b.path("src/state_transition/root.zig"),

@@ -152,7 +152,6 @@ pub fn verifyDataColumnSidecar(
     for (cell_indices) |*idx| idx.* = column_index;
 
     const valid = ctx.verifyCellProofBatch(
-        allocator,
         commitments,
         cell_indices,
         cells,
