@@ -10,7 +10,9 @@ const types = @import("types.zig");
 const config_mod = @import("config");
 const BeaconConfig = config_mod.BeaconConfig;
 const state_transition = @import("state_transition");
-const AnySignedBeaconBlock = @import("fork_types").AnySignedBeaconBlock;
+const fork_types = @import("fork_types");
+const AnySignedBeaconBlock = fork_types.AnySignedBeaconBlock;
+const BlockType = fork_types.BlockType;
 pub const CachedBeaconState = state_transition.CachedBeaconState;
 
 // ---------------------------------------------------------------------------
@@ -101,10 +103,16 @@ comptime {
 
 /// Callback for importing a signed beacon block from the API layer.
 /// The ptr field holds a type-erased pointer to the concrete importer;
-/// importFn receives raw SSZ bytes of the block and returns void or an error.
+/// importFn receives raw request metadata and returns void or an error.
+pub const PublishedBlockParams = struct {
+    block_bytes: []const u8,
+    block_type: BlockType,
+    broadcast_validation: types.BroadcastValidation = .gossip,
+};
+
 pub const BlockImportCallback = struct {
     ptr: *anyopaque,
-    importFn: *const fn (ptr: *anyopaque, block_bytes: []const u8) anyerror!void,
+    importFn: *const fn (ptr: *anyopaque, params: PublishedBlockParams) anyerror!void,
 };
 
 // ---------------------------------------------------------------------------
@@ -202,6 +210,7 @@ pub const ProduceBlockParams = struct {
     randao_reveal: [96]u8,
     fee_recipient: ?[20]u8 = null,
     graffiti: ?[32]u8 = null,
+    builder_selection: ?types.BuilderSelection = null,
     builder_boost_factor: ?u64 = null,
     strict_fee_recipient_check: bool = false,
     blinded_local: bool = false,
@@ -215,6 +224,8 @@ pub const ProducedBlockData = struct {
     fork: []const u8,
     /// True when the produced block bytes encode a blinded block.
     blinded: bool = false,
+    /// Source of the execution payload used to assemble the block.
+    execution_payload_source: types.ExecutionPayloadSource = .engine,
 };
 
 /// Callback for producing blocks (GET /eth/v1/validator/blocks/{slot}).

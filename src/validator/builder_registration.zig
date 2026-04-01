@@ -93,6 +93,8 @@ pub const BuilderRegistrationService = struct {
         defer registrations.deinit();
 
         for (pubkeys) |pubkey| {
+            if (self.validator_store.getBuilderSelection(pubkey) == .executiononly) continue;
+
             const fee_recipient = self.validator_store.getFeeRecipient(pubkey);
             const gas_limit = self.validator_store.getGasLimit(pubkey);
 

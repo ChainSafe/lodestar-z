@@ -1,6 +1,7 @@
 const cli = @import("zig_cli");
 const common = @import("../../spec_common.zig");
 const log_mod = @import("log");
+const validator_mod = @import("validator");
 
 pub const spec = cli.command(.{
     .description = "Run the validator client",
@@ -69,12 +70,12 @@ pub const spec = cli.command(.{
         }),
         .builder = cli.flag(.{
             .long = "builder",
-            .description = "Compatibility flag only. Builder selection policy is not implemented yet",
+            .description = "Alias for --builder.selection default",
             .group = "builder",
         }),
-        .@"builder.selection" = cli.option(?[]const u8, .{
+        .@"builder.selection" = cli.option(?validator_mod.BuilderSelection, .{
             .long = "builder.selection",
-            .description = "Compatibility flag only. Builder selection policy is not implemented yet",
+            .description = "Block source selection policy for local beacon-node block production",
             .group = "builder",
         }, null),
         .@"builder.boostFactor" = cli.option(?[]const u8, .{
@@ -82,9 +83,9 @@ pub const spec = cli.command(.{
             .description = "Builder boost factor percentage",
             .group = "builder",
         }, null),
-        .broadcastValidation = cli.option(?[]const u8, .{
+        .broadcastValidation = cli.option(?validator_mod.BroadcastValidation, .{
             .long = "broadcastValidation",
-            .description = "Compatibility flag only. Broadcast validation controls are not implemented yet",
+            .description = "Validations the beacon node should run before publishing the signed block",
         }, null),
         .blindedLocal = cli.flag(.{
             .long = "blindedLocal",
@@ -166,11 +167,11 @@ pub const spec = cli.command(.{
         }, null),
         .importKeystores = cli.option(?[]const u8, .{
             .long = "importKeystores",
-            .description = "Compatibility flag only. Startup keystore import is not implemented yet",
+            .description = "Comma-separated file or directory paths containing external EIP-2335 validator keystores to import into the managed validator data dir at startup",
         }, null),
         .importKeystoresPassword = cli.option(?[]const u8, .{
             .long = "importKeystoresPassword",
-            .description = "Compatibility flag only. Startup keystore import is not implemented yet",
+            .description = "Path to the shared password file used to decrypt all --importKeystores inputs during startup import",
         }, null),
         .metrics = cli.flag(.{
             .long = "metrics",

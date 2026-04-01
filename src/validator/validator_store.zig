@@ -21,6 +21,7 @@ const PublicKey = bls.PublicKey;
 const Signature = bls.Signature;
 
 const types = @import("types.zig");
+const BuilderSelection = types.BuilderSelection;
 const EffectiveProposerConfig = types.EffectiveProposerConfig;
 const ProposerConfig = types.ProposerConfig;
 const ProposerConfigEntry = types.ProposerConfigEntry;
@@ -82,6 +83,11 @@ pub const ValidatorStore = struct {
         total: usize,
         local: usize,
         remote: usize,
+    };
+
+    pub const BuilderSelectionParams = struct {
+        selection: BuilderSelection,
+        boost_factor: u64,
     };
 
     allocator: Allocator,
@@ -184,6 +190,28 @@ pub const ValidatorStore = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
         return self.effectiveProposerConfigLocked(pubkey).builder_boost_factor;
+    }
+
+    pub fn getBuilderSelection(self: *ValidatorStore, pubkey: [48]u8) BuilderSelection {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        return self.effectiveProposerConfigLocked(pubkey).builder_selection;
+    }
+
+    pub fn getBuilderSelectionParams(self: *ValidatorStore, pubkey: [48]u8) BuilderSelectionParams {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        const config = self.effectiveProposerConfigLocked(pubkey);
+        return .{
+            .selection = config.builder_selection,
+            .boost_factor = switch (config.builder_selection) {
+                .@"default" => 90,
+                .maxprofit => config.builder_boost_factor orelse 100,
+                .builderalways, .builderonly => std.math.maxInt(u64),
+                .executionalways, .executiononly => 0,
+            },
+        };
     }
 
     pub fn strictFeeRecipientCheck(self: *ValidatorStore, pubkey: [48]u8) bool {
@@ -809,6 +837,10 @@ pub const ValidatorStore = struct {
                 config.gas_limit orelse self.default_proposer_config.gas_limit
             else
                 self.default_proposer_config.gas_limit,
+            .builder_selection = if (override) |config|
+                config.builder_selection orelse self.default_proposer_config.builder_selection
+            else
+                self.default_proposer_config.builder_selection,
             .builder_boost_factor = if (override) |config|
                 config.builder_boost_factor orelse self.default_proposer_config.builder_boost_factor
             else
@@ -836,6 +868,7 @@ pub const ValidatorStore = struct {
         return config.fee_recipient == null and
             config.graffiti == null and
             config.gas_limit == null and
+            config.builder_selection == null and
             config.builder_boost_factor == null and
             config.strict_fee_recipient_check == null;
     }
@@ -1087,6 +1120,40 @@ test "ValidatorStore: proposer config overrides apply after validator is added" 
     try testing.expectEqual(@as(u64, 60_000_000), store.getGasLimit(pubkey));
     try testing.expectEqual(@as(?u64, 100), store.getBuilderBoostFactor(pubkey));
     try testing.expect(store.getProposerConfig(pubkey) == null);
+}
+
+test "ValidatorStore: builder selection params derive effective boost factor" {
+    const sk = makeDummyKey();
+    const pubkey = sk.toPublicKey().compress();
+
+    var store = try ValidatorStore.init(testing.io, testing.allocator, null, .{
+        .fee_recipient = [_]u8{0x11} ** 20,
+        .graffiti = [_]u8{0} ** 32,
+        .gas_limit = 60_000_000,
+        .builder_selection = .executiononly,
+        .builder_boost_factor = 100,
+        .strict_fee_recipient_check = false,
+    }, &.{
+        .{
+            .pubkey = pubkey,
+            .config = .{
+                .builder_selection = .maxprofit,
+                .builder_boost_factor = 125,
+            },
+        },
+    });
+    defer store.deinit();
+
+    try store.addKey(sk);
+
+    const params = store.getBuilderSelectionParams(pubkey);
+    try testing.expectEqual(BuilderSelection.maxprofit, params.selection);
+    try testing.expectEqual(@as(u64, 125), params.boost_factor);
+
+    try store.setProposerConfigOverride(pubkey, .{ .builder_selection = .builderonly });
+    const builder_only = store.getBuilderSelectionParams(pubkey);
+    try testing.expectEqual(BuilderSelection.builderonly, builder_only.selection);
+    try testing.expectEqual(std.math.maxInt(u64), builder_only.boost_factor);
 }
 
 fn textToGraffiti(text: []const u8) [32]u8 {

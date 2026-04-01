@@ -13,9 +13,13 @@ Current gaps:
 1. The validator CLI does **not** implement metrics or remote monitoring yet.
    `--metrics*` and `--monitoring.*` are rejected at startup.
 
-2. The validator CLI does **not** implement Lodestar's keystore import flow yet.
-   `--importKeystores*` is rejected. Operators must populate the keystore and
-   secret directories directly.
+2. Startup keystore import is now implemented, but it is still narrower than
+   Lodestar TS.
+   `--importKeystores` now recursively imports external EIP-2335 keystore files
+   into the managed `keystores/` + `secrets/` layout before normal startup, but
+   it currently assumes a single shared password file via
+   `--importKeystoresPassword` and does not implement Lodestar's prompt /
+   threaded-decrypt UX.
 
 3. External signer support is still narrower than Lodestar TS, but no longer
    in the basic startup path.
@@ -33,20 +37,24 @@ Current gaps:
    `--keymanager.stacktraces` and dedicated keymanager metrics/monitoring
    integration.
 
-5. Builder selection policy flags, distributed-validator flags, broadcast
-   validation controls, and mnemonic / interop signer sources are still not
-   implemented.
+5. Distributed-validator flags and mnemonic / interop signer sources are still
+   not implemented.
    The validator launcher now supports Lodestar-style proposer settings files,
    enforces strict fee-recipient checks before signing/publishing produced
    blocks, resolves Lodestar-style `cache/`, `remoteKeys/`, and
    `proposerConfigs/` paths, and loads/persists `proposerConfigs/` instead of
    ignoring them. The local lodestar-z beacon-node proposal path now honors
    `prepare_beacon_proposer` fee-recipient data, explicit `fee_recipient`
-   request overrides, request-level `builder_boost_factor`, validator-
-   provided `randao_reveal`, and `blindedLocal` response shaping for local
-   block production, but it still does not implement Lodestar TS's full
-   `produceBlockV3` option surface such as `builder.selection` and
-   `broadcastValidation`.
+   request overrides, request-level `builder_boost_factor`,
+   `builder.selection`, validator-provided `randao_reveal`, `blindedLocal`,
+   and `broadcastValidation` for local block production/publish.
+   The remaining builder gap is explicit: when the local beacon node has a
+   builder relay configured, it still cannot produce builder-sourced blinded
+   proposals yet, so builder-aware selections fail fast instead of silently
+   degrading to an engine block. Engine-only selections work today.
+   `broadcastValidation=consensus_and_equivocation` currently aliases
+   `consensus` with a warning because explicit equivocation checks are still
+   missing on the local beacon-node path.
 
 6. Beacon-node config verification is implemented only against the subset of
    `/eth/v1/config/spec` that lodestar-z currently exposes and consumes.

@@ -16,6 +16,75 @@ const phase0 = consensus_types.phase0;
 // Common identifiers
 // ---------------------------------------------------------------------------
 
+/// Validation policy requested when publishing a block through the beacon API.
+pub const BroadcastValidation = enum {
+    gossip,
+    consensus,
+    consensus_and_equivocation,
+    none,
+
+    pub fn parse(raw: []const u8) !BroadcastValidation {
+        inline for (std.meta.fields(BroadcastValidation)) |field| {
+            if (std.mem.eql(u8, raw, field.name)) return @enumFromInt(field.value);
+        }
+        return error.InvalidRequest;
+    }
+
+    pub fn queryValue(self: BroadcastValidation) []const u8 {
+        return @tagName(self);
+    }
+};
+
+pub const BuilderSelection = enum {
+    @"default",
+    maxprofit,
+    builderalways,
+    builderonly,
+    executionalways,
+    executiononly,
+
+    pub fn parse(raw: []const u8) !BuilderSelection {
+        inline for (std.meta.fields(BuilderSelection)) |field| {
+            if (std.mem.eql(u8, raw, field.name)) return @enumFromInt(field.value);
+        }
+        return error.InvalidRequest;
+    }
+
+    pub fn queryValue(self: BuilderSelection) []const u8 {
+        return @tagName(self);
+    }
+
+    pub fn usesBuilder(self: BuilderSelection) bool {
+        return switch (self) {
+            .executionalways, .executiononly => false,
+            else => true,
+        };
+    }
+
+    pub fn requiresBuilderSource(self: BuilderSelection) bool {
+        return switch (self) {
+            .builderalways, .builderonly => true,
+            else => false,
+        };
+    }
+};
+
+pub const ExecutionPayloadSource = enum {
+    engine,
+    builder,
+
+    pub fn parse(raw: []const u8) !ExecutionPayloadSource {
+        inline for (std.meta.fields(ExecutionPayloadSource)) |field| {
+            if (std.mem.eql(u8, raw, field.name)) return @enumFromInt(field.value);
+        }
+        return error.InvalidResponse;
+    }
+
+    pub fn headerValue(self: ExecutionPayloadSource) []const u8 {
+        return @tagName(self);
+    }
+};
+
 /// Block identifier — accepts named values, slot numbers, or 0x-prefixed roots.
 pub const BlockId = union(enum) {
     head,

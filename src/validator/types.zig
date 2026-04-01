@@ -7,6 +7,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const api = @import("api");
 
 // ---------------------------------------------------------------------------
 // Duty types (mirror of BN handler types in src/api/handlers/validator.zig)
@@ -113,6 +114,7 @@ pub const ProposerConfig = struct {
     fee_recipient: ?[20]u8 = null,
     graffiti: ?[32]u8 = null,
     gas_limit: ?u64 = null,
+    builder_selection: ?BuilderSelection = null,
     builder_boost_factor: ?u64 = null,
     strict_fee_recipient_check: ?bool = null,
 };
@@ -126,9 +128,14 @@ pub const EffectiveProposerConfig = struct {
     fee_recipient: [20]u8,
     graffiti: [32]u8,
     gas_limit: u64,
+    builder_selection: BuilderSelection = .executiononly,
     builder_boost_factor: ?u64,
     strict_fee_recipient_check: bool,
 };
+
+pub const BroadcastValidation = api.types.BroadcastValidation;
+pub const BuilderSelection = api.types.BuilderSelection;
+pub const ExecutionPayloadSource = api.types.ExecutionPayloadSource;
 
 // ---------------------------------------------------------------------------
 // Config
@@ -215,11 +222,15 @@ pub const ValidatorConfig = struct {
     /// 100 = neutral (builder wins if bid >= local). 200 = builder needs 2x.
     /// Per-spec default is 100. Set null to disable builder path.
     builder_boost_factor: ?u64 = 100,
+    /// Default builder selection policy for block production.
+    builder_selection: BuilderSelection = .executiononly,
     /// Whether the validator must enforce that the block returned by the beacon
     /// node uses the configured fee recipient.
     strict_fee_recipient_check: bool = false,
     /// Request local beacon-node block production in blinded form when possible.
     blinded_local: bool = false,
+    /// Validation policy requested when publishing signed blocks back to the BN.
+    broadcast_validation: BroadcastValidation = .gossip,
 };
 
 pub const PersistencePaths = struct {

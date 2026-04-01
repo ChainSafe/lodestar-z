@@ -406,6 +406,7 @@ pub fn produceBlock(
     randao_reveal: [96]u8,
     fee_recipient: ?[20]u8,
     graffiti: ?[32]u8,
+    builder_selection: ?types.BuilderSelection,
     builder_boost_factor: ?u64,
     strict_fee_recipient_check: bool,
     blinded_local: bool,
@@ -416,6 +417,7 @@ pub fn produceBlock(
         .randao_reveal = randao_reveal,
         .fee_recipient = fee_recipient,
         .graffiti = graffiti,
+        .builder_selection = builder_selection,
         .builder_boost_factor = builder_boost_factor,
         .strict_fee_recipient_check = strict_fee_recipient_check,
         .blinded_local = blinded_local,
@@ -595,7 +597,7 @@ test "getAttestationData uses callback when wired" {
 test "produceBlock returns NotImplemented without callback" {
     var tc = test_helpers.makeTestContext(std.testing.allocator);
     defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
-    const result = produceBlock(&tc.ctx, 100, [_]u8{0} ** 96, null, null, null, false, false);
+    const result = produceBlock(&tc.ctx, 100, [_]u8{0} ** 96, null, null, null, null, false, false);
     try std.testing.expectError(error.NotImplemented, result);
 }
 
@@ -618,6 +620,7 @@ test "produceBlock forwards extended params to callback" {
             try std.testing.expectEqual([_]u8{0xBB} ** 20, params.fee_recipient.?);
             try std.testing.expect(params.graffiti != null);
             try std.testing.expectEqual([_]u8{0xCC} ** 32, params.graffiti.?);
+            try std.testing.expectEqual(types.BuilderSelection.maxprofit, params.builder_selection.?);
             try std.testing.expectEqual(@as(?u64, 150), params.builder_boost_factor);
             try std.testing.expect(params.strict_fee_recipient_check);
             try std.testing.expect(params.blinded_local);
@@ -626,6 +629,7 @@ test "produceBlock forwards extended params to callback" {
                 .ssz_bytes = try allocator.dupe(u8, "block"),
                 .fork = "electra",
                 .blinded = true,
+                .execution_payload_source = .engine,
             };
         }
     };
@@ -642,6 +646,7 @@ test "produceBlock forwards extended params to callback" {
         [_]u8{0xAA} ** 96,
         [_]u8{0xBB} ** 20,
         [_]u8{0xCC} ** 32,
+        .maxprofit,
         150,
         true,
         true,

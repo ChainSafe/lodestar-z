@@ -89,6 +89,8 @@ pub fn fromZigError(err: anyerror) ApiError {
         error.InvalidRequestBody,
         error.MissingField,
         error.MismatchedCounts,
+        error.InvalidBlockType,
+        error.UnsupportedFork,
         => .{ .code = .bad_request, .message = "Bad request: invalid parameter" },
 
         // 401 Unauthorized
@@ -126,11 +128,13 @@ pub fn fromZigError(err: anyerror) ApiError {
         // 501 Not Implemented
         error.NotImplemented,
         error.ValidatorMonitorNotConfigured,
+        error.UnsupportedBuilderSelection,
         => .{ .code = .not_implemented, .message = "Not implemented" },
 
         // 503 Service Unavailable
         error.ServiceUnavailable,
         error.NodeNotReady,
+        error.BuilderNotConfigured,
         => .{ .code = .service_unavailable, .message = "Service unavailable" },
 
         // 500 Internal Server Error (default)

@@ -98,6 +98,8 @@ pub const PreparedRuntime = struct {
         std.log.info("  keystores:    {s}", .{self.paths.keystores_dir});
         std.log.info("  secrets:      {s}", .{self.paths.secrets_dir});
         std.log.info("  slashing-db:  {s}", .{self.paths.slashing_protection_db});
+        std.log.info("  builder selection: {s}", .{@tagName(self.validator_config.builder_selection)});
+        std.log.info("  block publish validation: {s}", .{@tagName(self.validator_config.broadcast_validation)});
         std.log.info("  validators:   {d} total ({d} local, {d} remote)", .{
             counts.total,
             counts.local,
@@ -168,6 +170,34 @@ pub fn prepareRuntime(io: Io, allocator: Allocator, opts: anytype) !PreparedRunt
     });
     errdefer paths.deinit();
     try paths.ensureDirs(io);
+
+    const persistence_paths: validator_mod.PersistencePaths = .{
+        .keystores_dir = paths.keystores_dir,
+        .secrets_dir = paths.secrets_dir,
+        .remote_keys_dir = paths.remote_keys_dir,
+        .proposer_dir = paths.proposer_dir,
+    };
+
+    if (opts.importKeystores) |raw_import_paths| {
+        const import_paths = try splitCsvOwnedUnique(allocator, raw_import_paths);
+        defer freeOwnedStrings(allocator, import_paths);
+
+        if (import_paths.len == 0) {
+            return error.NoImportKeystoresFound;
+        }
+
+        const password_file = opts.importKeystoresPassword orelse return error.MissingImportKeystorePassword;
+        _ = validator_mod.importExternalKeystores(
+            io,
+            allocator,
+            persistence_paths,
+            import_paths,
+            password_file,
+        ) catch |err| {
+            std.log.err("Failed to import startup keystores: {}", .{err});
+            return err;
+        };
+    }
 
     const cli_default_proposer_config = try parseCliDefaultProposerConfig(opts);
 
@@ -325,12 +355,7 @@ pub fn prepareRuntime(io: Io, allocator: Allocator, opts: anytype) !PreparedRunt
         .startup_signers = startup_signers,
         .signing_context = buildSigningContext(beacon_config, genesis),
         .validator_config = .{
-            .persistence = .{
-                .keystores_dir = paths.keystores_dir,
-                .secrets_dir = paths.secrets_dir,
-                .remote_keys_dir = paths.remote_keys_dir,
-                .proposer_dir = paths.proposer_dir,
-            },
+            .persistence = persistence_paths,
             .beacon_node_url = primary_beacon_url,
             .genesis_time = genesis.genesis_time,
             .genesis_validators_root = genesis.genesis_validators_root,
@@ -350,9 +375,11 @@ pub fn prepareRuntime(io: Io, allocator: Allocator, opts: anytype) !PreparedRunt
             .suggested_fee_recipient = default_proposer_config.fee_recipient,
             .gas_limit = default_proposer_config.gas_limit,
             .graffiti = default_proposer_config.graffiti,
+            .builder_selection = default_proposer_config.builder_selection,
             .builder_boost_factor = default_proposer_config.builder_boost_factor,
             .strict_fee_recipient_check = default_proposer_config.strict_fee_recipient_check,
             .blinded_local = opts.blindedLocal,
+            .broadcast_validation = opts.broadcastValidation orelse .gossip,
         },
     };
 }
@@ -496,6 +523,11 @@ fn parseCliDefaultProposerConfig(opts: anytype) !validator_mod.ProposerConfig {
     if (opts.defaultGasLimit) |gas_limit| {
         config.gas_limit = gas_limit;
     }
+    if (opts.@"builder.selection") |selection| {
+        config.builder_selection = selection;
+    } else if (opts.builder) {
+        config.builder_selection = .@"default";
+    }
     if (opts.@"builder.boostFactor" != null) {
         config.builder_boost_factor = try parseBuilderBoostFactor(opts.@"builder.boostFactor");
     }
@@ -511,6 +543,7 @@ fn cliDefaultEffectiveProposerConfig(config: validator_mod.ProposerConfig) valid
         .fee_recipient = config.fee_recipient orelse [_]u8{0} ** 20,
         .graffiti = config.graffiti orelse [_]u8{0} ** 32,
         .gas_limit = config.gas_limit orelse 60_000_000,
+        .builder_selection = config.builder_selection orelse .executiononly,
         .builder_boost_factor = config.builder_boost_factor orelse 100,
         .strict_fee_recipient_check = config.strict_fee_recipient_check orelse false,
     };
@@ -524,6 +557,7 @@ fn mergeProposerConfig(
     if (overrides.fee_recipient) |value| merged.fee_recipient = value;
     if (overrides.graffiti) |value| merged.graffiti = value;
     if (overrides.gas_limit) |value| merged.gas_limit = value;
+    if (overrides.builder_selection) |value| merged.builder_selection = value;
     if (overrides.builder_boost_factor) |value| merged.builder_boost_factor = value;
     if (overrides.strict_fee_recipient_check) |value| merged.strict_fee_recipient_check = value;
     return merged;
@@ -596,8 +630,9 @@ fn parseProposerSettingsSection(map: Yaml.Map) !validator_mod.ProposerConfig {
     }
     if (map.get("builder")) |value| {
         const builder = try value.asMap();
-        if (builder.get("selection") != null) {
-            return error.UnsupportedBuilderSelection;
+        if (builder.get("selection")) |selection_value| {
+            const selection_text = try scalarString(selection_value) orelse return error.InvalidProposerSettingsFile;
+            config.builder_selection = try validator_mod.BuilderSelection.parse(selection_text);
         }
         if (builder.get("gas_limit")) |gas_value| {
             config.gas_limit = try parseYamlU64(gas_value);

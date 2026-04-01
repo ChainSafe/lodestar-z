@@ -44,14 +44,11 @@ fn rejectUnsupportedOptions(opts: anytype) !void {
     {
         return unsupportedOption("Validator keymanager options require --keymanager. Add --keymanager or remove the --keymanager.* overrides.");
     }
-    if (opts.importKeystores != null or opts.importKeystoresPassword != null) {
-        return unsupportedOption("Validator keystore import at startup is not implemented yet. Populate the keystores and secrets directories directly instead.");
+    if (opts.importKeystores == null and opts.importKeystoresPassword != null) {
+        return unsupportedOption("--importKeystoresPassword requires --importKeystores.");
     }
-    if (opts.builder or opts.@"builder.selection" != null) {
-        return unsupportedOption("Validator builder selection policy flags are not implemented yet. Remove --builder and --builder.selection.");
-    }
-    if (opts.broadcastValidation != null) {
-        return unsupportedOption("Validator broadcast validation controls are not implemented yet. Remove --broadcastValidation.");
+    if (opts.importKeystores != null and opts.importKeystoresPassword == null) {
+        return unsupportedOption("--importKeystores requires --importKeystoresPassword pointing to the shared keystore password file.");
     }
     if (opts.distributed) {
         return unsupportedOption("Distributed validator mode is not implemented yet. Remove --distributed.");

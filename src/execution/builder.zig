@@ -16,6 +16,8 @@ const std = @import("std");
 const testing = std.testing;
 const Allocator = std.mem.Allocator;
 
+const consensus_types = @import("consensus_types");
+const fork_types = @import("fork_types");
 const types = @import("engine_api_types.zig");
 const http_engine = @import("http_engine.zig");
 const Transport = http_engine.Transport;
@@ -85,19 +87,6 @@ pub const SignedBuilderBid = struct {
     signature: [96]u8,
 };
 
-/// Blinded beacon block body (contains header instead of full payload).
-pub const BlindedBeaconBlockBody = struct {
-    /// The blinded execution payload header.
-    execution_payload_header: ExecutionPayloadHeader,
-    // Other beacon block body fields would go here.
-};
-
-/// Signed blinded beacon block submitted to the builder relay.
-pub const SignedBlindedBeaconBlock = struct {
-    message: BlindedBeaconBlockBody,
-    signature: [96]u8,
-};
-
 // ── Builder status ────────────────────────────────────────────────────────────
 
 pub const BuilderStatus = enum {
@@ -141,7 +130,7 @@ pub const BuilderApi = struct {
         /// Called after the proposer signs the blinded block.
         submitBlindedBlock: *const fn (
             ptr: *anyopaque,
-            block: SignedBlindedBeaconBlock,
+            block: fork_types.AnySignedBeaconBlock,
         ) anyerror!types.ExecutionPayloadV3,
 
         /// Check builder relay status.
@@ -171,7 +160,7 @@ pub const BuilderApi = struct {
     /// Submit a blinded beacon block and receive the full execution payload.
     pub fn submitBlindedBlock(
         self: BuilderApi,
-        block: SignedBlindedBeaconBlock,
+        block: fork_types.AnySignedBeaconBlock,
     ) !types.ExecutionPayloadV3 {
         return self.vtable.submitBlindedBlock(self.ptr, block);
     }
@@ -346,7 +335,7 @@ pub const HttpBuilder = struct {
 
     fn submitBlindedBlockImpl(
         ptr: *anyopaque,
-        block: SignedBlindedBeaconBlock,
+        block: fork_types.AnySignedBeaconBlock,
     ) anyerror!types.ExecutionPayloadV3 {
         const self: *HttpBuilder = @ptrCast(@alignCast(ptr));
         const url = try self.buildUrl("/eth/v1/builder/blinded_blocks");
@@ -502,19 +491,23 @@ fn encodeExecutionPayloadHeader(allocator: Allocator, h: ExecutionPayloadHeader)
     });
 }
 
-fn encodeSignedBlindedBlock(allocator: Allocator, block: SignedBlindedBeaconBlock) ![]const u8 {
-    const header_json = try encodeExecutionPayloadHeader(
-        allocator,
-        block.message.execution_payload_header,
-    );
-    defer allocator.free(header_json);
+fn encodeSignedBlindedBlock(allocator: Allocator, block: fork_types.AnySignedBeaconBlock) ![]const u8 {
+    if (block.blockType() != .blinded) return error.InvalidBlockType;
 
-    const sig_hex = try http_engine.hexEncodeFixed(allocator, &block.signature);
-    defer allocator.free(sig_hex);
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    errdefer aw.deinit();
+    var stream: std.json.Stringify = .{ .writer = &aw.writer };
 
-    return std.fmt.allocPrint(allocator,
-        \\{{"message":{{"body":{{"execution_payload_header":{s}}}}},"signature":"{s}"}}
-    , .{ header_json, sig_hex });
+    switch (block) {
+        .blinded_bellatrix => |blk| try consensus_types.bellatrix.SignedBlindedBeaconBlock.serializeIntoJson(allocator, &stream, blk),
+        .blinded_capella => |blk| try consensus_types.capella.SignedBlindedBeaconBlock.serializeIntoJson(allocator, &stream, blk),
+        .blinded_deneb => |blk| try consensus_types.deneb.SignedBlindedBeaconBlock.serializeIntoJson(allocator, &stream, blk),
+        .blinded_electra => |blk| try consensus_types.electra.SignedBlindedBeaconBlock.serializeIntoJson(allocator, &stream, blk),
+        .blinded_fulu => |blk| try consensus_types.fulu.SignedBlindedBeaconBlock.serializeIntoJson(allocator, &stream, blk),
+        else => return error.InvalidBlockType,
+    }
+
+    return aw.toOwnedSlice();
 }
 
 // ── JSON parsing ──────────────────────────────────────────────────────────────
@@ -815,7 +808,7 @@ pub const StubBuilder = struct {
 
     fn submitBlindedBlockImpl(
         _: *anyopaque,
-        _: SignedBlindedBeaconBlock,
+        _: fork_types.AnySignedBeaconBlock,
     ) anyerror!types.ExecutionPayloadV3 {
         return error.NotImplemented;
     }
@@ -850,27 +843,8 @@ test "StubBuilder: submitBlindedBlock returns NotImplemented" {
     defer stub.deinit();
 
     const api = stub.builder();
-    const result = api.submitBlindedBlock(.{
-        .message = .{
-            .execution_payload_header = .{
-                .parent_hash = std.mem.zeroes([32]u8),
-                .fee_recipient = std.mem.zeroes([20]u8),
-                .state_root = std.mem.zeroes([32]u8),
-                .receipts_root = std.mem.zeroes([32]u8),
-                .logs_bloom = std.mem.zeroes([256]u8),
-                .prev_randao = std.mem.zeroes([32]u8),
-                .block_number = 0,
-                .gas_limit = 0,
-                .gas_used = 0,
-                .timestamp = 0,
-                .extra_data = &.{},
-                .base_fee_per_gas = 0,
-                .block_hash = std.mem.zeroes([32]u8),
-                .transactions_root = std.mem.zeroes([32]u8),
-            },
-        },
-        .signature = std.mem.zeroes([96]u8),
-    });
+    var blinded_block = consensus_types.bellatrix.SignedBlindedBeaconBlock.default_value;
+    const result = api.submitBlindedBlock(.{ .blinded_bellatrix = &blinded_block });
     try testing.expectError(error.NotImplemented, result);
 }
 
@@ -1058,30 +1032,15 @@ test "HttpBuilder: submitBlindedBlock — calls correct endpoint" {
     var b = HttpBuilder.init(allocator, "http://localhost:18550", mock.transport());
     defer b.deinit();
 
-    const blinded_block = SignedBlindedBeaconBlock{
-        .message = .{
-            .execution_payload_header = .{
-                .parent_hash = std.mem.zeroes([32]u8),
-                .fee_recipient = std.mem.zeroes([20]u8),
-                .state_root = std.mem.zeroes([32]u8),
-                .receipts_root = std.mem.zeroes([32]u8),
-                .logs_bloom = std.mem.zeroes([256]u8),
-                .prev_randao = std.mem.zeroes([32]u8),
-                .block_number = 1,
-                .gas_limit = 30_000_000,
-                .gas_used = 0,
-                .timestamp = 1_700_000_000,
-                .extra_data = &.{},
-                .base_fee_per_gas = 1_000_000_000,
-                .block_hash = [_]u8{0xde} ** 32,
-                .transactions_root = std.mem.zeroes([32]u8),
-            },
-        },
-        .signature = [_]u8{0x11} ** 96,
-    };
+    var blinded_block = consensus_types.bellatrix.SignedBlindedBeaconBlock.default_value;
+    blinded_block.message.body.execution_payload_header.block_hash = [_]u8{0xde} ** 32;
+    blinded_block.message.body.execution_payload_header.block_number = 1;
+    blinded_block.message.body.execution_payload_header.gas_limit = 30_000_000;
+    blinded_block.message.body.execution_payload_header.timestamp = 1_700_000_000;
+    blinded_block.signature = [_]u8{0x11} ** 96;
 
     const api = b.builder();
-    const payload = try api.submitBlindedBlock(blinded_block);
+    const payload = try api.submitBlindedBlock(.{ .blinded_bellatrix = &blinded_block });
 
     try testing.expect(std.mem.indexOf(u8, mock.last_url.?, "/eth/v1/builder/blinded_blocks") != null);
     try testing.expectEqual([_]u8{0xde} ** 32, payload.block_hash);

@@ -597,15 +597,12 @@ pub fn broadcastBlock(
     std.log.info("Broadcast block via gossip: slot={d}", .{signed_block.message.slot});
 }
 
-fn convertEnginePayload(
+fn convertTransactions(
     allocator: std.mem.Allocator,
     engine_payload: execution_mod.engine_api_types.ExecutionPayloadV3,
-) !types.electra.ExecutionPayload.Type {
-    const bellatrix = @import("consensus_types").bellatrix;
-    const capella = @import("consensus_types").capella;
-
+) !std.ArrayListUnmanaged(types.bellatrix.Transactions.Element.Type) {
     var transactions = try std.ArrayListUnmanaged(
-        bellatrix.Transactions.Element.Type,
+        types.bellatrix.Transactions.Element.Type,
     ).initCapacity(allocator, engine_payload.transactions.len);
     errdefer {
         for (transactions.items) |*tx| tx.deinit(allocator);
@@ -618,8 +615,15 @@ fn convertEnginePayload(
         transactions.appendAssumeCapacity(tx_data);
     }
 
+    return transactions;
+}
+
+fn convertWithdrawals(
+    allocator: std.mem.Allocator,
+    engine_payload: execution_mod.engine_api_types.ExecutionPayloadV3,
+) !std.ArrayListUnmanaged(types.capella.Withdrawal.Type) {
     var withdrawals = try std.ArrayListUnmanaged(
-        capella.Withdrawal.Type,
+        types.capella.Withdrawal.Type,
     ).initCapacity(allocator, engine_payload.withdrawals.len);
     errdefer withdrawals.deinit(allocator);
 
@@ -632,9 +636,114 @@ fn convertEnginePayload(
         });
     }
 
+    return withdrawals;
+}
+
+fn convertExtraData(
+    allocator: std.mem.Allocator,
+    engine_payload: execution_mod.engine_api_types.ExecutionPayloadV3,
+) !std.ArrayListUnmanaged(u8) {
     var extra_data: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer extra_data.deinit(allocator);
     if (engine_payload.extra_data.len > 0) {
         try extra_data.appendSlice(allocator, engine_payload.extra_data);
+    }
+    return extra_data;
+}
+
+fn convertBellatrixPayload(
+    allocator: std.mem.Allocator,
+    engine_payload: execution_mod.engine_api_types.ExecutionPayloadV3,
+) !types.bellatrix.ExecutionPayload.Type {
+    const transactions = try convertTransactions(allocator, engine_payload);
+    errdefer {
+        for (transactions.items) |*tx| tx.deinit(allocator);
+        var owned = transactions;
+        owned.deinit(allocator);
+    }
+    const extra_data = try convertExtraData(allocator, engine_payload);
+    errdefer {
+        var owned = extra_data;
+        owned.deinit(allocator);
+    }
+
+    return .{
+        .parent_hash = engine_payload.parent_hash,
+        .fee_recipient = engine_payload.fee_recipient,
+        .state_root = engine_payload.state_root,
+        .receipts_root = engine_payload.receipts_root,
+        .logs_bloom = engine_payload.logs_bloom,
+        .prev_randao = engine_payload.prev_randao,
+        .block_number = engine_payload.block_number,
+        .gas_limit = engine_payload.gas_limit,
+        .gas_used = engine_payload.gas_used,
+        .timestamp = engine_payload.timestamp,
+        .extra_data = extra_data,
+        .base_fee_per_gas = engine_payload.base_fee_per_gas,
+        .block_hash = engine_payload.block_hash,
+        .transactions = transactions,
+    };
+}
+
+fn convertCapellaPayload(
+    allocator: std.mem.Allocator,
+    engine_payload: execution_mod.engine_api_types.ExecutionPayloadV3,
+) !types.capella.ExecutionPayload.Type {
+    const transactions = try convertTransactions(allocator, engine_payload);
+    errdefer {
+        for (transactions.items) |*tx| tx.deinit(allocator);
+        var owned = transactions;
+        owned.deinit(allocator);
+    }
+    const withdrawals = try convertWithdrawals(allocator, engine_payload);
+    errdefer {
+        var owned = withdrawals;
+        owned.deinit(allocator);
+    }
+    const extra_data = try convertExtraData(allocator, engine_payload);
+    errdefer {
+        var owned = extra_data;
+        owned.deinit(allocator);
+    }
+
+    return .{
+        .parent_hash = engine_payload.parent_hash,
+        .fee_recipient = engine_payload.fee_recipient,
+        .state_root = engine_payload.state_root,
+        .receipts_root = engine_payload.receipts_root,
+        .logs_bloom = engine_payload.logs_bloom,
+        .prev_randao = engine_payload.prev_randao,
+        .block_number = engine_payload.block_number,
+        .gas_limit = engine_payload.gas_limit,
+        .gas_used = engine_payload.gas_used,
+        .timestamp = engine_payload.timestamp,
+        .extra_data = extra_data,
+        .base_fee_per_gas = engine_payload.base_fee_per_gas,
+        .block_hash = engine_payload.block_hash,
+        .transactions = transactions,
+        .withdrawals = withdrawals,
+    };
+}
+
+fn convertEnginePayload(
+    allocator: std.mem.Allocator,
+    engine_payload: execution_mod.engine_api_types.ExecutionPayloadV3,
+) !types.electra.ExecutionPayload.Type {
+    const transactions = try convertTransactions(allocator, engine_payload);
+    errdefer {
+        for (transactions.items) |*tx| tx.deinit(allocator);
+        var owned = transactions;
+        owned.deinit(allocator);
+    }
+    const withdrawals = try convertWithdrawals(allocator, engine_payload);
+    errdefer {
+        var owned = withdrawals;
+        owned.deinit(allocator);
+    }
+    const extra_data = try convertExtraData(allocator, engine_payload);
+    errdefer {
+        var owned = extra_data;
+        owned.deinit(allocator);
     }
 
     return types.electra.ExecutionPayload.Type{
@@ -656,6 +765,170 @@ fn convertEnginePayload(
         .blob_gas_used = engine_payload.blob_gas_used,
         .excess_blob_gas = engine_payload.excess_blob_gas,
     };
+}
+
+pub fn unblindPublishedBlock(
+    self: *BeaconNode,
+    blinded_block: fork_types.AnySignedBeaconBlock,
+) !fork_types.AnySignedBeaconBlock {
+    if (blinded_block.blockType() != .blinded) return error.InvalidBlockType;
+
+    const builder = self.builder_api orelse return error.BuilderNotConfigured;
+    const payload = try builder.submitBlindedBlock(blinded_block);
+    defer execution_mod.builder.freeExecutionPayload(self.allocator, payload);
+
+    switch (blinded_block) {
+        .blinded_bellatrix => |signed_blinded| {
+            const execution_payload = try convertBellatrixPayload(self.allocator, payload);
+            const full = try self.allocator.create(types.bellatrix.SignedBeaconBlock.Type);
+            full.* = .{
+                .message = .{
+                    .slot = signed_blinded.message.slot,
+                    .proposer_index = signed_blinded.message.proposer_index,
+                    .parent_root = signed_blinded.message.parent_root,
+                    .state_root = signed_blinded.message.state_root,
+                    .body = .{
+                        .randao_reveal = signed_blinded.message.body.randao_reveal,
+                        .eth1_data = signed_blinded.message.body.eth1_data,
+                        .graffiti = signed_blinded.message.body.graffiti,
+                        .proposer_slashings = signed_blinded.message.body.proposer_slashings,
+                        .attester_slashings = signed_blinded.message.body.attester_slashings,
+                        .attestations = signed_blinded.message.body.attestations,
+                        .deposits = signed_blinded.message.body.deposits,
+                        .voluntary_exits = signed_blinded.message.body.voluntary_exits,
+                        .sync_aggregate = signed_blinded.message.body.sync_aggregate,
+                        .execution_payload = execution_payload,
+                    },
+                },
+                .signature = signed_blinded.signature,
+            };
+            types.bellatrix.ExecutionPayloadHeader.deinit(self.allocator, &signed_blinded.message.body.execution_payload_header);
+            self.allocator.destroy(signed_blinded);
+            return .{ .full_bellatrix = full };
+        },
+        .blinded_capella => |signed_blinded| {
+            const execution_payload = try convertCapellaPayload(self.allocator, payload);
+            const full = try self.allocator.create(types.capella.SignedBeaconBlock.Type);
+            full.* = .{
+                .message = .{
+                    .slot = signed_blinded.message.slot,
+                    .proposer_index = signed_blinded.message.proposer_index,
+                    .parent_root = signed_blinded.message.parent_root,
+                    .state_root = signed_blinded.message.state_root,
+                    .body = .{
+                        .randao_reveal = signed_blinded.message.body.randao_reveal,
+                        .eth1_data = signed_blinded.message.body.eth1_data,
+                        .graffiti = signed_blinded.message.body.graffiti,
+                        .proposer_slashings = signed_blinded.message.body.proposer_slashings,
+                        .attester_slashings = signed_blinded.message.body.attester_slashings,
+                        .attestations = signed_blinded.message.body.attestations,
+                        .deposits = signed_blinded.message.body.deposits,
+                        .voluntary_exits = signed_blinded.message.body.voluntary_exits,
+                        .sync_aggregate = signed_blinded.message.body.sync_aggregate,
+                        .execution_payload = execution_payload,
+                        .bls_to_execution_changes = signed_blinded.message.body.bls_to_execution_changes,
+                    },
+                },
+                .signature = signed_blinded.signature,
+            };
+            types.capella.ExecutionPayloadHeader.deinit(self.allocator, &signed_blinded.message.body.execution_payload_header);
+            self.allocator.destroy(signed_blinded);
+            return .{ .full_capella = full };
+        },
+        .blinded_deneb => |signed_blinded| {
+            const execution_payload = try convertEnginePayload(self.allocator, payload);
+            const full = try self.allocator.create(types.deneb.SignedBeaconBlock.Type);
+            full.* = .{
+                .message = .{
+                    .slot = signed_blinded.message.slot,
+                    .proposer_index = signed_blinded.message.proposer_index,
+                    .parent_root = signed_blinded.message.parent_root,
+                    .state_root = signed_blinded.message.state_root,
+                    .body = .{
+                        .randao_reveal = signed_blinded.message.body.randao_reveal,
+                        .eth1_data = signed_blinded.message.body.eth1_data,
+                        .graffiti = signed_blinded.message.body.graffiti,
+                        .proposer_slashings = signed_blinded.message.body.proposer_slashings,
+                        .attester_slashings = signed_blinded.message.body.attester_slashings,
+                        .attestations = signed_blinded.message.body.attestations,
+                        .deposits = signed_blinded.message.body.deposits,
+                        .voluntary_exits = signed_blinded.message.body.voluntary_exits,
+                        .sync_aggregate = signed_blinded.message.body.sync_aggregate,
+                        .execution_payload = execution_payload,
+                        .bls_to_execution_changes = signed_blinded.message.body.bls_to_execution_changes,
+                        .blob_kzg_commitments = signed_blinded.message.body.blob_kzg_commitments,
+                    },
+                },
+                .signature = signed_blinded.signature,
+            };
+            types.deneb.ExecutionPayloadHeader.deinit(self.allocator, &signed_blinded.message.body.execution_payload_header);
+            self.allocator.destroy(signed_blinded);
+            return .{ .full_deneb = full };
+        },
+        .blinded_electra => |signed_blinded| {
+            const execution_payload = try convertEnginePayload(self.allocator, payload);
+            const full = try self.allocator.create(types.electra.SignedBeaconBlock.Type);
+            full.* = .{
+                .message = .{
+                    .slot = signed_blinded.message.slot,
+                    .proposer_index = signed_blinded.message.proposer_index,
+                    .parent_root = signed_blinded.message.parent_root,
+                    .state_root = signed_blinded.message.state_root,
+                    .body = .{
+                        .randao_reveal = signed_blinded.message.body.randao_reveal,
+                        .eth1_data = signed_blinded.message.body.eth1_data,
+                        .graffiti = signed_blinded.message.body.graffiti,
+                        .proposer_slashings = signed_blinded.message.body.proposer_slashings,
+                        .attester_slashings = signed_blinded.message.body.attester_slashings,
+                        .attestations = signed_blinded.message.body.attestations,
+                        .deposits = signed_blinded.message.body.deposits,
+                        .voluntary_exits = signed_blinded.message.body.voluntary_exits,
+                        .sync_aggregate = signed_blinded.message.body.sync_aggregate,
+                        .execution_payload = execution_payload,
+                        .bls_to_execution_changes = signed_blinded.message.body.bls_to_execution_changes,
+                        .blob_kzg_commitments = signed_blinded.message.body.blob_kzg_commitments,
+                        .execution_requests = signed_blinded.message.body.execution_requests,
+                    },
+                },
+                .signature = signed_blinded.signature,
+            };
+            types.electra.ExecutionPayloadHeader.deinit(self.allocator, &signed_blinded.message.body.execution_payload_header);
+            self.allocator.destroy(signed_blinded);
+            return .{ .full_electra = full };
+        },
+        .blinded_fulu => |signed_blinded| {
+            const execution_payload = try convertEnginePayload(self.allocator, payload);
+            const full = try self.allocator.create(types.fulu.SignedBeaconBlock.Type);
+            full.* = .{
+                .message = .{
+                    .slot = signed_blinded.message.slot,
+                    .proposer_index = signed_blinded.message.proposer_index,
+                    .parent_root = signed_blinded.message.parent_root,
+                    .state_root = signed_blinded.message.state_root,
+                    .body = .{
+                        .randao_reveal = signed_blinded.message.body.randao_reveal,
+                        .eth1_data = signed_blinded.message.body.eth1_data,
+                        .graffiti = signed_blinded.message.body.graffiti,
+                        .proposer_slashings = signed_blinded.message.body.proposer_slashings,
+                        .attester_slashings = signed_blinded.message.body.attester_slashings,
+                        .attestations = signed_blinded.message.body.attestations,
+                        .deposits = signed_blinded.message.body.deposits,
+                        .voluntary_exits = signed_blinded.message.body.voluntary_exits,
+                        .sync_aggregate = signed_blinded.message.body.sync_aggregate,
+                        .execution_payload = execution_payload,
+                        .bls_to_execution_changes = signed_blinded.message.body.bls_to_execution_changes,
+                        .blob_kzg_commitments = signed_blinded.message.body.blob_kzg_commitments,
+                        .execution_requests = signed_blinded.message.body.execution_requests,
+                    },
+                },
+                .signature = signed_blinded.signature,
+            };
+            types.fulu.ExecutionPayloadHeader.deinit(self.allocator, &signed_blinded.message.body.execution_payload_header);
+            self.allocator.destroy(signed_blinded);
+            return .{ .full_fulu = full };
+        },
+        else => return error.InvalidBlockType,
+    }
 }
 
 const beacon_node_mod = @import("beacon_node.zig");

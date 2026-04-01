@@ -14,14 +14,17 @@
 //! - `Eth-Execution-Optimistic`     — "true" / "false"
 //! - `Eth-Consensus-Finalized`      — "true" / "false"
 //! - `Eth-Consensus-Dependent-Root` — 0x-prefixed hex root
+//! - `Eth-Execution-Payload-Source` — "engine" / "builder"
 //! - `Access-Control-Expose-Headers` — comma list of exposed custom headers
 
 const std = @import("std");
+const api_types = @import("types.zig");
 
 /// Standard Beacon API metadata header names.
 pub const MetaHeader = struct {
     pub const version = "Eth-Consensus-Version";
     pub const execution_payload_blinded = "Eth-Execution-Payload-Blinded";
+    pub const execution_payload_source = "Eth-Execution-Payload-Source";
     pub const execution_optimistic = "Eth-Execution-Optimistic";
     pub const finalized = "Eth-Consensus-Finalized";
     pub const dependent_root = "Eth-Consensus-Dependent-Root";
@@ -70,6 +73,8 @@ pub const ResponseMeta = struct {
     version: ?Fork = null,
     /// True if the response contains a blinded execution payload.
     execution_payload_blinded: ?bool = null,
+    /// Whether the execution payload came from the engine or builder flow.
+    execution_payload_source: ?api_types.ExecutionPayloadSource = null,
     /// True if the data references an unverified execution payload.
     execution_optimistic: ?bool = null,
     /// True if the data references finalized chain history.
@@ -103,6 +108,11 @@ pub const ResponseMeta = struct {
             appendStr(buf, &pos, MetaHeader.execution_payload_blinded);
             first = false;
         }
+        if (self.execution_payload_source != null) {
+            if (!first) appendStr(buf, &pos, ",");
+            appendStr(buf, &pos, MetaHeader.execution_payload_source);
+            first = false;
+        }
         if (self.execution_optimistic != null) {
             if (!first) appendStr(buf, &pos, ",");
             appendStr(buf, &pos, MetaHeader.execution_optimistic);
@@ -126,6 +136,7 @@ pub const ResponseMeta = struct {
     pub fn hasHeaders(self: ResponseMeta) bool {
         return self.version != null or
             self.execution_payload_blinded != null or
+            self.execution_payload_source != null or
             self.execution_optimistic != null or
             self.finalized != null or
             self.dependent_root != null;
@@ -140,13 +151,14 @@ pub const Header = struct {
 
 /// Result of writing metadata headers.
 ///
-/// Contains up to 6 headers (version, execution_payload_blinded,
-/// execution_optimistic, finalized, dependent_root, expose_headers) plus their
+/// Contains up to 7 headers (version, execution_payload_blinded,
+/// execution_payload_source, execution_optimistic, finalized, dependent_root,
+/// expose_headers) plus their
 /// value strings in fixed buffers.
 /// The struct is stack-allocated — no heap allocation needed.
 pub const MetaHeaders = struct {
     /// The header entries (name/value pairs).
-    headers: [6]Header = undefined,
+    headers: [7]Header = undefined,
     /// Number of valid entries in `headers`.
     count: usize = 0,
 
@@ -185,6 +197,14 @@ pub fn buildHeaders(meta: ResponseMeta, result: *MetaHeaders) void {
         result.headers[result.count] = .{
             .name = MetaHeader.execution_payload_blinded,
             .value = if (blinded) "true" else "false",
+        };
+        result.count += 1;
+    }
+
+    if (meta.execution_payload_source) |source| {
+        result.headers[result.count] = .{
+            .name = MetaHeader.execution_payload_source,
+            .value = source.headerValue(),
         };
         result.count += 1;
     }
@@ -293,6 +313,17 @@ test "buildHeaders execution_payload_blinded" {
     try std.testing.expectEqual(@as(usize, 2), s.len);
     try std.testing.expectEqualStrings("Eth-Execution-Payload-Blinded", s[0].name);
     try std.testing.expectEqualStrings("true", s[0].value);
+}
+
+test "buildHeaders execution_payload_source" {
+    const meta = ResponseMeta{ .execution_payload_source = .builder };
+    var hdrs: MetaHeaders = undefined;
+    buildHeaders(meta, &hdrs);
+    const s = hdrs.slice();
+
+    try std.testing.expectEqual(@as(usize, 2), s.len);
+    try std.testing.expectEqualStrings("Eth-Execution-Payload-Source", s[0].name);
+    try std.testing.expectEqualStrings("builder", s[0].value);
 }
 
 test "buildHeaders finalized false" {

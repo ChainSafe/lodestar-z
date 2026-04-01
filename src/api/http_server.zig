@@ -464,7 +464,9 @@ pub const HttpServer = struct {
             const body_reader = request.readerExpectNone(&reader_buf);
             // Block-submission endpoints allow up to max_block_body_bytes; all
             // other POST endpoints are capped at max_body_bytes (1 MiB).
-            const is_block_endpoint = std.mem.eql(u8, match.route.operation_id, "publishBlockV2");
+            const is_block_endpoint =
+                std.mem.eql(u8, match.route.operation_id, "publishBlockV2") or
+                std.mem.eql(u8, match.route.operation_id, "publishBlindedBlockV2");
             const body_limit: usize = if (is_block_endpoint) self.max_block_body_bytes else self.max_body_bytes;
             request_body = body_reader.readAlloc(self.allocator, body_limit) catch &[_]u8{};
             request_body_owned = true;
@@ -645,6 +647,7 @@ pub const HttpServer = struct {
         .{ "getStateFork", &hGetStateFork },
         .{ "getFinalityCheckpoints", &hGetFinalityCheckpoints },
         .{ "publishBlockV2", &hPublishBlockV2 },
+        .{ "publishBlindedBlockV2", &hPublishBlindedBlockV2 },
         .{ "getPoolAttestations", &hGetPoolAttestations },
         .{ "getPoolAttestationsV2", &hGetPoolAttestationsV2 },
         .{ "getPoolVoluntaryExits", &hGetPoolVoluntaryExits },
@@ -871,7 +874,29 @@ pub const HttpServer = struct {
     }
 
     fn hPublishBlockV2(self: *HttpServer, dc: DispatchContext) !HandlerResult {
-        const result = try handlers.beacon.submitBlock(self.api_context, dc.body);
+        const broadcast_validation = if (dc.getQuery("broadcast_validation")) |raw|
+            try types.BroadcastValidation.parse(raw)
+        else
+            .gossip;
+        const result = try handlers.beacon.submitBlock(
+            self.api_context,
+            dc.body,
+            .full,
+            broadcast_validation,
+        );
+        return self.makeVoidResult(result);
+    }
+
+    fn hPublishBlindedBlockV2(self: *HttpServer, dc: DispatchContext) !HandlerResult {
+        const broadcast_validation = if (dc.getQuery("broadcast_validation")) |raw|
+            try types.BroadcastValidation.parse(raw)
+        else
+            .gossip;
+        const result = try handlers.beacon.submitBlindedBlock(
+            self.api_context,
+            dc.body,
+            broadcast_validation,
+        );
         return self.makeVoidResult(result);
     }
 
@@ -1364,6 +1389,10 @@ pub const HttpServer = struct {
             _ = std.fmt.hexToBytes(&parsed, fee_src) catch return error.InvalidRequest;
             break :blk parsed;
         } else null;
+        const builder_selection: ?types.BuilderSelection = if (dc.getQuery("builder_selection")) |selection|
+            types.BuilderSelection.parse(selection) catch return error.InvalidRequest
+        else
+            null;
         const builder_boost_factor: ?u64 = if (dc.getQuery("builder_boost_factor")) |boost|
             std.fmt.parseInt(u64, boost, 10) catch return error.InvalidRequest
         else
@@ -1392,6 +1421,7 @@ pub const HttpServer = struct {
             randao_reveal,
             fee_recipient,
             graffiti,
+            builder_selection,
             builder_boost_factor,
             strict_fee_recipient_check,
             blinded_local,
@@ -1399,6 +1429,7 @@ pub const HttpServer = struct {
         var block_meta = handler_res.meta;
         block_meta.version = response_meta.Fork.fromString(handler_res.data.fork);
         block_meta.execution_payload_blinded = handler_res.data.blinded;
+        block_meta.execution_payload_source = handler_res.data.execution_payload_source;
         if (dc.format == .ssz) {
             const ssz_copy = try alloc.dupe(u8, handler_res.data.ssz_bytes);
             return .{ .status = 200, .content_type = "application/octet-stream", .body = ssz_copy, .meta = block_meta };

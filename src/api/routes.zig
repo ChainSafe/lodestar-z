@@ -115,6 +115,12 @@ pub const routes = [_]Route{
     },
     .{
         .method = .POST,
+        .path = "/eth/v2/beacon/blinded_blocks",
+        .operation_id = "publishBlindedBlockV2",
+        .supports_ssz = true,
+    },
+    .{
+        .method = .POST,
         .path = "/eth/v1/beacon/pool/attestations",
         .operation_id = "submitPoolAttestations",
     },
@@ -652,6 +658,12 @@ test "findRoute POST block" {
     try std.testing.expectEqualStrings("publishBlockV2", match.?.route.operation_id);
 }
 
+test "findRoute POST blinded block" {
+    const match = findRoute(.POST, "/eth/v2/beacon/blinded_blocks");
+    try std.testing.expect(match != null);
+    try std.testing.expectEqualStrings("publishBlindedBlockV2", match.?.route.operation_id);
+}
+
 test "findRoute no match" {
     const match = findRoute(.GET, "/eth/v1/not/a/real/route");
     try std.testing.expect(match == null);
@@ -664,5 +676,5 @@ test "findRoute wrong method" {
 
 test "route count" {
     // Verify we defined all expected routes.
-    try std.testing.expectEqual(@as(usize, 66), routes.len);
+    try std.testing.expectEqual(@as(usize, 67), routes.len);
 }

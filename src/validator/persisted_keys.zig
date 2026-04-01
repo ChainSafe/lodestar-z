@@ -291,6 +291,7 @@ test "writeProposerConfig round-trips persisted proposer settings" {
         .fee_recipient = [_]u8{0xaa} ** 20,
         .graffiti = textToGraffiti("lodestar-z"),
         .gas_limit = 60_000_000,
+        .builder_selection = .maxprofit,
         .builder_boost_factor = 123,
     };
 
@@ -309,6 +310,7 @@ test "writeProposerConfig round-trips persisted proposer settings" {
     try testing.expectEqualSlices(u8, &config.fee_recipient.?, &loaded[0].config.fee_recipient.?);
     try testing.expectEqualSlices(u8, &config.graffiti.?, &loaded[0].config.graffiti.?);
     try testing.expectEqual(config.gas_limit, loaded[0].config.gas_limit);
+    try testing.expectEqual(config.builder_selection, loaded[0].config.builder_selection);
     try testing.expectEqual(config.builder_boost_factor, loaded[0].config.builder_boost_factor);
 }
 
@@ -320,6 +322,7 @@ fn configIsEmpty(config: ProposerConfig) bool {
     return config.fee_recipient == null and
         config.graffiti == null and
         config.gas_limit == null and
+        config.builder_selection == null and
         config.builder_boost_factor == null and
         config.strict_fee_recipient_check == null;
 }
@@ -352,11 +355,16 @@ pub fn serializeProposerConfig(allocator: Allocator, config: ProposerConfig) ![]
         try writer.print("\"feeRecipient\":\"{s}\"", .{fee_hex});
         wrote_field = true;
     }
-    if (config.gas_limit != null or config.builder_boost_factor != null) {
+    if (config.builder_selection != null or config.gas_limit != null or config.builder_boost_factor != null) {
         if (wrote_field) try writer.writeByte(',');
         try writer.writeAll("\"builder\":{");
         var wrote_builder_field = false;
+        if (config.builder_selection) |selection| {
+            try writer.print("\"selection\":{f}", .{std.json.fmt(selection.queryValue(), .{})});
+            wrote_builder_field = true;
+        }
         if (config.gas_limit) |gas_limit| {
+            if (wrote_builder_field) try writer.writeByte(',');
             try writer.print("\"gasLimit\":{d}", .{gas_limit});
             wrote_builder_field = true;
         }
@@ -409,7 +417,14 @@ fn parseProposerConfig(allocator: Allocator, bytes: []const u8) !ProposerConfig 
             .object => |value| value,
             else => return error.InvalidProposerConfig,
         };
-        if (builder.get("selection") != null) return error.UnsupportedProposerConfigSelection;
+        if (builder.get("selection")) |selection_value| {
+            const selection_text = switch (selection_value) {
+                .string => |value| value,
+                .number_string => |value| value,
+                else => return error.InvalidProposerConfig,
+            };
+            config.builder_selection = try types.BuilderSelection.parse(selection_text);
+        }
 
         if (builder.get("gasLimit")) |gas_limit_value| {
             config.gas_limit = switch (gas_limit_value) {

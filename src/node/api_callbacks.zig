@@ -452,23 +452,77 @@ fn getAggregateAttestationCallback(
     return out.toOwnedSlice();
 }
 
-fn importBlockCallback(ptr: *anyopaque, block_bytes: []const u8) anyerror!void {
+fn readSignedBlockSlot(block_bytes: []const u8) ?u64 {
+    return if (block_bytes.len >= 108)
+        std.mem.readInt(u64, block_bytes[100..108], .little)
+    else
+        null;
+}
+
+fn applyPublishValidation(
+    node: *BeaconNode,
+    any_signed: AnySignedBeaconBlock,
+    validation: api_mod.types.BroadcastValidation,
+) anyerror!void {
+    switch (validation) {
+        .gossip => {
+            var block_root: [32]u8 = undefined;
+            try any_signed.beaconBlock().hashTreeRoot(node.allocator, &block_root);
+            const beacon_block = any_signed.beaconBlock();
+            const gossip_state = node.chain.makeGossipState();
+            const action = chain_mod.validateGossipBlock(
+                beacon_block.slot(),
+                beacon_block.proposerIndex(),
+                beacon_block.parentRoot().*,
+                block_root,
+                &gossip_state,
+            );
+            if (action == .reject) return error.InvalidRequest;
+        },
+        .consensus => {},
+        .consensus_and_equivocation => {
+            std.log.warn(
+                "broadcastValidation=consensus_and_equivocation currently aliases consensus validation; equivocation checks are not implemented yet",
+                .{},
+            );
+        },
+        .none => {},
+    }
+}
+
+fn importBlockCallback(
+    ptr: *anyopaque,
+    params: api_mod.context.PublishedBlockParams,
+) anyerror!void {
     const cb_ctx: *BlockImportCallbackCtx = @ptrCast(@alignCast(ptr));
     const node = cb_ctx.node;
 
     // SignedBeaconBlock SSZ layout starts with a 4-byte offset to `message`,
     // followed by the fixed 96-byte signature. The BeaconBlock `slot` is the
     // first field in the message fixed section.
-    const block_slot: u64 = if (block_bytes.len >= 108)
-        std.mem.readInt(u64, block_bytes[100..108], .little)
+    const block_slot: u64 = if (readSignedBlockSlot(params.block_bytes)) |slot|
+        slot
     else
         node.currentHeadSlot();
     const fork_seq = cb_ctx.beacon_config.forkSeq(block_slot);
 
-    const any_signed = try AnySignedBeaconBlock.deserialize(node.allocator, .full, fork_seq, block_bytes);
-    defer any_signed.deinit(node.allocator);
+    const any_signed = try AnySignedBeaconBlock.deserialize(
+        node.allocator,
+        params.block_type,
+        fork_seq,
+        params.block_bytes,
+    );
 
-    _ = try node.importBlock(any_signed, .api);
+    const imported = switch (params.block_type) {
+        .full => any_signed,
+        .blinded => blk: {
+            errdefer any_signed.deinit(node.allocator);
+            break :blk try block_production_mod.unblindPublishedBlock(node, any_signed);
+        },
+    };
+
+    try applyPublishValidation(node, imported, params.broadcast_validation);
+    _ = try node.importBlock(imported, .api);
 }
 
 fn getValidatorMonitorCallback(
@@ -654,8 +708,18 @@ fn produceBlockCallback(
     var prod_config = chain_mod.BlockProductionConfig{};
     if (params.graffiti) |graffiti| prod_config.graffiti = graffiti;
     if (params.fee_recipient) |fee_recipient| prod_config.fee_recipient = fee_recipient;
-    prod_config.builder_boost_factor = params.builder_boost_factor;
+    prod_config.builder_boost_factor = switch (params.builder_selection orelse .executiononly) {
+        .executionalways, .executiononly => 0,
+        .@"default" => 90,
+        .maxprofit => params.builder_boost_factor,
+        .builderalways, .builderonly => params.builder_boost_factor,
+    };
     prod_config.randao_reveal = params.randao_reveal;
+
+    if (node.builder_api != null) {
+        const selection = params.builder_selection orelse .executiononly;
+        if (selection.usesBuilder()) return error.UnsupportedBuilderSelection;
+    }
 
     var produced = try node.produceFullBlock(params.slot, prod_config);
     defer produced.deinit(allocator);
@@ -679,6 +743,7 @@ fn produceBlockCallback(
         .ssz_bytes = serialized.ssz_bytes,
         .fork = serialized.fork_name,
         .blinded = serialized.block_type == .blinded,
+        .execution_payload_source = .engine,
     };
 }
 

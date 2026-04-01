@@ -206,6 +206,7 @@ pub const ValidatorClient = struct {
                 .fee_recipient = config.suggested_fee_recipient,
                 .graffiti = config.graffiti,
                 .gas_limit = config.gas_limit,
+                .builder_selection = config.builder_selection,
                 .builder_boost_factor = config.builder_boost_factor,
                 .strict_fee_recipient_check = config.strict_fee_recipient_check,
             },
@@ -221,6 +222,7 @@ pub const ValidatorClient = struct {
             signing_ctx,
             config.slots_per_epoch,
             config.blinded_local,
+            config.broadcast_validation,
         );
         errdefer self.block_service.deinit();
         self.attestation_service = AttestationService.init(

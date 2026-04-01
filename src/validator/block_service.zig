@@ -23,7 +23,9 @@ const AnyBeaconBlockBody = fork_types.AnyBeaconBlockBody;
 const ForkSeq = @import("config").ForkSeq;
 const BlockType = fork_types.BlockType;
 const types = @import("types.zig");
+const BuilderSelection = types.BuilderSelection;
 const ProposerDuty = types.ProposerDuty;
+const BroadcastValidation = types.BroadcastValidation;
 const BeaconApiClient = @import("api_client.zig").BeaconApiClient;
 const ValidatorStore = @import("validator_store.zig").ValidatorStore;
 const signing_mod = @import("signing.zig");
@@ -67,6 +69,8 @@ pub const BlockService = struct {
     slots_per_epoch: u64,
     /// Whether to request local block production in blinded form.
     blinded_local: bool,
+    /// Validation policy requested when publishing signed blocks.
+    broadcast_validation: BroadcastValidation,
 
     pub fn init(
         allocator: Allocator,
@@ -75,6 +79,7 @@ pub const BlockService = struct {
         signing_ctx: SigningContext,
         slots_per_epoch: u64,
         blinded_local: bool,
+        broadcast_validation: BroadcastValidation,
     ) BlockService {
         return .{
             .allocator = allocator,
@@ -90,6 +95,7 @@ pub const BlockService = struct {
             .syncing_tracker = null,
             .slots_per_epoch = slots_per_epoch,
             .blinded_local = blinded_local,
+            .broadcast_validation = broadcast_validation,
         };
     }
 
@@ -295,6 +301,21 @@ pub const BlockService = struct {
         }
     }
 
+    fn ensureBuilderSelectionSatisfied(
+        selection: BuilderSelection,
+        source: types.ExecutionPayloadSource,
+    ) !void {
+        switch (selection) {
+            .builderonly, .builderalways => {
+                if (source != .builder) return error.UnsupportedBuilderSelection;
+            },
+            .executiononly, .executionalways => {
+                if (source != .engine) return error.UnsupportedBuilderSelection;
+            },
+            .@"default", .maxprofit => {},
+        }
+    }
+
     fn proposeDuty(self: *BlockService, io: Io, duty: ProposerDuty) !bool {
         // Safety checks: syncing status and doppelganger protection.
         if (!self.isSafeToSign(duty.pubkey)) {
@@ -303,6 +324,7 @@ pub const BlockService = struct {
         }
 
         log.info("proposing block slot={d} validator_index={d}", .{ duty.slot, duty.validator_index });
+        const builder_selection = self.validator_store.getBuilderSelectionParams(duty.pubkey);
 
         // 1. Compute RANDAO reveal: sign(epoch) with DOMAIN_RANDAO.
         const epoch = duty.slot / self.slots_per_epoch;
@@ -320,7 +342,8 @@ pub const BlockService = struct {
             self.validator_store.getGraffiti(duty.pubkey),
             .{
                 .fee_recipient = self.validator_store.getFeeRecipient(duty.pubkey),
-                .builder_boost_factor = self.validator_store.getBuilderBoostFactor(duty.pubkey),
+                .builder_selection = builder_selection.selection,
+                .builder_boost_factor = builder_selection.boost_factor,
                 .strict_fee_recipient_check = self.validator_store.strictFeeRecipientCheck(duty.pubkey),
                 .blinded_local = self.blinded_local,
             },
@@ -334,6 +357,10 @@ pub const BlockService = struct {
         log.debug("received unsigned block ssz_len={d} fork={s} blinded={}", .{
             block_resp.block_ssz.len, fork_name, block_resp.blinded,
         });
+        try ensureBuilderSelectionSatisfied(
+            builder_selection.selection,
+            block_resp.execution_payload_source,
+        );
 
         // 3. Deserialize the unsigned BeaconBlock from SSZ.
         //    The v3 endpoint returns an unsigned BeaconBlock (not SignedBeaconBlock).
@@ -398,9 +425,9 @@ pub const BlockService = struct {
             log.info("publishing blinded block slot={d} validator_index={d} fork={s}", .{
                 duty.slot, duty.validator_index, fork_name,
             });
-            try self.api.publishBlindedBlockSsz(io, signed_ssz, fork_name);
+            try self.api.publishBlindedBlockSsz(io, signed_ssz, fork_name, self.broadcast_validation);
         } else {
-            try self.api.publishBlockSsz(io, signed_ssz, fork_name);
+            try self.api.publishBlockSsz(io, signed_ssz, fork_name, self.broadcast_validation);
         }
         log.info("published block slot={d} validator_index={d} fork={s} blinded={}", .{
             duty.slot, duty.validator_index, fork_name, block_resp.blinded,

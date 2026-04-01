@@ -7,7 +7,9 @@ const fs = @import("fs.zig");
 const key_discovery_mod = @import("key_discovery.zig");
 const KeystoreLock = @import("keystore_lock.zig").KeystoreLock;
 const keystore_mod = @import("keystore.zig");
+const persisted_keys = @import("persisted_keys.zig");
 const RemoteSigner = @import("remote_signer.zig").RemoteSigner;
+const PersistencePaths = @import("types.zig").PersistencePaths;
 
 const log = std.log.scoped(.validator_startup);
 
@@ -73,6 +75,11 @@ pub const StartupSigners = struct {
 
 pub const LoadLocalOptions = struct {
     force: bool = false,
+};
+
+pub const ImportExternalKeystoresResult = struct {
+    imported: usize,
+    skipped_duplicates: usize,
 };
 
 pub fn loadLocalSigners(
@@ -141,6 +148,88 @@ pub fn loadLocalSigners(
         .allocator = allocator,
         .local_keys = try loaded.toOwnedSlice(allocator),
         .local_keystore_locks = try locks.toOwnedSlice(allocator),
+    };
+}
+
+pub fn importExternalKeystores(
+    io: Io,
+    allocator: Allocator,
+    paths: PersistencePaths,
+    import_paths: []const []const u8,
+    password_file: []const u8,
+) !ImportExternalKeystoresResult {
+    const password = try readImportPassword(io, allocator, password_file);
+    defer allocator.free(password);
+
+    var source_paths = std.ArrayListUnmanaged([]const u8).empty;
+    defer {
+        for (source_paths.items) |path| allocator.free(path);
+        source_paths.deinit(allocator);
+    }
+
+    for (import_paths) |import_path| {
+        try collectImportKeystorePaths(io, allocator, import_path, &source_paths);
+    }
+
+    if (source_paths.items.len == 0) {
+        return error.NoImportKeystoresFound;
+    }
+
+    var seen_pubkeys = std.AutoHashMap([48]u8, void).init(allocator);
+    defer seen_pubkeys.deinit();
+
+    var imported: usize = 0;
+    var skipped_duplicates: usize = 0;
+
+    for (source_paths.items) |source_path| {
+        const json_bytes = try fs.readFileAlloc(io, allocator, source_path, 1024 * 1024);
+        defer allocator.free(json_bytes);
+
+        var secret_key = keystore_mod.loadKeystore(allocator, json_bytes, password) catch |err| {
+            log.err("failed to decrypt imported keystore {s}: {s}", .{ source_path, @errorName(err) });
+            return err;
+        };
+        defer std.crypto.secureZero(u8, &secret_key.value.b);
+
+        const pubkey = secret_key.toPublicKey().compress();
+        const seen = try seen_pubkeys.getOrPut(pubkey);
+        if (seen.found_existing) {
+            skipped_duplicates += 1;
+            log.warn(
+                "skipping duplicate imported keystore pubkey=0x{s} path={s}",
+                .{ std.fmt.bytesToHex(pubkey, .lower), source_path },
+            );
+            continue;
+        }
+
+        const pubkey_hex = persisted_keys.formatPubkeyHex(pubkey);
+        const destination = try std.fs.path.join(allocator, &.{ paths.keystores_dir, &pubkey_hex, "voting-keystore.json" });
+        defer allocator.free(destination);
+
+        pathExists(io, destination) catch |err| switch (err) {
+            error.FileNotFound => {
+                _ = try persisted_keys.writeKeystore(io, allocator, paths, pubkey, json_bytes, password, .{});
+                imported += 1;
+                continue;
+            },
+            else => return err,
+        };
+
+        skipped_duplicates += 1;
+        log.warn(
+            "skipping already-imported keystore pubkey=0x{s} existing_path={s} source_path={s}",
+            .{ std.fmt.bytesToHex(pubkey, .lower), destination, source_path },
+        );
+    }
+
+    log.info(
+        "imported {d} external validator keystore(s) into {s} (skipped_duplicates={d})",
+        .{ imported, paths.keystores_dir, skipped_duplicates },
+    );
+
+    return .{
+        .imported = imported,
+        .skipped_duplicates = skipped_duplicates,
     };
 }
 
@@ -327,6 +416,95 @@ pub fn validateRemoteSignerUrl(url: []const u8) !void {
     }
 }
 
+fn readImportPassword(io: Io, allocator: Allocator, password_file: []const u8) ![]const u8 {
+    const password_raw = try fs.readFileAlloc(io, allocator, password_file, 4096);
+    errdefer allocator.free(password_raw);
+
+    const password = std.mem.trimEnd(u8, password_raw, &[_]u8{ '\n', '\r', ' ', '\t' });
+    if (password.len == 0) return error.EmptyImportPassword;
+
+    if (password.len < password_raw.len) {
+        defer allocator.free(password_raw);
+        return allocator.dupe(u8, password);
+    }
+
+    return password_raw;
+}
+
+fn collectImportKeystorePaths(
+    io: Io,
+    allocator: Allocator,
+    input_path: []const u8,
+    out: *std.ArrayListUnmanaged([]const u8),
+) !void {
+    var dir = std.Io.Dir.cwd().openDir(io, input_path, .{ .iterate = true }) catch {
+        var file = try std.Io.Dir.cwd().openFile(io, input_path, .{});
+        file.close(io);
+
+        if (isVotingKeystorePath(input_path) and !stringSliceContains(out.items, input_path)) {
+            try out.append(allocator, try allocator.dupe(u8, input_path));
+        }
+        return;
+    };
+    defer dir.close(io);
+
+    var iter = dir.iterate();
+    while (try iter.next(io)) |entry| {
+        switch (entry.kind) {
+            .file => {
+                if (!isVotingKeystorePath(entry.name)) continue;
+
+                const child_path = try std.fs.path.join(allocator, &.{ input_path, entry.name });
+                errdefer allocator.free(child_path);
+                if (stringSliceContains(out.items, child_path)) {
+                    allocator.free(child_path);
+                    continue;
+                }
+                try out.append(allocator, child_path);
+            },
+            .directory => {
+                const child_path = try std.fs.path.join(allocator, &.{ input_path, entry.name });
+                defer allocator.free(child_path);
+                try collectImportKeystorePaths(io, allocator, child_path, out);
+            },
+            else => {},
+        }
+    }
+}
+
+fn isVotingKeystorePath(path: []const u8) bool {
+    return isVotingKeystoreFilename(std.fs.path.basename(path));
+}
+
+fn isVotingKeystoreFilename(filename: []const u8) bool {
+    if (!std.mem.endsWith(u8, filename, ".json")) return false;
+    if (isDepositDataFilename(filename)) return false;
+    return true;
+}
+
+fn isDepositDataFilename(filename: []const u8) bool {
+    const prefix = "deposit_data-";
+    const suffix = ".json";
+    if (!std.mem.startsWith(u8, filename, prefix) or !std.mem.endsWith(u8, filename, suffix)) return false;
+    const digits = filename[prefix.len .. filename.len - suffix.len];
+    if (digits.len == 0) return false;
+    for (digits) |ch| {
+        if (ch < '0' or ch > '9') return false;
+    }
+    return true;
+}
+
+fn stringSliceContains(items: []const []const u8, needle: []const u8) bool {
+    for (items) |item| {
+        if (std.mem.eql(u8, item, needle)) return true;
+    }
+    return false;
+}
+
+fn pathExists(io: Io, path: []const u8) !void {
+    try Io.Dir.cwd().access(io, path, .{});
+}
+
 const testing = std.testing;
 const keystore_create = @import("keystore_create.zig");
 
@@ -447,4 +625,63 @@ test "loadPersistedRemoteSignerKeys groups definitions by URL" {
 
 test "validateRemoteSignerUrl rejects unsupported schemes" {
     try testing.expectError(error.InvalidRemoteSignerUrl, validateRemoteSignerUrl("ftp://signer.example"));
+}
+
+test "importExternalKeystores recursively imports voting keystores into managed dirs" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makeDir("managed");
+    try tmp.dir.makeDir("managed/keystores");
+    try tmp.dir.makeDir("managed/secrets");
+    try tmp.dir.makeDir("external");
+    try tmp.dir.makeDir("external/nested");
+
+    const created = try keystore_create.createKeystore(testing.io, testing.allocator, "import-pass", .{
+        .n = 16,
+        .r = 8,
+        .p = 1,
+    });
+    defer created.deinit(testing.allocator);
+
+    try tmp.dir.writeFile(.{
+        .sub_path = "external/nested/validator-keystore.json",
+        .data = created.keystore_json,
+    });
+    try tmp.dir.writeFile(.{
+        .sub_path = "external/deposit_data-123.json",
+        .data = "{}",
+    });
+    try tmp.dir.writeFile(.{
+        .sub_path = "password.txt",
+        .data = "import-pass\n",
+    });
+
+    const root = try tmp.dir.realpathAlloc(testing.allocator, ".");
+    defer testing.allocator.free(root);
+
+    const managed_keystores = try std.fs.path.join(testing.allocator, &.{ root, "managed", "keystores" });
+    defer testing.allocator.free(managed_keystores);
+    const managed_secrets = try std.fs.path.join(testing.allocator, &.{ root, "managed", "secrets" });
+    defer testing.allocator.free(managed_secrets);
+    const external_dir = try std.fs.path.join(testing.allocator, &.{ root, "external" });
+    defer testing.allocator.free(external_dir);
+    const password_file = try std.fs.path.join(testing.allocator, &.{ root, "password.txt" });
+    defer testing.allocator.free(password_file);
+
+    const result = try importExternalKeystores(testing.io, testing.allocator, .{
+        .keystores_dir = managed_keystores,
+        .secrets_dir = managed_secrets,
+        .remote_keys_dir = "",
+        .proposer_dir = "",
+    }, &.{external_dir}, password_file);
+
+    try testing.expectEqual(@as(usize, 1), result.imported);
+    try testing.expectEqual(@as(usize, 0), result.skipped_duplicates);
+
+    var signers = try loadLocalSigners(testing.io, testing.allocator, managed_keystores, managed_secrets, .{});
+    defer signers.deinit(testing.io);
+
+    try testing.expectEqual(@as(usize, 1), signers.local_keys.len);
+    try testing.expectEqualSlices(u8, &created.pubkey, &signers.local_keys[0].pubkey);
 }

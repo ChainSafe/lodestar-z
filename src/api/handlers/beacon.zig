@@ -11,6 +11,7 @@ const CachedBeaconState = context.CachedBeaconState;
 const preset = @import("preset").preset;
 const fork_types = @import("fork_types");
 const AnySignedBeaconBlock = fork_types.AnySignedBeaconBlock;
+const BlockType = fork_types.BlockType;
 const handler_result = @import("../handler_result.zig");
 const HandlerResult = handler_result.HandlerResult;
 const ResponseMeta = handler_result.ResponseMeta;
@@ -425,10 +426,24 @@ pub fn getFinalityCheckpoints(ctx: *ApiContext, state_id: types.StateId) !Handle
 pub fn submitBlock(
     ctx: *ApiContext,
     block_bytes: []const u8,
+    block_type: BlockType,
+    broadcast_validation: types.BroadcastValidation,
 ) !HandlerResult(void) {
     const cb = ctx.block_import orelse return error.NotImplemented;
-    try cb.importFn(cb.ptr, block_bytes);
+    try cb.importFn(cb.ptr, .{
+        .block_bytes = block_bytes,
+        .block_type = block_type,
+        .broadcast_validation = broadcast_validation,
+    });
     return .{ .data = {} };
+}
+
+pub fn submitBlindedBlock(
+    ctx: *ApiContext,
+    block_bytes: []const u8,
+    broadcast_validation: types.BroadcastValidation,
+) !HandlerResult(void) {
+    return submitBlock(ctx, block_bytes, .blinded, broadcast_validation);
 }
 
 /// POST /eth/v1/beacon/pool/attestations
@@ -1136,7 +1151,7 @@ test "submitBlock returns NotImplemented when block_import is null" {
     defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
     // block_import defaults to null
     const fake_bytes = [_]u8{ 0x01, 0x02, 0x03 };
-    const result = submitBlock(&tc.ctx, &fake_bytes);
+    const result = submitBlock(&tc.ctx, &fake_bytes, .full, .gossip);
     try std.testing.expectError(error.NotImplemented, result);
 }
 
@@ -1148,11 +1163,15 @@ test "submitBlock invokes block_import callback" {
     const MockImporter = struct {
         called: bool = false,
         received_len: usize = 0,
+        block_type: BlockType = .full,
+        broadcast_validation: types.BroadcastValidation = .gossip,
 
-        fn importBlock(ptr: *anyopaque, block_bytes: []const u8) anyerror!void {
+        fn importBlock(ptr: *anyopaque, params: context.PublishedBlockParams) anyerror!void {
             const self: *@This() = @ptrCast(@alignCast(ptr));
             self.called = true;
-            self.received_len = block_bytes.len;
+            self.received_len = params.block_bytes.len;
+            self.block_type = params.block_type;
+            self.broadcast_validation = params.broadcast_validation;
         }
     };
 
@@ -1163,11 +1182,13 @@ test "submitBlock invokes block_import callback" {
     };
 
     const fake_bytes = [_]u8{ 0xDE, 0xAD, 0xBE, 0xEF } ** 4;
-    const result = try submitBlock(&tc.ctx, &fake_bytes);
+    const result = try submitBlock(&tc.ctx, &fake_bytes, .full, .consensus);
     _ = result;
 
     try std.testing.expect(mock.called);
     try std.testing.expectEqual(fake_bytes.len, mock.received_len);
+    try std.testing.expectEqual(BlockType.full, mock.block_type);
+    try std.testing.expectEqual(types.BroadcastValidation.consensus, mock.broadcast_validation);
 }
 
 test "submitBlock propagates error from callback" {
@@ -1175,7 +1196,7 @@ test "submitBlock propagates error from callback" {
     defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
 
     const FailImporter = struct {
-        fn importBlock(_: *anyopaque, _: []const u8) anyerror!void {
+        fn importBlock(_: *anyopaque, _: context.PublishedBlockParams) anyerror!void {
             return error.BlockAlreadyKnown;
         }
     };
@@ -1187,7 +1208,7 @@ test "submitBlock propagates error from callback" {
     };
 
     const fake_bytes = [_]u8{0x01};
-    const result = submitBlock(&tc.ctx, &fake_bytes);
+    const result = submitBlock(&tc.ctx, &fake_bytes, .full, .gossip);
     try std.testing.expectError(error.BlockAlreadyKnown, result);
 }
 

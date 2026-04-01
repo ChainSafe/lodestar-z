@@ -71,6 +71,7 @@ pub const SyncCommitteeSubscription = struct {
 
 pub const ProduceBlockOpts = struct {
     fee_recipient: ?[20]u8 = null,
+    builder_selection: ?types.BuilderSelection = null,
     builder_boost_factor: ?u64 = null,
     strict_fee_recipient_check: bool = false,
     blinded_local: bool = false,
@@ -281,6 +282,7 @@ pub const BeaconApiClient = struct {
         var fork_name_buf: [32]u8 = [_]u8{0} ** 32;
         var fork_name_len: u8 = 0;
         var is_blinded = false;
+        var execution_payload_source: types.ExecutionPayloadSource = .engine;
         {
             var it = response.head.iterateHeaders();
             while (it.next()) |hdr| {
@@ -290,6 +292,8 @@ pub const BeaconApiClient = struct {
                     fork_name_len = len;
                 } else if (std.ascii.eqlIgnoreCase(hdr.name, "Eth-Execution-Payload-Blinded")) {
                     is_blinded = std.mem.eql(u8, hdr.value, "true");
+                } else if (std.ascii.eqlIgnoreCase(hdr.name, "Eth-Execution-Payload-Source")) {
+                    execution_payload_source = types.ExecutionPayloadSource.parse(hdr.value) catch return error.InvalidResponse;
                 }
             }
         }
@@ -306,6 +310,7 @@ pub const BeaconApiClient = struct {
             .fork_name = fork_name_buf,
             .fork_name_len = fork_name_len,
             .is_blinded = is_blinded,
+            .execution_payload_source = execution_payload_source,
         };
     }
 
@@ -314,6 +319,7 @@ pub const BeaconApiClient = struct {
         fork_name: [32]u8,
         fork_name_len: u8,
         is_blinded: bool,
+        execution_payload_source: types.ExecutionPayloadSource,
     };
 
     /// Perform a POST request with JSON body and return the response body (caller frees).
@@ -786,6 +792,9 @@ pub const BeaconApiClient = struct {
                 std.fmt.bytesToHex(&fee_recipient, .lower),
             });
         }
+        if (opts.builder_selection) |builder_selection| {
+            try path.writer.print("&builder_selection={s}", .{builder_selection.queryValue()});
+        }
         if (opts.builder_boost_factor) |boost_factor| {
             try path.writer.print("&builder_boost_factor={d}", .{boost_factor});
         }
@@ -797,6 +806,18 @@ pub const BeaconApiClient = struct {
         }
 
         return path.toOwnedSlice();
+    }
+
+    fn buildPublishBlockPath(
+        self: *BeaconApiClient,
+        base_path: []const u8,
+        broadcast_validation: types.BroadcastValidation,
+    ) ![]u8 {
+        return std.fmt.allocPrint(
+            self.allocator,
+            "{s}?broadcast_validation={s}",
+            .{ base_path, broadcast_validation.queryValue() },
+        );
     }
 
     /// GET /eth/v3/validator/blocks/{slot}?randao_reveal=...&graffiti=...
@@ -823,8 +844,11 @@ pub const BeaconApiClient = struct {
         self: *BeaconApiClient,
         io: Io,
         signed_block_ssz: []const u8,
+        broadcast_validation: types.BroadcastValidation,
     ) !void {
-        try self.postNoResponse(io, "/eth/v2/beacon/blocks", signed_block_ssz);
+        const path = try self.buildPublishBlockPath("/eth/v2/beacon/blocks", broadcast_validation);
+        defer self.allocator.free(path);
+        try self.postNoResponse(io, path, signed_block_ssz);
     }
 
     /// GET /eth/v3/validator/blocks/{slot} with SSZ response.
@@ -851,6 +875,7 @@ pub const BeaconApiClient = struct {
             .fork_name = resp.fork_name,
             .fork_name_len = resp.fork_name_len,
             .blinded = resp.is_blinded,
+            .execution_payload_source = resp.execution_payload_source,
         };
     }
 
@@ -863,8 +888,11 @@ pub const BeaconApiClient = struct {
         io: Io,
         signed_block_ssz: []const u8,
         fork_name: []const u8,
+        broadcast_validation: types.BroadcastValidation,
     ) !void {
-        try self.postSsz(io, "/eth/v2/beacon/blocks", signed_block_ssz, fork_name);
+        const path = try self.buildPublishBlockPath("/eth/v2/beacon/blocks", broadcast_validation);
+        defer self.allocator.free(path);
+        try self.postSsz(io, path, signed_block_ssz, fork_name);
     }
 
     // -----------------------------------------------------------------------
@@ -1143,8 +1171,11 @@ pub const BeaconApiClient = struct {
         io: Io,
         signed_block_ssz: []const u8,
         fork_name: []const u8,
+        broadcast_validation: types.BroadcastValidation,
     ) !void {
-        try self.postSsz(io, "/eth/v2/beacon/blinded_blocks", signed_block_ssz, fork_name);
+        const path = try self.buildPublishBlockPath("/eth/v2/beacon/blinded_blocks", broadcast_validation);
+        defer self.allocator.free(path);
+        try self.postSsz(io, path, signed_block_ssz, fork_name);
     }
 
     // -----------------------------------------------------------------------
@@ -1403,6 +1434,8 @@ pub const ProduceBlockSszResponse = struct {
     fork_name_len: u8,
     /// Whether the block is blinded (from response headers).
     blinded: bool,
+    /// Where the execution payload came from.
+    execution_payload_source: types.ExecutionPayloadSource,
 
     pub fn forkNameStr(self: *const ProduceBlockSszResponse) []const u8 {
         return self.fork_name[0..self.fork_name_len];
@@ -1442,6 +1475,7 @@ test "buildProduceBlockPath includes extended produceBlock opts" {
         [_]u8{0x22} ** 32,
         .{
             .fee_recipient = [_]u8{0x33} ** 20,
+            .builder_selection = .maxprofit,
             .builder_boost_factor = 150,
             .strict_fee_recipient_check = true,
             .blinded_local = true,
@@ -1452,9 +1486,21 @@ test "buildProduceBlockPath includes extended produceBlock opts" {
     try std.testing.expect(std.mem.indexOf(u8, path, "randao_reveal=0x") != null);
     try std.testing.expect(std.mem.indexOf(u8, path, "graffiti=0x") != null);
     try std.testing.expect(std.mem.indexOf(u8, path, "fee_recipient=0x3333") != null);
+    try std.testing.expect(std.mem.indexOf(u8, path, "builder_selection=maxprofit") != null);
     try std.testing.expect(std.mem.indexOf(u8, path, "builder_boost_factor=150") != null);
     try std.testing.expect(std.mem.indexOf(u8, path, "strict_fee_recipient_check=true") != null);
     try std.testing.expect(std.mem.indexOf(u8, path, "blinded_local=true") != null);
+}
+
+test "buildPublishBlockPath includes broadcast validation query" {
+    var client = BeaconApiClient.init(std.testing.allocator, "http://127.0.0.1:5052");
+    const path = try client.buildPublishBlockPath("/eth/v2/beacon/blinded_blocks", .consensus);
+    defer std.testing.allocator.free(path);
+
+    try std.testing.expectEqualStrings(
+        "/eth/v2/beacon/blinded_blocks?broadcast_validation=consensus",
+        path,
+    );
 }
 
 fn parseHexField(
