@@ -947,8 +947,6 @@ pub fn processorHandlerCallback(item: WorkItem, context: *anyopaque) void {
             // 2. Batch-verify all N signatures at once (~3-10x faster than individual)
             // 3. On batch success: import all attestations to fork choice + pool
             // 4. On batch failure: fall back to individual verification to find bad one(s)
-            const QueuedAttestation = gossip_handler_mod.QueuedAttestation;
-
             std.log.debug("Processor: attestation batch (count={d})", .{batch.count});
 
             // Step 1: Try batch BLS verification of all attestations.
@@ -965,8 +963,7 @@ pub fn processorHandlerCallback(item: WorkItem, context: *anyopaque) void {
                     var j: u32 = 0;
                     while (j < batch.count) : (j += 1) {
                         const att_work = batch.items[j];
-                        const queued = att_work.data.cast(QueuedAttestation);
-                        if (!verifyFn(gh.node, queued.ssz_bytes)) {
+                        if (!verifyFn(gh.node, &att_work.attestation)) {
                             batch_valid = false;
                             break;
                         }
@@ -983,32 +980,27 @@ pub fn processorHandlerCallback(item: WorkItem, context: *anyopaque) void {
             var i: u32 = 0;
             while (i < batch.count) : (i += 1) {
                 const att_work = batch.items[i];
-                const queued = att_work.data.cast(QueuedAttestation);
-                defer att_work.data.deinit();
+                var attestation = att_work.attestation;
+                defer attestation.deinit(node.allocator);
 
                 if (!batch_valid) {
                     // Batch failed — verify individually to find the bad one(s).
                     if (node.gossip_handler) |gh| {
                         if (gh.verifyAttestationSignatureFn) |verifyFn| {
-                            if (!verifyFn(gh.node, queued.ssz_bytes)) {
-                                std.log.warn("Attestation BLS failed in batch fallback slot={d}", .{queued.att.slot});
+                            if (!verifyFn(gh.node, &attestation)) {
+                                std.log.warn("Attestation BLS failed in batch fallback slot={d}", .{attestation.slot()});
                                 continue; // Skip this invalid attestation.
                             }
                         }
                     }
                 }
 
-                // Import to fork choice (apply vote weight).
-                // Op pool insertion requires a full Attestation struct — deferred to
-                // when full attestation objects are threaded through the pipeline.
-                node.chainService().applyAttestationVote(
-                    @intCast(queued.att.attester_index),
-                    queued.att.slot,
-                    queued.att.beacon_block_root,
-                    queued.att.target_epoch,
-                ) catch |err| {
-                    std.log.warn("FC onSingleVote failed validator={d} slot={d}: {}", .{
-                        queued.att.attester_index, queued.att.slot, err,
+                const gh = node.gossip_handler orelse continue;
+                const importFn = gh.importAttestationFn orelse continue;
+
+                importFn(gh.node, &attestation) catch |err| {
+                    std.log.warn("Processor: attestation import failed for slot {d}: {}", .{
+                        attestation.slot(), err,
                     });
                 };
             }
@@ -1030,41 +1022,36 @@ pub fn processorHandlerCallback(item: WorkItem, context: *anyopaque) void {
         .attestation => |att_work| {
             // Single attestation (not batched).
             // BLS verify and import to fork choice.
-            const QueuedAttestation = gossip_handler_mod.QueuedAttestation;
-            const queued = att_work.data.cast(QueuedAttestation);
-            defer att_work.data.deinit();
+            var attestation = att_work.attestation;
+            defer attestation.deinit(node.allocator);
 
             // BLS signature verification.
             if (node.gossip_handler) |gh| {
                 if (gh.verifyAttestationSignatureFn) |verifyFn| {
-                    if (!verifyFn(gh.node, queued.ssz_bytes)) {
-                        std.log.warn("Single attestation BLS failed slot={d}", .{queued.att.slot});
+                    if (!verifyFn(gh.node, &attestation)) {
+                        std.log.warn("Single attestation BLS failed slot={d}", .{attestation.slot()});
                         return;
                     }
                 }
+                const importFn = gh.importAttestationFn orelse return;
+                importFn(gh.node, &attestation) catch |err| {
+                    std.log.warn("Processor: attestation import failed for slot {d}: {}", .{
+                        attestation.slot(), err,
+                    });
+                };
             }
-
-            // Import to fork choice.
-            node.chainService().applyAttestationVote(
-                @intCast(queued.att.attester_index),
-                queued.att.slot,
-                queued.att.beacon_block_root,
-                queued.att.target_epoch,
-            ) catch |err| {
-                std.log.warn("FC onSingleVote failed validator={d}: {}", .{ queued.att.attester_index, err });
-            };
         },
         .gossip_voluntary_exit => |work| {
             handleQueuedVoluntaryExit(node, work);
         },
         .gossip_proposer_slashing => |work| {
-            handleQueuedPoolObject(node, work, .proposer_slashing);
+            handleQueuedProposerSlashing(node, work);
         },
         .gossip_attester_slashing => |work| {
-            handleQueuedPoolObject(node, work, .attester_slashing);
+            handleQueuedAttesterSlashing(node, work);
         },
         .gossip_bls_to_exec => |work| {
-            handleQueuedPoolObject(node, work, .bls_to_execution_change);
+            handleQueuedBlsChange(node, work);
         },
         .gossip_blob => |work| {
             handleQueuedBlobSidecar(node, work);
@@ -1086,97 +1073,94 @@ pub fn processorHandlerCallback(item: WorkItem, context: *anyopaque) void {
     }
 }
 
-const PoolObjectKind = enum {
-    proposer_slashing,
-    attester_slashing,
-    bls_to_execution_change,
-};
-
-fn handleQueuedAggregate(
-    node: *BeaconNode,
-    work: processor_mod.work_item.AggregateWork,
-) void {
-    const QueuedSszBytes = gossip_handler_mod.QueuedSszBytes;
-    const queued = work.data.cast(QueuedSszBytes);
-    defer work.data.deinit();
-
-    const decoded = networking.gossip_decoding.decodeFromSszBytes(
-        node.allocator,
-        .beacon_aggregate_and_proof,
-        queued.ssz_bytes,
-        queued.fork_seq,
-    ) catch |err| {
-        std.log.warn("Processor: aggregate decode failed: {}", .{err});
-        return;
-    };
-    const agg = decoded.beacon_aggregate_and_proof;
-
-    std.log.info("Accepted aggregate: aggregator={d} slot={d} target_epoch={d}", .{
-        agg.aggregator_index,
-        agg.attestation_slot,
-        agg.attestation_target_epoch,
-    });
-}
-
-fn handleQueuedVoluntaryExit(
-    node: *BeaconNode,
-    work: processor_mod.work_item.PoolObjectWork,
-) void {
+fn handleQueuedAggregate(node: *BeaconNode, work: processor_mod.work_item.AggregateWork) void {
     const gh = node.gossip_handler orelse {
-        work.data.deinit();
+        var aggregate = work.aggregate;
+        aggregate.deinit(node.allocator);
         return;
     };
-    const importFn = gh.importVoluntaryExitFn orelse {
-        work.data.deinit();
-        return;
-    };
-
-    const QueuedSszBytes = gossip_handler_mod.QueuedSszBytes;
-    const queued = work.data.cast(QueuedSszBytes);
-    defer work.data.deinit();
-
-    var exit: types.phase0.SignedVoluntaryExit.Type = undefined;
-    types.phase0.SignedVoluntaryExit.deserializeFromBytes(queued.ssz_bytes, &exit) catch |err| {
-        std.log.warn("Processor: voluntary exit decode failed: {}", .{err});
+    const importFn = gh.importAggregateFn orelse {
+        var aggregate = work.aggregate;
+        aggregate.deinit(node.allocator);
         return;
     };
 
-    importFn(gh.node, exit.message.validator_index, exit.message.epoch) catch |err| {
-        std.log.warn("Processor: voluntary exit import failed for validator {d}: {}", .{
-            exit.message.validator_index, err,
+    var aggregate = work.aggregate;
+    defer aggregate.deinit(node.allocator);
+
+    importFn(gh.node, &aggregate) catch |err| {
+        std.log.warn("Processor: aggregate import failed for aggregator {d}: {}", .{
+            aggregate.aggregatorIndex(), err,
         });
     };
 }
 
-fn handleQueuedPoolObject(
+fn handleQueuedVoluntaryExit(node: *BeaconNode, work: processor_mod.work_item.VoluntaryExitWork) void {
+    const gh = node.gossip_handler orelse {
+        return;
+    };
+    const importFn = gh.importVoluntaryExitFn orelse {
+        return;
+    };
+
+    importFn(gh.node, &work.exit) catch |err| {
+        std.log.warn("Processor: voluntary exit import failed for validator {d}: {}", .{
+            work.exit.message.validator_index, err,
+        });
+    };
+}
+
+fn handleQueuedAttesterSlashingSsz(node: *BeaconNode, ssz_bytes: []const u8) void {
+    const gh = node.gossip_handler orelse {
+        return;
+    };
+    const importFn = gh.importAttesterSlashingFn orelse {
+        return;
+    };
+
+    importFn(gh.node, ssz_bytes) catch |err| {
+        std.log.warn("Processor: attester slashing import failed: {}", .{err});
+    };
+}
+
+fn handleQueuedProposerSlashing(
     node: *BeaconNode,
-    work: processor_mod.work_item.PoolObjectWork,
-    kind: PoolObjectKind,
+    work: processor_mod.work_item.ProposerSlashingWork,
 ) void {
     const gh = node.gossip_handler orelse {
-        work.data.deinit();
+        return;
+    };
+    const importFn = gh.importProposerSlashingFn orelse {
         return;
     };
 
-    const importFn = switch (kind) {
-        .proposer_slashing => gh.importProposerSlashingFn,
-        .attester_slashing => gh.importAttesterSlashingFn,
-        .bls_to_execution_change => gh.importBlsChangeFn,
-    } orelse {
-        work.data.deinit();
+    importFn(gh.node, &work.slashing) catch |err| {
+        std.log.warn("Processor: proposer slashing import failed: {}", .{err});
+    };
+}
+
+fn handleQueuedAttesterSlashing(
+    node: *BeaconNode,
+    work: processor_mod.work_item.AttesterSlashingWork,
+) void {
+    var payload = work.payload;
+    defer payload.deinit();
+    handleQueuedAttesterSlashingSsz(node, payload.ssz.ssz_bytes);
+}
+
+fn handleQueuedBlsChange(
+    node: *BeaconNode,
+    work: processor_mod.work_item.BlsToExecutionChangeWork,
+) void {
+    const gh = node.gossip_handler orelse {
+        return;
+    };
+    const importFn = gh.importBlsChangeFn orelse {
         return;
     };
 
-    const QueuedSszBytes = gossip_handler_mod.QueuedSszBytes;
-    const queued = work.data.cast(QueuedSszBytes);
-    defer work.data.deinit();
-
-    importFn(gh.node, queued.ssz_bytes) catch |err| {
-        switch (kind) {
-            .proposer_slashing => std.log.warn("Processor: proposer slashing import failed: {}", .{err}),
-            .attester_slashing => std.log.warn("Processor: attester slashing import failed: {}", .{err}),
-            .bls_to_execution_change => std.log.warn("Processor: BLS change import failed: {}", .{err}),
-        }
+    importFn(gh.node, &work.change) catch |err| {
+        std.log.warn("Processor: BLS change import failed: {}", .{err});
     };
 }
 
@@ -1185,19 +1169,13 @@ fn handleQueuedSyncContribution(
     work: processor_mod.work_item.SyncContributionWork,
 ) void {
     const gh = node.gossip_handler orelse {
-        work.data.deinit();
         return;
     };
     const importFn = gh.importSyncContributionFn orelse {
-        work.data.deinit();
         return;
     };
 
-    const QueuedSszBytes = gossip_handler_mod.QueuedSszBytes;
-    const queued = work.data.cast(QueuedSszBytes);
-    defer work.data.deinit();
-
-    importFn(gh.node, queued.ssz_bytes) catch |err| {
+    importFn(gh.node, &work.signed_contribution) catch |err| {
         std.log.warn("Processor: sync contribution import failed: {}", .{err});
     };
 }
@@ -1251,19 +1229,13 @@ fn handleQueuedSyncMessage(
     work: processor_mod.work_item.SyncMessageWork,
 ) void {
     const gh = node.gossip_handler orelse {
-        work.data.deinit();
         return;
     };
     const importFn = gh.importSyncCommitteeMessageFn orelse {
-        work.data.deinit();
         return;
     };
 
-    const QueuedSszBytes = gossip_handler_mod.QueuedSszBytes;
-    const queued = work.data.cast(QueuedSszBytes);
-    defer work.data.deinit();
-
-    importFn(gh.node, queued.ssz_bytes, work.subnet_id) catch |err| {
+    importFn(gh.node, &work.message, work.subnet_id) catch |err| {
         std.log.warn("Processor: sync committee message import failed: {}", .{err});
     };
 }
@@ -1278,23 +1250,51 @@ fn handleQueuedSyncMessage(
 // ---------------------------------------------------------------------------
 
 const ProcessorImportTestContext = struct {
+    aggregate_aggregator_index: ?u64 = null,
+    aggregate_slot: ?u64 = null,
+    aggregate_target_epoch: ?u64 = null,
+    attestation_slot: ?u64 = null,
+    attestation_committee_index: ?u64 = null,
+    attestation_is_electra_single: bool = false,
     validator_index: ?u64 = null,
     exit_epoch: ?u64 = null,
     sync_subnet: ?u64 = null,
-    sync_bytes_len: usize = 0,
+    sync_slot: ?u64 = null,
+    sync_validator_index: ?u64 = null,
     blob_bytes_len: usize = 0,
     data_column_bytes_len: usize = 0,
 
-    fn importVoluntaryExit(ptr: *anyopaque, validator_index: u64, epoch: u64) anyerror!void {
+    fn importVoluntaryExit(ptr: *anyopaque, exit: *const types.phase0.SignedVoluntaryExit.Type) anyerror!void {
         const ctx: *ProcessorImportTestContext = @ptrCast(@alignCast(ptr));
-        ctx.validator_index = validator_index;
-        ctx.exit_epoch = epoch;
+        ctx.validator_index = exit.message.validator_index;
+        ctx.exit_epoch = exit.message.epoch;
     }
 
-    fn importSyncCommitteeMessage(ptr: *anyopaque, ssz_bytes: []const u8, subnet: u64) anyerror!void {
+    fn importAggregate(ptr: *anyopaque, aggregate: *const fork_types.AnySignedAggregateAndProof) anyerror!void {
+        const ctx: *ProcessorImportTestContext = @ptrCast(@alignCast(ptr));
+        ctx.aggregate_aggregator_index = aggregate.aggregatorIndex();
+        const attestation = aggregate.attestation();
+        const data = attestation.data();
+        ctx.aggregate_slot = data.slot;
+        ctx.aggregate_target_epoch = data.target.epoch;
+    }
+
+    fn importAttestation(ptr: *anyopaque, attestation: *const fork_types.AnyGossipAttestation) anyerror!void {
+        const ctx: *ProcessorImportTestContext = @ptrCast(@alignCast(ptr));
+        const data = attestation.data();
+        ctx.attestation_slot = data.slot;
+        ctx.attestation_committee_index = attestation.committeeIndex();
+        ctx.attestation_is_electra_single = switch (attestation.*) {
+            .electra_single => true,
+            .phase0 => false,
+        };
+    }
+
+    fn importSyncCommitteeMessage(ptr: *anyopaque, msg: *const types.altair.SyncCommitteeMessage.Type, subnet: u64) anyerror!void {
         const ctx: *ProcessorImportTestContext = @ptrCast(@alignCast(ptr));
         ctx.sync_subnet = subnet;
-        ctx.sync_bytes_len = ssz_bytes.len;
+        ctx.sync_slot = msg.slot;
+        ctx.sync_validator_index = msg.validator_index;
     }
 
     fn importBlobSidecar(ptr: *anyopaque, ssz_bytes: []const u8) anyerror!void {
@@ -1351,14 +1351,74 @@ test "processorHandlerCallback imports queued voluntary exits" {
     _ = types.phase0.SignedVoluntaryExit.serializeIntoBytes(&exit, ssz_bytes);
 
     processorHandlerCallback(.{ .gossip_voluntary_exit = .{
-        .peer_id = 1,
+        .source = .{ .key = 1 },
         .message_id = std.mem.zeroes(processor_mod.work_item.MessageId),
-        .data = try makeQueuedSszHandle(allocator, .phase0, ssz_bytes),
+        .exit = exit,
         .seen_timestamp_ns = 0,
     } }, @ptrCast(&node));
 
     try std.testing.expectEqual(@as(?u64, 34), ctx.validator_index);
     try std.testing.expectEqual(@as(?u64, 12), ctx.exit_epoch);
+}
+
+test "processorHandlerCallback imports queued aggregates" {
+    const allocator = std.testing.allocator;
+
+    var ctx = ProcessorImportTestContext{};
+    var node: BeaconNode = undefined;
+    node.allocator = allocator;
+
+    var gh: GossipHandler = undefined;
+    gh.node = @ptrCast(&ctx);
+    gh.importAggregateFn = &ProcessorImportTestContext.importAggregate;
+    node.gossip_handler = &gh;
+
+    var signed_agg = types.phase0.SignedAggregateAndProof.default_value;
+    signed_agg.message.aggregator_index = 21;
+    signed_agg.message.aggregate.data.slot = 123;
+    signed_agg.message.aggregate.data.target.epoch = 4;
+
+    processorHandlerCallback(.{ .aggregate = .{
+        .source = .{ .key = 1 },
+        .message_id = std.mem.zeroes(processor_mod.work_item.MessageId),
+        .aggregate = .{ .phase0 = signed_agg },
+        .seen_timestamp_ns = 0,
+    } }, @ptrCast(&node));
+
+    try std.testing.expectEqual(@as(?u64, 21), ctx.aggregate_aggregator_index);
+    try std.testing.expectEqual(@as(?u64, 123), ctx.aggregate_slot);
+    try std.testing.expectEqual(@as(?u64, 4), ctx.aggregate_target_epoch);
+}
+
+test "processorHandlerCallback imports queued attestations" {
+    const allocator = std.testing.allocator;
+
+    var ctx = ProcessorImportTestContext{};
+    var node: BeaconNode = undefined;
+    node.allocator = allocator;
+
+    var gh: GossipHandler = undefined;
+    gh.node = @ptrCast(&ctx);
+    gh.importAttestationFn = &ProcessorImportTestContext.importAttestation;
+    gh.verifyAttestationSignatureFn = null;
+    node.gossip_handler = &gh;
+
+    var attestation = types.electra.SingleAttestation.default_value;
+    attestation.committee_index = 7;
+    attestation.attester_index = 19;
+    attestation.data.slot = 222;
+
+    processorHandlerCallback(.{ .attestation = .{
+        .source = .{ .key = 1 },
+        .message_id = std.mem.zeroes(processor_mod.work_item.MessageId),
+        .attestation = .{ .electra_single = attestation },
+        .subnet_id = 0,
+        .seen_timestamp_ns = 0,
+    } }, @ptrCast(&node));
+
+    try std.testing.expectEqual(@as(?u64, 222), ctx.attestation_slot);
+    try std.testing.expectEqual(@as(?u64, 7), ctx.attestation_committee_index);
+    try std.testing.expect(ctx.attestation_is_electra_single);
 }
 
 test "processorHandlerCallback imports queued sync committee messages" {
@@ -1385,16 +1445,16 @@ test "processorHandlerCallback imports queued sync committee messages" {
     _ = types.altair.SyncCommitteeMessage.serializeIntoBytes(&msg, ssz_bytes);
 
     processorHandlerCallback(.{ .sync_message = .{
-        .peer_id = 1,
+        .source = .{ .key = 1 },
         .message_id = std.mem.zeroes(processor_mod.work_item.MessageId),
-        .data = try makeQueuedSszHandle(allocator, .altair, ssz_bytes),
-        .slot = msg.slot,
+        .message = msg,
         .subnet_id = 3,
         .seen_timestamp_ns = 0,
     } }, @ptrCast(&node));
 
     try std.testing.expectEqual(@as(?u64, 3), ctx.sync_subnet);
-    try std.testing.expectEqual(ssz_bytes.len, ctx.sync_bytes_len);
+    try std.testing.expectEqual(@as(?u64, 99), ctx.sync_slot);
+    try std.testing.expectEqual(@as(?u64, 7), ctx.sync_validator_index);
 }
 
 test "processorHandlerCallback imports queued blob sidecars" {
@@ -1413,7 +1473,7 @@ test "processorHandlerCallback imports queued blob sidecars" {
     defer allocator.free(ssz_bytes);
 
     processorHandlerCallback(.{ .gossip_blob = .{
-        .peer_id = 1,
+        .source = .{ .key = 1 },
         .message_id = std.mem.zeroes(processor_mod.work_item.MessageId),
         .data = try makeQueuedSszHandle(allocator, .deneb, ssz_bytes),
         .seen_timestamp_ns = 0,
@@ -1438,7 +1498,7 @@ test "processorHandlerCallback imports queued data column sidecars" {
     defer allocator.free(ssz_bytes);
 
     processorHandlerCallback(.{ .gossip_data_column = .{
-        .peer_id = 1,
+        .source = .{ .key = 1 },
         .message_id = std.mem.zeroes(processor_mod.work_item.MessageId),
         .data = try makeQueuedSszHandle(allocator, .fulu, ssz_bytes),
         .seen_timestamp_ns = 0,

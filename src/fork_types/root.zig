@@ -16,12 +16,14 @@ pub const AnyBeaconBlock = @import("./any_beacon_block.zig").AnyBeaconBlock;
 pub const AnyBeaconBlockBody = @import("./any_beacon_block.zig").AnyBeaconBlockBody;
 pub const AnyExecutionPayload = @import("./any_execution_payload.zig").AnyExecutionPayload;
 pub const AnyExecutionPayloadHeader = @import("./any_execution_payload.zig").AnyExecutionPayloadHeader;
+pub const AnySignedAggregateAndProof = @import("./any_signed_aggregate_and_proof.zig").AnySignedAggregateAndProof;
 pub const AnyAttesterSlashing = @import("./any_attester_slashing.zig").AnyAttesterSlashing;
 pub const AnyAttesterSlashings = @import("./any_attester_slashing.zig").AnyAttesterSlashings;
 pub const AnyAttesterSlashingItems = @import("./any_attester_slashing.zig").AnyAttesterSlashingItems;
 pub const AnyAttestation = @import("./any_attestation.zig").AnyAttestation;
 pub const AnyAttestations = @import("./any_attestation.zig").AnyAttestations;
 pub const AnyAttestationItems = @import("./any_attestation.zig").AnyAttestationItems;
+pub const AnyGossipAttestation = @import("./any_gossip_attestation.zig").AnyGossipAttestation;
 
 const testing = @import("std").testing;
 test {
@@ -38,4 +40,5 @@ test {
     testing.refAllDecls(AnyBeaconBlockBody);
     testing.refAllDecls(AnyExecutionPayload);
     testing.refAllDecls(AnyExecutionPayloadHeader);
+    testing.refAllDecls(AnyGossipAttestation);
 }

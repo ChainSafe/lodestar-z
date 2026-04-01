@@ -508,25 +508,22 @@ pub const Chain = struct {
     /// responsibility (gossip validation or API layer).
     pub fn importAttestation(
         self: *Chain,
-        attestation_slot: u64,
-        committee_index: u64,
-        beacon_block_root: [32]u8,
-        target_root: [32]u8,
-        target_epoch: u64,
         validator_index: u64,
         attestation: fork_types.AnyAttestation,
     ) !void {
+        const data = attestation.data();
+
         // Apply vote weight to fork choice.
         if (self.fork_choice) |fc| {
             fc.onSingleVote(
                 self.allocator,
                 @intCast(validator_index),
-                attestation_slot,
-                beacon_block_root,
-                target_epoch,
+                data.slot,
+                data.beacon_block_root,
+                data.target.epoch,
             ) catch |err| {
                 log_mod.logger(.chain).warn("FC onAttestation failed for validator {d} slot {d}: {}", .{
-                    validator_index, attestation_slot, err,
+                    validator_index, data.slot, err,
                 });
                 // Non-fatal — still insert into pool for block packing.
             };
@@ -538,17 +535,22 @@ pub const Chain = struct {
 
         // Publish attestation notification.
         if (self.notification_sink) |sink| {
+            var aggregation_bits = [_]u8{0} ** 8;
+            const aggregation_bits_bytes = attestation.aggregationBitsBytes();
+            const copy_len = @min(aggregation_bits.len, aggregation_bits_bytes.len);
+            @memcpy(aggregation_bits[0..copy_len], aggregation_bits_bytes[0..copy_len]);
+
             sink.publish(.{
                 .attestation = .{
-                    .aggregation_bits = [_]u8{0x01} ++ [_]u8{0} ** 7, // simplified; real impl extracts from bitfield
-                    .slot = attestation_slot,
-                    .committee_index = committee_index,
-                    .beacon_block_root = beacon_block_root,
-                    .source_epoch = target_epoch -| 1,
-                    .source_root = [_]u8{0} ** 32, // TODO: extract from attestation data
-                    .target_epoch = target_epoch,
-                    .target_root = target_root,
-                    .signature = [_]u8{0} ** 96, // TODO: extract from attestation
+                    .aggregation_bits = aggregation_bits,
+                    .slot = data.slot,
+                    .committee_index = attestation.committeeIndex(),
+                    .beacon_block_root = data.beacon_block_root,
+                    .source_epoch = data.source.epoch,
+                    .source_root = data.source.root,
+                    .target_epoch = data.target.epoch,
+                    .target_root = data.target.root,
+                    .signature = attestation.signature(),
                 },
             });
         }

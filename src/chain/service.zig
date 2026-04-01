@@ -275,23 +275,39 @@ pub const Service = struct {
 
     pub fn importAttestation(
         self: Service,
-        attestation_slot: u64,
-        committee_index: u64,
-        beacon_block_root: Root,
-        target_root: Root,
-        target_epoch: u64,
         validator_index: ValidatorIndex,
         attestation: fork_types.AnyAttestation,
     ) !void {
         try self.chain.importAttestation(
-            attestation_slot,
-            committee_index,
-            beacon_block_root,
-            target_root,
-            target_epoch,
             validator_index,
             attestation,
         );
+    }
+
+    pub fn importAggregate(
+        self: Service,
+        attestation: fork_types.AnyAttestation,
+        attesting_indices: []const ValidatorIndex,
+    ) !void {
+        const data = attestation.data();
+
+        if (self.chain.fork_choice) |fc| {
+            for (attesting_indices) |validator_index| {
+                fc.onSingleVote(
+                    self.chain.allocator,
+                    validator_index,
+                    data.slot,
+                    data.beacon_block_root,
+                    data.target.epoch,
+                ) catch |err| {
+                    std.log.warn("FC onAggregate failed for validator {d} slot {d}: {}", .{
+                        validator_index, data.slot, err,
+                    });
+                };
+            }
+        }
+
+        _ = try self.chain.op_pool.agg_attestation_pool.addAny(attestation);
     }
 
     pub fn applyAttestationVote(

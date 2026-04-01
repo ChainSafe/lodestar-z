@@ -19,8 +19,12 @@ const testing = std.testing;
 const work_item_mod = @import("work_item.zig");
 const WorkItem = work_item_mod.WorkItem;
 const WorkType = work_item_mod.WorkType;
+const GossipSource = work_item_mod.GossipSource;
 const MessageId = work_item_mod.MessageId;
-const GossipDataHandle = work_item_mod.GossipDataHandle;
+const OpaqueHandle = work_item_mod.OpaqueHandle;
+const PeerIdHandle = work_item_mod.PeerIdHandle;
+const consensus_types = @import("consensus_types");
+const fork_types = @import("fork_types");
 
 const work_queues_mod = @import("work_queues.zig");
 const WorkQueues = work_queues_mod.WorkQueues;
@@ -250,8 +254,40 @@ const TestContext = struct {
     }
 };
 
-fn dummyHandle() GossipDataHandle {
-    return GossipDataHandle.initBorrowed(@ptrFromInt(0xDEAD));
+fn testOpaqueHandle(tag: usize) OpaqueHandle {
+    return OpaqueHandle.initBorrowed(@ptrFromInt(0x1000 + tag));
+}
+
+fn testPeerId(tag: u8) PeerIdHandle {
+    return switch (tag) {
+        1 => PeerIdHandle.initBorrowed("peer-1"),
+        2 => PeerIdHandle.initBorrowed("peer-2"),
+        3 => PeerIdHandle.initBorrowed("peer-3"),
+        else => PeerIdHandle.initBorrowed("peer-x"),
+    };
+}
+
+fn testSource(tag: u64) GossipSource {
+    return .{ .key = tag };
+}
+
+fn testSignedVoluntaryExit(validator_index: u64, epoch: u64) consensus_types.phase0.SignedVoluntaryExit.Type {
+    return .{
+        .message = .{
+            .epoch = epoch,
+            .validator_index = validator_index,
+        },
+        .signature = [_]u8{0} ** 96,
+    };
+}
+
+fn testGossipAttestation(tag: u64) fork_types.AnyGossipAttestation {
+    var attestation = consensus_types.electra.SingleAttestation.default_value;
+    attestation.committee_index = @intCast(tag % 8);
+    attestation.attester_index = tag;
+    attestation.data.slot = 100 + tag;
+    attestation.data.target.epoch = 4;
+    return .{ .electra_single = attestation };
 }
 
 test "BeaconProcessor: ingest and dispatch priority order" {
@@ -271,12 +307,12 @@ test "BeaconProcessor: ingest and dispatch priority order" {
 
     // Ingest items in reverse priority order.
     proc.ingest(.{ .api_request_p1 = .{
-        .response_handle = 1,
+        .response = testOpaqueHandle(1),
         .seen_timestamp_ns = 100,
     } });
     proc.ingest(.{ .status = .{
-        .peer_id = 1,
-        .request_context = 2,
+        .peer_id = testPeerId(1),
+        .request = testOpaqueHandle(2),
         .seen_timestamp_ns = 200,
     } });
 
@@ -308,17 +344,17 @@ test "BeaconProcessor: drainAll" {
 
     // Ingest 3 items.
     proc.ingest(.{ .status = .{
-        .peer_id = 1,
-        .request_context = 1,
+        .peer_id = testPeerId(1),
+        .request = testOpaqueHandle(1),
         .seen_timestamp_ns = 100,
     } });
     proc.ingest(.{ .status = .{
-        .peer_id = 2,
-        .request_context = 2,
+        .peer_id = testPeerId(2),
+        .request = testOpaqueHandle(2),
         .seen_timestamp_ns = 200,
     } });
     proc.ingest(.{ .api_request_p1 = .{
-        .response_handle = 1,
+        .response = testOpaqueHandle(3),
         .seen_timestamp_ns = 300,
     } });
 
@@ -344,8 +380,8 @@ test "BeaconProcessor: metrics tracking" {
     );
 
     proc.processOne(.{ .status = .{
-        .peer_id = 1,
-        .request_context = 1,
+        .peer_id = testPeerId(1),
+        .request = testOpaqueHandle(1),
         .seen_timestamp_ns = 100,
     } });
 
@@ -373,11 +409,10 @@ test "BeaconProcessor: sync state affects dropping" {
     proc.setSyncState(.syncing);
 
     // Attestation should be dropped during sync.
-    const dummy_handle = dummyHandle();
     proc.ingest(.{ .attestation = .{
-        .peer_id = 1,
+        .source = testSource(1),
         .message_id = testMessageId(1),
-        .data = dummy_handle,
+        .attestation = testGossipAttestation(1),
         .subnet_id = 0,
         .seen_timestamp_ns = 100,
     } });
@@ -389,9 +424,9 @@ test "BeaconProcessor: sync state affects dropping" {
     // Switch to synced — attestation should be accepted.
     proc.setSyncState(.synced);
     proc.ingest(.{ .attestation = .{
-        .peer_id = 2,
+        .source = testSource(2),
         .message_id = testMessageId(2),
-        .data = dummy_handle,
+        .attestation = testGossipAttestation(2),
         .subnet_id = 1,
         .seen_timestamp_ns = 200,
     } });
@@ -463,7 +498,7 @@ test "BeaconProcessor: tick processes limited items" {
     var i: u32 = 0;
     while (i < 4) : (i += 1) {
         proc.ingest(.{ .api_request_p1 = .{
-            .response_handle = i,
+            .response = testOpaqueHandle(i),
             .seen_timestamp_ns = @as(i64, i) * 100,
         } });
     }
@@ -501,24 +536,23 @@ test "BeaconProcessor: getQueueDepths" {
 
     // Ingest different types.
     proc.ingest(.{ .status = .{
-        .peer_id = 1,
-        .request_context = 1,
+        .peer_id = testPeerId(1),
+        .request = testOpaqueHandle(1),
         .seen_timestamp_ns = 100,
     } });
 
-    const dummy_handle = dummyHandle();
     proc.ingest(.{ .attestation = .{
-        .peer_id = 1,
+        .source = testSource(1),
         .message_id = testMessageId(1),
-        .data = dummy_handle,
+        .attestation = testGossipAttestation(1),
         .subnet_id = 0,
         .seen_timestamp_ns = 100,
     } });
 
     proc.ingest(.{ .gossip_voluntary_exit = .{
-        .peer_id = 1,
+        .source = testSource(1),
         .message_id = testMessageId(1),
-        .data = dummy_handle,
+        .exit = testSignedVoluntaryExit(12, 34),
         .seen_timestamp_ns = 100,
     } });
 
@@ -548,25 +582,24 @@ test "BeaconProcessor: attestation batching" {
     );
 
     // Ingest 3 attestations. The LIFO queue should batch them when popped.
-    const dummy_handle = dummyHandle();
     proc.ingest(.{ .attestation = .{
-        .peer_id = 1,
+        .source = testSource(1),
         .message_id = testMessageId(1),
-        .data = dummy_handle,
+        .attestation = testGossipAttestation(1),
         .subnet_id = 0,
         .seen_timestamp_ns = 100,
     } });
     proc.ingest(.{ .attestation = .{
-        .peer_id = 2,
+        .source = testSource(2),
         .message_id = testMessageId(2),
-        .data = dummy_handle,
+        .attestation = testGossipAttestation(2),
         .subnet_id = 1,
         .seen_timestamp_ns = 200,
     } });
     proc.ingest(.{ .attestation = .{
-        .peer_id = 3,
+        .source = testSource(3),
         .message_id = testMessageId(3),
-        .data = dummy_handle,
+        .attestation = testGossipAttestation(3),
         .subnet_id = 2,
         .seen_timestamp_ns = 300,
     } });
@@ -602,11 +635,10 @@ test "BeaconProcessor: single attestation not batched" {
         @ptrCast(&ctx),
     );
 
-    const dummy_handle = dummyHandle();
     proc.ingest(.{ .attestation = .{
-        .peer_id = 1,
+        .source = testSource(1),
         .message_id = testMessageId(1),
-        .data = dummy_handle,
+        .attestation = testGossipAttestation(1),
         .subnet_id = 0,
         .seen_timestamp_ns = 100,
     } });
@@ -638,20 +670,17 @@ test "BeaconProcessor: blocks dispatched before attestations" {
         @ptrCast(&ctx),
     );
 
-    const dummy_handle = dummyHandle();
-
     // Enqueue attestation first, then block.
     proc.ingest(.{ .attestation = .{
-        .peer_id = 1,
+        .source = testSource(1),
         .message_id = testMessageId(1),
-        .data = dummy_handle,
+        .attestation = testGossipAttestation(1),
         .subnet_id = 0,
         .seen_timestamp_ns = 100,
     } });
 
-    const fork_types = @import("fork_types");
     proc.ingest(.{ .gossip_block = .{
-        .peer_id = 2,
+        .source = testSource(2),
         .message_id = testMessageId(2),
         .block = fork_types.AnySignedBeaconBlock{ .phase0 = undefined },
         .seen_timestamp_ns = 200,

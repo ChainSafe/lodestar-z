@@ -10,6 +10,9 @@ const testing = std.testing;
 pub const work_item = @import("work_item.zig");
 pub const WorkItem = work_item.WorkItem;
 pub const WorkType = work_item.WorkType;
+pub const GossipSource = work_item.GossipSource;
+pub const PeerIdHandle = work_item.PeerIdHandle;
+pub const OpaqueHandle = work_item.OpaqueHandle;
 
 pub const queues = @import("queues.zig");
 pub const FifoQueue = queues.FifoQueue;

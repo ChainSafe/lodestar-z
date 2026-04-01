@@ -2201,6 +2201,7 @@ fn initGossipHandler(self: *BeaconNode) void {
 
     if (self.gossip_handler) |gh| {
         gh.importAttestationFn = &callbacks.importAttestation;
+        gh.importAggregateFn = &callbacks.importAggregate;
         gh.importVoluntaryExitFn = &callbacks.importVoluntaryExit;
         gh.importProposerSlashingFn = &callbacks.importProposerSlashing;
         gh.importAttesterSlashingFn = &callbacks.importAttesterSlashing;

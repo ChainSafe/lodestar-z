@@ -16,11 +16,14 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const testing = std.testing;
+const types = @import("consensus_types");
 
 const networking = @import("networking");
 const config_mod = @import("config");
 const ForkSeq = config_mod.ForkSeq;
 const fork_types = @import("fork_types");
+const AnyGossipAttestation = fork_types.AnyGossipAttestation;
+const AnySignedAggregateAndProof = fork_types.AnySignedAggregateAndProof;
 const AnySignedBeaconBlock = fork_types.AnySignedBeaconBlock;
 const GossipTopicType = networking.GossipTopicType;
 const gossip_decoding = networking.gossip_decoding;
@@ -34,10 +37,19 @@ const BeaconMetrics = @import("metrics.zig").BeaconMetrics;
 const processor_mod = @import("processor");
 const BeaconProcessor = processor_mod.BeaconProcessor;
 const WorkItem = processor_mod.WorkItem;
+const GossipSource = processor_mod.work_item.GossipSource;
+const AttesterSlashingPayload = processor_mod.work_item.AttesterSlashingPayload;
 const MessageId = processor_mod.work_item.MessageId;
 const GossipDataHandle = processor_mod.work_item.GossipDataHandle;
+const OwnedSszBytes = processor_mod.work_item.OwnedSszBytes;
 const GossipAction = chain_gossip.GossipAction;
 const ChainState = chain_gossip.ChainState;
+
+const SignedVoluntaryExit = types.phase0.SignedVoluntaryExit.Type;
+const ProposerSlashing = types.phase0.ProposerSlashing.Type;
+const SignedBLSToExecutionChange = types.capella.SignedBLSToExecutionChange.Type;
+const SignedContributionAndProof = types.altair.SignedContributionAndProof.Type;
+const SyncCommitteeMessage = types.altair.SyncCommitteeMessage.Type;
 
 /// Error set for gossip processing failures.
 pub const GossipHandlerError = error{
@@ -66,20 +78,6 @@ pub const GossipProcessResult = union(enum) {
 /// 1. `create` — allocate and wire callbacks
 /// 2. `onGossipMessage` (or topic-specific methods)
 /// 3. `deinit` — release SeenCache and struct
-/// Heap-allocated attestation data for processor batch processing.
-/// Allocated by gossip handler, freed by processor handler after BLS verification.
-pub const QueuedAttestation = struct {
-    att: gossip_decoding.DecodedAttestation,
-    /// Owned copy of decompressed SSZ bytes for BLS signature verification.
-    ssz_bytes: []u8,
-    allocator: std.mem.Allocator,
-
-    pub fn deinit(self: *QueuedAttestation) void {
-        self.allocator.free(self.ssz_bytes);
-        self.allocator.destroy(self);
-    }
-};
-
 /// Heap-allocated copy of a decoded gossip payload's SSZ bytes.
 /// Used when the processor needs to import an object from raw SSZ later.
 pub const QueuedSszBytes = struct {
@@ -94,7 +92,7 @@ pub const QueuedSszBytes = struct {
 };
 
 pub const GossipIngressMetadata = struct {
-    peer_id: u64 = 0,
+    source: GossipSource = .{},
     message_id: MessageId = std.mem.zeroes(MessageId),
     seen_timestamp_ns: i64 = 0,
 };
@@ -113,27 +111,20 @@ pub const GossipHandler = struct {
     /// Null until wired by BeaconNode (attestation import is optional during early bringup).
     importAttestationFn: ?*const fn (
         ptr: *anyopaque,
-        attestation_slot: u64,
-        committee_index: u64,
-        target_root: [32]u8,
-        target_epoch: u64,
-        validator_index: u64,
-        beacon_block_root: [32]u8,
-        source_epoch: u64,
-        source_root: [32]u8,
+        attestation: *const AnyGossipAttestation,
     ) anyerror!void,
 
     /// Called to import a validated voluntary exit into the op pool.
-    importVoluntaryExitFn: ?*const fn (ptr: *anyopaque, validator_index: u64, epoch: u64) anyerror!void,
+    importVoluntaryExitFn: ?*const fn (ptr: *anyopaque, exit: *const SignedVoluntaryExit) anyerror!void,
 
-    /// Called to import raw proposer slashing SSZ bytes into the op pool.
-    importProposerSlashingFn: ?*const fn (ptr: *anyopaque, ssz_bytes: []const u8) anyerror!void,
+    /// Called to import a validated proposer slashing into the op pool.
+    importProposerSlashingFn: ?*const fn (ptr: *anyopaque, slashing: *const ProposerSlashing) anyerror!void,
 
     /// Called to import raw attester slashing SSZ bytes into the op pool.
     importAttesterSlashingFn: ?*const fn (ptr: *anyopaque, ssz_bytes: []const u8) anyerror!void,
 
-    /// Called to import raw BLS-to-execution change SSZ bytes into the op pool.
-    importBlsChangeFn: ?*const fn (ptr: *anyopaque, ssz_bytes: []const u8) anyerror!void,
+    /// Called to import a validated BLS-to-execution change into the op pool.
+    importBlsChangeFn: ?*const fn (ptr: *anyopaque, change: *const SignedBLSToExecutionChange) anyerror!void,
 
     /// Called to import a validated blob sidecar into the chain DA ingress.
     importBlobSidecarFn: ?*const fn (ptr: *anyopaque, ssz_bytes: []const u8) anyerror!void,
@@ -165,21 +156,22 @@ pub const GossipHandler = struct {
     verifyBlsChangeSignatureFn: ?*const fn (ptr: *anyopaque, ssz_bytes: []const u8) bool,
 
     /// Verify attestation BLS signature. Returns true if valid.
-    verifyAttestationSignatureFn: ?*const fn (ptr: *anyopaque, ssz_bytes: []const u8) bool,
+    verifyAttestationSignatureFn: ?*const fn (ptr: *anyopaque, attestation: *const AnyGossipAttestation) bool,
 
     /// Verify aggregate and proof BLS signatures (selection proof + aggregator + aggregate). Returns true if valid.
     verifyAggregateSignatureFn: ?*const fn (ptr: *anyopaque, ssz_bytes: []const u8) bool,
+
+    /// Called to import a validated aggregate into fork choice + aggregate pool.
+    importAggregateFn: ?*const fn (ptr: *anyopaque, aggregate: *const AnySignedAggregateAndProof) anyerror!void,
 
     /// Verify sync committee message BLS signature. Returns true if valid.
     verifySyncCommitteeSignatureFn: ?*const fn (ptr: *anyopaque, ssz_bytes: []const u8) bool,
 
     /// Called to import a validated sync committee contribution into the pool.
-    /// Receives raw decompressed SSZ bytes.
-    importSyncContributionFn: ?*const fn (ptr: *anyopaque, ssz_bytes: []const u8) anyerror!void,
+    importSyncContributionFn: ?*const fn (ptr: *anyopaque, signed_contribution: *const SignedContributionAndProof) anyerror!void,
 
     /// Called to import a validated sync committee message into the pool.
-    /// Args: (ptr, subnet, slot, beacon_block_root, validator_index, signature_bytes)
-    importSyncCommitteeMessageFn: ?*const fn (ptr: *anyopaque, ssz_bytes: []const u8, subnet: u64) anyerror!void,
+    importSyncCommitteeMessageFn: ?*const fn (ptr: *anyopaque, message: *const SyncCommitteeMessage, subnet: u64) anyerror!void,
 
     /// Gossip dedup caches (owned). Used by Phase 1 fast validation.
     seen_cache: SeenCache,
@@ -234,6 +226,7 @@ pub const GossipHandler = struct {
             .verifyBlsChangeSignatureFn = null,
             .verifyAttestationSignatureFn = null,
             .verifyAggregateSignatureFn = null,
+            .importAggregateFn = null,
             .verifySyncCommitteeSignatureFn = null,
             .importSyncContributionFn = null,
             .importSyncCommitteeMessageFn = null,
@@ -305,6 +298,62 @@ pub const GossipHandler = struct {
         return GossipDataHandle.initOwned(QueuedSszBytes, queued);
     }
 
+    fn dupeOwnedSszBytes(self: *GossipHandler, ssz_bytes: []const u8) ?OwnedSszBytes {
+        return OwnedSszBytes.dupe(self.allocator, ssz_bytes) catch null;
+    }
+
+    fn parseSignedAggregateAndProof(self: *GossipHandler, ssz_bytes: []const u8) ?AnySignedAggregateAndProof {
+        return AnySignedAggregateAndProof.deserialize(self.allocator, self.current_fork_seq, ssz_bytes) catch null;
+    }
+
+    fn parseGossipAttestation(self: *GossipHandler, ssz_bytes: []const u8) ?AnyGossipAttestation {
+        return AnyGossipAttestation.deserialize(self.allocator, self.current_fork_seq, ssz_bytes) catch null;
+    }
+
+    fn parseSignedVoluntaryExit(ssz_bytes: []const u8) ?SignedVoluntaryExit {
+        var exit: SignedVoluntaryExit = undefined;
+        types.phase0.SignedVoluntaryExit.deserializeFromBytes(ssz_bytes, &exit) catch return null;
+        return exit;
+    }
+
+    fn parseProposerSlashing(ssz_bytes: []const u8) ?ProposerSlashing {
+        var slashing: ProposerSlashing = undefined;
+        types.phase0.ProposerSlashing.deserializeFromBytes(ssz_bytes, &slashing) catch return null;
+        return slashing;
+    }
+
+    fn makeAttesterSlashingPayload(
+        self: *GossipHandler,
+        decoded: gossip_decoding.DecodedAttesterSlashing,
+        ssz_bytes: []const u8,
+    ) ?AttesterSlashingPayload {
+        return .{
+            .decoded = .{
+                .is_slashable = decoded.is_slashable,
+                .slashable_key = decoded.slashable_key,
+            },
+            .ssz = self.dupeOwnedSszBytes(ssz_bytes) orelse return null,
+        };
+    }
+
+    fn parseBlsChange(ssz_bytes: []const u8) ?SignedBLSToExecutionChange {
+        var change: SignedBLSToExecutionChange = undefined;
+        types.capella.SignedBLSToExecutionChange.deserializeFromBytes(ssz_bytes, &change) catch return null;
+        return change;
+    }
+
+    fn parseSignedContributionAndProof(ssz_bytes: []const u8) ?SignedContributionAndProof {
+        var signed_contribution: SignedContributionAndProof = undefined;
+        types.altair.SignedContributionAndProof.deserializeFromBytes(ssz_bytes, &signed_contribution) catch return null;
+        return signed_contribution;
+    }
+
+    fn parseSyncCommitteeMessage(ssz_bytes: []const u8) ?SyncCommitteeMessage {
+        var message: SyncCommitteeMessage = undefined;
+        types.altair.SyncCommitteeMessage.deserializeFromBytes(ssz_bytes, &message) catch return null;
+        return message;
+    }
+
     /// Called when a gossip message arrives on the beacon_block topic.
     ///
     /// Pipeline:
@@ -366,7 +415,7 @@ pub const GossipHandler = struct {
                 ssz_bytes,
             ) catch return GossipHandlerError.DecodeFailed;
             bp.ingest(.{ .gossip_block = .{
-                .peer_id = metadata.peer_id,
+                .source = metadata.source,
                 .message_id = metadata.message_id,
                 .block = any_signed,
                 .seen_timestamp_ns = metadata.seen_timestamp_ns,
@@ -401,41 +450,38 @@ pub const GossipHandler = struct {
             return GossipHandlerError.DecodeFailed;
         defer self.allocator.free(ssz_bytes);
 
-        // Phase 1a: Decode from already-decompressed SSZ bytes.
-        const decoded = gossip_decoding.decodeFromSszBytes(self.allocator, .beacon_attestation, ssz_bytes, self.current_fork_seq) catch
-            return GossipHandlerError.DecodeFailed;
-        const att = decoded.beacon_attestation;
+        // Phase 1a: Deserialize the full gossip attestation wrapper once so the
+        // processor and importer can use the real fork-typed object.
+        var attestation = self.parseGossipAttestation(ssz_bytes) orelse return GossipHandlerError.DecodeFailed;
+        var attestation_owned = true;
+        defer if (attestation_owned) attestation.deinit(self.allocator);
+        const data = attestation.data();
+        const committee_index = attestation.committeeIndex();
 
         // Phase 1b: Fast validation.
         var chain_state = self.makeChainState();
         const action = chain_gossip.validateGossipAttestation(
-            att.slot,
-            att.committee_index,
-            att.target_epoch,
-            att.target_root,
+            data.slot,
+            committee_index,
+            data.target.epoch,
+            data.target.root,
             &chain_state,
         );
         try checkAction(action);
+
+        if (attestation.participantCount() != 1) {
+            return GossipHandlerError.ValidationRejected;
+        }
 
         // Phase 2: Import to fork choice + attestation pool.
         // When processor is available, defer BLS to batch verification.
         // Attestations are LIFO-queued and batched for efficient BLS verification.
         if (self.beacon_processor) |bp| {
-            // Allocate owned copy of decoded attestation + SSZ bytes for the processor.
-            const queued = self.allocator.create(QueuedAttestation) catch return;
-            const ssz_copy = self.allocator.dupe(u8, ssz_bytes) catch {
-                self.allocator.destroy(queued);
-                return;
-            };
-            queued.* = .{
-                .att = att,
-                .ssz_bytes = ssz_copy,
-                .allocator = self.allocator,
-            };
+            attestation_owned = false;
             bp.ingest(.{ .attestation = .{
-                .peer_id = metadata.peer_id,
+                .source = metadata.source,
                 .message_id = metadata.message_id,
-                .data = GossipDataHandle.initOwned(QueuedAttestation, queued),
+                .attestation = attestation,
                 .subnet_id = @intCast(subnet_id),
                 .seen_timestamp_ns = metadata.seen_timestamp_ns,
             } });
@@ -445,26 +491,16 @@ pub const GossipHandler = struct {
         // Phase 1c: BLS signature verification (only for inline processing path).
         // [REJECT] The attestation signature is valid.
         if (self.verifyAttestationSignatureFn) |verifyFn| {
-            if (!verifyFn(self.node, ssz_bytes)) {
-                std.log.warn("Gossip attestation rejected: invalid signature slot={d}", .{att.slot});
+            if (!verifyFn(self.node, &attestation)) {
+                std.log.warn("Gossip attestation rejected: invalid signature slot={d}", .{data.slot});
                 return GossipHandlerError.ValidationRejected;
             }
         }
 
         // Fallback: inline processing.
         if (self.importAttestationFn) |importFn| {
-            importFn(
-                self.node,
-                att.slot,
-                att.committee_index,
-                att.target_root,
-                att.target_epoch,
-                att.attester_index,
-                att.beacon_block_root,
-                att.source_epoch,
-                att.source_root,
-            ) catch |err| {
-                std.log.warn("Attestation import failed for slot {d}: {}", .{ att.slot, err });
+            importFn(self.node, &attestation) catch |err| {
+                std.log.warn("Attestation import failed for slot {d}: {}", .{ data.slot, err });
             };
         }
     }
@@ -516,23 +552,27 @@ pub const GossipHandler = struct {
 
         // Phase 2: Import aggregate to fork choice + attestation pool.
         // When processor is available, enqueue for priority-ordered batch processing.
+        const signed_aggregate = self.parseSignedAggregateAndProof(ssz_bytes) orelse return GossipHandlerError.DecodeFailed;
         if (self.beacon_processor) |bp| {
-            const queued = self.dupeQueuedSszBytes(ssz_bytes) orelse return;
             bp.ingest(.{ .aggregate = .{
-                .peer_id = metadata.peer_id,
+                .source = metadata.source,
                 .message_id = metadata.message_id,
-                .data = queued,
+                .aggregate = signed_aggregate,
                 .seen_timestamp_ns = metadata.seen_timestamp_ns,
             } });
             return;
         }
 
-        // Fallback: inline logging (no full import yet).
-        std.log.info("Accepted aggregate: aggregator={d} slot={d} target_epoch={d}", .{
-            agg.aggregator_index,
-            agg.attestation_slot,
-            agg.attestation_target_epoch,
-        });
+        // Fallback: inline processing.
+        if (self.importAggregateFn) |importFn| {
+            importFn(self.node, &signed_aggregate) catch |err| {
+                std.log.warn("Aggregate import failed for aggregator {d}: {}", .{ agg.aggregator_index, err });
+            };
+            return;
+        }
+
+        var aggregate_to_drop = signed_aggregate;
+        aggregate_to_drop.deinit(self.allocator);
     }
 
     /// Called when a voluntary_exit gossip message arrives.
@@ -579,12 +619,12 @@ pub const GossipHandler = struct {
         }
 
         // Phase 2: import to op pool.
+        const signed_exit = parseSignedVoluntaryExit(ssz_bytes) orelse return GossipHandlerError.DecodeFailed;
         if (self.beacon_processor) |bp| {
-            const queued = self.dupeQueuedSszBytes(ssz_bytes) orelse return;
             bp.ingest(.{ .gossip_voluntary_exit = .{
-                .peer_id = metadata.peer_id,
+                .source = metadata.source,
                 .message_id = metadata.message_id,
-                .data = queued,
+                .exit = signed_exit,
                 .seen_timestamp_ns = metadata.seen_timestamp_ns,
             } });
             return;
@@ -592,7 +632,7 @@ pub const GossipHandler = struct {
 
         // Fallback: inline processing.
         if (self.importVoluntaryExitFn) |importFn| {
-            importFn(self.node, exit.validator_index, exit.exit_epoch) catch |err| {
+            importFn(self.node, &signed_exit) catch |err| {
                 std.log.warn("Voluntary exit import failed for validator {d}: {}", .{ exit.validator_index, err });
             };
         }
@@ -648,13 +688,13 @@ pub const GossipHandler = struct {
             }
         }
 
-        // Phase 2: import raw SSZ bytes to op pool.
+        // Phase 2: import to op pool.
+        const slashing = parseProposerSlashing(ssz_bytes) orelse return GossipHandlerError.DecodeFailed;
         if (self.beacon_processor) |bp| {
-            const queued = self.dupeQueuedSszBytes(ssz_bytes) orelse return;
             bp.ingest(.{ .gossip_proposer_slashing = .{
-                .peer_id = metadata.peer_id,
+                .source = metadata.source,
                 .message_id = metadata.message_id,
-                .data = queued,
+                .slashing = slashing,
                 .seen_timestamp_ns = metadata.seen_timestamp_ns,
             } });
             return;
@@ -662,7 +702,7 @@ pub const GossipHandler = struct {
 
         // Fallback: inline processing.
         if (self.importProposerSlashingFn) |importFn| {
-            importFn(self.node, ssz_bytes) catch |err| {
+            importFn(self.node, &slashing) catch |err| {
                 std.log.warn("Proposer slashing import failed for proposer {d}: {}", .{ ps.proposer_index, err });
             };
         }
@@ -721,11 +761,10 @@ pub const GossipHandler = struct {
 
         // Phase 2: import raw SSZ bytes.
         if (self.beacon_processor) |bp| {
-            const queued = self.dupeQueuedSszBytes(ssz_bytes) orelse return;
             bp.ingest(.{ .gossip_attester_slashing = .{
-                .peer_id = metadata.peer_id,
+                .source = metadata.source,
                 .message_id = metadata.message_id,
-                .data = queued,
+                .payload = self.makeAttesterSlashingPayload(as, ssz_bytes) orelse return,
                 .seen_timestamp_ns = metadata.seen_timestamp_ns,
             } });
             return;
@@ -783,13 +822,13 @@ pub const GossipHandler = struct {
             }
         }
 
-        // Phase 2: import raw SSZ bytes to op pool.
+        // Phase 2: import to op pool.
+        const signed_change = parseBlsChange(ssz_bytes) orelse return GossipHandlerError.DecodeFailed;
         if (self.beacon_processor) |bp| {
-            const queued = self.dupeQueuedSszBytes(ssz_bytes) orelse return;
             bp.ingest(.{ .gossip_bls_to_exec = .{
-                .peer_id = metadata.peer_id,
+                .source = metadata.source,
                 .message_id = metadata.message_id,
-                .data = queued,
+                .change = signed_change,
                 .seen_timestamp_ns = metadata.seen_timestamp_ns,
             } });
             return;
@@ -797,7 +836,7 @@ pub const GossipHandler = struct {
 
         // Fallback: inline processing.
         if (self.importBlsChangeFn) |importFn| {
-            importFn(self.node, ssz_bytes) catch |err| {
+            importFn(self.node, &signed_change) catch |err| {
                 std.log.warn("BLS change import failed for validator {d}: {}", .{ change.validator_index, err });
             };
         }
@@ -842,13 +881,12 @@ pub const GossipHandler = struct {
         try checkAction(action_sc);
 
         // Phase 2: import to sync contribution pool.
+        const signed_contribution = parseSignedContributionAndProof(ssz_bytes) orelse return GossipHandlerError.DecodeFailed;
         if (self.beacon_processor) |bp| {
-            const queued = self.dupeQueuedSszBytes(ssz_bytes) orelse return;
             bp.ingest(.{ .sync_contribution = .{
-                .peer_id = metadata.peer_id,
+                .source = metadata.source,
                 .message_id = metadata.message_id,
-                .data = queued,
-                .slot = contrib.contribution_slot,
+                .signed_contribution = signed_contribution,
                 .seen_timestamp_ns = metadata.seen_timestamp_ns,
             } });
             return;
@@ -856,7 +894,7 @@ pub const GossipHandler = struct {
 
         // Fallback: inline processing.
         if (self.importSyncContributionFn) |importFn| {
-            importFn(self.node, ssz_bytes) catch |err| {
+            importFn(self.node, &signed_contribution) catch |err| {
                 std.log.warn("Sync contribution import failed: {}", .{err});
             };
         }
@@ -913,13 +951,12 @@ pub const GossipHandler = struct {
         }
 
         // Phase 2: import to sync committee message pool.
+        const sync_message = parseSyncCommitteeMessage(ssz_bytes) orelse return GossipHandlerError.DecodeFailed;
         if (self.beacon_processor) |bp| {
-            const queued = self.dupeQueuedSszBytes(ssz_bytes) orelse return;
             bp.ingest(.{ .sync_message = .{
-                .peer_id = metadata.peer_id,
+                .source = metadata.source,
                 .message_id = metadata.message_id,
-                .data = queued,
-                .slot = msg.slot,
+                .message = sync_message,
                 .subnet_id = @intCast(subnet_id),
                 .seen_timestamp_ns = metadata.seen_timestamp_ns,
             } });
@@ -928,7 +965,7 @@ pub const GossipHandler = struct {
 
         // Fallback: inline processing.
         if (self.importSyncCommitteeMessageFn) |importFn| {
-            importFn(self.node, ssz_bytes, subnet_id) catch |err| {
+            importFn(self.node, &sync_message, subnet_id) catch |err| {
                 std.log.warn("Sync committee message import failed: {}", .{err});
             };
         }
@@ -981,7 +1018,7 @@ pub const GossipHandler = struct {
         if (self.beacon_processor) |bp| {
             const queued = self.dupeQueuedSszBytes(ssz_bytes) orelse return;
             bp.ingest(.{ .gossip_blob = .{
-                .peer_id = metadata.peer_id,
+                .source = metadata.source,
                 .message_id = metadata.message_id,
                 .data = queued,
                 .seen_timestamp_ns = metadata.seen_timestamp_ns,
@@ -1035,7 +1072,7 @@ pub const GossipHandler = struct {
         if (self.beacon_processor) |bp| {
             const queued = self.dupeQueuedSszBytes(ssz_bytes) orelse return;
             bp.ingest(.{ .gossip_data_column = .{
-                .peer_id = metadata.peer_id,
+                .source = metadata.source,
                 .message_id = metadata.message_id,
                 .data = queued,
                 .seen_timestamp_ns = metadata.seen_timestamp_ns,
@@ -1303,6 +1340,36 @@ test "GossipHandler: onAttestation rejects stale epoch" {
 
     const result = handler.onAttestation(0, compressed);
     try testing.expectError(GossipHandlerError.ValidationIgnored, result);
+}
+
+test "GossipHandler: onAttestation rejects pre-electra aggregated attestations" {
+    const alloc = testing.allocator;
+    const snappy = @import("snappy").frame;
+    const handler = try makeTestHandler(alloc);
+    defer handler.deinit();
+
+    handler.updateClock(100, 3, 64);
+    handler.updateForkSeq(.phase0);
+
+    var att: consensus_types.phase0.Attestation.Type = consensus_types.phase0.Attestation.default_value;
+    try att.aggregation_bits.data.append(alloc, 0x03);
+    att.aggregation_bits.bit_len = 2;
+    defer att.aggregation_bits.data.deinit(alloc);
+    att.data.slot = 96;
+    att.data.index = 0;
+    att.data.target.epoch = 3;
+    att.data.target.root = [_]u8{0xAA} ** 32;
+    att.data.beacon_block_root = [_]u8{0xBB} ** 32;
+
+    const ssz_size = consensus_types.phase0.Attestation.serializedSize(&att);
+    const ssz_buf = try alloc.alloc(u8, ssz_size);
+    defer alloc.free(ssz_buf);
+    _ = consensus_types.phase0.Attestation.serializeIntoBytes(&att, ssz_buf);
+
+    const compressed = try snappy.compress(alloc, ssz_buf);
+    defer alloc.free(compressed);
+
+    try testing.expectError(GossipHandlerError.ValidationRejected, handler.onAttestation(0, compressed));
 }
 
 test "GossipHandler: onGossipMessage routes beacon_block" {

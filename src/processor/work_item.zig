@@ -12,6 +12,13 @@ const fork_types = @import("fork_types");
 const Slot = consensus_types.primitive.Slot.Type;
 const Root = consensus_types.primitive.Root.Type;
 const AnySignedBeaconBlock = fork_types.AnySignedBeaconBlock;
+const AnySignedAggregateAndProof = fork_types.AnySignedAggregateAndProof;
+const AnyGossipAttestation = fork_types.AnyGossipAttestation;
+const SignedVoluntaryExit = consensus_types.phase0.SignedVoluntaryExit.Type;
+const ProposerSlashing = consensus_types.phase0.ProposerSlashing.Type;
+const SignedBLSToExecutionChange = consensus_types.capella.SignedBLSToExecutionChange.Type;
+const SyncCommitteeMessage = consensus_types.altair.SyncCommitteeMessage.Type;
+const SignedContributionAndProof = consensus_types.altair.SignedContributionAndProof.Type;
 
 /// Maximum number of attestations in a single batch for BLS batch verification.
 pub const max_attestation_batch_size: u32 = 64;
@@ -20,14 +27,67 @@ pub const max_attestation_batch_size: u32 = 64;
 pub const max_aggregate_batch_size: u32 = 64;
 
 // ---------------------------------------------------------------------------
-// Placeholder types for entities not yet defined elsewhere.
+// Concrete queue-boundary types.
 // ---------------------------------------------------------------------------
-
-/// Opaque peer identifier. TODO: Replace with real PeerId from networking.
-pub const PeerId = u64;
 
 /// Ethereum gossipsub message identifier: first 20 bytes of the spec hash.
 pub const MessageId = [20]u8;
+
+/// Stable provenance key for queued gossip work.
+///
+/// The processor currently needs a lightweight source identifier for logging,
+/// metrics, and future peer-scoring/reporting hooks. It does not require the
+/// full libp2p peer ID bytes on the hot gossip path.
+pub const GossipSource = struct {
+    key: u64 = 0,
+
+    pub fn fromOpaqueBytes(seed: u64, maybe_bytes: ?[]const u8) GossipSource {
+        const bytes = maybe_bytes orelse return .{};
+        return .{ .key = std.hash.Wyhash.hash(seed, bytes) };
+    }
+
+    pub fn isKnown(self: GossipSource) bool {
+        return self.key != 0;
+    }
+};
+
+/// Concrete peer identity for queued req/resp and service work.
+pub const PeerIdHandle = union(enum) {
+    none,
+    borrowed: []const u8,
+    owned: struct {
+        bytes: []u8,
+        allocator: std.mem.Allocator,
+    },
+
+    pub fn initBorrowed(peer_id: []const u8) PeerIdHandle {
+        return .{ .borrowed = peer_id };
+    }
+
+    pub fn initOwned(allocator: std.mem.Allocator, peer_id: []const u8) !PeerIdHandle {
+        return .{
+            .owned = .{
+                .bytes = try allocator.dupe(u8, peer_id),
+                .allocator = allocator,
+            },
+        };
+    }
+
+    pub fn bytes(self: PeerIdHandle) ?[]const u8 {
+        return switch (self) {
+            .none => null,
+            .borrowed => |peer_id| peer_id,
+            .owned => |owned| owned.bytes,
+        };
+    }
+
+    pub fn deinit(self: PeerIdHandle) void {
+        switch (self) {
+            .owned => |owned| owned.allocator.free(owned.bytes),
+            else => {},
+        }
+    }
+};
 
 /// Phase within a slot, used by the clock fiber.
 pub const SlotPhase = enum(u8) {
@@ -39,19 +99,15 @@ pub const SlotPhase = enum(u8) {
     aggregate_deadline,
 };
 
-/// Opaque handle for execution payload envelope. TODO: Replace with real type.
-pub const ExecutionPayloadHandle = *anyopaque;
-
-/// Type-erased handle for queued gossip payload data.
+/// Type-erased handle for queued payload and request context data.
 ///
-/// The gossip layer can attach an owned payload wrapper with a concrete
-/// `deinit()` method, and the processor can later destroy it without knowing
-/// the concrete type.
-pub const GossipDataHandle = struct {
+/// The producer can attach an owned wrapper with a concrete `deinit()` method,
+/// and the processor can later destroy it without knowing the concrete type.
+pub const OpaqueHandle = struct {
     ptr: *anyopaque,
     deinitFn: *const fn (ptr: *anyopaque) void,
 
-    pub fn initOwned(comptime T: type, ptr: *T) GossipDataHandle {
+    pub fn initOwned(comptime T: type, ptr: *T) OpaqueHandle {
         return .{
             .ptr = @ptrCast(ptr),
             .deinitFn = struct {
@@ -63,7 +119,7 @@ pub const GossipDataHandle = struct {
         };
     }
 
-    pub fn initBorrowed(ptr: *anyopaque) GossipDataHandle {
+    pub fn initBorrowed(ptr: *anyopaque) OpaqueHandle {
         return .{
             .ptr = ptr,
             .deinitFn = struct {
@@ -81,13 +137,51 @@ pub const GossipDataHandle = struct {
     }
 };
 
+pub const GossipDataHandle = OpaqueHandle;
+pub const ExecutionPayloadHandle = OpaqueHandle;
+pub const RpcBlobHandle = OpaqueHandle;
+pub const RpcColumnHandle = OpaqueHandle;
+pub const ReqRespRequestHandle = OpaqueHandle;
+pub const ApiResponseHandle = OpaqueHandle;
+pub const LightClientRequestHandle = OpaqueHandle;
+
+pub const OwnedSszBytes = struct {
+    ssz_bytes: []u8,
+    allocator: std.mem.Allocator,
+
+    pub fn dupe(allocator: std.mem.Allocator, ssz_bytes: []const u8) !OwnedSszBytes {
+        return .{
+            .ssz_bytes = try allocator.dupe(u8, ssz_bytes),
+            .allocator = allocator,
+        };
+    }
+
+    pub fn deinit(self: *OwnedSszBytes) void {
+        self.allocator.free(self.ssz_bytes);
+    }
+};
+
+pub const AttesterSlashingSummary = struct {
+    is_slashable: bool,
+    slashable_key: [32]u8,
+};
+
+pub const AttesterSlashingPayload = struct {
+    decoded: AttesterSlashingSummary,
+    ssz: OwnedSszBytes,
+
+    pub fn deinit(self: *AttesterSlashingPayload) void {
+        self.ssz.deinit();
+    }
+};
+
 // ---------------------------------------------------------------------------
 // Work payload structs — one per logical work type.
 // ---------------------------------------------------------------------------
 
 /// Gossip-received signed beacon block.
 pub const GossipBlockWork = struct {
-    peer_id: PeerId,
+    source: GossipSource,
     message_id: MessageId,
     block: AnySignedBeaconBlock,
     seen_timestamp_ns: i64,
@@ -95,7 +189,7 @@ pub const GossipBlockWork = struct {
 
 /// Gossip-received blob sidecar.
 pub const GossipBlobWork = struct {
-    peer_id: PeerId,
+    source: GossipSource,
     message_id: MessageId,
     data: GossipDataHandle,
     seen_timestamp_ns: i64,
@@ -103,7 +197,7 @@ pub const GossipBlobWork = struct {
 
 /// Gossip-received data column sidecar.
 pub const GossipColumnWork = struct {
-    peer_id: PeerId,
+    source: GossipSource,
     message_id: MessageId,
     data: GossipDataHandle,
     seen_timestamp_ns: i64,
@@ -111,7 +205,7 @@ pub const GossipColumnWork = struct {
 
 /// Gossip-received execution payload (Gloas).
 pub const GossipPayloadWork = struct {
-    peer_id: PeerId,
+    source: GossipSource,
     message_id: MessageId,
     payload: ExecutionPayloadHandle,
     seen_timestamp_ns: i64,
@@ -131,9 +225,9 @@ pub const ColumnReconstructionWork = struct {
 
 /// Unaggregated attestation from gossip.
 pub const AttestationWork = struct {
-    peer_id: PeerId,
+    source: GossipSource,
     message_id: MessageId,
-    data: GossipDataHandle,
+    attestation: AnyGossipAttestation,
     subnet_id: u8,
     seen_timestamp_ns: i64,
 };
@@ -146,9 +240,9 @@ pub const AttestationBatchWork = struct {
 
 /// Aggregated attestation from gossip.
 pub const AggregateWork = struct {
-    peer_id: PeerId,
+    source: GossipSource,
     message_id: MessageId,
-    data: GossipDataHandle,
+    aggregate: AnySignedAggregateAndProof,
     seen_timestamp_ns: i64,
 };
 
@@ -167,36 +261,53 @@ pub const ReprocessWork = struct {
 
 /// Sync committee message from gossip.
 pub const SyncMessageWork = struct {
-    peer_id: PeerId,
+    source: GossipSource,
     message_id: MessageId,
-    data: GossipDataHandle,
-    slot: u64,
+    message: SyncCommitteeMessage,
     subnet_id: u8,
     seen_timestamp_ns: i64,
 };
 
 /// Sync committee contribution from gossip.
 pub const SyncContributionWork = struct {
-    peer_id: PeerId,
+    source: GossipSource,
     message_id: MessageId,
-    data: GossipDataHandle,
-    slot: u64,
+    signed_contribution: SignedContributionAndProof,
     seen_timestamp_ns: i64,
 };
 
-/// Pool object from gossip: voluntary exit, proposer slashing,
-/// attester slashing, or BLS-to-execution change.
-pub const PoolObjectWork = struct {
-    peer_id: PeerId,
+pub const VoluntaryExitWork = struct {
+    source: GossipSource,
     message_id: MessageId,
-    data: GossipDataHandle,
+    exit: SignedVoluntaryExit,
+    seen_timestamp_ns: i64,
+};
+
+pub const ProposerSlashingWork = struct {
+    source: GossipSource,
+    message_id: MessageId,
+    slashing: ProposerSlashing,
+    seen_timestamp_ns: i64,
+};
+
+pub const AttesterSlashingWork = struct {
+    source: GossipSource,
+    message_id: MessageId,
+    payload: AttesterSlashingPayload,
+    seen_timestamp_ns: i64,
+};
+
+pub const BlsToExecutionChangeWork = struct {
+    source: GossipSource,
+    message_id: MessageId,
+    change: SignedBLSToExecutionChange,
     seen_timestamp_ns: i64,
 };
 
 /// Gloas-era work items: payload attestation, execution payload bid,
 /// proposer preferences.
 pub const GloasWork = struct {
-    peer_id: PeerId,
+    source: GossipSource,
     message_id: MessageId,
     slot: u64,
     seen_timestamp_ns: i64,
@@ -211,14 +322,14 @@ pub const RpcBlockWork = struct {
 
 /// Blob received via RPC.
 pub const RpcBlobWork = struct {
-    blob: *anyopaque,
+    blob: RpcBlobHandle,
     block_root: Root,
     seen_timestamp_ns: i64,
 };
 
 /// Data column received via RPC.
 pub const RpcColumnWork = struct {
-    column: *anyopaque,
+    column: RpcColumnHandle,
     block_root: Root,
     seen_timestamp_ns: i64,
 };
@@ -239,18 +350,14 @@ pub const BackfillWork = struct {
 
 /// Inbound req/resp request to serve to a peer.
 pub const ReqRespWork = struct {
-    peer_id: PeerId,
-    /// Opaque request context for sending the response.
-    /// TODO: Replace with real ReqRespContext pointer.
-    request_context: u64,
+    peer_id: PeerIdHandle,
+    request: ReqRespRequestHandle,
     seen_timestamp_ns: i64,
 };
 
 /// API request routed through the processor for prioritisation.
 pub const ApiWork = struct {
-    /// Opaque handle to the pending HTTP response.
-    /// TODO: Replace with real ApiResponseHandle.
-    response_handle: u64,
+    response: ApiResponseHandle,
     seen_timestamp_ns: i64,
 };
 
@@ -268,8 +375,8 @@ pub const ReprocessMessage = struct {
 
 /// Light client serving work.
 pub const LightClientWork = struct {
-    peer_id: PeerId,
-    request_context: u64,
+    peer_id: PeerIdHandle,
+    request: LightClientRequestHandle,
     seen_timestamp_ns: i64,
 };
 
@@ -425,10 +532,10 @@ pub const WorkItem = union(WorkType) {
     columns_by_root: ReqRespWork,
 
     // -- Pool objects --
-    gossip_attester_slashing: PoolObjectWork,
-    gossip_proposer_slashing: PoolObjectWork,
-    gossip_voluntary_exit: PoolObjectWork,
-    gossip_bls_to_exec: PoolObjectWork,
+    gossip_attester_slashing: AttesterSlashingWork,
+    gossip_proposer_slashing: ProposerSlashingWork,
+    gossip_voluntary_exit: VoluntaryExitWork,
+    gossip_bls_to_exec: BlsToExecutionChangeWork,
 
     // -- Low priority --
     api_request_p1: ApiWork,
@@ -458,19 +565,76 @@ pub const WorkItem = union(WorkType) {
         switch (self) {
             .delayed_block => |work| work.block.deinit(allocator),
             .gossip_block => |work| work.block.deinit(allocator),
+            .gossip_execution_payload => |work| work.payload.deinit(),
             .gossip_blob => |work| work.data.deinit(),
             .gossip_data_column => |work| work.data.deinit(),
             .rpc_block => |work| work.block.deinit(allocator),
-            .attestation => |work| work.data.deinit(),
-            .aggregate => |work| work.data.deinit(),
+            .rpc_blob => |work| work.blob.deinit(),
+            .rpc_custody_column => |work| work.column.deinit(),
+            .attestation => |work| {
+                var attestation = work.attestation;
+                attestation.deinit(allocator);
+            },
+            .aggregate => |work| {
+                var aggregate = work.aggregate;
+                aggregate.deinit(allocator);
+            },
             .unknown_block_aggregate => |work| work.data.deinit(),
             .unknown_block_attestation => |work| work.data.deinit(),
-            .sync_contribution => |work| work.data.deinit(),
-            .sync_message => |work| work.data.deinit(),
-            .gossip_attester_slashing => |work| work.data.deinit(),
-            .gossip_proposer_slashing => |work| work.data.deinit(),
-            .gossip_voluntary_exit => |work| work.data.deinit(),
-            .gossip_bls_to_exec => |work| work.data.deinit(),
+            .sync_contribution => {},
+            .sync_message => {},
+            .gossip_attester_slashing => |work| {
+                var payload = work.payload;
+                payload.deinit();
+            },
+            .gossip_proposer_slashing => {},
+            .gossip_bls_to_exec => {},
+            .status => |work| {
+                work.peer_id.deinit();
+                work.request.deinit();
+            },
+            .blocks_by_range => |work| {
+                work.peer_id.deinit();
+                work.request.deinit();
+            },
+            .blocks_by_root => |work| {
+                work.peer_id.deinit();
+                work.request.deinit();
+            },
+            .blobs_by_range => |work| {
+                work.peer_id.deinit();
+                work.request.deinit();
+            },
+            .blobs_by_root => |work| {
+                work.peer_id.deinit();
+                work.request.deinit();
+            },
+            .columns_by_range => |work| {
+                work.peer_id.deinit();
+                work.request.deinit();
+            },
+            .columns_by_root => |work| {
+                work.peer_id.deinit();
+                work.request.deinit();
+            },
+            .api_request_p0 => |work| work.response.deinit(),
+            .api_request_p1 => |work| work.response.deinit(),
+            .lc_bootstrap => |work| {
+                work.peer_id.deinit();
+                work.request.deinit();
+            },
+            .lc_finality_update => |work| {
+                work.peer_id.deinit();
+                work.request.deinit();
+            },
+            .lc_optimistic_update => |work| {
+                work.peer_id.deinit();
+                work.request.deinit();
+            },
+            .lc_updates_by_range => |work| {
+                work.peer_id.deinit();
+                work.request.deinit();
+            },
             else => {},
         }
     }

@@ -62,7 +62,7 @@ pub const AnyAttestation = union(enum) {
             .electra => |att| blk: {
                 // Find the first set bit in committee_bits.
                 for (0..preset.MAX_COMMITTEES_PER_SLOT) |i| {
-                    if (att.committee_bits.get(i)) break :blk @as(u64, i);
+                    if (att.committee_bits.get(i) catch false) break :blk @as(u64, i);
                 }
                 break :blk 0;
             },
@@ -78,7 +78,7 @@ pub const AnyAttestation = union(enum) {
             .electra => |att| blk: {
                 var count: u32 = 0;
                 for (0..preset.MAX_COMMITTEES_PER_SLOT) |i| {
-                    if (att.committee_bits.get(i)) count += 1;
+                    if (att.committee_bits.get(i) catch false) count += 1;
                 }
                 break :blk count;
             },

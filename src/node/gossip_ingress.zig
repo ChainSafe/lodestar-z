@@ -9,6 +9,7 @@ const config_mod = @import("config");
 const state_transition = @import("state_transition");
 const computeEpochAtSlot = state_transition.computeEpochAtSlot;
 const networking = @import("networking");
+const processor = @import("processor");
 
 const BeaconNode = @import("beacon_node.zig").BeaconNode;
 const GossipIngressMetadata = @import("gossip_handler.zig").GossipIngressMetadata;
@@ -27,7 +28,7 @@ pub fn processEvents(self: *BeaconNode, io: std.Io, p2p: *networking.P2pService)
             .message => |msg| {
                 processed_messages += 1;
                 const metadata = GossipIngressMetadata{
-                    .peer_id = hashOpaqueGossipBytes(0x70656572, msg.from),
+                    .source = processor.work_item.GossipSource.fromOpaqueBytes(0x70656572, msg.from),
                     .message_id = networking.computeGossipMessageId(self.allocator, msg.data) catch std.mem.zeroes(networking.GossipMessageId),
                     .seen_timestamp_ns = currentUnixTimeNs(io),
                 };
@@ -103,9 +104,4 @@ fn currentUnixTimeNs(io: std.Io) i64 {
         std.math.minInt(i64)
     else
         @intCast(ns);
-}
-
-fn hashOpaqueGossipBytes(seed: u64, maybe_bytes: ?[]const u8) u64 {
-    const bytes = maybe_bytes orelse return 0;
-    return std.hash.Wyhash.hash(seed, bytes);
 }

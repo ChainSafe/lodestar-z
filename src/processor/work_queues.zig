@@ -13,8 +13,12 @@ const Allocator = std.mem.Allocator;
 const work_item_mod = @import("work_item.zig");
 const WorkItem = work_item_mod.WorkItem;
 const WorkType = work_item_mod.WorkType;
+const GossipSource = work_item_mod.GossipSource;
 const MessageId = work_item_mod.MessageId;
-const GossipDataHandle = work_item_mod.GossipDataHandle;
+const OpaqueHandle = work_item_mod.OpaqueHandle;
+const PeerIdHandle = work_item_mod.PeerIdHandle;
+const consensus_types = @import("consensus_types");
+const fork_types = @import("fork_types");
 const GossipBlockWork = work_item_mod.GossipBlockWork;
 const GossipBlobWork = work_item_mod.GossipBlobWork;
 const GossipColumnWork = work_item_mod.GossipColumnWork;
@@ -28,7 +32,10 @@ const AggregateBatchWork = work_item_mod.AggregateBatchWork;
 const ReprocessWork = work_item_mod.ReprocessWork;
 const SyncMessageWork = work_item_mod.SyncMessageWork;
 const SyncContributionWork = work_item_mod.SyncContributionWork;
-const PoolObjectWork = work_item_mod.PoolObjectWork;
+const VoluntaryExitWork = work_item_mod.VoluntaryExitWork;
+const ProposerSlashingWork = work_item_mod.ProposerSlashingWork;
+const AttesterSlashingWork = work_item_mod.AttesterSlashingWork;
+const BlsToExecutionChangeWork = work_item_mod.BlsToExecutionChangeWork;
 const GloasWork = work_item_mod.GloasWork;
 const RpcBlockWork = work_item_mod.RpcBlockWork;
 const RpcBlobWork = work_item_mod.RpcBlobWork;
@@ -203,10 +210,10 @@ pub const WorkQueues = struct {
     blobs_by_root: FifoQueue(ReqRespWork),
     columns_by_range: FifoQueue(ReqRespWork),
     columns_by_root: FifoQueue(ReqRespWork),
-    gossip_attester_slashing: FifoQueue(PoolObjectWork),
-    gossip_proposer_slashing: FifoQueue(PoolObjectWork),
-    gossip_voluntary_exit: FifoQueue(PoolObjectWork),
-    gossip_bls_to_exec: FifoQueue(PoolObjectWork),
+    gossip_attester_slashing: FifoQueue(AttesterSlashingWork),
+    gossip_proposer_slashing: FifoQueue(ProposerSlashingWork),
+    gossip_voluntary_exit: FifoQueue(VoluntaryExitWork),
+    gossip_bls_to_exec: FifoQueue(BlsToExecutionChangeWork),
     api_request_p1: FifoQueue(ApiWork),
     backfill_segment: FifoQueue(BackfillWork),
     lc_bootstrap: FifoQueue(LightClientWork),
@@ -303,17 +310,17 @@ pub const WorkQueues = struct {
             .columns_by_root = FifoQueue(ReqRespWork).init(
                 try allocator.alloc(ReqRespWork, config.columns_by_root),
             ),
-            .gossip_attester_slashing = FifoQueue(PoolObjectWork).init(
-                try allocator.alloc(PoolObjectWork, config.gossip_attester_slashing),
+            .gossip_attester_slashing = FifoQueue(AttesterSlashingWork).init(
+                try allocator.alloc(AttesterSlashingWork, config.gossip_attester_slashing),
             ),
-            .gossip_proposer_slashing = FifoQueue(PoolObjectWork).init(
-                try allocator.alloc(PoolObjectWork, config.gossip_proposer_slashing),
+            .gossip_proposer_slashing = FifoQueue(ProposerSlashingWork).init(
+                try allocator.alloc(ProposerSlashingWork, config.gossip_proposer_slashing),
             ),
-            .gossip_voluntary_exit = FifoQueue(PoolObjectWork).init(
-                try allocator.alloc(PoolObjectWork, config.gossip_voluntary_exit),
+            .gossip_voluntary_exit = FifoQueue(VoluntaryExitWork).init(
+                try allocator.alloc(VoluntaryExitWork, config.gossip_voluntary_exit),
             ),
-            .gossip_bls_to_exec = FifoQueue(PoolObjectWork).init(
-                try allocator.alloc(PoolObjectWork, config.gossip_bls_to_exec),
+            .gossip_bls_to_exec = FifoQueue(BlsToExecutionChangeWork).init(
+                try allocator.alloc(BlsToExecutionChangeWork, config.gossip_bls_to_exec),
             ),
             .api_request_p1 = FifoQueue(ApiWork).init(
                 try allocator.alloc(ApiWork, config.api_request_p1),
@@ -735,12 +742,12 @@ test "WorkQueues: route and pop priority order" {
 
     // Route a low-priority item first, then a high-priority one.
     wq.routeToQueue(.{ .api_request_p1 = .{
-        .response_handle = 1,
+        .response = testOpaqueHandle(1),
         .seen_timestamp_ns = 100,
     } });
     wq.routeToQueue(.{ .status = .{
-        .peer_id = 1,
-        .request_context = 2,
+        .peer_id = testPeerId(1),
+        .request = testOpaqueHandle(2),
         .seen_timestamp_ns = 200,
     } });
 
@@ -766,11 +773,10 @@ test "WorkQueues: sync-aware dropping" {
     wq.sync_state = .syncing;
 
     // Attestation should be dropped during sync.
-    const dummy_handle = GossipDataHandle.initBorrowed(@ptrFromInt(0xDEAD));
     wq.routeToQueue(.{ .attestation = .{
-        .peer_id = 1,
+        .source = testSource(1),
         .message_id = testMessageId(1),
-        .data = dummy_handle,
+        .attestation = testGossipAttestation(1),
         .subnet_id = 0,
         .seen_timestamp_ns = 100,
     } });
@@ -780,31 +786,12 @@ test "WorkQueues: sync-aware dropping" {
 
     // Status should NOT be dropped during sync.
     wq.routeToQueue(.{ .status = .{
-        .peer_id = 1,
-        .request_context = 2,
+        .peer_id = testPeerId(1),
+        .request = testOpaqueHandle(2),
         .seen_timestamp_ns = 200,
     } });
 
     try testing.expectEqual(@as(u32, 1), wq.status.len);
-}
-
-const DropCounterHandle = struct {
-    allocator: Allocator,
-    counter: *u32,
-
-    pub fn deinit(self: *DropCounterHandle) void {
-        self.counter.* += 1;
-        self.allocator.destroy(self);
-    }
-};
-
-fn makeOwnedHandle(allocator: Allocator, counter: *u32) !GossipDataHandle {
-    const handle = try allocator.create(DropCounterHandle);
-    handle.* = .{
-        .allocator = allocator,
-        .counter = counter,
-    };
-    return GossipDataHandle.initOwned(DropCounterHandle, handle);
 }
 
 test "WorkQueues: sync drop deinitializes owned gossip data" {
@@ -816,16 +803,14 @@ test "WorkQueues: sync drop deinitializes owned gossip data" {
     defer wq.deinit();
     wq.sync_state = .syncing;
 
-    var dropped: u32 = 0;
     wq.routeToQueue(.{ .attestation = .{
-        .peer_id = 1,
+        .source = testSource(1),
         .message_id = testMessageId(1),
-        .data = try makeOwnedHandle(allocator, &dropped),
+        .attestation = try testOwnedPhase0GossipAttestation(allocator, 1),
         .subnet_id = 0,
         .seen_timestamp_ns = 100,
     } });
 
-    try testing.expectEqual(@as(u32, 1), dropped);
     try testing.expect(wq.attestation.isEmpty());
 }
 
@@ -837,51 +822,42 @@ test "WorkQueues: LIFO overflow deinitializes dropped owned gossip data" {
     var wq = try WorkQueues.init(allocator, config);
     defer wq.deinit();
 
-    var dropped_oldest: u32 = 0;
-    var dropped_newest: u32 = 0;
     wq.routeToQueue(.{ .attestation = .{
-        .peer_id = 1,
+        .source = testSource(1),
         .message_id = testMessageId(1),
-        .data = try makeOwnedHandle(allocator, &dropped_oldest),
+        .attestation = try testOwnedPhase0GossipAttestation(allocator, 1),
         .subnet_id = 0,
         .seen_timestamp_ns = 100,
     } });
     wq.routeToQueue(.{ .attestation = .{
-        .peer_id = 2,
+        .source = testSource(2),
         .message_id = testMessageId(2),
-        .data = try makeOwnedHandle(allocator, &dropped_newest),
+        .attestation = try testOwnedPhase0GossipAttestation(allocator, 2),
         .subnet_id = 1,
         .seen_timestamp_ns = 200,
     } });
-
-    try testing.expectEqual(@as(u32, 1), dropped_oldest);
-    try testing.expectEqual(@as(u32, 0), dropped_newest);
 
     const queued = wq.popHighestPriority().?;
     defer queued.deinit(allocator);
     try testing.expectEqual(WorkType.attestation, queued.workType());
 }
 
-test "WorkQueues: FIFO overflow deinitializes rejected owned gossip data" {
+test "WorkQueues: FIFO overflow deinitializes rejected owned API handles" {
     const allocator = testing.allocator;
     var config = testQueueConfig();
-    config.gossip_voluntary_exit = 1;
+    config.api_request_p1 = 1;
 
     var wq = try WorkQueues.init(allocator, config);
     defer wq.deinit();
 
     var dropped_existing: u32 = 0;
     var dropped_rejected: u32 = 0;
-    wq.routeToQueue(.{ .gossip_voluntary_exit = .{
-        .peer_id = 1,
-        .message_id = testMessageId(1),
-        .data = try makeOwnedHandle(allocator, &dropped_existing),
+    wq.routeToQueue(.{ .api_request_p1 = .{
+        .response = try makeOwnedHandle(allocator, &dropped_existing),
         .seen_timestamp_ns = 100,
     } });
-    wq.routeToQueue(.{ .gossip_voluntary_exit = .{
-        .peer_id = 2,
-        .message_id = testMessageId(2),
-        .data = try makeOwnedHandle(allocator, &dropped_rejected),
+    wq.routeToQueue(.{ .api_request_p1 = .{
+        .response = try makeOwnedHandle(allocator, &dropped_rejected),
         .seen_timestamp_ns = 200,
     } });
 
@@ -890,7 +866,7 @@ test "WorkQueues: FIFO overflow deinitializes rejected owned gossip data" {
 
     const queued = wq.popHighestPriority().?;
     defer queued.deinit(allocator);
-    try testing.expectEqual(WorkType.gossip_voluntary_exit, queued.workType());
+    try testing.expectEqual(WorkType.api_request_p1, queued.workType());
 }
 
 /// Test helper: tiny queue config with capacity 4 for all queues.
@@ -936,8 +912,77 @@ fn testQueueConfig() QueueConfig {
     };
 }
 
+fn testOpaqueHandle(tag: usize) OpaqueHandle {
+    return OpaqueHandle.initBorrowed(@ptrFromInt(0x2000 + tag));
+}
+
+fn testPeerId(tag: u8) PeerIdHandle {
+    return switch (tag) {
+        1 => PeerIdHandle.initBorrowed("peer-1"),
+        2 => PeerIdHandle.initBorrowed("peer-2"),
+        else => PeerIdHandle.initBorrowed("peer-x"),
+    };
+}
+
+fn testSource(tag: u64) GossipSource {
+    return .{ .key = tag };
+}
+
 fn testMessageId(tag: u8) MessageId {
     var out = std.mem.zeroes(MessageId);
     out[0] = tag;
     return out;
+}
+
+const DropCounterHandle = struct {
+    allocator: Allocator,
+    counter: *u32,
+
+    pub fn deinit(self: *DropCounterHandle) void {
+        self.counter.* += 1;
+        self.allocator.destroy(self);
+    }
+};
+
+fn makeOwnedHandle(allocator: Allocator, counter: *u32) !OpaqueHandle {
+    const handle = try allocator.create(DropCounterHandle);
+    handle.* = .{
+        .allocator = allocator,
+        .counter = counter,
+    };
+    return OpaqueHandle.initOwned(DropCounterHandle, handle);
+}
+
+fn testGossipAttestation(tag: u64) fork_types.AnyGossipAttestation {
+    var attestation = consensus_types.electra.SingleAttestation.default_value;
+    attestation.committee_index = @intCast(tag % 8);
+    attestation.attester_index = tag;
+    attestation.data.slot = 100 + tag;
+    attestation.data.target.epoch = 4;
+    return .{ .electra_single = attestation };
+}
+
+fn testOwnedPhase0GossipAttestation(
+    allocator: Allocator,
+    tag: u64,
+) !fork_types.AnyGossipAttestation {
+    var aggregation_bits = std.ArrayListUnmanaged(u8).empty;
+    try aggregation_bits.append(allocator, 0x01);
+
+    return .{
+        .phase0 = .{
+            .aggregation_bits = .{
+                .data = aggregation_bits,
+                .bit_len = 1,
+            },
+            .data = .{
+                .slot = 100 + tag,
+                .index = @intCast(tag % 8),
+                .beacon_block_root = [_]u8{@intCast(tag)} ** 32,
+                .source = .{ .epoch = 3, .root = [_]u8{0x11} ** 32 },
+                .target = .{ .epoch = 4, .root = [_]u8{0x22} ** 32 },
+            },
+            .signature = [_]u8{0} ** 96,
+        },
+    };
 }

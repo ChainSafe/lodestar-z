@@ -57,7 +57,7 @@ pub const InsertOutcome = enum {
 
 /// Bitlist type for per-slot aggregation bits.
 /// bit_len tracks the logical length; data stores the bytes.
-const Bitlist = Phase0Attestation.Type.@"aggregation_bits";
+const Bitlist = Phase0Attestation.Type.aggregation_bits;
 
 /// Count set bits in a bitlist.
 fn countBits(bits: []const u8) u32 {
@@ -409,7 +409,7 @@ pub const AggregatedAttestationPool = struct {
         var modified_data = attestation.data;
         var committee_index: u64 = 0;
         for (0..preset.MAX_COMMITTEES_PER_SLOT) |i| {
-            if (attestation.committee_bits.get(i)) {
+            if (attestation.committee_bits.get(i) catch false) {
                 committee_index = @intCast(i);
                 break;
             }
@@ -430,8 +430,15 @@ pub const AggregatedAttestationPool = struct {
         }
 
         // Convert to phase0 format for the group.
+        const src = attestation.aggregation_bits.data.items;
+        var new_data: std.ArrayListUnmanaged(u8) = .empty;
+        if (src.len > 0) {
+            new_data = try std.ArrayListUnmanaged(u8).initCapacity(self.allocator, src.len);
+            new_data.appendSliceAssumeCapacity(src);
+        }
+
         const phase0_att = Phase0Attestation.Type{
-            .aggregation_bits = attestation.aggregation_bits,
+            .aggregation_bits = .{ .data = new_data, .bit_len = attestation.aggregation_bits.bit_len },
             .data = modified_data,
             .signature = attestation.signature,
         };
@@ -633,8 +640,6 @@ fn cloneAttestation(allocator: Allocator, att: Phase0Attestation.Type) !Phase0At
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
-
-
 
 fn makeTestAttAlloc(allocator: Allocator, slot: Slot, index: u64, bits: []const u8, bit_len: usize) !Phase0Attestation.Type {
     var list = try std.ArrayListUnmanaged(u8).initCapacity(allocator, bits.len);

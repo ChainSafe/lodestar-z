@@ -12,9 +12,13 @@ const std = @import("std");
 const types = @import("consensus_types");
 const state_transition = @import("state_transition");
 const fork_types = @import("fork_types");
+const AnyAttestation = fork_types.AnyAttestation;
+const AnyGossipAttestation = fork_types.AnyGossipAttestation;
+const AnySignedAggregateAndProof = fork_types.AnySignedAggregateAndProof;
 const AnySignedBeaconBlock = fork_types.AnySignedBeaconBlock;
 const preset = @import("preset").preset;
 const constants = @import("constants");
+const ssz = @import("ssz");
 
 // Import BeaconNode lazily to avoid circular dependency.
 const beacon_node_mod = @import("beacon_node.zig");
@@ -92,60 +96,105 @@ pub fn getValidatorCount(ptr: *anyopaque) u32 {
 
 pub fn importAttestation(
     ptr: *anyopaque,
-    attestation_slot: u64,
-    committee_index: u64,
-    target_root: [32]u8,
-    target_epoch: u64,
-    validator_index: u64,
-    beacon_block_root: [32]u8,
-    source_epoch: u64,
-    source_root: [32]u8,
+    attestation: *const AnyGossipAttestation,
 ) anyerror!void {
     const node: *BeaconNode = @ptrCast(@alignCast(ptr));
-
-    const att = types.phase0.Attestation.Type{
-        .aggregation_bits = .{ .data = std.ArrayListUnmanaged(u8).empty, .bit_len = 0 },
-        .data = .{
-            .slot = attestation_slot,
-            .index = committee_index,
-            .beacon_block_root = beacon_block_root,
-            .source = .{ .epoch = source_epoch, .root = source_root },
-            .target = .{ .epoch = target_epoch, .root = target_root },
+    switch (attestation.*) {
+        .phase0 => |att| {
+            const validator_index = try getSingleAttestingIndexPhase0(node, &att);
+            try node.chainService().importAttestation(
+                validator_index,
+                .{ .phase0 = att },
+            );
         },
-        .signature = [_]u8{0} ** 96,
-    };
+        .electra_single => |single| {
+            var full_att = try convertSingleAttestation(node, &single);
+            defer full_att.aggregation_bits.data.deinit(node.allocator);
 
-    try node.chainService().importAttestation(
-        attestation_slot,
-        committee_index,
-        beacon_block_root,
-        target_root,
-        target_epoch,
-        validator_index,
-        .{ .phase0 = att },
-    );
+            try node.chainService().importAttestation(
+                single.attester_index,
+                .{ .electra = full_att },
+            );
+        },
+    }
 }
 
-pub fn importVoluntaryExit(ptr: *anyopaque, validator_index: u64, epoch: u64) anyerror!void {
-    const node: *BeaconNode = @ptrCast(@alignCast(ptr));
-    const exit = types.phase0.SignedVoluntaryExit.Type{
-        .message = .{
-            .epoch = epoch,
-            .validator_index = validator_index,
-        },
-        .signature = [_]u8{0} ** 96,
-    };
-    try node.chainService().importVoluntaryExit(exit);
+fn getSingleAttestingIndexPhase0(
+    node: *BeaconNode,
+    attestation: *const types.phase0.Attestation.Type,
+) !types.primitive.ValidatorIndex.Type {
+    const cached = node.headState() orelse return error.NoHeadState;
+    var attesting_indices = try cached.epoch_cache.getAttestingIndicesPhase0(attestation);
+    defer attesting_indices.deinit();
+
+    if (attesting_indices.items.len != 1) return error.InvalidGossipAttestation;
+    return attesting_indices.items[0];
 }
 
-pub fn importProposerSlashing(ptr: *anyopaque, ssz_bytes: []const u8) anyerror!void {
-    const node: *BeaconNode = @ptrCast(@alignCast(ptr));
-    var slashing: types.phase0.ProposerSlashing.Type = undefined;
-    types.phase0.ProposerSlashing.deserializeFromBytes(ssz_bytes, &slashing) catch |err| {
-        std.log.warn("Proposer slashing SSZ decode failed: {}", .{err});
-        return err;
+fn convertSingleAttestation(
+    node: *BeaconNode,
+    single: *const types.electra.SingleAttestation.Type,
+) !types.electra.Attestation.Type {
+    const cached = node.headState() orelse return error.NoHeadState;
+    const committee = try cached.epoch_cache.getBeaconCommittee(single.data.slot, single.committee_index);
+
+    var committee_offset: ?usize = null;
+    for (committee, 0..) |validator_index, index_in_committee| {
+        if (validator_index == single.attester_index) {
+            committee_offset = index_in_committee;
+            break;
+        }
+    }
+    const attester_offset = committee_offset orelse return error.AttesterNotInCommittee;
+
+    const AggregationBits = ssz.BitListType(preset.MAX_VALIDATORS_PER_COMMITTEE * preset.MAX_COMMITTEES_PER_SLOT);
+    const CommitteeBits = ssz.BitVectorType(preset.MAX_COMMITTEES_PER_SLOT);
+
+    var aggregation_bits = try AggregationBits.Type.fromBitLen(node.allocator, committee.len);
+    errdefer aggregation_bits.data.deinit(node.allocator);
+    try aggregation_bits.set(node.allocator, attester_offset, true);
+
+    var committee_bits = CommitteeBits.default_value;
+    try committee_bits.set(single.committee_index, true);
+
+    var data = single.data;
+    data.index = 0;
+
+    return .{
+        .aggregation_bits = aggregation_bits,
+        .data = data,
+        .signature = single.signature,
+        .committee_bits = committee_bits,
     };
-    try node.chainService().importProposerSlashing(slashing);
+}
+
+fn getAttestingIndicesForAnyAttestation(
+    node: *BeaconNode,
+    attestation: AnyAttestation,
+) !std.array_list.AlignedManaged(types.primitive.ValidatorIndex.Type, null) {
+    const cached = node.headState() orelse return error.NoHeadState;
+    return switch (attestation) {
+        .phase0 => |att| cached.epoch_cache.getAttestingIndicesPhase0(&att),
+        .electra => |att| cached.epoch_cache.getAttestingIndicesElectra(&att),
+    };
+}
+
+pub fn importAggregate(ptr: *anyopaque, aggregate: *const AnySignedAggregateAndProof) anyerror!void {
+    const node: *BeaconNode = @ptrCast(@alignCast(ptr));
+    const attestation = aggregate.attestation();
+    var attesting_indices = try getAttestingIndicesForAnyAttestation(node, attestation);
+    defer attesting_indices.deinit();
+    try node.chainService().importAggregate(attestation, attesting_indices.items);
+}
+
+pub fn importVoluntaryExit(ptr: *anyopaque, exit: *const types.phase0.SignedVoluntaryExit.Type) anyerror!void {
+    const node: *BeaconNode = @ptrCast(@alignCast(ptr));
+    try node.chainService().importVoluntaryExit(exit.*);
+}
+
+pub fn importProposerSlashing(ptr: *anyopaque, slashing: *const types.phase0.ProposerSlashing.Type) anyerror!void {
+    const node: *BeaconNode = @ptrCast(@alignCast(ptr));
+    try node.chainService().importProposerSlashing(slashing.*);
 }
 
 pub fn importAttesterSlashing(ptr: *anyopaque, ssz_bytes: []const u8) anyerror!void {
@@ -158,35 +207,18 @@ pub fn importAttesterSlashing(ptr: *anyopaque, ssz_bytes: []const u8) anyerror!v
     try node.chainService().importAttesterSlashing(slashing);
 }
 
-pub fn importBlsChange(ptr: *anyopaque, ssz_bytes: []const u8) anyerror!void {
+pub fn importBlsChange(ptr: *anyopaque, change: *const types.capella.SignedBLSToExecutionChange.Type) anyerror!void {
     const node: *BeaconNode = @ptrCast(@alignCast(ptr));
-    var change: types.capella.SignedBLSToExecutionChange.Type = undefined;
-    types.capella.SignedBLSToExecutionChange.deserializeFromBytes(ssz_bytes, &change) catch |err| {
-        std.log.warn("BLS change SSZ decode failed: {}", .{err});
-        return err;
-    };
-    try node.chainService().importBlsChange(change);
+    try node.chainService().importBlsChange(change.*);
 }
 
-pub fn importSyncContribution(ptr: *anyopaque, ssz_bytes: []const u8) anyerror!void {
+pub fn importSyncContribution(ptr: *anyopaque, signed_contribution: *const types.altair.SignedContributionAndProof.Type) anyerror!void {
     const node: *BeaconNode = @ptrCast(@alignCast(ptr));
-    var signed_cap: types.altair.SignedContributionAndProof.Type = undefined;
-    types.altair.SignedContributionAndProof.deserializeFromBytes(ssz_bytes, &signed_cap) catch |err| {
-        std.log.warn("SignedContributionAndProof SSZ decode failed: {}", .{err});
-        return err;
-    };
-
-    try node.chainService().importSyncContribution(&signed_cap.message.contribution);
+    try node.chainService().importSyncContribution(&signed_contribution.message.contribution);
 }
 
-pub fn importSyncCommitteeMessage(ptr: *anyopaque, ssz_bytes: []const u8, subnet: u64) anyerror!void {
+pub fn importSyncCommitteeMessage(ptr: *anyopaque, msg: *const types.altair.SyncCommitteeMessage.Type, subnet: u64) anyerror!void {
     const node: *BeaconNode = @ptrCast(@alignCast(ptr));
-    var msg: types.altair.SyncCommitteeMessage.Type = undefined;
-    types.altair.SyncCommitteeMessage.deserializeFromBytes(ssz_bytes, &msg) catch |err| {
-        std.log.warn("SyncCommitteeMessage SSZ decode failed: {}", .{err});
-        return err;
-    };
-
     const subcommittee_size = preset.SYNC_COMMITTEE_SIZE / constants.SYNC_COMMITTEE_SUBNET_COUNT;
     const index_in_subcommittee = msg.validator_index % subcommittee_size;
 
@@ -366,30 +398,49 @@ pub fn verifyBlsChangeSignature(ptr: *anyopaque, ssz_bytes: []const u8) bool {
     ) catch false;
 }
 
-pub fn verifyAttestationSignature(ptr: *anyopaque, ssz_bytes: []const u8) bool {
+pub fn verifyAttestationSignature(ptr: *anyopaque, attestation: *const AnyGossipAttestation) bool {
     const node: *BeaconNode = @ptrCast(@alignCast(ptr));
     const cached = node.headState() orelse return true;
 
-    var att: types.electra.SingleAttestation.Type = undefined;
-    types.electra.SingleAttestation.deserializeFromBytes(ssz_bytes, &att) catch return false;
+    switch (attestation.*) {
+        .phase0 => |att| {
+            var attesting_indices = cached.epoch_cache.getAttestingIndicesPhase0(&att) catch return false;
+            defer attesting_indices.deinit();
 
-    if (att.attester_index >= cached.epoch_cache.index_to_pubkey.items.len) return false;
+            if (attesting_indices.items.len != 1) return false;
 
-    var signing_root: [32]u8 = undefined;
-    state_transition.signature_sets.indexed_attestation.getAttestationDataSigningRoot(
-        node.config,
-        cached.epoch_cache.epoch,
-        &att.data,
-        &signing_root,
-    ) catch return false;
+            const sig_set = state_transition.signature_sets.indexed_attestation.getAttestationWithIndicesSignatureSet(
+                node.allocator,
+                node.config,
+                cached.epoch_cache,
+                &att.data,
+                att.signature,
+                attesting_indices.items,
+            ) catch return false;
+            defer node.allocator.free(sig_set.pubkeys);
 
-    const sig_set = state_transition.signature_sets.SingleSignatureSet{
-        .pubkey = cached.epoch_cache.index_to_pubkey.items[att.attester_index],
-        .signing_root = signing_root,
-        .signature = att.signature,
-    };
+            return state_transition.signature_sets.verifyAggregatedSignatureSet(&sig_set) catch false;
+        },
+        .electra_single => |att| {
+            if (att.attester_index >= cached.epoch_cache.index_to_pubkey.items.len) return false;
 
-    return state_transition.signature_sets.verifySingleSignatureSet(&sig_set) catch false;
+            var signing_root: [32]u8 = undefined;
+            state_transition.signature_sets.indexed_attestation.getAttestationDataSigningRoot(
+                node.config,
+                cached.epoch_cache.epoch,
+                &att.data,
+                &signing_root,
+            ) catch return false;
+
+            const sig_set = state_transition.signature_sets.SingleSignatureSet{
+                .pubkey = cached.epoch_cache.index_to_pubkey.items[att.attester_index],
+                .signing_root = signing_root,
+                .signature = att.signature,
+            };
+
+            return state_transition.signature_sets.verifySingleSignatureSet(&sig_set) catch false;
+        },
+    }
 }
 
 pub fn verifyAggregateSignature(ptr: *anyopaque, ssz_bytes: []const u8) bool {
