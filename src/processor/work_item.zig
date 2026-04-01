@@ -39,12 +39,6 @@ pub const SlotPhase = enum(u8) {
     aggregate_deadline,
 };
 
-/// Opaque handle for blob sidecar data. TODO: Replace with real type.
-pub const BlobSidecarHandle = *anyopaque;
-
-/// Opaque handle for data column sidecar. TODO: Replace with real type.
-pub const DataColumnHandle = *anyopaque;
-
 /// Opaque handle for execution payload envelope. TODO: Replace with real type.
 pub const ExecutionPayloadHandle = *anyopaque;
 
@@ -103,7 +97,7 @@ pub const GossipBlockWork = struct {
 pub const GossipBlobWork = struct {
     peer_id: PeerId,
     message_id: MessageId,
-    blob: BlobSidecarHandle,
+    data: GossipDataHandle,
     seen_timestamp_ns: i64,
 };
 
@@ -111,7 +105,7 @@ pub const GossipBlobWork = struct {
 pub const GossipColumnWork = struct {
     peer_id: PeerId,
     message_id: MessageId,
-    column: DataColumnHandle,
+    data: GossipDataHandle,
     seen_timestamp_ns: i64,
 };
 
@@ -217,14 +211,14 @@ pub const RpcBlockWork = struct {
 
 /// Blob received via RPC.
 pub const RpcBlobWork = struct {
-    blob: BlobSidecarHandle,
+    blob: *anyopaque,
     block_root: Root,
     seen_timestamp_ns: i64,
 };
 
 /// Data column received via RPC.
 pub const RpcColumnWork = struct {
-    column: DataColumnHandle,
+    column: *anyopaque,
     block_root: Root,
     seen_timestamp_ns: i64,
 };
@@ -464,6 +458,8 @@ pub const WorkItem = union(WorkType) {
         switch (self) {
             .delayed_block => |work| work.block.deinit(allocator),
             .gossip_block => |work| work.block.deinit(allocator),
+            .gossip_blob => |work| work.data.deinit(),
+            .gossip_data_column => |work| work.data.deinit(),
             .rpc_block => |work| work.block.deinit(allocator),
             .attestation => |work| work.data.deinit(),
             .aggregate => |work| work.data.deinit(),

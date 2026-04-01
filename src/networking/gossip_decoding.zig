@@ -157,6 +157,15 @@ pub const DecodedBlobSidecar = struct {
     block_parent_root: [32]u8,
 };
 
+/// Result of decoding a data_column_sidecar gossip message.
+pub const DecodedDataColumnSidecar = struct {
+    index: u64,
+    slot: u64,
+    proposer_index: u64,
+    block_parent_root: [32]u8,
+    block_root: [32]u8,
+};
+
 /// Result of decoding a beacon_attestation (SingleAttestation) gossip message.
 /// In Electra, individual gossip attestations use SingleAttestation format
 /// (one validator per message, no aggregation bits).
@@ -219,7 +228,6 @@ fn countSetBits(bl: anytype) u64 {
     return count;
 }
 
-
 /// Union of all decoded gossip message types.
 pub const DecodedGossipMessage = union(GossipTopicType) {
     // Fields match GossipTopicType enum declaration order.
@@ -233,7 +241,7 @@ pub const DecodedGossipMessage = union(GossipTopicType) {
     blob_sidecar: DecodedBlobSidecar,
     sync_committee_contribution_and_proof: DecodedSyncContributionAndProof,
     sync_committee: DecodedSyncCommitteeMessage,
-    data_column_sidecar: void,
+    data_column_sidecar: DecodedDataColumnSidecar,
 };
 
 /// Decompress a Snappy-framed gossip payload, rejecting payloads that would
@@ -333,14 +341,16 @@ pub fn decodeFromSszBytes(
             const proposer_index = std.mem.readInt(u64, ssz_bytes[message_offset + 8 ..][0..8], .little);
             var parent_root: [32]u8 = undefined;
             @memcpy(&parent_root, ssz_bytes[message_offset + 16 ..][0..32]);
-            return .{ .beacon_block = .{
-                .slot = slot,
-                .proposer_index = proposer_index,
-                .parent_root = parent_root,
-                // raw_ssz is filled in by decodeGossipMessage after ownership transfer.
-                // When called directly (e.g. from tests), callers must set raw_ssz themselves.
-                .raw_ssz = ssz_bytes,
-            } };
+            return .{
+                .beacon_block = .{
+                    .slot = slot,
+                    .proposer_index = proposer_index,
+                    .parent_root = parent_root,
+                    // raw_ssz is filled in by decodeGossipMessage after ownership transfer.
+                    // When called directly (e.g. from tests), callers must set raw_ssz themselves.
+                    .raw_ssz = ssz_bytes,
+                },
+            };
         },
         .beacon_aggregate_and_proof => {
             if (fork_seq.gte(.electra)) {
@@ -418,16 +428,18 @@ pub fn decodeFromSszBytes(
                 // committee_index is in data.index for phase0; attester_index is unknown at
                 // decode time (it's the single set bit in aggregation_bits, but we don't know
                 // the committee here). Use 0 as placeholder — callers must handle pre-Electra.
-                return .{ .beacon_attestation = .{
-                    .committee_index = att.data.index,
-                    .attester_index = 0, // not available in pre-Electra gossip format
-                    .slot = att.data.slot,
-                    .target_epoch = att.data.target.epoch,
-                    .target_root = att.data.target.root,
-                    .beacon_block_root = att.data.beacon_block_root,
-                    .source_epoch = att.data.source.epoch,
-                    .source_root = att.data.source.root,
-                } };
+                return .{
+                    .beacon_attestation = .{
+                        .committee_index = att.data.index,
+                        .attester_index = 0, // not available in pre-Electra gossip format
+                        .slot = att.data.slot,
+                        .target_epoch = att.data.target.epoch,
+                        .target_root = att.data.target.root,
+                        .beacon_block_root = att.data.beacon_block_root,
+                        .source_epoch = att.data.source.epoch,
+                        .source_root = att.data.source.root,
+                    },
+                };
             }
         },
         .attester_slashing => {
@@ -554,7 +566,25 @@ pub fn decodeFromSszBytes(
                 .block_parent_root = parent_root,
             } };
         },
-        .data_column_sidecar => return error.UnsupportedTopicType,
+        .data_column_sidecar => {
+            var sidecar = consensus_types.fulu.DataColumnSidecar.default_value;
+            consensus_types.fulu.DataColumnSidecar.deserializeFromBytes(allocator, ssz_bytes, &sidecar) catch
+                return error.SszDeserializationFailed;
+            defer consensus_types.fulu.DataColumnSidecar.deinit(allocator, &sidecar);
+
+            const header = &sidecar.signed_block_header.message;
+            var block_root: [32]u8 = undefined;
+            phase0.BeaconBlockHeader.hashTreeRoot(header, &block_root) catch
+                return error.SszDeserializationFailed;
+
+            return .{ .data_column_sidecar = .{
+                .index = sidecar.index,
+                .slot = header.slot,
+                .proposer_index = header.proposer_index,
+                .block_parent_root = header.parent_root,
+                .block_root = block_root,
+            } };
+        },
     }
 }
 
@@ -636,10 +666,23 @@ test "decode proposer_slashing from SSZ bytes" {
     try testing.expectEqual(@as(u64, 100), decoded.proposer_slashing.header_2_slot);
 }
 
-test "decode unsupported topic type" {
-    const dummy = [_]u8{ 0, 1, 2, 3 };
-    const result = decodeFromSszBytes(testing.allocator, .data_column_sidecar, &dummy, .phase0);
-    try testing.expectError(error.UnsupportedTopicType, result);
+test "decode data_column_sidecar from SSZ bytes" {
+    var sidecar = consensus_types.fulu.DataColumnSidecar.default_value;
+    sidecar.index = 7;
+    sidecar.signed_block_header.message.slot = 123;
+    sidecar.signed_block_header.message.proposer_index = 11;
+    sidecar.signed_block_header.message.parent_root = [_]u8{0xAA} ** 32;
+
+    const ssz_size = consensus_types.fulu.DataColumnSidecar.serializedSize(&sidecar);
+    const ssz_buf = try testing.allocator.alloc(u8, ssz_size);
+    defer testing.allocator.free(ssz_buf);
+    _ = consensus_types.fulu.DataColumnSidecar.serializeIntoBytes(&sidecar, ssz_buf);
+
+    const decoded = try decodeFromSszBytes(testing.allocator, .data_column_sidecar, ssz_buf, .fulu);
+    try testing.expectEqual(@as(u64, 7), decoded.data_column_sidecar.index);
+    try testing.expectEqual(@as(u64, 123), decoded.data_column_sidecar.slot);
+    try testing.expectEqual(@as(u64, 11), decoded.data_column_sidecar.proposer_index);
+    try testing.expectEqualSlices(u8, &([_]u8{0xAA} ** 32), &decoded.data_column_sidecar.block_parent_root);
 }
 
 test "decode attester_slashing bad SSZ" {

@@ -6,7 +6,6 @@
 const std = @import("std");
 const log = @import("log");
 
-const types = @import("consensus_types");
 const preset = @import("preset").preset;
 const fork_types = @import("fork_types");
 const config_mod = @import("config");
@@ -1550,6 +1549,8 @@ fn initGossipHandler(self: *BeaconNode) void {
         gh.importProposerSlashingFn = &callbacks.importProposerSlashing;
         gh.importAttesterSlashingFn = &callbacks.importAttesterSlashing;
         gh.importBlsChangeFn = &callbacks.importBlsChange;
+        gh.importBlobSidecarFn = &callbacks.importBlobSidecar;
+        gh.importDataColumnSidecarFn = &callbacks.importDataColumnSidecar;
 
         gh.verifyBlockSignatureFn = &callbacks.verifyBlockSignature;
         gh.verifyVoluntaryExitSignatureFn = &callbacks.verifyVoluntaryExitSignature;
@@ -1592,7 +1593,6 @@ fn processGossipEventsFromSlice(self: *BeaconNode, io: std.Io, events: anytype) 
                 const parsed = gossip_topics.parseTopic(msg.topic) orelse continue;
                 switch (parsed.topic_type) {
                     .beacon_block => handleGossipBlock(self, gossip_decoding, msg.data, metadata),
-                    .data_column_sidecar => handleGossipDataColumn(self, gossip_decoding, msg.data, parsed.subnet_id),
                     else => {
                         if (self.gossip_handler) |gh| {
                             const slot = self.currentHeadSlot();
@@ -1637,7 +1637,11 @@ fn handleGossipBlock(
         return;
     };
 
-    const fork_seq = self.config.forkSeq(self.currentHeadSlot());
+    const block_slot: u64 = if (ssz_bytes.len >= 108)
+        std.mem.readInt(u64, ssz_bytes[100..108], .little)
+    else
+        self.currentHeadSlot();
+    const fork_seq = self.config.forkSeq(block_slot);
     const any_signed = AnySignedBeaconBlock.deserialize(
         self.allocator,
         .full,
@@ -1661,11 +1665,24 @@ fn handleGossipBlock(
     }
 
     defer self.allocator.free(ssz_bytes);
-    defer any_signed.deinit(self.allocator);
+    const seen_timestamp_sec: u64 = if (metadata.seen_timestamp_ns > 0)
+        @intCast(@divFloor(metadata.seen_timestamp_ns, std.time.ns_per_s))
+    else
+        0;
+    const accepted = self.chainService().acceptGossipBlock(any_signed, seen_timestamp_sec) catch |err| {
+        any_signed.deinit(self.allocator);
+        std.log.warn("Gossip block ingress failed: {}", .{err});
+        return;
+    };
+    const ready = switch (accepted) {
+        .pending_data => return,
+        .ready => |ready| ready,
+    };
+    defer ready.block.deinit(self.allocator);
 
-    const result = self.importBlock(any_signed, .gossip) catch |err| {
+    const result = self.importReadyBlock(ready) catch |err| {
         if (err == error.UnknownParentBlock) {
-            self.queueOrphanBlock(any_signed, ssz_bytes);
+            self.queueOrphanBlock(ready.block, ssz_bytes);
         } else if (err != error.BlockAlreadyKnown and err != error.BlockAlreadyFinalized) {
             std.log.warn("Gossip block import: {}", .{err});
         }
@@ -1679,42 +1696,6 @@ fn handleGossipBlock(
         result.block_root[2],
         result.block_root[3],
     });
-}
-
-fn handleGossipDataColumn(
-    self: *BeaconNode,
-    gossip_decoding_mod: anytype,
-    data: []const u8,
-    subnet_id: ?u8,
-) void {
-    _ = subnet_id;
-    const ssz_bytes = gossip_decoding_mod.decompressGossipPayload(
-        self.allocator,
-        data,
-        gossip_decoding_mod.MAX_GOSSIP_SIZE_DEFAULT,
-    ) catch {
-        std.log.warn("Gossip: failed to decompress data column sidecar", .{});
-        return;
-    };
-    defer self.allocator.free(ssz_bytes);
-
-    var sidecar = types.fulu.DataColumnSidecar.default_value;
-    types.fulu.DataColumnSidecar.deserializeFromBytes(self.allocator, ssz_bytes, &sidecar) catch |err| {
-        std.log.warn("Gossip: failed to decode data column sidecar: {}", .{err});
-        return;
-    };
-    defer types.fulu.DataColumnSidecar.deinit(self.allocator, &sidecar);
-
-    const column_index = sidecar.index;
-    var block_root: [32]u8 = undefined;
-    types.phase0.BeaconBlockHeader.hashTreeRoot(&sidecar.signed_block_header.message, &block_root) catch |err| {
-        std.log.warn("Gossip: failed to hash data column block header: {}", .{err});
-        return;
-    };
-
-    self.importDataColumnSidecar(block_root, column_index, ssz_bytes) catch |err| {
-        std.log.warn("Gossip data column import error: {}", .{err});
-    };
 }
 
 fn currentUnixTimeNs(io: std.Io) i64 {

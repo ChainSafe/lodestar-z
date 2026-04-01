@@ -22,9 +22,12 @@ pub const Chain = chain.Chain;
 // BlockInput is now consolidated to blocks/types.BlockInput (P1-7 fix).
 pub const BlockInput = blocks.BlockInput;
 pub const BlockSource = blocks.BlockSource;
+pub const DataAvailabilityStatus = chain_types.DataAvailabilityStatus;
 pub const HeadInfo = chain_types.HeadInfo;
 pub const SyncStatus = chain_types.SyncStatus;
 pub const ForkchoiceUpdateState = chain_types.ForkchoiceUpdateState;
+pub const ReadyBlockInput = chain_types.ReadyBlockInput;
+pub const BlockIngressResult = chain_types.BlockIngressResult;
 pub const NotificationSink = chain_types.NotificationSink;
 pub const ChainNotification = chain_types.ChainNotification;
 pub const ImportOutcome = effects.ImportOutcome;
@@ -83,6 +86,7 @@ pub const prepare_next_slot = @import("prepare_next_slot.zig");
 pub const archive_store = @import("archive_store.zig");
 // block_verification.zig removed — superseded by blocks/ pipeline (P1-6 fix).
 pub const reprocess = @import("reprocess.zig");
+pub const pending_da_blocks = @import("pending_da_blocks.zig");
 
 // Re-exports
 pub const ShufflingCache = shuffling_cache.ShufflingCache;
@@ -93,6 +97,8 @@ pub const ArchiveStore = archive_store.ArchiveStore;
 pub const ReprocessQueue = reprocess.ReprocessQueue;
 pub const PendingBlock = reprocess.PendingBlock;
 pub const PendingReason = reprocess.PendingReason;
+pub const PendingDaBlocks = pending_da_blocks.PendingDaBlocks;
+pub const PendingDaBlock = pending_da_blocks.PendingBlock;
 // BlockVerification removed — use blocks/pipeline.zig instead.
 
 // Queued state regeneration

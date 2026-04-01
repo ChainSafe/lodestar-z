@@ -21,6 +21,7 @@ const Root = [32]u8;
 const blocks_types = @import("blocks/types.zig");
 pub const BlockInput = blocks_types.BlockInput;
 pub const BlockSource = blocks_types.BlockSource;
+pub const DataAvailabilityStatus = blocks_types.DataAvailabilityStatus;
 
 // ---------------------------------------------------------------------------
 // ImportResult — re-export from blocks/types.zig (P1-8 consolidation fix).
@@ -30,6 +31,20 @@ pub const BlockSource = blocks_types.BlockSource;
 // ---------------------------------------------------------------------------
 
 pub const ImportResult = blocks_types.ImportResult;
+
+pub const ReadyBlockInput = struct {
+    block: fork_types.AnySignedBeaconBlock,
+    source: BlockSource,
+    block_root: Root,
+    slot: Slot,
+    da_status: DataAvailabilityStatus,
+    seen_timestamp_sec: u64 = 0,
+};
+
+pub const BlockIngressResult = union(enum) {
+    ready: ReadyBlockInput,
+    pending_data: Root,
+};
 
 // ---------------------------------------------------------------------------
 // HeadInfo — current chain head summary.

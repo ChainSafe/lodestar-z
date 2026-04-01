@@ -31,6 +31,7 @@ const QueueConfig = processor_mod.QueueConfig;
 const SlotClock = @import("clock.zig").SlotClock;
 const NodeOptions = @import("options.zig").NodeOptions;
 const InitConfig = @import("beacon_node.zig").BeaconNode.InitConfig;
+const custody_mod = @import("networking").custody;
 
 pub fn init(allocator: Allocator, io: std.Io, beacon_config: *const BeaconConfig, init_config: InitConfig) !*BeaconNode {
     const opts = init_config.options;
@@ -44,6 +45,12 @@ pub fn init(allocator: Allocator, io: std.Io, beacon_config: *const BeaconConfig
     const api_node_identity = try initApiNodeIdentity(allocator, opts, &node_identity);
     var owned_api_node_identity: ?*ApiNodeIdentity = api_node_identity;
     errdefer if (owned_api_node_identity) |identity| deinitApiNodeIdentity(allocator, identity);
+    const custody_columns = try custody_mod.getCustodyColumns(
+        allocator,
+        node_identity.node_id,
+        beacon_config.chain.CUSTODY_REQUIREMENT,
+    );
+    defer allocator.free(custody_columns);
 
     var storage_backend: chain_mod.StorageBackend = undefined;
 
@@ -81,6 +88,7 @@ pub fn init(allocator: Allocator, io: std.Io, beacon_config: *const BeaconConfig
             .max_checkpoint_epochs = opts.max_checkpoint_epochs,
             .verify_signatures = opts.verify_signatures,
             .validator_monitor_indices = opts.validator_monitor_indices,
+            .custody_columns = custody_columns,
         },
     );
     var owned_chain_runtime: ?*chain_mod.Runtime = chain_runtime;

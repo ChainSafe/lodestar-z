@@ -87,6 +87,8 @@ const ValidatorMonitor = validator_monitor_mod.ValidatorMonitor;
 const DataAvailabilityManager = da_mod.DataAvailabilityManager;
 const reprocess_mod = @import("reprocess.zig");
 const ReprocessQueue = reprocess_mod.ReprocessQueue;
+const pending_da_blocks_mod = @import("pending_da_blocks.zig");
+const PendingDaBlocks = pending_da_blocks_mod.PendingDaBlocks;
 
 fn unixTimestampSeconds() u64 {
     var ts: std.posix.timespec = undefined;
@@ -137,6 +139,8 @@ pub const Chain = struct {
     /// for DA completeness before final import. If DA is pending, the block
     /// is queued for reprocessing when data arrives.
     da_manager: ?*DataAvailabilityManager,
+    /// Pending blocks whose DA is incomplete.
+    pending_da_blocks: ?*PendingDaBlocks,
 
     // --- Reprocessing --- (P1-10 fix)
     /// Reprocess queue — optional. When set, blocks that fail with ParentUnknown
@@ -204,6 +208,7 @@ pub const Chain = struct {
             .head_tracker = head_tracker,
             .beacon_proposer_cache = beacon_proposer_cache,
             .da_manager = null,
+            .pending_da_blocks = null,
             .reprocess_queue = null,
             .sync_contribution_pool = null,
             .sync_committee_message_pool = null,
@@ -379,6 +384,20 @@ pub const Chain = struct {
             .source = source,
             .da_status = .not_required,
         };
+        return self.importPipelineBlockInput(block_input);
+    }
+
+    pub fn importReadyBlock(self: *Chain, ready: chain_types.ReadyBlockInput) !ImportResult {
+        const block_input = PipelineBlockInput{
+            .block = ready.block,
+            .source = ready.source,
+            .da_status = ready.da_status,
+            .seen_timestamp_sec = ready.seen_timestamp_sec,
+        };
+        return self.importPipelineBlockInput(block_input);
+    }
+
+    fn importPipelineBlockInput(self: *Chain, block_input: PipelineBlockInput) !ImportResult {
         // Skip execution verification here — the EL call (engine_newPayload) is
         // handled by BeaconNode after importBlock returns, via notifyForkchoiceUpdate.
         // Skip future-slot check: callers (gossip handler, API, sync) have already
@@ -615,6 +634,9 @@ pub const Chain = struct {
         // Prune slot_roots in HeadTracker — remove entries for pre-finalized slots.
         // This prevents the slot→root map from growing unboundedly over time.
         const finalized_slot = finalized_epoch * preset.SLOTS_PER_EPOCH;
+        if (self.pending_da_blocks) |pending| {
+            pending.pruneBeforeSlot(finalized_slot);
+        }
         self.head_tracker.pruneBelow(finalized_slot);
 
         // Prune block_to_state — remove entries for blocks that are now finalized.
@@ -897,6 +919,15 @@ pub const Chain = struct {
                 .versioned_hash = [_]u8{0} ** 32,
             } });
         }
+    }
+
+    pub fn importDataColumnSidecar(
+        self: *Chain,
+        root: [32]u8,
+        column_index: u64,
+        data: []const u8,
+    ) !void {
+        try self.db.putDataColumn(root, column_index, data);
     }
 
     /// Advance the head state by one empty slot (no block).

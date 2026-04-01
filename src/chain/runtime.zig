@@ -29,12 +29,15 @@ const SyncContributionAndProofPool = sync_contribution_pool_mod.SyncContribution
 const SyncCommitteeMessagePool = sync_contribution_pool_mod.SyncCommitteeMessagePool;
 const ValidatorMonitor = @import("validator_monitor.zig").ValidatorMonitor;
 const BeaconProposerCache = @import("beacon_proposer_cache.zig").BeaconProposerCache;
+const DataAvailabilityManager = @import("data_availability.zig").DataAvailabilityManager;
+const PendingDaBlocks = @import("pending_da_blocks.zig").PendingDaBlocks;
 
 pub const RuntimeOptions = struct {
     max_block_states: u32 = 64,
     max_checkpoint_epochs: u32 = 3,
     verify_signatures: bool = false,
     validator_monitor_indices: []const u64 = &.{},
+    custody_columns: []const u64 = &.{},
 };
 
 pub const StorageBackend = union(enum) {
@@ -78,6 +81,9 @@ pub const Runtime = struct {
     sync_contribution_pool: *SyncContributionAndProofPool,
     sync_committee_message_pool: *SyncCommitteeMessagePool,
     beacon_proposer_cache: *BeaconProposerCache,
+    custody_columns: []u64,
+    da_manager: *DataAvailabilityManager,
+    pending_da_blocks: *PendingDaBlocks,
     validator_monitor: ?*ValidatorMonitor = null,
     chain: *Chain,
 
@@ -154,6 +160,25 @@ pub const Runtime = struct {
         proposer_cache.* = BeaconProposerCache.init(allocator);
         errdefer proposer_cache.deinit();
 
+        const custody_columns = try allocator.dupe(u64, opts.custody_columns);
+        errdefer allocator.free(custody_columns);
+
+        const da_manager = try allocator.create(DataAvailabilityManager);
+        errdefer allocator.destroy(da_manager);
+        da_manager.* = DataAvailabilityManager.init(
+            allocator,
+            .{
+                .min_epochs_for_blob_sidecars_requests = config.chain.MIN_EPOCHS_FOR_BLOB_SIDECARS_REQUESTS,
+            },
+            custody_columns,
+        );
+        errdefer da_manager.deinit();
+
+        const pending_da_blocks = try allocator.create(PendingDaBlocks);
+        errdefer allocator.destroy(pending_da_blocks);
+        pending_da_blocks.* = PendingDaBlocks.init(allocator);
+        errdefer pending_da_blocks.deinit();
+
         const chain = try allocator.create(Chain);
         errdefer allocator.destroy(chain);
         chain.* = Chain.init(
@@ -173,6 +198,8 @@ pub const Runtime = struct {
         chain.queued_regen = queued_regen;
         chain.sync_contribution_pool = sync_contrib_pool;
         chain.sync_committee_message_pool = sync_msg_pool;
+        chain.da_manager = da_manager;
+        chain.pending_da_blocks = pending_da_blocks;
 
         runtime.* = .{
             .allocator = allocator,
@@ -190,6 +217,9 @@ pub const Runtime = struct {
             .sync_contribution_pool = sync_contrib_pool,
             .sync_committee_message_pool = sync_msg_pool,
             .beacon_proposer_cache = proposer_cache,
+            .custody_columns = custody_columns,
+            .da_manager = da_manager,
+            .pending_da_blocks = pending_da_blocks,
             .chain = chain,
         };
 
@@ -231,6 +261,14 @@ pub const Runtime = struct {
 
         self.beacon_proposer_cache.deinit();
         self.allocator.destroy(self.beacon_proposer_cache);
+
+        self.pending_da_blocks.deinit();
+        self.allocator.destroy(self.pending_da_blocks);
+
+        self.da_manager.deinit();
+        self.allocator.destroy(self.da_manager);
+
+        self.allocator.free(self.custody_columns);
 
         self.seen_cache.deinit();
         self.allocator.destroy(self.seen_cache);

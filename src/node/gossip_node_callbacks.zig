@@ -26,7 +26,11 @@ const BeaconNode = beacon_node_mod.BeaconNode;
 
 pub fn importBlockFromGossip(ptr: *anyopaque, block_bytes: []const u8) anyerror!void {
     const node: *BeaconNode = @ptrCast(@alignCast(ptr));
-    const fork_seq = node.config.forkSeq(node.currentHeadSlot());
+    const block_slot: u64 = if (block_bytes.len >= 108)
+        std.mem.readInt(u64, block_bytes[100..108], .little)
+    else
+        node.currentHeadSlot();
+    const fork_seq = node.config.forkSeq(block_slot);
     const any_signed = AnySignedBeaconBlock.deserialize(
         node.allocator,
         .full,
@@ -36,11 +40,20 @@ pub fn importBlockFromGossip(ptr: *anyopaque, block_bytes: []const u8) anyerror!
         std.log.warn("Gossip block import deserialize: {}", .{err});
         return err;
     };
-    defer any_signed.deinit(node.allocator);
 
-    const result = node.importBlock(any_signed, .gossip) catch |err| {
+    const accepted = node.chainService().acceptGossipBlock(any_signed, 0) catch |err| {
+        any_signed.deinit(node.allocator);
+        return err;
+    };
+    const ready = switch (accepted) {
+        .pending_data => return,
+        .ready => |ready| ready,
+    };
+    defer ready.block.deinit(node.allocator);
+
+    const result = node.importReadyBlock(ready) catch |err| {
         if (err == error.UnknownParentBlock) {
-            node.queueOrphanBlock(any_signed, block_bytes);
+            node.queueOrphanBlock(ready.block, block_bytes);
         } else if (err != error.BlockAlreadyKnown and err != error.BlockAlreadyFinalized) {
             std.log.warn("Gossip block import: {}", .{err});
         }
@@ -184,6 +197,69 @@ pub fn importSyncCommitteeMessage(ptr: *anyopaque, ssz_bytes: []const u8, subnet
         index_in_subcommittee,
         msg.signature,
     );
+}
+
+pub fn importBlobSidecar(ptr: *anyopaque, ssz_bytes: []const u8) anyerror!void {
+    const node: *BeaconNode = @ptrCast(@alignCast(ptr));
+
+    var sidecar: types.deneb.BlobSidecar.Type = undefined;
+    types.deneb.BlobSidecar.deserializeFromBytes(ssz_bytes, &sidecar) catch |err| {
+        std.log.warn("BlobSidecar SSZ decode failed: {}", .{err});
+        return err;
+    };
+
+    var block_root: [32]u8 = undefined;
+    types.phase0.BeaconBlockHeader.hashTreeRoot(&sidecar.signed_block_header.message, &block_root) catch |err| {
+        std.log.warn("BlobSidecar block root hash failed: {}", .{err});
+        return err;
+    };
+
+    if (try node.ingestBlobSidecar(block_root, sidecar.index, sidecar.signed_block_header.message.slot, ssz_bytes)) |ready| {
+        defer ready.block.deinit(node.allocator);
+
+        const result = node.importReadyBlock(ready) catch |err| {
+            if (err == error.UnknownParentBlock) {
+                const block_bytes = ready.block.serialize(node.allocator) catch return err;
+                defer node.allocator.free(block_bytes);
+                node.queueOrphanBlock(ready.block, block_bytes);
+                return err;
+            }
+            return err;
+        };
+        node.processPendingChildren(result.block_root);
+    }
+}
+
+pub fn importDataColumnSidecar(ptr: *anyopaque, ssz_bytes: []const u8) anyerror!void {
+    const node: *BeaconNode = @ptrCast(@alignCast(ptr));
+
+    var sidecar = types.fulu.DataColumnSidecar.default_value;
+    types.fulu.DataColumnSidecar.deserializeFromBytes(node.allocator, ssz_bytes, &sidecar) catch |err| {
+        std.log.warn("DataColumnSidecar SSZ decode failed: {}", .{err});
+        return err;
+    };
+    defer types.fulu.DataColumnSidecar.deinit(node.allocator, &sidecar);
+
+    var block_root: [32]u8 = undefined;
+    types.phase0.BeaconBlockHeader.hashTreeRoot(&sidecar.signed_block_header.message, &block_root) catch |err| {
+        std.log.warn("DataColumnSidecar block root hash failed: {}", .{err});
+        return err;
+    };
+
+    if (try node.ingestDataColumnSidecar(block_root, sidecar.index, sidecar.signed_block_header.message.slot, ssz_bytes)) |ready| {
+        defer ready.block.deinit(node.allocator);
+
+        const result = node.importReadyBlock(ready) catch |err| {
+            if (err == error.UnknownParentBlock) {
+                const block_bytes = ready.block.serialize(node.allocator) catch return err;
+                defer node.allocator.free(block_bytes);
+                node.queueOrphanBlock(ready.block, block_bytes);
+                return err;
+            }
+            return err;
+        };
+        node.processPendingChildren(result.block_root);
+    }
 }
 
 // ---------------------------------------------------------------------------

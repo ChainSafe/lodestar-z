@@ -349,6 +349,23 @@ pub const BeaconNode = struct {
     ) !ImportResult {
         const t0 = std.Io.Clock.awake.now(self.io);
         const outcome = try self.chainService().importBlock(any_signed, source);
+        return self.finishImportOutcome(t0, outcome);
+    }
+
+    pub fn importReadyBlock(
+        self: *BeaconNode,
+        ready: chain_mod.ReadyBlockInput,
+    ) !ImportResult {
+        const t0 = std.Io.Clock.awake.now(self.io);
+        const outcome = try self.chainService().importReadyBlock(ready);
+        return self.finishImportOutcome(t0, outcome);
+    }
+
+    fn finishImportOutcome(
+        self: *BeaconNode,
+        t0: std.Io.Timestamp,
+        outcome: chain_mod.ImportOutcome,
+    ) !ImportResult {
         const result = outcome.result;
 
         // Notify EL of fork choice update after each block import.
@@ -404,6 +421,16 @@ pub const BeaconNode = struct {
         try self.chainService().importBlobSidecar(root, data);
     }
 
+    pub fn ingestBlobSidecar(
+        self: *BeaconNode,
+        root: [32]u8,
+        blob_index: u64,
+        slot: u64,
+        data: []const u8,
+    ) !?chain_mod.ReadyBlockInput {
+        return self.chainService().ingestBlobSidecar(root, blob_index, slot, data);
+    }
+
     /// Store a data column sidecar received via gossip or req/resp (PeerDAS / Fulu).
     ///
     /// Data column sidecars arrive individually, keyed by (block_root, column_index).
@@ -414,6 +441,23 @@ pub const BeaconNode = struct {
             &std.fmt.bytesToHex(root[0..4], .lower),
             column_index,
         });
+    }
+
+    pub fn ingestDataColumnSidecar(
+        self: *BeaconNode,
+        root: [32]u8,
+        column_index: u64,
+        slot: u64,
+        data: []const u8,
+    ) !?chain_mod.ReadyBlockInput {
+        const ready = try self.chainService().ingestDataColumnSidecar(root, column_index, slot, data);
+        if (ready != null) {
+            std.log.info("Imported data column sidecar root={s}... column={d}", .{
+                &std.fmt.bytesToHex(root[0..4], .lower),
+                column_index,
+            });
+        }
+        return ready;
     }
 
     /// Check data availability for a block: do we have all required custody columns?
@@ -790,23 +834,36 @@ pub fn processorHandlerCallback(item: WorkItem, context: *anyopaque) void {
 
     switch (item) {
         .gossip_block => |work| {
-            // Full block import via STFN + fork choice.
-            // The AnySignedBeaconBlock is owned by the work item.
-            const result = node.importBlock(work.block, .gossip) catch |err| {
+            const seen_timestamp_sec: u64 = if (work.seen_timestamp_ns > 0)
+                @intCast(@divFloor(work.seen_timestamp_ns, std.time.ns_per_s))
+            else
+                0;
+            const accepted = node.chainService().acceptGossipBlock(work.block, seen_timestamp_sec) catch |err| {
+                work.block.deinit(node.allocator);
+                std.log.warn("Processor: gossip block ingress failed: {}", .{err});
+                return;
+            };
+
+            const ready = switch (accepted) {
+                .pending_data => return,
+                .ready => |ready| ready,
+            };
+
+            const result = node.importReadyBlock(ready) catch |err| {
                 if (err == error.UnknownParentBlock) {
-                    const ssz_bytes = work.block.serialize(node.allocator) catch {
-                        work.block.deinit(node.allocator);
+                    const ssz_bytes = ready.block.serialize(node.allocator) catch {
+                        ready.block.deinit(node.allocator);
                         return;
                     };
                     defer node.allocator.free(ssz_bytes);
-                    node.queueOrphanBlock(work.block, ssz_bytes);
+                    node.queueOrphanBlock(ready.block, ssz_bytes);
                 } else if (err != error.BlockAlreadyKnown and err != error.BlockAlreadyFinalized) {
                     std.log.warn("Processor: gossip block import failed: {}", .{err});
                 }
-                work.block.deinit(node.allocator);
+                ready.block.deinit(node.allocator);
                 return;
             };
-            work.block.deinit(node.allocator);
+            ready.block.deinit(node.allocator);
             node.processPendingChildren(result.block_root);
             std.log.info("PROCESSOR: block imported slot={d} root={x:0>2}{x:0>2}{x:0>2}{x:0>2}...", .{
                 result.slot,
@@ -943,6 +1000,12 @@ pub fn processorHandlerCallback(item: WorkItem, context: *anyopaque) void {
         .gossip_bls_to_exec => |work| {
             handleQueuedPoolObject(node, work, .bls_to_execution_change);
         },
+        .gossip_blob => |work| {
+            handleQueuedBlobSidecar(node, work);
+        },
+        .gossip_data_column => |work| {
+            handleQueuedDataColumnSidecar(node, work);
+        },
         .sync_contribution => |work| {
             handleQueuedSyncContribution(node, work);
         },
@@ -1073,6 +1136,50 @@ fn handleQueuedSyncContribution(
     };
 }
 
+fn handleQueuedBlobSidecar(
+    node: *BeaconNode,
+    work: processor_mod.work_item.GossipBlobWork,
+) void {
+    const gh = node.gossip_handler orelse {
+        work.data.deinit();
+        return;
+    };
+    const importFn = gh.importBlobSidecarFn orelse {
+        work.data.deinit();
+        return;
+    };
+
+    const QueuedSszBytes = gossip_handler_mod.QueuedSszBytes;
+    const queued = work.data.cast(QueuedSszBytes);
+    defer work.data.deinit();
+
+    importFn(gh.node, queued.ssz_bytes) catch |err| {
+        std.log.warn("Processor: blob sidecar import failed: {}", .{err});
+    };
+}
+
+fn handleQueuedDataColumnSidecar(
+    node: *BeaconNode,
+    work: processor_mod.work_item.GossipColumnWork,
+) void {
+    const gh = node.gossip_handler orelse {
+        work.data.deinit();
+        return;
+    };
+    const importFn = gh.importDataColumnSidecarFn orelse {
+        work.data.deinit();
+        return;
+    };
+
+    const QueuedSszBytes = gossip_handler_mod.QueuedSszBytes;
+    const queued = work.data.cast(QueuedSszBytes);
+    defer work.data.deinit();
+
+    importFn(gh.node, queued.ssz_bytes) catch |err| {
+        std.log.warn("Processor: data column sidecar import failed: {}", .{err});
+    };
+}
+
 fn handleQueuedSyncMessage(
     node: *BeaconNode,
     work: processor_mod.work_item.SyncMessageWork,
@@ -1109,6 +1216,8 @@ const ProcessorImportTestContext = struct {
     exit_epoch: ?u64 = null,
     sync_subnet: ?u64 = null,
     sync_bytes_len: usize = 0,
+    blob_bytes_len: usize = 0,
+    data_column_bytes_len: usize = 0,
 
     fn importVoluntaryExit(ptr: *anyopaque, validator_index: u64, epoch: u64) anyerror!void {
         const ctx: *ProcessorImportTestContext = @ptrCast(@alignCast(ptr));
@@ -1120,6 +1229,16 @@ const ProcessorImportTestContext = struct {
         const ctx: *ProcessorImportTestContext = @ptrCast(@alignCast(ptr));
         ctx.sync_subnet = subnet;
         ctx.sync_bytes_len = ssz_bytes.len;
+    }
+
+    fn importBlobSidecar(ptr: *anyopaque, ssz_bytes: []const u8) anyerror!void {
+        const ctx: *ProcessorImportTestContext = @ptrCast(@alignCast(ptr));
+        ctx.blob_bytes_len = ssz_bytes.len;
+    }
+
+    fn importDataColumnSidecar(ptr: *anyopaque, ssz_bytes: []const u8) anyerror!void {
+        const ctx: *ProcessorImportTestContext = @ptrCast(@alignCast(ptr));
+        ctx.data_column_bytes_len = ssz_bytes.len;
     }
 };
 
@@ -1210,4 +1329,54 @@ test "processorHandlerCallback imports queued sync committee messages" {
 
     try std.testing.expectEqual(@as(?u64, 3), ctx.sync_subnet);
     try std.testing.expectEqual(ssz_bytes.len, ctx.sync_bytes_len);
+}
+
+test "processorHandlerCallback imports queued blob sidecars" {
+    const allocator = std.testing.allocator;
+
+    var ctx = ProcessorImportTestContext{};
+    var node: BeaconNode = undefined;
+    node.allocator = allocator;
+
+    var gh: GossipHandler = undefined;
+    gh.node = @ptrCast(&ctx);
+    gh.importBlobSidecarFn = &ProcessorImportTestContext.importBlobSidecar;
+    node.gossip_handler = &gh;
+
+    const ssz_bytes = try allocator.dupe(u8, "blob-sidecar");
+    defer allocator.free(ssz_bytes);
+
+    processorHandlerCallback(.{ .gossip_blob = .{
+        .peer_id = 1,
+        .message_id = std.mem.zeroes(processor_mod.work_item.MessageId),
+        .data = try makeQueuedSszHandle(allocator, .deneb, ssz_bytes),
+        .seen_timestamp_ns = 0,
+    } }, @ptrCast(&node));
+
+    try std.testing.expectEqual(ssz_bytes.len, ctx.blob_bytes_len);
+}
+
+test "processorHandlerCallback imports queued data column sidecars" {
+    const allocator = std.testing.allocator;
+
+    var ctx = ProcessorImportTestContext{};
+    var node: BeaconNode = undefined;
+    node.allocator = allocator;
+
+    var gh: GossipHandler = undefined;
+    gh.node = @ptrCast(&ctx);
+    gh.importDataColumnSidecarFn = &ProcessorImportTestContext.importDataColumnSidecar;
+    node.gossip_handler = &gh;
+
+    const ssz_bytes = try allocator.dupe(u8, "data-column-sidecar");
+    defer allocator.free(ssz_bytes);
+
+    processorHandlerCallback(.{ .gossip_data_column = .{
+        .peer_id = 1,
+        .message_id = std.mem.zeroes(processor_mod.work_item.MessageId),
+        .data = try makeQueuedSszHandle(allocator, .fulu, ssz_bytes),
+        .seen_timestamp_ns = 0,
+    } }, @ptrCast(&node));
+
+    try std.testing.expectEqual(ssz_bytes.len, ctx.data_column_bytes_len);
 }

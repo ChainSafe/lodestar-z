@@ -222,7 +222,7 @@ pub const DataAvailabilityManager = struct {
         self.column_tracker.onBlock(block_root, slot);
         self.column_tracker.onColumn(block_root, column_index);
 
-        if (self.column_tracker.custodyComplete(block_root)) {
+        if (self.column_tracker.custodyComplete(block_root) or self.column_tracker.canReconstruct(block_root)) {
             self.onBlockAvailable(block_root);
             return true;
         }
@@ -382,6 +382,32 @@ test "DataAvailabilityManager: Fulu column tracking" {
 
     const r2 = dam.checkBlockDataAvailability(root, 200, .fulu, 1);
     try std.testing.expectEqual(DaStatus.available, r2.status);
+}
+
+test "DataAvailabilityManager: Fulu reconstruction also completes availability" {
+    const allocator = std.testing.allocator;
+    const custody = [_]u64{ 100, 110 };
+
+    var dam = DataAvailabilityManager.init(allocator, test_config, &custody);
+    defer dam.deinit();
+
+    const root = [_]u8{0xDE} ** 32;
+
+    const r1 = dam.checkBlockDataAvailability(root, 220, .fulu, 1);
+    try std.testing.expectEqual(DaStatus.missing_columns, r1.status);
+
+    var i: u64 = 0;
+    while (i < NUMBER_OF_COLUMNS / 2) : (i += 1) {
+        const completed = dam.onDataColumnSidecar(root, i, 220);
+        if (i + 1 < NUMBER_OF_COLUMNS / 2) {
+            try std.testing.expect(!completed);
+        } else {
+            try std.testing.expect(completed);
+        }
+    }
+
+    const r2 = dam.checkBlockDataAvailability(root, 220, .fulu, 1);
+    try std.testing.expectEqual(DaStatus.reconstruction_possible, r2.status);
 }
 
 test "DataAvailabilityManager: pending blocks cleared on availability" {

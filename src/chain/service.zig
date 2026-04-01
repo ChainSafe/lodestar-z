@@ -35,6 +35,9 @@ const Eth1DataType = Eth1Data.Type;
 const ExecutionPayload = consensus_types.electra.ExecutionPayload.Type;
 const BLSSignature = consensus_types.primitive.BLSSignature.Type;
 
+pub const ReadyBlockInput = chain_types.ReadyBlockInput;
+pub const BlockIngressResult = chain_types.BlockIngressResult;
+
 pub const Service = struct {
     chain: *Chain,
 
@@ -72,6 +75,63 @@ pub const Service = struct {
                     null,
             },
         };
+    }
+
+    pub fn importReadyBlock(
+        self: Service,
+        ready: ReadyBlockInput,
+    ) !chain_effects.ImportOutcome {
+        const result = try self.chain.importReadyBlock(ready);
+        const snapshot = self.query().currentSnapshot();
+
+        return .{
+            .result = result,
+            .snapshot = snapshot,
+            .effects = .{
+                .notify_forkchoice_update_root = snapshot.head.root,
+                .archive_state = if (result.epoch_transition)
+                    .{
+                        .slot = result.slot,
+                        .state_root = result.state_root,
+                    }
+                else
+                    null,
+                .finalized_checkpoint = if (result.epoch_transition)
+                    snapshot.finalized
+                else
+                    null,
+            },
+        };
+    }
+
+    pub fn acceptGossipBlock(
+        self: Service,
+        any_signed: fork_types.AnySignedBeaconBlock,
+        seen_timestamp_sec: u64,
+    ) !BlockIngressResult {
+        const block_root = try hashBlock(self.chain.allocator, any_signed);
+        const da_status = pipelineDaStatus(self.chain, block_root, any_signed);
+
+        if (self.chain.pending_da_blocks) |pending| {
+            const ready = try pending.onBlock(
+                any_signed,
+                block_root,
+                any_signed.beaconBlock().slot(),
+                .gossip,
+                seen_timestamp_sec,
+                da_status,
+            );
+            if (ready) |block| return .{ .ready = block };
+            if (self.chain.da_manager) |dam| {
+                dam.markPending(block_root, any_signed.beaconBlock().slot()) catch |err| {
+                    pending.removePending(block_root);
+                    return err;
+                };
+            }
+            return .{ .pending_data = block_root };
+        }
+
+        return .{ .ready = readyBlockInput(any_signed, .gossip, block_root, da_status, seen_timestamp_sec) };
     }
 
     pub fn bootstrapFromGenesis(
@@ -177,13 +237,41 @@ pub const Service = struct {
         try self.chain.importBlobSidecar(root, data);
     }
 
+    pub fn ingestBlobSidecar(
+        self: Service,
+        root: Root,
+        blob_index: u64,
+        slot: Slot,
+        data: []const u8,
+    ) !?ReadyBlockInput {
+        try self.chain.importBlobSidecar(root, data);
+        const dam = self.chain.da_manager orelse return null;
+        const pending = self.chain.pending_da_blocks orelse return null;
+        if (!dam.onBlobSidecar(root, blob_index, slot)) return null;
+        return pending.onDataAvailable(root, .available);
+    }
+
     pub fn importDataColumnSidecar(
         self: Service,
         root: Root,
         column_index: u64,
         data: []const u8,
     ) !void {
-        try self.chain.db.putDataColumn(root, column_index, data);
+        try self.chain.importDataColumnSidecar(root, column_index, data);
+    }
+
+    pub fn ingestDataColumnSidecar(
+        self: Service,
+        root: Root,
+        column_index: u64,
+        slot: Slot,
+        data: []const u8,
+    ) !?ReadyBlockInput {
+        try self.chain.importDataColumnSidecar(root, column_index, data);
+        const dam = self.chain.da_manager orelse return null;
+        const pending = self.chain.pending_da_blocks orelse return null;
+        if (!dam.onDataColumnSidecar(root, column_index, slot)) return null;
+        return pending.onDataAvailable(root, .available);
     }
 
     pub fn archiveState(self: Service, slot: Slot, state_root: Root) !void {
@@ -299,3 +387,50 @@ pub const Service = struct {
         try self.chain.advanceSlot(slot);
     }
 };
+
+fn hashBlock(allocator: std.mem.Allocator, any_signed: fork_types.AnySignedBeaconBlock) !Root {
+    var block_root: Root = undefined;
+    try any_signed.beaconBlock().hashTreeRoot(allocator, &block_root);
+    return block_root;
+}
+
+fn readyBlockInput(
+    any_signed: fork_types.AnySignedBeaconBlock,
+    source: chain_types.BlockSource,
+    block_root: Root,
+    da_status: chain_types.DataAvailabilityStatus,
+    seen_timestamp_sec: u64,
+) ReadyBlockInput {
+    return .{
+        .block = any_signed,
+        .source = source,
+        .block_root = block_root,
+        .slot = any_signed.beaconBlock().slot(),
+        .da_status = da_status,
+        .seen_timestamp_sec = seen_timestamp_sec,
+    };
+}
+
+fn pipelineDaStatus(
+    chain: *Chain,
+    block_root: Root,
+    any_signed: fork_types.AnySignedBeaconBlock,
+) chain_types.DataAvailabilityStatus {
+    const block = any_signed.beaconBlock();
+    const slot = block.slot();
+    const fork = any_signed.forkSeq();
+    const blob_commitments = block.beaconBlockBody().blobKzgCommitments() catch return .not_required;
+    const blob_count: u32 = @intCast(blob_commitments.items.len);
+
+    if (chain.da_manager) |dam| {
+        return switch (dam.checkBlockDataAvailability(block_root, slot, fork, blob_count).status) {
+            .available, .reconstruction_possible => .available,
+            .not_required => .not_required,
+            .missing_blobs, .missing_columns => .pending,
+        };
+    }
+
+    if (fork.lt(.deneb)) return .not_required;
+    if (blob_count == 0) return .available;
+    return .not_required;
+}

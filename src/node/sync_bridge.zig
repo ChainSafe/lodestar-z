@@ -74,7 +74,11 @@ pub const SyncCallbackCtx = struct {
         const node = ctx.node;
         const allocator = node.allocator;
 
-        const fork_seq = node.config.forkSeq(node.currentHeadSlot());
+        const block_slot: u64 = if (block_bytes.len >= 108)
+            std.mem.readInt(u64, block_bytes[100..108], .little)
+        else
+            node.currentHeadSlot();
+        const fork_seq = node.config.forkSeq(block_slot);
 
         const any_signed = AnySignedBeaconBlock.deserialize(
             allocator,

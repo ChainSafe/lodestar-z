@@ -126,6 +126,12 @@ pub const GossipHandler = struct {
     /// Called to import raw BLS-to-execution change SSZ bytes into the op pool.
     importBlsChangeFn: ?*const fn (ptr: *anyopaque, ssz_bytes: []const u8) anyerror!void,
 
+    /// Called to import a validated blob sidecar into the chain DA ingress.
+    importBlobSidecarFn: ?*const fn (ptr: *anyopaque, ssz_bytes: []const u8) anyerror!void,
+
+    /// Called to import a validated data column sidecar into the chain DA ingress.
+    importDataColumnSidecarFn: ?*const fn (ptr: *anyopaque, ssz_bytes: []const u8) anyerror!void,
+
     // ── BLS signature verification callbacks ────────────────────────────
     // These are called between Phase 1 (cheap checks) and Phase 2 (import).
     // Each receives the raw decompressed SSZ bytes and returns true if the
@@ -210,6 +216,8 @@ pub const GossipHandler = struct {
             .importProposerSlashingFn = null,
             .importAttesterSlashingFn = null,
             .importBlsChangeFn = null,
+            .importBlobSidecarFn = null,
+            .importDataColumnSidecarFn = null,
             .verifyBlockSignatureFn = null,
             .verifyVoluntaryExitSignatureFn = null,
             .verifyProposerSlashingSignatureFn = null,
@@ -916,6 +924,15 @@ pub const GossipHandler = struct {
     /// 2. Phase 1: basic bounds check (slot range, proposer)
     /// 3. Phase 2: decompress full payload and import via BeaconNode
     pub fn onBlobSidecar(self: *GossipHandler, subnet_id: u64, message_data: []const u8) !void {
+        return self.onBlobSidecarWithMetadata(subnet_id, message_data, .{});
+    }
+
+    fn onBlobSidecarWithMetadata(
+        self: *GossipHandler,
+        subnet_id: u64,
+        message_data: []const u8,
+        metadata: GossipIngressMetadata,
+    ) !void {
         // Decompress once — reused for decode and import.
         const ssz_bytes = gossip_decoding.decompressGossipPayload(self.allocator, message_data, gossip_decoding.MAX_GOSSIP_SIZE_BLOB_SIDECAR) catch
             return GossipHandlerError.DecodeFailed;
@@ -938,13 +955,81 @@ pub const GossipHandler = struct {
         );
         try checkAction(action_blob);
 
-        // Phase 2: log acceptance.
-        // TODO: Add importBlobSidecarFn callback like importAttestationFn.
+        if (self.beacon_processor) |bp| {
+            const queued = self.dupeQueuedSszBytes(ssz_bytes) orelse return;
+            bp.ingest(.{ .gossip_blob = .{
+                .peer_id = metadata.peer_id,
+                .message_id = metadata.message_id,
+                .data = queued,
+                .seen_timestamp_ns = metadata.seen_timestamp_ns,
+            } });
+            return;
+        }
+
+        // Phase 2: hand off to chain DA ingress.
+        if (self.importBlobSidecarFn) |importFn| {
+            importFn(self.node, ssz_bytes) catch |err| {
+                std.log.warn("Blob sidecar import failed: {}", .{err});
+            };
+        }
+
         std.log.info("Accepted blob_sidecar: index={d} slot={d} proposer={d} ({d} bytes)", .{
             blob.index,
             blob.slot,
             blob.proposer_index,
             ssz_bytes.len,
+        });
+    }
+
+    pub fn onDataColumnSidecar(self: *GossipHandler, message_data: []const u8) !void {
+        return self.onDataColumnSidecarWithMetadata(message_data, .{});
+    }
+
+    fn onDataColumnSidecarWithMetadata(
+        self: *GossipHandler,
+        message_data: []const u8,
+        metadata: GossipIngressMetadata,
+    ) !void {
+        const ssz_bytes = gossip_decoding.decompressGossipPayload(self.allocator, message_data, gossip_decoding.MAX_GOSSIP_SIZE_DEFAULT) catch
+            return GossipHandlerError.DecodeFailed;
+        defer self.allocator.free(ssz_bytes);
+
+        const decoded = gossip_decoding.decodeFromSszBytes(self.allocator, .data_column_sidecar, ssz_bytes, self.current_fork_seq) catch
+            return GossipHandlerError.DecodeFailed;
+        const sidecar = decoded.data_column_sidecar;
+
+        var chain_state = self.makeChainState();
+        const action = chain_gossip.validateGossipDataColumnSidecar(
+            sidecar.slot,
+            sidecar.proposer_index,
+            sidecar.index,
+            sidecar.block_parent_root,
+            sidecar.block_root,
+            &chain_state,
+        );
+        try checkAction(action);
+
+        if (self.beacon_processor) |bp| {
+            const queued = self.dupeQueuedSszBytes(ssz_bytes) orelse return;
+            bp.ingest(.{ .gossip_data_column = .{
+                .peer_id = metadata.peer_id,
+                .message_id = metadata.message_id,
+                .data = queued,
+                .seen_timestamp_ns = metadata.seen_timestamp_ns,
+            } });
+            return;
+        }
+
+        if (self.importDataColumnSidecarFn) |importFn| {
+            importFn(self.node, ssz_bytes) catch |err| {
+                std.log.warn("Data column sidecar import failed: {}", .{err});
+            };
+        }
+
+        std.log.info("Accepted data_column_sidecar: index={d} slot={d} proposer={d}", .{
+            sidecar.index,
+            sidecar.slot,
+            sidecar.proposer_index,
         });
     }
 
@@ -991,8 +1076,8 @@ pub const GossipHandler = struct {
             .bls_to_execution_change => try self.onBlsToExecutionChangeWithMetadata(data, metadata),
             .sync_committee_contribution_and_proof => try self.onSyncCommitteeContributionWithMetadata(data, metadata),
             .sync_committee => try self.onSyncCommitteeMessageWithMetadata(@as(u64, subnet_id orelse 0), data, metadata),
-            .blob_sidecar => try self.onBlobSidecar(@as(u64, subnet_id orelse 0), data),
-            .data_column_sidecar => {}, // Handled directly in BeaconNode.processGossipEventsFromSlice
+            .blob_sidecar => try self.onBlobSidecarWithMetadata(@as(u64, subnet_id orelse 0), data, metadata),
+            .data_column_sidecar => try self.onDataColumnSidecarWithMetadata(data, metadata),
         }
     }
 };
@@ -1181,17 +1266,6 @@ test "GossipHandler: onGossipMessage routes beacon_block" {
     try testing.expectEqual(@as(u32, 1), g_imported_count);
 }
 
-test "GossipHandler: onGossipMessage no-ops for data_column_sidecar" {
-    const alloc = testing.allocator;
-    const handler = try makeTestHandler(alloc);
-    defer handler.deinit();
-
-    // data_column_sidecar is the only topic that is a no-op in GossipHandler
-    // (handled directly in BeaconNode.processGossipEventsFromSlice).
-    const dummy = [_]u8{ 0, 1, 2, 3 };
-    try handler.onGossipMessage(.data_column_sidecar, &dummy);
-}
-
 test "GossipHandler: decode failures are returned as errors" {
     const alloc = testing.allocator;
     const handler = try makeTestHandler(alloc);
@@ -1205,6 +1279,7 @@ test "GossipHandler: decode failures are returned as errors" {
     try testing.expectError(GossipHandlerError.DecodeFailed, handler.onGossipMessageWithSubnet(.attester_slashing, null, &dummy));
     try testing.expectError(GossipHandlerError.DecodeFailed, handler.onGossipMessageWithSubnet(.bls_to_execution_change, null, &dummy));
     try testing.expectError(GossipHandlerError.DecodeFailed, handler.onGossipMessageWithSubnet(.blob_sidecar, null, &dummy));
+    try testing.expectError(GossipHandlerError.DecodeFailed, handler.onGossipMessageWithSubnet(.data_column_sidecar, null, &dummy));
     try testing.expectError(GossipHandlerError.DecodeFailed, handler.onGossipMessageWithSubnet(.sync_committee, null, &dummy));
     try testing.expectError(GossipHandlerError.DecodeFailed, handler.onGossipMessageWithSubnet(.sync_committee_contribution_and_proof, null, &dummy));
 }
