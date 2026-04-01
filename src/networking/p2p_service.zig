@@ -268,7 +268,7 @@ pub const P2pService = struct {
                         .agent_version = config.identify_agent_version,
                         .supported_protocols = identify_supported_protocols,
                     },
-                    .peer_results = std.StringHashMap(identify_mod.IdentifyResult).init(allocator),
+                    .peer_results = std.StringArrayHashMap(identify_mod.IdentifyResult).init(allocator),
                 },
             },
         );
