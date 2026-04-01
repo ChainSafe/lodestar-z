@@ -29,49 +29,44 @@ pub const DebugChainHead = struct {
 /// Returns raw SSZ bytes for the beacon state at the given state identifier.
 ///
 /// Supports the following state_ids:
-/// - `head` — returns SSZ of the current head state from the HeadStateCallback
-/// - `finalized` — looks up the finalized state from the DB archive
-/// - `genesis` — returns the genesis state (slot 0) from the DB archive
-/// - slot number — returns the archived state at that slot
-/// - hex root — looks up state by state_root in the DB archive
+/// - `head` — returns SSZ of the current head state via the chain-backed state query
+/// - `finalized` — returns the finalized checkpoint state
+/// - `genesis` — returns the genesis state (slot 0)
+/// - slot number — returns the canonical/archived state at that slot
+/// - hex root — looks up state by state_root
 pub fn getState(ctx: *ApiContext, state_id: types.StateId) !HandlerResult([]const u8) {
+    const head = ctx.currentHeadTracker();
     switch (state_id) {
         .head => {
-            // Try to get the head state's raw SSZ via the DB.
-            // The head state root is known from the head tracker.
-            const state_root = ctx.head_tracker.head_state_root;
-            if (try ctx.db.getStateArchiveByRoot(state_root)) |data| {
+            const state_root = head.head_state_root;
+            if (try ctx.stateBytesByRoot(state_root)) |data| {
                 return .{ .data = data, .meta = .{ .execution_optimistic = false, .finalized = false } };
             }
-            // Head state might not be archived yet — not available.
             return error.StateNotAvailable;
         },
         .finalized => {
-            // Look up the finalized slot's state from the archive.
-            const finalized_slot = ctx.head_tracker.finalized_slot;
-            const data = (try ctx.db.getStateArchive(finalized_slot)) orelse return error.StateNotAvailable;
+            const finalized_root = (try ctx.stateRootByBlockRoot(head.finalized_root)) orelse
+                return error.StateNotAvailable;
+            const data = (try ctx.stateBytesByRoot(finalized_root)) orelse return error.StateNotAvailable;
             return .{ .data = data, .meta = .{ .execution_optimistic = false, .finalized = true } };
         },
         .genesis => {
-            // Genesis state is at slot 0.
-            const data = (try ctx.db.getStateArchive(0)) orelse return error.StateNotAvailable;
+            const data = (try ctx.stateBytesBySlot(0)) orelse return error.StateNotAvailable;
             return .{ .data = data, .meta = .{ .execution_optimistic = false, .finalized = true } };
         },
         .justified => {
-            // Look up the justified slot's state from the archive.
-            const justified_slot = ctx.head_tracker.justified_slot;
-            const data = (try ctx.db.getStateArchive(justified_slot)) orelse return error.StateNotAvailable;
+            const justified_root = (try ctx.stateRootByBlockRoot(head.justified_root)) orelse
+                return error.StateNotAvailable;
+            const data = (try ctx.stateBytesByRoot(justified_root)) orelse return error.StateNotAvailable;
             return .{ .data = data, .meta = .{ .execution_optimistic = false, .finalized = false } };
         },
         .slot => |slot| {
-            // Direct slot lookup in the archive.
-            const data = (try ctx.db.getStateArchive(slot)) orelse return error.StateNotAvailable;
-            const is_finalized = slot <= ctx.head_tracker.finalized_slot;
+            const data = (try ctx.stateBytesBySlot(slot)) orelse return error.StateNotAvailable;
+            const is_finalized = slot <= head.finalized_slot;
             return .{ .data = data, .meta = .{ .execution_optimistic = false, .finalized = is_finalized } };
         },
         .root => |root| {
-            // Look up by state root.
-            const data = (try ctx.db.getStateArchiveByRoot(root)) orelse return error.StateNotAvailable;
+            const data = (try ctx.stateBytesByRoot(root)) orelse return error.StateNotAvailable;
             return .{ .data = data, .meta = .{ .execution_optimistic = false, .finalized = false } };
         },
     }
@@ -85,12 +80,13 @@ pub fn getState(ctx: *ApiContext, state_id: types.StateId) !HandlerResult([]cons
 /// known tips. Currently the head tracker exposes only the canonical head,
 /// so we return that single entry.
 pub fn getHeads(ctx: *ApiContext) !HandlerResult([]const DebugChainHead) {
+    const head = ctx.currentHeadTracker();
     // Allocate a single-element slice on ctx.allocator so the caller can
     // free it uniformly.
     const heads = try ctx.allocator.alloc(DebugChainHead, 1);
     heads[0] = .{
-        .slot = ctx.head_tracker.head_slot,
-        .root = ctx.head_tracker.head_root,
+        .slot = head.head_slot,
+        .root = head.head_root,
     };
     return .{ .data = heads };
 }
@@ -106,6 +102,56 @@ test "getState head returns StateNotAvailable when not archived" {
     defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
     const result = getState(&tc.ctx, .head);
     try std.testing.expectError(error.StateNotAvailable, result);
+}
+
+test "getState head returns serialized bytes from live state query" {
+    const allocator = std.testing.allocator;
+    var tc = test_helpers.makeTestContext(allocator);
+    defer test_helpers.destroyTestContext(allocator, &tc);
+
+    const state_transition = @import("state_transition");
+    const Node = @import("persistent_merkle_tree").Node;
+    const TestCachedBeaconState = state_transition.test_utils.TestCachedBeaconState;
+
+    var pool = try Node.Pool.init(allocator, 500_000);
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 4);
+    defer test_state.deinit();
+
+    const StateQueryCb = struct {
+        cached: *state_transition.CachedBeaconState,
+
+        fn getHeadState(ptr: *anyopaque) ?*state_transition.CachedBeaconState {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            return self.cached;
+        }
+
+        fn getStateByRoot(ptr: *anyopaque, _: [32]u8) anyerror!?*state_transition.CachedBeaconState {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            return self.cached;
+        }
+
+        fn getStateBySlot(_: *anyopaque, _: u64) anyerror!?*state_transition.CachedBeaconState {
+            return null;
+        }
+    };
+
+    var cb_ctx = StateQueryCb{ .cached = test_state.cached_state };
+    tc.ctx.state_query = .{
+        .ptr = &cb_ctx,
+        .getHeadStateFn = &StateQueryCb.getHeadState,
+        .getStateByRootFn = &StateQueryCb.getStateByRoot,
+        .getStateBySlotFn = &StateQueryCb.getStateBySlot,
+    };
+
+    const result = try getState(&tc.ctx, .head);
+    defer allocator.free(result.data);
+
+    const expected = try test_state.cached_state.state.serialize(allocator);
+    defer allocator.free(expected);
+
+    try std.testing.expectEqualSlices(u8, expected, result.data);
 }
 
 test "getState finalized returns StateNotAvailable when not in DB" {
@@ -134,7 +180,7 @@ test "getState slot returns data from DB archive" {
     defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
 
     // Store a fake state archive at slot 42.
-    const fake_state = [_]u8{0xDE, 0xAD, 0xBE, 0xEF};
+    const fake_state = [_]u8{ 0xDE, 0xAD, 0xBE, 0xEF };
     try tc.db.putStateArchive(42, [_]u8{0x11} ** 32, &fake_state);
 
     const result = try getState(&tc.ctx, .{ .slot = 42 });
@@ -146,7 +192,7 @@ test "getState root returns data from DB archive" {
     var tc = test_helpers.makeTestContext(std.testing.allocator);
     defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
 
-    const fake_state = [_]u8{0xCA, 0xFE};
+    const fake_state = [_]u8{ 0xCA, 0xFE };
     const state_root = [_]u8{0x22} ** 32;
     try tc.db.putStateArchive(100, state_root, &fake_state);
 
@@ -176,32 +222,33 @@ test "getHeads returns single head entry" {
 /// Returns the full fork choice tree for debugging.
 /// Stub until the fork-choice store is wired into the API context.
 pub fn getForkChoice(ctx: *ApiContext) !HandlerResult(types.ForkChoiceDump) {
+    const head = ctx.currentHeadTracker();
     // TODO: query fork-choice store via a callback.
     // For now return a single-node tree representing the current head.
     const nodes = try ctx.allocator.alloc(types.ForkChoiceNode, 1);
     nodes[0] = .{
-        .slot = ctx.head_tracker.head_slot,
-        .block_root = ctx.head_tracker.head_root,
+        .slot = head.head_slot,
+        .block_root = head.head_root,
         .parent_root = null,
-        .justified_epoch = ctx.head_tracker.justified_slot / preset.SLOTS_PER_EPOCH,
-        .finalized_epoch = ctx.head_tracker.finalized_slot / preset.SLOTS_PER_EPOCH,
+        .justified_epoch = head.justified_slot / preset.SLOTS_PER_EPOCH,
+        .finalized_epoch = head.finalized_slot / preset.SLOTS_PER_EPOCH,
         .weight = 0,
         .validity = "valid",
         .execution_block_hash = [_]u8{0} ** 32,
     };
 
-    const justified_epoch = ctx.head_tracker.justified_slot / preset.SLOTS_PER_EPOCH;
-    const finalized_epoch = ctx.head_tracker.finalized_slot / preset.SLOTS_PER_EPOCH;
+    const justified_epoch = head.justified_slot / preset.SLOTS_PER_EPOCH;
+    const finalized_epoch = head.finalized_slot / preset.SLOTS_PER_EPOCH;
 
     return .{
         .data = .{
             .justified_checkpoint = .{
                 .epoch = justified_epoch,
-                .root = ctx.head_tracker.justified_root,
+                .root = head.justified_root,
             },
             .finalized_checkpoint = .{
                 .epoch = finalized_epoch,
-                .root = ctx.head_tracker.finalized_root,
+                .root = head.finalized_root,
             },
             .fork_choice_nodes = nodes,
         },

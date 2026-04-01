@@ -14,6 +14,8 @@ const state_transition = @import("state_transition");
 const fork_types = @import("fork_types");
 const AnySignedBeaconBlock = fork_types.AnySignedBeaconBlock;
 const chain_mod = @import("chain");
+const ChainQuery = chain_mod.Query;
+const ChainService = chain_mod.Service;
 const preset = @import("preset").preset;
 const constants = @import("constants");
 
@@ -29,7 +31,10 @@ pub fn importBlockFromGossip(ptr: *anyopaque, block_bytes: []const u8) anyerror!
     const node: *BeaconNode = @ptrCast(@alignCast(ptr));
     const fork_seq = node.config.forkSeq(node.head_tracker.head_slot);
     const any_signed = AnySignedBeaconBlock.deserialize(
-        node.allocator, .full, fork_seq, block_bytes,
+        node.allocator,
+        .full,
+        fork_seq,
+        block_bytes,
     ) catch |err| {
         std.log.warn("Gossip block import deserialize: {}", .{err});
         return err;
@@ -56,31 +61,19 @@ pub fn importBlockFromGossip(ptr: *anyopaque, block_bytes: []const u8) anyerror!
 /// Returns the expected block proposer for `slot` from the head state's epoch cache.
 pub fn getProposerIndex(ptr: *anyopaque, slot: u64) ?u32 {
     const node: *BeaconNode = @ptrCast(@alignCast(ptr));
-    const head_state_root = node.head_tracker.head_state_root;
-    const cached = node.block_state_cache.get(head_state_root) orelse return null;
-    const proposer = cached.getBeaconProposer(slot) catch return null;
-    return @intCast(proposer);
+    return ChainQuery.init(node.chain).getProposerIndex(slot);
 }
 
 /// Returns true if `root` appears in the head tracker's slot→root map or fork choice.
 pub fn isKnownBlockRoot(ptr: *anyopaque, root: [32]u8) bool {
     const node: *BeaconNode = @ptrCast(@alignCast(ptr));
-    var it = node.head_tracker.slot_roots.iterator();
-    while (it.next()) |entry| {
-        if (std.mem.eql(u8, entry.value_ptr, &root)) return true;
-    }
-    if (node.chain.fork_choice) |fc| {
-        return fc.hasBlock(root);
-    }
-    return false;
+    return ChainQuery.init(node.chain).isKnownBlockRoot(root);
 }
 
 /// Returns the total validator count.
 pub fn getValidatorCount(ptr: *anyopaque) u32 {
     const node: *BeaconNode = @ptrCast(@alignCast(ptr));
-    const head_state_root = node.head_tracker.head_state_root;
-    const cached = node.block_state_cache.get(head_state_root) orelse return 0;
-    return @intCast(cached.epoch_cache.index_to_pubkey.items.len);
+    return ChainQuery.init(node.chain).getValidatorCount();
 }
 
 // ---------------------------------------------------------------------------
@@ -112,7 +105,7 @@ pub fn importAttestation(
         .signature = [_]u8{0} ** 96,
     };
 
-    try node.chain.importAttestation(
+    try ChainService.init(node.chain).importAttestation(
         attestation_slot,
         committee_index,
         beacon_block_root,
@@ -132,7 +125,7 @@ pub fn importVoluntaryExit(ptr: *anyopaque, validator_index: u64, epoch: u64) an
         },
         .signature = [_]u8{0} ** 96,
     };
-    try node.chain.op_pool.voluntary_exit_pool.add(exit);
+    try ChainService.init(node.chain).importVoluntaryExit(exit);
 }
 
 pub fn importProposerSlashing(ptr: *anyopaque, ssz_bytes: []const u8) anyerror!void {
@@ -142,7 +135,7 @@ pub fn importProposerSlashing(ptr: *anyopaque, ssz_bytes: []const u8) anyerror!v
         std.log.warn("Proposer slashing SSZ decode failed: {}", .{err});
         return err;
     };
-    try node.chain.op_pool.proposer_slashing_pool.add(slashing);
+    try ChainService.init(node.chain).importProposerSlashing(slashing);
 }
 
 pub fn importAttesterSlashing(ptr: *anyopaque, ssz_bytes: []const u8) anyerror!void {
@@ -152,7 +145,7 @@ pub fn importAttesterSlashing(ptr: *anyopaque, ssz_bytes: []const u8) anyerror!v
         std.log.warn("Attester slashing SSZ decode failed: {}", .{err});
         return err;
     };
-    try node.chain.op_pool.attester_slashing_pool.add(slashing);
+    try ChainService.init(node.chain).importAttesterSlashing(slashing);
 }
 
 pub fn importBlsChange(ptr: *anyopaque, ssz_bytes: []const u8) anyerror!void {
@@ -162,26 +155,22 @@ pub fn importBlsChange(ptr: *anyopaque, ssz_bytes: []const u8) anyerror!void {
         std.log.warn("BLS change SSZ decode failed: {}", .{err});
         return err;
     };
-    try node.chain.op_pool.bls_change_pool.add(change);
+    try ChainService.init(node.chain).importBlsChange(change);
 }
 
 pub fn importSyncContribution(ptr: *anyopaque, ssz_bytes: []const u8) anyerror!void {
     const node: *BeaconNode = @ptrCast(@alignCast(ptr));
-    const pool = node.sync_contribution_pool orelse return;
-
     var signed_cap: types.altair.SignedContributionAndProof.Type = undefined;
     types.altair.SignedContributionAndProof.deserializeFromBytes(ssz_bytes, &signed_cap) catch |err| {
         std.log.warn("SignedContributionAndProof SSZ decode failed: {}", .{err});
         return err;
     };
 
-    try pool.add(&signed_cap.message.contribution);
+    try ChainService.init(node.chain).importSyncContribution(&signed_cap.message.contribution);
 }
 
 pub fn importSyncCommitteeMessage(ptr: *anyopaque, ssz_bytes: []const u8, subnet: u64) anyerror!void {
     const node: *BeaconNode = @ptrCast(@alignCast(ptr));
-    const pool = node.sync_committee_message_pool orelse return;
-
     var msg: types.altair.SyncCommitteeMessage.Type = undefined;
     types.altair.SyncCommitteeMessage.deserializeFromBytes(ssz_bytes, &msg) catch |err| {
         std.log.warn("SyncCommitteeMessage SSZ decode failed: {}", .{err});
@@ -191,7 +180,7 @@ pub fn importSyncCommitteeMessage(ptr: *anyopaque, ssz_bytes: []const u8, subnet
     const subcommittee_size = preset.SYNC_COMMITTEE_SIZE / constants.SYNC_COMMITTEE_SUBNET_COUNT;
     const index_in_subcommittee = msg.validator_index % subcommittee_size;
 
-    try pool.add(
+    try ChainService.init(node.chain).importSyncCommitteeMessage(
         subnet,
         msg.slot,
         msg.beacon_block_root,
@@ -211,7 +200,10 @@ pub fn verifyBlockSignature(ptr: *anyopaque, ssz_bytes: []const u8) bool {
 
     const fork_seq = node.config.forkSeq(node.head_tracker.head_slot);
     const any_signed = fork_types.AnySignedBeaconBlock.deserialize(
-        node.allocator, .full, fork_seq, ssz_bytes,
+        node.allocator,
+        .full,
+        fork_seq,
+        ssz_bytes,
     ) catch return false;
     defer any_signed.deinit(node.allocator);
 

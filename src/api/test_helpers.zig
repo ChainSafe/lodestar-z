@@ -23,7 +23,6 @@ pub fn makeTestContext(allocator: std.mem.Allocator) TestContext {
         .db = db,
         .ctx = .{
             .head_tracker = &default_head_tracker,
-            .regen = &default_regen,
             .db = db,
             .node_identity = &default_node_identity,
             .sync_status = &default_sync_status,
@@ -54,8 +53,6 @@ var default_head_tracker = ctx_mod.HeadTracker{
     .justified_slot = 950,
     .justified_root = [_]u8{0xdd} ** 32,
 };
-
-var default_regen = ctx_mod.StateRegen{};
 
 var default_node_identity = types.NodeIdentity{
     .peer_id = "test-peer-id",

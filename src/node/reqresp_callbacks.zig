@@ -6,6 +6,7 @@
 const std = @import("std");
 
 const preset_root = @import("preset");
+const chain_mod = @import("chain");
 const networking = @import("networking");
 const StatusMessage = networking.messages.StatusMessage;
 const ReqRespContext = networking.ReqRespContext;
@@ -44,7 +45,8 @@ fn requestNode(ptr: *anyopaque) *BeaconNode {
 }
 
 fn reqRespGetStatus(ptr: *anyopaque) StatusMessage.Type {
-    return requestNode(ptr).getStatus();
+    const node = requestNode(ptr);
+    return chain_mod.Query.init(node.chain).status();
 }
 
 fn reqRespGetMetadata(ptr: *anyopaque) networking.messages.MetadataV2.Type {
@@ -63,7 +65,7 @@ fn reqRespGetPingSequence(ptr: *anyopaque) u64 {
 
 fn reqRespFindBlockByRoot(ptr: *anyopaque, root: [32]u8, sink: *const PayloadSink) anyerror!void {
     const node = requestNode(ptr);
-    const maybe_bytes = node.db.getBlock(root) catch return;
+    const maybe_bytes = chain_mod.Query.init(node.chain).blockBytesByRoot(root) catch return;
     const bytes = maybe_bytes orelse return;
     defer node.allocator.free(bytes);
 
@@ -75,12 +77,12 @@ fn reqRespFindBlockByRoot(ptr: *anyopaque, root: [32]u8, sink: *const PayloadSin
 
 fn reqRespStreamBlocksByRange(ptr: *anyopaque, start_slot: u64, count: u64, sink: *const PayloadSink) anyerror!void {
     const node = requestNode(ptr);
+    const query = chain_mod.Query.init(node.chain);
 
     const end_slot = std.math.add(u64, start_slot, count) catch return;
     var slot = start_slot;
     while (slot < end_slot) : (slot += 1) {
-        const root = node.head_tracker.getBlockRoot(slot) orelse continue;
-        const maybe_bytes = node.db.getBlock(root) catch continue;
+        const maybe_bytes = query.blockBytesAtSlot(slot) catch continue;
         const bytes = maybe_bytes orelse continue;
         defer node.allocator.free(bytes);
 
@@ -94,7 +96,7 @@ fn reqRespStreamBlocksByRange(ptr: *anyopaque, start_slot: u64, count: u64, sink
 fn reqRespFindBlobByRoot(ptr: *anyopaque, root: [32]u8, index: u64, sink: *const PayloadSink) anyerror!void {
     const node = requestNode(ptr);
 
-    const maybe_bytes = node.db.getBlobSidecars(root) catch return;
+    const maybe_bytes = chain_mod.Query.init(node.chain).blobSidecarsByRoot(root) catch return;
     const bytes = maybe_bytes orelse return;
     defer node.allocator.free(bytes);
 
@@ -112,13 +114,13 @@ fn reqRespFindBlobByRoot(ptr: *anyopaque, root: [32]u8, index: u64, sink: *const
 
 fn reqRespStreamBlobsByRange(ptr: *anyopaque, start_slot: u64, count: u64, sink: *const PayloadSink) anyerror!void {
     const node = requestNode(ptr);
+    const query = chain_mod.Query.init(node.chain);
     const sidecar_size = preset_root.BLOBSIDECAR_FIXED_SIZE;
 
     const end_slot = std.math.add(u64, start_slot, count) catch return;
     var slot = start_slot;
     while (slot < end_slot) : (slot += 1) {
-        const root = node.head_tracker.getBlockRoot(slot) orelse continue;
-        const maybe_bytes = node.db.getBlobSidecars(root) catch continue;
+        const maybe_bytes = query.blobSidecarsAtSlot(slot) catch continue;
         const bytes = maybe_bytes orelse continue;
         defer node.allocator.free(bytes);
 
@@ -136,7 +138,7 @@ fn reqRespStreamBlobsByRange(ptr: *anyopaque, start_slot: u64, count: u64, sink:
 fn reqRespFindDataColumnByRoot(ptr: *anyopaque, root: [32]u8, index: u64, sink: *const PayloadSink) anyerror!void {
     const node = requestNode(ptr);
 
-    const maybe_bytes = node.db.getDataColumn(root, index) catch return;
+    const maybe_bytes = chain_mod.Query.init(node.chain).dataColumnByRoot(root, index) catch return;
     const bytes = maybe_bytes orelse return;
     defer node.allocator.free(bytes);
 
@@ -154,13 +156,13 @@ fn reqRespStreamDataColumnsByRange(
     sink: *const PayloadSink,
 ) anyerror!void {
     const node = requestNode(ptr);
+    const query = chain_mod.Query.init(node.chain);
 
     const end_slot = std.math.add(u64, start_slot, count) catch return;
     var slot = start_slot;
     while (slot < end_slot) : (slot += 1) {
-        const root = node.head_tracker.getBlockRoot(slot) orelse continue;
         for (columns) |column_index| {
-            const maybe_bytes = node.db.getDataColumn(root, column_index) catch continue;
+            const maybe_bytes = query.dataColumnAtSlot(slot, column_index) catch continue;
             const bytes = maybe_bytes orelse continue;
             defer node.allocator.free(bytes);
 

@@ -1,4 +1,4 @@
-//! Chain — owns all chain state and exposes pipeline functions.
+//! Chain — coordinates the chain runtime state and exposes pipeline functions.
 //!
 //! This is the central coordinator for beacon chain state. It holds
 //! pointers to all chain components (fork choice, caches, DB, pools)
@@ -11,9 +11,9 @@
 //! - `getHead` — current head info
 //! - `getStatus` — P2P status message
 //!
-//! The Chain does NOT own the backing memory for its components — the
-//! BeaconNode allocates everything and passes pointers. This avoids
-//! ownership complexity and keeps Chain as a pure coordinator.
+//! The Chain does not own the backing memory for its components. That graph is
+//! owned by `chain.Runtime`, which keeps `Chain` as the coordinator over a
+//! separately managed runtime.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -77,6 +77,7 @@ pub const SseEvent = chain_types.SseEvent;
 const AnySignedBeaconBlock = fork_types.AnySignedBeaconBlock;
 const sync_contribution_pool_mod = @import("sync_contribution_pool.zig");
 const SyncContributionAndProofPool = sync_contribution_pool_mod.SyncContributionAndProofPool;
+const SyncCommitteeMessagePool = sync_contribution_pool_mod.SyncCommitteeMessagePool;
 
 const da_mod = @import("data_availability.zig");
 const validator_monitor_mod = @import("validator_monitor.zig");
@@ -133,6 +134,10 @@ pub const Chain = struct {
     /// in the block's sync_aggregate field.
     sync_contribution_pool: ?*SyncContributionAndProofPool,
 
+    /// SyncCommitteeMessagePool — optional. Stores unaggregated sync committee
+    /// messages so aggregators can construct contributions.
+    sync_committee_message_pool: ?*SyncCommitteeMessagePool,
+
     // --- Block import state ---
     /// When true, BLS signatures are verified during block import.
     verify_signatures: bool,
@@ -183,6 +188,7 @@ pub const Chain = struct {
             .da_manager = null,
             .reprocess_queue = null,
             .sync_contribution_pool = null,
+            .sync_committee_message_pool = null,
             .verify_signatures = false,
             .block_to_state = std.AutoArrayHashMap([32]u8, [32]u8).init(allocator),
             .event_callback = null,
@@ -363,17 +369,19 @@ pub const Chain = struct {
 
         // Emit SSE attestation event.
         if (self.event_callback) |cb| {
-            cb.emit(.{ .attestation = .{
-                .aggregation_bits = [_]u8{0x01} ++ [_]u8{0} ** 7, // simplified; real impl extracts from bitfield
-                .slot = attestation_slot,
-                .committee_index = committee_index,
-                .beacon_block_root = beacon_block_root,
-                .source_epoch = target_epoch -| 1,
-                .source_root = [_]u8{0} ** 32, // TODO: extract from attestation data
-                .target_epoch = target_epoch,
-                .target_root = target_root,
-                .signature = [_]u8{0} ** 96, // TODO: extract from attestation
-            } });
+            cb.emit(.{
+                .attestation = .{
+                    .aggregation_bits = [_]u8{0x01} ++ [_]u8{0} ** 7, // simplified; real impl extracts from bitfield
+                    .slot = attestation_slot,
+                    .committee_index = committee_index,
+                    .beacon_block_root = beacon_block_root,
+                    .source_epoch = target_epoch -| 1,
+                    .source_root = [_]u8{0} ** 32, // TODO: extract from attestation data
+                    .target_epoch = target_epoch,
+                    .target_root = target_root,
+                    .signature = [_]u8{0} ** 96, // TODO: extract from attestation
+                },
+            });
         }
     }
 
@@ -784,7 +792,4 @@ pub const Chain = struct {
 
         try self.head_tracker.slot_roots.put(target_slot, self.head_tracker.head_root);
     }
-
-
-
 };

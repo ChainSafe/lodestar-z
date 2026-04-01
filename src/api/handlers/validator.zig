@@ -62,6 +62,7 @@ pub const SyncDuty = struct {
 /// proposer assignments and validator pubkeys. Falls back to a zeroed
 /// stub if the head state is unavailable.
 pub fn getProposerDuties(ctx: *ApiContext, epoch: u64) !HandlerResult([]ProposerDuty) {
+    const head = ctx.currentHeadTracker();
     const slots_per_epoch = preset.SLOTS_PER_EPOCH;
     const epoch_start = epoch * slots_per_epoch;
 
@@ -69,10 +70,7 @@ pub fn getProposerDuties(ctx: *ApiContext, epoch: u64) !HandlerResult([]Proposer
     errdefer ctx.allocator.free(duties);
 
     // Try to get real data from the head state's epoch cache.
-    const head_state: ?*CachedBeaconState = blk: {
-        const cb = ctx.head_state orelse break :blk null;
-        break :blk cb.getHeadStateFn(cb.ptr);
-    };
+    const head_state = ctx.headState();
 
     if (head_state) |state| {
         const epoch_cache = state.epoch_cache;
@@ -96,7 +94,7 @@ pub fn getProposerDuties(ctx: *ApiContext, epoch: u64) !HandlerResult([]Proposer
                 .data = duties,
                 .meta = .{
                     .execution_optimistic = false,
-                    .dependent_root = ctx.head_tracker.head_root,
+                    .dependent_root = head.head_root,
                 },
             };
         }
@@ -115,7 +113,7 @@ pub fn getProposerDuties(ctx: *ApiContext, epoch: u64) !HandlerResult([]Proposer
         .data = duties,
         .meta = .{
             .execution_optimistic = false,
-            .dependent_root = ctx.head_tracker.head_root,
+            .dependent_root = head.head_root,
         },
     };
 }
@@ -130,8 +128,8 @@ pub fn getAttesterDuties(
     epoch: u64,
     validator_indices: []const u64,
 ) !HandlerResult([]AttesterDuty) {
-    const cb = ctx.head_state orelse return error.NotImplemented;
-    const state = cb.getHeadStateFn(cb.ptr) orelse return error.StateNotAvailable;
+    const head = ctx.currentHeadTracker();
+    const state = ctx.headState() orelse return error.NotImplemented;
     const epoch_cache = state.epoch_cache;
 
     // We can serve duties for the current or next epoch.
@@ -176,7 +174,7 @@ pub fn getAttesterDuties(
         .data = try result.toOwnedSlice(ctx.allocator),
         .meta = .{
             .execution_optimistic = false,
-            .dependent_root = ctx.head_tracker.head_root,
+            .dependent_root = head.head_root,
         },
     };
 }
@@ -191,8 +189,7 @@ pub fn getSyncDuties(
     epoch: u64,
     validator_indices: []const u64,
 ) !HandlerResult([]SyncDuty) {
-    const cb = ctx.head_state orelse return error.NotImplemented;
-    const state = cb.getHeadStateFn(cb.ptr) orelse return error.StateNotAvailable;
+    const state = ctx.headState() orelse return error.NotImplemented;
     const epoch_cache = state.epoch_cache;
 
     // Get the indexed sync committee for this epoch.
@@ -342,22 +339,23 @@ pub fn getAttestationData(
         return .{ .data = result, .meta = .{} };
     }
 
+    const head = ctx.currentHeadTracker();
     // Stub: return attestation data based on current head.
     // W6: target_root is the block root at the START of the target epoch,
     // not the current head root. Use justified_root as an approximation
     // when no callback is wired (justified checkpoint root is at epoch start).
     const target_epoch = slot / preset.SLOTS_PER_EPOCH;
-    const target_root = if (target_epoch == ctx.head_tracker.justified_slot / preset.SLOTS_PER_EPOCH)
-        ctx.head_tracker.justified_root
+    const target_root = if (target_epoch == head.justified_slot / preset.SLOTS_PER_EPOCH)
+        head.justified_root
     else
-        ctx.head_tracker.head_root; // best effort when no state available
+        head.head_root; // best effort when no state available
     return .{
         .data = .{
             .slot = slot,
             .index = committee_index,
-            .beacon_block_root = ctx.head_tracker.head_root,
-            .source_epoch = ctx.head_tracker.justified_slot / preset.SLOTS_PER_EPOCH,
-            .source_root = ctx.head_tracker.justified_root,
+            .beacon_block_root = head.head_root,
+            .source_epoch = head.justified_slot / preset.SLOTS_PER_EPOCH,
+            .source_root = head.justified_root,
             .target_epoch = target_epoch,
             .target_root = target_root,
         },
@@ -612,11 +610,16 @@ fn serializeRegistrationsToJson(
             "{{\"{s}\":{{\"{s}\":\"0x{s}\",\"{s}\":\"{d}\",\"{s}\":\"{d}\",\"{s}\":\"0x{s}\"}},\"{s}\":\"0x{s}\"}}",
             .{
                 "message",
-                "fee_recipient", fee_hex,
-                "gas_limit", r.message.gas_limit,
-                "timestamp", r.message.timestamp,
-                "pubkey", pk_hex,
-                "signature", sig_hex,
+                "fee_recipient",
+                fee_hex,
+                "gas_limit",
+                r.message.gas_limit,
+                "timestamp",
+                r.message.timestamp,
+                "pubkey",
+                pk_hex,
+                "signature",
+                sig_hex,
             },
         );
         defer allocator.free(entry);

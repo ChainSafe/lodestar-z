@@ -58,9 +58,7 @@ pub fn getBlockHeader(ctx: *ApiContext, block_id: types.BlockId) !HandlerResult(
 pub fn getBlock(ctx: *ApiContext, block_id: types.BlockId) !BlockResult {
     const slot_info = try resolveBlockSlotAndRoot(ctx, block_id);
 
-    // Try hot (unfinalized) first, then cold (archived)
-    const block_bytes = (try ctx.db.getBlock(slot_info.root)) orelse
-        (try ctx.db.getBlockArchiveByRoot(slot_info.root)) orelse
+    const block_bytes = (try ctx.blockBytesByRoot(slot_info.root)) orelse
         return error.BlockNotFound;
 
     // Determine fork from slot for version metadata
@@ -103,55 +101,45 @@ fn forkNameFromSlot(ctx: *ApiContext, slot: u64) handler_result.Fork {
 /// Returns the list of validators for the given state.
 /// Supports optional filtering by validator IDs and statuses.
 ///
-/// For `head` and `justified`, uses the head state callback.
-/// For `finalized`, `genesis`, slot, and root — loads the state from the
-/// DB archive and deserializes it. This is the state regen path.
+/// Resolves states through the chain-backed API state query boundary.
+/// Head comes from the live head-state path; historical lookups go through
+/// chain-owned state lookup/regeneration.
 pub fn getValidators(
     ctx: *ApiContext,
     state_id: types.StateId,
     _: types.ValidatorQuery,
 ) !HandlerResult([]const types.ValidatorData) {
-    // Try the head state callback for head/justified.
+    const head = ctx.currentHeadTracker();
     const use_head = switch (state_id) {
-        .head, .justified => true,
+        .head => true,
         else => false,
     };
 
     if (use_head) {
-        const cb = ctx.head_state orelse return error.StateNotAvailable;
-        const state_opaque = cb.getHeadStateFn(cb.ptr) orelse return error.StateNotAvailable;
-        const state: *CachedBeaconState = @ptrCast(@alignCast(state_opaque));
+        const state = ctx.headState() orelse return error.StateNotAvailable;
         return buildValidatorResponse(ctx, state);
     }
 
-    // W-state: For finalized/justified, try state_regen_callback by state root.
     switch (state_id) {
         .finalized => {
-            if (ctx.state_regen_callback) |cb| {
-                // Look up the state at the finalized checkpoint root.
-                const fin_state_root = ctx.head_tracker.head_state_root; // best approximation
-                if (cb.getStateByRoot(fin_state_root)) |state| {
-                    return buildValidatorResponse(ctx, state);
-                }
-            }
+            const state = (try ctx.stateByBlockRoot(head.finalized_root)) orelse return error.StateNotAvailable;
+            return buildValidatorResponse(ctx, state);
         },
         .justified => {
-            if (ctx.state_regen_callback) |cb| {
-                const jst_state_root = ctx.head_tracker.head_state_root;
-                if (cb.getStateByRoot(jst_state_root)) |state| {
-                    return buildValidatorResponse(ctx, state);
-                }
-            }
+            const state = (try ctx.stateByBlockRoot(head.justified_root)) orelse return error.StateNotAvailable;
+            return buildValidatorResponse(ctx, state);
+        },
+        .genesis => {
+            const state = (try ctx.stateBySlot(0)) orelse return error.StateNotAvailable;
+            return buildValidatorResponse(ctx, state);
         },
         .slot => |slot| {
-            if (ctx.state_regen_callback) |cb| {
-                // Try to get pre-state for the block at this slot.
-                if (ctx.db.getBlockRootBySlot(slot) catch null) |root| {
-                    if (cb.getPreState(root, slot)) |state| {
-                        return buildValidatorResponse(ctx, state);
-                    }
-                }
-            }
+            const state = (try ctx.stateBySlot(slot)) orelse return error.StateNotAvailable;
+            return buildValidatorResponse(ctx, state);
+        },
+        .root => |root| {
+            const state = (try ctx.stateByRoot(root)) orelse return error.StateNotAvailable;
+            return buildValidatorResponse(ctx, state);
         },
         else => {},
     }
@@ -211,17 +199,15 @@ pub fn getValidator(
     state_id: types.StateId,
     validator_id: types.ValidatorId,
 ) !HandlerResult(types.ValidatorData) {
-    // Only head state is available via the head_state callback for now.
-    const use_head = switch (state_id) {
-        .head, .justified => true,
-        else => false,
+    const head = ctx.currentHeadTracker();
+    const state = switch (state_id) {
+        .head => ctx.headState() orelse return error.StateNotAvailable,
+        .justified => (try ctx.stateByBlockRoot(head.justified_root)) orelse return error.StateNotAvailable,
+        .finalized => (try ctx.stateByBlockRoot(head.finalized_root)) orelse return error.StateNotAvailable,
+        .genesis => (try ctx.stateBySlot(0)) orelse return error.StateNotAvailable,
+        .slot => |slot| (try ctx.stateBySlot(slot)) orelse return error.StateNotAvailable,
+        .root => |root| (try ctx.stateByRoot(root)) orelse return error.StateNotAvailable,
     };
-
-    if (!use_head) return error.StateNotAvailable;
-
-    const cb = ctx.head_state orelse return error.StateNotAvailable;
-    const state_opaque = cb.getHeadStateFn(cb.ptr) orelse return error.StateNotAvailable;
-    const state: *CachedBeaconState = @ptrCast(@alignCast(state_opaque));
 
     const validators = try state.state.validatorsSlice(ctx.allocator);
     defer ctx.allocator.free(validators);
@@ -270,52 +256,50 @@ pub fn getValidator(
 ///
 /// Returns the state root for the given state identifier.
 pub fn getStateRoot(ctx: *ApiContext, state_id: types.StateId) !HandlerResult([32]u8) {
+    const head = ctx.currentHeadTracker();
     switch (state_id) {
         .head => {
             return .{
-                .data = ctx.head_tracker.head_state_root,
+                .data = head.head_state_root,
                 .meta = .{},
             };
         },
         .finalized => {
-            // For finalized, we'd need the state root at finalized slot.
-            // Approximate with head_state_root for now if finalized == head.
+            const finalized_state_root = (try ctx.stateRootByBlockRoot(head.finalized_root)) orelse
+                return error.StateNotAvailable;
             return .{
-                .data = ctx.head_tracker.head_state_root,
+                .data = finalized_state_root,
                 .meta = .{ .finalized = true },
             };
         },
         .genesis => {
-            // Genesis state root would be stored in config/DB.
+            const genesis_state_root = (try ctx.stateRootBySlot(0)) orelse
+                return error.StateNotAvailable;
             return .{
-                .data = [_]u8{0} ** 32, // placeholder
+                .data = genesis_state_root,
                 .meta = .{ .finalized = true },
             };
         },
         .justified => {
+            const justified_state_root = (try ctx.stateRootByBlockRoot(head.justified_root)) orelse
+                return error.StateNotAvailable;
             return .{
-                .data = ctx.head_tracker.head_state_root,
+                .data = justified_state_root,
                 .meta = .{},
             };
         },
         .slot => |slot| {
-            // Look up the block at this slot, deserialize it, and return the state_root.
-            const root = (try ctx.db.getBlockRootBySlot(slot)) orelse return error.SlotNotFound;
-
-            // Try hot store first, then archived
-            const block_bytes = (try ctx.db.getBlock(root)) orelse
-                (try ctx.db.getBlockArchiveByRoot(root)) orelse
-                return error.BlockNotFound;
-            defer ctx.allocator.free(block_bytes);
-
-            const fork_seq = ctx.beacon_config.forkSeq(slot);
-            const any_block = try AnySignedBeaconBlock.deserialize(ctx.allocator, .full, fork_seq, block_bytes);
-            defer any_block.deinit(ctx.allocator);
-
-            const state_root = any_block.beaconBlock().stateRoot().*;
+            const state_root_opt = try ctx.stateRootBySlot(slot);
+            if (state_root_opt == null) {
+                if ((try ctx.blockRootBySlot(slot)) == null and (try ctx.stateArchiveAtSlot(slot)) == null) {
+                    return error.SlotNotFound;
+                }
+                return error.StateNotAvailable;
+            }
+            const state_root = state_root_opt.?;
             return .{
                 .data = state_root,
-                .meta = .{ .finalized = slot <= ctx.head_tracker.finalized_slot },
+                .meta = .{ .finalized = slot <= head.finalized_slot },
             };
         },
         .root => |root| {
@@ -333,7 +317,7 @@ pub fn getStateRoot(ctx: *ApiContext, state_id: types.StateId) !HandlerResult([3
 /// Returns the fork data for the given state.
 pub fn getStateFork(ctx: *ApiContext, state_id: types.StateId) !HandlerResult(types.ForkData) {
     // Determine the slot to compute the fork for
-    const slot = resolveStateSlot(ctx, state_id);
+    const slot = try resolveStateSlot(ctx, state_id);
 
     // Walk the config's fork schedule to find the active fork at this slot
     const cfg = ctx.beacon_config;
@@ -377,21 +361,22 @@ pub fn getStateFork(ctx: *ApiContext, state_id: types.StateId) !HandlerResult(ty
 /// the previous_justified, current_justified, and finalized checkpoints directly
 /// from the state. Falls back to head tracker data when state is not available.
 pub fn getFinalityCheckpoints(ctx: *ApiContext, state_id: types.StateId) !HandlerResult(types.FinalityCheckpoints) {
+    const head = ctx.currentHeadTracker();
     const resolved = resolveState(ctx, state_id) catch {
         // Fall back to head tracker data when state regen is unavailable.
         return .{
             .data = .{
                 .previous_justified = .{
-                    .epoch = ctx.head_tracker.justified_slot / preset.SLOTS_PER_EPOCH,
-                    .root = ctx.head_tracker.justified_root,
+                    .epoch = head.justified_slot / preset.SLOTS_PER_EPOCH,
+                    .root = head.justified_root,
                 },
                 .current_justified = .{
-                    .epoch = ctx.head_tracker.justified_slot / preset.SLOTS_PER_EPOCH,
-                    .root = ctx.head_tracker.justified_root,
+                    .epoch = head.justified_slot / preset.SLOTS_PER_EPOCH,
+                    .root = head.justified_root,
                 },
                 .finalized = .{
-                    .epoch = ctx.head_tracker.finalized_slot / preset.SLOTS_PER_EPOCH,
-                    .root = ctx.head_tracker.finalized_root,
+                    .epoch = head.finalized_slot / preset.SLOTS_PER_EPOCH,
+                    .root = head.finalized_root,
                 },
             },
             .meta = .{},
@@ -803,21 +788,32 @@ const SlotAndRoot = struct {
     finalized: bool,
 };
 
+fn readSignedBlockSlotFromSsz(block_bytes: []const u8) ?u64 {
+    if (block_bytes.len < 108) return null;
+    return std.mem.readInt(u64, block_bytes[100..108], .little);
+}
+
+fn readStateSlotFromSsz(state_bytes: []const u8) ?u64 {
+    if (state_bytes.len < 48) return null;
+    return std.mem.readInt(u64, state_bytes[40..48], .little);
+}
+
 fn resolveBlockSlotAndRoot(ctx: *ApiContext, block_id: types.BlockId) !SlotAndRoot {
+    const head = ctx.currentHeadTracker();
     switch (block_id) {
         .head => return .{
-            .slot = ctx.head_tracker.head_slot,
-            .root = ctx.head_tracker.head_root,
+            .slot = head.head_slot,
+            .root = head.head_root,
             .finalized = false,
         },
         .finalized => return .{
-            .slot = ctx.head_tracker.finalized_slot,
-            .root = ctx.head_tracker.finalized_root,
+            .slot = head.finalized_slot,
+            .root = head.finalized_root,
             .finalized = true,
         },
         .justified => return .{
-            .slot = ctx.head_tracker.justified_slot,
-            .root = ctx.head_tracker.justified_root,
+            .slot = head.justified_slot,
+            .root = head.justified_root,
             .finalized = false,
         },
         .genesis => return .{
@@ -826,39 +822,23 @@ fn resolveBlockSlotAndRoot(ctx: *ApiContext, block_id: types.BlockId) !SlotAndRo
             .finalized = true,
         },
         .slot => |slot| {
-            const root = (try ctx.db.getBlockRootBySlot(slot)) orelse return error.SlotNotFound;
+            const root = (try ctx.blockRootBySlot(slot)) orelse return error.SlotNotFound;
             return .{
                 .slot = slot,
                 .root = root,
-                .finalized = slot <= ctx.head_tracker.finalized_slot,
+                .finalized = slot <= head.finalized_slot,
             };
         },
         .root => |root| {
             // We have the root; look up the block to get the real slot.
-            const block_bytes = (try ctx.db.getBlock(root)) orelse
-                (try ctx.db.getBlockArchiveByRoot(root)) orelse
-                return error.BlockNotFound;
+            const block_bytes = (try ctx.blockBytesByRoot(root)) orelse return error.BlockNotFound;
             defer ctx.allocator.free(block_bytes);
 
-            // Read the block's actual slot from raw SSZ to determine the correct fork.
-            // SignedBeaconBlock SSZ layout: signature(96) + slot(8) + ...
-            // slot is at byte offset 96 in the serialized bytes.
-            const raw_slot: u64 = if (block_bytes.len >= 104)
-                std.mem.readInt(u64, block_bytes[96..104], .little)
-            else
-                ctx.head_tracker.head_slot; // fallback — block too short (shouldn't happen)
-
-            // Use the block's actual slot for fork determination instead of head slot.
-            // This correctly handles archived blocks from earlier forks.
-            const fork_seq = ctx.beacon_config.forkSeq(raw_slot);
-            const any_block = try AnySignedBeaconBlock.deserialize(ctx.allocator, .full, fork_seq, block_bytes);
-            defer any_block.deinit(ctx.allocator);
-
-            const block = any_block.beaconBlock();
+            const slot = readSignedBlockSlotFromSsz(block_bytes) orelse head.head_slot;
             return .{
-                .slot = block.slot(),
+                .slot = slot,
                 .root = root,
-                .finalized = block.slot() <= ctx.head_tracker.finalized_slot,
+                .finalized = slot <= head.finalized_slot,
             };
         },
     }
@@ -874,8 +854,7 @@ fn resolveBlockHeader(ctx: *ApiContext, block_id: types.BlockId) !BlockHeaderRes
     const slot_info = try resolveBlockSlotAndRoot(ctx, block_id);
 
     // Try to load and deserialize the block to get real header fields.
-    const block_bytes_opt = (try ctx.db.getBlock(slot_info.root)) orelse
-        try ctx.db.getBlockArchiveByRoot(slot_info.root);
+    const block_bytes_opt = try ctx.blockBytesByRoot(slot_info.root);
 
     if (block_bytes_opt) |block_bytes| {
         defer ctx.allocator.free(block_bytes);
@@ -933,14 +912,31 @@ fn resolveBlockHeader(ctx: *ApiContext, block_id: types.BlockId) !BlockHeaderRes
     };
 }
 
-fn resolveStateSlot(ctx: *ApiContext, state_id: types.StateId) u64 {
+fn resolveStateSlot(ctx: *ApiContext, state_id: types.StateId) !u64 {
+    const head = ctx.currentHeadTracker();
     return switch (state_id) {
-        .head => ctx.head_tracker.head_slot,
-        .finalized => ctx.head_tracker.finalized_slot,
-        .justified => ctx.head_tracker.justified_slot,
+        .head => head.head_slot,
+        .finalized => if (try ctx.stateByBlockRoot(head.finalized_root)) |state|
+            try state.state.slot()
+        else
+            head.finalized_slot,
+        .justified => if (try ctx.stateByBlockRoot(head.justified_root)) |state|
+            try state.state.slot()
+        else
+            head.justified_slot,
         .genesis => 0,
         .slot => |s| s,
-        .root => ctx.head_tracker.head_slot, // fallback; would need root->slot lookup
+        .root => |root| blk: {
+            if (try ctx.stateByRoot(root)) |state| {
+                break :blk try state.state.slot();
+            }
+
+            const state_bytes = (try ctx.stateBytesByRoot(root)) orelse
+                return error.StateNotAvailable;
+            defer ctx.allocator.free(state_bytes);
+
+            break :blk readStateSlotFromSsz(state_bytes) orelse return error.StateNotAvailable;
+        },
     };
 }
 
@@ -1053,7 +1049,7 @@ test "getBlockHeader for head extracts real fields from DB block" {
 test "getValidators without head state returns StateNotAvailable" {
     var tc = test_helpers.makeTestContext(std.testing.allocator);
     defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
-    // head_state is null in test context
+    // state_query is null in test context
     const result = getValidators(&tc.ctx, .head, .{});
     try std.testing.expectError(error.StateNotAvailable, result);
 }
@@ -1080,20 +1076,29 @@ test "getValidators with head state returns non-empty list" {
     var test_state = try TestCachedBeaconState.init(allocator, &pool, 4);
     defer test_state.deinit();
 
-    // Wire head state callback
-    const HeadStateCb = struct {
+    const StateQueryCb = struct {
         cached: *state_transition.CachedBeaconState,
 
-        fn getState(ptr: *anyopaque) ?*state_transition.CachedBeaconState {
+        fn getHeadState(ptr: *anyopaque) ?*state_transition.CachedBeaconState {
             const self: *@This() = @ptrCast(@alignCast(ptr));
             return self.cached;
         }
+
+        fn getStateByRoot(_: *anyopaque, _: [32]u8) anyerror!?*state_transition.CachedBeaconState {
+            return null;
+        }
+
+        fn getStateBySlot(_: *anyopaque, _: u64) anyerror!?*state_transition.CachedBeaconState {
+            return null;
+        }
     };
 
-    var cb_ctx = HeadStateCb{ .cached = test_state.cached_state };
-    tc.ctx.head_state = .{
+    var cb_ctx = StateQueryCb{ .cached = test_state.cached_state };
+    tc.ctx.state_query = .{
         .ptr = &cb_ctx,
-        .getHeadStateFn = &HeadStateCb.getState,
+        .getHeadStateFn = &StateQueryCb.getHeadState,
+        .getStateByRootFn = &StateQueryCb.getStateByRoot,
+        .getStateBySlotFn = &StateQueryCb.getStateBySlot,
     };
 
     const resp = try getValidators(&tc.ctx, .head, .{});
@@ -1120,19 +1125,29 @@ test "getValidator with valid index returns data" {
     var test_state = try TestCachedBeaconState.init(allocator, &pool, 4);
     defer test_state.deinit();
 
-    const HeadStateCb = struct {
+    const StateQueryCb = struct {
         cached: *state_transition.CachedBeaconState,
 
-        fn getState(ptr: *anyopaque) ?*state_transition.CachedBeaconState {
+        fn getHeadState(ptr: *anyopaque) ?*state_transition.CachedBeaconState {
             const self: *@This() = @ptrCast(@alignCast(ptr));
             return self.cached;
         }
+
+        fn getStateByRoot(_: *anyopaque, _: [32]u8) anyerror!?*state_transition.CachedBeaconState {
+            return null;
+        }
+
+        fn getStateBySlot(_: *anyopaque, _: u64) anyerror!?*state_transition.CachedBeaconState {
+            return null;
+        }
     };
 
-    var cb_ctx = HeadStateCb{ .cached = test_state.cached_state };
-    tc.ctx.head_state = .{
+    var cb_ctx = StateQueryCb{ .cached = test_state.cached_state };
+    tc.ctx.state_query = .{
         .ptr = &cb_ctx,
-        .getHeadStateFn = &HeadStateCb.getState,
+        .getHeadStateFn = &StateQueryCb.getHeadState,
+        .getStateByRootFn = &StateQueryCb.getStateByRoot,
+        .getStateBySlotFn = &StateQueryCb.getStateBySlot,
     };
 
     const resp = try getValidator(&tc.ctx, .head, .{ .index = 2 });
@@ -1156,19 +1171,29 @@ test "getValidator with out-of-range index returns ValidatorNotFound" {
     var test_state = try TestCachedBeaconState.init(allocator, &pool, 4);
     defer test_state.deinit();
 
-    const HeadStateCb = struct {
+    const StateQueryCb = struct {
         cached: *state_transition.CachedBeaconState,
 
-        fn getState(ptr: *anyopaque) ?*state_transition.CachedBeaconState {
+        fn getHeadState(ptr: *anyopaque) ?*state_transition.CachedBeaconState {
             const self: *@This() = @ptrCast(@alignCast(ptr));
             return self.cached;
         }
+
+        fn getStateByRoot(_: *anyopaque, _: [32]u8) anyerror!?*state_transition.CachedBeaconState {
+            return null;
+        }
+
+        fn getStateBySlot(_: *anyopaque, _: u64) anyerror!?*state_transition.CachedBeaconState {
+            return null;
+        }
     };
 
-    var cb_ctx = HeadStateCb{ .cached = test_state.cached_state };
-    tc.ctx.head_state = .{
+    var cb_ctx = StateQueryCb{ .cached = test_state.cached_state };
+    tc.ctx.state_query = .{
         .ptr = &cb_ctx,
-        .getHeadStateFn = &HeadStateCb.getState,
+        .getHeadStateFn = &StateQueryCb.getHeadState,
+        .getStateByRootFn = &StateQueryCb.getStateByRoot,
+        .getStateBySlotFn = &StateQueryCb.getStateBySlot,
     };
 
     const result = getValidator(&tc.ctx, .head, .{ .index = 99 });
@@ -1179,7 +1204,7 @@ test "submitBlock returns NotImplemented when block_import is null" {
     var tc = test_helpers.makeTestContext(std.testing.allocator);
     defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
     // block_import defaults to null
-    const fake_bytes = [_]u8{0x01, 0x02, 0x03};
+    const fake_bytes = [_]u8{ 0x01, 0x02, 0x03 };
     const result = submitBlock(&tc.ctx, &fake_bytes);
     try std.testing.expectError(error.NotImplemented, result);
 }
@@ -1206,7 +1231,7 @@ test "submitBlock invokes block_import callback" {
         .importFn = &MockImporter.importBlock,
     };
 
-    const fake_bytes = [_]u8{0xDE, 0xAD, 0xBE, 0xEF} ** 4;
+    const fake_bytes = [_]u8{ 0xDE, 0xAD, 0xBE, 0xEF } ** 4;
     const result = try submitBlock(&tc.ctx, &fake_bytes);
     _ = result;
 
@@ -1458,107 +1483,61 @@ const ResolvedStateMeta = struct {
 /// Resolve a state_id to a CachedBeaconState.
 ///
 /// Supports all Beacon API state identifiers:
-///   - "head"      → current head state via head_state callback
-///   - "justified" → head state (current justified checkpoint is on head state)
-///   - "finalized" → state at finalized checkpoint via state_regen_callback
-///   - "genesis"   → state at slot 0 via state_regen_callback
-///   - <slot>      → state at given slot via state_regen_callback
-///   - 0x<root>    → state by root via state_regen_callback
+///   - "head"      → current head state
+///   - "justified" → current justified checkpoint state
+///   - "finalized" → finalized checkpoint state
+///   - "genesis"   → state at slot 0
+///   - <slot>      → canonical state at the given slot
+///   - 0x<root>    → state by root
 ///
 /// Returns error.StateNotAvailable if the state cannot be resolved.
 fn resolveState(ctx: *ApiContext, state_id: types.StateId) !struct { state: *CachedBeaconState, meta: ResolvedStateMeta } {
+    const head = ctx.currentHeadTracker();
     switch (state_id) {
         .head => {
-            const cb = ctx.head_state orelse return error.StateNotAvailable;
-            const state_opaque = cb.getHeadStateFn(cb.ptr) orelse return error.StateNotAvailable;
-            const state: *CachedBeaconState = @ptrCast(@alignCast(state_opaque));
+            const state = ctx.headState() orelse return error.StateNotAvailable;
             return .{
                 .state = state,
                 .meta = .{ .execution_optimistic = false, .finalized = false },
             };
         },
         .justified => {
-            // Justified checkpoint is read from the head state, same as "head".
-            const cb = ctx.head_state orelse return error.StateNotAvailable;
-            const state_opaque = cb.getHeadStateFn(cb.ptr) orelse return error.StateNotAvailable;
-            const state: *CachedBeaconState = @ptrCast(@alignCast(state_opaque));
+            const state = (try ctx.stateByBlockRoot(head.justified_root)) orelse return error.StateNotAvailable;
             return .{
                 .state = state,
                 .meta = .{ .execution_optimistic = false, .finalized = false },
             };
         },
         .finalized => {
-            // Try state regen by the head state root as approximation.
-            // Full implementation would use the finalized checkpoint's state root.
-            if (ctx.state_regen_callback) |cb| {
-                if (cb.getStateByRoot(ctx.head_tracker.head_state_root)) |state| {
-                    return .{
-                        .state = state,
-                        .meta = .{ .execution_optimistic = false, .finalized = true },
-                    };
-                }
-            }
-            // Fall back to head state if regen is not available.
-            const hcb = ctx.head_state orelse return error.StateNotAvailable;
-            const state_opaque = hcb.getHeadStateFn(hcb.ptr) orelse return error.StateNotAvailable;
-            const state: *CachedBeaconState = @ptrCast(@alignCast(state_opaque));
+            const state = (try ctx.stateByBlockRoot(head.finalized_root)) orelse return error.StateNotAvailable;
             return .{
                 .state = state,
                 .meta = .{ .execution_optimistic = false, .finalized = true },
             };
         },
         .genesis => {
-            // Try state regen for slot 0.
-            if (ctx.state_regen_callback) |cb| {
-                if (ctx.db.getBlockRootBySlot(0) catch null) |root| {
-                    if (cb.getPreState(root, 0)) |state| {
-                        return .{
-                            .state = state,
-                            .meta = .{ .execution_optimistic = false, .finalized = true },
-                        };
-                    }
-                }
-            }
-            return error.StateNotAvailable;
+            const state = (try ctx.stateBySlot(0)) orelse return error.StateNotAvailable;
+            return .{
+                .state = state,
+                .meta = .{ .execution_optimistic = false, .finalized = true },
+            };
         },
         .slot => |slot| {
-            // Try state regen for the block at this slot.
-            if (ctx.state_regen_callback) |cb| {
-                if (ctx.db.getBlockRootBySlot(slot) catch null) |root| {
-                    if (cb.getPreState(root, slot)) |state| {
-                        return .{
-                            .state = state,
-                            .meta = .{
-                                .execution_optimistic = false,
-                                .finalized = slot <= ctx.head_tracker.finalized_slot,
-                            },
-                        };
-                    }
-                }
-            }
-            // Fall back to head state if the requested slot matches head.
-            if (slot == ctx.head_tracker.head_slot) {
-                const hcb = ctx.head_state orelse return error.StateNotAvailable;
-                const state_opaque = hcb.getHeadStateFn(hcb.ptr) orelse return error.StateNotAvailable;
-                const state: *CachedBeaconState = @ptrCast(@alignCast(state_opaque));
-                return .{
-                    .state = state,
-                    .meta = .{ .execution_optimistic = false, .finalized = false },
-                };
-            }
-            return error.StateNotAvailable;
+            const state = (try ctx.stateBySlot(slot)) orelse return error.StateNotAvailable;
+            return .{
+                .state = state,
+                .meta = .{
+                    .execution_optimistic = false,
+                    .finalized = slot <= head.finalized_slot,
+                },
+            };
         },
         .root => |root| {
-            // Try state regen by root.
-            if (ctx.state_regen_callback) |cb| {
-                if (cb.getStateByRoot(root)) |state| {
-                    return .{
-                        .state = state,
-                        .meta = .{ .execution_optimistic = false, .finalized = false },
-                    };
-                }
-            }
-            return error.StateNotAvailable;
+            const state = (try ctx.stateByRoot(root)) orelse return error.StateNotAvailable;
+            return .{
+                .state = state,
+                .meta = .{ .execution_optimistic = false, .finalized = false },
+            };
         },
     }
 }

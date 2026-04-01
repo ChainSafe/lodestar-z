@@ -114,7 +114,7 @@ pub const StateRegen = struct {
                             self.config.?,
                             state_bytes,
                         );
-                        return cached_state;
+                        return try self.cacheLoadedState(cached_state, false);
                     }
                     break;
                 }
@@ -155,10 +155,32 @@ pub const StateRegen = struct {
                 self.config.?,
                 bytes,
             );
-            return cached_state;
+            return try self.cacheLoadedState(cached_state, false);
         }
 
         return null;
+    }
+
+    /// Look up an archived state by slot.
+    ///
+    /// Search order:
+    /// 1. DB state archive by slot (cold path)
+    ///
+    /// Loaded states are inserted into the block state cache so callers
+    /// receive a cache-owned pointer with stable lifetime semantics.
+    pub fn getStateBySlot(self: *StateRegen, slot: u64) !?*CachedBeaconState {
+        if (self.db == null or self.pool == null or self.config == null) return null;
+
+        const bytes = (try self.db.?.getStateArchive(slot)) orelse return null;
+        defer self.allocator.free(bytes);
+
+        const cached_state = try deserializeState(
+            self.allocator,
+            self.pool.?,
+            self.config.?,
+            bytes,
+        );
+        return try self.cacheLoadedState(cached_state, false);
     }
 
     /// Called after processing a new block — cache the resulting state.
@@ -184,6 +206,22 @@ pub const StateRegen = struct {
     pub fn onFinalized(self: *StateRegen, finalized_epoch: u64) !void {
         self.block_cache.pruneBeforeEpoch(finalized_epoch);
         try self.checkpoint_cache.pruneFinalized(finalized_epoch);
+    }
+
+    fn cacheLoadedState(
+        self: *StateRegen,
+        state: *CachedBeaconState,
+        is_head: bool,
+    ) !*CachedBeaconState {
+        const state_root = (try state.state.hashTreeRoot()).*;
+        if (self.block_cache.get(state_root)) |existing| {
+            state.deinit();
+            self.allocator.destroy(state);
+            return existing;
+        }
+
+        _ = try self.block_cache.add(state, is_head);
+        return state;
     }
 };
 

@@ -321,7 +321,7 @@ pub const HttpServer = struct {
 
         const dc = DispatchContext{
             .match = match,
-            .query = if (std.mem.indexOfScalar(u8, target, '?')) |idx| target[idx + 1..] else null,
+            .query = if (std.mem.indexOfScalar(u8, target, '?')) |idx| target[idx + 1 ..] else null,
             .body = request_body,
             .format = format,
             .auth_header = findHeader(request, "authorization"),
@@ -330,7 +330,7 @@ pub const HttpServer = struct {
             try respondApiError(request, error_response.fromZigError(err));
             return;
         };
-        defer self.allocator.free(result.body);
+        defer result.deinit(self.allocator);
 
         // Build response headers: content-type + CORS + metadata.
         var extra_hdrs_buf: [16]http.Header = undefined;
@@ -371,7 +371,12 @@ pub const HttpServer = struct {
         status: u16,
         content_type: []const u8,
         body: []const u8,
+        body_owned: bool = true,
         meta: response_meta.ResponseMeta = .{},
+
+        pub fn deinit(self: HandlerResult, allocator: Allocator) void {
+            if (self.body_owned) allocator.free(self.body);
+        }
     };
 
     /// Write a JSON body for a HandlerResult(T) and return a HandlerResult for the server.
@@ -434,7 +439,7 @@ pub const HttpServer = struct {
         return buf.toOwnedSlice(allocator);
     }
 
-        /// Route to the correct handler and encode the response.
+    /// Route to the correct handler and encode the response.
     /// Context for dispatching a handler: route match + query params + body.
     const DispatchContext = struct {
         match: routes_mod.RouteMatch,
@@ -473,70 +478,70 @@ pub const HttpServer = struct {
     // ── StaticStringMap dispatch table ───────────────────────────────────────
 
     const handler_table = std.StaticStringMap(HandlerFn).initComptime(.{
-        .{ "getNodeIdentity",               &hGetNodeIdentity },
-        .{ "getNodeVersion",                &hGetNodeVersion },
-        .{ "getSyncing",                    &hGetSyncing },
-        .{ "getHealth",                     &hGetHealth },
-        .{ "getPeers",                      &hGetPeers },
-        .{ "getPeerCount",                  &hGetPeerCount },
-        .{ "getPeer",                       &hGetPeer },
-        .{ "getGenesis",                    &hGetGenesis },
-        .{ "getBlockHeader",                &hGetBlockHeader },
-        .{ "getBlockV2",                    &hGetBlockV2 },
-        .{ "getStateValidatorV2",           &hGetStateValidatorV2 },
-        .{ "getStateValidatorsV2",          &hGetStateValidatorsV2 },
-        .{ "getStateRoot",                  &hGetStateRoot },
-        .{ "getStateFork",                  &hGetStateFork },
-        .{ "getFinalityCheckpoints",        &hGetFinalityCheckpoints },
-        .{ "publishBlockV2",               &hPublishBlockV2 },
-        .{ "getPoolAttestations",           &hGetPoolAttestations },
-        .{ "getPoolAttestationsV2",         &hGetPoolAttestationsV2 },
-        .{ "getPoolVoluntaryExits",         &hGetPoolVoluntaryExits },
-        .{ "getPoolProposerSlashings",      &hGetPoolProposerSlashings },
-        .{ "getPoolAttesterSlashings",      &hGetPoolAttesterSlashings },
-        .{ "getPoolBlsToExecutionChanges",  &hGetPoolBlsToExecutionChanges },
-        .{ "submitPoolAttestations",        &hSubmitPoolAttestations },
-        .{ "submitPoolAttestationsV2",      &hSubmitPoolAttestationsV2 },
-        .{ "submitPoolVoluntaryExits",      &hSubmitPoolVoluntaryExits },
-        .{ "submitPoolProposerSlashings",   &hSubmitPoolProposerSlashings },
-        .{ "submitPoolAttesterSlashings",   &hSubmitPoolAttesterSlashings },
+        .{ "getNodeIdentity", &hGetNodeIdentity },
+        .{ "getNodeVersion", &hGetNodeVersion },
+        .{ "getSyncing", &hGetSyncing },
+        .{ "getHealth", &hGetHealth },
+        .{ "getPeers", &hGetPeers },
+        .{ "getPeerCount", &hGetPeerCount },
+        .{ "getPeer", &hGetPeer },
+        .{ "getGenesis", &hGetGenesis },
+        .{ "getBlockHeader", &hGetBlockHeader },
+        .{ "getBlockV2", &hGetBlockV2 },
+        .{ "getStateValidatorV2", &hGetStateValidatorV2 },
+        .{ "getStateValidatorsV2", &hGetStateValidatorsV2 },
+        .{ "getStateRoot", &hGetStateRoot },
+        .{ "getStateFork", &hGetStateFork },
+        .{ "getFinalityCheckpoints", &hGetFinalityCheckpoints },
+        .{ "publishBlockV2", &hPublishBlockV2 },
+        .{ "getPoolAttestations", &hGetPoolAttestations },
+        .{ "getPoolAttestationsV2", &hGetPoolAttestationsV2 },
+        .{ "getPoolVoluntaryExits", &hGetPoolVoluntaryExits },
+        .{ "getPoolProposerSlashings", &hGetPoolProposerSlashings },
+        .{ "getPoolAttesterSlashings", &hGetPoolAttesterSlashings },
+        .{ "getPoolBlsToExecutionChanges", &hGetPoolBlsToExecutionChanges },
+        .{ "submitPoolAttestations", &hSubmitPoolAttestations },
+        .{ "submitPoolAttestationsV2", &hSubmitPoolAttestationsV2 },
+        .{ "submitPoolVoluntaryExits", &hSubmitPoolVoluntaryExits },
+        .{ "submitPoolProposerSlashings", &hSubmitPoolProposerSlashings },
+        .{ "submitPoolAttesterSlashings", &hSubmitPoolAttesterSlashings },
         .{ "submitPoolBlsToExecutionChanges", &hSubmitPoolBlsToExecutionChanges },
-        .{ "submitPoolSyncCommittees",      &hSubmitPoolSyncCommittees },
-        .{ "getDebugState",                 &hGetDebugState },
-        .{ "getDebugHeads",                 &hGetDebugHeads },
-        .{ "getEvents",                     &hGetEvents },
-        .{ "getProposerDuties",             &hGetProposerDuties },
-        .{ "getAttesterDuties",             &hGetAttesterDuties },
-        .{ "getSyncDuties",                 &hGetSyncDuties },
-        .{ "getSpec",                       &hGetSpec },
-        .{ "getForkSchedule",               &hGetForkSchedule },
-        .{ "getValidatorMonitor",           &hGetValidatorMonitor },
-        .{ "produceBlock",                  &hProduceBlock },
-        .{ "produceBlockV3",                &hProduceBlock },
-        .{ "getAttestationData",            &hGetAttestationData },
-        .{ "getAggregateAttestation",       &hGetAggregateAttestation },
-        .{ "publishAggregateAndProofs",     &hPublishAggregateAndProofs },
-        .{ "getSyncCommitteeContribution",  &hGetSyncCommitteeContribution },
-        .{ "publishContributionAndProofs",  &hPublishContributionAndProofs },
-        .{ "getStateCommittees",            &hGetStateCommittees },
-        .{ "getStateSyncCommittees",        &hGetStateSyncCommittees },
-        .{ "getStateRandao",                &hGetStateRandao },
-        .{ "getBlockHeaders",               &hGetBlockHeaders },
-        .{ "getBlobSidecars",               &hGetBlobSidecars },
-        .{ "getBlindedBlock",               &hGetBlindedBlock },
-        .{ "getBlockRewards",               &hGetBlockRewards },
-        .{ "getAttestationRewards",         &hGetAttestationRewards },
-        .{ "getSyncCommitteeRewards",       &hGetSyncCommitteeRewards },
-        .{ "prepareBeaconProposer",         &hPrepareBeaconProposer },
-        .{ "registerValidator",             &hRegisterValidator },
-        .{ "getValidatorLiveness",          &hGetValidatorLiveness },
-        .{ "listKeystores",                 &hListKeystores },
-        .{ "importKeystores",               &hImportKeystores },
-        .{ "deleteKeystores",               &hDeleteKeystores },
-        .{ "listRemoteKeys",                &hListRemoteKeys },
-        .{ "importRemoteKeys",              &hImportRemoteKeys },
-        .{ "deleteRemoteKeys",              &hDeleteRemoteKeys },
-        .{ "getForkChoice",                 &hGetForkChoice },
+        .{ "submitPoolSyncCommittees", &hSubmitPoolSyncCommittees },
+        .{ "getDebugState", &hGetDebugState },
+        .{ "getDebugHeads", &hGetDebugHeads },
+        .{ "getEvents", &hGetEvents },
+        .{ "getProposerDuties", &hGetProposerDuties },
+        .{ "getAttesterDuties", &hGetAttesterDuties },
+        .{ "getSyncDuties", &hGetSyncDuties },
+        .{ "getSpec", &hGetSpec },
+        .{ "getForkSchedule", &hGetForkSchedule },
+        .{ "getValidatorMonitor", &hGetValidatorMonitor },
+        .{ "produceBlock", &hProduceBlock },
+        .{ "produceBlockV3", &hProduceBlock },
+        .{ "getAttestationData", &hGetAttestationData },
+        .{ "getAggregateAttestation", &hGetAggregateAttestation },
+        .{ "publishAggregateAndProofs", &hPublishAggregateAndProofs },
+        .{ "getSyncCommitteeContribution", &hGetSyncCommitteeContribution },
+        .{ "publishContributionAndProofs", &hPublishContributionAndProofs },
+        .{ "getStateCommittees", &hGetStateCommittees },
+        .{ "getStateSyncCommittees", &hGetStateSyncCommittees },
+        .{ "getStateRandao", &hGetStateRandao },
+        .{ "getBlockHeaders", &hGetBlockHeaders },
+        .{ "getBlobSidecars", &hGetBlobSidecars },
+        .{ "getBlindedBlock", &hGetBlindedBlock },
+        .{ "getBlockRewards", &hGetBlockRewards },
+        .{ "getAttestationRewards", &hGetAttestationRewards },
+        .{ "getSyncCommitteeRewards", &hGetSyncCommitteeRewards },
+        .{ "prepareBeaconProposer", &hPrepareBeaconProposer },
+        .{ "registerValidator", &hRegisterValidator },
+        .{ "getValidatorLiveness", &hGetValidatorLiveness },
+        .{ "listKeystores", &hListKeystores },
+        .{ "importKeystores", &hImportKeystores },
+        .{ "deleteKeystores", &hDeleteKeystores },
+        .{ "listRemoteKeys", &hListRemoteKeys },
+        .{ "importRemoteKeys", &hImportRemoteKeys },
+        .{ "deleteRemoteKeys", &hDeleteRemoteKeys },
+        .{ "getForkChoice", &hGetForkChoice },
     });
 
     /// Dispatch to the handler for the given operation_id.
@@ -600,7 +605,6 @@ pub const HttpServer = struct {
         return .{ .status = 200, .content_type = "application/json", .body = body, .meta = handler_res.meta };
     }
 
-
     fn hGetGenesis(self: *HttpServer, _: DispatchContext) !HandlerResult {
         const resp = handlers.beacon.getGenesis(self.api_context);
         return self.makeJsonResult(types.GenesisData, resp);
@@ -635,7 +639,6 @@ pub const HttpServer = struct {
         const body = try json_response.writeBlockEnvelope(alloc, any_block, meta);
         return .{ .status = 200, .content_type = "application/json", .body = body, .meta = meta };
     }
-
 
     fn hGetStateValidatorV2(self: *HttpServer, dc: DispatchContext) !HandlerResult {
         const state_id_str = dc.match.getParam("state_id") orelse return error.InvalidStateId;
@@ -821,7 +824,13 @@ pub const HttpServer = struct {
         // Return 501 Not Implemented until debug state endpoint is wired up.
         _ = self;
         _ = dc;
-        return .{ .status = 501, .content_type = "application/json", .body = "{\"code\":501,\"message\":\"Debug state endpoint not yet implemented\"}", .meta = .{} };
+        return .{
+            .status = 501,
+            .content_type = "application/json",
+            .body = "{\"code\":501,\"message\":\"Debug state endpoint not yet implemented\"}",
+            .body_owned = false,
+            .meta = .{},
+        };
     }
 
     fn hGetDebugHeads(self: *HttpServer, _: DispatchContext) !HandlerResult {
@@ -832,8 +841,6 @@ pub const HttpServer = struct {
         const body = try json_response.writeApiArrayEnvelope(alloc, handlers.debug.DebugChainHead, handler_res.data, handler_res.meta);
         return .{ .status = 200, .content_type = "application/json", .body = body, .meta = handler_res.meta };
     }
-
-
 
     // ── SSE streaming handler ────────────────────────────────────────────
 
@@ -1005,7 +1012,6 @@ pub const HttpServer = struct {
         return .{ .status = 200, .content_type = "application/json", .body = body, .meta = handler_res.meta };
     }
 
-
     fn hGetAttesterDuties(self: *HttpServer, dc: DispatchContext) !HandlerResult {
         const alloc = self.allocator;
         const epoch_str = dc.match.getParam("epoch") orelse return error.InvalidRequest;
@@ -1022,7 +1028,6 @@ pub const HttpServer = struct {
         const body = try json_response.writeApiArrayEnvelope(alloc, handlers.validator.AttesterDuty, handler_res.data, handler_res.meta);
         return .{ .status = 200, .content_type = "application/json", .body = body, .meta = handler_res.meta };
     }
-
 
     fn hGetSyncDuties(self: *HttpServer, dc: DispatchContext) !HandlerResult {
         const alloc = self.allocator;
@@ -1044,7 +1049,6 @@ pub const HttpServer = struct {
         return .{ .status = 200, .content_type = "application/json", .body = body, .meta = handler_res.meta };
     }
 
-
     fn hGetSpec(self: *HttpServer, _: DispatchContext) !HandlerResult {
         const result = handlers.config.getSpec(self.api_context);
         return self.makeJsonResult(handlers.config.SpecData, result);
@@ -1052,6 +1056,7 @@ pub const HttpServer = struct {
 
     fn hGetForkSchedule(self: *HttpServer, _: DispatchContext) !HandlerResult {
         const result = handlers.config.getForkSchedule(self.api_context);
+        defer if (result.data.len > 0) self.allocator.free(result.data);
         return self.makeJsonResult([]const types.ForkScheduleEntry, result);
     }
 
@@ -1096,7 +1101,6 @@ pub const HttpServer = struct {
         return .{ .status = 200, .content_type = "application/json", .body = body_json, .meta = block_meta };
     }
 
-
     fn hGetAttestationData(self: *HttpServer, dc: DispatchContext) !HandlerResult {
         const alloc = self.allocator;
         const slot_str = dc.getQuery("slot") orelse return error.InvalidRequest;
@@ -1105,14 +1109,12 @@ pub const HttpServer = struct {
         const committee_index = std.fmt.parseInt(u64, committee_str, 10) catch return error.InvalidRequest;
         const handler_res = try handlers.validator.getAttestationData(self.api_context, slot, committee_index);
         const d = handler_res.data;
-        const body_json = try std.fmt.allocPrint(alloc,
-            "{{\"data\":{{\"slot\":\"{d}\",\"index\":\"{d}\",\"beacon_block_root\":\"0x{s}\",\"source\":{{\"epoch\":\"{d}\",\"root\":\"0x{s}\"}},\"target\":{{\"epoch\":\"{d}\",\"root\":\"0x{s}\"}}}}}}",
-            .{
-                d.slot, d.index,
-                std.fmt.bytesToHex(&d.beacon_block_root, .lower),
-                d.source_epoch, std.fmt.bytesToHex(&d.source_root, .lower),
-                d.target_epoch, std.fmt.bytesToHex(&d.target_root, .lower),
-            });
+        const body_json = try std.fmt.allocPrint(alloc, "{{\"data\":{{\"slot\":\"{d}\",\"index\":\"{d}\",\"beacon_block_root\":\"0x{s}\",\"source\":{{\"epoch\":\"{d}\",\"root\":\"0x{s}\"}},\"target\":{{\"epoch\":\"{d}\",\"root\":\"0x{s}\"}}}}}}", .{
+            d.slot,                                           d.index,
+            std.fmt.bytesToHex(&d.beacon_block_root, .lower), d.source_epoch,
+            std.fmt.bytesToHex(&d.source_root, .lower),       d.target_epoch,
+            std.fmt.bytesToHex(&d.target_root, .lower),
+        });
         return .{ .status = 200, .content_type = "application/json", .body = body_json, .meta = handler_res.meta };
     }
 
@@ -1174,7 +1176,6 @@ pub const HttpServer = struct {
         return .{ .status = 200, .content_type = "application/json", .body = body, .meta = handler_res.meta };
     }
 
-
     fn hGetStateSyncCommittees(self: *HttpServer, dc: DispatchContext) !HandlerResult {
         const alloc = self.allocator;
         const state_id_str = dc.match.getParam("state_id") orelse return error.InvalidStateId;
@@ -1190,7 +1191,6 @@ pub const HttpServer = struct {
         return .{ .status = 200, .content_type = "application/json", .body = body, .meta = handler_res.meta };
     }
 
-
     fn hGetStateRandao(self: *HttpServer, dc: DispatchContext) !HandlerResult {
         const alloc = self.allocator;
         const state_id_str = dc.match.getParam("state_id") orelse return error.InvalidStateId;
@@ -1200,7 +1200,6 @@ pub const HttpServer = struct {
         const body = try json_response.writeApiObjectEnvelope(alloc, types.RandaoData, &handler_res.data, handler_res.meta);
         return .{ .status = 200, .content_type = "application/json", .body = body, .meta = handler_res.meta };
     }
-
 
     fn hGetBlockHeaders(self: *HttpServer, dc: DispatchContext) !HandlerResult {
         const alloc = self.allocator;
@@ -1228,7 +1227,6 @@ pub const HttpServer = struct {
         const body = try json_response.writeApiArrayEnvelope(alloc, types.BlockHeaderData, handler_res.data, meta);
         return .{ .status = 200, .content_type = "application/json", .body = body, .meta = meta };
     }
-
 
     fn hGetBlobSidecars(self: *HttpServer, dc: DispatchContext) !HandlerResult {
         const alloc = self.allocator;
@@ -1263,7 +1261,6 @@ pub const HttpServer = struct {
         const body = try json_response.writeBlockEnvelope(alloc, any_block, meta);
         return .{ .status = 200, .content_type = "application/json", .body = body, .meta = meta };
     }
-
 
     fn hGetBlockRewards(self: *HttpServer, dc: DispatchContext) !HandlerResult {
         const block_id_str = dc.match.getParam("block_id") orelse return error.InvalidBlockId;
@@ -1369,9 +1366,7 @@ pub const HttpServer = struct {
         try buf.appendSlice(alloc, "{\"data\":[");
         for (handler_res.data, 0..) |lv, i| {
             if (i > 0) try buf.appendSlice(alloc, ",");
-            const entry = try std.fmt.allocPrint(alloc,
-                "{{\"index\":\"{d}\",\"epoch\":\"{d}\",\"is_live\":{s}}}",
-                .{ lv.index, lv.epoch, if (lv.is_live) "true" else "false" });
+            const entry = try std.fmt.allocPrint(alloc, "{{\"index\":\"{d}\",\"epoch\":\"{d}\",\"is_live\":{s}}}", .{ lv.index, lv.epoch, if (lv.is_live) "true" else "false" });
             defer alloc.free(entry);
             try buf.appendSlice(alloc, entry);
         }
@@ -1416,14 +1411,12 @@ pub const HttpServer = struct {
         var buf = std.ArrayListUnmanaged(u8).empty;
         errdefer buf.deinit(alloc);
         const fc = handler_res.data;
-        const header = try std.fmt.allocPrint(alloc,
-            "{{\"data\":{{\"justified_checkpoint\":{{\"epoch\":\"{d}\",\"root\":\"0x{s}\"}},\"finalized_checkpoint\":{{\"epoch\":\"{d}\",\"root\":\"0x{s}\"}},\"fork_choice_nodes\":[",
-            .{
-                fc.justified_checkpoint.epoch,
-                std.fmt.bytesToHex(&fc.justified_checkpoint.root, .lower),
-                fc.finalized_checkpoint.epoch,
-                std.fmt.bytesToHex(&fc.finalized_checkpoint.root, .lower),
-            });
+        const header = try std.fmt.allocPrint(alloc, "{{\"data\":{{\"justified_checkpoint\":{{\"epoch\":\"{d}\",\"root\":\"0x{s}\"}},\"finalized_checkpoint\":{{\"epoch\":\"{d}\",\"root\":\"0x{s}\"}},\"fork_choice_nodes\":[", .{
+            fc.justified_checkpoint.epoch,
+            std.fmt.bytesToHex(&fc.justified_checkpoint.root, .lower),
+            fc.finalized_checkpoint.epoch,
+            std.fmt.bytesToHex(&fc.finalized_checkpoint.root, .lower),
+        });
         defer alloc.free(header);
         try buf.appendSlice(alloc, header);
         for (fc.fork_choice_nodes, 0..) |node, ni| {
@@ -1433,25 +1426,22 @@ pub const HttpServer = struct {
             else
                 try alloc.dupe(u8, "null");
             defer alloc.free(parent_root_str);
-            const node_entry = try std.fmt.allocPrint(alloc,
-                "{{\"slot\":\"{d}\",\"block_root\":\"0x{s}\",\"parent_root\":{s},\"justified_epoch\":\"{d}\",\"finalized_epoch\":\"{d}\",\"weight\":\"{d}\",\"validity\":\"{s}\",\"execution_block_hash\":\"0x{s}\"}}",
-                .{
-                    node.slot,
-                    std.fmt.bytesToHex(&node.block_root, .lower),
-                    parent_root_str,
-                    node.justified_epoch,
-                    node.finalized_epoch,
-                    node.weight,
-                    node.validity,
-                    std.fmt.bytesToHex(&node.execution_block_hash, .lower),
-                });
+            const node_entry = try std.fmt.allocPrint(alloc, "{{\"slot\":\"{d}\",\"block_root\":\"0x{s}\",\"parent_root\":{s},\"justified_epoch\":\"{d}\",\"finalized_epoch\":\"{d}\",\"weight\":\"{d}\",\"validity\":\"{s}\",\"execution_block_hash\":\"0x{s}\"}}", .{
+                node.slot,
+                std.fmt.bytesToHex(&node.block_root, .lower),
+                parent_root_str,
+                node.justified_epoch,
+                node.finalized_epoch,
+                node.weight,
+                node.validity,
+                std.fmt.bytesToHex(&node.execution_block_hash, .lower),
+            });
             defer alloc.free(node_entry);
             try buf.appendSlice(alloc, node_entry);
         }
         try buf.appendSlice(alloc, "]}}");
         return .{ .status = 200, .content_type = "application/json", .body = try buf.toOwnedSlice(alloc), .meta = handler_res.meta };
     }
-
 
     /// Handle a single HTTP request without TCP (for testing).
     ///
@@ -1472,6 +1462,7 @@ pub const HttpServer = struct {
                 .status_text = "No Content",
                 .content_type = "text/plain",
                 .body = "",
+                .body_owned = false,
             };
         }
 
@@ -1487,6 +1478,7 @@ pub const HttpServer = struct {
                 .status_text = "Method Not Allowed",
                 .content_type = "application/json",
                 .body = "{\"statusCode\":405,\"message\":\"Method not allowed\"}",
+                .body_owned = false,
             };
 
         const clean_path, _ = splitTarget(path);
@@ -1497,10 +1489,11 @@ pub const HttpServer = struct {
                 .status_text = "Not Found",
                 .content_type = "application/json",
                 .body = "{\"statusCode\":404,\"message\":\"Route not found\"}",
+                .body_owned = false,
             };
         };
 
-        const clean_query = if (std.mem.indexOfScalar(u8, path, '?')) |idx| path[idx+1..] else null;
+        const clean_query = if (std.mem.indexOfScalar(u8, path, '?')) |idx| path[idx + 1 ..] else null;
         const dc_test = DispatchContext{
             .match = match,
             .query = clean_query,
@@ -1512,13 +1505,13 @@ pub const HttpServer = struct {
             const err_json = api_err.formatJson(&err_buf);
             // Dupe onto heap — err_buf is stack-local and would dangle after return.
             // On OOM, fall back to a static string literal (safe to return by reference).
-            const err_json_heap = self.allocator.dupe(u8, err_json) catch
-                "{\"statusCode\":500,\"message\":\"internal server error\"}";
+            const err_json_heap = self.allocator.dupe(u8, err_json) catch null;
             return .{
                 .status = api_err.code.statusCode(),
                 .status_text = api_err.code.phrase(),
                 .content_type = "application/json",
-                .body = err_json_heap,
+                .body = err_json_heap orelse "{\"statusCode\":500,\"message\":\"internal server error\"}",
+                .body_owned = err_json_heap != null,
             };
         };
 
@@ -1527,6 +1520,7 @@ pub const HttpServer = struct {
             .status_text = "OK",
             .content_type = result.content_type,
             .body = result.body,
+            .body_owned = result.body_owned,
         };
     }
 
@@ -1535,6 +1529,11 @@ pub const HttpServer = struct {
         status_text: []const u8,
         content_type: []const u8,
         body: []const u8,
+        body_owned: bool = false,
+
+        pub fn deinit(self: HttpResponse, allocator: Allocator) void {
+            if (self.body_owned) allocator.free(self.body);
+        }
     };
 };
 
@@ -1746,10 +1745,13 @@ test "dispatch coverage: all route operation_ids have a handler branch" {
         var path_len: usize = 0;
         var in_param = false;
         for (route.path) |ch| {
-            if (ch == '{') { in_param = true; continue; }
+            if (ch == '{') {
+                in_param = true;
+                continue;
+            }
             if (ch == '}') {
                 const dummy = "head";
-                @memcpy(path_buf[path_len..path_len + dummy.len], dummy);
+                @memcpy(path_buf[path_len .. path_len + dummy.len], dummy);
                 path_len += dummy.len;
                 in_param = false;
                 continue;
@@ -1779,7 +1781,7 @@ test "handleRequest GET /eth/v1/node/version" {
 
     var server = HttpServer.init(std.testing.allocator, &tc.ctx, "127.0.0.1", 0);
     const resp = try server.handleRequest("GET", "/eth/v1/node/version", null);
-    defer if (resp.status == 200) std.testing.allocator.free(resp.body);
+    defer resp.deinit(std.testing.allocator);
 
     try std.testing.expectEqual(@as(u16, 200), resp.status);
     try std.testing.expect(std.mem.indexOf(u8, resp.body, "lodestar-z") != null);
@@ -1791,7 +1793,7 @@ test "handleRequest GET /eth/v1/node/identity" {
 
     var server = HttpServer.init(std.testing.allocator, &tc.ctx, "127.0.0.1", 0);
     const resp = try server.handleRequest("GET", "/eth/v1/node/identity", null);
-    defer if (resp.status == 200) std.testing.allocator.free(resp.body);
+    defer resp.deinit(std.testing.allocator);
 
     try std.testing.expectEqual(@as(u16, 200), resp.status);
     try std.testing.expect(std.mem.indexOf(u8, resp.body, "test-peer-id") != null);
@@ -1803,7 +1805,7 @@ test "handleRequest GET /eth/v1/node/syncing" {
 
     var server = HttpServer.init(std.testing.allocator, &tc.ctx, "127.0.0.1", 0);
     const resp = try server.handleRequest("GET", "/eth/v1/node/syncing", null);
-    defer if (resp.status == 200) std.testing.allocator.free(resp.body);
+    defer resp.deinit(std.testing.allocator);
 
     try std.testing.expectEqual(@as(u16, 200), resp.status);
     try std.testing.expect(std.mem.indexOf(u8, resp.body, "is_syncing") != null);
@@ -1817,7 +1819,7 @@ test "handleRequest GET /eth/v1/node/health ready" {
     tc.ctx.sync_status.is_syncing = false;
     tc.ctx.sync_status.head_slot = 1000;
     const resp = try server.handleRequest("GET", "/eth/v1/node/health", null);
-    defer std.testing.allocator.free(resp.body);
+    defer resp.deinit(std.testing.allocator);
 
     try std.testing.expectEqual(@as(u16, 200), resp.status);
 }
@@ -1829,7 +1831,7 @@ test "handleRequest GET /eth/v1/node/health syncing returns 206" {
     var server = HttpServer.init(std.testing.allocator, &tc.ctx, "127.0.0.1", 0);
     tc.ctx.sync_status.is_syncing = true;
     const resp = try server.handleRequest("GET", "/eth/v1/node/health", null);
-    defer std.testing.allocator.free(resp.body);
+    defer resp.deinit(std.testing.allocator);
 
     try std.testing.expectEqual(@as(u16, 206), resp.status);
 }
@@ -1842,7 +1844,7 @@ test "handleRequest GET /eth/v1/node/health not initialized returns 503" {
     tc.ctx.sync_status.is_syncing = false;
     tc.ctx.sync_status.head_slot = 0;
     const resp = try server.handleRequest("GET", "/eth/v1/node/health", null);
-    defer std.testing.allocator.free(resp.body);
+    defer resp.deinit(std.testing.allocator);
 
     try std.testing.expectEqual(@as(u16, 503), resp.status);
 }
@@ -1853,7 +1855,7 @@ test "handleRequest GET /eth/v1/node/peers" {
 
     var server = HttpServer.init(std.testing.allocator, &tc.ctx, "127.0.0.1", 0);
     const resp = try server.handleRequest("GET", "/eth/v1/node/peers", null);
-    defer if (resp.status == 200) std.testing.allocator.free(resp.body);
+    defer resp.deinit(std.testing.allocator);
 
     try std.testing.expectEqual(@as(u16, 200), resp.status);
 }
@@ -1864,7 +1866,7 @@ test "handleRequest GET /eth/v1/beacon/genesis" {
 
     var server = HttpServer.init(std.testing.allocator, &tc.ctx, "127.0.0.1", 0);
     const resp = try server.handleRequest("GET", "/eth/v1/beacon/genesis", null);
-    defer if (resp.status == 200) std.testing.allocator.free(resp.body);
+    defer resp.deinit(std.testing.allocator);
 
     try std.testing.expectEqual(@as(u16, 200), resp.status);
     try std.testing.expect(std.mem.indexOf(u8, resp.body, "genesis_time") != null);
@@ -1876,7 +1878,7 @@ test "handleRequest GET /eth/v1/config/spec" {
 
     var server = HttpServer.init(std.testing.allocator, &tc.ctx, "127.0.0.1", 0);
     const resp = try server.handleRequest("GET", "/eth/v1/config/spec", null);
-    defer if (resp.status == 200) std.testing.allocator.free(resp.body);
+    defer resp.deinit(std.testing.allocator);
 
     try std.testing.expectEqual(@as(u16, 200), resp.status);
     try std.testing.expect(std.mem.indexOf(u8, resp.body, "config_name") != null);
@@ -1888,7 +1890,7 @@ test "handleRequest GET /eth/v1/config/fork_schedule" {
 
     var server = HttpServer.init(std.testing.allocator, &tc.ctx, "127.0.0.1", 0);
     const resp = try server.handleRequest("GET", "/eth/v1/config/fork_schedule", null);
-    defer if (resp.status == 200) std.testing.allocator.free(resp.body);
+    defer resp.deinit(std.testing.allocator);
 
     try std.testing.expectEqual(@as(u16, 200), resp.status);
 }
@@ -1899,6 +1901,7 @@ test "handleRequest unknown route returns 404 with statusCode field" {
 
     var server = HttpServer.init(std.testing.allocator, &tc.ctx, "127.0.0.1", 0);
     const resp = try server.handleRequest("GET", "/eth/v1/not/a/route", null);
+    defer resp.deinit(std.testing.allocator);
 
     try std.testing.expectEqual(@as(u16, 404), resp.status);
     try std.testing.expect(std.mem.indexOf(u8, resp.body, "statusCode") != null);
@@ -1911,6 +1914,7 @@ test "handleRequest wrong method returns 405" {
     var server = HttpServer.init(std.testing.allocator, &tc.ctx, "127.0.0.1", 0);
     // PATCH is not a supported method, should return 405.
     const resp = try server.handleRequest("PATCH", "/eth/v1/node/version", null);
+    defer resp.deinit(std.testing.allocator);
 
     try std.testing.expectEqual(@as(u16, 405), resp.status);
 }
@@ -1921,7 +1925,7 @@ test "handleRequest with query string" {
 
     var server = HttpServer.init(std.testing.allocator, &tc.ctx, "127.0.0.1", 0);
     const resp = try server.handleRequest("GET", "/eth/v1/node/version?foo=bar", null);
-    defer if (resp.status == 200) std.testing.allocator.free(resp.body);
+    defer resp.deinit(std.testing.allocator);
 
     try std.testing.expectEqual(@as(u16, 200), resp.status);
 }
@@ -1932,7 +1936,7 @@ test "handleRequest pool submission POST returns 204" {
 
     var server = HttpServer.init(std.testing.allocator, &tc.ctx, "127.0.0.1", 0);
     const resp = try server.handleRequest("POST", "/eth/v1/beacon/pool/attestations", null);
-    defer std.testing.allocator.free(resp.body);
+    defer resp.deinit(std.testing.allocator);
 
     try std.testing.expectEqual(@as(u16, 204), resp.status);
 }
@@ -1962,6 +1966,7 @@ test "error responses use standard Beacon API format" {
 
     // Not found
     const resp = try server.handleRequest("GET", "/eth/v1/not/a/route", null);
+    defer resp.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(u16, 404), resp.status);
     try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"statusCode\":404") != null);
     try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"message\"") != null);
@@ -1973,7 +1978,7 @@ test "handleRequest GET /eth/v1/validator/attestation_data returns 200" {
 
     var server = HttpServer.init(std.testing.allocator, &tc.ctx, "127.0.0.1", 0);
     const resp = try server.handleRequest("GET", "/eth/v1/validator/attestation_data?slot=100&committee_index=0", null);
-    defer std.testing.allocator.free(resp.body);
+    defer resp.deinit(std.testing.allocator);
 
     try std.testing.expectEqual(@as(u16, 200), resp.status);
     try std.testing.expect(std.mem.indexOf(u8, resp.body, "beacon_block_root") != null);
@@ -1985,7 +1990,7 @@ test "handleRequest POST /eth/v1/validator/aggregate_and_proofs returns 204" {
 
     var server = HttpServer.init(std.testing.allocator, &tc.ctx, "127.0.0.1", 0);
     const resp = try server.handleRequest("POST", "/eth/v1/validator/aggregate_and_proofs", null);
-    defer std.testing.allocator.free(resp.body);
+    defer resp.deinit(std.testing.allocator);
 
     try std.testing.expectEqual(@as(u16, 204), resp.status);
 }
@@ -1996,7 +2001,7 @@ test "handleRequest POST /eth/v1/validator/contribution_and_proofs returns 204" 
 
     var server = HttpServer.init(std.testing.allocator, &tc.ctx, "127.0.0.1", 0);
     const resp = try server.handleRequest("POST", "/eth/v1/validator/contribution_and_proofs", null);
-    defer std.testing.allocator.free(resp.body);
+    defer resp.deinit(std.testing.allocator);
 
     try std.testing.expectEqual(@as(u16, 204), resp.status);
 }
@@ -2007,8 +2012,8 @@ test "handleRequest POST /eth/v2/beacon/blocks without import returns error" {
 
     var server = HttpServer.init(std.testing.allocator, &tc.ctx, "127.0.0.1", 0);
     // submitBlock returns NotImplemented since no block_import is wired
-    // Error responses from handleRequest are stack-allocated (not heap), so no free needed.
     const resp = try server.handleRequest("POST", "/eth/v2/beacon/blocks", "{}");
+    defer resp.deinit(std.testing.allocator);
 
     // NotImplemented maps to 500 or 501
     try std.testing.expect(resp.status >= 400);
@@ -2023,7 +2028,7 @@ test "handleRequest pool submission POST attestations with body" {
         \\[{"aggregation_bits":"0x01","data":{"slot":100,"index":0,"beacon_block_root":"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","source":{"epoch":0,"root":"0x0000000000000000000000000000000000000000000000000000000000000000"},"target":{"epoch":1,"root":"0x0000000000000000000000000000000000000000000000000000000000000000"}},"signature":"0x000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"}]
     ;
     const resp = try server.handleRequest("POST", "/eth/v1/beacon/pool/attestations", body);
-    defer std.testing.allocator.free(resp.body);
+    defer resp.deinit(std.testing.allocator);
 
     try std.testing.expectEqual(@as(u16, 204), resp.status);
 }
@@ -2037,7 +2042,7 @@ test "handleRequest pool submission POST voluntary_exits with body" {
         \\{"message":{"epoch":100,"validator_index":42},"signature":"0x000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"}
     ;
     const resp = try server.handleRequest("POST", "/eth/v1/beacon/pool/voluntary_exits", body);
-    defer std.testing.allocator.free(resp.body);
+    defer resp.deinit(std.testing.allocator);
 
     try std.testing.expectEqual(@as(u16, 204), resp.status);
 }
@@ -2059,7 +2064,7 @@ test "handleRequest GET /eth/v1/beacon/states/head/committees returns error with
 
     var server = HttpServer.init(std.testing.allocator, &tc.ctx, "127.0.0.1", 0);
     const resp = try server.handleRequest("GET", "/eth/v1/beacon/states/head/committees", null);
-    // Error responses are stack-allocated, do not free the body.
+    defer resp.deinit(std.testing.allocator);
 
     // Without a head state, should return an error (StateNotAvailable -> 500)
     try std.testing.expect(resp.status >= 400);
@@ -2071,7 +2076,7 @@ test "handleRequest GET /eth/v1/beacon/headers returns 200" {
 
     var server = HttpServer.init(std.testing.allocator, &tc.ctx, "127.0.0.1", 0);
     const resp = try server.handleRequest("GET", "/eth/v1/beacon/headers", null);
-    defer if (resp.status == 200) std.testing.allocator.free(resp.body);
+    defer resp.deinit(std.testing.allocator);
 
     try std.testing.expectEqual(@as(u16, 200), resp.status);
     try std.testing.expect(std.mem.indexOf(u8, resp.body, "data") != null);
@@ -2083,6 +2088,7 @@ test "handleRequest GET /eth/v1/beacon/rewards/blocks/head returns 501" {
 
     var server = HttpServer.init(std.testing.allocator, &tc.ctx, "127.0.0.1", 0);
     const resp = try server.handleRequest("GET", "/eth/v1/beacon/rewards/blocks/head", null);
+    defer resp.deinit(std.testing.allocator);
 
     // Rewards require RewardCache which is not yet implemented.
     try std.testing.expectEqual(@as(u16, 501), resp.status);
@@ -2094,6 +2100,7 @@ test "handleRequest POST /eth/v1/beacon/rewards/attestations/1 returns 501" {
 
     var server = HttpServer.init(std.testing.allocator, &tc.ctx, "127.0.0.1", 0);
     const resp = try server.handleRequest("POST", "/eth/v1/beacon/rewards/attestations/1", "[]");
+    defer resp.deinit(std.testing.allocator);
 
     // Rewards require RewardCache which is not yet implemented.
     try std.testing.expectEqual(@as(u16, 501), resp.status);
@@ -2104,7 +2111,7 @@ test "handleRequest POST /eth/v1/validator/prepare_beacon_proposer returns 204" 
 
     var server = HttpServer.init(std.testing.allocator, &tc.ctx, "127.0.0.1", 0);
     const resp = try server.handleRequest("POST", "/eth/v1/validator/prepare_beacon_proposer", "[]");
-    defer std.testing.allocator.free(resp.body);
+    defer resp.deinit(std.testing.allocator);
 
     try std.testing.expectEqual(@as(u16, 204), resp.status);
 }
@@ -2115,7 +2122,7 @@ test "handleRequest POST /eth/v1/validator/register_validator returns 204" {
 
     var server = HttpServer.init(std.testing.allocator, &tc.ctx, "127.0.0.1", 0);
     const resp = try server.handleRequest("POST", "/eth/v1/validator/register_validator", "[]");
-    defer std.testing.allocator.free(resp.body);
+    defer resp.deinit(std.testing.allocator);
 
     try std.testing.expectEqual(@as(u16, 204), resp.status);
 }
@@ -2126,7 +2133,7 @@ test "handleRequest POST /eth/v1/validator/liveness/1 returns 200" {
 
     var server = HttpServer.init(std.testing.allocator, &tc.ctx, "127.0.0.1", 0);
     const resp = try server.handleRequest("POST", "/eth/v1/validator/liveness/1", "[0,1,2]");
-    defer if (resp.status == 200) std.testing.allocator.free(resp.body);
+    defer resp.deinit(std.testing.allocator);
 
     try std.testing.expectEqual(@as(u16, 200), resp.status);
     try std.testing.expect(std.mem.indexOf(u8, resp.body, "is_live") != null);
@@ -2138,7 +2145,7 @@ test "handleRequest GET /eth/v1/debug/fork_choice returns 200" {
 
     var server = HttpServer.init(std.testing.allocator, &tc.ctx, "127.0.0.1", 0);
     const resp = try server.handleRequest("GET", "/eth/v1/debug/fork_choice", null);
-    defer if (resp.status == 200) std.testing.allocator.free(resp.body);
+    defer resp.deinit(std.testing.allocator);
 
     try std.testing.expectEqual(@as(u16, 200), resp.status);
     try std.testing.expect(std.mem.indexOf(u8, resp.body, "fork_choice_nodes") != null);
@@ -2150,7 +2157,7 @@ test "handleRequest GET /eth/v1/node/peer_count returns 200" {
 
     var server = HttpServer.init(std.testing.allocator, &tc.ctx, "127.0.0.1", 0);
     const resp = try server.handleRequest("GET", "/eth/v1/node/peer_count", null);
-    defer if (resp.status == 200) std.testing.allocator.free(resp.body);
+    defer resp.deinit(std.testing.allocator);
 
     try std.testing.expectEqual(@as(u16, 200), resp.status);
     try std.testing.expect(std.mem.indexOf(u8, resp.body, "connected") != null);

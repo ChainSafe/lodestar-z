@@ -35,24 +35,24 @@ const BlsThreadPool = bls_mod.ThreadPool;
 const CachedBeaconState = state_transition.CachedBeaconState;
 const BlockStateCache = state_transition.BlockStateCache;
 const CheckpointStateCache = state_transition.CheckpointStateCache;
-const MemoryCPStateDatastore = state_transition.MemoryCPStateDatastore;
 const CheckpointKey = state_transition.CheckpointKey;
 const StateRegen = state_transition.StateRegen;
 const db_mod = @import("db");
 const BeaconDB = db_mod.BeaconDB;
-const MemoryKVStore = db_mod.MemoryKVStore;
-const LmdbKVStore = db_mod.LmdbKVStore;
 const chain_mod = @import("chain");
 const Chain = chain_mod.Chain;
+const ChainRuntime = chain_mod.Runtime;
 const QueuedStateRegen = chain_mod.QueuedStateRegen;
 const OpPool = chain_mod.OpPool;
 const SeenCache = chain_mod.SeenCache;
+const ChainService = chain_mod.Service;
 const SyncContributionAndProofPool = chain_mod.SyncContributionAndProofPool;
 const SyncCommitteeMessagePool = chain_mod.SyncCommitteeMessagePool;
 const ProducedBlockBody = chain_mod.ProducedBlockBody;
 const ProducedBlock = chain_mod.ProducedBlock;
 const ValidatorMonitor = chain_mod.ValidatorMonitor;
 const BlockProductionConfig = chain_mod.BlockProductionConfig;
+const ImportOutcome = chain_mod.ImportOutcome;
 pub const HeadTracker = chain_mod.HeadTracker;
 pub const ImportResult = chain_mod.ImportResult;
 const ImportError = chain_mod.ImportError;
@@ -180,7 +180,10 @@ pub const BeaconNode = struct {
     allocator: Allocator,
     config: *const BeaconConfig,
 
-    // Core components
+    // Chain runtime ownership root.
+    chain_runtime: *ChainRuntime,
+
+    // Core chain component aliases.
     db: *BeaconDB,
     state_regen: *StateRegen,
     queued_regen: *QueuedStateRegen,
@@ -202,12 +205,6 @@ pub const BeaconNode = struct {
 
     // Clock
     clock: ?SlotClock,
-
-    // Checkpoint state datastore (memory-backed)
-    cp_datastore: *MemoryCPStateDatastore,
-
-    // KV backend (kept for cleanup — BeaconDB holds the vtable)
-    kv_backend: KVBackend,
 
     // API context
     api_context: *ApiContext,
@@ -339,16 +336,11 @@ pub const BeaconNode = struct {
         if (self.http_server) |*srv| srv.shutdown();
     }
 
-    pub const KVBackend = union(enum) {
-        memory: *MemoryKVStore,
-        lmdb: *LmdbKVStore,
-    };
-
     /// Create a new BeaconNode with all components wired together.
     ///
     /// Uses MemoryKVStore for the database backend — production would
-    /// swap this for LMDB or similar. All caches, pools, and trackers
-    /// are heap-allocated and owned by the node.
+    /// swap this for LMDB or similar. The hot chain graph is heap-allocated
+    /// and owned by `chain.Runtime`, with BeaconNode holding aliases into it.
     pub fn init(allocator: Allocator, io: std.Io, beacon_config: *const BeaconConfig, init_config: InitConfig) !*BeaconNode {
         return lifecycle_mod.init(allocator, io, beacon_config, init_config);
     }
@@ -390,10 +382,11 @@ pub const BeaconNode = struct {
         source: BlockSource,
     ) !ImportResult {
         const t0 = std.Io.Clock.awake.now(self.io);
-        const result = try self.chain.importBlock(any_signed, source);
+        const outcome = try ChainService.init(self.chain).importBlock(any_signed, source);
+        const result = outcome.result;
 
         // Notify EL of fork choice update after each block import.
-        self.notifyForkchoiceUpdate(result.block_root) catch |err| {
+        self.notifyForkchoiceUpdate(outcome.effects.notify_forkchoice_update_root) catch |err| {
             log.logger(.node).warn("forkchoiceUpdated failed: {}", .{err});
         };
 
@@ -404,37 +397,29 @@ pub const BeaconNode = struct {
         if (self.metrics) |m| {
             m.blocks_imported_total.incr();
             m.block_import_seconds.observe(elapsed_s);
-            m.head_slot.set(result.slot);
-            m.finalized_epoch.set(self.head_tracker.finalized_epoch);
-            m.justified_epoch.set(self.head_tracker.justified_epoch);
+            m.head_slot.set(outcome.snapshot.head.slot);
+            m.finalized_epoch.set(outcome.snapshot.finalized.epoch);
+            m.justified_epoch.set(outcome.snapshot.justified.epoch);
             // Encode first 8 bytes of block root as u64 for change detection.
-            m.head_root.set(std.mem.readInt(u64, result.block_root[0..8], .big));
+            m.head_root.set(std.mem.readInt(u64, outcome.snapshot.head.root[0..8], .big));
         }
 
         // Update API context
-        self.api_head_tracker.head_slot = result.slot;
-        self.api_head_tracker.head_root = result.block_root;
-        self.api_head_tracker.head_state_root = result.state_root;
+        self.applyImportOutcome(outcome);
 
         if (result.epoch_transition) {
-            // Store epoch-start slot; see HeadTracker.finalized_slot comment.
-            self.api_head_tracker.finalized_slot = self.head_tracker.finalized_epoch * preset.SLOTS_PER_EPOCH;
-            self.api_head_tracker.justified_slot = self.head_tracker.justified_epoch * preset.SLOTS_PER_EPOCH;
-            if (self.chain.fork_choice) |fc| {
-                self.api_head_tracker.justified_root = fc.getJustifiedCheckpoint().root;
-                self.api_head_tracker.finalized_root = fc.getFinalizedCheckpoint().root;
-            }
             // Archive the post-epoch state for cold-path recovery.
             // Errors are non-fatal — the block is already imported.
-            self.archiveState(result.slot, result.state_root) catch {};
-            // Prune backwards chains that are behind finalization.
-            self.unknown_chain_sync.onFinalized(
-                self.head_tracker.finalized_epoch * preset.SLOTS_PER_EPOCH,
-            );
+            if (outcome.effects.archive_state) |archive_state| {
+                ChainService.init(self.chain).archiveState(archive_state.slot, archive_state.state_root) catch {};
+            }
+            if (outcome.effects.finalized_checkpoint) |finalized| {
+                self.unknown_chain_sync.onFinalized(finalized.slot);
+            }
             log.logger(.chain).info("epoch transition", .{
                 .slot = result.slot,
-                .finalized_epoch = self.head_tracker.finalized_epoch,
-                .justified_epoch = self.head_tracker.justified_epoch,
+                .finalized_epoch = outcome.snapshot.finalized.epoch,
+                .justified_epoch = outcome.snapshot.justified.epoch,
             });
         }
 
@@ -453,7 +438,7 @@ pub const BeaconNode = struct {
     /// All sidecars for a given block root are stored together as raw bytes, keyed by root.
     /// Callers that have disaggregated sidecar data should aggregate before calling this.
     pub fn importBlobSidecar(self: *BeaconNode, root: [32]u8, data: []const u8) !void {
-        try self.db.putBlobSidecars(root, data);
+        try ChainService.init(self.chain).importBlobSidecar(root, data);
     }
 
     /// Store a data column sidecar received via gossip or req/resp (PeerDAS / Fulu).
@@ -461,7 +446,7 @@ pub const BeaconNode = struct {
     /// Data column sidecars arrive individually, keyed by (block_root, column_index).
     /// Each sidecar is stored independently to support per-column availability tracking.
     pub fn importDataColumnSidecar(self: *BeaconNode, root: [32]u8, column_index: u64, data: []const u8) !void {
-        try self.db.putDataColumn(root, column_index, data);
+        try ChainService.init(self.chain).importDataColumnSidecar(root, column_index, data);
         std.log.info("Imported data column sidecar root={s}... column={d}", .{
             &std.fmt.bytesToHex(root[0..4], .lower),
             column_index,
@@ -500,15 +485,7 @@ pub const BeaconNode = struct {
     /// Serializes the CachedBeaconState's inner AnyBeaconState to SSZ bytes
     /// and stores it via `BeaconDB.putStateArchive(slot, state_root, bytes)`.
     pub fn archiveState(self: *BeaconNode, slot: u64, state_root: [32]u8) !void {
-        // Look up the live state from the block cache by its state root.
-        const cached = self.block_state_cache.get(state_root) orelse return;
-
-        // Serialize the inner AnyBeaconState to SSZ bytes.
-        const bytes = try cached.state.serialize(self.allocator);
-        defer self.allocator.free(bytes);
-
-        // Persist to the archive store keyed by (slot, state_root).
-        try self.db.putStateArchive(slot, state_root, bytes);
+        try ChainService.init(self.chain).archiveState(slot, state_root);
     }
 
     /// Advance the head state by one empty slot (no block).
@@ -711,27 +688,7 @@ pub const BeaconNode = struct {
 
     /// Get the current head info.
     pub fn getHead(self: *const BeaconNode) HeadInfo {
-        // Use fork choice head when available (authoritative LMD-GHOST head).
-        if (self.fork_choice) |fc| {
-            const fc_head = fc.head;
-            const finalized_cp = fc.getFinalizedCheckpoint();
-            const justified_cp = fc.getJustifiedCheckpoint();
-            return .{
-                .slot = fc_head.slot,
-                .root = fc_head.block_root,
-                .state_root = fc_head.state_root,
-                .finalized_epoch = finalized_cp.epoch,
-                .justified_epoch = justified_cp.epoch,
-            };
-        }
-        // Fallback to naive head tracker (before initFromGenesis is called).
-        return .{
-            .slot = self.head_tracker.head_slot,
-            .root = self.head_tracker.head_root,
-            .state_root = self.head_tracker.head_state_root,
-            .finalized_epoch = self.head_tracker.finalized_epoch,
-            .justified_epoch = self.head_tracker.justified_epoch,
-        };
+        return self.chain.getHead();
     }
 
     /// Get the current sync status.
@@ -828,23 +785,7 @@ pub const BeaconNode = struct {
     }
     /// Used for req/resp Status exchanges with peers.
     pub fn getStatus(self: *const BeaconNode) StatusMessage.Type {
-        // Always use head_tracker which is updated during range sync import.
-        // Fork choice head isn't reliably updated during batch import.
-        return .{
-            .fork_digest = self.config.forkDigestAtSlot(self.head_tracker.head_slot, self.genesis_validators_root),
-            .finalized_root = if (self.head_tracker.finalized_epoch == 0)
-                [_]u8{0} ** 32
-            else if (self.fork_choice) |fc|
-                // Use fork choice's authoritative finalized checkpoint root (C2 fix).
-                // Slot-based lookup fails on skip slots.
-                fc.getFinalizedCheckpoint().root
-            else if (self.head_tracker.getBlockRoot(
-                self.head_tracker.finalized_epoch * preset.SLOTS_PER_EPOCH,
-            )) |r| r else [_]u8{0} ** 32,
-            .finalized_epoch = self.head_tracker.finalized_epoch,
-            .head_root = self.head_tracker.head_root,
-            .head_slot = self.head_tracker.head_slot,
-        };
+        return self.chain.getStatus();
     }
 
     /// Handle an incoming req/resp request.
@@ -864,6 +805,16 @@ pub const BeaconNode = struct {
         };
         const ctx = reqresp_callbacks_mod.makeReqRespContext(&req_ctx);
         return handleRequest(self.allocator, method, request_bytes, &ctx);
+    }
+
+    fn applyImportOutcome(self: *BeaconNode, outcome: ImportOutcome) void {
+        self.api_head_tracker.head_slot = outcome.snapshot.head.slot;
+        self.api_head_tracker.head_root = outcome.snapshot.head.root;
+        self.api_head_tracker.head_state_root = outcome.snapshot.head.state_root;
+        self.api_head_tracker.finalized_slot = outcome.snapshot.finalized.slot;
+        self.api_head_tracker.finalized_root = outcome.snapshot.finalized.root;
+        self.api_head_tracker.justified_slot = outcome.snapshot.justified.slot;
+        self.api_head_tracker.justified_root = outcome.snapshot.justified.root;
     }
 };
 

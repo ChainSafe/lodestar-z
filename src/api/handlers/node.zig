@@ -38,7 +38,7 @@ pub fn getVersion(_: *ApiContext) HandlerResult(types.NodeVersion) {
 ///
 /// Returns the current sync status of the node.
 pub fn getSyncing(ctx: *ApiContext) HandlerResult(types.SyncingStatus) {
-    const sync = ctx.sync_status;
+    const sync = ctx.currentSyncStatus();
     return .{
         .data = .{
             .head_slot = sync.head_slot,
@@ -57,9 +57,10 @@ pub fn getSyncing(ctx: *ApiContext) HandlerResult(types.SyncingStatus) {
 /// - 206: syncing
 /// - 503: not initialized
 pub fn getHealth(ctx: *ApiContext) HandlerResult(void) {
-    const status: u16 = if (ctx.sync_status.is_syncing)
+    const sync = ctx.currentSyncStatus();
+    const status: u16 = if (sync.is_syncing)
         206
-    else if (ctx.sync_status.head_slot == 0)
+    else if (sync.head_slot == 0)
         503
     else
         200;
@@ -241,7 +242,10 @@ test "getPeers returns peers from callback" {
     };
 
     const resp = getPeers(&tc.ctx);
-    defer tc.ctx.allocator.free(resp.data);
+    defer {
+        for (resp.data) |peer| tc.ctx.allocator.free(peer.peer_id);
+        tc.ctx.allocator.free(resp.data);
+    }
     try std.testing.expectEqual(@as(usize, 2), resp.data.len);
     try std.testing.expectEqualStrings("peer-1", resp.data[0].peer_id);
     try std.testing.expectEqual(types.PeerDirection.outbound, resp.data[1].direction);

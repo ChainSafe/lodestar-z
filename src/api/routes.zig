@@ -24,7 +24,6 @@ pub const HttpMethod = enum {
     DELETE,
 };
 
-
 /// A route definition: method, path pattern, and metadata.
 pub const Route = struct {
     method: HttpMethod,
@@ -181,7 +180,6 @@ pub const routes = [_]Route{
         .path = "/eth/v1/beacon/pool/bls_to_execution_changes",
         .operation_id = "getPoolBlsToExecutionChanges",
     },
-
 
     // -- Validator --
     .{
@@ -586,6 +584,5 @@ test "findRoute wrong method" {
 
 test "route count" {
     // Verify we defined all expected routes.
-    // Count updated to 55 to reflect actual route table.
-    try std.testing.expectEqual(@as(usize, 61), routes.len);
+    try std.testing.expectEqual(@as(usize, 64), routes.len);
 }

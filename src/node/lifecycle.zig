@@ -56,14 +56,14 @@ pub fn init(allocator: Allocator, io: std.Io, beacon_config: *const BeaconConfig
     errdefer bls_thread_pool.deinit();
 
     var node_identity = init_config.node_identity;
-    errdefer {
-        node_identity.deinit();
-    }
-    const api_node_identity = try initApiNodeIdentity(allocator, opts, &node_identity);
-    errdefer deinitApiNodeIdentity(allocator, api_node_identity);
+    var owns_node_identity = true;
+    errdefer if (owns_node_identity) node_identity.deinit();
 
-    var kv_backend: BeaconNode.KVBackend = undefined;
-    var kv_iface: db_mod.KVStore = undefined;
+    const api_node_identity = try initApiNodeIdentity(allocator, opts, &node_identity);
+    var owned_api_node_identity: ?*ApiNodeIdentity = api_node_identity;
+    errdefer if (owned_api_node_identity) |identity| deinitApiNodeIdentity(allocator, identity);
+
+    var storage_backend: chain_mod.StorageBackend = undefined;
 
     if (init_config.db_path) |db_path| {
         const z_path = try allocator.dupeZ(u8, db_path);
@@ -80,93 +80,41 @@ pub fn init(allocator: Allocator, io: std.Io, beacon_config: *const BeaconConfig
         };
         errdefer lmdb_store.deinit();
 
-        kv_backend = .{ .lmdb = lmdb_store };
-        kv_iface = lmdb_store.kvStore();
+        storage_backend = .{ .lmdb = lmdb_store };
     } else {
         const mem_store = try allocator.create(MemoryKVStore);
         errdefer allocator.destroy(mem_store);
         mem_store.* = MemoryKVStore.init(allocator);
         errdefer mem_store.deinit();
 
-        kv_backend = .{ .memory = mem_store };
-        kv_iface = mem_store.kvStore();
+        storage_backend = .{ .memory = mem_store };
     }
 
-    const db = try allocator.create(BeaconDB);
-    errdefer allocator.destroy(db);
-    db.* = BeaconDB.init(allocator, kv_iface);
-    errdefer db.close();
-
-    const block_cache = try allocator.create(BlockStateCache);
-    errdefer allocator.destroy(block_cache);
-    block_cache.* = BlockStateCache.init(allocator, opts.max_block_states);
-    errdefer block_cache.deinit();
-
-    const cp_datastore = try allocator.create(MemoryCPStateDatastore);
-    errdefer allocator.destroy(cp_datastore);
-    cp_datastore.* = MemoryCPStateDatastore.init(allocator);
-    errdefer cp_datastore.deinit();
-
-    const cp_cache = try allocator.create(CheckpointStateCache);
-    errdefer allocator.destroy(cp_cache);
-    cp_cache.* = CheckpointStateCache.init(
-        allocator,
-        cp_datastore.datastore(),
-        block_cache,
-        opts.max_checkpoint_epochs,
-    );
-    errdefer cp_cache.deinit();
-
-    const regen = try allocator.create(StateRegen);
-    errdefer allocator.destroy(regen);
-    regen.* = StateRegen.initWithDB(allocator, block_cache, cp_cache, db, null, null);
-
-    const queued_regen = try allocator.create(QueuedStateRegen);
-    errdefer allocator.destroy(queued_regen);
-    queued_regen.* = QueuedStateRegen.init(allocator, regen);
-    errdefer queued_regen.deinit();
-
-    const head_tracker = try allocator.create(HeadTracker);
-    errdefer allocator.destroy(head_tracker);
-    head_tracker.* = HeadTracker.init(allocator, [_]u8{0} ** 32);
-    errdefer head_tracker.deinit();
-
-    const op_pool = try allocator.create(OpPool);
-    errdefer allocator.destroy(op_pool);
-    op_pool.* = OpPool.init(allocator);
-    errdefer op_pool.deinit();
-
-    const sync_contrib_pool = try allocator.create(SyncContributionAndProofPool);
-    errdefer allocator.destroy(sync_contrib_pool);
-    sync_contrib_pool.* = SyncContributionAndProofPool.init(allocator);
-    errdefer sync_contrib_pool.deinit();
-
-    const sync_msg_pool = try allocator.create(SyncCommitteeMessagePool);
-    errdefer allocator.destroy(sync_msg_pool);
-    sync_msg_pool.* = SyncCommitteeMessagePool.init(allocator);
-    errdefer sync_msg_pool.deinit();
-
-    const seen_cache = try allocator.create(SeenCache);
-    errdefer allocator.destroy(seen_cache);
-    seen_cache.* = SeenCache.init(allocator);
-    errdefer seen_cache.deinit();
-
-    const chain_struct = try allocator.create(Chain);
-    errdefer allocator.destroy(chain_struct);
-    chain_struct.* = Chain.init(
+    const chain_runtime = try chain_mod.Runtime.init(
         allocator,
         beacon_config,
-        block_cache,
-        cp_cache,
-        regen,
-        db,
-        op_pool,
-        seen_cache,
-        head_tracker,
+        storage_backend,
+        .{
+            .max_block_states = opts.max_block_states,
+            .max_checkpoint_epochs = opts.max_checkpoint_epochs,
+            .verify_signatures = opts.verify_signatures,
+            .validator_monitor_indices = opts.validator_monitor_indices,
+        },
     );
-    errdefer chain_struct.deinit();
-    chain_struct.verify_signatures = opts.verify_signatures;
-    chain_struct.queued_regen = queued_regen;
+    var owned_chain_runtime: ?*chain_mod.Runtime = chain_runtime;
+    errdefer if (owned_chain_runtime) |runtime| runtime.deinit();
+
+    const db = chain_runtime.db;
+    const regen = chain_runtime.state_regen;
+    const queued_regen = chain_runtime.queued_regen;
+    const block_cache = chain_runtime.block_state_cache;
+    const cp_cache = chain_runtime.checkpoint_state_cache;
+    const head_tracker = chain_runtime.head_tracker;
+    const op_pool = chain_runtime.op_pool;
+    const sync_contrib_pool = chain_runtime.sync_contribution_pool;
+    const sync_msg_pool = chain_runtime.sync_committee_message_pool;
+    const seen_cache = chain_runtime.seen_cache;
+    const chain_struct = chain_runtime.chain;
 
     const api_head = try allocator.create(api_mod.context.HeadTracker);
     errdefer allocator.destroy(api_head);
@@ -190,10 +138,6 @@ pub fn init(allocator: Allocator, io: std.Io, beacon_config: *const BeaconConfig
         .el_offline = false,
     };
 
-    const api_regen = try allocator.create(api_mod.context.StateRegen);
-    errdefer allocator.destroy(api_regen);
-    api_regen.* = .{};
-
     const event_bus_ptr = try allocator.create(api_mod.EventBus);
     errdefer allocator.destroy(event_bus_ptr);
     event_bus_ptr.* = api_mod.EventBus.init(allocator);
@@ -202,7 +146,6 @@ pub fn init(allocator: Allocator, io: std.Io, beacon_config: *const BeaconConfig
     errdefer allocator.destroy(api_ctx);
     api_ctx.* = .{
         .head_tracker = api_head,
-        .regen = api_regen,
         .db = db,
         .node_identity = api_node_identity,
         .sync_status = api_sync,
@@ -258,13 +201,13 @@ pub fn init(allocator: Allocator, io: std.Io, beacon_config: *const BeaconConfig
     }
 
     const node = try allocator.create(BeaconNode);
-    errdefer allocator.destroy(node);
     node.* = .{
         .allocator = allocator,
         .config = beacon_config,
         .bootstrap_peers = init_config.bootstrap_peers,
         .discovery_bootnodes = init_config.discovery_bootnodes,
         .identify_agent_version = init_config.identify_agent_version,
+        .chain_runtime = chain_runtime,
         .node_options = opts,
         .db = db,
         .state_regen = regen,
@@ -286,8 +229,6 @@ pub fn init(allocator: Allocator, io: std.Io, beacon_config: *const BeaconConfig
         .http_engine = http_engine_ptr,
         .io_transport = io_transport_ptr,
         .engine_api = engine,
-        .cp_datastore = cp_datastore,
-        .kv_backend = kv_backend,
         .api_context = api_ctx,
         .api_head_tracker = api_head,
         .api_sync_status = api_sync,
@@ -296,15 +237,16 @@ pub fn init(allocator: Allocator, io: std.Io, beacon_config: *const BeaconConfig
         .unknown_block_sync = UnknownBlockSync.init(allocator),
         .unknown_chain_sync = UnknownChainSync.init(allocator),
     };
-    errdefer deinit(node);
 
-    if (opts.validator_monitor_indices.len > 0) {
-        const vm = try allocator.create(ValidatorMonitor);
-        vm.* = ValidatorMonitor.init(allocator, opts.validator_monitor_indices);
-        node.validator_monitor = vm;
-        chain_struct.validator_monitor = vm;
+    node.validator_monitor = chain_runtime.validator_monitor;
+    if (chain_runtime.validator_monitor != null) {
         log.logger(.node).info("Validator monitor: tracking {d} validators", .{opts.validator_monitor_indices.len});
     }
+
+    owns_node_identity = false;
+    owned_api_node_identity = null;
+    owned_chain_runtime = null;
+    errdefer deinit(node);
 
     node.api_bindings = try api_callbacks_mod.ApiBindings.init(allocator, node, beacon_config);
 
@@ -323,27 +265,6 @@ pub fn init(allocator: Allocator, io: std.Io, beacon_config: *const BeaconConfig
 
 pub fn deinit(self: *BeaconNode) void {
     const allocator = self.allocator;
-
-    self.chain.deinit();
-    allocator.destroy(self.chain);
-
-    self.seen_cache.deinit();
-    allocator.destroy(self.seen_cache);
-
-    self.op_pool.deinit();
-    allocator.destroy(self.op_pool);
-
-    if (self.sync_contribution_pool) |pool| {
-        pool.deinit();
-        allocator.destroy(pool);
-    }
-    if (self.sync_committee_message_pool) |pool| {
-        pool.deinit();
-        allocator.destroy(pool);
-    }
-
-    self.head_tracker.deinit();
-    allocator.destroy(self.head_tracker);
 
     if (self.mock_engine) |me| {
         me.deinit();
@@ -371,38 +292,10 @@ pub fn deinit(self: *BeaconNode) void {
 
     deinitApiNodeIdentity(allocator, self.api_node_identity);
     self.node_identity.deinit();
-    allocator.destroy(self.api_context.regen);
     allocator.destroy(self.api_context);
     allocator.destroy(self.api_head_tracker);
     allocator.destroy(self.api_sync_status);
     allocator.destroy(self.event_bus);
-
-    self.queued_regen.deinit();
-    allocator.destroy(self.queued_regen);
-    allocator.destroy(self.state_regen);
-
-    self.checkpoint_state_cache.deinit();
-    allocator.destroy(self.checkpoint_state_cache);
-
-    self.block_state_cache.deinit();
-    allocator.destroy(self.block_state_cache);
-
-    self.cp_datastore.deinit();
-    allocator.destroy(self.cp_datastore);
-
-    self.db.close();
-    allocator.destroy(self.db);
-
-    switch (self.kv_backend) {
-        .memory => |mem| {
-            mem.deinit();
-            allocator.destroy(mem);
-        },
-        .lmdb => |lmdb_store| {
-            lmdb_store.deinit();
-            allocator.destroy(lmdb_store);
-        },
-    }
 
     if (self.beacon_processor) |bp| {
         allocator.destroy(bp);
@@ -413,12 +306,8 @@ pub fn deinit(self: *BeaconNode) void {
     self.unknown_block_sync.deinit();
     self.unknown_chain_sync.deinit();
 
-    if (self.validator_monitor) |vm| {
-        vm.deinit();
-        allocator.destroy(vm);
-    }
-
     self.bls_thread_pool.deinit();
+    self.chain_runtime.deinit();
 
     allocator.destroy(self);
 }

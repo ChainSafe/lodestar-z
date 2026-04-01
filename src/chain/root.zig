@@ -6,6 +6,10 @@ const testing = std.testing;
 
 pub const chain = @import("chain.zig");
 pub const chain_types = @import("types.zig");
+pub const effects = @import("effects.zig");
+pub const runtime = @import("runtime.zig");
+pub const service = @import("service.zig");
+pub const query = @import("query.zig");
 pub const block_import = @import("block_import.zig");
 pub const op_pool = @import("op_pool.zig");
 pub const seen_cache = @import("seen_cache.zig");
@@ -22,6 +26,16 @@ pub const HeadInfo = chain_types.HeadInfo;
 pub const SyncStatus = chain_types.SyncStatus;
 pub const EventCallback = chain_types.EventCallback;
 pub const SseEvent = chain_types.SseEvent;
+pub const ImportOutcome = effects.ImportOutcome;
+pub const ImportEffects = effects.ImportEffects;
+pub const ChainSnapshot = effects.ChainSnapshot;
+pub const CheckpointSnapshot = effects.CheckpointSnapshot;
+pub const ArchiveStateRequest = effects.ArchiveStateRequest;
+pub const Runtime = runtime.Runtime;
+pub const RuntimeOptions = runtime.RuntimeOptions;
+pub const StorageBackend = runtime.StorageBackend;
+pub const Service = service.Service;
+pub const Query = query.Query;
 
 // Existing re-exports (kept for backward compatibility)
 pub const HeadTracker = block_import.HeadTracker;
