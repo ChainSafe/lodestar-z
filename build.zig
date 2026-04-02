@@ -146,6 +146,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    module_bls.linkLibrary(dep_blst.artifact("blst"));
     b.modules.put(b.dupe("bls"), module_bls) catch @panic("OOM");
 
     const module_state_transition = b.createModule(.{
@@ -1198,6 +1199,4 @@ pub fn build(b: *std.Build) void {
     module_bls_spec_tests.addImport("hex", module_hex);
     module_bls_spec_tests.addImport("yaml", dep_yaml.module("yaml"));
     module_bls_spec_tests.addImport("spec_test_options", options_module_spec_test_options);
-
-    _ = dep_blst;
 }
