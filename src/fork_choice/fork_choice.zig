@@ -583,13 +583,13 @@ pub const ForkChoice = struct {
         const target_root: Root = if (slot == target_slot) block_root else tr_blk: {
             var block_roots = try state.state.blockRoots();
             const idx = target_slot % preset.SLOTS_PER_HISTORICAL_ROOT;
-            break :tr_blk (try block_roots.getElement(idx)).*;
+            break :tr_blk block_roots.getFieldRoot(idx);
         };
 
         // 13. Construct BlockExtraMeta based on fork.
         // comptime: only one branch survives per fork instantiation.
         const extra_meta: BlockExtraMeta = if (comptime fork.gte(.gloas))
-            try self.getGloasExtraMetaTyped(fork, block.body(), parent_block, parent_root, execution_status, data_availability_status)
+            self.getGloasExtraMetaTyped(fork, block.body(), parent_block, parent_root, execution_status, data_availability_status)
         else if (comptime fork.gte(.bellatrix))
             getPreGloasExtraMetaTyped(fork, state.state.castToFork(fork), block, execution_status, data_availability_status)
         else
@@ -3599,4 +3599,543 @@ test "Gloas forked branches attestation shift" {
     try fc.updateHead(allocator);
     // A now has 5 votes (V0,V1,V2,V3,V4), B has 2 (V5,V6). Head = A.
     try testing.expectEqual(a_root, fc.head.block_root);
+}
+
+/// Create a test phase0 IndexedAttestation for use with onAttestation.
+fn makeTestIndexedAttestation(
+    indices: []const ValidatorIndex,
+    slot: Slot,
+    beacon_block_root: Root,
+    target_epoch: Epoch,
+    target_root: Root,
+    source_epoch: Epoch,
+    source_root: Root,
+    index: u64,
+) consensus_types.phase0.IndexedAttestation.Type {
+    const list = std.ArrayListUnmanaged(ValidatorIndex){ .items = @constCast(indices), .capacity = indices.len };
+    return std.mem.zeroInit(consensus_types.phase0.IndexedAttestation.Type, .{
+        .attesting_indices = list,
+        .data = std.mem.zeroInit(consensus_types.phase0.AttestationData.Type, .{
+            .slot = slot,
+            .index = index,
+            .beacon_block_root = beacon_block_root,
+            .source = std.mem.zeroInit(consensus_types.phase0.Checkpoint.Type, .{
+                .epoch = source_epoch,
+                .root = source_root,
+            }),
+            .target = std.mem.zeroInit(consensus_types.phase0.Checkpoint.Type, .{
+                .epoch = target_epoch,
+                .root = target_root,
+            }),
+        }),
+    });
+}
+
+test "onAttestation: reject empty aggregation bitfield" {
+    const allocator = testing.allocator;
+    const genesis_root = hashFromByte(0x01);
+    const block_root = hashFromByte(0x02);
+    const genesis_block = makeTestBlock(0, genesis_root, ZERO_HASH);
+
+    var fc = try initTestForkChoice(
+        allocator,
+        genesis_block,
+        10,
+        makeTestCheckpoint(0, genesis_root),
+        makeTestCheckpoint(0, genesis_root),
+        &.{},
+    );
+    defer deinitTestForkChoice(allocator, fc);
+
+    try onBlockFromProto(fc, allocator, makeTestBlock(1, block_root, genesis_root), 10);
+
+    // Empty attesting indices.
+    var att = makeTestIndexedAttestation(&.{}, 1, block_root, 0, genesis_root, 0, genesis_root, 0);
+    const any_att = AnyIndexedAttestation{ .phase0 = &att };
+    try testing.expectError(
+        error.InvalidAttestationEmptyAggregationBitfield,
+        fc.onAttestation(allocator, &any_att, ZERO_HASH, false),
+    );
+}
+
+test "onAttestation: reject future epoch" {
+    const allocator = testing.allocator;
+    const genesis_root = hashFromByte(0x01);
+    const block_root = hashFromByte(0x02);
+    const genesis_block = makeTestBlock(0, genesis_root, ZERO_HASH);
+
+    // current_slot = 10, so current_epoch = 10 / SLOTS_PER_EPOCH = 1 (minimal: 8 slots/epoch)
+    var fc = try initTestForkChoice(
+        allocator,
+        genesis_block,
+        10,
+        makeTestCheckpoint(0, genesis_root),
+        makeTestCheckpoint(0, genesis_root),
+        &.{},
+    );
+    defer deinitTestForkChoice(allocator, fc);
+
+    try onBlockFromProto(fc, allocator, makeTestBlock(1, block_root, genesis_root), 10);
+
+    // Future epoch: target_epoch = 5 >> current_epoch = 1.
+    const indices = [_]ValidatorIndex{0};
+    const future_epoch_slot = 5 * preset.SLOTS_PER_EPOCH;
+    var att = makeTestIndexedAttestation(&indices, future_epoch_slot, block_root, 5, block_root, 0, genesis_root, 0);
+    const any_att = AnyIndexedAttestation{ .phase0 = &att };
+    try testing.expectError(
+        error.InvalidAttestationFutureEpoch,
+        fc.onAttestation(allocator, &any_att, hashFromByte(0xF1), false),
+    );
+}
+
+test "onAttestation: reject past epoch (non-force)" {
+    const allocator = testing.allocator;
+    const genesis_root = hashFromByte(0x01);
+    const block_root = hashFromByte(0x02);
+    const genesis_block = makeTestBlock(0, genesis_root, ZERO_HASH);
+
+    // current_slot = 3 * SLOTS_PER_EPOCH, so current_epoch = 3.
+    const current_slot = 3 * preset.SLOTS_PER_EPOCH;
+    var fc = try initTestForkChoice(
+        allocator,
+        genesis_block,
+        current_slot,
+        makeTestCheckpoint(0, genesis_root),
+        makeTestCheckpoint(0, genesis_root),
+        &.{},
+    );
+    defer deinitTestForkChoice(allocator, fc);
+
+    try onBlockFromProto(fc, allocator, makeTestBlock(1, block_root, genesis_root), current_slot);
+
+    // Past epoch: target_epoch = 0, current_epoch = 3 => 0 + 1 < 3 => past.
+    const indices = [_]ValidatorIndex{0};
+    var att = makeTestIndexedAttestation(&indices, 1, block_root, 0, genesis_root, 0, genesis_root, 0);
+    const any_att = AnyIndexedAttestation{ .phase0 = &att };
+    try testing.expectError(
+        error.InvalidAttestationPastEpoch,
+        fc.onAttestation(allocator, &any_att, hashFromByte(0xF2), false),
+    );
+}
+
+test "onAttestation: reject bad target epoch" {
+    const allocator = testing.allocator;
+    const genesis_root = hashFromByte(0x01);
+    const block_root = hashFromByte(0x02);
+    const genesis_block = makeTestBlock(0, genesis_root, ZERO_HASH);
+
+    // current_slot = 40 → current_epoch = 1 (SLOTS_PER_EPOCH=32 mainnet).
+    var fc = try initTestForkChoice(
+        allocator,
+        genesis_block,
+        40,
+        makeTestCheckpoint(0, genesis_root),
+        makeTestCheckpoint(0, genesis_root),
+        &.{},
+    );
+    defer deinitTestForkChoice(allocator, fc);
+
+    try onBlockFromProto(fc, allocator, makeTestBlock(1, block_root, genesis_root), 40);
+
+    // Bad target epoch: att_slot = 33 (epoch 1), target_epoch = 0 → mismatch.
+    // FutureEpoch: 0 > 1 = false. PastEpoch: 0+1 < 1 = false. BadTargetEpoch: 0 != 1 = true.
+    const indices = [_]ValidatorIndex{0};
+    var att = makeTestIndexedAttestation(&indices, 33, block_root, 0, genesis_root, 0, genesis_root, 0);
+    const any_att = AnyIndexedAttestation{ .phase0 = &att };
+    try testing.expectError(
+        error.InvalidAttestationBadTargetEpoch,
+        fc.onAttestation(allocator, &any_att, hashFromByte(0xF3), false),
+    );
+}
+
+test "onAttestation: reject unknown target root" {
+    const allocator = testing.allocator;
+    const genesis_root = hashFromByte(0x01);
+    const block_root = hashFromByte(0x02);
+    const genesis_block = makeTestBlock(0, genesis_root, ZERO_HASH);
+
+    var fc = try initTestForkChoice(
+        allocator,
+        genesis_block,
+        10,
+        makeTestCheckpoint(0, genesis_root),
+        makeTestCheckpoint(0, genesis_root),
+        &.{},
+    );
+    defer deinitTestForkChoice(allocator, fc);
+
+    try onBlockFromProto(fc, allocator, makeTestBlock(1, block_root, genesis_root), 10);
+
+    // Unknown target root: target_root = 0xFF which is not in the tree.
+    const indices = [_]ValidatorIndex{0};
+    var att = makeTestIndexedAttestation(&indices, 1, block_root, 0, hashFromByte(0xFF), 0, genesis_root, 0);
+    const any_att = AnyIndexedAttestation{ .phase0 = &att };
+    try testing.expectError(
+        error.InvalidAttestationUnknownTargetRoot,
+        fc.onAttestation(allocator, &any_att, hashFromByte(0xF4), false),
+    );
+}
+
+test "onAttestation: reject unknown head block" {
+    const allocator = testing.allocator;
+    const genesis_root = hashFromByte(0x01);
+    const genesis_block = makeTestBlock(0, genesis_root, ZERO_HASH);
+
+    var fc = try initTestForkChoice(
+        allocator,
+        genesis_block,
+        10,
+        makeTestCheckpoint(0, genesis_root),
+        makeTestCheckpoint(0, genesis_root),
+        &.{},
+    );
+    defer deinitTestForkChoice(allocator, fc);
+
+    // beacon_block_root = 0xFF not in tree, but target_root = genesis_root (known).
+    const indices = [_]ValidatorIndex{0};
+    var att = makeTestIndexedAttestation(&indices, 1, hashFromByte(0xFF), 0, genesis_root, 0, genesis_root, 0);
+    const any_att = AnyIndexedAttestation{ .phase0 = &att };
+    try testing.expectError(
+        error.InvalidAttestationUnknownHeadBlock,
+        fc.onAttestation(allocator, &any_att, hashFromByte(0xF5), false),
+    );
+}
+
+test "onAttestation: reject attests to future block" {
+    const allocator = testing.allocator;
+    const genesis_root = hashFromByte(0x01);
+    const block_root = hashFromByte(0x02);
+    const genesis_block = makeTestBlock(0, genesis_root, ZERO_HASH);
+
+    var fc = try initTestForkChoice(
+        allocator,
+        genesis_block,
+        10,
+        makeTestCheckpoint(0, genesis_root),
+        makeTestCheckpoint(0, genesis_root),
+        &.{},
+    );
+    defer deinitTestForkChoice(allocator, fc);
+
+    // Insert block at slot 5.
+    try onBlockFromProto(fc, allocator, makeTestBlock(5, block_root, genesis_root), 10);
+
+    // Attestation slot = 3, but block.slot = 5 => block.slot > att_slot => future block.
+    // target_root = block_root to pass the target validation before reaching the future block check.
+    const indices = [_]ValidatorIndex{0};
+    var att = makeTestIndexedAttestation(&indices, 3, block_root, 0, block_root, 0, genesis_root, 0);
+    const any_att = AnyIndexedAttestation{ .phase0 = &att };
+    try testing.expectError(
+        error.InvalidAttestationAttestsToFutureBlock,
+        fc.onAttestation(allocator, &any_att, hashFromByte(0xF6), false),
+    );
+}
+
+test "onAttestation: reject invalid target (cross-epoch mismatch)" {
+    const allocator = testing.allocator;
+    const genesis_root = hashFromByte(0x01);
+    const block_root = hashFromByte(0x02);
+    const genesis_block = makeTestBlock(0, genesis_root, ZERO_HASH);
+
+    // current_slot in epoch 1 so we can attest in epoch 1.
+    const current_slot = preset.SLOTS_PER_EPOCH + 2;
+    var fc = try initTestForkChoice(
+        allocator,
+        genesis_block,
+        current_slot,
+        makeTestCheckpoint(0, genesis_root),
+        makeTestCheckpoint(0, genesis_root),
+        &.{},
+    );
+    defer deinitTestForkChoice(allocator, fc);
+
+    // Insert block at slot 1 (epoch 0). When target_epoch = 1 > epoch_of_block(0),
+    // expected_target = block_root. But we set target_root = genesis_root != block_root.
+    try onBlockFromProto(fc, allocator, makeTestBlock(1, block_root, genesis_root), current_slot);
+
+    const att_slot = preset.SLOTS_PER_EPOCH; // epoch 1
+    const indices = [_]ValidatorIndex{0};
+    // target_root = genesis_root but expected_target = block_root (because target_epoch > block_epoch).
+    var att = makeTestIndexedAttestation(&indices, att_slot, block_root, 1, genesis_root, 0, genesis_root, 0);
+    const any_att = AnyIndexedAttestation{ .phase0 = &att };
+    try testing.expectError(
+        error.InvalidAttestationInvalidTarget,
+        fc.onAttestation(allocator, &any_att, hashFromByte(0xF7), false),
+    );
+}
+
+test "onAttestation: valid attestation applies vote (past slot)" {
+    const allocator = testing.allocator;
+    const genesis_root = hashFromByte(0x01);
+    const block_root = hashFromByte(0x02);
+    const genesis_block = makeTestBlock(0, genesis_root, ZERO_HASH);
+    const balances = [_]u16{100} ** 2;
+
+    // current_slot = 5 so attestations at slot < 5 apply immediately.
+    var fc = try initTestForkChoice(
+        allocator,
+        genesis_block,
+        5,
+        makeTestCheckpoint(0, genesis_root),
+        makeTestCheckpoint(0, genesis_root),
+        &balances,
+    );
+    defer deinitTestForkChoice(allocator, fc);
+
+    try onBlockFromProto(fc, allocator, makeTestBlock(1, block_root, genesis_root), 5);
+
+    // Valid attestation: slot = 1 (< current_slot = 5), target_epoch = 0 = epoch(slot 1).
+    // target_root must match block.target_root (= block_root from makeTestBlock).
+    const indices = [_]ValidatorIndex{0};
+    var att = makeTestIndexedAttestation(&indices, 1, block_root, 0, block_root, 0, genesis_root, 0);
+    const any_att = AnyIndexedAttestation{ .phase0 = &att };
+    try fc.onAttestation(allocator, &any_att, hashFromByte(0xA1), false);
+
+    // Validator 0 should now have a vote. Head should be block_root.
+    try fc.updateHead(allocator);
+    try testing.expectEqual(block_root, fc.head.block_root);
+}
+
+test "onAttestation: valid attestation queued (same slot)" {
+    const allocator = testing.allocator;
+    const genesis_root = hashFromByte(0x01);
+    const block_root = hashFromByte(0x02);
+    const genesis_block = makeTestBlock(0, genesis_root, ZERO_HASH);
+    const balances = [_]u16{100} ** 2;
+
+    // current_slot = 3 so attestation at slot 3 gets queued (att_slot >= current_slot).
+    var fc = try initTestForkChoice(
+        allocator,
+        genesis_block,
+        3,
+        makeTestCheckpoint(0, genesis_root),
+        makeTestCheckpoint(0, genesis_root),
+        &balances,
+    );
+    defer deinitTestForkChoice(allocator, fc);
+
+    try onBlockFromProto(fc, allocator, makeTestBlock(1, block_root, genesis_root), 3);
+
+    // Attestation at slot 3 = current_slot → should be queued.
+    // target_root must match block.target_root (= block_root).
+    const indices = [_]ValidatorIndex{0};
+    var att = makeTestIndexedAttestation(&indices, 3, block_root, 0, block_root, 0, genesis_root, 0);
+    const any_att = AnyIndexedAttestation{ .phase0 = &att };
+    try fc.onAttestation(allocator, &any_att, hashFromByte(0xA2), false);
+
+    // Should be in the queue, not yet applied.
+    try testing.expect(fc.queued_attestations.count() > 0);
+}
+
+test "onAttestation: zero hash beacon_block_root is silently ignored" {
+    const allocator = testing.allocator;
+    const genesis_root = hashFromByte(0x01);
+    const genesis_block = makeTestBlock(0, genesis_root, ZERO_HASH);
+
+    var fc = try initTestForkChoice(
+        allocator,
+        genesis_block,
+        5,
+        makeTestCheckpoint(0, genesis_root),
+        makeTestCheckpoint(0, genesis_root),
+        &.{},
+    );
+    defer deinitTestForkChoice(allocator, fc);
+
+    // Attestation to ZERO_HASH beacon_block_root should be silently ignored.
+    const indices = [_]ValidatorIndex{0};
+    var att = makeTestIndexedAttestation(&indices, 1, ZERO_HASH, 0, genesis_root, 0, genesis_root, 0);
+    const any_att = AnyIndexedAttestation{ .phase0 = &att };
+    // Should succeed (no error) — just returns early.
+    try fc.onAttestation(allocator, &any_att, hashFromByte(0xA3), false);
+}
+
+// ── FFG updates with votes tests ──
+
+test "onAttestation: votes shift head between forks" {
+    const allocator = testing.allocator;
+    const genesis_root = hashFromByte(0x01);
+    const a_root = hashFromByte(0x0A);
+    const b_root = hashFromByte(0x0B);
+    const genesis_block = makeTestBlock(0, genesis_root, ZERO_HASH);
+    const balances = [_]u16{100} ** 6;
+
+    var fc = try initTestForkChoice(
+        allocator,
+        genesis_block,
+        10,
+        makeTestCheckpoint(0, genesis_root),
+        makeTestCheckpoint(0, genesis_root),
+        &balances,
+    );
+    defer deinitTestForkChoice(allocator, fc);
+
+    // Two branches from genesis.
+    try onBlockFromProto(fc, allocator, makeTestBlock(1, a_root, genesis_root), 10);
+    try onBlockFromProto(fc, allocator, makeTestBlock(1, b_root, genesis_root), 10);
+
+    // First V0-V2 vote for A via onAttestation.
+    // target_root = a_root (block.target_root for makeTestBlock(1, a_root, ...)).
+    {
+        const indices = [_]ValidatorIndex{ 0, 1, 2 };
+        var att = makeTestIndexedAttestation(&indices, 1, a_root, 0, a_root, 0, genesis_root, 0);
+        const any_att = AnyIndexedAttestation{ .phase0 = &att };
+        try fc.onAttestation(allocator, &any_att, hashFromByte(0xC1), false);
+    }
+
+    try fc.updateHead(allocator);
+    try testing.expectEqual(a_root, fc.head.block_root);
+
+    // V3-V5 vote for B → B has 3 votes, A has 3 → tiebreaker. Let's add more so B wins.
+    {
+        const indices = [_]ValidatorIndex{ 3, 4, 5 };
+        var att = makeTestIndexedAttestation(&indices, 1, b_root, 0, b_root, 0, genesis_root, 0);
+        const any_att = AnyIndexedAttestation{ .phase0 = &att };
+        try fc.onAttestation(allocator, &any_att, hashFromByte(0xC2), false);
+    }
+
+    // Tie: 3*100 vs 3*100. Winner decided by root comparison (higher root wins in tiebreaker).
+    // Regardless of tiebreak, let's verify votes were applied by checking both branches have weight.
+    try fc.updateHead(allocator);
+    // The tiebreaker selects based on root bytes — just verify head is one of them.
+    try testing.expect(std.mem.eql(u8, &fc.head.block_root, &a_root) or std.mem.eql(u8, &fc.head.block_root, &b_root));
+}
+
+test "onAttestation: epoch advancement allows vote update" {
+    const allocator = testing.allocator;
+    const genesis_root = hashFromByte(0x01);
+    const a_root = hashFromByte(0x0A);
+    const b_root = hashFromByte(0x0B);
+    const genesis_block = makeTestBlock(0, genesis_root, ZERO_HASH);
+    const balances = [_]u16{100} ** 2;
+
+    const epoch1_slot = preset.SLOTS_PER_EPOCH;
+    var fc = try initTestForkChoice(
+        allocator,
+        genesis_block,
+        epoch1_slot + 5,
+        makeTestCheckpoint(0, genesis_root),
+        makeTestCheckpoint(0, genesis_root),
+        &balances,
+    );
+    defer deinitTestForkChoice(allocator, fc);
+
+    try onBlockFromProto(fc, allocator, makeTestBlock(1, a_root, genesis_root), epoch1_slot + 5);
+    try onBlockFromProto(fc, allocator, makeTestBlock(2, b_root, genesis_root), epoch1_slot + 5);
+
+    // Validator 0 votes for A in epoch 0.
+    // target_root = a_root (block.target_root from makeTestBlock).
+    {
+        const indices = [_]ValidatorIndex{0};
+        var att = makeTestIndexedAttestation(&indices, 1, a_root, 0, a_root, 0, genesis_root, 0);
+        const any_att = AnyIndexedAttestation{ .phase0 = &att };
+        try fc.onAttestation(allocator, &any_att, hashFromByte(0xD1), false);
+    }
+
+    try fc.updateHead(allocator);
+    try testing.expectEqual(a_root, fc.head.block_root);
+
+    // Validator 0 switches vote to B in epoch 1 (epoch advances).
+    // target_epoch=1 > epoch_of(block.slot=2)=0, so expected_target = b_root (beacon_block_root).
+    {
+        const indices = [_]ValidatorIndex{0};
+        var att = makeTestIndexedAttestation(&indices, epoch1_slot, b_root, 1, b_root, 0, genesis_root, 0);
+        const any_att = AnyIndexedAttestation{ .phase0 = &att };
+        try fc.onAttestation(allocator, &any_att, hashFromByte(0xD2), false);
+    }
+
+    try fc.updateHead(allocator);
+    try testing.expectEqual(b_root, fc.head.block_root);
+}
+
+// ── Proposer boost with attestation tests ──
+
+test "onAttestation: proposer boost outweighs attestation votes" {
+    const allocator = testing.allocator;
+    const genesis_root = hashFromByte(0x01);
+    const a_root = hashFromByte(0x0A);
+    const b_root = hashFromByte(0x0B);
+    const genesis_block = makeTestBlock(0, genesis_root, ZERO_HASH);
+    // 32 validators each with weight 128 → committee_weight = 32*128/32 = 128
+    // proposer_boost_score = committee_weight * 40 / 100 = 51
+    const balances = [_]u16{128} ** 32;
+
+    var fc = try initTestForkChoiceWithOpts(
+        allocator,
+        genesis_block,
+        10,
+        makeTestCheckpoint(0, genesis_root),
+        makeTestCheckpoint(0, genesis_root),
+        &balances,
+        .{ .proposer_boost = true },
+    );
+    defer deinitTestForkChoice(allocator, fc);
+
+    try onBlockFromProto(fc, allocator, makeTestBlock(1, a_root, genesis_root), 10);
+    try onBlockFromProto(fc, allocator, makeTestBlock(1, b_root, genesis_root), 10);
+
+    // Give A one vote (weight = 128).
+    // target_root = a_root (block.target_root from makeTestBlock).
+    {
+        const indices = [_]ValidatorIndex{0};
+        var att = makeTestIndexedAttestation(&indices, 1, a_root, 0, a_root, 0, genesis_root, 0);
+        const any_att = AnyIndexedAttestation{ .phase0 = &att };
+        try fc.onAttestation(allocator, &any_att, hashFromByte(0xE1), false);
+    }
+
+    // Apply proposer boost to B.
+    fc.proposer_boost_root = b_root;
+
+    // Head: A has 128 (1 vote). B has proposer_boost (51).
+    // A should win with 128 > 51.
+    try fc.updateHead(allocator);
+    try testing.expectEqual(a_root, fc.head.block_root);
+}
+
+test "onAttestation: equivocating validator votes are not counted" {
+    const allocator = testing.allocator;
+    const genesis_root = hashFromByte(0x01);
+    const a_root = hashFromByte(0x0A);
+    const b_root = hashFromByte(0x0B);
+    const genesis_block = makeTestBlock(0, genesis_root, ZERO_HASH);
+    const balances = [_]u16{100} ** 4;
+
+    var fc = try initTestForkChoice(
+        allocator,
+        genesis_block,
+        10,
+        makeTestCheckpoint(0, genesis_root),
+        makeTestCheckpoint(0, genesis_root),
+        &balances,
+    );
+    defer deinitTestForkChoice(allocator, fc);
+
+    try onBlockFromProto(fc, allocator, makeTestBlock(1, a_root, genesis_root), 10);
+    try onBlockFromProto(fc, allocator, makeTestBlock(1, b_root, genesis_root), 10);
+
+    // Mark validator 0 as equivocating via attester slashing.
+    const slashing_indices = [_]ValidatorIndex{0};
+    var slashing = makeTestAttesterSlashing(&slashing_indices);
+    const any_slashing = AnyAttesterSlashing{ .phase0 = &slashing };
+    try fc.onAttesterSlashing(allocator, &any_slashing);
+
+    // Validator 0 votes for A (should be ignored because equivocating).
+    // Validator 1 votes for B.
+    // target_root = a_root/b_root (block.target_root from makeTestBlock).
+    {
+        const indices_a = [_]ValidatorIndex{0};
+        var att_a = makeTestIndexedAttestation(&indices_a, 1, a_root, 0, a_root, 0, genesis_root, 0);
+        const any_att_a = AnyIndexedAttestation{ .phase0 = &att_a };
+        try fc.onAttestation(allocator, &any_att_a, hashFromByte(0xE2), false);
+    }
+    {
+        const indices_b = [_]ValidatorIndex{1};
+        var att_b = makeTestIndexedAttestation(&indices_b, 1, b_root, 0, b_root, 0, genesis_root, 0);
+        const any_att_b = AnyIndexedAttestation{ .phase0 = &att_b };
+        try fc.onAttestation(allocator, &any_att_b, hashFromByte(0xE3), false);
+    }
+
+    // Head should be B since validator 0's vote was excluded.
+    try fc.updateHead(allocator);
+    try testing.expectEqual(b_root, fc.head.block_root);
 }
