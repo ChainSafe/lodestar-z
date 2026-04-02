@@ -93,6 +93,7 @@ const da_mod = @import("data_availability.zig");
 const validator_monitor_mod = @import("validator_monitor.zig");
 const ValidatorMonitor = validator_monitor_mod.ValidatorMonitor;
 const DataAvailabilityManager = da_mod.DataAvailabilityManager;
+const ArchiveStore = @import("archive_store.zig").ArchiveStore;
 const reprocess_mod = @import("reprocess.zig");
 const ReprocessQueue = reprocess_mod.ReprocessQueue;
 const pending_block_ingress_mod = @import("block_ingress.zig");
@@ -126,6 +127,7 @@ pub const Chain = struct {
     const BootstrapResult = struct {
         genesis_time: u64,
         genesis_validators_root: [32]u8,
+        earliest_available_slot: u64,
     };
 
     allocator: Allocator,
@@ -153,6 +155,8 @@ pub const Chain = struct {
     /// for DA completeness before final import. If DA is pending, the block
     /// is queued for reprocessing when data arrives.
     da_manager: ?*DataAvailabilityManager,
+    /// Finalized-history archival subsystem. Owned by chain.Runtime.
+    archive_store: ?*ArchiveStore,
     /// Pending block ingress whose required attachments are incomplete.
     pending_block_ingress: ?*PendingBlockIngress,
     /// Pending second-stage payload-envelope ingress for separated payload forks.
@@ -236,6 +240,7 @@ pub const Chain = struct {
             .head_tracker = head_tracker,
             .beacon_proposer_cache = beacon_proposer_cache,
             .da_manager = null,
+            .archive_store = null,
             .pending_block_ingress = null,
             .payload_envelope_ingress = null,
             .kzg = null,
@@ -329,11 +334,18 @@ pub const Chain = struct {
         self.genesis_validators_root = genesis_validators_root;
         const genesis_time = try anchor_state.state.genesisTime();
         self.genesis_time_s = genesis_time;
+        const earliest_archived_slot = try self.db.getEarliestBlockArchiveSlot();
 
         var justified_cp: consensus_types.phase0.Checkpoint.Type = undefined;
         try anchor_state.state.currentJustifiedCheckpoint(&justified_cp);
         var finalized_cp: consensus_types.phase0.Checkpoint.Type = undefined;
         try anchor_state.state.finalizedCheckpoint(&finalized_cp);
+
+        if (self.archive_store) |store| {
+            store.restoreProgress(finalized_cp.epoch * preset.SLOTS_PER_EPOCH) catch |err| {
+                log_mod.logger(.chain).warn("archive progress restore failed: {}", .{err});
+            };
+        }
 
         const balances = anchor_state.epoch_cache.getEffectiveBalanceIncrements();
         const justified_root = anchor_block_root;
@@ -381,6 +393,7 @@ pub const Chain = struct {
         return .{
             .genesis_time = genesis_time,
             .genesis_validators_root = genesis_validators_root,
+            .earliest_available_slot = if (earliest_archived_slot) |slot| @min(anchor_slot, slot) else anchor_slot,
         };
     }
 
@@ -656,6 +669,19 @@ pub const Chain = struct {
             finalized_epoch,
             &std.fmt.bytesToHex(finalized_root[0..4], .lower),
         });
+
+        if (self.archive_store) |store| {
+            store.onFinalized(
+                .{
+                    .epoch = finalized_epoch,
+                    .root = finalized_root,
+                },
+                &self.head_tracker.slot_roots,
+                &self.block_to_state,
+            ) catch |err| {
+                log_mod.logger(.chain).warn("onFinalized: archive store failed: {}", .{err});
+            };
+        }
 
         // Prune block state cache — evict states older than finalized epoch.
         self.block_state_cache.pruneBeforeEpoch(finalized_epoch);
@@ -976,6 +1002,11 @@ pub const Chain = struct {
 
     /// Archive the post-epoch state to the cold store.
     pub fn archiveState(self: *Chain, slot: u64, state_root: [32]u8) !void {
+        if (self.archive_store) |store| {
+            try store.archiveState(slot, state_root);
+            return;
+        }
+
         const cached = self.block_state_cache.get(state_root) orelse return;
         const bytes = try cached.state.serialize(self.allocator);
         defer self.allocator.free(bytes);

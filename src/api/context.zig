@@ -63,6 +63,7 @@ pub const ChainCallback = struct {
     getHeadTrackerFn: *const fn (ptr: *anyopaque) HeadTracker,
     getBlockRootBySlotFn: *const fn (ptr: *anyopaque, slot: u64) anyerror!?[32]u8,
     getBlockBytesByRootFn: *const fn (ptr: *anyopaque, root: [32]u8) anyerror!?[]const u8,
+    getBlobSidecarsByRootFn: *const fn (ptr: *anyopaque, root: [32]u8) anyerror!?[]const u8,
     getBlockExecutionOptimisticFn: *const fn (ptr: *anyopaque, root: [32]u8) bool,
     getBlockExecutionOptimisticAtSlotFn: *const fn (ptr: *anyopaque, slot: u64) anyerror!bool,
     getStateRootBySlotFn: *const fn (ptr: *anyopaque, slot: u64) anyerror!?[32]u8,
@@ -432,6 +433,16 @@ pub const ApiContext = struct {
     pub fn blockBytesByRoot(self: *const ApiContext, root: [32]u8) !?[]const u8 {
         if (self.chain) |cb| return cb.getBlockBytesByRootFn(cb.ptr, root);
         return null;
+    }
+
+    pub fn blobSidecarsByRoot(self: *const ApiContext, root: [32]u8) !?[]const u8 {
+        if (self.chain) |cb| return cb.getBlobSidecarsByRootFn(cb.ptr, root);
+        return null;
+    }
+
+    pub fn blobSidecarsAtSlot(self: *const ApiContext, slot: u64) !?[]const u8 {
+        const root = try self.blockRootBySlot(slot) orelse return null;
+        return self.blobSidecarsByRoot(root);
     }
 
     pub fn blockExecutionOptimistic(self: *const ApiContext, root: [32]u8) bool {

@@ -62,6 +62,12 @@ pub const Database = struct {
 
     /// Get the last key in this database (highest in sort order). O(1) via cursor.
     /// Returns an owned slice or null if the database is empty. Caller frees.
+    pub fn firstKey(self: Database) anyerror!?[]const u8 {
+        return self.store.vtable.firstKey(self.store.ptr, self.db_id);
+    }
+
+    /// Get the last key in this database (highest in sort order). O(1) via cursor.
+    /// Returns an owned slice or null if the database is empty. Caller frees.
     pub fn lastKey(self: Database) anyerror!?[]const u8 {
         return self.store.vtable.lastKey(self.store.ptr, self.db_id);
     }
@@ -88,6 +94,8 @@ pub const KVStore = struct {
         allKeys: *const fn (ptr: *anyopaque, db: DatabaseId) anyerror![]const []const u8,
         /// Get all key-value pairs in a named database.
         allEntries: *const fn (ptr: *anyopaque, db: DatabaseId) anyerror!EntryList,
+        /// Get the first (lowest) key in a named database. O(1). Returns owned slice or null.
+        firstKey: *const fn (ptr: *anyopaque, db: DatabaseId) anyerror!?[]const u8,
         /// Get the last (highest) key in a named database. O(1). Returns owned slice or null.
         lastKey: *const fn (ptr: *anyopaque, db: DatabaseId) anyerror!?[]const u8,
         /// Close the store and release resources.

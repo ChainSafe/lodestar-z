@@ -49,6 +49,12 @@ fn getTestBlockBytesByRoot(ptr: *anyopaque, root: [32]u8) anyerror!?[]const u8 {
     return fixture.db.getBlockArchiveByRoot(root);
 }
 
+fn getTestBlobSidecarsByRoot(ptr: *anyopaque, root: [32]u8) anyerror!?[]const u8 {
+    const fixture: *TestChainFixture = @ptrCast(@alignCast(ptr));
+    if (try fixture.db.getBlobSidecars(root)) |blob_bytes| return blob_bytes;
+    return fixture.db.getBlobSidecarsArchiveByRoot(root);
+}
+
 fn getTestBlockExecutionOptimistic(ptr: *anyopaque, root: [32]u8) bool {
     const fixture: *TestChainFixture = @ptrCast(@alignCast(ptr));
     return std.mem.eql(u8, &root, &fixture.head_tracker.head_root) and fixture.sync_status.is_optimistic;
@@ -171,6 +177,7 @@ pub fn makeTestContext(allocator: std.mem.Allocator) TestContext {
                 .getHeadTrackerFn = &getTestHeadTracker,
                 .getBlockRootBySlotFn = &getTestBlockRootBySlot,
                 .getBlockBytesByRootFn = &getTestBlockBytesByRoot,
+                .getBlobSidecarsByRootFn = &getTestBlobSidecarsByRoot,
                 .getBlockExecutionOptimisticFn = &getTestBlockExecutionOptimistic,
                 .getBlockExecutionOptimisticAtSlotFn = &getTestBlockExecutionOptimisticAtSlot,
                 .getStateRootBySlotFn = &getTestStateRootBySlot,

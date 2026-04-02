@@ -172,6 +172,22 @@ test "BeaconDB: put and get blob sidecars archive" {
     try std.testing.expectEqualSlices(u8, "archived_blobs", result.?);
 }
 
+test "BeaconDB: get blob sidecars archive by root" {
+    const allocator = std.testing.allocator;
+    var t = makeTestDB(allocator);
+    defer destroyTestDB(allocator, t.store);
+
+    const slot: u64 = 256;
+    const root = [_]u8{0xef} ** 32;
+    try t.db.putBlockArchive(slot, root, "archived_block");
+    try t.db.putBlobSidecarsArchive(slot, "archived_blobs");
+
+    const result = try t.db.getBlobSidecarsArchiveByRoot(root);
+    defer if (result) |r| allocator.free(r);
+    try std.testing.expect(result != null);
+    try std.testing.expectEqualSlices(u8, "archived_blobs", result.?);
+}
+
 // ---- Data column sidecars ----
 
 test "BeaconDB: put and get data column sidecars" {
@@ -200,6 +216,36 @@ test "BeaconDB: put and get data column sidecars archive" {
     defer if (result) |r| allocator.free(r);
     try std.testing.expect(result != null);
     try std.testing.expectEqualSlices(u8, "archived_columns", result.?);
+}
+
+test "BeaconDB: put and get archived single data column" {
+    const allocator = std.testing.allocator;
+    var t = makeTestDB(allocator);
+    defer destroyTestDB(allocator, t.store);
+
+    const slot: u64 = 1024;
+    try t.db.putDataColumnArchive(slot, 7, "archived_column_7");
+
+    const result = try t.db.getDataColumnArchive(slot, 7);
+    defer if (result) |r| allocator.free(r);
+    try std.testing.expect(result != null);
+    try std.testing.expectEqualSlices(u8, "archived_column_7", result.?);
+}
+
+test "BeaconDB: get archived single data column by root" {
+    const allocator = std.testing.allocator;
+    var t = makeTestDB(allocator);
+    defer destroyTestDB(allocator, t.store);
+
+    const slot: u64 = 1024;
+    const root = [_]u8{0x12} ** 32;
+    try t.db.putBlockArchive(slot, root, "archived_block");
+    try t.db.putDataColumnArchive(slot, 9, "archived_column_9");
+
+    const result = try t.db.getDataColumnArchiveByRoot(root, 9);
+    defer if (result) |r| allocator.free(r);
+    try std.testing.expect(result != null);
+    try std.testing.expectEqualSlices(u8, "archived_column_9", result.?);
 }
 
 // ---- Fork choice persistence ----
@@ -348,4 +394,17 @@ test "BeaconDB: slot-keyed buckets do not collide" {
     try std.testing.expectEqualSlices(u8, "finalized_block", block.?);
     try std.testing.expectEqualSlices(u8, "state_archive", state.?);
     try std.testing.expectEqualSlices(u8, "blob_archive", blob.?);
+}
+
+test "BeaconDB: earliest block archive slot returns lowest slot" {
+    const allocator = std.testing.allocator;
+    var t = makeTestDB(allocator);
+    defer destroyTestDB(allocator, t.store);
+
+    try t.db.putBlockArchive(64, [_]u8{0x40} ** 32, "block_64");
+    try t.db.putBlockArchive(16, [_]u8{0x10} ** 32, "block_16");
+    try t.db.putBlockArchive(32, [_]u8{0x20} ** 32, "block_32");
+
+    const earliest = try t.db.getEarliestBlockArchiveSlot();
+    try std.testing.expectEqual(@as(?u64, 16), earliest);
 }

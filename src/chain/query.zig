@@ -210,7 +210,8 @@ pub const Query = struct {
     }
 
     pub fn blobSidecarsByRoot(self: Query, root: Root) !?[]const u8 {
-        return self.chain.db.getBlobSidecars(root);
+        if (try self.chain.db.getBlobSidecars(root)) |bytes| return bytes;
+        return self.chain.db.getBlobSidecarsArchiveByRoot(root);
     }
 
     pub fn blobSidecarsAtSlot(self: Query, slot: Slot) !?[]const u8 {
@@ -219,7 +220,8 @@ pub const Query = struct {
     }
 
     pub fn dataColumnByRoot(self: Query, root: Root, column_index: u64) !?[]const u8 {
-        return self.chain.db.getDataColumn(root, column_index);
+        if (try self.chain.db.getDataColumn(root, column_index)) |bytes| return bytes;
+        return self.chain.db.getDataColumnArchiveByRoot(root, column_index);
     }
 
     pub fn dataColumnAtSlot(self: Query, slot: Slot, column_index: u64) !?[]const u8 {

@@ -28,6 +28,9 @@ pub const max_attestation_batch_size: u32 = 64;
 /// Maximum number of aggregates in a single batch for BLS batch verification.
 pub const max_aggregate_batch_size: u32 = 64;
 
+/// Maximum number of sync committee messages in a single batch for BLS batch verification.
+pub const max_sync_message_batch_size: u32 = 64;
+
 // ---------------------------------------------------------------------------
 // Concrete queue-boundary types.
 // ---------------------------------------------------------------------------
@@ -284,6 +287,12 @@ pub const AggregateBatchWork = struct {
     count: u32,
 };
 
+/// Batch of sync committee messages for BLS batch verification.
+pub const SyncMessageBatchWork = struct {
+    items: [*]SyncMessageWork,
+    count: u32,
+};
+
 /// Attestation or aggregate awaiting an unknown block.
 pub const ReprocessWork = struct {
     block_root: Root,
@@ -456,46 +465,47 @@ pub const WorkType = enum(u8) {
     // -- Sync committee --
     sync_contribution = 17,
     sync_message = 18,
+    sync_message_batch = 19,
 
     // -- Reprocessing --
-    unknown_block_aggregate = 19,
-    unknown_block_attestation = 20,
+    unknown_block_aggregate = 20,
+    unknown_block_attestation = 21,
 
     // -- Gloas --
-    gossip_execution_payload_bid = 21,
-    gossip_proposer_preferences = 22,
+    gossip_execution_payload_bid = 22,
+    gossip_proposer_preferences = 23,
 
     // -- Peer serving --
-    status = 23,
-    blocks_by_range = 24,
-    blocks_by_root = 25,
-    blobs_by_range = 26,
-    blobs_by_root = 27,
-    columns_by_range = 28,
-    columns_by_root = 29,
+    status = 24,
+    blocks_by_range = 25,
+    blocks_by_root = 26,
+    blobs_by_range = 27,
+    blobs_by_root = 28,
+    columns_by_range = 29,
+    columns_by_root = 30,
 
     // -- Pool objects --
-    gossip_attester_slashing = 30,
-    gossip_proposer_slashing = 31,
-    gossip_voluntary_exit = 32,
-    gossip_bls_to_exec = 33,
+    gossip_attester_slashing = 31,
+    gossip_proposer_slashing = 32,
+    gossip_voluntary_exit = 33,
+    gossip_bls_to_exec = 34,
 
     // -- Low priority --
-    api_request_p1 = 34,
-    backfill_segment = 35,
+    api_request_p1 = 35,
+    backfill_segment = 36,
 
     // -- Light client --
-    lc_bootstrap = 36,
-    lc_finality_update = 37,
-    lc_optimistic_update = 38,
-    lc_updates_by_range = 39,
+    lc_bootstrap = 37,
+    lc_finality_update = 38,
+    lc_optimistic_update = 39,
+    lc_updates_by_range = 40,
 
     // -- Internal --
-    slot_tick = 40,
-    reprocess = 41,
+    slot_tick = 41,
+    reprocess = 42,
 
     /// Total number of work types. Useful for sizing per-type metric arrays.
-    pub const count: u32 = 42;
+    pub const count: u32 = 43;
 
     /// Returns true if this work type should be dropped during initial sync.
     pub fn dropDuringSync(self: WorkType) bool {
@@ -507,6 +517,7 @@ pub const WorkType = enum(u8) {
             .unknown_block_attestation,
             .unknown_block_aggregate,
             .sync_message,
+            .sync_message_batch,
             .sync_contribution,
             .gossip_payload_attestation,
             .lc_bootstrap,
@@ -555,6 +566,7 @@ pub const WorkItem = union(WorkType) {
     // -- Sync committee --
     sync_contribution: SyncContributionWork,
     sync_message: SyncMessageWork,
+    sync_message_batch: SyncMessageBatchWork,
 
     // -- Reprocessing --
     unknown_block_aggregate: ReprocessWork,
@@ -627,6 +639,7 @@ pub const WorkItem = union(WorkType) {
             .unknown_block_attestation => |work| work.data.deinit(),
             .sync_contribution => {},
             .sync_message => {},
+            .sync_message_batch => {},
             .gossip_attester_slashing => |work| {
                 var slashing = work.slashing;
                 slashing.deinit(allocator);

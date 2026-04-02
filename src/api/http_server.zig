@@ -674,6 +674,22 @@ pub const HttpServer = struct {
         }
     };
 
+    fn parseOptionalU64ListQuery(allocator: Allocator, query_value: ?[]const u8) !?[]u64 {
+        const raw = query_value orelse return null;
+        if (raw.len == 0) return try allocator.dupe(u64, &.{});
+
+        var values = std.ArrayListUnmanaged(u64).empty;
+        defer values.deinit(allocator);
+
+        var it = std.mem.splitScalar(u8, raw, ',');
+        while (it.next()) |part| {
+            if (part.len == 0) return error.InvalidRequest;
+            try values.append(allocator, std.fmt.parseInt(u64, part, 10) catch return error.InvalidRequest);
+        }
+
+        return try values.toOwnedSlice(allocator);
+    }
+
     // Dispatch coverage is verified by the "dispatch coverage" test below.
     // When adding a new route, add a dispatch branch here AND update the
     // coverage check in the test.
@@ -1649,13 +1665,24 @@ pub const HttpServer = struct {
         const alloc = self.allocator;
         const block_id_str = dc.match.getParam("block_id") orelse return error.InvalidBlockId;
         const block_id = try types.BlockId.parse(block_id_str);
-        // TODO: wire Deneb blob DB lookup — parse optional ?indices query param and filter.
-        // When BeaconDB.getBlobSidecars is plumbed through ApiContext, call:
-        //   handlers.beacon.getBlobSidecars(self.api_context, block_id, indices_opt)
-        // and return the raw SSZ-decoded blob sidecar list as JSON.
-        _ = block_id;
-        _ = alloc;
-        return error.NotImplemented;
+        const indices_opt = try parseOptionalU64ListQuery(alloc, dc.getQuery("indices"));
+        defer if (indices_opt) |indices| alloc.free(indices);
+
+        const result = try handlers.beacon.getBlobSidecars(self.api_context, block_id, indices_opt);
+        defer alloc.free(result.data);
+
+        const meta = response_meta.ResponseMeta{
+            .version = result.fork_name,
+            .execution_optimistic = result.execution_optimistic,
+            .finalized = result.finalized,
+        };
+
+        const body = switch (result.fork_name) {
+            .deneb => try json_response.writeFixedSszArrayEnvelope(alloc, consensus_types.deneb.BlobSidecar, result.data, meta),
+            .electra, .fulu, .gloas => try json_response.writeFixedSszArrayEnvelope(alloc, consensus_types.electra.BlobSidecar, result.data, meta),
+            else => try json_response.writeRawEnvelope(alloc, "[]", meta),
+        };
+        return .{ .status = 200, .content_type = "application/json", .body = body, .meta = meta };
     }
 
     // TODO(stub): returns full block data, not an actual blinded block.

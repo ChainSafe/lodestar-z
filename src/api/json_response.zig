@@ -84,6 +84,30 @@ pub fn writeBeaconArrayEnvelope(
     return aw.toOwnedSlice();
 }
 
+/// Deserialize a concatenated SSZ byte slice of fixed-size items and wrap it
+/// in a Beacon API JSON array envelope.
+pub fn writeFixedSszArrayEnvelope(
+    alloc: Allocator,
+    comptime SszType: type,
+    encoded_items: []const u8,
+    meta: ResponseMeta,
+) ![]u8 {
+    if (!comptime isFixedType(SszType)) @compileError("writeFixedSszArrayEnvelope requires a fixed-size SSZ type");
+    if (encoded_items.len == 0) return writeBeaconArrayEnvelope(alloc, SszType, &.{}, meta);
+    if (encoded_items.len % SszType.fixed_size != 0) return error.InvalidResponseData;
+
+    const count = encoded_items.len / SszType.fixed_size;
+    const items = try alloc.alloc(SszType.Type, count);
+    defer alloc.free(items);
+
+    for (items, 0..) |*item, i| {
+        const offset = i * SszType.fixed_size;
+        try SszType.deserializeFromBytes(encoded_items[offset..][0..SszType.fixed_size], item);
+    }
+
+    return writeBeaconArrayEnvelope(alloc, SszType, items, meta);
+}
+
 /// Write a raw JSON string as the "data" field (already serialized).
 ///
 /// Useful when data is pre-serialized or from non-SSZ types.

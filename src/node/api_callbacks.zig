@@ -158,6 +158,7 @@ pub const ApiBindings = struct {
             .getHeadTrackerFn = &getChainHeadTrackerCallback,
             .getBlockRootBySlotFn = &getChainBlockRootBySlotCallback,
             .getBlockBytesByRootFn = &getChainBlockBytesByRootCallback,
+            .getBlobSidecarsByRootFn = &getChainBlobSidecarsByRootCallback,
             .getBlockExecutionOptimisticFn = &getChainBlockExecutionOptimisticCallback,
             .getBlockExecutionOptimisticAtSlotFn = &getChainBlockExecutionOptimisticAtSlotCallback,
             .getStateRootBySlotFn = &getChainStateRootBySlotCallback,
@@ -483,6 +484,11 @@ fn getChainBlockRootBySlotCallback(ptr: *anyopaque, slot: u64) anyerror!?[32]u8 
 fn getChainBlockBytesByRootCallback(ptr: *anyopaque, root: [32]u8) anyerror!?[]const u8 {
     const ctx: *ChainCallbackCtx = @ptrCast(@alignCast(ptr));
     return ctx.query.blockBytesByRoot(root);
+}
+
+fn getChainBlobSidecarsByRootCallback(ptr: *anyopaque, root: [32]u8) anyerror!?[]const u8 {
+    const ctx: *ChainCallbackCtx = @ptrCast(@alignCast(ptr));
+    return ctx.query.blobSidecarsByRoot(root);
 }
 
 fn getChainBlockExecutionOptimisticCallback(ptr: *anyopaque, root: [32]u8) bool {

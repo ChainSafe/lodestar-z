@@ -9,6 +9,10 @@ const Allocator = std.mem.Allocator;
 const preset = @import("preset").preset;
 const computeEpochAtSlot = @import("../utils/epoch.zig").computeEpochAtSlot;
 const computeStartSlotAtEpoch = @import("../utils/epoch.zig").computeStartSlotAtEpoch;
+const state_transition_mod = @import("../state_transition.zig");
+const processSlots = state_transition_mod.processSlots;
+const stateTransition = state_transition_mod.stateTransition;
+const TransitionOpt = state_transition_mod.TransitionOpt;
 
 const CachedBeaconState = @import("state_cache.zig").CachedBeaconState;
 const BlockStateCache = @import("block_state_cache.zig").BlockStateCache;
@@ -18,6 +22,7 @@ const BeaconDB = @import("db").BeaconDB;
 const BeaconConfig = @import("config").BeaconConfig;
 const PersistentMerkleTreeNode = @import("persistent_merkle_tree").Node;
 const deserializeState = @import("../utils/state_deserialize.zig").deserializeState;
+const AnySignedBeaconBlock = @import("fork_types").AnySignedBeaconBlock;
 
 pub const StateRegen = struct {
     allocator: Allocator,
@@ -64,7 +69,7 @@ pub const StateRegen = struct {
     /// Strategy:
     /// 1. Try block cache (hot path — most recent blocks)
     /// 2. Try checkpoint cache with reload (warm path — epoch boundary states)
-    /// 3. TODO: Walk fork choice backwards + replay blocks from closest ancestor (cold path)
+    /// 3. Replay canonical history from the closest archived state (cold path)
     pub fn getPreState(self: *StateRegen, parent_root: [32]u8, block_slot: u64) !*CachedBeaconState {
         // 1. Try block cache — O(1) lookup by state root
         if (self.block_cache.get(parent_root)) |state| {
@@ -90,36 +95,10 @@ pub const StateRegen = struct {
             }
         }
 
-        // 3. Cold path: find closest archived state, replay blocks forward.
-        //
-        //    Walk backwards from the target epoch to find a persisted state
-        //    archive, then replay blocks forward to produce the pre-state.
-        //    State deserialization from SSZ bytes is a TODO — requires fork
-        //    detection + tree construction + CachedBeaconState init.
-        if (self.db) |db| {
-            const cold_target_epoch = computeEpochAtSlot(block_slot);
-            var search_epoch = cold_target_epoch;
-            while (search_epoch > 0) : (search_epoch -= 1) {
-                const cp_slot = computeStartSlotAtEpoch(search_epoch);
-                if (try db.getStateArchive(cp_slot)) |state_bytes| {
-                    defer self.allocator.free(state_bytes);
-                    if (self.pool != null and self.config != null) {
-                        // Deserialize the archived state.
-                        // TODO: replay blocks forward from cp_slot to block_slot once
-                        // the STFN loop is available. For now, return the archived
-                        // checkpoint state directly (correct only when cp_slot == block_slot - 1).
-                        const cached_state = try deserializeState(
-                            self.allocator,
-                            self.pool.?,
-                            self.config.?,
-                            state_bytes,
-                        );
-                        return try self.cacheLoadedState(cached_state, false);
-                    }
-                    break;
-                }
-            }
+        if (try self.getCanonicalStateByBlockRoot(parent_root)) |state| {
+            return state;
         }
+
         return error.NoPreStateAvailable;
     }
 
@@ -134,8 +113,6 @@ pub const StateRegen = struct {
     /// 1. Block state cache (hot path)
     /// 2. DB state archive by root (cold path)
     ///
-    /// State deserialization from archived bytes is a TODO — returns null
-    /// for DB hits until the full deserialization pipeline is wired.
     pub fn getStateByRoot(self: *StateRegen, state_root: [32]u8) !?*CachedBeaconState {
         // 1. Check block cache — O(1) lookup
         if (self.block_cache.get(state_root)) |state| return state;
@@ -166,21 +143,24 @@ pub const StateRegen = struct {
     /// Search order:
     /// 1. DB state archive by slot (cold path)
     ///
-    /// Loaded states are inserted into the block state cache so callers
-    /// receive a cache-owned pointer with stable lifetime semantics.
+    /// When an exact archive is unavailable, replay canonical blocks forward
+    /// from the closest archived epoch-boundary anchor.
     pub fn getStateBySlot(self: *StateRegen, slot: u64) !?*CachedBeaconState {
         if (self.db == null or self.pool == null or self.config == null) return null;
 
-        const bytes = (try self.db.?.getStateArchive(slot)) orelse return null;
-        defer self.allocator.free(bytes);
+        if (try self.db.?.getStateArchive(slot)) |bytes| {
+            defer self.allocator.free(bytes);
 
-        const cached_state = try deserializeState(
-            self.allocator,
-            self.pool.?,
-            self.config.?,
-            bytes,
-        );
-        return try self.cacheLoadedState(cached_state, false);
+            const cached_state = try deserializeState(
+                self.allocator,
+                self.pool.?,
+                self.config.?,
+                bytes,
+            );
+            return try self.cacheLoadedState(cached_state, false);
+        }
+
+        return self.replayCanonicalStateToSlot(slot);
     }
 
     /// Called after processing a new block — cache the resulting state.
@@ -222,6 +202,135 @@ pub const StateRegen = struct {
 
         _ = try self.block_cache.add(state, is_head);
         return state;
+    }
+
+    fn getCanonicalStateByBlockRoot(self: *StateRegen, block_root: [32]u8) !?*CachedBeaconState {
+        if (self.db == null or self.config == null) return null;
+
+        const block_bytes = try self.getBlockBytesByRoot(block_root) orelse return null;
+        defer self.allocator.free(block_bytes);
+
+        const slot = readSignedBlockSlotFromSsz(block_bytes) orelse return null;
+        const canonical_root = try self.db.?.getBlockRootBySlot(slot) orelse return null;
+        if (!std.mem.eql(u8, &canonical_root, &block_root)) return null;
+
+        return self.replayCanonicalStateToSlot(slot);
+    }
+
+    fn replayCanonicalStateToSlot(self: *StateRegen, target_slot: u64) !?*CachedBeaconState {
+        if (self.db == null or self.pool == null or self.config == null) return null;
+
+        if (try self.db.?.getStateArchive(target_slot)) |bytes| {
+            defer self.allocator.free(bytes);
+            const exact_state = try deserializeState(
+                self.allocator,
+                self.pool.?,
+                self.config.?,
+                bytes,
+            );
+            return try self.cacheLoadedState(exact_state, false);
+        }
+
+        const anchor_slot = try self.findReplayAnchorSlot(target_slot) orelse return null;
+        var working_state = try self.loadArchivedStateUncached(anchor_slot);
+        errdefer {
+            working_state.deinit();
+            self.allocator.destroy(working_state);
+        }
+
+        if (anchor_slot == target_slot) {
+            return try self.cacheLoadedState(working_state, false);
+        }
+
+        var slot = anchor_slot + 1;
+        while (slot <= target_slot) : (slot += 1) {
+            const block_root = try self.db.?.getBlockRootBySlot(slot);
+            if (block_root) |root| {
+                const block_bytes = try self.getBlockBytesByRoot(root) orelse return null;
+                defer self.allocator.free(block_bytes);
+
+                var any_signed = try self.deserializeSignedBlock(slot, block_bytes);
+                defer any_signed.deinit(self.allocator);
+                var actual_root: [32]u8 = undefined;
+                try any_signed.beaconBlock().hashTreeRoot(self.allocator, &actual_root);
+                if (!std.mem.eql(u8, &actual_root, &root)) {
+                    try processSlots(self.allocator, working_state, slot, .{});
+                    try working_state.state.commit();
+                    continue;
+                }
+
+                const next_state = try stateTransition(
+                    self.allocator,
+                    working_state,
+                    any_signed,
+                    TransitionOpt{
+                        .verify_state_root = true,
+                        .verify_proposer = false,
+                        .verify_signatures = false,
+                        .transfer_cache = false,
+                    },
+                );
+                working_state.deinit();
+                self.allocator.destroy(working_state);
+                working_state = next_state;
+            } else {
+                try processSlots(self.allocator, working_state, slot, .{});
+                try working_state.state.commit();
+            }
+        }
+
+        return try self.cacheLoadedState(working_state, false);
+    }
+
+    fn findReplayAnchorSlot(self: *StateRegen, target_slot: u64) !?u64 {
+        if (self.db == null) return null;
+
+        var search_slot = computeStartSlotAtEpoch(computeEpochAtSlot(target_slot));
+        while (true) {
+            if (try self.db.?.getStateArchive(search_slot)) |bytes| {
+                self.allocator.free(bytes);
+                return search_slot;
+            }
+            if (search_slot == 0) return null;
+            search_slot = search_slot -| preset.SLOTS_PER_EPOCH;
+        }
+    }
+
+    fn loadArchivedStateUncached(self: *StateRegen, slot: u64) !*CachedBeaconState {
+        const bytes = (try self.db.?.getStateArchive(slot)) orelse return error.StateArchiveMissing;
+        defer self.allocator.free(bytes);
+
+        return deserializeState(
+            self.allocator,
+            self.pool.?,
+            self.config.?,
+            bytes,
+        );
+    }
+
+    fn getBlockBytesByRoot(self: *StateRegen, block_root: [32]u8) !?[]const u8 {
+        if (self.db == null) return null;
+        if (try self.db.?.getBlock(block_root)) |block_bytes| return block_bytes;
+        return self.db.?.getBlockArchiveByRoot(block_root);
+    }
+
+    fn deserializeSignedBlock(
+        self: *StateRegen,
+        slot: u64,
+        block_bytes: []const u8,
+    ) !AnySignedBeaconBlock {
+        const fork_seq = self.config.?.forkSeq(slot);
+        return AnySignedBeaconBlock.deserialize(
+            self.allocator,
+            .full,
+            fork_seq,
+            block_bytes,
+        );
+    }
+
+    fn readSignedBlockSlotFromSsz(block_bytes: []const u8) ?u64 {
+        if (block_bytes.len < 108) return null;
+        return std.mem.readInt(u64, block_bytes[100..108], .little);
     }
 };
 

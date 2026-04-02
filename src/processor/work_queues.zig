@@ -55,6 +55,7 @@ const LifoQueue = queues_mod.LifoQueue;
 
 const attestation_batch_target_size: u32 = 8;
 const aggregate_batch_target_size: u32 = 4;
+const sync_message_batch_target_size: u32 = 16;
 const gossip_batch_holdback_ns: i64 = 2 * std.time.ns_per_ms;
 
 // ---------------------------------------------------------------------------
@@ -243,6 +244,7 @@ pub const WorkQueues = struct {
     sync_state: SyncState,
     attestation_dispatch_enabled: bool = true,
     aggregate_dispatch_enabled: bool = true,
+    sync_message_dispatch_enabled: bool = true,
 
     // ── Metrics counters (plain u64, no Prometheus yet) ──
     items_routed: u64,
@@ -252,6 +254,7 @@ pub const WorkQueues = struct {
     // ── Batch scratch buffers (owned by allocator) ──
     attestation_batch_buf: []AttestationWork,
     aggregate_batch_buf: []AggregateWork,
+    sync_message_batch_buf: []SyncMessageWork,
 
     /// Initialise all queues from individually allocated per-type slices.
     /// Each queue gets its own slice from the allocator.
@@ -397,6 +400,10 @@ pub const WorkQueues = struct {
                 AggregateWork,
                 work_item_mod.max_aggregate_batch_size,
             ),
+            .sync_message_batch_buf = try allocator.alloc(
+                SyncMessageWork,
+                work_item_mod.max_sync_message_batch_size,
+            ),
         };
     }
 
@@ -406,6 +413,7 @@ pub const WorkQueues = struct {
         self.freeQueueBuffers();
         self.allocator.free(self.attestation_batch_buf);
         self.allocator.free(self.aggregate_batch_buf);
+        self.allocator.free(self.sync_message_batch_buf);
     }
 
     fn cleanupItem(self: *WorkQueues, item: WorkItem) void {
@@ -546,7 +554,7 @@ pub const WorkQueues = struct {
             },
 
             // ── Batch items are produced internally, not routed from inbound ──
-            .attestation_batch, .aggregate_batch => unreachable,
+            .attestation_batch, .aggregate_batch, .sync_message_batch => unreachable,
 
             // ── Internal items: handled directly by the processor loop ──
             .slot_tick, .reprocess => {},
@@ -601,7 +609,13 @@ pub const WorkQueues = struct {
 
         // Priority 15-16: Sync committee.
         if (self.sync_contribution.pop()) |w| return .{ .sync_contribution = w };
-        if (self.sync_message.pop()) |w| return .{ .sync_message = w };
+        if (self.sync_message_dispatch_enabled and self.sync_message.len > 0) {
+            if (self.syncMessageBatchReady(now_ns)) {
+                return self.formSyncMessageBatch();
+            }
+        } else if (self.sync_message.pop()) |w| {
+            return .{ .sync_message = w };
+        }
 
         // Priority 17-18: Unknown block reprocessing.
         if (self.unknown_block_aggregate.pop()) |w| return .{ .unknown_block_aggregate = w };
@@ -644,6 +658,7 @@ pub const WorkQueues = struct {
     pub fn setGossipBlsBatchDispatchEnabled(self: *WorkQueues, enabled: bool) void {
         self.attestation_dispatch_enabled = enabled;
         self.aggregate_dispatch_enabled = enabled;
+        self.sync_message_dispatch_enabled = enabled;
     }
 
     /// Returns true if every queue is empty.
@@ -722,6 +737,16 @@ pub const WorkQueues = struct {
         );
     }
 
+    fn syncMessageBatchReady(self: *const WorkQueues, now_ns: i64) bool {
+        return batchReady(
+            SyncMessageWork,
+            self.sync_message.len,
+            self.sync_message.peekOldest(),
+            now_ns,
+            sync_message_batch_target_size,
+        );
+    }
+
     /// Form a batch from the aggregate LIFO queue.
     /// If only 1 item, returns a single aggregate work item.
     /// If 2+, pops up to max_aggregate_batch_size into a batch.
@@ -792,6 +817,26 @@ pub const WorkQueues = struct {
         assert(count > 0);
         return .{ .attestation_batch = .{
             .items = self.attestation_batch_buf.ptr,
+            .count = count,
+        } };
+    }
+
+    fn formSyncMessageBatch(self: *WorkQueues) WorkItem {
+        assert(self.sync_message.len > 0);
+        if (self.sync_message.len < 2) {
+            return .{ .sync_message = self.sync_message.pop().? };
+        }
+
+        const batch_size = @min(
+            self.sync_message.len,
+            work_item_mod.max_sync_message_batch_size,
+        );
+        const count = self.sync_message.popBatch(
+            self.sync_message_batch_buf[0..batch_size],
+        );
+        assert(count > 0);
+        return .{ .sync_message_batch = .{
+            .items = self.sync_message_batch_buf.ptr,
             .count = count,
         } };
     }
@@ -1073,6 +1118,24 @@ test "WorkQueues: gossip bls dispatch gate defers attestation and aggregate work
     try testing.expectEqual(@as(u32, 1), wq.attestation.len);
 }
 
+test "WorkQueues: sync message batching holds briefly for a fuller batch" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const config = testQueueConfig();
+    var wq = try WorkQueues.init(allocator, config);
+
+    wq.routeToQueue(.{ .sync_message = testSyncMessageWork(1, 500, 1_000) });
+    wq.routeToQueue(.{ .sync_message = testSyncMessageWork(2, 500, 1_500) });
+
+    try testing.expect(wq.popHighestPriorityAt(1_000 + gossip_batch_holdback_ns - 1) == null);
+
+    const ready = wq.popHighestPriorityAt(1_000 + gossip_batch_holdback_ns + 1).?;
+    try testing.expectEqual(WorkType.sync_message_batch, ready.workType());
+    try testing.expectEqual(@as(u32, 2), ready.sync_message_batch.count);
+}
+
 test "WorkQueues: sync-aware dropping" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -1278,6 +1341,20 @@ fn testAttestationWorkWithSlot(tag: u64, slot: u64, subnet_id: u8, seen_timestam
             .expected_subnet = subnet_id,
         },
         .subnet_id = subnet_id,
+        .seen_timestamp_ns = seen_timestamp_ns,
+    };
+}
+
+fn testSyncMessageWork(tag: u64, slot: u64, seen_timestamp_ns: i64) SyncMessageWork {
+    var message = consensus_types.altair.SyncCommitteeMessage.default_value;
+    message.slot = slot;
+    message.validator_index = tag;
+    message.beacon_block_root = [_]u8{@intCast(tag % 251)} ** 32;
+    return .{
+        .source = testSource(tag),
+        .message_id = testMessageId(@intCast(tag & 0xff)),
+        .message = message,
+        .subnet_id = @intCast(tag % 4),
         .seen_timestamp_ns = seen_timestamp_ns,
     };
 }

@@ -88,6 +88,7 @@ pub const LmdbKVStore = struct {
         .writeBatch = vtableWriteBatch,
         .allKeys = vtableAllKeys,
         .allEntries = vtableAllEntries,
+        .firstKey = vtableFirstKey,
         .lastKey = vtableLastKey,
         .close = vtableClose,
     };
@@ -206,6 +207,20 @@ pub const LmdbKVStore = struct {
             .keys = try keys.toOwnedSlice(self.allocator),
             .values = try values.toOwnedSlice(self.allocator),
         };
+    }
+
+    fn vtableFirstKey(ptr: *anyopaque, db_id: DatabaseId) anyerror!?[]const u8 {
+        const self: *LmdbKVStore = @ptrCast(@alignCast(ptr));
+        if (self.closed) return error.StoreClosed;
+
+        var txn = try self.env.beginTxn(.{ .read_only = true });
+        defer txn.abort();
+
+        var cursor = try txn.openCursorDbi(self.getDbi(db_id));
+        defer cursor.close();
+
+        const entry = try cursor.first() orelse return null;
+        return try self.allocator.dupe(u8, entry.key);
     }
 
     fn vtableLastKey(ptr: *anyopaque, db_id: DatabaseId) anyerror!?[]const u8 {

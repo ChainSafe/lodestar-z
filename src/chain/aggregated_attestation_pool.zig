@@ -15,6 +15,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
+const bls = @import("bls");
 const types = @import("consensus_types");
 const preset = @import("preset").preset;
 const state_transition = @import("state_transition");
@@ -159,8 +160,8 @@ pub const AttestationGroup = struct {
     ///
     /// Pre-aggregation strategy (mirrors Lodestar TS MatchingDataAttestationGroup.add):
     /// 1. If new bits ⊆ existing: drop (AlreadyKnown)
-    /// 2. If existing ⊆ new bits: remove existing, continue
-    /// 3. If exclusive: merge bits into existing (Aggregated)
+    /// 2. If exclusive: merge bits into existing (Aggregated)
+    /// 3. If existing ⊆ new bits: remove existing, continue
     /// 4. Otherwise (partial overlap): store separately
     pub fn add(self: *AttestationGroup, attestation: Phase0Attestation.Type) !InsertOutcome {
         const new_bytes = attestation.aggregation_bits.data.items;
@@ -178,20 +179,15 @@ pub const AttestationGroup = struct {
                 return .AlreadyKnown;
             }
 
-            // Case 2: existing is subset of new → mark for removal
-            if (isSubset(existing_bytes, new_bytes)) {
-                try to_remove.append(self.allocator, i);
-                continue;
+            // Case 2: exclusive — merge bits and BLS signatures in-place.
+            if (isExclusive(new_bytes, existing_bytes)) {
+                try aggregateInto(entry, attestation);
+                return .Aggregated;
             }
 
-            // Case 3: exclusive — store separately until BLS sig aggregation is implemented.
-            // Merging aggregation_bits without aggregating the BLS signature produces an
-            // invalid attestation that will fail verification on block proposal.
-            // TODO: implement BLS aggregate_signatures() via blst bindings, then re-enable
-            // actual aggregation (OR bits + aggregate sigs).
-            // For now, exclusive attestations are stored as separate entries and the
-            // greedy selector in getAttestationsForBlock picks the best coverage.
-            if (isExclusive(new_bytes, existing_bytes)) {
+            // Case 3: existing is subset of new → mark for removal
+            if (isSubset(existing_bytes, new_bytes)) {
+                try to_remove.append(self.allocator, i);
                 continue;
             }
         }
@@ -637,6 +633,18 @@ fn cloneAttestation(allocator: Allocator, att: Phase0Attestation.Type) !Phase0At
     return cloned;
 }
 
+fn aggregateInto(entry: *AttestationEntry, attestation: Phase0Attestation.Type) !void {
+    orBitsInto(entry.attestation.aggregation_bits.data.items, attestation.aggregation_bits.data.items);
+
+    const sig1 = try bls.Signature.deserialize(entry.attestation.signature[0..]);
+    const sig2 = try bls.Signature.deserialize(attestation.signature[0..]);
+    const sigs = [_]bls.Signature{ sig1, sig2 };
+    const agg_sig = try bls.AggregateSignature.aggregate(&sigs, false);
+
+    entry.attestation.signature = agg_sig.toSignature().compress();
+    entry.bit_count = countBits(entry.attestation.aggregation_bits.data.items);
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -658,6 +666,13 @@ fn makeTestAttAlloc(allocator: Allocator, slot: Slot, index: u64, bits: []const 
         },
         .signature = [_]u8{0} ** 96,
     };
+}
+
+fn makeTestSignature(seed: u8) ![96]u8 {
+    var ikm = [_]u8{seed} ** 32;
+    if (seed == 0) ikm[0] = 1;
+    const sk = try bls.SecretKey.keyGen(&ikm, null);
+    return sk.sign("aggregated-attestation-pool", bls.DST, null).compress();
 }
 
 fn freeTestAtt(allocator: Allocator, att: *Phase0Attestation.Type) void {
@@ -694,7 +709,7 @@ test "AggregatedAttestationPool: add duplicate is AlreadyKnown" {
     try std.testing.expectEqual(@as(usize, 1), pool.entryCount());
 }
 
-test "AggregatedAttestationPool: exclusive attestations stored separately" {
+test "AggregatedAttestationPool: exclusive attestations are pre-aggregated" {
     const allocator = std.testing.allocator;
     var pool = AggregatedAttestationPool.init(allocator);
     defer pool.deinit();
@@ -705,15 +720,18 @@ test "AggregatedAttestationPool: exclusive attestations stored separately" {
     // Validator 1 attests (exclusive)
     var att2 = try makeTestAttAlloc(allocator, 10, 0, &[_]u8{0b00000010}, 8);
     defer freeTestAtt(allocator, &att2);
+    att1.signature = try makeTestSignature(1);
+    att2.signature = try makeTestSignature(2);
 
     _ = try pool.add(att1);
     const outcome = try pool.add(att2);
-    // Without BLS signature aggregation, exclusive attestations are stored as
-    // separate entries (NewData). Once BLS aggregate_signatures is implemented,
-    // they should be merged and the outcome should be Aggregated.
-    try std.testing.expectEqual(InsertOutcome.NewData, outcome);
-    // Two separate entries (not merged — BLS aggregation not yet available)
-    try std.testing.expectEqual(@as(usize, 2), pool.entryCount());
+    try std.testing.expectEqual(InsertOutcome.Aggregated, outcome);
+    try std.testing.expectEqual(@as(usize, 1), pool.entryCount());
+
+    var data_root: [32]u8 = undefined;
+    try AttestationData.hashTreeRoot(&att1.data, &data_root);
+    const best = pool.getAggregate(10, data_root).?;
+    try std.testing.expectEqual(@as(u32, 2), countBits(best.aggregation_bits.data.items));
 }
 
 test "AggregatedAttestationPool: superset replaces subset" {

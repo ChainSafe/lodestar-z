@@ -34,6 +34,8 @@ const BeaconProposerCache = @import("beacon_proposer_cache.zig").BeaconProposerC
 const DataAvailabilityManager = @import("data_availability.zig").DataAvailabilityManager;
 const PendingBlockIngress = @import("block_ingress.zig").PendingBlockIngress;
 const PayloadEnvelopeIngress = @import("payload_envelope_ingress.zig").PayloadEnvelopeIngress;
+const archive_store_mod = @import("archive_store.zig");
+const ArchiveStore = archive_store_mod.ArchiveStore;
 const kzg_mod = @import("kzg");
 const Kzg = kzg_mod.Kzg;
 const BlsThreadPool = @import("bls").ThreadPool;
@@ -93,6 +95,7 @@ pub const Runtime = struct {
     custody_columns: []u64,
     kzg: *Kzg,
     da_manager: *DataAvailabilityManager,
+    archive_store: *ArchiveStore,
     pending_block_ingress: *PendingBlockIngress,
     payload_envelope_ingress: *PayloadEnvelopeIngress,
     validator_monitor: ?*ValidatorMonitor = null,
@@ -200,6 +203,12 @@ pub const Runtime = struct {
         );
         errdefer da_manager.deinit();
 
+        const archive_store = try allocator.create(ArchiveStore);
+        errdefer allocator.destroy(archive_store);
+        archive_store.* = ArchiveStore.init(allocator, db, block_cache, .{});
+        archive_store.bindBeaconConfig(config);
+        errdefer archive_store.deinit();
+
         const pending_block_ingress = try allocator.create(PendingBlockIngress);
         errdefer allocator.destroy(pending_block_ingress);
         pending_block_ingress.* = PendingBlockIngress.init(allocator);
@@ -234,6 +243,7 @@ pub const Runtime = struct {
         chain.sync_committee_message_pool = sync_msg_pool;
         chain.kzg = kzg;
         chain.da_manager = da_manager;
+        chain.archive_store = archive_store;
         chain.pending_block_ingress = pending_block_ingress;
         chain.payload_envelope_ingress = payload_envelope_ingress;
 
@@ -258,6 +268,7 @@ pub const Runtime = struct {
             .custody_columns = custody_columns,
             .kzg = kzg,
             .da_manager = da_manager,
+            .archive_store = archive_store,
             .pending_block_ingress = pending_block_ingress,
             .payload_envelope_ingress = payload_envelope_ingress,
             .chain = chain,
@@ -301,6 +312,9 @@ pub const Runtime = struct {
 
         self.beacon_proposer_cache.deinit();
         self.allocator.destroy(self.beacon_proposer_cache);
+
+        self.archive_store.deinit();
+        self.allocator.destroy(self.archive_store);
 
         self.pending_block_ingress.deinit();
         self.allocator.destroy(self.pending_block_ingress);

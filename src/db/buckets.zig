@@ -83,6 +83,8 @@ pub const DatabaseId = enum {
     data_column_archive,
     /// Root(32B) ++ ColumnIndex(8B BE) -> single DataColumnSidecar (hot)
     data_column_single,
+    /// Slot(8B BE) ++ ColumnIndex(8B BE) -> single DataColumnSidecar (archive)
+    data_column_single_archive,
 
     // ---- ePBS (Gloas) ----
 
@@ -124,6 +126,7 @@ pub const DatabaseId = enum {
             .data_column => "data_column",
             .data_column_archive => "data_column_archive",
             .data_column_single => "data_column_single",
+            .data_column_single_archive => "data_column_single_archive",
             .epbs_payload => "epbs_payload",
             .epbs_payload_archive => "epbs_payload_archive",
             .fork_choice => "fork_choice",
@@ -161,6 +164,14 @@ pub fn rootColumnKey(root: [32]u8, column_index: u64) [40]u8 {
     var key: [40]u8 = undefined;
     @memcpy(key[0..32], &root);
     std.mem.writeInt(u64, key[32..40], column_index, .big);
+    return key;
+}
+
+/// Encode a composite key: slot(8 BE) ++ column_index(8 BE).
+pub fn slotColumnKey(slot: u64, column_index: u64) [16]u8 {
+    var key: [16]u8 = undefined;
+    std.mem.writeInt(u64, key[0..8], slot, .big);
+    std.mem.writeInt(u64, key[8..16], column_index, .big);
     return key;
 }
 
@@ -207,4 +218,12 @@ test "rootColumnKey: 40-byte composite key" {
     // Big-endian: value 5 is at the last byte
     try std.testing.expectEqual(@as(u8, 0), key[32]); // leading zeros in BE
     try std.testing.expectEqual(@as(u8, 5), key[39]); // least-significant byte last
+}
+
+test "slotColumnKey: 16-byte composite key" {
+    const key = slotColumnKey(17, 5);
+    try std.testing.expectEqual(@as(u8, 0), key[0]);
+    try std.testing.expectEqual(@as(u8, 17), key[7]);
+    try std.testing.expectEqual(@as(u8, 0), key[8]);
+    try std.testing.expectEqual(@as(u8, 5), key[15]);
 }

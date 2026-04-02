@@ -983,7 +983,7 @@ pub const BeaconNode = struct {
 
     pub fn applyBootstrapOutcome(self: *BeaconNode, outcome: chain_mod.BootstrapOutcome) void {
         self.genesis_validators_root = outcome.genesis_validators_root;
-        self.earliest_available_slot = outcome.snapshot.head.slot;
+        self.earliest_available_slot = outcome.earliest_available_slot;
         self.last_slot_tick = null;
         self.clock = SlotClock.fromGenesis(outcome.genesis_time, self.config.chain);
         self.api_context.genesis_time = outcome.genesis_time;
@@ -1033,14 +1033,33 @@ const PendingAggregateBlsBatch = struct {
     }
 };
 
+const PendingSyncMessageBlsBatch = struct {
+    items: []processor_mod.work_item.SyncMessageWork,
+    owned_sets: []bls_mod.OwnedSignatureSet,
+    future: *BlsThreadPool.VerifySetsFuture,
+
+    fn isReady(self: *const PendingSyncMessageBlsBatch) bool {
+        return self.future.isReady();
+    }
+
+    fn finish(self: *PendingSyncMessageBlsBatch, node: *BeaconNode) void {
+        const batch_valid = self.future.finish() catch false;
+        importSyncMessageBatchItems(node, self.items, batch_valid);
+        freeOwnedSignatureSets(node.allocator, self.owned_sets);
+        node.allocator.free(self.items);
+    }
+};
+
 const PendingGossipBlsBatch = union(enum) {
     attestation: PendingAttestationBlsBatch,
     aggregate: PendingAggregateBlsBatch,
+    sync_message: PendingSyncMessageBlsBatch,
 
     fn priority(self: *const PendingGossipBlsBatch) bls_mod.ThreadPool.VerifySetsPriority {
         return switch (self.*) {
             .attestation => .high,
             .aggregate => .normal,
+            .sync_message => .normal,
         };
     }
 
@@ -1048,6 +1067,7 @@ const PendingGossipBlsBatch = union(enum) {
         return switch (self.*) {
             .attestation => |batch| batch.future.started.isSet(),
             .aggregate => |batch| batch.future.started.isSet(),
+            .sync_message => |batch| batch.future.started.isSet(),
         };
     }
 
@@ -1055,6 +1075,7 @@ const PendingGossipBlsBatch = union(enum) {
         return switch (self.*) {
             .attestation => |batch| batch.isReady(),
             .aggregate => |batch| batch.isReady(),
+            .sync_message => |batch| batch.isReady(),
         };
     }
 
@@ -1062,6 +1083,7 @@ const PendingGossipBlsBatch = union(enum) {
         switch (self.*) {
             .attestation => |*batch| batch.finish(node),
             .aggregate => |*batch| batch.finish(node),
+            .sync_message => |*batch| batch.finish(node),
         }
     }
 };
@@ -1135,6 +1157,15 @@ fn cloneAggregateBatchItems(allocator: Allocator, items: []const AggregateWork) 
     return owned;
 }
 
+fn cloneSyncMessageBatchItems(
+    allocator: Allocator,
+    items: []const processor_mod.work_item.SyncMessageWork,
+) ![]processor_mod.work_item.SyncMessageWork {
+    const owned = try allocator.alloc(processor_mod.work_item.SyncMessageWork, items.len);
+    @memcpy(owned, items);
+    return owned;
+}
+
 fn freeOwnedSignatureSets(allocator: Allocator, owned_sets: []bls_mod.OwnedSignatureSet) void {
     for (owned_sets) |*owned_set| {
         owned_set.deinit();
@@ -1161,6 +1192,19 @@ fn attestationBatchSharesDataRoot(items: []const AttestationWork) bool {
     const attestation_data_root = items[0].attestation_data_root;
     for (items[1..]) |item| {
         if (!std.mem.eql(u8, &item.attestation_data_root, &attestation_data_root)) return false;
+    }
+
+    return true;
+}
+
+fn syncMessageBatchSharesSigningRoot(items: []const processor_mod.work_item.SyncMessageWork) bool {
+    if (items.len < 2) return false;
+
+    const slot = items[0].message.slot;
+    const beacon_block_root = items[0].message.beacon_block_root;
+    for (items[1..]) |item| {
+        if (item.message.slot != slot) return false;
+        if (!std.mem.eql(u8, &item.message.beacon_block_root, &beacon_block_root)) return false;
     }
 
     return true;
@@ -1273,6 +1317,56 @@ fn verifyAggregateBatchSync(node: *BeaconNode, items: []const AggregateWork) boo
     return batch_verifier.verifyAll() catch false;
 }
 
+fn verifySyncMessageBatchSync(
+    node: *BeaconNode,
+    items: []const processor_mod.work_item.SyncMessageWork,
+) bool {
+    const gh = node.gossip_handler orelse return true;
+    if (gh.verifySyncCommitteeSignatureFn == null) return true;
+    const same_message = syncMessageBatchSharesSigningRoot(items);
+
+    var owned_sets: [processor_mod.work_item.max_sync_message_batch_size]bls_mod.OwnedSignatureSet = undefined;
+    var signature_sets: [processor_mod.work_item.max_sync_message_batch_size]bls_mod.SignatureSet = undefined;
+    var owned_count: usize = 0;
+    defer {
+        while (owned_count > 0) {
+            owned_count -= 1;
+            owned_sets[owned_count].deinit();
+        }
+    }
+
+    for (items) |item| {
+        const owned_set = gossip_node_callbacks_mod.buildSyncCommitteeSignatureSet(
+            gh.node,
+            &item.message,
+        ) catch return false;
+        owned_sets[owned_count] = owned_set;
+        signature_sets[owned_count] = owned_set.set;
+        owned_count += 1;
+    }
+
+    const sets = signature_sets[0..owned_count];
+    if (same_message) {
+        var rands: [processor_mod.work_item.max_sync_message_batch_size][32]u8 = undefined;
+        std.Options.debug_io.randomSecure(std.mem.sliceAsBytes(rands[0..owned_count])) catch
+            std.Options.debug_io.random(std.mem.sliceAsBytes(rands[0..owned_count]));
+        var pairing_buf: [bls_mod.Pairing.sizeOf()]u8 align(bls_mod.Pairing.buf_align) = undefined;
+        return bls_mod.verifySignatureSetsSameMessage(
+            &pairing_buf,
+            sets,
+            bls_mod.DST,
+            rands[0..owned_count],
+        ) catch false;
+    }
+
+    var batch_verifier = bls_mod.BatchVerifier.init(node.gossip_bls_thread_pool);
+    for (sets) |set| {
+        batch_verifier.addSet(set) catch return false;
+    }
+
+    return batch_verifier.verifyAll() catch false;
+}
+
 fn importAttestationBatchItems(node: *BeaconNode, items: []AttestationWork, batch_valid: bool) void {
     for (items) |item| {
         var attestation = item.attestation;
@@ -1329,6 +1423,28 @@ fn importAggregateBatchItems(node: *BeaconNode, items: []AggregateWork, batch_va
                 };
             }
         }
+    }
+}
+
+fn importSyncMessageBatchItems(
+    node: *BeaconNode,
+    items: []processor_mod.work_item.SyncMessageWork,
+    batch_valid: bool,
+) void {
+    for (items) |item| {
+        if (!batch_valid) {
+            const gh = node.gossip_handler orelse continue;
+            if (gh.verifySyncCommitteeSignatureFn != null) {
+                if (!gossip_node_callbacks_mod.verifySyncCommitteeMessage(gh.node, &item.message)) {
+                    std.log.warn("Sync committee message BLS failed in batch fallback slot={d}", .{
+                        item.message.slot,
+                    });
+                    continue;
+                }
+            }
+        }
+
+        handleQueuedSyncMessage(node, item);
     }
 }
 
@@ -1457,6 +1573,70 @@ fn tryStartPendingAggregateBatch(node: *BeaconNode, items: []AggregateWork) bool
     return true;
 }
 
+fn tryStartPendingSyncMessageBatch(
+    node: *BeaconNode,
+    items: []processor_mod.work_item.SyncMessageWork,
+) bool {
+    const gh = node.gossip_handler orelse return false;
+    if (gh.verifySyncCommitteeSignatureFn == null) return false;
+    if (!node.gossip_bls_thread_pool.canAcceptWork()) return false;
+    node.pending_gossip_bls_batches.ensureUnusedCapacity(node.allocator, 1) catch return false;
+    const same_message = syncMessageBatchSharesSigningRoot(items);
+
+    const owned_sets = node.allocator.alloc(bls_mod.OwnedSignatureSet, items.len) catch return false;
+    var owned_count: usize = 0;
+
+    var signature_sets: [processor_mod.work_item.max_sync_message_batch_size]bls_mod.SignatureSet = undefined;
+    for (items, 0..) |item, i| {
+        const owned_set = gossip_node_callbacks_mod.buildSyncCommitteeSignatureSet(
+            gh.node,
+            &item.message,
+        ) catch {
+            while (owned_count > 0) {
+                owned_count -= 1;
+                owned_sets[owned_count].deinit();
+            }
+            node.allocator.free(owned_sets);
+            return false;
+        };
+
+        owned_sets[i] = owned_set;
+        signature_sets[i] = owned_set.set;
+        owned_count += 1;
+    }
+
+    const sets = signature_sets[0..items.len];
+    const future = (if (same_message)
+        node.gossip_bls_thread_pool.startVerifySignatureSetsSameMessage(
+            node.allocator,
+            sets,
+            bls_mod.DST,
+            .{ .priority = .normal },
+        )
+    else
+        node.gossip_bls_thread_pool.startVerifySignatureSets(
+            node.allocator,
+            sets,
+            bls_mod.DST,
+            .{ .priority = .normal },
+        )) catch {
+        while (owned_count > 0) {
+            owned_count -= 1;
+            owned_sets[owned_count].deinit();
+        }
+        node.allocator.free(owned_sets);
+        return false;
+    };
+
+    appendPendingGossipBlsBatch(node, .{ .sync_message = .{
+        .items = items,
+        .owned_sets = owned_sets,
+        .future = future,
+    } });
+    setGossipBlsBatchDispatchState(node);
+    return true;
+}
+
 // ---------------------------------------------------------------------------
 // Gossip callbacks — wired into GossipHandler as function pointers.
 // These bridge the type-erased *anyopaque back to *BeaconNode.
@@ -1541,6 +1721,22 @@ pub fn processorHandlerCallback(item: WorkItem, context: *anyopaque) void {
                 importAggregateBatchItems(node, batch_items, batch_valid);
             }
         },
+        .sync_message_batch => |batch| {
+            std.log.debug("Processor: sync message batch (count={d})", .{batch.count});
+            if (cloneSyncMessageBatchItems(node.allocator, batch.items[0..batch.count])) |owned_items| {
+                if (tryStartPendingSyncMessageBatch(node, owned_items)) {
+                    return;
+                }
+
+                defer node.allocator.free(owned_items);
+                const batch_valid = verifySyncMessageBatchSync(node, owned_items);
+                importSyncMessageBatchItems(node, owned_items, batch_valid);
+            } else |_| {
+                const batch_items = batch.items[0..batch.count];
+                const batch_valid = verifySyncMessageBatchSync(node, batch_items);
+                importSyncMessageBatchItems(node, batch_items, batch_valid);
+            }
+        },
         .aggregate => |work| {
             if (node.gossip_handler) |gh| {
                 if (gh.verifyAggregateSignatureFn) |verifyFn| {
@@ -1599,6 +1795,17 @@ pub fn processorHandlerCallback(item: WorkItem, context: *anyopaque) void {
             handleQueuedSyncContribution(node, work);
         },
         .sync_message => |work| {
+            if (node.gossip_handler) |gh| {
+                if (gh.verifySyncCommitteeSignatureFn != null) {
+                    if (!gossip_node_callbacks_mod.verifySyncCommitteeMessage(gh.node, &work.message)) {
+                        std.log.warn("Single sync committee message BLS failed validator={d} slot={d}", .{
+                            work.message.validator_index,
+                            work.message.slot,
+                        });
+                        return;
+                    }
+                }
+            }
             handleQueuedSyncMessage(node, work);
         },
         else => {

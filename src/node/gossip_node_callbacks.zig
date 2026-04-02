@@ -941,26 +941,44 @@ pub fn verifyResolvedAggregateSignature(
 }
 
 pub fn verifySyncCommitteeSignature(ptr: *anyopaque, ssz_bytes: []const u8) bool {
-    const node: *BeaconNode = @ptrCast(@alignCast(ptr));
-    const cached = node.headState() orelse return true;
-
     var msg: types.altair.SyncCommitteeMessage.Type = undefined;
     types.altair.SyncCommitteeMessage.deserializeFromBytes(ssz_bytes, &msg) catch return false;
+    return verifySyncCommitteeMessage(ptr, &msg);
+}
 
-    if (msg.validator_index >= cached.epoch_cache.index_to_pubkey.items.len) return false;
+pub fn buildSyncCommitteeSignatureSet(
+    ptr: *anyopaque,
+    msg: *const types.altair.SyncCommitteeMessage.Type,
+) !bls_mod.OwnedSignatureSet {
+    const node: *BeaconNode = @ptrCast(@alignCast(ptr));
+    const cached = node.headState() orelse return error.NoHeadState;
+
+    if (msg.validator_index >= cached.epoch_cache.index_to_pubkey.items.len) {
+        return error.ValidatorNotFound;
+    }
 
     const slot = msg.slot;
-    const domain = node.config.getDomain(cached.epoch_cache.epoch, constants.DOMAIN_SYNC_COMMITTEE, slot) catch return false;
+    const domain = try node.config.getDomain(cached.epoch_cache.epoch, constants.DOMAIN_SYNC_COMMITTEE, slot);
 
     var signing_root: [32]u8 = undefined;
     const computeSigningRoot = state_transition.computeSigningRoot;
-    computeSigningRoot(types.primitive.Root, &msg.beacon_block_root, domain, &signing_root) catch return false;
+    try computeSigningRoot(types.primitive.Root, &msg.beacon_block_root, domain, &signing_root);
 
-    const sig_set = state_transition.signature_sets.SingleSignatureSet{
-        .pubkey = cached.epoch_cache.index_to_pubkey.items[msg.validator_index],
-        .signing_root = signing_root,
-        .signature = msg.signature,
-    };
+    return bls_mod.OwnedSignatureSet.initSingle(
+        cached.epoch_cache.index_to_pubkey.items[msg.validator_index],
+        signing_root,
+        msg.signature,
+    );
+}
 
-    return state_transition.signature_sets.verifySingleSignatureSet(&sig_set) catch false;
+pub fn verifySyncCommitteeMessage(
+    ptr: *anyopaque,
+    msg: *const types.altair.SyncCommitteeMessage.Type,
+) bool {
+    const owned_set = buildSyncCommitteeSignatureSet(ptr, msg) catch return false;
+    return state_transition.signature_sets.verifySingleSignatureSet(&.{
+        .pubkey = owned_set.set.pubkey.?,
+        .signing_root = owned_set.set.signing_root,
+        .signature = owned_set.set.signature,
+    }) catch false;
 }

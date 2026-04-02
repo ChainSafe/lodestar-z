@@ -30,6 +30,7 @@ pub const BeaconDB = struct {
     data_column_db: Database,
     data_column_archive_db: Database,
     data_column_single_db: Database,
+    data_column_single_archive_db: Database,
     fork_choice_db: Database,
     validator_index_db: Database,
     chain_info_db: Database,
@@ -53,6 +54,7 @@ pub const BeaconDB = struct {
             .data_column_db = kv.getDatabase(.data_column),
             .data_column_archive_db = kv.getDatabase(.data_column_archive),
             .data_column_single_db = kv.getDatabase(.data_column_single),
+            .data_column_single_archive_db = kv.getDatabase(.data_column_single_archive),
             .fork_choice_db = kv.getDatabase(.fork_choice),
             .validator_index_db = kv.getDatabase(.validator_index),
             .chain_info_db = kv.getDatabase(.chain_info),
@@ -109,6 +111,13 @@ pub const BeaconDB = struct {
         if (slot_bytes.len != 8) return error.CorruptedIndex;
         const slot = std.mem.readInt(u64, slot_bytes[0..8], .big);
         return self.getBlockArchive(slot);
+    }
+
+    pub fn getEarliestBlockArchiveSlot(self: *BeaconDB) !?u64 {
+        const first = try self.block_archive_db.firstKey() orelse return null;
+        defer self.allocator.free(first);
+        if (first.len != 8) return error.InvalidKeyLength;
+        return std.mem.readInt(u64, first[0..8], .big);
     }
 
     pub fn getBlockRootBySlot(self: *BeaconDB, slot: u64) !?[32]u8 {
@@ -188,6 +197,15 @@ pub const BeaconDB = struct {
         return self.blob_sidecar_archive_db.get(&key);
     }
 
+    pub fn getBlobSidecarsArchiveByRoot(self: *BeaconDB, root: [32]u8) !?[]const u8 {
+        const slot_bytes = try self.idx_block_root_db.get(&root) orelse return null;
+        defer self.allocator.free(slot_bytes);
+
+        if (slot_bytes.len != 8) return error.CorruptedIndex;
+        const slot = std.mem.readInt(u64, slot_bytes[0..8], .big);
+        return self.getBlobSidecarsArchive(slot);
+    }
+
     // ---------------------------------------------------------------
     // Data column sidecars (PeerDAS / Fulu)
     // ---------------------------------------------------------------
@@ -222,6 +240,25 @@ pub const BeaconDB = struct {
     pub fn getDataColumn(self: *BeaconDB, root: [32]u8, column_index: u64) !?[]const u8 {
         const key = buckets.rootColumnKey(root, column_index);
         return self.data_column_single_db.get(&key);
+    }
+
+    pub fn putDataColumnArchive(self: *BeaconDB, slot: u64, column_index: u64, data: []const u8) !void {
+        const key = buckets.slotColumnKey(slot, column_index);
+        try self.data_column_single_archive_db.put(&key, data);
+    }
+
+    pub fn getDataColumnArchive(self: *BeaconDB, slot: u64, column_index: u64) !?[]const u8 {
+        const key = buckets.slotColumnKey(slot, column_index);
+        return self.data_column_single_archive_db.get(&key);
+    }
+
+    pub fn getDataColumnArchiveByRoot(self: *BeaconDB, root: [32]u8, column_index: u64) !?[]const u8 {
+        const slot_bytes = try self.idx_block_root_db.get(&root) orelse return null;
+        defer self.allocator.free(slot_bytes);
+
+        if (slot_bytes.len != 8) return error.CorruptedIndex;
+        const slot = std.mem.readInt(u64, slot_bytes[0..8], .big);
+        return self.getDataColumnArchive(slot, column_index);
     }
 
     pub fn deleteDataColumn(self: *BeaconDB, root: [32]u8, column_index: u64) !void {

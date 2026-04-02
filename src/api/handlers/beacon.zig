@@ -83,6 +83,14 @@ pub const BlockResult = struct {
     fork_name: handler_result.Fork = .phase0,
 };
 
+pub const BlobSidecarsResult = struct {
+    data: []const u8,
+    slot: u64,
+    execution_optimistic: bool,
+    finalized: bool,
+    fork_name: handler_result.Fork = .deneb,
+};
+
 /// Determine the fork name for a given slot using the beacon config.
 fn forkNameFromSlot(ctx: *ApiContext, slot: u64) handler_result.Fork {
     const fork_seq = ctx.beacon_config.forkSeq(slot);
@@ -93,7 +101,8 @@ fn forkNameFromSlot(ctx: *ApiContext, slot: u64) handler_result.Fork {
         .capella => .capella,
         .deneb => .deneb,
         .electra => .electra,
-        else => .phase0,
+        .fulu => .fulu,
+        .gloas => .gloas,
     };
 }
 
@@ -938,6 +947,56 @@ test "getBlockHeader for head reports execution optimistic from chain query" {
     try std.testing.expect(resp.meta.execution_optimistic orelse false);
 }
 
+test "getBlobSidecars returns archived blob sidecars for slot" {
+    const allocator = std.testing.allocator;
+    var tc = test_helpers.makeTestContext(allocator);
+    defer test_helpers.destroyTestContext(allocator, &tc);
+
+    const sidecar_size = consensus_types.deneb.BlobSidecar.fixed_size;
+    const slot: u64 = 128;
+    const block_root = [_]u8{0x44} ** 32;
+    const blob_bytes = try allocator.alloc(u8, sidecar_size * 2);
+    defer allocator.free(blob_bytes);
+    @memset(blob_bytes, 0);
+    std.mem.writeInt(u64, blob_bytes[0..8], 0, .little);
+    std.mem.writeInt(u64, blob_bytes[sidecar_size .. sidecar_size + 8], 1, .little);
+
+    try tc.db.putBlockArchive(slot, block_root, "archived_block");
+    try tc.db.putBlobSidecarsArchive(slot, blob_bytes);
+
+    const result = try getBlobSidecars(&tc.ctx, .{ .slot = slot }, null);
+    defer allocator.free(result.data);
+
+    try std.testing.expectEqual(@as(u64, slot), result.slot);
+    try std.testing.expectEqual(handler_result.Fork.deneb, result.fork_name);
+    try std.testing.expectEqualSlices(u8, blob_bytes, result.data);
+    try std.testing.expect(result.finalized);
+}
+
+test "getBlobSidecars filters requested indices" {
+    const allocator = std.testing.allocator;
+    var tc = test_helpers.makeTestContext(allocator);
+    defer test_helpers.destroyTestContext(allocator, &tc);
+
+    const sidecar_size = consensus_types.deneb.BlobSidecar.fixed_size;
+    const block_root = [_]u8{0x45} ** 32;
+    const blob_bytes = try allocator.alloc(u8, sidecar_size * 3);
+    defer allocator.free(blob_bytes);
+    @memset(blob_bytes, 0);
+    std.mem.writeInt(u64, blob_bytes[0..8], 0, .little);
+    std.mem.writeInt(u64, blob_bytes[sidecar_size .. sidecar_size + 8], 1, .little);
+    std.mem.writeInt(u64, blob_bytes[sidecar_size * 2 .. sidecar_size * 2 + 8], 2, .little);
+
+    try tc.db.putBlock(block_root, "hot_block");
+    try tc.db.putBlobSidecars(block_root, blob_bytes);
+
+    const result = try getBlobSidecars(&tc.ctx, .{ .root = block_root }, &.{1});
+    defer allocator.free(result.data);
+
+    try std.testing.expectEqual(@as(usize, sidecar_size), result.data.len);
+    try std.testing.expectEqual(@as(u64, 1), std.mem.readInt(u64, result.data[0..8], .little));
+}
+
 test "getValidators without head state returns StateNotAvailable" {
     var tc = test_helpers.makeTestContext(std.testing.allocator);
     defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
@@ -1618,17 +1677,70 @@ pub fn getBlockHeaders(
 
 /// GET /eth/v1/beacon/blob_sidecars/{block_id}
 ///
-/// Returns blob sidecars for a block. Stubs empty list until
-/// Deneb blob storage is wired into the chain query surface.
+/// Returns raw SSZ bytes for the block's blob sidecars.
+///
+/// The HTTP layer is responsible for fork-aware JSON serialization.
 pub fn getBlobSidecars(
-    _: *ApiContext,
-    _: types.BlockId,
-    _: ?[]const u64,
-) !HandlerResult([]const u8) {
-    // Return empty list — Deneb blob DB not yet wired.
-    // When available: resolve the block through chain queries, then read
-    // blob sidecars via a chain-owned blob storage/query API.
-    return error.NotImplemented;
+    ctx: *ApiContext,
+    block_id: types.BlockId,
+    indices_opt: ?[]const u64,
+) !BlobSidecarsResult {
+    const slot_info = try resolveBlockSlotAndRoot(ctx, block_id);
+    const raw_bytes = (try ctx.blobSidecarsByRoot(slot_info.root)) orelse {
+        return .{
+            .data = try ctx.allocator.dupe(u8, &.{}),
+            .slot = slot_info.slot,
+            .execution_optimistic = slot_info.execution_optimistic,
+            .finalized = slot_info.finalized,
+            .fork_name = forkNameFromSlot(ctx, slot_info.slot),
+        };
+    };
+
+    const filtered_bytes = if (indices_opt) |indices|
+        try filterBlobSidecarsByIndex(ctx.allocator, raw_bytes, indices)
+    else
+        raw_bytes;
+    if (indices_opt != null) ctx.allocator.free(raw_bytes);
+
+    return .{
+        .data = filtered_bytes,
+        .slot = slot_info.slot,
+        .execution_optimistic = slot_info.execution_optimistic,
+        .finalized = slot_info.finalized,
+        .fork_name = forkNameFromSlot(ctx, slot_info.slot),
+    };
+}
+
+fn filterBlobSidecarsByIndex(
+    allocator: std.mem.Allocator,
+    raw_bytes: []const u8,
+    indices: []const u64,
+) ![]const u8 {
+    if (indices.len == 0 or raw_bytes.len == 0) return try allocator.dupe(u8, &.{});
+
+    const sidecar_size = consensus_types.deneb.BlobSidecar.fixed_size;
+    if (raw_bytes.len % sidecar_size != 0) return error.InvalidRequest;
+
+    var filtered = std.ArrayListUnmanaged(u8).empty;
+    defer filtered.deinit(allocator);
+
+    var offset: usize = 0;
+    while (offset + sidecar_size <= raw_bytes.len) : (offset += sidecar_size) {
+        const sidecar_bytes = raw_bytes[offset..][0..sidecar_size];
+        const sidecar_index = std.mem.readInt(u64, sidecar_bytes[0..8], .little);
+        if (containsU64(indices, sidecar_index)) {
+            try filtered.appendSlice(allocator, sidecar_bytes);
+        }
+    }
+
+    return filtered.toOwnedSlice(allocator);
+}
+
+fn containsU64(values: []const u64, needle: u64) bool {
+    for (values) |value| {
+        if (value == needle) return true;
+    }
+    return false;
 }
 
 // ---------------------------------------------------------------------------

@@ -330,6 +330,7 @@ pub const Service = struct {
             .snapshot = self.query().currentSnapshot(),
             .genesis_time = bootstrap.genesis_time,
             .genesis_validators_root = bootstrap.genesis_validators_root,
+            .earliest_available_slot = bootstrap.earliest_available_slot,
         };
     }
 
@@ -342,6 +343,7 @@ pub const Service = struct {
             .snapshot = self.query().currentSnapshot(),
             .genesis_time = bootstrap.genesis_time,
             .genesis_validators_root = bootstrap.genesis_validators_root,
+            .earliest_available_slot = bootstrap.earliest_available_slot,
         };
     }
 

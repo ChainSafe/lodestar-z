@@ -76,4 +76,5 @@ pub const BootstrapOutcome = struct {
     snapshot: ChainSnapshot,
     genesis_time: u64,
     genesis_validators_root: Root,
+    earliest_available_slot: Slot,
 };

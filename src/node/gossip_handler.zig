@@ -1056,16 +1056,6 @@ pub const GossipHandler = struct {
             return GossipHandlerError.ValidationRejected;
         }
 
-        // Phase 1c: BLS signature verification.
-        // [REJECT] The sync committee message signature is valid.
-        if (self.verifySyncCommitteeSignatureFn) |verifyFn| {
-            if (!verifyFn(self.node, ssz_bytes)) {
-                std.log.warn("Gossip sync committee message rejected: invalid signature validator={d}", .{msg.validator_index});
-                return GossipHandlerError.ValidationRejected;
-            }
-        }
-
-        // Phase 2: import to sync committee message pool.
         const sync_message = parseSyncCommitteeMessage(ssz_bytes) orelse return GossipHandlerError.DecodeFailed;
         if (self.beacon_processor) |bp| {
             bp.ingest(.{ .sync_message = .{
@@ -1078,6 +1068,16 @@ pub const GossipHandler = struct {
             return;
         }
 
+        // Phase 1c: BLS signature verification.
+        // [REJECT] The sync committee message signature is valid.
+        if (self.verifySyncCommitteeSignatureFn) |verifyFn| {
+            if (!verifyFn(self.node, ssz_bytes)) {
+                std.log.warn("Gossip sync committee message rejected: invalid signature validator={d}", .{msg.validator_index});
+                return GossipHandlerError.ValidationRejected;
+            }
+        }
+
+        // Phase 2: import to sync committee message pool.
         // Fallback: inline processing.
         if (self.importSyncCommitteeMessageFn) |importFn| {
             importFn(self.node, &sync_message, subnet_id) catch |err| {

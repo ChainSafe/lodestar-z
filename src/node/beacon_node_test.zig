@@ -384,6 +384,69 @@ test "BeaconNode: onReqResp BlobSidecarsByRange returns stored blobs" {
     try std.testing.expectEqual(@as(u8, 0xB6), chunks[2].ssz_payload[0]);
 }
 
+test "BeaconNode: onReqResp BlobSidecarsByRoot falls back to archived blobs" {
+    const allocator = std.testing.allocator;
+    var ctx = try TestContext.init(.{});
+    defer ctx.deinit();
+
+    const sidecar_size = preset_root.BLOBSIDECAR_FIXED_SIZE;
+    const blob_root = [_]u8{0xD1} ** 32;
+    const slot: u64 = 24;
+    const archived_blobs = try allocator.alloc(u8, sidecar_size * 2);
+    defer allocator.free(archived_blobs);
+    @memset(archived_blobs[0..sidecar_size], 0x31);
+    @memset(archived_blobs[sidecar_size..], 0x32);
+
+    try ctx.node.chain_runtime.db.putBlockArchive(slot, blob_root, "archived-block");
+    try ctx.node.chain_runtime.db.putBlobSidecarsArchive(slot, archived_blobs);
+
+    var request_bytes: [32 + 8]u8 = undefined;
+    @memcpy(request_bytes[0..32], &blob_root);
+    std.mem.writeInt(u64, request_bytes[32..40], 1, .little);
+
+    const chunks = try ctx.node.onReqResp(.blob_sidecars_by_root, &request_bytes);
+    defer freeResponseChunks(allocator, chunks);
+
+    try std.testing.expectEqual(@as(usize, 1), chunks.len);
+    try std.testing.expectEqual(networking.protocol.ResponseCode.success, chunks[0].result);
+    try std.testing.expectEqual(@as(usize, sidecar_size), chunks[0].ssz_payload.len);
+    try std.testing.expectEqual(@as(u8, 0x32), chunks[0].ssz_payload[0]);
+}
+
+test "BeaconNode: onReqResp DataColumnSidecarsByRange falls back to archived columns" {
+    const allocator = std.testing.allocator;
+    var ctx = try TestContext.init(.{});
+    defer ctx.deinit();
+
+    const root = [_]u8{0xE2} ** 32;
+    const slot: u64 = 48;
+    const column_index: u64 = 7;
+    try ctx.node.chain_runtime.db.putBlockArchive(slot, root, "archived-block");
+    try ctx.node.chain_runtime.db.putDataColumnArchive(slot, column_index, "archived-column-7");
+
+    var request: networking.messages.DataColumnSidecarsByRangeRequest.Type = .{
+        .start_slot = slot,
+        .count = 1,
+        .columns = .empty,
+    };
+    defer networking.messages.DataColumnSidecarsByRangeRequest.deinit(allocator, &request);
+    try request.columns.append(allocator, column_index);
+
+    const request_bytes = try allocator.alloc(
+        u8,
+        networking.messages.DataColumnSidecarsByRangeRequest.serializedSize(&request),
+    );
+    defer allocator.free(request_bytes);
+    _ = networking.messages.DataColumnSidecarsByRangeRequest.serializeIntoBytes(&request, request_bytes);
+
+    const chunks = try ctx.node.onReqResp(.data_column_sidecars_by_range, request_bytes);
+    defer freeResponseChunks(allocator, chunks);
+
+    try std.testing.expectEqual(@as(usize, 1), chunks.len);
+    try std.testing.expectEqual(networking.protocol.ResponseCode.success, chunks[0].result);
+    try std.testing.expectEqualSlices(u8, "archived-column-7", chunks[0].ssz_payload);
+}
+
 test "BeaconNode: archiveState stores state bytes in DB and retrieves them" {
     const allocator = std.testing.allocator;
     var ctx = try TestContext.init(.{});
