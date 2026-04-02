@@ -13,6 +13,9 @@ const computeStartSlotAtEpoch = @import("../utils/epoch.zig").computeStartSlotAt
 
 const CachedBeaconState = @import("state_cache.zig").CachedBeaconState;
 const BlockStateCache = @import("block_state_cache.zig").BlockStateCache;
+const PmtMutator = @import("pmt_mutator.zig").PmtMutator;
+const StateDisposer = @import("state_disposer.zig").StateDisposer;
+const destroyCachedBeaconState = @import("state_disposer.zig").destroyCachedBeaconState;
 const datastore_mod = @import("datastore.zig");
 const CPStateDatastore = datastore_mod.CPStateDatastore;
 const CheckpointKey = datastore_mod.CheckpointKey;
@@ -51,6 +54,8 @@ pub const CheckpointStateCache = struct {
     block_cache: *BlockStateCache,
     /// Max epochs to keep in memory
     max_epochs_in_memory: u32,
+    state_disposer: ?*StateDisposer,
+    pmt_mutator: ?*PmtMutator,
 
     pub fn init(
         allocator: Allocator,
@@ -65,6 +70,8 @@ pub const CheckpointStateCache = struct {
             .datastore = ds,
             .block_cache = block_cache,
             .max_epochs_in_memory = max_epochs,
+            .state_disposer = null,
+            .pmt_mutator = null,
         };
     }
 
@@ -72,10 +79,7 @@ pub const CheckpointStateCache = struct {
         // Free in-memory states and persisted keys
         for (self.cache.values()) |item| {
             switch (item) {
-                .in_memory => |state| {
-                    state.deinit();
-                    self.allocator.destroy(state);
-                },
+                .in_memory => |state| self.disposeState(state),
                 .persisted => |key| {
                     self.allocator.free(key);
                 },
@@ -88,6 +92,14 @@ pub const CheckpointStateCache = struct {
             list.deinit(self.allocator);
         }
         self.epoch_index.deinit();
+    }
+
+    pub fn setStateDisposer(self: *CheckpointStateCache, state_disposer: *StateDisposer) void {
+        self.state_disposer = state_disposer;
+    }
+
+    pub fn setPmtMutator(self: *CheckpointStateCache, pmt_mutator: *PmtMutator) void {
+        self.pmt_mutator = pmt_mutator;
     }
 
     /// Get from memory only (fast path). Returns null if not present or persisted.
@@ -130,6 +142,9 @@ pub const CheckpointStateCache = struct {
             inline else => |s| s.pool,
         };
 
+        var pmt_mutation_lease = PmtMutator.acquireOptional(self.pmt_mutator);
+        defer pmt_mutation_lease.release();
+
         const new_state = try loadCachedBeaconState(
             self.allocator,
             pool,
@@ -155,10 +170,7 @@ pub const CheckpointStateCache = struct {
         if (self.cache.get(cp)) |old_item| {
             switch (old_item) {
                 .persisted => |key| self.allocator.free(key),
-                .in_memory => |old_state| {
-                    old_state.deinit();
-                    self.allocator.destroy(old_state);
-                },
+                .in_memory => |old_state| self.disposeState(old_state),
             }
         }
 
@@ -295,8 +307,7 @@ pub const CheckpointStateCache = struct {
                     };
 
                     // Free the in-memory state
-                    state_to_persist.deinit();
-                    self.allocator.destroy(state_to_persist);
+                    self.disposeState(state_to_persist);
 
                     persist_count += 1;
                 },
@@ -320,10 +331,7 @@ pub const CheckpointStateCache = struct {
             const cp = CheckpointKey{ .epoch = epoch, .root = root };
             if (self.cache.fetchOrderedRemove(cp)) |kv| {
                 switch (kv.value) {
-                    .in_memory => |s| {
-                        s.deinit();
-                        self.allocator.destroy(s);
-                    },
+                    .in_memory => |s| self.disposeState(s),
                     .persisted => |key| {
                         self.datastore.remove(key) catch {};
                         self.allocator.free(key);
@@ -337,6 +345,14 @@ pub const CheckpointStateCache = struct {
             list.deinit(self.allocator);
             _ = self.epoch_index.orderedRemove(epoch);
         }
+    }
+
+    fn disposeState(self: *CheckpointStateCache, state: *CachedBeaconState) void {
+        if (self.state_disposer) |state_disposer| {
+            state_disposer.dispose(state) catch @panic("OOM deferring checkpoint-state disposal");
+            return;
+        }
+        destroyCachedBeaconState(self.allocator, state);
     }
 };
 
@@ -647,4 +663,48 @@ test "CheckpointStateCache: add replaces existing in-memory state" {
 
     try std.testing.expectEqual(@as(usize, 1), cp_cache.size());
     try std.testing.expectEqual(state2, cp_cache.get(cp).?);
+}
+
+test "CheckpointStateCache: replacement can defer state teardown" {
+    const Node = @import("persistent_merkle_tree").Node;
+    const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
+    const MemoryCPStateDatastore = datastore_mod.MemoryCPStateDatastore;
+    const state_disposer_mod = @import("state_disposer.zig");
+
+    const allocator = std.testing.allocator;
+    const pool_size = 256 * 5;
+    var pool = try Node.Pool.init(allocator, pool_size);
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 16);
+    defer test_state.deinit();
+
+    var mem_store = MemoryCPStateDatastore.init(allocator);
+    defer mem_store.deinit();
+    const ds = mem_store.datastore();
+
+    var block_cache = BlockStateCache.init(allocator, 4);
+    defer block_cache.deinit();
+
+    var state_disposer = state_disposer_mod.StateDisposer.init(allocator, std.testing.io);
+    defer state_disposer.deinit();
+
+    var cp_cache = CheckpointStateCache.init(allocator, ds, &block_cache, 3);
+    cp_cache.setStateDisposer(&state_disposer);
+    defer cp_cache.deinit();
+
+    const cp = CheckpointKey{ .epoch = 5, .root = [_]u8{0x55} ** 32 };
+
+    const state1 = try test_state.cached_state.clone(allocator, .{});
+    try cp_cache.add(cp, state1);
+
+    state_disposer.beginDeferral();
+    const state2 = try test_state.cached_state.clone(allocator, .{});
+    try state2.state.setSlot((try state2.state.slot()) + 1);
+    try cp_cache.add(cp, state2);
+
+    try std.testing.expectEqual(@as(usize, 1), state_disposer.pendingCount());
+
+    try state_disposer.endDeferral();
+    try std.testing.expectEqual(@as(usize, 0), state_disposer.pendingCount());
 }

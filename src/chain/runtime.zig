@@ -14,6 +14,8 @@ const BlockStateCache = state_transition.BlockStateCache;
 const CheckpointStateCache = state_transition.CheckpointStateCache;
 const MemoryCPStateDatastore = state_transition.MemoryCPStateDatastore;
 const StateRegen = state_transition.StateRegen;
+const StateDisposer = state_transition.StateDisposer;
+const PmtMutator = state_transition.PmtMutator;
 const db_mod = @import("db");
 const BeaconDB = db_mod.BeaconDB;
 const MemoryKVStore = db_mod.MemoryKVStore;
@@ -82,6 +84,8 @@ pub const Runtime = struct {
     cp_datastore: *MemoryCPStateDatastore,
     block_state_cache: *BlockStateCache,
     checkpoint_state_cache: *CheckpointStateCache,
+    state_disposer: *StateDisposer,
+    pmt_mutator: *PmtMutator,
     state_regen: *StateRegen,
     queued_regen: *QueuedStateRegen,
     head_tracker: *HeadTracker,
@@ -103,6 +107,7 @@ pub const Runtime = struct {
 
     pub fn init(
         allocator: Allocator,
+        io: std.Io,
         config: *const BeaconConfig,
         storage_backend: StorageBackend,
         opts: RuntimeOptions,
@@ -135,9 +140,24 @@ pub const Runtime = struct {
         );
         errdefer cp_cache.deinit();
 
+        const state_disposer = try allocator.create(StateDisposer);
+        errdefer allocator.destroy(state_disposer);
+        state_disposer.* = StateDisposer.init(allocator, io);
+        errdefer state_disposer.deinit();
+
+        const pmt_mutator = try allocator.create(PmtMutator);
+        errdefer allocator.destroy(pmt_mutator);
+        pmt_mutator.* = PmtMutator.init(io, state_disposer);
+
+        block_cache.setStateDisposer(state_disposer);
+        cp_cache.setStateDisposer(state_disposer);
+        cp_cache.setPmtMutator(pmt_mutator);
+
         const regen = try allocator.create(StateRegen);
         errdefer allocator.destroy(regen);
         regen.* = StateRegen.initWithDB(allocator, block_cache, cp_cache, db, null, null);
+        regen.setStateDisposer(state_disposer);
+        regen.setPmtMutator(pmt_mutator);
 
         const queued_regen = try allocator.create(QueuedStateRegen);
         errdefer allocator.destroy(queued_regen);
@@ -238,6 +258,7 @@ pub const Runtime = struct {
         errdefer chain.deinit();
         chain.verify_signatures = opts.verify_signatures;
         chain.block_bls_thread_pool = opts.block_bls_thread_pool;
+        chain.pmt_mutator = pmt_mutator;
         chain.queued_regen = queued_regen;
         chain.sync_contribution_pool = sync_contrib_pool;
         chain.sync_committee_message_pool = sync_msg_pool;
@@ -255,6 +276,8 @@ pub const Runtime = struct {
             .cp_datastore = cp_datastore,
             .block_state_cache = block_cache,
             .checkpoint_state_cache = cp_cache,
+            .state_disposer = state_disposer,
+            .pmt_mutator = pmt_mutator,
             .state_regen = regen,
             .queued_regen = queued_regen,
             .head_tracker = head_tracker,
@@ -355,6 +378,11 @@ pub const Runtime = struct {
 
         self.block_state_cache.deinit();
         self.allocator.destroy(self.block_state_cache);
+
+        self.allocator.destroy(self.pmt_mutator);
+
+        self.state_disposer.deinit();
+        self.allocator.destroy(self.state_disposer);
 
         self.cp_datastore.deinit();
         self.allocator.destroy(self.cp_datastore);

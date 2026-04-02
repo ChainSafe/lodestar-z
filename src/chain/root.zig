@@ -53,6 +53,7 @@ pub const RuntimeOptions = runtime.RuntimeOptions;
 pub const StorageBackend = runtime.StorageBackend;
 pub const Service = service.Service;
 pub const Query = query.Query;
+pub const PmtMutator = @import("state_transition").PmtMutator;
 
 // Existing re-exports (kept for backward compatibility)
 pub const HeadTracker = block_import.HeadTracker;

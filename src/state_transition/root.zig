@@ -122,6 +122,8 @@ pub const deserializeState = state_deserialize.deserializeState;
 // State caching layer
 pub const BlockStateCache = @import("./cache/block_state_cache.zig").BlockStateCache;
 pub const CheckpointStateCache = @import("./cache/checkpoint_state_cache.zig").CheckpointStateCache;
+pub const StateDisposer = @import("./cache/state_disposer.zig").StateDisposer;
+pub const PmtMutator = @import("./cache/pmt_mutator.zig").PmtMutator;
 pub const CPStateDatastore = @import("./cache/datastore.zig").CPStateDatastore;
 pub const MemoryCPStateDatastore = @import("./cache/datastore.zig").MemoryCPStateDatastore;
 pub const FileCPStateDatastore = @import("./cache/datastore.zig").FileCPStateDatastore;

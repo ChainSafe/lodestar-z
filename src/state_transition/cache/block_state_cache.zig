@@ -11,6 +11,8 @@ const preset = @import("preset").preset;
 const computeEpochAtSlot = @import("../utils/epoch.zig").computeEpochAtSlot;
 
 const CachedBeaconState = @import("state_cache.zig").CachedBeaconState;
+const StateDisposer = @import("state_disposer.zig").StateDisposer;
+const destroyCachedBeaconState = @import("state_disposer.zig").destroyCachedBeaconState;
 
 pub const DEFAULT_MAX_STATES: u32 = 64;
 
@@ -24,6 +26,7 @@ pub const BlockStateCache = struct {
     max_states: u32,
     /// Head state root (always kept, never evicted)
     head_root: ?[32]u8,
+    state_disposer: ?*StateDisposer,
 
     pub fn init(allocator: Allocator, max_states: u32) BlockStateCache {
         return .{
@@ -32,17 +35,21 @@ pub const BlockStateCache = struct {
             .key_order = .empty,
             .max_states = max_states,
             .head_root = null,
+            .state_disposer = null,
         };
     }
 
     pub fn deinit(self: *BlockStateCache) void {
         // Deinit and free all cached states
         for (self.cache.values()) |state| {
-            state.deinit();
-            self.allocator.destroy(state);
+            self.disposeState(state);
         }
         self.cache.deinit();
         self.key_order.deinit(self.allocator);
+    }
+
+    pub fn setStateDisposer(self: *BlockStateCache, state_disposer: *StateDisposer) void {
+        self.state_disposer = state_disposer;
     }
 
     /// Get a state by its root.
@@ -130,8 +137,7 @@ pub const BlockStateCache = struct {
             if (epoch < finalized_epoch) {
                 _ = self.key_order.orderedRemove(i);
                 _ = self.cache.orderedRemove(root);
-                state.deinit();
-                self.allocator.destroy(state);
+                self.disposeState(state);
             } else {
                 i += 1;
             }
@@ -182,10 +188,17 @@ pub const BlockStateCache = struct {
             _ = self.key_order.pop();
 
             if (self.cache.fetchOrderedRemove(tail)) |kv| {
-                kv.value.deinit();
-                self.allocator.destroy(kv.value);
+                self.disposeState(kv.value);
             }
         }
+    }
+
+    fn disposeState(self: *BlockStateCache, state: *CachedBeaconState) void {
+        if (self.state_disposer) |state_disposer| {
+            state_disposer.dispose(state) catch @panic("OOM deferring block-state disposal");
+            return;
+        }
+        destroyCachedBeaconState(self.allocator, state);
     }
 };
 
@@ -266,6 +279,47 @@ test "BlockStateCache: head state is never evicted" {
     try std.testing.expectEqual(@as(usize, 2), cache.size());
     // Head should still be there
     try std.testing.expect(cache.get(root1) != null);
+}
+
+test "BlockStateCache: eviction can defer state teardown" {
+    const Node = @import("persistent_merkle_tree").Node;
+    const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
+    const state_disposer_mod = @import("state_disposer.zig");
+
+    const allocator = std.testing.allocator;
+    const pool_size = 256 * 5;
+    var pool = try Node.Pool.init(allocator, pool_size);
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 16);
+    defer test_state.deinit();
+
+    var state_disposer = state_disposer_mod.StateDisposer.init(allocator, std.testing.io);
+    defer state_disposer.deinit();
+
+    var cache = BlockStateCache.init(allocator, 2);
+    cache.setStateDisposer(&state_disposer);
+    defer cache.deinit();
+
+    const state1 = try test_state.cached_state.clone(allocator, .{});
+    try state1.state.setSlot((try state1.state.slot()) + 1);
+    const root1 = try cache.add(state1, false);
+
+    const state2 = try test_state.cached_state.clone(allocator, .{});
+    try state2.state.setSlot((try state2.state.slot()) + 2);
+    const root2 = try cache.add(state2, false);
+
+    state_disposer.beginDeferral();
+    const state3 = try test_state.cached_state.clone(allocator, .{});
+    try state3.state.setSlot((try state3.state.slot()) + 3);
+    _ = try cache.add(state3, false);
+
+    try std.testing.expect(cache.get(root1) != null);
+    try std.testing.expect(cache.get(root2) == null);
+    try std.testing.expectEqual(@as(usize, 1), state_disposer.pendingCount());
+
+    try state_disposer.endDeferral();
+    try std.testing.expectEqual(@as(usize, 0), state_disposer.pendingCount());
 }
 
 test "BlockStateCache: getSeedState" {

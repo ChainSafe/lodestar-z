@@ -29,6 +29,7 @@ const BlsThreadPool = @import("bls").ThreadPool;
 const CachedBeaconState = state_transition.CachedBeaconState;
 const BlockStateCache = state_transition.BlockStateCache;
 const CheckpointStateCache = state_transition.CheckpointStateCache;
+const PmtMutator = state_transition.PmtMutator;
 const StateRegen = state_transition.StateRegen;
 const QueuedStateRegen = @import("queued_regen.zig").QueuedStateRegen;
 const RegenPriority = @import("queued_regen.zig").RegenPriority;
@@ -138,6 +139,7 @@ pub const Chain = struct {
     block_state_cache: *BlockStateCache,
     checkpoint_state_cache: *CheckpointStateCache,
     state_regen: *StateRegen,
+    pmt_mutator: ?*PmtMutator,
     /// Queued state regenerator — optional, wraps state_regen with
     /// request deduplication and priority queuing. When set, used for
     /// pre-state lookups in block import and API handlers.
@@ -231,6 +233,7 @@ pub const Chain = struct {
             .block_state_cache = block_state_cache,
             .checkpoint_state_cache = checkpoint_state_cache,
             .state_regen = state_regen,
+            .pmt_mutator = null,
             .queued_regen = null,
             .db = db,
             .op_pool = op_pool,
@@ -523,6 +526,7 @@ pub const Chain = struct {
             .notification_sink = self.notification_sink,
             .execution_verifier = self.execution_verifier,
             .current_slot = current_slot,
+            .pmt_mutator = self.pmt_mutator,
             .block_bls_thread_pool = self.block_bls_thread_pool,
             .reprocess_queue = self.reprocess_queue, // P1-10: wire reprocess queue
             .on_finalized_ptr = @ptrCast(self), // W2: prune caches on finalization
@@ -1048,6 +1052,9 @@ pub const Chain = struct {
     /// blocks at the current slot as "future" if onSlot was called but advanceSlot was
     /// not (or vice versa).
     pub fn advanceSlot(self: *Chain, target_slot: u64) !void {
+        var pmt_mutation_lease = PmtMutator.acquireOptional(self.pmt_mutator);
+        defer pmt_mutation_lease.release();
+
         const head_state_root = self.head_tracker.head_state_root;
         const pre_state = self.block_state_cache.get(head_state_root) orelse
             return error.NoHeadState;
@@ -1083,5 +1090,9 @@ pub const Chain = struct {
         self.head_tracker.head_slot = target_slot;
 
         try self.head_tracker.slot_roots.put(target_slot, self.head_tracker.head_root);
+    }
+
+    pub fn acquirePmtMutationLease(self: *Chain) PmtMutator.Lease {
+        return PmtMutator.acquireOptional(self.pmt_mutator);
     }
 };

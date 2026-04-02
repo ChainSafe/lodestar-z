@@ -1266,6 +1266,9 @@ fn computeStateRootForAnyBlock(
 ) ![32]u8 {
     const head_state = self.headState() orelse return error.NoHeadState;
 
+    var pmt_mutation_lease = self.chainService().acquirePmtMutationLease();
+    defer pmt_mutation_lease.release();
+
     const post_state = state_transition.stateTransition(
         self.allocator,
         head_state,
@@ -1551,6 +1554,9 @@ pub fn produceAndImportBlock(
 
     if (self.headState()) |head_state| {
         const any_block = fork_types.AnySignedBeaconBlock{ .full_electra = signed_block };
+
+        var pmt_mutation_lease = self.chainService().acquirePmtMutationLease();
+        defer pmt_mutation_lease.release();
 
         const post_state = state_transition.stateTransition(
             self.allocator,

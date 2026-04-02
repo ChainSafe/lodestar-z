@@ -10,6 +10,7 @@ const fork_types = @import("fork_types");
 const fork_choice_mod = @import("fork_choice");
 const preset = @import("preset").preset;
 const state_transition = @import("state_transition");
+const PmtMutator = state_transition.PmtMutator;
 
 const Chain = @import("chain.zig").Chain;
 const chain_types = @import("types.zig");
@@ -94,6 +95,10 @@ pub const Service = struct {
 
     pub fn query(self: Service) Query {
         return Query.init(self.chain);
+    }
+
+    pub fn acquirePmtMutationLease(self: Service) PmtMutator.Lease {
+        return self.chain.acquirePmtMutationLease();
     }
 
     fn forkchoiceUpdateForHead(self: Service, head_root: Root) ?chain_effects.ExecutionForkchoiceUpdate {

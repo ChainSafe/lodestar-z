@@ -27,6 +27,7 @@ const consensus_types = @import("consensus_types");
 const preset = @import("preset").preset;
 const state_transition = @import("state_transition");
 const CachedBeaconState = state_transition.CachedBeaconState;
+const PmtMutator = state_transition.PmtMutator;
 const computeEpochAtSlot = state_transition.computeEpochAtSlot;
 const fork_choice_mod = @import("fork_choice");
 const ForkChoice = fork_choice_mod.ForkChoiceStruct;
@@ -104,6 +105,9 @@ pub const PipelineContext = struct {
 
     // -- Clock --
     current_slot: Slot,
+
+    // -- Shared PMT mutation --
+    pmt_mutator: ?*PmtMutator = null,
 
     // -- BLS verification --
     block_bls_thread_pool: ?*BlsThreadPool = null,
@@ -235,6 +239,7 @@ fn prepareBlockForImport(
                 da_status,
                 opts,
                 sanity.body_root,
+                ctx.pmt_mutator,
                 ctx.block_bls_thread_pool,
             );
             return .{ .prepared = .{

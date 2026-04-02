@@ -25,6 +25,7 @@ const config_mod = @import("config");
 const ForkSeq = config_mod.ForkSeq;
 const state_transition = @import("state_transition");
 const CachedBeaconState = state_transition.CachedBeaconState;
+const PmtMutator = state_transition.PmtMutator;
 const bls_mod = @import("bls");
 const BatchVerifier = bls_mod.BatchVerifier;
 
@@ -72,11 +73,15 @@ pub fn executeStateTransition(
     da_status: DataAvailabilityStatus,
     opts: ImportBlockOpts,
     precomputed_body_root: ?[32]u8,
+    pmt_mutator: ?*PmtMutator,
     block_bls_thread_pool: ?*bls_mod.ThreadPool,
 ) BlockImportError!StfResult {
     const any_signed_block = block_input.block;
     const block = any_signed_block.beaconBlock();
     const block_slot = block.slot();
+
+    var pmt_mutation_lease = PmtMutator.acquireOptional(pmt_mutator);
+    defer pmt_mutation_lease.release();
 
     // Clone pre-state (COW — cheap if no mutations).
     const post_state = pre_state.clone(allocator, .{ .transfer_cache = false }) catch

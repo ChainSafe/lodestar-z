@@ -86,6 +86,7 @@ pub fn init(allocator: Allocator, io: std.Io, beacon_config: *const BeaconConfig
 
     const chain_runtime = try chain_mod.Runtime.init(
         allocator,
+        io,
         beacon_config,
         storage_backend,
         .{

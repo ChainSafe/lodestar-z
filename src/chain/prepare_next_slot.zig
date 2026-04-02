@@ -20,6 +20,7 @@ const state_transition = @import("state_transition");
 const CachedBeaconState = state_transition.CachedBeaconState;
 const CheckpointStateCache = state_transition.CheckpointStateCache;
 const BlockStateCache = state_transition.BlockStateCache;
+const PmtMutator = state_transition.PmtMutator;
 const computeEpochAtSlot = state_transition.computeEpochAtSlot;
 
 const preset = @import("preset").preset;
@@ -39,6 +40,8 @@ pub const PrepareNextSlot = struct {
     block_state_cache: *BlockStateCache,
     /// Reference to the checkpoint state cache (not owned).
     checkpoint_state_cache: *CheckpointStateCache,
+    /// Shared PMT mutator gate (optional until the runtime wires it).
+    pmt_mutator: ?*PmtMutator,
 
     /// Slot for which we last ran the pre-computation.
     last_prepared_slot: u64,
@@ -54,11 +57,16 @@ pub const PrepareNextSlot = struct {
             .config = config,
             .block_state_cache = block_state_cache,
             .checkpoint_state_cache = checkpoint_state_cache,
+            .pmt_mutator = null,
             .last_prepared_slot = 0,
         };
     }
 
     pub fn deinit(_: *PrepareNextSlot) void {}
+
+    pub fn setPmtMutator(self: *PrepareNextSlot, pmt_mutator: *PmtMutator) void {
+        self.pmt_mutator = pmt_mutator;
+    }
 
     /// Called at the 2/3 slot tick (slot N) to pre-compute state for slot N+1.
     ///
@@ -85,6 +93,9 @@ pub const PrepareNextSlot = struct {
             return;
         };
 
+        var pmt_mutation_lease = PmtMutator.acquireOptional(self.pmt_mutator);
+        defer pmt_mutation_lease.release();
+
         // Clone and advance.
         const advanced = try head_state.clone(self.allocator, .{ .transfer_cache = false });
         errdefer {
@@ -93,7 +104,7 @@ pub const PrepareNextSlot = struct {
         }
 
         try state_transition.processSlots(self.allocator, advanced, target_slot, .{});
-        try advanced.state.commit();
+        try sealPublishedState(advanced);
 
         // Store in block state cache. The state root after advancing without a
         // block is the ephemeral intermediate state root.
@@ -108,6 +119,7 @@ pub const PrepareNextSlot = struct {
                 cp_state.deinit();
                 self.allocator.destroy(cp_state);
             }
+            try sealPublishedState(cp_state);
             // Use a zero root as the checkpoint block root for the pre-computed state.
             // The actual block root will be written when the block arrives.
             const ephemeral_root = [_]u8{0xFF} ** 32;
@@ -124,6 +136,11 @@ pub const PrepareNextSlot = struct {
     /// Reset the last-prepared tracker (call on chain reorg or resync).
     pub fn reset(self: *PrepareNextSlot) void {
         self.last_prepared_slot = 0;
+    }
+
+    fn sealPublishedState(state: *CachedBeaconState) !void {
+        try state.state.commit();
+        _ = try state.state.hashTreeRoot();
     }
 };
 

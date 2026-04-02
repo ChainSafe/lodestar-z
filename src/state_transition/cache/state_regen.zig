@@ -18,6 +18,9 @@ const CachedBeaconState = @import("state_cache.zig").CachedBeaconState;
 const BlockStateCache = @import("block_state_cache.zig").BlockStateCache;
 const CheckpointStateCache = @import("checkpoint_state_cache.zig").CheckpointStateCache;
 const CheckpointKey = @import("datastore.zig").CheckpointKey;
+const PmtMutator = @import("pmt_mutator.zig").PmtMutator;
+const StateDisposer = @import("state_disposer.zig").StateDisposer;
+const destroyCachedBeaconState = @import("state_disposer.zig").destroyCachedBeaconState;
 const BeaconDB = @import("db").BeaconDB;
 const BeaconConfig = @import("config").BeaconConfig;
 const PersistentMerkleTreeNode = @import("persistent_merkle_tree").Node;
@@ -36,6 +39,8 @@ pub const StateRegen = struct {
     /// Beacon chain config — required for fork detection during deserialization.
     /// Optional: deserialization from DB is skipped when null.
     config: ?*const BeaconConfig,
+    state_disposer: ?*StateDisposer,
+    pmt_mutator: ?*PmtMutator,
 
     pub fn init(
         allocator: Allocator,
@@ -61,7 +66,17 @@ pub const StateRegen = struct {
             .db = db,
             .pool = pool,
             .config = config,
+            .state_disposer = null,
+            .pmt_mutator = null,
         };
+    }
+
+    pub fn setStateDisposer(self: *StateRegen, state_disposer: *StateDisposer) void {
+        self.state_disposer = state_disposer;
+    }
+
+    pub fn setPmtMutator(self: *StateRegen, pmt_mutator: *PmtMutator) void {
+        self.pmt_mutator = pmt_mutator;
     }
 
     /// Get the pre-state for processing a block at `block_slot` with parent `parent_root`.
@@ -126,6 +141,8 @@ pub const StateRegen = struct {
             if (self.pool == null or self.config == null) return null;
             const bytes = (try db.getStateArchiveByRoot(state_root)) orelse return null;
             defer self.allocator.free(bytes);
+            var pmt_mutation_lease = PmtMutator.acquireOptional(self.pmt_mutator);
+            defer pmt_mutation_lease.release();
             const cached_state = try deserializeState(
                 self.allocator,
                 self.pool.?,
@@ -151,6 +168,8 @@ pub const StateRegen = struct {
         if (try self.db.?.getStateArchive(slot)) |bytes| {
             defer self.allocator.free(bytes);
 
+            var pmt_mutation_lease = PmtMutator.acquireOptional(self.pmt_mutator);
+            defer pmt_mutation_lease.release();
             const cached_state = try deserializeState(
                 self.allocator,
                 self.pool.?,
@@ -165,11 +184,13 @@ pub const StateRegen = struct {
 
     /// Called after processing a new block — cache the resulting state.
     pub fn onNewBlock(self: *StateRegen, state: *CachedBeaconState, is_head: bool) ![32]u8 {
+        try sealPublishedState(state);
         return self.block_cache.add(state, is_head);
     }
 
     /// Called when a new head is selected.
     pub fn onNewHead(self: *StateRegen, state: *CachedBeaconState) ![32]u8 {
+        try sealPublishedState(state);
         return self.block_cache.setHeadState(state);
     }
 
@@ -179,6 +200,7 @@ pub const StateRegen = struct {
         cp: CheckpointKey,
         state: *CachedBeaconState,
     ) !void {
+        try sealPublishedState(state);
         try self.checkpoint_cache.add(cp, state);
     }
 
@@ -193,10 +215,10 @@ pub const StateRegen = struct {
         state: *CachedBeaconState,
         is_head: bool,
     ) !*CachedBeaconState {
+        try sealPublishedState(state);
         const state_root = (try state.state.hashTreeRoot()).*;
         if (self.block_cache.get(state_root)) |existing| {
-            state.deinit();
-            self.allocator.destroy(state);
+            try self.disposeState(state);
             return existing;
         }
 
@@ -219,6 +241,9 @@ pub const StateRegen = struct {
 
     fn replayCanonicalStateToSlot(self: *StateRegen, target_slot: u64) !?*CachedBeaconState {
         if (self.db == null or self.pool == null or self.config == null) return null;
+
+        var pmt_mutation_lease = PmtMutator.acquireOptional(self.pmt_mutator);
+        defer pmt_mutation_lease.release();
 
         if (try self.db.?.getStateArchive(target_slot)) |bytes| {
             defer self.allocator.free(bytes);
@@ -332,6 +357,19 @@ pub const StateRegen = struct {
         if (block_bytes.len < 108) return null;
         return std.mem.readInt(u64, block_bytes[100..108], .little);
     }
+
+    fn sealPublishedState(state: *CachedBeaconState) !void {
+        try state.state.commit();
+        _ = try state.state.hashTreeRoot();
+    }
+
+    fn disposeState(self: *StateRegen, state: *CachedBeaconState) !void {
+        if (self.state_disposer) |state_disposer| {
+            try state_disposer.dispose(state);
+            return;
+        }
+        destroyCachedBeaconState(self.allocator, state);
+    }
 };
 
 // ---------------------------------------------------------------------------
@@ -439,6 +477,51 @@ test "StateRegen: onFinalized prunes old states" {
     // Finalize at epoch 10 — should prune epoch 5
     try regen.onFinalized(10);
     try std.testing.expectEqual(@as(usize, 0), cp_cache.size());
+}
+
+test "StateRegen: checkpoint publication seals lazy PMT roots" {
+    const Node = @import("persistent_merkle_tree").Node;
+    const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
+    const datastore_mod = @import("datastore.zig");
+    const MemoryCPStateDatastore = datastore_mod.MemoryCPStateDatastore;
+
+    const allocator = std.testing.allocator;
+    const pool_size = 256 * 5;
+    var pool = try Node.Pool.init(allocator, pool_size);
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 16);
+    defer test_state.deinit();
+
+    var mem_store = MemoryCPStateDatastore.init(allocator);
+    defer mem_store.deinit();
+    const ds = mem_store.datastore();
+
+    var block_cache = BlockStateCache.init(allocator, 4);
+    defer block_cache.deinit();
+
+    var cp_cache = CheckpointStateCache.init(allocator, ds, &block_cache, 3);
+    defer cp_cache.deinit();
+
+    var regen = StateRegen.init(allocator, &block_cache, &cp_cache);
+
+    const state = try test_state.cached_state.clone(allocator, .{});
+    try state.state.setSlot((try state.state.slot()) + 1);
+
+    const root_state_before = switch (state.state.*) {
+        inline else => |fork_state| fork_state.root.getState(fork_state.pool),
+    };
+    try std.testing.expect(root_state_before.isBranchLazy());
+
+    const cp = CheckpointKey{ .epoch = 5, .root = [_]u8{0x05} ** 32 };
+    try regen.onCheckpoint(cp, state);
+
+    const cached_state = cp_cache.get(cp);
+    try std.testing.expect(cached_state != null);
+    const root_state_after = switch (cached_state.?.state.*) {
+        inline else => |fork_state| fork_state.root.getState(fork_state.pool),
+    };
+    try std.testing.expect(root_state_after.isBranchComputed());
 }
 
 test "StateRegen: getStateByRoot returns state from block cache" {
