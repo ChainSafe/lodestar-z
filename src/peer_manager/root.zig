@@ -34,6 +34,9 @@ pub const PeerStore = @import("store.zig").PeerStore;
 // Scorer
 pub const PeerScorer = @import("scorer.zig").PeerScorer;
 
+// Relevance
+pub const assertPeerRelevance = @import("relevance.zig").assertPeerRelevance;
+
 // Constants
 pub const constants = @import("constants.zig");
 
