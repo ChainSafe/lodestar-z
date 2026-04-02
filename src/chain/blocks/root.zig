@@ -65,7 +65,6 @@ pub const DataAvailabilityStatus = types.DataAvailabilityStatus;
 pub const BlockImportError = types.BlockImportError;
 pub const BatchBlockResult = types.BatchBlockResult;
 pub const SanityResult = types.SanityResult;
-pub const SegmentExecStatus = types.SegmentExecStatus;
 
 // -- Stage-specific type re-exports --
 pub const SanityOutcome = verify_sanity.SanityOutcome;

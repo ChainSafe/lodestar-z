@@ -275,19 +275,6 @@ pub const BatchBlockResult = union(enum) {
     failed: BlockImportError,
 };
 
-/// Result of a segment execution status (mirrors TS SegmentExecStatus).
-pub const SegmentExecStatus = union(enum) {
-    /// All blocks in the segment had their execution verified.
-    complete: struct {
-        statuses: []const ExecutionStatus,
-    },
-    /// Execution verification was aborted at a specific block index.
-    aborted: struct {
-        block_index: usize,
-        err: BlockImportError,
-    },
-};
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------

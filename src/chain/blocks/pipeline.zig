@@ -40,6 +40,7 @@ const BatchBlockResult = pipeline_types.BatchBlockResult;
 const ExecutionStatus = pipeline_types.ExecutionStatus;
 const DataAvailabilityStatus = pipeline_types.DataAvailabilityStatus;
 const BlockImportError = pipeline_types.BlockImportError;
+const LVHExecResponse = fork_choice_mod.LVHExecResponse;
 
 const verify_sanity = @import("verify_sanity.zig");
 const SanityOutcome = verify_sanity.SanityOutcome;
@@ -138,6 +139,21 @@ pub const PipelineContext = struct {
 // Single block processing
 // ---------------------------------------------------------------------------
 
+const PreparedBlock = struct {
+    block_input: BlockInput,
+    post_state: *CachedBeaconState,
+    block_root: [32]u8,
+    state_root: [32]u8,
+    parent_slot: Slot,
+    data_availability_status: DataAvailabilityStatus,
+    proposer_balance_delta: i64,
+};
+
+const BlockPreparationResult = union(enum) {
+    skipped: ImportResult,
+    prepared: PreparedBlock,
+};
+
 /// Process a single block through the full import pipeline.
 ///
 /// This is the main entry point for gossip blocks and API submissions.
@@ -153,6 +169,26 @@ pub fn processBlock(
     block_input: BlockInput,
     opts: ImportBlockOpts,
 ) BlockImportError!ImportResult {
+    const preparation = try prepareBlockForImport(ctx, block_input, opts);
+    return switch (preparation) {
+        .skipped => |result| result,
+        .prepared => |prepared| {
+            const exec_status = try verify_exec.verifyExecutionPayload(
+                ctx.allocator,
+                block_input,
+                ctx.execution_verifier,
+                opts,
+            );
+            return importPreparedBlock(ctx, prepared, exec_status, opts);
+        },
+    };
+}
+
+fn prepareBlockForImport(
+    ctx: PipelineContext,
+    block_input: BlockInput,
+    opts: ImportBlockOpts,
+) BlockImportError!BlockPreparationResult {
     const fc = ctx.fork_choice orelse return BlockImportError.InternalError;
 
     // Stage 1: Sanity checks.
@@ -175,13 +211,13 @@ pub fn processBlock(
             var block_root: [32]u8 = undefined;
             block_input.block.beaconBlock().hashTreeRoot(ctx.allocator, &block_root) catch
                 return BlockImportError.InternalError;
-            return ImportResult{
+            return .{ .skipped = ImportResult{
                 .block_root = block_root,
                 .state_root = [_]u8{0} ** 32,
                 .slot = block_input.block.beaconBlock().slot(),
                 .epoch_transition = false,
                 .execution_optimistic = false,
-            };
+            } };
         },
         .valid => |sanity| {
             // Stage 2: Get pre-state via queued regen.
@@ -201,30 +237,37 @@ pub fn processBlock(
                 sanity.body_root,
                 ctx.block_bls_thread_pool,
             );
-
-            // Stage 5: Execution payload verification.
-            const exec_status = try verify_exec.verifyExecutionPayload(
-                ctx.allocator,
-                block_input,
-                ctx.execution_verifier,
-                opts,
-            );
-
-            // Stage 6: Import into chain.
-            const verified = VerifiedBlock{
+            return .{ .prepared = .{
                 .block_input = block_input,
                 .post_state = stf_result.post_state,
                 .block_root = stf_result.block_root,
                 .state_root = stf_result.state_root,
                 .parent_slot = sanity.parent_slot,
-                .execution_status = exec_status,
                 .data_availability_status = da_status,
                 .proposer_balance_delta = stf_result.proposer_balance_delta,
-            };
-
-            return import_block.importVerifiedBlock(ctx.toImportContext(), verified, opts);
+            } };
         },
     }
+}
+
+fn importPreparedBlock(
+    ctx: PipelineContext,
+    prepared: PreparedBlock,
+    exec_status: ExecutionStatus,
+    opts: ImportBlockOpts,
+) BlockImportError!ImportResult {
+    const verified = VerifiedBlock{
+        .block_input = prepared.block_input,
+        .post_state = prepared.post_state,
+        .block_root = prepared.block_root,
+        .state_root = prepared.state_root,
+        .parent_slot = prepared.parent_slot,
+        .execution_status = exec_status,
+        .data_availability_status = prepared.data_availability_status,
+        .proposer_balance_delta = prepared.proposer_balance_delta,
+    };
+
+    return import_block.importVerifiedBlock(ctx.toImportContext(), verified, opts);
 }
 
 /// Process a batch of blocks through the pipeline (for range sync).
@@ -250,7 +293,50 @@ pub fn processBlockBatch(
     batch_opts.ignore_if_finalized = true;
 
     for (block_inputs, 0..) |block_input, i| {
-        results[i] = processSingleForBatch(ctx, block_input, batch_opts);
+        const preparation = prepareBlockForImport(ctx, block_input, batch_opts) catch |err| {
+            results[i] = classifyBatchError(err);
+            continue;
+        };
+
+        switch (preparation) {
+            .skipped => {
+                results[i] = .{ .skipped = {} };
+            },
+            .prepared => |prepared| {
+                const exec_result = verify_exec.verifyExecutionPayloadDetailed(
+                    ctx.allocator,
+                    block_input,
+                    ctx.execution_verifier,
+                    batch_opts,
+                ) catch |err| {
+                    results[i] = classifyBatchError(err);
+                    continue;
+                };
+
+                switch (exec_result) {
+                    .valid, .syncing, .pre_merge => {
+                        results[i] = processPreparedBatchBlock(
+                            ctx,
+                            prepared,
+                            exec_result.status(),
+                            batch_opts,
+                        );
+                    },
+                    .invalid => |invalid| {
+                        invalidateExecutionBranch(
+                            ctx,
+                            invalid.latest_valid_hash,
+                            invalid.invalidate_from_parent_block_root,
+                        );
+                        results[i] = .{ .failed = BlockImportError.ExecutionPayloadInvalid };
+                        for (i + 1..block_inputs.len) |j| {
+                            results[j] = .{ .failed = BlockImportError.ExecutionPayloadInvalid };
+                        }
+                        break;
+                    },
+                }
+            },
+        }
     }
 
     return results;
@@ -260,22 +346,43 @@ pub fn processBlockBatch(
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-fn processSingleForBatch(
+fn processPreparedBatchBlock(
     ctx: PipelineContext,
-    block_input: BlockInput,
+    prepared: PreparedBlock,
+    exec_status: ExecutionStatus,
     opts: ImportBlockOpts,
 ) BatchBlockResult {
-    const result = processBlock(ctx, block_input, opts) catch |err| {
-        // Classify the error.
-        switch (err) {
-            BlockImportError.AlreadyKnown,
-            BlockImportError.WouldRevertFinalizedSlot,
-            BlockImportError.GenesisBlock,
-            => return .{ .skipped = {} },
-            else => return .{ .failed = err },
-        }
+    const result = importPreparedBlock(ctx, prepared, exec_status, opts) catch |err| switch (err) {
+        BlockImportError.AlreadyKnown,
+        BlockImportError.WouldRevertFinalizedSlot,
+        BlockImportError.GenesisBlock,
+        => return .{ .skipped = {} },
+        else => return .{ .failed = err },
     };
     return .{ .success = result };
+}
+
+fn classifyBatchError(err: BlockImportError) BatchBlockResult {
+    return switch (err) {
+        BlockImportError.AlreadyKnown,
+        BlockImportError.WouldRevertFinalizedSlot,
+        BlockImportError.GenesisBlock,
+        => .{ .skipped = {} },
+        else => .{ .failed = err },
+    };
+}
+
+fn invalidateExecutionBranch(
+    ctx: PipelineContext,
+    latest_valid_hash: ?[32]u8,
+    invalidate_from_parent_block_root: [32]u8,
+) void {
+    const fc = ctx.fork_choice orelse return;
+    fc.validateLatestHash(ctx.allocator, LVHExecResponse{ .invalid = .{
+        .latest_valid_exec_hash = latest_valid_hash,
+        .invalidate_from_parent_block_root = invalidate_from_parent_block_root,
+    } }, fc.getTime());
+    _ = fc.updateAndGetHead(ctx.allocator, .get_canonical_head) catch {};
 }
 
 /// Get the pre-state for a block, trying queued regen first.
