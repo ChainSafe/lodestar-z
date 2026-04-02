@@ -206,6 +206,8 @@ pub const ValidatorStore = struct {
         return .{
             .selection = config.builder_selection,
             .boost_factor = switch (config.builder_selection) {
+                // Lodestar's `default` builder alias slightly favors local execution
+                // for censorship resistance. The BN receives the explicit factor.
                 .@"default" => 90,
                 .maxprofit => config.builder_boost_factor orelse 100,
                 .builderalways, .builderonly => std.math.maxInt(u64),
@@ -1149,6 +1151,14 @@ test "ValidatorStore: builder selection params derive effective boost factor" {
     const params = store.getBuilderSelectionParams(pubkey);
     try testing.expectEqual(BuilderSelection.maxprofit, params.selection);
     try testing.expectEqual(@as(u64, 125), params.boost_factor);
+
+    try store.setProposerConfigOverride(pubkey, .{
+        .builder_selection = .@"default",
+        .builder_boost_factor = 175,
+    });
+    const default_params = store.getBuilderSelectionParams(pubkey);
+    try testing.expectEqual(BuilderSelection.@"default", default_params.selection);
+    try testing.expectEqual(@as(u64, 90), default_params.boost_factor);
 
     try store.setProposerConfigOverride(pubkey, .{ .builder_selection = .builderonly });
     const builder_only = store.getBuilderSelectionParams(pubkey);

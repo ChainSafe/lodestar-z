@@ -94,6 +94,36 @@ pub const CommonBlockBody = struct {
     }
 };
 
+/// Stable consensus snapshot for proposal assembly.
+///
+/// This captures all consensus-derived inputs that should stay fixed across
+/// the execution/builder fetch race so the final block is assembled against
+/// the same parent view it was requested for.
+pub const ProposalSnapshot = struct {
+    slot: Slot,
+    proposer_index: ValidatorIndex,
+    proposer_pubkey: [48]u8,
+    parent_root: [32]u8,
+    execution_parent_hash: [32]u8,
+    prev_randao: [32]u8,
+    eth1_data: types.phase0.Eth1Data.Type,
+};
+
+pub const PreparedProposalTemplate = struct {
+    slot: Slot,
+    proposer_index: ValidatorIndex,
+    proposer_pubkey: [48]u8,
+    parent_root: [32]u8,
+    execution_parent_hash: [32]u8,
+    prev_randao: [32]u8,
+    eth1_data: types.phase0.Eth1Data.Type,
+    common: CommonBlockBody,
+
+    pub fn deinit(self: *PreparedProposalTemplate, allocator: Allocator) void {
+        self.common.deinit(allocator);
+    }
+};
+
 /// Blobs bundle — engine-layer-agnostic representation.
 ///
 /// Mirrors the engine API BlobsBundle but uses the same types so the chain
@@ -422,6 +452,163 @@ fn assembleCommonBlockBody(
         .voluntary_exits = std.ArrayListUnmanaged(types.phase0.SignedVoluntaryExit.Type).fromOwnedSlice(ops.voluntary_exits),
         .sync_aggregate = sync_aggregate,
         .bls_to_execution_changes = std.ArrayListUnmanaged(types.capella.SignedBLSToExecutionChange.Type).fromOwnedSlice(ops.bls_to_execution_changes),
+    };
+}
+
+pub fn prepareProposalSnapshot(
+    slot: Slot,
+    proposer_index: ValidatorIndex,
+    proposer_pubkey: [48]u8,
+    parent_root: [32]u8,
+    execution_parent_hash: [32]u8,
+    prev_randao: [32]u8,
+    eth1_data: types.phase0.Eth1Data.Type,
+) ProposalSnapshot {
+    return .{
+        .slot = slot,
+        .proposer_index = proposer_index,
+        .proposer_pubkey = proposer_pubkey,
+        .parent_root = parent_root,
+        .execution_parent_hash = execution_parent_hash,
+        .prev_randao = prev_randao,
+        .eth1_data = eth1_data,
+    };
+}
+
+pub fn buildProposalTemplate(
+    allocator: Allocator,
+    snapshot: ProposalSnapshot,
+    op_pool: *OpPool,
+    config: BlockProductionConfig,
+    sync_contribution_pool: ?*SyncContributionAndProofPool,
+) !PreparedProposalTemplate {
+    var common = try assembleCommonBlockBody(
+        allocator,
+        snapshot.slot,
+        snapshot.parent_root,
+        op_pool,
+        snapshot.eth1_data,
+        config,
+        sync_contribution_pool,
+    );
+    errdefer common.deinit(allocator);
+
+    return .{
+        .slot = snapshot.slot,
+        .proposer_index = snapshot.proposer_index,
+        .proposer_pubkey = snapshot.proposer_pubkey,
+        .parent_root = snapshot.parent_root,
+        .execution_parent_hash = snapshot.execution_parent_hash,
+        .prev_randao = snapshot.prev_randao,
+        .eth1_data = snapshot.eth1_data,
+        .common = common,
+    };
+}
+
+pub fn assembleBlockFromTemplate(
+    allocator: Allocator,
+    template: PreparedProposalTemplate,
+    exec_payload: types.electra.ExecutionPayload.Type,
+    blobs_bundle: ?BlobsBundle,
+    block_value: u256,
+    blob_commitments: std.ArrayListUnmanaged(types.primitive.KZGCommitment.Type),
+    execution_requests: types.electra.ExecutionRequests.Type,
+) !ProducedBlock {
+    var common = template.common;
+    errdefer common.deinit(allocator);
+
+    const block_body = types.electra.BeaconBlockBody.Type{
+        .randao_reveal = common.randao_reveal,
+        .eth1_data = common.eth1_data,
+        .graffiti = common.graffiti,
+        .proposer_slashings = common.proposer_slashings,
+        .attester_slashings = common.attester_slashings,
+        .attestations = common.attestations,
+        .deposits = common.deposits,
+        .voluntary_exits = common.voluntary_exits,
+        .sync_aggregate = common.sync_aggregate,
+        .execution_payload = exec_payload,
+        .bls_to_execution_changes = common.bls_to_execution_changes,
+        .blob_kzg_commitments = blob_commitments,
+        .execution_requests = execution_requests,
+    };
+
+    std.log.info(
+        "Assembled full block body: slot={d} proposer={d} txs={d} atts={d} exits={d} slashings={d} bls_changes={d} blobs={d} execution_requests={d}/{d}/{d}",
+        .{
+            template.slot,
+            template.proposer_index,
+            exec_payload.transactions.items.len,
+            block_body.attestations.items.len,
+            block_body.voluntary_exits.items.len,
+            block_body.proposer_slashings.items.len,
+            block_body.bls_to_execution_changes.items.len,
+            block_body.blob_kzg_commitments.items.len,
+            block_body.execution_requests.deposits.items.len,
+            block_body.execution_requests.withdrawals.items.len,
+            block_body.execution_requests.consolidations.items.len,
+        },
+    );
+
+    return ProducedBlock{
+        .block_body = block_body,
+        .blobs_bundle = blobs_bundle,
+        .block_value = block_value,
+        .proposer_index = template.proposer_index,
+        .slot = template.slot,
+        .parent_root = template.parent_root,
+    };
+}
+
+pub fn assembleBlindedBlockFromTemplate(
+    allocator: Allocator,
+    template: PreparedProposalTemplate,
+    exec_payload_header: types.deneb.ExecutionPayloadHeader.Type,
+    block_value: u256,
+    blob_commitments: std.ArrayListUnmanaged(types.primitive.KZGCommitment.Type),
+    execution_requests: types.electra.ExecutionRequests.Type,
+) !ProducedBlindedBlock {
+    var common = template.common;
+    errdefer common.deinit(allocator);
+
+    const block_body = types.electra.BlindedBeaconBlockBody.Type{
+        .randao_reveal = common.randao_reveal,
+        .eth1_data = common.eth1_data,
+        .graffiti = common.graffiti,
+        .proposer_slashings = common.proposer_slashings,
+        .attester_slashings = common.attester_slashings,
+        .attestations = common.attestations,
+        .deposits = common.deposits,
+        .voluntary_exits = common.voluntary_exits,
+        .sync_aggregate = common.sync_aggregate,
+        .execution_payload_header = exec_payload_header,
+        .bls_to_execution_changes = common.bls_to_execution_changes,
+        .blob_kzg_commitments = blob_commitments,
+        .execution_requests = execution_requests,
+    };
+
+    std.log.info(
+        "Assembled blinded block body: slot={d} proposer={d} atts={d} exits={d} slashings={d} bls_changes={d} blobs={d} execution_requests={d}/{d}/{d}",
+        .{
+            template.slot,
+            template.proposer_index,
+            block_body.attestations.items.len,
+            block_body.voluntary_exits.items.len,
+            block_body.proposer_slashings.items.len,
+            block_body.bls_to_execution_changes.items.len,
+            block_body.blob_kzg_commitments.items.len,
+            block_body.execution_requests.deposits.items.len,
+            block_body.execution_requests.withdrawals.items.len,
+            block_body.execution_requests.consolidations.items.len,
+        },
+    );
+
+    return .{
+        .block_body = block_body,
+        .block_value = block_value,
+        .proposer_index = template.proposer_index,
+        .slot = template.slot,
+        .parent_root = template.parent_root,
     };
 }
 

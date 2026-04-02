@@ -130,24 +130,40 @@ pub fn init(allocator: Allocator, io: std.Io, beacon_config: *const BeaconConfig
     } else if (opts.execution_urls.len > 0) {
         const transport = try allocator.create(IoHttpTransport);
         errdefer allocator.destroy(transport);
-        transport.* = IoHttpTransport.init(allocator);
-        transport.setIo(io);
+        transport.* = IoHttpTransport.init(allocator, io);
         errdefer transport.deinit();
         io_transport_ptr = transport;
 
         const http_eng = try allocator.create(HttpEngine);
         errdefer allocator.destroy(http_eng);
-        http_eng.* = HttpEngine.init(
+        var retry_config = execution_mod.RetryConfig{
+            .max_retries = opts.execution_retries,
+            .initial_backoff_ms = opts.execution_retry_delay_ms,
+        };
+        if (opts.execution_timeout_ms) |timeout_ms| {
+            retry_config.default_timeout_ms = timeout_ms;
+            retry_config.new_payload_timeout_ms = timeout_ms;
+        }
+        http_eng.* = HttpEngine.initWithRetry(
             allocator,
+            io,
             opts.execution_urls[0],
             init_config.jwt_secret,
             transport.transport(),
+            retry_config,
         );
-        http_eng.setIo(io);
         errdefer http_eng.deinit();
         http_engine_ptr = http_eng;
         engine = http_eng.engine();
-        std.log.info("Execution engine: HttpEngine -> {s}", .{opts.execution_urls[0]});
+        std.log.info(
+            "Execution engine: HttpEngine -> {s} (retries={d} delay_ms={d} timeout_ms={d})",
+            .{
+                opts.execution_urls[0],
+                opts.execution_retries,
+                opts.execution_retry_delay_ms,
+                retry_config.default_timeout_ms,
+            },
+        );
     } else {
         const mock = try allocator.create(MockEngine);
         errdefer allocator.destroy(mock);
@@ -162,8 +178,7 @@ pub fn init(allocator: Allocator, io: std.Io, beacon_config: *const BeaconConfig
     if (opts.builder_enabled) {
         const transport = try allocator.create(IoHttpTransport);
         errdefer allocator.destroy(transport);
-        transport.* = IoHttpTransport.init(allocator);
-        transport.setIo(io);
+        transport.* = IoHttpTransport.init(allocator, io);
         errdefer transport.deinit();
         builder_transport_ptr = transport;
 
@@ -173,12 +188,26 @@ pub fn init(allocator: Allocator, io: std.Io, beacon_config: *const BeaconConfig
             allocator,
             opts.builder_url,
             transport.transport(),
+            .{
+                .timeout_ms = opts.builder_timeout_ms,
+                .fault_inspection_window = execution_mod.builder.resolveFaultInspectionWindow(
+                    io,
+                    opts.builder_fault_inspection_window,
+                ),
+                .allowed_faults = opts.builder_allowed_faults,
+            },
         );
         errdefer http_builder.deinit();
         http_builder_ptr = http_builder;
         builder_api = http_builder.builder();
 
-        log.logger(.node).info("Execution builder: HttpBuilder -> {s}", .{opts.builder_url});
+        log.logger(.node).info("Execution builder: HttpBuilder -> {s} (timeout_ms={d} proposal_timeout_ms={d} fault_window={d} allowed_faults={d})", .{
+            opts.builder_url,
+            http_builder.request_timeout_ms,
+            http_builder.proposal_timeout_ms,
+            http_builder.fault_inspection_window,
+            http_builder.allowed_faults,
+        });
     }
 
     const node = try allocator.create(BeaconNode);
@@ -205,6 +234,7 @@ pub fn init(allocator: Allocator, io: std.Io, beacon_config: *const BeaconConfig
         .api_context = api_ctx,
         .api_node_identity = api_node_identity,
         .event_bus = event_bus_ptr,
+        .published_proposals = std.AutoHashMap(BeaconNode.PublishedProposalKey, [32]u8).init(allocator),
         .unknown_block_sync = UnknownBlockSync.init(allocator),
         .unknown_chain_sync = UnknownChainSync.init(allocator),
     };
@@ -279,6 +309,7 @@ pub fn deinit(self: *BeaconNode) void {
 
     p2p_runtime_mod.deinitOwnedState(self);
 
+    self.published_proposals.deinit();
     self.unknown_block_sync.deinit();
     self.unknown_chain_sync.deinit();
 

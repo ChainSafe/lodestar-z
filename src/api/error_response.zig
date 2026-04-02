@@ -91,6 +91,7 @@ pub fn fromZigError(err: anyerror) ApiError {
         error.MismatchedCounts,
         error.InvalidBlockType,
         error.UnsupportedFork,
+        error.ProposerEquivocationDetected,
         => .{ .code = .bad_request, .message = "Bad request: invalid parameter" },
 
         // 401 Unauthorized
@@ -134,8 +135,12 @@ pub fn fromZigError(err: anyerror) ApiError {
         // 503 Service Unavailable
         error.ServiceUnavailable,
         error.NodeNotReady,
+        error.BlockProductionTimeout,
         error.BuilderNotConfigured,
+        error.BuilderUnavailable,
+        error.BuilderCircuitBreaker,
         error.BuilderBidUnavailable,
+        error.BuilderHeaderGasLimitOutOfRange,
         => .{ .code = .service_unavailable, .message = "Service unavailable" },
 
         // 500 Internal Server Error (default)

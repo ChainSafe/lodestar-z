@@ -219,7 +219,7 @@ pub const ValidatorConfig = struct {
     /// Defaults to all-zeros. Operators can set a custom string (UTF-8, right-padded).
     graffiti: [32]u8 = std.mem.zeroes([32]u8),
     /// Builder boost factor: percentage advantage given to builder bids.
-    /// 100 = neutral (builder wins if bid >= local). 200 = builder needs 2x.
+    /// 100 = neutral. Values above 100 boost builder bids, values below 100 dampen them.
     /// Per-spec default is 100. Set null to disable builder path.
     builder_boost_factor: ?u64 = 100,
     /// Default builder selection policy for block production.

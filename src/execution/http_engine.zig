@@ -90,6 +90,10 @@ pub const Header = struct {
 /// Real transports (IoHttpTransport) store their own std.Io context internally.
 /// Mock transports ignore I/O entirely.
 pub const Transport = struct {
+    pub const SendOptions = struct {
+        timeout: std.Io.Timeout = .none,
+    };
+
     ptr: *anyopaque,
     sendFn: *const fn (
         ptr: *anyopaque,
@@ -97,6 +101,7 @@ pub const Transport = struct {
         url: []const u8,
         headers: []const Header,
         body: []const u8,
+        options: SendOptions,
     ) anyerror![]const u8,
 
     pub fn send(
@@ -105,10 +110,18 @@ pub const Transport = struct {
         url: []const u8,
         headers: []const Header,
         body: []const u8,
+        options: SendOptions,
     ) ![]const u8 {
-        return self.sendFn(self.ptr, method, url, headers, body);
+        return self.sendFn(self.ptr, method, url, headers, body, options);
     }
 };
+
+pub fn timeoutFromMs(timeout_ms: u64) std.Io.Timeout {
+    return .{ .duration = .{
+        .raw = .{ .nanoseconds = @as(i96, @intCast(timeout_ms * std.time.ns_per_ms)) },
+        .clock = .real,
+    } };
+}
 
 // ── HttpEngine ────────────────────────────────────────────────────────────────
 
@@ -161,6 +174,8 @@ pub const HttpEngine = struct {
         "engine_getClientVersionV1",
     };
     allocator: Allocator,
+    /// I/O context for clock access and retry backoff.
+    io: std.Io,
     /// Execution engine endpoint URL (e.g. "http://localhost:8551").
     endpoint: []const u8,
     /// Optional JWT secret for authentication (32 bytes).
@@ -169,9 +184,6 @@ pub const HttpEngine = struct {
     transport: Transport,
     /// Monotonically increasing JSON-RPC request ID.
     next_id: u64,
-    /// I/O context for std.http.Client and clock access.
-    /// Set after construction via setIo() when the Io context becomes available.
-    io: ?std.Io,
     /// Current EL connection state.
     state: EngineState,
     /// Retry configuration.
@@ -181,17 +193,18 @@ pub const HttpEngine = struct {
 
     pub fn init(
         allocator: Allocator,
+        io: std.Io,
         endpoint: []const u8,
         jwt_secret: ?[32]u8,
         transport: Transport,
     ) HttpEngine {
         return .{
             .allocator = allocator,
+            .io = io,
             .endpoint = endpoint,
             .jwt_secret = jwt_secret,
             .transport = transport,
             .next_id = 1,
-            .io = null,
             .state = .online,
             .retry_config = .{},
             .client_version = null,
@@ -201,6 +214,7 @@ pub const HttpEngine = struct {
     /// Create an HttpEngine with custom retry configuration.
     pub fn initWithRetry(
         allocator: Allocator,
+        io: std.Io,
         endpoint: []const u8,
         jwt_secret: ?[32]u8,
         transport: Transport,
@@ -208,21 +222,15 @@ pub const HttpEngine = struct {
     ) HttpEngine {
         return .{
             .allocator = allocator,
+            .io = io,
             .endpoint = endpoint,
             .jwt_secret = jwt_secret,
             .transport = transport,
             .next_id = 1,
-            .io = null,
             .state = .online,
             .retry_config = retry_config,
             .client_version = null,
         };
-    }
-
-    /// Set the Io context. Must be called before any requests are made.
-    /// The Io context is not available at init time (before the event loop starts).
-    pub fn setIo(self: *HttpEngine, io: std.Io) void {
-        self.io = io;
     }
 
     pub fn deinit(self: *HttpEngine) void {
@@ -232,6 +240,23 @@ pub const HttpEngine = struct {
             self.allocator.free(cv.version);
             self.allocator.free(cv.commit);
         }
+    }
+
+    /// Create a shallow request-scoped clone with independent mutable client
+    /// state. The clone shares allocator and transport, but it does not share
+    /// request IDs, cached client version, or connection-health bookkeeping.
+    pub fn requestClone(self: *const HttpEngine) HttpEngine {
+        return .{
+            .allocator = self.allocator,
+            .io = self.io,
+            .endpoint = self.endpoint,
+            .jwt_secret = self.jwt_secret,
+            .transport = self.transport,
+            .next_id = 1,
+            .state = .online,
+            .retry_config = self.retry_config,
+            .client_version = null,
+        };
     }
 
     /// Return an EngineApi vtable interface backed by this client.
@@ -277,7 +302,7 @@ pub const HttpEngine = struct {
         count += 1;
 
         if (self.jwt_secret) |secret| {
-            const iat = if (self.io) |io| unixTimestamp(io) else 0;
+            const iat = unixTimestamp(self.io);
             const token = try generateJwt(self.allocator, secret, iat);
             defer self.allocator.free(token);
 
@@ -296,7 +321,7 @@ pub const HttpEngine = struct {
     /// Retries on transport errors (connection refused, timeout, etc.).
     /// Does NOT retry on JSON-RPC application errors (those are definitive).
     /// Caller owns the returned memory.
-    fn sendRequest(self: *HttpEngine, body: []const u8) ![]const u8 {
+    fn sendRequestWithTimeout(self: *HttpEngine, body: []const u8, timeout_ms: u64) ![]const u8 {
         // JWT tokens can be up to ~300 bytes; 512 is safe.
         var auth_buf: [512]u8 = undefined;
         var auth_buf_len: usize = 0;
@@ -320,12 +345,12 @@ pub const HttpEngine = struct {
                     attempt + 1, max_attempts, backoff_ms,
                 });
                 // Sleep if Io available; in tests without Io, skip sleep.
-                if (self.io) |io| {
-                    std.Io.sleep(io, .{ .nanoseconds = @as(i96, @intCast(backoff_ms)) * std.time.ns_per_ms }, .real) catch {};
-                }
+                std.Io.sleep(self.io, .{ .nanoseconds = @as(i96, @intCast(backoff_ms)) * std.time.ns_per_ms }, .real) catch {};
             }
 
-            const result = self.transport.send(.POST, self.endpoint, headers_buf[0..header_count], body);
+            const result = self.transport.send(.POST, self.endpoint, headers_buf[0..header_count], body, .{
+                .timeout = timeoutFromMs(timeout_ms),
+            });
             if (result) |response| {
                 // Successful transport — mark online.
                 self.updateState(.online);
@@ -341,6 +366,14 @@ pub const HttpEngine = struct {
             }
         }
         unreachable;
+    }
+
+    fn sendRequest(self: *HttpEngine, body: []const u8) ![]const u8 {
+        return self.sendRequestWithTimeout(body, self.retry_config.default_timeout_ms);
+    }
+
+    fn sendNewPayloadRequest(self: *HttpEngine, body: []const u8) ![]const u8 {
+        return self.sendRequestWithTimeout(body, self.retry_config.new_payload_timeout_ms);
     }
 
     // ── Additional Engine API methods ─────────────────────────────────────────
@@ -1058,7 +1091,7 @@ pub const HttpEngine = struct {
         const body = try encodeRawRequest(self.allocator, "engine_newPayloadV3", params_json, id);
         defer self.allocator.free(body);
 
-        const response = try self.sendRequest(body);
+        const response = try self.sendNewPayloadRequest(body);
         defer self.allocator.free(response);
 
         var parsed = try json_rpc.decodeResponse(PayloadStatusJson, self.allocator, response);
@@ -1157,7 +1190,7 @@ pub const HttpEngine = struct {
         const body = try encodeRawRequest(self.allocator, "engine_newPayloadV1", params_json, id);
         defer self.allocator.free(body);
 
-        const response = try self.sendRequest(body);
+        const response = try self.sendNewPayloadRequest(body);
         defer self.allocator.free(response);
 
         var parsed = try json_rpc.decodeResponse(PayloadStatusJson, self.allocator, response);
@@ -1186,7 +1219,7 @@ pub const HttpEngine = struct {
         const body = try encodeRawRequest(self.allocator, "engine_newPayloadV2", params_json, id);
         defer self.allocator.free(body);
 
-        const response = try self.sendRequest(body);
+        const response = try self.sendNewPayloadRequest(body);
         defer self.allocator.free(response);
 
         var parsed = try json_rpc.decodeResponse(PayloadStatusJson, self.allocator, response);
@@ -1223,7 +1256,7 @@ pub const HttpEngine = struct {
         const body = try encodeRawRequest(self.allocator, "engine_newPayloadV4", params_json, id);
         defer self.allocator.free(body);
 
-        const response = try self.sendRequest(body);
+        const response = try self.sendNewPayloadRequest(body);
         defer self.allocator.free(response);
 
         var parsed = try json_rpc.decodeResponse(PayloadStatusJson, self.allocator, response);
@@ -2750,6 +2783,8 @@ pub const MockTransport = struct {
     last_had_auth: bool = false,
     /// Last HTTP method used.
     last_method: ?HttpMethod = null,
+    /// Last timeout passed through the transport interface.
+    last_timeout: ?Transport.SendOptions = null,
 
     pub fn init(allocator: Allocator, canned_response: []const u8) MockTransport {
         return .{
@@ -2776,6 +2811,7 @@ pub const MockTransport = struct {
         url: []const u8,
         headers: []const Header,
         body: []const u8,
+        options: Transport.SendOptions,
     ) anyerror![]const u8 {
         const self: *MockTransport = @ptrCast(@alignCast(ptr));
         // Free previous recorded values.
@@ -2789,6 +2825,7 @@ pub const MockTransport = struct {
         }
 
         self.last_method = method;
+        self.last_timeout = options;
         self.last_body = try self.allocator.dupe(u8, body);
         self.last_url = try self.allocator.dupe(u8, url);
         self.last_had_auth = false;
@@ -2901,6 +2938,7 @@ test "HttpEngine: newPayloadV3 sends correct method" {
 
     var http_engine = HttpEngine.init(
         allocator,
+        testing.io,
         "http://localhost:8551",
         null,
         mock.transport(),
@@ -2927,7 +2965,7 @@ test "HttpEngine: newPayloadV3 encodes block_hash in hex" {
     var mock = MockTransport.init(allocator, canned);
     defer mock.deinit();
 
-    var http_engine = HttpEngine.init(allocator, "http://localhost:8551", null, mock.transport());
+    var http_engine = HttpEngine.init(allocator, testing.io, "http://localhost:8551", null, mock.transport());
     defer http_engine.deinit();
 
     const api = http_engine.engine();
@@ -2949,7 +2987,7 @@ test "HttpEngine: no auth header without jwt_secret" {
     var mock = MockTransport.init(allocator, canned);
     defer mock.deinit();
 
-    var http_engine = HttpEngine.init(allocator, "http://localhost:8551", null, mock.transport());
+    var http_engine = HttpEngine.init(allocator, testing.io, "http://localhost:8551", null, mock.transport());
     defer http_engine.deinit();
 
     const api = http_engine.engine();
@@ -2968,7 +3006,7 @@ test "HttpEngine: auth header present with jwt_secret" {
     defer mock.deinit();
 
     const secret = [_]u8{0x42} ** 32;
-    var http_engine = HttpEngine.init(allocator, "http://localhost:8551", secret, mock.transport());
+    var http_engine = HttpEngine.init(allocator, testing.io, "http://localhost:8551", secret, mock.transport());
     defer http_engine.deinit();
 
     const api = http_engine.engine();
@@ -2986,7 +3024,7 @@ test "HttpEngine: forkchoiceUpdatedV3 sends correct method" {
     var mock = MockTransport.init(allocator, canned);
     defer mock.deinit();
 
-    var http_engine = HttpEngine.init(allocator, "http://localhost:8551", null, mock.transport());
+    var http_engine = HttpEngine.init(allocator, testing.io, "http://localhost:8551", null, mock.transport());
     defer http_engine.deinit();
 
     const api = http_engine.engine();
@@ -3012,7 +3050,7 @@ test "HttpEngine: forkchoiceUpdatedV3 with payload_id in response" {
     var mock = MockTransport.init(allocator, canned);
     defer mock.deinit();
 
-    var http_engine = HttpEngine.init(allocator, "http://localhost:8551", null, mock.transport());
+    var http_engine = HttpEngine.init(allocator, testing.io, "http://localhost:8551", null, mock.transport());
     defer http_engine.deinit();
 
     const api = http_engine.engine();
@@ -3041,7 +3079,7 @@ test "HttpEngine: request id increments" {
     var mock = MockTransport.init(allocator, canned);
     defer mock.deinit();
 
-    var http_engine = HttpEngine.init(allocator, "http://localhost:8551", null, mock.transport());
+    var http_engine = HttpEngine.init(allocator, testing.io, "http://localhost:8551", null, mock.transport());
     defer http_engine.deinit();
 
     const api = http_engine.engine();
@@ -3101,7 +3139,7 @@ test "RetryConfig: defaults" {
 test "HttpEngine: state starts online" {
     var mock = MockTransport.init(testing.allocator, "{}");
     defer mock.deinit();
-    const engine = HttpEngine.init(testing.allocator, "http://localhost:8551", null, mock.transport());
+    const engine = HttpEngine.init(testing.allocator, testing.io, "http://localhost:8551", null, mock.transport());
     try testing.expectEqual(EngineState.online, engine.state);
 }
 
@@ -3109,9 +3147,33 @@ test "HttpEngine: initWithRetry sets custom retry config" {
     var mock = MockTransport.init(testing.allocator, "{}");
     defer mock.deinit();
     const cfg = RetryConfig{ .max_retries = 5, .initial_backoff_ms = 50 };
-    const engine = HttpEngine.initWithRetry(testing.allocator, "http://localhost:8551", null, mock.transport(), cfg);
+    const engine = HttpEngine.initWithRetry(testing.allocator, testing.io, "http://localhost:8551", null, mock.transport(), cfg);
     try testing.expectEqual(@as(u32, 5), engine.retry_config.max_retries);
     try testing.expectEqual(@as(u64, 50), engine.retry_config.initial_backoff_ms);
+}
+
+test "HttpEngine: transport uses configured per-request timeouts" {
+    const allocator = testing.allocator;
+    var mock = MockTransport.init(allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":false}");
+    defer mock.deinit();
+
+    var engine = HttpEngine.initWithRetry(allocator, testing.io, "http://localhost:8551", null, mock.transport(), .{
+        .max_retries = 0,
+        .initial_backoff_ms = 0,
+        .default_timeout_ms = 4_321,
+        .new_payload_timeout_ms = 8_765,
+    });
+    defer engine.deinit();
+
+    _ = try engine.checkHealth();
+    try testing.expectEqualDeep(timeoutFromMs(4_321), mock.last_timeout.?.timeout);
+
+    mock.canned_response =
+        \\{"jsonrpc":"2.0","id":1,"result":{"status":"VALID","latestValidHash":null,"validationError":null}}
+    ;
+    const api = engine.engine();
+    _ = try api.newPayload(makeTestPayload([_]u8{0x01} ** 32), &.{}, std.mem.zeroes([32]u8));
+    try testing.expectEqualDeep(timeoutFromMs(8_765), mock.last_timeout.?.timeout);
 }
 
 test "HttpEngine: retry: transport success on first attempt stays online" {
@@ -3121,7 +3183,7 @@ test "HttpEngine: retry: transport success on first attempt stays online" {
     ;
     var mock = MockTransport.init(allocator, canned);
     defer mock.deinit();
-    var engine = HttpEngine.init(allocator, "http://localhost:8551", null, mock.transport());
+    var engine = HttpEngine.init(allocator, testing.io, "http://localhost:8551", null, mock.transport());
     defer engine.deinit();
 
     const api = engine.engine();
@@ -3207,7 +3269,7 @@ test "HttpEngine: Fork.newPayloadForFork with unsupported fork returns error" {
     ;
     var mock = MockTransport.init(allocator, canned);
     defer mock.deinit();
-    var engine = HttpEngine.init(allocator, "http://localhost:8551", null, mock.transport());
+    var engine = HttpEngine.init(allocator, testing.io, "http://localhost:8551", null, mock.transport());
     defer engine.deinit();
 
     // phase0 and altair are pre-Merge — no execution engine.
@@ -3225,7 +3287,7 @@ test "HttpEngine: getPayloadForFork deneb dispatches to V3" {
     ;
     var mock = MockTransport.init(allocator, canned);
     defer mock.deinit();
-    var engine = HttpEngine.init(allocator, "http://localhost:8551", null, mock.transport());
+    var engine = HttpEngine.init(allocator, testing.io, "http://localhost:8551", null, mock.transport());
     defer engine.deinit();
 
     const resp = try engine.getPayloadForFork(.deneb, [_]u8{0xab} ** 8);
@@ -3240,7 +3302,7 @@ test "HttpEngine: forkchoiceUpdatedForFork unsupported fork" {
     const allocator = testing.allocator;
     var mock = MockTransport.init(allocator, "{}");
     defer mock.deinit();
-    var engine = HttpEngine.init(allocator, "http://localhost:8551", null, mock.transport());
+    var engine = HttpEngine.init(allocator, testing.io, "http://localhost:8551", null, mock.transport());
     defer engine.deinit();
 
     const result = engine.forkchoiceUpdatedForFork(.phase0, .{
@@ -3258,7 +3320,7 @@ test "HttpEngine: forkchoiceUpdatedForFork bellatrix uses V1" {
     ;
     var mock = MockTransport.init(allocator, canned);
     defer mock.deinit();
-    var engine = HttpEngine.init(allocator, "http://localhost:8551", null, mock.transport());
+    var engine = HttpEngine.init(allocator, testing.io, "http://localhost:8551", null, mock.transport());
     defer engine.deinit();
 
     _ = try engine.forkchoiceUpdatedForFork(.bellatrix, .{
@@ -3278,7 +3340,7 @@ test "HttpEngine: forkchoiceUpdatedForFork deneb uses V3" {
     ;
     var mock = MockTransport.init(allocator, canned);
     defer mock.deinit();
-    var engine = HttpEngine.init(allocator, "http://localhost:8551", null, mock.transport());
+    var engine = HttpEngine.init(allocator, testing.io, "http://localhost:8551", null, mock.transport());
     defer engine.deinit();
 
     _ = try engine.forkchoiceUpdatedForFork(.deneb, .{
@@ -3298,7 +3360,7 @@ test "HttpEngine: exchangeTransitionConfiguration encodes config correctly" {
     ;
     var mock = MockTransport.init(allocator, canned);
     defer mock.deinit();
-    var engine = HttpEngine.init(allocator, "http://localhost:8551", null, mock.transport());
+    var engine = HttpEngine.init(allocator, testing.io, "http://localhost:8551", null, mock.transport());
     defer engine.deinit();
 
     const result = try engine.exchangeTransitionConfiguration(.{
@@ -3321,7 +3383,7 @@ test "HttpEngine: getClientVersion sends correct method" {
     ;
     var mock = MockTransport.init(allocator, canned);
     defer mock.deinit();
-    var engine = HttpEngine.init(allocator, "http://localhost:8551", null, mock.transport());
+    var engine = HttpEngine.init(allocator, testing.io, "http://localhost:8551", null, mock.transport());
     defer engine.deinit();
 
     const versions = try engine.getClientVersion("lodestar-z", "v0.1.0", "abc123");
@@ -3342,7 +3404,7 @@ test "HttpEngine: JSON-RPC error propagates as specific error" {
     ;
     var mock = MockTransport.init(allocator, canned);
     defer mock.deinit();
-    var engine = HttpEngine.init(allocator, "http://localhost:8551", null, mock.transport());
+    var engine = HttpEngine.init(allocator, testing.io, "http://localhost:8551", null, mock.transport());
     defer engine.deinit();
 
     const api = engine.engine();
@@ -3359,7 +3421,7 @@ test "HttpEngine: JWT payload contains iat field" {
     defer mock.deinit();
 
     const secret = [_]u8{0x42} ** 32;
-    var engine = HttpEngine.init(allocator, "http://localhost:8551", secret, mock.transport());
+    var engine = HttpEngine.init(allocator, testing.io, "http://localhost:8551", secret, mock.transport());
     defer engine.deinit();
 
     const api = engine.engine();
@@ -3377,29 +3439,43 @@ test "HttpEngine: JWT payload contains iat field" {
 /// standard library's HTTP client which handles connection pooling, chunked
 /// encoding, and all I/O through std.Io.
 ///
-/// Not thread-safe: must be called from a single fiber/thread at a time.
+/// Concurrent requests are allowed as long as the transport outlives those
+/// requests. `std.http.Client.request()` is thread-safe in Zig 0.16.
 pub const IoHttpTransport = struct {
-    allocator: Allocator,
-    /// Reusable HTTP client — handles connection pooling across requests.
-    http_client: ?std.http.Client,
-    /// I/O context — set via setIo() before any requests are made.
-    io: ?std.Io,
+    const SendTaskResult = union(enum) {
+        success: []const u8,
+        failure: anyerror,
+        canceled,
+    };
 
-    pub fn init(allocator: Allocator) IoHttpTransport {
+    const TimerResult = enum {
+        fired,
+        canceled,
+    };
+
+    const SendEvent = union(enum) {
+        request: SendTaskResult,
+        timeout: TimerResult,
+    };
+
+    allocator: Allocator,
+    io: std.Io,
+    /// Reusable HTTP client — handles connection pooling across requests.
+    http_client: std.http.Client,
+
+    pub fn init(allocator: Allocator, io: std.Io) IoHttpTransport {
         return .{
             .allocator = allocator,
-            .http_client = null,
-            .io = null,
+            .io = io,
+            .http_client = .{
+                .allocator = allocator,
+                .io = io,
+            },
         };
     }
 
-    /// Set the I/O context. Must be called before send().
-    pub fn setIo(self: *IoHttpTransport, io: std.Io) void {
-        self.io = io;
-    }
-
     pub fn deinit(self: *IoHttpTransport) void {
-        if (self.http_client) |*c| c.deinit();
+        self.http_client.deinit();
     }
 
     pub fn transport(self: *IoHttpTransport) Transport {
@@ -3409,26 +3485,45 @@ pub const IoHttpTransport = struct {
         };
     }
 
-    fn ensureClient(self: *IoHttpTransport, io: std.Io) *std.http.Client {
-        if (self.http_client == null) {
-            self.http_client = .{
-                .allocator = self.allocator,
-                .io = io,
-            };
-        }
-        return &self.http_client.?;
+    fn waitTimeout(io: std.Io, timeout: std.Io.Timeout) TimerResult {
+        timeout.sleep(io) catch |err| switch (err) {
+            error.Canceled => return .canceled,
+        };
+        return .fired;
     }
 
-    fn send(
-        ptr: *anyopaque,
+    fn freeSendEvent(allocator: Allocator, event: SendEvent) void {
+        switch (event) {
+            .request => |result| switch (result) {
+                .success => |response| allocator.free(response),
+                else => {},
+            },
+            .timeout => {},
+        }
+    }
+
+    fn sendTaskResult(
+        self: *IoHttpTransport,
+        method: HttpMethod,
+        url: []const u8,
+        headers: []const Header,
+        body: []const u8,
+    ) SendTaskResult {
+        const response = self.sendBlocking(method, url, headers, body) catch |err| switch (err) {
+            error.Canceled => return .canceled,
+            else => return .{ .failure = err },
+        };
+        return .{ .success = response };
+    }
+
+    fn sendBlocking(
+        self: *IoHttpTransport,
         method: HttpMethod,
         url: []const u8,
         headers: []const Header,
         body: []const u8,
     ) anyerror![]const u8 {
-        const self: *IoHttpTransport = @ptrCast(@alignCast(ptr));
-        const io = self.io orelse return error.IoNotInitialized;
-        const client = self.ensureClient(io);
+        const client = &self.http_client;
 
         // Parse URI.
         const uri = try std.Uri.parse(url);
@@ -3473,6 +3568,61 @@ pub const IoHttpTransport = struct {
             else => |e| return e,
         };
     }
+
+    fn send(
+        ptr: *anyopaque,
+        method: HttpMethod,
+        url: []const u8,
+        headers: []const Header,
+        body: []const u8,
+        options: Transport.SendOptions,
+    ) anyerror![]const u8 {
+        const self: *IoHttpTransport = @ptrCast(@alignCast(ptr));
+        if (options.timeout == .none) {
+            return self.sendBlocking(method, url, headers, body);
+        }
+
+        var events_buf: [2]SendEvent = undefined;
+        var select = std.Io.Select(SendEvent).init(self.io, &events_buf);
+        errdefer while (select.cancel()) |event| {
+            freeSendEvent(self.allocator, event);
+        };
+
+        try select.concurrent(.request, sendTaskResult, .{ self, method, url, headers, body });
+        select.async(.timeout, waitTimeout, .{ self.io, options.timeout });
+
+        var maybe_result: ?SendTaskResult = null;
+        var timed_out = false;
+
+        while (true) {
+            const event = try select.await();
+            switch (event) {
+                .request => |result| {
+                    maybe_result = result;
+                    break;
+                },
+                .timeout => |result| {
+                    if (result == .fired) {
+                        timed_out = true;
+                        break;
+                    }
+                },
+            }
+        }
+
+        while (select.cancel()) |event| {
+            freeSendEvent(self.allocator, event);
+        }
+
+        if (timed_out) return error.Timeout;
+
+        const result = maybe_result orelse unreachable;
+        return switch (result) {
+            .success => |response| response,
+            .failure => |err| err,
+            .canceled => error.Canceled,
+        };
+    }
 };
 
 // ── GetPayload response parsing tests ─────────────────────────────────────────
@@ -3487,7 +3637,7 @@ test "getPayloadV1: parses ExecutionPayload response" {
 
     var mock = MockTransport.init(allocator, canned);
     defer mock.deinit();
-    var engine = HttpEngine.init(allocator, "http://localhost:8551", null, mock.transport());
+    var engine = HttpEngine.init(allocator, testing.io, "http://localhost:8551", null, mock.transport());
     defer engine.deinit();
 
     const api1 = engine.engine();
@@ -3514,7 +3664,7 @@ test "getPayloadV2: parses ExecutionPayload + blockValue response" {
 
     var mock = MockTransport.init(allocator, canned);
     defer mock.deinit();
-    var engine = HttpEngine.init(allocator, "http://localhost:8551", null, mock.transport());
+    var engine = HttpEngine.init(allocator, testing.io, "http://localhost:8551", null, mock.transport());
     defer engine.deinit();
 
     const api2 = engine.engine();
@@ -3539,7 +3689,7 @@ test "getPayloadV3: parses ExecutionPayload + blockValue + BlobsBundle response"
 
     var mock = MockTransport.init(allocator, canned);
     defer mock.deinit();
-    var engine = HttpEngine.init(allocator, "http://localhost:8551", null, mock.transport());
+    var engine = HttpEngine.init(allocator, testing.io, "http://localhost:8551", null, mock.transport());
     defer engine.deinit();
 
     const api3 = engine.engine();
@@ -3566,7 +3716,7 @@ test "getPayloadV4: parses ExecutionPayload + blockValue + BlobsBundle + executi
 
     var mock = MockTransport.init(allocator, canned);
     defer mock.deinit();
-    var engine = HttpEngine.init(allocator, "http://localhost:8551", null, mock.transport());
+    var engine = HttpEngine.init(allocator, testing.io, "http://localhost:8551", null, mock.transport());
     defer engine.deinit();
 
     const api4 = engine.engine();
@@ -3594,7 +3744,7 @@ test "getPayloadV1: payload id is hex-encoded in request" {
 
     var mock = MockTransport.init(allocator, canned);
     defer mock.deinit();
-    var engine = HttpEngine.init(allocator, "http://localhost:8551", null, mock.transport());
+    var engine = HttpEngine.init(allocator, testing.io, "http://localhost:8551", null, mock.transport());
     defer engine.deinit();
 
     // Payload ID with known bytes
@@ -3615,7 +3765,7 @@ test "getPayloadForFork: bellatrix dispatches to V1" {
 
     var mock = MockTransport.init(allocator, canned);
     defer mock.deinit();
-    var engine = HttpEngine.init(allocator, "http://localhost:8551", null, mock.transport());
+    var engine = HttpEngine.init(allocator, testing.io, "http://localhost:8551", null, mock.transport());
     defer engine.deinit();
 
     const resp = try engine.getPayloadForFork(.bellatrix, [_]u8{0xaa} ** 8);
@@ -3633,7 +3783,7 @@ test "getPayloadForFork: capella dispatches to V2" {
 
     var mock = MockTransport.init(allocator, canned);
     defer mock.deinit();
-    var engine = HttpEngine.init(allocator, "http://localhost:8551", null, mock.transport());
+    var engine = HttpEngine.init(allocator, testing.io, "http://localhost:8551", null, mock.transport());
     defer engine.deinit();
 
     const resp = try engine.getPayloadForFork(.capella, [_]u8{0xbb} ** 8);
@@ -3650,7 +3800,7 @@ test "getPayloadForFork: electra dispatches to V4" {
 
     var mock = MockTransport.init(allocator, canned);
     defer mock.deinit();
-    var engine = HttpEngine.init(allocator, "http://localhost:8551", null, mock.transport());
+    var engine = HttpEngine.init(allocator, testing.io, "http://localhost:8551", null, mock.transport());
     defer engine.deinit();
 
     const resp = try engine.getPayloadForFork(.electra, [_]u8{0xcc} ** 8);
@@ -3669,7 +3819,7 @@ test "PayloadAttributesV1: serializes timestamp, prevRandao, suggestedFeeRecipie
 
     var mock = MockTransport.init(allocator, canned);
     defer mock.deinit();
-    var engine = HttpEngine.init(allocator, "http://localhost:8551", null, mock.transport());
+    var engine = HttpEngine.init(allocator, testing.io, "http://localhost:8551", null, mock.transport());
     defer engine.deinit();
 
     const attrs = PayloadAttributesV1{
@@ -3745,7 +3895,7 @@ test "HttpEngine: state transitions offline→online are logged" {
     var mock = MockTransport.init(allocator, canned);
     defer mock.deinit();
 
-    var engine = HttpEngine.init(allocator, "http://localhost:8551", null, mock.transport());
+    var engine = HttpEngine.init(allocator, testing.io, "http://localhost:8551", null, mock.transport());
     defer engine.deinit();
 
     // Manually set offline state
@@ -3770,7 +3920,7 @@ test "HttpEngine: syncing state tracks EL sync" {
     var mock = MockTransport.init(allocator, canned);
     defer mock.deinit();
 
-    var engine = HttpEngine.init(allocator, "http://localhost:8551", null, mock.transport());
+    var engine = HttpEngine.init(allocator, testing.io, "http://localhost:8551", null, mock.transport());
     defer engine.deinit();
 
     const api = engine.engine();
@@ -3792,7 +3942,7 @@ test "HttpEngine: exchangeTransitionConfiguration verifies merge config" {
     var mock = MockTransport.init(allocator, canned);
     defer mock.deinit();
 
-    var engine = HttpEngine.init(allocator, "http://localhost:8551", null, mock.transport());
+    var engine = HttpEngine.init(allocator, testing.io, "http://localhost:8551", null, mock.transport());
     defer engine.deinit();
 
     // The Ethereum mainnet TTD
@@ -3822,7 +3972,7 @@ test "HttpEngine: optimistic sync — SYNCING newPayload accepted without error"
     var mock = MockTransport.init(allocator, canned);
     defer mock.deinit();
 
-    var engine = HttpEngine.init(allocator, "http://localhost:8551", null, mock.transport());
+    var engine = HttpEngine.init(allocator, testing.io, "http://localhost:8551", null, mock.transport());
     defer engine.deinit();
 
     const api = engine.engine();
@@ -3843,7 +3993,7 @@ test "checkHealth: eth_syncing returns false = synced" {
     var mock = MockTransport.init(allocator, canned);
     defer mock.deinit();
 
-    var engine = HttpEngine.init(allocator, "http://localhost:8551", null, mock.transport());
+    var engine = HttpEngine.init(allocator, testing.io, "http://localhost:8551", null, mock.transport());
     defer engine.deinit();
 
     const status = try engine.checkHealth();
@@ -3864,7 +4014,7 @@ test "checkHealth: eth_syncing returns object = syncing with progress" {
     var mock = MockTransport.init(allocator, canned);
     defer mock.deinit();
 
-    var engine = HttpEngine.init(allocator, "http://localhost:8551", null, mock.transport());
+    var engine = HttpEngine.init(allocator, testing.io, "http://localhost:8551", null, mock.transport());
     defer engine.deinit();
 
     const status = try engine.checkHealth();
@@ -3883,7 +4033,14 @@ test "checkHealth: transport error marks EL offline" {
     // Use an engine that will get an error from the transport
     // We need a custom transport that errors — use a mock engine that fails
     const ErrorTransport = struct {
-        fn send(_: *anyopaque, _: HttpMethod, _: []const u8, _: []const Header, _: []const u8) anyerror![]const u8 {
+        fn send(
+            _: *anyopaque,
+            _: HttpMethod,
+            _: []const u8,
+            _: []const Header,
+            _: []const u8,
+            _: Transport.SendOptions,
+        ) anyerror![]const u8 {
             return error.ConnectionRefused;
         }
     };
@@ -3893,7 +4050,7 @@ test "checkHealth: transport error marks EL offline" {
         .sendFn = ErrorTransport.send,
     };
 
-    var engine = HttpEngine.initWithRetry(allocator, "http://localhost:8551", null, error_transport, .{
+    var engine = HttpEngine.initWithRetry(allocator, testing.io, "http://localhost:8551", null, error_transport, .{
         .max_retries = 0,
         .initial_backoff_ms = 0,
     });
@@ -3913,7 +4070,7 @@ test "checkHealth: offline→online transition logs" {
     var mock = MockTransport.init(allocator, canned);
     defer mock.deinit();
 
-    var engine = HttpEngine.init(allocator, "http://localhost:8551", null, mock.transport());
+    var engine = HttpEngine.init(allocator, testing.io, "http://localhost:8551", null, mock.transport());
     defer engine.deinit();
 
     // Force offline state
@@ -3935,7 +4092,7 @@ test "getPayloadBodiesByHashV1: empty array" {
     ;
     var mock = MockTransport.init(allocator, canned);
     defer mock.deinit();
-    var engine = HttpEngine.init(allocator, "http://localhost:8551", null, mock.transport());
+    var engine = HttpEngine.init(allocator, testing.io, "http://localhost:8551", null, mock.transport());
     defer engine.deinit();
 
     const result = try engine.getPayloadBodiesByHashV1(&.{});
@@ -3955,7 +4112,7 @@ test "getPayloadBodiesByHashV1: mixed null and present entries" {
     ;
     var mock = MockTransport.init(allocator, canned);
     defer mock.deinit();
-    var engine = HttpEngine.init(allocator, "http://localhost:8551", null, mock.transport());
+    var engine = HttpEngine.init(allocator, testing.io, "http://localhost:8551", null, mock.transport());
     defer engine.deinit();
 
     const hashes = [_][32]u8{ [_]u8{0x01} ** 32, [_]u8{0x02} ** 32, [_]u8{0x03} ** 32 };
@@ -3994,7 +4151,7 @@ test "getPayloadBodiesByRangeV1: parses range response" {
     ;
     var mock = MockTransport.init(allocator, canned);
     defer mock.deinit();
-    var engine = HttpEngine.init(allocator, "http://localhost:8551", null, mock.transport());
+    var engine = HttpEngine.init(allocator, testing.io, "http://localhost:8551", null, mock.transport());
     defer engine.deinit();
 
     const result = try engine.getPayloadBodiesByRangeV1(100, 2);
@@ -4027,7 +4184,7 @@ test "getPayloadBodiesByHashV2: parses Electra requests" {
     ;
     var mock = MockTransport.init(allocator, canned);
     defer mock.deinit();
-    var engine = HttpEngine.init(allocator, "http://localhost:8551", null, mock.transport());
+    var engine = HttpEngine.init(allocator, testing.io, "http://localhost:8551", null, mock.transport());
     defer engine.deinit();
 
     const hashes = [_][32]u8{[_]u8{0xaa} ** 32};
@@ -4067,7 +4224,7 @@ test "getPayloadBodiesByRangeV2: parses V2 range response" {
     ;
     var mock = MockTransport.init(allocator, canned);
     defer mock.deinit();
-    var engine = HttpEngine.init(allocator, "http://localhost:8551", null, mock.transport());
+    var engine = HttpEngine.init(allocator, testing.io, "http://localhost:8551", null, mock.transport());
     defer engine.deinit();
 
     const result = try engine.getPayloadBodiesByRangeV2(1, 2);
@@ -4093,7 +4250,7 @@ test "getPayloadBodiesByHashV1: JSON-RPC error propagates" {
     ;
     var mock = MockTransport.init(allocator, canned);
     defer mock.deinit();
-    var engine = HttpEngine.init(allocator, "http://localhost:8551", null, mock.transport());
+    var engine = HttpEngine.init(allocator, testing.io, "http://localhost:8551", null, mock.transport());
     defer engine.deinit();
 
     const result = engine.getPayloadBodiesByHashV1(&.{[_]u8{0x01} ** 32});
@@ -4126,7 +4283,7 @@ test "getPayloadBodiesByHashForFork: deneb uses V1, electra uses V2" {
     ;
     var mock = MockTransport.init(allocator, canned);
     defer mock.deinit();
-    var engine = HttpEngine.init(allocator, "http://localhost:8551", null, mock.transport());
+    var engine = HttpEngine.init(allocator, testing.io, "http://localhost:8551", null, mock.transport());
     defer engine.deinit();
 
     // Deneb → V1
@@ -4152,7 +4309,7 @@ test "getPayloadBodiesByRangeForFork: pre-merge returns error" {
     const allocator = testing.allocator;
     var mock = MockTransport.init(allocator, "{}");
     defer mock.deinit();
-    var engine = HttpEngine.init(allocator, "http://localhost:8551", null, mock.transport());
+    var engine = HttpEngine.init(allocator, testing.io, "http://localhost:8551", null, mock.transport());
     defer engine.deinit();
 
     const result = engine.getPayloadBodiesByRangeForFork(.phase0, 1, 10);

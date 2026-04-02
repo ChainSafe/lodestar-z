@@ -599,14 +599,68 @@ fn applyPublishValidation(
             if (action == .reject) return error.InvalidRequest;
         },
         .consensus => {},
-        .consensus_and_equivocation => {
-            std.log.warn(
-                "broadcastValidation=consensus_and_equivocation currently aliases consensus validation; equivocation checks are not implemented yet",
-                .{},
-            );
-        },
+        .consensus_and_equivocation => {},
         .none => {},
     }
+}
+
+const PublishEquivocationGuard = struct {
+    key: BeaconNode.PublishedProposalKey,
+    block_root: [32]u8,
+    inserted: bool,
+};
+
+fn beginPublishEquivocationGuard(
+    node: *BeaconNode,
+    any_signed: AnySignedBeaconBlock,
+) !PublishEquivocationGuard {
+    var block_root: [32]u8 = undefined;
+    try any_signed.beaconBlock().hashTreeRoot(node.allocator, &block_root);
+
+    const key: BeaconNode.PublishedProposalKey = .{
+        .slot = any_signed.beaconBlock().slot(),
+        .proposer_index = any_signed.beaconBlock().proposerIndex(),
+    };
+
+    while (!node.published_proposals_mu.tryLock()) {
+        std.atomic.spinLoopHint();
+    }
+    defer node.published_proposals_mu.unlock();
+
+    if (node.published_proposals.get(key)) |existing_root| {
+        if (std.mem.eql(u8, &existing_root, &block_root)) {
+            return .{
+                .key = key,
+                .block_root = block_root,
+                .inserted = false,
+            };
+        }
+        return error.ProposerEquivocationDetected;
+    }
+
+    try node.published_proposals.put(key, block_root);
+    return .{
+        .key = key,
+        .block_root = block_root,
+        .inserted = true,
+    };
+}
+
+fn rollbackPublishEquivocationGuard(
+    node: *BeaconNode,
+    maybe_guard: ?PublishEquivocationGuard,
+) void {
+    const guard = maybe_guard orelse return;
+    if (!guard.inserted) return;
+
+    while (!node.published_proposals_mu.tryLock()) {
+        std.atomic.spinLoopHint();
+    }
+    defer node.published_proposals_mu.unlock();
+
+    const current_root = node.published_proposals.get(guard.key) orelse return;
+    if (!std.mem.eql(u8, &current_root, &guard.block_root)) return;
+    _ = node.published_proposals.remove(guard.key);
 }
 
 fn importBlockCallback(
@@ -639,6 +693,12 @@ fn importBlockCallback(
             break :blk try block_production_mod.unblindPublishedBlock(node, any_signed);
         },
     };
+
+    const equivocation_guard = switch (params.broadcast_validation) {
+        .consensus_and_equivocation => try beginPublishEquivocationGuard(node, imported),
+        else => null,
+    };
+    errdefer rollbackPublishEquivocationGuard(node, equivocation_guard);
 
     try applyPublishValidation(node, imported, params.broadcast_validation);
     _ = try node.importBlock(imported, .api);
@@ -828,12 +888,7 @@ fn produceBlockCallback(
     if (params.graffiti) |graffiti| prod_config.graffiti = graffiti;
     if (params.fee_recipient) |fee_recipient| prod_config.fee_recipient = fee_recipient;
     const selection = params.builder_selection orelse .executiononly;
-    prod_config.builder_boost_factor = switch (selection) {
-        .executionalways, .executiononly => 0,
-        .default => 90,
-        .maxprofit => params.builder_boost_factor,
-        .builderalways, .builderonly => params.builder_boost_factor,
-    };
+    prod_config.builder_boost_factor = builderBoostFactorForSelection(selection, params.builder_boost_factor);
     prod_config.randao_reveal = params.randao_reveal;
 
     switch (selection) {
@@ -864,61 +919,60 @@ fn produceBlockCallback(
             };
         },
         .@"default", .maxprofit => {
-            if (try block_production_mod.produceBuilderBlindedBlock(
+            var produced = try block_production_mod.produceEngineOrBuilderProposal(
                 node,
                 params.slot,
                 prod_config,
-                block_production_mod.builderBidThresholdForConfig(node, prod_config),
-                false,
-            )) |produced_blinded_value| {
-                var produced_blinded = produced_blinded_value;
-                defer produced_blinded.deinit(allocator);
-
-                if (params.strict_fee_recipient_check) {
-                    const expected_fee_recipient = params.fee_recipient orelse node.chainQuery().proposerFeeRecipientForSlot(
-                        params.slot,
-                        node.node_options.suggested_fee_recipient,
-                    ) orelse return error.MissingProposerFeeRecipient;
-                    try block_production_mod.ensureProducedBlindedFeeRecipient(&produced_blinded, expected_fee_recipient, true);
-                }
-
-                const serialized = try block_production_mod.serializeUnsignedProducedBlindedBlock(
-                    node,
-                    allocator,
-                    params.slot,
-                    &produced_blinded,
-                );
-                return .{
-                    .ssz_bytes = serialized.ssz_bytes,
-                    .fork = serialized.fork_name,
-                    .blinded = true,
-                    .execution_payload_source = .builder,
-                };
-            }
-
-            var produced = try node.produceFullBlock(params.slot, prod_config);
+                block_production_mod.builderBoostFactorForConfig(node, prod_config),
+            );
             defer produced.deinit(allocator);
 
-            if (params.strict_fee_recipient_check) {
-                const expected_fee_recipient = params.fee_recipient orelse node.chainQuery().proposerFeeRecipientForSlot(
+            const expected_fee_recipient = if (params.strict_fee_recipient_check)
+                params.fee_recipient orelse node.chainQuery().proposerFeeRecipientForSlot(
                     params.slot,
                     node.node_options.suggested_fee_recipient,
-                ) orelse return error.MissingProposerFeeRecipient;
-                try block_production_mod.ensureProducedFeeRecipient(&produced, expected_fee_recipient, true);
-            }
+                ) orelse return error.MissingProposerFeeRecipient
+            else
+                undefined;
 
-            const serialized = try block_production_mod.serializeUnsignedBlock(
-                node,
-                allocator,
-                params.slot,
-                &produced,
-                if (params.blinded_local) .blinded else .full,
-            );
-            return .{
-                .ssz_bytes = serialized.ssz_bytes,
-                .fork = serialized.fork_name,
-                .blinded = serialized.block_type == .blinded,
-                .execution_payload_source = .engine,
+            return switch (produced) {
+                .builder => |*produced_blinded| blk: {
+                    if (params.strict_fee_recipient_check) {
+                        try block_production_mod.ensureProducedBlindedFeeRecipient(produced_blinded, expected_fee_recipient, true);
+                    }
+
+                    const serialized = try block_production_mod.serializeUnsignedProducedBlindedBlock(
+                        node,
+                        allocator,
+                        params.slot,
+                        produced_blinded,
+                    );
+                    break :blk .{
+                        .ssz_bytes = serialized.ssz_bytes,
+                        .fork = serialized.fork_name,
+                        .blinded = true,
+                        .execution_payload_source = .builder,
+                    };
+                },
+                .engine => |*produced_full| blk: {
+                    if (params.strict_fee_recipient_check) {
+                        try block_production_mod.ensureProducedFeeRecipient(produced_full, expected_fee_recipient, true);
+                    }
+
+                    const serialized = try block_production_mod.serializeUnsignedBlock(
+                        node,
+                        allocator,
+                        params.slot,
+                        produced_full,
+                        if (params.blinded_local) .blinded else .full,
+                    );
+                    break :blk .{
+                        .ssz_bytes = serialized.ssz_bytes,
+                        .fork = serialized.fork_name,
+                        .blinded = serialized.block_type == .blinded,
+                        .execution_payload_source = .engine,
+                    };
+                },
             };
         },
         .builderalways, .builderonly => {
@@ -953,6 +1007,17 @@ fn produceBlockCallback(
             };
         },
     }
+}
+
+fn builderBoostFactorForSelection(
+    selection: api_mod.types.BuilderSelection,
+    requested: ?u64,
+) ?u64 {
+    return switch (selection) {
+        .executionalways, .executiononly => 0,
+        .@"default", .maxprofit => requested,
+        .builderalways, .builderonly => null,
+    };
 }
 
 fn getAttestationDataCallback(
@@ -1247,3 +1312,12 @@ fn opPoolGetBlsToExecutionChangesCallback(
 
 const beacon_node_mod = @import("beacon_node.zig");
 const BeaconNode = beacon_node_mod.BeaconNode;
+
+test "builderBoostFactorForSelection matches builder selection semantics" {
+    try std.testing.expectEqual(@as(?u64, 0), builderBoostFactorForSelection(.executiononly, 150));
+    try std.testing.expectEqual(@as(?u64, 0), builderBoostFactorForSelection(.executionalways, null));
+    try std.testing.expectEqual(@as(?u64, 150), builderBoostFactorForSelection(.maxprofit, 150));
+    try std.testing.expectEqual(@as(?u64, 150), builderBoostFactorForSelection(.@"default", 150));
+    try std.testing.expectEqual(@as(?u64, null), builderBoostFactorForSelection(.builderalways, 150));
+    try std.testing.expectEqual(@as(?u64, null), builderBoostFactorForSelection(.builderonly, null));
+}

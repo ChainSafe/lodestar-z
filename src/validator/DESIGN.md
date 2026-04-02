@@ -51,16 +51,19 @@ Current gaps:
    The local beacon node can now also produce builder-sourced blinded
    proposals for builder-aware selections instead of silently degrading them
    to an engine block. The remaining production gap in that area is narrower:
-   the local BN still evaluates the engine payload and builder bid
-   sequentially, not with Lodestar TS's parallel race/cutoff policy, so the
-   builder-vs-engine choice is correct but not yet as latency-hardened.
+   the local BN now evaluates the engine payload and builder bid with
+   parallel fetches plus a Lodestar-style cutoff/overall-timeout race, and it
+   now overlaps stable proposal-template assembly with those external fetches
+   so the hot proposal path is no longer serialized on local body-building.
    On the beacon CLI side, `--builder`, `--builder.url`, and the default
-   builder boost now wire through to a real local builder client, but the
-   builder timeout and circuit-breaker tuning flags still fail fast because
-   that builder-health control path is not implemented yet.
-   `broadcastValidation=consensus_and_equivocation` currently aliases
-   `consensus` with a warning because explicit equivocation checks are still
-   missing on the local beacon-node path.
+   builder boost now wire through to a real local builder client, and the
+   circuit-breaker tuning flags now control slot-based builder health checks.
+   Builder and execution timeout overrides now apply to the local HTTP
+   clients, with the builder proposal path still using a tighter capped
+   proposal timeout inside that broader client budget. The local beacon node
+   also now enforces a process-local equivocation guard on
+   `broadcastValidation=consensus_and_equivocation`, though the validator's
+   persistent slashing-protection DB remains the primary defense across restarts.
 
 6. Beacon-node config verification is implemented only against the subset of
    `/eth/v1/config/spec` that lodestar-z currently exposes and consumes.
@@ -72,13 +75,6 @@ Current gaps:
    (`genesis_time`, `genesis_validators_root`) is stored in a small sidecar file
    under `validator-db/`.
 
-8. Chain-head tracking still uses a dedicated SSE thread.
-   The tracker now seeds itself from normal REST calls and reconnects when the
-   SSE stream drops, but the current HTTP event stream client still does not
-   expose a true cancellation primitive. Shutdown therefore still depends on
-   the beacon node unblocking or closing the SSE stream. That remaining
-   cancellation limitation is a real runtime gap, not hidden behavior.
-
 Non-gap note:
 
 1. Local keystores are now locked at startup and held for the process lifetime.
@@ -88,6 +84,9 @@ Non-gap note:
 2. When `--proposerSettingsFile` is used, proposer policy writes are
    intentionally disabled through the keymanager API. The file is treated as the
    source of truth for proposer policy.
+
+3. Chain-head tracking and remote-signer refresh now run as cancellable
+   `std.Io` tasks owned by the validator runtime, not detached OS threads.
 
 ## Architecture Overview
 

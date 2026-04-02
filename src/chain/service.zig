@@ -7,6 +7,7 @@
 const std = @import("std");
 const consensus_types = @import("consensus_types");
 const fork_types = @import("fork_types");
+const preset = @import("preset").preset;
 const state_transition = @import("state_transition");
 
 const Chain = @import("chain.zig").Chain;
@@ -16,6 +17,8 @@ const Query = @import("query.zig").Query;
 const produce_block = @import("produce_block.zig");
 const blob_kzg_verification = @import("blob_kzg_verification.zig");
 const ProducedBlockBody = produce_block.ProducedBlockBody;
+const ProposalSnapshot = produce_block.ProposalSnapshot;
+const PreparedProposalTemplate = produce_block.PreparedProposalTemplate;
 const ProducedBlock = produce_block.ProducedBlock;
 const ProducedBlindedBlock = produce_block.ProducedBlindedBlock;
 const BlockProductionConfig = produce_block.BlockProductionConfig;
@@ -40,6 +43,34 @@ const ExecutionRequests = consensus_types.electra.ExecutionRequests.Type;
 const BLSSignature = consensus_types.primitive.BLSSignature.Type;
 const BlobVerifyInput = blob_kzg_verification.BlobVerifyInput;
 const BYTES_PER_CELL = blob_kzg_verification.BYTES_PER_CELL;
+
+fn eth1DataFromHeadState(cached: *CachedBeaconState) Eth1DataType {
+    var eth1_data = Eth1Data.default_value;
+    const state_eth1 = cached.state.eth1Data() catch return eth1_data;
+    eth1_data.deposit_root = (state_eth1.getFieldRoot("deposit_root") catch &std.mem.zeroes([32]u8)).*;
+    eth1_data.deposit_count = state_eth1.get("deposit_count") catch 0;
+    eth1_data.block_hash = (state_eth1.getFieldRoot("block_hash") catch &std.mem.zeroes([32]u8)).*;
+    return eth1_data;
+}
+
+fn proposerPubkeyForSlot(
+    allocator: std.mem.Allocator,
+    cached: *CachedBeaconState,
+    proposer_index: ValidatorIndex,
+) ![48]u8 {
+    var validators = try cached.state.validators();
+    var validator: consensus_types.phase0.Validator.Type = undefined;
+    try validators.getValue(allocator, proposer_index, &validator);
+    return validator.pubkey;
+}
+
+fn prevRandaoForSlot(cached: *CachedBeaconState, slot: Slot) ![32]u8 {
+    const epoch = slot / preset.SLOTS_PER_EPOCH;
+    const randao_index = epoch % preset.EPOCHS_PER_HISTORICAL_VECTOR;
+    var mixes = try cached.state.randaoMixes();
+    const mix_ptr = try mixes.getFieldRoot(randao_index);
+    return mix_ptr.*;
+}
 
 pub const ReadyBlockInput = chain_types.ReadyBlockInput;
 pub const RawBlockBytes = chain_types.RawBlockBytes;
@@ -578,6 +609,80 @@ pub const Service = struct {
         );
     }
 
+    pub fn prepareProposalSnapshot(
+        self: Service,
+        slot: Slot,
+    ) !ProposalSnapshot {
+        const chain_query = self.query();
+        const head = chain_query.head();
+        const head_state = chain_query.headState() orelse return error.NoHeadState;
+        const proposer_index = try head_state.getBeaconProposer(slot);
+        const proposer_pubkey = try proposerPubkeyForSlot(self.chain.allocator, head_state, proposer_index);
+        const execution_forkchoice = chain_query.executionForkchoiceState(head.root) orelse return error.NoExecutionHeadHash;
+
+        return produce_block.prepareProposalSnapshot(
+            slot,
+            proposer_index,
+            proposer_pubkey,
+            head.root,
+            execution_forkchoice.head_block_hash,
+            try prevRandaoForSlot(head_state, slot),
+            eth1DataFromHeadState(head_state),
+        );
+    }
+
+    pub fn buildProposalTemplate(
+        self: Service,
+        snapshot: ProposalSnapshot,
+        config: BlockProductionConfig,
+    ) !PreparedProposalTemplate {
+        return produce_block.buildProposalTemplate(
+            self.chain.allocator,
+            snapshot,
+            self.chain.op_pool,
+            config,
+            self.chain.sync_contribution_pool,
+        );
+    }
+
+    pub fn assemblePreparedBlock(
+        self: Service,
+        template: PreparedProposalTemplate,
+        exec_payload: ExecutionPayload,
+        blobs_bundle: ?BlobsBundle,
+        block_value: u256,
+        blob_commitments: std.ArrayListUnmanaged(KZGCommitment),
+        execution_requests: ExecutionRequests,
+    ) !ProducedBlock {
+        return produce_block.assembleBlockFromTemplate(
+            self.chain.allocator,
+            template,
+            exec_payload,
+            blobs_bundle,
+            block_value,
+            blob_commitments,
+            execution_requests,
+        );
+    }
+
+    pub fn assemblePreparedBlindedBlock(
+        self: Service,
+        template: PreparedProposalTemplate,
+        exec_payload_header: ExecutionPayloadHeader,
+        block_value: u256,
+        blob_commitments: std.ArrayListUnmanaged(KZGCommitment),
+        execution_requests: ExecutionRequests,
+    ) !ProducedBlindedBlock {
+        return produce_block.assembleBlindedBlockFromTemplate(
+            self.chain.allocator,
+            template,
+            exec_payload_header,
+            block_value,
+            blob_commitments,
+            execution_requests,
+        );
+    }
+
     pub fn produceFullBlockWithPayload(
         self: Service,
         slot: Slot,
@@ -588,36 +693,14 @@ pub const Service = struct {
         execution_requests: ExecutionRequests,
         config: BlockProductionConfig,
     ) !ProducedBlock {
-        const chain_query = self.query();
-        const head = chain_query.head();
-        const head_state = chain_query.headState();
-
-        var eth1_data = Eth1Data.default_value;
-        if (head_state) |cached| {
-            const state_eth1 = cached.state.eth1Data() catch null;
-            if (state_eth1) |eth1_view| {
-                eth1_data.deposit_root = (eth1_view.getFieldRoot("deposit_root") catch &std.mem.zeroes([32]u8)).*;
-                eth1_data.deposit_count = eth1_view.get("deposit_count") catch 0;
-                eth1_data.block_hash = (eth1_view.getFieldRoot("block_hash") catch &std.mem.zeroes([32]u8)).*;
-            }
-        }
-
-        var proposer_index: ValidatorIndex = 0;
-        if (head_state) |cached| {
-            proposer_index = cached.getBeaconProposer(slot) catch 0;
-        }
-
-        return self.assembleBlock(
-            slot,
-            proposer_index,
-            head.root,
+        const snapshot = try self.prepareProposalSnapshot(slot);
+        return self.assemblePreparedBlock(
+            try self.buildProposalTemplate(snapshot, config),
             exec_payload,
             blobs_bundle,
             block_value,
             blob_commitments,
             execution_requests,
-            eth1_data,
-            config,
         );
     }
 
@@ -630,35 +713,13 @@ pub const Service = struct {
         execution_requests: ExecutionRequests,
         config: BlockProductionConfig,
     ) !ProducedBlindedBlock {
-        const chain_query = self.query();
-        const head = chain_query.head();
-        const head_state = chain_query.headState();
-
-        var eth1_data = Eth1Data.default_value;
-        if (head_state) |cached| {
-            const state_eth1 = cached.state.eth1Data() catch null;
-            if (state_eth1) |eth1_view| {
-                eth1_data.deposit_root = (eth1_view.getFieldRoot("deposit_root") catch &std.mem.zeroes([32]u8)).*;
-                eth1_data.deposit_count = eth1_view.get("deposit_count") catch 0;
-                eth1_data.block_hash = (eth1_view.getFieldRoot("block_hash") catch &std.mem.zeroes([32]u8)).*;
-            }
-        }
-
-        var proposer_index: ValidatorIndex = 0;
-        if (head_state) |cached| {
-            proposer_index = cached.getBeaconProposer(slot) catch 0;
-        }
-
-        return self.assembleBlindedBlock(
-            slot,
-            proposer_index,
-            head.root,
+        const snapshot = try self.prepareProposalSnapshot(slot);
+        return self.assemblePreparedBlindedBlock(
+            try self.buildProposalTemplate(snapshot, config),
             exec_payload_header,
             block_value,
             blob_commitments,
             execution_requests,
-            eth1_data,
-            config,
         );
     }
 

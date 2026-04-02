@@ -141,6 +141,11 @@ pub const SyncStatus = struct {
 pub const HeadInfo = chain_mod.HeadInfo;
 
 pub const BeaconNode = struct {
+    pub const PublishedProposalKey = struct {
+        slot: u64,
+        proposer_index: u64,
+    };
+
     pub const InitConfig = struct {
         options: NodeOptions,
         db_path: ?[]const u8 = null,
@@ -251,6 +256,8 @@ pub const BeaconNode = struct {
     /// Used by produceBlockWithPayload to retrieve the built execution payload via getPayload.
     cached_payload_id: ?[8]u8 = null,
     cached_payload_slot: ?u64 = null,
+    cached_payload_parent_root: ?[32]u8 = null,
+    last_builder_status_slot: ?u64 = null,
 
     /// Optional MEV-boost builder relay client.
     /// When configured, block production attempts to use the builder for higher rewards.
@@ -259,6 +266,11 @@ pub const BeaconNode = struct {
 
     /// Track whether the EL is offline (unreachable). Reset on successful Engine API call.
     el_offline: bool = false,
+
+    /// Process-local guard against publishing conflicting blocks for the same
+    /// proposer/slot through the BN API.
+    published_proposals_mu: std.atomic.Mutex = .unlocked,
+    published_proposals: std.AutoHashMap(PublishedProposalKey, [32]u8),
 
     /// I/O context for runtime operations.
     io: std.Io,
@@ -761,6 +773,10 @@ pub const BeaconNode = struct {
         registrations: []const execution_mod.builder.SignedValidatorRegistration,
     ) void {
         block_production_mod.registerValidatorsWithBuilder(self, registrations);
+    }
+
+    pub fn refreshBuilderStatus(self: *BeaconNode, clock_slot: u64) void {
+        block_production_mod.refreshBuilderStatus(self, clock_slot);
     }
 
     /// Get the current head info.

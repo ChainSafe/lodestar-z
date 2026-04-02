@@ -91,6 +91,7 @@ const log = std.log.scoped(.validator_client);
 
 pub const ValidatorClient = struct {
     pub const ValidatorCounts = store_mod.ValidatorStore.ValidatorCounts;
+    const BackgroundTaskFuture = std.Io.Future(anyerror!void);
 
     allocator: Allocator,
     config: ValidatorConfig,
@@ -129,16 +130,15 @@ pub const ValidatorClient = struct {
     shutdown_requested: std.atomic.Value(bool),
     running: std.atomic.Value(bool),
 
-    // SSE thread handle — stored for clean shutdown (join instead of detach).
-    sse_thread_handle: ?std.Thread = null,
+    // Long-lived background tasks owned by the validator runtime.
+    header_tracker_task: ?BackgroundTaskFuture = null,
+    remote_signer_sync_task: ?BackgroundTaskFuture = null,
 
     // Session stats.
     session_start_ns: u64,
 
     /// Stable remote signer objects owned by this validator client.
     remote_signers: std.array_list.Managed(*RemoteSigner),
-    /// Background refresh thread for external signer key discovery.
-    remote_signer_sync_thread_handle: ?std.Thread = null,
     /// Local keystore ownership locks held for the process lifetime.
     local_keystore_locks: std.array_list.Managed(KeystoreLock),
     /// Serializes runtime keymanager mutations and remote-signer sync updates.
@@ -179,10 +179,10 @@ pub const ValidatorClient = struct {
         self.signing_context = signing_ctx;
         self.shutdown_requested = std.atomic.Value(bool).init(false);
         self.running = std.atomic.Value(bool).init(false);
-        self.sse_thread_handle = null;
+        self.header_tracker_task = null;
         self.session_start_ns = time.realtimeNs();
         self.remote_signers = std.array_list.Managed(*RemoteSigner).init(allocator);
-        self.remote_signer_sync_thread_handle = null;
+        self.remote_signer_sync_task = null;
         self.local_keystore_locks = std.array_list.Managed(KeystoreLock).init(allocator);
         self.runtime_mutex = .{};
 
@@ -782,45 +782,12 @@ pub const ValidatorClient = struct {
             });
         }
 
-        // Start ChainHeaderTracker SSE subscription in a background thread.
-        // The SSE stream provides head events for reorg detection and sync committee
-        // block root tracking. We start it here so it runs concurrently with the clock loop.
-        //
-        // The thread receives a copy of io (std.Io is a pointer/handle, safe to copy).
-        // If the SSE stream fails, the thread logs the error and exits — the VC
-        // continues without head tracking (using fallback zero block root for sync committee).
-        //
-        // TODO(fix-8): For Zig 0.16 full evented I/O, migrate to io.spawn() once
-        //     the evented fiber API stabilises. For now, std.Thread is sufficient.
-        const SseThreadCtx = struct {
-            tracker: *chain_header_mod.ChainHeaderTracker,
-            io: Io,
-            allocator: std.mem.Allocator,
-        };
-        const sse_ctx = try self.allocator.create(SseThreadCtx);
-        sse_ctx.* = .{ .tracker = &self.header_tracker, .io = self.io, .allocator = self.allocator };
-        const sse_thread = std.Thread.spawn(.{}, struct {
-            fn run(ctx: *SseThreadCtx) void {
-                const alloc = ctx.allocator;
-                ctx.tracker.start(ctx.io) catch |err| {
-                    log.warn("ChainHeaderTracker SSE stream ended: {s}", .{@errorName(err)});
-                };
-                alloc.destroy(ctx);
-            }
-        }.run, .{sse_ctx}) catch |err| blk: {
-            log.warn("failed to start ChainHeaderTracker SSE thread: {s}", .{@errorName(err)});
-            self.allocator.destroy(sse_ctx);
-            break :blk null;
-        };
-        if (sse_thread) |t| {
-            // Store thread handle for clean shutdown instead of detaching.
-            // The thread checks self.shutdown_requested and exits gracefully.
-            self.sse_thread_handle = t;
-            log.info("ChainHeaderTracker SSE subscription started in background thread", .{});
-        }
+        try self.startHeaderTrackerTask();
+        errdefer self.stopHeaderTrackerTask();
 
         if (self.config.external_signer_fetch_enabled and self.remote_signers.items.len > 0) {
-            try self.startRemoteSignerSyncThread();
+            try self.startRemoteSignerSyncTask();
+            errdefer self.stopRemoteSignerSyncTask();
         }
 
         var run_error: ?anyerror = null;
@@ -831,15 +798,8 @@ pub const ValidatorClient = struct {
         // Graceful shutdown sequence.
         log.info("validator client stopping...", .{});
 
-        self.header_tracker.requestShutdown();
-        self.stopRemoteSignerSyncThread();
-
-        // Join the SSE thread if it was spawned.
-        if (self.sse_thread_handle) |t| {
-            log.info("joining ChainHeaderTracker SSE thread...", .{});
-            t.join();
-            self.sse_thread_handle = null;
-        }
+        self.stopRemoteSignerSyncTask();
+        self.stopHeaderTrackerTask();
 
         // Note: slashing_db.close() is called by validator_store.deinit() — do NOT call it here.
 
@@ -986,51 +946,59 @@ pub const ValidatorClient = struct {
         return interval_ms * std.time.ns_per_ms;
     }
 
-    fn startRemoteSignerSyncThread(self: *ValidatorClient) !void {
-        const SyncCtx = struct {
-            io: Io,
-            client: *ValidatorClient,
-        };
-
-        const ctx = try self.allocator.create(SyncCtx);
-        errdefer self.allocator.destroy(ctx);
-        ctx.* = .{
-            .io = self.io,
-            .client = self,
-        };
-
-        self.remote_signer_sync_thread_handle = try std.Thread.spawn(.{}, struct {
-            fn run(sync_ctx: *SyncCtx) void {
-                defer sync_ctx.client.allocator.destroy(sync_ctx);
-
-                const client = sync_ctx.client;
-                const io = sync_ctx.io;
-                const interval_ns = client.remoteSignerSyncIntervalNs();
-                const sleep_slice_ns = std.time.ns_per_s;
-
-                while (!client.shutdown_requested.load(.acquire)) {
-                    var remaining_ns = interval_ns;
-                    while (remaining_ns > 0 and !client.shutdown_requested.load(.acquire)) {
-                        const this_sleep = @min(remaining_ns, sleep_slice_ns);
-                        io.sleep(.{ .nanoseconds = this_sleep }, .real) catch return;
-                        remaining_ns -= this_sleep;
-                    }
-
-                    if (client.shutdown_requested.load(.acquire)) return;
-
-                    client.syncRemoteSignerKeys(io) catch |err| {
-                        log.warn("remote signer sync failed: {s}", .{@errorName(err)});
-                    };
-                }
-            }
-        }.run, .{ctx});
+    fn runHeaderTrackerTask(self: *ValidatorClient) anyerror!void {
+        try self.header_tracker.start(self.io);
     }
 
-    fn stopRemoteSignerSyncThread(self: *ValidatorClient) void {
-        if (self.remote_signer_sync_thread_handle) |thread| {
-            self.shutdown_requested.store(true, .release);
-            thread.join();
-            self.remote_signer_sync_thread_handle = null;
+    fn startHeaderTrackerTask(self: *ValidatorClient) !void {
+        std.debug.assert(self.header_tracker_task == null);
+        self.header_tracker_task = try self.io.concurrent(runHeaderTrackerTask, .{self});
+        log.info("ChainHeaderTracker SSE subscription started as concurrent std.Io task", .{});
+    }
+
+    fn stopHeaderTrackerTask(self: *ValidatorClient) void {
+        self.header_tracker.requestShutdown();
+        if (self.header_tracker_task) |*task| {
+            _ = task.cancel(self.io) catch |err| switch (err) {
+                error.Canceled => {},
+                else => log.warn("chain header tracker task exited during shutdown: {s}", .{@errorName(err)}),
+            };
+            self.header_tracker_task = null;
+        }
+    }
+
+    fn runRemoteSignerSyncTask(self: *ValidatorClient) anyerror!void {
+        const interval_ns = self.remoteSignerSyncIntervalNs();
+        const sleep_slice_ns = std.time.ns_per_s;
+
+        while (!self.shutdown_requested.load(.acquire)) {
+            var remaining_ns = interval_ns;
+            while (remaining_ns > 0 and !self.shutdown_requested.load(.acquire)) {
+                const this_sleep = @min(remaining_ns, sleep_slice_ns);
+                try self.io.sleep(.{ .nanoseconds = this_sleep }, .real);
+                remaining_ns -= this_sleep;
+            }
+
+            if (self.shutdown_requested.load(.acquire)) return;
+
+            self.syncRemoteSignerKeys(self.io) catch |err| {
+                log.warn("remote signer sync failed: {s}", .{@errorName(err)});
+            };
+        }
+    }
+
+    fn startRemoteSignerSyncTask(self: *ValidatorClient) !void {
+        std.debug.assert(self.remote_signer_sync_task == null);
+        self.remote_signer_sync_task = try self.io.concurrent(runRemoteSignerSyncTask, .{self});
+    }
+
+    fn stopRemoteSignerSyncTask(self: *ValidatorClient) void {
+        if (self.remote_signer_sync_task) |*task| {
+            _ = task.cancel(self.io) catch |err| switch (err) {
+                error.Canceled => {},
+                else => log.warn("remote signer sync task exited during shutdown: {s}", .{@errorName(err)}),
+            };
+            self.remote_signer_sync_task = null;
         }
     }
 };

@@ -73,14 +73,8 @@ fn rejectUnsupportedOptions(opts: anytype) void {
     if (opts.disableLightClientServer) {
         unsupportedOption("--disableLightClientServer", "light client server toggling is not wired yet");
     }
-    if (opts.builder_timeout != null or opts.@"builder.timeout" != null) {
-        unsupportedOption("--builder-timeout", "builder HTTP timeout overrides are not wired yet");
-    }
-    if (opts.builder_fault_window != null or opts.@"builder.faultInspectionWindow" != null) {
-        unsupportedOption("--builder-fault-inspection-window", "builder circuit-breaker inspection is not wired yet");
-    }
-    if (opts.builder_allowed_faults != null or opts.@"builder.allowedFaults" != null) {
-        unsupportedOption("--builder-allowed-faults", "builder circuit-breaker thresholds are not wired yet");
+    if (opts.jwt_id != null or opts.jwtId != null) {
+        unsupportedOption("--jwt-id", "custom JWT claim ids are not wired yet");
     }
 }
 
@@ -115,6 +109,17 @@ fn parseU64OrExit(flag_name: []const u8, raw: []const u8) u64 {
         std.log.err("Invalid {s}: expected unsigned integer, got '{s}'", .{ flag_name, raw });
         std.process.exit(1);
     };
+}
+
+fn resolveEquivalentOption(
+    combined_flag_name: []const u8,
+    primary: ?[]const u8,
+    secondary: ?[]const u8,
+) ?[]const u8 {
+    if (primary != null and secondary != null and !std.mem.eql(u8, primary.?, secondary.?)) {
+        unsupportedOption(combined_flag_name, "conflicting values were provided");
+    }
+    return primary orelse secondary;
 }
 
 fn resolveBuilderUrl(opts: anytype) ?[]const u8 {
@@ -214,6 +219,13 @@ pub fn run(io: Io, allocator: Allocator, opts: anytype) !void {
     const params_file = opts.paramsFile orelse opts.params_file;
     const db_path_override = opts.dbDir orelse opts.db_path;
     const execution_urls = opts.@"execution.urls" orelse opts.execution_urls;
+    const execution_timeout_raw = resolveEquivalentOption(
+        "--execution-timeout/--execution.timeout",
+        opts.execution_timeout,
+        opts.@"execution.timeout",
+    );
+    const execution_retries = opts.@"execution.retries" orelse opts.execution_retries;
+    const execution_retry_delay = opts.@"execution.retryDelay" orelse 100;
     const jwt_secret_override = opts.jwtSecret orelse opts.jwt_secret;
     const api_port = opts.@"rest.port" orelse opts.api_port;
     const api_address = opts.@"rest.address" orelse opts.api_address;
@@ -240,7 +252,22 @@ pub fn run(io: Io, allocator: Allocator, opts: anytype) !void {
     const suggest_fee_recipient = opts.suggestedFeeRecipient orelse opts.suggest_fee_recipient;
     const builder_enabled = opts.builder;
     const builder_url = resolveBuilderUrl(opts);
+    const builder_timeout_raw = resolveEquivalentOption(
+        "--builder-timeout/--builder.timeout",
+        opts.builder_timeout,
+        opts.@"builder.timeout",
+    );
     const builder_boost_factor_raw = opts.builder_boost_factor;
+    const builder_fault_window_raw = resolveEquivalentOption(
+        "--builder-fault-inspection-window/--builder.faultInspectionWindow",
+        opts.builder_fault_window,
+        opts.@"builder.faultInspectionWindow",
+    );
+    const builder_allowed_faults_raw = resolveEquivalentOption(
+        "--builder-allowed-faults/--builder.allowedFaults",
+        opts.builder_allowed_faults,
+        opts.@"builder.allowedFaults",
+    );
     const log_level = opts.logLevel orelse opts.log_level;
     const log_file = opts.logFile orelse opts.log_file;
     const log_format = opts.logFormat orelse opts.log_format;
@@ -250,6 +277,12 @@ pub fn run(io: Io, allocator: Allocator, opts: anytype) !void {
     const engine_mock = opts.@"execution.engineMock" or opts.engine_mock;
     const persist_network_identity = opts.persistNetworkIdentity orelse true;
     const private_identify = opts.private;
+    if (std.mem.indexOfScalar(u8, execution_urls, ',') != null) {
+        unsupportedOption(
+            "--execution.urls",
+            "multiple execution URLs are not supported yet; use one execution endpoint or an external load balancer",
+        );
+    }
 
     if (!builder_enabled and builder_url != null) {
         unsupportedOption("--builder.url", "add --builder to enable the external builder relay");
@@ -257,10 +290,32 @@ pub fn run(io: Io, allocator: Allocator, opts: anytype) !void {
     if (!builder_enabled and builder_boost_factor_raw != null) {
         unsupportedOption("--builder-boost-factor", "add --builder to enable builder bid selection");
     }
+    if (!builder_enabled and builder_fault_window_raw != null) {
+        unsupportedOption("--builder-fault-inspection-window", "add --builder to enable builder circuit-breaker tuning");
+    }
+    if (!builder_enabled and builder_allowed_faults_raw != null) {
+        unsupportedOption("--builder-allowed-faults", "add --builder to enable builder circuit-breaker tuning");
+    }
     const builder_boost_factor = if (builder_boost_factor_raw) |raw|
         parseU64OrExit("--builder-boost-factor", raw)
     else
         @as(u64, 100);
+    const execution_timeout_ms = if (execution_timeout_raw) |raw|
+        parseU64OrExit("--execution-timeout", raw)
+    else
+        null;
+    const builder_timeout_ms = if (builder_timeout_raw) |raw|
+        parseU64OrExit("--builder-timeout", raw)
+    else
+        null;
+    const builder_fault_window = if (builder_fault_window_raw) |raw|
+        parseU64OrExit("--builder-fault-inspection-window", raw)
+    else
+        null;
+    const builder_allowed_faults = if (builder_allowed_faults_raw) |raw|
+        parseU64OrExit("--builder-allowed-faults", raw)
+    else
+        null;
 
     var custom_chain_config: config_mod.ChainConfig = undefined;
     var custom_beacon_config: BeaconConfig = undefined;
@@ -300,8 +355,19 @@ pub fn run(io: Io, allocator: Allocator, opts: anytype) !void {
         std.log.info("  jwt-secret: {s}", .{jwt});
     }
     std.log.info("  execution:  {s}", .{execution_urls});
+    std.log.info("  execution retry: attempts={d} delay_ms={d}", .{ execution_retries, execution_retry_delay });
+    if (execution_timeout_ms) |value| {
+        std.log.info("  execution timeout: {d}ms", .{value});
+    } else {
+        std.log.info("  execution timeout: default", .{});
+    }
     if (builder_enabled) {
         std.log.info("  builder:    {s} (boost={d})", .{ builder_url orelse default_builder_url, builder_boost_factor });
+        if (builder_timeout_ms) |value| {
+            std.log.info("  builder timeout: {d}ms", .{value});
+        } else {
+            std.log.info("  builder timeout: default", .{});
+        }
     }
 
     var pool = try Node.Pool.init(allocator, 200_000);
@@ -362,9 +428,15 @@ pub fn run(io: Io, allocator: Allocator, opts: anytype) !void {
         .rest_cors_origin = api_cors,
         .execution_urls = &.{execution_urls},
         .engine_mock = engine_mock,
+        .execution_retries = execution_retries,
+        .execution_retry_delay_ms = execution_retry_delay,
+        .execution_timeout_ms = execution_timeout_ms,
         .builder_enabled = builder_enabled,
         .builder_url = builder_url orelse default_builder_url,
+        .builder_timeout_ms = builder_timeout_ms,
         .builder_boost_factor = builder_boost_factor,
+        .builder_fault_inspection_window = builder_fault_window,
+        .builder_allowed_faults = builder_allowed_faults,
         .target_peers = target_peers,
         .network = network,
         .p2p_host = p2p_host4,

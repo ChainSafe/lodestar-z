@@ -18,6 +18,7 @@ const Allocator = std.mem.Allocator;
 
 const consensus_types = @import("consensus_types");
 const fork_types = @import("fork_types");
+const preset = @import("preset").preset;
 const types = @import("engine_api_types.zig");
 const http_engine = @import("http_engine.zig");
 const Transport = http_engine.Transport;
@@ -42,6 +43,11 @@ pub const ValidatorRegistration = struct {
 pub const SignedValidatorRegistration = struct {
     message: ValidatorRegistration,
     signature: [96]u8,
+};
+
+pub const CachedValidatorRegistration = struct {
+    gas_limit: u64,
+    timestamp: u64,
 };
 
 /// Execution payload header (blinded payload — without transactions).
@@ -188,6 +194,15 @@ pub const BuilderApi = struct {
 /// - No JWT authentication
 /// - Shorter timeouts (builder must respond quickly for block production)
 pub const HttpBuilder = struct {
+    const event_loop_lag_buffer_ms: u64 = 250;
+    const proposal_delay_tolerance_ms: u64 = 1_000 + event_loop_lag_buffer_ms;
+
+    pub const Config = struct {
+        timeout_ms: ?u64 = null,
+        fault_inspection_window: ?u64 = null,
+        allowed_faults: ?u64 = null,
+    };
+
     allocator: Allocator,
     /// Builder relay base URL (e.g. "http://localhost:18550").
     endpoint: []const u8,
@@ -195,24 +210,69 @@ pub const HttpBuilder = struct {
     transport: Transport,
     /// Current builder status.
     current_status: BuilderStatus,
-    /// Timeout for getHeader in milliseconds (builder must respond within 1s).
-    header_timeout_ms: u64,
+    /// Latest validator registrations forwarded through this beacon node.
+    registrations: std.AutoHashMapUnmanaged([48]u8, CachedValidatorRegistration),
+    /// Default HTTP request timeout applied to non-proposal builder calls.
+    request_timeout_ms: u64,
+    /// Proposal-path timeout for `getHeader`, bounded by the general request timeout.
+    proposal_timeout_ms: u64,
+    /// Window to inspect missed slots for builder circuit breaker.
+    fault_inspection_window: u64,
+    /// Allowed missed slots within the inspection window.
+    allowed_faults: u64,
 
     pub fn init(
         allocator: Allocator,
         endpoint: []const u8,
         transport: Transport,
+        config: Config,
     ) HttpBuilder {
+        const fault_window = clampFaultInspectionWindow(config.fault_inspection_window);
+        const request_timeout_ms = config.timeout_ms orelse 12_000;
         return .{
             .allocator = allocator,
             .endpoint = endpoint,
             .transport = transport,
             .current_status = .unavailable,
-            .header_timeout_ms = 1_000,
+            .registrations = .empty,
+            .request_timeout_ms = request_timeout_ms,
+            .proposal_timeout_ms = @min(request_timeout_ms, proposal_delay_tolerance_ms),
+            .fault_inspection_window = fault_window,
+            .allowed_faults = clampAllowedFaults(fault_window, config.allowed_faults),
         };
     }
 
-    pub fn deinit(_: *HttpBuilder) void {}
+    pub fn deinit(self: *HttpBuilder) void {
+        self.registrations.deinit(self.allocator);
+    }
+
+    /// Create a request-scoped clone with independent mutable state. The clone
+    /// shares allocator, endpoint, and transport, but it does not share cached
+    /// validator registrations or builder status bookkeeping.
+    pub fn requestClone(self: *const HttpBuilder) HttpBuilder {
+        return .{
+            .allocator = self.allocator,
+            .endpoint = self.endpoint,
+            .transport = self.transport,
+            .current_status = .unavailable,
+            .registrations = .empty,
+            .request_timeout_ms = self.request_timeout_ms,
+            .proposal_timeout_ms = self.proposal_timeout_ms,
+            .fault_inspection_window = self.fault_inspection_window,
+            .allowed_faults = self.allowed_faults,
+        };
+    }
+
+    pub fn updateStatus(self: *HttpBuilder, status: BuilderStatus) void {
+        self.current_status = status;
+    }
+
+    pub fn getValidatorRegistration(
+        self: *const HttpBuilder,
+        pubkey: [48]u8,
+    ) ?CachedValidatorRegistration {
+        return self.registrations.get(pubkey);
+    }
 
     /// Return a BuilderApi vtable interface backed by this client.
     pub fn builder(self: *HttpBuilder) BuilderApi {
@@ -250,8 +310,9 @@ pub const HttpBuilder = struct {
         const header_count = buildHeaders(&headers_buf);
 
         // GET with empty body
-        const response = self.transport.send(.GET, url, headers_buf[0..header_count], "") catch |err| {
-            std.log.warn("Builder: status check failed: {}", .{err});
+        const response = self.transport.send(.GET, url, headers_buf[0..header_count], "", .{
+            .timeout = http_engine.timeoutFromMs(self.request_timeout_ms),
+        }) catch {
             self.current_status = .unavailable;
             return .unavailable;
         };
@@ -259,7 +320,6 @@ pub const HttpBuilder = struct {
 
         // 200 OK = available
         self.current_status = .available;
-        std.log.info("Builder: relay is available at {s}", .{self.endpoint});
         return .available;
     }
 
@@ -280,11 +340,20 @@ pub const HttpBuilder = struct {
         var headers_buf: [2]Header = undefined;
         const header_count = buildHeaders(&headers_buf);
 
-        const response = self.transport.send(.POST, url, headers_buf[0..header_count], body) catch |err| {
+        const response = self.transport.send(.POST, url, headers_buf[0..header_count], body, .{
+            .timeout = http_engine.timeoutFromMs(self.request_timeout_ms),
+        }) catch |err| {
             std.log.warn("Builder: registerValidators failed: {}", .{err});
             return err;
         };
         defer self.allocator.free(response);
+
+        for (registrations) |registration| {
+            try self.registrations.put(self.allocator, registration.message.pubkey, .{
+                .gas_limit = registration.message.gas_limit,
+                .timestamp = registration.message.timestamp,
+            });
+        }
 
         std.log.info("Builder: registered {d} validator(s) with relay", .{registrations.len});
     }
@@ -315,7 +384,9 @@ pub const HttpBuilder = struct {
         var headers_buf: [2]Header = undefined;
         const header_count = buildHeaders(&headers_buf);
 
-        const response = self.transport.send(.GET, url, headers_buf[0..header_count], "") catch |err| {
+        const response = self.transport.send(.GET, url, headers_buf[0..header_count], "", .{
+            .timeout = http_engine.timeoutFromMs(self.proposal_timeout_ms),
+        }) catch |err| {
             std.log.warn("Builder: getHeader failed (slot={d}): {} — falling back to local execution", .{ slot, err });
             return null;
         };
@@ -351,7 +422,9 @@ pub const HttpBuilder = struct {
         var headers_buf: [2]Header = undefined;
         const header_count = buildHeaders(&headers_buf);
 
-        const response = self.transport.send(.POST, url, headers_buf[0..header_count], body) catch |err| {
+        const response = self.transport.send(.POST, url, headers_buf[0..header_count], body, .{
+            .timeout = http_engine.timeoutFromMs(self.request_timeout_ms),
+        }) catch |err| {
             std.log.err("Builder: submitBlindedBlock failed: {}", .{err});
             return err;
         };
@@ -374,6 +447,36 @@ pub const HttpBuilder = struct {
         .status = &statusImpl,
     };
 };
+
+pub fn clampFaultInspectionWindow(requested: ?u64) u64 {
+    const slots_per_epoch: u64 = preset.SLOTS_PER_EPOCH;
+    return @max(requested orelse (slots_per_epoch + slots_per_epoch / 2), slots_per_epoch);
+}
+
+pub fn resolveFaultInspectionWindow(io: std.Io, requested: ?u64) u64 {
+    if (requested != null) return clampFaultInspectionWindow(requested);
+
+    const slots_per_epoch: u64 = preset.SLOTS_PER_EPOCH;
+    var seed: [8]u8 = undefined;
+    io.randomSecure(&seed) catch return clampFaultInspectionWindow(null);
+    const offset = std.mem.readInt(u64, &seed, .little) % slots_per_epoch;
+    return clampFaultInspectionWindow(slots_per_epoch + offset);
+}
+
+pub fn clampAllowedFaults(fault_inspection_window: u64, requested: ?u64) u64 {
+    const max_allowed = fault_inspection_window / 4;
+    return @min(requested orelse max_allowed, max_allowed);
+}
+
+pub fn shouldEnableBuilderForSlot(
+    clock_slot: u64,
+    slots_present: u32,
+    fault_inspection_window: u64,
+    allowed_faults: u64,
+) bool {
+    const required_slots_present = @min(fault_inspection_window -| allowed_faults, clock_slot);
+    return @as(u64, slots_present) >= required_slots_present;
+}
 
 // ── JSON encoding ─────────────────────────────────────────────────────────────
 
@@ -860,6 +963,8 @@ pub const MockBuilderTransport = struct {
     last_url: ?[]const u8 = null,
     /// Last body sent.
     last_body: ?[]const u8 = null,
+    /// Last timeout passed through the transport interface.
+    last_timeout: ?Transport.SendOptions = null,
 
     pub fn init(allocator: Allocator, canned_response: []const u8) MockBuilderTransport {
         return .{
@@ -886,12 +991,14 @@ pub const MockBuilderTransport = struct {
         url: []const u8,
         _: []const Header,
         body: []const u8,
+        options: Transport.SendOptions,
     ) anyerror![]const u8 {
         const self: *MockBuilderTransport = @ptrCast(@alignCast(ptr));
         if (self.last_url) |u| self.allocator.free(u);
         if (self.last_body) |b| self.allocator.free(b);
         self.last_url = try self.allocator.dupe(u8, url);
         self.last_body = try self.allocator.dupe(u8, body);
+        self.last_timeout = options;
 
         if (self.force_error) |err| return err;
 
@@ -1010,7 +1117,7 @@ test "HttpBuilder: status check — builder available" {
     var mock = MockBuilderTransport.init(allocator, "{}");
     defer mock.deinit();
 
-    var b = HttpBuilder.init(allocator, "http://localhost:18550", mock.transport());
+    var b = HttpBuilder.init(allocator, "http://localhost:18550", mock.transport(), .{});
     defer b.deinit();
 
     const api = b.builder();
@@ -1025,7 +1132,7 @@ test "HttpBuilder: status check — builder offline" {
     mock.force_error = error.ConnectionRefused;
     defer mock.deinit();
 
-    var b = HttpBuilder.init(allocator, "http://localhost:18550", mock.transport());
+    var b = HttpBuilder.init(allocator, "http://localhost:18550", mock.transport(), .{});
     defer b.deinit();
 
     const api = b.builder();
@@ -1033,12 +1140,46 @@ test "HttpBuilder: status check — builder offline" {
     try testing.expectEqual(BuilderStatus.unavailable, s);
 }
 
+test "HttpBuilder: init clamps builder health thresholds" {
+    const allocator = testing.allocator;
+    var mock = MockBuilderTransport.init(allocator, "{}");
+    defer mock.deinit();
+
+    var b = HttpBuilder.init(allocator, "http://localhost:18550", mock.transport(), .{
+        .fault_inspection_window = 1,
+        .allowed_faults = 999,
+    });
+    defer b.deinit();
+
+    try testing.expectEqual(@as(u64, preset.SLOTS_PER_EPOCH), b.fault_inspection_window);
+    try testing.expectEqual(@as(u64, preset.SLOTS_PER_EPOCH / 4), b.allowed_faults);
+}
+
+test "HttpBuilder: init bounds proposal timeout by request timeout" {
+    const allocator = testing.allocator;
+    var mock = MockBuilderTransport.init(allocator, "{}");
+    defer mock.deinit();
+
+    var b = HttpBuilder.init(allocator, "http://localhost:18550", mock.transport(), .{
+        .timeout_ms = 500,
+    });
+    defer b.deinit();
+
+    try testing.expectEqual(@as(u64, 500), b.request_timeout_ms);
+    try testing.expectEqual(@as(u64, 500), b.proposal_timeout_ms);
+}
+
+test "shouldEnableBuilderForSlot enforces fault threshold" {
+    try testing.expect(shouldEnableBuilderForSlot(64, 24, 32, 8));
+    try testing.expect(!shouldEnableBuilderForSlot(64, 23, 32, 8));
+}
+
 test "HttpBuilder: registerValidators encodes correctly" {
     const allocator = testing.allocator;
     var mock = MockBuilderTransport.init(allocator, "{}");
     defer mock.deinit();
 
-    var b = HttpBuilder.init(allocator, "http://localhost:18550", mock.transport());
+    var b = HttpBuilder.init(allocator, "http://localhost:18550", mock.transport(), .{});
     defer b.deinit();
 
     const reg = SignedValidatorRegistration{
@@ -1060,6 +1201,10 @@ test "HttpBuilder: registerValidators encodes correctly" {
     try testing.expect(mock.last_body.?[0] == '[');
     // Fee recipient must appear hex-encoded
     try testing.expect(std.mem.indexOf(u8, mock.last_body.?, "abababababababababababababababababababab") != null);
+    try testing.expectEqualDeep(http_engine.timeoutFromMs(12_000), mock.last_timeout.?.timeout);
+    const cached = b.getValidatorRegistration(reg.message.pubkey).?;
+    try testing.expectEqual(reg.message.gas_limit, cached.gas_limit);
+    try testing.expectEqual(reg.message.timestamp, cached.timestamp);
 }
 
 test "HttpBuilder: registerValidators empty list is no-op" {
@@ -1067,7 +1212,7 @@ test "HttpBuilder: registerValidators empty list is no-op" {
     var mock = MockBuilderTransport.init(allocator, "");
     defer mock.deinit();
 
-    var b = HttpBuilder.init(allocator, "http://localhost:18550", mock.transport());
+    var b = HttpBuilder.init(allocator, "http://localhost:18550", mock.transport(), .{});
     defer b.deinit();
 
     const api = b.builder();
@@ -1082,7 +1227,7 @@ test "HttpBuilder: getHeader — builds correct URL" {
     var mock = MockBuilderTransport.init(allocator, "");
     defer mock.deinit();
 
-    var b = HttpBuilder.init(allocator, "http://localhost:18550", mock.transport());
+    var b = HttpBuilder.init(allocator, "http://localhost:18550", mock.transport(), .{});
     defer b.deinit();
 
     const api = b.builder();
@@ -1095,6 +1240,7 @@ test "HttpBuilder: getHeader — builds correct URL" {
     try testing.expect(result == null);
     // URL must contain slot
     try testing.expect(std.mem.indexOf(u8, mock.last_url.?, "/eth/v1/builder/header/100/") != null);
+    try testing.expectEqualDeep(http_engine.timeoutFromMs(1_250), mock.last_timeout.?.timeout);
 }
 
 test "HttpBuilder: getHeader — 204 No Content returns null" {
@@ -1102,7 +1248,7 @@ test "HttpBuilder: getHeader — 204 No Content returns null" {
     var mock = MockBuilderTransport.init(allocator, "");
     defer mock.deinit();
 
-    var b = HttpBuilder.init(allocator, "http://localhost:18550", mock.transport());
+    var b = HttpBuilder.init(allocator, "http://localhost:18550", mock.transport(), .{});
     defer b.deinit();
 
     const api = b.builder();
@@ -1116,7 +1262,7 @@ test "HttpBuilder: getHeader — builder offline returns null (fallback)" {
     mock.force_error = error.ConnectionRefused;
     defer mock.deinit();
 
-    var b = HttpBuilder.init(allocator, "http://localhost:18550", mock.transport());
+    var b = HttpBuilder.init(allocator, "http://localhost:18550", mock.transport(), .{});
     defer b.deinit();
 
     const api = b.builder();
@@ -1140,7 +1286,7 @@ test "HttpBuilder: getHeader — parses valid bid response" {
     var mock = MockBuilderTransport.init(allocator, bid_json);
     defer mock.deinit();
 
-    var b = HttpBuilder.init(allocator, "http://localhost:18550", mock.transport());
+    var b = HttpBuilder.init(allocator, "http://localhost:18550", mock.transport(), .{});
     defer b.deinit();
 
     const api = b.builder();
@@ -1165,7 +1311,7 @@ test "HttpBuilder: submitBlindedBlock — calls correct endpoint" {
     var mock = MockBuilderTransport.init(allocator, response_json);
     defer mock.deinit();
 
-    var b = HttpBuilder.init(allocator, "http://localhost:18550", mock.transport());
+    var b = HttpBuilder.init(allocator, "http://localhost:18550", mock.transport(), .{});
     defer b.deinit();
 
     var blinded_block = consensus_types.bellatrix.SignedBlindedBeaconBlock.default_value;

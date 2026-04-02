@@ -467,11 +467,6 @@ pub const spec = cli.command(.{
             .description = "Prune historical blocks and state",
             .group = "chain",
         }),
-        .broadcastValidationStrictness = cli.option(?[]const u8, .{
-            .long = "broadcastValidationStrictness",
-            .description = "Broadcast validation strictness",
-            .group = "chain",
-        }, null),
         .@"chain.maxBlockStates" = cli.option(?u32, .{
             .long = "chain.maxBlockStates",
             .description = "Max block states to cache in memory",

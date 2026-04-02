@@ -65,6 +65,11 @@ pub const Query = struct {
         };
     }
 
+    pub fn slotsPresent(self: Query, window_start: Slot) u32 {
+        const fc = self.chain.fork_choice orelse return 0;
+        return fc.getSlotsPresent(window_start);
+    }
+
     pub fn status(self: Query) networking.messages.StatusMessage.Type {
         return self.chain.getStatus();
     }

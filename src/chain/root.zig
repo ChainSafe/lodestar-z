@@ -73,11 +73,17 @@ pub const validateGossipSyncCommitteeMessage = gossip_validation.validateGossipS
 pub const validateGossipSyncContributionAndProof = gossip_validation.validateGossipSyncContributionAndProof;
 pub const ProducedBlockBody = produce_block.ProducedBlockBody;
 pub const CommonBlockBody = produce_block.CommonBlockBody;
+pub const ProposalSnapshot = produce_block.ProposalSnapshot;
+pub const PreparedProposalTemplate = produce_block.PreparedProposalTemplate;
 pub const ProducedBlock = produce_block.ProducedBlock;
 pub const ProducedBlindedBlock = produce_block.ProducedBlindedBlock;
 pub const BlockProductionConfig = produce_block.BlockProductionConfig;
 pub const assembleBlock = produce_block.assembleBlock;
 pub const assembleBlindedBlock = produce_block.assembleBlindedBlock;
+pub const prepareProposalSnapshot = produce_block.prepareProposalSnapshot;
+pub const buildProposalTemplate = produce_block.buildProposalTemplate;
+pub const assembleBlockFromTemplate = produce_block.assembleBlockFromTemplate;
+pub const assembleBlindedBlockFromTemplate = produce_block.assembleBlindedBlockFromTemplate;
 pub const DEFAULT_GRAFFITI = produce_block.DEFAULT_GRAFFITI;
 
 test {

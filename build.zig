@@ -268,6 +268,7 @@ pub fn build(b: *std.Build) void {
     b.modules.put(b.dupe("execution"), module_execution) catch @panic("OOM");
     module_execution.addImport("consensus_types", module_consensus_types);
     module_execution.addImport("fork_types", module_fork_types);
+    module_execution.addImport("preset", module_preset);
 
     const module_testing = b.createModule(.{
         .root_source_file = b.path("src/testing/root.zig"),

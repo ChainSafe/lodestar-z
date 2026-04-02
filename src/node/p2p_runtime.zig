@@ -2229,6 +2229,7 @@ fn maybePrepareProposerPayload(self: *BeaconNode, io: std.Io) void {
 
     const current_slot = clock.currentSlot(io) orelse return;
     const next_slot = current_slot + 1;
+    const head_root = self.currentHeadRoot();
 
     const head_state = self.headState() orelse return;
     _ = head_state.epoch_cache.getBeaconProposer(next_slot) catch return;
@@ -2237,7 +2238,14 @@ fn maybePrepareProposerPayload(self: *BeaconNode, io: std.Io) void {
         next_slot,
         self.node_options.suggested_fee_recipient,
     ) orelse return;
-    if (self.cached_payload_slot == next_slot and self.cached_payload_id != null) return;
+    self.refreshBuilderStatus(current_slot);
+    if (self.cached_payload_slot == next_slot and
+        self.cached_payload_id != null and
+        self.cached_payload_parent_root != null and
+        std.mem.eql(u8, &self.cached_payload_parent_root.?, &head_root))
+    {
+        return;
+    }
 
     const timestamp = clock.slotStartSeconds(next_slot);
     const next_epoch = next_slot / preset.SLOTS_PER_EPOCH;
@@ -2254,7 +2262,7 @@ fn maybePrepareProposerPayload(self: *BeaconNode, io: std.Io) void {
         prev_randao,
         fee_recipient,
         &.{},
-        self.currentHeadRoot(),
+        head_root,
     ) catch |err| {
         std.log.warn("W7: preparePayload failed for slot {d}: {}", .{ next_slot, err });
     };

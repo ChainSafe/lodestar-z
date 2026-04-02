@@ -72,12 +72,24 @@ pub const NodeOptions = struct {
     execution_urls: []const []const u8 = &.{"http://localhost:8551"},
     /// Use mock execution engine instead of real EL (--engine-mock).
     engine_mock: bool = false,
+    /// Number of retry attempts for execution-engine HTTP requests.
+    execution_retries: u32 = 3,
+    /// Initial delay between execution-engine retry attempts in milliseconds.
+    execution_retry_delay_ms: u64 = 100,
+    /// Per-request execution-engine HTTP timeout in milliseconds.
+    execution_timeout_ms: ?u64 = null,
     /// Enable an external builder relay for proposer block production.
     builder_enabled: bool = false,
     /// Builder relay URL used when builder support is enabled.
     builder_url: []const u8 = "http://localhost:8661",
+    /// Per-request builder HTTP timeout in milliseconds.
+    builder_timeout_ms: ?u64 = null,
     /// Default builder boost factor percentage for local BN produceBlockV3.
     builder_boost_factor: u64 = 100,
+    /// Slot window used for builder circuit-breaker health checks.
+    builder_fault_inspection_window: ?u64 = null,
+    /// Missed slots tolerated within the inspection window before disabling builder use.
+    builder_allowed_faults: ?u64 = null,
 
     // ── API ──────────────────────────────────────────────────────
     /// Enable the REST HTTP API (--rest flag).
