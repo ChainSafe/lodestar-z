@@ -132,7 +132,11 @@ pub const BeaconProcessor = struct {
     /// Dispatch the highest-priority queued item to the handler.
     /// Returns true if an item was dispatched, false if all queues empty.
     pub fn dispatchOne(self: *BeaconProcessor) bool {
-        const item = self.queues.popHighestPriority() orelse return false;
+        const now_ns = std.Io.Timestamp.now(std.Options.debug_io, .real).toNanoseconds();
+        const item = self.queues.popHighestPriorityAt(if (now_ns > std.math.maxInt(i64))
+            std.math.maxInt(i64)
+        else
+            @intCast(now_ns)) orelse return false;
 
         const wtype = item.workType();
 
@@ -183,6 +187,10 @@ pub const BeaconProcessor = struct {
     /// Update the sync state (affects sync-aware dropping).
     pub fn setSyncState(self: *BeaconProcessor, state: SyncState) void {
         self.queues.sync_state = state;
+    }
+
+    pub fn setGossipBlsBatchDispatchEnabled(self: *BeaconProcessor, enabled: bool) void {
+        self.queues.setGossipBlsBatchDispatchEnabled(enabled);
     }
 
     /// Returns total items currently queued.
@@ -288,6 +296,24 @@ fn testGossipAttestation(tag: u64) fork_types.AnyGossipAttestation {
     attestation.data.slot = 100 + tag;
     attestation.data.target.epoch = 4;
     return .{ .electra_single = attestation };
+}
+
+fn testGossipAttestationDataRoot(attestation: *const fork_types.AnyGossipAttestation) [32]u8 {
+    var root: [32]u8 = undefined;
+    consensus_types.phase0.AttestationData.hashTreeRoot(&attestation.data(), &root) catch unreachable;
+    return root;
+}
+
+fn testAttestationWork(tag: u64, subnet_id: u8, seen_timestamp_ns: i64) work_item_mod.AttestationWork {
+    const attestation = testGossipAttestation(tag);
+    return .{
+        .source = testSource(tag),
+        .message_id = testMessageId(@intCast(tag & 0xff)),
+        .attestation = attestation,
+        .attestation_data_root = testGossipAttestationDataRoot(&attestation),
+        .subnet_id = subnet_id,
+        .seen_timestamp_ns = seen_timestamp_ns,
+    };
 }
 
 test "BeaconProcessor: ingest and dispatch priority order" {
@@ -409,13 +435,7 @@ test "BeaconProcessor: sync state affects dropping" {
     proc.setSyncState(.syncing);
 
     // Attestation should be dropped during sync.
-    proc.ingest(.{ .attestation = .{
-        .source = testSource(1),
-        .message_id = testMessageId(1),
-        .attestation = testGossipAttestation(1),
-        .subnet_id = 0,
-        .seen_timestamp_ns = 100,
-    } });
+    proc.ingest(.{ .attestation = testAttestationWork(1, 0, 100) });
 
     // Nothing to dispatch — it was dropped.
     try testing.expect(!proc.dispatchOne());
@@ -423,13 +443,7 @@ test "BeaconProcessor: sync state affects dropping" {
 
     // Switch to synced — attestation should be accepted.
     proc.setSyncState(.synced);
-    proc.ingest(.{ .attestation = .{
-        .source = testSource(2),
-        .message_id = testMessageId(2),
-        .attestation = testGossipAttestation(2),
-        .subnet_id = 1,
-        .seen_timestamp_ns = 200,
-    } });
+    proc.ingest(.{ .attestation = testAttestationWork(2, 1, 200) });
 
     try testing.expect(proc.dispatchOne());
     try testing.expectEqual(@as(u32, 1), ctx.count);
@@ -541,13 +555,7 @@ test "BeaconProcessor: getQueueDepths" {
         .seen_timestamp_ns = 100,
     } });
 
-    proc.ingest(.{ .attestation = .{
-        .source = testSource(1),
-        .message_id = testMessageId(1),
-        .attestation = testGossipAttestation(1),
-        .subnet_id = 0,
-        .seen_timestamp_ns = 100,
-    } });
+    proc.ingest(.{ .attestation = testAttestationWork(1, 0, 100) });
 
     proc.ingest(.{ .gossip_voluntary_exit = .{
         .source = testSource(1),
@@ -582,27 +590,9 @@ test "BeaconProcessor: attestation batching" {
     );
 
     // Ingest 3 attestations. The LIFO queue should batch them when popped.
-    proc.ingest(.{ .attestation = .{
-        .source = testSource(1),
-        .message_id = testMessageId(1),
-        .attestation = testGossipAttestation(1),
-        .subnet_id = 0,
-        .seen_timestamp_ns = 100,
-    } });
-    proc.ingest(.{ .attestation = .{
-        .source = testSource(2),
-        .message_id = testMessageId(2),
-        .attestation = testGossipAttestation(2),
-        .subnet_id = 1,
-        .seen_timestamp_ns = 200,
-    } });
-    proc.ingest(.{ .attestation = .{
-        .source = testSource(3),
-        .message_id = testMessageId(3),
-        .attestation = testGossipAttestation(3),
-        .subnet_id = 2,
-        .seen_timestamp_ns = 300,
-    } });
+    proc.ingest(.{ .attestation = testAttestationWork(1, 0, 100) });
+    proc.ingest(.{ .attestation = testAttestationWork(2, 1, 200) });
+    proc.ingest(.{ .attestation = testAttestationWork(3, 2, 300) });
 
     try testing.expectEqual(@as(u64, 3), proc.totalQueued());
 
@@ -635,13 +625,7 @@ test "BeaconProcessor: single attestation not batched" {
         @ptrCast(&ctx),
     );
 
-    proc.ingest(.{ .attestation = .{
-        .source = testSource(1),
-        .message_id = testMessageId(1),
-        .attestation = testGossipAttestation(1),
-        .subnet_id = 0,
-        .seen_timestamp_ns = 100,
-    } });
+    proc.ingest(.{ .attestation = testAttestationWork(1, 0, 100) });
 
     try testing.expect(proc.dispatchOne());
     try testing.expectEqual(@as(u32, 1), ctx.count);
@@ -671,13 +655,7 @@ test "BeaconProcessor: blocks dispatched before attestations" {
     );
 
     // Enqueue attestation first, then block.
-    proc.ingest(.{ .attestation = .{
-        .source = testSource(1),
-        .message_id = testMessageId(1),
-        .attestation = testGossipAttestation(1),
-        .subnet_id = 0,
-        .seen_timestamp_ns = 100,
-    } });
+    proc.ingest(.{ .attestation = testAttestationWork(1, 0, 100) });
 
     proc.ingest(.{ .gossip_block = .{
         .source = testSource(2),

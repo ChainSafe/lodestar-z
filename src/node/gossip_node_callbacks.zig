@@ -12,6 +12,7 @@ const std = @import("std");
 const config_mod = @import("config");
 const types = @import("consensus_types");
 const state_transition = @import("state_transition");
+const bls_mod = @import("bls");
 const fork_types = @import("fork_types");
 const AnyAttestation = fork_types.AnyAttestation;
 const AnyAttesterSlashing = fork_types.AnyAttesterSlashing;
@@ -157,11 +158,21 @@ fn getSingleAttestingIndexPhase0(
     attestation: *const types.phase0.Attestation.Type,
 ) !types.primitive.ValidatorIndex.Type {
     const cached = node.headState() orelse return error.NoHeadState;
-    var attesting_indices = try cached.epoch_cache.getAttestingIndicesPhase0(attestation);
-    defer attesting_indices.deinit();
+    return getSingleAttestingIndexPhase0FromEpochCache(cached.epoch_cache, attestation);
+}
 
-    if (attesting_indices.items.len != 1) return error.InvalidGossipAttestation;
-    return attesting_indices.items[0];
+fn getSingleAttestingIndexPhase0FromEpochCache(
+    epoch_cache: *const state_transition.EpochCache,
+    attestation: *const types.phase0.Attestation.Type,
+) !types.primitive.ValidatorIndex.Type {
+    const committee = try epoch_cache.getBeaconCommittee(attestation.data.slot, attestation.data.index);
+    if (attestation.aggregation_bits.bit_len != committee.len) return error.InvalidGossipAttestation;
+
+    const bit_index = attestation.aggregation_bits.getSingleTrueBit() orelse
+        return error.InvalidGossipAttestation;
+    if (bit_index >= committee.len) return error.InvalidGossipAttestation;
+
+    return committee[bit_index];
 }
 
 fn convertSingleAttestation(
@@ -435,22 +446,27 @@ pub fn verifyAttestationSignature(ptr: *anyopaque, attestation: *const AnyGossip
 
     switch (attestation.*) {
         .phase0 => |att| {
-            var attesting_indices = cached.epoch_cache.getAttestingIndicesPhase0(&att) catch return false;
-            defer attesting_indices.deinit();
-
-            if (attesting_indices.items.len != 1) return false;
-
-            const sig_set = state_transition.signature_sets.indexed_attestation.getAttestationWithIndicesSignatureSet(
-                node.allocator,
-                node.config,
+            const validator_index = getSingleAttestingIndexPhase0FromEpochCache(
                 cached.epoch_cache,
-                &att.data,
-                att.signature,
-                attesting_indices.items,
+                &att,
             ) catch return false;
-            defer node.allocator.free(sig_set.pubkeys);
+            if (validator_index >= cached.epoch_cache.index_to_pubkey.items.len) return false;
 
-            return state_transition.signature_sets.verifyAggregatedSignatureSet(&sig_set) catch false;
+            var signing_root: [32]u8 = undefined;
+            state_transition.signature_sets.indexed_attestation.getAttestationDataSigningRoot(
+                node.config,
+                cached.epoch_cache.epoch,
+                &att.data,
+                &signing_root,
+            ) catch return false;
+
+            const sig_set = state_transition.signature_sets.SingleSignatureSet{
+                .pubkey = cached.epoch_cache.index_to_pubkey.items[validator_index],
+                .signing_root = signing_root,
+                .signature = att.signature,
+            };
+
+            return state_transition.signature_sets.verifySingleSignatureSet(&sig_set) catch false;
         },
         .electra_single => |att| {
             if (att.attester_index >= cached.epoch_cache.index_to_pubkey.items.len) return false;
@@ -472,6 +488,154 @@ pub fn verifyAttestationSignature(ptr: *anyopaque, attestation: *const AnyGossip
             return state_transition.signature_sets.verifySingleSignatureSet(&sig_set) catch false;
         },
     }
+}
+
+pub fn getAttestationSigningRoot(
+    ptr: *anyopaque,
+    attestation: *const AnyGossipAttestation,
+    out: *[32]u8,
+) !void {
+    const node: *BeaconNode = @ptrCast(@alignCast(ptr));
+    const cached = node.headState() orelse return error.NoHeadState;
+
+    try state_transition.signature_sets.indexed_attestation.getAttestationDataSigningRoot(
+        node.config,
+        cached.epoch_cache.epoch,
+        &attestation.data(),
+        out,
+    );
+}
+
+pub fn buildAttestationSignatureSetWithSigningRoot(
+    ptr: *anyopaque,
+    attestation: *const AnyGossipAttestation,
+    signing_root: *const [32]u8,
+) !bls_mod.OwnedSignatureSet {
+    const node: *BeaconNode = @ptrCast(@alignCast(ptr));
+    const cached = node.headState() orelse return error.NoHeadState;
+
+    return switch (attestation.*) {
+        .phase0 => |att| blk: {
+            const validator_index = try getSingleAttestingIndexPhase0FromEpochCache(
+                cached.epoch_cache,
+                &att,
+            );
+            if (validator_index >= cached.epoch_cache.index_to_pubkey.items.len) {
+                return error.ValidatorIndexOutOfBounds;
+            }
+
+            break :blk bls_mod.OwnedSignatureSet.initSingle(
+                cached.epoch_cache.index_to_pubkey.items[validator_index],
+                signing_root.*,
+                att.signature,
+            );
+        },
+        .electra_single => |att| blk: {
+            if (att.attester_index >= cached.epoch_cache.index_to_pubkey.items.len) {
+                return error.ValidatorIndexOutOfBounds;
+            }
+
+            break :blk bls_mod.OwnedSignatureSet.initSingle(
+                cached.epoch_cache.index_to_pubkey.items[att.attester_index],
+                signing_root.*,
+                att.signature,
+            );
+        },
+    };
+}
+
+pub fn buildAttestationSignatureSet(
+    allocator: std.mem.Allocator,
+    ptr: *anyopaque,
+    attestation: *const AnyGossipAttestation,
+) !bls_mod.OwnedSignatureSet {
+    _ = allocator;
+
+    var signing_root: [32]u8 = undefined;
+    try getAttestationSigningRoot(ptr, attestation, &signing_root);
+    return buildAttestationSignatureSetWithSigningRoot(ptr, attestation, &signing_root);
+}
+
+pub fn buildAggregateSignatureSets(
+    allocator: std.mem.Allocator,
+    ptr: *anyopaque,
+    aggregate: *const AnySignedAggregateAndProof,
+    out: *[3]bls_mod.OwnedSignatureSet,
+) !void {
+    const node: *BeaconNode = @ptrCast(@alignCast(ptr));
+    const cached = node.headState() orelse return error.NoHeadState;
+    const epoch_cache = cached.epoch_cache;
+
+    const aggregator_index = aggregate.aggregatorIndex();
+    if (aggregator_index >= epoch_cache.index_to_pubkey.items.len) return error.InvalidAggregatorIndex;
+
+    const aggregator_pubkey = epoch_cache.index_to_pubkey.items[aggregator_index];
+    const attestation = aggregate.attestation();
+    const att_data = attestation.data();
+    const att_slot = att_data.slot;
+    const committee_index = attestation.committeeIndex();
+
+    const committee = try epoch_cache.getBeaconCommittee(att_slot, committee_index);
+
+    var aggregator_in_committee = false;
+    for (committee) |validator_index| {
+        if (validator_index == aggregator_index) {
+            aggregator_in_committee = true;
+            break;
+        }
+    }
+    if (!aggregator_in_committee) return error.AggregatorNotInCommittee;
+
+    if (!state_transition.isAggregatorFromCommitteeLength(committee.len, aggregate.selectionProof())) {
+        return error.InvalidSelectionProof;
+    }
+
+    const epoch = epoch_cache.epoch;
+    const computeSigningRoot = state_transition.computeSigningRoot;
+    const computeStartSlotAtEpoch = state_transition.computeStartSlotAtEpoch;
+    const computeSigningRootAlloc = state_transition.computeSigningRootAlloc;
+
+    const selection_domain = try node.config.getDomain(epoch, constants.DOMAIN_SELECTION_PROOF, att_slot);
+    var selection_signing_root: [32]u8 = undefined;
+    try computeSigningRoot(types.primitive.Slot, &att_slot, selection_domain, &selection_signing_root);
+
+    const target_epoch_start_slot = computeStartSlotAtEpoch(att_data.target.epoch);
+    const agg_domain = try node.config.getDomain(epoch, constants.DOMAIN_AGGREGATE_AND_PROOF, target_epoch_start_slot);
+    var agg_signing_root: [32]u8 = undefined;
+    switch (aggregate.*) {
+        .phase0 => |signed_agg| try computeSigningRootAlloc(types.phase0.AggregateAndProof, allocator, &signed_agg.message, agg_domain, &agg_signing_root),
+        .electra => |signed_agg| try computeSigningRootAlloc(types.electra.AggregateAndProof, allocator, &signed_agg.message, agg_domain, &agg_signing_root),
+    }
+
+    var attesting_indices = try getAttestingIndicesForAnyAttestation(node, attestation);
+    defer attesting_indices.deinit();
+    if (attesting_indices.items.len == 0) return error.EmptyAggregateAttestation;
+
+    const att_sig_set = try state_transition.signature_sets.indexed_attestation.getAttestationWithIndicesSignatureSet(
+        allocator,
+        node.config,
+        epoch_cache,
+        &att_data,
+        attestation.signature(),
+        attesting_indices.items,
+    );
+
+    out[0] = bls_mod.OwnedSignatureSet.initSingle(
+        aggregator_pubkey,
+        selection_signing_root,
+        aggregate.selectionProof(),
+    );
+    out[1] = bls_mod.OwnedSignatureSet.initSingle(
+        aggregator_pubkey,
+        agg_signing_root,
+        aggregate.signature(),
+    );
+    out[2] = bls_mod.OwnedSignatureSet.initOwnedAggregate(
+        allocator,
+        att_sig_set.pubkeys,
+        att_sig_set.signing_root,
+        att_sig_set.signature,
+    );
 }
 
 pub fn verifyAggregateSignature(ptr: *anyopaque, aggregate: *const AnySignedAggregateAndProof) bool {

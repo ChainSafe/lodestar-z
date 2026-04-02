@@ -21,6 +21,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const BlsThreadPool = @import("bls").ThreadPool;
 
 const consensus_types = @import("consensus_types");
 const preset = @import("preset").preset;
@@ -102,6 +103,9 @@ pub const PipelineContext = struct {
 
     // -- Clock --
     current_slot: Slot,
+
+    // -- BLS verification --
+    block_bls_thread_pool: ?*BlsThreadPool = null,
 
     // -- Reprocessing -- (P1-10 fix)
     /// When set, blocks pending reprocessing are notified after successful import.
@@ -195,6 +199,7 @@ pub fn processBlock(
                 da_status,
                 opts,
                 sanity.body_root,
+                ctx.block_bls_thread_pool,
             );
 
             // Stage 5: Execution payload verification.

@@ -859,6 +859,7 @@ fn runRealtimeP2pTick(self: *BeaconNode, io: std.Io, svc: *networking.P2pService
     var did_work = false;
 
     did_work = gossip_ingress_mod.processEvents(self, io, svc) > 0 or did_work;
+    did_work = self.processPendingGossipBlsBatch() or did_work;
 
     if (self.beacon_processor) |bp| {
         const dispatched = bp.tick(128);

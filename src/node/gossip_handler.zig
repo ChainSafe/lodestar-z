@@ -459,6 +459,9 @@ pub const GossipHandler = struct {
         var attestation_owned = true;
         defer if (attestation_owned) attestation.deinit(self.allocator);
         const data = attestation.data();
+        var attestation_data_root: [32]u8 = undefined;
+        types.phase0.AttestationData.hashTreeRoot(&data, &attestation_data_root) catch
+            return GossipHandlerError.DecodeFailed;
         const committee_index = attestation.committeeIndex();
 
         const expected_subnet = self.computeAttestationSubnetFn(self.node, data.slot, committee_index) orelse
@@ -491,6 +494,7 @@ pub const GossipHandler = struct {
                 .source = metadata.source,
                 .message_id = metadata.message_id,
                 .attestation = attestation,
+                .attestation_data_root = attestation_data_root,
                 .subnet_id = @intCast(subnet_id),
                 .seen_timestamp_ns = metadata.seen_timestamp_ns,
             } });
@@ -562,17 +566,9 @@ pub const GossipHandler = struct {
         };
         try checkAction(action);
 
-        // Phase 1c: BLS signature verification.
-        // [REJECT] selection_proof, aggregator signature, and aggregate signature are all valid.
-        if (self.verifyAggregateSignatureFn) |verifyFn| {
-            if (!verifyFn(self.node, &signed_aggregate)) {
-                std.log.warn("Gossip aggregate rejected: invalid signature aggregator={d}", .{signed_aggregate.aggregatorIndex()});
-                return GossipHandlerError.ValidationRejected;
-            }
-        }
-
         // Phase 2: Import aggregate to fork choice + attestation pool.
-        // When processor is available, enqueue for priority-ordered batch processing.
+        // When processor is available, defer the expensive BLS checks to
+        // processor-side batch verification.
         if (self.beacon_processor) |bp| {
             aggregate_owned = false;
             bp.ingest(.{ .aggregate = .{
@@ -582,6 +578,15 @@ pub const GossipHandler = struct {
                 .seen_timestamp_ns = metadata.seen_timestamp_ns,
             } });
             return;
+        }
+
+        // Phase 1c: BLS signature verification.
+        // [REJECT] selection_proof, aggregator signature, and aggregate signature are all valid.
+        if (self.verifyAggregateSignatureFn) |verifyFn| {
+            if (!verifyFn(self.node, &signed_aggregate)) {
+                std.log.warn("Gossip aggregate rejected: invalid signature aggregator={d}", .{signed_aggregate.aggregatorIndex()});
+                return GossipHandlerError.ValidationRejected;
+            }
         }
 
         // Fallback: inline processing.

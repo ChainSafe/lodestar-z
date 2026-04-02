@@ -215,6 +215,7 @@ pub const AttestationWork = struct {
     source: GossipSource,
     message_id: MessageId,
     attestation: AnyGossipAttestation,
+    attestation_data_root: Root,
     subnet_id: u8,
     seen_timestamp_ns: i64,
 };

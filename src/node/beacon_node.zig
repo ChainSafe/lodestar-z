@@ -109,6 +109,8 @@ const BeaconProcessor = processor_mod.BeaconProcessor;
 const QueueConfig = processor_mod.QueueConfig;
 const WorkItem = processor_mod.WorkItem;
 const WorkQueues = processor_mod.WorkQueues;
+const AttestationWork = processor_mod.work_item.AttestationWork;
+const AggregateWork = processor_mod.work_item.AggregateWork;
 // HeadTracker, ImportResult, ImportError are in chain_mod (src/chain).
 
 // dummyBalancesGetterFn is defined in block_import.zig.
@@ -275,9 +277,11 @@ pub const BeaconNode = struct {
     /// I/O context for runtime operations.
     io: std.Io,
 
-    /// BLS thread pool for parallel signature verification.
-    /// Shared between BlockImporter (block import) and GossipHandler (gossip BLS — TODO).
-    bls_thread_pool: *BlsThreadPool,
+    /// BLS thread pool reserved for block STF verification work.
+    block_bls_thread_pool: *BlsThreadPool,
+    /// BLS thread pool reserved for gossip attestation/aggregate verification.
+    gossip_bls_thread_pool: *BlsThreadPool,
+    pending_gossip_bls_batches: std.ArrayListUnmanaged(PendingGossipBlsBatch) = .empty,
 
     // Node identity — secp256k1 keypair loaded/generated during init().
     node_identity: NodeIdentity,
@@ -936,7 +940,485 @@ pub const BeaconNode = struct {
         self.api_context.genesis_time = outcome.genesis_time;
         _ = outcome.snapshot;
     }
+
+    pub fn processPendingGossipBlsBatch(self: *BeaconNode) bool {
+        return processPendingGossipBlsBatchImpl(self);
+    }
+
+    pub fn flushPendingGossipBlsBatch(self: *BeaconNode) void {
+        flushPendingGossipBlsBatchImpl(self);
+    }
 };
+
+const PendingAttestationBlsBatch = struct {
+    items: []AttestationWork,
+    owned_sets: []bls_mod.OwnedSignatureSet,
+    future: *BlsThreadPool.VerifySetsFuture,
+
+    fn isReady(self: *const PendingAttestationBlsBatch) bool {
+        return self.future.isReady();
+    }
+
+    fn finish(self: *PendingAttestationBlsBatch, node: *BeaconNode) void {
+        const batch_valid = self.future.finish() catch false;
+        importAttestationBatchItems(node, self.items, batch_valid);
+        freeOwnedSignatureSets(node.allocator, self.owned_sets);
+        node.allocator.free(self.items);
+    }
+};
+
+const PendingAggregateBlsBatch = struct {
+    items: []AggregateWork,
+    owned_sets: []bls_mod.OwnedSignatureSet,
+    future: *BlsThreadPool.VerifySetsFuture,
+
+    fn isReady(self: *const PendingAggregateBlsBatch) bool {
+        return self.future.isReady();
+    }
+
+    fn finish(self: *PendingAggregateBlsBatch, node: *BeaconNode) void {
+        const batch_valid = self.future.finish() catch false;
+        importAggregateBatchItems(node, self.items, batch_valid);
+        freeOwnedSignatureSets(node.allocator, self.owned_sets);
+        node.allocator.free(self.items);
+    }
+};
+
+const PendingGossipBlsBatch = union(enum) {
+    attestation: PendingAttestationBlsBatch,
+    aggregate: PendingAggregateBlsBatch,
+
+    fn priority(self: *const PendingGossipBlsBatch) bls_mod.ThreadPool.VerifySetsPriority {
+        return switch (self.*) {
+            .attestation => .high,
+            .aggregate => .normal,
+        };
+    }
+
+    fn isStarted(self: *const PendingGossipBlsBatch) bool {
+        return switch (self.*) {
+            .attestation => |batch| batch.future.started.isSet(),
+            .aggregate => |batch| batch.future.started.isSet(),
+        };
+    }
+
+    fn isReady(self: *const PendingGossipBlsBatch) bool {
+        return switch (self.*) {
+            .attestation => |batch| batch.isReady(),
+            .aggregate => |batch| batch.isReady(),
+        };
+    }
+
+    fn finish(self: *PendingGossipBlsBatch, node: *BeaconNode) void {
+        switch (self.*) {
+            .attestation => |*batch| batch.finish(node),
+            .aggregate => |*batch| batch.finish(node),
+        }
+    }
+};
+
+fn setGossipBlsBatchDispatchState(node: *BeaconNode) void {
+    if (node.beacon_processor) |bp| {
+        const enabled = node.gossip_bls_thread_pool.canAcceptWork();
+        bp.setGossipBlsBatchDispatchEnabled(enabled);
+    }
+}
+
+fn processPendingGossipBlsBatchImpl(node: *BeaconNode) bool {
+    defer setGossipBlsBatchDispatchState(node);
+
+    var did_work = false;
+    while (findReadyPendingGossipBlsBatch(node)) |ready_index| {
+        var ready = node.pending_gossip_bls_batches.orderedRemove(ready_index);
+        ready.finish(node);
+        did_work = true;
+    }
+
+    return did_work or node.pending_gossip_bls_batches.items.len > 0;
+}
+
+fn flushPendingGossipBlsBatchImpl(node: *BeaconNode) void {
+    defer setGossipBlsBatchDispatchState(node);
+
+    while (node.pending_gossip_bls_batches.items.len > 0) {
+        const active_index = findStartedPendingGossipBlsBatch(node) orelse 0;
+        var pending = node.pending_gossip_bls_batches.orderedRemove(active_index);
+        pending.finish(node);
+    }
+}
+
+fn findReadyPendingGossipBlsBatch(node: *const BeaconNode) ?usize {
+    for (node.pending_gossip_bls_batches.items, 0..) |pending, i| {
+        if (pending.isReady()) return i;
+    }
+    return null;
+}
+
+fn findStartedPendingGossipBlsBatch(node: *const BeaconNode) ?usize {
+    for (node.pending_gossip_bls_batches.items, 0..) |pending, i| {
+        if (pending.isStarted()) return i;
+    }
+    return null;
+}
+
+fn appendPendingGossipBlsBatch(node: *BeaconNode, pending: PendingGossipBlsBatch) void {
+    const items = node.pending_gossip_bls_batches.items;
+    var insert_at = items.len;
+    if (pending.priority() == .high) {
+        insert_at = 0;
+        while (insert_at < items.len) : (insert_at += 1) {
+            if (items[insert_at].priority() != .high) break;
+        }
+    }
+
+    node.pending_gossip_bls_batches.insertAssumeCapacity(insert_at, pending);
+}
+
+fn cloneAttestationBatchItems(allocator: Allocator, items: []const AttestationWork) ![]AttestationWork {
+    const owned = try allocator.alloc(AttestationWork, items.len);
+    @memcpy(owned, items);
+    return owned;
+}
+
+fn cloneAggregateBatchItems(allocator: Allocator, items: []const AggregateWork) ![]AggregateWork {
+    const owned = try allocator.alloc(AggregateWork, items.len);
+    @memcpy(owned, items);
+    return owned;
+}
+
+fn freeOwnedSignatureSets(allocator: Allocator, owned_sets: []bls_mod.OwnedSignatureSet) void {
+    for (owned_sets) |*owned_set| {
+        owned_set.deinit();
+    }
+    allocator.free(owned_sets);
+}
+
+fn deinitAttestationBatchItems(node: *BeaconNode, items: []AttestationWork) void {
+    for (items) |*item| {
+        item.attestation.deinit(node.allocator);
+    }
+}
+
+fn deinitAggregateBatchItems(node: *BeaconNode, items: []AggregateWork) void {
+    for (items) |*item| {
+        item.aggregate.deinit(node.allocator);
+    }
+}
+
+fn attestationBatchSharesDataRoot(items: []const AttestationWork) bool {
+    if (items.len < 2) return false;
+
+    const attestation_data_root = items[0].attestation_data_root;
+    for (items[1..]) |item| {
+        if (!std.mem.eql(u8, &item.attestation_data_root, &attestation_data_root)) return false;
+    }
+
+    return true;
+}
+
+fn verifyAttestationBatchSync(node: *BeaconNode, items: []const AttestationWork) bool {
+    const gh = node.gossip_handler orelse return true;
+    if (gh.verifyAttestationSignatureFn == null) return true;
+    const same_message = attestationBatchSharesDataRoot(items);
+    var same_message_signing_root: [32]u8 = undefined;
+    if (same_message) {
+        gossip_node_callbacks_mod.getAttestationSigningRoot(
+            gh.node,
+            &items[0].attestation,
+            &same_message_signing_root,
+        ) catch return false;
+    }
+
+    var owned_sets: [processor_mod.work_item.max_attestation_batch_size]bls_mod.OwnedSignatureSet = undefined;
+    var signature_sets: [processor_mod.work_item.max_attestation_batch_size]bls_mod.SignatureSet = undefined;
+    var owned_count: usize = 0;
+    defer {
+        while (owned_count > 0) {
+            owned_count -= 1;
+            owned_sets[owned_count].deinit();
+        }
+    }
+
+    for (items) |item| {
+        const owned_set = blk: {
+            const built = if (same_message)
+                gossip_node_callbacks_mod.buildAttestationSignatureSetWithSigningRoot(
+                    gh.node,
+                    &item.attestation,
+                    &same_message_signing_root,
+                )
+            else
+                gossip_node_callbacks_mod.buildAttestationSignatureSet(
+                    node.allocator,
+                    gh.node,
+                    &item.attestation,
+                );
+            break :blk built catch return false;
+        };
+
+        owned_sets[owned_count] = owned_set;
+        signature_sets[owned_count] = owned_set.set;
+        owned_count += 1;
+    }
+
+    const sets = signature_sets[0..owned_count];
+    if (same_message) {
+        var rands: [processor_mod.work_item.max_attestation_batch_size][32]u8 = undefined;
+        std.Options.debug_io.randomSecure(std.mem.sliceAsBytes(rands[0..owned_count])) catch
+            std.Options.debug_io.random(std.mem.sliceAsBytes(rands[0..owned_count]));
+        var pairing_buf: [bls_mod.Pairing.sizeOf()]u8 align(bls_mod.Pairing.buf_align) = undefined;
+        return bls_mod.verifySignatureSetsSameMessage(
+            &pairing_buf,
+            sets,
+            bls_mod.DST,
+            rands[0..owned_count],
+        ) catch false;
+    }
+
+    var batch_verifier = bls_mod.BatchVerifier.init(node.gossip_bls_thread_pool);
+    for (sets) |set| {
+        batch_verifier.addSet(set) catch return false;
+    }
+
+    return batch_verifier.verifyAll() catch false;
+}
+
+fn verifyAggregateBatchSync(node: *BeaconNode, items: []const AggregateWork) bool {
+    const gh = node.gossip_handler orelse return true;
+    if (gh.verifyAggregateSignatureFn == null) return true;
+
+    var batch_verifier = bls_mod.BatchVerifier.init(node.gossip_bls_thread_pool);
+    var owned_sets: [processor_mod.work_item.max_aggregate_batch_size * 3]bls_mod.OwnedSignatureSet = undefined;
+    var owned_count: usize = 0;
+    defer {
+        while (owned_count > 0) {
+            owned_count -= 1;
+            owned_sets[owned_count].deinit();
+        }
+    }
+
+    for (items) |item| {
+        var local_sets: [3]bls_mod.OwnedSignatureSet = undefined;
+        gossip_node_callbacks_mod.buildAggregateSignatureSets(
+            node.allocator,
+            gh.node,
+            &item.aggregate,
+            &local_sets,
+        ) catch return false;
+
+        var local_added = true;
+        for (local_sets) |owned_set| {
+            batch_verifier.addSet(owned_set.set) catch {
+                local_added = false;
+                break;
+            };
+        }
+
+        if (!local_added) {
+            inline for (0..3) |idx| {
+                local_sets[idx].deinit();
+            }
+            return false;
+        }
+
+        inline for (0..3) |idx| {
+            owned_sets[owned_count] = local_sets[idx];
+            owned_count += 1;
+        }
+    }
+
+    return batch_verifier.verifyAll() catch false;
+}
+
+fn importAttestationBatchItems(node: *BeaconNode, items: []AttestationWork, batch_valid: bool) void {
+    for (items) |item| {
+        var attestation = item.attestation;
+        defer attestation.deinit(node.allocator);
+
+        if (!batch_valid) {
+            if (node.gossip_handler) |gh| {
+                if (gh.verifyAttestationSignatureFn) |verifyFn| {
+                    if (!verifyFn(gh.node, &attestation)) {
+                        std.log.warn("Attestation BLS failed in batch fallback slot={d}", .{attestation.slot()});
+                        continue;
+                    }
+                }
+            }
+        }
+
+        const gh = node.gossip_handler orelse continue;
+        const importFn = gh.importAttestationFn orelse continue;
+
+        importFn(gh.node, &attestation) catch |err| {
+            std.log.warn("Processor: attestation import failed for slot {d}: {}", .{
+                attestation.slot(), err,
+            });
+        };
+    }
+}
+
+fn importAggregateBatchItems(node: *BeaconNode, items: []AggregateWork, batch_valid: bool) void {
+    for (items) |item| {
+        var aggregate = item.aggregate;
+        defer aggregate.deinit(node.allocator);
+
+        if (!batch_valid) {
+            if (node.gossip_handler) |gh| {
+                if (gh.verifyAggregateSignatureFn) |verifyFn| {
+                    if (!verifyFn(gh.node, &aggregate)) {
+                        std.log.warn("Aggregate BLS failed in batch fallback slot={d}", .{
+                            aggregate.attestation().slot(),
+                        });
+                        continue;
+                    }
+                }
+            }
+        }
+
+        if (node.gossip_handler) |gh| {
+            if (gh.importAggregateFn) |importFn| {
+                importFn(gh.node, &aggregate) catch |err| {
+                    std.log.warn("Processor: aggregate import failed slot={d}: {}", .{
+                        aggregate.attestation().slot(),
+                        err,
+                    });
+                };
+            }
+        }
+    }
+}
+
+fn tryStartPendingAttestationBatch(node: *BeaconNode, items: []AttestationWork) bool {
+    const gh = node.gossip_handler orelse return false;
+    if (gh.verifyAttestationSignatureFn == null) return false;
+    if (!node.gossip_bls_thread_pool.canAcceptWork()) return false;
+    node.pending_gossip_bls_batches.ensureUnusedCapacity(node.allocator, 1) catch return false;
+    const same_message = attestationBatchSharesDataRoot(items);
+    var same_message_signing_root: [32]u8 = undefined;
+    if (same_message) {
+        gossip_node_callbacks_mod.getAttestationSigningRoot(
+            gh.node,
+            &items[0].attestation,
+            &same_message_signing_root,
+        ) catch return false;
+    }
+
+    const owned_sets = node.allocator.alloc(bls_mod.OwnedSignatureSet, items.len) catch return false;
+    var owned_count: usize = 0;
+
+    var signature_sets: [processor_mod.work_item.max_attestation_batch_size]bls_mod.SignatureSet = undefined;
+    for (items, 0..) |item, i| {
+        const owned_set = (if (same_message)
+            gossip_node_callbacks_mod.buildAttestationSignatureSetWithSigningRoot(
+                gh.node,
+                &item.attestation,
+                &same_message_signing_root,
+            )
+        else
+            gossip_node_callbacks_mod.buildAttestationSignatureSet(
+                node.allocator,
+                gh.node,
+                &item.attestation,
+            )) catch {
+            while (owned_count > 0) {
+                owned_count -= 1;
+                owned_sets[owned_count].deinit();
+            }
+            node.allocator.free(owned_sets);
+            return false;
+        };
+        owned_sets[i] = owned_set;
+        signature_sets[i] = owned_set.set;
+        owned_count += 1;
+    }
+
+    const sets = signature_sets[0..items.len];
+    const future = (if (same_message)
+        node.gossip_bls_thread_pool.startVerifySignatureSetsSameMessage(
+            node.allocator,
+            sets,
+            bls_mod.DST,
+            .{ .priority = .high },
+        )
+    else
+        node.gossip_bls_thread_pool.startVerifySignatureSets(
+            node.allocator,
+            sets,
+            bls_mod.DST,
+            .{ .priority = .high },
+        )) catch {
+        while (owned_count > 0) {
+            owned_count -= 1;
+            owned_sets[owned_count].deinit();
+        }
+        node.allocator.free(owned_sets);
+        return false;
+    };
+
+    appendPendingGossipBlsBatch(node, .{ .attestation = .{
+        .items = items,
+        .owned_sets = owned_sets,
+        .future = future,
+    } });
+    setGossipBlsBatchDispatchState(node);
+    return true;
+}
+
+fn tryStartPendingAggregateBatch(node: *BeaconNode, items: []AggregateWork) bool {
+    const gh = node.gossip_handler orelse return false;
+    if (gh.verifyAggregateSignatureFn == null) return false;
+    if (!node.gossip_bls_thread_pool.canAcceptWork()) return false;
+    node.pending_gossip_bls_batches.ensureUnusedCapacity(node.allocator, 1) catch return false;
+
+    const owned_sets = node.allocator.alloc(bls_mod.OwnedSignatureSet, items.len * 3) catch return false;
+    var owned_count: usize = 0;
+
+    var signature_sets: [processor_mod.work_item.max_aggregate_batch_size * 3]bls_mod.SignatureSet = undefined;
+    for (items) |item| {
+        var local_sets: [3]bls_mod.OwnedSignatureSet = undefined;
+        gossip_node_callbacks_mod.buildAggregateSignatureSets(
+            node.allocator,
+            gh.node,
+            &item.aggregate,
+            &local_sets,
+        ) catch {
+            while (owned_count > 0) {
+                owned_count -= 1;
+                owned_sets[owned_count].deinit();
+            }
+            node.allocator.free(owned_sets);
+            return false;
+        };
+
+        inline for (0..3) |idx| {
+            owned_sets[owned_count] = local_sets[idx];
+            signature_sets[owned_count] = local_sets[idx].set;
+            owned_count += 1;
+        }
+    }
+
+    const future = node.gossip_bls_thread_pool.startVerifySignatureSets(
+        node.allocator,
+        signature_sets[0..owned_count],
+        bls_mod.DST,
+        .{ .priority = .normal },
+    ) catch {
+        while (owned_count > 0) {
+            owned_count -= 1;
+            owned_sets[owned_count].deinit();
+        }
+        node.allocator.free(owned_sets);
+        return false;
+    };
+
+    appendPendingGossipBlsBatch(node, .{ .aggregate = .{
+        .items = items,
+        .owned_sets = owned_sets,
+        .future = future,
+    } });
+    setGossipBlsBatchDispatchState(node);
+    return true;
+}
 
 // ---------------------------------------------------------------------------
 // Gossip callbacks — wired into GossipHandler as function pointers.
@@ -986,83 +1468,48 @@ pub fn processorHandlerCallback(item: WorkItem, context: *anyopaque) void {
             }
         },
         .attestation_batch => |batch| {
-            // Batch BLS verification: the key performance optimization.
-            //
-            // Architecture (matches TS Lodestar's gossipQueues/indexed.ts):
-            // 1. Collect N attestation signature sets
-            // 2. Batch-verify all N signatures at once (~3-10x faster than individual)
-            // 3. On batch success: import all attestations to fork choice + pool
-            // 4. On batch failure: fall back to individual verification to find bad one(s)
             std.log.debug("Processor: attestation batch (count={d})", .{batch.count});
-
-            // Step 1: Try batch BLS verification of all attestations.
-            var batch_valid = false;
-            if (node.gossip_handler) |gh| {
-                if (gh.verifyAttestationSignatureFn) |verifyFn| {
-                    // Attempt batch: verify each individually for now.
-                    // TODO: Collect signature sets into BatchVerifier for true batch pairing.
-                    // When real signature set extraction is implemented, this becomes:
-                    //   var bv = BatchVerifier.init(node.bls_thread_pool);
-                    //   for items: bv.addSet(extractSigSet(queued.ssz_bytes));
-                    //   batch_valid = bv.verifyAll();
-                    batch_valid = true;
-                    var j: u32 = 0;
-                    while (j < batch.count) : (j += 1) {
-                        const att_work = batch.items[j];
-                        if (!verifyFn(gh.node, &att_work.attestation)) {
-                            batch_valid = false;
-                            break;
-                        }
-                    }
-                } else {
-                    // No BLS verification configured — accept all (test mode).
-                    batch_valid = true;
-                }
-            } else {
-                batch_valid = true;
-            }
-
-            // Step 2: Import valid attestations to fork choice + pool.
-            var i: u32 = 0;
-            while (i < batch.count) : (i += 1) {
-                const att_work = batch.items[i];
-                var attestation = att_work.attestation;
-                defer attestation.deinit(node.allocator);
-
-                if (!batch_valid) {
-                    // Batch failed — verify individually to find the bad one(s).
-                    if (node.gossip_handler) |gh| {
-                        if (gh.verifyAttestationSignatureFn) |verifyFn| {
-                            if (!verifyFn(gh.node, &attestation)) {
-                                std.log.warn("Attestation BLS failed in batch fallback slot={d}", .{attestation.slot()});
-                                continue; // Skip this invalid attestation.
-                            }
-                        }
-                    }
+            if (cloneAttestationBatchItems(node.allocator, batch.items[0..batch.count])) |owned_items| {
+                if (tryStartPendingAttestationBatch(node, owned_items)) {
+                    return;
                 }
 
-                const gh = node.gossip_handler orelse continue;
-                const importFn = gh.importAttestationFn orelse continue;
-
-                importFn(gh.node, &attestation) catch |err| {
-                    std.log.warn("Processor: attestation import failed for slot {d}: {}", .{
-                        attestation.slot(), err,
-                    });
-                };
+                defer node.allocator.free(owned_items);
+                const batch_valid = verifyAttestationBatchSync(node, owned_items);
+                importAttestationBatchItems(node, owned_items, batch_valid);
+            } else |_| {
+                const batch_items = batch.items[0..batch.count];
+                const batch_valid = verifyAttestationBatchSync(node, batch_items);
+                importAttestationBatchItems(node, batch_items, batch_valid);
             }
         },
         .aggregate_batch => |batch| {
-            // Batch BLS verification for aggregates.
-            // Same pattern as attestation batching.
             std.log.debug("Processor: aggregate batch (count={d})", .{batch.count});
+            if (cloneAggregateBatchItems(node.allocator, batch.items[0..batch.count])) |owned_items| {
+                if (tryStartPendingAggregateBatch(node, owned_items)) {
+                    return;
+                }
 
-            var i: u32 = 0;
-            while (i < batch.count) : (i += 1) {
-                const agg_work = batch.items[i];
-                handleQueuedAggregate(node, agg_work);
+                defer node.allocator.free(owned_items);
+                const batch_valid = verifyAggregateBatchSync(node, owned_items);
+                importAggregateBatchItems(node, owned_items, batch_valid);
+            } else |_| {
+                const batch_items = batch.items[0..batch.count];
+                const batch_valid = verifyAggregateBatchSync(node, batch_items);
+                importAggregateBatchItems(node, batch_items, batch_valid);
             }
         },
         .aggregate => |work| {
+            if (node.gossip_handler) |gh| {
+                if (gh.verifyAggregateSignatureFn) |verifyFn| {
+                    if (!verifyFn(gh.node, &work.aggregate)) {
+                        std.log.warn("Single aggregate BLS failed aggregator={d}", .{work.aggregate.aggregatorIndex()});
+                        var aggregate = work.aggregate;
+                        aggregate.deinit(node.allocator);
+                        return;
+                    }
+                }
+            }
             handleQueuedAggregate(node, work);
         },
         .attestation => |att_work| {
@@ -1299,6 +1746,7 @@ fn handleQueuedSyncMessage(
 // ---------------------------------------------------------------------------
 
 const ProcessorImportTestContext = struct {
+    aggregate_import_count: usize = 0,
     aggregate_aggregator_index: ?u64 = null,
     aggregate_slot: ?u64 = null,
     aggregate_target_epoch: ?u64 = null,
@@ -1321,6 +1769,7 @@ const ProcessorImportTestContext = struct {
 
     fn importAggregate(ptr: *anyopaque, aggregate: *const fork_types.AnySignedAggregateAndProof) anyerror!void {
         const ctx: *ProcessorImportTestContext = @ptrCast(@alignCast(ptr));
+        ctx.aggregate_import_count += 1;
         ctx.aggregate_aggregator_index = aggregate.aggregatorIndex();
         const attestation = aggregate.attestation();
         const data = attestation.data();
@@ -1420,6 +1869,7 @@ test "processorHandlerCallback imports queued aggregates" {
     var gh: GossipHandler = undefined;
     gh.node = @ptrCast(&ctx);
     gh.importAggregateFn = &ProcessorImportTestContext.importAggregate;
+    gh.verifyAggregateSignatureFn = null;
     node.gossip_handler = &gh;
 
     var signed_agg = types.phase0.SignedAggregateAndProof.default_value;
@@ -1434,9 +1884,59 @@ test "processorHandlerCallback imports queued aggregates" {
         .seen_timestamp_ns = 0,
     } }, @ptrCast(&node));
 
+    try std.testing.expectEqual(@as(usize, 1), ctx.aggregate_import_count);
     try std.testing.expectEqual(@as(?u64, 21), ctx.aggregate_aggregator_index);
     try std.testing.expectEqual(@as(?u64, 123), ctx.aggregate_slot);
     try std.testing.expectEqual(@as(?u64, 4), ctx.aggregate_target_epoch);
+}
+
+test "processorHandlerCallback imports queued aggregate batches" {
+    const allocator = std.testing.allocator;
+
+    var ctx = ProcessorImportTestContext{};
+    var node: BeaconNode = undefined;
+    node.allocator = allocator;
+
+    var gh: GossipHandler = undefined;
+    gh.node = @ptrCast(&ctx);
+    gh.importAggregateFn = &ProcessorImportTestContext.importAggregate;
+    gh.verifyAggregateSignatureFn = null;
+    node.gossip_handler = &gh;
+
+    var signed_agg_1 = types.phase0.SignedAggregateAndProof.default_value;
+    signed_agg_1.message.aggregator_index = 21;
+    signed_agg_1.message.aggregate.data.slot = 123;
+    signed_agg_1.message.aggregate.data.target.epoch = 4;
+
+    var signed_agg_2 = types.phase0.SignedAggregateAndProof.default_value;
+    signed_agg_2.message.aggregator_index = 22;
+    signed_agg_2.message.aggregate.data.slot = 124;
+    signed_agg_2.message.aggregate.data.target.epoch = 5;
+
+    var batch_items = [_]processor_mod.work_item.AggregateWork{
+        .{
+            .source = .{ .key = 1 },
+            .message_id = std.mem.zeroes(processor_mod.work_item.MessageId),
+            .aggregate = .{ .phase0 = signed_agg_1 },
+            .seen_timestamp_ns = 0,
+        },
+        .{
+            .source = .{ .key = 2 },
+            .message_id = std.mem.zeroes(processor_mod.work_item.MessageId),
+            .aggregate = .{ .phase0 = signed_agg_2 },
+            .seen_timestamp_ns = 0,
+        },
+    };
+
+    processorHandlerCallback(.{ .aggregate_batch = .{
+        .items = &batch_items,
+        .count = batch_items.len,
+    } }, @ptrCast(&node));
+
+    try std.testing.expectEqual(@as(usize, 2), ctx.aggregate_import_count);
+    try std.testing.expectEqual(@as(?u64, 22), ctx.aggregate_aggregator_index);
+    try std.testing.expectEqual(@as(?u64, 124), ctx.aggregate_slot);
+    try std.testing.expectEqual(@as(?u64, 5), ctx.aggregate_target_epoch);
 }
 
 test "processorHandlerCallback imports queued attestations" {
@@ -1456,11 +1956,14 @@ test "processorHandlerCallback imports queued attestations" {
     attestation.committee_index = 7;
     attestation.attester_index = 19;
     attestation.data.slot = 222;
+    var attestation_data_root: [32]u8 = undefined;
+    try types.phase0.AttestationData.hashTreeRoot(&attestation.data, &attestation_data_root);
 
     processorHandlerCallback(.{ .attestation = .{
         .source = .{ .key = 1 },
         .message_id = std.mem.zeroes(processor_mod.work_item.MessageId),
         .attestation = .{ .electra_single = attestation },
+        .attestation_data_root = attestation_data_root,
         .subnet_id = 0,
         .seen_timestamp_ns = 0,
     } }, @ptrCast(&node));

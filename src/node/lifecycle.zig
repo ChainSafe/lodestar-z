@@ -34,10 +34,18 @@ const NodeOptions = @import("options.zig").NodeOptions;
 const InitConfig = @import("beacon_node.zig").BeaconNode.InitConfig;
 const custody_mod = @import("networking").custody;
 
+const BlsThreadPools = struct {
+    block: *BlsThreadPool,
+    gossip: *BlsThreadPool,
+};
+
 pub fn init(allocator: Allocator, io: std.Io, beacon_config: *const BeaconConfig, init_config: InitConfig) !*BeaconNode {
     const opts = init_config.options;
-    const bls_thread_pool = try initBlsThreadPool(allocator, io);
-    errdefer bls_thread_pool.deinit();
+    const bls_thread_pools = try initBlsThreadPools(allocator, io);
+    errdefer {
+        bls_thread_pools.gossip.deinit();
+        bls_thread_pools.block.deinit();
+    }
 
     var node_identity = init_config.node_identity;
     var owns_node_identity = true;
@@ -88,6 +96,7 @@ pub fn init(allocator: Allocator, io: std.Io, beacon_config: *const BeaconConfig
             .max_block_states = opts.max_block_states,
             .max_checkpoint_epochs = opts.max_checkpoint_epochs,
             .verify_signatures = opts.verify_signatures,
+            .block_bls_thread_pool = bls_thread_pools.block,
             .validator_monitor_indices = opts.validator_monitor_indices,
             .custody_columns = custody_columns,
         },
@@ -222,7 +231,8 @@ pub fn init(allocator: Allocator, io: std.Io, beacon_config: *const BeaconConfig
         .chain = chain_struct,
         .clock = null,
         .io = io,
-        .bls_thread_pool = bls_thread_pool,
+        .block_bls_thread_pool = bls_thread_pools.block,
+        .gossip_bls_thread_pool = bls_thread_pools.gossip,
         .node_identity = node_identity,
         .mock_engine = mock_engine_ptr,
         .http_engine = http_engine_ptr,
@@ -302,6 +312,9 @@ pub fn deinit(self: *BeaconNode) void {
     allocator.destroy(self.api_context);
     allocator.destroy(self.event_bus);
 
+    self.flushPendingGossipBlsBatch();
+    self.pending_gossip_bls_batches.deinit(allocator);
+
     if (self.beacon_processor) |bp| {
         bp.deinit();
         allocator.destroy(bp);
@@ -313,18 +326,38 @@ pub fn deinit(self: *BeaconNode) void {
     self.unknown_block_sync.deinit();
     self.unknown_chain_sync.deinit();
 
-    self.bls_thread_pool.deinit();
+    self.gossip_bls_thread_pool.deinit();
+    self.block_bls_thread_pool.deinit();
     self.chain_runtime.deinit();
 
     allocator.destroy(self);
 }
 
-fn initBlsThreadPool(allocator: Allocator, io: std.Io) !*BlsThreadPool {
+fn initBlsThreadPools(allocator: Allocator, io: std.Io) !BlsThreadPools {
     const cpu_count = std.Thread.getCpuCount() catch 4;
-    const n_workers: u16 = @intCast(@max(@min(cpu_count / 2, BlsThreadPool.MAX_WORKERS), 1));
-    const pool = try BlsThreadPool.init(allocator, io, .{ .n_workers = n_workers });
-    log.logger(.node).info("BLS thread pool initialized with {d} workers", .{pool.n_workers});
-    return pool;
+    const pool_budget: usize = @max(@min(cpu_count / 2, BlsThreadPool.MAX_WORKERS), 1);
+    const gossip_workers: u16 = @intCast(@max((pool_budget * 2) / 3, 1));
+    const block_workers: u16 = @intCast(@max(pool_budget / 3, 1));
+
+    const block_pool = try BlsThreadPool.init(allocator, io, .{ .n_workers = block_workers });
+    errdefer block_pool.deinit();
+
+    const gossip_pool = try BlsThreadPool.init(allocator, io, .{
+        .n_workers = gossip_workers,
+        .use_caller_thread = false,
+        .max_async_verify_sets_jobs = @intCast(@min(@max(gossip_workers * 2, 4), BlsThreadPool.MAX_ASYNC_VERIFY_SETS_JOBS)),
+    });
+    errdefer gossip_pool.deinit();
+
+    log.logger(.node).info("BLS thread pools initialized: block={d} gossip={d}", .{
+        block_pool.n_workers,
+        gossip_pool.n_workers,
+    });
+
+    return .{
+        .block = block_pool,
+        .gossip = gossip_pool,
+    };
 }
 
 fn initApiNodeIdentity(

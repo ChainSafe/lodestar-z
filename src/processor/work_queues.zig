@@ -52,6 +52,10 @@ const queues_mod = @import("queues.zig");
 const FifoQueue = queues_mod.FifoQueue;
 const LifoQueue = queues_mod.LifoQueue;
 
+const attestation_batch_target_size: u32 = 8;
+const aggregate_batch_target_size: u32 = 4;
+const gossip_batch_holdback_ns: i64 = 2 * std.time.ns_per_ms;
+
 // ---------------------------------------------------------------------------
 // QueueConfig — sizes for each queue, derived from validator count.
 // ---------------------------------------------------------------------------
@@ -224,6 +228,7 @@ pub const WorkQueues = struct {
     // ── LIFO queues ──
     aggregate: LifoQueue(AggregateWork),
     attestation: LifoQueue(AttestationWork),
+    attestation_group_counts: std.AutoHashMap([32]u8, u32),
     unknown_block_aggregate: LifoQueue(ReprocessWork),
     unknown_block_attestation: LifoQueue(ReprocessWork),
     sync_contribution: LifoQueue(SyncContributionWork),
@@ -232,6 +237,8 @@ pub const WorkQueues = struct {
 
     // ── State ──
     sync_state: SyncState,
+    attestation_dispatch_enabled: bool = true,
+    aggregate_dispatch_enabled: bool = true,
 
     // ── Metrics counters (plain u64, no Prometheus yet) ──
     items_routed: u64,
@@ -248,6 +255,10 @@ pub const WorkQueues = struct {
         allocator: std.mem.Allocator,
         config: QueueConfig,
     ) !WorkQueues {
+        var attestation_group_counts = std.AutoHashMap([32]u8, u32).init(allocator);
+        errdefer attestation_group_counts.deinit();
+        try attestation_group_counts.ensureTotalCapacity(config.attestation);
+
         return .{
             .allocator = allocator,
             .chain_segment = FifoQueue(ChainSegmentWork).init(
@@ -348,6 +359,7 @@ pub const WorkQueues = struct {
             .attestation = LifoQueue(AttestationWork).init(
                 try allocator.alloc(AttestationWork, config.attestation),
             ),
+            .attestation_group_counts = attestation_group_counts,
             .unknown_block_aggregate = LifoQueue(ReprocessWork).init(
                 try allocator.alloc(ReprocessWork, config.unknown_block_aggregate),
             ),
@@ -383,6 +395,7 @@ pub const WorkQueues = struct {
 
     pub fn deinit(self: *WorkQueues) void {
         self.cleanupQueuedItems();
+        self.attestation_group_counts.deinit();
         self.freeQueueBuffers();
         self.allocator.free(self.attestation_batch_buf);
         self.allocator.free(self.aggregate_batch_buf);
@@ -512,7 +525,11 @@ pub const WorkQueues = struct {
             },
 
             // ── LIFO queues: always accept, drop oldest on overflow ──
-            inline .aggregate, .attestation, .unknown_block_aggregate, .unknown_block_attestation, .sync_contribution, .sync_message, .column_reconstruction => |w, tag| {
+            .attestation => |w| {
+                self.pushAttestationWork(w);
+            },
+
+            inline .aggregate, .unknown_block_aggregate, .unknown_block_attestation, .sync_contribution, .sync_message, .column_reconstruction => |w, tag| {
                 if (@field(self, @tagName(tag)).push(w)) |dropped| {
                     self.items_dropped_full += 1;
                     self.cleanupItem(@unionInit(WorkItem, @tagName(tag), dropped));
@@ -535,6 +552,13 @@ pub const WorkQueues = struct {
     ///
     /// Returns null when all queues are empty.
     pub fn popHighestPriority(self: *WorkQueues) ?WorkItem {
+        return self.popHighestPriorityAt(std.math.maxInt(i64));
+    }
+
+    /// Pop the highest-priority work item across all queues using `now_ns`
+    /// to decide whether attestation and aggregate queues should be held a
+    /// little longer to form a more worthwhile BLS batch.
+    pub fn popHighestPriorityAt(self: *WorkQueues, now_ns: i64) ?WorkItem {
         // Priority 1-4: Sync.
         if (self.chain_segment.pop()) |w| return .{ .chain_segment = w };
         if (self.rpc_block.pop()) |w| return .{ .rpc_block = w };
@@ -555,10 +579,10 @@ pub const WorkQueues = struct {
         if (self.api_request_p0.pop()) |w| return .{ .api_request_p0 = w };
 
         // Priority 12-13: Attestations — form batches for BLS batch verify.
-        if (self.aggregate.len > 0) {
+        if (self.aggregate_dispatch_enabled and self.aggregate.len > 0 and self.aggregateBatchReady(now_ns)) {
             return self.formAggregateBatch();
         }
-        if (self.attestation.len > 0) {
+        if (self.attestation_dispatch_enabled and self.attestation.len > 0 and self.attestationBatchReady(now_ns)) {
             return self.formAttestationBatch();
         }
 
@@ -605,6 +629,11 @@ pub const WorkQueues = struct {
         if (self.lc_updates_by_range.pop()) |w| return .{ .lc_updates_by_range = w };
 
         return null;
+    }
+
+    pub fn setGossipBlsBatchDispatchEnabled(self: *WorkQueues, enabled: bool) void {
+        self.attestation_dispatch_enabled = enabled;
+        self.aggregate_dispatch_enabled = enabled;
     }
 
     /// Returns true if every queue is empty.
@@ -662,6 +691,26 @@ pub const WorkQueues = struct {
 
     // ── Batch formation ──
 
+    fn aggregateBatchReady(self: *const WorkQueues, now_ns: i64) bool {
+        return batchReady(
+            AggregateWork,
+            self.aggregate.len,
+            self.aggregate.peekOldest(),
+            now_ns,
+            aggregate_batch_target_size,
+        );
+    }
+
+    fn attestationBatchReady(self: *const WorkQueues, now_ns: i64) bool {
+        return batchReady(
+            AttestationWork,
+            self.attestation.len,
+            self.attestation.peekOldest(),
+            now_ns,
+            attestation_batch_target_size,
+        );
+    }
+
     /// Form a batch from the aggregate LIFO queue.
     /// If only 1 item, returns a single aggregate work item.
     /// If 2+, pops up to max_aggregate_batch_size into a batch.
@@ -690,22 +739,131 @@ pub const WorkQueues = struct {
     fn formAttestationBatch(self: *WorkQueues) WorkItem {
         assert(self.attestation.len > 0);
         if (self.attestation.len < 2) {
-            return .{ .attestation = self.attestation.pop().? };
+            return .{ .attestation = self.popAttestation().? };
         }
+
+        if (self.bestAttestationGroupRoot()) |root| {
+            var matching_offsets: [work_item_mod.max_attestation_batch_size]u32 = undefined;
+            var match_count: u32 = 0;
+            var offset: u32 = 0;
+            while (offset < self.attestation.len and match_count < work_item_mod.max_attestation_batch_size) : (offset += 1) {
+                const item = self.attestation.peekAt(offset).?;
+                if (std.mem.eql(u8, &item.attestation_data_root, &root)) {
+                    matching_offsets[match_count] = offset;
+                    match_count += 1;
+                }
+            }
+
+            assert(match_count >= 2);
+            var remaining = match_count;
+            while (remaining > 0) {
+                remaining -= 1;
+                const batch_index = remaining;
+                self.attestation_batch_buf[batch_index] = self.removeAttestationAt(
+                    matching_offsets[remaining],
+                ).?;
+            }
+
+            return .{ .attestation_batch = .{
+                .items = self.attestation_batch_buf.ptr,
+                .count = match_count,
+            } };
+        }
+
         const batch_size = @min(
             self.attestation.len,
             work_item_mod.max_attestation_batch_size,
         );
-        const count = self.attestation.popBatch(
-            self.attestation_batch_buf[0..batch_size],
-        );
+        var count: u32 = 0;
+        while (count < batch_size) : (count += 1) {
+            self.attestation_batch_buf[count] = self.popAttestation().?;
+        }
         assert(count > 0);
         return .{ .attestation_batch = .{
             .items = self.attestation_batch_buf.ptr,
             .count = count,
         } };
     }
+
+    fn pushAttestationWork(self: *WorkQueues, work: AttestationWork) void {
+        self.incrementAttestationGroupCount(work.attestation_data_root);
+        if (self.attestation.push(work)) |dropped| {
+            self.items_dropped_full += 1;
+            self.decrementAttestationGroupCount(dropped.attestation_data_root);
+            self.cleanupItem(.{ .attestation = dropped });
+        }
+    }
+
+    fn popAttestation(self: *WorkQueues) ?AttestationWork {
+        const work = self.attestation.pop() orelse return null;
+        self.decrementAttestationGroupCount(work.attestation_data_root);
+        return work;
+    }
+
+    fn removeAttestationAt(self: *WorkQueues, offset: u32) ?AttestationWork {
+        const work = self.attestation.removeAt(offset) orelse return null;
+        self.decrementAttestationGroupCount(work.attestation_data_root);
+        return work;
+    }
+
+    fn incrementAttestationGroupCount(self: *WorkQueues, root: [32]u8) void {
+        const gop = self.attestation_group_counts.getOrPutAssumeCapacity(root);
+        if (gop.found_existing) {
+            gop.value_ptr.* += 1;
+        } else {
+            gop.value_ptr.* = 1;
+        }
+    }
+
+    fn decrementAttestationGroupCount(self: *WorkQueues, root: [32]u8) void {
+        const count_ptr = self.attestation_group_counts.getPtr(root) orelse unreachable;
+        if (count_ptr.* == 1) {
+            _ = self.attestation_group_counts.fetchRemove(root);
+        } else {
+            count_ptr.* -= 1;
+        }
+    }
+
+    fn bestAttestationGroupRoot(self: *const WorkQueues) ?[32]u8 {
+        var max_count: u32 = 0;
+        var it = self.attestation_group_counts.iterator();
+        while (it.next()) |entry| {
+            max_count = @max(max_count, entry.value_ptr.*);
+        }
+        if (max_count < 2) return null;
+
+        var offset: u32 = 0;
+        while (offset < self.attestation.len) : (offset += 1) {
+            const item = self.attestation.peekAt(offset).?;
+            if (self.attestation_group_counts.get(item.attestation_data_root)) |count| {
+                if (count == max_count) return item.attestation_data_root;
+            }
+        }
+
+        return null;
+    }
 };
+
+fn sameAttestationMessage(a: *const AttestationWork, b: *const AttestationWork) bool {
+    return std.mem.eql(u8, &a.attestation_data_root, &b.attestation_data_root);
+}
+
+fn batchReady(
+    comptime T: type,
+    queue_len: u32,
+    oldest: ?*const T,
+    now_ns: i64,
+    target_size: u32,
+) bool {
+    if (queue_len == 0) return false;
+    if (queue_len >= target_size) return true;
+
+    const oldest_item = oldest orelse return true;
+    if (oldest_item.seen_timestamp_ns <= 0) return true;
+    if (now_ns <= oldest_item.seen_timestamp_ns) return false;
+
+    return now_ns - oldest_item.seen_timestamp_ns >= gossip_batch_holdback_ns;
+}
 
 // ===========================================================================
 // Tests
@@ -763,6 +921,147 @@ test "WorkQueues: route and pop priority order" {
     try testing.expect(wq.allQueuesEmpty());
 }
 
+test "WorkQueues: attestation batching holds briefly for a fuller batch" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const config = testQueueConfig();
+    var wq = try WorkQueues.init(allocator, config);
+
+    wq.routeToQueue(.{ .attestation = testAttestationWork(1, 0, 1_000) });
+    wq.routeToQueue(.{ .attestation = testAttestationWork(2, 1, 1_500) });
+
+    try testing.expect(wq.popHighestPriorityAt(1_000 + gossip_batch_holdback_ns - 1) == null);
+
+    const ready = wq.popHighestPriorityAt(1_000 + gossip_batch_holdback_ns + 1).?;
+    try testing.expectEqual(WorkType.attestation_batch, ready.workType());
+}
+
+test "WorkQueues: attestation batching dispatches immediately at target size" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var config = testQueueConfig();
+    config.attestation = attestation_batch_target_size;
+    var wq = try WorkQueues.init(allocator, config);
+
+    var i: u32 = 0;
+    while (i < attestation_batch_target_size) : (i += 1) {
+        wq.routeToQueue(.{ .attestation = testAttestationWork(
+            i + 1,
+            @intCast(i % 4),
+            10_000 + i,
+        ) });
+    }
+
+    const ready = wq.popHighestPriorityAt(10_000).?;
+    try testing.expectEqual(WorkType.attestation_batch, ready.workType());
+}
+
+test "WorkQueues: attestation batching prefers same attestation data" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const config = testQueueConfig();
+    var wq = try WorkQueues.init(allocator, config);
+
+    wq.routeToQueue(.{ .attestation = testAttestationWorkWithSlot(1, 900, 0, 1_000) });
+    wq.routeToQueue(.{ .attestation = testAttestationWorkWithSlot(2, 901, 1, 1_001) });
+    wq.routeToQueue(.{ .attestation = testAttestationWorkWithSlot(3, 900, 0, 1_002) });
+
+    const ready = wq.popHighestPriorityAt(1_000 + gossip_batch_holdback_ns + 1).?;
+    try testing.expectEqual(WorkType.attestation_batch, ready.workType());
+
+    const batch = ready.attestation_batch;
+    try testing.expectEqual(@as(u32, 2), batch.count);
+    try testing.expectEqual(@as(u64, 900), batch.items[0].attestation.slot());
+    try testing.expectEqual(@as(u64, 900), batch.items[1].attestation.slot());
+
+    const next = wq.popHighestPriorityAt(1_000 + gossip_batch_holdback_ns + 1).?;
+    defer next.deinit(allocator);
+    try testing.expectEqual(WorkType.attestation, next.workType());
+    try testing.expectEqual(@as(u64, 901), next.attestation.attestation.slot());
+}
+
+test "WorkQueues: attestation batching scans the full queue for matching data" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var config = testQueueConfig();
+    config.attestation = 96;
+    var wq = try WorkQueues.init(allocator, config);
+
+    wq.routeToQueue(.{ .attestation = testAttestationWorkWithSlot(1, 777, 0, 1_000) });
+
+    var i: u32 = 0;
+    while (i < 70) : (i += 1) {
+        wq.routeToQueue(.{ .attestation = testAttestationWorkWithSlot(
+            10 + i,
+            900 + i,
+            @intCast(i % 4),
+            1_001 + i,
+        ) });
+    }
+
+    wq.routeToQueue(.{ .attestation = testAttestationWorkWithSlot(500, 777, 0, 2_000) });
+
+    const ready = wq.popHighestPriorityAt(2_000 + gossip_batch_holdback_ns + 1).?;
+    try testing.expectEqual(WorkType.attestation_batch, ready.workType());
+    try testing.expectEqual(@as(u32, 2), ready.attestation_batch.count);
+    try testing.expectEqual(@as(u64, 777), ready.attestation_batch.items[0].attestation.slot());
+    try testing.expectEqual(@as(u64, 777), ready.attestation_batch.items[1].attestation.slot());
+}
+
+test "WorkQueues: attestation batching picks the largest duplicate group" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var config = testQueueConfig();
+    config.attestation = 8;
+    var wq = try WorkQueues.init(allocator, config);
+
+    wq.routeToQueue(.{ .attestation = testAttestationWorkWithSlot(1, 700, 0, 1_000) });
+    wq.routeToQueue(.{ .attestation = testAttestationWorkWithSlot(2, 700, 0, 1_001) });
+    wq.routeToQueue(.{ .attestation = testAttestationWorkWithSlot(3, 700, 0, 1_002) });
+
+    wq.routeToQueue(.{ .attestation = testAttestationWorkWithSlot(4, 800, 1, 2_000) });
+    wq.routeToQueue(.{ .attestation = testAttestationWorkWithSlot(5, 800, 1, 2_001) });
+
+    const ready = wq.popHighestPriorityAt(2_001 + gossip_batch_holdback_ns + 1).?;
+    try testing.expectEqual(WorkType.attestation_batch, ready.workType());
+    try testing.expectEqual(@as(u32, 3), ready.attestation_batch.count);
+    try testing.expectEqual(@as(u64, 700), ready.attestation_batch.items[0].attestation.slot());
+    try testing.expectEqual(@as(u64, 700), ready.attestation_batch.items[1].attestation.slot());
+    try testing.expectEqual(@as(u64, 700), ready.attestation_batch.items[2].attestation.slot());
+}
+
+test "WorkQueues: gossip bls dispatch gate defers attestation and aggregate work" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const config = testQueueConfig();
+    var wq = try WorkQueues.init(allocator, config);
+
+    wq.setGossipBlsBatchDispatchEnabled(false);
+    wq.routeToQueue(.{ .attestation = testAttestationWork(1, 0, 1_000) });
+    wq.routeToQueue(.{ .status = .{
+        .peer_id = testPeerId(1),
+        .request = testOpaqueHandle(2),
+        .seen_timestamp_ns = 2_000,
+    } });
+
+    const first = wq.popHighestPriorityAt(10_000).?;
+    try testing.expectEqual(WorkType.status, first.workType());
+    try testing.expect(wq.popHighestPriorityAt(10_000) == null);
+    try testing.expectEqual(@as(u32, 1), wq.attestation.len);
+}
+
 test "WorkQueues: sync-aware dropping" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -773,13 +1072,7 @@ test "WorkQueues: sync-aware dropping" {
     wq.sync_state = .syncing;
 
     // Attestation should be dropped during sync.
-    wq.routeToQueue(.{ .attestation = .{
-        .source = testSource(1),
-        .message_id = testMessageId(1),
-        .attestation = testGossipAttestation(1),
-        .subnet_id = 0,
-        .seen_timestamp_ns = 100,
-    } });
+    wq.routeToQueue(.{ .attestation = testAttestationWork(1, 0, 100) });
 
     try testing.expectEqual(@as(u64, 1), wq.items_dropped_sync);
     try testing.expect(wq.attestation.isEmpty());
@@ -803,13 +1096,7 @@ test "WorkQueues: sync drop deinitializes owned gossip data" {
     defer wq.deinit();
     wq.sync_state = .syncing;
 
-    wq.routeToQueue(.{ .attestation = .{
-        .source = testSource(1),
-        .message_id = testMessageId(1),
-        .attestation = try testOwnedPhase0GossipAttestation(allocator, 1),
-        .subnet_id = 0,
-        .seen_timestamp_ns = 100,
-    } });
+    wq.routeToQueue(.{ .attestation = try testOwnedAttestationWork(allocator, 1, 0, 100) });
 
     try testing.expect(wq.attestation.isEmpty());
 }
@@ -822,20 +1109,8 @@ test "WorkQueues: LIFO overflow deinitializes dropped owned gossip data" {
     var wq = try WorkQueues.init(allocator, config);
     defer wq.deinit();
 
-    wq.routeToQueue(.{ .attestation = .{
-        .source = testSource(1),
-        .message_id = testMessageId(1),
-        .attestation = try testOwnedPhase0GossipAttestation(allocator, 1),
-        .subnet_id = 0,
-        .seen_timestamp_ns = 100,
-    } });
-    wq.routeToQueue(.{ .attestation = .{
-        .source = testSource(2),
-        .message_id = testMessageId(2),
-        .attestation = try testOwnedPhase0GossipAttestation(allocator, 2),
-        .subnet_id = 1,
-        .seen_timestamp_ns = 200,
-    } });
+    wq.routeToQueue(.{ .attestation = try testOwnedAttestationWork(allocator, 1, 0, 100) });
+    wq.routeToQueue(.{ .attestation = try testOwnedAttestationWork(allocator, 2, 1, 200) });
 
     const queued = wq.popHighestPriority().?;
     defer queued.deinit(allocator);
@@ -954,12 +1229,55 @@ fn makeOwnedHandle(allocator: Allocator, counter: *u32) !OpaqueHandle {
 }
 
 fn testGossipAttestation(tag: u64) fork_types.AnyGossipAttestation {
+    return testGossipAttestationWithSlot(tag, 100 + tag);
+}
+
+fn testGossipAttestationWithSlot(tag: u64, slot: u64) fork_types.AnyGossipAttestation {
     var attestation = consensus_types.electra.SingleAttestation.default_value;
     attestation.committee_index = @intCast(tag % 8);
     attestation.attester_index = tag;
-    attestation.data.slot = 100 + tag;
+    attestation.data.slot = slot;
     attestation.data.target.epoch = 4;
     return .{ .electra_single = attestation };
+}
+
+fn testGossipAttestationDataRoot(attestation: *const fork_types.AnyGossipAttestation) [32]u8 {
+    var root: [32]u8 = undefined;
+    consensus_types.phase0.AttestationData.hashTreeRoot(&attestation.data(), &root) catch unreachable;
+    return root;
+}
+
+fn testAttestationWork(tag: u64, subnet_id: u8, seen_timestamp_ns: i64) AttestationWork {
+    return testAttestationWorkWithSlot(tag, 100 + tag, subnet_id, seen_timestamp_ns);
+}
+
+fn testAttestationWorkWithSlot(tag: u64, slot: u64, subnet_id: u8, seen_timestamp_ns: i64) AttestationWork {
+    const attestation = testGossipAttestationWithSlot(tag, slot);
+    return .{
+        .source = testSource(tag),
+        .message_id = testMessageId(@intCast(tag & 0xff)),
+        .attestation = attestation,
+        .attestation_data_root = testGossipAttestationDataRoot(&attestation),
+        .subnet_id = subnet_id,
+        .seen_timestamp_ns = seen_timestamp_ns,
+    };
+}
+
+fn testOwnedAttestationWork(
+    allocator: Allocator,
+    tag: u64,
+    subnet_id: u8,
+    seen_timestamp_ns: i64,
+) !AttestationWork {
+    const attestation = try testOwnedPhase0GossipAttestation(allocator, tag);
+    return .{
+        .source = testSource(tag),
+        .message_id = testMessageId(@intCast(tag & 0xff)),
+        .attestation = attestation,
+        .attestation_data_root = testGossipAttestationDataRoot(&attestation),
+        .subnet_id = subnet_id,
+        .seen_timestamp_ns = seen_timestamp_ns,
+    };
 }
 
 fn testOwnedPhase0GossipAttestation(

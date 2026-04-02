@@ -90,26 +90,10 @@ pub const BatchVerifier = struct {
     /// Empty batch returns true (vacuous truth — no signatures to reject).
     ///
     /// This resolves aggregate pubkeys, decompresses signatures, generates
-    /// random scalars, and calls verifyMultipleAggregateSignatures for a
-    /// single multi-pairing check.
+    /// random scalars, and verifies all sets in one multi-pairing check.
     pub fn verifyAll(self: *BatchVerifier) BlstError!bool {
         const n = self.count;
         if (n == 0) return true;
-
-        // Resolve all pubkeys and decompress all signatures
-        var resolved_pks: [MAX_SETS_PER_BLOCK]PublicKey = undefined;
-        var resolved_sigs: [MAX_SETS_PER_BLOCK]Signature = undefined;
-        var msgs: [MAX_SETS_PER_BLOCK][32]u8 = undefined;
-        var pk_ptrs: [MAX_SETS_PER_BLOCK]*PublicKey = undefined;
-        var sig_ptrs: [MAX_SETS_PER_BLOCK]*Signature = undefined;
-
-        for (0..n) |i| {
-            resolved_pks[i] = try self.sets[i].resolvePublicKey();
-            resolved_sigs[i] = try self.sets[i].decompressSignature();
-            msgs[i] = self.sets[i].signing_root;
-            pk_ptrs[i] = &resolved_pks[i];
-            sig_ptrs[i] = &resolved_sigs[i];
-        }
 
         // Generate random scalars for fast verification
         var rands: [MAX_SETS_PER_BLOCK][32]u8 = undefined;
@@ -117,27 +101,17 @@ pub const BatchVerifier = struct {
 
         // Dispatch to thread pool if available, otherwise single-threaded
         if (self.thread_pool) |pool| {
-            return pool.verifyMultipleAggregateSignatures(
-                n,
-                msgs[0..n],
+            return pool.verifySignatureSets(
+                self.sets[0..n],
                 bls.DST,
-                pk_ptrs[0..n],
-                false, // pubkeys already validated from cache
-                sig_ptrs[0..n],
-                true, // signatures from wire, must group-check
                 rands[0..n],
             );
         } else {
             var pairing_buf: [Pairing.sizeOf()]u8 align(Pairing.buf_align) = undefined;
-            return fast_verify.verifyMultipleAggregateSignatures(
+            return fast_verify.verifySignatureSets(
                 &pairing_buf,
-                n,
-                msgs[0..n],
+                self.sets[0..n],
                 bls.DST,
-                pk_ptrs[0..n],
-                false,
-                sig_ptrs[0..n],
-                true,
                 rands[0..n],
             );
         }
@@ -150,17 +124,11 @@ pub const BatchVerifier = struct {
 };
 
 /// Fill random scalars for batch verification.
-/// Uses OS entropy for cryptographic security (random scalars must be
-/// unpredictable to prevent rogue-key attacks on the batch).
-///
-/// C-bls fix: use std.crypto.random as the primary path for all platforms.
-/// std.crypto.random is backed by the OS CSPRNG (getrandom on Linux,
-/// SecRandomCopyBytes on macOS, etc.) and is correct on all Zig targets.
-/// The previous hand-rolled platform dispatch was fragile; the ASLR-seeded
-/// ChaCha fallback provided only ~40 bits of entropy — cryptographically weak.
+/// Prefers OS-secure entropy and falls back to the process RNG only if secure
+/// entropy is temporarily unavailable.
 fn fillRandomScalars(rands: [][32]u8) void {
     const bytes = std.mem.sliceAsBytes(rands);
-    std.Options.debug_io.random(bytes);
+    std.Options.debug_io.randomSecure(bytes) catch std.Options.debug_io.random(bytes);
 }
 
 // ---------------------------------------------------------------------------

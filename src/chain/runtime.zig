@@ -34,11 +34,13 @@ const PendingBlockIngress = @import("block_ingress.zig").PendingBlockIngress;
 const PayloadEnvelopeIngress = @import("payload_envelope_ingress.zig").PayloadEnvelopeIngress;
 const kzg_mod = @import("kzg");
 const Kzg = kzg_mod.Kzg;
+const BlsThreadPool = @import("bls").ThreadPool;
 
 pub const RuntimeOptions = struct {
     max_block_states: u32 = 64,
     max_checkpoint_epochs: u32 = 3,
     verify_signatures: bool = false,
+    block_bls_thread_pool: ?*BlsThreadPool = null,
     validator_monitor_indices: []const u64 = &.{},
     custody_columns: []const u64 = &.{},
 };
@@ -210,6 +212,7 @@ pub const Runtime = struct {
         );
         errdefer chain.deinit();
         chain.verify_signatures = opts.verify_signatures;
+        chain.block_bls_thread_pool = opts.block_bls_thread_pool;
         chain.queued_regen = queued_regen;
         chain.sync_contribution_pool = sync_contrib_pool;
         chain.sync_committee_message_pool = sync_msg_pool;

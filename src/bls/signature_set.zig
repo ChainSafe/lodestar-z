@@ -73,3 +73,37 @@ pub const SignatureSet = struct {
         return Signature.uncompress(&self.signature);
     }
 };
+
+/// A signature set wrapper that can own aggregate-pubkey buffers when the
+/// caller needs a stable lifetime across queued verification work.
+pub const OwnedSignatureSet = struct {
+    set: SignatureSet,
+    owned_pubkeys: ?[]const PublicKey = null,
+    allocator: ?std.mem.Allocator = null,
+
+    pub fn initSingle(pubkey: PublicKey, signing_root: [32]u8, signature: [96]u8) OwnedSignatureSet {
+        return .{
+            .set = SignatureSet.initSingle(pubkey, signing_root, signature),
+        };
+    }
+
+    pub fn initOwnedAggregate(
+        allocator: std.mem.Allocator,
+        pubkeys: []const PublicKey,
+        signing_root: [32]u8,
+        signature: [96]u8,
+    ) OwnedSignatureSet {
+        return .{
+            .set = SignatureSet.initAggregate(pubkeys, signing_root, signature),
+            .owned_pubkeys = pubkeys,
+            .allocator = allocator,
+        };
+    }
+
+    pub fn deinit(self: *OwnedSignatureSet) void {
+        if (self.owned_pubkeys) |pubkeys| {
+            self.allocator.?.free(pubkeys);
+        }
+        self.* = undefined;
+    }
+};

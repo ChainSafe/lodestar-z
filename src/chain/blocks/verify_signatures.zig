@@ -174,3 +174,11 @@ test "createBlockBatchVerifier: creates with no pool" {
     var verifier = createBlockBatchVerifier(null);
     try std.testing.expectEqual(@as(usize, 0), verifier.len());
 }
+
+test "createBlockBatchVerifier: keeps provided pool" {
+    const pool = try bls_mod.ThreadPool.init(std.testing.allocator, std.testing.io, .{ .n_workers = 2 });
+    defer pool.deinit();
+
+    const verifier = createBlockBatchVerifier(pool);
+    try std.testing.expect(verifier.thread_pool == pool);
+}

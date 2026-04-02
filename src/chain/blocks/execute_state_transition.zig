@@ -72,6 +72,7 @@ pub fn executeStateTransition(
     da_status: DataAvailabilityStatus,
     opts: ImportBlockOpts,
     precomputed_body_root: ?[32]u8,
+    block_bls_thread_pool: ?*bls_mod.ThreadPool,
 ) BlockImportError!StfResult {
     const any_signed_block = block_input.block;
     const block = any_signed_block.beaconBlock();
@@ -94,7 +95,7 @@ pub fn executeStateTransition(
     const verify_signatures = sig_status == .verified;
 
     // Set up batch verifier if signatures are being verified.
-    var batch = BatchVerifier.init(null);
+    var batch = verify_sigs.createBlockBatchVerifier(block_bls_thread_pool);
 
     // Map pipeline DA status to the state_transition's BlockExternalData DA status.
     // Use @FieldType to get the anonymous enum type of the data_availability_status field.

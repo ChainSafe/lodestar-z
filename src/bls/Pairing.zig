@@ -83,7 +83,7 @@ pub fn mulAndAggregate(
     sig_groupcheck: bool,
     scalar: []const u8,
     nbits: usize,
-    msg: []const u8,
+    msg: *const [32]u8,
 ) BlstError!void {
     try errorFromInt(
         c.blst_pairing_chk_n_mul_n_aggr_pk_in_g1(
@@ -94,7 +94,7 @@ pub fn mulAndAggregate(
             sig_groupcheck,
             scalar.ptr,
             nbits,
-            msg.ptr,
+            msg,
             32,
             null,
             0,

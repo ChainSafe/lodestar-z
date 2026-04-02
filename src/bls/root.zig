@@ -16,8 +16,10 @@ pub const AggregateSignature = @import("AggregateSignature.zig");
 pub const BlstError = @import("error.zig").BlstError;
 
 pub const verifyMultipleAggregateSignatures = @import("fast_verify.zig").verifyMultipleAggregateSignatures;
+pub const verifySignatureSetsSameMessage = @import("fast_verify.zig").verifySignatureSetsSameMessage;
 pub const ThreadPool = @import("ThreadPool.zig");
 pub const SignatureSet = @import("signature_set.zig").SignatureSet;
+pub const OwnedSignatureSet = @import("signature_set.zig").OwnedSignatureSet;
 pub const BatchVerifier = @import("batch_verifier.zig").BatchVerifier;
 
 /// Maximum number of signatures that can be aggregated in a single job.

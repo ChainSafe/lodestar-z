@@ -144,6 +144,46 @@ pub fn LifoQueue(comptime T: type) type {
             return item;
         }
 
+        /// Returns the most recently pushed item without removing it.
+        pub fn peekNewest(self: *const Self) ?*const T {
+            if (self.len == 0) return null;
+            return &self.buffer[self.head];
+        }
+
+        /// Returns the oldest item without removing it.
+        pub fn peekOldest(self: *const Self) ?*const T {
+            if (self.len == 0) return null;
+            const tail_index = (self.head + self.len - 1) % self.capacity;
+            return &self.buffer[tail_index];
+        }
+
+        /// Returns the item at the given logical offset, where 0 is the newest.
+        pub fn peekAt(self: *const Self, offset: u32) ?*const T {
+            if (offset >= self.len) return null;
+            return &self.buffer[self.physicalIndex(offset)];
+        }
+
+        /// Remove the item at the given logical offset, where 0 is the newest.
+        /// Preserves the relative order of the remaining items.
+        pub fn removeAt(self: *Self, offset: u32) ?T {
+            if (offset >= self.len) return null;
+            if (offset == 0) return self.pop();
+
+            const item = self.buffer[self.physicalIndex(offset)];
+            var logical = offset + 1;
+            while (logical < self.len) : (logical += 1) {
+                const dst = self.physicalIndex(logical - 1);
+                const src = self.physicalIndex(logical);
+                self.buffer[dst] = self.buffer[src];
+            }
+            self.len -= 1;
+            return item;
+        }
+
+        fn physicalIndex(self: *const Self, offset: u32) u32 {
+            return (self.head + offset) % self.capacity;
+        }
+
         /// Pop up to `out.len` items into the provided slice (LIFO order).
         /// Returns the number of items actually popped.
         pub fn popBatch(self: *Self, out: []T) u32 {
@@ -388,6 +428,27 @@ test "LifoQueue: clear" {
     // Can reuse after clear.
     _ = q.push(99);
     try testing.expectEqual(@as(u32, 99), q.pop().?);
+}
+
+test "LifoQueue: peekAt and removeAt preserve order" {
+    var buf: [5]u32 = undefined;
+    var q = LifoQueue(u32).init(&buf);
+
+    _ = q.push(1);
+    _ = q.push(2);
+    _ = q.push(3);
+    _ = q.push(4);
+    // logical order: 4, 3, 2, 1
+
+    try testing.expectEqual(@as(u32, 4), q.peekAt(0).?.*);
+    try testing.expectEqual(@as(u32, 2), q.peekAt(2).?.*);
+    try testing.expectEqual(@as(u32, 2), q.removeAt(2).?);
+    try testing.expectEqual(@as(u32, 3), q.len);
+
+    try testing.expectEqual(@as(u32, 4), q.pop().?);
+    try testing.expectEqual(@as(u32, 3), q.pop().?);
+    try testing.expectEqual(@as(u32, 1), q.pop().?);
+    try testing.expect(q.isEmpty());
 }
 
 test "FifoQueue: capacity of 1" {

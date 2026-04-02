@@ -25,7 +25,7 @@ const fork_types = @import("fork_types");
 const config_mod = @import("config");
 const BeaconConfig = config_mod.BeaconConfig;
 const state_transition = @import("state_transition");
-const BatchVerifier = @import("bls").BatchVerifier;
+const BlsThreadPool = @import("bls").ThreadPool;
 const CachedBeaconState = state_transition.CachedBeaconState;
 const BlockStateCache = state_transition.BlockStateCache;
 const CheckpointStateCache = state_transition.CheckpointStateCache;
@@ -176,6 +176,8 @@ pub const Chain = struct {
     // --- Block import state ---
     /// When true, BLS signatures are verified during block import.
     verify_signatures: bool,
+    /// Shared BLS worker pool used by the block STF batch verifier.
+    block_bls_thread_pool: ?*BlsThreadPool = null,
 
     /// Maps block root → state root for pre-state lookup.
     block_to_state: std.AutoArrayHashMap([32]u8, [32]u8),
@@ -230,6 +232,7 @@ pub const Chain = struct {
             .sync_contribution_pool = null,
             .sync_committee_message_pool = null,
             .verify_signatures = false,
+            .block_bls_thread_pool = null,
             .block_to_state = std.AutoArrayHashMap([32]u8, [32]u8).init(allocator),
             .notification_sink = null,
             .genesis_validators_root = [_]u8{0} ** 32,
@@ -498,6 +501,7 @@ pub const Chain = struct {
             .notification_sink = self.notification_sink,
             .execution_verifier = null, // Set by BeaconNode when EL is configured
             .current_slot = current_slot,
+            .block_bls_thread_pool = self.block_bls_thread_pool,
             .reprocess_queue = self.reprocess_queue, // P1-10: wire reprocess queue
             .on_finalized_ptr = @ptrCast(self), // W2: prune caches on finalization
             .on_finalized_fn = &Chain.onFinalizedCallback,
