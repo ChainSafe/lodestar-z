@@ -28,8 +28,10 @@ pub const SyncStatus = chain_types.SyncStatus;
 pub const ForkchoiceUpdateState = chain_types.ForkchoiceUpdateState;
 pub const ReadyBlockInput = chain_types.ReadyBlockInput;
 pub const RawBlockBytes = chain_types.RawBlockBytes;
-pub const BlockAttachmentRequirement = chain_types.BlockAttachmentRequirement;
+pub const PlannedBlockIngress = chain_types.PlannedBlockIngress;
+pub const BlockDataRequirement = chain_types.BlockDataRequirement;
 pub const BlockIngressReadiness = chain_types.BlockIngressReadiness;
+pub const BlockDataFetchPlan = chain_types.BlockDataFetchPlan;
 pub const BlockIngressResult = chain_types.BlockIngressResult;
 pub const NotificationSink = chain_types.NotificationSink;
 pub const ChainNotification = chain_types.ChainNotification;
@@ -100,7 +102,8 @@ pub const prepare_next_slot = @import("prepare_next_slot.zig");
 pub const archive_store = @import("archive_store.zig");
 // block_verification.zig removed — superseded by blocks/ pipeline (P1-6 fix).
 pub const reprocess = @import("reprocess.zig");
-pub const pending_da_blocks = @import("pending_da_blocks.zig");
+pub const pending_block_ingress = @import("block_ingress.zig");
+pub const payload_envelope_ingress = @import("payload_envelope_ingress.zig");
 
 // Re-exports
 pub const ShufflingCache = shuffling_cache.ShufflingCache;
@@ -111,8 +114,11 @@ pub const ArchiveStore = archive_store.ArchiveStore;
 pub const ReprocessQueue = reprocess.ReprocessQueue;
 pub const PendingBlock = reprocess.PendingBlock;
 pub const PendingReason = reprocess.PendingReason;
-pub const PendingDaBlocks = pending_da_blocks.PendingDaBlocks;
-pub const PendingDaBlock = pending_da_blocks.PendingBlock;
+pub const PendingBlockIngress = pending_block_ingress.PendingBlockIngress;
+pub const PendingIngressBlock = pending_block_ingress.PendingIngressBlock;
+pub const PayloadEnvelopeIngress = payload_envelope_ingress.PayloadEnvelopeIngress;
+pub const PendingPayloadEnvelope = payload_envelope_ingress.PendingPayloadEnvelope;
+pub const PayloadEnvelopeFetchPlan = payload_envelope_ingress.PayloadEnvelopeFetchPlan;
 // BlockVerification removed — use blocks/pipeline.zig instead.
 
 // Queued state regeneration
@@ -164,12 +170,6 @@ pub const DaConfig = data_availability.DaConfig;
 pub const aggregated_attestation_pool = @import("aggregated_attestation_pool.zig");
 pub const AggregatedAttestationPool = aggregated_attestation_pool.AggregatedAttestationPool;
 pub const AttestationGroup = aggregated_attestation_pool.AttestationGroup;
-
-// Gossip block input assembly — async data waiting layer
-pub const gossip_block_input = @import("block_input.zig");
-pub const GossipBlockInput = gossip_block_input.GossipBlockInput;
-pub const AvailableBlockInput = gossip_block_input.AvailableBlockInput;
-pub const WaitResult = gossip_block_input.WaitResult;
 // Validator monitor — per-validator on-chain performance tracking
 pub const validator_monitor = @import("validator_monitor.zig");
 pub const ValidatorMonitor = validator_monitor.ValidatorMonitor;

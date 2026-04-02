@@ -51,12 +51,7 @@ const DataColumnSidecar = types.fulu.DataColumnSidecar;
 const BYTES_PER_BLOB = kzg_mod.BYTES_PER_BLOB;
 const MAX_COLUMNS = preset_root.NUMBER_OF_COLUMNS;
 
-const SyncBlockMeta = struct {
-    any_signed: fork_types.AnySignedBeaconBlock,
-    block_root: [32]u8,
-    slot: u64,
-    readiness: chain_mod.BlockIngressReadiness,
-};
+const SyncBlockMeta = chain_mod.PlannedBlockIngress;
 
 const SlotRange = struct {
     start_slot: u64,
@@ -1351,14 +1346,19 @@ fn ensureByRootDataAvailability(
     peer_id: []const u8,
     block_bytes: []const u8,
 ) !void {
-    const meta = try buildSyncBlockMeta(self, block_bytes, null);
-    defer meta.any_signed.deinit(self.allocator);
+    var meta = try buildSyncBlockMeta(self, block_bytes, null);
+    defer deinitSyncBlockMeta(self, &meta);
 
-    switch (meta.readiness.attachment_requirement) {
+    switch (meta.block_data_plan) {
         .none => return,
-        .blobs => try fetchBlobSidecarsByRootForMeta(self, io, svc, peer_id, meta),
-        .columns => try fetchDataColumnsByRootForMeta(self, io, svc, peer_id, meta),
-        .payload_and_columns => return error.UnsupportedAttachmentRequirement,
+        .blobs => |missing| {
+            if (missing.len == 0) return;
+            try fetchBlobSidecarsByRootForMeta(self, io, svc, peer_id, meta, missing);
+        },
+        .columns => |missing| {
+            if (missing.len == 0) return;
+            try fetchDataColumnsByRootForMeta(self, io, svc, peer_id, meta, missing);
+        },
     }
 }
 
@@ -1368,8 +1368,8 @@ fn buildSyncBlockMetas(self: *BeaconNode, blocks: []const BatchBlock) ![]SyncBlo
 
     var built: usize = 0;
     errdefer {
-        for (metas[0..built]) |meta| {
-            meta.any_signed.deinit(self.allocator);
+        for (metas[0..built]) |*meta| {
+            deinitSyncBlockMeta(self, meta);
         }
     }
 
@@ -1386,29 +1386,16 @@ fn buildSyncBlockMeta(
     block_bytes: []const u8,
     slot_hint: ?u64,
 ) !SyncBlockMeta {
-    const slot = slot_hint orelse readSignedBeaconBlockSlot(block_bytes) orelse return error.MalformedBlockBytes;
-    var any_signed = try fork_types.AnySignedBeaconBlock.deserialize(
-        self.allocator,
-        .full,
-        self.config.forkSeq(slot),
-        block_bytes,
-    );
-    errdefer any_signed.deinit(self.allocator);
-
-    var block_root: [32]u8 = undefined;
-    try any_signed.beaconBlock().hashTreeRoot(self.allocator, &block_root);
-
-    return .{
-        .any_signed = any_signed,
-        .block_root = block_root,
-        .slot = slot,
-        .readiness = self.chainService().ingressReadinessForBlock(block_root, any_signed),
-    };
+    return self.chainService().planRawBlockIngress(block_bytes, slot_hint);
 }
 
 fn deinitSyncBlockMetas(self: *BeaconNode, metas: []SyncBlockMeta) void {
-    for (metas) |meta| meta.any_signed.deinit(self.allocator);
+    for (metas) |*meta| deinitSyncBlockMeta(self, meta);
     self.allocator.free(metas);
+}
+
+fn deinitSyncBlockMeta(self: *BeaconNode, meta: *SyncBlockMeta) void {
+    meta.deinit(self.allocator);
 }
 
 fn fetchBlobSidecarsByRangeForMetas(
@@ -1523,7 +1510,8 @@ fn fetchBlobSidecarsByRangeForMetas(
         for (blob_indices, 0..) |*blob_index, blob_i| blob_index.* = @intCast(blob_i);
 
         if (try self.chainService().ingestBlobSidecars(meta.block_root, meta.slot, aggregate, blob_indices)) |ready| {
-            ready.block.deinit(self.allocator);
+            var owned_ready = ready;
+            owned_ready.deinit(self.allocator);
         }
 
         if (self.chainService().dataAvailabilityStatusForBlock(meta.block_root, meta.any_signed) == .pending) {
@@ -1538,9 +1526,8 @@ fn fetchBlobSidecarsByRootForMeta(
     svc: *networking.P2pService,
     peer_id: []const u8,
     meta: SyncBlockMeta,
+    missing: []const u64,
 ) !void {
-    const missing = try self.chainService().missingBlobSidecars(self.allocator, meta.block_root);
-    defer self.allocator.free(missing);
     if (missing.len == 0) return;
 
     const blob_commitments = try meta.any_signed.beaconBlock().beaconBlockBody().blobKzgCommitments();
@@ -1620,7 +1607,8 @@ fn fetchBlobSidecarsByRootForMeta(
     for (blob_indices, 0..) |*blob_index, i| blob_index.* = @intCast(i);
 
     if (try self.chainService().ingestBlobSidecars(meta.block_root, meta.slot, aggregate, blob_indices)) |ready| {
-        ready.block.deinit(self.allocator);
+        var owned_ready = ready;
+        owned_ready.deinit(self.allocator);
     }
 
     if (self.chainService().dataAvailabilityStatusForBlock(meta.block_root, meta.any_signed) == .pending) {
@@ -1646,9 +1634,7 @@ fn fetchDataColumnsByRangeForMetas(
         start_slot = @min(start_slot, meta.slot);
         end_slot = @max(end_slot, meta.slot);
 
-        const missing = try self.chainService().missingDataColumns(self.allocator, meta.block_root);
-        defer self.allocator.free(missing);
-        for (missing) |column_index| {
+        for (requiredColumnIndices(meta)) |column_index| {
             if (column_index < MAX_COLUMNS) requested_columns.set(@intCast(column_index));
         }
     }
@@ -1738,7 +1724,8 @@ fn fetchDataColumnsByRangeForMetas(
         );
 
         if (try self.chainService().ingestDataColumnSidecar(block_root, sidecar.index, slot, decoded.ssz_bytes)) |ready| {
-            ready.block.deinit(self.allocator);
+            var owned_ready = ready;
+            owned_ready.deinit(self.allocator);
         }
     }
 
@@ -1756,9 +1743,8 @@ fn fetchDataColumnsByRootForMeta(
     svc: *networking.P2pService,
     peer_id: []const u8,
     meta: SyncBlockMeta,
+    missing: []const u64,
 ) !void {
-    const missing = try self.chainService().missingDataColumns(self.allocator, meta.block_root);
-    defer self.allocator.free(missing);
     if (missing.len == 0) return;
 
     var request_bytes = try self.allocator.alloc(u8, missing.len * networking.messages.DataColumnIdentifier.fixed_size);
@@ -1834,7 +1820,8 @@ fn fetchDataColumnsByRootForMeta(
         );
 
         if (try self.chainService().ingestDataColumnSidecar(block_root, sidecar.index, sidecar.signed_block_header.message.slot, decoded.ssz_bytes)) |ready| {
-            ready.block.deinit(self.allocator);
+            var owned_ready = ready;
+            owned_ready.deinit(self.allocator);
         }
     }
 
@@ -1844,11 +1831,24 @@ fn fetchDataColumnsByRootForMeta(
 }
 
 fn needsBlobFetch(meta: SyncBlockMeta) bool {
-    return meta.readiness.attachment_requirement == .blobs;
+    return switch (meta.block_data_plan) {
+        .blobs => true,
+        else => false,
+    };
 }
 
 fn needsColumnFetch(meta: SyncBlockMeta) bool {
-    return meta.readiness.attachment_requirement == .columns;
+    return switch (meta.block_data_plan) {
+        .columns => true,
+        else => false,
+    };
+}
+
+fn requiredColumnIndices(meta: SyncBlockMeta) []const u64 {
+    return switch (meta.block_data_plan) {
+        .columns => |indices| indices,
+        else => &[_]u64{},
+    };
 }
 
 fn findMetaIndexByRoot(metas: []const SyncBlockMeta, root: [32]u8) ?usize {

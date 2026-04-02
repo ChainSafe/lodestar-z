@@ -201,8 +201,7 @@ pub const DataAvailabilityManager = struct {
         blob_index: u64,
         slot: u64,
     ) bool {
-        _ = slot;
-        self.blob_tracker.onBlob(block_root, blob_index);
+        self.blob_tracker.onBlob(block_root, blob_index, slot);
 
         if (self.blob_tracker.isComplete(block_root)) {
             self.onBlockAvailable(block_root);
@@ -219,8 +218,7 @@ pub const DataAvailabilityManager = struct {
         column_index: u64,
         slot: u64,
     ) bool {
-        self.column_tracker.onBlock(block_root, slot);
-        self.column_tracker.onColumn(block_root, column_index);
+        self.column_tracker.onColumn(block_root, column_index, slot);
 
         if (self.column_tracker.custodyComplete(block_root) or self.column_tracker.canReconstruct(block_root)) {
             self.onBlockAvailable(block_root);
@@ -238,6 +236,11 @@ pub const DataAvailabilityManager = struct {
     /// Check if a block is pending DA.
     pub fn isPending(self: *const DataAvailabilityManager, block_root: Root) bool {
         return self.pending_blocks.contains(block_root);
+    }
+
+    /// Remove pending-DA bookkeeping for a specific block root.
+    pub fn removePending(self: *DataAvailabilityManager, block_root: Root) void {
+        _ = self.pending_blocks.remove(block_root);
     }
 
     fn onBlockAvailable(self: *DataAvailabilityManager, block_root: Root) void {
@@ -273,8 +276,11 @@ pub const DataAvailabilityManager = struct {
     pub fn pruneOldData(self: *DataAvailabilityManager, min_slot: u64) void {
         self.blob_tracker.prune(min_slot);
         self.column_tracker.prune(min_slot);
+        self.prunePendingBeforeSlot(min_slot);
+    }
 
-        // Also prune pending blocks.
+    /// Prune pending-DA bookkeeping below the given slot.
+    pub fn prunePendingBeforeSlot(self: *DataAvailabilityManager, min_slot: u64) void {
         var to_remove: [256]Root = undefined;
         var remove_count: usize = 0;
 
@@ -429,6 +435,40 @@ test "DataAvailabilityManager: pending blocks cleared on availability" {
     try std.testing.expect(!dam.isPending(root));
 }
 
+test "DataAvailabilityManager: blobs received before block are reused on block arrival" {
+    const allocator = std.testing.allocator;
+    const custody = [_]u64{0};
+
+    var dam = DataAvailabilityManager.init(allocator, test_config, &custody);
+    defer dam.deinit();
+
+    const root = [_]u8{0xF1} ** 32;
+
+    try std.testing.expect(!dam.onBlobSidecar(root, 0, 100));
+    try std.testing.expect(!dam.onBlobSidecar(root, 1, 100));
+
+    const result = dam.checkBlockDataAvailability(root, 100, .deneb, 2);
+    try std.testing.expectEqual(DaStatus.available, result.status);
+    try std.testing.expectEqual(@as(u32, 0), result.missing_count);
+}
+
+test "DataAvailabilityManager: columns received before block are reused on block arrival" {
+    const allocator = std.testing.allocator;
+    const custody = [_]u64{ 5, 10 };
+
+    var dam = DataAvailabilityManager.init(allocator, test_config, &custody);
+    defer dam.deinit();
+
+    const root = [_]u8{0xF2} ** 32;
+
+    try std.testing.expect(!dam.onDataColumnSidecar(root, 5, 200));
+    try std.testing.expect(dam.onDataColumnSidecar(root, 10, 200));
+
+    const result = dam.checkBlockDataAvailability(root, 200, .fulu, 1);
+    try std.testing.expectEqual(DaStatus.available, result.status);
+    try std.testing.expectEqual(@as(u32, 0), result.missing_count);
+}
+
 test "DataAvailabilityManager: prune old data" {
     const allocator = std.testing.allocator;
     const custody = [_]u64{0};
@@ -448,6 +488,25 @@ test "DataAvailabilityManager: prune old data" {
     try std.testing.expect(dam.blob_tracker.getState(old_root) == null);
     try std.testing.expect(dam.blob_tracker.getState(new_root) != null);
     try std.testing.expect(!dam.isPending(old_root));
+}
+
+test "DataAvailabilityManager: prune pending bookkeeping before slot" {
+    const allocator = std.testing.allocator;
+    const custody = [_]u64{0};
+
+    var dam = DataAvailabilityManager.init(allocator, test_config, &custody);
+    defer dam.deinit();
+
+    const old_root = [_]u8{0x03} ** 32;
+    const keep_root = [_]u8{0x04} ** 32;
+
+    try dam.markPending(old_root, 10);
+    try dam.markPending(keep_root, 20);
+
+    dam.prunePendingBeforeSlot(20);
+
+    try std.testing.expect(!dam.isPending(old_root));
+    try std.testing.expect(dam.isPending(keep_root));
 }
 
 test "DataAvailabilityManager: DA window calculation" {

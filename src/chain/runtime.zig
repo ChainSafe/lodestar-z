@@ -30,7 +30,8 @@ const SyncCommitteeMessagePool = sync_contribution_pool_mod.SyncCommitteeMessage
 const ValidatorMonitor = @import("validator_monitor.zig").ValidatorMonitor;
 const BeaconProposerCache = @import("beacon_proposer_cache.zig").BeaconProposerCache;
 const DataAvailabilityManager = @import("data_availability.zig").DataAvailabilityManager;
-const PendingDaBlocks = @import("pending_da_blocks.zig").PendingDaBlocks;
+const PendingBlockIngress = @import("block_ingress.zig").PendingBlockIngress;
+const PayloadEnvelopeIngress = @import("payload_envelope_ingress.zig").PayloadEnvelopeIngress;
 const kzg_mod = @import("kzg");
 const Kzg = kzg_mod.Kzg;
 
@@ -86,7 +87,8 @@ pub const Runtime = struct {
     custody_columns: []u64,
     kzg: *Kzg,
     da_manager: *DataAvailabilityManager,
-    pending_da_blocks: *PendingDaBlocks,
+    pending_block_ingress: *PendingBlockIngress,
+    payload_envelope_ingress: *PayloadEnvelopeIngress,
     validator_monitor: ?*ValidatorMonitor = null,
     chain: *Chain,
 
@@ -182,10 +184,15 @@ pub const Runtime = struct {
         );
         errdefer da_manager.deinit();
 
-        const pending_da_blocks = try allocator.create(PendingDaBlocks);
-        errdefer allocator.destroy(pending_da_blocks);
-        pending_da_blocks.* = PendingDaBlocks.init(allocator);
-        errdefer pending_da_blocks.deinit();
+        const pending_block_ingress = try allocator.create(PendingBlockIngress);
+        errdefer allocator.destroy(pending_block_ingress);
+        pending_block_ingress.* = PendingBlockIngress.init(allocator);
+        errdefer pending_block_ingress.deinit();
+
+        const payload_envelope_ingress = try allocator.create(PayloadEnvelopeIngress);
+        errdefer allocator.destroy(payload_envelope_ingress);
+        payload_envelope_ingress.* = PayloadEnvelopeIngress.init(allocator);
+        errdefer payload_envelope_ingress.deinit();
 
         const chain = try allocator.create(Chain);
         errdefer allocator.destroy(chain);
@@ -208,7 +215,8 @@ pub const Runtime = struct {
         chain.sync_committee_message_pool = sync_msg_pool;
         chain.kzg = kzg;
         chain.da_manager = da_manager;
-        chain.pending_da_blocks = pending_da_blocks;
+        chain.pending_block_ingress = pending_block_ingress;
+        chain.payload_envelope_ingress = payload_envelope_ingress;
 
         runtime.* = .{
             .allocator = allocator,
@@ -229,7 +237,8 @@ pub const Runtime = struct {
             .custody_columns = custody_columns,
             .kzg = kzg,
             .da_manager = da_manager,
-            .pending_da_blocks = pending_da_blocks,
+            .pending_block_ingress = pending_block_ingress,
+            .payload_envelope_ingress = payload_envelope_ingress,
             .chain = chain,
         };
 
@@ -272,8 +281,11 @@ pub const Runtime = struct {
         self.beacon_proposer_cache.deinit();
         self.allocator.destroy(self.beacon_proposer_cache);
 
-        self.pending_da_blocks.deinit();
-        self.allocator.destroy(self.pending_da_blocks);
+        self.pending_block_ingress.deinit();
+        self.allocator.destroy(self.pending_block_ingress);
+
+        self.payload_envelope_ingress.deinit();
+        self.allocator.destroy(self.payload_envelope_ingress);
 
         self.da_manager.deinit();
         self.allocator.destroy(self.da_manager);

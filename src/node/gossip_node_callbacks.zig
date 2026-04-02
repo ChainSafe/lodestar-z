@@ -56,7 +56,7 @@ pub fn importBlockFromGossip(ptr: *anyopaque, block_bytes: []const u8) anyerror!
         return err;
     };
     const ready = switch (accepted) {
-        .pending_data => return,
+        .pending_block_data => return,
         .ready => |ready| ready,
     };
 

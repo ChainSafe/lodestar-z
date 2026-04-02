@@ -16,6 +16,7 @@ const chain_effects = @import("effects.zig");
 const Query = @import("query.zig").Query;
 const produce_block = @import("produce_block.zig");
 const blob_kzg_verification = @import("blob_kzg_verification.zig");
+const payload_envelope_ingress_mod = @import("payload_envelope_ingress.zig");
 const ProducedBlockBody = produce_block.ProducedBlockBody;
 const ProposalSnapshot = produce_block.ProposalSnapshot;
 const PreparedProposalTemplate = produce_block.PreparedProposalTemplate;
@@ -74,8 +75,11 @@ fn prevRandaoForSlot(cached: *CachedBeaconState, slot: Slot) ![32]u8 {
 
 pub const ReadyBlockInput = chain_types.ReadyBlockInput;
 pub const RawBlockBytes = chain_types.RawBlockBytes;
+pub const PlannedBlockIngress = chain_types.PlannedBlockIngress;
 pub const BlockIngressReadiness = chain_types.BlockIngressReadiness;
+pub const BlockDataFetchPlan = chain_types.BlockDataFetchPlan;
 pub const BlockIngressResult = chain_types.BlockIngressResult;
+pub const PayloadEnvelopeFetchPlan = payload_envelope_ingress_mod.PayloadEnvelopeFetchPlan;
 
 pub const Service = struct {
     chain: *Chain,
@@ -131,6 +135,7 @@ pub const Service = struct {
             block_root,
             self.dataAvailabilityStatusForBlock(block_root, any_signed),
             0,
+            .none,
         ));
     }
 
@@ -256,22 +261,41 @@ pub const Service = struct {
         };
     }
 
+    pub fn planRawBlockIngress(
+        self: Service,
+        block_bytes: []const u8,
+        slot_hint: ?Slot,
+    ) !PlannedBlockIngress {
+        const slot = slot_hint orelse try readBlockSlot(block_bytes);
+        var any_signed = try deserializeRawBlockBytes(self.chain, slot, block_bytes);
+        errdefer any_signed.deinit(self.chain.allocator);
+        const block_root = try hashBlock(self.chain.allocator, any_signed);
+        return .{
+            .any_signed = any_signed,
+            .block_root = block_root,
+            .slot = slot,
+            .block_data_plan = try self.blockDataFetchPlan(self.chain.allocator, block_root, any_signed),
+        };
+    }
+
     pub fn acceptGossipBlock(
         self: Service,
         any_signed: fork_types.AnySignedBeaconBlock,
         seen_timestamp_sec: u64,
     ) !BlockIngressResult {
         const block_root = try hashBlock(self.chain.allocator, any_signed);
-        const da_status = pipelineDaStatus(self.chain, block_root, any_signed);
+        const readiness = self.ingressReadinessForBlock(block_root, any_signed);
+        const block_data_plan = try self.blockDataFetchPlan(self.chain.allocator, block_root, any_signed);
 
-        if (self.chain.pending_da_blocks) |pending| {
-            const ready = try pending.onBlock(
+        if (self.chain.pending_block_ingress) |pending| {
+            const ready = try pending.acceptBlock(
                 any_signed,
                 block_root,
                 any_signed.beaconBlock().slot(),
                 .gossip,
+                block_data_plan,
                 seen_timestamp_sec,
-                da_status,
+                readiness.da_status,
             );
             if (ready) |block| return .{ .ready = block };
             if (self.chain.da_manager) |dam| {
@@ -280,10 +304,10 @@ pub const Service = struct {
                     return err;
                 };
             }
-            return .{ .pending_data = block_root };
+            return .{ .pending_block_data = block_root };
         }
 
-        return .{ .ready = readyBlockInput(any_signed, .gossip, block_root, da_status, seen_timestamp_sec) };
+        return .{ .ready = readyBlockInput(any_signed, .gossip, block_root, readiness.da_status, seen_timestamp_sec, block_data_plan) };
     }
 
     pub fn bootstrapFromGenesis(
@@ -414,7 +438,7 @@ pub const Service = struct {
     ) !?ReadyBlockInput {
         try self.chain.importBlobSidecar(root, data);
         const dam = self.chain.da_manager orelse return null;
-        const pending = self.chain.pending_da_blocks orelse return null;
+        const pending = self.chain.pending_block_ingress orelse return null;
 
         var available = false;
         for (blob_indices) |blob_index| {
@@ -422,7 +446,7 @@ pub const Service = struct {
         }
 
         if (!available) return null;
-        return pending.onDataAvailable(root, .available);
+        return pending.resolveAttachments(root, .available);
     }
 
     pub fn ingestBlobSidecar(
@@ -434,9 +458,9 @@ pub const Service = struct {
     ) !?ReadyBlockInput {
         try self.chain.importBlobSidecar(root, data);
         const dam = self.chain.da_manager orelse return null;
-        const pending = self.chain.pending_da_blocks orelse return null;
+        const pending = self.chain.pending_block_ingress orelse return null;
         if (!dam.onBlobSidecar(root, blob_index, slot)) return null;
-        return pending.onDataAvailable(root, .available);
+        return pending.resolveAttachments(root, .available);
     }
 
     pub fn importDataColumnSidecar(
@@ -457,9 +481,24 @@ pub const Service = struct {
     ) !?ReadyBlockInput {
         try self.chain.importDataColumnSidecar(root, column_index, data);
         const dam = self.chain.da_manager orelse return null;
-        const pending = self.chain.pending_da_blocks orelse return null;
+        const pending = self.chain.pending_block_ingress orelse return null;
         if (!dam.onDataColumnSidecar(root, column_index, slot)) return null;
-        return pending.onDataAvailable(root, .available);
+        return pending.resolveAttachments(root, .available);
+    }
+
+    pub fn trackPayloadEnvelope(
+        self: Service,
+        block_root: Root,
+        slot: Slot,
+        fetch_plan: PayloadEnvelopeFetchPlan,
+    ) !void {
+        const ingress = self.chain.payload_envelope_ingress orelse return error.MissingPayloadEnvelopeIngress;
+        try ingress.putOrReplace(block_root, slot, fetch_plan);
+    }
+
+    pub fn clearPayloadEnvelope(self: Service, block_root: Root) void {
+        const ingress = self.chain.payload_envelope_ingress orelse return;
+        ingress.remove(block_root);
     }
 
     pub fn dataAvailabilityStatusForBlock(
@@ -476,6 +515,33 @@ pub const Service = struct {
         any_signed: fork_types.AnySignedBeaconBlock,
     ) BlockIngressReadiness {
         return pipelineIngressReadiness(self.chain, block_root, any_signed);
+    }
+
+    pub fn blockDataFetchPlan(
+        self: Service,
+        allocator: std.mem.Allocator,
+        block_root: Root,
+        any_signed: fork_types.AnySignedBeaconBlock,
+    ) !BlockDataFetchPlan {
+        return switch (self.ingressReadinessForBlock(block_root, any_signed).data_requirement) {
+            .none => .none,
+            .blobs => blk: {
+                const missing = try self.missingBlobSidecars(allocator, block_root);
+                if (missing.len == 0) {
+                    allocator.free(missing);
+                    break :blk .{ .blobs = &[_]u64{} };
+                }
+                break :blk .{ .blobs = missing };
+            },
+            .columns => blk: {
+                const missing = try self.missingDataColumns(allocator, block_root);
+                if (missing.len == 0) {
+                    allocator.free(missing);
+                    break :blk .{ .columns = &[_]u64{} };
+                }
+                break :blk .{ .columns = missing };
+            },
+        };
     }
 
     pub fn missingBlobSidecars(
@@ -769,6 +835,7 @@ fn readyBlockInput(
     block_root: Root,
     da_status: chain_types.DataAvailabilityStatus,
     seen_timestamp_sec: u64,
+    block_data_plan: chain_types.BlockDataFetchPlan,
 ) ReadyBlockInput {
     return .{
         .block = any_signed,
@@ -776,6 +843,7 @@ fn readyBlockInput(
         .block_root = block_root,
         .slot = any_signed.beaconBlock().slot(),
         .da_status = da_status,
+        .block_data_plan = block_data_plan,
         .seen_timestamp_sec = seen_timestamp_sec,
     };
 }
@@ -799,7 +867,7 @@ fn pipelineIngressReadiness(
     const blob_commitments = block.beaconBlockBody().blobKzgCommitments() catch {
         return .{
             .da_status = .not_required,
-            .attachment_requirement = .none,
+            .data_requirement = .none,
         };
     };
     const blob_count: u32 = @intCast(blob_commitments.items.len);
@@ -807,17 +875,20 @@ fn pipelineIngressReadiness(
     if (fork.lt(.deneb)) {
         return .{
             .da_status = .not_required,
-            .attachment_requirement = .none,
+            .data_requirement = .none,
         };
     }
     if (blob_count == 0) {
         return .{
             .da_status = .available,
-            .attachment_requirement = .none,
+            .data_requirement = .none,
         };
     }
 
-    const attachment_requirement: chain_types.BlockAttachmentRequirement = if (fork.gte(.fulu))
+    // This is intentionally the pre-import beacon-block data path only.
+    // When Gloas lands, separated execution payload envelopes belong in the
+    // payload-envelope ingress subsystem, not as another block attachment here.
+    const data_requirement: chain_types.BlockDataRequirement = if (fork.gte(.fulu))
         .columns
     else
         .blobs;
@@ -827,7 +898,7 @@ fn pipelineIngressReadiness(
             if (slot < dam.daWindowMinSlot(wall_slot)) {
                 return .{
                     .da_status = .out_of_range,
-                    .attachment_requirement = .none,
+                    .data_requirement = .none,
                 };
             }
         }
@@ -839,12 +910,12 @@ fn pipelineIngressReadiness(
         };
         return .{
             .da_status = da_status,
-            .attachment_requirement = if (da_status == .pending) attachment_requirement else .none,
+            .data_requirement = if (da_status == .pending) data_requirement else .none,
         };
     }
 
     return .{
         .da_status = .pending,
-        .attachment_requirement = attachment_requirement,
+        .data_requirement = data_requirement,
     };
 }

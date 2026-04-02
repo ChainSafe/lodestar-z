@@ -25,6 +25,8 @@ pub const Root = [32]u8;
 pub const BlobState = struct {
     /// Number of blobs expected (from block's blob_kzg_commitments length).
     expected_count: u32,
+    /// Whether the block metadata has been registered yet.
+    has_block_metadata: bool,
     /// Slot of the block (for pruning).
     slot: u64,
     /// Bitset tracking which blob indices have been received.
@@ -35,6 +37,17 @@ pub const BlobState = struct {
     pub fn init(expected_count: u32, slot: u64) BlobState {
         return .{
             .expected_count = expected_count,
+            .has_block_metadata = true,
+            .slot = slot,
+            .received = std.StaticBitSet(MAX_BLOBS_PER_BLOCK).initEmpty(),
+            .verified = std.StaticBitSet(MAX_BLOBS_PER_BLOCK).initEmpty(),
+        };
+    }
+
+    pub fn initPending(slot: u64) BlobState {
+        return .{
+            .expected_count = 0,
+            .has_block_metadata = false,
             .slot = slot,
             .received = std.StaticBitSet(MAX_BLOBS_PER_BLOCK).initEmpty(),
             .verified = std.StaticBitSet(MAX_BLOBS_PER_BLOCK).initEmpty(),
@@ -43,6 +56,7 @@ pub const BlobState = struct {
 
     /// Check if all expected blobs have been received.
     pub fn isComplete(self: *const BlobState) bool {
+        if (!self.has_block_metadata) return false;
         for (0..self.expected_count) |i| {
             if (!self.received.isSet(i)) return false;
         }
@@ -90,21 +104,29 @@ pub const BlobTracker = struct {
     }
 
     /// Register a new block that expects `commitment_count` blobs.
-    /// If already tracked, this is a no-op.
+    /// If we already saw sidecars for this root, complete the metadata in place.
     pub fn onBlock(self: *BlobTracker, block_root: Root, commitment_count: u32, slot: u64) void {
         const gop = self.tracking.getOrPut(block_root) catch return;
         if (!gop.found_existing) {
             gop.value_ptr.* = BlobState.init(commitment_count, slot);
+            return;
         }
+        gop.value_ptr.expected_count = commitment_count;
+        gop.value_ptr.has_block_metadata = true;
+        gop.value_ptr.slot = slot;
     }
 
     /// Mark a blob index as received for a block.
-    pub fn onBlob(self: *BlobTracker, block_root: Root, index: u64) void {
-        if (self.tracking.getPtr(block_root)) |state| {
-            if (index < MAX_BLOBS_PER_BLOCK) {
-                state.received.set(index);
-            }
+    /// If the block has not been registered yet, create placeholder tracking so
+    /// early sidecars are visible once the block arrives.
+    pub fn onBlob(self: *BlobTracker, block_root: Root, index: u64, slot: u64) void {
+        if (index >= MAX_BLOBS_PER_BLOCK) return;
+
+        const gop = self.tracking.getOrPut(block_root) catch return;
+        if (!gop.found_existing) {
+            gop.value_ptr.* = BlobState.initPending(slot);
         }
+        gop.value_ptr.received.set(index);
     }
 
     /// Mark a blob index as KZG-verified.
@@ -199,8 +221,8 @@ test "BlobTracker: basic tracking and completion" {
     try std.testing.expect(!tracker.isComplete(root));
 
     // Receive blobs 0 and 2.
-    tracker.onBlob(root, 0);
-    tracker.onBlob(root, 2);
+    tracker.onBlob(root, 0, 100);
+    tracker.onBlob(root, 2, 100);
     try std.testing.expect(!tracker.isComplete(root));
 
     // Check missing.
@@ -210,7 +232,7 @@ test "BlobTracker: basic tracking and completion" {
     try std.testing.expectEqual(@as(u64, 1), missing[0]);
 
     // Receive blob 1 → complete.
-    tracker.onBlob(root, 1);
+    tracker.onBlob(root, 1, 100);
     try std.testing.expect(tracker.isComplete(root));
 }
 
@@ -265,8 +287,8 @@ test "BlobTracker: verification tracking" {
     const root = [_]u8{0xDD} ** 32;
     tracker.onBlock(root, 2, 100);
 
-    tracker.onBlob(root, 0);
-    tracker.onBlob(root, 1);
+    tracker.onBlob(root, 0, 100);
+    tracker.onBlob(root, 1, 100);
 
     const state = tracker.getState(root).?;
     try std.testing.expect(!state.isVerified());
@@ -276,4 +298,24 @@ test "BlobTracker: verification tracking" {
 
     const state2 = tracker.getState(root).?;
     try std.testing.expect(state2.isVerified());
+}
+
+test "BlobTracker: blobs received before block are retained" {
+    const allocator = std.testing.allocator;
+    var tracker = BlobTracker.init(allocator);
+    defer tracker.deinit();
+
+    const root = [_]u8{0xEF} ** 32;
+
+    tracker.onBlob(root, 0, 120);
+    tracker.onBlob(root, 1, 120);
+
+    try std.testing.expect(!tracker.isComplete(root));
+
+    tracker.onBlock(root, 2, 120);
+    try std.testing.expect(tracker.isComplete(root));
+
+    const missing = try tracker.getMissing(allocator, root);
+    defer allocator.free(missing);
+    try std.testing.expectEqual(@as(usize, 0), missing.len);
 }

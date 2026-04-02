@@ -76,6 +76,11 @@ pub const SyncStatus = chain_types.SyncStatus;
 pub const NotificationSink = chain_types.NotificationSink;
 pub const ChainNotification = chain_types.ChainNotification;
 
+/// Pending attachment ingress is driven by slot ticks, not per-message timers.
+/// Keep the current and previous slot so late-but-still-reasonable sidecars can
+/// complete a block, while bounding memory if the attachments never arrive.
+const PENDING_INGRESS_RETENTION_SLOTS: u64 = 1;
+
 const AnySignedBeaconBlock = fork_types.AnySignedBeaconBlock;
 const sync_contribution_pool_mod = @import("sync_contribution_pool.zig");
 const SyncContributionAndProofPool = sync_contribution_pool_mod.SyncContributionAndProofPool;
@@ -87,8 +92,10 @@ const ValidatorMonitor = validator_monitor_mod.ValidatorMonitor;
 const DataAvailabilityManager = da_mod.DataAvailabilityManager;
 const reprocess_mod = @import("reprocess.zig");
 const ReprocessQueue = reprocess_mod.ReprocessQueue;
-const pending_da_blocks_mod = @import("pending_da_blocks.zig");
-const PendingDaBlocks = pending_da_blocks_mod.PendingDaBlocks;
+const pending_block_ingress_mod = @import("block_ingress.zig");
+const PendingBlockIngress = pending_block_ingress_mod.PendingBlockIngress;
+const payload_envelope_ingress_mod = @import("payload_envelope_ingress.zig");
+const PayloadEnvelopeIngress = payload_envelope_ingress_mod.PayloadEnvelopeIngress;
 const kzg_mod = @import("kzg");
 const Kzg = kzg_mod.Kzg;
 
@@ -141,8 +148,10 @@ pub const Chain = struct {
     /// for DA completeness before final import. If DA is pending, the block
     /// is queued for reprocessing when data arrives.
     da_manager: ?*DataAvailabilityManager,
-    /// Pending blocks whose DA is incomplete.
-    pending_da_blocks: ?*PendingDaBlocks,
+    /// Pending block ingress whose required attachments are incomplete.
+    pending_block_ingress: ?*PendingBlockIngress,
+    /// Pending second-stage payload-envelope ingress for separated payload forks.
+    payload_envelope_ingress: ?*PayloadEnvelopeIngress,
 
     /// Shared KZG context for blob / column verification.
     /// Owned by chain.Runtime.
@@ -214,7 +223,8 @@ pub const Chain = struct {
             .head_tracker = head_tracker,
             .beacon_proposer_cache = beacon_proposer_cache,
             .da_manager = null,
-            .pending_da_blocks = null,
+            .pending_block_ingress = null,
+            .payload_envelope_ingress = null,
             .kzg = null,
             .reprocess_queue = null,
             .sync_contribution_pool = null,
@@ -595,6 +605,20 @@ pub const Chain = struct {
         // called every slot to bound memory.
         self.op_pool.agg_attestation_pool.pruneBySlot(slot);
         self.op_pool.attestation_pool.prune(slot);
+
+        const pending_min_slot = if (slot > PENDING_INGRESS_RETENTION_SLOTS)
+            slot - PENDING_INGRESS_RETENTION_SLOTS
+        else
+            0;
+        if (self.pending_block_ingress) |pending| {
+            _ = pending.pruneBeforeSlot(pending_min_slot);
+        }
+        if (self.da_manager) |dam| {
+            dam.prunePendingBeforeSlot(pending_min_slot);
+        }
+        if (self.payload_envelope_ingress) |ingress| {
+            _ = ingress.pruneBeforeSlot(pending_min_slot);
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -643,8 +667,14 @@ pub const Chain = struct {
         // Prune slot_roots in HeadTracker — remove entries for pre-finalized slots.
         // This prevents the slot→root map from growing unboundedly over time.
         const finalized_slot = finalized_epoch * preset.SLOTS_PER_EPOCH;
-        if (self.pending_da_blocks) |pending| {
-            pending.pruneBeforeSlot(finalized_slot);
+        if (self.pending_block_ingress) |pending| {
+            _ = pending.pruneBeforeSlot(finalized_slot);
+        }
+        if (self.da_manager) |dam| {
+            dam.prunePendingBeforeSlot(finalized_slot);
+        }
+        if (self.payload_envelope_ingress) |ingress| {
+            _ = ingress.pruneBeforeSlot(finalized_slot);
         }
         self.head_tracker.pruneBelow(finalized_slot);
 

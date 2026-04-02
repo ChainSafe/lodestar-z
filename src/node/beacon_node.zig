@@ -380,34 +380,36 @@ pub const BeaconNode = struct {
         ready: chain_mod.ReadyBlockInput,
         raw_block_bytes: ?[]const u8,
     ) !?ImportResult {
-        const result = self.importReadyBlock(ready) catch |err| {
+        var owned_ready = ready;
+
+        const result = self.importReadyBlock(owned_ready) catch |err| {
             switch (err) {
                 error.UnknownParentBlock => {
                     if (raw_block_bytes) |bytes| {
-                        self.queueOrphanBlock(ready.block, bytes);
+                        self.queueOrphanBlock(owned_ready.block, bytes);
                     } else {
-                        const serialized = ready.block.serialize(self.allocator) catch |serialize_err| {
-                            ready.block.deinit(self.allocator);
+                        const serialized = owned_ready.block.serialize(self.allocator) catch |serialize_err| {
+                            owned_ready.deinit(self.allocator);
                             return serialize_err;
                         };
                         defer self.allocator.free(serialized);
-                        self.queueOrphanBlock(ready.block, serialized);
+                        self.queueOrphanBlock(owned_ready.block, serialized);
                     }
-                    ready.block.deinit(self.allocator);
+                    owned_ready.deinit(self.allocator);
                     return null;
                 },
                 error.BlockAlreadyKnown, error.BlockAlreadyFinalized => {
-                    ready.block.deinit(self.allocator);
+                    owned_ready.deinit(self.allocator);
                     return null;
                 },
                 else => {
-                    ready.block.deinit(self.allocator);
+                    owned_ready.deinit(self.allocator);
                     return err;
                 },
             }
         };
 
-        ready.block.deinit(self.allocator);
+        owned_ready.deinit(self.allocator);
         self.processPendingChildren(result.block_root);
         return result;
     }
@@ -961,7 +963,7 @@ pub fn processorHandlerCallback(item: WorkItem, context: *anyopaque) void {
             };
 
             const ready = switch (accepted) {
-                .pending_data => return,
+                .pending_block_data => return,
                 .ready => |ready| ready,
             };
 

@@ -38,7 +38,14 @@ pub const ReadyBlockInput = struct {
     block_root: Root,
     slot: Slot,
     da_status: DataAvailabilityStatus,
+    block_data_plan: BlockDataFetchPlan = .none,
     seen_timestamp_sec: u64 = 0,
+
+    pub fn deinit(self: *ReadyBlockInput, allocator: std.mem.Allocator) void {
+        self.block_data_plan.deinit(allocator);
+        self.block.deinit(allocator);
+        self.* = undefined;
+    }
 };
 
 pub const RawBlockBytes = struct {
@@ -46,22 +53,50 @@ pub const RawBlockBytes = struct {
     bytes: []const u8,
 };
 
-pub const BlockAttachmentRequirement = enum {
+pub const PlannedBlockIngress = struct {
+    any_signed: fork_types.AnySignedBeaconBlock,
+    block_root: Root,
+    slot: Slot,
+    block_data_plan: BlockDataFetchPlan,
+
+    pub fn deinit(self: *PlannedBlockIngress, allocator: std.mem.Allocator) void {
+        self.block_data_plan.deinit(allocator);
+        self.any_signed.deinit(allocator);
+        self.* = undefined;
+    }
+};
+
+pub const BlockDataRequirement = enum {
+    /// Attachments required before the beacon block itself can be imported.
+    /// Gloas payload envelopes are modeled separately from block ingress.
     none,
     blobs,
     columns,
-    /// Future-separated execution payload plus custody data ingress.
-    payload_and_columns,
 };
 
 pub const BlockIngressReadiness = struct {
     da_status: DataAvailabilityStatus,
-    attachment_requirement: BlockAttachmentRequirement,
+    data_requirement: BlockDataRequirement,
+};
+
+pub const BlockDataFetchPlan = union(enum) {
+    none,
+    blobs: []const u64,
+    columns: []const u64,
+
+    pub fn deinit(self: *BlockDataFetchPlan, allocator: std.mem.Allocator) void {
+        switch (self.*) {
+            .none => {},
+            .blobs => |indices| if (indices.len > 0) allocator.free(indices),
+            .columns => |indices| if (indices.len > 0) allocator.free(indices),
+        }
+        self.* = undefined;
+    }
 };
 
 pub const BlockIngressResult = union(enum) {
     ready: ReadyBlockInput,
-    pending_data: Root,
+    pending_block_data: Root,
 };
 
 // ---------------------------------------------------------------------------

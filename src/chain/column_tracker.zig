@@ -84,16 +84,22 @@ pub const ColumnTracker = struct {
         const gop = self.tracking.getOrPut(block_root) catch return;
         if (!gop.found_existing) {
             gop.value_ptr.* = ColumnState.init(slot);
+            return;
         }
+        gop.value_ptr.slot = slot;
     }
 
     /// Mark a column as received for a block.
-    pub fn onColumn(self: *ColumnTracker, block_root: Root, column_index: u64) void {
-        if (self.tracking.getPtr(block_root)) |state| {
-            if (column_index < NUMBER_OF_COLUMNS) {
-                state.received.set(column_index);
-            }
+    /// If the block has not been registered yet, create placeholder tracking so
+    /// early sidecars are visible once the block arrives.
+    pub fn onColumn(self: *ColumnTracker, block_root: Root, column_index: u64, slot: u64) void {
+        if (column_index >= NUMBER_OF_COLUMNS) return;
+
+        const gop = self.tracking.getOrPut(block_root) catch return;
+        if (!gop.found_existing) {
+            gop.value_ptr.* = ColumnState.init(slot);
         }
+        gop.value_ptr.received.set(column_index);
     }
 
     /// Mark a column as cell-proof verified.
@@ -200,12 +206,12 @@ test "ColumnTracker: custody completion" {
 
     try std.testing.expect(!tracker.custodyComplete(root));
 
-    tracker.onColumn(root, 10);
-    tracker.onColumn(root, 20);
-    tracker.onColumn(root, 30);
+    tracker.onColumn(root, 10, 100);
+    tracker.onColumn(root, 20, 100);
+    tracker.onColumn(root, 30, 100);
     try std.testing.expect(!tracker.custodyComplete(root));
 
-    tracker.onColumn(root, 40);
+    tracker.onColumn(root, 40, 100);
     try std.testing.expect(tracker.custodyComplete(root));
 }
 
@@ -221,7 +227,7 @@ test "ColumnTracker: non-custody columns don't affect custody completion" {
 
     for (0..NUMBER_OF_COLUMNS) |i| {
         if (i != 5 and i != 15) {
-            tracker.onColumn(root, @intCast(i));
+            tracker.onColumn(root, @intCast(i), 50);
         }
     }
     try std.testing.expect(!tracker.custodyComplete(root));
@@ -238,11 +244,11 @@ test "ColumnTracker: reconstruction threshold" {
     tracker.onBlock(root, 100);
 
     for (0..RECONSTRUCTION_THRESHOLD - 1) |i| {
-        tracker.onColumn(root, @intCast(i));
+        tracker.onColumn(root, @intCast(i), 100);
     }
     try std.testing.expect(!tracker.canReconstruct(root));
 
-    tracker.onColumn(root, @intCast(RECONSTRUCTION_THRESHOLD - 1));
+    tracker.onColumn(root, @intCast(RECONSTRUCTION_THRESHOLD - 1), 100);
     try std.testing.expect(tracker.canReconstruct(root));
 }
 
@@ -256,7 +262,7 @@ test "ColumnTracker: getMissingCustody" {
     const root = [_]u8{0xDD} ** 32;
     tracker.onBlock(root, 200);
 
-    tracker.onColumn(root, 7);
+    tracker.onColumn(root, 7, 200);
 
     const missing = try tracker.getMissingCustody(allocator, root);
     defer allocator.free(missing);
@@ -296,4 +302,25 @@ test "ColumnTracker: unknown block returns all custody as missing" {
     defer allocator.free(missing);
 
     try std.testing.expectEqual(@as(usize, 3), missing.len);
+}
+
+test "ColumnTracker: columns received before block are retained" {
+    const allocator = std.testing.allocator;
+
+    const custody = [_]u64{ 5, 10 };
+    var tracker = ColumnTracker.init(allocator, &custody);
+    defer tracker.deinit();
+
+    const root = [_]u8{0xF0} ** 32;
+    tracker.onColumn(root, 5, 300);
+    tracker.onColumn(root, 10, 300);
+
+    try std.testing.expect(tracker.custodyComplete(root));
+
+    tracker.onBlock(root, 300);
+    try std.testing.expect(tracker.custodyComplete(root));
+
+    const missing = try tracker.getMissingCustody(allocator, root);
+    defer allocator.free(missing);
+    try std.testing.expectEqual(@as(usize, 0), missing.len);
 }
