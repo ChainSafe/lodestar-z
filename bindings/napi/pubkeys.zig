@@ -147,8 +147,6 @@ pub fn load(file_path: js.String) !void {
 /// JS: pubkeys.getIndex(pubkeyBytes) → number | null
 /// Returns the index for a 48-byte pubkey, or undefined if not found.
 pub fn getIndex(pubkey: js.Uint8Array) !js.Value {
-    std.debug.assert(pubkey.len == 48);
-
     if (!state.initialized) {
         return error.PubkeyIndexNotInitialized;
     }
