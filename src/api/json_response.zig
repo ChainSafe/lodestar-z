@@ -193,6 +193,7 @@ fn serializeAnyBlock(alloc: Allocator, stream: *std.json.Stringify, any_block: a
         .blinded_electra => |blk| try ct.electra.SignedBlindedBeaconBlock.serializeIntoJson(alloc, stream, blk),
         .full_fulu => |blk| try ct.fulu.SignedBeaconBlock.serializeIntoJson(alloc, stream, blk),
         .blinded_fulu => |blk| try ct.fulu.SignedBlindedBeaconBlock.serializeIntoJson(alloc, stream, blk),
+        .full_gloas => |blk| try ct.gloas.SignedBeaconBlock.serializeIntoJson(alloc, stream, blk),
     }
 }
 

@@ -20,6 +20,20 @@ const ValidatorIndex = primitives.ValidatorIndex.Type;
 
 const ZERO_HASH = constants.ZERO_HASH;
 
+pub const VariantIndexList = struct {
+    buf: [3]u32 = undefined,
+    len: usize = 0,
+
+    pub fn appendAssumeCapacity(self: *VariantIndexList, value: u32) void {
+        self.buf[self.len] = value;
+        self.len += 1;
+    }
+
+    pub fn get(self: *const VariantIndexList, index: usize) u32 {
+        return self.buf[index];
+    }
+};
+
 // ── Type definitions (formerly proto_node.zig) ──
 
 /// Execution status of a block in fork choice.
@@ -193,6 +207,12 @@ pub const ProtoBlock = struct {
     parent_block_hash: ?Root = null,
     /// Payload resolution status (Gloas ePBS). Pre-Gloas blocks are always .full.
     payload_status: PayloadStatus = .full,
+
+    /// Returns true if this is a Gloas (ePBS) block.
+    /// Gloas blocks have a non-null parent_block_hash.
+    pub fn isGloasBlock(self: ProtoBlock) bool {
+        return self.parent_block_hash != null;
+    }
 };
 
 /// A node in the ProtoArray DAG.
@@ -287,6 +307,12 @@ pub const ProtoNode = struct {
         }
         return block;
     }
+
+    /// Returns true if this is a Gloas (ePBS) block.
+    /// Gloas blocks have a non-null parent_block_hash.
+    pub fn isGloasBlock(self: ProtoNode) bool {
+        return self.parent_block_hash != null;
+    }
 };
 
 /// Response from the execution layer about a payload's validity.
@@ -348,36 +374,27 @@ pub const InvalidAttestationCode = enum {
 };
 
 /// High-level fork choice errors.
-pub const ForkChoiceError = error{
-    // InvalidAttestation inner codes (TS: InvalidAttestationCode)
-    InvalidAttestationEmptyAggregationBitfield,
-    InvalidAttestationUnknownHeadBlock,
-    InvalidAttestationBadTargetEpoch,
-    InvalidAttestationUnknownTargetRoot,
-    InvalidAttestationFutureEpoch,
-    InvalidAttestationPastEpoch,
-    InvalidAttestationInvalidTarget,
-    InvalidAttestationAttestsToFutureBlock,
-    InvalidAttestationFutureSlot,
-    InvalidAttestationInvalidDataIndex,
-    // InvalidBlock inner codes (TS: InvalidBlockCode)
-    InvalidBlockUnknownParent,
-    InvalidBlockFutureSlot,
-    InvalidBlockFinalizedSlot,
-    InvalidBlockNotFinalizedDescendant,
-    // Other errors
-    ProtoArrayErr,
-    InvalidProtoArrayBytes,
+pub const ProtoArrayError = error{
+    FinalizedNodeUnknown,
+    JustifiedNodeUnknown,
+    InvalidFinalizedRootChange,
+    InvalidNodeIndex,
+    InvalidParentIndex,
+    InvalidBestChildIndex,
+    InvalidJustifiedIndex,
+    InvalidBestDescendantIndex,
+    DeltaOverflow,
+    IndexOverflow,
+    RevertedFinalizedEpoch,
+    InvalidBestNode,
+    InvalidBlockExecutionStatus,
+    InvalidJustifiedExecutionStatus,
+    InvalidLVHExecutionResponse,
+    UnknownParentBlock,
+    UnknownBlock,
+    PreGloasBlock,
     MissingProtoArrayBlock,
     UnknownAncestor,
-    InconsistentOnTick,
-    BeaconStateErr,
-    AttemptToRevertJustification,
-    ForkChoiceStoreErr,
-    UnableToSetJustifiedCheckpoint,
-    AfterBlockFailed,
-    GenesisBlockNotAvailable,
-    DependentRootNotFound,
 };
 const GENESIS_EPOCH = preset_mod.GENESIS_EPOCH;
 
@@ -451,8 +468,8 @@ pub const VariantIndices = union(enum) {
     }
 
     /// Get all valid indices as a bounded array (1 for pre-Gloas, 2-3 for Gloas).
-    pub fn allIndices(self: VariantIndices) std.BoundedArray(u32, 3) {
-        var result = std.BoundedArray(u32, 3){};
+    pub fn allIndices(self: VariantIndices) VariantIndexList {
+        var result = VariantIndexList{};
         switch (self) {
             .pre_gloas => |idx| result.appendAssumeCapacity(idx),
             .gloas => |g| {
@@ -463,32 +480,6 @@ pub const VariantIndices = union(enum) {
         }
         return result;
     }
-};
-
-// ── ProtoArray errors ──
-
-/// Errors from the ProtoArray (low-level DAG operations).
-pub const ProtoArrayError = error{
-    FinalizedNodeUnknown,
-    JustifiedNodeUnknown,
-    InvalidFinalizedRootChange,
-    InvalidNodeIndex,
-    InvalidParentIndex,
-    InvalidBestChildIndex,
-    InvalidJustifiedIndex,
-    InvalidBestDescendantIndex,
-    DeltaOverflow,
-    IndexOverflow,
-    RevertedFinalizedEpoch,
-    InvalidBestNode,
-    InvalidBlockExecutionStatus,
-    InvalidJustifiedExecutionStatus,
-    InvalidLVHExecutionResponse,
-    UnknownParentBlock,
-    UnknownBlock,
-    PreGloasBlock,
-    MissingProtoArrayBlock,
-    UnknownAncestor,
 };
 
 // ── ProtoArray ──
@@ -533,23 +524,24 @@ pub const ProtoArray = struct {
         score: u64,
     };
 
-    pub fn init(
+    fn init(
+        self: *ProtoArray,
         justified_epoch: Epoch,
         justified_root: Root,
         finalized_epoch: Epoch,
         finalized_root: Root,
         prune_threshold: u32,
-    ) ProtoArray {
-        return .{
+    ) void {
+        self.* = .{
             .nodes = .empty,
-            .indices = .{},
+            .indices = .empty,
             .prune_threshold = prune_threshold,
             .justified_epoch = justified_epoch,
             .justified_root = justified_root,
             .finalized_epoch = finalized_epoch,
             .finalized_root = finalized_root,
             .previous_proposer_boost = null,
-            .ptc_votes = .{},
+            .ptc_votes = .empty,
             .lvh_error = null,
         };
     }
@@ -564,26 +556,25 @@ pub const ProtoArray = struct {
     /// Create a ProtoArray from a genesis/anchor block.
     /// The block's block_root is used as its target_root since it lies on an epoch boundary.
     pub fn initialize(
+        self: *ProtoArray,
         allocator: Allocator,
         block: ProtoBlock,
         current_slot: Slot,
-    ) (Allocator.Error || ProtoArrayError)!ProtoArray {
-        var proto_array = ProtoArray.init(
+    ) (Allocator.Error || ProtoArrayError)!void {
+        self.init(
             block.justified_epoch,
             block.justified_root,
             block.finalized_epoch,
             block.finalized_root,
             DEFAULT_PRUNE_THRESHOLD,
         );
-        errdefer proto_array.deinit(allocator);
+        errdefer self.deinit(allocator);
 
         // Use block_root as target_root — genesis/anchor always sits on an epoch boundary.
         var anchor = block;
         anchor.target_root = block.block_root;
 
-        try proto_array.onBlock(allocator, anchor, current_slot, null);
-
-        return proto_array;
+        try self.onBlock(allocator, anchor, current_slot, null);
     }
 
     // ── Accessors ──
@@ -646,7 +637,7 @@ pub const ProtoArray = struct {
             return error.InvalidBlockExecutionStatus;
         }
 
-        if (block.parent_block_hash != null) {
+        if (block.isGloasBlock()) {
             try self.onBlockGloas(allocator, block, current_slot, proposer_boost_root);
         } else {
             try self.onBlockPreGloas(allocator, block, current_slot, proposer_boost_root);
@@ -662,7 +653,7 @@ pub const ProtoArray = struct {
     ) (Allocator.Error || ProtoArrayError)!void {
         var node = ProtoNode.fromBlock(block);
         assert(node.payload_status == .full);
-        assert(block.parent_block_hash == null);
+        assert(!block.isGloasBlock());
 
         // Look up parent index.
         node.parent = self.getNodeIndexByRootAndStatus(block.parent_root, .full);
@@ -676,7 +667,7 @@ pub const ProtoArray = struct {
         self.indices.putAssumeCapacity(block.block_root, .{ .pre_gloas = node_index });
 
         if (node.parent) |parent_index| {
-            self.maybeUpdateBestChildAndDescendant(parent_index, node_index, current_slot, proposer_boost_root);
+            try self.maybeUpdateBestChildAndDescendant(parent_index, node_index, current_slot, proposer_boost_root);
 
             if (block.extra_meta.executionStatus() == .valid) {
                 try self.propagateValidExecutionStatusByIndex(parent_index);
@@ -694,7 +685,7 @@ pub const ProtoArray = struct {
         // Gloas: Create PENDING + EMPTY nodes with correct parent relationships
         // Parent of new PENDING node = parent block's EMPTY or FULL (inter-block edge)
         // Parent of new EMPTY node = own PENDING node (intra-block edge)
-        assert(block.parent_block_hash != null);
+        assert(block.isGloasBlock());
         assert(block.extra_meta.executionStatus() != .invalid);
 
         // For fork transition: if parent is pre-Gloas, point to parent's FULL
@@ -710,7 +701,10 @@ pub const ProtoArray = struct {
                 .gloas => |g| blk: {
                     const parent_status = try self.getParentPayloadStatus(block.parent_root, block.parent_block_hash);
                     break :blk switch (parent_status) {
-                        .full => g.full orelse g.empty,
+                        // If getParentPayloadStatus returns .full, the FULL variant
+                        // must exist: getNodeByRootAndBlockHash only matches a FULL
+                        // node when g.full is set (written by onExecutionPayload).
+                        .full => g.full.?,
                         .empty => g.empty,
                         .pending => g.pending,
                     };
@@ -749,7 +743,7 @@ pub const ProtoArray = struct {
 
         // Update bestChild pointers
         if (parent_index) |pi| {
-            self.maybeUpdateBestChildAndDescendant(pi, pending_index, current_slot, proposer_boost_root);
+            try self.maybeUpdateBestChildAndDescendant(pi, pending_index, current_slot, proposer_boost_root);
 
             if (block.extra_meta.executionStatus() == .valid) {
                 try self.propagateValidExecutionStatusByIndex(pi);
@@ -757,7 +751,7 @@ pub const ProtoArray = struct {
         }
 
         // Update bestChild for PENDING → EMPTY edge
-        self.maybeUpdateBestChildAndDescendant(pending_index, empty_index, current_slot, proposer_boost_root);
+        try self.maybeUpdateBestChildAndDescendant(pending_index, empty_index, current_slot, proposer_boost_root);
 
         // Initialize PTC votes for this block (all false initially)
         // Spec: gloas/fork-choice.md#modified-on_block
@@ -780,6 +774,7 @@ pub const ProtoArray = struct {
         execution_payload_number: u64,
         execution_payload_state_root: Root,
         proposer_boost_root: ?Root,
+        execution_status: ExecutionStatus,
     ) (Allocator.Error || ProtoArrayError)!void {
         const vi_ptr = self.indices.getPtr(block_root) orelse return error.UnknownBlock;
 
@@ -801,7 +796,8 @@ pub const ProtoArray = struct {
                 // data_availability_status inherited from the PENDING node.
                 full_node.extra_meta.post_merge.execution_payload_block_hash = execution_payload_block_hash;
                 full_node.extra_meta.post_merge.execution_payload_number = execution_payload_number;
-                full_node.extra_meta.post_merge.execution_status = .valid;
+                // TODO GLOAS: handle optimistic sync
+                full_node.extra_meta.post_merge.execution_status = execution_status;
                 full_node.state_root = execution_payload_state_root;
 
                 const full_index: u32 = @intCast(self.nodes.items.len);
@@ -809,7 +805,7 @@ pub const ProtoArray = struct {
                 g.full = full_index;
 
                 // Update best child/descendant: PENDING -> FULL.
-                self.maybeUpdateBestChildAndDescendant(
+                try self.maybeUpdateBestChildAndDescendant(
                     g.pending,
                     full_index,
                     current_slot,
@@ -843,7 +839,6 @@ pub const ProtoArray = struct {
         current_slot: Slot,
     ) ProtoArrayError!void {
         assert(deltas.len == self.nodes.items.len);
-        if (finalized_epoch < self.finalized_epoch) return error.RevertedFinalizedEpoch;
 
         self.maybeUpdateCheckpoints(
             justified_epoch,
@@ -857,7 +852,7 @@ pub const ProtoArray = struct {
             proposer_boost,
         );
 
-        self.updateBestDescendants(
+        try self.updateBestDescendants(
             current_slot,
             if (proposer_boost) |boost|
                 boost.root
@@ -954,13 +949,13 @@ pub const ProtoArray = struct {
         self: *ProtoArray,
         current_slot: Slot,
         proposer_boost_root: ?Root,
-    ) void {
+    ) ProtoArrayError!void {
         var node_index: u32 = @intCast(self.nodes.items.len);
         while (node_index > 0) {
             node_index -= 1;
             if (self.nodes.items[node_index].parent) |parent_index| {
                 assert(parent_index < self.nodes.items.len);
-                self.maybeUpdateBestChildAndDescendant(
+                try self.maybeUpdateBestChildAndDescendant(
                     parent_index,
                     node_index,
                     current_slot,
@@ -1023,9 +1018,11 @@ pub const ProtoArray = struct {
         parent_block_hash: ?Root,
     ) ?*const ProtoNode {
         const parent_bh = parent_block_hash orelse {
-            // Pre-Gloas path: look up by root with FULL status.
-            const idx = self.getNodeIndexByRootAndStatus(parent_root, .full) orelse return null;
-            return &self.nodes.items[idx];
+            // Pre-Gloas path: parent must be a pre-Gloas single-variant entry.
+            // Fork sequence is monotonic — a pre-Gloas block cannot have a Gloas parent.
+            const vi = self.indices.get(parent_root) orelse return null;
+            assert(vi == .pre_gloas);
+            return &self.nodes.items[vi.pre_gloas];
         };
 
         // Post-Gloas path: find by root + block hash.
@@ -1129,14 +1126,14 @@ pub const ProtoArray = struct {
         child_index: u32,
         current_slot: Slot,
         proposer_boost_root: ?Root,
-    ) void {
+    ) ProtoArrayError!void {
         assert(child_index < self.nodes.items.len);
         assert(parent_index < self.nodes.items.len);
 
         const child = &self.nodes.items[child_index];
         const parent = &self.nodes.items[parent_index];
 
-        const result = self.compareCandidateChild(
+        const result = try self.compareCandidateChild(
             parent,
             child,
             child_index,
@@ -1167,7 +1164,7 @@ pub const ProtoArray = struct {
         child_index: u32,
         current_slot: Slot,
         proposer_boost_root: ?Root,
-    ) ChildAndDescendant {
+    ) ProtoArrayError!ChildAndDescendant {
         const child_leads_to_viable =
             self.nodeLeadsToViableHead(child, current_slot);
 
@@ -1206,7 +1203,7 @@ pub const ProtoArray = struct {
         }
 
         // The child is not the best-child but might become it.
-        return self.compareAgainstBestChild(
+        return try self.compareAgainstBestChild(
             best_child_index,
             child,
             child_leads_to_viable,
@@ -1234,7 +1231,7 @@ pub const ProtoArray = struct {
         no_change: ChildAndDescendant,
         current_slot: Slot,
         proposer_boost_root: ?Root,
-    ) ChildAndDescendant {
+    ) ProtoArrayError!ChildAndDescendant {
         assert(best_child_index < self.nodes.items.len);
 
         const best_child =
@@ -1268,8 +1265,8 @@ pub const ProtoArray = struct {
         // tie-breaker by payload status.
         // Note: pre-Gloas, each child node of a block has a unique root,
         // so this point should not be reached.
-        const child_tb = self.getPayloadStatusTiebreaker(child, current_slot, proposer_boost_root);
-        const best_tb = self.getPayloadStatusTiebreaker(best_child, current_slot, proposer_boost_root);
+        const child_tb = try self.getPayloadStatusTiebreaker(child, current_slot, proposer_boost_root);
+        const best_tb = try self.getPayloadStatusTiebreaker(best_child, current_slot, proposer_boost_root);
         return if (child_tb > best_tb) change_to_child else no_change;
     }
 
@@ -1279,7 +1276,7 @@ pub const ProtoArray = struct {
         node: *const ProtoNode,
         current_slot: Slot,
     ) i64 {
-        const is_gloas = node.parent_block_hash != null;
+        const is_gloas = node.isGloasBlock();
         const is_variant =
             node.payload_status != .pending;
         const is_prev_slot =
@@ -1300,13 +1297,13 @@ pub const ProtoArray = struct {
         node: *const ProtoNode,
         current_slot: Slot,
         proposer_boost_root: ?Root,
-    ) u2 {
+    ) ProtoArrayError!u2 {
         // PENDING nodes or nodes not from the previous slot: return raw payload status.
         if (node.payload_status == .pending or node.slot + 1 != current_slot) return @intFromEnum(node.payload_status);
         if (node.payload_status == .empty) return @intFromEnum(PayloadStatus.empty);
 
         // FULL node from previous slot — check shouldExtendPayload.
-        const should_extend = self.shouldExtendPayload(node.block_root, proposer_boost_root) catch false;
+        const should_extend = try self.shouldExtendPayload(node.block_root, proposer_boost_root);
         return if (should_extend) @intFromEnum(PayloadStatus.full) else @intFromEnum(PayloadStatus.pending);
     }
 
@@ -1480,7 +1477,7 @@ pub const ProtoArray = struct {
 
         // Now parent_block.slot <= ancestor_slot
         // Return the parent with the correct payload status based on current_block
-        if (current_block.parent_block_hash == null) {
+        if (!current_block.isGloasBlock()) {
             // Pre-Gloas: return FULL variant (only one that exists)
             return parent_block;
         }
@@ -1648,10 +1645,6 @@ pub const ProtoArray = struct {
     fn propagateInvalidExecutionStatusByIndex(
         self: *ProtoArray,
         allocator: Allocator,
-        /// Pre-allocated scratch buffer for zero deltas (avoids fresh allocation during INVALID
-        /// propagation). Caller must ensure this is sized to at least nodes.items.len.
-        /// Using a cached/reused buffer prevents OOM during the error-path score recalculation.
-        deltas_buf: *std.ArrayListUnmanaged(i64),
         invalidate_from_index: u32,
         latest_valid_hash_index: u32,
         current_slot: Slot,
@@ -1678,14 +1671,14 @@ pub const ProtoArray = struct {
         }
 
         // Recalculate the DAG with zero deltas.
-        // Use the caller-supplied buffer to avoid a fresh allocation in this error path.
-        // resize() will reuse existing capacity when possible, growing only if needed.
-        const num_nodes: usize = self.nodes.items.len;
-        try deltas_buf.resize(allocator, num_nodes);
-        @memset(deltas_buf.items, 0);
+        const num_nodes: u32 = @intCast(self.nodes.items.len);
+        const zero_deltas = try allocator.alloc(i64, num_nodes);
+        defer allocator.free(zero_deltas);
+
+        @memset(zero_deltas, 0);
 
         try self.applyScoreChanges(
-            deltas_buf.items,
+            zero_deltas,
             self.previous_proposer_boost,
             self.justified_epoch,
             self.justified_root,
@@ -2081,9 +2074,6 @@ pub const ProtoArray = struct {
     pub fn validateLatestHash(
         self: *ProtoArray,
         allocator: Allocator,
-        /// Scratch buffer for zero-delta score recalculation during INVALID propagation.
-        /// Reused to avoid allocation in the EL-invalid error path.
-        deltas_buf: *std.ArrayListUnmanaged(i64),
         response: LVHExecResponse,
         current_slot: Slot,
     ) (Allocator.Error || ProtoArrayError)!void {
@@ -2121,7 +2111,6 @@ pub const ProtoArray = struct {
 
                 try self.propagateInvalidExecutionStatusByIndex(
                     allocator,
-                    deltas_buf,
                     invalidate_from_index,
                     latest_valid_hash_index.?,
                     current_slot,
@@ -2144,7 +2133,7 @@ pub const ProtoArray = struct {
         self: *ProtoArray,
         allocator: Allocator,
         finalized_root: Root,
-    ) (ProtoArrayError || Allocator.Error)![]ProtoBlock {
+    ) (Allocator.Error || ProtoArrayError)![]ProtoBlock {
         const entry = self.indices.get(finalized_root) orelse
             return error.FinalizedNodeUnknown;
 
@@ -2333,7 +2322,8 @@ fn makeRoot(byte: u8) Root {
 
 // Tree: (empty — no blocks inserted)
 test "init and deinit" {
-    var pa = ProtoArray.init(1, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(1, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     try testing.expectEqual(@as(usize, 0), pa.nodes.items.len);
@@ -2344,7 +2334,8 @@ test "init and deinit" {
 
 // Tree: 0 (genesis, FULL)
 test "onBlock adds genesis" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     try pa.onBlock(testing.allocator, TestBlock.genesis(), 0, null);
@@ -2362,7 +2353,8 @@ test "onBlock adds genesis" {
 
 // Tree: 0 (genesis, FULL) — second insert is skipped
 test "onBlock duplicate is no-op" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     try pa.onBlock(testing.allocator, TestBlock.genesis(), 0, null);
@@ -2373,7 +2365,8 @@ test "onBlock duplicate is no-op" {
 
 // Tree: (empty — block rejected)
 test "onBlock rejects invalid execution status" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     var block = TestBlock.withRoot(makeRoot(1));
@@ -2389,7 +2382,8 @@ test "onBlock rejects invalid execution status" {
 
 // Tree: 0x01 (orphan, parent 0x63 not in tree)
 test "onBlock unknown parent stays null" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     const unknown_parent = makeRoot(99);
@@ -2406,7 +2400,8 @@ test "onBlock unknown parent stays null" {
 //     |
 //   0x02
 test "onBlock links parent and updates best_child" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     const parent_root = makeRoot(1);
@@ -2429,7 +2424,8 @@ test "onBlock links parent and updates best_child" {
 //   / \
 // 0x02 0x03   (0x03 wins tiebreak: higher root)
 test "onBlock multiple children root tiebreak" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     const parent_root = makeRoot(1);
@@ -2450,7 +2446,8 @@ test "onBlock multiple children root tiebreak" {
 //     |
 //   0x01.EMPTY(idx=1)
 test "onBlock Gloas creates PENDING and EMPTY with VariantIndices" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     const root = makeRoot(1);
@@ -2489,7 +2486,8 @@ test "onBlock Gloas creates PENDING and EMPTY with VariantIndices" {
 //     |
 //   0x02.EMPTY
 test "onBlock Gloas with parent links correctly" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     const parent_root = makeRoot(1);
@@ -2518,7 +2516,8 @@ test "onBlock Gloas with parent links correctly" {
 //       / \
 // 0x01.EMPTY 0x01.FULL
 test "onExecutionPayload adds FULL variant" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     const root = makeRoot(1);
@@ -2526,7 +2525,7 @@ test "onExecutionPayload adds FULL variant" {
     try testing.expectEqual(@as(usize, 2), pa.nodes.items.len);
 
     const payload_hash = makeRoot(0xAA);
-    try pa.onExecutionPayload(testing.allocator, root, 0, payload_hash, 42, ZERO_HASH, null);
+    try pa.onExecutionPayload(testing.allocator, root, 0, payload_hash, 42, ZERO_HASH, null, .valid);
 
     // Now 3 nodes: PENDING, EMPTY, FULL.
     try testing.expectEqual(@as(usize, 3), pa.nodes.items.len);
@@ -2551,27 +2550,29 @@ test "onExecutionPayload adds FULL variant" {
 //       / \
 // 0x01.EMPTY 0x01.FULL
 test "onExecutionPayload duplicate is no-op" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     const root = makeRoot(1);
     try pa.onBlock(testing.allocator, TestBlock.asGloas(TestBlock.withRoot(root)), 0, null);
-    try pa.onExecutionPayload(testing.allocator, root, 0, makeRoot(0xBB), 1, ZERO_HASH, null);
-    try pa.onExecutionPayload(testing.allocator, root, 0, makeRoot(0xCC), 2, ZERO_HASH, null); // Second call is no-op.
+    try pa.onExecutionPayload(testing.allocator, root, 0, makeRoot(0xBB), 1, ZERO_HASH, null, .valid);
+    try pa.onExecutionPayload(testing.allocator, root, 0, makeRoot(0xCC), 2, ZERO_HASH, null, .valid); // Second call is no-op.
 
     try testing.expectEqual(@as(usize, 3), pa.nodes.items.len);
 }
 
 // Tree: 0x01 (pre-Gloas FULL) — onPayload is no-op
 test "onExecutionPayload for pre-Gloas returns PreGloasBlock error" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     const root = makeRoot(1);
     try pa.onBlock(testing.allocator, TestBlock.withRoot(root), 0, null);
     try testing.expectError(
         error.PreGloasBlock,
-        pa.onExecutionPayload(testing.allocator, root, 0, makeRoot(0xDD), 1, ZERO_HASH, null),
+        pa.onExecutionPayload(testing.allocator, root, 0, makeRoot(0xDD), 1, ZERO_HASH, null, .valid),
     );
 
     try testing.expectEqual(@as(usize, 1), pa.nodes.items.len);
@@ -2579,12 +2580,13 @@ test "onExecutionPayload for pre-Gloas returns PreGloasBlock error" {
 
 // Tree: (empty — unknown root lookup fails)
 test "onExecutionPayload for unknown block returns UnknownBlock error" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     try testing.expectError(
         error.UnknownBlock,
-        pa.onExecutionPayload(testing.allocator, makeRoot(0xFF), 0, makeRoot(0xDD), 1, ZERO_HASH, null),
+        pa.onExecutionPayload(testing.allocator, makeRoot(0xFF), 0, makeRoot(0xDD), 1, ZERO_HASH, null, .valid),
     );
 }
 
@@ -2594,7 +2596,8 @@ test "onExecutionPayload for unknown block returns UnknownBlock error" {
 //   0x02(valid)
 //   propagation: 0x01 becomes valid
 test "propagateValidExecutionStatusByIndex marks syncing ancestors" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     const root_a = makeRoot(1);
@@ -2657,7 +2660,8 @@ test "VariantIndices allIndices" {
 
 // Tree: (empty — pre-Gloas parent_block_hash is null → always FULL)
 test "getParentPayloadStatus pre-Gloas returns full" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     // Pre-Gloas block (no parent_block_hash) → always FULL.
@@ -2673,7 +2677,8 @@ test "getParentPayloadStatus pre-Gloas returns full" {
 //   EMPTY = bid.parentBlockHash (0x00), FULL = actual payload hash (= bid.blockHash).
 // getParentPayloadStatus matches by executionPayloadBlockHash on variants.
 test "getParentPayloadStatus matching bid hash returns full" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     const parent_root = makeRoot(1);
@@ -2682,7 +2687,7 @@ test "getParentPayloadStatus matching bid hash returns full" {
     // Add parent with bid block hash, then create FULL with payload_hash = bid_hash.
     // In ePBS, the actual payload hash equals the bid's blockHash.
     try pa.onBlock(testing.allocator, TestBlock.asGloas(TestBlock.withRoot(parent_root)), 0, null);
-    try pa.onExecutionPayload(testing.allocator, parent_root, 0, bid_hash, 1, makeRoot(0xDD), null);
+    try pa.onExecutionPayload(testing.allocator, parent_root, 0, bid_hash, 1, makeRoot(0xDD), null, .valid);
 
     // parent_block_hash matches FULL's executionPayloadBlockHash (= bid_hash) → FULL.
     try testing.expectEqual(PayloadStatus.full, try pa.getParentPayloadStatus(parent_root, bid_hash));
@@ -2698,7 +2703,8 @@ test "getParentPayloadStatus matching bid hash returns full" {
 // Only EMPTY exists; matching by executionPayloadBlockHash.
 // If no variant matches, returns UNKNOWN_PARENT_BLOCK.
 test "getParentPayloadStatus without FULL variant" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     const parent_root = makeRoot(1);
@@ -2722,7 +2728,8 @@ test "getParentPayloadStatus without FULL variant" {
 //   child_a.parent_block_hash = 0xAA (matches FULL's execHash) → links to parent.FULL
 //   child_b.parent_block_hash = 0x00 (matches EMPTY's execHash) → links to parent.EMPTY
 test "onBlockGloas links to correct parent variant via parent_block_hash" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     const parent_root = makeRoot(1);
@@ -2731,7 +2738,7 @@ test "onBlockGloas links to correct parent variant via parent_block_hash" {
     // Parent: Gloas block with bid hash 0xAA.
     try pa.onBlock(testing.allocator, TestBlock.asGloas(TestBlock.withRoot(parent_root)), 0, null);
     // Add FULL variant with execution_payload_block_hash = bid_hash (ePBS invariant).
-    try pa.onExecutionPayload(testing.allocator, parent_root, 0, bid_hash, 42, ZERO_HASH, null);
+    try pa.onExecutionPayload(testing.allocator, parent_root, 0, bid_hash, 42, ZERO_HASH, null, .valid);
 
     const parent_vi = pa.indices.get(parent_root).?;
     const parent_empty_idx = parent_vi.gloas.empty;
@@ -2769,7 +2776,8 @@ test "onBlockGloas links to correct parent variant via parent_block_hash" {
 //       |
 //     B.EMPTY
 test "child builds on EMPTY when parent_block_hash matches EMPTY execHash" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     // Genesis (pre-Gloas).
@@ -2810,7 +2818,8 @@ test "child builds on EMPTY when parent_block_hash matches EMPTY execHash" {
 //                                |
 //                              B.EMPTY
 test "child builds on FULL when parent_block_hash matches FULL execHash" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     // Genesis (pre-Gloas).
@@ -2826,7 +2835,7 @@ test "child builds on FULL when parent_block_hash matches FULL execHash" {
     try pa.onBlock(testing.allocator, block_a, 1, null);
 
     // Insert payload for A → creates A.FULL with execPayloadBlockHash = bid_hash (ePBS invariant).
-    try pa.onExecutionPayload(testing.allocator, root_a, 1, bid_hash_a, 1, ZERO_HASH, null);
+    try pa.onExecutionPayload(testing.allocator, root_a, 1, bid_hash_a, 1, ZERO_HASH, null, .valid);
 
     const vi_a = pa.indices.get(root_a).?;
     const full_a_idx = vi_a.gloas.full.?;
@@ -2857,7 +2866,8 @@ test "child builds on FULL when parent_block_hash matches FULL execHash" {
 //   B.parent_block_hash=0x00 (matches A.EMPTY's execHash) → links to A.EMPTY
 //   C.parent_block_hash=0x64 (matches A.FULL's execHash)  → links to A.FULL
 test "children of both EMPTY and FULL parent variants" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     try pa.onBlock(testing.allocator, TestBlock.genesis(), 0, null);
@@ -2872,7 +2882,7 @@ test "children of both EMPTY and FULL parent variants" {
     try pa.onBlock(testing.allocator, block_a, 1, null);
 
     // Insert payload for A → creates A.FULL with execHash = bid_hash (ePBS invariant).
-    try pa.onExecutionPayload(testing.allocator, root_a, 1, bid_hash_a, 1, ZERO_HASH, null);
+    try pa.onExecutionPayload(testing.allocator, root_a, 1, bid_hash_a, 1, ZERO_HASH, null, .valid);
 
     const vi_a = pa.indices.get(root_a).?;
     const empty_a_idx = vi_a.gloas.empty;
@@ -2915,7 +2925,8 @@ test "children of both EMPTY and FULL parent variants" {
 //   B builds on EMPTY(A), C builds on FULL(A).
 //   Attestations shift head from B to C and back.
 test "forked branches with EMPTY and FULL parent linkage and weight propagation" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     try pa.onBlock(testing.allocator, TestBlock.genesis(), 0, null);
@@ -2930,7 +2941,7 @@ test "forked branches with EMPTY and FULL parent linkage and weight propagation"
     try pa.onBlock(testing.allocator, block_a, 1, null);
 
     // Insert payload for A with execHash = bid_hash (ePBS invariant).
-    try pa.onExecutionPayload(testing.allocator, root_a, 1, bid_hash_a, 1, ZERO_HASH, null);
+    try pa.onExecutionPayload(testing.allocator, root_a, 1, bid_hash_a, 1, ZERO_HASH, null, .valid);
 
     const vi_a = pa.indices.get(root_a).?;
     const empty_a_idx = vi_a.gloas.empty;
@@ -2956,7 +2967,7 @@ test "forked branches with EMPTY and FULL parent linkage and weight propagation"
     try pa.onBlock(testing.allocator, block_c, 2, null);
 
     // Insert payload for C with execHash = C's bid_hash (ZERO_HASH).
-    try pa.onExecutionPayload(testing.allocator, root_c, 2, ZERO_HASH, 2, ZERO_HASH, null);
+    try pa.onExecutionPayload(testing.allocator, root_c, 2, ZERO_HASH, 2, ZERO_HASH, null, .valid);
 
     const pending_c = &pa.nodes.items[pa.indices.get(root_c).?.gloas.pending];
     try testing.expectEqual(full_a_idx, pending_c.parent.?);
@@ -3004,7 +3015,8 @@ test "forked branches with EMPTY and FULL parent linkage and weight propagation"
 //
 //   C builds on B.EMPTY, D builds on B.FULL.
 test "deep fork weight propagation across EMPTY and FULL variants" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     try pa.onBlock(testing.allocator, TestBlock.genesis(), 0, null);
@@ -3019,7 +3031,7 @@ test "deep fork weight propagation across EMPTY and FULL variants" {
     try pa.onBlock(testing.allocator, block_a, 1, null);
 
     // Payload for A: execHash = bid_hash_a (ePBS invariant).
-    try pa.onExecutionPayload(testing.allocator, root_a, 1, bid_hash_a, 1, ZERO_HASH, null);
+    try pa.onExecutionPayload(testing.allocator, root_a, 1, bid_hash_a, 1, ZERO_HASH, null, .valid);
 
     // B at slot 2, builds on A.FULL (parent_block_hash=bid_hash_a matches A.FULL's execHash).
     // B's EMPTY execHash = bid_hash_a (B's parent_block_hash = bid.parentBlockHash).
@@ -3037,7 +3049,7 @@ test "deep fork weight propagation across EMPTY and FULL variants" {
     try testing.expectEqual(full_a_idx, pending_b.parent.?);
 
     // Payload for B: execHash = bid_hash_b (ePBS invariant).
-    try pa.onExecutionPayload(testing.allocator, root_b, 2, bid_hash_b, 2, ZERO_HASH, null);
+    try pa.onExecutionPayload(testing.allocator, root_b, 2, bid_hash_b, 2, ZERO_HASH, null, .valid);
 
     const vi_b = pa.indices.get(root_b).?;
     const empty_b_idx = vi_b.gloas.empty;
@@ -3063,7 +3075,7 @@ test "deep fork weight propagation across EMPTY and FULL variants" {
     try pa.onBlock(testing.allocator, block_d, 3, null);
 
     // Payload for D.
-    try pa.onExecutionPayload(testing.allocator, root_d, 3, ZERO_HASH, 3, ZERO_HASH, null);
+    try pa.onExecutionPayload(testing.allocator, root_d, 3, ZERO_HASH, 3, ZERO_HASH, null, .valid);
 
     const pending_d = &pa.nodes.items[pa.indices.get(root_d).?.gloas.pending];
     try testing.expectEqual(full_b_idx, pending_d.parent.?);
@@ -3113,7 +3125,8 @@ test "deep fork weight propagation across EMPTY and FULL variants" {
 //     |
 //   0x01.EMPTY
 test "onBlockGloas initializes PTC votes" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     const root = makeRoot(1);
@@ -3129,7 +3142,8 @@ test "onBlockGloas initializes PTC votes" {
 //     |
 //   0x01.EMPTY
 test "notifyPtcMessages sets votes" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     const root = makeRoot(1);
@@ -3152,7 +3166,8 @@ test "notifyPtcMessages sets votes" {
 //     |
 //   0x01.EMPTY
 test "isPayloadTimely without FULL returns false" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     const root = makeRoot(1);
@@ -3169,14 +3184,15 @@ test "isPayloadTimely without FULL returns false" {
 //       / \
 // 0x01.EMPTY 0x01.FULL
 test "isPayloadTimely with FULL and supermajority returns true" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     const root = makeRoot(1);
     try pa.onBlock(testing.allocator, TestBlock.asGloas(TestBlock.withRoot(root)), 0, null);
 
     // Add FULL variant.
-    try pa.onExecutionPayload(testing.allocator, root, 0, makeRoot(0xAA), 1, ZERO_HASH, null);
+    try pa.onExecutionPayload(testing.allocator, root, 0, makeRoot(0xAA), 1, ZERO_HASH, null, .valid);
 
     // Set more than PAYLOAD_TIMELY_THRESHOLD votes to true.
     pa.ptc_votes.getPtr(root).?.* = ProtoArray.PtcVotes.initFull();
@@ -3189,12 +3205,13 @@ test "isPayloadTimely with FULL and supermajority returns true" {
 //       / \
 // 0x01.EMPTY 0x01.FULL
 test "shouldExtendPayload timely payload returns true" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     const root = makeRoot(1);
     try pa.onBlock(testing.allocator, TestBlock.asGloas(TestBlock.withRoot(root)), 0, null);
-    try pa.onExecutionPayload(testing.allocator, root, 0, makeRoot(0xAA), 1, ZERO_HASH, null);
+    try pa.onExecutionPayload(testing.allocator, root, 0, makeRoot(0xAA), 1, ZERO_HASH, null, .valid);
 
     // Make payload timely.
     pa.ptc_votes.getPtr(root).?.* = ProtoArray.PtcVotes.initFull();
@@ -3208,7 +3225,8 @@ test "shouldExtendPayload timely payload returns true" {
 //     |
 //   0x01.EMPTY
 test "shouldExtendPayload no proposer boost returns true" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     const root = makeRoot(1);
@@ -3224,7 +3242,8 @@ test "shouldExtendPayload no proposer boost returns true" {
 //     |
 //   0x01
 test "applyScoreChanges proposer boost does not accumulate across repeated calls" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     const child_root = makeRoot(1);
@@ -3257,7 +3276,8 @@ test "applyScoreChanges proposer boost does not accumulate across repeated calls
 //      5   6
 //
 test "findHead tiebreak without votes" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     try pa.onBlock(testing.allocator, TestBlock.genesis(), 0, null);
@@ -3298,7 +3318,8 @@ test "findHead tiebreak without votes" {
 //     1   2
 //
 test "votes shift head between branches" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     try pa.onBlock(testing.allocator, TestBlock.genesis(), 0, null);
@@ -3333,7 +3354,8 @@ test "findHead with ffg checkpoint updates" {
     const root_2 = makeRoot(2);
     const root_3 = makeRoot(3);
 
-    var pa = ProtoArray.init(0, root_0, 0, root_0, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, root_0, 0, root_0, 0);
     defer pa.deinit(testing.allocator);
 
     try pa.onBlock(testing.allocator, TestBlock.genesis(), 0, null);
@@ -3385,7 +3407,8 @@ test "votes shift head in binary tree" {
     const root_3 = makeRoot(3);
     const root_4 = makeRoot(4);
 
-    var pa = ProtoArray.init(0, root_0, 0, root_0, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, root_0, 0, root_0, 0);
     defer pa.deinit(testing.allocator);
 
     try pa.onBlock(testing.allocator, TestBlock.genesis(), 0, null);
@@ -3422,7 +3445,8 @@ test "isFinalizedRootOrDescendant" {
     const root_2 = makeRoot(2);
     const root_3 = makeRoot(3);
 
-    var pa = ProtoArray.init(0, finalized_root, 0, finalized_root, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, finalized_root, 0, finalized_root, 0);
     defer pa.deinit(testing.allocator);
 
     try pa.onBlock(testing.allocator, TestBlock.genesis(), 0, null);
@@ -3458,7 +3482,8 @@ test "isFinalizedRootOrDescendant" {
 //     1   2
 //
 test "invalid execution status zeroes weight and moves head" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     try pa.onBlock(testing.allocator, TestBlock.genesis(), 0, null);
@@ -3496,7 +3521,8 @@ test "invalid execution status zeroes weight and moves head" {
 //     |
 //   0x01(syncing)
 test "invalid execution status reverts proposer boost" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     try pa.onBlock(testing.allocator, TestBlock.genesis(), 0, null);
@@ -3521,7 +3547,8 @@ test "invalid execution status reverts proposer boost" {
 
 // Tree: 0 (genesis) — query with unknown justified root
 test "findHead unknown justified root returns error" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     try pa.onBlock(testing.allocator, TestBlock.genesis(), 0, null);
@@ -3531,7 +3558,8 @@ test "findHead unknown justified root returns error" {
 
 // Tree: 0x01 (syncing, then mutated to invalid)
 test "nodeIsViableForHead rejects invalid execution" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     // Can't insert invalid directly, so insert as syncing then mutate.
@@ -3552,7 +3580,8 @@ test "nodeIsViableForHead rejects invalid execution" {
 //     |
 //   0x01
 test "negative weight delta propagation" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     try pa.onBlock(testing.allocator, TestBlock.genesis(), 0, null);
@@ -3578,7 +3607,8 @@ test "negative weight delta propagation" {
 //   |
 //   3
 test "getAncestor returns ancestor at slot" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     const root_0 = ZERO_HASH;
@@ -3603,7 +3633,8 @@ test "getAncestor returns ancestor at slot" {
 //     |
 //   0x01(s=5)
 test "getAncestor at own slot returns self" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     const root_1 = makeRoot(1);
@@ -3619,7 +3650,8 @@ test "getAncestor at own slot returns self" {
 //     |     gap(s=1..4)
 //   0x01(s=5)
 test "getAncestor skips slot gap" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     const root_0 = ZERO_HASH;
@@ -3641,7 +3673,8 @@ test "getAncestor skips slot gap" {
 //      3   4
 //
 test "getAncestor finds common ancestor" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     const root_0 = ZERO_HASH;
@@ -3680,7 +3713,8 @@ test "getAncestor finds common ancestor" {
 test "ffg updates two branches with votes and justified epoch switch" {
     const root_0 = ZERO_HASH;
 
-    var pa = ProtoArray.init(0, root_0, 0, root_0, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, root_0, 0, root_0, 0);
     defer pa.deinit(testing.allocator);
 
     try pa.onBlock(testing.allocator, TestBlock.genesis(), 0, null);
@@ -3843,7 +3877,8 @@ test "nodeIsViableForHead table-driven epoch combinations" {
     for (cases) |tc| {
         // Use a previous-epoch slot so that nodeIsViableForHead uses
         // unrealized_justified_epoch (which we set equal to justified_epoch).
-        var pa = ProtoArray.init(
+        var pa: ProtoArray = undefined;
+        pa.init(
             tc.store_justified_epoch,
             ZERO_HASH,
             0,
@@ -3883,7 +3918,8 @@ test "weight propagation with positive deltas" {
     const root_2 = makeRoot(2);
     const root_3 = makeRoot(3);
 
-    var pa = ProtoArray.init(0, root_0, 0, root_0, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, root_0, 0, root_0, 0);
     defer pa.deinit(testing.allocator);
 
     try pa.onBlock(testing.allocator, TestBlock.genesis(), 0, null);
@@ -3936,7 +3972,8 @@ test "weight propagation with positive deltas" {
 }
 
 test "NodeCount returns number of unique block roots" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     try pa.onBlock(testing.allocator, TestBlock.genesis(), 0, null);
@@ -3948,7 +3985,8 @@ test "NodeCount returns number of unique block roots" {
 
 // Tree: genesis(0x00), child 0x01
 test "NodeByRoot returns correct node or null" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     try pa.onBlock(testing.allocator, TestBlock.genesis(), 0, null);
@@ -3972,7 +4010,8 @@ test "NodeByRoot returns correct node or null" {
 
 // Tree: genesis(0x00)
 test "HasNode returns true for known roots" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     try pa.onBlock(testing.allocator, TestBlock.genesis(), 0, null);
@@ -3995,7 +4034,8 @@ test "HasNode returns true for known roots" {
 // Head is 6 (longest chain from genesis). Canonical = on the head chain.
 // 1 and 3 are NOT canonical because they're on a different branch.
 test "IsCanonical identifies head chain via isDescendant" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     const root_0 = ZERO_HASH;
@@ -4031,7 +4071,8 @@ test "IsCanonical identifies head chain via isDescendant" {
 //                   |
 //                  j(9)
 test "CommonAncestor table-driven two-branch tree" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     const root_a = makeRoot('a');
@@ -4096,7 +4137,8 @@ test "CommonAncestor table-driven two-branch tree" {
 //     |
 //   0x03(slot=5)
 test "AncestorRoot returns correct ancestor at slot" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     try pa.onBlock(testing.allocator, TestBlock.genesis(), 0, null);
@@ -4122,7 +4164,8 @@ test "AncestorRoot returns correct ancestor at slot" {
 //     |
 //   '3'(slot=101)
 test "AncestorRoot equal slot returns parent" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     try pa.onBlock(testing.allocator, TestBlock.genesis(), 0, null);
@@ -4141,7 +4184,8 @@ test "AncestorRoot equal slot returns parent" {
 //   '3'(slot=200)
 // Ancestor at slot 150 should return parent at slot 100.
 test "AncestorRoot lower slot returns nearest parent" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     try pa.onBlock(testing.allocator, TestBlock.genesis(), 0, null);
@@ -4152,11 +4196,10 @@ test "AncestorRoot lower slot returns nearest parent" {
     try testing.expectEqual(makeRoot(1), a.block_root);
 }
 
-// ── Prune tests ──
-
 // 100 nodes in a chain, finalize node 99 -> only 1 node remains.
 test "Prune MoreThanThreshold leaves only finalized node" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     // Insert genesis + 99 children in a chain.
@@ -4179,14 +4222,15 @@ test "Prune MoreThanThreshold leaves only finalized node" {
 
     // Prune to node 99.
     const pruned = try pa.maybePrune(testing.allocator, makeRoot(99));
-    defer if (pruned.len > 0) testing.allocator.free(pruned);
+    defer testing.allocator.free(pruned);
     try testing.expect(pruned.len > 0);
     try testing.expectEqual(@as(usize, 1), pa.length());
 }
 
 // 100 nodes chain. Prune to 10, then prune to 20.
 test "Prune MoreThanOnce prunes incrementally" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     // Build chain of 100 nodes.
@@ -4208,7 +4252,7 @@ test "Prune MoreThanOnce prunes incrementally" {
 
     // First prune to node 10.
     const pruned1 = try pa.maybePrune(testing.allocator, makeRoot(10));
-    if (pruned1.len > 0) testing.allocator.free(pruned1);
+    testing.allocator.free(pruned1);
     try testing.expectEqual(@as(usize, 90), pa.length());
 
     // Reallocate zero_deltas for new node count.
@@ -4219,7 +4263,7 @@ test "Prune MoreThanOnce prunes incrementally" {
 
     // Second prune to node 20.
     const pruned2 = try pa.maybePrune(testing.allocator, makeRoot(20));
-    if (pruned2.len > 0) testing.allocator.free(pruned2);
+    testing.allocator.free(pruned2);
     try testing.expectEqual(@as(usize, 80), pa.length());
 }
 
@@ -4231,7 +4275,8 @@ test "Prune MoreThanOnce prunes incrementally" {
 // (node 2 survives because its index > finalized_index). It becomes unreachable
 // but stays in the array until a future prune removes it.
 test "Prune NoDanglingBranch keeps dangling node in flat array" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     const root_0 = ZERO_HASH;
@@ -4243,7 +4288,7 @@ test "Prune NoDanglingBranch keeps dangling node in flat array" {
     try pa.applyScoreChanges(&deltas, null, 0, root_0, 0, root_0, 2);
 
     const pruned = try pa.maybePrune(testing.allocator, makeRoot(1));
-    defer if (pruned.len > 0) testing.allocator.free(pruned);
+    defer testing.allocator.free(pruned);
     // 2 nodes remain (node 1 + dangling node 2). Proto_array does not remove
     // unreachable branches -- they are pruned when a future finalized root passes them.
     try testing.expectEqual(@as(usize, 2), pa.length());
@@ -4251,7 +4296,8 @@ test "Prune NoDanglingBranch keeps dangling node in flat array" {
 
 // Finalized root is genesis (index 0) -> nothing to prune, node count unchanged.
 test "Prune ReturnEarly when finalized is at index 0" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     try pa.onBlock(testing.allocator, TestBlock.genesis(), 0, null);
@@ -4265,15 +4311,14 @@ test "Prune ReturnEarly when finalized is at index 0" {
 
 // Unknown finalized root -> error.
 test "Prune unknown finalized root returns error" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     try pa.onBlock(testing.allocator, TestBlock.genesis(), 0, null);
 
     try testing.expectError(error.FinalizedNodeUnknown, pa.maybePrune(testing.allocator, makeRoot(0xFF)));
 }
-
-// ── Optimistic sync tests ──
 
 // Tree:
 //   genesis(0x00, syncing)
@@ -4285,10 +4330,8 @@ test "Prune unknown finalized root returns error" {
 // validateLatestHash(valid, latestValidExecHash=0xA1)
 // -> 0x01 becomes valid.
 test "SetOptimisticToValid propagates up from matching hash" {
-
-    var test_deltas_buf: std.ArrayListUnmanaged(i64) = .empty;
-    defer test_deltas_buf.deinit(testing.allocator);
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     try pa.onBlock(testing.allocator, TestBlock.genesis(), 0, null);
@@ -4309,7 +4352,6 @@ test "SetOptimisticToValid propagates up from matching hash" {
 
     try pa.validateLatestHash(
         testing.allocator,
-        &test_deltas_buf,
         .{ .valid = .{ .latest_valid_exec_hash = makeRoot(0xA1) } },
         2,
     );
@@ -4328,10 +4370,8 @@ test "SetOptimisticToValid propagates up from matching hash" {
 //
 // Invalidate D with LVH=A. Only D becomes invalid; B and C stay syncing.
 test "SetOptimisticToInvalid only invalidates target not siblings" {
-
-    var test_deltas_buf: std.ArrayListUnmanaged(i64) = .empty;
-    defer test_deltas_buf.deinit(testing.allocator);
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     try pa.onBlock(testing.allocator, TestBlock.genesis(), 0, null);
@@ -4366,7 +4406,6 @@ test "SetOptimisticToInvalid only invalidates target not siblings" {
 
     try pa.validateLatestHash(
         testing.allocator,
-        &test_deltas_buf,
         .{ .invalid = .{
             .invalidate_from_parent_block_root = root_d,
             .latest_valid_exec_hash = makeRoot('A'),
@@ -4397,10 +4436,8 @@ test "SetOptimisticToInvalid only invalidates target not siblings" {
 // Invalidate from d with LVH=ZERO_HASH (pre-merge boundary).
 // -> b, c, d, e become invalid; a, r stay pre-merge; f, g stay syncing.
 test "SetOptimisticToInvalid ForkAtMerge invalidates post-merge chain" {
-
-    var test_deltas_buf: std.ArrayListUnmanaged(i64) = .empty;
-    defer test_deltas_buf.deinit(testing.allocator);
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     try pa.onBlock(testing.allocator, TestBlock.genesis(), 0, null);
@@ -4456,7 +4493,6 @@ test "SetOptimisticToInvalid ForkAtMerge invalidates post-merge chain" {
     // Invalidate from d, LVH = ZERO_HASH (pre-merge boundary at 'a').
     try pa.validateLatestHash(
         testing.allocator,
-        &test_deltas_buf,
         .{ .invalid = .{
             .invalidate_from_parent_block_root = root_d,
             .latest_valid_exec_hash = ZERO_HASH,
@@ -4480,10 +4516,8 @@ test "SetOptimisticToInvalid ForkAtMerge invalidates post-merge chain" {
 //     |
 //   0x01(syncing)
 test "SetOptimisticToInvalid with null LVH returns error" {
-
-    var test_deltas_buf: std.ArrayListUnmanaged(i64) = .empty;
-    defer test_deltas_buf.deinit(testing.allocator);
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     try pa.onBlock(testing.allocator, TestBlock.genesis(), 0, null);
@@ -4497,7 +4531,6 @@ test "SetOptimisticToInvalid with null LVH returns error" {
 
     const result = pa.validateLatestHash(
         testing.allocator,
-        &test_deltas_buf,
         .{ .invalid = .{
             .invalidate_from_parent_block_root = root_1,
             .latest_valid_exec_hash = null,
@@ -4507,16 +4540,13 @@ test "SetOptimisticToInvalid with null LVH returns error" {
     try testing.expectError(error.InvalidLVHExecutionResponse, result);
 }
 
-// Prysm: ValidToInvalid stores lvh_error
 // Tree:
 //   genesis(0x00)
 //     |
 //   0x01(valid)
 test "SetOptimisticToInvalid on valid node stores lvh_error" {
-
-    var test_deltas_buf: std.ArrayListUnmanaged(i64) = .empty;
-    defer test_deltas_buf.deinit(testing.allocator);
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     try pa.onBlock(testing.allocator, TestBlock.genesis(), 0, null);
@@ -4530,7 +4560,6 @@ test "SetOptimisticToInvalid on valid node stores lvh_error" {
 
     const result = pa.validateLatestHash(
         testing.allocator,
-        &test_deltas_buf,
         .{ .invalid = .{
             .invalidate_from_parent_block_root = root_1,
             .latest_valid_exec_hash = ZERO_HASH,
@@ -4541,8 +4570,6 @@ test "SetOptimisticToInvalid on valid node stores lvh_error" {
     try testing.expect(pa.lvh_error != null);
     try testing.expectEqual(LVHExecErrorCode.valid_to_invalid, pa.lvh_error.?.lvh_code);
 }
-
-// ── Type definition tests ──
 
 test "ExecutionStatus enum values" {
     try testing.expectEqual(@intFromEnum(ExecutionStatus.valid), 0);
@@ -4647,10 +4674,9 @@ test "ProtoNode.toBlock round-trip" {
     try testing.expectEqual(recovered.parent_block_hash, null);
 }
 
-// ── Gloas PTC edge cases ──
-
 test "notifyPtcMessages ignores unknown block root" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     const unknown_root = makeRoot(0xFF);
@@ -4660,12 +4686,13 @@ test "notifyPtcMessages ignores unknown block root" {
 }
 
 test "isPayloadTimely threshold boundary (exactly 50% returns false)" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     const root = makeRoot(1);
     try pa.onBlock(testing.allocator, TestBlock.asGloas(TestBlock.withRoot(root)), 0, null);
-    try pa.onExecutionPayload(testing.allocator, root, 0, makeRoot(0xBB), 1, ZERO_HASH, null);
+    try pa.onExecutionPayload(testing.allocator, root, 0, makeRoot(0xBB), 1, ZERO_HASH, null, .valid);
 
     // Set exactly PTC_SIZE/2 votes (= PAYLOAD_TIMELY_THRESHOLD). Need > threshold.
     var votes = ProtoArray.PtcVotes.initEmpty();
@@ -4684,12 +4711,13 @@ test "isPayloadTimely threshold boundary (exactly 50% returns false)" {
 }
 
 test "isPayloadTimely counts only true votes with mixed yes/no" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     const root = makeRoot(1);
     try pa.onBlock(testing.allocator, TestBlock.asGloas(TestBlock.withRoot(root)), 0, null);
-    try pa.onExecutionPayload(testing.allocator, root, 0, makeRoot(0xBB), 1, ZERO_HASH, null);
+    try pa.onExecutionPayload(testing.allocator, root, 0, makeRoot(0xBB), 1, ZERO_HASH, null, .valid);
 
     // Set votes: first half true, second half false (default).
     const half: u32 = preset.PTC_SIZE / 2;
@@ -4706,20 +4734,20 @@ test "isPayloadTimely counts only true votes with mixed yes/no" {
 }
 
 test "isPayloadTimely returns false for unknown block" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     try testing.expect(!pa.isPayloadTimely(makeRoot(0xFF)));
 }
-
-// ── Gloas EMPTY vs FULL tiebreaker ──
 
 // Block at slot 5, current_slot=6 (n-1 condition: slot+1 == current).
 // Both EMPTY and FULL have effectiveWeight=0, tiebreaker by payload status.
 // For FULL to be demoted, shouldExtendPayload must return false.
 // That requires: not timely, boost_root exists, boost parent == block, boost extends EMPTY (not FULL).
 test "Gloas tiebreaker: EMPTY beats FULL for slot n-1 blocks (effectiveWeight zeroed)" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     const root = makeRoot(1);
@@ -4727,7 +4755,7 @@ test "Gloas tiebreaker: EMPTY beats FULL for slot n-1 blocks (effectiveWeight ze
     block = TestBlock.withParent(block, ZERO_HASH);
     try pa.onBlock(testing.allocator, block, 6, null);
     // FULL's execution_payload_block_hash = 0xAA
-    try pa.onExecutionPayload(testing.allocator, root, 6, makeRoot(0xAA), 1, ZERO_HASH, null);
+    try pa.onExecutionPayload(testing.allocator, root, 6, makeRoot(0xAA), 1, ZERO_HASH, null, .valid);
 
     // Add a child block at slot 6 that extends EMPTY (parent_block_hash = ZERO_HASH, which
     // does NOT match FULL's exec hash 0xAA → getParentPayloadStatus returns empty).
@@ -4761,14 +4789,15 @@ test "Gloas tiebreaker: EMPTY beats FULL for slot n-1 blocks (effectiveWeight ze
 // isPayloadTimely → true → shouldExtendPayload returns true → FULL ordinal stays 2.
 // FULL (2) > EMPTY (1) → FULL wins.
 test "Gloas tiebreaker: FULL beats EMPTY when payload is timely at slot n-1" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     const root = makeRoot(1);
     var block = TestBlock.asGloas(TestBlock.withSlotAndRoot(5, root));
     block = TestBlock.withParent(block, ZERO_HASH);
     try pa.onBlock(testing.allocator, block, 6, null);
-    try pa.onExecutionPayload(testing.allocator, root, 6, makeRoot(0xAA), 1, ZERO_HASH, null);
+    try pa.onExecutionPayload(testing.allocator, root, 6, makeRoot(0xAA), 1, ZERO_HASH, null, .valid);
 
     // Set all PTC votes → timely → FULL ordinal stays 2.
     pa.ptc_votes.getPtr(root).?.* = ProtoArray.PtcVotes.initFull();
@@ -4788,14 +4817,15 @@ test "Gloas tiebreaker: FULL beats EMPTY when payload is timely at slot n-1" {
 // Block at slot 3, current_slot=6 (not n-1: 3+1 != 6).
 // effectiveWeight returns actual node.weight, not 0.
 test "Gloas tiebreaker: older slots (n-2) use weight comparison not tiebreaker" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     const root = makeRoot(1);
     var block = TestBlock.asGloas(TestBlock.withSlotAndRoot(3, root));
     block = TestBlock.withParent(block, ZERO_HASH);
     try pa.onBlock(testing.allocator, block, 6, null);
-    try pa.onExecutionPayload(testing.allocator, root, 6, makeRoot(0xAA), 1, ZERO_HASH, null);
+    try pa.onExecutionPayload(testing.allocator, root, 6, makeRoot(0xAA), 1, ZERO_HASH, null, .valid);
 
     // Give FULL higher weight than EMPTY.
     const vi = pa.indices.get(root).?;
@@ -4820,15 +4850,14 @@ test "Gloas tiebreaker: older slots (n-2) use weight comparison not tiebreaker" 
     try testing.expectEqual(vi.gloas.empty, pending_node2.best_child.?);
 }
 
-// ── Gloas additional tests ──
-
 test "shouldExtendPayload returns false for untimely full" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     const root = makeRoot(1);
     try pa.onBlock(testing.allocator, TestBlock.asGloas(TestBlock.withRoot(root)), 0, null);
-    try pa.onExecutionPayload(testing.allocator, root, 0, makeRoot(0xAA), 1, ZERO_HASH, null);
+    try pa.onExecutionPayload(testing.allocator, root, 0, makeRoot(0xAA), 1, ZERO_HASH, null, .valid);
 
     // No PTC votes → not timely.
     // Proposer boost root is a child of this block → should NOT extend.
@@ -4866,7 +4895,8 @@ test "shouldExtendPayload returns false for untimely full" {
 }
 
 test "shouldExtendPayload returns true when slot has passed (no boost root)" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     const root = makeRoot(1);
@@ -4877,7 +4907,8 @@ test "shouldExtendPayload returns true when slot has passed (no boost root)" {
 }
 
 test "shouldExtendPayload returns error for unknown root" {
-    var pa = ProtoArray.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
     defer pa.deinit(testing.allocator);
 
     // isPayloadTimely returns false for unknown block → goes to condition 2.
@@ -4886,4 +4917,271 @@ test "shouldExtendPayload returns error for unknown root" {
 
     // With a boost root that doesn't exist → boost_index is null → returns true.
     try testing.expect(try pa.shouldExtendPayload(makeRoot(0xFF), makeRoot(0xEE)));
+}
+
+// Tree:
+//   genesis(0, pre-Gloas)
+//     |
+//   A(slot=1, Gloas: PENDING + EMPTY + FULL)
+//     |
+//   B(slot=2, Gloas: PENDING + EMPTY)
+//
+// Nodes: genesis=0, A.PENDING=1, A.EMPTY=2, A.FULL=3, B.PENDING=4, B.EMPTY=5
+// Finalize B → prune 0..4 → only B.PENDING(0) and B.EMPTY(1) remain.
+test "Prune Gloas variants removes all pruned variant nodes and map entries" {
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    defer pa.deinit(testing.allocator);
+
+    const root_a = makeRoot(0x0A);
+    const root_b = makeRoot(0x0B);
+    const a_parent_bh = makeRoot(0xA0);
+    const a_exec_bh = makeRoot(0xAA);
+
+    // Insert genesis (pre-Gloas).
+    try pa.onBlock(testing.allocator, TestBlock.genesis(), 0, null);
+
+    // Insert Gloas block A (PENDING + EMPTY).
+    try pa.onBlock(testing.allocator, TestBlock.asGloasWithParentBlockHash(
+        TestBlock.withParent(TestBlock.withSlotAndRoot(1, root_a), ZERO_HASH),
+        a_parent_bh,
+    ), 2, null);
+
+    // Add FULL variant for A.
+    try pa.onExecutionPayload(testing.allocator, root_a, 2, a_exec_bh, 1, ZERO_HASH, null, .valid);
+
+    // Verify A has all 3 variants and PTC entry.
+    try testing.expect(pa.getNodeIndexByRootAndStatus(root_a, .pending) != null);
+    try testing.expect(pa.getNodeIndexByRootAndStatus(root_a, .empty) != null);
+    try testing.expect(pa.getNodeIndexByRootAndStatus(root_a, .full) != null);
+    try testing.expect(pa.ptc_votes.get(root_a) != null);
+
+    // Insert Gloas block B (child of A's EMPTY, PENDING + EMPTY).
+    try pa.onBlock(testing.allocator, TestBlock.asGloasWithParentBlockHash(
+        TestBlock.withParent(TestBlock.withSlotAndRoot(2, root_b), root_a),
+        a_parent_bh,
+    ), 2, null);
+
+    // Verify total: 1 genesis unique root + 1 A root + 1 B root = 3 entries.
+    try testing.expectEqual(@as(usize, 3), pa.length());
+    // Total nodes: 1 + 3 + 2 = 6.
+    try testing.expectEqual(@as(usize, 6), pa.nodes.items.len);
+
+    // Apply scores for coherent best-child/descendant.
+    const zero_deltas = try testing.allocator.alloc(i64, pa.nodes.items.len);
+    defer testing.allocator.free(zero_deltas);
+    @memset(zero_deltas, 0);
+    try pa.applyScoreChanges(zero_deltas, null, 0, ZERO_HASH, 0, ZERO_HASH, 2);
+
+    // Prune to B (finalized B → removes genesis + all A variants).
+    const pruned = try pa.maybePrune(testing.allocator, root_b);
+    defer testing.allocator.free(pruned);
+    try testing.expect(pruned.len > 0);
+
+    // After prune: A's indices and PTC votes should be gone.
+    try testing.expect(pa.indices.get(root_a) == null);
+    try testing.expect(pa.ptc_votes.get(root_a) == null);
+    try testing.expect(pa.indices.get(ZERO_HASH) == null); // genesis gone
+
+    // B should survive with adjusted indices.
+    const b_vi = pa.indices.get(root_b) orelse return error.TestUnexpectedResult;
+    switch (b_vi) {
+        .gloas => |g| {
+            try testing.expectEqual(@as(u32, 0), g.pending);
+            try testing.expectEqual(@as(u32, 1), g.empty);
+            try testing.expectEqual(@as(?u32, null), g.full); // no FULL variant
+        },
+        .pre_gloas => return error.TestUnexpectedResult,
+    }
+
+    // Only B's 2 nodes remain (PENDING + EMPTY).
+    try testing.expectEqual(@as(usize, 1), pa.length()); // 1 unique root
+    try testing.expectEqual(@as(usize, 2), pa.nodes.items.len); // 2 nodes
+
+    // B's PTC votes survive.
+    try testing.expect(pa.ptc_votes.get(root_b) != null);
+}
+
+// Tree:
+//   genesis(0, pre-Gloas)
+//     |
+//   A(slot=1, Gloas: PENDING + EMPTY) with PTC votes
+//     |
+//   B(slot=2, Gloas: PENDING + EMPTY) with PTC votes
+//     |
+//   C(slot=3, Gloas: PENDING + EMPTY) with PTC votes
+//
+// Add PTC votes for all three, prune to B → only B and C PTC votes remain.
+test "Prune PTC votes cleanup removes pruned entries" {
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    defer pa.deinit(testing.allocator);
+
+    const root_a = makeRoot(0x0A);
+    const root_b = makeRoot(0x0B);
+    const root_c = makeRoot(0x0C);
+    const parent_bh = makeRoot(0xA0);
+
+    // Insert genesis + 3 Gloas blocks in a chain.
+    try pa.onBlock(testing.allocator, TestBlock.genesis(), 0, null);
+    try pa.onBlock(testing.allocator, TestBlock.asGloasWithParentBlockHash(TestBlock.withParent(TestBlock.withSlotAndRoot(1, root_a), ZERO_HASH), parent_bh), 3, null);
+    try pa.onBlock(testing.allocator, TestBlock.asGloasWithParentBlockHash(TestBlock.withParent(TestBlock.withSlotAndRoot(2, root_b), root_a), parent_bh), 3, null);
+    try pa.onBlock(testing.allocator, TestBlock.asGloasWithParentBlockHash(TestBlock.withParent(TestBlock.withSlotAndRoot(3, root_c), root_b), parent_bh), 3, null);
+
+    // Add PTC votes for all Gloas blocks (they're auto-initialized by onBlock).
+    // Set some actual votes so we can distinguish them.
+    pa.notifyPtcMessages(root_a, &.{0}, true);
+    pa.notifyPtcMessages(root_b, &.{1}, true);
+    pa.notifyPtcMessages(root_c, &.{ 0, 1 }, true);
+
+    // Verify PTC entries exist for all three.
+    try testing.expect(pa.ptc_votes.get(root_a) != null);
+    try testing.expect(pa.ptc_votes.get(root_b) != null);
+    try testing.expect(pa.ptc_votes.get(root_c) != null);
+
+    // Apply scores for coherent state.
+    const zero_deltas = try testing.allocator.alloc(i64, pa.nodes.items.len);
+    defer testing.allocator.free(zero_deltas);
+    @memset(zero_deltas, 0);
+    try pa.applyScoreChanges(zero_deltas, null, 0, ZERO_HASH, 0, ZERO_HASH, 3);
+
+    // Prune to B → genesis + A (and their nodes) removed.
+    const pruned = try pa.maybePrune(testing.allocator, root_b);
+    defer testing.allocator.free(pruned);
+    try testing.expect(pruned.len > 0);
+
+    // A's PTC votes should be gone (pruned).
+    try testing.expect(pa.ptc_votes.get(root_a) == null);
+
+    // B and C PTC votes should survive.
+    const b_votes = pa.ptc_votes.get(root_b).?;
+    try testing.expect(!b_votes.isSet(0));
+    try testing.expect(b_votes.isSet(1));
+
+    const c_votes = pa.ptc_votes.get(root_c).?;
+    try testing.expect(c_votes.isSet(0));
+    try testing.expect(c_votes.isSet(1));
+}
+
+// Tree:
+//   genesis(0, pre-merge)
+//     |
+//   A(slot=1, pre-merge, pre_gloas)  [FULL variant]
+//     |
+//   B(slot=2, Gloas: PENDING + EMPTY)  [parent is pre-Gloas A]
+//
+// Verifies the fork transition: B's parent_index resolves to A's pre_gloas FULL index.
+test "Gloas block with pre-Gloas parent links correctly across fork boundary" {
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    defer pa.deinit(testing.allocator);
+
+    const root_a = makeRoot(0x0A);
+    const root_b = makeRoot(0x0B);
+
+    // Insert genesis (pre-merge, pre-Gloas).
+    try pa.onBlock(testing.allocator, TestBlock.genesis(), 0, null);
+
+    // Insert A (pre-merge, pre-Gloas) as child of genesis.
+    try pa.onBlock(testing.allocator, TestBlock.withParent(TestBlock.withSlotAndRoot(1, root_a), ZERO_HASH), 2, null);
+
+    // Verify A is pre_gloas.
+    const a_vi = pa.indices.get(root_a).?;
+    try testing.expect(a_vi == .pre_gloas);
+    const a_idx = a_vi.pre_gloas;
+
+    // Insert Gloas block B (parent = A).
+    // B's parent_block_hash doesn't need to match A's exec hash for fork transition,
+    // because A is pre-Gloas and getParentPayloadStatus returns .full directly.
+    const b_parent_bh = makeRoot(0xB0);
+    try pa.onBlock(testing.allocator, TestBlock.asGloasWithParentBlockHash(
+        TestBlock.withParent(TestBlock.withSlotAndRoot(2, root_b), root_a),
+        b_parent_bh,
+    ), 2, null);
+
+    // Verify B is gloas.
+    const b_vi = pa.indices.get(root_b).?;
+    try testing.expect(b_vi == .gloas);
+    const b_pending_idx = b_vi.gloas.pending;
+    const b_empty_idx = b_vi.gloas.empty;
+
+    // B's PENDING parent should be A's pre_gloas index (the FULL node).
+    try testing.expectEqual(@as(?u32, a_idx), pa.nodes.items[b_pending_idx].parent);
+
+    // B's EMPTY parent should be B's own PENDING.
+    try testing.expectEqual(@as(?u32, b_pending_idx), pa.nodes.items[b_empty_idx].parent);
+
+    // findHead should work across the fork boundary.
+    // Apply zero deltas so best-child/descendant are computed.
+    const zero_deltas = try testing.allocator.alloc(i64, pa.nodes.items.len);
+    defer testing.allocator.free(zero_deltas);
+    @memset(zero_deltas, 0);
+    try pa.applyScoreChanges(zero_deltas, null, 0, ZERO_HASH, 0, ZERO_HASH, 2);
+
+    const head = try pa.findHead(ZERO_HASH, 2);
+    // Head should be B's EMPTY (deepest descendant via the fork-transition link).
+    try testing.expectEqual(root_b, head.block_root);
+    try testing.expectEqual(PayloadStatus.empty, head.payload_status);
+}
+
+test "invalid node not re-validated by valid LVH" {
+    // Tree: genesis(pre-merge) → A(syncing, exec=0xA1) → B(syncing, exec=0xA2)
+    // 1. Invalidate from B with LVH=exec(A) → B becomes invalid, A stays syncing.
+    // 2. Send .valid response matching B's exec hash (0xA2).
+    // 3. propagateValidExecutionStatusByIndex finds B (invalid) → must error with invalid_to_valid.
+
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    defer pa.deinit(testing.allocator);
+
+    // Genesis (pre-merge).
+    try pa.onBlock(testing.allocator, TestBlock.genesis(), 0, null);
+
+    // Block A: syncing, exec_hash = 0xA1.
+    const root_a = makeRoot(1);
+    const exec_a = makeRoot(0xA1);
+    var block_a = TestBlock.withParent(TestBlock.withSlotAndRoot(1, root_a), ZERO_HASH);
+    block_a.extra_meta = .{
+        .post_merge = BlockExtraMeta.PostMergeMeta.init(exec_a, 1, .syncing, .available),
+    };
+    try pa.onBlock(testing.allocator, block_a, 0, null);
+
+    // Block B: syncing, exec_hash = 0xA2.
+    const root_b = makeRoot(2);
+    const exec_b = makeRoot(0xA2);
+    var block_b = TestBlock.withParent(TestBlock.withSlotAndRoot(2, root_b), root_a);
+    block_b.extra_meta = .{
+        .post_merge = BlockExtraMeta.PostMergeMeta.init(exec_b, 2, .syncing, .available),
+    };
+    try pa.onBlock(testing.allocator, block_b, 0, null);
+
+    // Step 1: Invalidate B with LVH pointing to A's exec hash.
+    // This marks B as invalid; A stays syncing (it's the LVH boundary).
+    try pa.validateLatestHash(testing.allocator, .{ .invalid = .{
+        .invalidate_from_parent_block_root = root_b,
+        .latest_valid_exec_hash = exec_a,
+    } }, 2);
+
+    // Verify B is invalid, A is still syncing.
+    const idx_b = pa.getDefaultNodeIndex(root_b).?;
+    try testing.expectEqual(ExecutionStatus.invalid, pa.nodes.items[idx_b].extra_meta.executionStatus());
+    const idx_a = pa.getDefaultNodeIndex(root_a).?;
+    try testing.expectEqual(ExecutionStatus.syncing, pa.nodes.items[idx_a].extra_meta.executionStatus());
+
+    // Step 2: Send a .valid response matching B's exec hash.
+    // propagateValidExecutionStatusByIndex should find B, see it's invalid,
+    // and return error.InvalidLVHExecutionResponse (invalid → valid is forbidden).
+    const result = pa.validateLatestHash(testing.allocator, .{ .valid = .{
+        .latest_valid_exec_hash = exec_b,
+    } }, 2);
+    try testing.expectError(error.InvalidLVHExecutionResponse, result);
+
+    // Verify the lvh_error records the invalid_to_valid poison.
+    try testing.expect(pa.lvh_error != null);
+    try testing.expectEqual(LVHExecErrorCode.invalid_to_valid, pa.lvh_error.?.lvh_code);
+    try testing.expectEqual(root_b, pa.lvh_error.?.block_root);
+    try testing.expectEqual(exec_b, pa.lvh_error.?.exec_hash);
+
+    // B must remain invalid — the valid response must NOT resurrect it.
+    try testing.expectEqual(ExecutionStatus.invalid, pa.nodes.items[idx_b].extra_meta.executionStatus());
 }

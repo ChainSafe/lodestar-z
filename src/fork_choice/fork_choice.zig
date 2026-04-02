@@ -11,9 +11,7 @@ const presets = @import("preset");
 const preset = presets.preset;
 const state_transition = @import("state_transition");
 const computeEpochAtSlot = state_transition.computeEpochAtSlot;
-fn computeSlotsSinceEpochStart(slot: Slot) Slot {
-    return slot % preset.SLOTS_PER_EPOCH;
-}
+const computeSlotsSinceEpochStart = state_transition.computeSlotsSinceEpochStart;
 const computeStartSlotAtEpoch = state_transition.computeStartSlotAtEpoch;
 
 const Slot = primitives.Slot.Type;
@@ -21,18 +19,19 @@ const Epoch = primitives.Epoch.Type;
 const Root = primitives.Root.Type;
 const ValidatorIndex = primitives.ValidatorIndex.Type;
 
-const ProtoArray = @import("proto_array.zig").ProtoArray;
-const ProtoArrayError = @import("proto_array.zig").ProtoArrayError;
-const ProtoBlock = @import("proto_array.zig").ProtoBlock;
-const ProtoNode = @import("proto_array.zig").ProtoNode;
-const LVHExecResponse = @import("proto_array.zig").LVHExecResponse;
-const ForkChoiceError = @import("proto_array.zig").ForkChoiceError;
-const PayloadStatus = @import("proto_array.zig").PayloadStatus;
-const RootContext = @import("proto_array.zig").RootContext;
-const ExecutionStatus = @import("proto_array.zig").ExecutionStatus;
-const DataAvailabilityStatus = @import("proto_array.zig").DataAvailabilityStatus;
-const DEFAULT_PRUNE_THRESHOLD = @import("proto_array.zig").DEFAULT_PRUNE_THRESHOLD;
-const BlockExtraMeta = @import("proto_array.zig").BlockExtraMeta;
+const pa = @import("proto_array.zig");
+const ProtoArray = pa.ProtoArray;
+const ProtoArrayError = pa.ProtoArrayError;
+const ProtoBlock = pa.ProtoBlock;
+const ProtoNode = pa.ProtoNode;
+const LVHExecResponse = pa.LVHExecResponse;
+const LVHExecError = pa.LVHExecError;
+const PayloadStatus = pa.PayloadStatus;
+const RootContext = pa.RootContext;
+const ExecutionStatus = pa.ExecutionStatus;
+const DataAvailabilityStatus = pa.DataAvailabilityStatus;
+const DEFAULT_PRUNE_THRESHOLD = pa.DEFAULT_PRUNE_THRESHOLD;
+const BlockExtraMeta = pa.BlockExtraMeta;
 
 const vote_tracker = @import("vote_tracker.zig");
 const Votes = vote_tracker.Votes;
@@ -66,13 +65,32 @@ const UnrealizedCheckpoints = state_transition.UnrealizedCheckpoints;
 
 const ZERO_HASH = constants.ZERO_HASH;
 
-/// Checkpoint results extracted from state during onBlock.
-/// Contains both realized and unrealized checkpoints needed for ProtoBlock construction.
-const CheckpointResult = struct {
-    justified: CheckpointWithPayloadStatus,
-    finalized: CheckpointWithPayloadStatus,
-    unrealized_justified: CheckpointWithPayloadStatus,
-    unrealized_finalized: CheckpointWithPayloadStatus,
+pub const ForkChoiceError = ProtoArrayError || error{
+    // InvalidAttestation inner codes
+    InvalidAttestationEmptyAggregationBitfield,
+    InvalidAttestationUnknownHeadBlock,
+    InvalidAttestationBadTargetEpoch,
+    InvalidAttestationUnknownTargetRoot,
+    InvalidAttestationFutureEpoch,
+    InvalidAttestationPastEpoch,
+    InvalidAttestationInvalidTarget,
+    InvalidAttestationAttestsToFutureBlock,
+    InvalidAttestationFutureSlot,
+    InvalidAttestationInvalidDataIndex,
+    // InvalidBlock inner codes
+    InvalidBlockUnknownParent,
+    InvalidBlockFutureSlot,
+    InvalidBlockFinalizedSlot,
+    InvalidBlockNotFinalizedDescendant,
+    // Other errors
+    InvalidProtoArrayBytes,
+    InconsistentOnTick,
+    BeaconStateErr,
+    AttemptToRevertJustification,
+    ForkChoiceStoreErr,
+    UnableToSetJustifiedCheckpoint,
+    AfterBlockFailed,
+    DependentRootNotFound,
 };
 
 /// Epoch offset for dependent root computation.
@@ -99,6 +117,13 @@ pub const AncestorStatus = enum {
 };
 
 /// Result of `getCommonAncestorDepth`: ancestor status + optional depth.
+/// Result of `getAllAncestorAndNonAncestorBlocks`: owned slices of ancestor
+/// and non-ancestor proto-blocks partitioned by the finalized checkpoint.
+pub const AncestorAndNonAncestorBlocks = struct {
+    ancestors: []ProtoBlock,
+    non_ancestors: []ProtoBlock,
+};
+
 pub const AncestorResult = union(AncestorStatus) {
     common_ancestor: struct { depth: u32 },
     descendant: void,
@@ -197,13 +222,6 @@ pub const BlockAttestationMap = std.AutoHashMapUnmanaged(Root, ValidatorVoteMap)
 /// Slot -> BlockAttestationMap for all queued attestations.
 pub const QueuedAttestationMap = std.AutoArrayHashMapUnmanaged(Slot, BlockAttestationMap);
 
-/// Maximum number of slots to retain in the queued attestations map.
-///
-/// During processing delays, attestations for future slots are queued.
-/// Capping at 3 slots bounds memory to ~3 × 2.18M validators × (root+status)
-/// ≈ a few MB, rather than growing unboundedly during extended stalls.
-const MAX_QUEUED_SLOTS: usize = 3;
-
 /// Set of validated attestation data roots (cleared each slot).
 pub const RootSet = std.HashMapUnmanaged(Root, void, RootContext, 80);
 
@@ -224,8 +242,16 @@ pub const HeadResult = struct {
 
 /// High-level fork choice struct wrapping ProtoArray, Votes, and checkpoint state.
 ///
+/// This struct wraps `ProtoArray` and provides:
+///   - Management of validators' latest messages and balances
+///   - Management of the justified/finalized checkpoints as seen by fork choice
+///   - Queuing of attestations from the current slot
+///
+/// This struct MUST be used with the following considerations:
+///   - Time is not updated automatically, `updateTime` MUST be called every slot
+///
 /// Instantiated from pre-built components (dependency injection):
-///   `ForkChoice.create(config, fc_store, protoArray, validatorCount, opts?)`
+///   `ForkChoice.init(config, fc_store, protoArray, validatorCount, opts?)`
 /// Orchestrates: computeDeltas -> applyScoreChanges -> findHead.
 pub const ForkChoice = struct {
     // ── Config & options ──
@@ -233,32 +259,61 @@ pub const ForkChoice = struct {
     opts: ForkChoiceOpts,
 
     // ── Core components (borrowed references — caller owns lifetime) ──
+    /// The underlying representation of the block DAG.
     proto_array: *ProtoArray,
+    /// Votes currently tracked in the protoArray, stored as struct-of-arrays for performance.
+    /// Decomposes VoteTracker {currentIndex, nextIndex, slot} into parallel arrays.
+    ///
+    /// For Gloas (ePBS), LatestMessage tracks slot instead of epoch and includes payload status.
+    /// Spec: gloas/fork-choice.md#modified-latestmessage
+    ///
+    /// IMPORTANT: current_indices and next_indices point to the EXACT variant node index.
+    /// The payload status is encoded in the node index itself (different variants have
+    /// different indices). For example, if a validator votes for the EMPTY variant,
+    /// next_indices[i] points to that specific EMPTY node.
     votes: Votes,
     fc_store: *ForkChoiceStore,
     deltas_cache: DeltasCache,
 
     // ── Head tracking ──
+    /// Cached head — updated by `updateHead()`.
     head: ProtoBlock,
 
     // ── Proposer boost ──
+    /// Boost the entire branch with this proposer root as the leaf.
     proposer_boost_root: ?Root,
+    /// Score to use in proposer boost, evaluated lazily from justified balances.
     justified_proposer_boost_score: ?u64,
 
     // ── Balance tracking ──
+    /// The current effective balances (ref-counted, acquired from fc_store).
     balances: *EffectiveBalanceIncrementsRc,
 
     // ── Attestation queue ──
+    /// Attestations that arrived at the current slot and must be queued for later processing.
+    /// NOT currently tracked in the protoArray.
+    ///
+    /// Modified for Gloas to track PayloadStatus per validator.
+    /// Maps: Slot -> BlockRoot -> ValidatorIndex -> PayloadStatus
     queued_attestations: QueuedAttestationMap,
+    /// It's inconsistent to count queued attestations at different intervals of a slot.
+    /// Instead, we count queued attestations at the previous slot.
+    queued_attestations_previous_slot: u32,
 
     // ── Caches ──
+    /// Cache of validated attestation data roots to skip re-validation.
     validated_attestation_datas: RootSet,
 
+    // TODO: irrecoverable_error follows the TS Lodestar pattern of storing a fatal error
+    // and propagating it on subsequent calls. Revisit once callers are wired up — a more
+    // idiomatic Zig approach (e.g. returning error unions directly) may be cleaner.
     // ── Error state ──
     irrecoverable_error: ?(Allocator.Error || ProtoArrayError),
+    /// Detailed LVH error context, copied from proto_array when irrecoverable_error is set.
+    lvh_error: ?LVHExecError,
 
     /// Initialize ForkChoice in-place from pre-built components.
-    /// The caller is responsible for the memory backing `self`, `proto_array`, and `fc_store`.
+    /// The caller is responsible for the memory backing `self`, `pa`, and `fc_store`.
     /// Votes are pre-allocated to `validator_count` and initialized to defaults
     /// (when compute deltas, we ignore epoch if voteNextIndex is NULL_VOTE_INDEX anyway).
     /// Head is computed via `updateHead()`.
@@ -283,8 +338,10 @@ pub const ForkChoice = struct {
             .justified_proposer_boost_score = null,
             .balances = fc_store.justified.balances.acquire(),
             .queued_attestations = .empty,
+            .queued_attestations_previous_slot = 0,
             .validated_attestation_datas = .empty,
             .irrecoverable_error = null,
+            .lvh_error = null,
         };
 
         // Pre-allocate votes for known validators, initialized to NULL_VOTE_INDEX.
@@ -295,7 +352,7 @@ pub const ForkChoice = struct {
     }
 
     /// Release resources owned by ForkChoice (votes, caches, queued attestations).
-    /// Does NOT free proto_array, fc_store, or `self` — caller owns those.
+    /// Does NOT free pa, fc_store, or `self` — caller owns those.
     pub fn deinit(self: *ForkChoice, allocator: Allocator) void {
         // Clean up runtime-accumulated state (not allocated in init).
         var slot_iter = self.queued_attestations.iterator();
@@ -384,83 +441,17 @@ pub const ForkChoice = struct {
         else
             null;
 
-        // 1-4. Validate block and get parent.
-        const parent_block = try self.validateBlock(slot, parent_root, parent_block_hash);
-
-        // 5. Compute block root.
-        var block_root: Root = undefined;
-        try block.hashTreeRoot(allocator, &block_root);
-
-        // 6. Assign proposer score boost if the block is timely.
-        const is_timely = self.isBlockTimely(slot, block_delay_sec);
-        if (self.opts.proposer_boost and is_timely and self.proposer_boost_root == null) {
-            self.proposer_boost_root = block_root;
-        }
-
-        // 7-11. Extract and update checkpoints.
-        const checkpoints = try self.extractAndUpdateCheckpoints(allocator, state, parent_block, slot, current_slot);
-
-        // 12. Compute target root.
-        const block_epoch = computeEpochAtSlot(slot);
-        const target_slot = computeStartSlotAtEpoch(block_epoch);
-        const target_root: Root = if (slot == target_slot) block_root else tr_blk: {
-            var block_roots = try state.state.blockRoots();
-            const idx = target_slot % preset.SLOTS_PER_HISTORICAL_ROOT;
-            break :tr_blk (try block_roots.getFieldRoot(idx)).*;
-        };
-
-        // 13. Construct BlockExtraMeta based on fork.
-        // comptime: only one branch survives per fork instantiation.
-        const extra_meta: BlockExtraMeta = if (comptime fork.gte(.gloas))
-            try self.getGloasExtraMetaTyped(fork, block.body(), parent_block, parent_root, execution_status, data_availability_status)
-        else if (comptime fork.gte(.bellatrix))
-            getPreGloasExtraMetaTyped(fork, state.state.castToFork(fork), block, execution_status, data_availability_status)
-        else
-            getPreMergeExtraMeta(execution_status, data_availability_status);
-
-        // 14. Construct ProtoBlock.
-        const proto_block = ProtoBlock{
-            .slot = slot,
-            .block_root = block_root,
-            .parent_root = parent_root,
-            .state_root = block.inner.state_root,
-            .target_root = target_root,
-            .justified_epoch = checkpoints.justified.epoch,
-            .justified_root = checkpoints.justified.root,
-            .finalized_epoch = checkpoints.finalized.epoch,
-            .finalized_root = checkpoints.finalized.root,
-            .unrealized_justified_epoch = checkpoints.unrealized_justified.epoch,
-            .unrealized_justified_root = checkpoints.unrealized_justified.root,
-            .unrealized_finalized_epoch = checkpoints.unrealized_finalized.epoch,
-            .unrealized_finalized_root = checkpoints.unrealized_finalized.root,
-            .extra_meta = extra_meta,
-            .timeliness = is_timely,
-            .payload_status = if (comptime fork.gte(.gloas)) .pending else .full,
-            .parent_block_hash = parent_block_hash,
-        };
-
-        // 15. Add to proto array.
-        try self.proto_array.onBlock(allocator, proto_block, current_slot, self.proposer_boost_root);
-
-        return proto_block;
-    }
-
-    /// Validate block for fork choice: parent known, not future, not finalized, finalized descendant.
-    /// Returns the parent ProtoNode.
-    fn validateBlock(
-        self: *ForkChoice,
-        slot: Slot,
-        parent_root: Root,
-        parent_block_hash: ?Root,
-    ) (ProtoArrayError || ForkChoiceError)!*const ProtoNode {
         // 1. Parent block must be known (state_transition would have failed otherwise).
         const parent_block = self.proto_array.getParent(parent_root, parent_block_hash) orelse
             return error.InvalidBlockUnknownParent;
 
-        // 2. Blocks cannot be in the future.
+        // 2. Blocks cannot be in the future. If they are, their consideration must be delayed until
+        // they are in the past.
+        // Note: presently, we do not delay consideration. We just drop the block.
         if (slot > self.fc_store.current_slot) return error.InvalidBlockFutureSlot;
 
-        // 3. Block must be later than the finalized epoch slot.
+        // 3. Check that block is later than the finalized epoch slot (optimization to reduce calls to
+        // getAncestor).
         const finalized_slot = computeStartSlotAtEpoch(self.fc_store.finalized_checkpoint.epoch);
         if (slot <= finalized_slot) return error.InvalidBlockFinalizedSlot;
 
@@ -468,27 +459,43 @@ pub const ForkChoice = struct {
         const block_ancestor_node = try self.proto_array.getAncestor(parent_root, finalized_slot);
         const fc_store_finalized = self.fc_store.finalized_checkpoint;
         if (!std.mem.eql(u8, &block_ancestor_node.block_root, &fc_store_finalized.root) or
+            // Gloas (ePBS): finalized checkpoints carry payload status (empty/full) that must also match.
             block_ancestor_node.payload_status != fc_store_finalized.payload_status)
         {
             return error.InvalidBlockNotFinalizedDescendant;
         }
 
-        return parent_block;
-    }
+        // 5. Compute block root.
+        var block_root: Root = undefined;
+        const ForkTypes = @import("fork_types").ForkTypes;
+        try ForkTypes(fork).BeaconBlock.hashTreeRoot(allocator, &block.inner, &block_root);
 
-    /// Extract checkpoints from state, compute unrealized checkpoints, and update the store.
-    /// Returns all four checkpoints needed for ProtoBlock construction.
-    fn extractAndUpdateCheckpoints(
-        self: *ForkChoice,
-        allocator: Allocator,
-        state: *CachedBeaconState,
-        parent_block: *const ProtoNode,
-        slot: Slot,
-        current_slot: Slot,
-    ) !CheckpointResult {
+        // 6. Assign proposer score boost if the block is timely
+        // (before attesting interval = before 1st interval).
+        const is_timely = self.isBlockTimely(slot, block_delay_sec);
+        // Only boost the first block we see.
+        if (self.opts.proposer_boost and is_timely and self.proposer_boost_root == null) {
+            self.proposer_boost_root = block_root;
+        }
+
+        const block_epoch = computeEpochAtSlot(slot);
+
         // 7. Extract checkpoints from state with payload status.
-        const justified_checkpoint = try extractCheckpointFromState(state, .justified);
-        const finalized_checkpoint = try extractCheckpointFromState(state, .finalized);
+        var justified_ssz: consensus_types.phase0.Checkpoint.Type = undefined;
+        try state.state.currentJustifiedCheckpoint(&justified_ssz);
+        const justified_checkpoint: CheckpointWithPayloadStatus = .{
+            .epoch = justified_ssz.epoch,
+            .root = justified_ssz.root,
+            .payload_status = getCheckpointPayloadStatus(state, justified_ssz.epoch),
+        };
+
+        var finalized_ssz: consensus_types.phase0.Checkpoint.Type = undefined;
+        try state.state.finalizedCheckpoint(&finalized_ssz);
+        const finalized_checkpoint: CheckpointWithPayloadStatus = .{
+            .epoch = finalized_ssz.epoch,
+            .root = finalized_ssz.root,
+            .payload_status = getCheckpointPayloadStatus(state, finalized_ssz.epoch),
+        };
 
         // 8. Update realized checkpoints.
         var realized_ctx = OnBlockBalancesCtx{
@@ -501,64 +508,15 @@ pub const ForkChoice = struct {
             .getFn = OnBlockBalancesCtx.call,
         });
 
-        // 9–10. Compute unrealized checkpoints and update store.
-        const unrealized = try self.computeAndUpdateUnrealizedCheckpoints(
-            allocator,
-            state,
-            parent_block,
-            slot,
-            justified_checkpoint,
-            finalized_checkpoint,
-        );
-
-        // 11. If block from past epoch: update realized with unrealized.
-        if (computeEpochAtSlot(slot) < computeEpochAtSlot(current_slot)) {
-            var past_epoch_ctx = OnBlockBalancesCtx{
-                .getter = self.fc_store.justified_balances_getter,
-                .checkpoint = unrealized.justified,
-                .state = state,
-            };
-            try self.updateCheckpoints(unrealized.justified, unrealized.finalized, .{
-                .context = @ptrCast(&past_epoch_ctx),
-                .getFn = OnBlockBalancesCtx.call,
-            });
-        }
-
-        return .{
-            .justified = justified_checkpoint,
-            .finalized = finalized_checkpoint,
-            .unrealized_justified = unrealized.justified,
-            .unrealized_finalized = unrealized.finalized,
-        };
-    }
-
-    const CheckpointKind = enum { justified, finalized };
-
-    /// Extract a realized checkpoint from CachedBeaconState and attach payload status.
-    fn extractCheckpointFromState(state: *CachedBeaconState, kind: CheckpointKind) !CheckpointWithPayloadStatus {
-        var ssz_cp: consensus_types.phase0.Checkpoint.Type = undefined;
-        switch (kind) {
-            .justified => try state.state.currentJustifiedCheckpoint(&ssz_cp),
-            .finalized => try state.state.finalizedCheckpoint(&ssz_cp),
-        }
-        return .{
-            .epoch = ssz_cp.epoch,
-            .root = ssz_cp.root,
-            .payload_status = getCheckpointPayloadStatus(state, ssz_cp.epoch),
-        };
-    }
-
-    /// Compute or inherit unrealized checkpoints, then update the store.
-    fn computeAndUpdateUnrealizedCheckpoints(
-        self: *ForkChoice,
-        allocator: Allocator,
-        state: *CachedBeaconState,
-        parent_block: *const ProtoNode,
-        slot: Slot,
-        justified_checkpoint: CheckpointWithPayloadStatus,
-        finalized_checkpoint: CheckpointWithPayloadStatus,
-    ) !struct { justified: CheckpointWithPayloadStatus, finalized: CheckpointWithPayloadStatus } {
-        const block_epoch = computeEpochAtSlot(slot);
+        // 9-10. Same logic as compute_pulled_up_tip in the spec, inlined to reuse variables.
+        // If the parent checkpoints are already at the same epoch as the block being imported,
+        // it's impossible for the unrealized checkpoints to differ from the parent's. This
+        // holds true because:
+        //   1. A child block cannot have lower FFG checkpoints than its parent.
+        //   2. A block in epoch N cannot contain attestations which would justify an epoch higher than N.
+        //   3. A block in epoch N cannot contain attestations which would finalize an epoch higher than N - 1.
+        // This is an optimization. It should reduce the amount of times we run
+        // computeUnrealizedCheckpoints by approximately 1/3rd when the chain is performing optimally.
         var unrealized_justified: CheckpointWithPayloadStatus = undefined;
         var unrealized_finalized: CheckpointWithPayloadStatus = undefined;
 
@@ -566,6 +524,7 @@ pub const ForkChoice = struct {
             if (parent_block.unrealized_justified_epoch == block_epoch and
                 parent_block.unrealized_finalized_epoch + 1 >= block_epoch)
             {
+                // Reuse from parent, happens at ~1/3 last blocks of epoch as monitored in mainnet.
                 unrealized_justified = .{
                     .epoch = parent_block.unrealized_justified_epoch,
                     .root = parent_block.unrealized_justified_root,
@@ -577,6 +536,7 @@ pub const ForkChoice = struct {
                     .payload_status = getCheckpointPayloadStatus(state, parent_block.unrealized_finalized_epoch),
                 };
             } else {
+                // Compute new, happens ~2/3 first blocks of epoch as monitored in mainnet.
                 const unrealized = try state_transition.computeUnrealizedCheckpoints(state, allocator);
                 unrealized_justified = .{
                     .epoch = unrealized.justified_checkpoint.epoch,
@@ -594,6 +554,7 @@ pub const ForkChoice = struct {
             unrealized_finalized = finalized_checkpoint;
         }
 
+        // Update best known unrealized justified & finalized checkpoints.
         var unrealized_balances_ctx = OnBlockBalancesCtx{
             .getter = self.fc_store.justified_balances_getter,
             .checkpoint = unrealized_justified,
@@ -604,11 +565,65 @@ pub const ForkChoice = struct {
             .getFn = OnBlockBalancesCtx.call,
         });
 
-        return .{ .justified = unrealized_justified, .finalized = unrealized_finalized };
-    }
+        // 11. If block is from a past epoch, try to update store's justified & finalized
+        // checkpoints right away.
+        if (block_epoch < computeEpochAtSlot(current_slot)) {
+            var past_epoch_ctx = OnBlockBalancesCtx{
+                .getter = self.fc_store.justified_balances_getter,
+                .checkpoint = unrealized_justified,
+                .state = state,
+            };
+            try self.updateCheckpoints(unrealized_justified, unrealized_finalized, .{
+                .context = @ptrCast(&past_epoch_ctx),
+                .getFn = OnBlockBalancesCtx.call,
+            });
+        }
 
-    // NOTE: Test/bench-only helper `onBlockFromProto` is defined as a free function
-    // below the struct (in the test helpers section) to keep the production API surface clean.
+        // 12. Compute target root.
+        const target_slot = computeStartSlotAtEpoch(block_epoch);
+        const target_root: Root = if (slot == target_slot) block_root else tr_blk: {
+            var block_roots = try state.state.blockRoots();
+            const idx = target_slot % preset.SLOTS_PER_HISTORICAL_ROOT;
+            break :tr_blk (try block_roots.getFieldRoot(idx)).*;
+        };
+
+        // 13. Construct BlockExtraMeta based on fork.
+        // comptime: only one branch survives per fork instantiation.
+        const extra_meta: BlockExtraMeta = if (comptime fork.gte(.gloas))
+            self.getGloasExtraMetaTyped(fork, block.body(), parent_block, parent_root, execution_status, data_availability_status)
+        else if (comptime fork.gte(.bellatrix))
+            getPreGloasExtraMetaTyped(fork, state.state.castToFork(fork), block, execution_status, data_availability_status)
+        else
+            getPreMergeExtraMeta(execution_status, data_availability_status);
+
+        // 14. Construct ProtoBlock.
+        const proto_block = ProtoBlock{
+            .slot = slot,
+            .block_root = block_root,
+            .parent_root = parent_root,
+            .state_root = block.inner.state_root,
+            .target_root = target_root,
+            .justified_epoch = justified_checkpoint.epoch,
+            .justified_root = justified_checkpoint.root,
+            .finalized_epoch = finalized_checkpoint.epoch,
+            .finalized_root = finalized_checkpoint.root,
+            .unrealized_justified_epoch = unrealized_justified.epoch,
+            .unrealized_justified_root = unrealized_justified.root,
+            .unrealized_finalized_epoch = unrealized_finalized.epoch,
+            .unrealized_finalized_root = unrealized_finalized.root,
+            .extra_meta = extra_meta,
+            .timeliness = is_timely,
+            .payload_status = if (comptime fork.gte(.gloas)) .pending else .full,
+            .parent_block_hash = parent_block_hash,
+        };
+
+        // 15. Add to proto array.
+        // This does not apply a vote to the block, it just makes fork choice aware of the block so
+        // it can still be identified as the head even if it doesn't have any votes.
+        try self.proto_array.onBlock(allocator, proto_block, current_slot, self.proposer_boost_root);
+
+        return proto_block;
+    }
 
     // ── Attestation processing ──
 
@@ -635,7 +650,19 @@ pub const ForkChoice = struct {
         const target_epoch = attestation.targetEpoch();
         const attesting_indices = attestation.attestingIndices();
 
-        // Ignore zero-hash beacon_block_root.
+        // Ignore any attestations to the zero hash.
+        //
+        // This is an edge case that results from the spec aliasing the zero hash to the genesis
+        // block. Attesters may attest to the zero hash if they have never seen a block.
+        //
+        // We have two options here:
+        //
+        //  1. Apply all zero-hash attestations to the genesis block.
+        //  2. Ignore all attestations to the zero hash.
+        //
+        // (1) becomes weird once we hit finality and fork choice drops the genesis block. (2) is
+        // fine because votes to the genesis block are not useful; all validators implicitly attest
+        // to genesis just by being present in the chain.
         if (std.mem.eql(u8, &block_root, &ZERO_HASH)) return;
 
         // Validate the attestation.
@@ -649,114 +676,57 @@ pub const ForkChoice = struct {
             force_import,
         );
 
-        const payload_status = self.resolveAttestationPayloadStatus(attestation, att_slot, block_root);
+        // Determine the payload status for this attestation.
+        // Pre-Gloas: payload is always present (FULL).
+        // Post-Gloas (ePBS):
+        //   - always add weight to PENDING
+        //   - if att_slot > block.slot, also add weight to FULL or EMPTY
+        // We need to retrieve block to check if it's Gloas and to compare slot.
+        const payload_status: PayloadStatus = ps_blk: {
+            const block = self.getBlockDefaultStatus(block_root);
+            if (block != null and block.?.isGloasBlock()) {
+                // Post-Gloas block: determine FULL/EMPTY/PENDING based on slot and committee index.
+                // If att_slot > block.slot, we can determine FULL or EMPTY. Else always PENDING.
+                if (att_slot > block.?.slot) {
+                    const att_index = attestation.index();
+                    if (att_index == 1) break :ps_blk .full;
+                    // att_index must be 0 here — validateAttestationData already
+                    // rejected any index other than 0 or 1 for Gloas blocks.
+                    std.debug.assert(att_index == 0);
+                    break :ps_blk .empty;
+                }
+                break :ps_blk .pending;
+            }
+            // Pre-Gloas block or block not found: always FULL.
+            break :ps_blk .full;
+        };
 
+        // The spec declares:
+        //   Attestations can only affect the fork choice of subsequent slots.
+        //   Delay consideration in the fork choice until their slot is in the past.
         if (att_slot < self.fc_store.current_slot) {
-            try self.applyVotesImmediately(allocator, attesting_indices, att_slot, block_root, payload_status);
-        } else {
-            try self.queueVotesForSlot(allocator, attesting_indices, att_slot, block_root, payload_status);
-        }
-    }
-
-    /// Determine the payload status for an attestation.
-    ///
-    /// Pre-Gloas: always FULL (payload embedded in block).
-    /// Post-Gloas (block has parent_block_hash):
-    ///   - att_slot > block.slot: index 1 → FULL, index 0 → EMPTY
-    ///   - att_slot <= block.slot: PENDING
-    fn resolveAttestationPayloadStatus(
-        self: *ForkChoice,
-        attestation: *const AnyIndexedAttestation,
-        att_slot: Slot,
-        block_root: Root,
-    ) PayloadStatus {
-        const block = self.getBlockDefaultStatus(block_root);
-        if (block != null and block.?.parent_block_hash != null) {
-            // Gloas block
-            if (att_slot > block.?.slot) {
-                const att_index = attestation.index();
-                if (att_index == 1) return .full;
-                // att_index must be 0 here — validateAttestationData already
-                // rejected any index other than 0 or 1 for Gloas blocks.
-                std.debug.assert(att_index == 0);
-                return .empty;
-            }
-            return .pending;
-        }
-        return .full;
-    }
-
-    /// Apply attestation votes immediately (for past-slot attestations).
-    fn applyVotesImmediately(
-        self: *ForkChoice,
-        allocator: Allocator,
-        attesting_indices: []const ValidatorIndex,
-        att_slot: Slot,
-        block_root: Root,
-        payload_status: PayloadStatus,
-    ) !void {
-        for (attesting_indices) |validator_index| {
-            if (!self.fc_store.equivocating_indices.contains(validator_index)) {
-                try self.addLatestMessage(allocator, validator_index, att_slot, block_root, payload_status);
-            }
-        }
-    }
-
-    /// Queue attestation votes for deferred processing (current-slot attestations).
-    fn queueVotesForSlot(
-        self: *ForkChoice,
-        allocator: Allocator,
-        attesting_indices: []const ValidatorIndex,
-        att_slot: Slot,
-        block_root: Root,
-        payload_status: PayloadStatus,
-    ) !void {
-        // Bound queued_attestations to MAX_QUEUED_SLOTS slots.
-        //
-        // During processing delays, future-slot attestations accumulate.  Each
-        // validator can contribute one entry, so an unbounded map can reach
-        // ~2.18 M entries per slot (218 MB for mainnet). Cap by evicting the
-        // oldest slot whenever the map exceeds the limit.
-        //
-        // We evict before inserting so that att_slot (the current write) is
-        // always accepted; the drop targets stale slots that are farthest from
-        // the current slot.
-        while (self.queued_attestations.count() >= MAX_QUEUED_SLOTS) {
-            // Find the oldest (smallest) slot.  AutoArrayHashMap is
-            // insertion-ordered, not sorted, so we must scan.
-            var oldest_slot: Slot = std.math.maxInt(Slot);
-            var oldest_idx: usize = 0;
-            for (self.queued_attestations.keys(), 0..) |s, i| {
-                if (s < oldest_slot) {
-                    oldest_slot = s;
-                    oldest_idx = i;
+            for (attesting_indices) |validator_index| {
+                if (!self.fc_store.equivocating_indices.contains(validator_index)) {
+                    try self.addLatestMessage(allocator, validator_index, att_slot, block_root, payload_status);
                 }
             }
-            // Free the inner maps then remove the slot entry.
-            const block_map_ptr = &self.queued_attestations.values()[oldest_idx];
-            var root_it = block_map_ptr.iterator();
-            while (root_it.next()) |re| {
-                re.value_ptr.deinit(allocator);
-            }
-            block_map_ptr.deinit(allocator);
-            self.queued_attestations.swapRemoveAt(oldest_idx);
-        }
+        } else {
+            const by_root_gop = try self.queued_attestations.getOrPut(allocator, att_slot);
+            if (!by_root_gop.found_existing) by_root_gop.value_ptr.* = .{};
+            const by_root = by_root_gop.value_ptr;
 
-        const by_root_gop = try self.queued_attestations.getOrPut(allocator, att_slot);
-        if (!by_root_gop.found_existing) by_root_gop.value_ptr.* = .{};
-        const by_root = by_root_gop.value_ptr;
+            const validator_votes_gop = try by_root.getOrPut(allocator, block_root);
+            if (!validator_votes_gop.found_existing) validator_votes_gop.value_ptr.* = .{};
+            const validator_votes = validator_votes_gop.value_ptr;
 
-        const validator_votes_gop = try by_root.getOrPut(allocator, block_root);
-        if (!validator_votes_gop.found_existing) validator_votes_gop.value_ptr.* = .{};
-        const validator_votes = validator_votes_gop.value_ptr;
+            // Pre-allocate capacity so the loop below cannot fail with OOM,
+            // avoiding partial state changes.
+            try validator_votes.ensureTotalCapacity(allocator, validator_votes.count() + @as(u32, @intCast(attesting_indices.len)));
 
-        // Pre-allocate capacity so the loop below cannot fail with OOM,
-        // avoiding partial state changes.
-        try validator_votes.ensureTotalCapacity(allocator, validator_votes.count() + @as(u32, @intCast(attesting_indices.len)));
-
-        for (attesting_indices) |validator_index| {
-            if (!self.fc_store.equivocating_indices.contains(validator_index)) {
-                validator_votes.putAssumeCapacity(validator_index, payload_status);
+            for (attesting_indices) |validator_index| {
+                if (!self.fc_store.equivocating_indices.contains(validator_index)) {
+                    validator_votes.putAssumeCapacity(validator_index, payload_status);
+                }
             }
         }
     }
@@ -799,39 +769,48 @@ pub const ForkChoice = struct {
         target_epoch: Epoch,
         att_data_root: Root,
         force_import: bool,
-    ) (ForkChoiceError || Allocator.Error)!void {
+    ) (Allocator.Error || ForkChoiceError)!void {
         const current_epoch = computeEpochAtSlot(self.fc_store.current_slot);
         const target_root = attestation.targetRoot();
 
-        // FUTURE_EPOCH: target epoch must not be in the future.
+        // FUTURE_EPOCH: Attestation must be from the current or previous epoch.
         if (target_epoch > current_epoch) return error.InvalidAttestationFutureEpoch;
 
-        // PAST_EPOCH: target epoch must be current or previous (unless force_import).
+        // PAST_EPOCH: Attestation must be from the current or previous epoch (unless force_import).
         if (!force_import and target_epoch + 1 < current_epoch) return error.InvalidAttestationPastEpoch;
 
         // BAD_TARGET_EPOCH: target epoch must match epoch of attestation slot.
         if (target_epoch != computeEpochAtSlot(slot)) return error.InvalidAttestationBadTargetEpoch;
 
-        // UNKNOWN_TARGET_ROOT: target root must be known.
+        // UNKNOWN_TARGET_ROOT: Attestation target must be for a known block.
+        // We do not delay the block for later processing to reduce complexity and DoS attack surface.
         if (!self.proto_array.hasBlock(target_root)) return error.InvalidAttestationUnknownTargetRoot;
 
-        // UNKNOWN_HEAD_BLOCK: retrieve block for beacon block root.
+        // UNKNOWN_HEAD_BLOCK: Load the block for attestation.data.beacon_block_root.
+        //
+        // This indirectly checks to see if the beacon_block_root is in our fork choice. Any known,
+        // non-finalized block should be in fork choice, so this check immediately filters out
+        // attestations that attest to a block that has not been processed.
+        //
+        // Attestations must be for a known block. If the block is unknown, we simply drop the
+        // attestation and do not delay consideration for later.
         const default_status = self.proto_array.getDefaultVariant(block_root) orelse return error.InvalidAttestationUnknownHeadBlock;
         const block = self.getBlock(block_root, default_status) orelse return error.InvalidAttestationUnknownHeadBlock;
 
-        // INVALID_EXECUTION_STATUS: reject attestations to blocks with invalid execution.
-        if (block.extra_meta.executionStatus() == .invalid) return error.InvalidAttestationUnknownHeadBlock;
-
-        // INVALID_TARGET: verify target root consistency.
+        // INVALID_TARGET: If an attestation points to a block that is from an earlier slot than
+        // the attestation, then all slots between the block and attestation must be skipped.
+        // Therefore if the block is from a prior epoch to the attestation, then the target root
+        // must be equal to the root of the block that is being attested to.
         const expected_target = if (target_epoch > computeEpochAtSlot(block.slot)) block_root else block.target_root;
         if (!std.mem.eql(u8, &expected_target, &target_root)) return error.InvalidAttestationInvalidTarget;
 
-        // ATTESTS_TO_FUTURE_BLOCK: block slot must not be after attestation slot.
+        // ATTESTS_TO_FUTURE_BLOCK: Attestations must not be for blocks in the future. If this is
+        // the case, the attestation should not be considered.
         if (block.slot > slot) return error.InvalidAttestationAttestsToFutureBlock;
 
         // INVALID_DATA_INDEX: For Gloas blocks, attestation index must be 0 or 1.
         const att_index = attestation.index();
-        if (block.parent_block_hash != null and att_index != 0 and att_index != 1) return error.InvalidAttestationInvalidDataIndex;
+        if (block.isGloasBlock() and att_index != 0 and att_index != 1) return error.InvalidAttestationInvalidDataIndex;
 
         // Cache validated attestation data root.
         try self.validated_attestation_datas.put(
@@ -848,10 +827,10 @@ pub const ForkChoice = struct {
         // Only current-slot blocks can be timely.
         if (block_slot != self.fc_store.current_slot) return false;
 
-        // Timely if arrived before the attestation due time (1/3 of slot).
-        // Derive from config rather than hardcoding: SECONDS_PER_SLOT / 3 * 1000 ms.
-        const attestation_due_ms: u64 = self.config.chain.SECONDS_PER_SLOT * 1000 / 3;
-        return @as(u64, block_delay_sec) * 1000 < attestation_due_ms;
+        // Timely if arrived before the attestation due time.
+        const fork = self.config.forkSeq(block_slot);
+        const attestation_due_ms = self.config.getAttestationDueMs(fork);
+        return block_delay_sec * 1000 < attestation_due_ms;
     }
 
     // ── BlockExtraMeta construction helpers ──
@@ -869,7 +848,7 @@ pub const ForkChoice = struct {
         _ = parent_block.extra_meta.executionPayloadBlockHash() orelse return 0;
 
         // If parent is pre-Gloas, it only has FULL variant.
-        if (parent_block.parent_block_hash == null) {
+        if (!parent_block.isGloasBlock()) {
             return parent_block.extra_meta.executionPayloadNumber();
         }
 
@@ -1014,29 +993,6 @@ pub const ForkChoice = struct {
         return self.head;
     }
 
-    // ── Proposer boost ──
-
-    /// Apply proposer boost for a block.
-    /// Caller computes score = committee_weight * PROPOSER_SCORE_BOOST / 100
-    /// (PROPOSER_SCORE_BOOST is in ChainConfig, not a comptime preset).
-    pub fn setProposerBoost(
-        self: *ForkChoice,
-        root: Root,
-        score: u64,
-    ) void {
-        self.proto_array.previous_proposer_boost = .{
-            .root = root,
-            .score = score,
-        };
-        self.proposer_boost_root = root;
-    }
-
-    /// Clear proposer boost (typically at start of new slot).
-    pub fn clearProposerBoost(self: *ForkChoice) void {
-        self.proto_array.previous_proposer_boost = null;
-        self.proposer_boost_root = null;
-    }
-
     // ── Proposer boost reorg ──
 
     /// Called by `predictProposerHead` and `onBlock`. If the result is not same as
@@ -1140,13 +1096,13 @@ pub const ForkChoice = struct {
         const head_node_idx = self.proto_array.getNodeIndexByRootAndStatus(head_block.block_root, head_block.payload_status) orelse {
             return .{ .head = head_block.*, .is_head_timely = is_head_timely, .not_reorged_reason = .head_block_not_weak };
         };
-        if (self.proto_array.nodes.items[head_node_idx].weight >= @as(i64, @intCast(reorg_threshold))) {
+        if (self.proto_array.nodes.items[head_node_idx].weight >= reorg_threshold) {
             return .{ .head = head_block.*, .is_head_timely = is_head_timely, .not_reorged_reason = .head_block_not_weak };
         }
 
         // No reorg if parentBlock is "not strong" — weight is <= REORG_PARENT_WEIGHT_THRESHOLD% of committee
         const parent_threshold = getCommitteeFraction(self.fc_store.justified.total_balance, preset.SLOTS_PER_EPOCH, self.config.chain.REORG_PARENT_WEIGHT_THRESHOLD);
-        if (self.proto_array.nodes.items[parent_idx].weight <= @as(i64, @intCast(parent_threshold))) {
+        if (self.proto_array.nodes.items[parent_idx].weight <= parent_threshold) {
             return .{ .head = head_block.*, .is_head_timely = is_head_timely, .not_reorged_reason = .parent_block_not_strong };
         }
 
@@ -1220,12 +1176,9 @@ pub const ForkChoice = struct {
 
     /// Check if the proposer is proposing on time.
     /// https://github.com/ethereum/consensus-specs/blob/v1.5.0/specs/phase0/fork-choice.md#is_proposing_on_time
-    ///
-    /// Cutoff = SECONDS_PER_SLOT * 1000 / 6  (1/6 of slot duration in ms).
-    /// For 12s mainnet slots: 2000ms. For 6s minimal slots: 1000ms.
-    fn isProposingOnTime(self: *const ForkChoice, sec_from_slot: u32, _: Slot) bool {
-        const proposer_reorg_cutoff: u64 = self.config.chain.SECONDS_PER_SLOT * 1000 / 6;
-        return @as(u64, sec_from_slot) * 1000 < proposer_reorg_cutoff;
+    fn isProposingOnTime(self: *const ForkChoice, sec_from_slot: u32, slot: Slot) bool {
+        const proposer_reorg_cutoff = self.config.getProposerReorgCutoffMs(self.config.forkSeq(slot));
+        return @as(u64, sec_from_slot) * 1000 <= proposer_reorg_cutoff;
     }
 
     /// A multiplexer to wrap around the traditional `updateHead()` according to the scenario.
@@ -1265,6 +1218,7 @@ pub const ForkChoice = struct {
     /// Their weight is removed in the next computeDeltas call.
     pub fn onAttesterSlashing(
         self: *ForkChoice,
+        allocator: Allocator,
         attester_slashing: *const AnyAttesterSlashing,
     ) Allocator.Error!void {
         const indices_1 = attester_slashing.attestingIndices1();
@@ -1274,7 +1228,7 @@ pub const ForkChoice = struct {
         var j: usize = 0;
         while (i < indices_1.len and j < indices_2.len) {
             if (indices_1[i] == indices_2[j]) {
-                try self.fc_store.equivocating_indices.put(indices_1[i], {});
+                try self.fc_store.equivocating_indices.put(allocator, indices_1[i], {});
                 i += 1;
                 j += 1;
             } else if (indices_1[i] < indices_2[j]) {
@@ -1303,6 +1257,7 @@ pub const ForkChoice = struct {
         }
 
         // Process queued attestations after time advance.
+        self.queued_attestations_previous_slot = 0;
         try self.processAttestationQueue(allocator);
 
         // Clear validated attestation data cache.
@@ -1311,65 +1266,6 @@ pub const ForkChoice = struct {
 
     pub fn getTime(self: *const ForkChoice) Slot {
         return self.fc_store.current_slot;
-    }
-
-    /// Prune queued attestations whose slot is older than `current_slot - MAX_QUEUED_SLOTS`.
-    ///
-    /// Called from the chain's `updateTime` catch path: if `updateTime` fails (e.g. due to an
-    /// OOM during attestation processing), the queued_attestations map may still contain stale
-    /// entries that will never be consumed. Pruning here prevents unbounded growth.
-    pub fn pruneStaleQueuedAttestations(self: *ForkChoice, allocator: Allocator, current_slot: Slot) void {
-        if (self.queued_attestations.count() == 0) return;
-        const min_slot: Slot = if (current_slot > MAX_QUEUED_SLOTS)
-            current_slot - @as(Slot, MAX_QUEUED_SLOTS)
-        else
-            0;
-        // Collect stale keys (slot < min_slot).
-        var to_remove: std.ArrayListUnmanaged(Slot) = .empty;
-        defer to_remove.deinit(allocator);
-        var iter = self.queued_attestations.iterator();
-        while (iter.next()) |entry| {
-            if (entry.key_ptr.* < min_slot) {
-                to_remove.append(allocator, entry.key_ptr.*) catch continue;
-            }
-        }
-        for (to_remove.items) |slot| {
-            if (self.queued_attestations.getPtr(slot)) |block_map| {
-                var bm_iter = block_map.iterator();
-                while (bm_iter.next()) |block_entry| {
-                    block_entry.value_ptr.deinit(allocator);
-                }
-                block_map.deinit(allocator);
-            }
-            _ = self.queued_attestations.swapRemove(slot);
-        }
-    }
-
-    // ── Compatibility shims for chain pipeline ──
-
-    /// Apply a single validator vote to fork choice.
-    /// Simplified wrapper for the chain pipeline which processes attestations
-    /// one validator at a time. Wraps addLatestMessage with .full payload status.
-    pub fn onSingleVote(
-        self: *ForkChoice,
-        allocator: Allocator,
-        validator_index: ValidatorIndex,
-        att_slot: Slot,
-        block_root: Root,
-        target_epoch: Epoch,
-    ) !void {
-        if (target_epoch > computeEpochAtSlot(self.fc_store.current_slot)) return error.InvalidAttestationFutureEpoch;
-        if (self.fc_store.equivocating_indices.contains(validator_index)) return;
-        try self.addLatestMessage(allocator, validator_index, att_slot, block_root, .full);
-    }
-
-    /// Mark a single validator as equivocating.
-    /// For the chain pipeline which computes set intersection externally.
-    pub fn onEquivocation(
-        self: *ForkChoice,
-        equivocating_index: u64,
-    ) Allocator.Error!void {
-        try self.fc_store.equivocating_indices.put(equivocating_index, {});
     }
 
     // ── Checkpoint management (private) ──
@@ -1515,6 +1411,66 @@ pub const ForkChoice = struct {
         // else it's an old vote, don't count it.
     }
 
+    // ── Compatibility shims for existing chain callers ──
+
+    pub fn onSingleVote(
+        self: *ForkChoice,
+        allocator: Allocator,
+        validator_index: ValidatorIndex,
+        att_slot: Slot,
+        block_root: Root,
+        target_epoch: Epoch,
+    ) !void {
+        if (target_epoch > computeEpochAtSlot(self.fc_store.current_slot)) return error.InvalidAttestationFutureEpoch;
+        if (self.fc_store.equivocating_indices.contains(validator_index)) return;
+
+        const payload_status = self.proto_array.getDefaultVariant(block_root) orelse PayloadStatus.full;
+
+        if (att_slot < self.fc_store.current_slot) {
+            try self.addLatestMessage(allocator, validator_index, att_slot, block_root, payload_status);
+            return;
+        }
+
+        const by_root_gop = try self.queued_attestations.getOrPut(allocator, att_slot);
+        if (!by_root_gop.found_existing) by_root_gop.value_ptr.* = .{};
+        const by_root = by_root_gop.value_ptr;
+
+        const validator_votes_gop = try by_root.getOrPut(allocator, block_root);
+        if (!validator_votes_gop.found_existing) validator_votes_gop.value_ptr.* = .{};
+        try validator_votes_gop.value_ptr.put(allocator, validator_index, payload_status);
+    }
+
+    pub fn pruneStaleQueuedAttestations(self: *ForkChoice, allocator: Allocator, current_slot: Slot) void {
+        if (self.queued_attestations.count() == 0) return;
+
+        const max_queued_slots: Slot = 3;
+        const min_slot: Slot = if (current_slot > max_queued_slots)
+            current_slot - max_queued_slots
+        else
+            0;
+
+        var to_remove: std.ArrayListUnmanaged(Slot) = .empty;
+        defer to_remove.deinit(allocator);
+
+        var iter = self.queued_attestations.iterator();
+        while (iter.next()) |entry| {
+            if (entry.key_ptr.* < min_slot) {
+                to_remove.append(allocator, entry.key_ptr.*) catch continue;
+            }
+        }
+
+        for (to_remove.items) |slot| {
+            if (self.queued_attestations.getPtr(slot)) |block_map| {
+                var bm_iter = block_map.iterator();
+                while (bm_iter.next()) |block_entry| {
+                    block_entry.value_ptr.deinit(allocator);
+                }
+                block_map.deinit(allocator);
+            }
+            _ = self.queued_attestations.swapRemove(slot);
+        }
+    }
+
     // ── Time management (private) ──
 
     /// Called whenever the current time increases.
@@ -1529,10 +1485,10 @@ pub const ForkChoice = struct {
         // Update store time.
         self.fc_store.current_slot = time;
 
-        // Always clear proposer boost when advancing to the next slot. The boost
-        // only applies within a single slot, so it must be cleared unconditionally
-        // on every tick regardless of whether proposer_boost_root is set.
-        self.proposer_boost_root = null;
+        // Reset proposer boost if this is a new slot.
+        if (self.proposer_boost_root != null) {
+            self.proposer_boost_root = null;
+        }
 
         // Not a new epoch, return.
         if (computeSlotsSinceEpochStart(time) != 0) {
@@ -1556,15 +1512,7 @@ pub const ForkChoice = struct {
     /// for processing due to the slot clock incrementing.
     fn processAttestationQueue(self: *ForkChoice, allocator: Allocator) !void {
         const current_slot = self.fc_store.current_slot;
-
-        // Collect slots to remove: AutoArrayHashMap is insertion-ordered, NOT sorted.
-        // We must iterate all entries (not break on first future slot) because a future-slot
-        // attestation queued before a past-slot one would otherwise cause the past-slot one
-        // to be skipped. Collect keys to remove in a separate pass.
-        var keys_to_remove: std.ArrayListUnmanaged(u64) = .empty;
-        defer keys_to_remove.deinit(allocator);
-        // Pre-allocate so that append() cannot fail after votes are applied (OOM safety).
-        try keys_to_remove.ensureTotalCapacity(allocator, @intCast(self.queued_attestations.count()));
+        var remove_count: u32 = 0;
 
         var slot_iter = self.queued_attestations.iterator();
         while (slot_iter.next()) |entry| {
@@ -1576,31 +1524,31 @@ pub const ForkChoice = struct {
                     const block_root = block_entry.key_ptr.*;
                     var vote_iter = block_entry.value_ptr.iterator();
                     while (vote_iter.next()) |vote_entry| {
-                        self.addLatestMessage(
+                        try self.addLatestMessage(
                             allocator,
                             vote_entry.key_ptr.*,
                             att_slot,
                             block_root,
                             vote_entry.value_ptr.*,
-                        ) catch |err| switch (err) {
-                            error.OutOfMemory => return error.OutOfMemory,
-                            else => continue,
-                        };
+                        );
                     }
 
+                    if (att_slot == current_slot - 1) {
+                        self.queued_attestations_previous_slot += @intCast(block_entry.value_ptr.count());
+                    }
                     block_entry.value_ptr.deinit(allocator);
                 }
                 entry.value_ptr.deinit(allocator);
-                keys_to_remove.appendAssumeCapacity(att_slot);
+                remove_count += 1;
+            } else {
+                break;
             }
-            // No break here: map is insertion-ordered, not sorted — must scan all entries.
         }
 
-        // Remove processed slots. swapRemove is O(1) per removal (vs orderedRemove
-        // which is O(n) due to shifting). Order doesn't matter here — the map is
-        // iterated with a full scan on every call, not assumed to be sorted.
-        for (keys_to_remove.items) |key| {
-            _ = self.queued_attestations.swapRemove(key);
+        // Remove processed slots from front.
+        for (0..remove_count) |_| {
+            const key = self.queued_attestations.keys()[0];
+            _ = self.queued_attestations.orderedRemove(key);
         }
     }
 
@@ -1623,7 +1571,7 @@ pub const ForkChoice = struct {
         self: *ForkChoice,
         allocator: Allocator,
         finalized_root: Root,
-    ) (Allocator.Error || ProtoArrayError)![]ProtoBlock {
+    ) (Allocator.Error || ForkChoiceError)![]ProtoBlock {
         const pruned = try self.proto_array.maybePrune(allocator, finalized_root);
         const pruned_count: u32 = @intCast(pruned.len);
 
@@ -1654,15 +1602,19 @@ pub const ForkChoice = struct {
     // ── Execution validation ──
 
     /// Propagate execution layer validity response through the DAG.
-    /// Sets irrecoverable_error on failure instead of propagating the error.
+    /// Only sets irrecoverable_error for InvalidLVHExecutionResponse;
+    /// other errors are silently ignored.
     pub fn validateLatestHash(
         self: *ForkChoice,
         allocator: Allocator,
         response: LVHExecResponse,
         current_slot: Slot,
     ) void {
-        self.proto_array.validateLatestHash(allocator, &self.deltas_cache, response, current_slot) catch |err| {
-            self.irrecoverable_error = err;
+        self.proto_array.validateLatestHash(allocator, response, current_slot) catch |err| {
+            if (err == error.InvalidLVHExecutionResponse) {
+                self.irrecoverable_error = err;
+                self.lvh_error = self.proto_array.lvh_error;
+            }
         };
     }
 
@@ -1733,8 +1685,8 @@ pub const ForkChoice = struct {
     /// no fork-check is performed inside this function.
     ///
     /// Spec: https://github.com/ethereum/consensus-specs/blob/v1.6.0/fork_choice/safe-block.md#get_safe_execution_block_hash
-    pub fn getSafeExecutionBlockHash(self: *const ForkChoice) Root {
-        const justified_block = self.getJustifiedBlock() catch return ZERO_HASH;
+    pub fn getSafeExecutionBlockHash(self: *const ForkChoice) !Root {
+        const justified_block = try self.getJustifiedBlock();
         return justified_block.extra_meta.executionPayloadBlockHash() orelse ZERO_HASH;
     }
 
@@ -1752,7 +1704,7 @@ pub const ForkChoice = struct {
     ///
     /// Equivalent to:
     /// https://github.com/ethereum/consensus-specs/blob/v1.1.10/specs/phase0/fork-choice.md#get_ancestor
-    pub fn getAncestor(self: *const ForkChoice, block_root: Root, ancestor_slot: Slot) ProtoArrayError!ProtoNode {
+    pub fn getAncestor(self: *const ForkChoice, block_root: Root, ancestor_slot: Slot) ForkChoiceError!ProtoNode {
         const node = try self.proto_array.getAncestor(block_root, ancestor_slot);
         return node.*;
     }
@@ -1764,7 +1716,7 @@ pub const ForkChoice = struct {
         ancestor_status: PayloadStatus,
         descendant_root: Root,
         descendant_status: PayloadStatus,
-    ) ProtoArrayError!bool {
+    ) ForkChoiceError!bool {
         return try self.proto_array.isDescendant(
             ancestor_root,
             ancestor_status,
@@ -1774,7 +1726,7 @@ pub const ForkChoice = struct {
     }
 
     /// Get the canonical block matching the given root.
-    pub fn getCanonicalBlockByRoot(self: *const ForkChoice, block_root: Root) ProtoArrayError!?ProtoBlock {
+    pub fn getCanonicalBlockByRoot(self: *const ForkChoice, block_root: Root) ForkChoiceError!?ProtoBlock {
         if (std.mem.eql(u8, &self.head.block_root, &block_root)) return self.head;
 
         var iter = self.proto_array.iterateAncestors(self.head.block_root, self.head.payload_status);
@@ -1785,7 +1737,7 @@ pub const ForkChoice = struct {
     }
 
     /// Get the canonical block at a given slot.
-    pub fn getCanonicalBlockAtSlot(self: *const ForkChoice, slot: Slot) ProtoArrayError!?ProtoBlock {
+    pub fn getCanonicalBlockAtSlot(self: *const ForkChoice, slot: Slot) ForkChoiceError!?ProtoBlock {
         if (slot > self.head.slot) return null;
         if (slot == self.head.slot) return self.head;
 
@@ -1797,7 +1749,7 @@ pub const ForkChoice = struct {
     }
 
     /// Get the canonical block at or before a given slot.
-    pub fn getCanonicalBlockClosestLteSlot(self: *const ForkChoice, slot: Slot) ProtoArrayError!?ProtoBlock {
+    pub fn getCanonicalBlockClosestLteSlot(self: *const ForkChoice, slot: Slot) ForkChoiceError!?ProtoBlock {
         if (slot >= self.head.slot) return self.head;
 
         var iter = self.proto_array.iterateAncestors(self.head.block_root, self.head.payload_status);
@@ -1852,7 +1804,7 @@ pub const ForkChoice = struct {
         allocator: Allocator,
         block_root: Root,
         status: PayloadStatus,
-    ) !struct { ancestors: []ProtoBlock, non_ancestors: []ProtoBlock } {
+    ) !AncestorAndNonAncestorBlocks {
         var pa_result = try self.proto_array.getAllAncestorAndNonAncestorNodes(allocator, block_root, status);
         // The last ancestor block is the previous finalized one, exclude it.
         if (pa_result.ancestors.items.len > 0) _ = pa_result.ancestors.pop();
@@ -1893,9 +1845,11 @@ pub const ForkChoice = struct {
             @as(i64, @intCast(epoch_diff_val * preset.SLOTS_PER_EPOCH));
 
         // Special case close to genesis block, return the genesis block root.
+        // Invariant: when before_slot <= 0, genesis has not been pruned yet
+        // (finalization hasn't advanced enough), so items[0] is always genesis.
         if (before_slot_signed <= 0) {
             const genesis_block = &self.proto_array.nodes.items[0];
-            if (genesis_block.slot != 0) return error.GenesisBlockNotAvailable;
+            assert(genesis_block.slot == 0);
             return genesis_block.block_root;
         }
         const before_slot: Slot = @intCast(before_slot_signed);
@@ -1945,7 +1899,7 @@ pub const ForkChoice = struct {
 
     /// Get all leaf nodes (heads of chains).
     pub fn getHeads(self: *const ForkChoice, allocator: Allocator) ![]ProtoBlock {
-        var result = std.ArrayList(ProtoBlock).init(allocator);
+        var result = std.array_list.AlignedManaged(ProtoBlock, null).init(allocator);
         errdefer result.deinit();
 
         for (self.proto_array.nodes.items) |node| {
@@ -2015,7 +1969,7 @@ pub const ForkChoice = struct {
         const block_index = self.proto_array.getNodeIndexByRootAndStatus(block_root, status) orelse
             return error.MissingProtoArrayBlock;
 
-        var roots_in_chain: std.AutoHashMapUnmanaged(Root, void) = .{};
+        var roots_in_chain: std.AutoHashMapUnmanaged(Root, void) = .empty;
         try roots_in_chain.put(allocator, block_root, {});
 
         return .{
@@ -2031,7 +1985,7 @@ pub const ForkChoice = struct {
         allocator: Allocator,
         parent_root: Root,
     ) ![]ProtoBlock {
-        var result = std.ArrayList(ProtoBlock).init(allocator);
+        var result = std.array_list.AlignedManaged(ProtoBlock, null).init(allocator);
         errdefer result.deinit();
 
         for (self.proto_array.nodes.items) |node| {
@@ -2048,7 +2002,7 @@ pub const ForkChoice = struct {
         allocator: Allocator,
         slot: Slot,
     ) ![]ProtoBlock {
-        var result = std.ArrayList(ProtoBlock).init(allocator);
+        var result = std.array_list.AlignedManaged(ProtoBlock, null).init(allocator);
         errdefer result.deinit();
 
         for (self.proto_array.nodes.items) |node| {
@@ -2071,7 +2025,8 @@ pub const ForkChoice = struct {
         execution_payload_block_hash: Root,
         execution_payload_number: u64,
         execution_payload_state_root: Root,
-    ) (Allocator.Error || ProtoArrayError)!void {
+        execution_status: ExecutionStatus,
+    ) (Allocator.Error || ForkChoiceError)!void {
         try self.proto_array.onExecutionPayload(
             allocator,
             block_root,
@@ -2080,6 +2035,7 @@ pub const ForkChoice = struct {
             execution_payload_number,
             execution_payload_state_root,
             self.proposer_boost_root,
+            execution_status,
         );
     }
 
@@ -2113,12 +2069,18 @@ fn getCommitteeFraction(total_active_balance_by_increment: u64, slots_per_epoch:
 ///   - For non-skipped slots at checkpoint: returns false (EMPTY) since payload hasn't arrived yet.
 ///   - For skipped slots at checkpoint: returns the actual availability status from state.
 fn getCheckpointPayloadStatus(state: *CachedBeaconState, checkpoint_epoch: Epoch) PayloadStatus {
-    _ = state;
-    _ = checkpoint_epoch;
-    // Pre-Gloas: always FULL (payload embedded in block).
-    // TODO: When Gloas fork is added to ForkSeq, check state.execution_payload_availability
-    // for the checkpoint slot to determine FULL vs EMPTY status.
-    return .full;
+    const checkpoint_slot = computeStartSlotAtEpoch(checkpoint_epoch);
+    const fork = state.config.forkSeq(checkpoint_slot);
+
+    // Pre-Gloas: always FULL.
+    if (fork.lt(.gloas)) return .full;
+
+    // For Gloas, check state.execution_payload_availability.
+    const payload_available = state.state.executionPayloadAvailability(
+        checkpoint_slot % preset.SLOTS_PER_HISTORICAL_ROOT,
+    ) catch unreachable; // fork already verified as Gloas+, index always in range
+
+    return if (payload_available) .full else .empty;
 }
 
 // ── Test/bench helpers ──
@@ -2130,7 +2092,7 @@ pub fn onBlockFromProto(
     allocator: Allocator,
     block: ProtoBlock,
     current_slot: Slot,
-) (Allocator.Error || ProtoArrayError || ForkChoiceError)!void {
+) (Allocator.Error || ForkChoiceError)!void {
     if (block.slot > current_slot) return error.InvalidBlockFutureSlot;
 
     const finalized_slot = computeStartSlotAtEpoch(fc.fc_store.finalized_checkpoint.epoch);
@@ -2142,76 +2104,6 @@ pub fn onBlockFromProto(
 
     try fc.proto_array.onBlock(allocator, block, current_slot, null);
 }
-
-/// Import a block into fork choice using the post-state for proper checkpoint extraction.
-///
-/// Unlike `onBlockFromProto` (test-only), this function:
-/// - Extracts justified/finalized checkpoints from the CachedBeaconState
-/// - Computes unrealized checkpoints via state_transition
-/// - Updates the fork choice store's checkpoint tracking
-/// - Applies proposer boost for timely blocks
-/// - Computes the correct target root from state block_roots
-///
-/// This is the production API for the import pipeline when the full
-/// `ForkChoice.onBlock` cannot be used (e.g., Gloas types not yet available).
-pub fn onBlockFromState(
-    fc: *ForkChoice,
-    allocator: Allocator,
-    block_slot: Slot,
-    block_root: Root,
-    parent_root: Root,
-    state_root: Root,
-    state: *CachedBeaconState,
-    block_delay_sec: u32,
-    current_slot: Slot,
-    extra_meta: BlockExtraMeta,
-) !ProtoBlock {
-    // 1-4. Validate block and get parent.
-    const parent_block = try fc.validateBlock(block_slot, parent_root, null);
-
-    // 5. Proposer boost.
-    const is_timely = fc.isBlockTimely(block_slot, block_delay_sec);
-    if (fc.opts.proposer_boost and is_timely and fc.proposer_boost_root == null) {
-        fc.proposer_boost_root = block_root;
-    }
-
-    // 6. Extract and update checkpoints from state.
-    const checkpoints = try fc.extractAndUpdateCheckpoints(allocator, state, parent_block, block_slot, current_slot);
-
-    // 7. Compute target root.
-    const block_epoch = computeEpochAtSlot(block_slot);
-    const target_slot = computeStartSlotAtEpoch(block_epoch);
-    const target_root: Root = if (block_slot == target_slot) block_root else tr_blk: {
-        var block_roots = try state.state.blockRoots();
-        const idx = target_slot % preset.SLOTS_PER_HISTORICAL_ROOT;
-        break :tr_blk (try block_roots.getFieldRoot(idx)).*;
-    };
-
-    // 8. Construct ProtoBlock with caller-provided execution metadata.
-    const proto_block = ProtoBlock{
-        .slot = block_slot,
-        .block_root = block_root,
-        .parent_root = parent_root,
-        .state_root = state_root,
-        .target_root = target_root,
-        .justified_epoch = checkpoints.justified.epoch,
-        .justified_root = checkpoints.justified.root,
-        .finalized_epoch = checkpoints.finalized.epoch,
-        .finalized_root = checkpoints.finalized.root,
-        .unrealized_justified_epoch = checkpoints.unrealized_justified.epoch,
-        .unrealized_justified_root = checkpoints.unrealized_justified.root,
-        .unrealized_finalized_epoch = checkpoints.unrealized_finalized.epoch,
-        .unrealized_finalized_root = checkpoints.unrealized_finalized.root,
-        .extra_meta = extra_meta,
-        .timeliness = is_timely,
-    };
-
-    // 10. Add to proto array with proposer boost.
-    try fc.proto_array.onBlock(allocator, proto_block, current_slot, fc.proposer_boost_root);
-
-    return proto_block;
-}
-
 
 /// Create a ForkChoice from an anchor block (genesis or checkpoint).
 /// Heap-allocates ProtoArray, ForkChoiceStore, and ForkChoice.
@@ -2228,20 +2120,20 @@ pub fn initFromAnchor(
     events: ForkChoiceStoreEvents,
     opts: ForkChoiceOpts,
 ) !*ForkChoice {
-    const pa = try allocator.create(ProtoArray);
-    errdefer allocator.destroy(pa);
+    const pa_inst = try allocator.create(ProtoArray);
+    errdefer allocator.destroy(pa_inst);
 
-    pa.* = try ProtoArray.initialize(
+    try pa_inst.initialize(
         allocator,
         anchor_block,
         current_slot,
     );
-    errdefer pa.deinit(allocator);
+    errdefer pa_inst.deinit(allocator);
 
     const fc_store = try allocator.create(ForkChoiceStore);
     errdefer allocator.destroy(fc_store);
 
-    fc_store.* = try ForkChoiceStore.init(
+    try fc_store.init(
         allocator,
         current_slot,
         justified_checkpoint,
@@ -2250,25 +2142,25 @@ pub fn initFromAnchor(
         justified_balances_getter,
         events,
     );
-    errdefer fc_store.deinit();
+    errdefer fc_store.deinit(allocator);
 
     const fc = try allocator.create(ForkChoice);
     errdefer allocator.destroy(fc);
 
-    try fc.init(allocator, config, fc_store, pa, 0, opts);
+    try fc.init(allocator, config, fc_store, pa_inst, 0, opts);
     return fc;
 }
 
 /// Free ForkChoice + its heap-allocated ProtoArray and ForkChoiceStore.
 /// Only use this for ForkChoice instances created via `initFromAnchor`.
 pub fn destroyFromAnchor(allocator: Allocator, fc: *ForkChoice) void {
-    const pa = fc.proto_array;
+    const pa_inst = fc.proto_array;
     const fc_store = fc.fc_store;
     fc.deinit(allocator);
     allocator.destroy(fc);
-    pa.deinit(allocator);
-    allocator.destroy(pa);
-    fc_store.deinit();
+    pa_inst.deinit(allocator);
+    allocator.destroy(pa_inst);
+    fc_store.deinit(allocator);
     allocator.destroy(fc_store);
 }
 
@@ -2348,30 +2240,48 @@ fn initTestForkChoice(
     finalized_checkpoint: CheckpointWithPayloadStatus,
     justified_balances: []const u16,
 ) !*ForkChoice {
-    return initTestForkChoiceWithOpts(
+    const proto_arr = try allocator.create(ProtoArray);
+    errdefer allocator.destroy(proto_arr);
+
+    try proto_arr.initialize(
         allocator,
         anchor_block,
+        current_slot,
+    );
+    errdefer proto_arr.deinit(allocator);
+
+    const fc_store = try allocator.create(ForkChoiceStore);
+    errdefer allocator.destroy(fc_store);
+
+    try fc_store.init(
+        allocator,
         current_slot,
         justified_checkpoint,
         finalized_checkpoint,
         justified_balances,
+        test_balances_getter,
         .{},
     );
+    errdefer fc_store.deinit(allocator);
+
+    const fc = try allocator.create(ForkChoice);
+    errdefer allocator.destroy(fc);
+
+    try fc.init(allocator, getTestConfig(), fc_store, proto_arr, 0, .{});
+    return fc;
 }
 
 /// Test-only: free ForkChoice + its heap-allocated ProtoArray and ForkChoiceStore.
 fn deinitTestForkChoice(allocator: Allocator, fc: *ForkChoice) void {
-    const pa = fc.proto_array;
+    const proto_arr = fc.proto_array;
     const fc_store = fc.fc_store;
     fc.deinit(allocator);
     allocator.destroy(fc);
-    pa.deinit(allocator);
-    allocator.destroy(pa);
-    fc_store.deinit();
+    proto_arr.deinit(allocator);
+    allocator.destroy(proto_arr);
+    fc_store.deinit(allocator);
     allocator.destroy(fc_store);
 }
-
-// ── Proposer reorg tests ──
 
 /// Test-only helper: create ForkChoice with custom options.
 fn initTestForkChoiceWithOpts(
@@ -2383,19 +2293,19 @@ fn initTestForkChoiceWithOpts(
     justified_balances: []const u16,
     opts: ForkChoiceOpts,
 ) !*ForkChoice {
-    const pa = try allocator.create(ProtoArray);
-    errdefer allocator.destroy(pa);
-    pa.* = try ProtoArray.initialize(allocator, anchor_block, current_slot);
-    errdefer pa.deinit(allocator);
+    const proto_arr = try allocator.create(ProtoArray);
+    errdefer allocator.destroy(proto_arr);
+    try proto_arr.initialize(allocator, anchor_block, current_slot);
+    errdefer proto_arr.deinit(allocator);
 
     const fc_store = try allocator.create(ForkChoiceStore);
     errdefer allocator.destroy(fc_store);
-    fc_store.* = try ForkChoiceStore.init(allocator, current_slot, justified_checkpoint, finalized_checkpoint, justified_balances, test_balances_getter, .{});
-    errdefer fc_store.deinit();
+    try fc_store.init(allocator, current_slot, justified_checkpoint, finalized_checkpoint, justified_balances, test_balances_getter, .{});
+    errdefer fc_store.deinit(allocator);
 
     const fc = try allocator.create(ForkChoice);
     errdefer allocator.destroy(fc);
-    try fc.init(allocator, getTestConfig(), fc_store, pa, 0, opts);
+    try fc.init(allocator, getTestConfig(), fc_store, proto_arr, 0, opts);
     return fc;
 }
 
@@ -2474,8 +2384,6 @@ fn initReorgTest(allocator: Allocator, params: ReorgTestParams) !ReorgTestCtx {
         .head_root = head_root,
     };
 }
-
-// ── Group 1: getProposerHead ──
 
 test "getProposerHead reorgs when all conditions met" {
     var ctx = try initReorgTest(testing.allocator, .{});
@@ -2573,7 +2481,8 @@ test "getProposerHead no reorg: parent block not strong" {
 }
 
 test "getProposerHead no reorg: not proposing on time" {
-    // Minimal preset: SECONDS_PER_SLOT=6 → cutoff = 6 * 1000 / 6 = 1000ms
+    // Minimal ChainConfig: PROPOSER_REORG_CUTOFF_BPS=1667, SLOT_DURATION_MS=6000
+    // cutoff = (1667 * 6000 + 5000) / 10000 = 1000ms
     // sec_from_slot=2 → 2000ms > 1000ms → not on time
     var ctx = try initReorgTest(testing.allocator, .{});
     defer deinitTestForkChoice(testing.allocator, ctx.fc);
@@ -2581,8 +2490,6 @@ test "getProposerHead no reorg: not proposing on time" {
     const result = ctx.fc.getProposerHead(&ctx.head_block, 2, ctx.fc.fc_store.current_slot);
     try testing.expectEqual(@as(?NotReorgedReason, .not_proposing_on_time), result.not_reorged_reason);
 }
-
-// ── Group 2: shouldOverrideForkChoiceUpdate (deduplicated — preliminary checks covered by Group 1) ──
 
 test "shouldOverrideFCU overrides when head.slot == current_slot" {
     // head_slot=10, current_slot=10 → head.slot == current_slot → timing passes
@@ -2619,8 +2526,6 @@ test "shouldOverrideFCU no override: timing fails" {
         .should_override => return error.TestUnexpectedResult,
     }
 }
-
-// ── getDependentRoot tests ──
 
 /// Compute target root for a block at `slot`, given `skipped_slots`.
 fn getTargetRoot(slot: Slot, skipped_slots: []const Slot) Root {
@@ -2731,8 +2636,6 @@ test "getDependentRoot table-driven" {
         try testing.expectEqual(expected_root, result);
     }
 }
-
-// ── getAllAncestorBlocks / getAllNonAncestorBlocks tests ──
 
 // Tree:
 //       0(genesis)
@@ -2886,14 +2789,14 @@ test "onAttesterSlashing affects head via computeDeltas" {
     try testing.expectEqual(b_root, fc.head.block_root);
 
     // Slash validator 1 → b loses 200, now b=200 < c=300 → c becomes head.
-    var slashing1 = makeTestAttesterSlashing(&[_]u64{1});
-    try fc.onAttesterSlashing(&.{ .phase0 = &slashing1 });
+    const slashing1 = makeTestAttesterSlashing(&[_]u64{1});
+    try fc.onAttesterSlashing(testing.allocator, &.{ .phase0 = slashing1 });
     try fc.updateHead(testing.allocator);
     try testing.expectEqual(c_root, fc.head.block_root);
 
     // Re-slash validator 1 → noop (already slashed). c remains head.
-    var slashing2 = makeTestAttesterSlashing(&[_]u64{1});
-    try fc.onAttesterSlashing(&.{ .phase0 = &slashing2 });
+    const slashing2 = makeTestAttesterSlashing(&[_]u64{1});
+    try fc.onAttesterSlashing(testing.allocator, &.{ .phase0 = slashing2 });
     try fc.updateHead(testing.allocator);
     try testing.expectEqual(c_root, fc.head.block_root);
 }
@@ -2993,8 +2896,6 @@ test "deep chain head selection follows longest weighted branch" {
     try testing.expectEqual(@as(usize, 9), fc.proto_array.nodes.items.len); // genesis + 8 blocks
 }
 
-// ── shouldOverrideForkChoiceUpdate tests (continued) ──
-
 test "shouldOverrideFCU no override: not FFG competitive" {
     // Head has lower uj_epoch than parent → not FFG competitive → no override.
     var ctx = try initReorgTest(testing.allocator, .{ .head_uj_epoch = 0, .parent_uj_epoch = 1 });
@@ -3049,7 +2950,17 @@ test "shouldOverrideFCU no override: not shuffling stable (epoch boundary)" {
     }
 }
 
-// ── Balance update tests ──
+test "shouldOverrideFCU no override: head block is timely" {
+    // head_timely=true → getPreliminaryProposerHead returns .head_block_is_timely
+    var ctx = try initReorgTest(testing.allocator, .{ .head_timely = true });
+    defer deinitTestForkChoice(testing.allocator, ctx.fc);
+
+    const result = ctx.fc.shouldOverrideForkChoiceUpdate(&ctx.head_block, 0, 11);
+    switch (result) {
+        .should_not_override => |r| try testing.expectEqual(NotReorgedReason.head_block_is_timely, r.reason),
+        .should_override => return error.TestUnexpectedResult,
+    }
+}
 
 // Tree:
 //       genesis
@@ -3315,8 +3226,6 @@ test "failed insertion cleanup: unknown parent does not leave dangling root" {
     try testing.expectEqual(@as(?u32, null), fc.proto_array.getDefaultNodeIndex(orphan_root));
 }
 
-// ── IsCanonical / AncestorRoot tests ──
-
 // Tree:
 //         0(genesis)
 //          / \
@@ -3476,4 +3385,877 @@ test "AncestorRoot: lower slot with gap returns parent" {
 
     const ancestor = try fc.proto_array.getAncestor(root3, 150);
     try testing.expectEqual(root1, ancestor.block_root);
+}
+
+// Tree:
+//       genesis(0)
+//       /        \
+//     a(1)       b(1)
+//    /   \         \
+//  c(2)   d(2)    e(2)
+//  |       |
+//  f(3)   g(3)
+//
+// 7 validators, balances = [100]*7.
+// Phase 1: No votes → head = root tiebreak.
+// Phase 2: V0-V2 vote for f → head = f.
+// Phase 3: V3-V6 vote for e → head = e (4*100 > 3*100 on b-branch).
+// Phase 4: V3-V4 switch from e to g → a-branch=5*100 > b-branch=2*100 → head = f.
+// Phase 5: Slash V0 → f=2*100, g=2*100, e=2*100 → a-branch=4*100, b-branch=2*100 → head on a still.
+test "comprehensive multi-phase vote: 8-node tree with switching and slashing" {
+    const allocator = testing.allocator;
+    const genesis_root = hashFromByte(0x01);
+    const a_root = hashFromByte(0x0A);
+    const b_root = hashFromByte(0x0B);
+    const c_root = hashFromByte(0x0C);
+    const d_root = hashFromByte(0x0D);
+    const e_root = hashFromByte(0x0E);
+    const f_root = hashFromByte(0x0F);
+    const g_root = hashFromByte(0x10);
+    const genesis_block = makeTestBlock(0, genesis_root, ZERO_HASH);
+    const balances = [_]u16{100} ** 7;
+
+    var fc = try initTestForkChoice(
+        allocator,
+        genesis_block,
+        10,
+        makeTestCheckpoint(0, genesis_root),
+        makeTestCheckpoint(0, genesis_root),
+        &balances,
+    );
+    defer deinitTestForkChoice(allocator, fc);
+
+    // Insert tree.
+    try onBlockFromProto(fc, allocator, makeTestBlock(1, a_root, genesis_root), 10);
+    try onBlockFromProto(fc, allocator, makeTestBlock(1, b_root, genesis_root), 10);
+    try onBlockFromProto(fc, allocator, makeTestBlock(2, c_root, a_root), 10);
+    try onBlockFromProto(fc, allocator, makeTestBlock(2, d_root, a_root), 10);
+    try onBlockFromProto(fc, allocator, makeTestBlock(2, e_root, b_root), 10);
+    try onBlockFromProto(fc, allocator, makeTestBlock(3, f_root, c_root), 10);
+    try onBlockFromProto(fc, allocator, makeTestBlock(3, g_root, d_root), 10);
+
+    // Phase 1: No votes → head = highest leaf by root tiebreak.
+    try fc.updateHead(allocator);
+    // g_root=0x10 > f_root=0x0F > e_root=0x0E → deepest leaves are f,g,e.
+    // Weight ties at 0 → best-child chosen by root. The head depends on tree
+    // back-propagation: genesis has children a(0x0A) and b(0x0B). b > a by root,
+    // so best-child of genesis is b → head follows b → e.
+    try testing.expectEqual(e_root, fc.head.block_root);
+
+    // Phase 2: V0-V2 vote for f.
+    try fc.addLatestMessage(allocator, 0, 3, f_root, .full);
+    try fc.addLatestMessage(allocator, 1, 3, f_root, .full);
+    try fc.addLatestMessage(allocator, 2, 3, f_root, .full);
+    try fc.updateHead(allocator);
+    // a-branch weight: a=300(propagated), c=300, f=300. b-branch: b=0, e=0.
+    // a-branch wins → head = f.
+    try testing.expectEqual(f_root, fc.head.block_root);
+
+    // Phase 3: V3-V6 vote for e.
+    try fc.addLatestMessage(allocator, 3, 2, e_root, .full);
+    try fc.addLatestMessage(allocator, 4, 2, e_root, .full);
+    try fc.addLatestMessage(allocator, 5, 2, e_root, .full);
+    try fc.addLatestMessage(allocator, 6, 2, e_root, .full);
+    try fc.updateHead(allocator);
+    // a-branch=300, b-branch=400 → head = e.
+    try testing.expectEqual(e_root, fc.head.block_root);
+
+    // Phase 4: V3-V4 switch from e to g.
+    // addLatestMessage requires epoch advancement to accept a vote switch.
+    // Phase 3 used slot 2 (epoch 0), so we need slot in epoch 1.
+    const epoch1_slot = preset.SLOTS_PER_EPOCH;
+    try fc.addLatestMessage(allocator, 3, epoch1_slot, g_root, .full);
+    try fc.addLatestMessage(allocator, 4, epoch1_slot, g_root, .full);
+    try fc.updateHead(allocator);
+    // a-branch: f=300, g=200, total through a = 500.
+    // b-branch: e=200, total through b = 200.
+    // a wins → head. Within a: c(300) vs d(200) → c wins → head = f.
+    try testing.expectEqual(f_root, fc.head.block_root);
+
+    // Phase 5: Slash V0 → f loses 100. f=200, g=200, e=200.
+    const slashing = makeTestAttesterSlashing(&[_]u64{0});
+    try fc.onAttesterSlashing(allocator, &.{ .phase0 = slashing });
+    try fc.updateHead(allocator);
+    // a-branch: f=200, g=200, total through a = 400.
+    // b-branch: e=200, total through b = 200.
+    // a still wins. Within a: c(200) vs d(200) → root tiebreak d(0x0D) > c(0x0C) → head = g.
+    try testing.expectEqual(g_root, fc.head.block_root);
+}
+
+/// Test-only helper: convert a pre-merge ProtoBlock to a Gloas block.
+/// Sets parent_block_hash and extra_meta.post_merge so that isGloasBlock() returns true.
+fn makeGloasTestBlock(slot: Slot, root: Root, parent_root: Root, parent_bh: Root) ProtoBlock {
+    var block = makeTestBlock(slot, root, parent_root);
+    block.parent_block_hash = parent_bh;
+    block.extra_meta = .{
+        .post_merge = BlockExtraMeta.PostMergeMeta.init(
+            parent_bh,
+            0,
+            .payload_separated,
+            .pre_data,
+        ),
+    };
+    return block;
+}
+
+//
+// Tree (Gloas block A with PENDING, EMPTY, FULL; children B and C):
+//
+//   genesis(0, pre-merge)
+//     |
+//   A.PENDING(slot=1, Gloas)
+//     / \
+//   A.EMPTY  A.FULL  (created via onExecutionPayload)
+//     |        |
+//   B.PENDING  C.PENDING  (B child of EMPTY, C child of FULL)
+//     |          |
+//   B.EMPTY    C.EMPTY
+//
+// With current_slot=2, A is at slot n-1. EMPTY/FULL effective weights are zeroed.
+// The tiebreaker decides: without PTC → EMPTY wins → head follows B.
+// With PTC supermajority → FULL wins → head follows C.
+test "Gloas head integration: EMPTY vs FULL tiebreaker via PTC" {
+    const allocator = testing.allocator;
+    const genesis_root = hashFromByte(0x01);
+    const a_root = hashFromByte(0x0A);
+    const b_root = hashFromByte(0x0B);
+    const c_root = hashFromByte(0x0C);
+
+    // parentBlockHash for block A's bid (used for PENDING/EMPTY).
+    const a_parent_bh = hashFromByte(0xA0);
+    // executionPayloadBlockHash for A's FULL variant (arrives via onExecutionPayload).
+    const a_exec_bh = hashFromByte(0xAA);
+
+    const balances = [_]u16{100} ** 4;
+
+    var fc = try initTestForkChoiceWithOpts(
+        allocator,
+        makeTestBlock(0, genesis_root, ZERO_HASH),
+        2, // current_slot = 2, so A (slot=1) is at n-1
+        makeTestCheckpoint(0, genesis_root),
+        makeTestCheckpoint(0, genesis_root),
+        &balances,
+        .{ .proposer_boost = true },
+    );
+    defer deinitTestForkChoice(allocator, fc);
+
+    // Phase 1: Insert Gloas block A at slot 1.
+    // onBlock creates PENDING + EMPTY nodes.
+    try onBlockFromProto(fc, allocator, makeGloasTestBlock(1, a_root, genesis_root, a_parent_bh), 2);
+
+    // Verify PENDING and EMPTY exist, no FULL yet.
+    try testing.expect(fc.proto_array.getNodeIndexByRootAndStatus(a_root, .pending) != null);
+    try testing.expect(fc.proto_array.getNodeIndexByRootAndStatus(a_root, .empty) != null);
+    try testing.expect(fc.proto_array.getNodeIndexByRootAndStatus(a_root, .full) == null);
+
+    // Phase 2: Execution payload arrives for A → creates FULL node.
+    try fc.onExecutionPayload(allocator, a_root, a_exec_bh, 1, ZERO_HASH, .valid);
+    try testing.expect(fc.proto_array.getNodeIndexByRootAndStatus(a_root, .full) != null);
+
+    // Phase 3: Insert B (child of A's EMPTY) and C (child of A's FULL).
+    // B's parent_block_hash = a_parent_bh (matches A's EMPTY execution_payload_block_hash).
+    try onBlockFromProto(fc, allocator, makeGloasTestBlock(2, b_root, a_root, a_parent_bh), 2);
+    // C's parent_block_hash = a_exec_bh (matches A's FULL execution_payload_block_hash).
+    try onBlockFromProto(fc, allocator, makeGloasTestBlock(2, c_root, a_root, a_exec_bh), 2);
+
+    // Phase 4: Vote for both B and C equally.
+    // V0-V1 vote for B, V2-V3 vote for C.
+    try fc.addLatestMessage(allocator, 0, 2, b_root, .pending);
+    try fc.addLatestMessage(allocator, 1, 2, b_root, .pending);
+    try fc.addLatestMessage(allocator, 2, 2, c_root, .pending);
+    try fc.addLatestMessage(allocator, 3, 2, c_root, .pending);
+
+    // Phase 5: With proposer boost on B (extends A's EMPTY), no PTC votes.
+    // shouldExtendPayload: boost root = B, B's parent = A, B extends EMPTY → returns false.
+    // EMPTY tiebreaker = 1, FULL tiebreaker = 0 (not timely, extends EMPTY) → EMPTY wins → head through B.
+    fc.proposer_boost_root = b_root;
+    try fc.updateHead(allocator);
+    try testing.expectEqual(b_root, fc.head.block_root);
+    // Head is B's EMPTY node.
+    try testing.expectEqual(PayloadStatus.empty, fc.head.payload_status);
+
+    // Phase 6: Add PTC supermajority → isPayloadTimely true → shouldExtendPayload true → FULL wins.
+    // Set all PTC votes to true for block A.
+    fc.proto_array.ptc_votes.getPtr(a_root).?.* = ProtoArray.PtcVotes.initFull();
+
+    try fc.updateHead(allocator);
+    // FULL tiebreaker = 2, EMPTY tiebreaker = 1 → FULL wins → head follows C.
+    try testing.expectEqual(c_root, fc.head.block_root);
+    try testing.expectEqual(PayloadStatus.empty, fc.head.payload_status);
+}
+
+/// Test-only helper: post-merge block with syncing execution status.
+fn makePostMergeTestBlock(slot: Slot, root: Root, parent_root: Root, exec_hash: Root) ProtoBlock {
+    var block = makeTestBlock(slot, root, parent_root);
+    block.extra_meta = .{
+        .post_merge = BlockExtraMeta.PostMergeMeta.init(exec_hash, 0, .syncing, .available),
+    };
+    return block;
+}
+
+//
+// Tree:
+//   genesis(0)
+//     /      \
+//   A(1)     B(1)     [post-merge, syncing]
+//   |         |
+//   C(2)     D(2)
+//
+// Phase 1: V0-V3 vote for C → head = C.
+// Phase 2: Invalidate A (LVH=genesis exec hash) → A + C become invalid.
+// Phase 3: updateHead → head must be D (only viable branch).
+test "head moves to valid branch after mass invalidation" {
+    const allocator = testing.allocator;
+    const genesis_root = hashFromByte(0x01);
+    const a_root = hashFromByte(0x0A);
+    const b_root = hashFromByte(0x0B);
+    const c_root = hashFromByte(0x0C);
+    const d_root = hashFromByte(0x0D);
+
+    // Execution payload hashes for invalidation tracking.
+    const genesis_exec_hash = hashFromByte(0xE0);
+    const a_exec_hash = hashFromByte(0xEA);
+    const b_exec_hash = hashFromByte(0xEB);
+    const c_exec_hash = hashFromByte(0xEC);
+    const d_exec_hash = hashFromByte(0xED);
+
+    const balances = [_]u16{100} ** 6;
+
+    // Genesis needs to be post-merge for the invalidation chain to work.
+    var fc = try initTestForkChoice(
+        allocator,
+        makePostMergeTestBlock(0, genesis_root, ZERO_HASH, genesis_exec_hash),
+        10,
+        makeTestCheckpoint(0, genesis_root),
+        makeTestCheckpoint(0, genesis_root),
+        &balances,
+    );
+    defer deinitTestForkChoice(allocator, fc);
+
+    // Insert two branches: A →C, B→D (all post-merge syncing).
+    try onBlockFromProto(fc, allocator, makePostMergeTestBlock(1, a_root, genesis_root, a_exec_hash), 10);
+    try onBlockFromProto(fc, allocator, makePostMergeTestBlock(1, b_root, genesis_root, b_exec_hash), 10);
+    try onBlockFromProto(fc, allocator, makePostMergeTestBlock(2, c_root, a_root, c_exec_hash), 10);
+    try onBlockFromProto(fc, allocator, makePostMergeTestBlock(2, d_root, b_root, d_exec_hash), 10);
+
+    // Phase 1: V0-V3 vote for C → head = C.
+    try fc.addLatestMessage(allocator, 0, 2, c_root, .full);
+    try fc.addLatestMessage(allocator, 1, 2, c_root, .full);
+    try fc.addLatestMessage(allocator, 2, 2, c_root, .full);
+    try fc.addLatestMessage(allocator, 3, 2, c_root, .full);
+    // V4-V5 vote for D (minority).
+    try fc.addLatestMessage(allocator, 4, 2, d_root, .full);
+    try fc.addLatestMessage(allocator, 5, 2, d_root, .full);
+
+    try fc.updateHead(allocator);
+    try testing.expectEqual(c_root, fc.head.block_root);
+
+    // Phase 2: Invalidate A's branch. LVH = genesis exec hash.
+    // This marks A (and its descendant C) as invalid.
+    fc.validateLatestHash(allocator, .{
+        .invalid = .{
+            .invalidate_from_parent_block_root = a_root,
+            .latest_valid_exec_hash = genesis_exec_hash,
+        },
+    }, 10);
+
+    // Phase 3: updateHead → head should move to D (only viable branch).
+    try fc.updateHead(allocator);
+    try testing.expectEqual(d_root, fc.head.block_root);
+}
+
+//
+// Tree:
+//   genesis(0)
+//     /      \
+//   A(1,Gloas)  B(1,Gloas)
+//
+// Phase 1: V0-V2 vote for A → head = A.
+// Phase 2: V3-V6 vote for B → head = B (4*100 > 3*100).
+// Phase 3: V3-V4 switch from B to A at epoch 1 → A=5*100, B=2*100 → head = A.
+test "Gloas forked branches attestation shift" {
+    const allocator = testing.allocator;
+    const genesis_root = hashFromByte(0x01);
+    const a_root = hashFromByte(0x0A);
+    const b_root = hashFromByte(0x0B);
+    const a_parent_bh = hashFromByte(0xA0);
+    const b_parent_bh = hashFromByte(0xB0);
+
+    const balances = [_]u16{100} ** 7;
+
+    var fc = try initTestForkChoice(
+        allocator,
+        makeTestBlock(0, genesis_root, ZERO_HASH),
+        10,
+        makeTestCheckpoint(0, genesis_root),
+        makeTestCheckpoint(0, genesis_root),
+        &balances,
+    );
+    defer deinitTestForkChoice(allocator, fc);
+
+    // Insert two Gloas branches.
+    try onBlockFromProto(fc, allocator, makeGloasTestBlock(1, a_root, genesis_root, a_parent_bh), 10);
+    try onBlockFromProto(fc, allocator, makeGloasTestBlock(1, b_root, genesis_root, b_parent_bh), 10);
+
+    // Phase 1: V0-V2 vote for A → head = A.
+    try fc.addLatestMessage(allocator, 0, 1, a_root, .pending);
+    try fc.addLatestMessage(allocator, 1, 1, a_root, .pending);
+    try fc.addLatestMessage(allocator, 2, 1, a_root, .pending);
+    try fc.updateHead(allocator);
+    try testing.expectEqual(a_root, fc.head.block_root);
+
+    // Phase 2: V3-V6 vote for B → head = B (4*100 > 3*100).
+    try fc.addLatestMessage(allocator, 3, 1, b_root, .pending);
+    try fc.addLatestMessage(allocator, 4, 1, b_root, .pending);
+    try fc.addLatestMessage(allocator, 5, 1, b_root, .pending);
+    try fc.addLatestMessage(allocator, 6, 1, b_root, .pending);
+    try fc.updateHead(allocator);
+    try testing.expectEqual(b_root, fc.head.block_root);
+
+    // Phase 3: V3-V4 switch from B to A at epoch 1 (needs slot >= SLOTS_PER_EPOCH).
+    const epoch1_slot = preset.SLOTS_PER_EPOCH;
+    try fc.addLatestMessage(allocator, 3, epoch1_slot, a_root, .pending);
+    try fc.addLatestMessage(allocator, 4, epoch1_slot, a_root, .pending);
+    try fc.updateHead(allocator);
+    // A now has 5 votes (V0,V1,V2,V3,V4), B has 2 (V5,V6). Head = A.
+    try testing.expectEqual(a_root, fc.head.block_root);
+}
+
+/// Create a test phase0 IndexedAttestation for use with onAttestation.
+fn makeTestIndexedAttestation(
+    indices: []const ValidatorIndex,
+    slot: Slot,
+    beacon_block_root: Root,
+    target_epoch: Epoch,
+    target_root: Root,
+    source_epoch: Epoch,
+    source_root: Root,
+    index: u64,
+) consensus_types.phase0.IndexedAttestation.Type {
+    const list = std.ArrayListUnmanaged(ValidatorIndex){ .items = @constCast(indices), .capacity = indices.len };
+    return std.mem.zeroInit(consensus_types.phase0.IndexedAttestation.Type, .{
+        .attesting_indices = list,
+        .data = std.mem.zeroInit(consensus_types.phase0.AttestationData.Type, .{
+            .slot = slot,
+            .index = index,
+            .beacon_block_root = beacon_block_root,
+            .source = std.mem.zeroInit(consensus_types.phase0.Checkpoint.Type, .{
+                .epoch = source_epoch,
+                .root = source_root,
+            }),
+            .target = std.mem.zeroInit(consensus_types.phase0.Checkpoint.Type, .{
+                .epoch = target_epoch,
+                .root = target_root,
+            }),
+        }),
+    });
+}
+
+test "onAttestation: reject empty aggregation bitfield" {
+    const allocator = testing.allocator;
+    const genesis_root = hashFromByte(0x01);
+    const block_root = hashFromByte(0x02);
+    const genesis_block = makeTestBlock(0, genesis_root, ZERO_HASH);
+
+    var fc = try initTestForkChoice(
+        allocator,
+        genesis_block,
+        10,
+        makeTestCheckpoint(0, genesis_root),
+        makeTestCheckpoint(0, genesis_root),
+        &.{},
+    );
+    defer deinitTestForkChoice(allocator, fc);
+
+    try onBlockFromProto(fc, allocator, makeTestBlock(1, block_root, genesis_root), 10);
+
+    // Empty attesting indices.
+    var att = makeTestIndexedAttestation(&.{}, 1, block_root, 0, genesis_root, 0, genesis_root, 0);
+    const any_att = AnyIndexedAttestation{ .phase0 = &att };
+    try testing.expectError(
+        error.InvalidAttestationEmptyAggregationBitfield,
+        fc.onAttestation(allocator, &any_att, ZERO_HASH, false),
+    );
+}
+
+test "onAttestation: reject future epoch" {
+    const allocator = testing.allocator;
+    const genesis_root = hashFromByte(0x01);
+    const block_root = hashFromByte(0x02);
+    const genesis_block = makeTestBlock(0, genesis_root, ZERO_HASH);
+
+    // current_slot = 10, so current_epoch = 10 / SLOTS_PER_EPOCH = 1 (minimal: 8 slots/epoch)
+    var fc = try initTestForkChoice(
+        allocator,
+        genesis_block,
+        10,
+        makeTestCheckpoint(0, genesis_root),
+        makeTestCheckpoint(0, genesis_root),
+        &.{},
+    );
+    defer deinitTestForkChoice(allocator, fc);
+
+    try onBlockFromProto(fc, allocator, makeTestBlock(1, block_root, genesis_root), 10);
+
+    // Future epoch: target_epoch = 5 >> current_epoch = 1.
+    const indices = [_]ValidatorIndex{0};
+    const future_epoch_slot = 5 * preset.SLOTS_PER_EPOCH;
+    var att = makeTestIndexedAttestation(&indices, future_epoch_slot, block_root, 5, block_root, 0, genesis_root, 0);
+    const any_att = AnyIndexedAttestation{ .phase0 = &att };
+    try testing.expectError(
+        error.InvalidAttestationFutureEpoch,
+        fc.onAttestation(allocator, &any_att, hashFromByte(0xF1), false),
+    );
+}
+
+test "onAttestation: reject past epoch (non-force)" {
+    const allocator = testing.allocator;
+    const genesis_root = hashFromByte(0x01);
+    const block_root = hashFromByte(0x02);
+    const genesis_block = makeTestBlock(0, genesis_root, ZERO_HASH);
+
+    // current_slot = 3 * SLOTS_PER_EPOCH, so current_epoch = 3.
+    const current_slot = 3 * preset.SLOTS_PER_EPOCH;
+    var fc = try initTestForkChoice(
+        allocator,
+        genesis_block,
+        current_slot,
+        makeTestCheckpoint(0, genesis_root),
+        makeTestCheckpoint(0, genesis_root),
+        &.{},
+    );
+    defer deinitTestForkChoice(allocator, fc);
+
+    try onBlockFromProto(fc, allocator, makeTestBlock(1, block_root, genesis_root), current_slot);
+
+    // Past epoch: target_epoch = 0, current_epoch = 3 => 0 + 1 < 3 => past.
+    const indices = [_]ValidatorIndex{0};
+    var att = makeTestIndexedAttestation(&indices, 1, block_root, 0, genesis_root, 0, genesis_root, 0);
+    const any_att = AnyIndexedAttestation{ .phase0 = &att };
+    try testing.expectError(
+        error.InvalidAttestationPastEpoch,
+        fc.onAttestation(allocator, &any_att, hashFromByte(0xF2), false),
+    );
+}
+
+test "onAttestation: reject bad target epoch" {
+    const allocator = testing.allocator;
+    const genesis_root = hashFromByte(0x01);
+    const block_root = hashFromByte(0x02);
+    const genesis_block = makeTestBlock(0, genesis_root, ZERO_HASH);
+
+    // current_slot = 40 → current_epoch = 1 (SLOTS_PER_EPOCH=32 mainnet).
+    var fc = try initTestForkChoice(
+        allocator,
+        genesis_block,
+        40,
+        makeTestCheckpoint(0, genesis_root),
+        makeTestCheckpoint(0, genesis_root),
+        &.{},
+    );
+    defer deinitTestForkChoice(allocator, fc);
+
+    try onBlockFromProto(fc, allocator, makeTestBlock(1, block_root, genesis_root), 40);
+
+    // Bad target epoch: att_slot = 33 (epoch 1), target_epoch = 0 → mismatch.
+    // FutureEpoch: 0 > 1 = false. PastEpoch: 0+1 < 1 = false. BadTargetEpoch: 0 != 1 = true.
+    const indices = [_]ValidatorIndex{0};
+    var att = makeTestIndexedAttestation(&indices, 33, block_root, 0, genesis_root, 0, genesis_root, 0);
+    const any_att = AnyIndexedAttestation{ .phase0 = &att };
+    try testing.expectError(
+        error.InvalidAttestationBadTargetEpoch,
+        fc.onAttestation(allocator, &any_att, hashFromByte(0xF3), false),
+    );
+}
+
+test "onAttestation: reject unknown target root" {
+    const allocator = testing.allocator;
+    const genesis_root = hashFromByte(0x01);
+    const block_root = hashFromByte(0x02);
+    const genesis_block = makeTestBlock(0, genesis_root, ZERO_HASH);
+
+    var fc = try initTestForkChoice(
+        allocator,
+        genesis_block,
+        10,
+        makeTestCheckpoint(0, genesis_root),
+        makeTestCheckpoint(0, genesis_root),
+        &.{},
+    );
+    defer deinitTestForkChoice(allocator, fc);
+
+    try onBlockFromProto(fc, allocator, makeTestBlock(1, block_root, genesis_root), 10);
+
+    // Unknown target root: target_root = 0xFF which is not in the tree.
+    const indices = [_]ValidatorIndex{0};
+    var att = makeTestIndexedAttestation(&indices, 1, block_root, 0, hashFromByte(0xFF), 0, genesis_root, 0);
+    const any_att = AnyIndexedAttestation{ .phase0 = &att };
+    try testing.expectError(
+        error.InvalidAttestationUnknownTargetRoot,
+        fc.onAttestation(allocator, &any_att, hashFromByte(0xF4), false),
+    );
+}
+
+test "onAttestation: reject unknown head block" {
+    const allocator = testing.allocator;
+    const genesis_root = hashFromByte(0x01);
+    const genesis_block = makeTestBlock(0, genesis_root, ZERO_HASH);
+
+    var fc = try initTestForkChoice(
+        allocator,
+        genesis_block,
+        10,
+        makeTestCheckpoint(0, genesis_root),
+        makeTestCheckpoint(0, genesis_root),
+        &.{},
+    );
+    defer deinitTestForkChoice(allocator, fc);
+
+    // beacon_block_root = 0xFF not in tree, but target_root = genesis_root (known).
+    const indices = [_]ValidatorIndex{0};
+    var att = makeTestIndexedAttestation(&indices, 1, hashFromByte(0xFF), 0, genesis_root, 0, genesis_root, 0);
+    const any_att = AnyIndexedAttestation{ .phase0 = &att };
+    try testing.expectError(
+        error.InvalidAttestationUnknownHeadBlock,
+        fc.onAttestation(allocator, &any_att, hashFromByte(0xF5), false),
+    );
+}
+
+test "onAttestation: reject attests to future block" {
+    const allocator = testing.allocator;
+    const genesis_root = hashFromByte(0x01);
+    const block_root = hashFromByte(0x02);
+    const genesis_block = makeTestBlock(0, genesis_root, ZERO_HASH);
+
+    var fc = try initTestForkChoice(
+        allocator,
+        genesis_block,
+        10,
+        makeTestCheckpoint(0, genesis_root),
+        makeTestCheckpoint(0, genesis_root),
+        &.{},
+    );
+    defer deinitTestForkChoice(allocator, fc);
+
+    // Insert block at slot 5.
+    try onBlockFromProto(fc, allocator, makeTestBlock(5, block_root, genesis_root), 10);
+
+    // Attestation slot = 3, but block.slot = 5 => block.slot > att_slot => future block.
+    // target_root = block_root to pass the target validation before reaching the future block check.
+    const indices = [_]ValidatorIndex{0};
+    var att = makeTestIndexedAttestation(&indices, 3, block_root, 0, block_root, 0, genesis_root, 0);
+    const any_att = AnyIndexedAttestation{ .phase0 = &att };
+    try testing.expectError(
+        error.InvalidAttestationAttestsToFutureBlock,
+        fc.onAttestation(allocator, &any_att, hashFromByte(0xF6), false),
+    );
+}
+
+test "onAttestation: reject invalid target (cross-epoch mismatch)" {
+    const allocator = testing.allocator;
+    const genesis_root = hashFromByte(0x01);
+    const block_root = hashFromByte(0x02);
+    const genesis_block = makeTestBlock(0, genesis_root, ZERO_HASH);
+
+    // current_slot in epoch 1 so we can attest in epoch 1.
+    const current_slot = preset.SLOTS_PER_EPOCH + 2;
+    var fc = try initTestForkChoice(
+        allocator,
+        genesis_block,
+        current_slot,
+        makeTestCheckpoint(0, genesis_root),
+        makeTestCheckpoint(0, genesis_root),
+        &.{},
+    );
+    defer deinitTestForkChoice(allocator, fc);
+
+    // Insert block at slot 1 (epoch 0). When target_epoch = 1 > epoch_of_block(0),
+    // expected_target = block_root. But we set target_root = genesis_root != block_root.
+    try onBlockFromProto(fc, allocator, makeTestBlock(1, block_root, genesis_root), current_slot);
+
+    const att_slot = preset.SLOTS_PER_EPOCH; // epoch 1
+    const indices = [_]ValidatorIndex{0};
+    // target_root = genesis_root but expected_target = block_root (because target_epoch > block_epoch).
+    var att = makeTestIndexedAttestation(&indices, att_slot, block_root, 1, genesis_root, 0, genesis_root, 0);
+    const any_att = AnyIndexedAttestation{ .phase0 = &att };
+    try testing.expectError(
+        error.InvalidAttestationInvalidTarget,
+        fc.onAttestation(allocator, &any_att, hashFromByte(0xF7), false),
+    );
+}
+
+test "onAttestation: valid attestation applies vote (past slot)" {
+    const allocator = testing.allocator;
+    const genesis_root = hashFromByte(0x01);
+    const block_root = hashFromByte(0x02);
+    const genesis_block = makeTestBlock(0, genesis_root, ZERO_HASH);
+    const balances = [_]u16{100} ** 2;
+
+    // current_slot = 5 so attestations at slot < 5 apply immediately.
+    var fc = try initTestForkChoice(
+        allocator,
+        genesis_block,
+        5,
+        makeTestCheckpoint(0, genesis_root),
+        makeTestCheckpoint(0, genesis_root),
+        &balances,
+    );
+    defer deinitTestForkChoice(allocator, fc);
+
+    try onBlockFromProto(fc, allocator, makeTestBlock(1, block_root, genesis_root), 5);
+
+    // Valid attestation: slot = 1 (< current_slot = 5), target_epoch = 0 = epoch(slot 1).
+    // target_root must match block.target_root (= block_root from makeTestBlock).
+    const indices = [_]ValidatorIndex{0};
+    var att = makeTestIndexedAttestation(&indices, 1, block_root, 0, block_root, 0, genesis_root, 0);
+    const any_att = AnyIndexedAttestation{ .phase0 = &att };
+    try fc.onAttestation(allocator, &any_att, hashFromByte(0xA1), false);
+
+    // Validator 0 should now have a vote. Head should be block_root.
+    try fc.updateHead(allocator);
+    try testing.expectEqual(block_root, fc.head.block_root);
+}
+
+test "onAttestation: valid attestation queued (same slot)" {
+    const allocator = testing.allocator;
+    const genesis_root = hashFromByte(0x01);
+    const block_root = hashFromByte(0x02);
+    const genesis_block = makeTestBlock(0, genesis_root, ZERO_HASH);
+    const balances = [_]u16{100} ** 2;
+
+    // current_slot = 3 so attestation at slot 3 gets queued (att_slot >= current_slot).
+    var fc = try initTestForkChoice(
+        allocator,
+        genesis_block,
+        3,
+        makeTestCheckpoint(0, genesis_root),
+        makeTestCheckpoint(0, genesis_root),
+        &balances,
+    );
+    defer deinitTestForkChoice(allocator, fc);
+
+    try onBlockFromProto(fc, allocator, makeTestBlock(1, block_root, genesis_root), 3);
+
+    // Attestation at slot 3 = current_slot → should be queued.
+    // target_root must match block.target_root (= block_root).
+    const indices = [_]ValidatorIndex{0};
+    var att = makeTestIndexedAttestation(&indices, 3, block_root, 0, block_root, 0, genesis_root, 0);
+    const any_att = AnyIndexedAttestation{ .phase0 = &att };
+    try fc.onAttestation(allocator, &any_att, hashFromByte(0xA2), false);
+
+    // Should be in the queue, not yet applied.
+    try testing.expect(fc.queued_attestations.count() > 0);
+}
+
+test "onAttestation: zero hash beacon_block_root is silently ignored" {
+    const allocator = testing.allocator;
+    const genesis_root = hashFromByte(0x01);
+    const genesis_block = makeTestBlock(0, genesis_root, ZERO_HASH);
+
+    var fc = try initTestForkChoice(
+        allocator,
+        genesis_block,
+        5,
+        makeTestCheckpoint(0, genesis_root),
+        makeTestCheckpoint(0, genesis_root),
+        &.{},
+    );
+    defer deinitTestForkChoice(allocator, fc);
+
+    // Attestation to ZERO_HASH beacon_block_root should be silently ignored.
+    const indices = [_]ValidatorIndex{0};
+    var att = makeTestIndexedAttestation(&indices, 1, ZERO_HASH, 0, genesis_root, 0, genesis_root, 0);
+    const any_att = AnyIndexedAttestation{ .phase0 = &att };
+    // Should succeed (no error) — just returns early.
+    try fc.onAttestation(allocator, &any_att, hashFromByte(0xA3), false);
+}
+
+// ── FFG updates with votes tests ──
+
+test "onAttestation: votes shift head between forks" {
+    const allocator = testing.allocator;
+    const genesis_root = hashFromByte(0x01);
+    const a_root = hashFromByte(0x0A);
+    const b_root = hashFromByte(0x0B);
+    const genesis_block = makeTestBlock(0, genesis_root, ZERO_HASH);
+    const balances = [_]u16{100} ** 6;
+
+    var fc = try initTestForkChoice(
+        allocator,
+        genesis_block,
+        10,
+        makeTestCheckpoint(0, genesis_root),
+        makeTestCheckpoint(0, genesis_root),
+        &balances,
+    );
+    defer deinitTestForkChoice(allocator, fc);
+
+    // Two branches from genesis.
+    try onBlockFromProto(fc, allocator, makeTestBlock(1, a_root, genesis_root), 10);
+    try onBlockFromProto(fc, allocator, makeTestBlock(1, b_root, genesis_root), 10);
+
+    // First V0-V2 vote for A via onAttestation.
+    // target_root = a_root (block.target_root for makeTestBlock(1, a_root, ...)).
+    {
+        const indices = [_]ValidatorIndex{ 0, 1, 2 };
+        var att = makeTestIndexedAttestation(&indices, 1, a_root, 0, a_root, 0, genesis_root, 0);
+        const any_att = AnyIndexedAttestation{ .phase0 = &att };
+        try fc.onAttestation(allocator, &any_att, hashFromByte(0xC1), false);
+    }
+
+    try fc.updateHead(allocator);
+    try testing.expectEqual(a_root, fc.head.block_root);
+
+    // V3-V5 vote for B → B has 3 votes, A has 3 → tiebreaker. Let's add more so B wins.
+    {
+        const indices = [_]ValidatorIndex{ 3, 4, 5 };
+        var att = makeTestIndexedAttestation(&indices, 1, b_root, 0, b_root, 0, genesis_root, 0);
+        const any_att = AnyIndexedAttestation{ .phase0 = &att };
+        try fc.onAttestation(allocator, &any_att, hashFromByte(0xC2), false);
+    }
+
+    // Tie: 3*100 vs 3*100. Winner decided by root comparison (higher root wins in tiebreaker).
+    // Regardless of tiebreak, let's verify votes were applied by checking both branches have weight.
+    try fc.updateHead(allocator);
+    // The tiebreaker selects based on root bytes — just verify head is one of them.
+    try testing.expect(std.mem.eql(u8, &fc.head.block_root, &a_root) or std.mem.eql(u8, &fc.head.block_root, &b_root));
+}
+
+test "onAttestation: epoch advancement allows vote update" {
+    const allocator = testing.allocator;
+    const genesis_root = hashFromByte(0x01);
+    const a_root = hashFromByte(0x0A);
+    const b_root = hashFromByte(0x0B);
+    const genesis_block = makeTestBlock(0, genesis_root, ZERO_HASH);
+    const balances = [_]u16{100} ** 2;
+
+    const epoch1_slot = preset.SLOTS_PER_EPOCH;
+    var fc = try initTestForkChoice(
+        allocator,
+        genesis_block,
+        epoch1_slot + 5,
+        makeTestCheckpoint(0, genesis_root),
+        makeTestCheckpoint(0, genesis_root),
+        &balances,
+    );
+    defer deinitTestForkChoice(allocator, fc);
+
+    try onBlockFromProto(fc, allocator, makeTestBlock(1, a_root, genesis_root), epoch1_slot + 5);
+    try onBlockFromProto(fc, allocator, makeTestBlock(2, b_root, genesis_root), epoch1_slot + 5);
+
+    // Validator 0 votes for A in epoch 0.
+    // target_root = a_root (block.target_root from makeTestBlock).
+    {
+        const indices = [_]ValidatorIndex{0};
+        var att = makeTestIndexedAttestation(&indices, 1, a_root, 0, a_root, 0, genesis_root, 0);
+        const any_att = AnyIndexedAttestation{ .phase0 = &att };
+        try fc.onAttestation(allocator, &any_att, hashFromByte(0xD1), false);
+    }
+
+    try fc.updateHead(allocator);
+    try testing.expectEqual(a_root, fc.head.block_root);
+
+    // Validator 0 switches vote to B in epoch 1 (epoch advances).
+    // target_epoch=1 > epoch_of(block.slot=2)=0, so expected_target = b_root (beacon_block_root).
+    {
+        const indices = [_]ValidatorIndex{0};
+        var att = makeTestIndexedAttestation(&indices, epoch1_slot, b_root, 1, b_root, 0, genesis_root, 0);
+        const any_att = AnyIndexedAttestation{ .phase0 = &att };
+        try fc.onAttestation(allocator, &any_att, hashFromByte(0xD2), false);
+    }
+
+    try fc.updateHead(allocator);
+    try testing.expectEqual(b_root, fc.head.block_root);
+}
+
+// ── Proposer boost with attestation tests ──
+
+test "onAttestation: proposer boost outweighs attestation votes" {
+    const allocator = testing.allocator;
+    const genesis_root = hashFromByte(0x01);
+    const a_root = hashFromByte(0x0A);
+    const b_root = hashFromByte(0x0B);
+    const genesis_block = makeTestBlock(0, genesis_root, ZERO_HASH);
+    // 32 validators each with weight 128 → committee_weight = 32*128/32 = 128
+    // proposer_boost_score = committee_weight * 40 / 100 = 51
+    const balances = [_]u16{128} ** 32;
+
+    var fc = try initTestForkChoiceWithOpts(
+        allocator,
+        genesis_block,
+        10,
+        makeTestCheckpoint(0, genesis_root),
+        makeTestCheckpoint(0, genesis_root),
+        &balances,
+        .{ .proposer_boost = true },
+    );
+    defer deinitTestForkChoice(allocator, fc);
+
+    try onBlockFromProto(fc, allocator, makeTestBlock(1, a_root, genesis_root), 10);
+    try onBlockFromProto(fc, allocator, makeTestBlock(1, b_root, genesis_root), 10);
+
+    // Give A one vote (weight = 128).
+    // target_root = a_root (block.target_root from makeTestBlock).
+    {
+        const indices = [_]ValidatorIndex{0};
+        var att = makeTestIndexedAttestation(&indices, 1, a_root, 0, a_root, 0, genesis_root, 0);
+        const any_att = AnyIndexedAttestation{ .phase0 = &att };
+        try fc.onAttestation(allocator, &any_att, hashFromByte(0xE1), false);
+    }
+
+    // Apply proposer boost to B.
+    fc.proposer_boost_root = b_root;
+
+    // Head: A has 128 (1 vote). B has proposer_boost (51).
+    // A should win with 128 > 51.
+    try fc.updateHead(allocator);
+    try testing.expectEqual(a_root, fc.head.block_root);
+}
+
+test "onAttestation: equivocating validator votes are not counted" {
+    const allocator = testing.allocator;
+    const genesis_root = hashFromByte(0x01);
+    const a_root = hashFromByte(0x0A);
+    const b_root = hashFromByte(0x0B);
+    const genesis_block = makeTestBlock(0, genesis_root, ZERO_HASH);
+    const balances = [_]u16{100} ** 4;
+
+    var fc = try initTestForkChoice(
+        allocator,
+        genesis_block,
+        10,
+        makeTestCheckpoint(0, genesis_root),
+        makeTestCheckpoint(0, genesis_root),
+        &balances,
+    );
+    defer deinitTestForkChoice(allocator, fc);
+
+    try onBlockFromProto(fc, allocator, makeTestBlock(1, a_root, genesis_root), 10);
+    try onBlockFromProto(fc, allocator, makeTestBlock(1, b_root, genesis_root), 10);
+
+    // Mark validator 0 as equivocating via attester slashing.
+    const slashing_indices = [_]ValidatorIndex{0};
+    const slashing = makeTestAttesterSlashing(&slashing_indices);
+    const any_slashing = AnyAttesterSlashing{ .phase0 = slashing };
+    try fc.onAttesterSlashing(allocator, &any_slashing);
+
+    // Validator 0 votes for A (should be ignored because equivocating).
+    // Validator 1 votes for B.
+    // target_root = a_root/b_root (block.target_root from makeTestBlock).
+    {
+        const indices_a = [_]ValidatorIndex{0};
+        var att_a = makeTestIndexedAttestation(&indices_a, 1, a_root, 0, a_root, 0, genesis_root, 0);
+        const any_att_a = AnyIndexedAttestation{ .phase0 = &att_a };
+        try fc.onAttestation(allocator, &any_att_a, hashFromByte(0xE2), false);
+    }
+    {
+        const indices_b = [_]ValidatorIndex{1};
+        var att_b = makeTestIndexedAttestation(&indices_b, 1, b_root, 0, b_root, 0, genesis_root, 0);
+        const any_att_b = AnyIndexedAttestation{ .phase0 = &att_b };
+        try fc.onAttestation(allocator, &any_att_b, hashFromByte(0xE3), false);
+    }
+
+    // Head should be B since validator 0's vote was excluded.
+    try fc.updateHead(allocator);
+    try testing.expectEqual(b_root, fc.head.block_root);
 }

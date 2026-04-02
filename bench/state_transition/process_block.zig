@@ -337,7 +337,7 @@ fn ProcessBlockSegmentedBench(comptime fork: ForkSeq) type {
             ) catch unreachable;
             recordSegment(.block_header, elapsedSince(header_start));
 
-            if (comptime fork.gte(.capella)) {
+            if (comptime fork.gte(.capella) and fork.lt(.gloas)) {
                 const withdrawals_start = std.time.nanoTimestamp();
                 var withdrawals_result = WithdrawalsResult{
                     .withdrawals = Withdrawals.initCapacity(allocator, preset.MAX_WITHDRAWALS_PER_PAYLOAD) catch unreachable,
@@ -366,7 +366,7 @@ fn ProcessBlockSegmentedBench(comptime fork: ForkSeq) type {
                 recordSegment(.withdrawals, elapsedSince(withdrawals_start));
             }
 
-            if (comptime fork.gte(.bellatrix)) {
+            if (comptime fork.gte(.bellatrix) and fork.lt(.gloas)) {
                 const exec_start = std.time.nanoTimestamp();
                 const external_data = BlockExternalData{ .execution_payload_status = .valid, .data_availability_status = .available };
                 state_transition.processExecutionPayload(
@@ -554,10 +554,10 @@ fn runBenchmark(
 
     try bench.addParam("block_header", &ProcessBlockHeaderBench(fork){ .cached_state = cached_state, .block = block }, .{});
 
-    if (comptime fork.gte(.capella)) {
+    if (comptime fork.gte(.capella) and fork.lt(.gloas)) {
         try bench.addParam("withdrawals", &ProcessWithdrawalsBench(fork){ .cached_state = cached_state, .body = body }, .{});
     }
-    if (comptime fork.gte(.bellatrix)) {
+    if (comptime fork.gte(.bellatrix) and fork.lt(.gloas)) {
         try bench.addParam("execution_payload", &ProcessExecutionPayloadBench(fork){ .cached_state = cached_state, .body = body }, .{});
     }
 

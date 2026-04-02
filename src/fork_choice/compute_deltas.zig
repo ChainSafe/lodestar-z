@@ -1,7 +1,6 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
-const math = std.math;
 const testing = std.testing;
 
 const vote_tracker = @import("vote_tracker.zig");
@@ -13,65 +12,8 @@ const ValidatorIndex = consensus_types.primitive.ValidatorIndex.Type;
 
 pub const VoteIndex = u32;
 
-/// Set of equivocating validator indices with cached sorted keys.
-///
-/// The sorted cache avoids re-allocating and re-sorting on every computeDeltas call.
-/// Only re-sorts when the set has been modified (is_dirty flag).
-pub const EquivocatingIndices = struct {
-    map: std.AutoArrayHashMap(ValidatorIndex, void),
-    sorted_cache: ?[]const ValidatorIndex = null,
-    is_dirty: bool = true,
-    cache_allocator: ?Allocator = null,
-
-    pub fn init(allocator: Allocator) EquivocatingIndices {
-        return .{ .map = std.AutoArrayHashMap(ValidatorIndex, void).init(allocator) };
-    }
-
-    pub fn deinit(self: *EquivocatingIndices) void {
-        self.freeSortedCache();
-        self.map.deinit();
-    }
-
-    pub fn put(self: *EquivocatingIndices, key: ValidatorIndex, value: void) !void {
-        try self.map.put(key, value);
-        self.is_dirty = true;
-    }
-
-    pub fn keys(self: *const EquivocatingIndices) []const ValidatorIndex {
-        return self.map.keys();
-    }
-
-    pub fn count(self: *const EquivocatingIndices) usize {
-        return self.map.count();
-    }
-
-    pub fn contains(self: *const EquivocatingIndices, key: ValidatorIndex) bool {
-        return self.map.contains(key);
-    }
-
-    fn freeSortedCache(self: *EquivocatingIndices) void {
-        if (self.sorted_cache) |cache| {
-            if (self.cache_allocator) |alloc| alloc.free(cache);
-            self.sorted_cache = null;
-        }
-    }
-
-    /// Return sorted keys, using cached version if not dirty.
-    pub fn getSortedKeys(self: *EquivocatingIndices, allocator: Allocator) ![]const ValidatorIndex {
-        if (!self.is_dirty) {
-            if (self.sorted_cache) |cache| return cache;
-        }
-        self.freeSortedCache();
-        const map_keys = self.map.keys();
-        const buf = try allocator.alloc(ValidatorIndex, map_keys.len);
-        @memcpy(buf, map_keys);
-        std.mem.sortUnstable(ValidatorIndex, buf, {}, std.sort.asc(ValidatorIndex));
-        self.sorted_cache = buf;
-        self.cache_allocator = allocator;
-        self.is_dirty = false;
-        return buf;
-    }
-};
+/// Set of equivocating validator indices.
+pub const EquivocatingIndices = std.AutoArrayHashMapUnmanaged(ValidatorIndex, void);
 
 /// Diagnostic counters from a computeDeltas call.
 /// Used for monitoring fork choice health (not for correctness).
@@ -119,13 +61,13 @@ pub fn computeDeltas(
 
     const num_validators = vote_next_indices.len;
 
-    // Use cached sorted keys from the equivocating indices set.
-    // The EquivocatingIndices tracks dirtiness; only re-sorts when modified.
-    const sorted_eq = try @constCast(equivocating_indices).getSortedKeys(allocator);
+    // Sort equivocating indices for pointer advancement in the loop.
+    const sorted_eq = try sortEquivocatingKeys(allocator, equivocating_indices.*);
+    defer allocator.free(sorted_eq);
 
     var result: ComputeDeltasResult = .{ .deltas = deltas, .equivocating_validators = @intCast(sorted_eq.len) };
     // Pre-fetch the first equivocating validator index for pointer advancement comparison.
-    // Use maxInt as sentinel when empty so `v_index == equivocating_validator_index` is always false.
+    // Use maxInt as sentinel when empty so the equivocating check is always false.
     var equivocating_validator_index: ValidatorIndex = if (sorted_eq.len > 0) sorted_eq[0] else std.math.maxInt(ValidatorIndex);
     var equivocating_index: usize = 0;
 
@@ -134,49 +76,41 @@ pub fn computeDeltas(
         const next_index = vote_next_indices[v_index];
 
         // Validator has never voted and has no pending vote.
-        if (current_index == NULL_VOTE_INDEX and next_index == NULL_VOTE_INDEX) {
-            result.old_inactive_validators += 1;
-            continue;
+        if (current_index == NULL_VOTE_INDEX) {
+            if (next_index == NULL_VOTE_INDEX) {
+                result.old_inactive_validators += 1;
+                continue;
+            }
         }
 
-        const old_balance: i64 = if (v_index < old_balances.len) old_balances[v_index] else 0;
-        const new_balance: i64 = if (old_balances.ptr == new_balances.ptr) old_balance else if (v_index < new_balances.len) new_balances[v_index] else 0;
+        const bal = resolveBalances(v_index, old_balances, new_balances);
 
         // Check if this validator is equivocating (sorted pointer advancement).
-        if (v_index == equivocating_validator_index) {
+        if (@as(ValidatorIndex, @intCast(v_index)) == equivocating_validator_index) {
             // Remove weight from current vote. Only process once: after zeroing
             // current_index, subsequent calls skip this validator.
-            if (current_index != NULL_VOTE_INDEX) {
-                assert(current_index < deltas.len);
-                deltas[current_index] = math.sub(i64, deltas[current_index], old_balance) catch return error.DeltaOverflow;
-            }
+            subtractOldBalance(deltas, current_index, bal.old);
             vote_current_indices[v_index] = NULL_VOTE_INDEX;
             equivocating_index += 1;
-            // Advance to next equivocating validator, or set sentinel when all processed.
-            // equivocating_index == sorted_eq.len is the normal end condition, not an
-            // invariant violation, so a bounds check (not assert) is required here.
-            equivocating_validator_index = if (equivocating_index < sorted_eq.len) sorted_eq[equivocating_index] else std.math.maxInt(ValidatorIndex);
+            // Advance to next equivocating validator, or set sentinel when exhausted.
+            equivocating_validator_index = if (equivocating_index < sorted_eq.len)
+                sorted_eq[equivocating_index]
+            else
+                std.math.maxInt(ValidatorIndex);
             continue;
         }
 
-        if (old_balance == 0 and new_balance == 0) {
-            result.new_inactive_validators += 1;
-            continue;
+        if (bal.old == 0) {
+            if (bal.new == 0) {
+                result.new_inactive_validators += 1;
+                continue;
+            }
         }
 
         // Vote or balance changed: apply delta.
-        if (current_index != next_index or old_balance != new_balance) {
-            // Subtract old weight from departing node.
-            if (current_index != NULL_VOTE_INDEX) {
-                assert(current_index < deltas.len);
-                deltas[current_index] = math.sub(i64, deltas[current_index], old_balance) catch return error.DeltaOverflow;
-            }
-            // Add new weight to arriving node.
-            if (next_index != NULL_VOTE_INDEX) {
-                assert(next_index < deltas.len);
-                deltas[next_index] = math.add(i64, deltas[next_index], new_balance) catch return error.DeltaOverflow;
-            }
-            // Commit vote.
+        if (current_index != next_index or bal.old != bal.new) {
+            subtractOldBalance(deltas, current_index, bal.old);
+            addNewBalance(deltas, next_index, bal.new);
             vote_current_indices[v_index] = next_index;
             result.new_vote_validators += 1;
         } else {
@@ -187,12 +121,54 @@ pub fn computeDeltas(
     return result;
 }
 
+/// Subtracts a validator's old balance from the node it is departing.
+fn subtractOldBalance(deltas: []i64, node_index: VoteIndex, old_balance: i64) void {
+    if (node_index != NULL_VOTE_INDEX) {
+        assert(node_index < deltas.len);
+        assert(deltas[node_index] >= std.math.minInt(i64) + old_balance);
+        deltas[node_index] -|= old_balance;
+    }
+}
 
+/// Adds a validator's new balance to the node it is arriving at.
+fn addNewBalance(deltas: []i64, node_index: VoteIndex, new_balance: i64) void {
+    if (node_index != NULL_VOTE_INDEX) {
+        assert(node_index < deltas.len);
+        assert(deltas[node_index] <= std.math.maxInt(i64) - new_balance);
+        deltas[node_index] +|= new_balance;
+    }
+}
+
+/// Resolves old and new effective balance for a validator, handling mismatched slice lengths
+/// and the same-pointer optimisation (when old_balances == new_balances).
+fn resolveBalances(
+    v_index: usize,
+    old_balances: []const u16,
+    new_balances: []const u16,
+) struct { old: i64, new: i64 } {
+    const old_balance: i64 = if (v_index < old_balances.len) old_balances[v_index] else 0;
+    const new_balance: i64 = if (old_balances.ptr == new_balances.ptr)
+        old_balance
+    else if (v_index < new_balances.len)
+        new_balances[v_index]
+    else
+        0;
+    return .{ .old = old_balance, .new = new_balance };
+}
+
+/// Copies equivocating keys into a heap buffer and sorts ascending for pointer advancement.
+fn sortEquivocatingKeys(allocator: Allocator, indices: EquivocatingIndices) ![]const ValidatorIndex {
+    const keys = indices.keys();
+    const buf = try allocator.alloc(ValidatorIndex, keys.len);
+    @memcpy(buf, keys);
+    std.mem.sortUnstable(ValidatorIndex, buf, {}, std.sort.asc(ValidatorIndex));
+    return buf;
+}
 
 // ── Tests ──
 
 const TestContext = struct {
-    dc: DeltasCache = .{},
+    dc: DeltasCache = .empty,
     votes: Votes = .{},
 
     fn init(count: usize) !TestContext {
@@ -217,7 +193,8 @@ const TestContext = struct {
         return computeDeltas(testing.allocator, &self.dc, num_nodes, f.current_indices, f.next_indices, old_bal, new_bal, eq);
     }
 
-    const empty_eq = EquivocatingIndices.init(testing.allocator);
+    // No deinit needed: init performs no allocation, so there is nothing to free.
+    const empty_eq: EquivocatingIndices = .empty;
 };
 
 fn expectDeltas(actual: []const i64, expected: []const i64) !void {
@@ -340,9 +317,9 @@ test "not empty equivocation set" {
 
     const bal: []const u16 = &.{ 31, 32 };
     // 1st validator is part of an attester slashing
-    var eq = EquivocatingIndices.init(testing.allocator);
-    defer eq.deinit();
-    try eq.put(0, {});
+    var eq: EquivocatingIndices = .empty;
+    defer eq.deinit(testing.allocator);
+    try eq.put(testing.allocator, 0, {});
 
     // Should disregard the 1st validator due to attester slashing
     const r1 = try ctx.run(2, bal, bal, &eq);

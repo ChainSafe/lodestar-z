@@ -40,6 +40,7 @@ pub const Fork = enum {
     deneb,
     electra,
     fulu,
+    gloas,
 
     pub fn toString(self: Fork) []const u8 {
         return switch (self) {
@@ -50,6 +51,7 @@ pub const Fork = enum {
             .deneb => "deneb",
             .electra => "electra",
             .fulu => "fulu",
+            .gloas => "gloas",
         };
     }
 

@@ -135,6 +135,18 @@
                 .metrics,
             },
         },
+        .fork_choice = .{
+            .root_source_file = "src/fork_choice/root.zig",
+            .imports = .{
+                .consensus_types,
+                .config,
+                .preset,
+                .state_transition,
+                .fork_types,
+                .hex,
+                .constants,
+            },
+        },
     },
     .executables = .{
         .download_era_files = .{
@@ -222,6 +234,24 @@
             .root_module = .{
                 .root_source_file = "bench/ssz/hashing.zig",
                 .imports = .{ .hashing, .zbench },
+            },
+        },
+        .bench_fork_choice_update_head = .{
+            .root_module = .{
+                .root_source_file = "bench/fork_choice/update_head.zig",
+                .imports = .{ .fork_choice, .state_transition, .config, .constants, .zbench },
+            },
+        },
+        .bench_fork_choice_compute_deltas = .{
+            .root_module = .{
+                .root_source_file = "bench/fork_choice/compute_deltas.zig",
+                .imports = .{ .fork_choice, .zbench },
+            },
+        },
+        .bench_fork_choice_on_attestation = .{
+            .root_module = .{
+                .root_source_file = "bench/fork_choice/on_attestation.zig",
+                .imports = .{ .fork_choice, .consensus_types, .fork_types, .constants, .state_transition, .config, .zbench },
             },
         },
         .bench_process_block = .{

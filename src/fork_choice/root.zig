@@ -19,10 +19,11 @@ pub const LVHInvalidResponse = proto_array.LVHInvalidResponse;
 pub const LVHExecErrorCode = proto_array.LVHExecErrorCode;
 
 pub const ProtoArrayError = proto_array.ProtoArrayError;
-pub const ForkChoiceError = proto_array.ForkChoiceError;
+pub const ForkChoiceError = fork_choice.ForkChoiceError;
 pub const InvalidBlockCode = proto_array.InvalidBlockCode;
 pub const InvalidAttestationCode = proto_array.InvalidAttestationCode;
 
+pub const ProtoArray = proto_array.ProtoArray;
 pub const ProtoArrayStruct = proto_array.ProtoArray;
 pub const DEFAULT_PRUNE_THRESHOLD = proto_array.DEFAULT_PRUNE_THRESHOLD;
 pub const VariantIndices = proto_array.VariantIndices;
@@ -39,6 +40,7 @@ pub const DeltasCache = compute_deltas.DeltasCache;
 pub const EquivocatingIndices = compute_deltas.EquivocatingIndices;
 pub const VoteIndex = compute_deltas.VoteIndex;
 
+pub const ForkChoice = fork_choice.ForkChoice;
 pub const ForkChoiceStruct = fork_choice.ForkChoice;
 pub const ValidatorVoteMap = fork_choice.ValidatorVoteMap;
 pub const BlockAttestationMap = fork_choice.BlockAttestationMap;
@@ -67,7 +69,6 @@ pub const UpdateAndGetHeadResult = fork_choice.UpdateAndGetHeadResult;
 pub const CheckpointWithPayloadAndBalance = fork_choice.CheckpointWithPayloadAndBalance;
 pub const CheckpointWithPayloadAndTotalBalance = fork_choice.CheckpointWithPayloadAndTotalBalance;
 pub const onBlockFromProto = fork_choice.onBlockFromProto;
-pub const onBlockFromState = fork_choice.onBlockFromState;
 pub const HeadResult = fork_choice.HeadResult;
 pub const initFromAnchor = fork_choice.initFromAnchor;
 pub const destroyFromAnchor = fork_choice.destroyFromAnchor;

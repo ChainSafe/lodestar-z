@@ -23,6 +23,10 @@ pub fn computeCheckpointEpochAtStateSlot(slot: Slot) Epoch {
         epoch + 1;
 }
 
+pub fn computeSlotsSinceEpochStart(slot: Slot) Slot {
+    return slot - computeStartSlotAtEpoch(computeEpochAtSlot(slot));
+}
+
 pub fn computeStartSlotAtEpoch(epoch: Epoch) Slot {
     return epoch * preset.SLOTS_PER_EPOCH;
 }

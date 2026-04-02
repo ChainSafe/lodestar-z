@@ -118,7 +118,7 @@ pub fn executeStateTransition(
         inline else => |f| {
             switch (block.blockType()) {
                 inline else => |bt| {
-                    if (comptime bt == .blinded and f.lt(.bellatrix)) {
+                    if (comptime bt == .blinded and (f.lt(.bellatrix) or f.gte(.gloas))) {
                         return BlockImportError.StateTransitionFailed;
                     }
                     const process_opts = state_transition.ProcessBlockOpts{

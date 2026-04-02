@@ -50,7 +50,6 @@ test "merkleize" {
         expected: []const u8,
     };
 
-    // TODO: fix commented cases
     const test_cases = comptime [_]TestCase{
         TestCase{ .chunk_count = 0, .expected = "0x0000000000000000000000000000000000000000000000000000000000000000" },
         TestCase{ .chunk_count = 1, .expected = "0x0000000000000000000000000000000000000000000000000000000000000000" },
