@@ -337,12 +337,13 @@ test "decayScores exponential decay" {
     scorer.deinit();
     scorer = PeerScorer.init(std.testing.allocator, testConfig(), &testClock);
 
-    // 10 * mid_tolerance (-5 each) = -50
-    for (0..10) |_| {
+    // 4 * mid_tolerance (-5 each) = -20. Stay above ban threshold (-50) to avoid
+    // cooldown which would block decay.
+    for (0..4) |_| {
         scorer.reportPeer("peer1", .mid_tolerance);
     }
     const initial_score = scorer.scores.get("peer1").?.lodestar_score;
-    try std.testing.expectApproxEqAbs(@as(f64, -50.0), initial_score, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f64, -20.0), initial_score, 0.01);
 
     // Advance clock by one halflife (10 minutes = 600_000 ms).
     test_clock_value = @intFromFloat(constants.SCORE_HALFLIFE_MS);
@@ -350,7 +351,7 @@ test "decayScores exponential decay" {
 
     const decayed = scorer.scores.get("peer1").?.lodestar_score;
     // After one halflife, score should be approximately halved.
-    try std.testing.expectApproxEqAbs(@as(f64, -25.0), decayed, 0.5);
+    try std.testing.expectApproxEqAbs(@as(f64, -10.0), decayed, 0.5);
 }
 
 test "decayScores does not decay during cooldown" {
