@@ -31,6 +31,7 @@ const ValidatorStore = @import("validator_store.zig").ValidatorStore;
 const signing_mod = @import("signing.zig");
 const SigningContext = signing_mod.SigningContext;
 const ValidatorMetrics = @import("metrics.zig").ValidatorMetrics;
+const mutex_mod = @import("mutex.zig");
 
 const dopple_mod = @import("doppelganger.zig");
 const DoppelgangerService = dopple_mod.DoppelgangerService;
@@ -55,6 +56,9 @@ pub const BlockService = struct {
     validator_store: *ValidatorStore,
     /// Signing context (fork_version + genesis_validators_root) for domain computation.
     signing_ctx: SigningContext,
+    /// Protects proposer duty caches from concurrent keymanager mutation and
+    /// refresh/prefetch swaps.
+    cache_mutex: mutex_mod.Mutex,
     /// Duties for the current epoch.
     duties: std.array_list.Managed(CachedProposerDuty),
     duties_epoch: ?u64,
@@ -96,6 +100,7 @@ pub const BlockService = struct {
             .api = api,
             .validator_store = validator_store,
             .signing_ctx = signing_ctx,
+            .cache_mutex = .{},
             .duties = std.array_list.Managed(CachedProposerDuty).init(allocator),
             .duties_epoch = null,
             .next_duties = std.array_list.Managed(CachedProposerDuty).init(allocator),
@@ -134,6 +139,8 @@ pub const BlockService = struct {
     }
 
     pub fn deinit(self: *BlockService) void {
+        self.cache_mutex.lock();
+        defer self.cache_mutex.unlock();
         self.duties.deinit();
         self.next_duties.deinit();
     }
@@ -146,23 +153,9 @@ pub const BlockService = struct {
     ///
     /// TS: BlockDutiesService.pollBeaconProposers (runEveryEpoch)
     pub fn onEpoch(self: *BlockService, io: Io, epoch: u64) void {
-        // If next epoch duties were pre-fetched, swap them in.
-        if (self.next_duties_epoch) |ne| {
-            if (ne == epoch) {
-                if (self.duties_epoch) |prev_epoch| {
-                    if (prev_epoch + 1 == epoch) {
-                        self.checkMissedDuties();
-                    }
-                }
-
-                self.duties.deinit();
-                self.duties = self.next_duties;
-                self.duties_epoch = ne;
-                self.next_duties = std.array_list.Managed(CachedProposerDuty).init(self.allocator);
-                self.next_duties_epoch = null;
-                log.debug("swapped pre-fetched proposer duties into epoch={d}", .{epoch});
-                return;
-            }
+        if (self.activatePrefetchedEpoch(epoch)) {
+            log.debug("swapped pre-fetched proposer duties into epoch={d}", .{epoch});
+            return;
         }
 
         self.refreshDuties(io, epoch) catch |err| {
@@ -184,6 +177,9 @@ pub const BlockService = struct {
     /// Used when a validator is removed at runtime so stale proposer duties do not
     /// trigger failed proposal attempts later in the epoch.
     pub fn removeDutiesForKey(self: *BlockService, pubkey: [48]u8) void {
+        self.cache_mutex.lock();
+        defer self.cache_mutex.unlock();
+
         var i: usize = 0;
         while (i < self.duties.items.len) {
             if (std.mem.eql(u8, &self.duties.items[i].duty.pubkey, &pubkey)) {
@@ -231,11 +227,9 @@ pub const BlockService = struct {
             });
         }
 
-        self.duties.deinit();
-        self.duties = refreshed;
-        self.duties_epoch = epoch;
+        self.replaceCurrentDuties(epoch, refreshed);
 
-        log.debug("cached {d} proposer duties for epoch {d}", .{ self.duties.items.len, epoch });
+        log.debug("cached {d} proposer duties for epoch {d}", .{ refreshed.items.len, epoch });
     }
 
     /// Pre-fetch proposer duties for the next epoch to reduce latency at epoch boundaries.
@@ -264,11 +258,9 @@ pub const BlockService = struct {
             };
         }
 
-        self.next_duties.deinit();
-        self.next_duties = prefetched;
-        self.next_duties_epoch = next_epoch;
+        self.replaceNextDuties(next_epoch, prefetched);
 
-        log.debug("pre-fetched {d} proposer duties for epoch {d}", .{ self.next_duties.items.len, next_epoch });
+        log.debug("pre-fetched {d} proposer duties for epoch {d}", .{ prefetched.items.len, next_epoch });
     }
 
     // -----------------------------------------------------------------------
@@ -277,10 +269,10 @@ pub const BlockService = struct {
 
     fn maybePropose(self: *BlockService, io: Io, slot: u64) void {
         const epoch = slot / self.slots_per_epoch;
-        if (self.duties_epoch == null or self.duties_epoch.? != epoch) {
+        if (!self.hasCurrentEpochDuties(epoch)) {
             self.refreshDuties(io, epoch) catch |err| {
                 log.warn("refreshDuties slot={d} epoch={d} error={s}", .{ slot, epoch, @errorName(err) });
-                if (self.isLastSlotOfEpoch(slot) and (self.next_duties_epoch == null or self.next_duties_epoch.? != epoch + 1)) {
+                if (self.isLastSlotOfEpoch(slot) and !self.hasNextEpochDuties(epoch + 1)) {
                     self.prefetchNextEpochDuties(io, epoch + 1);
                 }
                 return;
@@ -289,16 +281,20 @@ pub const BlockService = struct {
 
         self.proposeCachedDutiesAtSlot(io, slot);
 
-        if (self.isLastSlotOfEpoch(slot) and (self.next_duties_epoch == null or self.next_duties_epoch.? != epoch + 1)) {
+        if (self.isLastSlotOfEpoch(slot) and !self.hasNextEpochDuties(epoch + 1)) {
             self.prefetchNextEpochDuties(io, epoch + 1);
         }
     }
 
     fn proposeCachedDutiesAtSlot(self: *BlockService, io: Io, slot: u64) void {
-        var i: usize = 0;
-        while (i < self.duties.items.len) : (i += 1) {
-            const cached = &self.duties.items[i];
-            if (cached.produced or cached.duty.slot != slot) continue;
+        const cached_duties = self.snapshotDutiesForSlot(slot) catch |err| {
+            log.err("snapshot proposer duties slot={d} error={s}", .{ slot, @errorName(err) });
+            return;
+        };
+        defer self.allocator.free(cached_duties);
+
+        for (cached_duties) |cached| {
+            if (cached.produced) continue;
 
             const produced = self.proposeDuty(io, cached.duty) catch |err| {
                 log.err("proposeDuty slot={d} validator_index={d} error={s}", .{
@@ -309,7 +305,7 @@ pub const BlockService = struct {
                 continue;
             };
 
-            cached.produced = produced;
+            self.markProduced(cached.duty, produced);
         }
     }
 
@@ -453,6 +449,9 @@ pub const BlockService = struct {
     ///
     /// Called before replacing the current epoch duties with the next epoch's duties.
     fn checkMissedDuties(self: *BlockService) void {
+        self.cache_mutex.lock();
+        defer self.cache_mutex.unlock();
+
         for (self.duties.items) |cached| {
             if (!cached.produced) {
                 self.missed_block_count += 1;
@@ -473,13 +472,14 @@ pub const BlockService = struct {
     }
 
     fn hasTrackedValidator(self: *const BlockService, pubkey: [48]u8) bool {
-        for (self.validator_store.validators.items) |v| {
-            if (std.mem.eql(u8, &v.pubkey, &pubkey)) return true;
-        }
-        return false;
+        return self.validator_store.hasPubkey(pubkey);
     }
 
     fn wasProduced(self: *const BlockService, duty: ProposerDuty) bool {
+        const mutex_ptr: *mutex_mod.Mutex = @constCast(&self.cache_mutex);
+        mutex_ptr.lock();
+        defer mutex_ptr.unlock();
+
         if (self.duties_epoch == null) return false;
 
         for (self.duties.items) |cached| {
@@ -496,6 +496,118 @@ pub const BlockService = struct {
 
     fn isLastSlotOfEpoch(self: *const BlockService, slot: u64) bool {
         return (slot + 1) % self.slots_per_epoch == 0;
+    }
+
+    fn hasCurrentEpochDuties(self: *BlockService, epoch: u64) bool {
+        self.cache_mutex.lock();
+        defer self.cache_mutex.unlock();
+        return self.duties_epoch != null and self.duties_epoch.? == epoch;
+    }
+
+    fn hasNextEpochDuties(self: *BlockService, epoch: u64) bool {
+        self.cache_mutex.lock();
+        defer self.cache_mutex.unlock();
+        return self.next_duties_epoch != null and self.next_duties_epoch.? == epoch;
+    }
+
+    fn snapshotDutiesForSlot(self: *BlockService, slot: u64) ![]CachedProposerDuty {
+        const epoch = slot / self.slots_per_epoch;
+
+        self.cache_mutex.lock();
+        defer self.cache_mutex.unlock();
+
+        if (self.duties_epoch == null or self.duties_epoch.? != epoch) {
+            return self.allocator.alloc(CachedProposerDuty, 0);
+        }
+
+        var count: usize = 0;
+        for (self.duties.items) |cached| {
+            if (cached.duty.slot == slot) count += 1;
+        }
+
+        const snapshot = try self.allocator.alloc(CachedProposerDuty, count);
+        var index: usize = 0;
+        for (self.duties.items) |cached| {
+            if (cached.duty.slot != slot) continue;
+            snapshot[index] = cached;
+            index += 1;
+        }
+        return snapshot;
+    }
+
+    fn markProduced(self: *BlockService, duty: ProposerDuty, produced: bool) void {
+        self.cache_mutex.lock();
+        defer self.cache_mutex.unlock();
+
+        for (self.duties.items) |*cached| {
+            if (cached.duty.slot != duty.slot) continue;
+            if (cached.duty.validator_index != duty.validator_index) continue;
+            if (!std.mem.eql(u8, &cached.duty.pubkey, &duty.pubkey)) continue;
+            cached.produced = produced;
+            return;
+        }
+    }
+
+    fn activatePrefetchedEpoch(self: *BlockService, epoch: u64) bool {
+        self.cache_mutex.lock();
+        defer self.cache_mutex.unlock();
+
+        if (self.next_duties_epoch == null or self.next_duties_epoch.? != epoch) return false;
+
+        if (self.duties_epoch) |prev_epoch| {
+            if (prev_epoch + 1 == epoch) {
+                self.checkMissedDutiesLocked();
+            }
+        }
+
+        const old_current = self.duties;
+        self.duties = self.next_duties;
+        self.duties_epoch = epoch;
+        self.next_duties = std.array_list.Managed(CachedProposerDuty).init(self.allocator);
+        self.next_duties_epoch = null;
+        old_current.deinit();
+        return true;
+    }
+
+    fn replaceCurrentDuties(
+        self: *BlockService,
+        epoch: u64,
+        refreshed: std.array_list.Managed(CachedProposerDuty),
+    ) void {
+        self.cache_mutex.lock();
+        defer self.cache_mutex.unlock();
+
+        const old = self.duties;
+        self.duties = refreshed;
+        self.duties_epoch = epoch;
+        old.deinit();
+    }
+
+    fn replaceNextDuties(
+        self: *BlockService,
+        epoch: u64,
+        prefetched: std.array_list.Managed(CachedProposerDuty),
+    ) void {
+        self.cache_mutex.lock();
+        defer self.cache_mutex.unlock();
+
+        const old = self.next_duties;
+        self.next_duties = prefetched;
+        self.next_duties_epoch = epoch;
+        old.deinit();
+    }
+
+    fn checkMissedDutiesLocked(self: *BlockService) void {
+        for (self.duties.items) |cached| {
+            if (!cached.produced) {
+                self.missed_block_count += 1;
+                self.metrics.block_missed_total.incr();
+                log.warn(
+                    "missed block proposal slot={d} validator_index={d} (total_missed={d})",
+                    .{ cached.duty.slot, cached.duty.validator_index, self.missed_block_count },
+                );
+            }
+        }
     }
 
     fn produceRandaoReveal(self: *BlockService, io: Io, pubkey: [48]u8, epoch: u64) ![96]u8 {

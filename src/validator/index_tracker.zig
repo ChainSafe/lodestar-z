@@ -20,6 +20,8 @@ const Io = std.Io;
 const api_client = @import("api_client.zig");
 const BeaconApiClient = api_client.BeaconApiClient;
 const mutex_mod = @import("mutex.zig");
+const validator_types = @import("types.zig");
+const ValidatorStatus = validator_types.ValidatorStatus;
 
 const log = std.log.scoped(.index_tracker);
 
@@ -31,6 +33,13 @@ const IndexEntry = struct {
     pubkey: [48]u8,
     /// Validator index on the beacon chain (null until resolved).
     index: ?u64,
+    status: ValidatorStatus,
+};
+
+pub const ResolvedIndexEntry = struct {
+    pubkey: [48]u8,
+    index: u64,
+    status: ValidatorStatus,
 };
 
 // ---------------------------------------------------------------------------
@@ -81,6 +90,7 @@ pub const IndexTracker = struct {
         self.entries.append(.{
             .pubkey = pubkey,
             .index = null,
+            .status = .unknown,
         }) catch |err| {
             log.err("trackPubkey: OOM {s}", .{@errorName(err)});
         };
@@ -121,36 +131,46 @@ pub const IndexTracker = struct {
         return null;
     }
 
-    /// Get all currently resolved (pubkey, index) pairs.
-    ///
-    /// Caller must free the returned slice.
-    pub fn allResolvedIndices(self: *IndexTracker, allocator: Allocator) ![]u64 {
+    pub fn allResolvedEntries(self: *IndexTracker, allocator: Allocator) ![]ResolvedIndexEntry {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        var result = std.array_list.Managed(u64).init(allocator);
-        errdefer result.deinit();
-
-        for (self.entries.items) |e| {
-            if (e.index) |idx| try result.append(idx);
+        var count: usize = 0;
+        for (self.entries.items) |entry| {
+            if (entry.index != null) count += 1;
         }
-        return result.toOwnedSlice();
+
+        const result = try allocator.alloc(ResolvedIndexEntry, count);
+        var out_idx: usize = 0;
+        for (self.entries.items) |entry| {
+            if (entry.index) |idx| {
+                result[out_idx] = .{
+                    .pubkey = entry.pubkey,
+                    .index = idx,
+                    .status = entry.status,
+                };
+                out_idx += 1;
+            }
+        }
+        return result;
     }
 
     // -----------------------------------------------------------------------
     // Resolution
     // -----------------------------------------------------------------------
 
-    /// Resolve indices for all tracked pubkeys via the beacon node API.
+    /// Refresh indices and lifecycle statuses for all tracked pubkeys via the
+    /// beacon node API.
     ///
-    /// Calls POST /eth/v1/beacon/states/head/validators with all pubkeys that
-    /// don't yet have a resolved index. Resolved indices are stored in the
-    /// entries map and also applied to the validator store.
+    /// This is intentionally not "unresolved only". The validator runtime uses
+    /// BN-reported status to decide who is duty-eligible, so pending/exiting/
+    /// withdrawn transitions must be observed after initial index resolution too.
     ///
     /// TS: IndicesService.pollValidatorIndices()
     pub fn resolveIndices(self: *IndexTracker, io: Io) !void {
-        // Collect unresolved pubkeys (under lock).
-        var unresolved = blk: {
+        // Snapshot all tracked pubkeys so runtime key add/remove does not race
+        // the outbound BN request.
+        var tracked = blk: {
             self.mutex.lock();
             defer self.mutex.unlock();
 
@@ -158,37 +178,40 @@ pub const IndexTracker = struct {
             errdefer list.deinit();
 
             for (self.entries.items) |e| {
-                if (e.index == null) try list.append(e.pubkey);
+                try list.append(e.pubkey);
             }
             break :blk list;
         };
-        defer unresolved.deinit();
+        defer tracked.deinit();
 
-        if (unresolved.items.len == 0) return;
+        if (tracked.items.len == 0) return;
 
-        log.debug("resolving {d} validator indices", .{unresolved.items.len});
+        log.debug("refreshing {d} validator indices", .{tracked.items.len});
 
-        const results = self.api.getValidatorIndices(io, unresolved.items) catch |err| {
+        const results = self.api.getValidatorIndices(io, tracked.items) catch |err| {
             log.warn("getValidatorIndices failed: {s} — will retry next epoch", .{@errorName(err)});
             return;
         };
         defer self.allocator.free(results);
 
-        var resolved_count: usize = 0;
+        var updated_count: usize = 0;
 
-        // Apply resolved indices (under lock).
+        // Apply refreshed indices and statuses under lock.
         self.mutex.lock();
         defer self.mutex.unlock();
 
         for (results) |r| {
             for (self.entries.items) |*e| {
                 if (std.mem.eql(u8, &e.pubkey, &r.pubkey)) {
-                    if (e.index == null) {
+                    const status = validator_types.parseValidatorStatus(r.statusStr());
+                    if (e.index == null or e.index.? != r.index or e.status != status) {
                         e.index = r.index;
-                        resolved_count += 1;
-                        log.info("validator index resolved pubkey=0x{s} index={d}", .{
+                        e.status = status;
+                        updated_count += 1;
+                        log.info("validator index status updated pubkey=0x{s} index={d} status={s}", .{
                             std.fmt.bytesToHex(e.pubkey[0..4], .lower),
                             r.index,
+                            @tagName(status),
                         });
                     }
                     break;
@@ -196,9 +219,9 @@ pub const IndexTracker = struct {
             }
         }
 
-        if (resolved_count > 0) {
-            log.info("resolved {d} new validator indices (total tracked={d})", .{
-                resolved_count,
+        if (updated_count > 0) {
+            log.info("updated {d} validator index/status entries (total tracked={d})", .{
+                updated_count,
                 self.entries.items.len,
             });
         }

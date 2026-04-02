@@ -55,15 +55,12 @@ pub const AttesterDutyWithProof = struct {
 pub const SyncCommitteeDuty = struct {
     pubkey: [48]u8,
     validator_index: u64,
-    /// Indices within the sync committee (a validator may appear multiple times).
+    /// One representative committee index per subscribed subnet.
+    ///
+    /// A validator can appear multiple times in the sync committee, but the VC
+    /// only needs one entry per subnet for subnet subscriptions and contribution
+    /// production.
     validator_sync_committee_indices: []const u64,
-};
-
-/// Sync committee duty with selection proofs for each subcommittee.
-pub const SyncCommitteeDutyWithProofs = struct {
-    duty: SyncCommitteeDuty,
-    /// One selection proof per subcommittee index.
-    selection_proofs: []?[96]u8,
 };
 
 // ---------------------------------------------------------------------------
@@ -83,6 +80,15 @@ pub const ValidatorStatus = enum {
     withdrawal_done,
     unknown,
 };
+
+pub fn parseValidatorStatus(text: []const u8) ValidatorStatus {
+    inline for (std.meta.fields(ValidatorStatus)) |field| {
+        if (std.mem.eql(u8, text, field.name)) {
+            return @field(ValidatorStatus, field.name);
+        }
+    }
+    return .unknown;
+}
 
 // ---------------------------------------------------------------------------
 // Signing domains (removed — use constants module directly)

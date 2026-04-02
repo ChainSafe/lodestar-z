@@ -93,8 +93,6 @@ pub const ValidatorStore = struct {
 
     allocator: Allocator,
     validators: std.array_list.Managed(ValidatorRecord),
-    /// Cached pubkey slice kept in sync with validators for non-allocating pubkeys() access.
-    pubkeys_cache: std.array_list.Managed([48]u8),
     /// Persistent slashing protection database.
     slashing_db: SlashingProtectionDb,
     /// Default proposer settings applied to every validator unless overridden.
@@ -117,7 +115,6 @@ pub const ValidatorStore = struct {
         var store = ValidatorStore{
             .allocator = allocator,
             .validators = std.array_list.Managed(ValidatorRecord).init(allocator),
-            .pubkeys_cache = std.array_list.Managed([48]u8).init(allocator),
             .slashing_db = slashing_db,
             .default_proposer_config = default_proposer_config,
             .proposer_overrides = .empty,
@@ -138,7 +135,6 @@ pub const ValidatorStore = struct {
             self.clearSigner(v);
         }
         self.validators.deinit();
-        self.pubkeys_cache.deinit();
         self.proposer_overrides.deinit(self.allocator);
         self.slashing_db.close();
     }
@@ -342,8 +338,6 @@ pub const ValidatorStore = struct {
                 .last_signed_attestation_target_epoch = null,
             },
         });
-        // Keep pubkeys_cache in sync for non-allocating pubkeys() access.
-        try self.pubkeys_cache.append(pubkey_bytes);
         log.debug("added validator pubkey={x}", .{pubkey_bytes});
     }
 
@@ -382,7 +376,6 @@ pub const ValidatorStore = struct {
                 .last_signed_attestation_target_epoch = null,
             },
         });
-        try self.pubkeys_cache.append(pubkey);
         log.info("registered remote validator pubkey={x}", .{pubkey});
     }
 
@@ -424,8 +417,6 @@ pub const ValidatorStore = struct {
                 // Zero secret key memory before removing the entry.
                 self.clearSigner(&self.validators.items[i]);
                 _ = self.validators.swapRemove(i);
-                // Keep pubkeys_cache in sync.
-                _ = self.pubkeys_cache.swapRemove(i);
                 log.info("removed validator pubkey={x}", .{pubkey});
                 return true;
             }
@@ -540,17 +531,15 @@ pub const ValidatorStore = struct {
         return result;
     }
 
-    /// Return a non-owning slice of all validator public keys.
-    ///
-    /// STUB Fix: Returns the actual loaded pubkeys from pubkeys_cache, which is kept
-    /// in sync with the validators list by addKeyLocked() and removeValidator().
-    ///
-    /// Safety: The returned slice is valid only while no concurrent writes occur.
-    /// For multi-threaded access, use allPubkeys() which returns an owned copy.
-    ///
-    /// TS: ValidatorStore.hasVote() / all pubkey iteration patterns.
-    pub fn pubkeys(self: *const ValidatorStore) []const [48]u8 {
-        return self.pubkeys_cache.items;
+    pub fn hasPubkey(self: *const ValidatorStore, pubkey: [48]u8) bool {
+        const mutex_ptr: *mutex_mod.Mutex = @constCast(&self.mutex);
+        mutex_ptr.lock();
+        defer mutex_ptr.unlock();
+
+        for (self.validators.items) |v| {
+            if (std.mem.eql(u8, &v.pubkey, &pubkey)) return true;
+        }
+        return false;
     }
 
     /// Return all known public keys as an owned slice (caller must free).
@@ -592,6 +581,9 @@ pub const ValidatorStore = struct {
     ///
     /// TS: IndicesService.pollValidatorIndices() → validatorStore updates.
     pub fn updateIndex(self: *ValidatorStore, pubkey: [48]u8, index: u64, status: ValidatorStatus) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
         for (self.validators.items) |*v| {
             if (std.mem.eql(u8, &v.pubkey, &pubkey)) {
                 v.index = index;
@@ -601,9 +593,11 @@ pub const ValidatorStore = struct {
         }
     }
 
-    /// Return all known validator indices (for duty fetching).
+    /// Return all duty-eligible validator indices.
     ///
-    /// TS: indicesService.getAllLocalIndices()
+    /// Validators that are resolved but not in an active lifecycle state are
+    /// excluded so attestation and sync-duty refreshes do not ask the BN for
+    /// duties that cannot be performed.
     pub fn allIndices(self: *const ValidatorStore, allocator: Allocator) ![]u64 {
         // Lock mutex for thread-safe access. Cast away const — mutex is logically
         // interior-mutable and doesn't change observable ValidatorStore state.
@@ -614,6 +608,7 @@ pub const ValidatorStore = struct {
         var result = try allocator.alloc(u64, self.validators.items.len);
         var count: usize = 0;
         for (self.validators.items) |v| {
+            if (!isActiveStatus(v.status)) continue;
             if (v.index) |idx| {
                 result[count] = idx;
                 count += 1;
@@ -972,6 +967,28 @@ test "ValidatorStore: addKey and allIndices" {
     defer testing.allocator.free(indices2);
     try testing.expectEqual(@as(usize, 1), indices2.len);
     try testing.expectEqual(@as(u64, 42), indices2[0]);
+}
+
+test "ValidatorStore: allIndices excludes non-active validators" {
+    var store = try initTestStore();
+    defer store.deinit();
+
+    const sk = makeDummyKey();
+    try store.addKey(sk);
+
+    const pk = sk.toPublicKey();
+    store.updateIndex(pk.compress(), 42, .pending_queued);
+
+    const pending_indices = try store.allIndices(testing.allocator);
+    defer testing.allocator.free(pending_indices);
+    try testing.expectEqual(@as(usize, 0), pending_indices.len);
+
+    store.updateIndex(pk.compress(), 42, .active_ongoing);
+
+    const active_indices = try store.allIndices(testing.allocator);
+    defer testing.allocator.free(active_indices);
+    try testing.expectEqual(@as(usize, 1), active_indices.len);
+    try testing.expectEqual(@as(u64, 42), active_indices[0]);
 }
 
 test "ValidatorStore: slashing protection — block double proposal" {

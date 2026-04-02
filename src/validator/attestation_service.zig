@@ -37,6 +37,7 @@ const syncing_tracker_mod = @import("syncing_tracker.zig");
 const SyncingTracker = syncing_tracker_mod.SyncingTracker;
 const liveness_mod = @import("liveness.zig");
 const LivenessTracker = liveness_mod.LivenessTracker;
+const mutex_mod = @import("mutex.zig");
 const time = @import("time.zig");
 const ValidatorMetrics = @import("metrics.zig").ValidatorMetrics;
 
@@ -44,6 +45,9 @@ const log = std.log.scoped(.attestation_service);
 
 /// Target aggregators per committee (from consensus spec).
 const TARGET_AGGREGATORS_PER_COMMITTEE: u64 = 16;
+/// Keep request bodies under typical 1 MiB HTTP limits when pushing beacon
+/// committee subscriptions for large validator sets.
+const SUBSCRIPTIONS_PER_REQUEST: usize = 8_738;
 
 fn isAttestationAggregator(selection_proof: [96]u8, committee_length: u64) bool {
     const modulo = @max(@as(u64, 1), committee_length / TARGET_AGGREGATORS_PER_COMMITTEE);
@@ -76,6 +80,9 @@ pub const AttestationService = struct {
     aggregate_due_ms: u64,
     aggregate_due_ms_gloas: u64,
 
+    /// Protects duty caches and dependent-root invalidation state shared across
+    /// the slot clock, epoch clock, and chain-head SSE callback paths.
+    cache_mutex: mutex_mod.Mutex,
     /// Duties indexed by slot (rolling window across epochs).
     duties: std.array_list.Managed(AttesterDutyWithProof),
     /// Epoch for which duties are currently cached.
@@ -92,6 +99,12 @@ pub const AttestationService = struct {
     last_previous_dependent_root: [32]u8,
     /// Last known current_duty_dependent_root — used to detect reorgs.
     last_current_dependent_root: [32]u8,
+    /// Monotonic revision for current-epoch duties. Bumped whenever a head
+    /// change invalidates current duties so in-flight refreshes can be dropped.
+    current_duties_revision: u64,
+    /// Monotonic revision for next-epoch duties. Bumped whenever a head change
+    /// invalidates next-epoch duties so stale prefetches do not resurrect them.
+    next_duties_revision: u64,
     /// Doppelganger service reference (optional).
     doppelganger: ?*DoppelgangerService,
     /// Syncing tracker reference (optional).
@@ -128,6 +141,7 @@ pub const AttestationService = struct {
             .attestation_due_ms_gloas = attestation_due_ms_gloas,
             .aggregate_due_ms = aggregate_due_ms,
             .aggregate_due_ms_gloas = aggregate_due_ms_gloas,
+            .cache_mutex = .{},
             .duties = std.array_list.Managed(AttesterDutyWithProof).init(allocator),
             .duties_epoch = null,
             .next_duties = std.array_list.Managed(AttesterDutyWithProof).init(allocator),
@@ -135,6 +149,8 @@ pub const AttestationService = struct {
             .header_tracker = null,
             .last_previous_dependent_root = [_]u8{0} ** 32,
             .last_current_dependent_root = [_]u8{0} ** 32,
+            .current_duties_revision = 0,
+            .next_duties_revision = 0,
             .doppelganger = null,
             .syncing_tracker = null,
             .liveness_tracker = null,
@@ -169,6 +185,8 @@ pub const AttestationService = struct {
     }
 
     pub fn deinit(self: *AttestationService) void {
+        self.cache_mutex.lock();
+        defer self.cache_mutex.unlock();
         self.duties.deinit();
         self.next_duties.deinit();
     }
@@ -191,24 +209,42 @@ pub const AttestationService = struct {
     fn onHeadChange(ctx: *anyopaque, info: HeadInfo) void {
         const self: *AttestationService = @ptrCast(@alignCast(ctx));
 
+        self.cache_mutex.lock();
+        defer self.cache_mutex.unlock();
+
         const prev_changed = !std.mem.eql(u8, &self.last_previous_dependent_root, &info.previous_duty_dependent_root);
         const curr_changed = !std.mem.eql(u8, &self.last_current_dependent_root, &info.current_duty_dependent_root);
 
         if (!prev_changed and !curr_changed) return;
 
-        const epoch = info.slot / self.signing_ctx.slots_per_epoch;
-        log.warn(
-            "reorg detected at slot={d}: dependent_root changed — re-fetching attester duties for epoch={d}",
-            .{ info.slot, epoch },
-        );
+        const current_epoch = info.slot / self.signing_ctx.slots_per_epoch;
         self.last_previous_dependent_root = info.previous_duty_dependent_root;
         self.last_current_dependent_root = info.current_duty_dependent_root;
 
         // Head callbacks are synchronous, so do not do HTTP work here. Instead,
-        // invalidate the current-epoch cache so the next slot boundary refreshes
-        // attester duties before producing anything for that slot.
-        self.duties_epoch = null; // invalidate cache → forces refresh on next onEpoch
-        log.warn("attester duties cache invalidated due to reorg", .{});
+        // invalidate whichever epoch cache depends on the changed root so the
+        // next slot/epoch boundary refreshes the affected duties before use.
+        if (prev_changed) {
+            log.warn(
+                "attester duties invalidated for current epoch={d} at slot={d}: previous dependent root changed",
+                .{ current_epoch, info.slot },
+            );
+            self.current_duties_revision +|= 1;
+            self.duties_epoch = null;
+        }
+
+        if (curr_changed) {
+            const next_epoch = current_epoch + 1;
+            log.warn(
+                "attester duties invalidated for next epoch={d} at slot={d}: current dependent root changed",
+                .{ next_epoch, info.slot },
+            );
+            self.next_duties_revision +|= 1;
+            if (self.next_duties_epoch != null and self.next_duties_epoch.? == next_epoch) {
+                self.next_duties.clearRetainingCapacity();
+            }
+            self.next_duties_epoch = null;
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -217,25 +253,15 @@ pub const AttestationService = struct {
 
     /// Called at each epoch boundary to refresh attester duties.
     pub fn onEpoch(self: *AttestationService, io: Io, epoch: u64) void {
-        // Swap in pre-fetched next epoch duties if available.
-        if (self.next_duties_epoch) |ne| {
-            if (ne == epoch) {
-                // Move next → current.
-                self.duties.clearRetainingCapacity();
-                for (self.next_duties.items) |d| {
-                    self.duties.append(d) catch {};
-                }
-                self.duties_epoch = ne;
-                self.next_duties.clearRetainingCapacity();
-                self.next_duties_epoch = null;
-                log.debug("swapped pre-fetched attester duties into epoch={d}", .{epoch});
-                self.publishBeaconCommitteeSubscriptions(io, self.duties.items);
-                // Pre-fetch for epoch+1 now.
-                self.prefetchNextEpochDuties(io, epoch + 1);
-                return;
-            }
+        if (self.activatePrefetchedEpoch(epoch)) |subscriptions| {
+            defer self.allocator.free(subscriptions);
+            log.debug("swapped pre-fetched attester duties into epoch={d}", .{epoch});
+            self.publishBeaconCommitteeSubscriptions(io, subscriptions);
+            self.prefetchNextEpochDuties(io, epoch + 1);
+            return;
         }
-        self.refreshDuties(io, epoch) catch |err| {
+
+        self.ensureCurrentEpochDuties(io, epoch) catch |err| {
             log.err("refreshDuties epoch={d} error={s}", .{ epoch, @errorName(err) });
         };
         // Pre-fetch next epoch duties.
@@ -245,12 +271,12 @@ pub const AttestationService = struct {
     /// Called at each slot to produce and publish attestations + aggregates.
     pub fn onSlot(self: *AttestationService, io: Io, slot: u64) void {
         const epoch = slot / self.signing_ctx.slots_per_epoch;
-        if (self.duties_epoch == null or self.duties_epoch.? != epoch) {
-            self.refreshDuties(io, epoch) catch |err| {
+        if (!self.hasCurrentEpochDuties(epoch)) {
+            self.ensureCurrentEpochDuties(io, epoch) catch |err| {
                 log.warn("refreshDuties slot={d} epoch={d} error={s}", .{ slot, epoch, @errorName(err) });
                 return;
             };
-            if (self.next_duties_epoch == null or self.next_duties_epoch.? != epoch + 1) {
+            if (!self.hasNextEpochDuties(epoch + 1)) {
                 self.prefetchNextEpochDuties(io, epoch + 1);
             }
         }
@@ -265,6 +291,9 @@ pub const AttestationService = struct {
     /// Lodestar drops duties immediately on validator removal; do the same here so
     /// stale cached duties do not survive until the next epoch refresh.
     pub fn removeDutiesForKey(self: *AttestationService, pubkey: [48]u8) void {
+        self.cache_mutex.lock();
+        defer self.cache_mutex.unlock();
+
         var i: usize = 0;
         while (i < self.duties.items.len) {
             if (std.mem.eql(u8, &self.duties.items[i].duty.pubkey, &pubkey)) {
@@ -288,7 +317,14 @@ pub const AttestationService = struct {
     // Duty management
     // -----------------------------------------------------------------------
 
+    fn ensureCurrentEpochDuties(self: *AttestationService, io: Io, epoch: u64) !void {
+        if (!self.hasCurrentEpochDuties(epoch)) {
+            try self.refreshDuties(io, epoch);
+        }
+    }
+
     fn refreshDuties(self: *AttestationService, io: Io, epoch: u64) !void {
+        const revision = self.currentDutiesRevision();
         const indices = try self.validator_store.allIndices(self.allocator);
         defer self.allocator.free(indices);
         if (indices.len == 0) return;
@@ -298,35 +334,19 @@ pub const AttestationService = struct {
         const fetched = try self.api.getAttesterDuties(io, epoch, indices);
         defer self.allocator.free(fetched);
 
-        self.duties.clearRetainingCapacity();
-        self.duties_epoch = epoch;
+        var fresh_duties = try self.buildDutyList(io, fetched);
+        errdefer fresh_duties.deinit();
 
-        for (fetched) |duty| {
-            // Compute selection proof: sign(slot) with DOMAIN_SELECTION_PROOF.
-            var sel_proof: ?[96]u8 = null;
-            var sel_root: [32]u8 = undefined;
-            signing_mod.attestationSelectionProofSigningRoot(self.signing_ctx, duty.slot, &sel_root) catch |err| {
-                log.warn("selection proof signing root error: {s}", .{@errorName(err)});
-                try self.duties.append(.{
-                    .duty = duty,
-                    .selection_proof = null,
-                });
-                continue;
-            };
-            if (self.validator_store.signSelectionProof(io, duty.pubkey, sel_root, .AGGREGATION_SLOT)) |sig| {
-                const proof = sig.compress();
-                if (isAttestationAggregator(proof, duty.committee_length)) {
-                    sel_proof = proof;
-                }
-            } else |_| {}
+        const subscriptions = try self.buildBeaconCommitteeSubscriptions(fresh_duties.items);
+        errdefer self.allocator.free(subscriptions);
 
-            try self.duties.append(.{
-                .duty = duty,
-                .selection_proof = sel_proof,
-            });
+        if (!self.tryInstallCurrentDuties(epoch, revision, &fresh_duties)) {
+            log.debug("discarded stale attester duty refresh epoch={d} after dependent-root invalidation", .{epoch});
+            return;
         }
 
-        self.publishBeaconCommitteeSubscriptions(io, self.duties.items);
+        defer self.allocator.free(subscriptions);
+        self.publishBeaconCommitteeSubscriptions(io, subscriptions);
         log.debug("cached {d} attester duties epoch={d}", .{ fetched.len, epoch });
     }
 
@@ -334,6 +354,7 @@ pub const AttestationService = struct {
     ///
     /// TS: AttestationDutiesService fetches N+1 at end of epoch N.
     fn prefetchNextEpochDuties(self: *AttestationService, io: Io, next_epoch: u64) void {
+        const revision = self.nextDutiesRevision();
         const indices = self.validator_store.allIndices(self.allocator) catch return;
         defer self.allocator.free(indices);
         if (indices.len == 0) return;
@@ -345,51 +366,48 @@ pub const AttestationService = struct {
         };
         defer self.allocator.free(fetched);
 
-        self.next_duties.clearRetainingCapacity();
-        self.next_duties_epoch = next_epoch;
+        var fresh_duties = self.buildDutyList(io, fetched) catch |err| {
+            log.warn("prefetch duty proof build epoch={d} error={s}", .{ next_epoch, @errorName(err) });
+            return;
+        };
+        errdefer fresh_duties.deinit();
 
-        for (fetched) |duty| {
-            var sel_proof: ?[96]u8 = null;
-            var sel_root: [32]u8 = undefined;
-            signing_mod.attestationSelectionProofSigningRoot(self.signing_ctx, duty.slot, &sel_root) catch |err| {
-                log.warn("prefetch selection proof signing root error: {s}", .{@errorName(err)});
-                self.next_duties.append(.{ .duty = duty, .selection_proof = null }) catch {};
-                continue;
-            };
-            if (self.validator_store.signSelectionProof(io, duty.pubkey, sel_root, .AGGREGATION_SLOT)) |sig| {
-                const proof = sig.compress();
-                if (isAttestationAggregator(proof, duty.committee_length)) {
-                    sel_proof = proof;
-                }
-            } else |_| {}
-            self.next_duties.append(.{ .duty = duty, .selection_proof = sel_proof }) catch {};
+        const subscriptions = self.buildBeaconCommitteeSubscriptions(fresh_duties.items) catch |err| {
+            log.warn("prefetch subscription build epoch={d} error={s}", .{ next_epoch, @errorName(err) });
+            return;
+        };
+        errdefer self.allocator.free(subscriptions);
+
+        if (!self.tryInstallNextDuties(next_epoch, revision, &fresh_duties)) {
+            log.debug("discarded stale next-epoch duty prefetch epoch={d} after dependent-root invalidation", .{next_epoch});
+            return;
         }
-        self.publishBeaconCommitteeSubscriptions(io, self.next_duties.items);
+
+        defer self.allocator.free(subscriptions);
+        self.publishBeaconCommitteeSubscriptions(io, subscriptions);
         log.debug("pre-fetched {d} attester duties epoch={d}", .{ fetched.len, next_epoch });
     }
 
-    fn publishBeaconCommitteeSubscriptions(self: *AttestationService, io: Io, duties: []const AttesterDutyWithProof) void {
-        if (duties.len == 0) return;
+    fn publishBeaconCommitteeSubscriptions(
+        self: *AttestationService,
+        io: Io,
+        subscriptions: []const BeaconCommitteeSubscription,
+    ) void {
+        if (subscriptions.len == 0) return;
 
-        const subscriptions = self.allocator.alloc(BeaconCommitteeSubscription, duties.len) catch |err| {
-            log.warn("alloc beacon committee subscriptions failed: {s}", .{@errorName(err)});
-            return;
-        };
-        defer self.allocator.free(subscriptions);
-
-        for (duties, subscriptions) |duty, *subscription| {
-            subscription.* = .{
-                .validator_index = duty.duty.validator_index,
-                .committee_index = duty.duty.committee_index,
-                .committees_at_slot = duty.duty.committees_at_slot,
-                .slot = duty.duty.slot,
-                .is_aggregator = duty.selection_proof != null,
+        var start: usize = 0;
+        while (start < subscriptions.len) {
+            const end = @min(start + SUBSCRIPTIONS_PER_REQUEST, subscriptions.len);
+            self.api.prepareBeaconCommitteeSubnets(io, subscriptions[start..end]) catch |err| {
+                log.warn("prepareBeaconCommitteeSubnets failed batch_start={d} batch_len={d}: {s}", .{
+                    start,
+                    end - start,
+                    @errorName(err),
+                });
+                return;
             };
+            start = end;
         }
-
-        self.api.prepareBeaconCommitteeSubnets(io, subscriptions) catch |err| {
-            log.warn("prepareBeaconCommitteeSubnets failed: {s}", .{@errorName(err)});
-        };
     }
 
     // -----------------------------------------------------------------------
@@ -397,7 +415,8 @@ pub const AttestationService = struct {
     // -----------------------------------------------------------------------
 
     fn runAttestationTasks(self: *AttestationService, io: Io, slot: u64) !void {
-        const duties_at_slot = self.allDuties();
+        var duties_at_slot = try self.snapshotCurrentDutiesForSlot(slot);
+        defer self.allocator.free(duties_at_slot);
         if (duties_at_slot.len == 0) return;
 
         // Sub-slot timing: compute absolute slot start relative to genesis.
@@ -417,6 +436,12 @@ pub const AttestationService = struct {
             try io.sleep(.{ .nanoseconds = @intCast(attestation_due_ns - now_ns) }, .real);
         }
 
+        const epoch = slot / self.signing_ctx.slots_per_epoch;
+        try self.ensureCurrentEpochDuties(io, epoch);
+        duties_at_slot = try self.replaceDutySnapshot(duties_at_slot, slot);
+        if (duties_at_slot.len == 0) return;
+        const duties_revision = self.currentDutiesRevision();
+
         // Step 1: produce and publish attestations (block arrival or attestation due time, whichever first).
         const att_data_root = try self.produceAndPublishAttestations(io, slot, duties_at_slot);
 
@@ -425,6 +450,11 @@ pub const AttestationService = struct {
         const aggregate_now_ns = time.realNanoseconds(io);
         if (aggregate_now_ns < aggregate_due_ns) {
             try io.sleep(.{ .nanoseconds = @intCast(aggregate_due_ns - aggregate_now_ns) }, .real);
+        }
+
+        if (self.currentDutiesRevision() != duties_revision or !self.hasCurrentEpochDuties(epoch)) {
+            log.warn("skipping aggregate production slot={d}: attester duties changed after attestation publication", .{slot});
+            return;
         }
 
         // Step 2: produce and publish aggregates at the configured aggregate due time.
@@ -447,10 +477,178 @@ pub const AttestationService = struct {
             self.aggregate_due_ms;
     }
 
-    fn allDuties(self: *const AttestationService) []const AttesterDutyWithProof {
-        // Returns all cached duties regardless of slot.
-        // Callers filter by duty.slot == target_slot.
-        return self.duties.items;
+    fn buildDutyList(
+        self: *AttestationService,
+        io: Io,
+        fetched: []const AttesterDuty,
+    ) !std.array_list.Managed(AttesterDutyWithProof) {
+        var duties = std.array_list.Managed(AttesterDutyWithProof).init(self.allocator);
+        errdefer duties.deinit();
+
+        for (fetched) |duty| {
+            var sel_proof: ?[96]u8 = null;
+            var sel_root: [32]u8 = undefined;
+            signing_mod.attestationSelectionProofSigningRoot(self.signing_ctx, duty.slot, &sel_root) catch |err| {
+                log.warn("selection proof signing root error: {s}", .{@errorName(err)});
+                try duties.append(.{
+                    .duty = duty,
+                    .selection_proof = null,
+                });
+                continue;
+            };
+            if (self.validator_store.signSelectionProof(io, duty.pubkey, sel_root, .AGGREGATION_SLOT)) |sig| {
+                const proof = sig.compress();
+                if (isAttestationAggregator(proof, duty.committee_length)) {
+                    sel_proof = proof;
+                }
+            } else |_| {}
+
+            try duties.append(.{
+                .duty = duty,
+                .selection_proof = sel_proof,
+            });
+        }
+
+        return duties;
+    }
+
+    fn buildBeaconCommitteeSubscriptions(
+        self: *AttestationService,
+        duties: []const AttesterDutyWithProof,
+    ) ![]BeaconCommitteeSubscription {
+        const subscriptions = try self.allocator.alloc(BeaconCommitteeSubscription, duties.len);
+        for (duties, subscriptions) |duty, *subscription| {
+            subscription.* = .{
+                .validator_index = duty.duty.validator_index,
+                .committee_index = duty.duty.committee_index,
+                .committees_at_slot = duty.duty.committees_at_slot,
+                .slot = duty.duty.slot,
+                .is_aggregator = duty.selection_proof != null,
+            };
+        }
+        return subscriptions;
+    }
+
+    fn snapshotCurrentDutiesForSlot(self: *AttestationService, slot: u64) ![]AttesterDutyWithProof {
+        const epoch = slot / self.signing_ctx.slots_per_epoch;
+
+        self.cache_mutex.lock();
+        defer self.cache_mutex.unlock();
+
+        if (self.duties_epoch == null or self.duties_epoch.? != epoch) {
+            return self.allocator.alloc(AttesterDutyWithProof, 0);
+        }
+
+        var count: usize = 0;
+        for (self.duties.items) |duty| {
+            if (duty.duty.slot == slot) count += 1;
+        }
+
+        const snapshot = try self.allocator.alloc(AttesterDutyWithProof, count);
+        var index: usize = 0;
+        for (self.duties.items) |duty| {
+            if (duty.duty.slot != slot) continue;
+            snapshot[index] = duty;
+            index += 1;
+        }
+        return snapshot;
+    }
+
+    fn replaceDutySnapshot(
+        self: *AttestationService,
+        old_snapshot: []AttesterDutyWithProof,
+        slot: u64,
+    ) ![]AttesterDutyWithProof {
+        self.allocator.free(old_snapshot);
+        return self.snapshotCurrentDutiesForSlot(slot);
+    }
+
+    fn hasCurrentEpochDuties(self: *AttestationService, epoch: u64) bool {
+        self.cache_mutex.lock();
+        defer self.cache_mutex.unlock();
+        return self.duties_epoch != null and self.duties_epoch.? == epoch;
+    }
+
+    fn hasNextEpochDuties(self: *AttestationService, epoch: u64) bool {
+        self.cache_mutex.lock();
+        defer self.cache_mutex.unlock();
+        return self.next_duties_epoch != null and self.next_duties_epoch.? == epoch;
+    }
+
+    fn currentDutiesRevision(self: *AttestationService) u64 {
+        self.cache_mutex.lock();
+        defer self.cache_mutex.unlock();
+        return self.current_duties_revision;
+    }
+
+    fn nextDutiesRevision(self: *AttestationService) u64 {
+        self.cache_mutex.lock();
+        defer self.cache_mutex.unlock();
+        return self.next_duties_revision;
+    }
+
+    fn tryInstallCurrentDuties(
+        self: *AttestationService,
+        epoch: u64,
+        revision: u64,
+        duties: *std.array_list.Managed(AttesterDutyWithProof),
+    ) bool {
+        self.cache_mutex.lock();
+        defer self.cache_mutex.unlock();
+
+        if (self.current_duties_revision != revision) return false;
+
+        const old = self.duties;
+        self.duties = duties.*;
+        self.duties_epoch = epoch;
+        duties.* = std.array_list.Managed(AttesterDutyWithProof).init(self.allocator);
+        old.deinit();
+        return true;
+    }
+
+    fn tryInstallNextDuties(
+        self: *AttestationService,
+        epoch: u64,
+        revision: u64,
+        duties: *std.array_list.Managed(AttesterDutyWithProof),
+    ) bool {
+        self.cache_mutex.lock();
+        defer self.cache_mutex.unlock();
+
+        if (self.next_duties_revision != revision) return false;
+
+        const old = self.next_duties;
+        self.next_duties = duties.*;
+        self.next_duties_epoch = epoch;
+        duties.* = std.array_list.Managed(AttesterDutyWithProof).init(self.allocator);
+        old.deinit();
+        return true;
+    }
+
+    fn activatePrefetchedEpoch(
+        self: *AttestationService,
+        epoch: u64,
+    ) ?[]BeaconCommitteeSubscription {
+        self.cache_mutex.lock();
+        defer self.cache_mutex.unlock();
+
+        if (self.next_duties_epoch == null or self.next_duties_epoch.? != epoch) return null;
+
+        const subscriptions = self.buildBeaconCommitteeSubscriptions(self.next_duties.items) catch |err| {
+            log.warn("failed to build beacon committee subscriptions while activating epoch={d}: {s}", .{
+                epoch,
+                @errorName(err),
+            });
+            return null;
+        };
+
+        const old_current = self.duties;
+        self.duties = self.next_duties;
+        self.duties_epoch = epoch;
+        self.next_duties = std.array_list.Managed(AttesterDutyWithProof).init(self.allocator);
+        self.next_duties_epoch = null;
+        old_current.deinit();
+        return subscriptions;
     }
 
     fn produceAndPublishAttestations(
@@ -967,4 +1165,109 @@ pub const AttestationService = struct {
 test "isAttestationAggregator matches spec modulus edge case" {
     const proof = [_]u8{0} ** 96;
     try std.testing.expect(isAttestationAggregator(proof, 1));
+}
+
+fn testSigningContext() SigningContext {
+    return .{
+        .genesis_validators_root = [_]u8{0} ** 32,
+        .genesis_time_unix_secs = 0,
+        .seconds_per_slot = 12,
+        .slots_per_epoch = 32,
+        .fork_schedule_len = 0,
+        .fork_schedule = undefined,
+    };
+}
+
+fn testMetrics() *ValidatorMetrics {
+    const Holder = struct {
+        var value = ValidatorMetrics.initNoop();
+    };
+    return &Holder.value;
+}
+
+fn testAttestationService() AttestationService {
+    return AttestationService.init(
+        std.testing.allocator,
+        undefined,
+        undefined,
+        testSigningContext(),
+        12,
+        0,
+        std.math.maxInt(u64),
+        std.math.maxInt(u64),
+        4_000,
+        3_000,
+        8_000,
+        6_000,
+        testMetrics(),
+    );
+}
+
+test "snapshotCurrentDutiesForSlot hides invalidated stale duties" {
+    var svc = testAttestationService();
+    defer svc.deinit();
+
+    try svc.duties.append(.{
+        .duty = .{
+            .pubkey = [_]u8{1} ** 48,
+            .validator_index = 7,
+            .committee_index = 3,
+            .committee_length = 16,
+            .committees_at_slot = 1,
+            .validator_committee_index = 5,
+            .slot = 64,
+        },
+        .selection_proof = null,
+    });
+    svc.duties_epoch = 2;
+
+    var snapshot = try svc.snapshotCurrentDutiesForSlot(64);
+    try std.testing.expectEqual(@as(usize, 1), snapshot.len);
+    try std.testing.expectEqual(@as(u64, 7), snapshot[0].duty.validator_index);
+    std.testing.allocator.free(snapshot);
+
+    AttestationService.onHeadChange(@ptrCast(&svc), .{
+        .slot = 64,
+        .block_root = [_]u8{0} ** 32,
+        .finalized_epoch = 0,
+        .previous_duty_dependent_root = [_]u8{9} ** 32,
+        .current_duty_dependent_root = [_]u8{0} ** 32,
+    });
+
+    snapshot = try svc.snapshotCurrentDutiesForSlot(64);
+    defer std.testing.allocator.free(snapshot);
+    try std.testing.expectEqual(@as(usize, 0), snapshot.len);
+    try std.testing.expect(svc.duties_epoch == null);
+}
+
+test "onHeadChange invalidates prefetched next epoch duties" {
+    var svc = testAttestationService();
+    defer svc.deinit();
+
+    try svc.next_duties.append(.{
+        .duty = .{
+            .pubkey = [_]u8{2} ** 48,
+            .validator_index = 9,
+            .committee_index = 1,
+            .committee_length = 16,
+            .committees_at_slot = 1,
+            .validator_committee_index = 2,
+            .slot = 96,
+        },
+        .selection_proof = null,
+    });
+    svc.next_duties_epoch = 3;
+
+    const prior_revision = svc.nextDutiesRevision();
+    AttestationService.onHeadChange(@ptrCast(&svc), .{
+        .slot = 64,
+        .block_root = [_]u8{0} ** 32,
+        .finalized_epoch = 0,
+        .previous_duty_dependent_root = [_]u8{0} ** 32,
+        .current_duty_dependent_root = [_]u8{7} ** 32,
+    });
+
+    try std.testing.expect(svc.next_duties_epoch == null);
+    try std.testing.expectEqual(@as(usize, 0), svc.next_duties.items.len);
+    try std.testing.expect(svc.nextDutiesRevision() > prior_revision);
 }

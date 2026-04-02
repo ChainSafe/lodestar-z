@@ -343,9 +343,11 @@ pub const ValidatorClient = struct {
             }
         }
 
-        for (self.validator_store.validators.items) |v| {
-            self.index_tracker.trackPubkey(v.pubkey);
-            self.liveness_tracker.register(v.pubkey);
+        const startup_pubkeys = try self.validator_store.allPubkeys(allocator);
+        defer allocator.free(startup_pubkeys);
+        for (startup_pubkeys) |pubkey| {
+            self.index_tracker.trackPubkey(pubkey);
+            self.liveness_tracker.register(pubkey);
         }
 
         if (config.external_signer_urls.len > 0) {
@@ -519,18 +521,30 @@ pub const ValidatorClient = struct {
     }
 
     fn applyResolvedIndices(self: *ValidatorClient) void {
-        for (self.index_tracker.entries.items) |e| {
-            if (e.index) |idx| {
-                self.validator_store.updateIndex(e.pubkey, idx, .active_ongoing);
+        const resolved = self.index_tracker.allResolvedEntries(self.allocator) catch |err| {
+            log.warn("snapshot resolved validator indices failed: {s}", .{@errorName(err)});
+            return;
+        };
+        defer self.allocator.free(resolved);
+
+        for (resolved) |entry| {
+            self.validator_store.updateIndex(entry.pubkey, entry.index, entry.status);
+            if (self.doppelganger) |*d| {
+                d.updateIndex(entry.pubkey, entry.index);
             }
         }
-        self.syncDoppelgangerEntryIndices();
     }
 
     fn syncDoppelgangerEntryIndices(self: *ValidatorClient) void {
         if (self.doppelganger) |*d| {
-            for (d.entries.items) |*de| {
-                de.index = self.index_tracker.getIndex(de.pubkey);
+            const pubkeys = self.validator_store.allPubkeys(self.allocator) catch |err| {
+                log.warn("snapshot validator pubkeys for doppelganger sync failed: {s}", .{@errorName(err)});
+                return;
+            };
+            defer self.allocator.free(pubkeys);
+
+            for (pubkeys) |pubkey| {
+                d.updateIndex(pubkey, self.index_tracker.getIndex(pubkey));
             }
         }
     }
@@ -538,8 +552,14 @@ pub const ValidatorClient = struct {
     fn registerAllValidatorsWithDoppelganger(self: *ValidatorClient) void {
         if (self.doppelganger) |*d| {
             const current_epoch = self.clock.currentEpoch(self.io);
-            for (self.validator_store.validators.items) |v| {
-                d.registerValidator(current_epoch, v.pubkey) catch |err| {
+            const pubkeys = self.validator_store.allPubkeys(self.allocator) catch |err| {
+                log.warn("snapshot validator pubkeys for doppelganger registration failed: {s}", .{@errorName(err)});
+                return;
+            };
+            defer self.allocator.free(pubkeys);
+
+            for (pubkeys) |pubkey| {
+                d.registerValidator(current_epoch, pubkey) catch |err| {
                     log.warn("doppelganger registerValidator error: {s}", .{@errorName(err)});
                 };
             }
@@ -824,11 +844,12 @@ pub const ValidatorClient = struct {
         // Log session summary.
         const session_end_ns = time.awakeNanoseconds(self.io);
         const session_duration_s = (session_end_ns -| self.session_start_ns) / std.time.ns_per_s;
+        const counts = self.validator_store.counts();
         log.info(
             "validator client stopped: session_duration={d}s validators={d} missed_blocks={d}",
             .{
                 session_duration_s,
-                self.validator_store.validators.items.len,
+                counts.total,
                 self.block_service.missed_block_count,
             },
         );
@@ -879,7 +900,7 @@ pub const ValidatorClient = struct {
 
         self.liveness_tracker.logEpochSummary(
             epoch,
-            self.validator_store.validators.items.len,
+            self.validator_store.counts().total,
             self.block_service.missed_block_count,
         );
 

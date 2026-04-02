@@ -18,9 +18,12 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
-const BeaconApiClient = @import("api_client.zig").BeaconApiClient;
+const api_client = @import("api_client.zig");
+const BeaconApiClient = api_client.BeaconApiClient;
+const ValidatorLiveness = api_client.ValidatorLiveness;
 const ValidatorMetrics = @import("metrics.zig").ValidatorMetrics;
 const SlashingProtectionDb = @import("slashing_protection_db.zig").SlashingProtectionDb;
+const mutex_mod = @import("mutex.zig");
 
 const log = std.log.scoped(.doppelganger);
 
@@ -79,6 +82,7 @@ pub const DoppelgangerService = struct {
     api: *BeaconApiClient,
     metrics: *ValidatorMetrics,
     slashing_db: *const SlashingProtectionDb,
+    mutex: mutex_mod.Mutex,
     /// Per-validator entries.
     entries: std.array_list.Managed(DoppelgangerEntry),
     /// Optional shutdown callback — called on doppelganger detection.
@@ -95,6 +99,7 @@ pub const DoppelgangerService = struct {
             .api = api,
             .metrics = metrics,
             .slashing_db = slashing_db,
+            .mutex = .{},
             .entries = std.array_list.Managed(DoppelgangerEntry).init(allocator),
             .shutdown_callback = null,
         };
@@ -121,6 +126,9 @@ pub const DoppelgangerService = struct {
     ///
     /// TS: DoppelgangerService.registerValidator(pubkeyHex)
     pub fn registerValidator(self: *DoppelgangerService, current_epoch: u64, pubkey: [48]u8) !void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
         // Check for duplicate.
         for (self.entries.items) |e| {
             if (std.mem.eql(u8, &e.pubkey, &pubkey)) return;
@@ -162,18 +170,21 @@ pub const DoppelgangerService = struct {
                 .status = if (remaining_epochs == 0) .verified_safe else .unverified,
             },
         });
-        self.refreshMetrics();
+        self.refreshMetricsLocked();
     }
 
     /// Remove a validator from doppelganger monitoring.
     pub fn unregisterValidator(self: *DoppelgangerService, pubkey: [48]u8) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
         for (self.entries.items, 0..) |e, i| {
             if (std.mem.eql(u8, &e.pubkey, &pubkey)) {
                 _ = self.entries.swapRemove(i);
                 log.debug("unregistered validator from doppelganger detection pubkey=0x{s}", .{
                     std.fmt.bytesToHex(pubkey[0..4], .lower),
                 });
-                self.refreshMetrics();
+                self.refreshMetricsLocked();
                 return;
             }
         }
@@ -187,6 +198,10 @@ pub const DoppelgangerService = struct {
     ///
     /// TS: DoppelgangerService.getStatus(pubkeyHex) == VerifiedSafe
     pub fn isSigningAllowed(self: *const DoppelgangerService, pubkey: [48]u8) bool {
+        const mutex_ptr: *mutex_mod.Mutex = @constCast(&self.mutex);
+        mutex_ptr.lock();
+        defer mutex_ptr.unlock();
+
         for (self.entries.items) |e| {
             if (std.mem.eql(u8, &e.pubkey, &pubkey)) {
                 return e.state.status == .verified_safe;
@@ -197,10 +212,25 @@ pub const DoppelgangerService = struct {
 
     /// Returns the current status for a validator pubkey.
     pub fn getStatus(self: *const DoppelgangerService, pubkey: [48]u8) DoppelgangerStatus {
+        const mutex_ptr: *mutex_mod.Mutex = @constCast(&self.mutex);
+        mutex_ptr.lock();
+        defer mutex_ptr.unlock();
+
         for (self.entries.items) |e| {
             if (std.mem.eql(u8, &e.pubkey, &pubkey)) return e.state.status;
         }
         return .unknown;
+    }
+
+    pub fn updateIndex(self: *DoppelgangerService, pubkey: [48]u8, index: ?u64) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        for (self.entries.items) |*entry| {
+            if (!std.mem.eql(u8, &entry.pubkey, &pubkey)) continue;
+            entry.index = index;
+            return;
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -220,13 +250,7 @@ pub const DoppelgangerService = struct {
         if (current_epoch == 0) return;
 
         // Step 1: resolve pubkey → index for any entries that don't have one yet.
-        var needs_resolution = false;
-        for (self.entries.items) |e| {
-            if (e.state.status == .unverified and e.state.remaining_epochs > 0 and e.index == null) {
-                needs_resolution = true;
-                break;
-            }
-        }
+        const needs_resolution = self.hasUnresolvedEntries();
 
         if (needs_resolution) {
             try self.resolveIndices(io);
@@ -236,14 +260,7 @@ pub const DoppelgangerService = struct {
         var indices = std.array_list.Managed(u64).init(self.allocator);
         defer indices.deinit();
 
-        for (self.entries.items) |e| {
-            if (e.state.status == .unverified and e.state.remaining_epochs > 0 and e.state.next_epoch_to_check <= current_epoch) {
-                if (e.index) |idx| {
-                    try indices.append(idx);
-                }
-                // If index still unknown after resolution, skip this epoch.
-            }
-        }
+        try self.collectIndicesToCheck(&indices, current_epoch);
         if (indices.items.len == 0) return;
 
         const previous_epoch = current_epoch - 1;
@@ -252,6 +269,125 @@ pub const DoppelgangerService = struct {
 
         const current_liveness = try self.api.getLiveness(io, current_epoch, indices.items);
         defer self.allocator.free(current_liveness);
+
+        if (self.applyLivenessCheck(current_epoch, previous_epoch, previous_liveness, current_liveness)) |cb| {
+            log.err("triggering shutdown due to doppelganger detection", .{});
+            cb.call();
+            return error.DoppelgangerDetected;
+        }
+    }
+
+    /// Resolve pubkey → validator index for entries that don't have one.
+    ///
+    /// Calls api.getValidatorIndices() with all unresolved pubkeys.
+    fn resolveIndices(self: *DoppelgangerService, io: Io) !void {
+        var unresolved = std.array_list.Managed([48]u8).init(self.allocator);
+        defer unresolved.deinit();
+
+        try self.collectUnresolvedPubkeys(&unresolved);
+        if (unresolved.items.len == 0) return;
+
+        log.debug("resolving {d} validator indices for doppelganger detection", .{unresolved.items.len});
+
+        const results = self.api.getValidatorIndices(io, unresolved.items) catch |err| {
+            log.warn("getValidatorIndices failed: {s} — will retry next epoch", .{@errorName(err)});
+            return;
+        };
+        defer self.allocator.free(results);
+
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        for (results) |r| {
+            for (self.entries.items) |*e| {
+                if (std.mem.eql(u8, &e.pubkey, &r.pubkey)) {
+                    e.index = r.index;
+                    log.debug("resolved validator index={d} for doppelganger monitoring", .{r.index});
+                    break;
+                }
+            }
+        }
+    }
+
+    fn refreshMetrics(self: *const DoppelgangerService) void {
+        var verified_safe: u64 = 0;
+        var unverified: u64 = 0;
+        var unknown: u64 = 0;
+        var detected: u64 = 0;
+
+        const mutex_ptr: *mutex_mod.Mutex = @constCast(&self.mutex);
+        mutex_ptr.lock();
+        for (self.entries.items) |entry| {
+            switch (entry.state.status) {
+                .verified_safe => verified_safe += 1,
+                .unverified => unverified += 1,
+                .unknown => unknown += 1,
+                .doppelganger_detected => detected += 1,
+            }
+        }
+        mutex_ptr.unlock();
+
+        self.metrics.setDoppelgangerStatusCount("VerifiedSafe", verified_safe);
+        self.metrics.setDoppelgangerStatusCount("Unverified", unverified);
+        self.metrics.setDoppelgangerStatusCount("Unknown", unknown);
+        self.metrics.setDoppelgangerStatusCount("DoppelgangerDetected", detected);
+    }
+
+    fn hasUnresolvedEntries(self: *const DoppelgangerService) bool {
+        const mutex_ptr: *mutex_mod.Mutex = @constCast(&self.mutex);
+        mutex_ptr.lock();
+        defer mutex_ptr.unlock();
+
+        for (self.entries.items) |e| {
+            if (e.state.status == .unverified and e.state.remaining_epochs > 0 and e.index == null) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    fn collectUnresolvedPubkeys(
+        self: *const DoppelgangerService,
+        out: *std.array_list.Managed([48]u8),
+    ) !void {
+        const mutex_ptr: *mutex_mod.Mutex = @constCast(&self.mutex);
+        mutex_ptr.lock();
+        defer mutex_ptr.unlock();
+
+        for (self.entries.items) |e| {
+            if (e.index == null and e.state.status == .unverified and e.state.remaining_epochs > 0) {
+                try out.append(e.pubkey);
+            }
+        }
+    }
+
+    fn collectIndicesToCheck(
+        self: *const DoppelgangerService,
+        out: *std.array_list.Managed(u64),
+        current_epoch: u64,
+    ) !void {
+        const mutex_ptr: *mutex_mod.Mutex = @constCast(&self.mutex);
+        mutex_ptr.lock();
+        defer mutex_ptr.unlock();
+
+        for (self.entries.items) |e| {
+            if (e.state.status == .unverified and e.state.remaining_epochs > 0 and e.state.next_epoch_to_check <= current_epoch) {
+                if (e.index) |idx| {
+                    try out.append(idx);
+                }
+            }
+        }
+    }
+
+    fn applyLivenessCheck(
+        self: *DoppelgangerService,
+        current_epoch: u64,
+        previous_epoch: u64,
+        previous_liveness: []const ValidatorLiveness,
+        current_liveness: []const ValidatorLiveness,
+    ) ?ShutdownCallback {
+        self.mutex.lock();
+        defer self.mutex.unlock();
 
         var detected = false;
         for (previous_liveness) |live| {
@@ -288,15 +424,11 @@ pub const DoppelgangerService = struct {
                     e.state.status = .doppelganger_detected;
                 }
             }
-            self.refreshMetrics();
-            if (self.shutdown_callback) |cb| {
-                log.err("triggering shutdown due to doppelganger detection", .{});
-                cb.call();
-            }
-            return error.DoppelgangerDetected;
+            const cb = self.shutdown_callback;
+            self.refreshMetricsLocked();
+            return cb;
         }
 
-        // Clean epoch — previous epoch had no liveness, so count it.
         for (previous_liveness) |live| {
             if (live.is_live) continue;
             for (self.entries.items) |*e| {
@@ -323,43 +455,12 @@ pub const DoppelgangerService = struct {
                 }
             }
         }
-        self.refreshMetrics();
+
+        self.refreshMetricsLocked();
+        return null;
     }
 
-    /// Resolve pubkey → validator index for entries that don't have one.
-    ///
-    /// Calls api.getValidatorIndices() with all unresolved pubkeys.
-    fn resolveIndices(self: *DoppelgangerService, io: Io) !void {
-        var unresolved = std.array_list.Managed([48]u8).init(self.allocator);
-        defer unresolved.deinit();
-
-        for (self.entries.items) |e| {
-            if (e.index == null and e.state.status == .unverified and e.state.remaining_epochs > 0) {
-                try unresolved.append(e.pubkey);
-            }
-        }
-        if (unresolved.items.len == 0) return;
-
-        log.debug("resolving {d} validator indices for doppelganger detection", .{unresolved.items.len});
-
-        const results = self.api.getValidatorIndices(io, unresolved.items) catch |err| {
-            log.warn("getValidatorIndices failed: {s} — will retry next epoch", .{@errorName(err)});
-            return;
-        };
-        defer self.allocator.free(results);
-
-        for (results) |r| {
-            for (self.entries.items) |*e| {
-                if (std.mem.eql(u8, &e.pubkey, &r.pubkey)) {
-                    e.index = r.index;
-                    log.debug("resolved validator index={d} for doppelganger monitoring", .{r.index});
-                    break;
-                }
-            }
-        }
-    }
-
-    fn refreshMetrics(self: *const DoppelgangerService) void {
+    fn refreshMetricsLocked(self: *const DoppelgangerService) void {
         var verified_safe: u64 = 0;
         var unverified: u64 = 0;
         var unknown: u64 = 0;
