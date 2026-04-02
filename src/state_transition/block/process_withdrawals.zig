@@ -13,6 +13,7 @@ const ExecutionAddress = types.primitive.ExecutionAddress.Type;
 const hasExecutionWithdrawalCredential = @import("../utils/electra.zig").hasExecutionWithdrawalCredential;
 const hasEth1WithdrawalCredential = @import("../utils/capella.zig").hasEth1WithdrawalCredential;
 const getMaxEffectiveBalance = @import("../utils/validator.zig").getMaxEffectiveBalance;
+const isFullyWithdrawableValidator = @import("../utils/validator.zig").isFullyWithdrawableValidator;
 const isPartiallyWithdrawableValidator = @import("../utils/validator.zig").isPartiallyWithdrawableValidator;
 const decreaseBalance = @import("../utils/balance.zig").decreaseBalance;
 const gloas_utils = @import("../utils/gloas.zig");
@@ -138,7 +139,7 @@ pub fn getExpectedWithdrawals(
     var withdrawal_index = try state.nextWithdrawalIndex();
 
     // Separate maps to track balances after applying withdrawals
-    var builder_balance_after_withdrawals = std.AutoHashMap(u64, u64).init(allocator);
+    var builder_balance_after_withdrawals = std.AutoHashMap(u64, i64).init(allocator);
     defer builder_balance_after_withdrawals.deinit();
 
     // partialWithdrawalsCount is withdrawals coming from EL since electra (EIP-7002)
@@ -334,16 +335,19 @@ fn getValidatorsSweepWithdrawals(
     var sweep_withdrawals = std.ArrayList(Withdrawal).init(allocator);
     errdefer sweep_withdrawals.deinit();
 
-    var validators = try state.validators();
+    const validators = try state.validators();
     var balances = try state.balances();
     const next_withdrawal_validator_index = try state.nextWithdrawalValidatorIndex();
     const validators_count = try validators.length();
-    const bound = @min(validators_count, preset.MAX_VALIDATORS_PER_WITHDRAWALS_SWEEP);
+    if (next_withdrawal_validator_index >= validators_count) {
+        return error.InvalidNextWithdrawalValidatorIndex;
+    }
+    const validators_limit = @min(validators_count, preset.MAX_VALIDATORS_PER_WITHDRAWALS_SWEEP);
 
     // Just run a bounded loop max iterating over all withdrawals
     // however breaks out once we have MAX_WITHDRAWALS_PER_PAYLOAD
-    var n: usize = 0;
-    while (n < bound) : (n += 1) {
+    var processed_count: usize = 0;
+    for (0..validators_limit) |n| {
         if (sweep_withdrawals.items.len + num_prior_withdrawals >= preset.MAX_WITHDRAWALS_PER_PAYLOAD) {
             break;
         }
@@ -361,15 +365,8 @@ fn getValidatorsSweepWithdrawals(
         const withdrawable_epoch = try validator.get("withdrawable_epoch");
         const withdrawal_credentials = try validator.getFieldRoot("withdrawal_credentials");
         const effective_balance = try validator.get("effective_balance");
-        const has_withdrawable_credentials = if (comptime fork.gte(.electra)) hasExecutionWithdrawalCredential(withdrawal_credentials) else hasEth1WithdrawalCredential(withdrawal_credentials);
-        // early skip for balance = 0 as its now more likely that validator has exited/slashed with
-        // balance zero than not have withdrawal credentials set
-        if (balance == 0 or !has_withdrawable_credentials) {
-            continue;
-        }
 
-        // capella full withdrawal
-        if (withdrawable_epoch <= epoch) {
+        if (isFullyWithdrawableValidator(fork, withdrawal_credentials, balance, withdrawable_epoch, epoch)) {
             var execution_address: ExecutionAddress = undefined;
             @memcpy(&execution_address, withdrawal_credentials[12..]);
             try sweep_withdrawals.append(.{
@@ -381,7 +378,6 @@ fn getValidatorsSweepWithdrawals(
             withdrawal_index.* += 1;
             balance_gop.value_ptr.* = 0;
         } else if (isPartiallyWithdrawableValidator(fork, withdrawal_credentials, effective_balance, balance)) {
-            // capella partial withdrawal
             const max_effective_balance = if (comptime fork.gte(.electra)) getMaxEffectiveBalance(withdrawal_credentials) else preset.MAX_EFFECTIVE_BALANCE;
             const partial_amount = balance - max_effective_balance;
             var execution_address: ExecutionAddress = undefined;
@@ -395,9 +391,11 @@ fn getValidatorsSweepWithdrawals(
             withdrawal_index.* += 1;
             balance_gop.value_ptr.* = balance - partial_amount;
         }
+
+        processed_count += 1;
     }
 
-    return .{ .withdrawals = sweep_withdrawals, .processed_count = n };
+    return .{ .withdrawals = sweep_withdrawals, .processed_count = processed_count };
 }
 
 fn getBuilderWithdrawals(
@@ -405,7 +403,7 @@ fn getBuilderWithdrawals(
     state: *BeaconState(.gloas),
     withdrawal_index: *u64,
     prior_withdrawals_len: usize,
-    builder_balance_after_withdrawals: *std.AutoHashMap(u64, u64),
+    builder_balance_after_withdrawals: *std.AutoHashMap(u64, i64),
 ) !struct { withdrawals: std.ArrayList(Withdrawal), processed_count: usize } {
     const withdrawals_limit = preset.MAX_WITHDRAWALS_PER_PAYLOAD - 1;
     if (prior_withdrawals_len > withdrawals_limit) {
@@ -433,7 +431,7 @@ fn getBuilderWithdrawals(
             var builders = try state.inner.get("builders");
             var builder: types.gloas.Builder.Type = undefined;
             try builders.getValue(allocator, builder_index, &builder);
-            balance_gop.value_ptr.* = builder.balance;
+            balance_gop.value_ptr.* = @intCast(builder.balance);
         }
 
         // Use the withdrawal amount directly as specified in the spec
@@ -444,7 +442,7 @@ fn getBuilderWithdrawals(
             .amount = bw.amount,
         });
         withdrawal_index.* += 1;
-        balance_gop.value_ptr.* -= bw.amount;
+        balance_gop.value_ptr.* -= @as(i64, @intCast(bw.amount));
 
         processed_count += 1;
     }
@@ -458,7 +456,7 @@ fn getBuildersSweepWithdrawals(
     epoch: u64,
     withdrawal_index: *u64,
     num_prior_withdrawals: usize,
-    builder_balance_after_withdrawals: *std.AutoHashMap(u64, u64),
+    builder_balance_after_withdrawals: *std.AutoHashMap(u64, i64),
 ) !struct { withdrawals: std.ArrayList(Withdrawal), processed_count: usize } {
     const withdrawals_limit = preset.MAX_WITHDRAWALS_PER_PAYLOAD - 1;
     if (num_prior_withdrawals > withdrawals_limit) {
@@ -477,6 +475,9 @@ fn getBuildersSweepWithdrawals(
 
     const builders_limit = @min(builders_len, preset.MAX_BUILDERS_PER_WITHDRAWALS_SWEEP);
     const next_withdrawal_builder_index: u64 = try state.inner.get("next_withdrawal_builder_index");
+    if (next_withdrawal_builder_index >= builders_len) {
+        return error.InvalidNextWithdrawalBuilderIndex;
+    }
     var processed_count: usize = 0;
 
     for (0..builders_limit) |n| {
@@ -490,7 +491,7 @@ fn getBuildersSweepWithdrawals(
         // Get builder balance (may have been decremented by builder withdrawals above)
         const balance_gop = try builder_balance_after_withdrawals.getOrPut(builder_index);
         if (!balance_gop.found_existing) {
-            balance_gop.value_ptr.* = builder.balance;
+            balance_gop.value_ptr.* = @intCast(builder.balance);
         }
         const balance = balance_gop.value_ptr.*;
 
@@ -501,7 +502,7 @@ fn getBuildersSweepWithdrawals(
                 .index = withdrawal_index.*,
                 .validator_index = convertBuilderIndexToValidatorIndex(builder_index),
                 .address = builder.execution_address,
-                .amount = balance,
+                .amount = @intCast(balance),
             });
             withdrawal_index.* += 1;
             balance_gop.value_ptr.* = 0;

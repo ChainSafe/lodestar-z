@@ -86,6 +86,15 @@ pub fn getMaxEffectiveBalance(withdrawal_credentials: *const WithdrawalCredentia
     return preset.MIN_ACTIVATION_BALANCE;
 }
 
+pub fn isFullyWithdrawableValidator(comptime fork: ForkSeq, withdrawal_credentials: *const WithdrawalCredentials, balance: u64, withdrawable_epoch: u64, epoch: u64) bool {
+    const has_withdrawable_credentials = if (comptime fork.gte(.electra))
+        hasExecutionWithdrawalCredential(withdrawal_credentials)
+    else
+        hasEth1WithdrawalCredential(withdrawal_credentials);
+
+    return has_withdrawable_credentials and withdrawable_epoch <= epoch and balance > 0;
+}
+
 pub fn isPartiallyWithdrawableValidator(comptime fork: ForkSeq, withdrawal_credentials: *const WithdrawalCredentials, effective_balance: u64, balance: u64) bool {
     // Check withdrawal credentials
     const has_withdrawable_credentials = if (comptime fork.gte(.electra))
