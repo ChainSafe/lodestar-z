@@ -7,7 +7,6 @@ const BeaconState = @import("fork_types").BeaconState;
 const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
 const preset = @import("preset").preset;
 const c = @import("constants");
-const computeTimeAtSlot = @import("../utils/epoch.zig").computeTimeAtSlot;
 const processDepositRequest = @import("./process_deposit_request.zig").processDepositRequest;
 const processWithdrawalRequest = @import("./process_withdrawal_request.zig").processWithdrawalRequest;
 const processConsolidationRequest = @import("./process_consolidation_request.zig").processConsolidationRequest;
@@ -37,19 +36,18 @@ pub fn processExecutionPayloadEnvelope(
 
     try validateExecutionPayloadEnvelope(allocator, config, state, envelope);
 
-    const fork = config.getForkSeqAtSlot(envelope.slot);
     const requests = &envelope.execution_requests;
 
     for (requests.deposits.items) |*deposit| {
-        try processDepositRequest(fork, allocator, config, epoch_cache, state, deposit);
+        try processDepositRequest(.gloas, allocator, config, epoch_cache, state, deposit);
     }
 
     for (requests.withdrawals.items) |*withdrawal| {
-        try processWithdrawalRequest(fork, config, epoch_cache, state, withdrawal);
+        try processWithdrawalRequest(.gloas, config, @constCast(epoch_cache), state, withdrawal);
     }
 
     for (requests.consolidations.items) |*consolidation| {
-        try processConsolidationRequest(fork, config, epoch_cache, state, consolidation);
+        try processConsolidationRequest(.gloas, config, epoch_cache, state, consolidation);
     }
 
     // Queue the builder payment
@@ -62,6 +60,7 @@ pub fn processExecutionPayloadEnvelope(
     if (amount > 0) {
         var builder_pending_withdrawals = try state.inner.get("builder_pending_withdrawals");
         try builder_pending_withdrawals.pushValue(&payment.withdrawal);
+        try state.inner.set("builder_pending_withdrawals", builder_pending_withdrawals);
     }
 
     const default_payment = types.gloas.BuilderPendingPayment.default_value;
@@ -71,6 +70,8 @@ pub fn processExecutionPayloadEnvelope(
     var execution_payload_availability = try state.inner.get("execution_payload_availability");
     try execution_payload_availability.set(try state.slot() % preset.SLOTS_PER_HISTORICAL_ROOT, true);
     try state.inner.setValue("latest_block_hash", &payload.block_hash);
+
+    try state.commit();
 
     if (opts.verify_state_root) {
         const state_root = try state.hashTreeRoot();
@@ -94,6 +95,7 @@ fn validateExecutionPayloadEnvelope(
     if (std.mem.eql(u8, latest_header_state_root, &c.ZERO_HASH)) {
         const previous_state_root = try state.hashTreeRoot();
         try latest_block_header.setValue("state_root", previous_state_root);
+        try state.inner.set("latest_block_header", latest_block_header);
     }
 
     // Verify consistency with the beacon block
@@ -108,8 +110,9 @@ fn validateExecutionPayloadEnvelope(
     }
 
     // Verify consistency with the committed bid
-    var committed_bid: types.gloas.ExecutionPayloadBid.Type = undefined;
+    var committed_bid: types.gloas.ExecutionPayloadBid.Type = types.gloas.ExecutionPayloadBid.default_value;
     try state.inner.getValue(allocator, "latest_execution_payload_bid", &committed_bid);
+    defer types.gloas.ExecutionPayloadBid.deinit(allocator, &committed_bid);
 
     if (envelope.builder_index != committed_bid.builder_index) {
         return error.EnvelopeBuilderIndexMismatch;
@@ -146,7 +149,8 @@ fn validateExecutionPayloadEnvelope(
     }
 
     // Verify timestamp
-    const expected_timestamp = computeTimeAtSlot(config, try state.slot(), try state.genesisTime());
+    // compute_timestamp_at_slot: genesis_time + slot * SECONDS_PER_SLOT
+    const expected_timestamp = (try state.genesisTime()) + (try state.slot()) * config.chain.SECONDS_PER_SLOT;
     if (payload.timestamp != expected_timestamp) {
         return error.EnvelopeTimestampMismatch;
     }

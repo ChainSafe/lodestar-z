@@ -52,6 +52,7 @@ pub const upgradeStateToCapella = @import("./slot/upgrade_state_to_capella.zig")
 pub const upgradeStateToDeneb = @import("./slot/upgrade_state_to_deneb.zig").upgradeStateToDeneb;
 pub const upgradeStateToElectra = @import("./slot/upgrade_state_to_electra.zig").upgradeStateToElectra;
 pub const upgradeStateToFulu = @import("./slot/upgrade_state_to_fulu.zig").upgradeStateToFulu;
+pub const upgradeStateToGloas = @import("./slot/upgrade_state_to_gloas.zig").upgradeStateToGloas;
 
 // Block
 pub const processBlockHeader = @import("./block/process_block_header.zig").processBlockHeader;
@@ -101,6 +102,11 @@ pub const preset = @import("preset").preset;
 const EpochShuffling = @import("./utils/epoch_shuffling.zig");
 pub const calculateShufflingDecisionRoot = EpochShuffling.calculateShufflingDecisionRoot;
 pub const processProposerLookahead = @import("./epoch/process_proposer_lookahead.zig").processProposerLookahead;
+pub const processBuilderPendingPayments = @import("./epoch/process_builder_pending_payments.zig").processBuilderPendingPayments;
+pub const processExecutionPayloadBid = @import("./block/process_execution_payload_bid.zig").processExecutionPayloadBid;
+pub const processExecutionPayloadEnvelope = @import("./block/process_execution_payload_envelope.zig").processExecutionPayloadEnvelope;
+pub const processPayloadAttestation = @import("./block/process_payload_attestation.zig").processPayloadAttestation;
+pub const processPtcWindow = @import("./epoch/process_ptc_window.zig").processPtcWindow;
 
 test {
     testing.refAllDecls(@This());

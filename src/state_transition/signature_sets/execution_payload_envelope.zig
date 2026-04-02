@@ -33,7 +33,8 @@ pub fn getExecutionPayloadEnvelopeSignatureSet(
     const envelope = &signed_envelope.message;
 
     // Get the pubkey: proposer key for self-builds, builder key otherwise
-    const proposer_index: u64 = try state.latestBlockHeader().get("proposer_index");
+    var latest_block_header = try state.latestBlockHeader();
+    const proposer_index: u64 = try latest_block_header.get("proposer_index");
     const pubkey = if (envelope.builder_index == c.BUILDER_INDEX_SELF_BUILD)
         epoch_cache.index_to_pubkey.items[proposer_index]
     else blk: {
@@ -44,5 +45,5 @@ pub fn getExecutionPayloadEnvelopeSignatureSet(
     };
 
     const signing_root = try getExecutionPayloadEnvelopeSigningRoot(allocator, config, envelope);
-    return createSingleSignatureSetFromComponents(&pubkey, signing_root, signed_envelope.signature);
+    return createSingleSignatureSetFromComponents(pubkey, signing_root, signed_envelope.signature);
 }

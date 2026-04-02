@@ -39,7 +39,7 @@ pub fn verifyAggregatedSignatureSet(set: *const AggregatedSignatureSet) !bool {
     return fastAggregateVerify(&set.signing_root, set.pubkeys, &signature, null, null);
 }
 
-pub fn createSingleSignatureSetFromComponents(pubkey: *const PublicKey, signing_root: Root, signature: BLSSignature) SingleSignatureSet {
+pub fn createSingleSignatureSetFromComponents(pubkey: PublicKey, signing_root: Root, signature: BLSSignature) SingleSignatureSet {
     return .{
         .pubkey = pubkey,
         .signing_root = signing_root,
