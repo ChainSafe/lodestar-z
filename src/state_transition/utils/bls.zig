@@ -22,8 +22,11 @@ pub fn verify(msg: []const u8, pk: *const PublicKey, sig: *const Signature, in_p
     try sig.verify(sig_groupcheck, msg, DST, null, pk, pk_validate);
 }
 
-/// `msg` must be at least 32 bytes; only the first 32 are passed to fast aggregate verification.
+/// The `msg` must be at least 32 bytes; only the first 32 are passed to
+/// fast aggregate verification.
 pub fn fastAggregateVerify(msg: []const u8, pks: []const PublicKey, sig: *const Signature, in_pk_validate: ?bool, in_sigs_group_check: ?bool) !bool {
+    std.debug.assert(msg.len >= 32);
+
     var pairing_buf: [bls.Pairing.sizeOf()]u8 align(bls.Pairing.buf_align) = undefined;
 
     const sigs_groupcheck = in_sigs_group_check orelse false;
