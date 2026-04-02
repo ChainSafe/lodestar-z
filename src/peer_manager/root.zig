@@ -31,6 +31,9 @@ pub const getSyncnetsActiveBits = types_.getSyncnetsActiveBits;
 // Store
 pub const PeerStore = @import("store.zig").PeerStore;
 
+// Scorer
+pub const PeerScorer = @import("scorer.zig").PeerScorer;
+
 // Constants
 pub const constants = @import("constants.zig");
 
