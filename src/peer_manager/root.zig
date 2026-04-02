@@ -28,6 +28,9 @@ pub const getKnownClientFromAgentVersion = types_.getKnownClientFromAgentVersion
 pub const getAttnetsActiveBits = types_.getAttnetsActiveBits;
 pub const getSyncnetsActiveBits = types_.getSyncnetsActiveBits;
 
+// Store
+pub const PeerStore = @import("store.zig").PeerStore;
+
 // Constants
 pub const constants = @import("constants.zig");
 
