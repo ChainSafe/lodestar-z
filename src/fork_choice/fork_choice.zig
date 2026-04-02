@@ -467,7 +467,8 @@ pub const ForkChoice = struct {
 
         // 5. Compute block root.
         var block_root: Root = undefined;
-        try block.hashTreeRoot(allocator, &block_root);
+        const ForkTypes = @import("fork_types").ForkTypes;
+        try ForkTypes(fork).BeaconBlock.hashTreeRoot(allocator, &block.inner, &block_root);
 
         // 6. Assign proposer score boost if the block is timely
         // (before attesting interval = before 1st interval).
@@ -583,7 +584,7 @@ pub const ForkChoice = struct {
         const target_root: Root = if (slot == target_slot) block_root else tr_blk: {
             var block_roots = try state.state.blockRoots();
             const idx = target_slot % preset.SLOTS_PER_HISTORICAL_ROOT;
-            break :tr_blk block_roots.getFieldRoot(idx);
+            break :tr_blk (try block_roots.getFieldRoot(idx)).*;
         };
 
         // 13. Construct BlockExtraMeta based on fork.
