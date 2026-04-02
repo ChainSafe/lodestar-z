@@ -67,9 +67,9 @@ fn configFromObject(env: napi.Env, obj: napi.Value) !Config {
     config.gossipsub_positive_score_weight = try (try obj.getNamedProperty("gossipsubPositiveScoreWeight")).getValueDouble();
     config.negative_gossip_score_ignore_threshold = try (try obj.getNamedProperty("negativeGossipScoreIgnoreThreshold")).getValueDouble();
     config.number_of_custody_groups = try (try obj.getNamedProperty("numberOfCustodyGroups")).getValueUint32();
-    config.custody_requirement = try (try obj.getNamedProperty("custodyRequirement")).getValueUint64();
-    config.samples_per_slot = try (try obj.getNamedProperty("samplesPerSlot")).getValueUint64();
-    config.slots_per_epoch = try (try obj.getNamedProperty("slotsPerEpoch")).getValueUint64();
+    config.custody_requirement = @intCast(try (try obj.getNamedProperty("custodyRequirement")).getValueInt64());
+    config.samples_per_slot = @intCast(try (try obj.getNamedProperty("samplesPerSlot")).getValueInt64());
+    config.slots_per_epoch = @intCast(try (try obj.getNamedProperty("slotsPerEpoch")).getValueInt64());
 
     // Boolean
     config.disable_peer_scoring = try (try obj.getNamedProperty("disablePeerScoring")).getValueBool();
@@ -94,20 +94,20 @@ fn statusFromObject(_: napi.Env, obj: napi.Value) !Status {
     if (finalized_root_info.data.len != 32) return error.InvalidFinalizedRootLength;
     @memcpy(&status.finalized_root, finalized_root_info.data[0..32]);
 
-    status.finalized_epoch = try (try obj.getNamedProperty("finalizedEpoch")).getValueUint64();
+    status.finalized_epoch = @intCast(try (try obj.getNamedProperty("finalizedEpoch")).getValueInt64());
 
     const head_root_info = try (try obj.getNamedProperty("headRoot")).getTypedarrayInfo();
     if (head_root_info.data.len != 32) return error.InvalidHeadRootLength;
     @memcpy(&status.head_root, head_root_info.data[0..32]);
 
-    status.head_slot = try (try obj.getNamedProperty("headSlot")).getValueUint64();
+    status.head_slot = @intCast(try (try obj.getNamedProperty("headSlot")).getValueInt64());
 
     const eas_value = try obj.getNamedProperty("earliestAvailableSlot");
-    const eas_type = try eas_value.typeOf();
+    const eas_type = try eas_value.typeof();
     if (eas_type == .undefined or eas_type == .null) {
         status.earliest_available_slot = null;
     } else {
-        status.earliest_available_slot = try eas_value.getValueUint64();
+        status.earliest_available_slot = @intCast(try eas_value.getValueInt64());
     }
 
     return status;
@@ -219,7 +219,7 @@ pub fn PeerManager_close(env: napi.Env, _: napi.CallbackInfo(0)) !napi.Value {
 
 pub fn PeerManager_heartbeat(env: napi.Env, cb: napi.CallbackInfo(2)) !napi.Value {
     const m = try getManager();
-    const current_slot = try cb.arg(0).getValueUint64();
+    const current_slot: u64 = @intCast(try cb.arg(0).getValueInt64());
     const local_status = try statusFromObject(env, try cb.arg(1).coerceToObject());
     const actions = try m.heartbeat(current_slot, local_status);
     return actionsToNapiArray(env, actions);
@@ -256,7 +256,7 @@ pub fn PeerManager_onStatusReceived(env: napi.Env, cb: napi.CallbackInfo(4)) !na
     const peer_id = try readPeerId(cb.arg(0));
     const remote_status = try statusFromObject(env, try cb.arg(1).coerceToObject());
     const local_status = try statusFromObject(env, try cb.arg(2).coerceToObject());
-    const current_slot = try cb.arg(3).getValueUint64();
+    const current_slot: u64 = @intCast(try cb.arg(3).getValueInt64());
     const actions = try m.onStatusReceived(peer_id, remote_status, local_status, current_slot);
     return actionsToNapiArray(env, actions);
 }
@@ -267,7 +267,7 @@ pub fn PeerManager_onMetadataReceived(env: napi.Env, cb: napi.CallbackInfo(2)) !
     const md_obj = try cb.arg(1).coerceToObject();
 
     var metadata: Metadata = undefined;
-    metadata.seq_number = try (try md_obj.getNamedProperty("seqNumber")).getValueUint64();
+    metadata.seq_number = @intCast(try (try md_obj.getNamedProperty("seqNumber")).getValueInt64());
 
     const attnets_info = try (try md_obj.getNamedProperty("attnets")).getTypedarrayInfo();
     if (attnets_info.data.len != 8) return error.InvalidAttnetsLength;
@@ -277,7 +277,7 @@ pub fn PeerManager_onMetadataReceived(env: napi.Env, cb: napi.CallbackInfo(2)) !
     if (syncnets_info.data.len != 1) return error.InvalidSyncnetsLength;
     @memcpy(&metadata.syncnets, syncnets_info.data[0..1]);
 
-    metadata.custody_group_count = try (try md_obj.getNamedProperty("custodyGroupCount")).getValueUint64();
+    metadata.custody_group_count = @intCast(try (try md_obj.getNamedProperty("custodyGroupCount")).getValueInt64());
     metadata.custody_groups = null;
     metadata.sampling_groups = null;
 
@@ -295,7 +295,7 @@ pub fn PeerManager_onMessageReceived(env: napi.Env, cb: napi.CallbackInfo(1)) !n
 pub fn PeerManager_onGoodbye(env: napi.Env, cb: napi.CallbackInfo(2)) !napi.Value {
     const m = try getManager();
     const peer_id = try readPeerId(cb.arg(0));
-    const reason_raw = try cb.arg(1).getValueUint64();
+    const reason_raw: u64 = @intCast(try cb.arg(1).getValueInt64());
     const reason: GoodbyeReasonCode = @enumFromInt(reason_raw);
     const actions = try m.onGoodbye(peer_id, reason);
     return actionsToNapiArray(env, actions);
@@ -304,7 +304,7 @@ pub fn PeerManager_onGoodbye(env: napi.Env, cb: napi.CallbackInfo(2)) !napi.Valu
 pub fn PeerManager_onPing(env: napi.Env, cb: napi.CallbackInfo(2)) !napi.Value {
     const m = try getManager();
     const peer_id = try readPeerId(cb.arg(0));
-    const seq_number = try cb.arg(1).getValueUint64();
+    const seq_number: u64 = @intCast(try cb.arg(1).getValueInt64());
     const actions = try m.onPing(peer_id, seq_number);
     return actionsToNapiArray(env, actions);
 }
@@ -355,7 +355,7 @@ pub fn PeerManager_setSubnetRequirements(env: napi.Env, cb: napi.CallbackInfo(2)
         const entry = try attnets_arr.getElement(@intCast(i));
         attnets[i] = .{
             .subnet = try (try entry.getNamedProperty("subnet")).getValueUint32(),
-            .to_slot = try (try entry.getNamedProperty("toSlot")).getValueUint64(),
+            .to_slot = @intCast(try (try entry.getNamedProperty("toSlot")).getValueInt64()),
         };
     }
 
@@ -367,7 +367,7 @@ pub fn PeerManager_setSubnetRequirements(env: napi.Env, cb: napi.CallbackInfo(2)
         const entry = try syncnets_arr.getElement(@intCast(i));
         syncnets[i] = .{
             .subnet = try (try entry.getNamedProperty("subnet")).getValueUint32(),
-            .to_slot = try (try entry.getNamedProperty("toSlot")).getValueUint64(),
+            .to_slot = @intCast(try (try entry.getNamedProperty("toSlot")).getValueInt64()),
         };
     }
 
