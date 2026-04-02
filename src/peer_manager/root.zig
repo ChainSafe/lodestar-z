@@ -37,6 +37,9 @@ pub const PeerScorer = @import("scorer.zig").PeerScorer;
 // Relevance
 pub const assertPeerRelevance = @import("relevance.zig").assertPeerRelevance;
 
+// Manager
+pub const PeerManager = @import("manager.zig").PeerManager;
+
 // Prioritization
 const prioritize_ = @import("prioritize.zig");
 pub const prioritizePeers = prioritize_.prioritizePeers;
