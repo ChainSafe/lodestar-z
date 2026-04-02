@@ -44,6 +44,8 @@ pub var state: State = .{};
 
 /// JS: config.set(chainConfigObj, genesisValidatorsRoot)
 pub fn set(obj: js.Value, genesis_root: js.Uint8Array) !void {
+    std.debug.assert(genesis_root.len == 32);
+
     if (!state.initialized) {
         return error.ConfigNotInitialized;
     }
