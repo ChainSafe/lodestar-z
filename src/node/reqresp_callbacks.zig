@@ -233,7 +233,7 @@ pub fn handlePeerStatus(
     var registered_new_peer = false;
 
     if (node.peer_manager) |pm| {
-        const now_ms = wallTimeMs();
+        const now_ms = wallTimeMs(node.io);
         const existing = pm.getPeer(peer_id);
         if (existing == null or !existing.?.isConnected()) {
             const direction = if (existing) |info| info.direction orelse .inbound else .inbound;
@@ -289,16 +289,11 @@ fn localCachedStatus(node: *const BeaconNode) networking.CachedStatus {
     };
 }
 
-fn wallTimeMs() u64 {
-    var ts: std.posix.timespec = undefined;
-    switch (std.posix.errno(std.posix.system.clock_gettime(.REALTIME, &ts))) {
-        .SUCCESS => {
-            const sec: u64 = if (ts.sec < 0) 0 else @intCast(ts.sec);
-            const nsec: u64 = if (ts.nsec < 0) 0 else @intCast(ts.nsec);
-            return sec * std.time.ms_per_s + (nsec / std.time.ns_per_ms);
-        },
-        else => return 0,
-    }
+fn wallTimeMs(io: std.Io) u64 {
+    const now = std.Io.Clock.real.now(io);
+    if (now.nanoseconds <= 0) return 0;
+    const ns = std.math.cast(u64, now.nanoseconds) orelse std.math.maxInt(u64);
+    return ns / std.time.ns_per_ms;
 }
 
 fn readSignedBeaconBlockSlot(bytes: []const u8) ?u64 {

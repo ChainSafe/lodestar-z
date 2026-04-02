@@ -10,8 +10,13 @@ compatibility flags or launcher shortcuts.
 
 Current gaps:
 
-1. The validator CLI does **not** implement metrics or remote monitoring yet.
-   `--metrics*` and `--monitoring.*` are rejected at startup.
+1. Remote validator monitoring is now implemented, but it is still Linux-only.
+   The validator launcher now supports Lodestar-style `--monitoring.endpoint`,
+   `--monitoring.interval`, `--monitoring.initialDelay`,
+   `--monitoring.requestTimeout`, and `--monitoring.collectSystemStats`.
+   The remaining gap is narrower: process and host stats currently rely on
+   Linux `/proc` plus `statvfs("/")`, so non-Linux validator hosts are not
+   supported yet.
 
 2. Startup keystore import is now implemented, but it is still narrower than
    Lodestar TS.
@@ -32,10 +37,10 @@ Current gaps:
 
 4. The validator keymanager server now covers keystores, remote keys,
    fee-recipient updates, graffiti updates, gas-limit updates, builder-boost
-   updates, proposer-config reads, and voluntary-exit signing. The remaining
-   keymanager gaps are:
-   `--keymanager.stacktraces` and dedicated keymanager metrics/monitoring
-   integration.
+   updates, proposer-config reads, voluntary-exit signing, typed HTTP error
+   stacktraces, and dedicated request/latency monitoring. The remaining
+   keymanager gap is narrower: there is still no separate remote monitoring
+   pipeline for the keymanager surface beyond the local Prometheus metrics.
 
 5. Distributed-validator flags and mnemonic / interop signer sources are still
    not implemented.
@@ -65,15 +70,36 @@ Current gaps:
    `broadcastValidation=consensus_and_equivocation`, though the validator's
    persistent slashing-protection DB remains the primary defense across restarts.
 
-6. Beacon-node config verification is implemented only against the subset of
-   `/eth/v1/config/spec` that lodestar-z currently exposes and consumes.
-   That is enough to catch the major fork/timing mismatches we depend on, but it
-   is not yet a full Lodestar-TS-style critical-params check.
+6. Beacon-node config verification now checks a much wider consensus-critical
+   subset of `/eth/v1/config/spec`, including genesis, fork versions/epochs,
+   churn, deposit contract, and core preset values. It still does not reach
+   full Lodestar-TS-style parity for every critical parameter, especially where
+   different clients omit fields or expose less structured values.
 
 7. Validator persistence is intentionally simpler than Lodestar TS.
    Slashing protection uses an append-only file, and validator metadata
    (`genesis_time`, `genesis_validators_root`) is stored in a small sidecar file
    under `validator-db/`.
+
+8. Beacon-node client failover is now request-scoped and deadline-bounded, but
+   it is still simpler than Lodestar TS.
+   The validator now retries non-streaming requests across configured beacon
+   node URLs within one shared timeout budget, and the head-tracker SSE path
+   now also walks configured URLs within one reconnect cycle before backing
+   off. The first URL that succeeds is promoted for later requests, so failover
+   is no longer gated on a sticky failure threshold or a single-URL SSE retry.
+   The remaining gap is narrower: the client still does not maintain
+   Lodestar-style per-URL health scores, dedicated fallback metrics, or
+   parallel fallback races.
+
+9. Doppelganger protection is much closer to Lodestar TS, but its observability
+   is still simpler.
+   The validator now skips doppelganger detection when starting before or at
+   genesis, skips it on restart when slashing protection shows a previous-epoch
+   attestation, and performs the late-epoch previous+current liveness checks
+   instead of the old immediate epoch-boundary poll. The remaining gap is
+   narrower: there are still no dedicated doppelganger status/epochs-checked
+   metrics like Lodestar TS exports.
 
 Non-gap note:
 
@@ -87,6 +113,12 @@ Non-gap note:
 
 3. Chain-head tracking and remote-signer refresh now run as cancellable
    `std.Io` tasks owned by the validator runtime, not detached OS threads.
+
+4. Beacon-node readiness is now fail-closed.
+   The validator treats the beacon node as ready only when
+   `!is_syncing && !is_optimistic && !el_offline`, exports `vc_beacon_health`,
+   and pauses duties on sync-status poll failures instead of reusing stale
+   readiness state.
 
 ## Architecture Overview
 

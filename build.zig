@@ -241,6 +241,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/validator/root.zig"),
         .target = target,
         .optimize = optimize,
+        .link_libc = true,
     });
     b.modules.put(b.dupe("validator"), module_validator) catch @panic("OOM");
     module_validator.addImport("bls", module_bls);
@@ -253,6 +254,7 @@ pub fn build(b: *std.Build) void {
     module_validator.addImport("fork_types", module_fork_types);
     module_validator.addImport("ssz", module_ssz);
     module_validator.addImport("api", module_api);
+    module_validator.addImport("metrics", dep_metrics.module("metrics"));
 
     const module_processor = b.createModule(.{
         .root_source_file = b.path("src/processor/root.zig"),

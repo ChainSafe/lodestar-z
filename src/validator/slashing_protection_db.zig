@@ -288,6 +288,15 @@ pub const SlashingProtectionDb = struct {
         };
     }
 
+    pub fn hasAttestedInEpoch(self: *const SlashingProtectionDb, pubkey: [48]u8, target_epoch: u64) bool {
+        const history = self.attest_history.get(pubkey) orelse return false;
+        for (history.items) |record| {
+            if (record.target_epoch == target_epoch) return true;
+            if (record.target_epoch > target_epoch) break;
+        }
+        return false;
+    }
+
     // -----------------------------------------------------------------------
     // Internal: attestation history management
     // -----------------------------------------------------------------------

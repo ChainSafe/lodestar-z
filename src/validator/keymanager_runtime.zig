@@ -373,7 +373,7 @@ pub const KeymanagerRuntime = struct {
         const self: *KeymanagerRuntime = @ptrCast(@alignCast(ptr));
         try self.ensureKnownPubkey(pubkey);
 
-        const exit_epoch = epoch orelse self.client.clock.currentEpoch();
+        const exit_epoch = epoch orelse self.client.clock.currentEpoch(self.io);
         const validator_index = self.client.validator_store.getValidatorIndex(pubkey) orelse
             return error.ValidatorNotFound;
 
@@ -422,7 +422,7 @@ pub const KeymanagerRuntime = struct {
 
     fn refreshProposerPolicies(self: *KeymanagerRuntime) void {
         if (!self.client.running.load(.acquire)) return;
-        const epoch = self.client.clock.currentEpoch();
+        const epoch = self.client.clock.currentEpoch(self.io);
         self.client.prepare_proposer.onEpoch(self.io, epoch);
         if (self.client.builder_registration) |*builder_registration| {
             builder_registration.onEpoch(self.io, epoch);

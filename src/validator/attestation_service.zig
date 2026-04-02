@@ -38,6 +38,7 @@ const SyncingTracker = syncing_tracker_mod.SyncingTracker;
 const liveness_mod = @import("liveness.zig");
 const LivenessTracker = liveness_mod.LivenessTracker;
 const time = @import("time.zig");
+const ValidatorMetrics = @import("metrics.zig").ValidatorMetrics;
 
 const log = std.log.scoped(.attestation_service);
 
@@ -82,6 +83,7 @@ pub const AttestationService = struct {
     syncing_tracker: ?*SyncingTracker,
     /// Liveness tracker — records per-validator duty outcomes.
     liveness_tracker: ?*LivenessTracker,
+    metrics: *ValidatorMetrics,
 
     pub fn init(
         allocator: Allocator,
@@ -91,6 +93,7 @@ pub const AttestationService = struct {
         seconds_per_slot: u64,
         genesis_time_unix_secs: u64,
         electra_fork_epoch: u64,
+        metrics: *ValidatorMetrics,
     ) AttestationService {
         return .{
             .allocator = allocator,
@@ -110,6 +113,7 @@ pub const AttestationService = struct {
             .doppelganger = null,
             .syncing_tracker = null,
             .liveness_tracker = null,
+            .metrics = metrics,
         };
     }
 
@@ -358,14 +362,12 @@ pub const AttestationService = struct {
         // Sub-slot timing: compute absolute slot start relative to genesis.
         // slot_start_ns = (genesis_time_unix_secs + slot * seconds_per_slot) * ns_per_s
         //
-        // BUG-5 Note: std.time.nanoTimestamp() uses CLOCK_REALTIME on Linux/macOS/Windows
-        // (confirmed in zig/lib/std/time.zig — it calls posix.clock_gettime(.REALTIME)).
-        // This IS Unix wall-clock time, NOT boot-relative, so comparing against
-        // genesis_time_ns is correct. No platform-specific workaround needed.
+        // Ethereum slot timing is based on Unix wall-clock time, so this uses
+        // `std.Io.Clock.real` through the shared validator time helper.
         const genesis_time_ns = self.genesis_time_unix_secs * std.time.ns_per_s;
         const slot_start_ns = genesis_time_ns + slot * slot_duration_ns;
         {
-            const now_ns = time.realtimeNs();
+            const now_ns = time.realNanoseconds(io);
             if (now_ns < slot_start_ns + one_third_ns) {
                 const wait_ns = slot_start_ns + one_third_ns - now_ns;
                 try io.sleep(.{ .nanoseconds = @intCast(wait_ns) }, .real);
@@ -377,7 +379,7 @@ pub const AttestationService = struct {
 
         // Sleep until 2/3 slot for aggregation.
         {
-            const now_ns = time.realtimeNs();
+            const now_ns = time.realNanoseconds(io);
             if (now_ns < slot_start_ns + two_thirds_ns) {
                 const wait_ns = slot_start_ns + two_thirds_ns - now_ns;
                 try io.sleep(.{ .nanoseconds = @intCast(wait_ns) }, .real);
@@ -434,7 +436,7 @@ pub const AttestationService = struct {
         // attestation capability via slashing protection monotonicity.
         // Spec allows at most current_epoch+1 for target (lookahead attestations).
         const current_epoch_for_check = blk: {
-            const now_ns = time.realtimeNs();
+            const now_ns = time.realNanoseconds(io);
             const genesis_ns = self.genesis_time_unix_secs * std.time.ns_per_s;
             if (now_ns < genesis_ns) break :blk @as(u64, 0);
             const slot_dur_ns = self.seconds_per_slot * std.time.ns_per_s;
@@ -461,7 +463,8 @@ pub const AttestationService = struct {
         // Sign for each validator with a duty this slot and collect JSON.
         var attestations_json: std.Io.Writer.Allocating = .init(self.allocator);
         defer attestations_json.deinit();
-        var signed_count: u32 = 0;
+        var signed_count: u64 = 0;
+        var duty_count_at_slot: u64 = 0;
         // Track signed pubkeys for liveness recording.
         var signed_pubkeys = std.array_list.Managed([48]u8).init(self.allocator);
         defer signed_pubkeys.deinit();
@@ -470,6 +473,7 @@ pub const AttestationService = struct {
 
         for (duties) |dp| {
             if (dp.duty.slot != slot) continue;
+            duty_count_at_slot += 1;
 
             // Safety check before signing.
             if (!self.isSafeToSign(dp.duty.pubkey)) {
@@ -588,6 +592,19 @@ pub const AttestationService = struct {
             break :blk true;
         };
 
+        if (publish_ok) {
+            self.metrics.attestation_published_total.incrBy(signed_count);
+            const delay_seconds = self.slotDelaySeconds(io, slot);
+            var observed: u64 = 0;
+            while (observed < signed_count) : (observed += 1) {
+                self.metrics.attestation_delay_seconds.observe(delay_seconds);
+            }
+        }
+        const missed_count = duty_count_at_slot - if (publish_ok) signed_count else 0;
+        if (missed_count > 0) {
+            self.metrics.attestation_missed_total.incrBy(missed_count);
+        }
+
         // Record liveness outcomes for all validators that had duties this slot.
         if (self.liveness_tracker) |lt| {
             const epoch = slot / self.signing_ctx.slots_per_epoch;
@@ -609,6 +626,13 @@ pub const AttestationService = struct {
         var att_data_root: [32]u8 = undefined;
         try consensus_types.phase0.AttestationData.hashTreeRoot(&att_data, &att_data_root);
         return att_data_root;
+    }
+
+    fn slotDelaySeconds(self: *const AttestationService, io: Io, slot: u64) f64 {
+        const slot_start_ns = (self.genesis_time_unix_secs * std.time.ns_per_s) + (slot * self.seconds_per_slot * std.time.ns_per_s);
+        const now_ns = time.realNanoseconds(io);
+        if (now_ns <= slot_start_ns) return 0.0;
+        return @as(f64, @floatFromInt(now_ns - slot_start_ns)) / @as(f64, std.time.ns_per_s);
     }
 
     fn produceAndPublishAggregates(

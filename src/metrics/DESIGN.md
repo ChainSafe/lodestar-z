@@ -10,7 +10,7 @@ monitoring, performance debugging, and operator visibility.
 ```
 ┌──────────────────┐     ┌──────────────────┐
 │  BeaconMetrics    │     │ ValidatorMetrics  │
-│  (50+ metrics)    │     │  (10+ metrics)    │
+│  (50+ metrics)    │     │  (15+ metrics)    │
 └────────┬─────────┘     └────────┬──────────┘
          │                        │
          │ ?*BeaconMetrics        │ ?*ValidatorMetrics
@@ -136,8 +136,14 @@ var m = BeaconMetrics.initNoop();
 - `validator_block_delay_seconds` — block proposal timing
 - `validator_sync_committee_message_total` — sync messages
 - `validator_sync_committee_contribution_total` — sync contributions
-- `validator_active_count` — managed validators
-- `validator_total_balance_gwei` — total balance
+- `validator_total_count` — total managed validators
+- `validator_active_count` — active managed validators
+- `validator_keymanager_requests_total` — keymanager request count by operation
+- `validator_keymanager_errors_total` — keymanager request failures by operation
+- `validator_keymanager_response_seconds` — keymanager response latency by operation
+- `validator_keymanager_active_connections` — keymanager open HTTP connections
+- `lodestar_monitoring_collect_data_seconds` — remote-monitoring payload collection latency
+- `lodestar_monitoring_send_data_seconds` — remote-monitoring upload latency by status
 
 ## Instrumentation Points
 

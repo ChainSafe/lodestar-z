@@ -30,7 +30,7 @@ pub const NetworkName = options.NetworkName;
 pub const metrics_mod = @import("metrics.zig");
 pub const BeaconMetrics = metrics_mod.BeaconMetrics;
 
-pub const validator_metrics_mod = @import("validator_metrics.zig");
+pub const validator_metrics_mod = @import("validator").metrics;
 pub const ValidatorMetrics = validator_metrics_mod.ValidatorMetrics;
 
 pub const metrics_server_mod = @import("metrics_server.zig");

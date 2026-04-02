@@ -121,3 +121,10 @@ pub const SyncingTracker = syncing_tracker.SyncingTracker;
 // Builder registration service — sends signed validator registrations to the builder relay.
 pub const builder_registration = @import("builder_registration.zig");
 pub const BuilderRegistrationService = builder_registration.BuilderRegistrationService;
+pub const metrics = @import("metrics.zig");
+pub const ValidatorMetrics = metrics.ValidatorMetrics;
+pub const metrics_server = @import("metrics_server.zig");
+pub const MetricsServer = metrics_server.MetricsServer;
+pub const monitoring = @import("monitoring.zig");
+pub const MonitoringOptions = monitoring.MonitoringOptions;
+pub const MonitoringService = monitoring.MonitoringService;

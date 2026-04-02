@@ -1,41 +1,22 @@
 //! Syncing status tracker for the Validator Client.
 //!
-//! Monitors the Beacon Node's sync status and pauses signing operations when
-//! the node is syncing with a large sync distance. Prevents signing with stale
-//! state data which could result in slashable attestations.
+//! Monitors the Beacon Node's readiness for validator duties and fails closed
+//! when the node is syncing, optimistic, EL-offline, or unreachable.
 //!
-//! TS equivalent: packages/validator/src/services/syncingStatusTracker.ts (SyncingStatusTracker)
-//!
-//! Algorithm:
-//!   1. Poll GET /eth/v1/node/syncing each slot (or every ~6 seconds).
-//!   2. If is_syncing=true AND sync_distance > SYNCING_THRESHOLD: set paused=true.
-//!   3. If is_syncing=false OR sync_distance <= SYNCING_THRESHOLD: set paused=false.
-//!   4. On transition paused→resumed: log "beacon node synced — resuming duties".
-//!   5. On transition resumed→paused: log "beacon node syncing — pausing validator duties".
-//!
-//! Services check isSynced() before producing duties; if false they skip the slot.
-//!
-//! Safety: This is CRITICAL — attesting to a block on a stale/non-canonical chain
-//! can double-vote and produce slashable attestations.
+//! TS equivalent: packages/validator/src/services/syncingStatusTracker.ts
 
 const std = @import("std");
-const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
-const BeaconApiClient = @import("api_client.zig").BeaconApiClient;
+const api_client = @import("api_client.zig");
+const BeaconApiClient = api_client.BeaconApiClient;
+const NodeSyncingResponse = api_client.NodeSyncingResponse;
+const metrics_mod = @import("metrics.zig");
+const BeaconHealth = metrics_mod.BeaconHealth;
+const ValidatorMetrics = metrics_mod.ValidatorMetrics;
 const time = @import("time.zig");
 
 const log = std.log.scoped(.syncing_tracker);
-
-/// Slots of sync distance above which we consider the node out-of-sync.
-///
-/// TS: SYNC_TOLERANCE_EPOCHS = 0 (strict) but many impls use 4–8 slots.
-/// We use 5 slots as a reasonable default.
-pub const SYNCING_THRESHOLD: u64 = 5;
-
-// ---------------------------------------------------------------------------
-// SyncingStatusTracker
-// ---------------------------------------------------------------------------
 
 pub const SyncingTracker = struct {
     pub const ResyncedCallback = struct {
@@ -47,10 +28,10 @@ pub const SyncingTracker = struct {
         }
     };
 
-    allocator: Allocator,
     api: *BeaconApiClient,
+    metrics: *ValidatorMetrics,
 
-    /// True when the BN is synced enough for signing.
+    /// True when the BN is ready for validator duties.
     synced: std.atomic.Value(bool),
     /// Last poll resulted in an error (BN unreachable).
     last_poll_error: std.atomic.Value(bool),
@@ -59,17 +40,19 @@ pub const SyncingTracker = struct {
     resynced_callbacks: [8]ResyncedCallback,
     resynced_callback_count: usize,
 
-    pub fn init(allocator: Allocator, api: *BeaconApiClient) SyncingTracker {
-        return .{
-            .allocator = allocator,
+    pub fn init(api: *BeaconApiClient, metrics: *ValidatorMetrics) SyncingTracker {
+        var tracker: SyncingTracker = .{
             .api = api,
-            // Start optimistic: if BN is unreachable on the first poll we'll find out.
-            .synced = std.atomic.Value(bool).init(true),
+            .metrics = metrics,
+            // Start fail-closed until the first successful readiness poll.
+            .synced = std.atomic.Value(bool).init(false),
             .last_poll_error = std.atomic.Value(bool).init(false),
             .last_success_ns = std.atomic.Value(u64).init(0),
             .resynced_callbacks = undefined,
             .resynced_callback_count = 0,
         };
+        tracker.metrics.setBeaconHealth(.syncing);
+        return tracker;
     }
 
     pub fn onResynced(self: *SyncingTracker, cb: ResyncedCallback) void {
@@ -77,86 +60,143 @@ pub const SyncingTracker = struct {
         self.resynced_callback_count += 1;
     }
 
-    /// Returns true when the BN is synced enough for validator duties.
-    ///
-    /// Called by every service before signing. If false, the service skips
-    /// the current slot/epoch to avoid signing with stale state.
-    ///
-    /// TS: SyncingStatusTracker.syncingStatus == "synced"
+    /// Returns true when the BN is ready for validator duties.
     pub fn isSynced(self: *const SyncingTracker) bool {
         return self.synced.load(.acquire);
     }
 
-    /// Poll the BN sync status and update internal state.
-    ///
-    /// Called from the slot clock callback in validator.zig.
-    ///
-    /// TS: SyncingStatusTracker.pollSyncingStatus()
     pub fn poll(self: *SyncingTracker, io: Io, slot: u64) void {
-        const was_synced = self.synced.load(.acquire);
-        const had_poll_error = self.last_poll_error.load(.acquire);
-
         const resp = self.api.getNodeSyncing(io) catch |err| {
-            log.warn("failed to poll BN sync status: {s}", .{@errorName(err)});
-            self.last_poll_error.store(true, .release);
-            // Don't change synced state on transient network error — keep previous.
+            self.applyPollError(err);
             return;
         };
 
+        self.applySyncStatus(io, slot, resp);
+    }
+
+    pub fn onSlot(self: *SyncingTracker, io: Io, slot: u64) void {
+        self.poll(io, slot);
+    }
+
+    fn evaluateStatus(resp: NodeSyncingResponse) BeaconHealth {
+        if (!resp.is_syncing and !resp.is_optimistic and !resp.el_offline) return .ready;
+        return .syncing;
+    }
+
+    fn applyPollError(self: *SyncingTracker, err: anyerror) void {
+        const was_synced = self.synced.load(.acquire);
+        const had_poll_error = self.last_poll_error.load(.acquire);
+
+        self.last_poll_error.store(true, .release);
+        self.synced.store(false, .release);
+        self.metrics.setBeaconHealth(.err);
+
+        if (was_synced or !had_poll_error) {
+            log.warn("failed to poll BN sync status: {s} — pausing validator duties", .{@errorName(err)});
+        }
+    }
+
+    fn applySyncStatus(self: *SyncingTracker, io: Io, slot: u64, resp: NodeSyncingResponse) void {
+        const was_synced = self.synced.load(.acquire);
+        const had_poll_error = self.last_poll_error.load(.acquire);
+        const health = evaluateStatus(resp);
+        const now_synced = health == .ready;
+
         self.last_poll_error.store(false, .release);
-        self.last_success_ns.store(time.realtimeNs(), .release);
-
-        // Determine if we're synced enough to sign.
-        const now_synced = !resp.is_syncing or resp.sync_distance <= SYNCING_THRESHOLD;
-
+        self.last_success_ns.store(time.awakeNanoseconds(io), .release);
         self.synced.store(now_synced, .release);
+        self.metrics.setBeaconHealth(health);
 
-        // Log state transitions.
         if (was_synced and !now_synced) {
             log.warn(
-                "beacon node syncing — pausing validator duties (sync_distance={d} head_slot={d})",
-                .{ resp.sync_distance, resp.head_slot },
+                "beacon node not ready — pausing validator duties (is_syncing={} sync_distance={d} is_optimistic={} el_offline={} head_slot={d})",
+                .{ resp.is_syncing, resp.sync_distance, resp.is_optimistic, resp.el_offline, resp.head_slot },
             );
         } else if ((!was_synced or had_poll_error) and now_synced) {
-            log.info(
-                "beacon node synced — resuming validator duties (head_slot={d})",
-                .{resp.head_slot},
-            );
+            log.info("beacon node ready — resuming validator duties (head_slot={d})", .{resp.head_slot});
             for (self.resynced_callbacks[0..self.resynced_callback_count]) |cb| {
                 cb.call(slot, io);
             }
         }
     }
-
-    /// Called at each slot boundary.
-    ///
-    /// TS: SyncingStatusTracker runs via clockService.runEverySlot
-    pub fn onSlot(self: *SyncingTracker, io: Io, slot: u64) void {
-        self.poll(io, slot);
-    }
 };
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 const testing = std.testing;
 
-test "SyncingTracker: starts synced" {
-    var api = BeaconApiClient.init(testing.allocator, "http://localhost:5052");
+test "SyncingTracker: starts fail-closed" {
+    var api = BeaconApiClient.init(testing.allocator, testing.io, "http://localhost:5052");
     defer api.deinit();
-    const tracker = SyncingTracker.init(testing.allocator, &api);
-    try testing.expect(tracker.isSynced());
+    var metrics = try ValidatorMetrics.init(testing.allocator);
+    defer metrics.deinit();
+
+    const tracker = SyncingTracker.init(&api, &metrics);
+    try testing.expect(!tracker.isSynced());
+    try testing.expectEqual(@as(u64, @intFromEnum(BeaconHealth.syncing)), tracker.metrics.beacon_health.impl.value);
 }
 
 test "SyncingTracker: isSynced reflects atomic store" {
-    var api = BeaconApiClient.init(testing.allocator, "http://localhost:5052");
+    var api = BeaconApiClient.init(testing.allocator, testing.io, "http://localhost:5052");
     defer api.deinit();
-    var tracker = SyncingTracker.init(testing.allocator, &api);
+    var metrics = try ValidatorMetrics.init(testing.allocator);
+    defer metrics.deinit();
+    var tracker = SyncingTracker.init(&api, &metrics);
 
     tracker.synced.store(false, .release);
     try testing.expect(!tracker.isSynced());
 
     tracker.synced.store(true, .release);
     try testing.expect(tracker.isSynced());
+}
+
+test "SyncingTracker: optimistic node is not ready" {
+    var api = BeaconApiClient.init(testing.allocator, testing.io, "http://localhost:5052");
+    defer api.deinit();
+    var metrics = try ValidatorMetrics.init(testing.allocator);
+    defer metrics.deinit();
+    var tracker = SyncingTracker.init(&api, &metrics);
+
+    tracker.applySyncStatus(testing.io, 0, .{
+        .head_slot = 123,
+        .sync_distance = 0,
+        .is_syncing = false,
+        .is_optimistic = true,
+        .el_offline = false,
+    });
+
+    try testing.expect(!tracker.isSynced());
+    try testing.expectEqual(@as(u64, @intFromEnum(BeaconHealth.syncing)), tracker.metrics.beacon_health.impl.value);
+}
+
+test "SyncingTracker: EL offline node is not ready" {
+    var api = BeaconApiClient.init(testing.allocator, testing.io, "http://localhost:5052");
+    defer api.deinit();
+    var metrics = try ValidatorMetrics.init(testing.allocator);
+    defer metrics.deinit();
+    var tracker = SyncingTracker.init(&api, &metrics);
+
+    tracker.applySyncStatus(testing.io, 0, .{
+        .head_slot = 123,
+        .sync_distance = 0,
+        .is_syncing = false,
+        .is_optimistic = false,
+        .el_offline = true,
+    });
+
+    try testing.expect(!tracker.isSynced());
+    try testing.expectEqual(@as(u64, @intFromEnum(BeaconHealth.syncing)), tracker.metrics.beacon_health.impl.value);
+}
+
+test "SyncingTracker: poll error fails closed" {
+    var api = BeaconApiClient.init(testing.allocator, testing.io, "http://localhost:5052");
+    defer api.deinit();
+    var metrics = try ValidatorMetrics.init(testing.allocator);
+    defer metrics.deinit();
+    var tracker = SyncingTracker.init(&api, &metrics);
+
+    tracker.synced.store(true, .release);
+    tracker.applyPollError(error.ConnectionRefused);
+
+    try testing.expect(!tracker.isSynced());
+    try testing.expect(tracker.last_poll_error.load(.acquire));
+    try testing.expectEqual(@as(u64, @intFromEnum(BeaconHealth.err)), tracker.metrics.beacon_health.impl.value);
 }

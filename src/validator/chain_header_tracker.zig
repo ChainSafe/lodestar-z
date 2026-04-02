@@ -141,10 +141,16 @@ pub const ChainHeaderTracker = struct {
             const subscribe_result = self.api.subscribeToEvents(io, topics, cb);
             if (self.shutdown_requested.load(.acquire)) break;
 
-            if (subscribe_result) |_| {
-                log.warn("chain head SSE stream ended; refreshing snapshot and reconnecting", .{});
-            } else |err| {
-                log.warn("chain head SSE stream failed: {s}", .{@errorName(err)});
+            if (subscribe_result) |_| unreachable else |err| {
+                switch (err) {
+                    error.StreamEnded => {
+                        log.warn("chain head SSE stream ended across configured beacon nodes; refreshing snapshot and reconnecting", .{});
+                    },
+                    error.Canceled => break,
+                    else => {
+                        log.warn("chain head SSE stream failed across configured beacon nodes: {s}", .{@errorName(err)});
+                    },
+                }
             }
 
             self.refreshSnapshot(io) catch |err| {

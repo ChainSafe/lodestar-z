@@ -36,6 +36,7 @@ const SyncingTracker = syncing_tracker_mod.SyncingTracker;
 const liveness_mod = @import("liveness.zig");
 const LivenessTracker = liveness_mod.LivenessTracker;
 const time = @import("time.zig");
+const ValidatorMetrics = @import("metrics.zig").ValidatorMetrics;
 
 const log = std.log.scoped(.sync_committee_service);
 
@@ -79,6 +80,7 @@ pub const SyncCommitteeService = struct {
     syncing_tracker: ?*SyncingTracker,
     /// Liveness tracker — records per-validator duty outcomes.
     liveness_tracker: ?*LivenessTracker,
+    metrics: *ValidatorMetrics,
 
     pub fn init(
         allocator: Allocator,
@@ -91,6 +93,7 @@ pub const SyncCommitteeService = struct {
         sync_committee_subnet_count: u64,
         seconds_per_slot: u64,
         genesis_time_unix_secs: u64,
+        metrics: *ValidatorMetrics,
     ) SyncCommitteeService {
         return .{
             .allocator = allocator,
@@ -111,6 +114,7 @@ pub const SyncCommitteeService = struct {
             .doppelganger = null,
             .syncing_tracker = null,
             .liveness_tracker = null,
+            .metrics = metrics,
         };
     }
 
@@ -379,16 +383,14 @@ pub const SyncCommitteeService = struct {
         const one_third_ns = slot_duration_ns / 3;
         const two_thirds_ns = slot_duration_ns * 2 / 3;
 
-        // Sub-slot timing: compute absolute slot start relative to genesis.
-        // BUG-5 Note: std.time.nanoTimestamp() is CLOCK_REALTIME (Unix wall-clock) on
-        // Linux/macOS/Windows. Confirmed in zig/lib/std/time.zig. Comparing against
-        // genesis_time_ns is correct — no platform workaround needed.
+        // Ethereum slot timing is based on Unix wall-clock time, so this uses
+        // `std.Io.Clock.real` through the shared validator time helper.
         const genesis_time_ns = self.genesis_time_unix_secs * std.time.ns_per_s;
         const slot_start_ns = genesis_time_ns + slot * slot_duration_ns;
 
         // Step 1: sign and submit sync committee messages (~1/3 slot).
         {
-            const now_ns = time.realtimeNs();
+            const now_ns = time.realNanoseconds(io);
             if (now_ns < slot_start_ns + one_third_ns) {
                 try io.sleep(.{ .nanoseconds = @intCast(slot_start_ns + one_third_ns - now_ns) }, .real);
             }
@@ -397,7 +399,7 @@ pub const SyncCommitteeService = struct {
 
         // Step 2: produce contributions for subcommittees we aggregate (~2/3 slot).
         {
-            const now_ns = time.realtimeNs();
+            const now_ns = time.realNanoseconds(io);
             if (now_ns < slot_start_ns + two_thirds_ns) {
                 try io.sleep(.{ .nanoseconds = @intCast(slot_start_ns + two_thirds_ns - now_ns) }, .real);
             }
@@ -462,6 +464,9 @@ pub const SyncCommitteeService = struct {
             log.info("sync committee messages slot={d} count={d}", .{ slot, count });
             break :blk true;
         };
+        if (publish_ok) {
+            self.metrics.sync_committee_message_total.incrBy(count);
+        }
 
         // Record liveness outcomes for all validators with sync committee duties this slot.
         if (self.liveness_tracker) |lt| {
@@ -485,6 +490,10 @@ pub const SyncCommitteeService = struct {
         slot: u64,
         beacon_block_root: *const [32]u8,
     ) !void {
+        const slot_duration_ns = self.seconds_per_slot * std.time.ns_per_s;
+        const genesis_time_ns = self.genesis_time_unix_secs * std.time.ns_per_s;
+        const slot_start_ns = genesis_time_ns + slot * slot_duration_ns;
+
         for (self.duties.items) |*dp| {
             for (dp.duty.validator_sync_committee_indices, dp.selection_proofs) |sc_idx, *cached_proof| {
                 const subcommittee_index = sc_idx / (self.sync_committee_size / self.sync_committee_subnet_count);
@@ -530,11 +539,17 @@ pub const SyncCommitteeService = struct {
                 if (hash_val % modulo != 0) continue; // not selected as aggregator for this subcommittee
 
                 // 1. Fetch contribution from BN.
-                const contrib = try self.api.produceSyncCommitteeContribution(
+                const now_ns = time.realNanoseconds(io);
+                const slot_end_ns = slot_start_ns + slot_duration_ns;
+                const remaining_ns = if (now_ns >= slot_end_ns) @as(u64, 1) else @max(@as(u64, 1), (slot_end_ns - now_ns));
+                const timeout_ms: u64 = @max(@as(u64, 1), remaining_ns / std.time.ns_per_ms);
+
+                const contrib = try self.api.produceSyncCommitteeContributionWithTimeout(
                     io,
                     slot,
                     subcommittee_index,
                     beacon_block_root.*,
+                    timeout_ms,
                 );
                 defer self.allocator.free(contrib.aggregation_bits);
 
@@ -600,7 +615,9 @@ pub const SyncCommitteeService = struct {
 
                 self.api.publishContributionAndProofs(io, contrib_json.written()) catch |err| {
                     log.warn("publishContributionAndProofs error: {s}", .{@errorName(err)});
+                    continue;
                 };
+                self.metrics.sync_committee_contribution_total.incr();
             }
         }
     }

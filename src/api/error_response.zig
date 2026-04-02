@@ -13,6 +13,8 @@
 
 const std = @import("std");
 
+pub const FormatJsonError = std.mem.Allocator.Error || error{WriteFailed};
+
 /// HTTP status codes used by the Beacon API.
 pub const ErrorCode = enum(u16) {
     accepted = 202,
@@ -52,19 +54,38 @@ pub const ErrorCode = enum(u16) {
 pub const ApiError = struct {
     code: ErrorCode,
     message: []const u8,
+    stacktraces: ?[]const []const u8 = null,
 
-    /// Format as JSON: `{"statusCode":N,"message":"..."}`
-    ///
-    /// Writes into `buf` and returns the populated slice.
-    /// `buf` must be large enough for the formatted string.
-    /// Minimal required size: 32 + message.len bytes.
-    pub fn formatJson(self: ApiError, buf: []u8) []const u8 {
-        const result = std.fmt.bufPrint(
-            buf,
-            "{{\"statusCode\":{d},\"message\":\"{s}\"}}",
-            .{ self.code.statusCode(), self.message },
-        ) catch buf[0..0];
-        return result;
+    pub fn deinit(self: *ApiError, allocator: std.mem.Allocator) void {
+        if (self.stacktraces) |stacktraces| {
+            for (stacktraces) |line| allocator.free(line);
+            allocator.free(stacktraces);
+            self.stacktraces = null;
+        }
+    }
+
+    /// Format as JSON: `{"statusCode":N,"message":"...","stacktraces":[...]}`.
+    pub fn formatJsonAlloc(self: ApiError, allocator: std.mem.Allocator) FormatJsonError![]u8 {
+        var aw: std.Io.Writer.Allocating = .init(allocator);
+        errdefer aw.deinit();
+        var stream: std.json.Stringify = .{ .writer = &aw.writer };
+
+        try stream.beginObject();
+        try stream.objectField("statusCode");
+        try stream.write(self.code.statusCode());
+        try stream.objectField("message");
+        try stream.write(self.message);
+        if (self.stacktraces) |stacktraces| {
+            try stream.objectField("stacktraces");
+            try stream.beginArray();
+            for (stacktraces) |line| {
+                try stream.write(line);
+            }
+            try stream.endArray();
+        }
+        try stream.endObject();
+
+        return aw.toOwnedSlice();
     }
 };
 
@@ -148,18 +169,13 @@ pub fn fromZigError(err: anyerror) ApiError {
     };
 }
 
-/// Format a Zig error directly to a JSON buffer.
-///
-/// Convenience wrapper around `fromZigError` + `ApiError.formatJson`.
-pub fn formatZigError(err: anyerror, buf: []u8) struct {
+/// Format a Zig error directly to owned JSON bytes.
+pub fn formatZigErrorAlloc(err: anyerror, allocator: std.mem.Allocator) FormatJsonError!struct {
     json: []const u8,
     status: u16,
 } {
     const api_err = fromZigError(err);
-    return .{
-        .json = api_err.formatJson(buf),
-        .status = api_err.code.statusCode(),
-    };
+    return .{ .json = try api_err.formatJsonAlloc(allocator), .status = api_err.code.statusCode() };
 }
 
 // ---------------------------------------------------------------------------
@@ -168,8 +184,8 @@ pub fn formatZigError(err: anyerror, buf: []u8) struct {
 
 test "ApiError.formatJson basic" {
     const err = ApiError{ .code = .not_found, .message = "Block not found" };
-    var buf: [256]u8 = undefined;
-    const json = err.formatJson(&buf);
+    const json = try err.formatJsonAlloc(std.testing.allocator);
+    defer std.testing.allocator.free(json);
     try std.testing.expectEqualStrings(
         "{\"statusCode\":404,\"message\":\"Block not found\"}",
         json,
@@ -178,10 +194,23 @@ test "ApiError.formatJson basic" {
 
 test "ApiError.formatJson bad request" {
     const err = ApiError{ .code = .bad_request, .message = "Invalid identifier" };
-    var buf: [256]u8 = undefined;
-    const json = err.formatJson(&buf);
+    const json = try err.formatJsonAlloc(std.testing.allocator);
+    defer std.testing.allocator.free(json);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"statusCode\":400") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "Invalid identifier") != null);
+}
+
+test "ApiError.formatJson includes stacktraces" {
+    const stacktraces = [_][]const u8{ "frame one", "frame two" };
+    const err = ApiError{
+        .code = .internal_server_error,
+        .message = "Internal server error",
+        .stacktraces = &stacktraces,
+    };
+    const json = try err.formatJsonAlloc(std.testing.allocator);
+    defer std.testing.allocator.free(json);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"stacktraces\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "frame one") != null);
 }
 
 test "fromZigError not_found errors" {
@@ -229,8 +258,8 @@ test "fromZigError not_acceptable" {
 }
 
 test "formatZigError convenience wrapper" {
-    var buf: [256]u8 = undefined;
-    const result = formatZigError(error.BlockNotFound, &buf);
+    const result = try formatZigErrorAlloc(error.BlockNotFound, std.testing.allocator);
+    defer std.testing.allocator.free(result.json);
     try std.testing.expectEqual(@as(u16, 404), result.status);
     try std.testing.expect(std.mem.indexOf(u8, result.json, "404") != null);
 }

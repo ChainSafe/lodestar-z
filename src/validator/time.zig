@@ -1,12 +1,23 @@
 const std = @import("std");
+const Io = std.Io;
 
-pub fn realtimeNs() u64 {
-    var ts: std.posix.timespec = undefined;
-    switch (std.posix.errno(std.posix.system.clock_gettime(.REALTIME, &ts))) {
-        .SUCCESS => {
-            if (ts.sec < 0 or ts.nsec < 0) return 0;
-            return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
-        },
-        else => return 0,
-    }
+pub fn realNanoseconds(io: Io) u64 {
+    return timestampNanoseconds(Io.Clock.real.now(io));
+}
+
+pub fn realMilliseconds(io: Io) u64 {
+    return realNanoseconds(io) / std.time.ns_per_ms;
+}
+
+pub fn realSeconds(io: Io) u64 {
+    return realNanoseconds(io) / std.time.ns_per_s;
+}
+
+pub fn awakeNanoseconds(io: Io) u64 {
+    return timestampNanoseconds(Io.Clock.awake.now(io));
+}
+
+fn timestampNanoseconds(ts: Io.Timestamp) u64 {
+    if (ts.nanoseconds <= 0) return 0;
+    return std.math.cast(u64, ts.nanoseconds) orelse std.math.maxInt(u64);
 }

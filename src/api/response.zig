@@ -142,9 +142,7 @@ pub fn encodeErrorJson(
     allocator: std.mem.Allocator,
     api_err: error_response.ApiError,
 ) std.mem.Allocator.Error![]u8 {
-    var buf: [512]u8 = undefined;
-    const json = api_err.formatJson(&buf);
-    return allocator.dupe(u8, json);
+    return api_err.formatJsonAlloc(allocator);
 }
 
 fn writeAll(writer: *IoWriter, data: []const u8) IoError!void {

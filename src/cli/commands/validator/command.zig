@@ -6,8 +6,11 @@ const Allocator = std.mem.Allocator;
 const validator_mod = @import("validator");
 const log_mod = @import("log");
 const ShutdownHandler = @import("../../shutdown.zig").ShutdownHandler;
+const common = @import("../../spec_common.zig");
 const bootstrap = @import("bootstrap.zig");
 const keymanager_server = @import("keymanager_server.zig");
+const metrics_server = @import("metrics_server.zig");
+const monitoring_runtime = @import("monitoring_runtime.zig");
 
 fn unsupportedOption(message: []const u8) error{UnsupportedValidatorOption}!void {
     std.log.err("{s}", .{message});
@@ -25,14 +28,16 @@ fn countCsvValues(input: []const u8) usize {
 }
 
 fn rejectUnsupportedOptions(opts: anytype) !void {
-    if (opts.metrics or opts.@"metrics.port" != null or opts.@"metrics.address" != null) {
-        return unsupportedOption("Validator metrics flags are not implemented yet. Remove --metrics, --metrics.port, and --metrics.address.");
+    if (!opts.metrics and (opts.@"metrics.port" != null or opts.@"metrics.address" != null)) {
+        return unsupportedOption("Validator metrics overrides require --metrics. Add --metrics or remove --metrics.port and --metrics.address.");
     }
-    if (opts.@"monitoring.endpoint" != null or opts.@"monitoring.interval" != null) {
-        return unsupportedOption("Validator monitoring flags are not implemented yet. Remove --monitoring.endpoint and --monitoring.interval.");
-    }
-    if (opts.@"keymanager.stacktraces") {
-        return unsupportedOption("Validator keymanager stacktrace responses are not implemented yet. Remove --keymanager.stacktraces.");
+    if (opts.@"monitoring.endpoint" == null and
+        (opts.@"monitoring.interval" != null or
+            opts.@"monitoring.initialDelay" != null or
+            opts.@"monitoring.requestTimeout" != null or
+            opts.@"monitoring.collectSystemStats"))
+    {
+        return unsupportedOption("Validator monitoring overrides require --monitoring.endpoint. Add --monitoring.endpoint or remove the --monitoring.* overrides.");
     }
     if (!opts.keymanager and
         (opts.@"keymanager.tokenFile" != null or
@@ -40,6 +45,7 @@ fn rejectUnsupportedOptions(opts: anytype) !void {
             opts.@"keymanager.address" != null or
             opts.@"keymanager.cors" != null or
             opts.@"keymanager.bodyLimit" != null or
+            opts.@"keymanager.stacktraces" or
             opts.@"keymanager.auth" != true))
     {
         return unsupportedOption("Validator keymanager options require --keymanager. Add --keymanager or remove the --keymanager.* overrides.");
@@ -114,12 +120,21 @@ pub fn run(io: Io, allocator: Allocator, opts: anytype) !void {
     defer prepared.deinit(io);
     try prepared.validateSignerAvailability();
 
+    var metrics = if (opts.metrics or prepared.monitoring != null)
+        try validator_mod.ValidatorMetrics.init(allocator)
+    else
+        validator_mod.ValidatorMetrics.initNoop();
+    defer metrics.deinit();
+
     const client = try validator_mod.ValidatorClient.init(
         io,
         allocator,
-        prepared.validator_config,
-        prepared.signing_context,
-        prepared.startup_signers,
+        .{
+            .config = prepared.validator_config,
+            .signing_context = prepared.signing_context,
+            .startup_signers = prepared.startup_signers,
+            .metrics = &metrics,
+        },
     );
     prepared.startup_signers = .{ .allocator = allocator };
     defer client.destroy();
@@ -130,33 +145,79 @@ pub fn run(io: Io, allocator: Allocator, opts: anytype) !void {
         done: std.atomic.Value(bool),
     };
 
-    const watch_ctx = try allocator.create(WatchCtx);
-    defer allocator.destroy(watch_ctx);
-    watch_ctx.* = .{
+    var watch_ctx = WatchCtx{
         .io = io,
         .client = client,
         .done = std.atomic.Value(bool).init(false),
     };
-
-    const watcher = try std.Thread.spawn(.{}, struct {
-        fn run(ctx: *WatchCtx) void {
+    var watcher = try io.concurrent(struct {
+        fn run(ctx: *WatchCtx) anyerror!void {
             while (!ctx.done.load(.acquire)) {
                 if (ShutdownHandler.shouldStop()) {
                     ctx.client.requestShutdown();
                     return;
                 }
-                ctx.io.sleep(.{ .nanoseconds = 100 * std.time.ns_per_ms }, .real) catch return;
+                try ctx.io.sleep(.{ .nanoseconds = 100 * std.time.ns_per_ms }, .real);
             }
         }
-    }.run, .{watch_ctx});
+    }.run, .{&watch_ctx});
     defer {
         watch_ctx.done.store(true, .release);
-        watcher.join();
+        _ = watcher.cancel(io) catch |err| switch (err) {
+            error.Canceled => {},
+            else => std.log.warn("validator shutdown watcher exited during shutdown: {s}", .{@errorName(err)}),
+        };
     }
 
     prepared.logStartup();
 
+    var metrics_runtime: ?metrics_server.Runtime = null;
+    errdefer if (metrics_runtime) |*runtime| runtime.stop();
+    if (opts.metrics) {
+        metrics_runtime = metrics_server.Runtime.init(
+            io,
+            allocator,
+            &metrics,
+            .{
+                .address = opts.@"metrics.address" orelse metrics_server.default_address,
+                .port = opts.@"metrics.port" orelse metrics_server.default_port,
+            },
+        );
+        try metrics_runtime.?.start();
+        std.log.info(
+            "validator metrics listening on http://{s}:{d}/metrics",
+            .{
+                opts.@"metrics.address" orelse metrics_server.default_address,
+                opts.@"metrics.port" orelse metrics_server.default_port,
+            },
+        );
+    }
+    defer if (metrics_runtime) |*runtime| runtime.stop();
+
+    var monitoring: ?monitoring_runtime.Runtime = null;
+    errdefer if (monitoring) |*runtime| runtime.stop();
+    if (prepared.monitoring) |monitoring_config| {
+        monitoring = try monitoring_runtime.Runtime.init(
+            io,
+            allocator,
+            client,
+            &metrics,
+            monitoring_config,
+            common.VERSION,
+        );
+        try monitoring.?.start();
+        std.log.info(
+            "validator monitoring sending to {s} every {d}ms",
+            .{ monitoring_config.endpoint, monitoring_config.interval_ms },
+        );
+    }
+    defer if (monitoring) |*runtime| runtime.stop();
+
     var keymanager: ?keymanager_server.Runtime = null;
+    errdefer if (keymanager) |*km| {
+        km.stop();
+        km.deinit();
+    };
     if (prepared.keymanager) |keymanager_config| {
         if (!keymanager_config.proposer_config_write_enabled) {
             std.log.warn(
@@ -168,6 +229,7 @@ pub fn run(io: Io, allocator: Allocator, opts: anytype) !void {
             io,
             allocator,
             client,
+            &metrics,
             &prepared.beacon_config,
             .{
                 .address = keymanager_config.address,
@@ -177,10 +239,10 @@ pub fn run(io: Io, allocator: Allocator, opts: anytype) !void {
                 .token_file = keymanager_config.token_file,
                 .header_limit = keymanager_config.header_limit,
                 .body_limit = keymanager_config.body_limit,
+                .stacktraces = keymanager_config.stacktraces,
                 .proposer_config_write_enabled = keymanager_config.proposer_config_write_enabled,
             },
         );
-        errdefer if (keymanager) |*km| km.deinit();
         try keymanager.?.start();
     }
     defer if (keymanager) |*km| {

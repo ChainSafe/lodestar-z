@@ -19,16 +19,9 @@ const api_client = @import("api_client.zig");
 const BeaconApiClient = api_client.BeaconApiClient;
 const ValidatorStore = @import("validator_store.zig").ValidatorStore;
 const signing_mod = @import("signing.zig");
+const time = @import("time.zig");
 
 const log = std.log.scoped(.builder_registration);
-
-fn unixTimestampSeconds() u64 {
-    var ts: std.posix.timespec = undefined;
-    switch (std.posix.errno(std.posix.system.clock_gettime(.REALTIME, &ts))) {
-        .SUCCESS => return if (ts.sec >= 0) @intCast(ts.sec) else 0,
-        else => return 0,
-    }
-}
 
 // ---------------------------------------------------------------------------
 // BuilderRegistrationService
@@ -83,7 +76,7 @@ pub const BuilderRegistrationService = struct {
         }
 
         // Current Unix timestamp (seconds).
-        const timestamp = unixTimestampSeconds();
+        const timestamp = time.realSeconds(io);
 
         // Build signed registrations.
         var registrations = try std.array_list.Managed(RegistrationEntry).initCapacity(

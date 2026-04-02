@@ -226,7 +226,7 @@ pub const IndexTracker = struct {
 const testing = std.testing;
 
 test "IndexTracker: trackPubkey and getIndex" {
-    var api = BeaconApiClient.init(testing.allocator, "http://localhost:5052");
+    var api = BeaconApiClient.init(testing.allocator, testing.io, "http://localhost:5052");
     defer api.deinit();
 
     var tracker = IndexTracker.init(testing.allocator, &api);
@@ -240,7 +240,7 @@ test "IndexTracker: trackPubkey and getIndex" {
 }
 
 test "IndexTracker: untrackPubkey" {
-    var api = BeaconApiClient.init(testing.allocator, "http://localhost:5052");
+    var api = BeaconApiClient.init(testing.allocator, testing.io, "http://localhost:5052");
     defer api.deinit();
 
     var tracker = IndexTracker.init(testing.allocator, &api);
@@ -256,7 +256,7 @@ test "IndexTracker: untrackPubkey" {
 }
 
 test "IndexTracker: duplicate trackPubkey is idempotent" {
-    var api = BeaconApiClient.init(testing.allocator, "http://localhost:5052");
+    var api = BeaconApiClient.init(testing.allocator, testing.io, "http://localhost:5052");
     defer api.deinit();
 
     var tracker = IndexTracker.init(testing.allocator, &api);

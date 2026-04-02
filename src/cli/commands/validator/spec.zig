@@ -137,7 +137,7 @@ pub const spec = cli.command(.{
         }, null),
         .@"keymanager.stacktraces" = cli.flag(.{
             .long = "keymanager.stacktraces",
-            .description = "Compatibility flag only. Keymanager stacktrace responses are not implemented yet",
+            .description = "Include Zig error return traces in validator keymanager HTTP error responses",
             .group = "keymanager",
         }),
         .@"externalSigner.urls" = cli.option(?[]const u8, .{
@@ -175,29 +175,44 @@ pub const spec = cli.command(.{
         }, null),
         .metrics = cli.flag(.{
             .long = "metrics",
-            .description = "Compatibility flag only. Validator metrics server is not implemented yet",
+            .description = "Enable the validator Prometheus metrics server",
             .group = "metrics",
         }),
         .@"metrics.port" = cli.option(?u16, .{
             .long = "metrics.port",
-            .description = "Compatibility flag only. Validator metrics server is not implemented yet",
+            .description = "Port for the validator Prometheus metrics server",
             .group = "metrics",
         }, null),
         .@"metrics.address" = cli.option(?[]const u8, .{
             .long = "metrics.address",
-            .description = "Compatibility flag only. Validator metrics server is not implemented yet",
+            .description = "Bind address for the validator Prometheus metrics server",
             .group = "metrics",
         }, null),
         .@"monitoring.endpoint" = cli.option(?[]const u8, .{
             .long = "monitoring.endpoint",
-            .description = "Compatibility flag only. Validator monitoring is not implemented yet",
+            .description = "Remote HTTP(S) endpoint for periodic validator monitoring stats uploads",
             .group = "monitoring",
         }, null),
         .@"monitoring.interval" = cli.option(?u64, .{
             .long = "monitoring.interval",
-            .description = "Compatibility flag only. Validator monitoring is not implemented yet",
+            .description = "Interval in milliseconds between validator monitoring uploads",
             .group = "monitoring",
         }, null),
+        .@"monitoring.initialDelay" = cli.option(?u64, .{
+            .long = "monitoring.initialDelay",
+            .description = "Delay in milliseconds before the first validator monitoring upload",
+            .group = "monitoring",
+        }, null),
+        .@"monitoring.requestTimeout" = cli.option(?u64, .{
+            .long = "monitoring.requestTimeout",
+            .description = "Request timeout in milliseconds for validator monitoring uploads",
+            .group = "monitoring",
+        }, null),
+        .@"monitoring.collectSystemStats" = cli.flag(.{
+            .long = "monitoring.collectSystemStats",
+            .description = "Include host-level CPU, memory, and disk stats in validator monitoring uploads",
+            .group = "monitoring",
+        }),
         .logFile = cli.option(?[]const u8, .{
             .long = "logFile",
             .description = "Path to output all logs to a persistent log file",

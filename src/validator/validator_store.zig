@@ -81,6 +81,7 @@ pub const ValidatorRecord = struct {
 pub const ValidatorStore = struct {
     pub const ValidatorCounts = struct {
         total: usize,
+        active: usize,
         local: usize,
         remote: usize,
     };
@@ -147,12 +148,15 @@ pub const ValidatorStore = struct {
         defer self.mutex.unlock();
 
         var remote: usize = 0;
+        var active: usize = 0;
         for (self.validators.items) |v| {
             if (v.isRemote()) remote += 1;
+            if (isActiveStatus(v.status)) active += 1;
         }
 
         return .{
             .total = self.validators.items.len,
+            .active = active,
             .local = self.validators.items.len - remote,
             .remote = remote,
         };
@@ -888,6 +892,16 @@ pub const ValidatorStore = struct {
             .local => |*secret_key| std.crypto.secureZero(u8, &secret_key.value.b),
             .remote => {},
         }
+    }
+
+    fn isActiveStatus(status: ValidatorStatus) bool {
+        return switch (status) {
+            .active_ongoing,
+            .active_exiting,
+            .active_slashed,
+            => true,
+            else => false,
+        };
     }
 
     fn signWithValidator(

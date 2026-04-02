@@ -77,11 +77,13 @@ const IndexTracker = index_tracker_mod.IndexTracker;
 
 const liveness_mod = @import("liveness.zig");
 const LivenessTracker = liveness_mod.LivenessTracker;
+const ValidatorMetrics = @import("metrics.zig").ValidatorMetrics;
 
 const fs = @import("fs.zig");
 const interchange_mod = @import("interchange.zig");
 const mutex_mod = @import("mutex.zig");
 const time = @import("time.zig");
+const state_transition = @import("state_transition");
 
 const log = std.log.scoped(.validator_client);
 
@@ -92,9 +94,16 @@ const log = std.log.scoped(.validator_client);
 pub const ValidatorClient = struct {
     pub const ValidatorCounts = store_mod.ValidatorStore.ValidatorCounts;
     const BackgroundTaskFuture = std.Io.Future(anyerror!void);
+    pub const InitParams = struct {
+        config: ValidatorConfig,
+        signing_context: SigningContext,
+        startup_signers: StartupSigners,
+        metrics: *ValidatorMetrics,
+    };
 
     allocator: Allocator,
     config: ValidatorConfig,
+    metrics: *ValidatorMetrics,
 
     // Core components.
     clock: ValidatorSlotTicker,
@@ -133,6 +142,7 @@ pub const ValidatorClient = struct {
     // Long-lived background tasks owned by the validator runtime.
     header_tracker_task: ?BackgroundTaskFuture = null,
     remote_signer_sync_task: ?BackgroundTaskFuture = null,
+    doppelganger_task: ?BackgroundTaskFuture = null,
 
     // Session stats.
     session_start_ns: u64,
@@ -158,11 +168,11 @@ pub const ValidatorClient = struct {
     pub fn init(
         io: Io,
         allocator: Allocator,
-        config: ValidatorConfig,
-        signing_ctx: SigningContext,
-        startup_signers: StartupSigners,
+        params: InitParams,
     ) !*ValidatorClient {
-        var signers = startup_signers;
+        const config = params.config;
+        const signing_ctx = params.signing_context;
+        var signers = params.startup_signers;
         defer signers.deinit(io);
 
         const self = try allocator.create(ValidatorClient);
@@ -170,6 +180,7 @@ pub const ValidatorClient = struct {
 
         self.allocator = allocator;
         self.config = config;
+        self.metrics = params.metrics;
         self.clock = ValidatorSlotTicker.init(
             config.genesis_time,
             config.seconds_per_slot,
@@ -180,24 +191,18 @@ pub const ValidatorClient = struct {
         self.shutdown_requested = std.atomic.Value(bool).init(false);
         self.running = std.atomic.Value(bool).init(false);
         self.header_tracker_task = null;
-        self.session_start_ns = time.realtimeNs();
+        self.session_start_ns = time.awakeNanoseconds(io);
         self.remote_signers = std.array_list.Managed(*RemoteSigner).init(allocator);
         self.remote_signer_sync_task = null;
+        self.doppelganger_task = null;
         self.local_keystore_locks = std.array_list.Managed(KeystoreLock).init(allocator);
         self.runtime_mutex = .{};
 
-        self.api = if (config.beacon_node_fallback_urls.len > 0)
-            .{
-                .allocator = allocator,
-                .base_url = config.beacon_node_url,
-                .fallback_urls = config.beacon_node_fallback_urls,
-                .active_url_idx = 0,
-                .consecutive_failures = 0,
-                .was_unreachable = false,
-                .unreachable_since_ns = 0,
-            }
-        else
-            BeaconApiClient.init(allocator, config.beacon_node_url);
+        self.api = BeaconApiClient.initWithOptions(allocator, io, .{
+            .base_url = config.beacon_node_url,
+            .fallback_urls = config.beacon_node_fallback_urls,
+            .request_timeout_ms = config.seconds_per_slot * std.time.ms_per_s,
+        });
         self.validator_store = try ValidatorStore.init(
             io,
             allocator,
@@ -221,8 +226,11 @@ pub const ValidatorClient = struct {
             &self.validator_store,
             signing_ctx,
             config.slots_per_epoch,
+            config.seconds_per_slot,
+            config.genesis_time,
             config.blinded_local,
             config.broadcast_validation,
+            self.metrics,
         );
         errdefer self.block_service.deinit();
         self.attestation_service = AttestationService.init(
@@ -233,6 +241,7 @@ pub const ValidatorClient = struct {
             config.seconds_per_slot,
             config.genesis_time,
             config.electra_fork_epoch,
+            self.metrics,
         );
         errdefer self.attestation_service.deinit();
         self.sync_committee_service = SyncCommitteeService.init(
@@ -246,6 +255,7 @@ pub const ValidatorClient = struct {
             config.sync_committee_subnet_count,
             config.seconds_per_slot,
             config.genesis_time,
+            self.metrics,
         );
         errdefer self.sync_committee_service.deinit();
 
@@ -266,7 +276,7 @@ pub const ValidatorClient = struct {
         errdefer if (self.builder_registration) |*builder_registration| builder_registration.deinit();
 
         self.doppelganger = if (config.doppelganger_protection)
-            DoppelgangerService.init(allocator, &self.api)
+            DoppelgangerService.init(allocator, &self.api, &self.validator_store.slashing_db)
         else
             null;
         errdefer if (self.doppelganger) |*doppelganger| doppelganger.deinit();
@@ -275,14 +285,11 @@ pub const ValidatorClient = struct {
         errdefer self.index_tracker.deinit();
         self.liveness_tracker = LivenessTracker.init(allocator);
         errdefer self.liveness_tracker.deinit();
-        self.syncing_tracker = SyncingTracker.init(allocator, &self.api);
+        self.syncing_tracker = SyncingTracker.init(&self.api, self.metrics);
 
         var loaded_count: usize = 0;
         for (signers.local_keys) |k| {
             try self.validator_store.addKey(k.secret_key);
-            if (self.doppelganger) |*doppelganger| {
-                try doppelganger.registerValidator(k.pubkey);
-            }
             loaded_count += 1;
         }
         log.info("validator local keys loaded at startup: {d}", .{loaded_count});
@@ -344,6 +351,7 @@ pub const ValidatorClient = struct {
             try self.local_keystore_locks.append(lock);
         }
         signers.local_keystore_locks = &.{};
+        self.syncValidatorMetrics();
 
         return self;
     }
@@ -375,6 +383,12 @@ pub const ValidatorClient = struct {
 
     pub fn validatorCounts(self: *ValidatorClient) ValidatorCounts {
         return self.validator_store.counts();
+    }
+
+    fn syncValidatorMetrics(self: *ValidatorClient) void {
+        const counts = self.validator_store.counts();
+        self.metrics.total_validators.set(@intCast(counts.total));
+        self.metrics.active_validators.set(@intCast(counts.active));
     }
 
     /// Request graceful shutdown of the validator client.
@@ -453,6 +467,7 @@ pub const ValidatorClient = struct {
     pub fn addKey(self: *ValidatorClient, secret_key: bls.SecretKey) !void {
         try self.validator_store.addKey(secret_key);
         try self.registerValidatorTracking(secret_key.toPublicKey().compress());
+        self.syncValidatorMetrics();
     }
 
     pub fn addLocalKeyRuntime(self: *ValidatorClient, secret_key: bls.SecretKey, lock: ?KeystoreLock) !void {
@@ -464,6 +479,7 @@ pub const ValidatorClient = struct {
         if (lock) |owned_lock| {
             try self.local_keystore_locks.append(owned_lock);
         }
+        self.syncValidatorMetrics();
         self.refreshCurrentEpochDuties(self.io);
     }
 
@@ -474,6 +490,7 @@ pub const ValidatorClient = struct {
         const signer = try self.ensureRemoteSigner(url);
         try self.validator_store.addRemotePubkey(pubkey, signer);
         try self.registerValidatorTracking(pubkey);
+        self.syncValidatorMetrics();
         self.refreshCurrentEpochDuties(self.io);
     }
 
@@ -486,6 +503,7 @@ pub const ValidatorClient = struct {
 
         if (signer_kind == .local) self.removeLocalKeystoreLock(pubkey);
         self.unregisterValidatorTracking(pubkey);
+        self.syncValidatorMetrics();
         return signer_kind;
     }
 
@@ -508,8 +526,9 @@ pub const ValidatorClient = struct {
 
     fn registerAllValidatorsWithDoppelganger(self: *ValidatorClient) void {
         if (self.doppelganger) |*d| {
+            const current_epoch = self.clock.currentEpoch(self.io);
             for (self.validator_store.validators.items) |v| {
-                d.registerValidator(v.pubkey) catch |err| {
+                d.registerValidator(current_epoch, v.pubkey) catch |err| {
                     log.warn("doppelganger registerValidator error: {s}", .{@errorName(err)});
                 };
             }
@@ -526,7 +545,7 @@ pub const ValidatorClient = struct {
 
     fn registerValidatorTracking(self: *ValidatorClient, pubkey: [48]u8) !void {
         if (self.doppelganger) |*d| {
-            try d.registerValidator(pubkey);
+            try d.registerValidator(self.clock.currentEpoch(self.io), pubkey);
         }
         self.index_tracker.trackPubkey(pubkey);
         self.liveness_tracker.register(pubkey);
@@ -551,7 +570,7 @@ pub const ValidatorClient = struct {
         };
         self.applyResolvedIndices();
 
-        const epoch = self.clock.currentEpoch();
+        const epoch = self.clock.currentEpoch(io);
         self.block_service.onEpoch(io, epoch);
         self.attestation_service.onEpoch(io, epoch);
         self.sync_committee_service.onEpoch(io, epoch);
@@ -694,6 +713,7 @@ pub const ValidatorClient = struct {
         }
 
         if (added_count > 0 or removed_count > 0) {
+            self.syncValidatorMetrics();
             log.info("remote signer sync complete added={d} removed={d}", .{ added_count, removed_count });
             self.refreshCurrentEpochDuties(io);
         }
@@ -725,26 +745,12 @@ pub const ValidatorClient = struct {
         self.sync_committee_service.setLivenessTracker(&self.liveness_tracker);
         self.syncing_tracker.onResynced(.{ .ctx = self, .fn_ptr = onResyncedDutyRefresh });
 
-        // Register clock callbacks.
-        self.clock.onEpoch(.{ .ctx = self, .fn_ptr = onEpochIndexTracker });
-
-        self.clock.onSlot(.{ .ctx = self, .fn_ptr = onSlotBlockService });
-        self.clock.onEpoch(.{ .ctx = self, .fn_ptr = onEpochBlockService });
-
-        self.clock.onSlot(.{ .ctx = self, .fn_ptr = onSlotAttestationService });
-        self.clock.onEpoch(.{ .ctx = self, .fn_ptr = onEpochAttestationService });
-
-        self.clock.onSlot(.{ .ctx = self, .fn_ptr = onSlotSyncCommitteeService });
-        self.clock.onEpoch(.{ .ctx = self, .fn_ptr = onEpochSyncCommitteeService });
-
-        self.clock.onEpoch(.{ .ctx = self, .fn_ptr = onEpochPrepareProposer });
-
-        if (self.builder_registration != null) {
-            self.clock.onEpoch(.{ .ctx = self, .fn_ptr = onEpochBuilderRegistration });
-        }
+        // Register one coherent runtime callback per phase so sync gating and
+        // index resolution complete before long-running duty work fans out.
+        self.clock.onEpoch(.{ .ctx = self, .fn_ptr = onEpochRuntime });
+        self.clock.onSlot(.{ .ctx = self, .fn_ptr = onSlotRuntime });
 
         if (self.doppelganger) |*d| {
-            self.clock.onEpoch(.{ .ctx = self, .fn_ptr = onEpochDoppelganger });
             // Wire shutdown callback: when doppelganger is detected, trigger VC shutdown.
             d.setShutdownCallback(.{
                 .ctx = self,
@@ -756,9 +762,6 @@ pub const ValidatorClient = struct {
                 }.cb,
             });
         }
-
-        // Syncing status tracker — poll every slot, gate signing when BN is behind.
-        self.clock.onSlot(.{ .ctx = self, .fn_ptr = onSlotSyncingTracker });
 
         // Resolve validator indices at startup.
         // This is required before duties can be fetched (duties use validator index, not pubkey).
@@ -780,7 +783,9 @@ pub const ValidatorClient = struct {
             log.info("doppelganger protection enabled — signing blocked until {d} clean epoch(s) observed", .{
                 dopple_mod.DEFAULT_REMAINING_DETECTION_EPOCHS,
             });
+            try self.startDoppelgangerTask();
         }
+        errdefer self.stopDoppelgangerTask();
 
         try self.startHeaderTrackerTask();
         errdefer self.stopHeaderTrackerTask();
@@ -799,12 +804,13 @@ pub const ValidatorClient = struct {
         log.info("validator client stopping...", .{});
 
         self.stopRemoteSignerSyncTask();
+        self.stopDoppelgangerTask();
         self.stopHeaderTrackerTask();
 
         // Note: slashing_db.close() is called by validator_store.deinit() — do NOT call it here.
 
         // Log session summary.
-        const session_end_ns = time.realtimeNs();
+        const session_end_ns = time.awakeNanoseconds(self.io);
         const session_duration_s = (session_end_ns -| self.session_start_ns) / std.time.ns_per_s;
         log.info(
             "validator client stopped: session_duration={d}s validators={d} missed_blocks={d}",
@@ -823,82 +829,89 @@ pub const ValidatorClient = struct {
     // Clock callback trampolines
     // -----------------------------------------------------------------------
 
-    fn onSlotBlockService(ctx: *anyopaque, slot: u64) void {
+    fn onSlotRuntime(ctx: *anyopaque, slot: u64) void {
         const self: *ValidatorClient = @ptrCast(@alignCast(ctx));
-        const io = self.io;
-        self.block_service.onSlot(io, slot);
+        self.runSlotRuntime(slot) catch |err| {
+            log.err("validator slot runtime slot={d} error={s}", .{ slot, @errorName(err) });
+        };
     }
 
-    fn onEpochBlockService(ctx: *anyopaque, epoch: u64) void {
+    fn onEpochRuntime(ctx: *anyopaque, epoch: u64) void {
         const self: *ValidatorClient = @ptrCast(@alignCast(ctx));
-        const io = self.io;
-        self.block_service.onEpoch(io, epoch);
+        self.runEpochRuntime(epoch) catch |err| {
+            log.err("validator epoch runtime epoch={d} error={s}", .{ epoch, @errorName(err) });
+        };
     }
 
-    fn onSlotAttestationService(ctx: *anyopaque, slot: u64) void {
-        const self: *ValidatorClient = @ptrCast(@alignCast(ctx));
-        const io = self.io;
-        self.attestation_service.onSlot(io, slot);
+    fn runSlotRuntime(self: *ValidatorClient, slot: u64) !void {
+        // Poll BN readiness before any duty work in this slot fans out.
+        self.syncing_tracker.onSlot(self.io, slot);
+
+        var group: Io.Group = .init;
+        errdefer group.cancel(self.io);
+
+        try group.concurrent(self.io, runBlockServiceSlotTask, .{ self, slot });
+        try group.concurrent(self.io, runAttestationServiceSlotTask, .{ self, slot });
+        try group.concurrent(self.io, runSyncCommitteeServiceSlotTask, .{ self, slot });
+        try group.await(self.io);
     }
 
-    fn onEpochAttestationService(ctx: *anyopaque, epoch: u64) void {
-        const self: *ValidatorClient = @ptrCast(@alignCast(ctx));
-        const io = self.io;
-        self.attestation_service.onEpoch(io, epoch);
-    }
-
-    fn onSlotSyncCommitteeService(ctx: *anyopaque, slot: u64) void {
-        const self: *ValidatorClient = @ptrCast(@alignCast(ctx));
-        const io = self.io;
-        self.sync_committee_service.onSlot(io, slot);
-    }
-
-    fn onEpochSyncCommitteeService(ctx: *anyopaque, epoch: u64) void {
-        const self: *ValidatorClient = @ptrCast(@alignCast(ctx));
-        const io = self.io;
-        self.sync_committee_service.onEpoch(io, epoch);
-    }
-
-    fn onEpochPrepareProposer(ctx: *anyopaque, epoch: u64) void {
-        const self: *ValidatorClient = @ptrCast(@alignCast(ctx));
-        const io = self.io;
-        self.prepare_proposer.onEpoch(io, epoch);
-    }
-
-    fn onEpochBuilderRegistration(ctx: *anyopaque, epoch: u64) void {
-        const self: *ValidatorClient = @ptrCast(@alignCast(ctx));
-        const io = self.io;
-        if (self.builder_registration) |*br| {
-            br.onEpoch(io, epoch);
-        }
-    }
-
-    fn onEpochDoppelganger(ctx: *anyopaque, epoch: u64) void {
-        const self: *ValidatorClient = @ptrCast(@alignCast(ctx));
-        const io = self.io;
-        if (self.doppelganger) |*d| {
-            d.onEpoch(io, epoch);
-        }
-    }
-
-    fn onEpochIndexTracker(ctx: *anyopaque, epoch: u64) void {
-        const self: *ValidatorClient = @ptrCast(@alignCast(ctx));
-        const io = self.io;
-        self.index_tracker.onEpoch(io, epoch);
+    fn runEpochRuntime(self: *ValidatorClient, epoch: u64) !void {
+        // Resolve indices first so epoch duty refreshes do not race stale mappings.
+        self.index_tracker.onEpoch(self.io, epoch);
         self.applyResolvedIndices();
 
-        // Emit epoch effectiveness summary.
         self.liveness_tracker.logEpochSummary(
             epoch,
             self.validator_store.validators.items.len,
             self.block_service.missed_block_count,
         );
+
+        var group: Io.Group = .init;
+        errdefer group.cancel(self.io);
+
+        try group.concurrent(self.io, runBlockServiceEpochTask, .{ self, epoch });
+        try group.concurrent(self.io, runAttestationServiceEpochTask, .{ self, epoch });
+        try group.concurrent(self.io, runSyncCommitteeServiceEpochTask, .{ self, epoch });
+        try group.concurrent(self.io, runPrepareProposerEpochTask, .{ self, epoch });
+        if (self.builder_registration != null) {
+            try group.concurrent(self.io, runBuilderRegistrationEpochTask, .{ self, epoch });
+        }
+        try group.await(self.io);
     }
 
-    fn onSlotSyncingTracker(ctx: *anyopaque, slot: u64) void {
-        const self: *ValidatorClient = @ptrCast(@alignCast(ctx));
-        const io = self.io;
-        self.syncing_tracker.onSlot(io, slot);
+    fn runBlockServiceSlotTask(self: *ValidatorClient, slot: u64) Io.Cancelable!void {
+        self.block_service.onSlot(self.io, slot);
+    }
+
+    fn runAttestationServiceSlotTask(self: *ValidatorClient, slot: u64) Io.Cancelable!void {
+        self.attestation_service.onSlot(self.io, slot);
+    }
+
+    fn runSyncCommitteeServiceSlotTask(self: *ValidatorClient, slot: u64) Io.Cancelable!void {
+        self.sync_committee_service.onSlot(self.io, slot);
+    }
+
+    fn runBlockServiceEpochTask(self: *ValidatorClient, epoch: u64) Io.Cancelable!void {
+        self.block_service.onEpoch(self.io, epoch);
+    }
+
+    fn runAttestationServiceEpochTask(self: *ValidatorClient, epoch: u64) Io.Cancelable!void {
+        self.attestation_service.onEpoch(self.io, epoch);
+    }
+
+    fn runSyncCommitteeServiceEpochTask(self: *ValidatorClient, epoch: u64) Io.Cancelable!void {
+        self.sync_committee_service.onEpoch(self.io, epoch);
+    }
+
+    fn runPrepareProposerEpochTask(self: *ValidatorClient, epoch: u64) Io.Cancelable!void {
+        self.prepare_proposer.onEpoch(self.io, epoch);
+    }
+
+    fn runBuilderRegistrationEpochTask(self: *ValidatorClient, epoch: u64) Io.Cancelable!void {
+        if (self.builder_registration) |*br| {
+            br.onEpoch(self.io, epoch);
+        }
     }
 
     fn onResyncedDutyRefresh(ctx: *anyopaque, slot: u64, io: Io) void {
@@ -913,6 +926,7 @@ pub const ValidatorClient = struct {
         self.applyResolvedIndices();
 
         const epoch = slot / self.config.slots_per_epoch;
+        self.block_service.onEpoch(io, epoch);
         self.attestation_service.onEpoch(io, epoch);
         self.sync_committee_service.onEpoch(io, epoch);
     }
@@ -938,12 +952,78 @@ pub const ValidatorClient = struct {
             try self.validator_store.addRemotePubkey(pubkey, signer);
             try self.registerValidatorTracking(pubkey);
         }
+        self.syncValidatorMetrics();
     }
 
     fn remoteSignerSyncIntervalNs(self: *const ValidatorClient) u64 {
         const interval_ms = self.config.external_signer_fetch_interval_ms orelse
             (self.config.slots_per_epoch * self.config.seconds_per_slot * std.time.ms_per_s);
         return interval_ms * std.time.ns_per_ms;
+    }
+
+    fn doppelgangerCheckTimeNs(self: *const ValidatorClient, epoch: u64) u64 {
+        const last_slot = state_transition.computeStartSlotAtEpoch(epoch + 1) - 1;
+        const slot_duration_ns = self.config.seconds_per_slot * std.time.ns_per_s;
+        return self.config.genesis_time * std.time.ns_per_s +
+            last_slot * slot_duration_ns +
+            (3 * slot_duration_ns) / 4;
+    }
+
+    fn sleepInterruptiblyNs(self: *ValidatorClient, duration_ns: u64) !void {
+        var remaining_ns = duration_ns;
+        const sleep_slice_ns = std.time.ns_per_s;
+        while (remaining_ns > 0 and !self.shutdown_requested.load(.acquire)) {
+            const this_sleep = @min(remaining_ns, sleep_slice_ns);
+            try self.io.sleep(.{ .nanoseconds = this_sleep }, .awake);
+            remaining_ns -= this_sleep;
+        }
+    }
+
+    fn runDoppelgangerTask(self: *ValidatorClient) anyerror!void {
+        var last_checked_epoch: ?u64 = null;
+
+        while (!self.shutdown_requested.load(.acquire)) {
+            const current_epoch = self.clock.currentEpoch(self.io);
+
+            if (last_checked_epoch != null and current_epoch <= last_checked_epoch.?) {
+                const current_slot = self.clock.currentSlot(self.io);
+                try self.sleepInterruptiblyNs(self.clock.nsUntilSlot(self.io, current_slot + 1));
+                continue;
+            }
+
+            const target_ns = self.doppelgangerCheckTimeNs(current_epoch);
+            const now_ns = time.realNanoseconds(self.io);
+            if (now_ns < target_ns) {
+                try self.sleepInterruptiblyNs(target_ns - now_ns);
+                continue;
+            }
+
+            if (self.shutdown_requested.load(.acquire)) return;
+            if (self.clock.currentEpoch(self.io) != current_epoch) continue;
+
+            if (self.doppelganger) |*d| {
+                d.pollLivenessForEpoch(self.io, current_epoch) catch |err| switch (err) {
+                    error.DoppelgangerDetected => {},
+                    else => log.warn("doppelganger check failed epoch={d}: {s}", .{ current_epoch, @errorName(err) }),
+                };
+            }
+            last_checked_epoch = current_epoch;
+        }
+    }
+
+    fn startDoppelgangerTask(self: *ValidatorClient) !void {
+        std.debug.assert(self.doppelganger_task == null);
+        self.doppelganger_task = try self.io.concurrent(runDoppelgangerTask, .{self});
+    }
+
+    fn stopDoppelgangerTask(self: *ValidatorClient) void {
+        if (self.doppelganger_task) |*task| {
+            _ = task.cancel(self.io) catch |err| switch (err) {
+                error.Canceled => {},
+                else => log.warn("doppelganger task exited during shutdown: {s}", .{@errorName(err)}),
+            };
+            self.doppelganger_task = null;
+        }
     }
 
     fn runHeaderTrackerTask(self: *ValidatorClient) anyerror!void {

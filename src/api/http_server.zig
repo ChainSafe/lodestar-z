@@ -99,6 +99,17 @@ fn pathMatchesPrefixes(path: []const u8, prefixes: []const []const u8) bool {
 }
 
 pub const HttpServer = struct {
+    pub const Observer = struct {
+        ptr: *anyopaque,
+        onActiveConnectionsChangedFn: ?*const fn (ptr: *anyopaque, active_connections: u32) void = null,
+        onRequestCompletedFn: ?*const fn (
+            ptr: *anyopaque,
+            operation_id: []const u8,
+            response_time_seconds: f64,
+            is_error: bool,
+        ) void = null,
+    };
+
     pub const StartupStatus = enum(u8) {
         idle,
         started,
@@ -108,6 +119,8 @@ pub const HttpServer = struct {
     pub const Options = struct {
         cors_origin: ?[]const u8 = null,
         allow_keymanager_cors: bool = false,
+        include_error_stacktraces: bool = false,
+        observer: ?Observer = null,
         allowed_path_prefixes: ?[]const []const u8 = null,
         allowed_operation_ids: ?[]const []const u8 = null,
         max_header_bytes: usize = default_max_header_bytes,
@@ -123,6 +136,8 @@ pub const HttpServer = struct {
     /// Never applied to keymanager endpoints regardless of this setting.
     cors_origin: ?[]const u8 = null,
     allow_keymanager_cors: bool = false,
+    include_error_stacktraces: bool = false,
+    observer: ?Observer = null,
     allowed_path_prefixes: ?[]const []const u8 = null,
     allowed_operation_ids: ?[]const []const u8 = null,
     max_header_bytes: usize = default_max_header_bytes,
@@ -191,6 +206,8 @@ pub const HttpServer = struct {
             .port = port,
             .cors_origin = options.cors_origin,
             .allow_keymanager_cors = options.allow_keymanager_cors,
+            .include_error_stacktraces = options.include_error_stacktraces,
+            .observer = options.observer,
             .allowed_path_prefixes = options.allowed_path_prefixes,
             .allowed_operation_ids = options.allowed_operation_ids,
             .max_header_bytes = options.max_header_bytes,
@@ -221,6 +238,27 @@ pub const HttpServer = struct {
         if (self.cors_origin == null) return false;
         if (isKeymanagerPath(path) and !self.allow_keymanager_cors) return false;
         return true;
+    }
+
+    fn notifyActiveConnectionsChanged(self: *HttpServer, active_connections: u32) void {
+        if (self.observer) |observer| {
+            if (observer.onActiveConnectionsChangedFn) |callback| {
+                callback(observer.ptr, active_connections);
+            }
+        }
+    }
+
+    fn notifyRequestCompleted(
+        self: *HttpServer,
+        operation_id: []const u8,
+        response_time_seconds: f64,
+        is_error: bool,
+    ) void {
+        if (self.observer) |observer| {
+            if (observer.onRequestCompletedFn) |callback| {
+                callback(observer.ptr, operation_id, response_time_seconds, is_error);
+            }
+        }
     }
 
     /// Signal the serve loop to exit after the current connection completes.
@@ -283,8 +321,10 @@ pub const HttpServer = struct {
 
             // Enforce maximum concurrent connection limit (DoS protection).
             const prev = self.active_connections.fetchAdd(1, .acquire);
+            self.notifyActiveConnectionsChanged(prev + 1);
             if (prev >= max_concurrent_connections) {
-                _ = self.active_connections.fetchSub(1, .release);
+                const old_count = self.active_connections.fetchSub(1, .release);
+                self.notifyActiveConnectionsChanged(old_count - 1);
                 log.warn("connection limit reached ({d}), rejecting new connection", .{max_concurrent_connections});
                 // Send a minimal 503 response before closing.
                 var reject_buf: [128]u8 = undefined;
@@ -295,7 +335,8 @@ pub const HttpServer = struct {
                 continue;
             }
             self.handleConnection(io, stream);
-            _ = self.active_connections.fetchSub(1, .release);
+            const old_count = self.active_connections.fetchSub(1, .release);
+            self.notifyActiveConnectionsChanged(old_count - 1);
         }
     }
 
@@ -364,7 +405,7 @@ pub const HttpServer = struct {
         // Split target into path and query.
         const path, _ = splitTarget(target);
         if (!self.pathAllowed(path)) {
-            try respondApiError(request, .{
+            try respondApiError(self.allocator, request, .{
                 .code = .not_found,
                 .message = "Route not found",
             });
@@ -399,7 +440,7 @@ pub const HttpServer = struct {
             .POST => .POST,
             .DELETE => .DELETE,
             else => {
-                try respondApiError(request, .{
+                try respondApiError(self.allocator, request, .{
                     .code = .method_not_allowed,
                     .message = "Method not allowed",
                 });
@@ -409,18 +450,28 @@ pub const HttpServer = struct {
 
         // Route lookup.
         const match = routes_mod.findRoute(route_method, path) orelse {
-            try respondApiError(request, .{
+            try respondApiError(self.allocator, request, .{
                 .code = .not_found,
                 .message = "Route not found",
             });
             return;
         };
         if (!self.operationAllowed(match.route.operation_id)) {
-            try respondApiError(request, .{
+            try respondApiError(self.allocator, request, .{
                 .code = .not_found,
                 .message = "Route not found",
             });
             return;
+        }
+
+        const request_started = Io.Timestamp.now(io, .awake);
+        var request_failed = true;
+        defer {
+            const request_finished = Io.Timestamp.now(io, .awake);
+            const elapsed_ns = request_started.durationTo(request_finished).nanoseconds;
+            const elapsed_seconds =
+                @as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(std.time.ns_per_s));
+            self.notifyRequestCompleted(match.route.operation_id, elapsed_seconds, request_failed);
         }
 
         // SSE streaming: intercept the events endpoint before normal dispatch.
@@ -438,7 +489,7 @@ pub const HttpServer = struct {
             .absent => content_negotiation.WireFormat.json,
             .format => |f| f,
             .not_acceptable => {
-                try respondApiError(request, .{
+                try respondApiError(self.allocator, request, .{
                     .code = .not_acceptable,
                     .message = "Supported: application/json, application/octet-stream",
                 });
@@ -448,7 +499,7 @@ pub const HttpServer = struct {
 
         // For SSZ requests, ensure the route supports SSZ.
         if (format == .ssz and !match.route.supports_ssz) {
-            try respondApiError(request, .{
+            try respondApiError(self.allocator, request, .{
                 .code = .not_acceptable,
                 .message = "This endpoint does not support SSZ responses",
             });
@@ -481,7 +532,9 @@ pub const HttpServer = struct {
             .auth_header = findHeader(request, "authorization"),
         };
         const result = self.dispatchHandler(dc) catch |err| {
-            try respondApiError(request, error_response.fromZigError(err));
+            var api_err = try makeApiError(self, err);
+            defer api_err.deinit(self.allocator);
+            try respondApiError(self.allocator, request, api_err);
             return;
         };
         defer result.deinit(self.allocator);
@@ -517,6 +570,7 @@ pub const HttpServer = struct {
             .status = statusFromCode(result.status),
             .extra_headers = extra_hdrs_buf[0..extra_count],
         });
+        request_failed = false;
     }
 
     /// Dispatch result from a handler.
@@ -1948,12 +2002,9 @@ pub const HttpServer = struct {
             .body = body orelse &[_]u8{},
         };
         const result = self.dispatchHandler(dc_test) catch |err| {
-            const api_err = error_response.fromZigError(err);
-            var err_buf: [256]u8 = undefined;
-            const err_json = api_err.formatJson(&err_buf);
-            // Dupe onto heap — err_buf is stack-local and would dangle after return.
-            // On OOM, fall back to a static string literal (safe to return by reference).
-            const err_json_heap = self.allocator.dupe(u8, err_json) catch null;
+            var api_err = makeApiError(self, err) catch error_response.fromZigError(err);
+            defer api_err.deinit(self.allocator);
+            const err_json_heap = api_err.formatJsonAlloc(self.allocator) catch null;
             return .{
                 .status = api_err.code.statusCode(),
                 .status_text = api_err.code.phrase(),
@@ -2162,15 +2213,51 @@ fn findHeader(request: *http.Server.Request, name: []const u8) ?[]const u8 {
 }
 
 /// Send a Beacon API error response (JSON, with statusCode field).
-fn respondApiError(request: *http.Server.Request, api_err: error_response.ApiError) !void {
-    var buf: [512]u8 = undefined;
-    const json = api_err.formatJson(&buf);
+fn respondApiError(
+    allocator: Allocator,
+    request: *http.Server.Request,
+    api_err: error_response.ApiError,
+) !void {
+    const json = try api_err.formatJsonAlloc(allocator);
+    defer allocator.free(json);
     try request.respond(json, .{
         .status = statusFromCode(api_err.code.statusCode()),
         .extra_headers = &.{
             .{ .name = "Content-Type", .value = "application/json" },
         },
     });
+}
+
+fn makeErrorStacktraces(allocator: Allocator, trace: *const std.builtin.StackTrace) ![]const []const u8 {
+    const formatted = try std.fmt.allocPrint(allocator, "{f}", .{
+        std.debug.FormatStackTrace{ .stack_trace = trace.* },
+    });
+    defer allocator.free(formatted);
+
+    var lines = std.ArrayListUnmanaged([]const u8).empty;
+    errdefer {
+        for (lines.items) |line| allocator.free(line);
+        lines.deinit(allocator);
+    }
+
+    var iter = std.mem.splitScalar(u8, formatted, '\n');
+    while (iter.next()) |line| {
+        const trimmed = std.mem.trim(u8, line, "\r");
+        if (trimmed.len == 0) continue;
+        try lines.append(allocator, try allocator.dupe(u8, trimmed));
+    }
+    return try lines.toOwnedSlice(allocator);
+}
+
+fn makeApiError(self: *HttpServer, err: anyerror) !error_response.ApiError {
+    var api_err = error_response.fromZigError(err);
+    if (!self.include_error_stacktraces) return api_err;
+    if (@errorReturnTrace()) |trace| {
+        if (trace.index > 0) {
+            api_err.stacktraces = try makeErrorStacktraces(self.allocator, trace);
+        }
+    }
+    return api_err;
 }
 
 fn statusFromCode(code: u16) http.Status {

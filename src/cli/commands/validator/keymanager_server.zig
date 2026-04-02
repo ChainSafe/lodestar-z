@@ -15,10 +15,13 @@ pub const Config = struct {
     token_file: []const u8,
     header_limit: usize,
     body_limit: usize,
+    stacktraces: bool,
     proposer_config_write_enabled: bool,
 };
 
 pub const Runtime = struct {
+    const Task = std.Io.Future(anyerror!void);
+
     io: Io,
     allocator: Allocator,
     client: *validator_mod.ValidatorClient,
@@ -27,12 +30,13 @@ pub const Runtime = struct {
     api_context: api_mod.ApiContext,
     server: api_mod.HttpServer,
     node_identity: api_mod.types.NodeIdentity,
-    thread_handle: ?std.Thread = null,
+    task: ?Task = null,
 
     pub fn init(
         io: Io,
         allocator: Allocator,
         client: *validator_mod.ValidatorClient,
+        metrics: *validator_mod.ValidatorMetrics,
         beacon_config: *const config_mod.BeaconConfig,
         config: Config,
     ) !Runtime {
@@ -84,6 +88,8 @@ pub const Runtime = struct {
             .{
                 .cors_origin = config.cors_origin,
                 .allow_keymanager_cors = true,
+                .include_error_stacktraces = config.stacktraces,
+                .observer = metrics.keymanagerObserver(),
                 .max_header_bytes = config.header_limit,
                 .allowed_operation_ids = &.{
                     "listKeystores",
@@ -119,13 +125,14 @@ pub const Runtime = struct {
     }
 
     pub fn start(self: *Runtime) !void {
-        self.thread_handle = try std.Thread.spawn(.{}, struct {
-            fn run(runtime: *Runtime) void {
-                runtime.server.serve(runtime.io) catch |err| {
-                    std.log.err("validator keymanager server stopped: {s}", .{@errorName(err)});
-                };
+        std.debug.assert(self.task == null);
+        self.task = try self.io.concurrent(runServer, .{self});
+        errdefer {
+            if (self.task) |*task| {
+                _ = task.await(self.io) catch {};
+                self.task = null;
             }
-        }.run, .{self});
+        }
 
         while (true) {
             switch (self.server.startupStatus()) {
@@ -145,9 +152,16 @@ pub const Runtime = struct {
 
     pub fn stop(self: *Runtime) void {
         self.server.shutdown(self.io);
-        if (self.thread_handle) |thread| {
-            thread.join();
-            self.thread_handle = null;
+        if (self.task) |*task| {
+            _ = task.cancel(self.io) catch |err| switch (err) {
+                error.Canceled => {},
+                else => std.log.warn("validator keymanager task exited during shutdown: {s}", .{@errorName(err)}),
+            };
+            self.task = null;
         }
+    }
+
+    fn runServer(self: *Runtime) anyerror!void {
+        try self.server.serve(self.io);
     }
 };

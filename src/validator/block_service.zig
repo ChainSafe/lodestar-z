@@ -30,11 +30,13 @@ const BeaconApiClient = @import("api_client.zig").BeaconApiClient;
 const ValidatorStore = @import("validator_store.zig").ValidatorStore;
 const signing_mod = @import("signing.zig");
 const SigningContext = signing_mod.SigningContext;
+const ValidatorMetrics = @import("metrics.zig").ValidatorMetrics;
 
 const dopple_mod = @import("doppelganger.zig");
 const DoppelgangerService = dopple_mod.DoppelgangerService;
 const syncing_tracker_mod = @import("syncing_tracker.zig");
 const SyncingTracker = syncing_tracker_mod.SyncingTracker;
+const time = @import("time.zig");
 
 const log = std.log.scoped(.block_service);
 
@@ -67,10 +69,15 @@ pub const BlockService = struct {
     syncing_tracker: ?*SyncingTracker,
     /// Slots per epoch (from chain config).
     slots_per_epoch: u64,
+    /// Seconds per slot for proposal timing metrics.
+    seconds_per_slot: u64,
+    /// Genesis time (Unix seconds) for proposal timing metrics.
+    genesis_time_unix_secs: u64,
     /// Whether to request local block production in blinded form.
     blinded_local: bool,
     /// Validation policy requested when publishing signed blocks.
     broadcast_validation: BroadcastValidation,
+    metrics: *ValidatorMetrics,
 
     pub fn init(
         allocator: Allocator,
@@ -78,8 +85,11 @@ pub const BlockService = struct {
         validator_store: *ValidatorStore,
         signing_ctx: SigningContext,
         slots_per_epoch: u64,
+        seconds_per_slot: u64,
+        genesis_time_unix_secs: u64,
         blinded_local: bool,
         broadcast_validation: BroadcastValidation,
+        metrics: *ValidatorMetrics,
     ) BlockService {
         return .{
             .allocator = allocator,
@@ -94,8 +104,11 @@ pub const BlockService = struct {
             .doppelganger = null,
             .syncing_tracker = null,
             .slots_per_epoch = slots_per_epoch,
+            .seconds_per_slot = seconds_per_slot,
+            .genesis_time_unix_secs = genesis_time_unix_secs,
             .blinded_local = blinded_local,
             .broadcast_validation = broadcast_validation,
+            .metrics = metrics,
         };
     }
 
@@ -432,6 +445,8 @@ pub const BlockService = struct {
         log.info("published block slot={d} validator_index={d} fork={s} blinded={}", .{
             duty.slot, duty.validator_index, fork_name, block_resp.blinded,
         });
+        self.metrics.block_proposed_total.incr();
+        self.metrics.block_delay_seconds.observe(self.slotDelaySeconds(io, duty.slot));
         return true;
     }
 
@@ -442,12 +457,20 @@ pub const BlockService = struct {
         for (self.duties.items) |cached| {
             if (!cached.produced) {
                 self.missed_block_count += 1;
+                self.metrics.block_missed_total.incr();
                 log.warn(
                     "missed block proposal slot={d} validator_index={d} (total_missed={d})",
                     .{ cached.duty.slot, cached.duty.validator_index, self.missed_block_count },
                 );
             }
         }
+    }
+
+    fn slotDelaySeconds(self: *const BlockService, io: Io, slot: u64) f64 {
+        const slot_start_ns = (self.genesis_time_unix_secs * std.time.ns_per_s) + (slot * self.seconds_per_slot * std.time.ns_per_s);
+        const now_ns = time.realNanoseconds(io);
+        if (now_ns <= slot_start_ns) return 0.0;
+        return @as(f64, @floatFromInt(now_ns - slot_start_ns)) / @as(f64, std.time.ns_per_s);
     }
 
     fn hasTrackedValidator(self: *const BlockService, pubkey: [48]u8) bool {

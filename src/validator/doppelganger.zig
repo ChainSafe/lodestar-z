@@ -19,11 +19,14 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
 const BeaconApiClient = @import("api_client.zig").BeaconApiClient;
+const SlashingProtectionDb = @import("slashing_protection_db.zig").SlashingProtectionDb;
 
 const log = std.log.scoped(.doppelganger);
 
 /// Number of clean epochs before we allow signing.
 pub const DEFAULT_REMAINING_DETECTION_EPOCHS: u64 = 1;
+const REMAINING_EPOCHS_IF_DOPPELGANGER = std.math.maxInt(u64);
+const REMAINING_EPOCHS_IF_SKIPPED: u64 = 0;
 
 // ---------------------------------------------------------------------------
 // Doppelganger status
@@ -73,15 +76,21 @@ pub const ShutdownCallback = struct {
 pub const DoppelgangerService = struct {
     allocator: Allocator,
     api: *BeaconApiClient,
+    slashing_db: *const SlashingProtectionDb,
     /// Per-validator entries.
     entries: std.array_list.Managed(DoppelgangerEntry),
     /// Optional shutdown callback — called on doppelganger detection.
     shutdown_callback: ?ShutdownCallback,
 
-    pub fn init(allocator: Allocator, api: *BeaconApiClient) DoppelgangerService {
+    pub fn init(
+        allocator: Allocator,
+        api: *BeaconApiClient,
+        slashing_db: *const SlashingProtectionDb,
+    ) DoppelgangerService {
         return .{
             .allocator = allocator,
             .api = api,
+            .slashing_db = slashing_db,
             .entries = std.array_list.Managed(DoppelgangerEntry).init(allocator),
             .shutdown_callback = null,
         };
@@ -105,21 +114,48 @@ pub const DoppelgangerService = struct {
     /// Register a validator pubkey for doppelganger monitoring.
     ///
     /// TS: DoppelgangerService.registerValidator(pubkeyHex)
-    pub fn registerValidator(self: *DoppelgangerService, pubkey: [48]u8) !void {
+    pub fn registerValidator(self: *DoppelgangerService, current_epoch: u64, pubkey: [48]u8) !void {
         // Check for duplicate.
         for (self.entries.items) |e| {
             if (std.mem.eql(u8, &e.pubkey, &pubkey)) return;
         }
+
+        var remaining_epochs = if (current_epoch == 0)
+            REMAINING_EPOCHS_IF_SKIPPED
+        else
+            DEFAULT_REMAINING_DETECTION_EPOCHS;
+        const next_epoch_to_check = current_epoch + 1;
+
+        if (remaining_epochs > 0) {
+            const previous_epoch = current_epoch - 1;
+            if (self.slashing_db.hasAttestedInEpoch(pubkey, previous_epoch)) {
+                remaining_epochs = REMAINING_EPOCHS_IF_SKIPPED;
+                log.info(
+                    "doppelganger detection skipped for validator because restart was detected pubkey=0x{x} previous_epoch={d}",
+                    .{ pubkey[0..4], previous_epoch },
+                );
+            } else {
+                log.info(
+                    "registered validator for doppelganger detection pubkey=0x{x} remaining_epochs={d} next_epoch_to_check={d}",
+                    .{ pubkey[0..4], remaining_epochs, next_epoch_to_check },
+                );
+            }
+        } else {
+            log.info(
+                "doppelganger detection skipped for validator initialized before or at genesis pubkey=0x{x} current_epoch={d}",
+                .{ pubkey[0..4], current_epoch },
+            );
+        }
+
         try self.entries.append(.{
             .pubkey = pubkey,
             .index = null,
             .state = .{
-                .next_epoch_to_check = 0,
-                .remaining_epochs = DEFAULT_REMAINING_DETECTION_EPOCHS,
-                .status = .unverified,
+                .next_epoch_to_check = next_epoch_to_check,
+                .remaining_epochs = remaining_epochs,
+                .status = if (remaining_epochs == 0) .verified_safe else .unverified,
             },
         });
-        log.debug("registered validator for doppelganger detection pubkey=0x{x}", .{pubkey[0..4]});
     }
 
     /// Remove a validator from doppelganger monitoring.
@@ -167,16 +203,18 @@ pub const DoppelgangerService = struct {
     ///
     /// TS: DoppelgangerService.pollLiveness (clock.runEveryEpoch)
     pub fn onEpoch(self: *DoppelgangerService, io: Io, epoch: u64) void {
-        self.pollLiveness(io, epoch) catch |err| {
+        self.pollLivenessForEpoch(io, epoch) catch |err| {
             log.err("pollLiveness epoch={d} error={s}", .{ epoch, @errorName(err) });
         };
     }
 
-    fn pollLiveness(self: *DoppelgangerService, io: Io, epoch: u64) !void {
+    pub fn pollLivenessForEpoch(self: *DoppelgangerService, io: Io, current_epoch: u64) !void {
+        if (current_epoch == 0) return;
+
         // Step 1: resolve pubkey → index for any entries that don't have one yet.
         var needs_resolution = false;
         for (self.entries.items) |e| {
-            if (e.state.status == .unverified and e.index == null) {
+            if (e.state.status == .unverified and e.state.remaining_epochs > 0 and e.index == null) {
                 needs_resolution = true;
                 break;
             }
@@ -191,7 +229,7 @@ pub const DoppelgangerService = struct {
         defer indices.deinit();
 
         for (self.entries.items) |e| {
-            if (e.state.status == .unverified) {
+            if (e.state.status == .unverified and e.state.remaining_epochs > 0 and e.state.next_epoch_to_check <= current_epoch) {
                 if (e.index) |idx| {
                     try indices.append(idx);
                 }
@@ -200,25 +238,48 @@ pub const DoppelgangerService = struct {
         }
         if (indices.items.len == 0) return;
 
-        const liveness = try self.api.getLiveness(io, epoch, indices.items);
-        defer self.allocator.free(liveness);
+        const previous_epoch = current_epoch - 1;
+        const previous_liveness = try self.api.getLiveness(io, previous_epoch, indices.items);
+        defer self.allocator.free(previous_liveness);
+
+        const current_liveness = try self.api.getLiveness(io, current_epoch, indices.items);
+        defer self.allocator.free(current_liveness);
 
         var detected = false;
-        for (liveness) |live| {
-            if (live.is_live) {
-                log.err("DOPPELGANGER DETECTED: validator index={d} is live on the network at epoch={d}!", .{ live.index, epoch });
-                detected = true;
-                // Mark the specific validator as detected.
-                for (self.entries.items) |*e| {
-                    if (e.index == live.index) {
-                        e.state.status = .doppelganger_detected;
-                    }
+        for (previous_liveness) |live| {
+            if (!live.is_live) continue;
+            for (self.entries.items) |*e| {
+                if (e.index == live.index and e.state.status == .unverified and e.state.next_epoch_to_check <= previous_epoch) {
+                    log.err("DOPPELGANGER DETECTED: validator index={d} is live on the network at epoch={d}!", .{
+                        live.index,
+                        previous_epoch,
+                    });
+                    detected = true;
+                    break;
+                }
+            }
+        }
+        for (current_liveness) |live| {
+            if (!live.is_live) continue;
+            for (self.entries.items) |*e| {
+                if (e.index == live.index and e.state.status == .unverified and e.state.next_epoch_to_check <= current_epoch) {
+                    log.err("DOPPELGANGER DETECTED: validator index={d} is live on the network at epoch={d}!", .{
+                        live.index,
+                        current_epoch,
+                    });
+                    detected = true;
+                    break;
                 }
             }
         }
 
         if (detected) {
-            // Trigger shutdown callback if registered.
+            for (self.entries.items) |*e| {
+                if (e.state.status == .unverified) {
+                    e.state.remaining_epochs = REMAINING_EPOCHS_IF_DOPPELGANGER;
+                    e.state.status = .doppelganger_detected;
+                }
+            }
             if (self.shutdown_callback) |cb| {
                 log.err("triggering shutdown due to doppelganger detection", .{});
                 cb.call();
@@ -226,15 +287,29 @@ pub const DoppelgangerService = struct {
             return error.DoppelgangerDetected;
         }
 
-        // Clean epoch — decrement remaining and promote to verified_safe if done.
-        for (self.entries.items) |*e| {
-            if (e.state.status == .unverified) {
-                if (e.state.remaining_epochs > 0) {
-                    e.state.remaining_epochs -= 1;
-                }
-                if (e.state.remaining_epochs == 0) {
-                    e.state.status = .verified_safe;
-                    log.info("doppelganger check passed for pubkey=0x{x} — validator now allowed to sign", .{e.pubkey[0..4]});
+        // Clean epoch — previous epoch had no liveness, so count it.
+        for (previous_liveness) |live| {
+            if (live.is_live) continue;
+            for (self.entries.items) |*e| {
+                if (e.index == live.index and e.state.status == .unverified and e.state.next_epoch_to_check <= previous_epoch) {
+                    if (e.state.remaining_epochs > 0) {
+                        e.state.remaining_epochs -= 1;
+                    }
+                    e.state.next_epoch_to_check = current_epoch;
+                    if (e.state.remaining_epochs == 0) {
+                        e.state.status = .verified_safe;
+                        log.info("doppelganger detection complete pubkey=0x{x} epoch={d}", .{
+                            e.pubkey[0..4],
+                            current_epoch,
+                        });
+                    } else {
+                        log.info("found no doppelganger pubkey=0x{x} remaining_epochs={d} next_epoch_to_check={d}", .{
+                            e.pubkey[0..4],
+                            e.state.remaining_epochs,
+                            e.state.next_epoch_to_check,
+                        });
+                    }
+                    break;
                 }
             }
         }
@@ -248,7 +323,7 @@ pub const DoppelgangerService = struct {
         defer unresolved.deinit();
 
         for (self.entries.items) |e| {
-            if (e.index == null and e.state.status == .unverified) {
+            if (e.index == null and e.state.status == .unverified and e.state.remaining_epochs > 0) {
                 try unresolved.append(e.pubkey);
             }
         }
@@ -273,3 +348,41 @@ pub const DoppelgangerService = struct {
         }
     }
 };
+
+const testing = std.testing;
+
+test "registerValidator skips doppelganger detection before or at genesis" {
+    var db = try SlashingProtectionDb.init(testing.io, testing.allocator, null);
+    defer db.close();
+
+    var api = BeaconApiClient.init(testing.allocator, testing.io, "http://127.0.0.1:5052");
+    defer api.deinit();
+
+    var service = DoppelgangerService.init(testing.allocator, &api, &db);
+    defer service.deinit();
+
+    const pubkey = [_]u8{0x11} ** 48;
+    try service.registerValidator(0, pubkey);
+
+    try testing.expectEqual(DoppelgangerStatus.verified_safe, service.getStatus(pubkey));
+    try testing.expectEqual(@as(u64, 0), service.entries.items[0].state.remaining_epochs);
+}
+
+test "registerValidator skips doppelganger detection after restart attestation" {
+    var db = try SlashingProtectionDb.init(testing.io, testing.allocator, null);
+    defer db.close();
+
+    const pubkey = [_]u8{0x22} ** 48;
+    try testing.expect(try db.checkAndInsertAttestation(pubkey, 1, 2));
+
+    var api = BeaconApiClient.init(testing.allocator, testing.io, "http://127.0.0.1:5052");
+    defer api.deinit();
+
+    var service = DoppelgangerService.init(testing.allocator, &api, &db);
+    defer service.deinit();
+
+    try service.registerValidator(3, pubkey);
+
+    try testing.expectEqual(DoppelgangerStatus.verified_safe, service.getStatus(pubkey));
+    try testing.expectEqual(@as(u64, 0), service.entries.items[0].state.remaining_epochs);
+}

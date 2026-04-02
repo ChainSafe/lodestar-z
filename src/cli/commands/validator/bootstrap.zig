@@ -29,8 +29,11 @@ pub const KeymanagerConfig = struct {
     token_file: []const u8,
     header_limit: usize,
     body_limit: usize,
+    stacktraces: bool,
     proposer_config_write_enabled: bool,
 };
+
+pub const MonitoringConfig = validator_mod.MonitoringOptions;
 
 pub const PreparedRuntime = struct {
     network: common.Network,
@@ -42,6 +45,7 @@ pub const PreparedRuntime = struct {
     remote_signer_source: RemoteSignerSource = .none,
     external_signer_fetch_enabled: bool = false,
     keymanager: ?KeymanagerConfig = null,
+    monitoring: ?MonitoringConfig = null,
     proposer_settings_file: ?[]const u8 = null,
     startup_signers: validator_mod.StartupSigners,
     validator_config: validator_mod.ValidatorConfig,
@@ -123,6 +127,12 @@ pub const PreparedRuntime = struct {
             std.log.info("  keymanager:   http://{s}:{d}", .{ keymanager.address, keymanager.port });
             if (!keymanager.proposer_config_write_enabled) {
                 std.log.info("  keymanager proposer writes: disabled (owned by proposer settings file)", .{});
+            }
+        }
+        if (self.monitoring) |monitoring| {
+            std.log.info("  monitoring:   {s} every {d}ms", .{ monitoring.endpoint, monitoring.interval_ms });
+            if (monitoring.collect_system_stats) {
+                std.log.info("  monitoring system stats: enabled", .{});
             }
         }
         if (self.proposer_settings_file) |path| {
@@ -263,18 +273,11 @@ pub fn prepareRuntime(io: Io, allocator: Allocator, opts: anytype) !PreparedRunt
         }
     }
 
-    var beacon_api = if (fallback_urls.len > 0)
-        validator_mod.BeaconApiClient{
-            .allocator = allocator,
-            .base_url = primary_beacon_url,
-            .fallback_urls = fallback_urls,
-            .active_url_idx = 0,
-            .consecutive_failures = 0,
-            .was_unreachable = false,
-            .unreachable_since_ns = 0,
-        }
-    else
-        validator_mod.BeaconApiClient.init(allocator, primary_beacon_url);
+    var beacon_api = validator_mod.BeaconApiClient.initWithOptions(allocator, io, .{
+        .base_url = primary_beacon_url,
+        .fallback_urls = fallback_urls,
+        .request_timeout_ms = beacon_config.chain.SECONDS_PER_SLOT * std.time.ms_per_s,
+    });
     defer beacon_api.deinit();
 
     const genesis = try waitForGenesis(io, &beacon_api, primary_beacon_url);
@@ -301,6 +304,10 @@ pub fn prepareRuntime(io: Io, allocator: Allocator, opts: anytype) !PreparedRunt
     };
     const keymanager_body_limit = parseKeymanagerBodyLimit(opts.@"keymanager.bodyLimit") catch |err| {
         std.log.err("Invalid --keymanager.bodyLimit: {}", .{err});
+        return err;
+    };
+    const monitoring = parseMonitoringConfig(opts) catch |err| {
+        std.log.err("Invalid --monitoring.* configuration: {}", .{err});
         return err;
     };
 
@@ -338,6 +345,7 @@ pub fn prepareRuntime(io: Io, allocator: Allocator, opts: anytype) !PreparedRunt
         .token_file = opts.@"keymanager.tokenFile" orelse paths.keymanager_token_file,
         .header_limit = keymanager_header_limit,
         .body_limit = keymanager_body_limit,
+        .stacktraces = opts.@"keymanager.stacktraces",
         .proposer_config_write_enabled = opts.proposerSettingsFile == null,
     } else null;
 
@@ -351,6 +359,7 @@ pub fn prepareRuntime(io: Io, allocator: Allocator, opts: anytype) !PreparedRunt
         .remote_signer_source = remote_signer_source,
         .external_signer_fetch_enabled = external_signer_fetch_enabled,
         .keymanager = keymanager,
+        .monitoring = monitoring,
         .proposer_settings_file = opts.proposerSettingsFile,
         .startup_signers = startup_signers,
         .signing_context = buildSigningContext(beacon_config, genesis),
@@ -509,6 +518,28 @@ fn parseKeymanagerHeaderLimit(input: ?u64) !usize {
     const bytes = input orelse return @import("api").HttpServer.default_max_header_bytes;
     if (bytes == 0) return error.InvalidKeymanagerHeaderLimit;
     return std.math.cast(usize, bytes) orelse return error.InvalidKeymanagerHeaderLimit;
+}
+
+fn parseMonitoringConfig(opts: anytype) !?MonitoringConfig {
+    const endpoint = opts.@"monitoring.endpoint" orelse return null;
+    if (endpoint.len == 0) return error.InvalidMonitoringEndpoint;
+
+    const interval_ms = opts.@"monitoring.interval" orelse 60_000;
+    if (interval_ms == 0) return error.InvalidMonitoringInterval;
+
+    const initial_delay_ms = opts.@"monitoring.initialDelay" orelse 30_000;
+    if (initial_delay_ms == 0) return error.InvalidMonitoringInitialDelay;
+
+    const request_timeout_ms = opts.@"monitoring.requestTimeout" orelse 10_000;
+    if (request_timeout_ms == 0) return error.InvalidMonitoringRequestTimeout;
+
+    return .{
+        .endpoint = endpoint,
+        .interval_ms = interval_ms,
+        .initial_delay_ms = initial_delay_ms,
+        .request_timeout_ms = request_timeout_ms,
+        .collect_system_stats = opts.@"monitoring.collectSystemStats",
+    };
 }
 
 fn parseCliDefaultProposerConfig(opts: anytype) !validator_mod.ProposerConfig {
@@ -804,11 +835,25 @@ fn compareOptionalVersionField(name: []const u8, expected: [4]u8, actual: ?[4]u8
     }
 }
 
+fn compareOptionalHexField(comptime name: []const u8, expected: anytype, actual: ?@TypeOf(expected)) !void {
+    if (actual) |value| {
+        if (!std.mem.eql(u8, &expected, &value)) {
+            std.log.err("Beacon node config mismatch field={s} expected=0x{s} actual=0x{s}", .{
+                name,
+                std.fmt.bytesToHex(&expected, .lower),
+                std.fmt.bytesToHex(&value, .lower),
+            });
+            return error.BeaconConfigMismatch;
+        }
+    }
+}
+
 fn ensureConfigSpecMatches(
     beacon_config: *const BeaconConfig,
     spec: validator_mod.api_client.ConfigSpecResponse,
 ) !void {
     try compareOptionalVersionField("GENESIS_FORK_VERSION", beacon_config.chain.GENESIS_FORK_VERSION, spec.genesis_fork_version);
+    try compareOptionalUintField("MIN_GENESIS_ACTIVE_VALIDATOR_COUNT", beacon_config.chain.MIN_GENESIS_ACTIVE_VALIDATOR_COUNT, spec.min_genesis_active_validator_count);
     try compareOptionalVersionField("ALTAIR_FORK_VERSION", beacon_config.chain.ALTAIR_FORK_VERSION, spec.altair_fork_version);
     try compareOptionalUintField("ALTAIR_FORK_EPOCH", beacon_config.chain.ALTAIR_FORK_EPOCH, spec.altair_fork_epoch);
     try compareOptionalVersionField("BELLATRIX_FORK_VERSION", beacon_config.chain.BELLATRIX_FORK_VERSION, spec.bellatrix_fork_version);
@@ -819,8 +864,51 @@ fn ensureConfigSpecMatches(
     try compareOptionalUintField("DENEB_FORK_EPOCH", beacon_config.chain.DENEB_FORK_EPOCH, spec.deneb_fork_epoch);
     try compareOptionalVersionField("ELECTRA_FORK_VERSION", beacon_config.chain.ELECTRA_FORK_VERSION, spec.electra_fork_version);
     try compareOptionalUintField("ELECTRA_FORK_EPOCH", beacon_config.chain.ELECTRA_FORK_EPOCH, spec.electra_fork_epoch);
+    try compareOptionalVersionField("FULU_FORK_VERSION", beacon_config.chain.FULU_FORK_VERSION, spec.fulu_fork_version);
+    try compareOptionalUintField("FULU_FORK_EPOCH", beacon_config.chain.FULU_FORK_EPOCH, spec.fulu_fork_epoch);
+    try compareOptionalUintField("GENESIS_DELAY", beacon_config.chain.GENESIS_DELAY, spec.genesis_delay);
     try compareOptionalUintField("SECONDS_PER_SLOT", beacon_config.chain.SECONDS_PER_SLOT, spec.seconds_per_slot);
     try compareOptionalUintField("MIN_GENESIS_TIME", beacon_config.chain.MIN_GENESIS_TIME, spec.min_genesis_time);
+    try compareOptionalUintField("MIN_VALIDATOR_WITHDRAWABILITY_DELAY", beacon_config.chain.MIN_VALIDATOR_WITHDRAWABILITY_DELAY, spec.min_validator_withdrawability_delay);
+    try compareOptionalUintField("SHARD_COMMITTEE_PERIOD", beacon_config.chain.SHARD_COMMITTEE_PERIOD, spec.shard_committee_period);
+    try compareOptionalUintField("ETH1_FOLLOW_DISTANCE", beacon_config.chain.ETH1_FOLLOW_DISTANCE, spec.eth1_follow_distance);
+    try compareOptionalUintField("INACTIVITY_SCORE_BIAS", beacon_config.chain.INACTIVITY_SCORE_BIAS, spec.inactivity_score_bias);
+    try compareOptionalUintField("INACTIVITY_SCORE_RECOVERY_RATE", beacon_config.chain.INACTIVITY_SCORE_RECOVERY_RATE, spec.inactivity_score_recovery_rate);
+    try compareOptionalUintField("EJECTION_BALANCE", beacon_config.chain.EJECTION_BALANCE, spec.ejection_balance);
+    try compareOptionalUintField("MIN_PER_EPOCH_CHURN_LIMIT", beacon_config.chain.MIN_PER_EPOCH_CHURN_LIMIT, spec.min_per_epoch_churn_limit);
+    try compareOptionalUintField("MAX_PER_EPOCH_ACTIVATION_CHURN_LIMIT", beacon_config.chain.MAX_PER_EPOCH_ACTIVATION_CHURN_LIMIT, spec.max_per_epoch_activation_churn_limit);
+    try compareOptionalUintField("CHURN_LIMIT_QUOTIENT", beacon_config.chain.CHURN_LIMIT_QUOTIENT, spec.churn_limit_quotient);
+    try compareOptionalUintField("MAX_COMMITTEES_PER_SLOT", preset.MAX_COMMITTEES_PER_SLOT, spec.max_committees_per_slot);
+    try compareOptionalUintField("TARGET_COMMITTEE_SIZE", preset.TARGET_COMMITTEE_SIZE, spec.target_committee_size);
+    try compareOptionalUintField("MAX_VALIDATORS_PER_COMMITTEE", preset.MAX_VALIDATORS_PER_COMMITTEE, spec.max_validators_per_committee);
+    try compareOptionalUintField("MIN_DEPOSIT_AMOUNT", preset.MIN_DEPOSIT_AMOUNT, spec.min_deposit_amount);
+    try compareOptionalUintField("MAX_EFFECTIVE_BALANCE", preset.MAX_EFFECTIVE_BALANCE, spec.max_effective_balance);
+    try compareOptionalUintField("EFFECTIVE_BALANCE_INCREMENT", preset.EFFECTIVE_BALANCE_INCREMENT, spec.effective_balance_increment);
+    try compareOptionalUintField("MIN_ATTESTATION_INCLUSION_DELAY", preset.MIN_ATTESTATION_INCLUSION_DELAY, spec.min_attestation_inclusion_delay);
+    try compareOptionalUintField("SLOTS_PER_EPOCH", preset.SLOTS_PER_EPOCH, spec.slots_per_epoch);
+    try compareOptionalUintField("MIN_SEED_LOOKAHEAD", preset.MIN_SEED_LOOKAHEAD, spec.min_seed_lookahead);
+    try compareOptionalUintField("MAX_SEED_LOOKAHEAD", preset.MAX_SEED_LOOKAHEAD, spec.max_seed_lookahead);
+    try compareOptionalUintField("EPOCHS_PER_ETH1_VOTING_PERIOD", preset.EPOCHS_PER_ETH1_VOTING_PERIOD, spec.epochs_per_eth1_voting_period);
+    try compareOptionalUintField("SLOTS_PER_HISTORICAL_ROOT", preset.SLOTS_PER_HISTORICAL_ROOT, spec.slots_per_historical_root);
+    try compareOptionalUintField("MIN_EPOCHS_TO_INACTIVITY_PENALTY", preset.MIN_EPOCHS_TO_INACTIVITY_PENALTY, spec.min_epochs_to_inactivity_penalty);
+    try compareOptionalUintField("EPOCHS_PER_HISTORICAL_VECTOR", preset.EPOCHS_PER_HISTORICAL_VECTOR, spec.epochs_per_historical_vector);
+    try compareOptionalUintField("EPOCHS_PER_SLASHINGS_VECTOR", preset.EPOCHS_PER_SLASHINGS_VECTOR, spec.epochs_per_slashings_vector);
+    try compareOptionalUintField("HISTORICAL_ROOTS_LIMIT", preset.HISTORICAL_ROOTS_LIMIT, spec.historical_roots_limit);
+    try compareOptionalUintField("VALIDATOR_REGISTRY_LIMIT", preset.VALIDATOR_REGISTRY_LIMIT, spec.validator_registry_limit);
+    try compareOptionalUintField("BASE_REWARD_FACTOR", preset.BASE_REWARD_FACTOR, spec.base_reward_factor);
+    try compareOptionalUintField("WHISTLEBLOWER_REWARD_QUOTIENT", preset.WHISTLEBLOWER_REWARD_QUOTIENT, spec.whistleblower_reward_quotient);
+    try compareOptionalUintField("PROPOSER_REWARD_QUOTIENT", preset.PROPOSER_REWARD_QUOTIENT, spec.proposer_reward_quotient);
+    try compareOptionalUintField("INACTIVITY_PENALTY_QUOTIENT", preset.INACTIVITY_PENALTY_QUOTIENT, spec.inactivity_penalty_quotient);
+    try compareOptionalUintField("MIN_SLASHING_PENALTY_QUOTIENT", preset.MIN_SLASHING_PENALTY_QUOTIENT, spec.min_slashing_penalty_quotient);
+    try compareOptionalUintField("PROPORTIONAL_SLASHING_MULTIPLIER", preset.PROPORTIONAL_SLASHING_MULTIPLIER, spec.proportional_slashing_multiplier);
+    try compareOptionalUintField("MAX_PROPOSER_SLASHINGS", preset.MAX_PROPOSER_SLASHINGS, spec.max_proposer_slashings);
+    try compareOptionalUintField("MAX_ATTESTER_SLASHINGS", preset.MAX_ATTESTER_SLASHINGS, spec.max_attester_slashings);
+    try compareOptionalUintField("MAX_ATTESTATIONS", preset.MAX_ATTESTATIONS, spec.max_attestations);
+    try compareOptionalUintField("MAX_DEPOSITS", preset.MAX_DEPOSITS, spec.max_deposits);
+    try compareOptionalUintField("MAX_VOLUNTARY_EXITS", preset.MAX_VOLUNTARY_EXITS, spec.max_voluntary_exits);
+    try compareOptionalUintField("SYNC_COMMITTEE_SIZE", preset.SYNC_COMMITTEE_SIZE, spec.sync_committee_size);
+    try compareOptionalUintField("EPOCHS_PER_SYNC_COMMITTEE_PERIOD", preset.EPOCHS_PER_SYNC_COMMITTEE_PERIOD, spec.epochs_per_sync_committee_period);
+    try compareOptionalHexField("DEPOSIT_CONTRACT_ADDRESS", beacon_config.chain.DEPOSIT_CONTRACT_ADDRESS, spec.deposit_contract_address);
 }
 
 fn buildSigningContext(
