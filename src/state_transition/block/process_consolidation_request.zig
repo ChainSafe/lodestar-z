@@ -104,7 +104,6 @@ pub fn processConsolidationRequest(
     }
 
     // Initiate source validator exit and append pending consolidation
-    // TODO Electra: See if we can get rid of big int
     const effective_balance = try source_validator.get("effective_balance");
     const exit_epoch = try computeConsolidationEpochAndUpdateChurn(fork, epoch_cache, state, effective_balance);
     try source_validator.set("exit_epoch", exit_epoch);

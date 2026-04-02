@@ -77,7 +77,8 @@ pub fn processOperations(
         }
     }
 
-    if (comptime fork.gte(.electra)) {
+    // Gloas (ePBS): execution_requests moved to ExecutionPayloadEnvelope
+    if (comptime fork.gte(.electra) and fork.lt(.gloas)) {
         const execution_requests = &body.inner.execution_requests;
         for (execution_requests.deposits.items) |*deposit_request| {
             try processDepositRequest(fork, state, deposit_request);

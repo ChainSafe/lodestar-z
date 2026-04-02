@@ -65,8 +65,8 @@ pub fn processAttestationsAltair(
         defer attesting_indices.deinit();
 
         // this check is done last because its the most expensive (if signature verification is toggled on)
-        // TODO: Why should we verify an indexed attestation that we just created? If it's just for the signature
-        // we can verify only that and nothing else.
+        // Unlike phase0 which calls isValidIndexedAttestation, altair+ only verifies the signature
+        // since the other checks (sorting, bounds) are already done in validateAttestation above.
         if (verify_signature) {
             const sig_set = try getAttestationWithIndicesSignatureSet(
                 allocator,

@@ -129,6 +129,7 @@ pub const ForkChoiceStore = struct {
     };
 
     pub fn init(
+        self: *ForkChoiceStore,
         allocator: Allocator,
         current_slot: Slot,
         justified_checkpoint: CheckpointWithPayloadStatus,
@@ -136,7 +137,7 @@ pub const ForkChoiceStore = struct {
         justified_balances: []const u16,
         justified_balances_getter: JustifiedBalancesGetter,
         events: ForkChoiceStoreEvents,
-    ) !ForkChoiceStore {
+    ) !void {
         var balances_list = JustifiedBalances.init(allocator);
         errdefer balances_list.deinit();
 
@@ -150,7 +151,7 @@ pub const ForkChoiceStore = struct {
         // referenced by `unrealized_justified`
         _ = balances_rc.acquire();
 
-        return .{
+        self.* = .{
             .current_slot = current_slot,
             .justified = .{
                 .checkpoint = justified_checkpoint,
@@ -164,7 +165,7 @@ pub const ForkChoiceStore = struct {
             },
             .finalized_checkpoint = finalized_checkpoint,
             .unrealized_finalized_checkpoint = finalized_checkpoint,
-            .equivocating_indices = EquivocatingIndices.init(allocator),
+            .equivocating_indices = .empty,
             .justified_balances_getter = justified_balances_getter,
             .events = events,
         };
@@ -197,24 +198,15 @@ pub const ForkChoiceStore = struct {
         if (self.events.on_finalized) |cb| cb.call(checkpoint);
     }
 
-    /// Prune equivocating_indices that are no longer relevant after finalization.
-    ///
-    /// TODO: The FC store only tracks validator indices (not their exit epochs).
-    /// To properly prune, we would need access to validator exit_epoch from the state,
-    /// which is not currently available inside ForkChoiceStore. A future improvement
-    /// would be to pass exit_epoch alongside the validator index when recording
-    /// equivocators (e.g. store a map from ValidatorIndex to exit_epoch), then
-    /// remove entries where exit_epoch < finalized_epoch here.
-    /// For now this is a no-op placeholder so callers can hook in without a breaking
-    /// change when the information becomes available.
-    pub fn pruneEquivocating(self: *ForkChoiceStore, finalized_epoch: u64) void {
+    /// Placeholder hook to keep finalized-epoch pruning call sites stable.
+    /// Proper pruning will require validator exit-epoch data to be tracked here.
+    pub fn pruneEquivocating(self: *ForkChoiceStore, finalized_epoch: Epoch) void {
         _ = self;
         _ = finalized_epoch;
-        // TODO: prune equivocating_indices by exit_epoch once exit info is available.
     }
 
-    pub fn deinit(self: *ForkChoiceStore) void {
-        self.equivocating_indices.deinit();
+    pub fn deinit(self: *ForkChoiceStore, allocator: Allocator) void {
+        self.equivocating_indices.deinit(allocator);
         self.justified.balances.release();
         self.unrealized_justified.balances.release();
     }
@@ -243,7 +235,8 @@ fn dummyBalancesGetter(_: ?*anyopaque, _: CheckpointWithPayloadStatus, _: *Cache
 const test_getter: JustifiedBalancesGetter = .{ .getFn = dummyBalancesGetter };
 
 fn initTestStore(balances: []const u16) !ForkChoiceStore {
-    return ForkChoiceStore.init(
+    var store: ForkChoiceStore = undefined;
+    try store.init(
         testing.allocator,
         0,
         makeCheckpoint(0, hashFromByte(0x01)),
@@ -252,6 +245,7 @@ fn initTestStore(balances: []const u16) !ForkChoiceStore {
         test_getter,
         .{},
     );
+    return store;
 }
 
 test "computeTotalBalance" {
@@ -286,7 +280,7 @@ test "CheckpointWithPayloadStatus.fromCheckpoint" {
 
 test "init shares Rc between justified and unrealized_justified" {
     var store = try initTestStore(&.{ 10, 20, 30 });
-    defer store.deinit();
+    defer store.deinit(testing.allocator);
 
     // Both point to the same Rc (ref_count = 2).
     try testing.expectEqual(store.justified.balances, store.unrealized_justified.balances);
@@ -299,7 +293,7 @@ test "init shares Rc between justified and unrealized_justified" {
 
 test "setJustified separates Rc from unrealized_justified" {
     var store = try initTestStore(&.{ 10, 20 });
-    defer store.deinit();
+    defer store.deinit(testing.allocator);
 
     const old_rc = store.justified.balances;
     const new_cp = makeCheckpoint(1, hashFromByte(0x02));
@@ -329,7 +323,8 @@ test "setFinalizedCheckpoint updates and fires event" {
     };
 
     var tracker: Tracker = .{};
-    var store = try ForkChoiceStore.init(
+    var store: ForkChoiceStore = undefined;
+    try store.init(
         testing.allocator,
         0,
         makeCheckpoint(0, hashFromByte(0x01)),
@@ -338,7 +333,7 @@ test "setFinalizedCheckpoint updates and fires event" {
         test_getter,
         .{ .on_finalized = .{ .context = @ptrCast(&tracker), .callFn = Tracker.onFinalized } },
     );
-    defer store.deinit();
+    defer store.deinit(testing.allocator);
 
     const new_cp = makeCheckpoint(3, hashFromByte(0x0F));
     store.setFinalizedCheckpoint(new_cp);
@@ -361,7 +356,8 @@ test "setJustified fires onJustified event" {
     };
 
     var tracker: Tracker = .{};
-    var store = try ForkChoiceStore.init(
+    var store: ForkChoiceStore = undefined;
+    try store.init(
         testing.allocator,
         0,
         makeCheckpoint(0, hashFromByte(0x01)),
@@ -370,7 +366,7 @@ test "setJustified fires onJustified event" {
         test_getter,
         .{ .on_justified = .{ .context = @ptrCast(&tracker), .callFn = Tracker.onJustified } },
     );
-    defer store.deinit();
+    defer store.deinit(testing.allocator);
 
     try store.setJustified(testing.allocator, makeCheckpoint(2, hashFromByte(0x0A)), &.{ 7, 8 });
 
@@ -381,5 +377,5 @@ test "setJustified fires onJustified event" {
 test "deinit releases all Rc without leak" {
     // If deinit leaks, testing.allocator will report it.
     var store = try initTestStore(&.{ 1, 2, 3 });
-    store.deinit();
+    store.deinit(testing.allocator);
 }

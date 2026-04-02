@@ -24,6 +24,7 @@ pub const AnyAttestation = @import("./any_attestation.zig").AnyAttestation;
 pub const AnyAttestations = @import("./any_attestation.zig").AnyAttestations;
 pub const AnyAttestationItems = @import("./any_attestation.zig").AnyAttestationItems;
 pub const AnyGossipAttestation = @import("./any_gossip_attestation.zig").AnyGossipAttestation;
+pub const AnyIndexedAttestation = @import("./any_indexed_attestation.zig").AnyIndexedAttestation;
 
 const testing = @import("std").testing;
 test {
@@ -41,4 +42,6 @@ test {
     testing.refAllDecls(AnyExecutionPayload);
     testing.refAllDecls(AnyExecutionPayloadHeader);
     testing.refAllDecls(AnyGossipAttestation);
+    testing.refAllDecls(AnyIndexedAttestation);
+    testing.refAllDecls(AnyAttesterSlashing);
 }

@@ -504,6 +504,16 @@ pub fn build(b: *std.Build) void {
     tls_run_test_fork_types.dependOn(&run_test_fork_types.step);
     tls_run_test.dependOn(&run_test_fork_types.step);
 
+    const test_fork_choice = b.addTest(.{
+        .name = "fork_choice",
+        .root_module = module_fork_choice,
+        .filters = b.option([][]const u8, "fork_choice.filters", "fork_choice test filters") orelse &[_][]const u8{},
+    });
+    const run_test_fork_choice = b.addRunArtifact(test_fork_choice);
+    const tls_run_test_fork_choice = b.step("test:fork_choice", "Run the fork_choice test");
+    tls_run_test_fork_choice.dependOn(&run_test_fork_choice.step);
+    tls_run_test.dependOn(&run_test_fork_choice.step);
+
     const test_era = b.addTest(.{
         .name = "era",
         .root_module = module_era,

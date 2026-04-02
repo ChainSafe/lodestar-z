@@ -29,6 +29,7 @@ pub const AnyBeaconState = union(ForkSeq) {
     deneb: *ct.deneb.BeaconState.TreeView,
     electra: *ct.electra.BeaconState.TreeView,
     fulu: *ct.fulu.BeaconState.TreeView,
+    gloas: *ct.gloas.BeaconState.TreeView,
 
     pub fn fromValue(allocator: Allocator, pool: *Node.Pool, comptime fork_seq: ForkSeq, value: anytype) !AnyBeaconState {
         return switch (fork_seq) {
@@ -52,6 +53,9 @@ pub const AnyBeaconState = union(ForkSeq) {
             },
             .fulu => .{
                 .fulu = try ct.fulu.BeaconState.TreeView.fromValue(allocator, pool, value),
+            },
+            .gloas => .{
+                .gloas = try ct.gloas.BeaconState.TreeView.fromValue(allocator, pool, value),
             },
         };
     }
@@ -78,6 +82,9 @@ pub const AnyBeaconState = union(ForkSeq) {
             },
             .fulu => .{
                 .fulu = try ct.fulu.BeaconState.TreeView.deserialize(allocator, pool, bytes),
+            },
+            .gloas => .{
+                .gloas = try ct.gloas.BeaconState.TreeView.deserialize(allocator, pool, bytes),
             },
         };
     }
@@ -127,6 +134,12 @@ pub const AnyBeaconState = union(ForkSeq) {
                 _ = try state.serializeIntoBytes(out);
                 return out;
             },
+            .gloas => |state| {
+                const out = try allocator.alloc(u8, try state.serializedSize());
+                errdefer allocator.free(out);
+                _ = try state.serializeIntoBytes(out);
+                return out;
+            },
         }
     }
 
@@ -154,6 +167,7 @@ pub const AnyBeaconState = union(ForkSeq) {
             .deneb => |state| .{ .deneb = try state.clone(opts) },
             .electra => |state| .{ .electra = try state.clone(opts) },
             .fulu => |state| .{ .fulu = try state.clone(opts) },
+            .gloas => |state| .{ .gloas = try state.clone(opts) },
         };
     }
 
@@ -180,7 +194,7 @@ pub const AnyBeaconState = union(ForkSeq) {
     /// Get a Merkle proof for the finalized root in the beacon state.
     pub fn getFinalizedRootProof(self: *AnyBeaconState, allocator: Allocator) !SingleProof {
         const gindex_value: u64 = switch (self.*) {
-            .electra, .fulu => constants.FINALIZED_ROOT_GINDEX_ELECTRA,
+            .electra, .fulu, .gloas => constants.FINALIZED_ROOT_GINDEX_ELECTRA,
             else => constants.FINALIZED_ROOT_GINDEX,
         };
         return self.getSingleProof(allocator, gindex_value);
@@ -606,7 +620,7 @@ pub const AnyBeaconState = union(ForkSeq) {
 
     pub fn latestExecutionPayloadHeader(self: *AnyBeaconState, allocator: Allocator, out: *AnyExecutionPayloadHeader) !void {
         return switch (self.*) {
-            .phase0, .altair => error.InvalidAtFork,
+            .phase0, .altair, .gloas => error.InvalidAtFork,
             .bellatrix => |state| {
                 out.* = .{ .bellatrix = undefined };
                 try state.getValue(allocator, "latest_execution_payload_header", &out.bellatrix);
@@ -632,11 +646,21 @@ pub const AnyBeaconState = union(ForkSeq) {
 
     pub fn latestExecutionPayloadHeaderBlockHash(self: *AnyBeaconState) !*const [32]u8 {
         return switch (self.*) {
-            .phase0, .altair => error.InvalidAtFork,
+            .phase0, .altair, .gloas => error.InvalidAtFork,
             inline else => |state| {
                 var header = try state.get("latest_execution_payload_header");
                 return try header.getFieldRoot("block_hash");
             },
+        };
+    }
+
+    pub fn executionPayloadAvailability(self: *AnyBeaconState, index: usize) !bool {
+        return switch (self.*) {
+            .gloas => |state| {
+                var bv = try state.get("execution_payload_availability");
+                return try bv.get(index);
+            },
+            inline else => error.InvalidAtFork,
         };
     }
 
@@ -647,7 +671,7 @@ pub const AnyBeaconState = union(ForkSeq) {
             .deneb => |state| try state.setValue("latest_execution_payload_header", &header.deneb),
             .electra => |state| try state.setValue("latest_execution_payload_header", &header.deneb),
             .fulu => |state| try state.setValue("latest_execution_payload_header", &header.deneb),
-            else => return error.InvalidAtFork,
+            .phase0, .altair, .gloas => return error.InvalidAtFork,
         }
     }
 
@@ -937,7 +961,16 @@ pub const AnyBeaconState = union(ForkSeq) {
                     state,
                 ),
             },
-            .fulu => error.InvalidAtFork,
+            .fulu => |state| .{
+                .gloas = try populateFields(
+                    ct.fulu.BeaconState,
+                    ct.gloas.BeaconState,
+                    state.allocator,
+                    state.pool,
+                    state,
+                ),
+            },
+            .gloas => error.InvalidAtFork,
         };
     }
 };
@@ -1053,4 +1086,8 @@ test "upgrade state - sanity" {
     var fulu_state = try electra_state.upgradeUnsafe();
     defer fulu_state.deinit();
     try expect(fulu_state.forkSeq() == .fulu);
+
+    var gloas_state = try fulu_state.upgradeUnsafe();
+    defer gloas_state.deinit();
+    try expect(gloas_state.forkSeq() == .gloas);
 }

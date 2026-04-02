@@ -174,25 +174,6 @@ pub fn importVerifiedBlock(
                 .pending => .pre_data,
             };
 
-            // Build execution metadata for fork choice.
-            // For post-merge blocks, extract block_hash and block_number from the block.
-            const extra_meta: fork_choice_mod.BlockExtraMeta = if (fc_exec_status != .pre_merge) blk: {
-                const block_body = block_input.block.beaconBlock().beaconBlockBody();
-                const exec_payload = block_body.executionPayload() catch
-                    break :blk fork_choice_mod.BlockExtraMeta{ .pre_merge = {} };
-                break :blk .{ .post_merge = fork_choice_mod.BlockExtraMeta.PostMergeMeta.init(
-                    exec_payload.blockHash().*,
-                    exec_payload.blockNumber(),
-                    fc_exec_status,
-                    fc_da_status,
-                ) };
-            } else .{ .pre_merge = {} };
-
-            // Use onBlockFromState which handles:
-            // - Checkpoint extraction and store updates
-            // - Unrealized checkpoint computation
-            // - Proposer boost assignment
-            // - Target root computation from state
             // C-boost fix: pass block_delay_sec based on block source.
             // Gossip blocks are "timely" (delay=0 → proposer boost applies).
             // Sync/API/regen blocks use delay=5 (> ATTESTATION_DUE threshold of 4s)
@@ -202,19 +183,17 @@ pub fn importVerifiedBlock(
                 .gossip => 0, // timely — proposer boost applies
                 else => 5, // late — no proposer boost (threshold is >4s)
             };
-            const fc_block_ok = if (fork_choice_mod.onBlockFromState(
-                fc,
+            const beacon_block = verified.block_input.block.beaconBlock();
+            const fc_block_ok = if (fc.onBlock(
                 ctx.allocator,
-                block_slot,
-                block_root,
-                verified.block_input.block.beaconBlock().parentRoot().*,
-                state_root,
+                &beacon_block,
                 post_state,
                 block_delay_sec,
                 fc.getTime(),
-                extra_meta,
+                fc_exec_status,
+                fc_da_status,
             )) |_| true else |err| blk: {
-                std.log.warn("ForkChoice.onBlockFromState failed for slot {d}: {}", .{ block_slot, err });
+                std.log.warn("ForkChoice.onBlock failed for slot {d}: {}", .{ block_slot, err });
                 break :blk false;
             };
 
@@ -283,7 +262,7 @@ pub fn importVerifiedBlock(
                     .phase0 => |slashings| {
                         for (slashings.items) |*slashing| {
                             const any_slashing = fork_types.AnyAttesterSlashing{ .phase0 = slashing.* };
-                            fc.onAttesterSlashing(&any_slashing) catch |err| return switch (err) {
+                            fc.onAttesterSlashing(ctx.allocator, &any_slashing) catch |err| return switch (err) {
                                 error.OutOfMemory => BlockImportError.InternalError,
                             };
                         }
@@ -291,7 +270,7 @@ pub fn importVerifiedBlock(
                     .electra => |slashings| {
                         for (slashings.items) |*slashing| {
                             const any_slashing = fork_types.AnyAttesterSlashing{ .electra = slashing.* };
-                            fc.onAttesterSlashing(&any_slashing) catch |err| return switch (err) {
+                            fc.onAttesterSlashing(ctx.allocator, &any_slashing) catch |err| return switch (err) {
                                 error.OutOfMemory => BlockImportError.InternalError,
                             };
                         }
