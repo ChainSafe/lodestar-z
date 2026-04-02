@@ -37,6 +37,13 @@ pub const PeerScorer = @import("scorer.zig").PeerScorer;
 // Relevance
 pub const assertPeerRelevance = @import("relevance.zig").assertPeerRelevance;
 
+// Prioritization
+const prioritize_ = @import("prioritize.zig");
+pub const prioritizePeers = prioritize_.prioritizePeers;
+pub const PrioritizePeersResult = prioritize_.PrioritizePeersResult;
+pub const PrioritizePeersInput = prioritize_.PrioritizePeersInput;
+pub const PrioritizePeersOpts = prioritize_.PrioritizePeersOpts;
+
 // Constants
 pub const constants = @import("constants.zig");
 
