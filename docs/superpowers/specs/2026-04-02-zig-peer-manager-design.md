@@ -86,6 +86,10 @@ Direct port of `score/constants.ts` plus peer manager constants from `peerManage
 | `FUTURE_SLOT_TOLERANCE` | 1 | `assertPeerRelevance.ts:5` |
 | `ALLOWED_NEGATIVE_GOSSIPSUB_FACTOR` | 0.1 | `peerManager.ts:113` |
 | `STARVATION_PRUNE_RATIO` | 0.05 | `peerManager.ts:108` |
+| `HEARTBEAT_INTERVAL_MS` | 30,000 (30s) | `peerManager.ts:82` |
+| `CHECK_PING_STATUS_INTERVAL` | 10,000 (10s) | `peerManager.ts:91` |
+
+> **Note**: `HEARTBEAT_INTERVAL_MS` and `CHECK_PING_STATUS_INTERVAL` are not used by the Zig module (tick-driven), but are documented here as recommended call intervals for the NAPI caller.
 
 ---
 
@@ -291,8 +295,15 @@ pub const Config = struct {
     ping_interval_outbound_ms: i64 = 20_000,
     status_interval_ms: i64 = 300_000,
     status_inbound_grace_period_ms: i64 = 15_000,
+    /// Gossipsub score weights. Both are equal, derived by the JS caller as:
+    /// (MIN_SCORE_BEFORE_DISCONNECT + 1) / gossipScoreThresholds.graylistThreshold
+    /// See score/constants.ts lines 2152-2154 in the TS reference.
     gossipsub_negative_score_weight: f64,
     gossipsub_positive_score_weight: f64,
+    /// Threshold below which negative gossipsub scores are never ignored.
+    /// Derived from gossipsub scoring parameters by the JS caller.
+    /// See score/utils.ts:negativeGossipScoreIgnoreThreshold in the TS reference.
+    negative_gossip_score_ignore_threshold: f64,
     disable_peer_scoring: bool = false,
     initial_fork_name: ForkName,
     number_of_custody_groups: u32 = 128,
@@ -330,7 +341,12 @@ pub const PeerStore = struct {
     pub fn deinit(self: *PeerStore) void;
 
     // Lifecycle
-    pub fn addPeer(self: *PeerStore, peer_id: []const u8, direction: Direction, now_ms: i64) !void;
+    /// Adds a peer with direction-dependent initial timestamps matching TS
+    /// `trackLibp2pConnection` (peerManager.ts:812-816):
+    /// - last_received_msg_unix_ts_ms: outbound = 0, inbound = now_ms
+    /// - last_status_unix_ts_ms: outbound = 0, inbound = now_ms - status_interval_ms + status_inbound_grace_period_ms
+    /// - connected_unix_ts_ms: now_ms
+    pub fn addPeer(self: *PeerStore, peer_id: []const u8, direction: Direction, now_ms: i64, config: Config) !void;
     pub fn removePeer(self: *PeerStore, peer_id: []const u8) void;
     pub fn contains(self: *const PeerStore, peer_id: []const u8) bool;
 
@@ -408,6 +424,7 @@ pub const PeerScorer = struct {
 
     // Queries
     pub fn getScore(self: *const PeerScorer, peer_id: []const u8) f64;
+    pub fn getGossipScore(self: *const PeerScorer, peer_id: []const u8) f64;
     pub fn getScoreState(self: *const PeerScorer, peer_id: []const u8) ScoreState;
     pub fn isCoolingDown(self: *const PeerScorer, peer_id: []const u8) bool;
 };
@@ -443,14 +460,14 @@ else if !ignore_negative_gossip_score:
      - `last_update_ms = now`
      - `recomputeScore()`
    - If `|lodestar_score| < SCORE_THRESHOLD`: prune entry, free key string
-3. Prune after decay, not before — matches TS behavior
+> **Note**: Step 1 (cap entries) runs before step 2 (decay), matching the TS `store.ts:update()` which calls `pruneSetToMax` before iterating to decay.
 
 ### updateGossipScores (port of `score/utils.ts:updateGossipsubScores`)
 
 1. Sort input by gossip score descending
 2. Compute `to_ignore_count = floor(ALLOWED_NEGATIVE_GOSSIPSUB_FACTOR * config.target_peers)`
 3. For each peer in sorted order:
-   - If score < 0 and score > negative threshold and `to_ignore_count > 0`: set `ignore = true`, decrement
+   - If score < 0 and score > `config.negative_gossip_score_ignore_threshold` and `to_ignore_count > 0`: set `ignore = true`, decrement counter
    - Call `updateGossipsubScore(peer_id, score, ignore)` which sets fields only if not cooling down
 
 ### applyReconnectionCoolDown (port of `score.ts:218-239`)
@@ -620,6 +637,7 @@ Filtering before pruning:
 **`sortPeersToPrune`** (port of TS `sortPeersToPrune`):
 - Shuffle first to break ties (PRNG seeded for deterministic tests)
 - Sort ascending by: duties → status score → long-lived subnet count → peer score
+- Lower values = pruned first. `StatusScore` values: `CLOSE_TO_US = -1`, `FAR_AHEAD = 0`. So close peers (who are less useful for syncing) are pruned before far-ahead peers.
 
 **`findMaxPeersSubnet`**: Find subnet with most peers exceeding `TARGET_SUBNET_PEERS`.
 
@@ -682,7 +700,7 @@ pub const PeerManager = struct {
     // Event handlers
     pub fn onConnectionOpen(self: *PeerManager, peer_id: []const u8, direction: Direction) ![]const Action;
     pub fn onConnectionClose(self: *PeerManager, peer_id: []const u8) ![]const Action;
-    pub fn onStatusReceived(self: *PeerManager, peer_id: []const u8, remote_status: Status, local_status: Status) ![]const Action;
+    pub fn onStatusReceived(self: *PeerManager, peer_id: []const u8, remote_status: Status, local_status: Status, current_slot: u64) ![]const Action;
     pub fn onMetadataReceived(self: *PeerManager, peer_id: []const u8, metadata: Metadata) void;
     pub fn onMessageReceived(self: *PeerManager, peer_id: []const u8) void;
     pub fn onGoodbye(self: *PeerManager, peer_id: []const u8, reason: GoodbyeReasonCode) ![]const Action;
@@ -727,27 +745,31 @@ For each connected peer, using `clock_fn()`:
 - Inbound + `now - last_received_msg > ping_interval_inbound_ms` → `send_ping`
 - Outbound + `now - last_received_msg > ping_interval_outbound_ms` → `send_ping`
 - `now - last_status > status_interval_ms` → `send_status`
-- Inbound + `last_status == 0` (never received) + `now - connected > status_inbound_grace_period_ms` → `disconnect_peer`
 
-### onConnectionOpen (port of `onLibp2pPeerConnect`)
+> **Note**: Inbound STATUS grace period is handled via initial timestamps in `addPeer`, not a special disconnect check. For inbound peers, `last_status_unix_ts_ms` is initialized to `now - STATUS_INTERVAL_MS + STATUS_INBOUND_GRACE_PERIOD_MS`, so the normal status interval check naturally triggers after the grace period. For outbound peers, `last_status_unix_ts_ms = 0` triggers an immediate status request. This matches TS `trackLibp2pConnection` (peerManager.ts:812-816).
+
+### onConnectionOpen (port of `onLibp2pPeerConnect` + `trackLibp2pConnection`)
 
 1. If `store.contains(peer_id)`: return empty (idempotent)
-2. `store.addPeer(peer_id, direction, clock_fn())`
-3. Append `emit_peer_connected`
+2. `store.addPeer(peer_id, direction, clock_fn(), config)` — sets direction-dependent initial timestamps
+3. If direction is outbound: append `send_ping` and `send_status` (matches TS `trackLibp2pConnection` line 830-833 where outbound connections immediately trigger handshake)
+
+> **Note**: `emit_peer_connected` is NOT emitted here. In TS, `NetworkEvent.peerConnected` fires in `onStatus` (peerManager.ts:520-525) after the peer is proven relevant, not on raw connection open. The Zig module emits it from `onStatusReceived` when the peer is found relevant.
 
 ### onConnectionClose (port of `onLibp2pPeerDisconnect`)
 
 1. Look up peer data. If not found, return empty.
-2. `store.removePeer(peer_id)`
-3. Append `emit_peer_disconnected`
+2. If peer direction is inbound: `scorer.applyReconnectionCoolDown(peer_id, .inbound_disconnect)` — prevents rapid reconnection cycles (TS peerManager.ts:882-887)
+3. `store.removePeer(peer_id)`
+4. Append `emit_peer_disconnected`
 
 ### onStatusReceived (port of `onStatus`)
 
 1. `store.updateStatus(peer_id, remote_status)`
 2. `store.updateLastStatus(peer_id, clock_fn())`
-3. `assertPeerRelevance(current_fork_name, remote_status, local_status, last_heartbeat_slot)`
+3. `assertPeerRelevance(current_fork_name, remote_status, local_status, current_slot)` — `current_slot` is passed by the caller (matches TS using `clock.currentSlot`, peerManager.ts:458)
 4. If irrelevant: set `relevant_status = .irrelevant`, append `send_goodbye(irrelevant_network)` + `disconnect_peer`
-5. If relevant and `relevant_status != .relevant`: set `.relevant`, append `tag_peer_relevant`
+5. If relevant and `relevant_status != .relevant`: set `.relevant`, append `tag_peer_relevant` and `emit_peer_connected` (TS fires `NetworkEvent.peerConnected` here, peerManager.ts:520-525)
 
 ### onPing (port of `onPing`)
 
@@ -756,8 +778,9 @@ For each connected peer, using `clock_fn()`:
 
 ### onGoodbye (port of `onGoodbye`)
 
-1. `scorer.applyReconnectionCoolDown(peer_id, reason)`
-2. Append `disconnect_peer`
+1. Append `disconnect_peer`
+
+> **Note**: No cooldown is applied here. In TS, `onGoodbye` (peerManager.ts:426-437) only logs and disconnects. Cooldowns are applied on the *sending* side (`goodbyeAndDisconnect`, peerManager.ts:948) and for inbound disconnects in `onLibp2pPeerDisconnect` (peerManager.ts:882-887). The Zig module only applies cooldowns in `onConnectionClose` for inbound peers.
 
 ### Tests
 
@@ -811,7 +834,7 @@ All follow the callback signature `fn(napi.Env, napi.CallbackInfo(N)) !napi.Valu
 **Event handlers:**
 - `PeerManager_onConnectionOpen(env, cb(2))` — args: `peerId: string`, `direction: string`
 - `PeerManager_onConnectionClose(env, cb(1))` — args: `peerId: string`
-- `PeerManager_onStatusReceived(env, cb(3))` — args: `peerId: string`, `remoteStatus: object`, `localStatus: object`
+- `PeerManager_onStatusReceived(env, cb(4))` — args: `peerId: string`, `remoteStatus: object`, `localStatus: object`, `currentSlot: number`
 - `PeerManager_onMetadataReceived(env, cb(2))` — args: `peerId: string`, `metadata: object`
 - `PeerManager_onMessageReceived(env, cb(1))` — args: `peerId: string`
 - `PeerManager_onGoodbye(env, cb(2))` — args: `peerId: string`, `reason: number`
