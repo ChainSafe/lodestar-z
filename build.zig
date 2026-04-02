@@ -695,6 +695,20 @@ pub fn build(b: *std.Build) void {
     tls_run_test_state_transition.dependOn(&run_test_state_transition.step);
     tls_run_test.dependOn(&run_test_state_transition.step);
 
+    const test_peer_manager = b.addTest(.{
+        .name = "peer_manager",
+        .root_module = module_peer_manager,
+        .filters = b.option([][]const u8, "peer_manager.filters", "peer_manager test filters") orelse &[_][]const u8{},
+    });
+    const install_test_peer_manager = b.addInstallArtifact(test_peer_manager, .{});
+    const tls_install_test_peer_manager = b.step("build-test:peer_manager", "Install the peer_manager test");
+    tls_install_test_peer_manager.dependOn(&install_test_peer_manager.step);
+
+    const run_test_peer_manager = b.addRunArtifact(test_peer_manager);
+    const tls_run_test_peer_manager = b.step("test:peer_manager", "Run the peer_manager test");
+    tls_run_test_peer_manager.dependOn(&run_test_peer_manager.step);
+    tls_run_test.dependOn(&run_test_peer_manager.step);
+
     const test_download_era_files = b.addTest(.{
         .name = "download_era_files",
         .root_module = module_download_era_files,
