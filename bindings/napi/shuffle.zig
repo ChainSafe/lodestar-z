@@ -9,8 +9,8 @@ pub fn innerShuffleList(list: js.Uint32Array, seed: js.Uint8Array, rounds: js.Nu
     if (rounds_i32 < 0 or rounds_i32 > 255) {
         return error.InvalidRoundsSize;
     }
-    const rounds_u8: u8 = @intCast(@as(u32, @intCast(rounds_i32)));
-    const fwd = forwards.assertBool();
+    const rounds_u8: u8 = @intCast(rounds_i32);
+    const is_forwards = forwards.assertBool();
 
-    try stInnerShuffleList(u32, list_u32, seed_slice, rounds_u8, fwd);
+    try stInnerShuffleList(u32, list_u32, seed_slice, rounds_u8, is_forwards);
 }

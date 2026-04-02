@@ -49,9 +49,7 @@ pub fn set(obj: js.Value, genesis_root: js.Uint8Array) !void {
     }
 
     // Drop to low-level for the complex object parsing
-    const e = js.env();
-    const raw_obj = try obj.toValue().coerceToObject();
-    const chain_config = try chainConfigFromObject(e, raw_obj);
+    const chain_config = try chainConfigFromObject(js.env(), try obj.toValue().coerceToObject());
 
     const root_slice = try genesis_root.toSlice();
     if (root_slice.len != 32) {
