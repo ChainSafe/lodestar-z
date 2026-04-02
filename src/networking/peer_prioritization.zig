@@ -32,6 +32,7 @@ const SYNC_COMMITTEE_SUBNET_COUNT = peer_info_mod.SYNC_COMMITTEE_SUBNET_COUNT;
 
 const subnet_service = @import("subnet_service.zig");
 const SubnetId = subnet_service.SubnetId;
+const custody = @import("custody.zig");
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -40,6 +41,13 @@ pub const TARGET_SUBNET_PEERS: u32 = 6;
 
 /// Minimum sync committee peers — don't prune below this.
 pub const MIN_SYNC_COMMITTEE_PEERS: u32 = 2;
+
+/// Target number of peers we'd like to have for each relevant custody group.
+///
+/// On current configs `NUMBER_OF_COLUMNS == NUMBER_OF_CUSTODY_GROUPS`, so the
+/// local custody column set is a direct proxy for the sampling groups that
+/// upstream Lodestar tracks.
+pub const TARGET_GROUP_PEERS: u32 = 6;
 
 /// Score threshold for "low score" pruning.
 pub const LOW_SCORE_PRUNE_THRESHOLD: f64 = -2.0;
@@ -70,6 +78,9 @@ pub const ConnectedPeerView = struct {
     score: f64,
     /// Whether the peer is trusted.
     is_trusted: bool,
+    /// Derived PeerDAS custody columns, if the peer has a verified discovery
+    /// node ID and MetadataV3 custody group count.
+    custody_columns: ?[]const u64 = null,
 };
 
 /// Configuration for prioritization.
@@ -77,7 +88,9 @@ pub const PrioritizationConfig = struct {
     target_peers: u32 = 50,
     max_peers: u32 = 55,
     target_subnet_peers: u32 = TARGET_SUBNET_PEERS,
+    target_group_peers: u32 = TARGET_GROUP_PEERS,
     outbound_ratio: f64 = OUTBOUND_PEERS_RATIO,
+    local_custody_columns: []const u64 = &.{},
 };
 
 // ── Output types ─────────────────────────────────────────────────────────────
@@ -103,6 +116,12 @@ pub const SubnetQuery = struct {
     peers_needed: u32,
 };
 
+/// A custody column that needs more peers.
+pub const CustodyQuery = struct {
+    column_index: u64,
+    peers_needed: u32,
+};
+
 /// Result of peer prioritization.
 pub const PrioritizationResult = struct {
     /// Peers to disconnect (pruning excess).
@@ -112,10 +131,13 @@ pub const PrioritizationResult = struct {
     peers_to_discover: u32,
     /// Subnets needing more peers for targeted discovery.
     subnets_needing_peers: []SubnetQuery,
+    /// Custody columns needing more peers for targeted PeerDAS discovery.
+    custody_columns_needing_peers: []CustodyQuery,
 
     pub fn deinit(self: *PrioritizationResult, allocator: Allocator) void {
         if (self.peers_to_disconnect.len > 0) allocator.free(self.peers_to_disconnect);
         if (self.subnets_needing_peers.len > 0) allocator.free(self.subnets_needing_peers);
+        if (self.custody_columns_needing_peers.len > 0) allocator.free(self.custody_columns_needing_peers);
     }
 };
 
@@ -136,6 +158,7 @@ pub fn prioritizePeers(
         .peers_to_disconnect = &.{},
         .peers_to_discover = 0,
         .subnets_needing_peers = &.{},
+        .custody_columns_needing_peers = &.{},
     };
     errdefer result.deinit(allocator);
 
@@ -178,6 +201,52 @@ pub fn prioritizePeers(
 
     result.subnets_needing_peers = try subnet_queries.toOwnedSlice(allocator);
 
+    var critical_custody_counts = try allocator.alloc(u32, peers.len);
+    defer allocator.free(critical_custody_counts);
+    @memset(critical_custody_counts, 0);
+
+    var max_custody_deficit: u32 = 0;
+    if (config.local_custody_columns.len > 0) {
+        var custody_queries = std.ArrayListUnmanaged(CustodyQuery){ .items = &.{}, .capacity = 0 };
+        defer custody_queries.deinit(allocator);
+
+        const coverage = try allocator.alloc(u32, config.local_custody_columns.len);
+        defer allocator.free(coverage);
+        @memset(coverage, 0);
+
+        for (config.local_custody_columns, 0..) |column_index, column_i| {
+            for (peers) |peer| {
+                const peer_columns = peer.custody_columns orelse continue;
+                if (custody.isCustodied(column_index, peer_columns)) {
+                    coverage[column_i] += 1;
+                }
+            }
+
+            if (coverage[column_i] < config.target_group_peers) {
+                const peers_needed = config.target_group_peers - coverage[column_i];
+                max_custody_deficit = @max(max_custody_deficit, peers_needed);
+                try custody_queries.append(allocator, .{
+                    .column_index = column_index,
+                    .peers_needed = peers_needed,
+                });
+            }
+        }
+
+        result.custody_columns_needing_peers = try custody_queries.toOwnedSlice(allocator);
+
+        if (max_custody_deficit > 0) {
+            for (config.local_custody_columns, 0..) |column_index, column_i| {
+                if (coverage[column_i] >= config.target_group_peers) continue;
+                for (peers, 0..) |peer, peer_i| {
+                    const peer_columns = peer.custody_columns orelse continue;
+                    if (custody.isCustodied(column_index, peer_columns)) {
+                        critical_custody_counts[peer_i] += 1;
+                    }
+                }
+            }
+        }
+    }
+
     // ── Discovery needs ─────────────────────────────────────────────
 
     if (connected_count < config.target_peers) {
@@ -186,6 +255,14 @@ pub fn prioritizePeers(
             deficit * DISCOVERY_OVERSHOOT_FACTOR,
             config.max_peers -| connected_count,
         );
+    }
+
+    if (max_custody_deficit > 0) {
+        const custody_discovery = @min(
+            max_custody_deficit * DISCOVERY_OVERSHOOT_FACTOR,
+            config.max_peers -| connected_count,
+        );
+        result.peers_to_discover = @max(result.peers_to_discover, custody_discovery);
     }
 
     // ── Phase B: Pruning when above target ──────────────────────────
@@ -227,12 +304,18 @@ pub fn prioritizePeers(
     const SortCtx = struct {
         peers: []const ConnectedPeerView,
         duties: []const u32,
+        critical_custody: []const u32,
 
         pub fn lessThan(ctx: @This(), a: usize, b: usize) bool {
             // Lower duty count → more prunable.
             const da = ctx.duties[a];
             const db = ctx.duties[b];
             if (da != db) return da < db;
+
+            // Peers covering under-served custody columns are less prunable.
+            const ca = ctx.critical_custody[a];
+            const cb = ctx.critical_custody[b];
+            if (ca != cb) return ca < cb;
 
             // Fewer long-lived subnets → more prunable.
             const la: u32 = @intCast(ctx.peers[a].attnets.count() + ctx.peers[a].syncnets.count());
@@ -244,7 +327,7 @@ pub fn prioritizePeers(
         }
     };
 
-    const sort_ctx = SortCtx{ .peers = peers, .duties = duty_counts };
+    const sort_ctx = SortCtx{ .peers = peers, .duties = duty_counts, .critical_custody = critical_custody_counts };
     std.mem.sortUnstable(usize, indices, sort_ctx, SortCtx.lessThan);
 
     // Filter eligible peers (not trusted, respecting outbound ratio).
@@ -286,7 +369,7 @@ pub fn prioritizePeers(
         if (marked[idx]) continue;
         const peer = peers[idx];
         const has_ll_subnet = peer.attnets.count() > 0 or peer.syncnets.count() > 0;
-        if (!has_ll_subnet) {
+        if (!has_ll_subnet and critical_custody_counts[idx] == 0) {
             try disconnects.append(allocator, .{
                 .peer_id = peer.peer_id,
                 .reason = .no_long_lived_subnet,
@@ -406,6 +489,7 @@ fn makePeer(
     score: f64,
     attnets_bits: []const u32,
     syncnets_bits: []const u32,
+    custody_columns: ?[]const u64,
 ) ConnectedPeerView {
     var attnets = AttnetsBitfield.initEmpty();
     for (attnets_bits) |bit| attnets.set(bit);
@@ -420,13 +504,14 @@ fn makePeer(
         .syncnets = syncnets,
         .score = score,
         .is_trusted = false,
+        .custody_columns = custody_columns,
     };
 }
 
 test "prioritizePeers: below target → discover, no prune" {
     const peers = [_]ConnectedPeerView{
-        makePeer("p1", .inbound, 0.0, &.{}, &.{}),
-        makePeer("p2", .outbound, 0.0, &.{}, &.{}),
+        makePeer("p1", .inbound, 0.0, &.{}, &.{}, null),
+        makePeer("p2", .outbound, 0.0, &.{}, &.{}, null),
     };
     var result = try prioritizePeers(
         testing.allocator,
@@ -439,6 +524,7 @@ test "prioritizePeers: below target → discover, no prune" {
 
     try testing.expectEqual(@as(usize, 0), result.peers_to_disconnect.len);
     try testing.expect(result.peers_to_discover > 0);
+    try testing.expectEqual(@as(usize, 0), result.custody_columns_needing_peers.len);
     // Deficit 8, overshoot 3x = 24, capped at max_peers - 2 = 13.
     try testing.expectEqual(@as(u32, 13), result.peers_to_discover);
 }
@@ -448,7 +534,7 @@ test "prioritizePeers: at target → no action" {
     for (&peers_arr, 0..) |*p, i| {
         var buf: [8]u8 = undefined;
         const id = std.fmt.bufPrint(&buf, "peer_{d}", .{i}) catch "peer";
-        p.* = makePeer(id, .outbound, 0.0, &.{}, &.{});
+        p.* = makePeer(id, .outbound, 0.0, &.{}, &.{}, null);
     }
     var result = try prioritizePeers(
         testing.allocator,
@@ -461,14 +547,15 @@ test "prioritizePeers: at target → no action" {
 
     try testing.expectEqual(@as(usize, 0), result.peers_to_disconnect.len);
     try testing.expectEqual(@as(u32, 0), result.peers_to_discover);
+    try testing.expectEqual(@as(usize, 0), result.custody_columns_needing_peers.len);
 }
 
 test "prioritizePeers: above target → prune no-subnet peers first" {
     const peers = [_]ConnectedPeerView{
-        makePeer("has_subnet", .inbound, 0.0, &.{ 1, 5, 10 }, &.{}),
-        makePeer("no_subnet_1", .inbound, 0.0, &.{}, &.{}),
-        makePeer("no_subnet_2", .inbound, -1.0, &.{}, &.{}),
-        makePeer("has_subnet_2", .outbound, 5.0, &.{ 2, 3 }, &.{}),
+        makePeer("has_subnet", .inbound, 0.0, &.{ 1, 5, 10 }, &.{}, null),
+        makePeer("no_subnet_1", .inbound, 0.0, &.{}, &.{}, null),
+        makePeer("no_subnet_2", .inbound, -1.0, &.{}, &.{}, null),
+        makePeer("has_subnet_2", .outbound, 5.0, &.{ 2, 3 }, &.{}, null),
     };
     var result = try prioritizePeers(
         testing.allocator,
@@ -494,9 +581,9 @@ test "prioritizePeers: above target → prune no-subnet peers first" {
 
 test "prioritizePeers: low-score peers pruned in stage 2" {
     const peers = [_]ConnectedPeerView{
-        makePeer("good_1", .outbound, 5.0, &.{1}, &.{}),
-        makePeer("good_2", .inbound, 3.0, &.{2}, &.{}),
-        makePeer("bad_score", .inbound, -5.0, &.{3}, &.{}),
+        makePeer("good_1", .outbound, 5.0, &.{1}, &.{}, null),
+        makePeer("good_2", .inbound, 3.0, &.{2}, &.{}, null),
+        makePeer("bad_score", .inbound, -5.0, &.{3}, &.{}, null),
     };
     var result = try prioritizePeers(
         testing.allocator,
@@ -513,13 +600,13 @@ test "prioritizePeers: low-score peers pruned in stage 2" {
 }
 
 test "prioritizePeers: trusted peers never pruned" {
-    var peer_trusted = makePeer("trusted", .inbound, -100.0, &.{}, &.{});
+    var peer_trusted = makePeer("trusted", .inbound, -100.0, &.{}, &.{}, null);
     peer_trusted.is_trusted = true;
 
     const peers = [_]ConnectedPeerView{
         peer_trusted,
-        makePeer("regular", .inbound, 0.0, &.{1}, &.{}),
-        makePeer("regular2", .inbound, 0.0, &.{2}, &.{}),
+        makePeer("regular", .inbound, 0.0, &.{1}, &.{}, null),
+        makePeer("regular2", .inbound, 0.0, &.{2}, &.{}, null),
     };
     var result = try prioritizePeers(
         testing.allocator,
@@ -538,8 +625,8 @@ test "prioritizePeers: trusted peers never pruned" {
 
 test "prioritizePeers: subnet queries emitted for underserved subnets" {
     const peers = [_]ConnectedPeerView{
-        makePeer("p1", .outbound, 0.0, &.{5}, &.{0}),
-        makePeer("p2", .inbound, 0.0, &.{5}, &.{}),
+        makePeer("p1", .outbound, 0.0, &.{5}, &.{0}, null),
+        makePeer("p2", .inbound, 0.0, &.{5}, &.{}, null),
     };
     // Active subnets: attestation 5 and 10, sync 0.
     var result = try prioritizePeers(
@@ -581,10 +668,10 @@ test "prioritizePeers: outbound ratio protection" {
     // Outbound target = 10% of 4 ≈ 0. So even the outbound peer can be pruned.
     // But if we set ratio to 0.5, the outbound peer should be protected.
     const peers = [_]ConnectedPeerView{
-        makePeer("outbound_1", .outbound, -1.0, &.{}, &.{}),
-        makePeer("inbound_1", .inbound, 0.0, &.{}, &.{}),
-        makePeer("inbound_2", .inbound, 0.0, &.{}, &.{}),
-        makePeer("inbound_3", .inbound, 0.0, &.{}, &.{}),
+        makePeer("outbound_1", .outbound, -1.0, &.{}, &.{}, null),
+        makePeer("inbound_1", .inbound, 0.0, &.{}, &.{}, null),
+        makePeer("inbound_2", .inbound, 0.0, &.{}, &.{}, null),
+        makePeer("inbound_3", .inbound, 0.0, &.{}, &.{}, null),
     };
     var result = try prioritizePeers(
         testing.allocator,
@@ -600,4 +687,58 @@ test "prioritizePeers: outbound ratio protection" {
     for (result.peers_to_disconnect) |d| {
         try testing.expect(!std.mem.eql(u8, d.peer_id, "outbound_1"));
     }
+}
+
+test "prioritizePeers: custody demand triggers discovery at target" {
+    const column_7 = [_]u64{7};
+    const peers = [_]ConnectedPeerView{
+        makePeer("custody_peer", .outbound, 0.0, &.{}, &.{}, &column_7),
+        makePeer("other_peer", .inbound, 0.0, &.{}, &.{}, null),
+    };
+
+    var result = try prioritizePeers(
+        testing.allocator,
+        &peers,
+        &.{},
+        &.{},
+        .{
+            .target_peers = 2,
+            .max_peers = 4,
+            .target_group_peers = 2,
+            .local_custody_columns = &column_7,
+        },
+    );
+    defer result.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(usize, 0), result.peers_to_disconnect.len);
+    try testing.expect(result.peers_to_discover > 0);
+    try testing.expectEqual(@as(usize, 1), result.custody_columns_needing_peers.len);
+    try testing.expectEqual(@as(u64, 7), result.custody_columns_needing_peers[0].column_index);
+    try testing.expectEqual(@as(u32, 1), result.custody_columns_needing_peers[0].peers_needed);
+}
+
+test "prioritizePeers: critical custody coverage is less prunable" {
+    const column_7 = [_]u64{7};
+    const peers = [_]ConnectedPeerView{
+        makePeer("custody_peer", .outbound, 0.0, &.{}, &.{}, &column_7),
+        makePeer("empty_a", .inbound, 0.0, &.{}, &.{}, null),
+        makePeer("empty_b", .inbound, 0.0, &.{}, &.{}, null),
+    };
+
+    var result = try prioritizePeers(
+        testing.allocator,
+        &peers,
+        &.{},
+        &.{},
+        .{
+            .target_peers = 2,
+            .max_peers = 4,
+            .target_group_peers = 2,
+            .local_custody_columns = &column_7,
+        },
+    );
+    defer result.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(usize, 1), result.peers_to_disconnect.len);
+    try testing.expect(!std.mem.eql(u8, result.peers_to_disconnect[0].peer_id, "custody_peer"));
 }

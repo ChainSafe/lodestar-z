@@ -50,6 +50,9 @@ pub const Batch = struct {
     generation: u32,
     /// Peer currently downloading this batch (valid when status == downloading).
     download_peer: ?[]const u8,
+    /// Highest slot ever returned for this batch by a successful download.
+    /// Used to avoid retrying against a head peer that is already behind known progress.
+    last_downloaded_slot: ?u64,
     /// Number of failed download attempts.
     download_failures: u8,
     /// Number of failed processing attempts.
@@ -69,6 +72,7 @@ pub const Batch = struct {
             .status = .awaiting_download,
             .generation = 0,
             .download_peer = null,
+            .last_downloaded_slot = null,
             .download_failures = 0,
             .processing_failures = 0,
             .blocks = &.{},
@@ -126,6 +130,13 @@ pub const Batch = struct {
         self.freeBlocks(); // free any previous attempt's data
         self.blocks = owned;
         self.blocks_hash = hashBlocks(blocks);
+        if (blocks.len > 0) {
+            var highest_slot = blocks[0].slot;
+            for (blocks[1..]) |blk| {
+                highest_slot = @max(highest_slot, blk.slot);
+            }
+            self.last_downloaded_slot = highest_slot;
+        }
         self.status = .awaiting_processing;
         return true;
     }

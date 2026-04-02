@@ -16,6 +16,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const ForkSeq = @import("config").ForkSeq;
 const peer_info_mod = @import("peer_info.zig");
 const PeerInfo = peer_info_mod.PeerInfo;
 const ConnectionState = peer_info_mod.ConnectionState;
@@ -41,6 +42,7 @@ const log = std.log.scoped(.peer_manager);
 const peer_relevance = @import("peer_relevance.zig");
 const assertPeerRelevance = peer_relevance.assertPeerRelevance;
 const IrrelevantPeerCode = peer_relevance.IrrelevantPeerCode;
+const custody = @import("custody.zig");
 
 const peer_prioritization = @import("peer_prioritization.zig");
 const ConnectedPeerView = peer_prioritization.ConnectedPeerView;
@@ -100,6 +102,10 @@ pub const PeerManagerConfig = struct {
     target_peers: u32 = 50,
     /// Hard maximum peers (allow some slack over target for subnet needs).
     max_peers: u32 = 55,
+    /// Target number of peers for each relevant PeerDAS custody group.
+    target_group_peers: u32 = peer_prioritization.TARGET_GROUP_PEERS,
+    /// Local PeerDAS custody columns used for retention and discovery demand.
+    local_custody_columns: []const u64 = &.{},
 };
 
 // ── Heartbeat result ────────────────────────────────────────────────────────
@@ -269,6 +275,15 @@ pub const PeerManager = struct {
         self.db.updateSubnets(peer_id, attnets, syncnets);
     }
 
+    /// Update the verified discovery node ID for a peer.
+    pub fn updatePeerDiscoveryNodeId(
+        self: *PeerManager,
+        peer_id: []const u8,
+        node_id: [32]u8,
+    ) !void {
+        try self.db.updatePeerDiscoveryNodeId(peer_id, node_id);
+    }
+
     /// Update peer metadata sequence and subnet subscriptions from Metadata.
     pub fn updatePeerMetadata(
         self: *PeerManager,
@@ -276,8 +291,9 @@ pub const PeerManager = struct {
         metadata_seq: u64,
         attnets: AttnetsBitfield,
         syncnets: SyncnetsBitfield,
-    ) void {
-        self.db.updatePeerMetadata(peer_id, metadata_seq, attnets, syncnets);
+        custody_group_count: ?u64,
+    ) !void {
+        try self.db.updatePeerMetadata(peer_id, metadata_seq, attnets, syncnets, custody_group_count);
     }
 
     /// Update a peer's last-seen timestamp after any successful req/resp exchange.
@@ -354,7 +370,9 @@ pub const PeerManager = struct {
         remote_finalized_root: [32]u8,
         remote_finalized_epoch: u64,
         remote_head_slot: u64,
+        remote_earliest_available_slot: ?u64,
         local_status: CachedStatus,
+        local_fork_seq: ForkSeq,
         current_slot: u64,
     ) ?IrrelevantPeerCode {
         const irrelevance = assertPeerRelevance(
@@ -362,7 +380,9 @@ pub const PeerManager = struct {
             remote_finalized_root,
             remote_finalized_epoch,
             remote_head_slot,
+            remote_earliest_available_slot,
             local_status,
+            local_fork_seq,
             current_slot,
         );
 
@@ -389,7 +409,9 @@ pub const PeerManager = struct {
         finalized_epoch: u64,
         head_root: [32]u8,
         head_slot: u64,
+        earliest_available_slot: ?u64,
         local_status: CachedStatus,
+        local_fork_seq: ForkSeq,
         current_slot: u64,
     ) ?IrrelevantPeerCode {
         // Update the peer's stored status.
@@ -400,6 +422,7 @@ pub const PeerManager = struct {
             finalized_epoch,
             head_slot,
             head_root,
+            earliest_available_slot,
         );
 
         // Check relevance.
@@ -409,7 +432,9 @@ pub const PeerManager = struct {
             finalized_root,
             finalized_epoch,
             head_slot,
+            earliest_available_slot,
             local_status,
+            local_fork_seq,
             current_slot,
         );
     }
@@ -440,6 +465,7 @@ pub const PeerManager = struct {
                 .syncnets = cp.info.syncnets,
                 .score = cp.info.score(),
                 .is_trusted = cp.info.is_trusted,
+                .custody_columns = cp.info.custody_columns,
             };
         }
 
@@ -451,6 +477,8 @@ pub const PeerManager = struct {
             .{
                 .target_peers = self.config.target_peers,
                 .max_peers = self.config.max_peers,
+                .target_group_peers = self.config.target_group_peers,
+                .local_custody_columns = self.config.local_custody_columns,
             },
         );
     }
@@ -460,6 +488,11 @@ pub const PeerManager = struct {
     /// Number of connected peers.
     pub fn peerCount(self: *const PeerManager) u32 {
         return self.db.connected_count;
+    }
+
+    /// Number of outbound dials currently in flight.
+    pub fn dialingPeerCount(self: *const PeerManager) u32 {
+        return self.db.dialing_count;
     }
 
     /// Get peer info (read-only).
@@ -492,6 +525,79 @@ pub const PeerManager = struct {
         }
 
         return peer_ids;
+    }
+
+    /// Select the best connected peer to request missing data columns from.
+    ///
+    /// Prefers peers with known custody overlap, falling back to peers with
+    /// unknown custody only when no better option is available.
+    /// Caller owns the returned peer ID.
+    pub fn selectDataColumnPeer(
+        self: *PeerManager,
+        missing_columns: []const u64,
+        start_slot: u64,
+        end_slot: u64,
+        preferred_peer_id: ?[]const u8,
+        excluded_peer_ids: []const []const u8,
+    ) !?[]const u8 {
+        const connected = try self.db.getConnectedPeers();
+        defer self.allocator.free(connected);
+
+        const Candidate = struct {
+            peer_id: []const u8,
+            coverage: usize,
+            head_slot: u64,
+            score: f64,
+            preferred: bool,
+        };
+
+        var best_known: ?Candidate = null;
+        var best_unknown: ?Candidate = null;
+
+        for (connected) |cp| {
+            if (containsPeerId(excluded_peer_ids, cp.peer_id)) continue;
+            if (!peerCanServeRange(cp.info, start_slot, end_slot)) continue;
+
+            const is_preferred = if (preferred_peer_id) |preferred|
+                std.mem.eql(u8, cp.peer_id, preferred)
+            else
+                false;
+
+            if (cp.info.custody_columns) |custody_columns| {
+                const coverage = custodyCoverageCount(custody_columns, missing_columns);
+                if (coverage == 0) continue;
+
+                const candidate: Candidate = .{
+                    .peer_id = cp.peer_id,
+                    .coverage = coverage,
+                    .head_slot = cp.info.headSlot(),
+                    .score = cp.info.score(),
+                    .preferred = is_preferred,
+                };
+                if (best_known == null or betterDataColumnCandidate(candidate, best_known.?)) {
+                    best_known = candidate;
+                }
+            } else {
+                const candidate: Candidate = .{
+                    .peer_id = cp.peer_id,
+                    .coverage = 0,
+                    .head_slot = cp.info.headSlot(),
+                    .score = cp.info.score(),
+                    .preferred = is_preferred,
+                };
+                if (best_unknown == null or betterDataColumnCandidate(candidate, best_unknown.?)) {
+                    best_unknown = candidate;
+                }
+            }
+        }
+
+        if (best_known) |candidate| {
+            return try self.allocator.dupe(u8, candidate.peer_id);
+        }
+        if (best_unknown) |candidate| {
+            return try self.allocator.dupe(u8, candidate.peer_id);
+        }
+        return null;
     }
 
     /// Select a bounded set of connected peers that are due for maintenance.
@@ -592,6 +698,15 @@ pub const PeerManager = struct {
             );
         }
 
+        const custody_deficit = try self.maxCustodyCoverageDeficit();
+        if (custody_deficit > 0) {
+            const custody_discovery = @min(
+                custody_deficit * DISCOVERY_OVERSHOOT_FACTOR,
+                self.config.max_peers -| self.db.connected_count,
+            );
+            actions.peers_to_discover = @max(actions.peers_to_discover, custody_discovery);
+        }
+
         // 6. Find subnets needing more peers.
         actions.subnets_needing_peers = try self.getSubnetsNeedingPeers();
 
@@ -686,6 +801,10 @@ pub const PeerManager = struct {
             }
             if (has_unique_subnet) prune_score += 100.0; // Strongly protect unique coverage.
 
+            if (self.peerProvidesCriticalCustodyCoverage(cp.info, all_connected)) {
+                prune_score += 100.0;
+            }
+
             try candidates.append(self.allocator, .{
                 .peer_id = cp.peer_id,
                 .prune_score = prune_score,
@@ -774,6 +893,79 @@ pub const PeerManager = struct {
         for (peer_ids) |peer_id| {
             if (std.mem.eql(u8, peer_id, needle)) return true;
         }
+        return false;
+    }
+
+    fn peerCanServeRange(peer: *const PeerInfo, start_slot: u64, end_slot: u64) bool {
+        if (peer.relevance == .irrelevant) return false;
+        const sync_info = peer.sync_info orelse return false;
+        if (sync_info.head_slot < end_slot) return false;
+        if (sync_info.earliest_available_slot) |earliest| {
+            if (start_slot < earliest) return false;
+        }
+        return true;
+    }
+
+    fn custodyCoverageCount(custody_columns: []const u64, missing_columns: []const u64) usize {
+        var count: usize = 0;
+        for (missing_columns) |column_index| {
+            if (custody.isCustodied(column_index, custody_columns)) count += 1;
+        }
+        return count;
+    }
+
+    fn betterDataColumnCandidate(candidate: anytype, current: @TypeOf(candidate)) bool {
+        if (candidate.coverage != current.coverage) return candidate.coverage > current.coverage;
+        if (candidate.preferred != current.preferred) return candidate.preferred;
+        if (candidate.score != current.score) return candidate.score > current.score;
+        if (candidate.head_slot != current.head_slot) return candidate.head_slot > current.head_slot;
+        return std.mem.lessThan(u8, candidate.peer_id, current.peer_id);
+    }
+
+    fn maxCustodyCoverageDeficit(self: *PeerManager) !u32 {
+        if (self.config.local_custody_columns.len == 0) return 0;
+
+        const connected = try self.db.getConnectedPeers();
+        defer self.allocator.free(connected);
+
+        var max_deficit: u32 = 0;
+        for (self.config.local_custody_columns) |column_index| {
+            var count: u32 = 0;
+            for (connected) |cp| {
+                const peer_columns = cp.info.custody_columns orelse continue;
+                if (custody.isCustodied(column_index, peer_columns)) {
+                    count += 1;
+                }
+            }
+            if (count < self.config.target_group_peers) {
+                max_deficit = @max(max_deficit, self.config.target_group_peers - count);
+            }
+        }
+        return max_deficit;
+    }
+
+    fn peerProvidesCriticalCustodyCoverage(
+        self: *PeerManager,
+        peer: *const PeerInfo,
+        connected: []const ConnectedPeer,
+    ) bool {
+        const peer_columns = peer.custody_columns orelse return false;
+        if (self.config.local_custody_columns.len == 0) return false;
+
+        for (self.config.local_custody_columns) |column_index| {
+            if (!custody.isCustodied(column_index, peer_columns)) continue;
+
+            var count: u32 = 0;
+            for (connected) |cp| {
+                const other_columns = cp.info.custody_columns orelse continue;
+                if (custody.isCustodied(column_index, other_columns)) {
+                    count += 1;
+                }
+            }
+
+            if (count < self.config.target_group_peers) return true;
+        }
+
         return false;
     }
 };
@@ -951,8 +1143,8 @@ test "PeerManager: maintenance schedules pings by connection direction" {
 
     _ = try pm.onPeerConnected("inbound_peer", .inbound, 1_000);
     _ = try pm.onPeerConnected("outbound_peer", .outbound, 1_000);
-    pm.db.updatePeerStatus("inbound_peer", [_]u8{0x11} ** 4, [_]u8{0x22} ** 32, 1, 2, [_]u8{0x33} ** 32);
-    pm.db.updatePeerStatus("outbound_peer", [_]u8{0x44} ** 4, [_]u8{0x55} ** 32, 1, 2, [_]u8{0x66} ** 32);
+    pm.db.updatePeerStatus("inbound_peer", [_]u8{0x11} ** 4, [_]u8{0x22} ** 32, 1, 2, [_]u8{0x33} ** 32, null);
+    pm.db.updatePeerStatus("outbound_peer", [_]u8{0x44} ** 4, [_]u8{0x55} ** 32, 1, 2, [_]u8{0x66} ** 32, null);
     pm.db.setRelevanceStatus("inbound_peer", .relevant);
     pm.db.setRelevanceStatus("outbound_peer", .relevant);
     pm.markStatusExchange("inbound_peer", 1_000);
@@ -979,7 +1171,7 @@ test "PeerManager: maintenance prioritizes status refresh over ping" {
     defer pm.deinit();
 
     _ = try pm.onPeerConnected("peer_a", .outbound, 1_000);
-    pm.db.updatePeerStatus("peer_a", [_]u8{0x77} ** 4, [_]u8{0x88} ** 32, 1, 2, [_]u8{0x99} ** 32);
+    pm.db.updatePeerStatus("peer_a", [_]u8{0x77} ** 4, [_]u8{0x88} ** 32, 1, 2, [_]u8{0x99} ** 32, null);
     pm.db.setRelevanceStatus("peer_a", .relevant);
     pm.markStatusExchange("peer_a", 1_000);
     pm.markPingResponse("peer_a", 1_000);
@@ -1004,4 +1196,68 @@ test "PeerManager: maintenance restatuses peers without prior status" {
 
     try std.testing.expectEqual(@as(usize, 1), actions.peers_to_restatus.len);
     try std.testing.expectEqualStrings("peer_a", actions.peers_to_restatus[0]);
+}
+
+test "PeerManager: selectDataColumnPeer prefers custody overlap" {
+    const allocator = std.testing.allocator;
+    var pm = PeerManager.init(allocator, .{});
+    defer pm.deinit();
+
+    _ = try pm.onPeerConnected("preferred_peer", .outbound, 1_000);
+    pm.db.updatePeerStatus("preferred_peer", [_]u8{0x11} ** 4, [_]u8{0x22} ** 32, 1, 128, [_]u8{0x33} ** 32, 0);
+    pm.db.setRelevanceStatus("preferred_peer", .relevant);
+
+    _ = try pm.onPeerConnected("custody_peer", .outbound, 1_000);
+    pm.db.updatePeerStatus("custody_peer", [_]u8{0x44} ** 4, [_]u8{0x55} ** 32, 1, 128, [_]u8{0x66} ** 32, 0);
+    pm.db.setRelevanceStatus("custody_peer", .relevant);
+
+    const custody_node_id = [_]u8{0x77} ** 32;
+    try pm.updatePeerDiscoveryNodeId("custody_peer", custody_node_id);
+    try pm.updatePeerMetadata(
+        "custody_peer",
+        1,
+        AttnetsBitfield.initEmpty(),
+        SyncnetsBitfield.initEmpty(),
+        4,
+    );
+
+    const custody_columns = pm.getPeer("custody_peer").?.custody_columns.?;
+    const missing = [_]u64{custody_columns[0]};
+
+    const selected = (try pm.selectDataColumnPeer(&missing, 64, 64, "preferred_peer", &.{})).?;
+    defer allocator.free(selected);
+
+    try std.testing.expectEqualStrings("custody_peer", selected);
+}
+
+test "PeerManager: selectDataColumnPeer respects serving range eligibility" {
+    const allocator = std.testing.allocator;
+    var pm = PeerManager.init(allocator, .{});
+    defer pm.deinit();
+
+    _ = try pm.onPeerConnected("preferred_peer", .outbound, 1_000);
+    pm.db.updatePeerStatus("preferred_peer", [_]u8{0x11} ** 4, [_]u8{0x22} ** 32, 1, 128, [_]u8{0x33} ** 32, 0);
+    pm.db.setRelevanceStatus("preferred_peer", .relevant);
+
+    _ = try pm.onPeerConnected("custody_peer", .outbound, 1_000);
+    pm.db.updatePeerStatus("custody_peer", [_]u8{0x44} ** 4, [_]u8{0x55} ** 32, 1, 128, [_]u8{0x66} ** 32, 96);
+    pm.db.setRelevanceStatus("custody_peer", .relevant);
+
+    const custody_node_id = [_]u8{0x88} ** 32;
+    try pm.updatePeerDiscoveryNodeId("custody_peer", custody_node_id);
+    try pm.updatePeerMetadata(
+        "custody_peer",
+        1,
+        AttnetsBitfield.initEmpty(),
+        SyncnetsBitfield.initEmpty(),
+        4,
+    );
+
+    const custody_columns = pm.getPeer("custody_peer").?.custody_columns.?;
+    const missing = [_]u64{custody_columns[0]};
+
+    const selected = (try pm.selectDataColumnPeer(&missing, 64, 64, "preferred_peer", &.{})).?;
+    defer allocator.free(selected);
+
+    try std.testing.expectEqualStrings("preferred_peer", selected);
 }

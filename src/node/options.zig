@@ -26,6 +26,7 @@ pub const NodeOptions = struct {
     // ── Network ──────────────────────────────────────────────────
     listen_addresses: []const []const u8 = &.{"/ip4/0.0.0.0/tcp/9000"},
     target_peers: u32 = 50,
+    target_group_peers: u32 = 6,
 
     // ── P2P ──────────────────────────────────────────────────────
     /// P2P listen address (IPv4), from --p2p-host. Null disables IPv4.

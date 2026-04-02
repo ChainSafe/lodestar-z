@@ -16,11 +16,13 @@ const protocol = @import("protocol.zig");
 const messages = @import("messages.zig");
 const req_resp_encoding = @import("req_resp_encoding.zig");
 const req_resp_handler = @import("req_resp_handler.zig");
+const ForkSeq = @import("config").ForkSeq;
 
 const Method = protocol.Method;
 const ResponseCode = protocol.ResponseCode;
 const ReqRespContext = req_resp_handler.ReqRespContext;
 const ResponseChunk = req_resp_handler.ResponseChunk;
+const PayloadSink = req_resp_handler.PayloadSink;
 
 const log = std.log.scoped(.eth_reqresp);
 
@@ -65,10 +67,11 @@ pub const EthReqRespAdapter = struct {
         request_wire_bytes: []const u8,
     ) HandleError![]const u8 {
         // 1. Parse protocol ID → Method.
-        const method = protocol.parseProtocolId(protocol_id) orelse {
+        const info = protocol.parseProtocolIdInfo(protocol_id) orelse {
             log.warn("Unknown protocol ID: {s}", .{protocol_id});
             return error.UnknownProtocol;
         };
+        const method = info.method;
 
         // 2. Decode the request from the wire (varint + snappy).
         //    For zero-length request methods (metadata), request_wire_bytes may be empty.
@@ -88,9 +91,10 @@ pub const EthReqRespAdapter = struct {
         defer if (should_free_ssz) self.allocator.free(ssz_bytes);
 
         // 3. Route to handler.
-        const chunks = req_resp_handler.handleRequest(
+        const chunks = req_resp_handler.handleRequestVersioned(
             self.allocator,
             method,
+            info.version,
             ssz_bytes,
             self.context,
         ) catch |err| {
@@ -155,6 +159,10 @@ pub const EthReqRespAdapter = struct {
         return protocol.formatProtocolId(self.allocator, method);
     }
 
+    pub fn protocolIdForVersion(self: *Self, method: Method, version: u8) ![]const u8 {
+        return protocol.formatProtocolIdVersioned(self.allocator, method, version);
+    }
+
     pub const HandleError = error{
         UnknownProtocol,
         DecodeError,
@@ -191,40 +199,52 @@ fn testPingSeq(_: *anyopaque) u64 {
     return 42;
 }
 
-fn testGetBlockByRoot(_: *anyopaque, _: [32]u8) ?[]const u8 {
-    return null;
+fn testEarliestAvailableSlot(_: *anyopaque) u64 {
+    return 64;
 }
 
-fn testGetBlocksByRange(_: *anyopaque, _: u64, _: u64) []const []const u8 {
-    return &.{};
+fn testCustodyGroupCount(_: *anyopaque) u64 {
+    return 8;
 }
 
-fn testGetBlobByRoot(_: *anyopaque, _: [32]u8, _: u64) ?[]const u8 {
-    return null;
+fn testFindBlockByRoot(_: *anyopaque, _: [32]u8, _: *const PayloadSink) anyerror!void {}
+
+fn testStreamBlocksByRange(_: *anyopaque, _: u64, _: u64, _: *const PayloadSink) anyerror!void {}
+
+fn testFindBlobByRoot(_: *anyopaque, _: [32]u8, _: u64, _: *const PayloadSink) anyerror!void {}
+
+fn testStreamBlobsByRange(_: *anyopaque, _: u64, _: u64, _: *const PayloadSink) anyerror!void {}
+
+fn testGetCurrentForkSeq(_: *anyopaque) ForkSeq {
+    return .phase0;
 }
 
-fn testGetBlobsByRange(_: *anyopaque, _: u64, _: u64) []const []const u8 {
-    return &.{};
+fn testGetForkSeqForSlot(_: *anyopaque, _: u64) ForkSeq {
+    return .phase0;
 }
 
 fn testGetForkDigest(_: *anyopaque, _: u64) [4]u8 {
     return .{ 0x01, 0x02, 0x03, 0x04 };
 }
 
-fn testOnGoodbye(_: *anyopaque, _: u64) void {}
+fn testOnGoodbye(_: *anyopaque, _: ?[]const u8, _: u64) void {}
 
-fn testOnPeerStatus(_: *anyopaque, _: messages.StatusMessage.Type) void {}
+fn testOnPeerStatus(_: *anyopaque, _: ?[]const u8, _: messages.StatusMessage.Type, _: ?u64) void {}
 
 var _test_sentinel: u8 = 0;
 const test_context = ReqRespContext{
     .ptr = &_test_sentinel,
     .getStatus = &testStatus,
     .getMetadata = &testMetadata,
+    .getEarliestAvailableSlot = &testEarliestAvailableSlot,
+    .getCustodyGroupCount = &testCustodyGroupCount,
     .getPingSequence = &testPingSeq,
-    .getBlockByRoot = &testGetBlockByRoot,
-    .getBlocksByRange = &testGetBlocksByRange,
-    .getBlobByRoot = &testGetBlobByRoot,
-    .getBlobsByRange = &testGetBlobsByRange,
+    .findBlockByRoot = &testFindBlockByRoot,
+    .streamBlocksByRange = &testStreamBlocksByRange,
+    .findBlobByRoot = &testFindBlobByRoot,
+    .streamBlobsByRange = &testStreamBlobsByRange,
+    .getCurrentForkSeq = &testGetCurrentForkSeq,
+    .getForkSeqForSlot = &testGetForkSeqForSlot,
     .getForkDigest = &testGetForkDigest,
     .onGoodbye = &testOnGoodbye,
     .onPeerStatus = &testOnPeerStatus,
@@ -305,6 +325,50 @@ test "EthReqRespAdapter: handle metadata request (empty body)" {
     try testing.expectEqual(ResponseCode.success, decoded.result);
     // MetadataV2 is seq_number(8) + attnets(8) + syncnets(1) = 17 bytes.
     try testing.expectEqual(@as(usize, 17), decoded.ssz_bytes.len);
+}
+
+test "EthReqRespAdapter: handle StatusV2 request roundtrip" {
+    const allocator = testing.allocator;
+
+    var adapter = EthReqRespAdapter.init(allocator, &test_context);
+
+    const status = messages.StatusMessageV2.Type{
+        .fork_digest = .{ 0x01, 0x02, 0x03, 0x04 },
+        .finalized_root = std.mem.zeroes([32]u8),
+        .finalized_epoch = 10,
+        .head_root = std.mem.zeroes([32]u8),
+        .head_slot = 320,
+        .earliest_available_slot = 16,
+    };
+    var ssz_buf: [messages.StatusMessageV2.fixed_size]u8 = undefined;
+    _ = messages.StatusMessageV2.serializeIntoBytes(&status, &ssz_buf);
+
+    const wire_request = try req_resp_encoding.encodeRequest(allocator, &ssz_buf);
+    defer allocator.free(wire_request);
+
+    const wire_response = try adapter.handleStream("/eth2/beacon_chain/req/status/2/ssz_snappy", wire_request);
+    defer allocator.free(wire_response);
+
+    const decoded = try req_resp_encoding.decodeResponseChunk(allocator, wire_response, false);
+    defer allocator.free(decoded.ssz_bytes);
+
+    try testing.expectEqual(ResponseCode.success, decoded.result);
+    try testing.expectEqual(messages.StatusMessageV2.fixed_size, decoded.ssz_bytes.len);
+}
+
+test "EthReqRespAdapter: handle MetadataV3 request (empty body)" {
+    const allocator = testing.allocator;
+
+    var adapter = EthReqRespAdapter.init(allocator, &test_context);
+
+    const wire_response = try adapter.handleStream("/eth2/beacon_chain/req/metadata/3/ssz_snappy", &.{});
+    defer allocator.free(wire_response);
+
+    const decoded = try req_resp_encoding.decodeResponseChunk(allocator, wire_response, false);
+    defer allocator.free(decoded.ssz_bytes);
+
+    try testing.expectEqual(ResponseCode.success, decoded.result);
+    try testing.expectEqual(messages.MetadataV3.fixed_size, decoded.ssz_bytes.len);
 }
 
 test "EthReqRespAdapter: unknown protocol returns error" {

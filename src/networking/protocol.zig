@@ -155,6 +155,11 @@ pub const protocol_prefix = "/eth2/beacon_chain/req";
 /// Context bytes length (fork digest).
 pub const context_bytes_length: usize = 4;
 
+pub const ProtocolIdInfo = struct {
+    method: Method,
+    version: u8,
+};
+
 /// Format a protocol ID string.
 ///
 /// The format is: `/eth2/beacon_chain/req/<method>/<version>/<encoding>`
@@ -164,10 +169,19 @@ pub fn protocolId(
     method: Method,
     encoding: Encoding,
 ) []const u8 {
+    return protocolIdVersioned(buf, method, method.version(), encoding);
+}
+
+pub fn protocolIdVersioned(
+    buf: []u8,
+    method: Method,
+    version: u8,
+    encoding: Encoding,
+) []const u8 {
     const result = std.fmt.bufPrint(buf, "{s}/{s}/{d}/{s}", .{
         protocol_prefix,
         method.name(),
-        method.version(),
+        version,
         encoding.suffix(),
     }) catch unreachable;
     return result;
@@ -220,6 +234,10 @@ test "protocolId formatting" {
 /// Expected format: `/eth2/beacon_chain/req/<method>/<version>/<encoding>`
 /// Returns null if the protocol ID doesn't match a known method.
 pub fn parseProtocolId(protocol_id_str: []const u8) ?Method {
+    return if (parseProtocolIdInfo(protocol_id_str)) |info| info.method else null;
+}
+
+pub fn parseProtocolIdInfo(protocol_id_str: []const u8) ?ProtocolIdInfo {
     // Strip the prefix.
     const prefix_with_slash = protocol_prefix ++ "/";
     if (!std.mem.startsWith(u8, protocol_id_str, prefix_with_slash)) return null;
@@ -228,11 +246,20 @@ pub fn parseProtocolId(protocol_id_str: []const u8) ?Method {
     // Find the method name (up to next '/').
     const method_end = std.mem.indexOfScalar(u8, rest, '/') orelse return null;
     const method_name = rest[0..method_end];
+    const after_method = rest[method_end + 1 ..];
+    const version_end = std.mem.indexOfScalar(u8, after_method, '/') orelse return null;
+    const version_bytes = after_method[0..version_end];
+    const version = std.fmt.parseUnsigned(u8, version_bytes, 10) catch return null;
 
     // Match method name to enum.
     inline for (std.meta.fields(Method)) |field| {
         const m: Method = @enumFromInt(field.value);
-        if (std.mem.eql(u8, m.name(), method_name)) return m;
+        if (std.mem.eql(u8, m.name(), method_name)) {
+            return .{
+                .method = m,
+                .version = version,
+            };
+        }
     }
     return null;
 }
@@ -241,10 +268,14 @@ pub fn parseProtocolId(protocol_id_str: []const u8) ?Method {
 ///
 /// Caller owns the returned string.
 pub fn formatProtocolId(allocator: std.mem.Allocator, method: Method) ![]const u8 {
+    return formatProtocolIdVersioned(allocator, method, method.version());
+}
+
+pub fn formatProtocolIdVersioned(allocator: std.mem.Allocator, method: Method, version: u8) ![]const u8 {
     return std.fmt.allocPrint(allocator, "{s}/{s}/{d}/{s}", .{
         protocol_prefix,
         method.name(),
-        method.version(),
+        version,
         Encoding.ssz_snappy.suffix(),
     });
 }
@@ -255,6 +286,12 @@ test "parseProtocolId" {
     try testing.expectEqual(Method.beacon_blocks_by_range, parseProtocolId("/eth2/beacon_chain/req/beacon_blocks_by_range/2/ssz_snappy").?);
     try testing.expect(parseProtocolId("/unknown/protocol") == null);
     try testing.expect(parseProtocolId("/eth2/beacon_chain/req/nonexistent/1/ssz_snappy") == null);
+}
+
+test "parseProtocolIdInfo parses versioned IDs" {
+    const info = parseProtocolIdInfo("/eth2/beacon_chain/req/status/2/ssz_snappy").?;
+    try testing.expectEqual(Method.status, info.method);
+    try testing.expectEqual(@as(u8, 2), info.version);
 }
 
 test "formatProtocolId" {

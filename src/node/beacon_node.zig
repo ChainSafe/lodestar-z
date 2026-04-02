@@ -285,6 +285,9 @@ pub const BeaconNode = struct {
     // Genesis validators root — set by initFromGenesis, used for fork digest computation.
     genesis_validators_root: [32]u8 = [_]u8{0} ** 32,
 
+    /// Earliest slot this node can honestly serve over req/resp.
+    earliest_available_slot: u64 = 0,
+
     // Node configuration options — stored for lazy-initialized components.
     node_options: NodeOptions = .{},
 
@@ -927,6 +930,7 @@ pub const BeaconNode = struct {
 
     pub fn applyBootstrapOutcome(self: *BeaconNode, outcome: chain_mod.BootstrapOutcome) void {
         self.genesis_validators_root = outcome.genesis_validators_root;
+        self.earliest_available_slot = outcome.snapshot.head.slot;
         self.last_slot_tick = null;
         self.clock = SlotClock.fromGenesis(outcome.genesis_time, self.config.chain);
         self.api_context.genesis_time = outcome.genesis_time;

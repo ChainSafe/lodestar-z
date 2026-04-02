@@ -26,6 +26,7 @@ fn peerIdFromCtx(ctx: anytype) ?[]const u8 {
 fn makeProtocolHandler(
     comptime method: protocol.Method,
     comptime id_literal: []const u8,
+    comptime version: u8,
 ) type {
     return struct {
         allocator: Allocator,
@@ -55,9 +56,10 @@ fn makeProtocolHandler(
             };
             defer self.allocator.free(request_bytes);
 
-            req_resp_handler.serveRequest(
+            req_resp_handler.serveRequestVersioned(
                 self.allocator,
                 method,
+                version,
                 request_bytes,
                 RequestMeta{ .peer_id = peerIdFromCtx(ctx) },
                 self.context,
@@ -93,6 +95,7 @@ fn makeProtocolHandler(
         }
 
         pub const protocol_method = method;
+        pub const protocol_version = version;
     };
 }
 
@@ -126,80 +129,108 @@ fn StreamResponseWriter(comptime StreamPtr: type) type {
 pub const StatusProtocol = makeProtocolHandler(
     .status,
     "/eth2/beacon_chain/req/status/1/ssz_snappy",
+    1,
+);
+
+pub const StatusV2Protocol = makeProtocolHandler(
+    .status,
+    "/eth2/beacon_chain/req/status/2/ssz_snappy",
+    2,
 );
 
 pub const GoodbyeProtocol = makeProtocolHandler(
     .goodbye,
     "/eth2/beacon_chain/req/goodbye/1/ssz_snappy",
+    1,
 );
 
 pub const PingProtocol = makeProtocolHandler(
     .ping,
     "/eth2/beacon_chain/req/ping/1/ssz_snappy",
+    1,
 );
 
 pub const MetadataProtocol = makeProtocolHandler(
     .metadata,
     "/eth2/beacon_chain/req/metadata/2/ssz_snappy",
+    2,
+);
+
+pub const MetadataV3Protocol = makeProtocolHandler(
+    .metadata,
+    "/eth2/beacon_chain/req/metadata/3/ssz_snappy",
+    3,
 );
 
 pub const BlocksByRangeProtocol = makeProtocolHandler(
     .beacon_blocks_by_range,
     "/eth2/beacon_chain/req/beacon_blocks_by_range/2/ssz_snappy",
+    2,
 );
 
 pub const BlocksByRootProtocol = makeProtocolHandler(
     .beacon_blocks_by_root,
     "/eth2/beacon_chain/req/beacon_blocks_by_root/2/ssz_snappy",
+    2,
 );
 
 pub const BlobSidecarsByRangeProtocol = makeProtocolHandler(
     .blob_sidecars_by_range,
     "/eth2/beacon_chain/req/blob_sidecars_by_range/1/ssz_snappy",
+    1,
 );
 
 pub const BlobSidecarsByRootProtocol = makeProtocolHandler(
     .blob_sidecars_by_root,
     "/eth2/beacon_chain/req/blob_sidecars_by_root/1/ssz_snappy",
+    1,
 );
 
 pub const DataColumnsByRangeProtocol = makeProtocolHandler(
     .data_column_sidecars_by_range,
     "/eth2/beacon_chain/req/data_column_sidecars_by_range/1/ssz_snappy",
+    1,
 );
 
 pub const DataColumnsByRootProtocol = makeProtocolHandler(
     .data_column_sidecars_by_root,
     "/eth2/beacon_chain/req/data_column_sidecars_by_root/1/ssz_snappy",
+    1,
 );
 
 pub const LightClientBootstrapProtocol = makeProtocolHandler(
     .light_client_bootstrap,
     "/eth2/beacon_chain/req/light_client_bootstrap/1/ssz_snappy",
+    1,
 );
 
 pub const LightClientUpdatesByRangeProtocol = makeProtocolHandler(
     .light_client_updates_by_range,
     "/eth2/beacon_chain/req/light_client_updates_by_range/1/ssz_snappy",
+    1,
 );
 
 pub const LightClientFinalityUpdateProtocol = makeProtocolHandler(
     .light_client_finality_update,
     "/eth2/beacon_chain/req/light_client_finality_update/1/ssz_snappy",
+    1,
 );
 
 pub const LightClientOptimisticUpdateProtocol = makeProtocolHandler(
     .light_client_optimistic_update,
     "/eth2/beacon_chain/req/light_client_optimistic_update/1/ssz_snappy",
+    1,
 );
 
 test "eth2_protocols: protocol IDs match spec" {
     const testing = std.testing;
 
     try testing.expectEqualStrings("/eth2/beacon_chain/req/status/1/ssz_snappy", StatusProtocol.id);
+    try testing.expectEqualStrings("/eth2/beacon_chain/req/status/2/ssz_snappy", StatusV2Protocol.id);
     try testing.expectEqualStrings("/eth2/beacon_chain/req/goodbye/1/ssz_snappy", GoodbyeProtocol.id);
     try testing.expectEqualStrings("/eth2/beacon_chain/req/ping/1/ssz_snappy", PingProtocol.id);
     try testing.expectEqualStrings("/eth2/beacon_chain/req/metadata/2/ssz_snappy", MetadataProtocol.id);
+    try testing.expectEqualStrings("/eth2/beacon_chain/req/metadata/3/ssz_snappy", MetadataV3Protocol.id);
     try testing.expectEqualStrings("/eth2/beacon_chain/req/beacon_blocks_by_range/2/ssz_snappy", BlocksByRangeProtocol.id);
     try testing.expectEqualStrings("/eth2/beacon_chain/req/beacon_blocks_by_root/2/ssz_snappy", BlocksByRootProtocol.id);
     try testing.expectEqualStrings("/eth2/beacon_chain/req/blob_sidecars_by_range/1/ssz_snappy", BlobSidecarsByRangeProtocol.id);
@@ -210,9 +241,11 @@ test "eth2_protocols: all handlers have required declarations" {
     const testing = std.testing;
     inline for (.{
         StatusProtocol,
+        StatusV2Protocol,
         GoodbyeProtocol,
         PingProtocol,
         MetadataProtocol,
+        MetadataV3Protocol,
         BlocksByRangeProtocol,
         BlocksByRootProtocol,
         BlobSidecarsByRangeProtocol,

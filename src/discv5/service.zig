@@ -677,6 +677,7 @@ pub const Service = struct {
         builder.quic6 = parsed.quic6;
         builder.attnets = parsed.attnets;
         builder.syncnets = parsed.syncnets;
+        builder.custody_group_count = parsed.custody_group_count;
         builder.eth2 = parsed.eth2_raw;
 
         switch (addr) {

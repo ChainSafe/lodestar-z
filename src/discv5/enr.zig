@@ -51,6 +51,8 @@ pub const Enr = struct {
     attnets: ?[8]u8,
     /// Sync committee subnet bitfield (1 byte = 4 sync committees)
     syncnets: ?[1]u8,
+    /// PeerDAS custody group count (`cgc` ENR field).
+    custody_group_count: ?u64,
     /// Raw RLP of the entire record (for signature verification and re-encoding)
     raw: []u8,
     alloc: Allocator,
@@ -110,6 +112,7 @@ pub fn decode(alloc: Allocator, data: []const u8) Error!Enr {
         .eth2_raw = null,
         .attnets = null,
         .syncnets = null,
+        .custody_group_count = null,
         .raw = try alloc.dupe(u8, data),
         .alloc = alloc,
     };
@@ -196,6 +199,13 @@ pub fn decode(alloc: Allocator, data: []const u8) Error!Enr {
             if (val.len == 8) {
                 enr.attnets = val[0..8].*;
             }
+        } else if (std.mem.eql(u8, key, "cgc")) {
+            const val = list.readBytes() catch return Error.InvalidEnr;
+            if (val.len > 0 and val.len <= 8) {
+                var count: u64 = 0;
+                for (val) |b| count = (count << 8) | b;
+                enr.custody_group_count = count;
+            }
         } else if (std.mem.eql(u8, key, "syncnets")) {
             const val = list.readBytes() catch return Error.InvalidEnr;
             if (val.len == 1) {
@@ -259,6 +269,8 @@ pub const Builder = struct {
     eth2: ?[16]u8 = null,
     /// Attestation subnet bitfield (8 bytes = 64 bits for 64 subnets)
     attnets: ?[8]u8 = null,
+    /// PeerDAS custody group count.
+    custody_group_count: ?u64 = null,
     /// Sync committee subnet bitfield (1 byte = 4 bits for 4 sync committees)
     syncnets: ?[1]u8 = null,
 
@@ -285,14 +297,27 @@ pub const Builder = struct {
         try writer.writeBytes(port_bytes[if (port_bytes[0] == 0) 1 else 0..2]);
     }
 
+    fn writeUint64Minimal(writer: *rlp.Writer, value: u64) !void {
+        var bytes: [8]u8 = undefined;
+        std.mem.writeInt(u64, &bytes, value, .big);
+
+        var start: usize = 0;
+        while (start < bytes.len - 1 and bytes[start] == 0) : (start += 1) {}
+        try writer.writeBytes(bytes[start..]);
+    }
+
     /// Write all key-value pairs in alphabetical order to an RLP writer.
     /// EIP-778 requires keys to be sorted.
     fn writeKVPairs(self: *const Builder, writer: *rlp.Writer, pubkey: *const [33]u8) !void {
-        // Alphabetical order: attnets, eth2, id, ip, ip6, quic, quic6,
+        // Alphabetical order: attnets, cgc, eth2, id, ip, ip6, quic, quic6,
         //                     secp256k1, syncnets, tcp, tcp6, udp, udp6
         if (self.attnets) |attnets| {
             try writer.writeBytes("attnets");
             try writer.writeBytes(&attnets);
+        }
+        if (self.custody_group_count) |count| {
+            try writer.writeBytes("cgc");
+            try writeUint64Minimal(writer, count);
         }
         if (self.eth2) |eth2_val| {
             try writer.writeBytes("eth2");
@@ -472,6 +497,25 @@ test "ENR Builder: encode with eth2 and attnets" {
     try std.testing.expectEqual([4]u8{ 0x6a, 0x95, 0xa1, 0xb0 }, parsed.eth2_fork_digest.?);
     try std.testing.expect(parsed.attnets != null);
     try std.testing.expectEqual([8]u8{ 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff }, parsed.attnets.?);
+}
+
+test "ENR Builder: encode with custody group count" {
+    const hex_mod = @import("hex.zig");
+    const alloc = std.testing.allocator;
+
+    const secret_key = hex_mod.hexToBytesComptime(32, "b71c71a67e1177ad4e901695e1b4b9ee17ae16c6668d313eac2f96dbcda3f291");
+    var builder = Builder.init(alloc, secret_key, 1);
+    builder.ip = [4]u8{ 127, 0, 0, 1 };
+    builder.udp = 9000;
+    builder.custody_group_count = 12;
+
+    const enr_bytes = try builder.encode();
+    defer alloc.free(enr_bytes);
+
+    var parsed = try decode(alloc, enr_bytes);
+    defer parsed.deinit();
+
+    try std.testing.expectEqual(@as(?u64, 12), parsed.custody_group_count);
 }
 
 test "ENR Builder: encodeToString produces valid enr: prefix" {

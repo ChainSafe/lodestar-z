@@ -84,6 +84,11 @@ pub const SyncChainStatus = enum {
 
 /// A chain of batches being downloaded towards a target.
 pub const SyncChain = struct {
+    const ChainPeer = struct {
+        target: ChainTarget,
+        earliest_available_slot: ?u64 = null,
+    };
+
     allocator: Allocator,
     /// Unique ID for this chain.
     id: u32,
@@ -111,8 +116,9 @@ pub const SyncChain = struct {
 
     // ── Peer set ────────────────────────────────────────────────────
 
-    /// Peers assigned to this chain, mapped to their reported target.
-    peers: std.StringArrayHashMap(ChainTarget),
+    /// Peers assigned to this chain, including the serving limits that affect
+    /// batch eligibility for this peer.
+    peers: std.StringArrayHashMap(ChainPeer),
 
     /// Global chain ID counter.
     pub fn init(
@@ -136,7 +142,7 @@ pub const SyncChain = struct {
             .batches = .empty,
             .next_batch_id = 0,
             .next_batch_start = start_slot,
-            .peers = std.StringArrayHashMap(ChainTarget).init(allocator),
+            .peers = std.StringArrayHashMap(ChainPeer).init(allocator),
         };
     }
 
@@ -151,16 +157,27 @@ pub const SyncChain = struct {
     ///
     /// The peer_id string is deep-copied into owned memory so the caller's
     /// buffer can be freed or reused after this call.
-    pub fn addPeer(self: *SyncChain, peer_id: []const u8, target: ChainTarget) !void {
+    pub fn addPeer(
+        self: *SyncChain,
+        peer_id: []const u8,
+        target: ChainTarget,
+        earliest_available_slot: ?u64,
+    ) !void {
         // If the key already exists, update value only — keep the owned key.
         if (self.peers.getPtr(peer_id)) |value_ptr| {
-            value_ptr.* = target;
+            value_ptr.* = .{
+                .target = target,
+                .earliest_available_slot = earliest_available_slot,
+            };
             self.computeTarget();
             return;
         }
         const owned_id = try self.allocator.dupe(u8, peer_id);
         errdefer self.allocator.free(owned_id);
-        try self.peers.put(owned_id, target);
+        try self.peers.put(owned_id, .{
+            .target = target,
+            .earliest_available_slot = earliest_available_slot,
+        });
         self.computeTarget();
     }
 
@@ -263,18 +280,61 @@ pub const SyncChain = struct {
     /// the target correctly decreases (instead of sticking at the stale watermark).
     fn computeTarget(self: *SyncChain) void {
         var best: ?ChainTarget = null;
-        for (self.peers.values()) |t| {
+        for (self.peers.values()) |peer| {
+            const t = peer.target;
             if (best == null or t.slot > best.?.slot) best = t;
         }
         if (best) |b| self.target = b;
     }
 
-    /// Select a peer for downloading — simple round-robin by least-used.
-    fn selectPeer(self: *SyncChain) ?[]const u8 {
+    /// Select the most suitable peer for the given batch.
+    ///
+    /// Eligibility rules follow the serving constraints we already know:
+    /// - a peer whose target is behind the batch start cannot help
+    /// - a peer whose earliest_available_slot is after the batch start cannot help
+    ///
+    /// Among eligible peers, prefer the one with the fewest active downloads,
+    /// then the highest target slot as a tiebreaker.
+    fn selectPeer(self: *const SyncChain, batch: *const Batch) ?[]const u8 {
         if (self.peers.count() == 0) return null;
-        // Simple: pick the first peer. A production implementation would
-        // balance load, but for correctness any connected peer works.
-        return self.peers.keys()[0];
+
+        var best_peer: ?[]const u8 = null;
+        var best_active_downloads: usize = std.math.maxInt(usize);
+        var best_target_slot: u64 = 0;
+
+        for (self.peers.keys(), self.peers.values()) |peer_id, peer| {
+            if (peer.target.slot < batch.start_slot) continue;
+            if (self.sync_type == .head) {
+                if (batch.last_downloaded_slot) |last_downloaded_slot| {
+                    if (peer.target.slot < last_downloaded_slot) continue;
+                }
+            }
+            if (peer.earliest_available_slot) |earliest_available_slot| {
+                if (earliest_available_slot > batch.start_slot) continue;
+            }
+
+            const active_downloads = self.activeDownloadsForPeer(peer_id);
+            if (best_peer == null or
+                active_downloads < best_active_downloads or
+                (active_downloads == best_active_downloads and peer.target.slot > best_target_slot))
+            {
+                best_peer = peer_id;
+                best_active_downloads = active_downloads;
+                best_target_slot = peer.target.slot;
+            }
+        }
+
+        return best_peer;
+    }
+
+    fn activeDownloadsForPeer(self: *const SyncChain, peer_id: []const u8) usize {
+        var active_downloads: usize = 0;
+        for (self.batches.items) |batch| {
+            if (batch.status != .downloading) continue;
+            const download_peer = batch.download_peer orelse continue;
+            if (std.mem.eql(u8, download_peer, peer_id)) active_downloads += 1;
+        }
+        return active_downloads;
     }
 
     /// Dispatch download requests for all awaiting_download batches.
@@ -286,7 +346,7 @@ pub const SyncChain = struct {
                     b.status = .awaiting_validation;
                     continue;
                 }
-                const peer = self.selectPeer() orelse continue;
+                const peer = self.selectPeer(b) orelse continue;
                 b.startDownload(peer);
                 self.callbacks.downloadByRange(
                     self.id,
@@ -381,6 +441,8 @@ const TestSyncCallbacks = struct {
     last_chain_id: u32 = 0,
     last_batch_id: BatchId = 0,
     last_generation: u32 = 0,
+    last_peer_id_buf: [64]u8 = undefined,
+    last_peer_id_len: usize = 0,
     should_fail_processing: bool = false,
 
     fn processChainSegmentFn(ptr: *anyopaque, blocks: []const BatchBlock, _: RangeSyncType) anyerror!void {
@@ -394,7 +456,7 @@ const TestSyncCallbacks = struct {
         chain_id: u32,
         batch_id: BatchId,
         generation: u32,
-        _: []const u8,
+        peer_id: []const u8,
         _: u64,
         _: u64,
     ) void {
@@ -403,6 +465,8 @@ const TestSyncCallbacks = struct {
         self.last_chain_id = chain_id;
         self.last_batch_id = batch_id;
         self.last_generation = generation;
+        self.last_peer_id_len = @min(peer_id.len, self.last_peer_id_buf.len);
+        @memcpy(self.last_peer_id_buf[0..self.last_peer_id_len], peer_id[0..self.last_peer_id_len]);
     }
 
     fn reportPeerFn(ptr: *anyopaque, _: []const u8) void {
@@ -424,6 +488,10 @@ const TestSyncCallbacks = struct {
             .reportPeerFn = &reportPeerFn,
         };
     }
+
+    fn lastPeerId(self: *const TestSyncCallbacks) []const u8 {
+        return self.last_peer_id_buf[0..self.last_peer_id_len];
+    }
 };
 
 test "SyncChain: basic batch pipeline" {
@@ -439,7 +507,7 @@ test "SyncChain: basic batch pipeline" {
     );
     defer chain.deinit();
 
-    try chain.addPeer("peer_a", .{ .slot = 128, .root = [_]u8{0xFF} ** 32 });
+    try chain.addPeer("peer_a", .{ .slot = 128, .root = [_]u8{0xFF} ** 32 }, null);
     chain.startSyncing();
 
     // First tick fills batches and dispatches downloads.
@@ -461,8 +529,8 @@ test "SyncChain: peer management" {
     );
     defer chain.deinit();
 
-    try chain.addPeer("p1", .{ .slot = 100, .root = [_]u8{0xAA} ** 32 });
-    try chain.addPeer("p2", .{ .slot = 200, .root = [_]u8{0xBB} ** 32 });
+    try chain.addPeer("p1", .{ .slot = 100, .root = [_]u8{0xAA} ** 32 }, null);
+    try chain.addPeer("p2", .{ .slot = 200, .root = [_]u8{0xBB} ** 32 }, null);
     try std.testing.expectEqual(@as(usize, 2), chain.peerCount());
     try std.testing.expectEqual(@as(u64, 200), chain.target.slot);
 
@@ -487,7 +555,7 @@ test "SyncChain: completes when all batches processed" {
     );
     defer chain.deinit();
 
-    try chain.addPeer("p1", .{ .slot = 2, .root = [_]u8{0} ** 32 });
+    try chain.addPeer("p1", .{ .slot = 2, .root = [_]u8{0} ** 32 }, null);
     chain.startSyncing();
 
     // Tick to create batches and dispatch download.
@@ -507,4 +575,62 @@ test "SyncChain: completes when all batches processed" {
     try std.testing.expectEqual(SyncChainStatus.done, chain.status);
     // 2 blocks were imported through the segment callback.
     try std.testing.expectEqual(@as(u32, 2), tc.processed_count);
+}
+
+test "SyncChain: skips peers that cannot serve the batch start slot" {
+    const allocator = std.testing.allocator;
+    var tc = TestSyncCallbacks{};
+    var chain = SyncChain.init(
+        allocator,
+        0,
+        .head,
+        0,
+        .{ .slot = 0, .root = [_]u8{0x11} ** 32 },
+        tc.callbacks(),
+    );
+    defer chain.deinit();
+
+    try chain.addPeer("too_new", .{ .slot = 0, .root = [_]u8{0x11} ** 32 }, 32);
+    try chain.addPeer("usable", .{ .slot = 0, .root = [_]u8{0x11} ** 32 }, 0);
+    chain.startSyncing();
+
+    _ = try chain.tick();
+
+    try std.testing.expectEqual(@as(u32, 1), tc.downloaded_count);
+    try std.testing.expectEqualStrings("usable", tc.lastPeerId());
+}
+
+test "SyncChain: head retries avoid peers behind known batch progress" {
+    const allocator = std.testing.allocator;
+    var tc = TestSyncCallbacks{};
+    var chain = SyncChain.init(
+        allocator,
+        0,
+        .head,
+        0,
+        .{ .slot = 20, .root = [_]u8{0x33} ** 32 },
+        tc.callbacks(),
+    );
+    defer chain.deinit();
+
+    try chain.addPeer("stale", .{ .slot = 5, .root = [_]u8{0x33} ** 32 }, null);
+    try chain.addPeer("fresh", .{ .slot = 20, .root = [_]u8{0x33} ** 32 }, null);
+    chain.startSyncing();
+
+    _ = try chain.tick();
+    try std.testing.expectEqualStrings("fresh", tc.lastPeerId());
+
+    const blocks = [_]BatchBlock{
+        .{ .slot = 0, .block_bytes = "b0" },
+        .{ .slot = 10, .block_bytes = "b10" },
+    };
+    chain.onBatchResponse(tc.last_batch_id, tc.last_generation, &blocks);
+
+    tc.should_fail_processing = true;
+    try std.testing.expectError(error.ProcessingFailed, chain.tick());
+    tc.should_fail_processing = false;
+
+    _ = try chain.tick();
+    try std.testing.expectEqual(@as(u32, 2), tc.downloaded_count);
+    try std.testing.expectEqualStrings("fresh", tc.lastPeerId());
 }

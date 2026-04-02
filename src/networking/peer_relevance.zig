@@ -15,6 +15,7 @@
 const std = @import("std");
 const testing = std.testing;
 
+const ForkSeq = @import("config").ForkSeq;
 const status_cache = @import("status_cache.zig");
 const CachedStatus = status_cache.CachedStatus;
 
@@ -39,6 +40,8 @@ pub const IrrelevantPeerCode = enum {
     different_finalized,
     /// Remote's head slot is too far in the future — clock skew or different genesis.
     different_clocks,
+    /// Post-Fulu peer did not announce earliestAvailableSlot.
+    no_earliest_available_slot,
 };
 
 /// Detailed irrelevance info for logging.
@@ -54,6 +57,7 @@ pub const IrrelevantPeerInfo = union(IrrelevantPeerCode) {
     different_clocks: struct {
         slot_diff: i64,
     },
+    no_earliest_available_slot: void,
 
     pub fn code(self: IrrelevantPeerInfo) IrrelevantPeerCode {
         return std.meta.activeTag(self);
@@ -78,7 +82,9 @@ pub fn assertPeerRelevance(
     remote_finalized_root: [32]u8,
     remote_finalized_epoch: u64,
     remote_head_slot: u64,
+    remote_earliest_available_slot: ?u64,
     local: CachedStatus,
+    local_fork_seq: ForkSeq,
     current_slot: u64,
 ) ?IrrelevantPeerInfo {
     // 1. Fork digest must match — different digest means different network/fork entirely.
@@ -131,6 +137,10 @@ pub fn assertPeerRelevance(
     // This means we'd be more likely to disconnect peers that are attempting to sync,
     // which would affect network stability."
 
+    if (local_fork_seq.gte(.fulu) and remote_earliest_available_slot == null) {
+        return .{ .no_earliest_available_slot = {} };
+    }
+
     return null; // Peer is relevant.
 }
 
@@ -162,7 +172,9 @@ test "assertPeerRelevance: compatible peer returns null" {
         TEST_FINALIZED_ROOT,
         10,
         315,
+        null,
         local,
+        .phase0,
         320,
     );
     try testing.expect(result == null);
@@ -176,7 +188,9 @@ test "assertPeerRelevance: different fork digest → incompatible_forks" {
         TEST_FINALIZED_ROOT,
         10,
         315,
+        null,
         local,
+        .phase0,
         320,
     );
     try testing.expect(result != null);
@@ -191,7 +205,9 @@ test "assertPeerRelevance: head too far in future → different_clocks" {
         TEST_FINALIZED_ROOT,
         10,
         400,
+        null,
         local,
+        .phase0,
         320,
     );
     try testing.expect(result != null);
@@ -206,7 +222,9 @@ test "assertPeerRelevance: head at current_slot + 1 → still relevant" {
         TEST_FINALIZED_ROOT,
         10,
         321,
+        null,
         local,
+        .phase0,
         320,
     );
     try testing.expect(result == null);
@@ -219,7 +237,9 @@ test "assertPeerRelevance: different finalized root at same epoch → different_
         OTHER_FINALIZED_ROOT, // Different from local's TEST_FINALIZED_ROOT
         10, // Same epoch
         315,
+        null,
         local,
+        .phase0,
         320,
     );
     try testing.expect(result != null);
@@ -235,7 +255,9 @@ test "assertPeerRelevance: different finalized root at earlier epoch → relevan
         OTHER_FINALIZED_ROOT,
         5, // Earlier epoch
         200,
+        null,
         local,
+        .phase0,
         320,
     );
     try testing.expect(result == null);
@@ -249,7 +271,9 @@ test "assertPeerRelevance: zero finalized root → skip finalized check" {
         ZERO_ROOT,
         10,
         315,
+        null,
         local,
+        .phase0,
         320,
     );
     try testing.expect(result == null);
@@ -263,7 +287,9 @@ test "assertPeerRelevance: local has zero finalized root → skip finalized chec
         OTHER_FINALIZED_ROOT,
         10,
         315,
+        null,
         local,
+        .phase0,
         320,
     );
     try testing.expect(result == null);
@@ -278,7 +304,9 @@ test "assertPeerRelevance: remote finalized ahead of us → relevant" {
         OTHER_FINALIZED_ROOT,
         20, // Ahead of us
         321,
+        null,
         local,
+        .phase0,
         320,
     );
     try testing.expect(result == null);
@@ -293,7 +321,9 @@ test "assertPeerRelevance: remote head far behind us → still relevant" {
         TEST_FINALIZED_ROOT,
         10,
         10, // Far behind
+        null,
         local,
+        .phase0,
         320,
     );
     try testing.expect(result == null);
@@ -306,8 +336,26 @@ test "assertPeerRelevance: current_slot at zero → handles edge case" {
         ZERO_ROOT,
         0,
         1,
+        null,
         local,
+        .phase0,
         0,
     );
     try testing.expect(result == null);
+}
+
+test "assertPeerRelevance: post-Fulu peer without earliestAvailableSlot is irrelevant" {
+    const local = makeLocalStatus(10, 320);
+    const result = assertPeerRelevance(
+        TEST_FORK_DIGEST,
+        TEST_FINALIZED_ROOT,
+        10,
+        315,
+        null,
+        local,
+        .fulu,
+        320,
+    );
+    try testing.expect(result != null);
+    try testing.expectEqual(IrrelevantPeerCode.no_earliest_available_slot, result.?.code());
 }

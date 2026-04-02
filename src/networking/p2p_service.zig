@@ -51,9 +51,11 @@ pub const QuicStream = quic_mod.Stream;
 const ReqRespContext = req_resp_handler.ReqRespContext;
 
 const StatusProtocol = eth2_protocols.StatusProtocol;
+const StatusV2Protocol = eth2_protocols.StatusV2Protocol;
 const GoodbyeProtocol = eth2_protocols.GoodbyeProtocol;
 const PingProtocol = eth2_protocols.PingProtocol;
 const MetadataProtocol = eth2_protocols.MetadataProtocol;
+const MetadataV3Protocol = eth2_protocols.MetadataV3Protocol;
 const BlocksByRangeProtocol = eth2_protocols.BlocksByRangeProtocol;
 const BlocksByRootProtocol = eth2_protocols.BlocksByRootProtocol;
 const BlobSidecarsByRangeProtocol = eth2_protocols.BlobSidecarsByRangeProtocol;
@@ -72,11 +74,30 @@ fn unixTimeMs(io: Io) u64 {
     return if (ms >= 0) @intCast(ms) else 0;
 }
 
-const identify_supported_protocols = &.{
+const identify_supported_protocols_without_light_client = &.{
     "/eth2/beacon_chain/req/status/1/ssz_snappy",
+    "/eth2/beacon_chain/req/status/2/ssz_snappy",
     "/eth2/beacon_chain/req/goodbye/1/ssz_snappy",
     "/eth2/beacon_chain/req/ping/1/ssz_snappy",
     "/eth2/beacon_chain/req/metadata/2/ssz_snappy",
+    "/eth2/beacon_chain/req/metadata/3/ssz_snappy",
+    "/eth2/beacon_chain/req/beacon_blocks_by_range/2/ssz_snappy",
+    "/eth2/beacon_chain/req/beacon_blocks_by_root/2/ssz_snappy",
+    "/eth2/beacon_chain/req/blob_sidecars_by_range/1/ssz_snappy",
+    "/eth2/beacon_chain/req/blob_sidecars_by_root/1/ssz_snappy",
+    "/eth2/beacon_chain/req/data_column_sidecars_by_range/1/ssz_snappy",
+    "/eth2/beacon_chain/req/data_column_sidecars_by_root/1/ssz_snappy",
+    "/meshsub/1.2.0",
+    "/ipfs/id/1.0.0",
+};
+
+const identify_supported_protocols_with_light_client = &.{
+    "/eth2/beacon_chain/req/status/1/ssz_snappy",
+    "/eth2/beacon_chain/req/status/2/ssz_snappy",
+    "/eth2/beacon_chain/req/goodbye/1/ssz_snappy",
+    "/eth2/beacon_chain/req/ping/1/ssz_snappy",
+    "/eth2/beacon_chain/req/metadata/2/ssz_snappy",
+    "/eth2/beacon_chain/req/metadata/3/ssz_snappy",
     "/eth2/beacon_chain/req/beacon_blocks_by_range/2/ssz_snappy",
     "/eth2/beacon_chain/req/beacon_blocks_by_root/2/ssz_snappy",
     "/eth2/beacon_chain/req/blob_sidecars_by_range/1/ssz_snappy",
@@ -91,15 +112,37 @@ const identify_supported_protocols = &.{
     "/ipfs/id/1.0.0",
 };
 
-// ─── Switch type ─────────────────────────────────────────────────────────────
+// ─── Switch types ────────────────────────────────────────────────────────────
 
-pub const Eth2Switch = swarm_mod.Switch(.{
+pub const Eth2SwitchWithoutLightClient = swarm_mod.Switch(.{
     .transports = &.{QuicTransport},
     .protocols = &.{
         StatusProtocol,
+        StatusV2Protocol,
         GoodbyeProtocol,
         PingProtocol,
         MetadataProtocol,
+        MetadataV3Protocol,
+        BlocksByRangeProtocol,
+        BlocksByRootProtocol,
+        BlobSidecarsByRangeProtocol,
+        BlobSidecarsByRootProtocol,
+        DataColumnsByRangeProtocol,
+        DataColumnsByRootProtocol,
+        GossipsubHandler,
+        IdentifyHandler,
+    },
+});
+
+pub const Eth2SwitchWithLightClient = swarm_mod.Switch(.{
+    .transports = &.{QuicTransport},
+    .protocols = &.{
+        StatusProtocol,
+        StatusV2Protocol,
+        GoodbyeProtocol,
+        PingProtocol,
+        MetadataProtocol,
+        MetadataV3Protocol,
         BlocksByRangeProtocol,
         BlocksByRootProtocol,
         BlobSidecarsByRangeProtocol,
@@ -115,6 +158,108 @@ pub const Eth2Switch = swarm_mod.Switch(.{
     },
 });
 
+const Network = union(enum) {
+    without_light_client: Eth2SwitchWithoutLightClient,
+    with_light_client: Eth2SwitchWithLightClient,
+
+    fn listen(self: *@This(), io: Io, listen_addr: Multiaddr) !void {
+        switch (self.*) {
+            inline else => |*network| try network.listen(io, listen_addr),
+        }
+    }
+
+    fn dial(self: *@This(), io: Io, peer_addr: Multiaddr) ![]const u8 {
+        return switch (self.*) {
+            inline else => |*network| try network.dial(io, peer_addr),
+        };
+    }
+
+    fn isPeerConnected(self: *const @This(), peer_id: []const u8) bool {
+        return switch (self.*) {
+            inline else => |network| network.connections.contains(peer_id),
+        };
+    }
+
+    fn snapshotConnectedPeerIds(self: *const @This(), allocator: Allocator) ![][]const u8 {
+        const connection_count = switch (self.*) {
+            inline else => |network| network.connections.count(),
+        };
+
+        var peer_ids = try allocator.alloc([]const u8, connection_count);
+        var copied: usize = 0;
+        errdefer {
+            for (peer_ids[0..copied]) |peer_id| allocator.free(peer_id);
+            allocator.free(peer_ids);
+        }
+
+        switch (self.*) {
+            inline else => |network| {
+                var iter = network.connections.iterator();
+                while (iter.next()) |entry| : (copied += 1) {
+                    peer_ids[copied] = try allocator.dupe(u8, entry.key_ptr.*);
+                }
+            },
+        }
+
+        return peer_ids;
+    }
+
+    fn newStreamWithPayload(
+        self: *@This(),
+        io: Io,
+        peer_id: []const u8,
+        comptime Protocol: type,
+        ssz_payload: ?[]const u8,
+    ) !void {
+        switch (self.*) {
+            inline else => |*network| try network.newStreamWithPayload(io, peer_id, Protocol, ssz_payload),
+        }
+    }
+
+    fn dialProtocol(self: *@This(), io: Io, peer_id: []const u8, protocol_id: []const u8) !quic_mod.Stream {
+        return switch (self.*) {
+            inline else => |*network| try network.dialProtocol(io, peer_id, protocol_id),
+        };
+    }
+
+    fn disconnectPeer(self: *@This(), io: Io, peer_id: []const u8) bool {
+        return switch (self.*) {
+            inline else => |*network| blk: {
+                const conn = network.connections.get(peer_id) orelse break :blk false;
+                conn.close(io);
+                break :blk true;
+            },
+        };
+    }
+
+    fn identifyResult(self: *@This(), peer_id: []const u8) ?*const identify_mod.IdentifyResult {
+        return switch (self.*) {
+            inline else => |*network| network.getHandler(IdentifyHandler).getPeerResult(peer_id),
+        };
+    }
+
+    fn close(self: *@This(), io: Io) void {
+        switch (self.*) {
+            inline else => |*network| network.close(io),
+        }
+    }
+
+    fn deinit(self: *@This(), io: Io) void {
+        switch (self.*) {
+            inline else => |*network| {
+                network.deinit(io);
+                network.getHandler(IdentifyHandler).deinit();
+            },
+        }
+    }
+
+    fn listenAddrs(self: *const @This()) []const std.Io.net.IpAddress {
+        return switch (self.*) {
+            inline else => |network| network.listenAddrs(),
+        };
+    }
+};
+
 // ─── Configuration ───────────────────────────────────────────────────────────
 
 pub const P2pConfig = struct {
@@ -129,6 +274,9 @@ pub const P2pConfig = struct {
     host_identity: ?identity_mod.KeyPair = null,
     /// Identify agent version to advertise. Null hides implementation details.
     identify_agent_version: ?[]const u8 = null,
+    /// Disable the light-client req/resp server surface. This defaults to true
+    /// because the current node does not implement those handlers yet.
+    disable_light_client_server: bool = true,
     /// GossipSub router configuration.
     gossipsub_config: GossipsubConfig = .{},
 };
@@ -139,7 +287,7 @@ pub const P2pService = struct {
     const Self = @This();
 
     allocator: Allocator,
-    network: Eth2Switch,
+    network: Network,
     gossipsub: *GossipsubService,
     gossip_adapter: EthGossipAdapter,
     host_identity: ?*identity_mod.KeyPair,
@@ -159,36 +307,65 @@ pub const P2pService = struct {
             allocator.destroy(ptr);
         };
 
-        const network = Eth2Switch.init(
-            allocator,
-            .{ .host_identity = host_identity },
-            .{
-                StatusProtocol.init(allocator, config.req_resp_context),
-                GoodbyeProtocol.init(allocator, config.req_resp_context),
-                PingProtocol.init(allocator, config.req_resp_context),
-                MetadataProtocol.init(allocator, config.req_resp_context),
-                BlocksByRangeProtocol.init(allocator, config.req_resp_context),
-                BlocksByRootProtocol.init(allocator, config.req_resp_context),
-                BlobSidecarsByRangeProtocol.init(allocator, config.req_resp_context),
-                BlobSidecarsByRootProtocol.init(allocator, config.req_resp_context),
-                DataColumnsByRangeProtocol.init(allocator, config.req_resp_context),
-                DataColumnsByRootProtocol.init(allocator, config.req_resp_context),
-                LightClientBootstrapProtocol.init(allocator, config.req_resp_context),
-                LightClientUpdatesByRangeProtocol.init(allocator, config.req_resp_context),
-                LightClientFinalityUpdateProtocol.init(allocator, config.req_resp_context),
-                LightClientOptimisticUpdateProtocol.init(allocator, config.req_resp_context),
-                GossipsubHandler{ .svc = gossipsub },
-                IdentifyHandler{
-                    .allocator = allocator,
-                    .config = .{
-                        .protocol_version = "eth2/1.0.0",
-                        .agent_version = config.identify_agent_version,
-                        .supported_protocols = identify_supported_protocols,
-                    },
-                    .peer_results = std.StringArrayHashMap(identify_mod.IdentifyResult).init(allocator),
-                },
+        const identify_handler = IdentifyHandler{
+            .allocator = allocator,
+            .config = .{
+                .protocol_version = "eth2/1.0.0",
+                .agent_version = config.identify_agent_version,
+                .supported_protocols = if (config.disable_light_client_server)
+                    identify_supported_protocols_without_light_client
+                else
+                    identify_supported_protocols_with_light_client,
             },
-        );
+            .peer_results = std.StringArrayHashMap(identify_mod.IdentifyResult).init(allocator),
+        };
+
+        const network: Network = if (config.disable_light_client_server)
+            .{ .without_light_client = Eth2SwitchWithoutLightClient.init(
+                allocator,
+                .{ .host_identity = host_identity },
+                .{
+                    StatusProtocol.init(allocator, config.req_resp_context),
+                    StatusV2Protocol.init(allocator, config.req_resp_context),
+                    GoodbyeProtocol.init(allocator, config.req_resp_context),
+                    PingProtocol.init(allocator, config.req_resp_context),
+                    MetadataProtocol.init(allocator, config.req_resp_context),
+                    MetadataV3Protocol.init(allocator, config.req_resp_context),
+                    BlocksByRangeProtocol.init(allocator, config.req_resp_context),
+                    BlocksByRootProtocol.init(allocator, config.req_resp_context),
+                    BlobSidecarsByRangeProtocol.init(allocator, config.req_resp_context),
+                    BlobSidecarsByRootProtocol.init(allocator, config.req_resp_context),
+                    DataColumnsByRangeProtocol.init(allocator, config.req_resp_context),
+                    DataColumnsByRootProtocol.init(allocator, config.req_resp_context),
+                    GossipsubHandler{ .svc = gossipsub },
+                    identify_handler,
+                },
+            ) }
+        else
+            .{ .with_light_client = Eth2SwitchWithLightClient.init(
+                allocator,
+                .{ .host_identity = host_identity },
+                .{
+                    StatusProtocol.init(allocator, config.req_resp_context),
+                    StatusV2Protocol.init(allocator, config.req_resp_context),
+                    GoodbyeProtocol.init(allocator, config.req_resp_context),
+                    PingProtocol.init(allocator, config.req_resp_context),
+                    MetadataProtocol.init(allocator, config.req_resp_context),
+                    MetadataV3Protocol.init(allocator, config.req_resp_context),
+                    BlocksByRangeProtocol.init(allocator, config.req_resp_context),
+                    BlocksByRootProtocol.init(allocator, config.req_resp_context),
+                    BlobSidecarsByRangeProtocol.init(allocator, config.req_resp_context),
+                    BlobSidecarsByRootProtocol.init(allocator, config.req_resp_context),
+                    DataColumnsByRangeProtocol.init(allocator, config.req_resp_context),
+                    DataColumnsByRootProtocol.init(allocator, config.req_resp_context),
+                    LightClientBootstrapProtocol.init(allocator, config.req_resp_context),
+                    LightClientUpdatesByRangeProtocol.init(allocator, config.req_resp_context),
+                    LightClientFinalityUpdateProtocol.init(allocator, config.req_resp_context),
+                    LightClientOptimisticUpdateProtocol.init(allocator, config.req_resp_context),
+                    GossipsubHandler{ .svc = gossipsub },
+                    identify_handler,
+                },
+            ) };
 
         const gossip_adapter = EthGossipAdapter.init(
             allocator,
@@ -225,24 +402,12 @@ pub const P2pService = struct {
 
     /// Return whether the peer currently has an active transport connection.
     pub fn isPeerConnected(self: *Self, peer_id: []const u8) bool {
-        return self.network.connections.contains(peer_id);
+        return self.network.isPeerConnected(peer_id);
     }
 
     /// Snapshot the currently connected peer IDs. Caller owns the returned slice and entries.
     pub fn snapshotConnectedPeerIds(self: *Self, allocator: Allocator) ![][]const u8 {
-        var peer_ids = try allocator.alloc([]const u8, self.network.connections.count());
-        var copied: usize = 0;
-        errdefer {
-            for (peer_ids[0..copied]) |peer_id| allocator.free(peer_id);
-            allocator.free(peer_ids);
-        }
-
-        var iter = self.network.connections.iterator();
-        while (iter.next()) |entry| : (copied += 1) {
-            peer_ids[copied] = try allocator.dupe(u8, entry.key_ptr.*);
-        }
-
-        return peer_ids;
+        return self.network.snapshotConnectedPeerIds(allocator);
     }
 
     /// Open a new outbound stream for a protocol to a connected peer.
@@ -276,14 +441,12 @@ pub const P2pService = struct {
     /// Gracefully close a connected peer transport. The switch will clean up
     /// handler state when its connection task observes the closure.
     pub fn disconnectPeer(self: *Self, io: Io, peer_id: []const u8) bool {
-        const conn = self.network.connections.get(peer_id) orelse return false;
-        conn.close(io);
-        return true;
+        return self.network.disconnectPeer(io, peer_id);
     }
 
     /// Return the latest identify result for a peer, if available.
     pub fn identifyResult(self: *Self, peer_id: []const u8) ?*const identify_mod.IdentifyResult {
-        return self.network.getHandler(IdentifyHandler).getPeerResult(peer_id);
+        return self.network.identifyResult(peer_id);
     }
 
     /// Publish an SSZ message to a gossip topic.
@@ -336,7 +499,6 @@ pub const P2pService = struct {
     pub fn deinit(self: *Self, io: Io) void {
         self.gossip_adapter.deinit();
         self.network.deinit(io);
-        self.network.getHandler(IdentifyHandler).deinit();
         self.gossipsub.deinit();
         if (self.host_identity) |host_identity| {
             host_identity.deinit();
@@ -346,7 +508,9 @@ pub const P2pService = struct {
 
     /// Spawn a background fiber for the gossipsub heartbeat timer.
     fn startHeartbeat(self: *Self, io: Io) void {
-        self.network.background.async(io, heartbeatLoop, .{ self.gossipsub, io });
+        switch (self.network) {
+            inline else => |*network| network.background.async(io, heartbeatLoop, .{ self.gossipsub, io }),
+        }
     }
 
     fn heartbeatLoop(gs: *GossipsubService, io: Io) void {
@@ -374,13 +538,35 @@ pub const P2pService = struct {
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
-test "P2pService: Eth2Switch compiles with 16 protocols" {
-    // 14 req/resp + 1 gossipsub + 1 identify = 16 protocols.
+test "P2pService: Eth2SwitchWithoutLightClient compiles with 14 protocols" {
     const protocols = [_]type{
         StatusProtocol,
+        StatusV2Protocol,
         GoodbyeProtocol,
         PingProtocol,
         MetadataProtocol,
+        MetadataV3Protocol,
+        BlocksByRangeProtocol,
+        BlocksByRootProtocol,
+        BlobSidecarsByRangeProtocol,
+        BlobSidecarsByRootProtocol,
+        DataColumnsByRangeProtocol,
+        DataColumnsByRootProtocol,
+        GossipsubHandler,
+        IdentifyHandler,
+    };
+    try std.testing.expectEqual(@as(usize, 14), protocols.len);
+}
+
+test "P2pService: Eth2SwitchWithLightClient compiles with 18 protocols" {
+    // 16 req/resp + 1 gossipsub + 1 identify = 18 protocols.
+    const protocols = [_]type{
+        StatusProtocol,
+        StatusV2Protocol,
+        GoodbyeProtocol,
+        PingProtocol,
+        MetadataProtocol,
+        MetadataV3Protocol,
         BlocksByRangeProtocol,
         BlocksByRootProtocol,
         BlobSidecarsByRangeProtocol,
@@ -394,15 +580,17 @@ test "P2pService: Eth2Switch compiles with 16 protocols" {
         GossipsubHandler,
         IdentifyHandler,
     };
-    try std.testing.expectEqual(@as(usize, 16), protocols.len);
+    try std.testing.expectEqual(@as(usize, 18), protocols.len);
 }
 
 test "P2pService: all eth2 protocol IDs are unique" {
     const ids = [_][]const u8{
         StatusProtocol.id,
+        StatusV2Protocol.id,
         GoodbyeProtocol.id,
         PingProtocol.id,
         MetadataProtocol.id,
+        MetadataV3Protocol.id,
         BlocksByRangeProtocol.id,
         BlocksByRootProtocol.id,
         BlobSidecarsByRangeProtocol.id,

@@ -5,6 +5,7 @@
 
 const std = @import("std");
 
+const config_mod = @import("config");
 const preset_root = @import("preset");
 const networking = @import("networking");
 const StatusMessage = networking.messages.StatusMessage;
@@ -12,6 +13,7 @@ const MetadataV2 = networking.messages.MetadataV2;
 const ReqRespContext = networking.ReqRespContext;
 const PayloadSink = networking.req_resp_handler.PayloadSink;
 const SlotPayload = networking.req_resp_handler.SlotPayload;
+const ForkSeq = config_mod.ForkSeq;
 
 pub const RequestContext = struct {
     // Stored as *anyopaque to avoid a circular dependency in the type graph.
@@ -23,6 +25,8 @@ pub fn makeReqRespContext(ctx: *RequestContext) ReqRespContext {
         .ptr = @ptrCast(ctx),
         .getStatus = &reqRespGetStatus,
         .getMetadata = &reqRespGetMetadata,
+        .getEarliestAvailableSlot = &reqRespGetEarliestAvailableSlot,
+        .getCustodyGroupCount = &reqRespGetCustodyGroupCount,
         .getPingSequence = &reqRespGetPingSequence,
         .findBlockByRoot = &reqRespFindBlockByRoot,
         .streamBlocksByRange = &reqRespStreamBlocksByRange,
@@ -30,6 +34,8 @@ pub fn makeReqRespContext(ctx: *RequestContext) ReqRespContext {
         .streamBlobsByRange = &reqRespStreamBlobsByRange,
         .findDataColumnByRoot = &reqRespFindDataColumnByRoot,
         .streamDataColumnsByRange = &reqRespStreamDataColumnsByRange,
+        .getCurrentForkSeq = &reqRespGetCurrentForkSeq,
+        .getForkSeqForSlot = &reqRespGetForkSeqForSlot,
         .getForkDigest = &reqRespGetForkDigest,
         .onGoodbye = &reqRespOnGoodbye,
         .onPeerStatus = &reqRespOnPeerStatus,
@@ -63,6 +69,16 @@ fn reqRespGetPingSequence(ptr: *anyopaque) u64 {
     return node.api_node_identity.metadata.seq_number;
 }
 
+fn reqRespGetEarliestAvailableSlot(ptr: *anyopaque) u64 {
+    const node = requestNode(ptr);
+    return node.earliest_available_slot;
+}
+
+fn reqRespGetCustodyGroupCount(ptr: *anyopaque) u64 {
+    const node = requestNode(ptr);
+    return node.config.chain.CUSTODY_REQUIREMENT;
+}
+
 fn reqRespFindBlockByRoot(ptr: *anyopaque, root: [32]u8, sink: *const PayloadSink) anyerror!void {
     const node = requestNode(ptr);
     const maybe_bytes = node.chainQuery().blockBytesByRoot(root) catch return;
@@ -80,7 +96,7 @@ fn reqRespStreamBlocksByRange(ptr: *anyopaque, start_slot: u64, count: u64, sink
     const query = node.chainQuery();
 
     const end_slot = std.math.add(u64, start_slot, count) catch return;
-    var slot = start_slot;
+    var slot = @max(start_slot, node.earliest_available_slot);
     while (slot < end_slot) : (slot += 1) {
         const maybe_bytes = query.blockBytesAtSlot(slot) catch continue;
         const bytes = maybe_bytes orelse continue;
@@ -159,7 +175,7 @@ fn reqRespStreamDataColumnsByRange(
     const query = node.chainQuery();
 
     const end_slot = std.math.add(u64, start_slot, count) catch return;
-    var slot = start_slot;
+    var slot = @max(start_slot, node.earliest_available_slot);
     while (slot < end_slot) : (slot += 1) {
         for (columns) |column_index| {
             const maybe_bytes = query.dataColumnAtSlot(slot, column_index) catch continue;
@@ -174,6 +190,16 @@ fn reqRespStreamDataColumnsByRange(
     }
 }
 
+fn reqRespGetCurrentForkSeq(ptr: *anyopaque) ForkSeq {
+    const node = requestNode(ptr);
+    return node.config.forkSeq(node.currentHeadSlot());
+}
+
+fn reqRespGetForkSeqForSlot(ptr: *anyopaque, slot: u64) ForkSeq {
+    const node = requestNode(ptr);
+    return node.config.forkSeq(slot);
+}
+
 fn reqRespGetForkDigest(ptr: *anyopaque, slot: u64) [4]u8 {
     const node = requestNode(ptr);
     return node.config.forkDigestAtSlot(slot, node.genesis_validators_root);
@@ -185,10 +211,10 @@ fn reqRespOnGoodbye(ptr: *anyopaque, peer_id: ?[]const u8, reason: u64) void {
     handlePeerGoodbye(node, effective_peer_id, reason);
 }
 
-fn reqRespOnPeerStatus(ptr: *anyopaque, peer_id: ?[]const u8, status: StatusMessage.Type) void {
+fn reqRespOnPeerStatus(ptr: *anyopaque, peer_id: ?[]const u8, status: StatusMessage.Type, earliest_available_slot: ?u64) void {
     const node = requestNode(ptr);
     const effective_peer_id = peer_id orelse return;
-    const irrelevance = handlePeerStatus(node, effective_peer_id, status);
+    const irrelevance = handlePeerStatus(node, effective_peer_id, status, earliest_available_slot);
     if (irrelevance) |code| {
         std.log.info("Peer {s} failed relevance check during inbound status handling: {s}", .{
             effective_peer_id,
@@ -197,7 +223,12 @@ fn reqRespOnPeerStatus(ptr: *anyopaque, peer_id: ?[]const u8, status: StatusMess
     }
 }
 
-pub fn handlePeerStatus(node: *BeaconNode, peer_id: []const u8, status: StatusMessage.Type) ?networking.IrrelevantPeerCode {
+pub fn handlePeerStatus(
+    node: *BeaconNode,
+    peer_id: []const u8,
+    status: StatusMessage.Type,
+    earliest_available_slot: ?u64,
+) ?networking.IrrelevantPeerCode {
     var irrelevance: ?networking.IrrelevantPeerCode = null;
     var registered_new_peer = false;
 
@@ -218,7 +249,9 @@ pub fn handlePeerStatus(node: *BeaconNode, peer_id: []const u8, status: StatusMe
             status.finalized_epoch,
             status.head_root,
             status.head_slot,
+            earliest_available_slot,
             localCachedStatus(node),
+            node.config.forkSeq(node.currentHeadSlot()),
             node.currentHeadSlot(),
         );
         pm.markStatusExchange(peer_id, now_ms);
@@ -229,7 +262,7 @@ pub fn handlePeerStatus(node: *BeaconNode, peer_id: []const u8, status: StatusMe
     }
 
     if (node.sync_service_inst) |sync_svc| {
-        sync_svc.onPeerStatus(peer_id, status) catch |err| {
+        sync_svc.onPeerStatus(peer_id, status, earliest_available_slot) catch |err| {
             std.log.warn("SyncService.onPeerStatus failed: {}", .{err});
         };
     }

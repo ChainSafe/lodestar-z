@@ -7,6 +7,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const custody = @import("custody.zig");
 const peer_info_mod = @import("peer_info.zig");
 const PeerInfo = peer_info_mod.PeerInfo;
 const ConnectionState = peer_info_mod.ConnectionState;
@@ -276,6 +277,17 @@ pub const PeerDB = struct {
         info.syncnets = syncnets;
     }
 
+    /// Update the verified discovery node ID for a peer.
+    pub fn updatePeerDiscoveryNodeId(
+        self: *PeerDB,
+        peer_id: []const u8,
+        node_id: [32]u8,
+    ) !void {
+        const info = self.peers.getPtr(peer_id) orelse return;
+        info.discovery_node_id = node_id;
+        try self.recomputeCustodyColumns(info);
+    }
+
     /// Update metadata sequence number and subnet subscriptions.
     pub fn updatePeerMetadata(
         self: *PeerDB,
@@ -283,11 +295,14 @@ pub const PeerDB = struct {
         metadata_seq: u64,
         attnets: AttnetsBitfield,
         syncnets: SyncnetsBitfield,
-    ) void {
+        custody_group_count: ?u64,
+    ) !void {
         const info = self.peers.getPtr(peer_id) orelse return;
         info.metadata_seq = metadata_seq;
         info.attnets = attnets;
         info.syncnets = syncnets;
+        info.custody_group_count = custody_group_count;
+        try self.recomputeCustodyColumns(info);
     }
 
     /// Record that the peer was observed responding successfully.
@@ -319,6 +334,7 @@ pub const PeerDB = struct {
         finalized_epoch: u64,
         head_slot: u64,
         head_root: [32]u8,
+        earliest_available_slot: ?u64,
     ) void {
         const info = self.peers.getPtr(peer_id) orelse return;
         info.sync_info = .{
@@ -326,11 +342,13 @@ pub const PeerDB = struct {
             .head_root = head_root,
             .finalized_epoch = finalized_epoch,
             .finalized_root = finalized_root,
+            .earliest_available_slot = earliest_available_slot,
         };
         info.last_status_fork_digest = fork_digest;
         info.last_status_finalized_root = finalized_root;
         info.last_status_finalized_epoch = finalized_epoch;
         info.last_status_head_slot = head_slot;
+        info.last_status_earliest_available_slot = earliest_available_slot;
     }
 
     /// Update the relevance status of a peer.
@@ -570,6 +588,21 @@ pub const PeerDB = struct {
                 },
             }
         }
+    }
+
+    fn recomputeCustodyColumns(self: *PeerDB, info: *PeerInfo) !void {
+        if (info.custody_columns) |cols| {
+            self.allocator.free(cols);
+            info.custody_columns = null;
+        }
+
+        const node_id = info.discovery_node_id orelse return;
+        const custody_group_count = info.custody_group_count orelse return;
+        info.custody_columns = try custody.getCustodyColumns(
+            self.allocator,
+            node_id,
+            custody_group_count,
+        );
     }
 };
 
@@ -847,4 +880,40 @@ test "PeerDB: graceful disconnect flow" {
     // Complete disconnect.
     db.peerDisconnected("peer_a", 2000);
     try std.testing.expectEqual(ConnectionState.disconnected, db.getPeer("peer_a").?.connection_state);
+}
+
+test "PeerDB: derives custody columns from discovery identity and metadata" {
+    const allocator = std.testing.allocator;
+    var db = PeerDB.init(allocator);
+    defer db.deinit();
+
+    _ = try db.peerConnected("peer_a", .outbound, 1_000);
+
+    const node_id = [_]u8{0x44} ** 32;
+    try db.updatePeerDiscoveryNodeId("peer_a", node_id);
+    try std.testing.expect(db.getPeer("peer_a").?.custody_columns == null);
+
+    try db.updatePeerMetadata(
+        "peer_a",
+        1,
+        AttnetsBitfield.initEmpty(),
+        SyncnetsBitfield.initEmpty(),
+        4,
+    );
+
+    const expected = try custody.getCustodyColumns(allocator, node_id, 4);
+    defer allocator.free(expected);
+
+    const peer = db.getPeer("peer_a").?;
+    try std.testing.expect(peer.custody_columns != null);
+    try std.testing.expectEqualSlices(u64, expected, peer.custody_columns.?);
+
+    try db.updatePeerMetadata(
+        "peer_a",
+        2,
+        AttnetsBitfield.initEmpty(),
+        SyncnetsBitfield.initEmpty(),
+        null,
+    );
+    try std.testing.expect(db.getPeer("peer_a").?.custody_columns == null);
 }

@@ -27,12 +27,16 @@ const ConnectionDirection = networking.ConnectionDirection;
 const GoodbyeReason = networking.GoodbyeReason;
 const PeerAction = networking.PeerAction;
 const ReqRespProtocol = networking.ReqRespProtocol;
+const StatusMessage = networking.messages.StatusMessage;
+const StatusMessageV2 = networking.messages.StatusMessageV2;
 const MetadataV2 = networking.messages.MetadataV2;
+const MetadataV3 = networking.messages.MetadataV3;
 const AttnetsBitfield = networking.peer_info.AttnetsBitfield;
 const SyncnetsBitfield = networking.peer_info.SyncnetsBitfield;
 const ATTESTATION_SUBNET_COUNT = networking.peer_info.ATTESTATION_SUBNET_COUNT;
 const SYNC_COMMITTEE_SUBNET_COUNT = networking.peer_info.SYNC_COMMITTEE_SUBNET_COUNT;
 const discv5 = @import("discv5");
+const libp2p = @import("zig-libp2p");
 const Multiaddr = @import("multiaddr").Multiaddr;
 const sync_mod = @import("sync");
 const SyncService = sync_mod.SyncService;
@@ -47,15 +51,32 @@ const SyncCallbackCtx = @import("sync_bridge.zig").SyncCallbackCtx;
 const BlobSidecar = types.deneb.BlobSidecar;
 const BlobIdentifier = types.deneb.BlobIdentifier;
 const DataColumnSidecar = types.fulu.DataColumnSidecar;
+const Libp2pPeerId = @TypeOf((@as(libp2p.security.Session1, undefined)).remote_id);
+const Libp2pPublicKey = @TypeOf((@as(libp2p.security.Session1, undefined)).remote_public_key);
 
 const BYTES_PER_BLOB = kzg_mod.BYTES_PER_BLOB;
 const MAX_COLUMNS = preset_root.NUMBER_OF_COLUMNS;
 
 const SyncBlockMeta = chain_mod.PlannedBlockIngress;
 
+const PeerStatusResponse = struct {
+    status: StatusMessage.Type,
+    earliest_available_slot: ?u64 = null,
+};
+
+const PeerMetadataResponse = struct {
+    metadata: MetadataV2.Type,
+    custody_group_count: ?u64 = null,
+};
+
 const SlotRange = struct {
     start_slot: u64,
     count: u64,
+};
+
+const DiscoveryPeerIdentity = struct {
+    node_id: [32]u8,
+    pubkey: [33]u8,
 };
 
 const BlobFetchState = struct {
@@ -156,6 +177,46 @@ fn formatDiscv5DialMultiaddr(buf: []u8, addr: discv5.Address) ![]const u8 {
             ip6.port,
         }),
     };
+}
+
+fn discoveryIdentityKnown(identity: DiscoveryPeerIdentity) bool {
+    return !std.mem.eql(u8, &identity.pubkey, &([_]u8{0} ** 33));
+}
+
+fn discoveryPeerIdMatches(
+    allocator: std.mem.Allocator,
+    peer_id_text: []const u8,
+    pubkey: [33]u8,
+) !bool {
+    const peer_data = try allocator.dupe(u8, pubkey[0..]);
+    defer allocator.free(peer_data);
+
+    var public_key = Libp2pPublicKey{
+        .type = .SECP256K1,
+        .data = peer_data,
+    };
+
+    const expected_peer_id = try Libp2pPeerId.fromPublicKey(allocator, &public_key);
+    const actual_peer_id = try Libp2pPeerId.fromString(allocator, peer_id_text);
+    return expected_peer_id.eql(&actual_peer_id);
+}
+
+fn discoveryPeerIdTextFromPubkey(
+    allocator: std.mem.Allocator,
+    pubkey: [33]u8,
+) ![]u8 {
+    const peer_data = try allocator.dupe(u8, pubkey[0..]);
+    defer allocator.free(peer_data);
+
+    var public_key = Libp2pPublicKey{
+        .type = .SECP256K1,
+        .data = peer_data,
+    };
+
+    const peer_id = try Libp2pPeerId.fromPublicKey(allocator, &public_key);
+    const peer_id_text = try allocator.alloc(u8, peer_id.toBase58Len());
+    _ = try peer_id.toBase58(peer_id_text);
+    return peer_id_text;
 }
 
 pub fn start(self: *BeaconNode, io: std.Io, listen_addr: []const u8, port: u16) !void {
@@ -294,6 +355,27 @@ pub fn processSyncBatches(self: *BeaconNode, io: std.Io, svc: *networking.P2pSer
             peer_id,
         });
 
+        if (self.peer_manager) |pm| {
+            if (pm.getPeer(peer_id)) |peer| {
+                if (peer.sync_info) |sync_info| {
+                    if (sync_info.earliest_available_slot) |earliest_available_slot| {
+                        if (req.start_slot < earliest_available_slot) {
+                            std.log.warn("Batch {d}: peer {s} cannot serve requested range start_slot={d} earliest_available_slot={d}", .{
+                                req.batch_id,
+                                peer_id,
+                                req.start_slot,
+                                earliest_available_slot,
+                            });
+                            if (self.sync_service_inst) |sync_svc| {
+                                sync_svc.onBatchError(req.chain_id, req.batch_id, req.generation, peer_id);
+                            }
+                            continue;
+                        }
+                    }
+                }
+            }
+        }
+
         const blocks = fetchRawBlocksByRange(self, io, svc, peer_id, req.start_slot, req.count) catch |err| {
             std.log.warn("Batch {d} fetch failed: {}", .{ req.batch_id, err });
             if (self.sync_service_inst) |sync_svc| {
@@ -425,6 +507,7 @@ const connectivity_maintenance_interval_ns: u64 = 100 * std.time.ns_per_ms;
 const discovery_maintenance_interval_ns: u64 = 6 * std.time.ns_per_s;
 const peer_maintenance_interval_ns: u64 = std.time.ns_per_s;
 const peer_manager_heartbeat_interval_ns: u64 = networking.peer_manager.HEARTBEAT_INTERVAL_MS * std.time.ns_per_ms;
+const max_discovery_dials_per_tick: u32 = 4;
 
 fn runDiscoveryMaintenance(self: *BeaconNode) bool {
     if (self.discovery_service) |ds| {
@@ -668,10 +751,16 @@ fn runPeerManagerHeartbeat(self: *BeaconNode, io: std.Io, svc: *networking.P2pSe
                 }, @intCast(query.subnet_id), @max(query.peers_needed, 1));
                 did_work = true;
             }
-            if (prioritization.peers_to_discover > 0) {
-                ds.discoverPeers();
+            for (prioritization.custody_columns_needing_peers) |query| {
+                ds.requestCustodyColumnPeers(query.column_index, @max(query.peers_needed, 1));
                 did_work = true;
             }
+            if (prioritization.peers_to_discover > 0) {
+                ds.requestMorePeers(prioritization.peers_to_discover);
+                did_work = true;
+            }
+            ds.discoverPeers();
+            did_work = true;
         }
 
         for (housekeeping.peers_to_disconnect) |peer_id| {
@@ -700,9 +789,11 @@ fn runPeerManagerHeartbeat(self: *BeaconNode, io: std.Io, svc: *networking.P2pSe
             did_work = true;
         }
         if (actions.peers_to_discover > 0) {
-            ds.discoverPeers();
+            ds.requestMorePeers(actions.peers_to_discover);
             did_work = true;
         }
+        ds.discoverPeers();
+        did_work = true;
     }
 
     for (actions.peers_to_disconnect) |peer_id| {
@@ -732,7 +823,7 @@ fn runPeerManagerMaintenance(self: *BeaconNode, io: std.Io, svc: *networking.P2p
             continue;
         };
 
-        if (reqresp_callbacks_mod.handlePeerStatus(self, peer_id, peer_status)) |_| {
+        if (reqresp_callbacks_mod.handlePeerStatus(self, peer_id, peer_status.status, peer_status.earliest_available_slot)) |_| {
             sendGoodbyeAndDisconnect(self, io, svc, peer_id, .irrelevant_network);
             did_work = true;
             continue;
@@ -924,7 +1015,17 @@ fn dialBootnodeEnr(self: *BeaconNode, io: std.Io, svc: *networking.P2pService, e
         return err;
     };
     std.log.info("Connected to bootnode, peer_id: {s}", .{peer_id});
-    _ = registerConnectedPeer(self, io, svc, peer_id, .outbound);
+    _ = registerConnectedPeer(
+        self,
+        io,
+        svc,
+        peer_id,
+        .outbound,
+        if (enr.pubkey) |pubkey|
+            .{ .node_id = discv5.enr.nodeIdFromCompressedPubkey(&pubkey), .pubkey = pubkey }
+        else
+            null,
+    );
 }
 
 fn initDiscoveryService(self: *BeaconNode) !void {
@@ -966,6 +1067,8 @@ fn initDiscoveryService(self: *BeaconNode) !void {
         .enr_udp6 = self.node_options.enr_udp6,
         .p2p_port = self.node_options.p2p_port,
         .p2p_port6 = self.node_options.p2p_port6,
+        .custody_group_count = @intCast(self.chain_runtime.custody_columns.len),
+        .default_custody_group_count = self.config.chain.CUSTODY_REQUIREMENT,
         .fork_digest = fork_digest,
         .target_peers = self.node_options.target_peers,
         .bootnodes = self.discovery_bootnodes,
@@ -1071,32 +1174,95 @@ fn preferredDiscoveredDialAddress(self: *BeaconNode, peer: *const networking.Dis
     return peer.addr_ip4 orelse peer.addr_ip6;
 }
 
+fn discoveryDialBudget(self: *BeaconNode) u32 {
+    const pm = self.peer_manager orelse return max_discovery_dials_per_tick;
+    const occupied_peers = pm.peerCount() + pm.dialingPeerCount();
+    if (occupied_peers >= pm.config.max_peers) return 0;
+    return @min(max_discovery_dials_per_tick, pm.config.max_peers - occupied_peers);
+}
+
 fn dialDiscoveredPeers(
     self: *BeaconNode,
     io: std.Io,
     svc: *networking.P2pService,
     ds: *DiscoveryService,
 ) bool {
-    const discovered_peers = ds.drainDiscoveredPeers();
-    defer self.allocator.free(discovered_peers);
+    const dial_budget = discoveryDialBudget(self);
+    if (dial_budget == 0) return false;
+
+    const discovered_peers = ds.takeDiscoveredPeers(dial_budget);
+    defer if (discovered_peers.len > 0) self.allocator.free(discovered_peers);
 
     var did_work = false;
+    const pm = self.peer_manager;
+    const now_ms = currentUnixTimeMs(io);
     for (discovered_peers) |peer| {
         if (!peer.has_quic) continue;
         const dial_addr = preferredDiscoveredDialAddress(self, &peer) orelse continue;
+
+        var predicted_peer_id: ?[]u8 = null;
+        defer if (predicted_peer_id) |peer_id| self.allocator.free(peer_id);
+
+        if (discoveryIdentityKnown(.{ .node_id = peer.node_id, .pubkey = peer.pubkey })) {
+            predicted_peer_id = discoveryPeerIdTextFromPubkey(self.allocator, peer.pubkey) catch |err| {
+                std.log.warn("Failed to derive peer ID from discovered ENR: {}", .{err});
+                continue;
+            };
+
+            const peer_id = predicted_peer_id.?;
+            if (svc.isPeerConnected(peer_id)) continue;
+
+            if (pm) |peer_manager| {
+                if (peer_manager.getPeer(peer_id)) |existing| {
+                    switch (existing.connection_state) {
+                        .banned, .dialing, .connected, .disconnecting => continue,
+                        .disconnected => {},
+                    }
+                }
+            }
+        }
 
         var ma_buf: [160]u8 = undefined;
         const ma_str = formatDiscv5DialMultiaddr(&ma_buf, dial_addr) catch continue;
         const peer_addr = Multiaddr.fromString(self.allocator, ma_str) catch continue;
         defer peer_addr.deinit();
 
+        if (pm) |peer_manager| {
+            if (predicted_peer_id) |known_peer_id| {
+                peer_manager.onDialing(known_peer_id, now_ms) catch |err| {
+                    std.log.warn("Failed to mark discovered peer {s} as dialing: {}", .{ known_peer_id, err });
+                    continue;
+                };
+            }
+        }
+
         const peer_id = svc.dial(io, peer_addr) catch |err| {
+            if (pm) |peer_manager| {
+                if (predicted_peer_id) |known_peer_id| {
+                    peer_manager.onPeerDisconnected(known_peer_id, now_ms);
+                }
+            }
             std.log.debug("Discovered peer dial failed: {}", .{err});
             continue;
         };
 
+        if (pm) |peer_manager| {
+            if (predicted_peer_id) |known_peer_id| {
+                if (!std.mem.eql(u8, known_peer_id, peer_id)) {
+                    peer_manager.onPeerDisconnected(known_peer_id, now_ms);
+                }
+            }
+        }
+
         std.log.info("Connected to discovered peer {s} via {s}", .{ peer_id, ma_str });
-        did_work = registerConnectedPeer(self, io, svc, peer_id, .outbound) or did_work;
+        did_work = registerConnectedPeer(
+            self,
+            io,
+            svc,
+            peer_id,
+            .outbound,
+            .{ .node_id = peer.node_id, .pubkey = peer.pubkey },
+        ) or did_work;
     }
 
     return did_work;
@@ -1146,7 +1312,7 @@ fn reconcilePeerConnections(self: *BeaconNode, io: std.Io, svc: *networking.P2pS
             peer.direction orelse .inbound
         else
             .inbound;
-        did_work = registerConnectedPeer(self, io, svc, peer_id, direction) or did_work;
+        did_work = registerConnectedPeer(self, io, svc, peer_id, direction, null) or did_work;
     }
 
     const managed_peer_ids = pm.getConnectedPeerIds() catch |err| {
@@ -1172,11 +1338,27 @@ fn registerConnectedPeer(
     svc: *networking.P2pService,
     peer_id: []const u8,
     direction: ConnectionDirection,
+    discovery_identity: ?DiscoveryPeerIdentity,
 ) bool {
     const pm = self.peer_manager orelse return maybeRecordPeerIdentity(self, svc, peer_id);
     const now_ms = currentUnixTimeMs(io);
     const existing = pm.getPeer(peer_id);
     const was_connected = if (existing) |peer| peer.isConnected() else false;
+
+    if (discovery_identity) |identity| {
+        if (discoveryIdentityKnown(identity)) {
+            const matches = discoveryPeerIdMatches(self.allocator, peer_id, identity.pubkey) catch |err| {
+                std.log.warn("Failed to verify discovered ENR identity for peer {s}: {}", .{ peer_id, err });
+                _ = svc.disconnectPeer(io, peer_id);
+                return true;
+            };
+            if (!matches) {
+                std.log.warn("Discovered ENR identity did not match connected peer {s}; dropping connection", .{peer_id});
+                _ = svc.disconnectPeer(io, peer_id);
+                return true;
+            }
+        }
+    }
 
     if (existing) |peer| {
         if (peer.connection_state == .banned) {
@@ -1196,6 +1378,12 @@ fn registerConnectedPeer(
     if (connected == null) {
         sendGoodbyeAndDisconnect(self, io, svc, peer_id, .banned);
         return true;
+    }
+
+    if (discovery_identity) |identity| {
+        pm.updatePeerDiscoveryNodeId(peer_id, identity.node_id) catch |err| {
+            std.log.warn("Failed to record discovery node ID for peer {s}: {}", .{ peer_id, err });
+        };
     }
 
     var did_work = !was_connected;
@@ -1219,7 +1407,7 @@ fn completePeerHandshake(
         return true;
     };
 
-    if (reqresp_callbacks_mod.handlePeerStatus(self, peer_id, peer_status)) |_| {
+    if (reqresp_callbacks_mod.handlePeerStatus(self, peer_id, peer_status.status, peer_status.earliest_available_slot)) |_| {
         sendGoodbyeAndDisconnect(self, io, svc, peer_id, .irrelevant_network);
         return true;
     }
@@ -1253,14 +1441,18 @@ fn maybeRecordPeerIdentity(
     return true;
 }
 
-fn applyPeerMetadata(self: *BeaconNode, peer_id: []const u8, metadata: MetadataV2.Type, now_ms: u64) void {
+fn applyPeerMetadata(self: *BeaconNode, peer_id: []const u8, metadata: PeerMetadataResponse, now_ms: u64) void {
     const pm = self.peer_manager orelse return;
     pm.updatePeerMetadata(
         peer_id,
-        metadata.seq_number,
-        attnetsFromMetadata(metadata.attnets.data),
-        syncnetsFromMetadata(metadata.syncnets.data),
-    );
+        metadata.metadata.seq_number,
+        attnetsFromMetadata(metadata.metadata.attnets.data),
+        syncnetsFromMetadata(metadata.metadata.syncnets.data),
+        metadata.custody_group_count,
+    ) catch |err| {
+        std.log.warn("Failed to update metadata for peer {s}: {}", .{ peer_id, err });
+        return;
+    };
     pm.notePeerSeen(peer_id, now_ms);
 }
 
@@ -1303,9 +1495,14 @@ fn initPeerManager(self: *BeaconNode) !void {
     errdefer self.allocator.destroy(pm);
     pm.* = PeerManager.init(self.allocator, .{
         .target_peers = self.node_options.target_peers,
+        .target_group_peers = self.node_options.target_group_peers,
+        .local_custody_columns = self.chain_runtime.custody_columns,
     });
     self.peer_manager = pm;
-    std.log.info("Peer manager initialized (target_peers={d})", .{pm.config.target_peers});
+    std.log.info("Peer manager initialized (target_peers={d} target_group_peers={d})", .{
+        pm.config.target_peers,
+        pm.config.target_group_peers,
+    });
 }
 
 fn initSyncPipeline(self: *BeaconNode) !void {
@@ -1357,7 +1554,7 @@ fn ensureByRootDataAvailability(
         },
         .columns => |missing| {
             if (missing.len == 0) return;
-            try fetchDataColumnsByRootForMeta(self, io, svc, peer_id, meta, missing);
+            try fetchDataColumnsByRootForMeta(self, io, svc, peer_id, meta);
         },
     }
 }
@@ -1620,49 +1817,67 @@ fn fetchDataColumnsByRangeForMetas(
     self: *BeaconNode,
     io: std.Io,
     svc: *networking.P2pService,
-    peer_id: []const u8,
+    preferred_peer_id: []const u8,
     metas: []const SyncBlockMeta,
 ) !void {
-    var requested_columns = std.StaticBitSet(MAX_COLUMNS).initEmpty();
-    var start_slot: u64 = std.math.maxInt(u64);
-    var end_slot: u64 = 0;
-    var have_pending = false;
-
-    for (metas) |meta| {
-        if (!needsColumnFetch(meta)) continue;
-        have_pending = true;
-        start_slot = @min(start_slot, meta.slot);
-        end_slot = @max(end_slot, meta.slot);
-
-        for (requiredColumnIndices(meta)) |column_index| {
-            if (column_index < MAX_COLUMNS) requested_columns.set(@intCast(column_index));
-        }
+    var attempted_peers = std.ArrayListUnmanaged([]const u8).empty;
+    defer {
+        for (attempted_peers.items) |peer_id| self.allocator.free(peer_id);
+        attempted_peers.deinit(self.allocator);
     }
 
-    if (!have_pending) return;
+    var last_err: ?anyerror = null;
 
-    var request: networking.messages.DataColumnSidecarsByRangeRequest.Type = .{
-        .start_slot = start_slot,
-        .count = end_slot - start_slot + 1,
-        .columns = .empty,
-    };
-    defer networking.messages.DataColumnSidecarsByRangeRequest.deinit(self.allocator, &request);
-    for (0..MAX_COLUMNS) |column_index| {
-        if (requested_columns.isSet(column_index)) {
-            try request.columns.append(self.allocator, @intCast(column_index));
-        }
+    while (true) {
+        const missing_before = try countMissingDataColumnsForMetas(self, metas);
+        if (missing_before == 0) return;
+
+        var request = (try buildDataColumnRangeRequest(self, metas)) orelse return;
+        defer networking.messages.DataColumnSidecarsByRangeRequest.deinit(self.allocator, &request);
+
+        const end_slot = request.start_slot +| (request.count -| 1);
+        const selected_peer = try selectDataColumnFetchPeer(
+            self,
+            request.columns.items,
+            request.start_slot,
+            end_slot,
+            preferred_peer_id,
+            attempted_peers.items,
+        ) orelse break;
+        errdefer self.allocator.free(selected_peer);
+        try attempted_peers.append(self.allocator, selected_peer);
+
+        fetchDataColumnsByRangeOnce(self, io, svc, selected_peer, metas, &request) catch |err| {
+            std.log.warn("Data column by-range fetch failed from peer {s}: {}", .{ selected_peer, err });
+            last_err = err;
+            continue;
+        };
+
+        const missing_after = try countMissingDataColumnsForMetas(self, metas);
+        if (missing_after == 0) return;
+        if (missing_after >= missing_before) continue;
     }
-    if (request.columns.items.len == 0) return;
 
+    return last_err orelse error.MissingDataColumnSidecar;
+}
+
+fn fetchDataColumnsByRangeOnce(
+    self: *BeaconNode,
+    io: std.Io,
+    svc: *networking.P2pService,
+    peer_id: []const u8,
+    metas: []const SyncBlockMeta,
+    request: *const networking.messages.DataColumnSidecarsByRangeRequest.Type,
+) !void {
     const protocol_id = "/eth2/beacon_chain/req/data_column_sidecars_by_range/1/ssz_snappy";
     const req_resp_encoding = networking.req_resp_encoding;
 
     var stream = try svc.dialProtocol(io, peer_id, protocol_id);
     defer closeOwnedQuicStream(io, &stream);
 
-    const request_bytes = try self.allocator.alloc(u8, networking.messages.DataColumnSidecarsByRangeRequest.serializedSize(&request));
+    const request_bytes = try self.allocator.alloc(u8, networking.messages.DataColumnSidecarsByRangeRequest.serializedSize(request));
     defer self.allocator.free(request_bytes);
-    _ = networking.messages.DataColumnSidecarsByRangeRequest.serializeIntoBytes(&request, request_bytes);
+    _ = networking.messages.DataColumnSidecarsByRangeRequest.serializeIntoBytes(request, request_bytes);
     try req_resp_encoding.writeRequestToStream(self.allocator, io, &stream, request_bytes);
     stream.closeWrite(io);
 
@@ -1728,16 +1943,54 @@ fn fetchDataColumnsByRangeForMetas(
             owned_ready.deinit(self.allocator);
         }
     }
-
-    for (metas) |meta| {
-        if (!needsColumnFetch(meta)) continue;
-        if (self.chainService().dataAvailabilityStatusForBlock(meta.block_root, meta.any_signed) == .pending) {
-            return error.MissingDataColumnSidecar;
-        }
-    }
 }
 
 fn fetchDataColumnsByRootForMeta(
+    self: *BeaconNode,
+    io: std.Io,
+    svc: *networking.P2pService,
+    preferred_peer_id: []const u8,
+    meta: SyncBlockMeta,
+) !void {
+    var attempted_peers = std.ArrayListUnmanaged([]const u8).empty;
+    defer {
+        for (attempted_peers.items) |peer_id| self.allocator.free(peer_id);
+        attempted_peers.deinit(self.allocator);
+    }
+
+    var last_err: ?anyerror = null;
+
+    while (true) {
+        const missing = try self.chainService().missingDataColumns(self.allocator, meta.block_root);
+        defer self.allocator.free(missing);
+        if (missing.len == 0) return;
+
+        const selected_peer = try selectDataColumnFetchPeer(
+            self,
+            missing,
+            meta.slot,
+            meta.slot,
+            preferred_peer_id,
+            attempted_peers.items,
+        ) orelse break;
+        errdefer self.allocator.free(selected_peer);
+        try attempted_peers.append(self.allocator, selected_peer);
+
+        fetchDataColumnsByRootOnce(self, io, svc, selected_peer, meta, missing) catch |err| {
+            std.log.warn("Data column by-root fetch failed from peer {s}: {}", .{ selected_peer, err });
+            last_err = err;
+            continue;
+        };
+
+        if (self.chainService().dataAvailabilityStatusForBlock(meta.block_root, meta.any_signed) != .pending) {
+            return;
+        }
+    }
+
+    return last_err orelse error.MissingDataColumnSidecar;
+}
+
+fn fetchDataColumnsByRootOnce(
     self: *BeaconNode,
     io: std.Io,
     svc: *networking.P2pService,
@@ -1745,8 +1998,6 @@ fn fetchDataColumnsByRootForMeta(
     meta: SyncBlockMeta,
     missing: []const u64,
 ) !void {
-    if (missing.len == 0) return;
-
     var request_bytes = try self.allocator.alloc(u8, missing.len * networking.messages.DataColumnIdentifier.fixed_size);
     defer self.allocator.free(request_bytes);
     for (missing, 0..) |column_index, i| {
@@ -1824,10 +2075,84 @@ fn fetchDataColumnsByRootForMeta(
             owned_ready.deinit(self.allocator);
         }
     }
+}
 
-    if (self.chainService().dataAvailabilityStatusForBlock(meta.block_root, meta.any_signed) == .pending) {
-        return error.MissingDataColumnSidecar;
+fn buildDataColumnRangeRequest(
+    self: *BeaconNode,
+    metas: []const SyncBlockMeta,
+) !?networking.messages.DataColumnSidecarsByRangeRequest.Type {
+    var requested_columns = std.StaticBitSet(MAX_COLUMNS).initEmpty();
+    var start_slot: u64 = std.math.maxInt(u64);
+    var end_slot: u64 = 0;
+    var have_pending = false;
+
+    for (metas) |meta| {
+        if (!needsColumnFetch(meta)) continue;
+        const missing = try self.chainService().missingDataColumns(self.allocator, meta.block_root);
+        defer self.allocator.free(missing);
+        if (missing.len == 0) continue;
+
+        have_pending = true;
+        start_slot = @min(start_slot, meta.slot);
+        end_slot = @max(end_slot, meta.slot);
+        for (missing) |column_index| {
+            if (column_index < MAX_COLUMNS) requested_columns.set(@intCast(column_index));
+        }
     }
+
+    if (!have_pending) return null;
+
+    var request: networking.messages.DataColumnSidecarsByRangeRequest.Type = .{
+        .start_slot = start_slot,
+        .count = end_slot - start_slot + 1,
+        .columns = .empty,
+    };
+    errdefer networking.messages.DataColumnSidecarsByRangeRequest.deinit(self.allocator, &request);
+
+    for (0..MAX_COLUMNS) |column_index| {
+        if (requested_columns.isSet(column_index)) {
+            try request.columns.append(self.allocator, @intCast(column_index));
+        }
+    }
+    if (request.columns.items.len == 0) return null;
+    return request;
+}
+
+fn countMissingDataColumnsForMetas(self: *BeaconNode, metas: []const SyncBlockMeta) !usize {
+    var count: usize = 0;
+    for (metas) |meta| {
+        if (!needsColumnFetch(meta)) continue;
+        count += try countMissingDataColumnsForMeta(self, meta);
+    }
+    return count;
+}
+
+fn countMissingDataColumnsForMeta(self: *BeaconNode, meta: SyncBlockMeta) !usize {
+    const missing = try self.chainService().missingDataColumns(self.allocator, meta.block_root);
+    defer self.allocator.free(missing);
+    return missing.len;
+}
+
+fn selectDataColumnFetchPeer(
+    self: *BeaconNode,
+    missing_columns: []const u64,
+    start_slot: u64,
+    end_slot: u64,
+    preferred_peer_id: []const u8,
+    excluded_peer_ids: []const []const u8,
+) !?[]const u8 {
+    if (self.peer_manager) |pm| {
+        return try pm.selectDataColumnPeer(
+            missing_columns,
+            start_slot,
+            end_slot,
+            preferred_peer_id,
+            excluded_peer_ids,
+        );
+    }
+
+    if (containsPeerId(excluded_peer_ids, preferred_peer_id)) return null;
+    return try self.allocator.dupe(u8, preferred_peer_id);
 }
 
 fn needsBlobFetch(meta: SyncBlockMeta) bool {
@@ -1931,18 +2256,20 @@ fn fetchRawBlocksByRange(
     };
     defer reader.deinit();
     var blocks_received: u64 = 0;
+    var previous_slot: ?u64 = null;
 
     while (blocks_received < count) {
         const decoded = (try reader.next(io, &stream)) orelse break;
         if (decoded.result != .success) {
             self.allocator.free(decoded.ssz_bytes);
-            break;
+            return error.ErrorResponse;
         }
 
-        const slot = readSignedBeaconBlockSlot(decoded.ssz_bytes) orelse {
+        const slot = validateFetchedBlockRangeChunk(self, start_slot, count, previous_slot, decoded.context_bytes, decoded.ssz_bytes) catch |err| {
             self.allocator.free(decoded.ssz_bytes);
-            return error.MalformedBlockBytes;
+            return err;
         };
+        previous_slot = slot;
 
         try result.append(self.allocator, .{
             .slot = slot,
@@ -1954,21 +2281,46 @@ fn fetchRawBlocksByRange(
     return result.toOwnedSlice(self.allocator);
 }
 
+fn validateFetchedBlockRangeChunk(
+    self: *const BeaconNode,
+    start_slot: u64,
+    count: u64,
+    previous_slot: ?u64,
+    context_bytes: ?[4]u8,
+    ssz_bytes: []const u8,
+) !u64 {
+    const slot = readSignedBeaconBlockSlot(ssz_bytes) orelse return error.MalformedBlockBytes;
+    if (slot < start_slot) return error.BlockOutsideRequestedRange;
+    if (slot - start_slot >= count) return error.BlockOutsideRequestedRange;
+    if (previous_slot) |prev| {
+        if (slot <= prev) return error.UnsortedBlockRangeResponse;
+    }
+
+    const chunk_context = context_bytes orelse return error.MissingContextBytes;
+    const expected_digest = self.config.forkDigestAtSlot(slot, self.genesis_validators_root);
+    if (!std.mem.eql(u8, &chunk_context, &expected_digest)) return error.ForkDigestMismatch;
+
+    return slot;
+}
+
 fn sendStatus(
     self: *BeaconNode,
     io: std.Io,
     svc: *networking.P2pService,
     peer_id: []const u8,
-) !networking.messages.StatusMessage.Type {
-    const status_protocol_id = "/eth2/beacon_chain/req/status/1/ssz_snappy";
+) !PeerStatusResponse {
+    const current_fork_seq = self.config.forkSeq(self.currentHeadSlot());
+    const use_status_v2 = current_fork_seq.gte(.fulu);
+    const status_protocol_id = if (use_status_v2)
+        "/eth2/beacon_chain/req/status/2/ssz_snappy"
+    else
+        "/eth2/beacon_chain/req/status/1/ssz_snappy";
     const req_resp_encoding = networking.req_resp_encoding;
 
     var stream = try svc.dialProtocol(io, peer_id, status_protocol_id);
     defer closeOwnedQuicStream(io, &stream);
 
-    var status_ssz: [networking.messages.StatusMessage.fixed_size]u8 = undefined;
     const our_status = self.getStatus();
-    _ = networking.messages.StatusMessage.serializeIntoBytes(&our_status, &status_ssz);
     std.log.info("Sending Status: fork_digest={x:0>2}{x:0>2}{x:0>2}{x:0>2} head_slot={d} finalized_epoch={d}", .{
         our_status.fork_digest[0],
         our_status.fork_digest[1],
@@ -1978,7 +2330,23 @@ fn sendStatus(
         our_status.finalized_epoch,
     });
 
-    try req_resp_encoding.writeRequestToStream(self.allocator, io, &stream, &status_ssz);
+    if (use_status_v2) {
+        const our_status_v2: StatusMessageV2.Type = .{
+            .fork_digest = our_status.fork_digest,
+            .finalized_root = our_status.finalized_root,
+            .finalized_epoch = our_status.finalized_epoch,
+            .head_root = our_status.head_root,
+            .head_slot = our_status.head_slot,
+            .earliest_available_slot = self.earliest_available_slot,
+        };
+        var status_ssz: [StatusMessageV2.fixed_size]u8 = undefined;
+        _ = StatusMessageV2.serializeIntoBytes(&our_status_v2, &status_ssz);
+        try req_resp_encoding.writeRequestToStream(self.allocator, io, &stream, &status_ssz);
+    } else {
+        var status_ssz: [StatusMessage.fixed_size]u8 = undefined;
+        _ = StatusMessage.serializeIntoBytes(&our_status, &status_ssz);
+        try req_resp_encoding.writeRequestToStream(self.allocator, io, &stream, &status_ssz);
+    }
     stream.closeWrite(io);
 
     var reader = req_resp_encoding.ResponseChunkStreamReader{
@@ -1998,8 +2366,37 @@ fn sendStatus(
         return error.StatusRejected;
     }
 
-    var peer_status: networking.messages.StatusMessage.Type = undefined;
-    networking.messages.StatusMessage.deserializeFromBytes(decoded.ssz_bytes, &peer_status) catch |err| {
+    if (use_status_v2) {
+        var peer_status_v2: StatusMessageV2.Type = undefined;
+        StatusMessageV2.deserializeFromBytes(decoded.ssz_bytes, &peer_status_v2) catch |err| {
+            std.log.warn("StatusV2 SSZ deserialize error: {}", .{err});
+            return err;
+        };
+
+        std.log.info("Peer StatusV2: fork_digest={x:0>2}{x:0>2}{x:0>2}{x:0>2} head_slot={d} finalized_epoch={d} earliest_available_slot={d}", .{
+            peer_status_v2.fork_digest[0],
+            peer_status_v2.fork_digest[1],
+            peer_status_v2.fork_digest[2],
+            peer_status_v2.fork_digest[3],
+            peer_status_v2.head_slot,
+            peer_status_v2.finalized_epoch,
+            peer_status_v2.earliest_available_slot,
+        });
+
+        return .{
+            .status = .{
+                .fork_digest = peer_status_v2.fork_digest,
+                .finalized_root = peer_status_v2.finalized_root,
+                .finalized_epoch = peer_status_v2.finalized_epoch,
+                .head_root = peer_status_v2.head_root,
+                .head_slot = peer_status_v2.head_slot,
+            },
+            .earliest_available_slot = peer_status_v2.earliest_available_slot,
+        };
+    }
+
+    var peer_status: StatusMessage.Type = undefined;
+    StatusMessage.deserializeFromBytes(decoded.ssz_bytes, &peer_status) catch |err| {
         std.log.warn("Status SSZ deserialize error: {}", .{err});
         return err;
     };
@@ -2017,7 +2414,7 @@ fn sendStatus(
         peer_status.finalized_root[3],
     });
 
-    return peer_status;
+    return .{ .status = peer_status };
 }
 
 fn requestPeerPing(
@@ -2060,8 +2457,13 @@ fn requestPeerMetadata(
     io: std.Io,
     svc: *networking.P2pService,
     peer_id: []const u8,
-) !MetadataV2.Type {
-    const metadata_protocol_id = "/eth2/beacon_chain/req/metadata/2/ssz_snappy";
+) !PeerMetadataResponse {
+    const current_fork_seq = self.config.forkSeq(self.currentHeadSlot());
+    const use_metadata_v3 = current_fork_seq.gte(.fulu);
+    const metadata_protocol_id = if (use_metadata_v3)
+        "/eth2/beacon_chain/req/metadata/3/ssz_snappy"
+    else
+        "/eth2/beacon_chain/req/metadata/2/ssz_snappy";
     const req_resp_encoding = networking.req_resp_encoding;
 
     var stream = try svc.dialProtocol(io, peer_id, metadata_protocol_id);
@@ -2081,9 +2483,22 @@ fn requestPeerMetadata(
 
     if (decoded.result != .success) return error.MetadataRejected;
 
+    if (use_metadata_v3) {
+        var metadata_v3: MetadataV3.Type = undefined;
+        try MetadataV3.deserializeFromBytes(decoded.ssz_bytes, &metadata_v3);
+        return .{
+            .metadata = .{
+                .seq_number = metadata_v3.seq_number,
+                .attnets = metadata_v3.attnets,
+                .syncnets = metadata_v3.syncnets,
+            },
+            .custody_group_count = metadata_v3.custody_group_count,
+        };
+    }
+
     var metadata: MetadataV2.Type = undefined;
     try MetadataV2.deserializeFromBytes(decoded.ssz_bytes, &metadata);
-    return metadata;
+    return .{ .metadata = metadata };
 }
 
 fn handleReqRespMaintenanceFailure(

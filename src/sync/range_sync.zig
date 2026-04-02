@@ -134,6 +134,7 @@ pub const RangeSync = struct {
         peer_finalized_root: [32]u8,
         peer_head_slot: u64,
         peer_head_root: [32]u8,
+        earliest_available_slot: ?u64,
     ) !void {
         self.local_finalized_epoch = local_finalized_epoch;
 
@@ -147,7 +148,7 @@ pub const RangeSync = struct {
                     .root = peer_finalized_root,
                 };
                 if (self.finalized_chain) |*fc| {
-                    try fc.addPeer(peer_id, target);
+                    try fc.addPeer(peer_id, target, earliest_available_slot);
                 } else {
                     var fc = SyncChain.init(
                         self.allocator,
@@ -157,7 +158,7 @@ pub const RangeSync = struct {
                         target,
                         self.callbacks.toSyncChainCallbacks(),
                     );
-                    try fc.addPeer(peer_id, target);
+                    try fc.addPeer(peer_id, target, earliest_available_slot);
                     self.finalized_chain = fc;
                 }
             },
@@ -169,7 +170,7 @@ pub const RangeSync = struct {
                 // Try to find an existing head chain with a matching target root.
                 for (self.head_chains.items) |*hc| {
                     if (std.mem.eql(u8, &hc.target.root, &target.root)) {
-                        try hc.addPeer(peer_id, target);
+                        try hc.addPeer(peer_id, target, earliest_available_slot);
                         return;
                     }
                 }
@@ -183,7 +184,7 @@ pub const RangeSync = struct {
                         target,
                         self.callbacks.toSyncChainCallbacks(),
                     );
-                    try hc.addPeer(peer_id, target);
+                    try hc.addPeer(peer_id, target, earliest_available_slot);
                     try self.head_chains.append(self.allocator, hc);
                 }
             },
@@ -386,7 +387,7 @@ test "RangeSync: finalized peer creates finalized chain" {
     defer rs.deinit();
 
     // Peer with finalized epoch 10 vs our 0.
-    try rs.addPeer("p1", 0, 10, [_]u8{0xAA} ** 32, 350, [_]u8{0xBB} ** 32);
+    try rs.addPeer("p1", 0, 10, [_]u8{0xAA} ** 32, 350, [_]u8{0xBB} ** 32, null);
 
     try std.testing.expect(rs.finalized_chain != null);
     try std.testing.expectEqual(RangeSyncStatus.finalized, rs.getState().status);
@@ -399,7 +400,7 @@ test "RangeSync: head peer creates head chain" {
     defer rs.deinit();
 
     // Peer with same finalized epoch but ahead head.
-    try rs.addPeer("p1", 5, 5, [_]u8{0} ** 32, 200, [_]u8{0xCC} ** 32);
+    try rs.addPeer("p1", 5, 5, [_]u8{0} ** 32, 200, [_]u8{0xCC} ** 32, null);
 
     try std.testing.expect(rs.finalized_chain == null);
     try std.testing.expectEqual(@as(usize, 1), rs.head_chains.items.len);
@@ -413,11 +414,11 @@ test "RangeSync: finalized chain has priority over head" {
     defer rs.deinit();
 
     // Add head peer first.
-    try rs.addPeer("p_head", 0, 0, [_]u8{0} ** 32, 200, [_]u8{0xCC} ** 32);
+    try rs.addPeer("p_head", 0, 0, [_]u8{0} ** 32, 200, [_]u8{0xCC} ** 32, null);
     try std.testing.expectEqual(RangeSyncStatus.head, rs.getState().status);
 
     // Add finalized peer — should take priority.
-    try rs.addPeer("p_fin", 0, 10, [_]u8{0xAA} ** 32, 500, [_]u8{0xBB} ** 32);
+    try rs.addPeer("p_fin", 0, 10, [_]u8{0xAA} ** 32, 500, [_]u8{0xBB} ** 32, null);
     try std.testing.expectEqual(RangeSyncStatus.finalized, rs.getState().status);
 }
 

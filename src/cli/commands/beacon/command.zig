@@ -242,6 +242,7 @@ pub fn run(io: Io, allocator: Allocator, opts: anytype) !void {
     const enr_tcp6 = opts.@"enr.tcp6";
     const enr_udp6 = opts.@"enr.udp6";
     const target_peers = opts.targetPeers orelse opts.target_peers;
+    const target_group_peers = opts.@"network.targetGroupPeers" orelse 6;
     const direct_peers_raw = opts.directPeers orelse opts.direct_peers;
     const checkpoint_state = opts.checkpointState orelse opts.checkpoint_state;
     const checkpoint_sync_url = opts.checkpointSyncUrl orelse opts.checkpoint_sync_url;
@@ -438,6 +439,7 @@ pub fn run(io: Io, allocator: Allocator, opts: anytype) !void {
         .builder_fault_inspection_window = builder_fault_window,
         .builder_allowed_faults = builder_allowed_faults,
         .target_peers = target_peers,
+        .target_group_peers = target_group_peers,
         .network = network,
         .p2p_host = p2p_host4,
         .p2p_host6 = p2p_host6,

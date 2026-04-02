@@ -27,6 +27,16 @@ pub const StatusMessage = ssz.FixedContainerType(struct {
     head_slot: p.Slot,
 });
 
+/// Fulu Status adds the earliest slot this node can serve.
+pub const StatusMessageV2 = ssz.FixedContainerType(struct {
+    fork_digest: p.ForkDigest,
+    finalized_root: p.Root,
+    finalized_epoch: p.Epoch,
+    head_root: p.Root,
+    head_slot: p.Slot,
+    earliest_available_slot: p.Slot,
+});
+
 /// Ping message carries a metadata sequence number.
 pub const Ping = p.Uint64;
 
@@ -67,6 +77,14 @@ pub const MetadataV2 = ssz.FixedContainerType(struct {
     syncnets: ssz.BitVectorType(constants.SYNC_COMMITTEE_SUBNET_COUNT),
 });
 
+/// Fulu Metadata adds custody_group_count for PeerDAS.
+pub const MetadataV3 = ssz.FixedContainerType(struct {
+    seq_number: p.Uint64,
+    attnets: ssz.BitVectorType(constants.ATTESTATION_SUBNET_COUNT),
+    syncnets: ssz.BitVectorType(constants.SYNC_COMMITTEE_SUBNET_COUNT),
+    custody_group_count: p.Uint64,
+});
+
 // === Deneb messages ===
 
 /// BlobSidecarsByRangeRequest requests blob sidecars for a slot range.
@@ -103,6 +121,11 @@ test "StatusMessage fixed size" {
     try testing.expectEqual(@as(usize, 84), StatusMessage.fixed_size);
 }
 
+test "StatusMessageV2 fixed size" {
+    // StatusMessage(84) + earliest_available_slot(8) = 92.
+    try testing.expectEqual(@as(usize, 92), StatusMessageV2.fixed_size);
+}
+
 test "StatusMessage serialize and deserialize roundtrip" {
     const msg: StatusMessage.Type = .{
         .fork_digest = .{ 0x01, 0x02, 0x03, 0x04 },
@@ -120,6 +143,30 @@ test "StatusMessage serialize and deserialize roundtrip" {
     try StatusMessage.deserializeFromBytes(&buf, &decoded);
     try testing.expectEqual(msg.finalized_epoch, decoded.finalized_epoch);
     try testing.expectEqual(msg.head_slot, decoded.head_slot);
+    try testing.expectEqualSlices(u8, &msg.fork_digest, &decoded.fork_digest);
+    try testing.expectEqualSlices(u8, &msg.finalized_root, &decoded.finalized_root);
+    try testing.expectEqualSlices(u8, &msg.head_root, &decoded.head_root);
+}
+
+test "StatusMessageV2 serialize and deserialize roundtrip" {
+    const msg: StatusMessageV2.Type = .{
+        .fork_digest = .{ 0x01, 0x02, 0x03, 0x04 },
+        .finalized_root = [_]u8{0xAA} ** 32,
+        .finalized_epoch = 100,
+        .head_root = [_]u8{0xBB} ** 32,
+        .head_slot = 200,
+        .earliest_available_slot = 64,
+    };
+
+    var buf: [StatusMessageV2.fixed_size]u8 = undefined;
+    const written = StatusMessageV2.serializeIntoBytes(&msg, &buf);
+    try testing.expectEqual(StatusMessageV2.fixed_size, written);
+
+    var decoded: StatusMessageV2.Type = undefined;
+    try StatusMessageV2.deserializeFromBytes(&buf, &decoded);
+    try testing.expectEqual(msg.finalized_epoch, decoded.finalized_epoch);
+    try testing.expectEqual(msg.head_slot, decoded.head_slot);
+    try testing.expectEqual(msg.earliest_available_slot, decoded.earliest_available_slot);
     try testing.expectEqualSlices(u8, &msg.fork_digest, &decoded.fork_digest);
     try testing.expectEqualSlices(u8, &msg.finalized_root, &decoded.finalized_root);
     try testing.expectEqualSlices(u8, &msg.head_root, &decoded.head_root);
@@ -148,4 +195,9 @@ test "BlobSidecarsByRangeRequest fixed size" {
 test "MetadataV2 fixed size" {
     // seq_number(8) + attnets(64 bits = 8 bytes) + syncnets(4 bits = 1 byte) = 17.
     try testing.expectEqual(@as(usize, 17), MetadataV2.fixed_size);
+}
+
+test "MetadataV3 fixed size" {
+    // MetadataV2(17) + custody_group_count(8) = 25.
+    try testing.expectEqual(@as(usize, 25), MetadataV3.fixed_size);
 }

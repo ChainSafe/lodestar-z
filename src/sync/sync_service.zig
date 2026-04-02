@@ -205,6 +205,7 @@ pub const SyncService = struct {
         self: *SyncService,
         peer_id: []const u8,
         status: StatusMessage.Type,
+        earliest_available_slot: ?u64,
     ) !void {
         // Track peers and their head_slot so best_peer_slot can be recomputed on disconnect.
         if (self.known_peers.getPtr(peer_id)) |slot_ptr| {
@@ -235,6 +236,7 @@ pub const SyncService = struct {
                 status.finalized_root,
                 status.head_slot,
                 status.head_root,
+                earliest_available_slot,
             );
         }
 
@@ -476,7 +478,7 @@ test "SyncService: transitions to range_sync on advanced peer" {
         .finalized_epoch = 10,
         .head_root = [_]u8{0xAA} ** 32,
         .head_slot = 500,
-    });
+    }, null);
 
     try std.testing.expectEqual(SyncMode.range_sync, svc.mode);
     try std.testing.expect(!svc.isSynced());
@@ -495,7 +497,7 @@ test "SyncService: synced when peer is within threshold" {
         .finalized_epoch = 15,
         .head_root = [_]u8{0xAA} ** 32,
         .head_slot = 500,
-    });
+    }, null);
 
     // Distance = 10 <= 32, so synced.
     try std.testing.expectEqual(SyncMode.synced, svc.mode);
@@ -514,7 +516,7 @@ test "SyncService: peer disconnect" {
         .finalized_epoch = 10,
         .head_root = [_]u8{0xAA} ** 32,
         .head_slot = 500,
-    });
+    }, null);
 
     svc.onPeerDisconnect("p1");
     try std.testing.expectEqual(@as(usize, 0), svc.peer_count);
@@ -536,7 +538,7 @@ test "SyncService: gossip gating" {
         .finalized_epoch = 100,
         .head_root = [_]u8{0xBB} ** 32,
         .head_slot = 5000,
-    });
+    }, null);
 
     try std.testing.expectEqual(SyncMode.range_sync, svc.mode);
     try std.testing.expect(!svc.shouldEnableGossip());
@@ -555,9 +557,28 @@ test "SyncService: getSyncStatus reports correct state" {
         .finalized_epoch = 20,
         .head_root = [_]u8{0xCC} ** 32,
         .head_slot = 700,
-    });
+    }, null);
 
     const status = svc.getSyncStatus();
     try std.testing.expectEqual(@as(u64, 600), status.sync_distance);
     try std.testing.expectEqual(@as(u64, 100), status.head_slot);
+}
+
+test "SyncService: stores earliest available slot for range sync peers" {
+    const allocator = std.testing.allocator;
+    var tc = TestSyncServiceCallbacks{};
+    var svc = SyncService.init(allocator, tc.callbacks(), 0, 0);
+    defer svc.deinit();
+
+    try svc.onPeerStatus("p1", .{
+        .fork_digest = .{ 0, 0, 0, 0 },
+        .finalized_root = [_]u8{0} ** 32,
+        .finalized_epoch = 10,
+        .head_root = [_]u8{0xDD} ** 32,
+        .head_slot = 500,
+    }, 128);
+
+    const chain = svc.range_sync.finalized_chain orelse return error.TestUnexpectedResult;
+    const peer = chain.peers.get("p1") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(?u64, 128), peer.earliest_available_slot);
 }

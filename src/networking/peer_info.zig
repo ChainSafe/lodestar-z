@@ -210,6 +210,7 @@ pub const SyncInfo = struct {
     head_root: [32]u8,
     finalized_epoch: u64,
     finalized_root: [32]u8,
+    earliest_available_slot: ?u64 = null,
 };
 
 // ── PeerScore ───────────────────────────────────────────────────────────────
@@ -369,6 +370,12 @@ pub const PeerInfo = struct {
     syncnets: SyncnetsBitfield = SyncnetsBitfield.initEmpty(),
     /// Metadata sequence number from Metadata req/resp.
     metadata_seq: u64 = 0,
+    /// ENR node ID from verified discovery/bootnode identity when known.
+    discovery_node_id: ?[32]u8 = null,
+    /// PeerDAS custody group count from MetadataV3 when available.
+    custody_group_count: ?u64 = null,
+    /// Derived custody columns for PeerDAS serving decisions.
+    custody_columns: ?[]u64 = null,
     /// Timestamp (ms) when the peer connected.
     connected_at_ms: u64 = 0,
     /// Timestamp (ms) of last message received from this peer.
@@ -388,6 +395,7 @@ pub const PeerInfo = struct {
     last_status_finalized_root: ?[32]u8 = null,
     last_status_finalized_epoch: ?u64 = null,
     last_status_head_slot: ?u64 = null,
+    last_status_earliest_available_slot: ?u64 = null,
 
     /// Get the combined score.
     pub fn score(self: *const PeerInfo) f64 {
@@ -441,6 +449,10 @@ pub const PeerInfo = struct {
         if (self.agent_version) |av| {
             allocator.free(av);
             self.agent_version = null;
+        }
+        if (self.custody_columns) |cols| {
+            allocator.free(cols);
+            self.custody_columns = null;
         }
     }
 };
