@@ -7,12 +7,14 @@
 const std = @import("std");
 const consensus_types = @import("consensus_types");
 const fork_types = @import("fork_types");
+const fork_choice_mod = @import("fork_choice");
 const preset = @import("preset").preset;
 const state_transition = @import("state_transition");
 
 const Chain = @import("chain.zig").Chain;
 const chain_types = @import("types.zig");
 const chain_effects = @import("effects.zig");
+const ports = @import("ports/root.zig");
 const Query = @import("query.zig").Query;
 const produce_block = @import("produce_block.zig");
 const blob_kzg_verification = @import("blob_kzg_verification.zig");
@@ -44,6 +46,8 @@ const ExecutionRequests = consensus_types.electra.ExecutionRequests.Type;
 const BLSSignature = consensus_types.primitive.BLSSignature.Type;
 const BlobVerifyInput = blob_kzg_verification.BlobVerifyInput;
 const BYTES_PER_CELL = blob_kzg_verification.BYTES_PER_CELL;
+const HeadResult = fork_choice_mod.HeadResult;
+const LVHExecResponse = fork_choice_mod.LVHExecResponse;
 
 fn eth1DataFromHeadState(cached: *CachedBeaconState) Eth1DataType {
     var eth1_data = Eth1Data.default_value;
@@ -92,6 +96,14 @@ pub const Service = struct {
         return Query.init(self.chain);
     }
 
+    fn forkchoiceUpdateForHead(self: Service, head_root: Root) ?chain_effects.ExecutionForkchoiceUpdate {
+        const state = self.query().executionForkchoiceState(head_root) orelse return null;
+        return .{
+            .beacon_block_root = head_root,
+            .state = state,
+        };
+    }
+
     pub fn importBlock(
         self: Service,
         any_signed: fork_types.AnySignedBeaconBlock,
@@ -104,7 +116,7 @@ pub const Service = struct {
             .result = result,
             .snapshot = snapshot,
             .effects = .{
-                .notify_forkchoice_update_root = snapshot.head.root,
+                .forkchoice_update = self.forkchoiceUpdateForHead(snapshot.head.root),
                 .archive_state = if (result.epoch_transition)
                     .{
                         .slot = result.slot,
@@ -150,7 +162,7 @@ pub const Service = struct {
             .result = result,
             .snapshot = snapshot,
             .effects = .{
-                .notify_forkchoice_update_root = snapshot.head.root,
+                .forkchoice_update = self.forkchoiceUpdateForHead(snapshot.head.root),
                 .archive_state = if (result.epoch_transition)
                     .{
                         .slot = result.slot,
@@ -178,7 +190,7 @@ pub const Service = struct {
                 .failed_count = 0,
                 .snapshot = before_snapshot,
                 .effects = .{
-                    .notify_forkchoice_update_root = before_snapshot.head.root,
+                    .forkchoice_update = self.forkchoiceUpdateForHead(before_snapshot.head.root),
                 },
             };
         }
@@ -210,7 +222,6 @@ pub const Service = struct {
 
         const results = try self.chain.processBlockBatchPipeline(block_inputs, .{
             .from_range_sync = true,
-            .skip_execution = true,
             .skip_future_slot = true,
             .skip_signatures = !self.chain.verify_signatures,
         });
@@ -250,7 +261,7 @@ pub const Service = struct {
             .failed_count = failed_count,
             .snapshot = snapshot,
             .effects = .{
-                .notify_forkchoice_update_root = snapshot.head.root,
+                .forkchoice_update = self.forkchoiceUpdateForHead(snapshot.head.root),
                 .archive_states = archive_states,
                 .finalized_checkpoint = if (snapshot.finalized.epoch != before_snapshot.finalized.epoch or
                     !std.mem.eql(u8, &snapshot.finalized.root, &before_snapshot.finalized.root))
@@ -796,6 +807,66 @@ pub const Service = struct {
 
     pub fn onSlot(self: Service, slot: Slot) void {
         self.chain.onSlot(slot);
+    }
+
+    pub fn revalidateCurrentOptimisticHead(self: Service) !?chain_effects.ExecutionRevalidationOutcome {
+        if (!self.chain.currentHeadExecutionOptimistic()) return null;
+
+        const fc = self.chain.fork_choice orelse return null;
+        const old_snapshot = self.query().currentSnapshot();
+        const head_root = old_snapshot.head.root;
+        const block_bytes = (try self.query().blockBytesByRoot(head_root)) orelse return error.HeadBlockNotAvailable;
+        defer self.chain.allocator.free(block_bytes);
+
+        const slot = try readBlockSlot(block_bytes);
+        var any_signed = try deserializeRawBlockBytes(self.chain, slot, block_bytes);
+        defer any_signed.deinit(self.chain.allocator);
+
+        const verifier = self.chain.execution_verifier orelse return null;
+        var request = try ports.execution.makeNewPayloadRequest(self.chain.allocator, any_signed) orelse return null;
+        defer request.deinit(self.chain.allocator);
+
+        const response: LVHExecResponse = switch (verifier.submitNewPayload(request)) {
+            .valid => |valid| .{ .valid = .{
+                .latest_valid_exec_hash = valid.latest_valid_hash,
+            } },
+            .invalid => |invalid| .{ .invalid = .{
+                .latest_valid_exec_hash = invalid.latest_valid_hash,
+                .invalidate_from_parent_block_root = any_signed.beaconBlock().parentRoot().*,
+            } },
+            .invalid_block_hash => |invalid| .{ .invalid = .{
+                .latest_valid_exec_hash = invalid.latest_valid_hash,
+                .invalidate_from_parent_block_root = any_signed.beaconBlock().parentRoot().*,
+            } },
+            .syncing, .accepted, .unavailable => return null,
+        };
+
+        fc.validateLatestHash(self.chain.allocator, response, fc.getTime());
+
+        const uagh_result = try fc.updateAndGetHead(self.chain.allocator, .get_canonical_head);
+        const head_node = fc.getBlockDefaultStatus(uagh_result.head.block_root);
+        const new_head = HeadResult{
+            .block_root = uagh_result.head.block_root,
+            .slot = uagh_result.head.slot,
+            .state_root = uagh_result.head.state_root,
+            .execution_optimistic = if (head_node) |node|
+                switch (node.extra_meta.executionStatus()) {
+                    .syncing, .payload_separated => true,
+                    else => false,
+                }
+            else
+                false,
+            .payload_status = if (head_node) |node| node.payload_status else .full,
+        };
+        self.chain.head_tracker.setHead(new_head.block_root, new_head.slot, new_head.state_root);
+
+        const snapshot = self.query().currentSnapshot();
+        const head_changed = !std.mem.eql(u8, &snapshot.head.root, &old_snapshot.head.root);
+        return .{
+            .snapshot = snapshot,
+            .head_changed = head_changed,
+            .forkchoice_update = if (head_changed) self.forkchoiceUpdateForHead(snapshot.head.root) else null,
+        };
     }
 
     pub fn advanceSlot(self: Service, slot: Slot) !void {

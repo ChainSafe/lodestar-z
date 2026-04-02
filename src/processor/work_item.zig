@@ -329,6 +329,14 @@ pub const ChainSegmentWork = struct {
     seen_timestamp_ns: i64,
 };
 
+/// Deferred EL forkchoice update derived from a completed chain import.
+pub const ExecutionForkchoiceWork = struct {
+    beacon_block_root: Root,
+    head_block_hash: Root,
+    safe_block_hash: Root,
+    finalized_block_hash: Root,
+};
+
 /// Backfill historical chain segment.
 pub const BackfillWork = struct {
     blocks: [*]AnySignedBeaconBlock,
@@ -376,73 +384,74 @@ pub const LightClientWork = struct {
 pub const WorkType = enum(u8) {
     // -- Sync (highest priority) --
     chain_segment = 0,
-    rpc_block = 1,
-    rpc_blob = 2,
-    rpc_custody_column = 3,
+    execution_forkchoice = 1,
+    rpc_block = 2,
+    rpc_blob = 3,
+    rpc_custody_column = 4,
 
     // -- Gossip: blocks + DA --
-    delayed_block = 4,
-    gossip_block = 5,
-    gossip_execution_payload = 6,
-    gossip_blob = 7,
-    gossip_data_column = 8,
-    column_reconstruction = 9,
+    delayed_block = 5,
+    gossip_block = 6,
+    gossip_execution_payload = 7,
+    gossip_blob = 8,
+    gossip_data_column = 9,
+    column_reconstruction = 10,
 
     // -- API high priority --
-    api_request_p0 = 10,
+    api_request_p0 = 11,
 
     // -- Attestations (batch-formed) --
-    aggregate = 11,
-    attestation = 12,
-    aggregate_batch = 13,
-    attestation_batch = 14,
+    aggregate = 12,
+    attestation = 13,
+    aggregate_batch = 14,
+    attestation_batch = 15,
 
     // -- Gloas: payload attestation --
-    gossip_payload_attestation = 15,
+    gossip_payload_attestation = 16,
 
     // -- Sync committee --
-    sync_contribution = 16,
-    sync_message = 17,
+    sync_contribution = 17,
+    sync_message = 18,
 
     // -- Reprocessing --
-    unknown_block_aggregate = 18,
-    unknown_block_attestation = 19,
+    unknown_block_aggregate = 19,
+    unknown_block_attestation = 20,
 
     // -- Gloas --
-    gossip_execution_payload_bid = 20,
-    gossip_proposer_preferences = 21,
+    gossip_execution_payload_bid = 21,
+    gossip_proposer_preferences = 22,
 
     // -- Peer serving --
-    status = 22,
-    blocks_by_range = 23,
-    blocks_by_root = 24,
-    blobs_by_range = 25,
-    blobs_by_root = 26,
-    columns_by_range = 27,
-    columns_by_root = 28,
+    status = 23,
+    blocks_by_range = 24,
+    blocks_by_root = 25,
+    blobs_by_range = 26,
+    blobs_by_root = 27,
+    columns_by_range = 28,
+    columns_by_root = 29,
 
     // -- Pool objects --
-    gossip_attester_slashing = 29,
-    gossip_proposer_slashing = 30,
-    gossip_voluntary_exit = 31,
-    gossip_bls_to_exec = 32,
+    gossip_attester_slashing = 30,
+    gossip_proposer_slashing = 31,
+    gossip_voluntary_exit = 32,
+    gossip_bls_to_exec = 33,
 
     // -- Low priority --
-    api_request_p1 = 33,
-    backfill_segment = 34,
+    api_request_p1 = 34,
+    backfill_segment = 35,
 
     // -- Light client --
-    lc_bootstrap = 35,
-    lc_finality_update = 36,
-    lc_optimistic_update = 37,
-    lc_updates_by_range = 38,
+    lc_bootstrap = 36,
+    lc_finality_update = 37,
+    lc_optimistic_update = 38,
+    lc_updates_by_range = 39,
 
     // -- Internal --
-    slot_tick = 39,
-    reprocess = 40,
+    slot_tick = 40,
+    reprocess = 41,
 
     /// Total number of work types. Useful for sizing per-type metric arrays.
-    pub const count: u32 = 41;
+    pub const count: u32 = 42;
 
     /// Returns true if this work type should be dropped during initial sync.
     pub fn dropDuringSync(self: WorkType) bool {
@@ -474,6 +483,7 @@ pub const WorkType = enum(u8) {
 pub const WorkItem = union(WorkType) {
     // -- Sync --
     chain_segment: ChainSegmentWork,
+    execution_forkchoice: ExecutionForkchoiceWork,
     rpc_block: RpcBlockWork,
     rpc_blob: RpcBlobWork,
     rpc_custody_column: RpcColumnWork,
@@ -551,6 +561,7 @@ pub const WorkItem = union(WorkType) {
 
     pub fn deinit(self: WorkItem, allocator: std.mem.Allocator) void {
         switch (self) {
+            .execution_forkchoice => {},
             .delayed_block => |work| work.block.deinit(allocator),
             .gossip_block => |work| work.block.deinit(allocator),
             .gossip_execution_payload => |work| work.payload.deinit(),

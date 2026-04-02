@@ -68,7 +68,7 @@ pub fn getBlock(ctx: *ApiContext, block_id: types.BlockId) !BlockResult {
     return .{
         .data = block_bytes,
         .slot = slot_info.slot,
-        .execution_optimistic = !slot_info.finalized,
+        .execution_optimistic = slot_info.execution_optimistic,
         .finalized = slot_info.finalized,
         .fork_name = fork_name,
     };
@@ -110,48 +110,15 @@ pub fn getValidators(
     state_id: types.StateId,
     _: types.ValidatorQuery,
 ) !HandlerResult([]const types.ValidatorData) {
-    const head = ctx.currentHeadTracker();
-    const use_head = switch (state_id) {
-        .head => true,
-        else => false,
-    };
-
-    if (use_head) {
-        const state = ctx.headState() orelse return error.StateNotAvailable;
-        return buildValidatorResponse(ctx, state);
-    }
-
-    switch (state_id) {
-        .finalized => {
-            const state = (try ctx.stateByBlockRoot(head.finalized_root)) orelse return error.StateNotAvailable;
-            return buildValidatorResponse(ctx, state);
-        },
-        .justified => {
-            const state = (try ctx.stateByBlockRoot(head.justified_root)) orelse return error.StateNotAvailable;
-            return buildValidatorResponse(ctx, state);
-        },
-        .genesis => {
-            const state = (try ctx.stateBySlot(0)) orelse return error.StateNotAvailable;
-            return buildValidatorResponse(ctx, state);
-        },
-        .slot => |slot| {
-            const state = (try ctx.stateBySlot(slot)) orelse return error.StateNotAvailable;
-            return buildValidatorResponse(ctx, state);
-        },
-        .root => |root| {
-            const state = (try ctx.stateByRoot(root)) orelse return error.StateNotAvailable;
-            return buildValidatorResponse(ctx, state);
-        },
-        else => {},
-    }
-
-    return error.StateNotAvailable;
+    const resolved = try resolveState(ctx, state_id);
+    return buildValidatorResponse(ctx, resolved.state, resolved.meta);
 }
 
 /// Build a validator response from a CachedBeaconState.
 fn buildValidatorResponse(
     ctx: *ApiContext,
     state: *CachedBeaconState,
+    meta: ResolvedStateMeta,
 ) !HandlerResult([]const types.ValidatorData) {
     // Read validators and balances from the state
     const validators = try state.state.validatorsSlice(ctx.allocator);
@@ -186,8 +153,8 @@ fn buildValidatorResponse(
     return .{
         .data = try result.toOwnedSlice(ctx.allocator),
         .meta = .{
-            .execution_optimistic = false,
-            .finalized = false,
+            .execution_optimistic = meta.execution_optimistic,
+            .finalized = meta.finalized,
         },
     };
 }
@@ -200,15 +167,8 @@ pub fn getValidator(
     state_id: types.StateId,
     validator_id: types.ValidatorId,
 ) !HandlerResult(types.ValidatorData) {
-    const head = ctx.currentHeadTracker();
-    const state = switch (state_id) {
-        .head => ctx.headState() orelse return error.StateNotAvailable,
-        .justified => (try ctx.stateByBlockRoot(head.justified_root)) orelse return error.StateNotAvailable,
-        .finalized => (try ctx.stateByBlockRoot(head.finalized_root)) orelse return error.StateNotAvailable,
-        .genesis => (try ctx.stateBySlot(0)) orelse return error.StateNotAvailable,
-        .slot => |slot| (try ctx.stateBySlot(slot)) orelse return error.StateNotAvailable,
-        .root => |root| (try ctx.stateByRoot(root)) orelse return error.StateNotAvailable,
-    };
+    const resolved = try resolveState(ctx, state_id);
+    const state = resolved.state;
 
     const validators = try state.state.validatorsSlice(ctx.allocator);
     defer ctx.allocator.free(validators);
@@ -249,7 +209,10 @@ pub fn getValidator(
                 .withdrawable_epoch = v.withdrawable_epoch,
             },
         },
-        .meta = .{},
+        .meta = .{
+            .execution_optimistic = resolved.meta.execution_optimistic,
+            .finalized = resolved.meta.finalized,
+        },
     };
 }
 
@@ -262,7 +225,9 @@ pub fn getStateRoot(ctx: *ApiContext, state_id: types.StateId) !HandlerResult([3
         .head => {
             return .{
                 .data = head.head_state_root,
-                .meta = .{},
+                .meta = .{
+                    .execution_optimistic = ctx.blockExecutionOptimistic(head.head_root),
+                },
             };
         },
         .finalized => {
@@ -286,7 +251,9 @@ pub fn getStateRoot(ctx: *ApiContext, state_id: types.StateId) !HandlerResult([3
                 return error.StateNotAvailable;
             return .{
                 .data = justified_state_root,
-                .meta = .{},
+                .meta = .{
+                    .execution_optimistic = ctx.blockExecutionOptimistic(head.justified_root),
+                },
             };
         },
         .slot => |slot| {
@@ -300,14 +267,19 @@ pub fn getStateRoot(ctx: *ApiContext, state_id: types.StateId) !HandlerResult([3
             const state_root = state_root_opt.?;
             return .{
                 .data = state_root,
-                .meta = .{ .finalized = slot <= head.finalized_slot },
+                .meta = .{
+                    .execution_optimistic = try ctx.stateExecutionOptimisticBySlot(slot),
+                    .finalized = slot <= head.finalized_slot,
+                },
             };
         },
         .root => |root| {
             // The state_id IS the root
             return .{
                 .data = root,
-                .meta = .{},
+                .meta = .{
+                    .execution_optimistic = ctx.stateExecutionOptimisticByRoot(root),
+                },
             };
         },
     }
@@ -648,6 +620,7 @@ fn getPoolCountsFromCtx(ctx: *ApiContext) [5]usize {
 const SlotAndRoot = struct {
     slot: u64,
     root: [32]u8,
+    execution_optimistic: bool,
     finalized: bool,
 };
 
@@ -667,21 +640,25 @@ fn resolveBlockSlotAndRoot(ctx: *ApiContext, block_id: types.BlockId) !SlotAndRo
         .head => return .{
             .slot = head.head_slot,
             .root = head.head_root,
+            .execution_optimistic = ctx.blockExecutionOptimistic(head.head_root),
             .finalized = false,
         },
         .finalized => return .{
             .slot = head.finalized_slot,
             .root = head.finalized_root,
+            .execution_optimistic = false,
             .finalized = true,
         },
         .justified => return .{
             .slot = head.justified_slot,
             .root = head.justified_root,
+            .execution_optimistic = ctx.blockExecutionOptimistic(head.justified_root),
             .finalized = false,
         },
         .genesis => return .{
             .slot = 0,
             .root = [_]u8{0} ** 32,
+            .execution_optimistic = false,
             .finalized = true,
         },
         .slot => |slot| {
@@ -689,6 +666,7 @@ fn resolveBlockSlotAndRoot(ctx: *ApiContext, block_id: types.BlockId) !SlotAndRo
             return .{
                 .slot = slot,
                 .root = root,
+                .execution_optimistic = try ctx.blockExecutionOptimisticAtSlot(slot),
                 .finalized = slot <= head.finalized_slot,
             };
         },
@@ -701,6 +679,7 @@ fn resolveBlockSlotAndRoot(ctx: *ApiContext, block_id: types.BlockId) !SlotAndRo
             return .{
                 .slot = slot,
                 .root = root,
+                .execution_optimistic = ctx.blockExecutionOptimistic(root),
                 .finalized = slot <= head.finalized_slot,
             };
         },
@@ -749,7 +728,7 @@ fn resolveBlockHeader(ctx: *ApiContext, block_id: types.BlockId) !BlockHeaderRes
                     .signature = sig.*,
                 },
             },
-            .execution_optimistic = !slot_info.finalized,
+            .execution_optimistic = slot_info.execution_optimistic,
             .finalized = slot_info.finalized,
         };
     }
@@ -770,7 +749,7 @@ fn resolveBlockHeader(ctx: *ApiContext, block_id: types.BlockId) !BlockHeaderRes
                 .signature = [_]u8{0} ** 96,
             },
         },
-        .execution_optimistic = !slot_info.finalized,
+        .execution_optimistic = slot_info.execution_optimistic,
         .finalized = slot_info.finalized,
     };
 }
@@ -949,6 +928,16 @@ test "getBlockHeader for head extracts real fields from DB block" {
     try std.testing.expectEqual([_]u8{0xef} ** 96, resp.data.header.signature);
 }
 
+test "getBlockHeader for head reports execution optimistic from chain query" {
+    var tc = test_helpers.makeTestContext(std.testing.allocator);
+    defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
+
+    tc.sync_status.is_optimistic = true;
+
+    const resp = try getBlockHeader(&tc.ctx, .head);
+    try std.testing.expect(resp.meta.execution_optimistic orelse false);
+}
+
 test "getValidators without head state returns StateNotAvailable" {
     var tc = test_helpers.makeTestContext(std.testing.allocator);
     defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
@@ -988,6 +977,30 @@ test "getValidators with head state returns non-empty list" {
     // Each validator should have a valid index
     try std.testing.expectEqual(@as(u64, 0), resp.data[0].index);
     try std.testing.expectEqual(@as(u64, 3), resp.data[3].index);
+}
+
+test "getValidators with head state propagates optimistic meta" {
+    const allocator = std.testing.allocator;
+    var tc = test_helpers.makeTestContext(allocator);
+    defer test_helpers.destroyTestContext(allocator, &tc);
+
+    const state_transition = @import("state_transition");
+    const Node = @import("persistent_merkle_tree").Node;
+    const TestCachedBeaconState = state_transition.test_utils.TestCachedBeaconState;
+
+    var pool = try Node.Pool.init(allocator, 500_000);
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 4);
+    defer test_state.deinit();
+
+    tc.chain_fixture.head_state = test_state.cached_state;
+    tc.sync_status.is_optimistic = true;
+
+    const resp = try getValidators(&tc.ctx, .head, .{});
+    defer allocator.free(resp.data);
+
+    try std.testing.expect(resp.meta.execution_optimistic orelse false);
 }
 
 test "getValidator with valid index returns data" {
@@ -1338,14 +1351,20 @@ fn resolveState(ctx: *ApiContext, state_id: types.StateId) !struct { state: *Cac
             const state = ctx.headState() orelse return error.StateNotAvailable;
             return .{
                 .state = state,
-                .meta = .{ .execution_optimistic = false, .finalized = false },
+                .meta = .{
+                    .execution_optimistic = ctx.blockExecutionOptimistic(head.head_root),
+                    .finalized = false,
+                },
             };
         },
         .justified => {
             const state = (try ctx.stateByBlockRoot(head.justified_root)) orelse return error.StateNotAvailable;
             return .{
                 .state = state,
-                .meta = .{ .execution_optimistic = false, .finalized = false },
+                .meta = .{
+                    .execution_optimistic = ctx.blockExecutionOptimistic(head.justified_root),
+                    .finalized = false,
+                },
             };
         },
         .finalized => {
@@ -1367,7 +1386,7 @@ fn resolveState(ctx: *ApiContext, state_id: types.StateId) !struct { state: *Cac
             return .{
                 .state = state,
                 .meta = .{
-                    .execution_optimistic = false,
+                    .execution_optimistic = try ctx.stateExecutionOptimisticBySlot(slot),
                     .finalized = slot <= head.finalized_slot,
                 },
             };
@@ -1376,7 +1395,10 @@ fn resolveState(ctx: *ApiContext, state_id: types.StateId) !struct { state: *Cac
             const state = (try ctx.stateByRoot(root)) orelse return error.StateNotAvailable;
             return .{
                 .state = state,
-                .meta = .{ .execution_optimistic = false, .finalized = false },
+                .meta = .{
+                    .execution_optimistic = ctx.stateExecutionOptimisticByRoot(root),
+                    .finalized = false,
+                },
             };
         },
     }

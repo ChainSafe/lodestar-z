@@ -981,6 +981,14 @@ fn advanceChainClock(self: *BeaconNode, io: std.Io) void {
 
     self.chainService().onSlot(current_slot);
     self.last_slot_tick = current_slot;
+
+    const outcome = self.chainService().revalidateCurrentOptimisticHead() catch |err| {
+        std.log.warn("Optimistic head revalidation failed: {}", .{err});
+        return;
+    };
+    if (outcome) |revalidated| {
+        self.finishExecutionRevalidationOutcome(revalidated);
+    }
 }
 
 fn dialBootnodeEnr(self: *BeaconNode, io: std.Io, svc: *networking.P2pService, enr_str: []const u8) !void {
@@ -2641,7 +2649,7 @@ fn currentUnixTimeMs(io: std.Io) u64 {
 
 fn maybePrepareProposerPayload(self: *BeaconNode, io: std.Io) void {
     const clock = self.clock orelse return;
-    _ = self.engine_api orelse return;
+    if (!self.hasExecutionEngine()) return;
 
     const current_slot = clock.currentSlot(io) orelse return;
     const next_slot = current_slot + 1;
@@ -2655,11 +2663,7 @@ fn maybePrepareProposerPayload(self: *BeaconNode, io: std.Io) void {
         self.node_options.suggested_fee_recipient,
     ) orelse return;
     self.refreshBuilderStatus(current_slot);
-    if (self.cached_payload_slot == next_slot and
-        self.cached_payload_id != null and
-        self.cached_payload_parent_root != null and
-        std.mem.eql(u8, &self.cached_payload_parent_root.?, &head_root))
-    {
+    if (self.execution_runtime.cachedPayloadFor(next_slot, head_root)) {
         return;
     }
 

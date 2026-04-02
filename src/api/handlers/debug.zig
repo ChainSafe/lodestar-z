@@ -40,7 +40,13 @@ pub fn getState(ctx: *ApiContext, state_id: types.StateId) !HandlerResult([]cons
         .head => {
             const state_root = head.head_state_root;
             if (try ctx.stateBytesByRoot(state_root)) |data| {
-                return .{ .data = data, .meta = .{ .execution_optimistic = false, .finalized = false } };
+                return .{
+                    .data = data,
+                    .meta = .{
+                        .execution_optimistic = ctx.blockExecutionOptimistic(head.head_root),
+                        .finalized = false,
+                    },
+                };
             }
             return error.StateNotAvailable;
         },
@@ -58,16 +64,34 @@ pub fn getState(ctx: *ApiContext, state_id: types.StateId) !HandlerResult([]cons
             const justified_root = (try ctx.stateRootByBlockRoot(head.justified_root)) orelse
                 return error.StateNotAvailable;
             const data = (try ctx.stateBytesByRoot(justified_root)) orelse return error.StateNotAvailable;
-            return .{ .data = data, .meta = .{ .execution_optimistic = false, .finalized = false } };
+            return .{
+                .data = data,
+                .meta = .{
+                    .execution_optimistic = ctx.blockExecutionOptimistic(head.justified_root),
+                    .finalized = false,
+                },
+            };
         },
         .slot => |slot| {
             const data = (try ctx.stateBytesBySlot(slot)) orelse return error.StateNotAvailable;
             const is_finalized = slot <= head.finalized_slot;
-            return .{ .data = data, .meta = .{ .execution_optimistic = false, .finalized = is_finalized } };
+            return .{
+                .data = data,
+                .meta = .{
+                    .execution_optimistic = try ctx.stateExecutionOptimisticBySlot(slot),
+                    .finalized = is_finalized,
+                },
+            };
         },
         .root => |root| {
             const data = (try ctx.stateBytesByRoot(root)) orelse return error.StateNotAvailable;
-            return .{ .data = data, .meta = .{ .execution_optimistic = false, .finalized = false } };
+            return .{
+                .data = data,
+                .meta = .{
+                    .execution_optimistic = ctx.stateExecutionOptimisticByRoot(root),
+                    .finalized = false,
+                },
+            };
         },
     }
 }

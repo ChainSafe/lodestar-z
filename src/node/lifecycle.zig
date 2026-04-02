@@ -20,18 +20,14 @@ const identity_mod = @import("identity.zig");
 const sync_mod = @import("sync");
 const UnknownBlockSync = sync_mod.UnknownBlockSync;
 const UnknownChainSync = sync_mod.UnknownChainSync;
-const execution_mod = @import("execution");
-const EngineApi = execution_mod.EngineApi;
-const MockEngine = execution_mod.MockEngine;
-const HttpEngine = execution_mod.HttpEngine;
-const HttpBuilder = execution_mod.HttpBuilder;
-const IoHttpTransport = execution_mod.IoHttpTransport;
 const processor_mod = @import("processor");
 const BeaconProcessor = processor_mod.BeaconProcessor;
 const QueueConfig = processor_mod.QueueConfig;
 const SlotClock = @import("clock.zig").SlotClock;
 const NodeOptions = @import("options.zig").NodeOptions;
 const InitConfig = @import("beacon_node.zig").BeaconNode.InitConfig;
+const execution_verifier_mod = @import("execution_verifier.zig");
+const ExecutionRuntime = @import("execution_runtime.zig").ExecutionRuntime;
 const custody_mod = @import("networking").custody;
 
 const BlsThreadPools = struct {
@@ -119,105 +115,14 @@ pub fn init(allocator: Allocator, io: std.Io, beacon_config: *const BeaconConfig
         .event_bus = event_bus_ptr,
     };
 
-    var mock_engine_ptr: ?*MockEngine = null;
-    var http_engine_ptr: ?*HttpEngine = null;
-    var io_transport_ptr: ?*IoHttpTransport = null;
-    var engine: ?EngineApi = null;
-    var http_builder_ptr: ?*HttpBuilder = null;
-    var builder_transport_ptr: ?*IoHttpTransport = null;
-    var builder_api: ?execution_mod.BuilderApi = null;
-
-    if (opts.engine_mock) {
-        const mock = try allocator.create(MockEngine);
-        errdefer allocator.destroy(mock);
-        mock.* = MockEngine.init(allocator);
-        errdefer mock.deinit();
-
-        mock_engine_ptr = mock;
-        engine = mock.engine();
-        log.logger(.node).info("Execution engine: MockEngine (--engine-mock)", .{});
-    } else if (opts.execution_urls.len > 0) {
-        const transport = try allocator.create(IoHttpTransport);
-        errdefer allocator.destroy(transport);
-        transport.* = IoHttpTransport.init(allocator, io);
-        errdefer transport.deinit();
-        io_transport_ptr = transport;
-
-        const http_eng = try allocator.create(HttpEngine);
-        errdefer allocator.destroy(http_eng);
-        var retry_config = execution_mod.RetryConfig{
-            .max_retries = opts.execution_retries,
-            .initial_backoff_ms = opts.execution_retry_delay_ms,
-        };
-        if (opts.execution_timeout_ms) |timeout_ms| {
-            retry_config.default_timeout_ms = timeout_ms;
-            retry_config.new_payload_timeout_ms = timeout_ms;
-        }
-        http_eng.* = HttpEngine.initWithRetry(
-            allocator,
-            io,
-            opts.execution_urls[0],
-            init_config.jwt_secret,
-            transport.transport(),
-            retry_config,
-        );
-        errdefer http_eng.deinit();
-        http_engine_ptr = http_eng;
-        engine = http_eng.engine();
-        std.log.info(
-            "Execution engine: HttpEngine -> {s} (retries={d} delay_ms={d} timeout_ms={d})",
-            .{
-                opts.execution_urls[0],
-                opts.execution_retries,
-                opts.execution_retry_delay_ms,
-                retry_config.default_timeout_ms,
-            },
-        );
-    } else {
-        const mock = try allocator.create(MockEngine);
-        errdefer allocator.destroy(mock);
-        mock.* = MockEngine.init(allocator);
-        errdefer mock.deinit();
-
-        mock_engine_ptr = mock;
-        engine = mock.engine();
-        log.logger(.node).info("Execution engine: MockEngine (no --execution-url)", .{});
-    }
-
-    if (opts.builder_enabled) {
-        const transport = try allocator.create(IoHttpTransport);
-        errdefer allocator.destroy(transport);
-        transport.* = IoHttpTransport.init(allocator, io);
-        errdefer transport.deinit();
-        builder_transport_ptr = transport;
-
-        const http_builder = try allocator.create(HttpBuilder);
-        errdefer allocator.destroy(http_builder);
-        http_builder.* = HttpBuilder.init(
-            allocator,
-            opts.builder_url,
-            transport.transport(),
-            .{
-                .timeout_ms = opts.builder_timeout_ms,
-                .fault_inspection_window = execution_mod.builder.resolveFaultInspectionWindow(
-                    io,
-                    opts.builder_fault_inspection_window,
-                ),
-                .allowed_faults = opts.builder_allowed_faults,
-            },
-        );
-        errdefer http_builder.deinit();
-        http_builder_ptr = http_builder;
-        builder_api = http_builder.builder();
-
-        log.logger(.node).info("Execution builder: HttpBuilder -> {s} (timeout_ms={d} proposal_timeout_ms={d} fault_window={d} allowed_faults={d})", .{
-            opts.builder_url,
-            http_builder.request_timeout_ms,
-            http_builder.proposal_timeout_ms,
-            http_builder.fault_inspection_window,
-            http_builder.allowed_faults,
-        });
-    }
+    const execution_runtime = try ExecutionRuntime.init(
+        allocator,
+        io,
+        opts,
+        init_config.jwt_secret,
+    );
+    var owned_execution_runtime: ?*ExecutionRuntime = execution_runtime;
+    errdefer if (owned_execution_runtime) |runtime| runtime.deinit();
 
     const node = try allocator.create(BeaconNode);
     node.* = .{
@@ -234,13 +139,7 @@ pub fn init(allocator: Allocator, io: std.Io, beacon_config: *const BeaconConfig
         .block_bls_thread_pool = bls_thread_pools.block,
         .gossip_bls_thread_pool = bls_thread_pools.gossip,
         .node_identity = node_identity,
-        .mock_engine = mock_engine_ptr,
-        .http_engine = http_engine_ptr,
-        .io_transport = io_transport_ptr,
-        .engine_api = engine,
-        .http_builder = http_builder_ptr,
-        .builder_transport = builder_transport_ptr,
-        .builder_api = builder_api,
+        .execution_runtime = execution_runtime,
         .api_context = api_ctx,
         .api_node_identity = api_node_identity,
         .event_bus = event_bus_ptr,
@@ -250,6 +149,7 @@ pub fn init(allocator: Allocator, io: std.Io, beacon_config: *const BeaconConfig
     };
 
     node.validator_monitor = chain_runtime.validator_monitor;
+    node.chain.execution_verifier = execution_verifier_mod.make(node);
     if (chain_runtime.validator_monitor != null) {
         log.logger(.node).info("Validator monitor: tracking {d} validators", .{opts.validator_monitor_indices.len});
     }
@@ -257,6 +157,7 @@ pub fn init(allocator: Allocator, io: std.Io, beacon_config: *const BeaconConfig
     owns_node_identity = false;
     owned_api_node_identity = null;
     owned_chain_runtime = null;
+    owned_execution_runtime = null;
     errdefer deinit(node);
 
     node.api_bindings = try api_callbacks_mod.ApiBindings.init(allocator, node, beacon_config);
@@ -277,30 +178,7 @@ pub fn init(allocator: Allocator, io: std.Io, beacon_config: *const BeaconConfig
 pub fn deinit(self: *BeaconNode) void {
     const allocator = self.allocator;
 
-    if (self.mock_engine) |me| {
-        me.deinit();
-        allocator.destroy(me);
-    }
-
-    if (self.http_engine) |he| {
-        he.deinit();
-        allocator.destroy(he);
-    }
-
-    if (self.http_builder) |hb| {
-        hb.deinit();
-        allocator.destroy(hb);
-    }
-
-    if (self.io_transport) |pt| {
-        pt.deinit();
-        allocator.destroy(pt);
-    }
-
-    if (self.builder_transport) |pt| {
-        pt.deinit();
-        allocator.destroy(pt);
-    }
+    self.execution_runtime.deinit();
 
     if (self.api_bindings) |bindings| {
         bindings.deinit(allocator);

@@ -41,6 +41,7 @@ const RpcBlockWork = work_item_mod.RpcBlockWork;
 const RpcBlobWork = work_item_mod.RpcBlobWork;
 const RpcColumnWork = work_item_mod.RpcColumnWork;
 const ChainSegmentWork = work_item_mod.ChainSegmentWork;
+const ExecutionForkchoiceWork = work_item_mod.ExecutionForkchoiceWork;
 const BackfillWork = work_item_mod.BackfillWork;
 const ReqRespWork = work_item_mod.ReqRespWork;
 const ApiWork = work_item_mod.ApiWork;
@@ -64,6 +65,7 @@ const gossip_batch_holdback_ns: i64 = 2 * std.time.ns_per_ms;
 /// Computed once at startup from the active validator count.
 pub const QueueConfig = struct {
     chain_segment: u32,
+    execution_forkchoice: u32,
     rpc_block: u32,
     rpc_blob: u32,
     rpc_custody_column: u32,
@@ -119,6 +121,7 @@ pub const QueueConfig = struct {
 
         return .{
             .chain_segment = 64,
+            .execution_forkchoice = 1024,
             .rpc_block = 1024,
             .rpc_blob = 1024,
             .rpc_custody_column = 64,
@@ -195,6 +198,7 @@ pub const WorkQueues = struct {
 
     // ── FIFO queues ──
     chain_segment: FifoQueue(ChainSegmentWork),
+    execution_forkchoice: FifoQueue(ExecutionForkchoiceWork),
     rpc_block: FifoQueue(RpcBlockWork),
     rpc_blob: FifoQueue(RpcBlobWork),
     rpc_custody_column: FifoQueue(RpcColumnWork),
@@ -263,6 +267,9 @@ pub const WorkQueues = struct {
             .allocator = allocator,
             .chain_segment = FifoQueue(ChainSegmentWork).init(
                 try allocator.alloc(ChainSegmentWork, config.chain_segment),
+            ),
+            .execution_forkchoice = FifoQueue(ExecutionForkchoiceWork).init(
+                try allocator.alloc(ExecutionForkchoiceWork, config.execution_forkchoice),
             ),
             .rpc_block = FifoQueue(RpcBlockWork).init(
                 try allocator.alloc(RpcBlockWork, config.rpc_block),
@@ -413,6 +420,7 @@ pub const WorkQueues = struct {
 
     fn cleanupQueuedItems(self: *WorkQueues) void {
         self.cleanupQueue(.chain_segment, &self.chain_segment);
+        self.cleanupQueue(.execution_forkchoice, &self.execution_forkchoice);
         self.cleanupQueue(.rpc_block, &self.rpc_block);
         self.cleanupQueue(.rpc_blob, &self.rpc_blob);
         self.cleanupQueue(.rpc_custody_column, &self.rpc_custody_column);
@@ -453,6 +461,7 @@ pub const WorkQueues = struct {
 
     fn freeQueueBuffers(self: *WorkQueues) void {
         self.allocator.free(self.chain_segment.buffer);
+        self.allocator.free(self.execution_forkchoice.buffer);
         self.allocator.free(self.rpc_block.buffer);
         self.allocator.free(self.rpc_blob.buffer);
         self.allocator.free(self.rpc_custody_column.buffer);
@@ -520,7 +529,7 @@ pub const WorkQueues = struct {
 
         switch (item) {
             // ── FIFO queues ──
-            inline .chain_segment, .rpc_block, .rpc_blob, .rpc_custody_column, .delayed_block, .gossip_block, .gossip_execution_payload, .gossip_blob, .gossip_data_column, .api_request_p0, .gossip_payload_attestation, .gossip_execution_payload_bid, .gossip_proposer_preferences, .status, .blocks_by_range, .blocks_by_root, .blobs_by_range, .blobs_by_root, .columns_by_range, .columns_by_root, .gossip_attester_slashing, .gossip_proposer_slashing, .gossip_voluntary_exit, .gossip_bls_to_exec, .api_request_p1, .backfill_segment, .lc_bootstrap, .lc_finality_update, .lc_optimistic_update, .lc_updates_by_range => |w, tag| {
+            inline .chain_segment, .execution_forkchoice, .rpc_block, .rpc_blob, .rpc_custody_column, .delayed_block, .gossip_block, .gossip_execution_payload, .gossip_blob, .gossip_data_column, .api_request_p0, .gossip_payload_attestation, .gossip_execution_payload_bid, .gossip_proposer_preferences, .status, .blocks_by_range, .blocks_by_root, .blobs_by_range, .blobs_by_root, .columns_by_range, .columns_by_root, .gossip_attester_slashing, .gossip_proposer_slashing, .gossip_voluntary_exit, .gossip_bls_to_exec, .api_request_p1, .backfill_segment, .lc_bootstrap, .lc_finality_update, .lc_optimistic_update, .lc_updates_by_range => |w, tag| {
                 pushFifo(self, &@field(self, @tagName(tag)), w, @unionInit(WorkItem, @tagName(tag), w));
             },
 
@@ -561,6 +570,7 @@ pub const WorkQueues = struct {
     pub fn popHighestPriorityAt(self: *WorkQueues, now_ns: i64) ?WorkItem {
         // Priority 1-4: Sync.
         if (self.chain_segment.pop()) |w| return .{ .chain_segment = w };
+        if (self.execution_forkchoice.pop()) |w| return .{ .execution_forkchoice = w };
         if (self.rpc_block.pop()) |w| return .{ .rpc_block = w };
         if (self.rpc_blob.pop()) |w| return .{ .rpc_blob = w };
         if (self.rpc_custody_column.pop()) |w| return .{ .rpc_custody_column = w };
@@ -647,6 +657,7 @@ pub const WorkQueues = struct {
 
         // FIFO queues.
         total += self.chain_segment.len;
+        total += self.execution_forkchoice.len;
         total += self.rpc_block.len;
         total += self.rpc_blob.len;
         total += self.rpc_custody_column.len;
@@ -1148,6 +1159,7 @@ test "WorkQueues: FIFO overflow deinitializes rejected owned API handles" {
 fn testQueueConfig() QueueConfig {
     return .{
         .chain_segment = 4,
+        .execution_forkchoice = 4,
         .rpc_block = 4,
         .rpc_blob = 4,
         .rpc_custody_column = 4,

@@ -46,6 +46,7 @@ const PipelineBlockInput = blocks_mod.BlockInput;
 const PipelineImportOpts = blocks_mod.ImportBlockOpts;
 const PipelineImportResult = blocks_mod.ImportResult;
 const BlockImportError = blocks_mod.BlockImportError;
+const ExecutionVerifier = @import("ports/execution.zig").ExecutionVerifier;
 
 const op_pool_mod = @import("op_pool.zig");
 const OpPool = op_pool_mod.OpPool;
@@ -178,6 +179,8 @@ pub const Chain = struct {
     verify_signatures: bool,
     /// Shared BLS worker pool used by the block STF batch verifier.
     block_bls_thread_pool: ?*BlsThreadPool = null,
+    /// Optional execution-layer verification dependency for block import.
+    execution_verifier: ?ExecutionVerifier,
 
     /// Maps block root → state root for pre-state lookup.
     block_to_state: std.AutoArrayHashMap([32]u8, [32]u8),
@@ -233,6 +236,7 @@ pub const Chain = struct {
             .sync_committee_message_pool = null,
             .verify_signatures = false,
             .block_bls_thread_pool = null,
+            .execution_verifier = null,
             .block_to_state = std.AutoArrayHashMap([32]u8, [32]u8).init(allocator),
             .notification_sink = null,
             .genesis_validators_root = [_]u8{0} ** 32,
@@ -418,14 +422,11 @@ pub const Chain = struct {
     }
 
     fn importPipelineBlockInput(self: *Chain, block_input: PipelineBlockInput) !ImportResult {
-        // Skip execution verification here — the EL call (engine_newPayload) is
-        // handled by BeaconNode after importBlock returns, via notifyForkchoiceUpdate.
         // Skip future-slot check: callers (gossip handler, API, sync) have already
         // validated timing. The legacy importBlock never enforced this check.
         // Propagate verify_signatures from chain config: when false (default for tests),
         // skip BLS signature verification to avoid failures with dummy test signatures.
         const opts = PipelineImportOpts{
-            .skip_execution = true,
             .skip_future_slot = true,
             .skip_signatures = !self.verify_signatures,
         };
@@ -499,7 +500,7 @@ pub const Chain = struct {
             .head_tracker = self.head_tracker,
             .block_to_state = &self.block_to_state,
             .notification_sink = self.notification_sink,
-            .execution_verifier = null, // Set by BeaconNode when EL is configured
+            .execution_verifier = self.execution_verifier,
             .current_slot = current_slot,
             .block_bls_thread_pool = self.block_bls_thread_pool,
             .reprocess_queue = self.reprocess_queue, // P1-10: wire reprocess queue
@@ -788,6 +789,7 @@ pub const Chain = struct {
     /// exceeds SYNC_DISTANCE_THRESHOLD slots.
     pub fn getSyncStatus(self: *const Chain) SyncStatus {
         const head_slot = if (self.fork_choice) |fc| fc.head.slot else self.head_tracker.head_slot;
+        const is_optimistic = self.currentHeadExecutionOptimistic();
 
         // Compute wall-clock slot from genesis_time_s.
         // Falls back to head_slot (distance = 0) when genesis is not yet known.
@@ -798,8 +800,17 @@ pub const Chain = struct {
             .head_slot = head_slot,
             .sync_distance = sync_distance,
             .is_syncing = sync_distance > SYNC_DISTANCE_THRESHOLD,
-            .is_optimistic = false,
+            .is_optimistic = is_optimistic,
             .el_offline = false,
+        };
+    }
+
+    pub fn currentHeadExecutionOptimistic(self: *const Chain) bool {
+        const fc = self.fork_choice orelse return false;
+        const head_node = fc.getBlockDefaultStatus(fc.head.block_root) orelse return false;
+        return switch (head_node.extra_meta.executionStatus()) {
+            .syncing, .payload_separated => true,
+            else => false,
         };
     }
 

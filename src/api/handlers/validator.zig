@@ -107,7 +107,7 @@ pub fn getProposerDuties(ctx: *ApiContext, epoch: u64) !HandlerResult([]Proposer
             return .{
                 .data = duties,
                 .meta = .{
-                    .execution_optimistic = false,
+                    .execution_optimistic = ctx.blockExecutionOptimistic(head.head_root),
                     .dependent_root = head.head_root,
                 },
             };
@@ -126,7 +126,7 @@ pub fn getProposerDuties(ctx: *ApiContext, epoch: u64) !HandlerResult([]Proposer
     return .{
         .data = duties,
         .meta = .{
-            .execution_optimistic = false,
+            .execution_optimistic = ctx.blockExecutionOptimistic(head.head_root),
             .dependent_root = head.head_root,
         },
     };
@@ -187,7 +187,7 @@ pub fn getAttesterDuties(
     return .{
         .data = try result.toOwnedSlice(ctx.allocator),
         .meta = .{
-            .execution_optimistic = false,
+            .execution_optimistic = ctx.blockExecutionOptimistic(head.head_root),
             .dependent_root = head.head_root,
         },
     };
@@ -203,6 +203,7 @@ pub fn getSyncDuties(
     epoch: u64,
     validator_indices: []const u64,
 ) !HandlerResult([]SyncDuty) {
+    const head = ctx.currentHeadTracker();
     const state = ctx.headState() orelse return error.NotImplemented;
     const epoch_cache = state.epoch_cache;
 
@@ -242,7 +243,7 @@ pub fn getSyncDuties(
     return .{
         .data = try result.toOwnedSlice(ctx.allocator),
         .meta = .{
-            .execution_optimistic = false,
+            .execution_optimistic = ctx.blockExecutionOptimistic(head.head_root),
         },
     };
 }

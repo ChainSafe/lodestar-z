@@ -119,7 +119,7 @@ pub const ApiBindings = struct {
             bindings.validator_monitor_cb_ctx.?.* = .{ .monitor = vm };
         }
 
-        if (node.builder_api != null) {
+        if (node.execution_runtime.builderApi() != null) {
             bindings.builder_cb_ctx = try allocator.create(BuilderCallbackCtx);
             bindings.builder_cb_ctx.?.* = .{ .node = node };
         }
@@ -158,6 +158,8 @@ pub const ApiBindings = struct {
             .getHeadTrackerFn = &getChainHeadTrackerCallback,
             .getBlockRootBySlotFn = &getChainBlockRootBySlotCallback,
             .getBlockBytesByRootFn = &getChainBlockBytesByRootCallback,
+            .getBlockExecutionOptimisticFn = &getChainBlockExecutionOptimisticCallback,
+            .getBlockExecutionOptimisticAtSlotFn = &getChainBlockExecutionOptimisticAtSlotCallback,
             .getStateRootBySlotFn = &getChainStateRootBySlotCallback,
             .getStateRootByBlockRootFn = &getChainStateRootByBlockRootCallback,
             .getStateBytesBySlotFn = &getChainStateBytesBySlotCallback,
@@ -167,6 +169,8 @@ pub const ApiBindings = struct {
             .getHeadStateFn = &getChainHeadStateCallback,
             .getStateByRootFn = &getChainStateByRootCallback,
             .getStateBySlotFn = &getChainStateBySlotCallback,
+            .getStateExecutionOptimisticByRootFn = &getChainStateExecutionOptimisticByRootCallback,
+            .getStateExecutionOptimisticBySlotFn = &getChainStateExecutionOptimisticBySlotCallback,
         };
         api_ctx.sync_status_view = .{
             .ptr = @ptrCast(self.sync_status_ctx),
@@ -485,6 +489,16 @@ fn getChainBlockBytesByRootCallback(ptr: *anyopaque, root: [32]u8) anyerror!?[]c
     return ctx.query.blockBytesByRoot(root);
 }
 
+fn getChainBlockExecutionOptimisticCallback(ptr: *anyopaque, root: [32]u8) bool {
+    const ctx: *ChainCallbackCtx = @ptrCast(@alignCast(ptr));
+    return ctx.query.blockExecutionOptimistic(root);
+}
+
+fn getChainBlockExecutionOptimisticAtSlotCallback(ptr: *anyopaque, slot: u64) anyerror!bool {
+    const ctx: *ChainCallbackCtx = @ptrCast(@alignCast(ptr));
+    return ctx.query.blockExecutionOptimisticAtSlot(slot);
+}
+
 fn getChainStateRootBySlotCallback(ptr: *anyopaque, slot: u64) anyerror!?[32]u8 {
     const ctx: *ChainCallbackCtx = @ptrCast(@alignCast(ptr));
     return ctx.query.stateRootBySlot(slot);
@@ -528,6 +542,16 @@ fn getChainStateByRootCallback(ptr: *anyopaque, state_root: [32]u8) anyerror!?*C
 fn getChainStateBySlotCallback(ptr: *anyopaque, slot: u64) anyerror!?*CachedBeaconState {
     const ctx: *ChainCallbackCtx = @ptrCast(@alignCast(ptr));
     return ctx.query.stateBySlot(slot);
+}
+
+fn getChainStateExecutionOptimisticByRootCallback(ptr: *anyopaque, state_root: [32]u8) bool {
+    const ctx: *ChainCallbackCtx = @ptrCast(@alignCast(ptr));
+    return ctx.query.stateExecutionOptimisticByRoot(state_root);
+}
+
+fn getChainStateExecutionOptimisticBySlotCallback(ptr: *anyopaque, slot: u64) anyerror!bool {
+    const ctx: *ChainCallbackCtx = @ptrCast(@alignCast(ptr));
+    return ctx.query.stateExecutionOptimisticAtSlot(slot);
 }
 
 fn getAggregateAttestationCallback(
@@ -918,7 +942,7 @@ fn produceBlockCallback(
                 .execution_payload_source = .engine,
             };
         },
-        .@"default", .maxprofit => {
+        .default, .maxprofit => {
             var produced = try block_production_mod.produceEngineOrBuilderProposal(
                 node,
                 params.slot,
@@ -1015,7 +1039,7 @@ fn builderBoostFactorForSelection(
 ) ?u64 {
     return switch (selection) {
         .executionalways, .executiononly => 0,
-        .@"default", .maxprofit => requested,
+        .default, .maxprofit => requested,
         .builderalways, .builderonly => null,
     };
 }
@@ -1240,7 +1264,7 @@ fn builderRegisterValidatorsCallback(
 ) anyerror!void {
     const ctx: *BuilderCallbackCtx = @ptrCast(@alignCast(ptr));
     const node = ctx.node;
-    _ = node.builder_api orelse return;
+    _ = node.execution_runtime.builderApi() orelse return;
 
     const relay_registrations = try node.allocator.alloc(
         execution_mod.builder.SignedValidatorRegistration,
@@ -1317,7 +1341,7 @@ test "builderBoostFactorForSelection matches builder selection semantics" {
     try std.testing.expectEqual(@as(?u64, 0), builderBoostFactorForSelection(.executiononly, 150));
     try std.testing.expectEqual(@as(?u64, 0), builderBoostFactorForSelection(.executionalways, null));
     try std.testing.expectEqual(@as(?u64, 150), builderBoostFactorForSelection(.maxprofit, 150));
-    try std.testing.expectEqual(@as(?u64, 150), builderBoostFactorForSelection(.@"default", 150));
+    try std.testing.expectEqual(@as(?u64, 150), builderBoostFactorForSelection(.default, 150));
     try std.testing.expectEqual(@as(?u64, null), builderBoostFactorForSelection(.builderalways, 150));
     try std.testing.expectEqual(@as(?u64, null), builderBoostFactorForSelection(.builderonly, null));
 }

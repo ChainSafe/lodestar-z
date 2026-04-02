@@ -70,7 +70,10 @@ pub const SegmentExecStatus = types.SegmentExecStatus;
 // -- Stage-specific type re-exports --
 pub const SanityOutcome = verify_sanity.SanityOutcome;
 pub const SignatureVerificationResult = verify_signatures.SignatureVerificationResult;
-pub const ExecutionVerifier = verify_execution.ExecutionVerifier;
+pub const ExecutionPort = @import("../ports/execution.zig").ExecutionPort;
+pub const ExecutionVerifier = @import("../ports/execution.zig").ExecutionVerifier;
+pub const NewPayloadRequest = @import("../ports/execution.zig").NewPayloadRequest;
+pub const NewPayloadResult = @import("../ports/execution.zig").NewPayloadResult;
 pub const ImportContext = import_block.ImportContext;
 pub const PipelineContext = pipeline.PipelineContext;
 pub const StfResult = execute_state_transition.StfResult;

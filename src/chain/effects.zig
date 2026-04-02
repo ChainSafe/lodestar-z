@@ -29,9 +29,14 @@ pub const ArchiveStateRequest = struct {
     state_root: Root,
 };
 
+pub const ExecutionForkchoiceUpdate = struct {
+    beacon_block_root: Root,
+    state: chain_types.ForkchoiceUpdateState,
+};
+
 pub const ImportEffects = struct {
-    /// The canonical head root after the import completes.
-    notify_forkchoice_update_root: Root,
+    /// Execution-layer forkchoice update to run after the import completes.
+    forkchoice_update: ?ExecutionForkchoiceUpdate = null,
     /// Archive this post-state on epoch boundaries.
     archive_state: ?ArchiveStateRequest = null,
     /// Finalized checkpoint snapshot after the import, when relevant.
@@ -45,8 +50,8 @@ pub const ImportOutcome = struct {
 };
 
 pub const SegmentImportEffects = struct {
-    /// The canonical head root after the segment completes.
-    notify_forkchoice_update_root: Root,
+    /// Execution-layer forkchoice update to run after the segment completes.
+    forkchoice_update: ?ExecutionForkchoiceUpdate = null,
     /// Archive any epoch-transition post-states imported in the segment.
     archive_states: []const ArchiveStateRequest = &.{},
     /// Finalized checkpoint snapshot after the segment, when relevant.
@@ -59,6 +64,12 @@ pub const SegmentImportOutcome = struct {
     failed_count: usize,
     snapshot: ChainSnapshot,
     effects: SegmentImportEffects,
+};
+
+pub const ExecutionRevalidationOutcome = struct {
+    snapshot: ChainSnapshot,
+    head_changed: bool,
+    forkchoice_update: ?ExecutionForkchoiceUpdate = null,
 };
 
 pub const BootstrapOutcome = struct {

@@ -75,14 +75,9 @@ const BatchBlock = sync_mod.BatchBlock;
 const BatchId = sync_mod.BatchId;
 
 const execution_mod = @import("execution");
-const EngineApi = execution_mod.EngineApi;
 const MockEngine = execution_mod.MockEngine;
-const HttpEngine = execution_mod.HttpEngine;
-const IoHttpTransport = execution_mod.IoHttpTransport;
 const PayloadAttributesV3 = execution_mod.engine_api_types.PayloadAttributesV3;
 const GetPayloadResponse = execution_mod.GetPayloadResponse;
-const BuilderApi = execution_mod.BuilderApi;
-const HttpBuilder = execution_mod.HttpBuilder;
 const constants = @import("constants");
 const Sha256 = std.crypto.hash.sha2.Sha256;
 const metrics_mod = @import("metrics.zig");
@@ -97,6 +92,7 @@ const GossipIngressMetadata = gossip_handler_mod.GossipIngressMetadata;
 const block_import_mod = @import("block_import.zig");
 const api_callbacks_mod = @import("api_callbacks.zig");
 const block_production_mod = @import("block_production.zig");
+const ExecutionRuntime = @import("execution_runtime.zig").ExecutionRuntime;
 const lifecycle_mod = @import("lifecycle.zig");
 const p2p_runtime_mod = @import("p2p_runtime.zig");
 const sync_bridge_mod = @import("sync_bridge.zig");
@@ -111,6 +107,7 @@ const WorkItem = processor_mod.WorkItem;
 const WorkQueues = processor_mod.WorkQueues;
 const AttestationWork = processor_mod.work_item.AttestationWork;
 const AggregateWork = processor_mod.work_item.AggregateWork;
+const ExecutionForkchoiceWork = processor_mod.work_item.ExecutionForkchoiceWork;
 // HeadTracker, ImportResult, ImportError are in chain_mod (src/chain).
 
 // dummyBalancesGetterFn is defined in block_import.zig.
@@ -246,28 +243,8 @@ pub const BeaconNode = struct {
     // Validator monitor — optional on-chain performance tracker for specified validators.
     validator_monitor: ?*ValidatorMonitor = null,
 
-    // Execution Layer engine (Engine API client or mock).
-    mock_engine: ?*MockEngine = null,
-    http_engine: ?*HttpEngine = null,
-    io_transport: ?*IoHttpTransport = null,
-    engine_api: ?EngineApi = null,
-    http_builder: ?*HttpBuilder = null,
-    builder_transport: ?*IoHttpTransport = null,
-
-    /// Cached payload ID from the last forkchoiceUpdated call with payload attributes.
-    /// Used by produceBlockWithPayload to retrieve the built execution payload via getPayload.
-    cached_payload_id: ?[8]u8 = null,
-    cached_payload_slot: ?u64 = null,
-    cached_payload_parent_root: ?[32]u8 = null,
-    last_builder_status_slot: ?u64 = null,
-
-    /// Optional MEV-boost builder relay client.
-    /// When configured, block production attempts to use the builder for higher rewards.
-    /// Falls back to local execution engine if builder is unavailable or bid too low.
-    builder_api: ?BuilderApi = null,
-
-    /// Track whether the EL is offline (unreachable). Reset on successful Engine API call.
-    el_offline: bool = false,
+    // Execution runtime owns EL transport, builder clients, and payload-build cache.
+    execution_runtime: *ExecutionRuntime,
 
     /// Process-local guard against publishing conflicting blocks for the same
     /// proposer/slot through the BN API.
@@ -440,9 +417,13 @@ pub const BeaconNode = struct {
         const result = outcome.result;
 
         // Notify EL of fork choice update after each block import.
-        self.notifyForkchoiceUpdate(outcome.effects.notify_forkchoice_update_root) catch |err| {
-            log.logger(.node).warn("forkchoiceUpdated failed: {}", .{err});
-        };
+        if (outcome.effects.forkchoice_update) |update| {
+            if (!self.scheduleForkchoiceUpdate(update)) {
+                self.notifyPreparedForkchoiceUpdate(update) catch |err| {
+                    log.logger(.node).warn("forkchoiceUpdated failed: {}", .{err});
+                };
+            }
+        }
 
         const t1 = std.Io.Clock.awake.now(self.io);
         const elapsed_s: f64 = @as(f64, @floatFromInt(t1.nanoseconds - t0.nanoseconds)) / 1e9;
@@ -491,9 +472,13 @@ pub const BeaconNode = struct {
     ) void {
         defer if (outcome.effects.archive_states.len > 0) self.allocator.free(outcome.effects.archive_states);
 
-        self.notifyForkchoiceUpdate(outcome.effects.notify_forkchoice_update_root) catch |err| {
-            log.logger(.node).warn("forkchoiceUpdated failed after range sync segment: {}", .{err});
-        };
+        if (outcome.effects.forkchoice_update) |update| {
+            if (!self.scheduleForkchoiceUpdate(update)) {
+                self.notifyPreparedForkchoiceUpdate(update) catch |err| {
+                    log.logger(.node).warn("forkchoiceUpdated failed after range sync segment: {}", .{err});
+                };
+            }
+        }
 
         const t1 = std.Io.Clock.awake.now(self.io);
         const elapsed_s: f64 = @as(f64, @floatFromInt(t1.nanoseconds - t0.nanoseconds)) / 1e9;
@@ -524,6 +509,35 @@ pub const BeaconNode = struct {
             .head_slot = outcome.snapshot.head.slot,
             .finalized_epoch = outcome.snapshot.finalized.epoch,
         });
+    }
+
+    pub fn finishExecutionRevalidationOutcome(
+        self: *BeaconNode,
+        outcome: chain_mod.ExecutionRevalidationOutcome,
+    ) void {
+        if (outcome.forkchoice_update) |update| {
+            if (!self.scheduleForkchoiceUpdate(update)) {
+                self.notifyPreparedForkchoiceUpdate(update) catch |err| {
+                    log.logger(.node).warn("forkchoiceUpdated failed after execution revalidation: {}", .{err});
+                };
+            }
+        }
+
+        if (self.metrics) |m| {
+            m.head_slot.set(outcome.snapshot.head.slot);
+            m.finalized_epoch.set(outcome.snapshot.finalized.epoch);
+            m.justified_epoch.set(outcome.snapshot.justified.epoch);
+            m.head_root.set(std.mem.readInt(u64, outcome.snapshot.head.root[0..8], .big));
+        }
+        self.updateSyncProgress(outcome.snapshot);
+
+        if (outcome.head_changed) {
+            log.logger(.chain).info("execution revalidation changed head", .{
+                .head_slot = outcome.snapshot.head.slot,
+                .head_root = outcome.snapshot.head.root,
+                .finalized_epoch = outcome.snapshot.finalized.epoch,
+            });
+        }
     }
 
     fn updateSyncProgress(self: *BeaconNode, snapshot: chain_mod.ChainSnapshot) void {
@@ -724,6 +738,38 @@ pub const BeaconNode = struct {
         try block_production_mod.notifyForkchoiceUpdate(self, new_head_root);
     }
 
+    fn notifyPreparedForkchoiceUpdate(
+        self: *BeaconNode,
+        update: chain_mod.ExecutionForkchoiceUpdate,
+    ) !void {
+        try block_production_mod.notifyPreparedForkchoiceUpdate(self, update);
+    }
+
+    fn scheduleForkchoiceUpdate(
+        self: *BeaconNode,
+        update: chain_mod.ExecutionForkchoiceUpdate,
+    ) bool {
+        if (self.p2p_service == null) return false;
+        const bp = self.beacon_processor orelse return false;
+        if (bp.queues.execution_forkchoice.isFull()) return false;
+
+        bp.ingest(.{ .execution_forkchoice = toExecutionForkchoiceWork(update) });
+        return true;
+    }
+
+    pub fn drainQueuedExecutionForkchoiceUpdates(self: *BeaconNode) void {
+        const bp = self.beacon_processor orelse return;
+        _ = bp.drainExecutionForkchoice();
+    }
+
+    pub fn mockEngine(self: *const BeaconNode) ?*MockEngine {
+        return self.execution_runtime.mockEngine();
+    }
+
+    pub fn hasExecutionEngine(self: *const BeaconNode) bool {
+        return self.execution_runtime.hasExecutionEngine();
+    }
+
     /// Inner forkchoiceUpdated with optional payload attributes.
     fn notifyForkchoiceUpdateWithAttrs(
         self: *BeaconNode,
@@ -823,6 +869,8 @@ pub const BeaconNode = struct {
     /// would compare against the clock's wall-clock slot to determine sync
     /// distance.
     pub fn getSyncStatus(self: *const BeaconNode) SyncStatus {
+        const chain_sync = self.chainQuery().syncStatus();
+
         // Use the sync service state machine when available.
         if (self.sync_service_inst) |svc| {
             const ss = svc.getSyncStatus();
@@ -830,17 +878,16 @@ pub const BeaconNode = struct {
                 .head_slot = ss.head_slot,
                 .sync_distance = ss.sync_distance,
                 .is_syncing = ss.state == .syncing_finalized or ss.state == .syncing_head,
-                .is_optimistic = ss.is_optimistic,
-                .el_offline = self.el_offline,
+                .is_optimistic = ss.is_optimistic or chain_sync.is_optimistic,
+                .el_offline = self.execution_runtime.el_offline,
             };
         }
-        // Fallback: no sync service (e.g. tests without P2P).
         return .{
-            .head_slot = self.currentHeadSlot(),
-            .sync_distance = 0,
-            .is_syncing = false,
-            .is_optimistic = false,
-            .el_offline = self.el_offline,
+            .head_slot = chain_sync.head_slot,
+            .sync_distance = chain_sync.sync_distance,
+            .is_syncing = chain_sync.is_syncing,
+            .is_optimistic = chain_sync.is_optimistic,
+            .el_offline = self.execution_runtime.el_offline,
         };
     }
 
@@ -1437,6 +1484,11 @@ pub fn processorHandlerCallback(item: WorkItem, context: *anyopaque) void {
     const wtype = item.workType();
 
     switch (item) {
+        .execution_forkchoice => |work| {
+            node.notifyPreparedForkchoiceUpdate(fromExecutionForkchoiceWork(work)) catch |err| {
+                std.log.warn("Processor: forkchoiceUpdated failed: {}", .{err});
+            };
+        },
         .gossip_block => |work| {
             const seen_timestamp_sec: u64 = if (work.seen_timestamp_ns > 0)
                 @intCast(@divFloor(work.seen_timestamp_ns, std.time.ns_per_s))
@@ -1564,6 +1616,26 @@ pub fn processorHandlerCallback(item: WorkItem, context: *anyopaque) void {
             std.log.debug("Processor: dispatched {s}", .{@tagName(wtype)});
         },
     }
+}
+
+fn toExecutionForkchoiceWork(update: chain_mod.ExecutionForkchoiceUpdate) ExecutionForkchoiceWork {
+    return .{
+        .beacon_block_root = update.beacon_block_root,
+        .head_block_hash = update.state.head_block_hash,
+        .safe_block_hash = update.state.safe_block_hash,
+        .finalized_block_hash = update.state.finalized_block_hash,
+    };
+}
+
+fn fromExecutionForkchoiceWork(work: ExecutionForkchoiceWork) chain_mod.ExecutionForkchoiceUpdate {
+    return .{
+        .beacon_block_root = work.beacon_block_root,
+        .state = .{
+            .head_block_hash = work.head_block_hash,
+            .safe_block_hash = work.safe_block_hash,
+            .finalized_block_hash = work.finalized_block_hash,
+        },
+    };
 }
 
 fn handleQueuedAggregate(node: *BeaconNode, work: processor_mod.work_item.AggregateWork) void {

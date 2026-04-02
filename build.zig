@@ -881,6 +881,7 @@ pub fn build(b: *std.Build) void {
     module_chain.addImport("bls", module_bls);
     module_chain.addImport("persistent_merkle_tree", module_persistent_merkle_tree);
     module_chain.addImport("kzg", module_kzg);
+    module_chain.addImport("execution", module_execution);
     module_chain.addImport("log", module_log);
 
     // sync module imports

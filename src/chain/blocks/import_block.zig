@@ -336,11 +336,19 @@ pub fn importVerifiedBlock(
             std.log.warn("importBlock: getHead failed: {}", .{err});
             break :head_recompute;
         };
+        const head_node = fc.getBlockDefaultStatus(uagh_result.head.block_root);
         const new_head = HeadResult{
             .block_root = uagh_result.head.block_root,
             .slot = uagh_result.head.slot,
             .state_root = uagh_result.head.state_root,
-            .execution_optimistic = false,
+            .execution_optimistic = if (head_node) |node|
+                switch (node.extra_meta.executionStatus()) {
+                    .syncing, .payload_separated => true,
+                    else => false,
+                }
+            else
+                false,
+            .payload_status = if (head_node) |node| node.payload_status else .full,
         };
 
         // Check finality changes.

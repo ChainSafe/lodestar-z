@@ -58,6 +58,7 @@ pub const SimTestHarness = struct {
         // Create the BeaconNode and initialize from genesis.
         const node_identity = try identity_mod.createEphemeralIdentity(allocator, std.testing.io, .{});
         const node = try BeaconNode.init(allocator, std.testing.io, test_state.config, .{
+            .options = .{ .engine_mock = true },
             .node_identity = node_identity,
         });
         errdefer node.deinit();

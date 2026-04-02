@@ -139,6 +139,7 @@ pub const SimCluster = struct {
         const seed_0 = cluster_prng.random().int(u64);
         const bn0_identity = try identity_mod.createEphemeralIdentity(allocator, std.testing.io, .{});
         const bn0 = try BeaconNode.init(allocator, std.testing.io, primary.config, .{
+            .options = .{ .engine_mock = true },
             .node_identity = bn0_identity,
         });
         try bn0.initFromGenesis(primary.cached_state);
@@ -156,6 +157,7 @@ pub const SimCluster = struct {
             const seed_i = cluster_prng.random().int(u64);
             const bn_i_identity = try identity_mod.createEphemeralIdentity(allocator, std.testing.io, .{});
             const bn_i = try BeaconNode.init(allocator, std.testing.io, primary.config, .{
+                .options = .{ .engine_mock = true },
                 .node_identity = bn_i_identity,
             });
             try bn_i.initFromGenesis(cloned);

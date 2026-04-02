@@ -138,6 +138,11 @@ pub const BeaconProcessor = struct {
         else
             @intCast(now_ns)) orelse return false;
 
+        self.dispatchItem(item);
+        return true;
+    }
+
+    fn dispatchItem(self: *BeaconProcessor, item: WorkItem) void {
         const wtype = item.workType();
 
         const t0 = std.Io.Timestamp.now(std.Options.debug_io, .real).toNanoseconds();
@@ -146,8 +151,6 @@ pub const BeaconProcessor = struct {
         const elapsed: u64 = if (t1 > t0) @intCast(t1 - t0) else 0;
         self.metrics.recordProcessed(wtype, elapsed);
         self.metrics.items_dispatched += 1;
-
-        return true;
     }
 
     /// Process one iteration: ingest an item, then dispatch highest priority.
@@ -162,6 +165,20 @@ pub const BeaconProcessor = struct {
     pub fn drainAll(self: *BeaconProcessor) u64 {
         var count: u64 = 0;
         while (self.dispatchOne()) {
+            count += 1;
+        }
+        return count;
+    }
+
+    /// Drain only queued execution forkchoice updates.
+    ///
+    /// Used when a synchronous execution-layer request needs to preserve
+    /// ordering relative to already-scheduled forkchoiceUpdated calls without
+    /// draining unrelated processor work.
+    pub fn drainExecutionForkchoice(self: *BeaconProcessor) u64 {
+        var count: u64 = 0;
+        while (self.queues.execution_forkchoice.pop()) |work| {
+            self.dispatchItem(.{ .execution_forkchoice = work });
             count += 1;
         }
         return count;
@@ -454,6 +471,7 @@ test "BeaconProcessor: sync state affects dropping" {
 fn testConfig() QueueConfig {
     return .{
         .chain_segment = 4,
+        .execution_forkchoice = 4,
         .rpc_block = 4,
         .rpc_blob = 4,
         .rpc_custody_column = 4,

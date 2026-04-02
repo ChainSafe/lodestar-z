@@ -63,6 +63,8 @@ pub const ChainCallback = struct {
     getHeadTrackerFn: *const fn (ptr: *anyopaque) HeadTracker,
     getBlockRootBySlotFn: *const fn (ptr: *anyopaque, slot: u64) anyerror!?[32]u8,
     getBlockBytesByRootFn: *const fn (ptr: *anyopaque, root: [32]u8) anyerror!?[]const u8,
+    getBlockExecutionOptimisticFn: *const fn (ptr: *anyopaque, root: [32]u8) bool,
+    getBlockExecutionOptimisticAtSlotFn: *const fn (ptr: *anyopaque, slot: u64) anyerror!bool,
     getStateRootBySlotFn: *const fn (ptr: *anyopaque, slot: u64) anyerror!?[32]u8,
     getStateRootByBlockRootFn: *const fn (ptr: *anyopaque, root: [32]u8) anyerror!?[32]u8,
     getStateBytesBySlotFn: *const fn (ptr: *anyopaque, slot: u64) anyerror!?[]const u8,
@@ -72,6 +74,8 @@ pub const ChainCallback = struct {
     getHeadStateFn: *const fn (ptr: *anyopaque) ?*CachedBeaconState,
     getStateByRootFn: *const fn (ptr: *anyopaque, state_root: [32]u8) anyerror!?*CachedBeaconState,
     getStateBySlotFn: *const fn (ptr: *anyopaque, slot: u64) anyerror!?*CachedBeaconState,
+    getStateExecutionOptimisticByRootFn: *const fn (ptr: *anyopaque, state_root: [32]u8) bool,
+    getStateExecutionOptimisticBySlotFn: *const fn (ptr: *anyopaque, slot: u64) anyerror!bool,
 };
 
 /// Type-erased callback for live node sync status.
@@ -430,6 +434,16 @@ pub const ApiContext = struct {
         return null;
     }
 
+    pub fn blockExecutionOptimistic(self: *const ApiContext, root: [32]u8) bool {
+        if (self.chain) |cb| return cb.getBlockExecutionOptimisticFn(cb.ptr, root);
+        return false;
+    }
+
+    pub fn blockExecutionOptimisticAtSlot(self: *const ApiContext, slot: u64) !bool {
+        if (self.chain) |cb| return cb.getBlockExecutionOptimisticAtSlotFn(cb.ptr, slot);
+        return false;
+    }
+
     pub fn blockBytesAtSlot(self: *const ApiContext, slot: u64) !?[]const u8 {
         const root = try self.blockRootBySlot(slot) orelse return null;
         return self.blockBytesByRoot(root);
@@ -506,6 +520,16 @@ pub const ApiContext = struct {
         if (slot == self.currentHeadTracker().head_slot) return self.headState();
         if (try self.stateRootBySlot(slot)) |state_root| return self.stateByRoot(state_root);
         return null;
+    }
+
+    pub fn stateExecutionOptimisticByRoot(self: *const ApiContext, state_root: [32]u8) bool {
+        if (self.chain) |cb| return cb.getStateExecutionOptimisticByRootFn(cb.ptr, state_root);
+        return false;
+    }
+
+    pub fn stateExecutionOptimisticBySlot(self: *const ApiContext, slot: u64) !bool {
+        if (self.chain) |cb| return cb.getStateExecutionOptimisticBySlotFn(cb.ptr, slot);
+        return false;
     }
 
     fn readSignedBlockSlotFromSsz(block_bytes: []const u8) ?u64 {

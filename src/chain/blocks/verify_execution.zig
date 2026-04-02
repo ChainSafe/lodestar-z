@@ -21,44 +21,14 @@
 
 const std = @import("std");
 
-const consensus_types = @import("consensus_types");
-const config_mod = @import("config");
-const ForkSeq = config_mod.ForkSeq;
-const fork_types = @import("fork_types");
-
 const pipeline_types = @import("types.zig");
 const BlockInput = pipeline_types.BlockInput;
 const ImportBlockOpts = pipeline_types.ImportBlockOpts;
 const ExecutionStatus = pipeline_types.ExecutionStatus;
 const BlockImportError = pipeline_types.BlockImportError;
-
-// ---------------------------------------------------------------------------
-// Engine callback interface (vtable for execution verification)
-// ---------------------------------------------------------------------------
-
-/// Vtable for execution payload verification.
-///
-/// The BeaconNode provides this callback, bridging the chain module
-/// to the execution module without a direct dependency.
-pub const ExecutionVerifier = struct {
-    ptr: *anyopaque,
-    verifyFn: *const fn (
-        ptr: *anyopaque,
-        block: fork_types.AnySignedBeaconBlock,
-    ) VerifyResult,
-
-    pub const VerifyResult = union(enum) {
-        valid: void,
-        invalid: void,
-        syncing: void,
-        pre_merge: void,
-        unavailable: void,
-    };
-
-    pub fn verify(self: ExecutionVerifier, block: fork_types.AnySignedBeaconBlock) VerifyResult {
-        return self.verifyFn(self.ptr, block);
-    }
-};
+const execution_port_mod = @import("../ports/execution.zig");
+pub const ExecutionPort = execution_port_mod.ExecutionPort;
+pub const ExecutionVerifier = execution_port_mod.ExecutionVerifier;
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -66,7 +36,8 @@ pub const ExecutionVerifier = struct {
 
 /// Verify the execution payload of a block.
 ///
-/// Uses the ExecutionVerifier callback (if provided) to call engine_newPayload.
+/// Builds an explicit `engine_newPayload` request from consensus data and
+/// submits it through the execution port.
 /// When no verifier is configured, returns pre_merge (running without EL).
 ///
 /// Returns:
@@ -78,8 +49,9 @@ pub const ExecutionVerifier = struct {
 /// - ExecutionPayloadInvalid: EL says INVALID
 /// - ExecutionEngineUnavailable: EL connection error (non-range-sync)
 pub fn verifyExecutionPayload(
+    allocator: std.mem.Allocator,
     block_input: BlockInput,
-    execution_verifier: ?ExecutionVerifier,
+    execution_verifier: ?ExecutionPort,
     opts: ImportBlockOpts,
 ) BlockImportError!ExecutionStatus {
     // Skip if explicitly requested (regen, checkpoint sync, testing).
@@ -91,15 +63,18 @@ pub fn verifyExecutionPayload(
 
     // No engine verifier configured — running without EL.
     const verifier = execution_verifier orelse return .pre_merge;
+    const request = execution_port_mod.makeNewPayloadRequest(allocator, block_input.block) catch
+        return BlockImportError.InternalError;
+    if (request == null) return .pre_merge;
+    var owned_request = request.?;
+    defer owned_request.deinit(allocator);
 
-    // Call the execution engine via the vtable.
-    const result = verifier.verify(block_input.block);
+    const result = verifier.submitNewPayload(owned_request);
 
     return switch (result) {
         .valid => .valid,
-        .invalid => BlockImportError.ExecutionPayloadInvalid,
-        .syncing => .syncing,
-        .pre_merge => .pre_merge,
+        .invalid, .invalid_block_hash => BlockImportError.ExecutionPayloadInvalid,
+        .syncing, .accepted => .syncing,
         .unavailable => {
             // During range sync, EL unavailability is okay — import optimistically.
             if (opts.from_range_sync) return .syncing;
@@ -121,7 +96,7 @@ pub fn verifyExecutionPayload(
 pub fn verifyExecutionPayloadBatch(
     allocator: std.mem.Allocator,
     block_inputs: []const BlockInput,
-    execution_verifier: ?ExecutionVerifier,
+    execution_verifier: ?ExecutionPort,
     opts: ImportBlockOpts,
     /// Set to the parent_root of the first INVALID block when one is found.
     /// Must be provided to `proto_array.validateLatestHash` with an
@@ -132,7 +107,7 @@ pub fn verifyExecutionPayloadBatch(
     errdefer allocator.free(statuses);
 
     for (block_inputs, 0..) |block_input, i| {
-        statuses[i] = verifyExecutionPayload(block_input, execution_verifier, opts) catch |err| {
+        statuses[i] = verifyExecutionPayload(allocator, block_input, execution_verifier, opts) catch |err| {
             if (err == BlockImportError.ExecutionPayloadInvalid) {
                 // Record the parent of the first INVALID block so the caller can
                 // invoke proto_array.validateLatestHash(.{ .invalid = ... }) and
@@ -167,7 +142,7 @@ test "verifyExecutionPayload: skip when requested" {
         .source = .gossip,
         .da_status = .not_required,
     };
-    const result = try verifyExecutionPayload(input, null, .{ .skip_execution = true });
+    const result = try verifyExecutionPayload(std.testing.allocator, input, null, .{ .skip_execution = true });
     try std.testing.expectEqual(ExecutionStatus.pre_merge, result);
 }
 
@@ -190,18 +165,22 @@ test "verifyExecutionPayloadBatch: INVALID propagates as invalid, not pre_merge"
     const State = struct {
         call_count: usize = 0,
 
-        fn verifyFn(ptr: *anyopaque, _: fork_types.AnySignedBeaconBlock) ExecutionVerifier.VerifyResult {
+        fn verifyFn(ptr: *anyopaque, _: execution_port_mod.NewPayloadRequest) execution_port_mod.NewPayloadResult {
             const self: *@This() = @ptrCast(@alignCast(ptr));
             self.call_count += 1;
-            if (self.call_count == 2) return .invalid;
-            return .valid;
+            if (self.call_count == 2) return .{ .invalid = .{
+                .latest_valid_hash = null,
+            } };
+            return .{ .valid = .{
+                .latest_valid_hash = std.mem.zeroes([32]u8),
+            } };
         }
     };
 
     var state = State{};
     const verifier = ExecutionVerifier{
         .ptr = &state,
-        .verifyFn = State.verifyFn,
+        .submitNewPayloadFn = State.verifyFn,
     };
 
     // Three synthetic block inputs: first valid, second invalid, third should

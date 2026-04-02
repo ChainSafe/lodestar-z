@@ -40,6 +40,20 @@ pub const Query = struct {
         return self.chain.getSyncStatus();
     }
 
+    pub fn blockExecutionOptimistic(self: Query, block_root: Root) bool {
+        const fc = self.chain.fork_choice orelse return false;
+        const node = fc.getBlockDefaultStatus(block_root) orelse return false;
+        return isExecutionOptimisticStatus(node.extra_meta.executionStatus());
+    }
+
+    pub fn blockExecutionOptimisticAtSlot(self: Query, slot: Slot) !bool {
+        const head_info = self.head();
+        if (slot == head_info.slot) return self.chain.currentHeadExecutionOptimistic();
+
+        const block_root = try self.canonicalBlockRootAtSlot(slot) orelse return false;
+        return self.blockExecutionOptimistic(block_root);
+    }
+
     pub fn executionForkchoiceState(self: Query, head_root: Root) ?chain_types.ForkchoiceUpdateState {
         const fc = self.chain.fork_choice orelse return null;
 
@@ -236,6 +250,30 @@ pub const Query = struct {
         return self.chain.state_regen.getStateByRoot(state_root);
     }
 
+    pub fn stateExecutionOptimisticByRoot(self: Query, state_root: Root) bool {
+        const head_info = self.head();
+        if (std.mem.eql(u8, &head_info.state_root, &state_root)) {
+            return self.chain.currentHeadExecutionOptimistic();
+        }
+
+        var it = self.chain.block_to_state.iterator();
+        while (it.next()) |entry| {
+            if (std.mem.eql(u8, entry.value_ptr, &state_root)) {
+                return self.blockExecutionOptimistic(entry.key_ptr.*);
+            }
+        }
+
+        return false;
+    }
+
+    pub fn stateExecutionOptimisticAtSlot(self: Query, slot: Slot) !bool {
+        const head_info = self.head();
+        if (slot == head_info.slot) return self.chain.currentHeadExecutionOptimistic();
+
+        const block_root = try self.canonicalBlockRootAtSlot(slot) orelse return false;
+        return self.blockExecutionOptimistic(block_root);
+    }
+
     pub fn stateByBlockRoot(self: Query, block_root: Root) !?*CachedBeaconState {
         const state_root = try self.stateRootByBlockRoot(block_root) orelse return null;
         return self.stateByRoot(state_root);
@@ -381,5 +419,12 @@ pub const Query = struct {
             return self.chain.head_tracker.head_root;
         }
         return [_]u8{0} ** 32;
+    }
+
+    fn isExecutionOptimisticStatus(exec_status: @import("fork_choice").ExecutionStatus) bool {
+        return switch (exec_status) {
+            .syncing, .payload_separated => true,
+            else => false,
+        };
     }
 };

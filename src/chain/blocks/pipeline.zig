@@ -46,7 +46,7 @@ const SanityOutcome = verify_sanity.SanityOutcome;
 const verify_da = @import("verify_data_availability.zig");
 const execute_stf = @import("execute_state_transition.zig");
 const verify_exec = @import("verify_execution.zig");
-const ExecutionVerifier = verify_exec.ExecutionVerifier;
+const ExecutionVerifier = @import("../ports/execution.zig").ExecutionVerifier;
 const import_block = @import("import_block.zig");
 const ImportContext = import_block.ImportContext;
 
@@ -204,6 +204,7 @@ pub fn processBlock(
 
             // Stage 5: Execution payload verification.
             const exec_status = try verify_exec.verifyExecutionPayload(
+                ctx.allocator,
                 block_input,
                 ctx.execution_verifier,
                 opts,

@@ -26,6 +26,7 @@ const TestChainFixture = struct {
     allocator: std.mem.Allocator,
     db: *db_mod.BeaconDB,
     head_tracker: *ctx_mod.HeadTracker,
+    sync_status: *ctx_mod.SyncStatus,
     beacon_config: *const config_mod.BeaconConfig,
     head_state: ?*CachedBeaconState = null,
     state_by_root: ?*CachedBeaconState = null,
@@ -46,6 +47,16 @@ fn getTestBlockBytesByRoot(ptr: *anyopaque, root: [32]u8) anyerror!?[]const u8 {
     const fixture: *TestChainFixture = @ptrCast(@alignCast(ptr));
     if (try fixture.db.getBlock(root)) |block_bytes| return block_bytes;
     return fixture.db.getBlockArchiveByRoot(root);
+}
+
+fn getTestBlockExecutionOptimistic(ptr: *anyopaque, root: [32]u8) bool {
+    const fixture: *TestChainFixture = @ptrCast(@alignCast(ptr));
+    return std.mem.eql(u8, &root, &fixture.head_tracker.head_root) and fixture.sync_status.is_optimistic;
+}
+
+fn getTestBlockExecutionOptimisticAtSlot(ptr: *anyopaque, slot: u64) anyerror!bool {
+    const fixture: *TestChainFixture = @ptrCast(@alignCast(ptr));
+    return slot == fixture.head_tracker.head_slot and fixture.sync_status.is_optimistic;
 }
 
 fn getTestStateRootByBlockRoot(ptr: *anyopaque, root: [32]u8) anyerror!?[32]u8 {
@@ -115,6 +126,16 @@ fn getTestStateBySlot(ptr: *anyopaque, slot: u64) anyerror!?*CachedBeaconState {
     return null;
 }
 
+fn getTestStateExecutionOptimisticByRoot(ptr: *anyopaque, state_root: [32]u8) bool {
+    const fixture: *TestChainFixture = @ptrCast(@alignCast(ptr));
+    return std.mem.eql(u8, &state_root, &fixture.head_tracker.head_state_root) and fixture.sync_status.is_optimistic;
+}
+
+fn getTestStateExecutionOptimisticBySlot(ptr: *anyopaque, slot: u64) anyerror!bool {
+    const fixture: *TestChainFixture = @ptrCast(@alignCast(ptr));
+    return slot == fixture.head_tracker.head_slot and fixture.sync_status.is_optimistic;
+}
+
 /// Create a test ApiContext backed by a MemoryKVStore.
 /// Caller must call destroyTestContext when done.
 pub fn makeTestContext(allocator: std.mem.Allocator) TestContext {
@@ -131,6 +152,7 @@ pub fn makeTestContext(allocator: std.mem.Allocator) TestContext {
         .allocator = allocator,
         .db = db,
         .head_tracker = head_tracker,
+        .sync_status = sync_status,
         .beacon_config = &default_beacon_config,
     };
 
@@ -149,6 +171,8 @@ pub fn makeTestContext(allocator: std.mem.Allocator) TestContext {
                 .getHeadTrackerFn = &getTestHeadTracker,
                 .getBlockRootBySlotFn = &getTestBlockRootBySlot,
                 .getBlockBytesByRootFn = &getTestBlockBytesByRoot,
+                .getBlockExecutionOptimisticFn = &getTestBlockExecutionOptimistic,
+                .getBlockExecutionOptimisticAtSlotFn = &getTestBlockExecutionOptimisticAtSlot,
                 .getStateRootBySlotFn = &getTestStateRootBySlot,
                 .getStateRootByBlockRootFn = &getTestStateRootByBlockRoot,
                 .getStateBytesBySlotFn = &getTestStateBytesBySlot,
@@ -158,6 +182,8 @@ pub fn makeTestContext(allocator: std.mem.Allocator) TestContext {
                 .getHeadStateFn = &getTestHeadState,
                 .getStateByRootFn = &getTestStateByRoot,
                 .getStateBySlotFn = &getTestStateBySlot,
+                .getStateExecutionOptimisticByRootFn = &getTestStateExecutionOptimisticByRoot,
+                .getStateExecutionOptimisticBySlotFn = &getTestStateExecutionOptimisticBySlot,
             },
             .sync_status_view = .{
                 .ptr = @ptrCast(sync_status),

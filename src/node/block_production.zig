@@ -223,8 +223,7 @@ fn validateBuilderHeaderGasLimit(
     proposer_pubkey: [48]u8,
     header_gas_limit: u64,
 ) !void {
-    const http_builder = self.http_builder orelse return;
-    const registration = http_builder.getValidatorRegistration(proposer_pubkey) orelse {
+    const registration = self.execution_runtime.getValidatorRegistration(proposer_pubkey) orelse {
         log.logger(.node).warn(
             "Builder: missing cached validator registration, skipping header gas limit check slot={d} proposer=0x{s}",
             .{ slot, std.fmt.bytesToHex(proposer_pubkey[0..4], .lower) },
@@ -265,40 +264,43 @@ fn validateBuilderHeaderGasLimit(
 }
 
 pub fn refreshBuilderStatus(self: *BeaconNode, clock_slot: u64) void {
-    const http_builder = self.http_builder orelse return;
-    if (self.last_builder_status_slot == clock_slot) return;
-    self.last_builder_status_slot = clock_slot;
+    if (self.execution_runtime.currentBuilderStatus() == .unavailable and
+        self.execution_runtime.builderApi() == null) return;
+    if (self.execution_runtime.lastBuilderStatusSlot() == clock_slot) return;
+    self.execution_runtime.setLastBuilderStatusSlot(clock_slot);
 
-    const previous_status = http_builder.current_status;
-    const slots_present = self.chainQuery().slotsPresent(clock_slot -| http_builder.fault_inspection_window);
+    const previous_status = self.execution_runtime.currentBuilderStatus();
+    const fault_window = self.execution_runtime.builderFaultInspectionWindow();
+    const slots_present = self.chainQuery().slotsPresent(clock_slot -| fault_window);
     const should_enable = execution_mod.builder.shouldEnableBuilderForSlot(
         clock_slot,
         slots_present,
-        http_builder.fault_inspection_window,
-        http_builder.allowed_faults,
+        fault_window,
+        self.execution_runtime.builderAllowedFaults(),
     );
 
     if (!should_enable) {
-        http_builder.updateStatus(.circuit_breaker);
-    } else if (self.builder_api) |builder| {
+        self.execution_runtime.updateBuilderStatus(.circuit_breaker);
+    } else if (self.execution_runtime.builderApi()) |builder| {
         const status = builder.status() catch |err| blk: {
             log.logger(.node).warn("Builder status check failed: {}", .{err});
             break :blk execution_mod.BuilderStatus.unavailable;
         };
-        http_builder.updateStatus(status);
+        self.execution_runtime.updateBuilderStatus(status);
     } else {
-        http_builder.updateStatus(.unavailable);
+        self.execution_runtime.updateBuilderStatus(.unavailable);
     }
 
-    if (http_builder.current_status != previous_status) {
+    const current_status = self.execution_runtime.currentBuilderStatus();
+    if (current_status != previous_status) {
         log.logger(.node).info(
             "External builder status updated: {s} -> {s} (slots_present={d} fault_window={d} allowed_faults={d})",
             .{
                 @tagName(previous_status),
-                @tagName(http_builder.current_status),
+                @tagName(current_status),
                 slots_present,
-                http_builder.fault_inspection_window,
-                http_builder.allowed_faults,
+                fault_window,
+                self.execution_runtime.builderAllowedFaults(),
             },
         );
     }
@@ -310,8 +312,7 @@ fn currentBuilderStatus(self: *BeaconNode) execution_mod.BuilderStatus {
     else
         self.currentHeadSlot();
     refreshBuilderStatus(self, clock_slot);
-    const http_builder = self.http_builder orelse return .unavailable;
-    return http_builder.current_status;
+    return self.execution_runtime.currentBuilderStatus();
 }
 
 fn normalizeBlockProductionConfig(
@@ -335,39 +336,51 @@ pub fn notifyForkchoiceUpdate(self: *BeaconNode, new_head_root: [32]u8) !void {
     };
 }
 
+pub fn notifyPreparedForkchoiceUpdate(
+    self: *BeaconNode,
+    update: chain_mod.ExecutionForkchoiceUpdate,
+) !void {
+    notifyPreparedForkchoiceUpdateWithAttrs(self, update, null) catch |err| {
+        log.logger(.node).warn("forkchoiceUpdated failed: {}", .{err});
+    };
+}
+
 pub fn notifyForkchoiceUpdateWithAttrs(
     self: *BeaconNode,
     new_head_root: [32]u8,
     payload_attrs: ?PayloadAttributesV3,
 ) !void {
-    const engine = self.engine_api orelse return;
     const fc_state = self.chainQuery().executionForkchoiceState(new_head_root) orelse return;
+    return notifyPreparedForkchoiceUpdateWithAttrs(self, .{
+        .beacon_block_root = new_head_root,
+        .state = fc_state,
+    }, payload_attrs);
+}
 
-    const fcu_state = ForkchoiceStateV1{
-        .head_block_hash = fc_state.head_block_hash,
-        .safe_block_hash = fc_state.safe_block_hash,
-        .finalized_block_hash = fc_state.finalized_block_hash,
-    };
+pub fn notifyPreparedForkchoiceUpdateWithAttrs(
+    self: *BeaconNode,
+    update: chain_mod.ExecutionForkchoiceUpdate,
+    payload_attrs: ?PayloadAttributesV3,
+) !void {
+    const t0 = std.Io.Clock.awake.now(self.io);
+    defer {
+        const t1 = std.Io.Clock.awake.now(self.io);
+        const elapsed_s: f64 = @as(f64, @floatFromInt(t1.nanoseconds - t0.nanoseconds)) / 1e9;
+        if (self.metrics) |m| m.execution_forkchoice_updated_seconds.observe(elapsed_s);
+    }
 
-    const result = engine.forkchoiceUpdated(fcu_state, payload_attrs) catch |err| {
+    const fc_state = update.state;
+    const maybe_result = self.execution_runtime.forkchoiceUpdated(update, payload_attrs) catch |err| {
         std.log.warn("engine_forkchoiceUpdatedV3 failed: {}", .{err});
-        self.el_offline = true;
         if (self.metrics) |m| m.execution_errors_total.incr();
         return err;
     };
-
-    self.el_offline = false;
+    const result = maybe_result orelse return;
 
     if (result.payload_id) |payload_id| {
-        self.cached_payload_id = payload_id;
-        if (payload_attrs != null) self.cached_payload_parent_root = new_head_root;
         std.log.info("forkchoiceUpdated: payload building started, id={s}", .{
             &std.fmt.bytesToHex(payload_id[0..8], .lower),
         });
-    } else if (payload_attrs != null) {
-        self.cached_payload_id = null;
-        self.cached_payload_slot = null;
-        self.cached_payload_parent_root = null;
     }
 
     std.log.info("forkchoiceUpdated: status={s} head={s}... safe={s}... finalized={s}...", .{
@@ -382,7 +395,7 @@ pub fn notifyForkchoiceUpdateWithAttrs(
             .proposer_index = 0,
             .proposal_slot = self.currentHeadSlot() + 1,
             .parent_block_number = 0,
-            .parent_block_root = new_head_root,
+            .parent_block_root = update.beacon_block_root,
             .parent_block_hash = fc_state.head_block_hash,
             .timestamp = attrs.timestamp,
             .prev_randao = attrs.prev_randao,
@@ -408,29 +421,14 @@ pub fn preparePayload(
         .parent_beacon_block_root = parent_beacon_block_root,
     };
     try notifyForkchoiceUpdateWithAttrs(self, parent_beacon_block_root, attrs);
-    if (self.cached_payload_id != null) {
-        self.cached_payload_slot = slot;
-        self.cached_payload_parent_root = parent_beacon_block_root;
-    } else {
-        self.cached_payload_slot = null;
-        self.cached_payload_parent_root = null;
-    }
+    self.execution_runtime.recordPreparedPayloadContext(slot, parent_beacon_block_root);
 }
 
 fn getEnginePayload(self: *BeaconNode) !GetPayloadResponse {
-    const engine = self.engine_api orelse return error.NoEngineApi;
-    const payload_id = self.cached_payload_id orelse return error.NoPayloadId;
-
-    const result = engine.getPayload(payload_id) catch |err| {
+    const result = self.execution_runtime.getPayload() catch |err| {
         std.log.warn("engine_getPayloadV3 failed: {}", .{err});
-        self.el_offline = true;
         return err;
     };
-
-    self.el_offline = false;
-    self.cached_payload_id = null;
-    self.cached_payload_slot = null;
-    self.cached_payload_parent_root = null;
 
     std.log.info("getPayload: block_number={d} block_value={d} txs={d} blobs={d}", .{
         result.execution_payload.block_number,
@@ -447,14 +445,7 @@ fn clearCachedPayloadIdIfCurrent(
     snapshot: *const ProposalSnapshot,
     payload_id: [8]u8,
 ) void {
-    if (self.cached_payload_slot != snapshot.slot) return;
-    const cached_parent_root = self.cached_payload_parent_root orelse return;
-    if (!std.mem.eql(u8, &cached_parent_root, &snapshot.parent_root)) return;
-    const cached_payload_id = self.cached_payload_id orelse return;
-    if (!std.mem.eql(u8, &cached_payload_id, &payload_id)) return;
-    self.cached_payload_id = null;
-    self.cached_payload_slot = null;
-    self.cached_payload_parent_root = null;
+    self.execution_runtime.clearCachedPayloadIfMatch(snapshot.slot, snapshot.parent_root, payload_id);
 }
 
 fn proposalRaceCutoffNs(self: *BeaconNode, slot: u64) u64 {
@@ -502,7 +493,7 @@ pub fn registerValidatorsWithBuilder(
     self: *BeaconNode,
     registrations: []const execution_mod.builder.SignedValidatorRegistration,
 ) void {
-    const builder = self.builder_api orelse return;
+    const builder = self.execution_runtime.builderApi() orelse return;
     builder.registerValidators(registrations) catch |err| {
         std.log.warn("Builder: registerValidators failed: {} — continuing", .{err});
     };
@@ -663,19 +654,10 @@ fn ensureExecutionPayloadForTemplate(
     snapshot: *const ProposalSnapshot,
     fee_recipient: [20]u8,
 ) !void {
-    _ = self.engine_api orelse return error.NoEngineApi;
+    if (!self.execution_runtime.hasExecutionEngine()) return error.NoEngineApi;
 
-    if (self.cached_payload_slot) |cached_slot| {
-        if (cached_slot != snapshot.slot or
-            self.cached_payload_parent_root == null or
-            !std.mem.eql(u8, &self.cached_payload_parent_root.?, &snapshot.parent_root))
-        {
-            self.cached_payload_id = null;
-            self.cached_payload_slot = null;
-            self.cached_payload_parent_root = null;
-        }
-    }
-    if (self.cached_payload_id != null) return;
+    self.execution_runtime.invalidatePreparedPayloadIfStale(snapshot.slot, snapshot.parent_root);
+    if (self.execution_runtime.cachedPayloadId() != null) return;
 
     try self.preparePayload(
         snapshot.slot,
@@ -692,8 +674,7 @@ fn assembleFullBlockFromPayloadResponse(
     template: PreparedProposalTemplate,
     resp: GetPayloadResponse,
 ) !ProducedBlock {
-    const engine = self.engine_api orelse return error.NoEngineApi;
-    defer engine.freeGetPayloadResponse(resp);
+    defer self.execution_runtime.freeGetPayloadResponse(resp);
 
     var exec_payload = try convertEnginePayload(self.allocator, resp.execution_payload);
     errdefer types.electra.ExecutionPayload.deinit(self.allocator, &exec_payload);
@@ -781,11 +762,11 @@ pub fn produceFullBlock(self: *BeaconNode, slot: u64, prod_config: BlockProducti
     const context = try prepareProposalContext(self, slot, prod_config);
 
     try ensureExecutionPayloadForTemplate(self, &context.snapshot, context.config.fee_recipient);
-    const payload_id = self.cached_payload_id orelse return error.NoPayloadId;
-    const http_engine = self.http_engine orelse return error.NoEngineApi;
+    const payload_id = self.execution_runtime.cachedPayloadId() orelse return error.NoPayloadId;
+    const http_engine = self.execution_runtime.httpEngineRequestClone() orelse return error.NoEngineApi;
 
     var engine_ctx = EnginePayloadFetchCtx{
-        .engine = http_engine.requestClone(),
+        .engine = http_engine,
         .payload_id = payload_id,
     };
     var engine_thread = try std.Thread.spawn(.{}, EnginePayloadFetchCtx.run, .{&engine_ctx});
@@ -826,7 +807,7 @@ fn produceEngineOrBuilderProposalWithSelect(
     prod_config: BlockProductionConfig,
     builder_boost_factor: u64,
 ) !ProducedProposal {
-    const http_builder = self.http_builder orelse {
+    const http_builder = self.execution_runtime.httpBuilderRequestClone() orelse {
         return .{ .engine = try produceFullBlock(self, slot, prod_config) };
     };
     switch (currentBuilderStatus(self)) {
@@ -839,24 +820,23 @@ fn produceEngineOrBuilderProposalWithSelect(
     const context = try prepareProposalContext(self, slot, prod_config);
 
     try ensureExecutionPayloadForTemplate(self, &context.snapshot, context.config.fee_recipient);
-    const payload_id = self.cached_payload_id orelse return error.NoPayloadId;
-    const http_engine = self.http_engine orelse return error.NoEngineApi;
-    const engine = self.engine_api orelse return error.NoEngineApi;
+    const payload_id = self.execution_runtime.cachedPayloadId() orelse return error.NoPayloadId;
+    const http_engine = self.execution_runtime.httpEngineRequestClone() orelse return error.NoEngineApi;
     const proposer_pubkey = context.snapshot.proposer_pubkey;
     const parent_hash = context.snapshot.execution_parent_hash;
 
     var events_buf: [4]ProposalRaceEvent = undefined;
     var select = std.Io.Select(ProposalRaceEvent).init(self.io, &events_buf);
     errdefer while (select.cancel()) |event| {
-        freeProposalRaceEvent(self.allocator, engine, event);
+        freeProposalRaceEvent(self.allocator, self.execution_runtime.engineApi().?, event);
     };
 
     try select.concurrent(.engine, fetchEnginePayloadResult, .{
-        http_engine.requestClone(),
+        http_engine,
         payload_id,
     });
     try select.concurrent(.builder, fetchBuilderBidResult, .{
-        http_builder.requestClone(),
+        http_builder,
         slot,
         parent_hash,
         proposer_pubkey,
@@ -937,7 +917,7 @@ fn produceEngineOrBuilderProposalWithSelect(
     }
 
     while (select.cancel()) |event| {
-        freeProposalRaceEvent(self.allocator, engine, event);
+        freeProposalRaceEvent(self.allocator, self.execution_runtime.engineApi().?, event);
     }
 
     if (maybe_local_payload == null and maybe_builder_bid == null and race_state.timeout_reached) {
@@ -983,7 +963,7 @@ fn produceEngineOrBuilderProposalWithSelect(
             return .{ .engine = try assembleFullBlockFromPayloadResponse(self, template, local_payload) };
         },
         else => {
-            engine.freeGetPayloadResponse(local_payload);
+            self.execution_runtime.freeGetPayloadResponse(local_payload);
             execution_mod.builder.freeBid(self.allocator, bid);
             return err;
         },
@@ -1007,7 +987,7 @@ fn produceEngineOrBuilderProposalWithSelect(
         return .{ .engine = try assembleFullBlockFromPayloadResponse(self, template, local_payload) };
     }
 
-    engine.freeGetPayloadResponse(local_payload);
+    self.execution_runtime.freeGetPayloadResponse(local_payload);
     return .{ .builder = try assembleBlindedBlockFromBuilderBid(self, template, bid) };
 }
 
@@ -1017,7 +997,7 @@ fn produceEngineOrBuilderProposalBlocking(
     prod_config: BlockProductionConfig,
     builder_boost_factor: u64,
 ) !ProducedProposal {
-    const http_builder = self.http_builder orelse {
+    const http_builder = self.execution_runtime.httpBuilderRequestClone() orelse {
         return .{ .engine = try produceFullBlock(self, slot, prod_config) };
     };
     switch (currentBuilderStatus(self)) {
@@ -1030,18 +1010,17 @@ fn produceEngineOrBuilderProposalBlocking(
     const context = try prepareProposalContext(self, slot, prod_config);
 
     try ensureExecutionPayloadForTemplate(self, &context.snapshot, context.config.fee_recipient);
-    const payload_id = self.cached_payload_id orelse return error.NoPayloadId;
-    const http_engine = self.http_engine orelse return error.NoEngineApi;
-    const engine = self.engine_api orelse return error.NoEngineApi;
+    const payload_id = self.execution_runtime.cachedPayloadId() orelse return error.NoPayloadId;
+    const http_engine = self.execution_runtime.httpEngineRequestClone() orelse return error.NoEngineApi;
     const proposer_pubkey = context.snapshot.proposer_pubkey;
     const parent_hash = context.snapshot.execution_parent_hash;
 
     var engine_ctx = EnginePayloadFetchCtx{
-        .engine = http_engine.requestClone(),
+        .engine = http_engine,
         .payload_id = payload_id,
     };
     var builder_ctx = BuilderBidFetchCtx{
-        .builder = http_builder.requestClone(),
+        .builder = http_builder,
         .slot = slot,
         .parent_hash = parent_hash,
         .proposer_pubkey = proposer_pubkey,
@@ -1120,7 +1099,7 @@ fn produceEngineOrBuilderProposalBlocking(
             return .{ .engine = try assembleFullBlockFromPayloadResponse(self, template, local_payload) };
         },
         else => {
-            engine.freeGetPayloadResponse(local_payload);
+            self.execution_runtime.freeGetPayloadResponse(local_payload);
             execution_mod.builder.freeBid(self.allocator, bid);
             return err;
         },
@@ -1144,7 +1123,7 @@ fn produceEngineOrBuilderProposalBlocking(
         return .{ .engine = try assembleFullBlockFromPayloadResponse(self, template, local_payload) };
     }
 
-    engine.freeGetPayloadResponse(local_payload);
+    self.execution_runtime.freeGetPayloadResponse(local_payload);
     return .{ .builder = try assembleBlindedBlockFromBuilderBid(self, template, bid) };
 }
 
@@ -1168,7 +1147,7 @@ pub fn produceBuilderBlindedBlock(
         }
     }
 
-    const builder = self.builder_api orelse {
+    const builder = self.execution_runtime.builderApi() orelse {
         if (require_builder) return error.BuilderNotConfigured;
         return null;
     };
@@ -1189,9 +1168,9 @@ pub fn produceBuilderBlindedBlock(
     const proposer_pubkey = context.snapshot.proposer_pubkey;
     const parent_hash = context.snapshot.execution_parent_hash;
 
-    if (self.http_builder) |http_builder| {
+    if (self.execution_runtime.httpBuilderRequestClone()) |http_builder| {
         var builder_ctx = BuilderBidFetchCtx{
-            .builder = http_builder.requestClone(),
+            .builder = http_builder,
             .slot = slot,
             .parent_hash = parent_hash,
             .proposer_pubkey = proposer_pubkey,
@@ -1831,7 +1810,7 @@ pub fn unblindPublishedBlock(
 ) !fork_types.AnySignedBeaconBlock {
     if (blinded_block.blockType() != .blinded) return error.InvalidBlockType;
 
-    const builder = self.builder_api orelse return error.BuilderNotConfigured;
+    const builder = self.execution_runtime.builderApi() orelse return error.BuilderNotConfigured;
     const payload = try builder.submitBlindedBlock(blinded_block);
     defer execution_mod.builder.freeExecutionPayload(self.allocator, payload);
 
