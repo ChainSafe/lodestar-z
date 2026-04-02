@@ -52,6 +52,8 @@ const op_pool_mod = @import("op_pool.zig");
 const OpPool = op_pool_mod.OpPool;
 const seen_cache_mod = @import("seen_cache.zig");
 const SeenCache = seen_cache_mod.SeenCache;
+const SeenAttesters = @import("seen_attesters.zig").SeenAttesters;
+const SeenAttestationData = @import("seen_attestation_data.zig").SeenAttestationData;
 const produce_block_mod = @import("produce_block.zig");
 const ProducedBlockBody = produce_block_mod.ProducedBlockBody;
 const produceBlockBody = produce_block_mod.produceBlockBody;
@@ -141,6 +143,8 @@ pub const Chain = struct {
     db: *BeaconDB,
     op_pool: *OpPool,
     seen_cache: *SeenCache,
+    seen_attesters: *SeenAttesters,
+    attestation_data_cache: *SeenAttestationData,
     head_tracker: *HeadTracker,
     beacon_proposer_cache: *BeaconProposerCache,
 
@@ -211,6 +215,8 @@ pub const Chain = struct {
         db: *BeaconDB,
         op_pool: *OpPool,
         seen_cache: *SeenCache,
+        seen_attesters: *SeenAttesters,
+        attestation_data_cache: *SeenAttestationData,
         head_tracker: *HeadTracker,
         beacon_proposer_cache: *BeaconProposerCache,
     ) Chain {
@@ -225,6 +231,8 @@ pub const Chain = struct {
             .db = db,
             .op_pool = op_pool,
             .seen_cache = seen_cache,
+            .seen_attesters = seen_attesters,
+            .attestation_data_cache = attestation_data_cache,
             .head_tracker = head_tracker,
             .beacon_proposer_cache = beacon_proposer_cache,
             .da_manager = null,
@@ -527,6 +535,9 @@ pub const Chain = struct {
         attestation: fork_types.AnyAttestation,
     ) !void {
         const data = attestation.data();
+        if (self.seen_attesters.isKnown(data.target.epoch, validator_index)) {
+            return error.AttestationAlreadyKnown;
+        }
 
         // Apply vote weight to fork choice.
         if (self.fork_choice) |fc| {
@@ -547,6 +558,10 @@ pub const Chain = struct {
         // Insert into attestation pool for block production.
         // Both formats are accepted; the pool handles fork-aware storage.
         try self.op_pool.attestation_pool.addAny(attestation);
+        self.seen_attesters.add(data.target.epoch, validator_index) catch |err| switch (err) {
+            error.EpochTooLow => {},
+            else => return err,
+        };
 
         // Publish attestation notification.
         if (self.notification_sink) |sink| {
@@ -595,6 +610,8 @@ pub const Chain = struct {
         else
             0;
         self.seen_cache.pruneBlocks(min_slot);
+        self.attestation_data_cache.onSlot(slot);
+        self.seen_attesters.prune(computeEpochAtSlot(slot));
 
         // Prune aggregators at epoch boundaries.
         // The seen_aggregators map is keyed by (validator_index, epoch) so it grows
@@ -663,6 +680,8 @@ pub const Chain = struct {
         else
             0;
         self.seen_cache.pruneBlocks(prune_slot);
+        self.attestation_data_cache.onSlot(prune_slot);
+        self.seen_attesters.prune(finalized_epoch);
 
         // Prune DA tracking data outside the availability window.
         if (self.da_manager) |dam| {

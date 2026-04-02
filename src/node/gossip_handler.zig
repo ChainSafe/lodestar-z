@@ -43,6 +43,8 @@ const GossipSource = processor_mod.work_item.GossipSource;
 const MessageId = processor_mod.work_item.MessageId;
 const GossipDataHandle = processor_mod.work_item.GossipDataHandle;
 const OwnedSszBytes = processor_mod.work_item.OwnedSszBytes;
+const ResolvedAggregate = processor_mod.work_item.ResolvedAggregate;
+const ResolvedAttestation = processor_mod.work_item.ResolvedAttestation;
 const GossipAction = chain_gossip.GossipAction;
 const ChainState = chain_gossip.ChainState;
 
@@ -108,11 +110,25 @@ pub const GossipHandler = struct {
     /// Receives raw SSZ bytes (decompressed, not Snappy-wrapped).
     importBlockFn: *const fn (ptr: *anyopaque, block_bytes: []const u8) anyerror!void,
 
-    /// Called to import a validated attestation into fork choice + pool.
-    /// Null until wired by BeaconNode (attestation import is optional during early bringup).
-    importAttestationFn: ?*const fn (
+    /// Resolve attestation committee metadata, signing root, and duplicate state.
+    resolveAttestationFn: *const fn (
         ptr: *anyopaque,
         attestation: *const AnyGossipAttestation,
+        attestation_data_root: *const [32]u8,
+    ) anyerror!ResolvedAttestation,
+
+    /// Resolve aggregate committee metadata, attesting indices, and signing roots.
+    resolveAggregateFn: *const fn (
+        ptr: *anyopaque,
+        aggregate: *const AnySignedAggregateAndProof,
+        attestation_data_root: *const [32]u8,
+    ) anyerror!ResolvedAggregate,
+
+    /// Called to import a validated attestation into fork choice + pool.
+    importResolvedAttestationFn: ?*const fn (
+        ptr: *anyopaque,
+        attestation: *const AnyGossipAttestation,
+        resolved: *const ResolvedAttestation,
     ) anyerror!void,
 
     /// Called to import a validated voluntary exit into the op pool.
@@ -157,17 +173,25 @@ pub const GossipHandler = struct {
     verifyBlsChangeSignatureFn: ?*const fn (ptr: *anyopaque, ssz_bytes: []const u8) bool,
 
     /// Verify attestation BLS signature. Returns true if valid.
-    verifyAttestationSignatureFn: ?*const fn (ptr: *anyopaque, attestation: *const AnyGossipAttestation) bool,
+    verifyAttestationSignatureFn: ?*const fn (
+        ptr: *anyopaque,
+        attestation: *const AnyGossipAttestation,
+        resolved: *const ResolvedAttestation,
+    ) bool,
 
     /// Verify aggregate and proof BLS signatures (selection proof + aggregator + aggregate). Returns true if valid.
-    verifyAggregateSignatureFn: ?*const fn (ptr: *anyopaque, aggregate: *const AnySignedAggregateAndProof) bool,
+    verifyAggregateSignatureFn: ?*const fn (
+        ptr: *anyopaque,
+        aggregate: *const AnySignedAggregateAndProof,
+        resolved: *const ResolvedAggregate,
+    ) bool,
 
     /// Called to import a validated aggregate into fork choice + aggregate pool.
-    importAggregateFn: ?*const fn (ptr: *anyopaque, aggregate: *const AnySignedAggregateAndProof) anyerror!void,
-
-    /// Compute the expected attestation subnet for a slot and committee index.
-    /// Returns null when the local node cannot currently resolve committee data.
-    computeAttestationSubnetFn: *const fn (ptr: *anyopaque, slot: u64, committee_index: u64) ?u8,
+    importResolvedAggregateFn: ?*const fn (
+        ptr: *anyopaque,
+        aggregate: *const AnySignedAggregateAndProof,
+        resolved: *const ResolvedAggregate,
+    ) anyerror!void,
 
     /// Verify sync committee message BLS signature. Returns true if valid.
     verifySyncCommitteeSignatureFn: ?*const fn (ptr: *anyopaque, ssz_bytes: []const u8) bool,
@@ -217,7 +241,16 @@ pub const GossipHandler = struct {
         getProposerIndex: *const fn (ptr: *anyopaque, slot: u64) ?u32,
         isKnownBlockRoot: *const fn (ptr: *anyopaque, root: [32]u8) bool,
         getValidatorCount: *const fn (ptr: *anyopaque) u32,
-        computeAttestationSubnetFn: *const fn (ptr: *anyopaque, slot: u64, committee_index: u64) ?u8,
+        resolveAttestationFn: *const fn (
+            ptr: *anyopaque,
+            attestation: *const AnyGossipAttestation,
+            attestation_data_root: *const [32]u8,
+        ) anyerror!ResolvedAttestation,
+        resolveAggregateFn: *const fn (
+            ptr: *anyopaque,
+            aggregate: *const AnySignedAggregateAndProof,
+            attestation_data_root: *const [32]u8,
+        ) anyerror!ResolvedAggregate,
         isValidSyncCommitteeSubnetFn: *const fn (ptr: *anyopaque, slot: u64, validator_index: u64, subnet: u64) bool,
     ) !*GossipHandler {
         const self = try allocator.create(GossipHandler);
@@ -225,7 +258,9 @@ pub const GossipHandler = struct {
             .allocator = allocator,
             .node = node,
             .importBlockFn = importBlockFn,
-            .importAttestationFn = null,
+            .resolveAttestationFn = resolveAttestationFn,
+            .resolveAggregateFn = resolveAggregateFn,
+            .importResolvedAttestationFn = null,
             .importVoluntaryExitFn = null,
             .importProposerSlashingFn = null,
             .importAttesterSlashingFn = null,
@@ -239,8 +274,7 @@ pub const GossipHandler = struct {
             .verifyBlsChangeSignatureFn = null,
             .verifyAttestationSignatureFn = null,
             .verifyAggregateSignatureFn = null,
-            .importAggregateFn = null,
-            .computeAttestationSubnetFn = computeAttestationSubnetFn,
+            .importResolvedAggregateFn = null,
             .verifySyncCommitteeSignatureFn = null,
             .isValidSyncCommitteeSubnetFn = isValidSyncCommitteeSubnetFn,
             .importSyncContributionFn = null,
@@ -298,6 +332,22 @@ pub const GossipHandler = struct {
             .ignore => return GossipHandlerError.ValidationIgnored,
             .reject => return GossipHandlerError.ValidationRejected,
         }
+    }
+
+    fn resolveAttestation(
+        self: *GossipHandler,
+        attestation: *const AnyGossipAttestation,
+        attestation_data_root: *const [32]u8,
+    ) anyerror!ResolvedAttestation {
+        return self.resolveAttestationFn(self.node, attestation, attestation_data_root);
+    }
+
+    fn resolveAggregate(
+        self: *GossipHandler,
+        aggregate: *const AnySignedAggregateAndProof,
+        attestation_data_root: *const [32]u8,
+    ) anyerror!ResolvedAggregate {
+        return self.resolveAggregateFn(self.node, aggregate, attestation_data_root);
     }
 
     fn dupeQueuedSszBytes(self: *GossipHandler, ssz_bytes: []const u8) ?GossipDataHandle {
@@ -464,12 +514,6 @@ pub const GossipHandler = struct {
             return GossipHandlerError.DecodeFailed;
         const committee_index = attestation.committeeIndex();
 
-        const expected_subnet = self.computeAttestationSubnetFn(self.node, data.slot, committee_index) orelse
-            return GossipHandlerError.ValidationIgnored;
-        if (expected_subnet != subnet_id) {
-            return GossipHandlerError.ValidationRejected;
-        }
-
         // Phase 1b: Fast validation.
         var chain_state = self.makeChainState();
         const action = chain_gossip.validateGossipAttestation(
@@ -485,6 +529,24 @@ pub const GossipHandler = struct {
             return GossipHandlerError.ValidationRejected;
         }
 
+        const resolved = self.resolveAttestation(&attestation, &attestation_data_root) catch |err| switch (err) {
+            error.NoHeadState,
+            error.EpochShufflingNotFound,
+            error.CommitteeIndexOutOfBounds,
+            => return GossipHandlerError.ValidationIgnored,
+            error.InvalidGossipAttestation,
+            error.AttesterNotInCommittee,
+            error.ValidatorIndexOutOfBounds,
+            => return GossipHandlerError.ValidationRejected,
+            else => return err,
+        };
+        if (resolved.expected_subnet != subnet_id) {
+            return GossipHandlerError.ValidationRejected;
+        }
+        if (resolved.already_seen) {
+            return GossipHandlerError.ValidationIgnored;
+        }
+
         // Phase 2: Import to fork choice + attestation pool.
         // When processor is available, defer BLS to batch verification.
         // Attestations are LIFO-queued and batched for efficient BLS verification.
@@ -495,6 +557,7 @@ pub const GossipHandler = struct {
                 .message_id = metadata.message_id,
                 .attestation = attestation,
                 .attestation_data_root = attestation_data_root,
+                .resolved = resolved,
                 .subnet_id = @intCast(subnet_id),
                 .seen_timestamp_ns = metadata.seen_timestamp_ns,
             } });
@@ -504,15 +567,15 @@ pub const GossipHandler = struct {
         // Phase 1c: BLS signature verification (only for inline processing path).
         // [REJECT] The attestation signature is valid.
         if (self.verifyAttestationSignatureFn) |verifyFn| {
-            if (!verifyFn(self.node, &attestation)) {
+            if (!verifyFn(self.node, &attestation, &resolved)) {
                 std.log.warn("Gossip attestation rejected: invalid signature slot={d}", .{data.slot});
                 return GossipHandlerError.ValidationRejected;
             }
         }
 
         // Fallback: inline processing.
-        if (self.importAttestationFn) |importFn| {
-            importFn(self.node, &attestation) catch |err| {
+        if (self.importResolvedAttestationFn) |importFn| {
+            importFn(self.node, &attestation, &resolved) catch |err| {
                 std.log.warn("Attestation import failed for slot {d}: {}", .{ data.slot, err });
             };
         }
@@ -543,6 +606,11 @@ pub const GossipHandler = struct {
         var signed_aggregate = self.parseSignedAggregateAndProof(ssz_bytes) orelse return GossipHandlerError.DecodeFailed;
         var aggregate_owned = true;
         defer if (aggregate_owned) signed_aggregate.deinit(self.allocator);
+        const attestation = signed_aggregate.attestation();
+        const att_data = attestation.data();
+        var attestation_data_root: [32]u8 = undefined;
+        types.phase0.AttestationData.hashTreeRoot(&att_data, &attestation_data_root) catch
+            return GossipHandlerError.DecodeFailed;
 
         // Phase 1b: Fast validation.
         var chain_state = self.makeChainState();
@@ -566,15 +634,36 @@ pub const GossipHandler = struct {
         };
         try checkAction(action);
 
+        var resolved = self.resolveAggregate(&signed_aggregate, &attestation_data_root) catch |err| switch (err) {
+            error.NoHeadState,
+            error.EpochShufflingNotFound,
+            error.CommitteeIndexOutOfBounds,
+            => return GossipHandlerError.ValidationIgnored,
+            error.InvalidGossipAttestation,
+            error.AttesterNotInCommittee,
+            error.ValidatorIndexOutOfBounds,
+            error.InvalidAggregatorIndex,
+            error.AggregatorNotInCommittee,
+            error.InvalidSelectionProof,
+            error.EmptyAggregateAttestation,
+            => return GossipHandlerError.ValidationRejected,
+            else => return err,
+        };
+        var resolved_owned = true;
+        defer if (resolved_owned) resolved.deinit(self.allocator);
+
         // Phase 2: Import aggregate to fork choice + attestation pool.
         // When processor is available, defer the expensive BLS checks to
         // processor-side batch verification.
         if (self.beacon_processor) |bp| {
             aggregate_owned = false;
+            resolved_owned = false;
             bp.ingest(.{ .aggregate = .{
                 .source = metadata.source,
                 .message_id = metadata.message_id,
                 .aggregate = signed_aggregate,
+                .attestation_data_root = attestation_data_root,
+                .resolved = resolved,
                 .seen_timestamp_ns = metadata.seen_timestamp_ns,
             } });
             return;
@@ -583,15 +672,15 @@ pub const GossipHandler = struct {
         // Phase 1c: BLS signature verification.
         // [REJECT] selection_proof, aggregator signature, and aggregate signature are all valid.
         if (self.verifyAggregateSignatureFn) |verifyFn| {
-            if (!verifyFn(self.node, &signed_aggregate)) {
+            if (!verifyFn(self.node, &signed_aggregate, &resolved)) {
                 std.log.warn("Gossip aggregate rejected: invalid signature aggregator={d}", .{signed_aggregate.aggregatorIndex()});
                 return GossipHandlerError.ValidationRejected;
             }
         }
 
         // Fallback: inline processing.
-        if (self.importAggregateFn) |importFn| {
-            importFn(self.node, &signed_aggregate) catch |err| {
+        if (self.importResolvedAggregateFn) |importFn| {
+            importFn(self.node, &signed_aggregate, &resolved) catch |err| {
                 std.log.warn("Aggregate import failed for aggregator {d}: {}", .{ signed_aggregate.aggregatorIndex(), err });
             };
             return;
@@ -1230,9 +1319,36 @@ fn stubGetValidatorCount(_: *anyopaque) u32 {
     return 1000;
 }
 
-fn stubComputeAttestationSubnet(_: *anyopaque, slot: u64, committee_index: u64) ?u8 {
-    const slots_since_epoch_start = slot % preset.SLOTS_PER_EPOCH;
-    return @intCast((slots_since_epoch_start + committee_index) % networking.peer_info.ATTESTATION_SUBNET_COUNT);
+fn stubResolveAttestation(
+    _: *anyopaque,
+    attestation: *const AnyGossipAttestation,
+    _: *const [32]u8,
+) anyerror!ResolvedAttestation {
+    const committee_index = attestation.committeeIndex();
+    const slots_since_epoch_start = attestation.slot() % preset.SLOTS_PER_EPOCH;
+    return .{
+        .validator_index = switch (attestation.*) {
+            .phase0 => 0,
+            .electra_single => |single| single.attester_index,
+        },
+        .validator_committee_index = 0,
+        .committee_size = 1,
+        .signing_root = [_]u8{0} ** 32,
+        .expected_subnet = @intCast((slots_since_epoch_start + committee_index) % networking.peer_info.ATTESTATION_SUBNET_COUNT),
+    };
+}
+
+fn stubResolveAggregate(
+    _: *anyopaque,
+    _: *const AnySignedAggregateAndProof,
+    _: *const [32]u8,
+) anyerror!ResolvedAggregate {
+    return .{
+        .attestation_signing_root = [_]u8{0} ** 32,
+        .selection_signing_root = [_]u8{0} ** 32,
+        .aggregate_signing_root = [_]u8{0} ** 32,
+        .attesting_indices = &.{},
+    };
 }
 
 fn stubIsValidSyncCommitteeSubnet(_: *anyopaque, _: u64, validator_index: u64, subnet: u64) bool {
@@ -1250,7 +1366,8 @@ fn makeTestHandler(allocator: Allocator) !*GossipHandler {
         &stubGetProposerIndex,
         &stubIsKnownBlockRoot,
         &stubGetValidatorCount,
-        &stubComputeAttestationSubnet,
+        &stubResolveAttestation,
+        &stubResolveAggregate,
         &stubIsValidSyncCommitteeSubnet,
     );
 }

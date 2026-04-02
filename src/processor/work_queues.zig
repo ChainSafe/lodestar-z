@@ -1270,6 +1270,13 @@ fn testAttestationWorkWithSlot(tag: u64, slot: u64, subnet_id: u8, seen_timestam
         .message_id = testMessageId(@intCast(tag & 0xff)),
         .attestation = attestation,
         .attestation_data_root = testGossipAttestationDataRoot(&attestation),
+        .resolved = .{
+            .validator_index = tag,
+            .validator_committee_index = 0,
+            .committee_size = 1,
+            .signing_root = [_]u8{@intCast(tag % 251)} ** 32,
+            .expected_subnet = subnet_id,
+        },
         .subnet_id = subnet_id,
         .seen_timestamp_ns = seen_timestamp_ns,
     };
@@ -1287,6 +1294,13 @@ fn testOwnedAttestationWork(
         .message_id = testMessageId(@intCast(tag & 0xff)),
         .attestation = attestation,
         .attestation_data_root = testGossipAttestationDataRoot(&attestation),
+        .resolved = .{
+            .validator_index = tag,
+            .validator_committee_index = 0,
+            .committee_size = 1,
+            .signing_root = [_]u8{@intCast(tag % 251)} ** 32,
+            .expected_subnet = subnet_id,
+        },
         .subnet_id = subnet_id,
         .seen_timestamp_ns = seen_timestamp_ns,
     };

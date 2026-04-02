@@ -11,6 +11,7 @@ const fork_types = @import("fork_types");
 // Re-export primitive types used in payloads.
 const Slot = consensus_types.primitive.Slot.Type;
 const Root = consensus_types.primitive.Root.Type;
+const ValidatorIndex = consensus_types.primitive.ValidatorIndex.Type;
 const AnySignedBeaconBlock = fork_types.AnySignedBeaconBlock;
 const AnySignedAggregateAndProof = fork_types.AnySignedAggregateAndProof;
 const AnyGossipAttestation = fork_types.AnyGossipAttestation;
@@ -211,11 +212,52 @@ pub const ColumnReconstructionWork = struct {
 };
 
 /// Unaggregated attestation from gossip.
+pub const ResolvedAttestation = struct {
+    validator_index: ValidatorIndex,
+    validator_committee_index: u32,
+    committee_size: u32,
+    signing_root: Root,
+    expected_subnet: u8,
+    already_seen: bool = false,
+};
+
+/// Aggregated attestation from gossip, resolved once at ingress.
+pub const ResolvedAggregate = struct {
+    attestation_signing_root: Root,
+    selection_signing_root: Root,
+    aggregate_signing_root: Root,
+    attesting_indices: []const ValidatorIndex,
+    owned_attesting_indices: ?[]ValidatorIndex = null,
+
+    pub fn initOwned(
+        attesting_indices: []ValidatorIndex,
+        attestation_signing_root: Root,
+        selection_signing_root: Root,
+        aggregate_signing_root: Root,
+    ) ResolvedAggregate {
+        return .{
+            .attestation_signing_root = attestation_signing_root,
+            .selection_signing_root = selection_signing_root,
+            .aggregate_signing_root = aggregate_signing_root,
+            .attesting_indices = attesting_indices,
+            .owned_attesting_indices = attesting_indices,
+        };
+    }
+
+    pub fn deinit(self: ResolvedAggregate, allocator: std.mem.Allocator) void {
+        if (self.owned_attesting_indices) |attesting_indices| {
+            allocator.free(attesting_indices);
+        }
+    }
+};
+
+/// Unaggregated attestation from gossip.
 pub const AttestationWork = struct {
     source: GossipSource,
     message_id: MessageId,
     attestation: AnyGossipAttestation,
     attestation_data_root: Root,
+    resolved: ResolvedAttestation,
     subnet_id: u8,
     seen_timestamp_ns: i64,
 };
@@ -231,6 +273,8 @@ pub const AggregateWork = struct {
     source: GossipSource,
     message_id: MessageId,
     aggregate: AnySignedAggregateAndProof,
+    attestation_data_root: Root,
+    resolved: ResolvedAggregate,
     seen_timestamp_ns: i64,
 };
 
@@ -575,6 +619,7 @@ pub const WorkItem = union(WorkType) {
                 attestation.deinit(allocator);
             },
             .aggregate => |work| {
+                work.resolved.deinit(allocator);
                 var aggregate = work.aggregate;
                 aggregate.deinit(allocator);
             },

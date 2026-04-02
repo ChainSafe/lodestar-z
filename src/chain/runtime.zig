@@ -24,6 +24,8 @@ const HeadTracker = @import("block_import.zig").HeadTracker;
 const QueuedStateRegen = @import("queued_regen.zig").QueuedStateRegen;
 const OpPool = @import("op_pool.zig").OpPool;
 const SeenCache = @import("seen_cache.zig").SeenCache;
+const SeenAttesters = @import("seen_attesters.zig").SeenAttesters;
+const SeenAttestationData = @import("seen_attestation_data.zig").SeenAttestationData;
 const sync_contribution_pool_mod = @import("sync_contribution_pool.zig");
 const SyncContributionAndProofPool = sync_contribution_pool_mod.SyncContributionAndProofPool;
 const SyncCommitteeMessagePool = sync_contribution_pool_mod.SyncCommitteeMessagePool;
@@ -83,6 +85,8 @@ pub const Runtime = struct {
     head_tracker: *HeadTracker,
     op_pool: *OpPool,
     seen_cache: *SeenCache,
+    seen_attesters: *SeenAttesters,
+    seen_attestation_data: *SeenAttestationData,
     sync_contribution_pool: *SyncContributionAndProofPool,
     sync_committee_message_pool: *SyncCommitteeMessagePool,
     beacon_proposer_cache: *BeaconProposerCache,
@@ -152,6 +156,16 @@ pub const Runtime = struct {
         seen_cache.* = SeenCache.init(allocator);
         errdefer seen_cache.deinit();
 
+        const seen_attesters = try allocator.create(SeenAttesters);
+        errdefer allocator.destroy(seen_attesters);
+        seen_attesters.* = SeenAttesters.init(allocator);
+        errdefer seen_attesters.deinit();
+
+        const seen_attestation_data = try allocator.create(SeenAttestationData);
+        errdefer allocator.destroy(seen_attestation_data);
+        seen_attestation_data.* = SeenAttestationData.init(allocator);
+        errdefer seen_attestation_data.deinit();
+
         const sync_contrib_pool = try allocator.create(SyncContributionAndProofPool);
         errdefer allocator.destroy(sync_contrib_pool);
         sync_contrib_pool.* = SyncContributionAndProofPool.init(allocator);
@@ -207,6 +221,8 @@ pub const Runtime = struct {
             db,
             op_pool,
             seen_cache,
+            seen_attesters,
+            seen_attestation_data,
             head_tracker,
             proposer_cache,
         );
@@ -234,6 +250,8 @@ pub const Runtime = struct {
             .head_tracker = head_tracker,
             .op_pool = op_pool,
             .seen_cache = seen_cache,
+            .seen_attesters = seen_attesters,
+            .seen_attestation_data = seen_attestation_data,
             .sync_contribution_pool = sync_contrib_pool,
             .sync_committee_message_pool = sync_msg_pool,
             .beacon_proposer_cache = proposer_cache,
@@ -300,6 +318,12 @@ pub const Runtime = struct {
 
         self.seen_cache.deinit();
         self.allocator.destroy(self.seen_cache);
+
+        self.seen_attesters.deinit();
+        self.allocator.destroy(self.seen_attesters);
+
+        self.seen_attestation_data.deinit();
+        self.allocator.destroy(self.seen_attestation_data);
 
         self.op_pool.deinit();
         self.allocator.destroy(self.op_pool);

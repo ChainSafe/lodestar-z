@@ -2608,7 +2608,8 @@ fn initGossipHandler(self: *BeaconNode) void {
         &callbacks.getProposerIndex,
         &callbacks.isKnownBlockRoot,
         &callbacks.getValidatorCount,
-        &callbacks.computeAttestationSubnet,
+        &callbacks.resolveAttestation,
+        &callbacks.resolveAggregate,
         &callbacks.isValidSyncCommitteeSubnet,
     ) catch |err| {
         std.log.warn("Failed to create GossipHandler: {}", .{err});
@@ -2616,8 +2617,8 @@ fn initGossipHandler(self: *BeaconNode) void {
     };
 
     if (self.gossip_handler) |gh| {
-        gh.importAttestationFn = &callbacks.importAttestation;
-        gh.importAggregateFn = &callbacks.importAggregate;
+        gh.importResolvedAttestationFn = &callbacks.importResolvedAttestation;
+        gh.importResolvedAggregateFn = &callbacks.importResolvedAggregate;
         gh.importVoluntaryExitFn = &callbacks.importVoluntaryExit;
         gh.importProposerSlashingFn = &callbacks.importProposerSlashing;
         gh.importAttesterSlashingFn = &callbacks.importAttesterSlashing;
@@ -2631,7 +2632,7 @@ fn initGossipHandler(self: *BeaconNode) void {
         gh.verifyAttesterSlashingSignatureFn = &callbacks.verifyAttesterSlashingSignature;
         gh.verifyBlsChangeSignatureFn = &callbacks.verifyBlsChangeSignature;
         gh.verifyAttestationSignatureFn = &callbacks.verifyAttestationSignature;
-        gh.verifyAggregateSignatureFn = &callbacks.verifyAggregateSignature;
+        gh.verifyAggregateSignatureFn = &callbacks.verifyResolvedAggregateSignature;
         gh.verifySyncCommitteeSignatureFn = &callbacks.verifySyncCommitteeSignature;
 
         gh.importSyncContributionFn = &callbacks.importSyncContribution;

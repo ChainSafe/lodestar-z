@@ -108,6 +108,8 @@ const WorkQueues = processor_mod.WorkQueues;
 const AttestationWork = processor_mod.work_item.AttestationWork;
 const AggregateWork = processor_mod.work_item.AggregateWork;
 const ExecutionForkchoiceWork = processor_mod.work_item.ExecutionForkchoiceWork;
+const ResolvedAggregate = processor_mod.work_item.ResolvedAggregate;
+const ResolvedAttestation = processor_mod.work_item.ResolvedAttestation;
 // HeadTracker, ImportResult, ImportError are in chain_mod (src/chain).
 
 // dummyBalancesGetterFn is defined in block_import.zig.
@@ -1148,6 +1150,7 @@ fn deinitAttestationBatchItems(node: *BeaconNode, items: []AttestationWork) void
 
 fn deinitAggregateBatchItems(node: *BeaconNode, items: []AggregateWork) void {
     for (items) |*item| {
+        item.resolved.deinit(node.allocator);
         item.aggregate.deinit(node.allocator);
     }
 }
@@ -1167,14 +1170,6 @@ fn verifyAttestationBatchSync(node: *BeaconNode, items: []const AttestationWork)
     const gh = node.gossip_handler orelse return true;
     if (gh.verifyAttestationSignatureFn == null) return true;
     const same_message = attestationBatchSharesDataRoot(items);
-    var same_message_signing_root: [32]u8 = undefined;
-    if (same_message) {
-        gossip_node_callbacks_mod.getAttestationSigningRoot(
-            gh.node,
-            &items[0].attestation,
-            &same_message_signing_root,
-        ) catch return false;
-    }
 
     var owned_sets: [processor_mod.work_item.max_attestation_batch_size]bls_mod.OwnedSignatureSet = undefined;
     var signature_sets: [processor_mod.work_item.max_attestation_batch_size]bls_mod.SignatureSet = undefined;
@@ -1189,16 +1184,16 @@ fn verifyAttestationBatchSync(node: *BeaconNode, items: []const AttestationWork)
     for (items) |item| {
         const owned_set = blk: {
             const built = if (same_message)
-                gossip_node_callbacks_mod.buildAttestationSignatureSetWithSigningRoot(
+                gossip_node_callbacks_mod.buildResolvedAttestationSignatureSet(
                     gh.node,
                     &item.attestation,
-                    &same_message_signing_root,
+                    &item.resolved,
                 )
             else
-                gossip_node_callbacks_mod.buildAttestationSignatureSet(
-                    node.allocator,
+                gossip_node_callbacks_mod.buildResolvedAttestationSignatureSet(
                     gh.node,
                     &item.attestation,
+                    &item.resolved,
                 );
             break :blk built catch return false;
         };
@@ -1246,10 +1241,11 @@ fn verifyAggregateBatchSync(node: *BeaconNode, items: []const AggregateWork) boo
 
     for (items) |item| {
         var local_sets: [3]bls_mod.OwnedSignatureSet = undefined;
-        gossip_node_callbacks_mod.buildAggregateSignatureSets(
+        gossip_node_callbacks_mod.buildResolvedAggregateSignatureSets(
             node.allocator,
             gh.node,
             &item.aggregate,
+            &item.resolved,
             &local_sets,
         ) catch return false;
 
@@ -1285,7 +1281,7 @@ fn importAttestationBatchItems(node: *BeaconNode, items: []AttestationWork, batc
         if (!batch_valid) {
             if (node.gossip_handler) |gh| {
                 if (gh.verifyAttestationSignatureFn) |verifyFn| {
-                    if (!verifyFn(gh.node, &attestation)) {
+                    if (!verifyFn(gh.node, &attestation, &item.resolved)) {
                         std.log.warn("Attestation BLS failed in batch fallback slot={d}", .{attestation.slot()});
                         continue;
                     }
@@ -1294,9 +1290,9 @@ fn importAttestationBatchItems(node: *BeaconNode, items: []AttestationWork, batc
         }
 
         const gh = node.gossip_handler orelse continue;
-        const importFn = gh.importAttestationFn orelse continue;
+        const importFn = gh.importResolvedAttestationFn orelse continue;
 
-        importFn(gh.node, &attestation) catch |err| {
+        importFn(gh.node, &attestation, &item.resolved) catch |err| {
             std.log.warn("Processor: attestation import failed for slot {d}: {}", .{
                 attestation.slot(), err,
             });
@@ -1308,11 +1304,12 @@ fn importAggregateBatchItems(node: *BeaconNode, items: []AggregateWork, batch_va
     for (items) |item| {
         var aggregate = item.aggregate;
         defer aggregate.deinit(node.allocator);
+        defer item.resolved.deinit(node.allocator);
 
         if (!batch_valid) {
             if (node.gossip_handler) |gh| {
                 if (gh.verifyAggregateSignatureFn) |verifyFn| {
-                    if (!verifyFn(gh.node, &aggregate)) {
+                    if (!verifyFn(gh.node, &aggregate, &item.resolved)) {
                         std.log.warn("Aggregate BLS failed in batch fallback slot={d}", .{
                             aggregate.attestation().slot(),
                         });
@@ -1323,8 +1320,8 @@ fn importAggregateBatchItems(node: *BeaconNode, items: []AggregateWork, batch_va
         }
 
         if (node.gossip_handler) |gh| {
-            if (gh.importAggregateFn) |importFn| {
-                importFn(gh.node, &aggregate) catch |err| {
+            if (gh.importResolvedAggregateFn) |importFn| {
+                importFn(gh.node, &aggregate, &item.resolved) catch |err| {
                     std.log.warn("Processor: aggregate import failed slot={d}: {}", .{
                         aggregate.attestation().slot(),
                         err,
@@ -1341,14 +1338,6 @@ fn tryStartPendingAttestationBatch(node: *BeaconNode, items: []AttestationWork) 
     if (!node.gossip_bls_thread_pool.canAcceptWork()) return false;
     node.pending_gossip_bls_batches.ensureUnusedCapacity(node.allocator, 1) catch return false;
     const same_message = attestationBatchSharesDataRoot(items);
-    var same_message_signing_root: [32]u8 = undefined;
-    if (same_message) {
-        gossip_node_callbacks_mod.getAttestationSigningRoot(
-            gh.node,
-            &items[0].attestation,
-            &same_message_signing_root,
-        ) catch return false;
-    }
 
     const owned_sets = node.allocator.alloc(bls_mod.OwnedSignatureSet, items.len) catch return false;
     var owned_count: usize = 0;
@@ -1356,16 +1345,16 @@ fn tryStartPendingAttestationBatch(node: *BeaconNode, items: []AttestationWork) 
     var signature_sets: [processor_mod.work_item.max_attestation_batch_size]bls_mod.SignatureSet = undefined;
     for (items, 0..) |item, i| {
         const owned_set = (if (same_message)
-            gossip_node_callbacks_mod.buildAttestationSignatureSetWithSigningRoot(
+            gossip_node_callbacks_mod.buildResolvedAttestationSignatureSet(
                 gh.node,
                 &item.attestation,
-                &same_message_signing_root,
+                &item.resolved,
             )
         else
-            gossip_node_callbacks_mod.buildAttestationSignatureSet(
-                node.allocator,
+            gossip_node_callbacks_mod.buildResolvedAttestationSignatureSet(
                 gh.node,
                 &item.attestation,
+                &item.resolved,
             )) catch {
             while (owned_count > 0) {
                 owned_count -= 1;
@@ -1423,10 +1412,11 @@ fn tryStartPendingAggregateBatch(node: *BeaconNode, items: []AggregateWork) bool
     var signature_sets: [processor_mod.work_item.max_aggregate_batch_size * 3]bls_mod.SignatureSet = undefined;
     for (items) |item| {
         var local_sets: [3]bls_mod.OwnedSignatureSet = undefined;
-        gossip_node_callbacks_mod.buildAggregateSignatureSets(
+        gossip_node_callbacks_mod.buildResolvedAggregateSignatureSets(
             node.allocator,
             gh.node,
             &item.aggregate,
+            &item.resolved,
             &local_sets,
         ) catch {
             while (owned_count > 0) {
@@ -1554,8 +1544,9 @@ pub fn processorHandlerCallback(item: WorkItem, context: *anyopaque) void {
         .aggregate => |work| {
             if (node.gossip_handler) |gh| {
                 if (gh.verifyAggregateSignatureFn) |verifyFn| {
-                    if (!verifyFn(gh.node, &work.aggregate)) {
+                    if (!verifyFn(gh.node, &work.aggregate, &work.resolved)) {
                         std.log.warn("Single aggregate BLS failed aggregator={d}", .{work.aggregate.aggregatorIndex()});
+                        work.resolved.deinit(node.allocator);
                         var aggregate = work.aggregate;
                         aggregate.deinit(node.allocator);
                         return;
@@ -1573,13 +1564,13 @@ pub fn processorHandlerCallback(item: WorkItem, context: *anyopaque) void {
             // BLS signature verification.
             if (node.gossip_handler) |gh| {
                 if (gh.verifyAttestationSignatureFn) |verifyFn| {
-                    if (!verifyFn(gh.node, &attestation)) {
+                    if (!verifyFn(gh.node, &attestation, &att_work.resolved)) {
                         std.log.warn("Single attestation BLS failed slot={d}", .{attestation.slot()});
                         return;
                     }
                 }
-                const importFn = gh.importAttestationFn orelse return;
-                importFn(gh.node, &attestation) catch |err| {
+                const importFn = gh.importResolvedAttestationFn orelse return;
+                importFn(gh.node, &attestation, &att_work.resolved) catch |err| {
                     std.log.warn("Processor: attestation import failed for slot {d}: {}", .{
                         attestation.slot(), err,
                     });
@@ -1640,11 +1631,13 @@ fn fromExecutionForkchoiceWork(work: ExecutionForkchoiceWork) chain_mod.Executio
 
 fn handleQueuedAggregate(node: *BeaconNode, work: processor_mod.work_item.AggregateWork) void {
     const gh = node.gossip_handler orelse {
+        work.resolved.deinit(node.allocator);
         var aggregate = work.aggregate;
         aggregate.deinit(node.allocator);
         return;
     };
-    const importFn = gh.importAggregateFn orelse {
+    const importFn = gh.importResolvedAggregateFn orelse {
+        work.resolved.deinit(node.allocator);
         var aggregate = work.aggregate;
         aggregate.deinit(node.allocator);
         return;
@@ -1652,8 +1645,9 @@ fn handleQueuedAggregate(node: *BeaconNode, work: processor_mod.work_item.Aggreg
 
     var aggregate = work.aggregate;
     defer aggregate.deinit(node.allocator);
+    defer work.resolved.deinit(node.allocator);
 
-    importFn(gh.node, &aggregate) catch |err| {
+    importFn(gh.node, &aggregate, &work.resolved) catch |err| {
         std.log.warn("Processor: aggregate import failed for aggregator {d}: {}", .{
             aggregate.aggregatorIndex(), err,
         });
@@ -1839,7 +1833,12 @@ const ProcessorImportTestContext = struct {
         ctx.exit_epoch = exit.message.epoch;
     }
 
-    fn importAggregate(ptr: *anyopaque, aggregate: *const fork_types.AnySignedAggregateAndProof) anyerror!void {
+    fn importAggregate(
+        ptr: *anyopaque,
+        aggregate: *const fork_types.AnySignedAggregateAndProof,
+        resolved: *const ResolvedAggregate,
+    ) anyerror!void {
+        _ = resolved;
         const ctx: *ProcessorImportTestContext = @ptrCast(@alignCast(ptr));
         ctx.aggregate_import_count += 1;
         ctx.aggregate_aggregator_index = aggregate.aggregatorIndex();
@@ -1849,7 +1848,11 @@ const ProcessorImportTestContext = struct {
         ctx.aggregate_target_epoch = data.target.epoch;
     }
 
-    fn importAttestation(ptr: *anyopaque, attestation: *const fork_types.AnyGossipAttestation) anyerror!void {
+    fn importAttestation(
+        ptr: *anyopaque,
+        attestation: *const fork_types.AnyGossipAttestation,
+        resolved: *const ResolvedAttestation,
+    ) anyerror!void {
         const ctx: *ProcessorImportTestContext = @ptrCast(@alignCast(ptr));
         const data = attestation.data();
         ctx.attestation_slot = data.slot;
@@ -1858,6 +1861,7 @@ const ProcessorImportTestContext = struct {
             .electra_single => true,
             .phase0 => false,
         };
+        ctx.validator_index = resolved.validator_index;
     }
 
     fn importSyncCommitteeMessage(ptr: *anyopaque, msg: *const types.altair.SyncCommitteeMessage.Type, subnet: u64) anyerror!void {
@@ -1940,7 +1944,7 @@ test "processorHandlerCallback imports queued aggregates" {
 
     var gh: GossipHandler = undefined;
     gh.node = @ptrCast(&ctx);
-    gh.importAggregateFn = &ProcessorImportTestContext.importAggregate;
+    gh.importResolvedAggregateFn = &ProcessorImportTestContext.importAggregate;
     gh.verifyAggregateSignatureFn = null;
     node.gossip_handler = &gh;
 
@@ -1953,6 +1957,13 @@ test "processorHandlerCallback imports queued aggregates" {
         .source = .{ .key = 1 },
         .message_id = std.mem.zeroes(processor_mod.work_item.MessageId),
         .aggregate = .{ .phase0 = signed_agg },
+        .attestation_data_root = [_]u8{0} ** 32,
+        .resolved = .{
+            .attestation_signing_root = [_]u8{0} ** 32,
+            .selection_signing_root = [_]u8{0} ** 32,
+            .aggregate_signing_root = [_]u8{0} ** 32,
+            .attesting_indices = &.{},
+        },
         .seen_timestamp_ns = 0,
     } }, @ptrCast(&node));
 
@@ -1971,7 +1982,7 @@ test "processorHandlerCallback imports queued aggregate batches" {
 
     var gh: GossipHandler = undefined;
     gh.node = @ptrCast(&ctx);
-    gh.importAggregateFn = &ProcessorImportTestContext.importAggregate;
+    gh.importResolvedAggregateFn = &ProcessorImportTestContext.importAggregate;
     gh.verifyAggregateSignatureFn = null;
     node.gossip_handler = &gh;
 
@@ -1990,12 +2001,26 @@ test "processorHandlerCallback imports queued aggregate batches" {
             .source = .{ .key = 1 },
             .message_id = std.mem.zeroes(processor_mod.work_item.MessageId),
             .aggregate = .{ .phase0 = signed_agg_1 },
+            .attestation_data_root = [_]u8{0} ** 32,
+            .resolved = .{
+                .attestation_signing_root = [_]u8{0} ** 32,
+                .selection_signing_root = [_]u8{0} ** 32,
+                .aggregate_signing_root = [_]u8{0} ** 32,
+                .attesting_indices = &.{},
+            },
             .seen_timestamp_ns = 0,
         },
         .{
             .source = .{ .key = 2 },
             .message_id = std.mem.zeroes(processor_mod.work_item.MessageId),
             .aggregate = .{ .phase0 = signed_agg_2 },
+            .attestation_data_root = [_]u8{0} ** 32,
+            .resolved = .{
+                .attestation_signing_root = [_]u8{0} ** 32,
+                .selection_signing_root = [_]u8{0} ** 32,
+                .aggregate_signing_root = [_]u8{0} ** 32,
+                .attesting_indices = &.{},
+            },
             .seen_timestamp_ns = 0,
         },
     };
@@ -2020,7 +2045,7 @@ test "processorHandlerCallback imports queued attestations" {
 
     var gh: GossipHandler = undefined;
     gh.node = @ptrCast(&ctx);
-    gh.importAttestationFn = &ProcessorImportTestContext.importAttestation;
+    gh.importResolvedAttestationFn = &ProcessorImportTestContext.importAttestation;
     gh.verifyAttestationSignatureFn = null;
     node.gossip_handler = &gh;
 
@@ -2036,6 +2061,13 @@ test "processorHandlerCallback imports queued attestations" {
         .message_id = std.mem.zeroes(processor_mod.work_item.MessageId),
         .attestation = .{ .electra_single = attestation },
         .attestation_data_root = attestation_data_root,
+        .resolved = .{
+            .validator_index = 19,
+            .validator_committee_index = 0,
+            .committee_size = 1,
+            .signing_root = [_]u8{0x33} ** 32,
+            .expected_subnet = 0,
+        },
         .subnet_id = 0,
         .seen_timestamp_ns = 0,
     } }, @ptrCast(&node));
@@ -2043,6 +2075,7 @@ test "processorHandlerCallback imports queued attestations" {
     try std.testing.expectEqual(@as(?u64, 222), ctx.attestation_slot);
     try std.testing.expectEqual(@as(?u64, 7), ctx.attestation_committee_index);
     try std.testing.expect(ctx.attestation_is_electra_single);
+    try std.testing.expectEqual(@as(?u64, 19), ctx.validator_index);
 }
 
 test "processorHandlerCallback imports queued sync committee messages" {

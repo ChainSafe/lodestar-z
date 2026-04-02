@@ -377,15 +377,11 @@ fn publishSsz(
 }
 
 fn importAttestationFromApi(node: *BeaconNode, attestation: *const AnyGossipAttestation) !void {
-    const gh = node.gossip_handler orelse return error.NotImplemented;
-    const import_fn = gh.importAttestationFn orelse return error.NotImplemented;
-    try import_fn(gh.node, attestation);
+    try @import("gossip_node_callbacks.zig").importAttestation(@ptrCast(node), attestation);
 }
 
 fn importAggregateFromApi(node: *BeaconNode, aggregate: *const AnySignedAggregateAndProof) !void {
-    const gh = node.gossip_handler orelse return error.NotImplemented;
-    const import_fn = gh.importAggregateFn orelse return error.NotImplemented;
-    try import_fn(gh.node, aggregate);
+    try @import("gossip_node_callbacks.zig").importAggregate(@ptrCast(node), aggregate);
 }
 
 fn syncCommitteePositionsForValidator(
