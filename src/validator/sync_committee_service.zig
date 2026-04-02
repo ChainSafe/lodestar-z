@@ -66,6 +66,12 @@ pub const SyncCommitteeService = struct {
     seconds_per_slot: u64,
     /// Genesis time (Unix seconds) — for correct sub-slot timing (BUG-5 fix).
     genesis_time_unix_secs: u64,
+    /// Gloas fork epoch — sync duty timing changes at/after this fork.
+    gloas_fork_epoch: u64,
+    sync_message_due_ms: u64,
+    sync_message_due_ms_gloas: u64,
+    sync_contribution_due_ms: u64,
+    sync_contribution_due_ms_gloas: u64,
 
     /// Duties keyed by validator index (valid for the current sync period).
     duties: std.array_list.Managed(SyncCommitteeDutyWithProofs),
@@ -93,6 +99,11 @@ pub const SyncCommitteeService = struct {
         sync_committee_subnet_count: u64,
         seconds_per_slot: u64,
         genesis_time_unix_secs: u64,
+        gloas_fork_epoch: u64,
+        sync_message_due_ms: u64,
+        sync_message_due_ms_gloas: u64,
+        sync_contribution_due_ms: u64,
+        sync_contribution_due_ms_gloas: u64,
         metrics: *ValidatorMetrics,
     ) SyncCommitteeService {
         return .{
@@ -107,6 +118,11 @@ pub const SyncCommitteeService = struct {
             .sync_committee_subnet_count = sync_committee_subnet_count,
             .seconds_per_slot = seconds_per_slot,
             .genesis_time_unix_secs = genesis_time_unix_secs,
+            .gloas_fork_epoch = gloas_fork_epoch,
+            .sync_message_due_ms = sync_message_due_ms,
+            .sync_message_due_ms_gloas = sync_message_due_ms_gloas,
+            .sync_contribution_due_ms = sync_contribution_due_ms,
+            .sync_contribution_due_ms_gloas = sync_contribution_due_ms_gloas,
             .duties = std.array_list.Managed(SyncCommitteeDutyWithProofs).init(allocator),
             .duties_period = null,
             .next_duties = std.array_list.Managed(SyncCommitteeDutyWithProofs).init(allocator),
@@ -370,41 +386,56 @@ pub const SyncCommitteeService = struct {
             @memset(d.selection_proofs, null);
         }
 
-        // Get current head root from tracker (or zero if unknown).
-        const beacon_block_root: [32]u8 = if (self.header_tracker) |ht|
-            ht.getHeadInfo().block_root
-        else
-            [_]u8{0} ** 32;
-
         // Sub-slot timing per Ethereum spec:
-        //   Sync committee messages: 1/3 slot (same as attestations).
-        //   Sync committee contributions: 2/3 slot.
         const slot_duration_ns = self.seconds_per_slot * std.time.ns_per_s;
-        const one_third_ns = slot_duration_ns / 3;
-        const two_thirds_ns = slot_duration_ns * 2 / 3;
 
         // Ethereum slot timing is based on Unix wall-clock time, so this uses
         // `std.Io.Clock.real` through the shared validator time helper.
         const genesis_time_ns = self.genesis_time_unix_secs * std.time.ns_per_s;
         const slot_start_ns = genesis_time_ns + slot * slot_duration_ns;
 
-        // Step 1: sign and submit sync committee messages (~1/3 slot).
-        {
-            const now_ns = time.realNanoseconds(io);
-            if (now_ns < slot_start_ns + one_third_ns) {
-                try io.sleep(.{ .nanoseconds = @intCast(slot_start_ns + one_third_ns - now_ns) }, .real);
-            }
+        // Step 1: sign and submit sync committee messages once the head block arrives
+        // or the sync-message due time elapses, whichever comes first.
+        const sync_message_due_ns = slot_start_ns + self.syncMessageDueMs(slot) * std.time.ns_per_ms;
+        if (self.header_tracker) |tracker| {
+            tracker.waitForHeadSlotOrDeadline(slot, sync_message_due_ns);
         }
+        const now_ns = time.realNanoseconds(io);
+        if (now_ns < sync_message_due_ns) {
+            try io.sleep(.{ .nanoseconds = @intCast(sync_message_due_ns - now_ns) }, .real);
+        }
+
+        // Snapshot the head root only after waiting for block arrival or the
+        // due instant so sync messages and contributions use the actual slot head.
+        const beacon_block_root: [32]u8 = if (self.header_tracker) |ht|
+            ht.getHeadInfo().block_root
+        else
+            [_]u8{0} ** 32;
         try self.produceAndPublishMessages(io, slot, &beacon_block_root);
 
-        // Step 2: produce contributions for subcommittees we aggregate (~2/3 slot).
-        {
-            const now_ns = time.realNanoseconds(io);
-            if (now_ns < slot_start_ns + two_thirds_ns) {
-                try io.sleep(.{ .nanoseconds = @intCast(slot_start_ns + two_thirds_ns - now_ns) }, .real);
-            }
+        // Step 2: produce contributions at the configured contribution due time.
+        const contribution_due_ns = slot_start_ns + self.syncContributionDueMs(slot) * std.time.ns_per_ms;
+        const contribution_now_ns = time.realNanoseconds(io);
+        if (contribution_now_ns < contribution_due_ns) {
+            try io.sleep(.{ .nanoseconds = @intCast(contribution_due_ns - contribution_now_ns) }, .real);
         }
         try self.produceAndPublishContributions(io, slot, &beacon_block_root);
+    }
+
+    fn syncMessageDueMs(self: *const SyncCommitteeService, slot: u64) u64 {
+        const epoch = slot / self.slots_per_epoch;
+        return if (epoch >= self.gloas_fork_epoch)
+            self.sync_message_due_ms_gloas
+        else
+            self.sync_message_due_ms;
+    }
+
+    fn syncContributionDueMs(self: *const SyncCommitteeService, slot: u64) u64 {
+        const epoch = slot / self.slots_per_epoch;
+        return if (epoch >= self.gloas_fork_epoch)
+            self.sync_contribution_due_ms_gloas
+        else
+            self.sync_contribution_due_ms;
     }
 
     fn produceAndPublishMessages(

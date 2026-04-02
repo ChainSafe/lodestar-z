@@ -43,8 +43,8 @@ pub const AttesterDuty = struct {
 /// Attester duty with selection proof (for aggregation).
 pub const AttesterDutyWithProof = struct {
     duty: AttesterDuty,
-    /// BLS signature over the slot — proves the validator is allowed to aggregate.
-    /// Null until computed.
+    /// BLS signature over the slot for validators that are actually selected as
+    /// aggregators for this committee and slot. Null for non-aggregators.
     selection_proof: ?[96]u8,
 };
 
@@ -167,6 +167,24 @@ pub const ValidatorConfig = struct {
     /// Electra fork epoch (EIP-7549). Attestation format changes at this epoch.
     /// Default: maxInt(u64) = Electra not scheduled.
     electra_fork_epoch: u64 = std.math.maxInt(u64),
+    /// Gloas fork epoch. Attestation and sync due times change at/after this fork.
+    gloas_fork_epoch: u64 = std.math.maxInt(u64),
+    /// Attestation production deadline in milliseconds from slot start pre-Gloas.
+    attestation_due_ms: u64 = 4_000,
+    /// Attestation production deadline in milliseconds from slot start at/after Gloas.
+    attestation_due_ms_gloas: u64 = 3_000,
+    /// Aggregate production deadline in milliseconds from slot start pre-Gloas.
+    aggregate_due_ms: u64 = 8_000,
+    /// Aggregate production deadline in milliseconds from slot start at/after Gloas.
+    aggregate_due_ms_gloas: u64 = 6_000,
+    /// Sync message deadline in milliseconds from slot start pre-Gloas.
+    sync_message_due_ms: u64 = 4_000,
+    /// Sync message deadline in milliseconds from slot start at/after Gloas.
+    sync_message_due_ms_gloas: u64 = 3_000,
+    /// Sync contribution deadline in milliseconds from slot start pre-Gloas.
+    sync_contribution_due_ms: u64 = 8_000,
+    /// Sync contribution deadline in milliseconds from slot start at/after Gloas.
+    sync_contribution_due_ms_gloas: u64 = 6_000,
     /// Whether doppelganger protection is enabled.
     doppelganger_protection: bool = true,
     /// Path to slashing protection DB file (null = in-memory only).

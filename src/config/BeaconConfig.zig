@@ -297,6 +297,27 @@ pub fn getAttestationDueMs(self: *const BeaconConfig, fork: ForkSeq) u64 {
     return self.getSlotComponentDurationMs(self.chain.ATTESTATION_DUE_BPS);
 }
 
+pub fn getAggregateDueMs(self: *const BeaconConfig, fork: ForkSeq) u64 {
+    if (fork.gte(.gloas)) {
+        return self.getSlotComponentDurationMs(self.chain.AGGREGATE_DUE_BPS_GLOAS);
+    }
+    return self.getSlotComponentDurationMs(self.chain.AGGREGATE_DUE_BPS);
+}
+
+pub fn getSyncMessageDueMs(self: *const BeaconConfig, fork: ForkSeq) u64 {
+    if (fork.gte(.gloas)) {
+        return self.getSlotComponentDurationMs(self.chain.SYNC_MESSAGE_DUE_BPS_GLOAS);
+    }
+    return self.getSlotComponentDurationMs(self.chain.SYNC_MESSAGE_DUE_BPS);
+}
+
+pub fn getSyncContributionDueMs(self: *const BeaconConfig, fork: ForkSeq) u64 {
+    if (fork.gte(.gloas)) {
+        return self.getSlotComponentDurationMs(self.chain.CONTRIBUTION_DUE_BPS_GLOAS);
+    }
+    return self.getSlotComponentDurationMs(self.chain.CONTRIBUTION_DUE_BPS);
+}
+
 /// Compute the signature domain for a message.
 ///
 /// - `state_slot` is the slot of the state used for verification.

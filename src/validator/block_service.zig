@@ -172,8 +172,9 @@ pub const BlockService = struct {
 
     /// Called at each slot to check for a block proposal duty.
     ///
-    /// TS: BlockDutiesService first notifies from cache, then refreshes duties,
-    /// then notifies any newly discovered proposers for the same slot.
+    /// The proposer-duty cache is refreshed at startup, on epoch boundaries, and
+    /// on runtime validator-set changes. Slot processing only falls back to an
+    /// inline refresh when the cache is stale for the current epoch.
     pub fn onSlot(self: *BlockService, io: Io, slot: u64) void {
         self.maybePropose(io, slot);
     }
@@ -275,22 +276,20 @@ pub const BlockService = struct {
     // -----------------------------------------------------------------------
 
     fn maybePropose(self: *BlockService, io: Io, slot: u64) void {
-        // Notify from cached duties first so block production can start immediately.
-        self.proposeCachedDutiesAtSlot(io, slot);
-
-        // Then refresh proposer duties for the current epoch and notify again.
-        // Produced markers prevent double-proposal of duties that were already handled.
         const epoch = slot / self.slots_per_epoch;
-        self.refreshDuties(io, epoch) catch |err| {
-            log.warn("refreshDuties slot={d} epoch={d} error={s}", .{ slot, epoch, @errorName(err) });
-            if (self.isLastSlotOfEpoch(slot)) {
-                self.prefetchNextEpochDuties(io, epoch + 1);
-            }
-            return;
-        };
+        if (self.duties_epoch == null or self.duties_epoch.? != epoch) {
+            self.refreshDuties(io, epoch) catch |err| {
+                log.warn("refreshDuties slot={d} epoch={d} error={s}", .{ slot, epoch, @errorName(err) });
+                if (self.isLastSlotOfEpoch(slot) and (self.next_duties_epoch == null or self.next_duties_epoch.? != epoch + 1)) {
+                    self.prefetchNextEpochDuties(io, epoch + 1);
+                }
+                return;
+            };
+        }
+
         self.proposeCachedDutiesAtSlot(io, slot);
 
-        if (self.isLastSlotOfEpoch(slot)) {
+        if (self.isLastSlotOfEpoch(slot) and (self.next_duties_epoch == null or self.next_duties_epoch.? != epoch + 1)) {
             self.prefetchNextEpochDuties(io, epoch + 1);
         }
     }
@@ -325,7 +324,7 @@ pub const BlockService = struct {
             .executiononly, .executionalways => {
                 if (source != .engine) return error.UnsupportedBuilderSelection;
             },
-            .@"default", .maxprofit => {},
+            .default, .maxprofit => {},
         }
     }
 

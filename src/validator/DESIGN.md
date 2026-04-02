@@ -72,10 +72,11 @@ Current gaps:
 
 6. Beacon-node config verification now checks a much wider consensus-critical
    subset of `/eth/v1/config/spec`, including genesis, fork versions/epochs,
-   slot timing, proposer/attestation timing cutoffs, churn, deposit contract,
-   blob-sidecar limits, and core preset values. It still does not reach full
-   Lodestar-TS-style parity for every critical parameter, especially where
-   different clients omit fields or expose less structured values.
+   slot timing, proposer/attestation/aggregate/sync timing cutoffs, churn,
+   deposit contract, blob-sidecar limits, and core preset values. It still
+   does not reach full Lodestar-TS-style parity for every critical parameter,
+   especially where different clients omit fields or expose less structured
+   values.
 
 7. Validator persistence is intentionally simpler than Lodestar TS.
    Slashing protection uses an append-only file, and validator metadata
@@ -262,7 +263,7 @@ SlotClock fires slot callback
 | `SyncCommitteeDutiesService`| (merged into `SyncCommitteeService`)      |
 | `DoppelgangerService`       | `doppelganger.DoppelgangerService`        |
 | `IndicesService`            | (merged into `ValidatorStore.allIndices`) |
-| `ChainHeaderTracker`        | (TODO: chain_header_tracker.zig)          |
+| `ChainHeaderTracker`        | `chain_header_tracker.ChainHeaderTracker` |
 | `ISlashingProtection`       | `SlashingProtectionRecord` (in-process)   |
 | `BLSSecretKey` / `SignerLocal` | `bls.SecretKey`                        |
 | `PubkeyHex`                 | `[48]u8` (raw bytes)                      |
@@ -294,11 +295,11 @@ Zig uses:
 
 ### 3. Callbacks vs Async Loops
 
-TypeScript: `clock.runEverySlot(fn)` registers an async function that runs in a separate Promise chain.
+TypeScript: `clock.runEverySlot(fn)` registers async slot/epoch work that fans out into service tasks.
 
-Zig: Same concept — `SlotClock.onSlot(cb)` / `onEpoch(cb)` registers callbacks. The `run()` loop fires them synchronously at each boundary.
+Zig: Same concept — `SlotClock.onSlot(cb)` / `onEpoch(cb)` registers coherent runtime phases. The validator runtime then fans those phases out through `std.Io.Group.concurrent`, so sync-status gating, index resolution, and long-running duty work are ordered explicitly instead of hiding behind detached threads.
 
-For sub-slot timing (1/3, 2/3), services will need to spawn background tasks using `io.background.async()` — not yet wired (stub uses synchronous calls).
+For sub-slot timing, attestation and sync duties now wait until either the configured due instant or the slot head block arrives, whichever happens first. `ChainHeaderTracker` provides the head cache plus event-driven wakeups for those waits.
 
 ### 4. Signing API
 
@@ -324,7 +325,7 @@ Checks liveness via `/eth/v1/validator/liveness/{epoch}` for DEFAULT_REMAINING_D
 1. **No class hierarchy** — flat structs, no `extends` / `implements`.
 2. **Explicit memory management** — `allocator` everywhere, `deinit()` / `destroy()` required.
 3. **No closures** — callbacks use `*anyopaque` context pointers.
-4. **Synchronous-first clock** — no concurrent promise chains; sub-slot timing still needs `io.background.async()` or an equivalent task primitive.
+4. **Explicit runtime phases** — slot and epoch work run through explicit `std.Io` task groups rather than detached promise chains or per-tick OS threads.
 5. **BLS API** — `SecretKey.sign(msg, dst, aug)` vs `secretKey.sign(msg)`.
 6. **Pubkeys as raw bytes** — `[48]u8` vs hex strings (PubkeyHex in TS).
 7. **Remote signer support is present but narrower** — current Web3Signer support fetches keys from one signer and signs by duty type; TS supports a broader signer-loading matrix.
@@ -348,10 +349,8 @@ Checks liveness via `/eth/v1/validator/liveness/{epoch}` for DEFAULT_REMAINING_D
 
 ## Next Steps (Not Scaffolded)
 
-1. **chain_header_tracker.zig** — SSE head event subscription + head root cache.
-2. **compute_signing_root()** — domain computation for all signing operations.
-3. **HTTP client implementation** — wire BeaconApiClient to real HTTP requests using std.Io.net.
-4. **Sub-slot timing** — use `io.background.async()` for 1/3 and 2/3 slot waits.
-5. **Full beacon config critical-params verification** — extend the startup comparison beyond the currently parsed subset.
-6. **Keymanager API** — runtime key import/delete, auth, and proposer-config persistence.
-7. **Metrics and monitoring** — Prometheus endpoint and remote monitoring reporter.
+1. **Distributed-validator mode** — `--distributed` is still rejected because the validator does not yet implement the distributed aggregation-selection / duty-coordination semantics Lodestar expects there.
+2. **Portable remote monitoring** — validator host/process stats still assume Linux `/proc` and `statvfs("/")`.
+3. **Broader beacon config verification parity** — the `/eth/v1/config/spec` comparison is much wider now, but still not exhaustive across every consensus-critical field and client-specific response shape.
+4. **Beacon API failover polish** — request-scoped failover is deadline-bounded and parallel on the validator hot path, but the client still does not run fully general multi-round races with Lodestar-style route-scoped metrics.
+5. **Keymanager monitoring split** — the keymanager surface has dedicated auth/metrics/error handling now, but still does not have a separate remote monitoring pipeline beyond local Prometheus metrics.

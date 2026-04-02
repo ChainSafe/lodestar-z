@@ -45,6 +45,15 @@ const log = std.log.scoped(.attestation_service);
 /// Target aggregators per committee (from consensus spec).
 const TARGET_AGGREGATORS_PER_COMMITTEE: u64 = 16;
 
+fn isAttestationAggregator(selection_proof: [96]u8, committee_length: u64) bool {
+    const modulo = @max(@as(u64, 1), committee_length / TARGET_AGGREGATORS_PER_COMMITTEE);
+    const Sha256 = std.crypto.hash.sha2.Sha256;
+    var sel_hash: [32]u8 = undefined;
+    Sha256.hash(&selection_proof, &sel_hash, .{});
+    const hash_val = std.mem.readInt(u64, sel_hash[0..8], .little);
+    return hash_val % modulo == 0;
+}
+
 // ---------------------------------------------------------------------------
 // AttestationService
 // ---------------------------------------------------------------------------
@@ -60,6 +69,12 @@ pub const AttestationService = struct {
     /// Electra fork epoch — attestation format changes at this epoch (EIP-7549).
     /// Set to maxInt(u64) if Electra is not scheduled.
     electra_fork_epoch: u64,
+    /// Gloas fork epoch — attestation and aggregate timing changes at/after this fork.
+    gloas_fork_epoch: u64,
+    attestation_due_ms: u64,
+    attestation_due_ms_gloas: u64,
+    aggregate_due_ms: u64,
+    aggregate_due_ms_gloas: u64,
 
     /// Duties indexed by slot (rolling window across epochs).
     duties: std.array_list.Managed(AttesterDutyWithProof),
@@ -93,6 +108,11 @@ pub const AttestationService = struct {
         seconds_per_slot: u64,
         genesis_time_unix_secs: u64,
         electra_fork_epoch: u64,
+        gloas_fork_epoch: u64,
+        attestation_due_ms: u64,
+        attestation_due_ms_gloas: u64,
+        aggregate_due_ms: u64,
+        aggregate_due_ms_gloas: u64,
         metrics: *ValidatorMetrics,
     ) AttestationService {
         return .{
@@ -103,6 +123,11 @@ pub const AttestationService = struct {
             .seconds_per_slot = seconds_per_slot,
             .genesis_time_unix_secs = genesis_time_unix_secs,
             .electra_fork_epoch = electra_fork_epoch,
+            .gloas_fork_epoch = gloas_fork_epoch,
+            .attestation_due_ms = attestation_due_ms,
+            .attestation_due_ms_gloas = attestation_due_ms_gloas,
+            .aggregate_due_ms = aggregate_due_ms,
+            .aggregate_due_ms_gloas = aggregate_due_ms_gloas,
             .duties = std.array_list.Managed(AttesterDutyWithProof).init(allocator),
             .duties_epoch = null,
             .next_duties = std.array_list.Managed(AttesterDutyWithProof).init(allocator),
@@ -179,12 +204,9 @@ pub const AttestationService = struct {
         self.last_previous_dependent_root = info.previous_duty_dependent_root;
         self.last_current_dependent_root = info.current_duty_dependent_root;
 
-        // We don't have an io handle here (head callbacks are sync, called from SSE reader).
-        // Flag that duties need refresh; they will be re-fetched on the next slot callback.
-        // An alternative would be to fire an async task if io is stored; for now we clear
-        // cached duties so they get re-fetched at the next onEpoch/onSlot boundary.
-        //
-        // TS: AttestationDutiesService immediately re-fetches via pollBeaconAttesters.
+        // Head callbacks are synchronous, so do not do HTTP work here. Instead,
+        // invalidate the current-epoch cache so the next slot boundary refreshes
+        // attester duties before producing anything for that slot.
         self.duties_epoch = null; // invalidate cache → forces refresh on next onEpoch
         log.warn("attester duties cache invalidated due to reorg", .{});
     }
@@ -222,6 +244,17 @@ pub const AttestationService = struct {
 
     /// Called at each slot to produce and publish attestations + aggregates.
     pub fn onSlot(self: *AttestationService, io: Io, slot: u64) void {
+        const epoch = slot / self.signing_ctx.slots_per_epoch;
+        if (self.duties_epoch == null or self.duties_epoch.? != epoch) {
+            self.refreshDuties(io, epoch) catch |err| {
+                log.warn("refreshDuties slot={d} epoch={d} error={s}", .{ slot, epoch, @errorName(err) });
+                return;
+            };
+            if (self.next_duties_epoch == null or self.next_duties_epoch.? != epoch + 1) {
+                self.prefetchNextEpochDuties(io, epoch + 1);
+            }
+        }
+
         self.runAttestationTasks(io, slot) catch |err| {
             log.err("runAttestationTasks slot={d} error={s}", .{ slot, @errorName(err) });
         };
@@ -274,9 +307,17 @@ pub const AttestationService = struct {
             var sel_root: [32]u8 = undefined;
             signing_mod.attestationSelectionProofSigningRoot(self.signing_ctx, duty.slot, &sel_root) catch |err| {
                 log.warn("selection proof signing root error: {s}", .{@errorName(err)});
+                try self.duties.append(.{
+                    .duty = duty,
+                    .selection_proof = null,
+                });
+                continue;
             };
             if (self.validator_store.signSelectionProof(io, duty.pubkey, sel_root, .AGGREGATION_SLOT)) |sig| {
-                sel_proof = sig.compress();
+                const proof = sig.compress();
+                if (isAttestationAggregator(proof, duty.committee_length)) {
+                    sel_proof = proof;
+                }
             } else |_| {}
 
             try self.duties.append(.{
@@ -310,9 +351,16 @@ pub const AttestationService = struct {
         for (fetched) |duty| {
             var sel_proof: ?[96]u8 = null;
             var sel_root: [32]u8 = undefined;
-            signing_mod.attestationSelectionProofSigningRoot(self.signing_ctx, duty.slot, &sel_root) catch {};
+            signing_mod.attestationSelectionProofSigningRoot(self.signing_ctx, duty.slot, &sel_root) catch |err| {
+                log.warn("prefetch selection proof signing root error: {s}", .{@errorName(err)});
+                self.next_duties.append(.{ .duty = duty, .selection_proof = null }) catch {};
+                continue;
+            };
             if (self.validator_store.signSelectionProof(io, duty.pubkey, sel_root, .AGGREGATION_SLOT)) |sig| {
-                sel_proof = sig.compress();
+                const proof = sig.compress();
+                if (isAttestationAggregator(proof, duty.committee_length)) {
+                    sel_proof = proof;
+                }
             } else |_| {}
             self.next_duties.append(.{ .duty = duty, .selection_proof = sel_proof }) catch {};
         }
@@ -352,42 +400,51 @@ pub const AttestationService = struct {
         const duties_at_slot = self.allDuties();
         if (duties_at_slot.len == 0) return;
 
-        // Sub-slot timing per Ethereum spec:
-        //   Attestations at 1/3 slot (seconds_per_slot / 3 seconds in).
-        //   Aggregates at 2/3 slot (seconds_per_slot * 2 / 3 seconds in).
-        const slot_duration_ns = self.seconds_per_slot * std.time.ns_per_s;
-        const one_third_ns = slot_duration_ns / 3;
-        const two_thirds_ns = slot_duration_ns * 2 / 3;
-
         // Sub-slot timing: compute absolute slot start relative to genesis.
         // slot_start_ns = (genesis_time_unix_secs + slot * seconds_per_slot) * ns_per_s
         //
         // Ethereum slot timing is based on Unix wall-clock time, so this uses
         // `std.Io.Clock.real` through the shared validator time helper.
+        const slot_duration_ns = self.seconds_per_slot * std.time.ns_per_s;
         const genesis_time_ns = self.genesis_time_unix_secs * std.time.ns_per_s;
         const slot_start_ns = genesis_time_ns + slot * slot_duration_ns;
-        {
-            const now_ns = time.realNanoseconds(io);
-            if (now_ns < slot_start_ns + one_third_ns) {
-                const wait_ns = slot_start_ns + one_third_ns - now_ns;
-                try io.sleep(.{ .nanoseconds = @intCast(wait_ns) }, .real);
-            }
+        const attestation_due_ns = slot_start_ns + self.attestationDueMs(slot) * std.time.ns_per_ms;
+        if (self.header_tracker) |tracker| {
+            tracker.waitForHeadSlotOrDeadline(slot, attestation_due_ns);
+        }
+        const now_ns = time.realNanoseconds(io);
+        if (now_ns < attestation_due_ns) {
+            try io.sleep(.{ .nanoseconds = @intCast(attestation_due_ns - now_ns) }, .real);
         }
 
-        // Step 1: produce and publish attestations (~1/3 slot).
+        // Step 1: produce and publish attestations (block arrival or attestation due time, whichever first).
         const att_data_root = try self.produceAndPublishAttestations(io, slot, duties_at_slot);
 
-        // Sleep until 2/3 slot for aggregation.
-        {
-            const now_ns = time.realNanoseconds(io);
-            if (now_ns < slot_start_ns + two_thirds_ns) {
-                const wait_ns = slot_start_ns + two_thirds_ns - now_ns;
-                try io.sleep(.{ .nanoseconds = @intCast(wait_ns) }, .real);
-            }
+        // Step 2 runs at the aggregate due time for the active fork.
+        const aggregate_due_ns = slot_start_ns + self.aggregateDueMs(slot) * std.time.ns_per_ms;
+        const aggregate_now_ns = time.realNanoseconds(io);
+        if (aggregate_now_ns < aggregate_due_ns) {
+            try io.sleep(.{ .nanoseconds = @intCast(aggregate_due_ns - aggregate_now_ns) }, .real);
         }
 
-        // Step 2: produce and publish aggregates (~2/3 slot).
+        // Step 2: produce and publish aggregates at the configured aggregate due time.
         try self.produceAndPublishAggregates(io, slot, duties_at_slot, att_data_root);
+    }
+
+    fn attestationDueMs(self: *const AttestationService, slot: u64) u64 {
+        const epoch = slot / self.signing_ctx.slots_per_epoch;
+        return if (epoch >= self.gloas_fork_epoch)
+            self.attestation_due_ms_gloas
+        else
+            self.attestation_due_ms;
+    }
+
+    fn aggregateDueMs(self: *const AttestationService, slot: u64) u64 {
+        const epoch = slot / self.signing_ctx.slots_per_epoch;
+        return if (epoch >= self.gloas_fork_epoch)
+            self.aggregate_due_ms_gloas
+        else
+            self.aggregate_due_ms;
     }
 
     fn allDuties(self: *const AttestationService) []const AttesterDutyWithProof {
@@ -648,17 +705,6 @@ pub const AttestationService = struct {
             // Only aggregate if we have a selection proof and are eligible.
             const sel_proof = dp.selection_proof orelse continue;
 
-            // Aggregation eligibility check per consensus spec:
-            //   is_aggregator = (SHA256(sel_proof)[0:8] as little-endian u64)
-            //                   % max(1, committee_size / TARGET_AGGREGATORS_PER_COMMITTEE) == 0
-            const committee_size = dp.duty.committee_length;
-            const modulo = @max(1, committee_size / TARGET_AGGREGATORS_PER_COMMITTEE);
-            const Sha256 = std.crypto.hash.sha2.Sha256;
-            var sel_hash: [32]u8 = undefined;
-            Sha256.hash(&sel_proof, &sel_hash, .{});
-            const hash_val = std.mem.readInt(u64, sel_hash[0..8], .little);
-            if (hash_val % modulo != 0) continue; // not selected as aggregator this slot
-
             log.debug("selected as aggregator slot={d} validator_index={d}", .{ slot, dp.duty.validator_index });
 
             // Safety check before aggregate signing.
@@ -917,3 +963,8 @@ pub const AttestationService = struct {
         return result;
     }
 };
+
+test "isAttestationAggregator matches spec modulus edge case" {
+    const proof = [_]u8{0} ** 96;
+    try std.testing.expect(isAttestationAggregator(proof, 1));
+}

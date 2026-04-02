@@ -378,6 +378,15 @@ pub fn prepareRuntime(io: Io, allocator: Allocator, opts: anytype) !PreparedRunt
             .sync_committee_size = preset.SYNC_COMMITTEE_SIZE,
             .sync_committee_subnet_count = constants.SYNC_COMMITTEE_SUBNET_COUNT,
             .electra_fork_epoch = beacon_config.chain.ELECTRA_FORK_EPOCH,
+            .gloas_fork_epoch = beacon_config.chain.GLOAS_FORK_EPOCH,
+            .attestation_due_ms = beacon_config.getSlotComponentDurationMs(beacon_config.chain.ATTESTATION_DUE_BPS),
+            .attestation_due_ms_gloas = beacon_config.getSlotComponentDurationMs(beacon_config.chain.ATTESTATION_DUE_BPS_GLOAS),
+            .aggregate_due_ms = beacon_config.getSlotComponentDurationMs(beacon_config.chain.AGGREGATE_DUE_BPS),
+            .aggregate_due_ms_gloas = beacon_config.getSlotComponentDurationMs(beacon_config.chain.AGGREGATE_DUE_BPS_GLOAS),
+            .sync_message_due_ms = beacon_config.getSlotComponentDurationMs(beacon_config.chain.SYNC_MESSAGE_DUE_BPS),
+            .sync_message_due_ms_gloas = beacon_config.getSlotComponentDurationMs(beacon_config.chain.SYNC_MESSAGE_DUE_BPS_GLOAS),
+            .sync_contribution_due_ms = beacon_config.getSlotComponentDurationMs(beacon_config.chain.CONTRIBUTION_DUE_BPS),
+            .sync_contribution_due_ms_gloas = beacon_config.getSlotComponentDurationMs(beacon_config.chain.CONTRIBUTION_DUE_BPS_GLOAS),
             .doppelganger_protection = opts.doppelgangerProtection,
             .slashing_protection_path = paths.slashing_protection_db,
             .external_signer_urls = external_signer_urls,
@@ -888,6 +897,12 @@ fn ensureConfigSpecMatches(
     try compareOptionalUintField("PROPOSER_REORG_CUTOFF_BPS", beacon_config.chain.PROPOSER_REORG_CUTOFF_BPS, spec.proposer_reorg_cutoff_bps);
     try compareOptionalUintField("ATTESTATION_DUE_BPS", beacon_config.chain.ATTESTATION_DUE_BPS, spec.attestation_due_bps);
     try compareOptionalUintField("ATTESTATION_DUE_BPS_GLOAS", beacon_config.chain.ATTESTATION_DUE_BPS_GLOAS, spec.attestation_due_bps_gloas);
+    try compareOptionalUintField("AGGREGATE_DUE_BPS", beacon_config.chain.AGGREGATE_DUE_BPS, spec.aggregate_due_bps);
+    try compareOptionalUintField("AGGREGATE_DUE_BPS_GLOAS", beacon_config.chain.AGGREGATE_DUE_BPS_GLOAS, spec.aggregate_due_bps_gloas);
+    try compareOptionalUintField("SYNC_MESSAGE_DUE_BPS", beacon_config.chain.SYNC_MESSAGE_DUE_BPS, spec.sync_message_due_bps);
+    try compareOptionalUintField("SYNC_MESSAGE_DUE_BPS_GLOAS", beacon_config.chain.SYNC_MESSAGE_DUE_BPS_GLOAS, spec.sync_message_due_bps_gloas);
+    try compareOptionalUintField("CONTRIBUTION_DUE_BPS", beacon_config.chain.CONTRIBUTION_DUE_BPS, spec.contribution_due_bps);
+    try compareOptionalUintField("CONTRIBUTION_DUE_BPS_GLOAS", beacon_config.chain.CONTRIBUTION_DUE_BPS_GLOAS, spec.contribution_due_bps_gloas);
     try compareOptionalUintField("BLOB_SIDECAR_SUBNET_COUNT", beacon_config.chain.BLOB_SIDECAR_SUBNET_COUNT, spec.blob_sidecar_subnet_count);
     try compareOptionalUintField("MAX_COMMITTEES_PER_SLOT", preset.MAX_COMMITTEES_PER_SLOT, spec.max_committees_per_slot);
     try compareOptionalUintField("TARGET_COMMITTEE_SIZE", preset.TARGET_COMMITTEE_SIZE, spec.target_committee_size);

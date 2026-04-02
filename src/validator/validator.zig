@@ -220,7 +220,7 @@ pub const ValidatorClient = struct {
         );
         errdefer self.validator_store.deinit();
 
-        self.header_tracker = ChainHeaderTracker.init(allocator, &self.api);
+        self.header_tracker = ChainHeaderTracker.init(allocator, io, &self.api);
         self.block_service = BlockService.init(
             allocator,
             &self.api,
@@ -242,6 +242,11 @@ pub const ValidatorClient = struct {
             config.seconds_per_slot,
             config.genesis_time,
             config.electra_fork_epoch,
+            config.gloas_fork_epoch,
+            config.attestation_due_ms,
+            config.attestation_due_ms_gloas,
+            config.aggregate_due_ms,
+            config.aggregate_due_ms_gloas,
             self.metrics,
         );
         errdefer self.attestation_service.deinit();
@@ -256,6 +261,11 @@ pub const ValidatorClient = struct {
             config.sync_committee_subnet_count,
             config.seconds_per_slot,
             config.genesis_time,
+            config.gloas_fork_epoch,
+            config.sync_message_due_ms,
+            config.sync_message_due_ms_gloas,
+            config.sync_contribution_due_ms,
+            config.sync_contribution_due_ms_gloas,
             self.metrics,
         );
         errdefer self.sync_committee_service.deinit();
@@ -773,6 +783,7 @@ pub const ValidatorClient = struct {
             log.warn("startup index resolution failed: {s} — will retry on first epoch", .{@errorName(err)});
         };
         self.applyResolvedIndices();
+        self.refreshCurrentEpochDuties(self.io);
 
         // Doppelganger startup: if enabled, validators start as Unverified and cannot sign.
         // The doppelganger service checks liveness each epoch and promotes to VerifiedSafe

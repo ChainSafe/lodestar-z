@@ -22,6 +22,7 @@ const BeaconApiClient = api_client.BeaconApiClient;
 const SseEvent = api_client.SseEvent;
 const SseCallback = api_client.SseCallback;
 const mutex_mod = @import("mutex.zig");
+const time = @import("time.zig");
 
 const log = std.log.scoped(.chain_header_tracker);
 
@@ -68,8 +69,15 @@ const MAX_HEAD_CALLBACKS: usize = 8;
 pub const ChainHeaderTracker = struct {
     const reconnect_backoff_initial_ns = std.time.ns_per_s;
     const reconnect_backoff_max_ns = 30 * std.time.ns_per_s;
+    const MAX_HEAD_WAITERS: usize = 8;
+
+    const HeadWaiter = struct {
+        slot: u64,
+        ready: *Io.Event,
+    };
 
     allocator: Allocator,
+    io: Io,
     api: *BeaconApiClient,
     shutdown_requested: std.atomic.Value(bool),
 
@@ -80,10 +88,13 @@ pub const ChainHeaderTracker = struct {
     /// Registered head callbacks.
     head_callbacks: [MAX_HEAD_CALLBACKS]HeadCallback,
     head_callback_count: usize,
+    head_waiters: [MAX_HEAD_WAITERS]HeadWaiter,
+    head_waiter_count: usize,
 
-    pub fn init(allocator: Allocator, api: *BeaconApiClient) ChainHeaderTracker {
+    pub fn init(allocator: Allocator, io: Io, api: *BeaconApiClient) ChainHeaderTracker {
         return .{
             .allocator = allocator,
+            .io = io,
             .api = api,
             .shutdown_requested = std.atomic.Value(bool).init(false),
             .mu = .{},
@@ -96,6 +107,8 @@ pub const ChainHeaderTracker = struct {
             },
             .head_callbacks = undefined,
             .head_callback_count = 0,
+            .head_waiters = undefined,
+            .head_waiter_count = 0,
         };
     }
 
@@ -113,8 +126,39 @@ pub const ChainHeaderTracker = struct {
         return self.head;
     }
 
+    pub fn hasHeadForSlot(self: *ChainHeaderTracker, slot: u64) bool {
+        return self.getHeadInfo().slot >= slot;
+    }
+
+    pub fn waitForHeadSlotOrDeadline(self: *ChainHeaderTracker, slot: u64, deadline_real_ns: u64) void {
+        if (self.shutdown_requested.load(.acquire)) return;
+        if (time.realNanoseconds(self.io) >= deadline_real_ns) return;
+
+        var ready: Io.Event = .unset;
+        if (self.registerHeadWaiter(slot, &ready)) return;
+        defer self.unregisterHeadWaiter(&ready);
+
+        var events_buf: [2]HeadWaitEvent = undefined;
+        var select = Io.Select(HeadWaitEvent).init(self.io, &events_buf);
+        errdefer while (select.cancel()) |_| {};
+
+        select.async(.head, waitHeadEvent, .{ self.io, &ready });
+        select.async(.deadline, waitHeadDeadline, .{ self.io, deadline_real_ns });
+
+        _ = select.await() catch return;
+        while (select.cancel()) |_| {}
+    }
+
     pub fn requestShutdown(self: *ChainHeaderTracker) void {
         self.shutdown_requested.store(true, .release);
+
+        self.mu.lock();
+        defer self.mu.unlock();
+
+        for (self.head_waiters[0..self.head_waiter_count]) |waiter| {
+            waiter.ready.set(self.io);
+        }
+        self.head_waiter_count = 0;
     }
 
     /// Start subscribing to BN SSE events.
@@ -283,9 +327,56 @@ pub const ChainHeaderTracker = struct {
     fn applyHeadInfo(self: *ChainHeaderTracker, info: HeadInfo) void {
         self.mu.lock();
         self.head = info;
+        self.signalSatisfiedWaitersLocked();
         self.mu.unlock();
 
         self.notifyHeadCallbacks(info);
+    }
+
+    fn registerHeadWaiter(self: *ChainHeaderTracker, slot: u64, ready: *Io.Event) bool {
+        self.mu.lock();
+        defer self.mu.unlock();
+
+        if (self.shutdown_requested.load(.acquire) or self.head.slot >= slot) {
+            return true;
+        }
+
+        std.debug.assert(self.head_waiter_count < MAX_HEAD_WAITERS);
+        self.head_waiters[self.head_waiter_count] = .{
+            .slot = slot,
+            .ready = ready,
+        };
+        self.head_waiter_count += 1;
+        return false;
+    }
+
+    fn unregisterHeadWaiter(self: *ChainHeaderTracker, ready: *Io.Event) void {
+        self.mu.lock();
+        defer self.mu.unlock();
+
+        var i: usize = 0;
+        while (i < self.head_waiter_count) : (i += 1) {
+            if (self.head_waiters[i].ready == ready) {
+                self.head_waiter_count -= 1;
+                self.head_waiters[i] = self.head_waiters[self.head_waiter_count];
+                return;
+            }
+        }
+    }
+
+    fn signalSatisfiedWaitersLocked(self: *ChainHeaderTracker) void {
+        var i: usize = 0;
+        while (i < self.head_waiter_count) {
+            const waiter = self.head_waiters[i];
+            if (self.head.slot < waiter.slot) {
+                i += 1;
+                continue;
+            }
+
+            waiter.ready.set(self.io);
+            self.head_waiter_count -= 1;
+            self.head_waiters[i] = self.head_waiters[self.head_waiter_count];
+        }
     }
 
     fn notifyHeadCallbacks(self: *ChainHeaderTracker, info: HeadInfo) void {
@@ -294,6 +385,21 @@ pub const ChainHeaderTracker = struct {
         }
     }
 };
+
+const HeadWaitEvent = union(enum) {
+    head: void,
+    deadline: void,
+};
+
+fn waitHeadEvent(io: Io, ready: *Io.Event) void {
+    ready.wait(io) catch {};
+}
+
+fn waitHeadDeadline(io: Io, deadline_real_ns: u64) void {
+    const now_ns = time.realNanoseconds(io);
+    if (now_ns >= deadline_real_ns) return;
+    io.sleep(.{ .nanoseconds = @intCast(deadline_real_ns - now_ns) }, .real) catch {};
+}
 
 // ---------------------------------------------------------------------------
 // JSON event shapes (minimal fields we care about)

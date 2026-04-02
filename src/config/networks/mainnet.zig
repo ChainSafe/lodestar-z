@@ -63,7 +63,13 @@ pub const chain_config = ChainConfig{
 
     // Timing (basis points)
     .ATTESTATION_DUE_BPS = 3333,
+    .AGGREGATE_DUE_BPS = 6667,
+    .SYNC_MESSAGE_DUE_BPS = 3333,
+    .CONTRIBUTION_DUE_BPS = 6667,
     .ATTESTATION_DUE_BPS_GLOAS = 2500,
+    .AGGREGATE_DUE_BPS_GLOAS = 5000,
+    .SYNC_MESSAGE_DUE_BPS_GLOAS = 2500,
+    .CONTRIBUTION_DUE_BPS_GLOAS = 5000,
 
     // Deposit contract
     .DEPOSIT_CHAIN_ID = 1,
