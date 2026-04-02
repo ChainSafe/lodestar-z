@@ -34,7 +34,6 @@ const syncing_tracker_mod = @import("syncing_tracker.zig");
 const SyncingTracker = syncing_tracker_mod.SyncingTracker;
 const liveness_mod = @import("liveness.zig");
 const LivenessTracker = liveness_mod.LivenessTracker;
-const mutex_mod = @import("mutex.zig");
 const time = @import("time.zig");
 const ValidatorMetrics = @import("metrics.zig").ValidatorMetrics;
 
@@ -74,6 +73,7 @@ fn appendUniqueSubnetRepresentative(
 
 pub const SyncCommitteeService = struct {
     allocator: Allocator,
+    io: Io,
     api: *BeaconApiClient,
     validator_store: *ValidatorStore,
     /// Optional chain header tracker for head root queries.
@@ -98,7 +98,7 @@ pub const SyncCommitteeService = struct {
 
     /// Protects sync-duty caches from concurrent runtime key changes and
     /// period refresh/prefetch swaps.
-    cache_mutex: mutex_mod.Mutex,
+    cache_mutex: std.Io.Mutex,
     /// Duties keyed by validator index (valid for the current sync period).
     duties: std.array_list.Managed(SyncCommitteeDuty),
     /// Sync period for which duties are cached.
@@ -115,6 +115,7 @@ pub const SyncCommitteeService = struct {
     metrics: *ValidatorMetrics,
 
     pub fn init(
+        io: Io,
         allocator: Allocator,
         api: *BeaconApiClient,
         validator_store: *ValidatorStore,
@@ -134,6 +135,7 @@ pub const SyncCommitteeService = struct {
     ) SyncCommitteeService {
         return .{
             .allocator = allocator,
+            .io = io,
             .api = api,
             .validator_store = validator_store,
             .header_tracker = null,
@@ -149,7 +151,7 @@ pub const SyncCommitteeService = struct {
             .sync_message_due_ms_gloas = sync_message_due_ms_gloas,
             .sync_contribution_due_ms = sync_contribution_due_ms,
             .sync_contribution_due_ms_gloas = sync_contribution_due_ms_gloas,
-            .cache_mutex = .{},
+            .cache_mutex = .init,
             .duties = std.array_list.Managed(SyncCommitteeDuty).init(allocator),
             .duties_period = null,
             .next_duties = std.array_list.Managed(SyncCommitteeDuty).init(allocator),
@@ -188,8 +190,8 @@ pub const SyncCommitteeService = struct {
     }
 
     pub fn deinit(self: *SyncCommitteeService) void {
-        self.cache_mutex.lock();
-        defer self.cache_mutex.unlock();
+        self.cache_mutex.lockUncancelable(self.io);
+        defer self.cache_mutex.unlock(self.io);
         self.clearDutyList(&self.duties);
         self.duties.deinit();
         self.clearDutyList(&self.next_duties);
@@ -248,8 +250,8 @@ pub const SyncCommitteeService = struct {
     /// This mirrors Lodestar's runtime duty cleanup so validator removals take
     /// effect immediately instead of waiting for the next period refresh.
     pub fn removeDutiesForKey(self: *SyncCommitteeService, pubkey: [48]u8) void {
-        self.cache_mutex.lock();
-        defer self.cache_mutex.unlock();
+        self.cache_mutex.lockUncancelable(self.io);
+        defer self.cache_mutex.unlock(self.io);
 
         var i: usize = 0;
         while (i < self.duties.items.len) {
@@ -453,8 +455,8 @@ pub const SyncCommitteeService = struct {
     }
 
     fn periodHasDuties(self: *SyncCommitteeService, period: u64) bool {
-        self.cache_mutex.lock();
-        defer self.cache_mutex.unlock();
+        self.cache_mutex.lockUncancelable(self.io);
+        defer self.cache_mutex.unlock(self.io);
 
         if (self.duties_period != null and self.duties_period.? == period) return true;
         if (self.next_duties_period != null and self.next_duties_period.? == period) return true;
@@ -463,8 +465,8 @@ pub const SyncCommitteeService = struct {
 
     fn snapshotDutiesForSlot(self: *SyncCommitteeService, slot: u64) ![]SyncCommitteeDuty {
         const period = self.syncPeriodForSlot(slot);
-        self.cache_mutex.lock();
-        defer self.cache_mutex.unlock();
+        self.cache_mutex.lockUncancelable(self.io);
+        defer self.cache_mutex.unlock(self.io);
 
         const source = blk: {
             if (self.duties_period != null and self.duties_period.? == period) break :blk self.duties.items;
@@ -724,8 +726,8 @@ pub const SyncCommitteeService = struct {
         period: u64,
         duties: std.array_list.Managed(SyncCommitteeDuty),
     ) void {
-        self.cache_mutex.lock();
-        defer self.cache_mutex.unlock();
+        self.cache_mutex.lockUncancelable(self.io);
+        defer self.cache_mutex.unlock(self.io);
 
         var old = self.duties;
         self.duties = duties;
@@ -739,8 +741,8 @@ pub const SyncCommitteeService = struct {
         period: u64,
         duties: std.array_list.Managed(SyncCommitteeDuty),
     ) void {
-        self.cache_mutex.lock();
-        defer self.cache_mutex.unlock();
+        self.cache_mutex.lockUncancelable(self.io);
+        defer self.cache_mutex.unlock(self.io);
 
         var old = self.next_duties;
         self.next_duties = duties;
@@ -750,8 +752,8 @@ pub const SyncCommitteeService = struct {
     }
 
     fn activatePrefetchedPeriod(self: *SyncCommitteeService, period: u64) bool {
-        self.cache_mutex.lock();
-        defer self.cache_mutex.unlock();
+        self.cache_mutex.lockUncancelable(self.io);
+        defer self.cache_mutex.unlock(self.io);
 
         if (self.next_duties_period == null or self.next_duties_period.? != period) return false;
 
@@ -798,6 +800,7 @@ pub const SyncCommitteeService = struct {
 
 test "syncPeriodForSlot uses slot plus one offset at period boundary" {
     var service = SyncCommitteeService.init(
+        std.testing.io,
         std.testing.allocator,
         undefined,
         undefined,
@@ -834,6 +837,7 @@ test "shouldPublishSyncSubscriptions only within lookahead window" {
 
 test "cacheDutyList deduplicates multiple committee positions in the same subnet" {
     var service = SyncCommitteeService.init(
+        std.testing.io,
         std.testing.allocator,
         undefined,
         undefined,

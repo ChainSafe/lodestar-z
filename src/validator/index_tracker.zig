@@ -19,7 +19,6 @@ const Io = std.Io;
 
 const api_client = @import("api_client.zig");
 const BeaconApiClient = api_client.BeaconApiClient;
-const mutex_mod = @import("mutex.zig");
 const validator_types = @import("types.zig");
 const ValidatorStatus = validator_types.ValidatorStatus;
 
@@ -48,22 +47,24 @@ pub const ResolvedIndexEntry = struct {
 
 pub const IndexTracker = struct {
     allocator: Allocator,
+    io: Io,
     api: *BeaconApiClient,
     /// All tracked entries.
     entries: std.array_list.Managed(IndexEntry),
     /// Mutex for thread-safe access from multiple services.
-    mutex: mutex_mod.Mutex,
+    mutex: std.Io.Mutex,
 
     // -----------------------------------------------------------------------
     // Init / deinit
     // -----------------------------------------------------------------------
 
-    pub fn init(allocator: Allocator, api: *BeaconApiClient) IndexTracker {
+    pub fn init(allocator: Allocator, io: Io, api: *BeaconApiClient) IndexTracker {
         return .{
             .allocator = allocator,
+            .io = io,
             .api = api,
             .entries = std.array_list.Managed(IndexEntry).init(allocator),
-            .mutex = .{},
+            .mutex = .init,
         };
     }
 
@@ -81,8 +82,8 @@ pub const IndexTracker = struct {
     ///
     /// TS: IndicesService.pollValidatorIndices adds newly discovered keys
     pub fn trackPubkey(self: *IndexTracker, pubkey: [48]u8) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
 
         for (self.entries.items) |e| {
             if (std.mem.eql(u8, &e.pubkey, &pubkey)) return;
@@ -99,8 +100,8 @@ pub const IndexTracker = struct {
 
     /// Remove a pubkey from tracking (e.g. key deleted via keymanager API).
     pub fn untrackPubkey(self: *IndexTracker, pubkey: [48]u8) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
 
         for (self.entries.items, 0..) |e, i| {
             if (std.mem.eql(u8, &e.pubkey, &pubkey)) {
@@ -122,8 +123,8 @@ pub const IndexTracker = struct {
     ///
     /// TS: indicesService.getValidatorIndex(pubkeyHex)
     pub fn getIndex(self: *IndexTracker, pubkey: [48]u8) ?u64 {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
 
         for (self.entries.items) |e| {
             if (std.mem.eql(u8, &e.pubkey, &pubkey)) return e.index;
@@ -132,8 +133,8 @@ pub const IndexTracker = struct {
     }
 
     pub fn allResolvedEntries(self: *IndexTracker, allocator: Allocator) ![]ResolvedIndexEntry {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
 
         var count: usize = 0;
         for (self.entries.items) |entry| {
@@ -171,8 +172,8 @@ pub const IndexTracker = struct {
         // Snapshot all tracked pubkeys so runtime key add/remove does not race
         // the outbound BN request.
         var tracked = blk: {
-            self.mutex.lock();
-            defer self.mutex.unlock();
+            self.mutex.lockUncancelable(self.io);
+            defer self.mutex.unlock(self.io);
 
             var list = std.array_list.Managed([48]u8).init(self.allocator);
             errdefer list.deinit();
@@ -197,8 +198,8 @@ pub const IndexTracker = struct {
         var updated_count: usize = 0;
 
         // Apply refreshed indices and statuses under lock.
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
 
         for (results) |r| {
             for (self.entries.items) |*e| {
@@ -252,7 +253,7 @@ test "IndexTracker: trackPubkey and getIndex" {
     var api = try BeaconApiClient.init(testing.allocator, testing.io, "http://localhost:5052");
     defer api.deinit();
 
-    var tracker = IndexTracker.init(testing.allocator, &api);
+    var tracker = IndexTracker.init(testing.allocator, testing.io, &api);
     defer tracker.deinit();
 
     const pk = [_]u8{0x01} ** 48;
@@ -266,7 +267,7 @@ test "IndexTracker: untrackPubkey" {
     var api = try BeaconApiClient.init(testing.allocator, testing.io, "http://localhost:5052");
     defer api.deinit();
 
-    var tracker = IndexTracker.init(testing.allocator, &api);
+    var tracker = IndexTracker.init(testing.allocator, testing.io, &api);
     defer tracker.deinit();
 
     const pk = [_]u8{0x02} ** 48;
@@ -282,7 +283,7 @@ test "IndexTracker: duplicate trackPubkey is idempotent" {
     var api = try BeaconApiClient.init(testing.allocator, testing.io, "http://localhost:5052");
     defer api.deinit();
 
-    var tracker = IndexTracker.init(testing.allocator, &api);
+    var tracker = IndexTracker.init(testing.allocator, testing.io, &api);
     defer tracker.deinit();
 
     const pk = [_]u8{0x03} ** 48;

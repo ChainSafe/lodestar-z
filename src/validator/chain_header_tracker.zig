@@ -21,7 +21,6 @@ const api_client = @import("api_client.zig");
 const BeaconApiClient = api_client.BeaconApiClient;
 const SseEvent = api_client.SseEvent;
 const SseCallback = api_client.SseCallback;
-const mutex_mod = @import("mutex.zig");
 const time = @import("time.zig");
 
 const log = std.log.scoped(.chain_header_tracker);
@@ -82,7 +81,7 @@ pub const ChainHeaderTracker = struct {
     shutdown_requested: std.atomic.Value(bool),
 
     /// Current head info (protected by mutex for concurrent access).
-    mu: mutex_mod.Mutex,
+    mu: std.Io.Mutex,
     head: HeadInfo,
 
     /// Registered head callbacks.
@@ -97,7 +96,7 @@ pub const ChainHeaderTracker = struct {
             .io = io,
             .api = api,
             .shutdown_requested = std.atomic.Value(bool).init(false),
-            .mu = .{},
+            .mu = .init,
             .head = .{
                 .slot = 0,
                 .block_root = [_]u8{0} ** 32,
@@ -121,8 +120,8 @@ pub const ChainHeaderTracker = struct {
 
     /// Return the current head info (thread-safe snapshot).
     pub fn getHeadInfo(self: *ChainHeaderTracker) HeadInfo {
-        self.mu.lock();
-        defer self.mu.unlock();
+        self.mu.lockUncancelable(self.io);
+        defer self.mu.unlock(self.io);
         return self.head;
     }
 
@@ -152,8 +151,8 @@ pub const ChainHeaderTracker = struct {
     pub fn requestShutdown(self: *ChainHeaderTracker) void {
         self.shutdown_requested.store(true, .release);
 
-        self.mu.lock();
-        defer self.mu.unlock();
+        self.mu.lockUncancelable(self.io);
+        defer self.mu.unlock(self.io);
 
         for (self.head_waiters[0..self.head_waiter_count]) |waiter| {
             waiter.ready.set(self.io);
@@ -300,10 +299,10 @@ pub const ChainHeaderTracker = struct {
             return;
         };
 
-        self.mu.lock();
+        self.mu.lockUncancelable(self.io);
         self.head.finalized_epoch = epoch;
         const snapshot = self.head;
-        self.mu.unlock();
+        self.mu.unlock(self.io);
 
         self.notifyHeadCallbacks(snapshot);
 
@@ -325,17 +324,17 @@ pub const ChainHeaderTracker = struct {
     }
 
     fn applyHeadInfo(self: *ChainHeaderTracker, info: HeadInfo) void {
-        self.mu.lock();
+        self.mu.lockUncancelable(self.io);
         self.head = info;
         self.signalSatisfiedWaitersLocked();
-        self.mu.unlock();
+        self.mu.unlock(self.io);
 
         self.notifyHeadCallbacks(info);
     }
 
     fn registerHeadWaiter(self: *ChainHeaderTracker, slot: u64, ready: *Io.Event) bool {
-        self.mu.lock();
-        defer self.mu.unlock();
+        self.mu.lockUncancelable(self.io);
+        defer self.mu.unlock(self.io);
 
         if (self.shutdown_requested.load(.acquire) or self.head.slot >= slot) {
             return true;
@@ -351,8 +350,8 @@ pub const ChainHeaderTracker = struct {
     }
 
     fn unregisterHeadWaiter(self: *ChainHeaderTracker, ready: *Io.Event) void {
-        self.mu.lock();
-        defer self.mu.unlock();
+        self.mu.lockUncancelable(self.io);
+        defer self.mu.unlock(self.io);
 
         var i: usize = 0;
         while (i < self.head_waiter_count) : (i += 1) {

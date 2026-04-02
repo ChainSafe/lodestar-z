@@ -81,7 +81,6 @@ const ValidatorMetrics = @import("metrics.zig").ValidatorMetrics;
 
 const fs = @import("fs.zig");
 const interchange_mod = @import("interchange.zig");
-const mutex_mod = @import("mutex.zig");
 const time = @import("time.zig");
 const state_transition = @import("state_transition");
 
@@ -152,7 +151,7 @@ pub const ValidatorClient = struct {
     /// Local keystore ownership locks held for the process lifetime.
     local_keystore_locks: std.array_list.Managed(KeystoreLock),
     /// Serializes runtime keymanager mutations and remote-signer sync updates.
-    runtime_mutex: mutex_mod.Mutex,
+    runtime_mutex: std.Io.Mutex,
 
     // ---------------------------------------------------------------------------
     // Lifecycle
@@ -196,7 +195,7 @@ pub const ValidatorClient = struct {
         self.remote_signer_sync_task = null;
         self.doppelganger_task = null;
         self.local_keystore_locks = std.array_list.Managed(KeystoreLock).init(allocator);
-        self.runtime_mutex = .{};
+        self.runtime_mutex = .init;
 
         self.api = try BeaconApiClient.initWithOptions(allocator, io, .{
             .base_url = config.beacon_node_url,
@@ -222,6 +221,7 @@ pub const ValidatorClient = struct {
 
         self.header_tracker = ChainHeaderTracker.init(allocator, io, &self.api);
         self.block_service = BlockService.init(
+            io,
             allocator,
             &self.api,
             &self.validator_store,
@@ -235,6 +235,7 @@ pub const ValidatorClient = struct {
         );
         errdefer self.block_service.deinit();
         self.attestation_service = AttestationService.init(
+            io,
             allocator,
             &self.api,
             &self.validator_store,
@@ -251,6 +252,7 @@ pub const ValidatorClient = struct {
         );
         errdefer self.attestation_service.deinit();
         self.sync_committee_service = SyncCommitteeService.init(
+            io,
             allocator,
             &self.api,
             &self.validator_store,
@@ -287,14 +289,14 @@ pub const ValidatorClient = struct {
         errdefer if (self.builder_registration) |*builder_registration| builder_registration.deinit();
 
         self.doppelganger = if (config.doppelganger_protection)
-            DoppelgangerService.init(allocator, &self.api, self.metrics, &self.validator_store.slashing_db)
+            DoppelgangerService.init(allocator, io, &self.api, self.metrics, &self.validator_store.slashing_db)
         else
             null;
         errdefer if (self.doppelganger) |*doppelganger| doppelganger.deinit();
 
-        self.index_tracker = IndexTracker.init(allocator, &self.api);
+        self.index_tracker = IndexTracker.init(allocator, io, &self.api);
         errdefer self.index_tracker.deinit();
-        self.liveness_tracker = LivenessTracker.init(allocator);
+        self.liveness_tracker = LivenessTracker.init(allocator, io);
         errdefer self.liveness_tracker.deinit();
         self.syncing_tracker = SyncingTracker.init(&self.api, self.metrics);
 
@@ -484,8 +486,8 @@ pub const ValidatorClient = struct {
     }
 
     pub fn addLocalKeyRuntime(self: *ValidatorClient, secret_key: bls.SecretKey, lock: ?KeystoreLock) !void {
-        self.runtime_mutex.lock();
-        defer self.runtime_mutex.unlock();
+        self.runtime_mutex.lockUncancelable(self.io);
+        defer self.runtime_mutex.unlock(self.io);
 
         try self.validator_store.addKey(secret_key);
         try self.registerValidatorTracking(secret_key.toPublicKey().compress());
@@ -497,8 +499,8 @@ pub const ValidatorClient = struct {
     }
 
     pub fn addRemoteKeyRuntime(self: *ValidatorClient, pubkey: [48]u8, url: []const u8) !void {
-        self.runtime_mutex.lock();
-        defer self.runtime_mutex.unlock();
+        self.runtime_mutex.lockUncancelable(self.io);
+        defer self.runtime_mutex.unlock(self.io);
 
         const signer = try self.ensureRemoteSigner(url);
         try self.validator_store.addRemotePubkey(pubkey, signer);
@@ -508,8 +510,8 @@ pub const ValidatorClient = struct {
     }
 
     pub fn removeValidatorRuntime(self: *ValidatorClient, pubkey: [48]u8) ?store_mod.SignerKind {
-        self.runtime_mutex.lock();
-        defer self.runtime_mutex.unlock();
+        self.runtime_mutex.lockUncancelable(self.io);
+        defer self.runtime_mutex.unlock(self.io);
 
         const signer_kind = self.validator_store.signerKind(pubkey) orelse return null;
         if (!self.validator_store.removeValidator(pubkey)) return null;
@@ -637,8 +639,8 @@ pub const ValidatorClient = struct {
     }
 
     fn syncRemoteSignerKeys(self: *ValidatorClient, io: Io) !void {
-        self.runtime_mutex.lock();
-        defer self.runtime_mutex.unlock();
+        self.runtime_mutex.lockUncancelable(self.io);
+        defer self.runtime_mutex.unlock(self.io);
 
         if (self.remote_signers.items.len == 0) return;
 

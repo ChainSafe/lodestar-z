@@ -37,7 +37,6 @@ const syncing_tracker_mod = @import("syncing_tracker.zig");
 const SyncingTracker = syncing_tracker_mod.SyncingTracker;
 const liveness_mod = @import("liveness.zig");
 const LivenessTracker = liveness_mod.LivenessTracker;
-const mutex_mod = @import("mutex.zig");
 const time = @import("time.zig");
 const ValidatorMetrics = @import("metrics.zig").ValidatorMetrics;
 
@@ -64,6 +63,7 @@ fn isAttestationAggregator(selection_proof: [96]u8, committee_length: u64) bool 
 
 pub const AttestationService = struct {
     allocator: Allocator,
+    io: Io,
     api: *BeaconApiClient,
     validator_store: *ValidatorStore,
     signing_ctx: SigningContext,
@@ -82,7 +82,7 @@ pub const AttestationService = struct {
 
     /// Protects duty caches and dependent-root invalidation state shared across
     /// the slot clock, epoch clock, and chain-head SSE callback paths.
-    cache_mutex: mutex_mod.Mutex,
+    cache_mutex: std.Io.Mutex,
     /// Duties indexed by slot (rolling window across epochs).
     duties: std.array_list.Managed(AttesterDutyWithProof),
     /// Epoch for which duties are currently cached.
@@ -114,6 +114,7 @@ pub const AttestationService = struct {
     metrics: *ValidatorMetrics,
 
     pub fn init(
+        io: Io,
         allocator: Allocator,
         api: *BeaconApiClient,
         validator_store: *ValidatorStore,
@@ -130,6 +131,7 @@ pub const AttestationService = struct {
     ) AttestationService {
         return .{
             .allocator = allocator,
+            .io = io,
             .api = api,
             .validator_store = validator_store,
             .signing_ctx = signing_ctx,
@@ -141,7 +143,7 @@ pub const AttestationService = struct {
             .attestation_due_ms_gloas = attestation_due_ms_gloas,
             .aggregate_due_ms = aggregate_due_ms,
             .aggregate_due_ms_gloas = aggregate_due_ms_gloas,
-            .cache_mutex = .{},
+            .cache_mutex = .init,
             .duties = std.array_list.Managed(AttesterDutyWithProof).init(allocator),
             .duties_epoch = null,
             .next_duties = std.array_list.Managed(AttesterDutyWithProof).init(allocator),
@@ -185,8 +187,8 @@ pub const AttestationService = struct {
     }
 
     pub fn deinit(self: *AttestationService) void {
-        self.cache_mutex.lock();
-        defer self.cache_mutex.unlock();
+        self.cache_mutex.lockUncancelable(self.io);
+        defer self.cache_mutex.unlock(self.io);
         self.duties.deinit();
         self.next_duties.deinit();
     }
@@ -209,8 +211,8 @@ pub const AttestationService = struct {
     fn onHeadChange(ctx: *anyopaque, info: HeadInfo) void {
         const self: *AttestationService = @ptrCast(@alignCast(ctx));
 
-        self.cache_mutex.lock();
-        defer self.cache_mutex.unlock();
+        self.cache_mutex.lockUncancelable(self.io);
+        defer self.cache_mutex.unlock(self.io);
 
         const prev_changed = !std.mem.eql(u8, &self.last_previous_dependent_root, &info.previous_duty_dependent_root);
         const curr_changed = !std.mem.eql(u8, &self.last_current_dependent_root, &info.current_duty_dependent_root);
@@ -291,8 +293,8 @@ pub const AttestationService = struct {
     /// Lodestar drops duties immediately on validator removal; do the same here so
     /// stale cached duties do not survive until the next epoch refresh.
     pub fn removeDutiesForKey(self: *AttestationService, pubkey: [48]u8) void {
-        self.cache_mutex.lock();
-        defer self.cache_mutex.unlock();
+        self.cache_mutex.lockUncancelable(self.io);
+        defer self.cache_mutex.unlock(self.io);
 
         var i: usize = 0;
         while (i < self.duties.items.len) {
@@ -532,8 +534,8 @@ pub const AttestationService = struct {
     fn snapshotCurrentDutiesForSlot(self: *AttestationService, slot: u64) ![]AttesterDutyWithProof {
         const epoch = slot / self.signing_ctx.slots_per_epoch;
 
-        self.cache_mutex.lock();
-        defer self.cache_mutex.unlock();
+        self.cache_mutex.lockUncancelable(self.io);
+        defer self.cache_mutex.unlock(self.io);
 
         if (self.duties_epoch == null or self.duties_epoch.? != epoch) {
             return self.allocator.alloc(AttesterDutyWithProof, 0);
@@ -564,26 +566,26 @@ pub const AttestationService = struct {
     }
 
     fn hasCurrentEpochDuties(self: *AttestationService, epoch: u64) bool {
-        self.cache_mutex.lock();
-        defer self.cache_mutex.unlock();
+        self.cache_mutex.lockUncancelable(self.io);
+        defer self.cache_mutex.unlock(self.io);
         return self.duties_epoch != null and self.duties_epoch.? == epoch;
     }
 
     fn hasNextEpochDuties(self: *AttestationService, epoch: u64) bool {
-        self.cache_mutex.lock();
-        defer self.cache_mutex.unlock();
+        self.cache_mutex.lockUncancelable(self.io);
+        defer self.cache_mutex.unlock(self.io);
         return self.next_duties_epoch != null and self.next_duties_epoch.? == epoch;
     }
 
     fn currentDutiesRevision(self: *AttestationService) u64 {
-        self.cache_mutex.lock();
-        defer self.cache_mutex.unlock();
+        self.cache_mutex.lockUncancelable(self.io);
+        defer self.cache_mutex.unlock(self.io);
         return self.current_duties_revision;
     }
 
     fn nextDutiesRevision(self: *AttestationService) u64 {
-        self.cache_mutex.lock();
-        defer self.cache_mutex.unlock();
+        self.cache_mutex.lockUncancelable(self.io);
+        defer self.cache_mutex.unlock(self.io);
         return self.next_duties_revision;
     }
 
@@ -593,8 +595,8 @@ pub const AttestationService = struct {
         revision: u64,
         duties: *std.array_list.Managed(AttesterDutyWithProof),
     ) bool {
-        self.cache_mutex.lock();
-        defer self.cache_mutex.unlock();
+        self.cache_mutex.lockUncancelable(self.io);
+        defer self.cache_mutex.unlock(self.io);
 
         if (self.current_duties_revision != revision) return false;
 
@@ -612,8 +614,8 @@ pub const AttestationService = struct {
         revision: u64,
         duties: *std.array_list.Managed(AttesterDutyWithProof),
     ) bool {
-        self.cache_mutex.lock();
-        defer self.cache_mutex.unlock();
+        self.cache_mutex.lockUncancelable(self.io);
+        defer self.cache_mutex.unlock(self.io);
 
         if (self.next_duties_revision != revision) return false;
 
@@ -629,8 +631,8 @@ pub const AttestationService = struct {
         self: *AttestationService,
         epoch: u64,
     ) ?[]BeaconCommitteeSubscription {
-        self.cache_mutex.lock();
-        defer self.cache_mutex.unlock();
+        self.cache_mutex.lockUncancelable(self.io);
+        defer self.cache_mutex.unlock(self.io);
 
         if (self.next_duties_epoch == null or self.next_duties_epoch.? != epoch) return null;
 
@@ -1187,6 +1189,7 @@ fn testMetrics() *ValidatorMetrics {
 
 fn testAttestationService() AttestationService {
     return AttestationService.init(
+        std.testing.io,
         std.testing.allocator,
         undefined,
         undefined,

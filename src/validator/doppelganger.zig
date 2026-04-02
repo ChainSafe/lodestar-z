@@ -23,7 +23,6 @@ const BeaconApiClient = api_client.BeaconApiClient;
 const ValidatorLiveness = api_client.ValidatorLiveness;
 const ValidatorMetrics = @import("metrics.zig").ValidatorMetrics;
 const SlashingProtectionDb = @import("slashing_protection_db.zig").SlashingProtectionDb;
-const mutex_mod = @import("mutex.zig");
 
 const log = std.log.scoped(.doppelganger);
 
@@ -79,10 +78,11 @@ pub const ShutdownCallback = struct {
 
 pub const DoppelgangerService = struct {
     allocator: Allocator,
+    io: Io,
     api: *BeaconApiClient,
     metrics: *ValidatorMetrics,
     slashing_db: *const SlashingProtectionDb,
-    mutex: mutex_mod.Mutex,
+    mutex: std.Io.Mutex,
     /// Per-validator entries.
     entries: std.array_list.Managed(DoppelgangerEntry),
     /// Optional shutdown callback — called on doppelganger detection.
@@ -90,16 +90,18 @@ pub const DoppelgangerService = struct {
 
     pub fn init(
         allocator: Allocator,
+        io: Io,
         api: *BeaconApiClient,
         metrics: *ValidatorMetrics,
         slashing_db: *const SlashingProtectionDb,
     ) DoppelgangerService {
         var service: DoppelgangerService = .{
             .allocator = allocator,
+            .io = io,
             .api = api,
             .metrics = metrics,
             .slashing_db = slashing_db,
-            .mutex = .{},
+            .mutex = .init,
             .entries = std.array_list.Managed(DoppelgangerEntry).init(allocator),
             .shutdown_callback = null,
         };
@@ -126,8 +128,8 @@ pub const DoppelgangerService = struct {
     ///
     /// TS: DoppelgangerService.registerValidator(pubkeyHex)
     pub fn registerValidator(self: *DoppelgangerService, current_epoch: u64, pubkey: [48]u8) !void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
 
         // Check for duplicate.
         for (self.entries.items) |e| {
@@ -175,8 +177,8 @@ pub const DoppelgangerService = struct {
 
     /// Remove a validator from doppelganger monitoring.
     pub fn unregisterValidator(self: *DoppelgangerService, pubkey: [48]u8) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
 
         for (self.entries.items, 0..) |e, i| {
             if (std.mem.eql(u8, &e.pubkey, &pubkey)) {
@@ -198,9 +200,9 @@ pub const DoppelgangerService = struct {
     ///
     /// TS: DoppelgangerService.getStatus(pubkeyHex) == VerifiedSafe
     pub fn isSigningAllowed(self: *const DoppelgangerService, pubkey: [48]u8) bool {
-        const mutex_ptr: *mutex_mod.Mutex = @constCast(&self.mutex);
-        mutex_ptr.lock();
-        defer mutex_ptr.unlock();
+        const mutex_ptr: *std.Io.Mutex = @constCast(&self.mutex);
+        mutex_ptr.lockUncancelable(self.io);
+        defer mutex_ptr.unlock(self.io);
 
         for (self.entries.items) |e| {
             if (std.mem.eql(u8, &e.pubkey, &pubkey)) {
@@ -212,9 +214,9 @@ pub const DoppelgangerService = struct {
 
     /// Returns the current status for a validator pubkey.
     pub fn getStatus(self: *const DoppelgangerService, pubkey: [48]u8) DoppelgangerStatus {
-        const mutex_ptr: *mutex_mod.Mutex = @constCast(&self.mutex);
-        mutex_ptr.lock();
-        defer mutex_ptr.unlock();
+        const mutex_ptr: *std.Io.Mutex = @constCast(&self.mutex);
+        mutex_ptr.lockUncancelable(self.io);
+        defer mutex_ptr.unlock(self.io);
 
         for (self.entries.items) |e| {
             if (std.mem.eql(u8, &e.pubkey, &pubkey)) return e.state.status;
@@ -223,8 +225,8 @@ pub const DoppelgangerService = struct {
     }
 
     pub fn updateIndex(self: *DoppelgangerService, pubkey: [48]u8, index: ?u64) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
 
         for (self.entries.items) |*entry| {
             if (!std.mem.eql(u8, &entry.pubkey, &pubkey)) continue;
@@ -295,8 +297,8 @@ pub const DoppelgangerService = struct {
         };
         defer self.allocator.free(results);
 
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
 
         for (results) |r| {
             for (self.entries.items) |*e| {
@@ -315,8 +317,8 @@ pub const DoppelgangerService = struct {
         var unknown: u64 = 0;
         var detected: u64 = 0;
 
-        const mutex_ptr: *mutex_mod.Mutex = @constCast(&self.mutex);
-        mutex_ptr.lock();
+        const mutex_ptr: *std.Io.Mutex = @constCast(&self.mutex);
+        mutex_ptr.lockUncancelable(self.io);
         for (self.entries.items) |entry| {
             switch (entry.state.status) {
                 .verified_safe => verified_safe += 1,
@@ -325,7 +327,7 @@ pub const DoppelgangerService = struct {
                 .doppelganger_detected => detected += 1,
             }
         }
-        mutex_ptr.unlock();
+        mutex_ptr.unlock(self.io);
 
         self.metrics.setDoppelgangerStatusCount("VerifiedSafe", verified_safe);
         self.metrics.setDoppelgangerStatusCount("Unverified", unverified);
@@ -334,9 +336,9 @@ pub const DoppelgangerService = struct {
     }
 
     fn hasUnresolvedEntries(self: *const DoppelgangerService) bool {
-        const mutex_ptr: *mutex_mod.Mutex = @constCast(&self.mutex);
-        mutex_ptr.lock();
-        defer mutex_ptr.unlock();
+        const mutex_ptr: *std.Io.Mutex = @constCast(&self.mutex);
+        mutex_ptr.lockUncancelable(self.io);
+        defer mutex_ptr.unlock(self.io);
 
         for (self.entries.items) |e| {
             if (e.state.status == .unverified and e.state.remaining_epochs > 0 and e.index == null) {
@@ -350,9 +352,9 @@ pub const DoppelgangerService = struct {
         self: *const DoppelgangerService,
         out: *std.array_list.Managed([48]u8),
     ) !void {
-        const mutex_ptr: *mutex_mod.Mutex = @constCast(&self.mutex);
-        mutex_ptr.lock();
-        defer mutex_ptr.unlock();
+        const mutex_ptr: *std.Io.Mutex = @constCast(&self.mutex);
+        mutex_ptr.lockUncancelable(self.io);
+        defer mutex_ptr.unlock(self.io);
 
         for (self.entries.items) |e| {
             if (e.index == null and e.state.status == .unverified and e.state.remaining_epochs > 0) {
@@ -366,9 +368,9 @@ pub const DoppelgangerService = struct {
         out: *std.array_list.Managed(u64),
         current_epoch: u64,
     ) !void {
-        const mutex_ptr: *mutex_mod.Mutex = @constCast(&self.mutex);
-        mutex_ptr.lock();
-        defer mutex_ptr.unlock();
+        const mutex_ptr: *std.Io.Mutex = @constCast(&self.mutex);
+        mutex_ptr.lockUncancelable(self.io);
+        defer mutex_ptr.unlock(self.io);
 
         for (self.entries.items) |e| {
             if (e.state.status == .unverified and e.state.remaining_epochs > 0 and e.state.next_epoch_to_check <= current_epoch) {
@@ -386,8 +388,8 @@ pub const DoppelgangerService = struct {
         previous_liveness: []const ValidatorLiveness,
         current_liveness: []const ValidatorLiveness,
     ) ?ShutdownCallback {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
 
         var detected = false;
         for (previous_liveness) |live| {
@@ -492,7 +494,7 @@ test "registerValidator skips doppelganger detection before or at genesis" {
     defer api.deinit();
 
     var metrics = ValidatorMetrics.initNoop();
-    var service = DoppelgangerService.init(testing.allocator, &api, &metrics, &db);
+    var service = DoppelgangerService.init(testing.allocator, testing.io, &api, &metrics, &db);
     defer service.deinit();
 
     const pubkey = [_]u8{0x11} ** 48;
@@ -513,7 +515,7 @@ test "registerValidator skips doppelganger detection after restart attestation" 
     defer api.deinit();
 
     var metrics = ValidatorMetrics.initNoop();
-    var service = DoppelgangerService.init(testing.allocator, &api, &metrics, &db);
+    var service = DoppelgangerService.init(testing.allocator, testing.io, &api, &metrics, &db);
     defer service.deinit();
 
     try service.registerValidator(3, pubkey);
@@ -532,7 +534,7 @@ test "doppelganger metrics export status counts" {
     var metrics = try ValidatorMetrics.init(testing.allocator);
     defer metrics.deinit();
 
-    var service = DoppelgangerService.init(testing.allocator, &api, &metrics, &db);
+    var service = DoppelgangerService.init(testing.allocator, testing.io, &api, &metrics, &db);
     defer service.deinit();
 
     try service.registerValidator(1, [_]u8{0x33} ** 48);

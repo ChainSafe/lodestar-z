@@ -35,7 +35,6 @@ const RemoteSigner = remote_signer_mod.RemoteSigner;
 const SigningType = remote_signer_mod.SigningType;
 
 const Io = std.Io;
-const mutex_mod = @import("mutex.zig");
 
 const log = std.log.scoped(.validator_store);
 
@@ -92,6 +91,7 @@ pub const ValidatorStore = struct {
     };
 
     allocator: Allocator,
+    io: Io,
     validators: std.array_list.Managed(ValidatorRecord),
     /// Persistent slashing protection database.
     slashing_db: SlashingProtectionDb,
@@ -100,7 +100,7 @@ pub const ValidatorStore = struct {
     /// Per-validator proposer config overrides keyed by pubkey.
     proposer_overrides: std.AutoHashMapUnmanaged([48]u8, ProposerConfig),
     /// Mutex protecting validators list for concurrent add/remove.
-    mutex: mutex_mod.Mutex,
+    mutex: std.Io.Mutex,
     /// Initialize the ValidatorStore with an optional persistent slashing protection DB.
     ///
     /// Pass db_path = null for in-memory-only mode (tests, no persistence).
@@ -114,11 +114,12 @@ pub const ValidatorStore = struct {
         const slashing_db = try SlashingProtectionDb.init(io, allocator, db_path);
         var store = ValidatorStore{
             .allocator = allocator,
+            .io = io,
             .validators = std.array_list.Managed(ValidatorRecord).init(allocator),
             .slashing_db = slashing_db,
             .default_proposer_config = default_proposer_config,
             .proposer_overrides = .empty,
-            .mutex = .{},
+            .mutex = .init,
         };
         errdefer store.proposer_overrides.deinit(allocator);
 
@@ -139,9 +140,25 @@ pub const ValidatorStore = struct {
         self.slashing_db.close();
     }
 
+    fn lock(self: *ValidatorStore) void {
+        self.mutex.lockUncancelable(self.io);
+    }
+
+    fn unlock(self: *ValidatorStore) void {
+        self.mutex.unlock(self.io);
+    }
+
+    fn lockConst(self: *const ValidatorStore) void {
+        @constCast(&self.mutex).lockUncancelable(self.io);
+    }
+
+    fn unlockConst(self: *const ValidatorStore) void {
+        @constCast(&self.mutex).unlock(self.io);
+    }
+
     pub fn counts(self: *ValidatorStore) ValidatorCounts {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.lock();
+        defer self.unlock();
 
         var remote: usize = 0;
         var active: usize = 0;
@@ -159,14 +176,14 @@ pub const ValidatorStore = struct {
     }
 
     pub fn getFeeRecipient(self: *ValidatorStore, pubkey: [48]u8) [20]u8 {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.lock();
+        defer self.unlock();
         return self.effectiveProposerConfigLocked(pubkey).fee_recipient;
     }
 
     pub fn getFeeRecipientByIndex(self: *ValidatorStore, index: u64) [20]u8 {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.lock();
+        defer self.unlock();
         for (self.validators.items) |validator| {
             if (validator.index != index) continue;
             return self.effectiveProposerConfigLocked(validator.pubkey).fee_recipient;
@@ -175,32 +192,32 @@ pub const ValidatorStore = struct {
     }
 
     pub fn getGraffiti(self: *ValidatorStore, pubkey: [48]u8) [32]u8 {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.lock();
+        defer self.unlock();
         return self.effectiveProposerConfigLocked(pubkey).graffiti;
     }
 
     pub fn getGasLimit(self: *ValidatorStore, pubkey: [48]u8) u64 {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.lock();
+        defer self.unlock();
         return self.effectiveProposerConfigLocked(pubkey).gas_limit;
     }
 
     pub fn getBuilderBoostFactor(self: *ValidatorStore, pubkey: [48]u8) ?u64 {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.lock();
+        defer self.unlock();
         return self.effectiveProposerConfigLocked(pubkey).builder_boost_factor;
     }
 
     pub fn getBuilderSelection(self: *ValidatorStore, pubkey: [48]u8) BuilderSelection {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.lock();
+        defer self.unlock();
         return self.effectiveProposerConfigLocked(pubkey).builder_selection;
     }
 
     pub fn getBuilderSelectionParams(self: *ValidatorStore, pubkey: [48]u8) BuilderSelectionParams {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.lock();
+        defer self.unlock();
 
         const config = self.effectiveProposerConfigLocked(pubkey);
         return .{
@@ -217,14 +234,14 @@ pub const ValidatorStore = struct {
     }
 
     pub fn strictFeeRecipientCheck(self: *ValidatorStore, pubkey: [48]u8) bool {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.lock();
+        defer self.unlock();
         return self.effectiveProposerConfigLocked(pubkey).strict_fee_recipient_check;
     }
 
     pub fn getProposerConfig(self: *ValidatorStore, pubkey: [48]u8) ?ProposerConfig {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.lock();
+        defer self.unlock();
         return self.proposer_overrides.get(pubkey);
     }
 
@@ -233,70 +250,70 @@ pub const ValidatorStore = struct {
         pubkey: [48]u8,
         config: ?ProposerConfig,
     ) !void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.lock();
+        defer self.unlock();
         try self.putProposerConfigLocked(pubkey, config orelse ProposerConfig{});
     }
 
     pub fn setFeeRecipient(self: *ValidatorStore, pubkey: [48]u8, fee_recipient: [20]u8) !void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.lock();
+        defer self.unlock();
         var config = self.proposer_overrides.get(pubkey) orelse ProposerConfig{};
         config.fee_recipient = fee_recipient;
         try self.putProposerConfigLocked(pubkey, config);
     }
 
     pub fn deleteFeeRecipient(self: *ValidatorStore, pubkey: [48]u8) !void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.lock();
+        defer self.unlock();
         var config = self.proposer_overrides.get(pubkey) orelse return;
         config.fee_recipient = null;
         try self.putProposerConfigLocked(pubkey, config);
     }
 
     pub fn setGraffiti(self: *ValidatorStore, pubkey: [48]u8, graffiti: [32]u8) !void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.lock();
+        defer self.unlock();
         var config = self.proposer_overrides.get(pubkey) orelse ProposerConfig{};
         config.graffiti = graffiti;
         try self.putProposerConfigLocked(pubkey, config);
     }
 
     pub fn deleteGraffiti(self: *ValidatorStore, pubkey: [48]u8) !void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.lock();
+        defer self.unlock();
         var config = self.proposer_overrides.get(pubkey) orelse return;
         config.graffiti = null;
         try self.putProposerConfigLocked(pubkey, config);
     }
 
     pub fn setGasLimit(self: *ValidatorStore, pubkey: [48]u8, gas_limit: u64) !void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.lock();
+        defer self.unlock();
         var config = self.proposer_overrides.get(pubkey) orelse ProposerConfig{};
         config.gas_limit = gas_limit;
         try self.putProposerConfigLocked(pubkey, config);
     }
 
     pub fn deleteGasLimit(self: *ValidatorStore, pubkey: [48]u8) !void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.lock();
+        defer self.unlock();
         var config = self.proposer_overrides.get(pubkey) orelse return;
         config.gas_limit = null;
         try self.putProposerConfigLocked(pubkey, config);
     }
 
     pub fn setBuilderBoostFactor(self: *ValidatorStore, pubkey: [48]u8, builder_boost_factor: u64) !void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.lock();
+        defer self.unlock();
         var config = self.proposer_overrides.get(pubkey) orelse ProposerConfig{};
         config.builder_boost_factor = builder_boost_factor;
         try self.putProposerConfigLocked(pubkey, config);
     }
 
     pub fn deleteBuilderBoostFactor(self: *ValidatorStore, pubkey: [48]u8) !void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.lock();
+        defer self.unlock();
         var config = self.proposer_overrides.get(pubkey) orelse return;
         config.builder_boost_factor = null;
         try self.putProposerConfigLocked(pubkey, config);
@@ -311,8 +328,8 @@ pub const ValidatorStore = struct {
     /// No-op if the key is already present.
     /// TS: ValidatorStore.init(opts, signers, ...) — signers map to keys here.
     pub fn addKey(self: *ValidatorStore, secret_key: SecretKey) !void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.lock();
+        defer self.unlock();
         return self.addKeyLocked(secret_key);
     }
 
@@ -356,8 +373,8 @@ pub const ValidatorStore = struct {
     /// TS: ValidatorStore init with `ExternalSignerSigner` entries — pubkey tracked but
     ///     signing goes through the external signer HTTP client.
     pub fn addRemotePubkey(self: *ValidatorStore, pubkey: [48]u8, signer: *RemoteSigner) !void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.lock();
+        defer self.unlock();
 
         // Check for duplicate (remote or local).
         for (self.validators.items) |v| {
@@ -381,8 +398,8 @@ pub const ValidatorStore = struct {
 
     /// Return true if the given pubkey belongs to a remote signer.
     pub fn isRemote(self: *ValidatorStore, pubkey: [48]u8) bool {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.lock();
+        defer self.unlock();
         for (self.validators.items) |v| {
             if (std.mem.eql(u8, &v.pubkey, &pubkey)) return v.isRemote();
         }
@@ -390,8 +407,8 @@ pub const ValidatorStore = struct {
     }
 
     pub fn signerKind(self: *ValidatorStore, pubkey: [48]u8) ?SignerKind {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.lock();
+        defer self.unlock();
         for (self.validators.items) |v| {
             if (!std.mem.eql(u8, &v.pubkey, &pubkey)) continue;
             return switch (v.signer) {
@@ -409,8 +426,8 @@ pub const ValidatorStore = struct {
     ///
     /// TS: ValidatorStore.deleteKeystore(pubkey)
     pub fn removeValidator(self: *ValidatorStore, pubkey: [48]u8) bool {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.lock();
+        defer self.unlock();
 
         for (self.validators.items, 0..) |v, i| {
             if (std.mem.eql(u8, &v.pubkey, &pubkey)) {
@@ -441,8 +458,8 @@ pub const ValidatorStore = struct {
     ///
     /// TS: ValidatorStore.getLocalKeystoreInfo()
     pub fn listLocalValidators(self: *ValidatorStore, allocator: Allocator) ![]ValidatorInfo {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.lock();
+        defer self.unlock();
 
         var count: usize = 0;
         for (self.validators.items) |v| {
@@ -471,8 +488,8 @@ pub const ValidatorStore = struct {
     };
 
     pub fn listRemoteValidators(self: *ValidatorStore, allocator: Allocator) ![]RemoteValidatorInfo {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.lock();
+        defer self.unlock();
 
         var count: usize = 0;
         for (self.validators.items) |v| {
@@ -502,9 +519,8 @@ pub const ValidatorStore = struct {
         allocator: Allocator,
         signer: *const RemoteSigner,
     ) ![][48]u8 {
-        const mutex_ptr: *mutex_mod.Mutex = @constCast(&self.mutex);
-        mutex_ptr.lock();
-        defer mutex_ptr.unlock();
+        self.lockConst();
+        defer self.unlockConst();
 
         var count: usize = 0;
         for (self.validators.items) |v| {
@@ -532,9 +548,8 @@ pub const ValidatorStore = struct {
     }
 
     pub fn hasPubkey(self: *const ValidatorStore, pubkey: [48]u8) bool {
-        const mutex_ptr: *mutex_mod.Mutex = @constCast(&self.mutex);
-        mutex_ptr.lock();
-        defer mutex_ptr.unlock();
+        self.lockConst();
+        defer self.unlockConst();
 
         for (self.validators.items) |v| {
             if (std.mem.eql(u8, &v.pubkey, &pubkey)) return true;
@@ -544,9 +559,8 @@ pub const ValidatorStore = struct {
 
     /// Return all known public keys as an owned slice (caller must free).
     pub fn allPubkeys(self: *const ValidatorStore, allocator: Allocator) ![][48]u8 {
-        const mutex_ptr: *mutex_mod.Mutex = @constCast(&self.mutex);
-        mutex_ptr.lock();
-        defer mutex_ptr.unlock();
+        self.lockConst();
+        defer self.unlockConst();
 
         const result = try allocator.alloc([48]u8, self.validators.items.len);
         for (self.validators.items, result) |v, *out| {
@@ -557,9 +571,8 @@ pub const ValidatorStore = struct {
 
     /// Return all remote-only validator pubkeys as an owned slice (caller must free).
     pub fn allRemotePubkeys(self: *const ValidatorStore, allocator: Allocator) ![][48]u8 {
-        const mutex_ptr: *mutex_mod.Mutex = @constCast(&self.mutex);
-        mutex_ptr.lock();
-        defer mutex_ptr.unlock();
+        self.lockConst();
+        defer self.unlockConst();
 
         var count: usize = 0;
         for (self.validators.items) |v| {
@@ -581,8 +594,8 @@ pub const ValidatorStore = struct {
     ///
     /// TS: IndicesService.pollValidatorIndices() → validatorStore updates.
     pub fn updateIndex(self: *ValidatorStore, pubkey: [48]u8, index: u64, status: ValidatorStatus) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.lock();
+        defer self.unlock();
 
         for (self.validators.items) |*v| {
             if (std.mem.eql(u8, &v.pubkey, &pubkey)) {
@@ -599,11 +612,8 @@ pub const ValidatorStore = struct {
     /// excluded so attestation and sync-duty refreshes do not ask the BN for
     /// duties that cannot be performed.
     pub fn allIndices(self: *const ValidatorStore, allocator: Allocator) ![]u64 {
-        // Lock mutex for thread-safe access. Cast away const — mutex is logically
-        // interior-mutable and doesn't change observable ValidatorStore state.
-        const mutex_ptr: *mutex_mod.Mutex = @constCast(&self.mutex);
-        mutex_ptr.lock();
-        defer mutex_ptr.unlock();
+        self.lockConst();
+        defer self.unlockConst();
 
         var result = try allocator.alloc(u64, self.validators.items.len);
         var count: usize = 0;
@@ -635,8 +645,8 @@ pub const ValidatorStore = struct {
     ) !Signature {
         // Hold mutex for the entire check-and-sign sequence to prevent TOCTOU races
         // between the slashing protection check and the actual signing operation.
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.lock();
+        defer self.unlock();
 
         const validator = self.findValidator(pubkey) orelse return error.ValidatorNotFound;
 
@@ -663,8 +673,8 @@ pub const ValidatorStore = struct {
         pubkey: [48]u8,
         signing_root: [32]u8,
     ) !Signature {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.lock();
+        defer self.unlock();
         const validator = self.findValidator(pubkey) orelse return error.ValidatorNotFound;
         return self.signWithValidator(io, validator, pubkey, signing_root, .RANDAO_REVEAL);
     }
@@ -691,8 +701,8 @@ pub const ValidatorStore = struct {
     ) !Signature {
         // Hold mutex for the entire check-and-sign sequence to prevent TOCTOU races
         // between the slashing protection check and the actual signing operation.
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.lock();
+        defer self.unlock();
 
         const validator = self.findValidator(pubkey) orelse return error.ValidatorNotFound;
 
@@ -720,8 +730,8 @@ pub const ValidatorStore = struct {
         pubkey: [48]u8,
         signing_root: [32]u8,
     ) !Signature {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.lock();
+        defer self.unlock();
         const validator = self.findValidator(pubkey) orelse return error.ValidatorNotFound;
         return self.signWithValidator(io, validator, pubkey, signing_root, .SYNC_COMMITTEE_MESSAGE);
     }
@@ -740,8 +750,8 @@ pub const ValidatorStore = struct {
         signing_root: [32]u8,
         signing_type: SigningType,
     ) !Signature {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.lock();
+        defer self.unlock();
         const validator = self.findValidator(pubkey) orelse return error.ValidatorNotFound;
         return self.signWithValidator(io, validator, pubkey, signing_root, signing_type);
     }
@@ -755,8 +765,8 @@ pub const ValidatorStore = struct {
         pubkey: [48]u8,
         signing_root: [32]u8,
     ) !Signature {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.lock();
+        defer self.unlock();
         const validator = self.findValidator(pubkey) orelse return error.ValidatorNotFound;
         return self.signWithValidator(io, validator, pubkey, signing_root, .AGGREGATE_AND_PROOF);
     }
@@ -770,16 +780,16 @@ pub const ValidatorStore = struct {
         pubkey: [48]u8,
         signing_root: [32]u8,
     ) !Signature {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.lock();
+        defer self.unlock();
         const validator = self.findValidator(pubkey) orelse return error.ValidatorNotFound;
         return self.signWithValidator(io, validator, pubkey, signing_root, .SYNC_COMMITTEE_CONTRIBUTION_AND_PROOF);
     }
 
     /// Get the on-chain validator index for a given pubkey, or null if not yet resolved.
     pub fn getValidatorIndex(self: *ValidatorStore, pubkey: [48]u8) ?u64 {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.lock();
+        defer self.unlock();
         const validator = self.findValidator(pubkey) orelse return null;
         return validator.index;
     }
@@ -798,8 +808,8 @@ pub const ValidatorStore = struct {
         pubkey: [48]u8,
         signing_root: [32]u8,
     ) !Signature {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.lock();
+        defer self.unlock();
         const validator = self.findValidator(pubkey) orelse return error.ValidatorNotFound;
         return self.signWithValidator(io, validator, pubkey, signing_root, .VOLUNTARY_EXIT);
     }
@@ -810,8 +820,8 @@ pub const ValidatorStore = struct {
         pubkey: [48]u8,
         signing_root: [32]u8,
     ) !Signature {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.lock();
+        defer self.unlock();
         const validator = self.findValidator(pubkey) orelse return error.ValidatorNotFound;
         return self.signWithValidator(io, validator, pubkey, signing_root, .VALIDATOR_REGISTRATION);
     }

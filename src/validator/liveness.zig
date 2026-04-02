@@ -12,7 +12,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const mutex_mod = @import("mutex.zig");
+const Io = std.Io;
 
 const log = std.log.scoped(.validator_liveness);
 
@@ -112,14 +112,16 @@ fn hitRate(history: *const [HISTORY_WINDOW]?EpochDutyResult) f64 {
 
 pub const LivenessTracker = struct {
     allocator: Allocator,
+    io: Io,
     entries: std.array_list.Managed(ValidatorLivenessEntry),
-    mutex: mutex_mod.Mutex,
+    mutex: std.Io.Mutex,
 
-    pub fn init(allocator: Allocator) LivenessTracker {
+    pub fn init(allocator: Allocator, io: Io) LivenessTracker {
         return .{
             .allocator = allocator,
+            .io = io,
             .entries = std.array_list.Managed(ValidatorLivenessEntry).init(allocator),
-            .mutex = .{},
+            .mutex = .init,
         };
     }
 
@@ -131,8 +133,8 @@ pub const LivenessTracker = struct {
     ///
     /// Idempotent — no-op if already registered.
     pub fn register(self: *LivenessTracker, pubkey: [48]u8) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
 
         for (self.entries.items) |e| {
             if (std.mem.eql(u8, &e.pubkey, &pubkey)) return;
@@ -144,8 +146,8 @@ pub const LivenessTracker = struct {
 
     /// Remove a validator from liveness tracking.
     pub fn unregister(self: *LivenessTracker, pubkey: [48]u8) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
 
         for (self.entries.items, 0..) |e, i| {
             if (std.mem.eql(u8, &e.pubkey, &pubkey)) {
@@ -159,8 +161,8 @@ pub const LivenessTracker = struct {
     ///
     /// TS: MetaDataService tracks attestation outcome per epoch.
     pub fn recordAttestationDuty(self: *LivenessTracker, pubkey: [48]u8, epoch: u64, performed: bool) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
 
         for (self.entries.items) |*e| {
             if (std.mem.eql(u8, &e.pubkey, &pubkey)) {
@@ -195,8 +197,8 @@ pub const LivenessTracker = struct {
     ///
     /// TS: SyncCommitteeService tracks participation per epoch.
     pub fn recordSyncDuty(self: *LivenessTracker, pubkey: [48]u8, epoch: u64, performed: bool) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
 
         for (self.entries.items) |*e| {
             if (std.mem.eql(u8, &e.pubkey, &pubkey)) {
@@ -225,8 +227,8 @@ pub const LivenessTracker = struct {
     ///
     /// Called at session end or periodically.
     pub fn logSummary(self: *LivenessTracker) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
 
         for (self.entries.items) |e| {
             log.info(
@@ -257,8 +259,8 @@ pub const LivenessTracker = struct {
         total_validators: usize,
         missed_blocks: u64,
     ) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
 
         var total_att: u64 = 0;
         var hit_att: u64 = 0;
@@ -333,7 +335,7 @@ pub const LivenessTracker = struct {
 const testing = std.testing;
 
 test "LivenessTracker: attestation hit rate" {
-    var tracker = LivenessTracker.init(testing.allocator);
+    var tracker = LivenessTracker.init(testing.allocator, testing.io);
     defer tracker.deinit();
 
     const pk = [_]u8{0x01} ** 48;
@@ -352,7 +354,7 @@ test "LivenessTracker: attestation hit rate" {
 }
 
 test "LivenessTracker: consecutive miss resets on success" {
-    var tracker = LivenessTracker.init(testing.allocator);
+    var tracker = LivenessTracker.init(testing.allocator, testing.io);
     defer tracker.deinit();
 
     const pk = [_]u8{0x02} ** 48;
@@ -367,7 +369,7 @@ test "LivenessTracker: consecutive miss resets on success" {
 }
 
 test "LivenessTracker: no data returns 1.0 hit rate" {
-    var tracker = LivenessTracker.init(testing.allocator);
+    var tracker = LivenessTracker.init(testing.allocator, testing.io);
     defer tracker.deinit();
 
     const pk = [_]u8{0x03} ** 48;

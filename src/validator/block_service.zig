@@ -31,7 +31,6 @@ const ValidatorStore = @import("validator_store.zig").ValidatorStore;
 const signing_mod = @import("signing.zig");
 const SigningContext = signing_mod.SigningContext;
 const ValidatorMetrics = @import("metrics.zig").ValidatorMetrics;
-const mutex_mod = @import("mutex.zig");
 
 const dopple_mod = @import("doppelganger.zig");
 const DoppelgangerService = dopple_mod.DoppelgangerService;
@@ -52,13 +51,14 @@ const CachedProposerDuty = struct {
 
 pub const BlockService = struct {
     allocator: Allocator,
+    io: Io,
     api: *BeaconApiClient,
     validator_store: *ValidatorStore,
     /// Signing context (fork_version + genesis_validators_root) for domain computation.
     signing_ctx: SigningContext,
     /// Protects proposer duty caches from concurrent keymanager mutation and
     /// refresh/prefetch swaps.
-    cache_mutex: mutex_mod.Mutex,
+    cache_mutex: std.Io.Mutex,
     /// Duties for the current epoch.
     duties: std.array_list.Managed(CachedProposerDuty),
     duties_epoch: ?u64,
@@ -84,6 +84,7 @@ pub const BlockService = struct {
     metrics: *ValidatorMetrics,
 
     pub fn init(
+        io: Io,
         allocator: Allocator,
         api: *BeaconApiClient,
         validator_store: *ValidatorStore,
@@ -97,10 +98,11 @@ pub const BlockService = struct {
     ) BlockService {
         return .{
             .allocator = allocator,
+            .io = io,
             .api = api,
             .validator_store = validator_store,
             .signing_ctx = signing_ctx,
-            .cache_mutex = .{},
+            .cache_mutex = .init,
             .duties = std.array_list.Managed(CachedProposerDuty).init(allocator),
             .duties_epoch = null,
             .next_duties = std.array_list.Managed(CachedProposerDuty).init(allocator),
@@ -139,8 +141,8 @@ pub const BlockService = struct {
     }
 
     pub fn deinit(self: *BlockService) void {
-        self.cache_mutex.lock();
-        defer self.cache_mutex.unlock();
+        self.cache_mutex.lockUncancelable(self.io);
+        defer self.cache_mutex.unlock(self.io);
         self.duties.deinit();
         self.next_duties.deinit();
     }
@@ -177,8 +179,8 @@ pub const BlockService = struct {
     /// Used when a validator is removed at runtime so stale proposer duties do not
     /// trigger failed proposal attempts later in the epoch.
     pub fn removeDutiesForKey(self: *BlockService, pubkey: [48]u8) void {
-        self.cache_mutex.lock();
-        defer self.cache_mutex.unlock();
+        self.cache_mutex.lockUncancelable(self.io);
+        defer self.cache_mutex.unlock(self.io);
 
         var i: usize = 0;
         while (i < self.duties.items.len) {
@@ -449,8 +451,8 @@ pub const BlockService = struct {
     ///
     /// Called before replacing the current epoch duties with the next epoch's duties.
     fn checkMissedDuties(self: *BlockService) void {
-        self.cache_mutex.lock();
-        defer self.cache_mutex.unlock();
+        self.cache_mutex.lockUncancelable(self.io);
+        defer self.cache_mutex.unlock(self.io);
 
         for (self.duties.items) |cached| {
             if (!cached.produced) {
@@ -476,9 +478,9 @@ pub const BlockService = struct {
     }
 
     fn wasProduced(self: *const BlockService, duty: ProposerDuty) bool {
-        const mutex_ptr: *mutex_mod.Mutex = @constCast(&self.cache_mutex);
-        mutex_ptr.lock();
-        defer mutex_ptr.unlock();
+        const mutex_ptr: *std.Io.Mutex = @constCast(&self.cache_mutex);
+        mutex_ptr.lockUncancelable(self.io);
+        defer mutex_ptr.unlock(self.io);
 
         if (self.duties_epoch == null) return false;
 
@@ -499,22 +501,22 @@ pub const BlockService = struct {
     }
 
     fn hasCurrentEpochDuties(self: *BlockService, epoch: u64) bool {
-        self.cache_mutex.lock();
-        defer self.cache_mutex.unlock();
+        self.cache_mutex.lockUncancelable(self.io);
+        defer self.cache_mutex.unlock(self.io);
         return self.duties_epoch != null and self.duties_epoch.? == epoch;
     }
 
     fn hasNextEpochDuties(self: *BlockService, epoch: u64) bool {
-        self.cache_mutex.lock();
-        defer self.cache_mutex.unlock();
+        self.cache_mutex.lockUncancelable(self.io);
+        defer self.cache_mutex.unlock(self.io);
         return self.next_duties_epoch != null and self.next_duties_epoch.? == epoch;
     }
 
     fn snapshotDutiesForSlot(self: *BlockService, slot: u64) ![]CachedProposerDuty {
         const epoch = slot / self.slots_per_epoch;
 
-        self.cache_mutex.lock();
-        defer self.cache_mutex.unlock();
+        self.cache_mutex.lockUncancelable(self.io);
+        defer self.cache_mutex.unlock(self.io);
 
         if (self.duties_epoch == null or self.duties_epoch.? != epoch) {
             return self.allocator.alloc(CachedProposerDuty, 0);
@@ -536,8 +538,8 @@ pub const BlockService = struct {
     }
 
     fn markProduced(self: *BlockService, duty: ProposerDuty, produced: bool) void {
-        self.cache_mutex.lock();
-        defer self.cache_mutex.unlock();
+        self.cache_mutex.lockUncancelable(self.io);
+        defer self.cache_mutex.unlock(self.io);
 
         for (self.duties.items) |*cached| {
             if (cached.duty.slot != duty.slot) continue;
@@ -549,8 +551,8 @@ pub const BlockService = struct {
     }
 
     fn activatePrefetchedEpoch(self: *BlockService, epoch: u64) bool {
-        self.cache_mutex.lock();
-        defer self.cache_mutex.unlock();
+        self.cache_mutex.lockUncancelable(self.io);
+        defer self.cache_mutex.unlock(self.io);
 
         if (self.next_duties_epoch == null or self.next_duties_epoch.? != epoch) return false;
 
@@ -574,8 +576,8 @@ pub const BlockService = struct {
         epoch: u64,
         refreshed: std.array_list.Managed(CachedProposerDuty),
     ) void {
-        self.cache_mutex.lock();
-        defer self.cache_mutex.unlock();
+        self.cache_mutex.lockUncancelable(self.io);
+        defer self.cache_mutex.unlock(self.io);
 
         const old = self.duties;
         self.duties = refreshed;
@@ -588,8 +590,8 @@ pub const BlockService = struct {
         epoch: u64,
         prefetched: std.array_list.Managed(CachedProposerDuty),
     ) void {
-        self.cache_mutex.lock();
-        defer self.cache_mutex.unlock();
+        self.cache_mutex.lockUncancelable(self.io);
+        defer self.cache_mutex.unlock(self.io);
 
         const old = self.next_duties;
         self.next_duties = prefetched;

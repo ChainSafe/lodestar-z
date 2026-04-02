@@ -21,7 +21,6 @@ const AttesterDuty = types.AttesterDuty;
 const SyncCommitteeDuty = types.SyncCommitteeDuty;
 const ValidatorMetrics = @import("metrics.zig").ValidatorMetrics;
 const time = @import("time.zig");
-const mutex_mod = @import("mutex.zig");
 
 const log = std.log.scoped(.vc_api);
 
@@ -141,6 +140,7 @@ pub const BeaconApiClient = struct {
     };
 
     allocator: Allocator,
+    io: Io,
     http_client: std.http.Client,
     sse_client: std.http.Client,
     /// Primary beacon node URL (first in urls list, or beacon_node_url).
@@ -162,7 +162,7 @@ pub const BeaconApiClient = struct {
     request_timeout_ms: u64,
     metrics: ?*ValidatorMetrics,
     /// Protects the shared failover state used by validator worker threads.
-    state_mutex: mutex_mod.Mutex,
+    state_mutex: std.Io.Mutex,
 
     pub const FailoverStatus = struct {
         configured: bool,
@@ -208,6 +208,7 @@ pub const BeaconApiClient = struct {
 
         var client: BeaconApiClient = .{
             .allocator = allocator,
+            .io = io,
             .http_client = .{ .allocator = allocator, .io = io },
             .sse_client = .{ .allocator = allocator, .io = io },
             .base_url = options.base_url,
@@ -219,7 +220,7 @@ pub const BeaconApiClient = struct {
             .unreachable_since_ns = 0,
             .request_timeout_ms = options.request_timeout_ms,
             .metrics = options.metrics,
-            .state_mutex = .{},
+            .state_mutex = .init,
         };
         client.publishAllUrlScores();
         return client;
@@ -248,14 +249,14 @@ pub const BeaconApiClient = struct {
     }
 
     fn activeUrl(self: *BeaconApiClient) []const u8 {
-        self.state_mutex.lock();
-        defer self.state_mutex.unlock();
+        self.state_mutex.lockUncancelable(self.io);
+        defer self.state_mutex.unlock(self.io);
         return self.activeUrlLocked();
     }
 
     fn activeUrlIndex(self: *BeaconApiClient) usize {
-        self.state_mutex.lock();
-        defer self.state_mutex.unlock();
+        self.state_mutex.lockUncancelable(self.io);
+        defer self.state_mutex.unlock(self.io);
         if (self.url_scores[self.active_url_idx] == URL_SCORE_MIN) {
             self.active_url_idx = self.bestScoredUrlLocked();
         }
@@ -263,8 +264,8 @@ pub const BeaconApiClient = struct {
     }
 
     pub fn failoverStatus(self: *BeaconApiClient) FailoverStatus {
-        self.state_mutex.lock();
-        defer self.state_mutex.unlock();
+        self.state_mutex.lockUncancelable(self.io);
+        defer self.state_mutex.unlock(self.io);
         return .{
             .configured = self.fallback_urls.len > 0,
             .connected = self.active_url_idx > 0,
@@ -272,8 +273,8 @@ pub const BeaconApiClient = struct {
     }
 
     pub fn primaryUrlUnhealthy(self: *BeaconApiClient) bool {
-        self.state_mutex.lock();
-        defer self.state_mutex.unlock();
+        self.state_mutex.lockUncancelable(self.io);
+        defer self.state_mutex.unlock(self.io);
         return self.url_scores[0] == URL_SCORE_MIN;
     }
 
@@ -324,8 +325,8 @@ pub const BeaconApiClient = struct {
 
         var log_state: ?LogState = null;
         {
-            self.state_mutex.lock();
-            defer self.state_mutex.unlock();
+            self.state_mutex.lockUncancelable(self.io);
+            defer self.state_mutex.unlock(self.io);
 
             self.url_scores[failed_url_idx] = self.url_scores[failed_url_idx] -| URL_SCORE_DELTA_ERROR;
             self.updateUrlScoreMetrics(failed_url_idx);
@@ -365,8 +366,8 @@ pub const BeaconApiClient = struct {
         var reconnected_url: ?[]const u8 = null;
         var switched_url: ?[]const u8 = null;
         {
-            self.state_mutex.lock();
-            defer self.state_mutex.unlock();
+            self.state_mutex.lockUncancelable(self.io);
+            defer self.state_mutex.unlock(self.io);
 
             self.url_scores[successful_url_idx] = @min(URL_SCORE_MAX, self.url_scores[successful_url_idx] + URL_SCORE_DELTA_SUCCESS);
             self.updateUrlScoreMetrics(successful_url_idx);
@@ -579,8 +580,8 @@ pub const BeaconApiClient = struct {
         start_offset: usize,
         out: []usize,
     ) usize {
-        self.state_mutex.lock();
-        defer self.state_mutex.unlock();
+        self.state_mutex.lockUncancelable(self.io);
+        defer self.state_mutex.unlock(self.io);
 
         const total_urls = self.totalUrlCount();
         std.debug.assert(start_offset < total_urls);
