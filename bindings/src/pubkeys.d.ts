@@ -10,7 +10,7 @@ export interface PubkeyCache {
   /** Set both directions atomically — impl owns the PublicKey.fromBytes() deserialization */
   set(index: number, pubkey: Uint8Array): void;
   /** Number of entries */
-  readonly size: number;
+  size(): number;
   /** Load cache from a PKIX file (clears JS-level cache) */
   load(filepath: string): void;
   /** Save cache to a PKIX file */

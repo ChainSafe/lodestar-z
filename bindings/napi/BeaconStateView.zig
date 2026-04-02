@@ -1,5 +1,5 @@
 const std = @import("std");
-const napi = @import("zapi:napi");
+const napi = @import("zapi").napi;
 const c = @import("config");
 const fork_types = @import("fork_types");
 const st = @import("state_transition");
@@ -36,6 +36,7 @@ pub fn BeaconStateView_ctor(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value
         CachedBeaconState,
         cached_state,
         BeaconStateView_finalize,
+        null,
         null,
     );
 

@@ -1,6 +1,6 @@
 const std = @import("std");
 const ssz = @import("ssz");
-const napi = @import("zapi:napi");
+const napi = @import("zapi").napi;
 const constants = @import("constants");
 
 pub fn sszValueToNapiValue(env: napi.Env, comptime ST: type, value: *const ST.Type) !napi.Value {
