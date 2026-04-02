@@ -1335,6 +1335,7 @@ pub fn build(b: *std.Build) void {
     module_spec_tests.addImport("bls", module_bls);
     module_spec_tests.addImport("persistent_merkle_tree", module_persistent_merkle_tree);
     module_spec_tests.addImport("hex", module_hex);
+    module_spec_tests.addImport("fork_choice", module_fork_choice);
 
     module_ssz_generic_spec_tests.addImport("hex", module_hex);
     module_ssz_generic_spec_tests.addImport("snappy", dep_snappy.module("snappy"));
