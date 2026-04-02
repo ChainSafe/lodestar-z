@@ -14,6 +14,7 @@ const computeEpochAtSlot = @import("../utils/epoch.zig").computeEpochAtSlot;
 const gloas_utils = @import("../utils/gloas.zig");
 const findBuilderIndexByPubkey = gloas_utils.findBuilderIndexByPubkey;
 const isBuilderWithdrawalCredential = gloas_utils.isBuilderWithdrawalCredential;
+const isPendingValidator = gloas_utils.isPendingValidator;
 const isValidDepositSignature = @import("./process_deposit.zig").isValidDepositSignature;
 const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
 
@@ -34,13 +35,14 @@ pub fn processDepositRequest(
     if (fork.gte(.gloas)) {
         const builder_index = try findBuilderIndexByPubkey(allocator, state, pubkey);
         const validator_index = epoch_cache.getValidatorIndex(pubkey);
+        const pending_validator = try isPendingValidator(fork, allocator, config, state, pubkey);
 
         const is_builder = builder_index != null;
         const is_validator = validator_index != null;
         const is_builder_prefix = isBuilderWithdrawalCredential(withdrawal_credentials);
 
         // Route to builder if it's an existing builder OR has builder prefix and is not a validator
-        if (is_builder or (is_builder_prefix and !is_validator)) {
+        if (is_builder or (is_builder_prefix and !is_validator and !pending_validator)) {
             // Apply builder deposits immediately
             try applyDepositForBuilder(allocator, config, state, pubkey, withdrawal_credentials, amount, signature, try state.slot());
             return;
@@ -105,9 +107,9 @@ fn addBuilderToRegistry(
     const current_epoch = computeEpochAtSlot(try state.slot());
 
     var builderIndex: ?usize = null;
-    var it = builders.iteratorReadonly(0);
     for (0..len) |i| {
-        const b = try it.nextValue(allocator);
+        var b: Builder.Type = undefined;
+        try builders.getValue(allocator, i, &b);
         if (b.withdrawable_epoch <= current_epoch and b.balance == 0) {
             builderIndex = i;
             break;
@@ -127,5 +129,6 @@ fn addBuilderToRegistry(
         try builders.setValue(idx, &new_builder);
     } else {
         try builders.pushValue(&new_builder);
+        try state.inner.set("builders", builders);
     }
 }
