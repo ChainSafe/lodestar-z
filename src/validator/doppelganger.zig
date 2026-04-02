@@ -19,6 +19,7 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
 const BeaconApiClient = @import("api_client.zig").BeaconApiClient;
+const ValidatorMetrics = @import("metrics.zig").ValidatorMetrics;
 const SlashingProtectionDb = @import("slashing_protection_db.zig").SlashingProtectionDb;
 
 const log = std.log.scoped(.doppelganger);
@@ -76,6 +77,7 @@ pub const ShutdownCallback = struct {
 pub const DoppelgangerService = struct {
     allocator: Allocator,
     api: *BeaconApiClient,
+    metrics: *ValidatorMetrics,
     slashing_db: *const SlashingProtectionDb,
     /// Per-validator entries.
     entries: std.array_list.Managed(DoppelgangerEntry),
@@ -85,15 +87,19 @@ pub const DoppelgangerService = struct {
     pub fn init(
         allocator: Allocator,
         api: *BeaconApiClient,
+        metrics: *ValidatorMetrics,
         slashing_db: *const SlashingProtectionDb,
     ) DoppelgangerService {
-        return .{
+        var service: DoppelgangerService = .{
             .allocator = allocator,
             .api = api,
+            .metrics = metrics,
             .slashing_db = slashing_db,
             .entries = std.array_list.Managed(DoppelgangerEntry).init(allocator),
             .shutdown_callback = null,
         };
+        service.refreshMetrics();
+        return service;
     }
 
     pub fn deinit(self: *DoppelgangerService) void {
@@ -156,6 +162,7 @@ pub const DoppelgangerService = struct {
                 .status = if (remaining_epochs == 0) .verified_safe else .unverified,
             },
         });
+        self.refreshMetrics();
     }
 
     /// Remove a validator from doppelganger monitoring.
@@ -166,6 +173,7 @@ pub const DoppelgangerService = struct {
                 log.debug("unregistered validator from doppelganger detection pubkey=0x{s}", .{
                     std.fmt.bytesToHex(pubkey[0..4], .lower),
                 });
+                self.refreshMetrics();
                 return;
             }
         }
@@ -280,6 +288,7 @@ pub const DoppelgangerService = struct {
                     e.state.status = .doppelganger_detected;
                 }
             }
+            self.refreshMetrics();
             if (self.shutdown_callback) |cb| {
                 log.err("triggering shutdown due to doppelganger detection", .{});
                 cb.call();
@@ -296,6 +305,7 @@ pub const DoppelgangerService = struct {
                         e.state.remaining_epochs -= 1;
                     }
                     e.state.next_epoch_to_check = current_epoch;
+                    self.metrics.incrDoppelgangerEpochsChecked();
                     if (e.state.remaining_epochs == 0) {
                         e.state.status = .verified_safe;
                         log.info("doppelganger detection complete pubkey=0x{x} epoch={d}", .{
@@ -313,6 +323,7 @@ pub const DoppelgangerService = struct {
                 }
             }
         }
+        self.refreshMetrics();
     }
 
     /// Resolve pubkey → validator index for entries that don't have one.
@@ -347,6 +358,27 @@ pub const DoppelgangerService = struct {
             }
         }
     }
+
+    fn refreshMetrics(self: *const DoppelgangerService) void {
+        var verified_safe: u64 = 0;
+        var unverified: u64 = 0;
+        var unknown: u64 = 0;
+        var detected: u64 = 0;
+
+        for (self.entries.items) |entry| {
+            switch (entry.state.status) {
+                .verified_safe => verified_safe += 1,
+                .unverified => unverified += 1,
+                .unknown => unknown += 1,
+                .doppelganger_detected => detected += 1,
+            }
+        }
+
+        self.metrics.setDoppelgangerStatusCount("VerifiedSafe", verified_safe);
+        self.metrics.setDoppelgangerStatusCount("Unverified", unverified);
+        self.metrics.setDoppelgangerStatusCount("Unknown", unknown);
+        self.metrics.setDoppelgangerStatusCount("DoppelgangerDetected", detected);
+    }
 };
 
 const testing = std.testing;
@@ -355,10 +387,11 @@ test "registerValidator skips doppelganger detection before or at genesis" {
     var db = try SlashingProtectionDb.init(testing.io, testing.allocator, null);
     defer db.close();
 
-    var api = BeaconApiClient.init(testing.allocator, testing.io, "http://127.0.0.1:5052");
+    var api = try BeaconApiClient.init(testing.allocator, testing.io, "http://127.0.0.1:5052");
     defer api.deinit();
 
-    var service = DoppelgangerService.init(testing.allocator, &api, &db);
+    var metrics = ValidatorMetrics.initNoop();
+    var service = DoppelgangerService.init(testing.allocator, &api, &metrics, &db);
     defer service.deinit();
 
     const pubkey = [_]u8{0x11} ** 48;
@@ -375,14 +408,41 @@ test "registerValidator skips doppelganger detection after restart attestation" 
     const pubkey = [_]u8{0x22} ** 48;
     try testing.expect(try db.checkAndInsertAttestation(pubkey, 1, 2));
 
-    var api = BeaconApiClient.init(testing.allocator, testing.io, "http://127.0.0.1:5052");
+    var api = try BeaconApiClient.init(testing.allocator, testing.io, "http://127.0.0.1:5052");
     defer api.deinit();
 
-    var service = DoppelgangerService.init(testing.allocator, &api, &db);
+    var metrics = ValidatorMetrics.initNoop();
+    var service = DoppelgangerService.init(testing.allocator, &api, &metrics, &db);
     defer service.deinit();
 
     try service.registerValidator(3, pubkey);
 
     try testing.expectEqual(DoppelgangerStatus.verified_safe, service.getStatus(pubkey));
     try testing.expectEqual(@as(u64, 0), service.entries.items[0].state.remaining_epochs);
+}
+
+test "doppelganger metrics export status counts" {
+    var db = try SlashingProtectionDb.init(testing.io, testing.allocator, null);
+    defer db.close();
+
+    var api = try BeaconApiClient.init(testing.allocator, testing.io, "http://127.0.0.1:5052");
+    defer api.deinit();
+
+    var metrics = try ValidatorMetrics.init(testing.allocator);
+    defer metrics.deinit();
+
+    var service = DoppelgangerService.init(testing.allocator, &api, &metrics, &db);
+    defer service.deinit();
+
+    try service.registerValidator(1, [_]u8{0x33} ** 48);
+
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    try metrics.write(&out.writer);
+
+    const buf = out.writer.buffered();
+    try testing.expect(std.mem.indexOf(u8, buf, "vc_doppelganger_validator_status_count") != null);
+    try testing.expect(std.mem.indexOf(u8, buf, "Unverified") != null);
+    try testing.expect(std.mem.indexOf(u8, buf, "VerifiedSafe") != null);
+    try testing.expect(std.mem.indexOf(u8, buf, "DoppelgangerDetected") != null);
 }

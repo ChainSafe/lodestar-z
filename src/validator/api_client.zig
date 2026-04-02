@@ -19,6 +19,7 @@ const types = @import("types.zig");
 const ProposerDuty = types.ProposerDuty;
 const AttesterDuty = types.AttesterDuty;
 const SyncCommitteeDuty = types.SyncCommitteeDuty;
+const ValidatorMetrics = @import("metrics.zig").ValidatorMetrics;
 const time = @import("time.zig");
 const mutex_mod = @import("mutex.zig");
 
@@ -92,6 +93,39 @@ const SszGetResponse = struct {
 
 /// Maximum consecutive failures before logging "beacon node unreachable".
 const BN_UNREACHABLE_THRESHOLD: u64 = 3;
+const URL_SCORE_DELTA_SUCCESS: u8 = 1;
+const URL_SCORE_DELTA_ERROR: u8 = 2 * URL_SCORE_DELTA_SUCCESS;
+const URL_SCORE_MAX: u8 = 10 * URL_SCORE_DELTA_SUCCESS;
+const URL_SCORE_MIN: u8 = 0;
+
+const route_ids = struct {
+    const beacon_get_genesis = "beacon.getGenesis";
+    const config_get_spec = "config.getSpec";
+    const beacon_get_header = "beacon.getHeader";
+    const beacon_get_state_finality_checkpoints = "beacon.getStateFinalityCheckpoints";
+    const validator_get_proposer_duties = "validator.getProposerDuties";
+    const validator_get_attester_duties = "validator.getAttesterDuties";
+    const validator_get_sync_committee_duties = "validator.getSyncCommitteeDuties";
+    const beacon_get_state_validators = "beacon.getStateValidators";
+    const validator_produce_block_v3 = "validator.produceBlockV3";
+    const beacon_publish_block_v2 = "beacon.publishBlockV2";
+    const validator_produce_attestation_data = "validator.produceAttestationData";
+    const beacon_publish_attestations_v2 = "beacon.publishAttestationsV2";
+    const beacon_publish_voluntary_exit = "beacon.publishVoluntaryExit";
+    const validator_get_aggregate_attestation = "validator.getAggregatedAttestation";
+    const validator_publish_aggregate_and_proofs_v2 = "validator.publishAggregateAndProofsV2";
+    const beacon_publish_sync_committee_messages = "beacon.publishSyncCommitteeMessages";
+    const validator_publish_contribution_and_proofs = "validator.publishContributionAndProofs";
+    const validator_produce_sync_committee_contribution = "validator.produceSyncCommitteeContribution";
+    const validator_prepare_beacon_committee_subscriptions = "validator.prepareBeaconCommitteeSubscriptions";
+    const validator_prepare_sync_committee_subscriptions = "validator.prepareSyncCommitteeSubscriptions";
+    const validator_prepare_beacon_proposer = "validator.prepareBeaconProposer";
+    const validator_register_validator = "validator.registerValidator";
+    const beacon_publish_blinded_block_v2 = "beacon.publishBlindedBlockV2";
+    const events_eventstream = "events.eventstream";
+    const node_get_syncing_status = "node.getSyncingStatus";
+    const validator_get_liveness = "validator.getLiveness";
+};
 
 /// HTTP client for the Beacon Node REST API (validator-facing endpoints).
 ///
@@ -103,6 +137,7 @@ pub const BeaconApiClient = struct {
         base_url: []const u8,
         fallback_urls: []const []const u8 = &.{},
         request_timeout_ms: u64 = 12_000,
+        metrics: ?*ValidatorMetrics = null,
     };
 
     allocator: Allocator,
@@ -113,6 +148,8 @@ pub const BeaconApiClient = struct {
     /// Additional fallback beacon node URLs (may be empty).
     /// Tried in order when the primary fails.
     fallback_urls: []const []const u8,
+    /// Health score per configured beacon URL.
+    url_scores: []u8,
     /// Index of the currently active URL (0 = primary).
     active_url_idx: usize,
     /// Consecutive HTTP/transport failures on the current URL.
@@ -123,6 +160,7 @@ pub const BeaconApiClient = struct {
     unreachable_since_ns: u64,
     /// Default timeout budget for non-streaming BN requests.
     request_timeout_ms: u64,
+    metrics: ?*ValidatorMetrics,
     /// Protects the shared failover state used by validator worker threads.
     state_mutex: mutex_mod.Mutex,
 
@@ -131,7 +169,7 @@ pub const BeaconApiClient = struct {
         connected: bool,
     };
 
-    pub fn init(allocator: Allocator, io: Io, base_url: []const u8) BeaconApiClient {
+    pub fn init(allocator: Allocator, io: Io, base_url: []const u8) !BeaconApiClient {
         return initWithOptions(allocator, io, .{ .base_url = base_url });
     }
 
@@ -139,8 +177,8 @@ pub const BeaconApiClient = struct {
     ///
     /// `urls` must have at least one entry. The first is the primary.
     /// TS: BeaconNodeOpts.urls (array of BN endpoints)
-    pub fn initMulti(allocator: Allocator, io: Io, urls: []const []const u8) BeaconApiClient {
-        if (urls.len == 0) @panic("BeaconApiClient.initMulti: urls must not be empty");
+    pub fn initMulti(allocator: Allocator, io: Io, urls: []const []const u8) !BeaconApiClient {
+        if (urls.len == 0) return error.InvalidBeaconNodeUrlConfiguration;
         return initWithOptions(allocator, io, .{
             .base_url = urls[0],
             .fallback_urls = urls[1..],
@@ -152,7 +190,7 @@ pub const BeaconApiClient = struct {
         io: Io,
         base_url: []const u8,
         fallback_urls: []const []const u8,
-    ) BeaconApiClient {
+    ) !BeaconApiClient {
         return initWithOptions(allocator, io, .{
             .base_url = base_url,
             .fallback_urls = fallback_urls,
@@ -163,25 +201,34 @@ pub const BeaconApiClient = struct {
         allocator: Allocator,
         io: Io,
         options: Options,
-    ) BeaconApiClient {
-        return .{
+    ) !BeaconApiClient {
+        const total_urls = 1 + options.fallback_urls.len;
+        const url_scores = try allocator.alloc(u8, total_urls);
+        @memset(url_scores, URL_SCORE_MAX);
+
+        var client: BeaconApiClient = .{
             .allocator = allocator,
             .http_client = .{ .allocator = allocator, .io = io },
             .sse_client = .{ .allocator = allocator, .io = io },
             .base_url = options.base_url,
             .fallback_urls = options.fallback_urls,
+            .url_scores = url_scores,
             .active_url_idx = 0,
             .consecutive_failures = 0,
             .was_unreachable = false,
             .unreachable_since_ns = 0,
             .request_timeout_ms = options.request_timeout_ms,
+            .metrics = options.metrics,
             .state_mutex = .{},
         };
+        client.publishAllUrlScores();
+        return client;
     }
 
     pub fn deinit(self: *BeaconApiClient) void {
         self.http_client.deinit();
         self.sse_client.deinit();
+        self.allocator.free(self.url_scores);
     }
 
     /// Return the currently active beacon node URL.
@@ -209,6 +256,9 @@ pub const BeaconApiClient = struct {
     fn activeUrlIndex(self: *BeaconApiClient) usize {
         self.state_mutex.lock();
         defer self.state_mutex.unlock();
+        if (self.url_scores[self.active_url_idx] == URL_SCORE_MIN) {
+            self.active_url_idx = self.bestScoredUrlLocked();
+        }
         return self.active_url_idx;
     }
 
@@ -219,6 +269,49 @@ pub const BeaconApiClient = struct {
             .configured = self.fallback_urls.len > 0,
             .connected = self.active_url_idx > 0,
         };
+    }
+
+    pub fn primaryUrlUnhealthy(self: *BeaconApiClient) bool {
+        self.state_mutex.lock();
+        defer self.state_mutex.unlock();
+        return self.url_scores[0] == URL_SCORE_MIN;
+    }
+
+    fn bestScoredUrlLocked(self: *const BeaconApiClient) usize {
+        var best_idx: usize = self.active_url_idx;
+        var best_score = self.url_scores[best_idx];
+        for (self.url_scores, 0..) |score, idx| {
+            if (score > best_score or (score == best_score and idx < best_idx)) {
+                best_idx = idx;
+                best_score = score;
+            }
+        }
+        return best_idx;
+    }
+
+    fn updateUrlScoreMetrics(self: *BeaconApiClient, url_idx: usize) void {
+        if (self.metrics) |metrics| {
+            metrics.setRestApiUrlScore(url_idx, self.urlAtIndex(url_idx), self.url_scores[url_idx]);
+        }
+    }
+
+    fn publishAllUrlScores(self: *BeaconApiClient) void {
+        if (self.metrics == null) return;
+        for (self.url_scores, 0..) |_, idx| {
+            self.updateUrlScoreMetrics(idx);
+        }
+    }
+
+    fn recordRequestErrorMetric(self: *BeaconApiClient, route_id: []const u8, base_url: []const u8) void {
+        if (self.metrics) |metrics| {
+            metrics.recordRestApiError(route_id, base_url);
+        }
+    }
+
+    fn recordFallbackMetric(self: *BeaconApiClient, route_id: []const u8, base_url: []const u8) void {
+        if (self.metrics) |metrics| {
+            metrics.recordRestApiFallback(route_id, base_url);
+        }
     }
 
     /// Record a transport/HTTP failure. Rotates to next BN URL after threshold.
@@ -233,6 +326,9 @@ pub const BeaconApiClient = struct {
         {
             self.state_mutex.lock();
             defer self.state_mutex.unlock();
+
+            self.url_scores[failed_url_idx] = self.url_scores[failed_url_idx] -| URL_SCORE_DELTA_ERROR;
+            self.updateUrlScoreMetrics(failed_url_idx);
 
             if (failed_url_idx != self.active_url_idx) return;
 
@@ -272,6 +368,9 @@ pub const BeaconApiClient = struct {
             self.state_mutex.lock();
             defer self.state_mutex.unlock();
 
+            self.url_scores[successful_url_idx] = @min(URL_SCORE_MAX, self.url_scores[successful_url_idx] + URL_SCORE_DELTA_SUCCESS);
+            self.updateUrlScoreMetrics(successful_url_idx);
+
             if (self.active_url_idx != successful_url_idx) {
                 self.active_url_idx = successful_url_idx;
                 switched_url = self.activeUrlLocked();
@@ -299,14 +398,92 @@ pub const BeaconApiClient = struct {
         canceled,
     };
 
+    const RequestOp = union(enum) {
+        get: struct {
+            route_id: []const u8,
+            path: []const u8,
+        },
+        get_ssz: struct {
+            route_id: []const u8,
+            path: []const u8,
+        },
+        post: struct {
+            route_id: []const u8,
+            path: []const u8,
+            body: []const u8,
+        },
+        post_ssz: struct {
+            route_id: []const u8,
+            path: []const u8,
+            body: []const u8,
+            fork_name: []const u8,
+        },
+    };
+
     const TimerResult = enum {
         fired,
         canceled,
     };
 
-    const TimedEvent = union(enum) {
-        request: TimedTaskResult,
+    const RequestRaceCompletion = struct {
+        url_idx: usize,
+        result: TimedTaskResult,
+    };
+
+    const RequestRaceEvent = union(enum) {
+        request: RequestRaceCompletion,
         timeout: TimerResult,
+    };
+
+    const RequestRaceTaskContext = struct {
+        client: *BeaconApiClient,
+        io: Io,
+        url_idx: usize,
+        base_url: []const u8,
+        op: RequestOp,
+
+        fn run(ctx: @This()) RequestRaceCompletion {
+            return .{
+                .url_idx = ctx.url_idx,
+                .result = ctx.client.runRequestOp(ctx.io, ctx.base_url, ctx.op),
+            };
+        }
+    };
+
+    const SseConnection = struct {
+        url_idx: usize,
+        req: std.http.Client.Request,
+        response: std.http.Client.Response,
+    };
+
+    const SseConnectResult = union(enum) {
+        success: SseConnection,
+        failure: anyerror,
+        canceled,
+    };
+
+    const SseConnectCompletion = struct {
+        url_idx: usize,
+        result: SseConnectResult,
+    };
+
+    const SseConnectEvent = union(enum) {
+        connect: SseConnectCompletion,
+        timeout: TimerResult,
+    };
+
+    const SseConnectTaskContext = struct {
+        client: *BeaconApiClient,
+        io: Io,
+        url_idx: usize,
+        path: []const u8,
+
+        fn run(ctx: @This()) SseConnectCompletion {
+            return .{
+                .url_idx = ctx.url_idx,
+                .result = ctx.client.connectSseOnUrl(ctx.io, ctx.url_idx, ctx.path),
+            };
+        }
     };
 
     fn timeoutFromMs(timeout_ms: u64) Io.Timeout {
@@ -334,73 +511,525 @@ pub const BeaconApiClient = struct {
         return .fired;
     }
 
-    fn freeTimedEvent(self: *BeaconApiClient, event: TimedEvent) void {
+    fn freeTimedTaskResult(self: *BeaconApiClient, result: TimedTaskResult) void {
+        switch (result) {
+            .success => |body| self.allocator.free(body),
+            .success_ssz => |response| self.allocator.free(response.body),
+            else => {},
+        }
+    }
+
+    fn freeRequestRaceEvent(self: *BeaconApiClient, event: RequestRaceEvent) void {
         switch (event) {
-            .request => |result| switch (result) {
-                .success => |body| self.allocator.free(body),
-                .success_ssz => |response| self.allocator.free(response.body),
+            .request => |completion| self.freeTimedTaskResult(completion.result),
+            .timeout => {},
+        }
+    }
+
+    fn requestOpRouteId(op: RequestOp) []const u8 {
+        return switch (op) {
+            .get => |request| request.route_id,
+            .get_ssz => |request| request.route_id,
+            .post => |request| request.route_id,
+            .post_ssz => |request| request.route_id,
+        };
+    }
+
+    fn runRequestOp(
+        self: *BeaconApiClient,
+        io: Io,
+        base_url: []const u8,
+        op: RequestOp,
+    ) TimedTaskResult {
+        return switch (op) {
+            .get => |request| blk: {
+                const body = self.getBlocking(io, request.route_id, base_url, request.path) catch |err| switch (err) {
+                    error.Canceled => break :blk .canceled,
+                    else => break :blk .{ .failure = err },
+                };
+                break :blk .{ .success = body };
+            },
+            .get_ssz => |request| blk: {
+                const response = self.getSszBlocking(io, request.route_id, base_url, request.path) catch |err| switch (err) {
+                    error.Canceled => break :blk .canceled,
+                    else => break :blk .{ .failure = err },
+                };
+                break :blk .{ .success_ssz = response };
+            },
+            .post => |request| blk: {
+                const body = self.postBlocking(io, request.route_id, base_url, request.path, request.body) catch |err| switch (err) {
+                    error.Canceled => break :blk .canceled,
+                    else => break :blk .{ .failure = err },
+                };
+                break :blk .{ .success = body };
+            },
+            .post_ssz => |request| blk: {
+                self.postSszBlocking(io, request.route_id, base_url, request.path, request.body, request.fork_name) catch |err| switch (err) {
+                    error.Canceled => break :blk .canceled,
+                    else => break :blk .{ .failure = err },
+                };
+                break :blk .success_void;
+            },
+        };
+    }
+
+    fn fillRaceGroup(
+        self: *BeaconApiClient,
+        start_idx: usize,
+        start_offset: usize,
+        out: []usize,
+    ) usize {
+        self.state_mutex.lock();
+        defer self.state_mutex.unlock();
+
+        const total_urls = self.totalUrlCount();
+        std.debug.assert(start_offset < total_urls);
+        std.debug.assert(out.len >= total_urls - start_offset);
+
+        var count: usize = 0;
+        var offset = start_offset;
+        while (offset < total_urls) : (offset += 1) {
+            const url_idx = (start_idx + offset) % total_urls;
+            out[count] = url_idx;
+            count += 1;
+
+            if (self.url_scores[url_idx] >= URL_SCORE_MAX) break;
+        }
+
+        return count;
+    }
+
+    fn runRequestRaceGroup(
+        self: *BeaconApiClient,
+        io: Io,
+        timeout_ms: u64,
+        url_indices: []const usize,
+        op: RequestOp,
+    ) !RequestRaceCompletion {
+        var stack_events: [9]RequestRaceEvent = undefined;
+        const needed_events = url_indices.len + 1;
+        const using_heap_events = needed_events > stack_events.len;
+        const events_buf = if (!using_heap_events)
+            stack_events[0..needed_events]
+        else
+            try self.allocator.alloc(RequestRaceEvent, needed_events);
+        defer if (using_heap_events) self.allocator.free(events_buf);
+
+        var stack_observed: [8]bool = undefined;
+        const using_heap_observed = url_indices.len > stack_observed.len;
+        const observed = if (!using_heap_observed)
+            stack_observed[0..url_indices.len]
+        else
+            try self.allocator.alloc(bool, url_indices.len);
+        defer if (using_heap_observed) self.allocator.free(observed);
+        @memset(observed, false);
+
+        var select = Io.Select(RequestRaceEvent).init(io, events_buf);
+        errdefer while (select.cancel()) |event| {
+            self.freeRequestRaceEvent(event);
+        };
+
+        for (url_indices) |url_idx| {
+            try select.concurrent(.request, RequestRaceTaskContext.run, .{.{
+                .client = self,
+                .io = io,
+                .url_idx = url_idx,
+                .base_url = self.urlAtIndex(url_idx),
+                .op = op,
+            }});
+        }
+        select.async(.timeout, waitTimeout, .{ io, timeoutFromMs(timeout_ms) });
+
+        var completed_count: usize = 0;
+        var last_err: anyerror = error.HttpError;
+        while (completed_count < url_indices.len) {
+            const event = try select.await();
+            switch (event) {
+                .request => |completion| {
+                    const observed_idx = std.mem.indexOfScalar(usize, url_indices, completion.url_idx) orelse unreachable;
+                    observed[observed_idx] = true;
+                    switch (completion.result) {
+                        .success, .success_ssz, .success_void => {
+                            while (select.cancel()) |remaining| {
+                                self.freeRequestRaceEvent(remaining);
+                            }
+                            return completion;
+                        },
+                        .failure => |err| {
+                            self.recordFailure(io, completion.url_idx);
+                            last_err = err;
+                            completed_count += 1;
+                        },
+                        .canceled => {
+                            while (select.cancel()) |remaining| {
+                                self.freeRequestRaceEvent(remaining);
+                            }
+                            return error.Canceled;
+                        },
+                    }
+                },
+                .timeout => |result| {
+                    if (result != .fired) continue;
+
+                    for (url_indices, observed) |url_idx, did_finish| {
+                        if (!did_finish) self.recordFailure(io, url_idx);
+                    }
+                    while (select.cancel()) |remaining| {
+                        self.freeRequestRaceEvent(remaining);
+                    }
+                    return error.Timeout;
+                },
+            }
+        }
+
+        while (select.cancel()) |event| {
+            self.freeRequestRaceEvent(event);
+        }
+
+        return last_err;
+    }
+
+    fn executeRequestWithFallbacks(
+        self: *BeaconApiClient,
+        io: Io,
+        timeout_ms: u64,
+        op: RequestOp,
+    ) !TimedTaskResult {
+        const start_idx = self.activeUrlIndex();
+        const total_urls = self.totalUrlCount();
+        const deadline_ns = requestDeadlineNs(io, timeout_ms);
+        var last_err: anyerror = error.HttpError;
+        var attempted_any = false;
+        var next_offset: usize = 0;
+
+        var stack_group: [8]usize = undefined;
+        const using_heap_group = total_urls > stack_group.len;
+        const group_buf = if (!using_heap_group)
+            stack_group[0..total_urls]
+        else
+            try self.allocator.alloc(usize, total_urls);
+        defer if (using_heap_group) self.allocator.free(group_buf);
+
+        while (next_offset < total_urls) {
+            const attempt_timeout_ms = remainingTimeoutMs(io, deadline_ns) catch |err| {
+                return if (attempted_any) last_err else err;
+            };
+
+            const group_len = self.fillRaceGroup(start_idx, next_offset, group_buf);
+            const group = group_buf[0..group_len];
+            for (group, 0..) |url_idx, idx| {
+                if (next_offset + idx > 0) self.recordFallbackMetric(requestOpRouteId(op), self.urlAtIndex(url_idx));
+            }
+
+            const completion = self.runRequestRaceGroup(io, attempt_timeout_ms, group, op) catch |err| {
+                if (err == error.Canceled) return err;
+                attempted_any = true;
+                last_err = err;
+                next_offset += group_len;
+                continue;
+            };
+
+            self.recordSuccessAt(completion.url_idx);
+            return completion.result;
+        }
+
+        return last_err;
+    }
+
+    fn freeSseConnection(stream: *SseConnection) void {
+        stream.req.deinit();
+        stream.* = undefined;
+    }
+
+    fn freeSseConnectEvent(_: *BeaconApiClient, event: SseConnectEvent) void {
+        switch (event) {
+            .connect => |completion| switch (completion.result) {
+                .success => |stream| {
+                    var owned_stream = stream;
+                    freeSseConnection(&owned_stream);
+                },
                 else => {},
             },
             .timeout => {},
         }
     }
 
-    fn runTimedRequest(
+    fn connectSseOnUrl(
+        self: *BeaconApiClient,
+        io: Io,
+        url_idx: usize,
+        path: []const u8,
+    ) SseConnectResult {
+        const base_url = self.urlAtIndex(url_idx);
+        const request_started_ns = time.awakeNanoseconds(io);
+        defer self.observeRequestDuration(route_ids.events_eventstream, request_started_ns);
+
+        const url = std.fmt.allocPrint(self.allocator, "{s}{s}", .{ base_url, path }) catch |err| {
+            self.recordRequestErrorMetric(route_ids.events_eventstream, base_url);
+            return .{ .failure = err };
+        };
+        defer self.allocator.free(url);
+
+        const uri = std.Uri.parse(url) catch |err| {
+            self.recordRequestErrorMetric(route_ids.events_eventstream, base_url);
+            return .{ .failure = err };
+        };
+
+        var req = self.sse_client.request(.GET, uri, .{
+            .keep_alive = true,
+            .extra_headers = &.{
+                .{ .name = "Accept", .value = "text/event-stream" },
+                .{ .name = "Cache-Control", .value = "no-cache" },
+            },
+        }) catch |err| {
+            self.recordRequestErrorMetric(route_ids.events_eventstream, base_url);
+            return .{ .failure = err };
+        };
+        errdefer req.deinit();
+
+        req.sendBodiless() catch |err| {
+            self.recordRequestErrorMetric(route_ids.events_eventstream, base_url);
+            return .{ .failure = err };
+        };
+
+        var redirect_buf: [1024]u8 = undefined;
+        const response = req.receiveHead(&redirect_buf) catch |err| {
+            self.recordRequestErrorMetric(route_ids.events_eventstream, base_url);
+            return .{ .failure = err };
+        };
+
+        if (response.head.status != .ok) {
+            log.err("SSE subscription failed: HTTP {d}", .{@intFromEnum(response.head.status)});
+            self.recordRequestErrorMetric(route_ids.events_eventstream, base_url);
+            return .{ .failure = error.HttpError };
+        }
+
+        return .{ .success = .{
+            .url_idx = url_idx,
+            .req = req,
+            .response = response,
+        } };
+    }
+
+    fn runSseConnectRaceGroup(
         self: *BeaconApiClient,
         io: Io,
         timeout_ms: u64,
-        function: anytype,
-        args: std.meta.ArgsTuple(@TypeOf(function)),
-    ) !TimedTaskResult {
-        var events_buf: [2]TimedEvent = undefined;
-        var select = Io.Select(TimedEvent).init(io, &events_buf);
+        url_indices: []const usize,
+        path: []const u8,
+    ) !SseConnection {
+        var stack_events: [9]SseConnectEvent = undefined;
+        const needed_events = url_indices.len + 1;
+        const using_heap_events = needed_events > stack_events.len;
+        const events_buf = if (!using_heap_events)
+            stack_events[0..needed_events]
+        else
+            try self.allocator.alloc(SseConnectEvent, needed_events);
+        defer if (using_heap_events) self.allocator.free(events_buf);
+
+        var stack_observed: [8]bool = undefined;
+        const using_heap_observed = url_indices.len > stack_observed.len;
+        const observed = if (!using_heap_observed)
+            stack_observed[0..url_indices.len]
+        else
+            try self.allocator.alloc(bool, url_indices.len);
+        defer if (using_heap_observed) self.allocator.free(observed);
+        @memset(observed, false);
+
+        var select = Io.Select(SseConnectEvent).init(io, events_buf);
         errdefer while (select.cancel()) |event| {
-            self.freeTimedEvent(event);
+            self.freeSseConnectEvent(event);
         };
 
-        const RequestTask = struct {
-            fn run(task_args: @TypeOf(args)) TimedTaskResult {
-                const result = @call(.auto, function, task_args) catch |err| switch (err) {
-                    error.Canceled => return .canceled,
-                    else => return .{ .failure = err },
-                };
-
-                return switch (@TypeOf(result)) {
-                    void => .success_void,
-                    []const u8 => .{ .success = result },
-                    SszGetResponse => .{ .success_ssz = result },
-                    else => @compileError("unsupported timed request result type"),
-                };
-            }
-        };
-
-        try select.concurrent(.request, RequestTask.run, .{args});
+        for (url_indices) |url_idx| {
+            try select.concurrent(.connect, SseConnectTaskContext.run, .{.{
+                .client = self,
+                .io = io,
+                .url_idx = url_idx,
+                .path = path,
+            }});
+        }
         select.async(.timeout, waitTimeout, .{ io, timeoutFromMs(timeout_ms) });
 
-        var maybe_result: ?TimedTaskResult = null;
-        var timed_out = false;
-        while (true) {
+        var completed_count: usize = 0;
+        var last_err: anyerror = error.StreamEnded;
+        while (completed_count < url_indices.len) {
             const event = try select.await();
             switch (event) {
-                .request => |result| {
-                    maybe_result = result;
-                    break;
+                .connect => |completion| {
+                    const observed_idx = std.mem.indexOfScalar(usize, url_indices, completion.url_idx) orelse unreachable;
+                    observed[observed_idx] = true;
+                    switch (completion.result) {
+                        .success => |stream| {
+                            while (select.cancel()) |remaining| {
+                                self.freeSseConnectEvent(remaining);
+                            }
+                            return stream;
+                        },
+                        .failure => |err| {
+                            self.recordFailure(io, completion.url_idx);
+                            last_err = err;
+                            completed_count += 1;
+                        },
+                        .canceled => {
+                            while (select.cancel()) |remaining| {
+                                self.freeSseConnectEvent(remaining);
+                            }
+                            return error.Canceled;
+                        },
+                    }
                 },
                 .timeout => |result| {
-                    if (result == .fired) {
-                        timed_out = true;
-                        break;
+                    if (result != .fired) continue;
+
+                    for (url_indices, observed) |url_idx, did_finish| {
+                        if (!did_finish) self.recordFailure(io, url_idx);
                     }
+                    while (select.cancel()) |remaining| {
+                        self.freeSseConnectEvent(remaining);
+                    }
+                    return error.Timeout;
                 },
             }
         }
 
         while (select.cancel()) |event| {
-            self.freeTimedEvent(event);
+            self.freeSseConnectEvent(event);
         }
 
-        if (timed_out) return error.Timeout;
-        return maybe_result orelse unreachable;
+        return last_err;
+    }
+
+    fn connectSseWithFallbacks(
+        self: *BeaconApiClient,
+        io: Io,
+        path: []const u8,
+    ) !SseConnection {
+        const start_idx = self.activeUrlIndex();
+        const total_urls = self.totalUrlCount();
+        const deadline_ns = requestDeadlineNs(io, self.request_timeout_ms);
+        var last_err: anyerror = error.StreamEnded;
+        var attempted_any = false;
+        var next_offset: usize = 0;
+
+        var stack_group: [8]usize = undefined;
+        const using_heap_group = total_urls > stack_group.len;
+        const group_buf = if (!using_heap_group)
+            stack_group[0..total_urls]
+        else
+            try self.allocator.alloc(usize, total_urls);
+        defer if (using_heap_group) self.allocator.free(group_buf);
+
+        while (next_offset < total_urls) {
+            const attempt_timeout_ms = remainingTimeoutMs(io, deadline_ns) catch |err| {
+                return if (attempted_any) last_err else err;
+            };
+
+            const group_len = self.fillRaceGroup(start_idx, next_offset, group_buf);
+            const group = group_buf[0..group_len];
+            for (group, 0..) |url_idx, idx| {
+                if (next_offset + idx > 0) self.recordFallbackMetric(route_ids.events_eventstream, self.urlAtIndex(url_idx));
+            }
+
+            const stream = self.runSseConnectRaceGroup(io, attempt_timeout_ms, group, path) catch |err| {
+                if (err == error.Canceled) return err;
+                attempted_any = true;
+                last_err = err;
+                next_offset += group_len;
+                continue;
+            };
+
+            self.recordSuccessAt(stream.url_idx);
+            return stream;
+        }
+
+        return last_err;
+    }
+
+    fn processConnectedSseStream(
+        self: *BeaconApiClient,
+        io: Io,
+        stream: *SseConnection,
+        callback: SseCallback,
+    ) !void {
+        defer freeSseConnection(stream);
+        log.info("subscribing to SSE events url={s}", .{self.urlAtIndex(stream.url_idx)});
+
+        const stream_started_ns = time.awakeNanoseconds(io);
+        defer self.observeStreamDuration(route_ids.events_eventstream, io, stream_started_ns);
+
+        var event_type_buf: [128]u8 = undefined;
+        var event_type: []const u8 = "";
+        var data_buf: [SSE_LINE_BUF]u8 = undefined;
+        var data_len: usize = 0;
+
+        var transfer_buf: [SSE_LINE_BUF]u8 = undefined;
+        const reader = stream.response.reader(&transfer_buf);
+
+        while (true) {
+            const line = reader.*.takeDelimiterExclusive('\n') catch |err| switch (err) {
+                error.EndOfStream => {
+                    self.recordRequestErrorMetric(route_ids.events_eventstream, self.urlAtIndex(stream.url_idx));
+                    self.recordFailure(io, stream.url_idx);
+                    return error.StreamEnded;
+                },
+                else => {
+                    self.recordRequestErrorMetric(route_ids.events_eventstream, self.urlAtIndex(stream.url_idx));
+                    self.recordFailure(io, stream.url_idx);
+                    return err;
+                },
+            };
+
+            const trimmed = if (line.len > 0 and line[line.len - 1] == '\r') line[0 .. line.len - 1] else line;
+
+            if (trimmed.len == 0) {
+                if (data_len > 0 and event_type.len > 0) {
+                    callback.call(.{
+                        .event_type = event_type,
+                        .data = data_buf[0..data_len],
+                    });
+                }
+                event_type = "";
+                data_len = 0;
+                continue;
+            }
+
+            if (std.mem.startsWith(u8, trimmed, "event:")) {
+                var val = trimmed["event:".len..];
+                if (val.len > 0 and val[0] == ' ') val = val[1..];
+                const n = @min(val.len, event_type_buf.len);
+                @memcpy(event_type_buf[0..n], val[0..n]);
+                event_type = event_type_buf[0..n];
+            } else if (std.mem.startsWith(u8, trimmed, "data:")) {
+                var val = trimmed["data:".len..];
+                if (val.len > 0 and val[0] == ' ') val = val[1..];
+                if (data_len != 0 and data_len < data_buf.len) {
+                    data_buf[data_len] = '\n';
+                    data_len += 1;
+                }
+                const copy_len = @min(val.len, data_buf.len - data_len);
+                if (copy_len > 0) {
+                    @memcpy(data_buf[data_len .. data_len + copy_len], val[0..copy_len]);
+                    data_len += copy_len;
+                }
+            }
+        }
+    }
+
+    fn observeRequestDuration(self: *BeaconApiClient, route_id: []const u8, started_ns: u64) void {
+        if (self.metrics) |metrics| {
+            metrics.observeRestApiRequest(route_id, nsToSeconds(time.awakeNanoseconds(self.http_client.io) -| started_ns));
+        }
+    }
+
+    fn observeStreamDuration(self: *BeaconApiClient, route_id: []const u8, io: Io, started_ns: u64) void {
+        if (self.metrics) |metrics| {
+            metrics.observeRestApiStream(route_id, nsToSeconds(time.awakeNanoseconds(io) -| started_ns));
+        }
+    }
+
+    fn nsToSeconds(ns: u64) f64 {
+        return @as(f64, @floatFromInt(ns)) / @as(f64, std.time.ns_per_s);
     }
 
     // -----------------------------------------------------------------------
@@ -409,55 +1038,28 @@ pub const BeaconApiClient = struct {
 
     /// Perform a GET request and return the response body (caller frees).
     ///
-    fn get(self: *BeaconApiClient, io: Io, path: []const u8) ![]const u8 {
-        return self.getWithTimeout(io, path, self.request_timeout_ms);
+    fn get(self: *BeaconApiClient, io: Io, route_id: []const u8, path: []const u8) ![]const u8 {
+        return self.getWithTimeout(io, route_id, path, self.request_timeout_ms);
     }
 
-    fn getWithTimeout(self: *BeaconApiClient, io: Io, path: []const u8, timeout_ms: u64) ![]const u8 {
-        const start_idx = self.activeUrlIndex();
-        const total_urls = self.totalUrlCount();
-        const deadline_ns = requestDeadlineNs(io, timeout_ms);
-        var last_err: anyerror = error.HttpError;
-        var active_failure_recorded = false;
-        var attempted_any = false;
-
-        for (0..total_urls) |offset| {
-            const attempt_timeout_ms = remainingTimeoutMs(io, deadline_ns) catch |err| {
-                return if (attempted_any) last_err else err;
-            };
-            const url_idx = (start_idx + offset) % total_urls;
-            const base_url = self.urlAtIndex(url_idx);
-            const result = self.runTimedRequest(io, attempt_timeout_ms, getBlocking, .{ self, io, base_url, path }) catch |err| {
-                attempted_any = true;
-                if (err != error.Canceled and !active_failure_recorded and url_idx == start_idx) {
-                    self.recordFailure(io, start_idx);
-                    active_failure_recorded = true;
-                }
-                last_err = err;
-                continue;
-            };
-            switch (result) {
-                .success => |body| {
-                    self.recordSuccessAt(url_idx);
-                    return body;
-                },
-                .failure => |err| {
-                    attempted_any = true;
-                    if (err != error.Canceled and !active_failure_recorded and url_idx == start_idx) {
-                        self.recordFailure(io, start_idx);
-                        active_failure_recorded = true;
-                    }
-                    last_err = err;
-                },
-                .canceled => return error.Canceled,
-                else => unreachable,
-            }
-        }
-
-        return last_err;
+    fn getWithTimeout(self: *BeaconApiClient, io: Io, route_id: []const u8, path: []const u8, timeout_ms: u64) ![]const u8 {
+        const result = try self.executeRequestWithFallbacks(io, timeout_ms, .{ .get = .{
+            .route_id = route_id,
+            .path = path,
+        } });
+        return switch (result) {
+            .success => |body| body,
+            .canceled => error.Canceled,
+            .failure => |err| err,
+            else => unreachable,
+        };
     }
 
-    fn getBlocking(self: *BeaconApiClient, _: Io, base_url: []const u8, path: []const u8) ![]const u8 {
+    fn getBlocking(self: *BeaconApiClient, _: Io, route_id: []const u8, base_url: []const u8, path: []const u8) ![]const u8 {
+        const started_ns = time.awakeNanoseconds(self.http_client.io);
+        defer self.observeRequestDuration(route_id, started_ns);
+        errdefer self.recordRequestErrorMetric(route_id, base_url);
+
         const url = try std.fmt.allocPrint(self.allocator, "{s}{s}", .{ base_url, path });
         defer self.allocator.free(url);
 
@@ -496,51 +1098,24 @@ pub const BeaconApiClient = struct {
     /// Perform a GET request with Accept: application/octet-stream.
     /// Returns the raw SSZ bytes and parsed response headers.
     /// Caller must free the returned SszGetResponse.body.
-    fn getSsz(self: *BeaconApiClient, io: Io, path: []const u8) !SszGetResponse {
-        const start_idx = self.activeUrlIndex();
-        const total_urls = self.totalUrlCount();
-        const deadline_ns = requestDeadlineNs(io, self.request_timeout_ms);
-        var last_err: anyerror = error.HttpError;
-        var active_failure_recorded = false;
-        var attempted_any = false;
-
-        for (0..total_urls) |offset| {
-            const attempt_timeout_ms = remainingTimeoutMs(io, deadline_ns) catch |err| {
-                return if (attempted_any) last_err else err;
-            };
-            const url_idx = (start_idx + offset) % total_urls;
-            const base_url = self.urlAtIndex(url_idx);
-            const result = self.runTimedRequest(io, attempt_timeout_ms, getSszBlocking, .{ self, io, base_url, path }) catch |err| {
-                attempted_any = true;
-                if (err != error.Canceled and !active_failure_recorded and url_idx == start_idx) {
-                    self.recordFailure(io, start_idx);
-                    active_failure_recorded = true;
-                }
-                last_err = err;
-                continue;
-            };
-            switch (result) {
-                .success_ssz => |response| {
-                    self.recordSuccessAt(url_idx);
-                    return response;
-                },
-                .failure => |err| {
-                    attempted_any = true;
-                    if (err != error.Canceled and !active_failure_recorded and url_idx == start_idx) {
-                        self.recordFailure(io, start_idx);
-                        active_failure_recorded = true;
-                    }
-                    last_err = err;
-                },
-                .canceled => return error.Canceled,
-                else => unreachable,
-            }
-        }
-
-        return last_err;
+    fn getSsz(self: *BeaconApiClient, io: Io, route_id: []const u8, path: []const u8) !SszGetResponse {
+        const result = try self.executeRequestWithFallbacks(io, self.request_timeout_ms, .{ .get_ssz = .{
+            .route_id = route_id,
+            .path = path,
+        } });
+        return switch (result) {
+            .success_ssz => |response| response,
+            .canceled => error.Canceled,
+            .failure => |err| err,
+            else => unreachable,
+        };
     }
 
-    fn getSszBlocking(self: *BeaconApiClient, _: Io, base_url: []const u8, path: []const u8) !SszGetResponse {
+    fn getSszBlocking(self: *BeaconApiClient, _: Io, route_id: []const u8, base_url: []const u8, path: []const u8) !SszGetResponse {
+        const started_ns = time.awakeNanoseconds(self.http_client.io);
+        defer self.observeRequestDuration(route_id, started_ns);
+        errdefer self.recordRequestErrorMetric(route_id, base_url);
+
         const url = try std.fmt.allocPrint(self.allocator, "{s}{s}", .{ base_url, path });
         defer self.allocator.free(url);
 
@@ -609,51 +1184,23 @@ pub const BeaconApiClient = struct {
     /// Perform a POST request with JSON body and return the response body (caller frees).
     ///
     /// Pass an empty body (`""`) for POST endpoints that don't require a body.
-    fn post(self: *BeaconApiClient, io: Io, path: []const u8, body: []const u8) ![]const u8 {
-        const start_idx = self.activeUrlIndex();
-        const total_urls = self.totalUrlCount();
-        const deadline_ns = requestDeadlineNs(io, self.request_timeout_ms);
-        var last_err: anyerror = error.HttpError;
-        var active_failure_recorded = false;
-        var attempted_any = false;
-
-        for (0..total_urls) |offset| {
-            const attempt_timeout_ms = remainingTimeoutMs(io, deadline_ns) catch |err| {
-                return if (attempted_any) last_err else err;
-            };
-            const url_idx = (start_idx + offset) % total_urls;
-            const base_url = self.urlAtIndex(url_idx);
-            const result = self.runTimedRequest(io, attempt_timeout_ms, postBlocking, .{ self, io, base_url, path, body }) catch |err| {
-                attempted_any = true;
-                if (err != error.Canceled and !active_failure_recorded and url_idx == start_idx) {
-                    self.recordFailure(io, start_idx);
-                    active_failure_recorded = true;
-                }
-                last_err = err;
-                continue;
-            };
-            switch (result) {
-                .success => |response| {
-                    self.recordSuccessAt(url_idx);
-                    return response;
-                },
-                .failure => |err| {
-                    attempted_any = true;
-                    if (err != error.Canceled and !active_failure_recorded and url_idx == start_idx) {
-                        self.recordFailure(io, start_idx);
-                        active_failure_recorded = true;
-                    }
-                    last_err = err;
-                },
-                .canceled => return error.Canceled,
-                else => unreachable,
-            }
-        }
-
-        return last_err;
+    fn post(self: *BeaconApiClient, io: Io, route_id: []const u8, path: []const u8, body: []const u8) ![]const u8 {
+        const result = try self.executeRequestWithFallbacks(io, self.request_timeout_ms, .{
+            .post = .{ .route_id = route_id, .path = path, .body = body },
+        });
+        return switch (result) {
+            .success => |response| response,
+            .canceled => error.Canceled,
+            .failure => |err| err,
+            else => unreachable,
+        };
     }
 
-    fn postBlocking(self: *BeaconApiClient, _: Io, base_url: []const u8, path: []const u8, body: []const u8) ![]const u8 {
+    fn postBlocking(self: *BeaconApiClient, _: Io, route_id: []const u8, base_url: []const u8, path: []const u8, body: []const u8) ![]const u8 {
+        const started_ns = time.awakeNanoseconds(self.http_client.io);
+        defer self.observeRequestDuration(route_id, started_ns);
+        errdefer self.recordRequestErrorMetric(route_id, base_url);
+
         const url = try std.fmt.allocPrint(self.allocator, "{s}{s}", .{ base_url, path });
         defer self.allocator.free(url);
 
@@ -701,59 +1248,36 @@ pub const BeaconApiClient = struct {
     }
 
     /// Perform a POST with no response body required (fire-and-forget).
-    fn postNoResponse(self: *BeaconApiClient, io: Io, path: []const u8, body: []const u8) !void {
-        const resp = try self.post(io, path, body);
+    fn postNoResponse(self: *BeaconApiClient, io: Io, route_id: []const u8, path: []const u8, body: []const u8) !void {
+        const resp = try self.post(io, route_id, path, body);
         self.allocator.free(resp);
     }
 
     /// Perform a POST request with SSZ body (Content-Type: application/octet-stream).
     /// The Eth-Consensus-Version header is included for fork context.
     /// Returns void on success; errors on non-2xx status.
-    fn postSsz(self: *BeaconApiClient, io: Io, path: []const u8, body: []const u8, fork_name: []const u8) !void {
-        const start_idx = self.activeUrlIndex();
-        const total_urls = self.totalUrlCount();
-        const deadline_ns = requestDeadlineNs(io, self.request_timeout_ms);
-        var last_err: anyerror = error.HttpError;
-        var active_failure_recorded = false;
-        var attempted_any = false;
-
-        for (0..total_urls) |offset| {
-            const attempt_timeout_ms = remainingTimeoutMs(io, deadline_ns) catch |err| {
-                return if (attempted_any) last_err else err;
-            };
-            const url_idx = (start_idx + offset) % total_urls;
-            const base_url = self.urlAtIndex(url_idx);
-            const result = self.runTimedRequest(io, attempt_timeout_ms, postSszBlocking, .{ self, io, base_url, path, body, fork_name }) catch |err| {
-                attempted_any = true;
-                if (err != error.Canceled and !active_failure_recorded and url_idx == start_idx) {
-                    self.recordFailure(io, start_idx);
-                    active_failure_recorded = true;
-                }
-                last_err = err;
-                continue;
-            };
-            switch (result) {
-                .success_void => {
-                    self.recordSuccessAt(url_idx);
-                    return;
-                },
-                .failure => |err| {
-                    attempted_any = true;
-                    if (err != error.Canceled and !active_failure_recorded and url_idx == start_idx) {
-                        self.recordFailure(io, start_idx);
-                        active_failure_recorded = true;
-                    }
-                    last_err = err;
-                },
-                .canceled => return error.Canceled,
-                else => unreachable,
-            }
-        }
-
-        return last_err;
+    fn postSsz(self: *BeaconApiClient, io: Io, route_id: []const u8, path: []const u8, body: []const u8, fork_name: []const u8) !void {
+        const result = try self.executeRequestWithFallbacks(io, self.request_timeout_ms, .{
+            .post_ssz = .{
+                .route_id = route_id,
+                .path = path,
+                .body = body,
+                .fork_name = fork_name,
+            },
+        });
+        return switch (result) {
+            .success_void => {},
+            .canceled => error.Canceled,
+            .failure => |err| err,
+            else => unreachable,
+        };
     }
 
-    fn postSszBlocking(self: *BeaconApiClient, _: Io, base_url: []const u8, path: []const u8, body: []const u8, fork_name: []const u8) !void {
+    fn postSszBlocking(self: *BeaconApiClient, _: Io, route_id: []const u8, base_url: []const u8, path: []const u8, body: []const u8, fork_name: []const u8) !void {
+        const started_ns = time.awakeNanoseconds(self.http_client.io);
+        defer self.observeRequestDuration(route_id, started_ns);
+        errdefer self.recordRequestErrorMetric(route_id, base_url);
+
         const url = try std.fmt.allocPrint(self.allocator, "{s}{s}", .{ base_url, path });
         defer self.allocator.free(url);
 
@@ -800,7 +1324,7 @@ pub const BeaconApiClient = struct {
 
     /// GET /eth/v1/beacon/genesis
     pub fn getGenesis(self: *BeaconApiClient, io: Io) !GenesisResponse {
-        const body = try self.get(io, "/eth/v1/beacon/genesis");
+        const body = try self.get(io, route_ids.beacon_get_genesis, "/eth/v1/beacon/genesis");
         defer self.allocator.free(body);
 
         const Parsed = struct {
@@ -839,7 +1363,7 @@ pub const BeaconApiClient = struct {
     /// accept either snake_case or SCREAMING_SNAKE_CASE and only compare fields
     /// that are present.
     pub fn getConfigSpec(self: *BeaconApiClient, io: Io) !ConfigSpecResponse {
-        const body = try self.get(io, "/eth/v1/config/spec");
+        const body = try self.get(io, route_ids.config_get_spec, "/eth/v1/config/spec");
         defer self.allocator.free(body);
 
         var parsed = try std.json.parseFromSlice(std.json.Value, self.allocator, body, .{});
@@ -872,7 +1396,10 @@ pub const BeaconApiClient = struct {
             .electra_fork_epoch = try parseUintField(data, &.{ "electra_fork_epoch", "ELECTRA_FORK_EPOCH" }),
             .fulu_fork_version = try parseHexField(data, &.{ "fulu_fork_version", "FULU_FORK_VERSION" }, 4),
             .fulu_fork_epoch = try parseUintField(data, &.{ "fulu_fork_epoch", "FULU_FORK_EPOCH" }),
+            .gloas_fork_version = try parseHexField(data, &.{ "gloas_fork_version", "GLOAS_FORK_VERSION" }, 4),
+            .gloas_fork_epoch = try parseUintField(data, &.{ "gloas_fork_epoch", "GLOAS_FORK_EPOCH" }),
             .seconds_per_slot = try parseUintField(data, &.{ "seconds_per_slot", "SECONDS_PER_SLOT" }),
+            .slot_duration_ms = try parseUintField(data, &.{ "slot_duration_ms", "SLOT_DURATION_MS" }),
             .min_validator_withdrawability_delay = try parseUintField(data, &.{ "min_validator_withdrawability_delay", "MIN_VALIDATOR_WITHDRAWABILITY_DELAY" }),
             .shard_committee_period = try parseUintField(data, &.{ "shard_committee_period", "SHARD_COMMITTEE_PERIOD" }),
             .eth1_follow_distance = try parseUintField(data, &.{ "eth1_follow_distance", "ETH1_FOLLOW_DISTANCE" }),
@@ -882,10 +1409,15 @@ pub const BeaconApiClient = struct {
             .min_per_epoch_churn_limit = try parseUintField(data, &.{ "min_per_epoch_churn_limit", "MIN_PER_EPOCH_CHURN_LIMIT" }),
             .max_per_epoch_activation_churn_limit = try parseUintField(data, &.{ "max_per_epoch_activation_churn_limit", "MAX_PER_EPOCH_ACTIVATION_CHURN_LIMIT" }),
             .churn_limit_quotient = try parseUintField(data, &.{ "churn_limit_quotient", "CHURN_LIMIT_QUOTIENT" }),
+            .proposer_reorg_cutoff_bps = try parseUintField(data, &.{ "proposer_reorg_cutoff_bps", "PROPOSER_REORG_CUTOFF_BPS" }),
+            .attestation_due_bps = try parseUintField(data, &.{ "attestation_due_bps", "ATTESTATION_DUE_BPS" }),
+            .attestation_due_bps_gloas = try parseUintField(data, &.{ "attestation_due_bps_gloas", "ATTESTATION_DUE_BPS_GLOAS" }),
             .deposit_contract_address = try parseHexField(data, &.{ "deposit_contract_address", "DEPOSIT_CONTRACT_ADDRESS" }, 20),
+            .blob_sidecar_subnet_count = try parseUintField(data, &.{ "blob_sidecar_subnet_count", "BLOB_SIDECAR_SUBNET_COUNT" }),
             .max_committees_per_slot = try parseUintField(data, &.{ "max_committees_per_slot", "MAX_COMMITTEES_PER_SLOT" }),
             .target_committee_size = try parseUintField(data, &.{ "target_committee_size", "TARGET_COMMITTEE_SIZE" }),
             .max_validators_per_committee = try parseUintField(data, &.{ "max_validators_per_committee", "MAX_VALIDATORS_PER_COMMITTEE" }),
+            .max_blobs_per_block = try parseUintField(data, &.{ "max_blobs_per_block", "MAX_BLOBS_PER_BLOCK" }),
             .min_deposit_amount = try parseUintField(data, &.{ "min_deposit_amount", "MIN_DEPOSIT_AMOUNT" }),
             .max_effective_balance = try parseUintField(data, &.{ "max_effective_balance", "MAX_EFFECTIVE_BALANCE" }),
             .effective_balance_increment = try parseUintField(data, &.{ "effective_balance_increment", "EFFECTIVE_BALANCE_INCREMENT" }),
@@ -913,6 +1445,12 @@ pub const BeaconApiClient = struct {
             .max_voluntary_exits = try parseUintField(data, &.{ "max_voluntary_exits", "MAX_VOLUNTARY_EXITS" }),
             .sync_committee_size = try parseUintField(data, &.{ "sync_committee_size", "SYNC_COMMITTEE_SIZE" }),
             .epochs_per_sync_committee_period = try parseUintField(data, &.{ "epochs_per_sync_committee_period", "EPOCHS_PER_SYNC_COMMITTEE_PERIOD" }),
+            .inactivity_penalty_quotient_altair = try parseUintField(data, &.{ "inactivity_penalty_quotient_altair", "INACTIVITY_PENALTY_QUOTIENT_ALTAIR" }),
+            .min_slashing_penalty_quotient_altair = try parseUintField(data, &.{ "min_slashing_penalty_quotient_altair", "MIN_SLASHING_PENALTY_QUOTIENT_ALTAIR" }),
+            .proportional_slashing_multiplier_altair = try parseUintField(data, &.{ "proportional_slashing_multiplier_altair", "PROPORTIONAL_SLASHING_MULTIPLIER_ALTAIR" }),
+            .blob_sidecar_subnet_count_electra = try parseUintField(data, &.{ "blob_sidecar_subnet_count_electra", "BLOB_SIDECAR_SUBNET_COUNT_ELECTRA" }),
+            .max_blobs_per_block_electra = try parseUintField(data, &.{ "max_blobs_per_block_electra", "MAX_BLOBS_PER_BLOCK_ELECTRA" }),
+            .blob_schedule = try parseBlobScheduleField(self.allocator, data, &.{ "blob_schedule", "BLOB_SCHEDULE" }),
         };
     }
 
@@ -920,7 +1458,7 @@ pub const BeaconApiClient = struct {
     ///
     /// Returns the current canonical head slot and block root.
     pub fn getHeadHeaderSummary(self: *BeaconApiClient, io: Io) !HeadHeaderSummary {
-        const body = try self.get(io, "/eth/v1/beacon/headers/head");
+        const body = try self.get(io, route_ids.beacon_get_header, "/eth/v1/beacon/headers/head");
         defer self.allocator.free(body);
 
         const Parsed = struct {
@@ -954,7 +1492,7 @@ pub const BeaconApiClient = struct {
     ///
     /// Returns the current finalized checkpoint epoch.
     pub fn getFinalizedCheckpointEpoch(self: *BeaconApiClient, io: Io) !u64 {
-        const body = try self.get(io, "/eth/v1/beacon/states/head/finality_checkpoints");
+        const body = try self.get(io, route_ids.beacon_get_state_finality_checkpoints, "/eth/v1/beacon/states/head/finality_checkpoints");
         defer self.allocator.free(body);
 
         const Parsed = struct {
@@ -986,7 +1524,7 @@ pub const BeaconApiClient = struct {
         const path = try std.fmt.allocPrint(self.allocator, "/eth/v1/validator/duties/proposer/{d}", .{epoch});
         defer self.allocator.free(path);
 
-        const body = try self.get(io, path);
+        const body = try self.get(io, route_ids.validator_get_proposer_duties, path);
         defer self.allocator.free(body);
 
         const ProposerDutyJson = struct {
@@ -1031,7 +1569,7 @@ pub const BeaconApiClient = struct {
         }
         try body_buf.writer.writeByte(']');
 
-        const resp = try self.post(io, path, body_buf.written());
+        const resp = try self.post(io, route_ids.validator_get_attester_duties, path, body_buf.written());
         defer self.allocator.free(resp);
 
         const AttesterDutyJson = struct {
@@ -1083,7 +1621,7 @@ pub const BeaconApiClient = struct {
         }
         try body_buf.writer.writeByte(']');
 
-        const resp = try self.post(io, path, body_buf.written());
+        const resp = try self.post(io, route_ids.validator_get_sync_committee_duties, path, body_buf.written());
         defer self.allocator.free(resp);
 
         const SyncDutyJson = struct {
@@ -1135,7 +1673,7 @@ pub const BeaconApiClient = struct {
         }
         try body_buf.writer.writeByte(']');
 
-        const resp = try self.post(io, "/eth/v1/beacon/states/head/validators", body_buf.written());
+        const resp = try self.post(io, route_ids.beacon_get_state_validators, "/eth/v1/beacon/states/head/validators", body_buf.written());
         defer self.allocator.free(resp);
 
         const ValidatorJson = struct {
@@ -1238,7 +1776,7 @@ pub const BeaconApiClient = struct {
         const path = try self.buildProduceBlockPath(slot, randao_reveal, graffiti, opts);
         defer self.allocator.free(path);
 
-        const body = try self.get(io, path);
+        const body = try self.get(io, route_ids.validator_produce_block_v3, path);
         // Return the raw JSON body — callers parse what they need.
         return .{ .block_ssz = body, .blinded = false };
     }
@@ -1252,7 +1790,7 @@ pub const BeaconApiClient = struct {
     ) !void {
         const path = try self.buildPublishBlockPath("/eth/v2/beacon/blocks", broadcast_validation);
         defer self.allocator.free(path);
-        try self.postNoResponse(io, path, signed_block_ssz);
+        try self.postNoResponse(io, route_ids.beacon_publish_block_v2, path, signed_block_ssz);
     }
 
     /// GET /eth/v3/validator/blocks/{slot} with SSZ response.
@@ -1273,7 +1811,7 @@ pub const BeaconApiClient = struct {
         const path = try self.buildProduceBlockPath(slot, randao_reveal, graffiti, opts);
         defer self.allocator.free(path);
 
-        const resp = try self.getSsz(io, path);
+        const resp = try self.getSsz(io, route_ids.validator_produce_block_v3, path);
         return .{
             .block_ssz = resp.body,
             .fork_name = resp.fork_name,
@@ -1296,7 +1834,7 @@ pub const BeaconApiClient = struct {
     ) !void {
         const path = try self.buildPublishBlockPath("/eth/v2/beacon/blocks", broadcast_validation);
         defer self.allocator.free(path);
-        try self.postSsz(io, path, signed_block_ssz, fork_name);
+        try self.postSsz(io, route_ids.beacon_publish_block_v2, path, signed_block_ssz, fork_name);
     }
 
     // -----------------------------------------------------------------------
@@ -1317,7 +1855,7 @@ pub const BeaconApiClient = struct {
         );
         defer self.allocator.free(path);
 
-        const body = try self.get(io, path);
+        const body = try self.get(io, route_ids.validator_produce_attestation_data, path);
         defer self.allocator.free(body);
 
         const AttDataJson = struct {
@@ -1364,7 +1902,7 @@ pub const BeaconApiClient = struct {
         io: Io,
         attestations_json: []const u8,
     ) !void {
-        try self.postNoResponse(io, "/eth/v2/beacon/pool/attestations", attestations_json);
+        try self.postNoResponse(io, route_ids.beacon_publish_attestations_v2, "/eth/v2/beacon/pool/attestations", attestations_json);
     }
 
     /// POST /eth/v1/beacon/pool/voluntary_exits
@@ -1373,7 +1911,7 @@ pub const BeaconApiClient = struct {
         io: Io,
         signed_exit_json: []const u8,
     ) !void {
-        try self.postNoResponse(io, "/eth/v1/beacon/pool/voluntary_exits", signed_exit_json);
+        try self.postNoResponse(io, route_ids.beacon_publish_voluntary_exit, "/eth/v1/beacon/pool/voluntary_exits", signed_exit_json);
     }
 
     /// GET /eth/v1/validator/aggregate_attestation?slot=...&attestation_data_root=...
@@ -1391,7 +1929,7 @@ pub const BeaconApiClient = struct {
         );
         defer self.allocator.free(path);
 
-        const body = try self.get(io, path);
+        const body = try self.get(io, route_ids.validator_get_aggregate_attestation, path);
         return .{ .attestation_json = body };
     }
 
@@ -1401,7 +1939,7 @@ pub const BeaconApiClient = struct {
         io: Io,
         proofs_json: []const u8,
     ) !void {
-        try self.postNoResponse(io, "/eth/v2/validator/aggregate_and_proofs", proofs_json);
+        try self.postNoResponse(io, route_ids.validator_publish_aggregate_and_proofs_v2, "/eth/v2/validator/aggregate_and_proofs", proofs_json);
     }
 
     // -----------------------------------------------------------------------
@@ -1414,7 +1952,7 @@ pub const BeaconApiClient = struct {
         io: Io,
         messages_json: []const u8,
     ) !void {
-        try self.postNoResponse(io, "/eth/v1/beacon/pool/sync_committees", messages_json);
+        try self.postNoResponse(io, route_ids.beacon_publish_sync_committee_messages, "/eth/v1/beacon/pool/sync_committees", messages_json);
     }
 
     /// POST /eth/v1/validator/contribution_and_proofs
@@ -1423,7 +1961,7 @@ pub const BeaconApiClient = struct {
         io: Io,
         contributions_json: []const u8,
     ) !void {
-        try self.postNoResponse(io, "/eth/v1/validator/contribution_and_proofs", contributions_json);
+        try self.postNoResponse(io, route_ids.validator_publish_contribution_and_proofs, "/eth/v1/validator/contribution_and_proofs", contributions_json);
     }
 
     /// GET /eth/v1/validator/sync_committee_contribution?slot=...&subcommittee_index=...&beacon_block_root=...
@@ -1459,7 +1997,7 @@ pub const BeaconApiClient = struct {
         );
         defer self.allocator.free(path);
 
-        const body = try self.getWithTimeout(io, path, timeout_ms);
+        const body = try self.getWithTimeout(io, route_ids.validator_produce_sync_committee_contribution, path, timeout_ms);
         defer self.allocator.free(body);
 
         const ContribJson = struct {
@@ -1530,7 +2068,7 @@ pub const BeaconApiClient = struct {
         }
         try body.writer.writeByte(']');
 
-        try self.postNoResponse(io, "/eth/v1/validator/beacon_committee_subscriptions", body.written());
+        try self.postNoResponse(io, route_ids.validator_prepare_beacon_committee_subscriptions, "/eth/v1/validator/beacon_committee_subscriptions", body.written());
     }
 
     /// POST /eth/v1/validator/sync_committee_subscriptions
@@ -1555,7 +2093,7 @@ pub const BeaconApiClient = struct {
         }
         try body.writer.writeByte(']');
 
-        try self.postNoResponse(io, "/eth/v1/validator/sync_committee_subscriptions", body.written());
+        try self.postNoResponse(io, route_ids.validator_prepare_sync_committee_subscriptions, "/eth/v1/validator/sync_committee_subscriptions", body.written());
     }
 
     /// POST /eth/v1/validator/prepare_beacon_proposer
@@ -1564,7 +2102,7 @@ pub const BeaconApiClient = struct {
         io: Io,
         registrations_json: []const u8,
     ) !void {
-        try self.postNoResponse(io, "/eth/v1/validator/prepare_beacon_proposer", registrations_json);
+        try self.postNoResponse(io, route_ids.validator_prepare_beacon_proposer, "/eth/v1/validator/prepare_beacon_proposer", registrations_json);
     }
 
     // -----------------------------------------------------------------------
@@ -1580,7 +2118,7 @@ pub const BeaconApiClient = struct {
         io: Io,
         registrations_json: []const u8,
     ) !void {
-        try self.postNoResponse(io, "/eth/v1/validator/register_validator", registrations_json);
+        try self.postNoResponse(io, route_ids.validator_register_validator, "/eth/v1/validator/register_validator", registrations_json);
     }
 
     /// POST /eth/v2/beacon/blinded_blocks with SSZ body.
@@ -1596,7 +2134,7 @@ pub const BeaconApiClient = struct {
     ) !void {
         const path = try self.buildPublishBlockPath("/eth/v2/beacon/blinded_blocks", broadcast_validation);
         defer self.allocator.free(path);
-        try self.postSsz(io, path, signed_block_ssz, fork_name);
+        try self.postSsz(io, route_ids.beacon_publish_blinded_block_v2, path, signed_block_ssz, fork_name);
     }
 
     // -----------------------------------------------------------------------
@@ -1620,27 +2158,8 @@ pub const BeaconApiClient = struct {
     ) !void {
         const path = try self.buildEventsPath(topics);
         defer self.allocator.free(path);
-
-        const start_idx = self.activeUrlIndex();
-        const total_urls = self.totalUrlCount();
-        var last_err: anyerror = error.StreamEnded;
-
-        for (0..total_urls) |offset| {
-            const url_idx = (start_idx + offset) % total_urls;
-            self.subscribeToEventsOnUrl(io, url_idx, path, callback) catch |err| {
-                if (err == error.Canceled) return err;
-                last_err = err;
-                if (offset + 1 < total_urls) {
-                    log.warn("SSE stream unavailable on beacon node url={s}; trying next", .{
-                        self.urlAtIndex(url_idx),
-                    });
-                }
-                continue;
-            };
-            return;
-        }
-
-        return last_err;
+        var stream = try self.connectSseWithFallbacks(io, path);
+        return self.processConnectedSseStream(io, &stream, callback);
     }
 
     fn buildEventsPath(self: *BeaconApiClient, topics: []const []const u8) ![]u8 {
@@ -1658,104 +2177,6 @@ pub const BeaconApiClient = struct {
         );
     }
 
-    fn subscribeToEventsOnUrl(
-        self: *BeaconApiClient,
-        io: Io,
-        url_idx: usize,
-        path: []const u8,
-        callback: SseCallback,
-    ) !void {
-        const url = try std.fmt.allocPrint(self.allocator, "{s}{s}", .{ self.urlAtIndex(url_idx), path });
-        defer self.allocator.free(url);
-
-        log.info("subscribing to SSE events url={s}", .{self.urlAtIndex(url_idx)});
-
-        const uri = try std.Uri.parse(url);
-        var req = self.sse_client.request(.GET, uri, .{
-            .keep_alive = true,
-            .extra_headers = &.{
-                .{ .name = "Accept", .value = "text/event-stream" },
-                .{ .name = "Cache-Control", .value = "no-cache" },
-            },
-        }) catch |err| {
-            self.recordFailure(io, url_idx);
-            return err;
-        };
-        defer req.deinit();
-
-        req.sendBodiless() catch |err| {
-            self.recordFailure(io, url_idx);
-            return err;
-        };
-
-        var redirect_buf: [1024]u8 = undefined;
-        var response = req.receiveHead(&redirect_buf) catch |err| {
-            self.recordFailure(io, url_idx);
-            return err;
-        };
-
-        if (response.head.status != .ok) {
-            log.err("SSE subscription failed: HTTP {d}", .{@intFromEnum(response.head.status)});
-            self.recordFailure(io, url_idx);
-            return error.HttpError;
-        }
-
-        self.recordSuccessAt(url_idx);
-
-        // Parse SSE stream line by line.
-        var event_type_buf: [128]u8 = undefined;
-        var event_type: []const u8 = "";
-        var data_buf: [SSE_LINE_BUF]u8 = undefined;
-        var data_len: usize = 0;
-
-        var transfer_buf: [SSE_LINE_BUF]u8 = undefined;
-        const reader = response.reader(&transfer_buf);
-
-        while (true) {
-            // Read one line at a time.
-            const line = reader.*.takeDelimiterExclusive('\n') catch |err| switch (err) {
-                error.EndOfStream => {
-                    self.recordFailure(io, url_idx);
-                    return error.StreamEnded;
-                },
-                else => {
-                    self.recordFailure(io, url_idx);
-                    return err;
-                },
-            };
-
-            // Strip trailing \r if present.
-            const trimmed = if (line.len > 0 and line[line.len - 1] == '\r') line[0 .. line.len - 1] else line;
-
-            if (trimmed.len == 0) {
-                // Empty line = dispatch event (if we have data).
-                if (data_len > 0 and event_type.len > 0) {
-                    callback.call(.{
-                        .event_type = event_type,
-                        .data = data_buf[0..data_len],
-                    });
-                }
-                // Reset for next event.
-                event_type = "";
-                data_len = 0;
-                continue;
-            }
-
-            if (std.mem.startsWith(u8, trimmed, "event:")) {
-                const ev = std.mem.trimStart(u8, trimmed[6..], " ");
-                const copy_len = @min(ev.len, event_type_buf.len);
-                @memcpy(event_type_buf[0..copy_len], ev[0..copy_len]);
-                event_type = event_type_buf[0..copy_len];
-            } else if (std.mem.startsWith(u8, trimmed, "data:")) {
-                const d = std.mem.trimStart(u8, trimmed[5..], " ");
-                const copy_len = @min(d.len, data_buf.len - data_len);
-                @memcpy(data_buf[data_len .. data_len + copy_len], d[0..copy_len]);
-                data_len += copy_len;
-            }
-            // Ignore "id:", "retry:", and comments (":").
-        }
-    }
-
     // -----------------------------------------------------------------------
     // Liveness (doppelganger)
     // -----------------------------------------------------------------------
@@ -1766,7 +2187,7 @@ pub const BeaconApiClient = struct {
     /// Returns sync status of the beacon node.
     /// TS: Api.node.getSyncingStatus()
     pub fn getNodeSyncing(self: *BeaconApiClient, io: Io) !NodeSyncingResponse {
-        const body = try self.get(io, "/eth/v1/node/syncing");
+        const body = try self.get(io, route_ids.node_get_syncing_status, "/eth/v1/node/syncing");
         defer self.allocator.free(body);
 
         const Parsed = struct {
@@ -1810,7 +2231,7 @@ pub const BeaconApiClient = struct {
         }
         try body_buf.writer.writeByte(']');
 
-        const resp = try self.post(io, path, body_buf.written());
+        const resp = try self.post(io, route_ids.validator_get_liveness, path, body_buf.written());
         defer self.allocator.free(resp);
 
         const LivenessJson = struct {
@@ -1844,6 +2265,11 @@ pub const GenesisResponse = struct {
 };
 
 pub const ConfigSpecResponse = struct {
+    pub const BlobScheduleEntry = struct {
+        epoch: u64,
+        max_blobs_per_block: u64,
+    };
+
     min_genesis_active_validator_count: ?u64 = null,
     min_genesis_time: ?u64 = null,
     genesis_delay: ?u64 = null,
@@ -1860,7 +2286,10 @@ pub const ConfigSpecResponse = struct {
     electra_fork_epoch: ?u64 = null,
     fulu_fork_version: ?[4]u8 = null,
     fulu_fork_epoch: ?u64 = null,
+    gloas_fork_version: ?[4]u8 = null,
+    gloas_fork_epoch: ?u64 = null,
     seconds_per_slot: ?u64 = null,
+    slot_duration_ms: ?u64 = null,
     min_validator_withdrawability_delay: ?u64 = null,
     shard_committee_period: ?u64 = null,
     eth1_follow_distance: ?u64 = null,
@@ -1870,10 +2299,15 @@ pub const ConfigSpecResponse = struct {
     min_per_epoch_churn_limit: ?u64 = null,
     max_per_epoch_activation_churn_limit: ?u64 = null,
     churn_limit_quotient: ?u64 = null,
+    proposer_reorg_cutoff_bps: ?u64 = null,
+    attestation_due_bps: ?u64 = null,
+    attestation_due_bps_gloas: ?u64 = null,
     deposit_contract_address: ?[20]u8 = null,
+    blob_sidecar_subnet_count: ?u64 = null,
     max_committees_per_slot: ?u64 = null,
     target_committee_size: ?u64 = null,
     max_validators_per_committee: ?u64 = null,
+    max_blobs_per_block: ?u64 = null,
     min_deposit_amount: ?u64 = null,
     max_effective_balance: ?u64 = null,
     effective_balance_increment: ?u64 = null,
@@ -1901,6 +2335,17 @@ pub const ConfigSpecResponse = struct {
     max_voluntary_exits: ?u64 = null,
     sync_committee_size: ?u64 = null,
     epochs_per_sync_committee_period: ?u64 = null,
+    inactivity_penalty_quotient_altair: ?u64 = null,
+    min_slashing_penalty_quotient_altair: ?u64 = null,
+    proportional_slashing_multiplier_altair: ?u64 = null,
+    blob_sidecar_subnet_count_electra: ?u64 = null,
+    max_blobs_per_block_electra: ?u64 = null,
+    blob_schedule: []const BlobScheduleEntry = &.{},
+
+    pub fn deinit(self: *ConfigSpecResponse, allocator: Allocator) void {
+        if (self.blob_schedule.len > 0) allocator.free(self.blob_schedule);
+        self.* = undefined;
+    }
 };
 
 pub const ValidatorIndexAndStatus = struct {
@@ -1968,7 +2413,8 @@ fn parseUintField(
 }
 
 test "buildProduceBlockPath includes extended produceBlock opts" {
-    var client = BeaconApiClient.init(std.testing.allocator, std.testing.io, "http://127.0.0.1:5052");
+    var client = try BeaconApiClient.init(std.testing.allocator, std.testing.io, "http://127.0.0.1:5052");
+    defer client.deinit();
     const path = try client.buildProduceBlockPath(
         7,
         [_]u8{0x11} ** 96,
@@ -1993,7 +2439,8 @@ test "buildProduceBlockPath includes extended produceBlock opts" {
 }
 
 test "buildPublishBlockPath includes broadcast validation query" {
-    var client = BeaconApiClient.init(std.testing.allocator, std.testing.io, "http://127.0.0.1:5052");
+    var client = try BeaconApiClient.init(std.testing.allocator, std.testing.io, "http://127.0.0.1:5052");
+    defer client.deinit();
     const path = try client.buildPublishBlockPath("/eth/v2/beacon/blinded_blocks", .consensus);
     defer std.testing.allocator.free(path);
 
@@ -2004,12 +2451,13 @@ test "buildPublishBlockPath includes broadcast validation query" {
 }
 
 test "BeaconApiClient promotes successful fallback URL to active" {
-    var client = BeaconApiClient.initWithFallbacks(
+    var client = try BeaconApiClient.initWithFallbacks(
         std.testing.allocator,
         std.testing.io,
         "http://127.0.0.1:5052",
         &.{ "http://127.0.0.1:5053", "http://127.0.0.1:5054" },
     );
+    defer client.deinit();
 
     try std.testing.expectEqualStrings("http://127.0.0.1:5052", client.activeUrl());
     try std.testing.expectEqual(@as(usize, 0), client.activeUrlIndex());
@@ -2025,18 +2473,82 @@ test "BeaconApiClient promotes successful fallback URL to active" {
 }
 
 test "BeaconApiClient stale failures do not clobber newer active URL" {
-    var client = BeaconApiClient.initWithFallbacks(
+    var client = try BeaconApiClient.initWithFallbacks(
         std.testing.allocator,
         std.testing.io,
         "http://127.0.0.1:5052",
         &.{"http://127.0.0.1:5053"},
     );
+    defer client.deinit();
 
     client.recordSuccessAt(1);
     client.recordFailure(std.testing.io, 0);
 
     try std.testing.expectEqual(@as(usize, 1), client.activeUrlIndex());
     try std.testing.expectEqual(@as(u64, 0), client.consecutive_failures);
+}
+
+test "BeaconApiClient falls back to highest-scored URL after primary bottoms out" {
+    var client = try BeaconApiClient.initWithFallbacks(
+        std.testing.allocator,
+        std.testing.io,
+        "http://127.0.0.1:5052",
+        &.{ "http://127.0.0.1:5053", "http://127.0.0.1:5054" },
+    );
+    defer client.deinit();
+
+    client.recordFailure(std.testing.io, 0);
+    client.recordFailure(std.testing.io, 0);
+    client.recordFailure(std.testing.io, 0);
+    client.recordFailure(std.testing.io, 0);
+    client.recordFailure(std.testing.io, 0);
+
+    try std.testing.expect(client.primaryUrlUnhealthy());
+    try std.testing.expectEqual(@as(usize, 1), client.activeUrlIndex());
+}
+
+test "BeaconApiClient race group includes degraded URLs through next healthy URL" {
+    var client = try BeaconApiClient.initWithFallbacks(
+        std.testing.allocator,
+        std.testing.io,
+        "http://127.0.0.1:5052",
+        &.{ "http://127.0.0.1:5053", "http://127.0.0.1:5054" },
+    );
+    defer client.deinit();
+
+    client.recordFailure(std.testing.io, 0);
+    client.recordFailure(std.testing.io, 1);
+
+    var group: [3]usize = undefined;
+    const count = client.fillRaceGroup(0, 0, group[0..]);
+
+    try std.testing.expectEqual(@as(usize, 3), count);
+    try std.testing.expectEqualSlices(usize, &.{ 0, 1, 2 }, group[0..count]);
+}
+
+test "BeaconApiClient initMulti rejects empty URL lists" {
+    try std.testing.expectError(
+        error.InvalidBeaconNodeUrlConfiguration,
+        BeaconApiClient.initMulti(std.testing.allocator, std.testing.io, &.{}),
+    );
+}
+
+test "BeaconApiClient race group uses only the active healthy URL" {
+    var client = try BeaconApiClient.initWithFallbacks(
+        std.testing.allocator,
+        std.testing.io,
+        "http://127.0.0.1:5052",
+        &.{ "http://127.0.0.1:5053", "http://127.0.0.1:5054" },
+    );
+    defer client.deinit();
+
+    client.recordSuccessAt(2);
+
+    var group: [3]usize = undefined;
+    const count = client.fillRaceGroup(2, 0, group[0..]);
+
+    try std.testing.expectEqual(@as(usize, 1), count);
+    try std.testing.expectEqualSlices(usize, &.{2}, group[0..count]);
 }
 
 fn parseHexField(
@@ -2059,6 +2571,35 @@ fn parseHexField(
     var out: [N]u8 = undefined;
     _ = try std.fmt.hexToBytes(&out, hex);
     return out;
+}
+
+fn parseBlobScheduleField(
+    allocator: Allocator,
+    object: std.json.ObjectMap,
+    comptime names: []const []const u8,
+) ![]const ConfigSpecResponse.BlobScheduleEntry {
+    const value = getObjectField(object, names) orelse return &.{};
+    const array = switch (value) {
+        .array => |items| items,
+        else => return error.InvalidResponse,
+    };
+    if (array.items.len == 0) return &.{};
+
+    const entries = try allocator.alloc(ConfigSpecResponse.BlobScheduleEntry, array.items.len);
+    errdefer allocator.free(entries);
+
+    for (array.items, entries) |item, *entry| {
+        const entry_obj = switch (item) {
+            .object => |obj| obj,
+            else => return error.InvalidResponse,
+        };
+        entry.* = .{
+            .epoch = try parseUintField(entry_obj, &.{ "epoch", "EPOCH" }) orelse return error.InvalidResponse,
+            .max_blobs_per_block = try parseUintField(entry_obj, &.{ "max_blobs_per_block", "MAX_BLOBS_PER_BLOCK" }) orelse return error.InvalidResponse,
+        };
+    }
+
+    return entries;
 }
 
 pub const AttestationDataResponse = struct {

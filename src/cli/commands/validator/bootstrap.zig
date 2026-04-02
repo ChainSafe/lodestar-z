@@ -273,7 +273,7 @@ pub fn prepareRuntime(io: Io, allocator: Allocator, opts: anytype) !PreparedRunt
         }
     }
 
-    var beacon_api = validator_mod.BeaconApiClient.initWithOptions(allocator, io, .{
+    var beacon_api = try validator_mod.BeaconApiClient.initWithOptions(allocator, io, .{
         .base_url = primary_beacon_url,
         .fallback_urls = fallback_urls,
         .request_timeout_ms = beacon_config.chain.SECONDS_PER_SLOT * std.time.ms_per_s,
@@ -291,6 +291,10 @@ pub fn prepareRuntime(io: Io, allocator: Allocator, opts: anytype) !PreparedRunt
         std.log.err("Failed to fetch beacon config spec from {s}: {}", .{ primary_beacon_url, err });
         return err;
     };
+    defer {
+        var spec = remote_spec;
+        spec.deinit(allocator);
+    }
     try ensureConfigSpecMatches(beacon_config, remote_spec);
     try validator_mod.ensureGenesisMetadata(io, allocator, paths.metadata_file, genesis);
 
@@ -557,7 +561,7 @@ fn parseCliDefaultProposerConfig(opts: anytype) !validator_mod.ProposerConfig {
     if (opts.@"builder.selection") |selection| {
         config.builder_selection = selection;
     } else if (opts.builder) {
-        config.builder_selection = .@"default";
+        config.builder_selection = .default;
     }
     if (opts.@"builder.boostFactor" != null) {
         config.builder_boost_factor = try parseBuilderBoostFactor(opts.@"builder.boostFactor");
@@ -866,8 +870,11 @@ fn ensureConfigSpecMatches(
     try compareOptionalUintField("ELECTRA_FORK_EPOCH", beacon_config.chain.ELECTRA_FORK_EPOCH, spec.electra_fork_epoch);
     try compareOptionalVersionField("FULU_FORK_VERSION", beacon_config.chain.FULU_FORK_VERSION, spec.fulu_fork_version);
     try compareOptionalUintField("FULU_FORK_EPOCH", beacon_config.chain.FULU_FORK_EPOCH, spec.fulu_fork_epoch);
+    try compareOptionalVersionField("GLOAS_FORK_VERSION", beacon_config.chain.GLOAS_FORK_VERSION, spec.gloas_fork_version);
+    try compareOptionalUintField("GLOAS_FORK_EPOCH", beacon_config.chain.GLOAS_FORK_EPOCH, spec.gloas_fork_epoch);
     try compareOptionalUintField("GENESIS_DELAY", beacon_config.chain.GENESIS_DELAY, spec.genesis_delay);
     try compareOptionalUintField("SECONDS_PER_SLOT", beacon_config.chain.SECONDS_PER_SLOT, spec.seconds_per_slot);
+    try compareOptionalUintField("SLOT_DURATION_MS", beacon_config.chain.SLOT_DURATION_MS, spec.slot_duration_ms);
     try compareOptionalUintField("MIN_GENESIS_TIME", beacon_config.chain.MIN_GENESIS_TIME, spec.min_genesis_time);
     try compareOptionalUintField("MIN_VALIDATOR_WITHDRAWABILITY_DELAY", beacon_config.chain.MIN_VALIDATOR_WITHDRAWABILITY_DELAY, spec.min_validator_withdrawability_delay);
     try compareOptionalUintField("SHARD_COMMITTEE_PERIOD", beacon_config.chain.SHARD_COMMITTEE_PERIOD, spec.shard_committee_period);
@@ -878,9 +885,14 @@ fn ensureConfigSpecMatches(
     try compareOptionalUintField("MIN_PER_EPOCH_CHURN_LIMIT", beacon_config.chain.MIN_PER_EPOCH_CHURN_LIMIT, spec.min_per_epoch_churn_limit);
     try compareOptionalUintField("MAX_PER_EPOCH_ACTIVATION_CHURN_LIMIT", beacon_config.chain.MAX_PER_EPOCH_ACTIVATION_CHURN_LIMIT, spec.max_per_epoch_activation_churn_limit);
     try compareOptionalUintField("CHURN_LIMIT_QUOTIENT", beacon_config.chain.CHURN_LIMIT_QUOTIENT, spec.churn_limit_quotient);
+    try compareOptionalUintField("PROPOSER_REORG_CUTOFF_BPS", beacon_config.chain.PROPOSER_REORG_CUTOFF_BPS, spec.proposer_reorg_cutoff_bps);
+    try compareOptionalUintField("ATTESTATION_DUE_BPS", beacon_config.chain.ATTESTATION_DUE_BPS, spec.attestation_due_bps);
+    try compareOptionalUintField("ATTESTATION_DUE_BPS_GLOAS", beacon_config.chain.ATTESTATION_DUE_BPS_GLOAS, spec.attestation_due_bps_gloas);
+    try compareOptionalUintField("BLOB_SIDECAR_SUBNET_COUNT", beacon_config.chain.BLOB_SIDECAR_SUBNET_COUNT, spec.blob_sidecar_subnet_count);
     try compareOptionalUintField("MAX_COMMITTEES_PER_SLOT", preset.MAX_COMMITTEES_PER_SLOT, spec.max_committees_per_slot);
     try compareOptionalUintField("TARGET_COMMITTEE_SIZE", preset.TARGET_COMMITTEE_SIZE, spec.target_committee_size);
     try compareOptionalUintField("MAX_VALIDATORS_PER_COMMITTEE", preset.MAX_VALIDATORS_PER_COMMITTEE, spec.max_validators_per_committee);
+    try compareOptionalUintField("MAX_BLOBS_PER_BLOCK", beacon_config.chain.MAX_BLOBS_PER_BLOCK, spec.max_blobs_per_block);
     try compareOptionalUintField("MIN_DEPOSIT_AMOUNT", preset.MIN_DEPOSIT_AMOUNT, spec.min_deposit_amount);
     try compareOptionalUintField("MAX_EFFECTIVE_BALANCE", preset.MAX_EFFECTIVE_BALANCE, spec.max_effective_balance);
     try compareOptionalUintField("EFFECTIVE_BALANCE_INCREMENT", preset.EFFECTIVE_BALANCE_INCREMENT, spec.effective_balance_increment);
@@ -908,7 +920,46 @@ fn ensureConfigSpecMatches(
     try compareOptionalUintField("MAX_VOLUNTARY_EXITS", preset.MAX_VOLUNTARY_EXITS, spec.max_voluntary_exits);
     try compareOptionalUintField("SYNC_COMMITTEE_SIZE", preset.SYNC_COMMITTEE_SIZE, spec.sync_committee_size);
     try compareOptionalUintField("EPOCHS_PER_SYNC_COMMITTEE_PERIOD", preset.EPOCHS_PER_SYNC_COMMITTEE_PERIOD, spec.epochs_per_sync_committee_period);
+    try compareOptionalUintField("INACTIVITY_PENALTY_QUOTIENT_ALTAIR", preset.INACTIVITY_PENALTY_QUOTIENT_ALTAIR, spec.inactivity_penalty_quotient_altair);
+    try compareOptionalUintField("MIN_SLASHING_PENALTY_QUOTIENT_ALTAIR", preset.MIN_SLASHING_PENALTY_QUOTIENT_ALTAIR, spec.min_slashing_penalty_quotient_altair);
+    try compareOptionalUintField("PROPORTIONAL_SLASHING_MULTIPLIER_ALTAIR", preset.PROPORTIONAL_SLASHING_MULTIPLIER_ALTAIR, spec.proportional_slashing_multiplier_altair);
+    try compareOptionalUintField("BLOB_SIDECAR_SUBNET_COUNT_ELECTRA", beacon_config.chain.BLOB_SIDECAR_SUBNET_COUNT_ELECTRA, spec.blob_sidecar_subnet_count_electra);
+    try compareOptionalUintField("MAX_BLOBS_PER_BLOCK_ELECTRA", beacon_config.chain.MAX_BLOBS_PER_BLOCK_ELECTRA, spec.max_blobs_per_block_electra);
+    try compareBlobSchedule(beacon_config.chain.BLOB_SCHEDULE, spec.blob_schedule);
     try compareOptionalHexField("DEPOSIT_CONTRACT_ADDRESS", beacon_config.chain.DEPOSIT_CONTRACT_ADDRESS, spec.deposit_contract_address);
+}
+
+fn compareBlobSchedule(
+    expected: []const config_mod.ChainConfig.BlobScheduleEntry,
+    actual: []const validator_mod.api_client.ConfigSpecResponse.BlobScheduleEntry,
+) !void {
+    if (actual.len == 0) return;
+    if (expected.len != actual.len) {
+        std.log.err("Beacon node config mismatch field=BLOB_SCHEDULE expected_len={d} actual_len={d}", .{
+            expected.len,
+            actual.len,
+        });
+        return error.BeaconConfigMismatch;
+    }
+
+    for (expected, actual, 0..) |expected_entry, actual_entry, idx| {
+        if (expected_entry.EPOCH != actual_entry.epoch) {
+            std.log.err("Beacon node config mismatch field=BLOB_SCHEDULE[{d}].EPOCH expected={d} actual={d}", .{
+                idx,
+                expected_entry.EPOCH,
+                actual_entry.epoch,
+            });
+            return error.BeaconConfigMismatch;
+        }
+        if (expected_entry.MAX_BLOBS_PER_BLOCK != actual_entry.max_blobs_per_block) {
+            std.log.err("Beacon node config mismatch field=BLOB_SCHEDULE[{d}].MAX_BLOBS_PER_BLOCK expected={d} actual={d}", .{
+                idx,
+                expected_entry.MAX_BLOBS_PER_BLOCK,
+                actual_entry.max_blobs_per_block,
+            });
+            return error.BeaconConfigMismatch;
+        }
+    }
 }
 
 fn buildSigningContext(

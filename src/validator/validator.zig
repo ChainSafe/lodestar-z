@@ -198,10 +198,11 @@ pub const ValidatorClient = struct {
         self.local_keystore_locks = std.array_list.Managed(KeystoreLock).init(allocator);
         self.runtime_mutex = .{};
 
-        self.api = BeaconApiClient.initWithOptions(allocator, io, .{
+        self.api = try BeaconApiClient.initWithOptions(allocator, io, .{
             .base_url = config.beacon_node_url,
             .fallback_urls = config.beacon_node_fallback_urls,
             .request_timeout_ms = config.seconds_per_slot * std.time.ms_per_s,
+            .metrics = self.metrics,
         });
         self.validator_store = try ValidatorStore.init(
             io,
@@ -276,7 +277,7 @@ pub const ValidatorClient = struct {
         errdefer if (self.builder_registration) |*builder_registration| builder_registration.deinit();
 
         self.doppelganger = if (config.doppelganger_protection)
-            DoppelgangerService.init(allocator, &self.api, &self.validator_store.slashing_db)
+            DoppelgangerService.init(allocator, &self.api, self.metrics, &self.validator_store.slashing_db)
         else
             null;
         errdefer if (self.doppelganger) |*doppelganger| doppelganger.deinit();
@@ -860,6 +861,10 @@ pub const ValidatorClient = struct {
         // Resolve indices first so epoch duty refreshes do not race stale mappings.
         self.index_tracker.onEpoch(self.io, epoch);
         self.applyResolvedIndices();
+
+        if (self.api.primaryUrlUnhealthy() and self.api.failoverStatus().configured) {
+            log.warn("primary beacon node is unhealthy; validator is relying on fallback URLs", .{});
+        }
 
         self.liveness_tracker.logEpochSummary(
             epoch,

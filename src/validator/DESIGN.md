@@ -72,8 +72,9 @@ Current gaps:
 
 6. Beacon-node config verification now checks a much wider consensus-critical
    subset of `/eth/v1/config/spec`, including genesis, fork versions/epochs,
-   churn, deposit contract, and core preset values. It still does not reach
-   full Lodestar-TS-style parity for every critical parameter, especially where
+   slot timing, proposer/attestation timing cutoffs, churn, deposit contract,
+   blob-sidecar limits, and core preset values. It still does not reach full
+   Lodestar-TS-style parity for every critical parameter, especially where
    different clients omit fields or expose less structured values.
 
 7. Validator persistence is intentionally simpler than Lodestar TS.
@@ -81,25 +82,21 @@ Current gaps:
    (`genesis_time`, `genesis_validators_root`) is stored in a small sidecar file
    under `validator-db/`.
 
-8. Beacon-node client failover is now request-scoped and deadline-bounded, but
-   it is still simpler than Lodestar TS.
+8. Beacon-node client failover is now request-scoped, deadline-bounded, and
+   parallel on the validator hot path, but it is still simpler than
+   Lodestar TS overall.
    The validator now retries non-streaming requests across configured beacon
-   node URLs within one shared timeout budget, and the head-tracker SSE path
-   now also walks configured URLs within one reconnect cycle before backing
-   off. The first URL that succeeds is promoted for later requests, so failover
-   is no longer gated on a sticky failure threshold or a single-URL SSE retry.
-   The remaining gap is narrower: the client still does not maintain
-   Lodestar-style per-URL health scores, dedicated fallback metrics, or
-   parallel fallback races.
-
-9. Doppelganger protection is much closer to Lodestar TS, but its observability
-   is still simpler.
-   The validator now skips doppelganger detection when starting before or at
-   genesis, skips it on restart when slashing protection shows a previous-epoch
-   attestation, and performs the late-epoch previous+current liveness checks
-   instead of the old immediate epoch-boundary poll. The remaining gap is
-   narrower: there are still no dedicated doppelganger status/epochs-checked
-   metrics like Lodestar TS exports.
+   node URLs within one shared timeout budget, and it races degraded URLs in
+   parallel through the next healthy URL instead of serializing every fallback
+   attempt. The head-tracker SSE path also walks configured URLs within one
+   reconnect cycle before backing off. The first URL that succeeds is promoted
+   for later requests, so failover is no longer gated on a sticky failure
+   threshold or a single-URL SSE retry. The client now also maintains
+   Lodestar-style per-URL health scores, exports fallback/error/request-time
+   metrics, and warns when the primary beacon node has bottomed out and the
+   validator is riding fallbacks.
+   The remaining gap is narrower: the client still does not run fully parallel
+   multi-round fallback races once it has moved past one degraded URL window.
 
 Non-gap note:
 
@@ -119,6 +116,12 @@ Non-gap note:
    `!is_syncing && !is_optimistic && !el_offline`, exports `vc_beacon_health`,
    and pauses duties on sync-status poll failures instead of reusing stale
    readiness state.
+
+5. Doppelganger protection now exports dedicated status and epochs-checked
+   metrics.
+   The validator now mirrors Lodestar TS's `vc_doppelganger_validator_status_count`
+   and `vc_doppelganger_epochs_checked_total` surfaces instead of leaving
+   doppelganger state observable only through logs.
 
 ## Architecture Overview
 

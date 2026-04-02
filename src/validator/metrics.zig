@@ -9,6 +9,7 @@ const api_mod = @import("api");
 pub const Counter = metrics_lib.Counter;
 pub const CounterVec = metrics_lib.CounterVec;
 pub const Gauge = metrics_lib.Gauge;
+pub const GaugeVec = metrics_lib.GaugeVec;
 pub const Histogram = metrics_lib.Histogram;
 pub const HistogramVec = metrics_lib.HistogramVec;
 
@@ -17,12 +18,31 @@ const block_delay_buckets = [_]f64{ 0.5, 1.0, 2.0, 4.0, 6.0, 8.0, 12.0 };
 const keymanager_response_buckets = [_]f64{ 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 2.0, 5.0 };
 const monitoring_collect_buckets = [_]f64{ 0.001, 0.01, 0.1, 1.0, 5.0 };
 const monitoring_send_buckets = [_]f64{ 0.3, 0.5, 1.0, 2.0, 5.0, 10.0 };
+const rest_api_request_buckets = [_]f64{ 0.01, 0.1, 1.0, 2.0, 5.0 };
 
 const OperationLabels = struct {
     operation_id: []const u8,
 };
 
 const MonitoringStatusLabels = struct {
+    status: []const u8,
+};
+
+const RestApiRouteLabels = struct {
+    routeId: []const u8,
+};
+
+const RestApiRouteUrlLabels = struct {
+    routeId: []const u8,
+    baseUrl: []const u8,
+};
+
+const RestApiUrlScoreLabels = struct {
+    urlIndex: u64,
+    baseUrl: []const u8,
+};
+
+const DoppelgangerStatusLabels = struct {
     status: []const u8,
 };
 
@@ -47,12 +67,19 @@ pub const ValidatorMetrics = struct {
     total_validators: Gauge(u64),
     active_validators: Gauge(u64),
     beacon_health: Gauge(u64),
+    rest_api_request_seconds: HistogramVec(f64, RestApiRouteLabels, &rest_api_request_buckets),
+    rest_api_stream_seconds: HistogramVec(f64, RestApiRouteLabels, &rest_api_request_buckets),
+    rest_api_request_errors_total: CounterVec(u64, RestApiRouteUrlLabels),
+    rest_api_request_to_fallbacks_total: CounterVec(u64, RestApiRouteUrlLabels),
+    rest_api_urls_score: GaugeVec(u64, RestApiUrlScoreLabels),
     keymanager_requests_total: CounterVec(u64, OperationLabels),
     keymanager_errors_total: CounterVec(u64, OperationLabels),
     keymanager_response_seconds: HistogramVec(f64, OperationLabels, &keymanager_response_buckets),
     keymanager_active_connections: Gauge(u64),
     monitoring_collect_data_seconds: Histogram(f64, &monitoring_collect_buckets),
     monitoring_send_data_seconds: HistogramVec(f64, MonitoringStatusLabels, &monitoring_send_buckets),
+    doppelganger_validator_status_count: GaugeVec(u64, DoppelgangerStatusLabels),
+    doppelganger_epochs_checked_total: Counter(u64),
 
     pub fn init(allocator: std.mem.Allocator) !ValidatorMetrics {
         const ro: metrics_lib.RegistryOpts = .{};
@@ -68,6 +95,36 @@ pub const ValidatorMetrics = struct {
             .total_validators = Gauge(u64).init("validator_total_count", .{}, ro),
             .active_validators = Gauge(u64).init("validator_active_count", .{}, ro),
             .beacon_health = Gauge(u64).init("vc_beacon_health", .{}, ro),
+            .rest_api_request_seconds = try HistogramVec(f64, RestApiRouteLabels, &rest_api_request_buckets).init(
+                allocator,
+                "vc_rest_api_client_request_time_seconds",
+                .{},
+                ro,
+            ),
+            .rest_api_stream_seconds = try HistogramVec(f64, RestApiRouteLabels, &rest_api_request_buckets).init(
+                allocator,
+                "vc_rest_api_client_stream_time_seconds",
+                .{},
+                ro,
+            ),
+            .rest_api_request_errors_total = try CounterVec(u64, RestApiRouteUrlLabels).init(
+                allocator,
+                "vc_rest_api_client_request_errors_total",
+                .{},
+                ro,
+            ),
+            .rest_api_request_to_fallbacks_total = try CounterVec(u64, RestApiRouteUrlLabels).init(
+                allocator,
+                "vc_rest_api_client_request_to_fallbacks_total",
+                .{},
+                ro,
+            ),
+            .rest_api_urls_score = try GaugeVec(u64, RestApiUrlScoreLabels).init(
+                allocator,
+                "vc_rest_api_client_urls_score",
+                .{},
+                ro,
+            ),
             .keymanager_requests_total = try CounterVec(u64, OperationLabels).init(
                 allocator,
                 "validator_keymanager_requests_total",
@@ -98,6 +155,17 @@ pub const ValidatorMetrics = struct {
                 .{},
                 ro,
             ),
+            .doppelganger_validator_status_count = try GaugeVec(u64, DoppelgangerStatusLabels).init(
+                allocator,
+                "vc_doppelganger_validator_status_count",
+                .{},
+                ro,
+            ),
+            .doppelganger_epochs_checked_total = Counter(u64).init(
+                "vc_doppelganger_epochs_checked_total",
+                .{},
+                ro,
+            ),
         };
     }
 
@@ -106,10 +174,16 @@ pub const ValidatorMetrics = struct {
     }
 
     pub fn deinit(self: *ValidatorMetrics) void {
+        self.rest_api_request_seconds.deinit();
+        self.rest_api_stream_seconds.deinit();
+        self.rest_api_request_errors_total.deinit();
+        self.rest_api_request_to_fallbacks_total.deinit();
+        self.rest_api_urls_score.deinit();
         self.keymanager_requests_total.deinit();
         self.keymanager_errors_total.deinit();
         self.keymanager_response_seconds.deinit();
         self.monitoring_send_data_seconds.deinit();
+        self.doppelganger_validator_status_count.deinit();
     }
 
     pub fn write(self: *ValidatorMetrics, writer: *std.Io.Writer) !void {
@@ -138,6 +212,35 @@ pub const ValidatorMetrics = struct {
         self.beacon_health.set(@intFromEnum(health));
     }
 
+    pub fn observeRestApiRequest(self: *ValidatorMetrics, route_id: []const u8, response_time_seconds: f64) void {
+        self.rest_api_request_seconds.observe(.{ .routeId = route_id }, response_time_seconds) catch return;
+    }
+
+    pub fn observeRestApiStream(self: *ValidatorMetrics, route_id: []const u8, response_time_seconds: f64) void {
+        self.rest_api_stream_seconds.observe(.{ .routeId = route_id }, response_time_seconds) catch return;
+    }
+
+    pub fn recordRestApiError(self: *ValidatorMetrics, route_id: []const u8, base_url: []const u8) void {
+        self.rest_api_request_errors_total.incr(.{
+            .routeId = route_id,
+            .baseUrl = base_url,
+        }) catch return;
+    }
+
+    pub fn recordRestApiFallback(self: *ValidatorMetrics, route_id: []const u8, base_url: []const u8) void {
+        self.rest_api_request_to_fallbacks_total.incr(.{
+            .routeId = route_id,
+            .baseUrl = base_url,
+        }) catch return;
+    }
+
+    pub fn setRestApiUrlScore(self: *ValidatorMetrics, url_index: usize, base_url: []const u8, score: u64) void {
+        self.rest_api_urls_score.set(.{
+            .urlIndex = @intCast(url_index),
+            .baseUrl = base_url,
+        }, score) catch return;
+    }
+
     pub fn observeMonitoringCollect(self: *ValidatorMetrics, response_time_seconds: f64) void {
         self.monitoring_collect_data_seconds.observe(response_time_seconds);
     }
@@ -151,6 +254,14 @@ pub const ValidatorMetrics = struct {
             .status = if (success) "success" else "error",
         };
         self.monitoring_send_data_seconds.observe(labels, response_time_seconds) catch return;
+    }
+
+    pub fn setDoppelgangerStatusCount(self: *ValidatorMetrics, status: []const u8, count: u64) void {
+        self.doppelganger_validator_status_count.set(.{ .status = status }, count) catch return;
+    }
+
+    pub fn incrDoppelgangerEpochsChecked(self: *ValidatorMetrics) void {
+        self.doppelganger_epochs_checked_total.incr();
     }
 
     pub fn keymanagerObserver(self: *ValidatorMetrics) api_mod.HttpServer.Observer {
@@ -186,6 +297,11 @@ test "ValidatorMetrics: init and observe" {
     m.total_validators.set(123);
     m.active_validators.set(100);
     m.setBeaconHealth(.ready);
+    m.observeRestApiRequest("beacon.getGenesis", 0.02);
+    m.observeRestApiStream("events.eventstream", 0.03);
+    m.recordRestApiError("beacon.getGenesis", "http://127.0.0.1:5052");
+    m.recordRestApiFallback("beacon.getGenesis", "http://127.0.0.1:5053");
+    m.setRestApiUrlScore(0, "http://127.0.0.1:5052", 10);
     try std.testing.expectEqual(@as(u64, 1), m.attestation_published_total.impl.count);
     try std.testing.expectEqual(@as(u64, 1), m.block_proposed_total.impl.count);
     try std.testing.expectEqual(@as(u64, 123), m.total_validators.impl.value);
@@ -201,6 +317,11 @@ test "ValidatorMetrics: noop is safe" {
     m.total_validators.set(123);
     m.active_validators.set(100);
     m.setBeaconHealth(.err);
+    m.observeRestApiRequest("beacon.getGenesis", 0.02);
+    m.observeRestApiStream("events.eventstream", 0.03);
+    m.recordRestApiError("beacon.getGenesis", "http://127.0.0.1:5052");
+    m.recordRestApiFallback("beacon.getGenesis", "http://127.0.0.1:5053");
+    m.setRestApiUrlScore(0, "http://127.0.0.1:5052", 0);
     try std.testing.expect(std.meta.activeTag(m.attestation_published_total) == .noop);
 }
 
@@ -212,8 +333,15 @@ test "ValidatorMetrics: write produces Prometheus output" {
     m.observeKeymanagerRequest("listKeystores", 0.01, false);
     m.observeKeymanagerRequest("importKeystores", 0.02, true);
     m.setKeymanagerActiveConnections(1);
+    m.observeRestApiRequest("beacon.getGenesis", 0.02);
+    m.observeRestApiStream("events.eventstream", 0.03);
+    m.recordRestApiError("beacon.getGenesis", "http://127.0.0.1:5052");
+    m.recordRestApiFallback("beacon.getGenesis", "http://127.0.0.1:5053");
+    m.setRestApiUrlScore(0, "http://127.0.0.1:5052", 8);
     m.observeMonitoringCollect(0.01);
     m.observeMonitoringSend(0.25, true);
+    m.setDoppelgangerStatusCount("Unverified", 3);
+    m.incrDoppelgangerEpochsChecked();
     m.total_validators.set(123);
     m.setBeaconHealth(.syncing);
 
@@ -228,10 +356,20 @@ test "ValidatorMetrics: write produces Prometheus output" {
     try std.testing.expect(std.mem.indexOf(u8, buf, "validator_total_count") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf, "validator_active_count") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf, "vc_beacon_health") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf, "vc_rest_api_client_request_time_seconds") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf, "vc_rest_api_client_stream_time_seconds") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf, "vc_rest_api_client_request_errors_total") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf, "vc_rest_api_client_request_to_fallbacks_total") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf, "vc_rest_api_client_urls_score") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf, "beacon.getGenesis") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf, "events.eventstream") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf, "validator_keymanager_requests_total") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf, "validator_keymanager_errors_total") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf, "validator_keymanager_response_seconds") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf, "validator_keymanager_active_connections") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf, "lodestar_monitoring_collect_data_seconds") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf, "lodestar_monitoring_send_data_seconds") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf, "vc_doppelganger_validator_status_count") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf, "vc_doppelganger_epochs_checked_total") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf, "Unverified") != null);
 }

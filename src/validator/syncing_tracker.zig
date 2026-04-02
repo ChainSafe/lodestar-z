@@ -124,7 +124,7 @@ pub const SyncingTracker = struct {
 const testing = std.testing;
 
 test "SyncingTracker: starts fail-closed" {
-    var api = BeaconApiClient.init(testing.allocator, testing.io, "http://localhost:5052");
+    var api = try BeaconApiClient.init(testing.allocator, testing.io, "http://localhost:5052");
     defer api.deinit();
     var metrics = try ValidatorMetrics.init(testing.allocator);
     defer metrics.deinit();
@@ -135,7 +135,7 @@ test "SyncingTracker: starts fail-closed" {
 }
 
 test "SyncingTracker: isSynced reflects atomic store" {
-    var api = BeaconApiClient.init(testing.allocator, testing.io, "http://localhost:5052");
+    var api = try BeaconApiClient.init(testing.allocator, testing.io, "http://localhost:5052");
     defer api.deinit();
     var metrics = try ValidatorMetrics.init(testing.allocator);
     defer metrics.deinit();
@@ -149,7 +149,7 @@ test "SyncingTracker: isSynced reflects atomic store" {
 }
 
 test "SyncingTracker: optimistic node is not ready" {
-    var api = BeaconApiClient.init(testing.allocator, testing.io, "http://localhost:5052");
+    var api = try BeaconApiClient.init(testing.allocator, testing.io, "http://localhost:5052");
     defer api.deinit();
     var metrics = try ValidatorMetrics.init(testing.allocator);
     defer metrics.deinit();
@@ -168,7 +168,7 @@ test "SyncingTracker: optimistic node is not ready" {
 }
 
 test "SyncingTracker: EL offline node is not ready" {
-    var api = BeaconApiClient.init(testing.allocator, testing.io, "http://localhost:5052");
+    var api = try BeaconApiClient.init(testing.allocator, testing.io, "http://localhost:5052");
     defer api.deinit();
     var metrics = try ValidatorMetrics.init(testing.allocator);
     defer metrics.deinit();
@@ -187,7 +187,7 @@ test "SyncingTracker: EL offline node is not ready" {
 }
 
 test "SyncingTracker: poll error fails closed" {
-    var api = BeaconApiClient.init(testing.allocator, testing.io, "http://localhost:5052");
+    var api = try BeaconApiClient.init(testing.allocator, testing.io, "http://localhost:5052");
     defer api.deinit();
     var metrics = try ValidatorMetrics.init(testing.allocator);
     defer metrics.deinit();
