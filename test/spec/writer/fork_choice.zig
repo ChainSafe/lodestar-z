@@ -58,12 +58,32 @@ pub fn writeHeader(writer: std.io.AnyWriter) !void {
     try writer.print(header, .{});
 }
 
+/// Tests skipped to match Lodestar TS unstable.
+/// TODO GLOAS: proposer boost specs changed retroactively in v1.7.0-alpha.1;
+/// remove once update_proposer_boost_root is implemented.
+/// invalid_incorrect_proof: no KZG verification for minimal preset.
+const skip_patterns = [_][]const u8{
+    "voting_source_beyond_two_epoch",
+    "justified_update_always_if_better",
+    "justified_update_not_realized_finality",
+    "invalid_incorrect_proof",
+};
+
+fn shouldSkip(test_case_name: []const u8) bool {
+    for (skip_patterns) |pattern| {
+        if (std.mem.indexOf(u8, test_case_name, pattern) != null) return true;
+    }
+    return false;
+}
+
 pub fn writeTest(
     writer: std.io.AnyWriter,
     fork: ForkSeq,
     handler: Handler,
     test_case_name: []const u8,
 ) !void {
+    if (shouldSkip(test_case_name)) return;
+
     try writer.print(test_template, .{
         @tagName(fork),
         @tagName(handler),

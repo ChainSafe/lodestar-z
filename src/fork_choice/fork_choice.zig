@@ -474,6 +474,9 @@ pub const ForkChoice = struct {
         // (before attesting interval = before 1st interval).
         const is_timely = self.isBlockTimely(slot, block_delay_sec);
         // Only boost the first block we see.
+        // TODO GLOAS: v1.7.0-alpha.1 added proposer index check in update_proposer_boost_root
+        // (block.proposer_index == get_beacon_proposer_index(head_state)).
+        // Not yet implemented — matches Lodestar TS unstable.
         if (self.opts.proposer_boost and is_timely and self.proposer_boost_root == null) {
             self.proposer_boost_root = block_root;
         }
