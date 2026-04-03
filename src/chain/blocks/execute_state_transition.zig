@@ -74,14 +74,14 @@ pub fn executeStateTransition(
     da_status: DataAvailabilityStatus,
     opts: ImportBlockOpts,
     precomputed_body_root: ?[32]u8,
-    pmt_mutator: ?*PmtMutator,
+    pmt_mutator: *PmtMutator,
     block_bls_thread_pool: ?*bls_mod.ThreadPool,
 ) BlockImportError!StfResult {
     const any_signed_block = block_input.block;
     const block = any_signed_block.beaconBlock();
     const block_slot = block.slot();
 
-    var pmt_mutation_lease = PmtMutator.acquireOptional(pmt_mutator);
+    var pmt_mutation_lease = pmt_mutator.acquire();
     defer pmt_mutation_lease.release();
 
     // Clone pre-state (COW — cheap if no mutations).

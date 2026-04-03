@@ -415,33 +415,14 @@ pub const QueuedStateRegen = struct {
 // Tests
 // ---------------------------------------------------------------------------
 
+const RegenRuntimeFixture = @import("test_fixture.zig").RegenRuntimeFixture;
+
 test "QueuedStateRegen: init and deinit" {
-    const Node = @import("persistent_merkle_tree").Node;
-    const TestCachedBeaconState = @import("state_transition").test_utils.TestCachedBeaconState;
-
-    const MemoryCPStateDatastore = @import("datastore.zig").MemoryCPStateDatastore;
-
     const allocator = std.testing.allocator;
-    const pool_size = 256 * 5;
-    var pool = try Node.Pool.init(allocator, pool_size);
-    defer pool.deinit();
+    var fixture = try RegenRuntimeFixture.init(allocator, 16);
+    defer fixture.deinit();
 
-    var test_state = try TestCachedBeaconState.init(allocator, &pool, 16);
-    defer test_state.deinit();
-
-    var mem_store = MemoryCPStateDatastore.init(allocator);
-    defer mem_store.deinit();
-    const ds = mem_store.datastore();
-
-    var block_cache = BlockStateCache.init(allocator, 4);
-    defer block_cache.deinit();
-
-    var cp_cache = CheckpointStateCache.init(allocator, ds, &block_cache, 3);
-    defer cp_cache.deinit();
-
-    var regen = StateRegen.init(allocator, &block_cache, &cp_cache);
-
-    var queued = QueuedStateRegen.init(allocator, &regen);
+    var queued = QueuedStateRegen.init(allocator, fixture.regen);
     defer queued.deinit();
 
     try std.testing.expectEqual(@as(usize, 0), queued.queueLen());
@@ -449,37 +430,16 @@ test "QueuedStateRegen: init and deinit" {
 }
 
 test "QueuedStateRegen: getPreState cache hit" {
-    const Node = @import("persistent_merkle_tree").Node;
-    const TestCachedBeaconState = @import("state_transition").test_utils.TestCachedBeaconState;
-
-    const MemoryCPStateDatastore = @import("datastore.zig").MemoryCPStateDatastore;
-
     const allocator = std.testing.allocator;
-    const pool_size = 256 * 5;
-    var pool = try Node.Pool.init(allocator, pool_size);
-    defer pool.deinit();
+    var fixture = try RegenRuntimeFixture.init(allocator, 16);
+    defer fixture.deinit();
 
-    var test_state = try TestCachedBeaconState.init(allocator, &pool, 16);
-    defer test_state.deinit();
-
-    var mem_store = MemoryCPStateDatastore.init(allocator);
-    defer mem_store.deinit();
-    const ds = mem_store.datastore();
-
-    var block_cache = BlockStateCache.init(allocator, 4);
-    defer block_cache.deinit();
-
-    var cp_cache = CheckpointStateCache.init(allocator, ds, &block_cache, 3);
-    defer cp_cache.deinit();
-
-    var regen = StateRegen.init(allocator, &block_cache, &cp_cache);
-
-    var queued = QueuedStateRegen.init(allocator, &regen);
+    var queued = QueuedStateRegen.init(allocator, fixture.regen);
     defer queued.deinit();
 
     // Add a state to block cache.
-    const state = try test_state.cached_state.clone(allocator, .{});
-    const root = try regen.onNewBlock(state, true);
+    const state = try fixture.clonePublishedState();
+    const root = try fixture.regen.onNewBlock(state, true);
 
     // getPreState should find it via cache.
     const result = try queued.getPreState(root, root, 100, .block_import);
@@ -488,32 +448,11 @@ test "QueuedStateRegen: getPreState cache hit" {
 }
 
 test "QueuedStateRegen: enqueue deduplicates" {
-    const Node = @import("persistent_merkle_tree").Node;
-    const TestCachedBeaconState = @import("state_transition").test_utils.TestCachedBeaconState;
-
-    const MemoryCPStateDatastore = @import("datastore.zig").MemoryCPStateDatastore;
-
     const allocator = std.testing.allocator;
-    const pool_size = 256 * 5;
-    var pool = try Node.Pool.init(allocator, pool_size);
-    defer pool.deinit();
+    var fixture = try RegenRuntimeFixture.init(allocator, 16);
+    defer fixture.deinit();
 
-    var test_state = try TestCachedBeaconState.init(allocator, &pool, 16);
-    defer test_state.deinit();
-
-    var mem_store = MemoryCPStateDatastore.init(allocator);
-    defer mem_store.deinit();
-    const ds = mem_store.datastore();
-
-    var block_cache = BlockStateCache.init(allocator, 4);
-    defer block_cache.deinit();
-
-    var cp_cache = CheckpointStateCache.init(allocator, ds, &block_cache, 3);
-    defer cp_cache.deinit();
-
-    var regen = StateRegen.init(allocator, &block_cache, &cp_cache);
-
-    var queued = QueuedStateRegen.init(allocator, &regen);
+    var queued = QueuedStateRegen.init(allocator, fixture.regen);
     defer queued.deinit();
 
     const root = [_]u8{0x42} ** 32;
@@ -532,32 +471,11 @@ test "QueuedStateRegen: enqueue deduplicates" {
 }
 
 test "QueuedStateRegen: enqueue upgrades priority" {
-    const Node = @import("persistent_merkle_tree").Node;
-    const TestCachedBeaconState = @import("state_transition").test_utils.TestCachedBeaconState;
-
-    const MemoryCPStateDatastore = @import("datastore.zig").MemoryCPStateDatastore;
-
     const allocator = std.testing.allocator;
-    const pool_size = 256 * 5;
-    var pool = try Node.Pool.init(allocator, pool_size);
-    defer pool.deinit();
+    var fixture = try RegenRuntimeFixture.init(allocator, 16);
+    defer fixture.deinit();
 
-    var test_state = try TestCachedBeaconState.init(allocator, &pool, 16);
-    defer test_state.deinit();
-
-    var mem_store = MemoryCPStateDatastore.init(allocator);
-    defer mem_store.deinit();
-    const ds = mem_store.datastore();
-
-    var block_cache = BlockStateCache.init(allocator, 4);
-    defer block_cache.deinit();
-
-    var cp_cache = CheckpointStateCache.init(allocator, ds, &block_cache, 3);
-    defer cp_cache.deinit();
-
-    var regen = StateRegen.init(allocator, &block_cache, &cp_cache);
-
-    var queued = QueuedStateRegen.init(allocator, &regen);
+    var queued = QueuedStateRegen.init(allocator, fixture.regen);
     defer queued.deinit();
 
     const root = [_]u8{0x42} ** 32;
@@ -579,32 +497,11 @@ test "QueuedStateRegen: enqueue upgrades priority" {
 }
 
 test "QueuedStateRegen: dropLowPriority removes background requests" {
-    const Node = @import("persistent_merkle_tree").Node;
-    const TestCachedBeaconState = @import("state_transition").test_utils.TestCachedBeaconState;
-
-    const MemoryCPStateDatastore = @import("datastore.zig").MemoryCPStateDatastore;
-
     const allocator = std.testing.allocator;
-    const pool_size = 256 * 5;
-    var pool = try Node.Pool.init(allocator, pool_size);
-    defer pool.deinit();
+    var fixture = try RegenRuntimeFixture.init(allocator, 16);
+    defer fixture.deinit();
 
-    var test_state = try TestCachedBeaconState.init(allocator, &pool, 16);
-    defer test_state.deinit();
-
-    var mem_store = MemoryCPStateDatastore.init(allocator);
-    defer mem_store.deinit();
-    const ds = mem_store.datastore();
-
-    var block_cache = BlockStateCache.init(allocator, 4);
-    defer block_cache.deinit();
-
-    var cp_cache = CheckpointStateCache.init(allocator, ds, &block_cache, 3);
-    defer cp_cache.deinit();
-
-    var regen = StateRegen.init(allocator, &block_cache, &cp_cache);
-
-    var queued = QueuedStateRegen.init(allocator, &regen);
+    var queued = QueuedStateRegen.init(allocator, fixture.regen);
     defer queued.deinit();
 
     // Queue a mix of priorities.
@@ -632,72 +529,30 @@ test "QueuedStateRegen: dropLowPriority removes background requests" {
 }
 
 test "QueuedStateRegen: onNewBlock delegates to regen" {
-    const Node = @import("persistent_merkle_tree").Node;
-    const TestCachedBeaconState = @import("state_transition").test_utils.TestCachedBeaconState;
-
-    const MemoryCPStateDatastore = @import("datastore.zig").MemoryCPStateDatastore;
-
     const allocator = std.testing.allocator;
-    const pool_size = 256 * 5;
-    var pool = try Node.Pool.init(allocator, pool_size);
-    defer pool.deinit();
+    var fixture = try RegenRuntimeFixture.init(allocator, 16);
+    defer fixture.deinit();
 
-    var test_state = try TestCachedBeaconState.init(allocator, &pool, 16);
-    defer test_state.deinit();
-
-    var mem_store = MemoryCPStateDatastore.init(allocator);
-    defer mem_store.deinit();
-    const ds = mem_store.datastore();
-
-    var block_cache = BlockStateCache.init(allocator, 4);
-    defer block_cache.deinit();
-
-    var cp_cache = CheckpointStateCache.init(allocator, ds, &block_cache, 3);
-    defer cp_cache.deinit();
-
-    var regen = StateRegen.init(allocator, &block_cache, &cp_cache);
-
-    var queued = QueuedStateRegen.init(allocator, &regen);
+    var queued = QueuedStateRegen.init(allocator, fixture.regen);
     defer queued.deinit();
 
     // onNewBlock should delegate to regen.
-    const state = try test_state.cached_state.clone(allocator, .{});
+    const state = try fixture.clonePublishedState();
     const root = try queued.onNewBlock(state, true);
-    try std.testing.expect(block_cache.get(root) != null);
+    try std.testing.expect(fixture.block_cache.get(root) != null);
 }
 
 test "QueuedStateRegen: metrics tracking" {
-    const Node = @import("persistent_merkle_tree").Node;
-    const TestCachedBeaconState = @import("state_transition").test_utils.TestCachedBeaconState;
-
-    const MemoryCPStateDatastore = @import("datastore.zig").MemoryCPStateDatastore;
-
     const allocator = std.testing.allocator;
-    const pool_size = 256 * 5;
-    var pool = try Node.Pool.init(allocator, pool_size);
-    defer pool.deinit();
+    var fixture = try RegenRuntimeFixture.init(allocator, 16);
+    defer fixture.deinit();
 
-    var test_state = try TestCachedBeaconState.init(allocator, &pool, 16);
-    defer test_state.deinit();
-
-    var mem_store = MemoryCPStateDatastore.init(allocator);
-    defer mem_store.deinit();
-    const ds = mem_store.datastore();
-
-    var block_cache = BlockStateCache.init(allocator, 4);
-    defer block_cache.deinit();
-
-    var cp_cache = CheckpointStateCache.init(allocator, ds, &block_cache, 3);
-    defer cp_cache.deinit();
-
-    var regen = StateRegen.init(allocator, &block_cache, &cp_cache);
-
-    var queued = QueuedStateRegen.init(allocator, &regen);
+    var queued = QueuedStateRegen.init(allocator, fixture.regen);
     defer queued.deinit();
 
     // Add a state.
-    const state = try test_state.cached_state.clone(allocator, .{});
-    const root = try regen.onNewBlock(state, true);
+    const state = try fixture.clonePublishedState();
+    const root = try fixture.regen.onNewBlock(state, true);
 
     // Cache hit.
     _ = try queued.getPreState(root, root, 100, .block_import);

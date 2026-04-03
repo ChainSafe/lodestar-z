@@ -9,6 +9,9 @@ const Allocator = std.mem.Allocator;
 
 const config_mod = @import("config");
 const BeaconConfig = config_mod.BeaconConfig;
+const state_transition = @import("state_transition");
+const SharedValidatorPubkeys = state_transition.SharedValidatorPubkeys;
+const Node = @import("persistent_merkle_tree").Node;
 const regen_mod = @import("regen/root.zig");
 const BlockStateCache = regen_mod.BlockStateCache;
 const CheckpointStateCache = regen_mod.CheckpointStateCache;
@@ -45,6 +48,7 @@ const Kzg = kzg_mod.Kzg;
 const BlsThreadPool = @import("bls").ThreadPool;
 
 pub const RuntimeOptions = struct {
+    pmt_pool_size: u32 = 200_000,
     max_block_states: u32 = 64,
     max_checkpoint_epochs: u32 = 3,
     verify_signatures: bool = false,
@@ -83,11 +87,13 @@ pub const Runtime = struct {
     config: *const BeaconConfig,
     storage_backend: StorageBackend,
     db: *BeaconDB,
+    pool: *Node.Pool,
     cp_datastore: *MemoryCPStateDatastore,
     block_state_cache: *BlockStateCache,
     checkpoint_state_cache: *CheckpointStateCache,
     state_disposer: *StateDisposer,
     pmt_mutator: *PmtMutator,
+    validator_pubkeys: *SharedValidatorPubkeys,
     state_regen: *StateRegen,
     queued_regen: *QueuedStateRegen,
     state_work_service: *StateWorkService,
@@ -123,9 +129,27 @@ pub const Runtime = struct {
         db.* = BeaconDB.init(allocator, storage_backend.kvStore());
         errdefer db.close();
 
+        const pool = try allocator.create(Node.Pool);
+        errdefer allocator.destroy(pool);
+        pool.* = try Node.Pool.init(allocator, opts.pmt_pool_size);
+        errdefer pool.deinit();
+
+        const state_disposer = try allocator.create(StateDisposer);
+        errdefer allocator.destroy(state_disposer);
+        state_disposer.* = StateDisposer.init(allocator, io);
+        errdefer state_disposer.deinit();
+
+        const pmt_mutator = try allocator.create(PmtMutator);
+        errdefer allocator.destroy(pmt_mutator);
+        pmt_mutator.* = PmtMutator.init(io, state_disposer);
+
         const block_cache = try allocator.create(BlockStateCache);
         errdefer allocator.destroy(block_cache);
-        block_cache.* = BlockStateCache.init(allocator, opts.max_block_states);
+        block_cache.* = BlockStateCache.init(
+            allocator,
+            opts.max_block_states,
+            state_disposer,
+        );
         errdefer block_cache.deinit();
 
         const cp_datastore = try allocator.create(MemoryCPStateDatastore);
@@ -140,27 +164,28 @@ pub const Runtime = struct {
             cp_datastore.datastore(),
             block_cache,
             opts.max_checkpoint_epochs,
+            state_disposer,
+            pmt_mutator,
         );
         errdefer cp_cache.deinit();
 
-        const state_disposer = try allocator.create(StateDisposer);
-        errdefer allocator.destroy(state_disposer);
-        state_disposer.* = StateDisposer.init(allocator, io);
-        errdefer state_disposer.deinit();
-
-        const pmt_mutator = try allocator.create(PmtMutator);
-        errdefer allocator.destroy(pmt_mutator);
-        pmt_mutator.* = PmtMutator.init(io, state_disposer);
-
-        block_cache.setStateDisposer(state_disposer);
-        cp_cache.setStateDisposer(state_disposer);
-        cp_cache.setPmtMutator(pmt_mutator);
+        const validator_pubkeys = try allocator.create(SharedValidatorPubkeys);
+        errdefer allocator.destroy(validator_pubkeys);
+        validator_pubkeys.* = SharedValidatorPubkeys.init(allocator);
+        errdefer validator_pubkeys.deinit();
 
         const regen = try allocator.create(StateRegen);
         errdefer allocator.destroy(regen);
-        regen.* = StateRegen.initWithDB(allocator, block_cache, cp_cache, db, null, null);
-        regen.setStateDisposer(state_disposer);
-        regen.setPmtMutator(pmt_mutator);
+        regen.* = StateRegen.initForRuntime(allocator, block_cache, cp_cache, .{
+            .cold_path = .{
+                .db = db,
+                .pool = pool,
+                .config = config,
+                .validator_pubkeys = validator_pubkeys,
+            },
+            .state_disposer = state_disposer,
+            .pmt_mutator = pmt_mutator,
+        });
 
         const queued_regen = try allocator.create(QueuedStateRegen);
         errdefer allocator.destroy(queued_regen);
@@ -260,6 +285,7 @@ pub const Runtime = struct {
             block_cache,
             cp_cache,
             regen,
+            pmt_mutator,
             db,
             op_pool,
             seen_cache,
@@ -271,7 +297,6 @@ pub const Runtime = struct {
         errdefer chain.deinit();
         chain.verify_signatures = opts.verify_signatures;
         chain.block_bls_thread_pool = opts.block_bls_thread_pool;
-        chain.pmt_mutator = pmt_mutator;
         chain.queued_regen = queued_regen;
         chain.state_work_service = state_work_service;
         chain.sync_contribution_pool = sync_contrib_pool;
@@ -287,11 +312,13 @@ pub const Runtime = struct {
             .config = config,
             .storage_backend = storage_backend,
             .db = db,
+            .pool = pool,
             .cp_datastore = cp_datastore,
             .block_state_cache = block_cache,
             .checkpoint_state_cache = cp_cache,
             .state_disposer = state_disposer,
             .pmt_mutator = pmt_mutator,
+            .validator_pubkeys = validator_pubkeys,
             .state_regen = regen,
             .queued_regen = queued_regen,
             .state_work_service = state_work_service,
@@ -396,6 +423,9 @@ pub const Runtime = struct {
         self.block_state_cache.deinit();
         self.allocator.destroy(self.block_state_cache);
 
+        self.validator_pubkeys.deinit();
+        self.allocator.destroy(self.validator_pubkeys);
+
         self.allocator.destroy(self.pmt_mutator);
 
         self.state_disposer.deinit();
@@ -406,6 +436,9 @@ pub const Runtime = struct {
 
         self.db.close();
         self.allocator.destroy(self.db);
+
+        self.pool.deinit();
+        self.allocator.destroy(self.pool);
 
         self.storage_backend.deinit(self.allocator);
         self.allocator.destroy(self);

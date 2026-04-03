@@ -143,7 +143,7 @@ pub const Chain = struct {
     block_state_cache: *BlockStateCache,
     checkpoint_state_cache: *CheckpointStateCache,
     state_regen: *StateRegen,
-    pmt_mutator: ?*PmtMutator,
+    pmt_mutator: *PmtMutator,
     /// Queued state regenerator — optional, wraps state_regen with
     /// request deduplication and priority queuing. When set, used for
     /// pre-state lookups in block import and API handlers.
@@ -223,6 +223,7 @@ pub const Chain = struct {
         block_state_cache: *BlockStateCache,
         checkpoint_state_cache: *CheckpointStateCache,
         state_regen: *StateRegen,
+        pmt_mutator: *PmtMutator,
         db: *BeaconDB,
         op_pool: *OpPool,
         seen_cache: *SeenCache,
@@ -238,7 +239,7 @@ pub const Chain = struct {
             .block_state_cache = block_state_cache,
             .checkpoint_state_cache = checkpoint_state_cache,
             .state_regen = state_regen,
-            .pmt_mutator = null,
+            .pmt_mutator = pmt_mutator,
             .queued_regen = null,
             .state_work_service = null,
             .db = db,
@@ -329,7 +330,7 @@ pub const Chain = struct {
         anchor_block_root: [32]u8,
         anchor_slot: u64,
     ) !BootstrapResult {
-        self.state_regen.bindPublishedState(anchor_state);
+        try self.state_regen.verifyPublishedStateOwnership(anchor_state);
 
         const cached_state_root = if (self.queued_regen) |qr|
             try qr.onNewBlock(anchor_state, true)
@@ -1151,7 +1152,7 @@ pub const Chain = struct {
     /// blocks at the current slot as "future" if onSlot was called but advanceSlot was
     /// not (or vice versa).
     pub fn advanceSlot(self: *Chain, target_slot: u64) !void {
-        var pmt_mutation_lease = PmtMutator.acquireOptional(self.pmt_mutator);
+        var pmt_mutation_lease = self.pmt_mutator.acquire();
         defer pmt_mutation_lease.release();
 
         const head_state_root = self.head_tracker.head_state_root;
@@ -1192,6 +1193,6 @@ pub const Chain = struct {
     }
 
     pub fn acquirePmtMutationLease(self: *Chain) PmtMutator.Lease {
-        return PmtMutator.acquireOptional(self.pmt_mutator);
+        return self.pmt_mutator.acquire();
     }
 };

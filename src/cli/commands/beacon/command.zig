@@ -13,7 +13,6 @@ const BeaconConfig = config_mod.BeaconConfig;
 const config_loader = config_mod.config_loader;
 const state_transition = @import("state_transition");
 const preset = @import("preset").preset;
-const Node = @import("persistent_merkle_tree").Node;
 const genesis_util = @import("../../genesis_util.zig");
 const ShutdownHandler = @import("../../shutdown.zig").ShutdownHandler;
 const sync_mod = @import("sync");
@@ -371,9 +370,6 @@ pub fn run(io: Io, allocator: Allocator, opts: anytype) !void {
         }
     }
 
-    var pool = try Node.Pool.init(allocator, 200_000);
-    defer pool.deinit();
-
     const direct_peers: []const []const u8 = if (direct_peers_raw) |raw| blk: {
         var list: std.ArrayListUnmanaged([]const u8) = .empty;
         var it = std.mem.splitScalar(u8, raw, ',');
@@ -542,10 +538,11 @@ pub fn run(io: Io, allocator: Allocator, opts: anytype) !void {
             fetched.state_bytes.len, fetched.fork_name,
         });
 
-        const cp_state = state_transition.deserializeState(
+        const cp_state = state_transition.deserializePublishedState(
             allocator,
-            &pool,
+            node.chain_runtime.pool,
             beacon_config,
+            node.chain_runtime.validator_pubkeys,
             fetched.state_bytes,
         ) catch |err| {
             std.log.err("Failed to deserialize checkpoint state: {}", .{err});
@@ -577,7 +574,14 @@ pub fn run(io: Io, allocator: Allocator, opts: anytype) !void {
     } else if (checkpoint_state) |state_path| {
         std.log.info("Loading checkpoint state from: {s}", .{state_path});
 
-        const cp_state = genesis_util.loadGenesisFromFile(allocator, &pool, beacon_config, io, state_path) catch |err| {
+        const cp_state = genesis_util.loadGenesisFromFile(
+            allocator,
+            node.chain_runtime.pool,
+            beacon_config,
+            node.chain_runtime.validator_pubkeys,
+            io,
+            state_path,
+        ) catch |err| {
             std.log.err("Failed to load checkpoint state '{s}': {}", .{ state_path, err });
             std.process.exit(1);
         };
@@ -617,10 +621,11 @@ pub fn run(io: Io, allocator: Allocator, opts: anytype) !void {
         };
         defer allocator.free(state_bytes);
 
-        const db_state = state_transition.deserializeState(
+        const db_state = state_transition.deserializePublishedState(
             allocator,
-            &pool,
+            node.chain_runtime.pool,
             beacon_config,
+            node.chain_runtime.validator_pubkeys,
             state_bytes,
         ) catch |err| {
             std.log.err("Failed to deserialize DB state at slot {d}: {}", .{ db_slot, err });
@@ -636,7 +641,13 @@ pub fn run(io: Io, allocator: Allocator, opts: anytype) !void {
     } else if (network == .minimal) {
         std.log.info("Generating minimal genesis state with 64 validators...", .{});
 
-        const genesis_state = genesis_util.createMinimalGenesis(allocator, &pool, 64) catch |err| {
+        const genesis_state = genesis_util.createMinimalGenesis(
+            allocator,
+            node.chain_runtime.pool,
+            beacon_config,
+            node.chain_runtime.validator_pubkeys,
+            64,
+        ) catch |err| {
             std.log.err("Failed to generate minimal genesis state: {}", .{err});
             std.process.exit(1);
         };

@@ -25,33 +25,18 @@ pub const PmtMutator = struct {
         return .{ .mutator = self };
     }
 
-    pub fn acquireOptional(pmt_mutator: ?*PmtMutator) Lease {
-        if (pmt_mutator) |mutator| {
-            return mutator.acquire();
-        }
-        return .{ .mutator = null };
-    }
-
     pub const Lease = struct {
-        mutator: ?*PmtMutator,
+        mutator: *PmtMutator,
         released: bool = false,
 
         pub fn release(self: *Lease) void {
             if (self.released) return;
             self.released = true;
-            if (self.mutator) |mutator| {
-                mutator.state_disposer.endDeferral() catch @panic("PMT mutator deferral underflow");
-                mutator.mutex.unlock(mutator.io);
-            }
+            self.mutator.state_disposer.endDeferral() catch @panic("PMT mutator deferral underflow");
+            self.mutator.mutex.unlock(self.mutator.io);
         }
     };
 };
-
-test "PmtMutator: optional lease is a no-op" {
-    var lease = PmtMutator.acquireOptional(null);
-    lease.release();
-    lease.release();
-}
 
 test "PmtMutator: lease defers and flushes teardown" {
     const Node = @import("persistent_merkle_tree").Node;

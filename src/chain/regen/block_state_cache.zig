@@ -13,7 +13,6 @@ const computeEpochAtSlot = state_transition.computeEpochAtSlot;
 
 const CachedBeaconState = state_transition.CachedBeaconState;
 const StateDisposer = @import("state_disposer.zig").StateDisposer;
-const destroyCachedBeaconState = @import("state_disposer.zig").destroyCachedBeaconState;
 
 pub const DEFAULT_MAX_STATES: u32 = 64;
 
@@ -27,16 +26,20 @@ pub const BlockStateCache = struct {
     max_states: u32,
     /// Head state root (always kept, never evicted)
     head_root: ?[32]u8,
-    state_disposer: ?*StateDisposer,
+    state_disposer: *StateDisposer,
 
-    pub fn init(allocator: Allocator, max_states: u32) BlockStateCache {
+    pub fn init(
+        allocator: Allocator,
+        max_states: u32,
+        state_disposer: *StateDisposer,
+    ) BlockStateCache {
         return .{
             .allocator = allocator,
             .cache = std.AutoArrayHashMap([32]u8, *CachedBeaconState).init(allocator),
             .key_order = .empty,
             .max_states = max_states,
             .head_root = null,
-            .state_disposer = null,
+            .state_disposer = state_disposer,
         };
     }
 
@@ -47,10 +50,6 @@ pub const BlockStateCache = struct {
         }
         self.cache.deinit();
         self.key_order.deinit(self.allocator);
-    }
-
-    pub fn setStateDisposer(self: *BlockStateCache, state_disposer: *StateDisposer) void {
-        self.state_disposer = state_disposer;
     }
 
     /// Get a state by its root.
@@ -195,11 +194,7 @@ pub const BlockStateCache = struct {
     }
 
     fn disposeState(self: *BlockStateCache, state: *CachedBeaconState) void {
-        if (self.state_disposer) |state_disposer| {
-            state_disposer.dispose(state) catch @panic("OOM deferring block-state disposal");
-            return;
-        }
-        destroyCachedBeaconState(self.allocator, state);
+        self.state_disposer.dispose(state) catch @panic("OOM deferring block-state disposal");
     }
 };
 
@@ -219,7 +214,10 @@ test "BlockStateCache: add, get, FIFO eviction" {
     var test_state = try TestCachedBeaconState.init(allocator, &pool, 16);
     defer test_state.deinit();
 
-    var cache = BlockStateCache.init(allocator, 2);
+    var state_disposer = StateDisposer.init(allocator, std.testing.io);
+    defer state_disposer.deinit();
+
+    var cache = BlockStateCache.init(allocator, 2, &state_disposer);
     defer cache.deinit();
 
     // Clone and add first state
@@ -259,7 +257,10 @@ test "BlockStateCache: head state is never evicted" {
     var test_state = try TestCachedBeaconState.init(allocator, &pool, 16);
     defer test_state.deinit();
 
-    var cache = BlockStateCache.init(allocator, 2);
+    var state_disposer = StateDisposer.init(allocator, std.testing.io);
+    defer state_disposer.deinit();
+
+    var cache = BlockStateCache.init(allocator, 2, &state_disposer);
     defer cache.deinit();
 
     // Add as head
@@ -285,8 +286,6 @@ test "BlockStateCache: head state is never evicted" {
 test "BlockStateCache: eviction can defer state teardown" {
     const Node = @import("persistent_merkle_tree").Node;
     const TestCachedBeaconState = @import("state_transition").test_utils.TestCachedBeaconState;
-    const state_disposer_mod = @import("state_disposer.zig");
-
     const allocator = std.testing.allocator;
     const pool_size = 256 * 5;
     var pool = try Node.Pool.init(allocator, pool_size);
@@ -295,11 +294,10 @@ test "BlockStateCache: eviction can defer state teardown" {
     var test_state = try TestCachedBeaconState.init(allocator, &pool, 16);
     defer test_state.deinit();
 
-    var state_disposer = state_disposer_mod.StateDisposer.init(allocator, std.testing.io);
+    var state_disposer = StateDisposer.init(allocator, std.testing.io);
     defer state_disposer.deinit();
 
-    var cache = BlockStateCache.init(allocator, 2);
-    cache.setStateDisposer(&state_disposer);
+    var cache = BlockStateCache.init(allocator, 2, &state_disposer);
     defer cache.deinit();
 
     const state1 = try test_state.cached_state.clone(allocator, .{});
@@ -334,7 +332,10 @@ test "BlockStateCache: getSeedState" {
     var test_state = try TestCachedBeaconState.init(allocator, &pool, 16);
     defer test_state.deinit();
 
-    var cache = BlockStateCache.init(allocator, 4);
+    var state_disposer = StateDisposer.init(allocator, std.testing.io);
+    defer state_disposer.deinit();
+
+    var cache = BlockStateCache.init(allocator, 4, &state_disposer);
     defer cache.deinit();
 
     // Empty cache
@@ -359,7 +360,10 @@ test "BlockStateCache: head state survives multiple evictions" {
     defer test_state.deinit();
 
     // Cache capacity of 3
-    var cache = BlockStateCache.init(allocator, 3);
+    var state_disposer = StateDisposer.init(allocator, std.testing.io);
+    defer state_disposer.deinit();
+
+    var cache = BlockStateCache.init(allocator, 3, &state_disposer);
     defer cache.deinit();
 
     // Set first state as head
@@ -391,7 +395,10 @@ test "BlockStateCache: pruneBeforeEpoch removes old states" {
     var test_state = try TestCachedBeaconState.init(allocator, &pool, 16);
     defer test_state.deinit();
 
-    var cache = BlockStateCache.init(allocator, 10);
+    var state_disposer = StateDisposer.init(allocator, std.testing.io);
+    defer state_disposer.deinit();
+
+    var cache = BlockStateCache.init(allocator, 10, &state_disposer);
     defer cache.deinit();
 
     // Set head at high slot
@@ -425,7 +432,10 @@ test "BlockStateCache: re-adding existing state moves position" {
     var test_state = try TestCachedBeaconState.init(allocator, &pool, 16);
     defer test_state.deinit();
 
-    var cache = BlockStateCache.init(allocator, 3);
+    var state_disposer = StateDisposer.init(allocator, std.testing.io);
+    defer state_disposer.deinit();
+
+    var cache = BlockStateCache.init(allocator, 3, &state_disposer);
     defer cache.deinit();
 
     const state1 = try test_state.cached_state.clone(allocator, .{});

@@ -23,6 +23,7 @@ const fork_types = @import("fork_types");
 const AnySignedBeaconBlock = fork_types.AnySignedBeaconBlock;
 
 const BlockStateCache = @import("regen/root.zig").BlockStateCache;
+const StateDisposer = @import("regen/root.zig").StateDisposer;
 
 const Root = [32]u8;
 const Slot = u64;
@@ -281,7 +282,10 @@ test "ArchiveStore: init/deinit is safe" {
     var db = db_mod.BeaconDB.init(std.testing.allocator, store_ptr.kvStore());
     defer db.close();
 
-    var bsc = BlockStateCache.init(std.testing.allocator, 64);
+    var state_disposer = StateDisposer.init(std.testing.allocator, std.testing.io);
+    defer state_disposer.deinit();
+
+    var bsc = BlockStateCache.init(std.testing.allocator, 64, &state_disposer);
     defer bsc.deinit();
 
     var store = ArchiveStore.init(std.testing.allocator, &db, &bsc, .{});
@@ -301,7 +305,10 @@ test "ArchiveStore: archiveBlocks moves data from hot to archive" {
     var db = db_mod.BeaconDB.init(std.testing.allocator, store_ptr.kvStore());
     defer db.close();
 
-    var bsc = BlockStateCache.init(std.testing.allocator, 64);
+    var state_disposer = StateDisposer.init(std.testing.allocator, std.testing.io);
+    defer state_disposer.deinit();
+
+    var bsc = BlockStateCache.init(std.testing.allocator, 64, &state_disposer);
     defer bsc.deinit();
 
     var store = ArchiveStore.init(std.testing.allocator, &db, &bsc, .{
@@ -349,15 +356,18 @@ test "ArchiveStore: onFinalized archives epoch boundary state" {
     var db = db_mod.BeaconDB.init(allocator, store_ptr.kvStore());
     defer db.close();
 
-    var bsc = BlockStateCache.init(allocator, 64);
-    defer bsc.deinit();
-
     const pool_size = 256 * 5;
     var pool = try Node.Pool.init(allocator, pool_size);
     defer pool.deinit();
 
     var test_state = try TestCachedBeaconState.init(allocator, &pool, 16);
     defer test_state.deinit();
+
+    var state_disposer = StateDisposer.init(allocator, std.testing.io);
+    defer state_disposer.deinit();
+
+    var bsc = BlockStateCache.init(allocator, 64, &state_disposer);
+    defer bsc.deinit();
 
     const cached_state = try test_state.cached_state.clone(allocator, .{});
     try cached_state.state.setSlot(preset.SLOTS_PER_EPOCH);
@@ -407,7 +417,10 @@ test "ArchiveStore: archiveBlocks archives blob sidecars and data columns" {
     var db = db_mod.BeaconDB.init(allocator, store_ptr.kvStore());
     defer db.close();
 
-    var bsc = BlockStateCache.init(allocator, 64);
+    var state_disposer = StateDisposer.init(allocator, std.testing.io);
+    defer state_disposer.deinit();
+
+    var bsc = BlockStateCache.init(allocator, 64, &state_disposer);
     defer bsc.deinit();
 
     var store = ArchiveStore.init(allocator, &db, &bsc, .{

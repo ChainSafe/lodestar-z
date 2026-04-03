@@ -109,7 +109,7 @@ pub const PipelineContext = struct {
     current_slot: Slot,
 
     // -- Shared PMT mutation --
-    pmt_mutator: ?*PmtMutator = null,
+    pmt_mutator: *PmtMutator,
 
     // -- BLS verification --
     block_bls_thread_pool: ?*BlsThreadPool = null,
@@ -285,7 +285,7 @@ pub fn planBlockForImport(
 pub fn executePlannedBlockImport(
     allocator: Allocator,
     state_regen: *StateRegen,
-    pmt_mutator: ?*PmtMutator,
+    pmt_mutator: *PmtMutator,
     block_bls_thread_pool: ?*BlsThreadPool,
     planned: PlannedBlockImport,
 ) BlockImportError!PreparedBlockImport {

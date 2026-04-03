@@ -38,7 +38,7 @@ pub const StateWorkService = struct {
     allocator: Allocator,
     io: std.Io,
     state_regen: *StateRegen,
-    pmt_mutator: ?*PmtMutator,
+    pmt_mutator: *PmtMutator,
     block_bls_thread_pool: ?*BlsThreadPool,
     max_pending_block_imports: usize,
 
@@ -53,7 +53,7 @@ pub const StateWorkService = struct {
         allocator: Allocator,
         io: std.Io,
         state_regen: *StateRegen,
-        pmt_mutator: ?*PmtMutator,
+        pmt_mutator: *PmtMutator,
         block_bls_thread_pool: ?*BlsThreadPool,
         max_pending_block_imports: u16,
     ) !*StateWorkService {

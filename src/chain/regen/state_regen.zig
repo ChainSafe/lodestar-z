@@ -16,6 +16,7 @@ const stateTransition = state_transition_mod.stateTransition;
 const TransitionOpt = state_transition_mod.TransitionOpt;
 
 const CachedBeaconState = state_transition.CachedBeaconState;
+const SharedValidatorPubkeys = state_transition.SharedValidatorPubkeys;
 const BlockStateCache = @import("block_state_cache.zig").BlockStateCache;
 const CheckpointStateCache = @import("checkpoint_state_cache.zig").CheckpointStateCache;
 const CheckpointKey = @import("datastore.zig").CheckpointKey;
@@ -26,67 +27,61 @@ const BeaconDB = @import("db").BeaconDB;
 const BeaconConfig = @import("config").BeaconConfig;
 const PersistentMerkleTreeNode = @import("persistent_merkle_tree").Node;
 const deserializeState = state_transition.deserializeState;
+const AnyBeaconState = @import("fork_types").AnyBeaconState;
 const AnySignedBeaconBlock = @import("fork_types").AnySignedBeaconBlock;
+
+pub const ColdPathDeps = struct {
+    db: *BeaconDB,
+    pool: *PersistentMerkleTreeNode.Pool,
+    config: *const BeaconConfig,
+    validator_pubkeys: *SharedValidatorPubkeys,
+};
+
+pub const RuntimeDeps = struct {
+    cold_path: ColdPathDeps,
+    state_disposer: *StateDisposer,
+    pmt_mutator: *PmtMutator,
+};
 
 pub const StateRegen = struct {
     allocator: Allocator,
     block_cache: *BlockStateCache,
     checkpoint_cache: *CheckpointStateCache,
     // fork_choice: *ForkChoice,   // TODO: wire when available
-    db: ?*BeaconDB,
-    /// Persistent Merkle tree node pool — shared across all states.
-    /// Optional: deserialization from DB is skipped when null.
-    pool: ?*PersistentMerkleTreeNode.Pool,
-    /// Beacon chain config — required for fork detection during deserialization.
-    /// Optional: deserialization from DB is skipped when null.
-    config: ?*const BeaconConfig,
-    state_disposer: ?*StateDisposer,
-    pmt_mutator: ?*PmtMutator,
+    runtime: RuntimeDeps,
 
-    pub fn init(
+    pub fn initForRuntime(
         allocator: Allocator,
         block_cache: *BlockStateCache,
         checkpoint_cache: *CheckpointStateCache,
-    ) StateRegen {
-        return initWithDB(allocator, block_cache, checkpoint_cache, null, null, null);
-    }
-
-    /// Initialize with an optional BeaconDB for cold-path state retrieval.
-    pub fn initWithDB(
-        allocator: Allocator,
-        block_cache: *BlockStateCache,
-        checkpoint_cache: *CheckpointStateCache,
-        db: ?*BeaconDB,
-        pool: ?*PersistentMerkleTreeNode.Pool,
-        config: ?*const BeaconConfig,
+        runtime_deps: RuntimeDeps,
     ) StateRegen {
         return .{
             .allocator = allocator,
             .block_cache = block_cache,
             .checkpoint_cache = checkpoint_cache,
-            .db = db,
-            .pool = pool,
-            .config = config,
-            .state_disposer = null,
-            .pmt_mutator = null,
+            .runtime = runtime_deps,
         };
     }
 
-    pub fn setStateDisposer(self: *StateRegen, state_disposer: *StateDisposer) void {
-        self.state_disposer = state_disposer;
-    }
-
-    pub fn setPmtMutator(self: *StateRegen, pmt_mutator: *PmtMutator) void {
-        self.pmt_mutator = pmt_mutator;
-    }
-
-    /// Bind cold-path deserialization to the live shared pool/config of a
-    /// published state. Call this once an anchor/head state exists.
-    pub fn bindPublishedState(self: *StateRegen, state: *CachedBeaconState) void {
-        self.config = state.config;
-        self.pool = switch (state.state.*) {
+    /// Verify that a published state borrows the runtime-owned immutable data.
+    ///
+    /// Published states must already reference the runtime-owned config, PMT
+    /// pool, and shared pubkey cache. This function is an invariant check, not
+    /// an ownership-transfer hook.
+    pub fn verifyPublishedStateOwnership(self: *StateRegen, state: *CachedBeaconState) !void {
+        const cold = self.runtime.cold_path;
+        if (state.config != cold.config) return error.PublishedStateConfigMismatch;
+        const pool = switch (state.state.*) {
             inline else => |fork_state| fork_state.pool,
         };
+        if (pool != cold.pool) return error.PublishedStatePoolMismatch;
+        if (!cold.validator_pubkeys.ownsStateCaches(
+            state.epoch_cache.pubkey_to_index,
+            state.epoch_cache.index_to_pubkey,
+        )) {
+            return error.PublishedStatePubkeyCacheMismatch;
+        }
     }
 
     /// Fast pre-state lookup for block import planning.
@@ -175,18 +170,12 @@ pub const StateRegen = struct {
 
     /// Destroy a temporary uncached state loaded via deserializeState/replay.
     ///
-    /// These states allocate their own pubkey caches and do not share them with
-    /// the main published-state graph, so callers must use this path instead of
-    /// plain `CachedBeaconState.deinit()` to avoid leaking those transient caches.
+    /// Production cold-path states borrow the runtime singleton pubkey cache.
+    /// The fallback cache cleanup remains only for standalone/test callers that
+    /// construct detached immutable data without a cold-path binding.
     pub fn destroyTransientState(self: *StateRegen, state: *CachedBeaconState) void {
-        const pubkey_to_index = state.epoch_cache.pubkey_to_index;
-        const index_to_pubkey = state.epoch_cache.index_to_pubkey;
         state.deinit();
         self.allocator.destroy(state);
-        pubkey_to_index.deinit();
-        self.allocator.destroy(pubkey_to_index);
-        index_to_pubkey.deinit();
-        self.allocator.destroy(index_to_pubkey);
     }
 
     /// Get a checkpoint state, potentially reloading from disk.
@@ -209,22 +198,19 @@ pub const StateRegen = struct {
         // so we cannot efficiently look up by state_root here. Skip for now.
 
         // 3. Try DB archived state
-        if (self.db) |db| {
-            if (self.pool == null or self.config == null) return null;
-            const bytes = (try db.getStateArchiveByRoot(state_root)) orelse return null;
-            defer self.allocator.free(bytes);
-            var pmt_mutation_lease = PmtMutator.acquireOptional(self.pmt_mutator);
-            defer pmt_mutation_lease.release();
-            const cached_state = try deserializeState(
-                self.allocator,
-                self.pool.?,
-                self.config.?,
-                bytes,
-            );
-            return try self.cacheLoadedState(cached_state, false);
-        }
-
-        return null;
+        const cold = self.runtime.cold_path;
+        const bytes = (try cold.db.getStateArchiveByRoot(state_root)) orelse return null;
+        defer self.allocator.free(bytes);
+        var pmt_mutation_lease = self.acquirePmtMutationLease();
+        defer pmt_mutation_lease.release();
+        const cached_state = try deserializeState(
+            self.allocator,
+            cold.pool,
+            cold.config,
+            cold.validator_pubkeys,
+            bytes,
+        );
+        return try self.cacheLoadedState(cached_state, false);
     }
 
     /// Look up an archived state by slot.
@@ -235,17 +221,18 @@ pub const StateRegen = struct {
     /// When an exact archive is unavailable, replay canonical blocks forward
     /// from the closest archived epoch-boundary anchor.
     pub fn getStateBySlot(self: *StateRegen, slot: u64) !?*CachedBeaconState {
-        if (self.db == null or self.pool == null or self.config == null) return null;
+        const cold = self.runtime.cold_path;
 
-        if (try self.db.?.getStateArchive(slot)) |bytes| {
+        if (try cold.db.getStateArchive(slot)) |bytes| {
             defer self.allocator.free(bytes);
 
-            var pmt_mutation_lease = PmtMutator.acquireOptional(self.pmt_mutator);
+            var pmt_mutation_lease = self.acquirePmtMutationLease();
             defer pmt_mutation_lease.release();
             const cached_state = try deserializeState(
                 self.allocator,
-                self.pool.?,
-                self.config.?,
+                cold.pool,
+                cold.config,
+                cold.validator_pubkeys,
                 bytes,
             );
             return try self.cacheLoadedState(cached_state, false);
@@ -299,43 +286,44 @@ pub const StateRegen = struct {
     }
 
     fn getCanonicalStateByBlockRoot(self: *StateRegen, block_root: [32]u8) !?*CachedBeaconState {
-        if (self.db == null or self.config == null) return null;
+        const cold = self.runtime.cold_path;
 
         const block_bytes = try self.getBlockBytesByRoot(block_root) orelse return null;
         defer self.allocator.free(block_bytes);
 
         const slot = readSignedBlockSlotFromSsz(block_bytes) orelse return null;
-        const canonical_root = try self.db.?.getBlockRootBySlot(slot) orelse return null;
+        const canonical_root = try cold.db.getBlockRootBySlot(slot) orelse return null;
         if (!std.mem.eql(u8, &canonical_root, &block_root)) return null;
 
         return self.replayCanonicalStateToSlot(slot);
     }
 
     fn getCanonicalStateByBlockRootUncached(self: *StateRegen, block_root: [32]u8) !?*CachedBeaconState {
-        if (self.db == null or self.config == null) return null;
+        const cold = self.runtime.cold_path;
 
         const block_bytes = try self.getBlockBytesByRoot(block_root) orelse return null;
         defer self.allocator.free(block_bytes);
 
         const slot = readSignedBlockSlotFromSsz(block_bytes) orelse return null;
-        const canonical_root = try self.db.?.getBlockRootBySlot(slot) orelse return null;
+        const canonical_root = try cold.db.getBlockRootBySlot(slot) orelse return null;
         if (!std.mem.eql(u8, &canonical_root, &block_root)) return null;
 
         return self.replayCanonicalStateToSlotUncached(slot);
     }
 
     fn replayCanonicalStateToSlot(self: *StateRegen, target_slot: u64) !?*CachedBeaconState {
-        if (self.db == null or self.pool == null or self.config == null) return null;
+        const cold = self.runtime.cold_path;
 
-        var pmt_mutation_lease = PmtMutator.acquireOptional(self.pmt_mutator);
+        var pmt_mutation_lease = self.acquirePmtMutationLease();
         defer pmt_mutation_lease.release();
 
-        if (try self.db.?.getStateArchive(target_slot)) |bytes| {
+        if (try cold.db.getStateArchive(target_slot)) |bytes| {
             defer self.allocator.free(bytes);
             const exact_state = try deserializeState(
                 self.allocator,
-                self.pool.?,
-                self.config.?,
+                cold.pool,
+                cold.config,
+                cold.validator_pubkeys,
                 bytes,
             );
             return try self.cacheLoadedState(exact_state, false);
@@ -354,7 +342,7 @@ pub const StateRegen = struct {
 
         var slot = anchor_slot + 1;
         while (slot <= target_slot) : (slot += 1) {
-            const block_root = try self.db.?.getBlockRootBySlot(slot);
+            const block_root = try cold.db.getBlockRootBySlot(slot);
             if (block_root) |root| {
                 const block_bytes = try self.getBlockBytesByRoot(root) orelse return null;
                 defer self.allocator.free(block_bytes);
@@ -393,17 +381,18 @@ pub const StateRegen = struct {
     }
 
     fn replayCanonicalStateToSlotUncached(self: *StateRegen, target_slot: u64) !?*CachedBeaconState {
-        if (self.db == null or self.pool == null or self.config == null) return null;
+        const cold = self.runtime.cold_path;
 
-        var pmt_mutation_lease = PmtMutator.acquireOptional(self.pmt_mutator);
+        var pmt_mutation_lease = self.acquirePmtMutationLease();
         defer pmt_mutation_lease.release();
 
-        if (try self.db.?.getStateArchive(target_slot)) |bytes| {
+        if (try cold.db.getStateArchive(target_slot)) |bytes| {
             defer self.allocator.free(bytes);
             return try deserializeState(
                 self.allocator,
-                self.pool.?,
-                self.config.?,
+                cold.pool,
+                cold.config,
+                cold.validator_pubkeys,
                 bytes,
             );
         }
@@ -421,7 +410,7 @@ pub const StateRegen = struct {
 
         var slot = anchor_slot + 1;
         while (slot <= target_slot) : (slot += 1) {
-            const block_root = try self.db.?.getBlockRootBySlot(slot);
+            const block_root = try cold.db.getBlockRootBySlot(slot);
             if (block_root) |root| {
                 const block_bytes = try self.getBlockBytesByRoot(root) orelse return null;
                 defer self.allocator.free(block_bytes);
@@ -460,11 +449,11 @@ pub const StateRegen = struct {
     }
 
     fn findReplayAnchorSlot(self: *StateRegen, target_slot: u64) !?u64 {
-        if (self.db == null) return null;
+        const cold = self.runtime.cold_path;
 
         var search_slot = computeStartSlotAtEpoch(computeEpochAtSlot(target_slot));
         while (true) {
-            if (try self.db.?.getStateArchive(search_slot)) |bytes| {
+            if (try cold.db.getStateArchive(search_slot)) |bytes| {
                 self.allocator.free(bytes);
                 return search_slot;
             }
@@ -474,36 +463,39 @@ pub const StateRegen = struct {
     }
 
     fn loadArchivedStateUncached(self: *StateRegen, slot: u64) !*CachedBeaconState {
-        const bytes = (try self.db.?.getStateArchive(slot)) orelse return error.StateArchiveMissing;
+        const cold = self.runtime.cold_path;
+        const bytes = (try cold.db.getStateArchive(slot)) orelse return error.StateArchiveMissing;
         defer self.allocator.free(bytes);
 
         return deserializeState(
             self.allocator,
-            self.pool.?,
-            self.config.?,
+            cold.pool,
+            cold.config,
+            cold.validator_pubkeys,
             bytes,
         );
     }
 
     fn loadArchivedStateByRootUncached(self: *StateRegen, state_root: [32]u8) !?*CachedBeaconState {
-        if (self.db == null or self.pool == null or self.config == null) return null;
-        const bytes = (try self.db.?.getStateArchiveByRoot(state_root)) orelse return null;
+        const cold = self.runtime.cold_path;
+        const bytes = (try cold.db.getStateArchiveByRoot(state_root)) orelse return null;
         defer self.allocator.free(bytes);
 
-        var pmt_mutation_lease = PmtMutator.acquireOptional(self.pmt_mutator);
+        var pmt_mutation_lease = self.acquirePmtMutationLease();
         defer pmt_mutation_lease.release();
         return deserializeState(
             self.allocator,
-            self.pool.?,
-            self.config.?,
+            cold.pool,
+            cold.config,
+            cold.validator_pubkeys,
             bytes,
         );
     }
 
     fn getBlockBytesByRoot(self: *StateRegen, block_root: [32]u8) !?[]const u8 {
-        if (self.db == null) return null;
-        if (try self.db.?.getBlock(block_root)) |block_bytes| return block_bytes;
-        return self.db.?.getBlockArchiveByRoot(block_root);
+        const cold = self.runtime.cold_path;
+        if (try cold.db.getBlock(block_root)) |block_bytes| return block_bytes;
+        return cold.db.getBlockArchiveByRoot(block_root);
     }
 
     fn deserializeSignedBlock(
@@ -511,7 +503,8 @@ pub const StateRegen = struct {
         slot: u64,
         block_bytes: []const u8,
     ) !AnySignedBeaconBlock {
-        const fork_seq = self.config.?.forkSeq(slot);
+        const cold = self.runtime.cold_path;
+        const fork_seq = cold.config.forkSeq(slot);
         return AnySignedBeaconBlock.deserialize(
             self.allocator,
             .full,
@@ -531,11 +524,11 @@ pub const StateRegen = struct {
     }
 
     fn disposeState(self: *StateRegen, state: *CachedBeaconState) !void {
-        if (self.state_disposer) |state_disposer| {
-            try state_disposer.dispose(state);
-            return;
-        }
-        destroyCachedBeaconState(self.allocator, state);
+        try self.runtime.state_disposer.dispose(state);
+    }
+
+    fn acquirePmtMutationLease(self: *const StateRegen) PmtMutator.Lease {
+        return self.runtime.pmt_mutator.acquire();
     }
 };
 
@@ -543,136 +536,79 @@ pub const StateRegen = struct {
 // Tests
 // ---------------------------------------------------------------------------
 
+const RegenRuntimeFixture = @import("test_fixture.zig").RegenRuntimeFixture;
+
+fn clonePublishedStateWithSharedPubkeys(
+    allocator: Allocator,
+    shared_pubkeys: *SharedValidatorPubkeys,
+    source: *CachedBeaconState,
+) !*CachedBeaconState {
+    const cloned_state = try allocator.create(AnyBeaconState);
+    errdefer allocator.destroy(cloned_state);
+    cloned_state.* = try source.state.clone(.{});
+    errdefer cloned_state.deinit();
+
+    const validators = try cloned_state.validatorsSlice(allocator);
+    defer allocator.free(validators);
+    try shared_pubkeys.syncFromValidators(validators);
+
+    return CachedBeaconState.createCachedBeaconState(
+        allocator,
+        cloned_state,
+        shared_pubkeys.immutableData(source.config),
+        .{
+            .skip_sync_committee_cache = cloned_state.forkSeq() == .phase0,
+            .skip_sync_pubkeys = true,
+        },
+    );
+}
+
 test "StateRegen: basic getPreState from block cache" {
-    const Node = @import("persistent_merkle_tree").Node;
-    const TestCachedBeaconState = @import("state_transition").test_utils.TestCachedBeaconState;
-    const datastore_mod = @import("datastore.zig");
-    const MemoryCPStateDatastore = datastore_mod.MemoryCPStateDatastore;
-
     const allocator = std.testing.allocator;
-    const pool_size = 256 * 5;
-    var pool = try Node.Pool.init(allocator, pool_size);
-    defer pool.deinit();
-
-    var test_state = try TestCachedBeaconState.init(allocator, &pool, 16);
-    defer test_state.deinit();
-
-    var mem_store = MemoryCPStateDatastore.init(allocator);
-    defer mem_store.deinit();
-    const ds = mem_store.datastore();
-
-    var block_cache = BlockStateCache.init(allocator, 4);
-    defer block_cache.deinit();
-
-    var cp_cache = CheckpointStateCache.init(allocator, ds, &block_cache, 3);
-    defer cp_cache.deinit();
-
-    var regen = StateRegen.init(allocator, &block_cache, &cp_cache);
+    var fixture = try RegenRuntimeFixture.init(allocator, 16);
+    defer fixture.deinit();
 
     // Add a state to block cache
-    const state = try test_state.cached_state.clone(allocator, .{});
-    const root = try regen.onNewBlock(state, true);
+    const state = try fixture.clonePublishedState();
+    const root = try fixture.regen.onNewBlock(state, true);
 
     // Should find it via getPreState
-    const pre_state = try regen.getPreState(root, root, 100);
+    const pre_state = try fixture.regen.getPreState(root, root, 100);
     try std.testing.expectEqual(state, pre_state);
 }
 
 test "StateRegen: getPreState returns error when nothing cached" {
-    const Node = @import("persistent_merkle_tree").Node;
-    const TestCachedBeaconState = @import("state_transition").test_utils.TestCachedBeaconState;
-    const datastore_mod = @import("datastore.zig");
-    const MemoryCPStateDatastore = datastore_mod.MemoryCPStateDatastore;
-
     const allocator = std.testing.allocator;
-    const pool_size = 256 * 5;
-    var pool = try Node.Pool.init(allocator, pool_size);
-    defer pool.deinit();
-
-    var test_state = try TestCachedBeaconState.init(allocator, &pool, 16);
-    defer test_state.deinit();
-
-    var mem_store = MemoryCPStateDatastore.init(allocator);
-    defer mem_store.deinit();
-    const ds = mem_store.datastore();
-
-    var block_cache = BlockStateCache.init(allocator, 4);
-    defer block_cache.deinit();
-
-    var cp_cache = CheckpointStateCache.init(allocator, ds, &block_cache, 3);
-    defer cp_cache.deinit();
-
-    var regen = StateRegen.init(allocator, &block_cache, &cp_cache);
+    var fixture = try RegenRuntimeFixture.init(allocator, 16);
+    defer fixture.deinit();
 
     const unknown_root = [_]u8{0xde} ** 32;
-    try std.testing.expectError(error.NoPreStateAvailable, regen.getPreState(unknown_root, unknown_root, 100));
+    try std.testing.expectError(error.NoPreStateAvailable, fixture.regen.getPreState(unknown_root, unknown_root, 100));
 }
 
 test "StateRegen: onFinalized prunes old states" {
-    const Node = @import("persistent_merkle_tree").Node;
-    const TestCachedBeaconState = @import("state_transition").test_utils.TestCachedBeaconState;
-    const datastore_mod = @import("datastore.zig");
-    const MemoryCPStateDatastore = datastore_mod.MemoryCPStateDatastore;
-
     const allocator = std.testing.allocator;
-    const pool_size = 256 * 5;
-    var pool = try Node.Pool.init(allocator, pool_size);
-    defer pool.deinit();
-
-    var test_state = try TestCachedBeaconState.init(allocator, &pool, 16);
-    defer test_state.deinit();
-
-    var mem_store = MemoryCPStateDatastore.init(allocator);
-    defer mem_store.deinit();
-    const ds = mem_store.datastore();
-
-    var block_cache = BlockStateCache.init(allocator, 4);
-    defer block_cache.deinit();
-
-    var cp_cache = CheckpointStateCache.init(allocator, ds, &block_cache, 3);
-    defer cp_cache.deinit();
-
-    var regen = StateRegen.init(allocator, &block_cache, &cp_cache);
+    var fixture = try RegenRuntimeFixture.init(allocator, 16);
+    defer fixture.deinit();
 
     // Add checkpoint at epoch 5
-    const state = try test_state.cached_state.clone(allocator, .{});
+    const state = try fixture.clonePublishedState();
     const cp = CheckpointKey{ .epoch = 5, .root = [_]u8{0x05} ** 32 };
-    try regen.onCheckpoint(cp, state);
+    try fixture.regen.onCheckpoint(cp, state);
 
-    try std.testing.expectEqual(@as(usize, 1), cp_cache.size());
+    try std.testing.expectEqual(@as(usize, 1), fixture.cp_cache.size());
 
     // Finalize at epoch 10 — should prune epoch 5
-    try regen.onFinalized(10);
-    try std.testing.expectEqual(@as(usize, 0), cp_cache.size());
+    try fixture.regen.onFinalized(10);
+    try std.testing.expectEqual(@as(usize, 0), fixture.cp_cache.size());
 }
 
 test "StateRegen: checkpoint publication seals lazy PMT roots" {
-    const Node = @import("persistent_merkle_tree").Node;
-    const TestCachedBeaconState = @import("state_transition").test_utils.TestCachedBeaconState;
-    const datastore_mod = @import("datastore.zig");
-    const MemoryCPStateDatastore = datastore_mod.MemoryCPStateDatastore;
-
     const allocator = std.testing.allocator;
-    const pool_size = 256 * 5;
-    var pool = try Node.Pool.init(allocator, pool_size);
-    defer pool.deinit();
+    var fixture = try RegenRuntimeFixture.init(allocator, 16);
+    defer fixture.deinit();
 
-    var test_state = try TestCachedBeaconState.init(allocator, &pool, 16);
-    defer test_state.deinit();
-
-    var mem_store = MemoryCPStateDatastore.init(allocator);
-    defer mem_store.deinit();
-    const ds = mem_store.datastore();
-
-    var block_cache = BlockStateCache.init(allocator, 4);
-    defer block_cache.deinit();
-
-    var cp_cache = CheckpointStateCache.init(allocator, ds, &block_cache, 3);
-    defer cp_cache.deinit();
-
-    var regen = StateRegen.init(allocator, &block_cache, &cp_cache);
-
-    const state = try test_state.cached_state.clone(allocator, .{});
+    const state = try fixture.clonePublishedState();
     try state.state.setSlot((try state.state.slot()) + 1);
 
     const root_state_before = switch (state.state.*) {
@@ -681,9 +617,9 @@ test "StateRegen: checkpoint publication seals lazy PMT roots" {
     try std.testing.expect(root_state_before.isBranchLazy());
 
     const cp = CheckpointKey{ .epoch = 5, .root = [_]u8{0x05} ** 32 };
-    try regen.onCheckpoint(cp, state);
+    try fixture.regen.onCheckpoint(cp, state);
 
-    const cached_state = cp_cache.get(cp);
+    const cached_state = fixture.cp_cache.get(cp);
     try std.testing.expect(cached_state != null);
     const root_state_after = switch (cached_state.?.state.*) {
         inline else => |fork_state| fork_state.root.getState(fork_state.pool),
@@ -692,135 +628,46 @@ test "StateRegen: checkpoint publication seals lazy PMT roots" {
 }
 
 test "StateRegen: getStateByRoot returns state from block cache" {
-    const Node = @import("persistent_merkle_tree").Node;
-    const TestCachedBeaconState = @import("state_transition").test_utils.TestCachedBeaconState;
-    const datastore_mod = @import("datastore.zig");
-    const MemoryCPStateDatastore = datastore_mod.MemoryCPStateDatastore;
-
     const allocator = std.testing.allocator;
-    const pool_size = 256 * 5;
-    var pool = try Node.Pool.init(allocator, pool_size);
-    defer pool.deinit();
-
-    var test_state = try TestCachedBeaconState.init(allocator, &pool, 16);
-    defer test_state.deinit();
-
-    var mem_store = MemoryCPStateDatastore.init(allocator);
-    defer mem_store.deinit();
-    const ds = mem_store.datastore();
-
-    var block_cache = BlockStateCache.init(allocator, 4);
-    defer block_cache.deinit();
-
-    var cp_cache = CheckpointStateCache.init(allocator, ds, &block_cache, 3);
-    defer cp_cache.deinit();
-
-    var regen = StateRegen.init(allocator, &block_cache, &cp_cache);
+    var fixture = try RegenRuntimeFixture.init(allocator, 16);
+    defer fixture.deinit();
 
     // Add a state to block cache
-    const state = try test_state.cached_state.clone(allocator, .{});
-    const state_root = try regen.onNewBlock(state, true);
+    const state = try fixture.clonePublishedState();
+    const state_root = try fixture.regen.onNewBlock(state, true);
 
     // getStateByRoot should find it in block cache
-    const found = try regen.getStateByRoot(state_root);
+    const found = try fixture.regen.getStateByRoot(state_root);
     try std.testing.expectEqual(state, found);
 }
 
 test "StateRegen: getStateByRoot returns null for unknown root" {
-    const Node = @import("persistent_merkle_tree").Node;
-    const TestCachedBeaconState = @import("state_transition").test_utils.TestCachedBeaconState;
-    const datastore_mod = @import("datastore.zig");
-    const MemoryCPStateDatastore = datastore_mod.MemoryCPStateDatastore;
-
     const allocator = std.testing.allocator;
-    const pool_size = 256 * 5;
-    var pool = try Node.Pool.init(allocator, pool_size);
-    defer pool.deinit();
-
-    var test_state = try TestCachedBeaconState.init(allocator, &pool, 16);
-    defer test_state.deinit();
-
-    var mem_store = MemoryCPStateDatastore.init(allocator);
-    defer mem_store.deinit();
-    const ds = mem_store.datastore();
-
-    var block_cache = BlockStateCache.init(allocator, 4);
-    defer block_cache.deinit();
-
-    var cp_cache = CheckpointStateCache.init(allocator, ds, &block_cache, 3);
-    defer cp_cache.deinit();
-
-    var regen = StateRegen.init(allocator, &block_cache, &cp_cache);
+    var fixture = try RegenRuntimeFixture.init(allocator, 16);
+    defer fixture.deinit();
 
     const unknown_root = [_]u8{0xaa} ** 32;
-    const found = try regen.getStateByRoot(unknown_root);
+    const found = try fixture.regen.getStateByRoot(unknown_root);
     try std.testing.expectEqual(@as(?*CachedBeaconState, null), found);
 }
 
-test "StateRegen: getPreState returns error when nothing cached and no DB" {
-    const Node = @import("persistent_merkle_tree").Node;
-    const TestCachedBeaconState = @import("state_transition").test_utils.TestCachedBeaconState;
-    const datastore_mod = @import("datastore.zig");
-    const MemoryCPStateDatastore = datastore_mod.MemoryCPStateDatastore;
-
+test "StateRegen: getPreState returns error when nothing canonical is available" {
     const allocator = std.testing.allocator;
-    const pool_size = 256 * 5;
-    var pool = try Node.Pool.init(allocator, pool_size);
-    defer pool.deinit();
-
-    var test_state = try TestCachedBeaconState.init(allocator, &pool, 16);
-    defer test_state.deinit();
-
-    var mem_store = MemoryCPStateDatastore.init(allocator);
-    defer mem_store.deinit();
-    const ds = mem_store.datastore();
-
-    var block_cache = BlockStateCache.init(allocator, 4);
-    defer block_cache.deinit();
-
-    var cp_cache = CheckpointStateCache.init(allocator, ds, &block_cache, 3);
-    defer cp_cache.deinit();
-
-    // No DB wired
-    var regen = StateRegen.init(allocator, &block_cache, &cp_cache);
+    var fixture = try RegenRuntimeFixture.init(allocator, 16);
+    defer fixture.deinit();
 
     const unknown_root = [_]u8{0xbb} ** 32;
-    try std.testing.expectError(error.NoPreStateAvailable, regen.getPreState(unknown_root, unknown_root, 64));
+    try std.testing.expectError(error.NoPreStateAvailable, fixture.regen.getPreState(unknown_root, unknown_root, 64));
 }
 
-test "StateRegen: loadPreStateUncached loads archived state root after binding published state" {
-    const Node = @import("persistent_merkle_tree").Node;
-    const TestCachedBeaconState = @import("state_transition").test_utils.TestCachedBeaconState;
-    const datastore_mod = @import("datastore.zig");
-    const MemoryCPStateDatastore = datastore_mod.MemoryCPStateDatastore;
-    const db_mod = @import("db");
-
+test "StateRegen: loadPreStateUncached loads archived state root after verifying published ownership" {
     const allocator = std.testing.allocator;
-    const pool_size = 256 * 5;
-    var pool = try Node.Pool.init(allocator, pool_size);
-    defer pool.deinit();
+    var fixture = try RegenRuntimeFixture.init(allocator, 16);
+    defer fixture.deinit();
 
-    var test_state = try TestCachedBeaconState.init(allocator, &pool, 16);
-    defer test_state.deinit();
+    try fixture.regen.verifyPublishedStateOwnership(fixture.published_state);
 
-    var mem_store = MemoryCPStateDatastore.init(allocator);
-    defer mem_store.deinit();
-    const ds = mem_store.datastore();
-
-    var block_cache = BlockStateCache.init(allocator, 4);
-    defer block_cache.deinit();
-
-    var cp_cache = CheckpointStateCache.init(allocator, ds, &block_cache, 3);
-    defer cp_cache.deinit();
-
-    var kv_store = db_mod.MemoryKVStore.init(allocator);
-    defer kv_store.deinit();
-    var db = db_mod.BeaconDB.init(allocator, kv_store.kvStore());
-
-    var regen = StateRegen.initWithDB(allocator, &block_cache, &cp_cache, &db, null, null);
-    regen.bindPublishedState(test_state.cached_state);
-
-    const archived = try test_state.cached_state.clone(allocator, .{});
+    const archived = try fixture.clonePublishedState();
     defer {
         archived.deinit();
         allocator.destroy(archived);
@@ -830,17 +677,59 @@ test "StateRegen: loadPreStateUncached loads archived state root after binding p
     const archived_slot = try archived.state.slot();
     const archived_bytes = try archived.state.serialize(allocator);
     defer allocator.free(archived_bytes);
-    try db.putStateArchive(archived_slot, archived_state_root, archived_bytes);
+    try fixture.db.putStateArchive(archived_slot, archived_state_root, archived_bytes);
 
-    const loaded = try regen.loadPreStateUncached(
+    const loaded = try fixture.regen.loadPreStateUncached(
         [_]u8{0x11} ** 32,
         archived_state_root,
         archived_slot + 1,
     );
     defer {
-        regen.destroyTransientState(loaded);
+        fixture.regen.destroyTransientState(loaded);
     }
 
     try std.testing.expectEqual(archived_slot, try loaded.state.slot());
-    try std.testing.expectEqual(@as(usize, 0), block_cache.size());
+    try std.testing.expectEqual(@as(usize, 0), fixture.block_cache.size());
+}
+
+test "StateRegen: verifyPublishedStateOwnership accepts runtime-owned shared singleton" {
+    const allocator = std.testing.allocator;
+    var fixture = try RegenRuntimeFixture.init(allocator, 16);
+    defer fixture.deinit();
+
+    try fixture.regen.verifyPublishedStateOwnership(fixture.published_state);
+
+    try std.testing.expect(fixture.shared_pubkeys.ownsStateCaches(
+        fixture.published_state.epoch_cache.pubkey_to_index,
+        fixture.published_state.epoch_cache.index_to_pubkey,
+    ));
+    try std.testing.expectEqual(@as(usize, 16), fixture.shared_pubkeys.index_to_pubkey.items.len);
+}
+
+test "StateRegen: verifyPublishedStateOwnership rejects detached test-helper pubkey caches" {
+    const allocator = std.testing.allocator;
+    var fixture = try RegenRuntimeFixture.init(allocator, 16);
+    defer fixture.deinit();
+
+    const detached_pubkeys = try allocator.create(SharedValidatorPubkeys);
+    defer {
+        detached_pubkeys.deinit();
+        allocator.destroy(detached_pubkeys);
+    }
+    detached_pubkeys.* = SharedValidatorPubkeys.init(allocator);
+
+    const detached_state = try clonePublishedStateWithSharedPubkeys(
+        allocator,
+        detached_pubkeys,
+        fixture.published_state,
+    );
+    defer {
+        detached_state.deinit();
+        allocator.destroy(detached_state);
+    }
+
+    try std.testing.expectError(
+        error.PublishedStatePubkeyCacheMismatch,
+        fixture.regen.verifyPublishedStateOwnership(detached_state),
+    );
 }
