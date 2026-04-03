@@ -22,8 +22,7 @@ const BeaconDB = db_mod.BeaconDB;
 const fork_types = @import("fork_types");
 const AnySignedBeaconBlock = fork_types.AnySignedBeaconBlock;
 
-const state_transition = @import("state_transition");
-const BlockStateCache = state_transition.BlockStateCache;
+const BlockStateCache = @import("regen/root.zig").BlockStateCache;
 
 const Root = [32]u8;
 const Slot = u64;
@@ -282,7 +281,7 @@ test "ArchiveStore: init/deinit is safe" {
     var db = db_mod.BeaconDB.init(std.testing.allocator, store_ptr.kvStore());
     defer db.close();
 
-    var bsc = state_transition.BlockStateCache.init(std.testing.allocator, 64);
+    var bsc = BlockStateCache.init(std.testing.allocator, 64);
     defer bsc.deinit();
 
     var store = ArchiveStore.init(std.testing.allocator, &db, &bsc, .{});
@@ -302,7 +301,7 @@ test "ArchiveStore: archiveBlocks moves data from hot to archive" {
     var db = db_mod.BeaconDB.init(std.testing.allocator, store_ptr.kvStore());
     defer db.close();
 
-    var bsc = state_transition.BlockStateCache.init(std.testing.allocator, 64);
+    var bsc = BlockStateCache.init(std.testing.allocator, 64);
     defer bsc.deinit();
 
     var store = ArchiveStore.init(std.testing.allocator, &db, &bsc, .{
@@ -350,7 +349,7 @@ test "ArchiveStore: onFinalized archives epoch boundary state" {
     var db = db_mod.BeaconDB.init(allocator, store_ptr.kvStore());
     defer db.close();
 
-    var bsc = state_transition.BlockStateCache.init(allocator, 64);
+    var bsc = BlockStateCache.init(allocator, 64);
     defer bsc.deinit();
 
     const pool_size = 256 * 5;
@@ -408,7 +407,7 @@ test "ArchiveStore: archiveBlocks archives blob sidecars and data columns" {
     var db = db_mod.BeaconDB.init(allocator, store_ptr.kvStore());
     defer db.close();
 
-    var bsc = state_transition.BlockStateCache.init(allocator, 64);
+    var bsc = BlockStateCache.init(allocator, 64);
     defer bsc.deinit();
 
     var store = ArchiveStore.init(allocator, &db, &bsc, .{

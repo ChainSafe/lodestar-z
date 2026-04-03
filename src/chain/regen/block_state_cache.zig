@@ -8,9 +8,10 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const preset = @import("preset").preset;
-const computeEpochAtSlot = @import("../utils/epoch.zig").computeEpochAtSlot;
+const state_transition = @import("state_transition");
+const computeEpochAtSlot = state_transition.computeEpochAtSlot;
 
-const CachedBeaconState = @import("state_cache.zig").CachedBeaconState;
+const CachedBeaconState = state_transition.CachedBeaconState;
 const StateDisposer = @import("state_disposer.zig").StateDisposer;
 const destroyCachedBeaconState = @import("state_disposer.zig").destroyCachedBeaconState;
 
@@ -208,7 +209,7 @@ pub const BlockStateCache = struct {
 
 test "BlockStateCache: add, get, FIFO eviction" {
     const Node = @import("persistent_merkle_tree").Node;
-    const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
+    const TestCachedBeaconState = @import("state_transition").test_utils.TestCachedBeaconState;
     const allocator = std.testing.allocator;
     const pool_size = 256 * 5;
     var pool = try Node.Pool.init(allocator, pool_size);
@@ -249,7 +250,7 @@ test "BlockStateCache: add, get, FIFO eviction" {
 
 test "BlockStateCache: head state is never evicted" {
     const Node = @import("persistent_merkle_tree").Node;
-    const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
+    const TestCachedBeaconState = @import("state_transition").test_utils.TestCachedBeaconState;
     const allocator = std.testing.allocator;
     const pool_size = 256 * 5;
     var pool = try Node.Pool.init(allocator, pool_size);
@@ -283,7 +284,7 @@ test "BlockStateCache: head state is never evicted" {
 
 test "BlockStateCache: eviction can defer state teardown" {
     const Node = @import("persistent_merkle_tree").Node;
-    const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
+    const TestCachedBeaconState = @import("state_transition").test_utils.TestCachedBeaconState;
     const state_disposer_mod = @import("state_disposer.zig");
 
     const allocator = std.testing.allocator;
@@ -324,7 +325,7 @@ test "BlockStateCache: eviction can defer state teardown" {
 
 test "BlockStateCache: getSeedState" {
     const Node = @import("persistent_merkle_tree").Node;
-    const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
+    const TestCachedBeaconState = @import("state_transition").test_utils.TestCachedBeaconState;
     const allocator = std.testing.allocator;
     const pool_size = 256 * 5;
     var pool = try Node.Pool.init(allocator, pool_size);
@@ -348,7 +349,7 @@ test "BlockStateCache: getSeedState" {
 
 test "BlockStateCache: head state survives multiple evictions" {
     const Node = @import("persistent_merkle_tree").Node;
-    const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
+    const TestCachedBeaconState = @import("state_transition").test_utils.TestCachedBeaconState;
     const allocator = std.testing.allocator;
     const pool_size = 256 * 10;
     var pool = try Node.Pool.init(allocator, pool_size);
@@ -381,7 +382,7 @@ test "BlockStateCache: head state survives multiple evictions" {
 
 test "BlockStateCache: pruneBeforeEpoch removes old states" {
     const Node = @import("persistent_merkle_tree").Node;
-    const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
+    const TestCachedBeaconState = @import("state_transition").test_utils.TestCachedBeaconState;
     const allocator = std.testing.allocator;
     const pool_size = 256 * 10;
     var pool = try Node.Pool.init(allocator, pool_size);
@@ -415,7 +416,7 @@ test "BlockStateCache: pruneBeforeEpoch removes old states" {
 
 test "BlockStateCache: re-adding existing state moves position" {
     const Node = @import("persistent_merkle_tree").Node;
-    const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
+    const TestCachedBeaconState = @import("state_transition").test_utils.TestCachedBeaconState;
     const allocator = std.testing.allocator;
     const pool_size = 256 * 5;
     var pool = try Node.Pool.init(allocator, pool_size);

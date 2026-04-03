@@ -17,10 +17,11 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 
 const state_transition = @import("state_transition");
+const regen_mod = @import("regen/root.zig");
 const CachedBeaconState = state_transition.CachedBeaconState;
-const CheckpointStateCache = state_transition.CheckpointStateCache;
-const BlockStateCache = state_transition.BlockStateCache;
-const PmtMutator = state_transition.PmtMutator;
+const CheckpointStateCache = regen_mod.CheckpointStateCache;
+const BlockStateCache = regen_mod.BlockStateCache;
+const PmtMutator = regen_mod.PmtMutator;
 const computeEpochAtSlot = state_transition.computeEpochAtSlot;
 
 const preset = @import("preset").preset;
@@ -149,14 +150,14 @@ pub const PrepareNextSlot = struct {
 // ---------------------------------------------------------------------------
 
 fn makeTestCaches(allocator: std.mem.Allocator) struct {
-    mem_ds: *state_transition.MemoryCPStateDatastore,
-    bsc: state_transition.BlockStateCache,
-    csc: state_transition.CheckpointStateCache,
+    mem_ds: *regen_mod.MemoryCPStateDatastore,
+    bsc: regen_mod.BlockStateCache,
+    csc: regen_mod.CheckpointStateCache,
 } {
-    const mem_ds = allocator.create(state_transition.MemoryCPStateDatastore) catch @panic("OOM");
-    mem_ds.* = state_transition.MemoryCPStateDatastore.init(allocator);
-    var bsc = state_transition.BlockStateCache.init(allocator, 64);
-    const csc = state_transition.CheckpointStateCache.init(allocator, mem_ds.datastore(), &bsc, 3);
+    const mem_ds = allocator.create(regen_mod.MemoryCPStateDatastore) catch @panic("OOM");
+    mem_ds.* = regen_mod.MemoryCPStateDatastore.init(allocator);
+    var bsc = regen_mod.BlockStateCache.init(allocator, 64);
+    const csc = regen_mod.CheckpointStateCache.init(allocator, mem_ds.datastore(), &bsc, 3);
     return .{ .mem_ds = mem_ds, .bsc = bsc, .csc = csc };
 }
 

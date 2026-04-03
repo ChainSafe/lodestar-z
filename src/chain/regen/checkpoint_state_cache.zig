@@ -8,10 +8,11 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const preset = @import("preset").preset;
-const computeEpochAtSlot = @import("../utils/epoch.zig").computeEpochAtSlot;
-const computeStartSlotAtEpoch = @import("../utils/epoch.zig").computeStartSlotAtEpoch;
+const state_transition = @import("state_transition");
+const computeEpochAtSlot = state_transition.computeEpochAtSlot;
+const computeStartSlotAtEpoch = state_transition.computeStartSlotAtEpoch;
 
-const CachedBeaconState = @import("state_cache.zig").CachedBeaconState;
+const CachedBeaconState = state_transition.CachedBeaconState;
 const BlockStateCache = @import("block_state_cache.zig").BlockStateCache;
 const PmtMutator = @import("pmt_mutator.zig").PmtMutator;
 const StateDisposer = @import("state_disposer.zig").StateDisposer;
@@ -131,7 +132,7 @@ pub const CheckpointStateCache = struct {
         // Get seed state for tree-sharing reload
         const seed_state = self.block_cache.getSeedState() orelse return null;
 
-        const loadCachedBeaconState = @import("../utils/load_cached_state.zig").loadCachedBeaconState;
+        const loadCachedBeaconState = state_transition.loadCachedBeaconState;
         const Node = @import("persistent_merkle_tree").Node;
 
         // Use the seed state's fork for now — loadCachedBeaconState uses the seed state's fork
@@ -362,7 +363,7 @@ pub const CheckpointStateCache = struct {
 
 test "CheckpointStateCache: add and get" {
     const Node = @import("persistent_merkle_tree").Node;
-    const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
+    const TestCachedBeaconState = @import("state_transition").test_utils.TestCachedBeaconState;
     const MemoryCPStateDatastore = datastore_mod.MemoryCPStateDatastore;
 
     const allocator = std.testing.allocator;
@@ -398,7 +399,7 @@ test "CheckpointStateCache: add and get" {
 
 test "CheckpointStateCache: getLatest" {
     const Node = @import("persistent_merkle_tree").Node;
-    const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
+    const TestCachedBeaconState = @import("state_transition").test_utils.TestCachedBeaconState;
     const MemoryCPStateDatastore = datastore_mod.MemoryCPStateDatastore;
 
     const allocator = std.testing.allocator;
@@ -443,7 +444,7 @@ test "CheckpointStateCache: getLatest" {
 
 test "CheckpointStateCache: processState persists old epochs" {
     const Node = @import("persistent_merkle_tree").Node;
-    const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
+    const TestCachedBeaconState = @import("state_transition").test_utils.TestCachedBeaconState;
     const MemoryCPStateDatastore = datastore_mod.MemoryCPStateDatastore;
 
     const allocator = std.testing.allocator;
@@ -494,7 +495,7 @@ test "CheckpointStateCache: processState persists old epochs" {
 
 test "CheckpointStateCache: pruneFinalized" {
     const Node = @import("persistent_merkle_tree").Node;
-    const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
+    const TestCachedBeaconState = @import("state_transition").test_utils.TestCachedBeaconState;
     const MemoryCPStateDatastore = datastore_mod.MemoryCPStateDatastore;
 
     const allocator = std.testing.allocator;
@@ -534,7 +535,7 @@ test "CheckpointStateCache: pruneFinalized" {
 
 test "CheckpointStateCache: multiple roots per epoch" {
     const Node = @import("persistent_merkle_tree").Node;
-    const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
+    const TestCachedBeaconState = @import("state_transition").test_utils.TestCachedBeaconState;
     const MemoryCPStateDatastore = datastore_mod.MemoryCPStateDatastore;
 
     const allocator = std.testing.allocator;
@@ -575,7 +576,7 @@ test "CheckpointStateCache: multiple roots per epoch" {
 
 test "CheckpointStateCache: persist and prune full cycle" {
     const Node = @import("persistent_merkle_tree").Node;
-    const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
+    const TestCachedBeaconState = @import("state_transition").test_utils.TestCachedBeaconState;
     const MemoryCPStateDatastore = datastore_mod.MemoryCPStateDatastore;
 
     const allocator = std.testing.allocator;
@@ -630,7 +631,7 @@ test "CheckpointStateCache: persist and prune full cycle" {
 
 test "CheckpointStateCache: add replaces existing in-memory state" {
     const Node = @import("persistent_merkle_tree").Node;
-    const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
+    const TestCachedBeaconState = @import("state_transition").test_utils.TestCachedBeaconState;
     const MemoryCPStateDatastore = datastore_mod.MemoryCPStateDatastore;
 
     const allocator = std.testing.allocator;
@@ -667,7 +668,7 @@ test "CheckpointStateCache: add replaces existing in-memory state" {
 
 test "CheckpointStateCache: replacement can defer state teardown" {
     const Node = @import("persistent_merkle_tree").Node;
-    const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
+    const TestCachedBeaconState = @import("state_transition").test_utils.TestCachedBeaconState;
     const MemoryCPStateDatastore = datastore_mod.MemoryCPStateDatastore;
     const state_disposer_mod = @import("state_disposer.zig");
 

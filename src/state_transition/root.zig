@@ -119,16 +119,6 @@ pub const loadCachedBeaconState = load_cached_state.loadCachedBeaconState;
 pub const state_deserialize = @import("./utils/state_deserialize.zig");
 pub const deserializeState = state_deserialize.deserializeState;
 
-// State caching layer
-pub const BlockStateCache = @import("./cache/block_state_cache.zig").BlockStateCache;
-pub const CheckpointStateCache = @import("./cache/checkpoint_state_cache.zig").CheckpointStateCache;
-pub const StateDisposer = @import("./cache/state_disposer.zig").StateDisposer;
-pub const PmtMutator = @import("./cache/pmt_mutator.zig").PmtMutator;
-pub const CPStateDatastore = @import("./cache/datastore.zig").CPStateDatastore;
-pub const MemoryCPStateDatastore = @import("./cache/datastore.zig").MemoryCPStateDatastore;
-pub const FileCPStateDatastore = @import("./cache/datastore.zig").FileCPStateDatastore;
-pub const CheckpointKey = @import("./cache/datastore.zig").CheckpointKey;
-pub const StateRegen = @import("./cache/state_regen.zig").StateRegen;
 const seed = @import("./utils/seed.zig");
 pub const state_transition = @import("./state_transition.zig");
 pub const BlockExternalData = state_transition.BlockExternalData;

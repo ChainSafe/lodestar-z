@@ -7,9 +7,9 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const BlsThreadPool = @import("bls").ThreadPool;
-const state_transition = @import("state_transition");
-const PmtMutator = state_transition.PmtMutator;
-const StateRegen = state_transition.StateRegen;
+const regen_mod = @import("regen/root.zig");
+const PmtMutator = regen_mod.PmtMutator;
+const StateRegen = regen_mod.StateRegen;
 
 const blocks = @import("blocks/root.zig");
 const PlannedBlockImport = blocks.pipeline.PlannedBlockImport;

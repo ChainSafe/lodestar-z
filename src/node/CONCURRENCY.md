@@ -42,7 +42,7 @@ The main places that define the current shape are:
   - `dispatchItem()`
 - `src/node/lifecycle.zig`
   - `initBlsThreadPools()`
-- `src/chain/queued_regen.zig`
+- `src/chain/regen/queued_regen.zig`
   - `QueuedStateRegen`
 
 ## Design Invariants

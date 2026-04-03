@@ -22,20 +22,21 @@ const types = @import("consensus_types");
 const preset = @import("preset").preset;
 const fork_types = @import("fork_types");
 const state_transition = @import("state_transition");
+const chain = @import("chain");
 const db_mod = @import("db");
 
 const CachedBeaconState = state_transition.CachedBeaconState;
-const StateRegen = state_transition.StateRegen;
-const BlockStateCache = state_transition.BlockStateCache;
-const CheckpointStateCache = state_transition.CheckpointStateCache;
-const CheckpointKey = state_transition.CheckpointKey;
+const StateRegen = chain.StateRegen;
+const BlockStateCache = chain.BlockStateCache;
+const CheckpointStateCache = chain.CheckpointStateCache;
+const CheckpointKey = chain.CheckpointKey;
 const BeaconDB = db_mod.BeaconDB;
 const computeEpochAtSlot = state_transition.computeEpochAtSlot;
 
 const AnySignedBeaconBlock = fork_types.AnySignedBeaconBlock;
 const HeadTracker = @import("head_tracker.zig").HeadTracker;
 
-const chain_blocks = @import("chain").blocks;
+const chain_blocks = chain.blocks;
 pub const ImportResult = chain_blocks.ImportResult;
 
 pub const BlockImporter = struct {

@@ -14,10 +14,10 @@ const Allocator = std.mem.Allocator;
 
 const state_transition = @import("state_transition");
 const CachedBeaconState = state_transition.CachedBeaconState;
-const BlockStateCache = state_transition.BlockStateCache;
-const CheckpointStateCache = state_transition.CheckpointStateCache;
-const StateRegen = state_transition.StateRegen;
-const CheckpointKey = state_transition.CheckpointKey;
+const BlockStateCache = @import("block_state_cache.zig").BlockStateCache;
+const CheckpointStateCache = @import("checkpoint_state_cache.zig").CheckpointStateCache;
+const StateRegen = @import("state_regen.zig").StateRegen;
+const CheckpointKey = @import("datastore.zig").CheckpointKey;
 
 /// Priority for state regen requests (lower numeric value = higher priority).
 pub const RegenPriority = enum(u2) {
@@ -419,7 +419,7 @@ test "QueuedStateRegen: init and deinit" {
     const Node = @import("persistent_merkle_tree").Node;
     const TestCachedBeaconState = @import("state_transition").test_utils.TestCachedBeaconState;
 
-    const MemoryCPStateDatastore = @import("state_transition").MemoryCPStateDatastore;
+    const MemoryCPStateDatastore = @import("datastore.zig").MemoryCPStateDatastore;
 
     const allocator = std.testing.allocator;
     const pool_size = 256 * 5;
@@ -452,7 +452,7 @@ test "QueuedStateRegen: getPreState cache hit" {
     const Node = @import("persistent_merkle_tree").Node;
     const TestCachedBeaconState = @import("state_transition").test_utils.TestCachedBeaconState;
 
-    const MemoryCPStateDatastore = @import("state_transition").MemoryCPStateDatastore;
+    const MemoryCPStateDatastore = @import("datastore.zig").MemoryCPStateDatastore;
 
     const allocator = std.testing.allocator;
     const pool_size = 256 * 5;
@@ -491,7 +491,7 @@ test "QueuedStateRegen: enqueue deduplicates" {
     const Node = @import("persistent_merkle_tree").Node;
     const TestCachedBeaconState = @import("state_transition").test_utils.TestCachedBeaconState;
 
-    const MemoryCPStateDatastore = @import("state_transition").MemoryCPStateDatastore;
+    const MemoryCPStateDatastore = @import("datastore.zig").MemoryCPStateDatastore;
 
     const allocator = std.testing.allocator;
     const pool_size = 256 * 5;
@@ -535,7 +535,7 @@ test "QueuedStateRegen: enqueue upgrades priority" {
     const Node = @import("persistent_merkle_tree").Node;
     const TestCachedBeaconState = @import("state_transition").test_utils.TestCachedBeaconState;
 
-    const MemoryCPStateDatastore = @import("state_transition").MemoryCPStateDatastore;
+    const MemoryCPStateDatastore = @import("datastore.zig").MemoryCPStateDatastore;
 
     const allocator = std.testing.allocator;
     const pool_size = 256 * 5;
@@ -582,7 +582,7 @@ test "QueuedStateRegen: dropLowPriority removes background requests" {
     const Node = @import("persistent_merkle_tree").Node;
     const TestCachedBeaconState = @import("state_transition").test_utils.TestCachedBeaconState;
 
-    const MemoryCPStateDatastore = @import("state_transition").MemoryCPStateDatastore;
+    const MemoryCPStateDatastore = @import("datastore.zig").MemoryCPStateDatastore;
 
     const allocator = std.testing.allocator;
     const pool_size = 256 * 5;
@@ -635,7 +635,7 @@ test "QueuedStateRegen: onNewBlock delegates to regen" {
     const Node = @import("persistent_merkle_tree").Node;
     const TestCachedBeaconState = @import("state_transition").test_utils.TestCachedBeaconState;
 
-    const MemoryCPStateDatastore = @import("state_transition").MemoryCPStateDatastore;
+    const MemoryCPStateDatastore = @import("datastore.zig").MemoryCPStateDatastore;
 
     const allocator = std.testing.allocator;
     const pool_size = 256 * 5;
@@ -670,7 +670,7 @@ test "QueuedStateRegen: metrics tracking" {
     const Node = @import("persistent_merkle_tree").Node;
     const TestCachedBeaconState = @import("state_transition").test_utils.TestCachedBeaconState;
 
-    const MemoryCPStateDatastore = @import("state_transition").MemoryCPStateDatastore;
+    const MemoryCPStateDatastore = @import("datastore.zig").MemoryCPStateDatastore;
 
     const allocator = std.testing.allocator;
     const pool_size = 256 * 5;

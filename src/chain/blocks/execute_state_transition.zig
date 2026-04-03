@@ -24,8 +24,9 @@ const fork_types = @import("fork_types");
 const config_mod = @import("config");
 const ForkSeq = config_mod.ForkSeq;
 const state_transition = @import("state_transition");
+const regen_mod = @import("../regen/root.zig");
 const CachedBeaconState = state_transition.CachedBeaconState;
-const PmtMutator = state_transition.PmtMutator;
+const PmtMutator = regen_mod.PmtMutator;
 const bls_mod = @import("bls");
 const BatchVerifier = bls_mod.BatchVerifier;
 

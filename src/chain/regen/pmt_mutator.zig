@@ -55,7 +55,7 @@ test "PmtMutator: optional lease is a no-op" {
 
 test "PmtMutator: lease defers and flushes teardown" {
     const Node = @import("persistent_merkle_tree").Node;
-    const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
+    const TestCachedBeaconState = @import("state_transition").test_utils.TestCachedBeaconState;
 
     const allocator = std.testing.allocator;
     var pool = try Node.Pool.init(allocator, 256 * 5);

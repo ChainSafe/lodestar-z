@@ -26,8 +26,9 @@ const BlsThreadPool = @import("bls").ThreadPool;
 const consensus_types = @import("consensus_types");
 const preset = @import("preset").preset;
 const state_transition = @import("state_transition");
+const regen_mod = @import("../regen/root.zig");
 const CachedBeaconState = state_transition.CachedBeaconState;
-const PmtMutator = state_transition.PmtMutator;
+const PmtMutator = regen_mod.PmtMutator;
 const computeEpochAtSlot = state_transition.computeEpochAtSlot;
 const fork_choice_mod = @import("fork_choice");
 const ForkChoice = fork_choice_mod.ForkChoiceStruct;
@@ -52,8 +53,8 @@ const ExecutionVerifier = @import("../ports/execution.zig").ExecutionVerifier;
 const import_block = @import("import_block.zig");
 const ImportContext = import_block.ImportContext;
 
-const QueuedStateRegen = @import("../queued_regen.zig").QueuedStateRegen;
-const StateRegen = state_transition.StateRegen;
+const QueuedStateRegen = regen_mod.QueuedStateRegen;
+const StateRegen = regen_mod.StateRegen;
 const HeadTracker = @import("../block_import.zig").HeadTracker;
 const ReprocessQueue = @import("../reprocess.zig").ReprocessQueue;
 
@@ -82,8 +83,8 @@ pub const PipelineContext = struct {
     allocator: Allocator,
 
     // -- State management --
-    block_state_cache: *state_transition.BlockStateCache,
-    state_regen: *state_transition.StateRegen,
+    block_state_cache: *regen_mod.BlockStateCache,
+    state_regen: *regen_mod.StateRegen,
     queued_regen: ?*QueuedStateRegen,
 
     // -- Fork choice --

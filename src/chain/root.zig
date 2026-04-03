@@ -11,6 +11,7 @@ pub const ports = @import("ports/root.zig");
 pub const runtime = @import("runtime.zig");
 pub const service = @import("service.zig");
 pub const query = @import("query.zig");
+pub const regen = @import("regen/root.zig");
 pub const state_work_service = @import("state_work_service.zig");
 pub const block_import = @import("block_import.zig");
 pub const op_pool = @import("op_pool.zig");
@@ -56,7 +57,15 @@ pub const RuntimeOptions = runtime.RuntimeOptions;
 pub const StorageBackend = runtime.StorageBackend;
 pub const Service = service.Service;
 pub const Query = query.Query;
-pub const PmtMutator = @import("state_transition").PmtMutator;
+pub const CPStateDatastore = regen.CPStateDatastore;
+pub const MemoryCPStateDatastore = regen.MemoryCPStateDatastore;
+pub const FileCPStateDatastore = regen.FileCPStateDatastore;
+pub const CheckpointKey = regen.CheckpointKey;
+pub const BlockStateCache = regen.BlockStateCache;
+pub const CheckpointStateCache = regen.CheckpointStateCache;
+pub const StateDisposer = regen.StateDisposer;
+pub const PmtMutator = regen.PmtMutator;
+pub const StateRegen = regen.StateRegen;
 pub const StateWorkService = state_work_service.StateWorkService;
 pub const CompletedBlockImport = state_work_service.CompletedBlockImport;
 
@@ -136,7 +145,7 @@ pub const PayloadEnvelopeFetchPlan = payload_envelope_ingress.PayloadEnvelopeFet
 // BlockVerification removed — use blocks/pipeline.zig instead.
 
 // Queued state regeneration
-pub const queued_regen = @import("queued_regen.zig");
+pub const queued_regen = regen.queued_regen;
 pub const QueuedStateRegen = queued_regen.QueuedStateRegen;
 pub const RegenPriority = queued_regen.RegenPriority;
 pub const RegenKey = queued_regen.RegenKey;

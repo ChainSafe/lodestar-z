@@ -24,6 +24,7 @@ const consensus_types = @import("consensus_types");
 const preset = @import("preset").preset;
 const fork_types = @import("fork_types");
 const state_transition = @import("state_transition");
+const regen_mod = @import("../regen/root.zig");
 const CachedBeaconState = state_transition.CachedBeaconState;
 const computeEpochAtSlot = state_transition.computeEpochAtSlot;
 const computeStartSlotAtEpoch = state_transition.computeStartSlotAtEpoch;
@@ -48,7 +49,7 @@ const NotificationSink = chain_types.NotificationSink;
 
 const block_import = @import("../block_import.zig");
 const HeadTracker = block_import.HeadTracker;
-const QueuedStateRegen = @import("../queued_regen.zig").QueuedStateRegen;
+const QueuedStateRegen = regen_mod.QueuedStateRegen;
 const reprocess_mod = @import("../reprocess.zig");
 const ReprocessQueue = reprocess_mod.ReprocessQueue;
 const PendingReason = reprocess_mod.PendingReason;
@@ -73,8 +74,8 @@ pub const ImportContext = struct {
     allocator: Allocator,
 
     // -- State management --
-    block_state_cache: *state_transition.BlockStateCache,
-    state_regen: *state_transition.StateRegen,
+    block_state_cache: *regen_mod.BlockStateCache,
+    state_regen: *regen_mod.StateRegen,
     queued_regen: ?*QueuedStateRegen,
 
     // -- Fork choice --

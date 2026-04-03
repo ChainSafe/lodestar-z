@@ -10,7 +10,7 @@ const fork_types = @import("fork_types");
 const fork_choice_mod = @import("fork_choice");
 const preset = @import("preset").preset;
 const state_transition = @import("state_transition");
-const PmtMutator = state_transition.PmtMutator;
+const PmtMutator = @import("regen/root.zig").PmtMutator;
 
 const Chain = @import("chain.zig").Chain;
 const chain_types = @import("types.zig");

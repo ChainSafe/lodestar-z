@@ -7,14 +7,15 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const preset = @import("preset").preset;
-const computeEpochAtSlot = @import("../utils/epoch.zig").computeEpochAtSlot;
-const computeStartSlotAtEpoch = @import("../utils/epoch.zig").computeStartSlotAtEpoch;
-const state_transition_mod = @import("../state_transition.zig");
+const state_transition = @import("state_transition");
+const computeEpochAtSlot = state_transition.computeEpochAtSlot;
+const computeStartSlotAtEpoch = state_transition.computeStartSlotAtEpoch;
+const state_transition_mod = state_transition.state_transition;
 const processSlots = state_transition_mod.processSlots;
 const stateTransition = state_transition_mod.stateTransition;
 const TransitionOpt = state_transition_mod.TransitionOpt;
 
-const CachedBeaconState = @import("state_cache.zig").CachedBeaconState;
+const CachedBeaconState = state_transition.CachedBeaconState;
 const BlockStateCache = @import("block_state_cache.zig").BlockStateCache;
 const CheckpointStateCache = @import("checkpoint_state_cache.zig").CheckpointStateCache;
 const CheckpointKey = @import("datastore.zig").CheckpointKey;
@@ -24,7 +25,7 @@ const destroyCachedBeaconState = @import("state_disposer.zig").destroyCachedBeac
 const BeaconDB = @import("db").BeaconDB;
 const BeaconConfig = @import("config").BeaconConfig;
 const PersistentMerkleTreeNode = @import("persistent_merkle_tree").Node;
-const deserializeState = @import("../utils/state_deserialize.zig").deserializeState;
+const deserializeState = state_transition.deserializeState;
 const AnySignedBeaconBlock = @import("fork_types").AnySignedBeaconBlock;
 
 pub const StateRegen = struct {
@@ -544,7 +545,7 @@ pub const StateRegen = struct {
 
 test "StateRegen: basic getPreState from block cache" {
     const Node = @import("persistent_merkle_tree").Node;
-    const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
+    const TestCachedBeaconState = @import("state_transition").test_utils.TestCachedBeaconState;
     const datastore_mod = @import("datastore.zig");
     const MemoryCPStateDatastore = datastore_mod.MemoryCPStateDatastore;
 
@@ -579,7 +580,7 @@ test "StateRegen: basic getPreState from block cache" {
 
 test "StateRegen: getPreState returns error when nothing cached" {
     const Node = @import("persistent_merkle_tree").Node;
-    const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
+    const TestCachedBeaconState = @import("state_transition").test_utils.TestCachedBeaconState;
     const datastore_mod = @import("datastore.zig");
     const MemoryCPStateDatastore = datastore_mod.MemoryCPStateDatastore;
 
@@ -609,7 +610,7 @@ test "StateRegen: getPreState returns error when nothing cached" {
 
 test "StateRegen: onFinalized prunes old states" {
     const Node = @import("persistent_merkle_tree").Node;
-    const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
+    const TestCachedBeaconState = @import("state_transition").test_utils.TestCachedBeaconState;
     const datastore_mod = @import("datastore.zig");
     const MemoryCPStateDatastore = datastore_mod.MemoryCPStateDatastore;
 
@@ -647,7 +648,7 @@ test "StateRegen: onFinalized prunes old states" {
 
 test "StateRegen: checkpoint publication seals lazy PMT roots" {
     const Node = @import("persistent_merkle_tree").Node;
-    const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
+    const TestCachedBeaconState = @import("state_transition").test_utils.TestCachedBeaconState;
     const datastore_mod = @import("datastore.zig");
     const MemoryCPStateDatastore = datastore_mod.MemoryCPStateDatastore;
 
@@ -692,7 +693,7 @@ test "StateRegen: checkpoint publication seals lazy PMT roots" {
 
 test "StateRegen: getStateByRoot returns state from block cache" {
     const Node = @import("persistent_merkle_tree").Node;
-    const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
+    const TestCachedBeaconState = @import("state_transition").test_utils.TestCachedBeaconState;
     const datastore_mod = @import("datastore.zig");
     const MemoryCPStateDatastore = datastore_mod.MemoryCPStateDatastore;
 
@@ -727,7 +728,7 @@ test "StateRegen: getStateByRoot returns state from block cache" {
 
 test "StateRegen: getStateByRoot returns null for unknown root" {
     const Node = @import("persistent_merkle_tree").Node;
-    const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
+    const TestCachedBeaconState = @import("state_transition").test_utils.TestCachedBeaconState;
     const datastore_mod = @import("datastore.zig");
     const MemoryCPStateDatastore = datastore_mod.MemoryCPStateDatastore;
 
@@ -758,7 +759,7 @@ test "StateRegen: getStateByRoot returns null for unknown root" {
 
 test "StateRegen: getPreState returns error when nothing cached and no DB" {
     const Node = @import("persistent_merkle_tree").Node;
-    const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
+    const TestCachedBeaconState = @import("state_transition").test_utils.TestCachedBeaconState;
     const datastore_mod = @import("datastore.zig");
     const MemoryCPStateDatastore = datastore_mod.MemoryCPStateDatastore;
 
@@ -789,7 +790,7 @@ test "StateRegen: getPreState returns error when nothing cached and no DB" {
 
 test "StateRegen: loadPreStateUncached loads archived state root after binding published state" {
     const Node = @import("persistent_merkle_tree").Node;
-    const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
+    const TestCachedBeaconState = @import("state_transition").test_utils.TestCachedBeaconState;
     const datastore_mod = @import("datastore.zig");
     const MemoryCPStateDatastore = datastore_mod.MemoryCPStateDatastore;
     const db_mod = @import("db");
