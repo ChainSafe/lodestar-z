@@ -32,6 +32,9 @@ const CheckpointStateCache = state_transition.CheckpointStateCache;
 const PmtMutator = state_transition.PmtMutator;
 const StateRegen = state_transition.StateRegen;
 const QueuedStateRegen = @import("queued_regen.zig").QueuedStateRegen;
+const state_work_service_mod = @import("state_work_service.zig");
+const StateWorkService = state_work_service_mod.StateWorkService;
+const CompletedBlockImport = state_work_service_mod.CompletedBlockImport;
 const RegenPriority = @import("queued_regen.zig").RegenPriority;
 const computeEpochAtSlot = state_transition.computeEpochAtSlot;
 const db_mod = @import("db");
@@ -144,6 +147,7 @@ pub const Chain = struct {
     /// request deduplication and priority queuing. When set, used for
     /// pre-state lookups in block import and API handlers.
     queued_regen: ?*QueuedStateRegen,
+    state_work_service: ?*StateWorkService,
     db: *BeaconDB,
     op_pool: *OpPool,
     seen_cache: *SeenCache,
@@ -235,6 +239,7 @@ pub const Chain = struct {
             .state_regen = state_regen,
             .pmt_mutator = null,
             .queued_regen = null,
+            .state_work_service = null,
             .db = db,
             .op_pool = op_pool,
             .seen_cache = seen_cache,
@@ -323,6 +328,8 @@ pub const Chain = struct {
         anchor_block_root: [32]u8,
         anchor_slot: u64,
     ) !BootstrapResult {
+        self.state_regen.bindPublishedState(anchor_state);
+
         const cached_state_root = if (self.queued_regen) |qr|
             try qr.onNewBlock(anchor_state, true)
         else
@@ -436,13 +443,10 @@ pub const Chain = struct {
     }
 
     pub fn importReadyBlock(self: *Chain, ready: chain_types.ReadyBlockInput) !ImportResult {
-        const block_input = PipelineBlockInput{
-            .block = ready.block,
-            .source = ready.source,
-            .da_status = ready.da_status,
-            .seen_timestamp_sec = ready.seen_timestamp_sec,
-        };
-        return self.importPipelineBlockInput(block_input);
+        var owned_ready = ready;
+        const planned = try self.planReadyBlockImport(&owned_ready);
+        const completed = self.executePlannedReadyBlockImportSync(planned);
+        return self.finishCompletedReadyBlockImport(completed);
     }
 
     fn importPipelineBlockInput(self: *Chain, block_input: PipelineBlockInput) !ImportResult {
@@ -473,6 +477,100 @@ pub const Chain = struct {
             .slot = pipeline_result.slot,
             .epoch_transition = pipeline_result.epoch_transition,
             .execution_optimistic = pipeline_result.execution_optimistic,
+        };
+    }
+
+    pub fn planReadyBlockImport(self: *Chain, ready: *chain_types.ReadyBlockInput) !blocks_mod.PlannedBlockImport {
+        const block_input = PipelineBlockInput{
+            .block = ready.block,
+            .source = ready.source,
+            .da_status = ready.da_status,
+            .seen_timestamp_sec = ready.seen_timestamp_sec,
+        };
+        const opts = PipelineImportOpts{
+            .skip_future_slot = true,
+            .skip_signatures = !self.verify_signatures,
+        };
+        const plan_result = self.planPipelineBlockInput(block_input, opts) catch |err| {
+            return translatePipelineError(err);
+        };
+        switch (plan_result) {
+            .skipped => return error.InternalError,
+            .planned => |planned| {
+                ready.block_data_plan.deinit(self.allocator);
+                ready.* = undefined;
+                return planned;
+            },
+        }
+    }
+
+    pub fn tryQueuePlannedReadyBlockImport(self: *Chain, planned: blocks_mod.PlannedBlockImport) !bool {
+        const service = self.state_work_service orelse return false;
+        return service.submitBlockImport(planned);
+    }
+
+    pub fn popCompletedReadyBlockImport(self: *Chain) ?CompletedBlockImport {
+        const service = self.state_work_service orelse return null;
+        return service.popCompletedBlockImport();
+    }
+
+    pub fn executePlannedReadyBlockImportSync(
+        self: *Chain,
+        planned: blocks_mod.PlannedBlockImport,
+    ) CompletedBlockImport {
+        const prepared = blocks_mod.executePlannedBlockImport(
+            self.allocator,
+            self.state_regen,
+            self.pmt_mutator,
+            self.block_bls_thread_pool,
+            planned,
+        ) catch |err| {
+            return .{ .failure = .{
+                .planned = planned,
+                .err = err,
+            } };
+        };
+        return .{ .success = prepared };
+    }
+
+    pub fn finishCompletedReadyBlockImport(self: *Chain, completed: CompletedBlockImport) !ImportResult {
+        var owned_completed = completed;
+        defer owned_completed.deinit(self.allocator);
+
+        switch (owned_completed) {
+            .failure => |failure| return translatePipelineError(failure.err),
+            .success => |prepared| {
+                const ctx = self.getPipelineContext();
+                const exec_status = try blocks_mod.verifyExecutionPayload(
+                    ctx.allocator,
+                    prepared.block_input,
+                    ctx.execution_verifier,
+                    prepared.opts,
+                );
+                return blocks_mod.finishPreparedBlockImport(ctx, prepared, exec_status);
+            },
+        }
+    }
+
+    fn planPipelineBlockInput(
+        self: *Chain,
+        block_input: PipelineBlockInput,
+        opts: PipelineImportOpts,
+    ) BlockImportError!blocks_mod.BlockPlanResult {
+        const ctx = self.getPipelineContext();
+        return blocks_mod.planBlockForImport(ctx, block_input, opts);
+    }
+
+    fn translatePipelineError(err: anyerror) anyerror {
+        return switch (err) {
+            BlockImportError.ParentUnknown => error.UnknownParentBlock,
+            BlockImportError.AlreadyKnown => error.BlockAlreadyKnown,
+            BlockImportError.WouldRevertFinalizedSlot => error.BlockAlreadyFinalized,
+            BlockImportError.GenesisBlock => error.GenesisBlock,
+            BlockImportError.PrestateMissing => error.NoPreStateAvailable,
+            BlockImportError.StateTransitionFailed => error.StateTransitionFailed,
+            BlockImportError.InternalError => error.InternalError,
+            else => err,
         };
     }
 

@@ -859,6 +859,7 @@ fn runRealtimeP2pTick(self: *BeaconNode, io: std.Io, svc: *networking.P2pService
     var did_work = false;
 
     did_work = gossip_ingress_mod.processEvents(self, io, svc) > 0 or did_work;
+    did_work = self.processPendingBlockStateWork() or did_work;
     did_work = self.processPendingGossipBlsBatch() or did_work;
 
     if (self.beacon_processor) |bp| {
@@ -880,6 +881,7 @@ fn runRealtimeP2pTick(self: *BeaconNode, io: std.Io, svc: *networking.P2pService
             std.log.warn("SyncService.tick failed: {}", .{err});
         };
     }
+    did_work = self.drivePendingSyncSegments() or did_work;
 
     maybeHandleForkTransition(self, svc);
 

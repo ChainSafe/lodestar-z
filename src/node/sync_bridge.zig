@@ -72,38 +72,41 @@ pub const SyncCallbackCtx = struct {
         const ctx: *SyncCallbackCtx = @ptrCast(@alignCast(ptr));
         const node = ctx.node;
 
-        const result = node.importRawBlockBytes(block_bytes, .unknown_block_sync) catch |err| {
+        const result = node.ingestRawBlockBytes(block_bytes, .unknown_block_sync) catch |err| {
             if (err != error.BlockAlreadyKnown and err != error.BlockAlreadyFinalized) {
                 std.log.warn("SyncCallbackCtx: import error: {}", .{err});
             }
             return err;
         };
-        std.log.info("SyncCallbackCtx: imported slot={d}", .{result.slot});
+        switch (result) {
+            .ignored => {},
+            .queued => return error.ImportPending,
+            .imported => |imported| {
+                std.log.info("SyncCallbackCtx: imported slot={d}", .{imported.slot});
+            },
+        }
     }
 
     fn syncProcessChainSegment(
         ptr: *anyopaque,
+        chain_id: u32,
+        batch_id: u32,
+        generation: u32,
         blocks: []const BatchBlock,
         sync_type: sync_mod.RangeSyncType,
     ) anyerror!void {
         const ctx: *SyncCallbackCtx = @ptrCast(@alignCast(ptr));
         const node = ctx.node;
 
-        const raw_blocks = try node.allocator.alloc(chain_mod.RawBlockBytes, blocks.len);
-        defer node.allocator.free(raw_blocks);
-
-        for (blocks, 0..) |block, i| {
-            raw_blocks[i] = .{
-                .slot = block.slot,
-                .bytes = block.block_bytes,
-            };
-        }
-
-        try node.processRangeSyncSegment(raw_blocks);
-        std.log.info("SyncCallbackCtx: processed {d} {s} blocks", .{
+        try node.enqueueSyncSegment(chain_id, batch_id, generation, blocks, sync_type);
+        std.log.info("SyncCallbackCtx: queued {d} {s} blocks for chain {d} batch {d}/gen {d}", .{
             blocks.len,
             @tagName(sync_type),
+            chain_id,
+            batch_id,
+            generation,
         });
+        return error.ProcessingPending;
     }
 
     fn syncRequestBlocksByRange(

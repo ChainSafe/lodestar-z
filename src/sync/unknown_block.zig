@@ -258,6 +258,9 @@ pub const UnknownBlockSync = struct {
 
         // Import the fetched parent.
         cbs.importBlock(parent_block_bytes) catch |err| {
+            if (err == error.ImportPending) {
+                return;
+            }
             // If import fails, mark the root as bad.
             try self.markBad(parent_root);
             return err;
@@ -341,9 +344,12 @@ pub const UnknownBlockSync = struct {
                 defer self.allocator.free(child.block_bytes);
 
                 // Try to import the child — its parent is now known.
-                cbs.importBlock(child.block_bytes) catch {
-                    // Child failed import — don't propagate, just drop.
-                    continue;
+                cbs.importBlock(child.block_bytes) catch |err| switch (err) {
+                    error.ImportPending => continue,
+                    else => {
+                        // Child failed import — don't propagate, just drop.
+                        continue;
+                    },
                 };
 
                 // This child is now imported — resolve ITS children recursively.
@@ -436,4 +442,52 @@ test "UnknownBlockSync: evicts oldest at capacity" {
     const new_parent: [32]u8 = [_]u8{0xDD} ** 32;
     _ = try sync.addPendingBlock(new_root, new_parent, 999, &[_]u8{0});
     try std.testing.expectEqual(sync_types.MAX_PENDING_BLOCKS, sync.pendingCount());
+}
+
+test "UnknownBlockSync: import pending defers child resolution until notify" {
+    const TestCallbacks = struct {
+        import_pending: bool = true,
+        import_calls: usize = 0,
+
+        fn requestBlockByRootFn(_: *anyopaque, _: [32]u8, _: []const u8) void {}
+
+        fn importBlockFn(ptr: *anyopaque, _: []const u8) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            self.import_calls += 1;
+            if (self.import_pending) return error.ImportPending;
+        }
+
+        fn getConnectedPeersFn(_: *anyopaque) []const []const u8 {
+            return &.{};
+        }
+
+        fn callbacks(self: *@This()) UnknownBlockCallbacks {
+            return .{
+                .ptr = self,
+                .requestBlockByRootFn = &requestBlockByRootFn,
+                .importBlockFn = &importBlockFn,
+                .getConnectedPeersFn = &getConnectedPeersFn,
+            };
+        }
+    };
+
+    const alloc = std.testing.allocator;
+    var sync = UnknownBlockSync.init(alloc);
+    defer sync.deinit();
+
+    var callbacks = TestCallbacks{};
+    sync.setCallbacks(callbacks.callbacks());
+
+    const parent_root = [_]u8{0xAA} ** 32;
+    const child_root = [_]u8{0xBB} ** 32;
+    _ = try sync.addPendingBlock(child_root, parent_root, 42, &[_]u8{0x01});
+
+    try sync.onParentFetched(parent_root, &[_]u8{0x02});
+    try std.testing.expectEqual(@as(usize, 1), sync.pendingCount());
+    try std.testing.expectEqual(@as(usize, 1), callbacks.import_calls);
+
+    callbacks.import_pending = false;
+    try sync.notifyBlockImported(parent_root);
+    try std.testing.expectEqual(@as(usize, 0), sync.pendingCount());
+    try std.testing.expectEqual(@as(usize, 2), callbacks.import_calls);
 }

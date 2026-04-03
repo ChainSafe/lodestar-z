@@ -12,7 +12,7 @@
 //! └──────┬───────┘
 //!        │
 //! ┌──────▼───────┐
-//! │ getPreState  │ via queued regen
+//! │ getPreState  │ via cache lookup / worker cold regen
 //! └──────┬───────┘
 //!        │
 //! ┌──────▼───────┐
@@ -76,10 +76,16 @@ pub const NewPayloadResult = @import("../ports/execution.zig").NewPayloadResult;
 pub const ImportContext = import_block.ImportContext;
 pub const PipelineContext = pipeline.PipelineContext;
 pub const StfResult = execute_state_transition.StfResult;
+pub const PlannedBlockImport = pipeline.PlannedBlockImport;
+pub const PreparedBlockImport = pipeline.PreparedBlockImport;
+pub const BlockPlanResult = pipeline.BlockPlanResult;
 
 // -- Public API --
 pub const processBlock = pipeline.processBlock;
 pub const processBlockBatch = pipeline.processBlockBatch;
+pub const planBlockForImport = pipeline.planBlockForImport;
+pub const executePlannedBlockImport = pipeline.executePlannedBlockImport;
+pub const finishPreparedBlockImport = pipeline.finishPreparedBlockImport;
 pub const verifySanity = verify_sanity.verifySanity;
 pub const verifyDataAvailability = verify_data_availability.verifyDataAvailability;
 pub const verifyExecutionPayload = verify_execution.verifyExecutionPayload;

@@ -36,6 +36,9 @@ pub const RangeSyncCallbacks = struct {
 
     processChainSegmentFn: *const fn (
         ptr: *anyopaque,
+        chain_id: u32,
+        batch_id: BatchId,
+        generation: u32,
         blocks: []const BatchBlock,
         sync_type: RangeSyncType,
     ) anyerror!void,
@@ -310,6 +313,46 @@ pub const RangeSync = struct {
         }
     }
 
+    pub fn onSegmentProcessingSuccess(
+        self: *RangeSync,
+        chain_id: u32,
+        batch_id: BatchId,
+        generation: u32,
+    ) void {
+        if (self.finalized_chain) |*fc| {
+            if (fc.id == chain_id) {
+                fc.onProcessingSuccess(batch_id, generation);
+                return;
+            }
+        }
+        for (self.head_chains.items) |*hc| {
+            if (hc.id == chain_id) {
+                hc.onProcessingSuccess(batch_id, generation);
+                return;
+            }
+        }
+    }
+
+    pub fn onSegmentProcessingError(
+        self: *RangeSync,
+        chain_id: u32,
+        batch_id: BatchId,
+        generation: u32,
+    ) void {
+        if (self.finalized_chain) |*fc| {
+            if (fc.id == chain_id) {
+                fc.onProcessingError(batch_id, generation);
+                return;
+            }
+        }
+        for (self.head_chains.items) |*hc| {
+            if (hc.id == chain_id) {
+                hc.onProcessingError(batch_id, generation);
+                return;
+            }
+        }
+    }
+
     // ── Internal ────────────────────────────────────────────────────
 
     /// Update chain states — start/stop based on priority.
@@ -354,7 +397,7 @@ const TestCallbacks = struct {
 
     fn importBlockFn(_: *anyopaque, _: []const u8) anyerror!void {}
 
-    fn processChainSegmentFn(ptr: *anyopaque, _: []const BatchBlock, _: RangeSyncType) anyerror!void {
+    fn processChainSegmentFn(ptr: *anyopaque, _: u32, _: BatchId, _: u32, _: []const BatchBlock, _: RangeSyncType) anyerror!void {
         const self: *TestCallbacks = @ptrCast(@alignCast(ptr));
         self.processed += 1;
     }

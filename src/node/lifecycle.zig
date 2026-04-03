@@ -193,6 +193,11 @@ pub fn deinit(self: *BeaconNode) void {
 
     self.flushPendingGossipBlsBatch();
     self.pending_gossip_bls_batches.deinit(allocator);
+    self.queued_state_work_owners.deinit(allocator);
+    for (self.pending_sync_segments.items) |*segment| {
+        segment.deinit(allocator);
+    }
+    self.pending_sync_segments.deinit(allocator);
 
     if (self.beacon_processor) |bp| {
         bp.deinit();

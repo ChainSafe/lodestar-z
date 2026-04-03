@@ -73,6 +73,7 @@ const SyncMode = sync_mod.SyncMode;
 const SyncServiceCallbacks = sync_mod.SyncServiceCallbacks;
 const BatchBlock = sync_mod.BatchBlock;
 const BatchId = sync_mod.BatchId;
+const RangeSyncType = sync_mod.RangeSyncType;
 
 const execution_mod = @import("execution");
 const MockEngine = execution_mod.MockEngine;
@@ -133,6 +134,37 @@ pub const SyncStatus = struct {
     is_syncing: bool,
     is_optimistic: bool,
     el_offline: bool,
+};
+
+const SyncSegmentKey = struct {
+    chain_id: u32,
+    batch_id: BatchId,
+    generation: u32,
+};
+
+const QueuedStateWorkOwner = union(enum) {
+    generic,
+    sync_segment: SyncSegmentKey,
+};
+
+const PendingSyncSegment = struct {
+    key: SyncSegmentKey,
+    sync_type: RangeSyncType,
+    blocks: []const BatchBlock,
+    before_snapshot: chain_mod.ChainSnapshot,
+    started_at: std.Io.Timestamp,
+    next_index: usize = 0,
+    in_flight: bool = false,
+    imported_count: usize = 0,
+    skipped_count: usize = 0,
+    failed_count: usize = 0,
+    stop_after_current: bool = false,
+    archive_states: std.ArrayListUnmanaged(chain_mod.ArchiveStateRequest) = .empty,
+
+    pub fn deinit(self: *PendingSyncSegment, allocator: Allocator) void {
+        self.archive_states.deinit(allocator);
+        self.* = undefined;
+    }
 };
 
 // ---------------------------------------------------------------------------
@@ -222,6 +254,8 @@ pub const BeaconNode = struct {
 
     sync_service_inst: ?*SyncService = null,
     sync_callback_ctx: ?*SyncCallbackCtx = null, // bridges to P2P transport
+    queued_state_work_owners: std.ArrayListUnmanaged(QueuedStateWorkOwner) = .empty,
+    pending_sync_segments: std.ArrayListUnmanaged(PendingSyncSegment) = .empty,
 
     // GossipHandler — lazily initialized when P2P starts (owns its SeenSets).
     gossip_handler: ?*GossipHandler = null,
@@ -352,6 +386,21 @@ pub const BeaconNode = struct {
         return self.finishImportOutcome(t0, outcome);
     }
 
+    pub const ReadyIngressResult = union(enum) {
+        ignored,
+        queued,
+        imported: ImportResult,
+    };
+
+    pub fn ingestRawBlockBytes(
+        self: *BeaconNode,
+        block_bytes: []const u8,
+        source: BlockSource,
+    ) !ReadyIngressResult {
+        const ready = try self.chainService().prepareRawBlockInput(block_bytes, source);
+        return self.completeReadyIngressDetailed(ready, block_bytes);
+    }
+
     pub fn importReadyBlock(
         self: *BeaconNode,
         ready: chain_mod.ReadyBlockInput,
@@ -366,9 +415,21 @@ pub const BeaconNode = struct {
         ready: chain_mod.ReadyBlockInput,
         raw_block_bytes: ?[]const u8,
     ) !?ImportResult {
-        var owned_ready = ready;
+        return switch (try self.completeReadyIngressDetailed(ready, raw_block_bytes)) {
+            .ignored, .queued => null,
+            .imported => |result| result,
+        };
+    }
 
-        const result = self.importReadyBlock(owned_ready) catch |err| {
+    fn completeReadyIngressDetailed(
+        self: *BeaconNode,
+        ready: chain_mod.ReadyBlockInput,
+        raw_block_bytes: ?[]const u8,
+    ) !ReadyIngressResult {
+        var owned_ready = ready;
+        const t0 = std.Io.Clock.awake.now(self.io);
+
+        const planned = self.chainService().planReadyBlockImport(&owned_ready) catch |err| {
             switch (err) {
                 error.UnknownParentBlock => {
                     if (raw_block_bytes) |bytes| {
@@ -382,11 +443,11 @@ pub const BeaconNode = struct {
                         self.queueOrphanBlock(owned_ready.block, serialized);
                     }
                     owned_ready.deinit(self.allocator);
-                    return null;
+                    return .ignored;
                 },
                 error.BlockAlreadyKnown, error.BlockAlreadyFinalized => {
                     owned_ready.deinit(self.allocator);
-                    return null;
+                    return .ignored;
                 },
                 else => {
                     owned_ready.deinit(self.allocator);
@@ -395,9 +456,37 @@ pub const BeaconNode = struct {
             }
         };
 
-        owned_ready.deinit(self.allocator);
+        try self.queued_state_work_owners.ensureUnusedCapacity(self.allocator, 1);
+        if (try self.chainService().tryQueuePlannedReadyBlockImport(planned)) {
+            self.queued_state_work_owners.appendAssumeCapacity(.generic);
+            return .queued;
+        }
+
+        const outcome = try self.chainService().finishCompletedReadyBlockImport(
+            self.chainService().executePlannedReadyBlockImportSync(planned),
+        );
+        const result = try self.finishImportOutcome(t0, outcome);
         self.processPendingChildren(result.block_root);
-        return result;
+        return .{ .imported = result };
+    }
+
+    pub fn processPendingBlockStateWork(self: *BeaconNode) bool {
+        var did_work = false;
+
+        while (self.chainService().popCompletedReadyBlockImport()) |completed| {
+            did_work = true;
+            const owner: QueuedStateWorkOwner = if (self.queued_state_work_owners.items.len > 0)
+                self.queued_state_work_owners.orderedRemove(0)
+            else
+                .generic;
+
+            switch (owner) {
+                .generic => self.finishGenericQueuedBlockImport(completed),
+                .sync_segment => |key| self.finishSyncSegmentQueuedBlockImport(key, completed),
+            }
+        }
+
+        return did_work;
     }
 
     pub fn processRangeSyncSegment(
@@ -409,6 +498,69 @@ pub const BeaconNode = struct {
         const all_failed = outcome.imported_count == 0 and outcome.skipped_count == 0 and outcome.failed_count > 0;
         self.finishSegmentImportOutcome(t0, outcome);
         if (all_failed) return error.AllBlocksFailed;
+    }
+
+    pub fn enqueueSyncSegment(
+        self: *BeaconNode,
+        chain_id: u32,
+        batch_id: BatchId,
+        generation: u32,
+        blocks: []const BatchBlock,
+        sync_type: RangeSyncType,
+    ) !void {
+        const key: SyncSegmentKey = .{
+            .chain_id = chain_id,
+            .batch_id = batch_id,
+            .generation = generation,
+        };
+        if (findPendingSyncSegmentIndex(self, key) != null) return;
+
+        try self.pending_sync_segments.append(self.allocator, .{
+            .key = key,
+            .sync_type = sync_type,
+            .blocks = blocks,
+            .before_snapshot = self.chainService().query().currentSnapshot(),
+            .started_at = std.Io.Clock.awake.now(self.io),
+        });
+    }
+
+    pub fn drivePendingSyncSegments(self: *BeaconNode) bool {
+        var did_work = false;
+        var i: usize = 0;
+
+        while (i < self.pending_sync_segments.items.len) {
+            if (self.pending_sync_segments.items[i].in_flight) {
+                i += 1;
+                continue;
+            }
+
+            if (self.pending_sync_segments.items[i].stop_after_current or
+                self.pending_sync_segments.items[i].next_index >= self.pending_sync_segments.items[i].blocks.len)
+            {
+                finalizePendingSyncSegment(self, i);
+                did_work = true;
+                continue;
+            }
+
+            const started = startPendingSyncSegmentBlock(self, i) catch |err| {
+                log.logger(.node).warn("failed to start pending sync segment block: {}", .{err});
+                self.pending_sync_segments.items[i].stop_after_current = true;
+                did_work = true;
+                continue;
+            };
+            did_work = started or did_work;
+            if (!started) {
+                const segment = &self.pending_sync_segments.items[i];
+                if (segment.stop_after_current or segment.next_index >= segment.blocks.len) {
+                    did_work = true;
+                    continue;
+                }
+                break;
+            }
+            i += 1;
+        }
+
+        return did_work;
     }
 
     fn finishImportOutcome(
@@ -511,6 +663,64 @@ pub const BeaconNode = struct {
             .head_slot = outcome.snapshot.head.slot,
             .finalized_epoch = outcome.snapshot.finalized.epoch,
         });
+    }
+
+    fn finishGenericQueuedBlockImport(
+        self: *BeaconNode,
+        completed: chain_mod.CompletedBlockImport,
+    ) void {
+        const t0 = std.Io.Clock.awake.now(self.io);
+        const outcome = self.chainService().finishCompletedReadyBlockImport(completed) catch |err| {
+            log.logger(.node).warn("deferred block state work failed: {}", .{err});
+            return;
+        };
+        const result = self.finishImportOutcome(t0, outcome) catch |err| {
+            log.logger(.node).warn("deferred block import commit failed: {}", .{err});
+            return;
+        };
+        self.processPendingChildren(result.block_root);
+    }
+
+    fn finishSyncSegmentQueuedBlockImport(
+        self: *BeaconNode,
+        key: SyncSegmentKey,
+        completed: chain_mod.CompletedBlockImport,
+    ) void {
+        const index = findPendingSyncSegmentIndex(self, key) orelse {
+            log.logger(.node).warn("missing pending sync segment for completed block work", .{});
+            self.finishGenericQueuedBlockImport(completed);
+            return;
+        };
+
+        var segment = &self.pending_sync_segments.items[index];
+        segment.in_flight = false;
+        segment.next_index += 1;
+
+        const outcome = self.chainService().finishCompletedReadyBlockImport(completed) catch |err| {
+            switch (err) {
+                error.BlockAlreadyKnown, error.BlockAlreadyFinalized, error.GenesisBlock => {
+                    segment.skipped_count += 1;
+                },
+                error.ExecutionPayloadInvalid => {
+                    segment.failed_count += 1;
+                    segment.stop_after_current = true;
+                },
+                else => {
+                    segment.failed_count += 1;
+                    log.logger(.node).warn("deferred sync segment block commit failed: {}", .{err});
+                },
+            }
+            return;
+        };
+
+        segment.imported_count += 1;
+        if (outcome.effects.archive_state) |archive_state| {
+            segment.archive_states.append(self.allocator, archive_state) catch {
+                self.chainService().archiveState(archive_state.slot, archive_state.state_root) catch {};
+            };
+        }
+
+        self.processPendingChildren(outcome.result.block_root);
     }
 
     pub fn finishExecutionRevalidationOutcome(
@@ -728,6 +938,96 @@ pub const BeaconNode = struct {
         self.unknown_chain_sync.onBlockImported(parent_root);
         // Notify unknown block sync — handles recursive resolution internally.
         self.unknown_block_sync.notifyBlockImported(parent_root) catch {};
+    }
+
+    fn findPendingSyncSegmentIndex(self: *BeaconNode, key: SyncSegmentKey) ?usize {
+        for (self.pending_sync_segments.items, 0..) |segment, i| {
+            if (segment.key.chain_id != key.chain_id) continue;
+            if (segment.key.batch_id != key.batch_id) continue;
+            if (segment.key.generation != key.generation) continue;
+            return i;
+        }
+        return null;
+    }
+
+    fn startPendingSyncSegmentBlock(self: *BeaconNode, index: usize) !bool {
+        var segment = &self.pending_sync_segments.items[index];
+
+        while (segment.next_index < segment.blocks.len and !segment.stop_after_current) {
+            const block = segment.blocks[segment.next_index];
+            var ready = self.chainService().prepareRawBlockInput(block.block_bytes, .range_sync) catch |err| {
+                segment.failed_count += 1;
+                segment.next_index += 1;
+                log.logger(.node).warn("range sync block preparation failed: {}", .{err});
+                continue;
+            };
+
+            const planned = self.chainService().planReadyBlockImport(&ready) catch |err| {
+                ready.deinit(self.allocator);
+                switch (err) {
+                    error.BlockAlreadyKnown, error.BlockAlreadyFinalized, error.GenesisBlock => {
+                        segment.skipped_count += 1;
+                    },
+                    else => {
+                        segment.failed_count += 1;
+                        log.logger(.node).warn("range sync block planning failed: {}", .{err});
+                    },
+                }
+                segment.next_index += 1;
+                continue;
+            };
+
+            try self.queued_state_work_owners.ensureUnusedCapacity(self.allocator, 1);
+            if (try self.chainService().tryQueuePlannedReadyBlockImport(planned)) {
+                self.queued_state_work_owners.appendAssumeCapacity(.{ .sync_segment = segment.key });
+                segment.in_flight = true;
+                return true;
+            }
+
+            var owned_planned = planned;
+            owned_planned.deinit(self.allocator);
+            return false;
+        }
+
+        return false;
+    }
+
+    fn finalizePendingSyncSegment(self: *BeaconNode, index: usize) void {
+        var segment = self.pending_sync_segments.orderedRemove(index);
+        defer segment.deinit(self.allocator);
+
+        if (segment.stop_after_current and segment.next_index < segment.blocks.len) {
+            segment.failed_count += segment.blocks.len - segment.next_index;
+            segment.next_index = segment.blocks.len;
+        }
+
+        const archive_states = segment.archive_states.items;
+        segment.archive_states = .empty;
+        const outcome = self.chainService().buildDeferredRangeSyncSegmentOutcome(
+            segment.before_snapshot,
+            segment.imported_count,
+            segment.skipped_count,
+            segment.failed_count,
+            archive_states,
+        );
+        const all_failed = outcome.imported_count == 0 and outcome.skipped_count == 0 and outcome.failed_count > 0;
+        self.finishSegmentImportOutcome(segment.started_at, outcome);
+
+        if (self.sync_service_inst) |sync_svc| {
+            if (all_failed) {
+                sync_svc.onSegmentProcessingError(
+                    segment.key.chain_id,
+                    segment.key.batch_id,
+                    segment.key.generation,
+                );
+            } else {
+                sync_svc.onSegmentProcessingSuccess(
+                    segment.key.chain_id,
+                    segment.key.batch_id,
+                    segment.key.generation,
+                );
+            }
+        }
     }
 
     /// Notify the EL of the current fork choice and optionally trigger payload building.

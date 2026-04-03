@@ -49,6 +49,8 @@ const BlobVerifyInput = blob_kzg_verification.BlobVerifyInput;
 const BYTES_PER_CELL = blob_kzg_verification.BYTES_PER_CELL;
 const HeadResult = fork_choice_mod.HeadResult;
 const LVHExecResponse = fork_choice_mod.LVHExecResponse;
+pub const PlannedBlockImport = @import("blocks/root.zig").PlannedBlockImport;
+pub const CompletedBlockImport = @import("state_work_service.zig").CompletedBlockImport;
 
 fn eth1DataFromHeadState(cached: *CachedBeaconState) Eth1DataType {
     var eth1_data = Eth1Data.default_value;
@@ -142,18 +144,25 @@ pub const Service = struct {
         block_bytes: []const u8,
         source: chain_types.BlockSource,
     ) !chain_effects.ImportOutcome {
+        return self.importReadyBlock(try self.prepareRawBlockInput(block_bytes, source));
+    }
+
+    pub fn prepareRawBlockInput(
+        self: Service,
+        block_bytes: []const u8,
+        source: chain_types.BlockSource,
+    ) !ReadyBlockInput {
         const slot = try readBlockSlot(block_bytes);
-        var any_signed = try deserializeRawBlockBytes(self.chain, slot, block_bytes);
-        defer any_signed.deinit(self.chain.allocator);
+        const any_signed = try deserializeRawBlockBytes(self.chain, slot, block_bytes);
         const block_root = try hashBlock(self.chain.allocator, any_signed);
-        return self.importReadyBlock(readyBlockInput(
+        return readyBlockInput(
             any_signed,
             source,
             block_root,
             self.dataAvailabilityStatusForBlock(block_root, any_signed),
             0,
             .none,
-        ));
+        );
     }
 
     pub fn importReadyBlock(
@@ -181,6 +190,65 @@ pub const Service = struct {
                     null,
             },
         };
+    }
+
+    /// Consumes `ready`. On success, ownership transfers into the returned plan.
+    /// On error, `ready` still owns its resources.
+    pub fn planReadyBlockImport(
+        self: Service,
+        ready: *ReadyBlockInput,
+    ) !PlannedBlockImport {
+        return self.chain.planReadyBlockImport(ready);
+    }
+
+    /// Consumes `planned` on both success and failure.
+    /// Returns `true` when queued for background STFN, `false` when the caller
+    /// still owns `planned` and should fall back to synchronous execution.
+    pub fn tryQueuePlannedReadyBlockImport(
+        self: Service,
+        planned: PlannedBlockImport,
+    ) !bool {
+        return self.chain.tryQueuePlannedReadyBlockImport(planned);
+    }
+
+    /// Consumes `planned`.
+    pub fn executePlannedReadyBlockImportSync(
+        self: Service,
+        planned: PlannedBlockImport,
+    ) CompletedBlockImport {
+        return self.chain.executePlannedReadyBlockImportSync(planned);
+    }
+
+    /// Consumes `completed`.
+    pub fn finishCompletedReadyBlockImport(
+        self: Service,
+        completed: CompletedBlockImport,
+    ) !chain_effects.ImportOutcome {
+        const result = try self.chain.finishCompletedReadyBlockImport(completed);
+        const snapshot = self.query().currentSnapshot();
+
+        return .{
+            .result = result,
+            .snapshot = snapshot,
+            .effects = .{
+                .forkchoice_update = self.forkchoiceUpdateForHead(snapshot.head.root),
+                .archive_state = if (result.epoch_transition)
+                    .{
+                        .slot = result.slot,
+                        .state_root = result.state_root,
+                    }
+                else
+                    null,
+                .finalized_checkpoint = if (result.epoch_transition)
+                    snapshot.finalized
+                else
+                    null,
+            },
+        };
+    }
+
+    pub fn popCompletedReadyBlockImport(self: Service) ?CompletedBlockImport {
+        return self.chain.popCompletedReadyBlockImport();
     }
 
     pub fn processRangeSyncSegment(
@@ -260,6 +328,32 @@ pub const Service = struct {
         else
             try archive_states_builder.toOwnedSlice(allocator);
 
+        return .{
+            .imported_count = imported_count,
+            .skipped_count = skipped_count,
+            .failed_count = failed_count,
+            .snapshot = snapshot,
+            .effects = .{
+                .forkchoice_update = self.forkchoiceUpdateForHead(snapshot.head.root),
+                .archive_states = archive_states,
+                .finalized_checkpoint = if (snapshot.finalized.epoch != before_snapshot.finalized.epoch or
+                    !std.mem.eql(u8, &snapshot.finalized.root, &before_snapshot.finalized.root))
+                    snapshot.finalized
+                else
+                    null,
+            },
+        };
+    }
+
+    pub fn buildDeferredRangeSyncSegmentOutcome(
+        self: Service,
+        before_snapshot: chain_effects.ChainSnapshot,
+        imported_count: usize,
+        skipped_count: usize,
+        failed_count: usize,
+        archive_states: []const chain_effects.ArchiveStateRequest,
+    ) chain_effects.SegmentImportOutcome {
+        const snapshot = self.query().currentSnapshot();
         return .{
             .imported_count = imported_count,
             .skipped_count = skipped_count,

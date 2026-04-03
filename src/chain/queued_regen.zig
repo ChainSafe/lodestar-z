@@ -18,7 +18,6 @@ const BlockStateCache = state_transition.BlockStateCache;
 const CheckpointStateCache = state_transition.CheckpointStateCache;
 const StateRegen = state_transition.StateRegen;
 const CheckpointKey = state_transition.CheckpointKey;
-const computeEpochAtSlot = state_transition.computeEpochAtSlot;
 
 /// Priority for state regen requests (lower numeric value = higher priority).
 pub const RegenPriority = enum(u2) {
@@ -52,7 +51,11 @@ pub const RegenRequestKind = enum {
 pub const RegenKey = union(RegenRequestKind) {
     block_root: [32]u8,
     checkpoint: CheckpointKey,
-    pre_state: struct { parent_root: [32]u8, block_slot: u64 },
+    pre_state: struct {
+        parent_block_root: [32]u8,
+        parent_state_root: [32]u8,
+        block_slot: u64,
+    },
     state_root: [32]u8,
 
     pub fn eql(a: RegenKey, b: RegenKey) bool {
@@ -62,7 +65,9 @@ pub const RegenKey = union(RegenRequestKind) {
         return switch (a) {
             .block_root => |ra| std.mem.eql(u8, &ra, &b.block_root),
             .checkpoint => |ca| ca.epoch == b.checkpoint.epoch and std.mem.eql(u8, &ca.root, &b.checkpoint.root),
-            .pre_state => |pa| std.mem.eql(u8, &pa.parent_root, &b.pre_state.parent_root) and pa.block_slot == b.pre_state.block_slot,
+            .pre_state => |pa| std.mem.eql(u8, &pa.parent_block_root, &b.pre_state.parent_block_root) and
+                std.mem.eql(u8, &pa.parent_state_root, &b.pre_state.parent_state_root) and
+                pa.block_slot == b.pre_state.block_slot,
             .state_root => |ra| std.mem.eql(u8, &ra, &b.state_root),
         };
     }
@@ -77,7 +82,8 @@ pub const RegenKey = union(RegenRequestKind) {
                 h.update(&cp.root);
             },
             .pre_state => |ps| {
-                h.update(&ps.parent_root);
+                h.update(&ps.parent_block_root);
+                h.update(&ps.parent_state_root);
                 h.update(std.mem.asBytes(&ps.block_slot));
             },
             .state_root => |r| h.update(&r),
@@ -160,44 +166,44 @@ pub const QueuedStateRegen = struct {
 
     /// Get the pre-state for processing a block.
     ///
-    /// `parent_root` MUST be a STATE root (not a block root).
+    /// `parent_state_root` MUST be a STATE root (not a block root).
     /// BlockStateCache is keyed by state root. Callers must translate
     /// block_root → state_root via block_to_state map BEFORE calling this.
     ///
-    /// This is verified in pipeline.getPreState (P1-13 / P0-2 fix):
+    /// This is verified in pipeline.getCachedPreState:
     ///   parent_state_root = block_to_state.get(parent_block_root)
-    ///   qr.getPreState(parent_state_root, ...)  ← correct
+    ///   qr.getCachedPreState(parent_state_root, ...)  ← correct
     ///
     /// Fast path: checks block cache and checkpoint cache.
     /// Slow path: delegates to StateRegen.getPreState (which may read from DB).
+    pub fn getCachedPreState(
+        self: *QueuedStateRegen,
+        parent_state_root: [32]u8, // Must be state root, not block root
+        block_slot: u64,
+    ) !?*CachedBeaconState {
+        if (try self.regen.getCachedPreState(parent_state_root, block_slot)) |state| {
+            self.cache_hits += 1;
+            return state;
+        }
+
+        return null;
+    }
+
     pub fn getPreState(
         self: *QueuedStateRegen,
-        parent_root: [32]u8, // Must be state root, not block root
+        parent_block_root: [32]u8,
+        parent_state_root: [32]u8,
         block_slot: u64,
         priority: RegenPriority,
     ) !*CachedBeaconState {
         _ = priority;
 
-        // Fast path: try caches directly.
-        // block_cache is keyed by state root — correct since parent_root is state_root.
-        if (self.regen.block_cache.get(parent_root)) |state| {
-            self.cache_hits += 1;
+        if (try self.getCachedPreState(parent_state_root, block_slot)) |state| {
             return state;
         }
 
-        // Try checkpoint cache.
-        const target_epoch = computeEpochAtSlot(block_slot);
-        if (try self.regen.checkpoint_cache.getOrReload(.{
-            .epoch = target_epoch,
-            .root = parent_root,
-        })) |state| {
-            self.cache_hits += 1;
-            return state;
-        }
-
-        // Slow path: full regen (may hit DB).
         self.queue_hits += 1;
-        return self.regen.getPreState(parent_root, block_slot);
+        return self.regen.getPreState(parent_block_root, parent_state_root, block_slot);
     }
 
     /// Get a checkpoint state (epoch boundary state).
@@ -301,7 +307,7 @@ pub const QueuedStateRegen = struct {
                 _ = try self.regen.getCheckpointState(cp);
             },
             .pre_state => |ps| {
-                _ = try self.regen.getPreState(ps.parent_root, ps.block_slot);
+                _ = try self.regen.getPreState(ps.parent_block_root, ps.parent_state_root, ps.block_slot);
             },
             .state_root => |root| {
                 _ = try self.regen.getStateByRoot(root);
@@ -412,7 +418,7 @@ pub const QueuedStateRegen = struct {
 test "QueuedStateRegen: init and deinit" {
     const Node = @import("persistent_merkle_tree").Node;
     const TestCachedBeaconState = @import("state_transition").test_utils.TestCachedBeaconState;
-    
+
     const MemoryCPStateDatastore = @import("state_transition").MemoryCPStateDatastore;
 
     const allocator = std.testing.allocator;
@@ -445,7 +451,7 @@ test "QueuedStateRegen: init and deinit" {
 test "QueuedStateRegen: getPreState cache hit" {
     const Node = @import("persistent_merkle_tree").Node;
     const TestCachedBeaconState = @import("state_transition").test_utils.TestCachedBeaconState;
-    
+
     const MemoryCPStateDatastore = @import("state_transition").MemoryCPStateDatastore;
 
     const allocator = std.testing.allocator;
@@ -476,7 +482,7 @@ test "QueuedStateRegen: getPreState cache hit" {
     const root = try regen.onNewBlock(state, true);
 
     // getPreState should find it via cache.
-    const result = try queued.getPreState(root, 100, .block_import);
+    const result = try queued.getPreState(root, root, 100, .block_import);
     try std.testing.expectEqual(state, result);
     try std.testing.expectEqual(@as(u64, 1), queued.cache_hits);
 }
@@ -484,7 +490,7 @@ test "QueuedStateRegen: getPreState cache hit" {
 test "QueuedStateRegen: enqueue deduplicates" {
     const Node = @import("persistent_merkle_tree").Node;
     const TestCachedBeaconState = @import("state_transition").test_utils.TestCachedBeaconState;
-    
+
     const MemoryCPStateDatastore = @import("state_transition").MemoryCPStateDatastore;
 
     const allocator = std.testing.allocator;
@@ -528,7 +534,7 @@ test "QueuedStateRegen: enqueue deduplicates" {
 test "QueuedStateRegen: enqueue upgrades priority" {
     const Node = @import("persistent_merkle_tree").Node;
     const TestCachedBeaconState = @import("state_transition").test_utils.TestCachedBeaconState;
-    
+
     const MemoryCPStateDatastore = @import("state_transition").MemoryCPStateDatastore;
 
     const allocator = std.testing.allocator;
@@ -575,7 +581,7 @@ test "QueuedStateRegen: enqueue upgrades priority" {
 test "QueuedStateRegen: dropLowPriority removes background requests" {
     const Node = @import("persistent_merkle_tree").Node;
     const TestCachedBeaconState = @import("state_transition").test_utils.TestCachedBeaconState;
-    
+
     const MemoryCPStateDatastore = @import("state_transition").MemoryCPStateDatastore;
 
     const allocator = std.testing.allocator;
@@ -628,7 +634,7 @@ test "QueuedStateRegen: dropLowPriority removes background requests" {
 test "QueuedStateRegen: onNewBlock delegates to regen" {
     const Node = @import("persistent_merkle_tree").Node;
     const TestCachedBeaconState = @import("state_transition").test_utils.TestCachedBeaconState;
-    
+
     const MemoryCPStateDatastore = @import("state_transition").MemoryCPStateDatastore;
 
     const allocator = std.testing.allocator;
@@ -663,7 +669,7 @@ test "QueuedStateRegen: onNewBlock delegates to regen" {
 test "QueuedStateRegen: metrics tracking" {
     const Node = @import("persistent_merkle_tree").Node;
     const TestCachedBeaconState = @import("state_transition").test_utils.TestCachedBeaconState;
-    
+
     const MemoryCPStateDatastore = @import("state_transition").MemoryCPStateDatastore;
 
     const allocator = std.testing.allocator;
@@ -694,7 +700,7 @@ test "QueuedStateRegen: metrics tracking" {
     const root = try regen.onNewBlock(state, true);
 
     // Cache hit.
-    _ = try queued.getPreState(root, 100, .block_import);
+    _ = try queued.getPreState(root, root, 100, .block_import);
 
     const m = queued.getMetrics();
     try std.testing.expectEqual(@as(u64, 1), m.cache_hits);

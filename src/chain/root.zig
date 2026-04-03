@@ -11,6 +11,7 @@ pub const ports = @import("ports/root.zig");
 pub const runtime = @import("runtime.zig");
 pub const service = @import("service.zig");
 pub const query = @import("query.zig");
+pub const state_work_service = @import("state_work_service.zig");
 pub const block_import = @import("block_import.zig");
 pub const op_pool = @import("op_pool.zig");
 pub const seen_cache = @import("seen_cache.zig");
@@ -30,6 +31,8 @@ pub const HeadInfo = chain_types.HeadInfo;
 pub const SyncStatus = chain_types.SyncStatus;
 pub const ForkchoiceUpdateState = chain_types.ForkchoiceUpdateState;
 pub const ReadyBlockInput = chain_types.ReadyBlockInput;
+pub const PlannedBlockImport = blocks.PlannedBlockImport;
+pub const PreparedBlockImport = blocks.PreparedBlockImport;
 pub const RawBlockBytes = chain_types.RawBlockBytes;
 pub const PlannedBlockIngress = chain_types.PlannedBlockIngress;
 pub const BlockDataRequirement = chain_types.BlockDataRequirement;
@@ -54,6 +57,8 @@ pub const StorageBackend = runtime.StorageBackend;
 pub const Service = service.Service;
 pub const Query = query.Query;
 pub const PmtMutator = @import("state_transition").PmtMutator;
+pub const StateWorkService = state_work_service.StateWorkService;
+pub const CompletedBlockImport = state_work_service.CompletedBlockImport;
 
 // Existing re-exports (kept for backward compatibility)
 pub const HeadTracker = block_import.HeadTracker;

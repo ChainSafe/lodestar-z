@@ -34,6 +34,8 @@ const SyncCommitteeMessagePool = sync_contribution_pool_mod.SyncCommitteeMessage
 const ValidatorMonitor = @import("validator_monitor.zig").ValidatorMonitor;
 const BeaconProposerCache = @import("beacon_proposer_cache.zig").BeaconProposerCache;
 const DataAvailabilityManager = @import("data_availability.zig").DataAvailabilityManager;
+const state_work_service_mod = @import("state_work_service.zig");
+const StateWorkService = state_work_service_mod.StateWorkService;
 const PendingBlockIngress = @import("block_ingress.zig").PendingBlockIngress;
 const PayloadEnvelopeIngress = @import("payload_envelope_ingress.zig").PayloadEnvelopeIngress;
 const archive_store_mod = @import("archive_store.zig");
@@ -88,6 +90,7 @@ pub const Runtime = struct {
     pmt_mutator: *PmtMutator,
     state_regen: *StateRegen,
     queued_regen: *QueuedStateRegen,
+    state_work_service: *StateWorkService,
     head_tracker: *HeadTracker,
     op_pool: *OpPool,
     seen_cache: *SeenCache,
@@ -163,6 +166,16 @@ pub const Runtime = struct {
         errdefer allocator.destroy(queued_regen);
         queued_regen.* = QueuedStateRegen.init(allocator, regen);
         errdefer queued_regen.deinit();
+
+        const state_work_service = try StateWorkService.init(
+            allocator,
+            io,
+            regen,
+            pmt_mutator,
+            opts.block_bls_thread_pool,
+            state_work_service_mod.DEFAULT_MAX_PENDING_BLOCK_IMPORTS,
+        );
+        errdefer state_work_service.deinit();
 
         const head_tracker = try allocator.create(HeadTracker);
         errdefer allocator.destroy(head_tracker);
@@ -260,6 +273,7 @@ pub const Runtime = struct {
         chain.block_bls_thread_pool = opts.block_bls_thread_pool;
         chain.pmt_mutator = pmt_mutator;
         chain.queued_regen = queued_regen;
+        chain.state_work_service = state_work_service;
         chain.sync_contribution_pool = sync_contrib_pool;
         chain.sync_committee_message_pool = sync_msg_pool;
         chain.kzg = kzg;
@@ -280,6 +294,7 @@ pub const Runtime = struct {
             .pmt_mutator = pmt_mutator,
             .state_regen = regen,
             .queued_regen = queued_regen,
+            .state_work_service = state_work_service,
             .head_tracker = head_tracker,
             .op_pool = op_pool,
             .seen_cache = seen_cache,
@@ -370,6 +385,8 @@ pub const Runtime = struct {
 
         self.queued_regen.deinit();
         self.allocator.destroy(self.queued_regen);
+
+        self.state_work_service.deinit();
 
         self.allocator.destroy(self.state_regen);
 

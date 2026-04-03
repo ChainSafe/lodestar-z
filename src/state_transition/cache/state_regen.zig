@@ -79,42 +79,113 @@ pub const StateRegen = struct {
         self.pmt_mutator = pmt_mutator;
     }
 
+    /// Bind cold-path deserialization to the live shared pool/config of a
+    /// published state. Call this once an anchor/head state exists.
+    pub fn bindPublishedState(self: *StateRegen, state: *CachedBeaconState) void {
+        self.config = state.config;
+        self.pool = switch (state.state.*) {
+            inline else => |fork_state| fork_state.pool,
+        };
+    }
+
+    /// Fast pre-state lookup for block import planning.
+    ///
+    /// This only consults in-memory / checkpoint-backed caches and does not
+    /// fall through to expensive replay from disk.
+    pub fn getCachedPreState(
+        self: *StateRegen,
+        parent_state_root: [32]u8,
+        block_slot: u64,
+    ) !?*CachedBeaconState {
+        if (self.block_cache.get(parent_state_root)) |state| {
+            return state;
+        }
+
+        const target_epoch = computeEpochAtSlot(block_slot);
+        if (try self.checkpoint_cache.getOrReload(.{
+            .epoch = target_epoch,
+            .root = parent_state_root,
+        })) |state| {
+            return state;
+        }
+
+        if (target_epoch > 0) {
+            if (try self.checkpoint_cache.getOrReload(.{
+                .epoch = target_epoch - 1,
+                .root = parent_state_root,
+            })) |state| {
+                return state;
+            }
+        }
+
+        return null;
+    }
+
     /// Get the pre-state for processing a block at `block_slot` with parent `parent_root`.
     ///
     /// Strategy:
     /// 1. Try block cache (hot path — most recent blocks)
     /// 2. Try checkpoint cache with reload (warm path — epoch boundary states)
     /// 3. Replay canonical history from the closest archived state (cold path)
-    pub fn getPreState(self: *StateRegen, parent_root: [32]u8, block_slot: u64) !*CachedBeaconState {
-        // 1. Try block cache — O(1) lookup by state root
-        if (self.block_cache.get(parent_root)) |state| {
+    pub fn getPreState(
+        self: *StateRegen,
+        parent_block_root: [32]u8,
+        parent_state_root: [32]u8,
+        block_slot: u64,
+    ) !*CachedBeaconState {
+        if (try self.getCachedPreState(parent_state_root, block_slot)) |state| {
             return state;
         }
 
-        // 2. Try checkpoint cache — look for the closest epoch boundary state
-        const target_epoch = computeEpochAtSlot(block_slot);
-        if (try self.checkpoint_cache.getOrReload(.{
-            .epoch = target_epoch,
-            .root = parent_root,
-        })) |state| {
+        if (try self.getStateByRoot(parent_state_root)) |state| {
             return state;
         }
 
-        // Also try previous epoch (the block might be the first in a new epoch)
-        if (target_epoch > 0) {
-            if (try self.checkpoint_cache.getOrReload(.{
-                .epoch = target_epoch - 1,
-                .root = parent_root,
-            })) |state| {
-                return state;
-            }
-        }
-
-        if (try self.getCanonicalStateByBlockRoot(parent_root)) |state| {
+        if (try self.getCanonicalStateByBlockRoot(parent_block_root)) |state| {
             return state;
         }
 
         return error.NoPreStateAvailable;
+    }
+
+    /// Cold pre-state load for off-main-thread block import.
+    ///
+    /// Unlike `getPreState()`, this does not touch the shared caches. It
+    /// deserializes or replays directly from archival storage and returns an
+    /// uncached owned state for the caller to use temporarily.
+    pub fn loadPreStateUncached(
+        self: *StateRegen,
+        parent_block_root: [32]u8,
+        parent_state_root: [32]u8,
+        block_slot: u64,
+    ) !*CachedBeaconState {
+        _ = block_slot;
+
+        if (try self.loadArchivedStateByRootUncached(parent_state_root)) |state| {
+            return state;
+        }
+
+        if (try self.getCanonicalStateByBlockRootUncached(parent_block_root)) |state| {
+            return state;
+        }
+
+        return error.NoPreStateAvailable;
+    }
+
+    /// Destroy a temporary uncached state loaded via deserializeState/replay.
+    ///
+    /// These states allocate their own pubkey caches and do not share them with
+    /// the main published-state graph, so callers must use this path instead of
+    /// plain `CachedBeaconState.deinit()` to avoid leaking those transient caches.
+    pub fn destroyTransientState(self: *StateRegen, state: *CachedBeaconState) void {
+        const pubkey_to_index = state.epoch_cache.pubkey_to_index;
+        const index_to_pubkey = state.epoch_cache.index_to_pubkey;
+        state.deinit();
+        self.allocator.destroy(state);
+        pubkey_to_index.deinit();
+        self.allocator.destroy(pubkey_to_index);
+        index_to_pubkey.deinit();
+        self.allocator.destroy(index_to_pubkey);
     }
 
     /// Get a checkpoint state, potentially reloading from disk.
@@ -239,6 +310,19 @@ pub const StateRegen = struct {
         return self.replayCanonicalStateToSlot(slot);
     }
 
+    fn getCanonicalStateByBlockRootUncached(self: *StateRegen, block_root: [32]u8) !?*CachedBeaconState {
+        if (self.db == null or self.config == null) return null;
+
+        const block_bytes = try self.getBlockBytesByRoot(block_root) orelse return null;
+        defer self.allocator.free(block_bytes);
+
+        const slot = readSignedBlockSlotFromSsz(block_bytes) orelse return null;
+        const canonical_root = try self.db.?.getBlockRootBySlot(slot) orelse return null;
+        if (!std.mem.eql(u8, &canonical_root, &block_root)) return null;
+
+        return self.replayCanonicalStateToSlotUncached(slot);
+    }
+
     fn replayCanonicalStateToSlot(self: *StateRegen, target_slot: u64) !?*CachedBeaconState {
         if (self.db == null or self.pool == null or self.config == null) return null;
 
@@ -307,6 +391,73 @@ pub const StateRegen = struct {
         return try self.cacheLoadedState(working_state, false);
     }
 
+    fn replayCanonicalStateToSlotUncached(self: *StateRegen, target_slot: u64) !?*CachedBeaconState {
+        if (self.db == null or self.pool == null or self.config == null) return null;
+
+        var pmt_mutation_lease = PmtMutator.acquireOptional(self.pmt_mutator);
+        defer pmt_mutation_lease.release();
+
+        if (try self.db.?.getStateArchive(target_slot)) |bytes| {
+            defer self.allocator.free(bytes);
+            return try deserializeState(
+                self.allocator,
+                self.pool.?,
+                self.config.?,
+                bytes,
+            );
+        }
+
+        const anchor_slot = try self.findReplayAnchorSlot(target_slot) orelse return null;
+        var working_state = try self.loadArchivedStateUncached(anchor_slot);
+        errdefer {
+            working_state.deinit();
+            self.allocator.destroy(working_state);
+        }
+
+        if (anchor_slot == target_slot) {
+            return working_state;
+        }
+
+        var slot = anchor_slot + 1;
+        while (slot <= target_slot) : (slot += 1) {
+            const block_root = try self.db.?.getBlockRootBySlot(slot);
+            if (block_root) |root| {
+                const block_bytes = try self.getBlockBytesByRoot(root) orelse return null;
+                defer self.allocator.free(block_bytes);
+
+                var any_signed = try self.deserializeSignedBlock(slot, block_bytes);
+                defer any_signed.deinit(self.allocator);
+                var actual_root: [32]u8 = undefined;
+                try any_signed.beaconBlock().hashTreeRoot(self.allocator, &actual_root);
+                if (!std.mem.eql(u8, &actual_root, &root)) {
+                    try processSlots(self.allocator, working_state, slot, .{});
+                    try working_state.state.commit();
+                    continue;
+                }
+
+                const next_state = try stateTransition(
+                    self.allocator,
+                    working_state,
+                    any_signed,
+                    TransitionOpt{
+                        .verify_state_root = true,
+                        .verify_proposer = false,
+                        .verify_signatures = false,
+                        .transfer_cache = false,
+                    },
+                );
+                working_state.deinit();
+                self.allocator.destroy(working_state);
+                working_state = next_state;
+            } else {
+                try processSlots(self.allocator, working_state, slot, .{});
+                try working_state.state.commit();
+            }
+        }
+
+        return working_state;
+    }
+
     fn findReplayAnchorSlot(self: *StateRegen, target_slot: u64) !?u64 {
         if (self.db == null) return null;
 
@@ -325,6 +476,21 @@ pub const StateRegen = struct {
         const bytes = (try self.db.?.getStateArchive(slot)) orelse return error.StateArchiveMissing;
         defer self.allocator.free(bytes);
 
+        return deserializeState(
+            self.allocator,
+            self.pool.?,
+            self.config.?,
+            bytes,
+        );
+    }
+
+    fn loadArchivedStateByRootUncached(self: *StateRegen, state_root: [32]u8) !?*CachedBeaconState {
+        if (self.db == null or self.pool == null or self.config == null) return null;
+        const bytes = (try self.db.?.getStateArchiveByRoot(state_root)) orelse return null;
+        defer self.allocator.free(bytes);
+
+        var pmt_mutation_lease = PmtMutator.acquireOptional(self.pmt_mutator);
+        defer pmt_mutation_lease.release();
         return deserializeState(
             self.allocator,
             self.pool.?,
@@ -407,7 +573,7 @@ test "StateRegen: basic getPreState from block cache" {
     const root = try regen.onNewBlock(state, true);
 
     // Should find it via getPreState
-    const pre_state = try regen.getPreState(root, 100);
+    const pre_state = try regen.getPreState(root, root, 100);
     try std.testing.expectEqual(state, pre_state);
 }
 
@@ -438,7 +604,7 @@ test "StateRegen: getPreState returns error when nothing cached" {
     var regen = StateRegen.init(allocator, &block_cache, &cp_cache);
 
     const unknown_root = [_]u8{0xde} ** 32;
-    try std.testing.expectError(error.NoPreStateAvailable, regen.getPreState(unknown_root, 100));
+    try std.testing.expectError(error.NoPreStateAvailable, regen.getPreState(unknown_root, unknown_root, 100));
 }
 
 test "StateRegen: onFinalized prunes old states" {
@@ -618,5 +784,62 @@ test "StateRegen: getPreState returns error when nothing cached and no DB" {
     var regen = StateRegen.init(allocator, &block_cache, &cp_cache);
 
     const unknown_root = [_]u8{0xbb} ** 32;
-    try std.testing.expectError(error.NoPreStateAvailable, regen.getPreState(unknown_root, 64));
+    try std.testing.expectError(error.NoPreStateAvailable, regen.getPreState(unknown_root, unknown_root, 64));
+}
+
+test "StateRegen: loadPreStateUncached loads archived state root after binding published state" {
+    const Node = @import("persistent_merkle_tree").Node;
+    const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
+    const datastore_mod = @import("datastore.zig");
+    const MemoryCPStateDatastore = datastore_mod.MemoryCPStateDatastore;
+    const db_mod = @import("db");
+
+    const allocator = std.testing.allocator;
+    const pool_size = 256 * 5;
+    var pool = try Node.Pool.init(allocator, pool_size);
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 16);
+    defer test_state.deinit();
+
+    var mem_store = MemoryCPStateDatastore.init(allocator);
+    defer mem_store.deinit();
+    const ds = mem_store.datastore();
+
+    var block_cache = BlockStateCache.init(allocator, 4);
+    defer block_cache.deinit();
+
+    var cp_cache = CheckpointStateCache.init(allocator, ds, &block_cache, 3);
+    defer cp_cache.deinit();
+
+    var kv_store = db_mod.MemoryKVStore.init(allocator);
+    defer kv_store.deinit();
+    var db = db_mod.BeaconDB.init(allocator, kv_store.kvStore());
+
+    var regen = StateRegen.initWithDB(allocator, &block_cache, &cp_cache, &db, null, null);
+    regen.bindPublishedState(test_state.cached_state);
+
+    const archived = try test_state.cached_state.clone(allocator, .{});
+    defer {
+        archived.deinit();
+        allocator.destroy(archived);
+    }
+    try archived.state.commit();
+    const archived_state_root = (try archived.state.hashTreeRoot()).*;
+    const archived_slot = try archived.state.slot();
+    const archived_bytes = try archived.state.serialize(allocator);
+    defer allocator.free(archived_bytes);
+    try db.putStateArchive(archived_slot, archived_state_root, archived_bytes);
+
+    const loaded = try regen.loadPreStateUncached(
+        [_]u8{0x11} ** 32,
+        archived_state_root,
+        archived_slot + 1,
+    );
+    defer {
+        regen.destroyTransientState(loaded);
+    }
+
+    try std.testing.expectEqual(archived_slot, try loaded.state.slot());
+    try std.testing.expectEqual(@as(usize, 0), block_cache.size());
 }
