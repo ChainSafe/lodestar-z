@@ -56,13 +56,23 @@ pub const ValidatorMetrics = struct {
     attestation_published_total: Counter(u64),
     attestation_missed_total: Counter(u64),
     attestation_delay_seconds: Histogram(f64, &attestation_delay_buckets),
+    attester_duties_count: Gauge(u64),
+    attester_duties_epoch_count: Gauge(u64),
+    attestation_duties_reorg_total: Counter(u64),
+    attestation_duty_slot: Gauge(u64),
 
     block_proposed_total: Counter(u64),
     block_missed_total: Counter(u64),
     block_delay_seconds: Histogram(f64, &block_delay_buckets),
+    proposer_duties_epoch_count: Gauge(u64),
+    proposer_duties_reorg_total: Counter(u64),
+    new_proposal_duties_detected_total: Counter(u64),
 
     sync_committee_message_total: Counter(u64),
     sync_committee_contribution_total: Counter(u64),
+    sync_committee_duties_count: Gauge(u64),
+    sync_committee_duties_epoch_count: Gauge(u64),
+    sync_committee_duties_reorg_total: Counter(u64),
 
     total_validators: Gauge(u64),
     active_validators: Gauge(u64),
@@ -87,11 +97,21 @@ pub const ValidatorMetrics = struct {
             .attestation_published_total = Counter(u64).init("validator_attestation_published_total", .{}, ro),
             .attestation_missed_total = Counter(u64).init("validator_attestation_missed_total", .{}, ro),
             .attestation_delay_seconds = Histogram(f64, &attestation_delay_buckets).init("validator_attestation_delay_seconds", .{}, ro),
+            .attester_duties_count = Gauge(u64).init("vc_attester_duties_count", .{}, ro),
+            .attester_duties_epoch_count = Gauge(u64).init("vc_attester_duties_epoch_count", .{}, ro),
+            .attestation_duties_reorg_total = Counter(u64).init("vc_attestation_duties_reorg_total", .{}, ro),
+            .attestation_duty_slot = Gauge(u64).init("vc_attestation_duty_slot", .{}, ro),
             .block_proposed_total = Counter(u64).init("validator_block_proposed_total", .{}, ro),
             .block_missed_total = Counter(u64).init("validator_block_missed_total", .{}, ro),
             .block_delay_seconds = Histogram(f64, &block_delay_buckets).init("validator_block_delay_seconds", .{}, ro),
+            .proposer_duties_epoch_count = Gauge(u64).init("vc_proposer_duties_epoch_count", .{}, ro),
+            .proposer_duties_reorg_total = Counter(u64).init("vc_proposer_duties_reorg_total", .{}, ro),
+            .new_proposal_duties_detected_total = Counter(u64).init("vc_new_proposal_duties_detected_total", .{}, ro),
             .sync_committee_message_total = Counter(u64).init("validator_sync_committee_message_total", .{}, ro),
             .sync_committee_contribution_total = Counter(u64).init("validator_sync_committee_contribution_total", .{}, ro),
+            .sync_committee_duties_count = Gauge(u64).init("vc_sync_committee_duties_count", .{}, ro),
+            .sync_committee_duties_epoch_count = Gauge(u64).init("vc_sync_committee_duties_epoch_count", .{}, ro),
+            .sync_committee_duties_reorg_total = Counter(u64).init("vc_sync_committee_duties_reorg_total", .{}, ro),
             .total_validators = Gauge(u64).init("validator_total_count", .{}, ro),
             .active_validators = Gauge(u64).init("validator_active_count", .{}, ro),
             .beacon_health = Gauge(u64).init("vc_beacon_health", .{}, ro),
@@ -216,6 +236,37 @@ pub const ValidatorMetrics = struct {
         self.rest_api_request_seconds.observe(.{ .routeId = route_id }, response_time_seconds) catch return;
     }
 
+    pub fn setAttesterDutyCache(self: *ValidatorMetrics, duty_count: usize, epoch_count: usize, next_duty_slot: ?u64) void {
+        self.attester_duties_count.set(@intCast(duty_count));
+        self.attester_duties_epoch_count.set(@intCast(epoch_count));
+        self.attestation_duty_slot.set(next_duty_slot orelse 0);
+    }
+
+    pub fn incrAttesterDutyReorg(self: *ValidatorMetrics) void {
+        self.attestation_duties_reorg_total.incr();
+    }
+
+    pub fn setProposerDutyEpochCount(self: *ValidatorMetrics, epoch_count: usize) void {
+        self.proposer_duties_epoch_count.set(@intCast(epoch_count));
+    }
+
+    pub fn incrProposerDutyReorg(self: *ValidatorMetrics) void {
+        self.proposer_duties_reorg_total.incr();
+    }
+
+    pub fn incrNewProposalDutiesDetected(self: *ValidatorMetrics) void {
+        self.new_proposal_duties_detected_total.incr();
+    }
+
+    pub fn setSyncCommitteeDutyCache(self: *ValidatorMetrics, duty_count: usize, epoch_count: usize) void {
+        self.sync_committee_duties_count.set(@intCast(duty_count));
+        self.sync_committee_duties_epoch_count.set(@intCast(epoch_count));
+    }
+
+    pub fn incrSyncCommitteeDutyReorg(self: *ValidatorMetrics) void {
+        self.sync_committee_duties_reorg_total.incr();
+    }
+
     pub fn observeRestApiStream(self: *ValidatorMetrics, route_id: []const u8, response_time_seconds: f64) void {
         self.rest_api_stream_seconds.observe(.{ .routeId = route_id }, response_time_seconds) catch return;
     }
@@ -294,6 +345,13 @@ test "ValidatorMetrics: init and observe" {
     m.attestation_published_total.incr();
     m.block_proposed_total.incr();
     m.attestation_delay_seconds.observe(1.5);
+    m.setAttesterDutyCache(12, 2, 96);
+    m.incrAttesterDutyReorg();
+    m.setProposerDutyEpochCount(2);
+    m.incrProposerDutyReorg();
+    m.incrNewProposalDutiesDetected();
+    m.setSyncCommitteeDutyCache(8, 2);
+    m.incrSyncCommitteeDutyReorg();
     m.total_validators.set(123);
     m.active_validators.set(100);
     m.setBeaconHealth(.ready);
@@ -304,6 +362,12 @@ test "ValidatorMetrics: init and observe" {
     m.setRestApiUrlScore(0, "http://127.0.0.1:5052", 10);
     try std.testing.expectEqual(@as(u64, 1), m.attestation_published_total.impl.count);
     try std.testing.expectEqual(@as(u64, 1), m.block_proposed_total.impl.count);
+    try std.testing.expectEqual(@as(u64, 12), m.attester_duties_count.impl.value);
+    try std.testing.expectEqual(@as(u64, 2), m.attester_duties_epoch_count.impl.value);
+    try std.testing.expectEqual(@as(u64, 96), m.attestation_duty_slot.impl.value);
+    try std.testing.expectEqual(@as(u64, 2), m.proposer_duties_epoch_count.impl.value);
+    try std.testing.expectEqual(@as(u64, 8), m.sync_committee_duties_count.impl.value);
+    try std.testing.expectEqual(@as(u64, 2), m.sync_committee_duties_epoch_count.impl.value);
     try std.testing.expectEqual(@as(u64, 123), m.total_validators.impl.value);
     try std.testing.expectEqual(@as(u64, 100), m.active_validators.impl.value);
     try std.testing.expectEqual(@as(u64, 0), m.beacon_health.impl.value);
@@ -314,6 +378,13 @@ test "ValidatorMetrics: noop is safe" {
     m.attestation_published_total.incr();
     m.block_proposed_total.incr();
     m.attestation_delay_seconds.observe(1.5);
+    m.setAttesterDutyCache(1, 1, 1);
+    m.incrAttesterDutyReorg();
+    m.setProposerDutyEpochCount(1);
+    m.incrProposerDutyReorg();
+    m.incrNewProposalDutiesDetected();
+    m.setSyncCommitteeDutyCache(1, 1);
+    m.incrSyncCommitteeDutyReorg();
     m.total_validators.set(123);
     m.active_validators.set(100);
     m.setBeaconHealth(.err);
@@ -340,6 +411,13 @@ test "ValidatorMetrics: write produces Prometheus output" {
     m.setRestApiUrlScore(0, "http://127.0.0.1:5052", 8);
     m.observeMonitoringCollect(0.01);
     m.observeMonitoringSend(0.25, true);
+    m.setAttesterDutyCache(12, 2, 96);
+    m.incrAttesterDutyReorg();
+    m.setProposerDutyEpochCount(2);
+    m.incrProposerDutyReorg();
+    m.incrNewProposalDutiesDetected();
+    m.setSyncCommitteeDutyCache(8, 2);
+    m.incrSyncCommitteeDutyReorg();
     m.setDoppelgangerStatusCount("Unverified", 3);
     m.incrDoppelgangerEpochsChecked();
     m.total_validators.set(123);
@@ -353,8 +431,18 @@ test "ValidatorMetrics: write produces Prometheus output" {
     try std.testing.expect(std.mem.indexOf(u8, buf, "validator_attestation_published_total") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf, "validator_block_proposed_total") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf, "validator_attestation_delay_seconds") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf, "vc_attester_duties_count") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf, "vc_attester_duties_epoch_count") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf, "vc_attestation_duties_reorg_total") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf, "vc_attestation_duty_slot") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf, "validator_total_count") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf, "validator_active_count") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf, "vc_proposer_duties_epoch_count") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf, "vc_proposer_duties_reorg_total") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf, "vc_new_proposal_duties_detected_total") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf, "vc_sync_committee_duties_count") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf, "vc_sync_committee_duties_epoch_count") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf, "vc_sync_committee_duties_reorg_total") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf, "vc_beacon_health") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf, "vc_rest_api_client_request_time_seconds") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf, "vc_rest_api_client_stream_time_seconds") != null);

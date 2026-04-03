@@ -231,6 +231,7 @@ pub const AttestationService = struct {
                 "attester duties invalidated for current epoch={d} at slot={d}: previous dependent root changed",
                 .{ current_epoch, info.slot },
             );
+            self.metrics.incrAttesterDutyReorg();
             self.current_duties_revision +|= 1;
             self.duties_epoch = null;
         }
@@ -241,12 +242,15 @@ pub const AttestationService = struct {
                 "attester duties invalidated for next epoch={d} at slot={d}: current dependent root changed",
                 .{ next_epoch, info.slot },
             );
+            self.metrics.incrAttesterDutyReorg();
             self.next_duties_revision +|= 1;
             if (self.next_duties_epoch != null and self.next_duties_epoch.? == next_epoch) {
                 self.next_duties.clearRetainingCapacity();
             }
             self.next_duties_epoch = null;
         }
+
+        self.updateDutyMetricsLocked();
     }
 
     // -----------------------------------------------------------------------
@@ -278,14 +282,13 @@ pub const AttestationService = struct {
                 log.warn("refreshDuties slot={d} epoch={d} error={s}", .{ slot, epoch, @errorName(err) });
                 return;
             };
-            if (!self.hasNextEpochDuties(epoch + 1)) {
-                self.prefetchNextEpochDuties(io, epoch + 1);
-            }
         }
 
         self.runAttestationTasks(io, slot) catch |err| {
             log.err("runAttestationTasks slot={d} error={s}", .{ slot, @errorName(err) });
         };
+
+        self.maybePrefetchNextEpochDuties(io, slot);
     }
 
     /// Remove any cached attester duties for the given validator pubkey.
@@ -313,6 +316,8 @@ pub const AttestationService = struct {
                 i += 1;
             }
         }
+
+        self.updateDutyMetricsLocked();
     }
 
     // -----------------------------------------------------------------------
@@ -388,6 +393,30 @@ pub const AttestationService = struct {
         defer self.allocator.free(subscriptions);
         self.publishBeaconCommitteeSubscriptions(io, subscriptions);
         log.debug("pre-fetched {d} attester duties epoch={d}", .{ fetched.len, next_epoch });
+    }
+
+    fn maybePrefetchNextEpochDuties(self: *AttestationService, io: Io, slot: u64) void {
+        const epoch = slot / self.signing_ctx.slots_per_epoch;
+        const next_epoch = epoch + 1;
+        if (self.hasNextEpochDuties(next_epoch)) return;
+
+        if (self.isLastSlotOfEpoch(slot)) {
+            const slot_duration_ns = self.seconds_per_slot * std.time.ns_per_s;
+            const genesis_time_ns = self.genesis_time_unix_secs * std.time.ns_per_s;
+            const slot_start_ns = genesis_time_ns + slot * slot_duration_ns;
+            const refresh_due_ns = slot_start_ns + self.attestationDueMs(slot) * std.time.ns_per_ms;
+            const now_ns = time.realNanoseconds(io);
+            if (now_ns < refresh_due_ns) {
+                io.sleep(.{ .nanoseconds = @intCast(refresh_due_ns - now_ns) }, .real) catch |err| {
+                    log.warn("next-epoch attester duty prefetch wait slot={d} error={s}", .{ slot, @errorName(err) });
+                    return;
+                };
+            }
+        }
+
+        if (!self.hasNextEpochDuties(next_epoch)) {
+            self.prefetchNextEpochDuties(io, next_epoch);
+        }
     }
 
     fn publishBeaconCommitteeSubscriptions(
@@ -577,6 +606,10 @@ pub const AttestationService = struct {
         return self.next_duties_epoch != null and self.next_duties_epoch.? == epoch;
     }
 
+    fn isLastSlotOfEpoch(self: *const AttestationService, slot: u64) bool {
+        return (slot + 1) % self.signing_ctx.slots_per_epoch == 0;
+    }
+
     fn currentDutiesRevision(self: *AttestationService) u64 {
         self.cache_mutex.lockUncancelable(self.io);
         defer self.cache_mutex.unlock(self.io);
@@ -605,6 +638,7 @@ pub const AttestationService = struct {
         self.duties_epoch = epoch;
         duties.* = std.array_list.Managed(AttesterDutyWithProof).init(self.allocator);
         old.deinit();
+        self.updateDutyMetricsLocked();
         return true;
     }
 
@@ -624,6 +658,7 @@ pub const AttestationService = struct {
         self.next_duties_epoch = epoch;
         duties.* = std.array_list.Managed(AttesterDutyWithProof).init(self.allocator);
         old.deinit();
+        self.updateDutyMetricsLocked();
         return true;
     }
 
@@ -650,7 +685,32 @@ pub const AttestationService = struct {
         self.next_duties = std.array_list.Managed(AttesterDutyWithProof).init(self.allocator);
         self.next_duties_epoch = null;
         old_current.deinit();
+        self.updateDutyMetricsLocked();
         return subscriptions;
+    }
+
+    fn updateDutyMetricsLocked(self: *AttestationService) void {
+        var duty_count: usize = 0;
+        var epoch_count: usize = 0;
+        var next_slot: ?u64 = null;
+
+        if (self.duties_epoch != null) {
+            epoch_count += 1;
+            duty_count += self.duties.items.len;
+            for (self.duties.items) |duty| {
+                next_slot = if (next_slot) |current| @min(current, duty.duty.slot) else duty.duty.slot;
+            }
+        }
+
+        if (self.next_duties_epoch != null) {
+            epoch_count += 1;
+            duty_count += self.next_duties.items.len;
+            for (self.next_duties.items) |duty| {
+                next_slot = if (next_slot) |current| @min(current, duty.duty.slot) else duty.duty.slot;
+            }
+        }
+
+        self.metrics.setAttesterDutyCache(duty_count, epoch_count, next_slot);
     }
 
     fn produceAndPublishAttestations(

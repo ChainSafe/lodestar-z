@@ -46,6 +46,15 @@ pub const HeadHeaderSummary = struct {
     block_root: [32]u8,
 };
 
+pub const ProposerDutiesResponse = struct {
+    duties: []ProposerDuty,
+    dependent_root: ?[32]u8,
+
+    pub fn deinit(self: @This(), allocator: Allocator) void {
+        allocator.free(self.duties);
+    }
+};
+
 /// Callback type for SSE events.
 pub const SseCallback = struct {
     ctx: *anyopaque,
@@ -1527,7 +1536,7 @@ pub const BeaconApiClient = struct {
         self: *BeaconApiClient,
         io: Io,
         epoch: u64,
-    ) ![]ProposerDuty {
+    ) !ProposerDutiesResponse {
         const path = try std.fmt.allocPrint(self.allocator, "/eth/v1/validator/duties/proposer/{d}", .{epoch});
         defer self.allocator.free(path);
 
@@ -1541,6 +1550,7 @@ pub const BeaconApiClient = struct {
         };
         const Parsed = struct {
             data: []const ProposerDutyJson,
+            dependent_root: ?[]const u8 = null,
         };
 
         var parsed = try std.json.parseFromSlice(Parsed, self.allocator, body, .{ .ignore_unknown_fields = true });
@@ -1553,7 +1563,14 @@ pub const BeaconApiClient = struct {
             const pk_hex = if (std.mem.startsWith(u8, src.pubkey, "0x")) src.pubkey[2..] else src.pubkey;
             _ = std.fmt.hexToBytes(&dst.pubkey, pk_hex) catch {};
         }
-        return duties;
+
+        return .{
+            .duties = duties,
+            .dependent_root = if (parsed.value.dependent_root) |root_hex|
+                parseOptionalHexRoot(root_hex)
+            else
+                null,
+        };
     }
 
     /// POST /eth/v1/validator/duties/attester/{epoch}
@@ -2546,6 +2563,16 @@ test "BeaconApiClient initMulti rejects empty URL lists" {
     );
 }
 
+test "parseOptionalHexRoot parses 0x-prefixed roots" {
+    const parsed = parseOptionalHexRoot("0x1111111111111111111111111111111111111111111111111111111111111111");
+    try std.testing.expect(parsed != null);
+    try std.testing.expectEqual([32]u8{0x11} ** 32, parsed.?);
+}
+
+test "parseOptionalHexRoot rejects invalid roots" {
+    try std.testing.expectEqual(@as(?[32]u8, null), parseOptionalHexRoot("0x1234"));
+}
+
 test "BeaconApiClient race group uses only the active healthy URL" {
     var client = try BeaconApiClient.initWithFallbacks(
         std.testing.allocator,
@@ -2613,6 +2640,15 @@ fn parseBlobScheduleField(
     }
 
     return entries;
+}
+
+fn parseOptionalHexRoot(text: []const u8) ?[32]u8 {
+    const hex = if (std.mem.startsWith(u8, text, "0x")) text[2..] else text;
+    if (hex.len != 64) return null;
+
+    var root: [32]u8 = undefined;
+    _ = std.fmt.hexToBytes(&root, hex) catch return null;
+    return root;
 }
 
 pub const AttestationDataResponse = struct {

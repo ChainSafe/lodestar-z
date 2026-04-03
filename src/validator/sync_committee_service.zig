@@ -45,6 +45,13 @@ const log = std.log.scoped(.sync_committee_service);
 const MAX_SUBCOMMITTEE_BYTES: usize = 64;
 /// How many epochs before a sync period begins we ask the BN to subscribe.
 const SUBSCRIPTIONS_LOOKAHEAD_EPOCHS: u64 = 2;
+const TARGET_AGGREGATORS_PER_SYNC_SUBCOMMITTEE: u64 = 16;
+
+const SyncAggregatorCandidate = struct {
+    pubkey: [48]u8,
+    validator_index: u64,
+    selection_proof: [96]u8,
+};
 
 fn shouldPublishSyncSubscriptions(
     current_epoch: u64,
@@ -240,6 +247,7 @@ pub const SyncCommitteeService = struct {
 
     /// Called at each slot to produce and submit sync committee messages + contributions.
     pub fn onSlot(self: *SyncCommitteeService, io: Io, slot: u64) void {
+        self.ensureDutiesForSlot(io, slot);
         self.runSyncTasks(io, slot) catch |err| {
             log.err("runSyncTasks slot={d} error={s}", .{ slot, @errorName(err) });
         };
@@ -272,6 +280,8 @@ pub const SyncCommitteeService = struct {
                 i += 1;
             }
         }
+
+        self.updateDutyMetricsLocked();
     }
 
     // -----------------------------------------------------------------------
@@ -303,7 +313,11 @@ pub const SyncCommitteeService = struct {
             next_duties.deinit();
         }
         try self.cacheDutyList(&next_duties, fetched);
-        self.replaceNextDuties(period, next_duties);
+        const duties_changed = self.replaceNextDuties(period, next_duties);
+        if (duties_changed) {
+            self.metrics.incrSyncCommitteeDutyReorg();
+            log.warn("sync committee duties changed while refreshing next period={d}", .{period});
+        }
         log.info("pre-fetched {d} sync committee duties for period={d}", .{ fetched.len, period });
     }
 
@@ -331,7 +345,11 @@ pub const SyncCommitteeService = struct {
             current_duties.deinit();
         }
         try self.cacheDutyList(&current_duties, fetched);
-        self.replaceCurrentDuties(period, current_duties);
+        const duties_changed = self.replaceCurrentDuties(period, current_duties);
+        if (duties_changed) {
+            self.metrics.incrSyncCommitteeDutyReorg();
+            log.warn("sync committee duties changed while refreshing current period={d}", .{period});
+        }
         log.debug("cached {d} sync committee duties period={d}", .{ fetched.len, period });
     }
 
@@ -407,6 +425,35 @@ pub const SyncCommitteeService = struct {
     // Sync task execution
     // -----------------------------------------------------------------------
 
+    fn ensureDutiesForSlot(self: *SyncCommitteeService, io: Io, slot: u64) void {
+        const period = self.syncPeriodForSlot(slot);
+        const current_epoch = slot / self.slots_per_epoch;
+        const current_period = current_epoch / self.epochs_per_sync_committee_period;
+        const refresh_next_period = period > current_period and self.isFirstSlotUsingSyncPeriod(slot, period);
+
+        if (period == current_period) {
+            if (!self.periodHasDuties(period)) {
+                self.refreshDuties(io, current_epoch, period) catch |err| {
+                    log.warn("repair sync duties slot={d} period={d} error={s}", .{ slot, period, @errorName(err) });
+                    return;
+                };
+                self.publishSubscriptionsForPeriod(io, period, current_epoch);
+            }
+            return;
+        }
+
+        if (!self.periodHasDuties(period) or refresh_next_period) {
+            if (refresh_next_period) {
+                log.debug("refreshing sync duties on first slot using period={d} slot={d}", .{ period, slot });
+            }
+            self.refreshDutiesForPeriod(io, self.periodStartEpoch(period), period) catch |err| {
+                log.warn("repair next sync duties slot={d} period={d} error={s}", .{ slot, period, @errorName(err) });
+                return;
+            };
+            self.publishSubscriptionsForPeriod(io, period, current_epoch);
+        }
+    }
+
     fn runSyncTasks(self: *SyncCommitteeService, io: Io, slot: u64) !void {
         const duties = try self.snapshotDutiesForSlot(slot);
         defer self.freeDutySnapshot(duties);
@@ -423,11 +470,13 @@ pub const SyncCommitteeService = struct {
         // Step 1: sign and submit sync committee messages once the head block arrives
         // or the sync-message due time elapses, whichever comes first.
         const sync_message_due_ns = slot_start_ns + self.syncMessageDueMs(slot) * std.time.ns_per_ms;
+        var head_arrived = false;
         if (self.header_tracker) |tracker| {
             tracker.waitForHeadSlotOrDeadline(slot, sync_message_due_ns);
+            head_arrived = tracker.hasHeadForSlot(slot);
         }
         const now_ns = time.realNanoseconds(io);
-        if (now_ns < sync_message_due_ns) {
+        if (!head_arrived and now_ns < sync_message_due_ns) {
             try io.sleep(.{ .nanoseconds = @intCast(sync_message_due_ns - now_ns) }, .real);
         }
 
@@ -452,6 +501,19 @@ pub const SyncCommitteeService = struct {
         const effective_slot = slot +| 1;
         const epoch = effective_slot / self.slots_per_epoch;
         return epoch / self.epochs_per_sync_committee_period;
+    }
+
+    fn periodStartEpoch(self: *const SyncCommitteeService, period: u64) u64 {
+        return period * self.epochs_per_sync_committee_period;
+    }
+
+    fn firstSlotUsingSyncPeriod(self: *const SyncCommitteeService, period: u64) u64 {
+        if (period == 0) return 0;
+        return self.periodStartEpoch(period) * self.slots_per_epoch - 1;
+    }
+
+    fn isFirstSlotUsingSyncPeriod(self: *const SyncCommitteeService, slot: u64, period: u64) bool {
+        return slot == self.firstSlotUsingSyncPeriod(period);
     }
 
     fn periodHasDuties(self: *SyncCommitteeService, period: u64) bool {
@@ -599,20 +661,26 @@ pub const SyncCommitteeService = struct {
         const slot_duration_ns = self.seconds_per_slot * std.time.ns_per_s;
         const genesis_time_ns = self.genesis_time_unix_secs * std.time.ns_per_s;
         const slot_start_ns = genesis_time_ns + slot * slot_duration_ns;
+        const subcommittee_size = self.sync_committee_size / self.sync_committee_subnet_count;
+        const modulo = @max(1, subcommittee_size / TARGET_AGGREGATORS_PER_SYNC_SUBCOMMITTEE);
+        const subcommittee_count: usize = @intCast(self.sync_committee_subnet_count);
+
+        const groups = try self.allocator.alloc(std.ArrayListUnmanaged(SyncAggregatorCandidate), subcommittee_count);
+        defer {
+            for (groups) |*group| group.deinit(self.allocator);
+            self.allocator.free(groups);
+        }
+        for (groups) |*group| group.* = .empty;
 
         for (duties) |dp| {
+            if (!self.isSafeToSign(dp.pubkey)) {
+                log.warn("skipping contribution slot={d} validator_index={d}: signing not safe", .{ slot, dp.validator_index });
+                continue;
+            }
+
             for (dp.validator_sync_committee_indices) |sc_idx| {
-                const subcommittee_index = sc_idx / (self.sync_committee_size / self.sync_committee_subnet_count);
+                const subcommittee_index = sc_idx / subcommittee_size;
 
-                // Safety check before any signing.
-                if (!self.isSafeToSign(dp.pubkey)) {
-                    log.warn("skipping contribution slot={d} validator_index={d}: signing not safe", .{ slot, dp.validator_index });
-                    continue;
-                }
-
-                // Selection proofs are slot-scoped, so compute them on demand for
-                // the current slot rather than storing mutable per-slot state in
-                // the long-lived duty cache.
                 var sel_root: [32]u8 = undefined;
                 signing_mod.syncCommitteeSelectionProofSigningRoot(
                     self.signing_ctx,
@@ -628,127 +696,171 @@ pub const SyncCommitteeService = struct {
                 else |_|
                     continue;
 
-                // Aggregation eligibility check per consensus spec:
-                //   is_sync_committee_aggregator = (SHA256(sel_proof)[0:8] as little-endian u64)
-                //       % max(1, SYNC_COMMITTEE_SIZE / SYNC_COMMITTEE_SUBNET_COUNT / TARGET_AGGREGATORS_PER_SYNC_SUBCOMMITTEE) == 0
-                // Same pattern as attestation_service.zig's aggregator check.
-                const subcommittee_size = self.sync_committee_size / self.sync_committee_subnet_count;
-                const TARGET_AGGREGATORS_PER_SYNC_SUBCOMMITTEE: u64 = 16;
-                const modulo = @max(1, subcommittee_size / TARGET_AGGREGATORS_PER_SYNC_SUBCOMMITTEE);
-                const Sha256 = std.crypto.hash.sha2.Sha256;
-                var sel_hash: [32]u8 = undefined;
-                Sha256.hash(&sel_proof, &sel_hash, .{});
-                const hash_val = std.mem.readInt(u64, sel_hash[0..8], .little);
-                if (hash_val % modulo != 0) continue; // not selected as aggregator for this subcommittee
+                if (!isSyncCommitteeAggregator(sel_proof, modulo)) continue;
 
-                // 1. Fetch contribution from BN.
-                const now_ns = time.realNanoseconds(io);
-                const slot_end_ns = slot_start_ns + slot_duration_ns;
-                const remaining_ns = if (now_ns >= slot_end_ns) @as(u64, 1) else @max(@as(u64, 1), (slot_end_ns - now_ns));
-                const timeout_ms: u64 = @max(@as(u64, 1), remaining_ns / std.time.ns_per_ms);
-
-                const contrib = try self.api.produceSyncCommitteeContributionWithTimeout(
-                    io,
-                    slot,
-                    subcommittee_index,
-                    beacon_block_root.*,
-                    timeout_ms,
-                );
-                defer self.allocator.free(contrib.aggregation_bits);
-
-                // 2. Build ContributionAndProof and sign the contribution exactly as
-                // returned by the BN. The BN response is the source of truth for
-                // aggregated sync committee participation at this subnet/slot.
-                const AggregationBitsData = @FieldType(
-                    @FieldType(consensus_types.altair.SyncCommitteeContribution.Type, "aggregation_bits"),
-                    "data",
-                );
-                var agg_bits: AggregationBitsData = [_]u8{0} ** @typeInfo(AggregationBitsData).array.len;
-                const subcommittee_bytes = (subcommittee_size + 7) / 8;
-                const agg_bits_slice = agg_bits[0..subcommittee_bytes];
-                // Copy BN's aggregated bits directly.
-                const copy_len = @min(contrib.aggregation_bits.len, agg_bits_slice.len);
-                @memcpy(agg_bits_slice[0..copy_len], contrib.aggregation_bits[0..copy_len]);
-
-                const contribution_and_proof = consensus_types.altair.ContributionAndProof.Type{
-                    .aggregator_index = dp.validator_index,
-                    .contribution = .{
-                        .slot = slot,
-                        .beacon_block_root = beacon_block_root.*,
-                        .subcommittee_index = subcommittee_index,
-                        .aggregation_bits = .{ .data = agg_bits },
-                        .signature = contrib.signature,
-                    },
+                try groups[@intCast(subcommittee_index)].append(self.allocator, .{
+                    .pubkey = dp.pubkey,
+                    .validator_index = dp.validator_index,
                     .selection_proof = sel_proof,
-                };
-
-                var signing_root: [32]u8 = undefined;
-                signing_mod.contributionAndProofSigningRoot(
-                    self.signing_ctx,
-                    &contribution_and_proof,
-                    &signing_root,
-                ) catch |err| {
-                    log.warn("contributionAndProofSigningRoot error: {s}", .{@errorName(err)});
-                    continue;
-                };
-
-                const sig = self.validator_store.signContributionAndProof(io, dp.pubkey, signing_root) catch |err| {
-                    log.warn("signContributionAndProof error: {s}", .{@errorName(err)});
-                    continue;
-                };
-                const sig_bytes = sig.compress();
-                const sig_hex = std.fmt.bytesToHex(&sig_bytes, .lower);
-                const sel_hex = std.fmt.bytesToHex(&sel_proof, .lower);
-                const bbr_hex2 = std.fmt.bytesToHex(beacon_block_root, .lower);
-                const contrib_sig_hex = std.fmt.bytesToHex(&contrib.signature, .lower);
-
-                // 3. Build SignedContributionAndProof JSON and publish.
-                // Fix 4: Hex-encode the actual agg_bits instead of hardcoded "0x00".
-                // agg_bits is a BitVector(128) — 16 bytes, no sentinel needed (fixed-size).
-                var contrib_json: std.Io.Writer.Allocating = .init(self.allocator);
-                defer contrib_json.deinit();
-                try contrib_json.writer.print(
-                    "[{{\"message\":{{\"aggregator_index\":\"{d}\",\"contribution\":{{\"slot\":\"{d}\",\"beacon_block_root\":\"0x{s}\",\"subcommittee_index\":\"{d}\",\"aggregation_bits\":\"0x{x}\",\"signature\":\"0x{s}\"}},\"selection_proof\":\"0x{s}\"}},\"signature\":\"0x{s}\"}}]",
-                    .{ dp.validator_index, slot, bbr_hex2, subcommittee_index, agg_bits_slice, contrib_sig_hex, sel_hex, sig_hex },
-                );
-
-                self.api.publishContributionAndProofs(io, contrib_json.written()) catch |err| {
-                    log.warn("publishContributionAndProofs error: {s}", .{@errorName(err)});
-                    continue;
-                };
-                self.metrics.sync_committee_contribution_total.incr();
+                });
             }
         }
+
+        for (groups, 0..) |*group, subcommittee_index_usize| {
+            if (group.items.len == 0) continue;
+
+            const subcommittee_index: u64 = @intCast(subcommittee_index_usize);
+            const now_ns = time.realNanoseconds(io);
+            const slot_end_ns = slot_start_ns + slot_duration_ns;
+            const remaining_ns = if (now_ns >= slot_end_ns) @as(u64, 1) else @max(@as(u64, 1), (slot_end_ns - now_ns));
+            const timeout_ms: u64 = @max(@as(u64, 1), remaining_ns / std.time.ns_per_ms);
+
+            const contrib = self.api.produceSyncCommitteeContributionWithTimeout(
+                io,
+                slot,
+                subcommittee_index,
+                beacon_block_root.*,
+                timeout_ms,
+            ) catch |err| {
+                log.warn(
+                    "produceSyncCommitteeContribution slot={d} subcommittee_index={d} error={s}",
+                    .{ slot, subcommittee_index, @errorName(err) },
+                );
+                continue;
+            };
+            defer self.allocator.free(contrib.aggregation_bits);
+
+            var contrib_json: std.Io.Writer.Allocating = .init(self.allocator);
+            defer contrib_json.deinit();
+            try contrib_json.writer.writeByte('[');
+
+            var published_count: u64 = 0;
+            for (group.items) |candidate| {
+                const rendered = self.appendSignedContributionAndProofJson(
+                    &contrib_json,
+                    slot,
+                    subcommittee_index,
+                    beacon_block_root,
+                    subcommittee_size,
+                    contrib.aggregation_bits,
+                    contrib.signature,
+                    candidate,
+                ) catch |err| {
+                    log.warn(
+                        "build signed contribution slot={d} validator_index={d} subcommittee_index={d} error={s}",
+                        .{ slot, candidate.validator_index, subcommittee_index, @errorName(err) },
+                    );
+                    continue;
+                };
+                if (rendered) published_count += 1;
+            }
+
+            try contrib_json.writer.writeByte(']');
+            if (published_count == 0) continue;
+
+            self.api.publishContributionAndProofs(io, contrib_json.written()) catch |err| {
+                log.warn(
+                    "publishContributionAndProofs slot={d} subcommittee_index={d} error={s}",
+                    .{ slot, subcommittee_index, @errorName(err) },
+                );
+                continue;
+            };
+            self.metrics.sync_committee_contribution_total.incrBy(published_count);
+        }
+    }
+
+    fn appendSignedContributionAndProofJson(
+        self: *SyncCommitteeService,
+        contrib_json: *std.Io.Writer.Allocating,
+        slot: u64,
+        subcommittee_index: u64,
+        beacon_block_root: *const [32]u8,
+        subcommittee_size: u64,
+        aggregation_bits: []const u8,
+        contribution_signature: [96]u8,
+        candidate: SyncAggregatorCandidate,
+    ) !bool {
+        const AggregationBitsData = @FieldType(
+            @FieldType(consensus_types.altair.SyncCommitteeContribution.Type, "aggregation_bits"),
+            "data",
+        );
+        var agg_bits: AggregationBitsData = [_]u8{0} ** @typeInfo(AggregationBitsData).array.len;
+        const subcommittee_bytes = (subcommittee_size + 7) / 8;
+        const agg_bits_slice = agg_bits[0..subcommittee_bytes];
+        const copy_len = @min(aggregation_bits.len, agg_bits_slice.len);
+        @memcpy(agg_bits_slice[0..copy_len], aggregation_bits[0..copy_len]);
+
+        const contribution_and_proof = consensus_types.altair.ContributionAndProof.Type{
+            .aggregator_index = candidate.validator_index,
+            .contribution = .{
+                .slot = slot,
+                .beacon_block_root = beacon_block_root.*,
+                .subcommittee_index = subcommittee_index,
+                .aggregation_bits = .{ .data = agg_bits },
+                .signature = contribution_signature,
+            },
+            .selection_proof = candidate.selection_proof,
+        };
+
+        var signing_root: [32]u8 = undefined;
+        try signing_mod.contributionAndProofSigningRoot(
+            self.signing_ctx,
+            &contribution_and_proof,
+            &signing_root,
+        );
+
+        const sig = self.validator_store.signContributionAndProof(self.io, candidate.pubkey, signing_root) catch |err| {
+            log.warn("signContributionAndProof validator_index={d} error={s}", .{ candidate.validator_index, @errorName(err) });
+            return false;
+        };
+        const sig_bytes = sig.compress();
+        const sig_hex = std.fmt.bytesToHex(&sig_bytes, .lower);
+        const sel_hex = std.fmt.bytesToHex(&candidate.selection_proof, .lower);
+        const bbr_hex = std.fmt.bytesToHex(beacon_block_root, .lower);
+        const contrib_sig_hex = std.fmt.bytesToHex(&contribution_signature, .lower);
+
+        if (contrib_json.written().len > 1) try contrib_json.writer.writeByte(',');
+        try contrib_json.writer.print(
+            "{{\"message\":{{\"aggregator_index\":\"{d}\",\"contribution\":{{\"slot\":\"{d}\",\"beacon_block_root\":\"0x{s}\",\"subcommittee_index\":\"{d}\",\"aggregation_bits\":\"0x{x}\",\"signature\":\"0x{s}\"}},\"selection_proof\":\"0x{s}\"}},\"signature\":\"0x{s}\"}}",
+            .{ candidate.validator_index, slot, bbr_hex, subcommittee_index, agg_bits_slice, contrib_sig_hex, sel_hex, sig_hex },
+        );
+        return true;
     }
 
     fn replaceCurrentDuties(
         self: *SyncCommitteeService,
         period: u64,
         duties: std.array_list.Managed(SyncCommitteeDuty),
-    ) void {
+    ) bool {
         self.cache_mutex.lockUncancelable(self.io);
         defer self.cache_mutex.unlock(self.io);
 
+        const changed = self.cachedDutiesChangedLocked(period, duties.items, .current);
         var old = self.duties;
         self.duties = duties;
         self.duties_period = period;
         self.clearDutyList(&old);
         old.deinit();
+        self.updateDutyMetricsLocked();
+        return changed;
     }
 
     fn replaceNextDuties(
         self: *SyncCommitteeService,
         period: u64,
         duties: std.array_list.Managed(SyncCommitteeDuty),
-    ) void {
+    ) bool {
         self.cache_mutex.lockUncancelable(self.io);
         defer self.cache_mutex.unlock(self.io);
 
+        const changed = self.cachedDutiesChangedLocked(period, duties.items, .next);
         var old = self.next_duties;
         self.next_duties = duties;
         self.next_duties_period = period;
         self.clearDutyList(&old);
         old.deinit();
+        self.updateDutyMetricsLocked();
+        return changed;
     }
 
     fn activatePrefetchedPeriod(self: *SyncCommitteeService, period: u64) bool {
@@ -764,7 +876,73 @@ pub const SyncCommitteeService = struct {
         self.next_duties_period = null;
         self.clearDutyList(&old_current);
         old_current.deinit();
+        self.updateDutyMetricsLocked();
         return true;
+    }
+
+    fn updateDutyMetricsLocked(self: *SyncCommitteeService) void {
+        var duty_count: usize = 0;
+        var epoch_count: usize = 0;
+
+        if (self.duties_period != null) {
+            epoch_count += 1;
+            duty_count += self.duties.items.len;
+        }
+        if (self.next_duties_period != null) {
+            epoch_count += 1;
+            duty_count += self.next_duties.items.len;
+        }
+
+        self.metrics.setSyncCommitteeDutyCache(duty_count, epoch_count);
+    }
+
+    const DutyCacheKind = enum {
+        current,
+        next,
+    };
+
+    fn cachedDutiesChangedLocked(
+        self: *const SyncCommitteeService,
+        period: u64,
+        fresh: []const SyncCommitteeDuty,
+        kind: DutyCacheKind,
+    ) bool {
+        const existing_period, const existing = switch (kind) {
+            .current => .{ self.duties_period, self.duties.items },
+            .next => .{ self.next_duties_period, self.next_duties.items },
+        };
+
+        if (existing_period == null or existing_period.? != period) return false;
+        return dutyListsDiffer(existing, fresh);
+    }
+
+    fn dutyListsDiffer(existing: []const SyncCommitteeDuty, fresh: []const SyncCommitteeDuty) bool {
+        if (existing.len != fresh.len) return true;
+
+        for (existing) |current| {
+            const candidate = findDutyByValidatorIndex(fresh, current.validator_index) orelse return true;
+            if (!std.mem.eql(u8, &current.pubkey, &candidate.pubkey)) return true;
+            if (!std.mem.eql(u64, current.validator_sync_committee_indices, candidate.validator_sync_committee_indices)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    fn findDutyByValidatorIndex(duties: []const SyncCommitteeDuty, validator_index: u64) ?SyncCommitteeDuty {
+        for (duties) |duty| {
+            if (duty.validator_index == validator_index) return duty;
+        }
+        return null;
+    }
+
+    fn isSyncCommitteeAggregator(selection_proof: [96]u8, modulo: u64) bool {
+        const Sha256 = std.crypto.hash.sha2.Sha256;
+        var sel_hash: [32]u8 = undefined;
+        Sha256.hash(&selection_proof, &sel_hash, .{});
+        const hash_val = std.mem.readInt(u64, sel_hash[0..8], .little);
+        return hash_val % modulo == 0;
     }
 
     fn publishSubscriptionsForPeriod(
@@ -827,6 +1005,90 @@ test "syncPeriodForSlot uses slot plus one offset at period boundary" {
     try std.testing.expectEqual(@as(u64, 0), service.syncPeriodForSlot(boundary_slot - 2));
     try std.testing.expectEqual(@as(u64, 1), service.syncPeriodForSlot(boundary_slot - 1));
     try std.testing.expectEqual(@as(u64, 1), service.syncPeriodForSlot(boundary_slot));
+}
+
+test "firstSlotUsingSyncPeriod handles genesis and later periods" {
+    var service = SyncCommitteeService.init(
+        std.testing.io,
+        std.testing.allocator,
+        undefined,
+        undefined,
+        undefined,
+        32,
+        256,
+        512,
+        4,
+        12,
+        0,
+        std.math.maxInt(u64),
+        4_000,
+        3_000,
+        8_000,
+        6_000,
+        undefined,
+    );
+    defer {
+        service.duties.deinit();
+        service.next_duties.deinit();
+    }
+
+    try std.testing.expectEqual(@as(u64, 0), service.firstSlotUsingSyncPeriod(0));
+    try std.testing.expectEqual(@as(u64, 8191), service.firstSlotUsingSyncPeriod(1));
+    try std.testing.expect(service.isFirstSlotUsingSyncPeriod(8191, 1));
+    try std.testing.expect(!service.isFirstSlotUsingSyncPeriod(8192, 1));
+}
+
+test "dutyListsDiffer ignores ordering but detects subnet changes" {
+    const a_indices = try std.testing.allocator.dupe(u64, &.{ 0, 128 });
+    defer std.testing.allocator.free(a_indices);
+    const b_indices = try std.testing.allocator.dupe(u64, &.{ 256 });
+    defer std.testing.allocator.free(b_indices);
+    const fresh_a_indices = try std.testing.allocator.dupe(u64, &.{ 0, 128 });
+    defer std.testing.allocator.free(fresh_a_indices);
+    const fresh_b_indices = try std.testing.allocator.dupe(u64, &.{ 256 });
+    defer std.testing.allocator.free(fresh_b_indices);
+    const changed_b_indices = try std.testing.allocator.dupe(u64, &.{ 384 });
+    defer std.testing.allocator.free(changed_b_indices);
+
+    const existing = [_]SyncCommitteeDuty{
+        .{
+            .pubkey = [_]u8{1} ** 48,
+            .validator_index = 1,
+            .validator_sync_committee_indices = a_indices,
+        },
+        .{
+            .pubkey = [_]u8{2} ** 48,
+            .validator_index = 2,
+            .validator_sync_committee_indices = b_indices,
+        },
+    };
+    const reordered = [_]SyncCommitteeDuty{
+        .{
+            .pubkey = [_]u8{2} ** 48,
+            .validator_index = 2,
+            .validator_sync_committee_indices = fresh_b_indices,
+        },
+        .{
+            .pubkey = [_]u8{1} ** 48,
+            .validator_index = 1,
+            .validator_sync_committee_indices = fresh_a_indices,
+        },
+    };
+    const changed = [_]SyncCommitteeDuty{
+        .{
+            .pubkey = [_]u8{1} ** 48,
+            .validator_index = 1,
+            .validator_sync_committee_indices = fresh_a_indices,
+        },
+        .{
+            .pubkey = [_]u8{2} ** 48,
+            .validator_index = 2,
+            .validator_sync_committee_indices = changed_b_indices,
+        },
+    };
+
+    try std.testing.expect(!SyncCommitteeService.dutyListsDiffer(&existing, &reordered));
+    try std.testing.expect(SyncCommitteeService.dutyListsDiffer(&existing, &changed));
 }
 
 test "shouldPublishSyncSubscriptions only within lookahead window" {

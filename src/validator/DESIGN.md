@@ -99,6 +99,15 @@ Current gaps:
    The remaining gap is narrower: the client still does not run fully parallel
    multi-round fallback races once it has moved past one degraded URL window.
 
+9. Sync committee duty handling is closer to Lodestar TS on the hot path, but
+   it is still narrower on reorg semantics.
+   The validator now re-polls sync duties every epoch, repairs missing duties
+   from the slot path, and refreshes the first slot that uses a new sync
+   period against a fresh beacon-node view. The remaining gap is that the BN
+   sync-duty API still does not expose attester-style `dependent_root`
+   metadata, so sync-duty churn is detected only by observed duty-set changes
+   when a period is refreshed.
+
 Non-gap note:
 
 1. Local keystores are now locked at startup and held for the process lifetime.
