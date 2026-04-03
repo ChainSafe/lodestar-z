@@ -56,9 +56,6 @@ fn rejectUnsupportedOptions(opts: anytype) !void {
     if (opts.importKeystores != null and opts.importKeystoresPassword == null) {
         return unsupportedOption("--importKeystores requires --importKeystoresPassword pointing to the shared keystore password file.");
     }
-    if (opts.distributed) {
-        return unsupportedOption("Distributed validator mode is not implemented yet. Remove --distributed.");
-    }
     const external_signer_urls = opts.@"externalSigner.urls" orelse opts.@"externalSigner.url";
     if (external_signer_urls) |raw| {
         const url_count = countCsvValues(raw);

@@ -45,6 +45,7 @@ pub const ValidatorSlotTicker = struct {
     genesis_time_ns: u64,
     seconds_per_slot: u64,
     slots_per_epoch: u64,
+    skip_slots: bool,
 
     slot_callbacks: [MAX_CALLBACKS]SlotCallback,
     slot_callback_count: usize,
@@ -58,11 +59,13 @@ pub const ValidatorSlotTicker = struct {
         genesis_time_unix_secs: u64,
         seconds_per_slot: u64,
         slots_per_epoch: u64,
+        skip_slots: bool,
     ) ValidatorSlotTicker {
         return .{
             .genesis_time_ns = genesis_time_unix_secs * std.time.ns_per_s,
             .seconds_per_slot = seconds_per_slot,
             .slots_per_epoch = slots_per_epoch,
+            .skip_slots = skip_slots,
             .slot_callbacks = undefined,
             .slot_callback_count = 0,
             .epoch_callbacks = undefined,
@@ -140,13 +143,17 @@ pub const ValidatorSlotTicker = struct {
     /// TS: clock.start(signal) which calls runAtMostEvery in a loop.
     pub fn run(self: *ValidatorSlotTicker, io: Io) !void {
         const start_slot = self.currentSlot(io);
-        var last_slot: u64 = if (start_slot > 0) start_slot - 1 else 0;
+        var last_slot: u64 = if (self.skip_slots and start_slot > 0) start_slot - 1 else start_slot;
         var first_iteration = true;
 
         while (!self.shutdown_requested.load(.seq_cst)) {
-            const slot = self.currentSlot(io);
+            const current_slot = self.currentSlot(io);
+            const slot = if (self.skip_slots or first_iteration)
+                current_slot
+            else
+                @max(last_slot, @min(current_slot, last_slot + 1));
 
-            if (slot > last_slot or first_iteration) {
+            if (slot > last_slot or first_iteration or (!self.skip_slots and slot == last_slot)) {
                 if (!first_iteration or slot > last_slot) {
                     last_slot = slot;
                 }
@@ -170,7 +177,7 @@ pub const ValidatorSlotTicker = struct {
             }
 
             // Sleep until the next slot boundary.
-            const next_slot = last_slot + 1;
+            const next_slot = if (self.skip_slots) last_slot + 1 else last_slot + 1;
             const wait_ns = self.nsUntilSlot(io, next_slot);
             if (wait_ns > 0) {
                 // Use Io.Timeout.sleep — Zig 0.16 evented sleep (io_uring / GCD).
@@ -231,7 +238,7 @@ test "ValidatorSlotTicker.currentSlot before genesis" {
 
     // Genesis in the far future → slot 0.
     const future = time.realSeconds(io) + 9999;
-    const clock = ValidatorSlotTicker.init(future, 12, 32);
+    const clock = ValidatorSlotTicker.init(future, 12, 32, true);
     try testing.expectEqual(@as(u64, 0), clock.currentSlot(io));
 }
 
@@ -243,7 +250,7 @@ test "ValidatorSlotTicker.currentEpoch" {
     // Genesis 100 slots ago at 12 s/slot.
     const now_secs = time.realSeconds(io);
     const genesis = now_secs -| (100 * 12);
-    const clock = ValidatorSlotTicker.init(genesis, 12, 32);
+    const clock = ValidatorSlotTicker.init(genesis, 12, 32, true);
     const slot = clock.currentSlot(io);
     const epoch = clock.currentEpoch(io);
     try testing.expectEqual(slot / 32, epoch);

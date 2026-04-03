@@ -79,6 +79,7 @@ pub const AttestationService = struct {
     attestation_due_ms_gloas: u64,
     aggregate_due_ms: u64,
     aggregate_due_ms_gloas: u64,
+    distributed_aggregation_selection: bool,
 
     /// Protects duty caches and dependent-root invalidation state shared across
     /// the slot clock, epoch clock, and chain-head SSE callback paths.
@@ -133,6 +134,7 @@ pub const AttestationService = struct {
         attestation_due_ms_gloas: u64,
         aggregate_due_ms: u64,
         aggregate_due_ms_gloas: u64,
+        distributed_aggregation_selection: bool,
         metrics: *ValidatorMetrics,
     ) AttestationService {
         return .{
@@ -149,6 +151,7 @@ pub const AttestationService = struct {
             .attestation_due_ms_gloas = attestation_due_ms_gloas,
             .aggregate_due_ms = aggregate_due_ms,
             .aggregate_due_ms_gloas = aggregate_due_ms_gloas,
+            .distributed_aggregation_selection = distributed_aggregation_selection,
             .cache_mutex = .init,
             .duties = std.array_list.Managed(AttesterDutyWithProof).init(allocator),
             .duties_epoch = null,
@@ -352,6 +355,7 @@ pub const AttestationService = struct {
 
         var fresh_duties = try self.buildDutyList(io, fetched.duties);
         errdefer fresh_duties.deinit();
+        try self.resolveDistributedAggregationSelections(io, fresh_duties.items);
 
         const subscriptions = try self.buildBeaconCommitteeSubscriptions(fresh_duties.items);
         errdefer self.allocator.free(subscriptions);
@@ -387,6 +391,10 @@ pub const AttestationService = struct {
             return;
         };
         errdefer fresh_duties.deinit();
+        self.resolveDistributedAggregationSelections(io, fresh_duties.items) catch |err| {
+            log.warn("prefetch distributed aggregation selection epoch={d} error={s}", .{ next_epoch, @errorName(err) });
+            return;
+        };
 
         const subscriptions = self.buildBeaconCommitteeSubscriptions(fresh_duties.items) catch |err| {
             log.warn("prefetch subscription build epoch={d} error={s}", .{ next_epoch, @errorName(err) });
@@ -538,6 +546,15 @@ pub const AttestationService = struct {
             };
             if (self.validator_store.signSelectionProof(io, duty.pubkey, sel_root, .AGGREGATION_SLOT)) |sig| {
                 const proof = sig.compress();
+                if (self.distributed_aggregation_selection) {
+                    try duties.append(.{
+                        .duty = duty,
+                        .selection_proof = null,
+                        .partial_selection_proof = proof,
+                    });
+                    continue;
+                }
+
                 if (isAttestationAggregator(proof, duty.committee_length)) {
                     sel_proof = proof;
                 }
@@ -546,10 +563,50 @@ pub const AttestationService = struct {
             try duties.append(.{
                 .duty = duty,
                 .selection_proof = sel_proof,
+                .partial_selection_proof = null,
             });
         }
 
         return duties;
+    }
+
+    fn resolveDistributedAggregationSelections(
+        self: *AttestationService,
+        io: Io,
+        duties: []AttesterDutyWithProof,
+    ) !void {
+        if (!self.distributed_aggregation_selection or duties.len == 0) return;
+
+        var selections = std.array_list.Managed(api_client.BeaconCommitteeSelection).init(self.allocator);
+        defer selections.deinit();
+
+        for (duties) |duty| {
+            const partial = duty.partial_selection_proof orelse continue;
+            try selections.append(.{
+                .validator_index = duty.duty.validator_index,
+                .slot = duty.duty.slot,
+                .selection_proof = partial,
+            });
+        }
+
+        if (selections.items.len == 0) return;
+
+        const combined = try self.api.submitBeaconCommitteeSelections(io, selections.items);
+        defer self.allocator.free(combined);
+
+        for (duties) |*duty| {
+            duty.selection_proof = null;
+            if (duty.partial_selection_proof == null) continue;
+
+            for (combined) |selection| {
+                if (selection.validator_index != duty.duty.validator_index) continue;
+                if (selection.slot != duty.duty.slot) continue;
+                if (isAttestationAggregator(selection.selection_proof, duty.duty.committee_length)) {
+                    duty.selection_proof = selection.selection_proof;
+                }
+                break;
+            }
+        }
     }
 
     fn buildBeaconCommitteeSubscriptions(
@@ -1307,6 +1364,7 @@ fn testAttestationService() AttestationService {
         3_000,
         8_000,
         6_000,
+        false,
         testMetrics(),
     );
 }

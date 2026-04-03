@@ -46,6 +46,10 @@ pub const AttesterDutyWithProof = struct {
     /// BLS signature over the slot for validators that are actually selected as
     /// aggregators for this committee and slot. Null for non-aggregators.
     selection_proof: ?[96]u8,
+    /// Partial selection proof produced by the local signer when the validator
+    /// runs in distributed mode. This is exchanged for a combined proof through
+    /// the validator middleware before aggregator eligibility is decided.
+    partial_selection_proof: ?[96]u8 = null,
 };
 
 /// Sync committee duty for a single validator in a sync period.
@@ -274,6 +278,11 @@ pub const ValidatorConfig = struct {
     blinded_local: bool = false,
     /// Validation policy requested when publishing signed blocks back to the BN.
     broadcast_validation: BroadcastValidation = .gossip,
+    /// Enable Lodestar-style distributed-validator aggregation selection flows.
+    distributed: bool = false,
+    /// Whether the validator clock may skip slow slot tasks instead of
+    /// processing every slot sequentially when the runtime falls behind.
+    clock_skip_slots: bool = true,
 };
 
 pub const PersistencePaths = struct {

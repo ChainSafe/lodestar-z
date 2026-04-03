@@ -222,6 +222,7 @@ pub const ValidatorClient = struct {
             config.genesis_time,
             config.seconds_per_slot,
             config.slots_per_epoch,
+            config.clock_skip_slots,
         );
         self.io = io;
         self.signing_context = signing_ctx;
@@ -288,6 +289,7 @@ pub const ValidatorClient = struct {
             config.attestation_due_ms_gloas,
             config.aggregate_due_ms,
             config.aggregate_due_ms_gloas,
+            config.distributed,
             self.metrics,
         );
         errdefer self.attestation_service.deinit();
@@ -308,6 +310,7 @@ pub const ValidatorClient = struct {
             config.sync_message_due_ms_gloas,
             config.sync_contribution_due_ms,
             config.sync_contribution_due_ms_gloas,
+            config.distributed,
             self.metrics,
         );
         errdefer self.sync_committee_service.deinit();

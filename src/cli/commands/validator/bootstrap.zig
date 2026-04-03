@@ -104,6 +104,9 @@ pub const PreparedRuntime = struct {
         std.log.info("  slashing-db:  {s}", .{self.paths.slashing_protection_db});
         std.log.info("  builder selection: {s}", .{@tagName(self.validator_config.builder_selection)});
         std.log.info("  block publish validation: {s}", .{@tagName(self.validator_config.broadcast_validation)});
+        if (self.validator_config.distributed) {
+            std.log.info("  distributed validator mode: enabled", .{});
+        }
         std.log.info("  validators:   {d} total ({d} local, {d} remote)", .{
             counts.total,
             counts.local,
@@ -404,6 +407,8 @@ pub fn prepareRuntime(io: Io, allocator: Allocator, opts: anytype) !PreparedRunt
             .strict_fee_recipient_check = default_proposer_config.strict_fee_recipient_check,
             .blinded_local = opts.blindedLocal,
             .broadcast_validation = opts.broadcastValidation orelse .gossip,
+            .distributed = opts.distributed,
+            .clock_skip_slots = opts.@"clock.skipSlots" orelse !opts.distributed,
         },
     };
 }

@@ -82,10 +82,23 @@ pub const BeaconCommitteeSubscription = struct {
     is_aggregator: bool,
 };
 
+pub const BeaconCommitteeSelection = struct {
+    validator_index: u64,
+    slot: u64,
+    selection_proof: [96]u8,
+};
+
 pub const SyncCommitteeSubscription = struct {
     validator_index: u64,
     sync_committee_indices: []const u64,
     until_epoch: u64,
+};
+
+pub const SyncCommitteeSelection = struct {
+    validator_index: u64,
+    slot: u64,
+    subcommittee_index: u64,
+    selection_proof: [96]u8,
 };
 
 pub const ProduceBlockOpts = struct {
@@ -136,6 +149,8 @@ const route_ids = struct {
     const validator_produce_sync_committee_contribution = "validator.produceSyncCommitteeContribution";
     const validator_prepare_beacon_committee_subscriptions = "validator.prepareBeaconCommitteeSubscriptions";
     const validator_prepare_sync_committee_subscriptions = "validator.prepareSyncCommitteeSubscriptions";
+    const validator_submit_beacon_committee_selections = "validator.submitBeaconCommitteeSelections";
+    const validator_submit_sync_committee_selections = "validator.submitSyncCommitteeSelections";
     const validator_prepare_beacon_proposer = "validator.prepareBeaconProposer";
     const validator_register_validator = "validator.registerValidator";
     const beacon_publish_blinded_block_v2 = "beacon.publishBlindedBlockV2";
@@ -1204,7 +1219,18 @@ pub const BeaconApiClient = struct {
     ///
     /// Pass an empty body (`""`) for POST endpoints that don't require a body.
     fn post(self: *BeaconApiClient, io: Io, route_id: []const u8, path: []const u8, body: []const u8) ![]const u8 {
-        const result = try self.executeRequestWithFallbacks(io, self.request_timeout_ms, .{
+        return self.postWithTimeout(io, route_id, path, body, self.request_timeout_ms);
+    }
+
+    fn postWithTimeout(
+        self: *BeaconApiClient,
+        io: Io,
+        route_id: []const u8,
+        path: []const u8,
+        body: []const u8,
+        timeout_ms: u64,
+    ) ![]const u8 {
+        const result = try self.executeRequestWithFallbacks(io, timeout_ms, .{
             .post = .{ .route_id = route_id, .path = path, .body = body },
         });
         return switch (result) {
@@ -2134,6 +2160,118 @@ pub const BeaconApiClient = struct {
         try body.writer.writeByte(']');
 
         try self.postNoResponse(io, route_ids.validator_prepare_sync_committee_subscriptions, "/eth/v1/validator/sync_committee_subscriptions", body.written());
+    }
+
+    /// POST /eth/v1/validator/beacon_committee_selections
+    pub fn submitBeaconCommitteeSelections(
+        self: *BeaconApiClient,
+        io: Io,
+        selections: []const BeaconCommitteeSelection,
+    ) ![]BeaconCommitteeSelection {
+        if (selections.len == 0) return try self.allocator.alloc(BeaconCommitteeSelection, 0);
+
+        var body: std.Io.Writer.Allocating = .init(self.allocator);
+        defer body.deinit();
+        try body.writer.writeByte('[');
+        for (selections, 0..) |selection, i| {
+            if (i > 0) try body.writer.writeByte(',');
+            const proof_hex = std.fmt.bytesToHex(&selection.selection_proof, .lower);
+            try body.writer.print(
+                "{{\"validator_index\":\"{d}\",\"slot\":\"{d}\",\"selection_proof\":\"0x{s}\"}}",
+                .{ selection.validator_index, selection.slot, proof_hex },
+            );
+        }
+        try body.writer.writeByte(']');
+
+        const resp = try self.post(
+            io,
+            route_ids.validator_submit_beacon_committee_selections,
+            "/eth/v1/validator/beacon_committee_selections",
+            body.written(),
+        );
+        defer self.allocator.free(resp);
+
+        const SelectionJson = struct {
+            validator_index: []const u8,
+            slot: []const u8,
+            selection_proof: []const u8,
+        };
+        const Parsed = struct {
+            data: []const SelectionJson,
+        };
+
+        var parsed = try std.json.parseFromSlice(Parsed, self.allocator, resp, .{ .ignore_unknown_fields = true });
+        defer parsed.deinit();
+
+        const result = try self.allocator.alloc(BeaconCommitteeSelection, parsed.value.data.len);
+        errdefer self.allocator.free(result);
+
+        for (parsed.value.data, result) |src, *dst| {
+            dst.validator_index = try std.fmt.parseInt(u64, src.validator_index, 10);
+            dst.slot = try std.fmt.parseInt(u64, src.slot, 10);
+            const proof_hex = if (std.mem.startsWith(u8, src.selection_proof, "0x")) src.selection_proof[2..] else src.selection_proof;
+            _ = std.fmt.hexToBytes(&dst.selection_proof, proof_hex) catch return error.InvalidResponse;
+        }
+
+        return result;
+    }
+
+    /// POST /eth/v1/validator/sync_committee_selections
+    pub fn submitSyncCommitteeSelectionsWithTimeout(
+        self: *BeaconApiClient,
+        io: Io,
+        selections: []const SyncCommitteeSelection,
+        timeout_ms: u64,
+    ) ![]SyncCommitteeSelection {
+        if (selections.len == 0) return try self.allocator.alloc(SyncCommitteeSelection, 0);
+
+        var body: std.Io.Writer.Allocating = .init(self.allocator);
+        defer body.deinit();
+        try body.writer.writeByte('[');
+        for (selections, 0..) |selection, i| {
+            if (i > 0) try body.writer.writeByte(',');
+            const proof_hex = std.fmt.bytesToHex(&selection.selection_proof, .lower);
+            try body.writer.print(
+                "{{\"validator_index\":\"{d}\",\"slot\":\"{d}\",\"subcommittee_index\":\"{d}\",\"selection_proof\":\"0x{s}\"}}",
+                .{ selection.validator_index, selection.slot, selection.subcommittee_index, proof_hex },
+            );
+        }
+        try body.writer.writeByte(']');
+
+        const resp = try self.postWithTimeout(
+            io,
+            route_ids.validator_submit_sync_committee_selections,
+            "/eth/v1/validator/sync_committee_selections",
+            body.written(),
+            timeout_ms,
+        );
+        defer self.allocator.free(resp);
+
+        const SelectionJson = struct {
+            validator_index: []const u8,
+            slot: []const u8,
+            subcommittee_index: []const u8,
+            selection_proof: []const u8,
+        };
+        const Parsed = struct {
+            data: []const SelectionJson,
+        };
+
+        var parsed = try std.json.parseFromSlice(Parsed, self.allocator, resp, .{ .ignore_unknown_fields = true });
+        defer parsed.deinit();
+
+        const result = try self.allocator.alloc(SyncCommitteeSelection, parsed.value.data.len);
+        errdefer self.allocator.free(result);
+
+        for (parsed.value.data, result) |src, *dst| {
+            dst.validator_index = try std.fmt.parseInt(u64, src.validator_index, 10);
+            dst.slot = try std.fmt.parseInt(u64, src.slot, 10);
+            dst.subcommittee_index = try std.fmt.parseInt(u64, src.subcommittee_index, 10);
+            const proof_hex = if (std.mem.startsWith(u8, src.selection_proof, "0x")) src.selection_proof[2..] else src.selection_proof;
+            _ = std.fmt.hexToBytes(&dst.selection_proof, proof_hex) catch return error.InvalidResponse;
+        }
+
+        return result;
     }
 
     /// POST /eth/v1/validator/prepare_beacon_proposer

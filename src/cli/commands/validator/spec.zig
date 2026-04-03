@@ -97,8 +97,12 @@ pub const spec = cli.command(.{
         }),
         .distributed = cli.flag(.{
             .long = "distributed",
-            .description = "Compatibility flag only. Distributed validator mode is not implemented yet",
+            .description = "Enable Lodestar-style distributed validator aggregation-selection flows",
         }),
+        .@"clock.skipSlots" = cli.option(?bool, .{
+            .long = "clock.skipSlots",
+            .description = "Allow the validator clock to skip slow slot tasks instead of processing every slot sequentially",
+        }, null),
         .keymanager = cli.flag(.{
             .long = "keymanager",
             .description = "Enable the validator keymanager API server",

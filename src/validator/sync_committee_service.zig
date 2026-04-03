@@ -53,6 +53,13 @@ const SyncAggregatorCandidate = struct {
     selection_proof: [96]u8,
 };
 
+const DistributedSyncSelectionCandidate = struct {
+    pubkey: [48]u8,
+    validator_index: u64,
+    subcommittee_index: u64,
+    partial_selection_proof: [96]u8,
+};
+
 fn shouldPublishSyncSubscriptions(
     current_epoch: u64,
     period: u64,
@@ -102,6 +109,7 @@ pub const SyncCommitteeService = struct {
     sync_message_due_ms_gloas: u64,
     sync_contribution_due_ms: u64,
     sync_contribution_due_ms_gloas: u64,
+    distributed_aggregation_selection: bool,
 
     /// Protects sync-duty caches from concurrent runtime key changes and
     /// period refresh/prefetch swaps.
@@ -138,6 +146,7 @@ pub const SyncCommitteeService = struct {
         sync_message_due_ms_gloas: u64,
         sync_contribution_due_ms: u64,
         sync_contribution_due_ms_gloas: u64,
+        distributed_aggregation_selection: bool,
         metrics: *ValidatorMetrics,
     ) SyncCommitteeService {
         return .{
@@ -158,6 +167,7 @@ pub const SyncCommitteeService = struct {
             .sync_message_due_ms_gloas = sync_message_due_ms_gloas,
             .sync_contribution_due_ms = sync_contribution_due_ms,
             .sync_contribution_due_ms_gloas = sync_contribution_due_ms_gloas,
+            .distributed_aggregation_selection = distributed_aggregation_selection,
             .cache_mutex = .init,
             .duties = std.array_list.Managed(SyncCommitteeDuty).init(allocator),
             .duties_period = null,
@@ -490,11 +500,27 @@ pub const SyncCommitteeService = struct {
 
         // Step 2: produce contributions at the configured contribution due time.
         const contribution_due_ns = slot_start_ns + self.syncContributionDueMs(slot) * std.time.ns_per_ms;
+        var distributed_groups: ?[]std.ArrayListUnmanaged(SyncAggregatorCandidate) = null;
+        if (self.distributed_aggregation_selection) {
+            distributed_groups = try self.buildDistributedAggregatorGroups(
+                io,
+                slot,
+                duties,
+                contribution_due_ns,
+                slot_start_ns,
+                slot_duration_ns,
+            );
+        }
+        defer if (distributed_groups) |groups| {
+            for (groups) |*group| group.deinit(self.allocator);
+            self.allocator.free(groups);
+        };
+
         const contribution_now_ns = time.realNanoseconds(io);
         if (contribution_now_ns < contribution_due_ns) {
             try io.sleep(.{ .nanoseconds = @intCast(contribution_due_ns - contribution_now_ns) }, .real);
         }
-        try self.produceAndPublishContributions(io, slot, duties, &beacon_block_root);
+        try self.produceAndPublishContributions(io, slot, duties, &beacon_block_root, distributed_groups);
     }
 
     fn syncPeriodForSlot(self: *const SyncCommitteeService, slot: u64) u64 {
@@ -657,6 +683,7 @@ pub const SyncCommitteeService = struct {
         slot: u64,
         duties: []const SyncCommitteeDuty,
         beacon_block_root: *const [32]u8,
+        distributed_groups: ?[]std.ArrayListUnmanaged(SyncAggregatorCandidate),
     ) !void {
         const slot_duration_ns = self.seconds_per_slot * std.time.ns_per_s;
         const genesis_time_ns = self.genesis_time_unix_secs * std.time.ns_per_s;
@@ -665,46 +692,54 @@ pub const SyncCommitteeService = struct {
         const modulo = @max(1, subcommittee_size / TARGET_AGGREGATORS_PER_SYNC_SUBCOMMITTEE);
         const subcommittee_count: usize = @intCast(self.sync_committee_subnet_count);
 
-        const groups = try self.allocator.alloc(std.ArrayListUnmanaged(SyncAggregatorCandidate), subcommittee_count);
-        defer {
+        const owned_groups: ?[]std.ArrayListUnmanaged(SyncAggregatorCandidate) = if (distributed_groups == null) blk: {
+            const groups = try self.allocator.alloc(std.ArrayListUnmanaged(SyncAggregatorCandidate), subcommittee_count);
+            errdefer self.allocator.free(groups);
+            for (groups) |*group| group.* = .empty;
+            errdefer {
+                for (groups) |*group| group.deinit(self.allocator);
+            }
+
+            for (duties) |dp| {
+                if (!self.isSafeToSign(dp.pubkey)) {
+                    log.warn("skipping contribution slot={d} validator_index={d}: signing not safe", .{ slot, dp.validator_index });
+                    continue;
+                }
+
+                for (dp.validator_sync_committee_indices) |sc_idx| {
+                    const subcommittee_index = sc_idx / subcommittee_size;
+
+                    var sel_root: [32]u8 = undefined;
+                    signing_mod.syncCommitteeSelectionProofSigningRoot(
+                        self.signing_ctx,
+                        slot,
+                        subcommittee_index,
+                        &sel_root,
+                    ) catch |err| {
+                        log.warn("sync selection proof signing root error slot={d}: {s}", .{ slot, @errorName(err) });
+                        continue;
+                    };
+                    const sel_proof = if (self.validator_store.signSelectionProof(io, dp.pubkey, sel_root, .SYNC_COMMITTEE_SELECTION_PROOF)) |sig|
+                        sig.compress()
+                    else |_|
+                        continue;
+
+                    if (!isSyncCommitteeAggregator(sel_proof, modulo)) continue;
+
+                    try groups[@intCast(subcommittee_index)].append(self.allocator, .{
+                        .pubkey = dp.pubkey,
+                        .validator_index = dp.validator_index,
+                        .selection_proof = sel_proof,
+                    });
+                }
+            }
+            break :blk groups;
+        } else null;
+        defer if (owned_groups) |groups| {
             for (groups) |*group| group.deinit(self.allocator);
             self.allocator.free(groups);
-        }
-        for (groups) |*group| group.* = .empty;
-
-        for (duties) |dp| {
-            if (!self.isSafeToSign(dp.pubkey)) {
-                log.warn("skipping contribution slot={d} validator_index={d}: signing not safe", .{ slot, dp.validator_index });
-                continue;
-            }
-
-            for (dp.validator_sync_committee_indices) |sc_idx| {
-                const subcommittee_index = sc_idx / subcommittee_size;
-
-                var sel_root: [32]u8 = undefined;
-                signing_mod.syncCommitteeSelectionProofSigningRoot(
-                    self.signing_ctx,
-                    slot,
-                    subcommittee_index,
-                    &sel_root,
-                ) catch |err| {
-                    log.warn("sync selection proof signing root error slot={d}: {s}", .{ slot, @errorName(err) });
-                    continue;
-                };
-                const sel_proof = if (self.validator_store.signSelectionProof(io, dp.pubkey, sel_root, .SYNC_COMMITTEE_SELECTION_PROOF)) |sig|
-                    sig.compress()
-                else |_|
-                    continue;
-
-                if (!isSyncCommitteeAggregator(sel_proof, modulo)) continue;
-
-                try groups[@intCast(subcommittee_index)].append(self.allocator, .{
-                    .pubkey = dp.pubkey,
-                    .validator_index = dp.validator_index,
-                    .selection_proof = sel_proof,
-                });
-            }
-        }
+        };
+        const groups = distributed_groups orelse owned_groups.?;
 
         for (groups, 0..) |*group, subcommittee_index_usize| {
             if (group.items.len == 0) continue;
@@ -767,6 +802,107 @@ pub const SyncCommitteeService = struct {
             };
             self.metrics.sync_committee_contribution_total.incrBy(published_count);
         }
+    }
+
+    fn buildDistributedAggregatorGroups(
+        self: *SyncCommitteeService,
+        io: Io,
+        slot: u64,
+        duties: []const SyncCommitteeDuty,
+        contribution_due_ns: u64,
+        slot_start_ns: u64,
+        slot_duration_ns: u64,
+    ) ![]std.ArrayListUnmanaged(SyncAggregatorCandidate) {
+        _ = slot_start_ns;
+        _ = slot_duration_ns;
+        const subcommittee_count: usize = @intCast(self.sync_committee_subnet_count);
+        const subcommittee_size = self.sync_committee_size / self.sync_committee_subnet_count;
+        const modulo = @max(1, subcommittee_size / TARGET_AGGREGATORS_PER_SYNC_SUBCOMMITTEE);
+
+        const groups = try self.allocator.alloc(std.ArrayListUnmanaged(SyncAggregatorCandidate), subcommittee_count);
+        errdefer self.allocator.free(groups);
+        for (groups) |*group| group.* = .empty;
+        errdefer {
+            for (groups) |*group| group.deinit(self.allocator);
+        }
+
+        var partials = std.array_list.Managed(api_client.SyncCommitteeSelection).init(self.allocator);
+        defer partials.deinit();
+        var candidates = std.array_list.Managed(DistributedSyncSelectionCandidate).init(self.allocator);
+        defer candidates.deinit();
+
+        for (duties) |duty| {
+            if (!self.isSafeToSign(duty.pubkey)) {
+                log.warn("skipping distributed sync selection slot={d} validator_index={d}: signing not safe", .{
+                    slot,
+                    duty.validator_index,
+                });
+                continue;
+            }
+
+            for (duty.validator_sync_committee_indices) |sc_idx| {
+                const subcommittee_index = sc_idx / subcommittee_size;
+
+                var sel_root: [32]u8 = undefined;
+                signing_mod.syncCommitteeSelectionProofSigningRoot(
+                    self.signing_ctx,
+                    slot,
+                    subcommittee_index,
+                    &sel_root,
+                ) catch |err| {
+                    log.warn("distributed sync selection signing root error slot={d}: {s}", .{ slot, @errorName(err) });
+                    continue;
+                };
+
+                const partial = if (self.validator_store.signSelectionProof(io, duty.pubkey, sel_root, .SYNC_COMMITTEE_SELECTION_PROOF)) |sig|
+                    sig.compress()
+                else |_|
+                    continue;
+
+                try partials.append(.{
+                    .validator_index = duty.validator_index,
+                    .slot = slot,
+                    .subcommittee_index = subcommittee_index,
+                    .selection_proof = partial,
+                });
+                try candidates.append(.{
+                    .pubkey = duty.pubkey,
+                    .validator_index = duty.validator_index,
+                    .subcommittee_index = subcommittee_index,
+                    .partial_selection_proof = partial,
+                });
+            }
+        }
+
+        if (partials.items.len == 0) return groups;
+
+        const now_ns = time.realNanoseconds(io);
+        if (now_ns >= contribution_due_ns) return groups;
+        const timeout_ms = @max(@as(u64, 1), @as(u64, @intCast((contribution_due_ns - now_ns + std.time.ns_per_ms - 1) / std.time.ns_per_ms)));
+
+        const combined = self.api.submitSyncCommitteeSelectionsWithTimeout(io, partials.items, timeout_ms) catch |err| {
+            log.warn("submitSyncCommitteeSelections slot={d} error={s}", .{ slot, @errorName(err) });
+            return groups;
+        };
+        defer self.allocator.free(combined);
+
+        for (candidates.items) |candidate| {
+            for (combined) |selection| {
+                if (selection.validator_index != candidate.validator_index) continue;
+                if (selection.slot != slot) continue;
+                if (selection.subcommittee_index != candidate.subcommittee_index) continue;
+                if (!isSyncCommitteeAggregator(selection.selection_proof, modulo)) break;
+
+                try groups[@intCast(candidate.subcommittee_index)].append(self.allocator, .{
+                    .pubkey = candidate.pubkey,
+                    .validator_index = candidate.validator_index,
+                    .selection_proof = selection.selection_proof,
+                });
+                break;
+            }
+        }
+
+        return groups;
     }
 
     fn appendSignedContributionAndProofJson(
@@ -994,6 +1130,7 @@ test "syncPeriodForSlot uses slot plus one offset at period boundary" {
         3_000,
         8_000,
         6_000,
+        false,
         undefined,
     );
     defer {
@@ -1025,6 +1162,7 @@ test "firstSlotUsingSyncPeriod handles genesis and later periods" {
         3_000,
         8_000,
         6_000,
+        false,
         undefined,
     );
     defer {
@@ -1041,13 +1179,13 @@ test "firstSlotUsingSyncPeriod handles genesis and later periods" {
 test "dutyListsDiffer ignores ordering but detects subnet changes" {
     const a_indices = try std.testing.allocator.dupe(u64, &.{ 0, 128 });
     defer std.testing.allocator.free(a_indices);
-    const b_indices = try std.testing.allocator.dupe(u64, &.{ 256 });
+    const b_indices = try std.testing.allocator.dupe(u64, &.{256});
     defer std.testing.allocator.free(b_indices);
     const fresh_a_indices = try std.testing.allocator.dupe(u64, &.{ 0, 128 });
     defer std.testing.allocator.free(fresh_a_indices);
-    const fresh_b_indices = try std.testing.allocator.dupe(u64, &.{ 256 });
+    const fresh_b_indices = try std.testing.allocator.dupe(u64, &.{256});
     defer std.testing.allocator.free(fresh_b_indices);
-    const changed_b_indices = try std.testing.allocator.dupe(u64, &.{ 384 });
+    const changed_b_indices = try std.testing.allocator.dupe(u64, &.{384});
     defer std.testing.allocator.free(changed_b_indices);
 
     const existing = [_]SyncCommitteeDuty{
@@ -1115,6 +1253,7 @@ test "cacheDutyList deduplicates multiple committee positions in the same subnet
         3_000,
         8_000,
         6_000,
+        false,
         undefined,
     );
     defer {

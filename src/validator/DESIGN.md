@@ -45,8 +45,7 @@ Current gaps:
    keymanager gap is narrower: there is still no separate remote monitoring
    pipeline for the keymanager surface beyond the local Prometheus metrics.
 
-5. Distributed-validator flags and mnemonic / interop signer sources are still
-   not implemented.
+5. Mnemonic / interop signer sources are still not implemented.
    The validator launcher now supports Lodestar-style proposer settings files,
    enforces strict fee-recipient checks before signing/publishing produced
    blocks, resolves Lodestar-style `cache/`, `remoteKeys/`, and
@@ -72,6 +71,11 @@ Current gaps:
    also now enforces a process-local equivocation guard on
    `broadcastValidation=consensus_and_equivocation`, though the validator's
    persistent slashing-protection DB remains the primary defense across restarts.
+   The validator launcher now also supports Lodestar-style `--distributed`
+   aggregation-selection behavior: attestation and sync-committee aggregator
+   selection proofs are exchanged through the validator API middleware
+   endpoints, and the validator clock defaults to not skipping slow slot work
+   in distributed mode unless `--clock.skipSlots` overrides that policy.
 
 6. Beacon-node config verification now checks a much wider consensus-critical
    subset of `/eth/v1/config/spec`, including genesis, fork versions/epochs,
