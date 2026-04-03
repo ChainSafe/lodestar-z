@@ -23,8 +23,11 @@ Current gaps:
    `--importKeystores` now recursively imports external EIP-2335 keystore files
    into the managed `keystores/` + `secrets/` layout before normal startup, but
    it currently assumes a single shared password file via
-   `--importKeystoresPassword` and does not implement Lodestar's prompt /
-   threaded-decrypt UX.
+   `--importKeystoresPassword` and does not implement Lodestar's prompt-based
+   password UX. Local managed keystore startup now uses an encrypted aggregate
+   cache under `cache/local_keystores.cache` plus bounded concurrent decrypt
+   workers, with `--disableKeystoresThreadPool` available as the same operator
+   escape hatch Lodestar exposes.
 
 3. External signer support is still narrower than Lodestar TS, but no longer
    in the basic startup path.

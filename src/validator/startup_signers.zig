@@ -2,9 +2,11 @@ const std = @import("std");
 
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
+const bls = @import("bls");
 
 const fs = @import("fs.zig");
 const key_discovery_mod = @import("key_discovery.zig");
+const keystore_cache = @import("keystore_cache.zig");
 const KeystoreLock = @import("keystore_lock.zig").KeystoreLock;
 const keystore_mod = @import("keystore.zig");
 const persisted_keys = @import("persisted_keys.zig");
@@ -75,6 +77,8 @@ pub const StartupSigners = struct {
 
 pub const LoadLocalOptions = struct {
     force: bool = false,
+    cache_dir: ?[]const u8 = null,
+    disable_thread_pool: bool = false,
 };
 
 pub const ImportExternalKeystoresResult = struct {
@@ -94,6 +98,7 @@ pub fn loadLocalSigners(
         for (discovered) |key| key.deinit(allocator);
         allocator.free(discovered);
     }
+    sortDiscoveredKeys(discovered);
 
     var loaded: std.ArrayListUnmanaged(LoadedKey) = .empty;
     errdefer {
@@ -105,6 +110,12 @@ pub fn loadLocalSigners(
     errdefer {
         for (locks.items) |*lock| lock.deinit(io);
         locks.deinit(allocator);
+    }
+
+    var passwords: std.ArrayListUnmanaged([]const u8) = .empty;
+    errdefer {
+        for (passwords.items) |password| allocator.free(password);
+        passwords.deinit(allocator);
     }
 
     for (discovered) |key| {
@@ -122,24 +133,53 @@ pub fn loadLocalSigners(
             log.err("failed to load password for {s}: {s}", .{ key.pubkey_hex, @errorName(err) });
             return err;
         };
-        defer allocator.free(password);
+        try passwords.append(allocator, password);
+    }
 
-        const json_bytes = fs.readFileAlloc(io, allocator, key.keystore_path, 1024 * 1024) catch |err| {
-            log.err("failed to read keystore {s}: {s}", .{ key.keystore_path, @errorName(err) });
-            return err;
+    if (options.cache_dir) |cache_dir| {
+        const cached_keys = keystore_cache.loadLocalCache(io, allocator, cache_dir, discovered, passwords.items) catch |err| blk: {
+            if (err != error.FileNotFound) {
+                log.warn("ignoring local keystore startup cache under {s}: {s}", .{
+                    cache_dir,
+                    @errorName(err),
+                });
+                keystore_cache.invalidateLocalCache(io, allocator, cache_dir);
+            }
+            break :blk null;
         };
-        defer allocator.free(json_bytes);
 
-        const secret_key = keystore_mod.loadKeystore(allocator, json_bytes, password) catch |err| {
-            log.err("failed to decrypt keystore {s}: {s}", .{ key.keystore_path, @errorName(err) });
-            return err;
+        if (cached_keys) |secret_keys| {
+            defer allocator.free(secret_keys);
+            for (discovered, secret_keys) |key, secret_key| {
+                try loaded.append(allocator, .{
+                    .pubkey = key.pubkey,
+                    .secret_key = secret_key,
+                    .keystore_path = try allocator.dupe(u8, key.keystore_path),
+                });
+            }
+
+            log.info("loaded {d} local validator keystore(s) via encrypted startup cache", .{loaded.items.len});
+            return .{
+                .allocator = allocator,
+                .local_keys = try loaded.toOwnedSlice(allocator),
+                .local_keystore_locks = try locks.toOwnedSlice(allocator),
+            };
+        }
+    }
+
+    if (options.disable_thread_pool or discovered.len <= 1) {
+        try decryptLocalKeystoresSerial(io, allocator, discovered, passwords.items, &loaded);
+    } else {
+        try decryptLocalKeystoresConcurrent(io, allocator, discovered, passwords.items, &loaded);
+    }
+
+    if (options.cache_dir) |cache_dir| {
+        keystore_cache.writeLocalCache(io, allocator, cache_dir, loaded.items, passwords.items) catch |err| {
+            log.warn("failed to write local keystore startup cache under {s}: {s}", .{
+                cache_dir,
+                @errorName(err),
+            });
         };
-
-        try loaded.append(allocator, .{
-            .pubkey = key.pubkey,
-            .secret_key = secret_key,
-            .keystore_path = try allocator.dupe(u8, key.keystore_path),
-        });
     }
 
     log.info("loaded {d} local validator keystore(s)", .{loaded.items.len});
@@ -149,6 +189,197 @@ pub fn loadLocalSigners(
         .local_keys = try loaded.toOwnedSlice(allocator),
         .local_keystore_locks = try locks.toOwnedSlice(allocator),
     };
+}
+
+const DecryptWorkerQueue = std.Io.Queue(usize);
+const DecryptWorkerFuture = std.Io.Future(anyerror!void);
+
+const DecryptWorkerState = struct {
+    io: Io,
+    allocator: Allocator,
+    discovered: []const key_discovery_mod.DiscoveredKey,
+    passwords: []const []const u8,
+    loaded: []LoadedKey,
+    initialized: []bool,
+    queue: *DecryptWorkerQueue,
+    first_error: ?anyerror = null,
+    error_mutex: std.Io.Mutex = .init,
+    failed: std.atomic.Value(bool) = .init(false),
+    completed: std.atomic.Value(usize) = .init(0),
+    next_progress: std.atomic.Value(usize),
+    progress_step: usize,
+};
+
+fn decryptLocalKeystoresSerial(
+    io: Io,
+    allocator: Allocator,
+    discovered: []const key_discovery_mod.DiscoveredKey,
+    passwords: []const []const u8,
+    loaded: *std.ArrayListUnmanaged(LoadedKey),
+) !void {
+    for (discovered, passwords) |key, password| {
+        const secret_key = try decryptLocalKeystore(io, allocator, key, password);
+        try loaded.append(allocator, .{
+            .pubkey = key.pubkey,
+            .secret_key = secret_key,
+            .keystore_path = try allocator.dupe(u8, key.keystore_path),
+        });
+    }
+}
+
+fn decryptLocalKeystoresConcurrent(
+    io: Io,
+    allocator: Allocator,
+    discovered: []const key_discovery_mod.DiscoveredKey,
+    passwords: []const []const u8,
+    loaded: *std.ArrayListUnmanaged(LoadedKey),
+) !void {
+    const worker_count = computeDecryptWorkerCount(discovered.len);
+    if (worker_count <= 1) return decryptLocalKeystoresSerial(io, allocator, discovered, passwords, loaded);
+
+    const loaded_buffer = try allocator.alloc(LoadedKey, discovered.len);
+    defer allocator.free(loaded_buffer);
+    const initialized = try allocator.alloc(bool, discovered.len);
+    defer allocator.free(initialized);
+    @memset(initialized, false);
+
+    const queue_storage = try allocator.alloc(usize, discovered.len);
+    defer allocator.free(queue_storage);
+    var queue = DecryptWorkerQueue.init(queue_storage);
+
+    var futures = try allocator.alloc(DecryptWorkerFuture, worker_count);
+    defer allocator.free(futures);
+
+    const progress_step = computeProgressStep(discovered.len);
+    var state = DecryptWorkerState{
+        .io = io,
+        .allocator = allocator,
+        .discovered = discovered,
+        .passwords = passwords,
+        .loaded = loaded_buffer,
+        .initialized = initialized,
+        .queue = &queue,
+        .next_progress = .init(progress_step),
+        .progress_step = progress_step,
+    };
+
+    var started_workers: usize = 0;
+    errdefer {
+        queue.close(io);
+        for (futures[0..started_workers]) |*future| {
+            _ = future.cancel(io) catch {};
+        }
+        for (loaded_buffer, initialized) |*item, was_initialized| {
+            if (was_initialized) item.deinit(allocator);
+        }
+    }
+
+    for (0..worker_count) |_| {
+        futures[started_workers] = try io.concurrent(runDecryptWorker, .{&state});
+        started_workers += 1;
+    }
+
+    for (0..discovered.len) |idx| {
+        try queue.putOneUncancelable(io, idx);
+    }
+    queue.close(io);
+
+    for (futures[0..started_workers]) |*future| {
+        _ = future.await(io) catch {};
+    }
+
+    if (state.first_error) |err| return err;
+
+    for (loaded_buffer) |item| try loaded.append(allocator, item);
+}
+
+fn runDecryptWorker(state: *DecryptWorkerState) anyerror!void {
+    while (true) {
+        const idx = state.queue.getOneUncancelable(state.io) catch |err| switch (err) {
+            error.Closed => return,
+        };
+        if (state.failed.load(.acquire)) return;
+
+        const key = state.discovered[idx];
+        const password = state.passwords[idx];
+
+        const secret_key = decryptLocalKeystore(state.io, state.allocator, key, password) catch |err| {
+            recordDecryptFailure(state, err);
+            return err;
+        };
+
+        state.loaded[idx] = .{
+            .pubkey = key.pubkey,
+            .secret_key = secret_key,
+            .keystore_path = try state.allocator.dupe(u8, key.keystore_path),
+        };
+        state.initialized[idx] = true;
+        logDecryptProgress(state);
+    }
+}
+
+fn decryptLocalKeystore(
+    io: Io,
+    allocator: Allocator,
+    key: key_discovery_mod.DiscoveredKey,
+    password: []const u8,
+) !bls.SecretKey {
+    const json_bytes = fs.readFileAlloc(io, allocator, key.keystore_path, 1024 * 1024) catch |err| {
+        log.err("failed to read keystore {s}: {s}", .{ key.keystore_path, @errorName(err) });
+        return err;
+    };
+    defer allocator.free(json_bytes);
+
+    return keystore_mod.loadKeystore(allocator, json_bytes, password) catch |err| {
+        log.err("failed to decrypt keystore {s}: {s}", .{ key.keystore_path, @errorName(err) });
+        return err;
+    };
+}
+
+fn recordDecryptFailure(state: *DecryptWorkerState, err: anyerror) void {
+    const first = !state.failed.swap(true, .acq_rel);
+    if (!first) return;
+    state.error_mutex.lockUncancelable(state.io);
+    defer state.error_mutex.unlock(state.io);
+    state.first_error = err;
+}
+
+fn logDecryptProgress(state: *DecryptWorkerState) void {
+    const completed = state.completed.fetchAdd(1, .acq_rel) + 1;
+    const total = state.discovered.len;
+    if (completed == total) {
+        log.info("decrypted {d}/{d} local validator keystore(s)", .{ completed, total });
+        return;
+    }
+    if (state.progress_step == 0) return;
+
+    while (true) {
+        const threshold = state.next_progress.load(.acquire);
+        if (completed < threshold) return;
+        if (state.next_progress.cmpxchgWeak(threshold, threshold + state.progress_step, .acq_rel, .acquire) == null) {
+            log.info("decrypted {d}/{d} local validator keystore(s)", .{ completed, total });
+            return;
+        }
+    }
+}
+
+fn computeDecryptWorkerCount(key_count: usize) usize {
+    if (key_count == 0) return 0;
+    const cpu_count = std.Thread.getCpuCount() catch 4;
+    return @min(key_count, @min(cpu_count, 32));
+}
+
+fn computeProgressStep(total: usize) usize {
+    if (total <= 20) return 1;
+    return @max(total / 20, 1);
+}
+
+fn sortDiscoveredKeys(discovered: []key_discovery_mod.DiscoveredKey) void {
+    std.mem.sort(key_discovery_mod.DiscoveredKey, discovered, {}, struct {
+        fn lessThan(_: void, a: key_discovery_mod.DiscoveredKey, b: key_discovery_mod.DiscoveredKey) bool {
+            return std.mem.lessThan(u8, a.pubkey_hex, b.pubkey_hex);
+        }
+    }.lessThan);
 }
 
 pub fn importExternalKeystores(
@@ -587,6 +818,54 @@ test "loadLocalSigners fails fast when a password file is missing" {
     try testing.expectError(error.FileNotFound, loadLocalSigners(testing.io, testing.allocator, keystores_dir, secrets_dir, .{}));
 }
 
+test "loadLocalSigners refreshes stale startup cache after validator set changes" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makeDir("keystores");
+    try tmp.dir.makeDir("secrets");
+    try tmp.dir.makeDir("cache");
+
+    const created_a = try keystore_create.createKeystore(testing.io, testing.allocator, "secret-pass-a", .{
+        .n = 16,
+        .r = 8,
+        .p = 1,
+    });
+    defer created_a.deinit(testing.allocator);
+
+    const created_b = try keystore_create.createKeystore(testing.io, testing.allocator, "secret-pass-b", .{
+        .n = 16,
+        .r = 8,
+        .p = 1,
+    });
+    defer created_b.deinit(testing.allocator);
+
+    const root = try tmp.dir.realpathAlloc(testing.allocator, ".");
+    defer testing.allocator.free(root);
+    const keystores_dir = try std.fs.path.join(testing.allocator, &.{ root, "keystores" });
+    defer testing.allocator.free(keystores_dir);
+    const secrets_dir = try std.fs.path.join(testing.allocator, &.{ root, "secrets" });
+    defer testing.allocator.free(secrets_dir);
+    const cache_dir = try std.fs.path.join(testing.allocator, &.{ root, "cache" });
+    defer testing.allocator.free(cache_dir);
+
+    try writeTestManagedKeystore(tmp.dir, created_a.pubkey_hex, created_a.keystore_json, "secret-pass-a");
+
+    var first_signers = try loadLocalSigners(testing.io, testing.allocator, keystores_dir, secrets_dir, .{
+        .cache_dir = cache_dir,
+    });
+    first_signers.deinit(testing.io);
+
+    try writeTestManagedKeystore(tmp.dir, created_b.pubkey_hex, created_b.keystore_json, "secret-pass-b");
+
+    var second_signers = try loadLocalSigners(testing.io, testing.allocator, keystores_dir, secrets_dir, .{
+        .cache_dir = cache_dir,
+    });
+    defer second_signers.deinit(testing.io);
+
+    try testing.expectEqual(@as(usize, 2), second_signers.local_keys.len);
+}
+
 test "loadPersistedRemoteSignerKeys groups definitions by URL" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -684,4 +963,28 @@ test "importExternalKeystores recursively imports voting keystores into managed 
 
     try testing.expectEqual(@as(usize, 1), signers.local_keys.len);
     try testing.expectEqualSlices(u8, &created.pubkey, &signers.local_keys[0].pubkey);
+}
+
+fn writeTestManagedKeystore(
+    dir: std.fs.Dir,
+    pubkey_hex: []const u8,
+    keystore_json: []const u8,
+    password: []const u8,
+) !void {
+    const keystore_rel_dir = try std.fs.path.join(testing.allocator, &.{ "keystores", pubkey_hex });
+    defer testing.allocator.free(keystore_rel_dir);
+    try dir.makePath(keystore_rel_dir);
+    var validator_dir = try dir.openDir(keystore_rel_dir, .{});
+    defer validator_dir.close();
+    try validator_dir.writeFile(.{
+        .sub_path = "voting-keystore.json",
+        .data = keystore_json,
+    });
+
+    const secret_rel_path = try std.fs.path.join(testing.allocator, &.{ "secrets", pubkey_hex });
+    defer testing.allocator.free(secret_rel_path);
+    try dir.writeFile(.{
+        .sub_path = secret_rel_path,
+        .data = password,
+    });
 }

@@ -43,6 +43,10 @@ pub const spec = cli.command(.{
             .long = "force",
             .description = "Load local keystores even if another process already holds their ownership lock",
         }),
+        .disableKeystoresThreadPool = cli.flag(.{
+            .long = "disableKeystoresThreadPool",
+            .description = "Disable concurrent local-keystore decrypt workers and perform startup decryption on the main task",
+        }),
         .graffiti = cli.option(?[]const u8, .{
             .long = "graffiti",
             .description = "Validator graffiti string",

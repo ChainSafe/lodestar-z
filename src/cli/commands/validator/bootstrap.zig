@@ -228,6 +228,8 @@ pub fn prepareRuntime(io: Io, allocator: Allocator, opts: anytype) !PreparedRunt
 
     startup_signers = try validator_mod.loadLocalSigners(io, allocator, paths.keystores_dir, paths.secrets_dir, .{
         .force = opts.force,
+        .cache_dir = paths.cache_dir,
+        .disable_thread_pool = opts.disableKeystoresThreadPool,
     });
     const external_signer_fetch_enabled = opts.@"externalSigner.fetch";
     var remote_signer_source: RemoteSignerSource = .none;

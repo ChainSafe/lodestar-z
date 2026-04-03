@@ -176,8 +176,11 @@ pub const KeystoreDecryptor = struct {
         return .{ .allocator = allocator };
     }
 
-    /// Decrypt a keystore and return the BLS secret key.
-    pub fn decrypt(self: *KeystoreDecryptor, keystore: *const Keystore, password: []const u8) !SecretKey {
+    /// Decrypt a keystore and return the plaintext bytes.
+    ///
+    /// The returned slice is owned by the caller and must be securely zeroed
+    /// and freed after use.
+    pub fn decryptBytes(self: *KeystoreDecryptor, keystore: *const Keystore, password: []const u8) ![]u8 {
         // Step 1: KDF — derive 32-byte decryption key.
         var decryption_key: [32]u8 = undefined;
         defer std.crypto.secureZero(u8, &decryption_key);
@@ -305,19 +308,26 @@ pub const KeystoreDecryptor = struct {
         @memcpy(&key_bytes, decryption_key[0..16]);
 
         const plaintext = try self.allocator.alloc(u8, cipher_bytes.len);
+        aesCtr128Xor(plaintext, cipher_bytes, key_bytes, iv_bytes);
+
+        log.debug("keystore decryption successful", .{});
+        return plaintext;
+    }
+
+    /// Decrypt a keystore and return the BLS secret key.
+    pub fn decrypt(self: *KeystoreDecryptor, keystore: *const Keystore, password: []const u8) !SecretKey {
+        const plaintext = try self.decryptBytes(keystore, password);
         defer {
             std.crypto.secureZero(u8, plaintext);
             self.allocator.free(plaintext);
         }
-        aesCtr128Xor(plaintext, cipher_bytes, key_bytes, iv_bytes);
 
         // Step 4: interpret 32-byte plaintext as BLS secret key.
-        if (plaintext.len < 32) return error.InvalidKeystoreSize;
+        if (plaintext.len != 32) return error.InvalidKeystoreSize;
         var sk_bytes: [32]u8 = undefined;
         defer std.crypto.secureZero(u8, &sk_bytes);
         @memcpy(&sk_bytes, plaintext[0..32]);
 
-        log.debug("keystore decryption successful", .{});
         return SecretKey.deserialize(&sk_bytes) catch return error.InvalidBLSSecretKey;
     }
 };
@@ -465,6 +475,142 @@ pub fn loadKeystore(allocator: Allocator, json_bytes: []const u8, password: []co
 
     var decryptor = KeystoreDecryptor.init(allocator);
     return decryptor.decrypt(&keystore, password);
+}
+
+/// Load a keystore from JSON bytes and decrypt it into caller-owned plaintext.
+///
+/// This supports the normal one-secret-key EIP-2335 path and the validator
+/// startup cache path, where the plaintext contains concatenated validator
+/// secret keys rather than a single 32-byte secret.
+pub fn loadKeystoreBytes(allocator: Allocator, json_bytes: []const u8, password: []const u8) ![]u8 {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, a, json_bytes, .{});
+    const root_obj = switch (parsed.value) {
+        .object => |obj| obj,
+        else => return error.InvalidKeystoreJson,
+    };
+
+    const version_val = root_obj.get("version") orelse return error.MissingKeystoreField;
+    const version: u64 = switch (version_val) {
+        .integer => |n| @intCast(n),
+        else => return error.InvalidKeystoreVersion,
+    };
+    if (version != 4) return error.UnsupportedKeystoreVersion;
+
+    const crypto_val = root_obj.get("crypto") orelse return error.MissingKeystoreField;
+    const crypto_obj = switch (crypto_val) {
+        .object => |obj| obj,
+        else => return error.InvalidKeystoreJson,
+    };
+
+    const kdf_val = crypto_obj.get("kdf") orelse return error.MissingKeystoreField;
+    const kdf_obj = switch (kdf_val) {
+        .object => |obj| obj,
+        else => return error.InvalidKeystoreJson,
+    };
+    const kdf_fn_val = kdf_obj.get("function") orelse return error.MissingKeystoreField;
+    const kdf_fn_str = switch (kdf_fn_val) {
+        .string => |s| s,
+        else => return error.InvalidKeystoreJson,
+    };
+    const kdf_fn = if (std.mem.eql(u8, kdf_fn_str, "scrypt"))
+        KdfFunction.scrypt
+    else if (std.mem.eql(u8, kdf_fn_str, "pbkdf2"))
+        KdfFunction.pbkdf2
+    else
+        return error.UnsupportedKdfFunction;
+
+    const kdf_params_val = kdf_obj.get("params") orelse return error.MissingKeystoreField;
+    const kdf_msg = optionalStringField(kdf_obj, "message");
+
+    const cipher_val = crypto_obj.get("cipher") orelse return error.MissingKeystoreField;
+    const cipher_obj = switch (cipher_val) {
+        .object => |obj| obj,
+        else => return error.InvalidKeystoreJson,
+    };
+    const cipher_fn_val = cipher_obj.get("function") orelse return error.MissingKeystoreField;
+    const cipher_fn_str = switch (cipher_fn_val) {
+        .string => |s| s,
+        else => return error.InvalidKeystoreJson,
+    };
+    const cipher_params_val = cipher_obj.get("params") orelse return error.MissingKeystoreField;
+    const cipher_params_obj = switch (cipher_params_val) {
+        .object => |obj| obj,
+        else => return error.InvalidKeystoreJson,
+    };
+    const cipher_iv_val = cipher_params_obj.get("iv") orelse return error.MissingKeystoreField;
+    const cipher_iv = switch (cipher_iv_val) {
+        .string => |s| s,
+        else => return error.InvalidKeystoreJson,
+    };
+    const cipher_msg_val = cipher_obj.get("message") orelse return error.MissingKeystoreField;
+    const cipher_msg = switch (cipher_msg_val) {
+        .string => |s| s,
+        else => return error.InvalidKeystoreJson,
+    };
+
+    const cksum_val = crypto_obj.get("checksum") orelse return error.MissingKeystoreField;
+    const cksum_obj = switch (cksum_val) {
+        .object => |obj| obj,
+        else => return error.InvalidKeystoreJson,
+    };
+    const cksum_fn_val = cksum_obj.get("function") orelse return error.MissingKeystoreField;
+    const cksum_fn = switch (cksum_fn_val) {
+        .string => |s| s,
+        else => return error.InvalidKeystoreJson,
+    };
+    const cksum_msg_val = cksum_obj.get("message") orelse return error.MissingKeystoreField;
+    const cksum_msg = switch (cksum_msg_val) {
+        .string => |s| s,
+        else => return error.InvalidKeystoreJson,
+    };
+
+    const keystore = Keystore{
+        .version = version,
+        .uuid = optionalStringField(root_obj, "uuid"),
+        .description = optionalStringField(root_obj, "description"),
+        .pubkey = optionalStringField(root_obj, "pubkey"),
+        .path = optionalStringField(root_obj, "path"),
+        .crypto = .{
+            .kdf = .{
+                .function = kdf_fn,
+                .message = kdf_msg,
+                .params_json = kdf_params_val,
+            },
+            .checksum = .{
+                .function = cksum_fn,
+                .message = cksum_msg,
+            },
+            .cipher = .{
+                .function = cipher_fn_str,
+                .iv = cipher_iv,
+                .message = cipher_msg,
+            },
+        },
+    };
+
+    var decryptor = KeystoreDecryptor.init(allocator);
+    return decryptor.decryptBytes(&keystore, password);
+}
+
+/// Read the `pubkey` field from a keystore JSON document as an owned slice.
+///
+/// This is used by the validator startup cache to verify that the encrypted
+/// aggregate cache still matches the currently discovered validator set before
+/// trusting the cached secret material.
+pub fn loadKeystorePubkeyHex(allocator: Allocator, json_bytes: []const u8) ![]u8 {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, arena.allocator(), json_bytes, .{});
+    const root_obj = switch (parsed.value) {
+        .object => |obj| obj,
+        else => return error.InvalidKeystoreJson,
+    };
+    return allocator.dupe(u8, optionalStringField(root_obj, "pubkey"));
 }
 
 // ---------------------------------------------------------------------------

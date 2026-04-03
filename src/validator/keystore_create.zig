@@ -88,6 +88,24 @@ pub fn createKeystore(io: Io, allocator: Allocator, password: []const u8, params
 /// Returns an owned JSON string. Caller must free.
 pub fn encryptKeystore(io: Io, allocator: Allocator, secret_key: SecretKey, password: []const u8, params: ScryptParams) ![]const u8 {
     const sk_bytes = secret_key.serialize();
+    const pubkey = secret_key.toPublicKey().compress();
+    return encryptKeystoreBytes(io, allocator, &sk_bytes, password, &pubkey, params);
+}
+
+/// Encrypt arbitrary plaintext bytes as an EIP-2335-compatible keystore JSON string.
+///
+/// This is used for the validator startup cache, where the plaintext is the
+/// concatenated local validator secret keys and the pubkey field stores the
+/// concatenated public keys for self-validation.
+pub fn encryptKeystoreBytes(
+    io: Io,
+    allocator: Allocator,
+    plaintext: []const u8,
+    password: []const u8,
+    pubkey_bytes: []const u8,
+    params: ScryptParams,
+) ![]const u8 {
+    if (plaintext.len == 0) return error.InvalidKeystoreSize;
 
     // Generate random 32-byte salt and 16-byte IV.
     var salt: [32]u8 = undefined;
@@ -114,19 +132,20 @@ pub fn encryptKeystore(io: Io, allocator: Allocator, secret_key: SecretKey, pass
         .{ .ln = ln, .r = @intCast(params.r), .p = @intCast(params.p) },
     );
 
-    // Encrypt: AES-128-CTR with decryption_key[0..16] as key, iv as counter.
-    var ciphertext: [32]u8 = undefined;
-    aesCtr128Xor(&ciphertext, &sk_bytes, decryption_key[0..16].*, iv);
+    const ciphertext = try allocator.alloc(u8, plaintext.len);
+    defer allocator.free(ciphertext);
+    aesCtr128Xor(ciphertext, plaintext, decryption_key[0..16].*, iv);
 
     // Compute checksum: SHA256(decryption_key[16..32] || ciphertext).
-    var checksum_input: [48]u8 = undefined;
+    const checksum_input = try allocator.alloc(u8, 16 + ciphertext.len);
+    defer {
+        std.crypto.secureZero(u8, checksum_input);
+        allocator.free(checksum_input);
+    }
     @memcpy(checksum_input[0..16], decryption_key[16..32]);
-    @memcpy(checksum_input[16..48], &ciphertext);
+    @memcpy(checksum_input[16..], ciphertext);
     var checksum: [32]u8 = undefined;
-    std.crypto.hash.sha2.Sha256.hash(&checksum_input, &checksum, .{});
-
-    // Get public key for the keystore.
-    const pubkey = secret_key.toPublicKey().compress();
+    std.crypto.hash.sha2.Sha256.hash(checksum_input, &checksum, .{});
 
     // Build keystore JSON.
     const json = try std.fmt.allocPrint(allocator,
@@ -139,25 +158,25 @@ pub fn encryptKeystore(io: Io, allocator: Allocator, secret_key: SecretKey, pass
         \\        "n": {d},
         \\        "p": {d},
         \\        "r": {d},
-        \\        "salt": "{s}"
+        \\        "salt": "{x}"
         \\      }},
         \\      "message": ""
         \\    }},
         \\    "checksum": {{
         \\      "function": "sha256",
         \\      "params": {{}},
-        \\      "message": "{s}"
+        \\      "message": "{x}"
         \\    }},
         \\    "cipher": {{
         \\      "function": "aes-128-ctr",
         \\      "params": {{
-        \\        "iv": "{s}"
+        \\        "iv": "{x}"
         \\      }},
-        \\      "message": "{s}"
+        \\      "message": "{x}"
         \\    }}
         \\  }},
         \\  "description": "",
-        \\  "pubkey": "{s}",
+        \\  "pubkey": "{x}",
         \\  "path": "",
         \\  "uuid": "{s}",
         \\  "version": 4
@@ -170,7 +189,7 @@ pub fn encryptKeystore(io: Io, allocator: Allocator, secret_key: SecretKey, pass
         checksum,
         iv,
         ciphertext,
-        pubkey,
+        pubkey_bytes,
         formatUuid(uuid_bytes),
     });
 
@@ -326,14 +345,14 @@ test "writeKeystoreToDir: writes files correctly" {
     // Verify voting-keystore.json exists.
     const ks_file_path = try std.fs.path.join(testing.allocator, &.{ ks_path, pubkey_hex, "voting-keystore.json" });
     defer testing.allocator.free(ks_file_path);
-    const ks_content = try fs.readFileAlloc(testing.allocator, ks_file_path, 4096);
+    const ks_content = try fs.readFileAlloc(testing.io, testing.allocator, ks_file_path, 4096);
     defer testing.allocator.free(ks_content);
     try testing.expectEqualStrings(keystore_json, ks_content);
 
     // Verify password file exists.
     const sec_file_path = try std.fs.path.join(testing.allocator, &.{ sec_path, pubkey_hex });
     defer testing.allocator.free(sec_file_path);
-    const sec_content = try fs.readFileAlloc(testing.allocator, sec_file_path, 4096);
+    const sec_content = try fs.readFileAlloc(testing.io, testing.allocator, sec_file_path, 4096);
     defer testing.allocator.free(sec_content);
     try testing.expectEqualStrings(password, sec_content);
 }
