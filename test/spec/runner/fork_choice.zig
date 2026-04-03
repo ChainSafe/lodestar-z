@@ -64,6 +64,8 @@ const Step = union(enum) {
 const BlockStep = struct {
     name: []const u8,
     valid: bool = true,
+    blobs: ?[]const u8 = null,
+    proofs_count: usize = 0,
 };
 
 const PayloadStatusStep = struct {
@@ -119,6 +121,12 @@ pub fn TestCase(comptime fork: ForkSeq) type {
         // Blocks may reference different parents (forking), so each block's state
         // transition must start from the correct parent's post-state.
         state_cache: std.AutoHashMap(Root, *CachedBeaconState),
+
+        // Pending payload statuses: maps execution_payload.block_hash → status.
+        // In TS, payload_status steps pre-load the execution engine mock; the stored status
+        // is consumed during subsequent processBlock calls. We replicate this by storing
+        // statuses and looking them up when processing blocks.
+        pending_payload_statuses: std.AutoHashMap(Root, PayloadStatusStep),
 
         // Root of the anchor block (used as fallback parent state)
         anchor_block_root: Root,
@@ -264,6 +272,7 @@ pub fn TestCase(comptime fork: ForkSeq) type {
                 .fc_store = fc_store,
                 .proto_array = proto_array,
                 .state_cache = std.AutoHashMap(Root, *CachedBeaconState).init(allocator),
+                .pending_payload_statuses = std.AutoHashMap(Root, PayloadStatusStep).init(allocator),
                 .anchor_block_root = block_root,
                 .tick_time = 0,
                 .steps = steps,
@@ -280,6 +289,7 @@ pub fn TestCase(comptime fork: ForkSeq) type {
                 self.allocator.destroy(entry.value_ptr.*);
             }
             self.state_cache.deinit();
+            self.pending_payload_statuses.deinit();
             self.fc.deinit(self.allocator);
             self.allocator.destroy(self.fc);
             self.fc_store.deinit(self.allocator);
@@ -367,9 +377,18 @@ pub fn TestCase(comptime fork: ForkSeq) type {
 
                 const current_slot: Slot = @intCast(self.tick_time / seconds_per_slot);
 
-                // Determine execution status
-                const execution_status = getExecutionStatus(beacon_block);
+                // Determine execution status — check pending payload statuses first.
+                // In TS, the execution engine mock returns a predefined status if one was
+                // stored by a prior payload_status step; otherwise defaults to VALID.
+                const execution_status = self.getBlockExecutionStatus(&beacon_block);
                 const da_status = getDataAvailabilityStatus(beacon_block);
+
+                // Validate blob/proof counts for deneb/electra blocks (matching TS behavior).
+                // TS verifies blobs.length === commitments.length && proofs.length === commitments.length.
+                // Fulu uses columns (not blobs/proofs), Gloas has no DA in beacon block.
+                if (comptime fork.gte(.deneb) and !fork.gte(.fulu)) {
+                    try self.validateBlobsProofs(&beacon_block, block_step);
+                }
 
                 // Call fork choice onBlock
                 _ = try self.fc.onBlock(
@@ -382,6 +401,12 @@ pub fn TestCase(comptime fork: ForkSeq) type {
                     da_status,
                 );
 
+                // Import attestations from block body into fork choice.
+                // The pyspec processes block body attestations via on_attestation(is_from_block=True),
+                // and Lodestar TS does this via importAttestations: Force. Without this,
+                // fork choice has no validator votes and proposer boost alone determines the head.
+                try self.importBlockAttestations(&beacon_block, post_state);
+
                 // Store post_state in cache keyed by block_root.
                 // Prune old entries to avoid pool exhaustion — keep only the
                 // last few states (most tests are linear chains; forked tests
@@ -389,7 +414,20 @@ pub fn TestCase(comptime fork: ForkSeq) type {
                 try self.state_cache.put(block_root, post_state);
                 self.pruneStateCache(block_root);
             } else {
-                // Block expected to be invalid — either state_transition or onBlock should error
+                // Block expected to be invalid — either state_transition, blob validation,
+                // or onBlock should error.
+
+                // Check blob/proof validation first (may catch the expected failure).
+                if (comptime fork.gte(.deneb) and !fork.gte(.fulu)) {
+                    self.validateBlobsProofs(&beacon_block, block_step) catch {
+                        if (post_state_result) |ps| {
+                            ps.deinit();
+                            self.allocator.destroy(ps);
+                        } else |_| {}
+                        return; // Expected failure in blob validation
+                    };
+                }
+
                 if (post_state_result) |post_state| {
                     defer {
                         post_state.deinit();
@@ -401,7 +439,7 @@ pub fn TestCase(comptime fork: ForkSeq) type {
 
                     const seconds_per_slot = self.anchor_state.config.chain.SECONDS_PER_SLOT;
                     const current_slot: Slot = @intCast(self.tick_time / seconds_per_slot);
-                    const execution_status = getExecutionStatus(beacon_block);
+                    const execution_status = self.getBlockExecutionStatus(&beacon_block);
 
                     _ = self.fc.onBlock(
                         self.allocator,
@@ -444,7 +482,7 @@ pub fn TestCase(comptime fork: ForkSeq) type {
                 try types_mod.phase0.AttestationData.hashTreeRoot(&attestation.data, &att_data_root);
 
                 const any_indexed = AnyIndexedAttestation{ .electra = &indexed_att };
-                try self.fc.onAttestation(self.allocator, &any_indexed, att_data_root, true);
+                try self.fc.onAttestation(self.allocator, &any_indexed, att_data_root, false);
             } else {
                 // Phase0 attestation format (pre-electra)
                 const types_mod = @import("consensus_types");
@@ -460,7 +498,7 @@ pub fn TestCase(comptime fork: ForkSeq) type {
                 try types_mod.phase0.AttestationData.hashTreeRoot(&attestation.data, &att_data_root);
 
                 const any_indexed = AnyIndexedAttestation{ .phase0 = &indexed_att };
-                try self.fc.onAttestation(self.allocator, &any_indexed, att_data_root, true);
+                try self.fc.onAttestation(self.allocator, &any_indexed, att_data_root, false);
             }
         }
 
@@ -487,6 +525,46 @@ pub fn TestCase(comptime fork: ForkSeq) type {
             }
         }
 
+        /// Import attestations from a block body into fork choice.
+        /// Mirrors pyspec on_attestation(store, att, is_from_block=True) and
+        /// Lodestar TS importAttestations: Force.
+        fn importBlockAttestations(self: *Self, beacon_block: *const AnyBeaconBlock, post_state: *CachedBeaconState) !void {
+            const body = beacon_block.beaconBlockBody();
+            const any_atts = body.attestations();
+            const atts_items = any_atts.items();
+
+            switch (atts_items) {
+                .electra => |electra_atts| {
+                    const types_mod = @import("consensus_types");
+                    for (electra_atts) |*att| {
+                        var indexed_att: types_mod.electra.IndexedAttestation.Type = types_mod.electra.IndexedAttestation.default_value;
+                        post_state.epoch_cache.computeIndexedAttestationElectra(att, &indexed_att) catch continue;
+                        defer types_mod.electra.IndexedAttestation.deinit(self.allocator, &indexed_att);
+
+                        var att_data_root: Root = undefined;
+                        types_mod.phase0.AttestationData.hashTreeRoot(&att.data, &att_data_root) catch continue;
+
+                        const any_indexed = AnyIndexedAttestation{ .electra = &indexed_att };
+                        self.fc.onAttestation(self.allocator, &any_indexed, att_data_root, true) catch continue;
+                    }
+                },
+                .phase0 => |phase0_atts| {
+                    const types_mod = @import("consensus_types");
+                    for (phase0_atts) |*att| {
+                        var indexed_att: types_mod.phase0.IndexedAttestation.Type = types_mod.phase0.IndexedAttestation.default_value;
+                        post_state.epoch_cache.computeIndexedAttestationPhase0(att, &indexed_att) catch continue;
+                        defer types_mod.phase0.IndexedAttestation.deinit(self.allocator, &indexed_att);
+
+                        var att_data_root: Root = undefined;
+                        types_mod.phase0.AttestationData.hashTreeRoot(&att.data, &att_data_root) catch continue;
+
+                        const any_indexed = AnyIndexedAttestation{ .phase0 = &indexed_att };
+                        self.fc.onAttestation(self.allocator, &any_indexed, att_data_root, true) catch continue;
+                    }
+                },
+            }
+        }
+
         /// Get the most recent cached state (for epoch cache access).
         /// Falls back to anchor state if no blocks have been processed yet.
         fn getHeadState(self: *Self) *CachedBeaconState {
@@ -499,6 +577,13 @@ pub fn TestCase(comptime fork: ForkSeq) type {
         }
 
         fn handlePayloadStatus(self: *Self, ps: PayloadStatusStep) void {
+            // Store the status for future block processing (mirrors TS execution engine mock).
+            // When a subsequent block references this execution payload hash, we'll use
+            // the stored status instead of the default (.valid).
+            self.pending_payload_statuses.put(ps.block_hash, ps) catch {};
+
+            // For valid/invalid, also call validateLatestHash to update
+            // already-processed blocks (handles post-block payload_status steps).
             const seconds_per_slot = self.anchor_state.config.chain.SECONDS_PER_SLOT;
             const current_slot: Slot = @intCast(self.tick_time / seconds_per_slot);
 
@@ -508,7 +593,7 @@ pub fn TestCase(comptime fork: ForkSeq) type {
                     .latest_valid_exec_hash = ps.latest_valid_hash,
                     .invalidate_from_parent_block_root = ZERO_HASH,
                 } },
-                .syncing, .accepted => return, // Not handled in fork choice
+                .syncing, .accepted => return, // No retroactive update needed
             };
             self.fc.validateLatestHash(self.allocator, response, current_slot);
         }
@@ -617,6 +702,60 @@ pub fn TestCase(comptime fork: ForkSeq) type {
                 .phase0, .altair => .pre_merge,
                 else => .valid,
             };
+        }
+
+        /// Get execution status for a block, checking pending payload statuses first.
+        /// Mirrors the TS execution engine mock: if a payload_status step pre-loaded a
+        /// status for this block's execution payload hash, use it; otherwise default to
+        /// the fork-based default (.valid for post-merge).
+        fn getBlockExecutionStatus(self: *Self, beacon_block: *const AnyBeaconBlock) ExecutionStatus {
+            const fork_seq = beacon_block.forkSeq();
+            if (fork_seq == .phase0 or fork_seq == .altair) return .pre_merge;
+
+            // Try to get execution payload block hash and look up pending status.
+            const body = beacon_block.beaconBlockBody();
+            if (body.executionPayload()) |exec_payload| {
+                const exec_block_hash = exec_payload.blockHash().*;
+                if (self.pending_payload_statuses.get(exec_block_hash)) |ps| {
+                    return switch (ps.status) {
+                        .valid => .valid,
+                        .invalid => .invalid,
+                        .syncing, .accepted => .syncing,
+                    };
+                }
+            } else |_| {}
+
+            return .valid;
+        }
+
+        /// Validate blob/proof counts match blobKzgCommitments (deneb+ only).
+        /// Mirrors TS: `if (blobs.length !== commitments.length || proofs.length !== commitments.length)`
+        /// We check proofs_count (parsed from YAML inline hex values) against commitments.
+        /// When blobs are present, TS requires all three counts to match.
+        fn validateBlobsProofs(_: *Self, beacon_block: *const AnyBeaconBlock, block_step: BlockStep) !void {
+            const body = beacon_block.beaconBlockBody();
+            const commitments = try body.blobKzgCommitments();
+            const commitments_len = commitments.items.len;
+
+            // If this block step has no blobs/proofs data, default to count 0
+            // (matching TS: `if (blobs === undefined) blobs = []`)
+            const has_blobs = block_step.blobs != null;
+            const proofs_count = block_step.proofs_count;
+
+            if (commitments_len == 0) {
+                // No commitments — no blobs/proofs required
+                return;
+            }
+
+            if (!has_blobs and proofs_count == 0) {
+                // TS defaults missing blobs/proofs to empty arrays.
+                // Empty vs non-zero commitments would fail this check.
+                return error.InvalidBlobsOrProofsLength;
+            }
+
+            if (proofs_count != commitments_len) {
+                return error.InvalidBlobsOrProofsLength;
+            }
         }
 
         fn getDataAvailabilityStatus(beacon_block: AnyBeaconBlock) DataAvailabilityStatus {
@@ -777,21 +916,68 @@ fn parseBlockStep(allocator: Allocator, lines: []const []const u8) !BlockStep {
 
     var name: []const u8 = "";
     var valid: bool = true;
+    var blobs: ?[]const u8 = null;
+    var proofs_count: usize = 0;
 
-    for (lines) |line| {
-        const trimmed = std.mem.trim(u8, line, " \t\r");
+    var i: usize = 0;
+    while (i < lines.len) : (i += 1) {
+        const trimmed = std.mem.trim(u8, lines[i], " \t\r");
 
         if (std.mem.startsWith(u8, trimmed, "block:") or std.mem.startsWith(u8, trimmed, "block: ")) {
             if (extractValue(trimmed, "block:")) |val| {
-                name = std.mem.trim(u8, val, " \r\t");
+                const val_trimmed = std.mem.trim(u8, val, " \r\t");
+                if (val_trimmed.len > 0) {
+                    name = val_trimmed;
+                }
+            }
+            // If block: has empty value, next line is the block name
+            if (name.len == 0 and i + 1 < lines.len) {
+                const next = std.mem.trim(u8, lines[i + 1], " \t\r");
+                if (std.mem.startsWith(u8, next, "block_")) {
+                    name = next;
+                    i += 1;
+                }
             }
         } else if (std.mem.startsWith(u8, trimmed, "valid:")) {
             if (extractValue(trimmed, "valid:")) |val| {
                 const val_trimmed = std.mem.trim(u8, val, " \r\t");
                 if (std.mem.eql(u8, val_trimmed, "false")) valid = false;
             }
+        } else if (std.mem.startsWith(u8, trimmed, "blobs:")) {
+            if (extractValue(trimmed, "blobs:")) |val| {
+                const val_trimmed = std.mem.trim(u8, val, " \r\t");
+                if (val_trimmed.len > 0) {
+                    blobs = val_trimmed;
+                }
+            }
+        } else if (std.mem.startsWith(u8, trimmed, "proofs:")) {
+            // proofs is a YAML list of hex strings: ['0x...', '0x...']
+            // Count the number of entries by counting '0x' occurrences.
+            if (extractValue(trimmed, "proofs:")) |val| {
+                var count: usize = 0;
+                var pos: usize = 0;
+                while (std.mem.indexOf(u8, val[pos..], "0x")) |idx| {
+                    count += 1;
+                    pos += idx + 2;
+                }
+                // If proofs span multiple lines, scan continuation lines
+                if (std.mem.indexOfScalar(u8, val, ']') == null) {
+                    var j = i + 1;
+                    while (j < lines.len) : (j += 1) {
+                        const next_trimmed = std.mem.trim(u8, lines[j], " \t\r");
+                        var npos: usize = 0;
+                        while (std.mem.indexOf(u8, next_trimmed[npos..], "0x")) |idx| {
+                            count += 1;
+                            npos += idx + 2;
+                        }
+                        if (std.mem.indexOfScalar(u8, next_trimmed, ']') != null) break;
+                    }
+                    i = j;
+                }
+                proofs_count = count;
+            }
         }
-        // blobs, proofs, columns — skip for now
+        // columns — ignored (PeerDAS data column handling not implemented)
     }
 
     if (name.len == 0) return error.InvalidYaml;
@@ -799,6 +985,8 @@ fn parseBlockStep(allocator: Allocator, lines: []const []const u8) !BlockStep {
     return .{
         .name = try allocator.dupe(u8, name),
         .valid = valid,
+        .blobs = if (blobs) |b| try allocator.dupe(u8, b) else null,
+        .proofs_count = proofs_count,
     };
 }
 
@@ -837,7 +1025,30 @@ fn parseChecks(lines: []const []const u8) !Checks {
             }
         } else if (std.mem.startsWith(u8, trimmed, "should_override_forkchoice_update:")) {
             if (extractValue(trimmed, "should_override_forkchoice_update:")) |val| {
-                checks.should_override_forkchoice_update = try parseShouldOverrideFCU(val);
+                // The value may span multiple lines, e.g.:
+                //   should_override_forkchoice_update: {validator_is_connected: true, result:
+                //       true}
+                // Concatenate lines until we find the closing '}'.
+                if (std.mem.indexOfScalar(u8, val, '}') != null) {
+                    checks.should_override_forkchoice_update = try parseShouldOverrideFCU(val);
+                } else {
+                    var buf: [512]u8 = undefined;
+                    var pos: usize = 0;
+                    const src = val;
+                    @memcpy(buf[pos..][0..src.len], src);
+                    pos += src.len;
+                    var j = i + 1;
+                    while (j < lines.len) : (j += 1) {
+                        const next_trimmed = std.mem.trim(u8, lines[j], " \t\r");
+                        buf[pos] = ' ';
+                        pos += 1;
+                        @memcpy(buf[pos..][0..next_trimmed.len], next_trimmed);
+                        pos += next_trimmed.len;
+                        if (std.mem.indexOfScalar(u8, next_trimmed, '}') != null) break;
+                    }
+                    checks.should_override_forkchoice_update = try parseShouldOverrideFCU(buf[0..pos]);
+                    i = j;
+                }
             }
         }
     }
@@ -930,7 +1141,10 @@ fn extractValue(text: []const u8, key: []const u8) ?[]const u8 {
 
 fn freeStep(allocator: Allocator, step: *Step) void {
     switch (step.*) {
-        .block => |b| allocator.free(b.name),
+        .block => |b| {
+            allocator.free(b.name);
+            if (b.blobs) |bl| allocator.free(bl);
+        },
         .attestation => |a| allocator.free(a),
         .attester_slashing => |s| allocator.free(s),
         .pow_block => |p| allocator.free(p),
