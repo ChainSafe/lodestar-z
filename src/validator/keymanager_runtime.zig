@@ -20,7 +20,6 @@ const SignerKind = validator_store_mod.SignerKind;
 const interchange_mod = @import("interchange.zig");
 const validator_types = @import("types.zig");
 const ProposerConfig = validator_types.ProposerConfig;
-const SlashingProtectionRecord = validator_types.SlashingProtectionRecord;
 const startup_signers = @import("startup_signers.zig");
 const consensus_types = @import("consensus_types");
 
@@ -441,23 +440,11 @@ fn importSlashingForPubkey(
         interchange_json,
         client.config.genesis_validators_root,
     );
-    defer allocator.free(records);
+    defer interchange_mod.deinitInterchangeData(allocator, records);
 
     for (records) |record| {
         if (!std.mem.eql(u8, &record.pubkey, &pubkey)) continue;
-
-        if (record.last_signed_block_slot) |slot| {
-            _ = try client.validator_store.slashing_db.checkAndInsertBlock(record.pubkey, slot);
-        }
-        if (record.last_signed_attestation_source_epoch) |source_epoch| {
-            if (record.last_signed_attestation_target_epoch) |target_epoch| {
-                _ = try client.validator_store.slashing_db.checkAndInsertAttestation(
-                    record.pubkey,
-                    source_epoch,
-                    target_epoch,
-                );
-            }
-        }
+        try client.validator_store.slashing_db.importHistory(record);
     }
 }
 
@@ -466,9 +453,13 @@ fn exportSlashingForPubkey(
     allocator: Allocator,
     pubkey: [48]u8,
 ) ![]const u8 {
-    const record = client.validator_store.slashing_db.exportRecord(pubkey) orelse
-        return allocator.dupe(u8, "{}");
+    const history = try client.validator_store.slashing_db.exportHistory(allocator, pubkey) orelse
+        return interchange_mod.exportInterchange(allocator, &.{}, client.config.genesis_validators_root);
+    defer {
+        allocator.free(history.signed_blocks);
+        allocator.free(history.signed_attestations);
+    }
 
-    const records = [_]SlashingProtectionRecord{record};
+    const records = [_]validator_types.SlashingProtectionHistory{history};
     return interchange_mod.exportInterchange(allocator, &records, client.config.genesis_validators_root);
 }

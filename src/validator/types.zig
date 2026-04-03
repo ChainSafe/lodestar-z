@@ -102,18 +102,37 @@ pub fn parseValidatorStatus(text: []const u8) ValidatorStatus {
 // Slashing protection
 // ---------------------------------------------------------------------------
 
-/// Tracks the highest slot/epoch signed for each validator.
-/// Used to prevent equivocation (double-voting / double-proposing).
+/// Signing root value used when a record was imported/exported without an
+/// explicit signing root. EIP-3076 treats signing roots as optional.
+pub const UNKNOWN_SIGNING_ROOT = std.mem.zeroes([32]u8);
+
+/// One slash-protection block record.
 ///
-/// TS: ISlashingProtection / SlashingProtectionSqlite
-pub const SlashingProtectionRecord = struct {
+/// `signing_root == UNKNOWN_SIGNING_ROOT` means the source data omitted the
+/// optional signing root, so exact same-data repeat signing cannot be proven.
+pub const SlashingProtectionBlockRecord = struct {
+    slot: u64,
+    signing_root: [32]u8 = UNKNOWN_SIGNING_ROOT,
+};
+
+/// One slash-protection attestation record.
+///
+/// `signing_root == UNKNOWN_SIGNING_ROOT` means the source data omitted the
+/// optional signing root, so exact same-data repeat signing cannot be proven.
+pub const SlashingProtectionAttestationRecord = struct {
+    source_epoch: u64,
+    target_epoch: u64,
+    signing_root: [32]u8 = UNKNOWN_SIGNING_ROOT,
+};
+
+/// Full slash-protection history for one validator.
+///
+/// This is the in-memory / interchange shape that matches Lodestar and EIP-3076
+/// much more closely than the older "latest slot/latest epoch" summary.
+pub const SlashingProtectionHistory = struct {
     pubkey: [48]u8,
-    /// Highest block slot we have signed (proposal protection).
-    last_signed_block_slot: ?u64,
-    /// Highest source epoch in any signed attestation (vote protection).
-    last_signed_attestation_source_epoch: ?u64,
-    /// Highest target epoch in any signed attestation (vote protection).
-    last_signed_attestation_target_epoch: ?u64,
+    signed_blocks: []const SlashingProtectionBlockRecord,
+    signed_attestations: []const SlashingProtectionAttestationRecord,
 };
 
 pub const ProposerConfig = struct {

@@ -13,7 +13,10 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 
 const types = @import("types.zig");
-const SlashingProtectionRecord = types.SlashingProtectionRecord;
+const UNKNOWN_SIGNING_ROOT = types.UNKNOWN_SIGNING_ROOT;
+const SignedBlock = types.SlashingProtectionBlockRecord;
+const SignedAttestation = types.SlashingProtectionAttestationRecord;
+const InterchangeData = types.SlashingProtectionHistory;
 
 const log = std.log.scoped(.interchange);
 
@@ -23,36 +26,6 @@ pub const INTERCHANGE_FORMAT_VERSION = "5";
 // ---------------------------------------------------------------------------
 // Interchange JSON types
 // ---------------------------------------------------------------------------
-
-/// A signed block record within an interchange entry.
-/// Represents a block that was signed at a given slot.
-pub const SignedBlock = struct {
-    /// Slot at which the block was signed (decimal string in JSON).
-    slot: u64,
-    /// Block signing root (hex, optional — some clients omit).
-    signing_root: ?[32]u8,
-};
-
-/// A signed attestation record within an interchange entry.
-/// Represents an attestation that was signed for source/target epochs.
-pub const SignedAttestation = struct {
-    /// Source epoch (decimal string in JSON).
-    source_epoch: u64,
-    /// Target epoch (decimal string in JSON).
-    target_epoch: u64,
-    /// Attestation signing root (hex, optional).
-    signing_root: ?[32]u8,
-};
-
-/// Per-validator interchange entry.
-pub const InterchangeData = struct {
-    /// BLS pubkey (hex, "0x"-prefixed).
-    pubkey: [48]u8,
-    /// All signed blocks recorded for this validator.
-    signed_blocks: []const SignedBlock,
-    /// All signed attestations recorded for this validator.
-    signed_attestations: []const SignedAttestation,
-};
 
 /// Top-level EIP-3076 interchange format.
 pub const InterchangeFormat = struct {
@@ -74,15 +47,19 @@ pub const InterchangeMetadata = struct {
 // Import
 // ---------------------------------------------------------------------------
 
-/// Import EIP-3076 interchange JSON into a list of SlashingProtectionRecords.
+pub fn deinitInterchangeData(allocator: Allocator, records: []const InterchangeData) void {
+    for (records) |record| {
+        allocator.free(record.signed_blocks);
+        allocator.free(record.signed_attestations);
+    }
+    allocator.free(records);
+}
+
+/// Import EIP-3076 interchange JSON into a list of per-validator histories.
 ///
 /// The returned slice and all inner slices are allocated from `allocator`.
 /// Caller must free: `allocator.free(records)` (inner fields are not allocated
 /// separately — see docs below).
-///
-/// Note: We produce one SlashingProtectionRecord per validator, tracking
-/// only the *highest* signed slot/epoch from the interchange (conservative
-/// protection — same as what TS lodestar does for fast import).
 ///
 /// ⚠️ WARNING: This function skips genesis_validators_root (GVR) verification.
 /// Importing interchange data without GVR verification risks loading protection
@@ -94,8 +71,8 @@ pub const InterchangeMetadata = struct {
 /// This unverified variant exists only for testing and tools that handle
 /// GVR verification externally.
 ///
-/// TS: SlashingProtectionInterchange.importInterchange(interchange)
-pub fn importInterchange(allocator: Allocator, json: []const u8) ![]SlashingProtectionRecord {
+/// TS: SlashingProtection.importInterchange() / parseInterchangeV5()
+pub fn importInterchange(allocator: Allocator, json: []const u8) ![]InterchangeData {
     return importInterchangeVerified(allocator, json, null);
 }
 
@@ -106,12 +83,12 @@ pub fn importInterchange(allocator: Allocator, json: []const u8) ![]SlashingProt
 /// returned if they don't match. This prevents accidentally importing protection
 /// data from a different chain (e.g. mainnet data into a testnet validator).
 ///
-/// TS: SlashingProtectionInterchange.importInterchange — always verifies GVR.
+/// TS: SlashingProtection.importInterchange() — always verifies GVR.
 pub fn importInterchangeVerified(
     allocator: Allocator,
     json: []const u8,
     expected_genesis_validators_root: ?[32]u8,
-) ![]SlashingProtectionRecord {
+) ![]InterchangeData {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -178,8 +155,22 @@ pub fn importInterchangeVerified(
         else => return error.InvalidInterchangeJson,
     };
 
-    const records = try allocator.alloc(SlashingProtectionRecord, data_arr.items.len);
-    errdefer allocator.free(records);
+    const records = try allocator.alloc(InterchangeData, data_arr.items.len);
+    errdefer {
+        for (records[0..data_arr.items.len]) |record| {
+            allocator.free(record.signed_blocks);
+            allocator.free(record.signed_attestations);
+        }
+        allocator.free(records);
+    }
+
+    for (records) |*record| {
+        record.* = .{
+            .pubkey = std.mem.zeroes([48]u8),
+            .signed_blocks = &.{},
+            .signed_attestations = &.{},
+        };
+    }
 
     for (data_arr.items, records) |item, *record| {
         const item_obj = switch (item) {
@@ -195,88 +186,103 @@ pub fn importInterchangeVerified(
         };
         var pubkey: [48]u8 = [_]u8{0} ** 48;
         const pk_hex = if (std.mem.startsWith(u8, pk_str, "0x")) pk_str[2..] else pk_str;
-        _ = std.fmt.hexToBytes(&pubkey, pk_hex) catch {
-            log.warn("interchange: skipping entry with invalid pubkey hex: {s}", .{pk_str});
-            // Initialize to empty record that will be filtered out below.
-            record.* = .{
-                .pubkey = [_]u8{0} ** 48,
-                .last_signed_block_slot = null,
-                .last_signed_attestation_source_epoch = null,
-                .last_signed_attestation_target_epoch = null,
-            };
-            continue;
-        };
+        _ = std.fmt.hexToBytes(&pubkey, pk_hex) catch return error.InvalidInterchangeJson;
 
         record.pubkey = pubkey;
-        record.last_signed_block_slot = null;
-        record.last_signed_attestation_source_epoch = null;
-        record.last_signed_attestation_target_epoch = null;
-
-        // Signed blocks — track maximum slot.
-        const blocks_val = item_obj.get("signed_blocks") orelse continue;
-        const blocks_arr = switch (blocks_val) {
-            .array => |arr| arr,
-            else => continue,
-        };
-        for (blocks_arr.items) |block_item| {
-            const block_obj = switch (block_item) {
-                .object => |obj| obj,
-                else => continue,
-            };
-            const slot_val = block_obj.get("slot") orelse continue;
-            const slot: u64 = switch (slot_val) {
-                .integer => |n| @intCast(n),
-                .string => |s| std.fmt.parseInt(u64, s, 10) catch continue,
-                .number_string => |s| std.fmt.parseInt(u64, s, 10) catch continue,
-                else => continue,
-            };
-            if (record.last_signed_block_slot == null or slot > record.last_signed_block_slot.?) {
-                record.last_signed_block_slot = slot;
-            }
-        }
-
-        // Signed attestations — track maximum target epoch (and matching source).
-        const atts_val = item_obj.get("signed_attestations") orelse continue;
-        const atts_arr = switch (atts_val) {
-            .array => |arr| arr,
-            else => continue,
-        };
-        for (atts_arr.items) |att_item| {
-            const att_obj = switch (att_item) {
-                .object => |obj| obj,
-                else => continue,
-            };
-            const src_val = att_obj.get("source_epoch") orelse continue;
-            const tgt_val = att_obj.get("target_epoch") orelse continue;
-            const src: u64 = switch (src_val) {
-                .integer => |n| @intCast(n),
-                .string => |s| std.fmt.parseInt(u64, s, 10) catch continue,
-                .number_string => |s| std.fmt.parseInt(u64, s, 10) catch continue,
-                else => continue,
-            };
-            const tgt: u64 = switch (tgt_val) {
-                .integer => |n| @intCast(n),
-                .string => |s| std.fmt.parseInt(u64, s, 10) catch continue,
-                .number_string => |s| std.fmt.parseInt(u64, s, 10) catch continue,
-                else => continue,
-            };
-            // Use maximum target epoch (most conservative).
-            if (record.last_signed_attestation_target_epoch == null or tgt > record.last_signed_attestation_target_epoch.?) {
-                record.last_signed_attestation_target_epoch = tgt;
-                record.last_signed_attestation_source_epoch = src;
-            }
-        }
+        record.signed_blocks = try parseSignedBlocks(allocator, item_obj.get("signed_blocks"));
+        errdefer allocator.free(record.signed_blocks);
+        record.signed_attestations = try parseSignedAttestations(allocator, item_obj.get("signed_attestations"));
+        errdefer allocator.free(record.signed_attestations);
     }
 
     log.info("imported interchange: {d} validators", .{records.len});
     return records;
 }
 
+fn parseSignedBlocks(allocator: Allocator, blocks_val: ?std.json.Value) ![]SignedBlock {
+    const blocks = switch (blocks_val orelse .null) {
+        .null => return allocator.alloc(SignedBlock, 0),
+        .array => |arr| arr,
+        else => return error.InvalidInterchangeJson,
+    };
+
+    var out = std.array_list.Managed(SignedBlock).init(allocator);
+    errdefer out.deinit();
+
+    for (blocks.items) |block_item| {
+        const block_obj = switch (block_item) {
+            .object => |obj| obj,
+            else => return error.InvalidInterchangeJson,
+        };
+        const slot_val = block_obj.get("slot") orelse return error.MissingInterchangeField;
+        const slot = try parseDecimalU64(slot_val);
+        const signing_root = try parseOptionalSigningRoot(block_obj.get("signing_root"));
+        try out.append(.{
+            .slot = slot,
+            .signing_root = signing_root,
+        });
+    }
+
+    return out.toOwnedSlice();
+}
+
+fn parseSignedAttestations(allocator: Allocator, atts_val: ?std.json.Value) ![]SignedAttestation {
+    const attestations = switch (atts_val orelse .null) {
+        .null => return allocator.alloc(SignedAttestation, 0),
+        .array => |arr| arr,
+        else => return error.InvalidInterchangeJson,
+    };
+
+    var out = std.array_list.Managed(SignedAttestation).init(allocator);
+    errdefer out.deinit();
+
+    for (attestations.items) |att_item| {
+        const att_obj = switch (att_item) {
+            .object => |obj| obj,
+            else => return error.InvalidInterchangeJson,
+        };
+        const source_epoch = try parseDecimalU64(att_obj.get("source_epoch") orelse return error.MissingInterchangeField);
+        const target_epoch = try parseDecimalU64(att_obj.get("target_epoch") orelse return error.MissingInterchangeField);
+        const signing_root = try parseOptionalSigningRoot(att_obj.get("signing_root"));
+        try out.append(.{
+            .source_epoch = source_epoch,
+            .target_epoch = target_epoch,
+            .signing_root = signing_root,
+        });
+    }
+
+    return out.toOwnedSlice();
+}
+
+fn parseDecimalU64(value: std.json.Value) !u64 {
+    return switch (value) {
+        .integer => |n| @intCast(n),
+        .string => |s| std.fmt.parseInt(u64, s, 10),
+        .number_string => |s| std.fmt.parseInt(u64, s, 10),
+        else => error.InvalidInterchangeJson,
+    };
+}
+
+fn parseOptionalSigningRoot(value: ?std.json.Value) ![32]u8 {
+    const root_val = value orelse return UNKNOWN_SIGNING_ROOT;
+    return switch (root_val) {
+        .null => UNKNOWN_SIGNING_ROOT,
+        .string => |s| blk: {
+            var signing_root = UNKNOWN_SIGNING_ROOT;
+            const root_hex = if (std.mem.startsWith(u8, s, "0x")) s[2..] else s;
+            if (root_hex.len == 0) break :blk UNKNOWN_SIGNING_ROOT;
+            _ = std.fmt.hexToBytes(&signing_root, root_hex) catch return error.InvalidInterchangeJson;
+            break :blk signing_root;
+        },
+        else => error.InvalidInterchangeJson,
+    };
+}
+
 // ---------------------------------------------------------------------------
 // Export
 // ---------------------------------------------------------------------------
 
-/// Export SlashingProtectionRecords to EIP-3076 interchange JSON.
+/// Export full slashing-protection history to EIP-3076 interchange JSON.
 ///
 /// genesis_validators_root ties the export to a specific chain.
 ///
@@ -285,7 +291,7 @@ pub fn importInterchangeVerified(
 /// TS: SlashingProtectionInterchange.exportInterchange(pubkeys, genesis_validators_root)
 pub fn exportInterchange(
     allocator: Allocator,
-    records: []const SlashingProtectionRecord,
+    records: []const InterchangeData,
     genesis_validators_root: [32]u8,
 ) ![]u8 {
     var out: std.Io.Writer.Allocating = .init(allocator);
@@ -305,20 +311,28 @@ pub fn exportInterchange(
         const pk_hex = std.fmt.bytesToHex(&rec.pubkey, .lower);
         try writer.print("{{\"pubkey\":\"0x{s}\",\"signed_blocks\":[", .{pk_hex});
 
-        // Emit last signed block slot as a single entry (if any).
-        if (rec.last_signed_block_slot) |slot| {
-            try writer.print("{{\"slot\":\"{d}\",\"signing_root\":null}}", .{slot});
+        for (rec.signed_blocks, 0..) |block, bi| {
+            if (bi > 0) try writer.writeByte(',');
+            try writer.print("{{\"slot\":\"{d}\"", .{block.slot});
+            if (!std.mem.eql(u8, &block.signing_root, &UNKNOWN_SIGNING_ROOT)) {
+                const root_hex = std.fmt.bytesToHex(&block.signing_root, .lower);
+                try writer.print(",\"signing_root\":\"0x{s}\"", .{root_hex});
+            }
+            try writer.writeByte('}');
         }
 
         try writer.writeAll("],\"signed_attestations\":[");
-
-        // Emit last signed attestation as a single entry (if any).
-        if (rec.last_signed_attestation_target_epoch) |target| {
-            const source = rec.last_signed_attestation_source_epoch orelse 0;
+        for (rec.signed_attestations, 0..) |attestation, ai| {
+            if (ai > 0) try writer.writeByte(',');
             try writer.print(
-                "{{\"source_epoch\":\"{d}\",\"target_epoch\":\"{d}\",\"signing_root\":null}}",
-                .{ source, target },
+                "{{\"source_epoch\":\"{d}\",\"target_epoch\":\"{d}\"",
+                .{ attestation.source_epoch, attestation.target_epoch },
             );
+            if (!std.mem.eql(u8, &attestation.signing_root, &UNKNOWN_SIGNING_ROOT)) {
+                const root_hex = std.fmt.bytesToHex(&attestation.signing_root, .lower);
+                try writer.print(",\"signing_root\":\"0x{s}\"", .{root_hex});
+            }
+            try writer.writeByte('}');
         }
 
         try writer.writeAll("]}");
@@ -346,17 +360,17 @@ test "exportInterchange: empty records" {
 
 test "exportInterchange: single validator" {
     const gvr = [_]u8{0xab} ** 32;
-    const records = [_]SlashingProtectionRecord{.{
+    const records = [_]InterchangeData{.{
         .pubkey = [_]u8{0x01} ** 48,
-        .last_signed_block_slot = 100,
-        .last_signed_attestation_source_epoch = 5,
-        .last_signed_attestation_target_epoch = 10,
+        .signed_blocks = &.{.{ .slot = 100 }},
+        .signed_attestations = &.{.{ .source_epoch = 5, .target_epoch = 10 }},
     }};
     const json = try exportInterchange(testing.allocator, &records, gvr);
     defer testing.allocator.free(json);
     try testing.expect(std.mem.indexOf(u8, json, "\"slot\":\"100\"") != null);
     try testing.expect(std.mem.indexOf(u8, json, "\"source_epoch\":\"5\"") != null);
     try testing.expect(std.mem.indexOf(u8, json, "\"target_epoch\":\"10\"") != null);
+    try testing.expect(std.mem.indexOf(u8, json, "\"signing_root\":null") == null);
 }
 
 test "importInterchange: unsupported version" {
@@ -371,20 +385,24 @@ test "importInterchange: empty data" {
         \\{"metadata":{"interchange_format_version":"5","genesis_validators_root":"0x0000000000000000000000000000000000000000000000000000000000000000"},"data":[]}
     ;
     const records = try importInterchange(testing.allocator, json);
-    defer testing.allocator.free(records);
+    defer deinitInterchangeData(testing.allocator, records);
     try testing.expectEqual(@as(usize, 0), records.len);
 }
 
 test "importInterchange: single validator round-trip" {
     const json =
-        \\{"metadata":{"interchange_format_version":"5","genesis_validators_root":"0x0000000000000000000000000000000000000000000000000000000000000000"},"data":[{"pubkey":"0x000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001","signed_blocks":[{"slot":"42"}],"signed_attestations":[{"source_epoch":"3","target_epoch":"7"}]}]}
+        \\{"metadata":{"interchange_format_version":"5","genesis_validators_root":"0x0000000000000000000000000000000000000000000000000000000000000000"},"data":[{"pubkey":"0x000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001","signed_blocks":[{"slot":"42","signing_root":"0x1111111111111111111111111111111111111111111111111111111111111111"}],"signed_attestations":[{"source_epoch":"3","target_epoch":"7","signing_root":"0x2222222222222222222222222222222222222222222222222222222222222222"}]}]}
     ;
     const records = try importInterchange(testing.allocator, json);
-    defer testing.allocator.free(records);
+    defer deinitInterchangeData(testing.allocator, records);
     try testing.expectEqual(@as(usize, 1), records.len);
-    try testing.expectEqual(@as(?u64, 42), records[0].last_signed_block_slot);
-    try testing.expectEqual(@as(?u64, 7), records[0].last_signed_attestation_target_epoch);
-    try testing.expectEqual(@as(?u64, 3), records[0].last_signed_attestation_source_epoch);
+    try testing.expectEqual(@as(usize, 1), records[0].signed_blocks.len);
+    try testing.expectEqual(@as(u64, 42), records[0].signed_blocks[0].slot);
+    try testing.expectEqual(@as(usize, 1), records[0].signed_attestations.len);
+    try testing.expectEqual(@as(u64, 3), records[0].signed_attestations[0].source_epoch);
+    try testing.expectEqual(@as(u64, 7), records[0].signed_attestations[0].target_epoch);
+    try testing.expectEqualSlices(u8, &([_]u8{0x11} ** 32), &records[0].signed_blocks[0].signing_root);
+    try testing.expectEqualSlices(u8, &([_]u8{0x22} ** 32), &records[0].signed_attestations[0].signing_root);
 }
 
 test "importInterchangeVerified: rejects mismatched genesis_validators_root" {
@@ -405,7 +423,7 @@ test "importInterchangeVerified: accepts matching genesis_validators_root" {
     ;
     const expected_gvr = [_]u8{0x00} ** 32;
     const records = try importInterchangeVerified(testing.allocator, json, expected_gvr);
-    defer testing.allocator.free(records);
+    defer deinitInterchangeData(testing.allocator, records);
     try testing.expectEqual(@as(usize, 0), records.len);
 }
 
@@ -415,6 +433,6 @@ test "importInterchangeVerified: skips verification when expected is null" {
     ;
     // null → no verification, any GVR accepted
     const records = try importInterchangeVerified(testing.allocator, json, null);
-    defer testing.allocator.free(records);
+    defer deinitInterchangeData(testing.allocator, records);
     try testing.expectEqual(@as(usize, 0), records.len);
 }

@@ -324,22 +324,11 @@ pub const ValidatorClient = struct {
                     break :blk null;
                 };
                 if (records) |recs| {
-                    defer allocator.free(recs);
+                    defer interchange_mod.deinitInterchangeData(allocator, recs);
                     var imported_count: usize = 0;
                     for (recs) |rec| {
-                        if (rec.last_signed_block_slot) |slot| {
-                            _ = try self.validator_store.slashing_db.checkAndInsertBlock(rec.pubkey, slot);
-                            imported_count += 1;
-                        }
-                        if (rec.last_signed_attestation_source_epoch) |src| {
-                            if (rec.last_signed_attestation_target_epoch) |tgt| {
-                                _ = try self.validator_store.slashing_db.checkAndInsertAttestation(
-                                    rec.pubkey,
-                                    src,
-                                    tgt,
-                                );
-                            }
-                        }
+                        try self.validator_store.slashing_db.importHistory(rec);
+                        imported_count += 1;
                     }
                     log.info("imported interchange: {d} validator records from {s}", .{ imported_count, ipath });
                 }

@@ -509,7 +509,7 @@ test "registerValidator skips doppelganger detection after restart attestation" 
     defer db.close();
 
     const pubkey = [_]u8{0x22} ** 48;
-    try testing.expect(try db.checkAndInsertAttestation(pubkey, 1, 2));
+    try testing.expect(try db.checkAndInsertAttestation(pubkey, 1, 2, [_]u8{0xAA} ** 32));
 
     var api = try BeaconApiClient.init(testing.allocator, testing.io, "http://127.0.0.1:5052");
     defer api.deinit();

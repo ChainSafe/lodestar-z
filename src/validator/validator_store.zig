@@ -25,7 +25,6 @@ const BuilderSelection = types.BuilderSelection;
 const EffectiveProposerConfig = types.EffectiveProposerConfig;
 const ProposerConfig = types.ProposerConfig;
 const ProposerConfigEntry = types.ProposerConfigEntry;
-const SlashingProtectionRecord = types.SlashingProtectionRecord;
 const ValidatorStatus = types.ValidatorStatus;
 
 const SlashingProtectionDb = @import("slashing_protection_db.zig").SlashingProtectionDb;
@@ -63,8 +62,6 @@ pub const ValidatorRecord = struct {
     index: ?u64,
     /// Current activation status.
     status: ValidatorStatus,
-    /// Slashing protection data.
-    slashing: SlashingProtectionRecord,
 
     pub fn isRemote(self: *const ValidatorRecord) bool {
         return switch (self.signer) {
@@ -354,12 +351,6 @@ pub const ValidatorStore = struct {
             .signer = .{ .local = secret_key },
             .index = null,
             .status = .unknown,
-            .slashing = .{
-                .pubkey = pubkey_bytes,
-                .last_signed_block_slot = null,
-                .last_signed_attestation_source_epoch = null,
-                .last_signed_attestation_target_epoch = null,
-            },
         });
         try self.validator_index_by_pubkey.put(self.allocator, pubkey_bytes, self.validators.items.len - 1);
         log.debug("added validator pubkey={x}", .{pubkey_bytes});
@@ -390,12 +381,6 @@ pub const ValidatorStore = struct {
             .signer = .{ .remote = signer },
             .index = null,
             .status = .unknown,
-            .slashing = .{
-                .pubkey = pubkey,
-                .last_signed_block_slot = null,
-                .last_signed_attestation_source_epoch = null,
-                .last_signed_attestation_target_epoch = null,
-            },
         });
         try self.validator_index_by_pubkey.put(self.allocator, pubkey, self.validators.items.len - 1);
         log.info("registered remote validator pubkey={x}", .{pubkey});
@@ -639,7 +624,7 @@ pub const ValidatorStore = struct {
         signing_root: [32]u8,
         slot: u64,
     ) !Signature {
-        var signer = try self.snapshotBlockSigner(pubkey, slot);
+        var signer = try self.snapshotBlockSigner(pubkey, slot, signing_root);
         defer clearSignerValue(&signer);
         return signWithSigner(self.metrics, io, &signer, pubkey, signing_root, .BLOCK_V2);
     }
@@ -678,7 +663,7 @@ pub const ValidatorStore = struct {
         source_epoch: u64,
         target_epoch: u64,
     ) !Signature {
-        var signer = try self.snapshotAttestationSigner(pubkey, source_epoch, target_epoch);
+        var signer = try self.snapshotAttestationSigner(pubkey, source_epoch, target_epoch, signing_root);
         defer clearSignerValue(&signer);
         return signWithSigner(self.metrics, io, &signer, pubkey, signing_root, .ATTESTATION);
     }
@@ -867,20 +852,19 @@ pub const ValidatorStore = struct {
         return cloneSigner(validator.signer);
     }
 
-    fn snapshotBlockSigner(self: *ValidatorStore, pubkey: [48]u8, slot: u64) !ValidatorSigner {
+    fn snapshotBlockSigner(self: *ValidatorStore, pubkey: [48]u8, slot: u64, signing_root: [32]u8) !ValidatorSigner {
         self.lock();
         defer self.unlock();
 
         const validator = self.findValidator(pubkey) orelse return error.ValidatorNotFound;
 
-        const block_allowed = try self.slashing_db.checkAndInsertBlock(pubkey, slot);
+        const block_allowed = try self.slashing_db.checkAndInsertBlock(pubkey, slot, signing_root);
         if (!block_allowed) {
             self.metrics.incrSlashingProtectionBlockError();
             log.warn("slashing protection: refusing to sign block at slot {d}", .{slot});
             return error.SlashingProtectionTriggered;
         }
 
-        validator.slashing.last_signed_block_slot = slot;
         return cloneSigner(validator.signer);
     }
 
@@ -889,21 +873,20 @@ pub const ValidatorStore = struct {
         pubkey: [48]u8,
         source_epoch: u64,
         target_epoch: u64,
+        signing_root: [32]u8,
     ) !ValidatorSigner {
         self.lock();
         defer self.unlock();
 
         const validator = self.findValidator(pubkey) orelse return error.ValidatorNotFound;
 
-        const attest_allowed = try self.slashing_db.checkAndInsertAttestation(pubkey, source_epoch, target_epoch);
+        const attest_allowed = try self.slashing_db.checkAndInsertAttestation(pubkey, source_epoch, target_epoch, signing_root);
         if (!attest_allowed) {
             self.metrics.incrSlashingProtectionAttestationError();
             log.warn("slashing protection: refusing attestation source={d} target={d}", .{ source_epoch, target_epoch });
             return error.SlashingProtectionTriggered;
         }
 
-        validator.slashing.last_signed_attestation_source_epoch = source_epoch;
-        validator.slashing.last_signed_attestation_target_epoch = target_epoch;
         return cloneSigner(validator.signer);
     }
 
