@@ -55,6 +55,15 @@ pub const ProposerDutiesResponse = struct {
     }
 };
 
+pub const AttesterDutiesResponse = struct {
+    duties: []AttesterDuty,
+    dependent_root: ?[32]u8,
+
+    pub fn deinit(self: @This(), allocator: Allocator) void {
+        allocator.free(self.duties);
+    }
+};
+
 /// Callback type for SSE events.
 pub const SseCallback = struct {
     ctx: *anyopaque,
@@ -1579,7 +1588,7 @@ pub const BeaconApiClient = struct {
         io: Io,
         epoch: u64,
         indices: []const u64,
-    ) ![]AttesterDuty {
+    ) !AttesterDutiesResponse {
         const path = try std.fmt.allocPrint(self.allocator, "/eth/v1/validator/duties/attester/{d}", .{epoch});
         defer self.allocator.free(path);
 
@@ -1607,6 +1616,7 @@ pub const BeaconApiClient = struct {
         };
         const Parsed = struct {
             data: []const AttesterDutyJson,
+            dependent_root: ?[]const u8 = null,
         };
 
         var parsed = try std.json.parseFromSlice(Parsed, self.allocator, resp, .{ .ignore_unknown_fields = true });
@@ -1623,7 +1633,13 @@ pub const BeaconApiClient = struct {
             const pk_hex = if (std.mem.startsWith(u8, src.pubkey, "0x")) src.pubkey[2..] else src.pubkey;
             _ = std.fmt.hexToBytes(&dst.pubkey, pk_hex) catch {};
         }
-        return duties;
+        return .{
+            .duties = duties,
+            .dependent_root = if (parsed.value.dependent_root) |root_hex|
+                parseOptionalHexRoot(root_hex)
+            else
+                null,
+        };
     }
 
     /// POST /eth/v1/validator/duties/sync/{epoch}

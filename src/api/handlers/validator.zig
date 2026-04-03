@@ -10,9 +10,9 @@ const types = @import("../types.zig");
 const context = @import("../context.zig");
 const ApiContext = context.ApiContext;
 const CachedBeaconState = context.CachedBeaconState;
+const constants = @import("constants");
 const preset = @import("preset").preset;
 const state_transition = @import("state_transition");
-const EpochCache = state_transition.EpochCache;
 const handler_result = @import("../handler_result.zig");
 const HandlerResult = handler_result.HandlerResult;
 const ResponseMeta = handler_result.ResponseMeta;
@@ -64,6 +64,65 @@ const PoolSubmitProbe = struct {
     }
 };
 
+fn attesterDependentRoot(state: *CachedBeaconState, epoch: u64) ?[32]u8 {
+    const current_epoch = state.epoch_cache.epoch;
+    if (epoch == current_epoch) return state.previousDecisionRoot();
+    if (epoch == current_epoch + 1) return state.currentDecisionRoot();
+    return null;
+}
+
+fn proposerDependentRoot(state: *CachedBeaconState, epoch: u64) ?[32]u8 {
+    const current_epoch = state.epoch_cache.epoch;
+    const is_post_fulu = state.state.forkSeq().gte(.fulu);
+
+    if (epoch == current_epoch) {
+        return if (is_post_fulu) state.previousDecisionRoot() else state.currentDecisionRoot();
+    }
+    if (epoch == current_epoch + 1) {
+        return if (is_post_fulu) state.currentDecisionRoot() else null;
+    }
+    if (epoch + 1 == current_epoch) {
+        return state.previousDecisionRoot();
+    }
+    return null;
+}
+
+fn nextEpochProposers(state: *CachedBeaconState, allocator: std.mem.Allocator) ![preset.SLOTS_PER_EPOCH]u64 {
+    if (state.epoch_cache.proposers_next_epoch) |next| return next;
+
+    const next_epoch = state.epoch_cache.epoch + 1;
+    const active_indices = state.epoch_cache.next_shuffling.get().active_indices;
+
+    var proposers = [_]u64{0} ** preset.SLOTS_PER_EPOCH;
+    if (active_indices.len == 0) return proposers;
+
+    var seed: [32]u8 = undefined;
+    switch (state.state.forkSeq()) {
+        inline else => |fork_seq| {
+            // Exported through the state_transition module so API code does
+            // not reach into another module's private file tree.
+            try state_transition.getSeed(
+                fork_seq,
+                state.state.castToFork(fork_seq),
+                next_epoch,
+                constants.DOMAIN_BEACON_PROPOSER,
+                &seed,
+            );
+            try state_transition.computeProposers(
+                fork_seq,
+                allocator,
+                seed,
+                next_epoch,
+                active_indices,
+                state.epoch_cache.effective_balance_increments.get(),
+                &proposers,
+            );
+        },
+    }
+
+    return proposers;
+}
+
 // ---------------------------------------------------------------------------
 // Handlers
 // ---------------------------------------------------------------------------
@@ -80,45 +139,32 @@ pub fn getProposerDuties(ctx: *ApiContext, epoch: u64) !HandlerResult([]Proposer
     const slots_per_epoch = preset.SLOTS_PER_EPOCH;
     const epoch_start = epoch * slots_per_epoch;
 
+    const state = ctx.headState() orelse return error.NotImplemented;
+    const current_epoch = state.epoch_cache.epoch;
+    const proposer_indices: [slots_per_epoch]u64 = blk: {
+        if (epoch == current_epoch) break :blk state.epoch_cache.proposers;
+        if (epoch == current_epoch + 1) {
+            break :blk try nextEpochProposers(state, ctx.allocator);
+        }
+        if (epoch + 1 == current_epoch) {
+            const prev = state.epoch_cache.proposers_prev_epoch orelse return error.NotImplemented;
+            break :blk prev;
+        }
+        return error.NotImplemented;
+    };
+
     const duties = try ctx.allocator.alloc(ProposerDuty, slots_per_epoch);
     errdefer ctx.allocator.free(duties);
 
-    // Try to get real data from the head state's epoch cache.
-    const head_state = ctx.headState();
+    const validators = try state.state.validatorsSlice(ctx.allocator);
+    defer ctx.allocator.free(validators);
 
-    if (head_state) |state| {
-        const epoch_cache = state.epoch_cache;
-        // Check if this epoch cache covers the requested epoch.
-        // The epoch cache has proposers for its current epoch.
-        if (epoch_cache.epoch == epoch) {
-            // Read proposers from the epoch cache and resolve pubkeys from the state.
-            const validators = try state.state.validatorsSlice(ctx.allocator);
-            defer ctx.allocator.free(validators);
-
-            for (duties, 0..) |*duty, i| {
-                const proposer_index = epoch_cache.proposers[i];
-                const pubkey = if (proposer_index < validators.len) validators[proposer_index].pubkey else [_]u8{0} ** 48;
-                duty.* = .{
-                    .pubkey = pubkey,
-                    .validator_index = proposer_index,
-                    .slot = epoch_start + i,
-                };
-            }
-            return .{
-                .data = duties,
-                .meta = .{
-                    .execution_optimistic = ctx.blockExecutionOptimistic(head.head_root),
-                    .dependent_root = head.head_root,
-                },
-            };
-        }
-    }
-
-    // Fallback: return stub duties with zeroed pubkeys.
     for (duties, 0..) |*duty, i| {
+        const proposer_index = proposer_indices[i];
+        const pubkey = if (proposer_index < validators.len) validators[proposer_index].pubkey else [_]u8{0} ** 48;
         duty.* = .{
-            .pubkey = [_]u8{0} ** 48,
-            .validator_index = 0,
+            .pubkey = pubkey,
+            .validator_index = proposer_index,
             .slot = epoch_start + i,
         };
     }
@@ -127,7 +173,7 @@ pub fn getProposerDuties(ctx: *ApiContext, epoch: u64) !HandlerResult([]Proposer
         .data = duties,
         .meta = .{
             .execution_optimistic = ctx.blockExecutionOptimistic(head.head_root),
-            .dependent_root = head.head_root,
+            .dependent_root = proposerDependentRoot(state, epoch),
         },
     };
 }
@@ -188,7 +234,7 @@ pub fn getAttesterDuties(
         .data = try result.toOwnedSlice(ctx.allocator),
         .meta = .{
             .execution_optimistic = ctx.blockExecutionOptimistic(head.head_root),
-            .dependent_root = head.head_root,
+            .dependent_root = attesterDependentRoot(state, epoch),
         },
     };
 }

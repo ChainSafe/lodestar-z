@@ -33,6 +33,7 @@ const SlashingProtectionDb = @import("slashing_protection_db.zig").SlashingProte
 const remote_signer_mod = @import("remote_signer.zig");
 const RemoteSigner = remote_signer_mod.RemoteSigner;
 const SigningType = remote_signer_mod.SigningType;
+const ValidatorMetrics = @import("metrics.zig").ValidatorMetrics;
 
 const Io = std.Io;
 
@@ -93,8 +94,11 @@ pub const ValidatorStore = struct {
     allocator: Allocator,
     io: Io,
     validators: std.array_list.Managed(ValidatorRecord),
+    /// Hot-path lookup from validator pubkey to its slot in `validators`.
+    validator_index_by_pubkey: std.AutoHashMapUnmanaged([48]u8, usize),
     /// Persistent slashing protection database.
     slashing_db: SlashingProtectionDb,
+    metrics: *ValidatorMetrics,
     /// Default proposer settings applied to every validator unless overridden.
     default_proposer_config: EffectiveProposerConfig,
     /// Per-validator proposer config overrides keyed by pubkey.
@@ -110,17 +114,21 @@ pub const ValidatorStore = struct {
         db_path: ?[]const u8,
         default_proposer_config: EffectiveProposerConfig,
         proposer_configs: []const ProposerConfigEntry,
+        metrics: *ValidatorMetrics,
     ) !ValidatorStore {
         const slashing_db = try SlashingProtectionDb.init(io, allocator, db_path);
         var store = ValidatorStore{
             .allocator = allocator,
             .io = io,
             .validators = std.array_list.Managed(ValidatorRecord).init(allocator),
+            .validator_index_by_pubkey = .empty,
             .slashing_db = slashing_db,
+            .metrics = metrics,
             .default_proposer_config = default_proposer_config,
             .proposer_overrides = .empty,
             .mutex = .init,
         };
+        errdefer store.validator_index_by_pubkey.deinit(allocator);
         errdefer store.proposer_overrides.deinit(allocator);
 
         for (proposer_configs) |entry| {
@@ -136,6 +144,7 @@ pub const ValidatorStore = struct {
             self.clearSigner(v);
         }
         self.validators.deinit();
+        self.validator_index_by_pubkey.deinit(self.allocator);
         self.proposer_overrides.deinit(self.allocator);
         self.slashing_db.close();
     }
@@ -338,10 +347,7 @@ pub const ValidatorStore = struct {
         const pk = secret_key.toPublicKey();
         const pubkey_bytes = pk.compress();
 
-        // Check for duplicate.
-        for (self.validators.items) |v| {
-            if (std.mem.eql(u8, &v.pubkey, &pubkey_bytes)) return; // already present
-        }
+        if (self.validator_index_by_pubkey.contains(pubkey_bytes)) return;
 
         try self.validators.append(.{
             .pubkey = pubkey_bytes,
@@ -355,6 +361,7 @@ pub const ValidatorStore = struct {
                 .last_signed_attestation_target_epoch = null,
             },
         });
+        try self.validator_index_by_pubkey.put(self.allocator, pubkey_bytes, self.validators.items.len - 1);
         log.debug("added validator pubkey={x}", .{pubkey_bytes});
     }
 
@@ -376,10 +383,7 @@ pub const ValidatorStore = struct {
         self.lock();
         defer self.unlock();
 
-        // Check for duplicate (remote or local).
-        for (self.validators.items) |v| {
-            if (std.mem.eql(u8, &v.pubkey, &pubkey)) return; // already present
-        }
+        if (self.validator_index_by_pubkey.contains(pubkey)) return;
 
         try self.validators.append(.{
             .pubkey = pubkey,
@@ -393,6 +397,7 @@ pub const ValidatorStore = struct {
                 .last_signed_attestation_target_epoch = null,
             },
         });
+        try self.validator_index_by_pubkey.put(self.allocator, pubkey, self.validators.items.len - 1);
         log.info("registered remote validator pubkey={x}", .{pubkey});
     }
 
@@ -400,23 +405,18 @@ pub const ValidatorStore = struct {
     pub fn isRemote(self: *ValidatorStore, pubkey: [48]u8) bool {
         self.lock();
         defer self.unlock();
-        for (self.validators.items) |v| {
-            if (std.mem.eql(u8, &v.pubkey, &pubkey)) return v.isRemote();
-        }
-        return false;
+        const validator = self.findValidator(pubkey) orelse return false;
+        return validator.isRemote();
     }
 
     pub fn signerKind(self: *ValidatorStore, pubkey: [48]u8) ?SignerKind {
         self.lock();
         defer self.unlock();
-        for (self.validators.items) |v| {
-            if (!std.mem.eql(u8, &v.pubkey, &pubkey)) continue;
-            return switch (v.signer) {
-                .local => .local,
-                .remote => .remote,
-            };
-        }
-        return null;
+        const validator = self.findValidator(pubkey) orelse return null;
+        return switch (validator.signer) {
+            .local => .local,
+            .remote => .remote,
+        };
     }
 
     /// Remove a validator key at runtime (thread-safe).
@@ -429,16 +429,20 @@ pub const ValidatorStore = struct {
         self.lock();
         defer self.unlock();
 
-        for (self.validators.items, 0..) |v, i| {
-            if (std.mem.eql(u8, &v.pubkey, &pubkey)) {
-                // Zero secret key memory before removing the entry.
-                self.clearSigner(&self.validators.items[i]);
-                _ = self.validators.swapRemove(i);
-                log.info("removed validator pubkey={x}", .{pubkey});
-                return true;
-            }
+        const idx = self.validator_index_by_pubkey.get(pubkey) orelse return false;
+        const last_idx = self.validators.items.len - 1;
+        const moved_pubkey = if (idx != last_idx) self.validators.items[last_idx].pubkey else null;
+
+        self.clearSigner(&self.validators.items[idx]);
+        _ = self.validators.swapRemove(idx);
+        _ = self.validator_index_by_pubkey.remove(pubkey);
+
+        if (moved_pubkey) |moved| {
+            self.validator_index_by_pubkey.put(self.allocator, moved, idx) catch unreachable;
         }
-        return false;
+
+        log.info("removed validator pubkey={x}", .{pubkey});
+        return true;
     }
 
     /// Validator metadata for listing.
@@ -550,11 +554,7 @@ pub const ValidatorStore = struct {
     pub fn hasPubkey(self: *const ValidatorStore, pubkey: [48]u8) bool {
         self.lockConst();
         defer self.unlockConst();
-
-        for (self.validators.items) |v| {
-            if (std.mem.eql(u8, &v.pubkey, &pubkey)) return true;
-        }
-        return false;
+        return self.validator_index_by_pubkey.contains(pubkey);
     }
 
     /// Return all known public keys as an owned slice (caller must free).
@@ -597,13 +597,9 @@ pub const ValidatorStore = struct {
         self.lock();
         defer self.unlock();
 
-        for (self.validators.items) |*v| {
-            if (std.mem.eql(u8, &v.pubkey, &pubkey)) {
-                v.index = index;
-                v.status = status;
-                return;
-            }
-        }
+        const validator = self.findValidator(pubkey) orelse return;
+        validator.index = index;
+        validator.status = status;
     }
 
     /// Return all duty-eligible validator indices.
@@ -643,25 +639,9 @@ pub const ValidatorStore = struct {
         signing_root: [32]u8,
         slot: u64,
     ) !Signature {
-        // Hold mutex for the entire check-and-sign sequence to prevent TOCTOU races
-        // between the slashing protection check and the actual signing operation.
-        self.lock();
-        defer self.unlock();
-
-        const validator = self.findValidator(pubkey) orelse return error.ValidatorNotFound;
-
-        // Slashing protection FIRST: applies to both local and remote validators.
-        // Remote signers must not be allowed to bypass the slashing DB.
-        const block_allowed = try self.slashing_db.checkAndInsertBlock(pubkey, slot);
-        if (!block_allowed) {
-            log.warn("slashing protection: refusing to sign block at slot {d}", .{slot});
-            return error.SlashingProtectionTriggered;
-        }
-
-        // Also update the in-memory SlashingProtectionRecord for quick reference.
-        validator.slashing.last_signed_block_slot = slot;
-
-        return self.signWithValidator(io, validator, pubkey, signing_root, .BLOCK_V2);
+        var signer = try self.snapshotBlockSigner(pubkey, slot);
+        defer clearSignerValue(&signer);
+        return signWithSigner(self.metrics, io, &signer, pubkey, signing_root, .BLOCK_V2);
     }
 
     /// Produce a RANDAO reveal for the given epoch.
@@ -673,10 +653,9 @@ pub const ValidatorStore = struct {
         pubkey: [48]u8,
         signing_root: [32]u8,
     ) !Signature {
-        self.lock();
-        defer self.unlock();
-        const validator = self.findValidator(pubkey) orelse return error.ValidatorNotFound;
-        return self.signWithValidator(io, validator, pubkey, signing_root, .RANDAO_REVEAL);
+        var signer = try self.snapshotSigner(pubkey);
+        defer clearSignerValue(&signer);
+        return signWithSigner(self.metrics, io, &signer, pubkey, signing_root, .RANDAO_REVEAL);
     }
 
     /// Sign attestation data.
@@ -699,26 +678,9 @@ pub const ValidatorStore = struct {
         source_epoch: u64,
         target_epoch: u64,
     ) !Signature {
-        // Hold mutex for the entire check-and-sign sequence to prevent TOCTOU races
-        // between the slashing protection check and the actual signing operation.
-        self.lock();
-        defer self.unlock();
-
-        const validator = self.findValidator(pubkey) orelse return error.ValidatorNotFound;
-
-        // Slashing protection FIRST: applies to both local and remote validators.
-        // Remote signers must not be allowed to bypass the slashing DB.
-        const attest_allowed = try self.slashing_db.checkAndInsertAttestation(pubkey, source_epoch, target_epoch);
-        if (!attest_allowed) {
-            log.warn("slashing protection: refusing attestation source={d} target={d}", .{ source_epoch, target_epoch });
-            return error.SlashingProtectionTriggered;
-        }
-
-        // Also update the in-memory SlashingProtectionRecord for quick reference.
-        validator.slashing.last_signed_attestation_source_epoch = source_epoch;
-        validator.slashing.last_signed_attestation_target_epoch = target_epoch;
-
-        return self.signWithValidator(io, validator, pubkey, signing_root, .ATTESTATION);
+        var signer = try self.snapshotAttestationSigner(pubkey, source_epoch, target_epoch);
+        defer clearSignerValue(&signer);
+        return signWithSigner(self.metrics, io, &signer, pubkey, signing_root, .ATTESTATION);
     }
 
     /// Sign a sync committee message.
@@ -730,10 +692,9 @@ pub const ValidatorStore = struct {
         pubkey: [48]u8,
         signing_root: [32]u8,
     ) !Signature {
-        self.lock();
-        defer self.unlock();
-        const validator = self.findValidator(pubkey) orelse return error.ValidatorNotFound;
-        return self.signWithValidator(io, validator, pubkey, signing_root, .SYNC_COMMITTEE_MESSAGE);
+        var signer = try self.snapshotSigner(pubkey);
+        defer clearSignerValue(&signer);
+        return signWithSigner(self.metrics, io, &signer, pubkey, signing_root, .SYNC_COMMITTEE_MESSAGE);
     }
 
     /// Sign a selection proof for aggregation eligibility.
@@ -750,10 +711,9 @@ pub const ValidatorStore = struct {
         signing_root: [32]u8,
         signing_type: SigningType,
     ) !Signature {
-        self.lock();
-        defer self.unlock();
-        const validator = self.findValidator(pubkey) orelse return error.ValidatorNotFound;
-        return self.signWithValidator(io, validator, pubkey, signing_root, signing_type);
+        var signer = try self.snapshotSigner(pubkey);
+        defer clearSignerValue(&signer);
+        return signWithSigner(self.metrics, io, &signer, pubkey, signing_root, signing_type);
     }
 
     /// Sign an aggregate and proof.
@@ -765,10 +725,9 @@ pub const ValidatorStore = struct {
         pubkey: [48]u8,
         signing_root: [32]u8,
     ) !Signature {
-        self.lock();
-        defer self.unlock();
-        const validator = self.findValidator(pubkey) orelse return error.ValidatorNotFound;
-        return self.signWithValidator(io, validator, pubkey, signing_root, .AGGREGATE_AND_PROOF);
+        var signer = try self.snapshotSigner(pubkey);
+        defer clearSignerValue(&signer);
+        return signWithSigner(self.metrics, io, &signer, pubkey, signing_root, .AGGREGATE_AND_PROOF);
     }
 
     /// Sign a sync committee contribution and proof.
@@ -780,10 +739,9 @@ pub const ValidatorStore = struct {
         pubkey: [48]u8,
         signing_root: [32]u8,
     ) !Signature {
-        self.lock();
-        defer self.unlock();
-        const validator = self.findValidator(pubkey) orelse return error.ValidatorNotFound;
-        return self.signWithValidator(io, validator, pubkey, signing_root, .SYNC_COMMITTEE_CONTRIBUTION_AND_PROOF);
+        var signer = try self.snapshotSigner(pubkey);
+        defer clearSignerValue(&signer);
+        return signWithSigner(self.metrics, io, &signer, pubkey, signing_root, .SYNC_COMMITTEE_CONTRIBUTION_AND_PROOF);
     }
 
     /// Get the on-chain validator index for a given pubkey, or null if not yet resolved.
@@ -808,10 +766,9 @@ pub const ValidatorStore = struct {
         pubkey: [48]u8,
         signing_root: [32]u8,
     ) !Signature {
-        self.lock();
-        defer self.unlock();
-        const validator = self.findValidator(pubkey) orelse return error.ValidatorNotFound;
-        return self.signWithValidator(io, validator, pubkey, signing_root, .VOLUNTARY_EXIT);
+        var signer = try self.snapshotSigner(pubkey);
+        defer clearSignerValue(&signer);
+        return signWithSigner(self.metrics, io, &signer, pubkey, signing_root, .VOLUNTARY_EXIT);
     }
 
     pub fn signBuilderRegistration(
@@ -820,10 +777,9 @@ pub const ValidatorStore = struct {
         pubkey: [48]u8,
         signing_root: [32]u8,
     ) !Signature {
-        self.lock();
-        defer self.unlock();
-        const validator = self.findValidator(pubkey) orelse return error.ValidatorNotFound;
-        return self.signWithValidator(io, validator, pubkey, signing_root, .VALIDATOR_REGISTRATION);
+        var signer = try self.snapshotSigner(pubkey);
+        defer clearSignerValue(&signer);
+        return signWithSigner(self.metrics, io, &signer, pubkey, signing_root, .VALIDATOR_REGISTRATION);
     }
 
     // -----------------------------------------------------------------------
@@ -885,18 +841,13 @@ pub const ValidatorStore = struct {
     }
 
     fn findValidator(self: *ValidatorStore, pubkey: [48]u8) ?*ValidatorRecord {
-        for (self.validators.items) |*v| {
-            if (std.mem.eql(u8, &v.pubkey, &pubkey)) return v;
-        }
-        return null;
+        const idx = self.validator_index_by_pubkey.get(pubkey) orelse return null;
+        return &self.validators.items[idx];
     }
 
     fn clearSigner(self: *ValidatorStore, validator: *ValidatorRecord) void {
         _ = self;
-        switch (validator.signer) {
-            .local => |*secret_key| std.crypto.secureZero(u8, &secret_key.value.b),
-            .remote => {},
-        }
+        clearSignerValue(&validator.signer);
     }
 
     fn isActiveStatus(status: ValidatorStatus) bool {
@@ -909,19 +860,81 @@ pub const ValidatorStore = struct {
         };
     }
 
-    fn signWithValidator(
+    fn snapshotSigner(self: *ValidatorStore, pubkey: [48]u8) !ValidatorSigner {
+        self.lock();
+        defer self.unlock();
+        const validator = self.findValidator(pubkey) orelse return error.ValidatorNotFound;
+        return cloneSigner(validator.signer);
+    }
+
+    fn snapshotBlockSigner(self: *ValidatorStore, pubkey: [48]u8, slot: u64) !ValidatorSigner {
+        self.lock();
+        defer self.unlock();
+
+        const validator = self.findValidator(pubkey) orelse return error.ValidatorNotFound;
+
+        const block_allowed = try self.slashing_db.checkAndInsertBlock(pubkey, slot);
+        if (!block_allowed) {
+            self.metrics.incrSlashingProtectionBlockError();
+            log.warn("slashing protection: refusing to sign block at slot {d}", .{slot});
+            return error.SlashingProtectionTriggered;
+        }
+
+        validator.slashing.last_signed_block_slot = slot;
+        return cloneSigner(validator.signer);
+    }
+
+    fn snapshotAttestationSigner(
         self: *ValidatorStore,
+        pubkey: [48]u8,
+        source_epoch: u64,
+        target_epoch: u64,
+    ) !ValidatorSigner {
+        self.lock();
+        defer self.unlock();
+
+        const validator = self.findValidator(pubkey) orelse return error.ValidatorNotFound;
+
+        const attest_allowed = try self.slashing_db.checkAndInsertAttestation(pubkey, source_epoch, target_epoch);
+        if (!attest_allowed) {
+            self.metrics.incrSlashingProtectionAttestationError();
+            log.warn("slashing protection: refusing attestation source={d} target={d}", .{ source_epoch, target_epoch });
+            return error.SlashingProtectionTriggered;
+        }
+
+        validator.slashing.last_signed_attestation_source_epoch = source_epoch;
+        validator.slashing.last_signed_attestation_target_epoch = target_epoch;
+        return cloneSigner(validator.signer);
+    }
+
+    fn cloneSigner(signer: ValidatorSigner) ValidatorSigner {
+        return switch (signer) {
+            .local => |secret_key| .{ .local = secret_key },
+            .remote => |remote_signer| .{ .remote = remote_signer },
+        };
+    }
+
+    fn clearSignerValue(signer: *ValidatorSigner) void {
+        switch (signer.*) {
+            .local => |*secret_key| std.crypto.secureZero(u8, &secret_key.value.b),
+            .remote => {},
+        }
+    }
+
+    fn signWithSigner(
+        metrics: *ValidatorMetrics,
         io: Io,
-        validator: *const ValidatorRecord,
+        signer: *const ValidatorSigner,
         pubkey: [48]u8,
         signing_root: [32]u8,
         signing_type: SigningType,
     ) !Signature {
-        _ = self;
-        return switch (validator.signer) {
+        return switch (signer.*) {
             .local => |secret_key| secret_key.sign(&signing_root, bls.DST, null),
             .remote => |remote_signer| blk: {
                 break :blk remote_signer.sign(io, pubkey, signing_root, signing_type) catch |err| {
+                    metrics.incrRemoteSignError();
+                    metrics.incrSignError();
                     log.warn(
                         "remote signer url={s} type={s} error={s}",
                         .{ remote_signer.base_url, signing_type.asStr(), @errorName(err) },
@@ -938,6 +951,7 @@ pub const ValidatorStore = struct {
 // ---------------------------------------------------------------------------
 
 const testing = std.testing;
+var test_noop_metrics = ValidatorMetrics.initNoop();
 
 fn makeDummyKey() SecretKey {
     // Generate a deterministic test key from a fixed scalar.
@@ -953,7 +967,7 @@ fn initTestStore() !ValidatorStore {
         .gas_limit = 60_000_000,
         .builder_boost_factor = 100,
         .strict_fee_recipient_check = false,
-    }, &.{});
+    }, &.{}, &test_noop_metrics);
 }
 
 test "ValidatorStore: addKey and allIndices" {
@@ -1143,7 +1157,7 @@ test "ValidatorStore: proposer config overrides apply after validator is added" 
                 .builder_boost_factor = 200,
             },
         },
-    });
+    }, &test_noop_metrics);
     defer store.deinit();
 
     try store.addKey(sk);
@@ -1184,7 +1198,7 @@ test "ValidatorStore: builder selection params derive effective boost factor" {
                 .builder_boost_factor = 125,
             },
         },
-    });
+    }, &test_noop_metrics);
     defer store.deinit();
 
     try store.addKey(sk);

@@ -53,6 +53,10 @@ pub const BeaconHealth = enum(u64) {
 };
 
 pub const ValidatorMetrics = struct {
+    remote_sign_errors_total: Counter(u64),
+    sign_errors_total: Counter(u64),
+    slashing_protection_block_errors_total: Counter(u64),
+    slashing_protection_attestation_errors_total: Counter(u64),
     attestation_published_total: Counter(u64),
     attestation_missed_total: Counter(u64),
     attestation_delay_seconds: Histogram(f64, &attestation_delay_buckets),
@@ -94,6 +98,18 @@ pub const ValidatorMetrics = struct {
     pub fn init(allocator: std.mem.Allocator) !ValidatorMetrics {
         const ro: metrics_lib.RegistryOpts = .{};
         return .{
+            .remote_sign_errors_total = Counter(u64).init("vc_remote_sign_errors_total", .{}, ro),
+            .sign_errors_total = Counter(u64).init("vc_sign_errors_total", .{}, ro),
+            .slashing_protection_block_errors_total = Counter(u64).init(
+                "vc_slashing_protection_block_errors_total",
+                .{},
+                ro,
+            ),
+            .slashing_protection_attestation_errors_total = Counter(u64).init(
+                "vc_slashing_protection_attestation_errors_total",
+                .{},
+                ro,
+            ),
             .attestation_published_total = Counter(u64).init("validator_attestation_published_total", .{}, ro),
             .attestation_missed_total = Counter(u64).init("validator_attestation_missed_total", .{}, ro),
             .attestation_delay_seconds = Histogram(f64, &attestation_delay_buckets).init("validator_attestation_delay_seconds", .{}, ro),
@@ -224,6 +240,22 @@ pub const ValidatorMetrics = struct {
         self.keymanager_response_seconds.observe(labels, response_time_seconds) catch return;
     }
 
+    pub fn incrRemoteSignError(self: *ValidatorMetrics) void {
+        self.remote_sign_errors_total.incr();
+    }
+
+    pub fn incrSignError(self: *ValidatorMetrics) void {
+        self.sign_errors_total.incr();
+    }
+
+    pub fn incrSlashingProtectionBlockError(self: *ValidatorMetrics) void {
+        self.slashing_protection_block_errors_total.incr();
+    }
+
+    pub fn incrSlashingProtectionAttestationError(self: *ValidatorMetrics) void {
+        self.slashing_protection_attestation_errors_total.incr();
+    }
+
     pub fn setKeymanagerActiveConnections(self: *ValidatorMetrics, active_connections: u32) void {
         self.keymanager_active_connections.set(active_connections);
     }
@@ -342,6 +374,10 @@ fn onKeymanagerRequestCompleted(
 test "ValidatorMetrics: init and observe" {
     var m = try ValidatorMetrics.init(std.testing.allocator);
     defer m.deinit();
+    m.incrRemoteSignError();
+    m.incrSignError();
+    m.incrSlashingProtectionBlockError();
+    m.incrSlashingProtectionAttestationError();
     m.attestation_published_total.incr();
     m.block_proposed_total.incr();
     m.attestation_delay_seconds.observe(1.5);
@@ -360,6 +396,10 @@ test "ValidatorMetrics: init and observe" {
     m.recordRestApiError("beacon.getGenesis", "http://127.0.0.1:5052");
     m.recordRestApiFallback("beacon.getGenesis", "http://127.0.0.1:5053");
     m.setRestApiUrlScore(0, "http://127.0.0.1:5052", 10);
+    try std.testing.expectEqual(@as(u64, 1), m.remote_sign_errors_total.impl.count);
+    try std.testing.expectEqual(@as(u64, 1), m.sign_errors_total.impl.count);
+    try std.testing.expectEqual(@as(u64, 1), m.slashing_protection_block_errors_total.impl.count);
+    try std.testing.expectEqual(@as(u64, 1), m.slashing_protection_attestation_errors_total.impl.count);
     try std.testing.expectEqual(@as(u64, 1), m.attestation_published_total.impl.count);
     try std.testing.expectEqual(@as(u64, 1), m.block_proposed_total.impl.count);
     try std.testing.expectEqual(@as(u64, 12), m.attester_duties_count.impl.value);
@@ -375,6 +415,10 @@ test "ValidatorMetrics: init and observe" {
 
 test "ValidatorMetrics: noop is safe" {
     var m = ValidatorMetrics.initNoop();
+    m.incrRemoteSignError();
+    m.incrSignError();
+    m.incrSlashingProtectionBlockError();
+    m.incrSlashingProtectionAttestationError();
     m.attestation_published_total.incr();
     m.block_proposed_total.incr();
     m.attestation_delay_seconds.observe(1.5);
@@ -399,6 +443,10 @@ test "ValidatorMetrics: noop is safe" {
 test "ValidatorMetrics: write produces Prometheus output" {
     var m = try ValidatorMetrics.init(std.testing.allocator);
     defer m.deinit();
+    m.incrRemoteSignError();
+    m.incrSignError();
+    m.incrSlashingProtectionBlockError();
+    m.incrSlashingProtectionAttestationError();
     m.attestation_published_total.incr();
     m.block_proposed_total.incr();
     m.observeKeymanagerRequest("listKeystores", 0.01, false);

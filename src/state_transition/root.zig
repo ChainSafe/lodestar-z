@@ -92,6 +92,8 @@ pub const deinitStateTransition = @import("./state_transition.zig").deinitStateT
 pub const isExecutionEnabled = @import("./utils/execution.zig").isExecutionEnabled;
 pub const isMergeTransitionComplete = @import("./utils/execution.zig").isMergeTransitionComplete;
 pub const getRandaoMix = @import("./utils/seed.zig").getRandaoMix;
+pub const getSeed = @import("./utils/seed.zig").getSeed;
+pub const computeProposers = @import("./utils/seed.zig").computeProposers;
 pub const getEffectiveBalanceIncrementsZeroInactive = @import("./utils/balance.zig").getEffectiveBalanceIncrementsZeroInactive;
 
 pub const WithdrawalsResult = @import("./block/process_withdrawals.zig").WithdrawalsResult;

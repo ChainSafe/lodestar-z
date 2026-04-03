@@ -87,9 +87,15 @@ pub const AttestationService = struct {
     duties: std.array_list.Managed(AttesterDutyWithProof),
     /// Epoch for which duties are currently cached.
     duties_epoch: ?u64,
+    /// Decision root that keyed the currently cached epoch duties.
+    current_duties_dependent_root: ?[32]u8,
     /// Pre-fetched duties for next epoch.
     next_duties: std.array_list.Managed(AttesterDutyWithProof),
     next_duties_epoch: ?u64,
+    /// Decision root that keyed the prefetched next-epoch duties.
+    next_duties_dependent_root: ?[32]u8,
+    /// Reorg-updated decision root for next epoch seen before the boundary.
+    pending_next_duties_dependent_root: ?[32]u8,
     /// Optional chain header tracker for reorg detection.
     header_tracker: ?*ChainHeaderTracker,
     /// Last known previous_duty_dependent_root — used to detect reorgs.
@@ -146,8 +152,11 @@ pub const AttestationService = struct {
             .cache_mutex = .init,
             .duties = std.array_list.Managed(AttesterDutyWithProof).init(allocator),
             .duties_epoch = null,
+            .current_duties_dependent_root = null,
             .next_duties = std.array_list.Managed(AttesterDutyWithProof).init(allocator),
             .next_duties_epoch = null,
+            .next_duties_dependent_root = null,
+            .pending_next_duties_dependent_root = null,
             .header_tracker = null,
             .last_previous_dependent_root = [_]u8{0} ** 32,
             .last_current_dependent_root = [_]u8{0} ** 32,
@@ -226,7 +235,7 @@ pub const AttestationService = struct {
         // Head callbacks are synchronous, so do not do HTTP work here. Instead,
         // invalidate whichever epoch cache depends on the changed root so the
         // next slot/epoch boundary refreshes the affected duties before use.
-        if (prev_changed) {
+        if (prev_changed and self.currentEpochDutiesNeedRefreshLocked(current_epoch, info.previous_duty_dependent_root)) {
             log.warn(
                 "attester duties invalidated for current epoch={d} at slot={d}: previous dependent root changed",
                 .{ current_epoch, info.slot },
@@ -234,20 +243,20 @@ pub const AttestationService = struct {
             self.metrics.incrAttesterDutyReorg();
             self.current_duties_revision +|= 1;
             self.duties_epoch = null;
+            self.current_duties_dependent_root = null;
         }
 
         if (curr_changed) {
             const next_epoch = current_epoch + 1;
-            log.warn(
-                "attester duties invalidated for next epoch={d} at slot={d}: current dependent root changed",
-                .{ next_epoch, info.slot },
-            );
-            self.metrics.incrAttesterDutyReorg();
             self.next_duties_revision +|= 1;
-            if (self.next_duties_epoch != null and self.next_duties_epoch.? == next_epoch) {
-                self.next_duties.clearRetainingCapacity();
+            if (self.nextEpochDutiesNeedRefreshLocked(next_epoch, info.current_duty_dependent_root)) {
+                log.warn(
+                    "attester duties marked stale for next epoch={d} at slot={d}: current dependent root changed",
+                    .{ next_epoch, info.slot },
+                );
+                self.metrics.incrAttesterDutyReorg();
+                self.pending_next_duties_dependent_root = info.current_duty_dependent_root;
             }
-            self.next_duties_epoch = null;
         }
 
         self.updateDutyMetricsLocked();
@@ -339,22 +348,22 @@ pub const AttestationService = struct {
         log.debug("fetching attester duties epoch={d} validators={d}", .{ epoch, indices.len });
 
         const fetched = try self.api.getAttesterDuties(io, epoch, indices);
-        defer self.allocator.free(fetched);
+        defer fetched.deinit(self.allocator);
 
-        var fresh_duties = try self.buildDutyList(io, fetched);
+        var fresh_duties = try self.buildDutyList(io, fetched.duties);
         errdefer fresh_duties.deinit();
 
         const subscriptions = try self.buildBeaconCommitteeSubscriptions(fresh_duties.items);
         errdefer self.allocator.free(subscriptions);
 
-        if (!self.tryInstallCurrentDuties(epoch, revision, &fresh_duties)) {
+        if (!self.tryInstallCurrentDuties(epoch, revision, fetched.dependent_root, &fresh_duties)) {
             log.debug("discarded stale attester duty refresh epoch={d} after dependent-root invalidation", .{epoch});
             return;
         }
 
         defer self.allocator.free(subscriptions);
         self.publishBeaconCommitteeSubscriptions(io, subscriptions);
-        log.debug("cached {d} attester duties epoch={d}", .{ fetched.len, epoch });
+        log.debug("cached {d} attester duties epoch={d}", .{ fetched.duties.len, epoch });
     }
 
     /// Pre-fetch attester duties for next epoch to avoid latency at epoch boundaries.
@@ -371,9 +380,9 @@ pub const AttestationService = struct {
             log.warn("prefetch attester duties epoch={d} error={s}", .{ next_epoch, @errorName(err) });
             return;
         };
-        defer self.allocator.free(fetched);
+        defer fetched.deinit(self.allocator);
 
-        var fresh_duties = self.buildDutyList(io, fetched) catch |err| {
+        var fresh_duties = self.buildDutyList(io, fetched.duties) catch |err| {
             log.warn("prefetch duty proof build epoch={d} error={s}", .{ next_epoch, @errorName(err) });
             return;
         };
@@ -385,20 +394,20 @@ pub const AttestationService = struct {
         };
         errdefer self.allocator.free(subscriptions);
 
-        if (!self.tryInstallNextDuties(next_epoch, revision, &fresh_duties)) {
+        if (!self.tryInstallNextDuties(next_epoch, revision, fetched.dependent_root, &fresh_duties)) {
             log.debug("discarded stale next-epoch duty prefetch epoch={d} after dependent-root invalidation", .{next_epoch});
             return;
         }
 
         defer self.allocator.free(subscriptions);
         self.publishBeaconCommitteeSubscriptions(io, subscriptions);
-        log.debug("pre-fetched {d} attester duties epoch={d}", .{ fetched.len, next_epoch });
+        log.debug("pre-fetched {d} attester duties epoch={d}", .{ fetched.duties.len, next_epoch });
     }
 
     fn maybePrefetchNextEpochDuties(self: *AttestationService, io: Io, slot: u64) void {
         const epoch = slot / self.signing_ctx.slots_per_epoch;
         const next_epoch = epoch + 1;
-        if (self.hasNextEpochDuties(next_epoch)) return;
+        if (!self.nextEpochDutiesNeedRefresh(next_epoch)) return;
 
         if (self.isLastSlotOfEpoch(slot)) {
             const slot_duration_ns = self.seconds_per_slot * std.time.ns_per_s;
@@ -414,7 +423,7 @@ pub const AttestationService = struct {
             }
         }
 
-        if (!self.hasNextEpochDuties(next_epoch)) {
+        if (self.nextEpochDutiesNeedRefresh(next_epoch)) {
             self.prefetchNextEpochDuties(io, next_epoch);
         }
     }
@@ -626,6 +635,7 @@ pub const AttestationService = struct {
         self: *AttestationService,
         epoch: u64,
         revision: u64,
+        dependent_root: ?[32]u8,
         duties: *std.array_list.Managed(AttesterDutyWithProof),
     ) bool {
         self.cache_mutex.lockUncancelable(self.io);
@@ -636,6 +646,7 @@ pub const AttestationService = struct {
         const old = self.duties;
         self.duties = duties.*;
         self.duties_epoch = epoch;
+        self.current_duties_dependent_root = dependent_root;
         duties.* = std.array_list.Managed(AttesterDutyWithProof).init(self.allocator);
         old.deinit();
         self.updateDutyMetricsLocked();
@@ -646,6 +657,7 @@ pub const AttestationService = struct {
         self: *AttestationService,
         epoch: u64,
         revision: u64,
+        dependent_root: ?[32]u8,
         duties: *std.array_list.Managed(AttesterDutyWithProof),
     ) bool {
         self.cache_mutex.lockUncancelable(self.io);
@@ -656,6 +668,8 @@ pub const AttestationService = struct {
         const old = self.next_duties;
         self.next_duties = duties.*;
         self.next_duties_epoch = epoch;
+        self.next_duties_dependent_root = dependent_root;
+        self.pending_next_duties_dependent_root = null;
         duties.* = std.array_list.Managed(AttesterDutyWithProof).init(self.allocator);
         old.deinit();
         self.updateDutyMetricsLocked();
@@ -682,11 +696,42 @@ pub const AttestationService = struct {
         const old_current = self.duties;
         self.duties = self.next_duties;
         self.duties_epoch = epoch;
+        self.current_duties_dependent_root = self.next_duties_dependent_root;
         self.next_duties = std.array_list.Managed(AttesterDutyWithProof).init(self.allocator);
         self.next_duties_epoch = null;
+        self.next_duties_dependent_root = null;
+        self.pending_next_duties_dependent_root = null;
         old_current.deinit();
         self.updateDutyMetricsLocked();
         return subscriptions;
+    }
+
+    fn nextEpochDutiesNeedRefresh(self: *AttestationService, epoch: u64) bool {
+        self.cache_mutex.lockUncancelable(self.io);
+        defer self.cache_mutex.unlock(self.io);
+        return self.nextEpochDutiesNeedRefreshLocked(epoch, null);
+    }
+
+    fn currentEpochDutiesNeedRefreshLocked(
+        self: *const AttestationService,
+        epoch: u64,
+        new_dependent_root: [32]u8,
+    ) bool {
+        if (self.duties_epoch == null or self.duties_epoch.? != epoch) return false;
+        const cached = self.current_duties_dependent_root orelse return true;
+        return !std.mem.eql(u8, &cached, &new_dependent_root);
+    }
+
+    fn nextEpochDutiesNeedRefreshLocked(
+        self: *const AttestationService,
+        epoch: u64,
+        override_pending_root: ?[32]u8,
+    ) bool {
+        if (self.next_duties_epoch == null or self.next_duties_epoch.? != epoch) return true;
+
+        const pending_root = override_pending_root orelse self.pending_next_duties_dependent_root orelse return false;
+        const cached = self.next_duties_dependent_root orelse return true;
+        return !std.mem.eql(u8, &cached, &pending_root);
     }
 
     fn updateDutyMetricsLocked(self: *AttestationService) void {
@@ -1283,6 +1328,7 @@ test "snapshotCurrentDutiesForSlot hides invalidated stale duties" {
         .selection_proof = null,
     });
     svc.duties_epoch = 2;
+    svc.current_duties_dependent_root = [_]u8{1} ** 32;
 
     var snapshot = try svc.snapshotCurrentDutiesForSlot(64);
     try std.testing.expectEqual(@as(usize, 1), snapshot.len);
@@ -1303,7 +1349,7 @@ test "snapshotCurrentDutiesForSlot hides invalidated stale duties" {
     try std.testing.expect(svc.duties_epoch == null);
 }
 
-test "onHeadChange invalidates prefetched next epoch duties" {
+test "onHeadChange marks prefetched next epoch duties for refresh" {
     var svc = testAttestationService();
     defer svc.deinit();
 
@@ -1320,6 +1366,7 @@ test "onHeadChange invalidates prefetched next epoch duties" {
         .selection_proof = null,
     });
     svc.next_duties_epoch = 3;
+    svc.next_duties_dependent_root = [_]u8{2} ** 32;
 
     const prior_revision = svc.nextDutiesRevision();
     AttestationService.onHeadChange(@ptrCast(&svc), .{
@@ -1330,7 +1377,9 @@ test "onHeadChange invalidates prefetched next epoch duties" {
         .current_duty_dependent_root = [_]u8{7} ** 32,
     });
 
-    try std.testing.expect(svc.next_duties_epoch == null);
-    try std.testing.expectEqual(@as(usize, 0), svc.next_duties.items.len);
+    try std.testing.expectEqual(@as(?u64, 3), svc.next_duties_epoch);
+    try std.testing.expectEqual(@as(usize, 1), svc.next_duties.items.len);
     try std.testing.expect(svc.nextDutiesRevision() > prior_revision);
+    try std.testing.expectEqual(@as(?[32]u8, [_]u8{7} ** 32), svc.pending_next_duties_dependent_root);
+    try std.testing.expect(svc.nextEpochDutiesNeedRefresh(3));
 }

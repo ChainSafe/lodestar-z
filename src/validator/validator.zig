@@ -216,6 +216,7 @@ pub const ValidatorClient = struct {
                 .strict_fee_recipient_check = config.strict_fee_recipient_check,
             },
             config.proposer_configs,
+            self.metrics,
         );
         errdefer self.validator_store.deinit();
 
