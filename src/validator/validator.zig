@@ -93,11 +93,47 @@ const log = std.log.scoped(.validator_client);
 pub const ValidatorClient = struct {
     pub const ValidatorCounts = store_mod.ValidatorStore.ValidatorCounts;
     const BackgroundTaskFuture = std.Io.Future(anyerror!void);
+    const RuntimeMutationQueue = std.Io.Queue(*RuntimeMutationRequest);
     pub const InitParams = struct {
         config: ValidatorConfig,
         signing_context: SigningContext,
         startup_signers: StartupSigners,
         metrics: *ValidatorMetrics,
+    };
+
+    const SnapshotRemoteSignerUrls = struct {
+        allocator: Allocator,
+        urls: ?[]const []const u8 = null,
+    };
+
+    const RuntimeMutation = union(enum) {
+        add_local_key: struct {
+            secret_key: bls.SecretKey,
+            lock: ?KeystoreLock,
+        },
+        add_remote_key: struct {
+            pubkey: [48]u8,
+            url: []const u8,
+        },
+        remove_validator: struct {
+            pubkey: [48]u8,
+        },
+        snapshot_remote_signer_urls: SnapshotRemoteSignerUrls,
+        apply_remote_signer_sync: struct {
+            fetched_sets: []const RemoteSignerKeys,
+        },
+    };
+
+    const RuntimeMutationRequest = struct {
+        mutation: RuntimeMutation,
+        completed: std.Io.Event = .unset,
+        err: ?anyerror = null,
+        removed_signer_kind: ?store_mod.SignerKind = null,
+
+        fn finish(self: *RuntimeMutationRequest, io: Io, err: ?anyerror) void {
+            self.err = err;
+            self.completed.set(io);
+        }
     };
 
     allocator: Allocator,
@@ -139,6 +175,7 @@ pub const ValidatorClient = struct {
     running: std.atomic.Value(bool),
 
     // Long-lived background tasks owned by the validator runtime.
+    runtime_mutation_task: ?BackgroundTaskFuture = null,
     header_tracker_task: ?BackgroundTaskFuture = null,
     remote_signer_sync_task: ?BackgroundTaskFuture = null,
     doppelganger_task: ?BackgroundTaskFuture = null,
@@ -150,8 +187,9 @@ pub const ValidatorClient = struct {
     remote_signers: std.array_list.Managed(*RemoteSigner),
     /// Local keystore ownership locks held for the process lifetime.
     local_keystore_locks: std.array_list.Managed(KeystoreLock),
-    /// Serializes runtime keymanager mutations and remote-signer sync updates.
-    runtime_mutex: std.Io.Mutex,
+    /// Single-owner runtime mutation queue for keymanager and remote-signer updates.
+    runtime_mutation_queue: RuntimeMutationQueue,
+    runtime_mutation_queue_storage: [32]*RuntimeMutationRequest,
 
     // ---------------------------------------------------------------------------
     // Lifecycle
@@ -189,13 +227,14 @@ pub const ValidatorClient = struct {
         self.signing_context = signing_ctx;
         self.shutdown_requested = std.atomic.Value(bool).init(false);
         self.running = std.atomic.Value(bool).init(false);
+        self.runtime_mutation_task = null;
         self.header_tracker_task = null;
         self.session_start_ns = time.awakeNanoseconds(io);
         self.remote_signers = std.array_list.Managed(*RemoteSigner).init(allocator);
         self.remote_signer_sync_task = null;
         self.doppelganger_task = null;
         self.local_keystore_locks = std.array_list.Managed(KeystoreLock).init(allocator);
-        self.runtime_mutex = .init;
+        self.runtime_mutation_queue = RuntimeMutationQueue.init(&self.runtime_mutation_queue_storage);
 
         self.api = try BeaconApiClient.initWithOptions(allocator, io, .{
             .base_url = config.beacon_node_url,
@@ -357,11 +396,13 @@ pub const ValidatorClient = struct {
         }
         signers.local_keystore_locks = &.{};
         self.syncValidatorMetrics();
+        try self.startRuntimeMutationTask();
 
         return self;
     }
 
     pub fn deinit(self: *ValidatorClient) void {
+        self.stopRuntimeMutationTask();
         self.block_service.deinit();
         self.attestation_service.deinit();
         self.sync_committee_service.deinit();
@@ -476,40 +517,38 @@ pub const ValidatorClient = struct {
     }
 
     pub fn addLocalKeyRuntime(self: *ValidatorClient, secret_key: bls.SecretKey, lock: ?KeystoreLock) !void {
-        self.runtime_mutex.lockUncancelable(self.io);
-        defer self.runtime_mutex.unlock(self.io);
-
-        try self.validator_store.addKey(secret_key);
-        try self.registerValidatorTracking(secret_key.toPublicKey().compress());
-        if (lock) |owned_lock| {
-            try self.local_keystore_locks.append(owned_lock);
-        }
-        self.syncValidatorMetrics();
-        self.refreshCurrentEpochDuties(self.io);
+        var request = RuntimeMutationRequest{
+            .mutation = .{ .add_local_key = .{
+                .secret_key = secret_key,
+                .lock = lock,
+            } },
+        };
+        errdefer if (request.mutation.add_local_key.lock) |*owned_lock| owned_lock.deinit(self.io);
+        try self.submitRuntimeMutation(&request);
     }
 
     pub fn addRemoteKeyRuntime(self: *ValidatorClient, pubkey: [48]u8, url: []const u8) !void {
-        self.runtime_mutex.lockUncancelable(self.io);
-        defer self.runtime_mutex.unlock(self.io);
-
-        const signer = try self.ensureRemoteSigner(url);
-        try self.validator_store.addRemotePubkey(pubkey, signer);
-        try self.registerValidatorTracking(pubkey);
-        self.syncValidatorMetrics();
-        self.refreshCurrentEpochDuties(self.io);
+        var request = RuntimeMutationRequest{
+            .mutation = .{ .add_remote_key = .{
+                .pubkey = pubkey,
+                .url = url,
+            } },
+        };
+        try self.submitRuntimeMutation(&request);
     }
 
     pub fn removeValidatorRuntime(self: *ValidatorClient, pubkey: [48]u8) ?store_mod.SignerKind {
-        self.runtime_mutex.lockUncancelable(self.io);
-        defer self.runtime_mutex.unlock(self.io);
-
-        const signer_kind = self.validator_store.signerKind(pubkey) orelse return null;
-        if (!self.validator_store.removeValidator(pubkey)) return null;
-
-        if (signer_kind == .local) self.removeLocalKeystoreLock(pubkey);
-        self.unregisterValidatorTracking(pubkey);
-        self.syncValidatorMetrics();
-        return signer_kind;
+        var request = RuntimeMutationRequest{
+            .mutation = .{ .remove_validator = .{ .pubkey = pubkey } },
+        };
+        self.submitRuntimeMutation(&request) catch |err| {
+            log.warn("remove validator runtime pubkey=0x{s} failed: {s}", .{
+                std.fmt.bytesToHex(pubkey, .lower),
+                @errorName(err),
+            });
+            return null;
+        };
+        return request.removed_signer_kind;
     }
 
     fn applyResolvedIndices(self: *ValidatorClient) void {
@@ -629,117 +668,52 @@ pub const ValidatorClient = struct {
     }
 
     fn syncRemoteSignerKeys(self: *ValidatorClient, io: Io) !void {
-        self.runtime_mutex.lockUncancelable(self.io);
-        defer self.runtime_mutex.unlock(self.io);
-
-        if (self.remote_signers.items.len == 0) return;
+        const urls = try self.snapshotRemoteSignerUrls();
+        defer freeOwnedStrings(self.allocator, urls);
+        if (urls.len == 0) return;
 
         const RemoteFetch = struct {
-            signer: *RemoteSigner,
+            url: []const u8,
             pubkeys: [][48]u8,
         };
 
         var fetched_sets = std.ArrayListUnmanaged(RemoteFetch).empty;
         defer {
             for (fetched_sets.items) |item| {
+                self.allocator.free(item.url);
                 if (item.pubkeys.len > 0) self.allocator.free(item.pubkeys);
             }
             fetched_sets.deinit(self.allocator);
         }
 
-        var first_seen_by_pubkey = std.AutoHashMap([48]u8, *RemoteSigner).init(self.allocator);
-        defer first_seen_by_pubkey.deinit();
-
-        for (self.remote_signers.items) |remote_signer| {
-            const fetched_pubkeys = remote_signer.listKeys(io) catch |err| {
-                log.warn("failed to fetch remote keys url={s}: {s}", .{
-                    remote_signer.base_url,
-                    @errorName(err),
-                });
+        for (urls) |url| {
+            var signer = RemoteSigner.init(self.allocator, url);
+            const fetched_pubkeys = signer.listKeys(io) catch |err| {
+                log.warn("failed to fetch remote keys url={s}: {s}", .{ url, @errorName(err) });
                 continue;
             };
 
             try fetched_sets.append(self.allocator, .{
-                .signer = remote_signer,
+                .url = try self.allocator.dupe(u8, url),
                 .pubkeys = fetched_pubkeys,
             });
         }
 
-        var added_count: usize = 0;
-        var removed_count: usize = 0;
-
-        for (fetched_sets.items) |fetched_set| {
-            const signer = fetched_set.signer;
-
-            var desired_pubkeys = std.ArrayListUnmanaged([48]u8).empty;
-            defer desired_pubkeys.deinit(self.allocator);
-
-            for (fetched_set.pubkeys) |pubkey| {
-                const existing = try first_seen_by_pubkey.getOrPut(pubkey);
-                if (existing.found_existing) {
-                    if (existing.value_ptr.* != signer) {
-                        log.warn(
-                            "duplicate remote validator pubkey=0x{s} first_url={s} duplicate_url={s} - keeping first occurrence",
-                            .{
-                                std.fmt.bytesToHex(pubkey, .lower),
-                                existing.value_ptr.*.base_url,
-                                signer.base_url,
-                            },
-                        );
-                    }
-                    continue;
-                }
-
-                existing.value_ptr.* = signer;
-                try desired_pubkeys.append(self.allocator, pubkey);
-            }
-
-            const existing_remote_pubkeys = try self.validator_store.allRemotePubkeysForSigner(self.allocator, signer);
-            defer if (existing_remote_pubkeys.len > 0) self.allocator.free(existing_remote_pubkeys);
-
-            for (desired_pubkeys.items) |pubkey| {
-                if (sliceContainsPubkey(existing_remote_pubkeys, pubkey)) continue;
-
-                self.validator_store.addRemotePubkey(pubkey, signer) catch |err| {
-                    log.warn("addRemotePubkey failed pubkey=0x{s} url={s}: {s}", .{
-                        std.fmt.bytesToHex(pubkey, .lower),
-                        signer.base_url,
-                        @errorName(err),
-                    });
-                    continue;
-                };
-                self.registerValidatorTracking(pubkey) catch |err| {
-                    log.warn("failed to register runtime tracking pubkey=0x{s}: {s}", .{
-                        std.fmt.bytesToHex(pubkey, .lower),
-                        @errorName(err),
-                    });
-                };
-                added_count += 1;
-                log.info("registered remote validator pubkey=0x{s} url={s}", .{
-                    std.fmt.bytesToHex(pubkey, .lower),
-                    signer.base_url,
-                });
-            }
-
-            for (existing_remote_pubkeys) |pubkey| {
-                if (sliceContainsPubkey(desired_pubkeys.items, pubkey)) continue;
-
-                if (self.validator_store.removeValidator(pubkey)) {
-                    self.unregisterValidatorTracking(pubkey);
-                    removed_count += 1;
-                    log.info("removed remote validator pubkey=0x{s} url={s}", .{
-                        std.fmt.bytesToHex(pubkey, .lower),
-                        signer.base_url,
-                    });
-                }
-            }
+        const fetched_sets_owned = try self.allocator.alloc(RemoteSignerKeys, fetched_sets.items.len);
+        defer self.allocator.free(fetched_sets_owned);
+        for (fetched_sets.items, fetched_sets_owned) |item, *out| {
+            out.* = .{
+                .url = item.url,
+                .pubkeys = item.pubkeys,
+            };
         }
 
-        if (added_count > 0 or removed_count > 0) {
-            self.syncValidatorMetrics();
-            log.info("remote signer sync complete added={d} removed={d}", .{ added_count, removed_count });
-            self.refreshCurrentEpochDuties(io);
-        }
+        var request = RuntimeMutationRequest{
+            .mutation = .{ .apply_remote_signer_sync = .{
+                .fetched_sets = fetched_sets_owned,
+            } },
+        };
+        try self.submitRuntimeMutation(&request);
     }
 
     /// Start the validator client: wire up clock callbacks and enter the run loop.
@@ -1110,4 +1084,211 @@ pub const ValidatorClient = struct {
             self.remote_signer_sync_task = null;
         }
     }
+
+    fn submitRuntimeMutation(self: *ValidatorClient, request: *RuntimeMutationRequest) !void {
+        self.runtime_mutation_queue.putOneUncancelable(self.io, request) catch {
+            return error.ValidatorStopped;
+        };
+        request.completed.waitUncancelable(self.io);
+        if (request.err) |err| return err;
+    }
+
+    fn runRuntimeMutationTask(self: *ValidatorClient) anyerror!void {
+        while (true) {
+            const request = self.runtime_mutation_queue.getOneUncancelable(self.io) catch |err| switch (err) {
+                error.Closed => return,
+            };
+            const result = self.processRuntimeMutation(request);
+            request.finish(self.io, result);
+        }
+    }
+
+    fn processRuntimeMutation(self: *ValidatorClient, request: *RuntimeMutationRequest) ?anyerror {
+        switch (request.mutation) {
+            .add_local_key => |payload| {
+                self.applyAddLocalKey(payload.secret_key, payload.lock) catch |err| return err;
+            },
+            .add_remote_key => |payload| {
+                self.applyAddRemoteKey(payload.pubkey, payload.url) catch |err| return err;
+            },
+            .remove_validator => |payload| {
+                request.removed_signer_kind = self.applyRemoveValidator(payload.pubkey);
+            },
+            .snapshot_remote_signer_urls => |*payload| {
+                payload.urls = self.snapshotRemoteSignerUrlsOwned(payload.allocator) catch |err| return err;
+            },
+            .apply_remote_signer_sync => |payload| {
+                self.applyRemoteSignerSync(payload.fetched_sets) catch |err| return err;
+            },
+        }
+        return null;
+    }
+
+    fn applyAddLocalKey(self: *ValidatorClient, secret_key: bls.SecretKey, lock: ?KeystoreLock) !void {
+        const pubkey = secret_key.toPublicKey().compress();
+        try self.validator_store.addKey(secret_key);
+        errdefer _ = self.validator_store.removeValidator(pubkey);
+
+        try self.registerValidatorTracking(pubkey);
+        errdefer self.unregisterValidatorTracking(pubkey);
+
+        if (lock) |owned_lock| {
+            try self.local_keystore_locks.append(owned_lock);
+        }
+        self.syncValidatorMetrics();
+        self.refreshCurrentEpochDuties(self.io);
+    }
+
+    fn applyAddRemoteKey(self: *ValidatorClient, pubkey: [48]u8, url: []const u8) !void {
+        const signer = try self.ensureRemoteSigner(url);
+        try self.validator_store.addRemotePubkey(pubkey, signer);
+        errdefer _ = self.validator_store.removeValidator(pubkey);
+
+        try self.registerValidatorTracking(pubkey);
+        errdefer self.unregisterValidatorTracking(pubkey);
+
+        self.syncValidatorMetrics();
+        self.refreshCurrentEpochDuties(self.io);
+    }
+
+    fn applyRemoveValidator(self: *ValidatorClient, pubkey: [48]u8) ?store_mod.SignerKind {
+        const signer_kind = self.validator_store.signerKind(pubkey) orelse return null;
+        if (!self.validator_store.removeValidator(pubkey)) return null;
+
+        if (signer_kind == .local) self.removeLocalKeystoreLock(pubkey);
+        self.unregisterValidatorTracking(pubkey);
+        self.syncValidatorMetrics();
+        return signer_kind;
+    }
+
+    fn snapshotRemoteSignerUrls(self: *ValidatorClient) ![]const []const u8 {
+        var request = RuntimeMutationRequest{
+            .mutation = .{ .snapshot_remote_signer_urls = .{
+                .allocator = self.allocator,
+            } },
+        };
+        try self.submitRuntimeMutation(&request);
+        return request.mutation.snapshot_remote_signer_urls.urls orelse &.{};
+    }
+
+    fn snapshotRemoteSignerUrlsOwned(self: *ValidatorClient, allocator: Allocator) ![]const []const u8 {
+        if (self.remote_signers.items.len == 0) return &.{};
+
+        var urls = std.ArrayListUnmanaged([]const u8).empty;
+        errdefer {
+            for (urls.items) |url| allocator.free(url);
+            urls.deinit(allocator);
+        }
+
+        for (self.remote_signers.items) |remote_signer| {
+            try urls.append(allocator, try allocator.dupe(u8, remote_signer.base_url));
+        }
+
+        return try urls.toOwnedSlice(allocator);
+    }
+
+    fn applyRemoteSignerSync(self: *ValidatorClient, fetched_sets: []const RemoteSignerKeys) !void {
+        if (fetched_sets.len == 0) return;
+
+        var first_seen_by_pubkey = std.AutoHashMap([48]u8, *RemoteSigner).init(self.allocator);
+        defer first_seen_by_pubkey.deinit();
+
+        var added_count: usize = 0;
+        var removed_count: usize = 0;
+
+        for (fetched_sets) |fetched_set| {
+            const signer = try self.ensureRemoteSigner(fetched_set.url);
+
+            var desired_pubkeys = std.ArrayListUnmanaged([48]u8).empty;
+            defer desired_pubkeys.deinit(self.allocator);
+
+            for (fetched_set.pubkeys) |pubkey| {
+                const existing = try first_seen_by_pubkey.getOrPut(pubkey);
+                if (existing.found_existing) {
+                    if (existing.value_ptr.* != signer) {
+                        log.warn(
+                            "duplicate remote validator pubkey=0x{s} first_url={s} duplicate_url={s} - keeping first occurrence",
+                            .{
+                                std.fmt.bytesToHex(pubkey, .lower),
+                                existing.value_ptr.*.base_url,
+                                signer.base_url,
+                            },
+                        );
+                    }
+                    continue;
+                }
+
+                existing.value_ptr.* = signer;
+                try desired_pubkeys.append(self.allocator, pubkey);
+            }
+
+            const existing_remote_pubkeys = try self.validator_store.allRemotePubkeysForSigner(self.allocator, signer);
+            defer if (existing_remote_pubkeys.len > 0) self.allocator.free(existing_remote_pubkeys);
+
+            for (desired_pubkeys.items) |pubkey| {
+                if (sliceContainsPubkey(existing_remote_pubkeys, pubkey)) continue;
+
+                self.validator_store.addRemotePubkey(pubkey, signer) catch |err| {
+                    log.warn("addRemotePubkey failed pubkey=0x{s} url={s}: {s}", .{
+                        std.fmt.bytesToHex(pubkey, .lower),
+                        signer.base_url,
+                        @errorName(err),
+                    });
+                    continue;
+                };
+                self.registerValidatorTracking(pubkey) catch |err| {
+                    log.warn("failed to register runtime tracking pubkey=0x{s}: {s}", .{
+                        std.fmt.bytesToHex(pubkey, .lower),
+                        @errorName(err),
+                    });
+                };
+                added_count += 1;
+                log.info("registered remote validator pubkey=0x{s} url={s}", .{
+                    std.fmt.bytesToHex(pubkey, .lower),
+                    signer.base_url,
+                });
+            }
+
+            for (existing_remote_pubkeys) |pubkey| {
+                if (sliceContainsPubkey(desired_pubkeys.items, pubkey)) continue;
+
+                if (self.validator_store.removeValidator(pubkey)) {
+                    self.unregisterValidatorTracking(pubkey);
+                    removed_count += 1;
+                    log.info("removed remote validator pubkey=0x{s} url={s}", .{
+                        std.fmt.bytesToHex(pubkey, .lower),
+                        signer.base_url,
+                    });
+                }
+            }
+        }
+
+        if (added_count > 0 or removed_count > 0) {
+            self.syncValidatorMetrics();
+            log.info("remote signer sync complete added={d} removed={d}", .{ added_count, removed_count });
+            self.refreshCurrentEpochDuties(self.io);
+        }
+    }
+
+    fn startRuntimeMutationTask(self: *ValidatorClient) !void {
+        std.debug.assert(self.runtime_mutation_task == null);
+        self.runtime_mutation_task = try self.io.concurrent(runRuntimeMutationTask, .{self});
+    }
+
+    fn stopRuntimeMutationTask(self: *ValidatorClient) void {
+        self.runtime_mutation_queue.close(self.io);
+        if (self.runtime_mutation_task) |*task| {
+            _ = task.cancel(self.io) catch |err| switch (err) {
+                error.Canceled => {},
+                else => log.warn("runtime mutation task exited during shutdown: {s}", .{@errorName(err)}),
+            };
+            self.runtime_mutation_task = null;
+        }
+    }
 };
+
+fn freeOwnedStrings(allocator: Allocator, items: []const []const u8) void {
+    if (items.len == 0) return;
+    for (items) |item| allocator.free(item);
+    allocator.free(items);
+}
