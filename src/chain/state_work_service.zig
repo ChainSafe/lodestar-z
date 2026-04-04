@@ -8,7 +8,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const BlsThreadPool = @import("bls").ThreadPool;
 const regen_mod = @import("regen/root.zig");
-const PmtMutator = regen_mod.PmtMutator;
+const StateGraphGate = regen_mod.StateGraphGate;
 const StateRegen = regen_mod.StateRegen;
 
 const blocks = @import("blocks/root.zig");
@@ -38,7 +38,7 @@ pub const StateWorkService = struct {
     allocator: Allocator,
     io: std.Io,
     state_regen: *StateRegen,
-    pmt_mutator: *PmtMutator,
+    state_graph_gate: *StateGraphGate,
     block_bls_thread_pool: ?*BlsThreadPool,
     max_pending_block_imports: usize,
 
@@ -53,7 +53,7 @@ pub const StateWorkService = struct {
         allocator: Allocator,
         io: std.Io,
         state_regen: *StateRegen,
-        pmt_mutator: *PmtMutator,
+        state_graph_gate: *StateGraphGate,
         block_bls_thread_pool: ?*BlsThreadPool,
         max_pending_block_imports: u16,
     ) !*StateWorkService {
@@ -64,7 +64,7 @@ pub const StateWorkService = struct {
             .allocator = allocator,
             .io = io,
             .state_regen = state_regen,
-            .pmt_mutator = pmt_mutator,
+            .state_graph_gate = state_graph_gate,
             .block_bls_thread_pool = block_bls_thread_pool,
             .max_pending_block_imports = max_pending_block_imports,
         };
@@ -143,7 +143,7 @@ pub const StateWorkService = struct {
                 const prepared = blocks.pipeline.executePlannedBlockImport(
                     self.allocator,
                     self.state_regen,
-                    self.pmt_mutator,
+                    self.state_graph_gate,
                     self.block_bls_thread_pool,
                     planned,
                 ) catch |err| {

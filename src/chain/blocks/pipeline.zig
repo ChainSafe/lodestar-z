@@ -28,7 +28,7 @@ const preset = @import("preset").preset;
 const state_transition = @import("state_transition");
 const regen_mod = @import("../regen/root.zig");
 const CachedBeaconState = state_transition.CachedBeaconState;
-const PmtMutator = regen_mod.PmtMutator;
+const StateGraphGate = regen_mod.StateGraphGate;
 const computeEpochAtSlot = state_transition.computeEpochAtSlot;
 const fork_choice_mod = @import("fork_choice");
 const ForkChoice = fork_choice_mod.ForkChoiceStruct;
@@ -85,10 +85,10 @@ pub const PipelineContext = struct {
     // -- State management --
     block_state_cache: *regen_mod.BlockStateCache,
     state_regen: *regen_mod.StateRegen,
-    queued_regen: ?*QueuedStateRegen,
+    queued_regen: *QueuedStateRegen,
 
     // -- Fork choice --
-    fork_choice: ?*ForkChoice,
+    fork_choice: *ForkChoice,
 
     // -- Persistence --
     db: *@import("db").BeaconDB,
@@ -109,7 +109,7 @@ pub const PipelineContext = struct {
     current_slot: Slot,
 
     // -- Shared PMT mutation --
-    pmt_mutator: *PmtMutator,
+    state_graph_gate: *StateGraphGate,
 
     // -- BLS verification --
     block_bls_thread_pool: ?*BlsThreadPool = null,
@@ -127,7 +127,6 @@ pub const PipelineContext = struct {
         return .{
             .allocator = self.allocator,
             .block_state_cache = self.block_state_cache,
-            .state_regen = self.state_regen,
             .queued_regen = self.queued_regen,
             .fork_choice = self.fork_choice,
             .db = self.db,
@@ -206,7 +205,7 @@ pub fn processBlock(
             const prepared = try executePlannedBlockImport(
                 ctx.allocator,
                 ctx.state_regen,
-                ctx.pmt_mutator,
+                ctx.state_graph_gate,
                 ctx.block_bls_thread_pool,
                 planned,
             );
@@ -226,7 +225,7 @@ pub fn planBlockForImport(
     block_input: BlockInput,
     opts: ImportBlockOpts,
 ) BlockImportError!BlockPlanResult {
-    const fc = ctx.fork_choice orelse return BlockImportError.InternalError;
+    const fc = ctx.fork_choice;
 
     // Stage 1: Sanity checks.
     // Note: verifySanity uses fork_choice for parent lookup. If the fork choice
@@ -285,7 +284,7 @@ pub fn planBlockForImport(
 pub fn executePlannedBlockImport(
     allocator: Allocator,
     state_regen: *StateRegen,
-    pmt_mutator: *PmtMutator,
+    state_graph_gate: *StateGraphGate,
     block_bls_thread_pool: ?*BlsThreadPool,
     planned: PlannedBlockImport,
 ) BlockImportError!PreparedBlockImport {
@@ -311,7 +310,7 @@ pub fn executePlannedBlockImport(
         planned.data_availability_status,
         planned.opts,
         planned.precomputed_body_root,
-        pmt_mutator,
+        state_graph_gate,
         block_bls_thread_pool,
     );
     return .{
@@ -381,7 +380,7 @@ pub fn processBlockBatch(
                 const prepared = executePlannedBlockImport(
                     ctx.allocator,
                     ctx.state_regen,
-                    ctx.pmt_mutator,
+                    ctx.state_graph_gate,
                     ctx.block_bls_thread_pool,
                     planned,
                 ) catch |err| {
@@ -460,7 +459,7 @@ fn invalidateExecutionBranch(
     latest_valid_hash: ?[32]u8,
     invalidate_from_parent_block_root: [32]u8,
 ) void {
-    const fc = ctx.fork_choice orelse return;
+    const fc = ctx.fork_choice;
     fc.validateLatestHash(ctx.allocator, LVHExecResponse{ .invalid = .{
         .latest_valid_exec_hash = latest_valid_hash,
         .invalidate_from_parent_block_root = invalidate_from_parent_block_root,
@@ -474,11 +473,7 @@ fn getCachedPreState(
     parent_state_root: [32]u8,
     block_slot: Slot,
 ) !?*CachedBeaconState {
-    if (ctx.queued_regen) |qr| {
-        return qr.getCachedPreState(parent_state_root, block_slot);
-    }
-
-    return ctx.state_regen.getCachedPreState(parent_state_root, block_slot);
+    return ctx.queued_regen.getCachedPreState(parent_state_root, block_slot);
 }
 
 // ---------------------------------------------------------------------------

@@ -10,7 +10,7 @@ const fork_types = @import("fork_types");
 const fork_choice_mod = @import("fork_choice");
 const preset = @import("preset").preset;
 const state_transition = @import("state_transition");
-const PmtMutator = @import("regen/root.zig").PmtMutator;
+const StateGraphGate = @import("regen/root.zig").StateGraphGate;
 
 const Chain = @import("chain.zig").Chain;
 const chain_types = @import("types.zig");
@@ -99,8 +99,8 @@ pub const Service = struct {
         return Query.init(self.chain);
     }
 
-    pub fn acquirePmtMutationLease(self: Service) PmtMutator.Lease {
-        return self.chain.acquirePmtMutationLease();
+    pub fn acquireStateGraphLease(self: Service) StateGraphGate.Lease {
+        return self.chain.acquireStateGraphLease();
     }
 
     fn forkchoiceUpdateForHead(self: Service, head_root: Root) ?chain_effects.ExecutionForkchoiceUpdate {
@@ -425,6 +425,7 @@ pub const Service = struct {
         genesis_state: *CachedBeaconState,
     ) !chain_effects.BootstrapOutcome {
         const bootstrap = try self.chain.bootstrapFromGenesis(genesis_state);
+        try self.chain.installForkChoice(bootstrap.fork_choice);
         return .{
             .snapshot = self.query().currentSnapshot(),
             .genesis_time = bootstrap.genesis_time,
@@ -438,6 +439,7 @@ pub const Service = struct {
         checkpoint_state: *CachedBeaconState,
     ) !chain_effects.BootstrapOutcome {
         const bootstrap = try self.chain.bootstrapFromCheckpoint(checkpoint_state);
+        try self.chain.installForkChoice(bootstrap.fork_choice);
         return .{
             .snapshot = self.query().currentSnapshot(),
             .genesis_time = bootstrap.genesis_time,
@@ -464,20 +466,17 @@ pub const Service = struct {
     ) !void {
         const data = attestation.data();
 
-        if (self.chain.fork_choice) |fc| {
-            for (attesting_indices) |validator_index| {
-                fc.onSingleVote(
-                    self.chain.allocator,
-                    validator_index,
-                    data.slot,
-                    data.beacon_block_root,
-                    data.target.epoch,
-                ) catch |err| {
-                    std.log.warn("FC onAggregate failed for validator {d} slot {d}: {}", .{
-                        validator_index, data.slot, err,
-                    });
-                };
-            }
+        for (attesting_indices) |validator_index| {
+            _ = self.chain.onSingleVote(
+                @intCast(validator_index),
+                data.slot,
+                data.beacon_block_root,
+                data.target.epoch,
+            ) catch |err| {
+                std.log.warn("FC onAggregate failed for validator {d} slot {d}: {}", .{
+                    validator_index, data.slot, err,
+                });
+            };
         }
 
         _ = try self.chain.op_pool.agg_attestation_pool.addAny(attestation);
@@ -490,15 +489,12 @@ pub const Service = struct {
         beacon_block_root: Root,
         target_epoch: u64,
     ) !void {
-        if (self.chain.fork_choice) |fc| {
-            try fc.onSingleVote(
-                self.chain.allocator,
-                @intCast(validator_index),
-                attestation_slot,
-                beacon_block_root,
-                target_epoch,
-            );
-        }
+        _ = try self.chain.onSingleVote(
+            @intCast(validator_index),
+            attestation_slot,
+            beacon_block_root,
+            target_epoch,
+        );
     }
 
     pub fn importVoluntaryExit(self: Service, exit: SignedVoluntaryExit) !void {
@@ -913,7 +909,7 @@ pub const Service = struct {
     pub fn revalidateCurrentOptimisticHead(self: Service) !?chain_effects.ExecutionRevalidationOutcome {
         if (!self.chain.currentHeadExecutionOptimistic()) return null;
 
-        const fc = self.chain.fork_choice orelse return null;
+        const fc = self.chain.forkChoice();
         const old_snapshot = self.query().currentSnapshot();
         const head_root = old_snapshot.head.root;
         const block_bytes = (try self.query().blockBytesByRoot(head_root)) orelse return error.HeadBlockNotAvailable;
@@ -959,7 +955,7 @@ pub const Service = struct {
                 false,
             .payload_status = if (head_node) |node| node.payload_status else .full,
         };
-        self.chain.head_tracker.setHead(new_head.block_root, new_head.slot, new_head.state_root);
+        self.chain.setTrackedHead(new_head.block_root, new_head.slot, new_head.state_root);
 
         const snapshot = self.query().currentSnapshot();
         const head_changed = !std.mem.eql(u8, &snapshot.head.root, &old_snapshot.head.root);

@@ -57,16 +57,17 @@ pub const SimTestHarness = struct {
 
         // Create the BeaconNode and initialize from genesis.
         const node_identity = try identity_mod.createEphemeralIdentity(allocator, std.testing.io, .{});
-        const node = try BeaconNode.init(allocator, std.testing.io, test_state.config, .{
+        var builder = try BeaconNode.Builder.init(allocator, std.testing.io, test_state.config, .{
             .options = .{ .engine_mock = true },
             .node_identity = node_identity,
         });
-        errdefer node.deinit();
+        errdefer builder.deinit();
 
         // initFromGenesis takes ownership of the genesis state (caches it).
         // We pass the cached_state pointer — node will clone it into block_state_cache.
         // After this call, test_state.cached_state is owned by the node.
-        try node.initFromGenesis(test_state.cached_state);
+        const node = try builder.finishGenesis(test_state.cached_state);
+        errdefer node.deinit();
 
         const sim = SimNodeHarness.init(allocator, node, seed);
 

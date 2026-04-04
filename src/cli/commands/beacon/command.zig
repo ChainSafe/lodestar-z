@@ -210,6 +210,47 @@ fn runSlotClock(io: Io, node: *BeaconNode) void {
     };
 }
 
+fn logHeadSummary(node: *BeaconNode) void {
+    const head = node.getHead();
+    std.log.info("Head: slot={d} root=0x{s}", .{ head.slot, &std.fmt.bytesToHex(head.root, .lower) });
+    std.log.info("  finalized_epoch={d} justified_epoch={d}", .{ head.finalized_epoch, head.justified_epoch });
+}
+
+fn runBootstrappedNode(
+    io: Io,
+    node: *BeaconNode,
+    api_port: u16,
+    api_address: []const u8,
+    api_cors_origin: ?[]const u8,
+    p2p_bind_host: []const u8,
+    p2p_bind_port: u16,
+) !void {
+    var run_ctx = RunContext{
+        .node = node,
+        .api_port = api_port,
+        .api_address = api_address,
+        .api_cors_origin = api_cors_origin,
+        .p2p_port = p2p_bind_port,
+        .p2p_host = p2p_bind_host,
+    };
+
+    std.log.info("Starting services concurrently...", .{});
+    std.log.info("  REST API: http://{s}:{d}", .{ api_address, api_port });
+    var p2p_multiaddr_buf: [160]u8 = undefined;
+    const p2p_multiaddr = try formatP2pListenMultiaddr(&p2p_multiaddr_buf, p2p_bind_host, p2p_bind_port);
+    std.log.info("  P2P:      {s}", .{p2p_multiaddr});
+
+    var group: Io.Group = .init;
+    group.async(io, runApiServer, .{ io, &run_ctx });
+    group.async(io, runP2p, .{ io, &run_ctx });
+    group.async(io, runSlotClock, .{ io, node });
+
+    group.await(io) catch {};
+
+    std.log.info("Shutting down...", .{});
+    std.log.info("Goodbye.", .{});
+}
+
 pub fn run(io: Io, allocator: Allocator, opts: anytype) !void {
     rejectUnsupportedOptions(opts);
 
@@ -512,12 +553,12 @@ pub fn run(io: Io, allocator: Allocator, opts: anytype) !void {
         prepared_runtime.discovery_bootnodes.len,
     });
 
-    const node = try BeaconNode.init(allocator, io, beacon_config, prepared_runtime.takeInitConfig(node_opts));
-    defer node.deinit();
+    var node_builder = try BeaconNode.Builder.init(allocator, io, beacon_config, prepared_runtime.takeInitConfig(node_opts));
+    defer node_builder.deinit();
 
-    std.log.info("BeaconNode initialized", .{});
-    std.log.info("  peer-id:    {s}", .{node.node_identity.peer_id});
-    std.log.info("  enr:        {s}", .{node.node_identity.enr});
+    std.log.info("BeaconNode bootstrap initialized", .{});
+    std.log.info("  peer-id:    {s}", .{node_builder.nodeIdentity().peer_id});
+    std.log.info("  enr:        {s}", .{node_builder.nodeIdentity().enr});
 
     const force_checkpoint = force_checkpoint_sync;
 
@@ -540,9 +581,9 @@ pub fn run(io: Io, allocator: Allocator, opts: anytype) !void {
 
         const cp_state = state_transition.deserializePublishedState(
             allocator,
-            node.chain_runtime.pool,
+            node_builder.sharedStateGraph().pool,
             beacon_config,
-            node.chain_runtime.validator_pubkeys,
+            node_builder.sharedStateGraph().validator_pubkeys,
             fetched.state_bytes,
         ) catch |err| {
             std.log.err("Failed to deserialize checkpoint state: {}", .{err});
@@ -566,19 +607,24 @@ pub fn run(io: Io, allocator: Allocator, opts: anytype) !void {
             std.log.info("Weak subjectivity checkpoint validated (epoch {d})", .{ws.epoch});
         }
 
-        try node.initFromCheckpoint(cp_state);
+        const cp_slot = cp_state.state.slot() catch 0;
+        const node = try node_builder.finishCheckpoint(cp_state);
+        defer node.deinit();
         if (params_file != null) {
             custom_beacon_config.genesis_validator_root = node.genesis_validators_root;
         }
-        std.log.info("Initialized from checkpoint sync URL at slot {d}", .{cp_state.state.slot() catch 0});
+        std.log.info("Initialized from checkpoint sync URL at slot {d}", .{cp_slot});
+        logHeadSummary(node);
+        try runBootstrappedNode(io, node, api_port, api_address, api_cors, p2p_bind_host, p2p_bind_port);
+        return;
     } else if (checkpoint_state) |state_path| {
         std.log.info("Loading checkpoint state from: {s}", .{state_path});
 
         const cp_state = genesis_util.loadGenesisFromFile(
             allocator,
-            node.chain_runtime.pool,
+            node_builder.sharedStateGraph().pool,
             beacon_config,
-            node.chain_runtime.validator_pubkeys,
+            node_builder.sharedStateGraph().validator_pubkeys,
             io,
             state_path,
         ) catch |err| {
@@ -600,19 +646,22 @@ pub fn run(io: Io, allocator: Allocator, opts: anytype) !void {
         }
 
         const cp_slot = cp_state.state.slot() catch 0;
-        if (cp_slot == 0) {
-            try node.initFromGenesis(cp_state);
-        } else {
-            try node.initFromCheckpoint(cp_state);
-        }
+        const node = if (cp_slot == 0)
+            try node_builder.finishGenesis(cp_state)
+        else
+            try node_builder.finishCheckpoint(cp_state);
+        defer node.deinit();
         if (params_file != null) {
             custom_beacon_config.genesis_validator_root = node.genesis_validators_root;
         }
         std.log.info("Initialized from checkpoint file at slot {d}", .{cp_slot});
-    } else if (if (!force_checkpoint) node.chainQuery().latestStateArchiveSlot() catch null else null) |db_slot| {
+        logHeadSummary(node);
+        try runBootstrappedNode(io, node, api_port, api_address, api_cors, p2p_bind_host, p2p_bind_port);
+        return;
+    } else if (if (!force_checkpoint) node_builder.latestStateArchiveSlot() catch null else null) |db_slot| {
         std.log.info("Found persisted state in DB at slot {d}, resuming...", .{db_slot});
 
-        const state_bytes = node.chainQuery().stateArchiveAtSlot(db_slot) catch |err| {
+        const state_bytes = node_builder.stateArchiveAtSlot(db_slot) catch |err| {
             std.log.err("Failed to read state from DB at slot {d}: {}", .{ db_slot, err });
             std.process.exit(1);
         } orelse {
@@ -623,9 +672,9 @@ pub fn run(io: Io, allocator: Allocator, opts: anytype) !void {
 
         const db_state = state_transition.deserializePublishedState(
             allocator,
-            node.chain_runtime.pool,
+            node_builder.sharedStateGraph().pool,
             beacon_config,
-            node.chain_runtime.validator_pubkeys,
+            node_builder.sharedStateGraph().validator_pubkeys,
             state_bytes,
         ) catch |err| {
             std.log.err("Failed to deserialize DB state at slot {d}: {}", .{ db_slot, err });
@@ -633,30 +682,38 @@ pub fn run(io: Io, allocator: Allocator, opts: anytype) !void {
             std.process.exit(1);
         };
 
-        try node.initFromCheckpoint(db_state);
+        const node = try node_builder.finishCheckpoint(db_state);
+        defer node.deinit();
         if (params_file != null) {
             custom_beacon_config.genesis_validator_root = node.genesis_validators_root;
         }
         std.log.info("Resumed from DB state at slot {d}", .{db_slot});
+        logHeadSummary(node);
+        try runBootstrappedNode(io, node, api_port, api_address, api_cors, p2p_bind_host, p2p_bind_port);
+        return;
     } else if (network == .minimal) {
         std.log.info("Generating minimal genesis state with 64 validators...", .{});
 
         const genesis_state = genesis_util.createMinimalGenesis(
             allocator,
-            node.chain_runtime.pool,
+            node_builder.sharedStateGraph().pool,
             beacon_config,
-            node.chain_runtime.validator_pubkeys,
+            node_builder.sharedStateGraph().validator_pubkeys,
             64,
         ) catch |err| {
             std.log.err("Failed to generate minimal genesis state: {}", .{err});
             std.process.exit(1);
         };
 
-        try node.initFromGenesis(genesis_state);
+        const node = try node_builder.finishGenesis(genesis_state);
+        defer node.deinit();
         if (params_file != null) {
             custom_beacon_config.genesis_validator_root = node.genesis_validators_root;
         }
         std.log.info("Initialized from minimal genesis state", .{});
+        logHeadSummary(node);
+        try runBootstrappedNode(io, node, api_port, api_address, api_cors, p2p_bind_host, p2p_bind_port);
+        return;
     } else {
         std.log.err("No beacon state available. Provide one of:", .{});
         std.log.err("  --checkpoint-sync-url <URL>  Sync from a beacon API endpoint", .{});
@@ -666,35 +723,4 @@ pub fn run(io: Io, allocator: Allocator, opts: anytype) !void {
         std.log.err("Or ensure --data-dir points to a directory with prior chain data.", .{});
         std.process.exit(1);
     }
-
-    {
-        const head = node.getHead();
-        std.log.info("Head: slot={d} root=0x{s}", .{ head.slot, &std.fmt.bytesToHex(head.root, .lower) });
-        std.log.info("  finalized_epoch={d} justified_epoch={d}", .{ head.finalized_epoch, head.justified_epoch });
-    }
-
-    var run_ctx = RunContext{
-        .node = node,
-        .api_port = api_port,
-        .api_address = api_address,
-        .api_cors_origin = api_cors,
-        .p2p_port = p2p_bind_port,
-        .p2p_host = p2p_bind_host,
-    };
-
-    std.log.info("Starting services concurrently...", .{});
-    std.log.info("  REST API: http://{s}:{d}", .{ api_address, api_port });
-    var p2p_multiaddr_buf: [160]u8 = undefined;
-    const p2p_multiaddr = try formatP2pListenMultiaddr(&p2p_multiaddr_buf, p2p_bind_host, p2p_bind_port);
-    std.log.info("  P2P:      {s}", .{p2p_multiaddr});
-
-    var group: Io.Group = .init;
-    group.async(io, runApiServer, .{ io, &run_ctx });
-    group.async(io, runP2p, .{ io, &run_ctx });
-    group.async(io, runSlotClock, .{ io, node });
-
-    group.await(io) catch {};
-
-    std.log.info("Shutting down...", .{});
-    std.log.info("Goodbye.", .{});
 }

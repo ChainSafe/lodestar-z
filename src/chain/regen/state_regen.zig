@@ -20,47 +20,34 @@ const SharedValidatorPubkeys = state_transition.SharedValidatorPubkeys;
 const BlockStateCache = @import("block_state_cache.zig").BlockStateCache;
 const CheckpointStateCache = @import("checkpoint_state_cache.zig").CheckpointStateCache;
 const CheckpointKey = @import("datastore.zig").CheckpointKey;
-const PmtMutator = @import("pmt_mutator.zig").PmtMutator;
-const StateDisposer = @import("state_disposer.zig").StateDisposer;
-const destroyCachedBeaconState = @import("state_disposer.zig").destroyCachedBeaconState;
+const StateGraphGate = @import("state_graph_gate.zig").StateGraphGate;
+const SharedStateGraph = @import("shared_state_graph.zig").SharedStateGraph;
 const BeaconDB = @import("db").BeaconDB;
-const BeaconConfig = @import("config").BeaconConfig;
-const PersistentMerkleTreeNode = @import("persistent_merkle_tree").Node;
 const deserializeState = state_transition.deserializeState;
 const AnyBeaconState = @import("fork_types").AnyBeaconState;
 const AnySignedBeaconBlock = @import("fork_types").AnySignedBeaconBlock;
-
-pub const ColdPathDeps = struct {
-    db: *BeaconDB,
-    pool: *PersistentMerkleTreeNode.Pool,
-    config: *const BeaconConfig,
-    validator_pubkeys: *SharedValidatorPubkeys,
-};
-
-pub const RuntimeDeps = struct {
-    cold_path: ColdPathDeps,
-    state_disposer: *StateDisposer,
-    pmt_mutator: *PmtMutator,
-};
 
 pub const StateRegen = struct {
     allocator: Allocator,
     block_cache: *BlockStateCache,
     checkpoint_cache: *CheckpointStateCache,
     // fork_choice: *ForkChoice,   // TODO: wire when available
-    runtime: RuntimeDeps,
+    db: *BeaconDB,
+    shared_state_graph: *SharedStateGraph,
 
     pub fn initForRuntime(
         allocator: Allocator,
         block_cache: *BlockStateCache,
         checkpoint_cache: *CheckpointStateCache,
-        runtime_deps: RuntimeDeps,
+        db: *BeaconDB,
+        shared_state_graph: *SharedStateGraph,
     ) StateRegen {
         return .{
             .allocator = allocator,
             .block_cache = block_cache,
             .checkpoint_cache = checkpoint_cache,
-            .runtime = runtime_deps,
+            .db = db,
+            .shared_state_graph = shared_state_graph,
         };
     }
 
@@ -70,18 +57,7 @@ pub const StateRegen = struct {
     /// pool, and shared pubkey cache. This function is an invariant check, not
     /// an ownership-transfer hook.
     pub fn verifyPublishedStateOwnership(self: *StateRegen, state: *CachedBeaconState) !void {
-        const cold = self.runtime.cold_path;
-        if (state.config != cold.config) return error.PublishedStateConfigMismatch;
-        const pool = switch (state.state.*) {
-            inline else => |fork_state| fork_state.pool,
-        };
-        if (pool != cold.pool) return error.PublishedStatePoolMismatch;
-        if (!cold.validator_pubkeys.ownsStateCaches(
-            state.epoch_cache.pubkey_to_index,
-            state.epoch_cache.index_to_pubkey,
-        )) {
-            return error.PublishedStatePubkeyCacheMismatch;
-        }
+        try self.shared_state_graph.verifyPublishedStateOwnership(state);
     }
 
     /// Fast pre-state lookup for block import planning.
@@ -198,16 +174,15 @@ pub const StateRegen = struct {
         // so we cannot efficiently look up by state_root here. Skip for now.
 
         // 3. Try DB archived state
-        const cold = self.runtime.cold_path;
-        const bytes = (try cold.db.getStateArchiveByRoot(state_root)) orelse return null;
+        const bytes = (try self.db.getStateArchiveByRoot(state_root)) orelse return null;
         defer self.allocator.free(bytes);
-        var pmt_mutation_lease = self.acquirePmtMutationLease();
-        defer pmt_mutation_lease.release();
+        var state_graph_lease = self.acquireStateGraphLease();
+        defer state_graph_lease.release();
         const cached_state = try deserializeState(
             self.allocator,
-            cold.pool,
-            cold.config,
-            cold.validator_pubkeys,
+            self.shared_state_graph.pool,
+            self.shared_state_graph.config,
+            self.shared_state_graph.validator_pubkeys,
             bytes,
         );
         return try self.cacheLoadedState(cached_state, false);
@@ -221,18 +196,16 @@ pub const StateRegen = struct {
     /// When an exact archive is unavailable, replay canonical blocks forward
     /// from the closest archived epoch-boundary anchor.
     pub fn getStateBySlot(self: *StateRegen, slot: u64) !?*CachedBeaconState {
-        const cold = self.runtime.cold_path;
-
-        if (try cold.db.getStateArchive(slot)) |bytes| {
+        if (try self.db.getStateArchive(slot)) |bytes| {
             defer self.allocator.free(bytes);
 
-            var pmt_mutation_lease = self.acquirePmtMutationLease();
-            defer pmt_mutation_lease.release();
+            var state_graph_lease = self.acquireStateGraphLease();
+            defer state_graph_lease.release();
             const cached_state = try deserializeState(
                 self.allocator,
-                cold.pool,
-                cold.config,
-                cold.validator_pubkeys,
+                self.shared_state_graph.pool,
+                self.shared_state_graph.config,
+                self.shared_state_graph.validator_pubkeys,
                 bytes,
             );
             return try self.cacheLoadedState(cached_state, false);
@@ -286,44 +259,38 @@ pub const StateRegen = struct {
     }
 
     fn getCanonicalStateByBlockRoot(self: *StateRegen, block_root: [32]u8) !?*CachedBeaconState {
-        const cold = self.runtime.cold_path;
-
         const block_bytes = try self.getBlockBytesByRoot(block_root) orelse return null;
         defer self.allocator.free(block_bytes);
 
         const slot = readSignedBlockSlotFromSsz(block_bytes) orelse return null;
-        const canonical_root = try cold.db.getBlockRootBySlot(slot) orelse return null;
+        const canonical_root = try self.db.getBlockRootBySlot(slot) orelse return null;
         if (!std.mem.eql(u8, &canonical_root, &block_root)) return null;
 
         return self.replayCanonicalStateToSlot(slot);
     }
 
     fn getCanonicalStateByBlockRootUncached(self: *StateRegen, block_root: [32]u8) !?*CachedBeaconState {
-        const cold = self.runtime.cold_path;
-
         const block_bytes = try self.getBlockBytesByRoot(block_root) orelse return null;
         defer self.allocator.free(block_bytes);
 
         const slot = readSignedBlockSlotFromSsz(block_bytes) orelse return null;
-        const canonical_root = try cold.db.getBlockRootBySlot(slot) orelse return null;
+        const canonical_root = try self.db.getBlockRootBySlot(slot) orelse return null;
         if (!std.mem.eql(u8, &canonical_root, &block_root)) return null;
 
         return self.replayCanonicalStateToSlotUncached(slot);
     }
 
     fn replayCanonicalStateToSlot(self: *StateRegen, target_slot: u64) !?*CachedBeaconState {
-        const cold = self.runtime.cold_path;
+        var state_graph_lease = self.acquireStateGraphLease();
+        defer state_graph_lease.release();
 
-        var pmt_mutation_lease = self.acquirePmtMutationLease();
-        defer pmt_mutation_lease.release();
-
-        if (try cold.db.getStateArchive(target_slot)) |bytes| {
+        if (try self.db.getStateArchive(target_slot)) |bytes| {
             defer self.allocator.free(bytes);
             const exact_state = try deserializeState(
                 self.allocator,
-                cold.pool,
-                cold.config,
-                cold.validator_pubkeys,
+                self.shared_state_graph.pool,
+                self.shared_state_graph.config,
+                self.shared_state_graph.validator_pubkeys,
                 bytes,
             );
             return try self.cacheLoadedState(exact_state, false);
@@ -342,7 +309,7 @@ pub const StateRegen = struct {
 
         var slot = anchor_slot + 1;
         while (slot <= target_slot) : (slot += 1) {
-            const block_root = try cold.db.getBlockRootBySlot(slot);
+            const block_root = try self.db.getBlockRootBySlot(slot);
             if (block_root) |root| {
                 const block_bytes = try self.getBlockBytesByRoot(root) orelse return null;
                 defer self.allocator.free(block_bytes);
@@ -381,18 +348,16 @@ pub const StateRegen = struct {
     }
 
     fn replayCanonicalStateToSlotUncached(self: *StateRegen, target_slot: u64) !?*CachedBeaconState {
-        const cold = self.runtime.cold_path;
+        var state_graph_lease = self.acquireStateGraphLease();
+        defer state_graph_lease.release();
 
-        var pmt_mutation_lease = self.acquirePmtMutationLease();
-        defer pmt_mutation_lease.release();
-
-        if (try cold.db.getStateArchive(target_slot)) |bytes| {
+        if (try self.db.getStateArchive(target_slot)) |bytes| {
             defer self.allocator.free(bytes);
             return try deserializeState(
                 self.allocator,
-                cold.pool,
-                cold.config,
-                cold.validator_pubkeys,
+                self.shared_state_graph.pool,
+                self.shared_state_graph.config,
+                self.shared_state_graph.validator_pubkeys,
                 bytes,
             );
         }
@@ -410,7 +375,7 @@ pub const StateRegen = struct {
 
         var slot = anchor_slot + 1;
         while (slot <= target_slot) : (slot += 1) {
-            const block_root = try cold.db.getBlockRootBySlot(slot);
+            const block_root = try self.db.getBlockRootBySlot(slot);
             if (block_root) |root| {
                 const block_bytes = try self.getBlockBytesByRoot(root) orelse return null;
                 defer self.allocator.free(block_bytes);
@@ -449,11 +414,9 @@ pub const StateRegen = struct {
     }
 
     fn findReplayAnchorSlot(self: *StateRegen, target_slot: u64) !?u64 {
-        const cold = self.runtime.cold_path;
-
         var search_slot = computeStartSlotAtEpoch(computeEpochAtSlot(target_slot));
         while (true) {
-            if (try cold.db.getStateArchive(search_slot)) |bytes| {
+            if (try self.db.getStateArchive(search_slot)) |bytes| {
                 self.allocator.free(bytes);
                 return search_slot;
             }
@@ -463,39 +426,38 @@ pub const StateRegen = struct {
     }
 
     fn loadArchivedStateUncached(self: *StateRegen, slot: u64) !*CachedBeaconState {
-        const cold = self.runtime.cold_path;
-        const bytes = (try cold.db.getStateArchive(slot)) orelse return error.StateArchiveMissing;
+        const bytes = (try self.db.getStateArchive(slot)) orelse return error.StateArchiveMissing;
         defer self.allocator.free(bytes);
 
+        var state_graph_lease = self.acquireStateGraphLease();
+        defer state_graph_lease.release();
         return deserializeState(
             self.allocator,
-            cold.pool,
-            cold.config,
-            cold.validator_pubkeys,
+            self.shared_state_graph.pool,
+            self.shared_state_graph.config,
+            self.shared_state_graph.validator_pubkeys,
             bytes,
         );
     }
 
     fn loadArchivedStateByRootUncached(self: *StateRegen, state_root: [32]u8) !?*CachedBeaconState {
-        const cold = self.runtime.cold_path;
-        const bytes = (try cold.db.getStateArchiveByRoot(state_root)) orelse return null;
+        const bytes = (try self.db.getStateArchiveByRoot(state_root)) orelse return null;
         defer self.allocator.free(bytes);
 
-        var pmt_mutation_lease = self.acquirePmtMutationLease();
-        defer pmt_mutation_lease.release();
+        var state_graph_lease = self.acquireStateGraphLease();
+        defer state_graph_lease.release();
         return deserializeState(
             self.allocator,
-            cold.pool,
-            cold.config,
-            cold.validator_pubkeys,
+            self.shared_state_graph.pool,
+            self.shared_state_graph.config,
+            self.shared_state_graph.validator_pubkeys,
             bytes,
         );
     }
 
     fn getBlockBytesByRoot(self: *StateRegen, block_root: [32]u8) !?[]const u8 {
-        const cold = self.runtime.cold_path;
-        if (try cold.db.getBlock(block_root)) |block_bytes| return block_bytes;
-        return cold.db.getBlockArchiveByRoot(block_root);
+        if (try self.db.getBlock(block_root)) |block_bytes| return block_bytes;
+        return self.db.getBlockArchiveByRoot(block_root);
     }
 
     fn deserializeSignedBlock(
@@ -503,8 +465,7 @@ pub const StateRegen = struct {
         slot: u64,
         block_bytes: []const u8,
     ) !AnySignedBeaconBlock {
-        const cold = self.runtime.cold_path;
-        const fork_seq = cold.config.forkSeq(slot);
+        const fork_seq = self.shared_state_graph.config.forkSeq(slot);
         return AnySignedBeaconBlock.deserialize(
             self.allocator,
             .full,
@@ -524,11 +485,11 @@ pub const StateRegen = struct {
     }
 
     fn disposeState(self: *StateRegen, state: *CachedBeaconState) !void {
-        try self.runtime.state_disposer.dispose(state);
+        try self.shared_state_graph.state_disposer.dispose(state);
     }
 
-    fn acquirePmtMutationLease(self: *const StateRegen) PmtMutator.Lease {
-        return self.runtime.pmt_mutator.acquire();
+    fn acquireStateGraphLease(self: *StateRegen) StateGraphGate.Lease {
+        return self.shared_state_graph.acquireMutationLease();
     }
 };
 
@@ -699,11 +660,14 @@ test "StateRegen: verifyPublishedStateOwnership accepts runtime-owned shared sin
 
     try fixture.regen.verifyPublishedStateOwnership(fixture.published_state);
 
-    try std.testing.expect(fixture.shared_pubkeys.ownsStateCaches(
+    try std.testing.expect(fixture.shared_state_graph.validator_pubkeys.ownsStateCaches(
         fixture.published_state.epoch_cache.pubkey_to_index,
         fixture.published_state.epoch_cache.index_to_pubkey,
     ));
-    try std.testing.expectEqual(@as(usize, 16), fixture.shared_pubkeys.index_to_pubkey.items.len);
+    try std.testing.expectEqual(
+        @as(usize, 16),
+        fixture.shared_state_graph.validator_pubkeys.index_to_pubkey.items.len,
+    );
 }
 
 test "StateRegen: verifyPublishedStateOwnership rejects detached test-helper pubkey caches" {

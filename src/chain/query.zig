@@ -41,9 +41,7 @@ pub const Query = struct {
     }
 
     pub fn blockExecutionOptimistic(self: Query, block_root: Root) bool {
-        const fc = self.chain.fork_choice orelse return false;
-        const node = fc.getBlockDefaultStatus(block_root) orelse return false;
-        return isExecutionOptimisticStatus(node.extra_meta.executionStatus());
+        return self.chain.blockExecutionOptimistic(block_root);
     }
 
     pub fn blockExecutionOptimisticAtSlot(self: Query, slot: Slot) !bool {
@@ -55,33 +53,11 @@ pub const Query = struct {
     }
 
     pub fn executionForkchoiceState(self: Query, head_root: Root) ?chain_types.ForkchoiceUpdateState {
-        const fc = self.chain.fork_choice orelse return null;
-
-        const head_node = fc.getBlockDefaultStatus(head_root) orelse return null;
-        const head_block_hash = head_node.extra_meta.executionPayloadBlockHash() orelse return null;
-
-        const justified_cp = fc.getJustifiedCheckpoint();
-        const safe_block_hash = if (fc.getBlockDefaultStatus(justified_cp.root)) |node|
-            node.extra_meta.executionPayloadBlockHash() orelse std.mem.zeroes([32]u8)
-        else
-            std.mem.zeroes([32]u8);
-
-        const finalized_cp = fc.getFinalizedCheckpoint();
-        const finalized_block_hash = if (fc.getBlockDefaultStatus(finalized_cp.root)) |node|
-            node.extra_meta.executionPayloadBlockHash() orelse std.mem.zeroes([32]u8)
-        else
-            std.mem.zeroes([32]u8);
-
-        return .{
-            .head_block_hash = head_block_hash,
-            .safe_block_hash = safe_block_hash,
-            .finalized_block_hash = finalized_block_hash,
-        };
+        return self.chain.executionForkchoiceState(head_root);
     }
 
     pub fn slotsPresent(self: Query, window_start: Slot) u32 {
-        const fc = self.chain.fork_choice orelse return 0;
-        return fc.getSlotsPresent(window_start);
+        return self.chain.slotsPresent(window_start);
     }
 
     pub fn status(self: Query) networking.messages.StatusMessage.Type {
@@ -98,43 +74,25 @@ pub const Query = struct {
     }
 
     pub fn justifiedCheckpoint(self: Query) chain_effects.CheckpointSnapshot {
-        if (self.chain.fork_choice) |fc| {
-            const cp = fc.getJustifiedCheckpoint();
-            return .{
-                .epoch = cp.epoch,
-                .slot = checkpointSlot(cp.epoch),
-                .root = cp.root,
-            };
-        }
-
-        const epoch = self.chain.head_tracker.justified_epoch;
+        const cp = self.chain.forkChoice().getJustifiedCheckpoint();
         return .{
-            .epoch = epoch,
-            .slot = checkpointSlot(epoch),
-            .root = checkpointRootFromTracker(self, epoch),
+            .epoch = cp.epoch,
+            .slot = checkpointSlot(cp.epoch),
+            .root = cp.root,
         };
     }
 
     pub fn finalizedCheckpoint(self: Query) chain_effects.CheckpointSnapshot {
-        if (self.chain.fork_choice) |fc| {
-            const cp = fc.getFinalizedCheckpoint();
-            return .{
-                .epoch = cp.epoch,
-                .slot = checkpointSlot(cp.epoch),
-                .root = cp.root,
-            };
-        }
-
-        const epoch = self.chain.head_tracker.finalized_epoch;
+        const cp = self.chain.forkChoice().getFinalizedCheckpoint();
         return .{
-            .epoch = epoch,
-            .slot = checkpointSlot(epoch),
-            .root = checkpointRootFromTracker(self, epoch),
+            .epoch = cp.epoch,
+            .slot = checkpointSlot(cp.epoch),
+            .root = cp.root,
         };
     }
 
     pub fn blockRootAtSlot(self: Query, slot: Slot) ?Root {
-        return self.chain.head_tracker.getBlockRoot(slot);
+        return self.chain.blockRootAtTrackedSlot(slot);
     }
 
     pub fn canonicalBlockRootAtSlot(self: Query, slot: Slot) !?Root {
@@ -230,7 +188,7 @@ pub const Query = struct {
     }
 
     pub fn headState(self: Query) ?*CachedBeaconState {
-        const head_state_root = self.chain.head_tracker.head_state_root;
+        const head_state_root = self.chain.headStateRoot();
         return self.chain.block_state_cache.get(head_state_root);
     }
 
@@ -245,11 +203,7 @@ pub const Query = struct {
     pub fn stateByRoot(self: Query, state_root: Root) !?*CachedBeaconState {
         if (self.chain.block_state_cache.get(state_root)) |state| return state;
 
-        if (self.chain.queued_regen) |qr| {
-            return qr.getStateByRoot(state_root, .api);
-        }
-
-        return self.chain.state_regen.getStateByRoot(state_root);
+        return self.chain.queued_regen.getStateByRoot(state_root, .api);
     }
 
     pub fn stateExecutionOptimisticByRoot(self: Query, state_root: Root) bool {
@@ -380,14 +334,7 @@ pub const Query = struct {
     }
 
     pub fn isKnownBlockRoot(self: Query, root: Root) bool {
-        var it = self.chain.head_tracker.slot_roots.iterator();
-        while (it.next()) |entry| {
-            if (std.mem.eql(u8, entry.value_ptr, &root)) return true;
-        }
-        if (self.chain.fork_choice) |fc| {
-            return fc.hasBlock(root);
-        }
-        return false;
+        return self.chain.hasCanonicalBlock(root);
     }
 
     fn checkpointSlot(epoch: Epoch) Slot {
@@ -410,23 +357,5 @@ pub const Query = struct {
         );
         defer any_signed.deinit(self.chain.allocator);
         return any_signed.beaconBlock().stateRoot().*;
-    }
-
-    fn checkpointRootFromTracker(self: Query, epoch: Epoch) Root {
-        const slot = checkpointSlot(epoch);
-        if (self.chain.head_tracker.getBlockRoot(slot)) |root| {
-            return root;
-        }
-        if (epoch == 0) {
-            return self.chain.head_tracker.head_root;
-        }
-        return [_]u8{0} ** 32;
-    }
-
-    fn isExecutionOptimisticStatus(exec_status: @import("fork_choice").ExecutionStatus) bool {
-        return switch (exec_status) {
-            .syncing, .payload_separated => true,
-            else => false,
-        };
     }
 };

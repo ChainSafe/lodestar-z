@@ -14,7 +14,7 @@ const computeStartSlotAtEpoch = state_transition.computeStartSlotAtEpoch;
 
 const CachedBeaconState = state_transition.CachedBeaconState;
 const BlockStateCache = @import("block_state_cache.zig").BlockStateCache;
-const PmtMutator = @import("pmt_mutator.zig").PmtMutator;
+const StateGraphGate = @import("state_graph_gate.zig").StateGraphGate;
 const StateDisposer = @import("state_disposer.zig").StateDisposer;
 const datastore_mod = @import("datastore.zig");
 const CPStateDatastore = datastore_mod.CPStateDatastore;
@@ -55,7 +55,7 @@ pub const CheckpointStateCache = struct {
     /// Max epochs to keep in memory
     max_epochs_in_memory: u32,
     state_disposer: *StateDisposer,
-    pmt_mutator: *PmtMutator,
+    state_graph_gate: *StateGraphGate,
 
     pub fn init(
         allocator: Allocator,
@@ -63,7 +63,7 @@ pub const CheckpointStateCache = struct {
         block_cache: *BlockStateCache,
         max_epochs: u32,
         state_disposer: *StateDisposer,
-        pmt_mutator: *PmtMutator,
+        state_graph_gate: *StateGraphGate,
     ) CheckpointStateCache {
         return .{
             .allocator = allocator,
@@ -73,7 +73,7 @@ pub const CheckpointStateCache = struct {
             .block_cache = block_cache,
             .max_epochs_in_memory = max_epochs,
             .state_disposer = state_disposer,
-            .pmt_mutator = pmt_mutator,
+            .state_graph_gate = state_graph_gate,
         };
     }
 
@@ -136,8 +136,8 @@ pub const CheckpointStateCache = struct {
             inline else => |s| s.pool,
         };
 
-        var pmt_mutation_lease = self.pmt_mutator.acquire();
-        defer pmt_mutation_lease.release();
+        var state_graph_lease = self.state_graph_gate.acquire();
+        defer state_graph_lease.release();
 
         const new_state = try loadCachedBeaconState(
             self.allocator,
@@ -369,7 +369,7 @@ test "CheckpointStateCache: add and get" {
 
     var state_disposer = StateDisposer.init(allocator, std.testing.io);
     defer state_disposer.deinit();
-    var pmt_mutator = PmtMutator.init(std.testing.io, &state_disposer);
+    var state_graph_gate = StateGraphGate.init(std.testing.io, &state_disposer);
 
     var block_cache = BlockStateCache.init(allocator, 4, &state_disposer);
     defer block_cache.deinit();
@@ -378,7 +378,7 @@ test "CheckpointStateCache: add and get" {
     const seed = try test_state.cached_state.clone(allocator, .{});
     _ = try block_cache.add(seed, true);
 
-    var cp_cache = CheckpointStateCache.init(allocator, ds, &block_cache, 3, &state_disposer, &pmt_mutator);
+    var cp_cache = CheckpointStateCache.init(allocator, ds, &block_cache, 3, &state_disposer, &state_graph_gate);
     defer cp_cache.deinit();
 
     const state1 = try test_state.cached_state.clone(allocator, .{});
@@ -409,12 +409,12 @@ test "CheckpointStateCache: getLatest" {
 
     var state_disposer = StateDisposer.init(allocator, std.testing.io);
     defer state_disposer.deinit();
-    var pmt_mutator = PmtMutator.init(std.testing.io, &state_disposer);
+    var state_graph_gate = StateGraphGate.init(std.testing.io, &state_disposer);
 
     var block_cache = BlockStateCache.init(allocator, 4, &state_disposer);
     defer block_cache.deinit();
 
-    var cp_cache = CheckpointStateCache.init(allocator, ds, &block_cache, 3, &state_disposer, &pmt_mutator);
+    var cp_cache = CheckpointStateCache.init(allocator, ds, &block_cache, 3, &state_disposer, &state_graph_gate);
     defer cp_cache.deinit();
 
     const root = [_]u8{0x42} ** 32;
@@ -458,13 +458,13 @@ test "CheckpointStateCache: processState persists old epochs" {
 
     var state_disposer = StateDisposer.init(allocator, std.testing.io);
     defer state_disposer.deinit();
-    var pmt_mutator = PmtMutator.init(std.testing.io, &state_disposer);
+    var state_graph_gate = StateGraphGate.init(std.testing.io, &state_disposer);
 
     var block_cache = BlockStateCache.init(allocator, 4, &state_disposer);
     defer block_cache.deinit();
 
     // max 2 epochs in memory
-    var cp_cache = CheckpointStateCache.init(allocator, ds, &block_cache, 2, &state_disposer, &pmt_mutator);
+    var cp_cache = CheckpointStateCache.init(allocator, ds, &block_cache, 2, &state_disposer, &state_graph_gate);
     defer cp_cache.deinit();
 
     // Add states at epochs 1, 2, 3, 4
@@ -513,12 +513,12 @@ test "CheckpointStateCache: pruneFinalized" {
 
     var state_disposer = StateDisposer.init(allocator, std.testing.io);
     defer state_disposer.deinit();
-    var pmt_mutator = PmtMutator.init(std.testing.io, &state_disposer);
+    var state_graph_gate = StateGraphGate.init(std.testing.io, &state_disposer);
 
     var block_cache = BlockStateCache.init(allocator, 4, &state_disposer);
     defer block_cache.deinit();
 
-    var cp_cache = CheckpointStateCache.init(allocator, ds, &block_cache, 3, &state_disposer, &pmt_mutator);
+    var cp_cache = CheckpointStateCache.init(allocator, ds, &block_cache, 3, &state_disposer, &state_graph_gate);
     defer cp_cache.deinit();
 
     // Add states at epochs 5, 10, 15
@@ -557,12 +557,12 @@ test "CheckpointStateCache: multiple roots per epoch" {
 
     var state_disposer = StateDisposer.init(allocator, std.testing.io);
     defer state_disposer.deinit();
-    var pmt_mutator = PmtMutator.init(std.testing.io, &state_disposer);
+    var state_graph_gate = StateGraphGate.init(std.testing.io, &state_disposer);
 
     var block_cache = BlockStateCache.init(allocator, 4, &state_disposer);
     defer block_cache.deinit();
 
-    var cp_cache = CheckpointStateCache.init(allocator, ds, &block_cache, 3, &state_disposer, &pmt_mutator);
+    var cp_cache = CheckpointStateCache.init(allocator, ds, &block_cache, 3, &state_disposer, &state_graph_gate);
     defer cp_cache.deinit();
 
     // Add two different roots at the same epoch
@@ -602,13 +602,13 @@ test "CheckpointStateCache: persist and prune full cycle" {
 
     var state_disposer = StateDisposer.init(allocator, std.testing.io);
     defer state_disposer.deinit();
-    var pmt_mutator = PmtMutator.init(std.testing.io, &state_disposer);
+    var state_graph_gate = StateGraphGate.init(std.testing.io, &state_disposer);
 
     var block_cache = BlockStateCache.init(allocator, 4, &state_disposer);
     defer block_cache.deinit();
 
     // max 1 epoch in memory for aggressive testing
-    var cp_cache = CheckpointStateCache.init(allocator, ds, &block_cache, 1, &state_disposer, &pmt_mutator);
+    var cp_cache = CheckpointStateCache.init(allocator, ds, &block_cache, 1, &state_disposer, &state_graph_gate);
     defer cp_cache.deinit();
 
     // Add epoch 1, 2, 3
@@ -661,12 +661,12 @@ test "CheckpointStateCache: add replaces existing in-memory state" {
 
     var state_disposer = StateDisposer.init(allocator, std.testing.io);
     defer state_disposer.deinit();
-    var pmt_mutator = PmtMutator.init(std.testing.io, &state_disposer);
+    var state_graph_gate = StateGraphGate.init(std.testing.io, &state_disposer);
 
     var block_cache = BlockStateCache.init(allocator, 4, &state_disposer);
     defer block_cache.deinit();
 
-    var cp_cache = CheckpointStateCache.init(allocator, ds, &block_cache, 3, &state_disposer, &pmt_mutator);
+    var cp_cache = CheckpointStateCache.init(allocator, ds, &block_cache, 3, &state_disposer, &state_graph_gate);
     defer cp_cache.deinit();
 
     const cp = CheckpointKey{ .epoch = 5, .root = [_]u8{0x55} ** 32 };
@@ -701,7 +701,7 @@ test "CheckpointStateCache: replacement can defer state teardown" {
 
     var state_disposer = StateDisposer.init(allocator, std.testing.io);
     defer state_disposer.deinit();
-    var pmt_mutator = PmtMutator.init(std.testing.io, &state_disposer);
+    var state_graph_gate = StateGraphGate.init(std.testing.io, &state_disposer);
 
     var block_cache = BlockStateCache.init(allocator, 4, &state_disposer);
     defer block_cache.deinit();
@@ -712,7 +712,7 @@ test "CheckpointStateCache: replacement can defer state teardown" {
         &block_cache,
         3,
         &state_disposer,
-        &pmt_mutator,
+        &state_graph_gate,
     );
     defer cp_cache.deinit();
 

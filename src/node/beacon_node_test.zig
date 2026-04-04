@@ -26,7 +26,7 @@ const TestContext = struct {
     test_state: TestCachedBeaconState,
     node: *BeaconNode,
 
-    fn init(opts: NodeOptions) !TestContext {
+    fn initUnbootstrapped(opts: NodeOptions) !TestContext {
         const allocator = std.testing.allocator;
         var pool = try TreeNode.Pool.init(allocator, 256 * 5);
         errdefer pool.deinit();
@@ -38,7 +38,7 @@ const TestContext = struct {
         }
 
         const node_identity = try identity_mod.createEphemeralIdentity(allocator, std.testing.io, opts);
-        const node = try BeaconNode.init(allocator, std.testing.io, test_state.cached_state.config, .{
+        const node = try BeaconNode.initUnbootstrapped(allocator, std.testing.io, test_state.cached_state.config, .{
             .options = opts,
             .node_identity = node_identity,
         });
@@ -49,6 +49,17 @@ const TestContext = struct {
             .test_state = test_state,
             .node = node,
         };
+    }
+
+    fn init(opts: NodeOptions) !TestContext {
+        const allocator = std.testing.allocator;
+        var ctx = try initUnbootstrapped(opts);
+        errdefer ctx.deinit();
+
+        const genesis_state = try ctx.test_state.cached_state.clone(allocator, .{});
+        try genesis_state.state.setSlot(0);
+        try ctx.node.initFromGenesis(genesis_state);
+        return ctx;
     }
 
     fn deinit(self: *TestContext) void {
@@ -70,7 +81,7 @@ test "BeaconNode: init and deinit" {
 
 test "BeaconNode: initFromGenesis sets head at slot 0" {
     const allocator = std.testing.allocator;
-    var ctx = try TestContext.init(.{});
+    var ctx = try TestContext.initUnbootstrapped(.{});
     defer ctx.deinit();
 
     const genesis_state = try ctx.test_state.cached_state.clone(allocator, .{});
@@ -183,8 +194,8 @@ test "BeaconNode: onReqResp Status returns real head slot and root" {
     const expected_root = [_]u8{0xAB} ** 32;
     const expected_slot: u64 = 42;
     const state_root = [_]u8{0x11} ** 32;
-    try ctx.node.chain_runtime.head_tracker.onBlock(expected_root, expected_slot, state_root);
-    ctx.node.chain_runtime.head_tracker.setHead(expected_root, expected_slot, state_root);
+    try ctx.node.chain.onTrackedBlock(expected_root, expected_slot, state_root);
+    ctx.node.chain.setTrackedHead(expected_root, expected_slot, state_root);
 
     const peer_status = StatusMessage.Type{
         .fork_digest = [_]u8{0} ** 4,
@@ -267,8 +278,8 @@ test "BeaconNode: onReqResp BeaconBlocksByRange returns blocks for known slots" 
     const block_10 = [_]u8{0xAA} ** 20;
     const block_11 = [_]u8{0xBB} ** 20;
 
-    try ctx.node.chain_runtime.head_tracker.onBlock(root_10, 10, [_]u8{0} ** 32);
-    try ctx.node.chain_runtime.head_tracker.onBlock(root_11, 11, [_]u8{0} ** 32);
+    try ctx.node.chain.onTrackedBlock(root_10, 10, [_]u8{0} ** 32);
+    try ctx.node.chain.onTrackedBlock(root_11, 11, [_]u8{0} ** 32);
     try ctx.node.chain_runtime.db.putBlock(root_10, &block_10);
     try ctx.node.chain_runtime.db.putBlock(root_11, &block_11);
 
@@ -352,8 +363,8 @@ test "BeaconNode: onReqResp BlobSidecarsByRange returns stored blobs" {
     const sidecar_size = preset_root.BLOBSIDECAR_FIXED_SIZE;
     const root_5 = [_]u8{0x05} ** 32;
     const root_6 = [_]u8{0x06} ** 32;
-    try ctx.node.chain_runtime.head_tracker.onBlock(root_5, 5, [_]u8{0} ** 32);
-    try ctx.node.chain_runtime.head_tracker.onBlock(root_6, 6, [_]u8{0} ** 32);
+    try ctx.node.chain.onTrackedBlock(root_5, 5, [_]u8{0} ** 32);
+    try ctx.node.chain.onTrackedBlock(root_6, 6, [_]u8{0} ** 32);
 
     const blob_5 = try allocator.alloc(u8, sidecar_size * 2);
     defer allocator.free(blob_5);
@@ -453,7 +464,7 @@ test "BeaconNode: archiveState stores state bytes in DB and retrieves them" {
     defer ctx.deinit();
 
     const state = try ctx.test_state.cached_state.clone(allocator, .{});
-    const state_root = try ctx.node.chain_runtime.queued_regen.onNewBlock(state, true);
+    const state_root = try ctx.node.chain.queued_regen.onNewBlock(state, true);
     const slot: u64 = 32;
 
     try ctx.node.archiveState(slot, state_root);
@@ -476,7 +487,7 @@ test "BeaconNode: archiveState is no-op for unknown state root" {
 
 test "BeaconNode: forkchoiceUpdated called after block import for post-merge head" {
     const allocator = std.testing.allocator;
-    var ctx = try TestContext.init(.{ .engine_mock = true });
+    var ctx = try TestContext.initUnbootstrapped(.{ .engine_mock = true });
     defer ctx.deinit();
 
     const genesis_state = try ctx.test_state.cached_state.clone(allocator, .{});
@@ -487,7 +498,7 @@ test "BeaconNode: forkchoiceUpdated called after block import for post-merge hea
     const genesis_root = ctx.node.getHead().root;
     const fake_exec_hash = [_]u8{0xab} ** 32;
     const post_merge_root = [_]u8{0xcd} ** 32;
-    const fc = ctx.node.chain.fork_choice.?;
+    const fc = ctx.node.chain.forkChoice();
     const finalized_cp = fc.getFinalizedCheckpoint();
     const post_merge_slot = finalized_cp.epoch * preset.SLOTS_PER_EPOCH + 10;
 
@@ -523,7 +534,7 @@ test "BeaconNode: forkchoiceUpdated called after block import for post-merge hea
 
 test "BeaconNode: forkchoiceUpdated not called for pre-merge head" {
     const allocator = std.testing.allocator;
-    var ctx = try TestContext.init(.{ .engine_mock = true });
+    var ctx = try TestContext.initUnbootstrapped(.{ .engine_mock = true });
     defer ctx.deinit();
 
     const genesis_state = try ctx.test_state.cached_state.clone(allocator, .{});

@@ -125,10 +125,10 @@ pub const ApiBindings = struct {
         }
 
         wireApiContext(bindings, node.api_context);
-        node.chain.notification_sink = .{
+        node.chain.setNotificationSink(.{
             .ptr = @ptrCast(bindings.notification_sink_ctx),
             .publishFn = &publishChainNotificationFn,
-        };
+        });
         return bindings;
     }
 

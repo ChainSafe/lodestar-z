@@ -26,7 +26,7 @@ const ForkSeq = config_mod.ForkSeq;
 const state_transition = @import("state_transition");
 const regen_mod = @import("../regen/root.zig");
 const CachedBeaconState = state_transition.CachedBeaconState;
-const PmtMutator = regen_mod.PmtMutator;
+const StateGraphGate = regen_mod.StateGraphGate;
 const bls_mod = @import("bls");
 const BatchVerifier = bls_mod.BatchVerifier;
 
@@ -74,15 +74,15 @@ pub fn executeStateTransition(
     da_status: DataAvailabilityStatus,
     opts: ImportBlockOpts,
     precomputed_body_root: ?[32]u8,
-    pmt_mutator: *PmtMutator,
+    state_graph_gate: *StateGraphGate,
     block_bls_thread_pool: ?*bls_mod.ThreadPool,
 ) BlockImportError!StfResult {
     const any_signed_block = block_input.block;
     const block = any_signed_block.beaconBlock();
     const block_slot = block.slot();
 
-    var pmt_mutation_lease = pmt_mutator.acquire();
-    defer pmt_mutation_lease.release();
+    var state_graph_lease = state_graph_gate.acquire();
+    defer state_graph_lease.release();
 
     // Clone pre-state (COW — cheap if no mutations).
     const post_state = pre_state.clone(allocator, .{ .transfer_cache = false }) catch

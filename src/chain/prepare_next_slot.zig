@@ -21,7 +21,7 @@ const regen_mod = @import("regen/root.zig");
 const CachedBeaconState = state_transition.CachedBeaconState;
 const CheckpointStateCache = regen_mod.CheckpointStateCache;
 const BlockStateCache = regen_mod.BlockStateCache;
-const PmtMutator = regen_mod.PmtMutator;
+const StateGraphGate = regen_mod.StateGraphGate;
 const computeEpochAtSlot = state_transition.computeEpochAtSlot;
 const RegenRuntimeFixture = @import("regen/test_fixture.zig").RegenRuntimeFixture;
 
@@ -42,8 +42,8 @@ pub const PrepareNextSlot = struct {
     block_state_cache: *BlockStateCache,
     /// Reference to the checkpoint state cache (not owned).
     checkpoint_state_cache: *CheckpointStateCache,
-    /// Shared PMT mutator gate.
-    pmt_mutator: *PmtMutator,
+    /// Shared published-state mutation gate.
+    state_graph_gate: *StateGraphGate,
 
     /// Slot for which we last ran the pre-computation.
     last_prepared_slot: u64,
@@ -52,7 +52,7 @@ pub const PrepareNextSlot = struct {
         allocator: Allocator,
         block_state_cache: *BlockStateCache,
         checkpoint_state_cache: *CheckpointStateCache,
-        pmt_mutator: *PmtMutator,
+        state_graph_gate: *StateGraphGate,
         config: PrepareNextSlotConfig,
     ) PrepareNextSlot {
         return .{
@@ -60,7 +60,7 @@ pub const PrepareNextSlot = struct {
             .config = config,
             .block_state_cache = block_state_cache,
             .checkpoint_state_cache = checkpoint_state_cache,
-            .pmt_mutator = pmt_mutator,
+            .state_graph_gate = state_graph_gate,
             .last_prepared_slot = 0,
         };
     }
@@ -92,8 +92,8 @@ pub const PrepareNextSlot = struct {
             return;
         };
 
-        var pmt_mutation_lease = self.pmt_mutator.acquire();
-        defer pmt_mutation_lease.release();
+        var state_graph_lease = self.state_graph_gate.acquire();
+        defer state_graph_lease.release();
 
         // Clone and advance.
         const advanced = try head_state.clone(self.allocator, .{ .transfer_cache = false });
@@ -155,7 +155,7 @@ test "PrepareNextSlot: init/deinit is safe" {
         std.testing.allocator,
         fixture.block_cache,
         fixture.cp_cache,
-        fixture.pmt_mutator,
+        fixture.shared_state_graph.gate,
         .{},
     );
     defer pns.deinit();
@@ -171,7 +171,7 @@ test "PrepareNextSlot: disabled config skips work" {
         std.testing.allocator,
         fixture.block_cache,
         fixture.cp_cache,
-        fixture.pmt_mutator,
+        fixture.shared_state_graph.gate,
         .{ .enabled = false },
     );
     defer pns.deinit();
@@ -195,7 +195,7 @@ test "PrepareNextSlot: precomputes next-slot head state" {
         std.testing.allocator,
         fixture.block_cache,
         fixture.cp_cache,
-        fixture.pmt_mutator,
+        fixture.shared_state_graph.gate,
         .{},
     );
     defer pns.deinit();

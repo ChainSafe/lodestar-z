@@ -12,8 +12,9 @@ const generateElectraState = state_transition.test_utils.generateElectraState;
 const BlockStateCache = @import("block_state_cache.zig").BlockStateCache;
 const CheckpointStateCache = @import("checkpoint_state_cache.zig").CheckpointStateCache;
 const MemoryCPStateDatastore = @import("datastore.zig").MemoryCPStateDatastore;
+const SharedStateGraph = @import("shared_state_graph.zig").SharedStateGraph;
 const StateDisposer = @import("state_disposer.zig").StateDisposer;
-const PmtMutator = @import("pmt_mutator.zig").PmtMutator;
+const StateGraphGate = @import("state_graph_gate.zig").StateGraphGate;
 const StateRegen = @import("state_regen.zig").StateRegen;
 const db_mod = @import("db");
 const BeaconDB = db_mod.BeaconDB;
@@ -26,11 +27,7 @@ else
 
 pub const RegenRuntimeFixture = struct {
     allocator: Allocator,
-    pool: *Node.Pool,
-    config: *BeaconConfig,
-    shared_pubkeys: *SharedValidatorPubkeys,
-    state_disposer: *StateDisposer,
-    pmt_mutator: *PmtMutator,
+    shared_state_graph: *SharedStateGraph,
     block_cache: *BlockStateCache,
     cp_datastore: *MemoryCPStateDatastore,
     cp_cache: *CheckpointStateCache,
@@ -83,13 +80,23 @@ pub const RegenRuntimeFixture = struct {
         state_disposer.* = StateDisposer.init(allocator, std.testing.io);
         errdefer state_disposer.deinit();
 
-        const pmt_mutator = try allocator.create(PmtMutator);
-        errdefer allocator.destroy(pmt_mutator);
-        pmt_mutator.* = PmtMutator.init(std.testing.io, state_disposer);
+        const state_graph_gate = try allocator.create(StateGraphGate);
+        errdefer allocator.destroy(state_graph_gate);
+        state_graph_gate.* = StateGraphGate.init(std.testing.io, state_disposer);
+
+        const shared_state_graph = try allocator.create(SharedStateGraph);
+        errdefer allocator.destroy(shared_state_graph);
+        shared_state_graph.* = .{
+            .config = config,
+            .pool = pool,
+            .validator_pubkeys = shared_pubkeys,
+            .state_disposer = state_disposer,
+            .gate = state_graph_gate,
+        };
 
         const block_cache = try allocator.create(BlockStateCache);
         errdefer allocator.destroy(block_cache);
-        block_cache.* = BlockStateCache.init(allocator, 4, state_disposer);
+        block_cache.* = BlockStateCache.init(allocator, 4, shared_state_graph.state_disposer);
         errdefer block_cache.deinit();
 
         const cp_datastore = try allocator.create(MemoryCPStateDatastore);
@@ -104,8 +111,8 @@ pub const RegenRuntimeFixture = struct {
             cp_datastore.datastore(),
             block_cache,
             3,
-            state_disposer,
-            pmt_mutator,
+            shared_state_graph.state_disposer,
+            shared_state_graph.gate,
         );
         errdefer cp_cache.deinit();
 
@@ -121,24 +128,17 @@ pub const RegenRuntimeFixture = struct {
 
         const regen = try allocator.create(StateRegen);
         errdefer allocator.destroy(regen);
-        regen.* = StateRegen.initForRuntime(allocator, block_cache, cp_cache, .{
-            .cold_path = .{
-                .db = db,
-                .pool = pool,
-                .config = config,
-                .validator_pubkeys = shared_pubkeys,
-            },
-            .state_disposer = state_disposer,
-            .pmt_mutator = pmt_mutator,
-        });
+        regen.* = StateRegen.initForRuntime(
+            allocator,
+            block_cache,
+            cp_cache,
+            db,
+            shared_state_graph,
+        );
 
         return .{
             .allocator = allocator,
-            .pool = pool,
-            .config = config,
-            .shared_pubkeys = shared_pubkeys,
-            .state_disposer = state_disposer,
-            .pmt_mutator = pmt_mutator,
+            .shared_state_graph = shared_state_graph,
             .block_cache = block_cache,
             .cp_datastore = cp_datastore,
             .cp_cache = cp_cache,
@@ -170,18 +170,20 @@ pub const RegenRuntimeFixture = struct {
         self.mem_kv.deinit();
         self.allocator.destroy(self.mem_kv);
 
-        self.allocator.destroy(self.pmt_mutator);
+        self.allocator.destroy(self.shared_state_graph.gate);
 
-        self.state_disposer.deinit();
-        self.allocator.destroy(self.state_disposer);
+        self.shared_state_graph.state_disposer.deinit();
+        self.allocator.destroy(self.shared_state_graph.state_disposer);
 
-        self.shared_pubkeys.deinit();
-        self.allocator.destroy(self.shared_pubkeys);
+        self.shared_state_graph.validator_pubkeys.deinit();
+        self.allocator.destroy(self.shared_state_graph.validator_pubkeys);
 
-        self.allocator.destroy(self.config);
+        self.allocator.destroy(@constCast(self.shared_state_graph.config));
 
-        self.pool.deinit();
-        self.allocator.destroy(self.pool);
+        self.shared_state_graph.pool.deinit();
+        self.allocator.destroy(self.shared_state_graph.pool);
+
+        self.allocator.destroy(self.shared_state_graph);
     }
 
     pub fn clonePublishedState(self: *RegenRuntimeFixture) !*CachedBeaconState {

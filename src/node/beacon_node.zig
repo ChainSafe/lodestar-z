@@ -36,7 +36,9 @@ const CachedBeaconState = state_transition.CachedBeaconState;
 const chain_mod = @import("chain");
 const Chain = chain_mod.Chain;
 const ChainRuntime = chain_mod.Runtime;
+const ChainRuntimeBuilder = chain_mod.RuntimeBuilder;
 const ChainService = chain_mod.Service;
+const SharedStateGraph = chain_mod.SharedStateGraph;
 const ProducedBlockBody = chain_mod.ProducedBlockBody;
 const ProducedBlock = chain_mod.ProducedBlock;
 const ValidatorMonitor = chain_mod.ValidatorMonitor;
@@ -189,6 +191,70 @@ pub const BeaconNode = struct {
         identify_agent_version: ?[]const u8 = null,
     };
 
+    pub const Builder = struct {
+        allocator: Allocator,
+        io: std.Io,
+        config: *const BeaconConfig,
+        node_options: NodeOptions,
+        runtime_builder: ChainRuntimeBuilder,
+        block_bls_thread_pool: *BlsThreadPool,
+        gossip_bls_thread_pool: *BlsThreadPool,
+        node_identity: ?NodeIdentity,
+        execution_runtime: ?*ExecutionRuntime,
+        api_context: ?*ApiContext,
+        api_node_identity: ?*api_mod.types.NodeIdentity,
+        event_bus: ?*api_mod.EventBus,
+        bootstrap_peers: []const []const u8 = &.{},
+        discovery_bootnodes: []const []const u8 = &.{},
+        identify_agent_version: ?[]const u8 = null,
+        finished: bool = false,
+
+        pub fn init(
+            allocator: Allocator,
+            io: std.Io,
+            beacon_config: *const BeaconConfig,
+            init_config: InitConfig,
+        ) !Builder {
+            return lifecycle_mod.initBuilder(allocator, io, beacon_config, init_config);
+        }
+
+        pub fn deinit(self: *Builder) void {
+            lifecycle_mod.deinitBuilder(self);
+        }
+
+        fn ensureActive(self: *const Builder) void {
+            if (self.finished) @panic("BeaconNode.Builder used after finish");
+        }
+
+        pub fn nodeIdentity(self: *const Builder) *const NodeIdentity {
+            self.ensureActive();
+            return &(self.node_identity orelse @panic("BeaconNode.Builder missing node identity"));
+        }
+
+        pub fn sharedStateGraph(self: *const Builder) *SharedStateGraph {
+            self.ensureActive();
+            return self.runtime_builder.sharedStateGraph();
+        }
+
+        pub fn latestStateArchiveSlot(self: *const Builder) !?u64 {
+            self.ensureActive();
+            return self.runtime_builder.latestStateArchiveSlot();
+        }
+
+        pub fn stateArchiveAtSlot(self: *const Builder, slot: u64) !?[]const u8 {
+            self.ensureActive();
+            return self.runtime_builder.stateArchiveAtSlot(slot);
+        }
+
+        pub fn finishGenesis(self: *Builder, genesis_state: *CachedBeaconState) !*BeaconNode {
+            return lifecycle_mod.finishBuilderGenesis(self, genesis_state);
+        }
+
+        pub fn finishCheckpoint(self: *Builder, checkpoint_state: *CachedBeaconState) !*BeaconNode {
+            return lifecycle_mod.finishBuilderCheckpoint(self, checkpoint_state);
+        }
+    };
+
     allocator: Allocator,
     config: *const BeaconConfig,
 
@@ -326,12 +392,16 @@ pub const BeaconNode = struct {
         if (self.http_server) |*srv| srv.shutdown(self.io);
     }
 
-    /// Create a new BeaconNode with all components wired together.
+    /// Low-level unbootstrapped constructor used by tests and bring-up code.
     ///
-    /// Uses MemoryKVStore for the database backend — production would
-    /// swap this for LMDB or similar. The hot chain graph is heap-allocated
-    /// and owned by `chain.Runtime`, with BeaconNode holding aliases into it.
-    pub fn init(allocator: Allocator, io: std.Io, beacon_config: *const BeaconConfig, init_config: InitConfig) !*BeaconNode {
+    /// Production callers should prefer `BeaconNode.Builder`, which only yields
+    /// a live node after genesis/checkpoint bootstrap is complete.
+    pub fn initUnbootstrapped(
+        allocator: Allocator,
+        io: std.Io,
+        beacon_config: *const BeaconConfig,
+        init_config: InitConfig,
+    ) !*BeaconNode {
         return lifecycle_mod.init(allocator, io, beacon_config, init_config);
     }
 
