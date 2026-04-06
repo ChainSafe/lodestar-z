@@ -72,12 +72,12 @@ const MAX_BLS_CHANGE_POOL_SIZE: u32 = 16_384;
 /// most entries (rough proxy for coverage) up to `max_attestations`.
 pub const AttestationPool = struct {
     allocator: Allocator,
-    pool: std.AutoHashMap([32]u8, std.ArrayListUnmanaged(Phase0Attestation.Type)),
+    pool: std.AutoHashMap([32]u8, std.ArrayListUnmanaged(AnyAttestation)),
 
     pub fn init(allocator: Allocator) AttestationPool {
         return .{
             .allocator = allocator,
-            .pool = std.AutoHashMap([32]u8, std.ArrayListUnmanaged(Phase0Attestation.Type)).init(allocator),
+            .pool = std.AutoHashMap([32]u8, std.ArrayListUnmanaged(AnyAttestation)).init(allocator),
         };
     }
 
@@ -85,7 +85,7 @@ pub const AttestationPool = struct {
         var it = self.pool.iterator();
         while (it.next()) |entry| {
             for (entry.value_ptr.items) |*att| {
-                att.aggregation_bits.data.deinit(self.allocator);
+                att.deinit(self.allocator);
             }
             entry.value_ptr.deinit(self.allocator);
         }
@@ -96,33 +96,13 @@ pub const AttestationPool = struct {
     ///
     /// Grouped by hash-tree-root of `AttestationData`.
     pub fn add(self: *AttestationPool, attestation: Phase0Attestation.Type) !void {
-        // Capacity limit: drop new entries when the pool is full.
-        if (self.pool.count() >= MAX_ATTESTATION_POOL_SIZE) return;
-        var data_root: [32]u8 = undefined;
-        try AttestationData.hashTreeRoot(&attestation.data, &data_root);
-
-        const gop = try self.pool.getOrPut(data_root);
-        if (!gop.found_existing) {
-            gop.value_ptr.* = std.ArrayListUnmanaged(Phase0Attestation.Type).empty;
-        }
-
-        // Clone aggregation bits so the pool owns the memory.
-        var cloned = attestation;
-        const src = attestation.aggregation_bits.data.items;
-        if (src.len > 0) {
-            var new_data = try std.ArrayListUnmanaged(u8).initCapacity(self.allocator, src.len);
-            new_data.appendSliceAssumeCapacity(src);
-            cloned.aggregation_bits.data = new_data;
-        } else {
-            cloned.aggregation_bits.data = std.ArrayListUnmanaged(u8).empty;
-        }
-        try gop.value_ptr.append(self.allocator, cloned);
+        try self.addAny(.{ .phase0 = attestation });
     }
 
     /// Select the best attestations for block inclusion.
     ///
-    /// Returns up to `max_attestations` entries.  Caller owns the returned
-    /// slice.
+    /// Returns up to `max_attestations` entries in phase0 format. Caller owns
+    /// the returned slice and each attestation's dynamic storage.
     pub fn getForBlock(self: *AttestationPool, allocator: Allocator, max_attestations: u32) ![]Phase0Attestation.Type {
         const Group = struct {
             key: [32]u8,
@@ -139,7 +119,6 @@ pub const AttestationPool = struct {
             });
         }
 
-        // Sort descending by group size (best coverage first).
         const Sort = struct {
             pub fn lessThan(_: void, a: Group, b_val: Group) bool {
                 return a.len > b_val.len;
@@ -148,14 +127,21 @@ pub const AttestationPool = struct {
         std.sort.pdq(Group, groups.items, {}, Sort.lessThan);
 
         var result = std.ArrayListUnmanaged(Phase0Attestation.Type).empty;
-        errdefer result.deinit(allocator);
+        errdefer {
+            for (result.items) |*att| {
+                Phase0Attestation.deinit(allocator, att);
+            }
+            result.deinit(allocator);
+        }
 
         for (groups.items) |group| {
             if (result.items.len >= max_attestations) break;
             if (self.pool.get(group.key)) |atts| {
-                for (atts.items) |att| {
+                for (atts.items) |*att| {
                     if (result.items.len >= max_attestations) break;
-                    try result.append(allocator, att);
+                    var cloned = try cloneForPhase0Result(allocator, att);
+                    errdefer Phase0Attestation.deinit(allocator, &cloned);
+                    try result.append(allocator, cloned);
                 }
             }
         }
@@ -175,9 +161,9 @@ pub const AttestationPool = struct {
         var it = self.pool.iterator();
         while (it.next()) |entry| {
             const items = entry.value_ptr.items;
-            if (items.len > 0 and items[0].data.slot < cutoff) {
+            if (items.len > 0 and items[0].slot() < cutoff) {
                 for (items) |*att| {
-                    att.aggregation_bits.data.deinit(self.allocator);
+                    att.deinit(self.allocator);
                 }
                 entry.value_ptr.deinit(self.allocator);
                 to_remove.append(self.allocator, entry.key_ptr.*) catch continue;
@@ -189,61 +175,22 @@ pub const AttestationPool = struct {
     }
 
     /// Add an attestation in any fork format.
-    ///
-    /// For phase0 attestations, delegates to `add`.
-    /// For electra attestations, groups by AttestationData hash (ignoring committee_bits for grouping).
     pub fn addAny(self: *AttestationPool, attestation: AnyAttestation) !void {
-        switch (attestation) {
-            .phase0 => |att| try self.add(att),
-            .electra => |att| try self.addElectra(att),
-        }
-    }
-
-    /// Add an Electra-format attestation to the pool.
-    ///
-    /// Electra attestations have committee_bits and wider aggregation_bits.
-    /// For the simple pool, we store them converted to phase0 format using
-    /// the first committee index from committee_bits.
-    fn addElectra(self: *AttestationPool, attestation: ElectraAttestation.Type) !void {
-        // Capacity limit
         if (self.pool.count() >= MAX_ATTESTATION_POOL_SIZE) return;
 
-        // Compute data root (AttestationData is the same struct).
+        var data = attestation.data();
         var data_root: [32]u8 = undefined;
-        try AttestationData.hashTreeRoot(&attestation.data, &data_root);
+        try AttestationData.hashTreeRoot(&data, &data_root);
 
         const gop = try self.pool.getOrPut(data_root);
         if (!gop.found_existing) {
-            gop.value_ptr.* = std.ArrayListUnmanaged(Phase0Attestation.Type).empty;
+            gop.value_ptr.* = std.ArrayListUnmanaged(AnyAttestation).empty;
         }
 
-        // Convert to phase0 format for storage.
-        // Extract committee index from committee_bits.
-        var committee_index: u64 = 0;
-        for (0..preset.MAX_COMMITTEES_PER_SLOT) |i| {
-            if (attestation.committee_bits.get(i) catch false) {
-                committee_index = @intCast(i);
-                break;
-            }
-        }
-
-        var cloned_data = attestation.data;
-        cloned_data.index = committee_index;
-
-        // Clone aggregation bits.
-        const src = attestation.aggregation_bits.data.items;
-        var new_data: std.ArrayListUnmanaged(u8) = .empty;
-        if (src.len > 0) {
-            new_data = try std.ArrayListUnmanaged(u8).initCapacity(self.allocator, src.len);
-            new_data.appendSliceAssumeCapacity(src);
-        }
-
-        const phase0_att = Phase0Attestation.Type{
-            .aggregation_bits = .{ .data = new_data, .bit_len = attestation.aggregation_bits.bit_len },
-            .data = cloned_data,
-            .signature = attestation.signature,
-        };
-        try gop.value_ptr.append(self.allocator, phase0_att);
+        var owned: AnyAttestation = undefined;
+        try attestation.clone(self.allocator, &owned);
+        errdefer owned.deinit(self.allocator);
+        try gop.value_ptr.append(self.allocator, owned);
     }
 
     /// Number of distinct attestation-data groups in the pool.
@@ -251,10 +198,9 @@ pub const AttestationPool = struct {
         return self.pool.count();
     }
 
-    /// Return all attestations in the pool, optionally filtered by slot and
-    /// committee index. Caller owns the returned slice.
-    ///
-    /// Used by GET /eth/v1/beacon/pool/attestations.
+    /// Return all attestations in phase0 format, optionally filtered by slot and
+    /// committee index. Caller owns the returned slice and each item's dynamic
+    /// storage.
     pub fn getAll(
         self: *AttestationPool,
         allocator: Allocator,
@@ -262,18 +208,60 @@ pub const AttestationPool = struct {
         committee_index_filter: ?u64,
     ) ![]Phase0Attestation.Type {
         var result = std.ArrayListUnmanaged(Phase0Attestation.Type).empty;
-        errdefer result.deinit(allocator);
+        errdefer {
+            for (result.items) |*att| {
+                Phase0Attestation.deinit(allocator, att);
+            }
+            result.deinit(allocator);
+        }
 
         var it = self.pool.iterator();
         while (it.next()) |entry| {
-            for (entry.value_ptr.items) |att| {
+            for (entry.value_ptr.items) |*att| {
                 if (slot_filter) |s| {
-                    if (att.data.slot != s) continue;
+                    if (att.slot() != s) continue;
                 }
                 if (committee_index_filter) |ci| {
-                    if (att.data.index != ci) continue;
+                    if (!att.containsCommitteeIndex(ci)) continue;
                 }
-                try result.append(allocator, att);
+                var cloned = try cloneForPhase0Result(allocator, att);
+                errdefer Phase0Attestation.deinit(allocator, &cloned);
+                try result.append(allocator, cloned);
+            }
+        }
+        return result.toOwnedSlice(allocator);
+    }
+
+    /// Return all attestations in fork-aware format, optionally filtered by slot
+    /// and committee index. Caller owns the returned slice and each item's
+    /// dynamic storage.
+    pub fn getAllAny(
+        self: *AttestationPool,
+        allocator: Allocator,
+        slot_filter: ?Slot,
+        committee_index_filter: ?u64,
+    ) ![]AnyAttestation {
+        var result = std.ArrayListUnmanaged(AnyAttestation).empty;
+        errdefer {
+            for (result.items) |*att| {
+                att.deinit(allocator);
+            }
+            result.deinit(allocator);
+        }
+
+        var it = self.pool.iterator();
+        while (it.next()) |entry| {
+            for (entry.value_ptr.items) |*att| {
+                if (slot_filter) |s| {
+                    if (att.slot() != s) continue;
+                }
+                if (committee_index_filter) |ci| {
+                    if (!att.containsCommitteeIndex(ci)) continue;
+                }
+                var cloned: AnyAttestation = undefined;
+                try att.clone(allocator, &cloned);
+                errdefer cloned.deinit(allocator);
+                try result.append(allocator, cloned);
             }
         }
         return result.toOwnedSlice(allocator);
@@ -282,6 +270,29 @@ pub const AttestationPool = struct {
     /// Alias for groupCount — total unique AttestationData entries.
     pub fn count(self: *const AttestationPool) usize {
         return self.pool.count();
+    }
+
+    fn cloneForPhase0Result(allocator: Allocator, attestation: *const AnyAttestation) !Phase0Attestation.Type {
+        switch (attestation.*) {
+            .phase0 => |*att| {
+                var cloned = Phase0Attestation.default_value;
+                try Phase0Attestation.clone(allocator, att, &cloned);
+                return cloned;
+            },
+            .electra => |*att| {
+                var cloned = Phase0Attestation.default_value;
+                cloned.data = att.data;
+                cloned.data.index = attestation.committeeIndex();
+                cloned.signature = att.signature;
+                cloned.aggregation_bits.bit_len = att.aggregation_bits.bit_len;
+                if (att.aggregation_bits.data.items.len > 0) {
+                    var new_data = try std.ArrayListUnmanaged(u8).initCapacity(allocator, att.aggregation_bits.data.items.len);
+                    new_data.appendSliceAssumeCapacity(att.aggregation_bits.data.items);
+                    cloned.aggregation_bits.data = new_data;
+                }
+                return cloned;
+            },
+        }
     }
 };
 
@@ -724,7 +735,10 @@ test "AttestationPool: getForBlock respects max" {
     try std.testing.expectEqual(@as(usize, 5), pool.groupCount());
 
     const selected = try pool.getForBlock(allocator, 3);
-    defer allocator.free(selected);
+    defer {
+        for (selected) |*item| Phase0Attestation.deinit(allocator, item);
+        allocator.free(selected);
+    }
     try std.testing.expect(selected.len <= 3);
 }
 
@@ -740,6 +754,26 @@ test "AttestationPool: prune removes old attestations" {
     pool.prune(100);
     // slot 5 is older than 100 - SLOTS_PER_EPOCH (= 68 for mainnet), so pruned.
     try std.testing.expectEqual(@as(usize, 1), pool.groupCount());
+}
+
+test "AttestationPool: getAllAny preserves electra attestations" {
+    const allocator = std.testing.allocator;
+    var pool = AttestationPool.init(allocator);
+    defer pool.deinit();
+
+    var att = ElectraAttestation.default_value;
+    att.data.slot = 64;
+    att.committee_bits.set(3, true) catch unreachable;
+    try pool.addAny(.{ .electra = att });
+
+    const selected = try pool.getAllAny(allocator, 64, 3);
+    defer {
+        for (selected) |*item| item.deinit(allocator);
+        allocator.free(selected);
+    }
+
+    try std.testing.expectEqual(@as(usize, 1), selected.len);
+    try std.testing.expect(selected[0] == .electra);
 }
 
 test "VoluntaryExitPool: add dedup and getForBlock" {

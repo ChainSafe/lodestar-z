@@ -21,6 +21,7 @@ const networking = @import("networking");
 const StatusMessage = networking.messages.StatusMessage;
 const SubnetService = networking.SubnetService;
 const fork_types = @import("fork_types");
+const AnyAttestation = fork_types.AnyAttestation;
 const AnyAttesterSlashing = fork_types.AnyAttesterSlashing;
 const AnyGossipAttestation = fork_types.AnyGossipAttestation;
 const AnySignedAggregateAndProof = fork_types.AnySignedAggregateAndProof;
@@ -212,6 +213,7 @@ pub const ApiBindings = struct {
             .ptr = @ptrCast(self.op_pool_cb_ctx),
             .getPoolCountsFn = &opPoolGetCountsCallback,
             .getAttestationsFn = &opPoolGetAttestationsCallback,
+            .getAttestationsV2Fn = &opPoolGetAttestationsV2Callback,
             .getVoluntaryExitsFn = &opPoolGetVoluntaryExitsCallback,
             .getProposerSlashingsFn = &opPoolGetProposerSlashingsCallback,
             .getAttesterSlashingsFn = &opPoolGetAttesterSlashingsCallback,
@@ -1340,6 +1342,16 @@ fn opPoolGetAttestationsCallback(
 ) anyerror![]types.phase0.Attestation.Type {
     const ctx: *OpPoolCallbackCtx = @ptrCast(@alignCast(ptr));
     return ctx.query.attestations(allocator, slot_filter, committee_index_filter);
+}
+
+fn opPoolGetAttestationsV2Callback(
+    ptr: *anyopaque,
+    allocator: std.mem.Allocator,
+    slot_filter: ?u64,
+    committee_index_filter: ?u64,
+) anyerror![]AnyAttestation {
+    const ctx: *OpPoolCallbackCtx = @ptrCast(@alignCast(ptr));
+    return ctx.query.attestationsV2(allocator, slot_filter, committee_index_filter);
 }
 
 fn opPoolGetVoluntaryExitsCallback(

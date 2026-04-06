@@ -41,6 +41,26 @@ pub const AnyAttestation = union(enum) {
     phase0: ct.phase0.Attestation.Type,
     electra: ct.electra.Attestation.Type,
 
+    pub fn clone(self: *const AnyAttestation, allocator: std.mem.Allocator, out: *AnyAttestation) !void {
+        switch (self.*) {
+            .phase0 => |*att| {
+                out.* = .{ .phase0 = ct.phase0.Attestation.default_value };
+                try ct.phase0.Attestation.clone(allocator, att, &out.phase0);
+            },
+            .electra => |*att| {
+                out.* = .{ .electra = ct.electra.Attestation.default_value };
+                try ct.electra.Attestation.clone(allocator, att, &out.electra);
+            },
+        }
+    }
+
+    pub fn deinit(self: *AnyAttestation, allocator: std.mem.Allocator) void {
+        switch (self.*) {
+            .phase0 => |*att| ct.phase0.Attestation.deinit(allocator, att),
+            .electra => |*att| ct.electra.Attestation.deinit(allocator, att),
+        }
+    }
+
     /// Returns the attestation data (same struct for both forks).
     pub fn data(self: *const AnyAttestation) ct.phase0.AttestationData.Type {
         return switch (self.*) {
@@ -82,6 +102,13 @@ pub const AnyAttestation = union(enum) {
                 }
                 break :blk count;
             },
+        };
+    }
+
+    pub fn containsCommitteeIndex(self: *const AnyAttestation, committee_index: u64) bool {
+        return switch (self.*) {
+            .phase0 => |att| att.data.index == committee_index,
+            .electra => |att| att.committee_bits.get(@intCast(committee_index)) catch false,
         };
     }
 

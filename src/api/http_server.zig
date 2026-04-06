@@ -953,7 +953,12 @@ pub const HttpServer = struct {
         const slot_filter: ?u64 = if (dc.getQuery("slot")) |s| std.fmt.parseInt(u64, s, 10) catch null else null;
         const ci_filter: ?u64 = if (dc.getQuery("committee_index")) |s| std.fmt.parseInt(u64, s, 10) catch null else null;
         const handler_res = try handlers.beacon.getPoolAttestations(self.api_context, slot_filter, ci_filter);
-        defer alloc.free(handler_res.data);
+        defer {
+            for (handler_res.data) |*att| {
+                consensus_types.phase0.Attestation.deinit(alloc, @constCast(att));
+            }
+            alloc.free(handler_res.data);
+        }
         const body = try json_response.writeBeaconArrayEnvelope(alloc, consensus_types.phase0.Attestation, handler_res.data, handler_res.meta);
         return .{ .status = 200, .content_type = "application/json", .body = body, .meta = handler_res.meta };
     }
@@ -963,22 +968,22 @@ pub const HttpServer = struct {
         const slot_filter: ?u64 = if (dc.getQuery("slot")) |s| std.fmt.parseInt(u64, s, 10) catch null else null;
         const ci_filter: ?u64 = if (dc.getQuery("committee_index")) |s| std.fmt.parseInt(u64, s, 10) catch null else null;
         const handler_res = try handlers.beacon.getPoolAttestationsV2(self.api_context, slot_filter, ci_filter);
-        defer alloc.free(handler_res.data);
+        defer {
+            for (handler_res.data) |*att| {
+                @constCast(att).deinit(alloc);
+            }
+            alloc.free(handler_res.data);
+        }
 
-        // V2: fork-aware serialization for the subset of attestation data the
-        // handler can represent honestly today. Electra-era pool attestations
-        // are rejected in the handler until the op-pool preserves
-        // committee_bits end to end.
         var aw: std.Io.Writer.Allocating = .init(alloc);
         errdefer aw.deinit();
         var stream: std.json.Stringify = .{ .writer = &aw.writer };
 
-        // Determine version from first attestation slot (or default to head slot).
-        var version_str: []const u8 = "phase0";
-        if (handler_res.data.len > 0) {
-            const first_fork = self.api_context.beacon_config.forkSeq(handler_res.data[0].data.slot);
-            version_str = first_fork.name();
-        }
+        const version_slot = if (handler_res.data.len > 0)
+            handler_res.data[0].slot()
+        else
+            (slot_filter orelse self.api_context.currentHeadTracker().head_slot);
+        const version_str = self.api_context.beacon_config.forkSeq(version_slot).name();
 
         try stream.beginObject();
         try stream.objectField("version");
@@ -987,13 +992,9 @@ pub const HttpServer = struct {
         try stream.beginArray();
 
         for (handler_res.data) |*att| {
-            const att_fork = self.api_context.beacon_config.forkSeq(att.data.slot);
-            if (@intFromEnum(att_fork) >= @intFromEnum(ForkSeq.electra)) {
-                // Electra format: add committee_bits, set data.index=0
-                try writeElectraAttestationJson(alloc, &stream, att);
-            } else {
-                // Pre-Electra: standard phase0 Attestation
-                try consensus_types.phase0.Attestation.serializeIntoJson(alloc, &stream, att);
+            switch (att.*) {
+                .phase0 => |*phase0_att| try consensus_types.phase0.Attestation.serializeIntoJson(alloc, &stream, phase0_att),
+                .electra => |*electra_att| try consensus_types.electra.Attestation.serializeIntoJson(alloc, &stream, electra_att),
             }
         }
 
@@ -2123,145 +2124,6 @@ pub const HttpServer = struct {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Write an Electra-format attestation JSON object into the Stringify stream.
-///
-/// Converts a phase0-stored attestation (with committee_index in data.index)
-/// into the Electra wire format: aggregation_bits, data (with index=0),
-/// signature, and reconstructed committee_bits bitvector.
-fn writeElectraAttestationJson(
-    _: std.mem.Allocator,
-    stream: *std.json.Stringify,
-    att: *const consensus_types.phase0.Attestation.Type,
-) !void {
-    // Reconstruct committee_bits: a bitvector of MAX_COMMITTEES_PER_SLOT bits
-    // with the bit at position data.index set.
-    const committee_index = att.data.index;
-
-    try stream.beginObject();
-
-    // aggregation_bits (same as phase0 — hex-encoded SSZ bitlist)
-    try stream.objectField("aggregation_bits");
-    const agg_bits = &att.aggregation_bits;
-    const bit_len = agg_bits.bit_len;
-    const data_byte_count = (bit_len + 7) / 8;
-    const ssz_byte_count = if (bit_len % 8 == 0) data_byte_count + 1 else data_byte_count;
-    // Build SSZ bitlist bytes: data bytes + sentinel bit
-    var agg_buf: [258]u8 = undefined;
-    @memset(&agg_buf, 0);
-    if (agg_bits.data.items.len > 0) {
-        const copy_len = @min(agg_bits.data.items.len, agg_buf.len);
-        @memcpy(agg_buf[0..copy_len], agg_bits.data.items[0..copy_len]);
-    }
-    if (ssz_byte_count > 0 and ssz_byte_count <= agg_buf.len) {
-        agg_buf[bit_len / 8] |= @as(u8, 1) << @intCast(bit_len % 8);
-    }
-    // Hex-encode
-    var agg_hex: [258 * 2 + 2]u8 = undefined;
-    agg_hex[0] = '0';
-    agg_hex[1] = 'x';
-    for (agg_buf[0..ssz_byte_count], 0..) |byte, i| {
-        const nibbles = "0123456789abcdef";
-        agg_hex[2 + i * 2] = nibbles[(byte >> 4) & 0xF];
-        agg_hex[2 + i * 2 + 1] = nibbles[byte & 0xF];
-    }
-    try stream.write(agg_hex[0 .. 2 + ssz_byte_count * 2]);
-
-    // data (with index=0 for Electra)
-    try stream.objectField("data");
-    try stream.beginObject();
-    try stream.objectField("slot");
-    {
-        var buf: [20]u8 = undefined;
-        const s = std.fmt.bufPrint(&buf, "{d}", .{att.data.slot}) catch unreachable;
-        try stream.write(s);
-    }
-    try stream.objectField("index");
-    try stream.write("0");
-    try stream.objectField("beacon_block_root");
-    var root_hex: [66]u8 = undefined;
-    root_hex[0] = '0';
-    root_hex[1] = 'x';
-    for (att.data.beacon_block_root, 0..) |byte, i| {
-        const nibbles = "0123456789abcdef";
-        root_hex[2 + i * 2] = nibbles[(byte >> 4) & 0xF];
-        root_hex[2 + i * 2 + 1] = nibbles[byte & 0xF];
-    }
-    try stream.write(root_hex[0..66]);
-    try stream.objectField("source");
-    try stream.beginObject();
-    try stream.objectField("epoch");
-    {
-        var buf: [20]u8 = undefined;
-        const s = std.fmt.bufPrint(&buf, "{d}", .{att.data.source.epoch}) catch unreachable;
-        try stream.write(s);
-    }
-    try stream.objectField("root");
-    var src_hex: [66]u8 = undefined;
-    src_hex[0] = '0';
-    src_hex[1] = 'x';
-    for (att.data.source.root, 0..) |byte, i| {
-        const nibbles = "0123456789abcdef";
-        src_hex[2 + i * 2] = nibbles[(byte >> 4) & 0xF];
-        src_hex[2 + i * 2 + 1] = nibbles[byte & 0xF];
-    }
-    try stream.write(src_hex[0..66]);
-    try stream.endObject();
-    try stream.objectField("target");
-    try stream.beginObject();
-    try stream.objectField("epoch");
-    {
-        var buf: [20]u8 = undefined;
-        const s = std.fmt.bufPrint(&buf, "{d}", .{att.data.target.epoch}) catch unreachable;
-        try stream.write(s);
-    }
-    try stream.objectField("root");
-    var tgt_hex: [66]u8 = undefined;
-    tgt_hex[0] = '0';
-    tgt_hex[1] = 'x';
-    for (att.data.target.root, 0..) |byte, i| {
-        const nibbles = "0123456789abcdef";
-        tgt_hex[2 + i * 2] = nibbles[(byte >> 4) & 0xF];
-        tgt_hex[2 + i * 2 + 1] = nibbles[byte & 0xF];
-    }
-    try stream.write(tgt_hex[0..66]);
-    try stream.endObject();
-    try stream.endObject();
-
-    // signature
-    try stream.objectField("signature");
-    var sig_hex: [194]u8 = undefined;
-    sig_hex[0] = '0';
-    sig_hex[1] = 'x';
-    for (att.signature, 0..) |byte, i| {
-        const nibbles = "0123456789abcdef";
-        sig_hex[2 + i * 2] = nibbles[(byte >> 4) & 0xF];
-        sig_hex[2 + i * 2 + 1] = nibbles[byte & 0xF];
-    }
-    try stream.write(sig_hex[0..194]);
-
-    // committee_bits: bitvector of MAX_COMMITTEES_PER_SLOT bits
-    // with the bit at position committee_index set.
-    try stream.objectField("committee_bits");
-    const max_committees = @import("preset").preset.MAX_COMMITTEES_PER_SLOT;
-    const cb_byte_count = (max_committees + 7) / 8;
-    var cb_buf: [cb_byte_count]u8 = @splat(0);
-    if (committee_index < max_committees) {
-        const ci: usize = @intCast(committee_index);
-        cb_buf[ci / 8] |= @as(u8, 1) << @intCast(ci % 8);
-    }
-    var cb_hex: [cb_byte_count * 2 + 2]u8 = undefined;
-    cb_hex[0] = '0';
-    cb_hex[1] = 'x';
-    for (cb_buf, 0..) |byte, i| {
-        const nibbles = "0123456789abcdef";
-        cb_hex[2 + i * 2] = nibbles[(byte >> 4) & 0xF];
-        cb_hex[2 + i * 2 + 1] = nibbles[byte & 0xF];
-    }
-    try stream.write(cb_hex[0 .. cb_byte_count * 2 + 2]);
-
-    try stream.endObject();
-}
-
 /// Split a request target into path and optional query string.
 fn splitTarget(target: []const u8) struct { []const u8, ?[]const u8 } {
     if (std.mem.indexOfScalar(u8, target, '?')) |idx| {
@@ -2585,18 +2447,53 @@ test "handleRequest GET /eth/v1/beacon/pool/attestations without op_pool returns
     try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"statusCode\":501") != null);
 }
 
-test "handleRequest GET /eth/v2/beacon/pool/attestations returns 501 on Electra head" {
+test "handleRequest GET /eth/v1/beacon/pool/attestations returns 400 on Electra head" {
     var tc = test_helpers.makeTestContext(std.testing.allocator);
     defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
 
     tc.head_tracker.head_slot = tc.ctx.beacon_config.chain.ELECTRA_FORK_EPOCH * preset.SLOTS_PER_EPOCH;
 
     var server = HttpServer.init(std.testing.allocator, &tc.ctx, "127.0.0.1", 0);
+    const resp = try server.handleRequest("GET", "/eth/v1/beacon/pool/attestations", null);
+    defer resp.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(u16, 400), resp.status);
+    try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"statusCode\":400") != null);
+}
+
+test "handleRequest GET /eth/v2/beacon/pool/attestations returns electra attestation on Electra head" {
+    var tc = test_helpers.makeTestContext(std.testing.allocator);
+    defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
+
+    const MockOpPool = struct {
+        fn getPoolCounts(_: *anyopaque) [5]usize {
+            return .{ 1, 0, 0, 0, 0 };
+        }
+        fn getAttestationsV2(_: *anyopaque, allocator: std.mem.Allocator, _: ?u64, _: ?u64) anyerror![]context.OpPoolCallback.AnyAttestation {
+            var result = try allocator.alloc(context.OpPoolCallback.AnyAttestation, 1);
+            var att = consensus_types.electra.Attestation.default_value;
+            att.data.slot = preset.SLOTS_PER_EPOCH * @import("config").mainnet.chain_config.ELECTRA_FORK_EPOCH;
+            att.committee_bits.set(3, true) catch unreachable;
+            result[0] = .{ .electra = att };
+            return result;
+        }
+    };
+
+    var dummy: u8 = 0;
+    tc.head_tracker.head_slot = tc.ctx.beacon_config.chain.ELECTRA_FORK_EPOCH * preset.SLOTS_PER_EPOCH;
+    tc.ctx.op_pool = .{
+        .ptr = &dummy,
+        .getPoolCountsFn = &MockOpPool.getPoolCounts,
+        .getAttestationsV2Fn = &MockOpPool.getAttestationsV2,
+    };
+
+    var server = HttpServer.init(std.testing.allocator, &tc.ctx, "127.0.0.1", 0);
     const resp = try server.handleRequest("GET", "/eth/v2/beacon/pool/attestations", null);
     defer resp.deinit(std.testing.allocator);
 
-    try std.testing.expectEqual(@as(u16, 501), resp.status);
-    try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"statusCode\":501") != null);
+    try std.testing.expectEqual(@as(u16, 200), resp.status);
+    try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"electra\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"committee_bits\"") != null);
 }
 
 test "handleRequest pool submission POST returns 204" {

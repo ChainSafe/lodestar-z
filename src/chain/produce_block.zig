@@ -54,6 +54,7 @@ pub const ProducedBlockBody = struct {
 
     /// Free all owned slices.
     pub fn deinit(self: *ProducedBlockBody, allocator: Allocator) void {
+        for (self.attestations) |*att| types.phase0.Attestation.deinit(allocator, att);
         if (self.attestations.len > 0) allocator.free(self.attestations);
         if (self.voluntary_exits.len > 0) allocator.free(self.voluntary_exits);
         if (self.proposer_slashings.len > 0) allocator.free(self.proposer_slashings);
@@ -254,7 +255,10 @@ pub fn produceBlockBody(
         try op_pool.agg_attestation_pool.getAttestationsForBlock(allocator, slot, MAX_ATTESTATIONS)
     else
         try op_pool.attestation_pool.getForBlock(allocator, MAX_ATTESTATIONS);
-    errdefer allocator.free(attestations);
+    errdefer {
+        for (attestations) |*att| types.phase0.Attestation.deinit(allocator, att);
+        allocator.free(attestations);
+    }
 
     const voluntary_exits = try op_pool.voluntary_exit_pool.getForBlock(allocator, MAX_VOLUNTARY_EXITS);
     errdefer allocator.free(voluntary_exits);
@@ -439,6 +443,9 @@ fn assembleCommonBlockBody(
     }
 
     allocator.free(ops.attester_slashings);
+    for (ops.attestations) |*att| {
+        types.phase0.Attestation.deinit(allocator, att);
+    }
     allocator.free(ops.attestations);
 
     return .{

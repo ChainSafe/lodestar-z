@@ -175,6 +175,7 @@ pub const PeerDBCallback = struct {
 pub const OpPoolCallback = struct {
     pub const consensus = @import("consensus_types");
     pub const Phase0Attestation = consensus.phase0.Attestation.Type;
+    pub const AnyAttestation = fork_types.AnyAttestation;
     pub const SignedVoluntaryExit = consensus.phase0.SignedVoluntaryExit.Type;
     pub const ProposerSlashing = consensus.phase0.ProposerSlashing.Type;
     pub const AnyAttesterSlashing = fork_types.AnyAttesterSlashing;
@@ -183,9 +184,12 @@ pub const OpPoolCallback = struct {
     ptr: *anyopaque,
     /// Returns the number of items in each pool: [attestation_groups, voluntary_exits, proposer_slashings, attester_slashings, bls_changes].
     getPoolCountsFn: *const fn (ptr: *anyopaque) [5]usize,
-    /// Returns all pending attestations, optionally filtered by slot and committee_index.
+    /// Returns all pending attestations in phase0 format, optionally filtered by slot and committee_index.
     /// Caller owns the returned slice.
     getAttestationsFn: ?*const fn (ptr: *anyopaque, allocator: std.mem.Allocator, slot: ?u64, committee_index: ?u64) anyerror![]Phase0Attestation = null,
+    /// Returns all pending attestations in fork-aware format, optionally filtered by slot and committee_index.
+    /// Caller owns the returned slice.
+    getAttestationsV2Fn: ?*const fn (ptr: *anyopaque, allocator: std.mem.Allocator, slot: ?u64, committee_index: ?u64) anyerror![]AnyAttestation = null,
     /// Returns all pending voluntary exits. Caller owns the returned slice.
     getVoluntaryExitsFn: ?*const fn (ptr: *anyopaque, allocator: std.mem.Allocator) anyerror![]SignedVoluntaryExit = null,
     /// Returns all pending proposer slashings. Caller owns the returned slice.

@@ -10,6 +10,7 @@ const state_transition = @import("state_transition");
 const networking = @import("networking");
 const fork_types = @import("fork_types");
 const AnySignedBeaconBlock = fork_types.AnySignedBeaconBlock;
+const AnyAttestation = fork_types.AnyAttestation;
 const AnyAttesterSlashing = fork_types.AnyAttesterSlashing;
 const fork_choice_mod = @import("fork_choice");
 
@@ -345,6 +346,15 @@ pub const Query = struct {
         committee_index_filter: ?u64,
     ) ![]Phase0Attestation {
         return self.chain.op_pool.attestation_pool.getAll(allocator, slot_filter, committee_index_filter);
+    }
+
+    pub fn attestationsV2(
+        self: Query,
+        allocator: std.mem.Allocator,
+        slot_filter: ?u64,
+        committee_index_filter: ?u64,
+    ) ![]AnyAttestation {
+        return self.chain.op_pool.attestation_pool.getAllAny(allocator, slot_filter, committee_index_filter);
     }
 
     pub fn voluntaryExits(

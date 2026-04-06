@@ -547,11 +547,18 @@ const OpPoolCallback = context.OpPoolCallback;
 ///
 /// Returns pending attestations from the operation pool.
 /// Supports optional `slot` and `committee_index` query parameter filters.
+///
+/// This endpoint is pre-Electra only. Post-Electra callers must use the v2
+/// endpoint, which can only become fully correct once the pool preserves full
+/// Electra attestation shape.
 pub fn getPoolAttestations(
     ctx: *ApiContext,
     slot_filter: ?u64,
     committee_index_filter: ?u64,
 ) !HandlerResult([]const OpPoolCallback.Phase0Attestation) {
+    const query_slot = slot_filter orelse ctx.currentHeadTracker().head_slot;
+    if (ctx.beacon_config.forkSeq(query_slot).gte(.electra)) return error.InvalidRequest;
+
     const cb = ctx.op_pool orelse return error.NotImplemented;
     const get_fn = cb.getAttestationsFn orelse return error.NotImplemented;
     const items = try get_fn(cb.ptr, ctx.allocator, slot_filter, committee_index_filter);
@@ -562,19 +569,15 @@ pub fn getPoolAttestations(
 ///
 /// Returns pending attestations from the operation pool in fork-versioned format.
 /// Supports optional `slot` and `committee_index` query parameter filters.
-///
-/// Until the op pool preserves Electra committee_bits end to end, this endpoint
-/// only serves pre-Electra queries. Electra-era requests return
-/// `error.NotImplemented` rather than fabricating committee_bits from the lossy
-/// phase0-shaped pool representation.
 pub fn getPoolAttestationsV2(
     ctx: *ApiContext,
     slot_filter: ?u64,
     committee_index_filter: ?u64,
-) !HandlerResult([]const OpPoolCallback.Phase0Attestation) {
-    const query_slot = slot_filter orelse ctx.currentHeadTracker().head_slot;
-    if (ctx.beacon_config.forkSeq(query_slot).gte(.electra)) return error.NotImplemented;
-    return getPoolAttestations(ctx, slot_filter, committee_index_filter);
+) !HandlerResult([]const OpPoolCallback.AnyAttestation) {
+    const cb = ctx.op_pool orelse return error.NotImplemented;
+    const get_fn = cb.getAttestationsV2Fn orelse return error.NotImplemented;
+    const items = try get_fn(cb.ptr, ctx.allocator, slot_filter, committee_index_filter);
+    return .{ .data = items };
 }
 
 /// GET /eth/v1/beacon/pool/voluntary_exits
@@ -1723,26 +1726,55 @@ test "getPoolAttestations returns items from callback" {
     };
 
     const resp = try getPoolAttestations(&tc.ctx, null, null);
-    defer std.testing.allocator.free(resp.data);
+    defer {
+        for (resp.data) |*item| consensus_types.phase0.Attestation.deinit(std.testing.allocator, @constCast(item));
+        std.testing.allocator.free(resp.data);
+    }
     try std.testing.expectEqual(@as(usize, 2), resp.data.len);
     try std.testing.expectEqual(@as(u64, 42), resp.data[0].data.slot);
     try std.testing.expectEqual(@as(u64, 43), resp.data[1].data.slot);
 }
 
-test "getPoolAttestationsV2 returns NotImplemented for Electra slot query" {
-    var tc = test_helpers.makeTestContext(std.testing.allocator);
-    defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
-
-    const electra_slot = tc.ctx.beacon_config.chain.ELECTRA_FORK_EPOCH * preset.SLOTS_PER_EPOCH;
-    try std.testing.expectError(error.NotImplemented, getPoolAttestationsV2(&tc.ctx, electra_slot, null));
-}
-
-test "getPoolAttestationsV2 returns NotImplemented when head is Electra" {
+test "getPoolAttestations returns InvalidRequest when head is Electra" {
     var tc = test_helpers.makeTestContext(std.testing.allocator);
     defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
 
     tc.head_tracker.head_slot = tc.ctx.beacon_config.chain.ELECTRA_FORK_EPOCH * preset.SLOTS_PER_EPOCH;
-    try std.testing.expectError(error.NotImplemented, getPoolAttestationsV2(&tc.ctx, null, null));
+    try std.testing.expectError(error.InvalidRequest, getPoolAttestations(&tc.ctx, null, null));
+}
+
+test "getPoolAttestationsV2 returns electra items from callback" {
+    var tc = test_helpers.makeTestContext(std.testing.allocator);
+    defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
+
+    const MockOpPoolV2 = struct {
+        fn getPoolCounts(_: *anyopaque) [5]usize {
+            return .{ 1, 0, 0, 0, 0 };
+        }
+        fn getAttestationsV2(_: *anyopaque, allocator: std.mem.Allocator, _: ?u64, _: ?u64) anyerror![]OpPoolCallback.AnyAttestation {
+            var result = try allocator.alloc(OpPoolCallback.AnyAttestation, 1);
+            var att = consensus_types.electra.Attestation.default_value;
+            att.data.slot = preset.SLOTS_PER_EPOCH * @import("config").mainnet.chain_config.ELECTRA_FORK_EPOCH;
+            att.committee_bits.set(3, true) catch unreachable;
+            result[0] = .{ .electra = att };
+            return result;
+        }
+    };
+
+    var dummy: u8 = 0;
+    tc.ctx.op_pool = .{
+        .ptr = &dummy,
+        .getPoolCountsFn = &MockOpPoolV2.getPoolCounts,
+        .getAttestationsV2Fn = &MockOpPoolV2.getAttestationsV2,
+    };
+
+    const resp = try getPoolAttestationsV2(&tc.ctx, null, 3);
+    defer {
+        for (resp.data) |*item| @constCast(item).deinit(std.testing.allocator);
+        std.testing.allocator.free(resp.data);
+    }
+    try std.testing.expectEqual(@as(usize, 1), resp.data.len);
+    try std.testing.expect(resp.data[0] == .electra);
 }
 
 test "getPoolVoluntaryExits returns NotImplemented when no op_pool" {
