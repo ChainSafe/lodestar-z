@@ -49,7 +49,7 @@ const SanityOutcome = verify_sanity.SanityOutcome;
 const verify_da = @import("verify_data_availability.zig");
 const execute_stf = @import("execute_state_transition.zig");
 const verify_exec = @import("verify_execution.zig");
-const ExecutionVerifier = @import("../ports/execution.zig").ExecutionVerifier;
+const ExecutionPort = @import("../ports/execution.zig").ExecutionPort;
 const import_block = @import("import_block.zig");
 const ImportContext = import_block.ImportContext;
 
@@ -72,7 +72,7 @@ const Slot = consensus_types.primitive.Slot.Type;
 /// Relationship to ImportContext (P1-9 note):
 /// `ImportContext` is a strict subset of `PipelineContext`. The import stage
 /// (import_block.zig) only needs the fields that appear in ImportContext —
-/// it doesn't need `execution_verifier` (handled before import) or
+/// it doesn't need `execution_port` (handled before import) or
 /// `current_slot` (used only for sanity/DA checks). The conversion via
 /// `toImportContext()` is intentional: it gives the import stage a focused
 /// interface and avoids import_block.zig depending on the full pipeline type
@@ -103,7 +103,7 @@ pub const PipelineContext = struct {
     notification_sink: ?@import("../types.zig").NotificationSink,
 
     // -- Execution verification (optional) --
-    execution_verifier: ?ExecutionVerifier,
+    execution_port: ?ExecutionPort,
 
     // -- Clock --
     current_slot: Slot,
@@ -212,7 +212,7 @@ pub fn processBlock(
             const exec_status = try verify_exec.verifyExecutionPayload(
                 ctx.allocator,
                 prepared.block_input,
-                ctx.execution_verifier,
+                ctx.execution_port,
                 prepared.opts,
             );
             return finishPreparedBlockImport(ctx, prepared, exec_status);
@@ -390,7 +390,7 @@ pub fn processBlockBatch(
                 const exec_result = verify_exec.verifyExecutionPayloadDetailed(
                     ctx.allocator,
                     prepared.block_input,
-                    ctx.execution_verifier,
+                    ctx.execution_port,
                     prepared.opts,
                 ) catch |err| {
                     results[i] = classifyBatchError(err);

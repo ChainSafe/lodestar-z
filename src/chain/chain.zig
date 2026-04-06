@@ -51,7 +51,7 @@ const PipelineBlockInput = blocks_mod.BlockInput;
 const PipelineImportOpts = blocks_mod.ImportBlockOpts;
 const PipelineImportResult = blocks_mod.ImportResult;
 const BlockImportError = blocks_mod.BlockImportError;
-const ExecutionVerifier = @import("ports/execution.zig").ExecutionVerifier;
+const ExecutionPort = @import("ports/execution.zig").ExecutionPort;
 
 const op_pool_mod = @import("op_pool.zig");
 const OpPool = op_pool_mod.OpPool;
@@ -99,6 +99,7 @@ const validator_monitor_mod = @import("validator_monitor.zig");
 const ValidatorMonitor = validator_monitor_mod.ValidatorMonitor;
 const DataAvailabilityManager = da_mod.DataAvailabilityManager;
 const ArchiveStore = @import("archive_store.zig").ArchiveStore;
+const FinalizationPlan = @import("finalization_plan.zig").FinalizationPlan;
 const reprocess_mod = @import("reprocess.zig");
 const ReprocessQueue = reprocess_mod.ReprocessQueue;
 const pending_block_ingress_mod = @import("block_ingress.zig");
@@ -196,7 +197,7 @@ pub const Chain = struct {
     /// initFromGenesis / initFromCheckpoint; zero until genesis is known.
     genesis_time_s: u64,
     fork_choice_storage: ?*ForkChoice = null,
-    execution_verifier: ?ExecutionVerifier = null,
+    execution_port: ?ExecutionPort = null,
     notification_sink: ?NotificationSink = null,
     validator_monitor: ?*ValidatorMonitor = null,
     reprocess_queue: ?*ReprocessQueue = null,
@@ -290,8 +291,8 @@ pub const Chain = struct {
         self.validator_monitor = vm;
     }
 
-    pub fn setExecutionVerifier(self: *Chain, verifier: ?ExecutionVerifier) void {
-        self.execution_verifier = verifier;
+    pub fn setExecutionPort(self: *Chain, port: ?ExecutionPort) void {
+        self.execution_port = port;
     }
 
     pub fn setNotificationSink(self: *Chain, sink: ?NotificationSink) void {
@@ -348,6 +349,16 @@ pub const Chain = struct {
 
     pub fn blockRootAtTrackedSlot(self: *const Chain, slot: u64) ?[32]u8 {
         return self.head_tracker.getBlockRoot(slot);
+    }
+
+    pub fn canonicalHotBlockRootAtSlot(self: *const Chain, slot: u64) !?[32]u8 {
+        const head = self.headInfo();
+        if (slot > head.slot) return null;
+        if (slot == head.slot) return head.root;
+
+        const ancestor = try self.forkChoice().getAncestor(head.root, slot);
+        if (ancestor.slot != slot) return null;
+        return ancestor.block_root;
     }
 
     pub fn hasTrackedBlockRoot(self: *const Chain, root: [32]u8) bool {
@@ -547,6 +558,19 @@ pub const Chain = struct {
             store.restoreProgress(finalized_cp.epoch * preset.SLOTS_PER_EPOCH) catch |err| {
                 log_mod.logger(.chain).warn("archive progress restore failed: {}", .{err});
             };
+
+            const finalized_slot = finalized_cp.epoch * preset.SLOTS_PER_EPOCH;
+            if (store.last_finalized_slot < finalized_slot) {
+                store.catchUpToFinalized(
+                    .{
+                        .epoch = finalized_cp.epoch,
+                        .root = anchor_block_root,
+                    },
+                    &self.block_to_state,
+                ) catch |err| {
+                    log_mod.logger(.chain).warn("archive catch-up during bootstrap failed: {}", .{err});
+                };
+            }
         }
 
         const balances = anchor_state.epoch_cache.getEffectiveBalanceIncrements();
@@ -604,16 +628,7 @@ pub const Chain = struct {
 
     /// Full block import pipeline: sanity → STFN → fork choice → persist → head → notifications.
     ///
-    /// Fork-polymorphic entry point. Accepts any signed beacon block via
-    /// AnySignedBeaconBlock and delegates to processBlockPipeline, eliminating
-    /// the electra-specific hardcoding of the old implementation.
-    ///
-    /// The `source` parameter tells the pipeline where the block came from
-    /// (gossip, range_sync, api, etc.) so it can apply the right checks.
-    ///
-    /// Legacy error names (UnknownParentBlock, BlockAlreadyKnown, etc.) are
-    /// preserved for backward compatibility with existing callers.
-    pub fn importBlock(
+    fn importBlockSync(
         self: *Chain,
         any_signed: AnySignedBeaconBlock,
         source: blocks_mod.BlockSource,
@@ -626,7 +641,7 @@ pub const Chain = struct {
         return self.importPipelineBlockInput(block_input);
     }
 
-    pub fn importReadyBlock(self: *Chain, ready: chain_types.ReadyBlockInput) !ImportResult {
+    fn importReadyBlockSync(self: *Chain, ready: chain_types.ReadyBlockInput) !ImportResult {
         var owned_ready = ready;
         const planned = try self.planReadyBlockImport(&owned_ready);
         const completed = self.executePlannedReadyBlockImportSync(planned);
@@ -723,17 +738,22 @@ pub const Chain = struct {
 
         switch (owned_completed) {
             .failure => |failure| return translatePipelineError(failure.err),
-            .success => |prepared| {
-                const ctx = self.getPipelineContext();
-                const exec_status = try blocks_mod.verifyExecutionPayload(
-                    ctx.allocator,
-                    prepared.block_input,
-                    ctx.execution_verifier,
-                    prepared.opts,
-                );
-                return blocks_mod.finishPreparedBlockImport(ctx, prepared, exec_status);
-            },
+            .success => |prepared| return self.finishPreparedReadyBlockImport(prepared, try blocks_mod.verifyExecutionPayload(
+                self.allocator,
+                prepared.block_input,
+                self.execution_port,
+                prepared.opts,
+            )),
         }
+    }
+
+    pub fn finishPreparedReadyBlockImport(
+        self: *Chain,
+        prepared: blocks_mod.PreparedBlockImport,
+        exec_status: blocks_mod.ExecutionStatus,
+    ) !ImportResult {
+        const ctx = self.getPipelineContext();
+        return blocks_mod.finishPreparedBlockImport(ctx, prepared, exec_status);
     }
 
     fn planPipelineBlockInput(
@@ -766,7 +786,7 @@ pub const Chain = struct {
     ///
     /// This is the main entry point for block processing. It runs all stages
     /// in sequence: verify_sanity → state_transition → verify_execution → import.
-    /// importBlock delegates here, so this is the canonical implementation.
+    /// importBlockSync delegates here, so this is the canonical synchronous implementation.
     pub fn processBlockPipeline(
         self: *Chain,
         block_input: PipelineBlockInput,
@@ -806,7 +826,7 @@ pub const Chain = struct {
             .head_tracker = self.head_tracker,
             .block_to_state = &self.block_to_state,
             .notification_sink = self.notification_sink,
-            .execution_verifier = self.execution_verifier,
+            .execution_port = self.execution_port,
             .current_slot = current_slot,
             .state_graph_gate = self.state_graph_gate,
             .block_bls_thread_pool = self.block_bls_thread_pool,
@@ -943,108 +963,85 @@ pub const Chain = struct {
 
     /// Called when a new finalized checkpoint is detected.
     ///
-    /// Prunes caches to free memory from pre-finalization data,
-    /// prunes the fork choice DAG, and keeps finalized checkpoint notifications bounded.
+    /// Finalization is a two-phase cleanup:
+    /// 1. Durably archive finalized history.
+    /// 2. Prune hot in-memory structures only after archival succeeds.
+    ///
+    /// If archival fails, pruning is skipped so the node retains the hot data
+    /// needed to retry archival later.
     pub fn onFinalized(self: *Chain, finalized_epoch: u64, finalized_root: [32]u8) void {
         log_mod.logger(.chain).info("onFinalized: epoch={d} root={s}...", .{
             finalized_epoch,
             &std.fmt.bytesToHex(finalized_root[0..4], .lower),
         });
 
-        if (self.archive_store) |store| {
-            store.onFinalized(
-                .{
-                    .epoch = finalized_epoch,
-                    .root = finalized_root,
-                },
-                &self.head_tracker.slot_roots,
-                &self.block_to_state,
+        var plan = if (self.archive_store) |store| blk: {
+            break :blk FinalizationPlan.initForArchive(
+                self.allocator,
+                self.forkChoice(),
+                store.last_finalized_slot + 1,
+                finalized_epoch,
+                finalized_root,
             ) catch |err| {
+                log_mod.logger(.chain).warn("onFinalized: failed to build finalization plan: {}", .{err});
+                return;
+            };
+        } else FinalizationPlan.init(self.allocator, finalized_epoch, finalized_root);
+        defer plan.deinit();
+
+        if (self.archive_store) |store| {
+            store.onFinalized(&plan, &self.block_to_state) catch |err| {
                 log_mod.logger(.chain).warn("onFinalized: archive store failed: {}", .{err});
+                return;
             };
         }
 
-        // Prune block state cache — evict states older than finalized epoch.
-        self.block_state_cache.pruneBeforeEpoch(finalized_epoch);
-
-        // Prune checkpoint state cache — remove checkpoints below finalized epoch.
-        self.checkpoint_state_cache.pruneFinalized(finalized_epoch) catch |err| {
-            log_mod.logger(.chain).warn("onFinalized: checkpoint cache prune failed: {}", .{err});
+        self.queued_regen.onFinalized(plan.finalized_epoch) catch |err| {
+            log_mod.logger(.chain).warn("onFinalized: regen prune failed: {}", .{err});
+            return;
         };
 
         // Prune fork choice DAG — remove nodes below finalized root.
-        self.pruneForkChoice(finalized_root, finalized_epoch) catch |err| {
+        self.pruneForkChoice(plan.finalized_root, plan.finalized_epoch) catch |err| {
             log_mod.logger(.chain).warn("onFinalized: fork choice prune failed: {}", .{err});
+            return;
         };
 
         // Prune seen cache — remove entries older than 2 epochs before finalization.
-        const prune_slot = if (finalized_epoch > 2)
-            (finalized_epoch - 2) * preset.SLOTS_PER_EPOCH
-        else
-            0;
-        self.seen_cache.pruneBlocks(prune_slot);
-        self.attestation_data_cache.onSlot(prune_slot);
-        self.seen_attesters.prune(finalized_epoch);
+        self.seen_cache.pruneBlocks(plan.prune_slot);
+        self.attestation_data_cache.onSlot(plan.prune_slot);
+        self.seen_attesters.prune(plan.finalized_epoch);
 
         // Prune DA tracking data outside the availability window.
         if (self.da_manager) |dam| {
-            dam.pruneOldData(prune_slot);
+            dam.pruneOldData(plan.prune_slot);
         }
 
         // Prune slot_roots in HeadTracker — remove entries for pre-finalized slots.
         // This prevents the slot→root map from growing unboundedly over time.
-        const finalized_slot = finalized_epoch * preset.SLOTS_PER_EPOCH;
         if (self.pending_block_ingress) |pending| {
-            _ = pending.pruneBeforeSlot(finalized_slot);
+            _ = pending.pruneBeforeSlot(plan.finalized_slot);
         }
         if (self.da_manager) |dam| {
-            dam.prunePendingBeforeSlot(finalized_slot);
+            dam.prunePendingBeforeSlot(plan.finalized_slot);
         }
         if (self.payload_envelope_ingress) |ingress| {
-            _ = ingress.pruneBeforeSlot(finalized_slot);
+            _ = ingress.pruneBeforeSlot(plan.finalized_slot);
         }
-        self.pruneTrackedBlocksBelow(finalized_slot);
+        self.pruneTrackedBlocksBelow(plan.finalized_slot);
 
-        // Prune block_to_state — remove entries for blocks that are now finalized.
-        // We use the pruned slot_roots as a guide: any root no longer in slot_roots
-        // that is below the finalized slot can be removed. Since pruneBelow already
-        // evicted pre-finalized entries from slot_roots, we iterate block_to_state
-        // and remove roots that are no longer tracked by slot_roots (i.e., pre-fin).
-        // Skip the entire block_to_state prune on OOM — partial removal is
-        // worse than no removal (would drop entries still needed by slot_roots).
+        // Prune block_to_state for blocks no longer present in fork choice's hot DAG.
+        // HeadTracker only tracks one root per slot and is not a complete liveness
+        // set for competing hot branches. Fork choice is the authoritative hot view.
         prune_b2s: {
-            // Build a HashSet of live roots from slot_roots in O(n) first, then
-            // check membership in O(1) per block_to_state entry — avoids O(n²).
-            var live_roots = std.AutoArrayHashMap([32]u8, void).init(self.allocator);
-            defer live_roots.deinit();
-            {
-                var sr_it = self.head_tracker.slot_roots.iterator();
-                while (sr_it.next()) |sr_entry| {
-                    live_roots.put(sr_entry.value_ptr.*, {}) catch {
-                        log_mod.logger(.chain).warn("onFinalized: OOM building live_roots, skipping block_to_state prune", .{});
-                        break :prune_b2s;
-                    };
-                }
-            }
-
-            var roots_to_remove = std.array_list.Managed([32]u8).init(self.allocator);
+            var roots_to_remove = plan.collectBlockStateRemovals(
+                self.forkChoice(),
+                &self.block_to_state,
+            ) catch {
+                log_mod.logger(.chain).warn("onFinalized: OOM collecting roots_to_remove, skipping block_to_state prune", .{});
+                break :prune_b2s;
+            };
             defer roots_to_remove.deinit();
-
-            // Collect all roots in block_to_state that are not the finalized root
-            // and are not referenced by any remaining slot_roots entry.
-            var b2s_it = self.block_to_state.iterator();
-            while (b2s_it.next()) |entry| {
-                const root = entry.key_ptr.*;
-                // Never evict the finalized root itself — needed for the finalized notification above.
-                if (std.mem.eql(u8, &root, &finalized_root)) continue;
-                // Keep entries still referenced by slot_roots (post-finalization blocks).
-                if (!live_roots.contains(root)) {
-                    roots_to_remove.append(root) catch {
-                        log_mod.logger(.chain).warn("onFinalized: OOM collecting roots_to_remove, skipping block_to_state prune", .{});
-                        break :prune_b2s;
-                    };
-                }
-            }
             for (roots_to_remove.items) |root| {
                 _ = self.block_to_state.swapRemove(root);
             }
@@ -1056,13 +1053,13 @@ pub const Chain = struct {
 
         // Prune op_pool secondary pools — remove stale slashings/exits.
         // The SeenCache dedup was already cleared above; now evict actual entries.
-        self.op_pool.voluntary_exit_pool.prune(finalized_epoch);
-        self.op_pool.proposer_slashing_pool.pruneFinalized(finalized_epoch);
+        self.op_pool.voluntary_exit_pool.prune(plan.finalized_epoch);
+        self.op_pool.proposer_slashing_pool.pruneFinalized(plan.finalized_epoch);
         self.op_pool.attester_slashing_pool.pruneAll();
 
         // Prune ReprocessQueue — drop blocks queued for slots below finalized.
         if (self.reprocess_queue) |rq| {
-            rq.prune(finalized_slot);
+            rq.prune(plan.finalized_slot);
         }
 
         // Note: finalized_checkpoint notification is emitted in import_block.zig
@@ -1224,23 +1221,6 @@ pub const Chain = struct {
             config,
             self.sync_contribution_pool, // P1-11: wire sync contribution pool
         );
-    }
-
-    // -----------------------------------------------------------------------
-    // State archive
-    // -----------------------------------------------------------------------
-
-    /// Archive the post-epoch state to the cold store.
-    pub fn archiveState(self: *Chain, slot: u64, state_root: [32]u8) !void {
-        if (self.archive_store) |store| {
-            try store.archiveState(slot, state_root);
-            return;
-        }
-
-        const cached = self.block_state_cache.get(state_root) orelse return;
-        const bytes = try cached.state.serialize(self.allocator);
-        defer self.allocator.free(bytes);
-        try self.db.putStateArchive(slot, state_root, bytes);
     }
 
     /// Store a blob sidecar received via gossip or req/resp.

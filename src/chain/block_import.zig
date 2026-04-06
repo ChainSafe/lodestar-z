@@ -55,6 +55,9 @@ pub const HeadTracker = struct {
     justified_epoch: u64,
     head_state_root: [32]u8,
 
+    /// Last-seen block root per slot for lightweight tracking only.
+    /// This is NOT a canonical slot->root map and must not be used for
+    /// finalized archival or canonical-history queries.
     slot_roots: std.AutoArrayHashMap(u64, [32]u8),
     allocator: Allocator,
 
@@ -75,7 +78,8 @@ pub const HeadTracker = struct {
     }
 
     pub fn onBlock(self: *HeadTracker, block_root: [32]u8, slot: u64, state_root: [32]u8) !void {
-        // Record slot → block_root mapping for lookups (e.g. getStatus).
+        // Record a lightweight slot → block_root hint.
+        // This is last-seen tracking only, not canonical history.
         // NOTE: Do NOT update head_root/head_slot/head_state_root here.
         // Head is authoritative only when set by fork choice (setHead).
         // Naive slot comparison (slot >= head_slot) fails during forks where a

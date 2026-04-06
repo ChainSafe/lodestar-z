@@ -28,7 +28,6 @@ const ExecutionStatus = pipeline_types.ExecutionStatus;
 const BlockImportError = pipeline_types.BlockImportError;
 const execution_port_mod = @import("../ports/execution.zig");
 pub const ExecutionPort = execution_port_mod.ExecutionPort;
-pub const ExecutionVerifier = execution_port_mod.ExecutionVerifier;
 const Root = [32]u8;
 
 pub const ExecutionVerificationResult = union(enum) {
@@ -73,21 +72,24 @@ pub const ExecutionVerificationResult = union(enum) {
 pub fn verifyExecutionPayload(
     allocator: std.mem.Allocator,
     block_input: BlockInput,
-    execution_verifier: ?ExecutionPort,
+    execution_port: ?ExecutionPort,
     opts: ImportBlockOpts,
 ) BlockImportError!ExecutionStatus {
-    return (try verifyExecutionPayloadDetailed(
-        allocator,
-        block_input,
-        execution_verifier,
+    return executionStatusFromVerificationResult(
+        try verifyExecutionPayloadDetailed(
+            allocator,
+            block_input,
+            execution_port,
+            opts,
+        ),
         opts,
-    )).status();
+    );
 }
 
 pub fn verifyExecutionPayloadDetailed(
     allocator: std.mem.Allocator,
     block_input: BlockInput,
-    execution_verifier: ?ExecutionPort,
+    execution_port: ?ExecutionPort,
     opts: ImportBlockOpts,
 ) BlockImportError!ExecutionVerificationResult {
     // Skip if explicitly requested (regen, checkpoint sync, testing).
@@ -98,14 +100,14 @@ pub fn verifyExecutionPayloadDetailed(
     if (fork_seq.lt(.bellatrix)) return .pre_merge;
 
     // No engine verifier configured — running without EL.
-    const verifier = execution_verifier orelse return .pre_merge;
+    const port = execution_port orelse return .pre_merge;
     const request = execution_port_mod.makeNewPayloadRequest(allocator, block_input.block) catch
         return BlockImportError.InternalError;
     if (request == null) return .pre_merge;
     var owned_request = request.?;
     defer owned_request.deinit(allocator);
 
-    const result = verifier.submitNewPayload(owned_request);
+    const result = port.submitNewPayload(owned_request);
 
     return switch (result) {
         .valid => |valid| .{ .valid = .{
@@ -125,6 +127,34 @@ pub fn verifyExecutionPayloadDetailed(
             if (opts.from_range_sync) return .syncing;
             return BlockImportError.ExecutionEngineUnavailable;
         },
+    };
+}
+
+pub fn executionStatusFromVerificationResult(
+    verification_result: ExecutionVerificationResult,
+    opts: ImportBlockOpts,
+) BlockImportError!ExecutionStatus {
+    _ = opts;
+    return switch (verification_result) {
+        .valid => .valid,
+        .syncing => .syncing,
+        .pre_merge => .pre_merge,
+        .invalid => BlockImportError.ExecutionPayloadInvalid,
+    };
+}
+
+pub fn executionStatusFromNewPayloadResult(
+    result: execution_port_mod.NewPayloadResult,
+    opts: ImportBlockOpts,
+) BlockImportError!ExecutionStatus {
+    return switch (result) {
+        .valid => .valid,
+        .syncing, .accepted => .syncing,
+        .invalid, .invalid_block_hash => BlockImportError.ExecutionPayloadInvalid,
+        .unavailable => if (opts.from_range_sync)
+            .syncing
+        else
+            BlockImportError.ExecutionEngineUnavailable,
     };
 }
 
@@ -149,7 +179,7 @@ test "verifyExecutionPayload: no verifier returns pre_merge" {
     // The no-verifier path hits forkSeq() which requires a valid block.
 }
 
-test "ExecutionVerifier type compiles" {
+test "ExecutionPort type compiles" {
     // Just verify the type compiles.
-    _ = ExecutionVerifier;
+    _ = ExecutionPort;
 }

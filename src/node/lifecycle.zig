@@ -27,7 +27,7 @@ const SlotClock = @import("clock.zig").SlotClock;
 const NodeOptions = @import("options.zig").NodeOptions;
 const BeaconNodeBuilder = @import("beacon_node.zig").BeaconNode.Builder;
 const InitConfig = @import("beacon_node.zig").BeaconNode.InitConfig;
-const execution_verifier_mod = @import("execution_verifier.zig");
+const execution_port_mod = @import("execution_port.zig");
 const ExecutionRuntime = @import("execution_runtime.zig").ExecutionRuntime;
 const custody_mod = @import("networking").custody;
 
@@ -399,6 +399,14 @@ pub fn deinit(self: *BeaconNode) void {
     self.flushPendingGossipBlsBatch();
     self.pending_gossip_bls_batches.deinit(allocator);
     self.queued_state_work_owners.deinit(allocator);
+    for (self.waiting_execution_payloads.items) |*pending| {
+        pending.deinit(allocator);
+    }
+    self.waiting_execution_payloads.deinit(allocator);
+    for (self.pending_execution_payloads.items) |*pending| {
+        pending.deinit(allocator);
+    }
+    self.pending_execution_payloads.deinit(allocator);
     for (self.pending_sync_segments.items) |*segment| {
         segment.deinit(allocator);
     }
@@ -569,7 +577,7 @@ fn freeAddressList(allocator: Allocator, addresses: []const []const u8) void {
 }
 
 fn wireBootstrappedNode(self: *BeaconNode) !void {
-    self.chain.setExecutionVerifier(execution_verifier_mod.make(self));
+    self.chain.setExecutionPort(execution_port_mod.make(self));
     if (self.api_bindings == null) {
         self.api_bindings = try api_callbacks_mod.ApiBindings.init(self.allocator, self, self.config);
     }

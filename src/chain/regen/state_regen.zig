@@ -263,7 +263,7 @@ pub const StateRegen = struct {
         defer self.allocator.free(block_bytes);
 
         const slot = readSignedBlockSlotFromSsz(block_bytes) orelse return null;
-        const canonical_root = try self.db.getBlockRootBySlot(slot) orelse return null;
+        const canonical_root = try self.db.getFinalizedBlockRootBySlot(slot) orelse return null;
         if (!std.mem.eql(u8, &canonical_root, &block_root)) return null;
 
         return self.replayCanonicalStateToSlot(slot);
@@ -274,7 +274,7 @@ pub const StateRegen = struct {
         defer self.allocator.free(block_bytes);
 
         const slot = readSignedBlockSlotFromSsz(block_bytes) orelse return null;
-        const canonical_root = try self.db.getBlockRootBySlot(slot) orelse return null;
+        const canonical_root = try self.db.getFinalizedBlockRootBySlot(slot) orelse return null;
         if (!std.mem.eql(u8, &canonical_root, &block_root)) return null;
 
         return self.replayCanonicalStateToSlotUncached(slot);
@@ -309,7 +309,7 @@ pub const StateRegen = struct {
 
         var slot = anchor_slot + 1;
         while (slot <= target_slot) : (slot += 1) {
-            const block_root = try self.db.getBlockRootBySlot(slot);
+            const block_root = try self.db.getFinalizedBlockRootBySlot(slot);
             if (block_root) |root| {
                 const block_bytes = try self.getBlockBytesByRoot(root) orelse return null;
                 defer self.allocator.free(block_bytes);
@@ -375,7 +375,7 @@ pub const StateRegen = struct {
 
         var slot = anchor_slot + 1;
         while (slot <= target_slot) : (slot += 1) {
-            const block_root = try self.db.getBlockRootBySlot(slot);
+            const block_root = try self.db.getFinalizedBlockRootBySlot(slot);
             if (block_root) |root| {
                 const block_bytes = try self.getBlockBytesByRoot(root) orelse return null;
                 defer self.allocator.free(block_bytes);

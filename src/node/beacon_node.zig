@@ -96,6 +96,8 @@ const block_import_mod = @import("block_import.zig");
 const api_callbacks_mod = @import("api_callbacks.zig");
 const block_production_mod = @import("block_production.zig");
 const ExecutionRuntime = @import("execution_runtime.zig").ExecutionRuntime;
+const CompletedPayloadVerification = @import("execution_runtime.zig").CompletedPayloadVerification;
+const CompletedForkchoiceUpdate = @import("execution_runtime.zig").CompletedForkchoiceUpdate;
 const lifecycle_mod = @import("lifecycle.zig");
 const p2p_runtime_mod = @import("p2p_runtime.zig");
 const sync_bridge_mod = @import("sync_bridge.zig");
@@ -110,7 +112,6 @@ const WorkItem = processor_mod.WorkItem;
 const WorkQueues = processor_mod.WorkQueues;
 const AttestationWork = processor_mod.work_item.AttestationWork;
 const AggregateWork = processor_mod.work_item.AggregateWork;
-const ExecutionForkchoiceWork = processor_mod.work_item.ExecutionForkchoiceWork;
 const ResolvedAggregate = processor_mod.work_item.ResolvedAggregate;
 const ResolvedAttestation = processor_mod.work_item.ResolvedAttestation;
 // HeadTracker, ImportResult, ImportError are in chain_mod (src/chain).
@@ -161,10 +162,48 @@ const PendingSyncSegment = struct {
     skipped_count: usize = 0,
     failed_count: usize = 0,
     stop_after_current: bool = false,
-    archive_states: std.ArrayListUnmanaged(chain_mod.ArchiveStateRequest) = .empty,
 
     pub fn deinit(self: *PendingSyncSegment, allocator: Allocator) void {
-        self.archive_states.deinit(allocator);
+        _ = allocator;
+        self.* = undefined;
+    }
+};
+
+const ExecutionImportWork = struct {
+    owner: QueuedStateWorkOwner,
+    prepared: chain_mod.PreparedBlockImport,
+
+    pub fn deinit(self: *ExecutionImportWork, allocator: Allocator) void {
+        self.prepared.deinit(allocator);
+        self.* = undefined;
+    }
+};
+
+const WaitingExecutionPayload = union(enum) {
+    import: ExecutionImportWork,
+    revalidation: chain_mod.PreparedExecutionRevalidation,
+
+    pub fn deinit(self: *WaitingExecutionPayload, allocator: Allocator) void {
+        switch (self.*) {
+            .import => |*pending| pending.deinit(allocator),
+            .revalidation => |*prepared| prepared.deinit(allocator),
+        }
+        self.* = undefined;
+    }
+};
+
+const PendingExecutionPayload = struct {
+    ticket: u64,
+    work: union(enum) {
+        import: ExecutionImportWork,
+        revalidation: chain_mod.PendingExecutionRevalidation,
+    },
+
+    pub fn deinit(self: *PendingExecutionPayload, allocator: Allocator) void {
+        switch (self.work) {
+            .import => |*pending| pending.deinit(allocator),
+            .revalidation => {},
+        }
         self.* = undefined;
     }
 };
@@ -321,6 +360,9 @@ pub const BeaconNode = struct {
     sync_service_inst: ?*SyncService = null,
     sync_callback_ctx: ?*SyncCallbackCtx = null, // bridges to P2P transport
     queued_state_work_owners: std.ArrayListUnmanaged(QueuedStateWorkOwner) = .empty,
+    waiting_execution_payloads: std.ArrayListUnmanaged(WaitingExecutionPayload) = .empty,
+    pending_execution_payloads: std.ArrayListUnmanaged(PendingExecutionPayload) = .empty,
+    next_execution_ticket: u64 = 1,
     pending_sync_segments: std.ArrayListUnmanaged(PendingSyncSegment) = .empty,
 
     // GossipHandler — lazily initialized when P2P starts (owns its SeenSets).
@@ -431,29 +473,13 @@ pub const BeaconNode = struct {
     pub fn initFromCheckpoint(self: *BeaconNode, checkpoint_state: *CachedBeaconState) !void {
         try lifecycle_mod.initFromCheckpoint(self, checkpoint_state);
     }
-
-    /// Import a signed beacon block through the full pipeline.
-    ///
-    /// Fork-polymorphic: accepts any signed beacon block via AnySignedBeaconBlock.
-    /// Delegates to chain.importBlock which routes through the modular pipeline.
-    pub fn importBlock(
+    pub fn ingestBlock(
         self: *BeaconNode,
         any_signed: AnySignedBeaconBlock,
         source: BlockSource,
-    ) !ImportResult {
-        const t0 = std.Io.Clock.awake.now(self.io);
-        const outcome = try self.chainService().importBlock(any_signed, source);
-        return self.finishImportOutcome(t0, outcome);
-    }
-
-    pub fn importRawBlockBytes(
-        self: *BeaconNode,
-        block_bytes: []const u8,
-        source: BlockSource,
-    ) !ImportResult {
-        const t0 = std.Io.Clock.awake.now(self.io);
-        const outcome = try self.chainService().importRawBlockBytes(block_bytes, source);
-        return self.finishImportOutcome(t0, outcome);
+    ) !ReadyIngressResult {
+        const ready = try self.chainService().prepareBlockInput(any_signed, source);
+        return self.completeReadyIngressDetailed(ready, null);
     }
 
     pub const ReadyIngressResult = union(enum) {
@@ -474,10 +500,8 @@ pub const BeaconNode = struct {
     pub fn importReadyBlock(
         self: *BeaconNode,
         ready: chain_mod.ReadyBlockInput,
-    ) !ImportResult {
-        const t0 = std.Io.Clock.awake.now(self.io);
-        const outcome = try self.chainService().importReadyBlock(ready);
-        return self.finishImportOutcome(t0, outcome);
+    ) !ReadyIngressResult {
+        return self.completeReadyIngressDetailed(ready, null);
     }
 
     pub fn completeReadyIngress(
@@ -532,12 +556,19 @@ pub const BeaconNode = struct {
             return .queued;
         }
 
-        const outcome = try self.chainService().finishCompletedReadyBlockImport(
-            self.chainService().executePlannedReadyBlockImportSync(planned),
-        );
-        const result = try self.finishImportOutcome(t0, outcome);
-        self.processPendingChildren(result.block_root);
-        return .{ .imported = result };
+        const completed = self.chainService().executePlannedReadyBlockImportSync(planned);
+        switch (completed) {
+            .failure => {
+                const outcome = try self.chainService().finishCompletedReadyBlockImport(completed);
+                const result = try self.finishImportOutcome(t0, outcome);
+                self.processPendingChildren(result.block_root);
+                return .{ .imported = result };
+            },
+            .success => |prepared| {
+                self.queuePreparedBlockImportExecution(.generic, prepared);
+                return .queued;
+            },
+        }
     }
 
     pub fn processPendingBlockStateWork(self: *BeaconNode) bool {
@@ -550,13 +581,392 @@ pub const BeaconNode = struct {
             else
                 .generic;
 
-            switch (owner) {
-                .generic => self.finishGenericQueuedBlockImport(completed),
-                .sync_segment => |key| self.finishSyncSegmentQueuedBlockImport(key, completed),
+            switch (completed) {
+                .failure => switch (owner) {
+                    .generic => self.finishGenericQueuedBlockImport(completed),
+                    .sync_segment => |key| self.finishSyncSegmentQueuedBlockImport(key, completed),
+                },
+                .success => |prepared| {
+                    self.queuePreparedBlockImportExecution(owner, prepared);
+                },
             }
         }
 
         return did_work;
+    }
+
+    pub fn processPendingExecutionPayloadVerifications(self: *BeaconNode) bool {
+        var did_work = false;
+
+        while (self.execution_runtime.popCompletedPayloadVerification()) |completed| {
+            did_work = true;
+            self.observeExecutionPayloadVerification(completed);
+
+            const pending_index = findPendingExecutionPayloadIndex(self, completed.ticket) orelse {
+                log.logger(.node).warn("missing pending execution payload for completed newPayload result", .{});
+                self.dispatchWaitingExecutionPayloads();
+                continue;
+            };
+
+            var pending = self.pending_execution_payloads.orderedRemove(pending_index);
+            switch (pending.work) {
+                .import => |import_work| {
+                    const exec_status = chain_mod.blocks.executionStatusFromNewPayloadResult(
+                        completed.result,
+                        import_work.prepared.opts,
+                    ) catch |err| {
+                        self.finishPreparedQueuedBlockImportError(import_work.owner, import_work.prepared, err);
+                        pending = undefined;
+                        self.dispatchWaitingExecutionPayloads();
+                        continue;
+                    };
+
+                    self.finishPreparedQueuedBlockImport(import_work.owner, import_work.prepared, exec_status);
+                    pending = undefined;
+                },
+                .revalidation => |revalidation| {
+                    const outcome = self.chainService().finishCurrentOptimisticHeadRevalidation(
+                        revalidation,
+                        completed.result,
+                    ) catch |err| {
+                        log.logger(.node).warn("execution revalidation finish failed: {}", .{err});
+                        pending = undefined;
+                        self.dispatchWaitingExecutionPayloads();
+                        continue;
+                    };
+                    if (outcome) |revalidated| {
+                        self.finishExecutionRevalidationOutcome(revalidated);
+                    }
+                    pending = undefined;
+                },
+            }
+            self.dispatchWaitingExecutionPayloads();
+        }
+
+        return did_work;
+    }
+
+    pub fn processPendingExecutionForkchoiceUpdates(self: *BeaconNode) bool {
+        var did_work = false;
+
+        while (self.execution_runtime.popCompletedForkchoiceUpdate()) |completed| {
+            did_work = true;
+            self.observeExecutionForkchoiceUpdate(completed);
+        }
+
+        return did_work;
+    }
+
+    fn queuePreparedBlockImportExecution(
+        self: *BeaconNode,
+        owner: QueuedStateWorkOwner,
+        prepared: chain_mod.PreparedBlockImport,
+    ) void {
+        self.waiting_execution_payloads.append(self.allocator, .{ .import = .{
+            .owner = owner,
+            .prepared = prepared,
+        } }) catch {
+            const owned_prepared = prepared;
+            self.finishPreparedQueuedBlockImportError(owner, owned_prepared, error.OutOfMemory);
+            return;
+        };
+        self.dispatchWaitingExecutionPayloads();
+    }
+
+    pub fn queueCurrentOptimisticHeadRevalidation(self: *BeaconNode) void {
+        if (self.hasPendingExecutionRevalidation()) return;
+
+        var prepared = self.chainService().prepareCurrentOptimisticHeadRevalidation() catch |err| {
+            std.log.warn("Optimistic head revalidation planning failed: {}", .{err});
+            return;
+        } orelse return;
+
+        self.waiting_execution_payloads.append(self.allocator, .{ .revalidation = prepared }) catch |err| {
+            prepared.deinit(self.allocator);
+            std.log.warn("failed to queue optimistic head revalidation: {}", .{err});
+            return;
+        };
+        self.dispatchWaitingExecutionPayloads();
+    }
+
+    fn hasPendingExecutionRevalidation(self: *const BeaconNode) bool {
+        for (self.waiting_execution_payloads.items) |pending| {
+            if (pending == .revalidation) return true;
+        }
+        for (self.pending_execution_payloads.items) |pending| {
+            if (pending.work == .revalidation) return true;
+        }
+        return false;
+    }
+
+    fn dispatchWaitingExecutionPayloads(self: *BeaconNode) void {
+        while (self.pending_execution_payloads.items.len == 0 and self.waiting_execution_payloads.items.len > 0) {
+            if (!self.execution_runtime.canAcceptPayloadVerification()) break;
+
+            var waiting = self.waiting_execution_payloads.orderedRemove(0);
+            self.pending_execution_payloads.ensureUnusedCapacity(self.allocator, 1) catch |err| {
+                waiting.deinit(self.allocator);
+                std.log.warn("failed to allocate pending execution payload slot: {}", .{err});
+                continue;
+            };
+
+            const ticket = self.next_execution_ticket;
+            self.next_execution_ticket += 1;
+
+            switch (waiting) {
+                .import => |pending| {
+                    if (pending.prepared.opts.skip_execution or
+                        pending.prepared.block_input.block.forkSeq().lt(.bellatrix) or
+                        !self.execution_runtime.hasExecutionEngine())
+                    {
+                        self.finishPreparedQueuedBlockImport(pending.owner, pending.prepared, .pre_merge);
+                        waiting = undefined;
+                        continue;
+                    }
+
+                    var request = chain_mod.ports.execution.makeNewPayloadRequest(
+                        self.allocator,
+                        pending.prepared.block_input.block,
+                    ) catch |err| {
+                        self.finishPreparedQueuedBlockImportError(pending.owner, pending.prepared, err);
+                        waiting = undefined;
+                        continue;
+                    } orelse {
+                        self.finishPreparedQueuedBlockImport(pending.owner, pending.prepared, .pre_merge);
+                        waiting = undefined;
+                        continue;
+                    };
+
+                    if (self.execution_runtime.submitPayloadVerification(ticket, request) catch false) {
+                        self.pending_execution_payloads.appendAssumeCapacity(.{
+                            .ticket = ticket,
+                            .work = .{ .import = pending },
+                        });
+                        waiting = undefined;
+                    } else {
+                        request.deinit(self.allocator);
+                        self.waiting_execution_payloads.insert(self.allocator, 0, .{ .import = pending }) catch |err| {
+                            self.finishPreparedQueuedBlockImportError(pending.owner, pending.prepared, err);
+                        };
+                        waiting = undefined;
+                        break;
+                    }
+                },
+                .revalidation => |prepared| {
+                    if (!self.execution_runtime.hasExecutionEngine()) {
+                        var owned_prepared = prepared;
+                        owned_prepared.deinit(self.allocator);
+                        waiting = undefined;
+                        continue;
+                    }
+
+                    const request = prepared.request;
+                    if (self.execution_runtime.submitPayloadVerification(ticket, request) catch false) {
+                        self.pending_execution_payloads.appendAssumeCapacity(.{
+                            .ticket = ticket,
+                            .work = .{ .revalidation = prepared.pending },
+                        });
+                        waiting = undefined;
+                    } else {
+                        self.waiting_execution_payloads.insert(self.allocator, 0, .{ .revalidation = prepared }) catch |err| {
+                            var owned_prepared = prepared;
+                            owned_prepared.deinit(self.allocator);
+                            std.log.warn("failed to requeue optimistic head revalidation: {}", .{err});
+                        };
+                        waiting = undefined;
+                        break;
+                    }
+                },
+            }
+        }
+    }
+
+    fn findPendingExecutionPayloadIndex(self: *BeaconNode, ticket: u64) ?usize {
+        for (self.pending_execution_payloads.items, 0..) |pending, i| {
+            if (pending.ticket == ticket) return i;
+        }
+        return null;
+    }
+
+    fn observeExecutionPayloadVerification(
+        self: *BeaconNode,
+        completed: CompletedPayloadVerification,
+    ) void {
+        if (self.metrics) |m| {
+            m.execution_new_payload_seconds.observe(completed.elapsed_s);
+            switch (completed.result) {
+                .valid => m.execution_payload_valid_total.incr(),
+                .invalid, .invalid_block_hash => m.execution_payload_invalid_total.incr(),
+                .syncing, .accepted => m.execution_payload_syncing_total.incr(),
+                .unavailable => if (completed.had_engine) m.execution_errors_total.incr(),
+            }
+        }
+    }
+
+    fn observeExecutionForkchoiceUpdate(
+        self: *BeaconNode,
+        completed: CompletedForkchoiceUpdate,
+    ) void {
+        if (self.metrics) |m| {
+            m.execution_forkchoice_updated_seconds.observe(completed.elapsed_s);
+            if (completed.status == .failed and completed.had_engine) {
+                m.execution_errors_total.incr();
+            }
+        }
+
+        const fc_state = completed.update.state;
+        switch (completed.status) {
+            .success => {
+                if (completed.payload_id) |payload_id| {
+                    std.log.info("forkchoiceUpdated: payload building started, id={s}", .{
+                        &std.fmt.bytesToHex(payload_id[0..8], .lower),
+                    });
+                }
+                std.log.info("forkchoiceUpdated: status={s} head={s}... safe={s}... finalized={s}...", .{
+                    @tagName(completed.payload_status.?),
+                    &std.fmt.bytesToHex(fc_state.head_block_hash[0..4], .lower),
+                    &std.fmt.bytesToHex(fc_state.safe_block_hash[0..4], .lower),
+                    &std.fmt.bytesToHex(fc_state.finalized_block_hash[0..4], .lower),
+                });
+
+                switch (completed.request) {
+                    .plain => {},
+                    .payload_preparation => |payload_preparation| {
+                        self.event_bus.emit(.{ .payload_attributes = .{
+                            .proposer_index = 0,
+                            .proposal_slot = payload_preparation.slot,
+                            .parent_block_number = 0,
+                            .parent_block_root = completed.update.beacon_block_root,
+                            .parent_block_hash = fc_state.head_block_hash,
+                            .timestamp = payload_preparation.timestamp,
+                            .prev_randao = payload_preparation.prev_randao,
+                            .suggested_fee_recipient = payload_preparation.suggested_fee_recipient,
+                        } });
+                    },
+                }
+            },
+            .unavailable => {},
+            .failed => {},
+        }
+    }
+
+    fn finishPreparedQueuedBlockImport(
+        self: *BeaconNode,
+        owner: QueuedStateWorkOwner,
+        prepared: chain_mod.PreparedBlockImport,
+        exec_status: chain_mod.ExecutionStatus,
+    ) void {
+        switch (owner) {
+            .generic => self.finishGenericPreparedQueuedBlockImport(prepared, exec_status),
+            .sync_segment => |key| self.finishSyncSegmentPreparedQueuedBlockImport(key, prepared, exec_status),
+        }
+    }
+
+    fn finishGenericPreparedQueuedBlockImport(
+        self: *BeaconNode,
+        prepared: chain_mod.PreparedBlockImport,
+        exec_status: chain_mod.ExecutionStatus,
+    ) void {
+        const t0 = std.Io.Clock.awake.now(self.io);
+        var owned_prepared = prepared;
+        defer {
+            owned_prepared.deinit(self.allocator);
+            owned_prepared = undefined;
+        }
+
+        const outcome = self.chainService().finishPreparedReadyBlockImport(owned_prepared, exec_status) catch |err| {
+            log.logger(.node).warn("deferred block execution commit failed: {}", .{err});
+            return;
+        };
+        const result = self.finishImportOutcome(t0, outcome) catch |err| {
+            log.logger(.node).warn("deferred block import commit failed: {}", .{err});
+            return;
+        };
+        self.processPendingChildren(result.block_root);
+    }
+
+    fn finishSyncSegmentPreparedQueuedBlockImport(
+        self: *BeaconNode,
+        key: SyncSegmentKey,
+        prepared: chain_mod.PreparedBlockImport,
+        exec_status: chain_mod.ExecutionStatus,
+    ) void {
+        const index = findPendingSyncSegmentIndex(self, key) orelse {
+            log.logger(.node).warn("missing pending sync segment for prepared block commit", .{});
+            self.finishGenericPreparedQueuedBlockImport(prepared, exec_status);
+            return;
+        };
+
+        var segment = &self.pending_sync_segments.items[index];
+        segment.in_flight = false;
+        segment.next_index += 1;
+
+        var owned_prepared = prepared;
+        defer {
+            owned_prepared.deinit(self.allocator);
+            owned_prepared = undefined;
+        }
+
+        const outcome = self.chainService().finishPreparedReadyBlockImport(owned_prepared, exec_status) catch |err| {
+            switch (err) {
+                error.ExecutionPayloadInvalid => {
+                    segment.failed_count += 1;
+                    segment.stop_after_current = true;
+                },
+                else => {
+                    segment.failed_count += 1;
+                    log.logger(.node).warn("deferred sync segment block commit failed: {}", .{err});
+                },
+            }
+            return;
+        };
+
+        segment.imported_count += 1;
+        self.processPendingChildren(outcome.result.block_root);
+    }
+
+    fn finishPreparedQueuedBlockImportError(
+        self: *BeaconNode,
+        owner: QueuedStateWorkOwner,
+        prepared: chain_mod.PreparedBlockImport,
+        err: anyerror,
+    ) void {
+        switch (owner) {
+            .generic => {
+                var owned_prepared = prepared;
+                owned_prepared.deinit(self.allocator);
+                log.logger(.node).warn("deferred block execution verification failed: {}", .{err});
+            },
+            .sync_segment => |key| {
+                const index = findPendingSyncSegmentIndex(self, key) orelse {
+                    var owned_prepared = prepared;
+                    owned_prepared.deinit(self.allocator);
+                    log.logger(.node).warn("missing pending sync segment for execution verification failure", .{});
+                    return;
+                };
+
+                var segment = &self.pending_sync_segments.items[index];
+                segment.in_flight = false;
+                segment.next_index += 1;
+
+                switch (err) {
+                    error.BlockAlreadyKnown, error.BlockAlreadyFinalized, error.GenesisBlock => {
+                        segment.skipped_count += 1;
+                    },
+                    error.ExecutionPayloadInvalid => {
+                        segment.failed_count += 1;
+                        segment.stop_after_current = true;
+                    },
+                    else => {
+                        segment.failed_count += 1;
+                        log.logger(.node).warn("deferred sync segment execution verification failed: {}", .{err});
+                    },
+                }
+
+                var owned_prepared = prepared;
+                owned_prepared.deinit(self.allocator);
+            },
+        }
     }
 
     pub fn processRangeSyncSegment(
@@ -641,13 +1051,7 @@ pub const BeaconNode = struct {
         const result = outcome.result;
 
         // Notify EL of fork choice update after each block import.
-        if (outcome.effects.forkchoice_update) |update| {
-            if (!self.scheduleForkchoiceUpdate(update)) {
-                self.notifyPreparedForkchoiceUpdate(update) catch |err| {
-                    log.logger(.node).warn("forkchoiceUpdated failed: {}", .{err});
-                };
-            }
-        }
+        if (outcome.effects.forkchoice_update) |update| self.queueExecutionForkchoiceUpdate(update);
 
         const t1 = std.Io.Clock.awake.now(self.io);
         const elapsed_s: f64 = @as(f64, @floatFromInt(t1.nanoseconds - t0.nanoseconds)) / 1e9;
@@ -665,11 +1069,6 @@ pub const BeaconNode = struct {
         self.updateSyncProgress(outcome.snapshot);
 
         if (result.epoch_transition) {
-            // Archive the post-epoch state for cold-path recovery.
-            // Errors are non-fatal — the block is already imported.
-            if (outcome.effects.archive_state) |archive_state| {
-                self.chainService().archiveState(archive_state.slot, archive_state.state_root) catch {};
-            }
             if (outcome.effects.finalized_checkpoint) |finalized| {
                 self.unknown_chain_sync.onFinalized(finalized.slot);
             }
@@ -694,15 +1093,7 @@ pub const BeaconNode = struct {
         t0: std.Io.Timestamp,
         outcome: chain_mod.SegmentImportOutcome,
     ) void {
-        defer if (outcome.effects.archive_states.len > 0) self.allocator.free(outcome.effects.archive_states);
-
-        if (outcome.effects.forkchoice_update) |update| {
-            if (!self.scheduleForkchoiceUpdate(update)) {
-                self.notifyPreparedForkchoiceUpdate(update) catch |err| {
-                    log.logger(.node).warn("forkchoiceUpdated failed after range sync segment: {}", .{err});
-                };
-            }
-        }
+        if (outcome.effects.forkchoice_update) |update| self.queueExecutionForkchoiceUpdate(update);
 
         const t1 = std.Io.Clock.awake.now(self.io);
         const elapsed_s: f64 = @as(f64, @floatFromInt(t1.nanoseconds - t0.nanoseconds)) / 1e9;
@@ -719,9 +1110,6 @@ pub const BeaconNode = struct {
         }
         self.updateSyncProgress(outcome.snapshot);
 
-        for (outcome.effects.archive_states) |archive_state| {
-            self.chainService().archiveState(archive_state.slot, archive_state.state_root) catch {};
-        }
         if (outcome.effects.finalized_checkpoint) |finalized| {
             self.unknown_chain_sync.onFinalized(finalized.slot);
         }
@@ -784,11 +1172,6 @@ pub const BeaconNode = struct {
         };
 
         segment.imported_count += 1;
-        if (outcome.effects.archive_state) |archive_state| {
-            segment.archive_states.append(self.allocator, archive_state) catch {
-                self.chainService().archiveState(archive_state.slot, archive_state.state_root) catch {};
-            };
-        }
 
         self.processPendingChildren(outcome.result.block_root);
     }
@@ -797,13 +1180,7 @@ pub const BeaconNode = struct {
         self: *BeaconNode,
         outcome: chain_mod.ExecutionRevalidationOutcome,
     ) void {
-        if (outcome.forkchoice_update) |update| {
-            if (!self.scheduleForkchoiceUpdate(update)) {
-                self.notifyPreparedForkchoiceUpdate(update) catch |err| {
-                    log.logger(.node).warn("forkchoiceUpdated failed after execution revalidation: {}", .{err});
-                };
-            }
-        }
+        if (outcome.forkchoice_update) |update| self.queueExecutionForkchoiceUpdate(update);
 
         if (self.metrics) |m| {
             m.head_slot.set(outcome.snapshot.head.slot);
@@ -899,17 +1276,6 @@ pub const BeaconNode = struct {
     /// Used by req/resp handlers to serve DataColumnSidecarsByRoot requests.
     pub fn getDataColumnSidecar(self: *BeaconNode, root: [32]u8, column_index: u64) !?[]const u8 {
         return self.chainQuery().dataColumnByRoot(root, column_index);
-    }
-
-    /// Archive the post-epoch state to the cold store.
-    ///
-    /// Called at epoch boundaries so that the cold path in StateRegen can
-    /// find a nearby anchor state and replay blocks forward from it.
-    ///
-    /// Serializes the CachedBeaconState's inner AnyBeaconState to SSZ bytes
-    /// and stores it via `BeaconDB.putStateArchive(slot, state_root, bytes)`.
-    pub fn archiveState(self: *BeaconNode, slot: u64, state_root: [32]u8) !void {
-        try self.chainService().archiveState(slot, state_root);
     }
 
     /// Advance the head state by one empty slot (no block).
@@ -1071,14 +1437,11 @@ pub const BeaconNode = struct {
             segment.next_index = segment.blocks.len;
         }
 
-        const archive_states = segment.archive_states.items;
-        segment.archive_states = .empty;
         const outcome = self.chainService().buildDeferredRangeSyncSegmentOutcome(
             segment.before_snapshot,
             segment.imported_count,
             segment.skipped_count,
             segment.failed_count,
-            archive_states,
         );
         const all_failed = outcome.imported_count == 0 and outcome.skipped_count == 0 and outcome.failed_count > 0;
         self.finishSegmentImportOutcome(segment.started_at, outcome);
@@ -1100,38 +1463,13 @@ pub const BeaconNode = struct {
         }
     }
 
-    /// Notify the EL of the current fork choice and optionally trigger payload building.
-    ///
-    /// Called after each block import. Sends engine_forkchoiceUpdatedV3 with the
-    /// current head/safe/finalized block hashes. If payload_attrs is provided
-    /// (e.g., this node is the next proposer), also starts building a new payload.
-    /// The returned payload_id is cached for later getPayload calls.
-    fn notifyForkchoiceUpdate(self: *BeaconNode, new_head_root: [32]u8) !void {
-        try block_production_mod.notifyForkchoiceUpdate(self, new_head_root);
-    }
-
-    fn notifyPreparedForkchoiceUpdate(
+    fn queueExecutionForkchoiceUpdate(
         self: *BeaconNode,
         update: chain_mod.ExecutionForkchoiceUpdate,
-    ) !void {
-        try block_production_mod.notifyPreparedForkchoiceUpdate(self, update);
-    }
-
-    fn scheduleForkchoiceUpdate(
-        self: *BeaconNode,
-        update: chain_mod.ExecutionForkchoiceUpdate,
-    ) bool {
-        if (self.p2p_service == null) return false;
-        const bp = self.beacon_processor orelse return false;
-        if (bp.queues.execution_forkchoice.isFull()) return false;
-
-        bp.ingest(.{ .execution_forkchoice = toExecutionForkchoiceWork(update) });
-        return true;
-    }
-
-    pub fn drainQueuedExecutionForkchoiceUpdates(self: *BeaconNode) void {
-        const bp = self.beacon_processor orelse return;
-        _ = bp.drainExecutionForkchoice();
+    ) void {
+        self.execution_runtime.submitForkchoiceUpdateAsync(update) catch |err| {
+            log.logger(.node).warn("forkchoiceUpdated failed: {}", .{err});
+        };
     }
 
     pub fn mockEngine(self: *const BeaconNode) ?*MockEngine {
@@ -1142,21 +1480,11 @@ pub const BeaconNode = struct {
         return self.execution_runtime.hasExecutionEngine();
     }
 
-    /// Inner forkchoiceUpdated with optional payload attributes.
-    fn notifyForkchoiceUpdateWithAttrs(
-        self: *BeaconNode,
-        new_head_root: [32]u8,
-        payload_attrs: ?PayloadAttributesV3,
-    ) !void {
-        try block_production_mod.notifyForkchoiceUpdateWithAttrs(self, new_head_root, payload_attrs);
-    }
-
-    /// Trigger payload building by sending forkchoiceUpdated with payload attributes.
+    /// Queue payload preparation on the execution runtime.
     ///
-    /// Called before block production when this node is the proposer for the next slot.
-    /// Sends the current fork choice state with payload attributes to start the EL
-    /// building an execution payload. The payload_id is cached for retrieval via
-    /// getExecutionPayload().
+    /// This no longer implies the payload id is available when the call returns.
+    /// Proposal-building paths that need the payload immediately must wait on the
+    /// queued execution completion through the normal runtime lane.
     pub fn preparePayload(
         self: *BeaconNode,
         slot: u64,
@@ -1175,19 +1503,6 @@ pub const BeaconNode = struct {
             withdrawals_slice,
             parent_beacon_block_root,
         );
-    }
-
-    /// Retrieve the execution payload built by the EL via engine_getPayloadV3.
-    ///
-    /// Must be called after preparePayload() has been called and the EL returned
-    /// a payload_id. Returns the complete execution payload, block value, and
-    /// blobs bundle for inclusion in the beacon block.
-    ///
-    /// If a builder relay is configured and available, this method first attempts
-    /// to retrieve a builder bid (getHeader). If the bid value exceeds the local
-    /// payload value * threshold, the blinded block path is used.
-    pub fn getExecutionPayload(self: *BeaconNode) !GetPayloadResponse {
-        return block_production_mod.getExecutionPayload(self);
     }
 
     /// Register validators with the builder relay.
@@ -1290,33 +1605,33 @@ pub const BeaconNode = struct {
     pub fn produceFullBlock(self: *BeaconNode, slot: u64, prod_config: BlockProductionConfig) !ProducedBlock {
         return block_production_mod.produceFullBlock(self, slot, prod_config);
     }
-    /// Produce a full block and import it locally.
+    /// Produce a full block and submit it through the normal local ingress path.
     ///
     /// This is the complete block production pipeline:
     /// 1. Produce block body with execution payload
     /// 2. Wrap in BeaconBlock with slot, proposer, parent root
     /// 3. Compute state root via state transition (with verification off)
     /// 4. Wrap in SignedBeaconBlock (with zero signature — VC signs separately)
-    /// 5. Import the block locally
+    /// 5. Submit the block through the normal ingress pipeline
     ///
-    /// Returns the signed block and import result. The block is owned by the
+    /// Returns the signed block and ingress result. The block is owned by the
     /// caller and must be freed.
     ///
     /// Preconditions:
     /// - preparePayload() called at slot N-1 (to have a cached payload)
     /// - Head state available in block_state_cache
-    pub fn produceAndImportBlock(
+    pub fn produceAndIngestBlock(
         self: *BeaconNode,
         slot: u64,
         prod_config: BlockProductionConfig,
-    ) !struct { signed_block: *types.electra.SignedBeaconBlock.Type, import_result: ImportResult } {
-        return block_production_mod.produceAndImportBlock(self, slot, prod_config);
+    ) !struct { signed_block: *types.electra.SignedBeaconBlock.Type, ingress_result: ReadyIngressResult } {
+        return block_production_mod.produceAndIngestBlock(self, slot, prod_config);
     }
 
     /// Broadcast a signed block to the network via gossip.
     ///
     /// Serializes and publishes the block on the beacon_block gossip topic.
-    /// Should be called after produceAndImportBlock() succeeds.
+    /// Should be called after `produceAndIngestBlock()`.
     ///
     /// NOTE: Gossip encoding (SSZ + Snappy) and topic construction are
     /// handled by the networking layer's gossip adapter. This method
@@ -2024,11 +2339,6 @@ pub fn processorHandlerCallback(item: WorkItem, context: *anyopaque) void {
     const wtype = item.workType();
 
     switch (item) {
-        .execution_forkchoice => |work| {
-            node.notifyPreparedForkchoiceUpdate(fromExecutionForkchoiceWork(work)) catch |err| {
-                std.log.warn("Processor: forkchoiceUpdated failed: {}", .{err});
-            };
-        },
         .gossip_block => |work| {
             const seen_timestamp_sec: u64 = if (work.seen_timestamp_ns > 0)
                 @intCast(@divFloor(work.seen_timestamp_ns, std.time.ns_per_s))
@@ -2184,26 +2494,6 @@ pub fn processorHandlerCallback(item: WorkItem, context: *anyopaque) void {
             std.log.debug("Processor: dispatched {s}", .{@tagName(wtype)});
         },
     }
-}
-
-fn toExecutionForkchoiceWork(update: chain_mod.ExecutionForkchoiceUpdate) ExecutionForkchoiceWork {
-    return .{
-        .beacon_block_root = update.beacon_block_root,
-        .head_block_hash = update.state.head_block_hash,
-        .safe_block_hash = update.state.safe_block_hash,
-        .finalized_block_hash = update.state.finalized_block_hash,
-    };
-}
-
-fn fromExecutionForkchoiceWork(work: ExecutionForkchoiceWork) chain_mod.ExecutionForkchoiceUpdate {
-    return .{
-        .beacon_block_root = work.beacon_block_root,
-        .state = .{
-            .head_block_hash = work.head_block_hash,
-            .safe_block_hash = work.safe_block_hash,
-            .finalized_block_hash = work.finalized_block_hash,
-        },
-    };
 }
 
 fn handleQueuedAggregate(node: *BeaconNode, work: processor_mod.work_item.AggregateWork) void {

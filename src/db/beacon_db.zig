@@ -15,12 +15,18 @@ const buckets = @import("buckets.zig");
 const DatabaseId = buckets.DatabaseId;
 
 pub const BeaconDB = struct {
+    pub const ArchivedBlockRef = struct {
+        slot: u64,
+        root: [32]u8,
+    };
+
     allocator: Allocator,
     kv: KVStore,
 
     // Pre-resolved database handles for hot-path operations.
     block_db: Database,
     block_archive_db: Database,
+    idx_block_parent_root_db: Database,
     idx_block_root_db: Database,
     idx_main_chain_db: Database,
     state_archive_db: Database,
@@ -45,6 +51,7 @@ pub const BeaconDB = struct {
             .kv = kv,
             .block_db = kv.getDatabase(.block),
             .block_archive_db = kv.getDatabase(.block_archive),
+            .idx_block_parent_root_db = kv.getDatabase(.idx_block_parent_root),
             .idx_block_root_db = kv.getDatabase(.idx_block_root),
             .idx_main_chain_db = kv.getDatabase(.idx_main_chain),
             .state_archive_db = kv.getDatabase(.state_archive),
@@ -67,6 +74,10 @@ pub const BeaconDB = struct {
 
     pub fn close(self: *BeaconDB) void {
         self.kv.close();
+    }
+
+    pub fn writeBatch(self: *BeaconDB, ops: []const BatchOp) !void {
+        try self.kv.writeBatch(ops);
     }
 
     // ---------------------------------------------------------------
@@ -99,6 +110,23 @@ pub const BeaconDB = struct {
         try self.kv.writeBatch(&ops);
     }
 
+    pub fn putBlockArchiveCanonical(
+        self: *BeaconDB,
+        slot: u64,
+        root: [32]u8,
+        parent_root: [32]u8,
+        data: []const u8,
+    ) !void {
+        const slot_key = buckets.slotKey(slot);
+        const ops = [_]BatchOp{
+            .{ .put = .{ .db = .block_archive, .key = &slot_key, .value = data } },
+            .{ .put = .{ .db = .idx_block_parent_root, .key = &parent_root, .value = &buckets.slotKey(slot) } },
+            .{ .put = .{ .db = .idx_block_root, .key = &root, .value = &buckets.slotKey(slot) } },
+            .{ .put = .{ .db = .idx_main_chain, .key = &slot_key, .value = &root } },
+        };
+        try self.kv.writeBatch(&ops);
+    }
+
     pub fn getBlockArchive(self: *BeaconDB, slot: u64) !?[]const u8 {
         const key = buckets.slotKey(slot);
         return self.block_archive_db.get(&key);
@@ -113,6 +141,19 @@ pub const BeaconDB = struct {
         return self.getBlockArchive(slot);
     }
 
+    pub fn getFinalizedBlockSlotByParentRoot(self: *BeaconDB, parent_root: [32]u8) !?u64 {
+        const slot_bytes = try self.idx_block_parent_root_db.get(&parent_root) orelse return null;
+        defer self.allocator.free(slot_bytes);
+
+        if (slot_bytes.len != 8) return error.CorruptedIndex;
+        return std.mem.readInt(u64, slot_bytes[0..8], .big);
+    }
+
+    pub fn getBlockArchiveByParentRoot(self: *BeaconDB, parent_root: [32]u8) !?[]const u8 {
+        const slot = try self.getFinalizedBlockSlotByParentRoot(parent_root) orelse return null;
+        return self.getBlockArchive(slot);
+    }
+
     pub fn getEarliestBlockArchiveSlot(self: *BeaconDB) !?u64 {
         const first = try self.block_archive_db.firstKey() orelse return null;
         defer self.allocator.free(first);
@@ -120,7 +161,15 @@ pub const BeaconDB = struct {
         return std.mem.readInt(u64, first[0..8], .big);
     }
 
-    pub fn getBlockRootBySlot(self: *BeaconDB, slot: u64) !?[32]u8 {
+    pub fn getEarliestArchivedCanonicalBlock(self: *BeaconDB) !?ArchivedBlockRef {
+        const slot = try self.getEarliestBlockArchiveSlot() orelse return null;
+        const root = try self.getFinalizedBlockRootBySlot(slot) orelse return error.CorruptedIndex;
+        return .{ .slot = slot, .root = root };
+    }
+
+    /// Return the canonical finalized block root for a slot from the durable
+    /// finalized-history indices.
+    pub fn getFinalizedBlockRootBySlot(self: *BeaconDB, slot: u64) !?[32]u8 {
         const key = buckets.slotKey(slot);
         const root_bytes = try self.idx_main_chain_db.get(&key) orelse return null;
         defer self.allocator.free(root_bytes);
@@ -129,6 +178,26 @@ pub const BeaconDB = struct {
         var root: [32]u8 = undefined;
         @memcpy(&root, root_bytes[0..32]);
         return root;
+    }
+
+    pub fn getArchivedCanonicalChild(self: *BeaconDB, parent_root: [32]u8) !?ArchivedBlockRef {
+        const slot = try self.getFinalizedBlockSlotByParentRoot(parent_root) orelse return null;
+        const root = try self.getFinalizedBlockRootBySlot(slot) orelse return error.CorruptedIndex;
+        return .{ .slot = slot, .root = root };
+    }
+
+    pub fn getContiguousArchivedCanonicalHead(self: *BeaconDB, max_slot: u64) !?ArchivedBlockRef {
+        var current = try self.getEarliestArchivedCanonicalBlock() orelse return null;
+        if (current.slot > max_slot) return null;
+
+        while (true) {
+            const child = try self.getArchivedCanonicalChild(current.root) orelse break;
+            if (child.slot <= current.slot) return error.CorruptedIndex;
+            if (child.slot > max_slot) break;
+            current = child;
+        }
+
+        return current;
     }
 
     // ---------------------------------------------------------------
@@ -307,14 +376,18 @@ pub const BeaconDB = struct {
         finalized_root,
         justified_slot,
         justified_root,
+        archive_finalized_slot,
+        archive_state_epoch,
     };
 
-    fn chainInfoKeyBytes(info_key: ChainInfoKey) []const u8 {
+    pub fn chainInfoKeyBytes(info_key: ChainInfoKey) []const u8 {
         return switch (info_key) {
             .finalized_slot => "fs",
             .finalized_root => "fr",
             .justified_slot => "js",
             .justified_root => "jr",
+            .archive_finalized_slot => "afs",
+            .archive_state_epoch => "ase",
         };
     }
 
@@ -324,6 +397,19 @@ pub const BeaconDB = struct {
 
     pub fn getChainInfo(self: *BeaconDB, info_key: ChainInfoKey) !?[]const u8 {
         return self.chain_info_db.get(chainInfoKeyBytes(info_key));
+    }
+
+    pub fn putChainInfoU64(self: *BeaconDB, info_key: ChainInfoKey, value: u64) !void {
+        const bytes = buckets.slotKey(value);
+        try self.putChainInfo(info_key, &bytes);
+    }
+
+    pub fn getChainInfoU64(self: *BeaconDB, info_key: ChainInfoKey) !?u64 {
+        const bytes = try self.getChainInfo(info_key) orelse return null;
+        defer self.allocator.free(bytes);
+
+        if (bytes.len != 8) return error.CorruptedIndex;
+        return std.mem.readInt(u64, bytes[0..8], .big);
     }
 
     // ---------------------------------------------------------------

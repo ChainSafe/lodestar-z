@@ -151,7 +151,6 @@ const OwnedGraph = struct {
         allocator.destroy(self.op_pool);
 
         self.chain.state_work_service.deinit();
-        allocator.destroy(self.chain.state_work_service);
 
         self.chain.queued_regen.deinit();
         allocator.destroy(self.chain.queued_regen);
@@ -343,8 +342,7 @@ fn initOwnedGraph(
 
     const archive_store = try allocator.create(ArchiveStore);
     errdefer allocator.destroy(archive_store);
-    archive_store.* = ArchiveStore.init(allocator, db, block_cache, .{});
-    archive_store.bindBeaconConfig(config);
+    archive_store.* = ArchiveStore.init(allocator, db, regen, .{});
     errdefer archive_store.deinit();
 
     const pending_block_ingress = try allocator.create(PendingBlockIngress);
@@ -594,3 +592,137 @@ pub const Builder = struct {
         return self.finish(outcome);
     }
 };
+
+test "Runtime.Builder: finishCheckpoint repairs archive lag during bootstrap" {
+    const ct = @import("consensus_types");
+    const active_preset = @import("preset").active_preset;
+    const preset = @import("preset").preset;
+    const BatchOp = db_mod.BatchOp;
+
+    const allocator = std.testing.allocator;
+    const chain_config = if (active_preset == .mainnet)
+        config_mod.mainnet.chain_config
+    else
+        config_mod.minimal.chain_config;
+
+    var temp_pool = try Node.Pool.init(allocator, 256 * 5);
+    defer temp_pool.deinit();
+
+    const temp_state = try state_transition.test_utils.generateElectraState(
+        allocator,
+        &temp_pool,
+        chain_config,
+        16,
+    );
+    defer {
+        temp_state.deinit();
+        allocator.destroy(temp_state);
+    }
+
+    const config = try allocator.create(BeaconConfig);
+    defer allocator.destroy(config);
+    config.* = BeaconConfig.init(chain_config, (try temp_state.genesisValidatorsRoot()).*);
+
+    const mem_store = try allocator.create(MemoryKVStore);
+    mem_store.* = MemoryKVStore.init(allocator);
+
+    var builder = try Builder.init(
+        allocator,
+        std.testing.io,
+        config,
+        .{ .memory = mem_store },
+        .{},
+    );
+    defer builder.deinit();
+
+    const shared_state_graph = builder.sharedStateGraph();
+    const raw_state = try state_transition.test_utils.generateElectraState(
+        allocator,
+        shared_state_graph.pool,
+        chain_config,
+        16,
+    );
+    const validators = try raw_state.validatorsSlice(allocator);
+    defer allocator.free(validators);
+    try shared_state_graph.validator_pubkeys.syncFromValidators(validators);
+
+    const checkpoint_state = try CachedBeaconState.createCachedBeaconState(
+        allocator,
+        raw_state,
+        shared_state_graph.validator_pubkeys.immutableData(shared_state_graph.config),
+        .{
+            .skip_sync_committee_cache = raw_state.forkSeq() == .phase0,
+            .skip_sync_pubkeys = true,
+        },
+    );
+    errdefer {
+        checkpoint_state.deinit();
+        allocator.destroy(checkpoint_state);
+    }
+
+    const anchor_epoch: u64 = 1024;
+    const anchor_slot: u64 = anchor_epoch * preset.SLOTS_PER_EPOCH;
+    const parent_root = [_]u8{0x41} ** 32;
+    const state_root_hint = [_]u8{0x52} ** 32;
+    const body_root = [_]u8{0x63} ** 32;
+    const checkpoint_header = ct.phase0.BeaconBlockHeader.Type{
+        .slot = anchor_slot,
+        .proposer_index = 0,
+        .parent_root = parent_root,
+        .state_root = state_root_hint,
+        .body_root = body_root,
+    };
+
+    try checkpoint_state.state.setSlot(anchor_slot);
+    try checkpoint_state.state.setLatestBlockHeader(&checkpoint_header);
+
+    var anchor_block_root: [32]u8 = undefined;
+    try ct.phase0.BeaconBlockHeader.hashTreeRoot(&checkpoint_header, &anchor_block_root);
+
+    const finalized_checkpoint = ct.phase0.Checkpoint.Type{
+        .epoch = anchor_epoch,
+        .root = anchor_block_root,
+    };
+    try checkpoint_state.state.setCurrentJustifiedCheckpoint(&finalized_checkpoint);
+    try checkpoint_state.state.setFinalizedCheckpoint(&finalized_checkpoint);
+    try checkpoint_state.state.commit();
+
+    try builder.graph.db.putBlock(anchor_block_root, "lagging-finalized-block");
+
+    const finalized_slot_key = db_mod.slotKey(anchor_slot);
+    const finalized_slot_value = db_mod.slotKey(anchor_slot);
+    const finalized_index_ops = [_]BatchOp{
+        .{ .put = .{ .db = .idx_main_chain, .key = &finalized_slot_key, .value = &anchor_block_root } },
+        .{ .put = .{ .db = .idx_block_root, .key = &anchor_block_root, .value = &finalized_slot_value } },
+        .{ .put = .{ .db = .idx_block_parent_root, .key = &parent_root, .value = &finalized_slot_value } },
+        .{ .put = .{ .db = .chain_info, .key = BeaconDB.chainInfoKeyBytes(.finalized_slot), .value = &finalized_slot_value } },
+        .{ .put = .{ .db = .chain_info, .key = BeaconDB.chainInfoKeyBytes(.finalized_root), .value = &anchor_block_root } },
+    };
+    try builder.graph.db.writeBatch(&finalized_index_ops);
+
+    const finished = try builder.finishCheckpoint(checkpoint_state);
+    const runtime = finished.runtime;
+    defer runtime.deinit();
+
+    const archived = try runtime.db.getBlockArchive(anchor_slot);
+    try std.testing.expect(archived != null);
+    defer if (archived) |bytes| allocator.free(bytes);
+    try std.testing.expectEqualSlices(u8, "lagging-finalized-block", archived.?);
+
+    const archive_progress = try runtime.db.getChainInfoU64(.archive_finalized_slot);
+    try std.testing.expectEqual(@as(?u64, anchor_slot), archive_progress);
+
+    const archived_state = try runtime.db.getStateArchive(anchor_slot);
+    try std.testing.expect(archived_state != null);
+    defer if (archived_state) |bytes| allocator.free(bytes);
+
+    const archived_state_epoch = try runtime.db.getChainInfoU64(.archive_state_epoch);
+    try std.testing.expectEqual(@as(?u64, anchor_epoch), archived_state_epoch);
+
+    const hot = try runtime.db.getBlock(anchor_block_root);
+    defer if (hot) |bytes| allocator.free(bytes);
+    try std.testing.expect(hot == null);
+
+    try std.testing.expectEqual(anchor_slot, runtime.archive_store.last_finalized_slot);
+    try std.testing.expectEqual(anchor_epoch, runtime.archive_store.last_archived_state_epoch);
+}

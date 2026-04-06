@@ -16,6 +16,7 @@ const Chain = @import("chain.zig").Chain;
 const chain_types = @import("types.zig");
 const chain_effects = @import("effects.zig");
 const ports = @import("ports/root.zig");
+const blocks = @import("blocks/root.zig");
 const Query = @import("query.zig").Query;
 const produce_block = @import("produce_block.zig");
 const blob_kzg_verification = @import("blob_kzg_verification.zig");
@@ -51,6 +52,8 @@ const HeadResult = fork_choice_mod.HeadResult;
 const LVHExecResponse = fork_choice_mod.LVHExecResponse;
 pub const PlannedBlockImport = @import("blocks/root.zig").PlannedBlockImport;
 pub const CompletedBlockImport = @import("state_work_service.zig").CompletedBlockImport;
+pub const PreparedBlockImport = @import("blocks/root.zig").PreparedBlockImport;
+pub const ExecutionStatus = blocks.ExecutionStatus;
 
 fn eth1DataFromHeadState(cached: *CachedBeaconState) Eth1DataType {
     var eth1_data = Eth1Data.default_value;
@@ -110,41 +113,20 @@ pub const Service = struct {
             .state = state,
         };
     }
-
-    pub fn importBlock(
+    pub fn prepareBlockInput(
         self: Service,
         any_signed: fork_types.AnySignedBeaconBlock,
         source: chain_types.BlockSource,
-    ) !chain_effects.ImportOutcome {
-        const result = try self.chain.importBlock(any_signed, source);
-        const snapshot = self.query().currentSnapshot();
-
-        return .{
-            .result = result,
-            .snapshot = snapshot,
-            .effects = .{
-                .forkchoice_update = self.forkchoiceUpdateForHead(snapshot.head.root),
-                .archive_state = if (result.epoch_transition)
-                    .{
-                        .slot = result.slot,
-                        .state_root = result.state_root,
-                    }
-                else
-                    null,
-                .finalized_checkpoint = if (result.epoch_transition)
-                    snapshot.finalized
-                else
-                    null,
-            },
-        };
-    }
-
-    pub fn importRawBlockBytes(
-        self: Service,
-        block_bytes: []const u8,
-        source: chain_types.BlockSource,
-    ) !chain_effects.ImportOutcome {
-        return self.importReadyBlock(try self.prepareRawBlockInput(block_bytes, source));
+    ) !ReadyBlockInput {
+        const block_root = try hashBlock(self.chain.allocator, any_signed);
+        return readyBlockInput(
+            any_signed,
+            source,
+            block_root,
+            self.dataAvailabilityStatusForBlock(block_root, any_signed),
+            0,
+            .none,
+        );
     }
 
     pub fn prepareRawBlockInput(
@@ -164,34 +146,6 @@ pub const Service = struct {
             .none,
         );
     }
-
-    pub fn importReadyBlock(
-        self: Service,
-        ready: ReadyBlockInput,
-    ) !chain_effects.ImportOutcome {
-        const result = try self.chain.importReadyBlock(ready);
-        const snapshot = self.query().currentSnapshot();
-
-        return .{
-            .result = result,
-            .snapshot = snapshot,
-            .effects = .{
-                .forkchoice_update = self.forkchoiceUpdateForHead(snapshot.head.root),
-                .archive_state = if (result.epoch_transition)
-                    .{
-                        .slot = result.slot,
-                        .state_root = result.state_root,
-                    }
-                else
-                    null,
-                .finalized_checkpoint = if (result.epoch_transition)
-                    snapshot.finalized
-                else
-                    null,
-            },
-        };
-    }
-
     /// Consumes `ready`. On success, ownership transfers into the returned plan.
     /// On error, `ready` still owns its resources.
     pub fn planReadyBlockImport(
@@ -232,13 +186,27 @@ pub const Service = struct {
             .snapshot = snapshot,
             .effects = .{
                 .forkchoice_update = self.forkchoiceUpdateForHead(snapshot.head.root),
-                .archive_state = if (result.epoch_transition)
-                    .{
-                        .slot = result.slot,
-                        .state_root = result.state_root,
-                    }
+                .finalized_checkpoint = if (result.epoch_transition)
+                    snapshot.finalized
                 else
                     null,
+            },
+        };
+    }
+
+    pub fn finishPreparedReadyBlockImport(
+        self: Service,
+        prepared: PreparedBlockImport,
+        exec_status: ExecutionStatus,
+    ) !chain_effects.ImportOutcome {
+        const result = try self.chain.finishPreparedReadyBlockImport(prepared, exec_status);
+        const snapshot = self.query().currentSnapshot();
+
+        return .{
+            .result = result,
+            .snapshot = snapshot,
+            .effects = .{
+                .forkchoice_update = self.forkchoiceUpdateForHead(snapshot.head.root),
                 .finalized_checkpoint = if (result.epoch_transition)
                     snapshot.finalized
                 else
@@ -303,19 +271,11 @@ pub const Service = struct {
         var imported_count: usize = 0;
         var skipped_count: usize = 0;
         var failed_count: usize = 0;
-        var archive_states_builder: std.ArrayListUnmanaged(chain_effects.ArchiveStateRequest) = .empty;
-        defer archive_states_builder.deinit(allocator);
-
         for (results) |result| {
             switch (result) {
                 .success => |import_result| {
                     imported_count += 1;
-                    if (import_result.epoch_transition) {
-                        try archive_states_builder.append(allocator, .{
-                            .slot = import_result.slot,
-                            .state_root = import_result.state_root,
-                        });
-                    }
+                    _ = import_result;
                 },
                 .skipped => skipped_count += 1,
                 .failed => failed_count += 1,
@@ -323,10 +283,6 @@ pub const Service = struct {
         }
 
         const snapshot = self.query().currentSnapshot();
-        const archive_states = if (archive_states_builder.items.len == 0)
-            &[_]chain_effects.ArchiveStateRequest{}
-        else
-            try archive_states_builder.toOwnedSlice(allocator);
 
         return .{
             .imported_count = imported_count,
@@ -335,7 +291,6 @@ pub const Service = struct {
             .snapshot = snapshot,
             .effects = .{
                 .forkchoice_update = self.forkchoiceUpdateForHead(snapshot.head.root),
-                .archive_states = archive_states,
                 .finalized_checkpoint = if (snapshot.finalized.epoch != before_snapshot.finalized.epoch or
                     !std.mem.eql(u8, &snapshot.finalized.root, &before_snapshot.finalized.root))
                     snapshot.finalized
@@ -351,7 +306,6 @@ pub const Service = struct {
         imported_count: usize,
         skipped_count: usize,
         failed_count: usize,
-        archive_states: []const chain_effects.ArchiveStateRequest,
     ) chain_effects.SegmentImportOutcome {
         const snapshot = self.query().currentSnapshot();
         return .{
@@ -361,7 +315,6 @@ pub const Service = struct {
             .snapshot = snapshot,
             .effects = .{
                 .forkchoice_update = self.forkchoiceUpdateForHead(snapshot.head.root),
-                .archive_states = archive_states,
                 .finalized_checkpoint = if (snapshot.finalized.epoch != before_snapshot.finalized.epoch or
                     !std.mem.eql(u8, &snapshot.finalized.root, &before_snapshot.finalized.root))
                     snapshot.finalized
@@ -694,10 +647,6 @@ pub const Service = struct {
         );
     }
 
-    pub fn archiveState(self: Service, slot: Slot, state_root: Root) !void {
-        try self.chain.archiveState(slot, state_root);
-    }
-
     pub fn updateBeaconProposerData(
         self: Service,
         epoch: u64,
@@ -906,12 +855,10 @@ pub const Service = struct {
         self.chain.onSlot(slot);
     }
 
-    pub fn revalidateCurrentOptimisticHead(self: Service) !?chain_effects.ExecutionRevalidationOutcome {
+    pub fn prepareCurrentOptimisticHeadRevalidation(self: Service) !?chain_effects.PreparedExecutionRevalidation {
         if (!self.chain.currentHeadExecutionOptimistic()) return null;
 
-        const fc = self.chain.forkChoice();
-        const old_snapshot = self.query().currentSnapshot();
-        const head_root = old_snapshot.head.root;
+        const head_root = self.query().head().root;
         const block_bytes = (try self.query().blockBytesByRoot(head_root)) orelse return error.HeadBlockNotAvailable;
         defer self.chain.allocator.free(block_bytes);
 
@@ -919,21 +866,38 @@ pub const Service = struct {
         var any_signed = try deserializeRawBlockBytes(self.chain, slot, block_bytes);
         defer any_signed.deinit(self.chain.allocator);
 
-        const verifier = self.chain.execution_verifier orelse return null;
-        var request = try ports.execution.makeNewPayloadRequest(self.chain.allocator, any_signed) orelse return null;
-        defer request.deinit(self.chain.allocator);
+        const request = try ports.execution.makeNewPayloadRequest(self.chain.allocator, any_signed) orelse return null;
+        return .{
+            .pending = .{
+                .target_head_root = head_root,
+                .invalidate_from_parent_block_root = any_signed.beaconBlock().parentRoot().*,
+            },
+            .request = request,
+        };
+    }
 
-        const response: LVHExecResponse = switch (verifier.submitNewPayload(request)) {
+    pub fn finishCurrentOptimisticHeadRevalidation(
+        self: Service,
+        pending: chain_effects.PendingExecutionRevalidation,
+        result: ports.execution.NewPayloadResult,
+    ) !?chain_effects.ExecutionRevalidationOutcome {
+        if (!self.chain.currentHeadExecutionOptimistic()) return null;
+
+        const old_head = self.query().head();
+        if (!std.mem.eql(u8, &old_head.root, &pending.target_head_root)) return null;
+
+        const fc = self.chain.forkChoice();
+        const response: LVHExecResponse = switch (result) {
             .valid => |valid| .{ .valid = .{
                 .latest_valid_exec_hash = valid.latest_valid_hash,
             } },
             .invalid => |invalid| .{ .invalid = .{
                 .latest_valid_exec_hash = invalid.latest_valid_hash,
-                .invalidate_from_parent_block_root = any_signed.beaconBlock().parentRoot().*,
+                .invalidate_from_parent_block_root = pending.invalidate_from_parent_block_root,
             } },
             .invalid_block_hash => |invalid| .{ .invalid = .{
                 .latest_valid_exec_hash = invalid.latest_valid_hash,
-                .invalidate_from_parent_block_root = any_signed.beaconBlock().parentRoot().*,
+                .invalidate_from_parent_block_root = pending.invalidate_from_parent_block_root,
             } },
             .syncing, .accepted, .unavailable => return null,
         };
@@ -958,7 +922,7 @@ pub const Service = struct {
         self.chain.setTrackedHead(new_head.block_root, new_head.slot, new_head.state_root);
 
         const snapshot = self.query().currentSnapshot();
-        const head_changed = !std.mem.eql(u8, &snapshot.head.root, &old_snapshot.head.root);
+        const head_changed = !std.mem.eql(u8, &snapshot.head.root, &pending.target_head_root);
         return .{
             .snapshot = snapshot,
             .head_changed = head_changed,

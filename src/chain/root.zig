@@ -45,12 +45,13 @@ pub const ChainNotification = chain_types.ChainNotification;
 pub const ImportOutcome = effects.ImportOutcome;
 pub const SegmentImportOutcome = effects.SegmentImportOutcome;
 pub const ExecutionRevalidationOutcome = effects.ExecutionRevalidationOutcome;
+pub const PendingExecutionRevalidation = effects.PendingExecutionRevalidation;
+pub const PreparedExecutionRevalidation = effects.PreparedExecutionRevalidation;
 pub const BootstrapOutcome = effects.BootstrapOutcome;
 pub const ImportEffects = effects.ImportEffects;
 pub const SegmentImportEffects = effects.SegmentImportEffects;
 pub const ChainSnapshot = effects.ChainSnapshot;
 pub const CheckpointSnapshot = effects.CheckpointSnapshot;
-pub const ArchiveStateRequest = effects.ArchiveStateRequest;
 pub const ExecutionForkchoiceUpdate = effects.ExecutionForkchoiceUpdate;
 pub const Runtime = runtime.Runtime;
 pub const RuntimeBuilder = runtime.Builder;
@@ -129,6 +130,7 @@ pub const archive_store = @import("archive_store.zig");
 pub const reprocess = @import("reprocess.zig");
 pub const pending_block_ingress = @import("block_ingress.zig");
 pub const payload_envelope_ingress = @import("payload_envelope_ingress.zig");
+pub const finalization_plan = @import("finalization_plan.zig");
 
 // Re-exports
 pub const ShufflingCache = shuffling_cache.ShufflingCache;
@@ -144,6 +146,7 @@ pub const PendingIngressBlock = pending_block_ingress.PendingIngressBlock;
 pub const PayloadEnvelopeIngress = payload_envelope_ingress.PayloadEnvelopeIngress;
 pub const PendingPayloadEnvelope = payload_envelope_ingress.PendingPayloadEnvelope;
 pub const PayloadEnvelopeFetchPlan = payload_envelope_ingress.PayloadEnvelopeFetchPlan;
+pub const FinalizationPlan = finalization_plan.FinalizationPlan;
 // BlockVerification removed — use blocks/pipeline.zig instead.
 
 // Queued state regeneration
@@ -177,7 +180,6 @@ pub const BlockImportError = blocks.BlockImportError;
 pub const BatchBlockResult = blocks.BatchBlockResult;
 pub const SanityOutcome = blocks.SanityOutcome;
 pub const ExecutionPort = ports.ExecutionPort;
-pub const ExecutionVerifier = ports.ExecutionVerifier;
 pub const NewPayloadRequest = ports.NewPayloadRequest;
 pub const NewPayloadResult = ports.NewPayloadResult;
 // Data availability subsystem

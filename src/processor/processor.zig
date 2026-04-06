@@ -170,20 +170,6 @@ pub const BeaconProcessor = struct {
         return count;
     }
 
-    /// Drain only queued execution forkchoice updates.
-    ///
-    /// Used when a synchronous execution-layer request needs to preserve
-    /// ordering relative to already-scheduled forkchoiceUpdated calls without
-    /// draining unrelated processor work.
-    pub fn drainExecutionForkchoice(self: *BeaconProcessor) u64 {
-        var count: u64 = 0;
-        while (self.queues.execution_forkchoice.pop()) |work| {
-            self.dispatchItem(.{ .execution_forkchoice = work });
-            count += 1;
-        }
-        return count;
-    }
-
     /// Process up to `max_items` work items in priority order.
     ///
     /// Returns the number of items dispatched. Designed for cooperative
@@ -478,7 +464,6 @@ test "BeaconProcessor: sync state affects dropping" {
 fn testConfig() QueueConfig {
     return .{
         .chain_segment = 4,
-        .execution_forkchoice = 4,
         .rpc_block = 4,
         .rpc_blob = 4,
         .rpc_custody_column = 4,

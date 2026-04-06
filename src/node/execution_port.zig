@@ -28,8 +28,6 @@ fn submitNewPayloadFn(ptr: *anyopaque, request: NewPayloadRequest) NewPayloadRes
 }
 
 fn submitNewPayload(node: *BeaconNode, request: NewPayloadRequest) NewPayloadResult {
-    node.drainQueuedExecutionForkchoiceUpdates();
-
     const t0 = std.Io.Clock.awake.now(node.io);
     const had_engine = node.execution_runtime.hasExecutionEngine();
     const result = node.execution_runtime.submitNewPayload(request);

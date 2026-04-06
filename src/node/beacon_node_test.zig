@@ -1,9 +1,14 @@
 const std = @import("std");
 
+const ct = @import("consensus_types");
+const config_mod = @import("config");
+const BeaconConfig = config_mod.BeaconConfig;
 const preset = @import("preset").preset;
 const preset_root = @import("preset");
+const active_preset = @import("preset").active_preset;
 const state_transition = @import("state_transition");
 const chain_mod = @import("chain");
+const db_mod = @import("db");
 const networking = @import("networking");
 const fork_choice_mod = @import("fork_choice");
 
@@ -18,54 +23,125 @@ const freeResponseChunks = networking.freeResponseChunks;
 const BlockExtraMeta = fork_choice_mod.BlockExtraMeta;
 const ProtoBlock = fork_choice_mod.ProtoBlock;
 
-const TreeNode = @import("persistent_merkle_tree").Node;
-const TestCachedBeaconState = state_transition.test_utils.TestCachedBeaconState;
+const generateElectraState = state_transition.test_utils.generateElectraState;
+const SharedStateGraph = chain_mod.SharedStateGraph;
+const BatchOp = db_mod.BatchOp;
+
+const active_chain_config = if (active_preset == .mainnet)
+    config_mod.mainnet.chain_config
+else
+    config_mod.minimal.chain_config;
+const test_validator_count = 16;
+
+fn makeTestConfig(allocator: std.mem.Allocator) !*BeaconConfig {
+    var temp_pool = try @import("persistent_merkle_tree").Node.Pool.init(allocator, 256 * 5);
+    defer temp_pool.deinit();
+
+    const temp_state = try generateElectraState(allocator, &temp_pool, active_chain_config, test_validator_count);
+    defer {
+        temp_state.deinit();
+        allocator.destroy(temp_state);
+    }
+
+    const config = try allocator.create(BeaconConfig);
+    errdefer allocator.destroy(config);
+    config.* = BeaconConfig.init(active_chain_config, (try temp_state.genesisValidatorsRoot()).*);
+    return config;
+}
+
+fn createPublishedState(
+    allocator: std.mem.Allocator,
+    shared_state_graph: *SharedStateGraph,
+) !*state_transition.CachedBeaconState {
+    const raw_state = try generateElectraState(
+        allocator,
+        shared_state_graph.pool,
+        active_chain_config,
+        test_validator_count,
+    );
+
+    const validators = try raw_state.validatorsSlice(allocator);
+    defer allocator.free(validators);
+    try shared_state_graph.validator_pubkeys.syncFromValidators(validators);
+
+    return state_transition.CachedBeaconState.createCachedBeaconState(
+        allocator,
+        raw_state,
+        shared_state_graph.validator_pubkeys.immutableData(shared_state_graph.config),
+        .{
+            .skip_sync_committee_cache = raw_state.forkSeq() == .phase0,
+            .skip_sync_pubkeys = true,
+        },
+    );
+}
+
+fn queueForkchoiceUpdateForHead(node: *BeaconNode, head_root: [32]u8) !void {
+    const fc_state = node.chainQuery().executionForkchoiceState(head_root) orelse return;
+    try node.execution_runtime.submitForkchoiceUpdateAsync(.{
+        .beacon_block_root = head_root,
+        .state = fc_state,
+    });
+
+    var spins: usize = 0;
+    while (spins < 1_000) : (spins += 1) {
+        if (node.processPendingExecutionForkchoiceUpdates()) return;
+        std.Io.sleep(std.testing.io, .{ .nanoseconds = std.time.ns_per_ms }, .real) catch {};
+    }
+
+    return error.TestTimeout;
+}
 
 const TestContext = struct {
-    pool: TreeNode.Pool,
-    test_state: TestCachedBeaconState,
+    config: *BeaconConfig,
     node: *BeaconNode,
 
     fn initUnbootstrapped(opts: NodeOptions) !TestContext {
         const allocator = std.testing.allocator;
-        var pool = try TreeNode.Pool.init(allocator, 256 * 5);
-        errdefer pool.deinit();
-
-        const test_state = try TestCachedBeaconState.init(allocator, &pool, 16);
-        errdefer {
-            var owned_state = test_state;
-            owned_state.deinit();
-        }
+        const config = try makeTestConfig(allocator);
+        errdefer allocator.destroy(config);
 
         const node_identity = try identity_mod.createEphemeralIdentity(allocator, std.testing.io, opts);
-        const node = try BeaconNode.initUnbootstrapped(allocator, std.testing.io, test_state.cached_state.config, .{
+        const node = try BeaconNode.initUnbootstrapped(allocator, std.testing.io, config, .{
             .options = opts,
             .node_identity = node_identity,
         });
         errdefer node.deinit();
 
         return .{
-            .pool = pool,
-            .test_state = test_state,
+            .config = config,
             .node = node,
         };
     }
 
     fn init(opts: NodeOptions) !TestContext {
         const allocator = std.testing.allocator;
-        var ctx = try initUnbootstrapped(opts);
-        errdefer ctx.deinit();
+        const config = try makeTestConfig(allocator);
+        errdefer allocator.destroy(config);
 
-        const genesis_state = try ctx.test_state.cached_state.clone(allocator, .{});
+        const node_identity = try identity_mod.createEphemeralIdentity(allocator, std.testing.io, opts);
+        var builder = try BeaconNode.Builder.init(allocator, std.testing.io, config, .{
+            .options = opts,
+            .node_identity = node_identity,
+        });
+        errdefer builder.deinit();
+
+        const genesis_state = try createPublishedState(allocator, builder.sharedStateGraph());
         try genesis_state.state.setSlot(0);
-        try ctx.node.initFromGenesis(genesis_state);
-        return ctx;
+        const node = try builder.finishGenesis(genesis_state);
+
+        return .{
+            .config = config,
+            .node = node,
+        };
+    }
+
+    fn makePublishedState(self: *TestContext) !*state_transition.CachedBeaconState {
+        return createPublishedState(std.testing.allocator, self.node.chain_runtime.shared_state_graph);
     }
 
     fn deinit(self: *TestContext) void {
         self.node.deinit();
-        self.test_state.deinit();
-        self.pool.deinit();
+        std.testing.allocator.destroy(self.config);
     }
 };
 
@@ -80,11 +156,10 @@ test "BeaconNode: init and deinit" {
 }
 
 test "BeaconNode: initFromGenesis sets head at slot 0" {
-    const allocator = std.testing.allocator;
     var ctx = try TestContext.initUnbootstrapped(.{});
     defer ctx.deinit();
 
-    const genesis_state = try ctx.test_state.cached_state.clone(allocator, .{});
+    const genesis_state = try ctx.makePublishedState();
     try genesis_state.state.setSlot(0);
 
     try ctx.node.initFromGenesis(genesis_state);
@@ -458,39 +533,12 @@ test "BeaconNode: onReqResp DataColumnSidecarsByRange falls back to archived col
     try std.testing.expectEqualSlices(u8, "archived-column-7", chunks[0].ssz_payload);
 }
 
-test "BeaconNode: archiveState stores state bytes in DB and retrieves them" {
-    const allocator = std.testing.allocator;
-    var ctx = try TestContext.init(.{});
-    defer ctx.deinit();
-
-    const state = try ctx.test_state.cached_state.clone(allocator, .{});
-    const state_root = try ctx.node.chain.queued_regen.onNewBlock(state, true);
-    const slot: u64 = 32;
-
-    try ctx.node.archiveState(slot, state_root);
-
-    const retrieved = try ctx.node.chain_runtime.db.getStateArchive(slot);
-    try std.testing.expect(retrieved != null);
-    if (retrieved) |bytes| allocator.free(bytes);
-}
-
-test "BeaconNode: archiveState is no-op for unknown state root" {
-    var ctx = try TestContext.init(.{});
-    defer ctx.deinit();
-
-    const missing_root = [_]u8{0xff} ** 32;
-    try ctx.node.archiveState(64, missing_root);
-
-    const retrieved = try ctx.node.chain_runtime.db.getStateArchive(64);
-    try std.testing.expectEqual(@as(?[]const u8, null), retrieved);
-}
-
 test "BeaconNode: forkchoiceUpdated called after block import for post-merge head" {
-    const allocator = std.testing.allocator;
     var ctx = try TestContext.initUnbootstrapped(.{ .engine_mock = true });
     defer ctx.deinit();
 
-    const genesis_state = try ctx.test_state.cached_state.clone(allocator, .{});
+    const allocator = std.testing.allocator;
+    const genesis_state = try ctx.makePublishedState();
     try genesis_state.state.setSlot(0);
     try ctx.node.initFromGenesis(genesis_state);
 
@@ -525,7 +573,7 @@ test "BeaconNode: forkchoiceUpdated called after block import for post-merge hea
     try fork_choice_mod.onBlockFromProto(fc, allocator, post_merge_block, post_merge_slot);
     try std.testing.expect(mock.last_forkchoice_state == null);
 
-    try block_production_mod.notifyForkchoiceUpdate(ctx.node, post_merge_root);
+    try queueForkchoiceUpdateForHead(ctx.node, post_merge_root);
 
     try std.testing.expect(mock.last_forkchoice_state != null);
     const fcu_state = mock.last_forkchoice_state.?;
@@ -533,18 +581,92 @@ test "BeaconNode: forkchoiceUpdated called after block import for post-merge hea
 }
 
 test "BeaconNode: forkchoiceUpdated not called for pre-merge head" {
-    const allocator = std.testing.allocator;
     var ctx = try TestContext.initUnbootstrapped(.{ .engine_mock = true });
     defer ctx.deinit();
 
-    const genesis_state = try ctx.test_state.cached_state.clone(allocator, .{});
+    const genesis_state = try ctx.makePublishedState();
     try genesis_state.state.setSlot(0);
     try ctx.node.initFromGenesis(genesis_state);
 
     const mock = ctx.node.mockEngine() orelse return error.TestFailed;
     const genesis_root = ctx.node.getHead().root;
 
-    try block_production_mod.notifyForkchoiceUpdate(ctx.node, genesis_root);
+    try queueForkchoiceUpdateForHead(ctx.node, genesis_root);
 
     try std.testing.expect(mock.last_forkchoice_state == null);
+}
+
+test "BeaconNode.Builder: finishCheckpoint repairs archive lag during bootstrap" {
+    const allocator = std.testing.allocator;
+    const config = try makeTestConfig(allocator);
+    defer allocator.destroy(config);
+
+    const node_identity = try identity_mod.createEphemeralIdentity(allocator, std.testing.io, .{});
+    var builder = try BeaconNode.Builder.init(allocator, std.testing.io, config, .{
+        .options = .{},
+        .node_identity = node_identity,
+    });
+    defer builder.deinit();
+
+    const checkpoint_state = try createPublishedState(allocator, builder.sharedStateGraph());
+
+    const anchor_epoch: u64 = 1024;
+    const anchor_slot: u64 = anchor_epoch * preset.SLOTS_PER_EPOCH;
+    const parent_root = [_]u8{0x41} ** 32;
+    const state_root_hint = [_]u8{0x52} ** 32;
+    const body_root = [_]u8{0x63} ** 32;
+    const checkpoint_header = ct.phase0.BeaconBlockHeader.Type{
+        .slot = anchor_slot,
+        .proposer_index = 0,
+        .parent_root = parent_root,
+        .state_root = state_root_hint,
+        .body_root = body_root,
+    };
+
+    try checkpoint_state.state.setSlot(anchor_slot);
+    try checkpoint_state.state.setLatestBlockHeader(&checkpoint_header);
+
+    var anchor_block_root: [32]u8 = undefined;
+    try ct.phase0.BeaconBlockHeader.hashTreeRoot(&checkpoint_header, &anchor_block_root);
+
+    const finalized_checkpoint = ct.phase0.Checkpoint.Type{
+        .epoch = anchor_epoch,
+        .root = anchor_block_root,
+    };
+    try checkpoint_state.state.setCurrentJustifiedCheckpoint(&finalized_checkpoint);
+    try checkpoint_state.state.setFinalizedCheckpoint(&finalized_checkpoint);
+    try checkpoint_state.state.commit();
+
+    try builder.runtime_builder.graph.db.putBlock(anchor_block_root, "lagging-finalized-block");
+
+    const finalized_slot_key = db_mod.slotKey(anchor_slot);
+    const finalized_slot_value = db_mod.slotKey(anchor_slot);
+    const finalized_index_ops = [_]BatchOp{
+        .{ .put = .{ .db = .idx_main_chain, .key = &finalized_slot_key, .value = &anchor_block_root } },
+        .{ .put = .{ .db = .idx_block_root, .key = &anchor_block_root, .value = &finalized_slot_value } },
+        .{ .put = .{ .db = .idx_block_parent_root, .key = &parent_root, .value = &finalized_slot_value } },
+        .{ .put = .{ .db = .chain_info, .key = db_mod.BeaconDB.chainInfoKeyBytes(.finalized_slot), .value = &finalized_slot_value } },
+        .{ .put = .{ .db = .chain_info, .key = db_mod.BeaconDB.chainInfoKeyBytes(.finalized_root), .value = &anchor_block_root } },
+    };
+    try builder.runtime_builder.graph.db.writeBatch(&finalized_index_ops);
+
+    const node = try builder.finishCheckpoint(checkpoint_state);
+    defer node.deinit();
+
+    const archived_block = try node.chain_runtime.db.getBlockArchive(anchor_slot);
+    try std.testing.expect(archived_block != null);
+    defer if (archived_block) |bytes| allocator.free(bytes);
+    try std.testing.expectEqualSlices(u8, "lagging-finalized-block", archived_block.?);
+
+    const archived_state = try node.chain_runtime.db.getStateArchive(anchor_slot);
+    try std.testing.expect(archived_state != null);
+    defer if (archived_state) |bytes| allocator.free(bytes);
+
+    try std.testing.expectEqual(@as(?u64, anchor_slot), try node.chain_runtime.db.getChainInfoU64(.archive_finalized_slot));
+    try std.testing.expectEqual(@as(?u64, anchor_epoch), try node.chain_runtime.db.getChainInfoU64(.archive_state_epoch));
+    try std.testing.expectEqual(@as(?u64, anchor_slot), try node.chain_runtime.db.getLatestStateArchiveSlot());
+
+    const hot = try node.chain_runtime.db.getBlock(anchor_block_root);
+    defer if (hot) |bytes| allocator.free(bytes);
+    try std.testing.expect(hot == null);
 }

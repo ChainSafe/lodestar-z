@@ -91,13 +91,13 @@ pub const Query = struct {
         };
     }
 
-    pub fn blockRootAtSlot(self: Query, slot: Slot) ?Root {
-        return self.chain.blockRootAtTrackedSlot(slot);
+    pub fn blockRootAtSlot(self: Query, slot: Slot) !?Root {
+        return self.chain.canonicalHotBlockRootAtSlot(slot);
     }
 
     pub fn canonicalBlockRootAtSlot(self: Query, slot: Slot) !?Root {
-        if (self.blockRootAtSlot(slot)) |root| return root;
-        return self.chain.db.getBlockRootBySlot(slot);
+        if (try self.blockRootAtSlot(slot)) |root| return root;
+        return self.chain.db.getFinalizedBlockRootBySlot(slot);
     }
 
     pub fn stateArchiveAtSlot(self: Query, slot: Slot) !?[]const u8 {

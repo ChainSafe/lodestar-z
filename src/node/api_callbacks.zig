@@ -727,7 +727,7 @@ fn importBlockCallback(
     errdefer rollbackPublishEquivocationGuard(node, equivocation_guard);
 
     try applyPublishValidation(node, imported, params.broadcast_validation);
-    _ = try node.importBlock(imported, .api);
+    _ = try node.ingestBlock(imported, .api);
 }
 
 fn getValidatorMonitorCallback(

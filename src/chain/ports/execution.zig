@@ -145,9 +145,6 @@ pub const ExecutionPort = struct {
     }
 };
 
-// Compatibility alias while callers are migrated.
-pub const ExecutionVerifier = ExecutionPort;
-
 pub fn makeNewPayloadRequest(
     allocator: Allocator,
     block: AnySignedBeaconBlock,

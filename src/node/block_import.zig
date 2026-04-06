@@ -1,8 +1,9 @@
 //! Node-level block import re-exports.
 //!
 //! Provides backward-compatible re-exports from chain module.
-//! The dead BlockImporter struct has been removed — the live import path
-//! goes through chain/blocks/pipeline.zig via Chain.importBlock().
+//! The dead BlockImporter struct has been removed. Live external ingress now
+//! goes through BeaconNode ready-ingress / chain pipeline planning rather than
+//! a direct synchronous chain import helper.
 //!
 //! registerGenesisRoot is now handled directly by Chain.registerGenesisRoot().
 
