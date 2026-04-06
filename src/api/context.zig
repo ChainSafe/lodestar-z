@@ -64,6 +64,7 @@ pub const ChainCallback = struct {
     getCurrentSlotFn: *const fn (ptr: *anyopaque) u64,
     validatorSeenAtEpochFn: *const fn (ptr: *anyopaque, validator_index: u64, epoch: u64) bool,
     getBlockRootBySlotFn: *const fn (ptr: *anyopaque, slot: u64) anyerror!?[32]u8,
+    getFinalizedBlockRootByParentRootFn: *const fn (ptr: *anyopaque, parent_root: [32]u8) anyerror!?[32]u8,
     getBlockBytesByRootFn: *const fn (ptr: *anyopaque, root: [32]u8) anyerror!?[]const u8,
     getBlobSidecarsByRootFn: *const fn (ptr: *anyopaque, root: [32]u8) anyerror!?[]const u8,
     getBlockExecutionOptimisticFn: *const fn (ptr: *anyopaque, root: [32]u8) bool,
@@ -482,6 +483,11 @@ pub const ApiContext = struct {
 
     pub fn blockRootBySlot(self: *const ApiContext, slot: u64) !?[32]u8 {
         if (self.chain) |cb| return cb.getBlockRootBySlotFn(cb.ptr, slot);
+        return null;
+    }
+
+    pub fn finalizedBlockRootByParentRoot(self: *const ApiContext, parent_root: [32]u8) !?[32]u8 {
+        if (self.chain) |cb| return cb.getFinalizedBlockRootByParentRootFn(cb.ptr, parent_root);
         return null;
     }
 

@@ -211,7 +211,7 @@ pub const TestCachedBeaconState = struct {
             .pubkey_to_index = pubkey_index_map,
         };
         // cached_state takes ownership of state and will deinit there
-        const cached_state = try CachedBeaconState.createCachedBeaconState(allocator, state, immutable_data, .{
+        const cached_state = try CachedBeaconState.createCachedBeaconState(allocator, state, state_transition.metrics.noop(), immutable_data, .{
             .skip_sync_committee_cache = state.forkSeq() == .phase0,
             .skip_sync_pubkeys = false,
         });

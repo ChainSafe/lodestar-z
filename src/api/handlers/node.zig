@@ -153,13 +153,13 @@ test "getHealth returns syncing (206) when syncing" {
     try std.testing.expectEqual(@as(u16, 206), result.status);
 }
 
-test "getHealth returns not_initialized (503) when head_slot is 0" {
+test "getHealth returns ready (200) at genesis slot when initialized" {
     var tc = test_helpers.makeTestContext(std.testing.allocator);
     defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
     tc.sync_status.is_syncing = false;
     tc.sync_status.head_slot = 0;
     const result = getHealth(&tc.ctx);
-    try std.testing.expectEqual(@as(u16, 503), result.status);
+    try std.testing.expectEqual(@as(u16, 200), result.status);
 }
 
 test "getHealth returns ready (200) when synced" {

@@ -167,6 +167,7 @@ pub const ApiBindings = struct {
             .getCurrentSlotFn = &getChainCurrentSlotCallback,
             .validatorSeenAtEpochFn = &getChainValidatorSeenAtEpochCallback,
             .getBlockRootBySlotFn = &getChainBlockRootBySlotCallback,
+            .getFinalizedBlockRootByParentRootFn = &getChainFinalizedBlockRootByParentRootCallback,
             .getBlockBytesByRootFn = &getChainBlockBytesByRootCallback,
             .getBlobSidecarsByRootFn = &getChainBlobSidecarsByRootCallback,
             .getBlockExecutionOptimisticFn = &getChainBlockExecutionOptimisticCallback,
@@ -447,6 +448,11 @@ fn getNodeSyncStatusCallback(ptr: *anyopaque) ApiSyncStatus {
 fn getChainBlockRootBySlotCallback(ptr: *anyopaque, slot: u64) anyerror!?[32]u8 {
     const ctx: *ChainCallbackCtx = @ptrCast(@alignCast(ptr));
     return ctx.query.canonicalBlockRootAtSlot(slot);
+}
+
+fn getChainFinalizedBlockRootByParentRootCallback(ptr: *anyopaque, parent_root: [32]u8) anyerror!?[32]u8 {
+    const ctx: *ChainCallbackCtx = @ptrCast(@alignCast(ptr));
+    return ctx.query.finalizedBlockRootByParentRoot(parent_root);
 }
 
 fn getChainBlockBytesByRootCallback(ptr: *anyopaque, root: [32]u8) anyerror!?[]const u8 {

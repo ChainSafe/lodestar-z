@@ -120,6 +120,11 @@ pub const Query = struct {
         return self.chain.db.getFinalizedBlockRootBySlot(slot);
     }
 
+    pub fn finalizedBlockRootByParentRoot(self: Query, parent_root: Root) !?Root {
+        const child = try self.chain.db.getArchivedCanonicalChild(parent_root) orelse return null;
+        return child.root;
+    }
+
     pub fn stateArchiveAtSlot(self: Query, slot: Slot) !?[]const u8 {
         return self.chain.db.getStateArchive(slot);
     }

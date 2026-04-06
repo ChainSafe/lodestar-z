@@ -238,6 +238,7 @@ pub fn getStateRoot(ctx: *ApiContext, state_id: types.StateId) !HandlerResult([3
                 .data = head.head_state_root,
                 .meta = .{
                     .execution_optimistic = ctx.blockExecutionOptimistic(head.head_root),
+                    .finalized = std.mem.eql(u8, &head.head_root, &head.finalized_root),
                 },
             };
         },
@@ -264,6 +265,7 @@ pub fn getStateRoot(ctx: *ApiContext, state_id: types.StateId) !HandlerResult([3
                 .data = justified_state_root,
                 .meta = .{
                     .execution_optimistic = ctx.blockExecutionOptimistic(head.justified_root),
+                    .finalized = std.mem.eql(u8, &head.justified_root, &head.finalized_root),
                 },
             };
         },
@@ -285,11 +287,12 @@ pub fn getStateRoot(ctx: *ApiContext, state_id: types.StateId) !HandlerResult([3
             };
         },
         .root => |root| {
-            // The state_id IS the root
+            const meta = try resolveStateMetaByRoot(ctx, root);
             return .{
                 .data = root,
                 .meta = .{
-                    .execution_optimistic = ctx.stateExecutionOptimisticByRoot(root),
+                    .execution_optimistic = meta.execution_optimistic,
+                    .finalized = meta.finalized,
                 },
             };
         },
@@ -300,8 +303,8 @@ pub fn getStateRoot(ctx: *ApiContext, state_id: types.StateId) !HandlerResult([3
 ///
 /// Returns the fork data for the given state.
 pub fn getStateFork(ctx: *ApiContext, state_id: types.StateId) !HandlerResult(types.ForkData) {
-    // Determine the slot to compute the fork for
-    const slot = try resolveStateSlot(ctx, state_id);
+    const resolved = try resolveState(ctx, state_id);
+    const slot = try resolved.state.state.slot();
 
     // Walk the config's fork schedule to find the active fork at this slot
     const cfg = ctx.beacon_config;
@@ -329,10 +332,8 @@ pub fn getStateFork(ctx: *ApiContext, state_id: types.StateId) !HandlerResult(ty
     return .{
         .data = result,
         .meta = .{
-            .finalized = switch (state_id) {
-                .finalized, .genesis => true,
-                else => false,
-            },
+            .execution_optimistic = resolved.meta.execution_optimistic,
+            .finalized = resolved.meta.finalized,
         },
     };
 }
@@ -346,25 +347,30 @@ pub fn getStateFork(ctx: *ApiContext, state_id: types.StateId) !HandlerResult(ty
 /// from the state. Falls back to head tracker data when state is not available.
 pub fn getFinalityCheckpoints(ctx: *ApiContext, state_id: types.StateId) !HandlerResult(types.FinalityCheckpoints) {
     const head = ctx.currentHeadTracker();
-    const resolved = resolveState(ctx, state_id) catch {
-        // Fall back to head tracker data when state regen is unavailable.
-        return .{
-            .data = .{
-                .previous_justified = .{
-                    .epoch = head.justified_slot / preset.SLOTS_PER_EPOCH,
-                    .root = head.justified_root,
+    const resolved = resolveState(ctx, state_id) catch |err| switch (state_id) {
+        .head => {
+            return .{
+                .data = .{
+                    .previous_justified = .{
+                        .epoch = head.justified_slot / preset.SLOTS_PER_EPOCH,
+                        .root = head.justified_root,
+                    },
+                    .current_justified = .{
+                        .epoch = head.justified_slot / preset.SLOTS_PER_EPOCH,
+                        .root = head.justified_root,
+                    },
+                    .finalized = .{
+                        .epoch = head.finalized_slot / preset.SLOTS_PER_EPOCH,
+                        .root = head.finalized_root,
+                    },
                 },
-                .current_justified = .{
-                    .epoch = head.justified_slot / preset.SLOTS_PER_EPOCH,
-                    .root = head.justified_root,
+                .meta = .{
+                    .execution_optimistic = ctx.blockExecutionOptimistic(head.head_root),
+                    .finalized = std.mem.eql(u8, &head.head_root, &head.finalized_root),
                 },
-                .finalized = .{
-                    .epoch = head.finalized_slot / preset.SLOTS_PER_EPOCH,
-                    .root = head.finalized_root,
-                },
-            },
-            .meta = .{},
-        };
+            };
+        },
+        else => return err,
     };
     const state = resolved.state;
 
@@ -555,19 +561,20 @@ pub fn getPoolAttestations(
 /// GET /eth/v2/beacon/pool/attestations
 ///
 /// Returns pending attestations from the operation pool in fork-versioned format.
-/// For pre-Electra attestations: returns phase0 Attestation format.
-/// For Electra attestations: returns Electra Attestation format with committee_bits.
 /// Supports optional `slot` and `committee_index` query parameter filters.
+///
+/// Until the op pool preserves Electra committee_bits end to end, this endpoint
+/// only serves pre-Electra queries. Electra-era requests return
+/// `error.NotImplemented` rather than fabricating committee_bits from the lossy
+/// phase0-shaped pool representation.
 pub fn getPoolAttestationsV2(
     ctx: *ApiContext,
     slot_filter: ?u64,
     committee_index_filter: ?u64,
 ) !HandlerResult([]const OpPoolCallback.Phase0Attestation) {
-    // Get the raw attestations from the op pool (stored as phase0 internally).
+    const query_slot = slot_filter orelse ctx.currentHeadTracker().head_slot;
+    if (ctx.beacon_config.forkSeq(query_slot).gte(.electra)) return error.NotImplemented;
     return getPoolAttestations(ctx, slot_filter, committee_index_filter);
-    // Note: The http_server layer handles fork-aware JSON serialization.
-    // It checks each attestation's slot against the Electra fork epoch and
-    // serializes accordingly (adding committee_bits for Electra attestations).
 }
 
 /// GET /eth/v1/beacon/pool/voluntary_exits
@@ -642,6 +649,7 @@ const SlotAndRoot = struct {
     root: [32]u8,
     execution_optimistic: bool,
     finalized: bool,
+    canonical: bool,
 };
 
 fn readSignedBlockSlotFromSsz(block_bytes: []const u8) ?u64 {
@@ -661,25 +669,32 @@ fn resolveBlockSlotAndRoot(ctx: *ApiContext, block_id: types.BlockId) !SlotAndRo
             .slot = head.head_slot,
             .root = head.head_root,
             .execution_optimistic = ctx.blockExecutionOptimistic(head.head_root),
-            .finalized = false,
+            .finalized = std.mem.eql(u8, &head.head_root, &head.finalized_root),
+            .canonical = true,
         },
         .finalized => return .{
             .slot = head.finalized_slot,
             .root = head.finalized_root,
             .execution_optimistic = false,
             .finalized = true,
+            .canonical = true,
         },
         .justified => return .{
             .slot = head.justified_slot,
             .root = head.justified_root,
             .execution_optimistic = ctx.blockExecutionOptimistic(head.justified_root),
-            .finalized = false,
+            .finalized = std.mem.eql(u8, &head.justified_root, &head.finalized_root),
+            .canonical = true,
         },
-        .genesis => return .{
-            .slot = 0,
-            .root = [_]u8{0} ** 32,
-            .execution_optimistic = false,
-            .finalized = true,
+        .genesis => {
+            const root = (try ctx.blockRootBySlot(0)) orelse return error.BlockNotFound;
+            return .{
+                .slot = 0,
+                .root = root,
+                .execution_optimistic = false,
+                .finalized = true,
+                .canonical = true,
+            };
         },
         .slot => |slot| {
             const root = (try ctx.blockRootBySlot(slot)) orelse return error.SlotNotFound;
@@ -688,6 +703,7 @@ fn resolveBlockSlotAndRoot(ctx: *ApiContext, block_id: types.BlockId) !SlotAndRo
                 .root = root,
                 .execution_optimistic = try ctx.blockExecutionOptimisticAtSlot(slot),
                 .finalized = slot <= head.finalized_slot,
+                .canonical = true,
             };
         },
         .root => |root| {
@@ -695,12 +711,18 @@ fn resolveBlockSlotAndRoot(ctx: *ApiContext, block_id: types.BlockId) !SlotAndRo
             const block_bytes = (try ctx.blockBytesByRoot(root)) orelse return error.BlockNotFound;
             defer ctx.allocator.free(block_bytes);
 
-            const slot = readSignedBlockSlotFromSsz(block_bytes) orelse head.head_slot;
+            const slot = readSignedBlockSlotFromSsz(block_bytes) orelse return error.BlockNotFound;
+            const canonical_root = try ctx.blockRootBySlot(slot);
+            const canonical = if (canonical_root) |canonical_block_root|
+                std.mem.eql(u8, &canonical_block_root, &root)
+            else
+                false;
             return .{
                 .slot = slot,
                 .root = root,
                 .execution_optimistic = ctx.blockExecutionOptimistic(root),
-                .finalized = slot <= head.finalized_slot,
+                .finalized = canonical and slot <= head.finalized_slot,
+                .canonical = canonical,
             };
         },
     }
@@ -712,9 +734,23 @@ const BlockHeaderResult = struct {
     finalized: bool,
 };
 
-fn resolveBlockHeader(ctx: *ApiContext, block_id: types.BlockId) !BlockHeaderResult {
-    const slot_info = try resolveBlockSlotAndRoot(ctx, block_id);
+const BlockHeaderListMeta = struct {
+    saw_any: bool = false,
+    execution_optimistic: bool = false,
+    finalized: bool = true,
 
+    fn observe(self: *BlockHeaderListMeta, result: BlockHeaderResult) void {
+        self.saw_any = true;
+        self.execution_optimistic = self.execution_optimistic or result.execution_optimistic;
+        self.finalized = self.finalized and result.finalized;
+    }
+};
+
+fn resolveBlockHeader(ctx: *ApiContext, block_id: types.BlockId) !BlockHeaderResult {
+    return resolveBlockHeaderFromSlotInfo(ctx, try resolveBlockSlotAndRoot(ctx, block_id));
+}
+
+fn resolveBlockHeaderFromSlotInfo(ctx: *ApiContext, slot_info: SlotAndRoot) !BlockHeaderResult {
     // Try to load and deserialize the block to get real header fields.
     const block_bytes_opt = try ctx.blockBytesByRoot(slot_info.root);
 
@@ -736,7 +772,7 @@ fn resolveBlockHeader(ctx: *ApiContext, block_id: types.BlockId) !BlockHeaderRes
         return .{
             .header = .{
                 .root = slot_info.root,
-                .canonical = true,
+                .canonical = slot_info.canonical,
                 .header = .{
                     .message = .{
                         .slot = block.slot(),
@@ -753,53 +789,27 @@ fn resolveBlockHeader(ctx: *ApiContext, block_id: types.BlockId) !BlockHeaderRes
         };
     }
 
-    // Block not in DB — return what we know from the head tracker with zero fields.
-    return .{
-        .header = .{
-            .root = slot_info.root,
-            .canonical = true,
-            .header = .{
-                .message = .{
-                    .slot = slot_info.slot,
-                    .proposer_index = 0,
-                    .parent_root = [_]u8{0} ** 32,
-                    .state_root = [_]u8{0} ** 32,
-                    .body_root = [_]u8{0} ** 32,
-                },
-                .signature = [_]u8{0} ** 96,
-            },
-        },
-        .execution_optimistic = slot_info.execution_optimistic,
-        .finalized = slot_info.finalized,
-    };
+    return error.BlockNotFound;
 }
 
-fn resolveStateSlot(ctx: *ApiContext, state_id: types.StateId) !u64 {
-    const head = ctx.currentHeadTracker();
-    return switch (state_id) {
-        .head => head.head_slot,
-        .finalized => if (try ctx.stateByBlockRoot(head.finalized_root)) |state|
-            try state.state.slot()
-        else
-            head.finalized_slot,
-        .justified => if (try ctx.stateByBlockRoot(head.justified_root)) |state|
-            try state.state.slot()
-        else
-            head.justified_slot,
-        .genesis => 0,
-        .slot => |s| s,
-        .root => |root| blk: {
-            if (try ctx.stateByRoot(root)) |state| {
-                break :blk try state.state.slot();
-            }
+fn appendBlockHeaderMatch(
+    ctx: *ApiContext,
+    headers: *std.ArrayListUnmanaged(types.BlockHeaderData),
+    seen_roots: *std.AutoHashMap([32]u8, void),
+    meta: *BlockHeaderListMeta,
+    slot_info: SlotAndRoot,
+    parent_root_opt: ?[32]u8,
+) !void {
+    if (seen_roots.contains(slot_info.root)) return;
 
-            const state_bytes = (try ctx.stateBytesByRoot(root)) orelse
-                return error.StateNotAvailable;
-            defer ctx.allocator.free(state_bytes);
+    const result = try resolveBlockHeaderFromSlotInfo(ctx, slot_info);
+    if (parent_root_opt) |parent_root| {
+        if (!std.mem.eql(u8, &result.header.header.message.parent_root, &parent_root)) return;
+    }
 
-            break :blk readStateSlotFromSsz(state_bytes) orelse return error.StateNotAvailable;
-        },
-    };
+    try seen_roots.put(slot_info.root, {});
+    try headers.append(ctx.allocator, result.header);
+    meta.observe(result);
 }
 
 // ---------------------------------------------------------------------------
@@ -820,6 +830,30 @@ const PoolSubmitProbe = struct {
         }
     }
 };
+
+const HeadBlockOverrides = struct {
+    proposer_index: ?u64 = null,
+    parent_root: ?[32]u8 = null,
+    state_root: ?[32]u8 = null,
+    signature: ?[96]u8 = null,
+};
+
+fn storePhase0HeadBlock(tc: *test_helpers.TestContext, overrides: HeadBlockOverrides) !void {
+    const ct = @import("consensus_types");
+
+    var signed_block = ct.phase0.SignedBeaconBlock.default_value;
+    signed_block.message.slot = tc.head_tracker.head_slot;
+    if (overrides.proposer_index) |proposer_index| signed_block.message.proposer_index = proposer_index;
+    if (overrides.parent_root) |parent_root| signed_block.message.parent_root = parent_root;
+    if (overrides.state_root) |state_root| signed_block.message.state_root = state_root;
+    if (overrides.signature) |signature| signed_block.signature = signature;
+
+    const block_size = ct.phase0.SignedBeaconBlock.serializedSize(&signed_block);
+    const block_bytes = try std.testing.allocator.alloc(u8, block_size);
+    defer std.testing.allocator.free(block_bytes);
+    _ = ct.phase0.SignedBeaconBlock.serializeIntoBytes(&signed_block, block_bytes);
+    try tc.db.putBlock(tc.head_tracker.head_root, block_bytes);
+}
 
 test "getGenesis returns genesis data from config" {
     var tc = test_helpers.makeTestContext(std.testing.allocator);
@@ -899,12 +933,78 @@ test "getStateRoot for slot returns SlotNotFound if no block" {
     try std.testing.expectError(error.SlotNotFound, result);
 }
 
-test "getStateFork returns genesis fork for slot 0" {
+test "getStateRoot for unknown root returns StateNotAvailable" {
     var tc = test_helpers.makeTestContext(std.testing.allocator);
     defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
+
+    const result = getStateRoot(&tc.ctx, .{ .root = [_]u8{0x55} ** 32 });
+    try std.testing.expectError(error.StateNotAvailable, result);
+}
+
+test "getStateRoot for finalized root marks response finalized" {
+    const allocator = std.testing.allocator;
+    var tc = test_helpers.makeTestContext(allocator);
+    defer test_helpers.destroyTestContext(allocator, &tc);
+
+    const state_transition = @import("state_transition");
+    const Node = @import("persistent_merkle_tree").Node;
+    const TestCachedBeaconState = state_transition.test_utils.TestCachedBeaconState;
+
+    var pool = try Node.Pool.init(allocator, 500_000);
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 4);
+    defer test_state.deinit();
+
+    const finalized_slot: u64 = 1;
+    try test_state.cached_state.state.setSlot(finalized_slot);
+    const state_root = (try test_state.cached_state.state.hashTreeRoot()).*;
+    const state_bytes = try test_state.cached_state.state.serialize(allocator);
+    defer allocator.free(state_bytes);
+    try tc.db.putStateArchive(finalized_slot, state_root, state_bytes);
+
+    var finalized_block = consensus_types.phase0.SignedBeaconBlock.default_value;
+    finalized_block.message.slot = finalized_slot;
+    finalized_block.message.state_root = state_root;
+    const finalized_root = [_]u8{0x12} ** 32;
+    const finalized_block_size = consensus_types.phase0.SignedBeaconBlock.serializedSize(&finalized_block);
+    const finalized_block_bytes = try allocator.alloc(u8, finalized_block_size);
+    defer allocator.free(finalized_block_bytes);
+    _ = consensus_types.phase0.SignedBeaconBlock.serializeIntoBytes(&finalized_block, finalized_block_bytes);
+    try tc.db.putBlockArchive(finalized_slot, finalized_root, finalized_block_bytes);
+
+    const resp = try getStateRoot(&tc.ctx, .{ .root = state_root });
+    try std.testing.expectEqual(state_root, resp.data);
+    try std.testing.expect(resp.meta.finalized orelse false);
+}
+
+test "getStateFork returns genesis fork for slot 0" {
+    const allocator = std.testing.allocator;
+    var tc = test_helpers.makeTestContext(allocator);
+    defer test_helpers.destroyTestContext(allocator, &tc);
+
+    const state_transition = @import("state_transition");
+    const Node = @import("persistent_merkle_tree").Node;
+    const TestCachedBeaconState = state_transition.test_utils.TestCachedBeaconState;
+
+    var pool = try Node.Pool.init(allocator, 500_000);
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 4);
+    defer test_state.deinit();
+    try test_state.cached_state.state.setSlot(0);
+    tc.chain_fixture.state_by_slot = test_state.cached_state;
+
     const resp = try getStateFork(&tc.ctx, .genesis);
     try std.testing.expectEqual(tc.ctx.beacon_config.chain.GENESIS_FORK_VERSION, resp.data.current_version);
     try std.testing.expect(resp.meta.finalized orelse false);
+}
+
+test "getStateFork for missing slot returns StateNotAvailable" {
+    var tc = test_helpers.makeTestContext(std.testing.allocator);
+    defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
+
+    try std.testing.expectError(error.StateNotAvailable, getStateFork(&tc.ctx, .{ .slot = 999 }));
 }
 
 test "getFinalityCheckpoints returns checkpoint data" {
@@ -915,9 +1015,19 @@ test "getFinalityCheckpoints returns checkpoint data" {
     try std.testing.expectEqual(expected_epoch, resp.data.finalized.epoch);
 }
 
+test "getFinalityCheckpoints for missing slot returns StateNotAvailable" {
+    var tc = test_helpers.makeTestContext(std.testing.allocator);
+    defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
+
+    try std.testing.expectError(error.StateNotAvailable, getFinalityCheckpoints(&tc.ctx, .{ .slot = 999 }));
+}
+
 test "getBlockHeader for head returns header" {
     var tc = test_helpers.makeTestContext(std.testing.allocator);
     defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
+
+    try storePhase0HeadBlock(&tc, .{});
+
     const resp = try getBlockHeader(&tc.ctx, .head);
     try std.testing.expectEqual(tc.head_tracker.head_slot, resp.data.header.message.slot);
     try std.testing.expect(resp.data.canonical);
@@ -927,23 +1037,12 @@ test "getBlockHeader for head extracts real fields from DB block" {
     var tc = test_helpers.makeTestContext(std.testing.allocator);
     defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
 
-    const ct = @import("consensus_types");
-
-    // Build a phase0 signed block with known fields
-    var signed_block = ct.phase0.SignedBeaconBlock.default_value;
-    signed_block.message.slot = tc.head_tracker.head_slot;
-    signed_block.message.proposer_index = 42;
-    signed_block.message.parent_root = [_]u8{0xab} ** 32;
-    signed_block.message.state_root = [_]u8{0xcd} ** 32;
-    signed_block.signature = [_]u8{0xef} ** 96;
-
-    const block_size = ct.phase0.SignedBeaconBlock.serializedSize(&signed_block);
-    const block_bytes = try std.testing.allocator.alloc(u8, block_size);
-    defer std.testing.allocator.free(block_bytes);
-    _ = ct.phase0.SignedBeaconBlock.serializeIntoBytes(&signed_block, block_bytes);
-
-    // Store under the head root
-    try tc.db.putBlock(tc.head_tracker.head_root, block_bytes);
+    try storePhase0HeadBlock(&tc, .{
+        .proposer_index = 42,
+        .parent_root = [_]u8{0xab} ** 32,
+        .state_root = [_]u8{0xcd} ** 32,
+        .signature = [_]u8{0xef} ** 96,
+    });
 
     const resp = try getBlockHeader(&tc.ctx, .head);
     try std.testing.expectEqual(@as(u64, 42), resp.data.header.message.proposer_index);
@@ -956,6 +1055,7 @@ test "getBlockHeader for head reports execution optimistic from chain query" {
     var tc = test_helpers.makeTestContext(std.testing.allocator);
     defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
 
+    try storePhase0HeadBlock(&tc, .{});
     tc.sync_status.is_optimistic = true;
 
     const resp = try getBlockHeader(&tc.ctx, .head);
@@ -971,16 +1071,18 @@ test "getBlockHeaders filters resolved header by parent_root" {
     try std.testing.expectEqual(@as(usize, 0), matching.data.len);
 
     const parent_root = [_]u8{0x42} ** 32;
-    const ct = @import("consensus_types");
-    var signed_block = ct.phase0.SignedBeaconBlock.default_value;
-    signed_block.message.slot = tc.head_tracker.head_slot;
-    signed_block.message.parent_root = parent_root;
-
-    const block_size = ct.phase0.SignedBeaconBlock.serializedSize(&signed_block);
-    const block_bytes = try std.testing.allocator.alloc(u8, block_size);
-    defer std.testing.allocator.free(block_bytes);
-    _ = ct.phase0.SignedBeaconBlock.serializeIntoBytes(&signed_block, block_bytes);
-    try tc.db.putBlock(tc.head_tracker.head_root, block_bytes);
+    try storePhase0HeadBlock(&tc, .{ .parent_root = parent_root });
+    tc.chain_fixture.fork_choice_nodes = try std.testing.allocator.alloc(types.ForkChoiceNode, 1);
+    tc.chain_fixture.fork_choice_nodes.?[0] = .{
+        .slot = tc.head_tracker.head_slot,
+        .block_root = tc.head_tracker.head_root,
+        .parent_root = parent_root,
+        .justified_epoch = tc.head_tracker.justified_slot / preset.SLOTS_PER_EPOCH,
+        .finalized_epoch = tc.head_tracker.finalized_slot / preset.SLOTS_PER_EPOCH,
+        .weight = 1,
+        .validity = "valid",
+        .execution_block_hash = [_]u8{0} ** 32,
+    };
 
     const filtered = try getBlockHeaders(&tc.ctx, null, parent_root);
     defer std.testing.allocator.free(filtered.data);
@@ -992,20 +1094,195 @@ test "getBlockHeaders returns empty when parent_root filter mismatches" {
     var tc = test_helpers.makeTestContext(std.testing.allocator);
     defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
 
-    const ct = @import("consensus_types");
-    var signed_block = ct.phase0.SignedBeaconBlock.default_value;
-    signed_block.message.slot = tc.head_tracker.head_slot;
-    signed_block.message.parent_root = [_]u8{0x11} ** 32;
-
-    const block_size = ct.phase0.SignedBeaconBlock.serializedSize(&signed_block);
-    const block_bytes = try std.testing.allocator.alloc(u8, block_size);
-    defer std.testing.allocator.free(block_bytes);
-    _ = ct.phase0.SignedBeaconBlock.serializeIntoBytes(&signed_block, block_bytes);
-    try tc.db.putBlock(tc.head_tracker.head_root, block_bytes);
+    try storePhase0HeadBlock(&tc, .{ .parent_root = [_]u8{0x11} ** 32 });
 
     const filtered = try getBlockHeaders(&tc.ctx, null, [_]u8{0x22} ** 32);
     defer std.testing.allocator.free(filtered.data);
     try std.testing.expectEqual(@as(usize, 0), filtered.data.len);
+}
+
+test "getBlockHeader for head returns BlockNotFound when block bytes are missing" {
+    var tc = test_helpers.makeTestContext(std.testing.allocator);
+    defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
+
+    try std.testing.expectError(error.BlockNotFound, getBlockHeader(&tc.ctx, .head));
+}
+
+test "getBlockHeaders for missing slot returns empty" {
+    var tc = test_helpers.makeTestContext(std.testing.allocator);
+    defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
+
+    const filtered = try getBlockHeaders(&tc.ctx, 999_999, null);
+    defer std.testing.allocator.free(filtered.data);
+    try std.testing.expectEqual(@as(usize, 0), filtered.data.len);
+}
+
+test "getBlockHeaders without filters returns BlockNotFound when head block bytes are missing" {
+    var tc = test_helpers.makeTestContext(std.testing.allocator);
+    defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
+
+    try std.testing.expectError(error.BlockNotFound, getBlockHeaders(&tc.ctx, null, null));
+}
+
+test "getBlockHeader for root marks noncanonical sibling as noncanonical" {
+    var tc = test_helpers.makeTestContext(std.testing.allocator);
+    defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
+
+    try storePhase0HeadBlock(&tc, .{});
+
+    const sibling_root = [_]u8{0x66} ** 32;
+    var sibling_block = consensus_types.phase0.SignedBeaconBlock.default_value;
+    sibling_block.message.slot = tc.head_tracker.head_slot;
+    sibling_block.message.parent_root = [_]u8{0x33} ** 32;
+    const sibling_size = consensus_types.phase0.SignedBeaconBlock.serializedSize(&sibling_block);
+    const sibling_bytes = try std.testing.allocator.alloc(u8, sibling_size);
+    defer std.testing.allocator.free(sibling_bytes);
+    _ = consensus_types.phase0.SignedBeaconBlock.serializeIntoBytes(&sibling_block, sibling_bytes);
+    try tc.db.putBlock(sibling_root, sibling_bytes);
+
+    const resp = try getBlockHeader(&tc.ctx, .{ .root = sibling_root });
+    try std.testing.expectEqual(tc.head_tracker.head_slot, resp.data.header.message.slot);
+    try std.testing.expect(!resp.data.canonical);
+    try std.testing.expect(!(resp.meta.finalized orelse false));
+}
+
+test "getBlockHeader for genesis resolves canonical slot zero root" {
+    var tc = test_helpers.makeTestContext(std.testing.allocator);
+    defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
+
+    const genesis_root = [_]u8{0x10} ** 32;
+    var genesis_block = consensus_types.phase0.SignedBeaconBlock.default_value;
+    genesis_block.message.slot = 0;
+    const genesis_size = consensus_types.phase0.SignedBeaconBlock.serializedSize(&genesis_block);
+    const genesis_bytes = try std.testing.allocator.alloc(u8, genesis_size);
+    defer std.testing.allocator.free(genesis_bytes);
+    _ = consensus_types.phase0.SignedBeaconBlock.serializeIntoBytes(&genesis_block, genesis_bytes);
+    try tc.db.putBlockArchive(0, genesis_root, genesis_bytes);
+
+    const resp = try getBlockHeader(&tc.ctx, .genesis);
+    try std.testing.expectEqual(genesis_root, resp.data.root);
+    try std.testing.expectEqual(@as(u64, 0), resp.data.header.message.slot);
+    try std.testing.expect(resp.data.canonical);
+    try std.testing.expect(resp.meta.finalized orelse false);
+}
+
+test "getBlockHeaders returns hot siblings for slot filter" {
+    var tc = test_helpers.makeTestContext(std.testing.allocator);
+    defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
+
+    try storePhase0HeadBlock(&tc, .{});
+
+    const sibling_root = [_]u8{0x77} ** 32;
+    var sibling_block = consensus_types.phase0.SignedBeaconBlock.default_value;
+    sibling_block.message.slot = tc.head_tracker.head_slot;
+    sibling_block.message.parent_root = [_]u8{0x44} ** 32;
+    const sibling_size = consensus_types.phase0.SignedBeaconBlock.serializedSize(&sibling_block);
+    const sibling_bytes = try std.testing.allocator.alloc(u8, sibling_size);
+    defer std.testing.allocator.free(sibling_bytes);
+    _ = consensus_types.phase0.SignedBeaconBlock.serializeIntoBytes(&sibling_block, sibling_bytes);
+    try tc.db.putBlock(sibling_root, sibling_bytes);
+
+    tc.chain_fixture.fork_choice_nodes = try std.testing.allocator.alloc(types.ForkChoiceNode, 2);
+    tc.chain_fixture.fork_choice_nodes.?[0] = .{
+        .slot = tc.head_tracker.head_slot,
+        .block_root = tc.head_tracker.head_root,
+        .parent_root = null,
+        .justified_epoch = tc.head_tracker.justified_slot / preset.SLOTS_PER_EPOCH,
+        .finalized_epoch = tc.head_tracker.finalized_slot / preset.SLOTS_PER_EPOCH,
+        .weight = 1,
+        .validity = "valid",
+        .execution_block_hash = [_]u8{0} ** 32,
+    };
+    tc.chain_fixture.fork_choice_nodes.?[1] = .{
+        .slot = tc.head_tracker.head_slot,
+        .block_root = sibling_root,
+        .parent_root = [_]u8{0x44} ** 32,
+        .justified_epoch = tc.head_tracker.justified_slot / preset.SLOTS_PER_EPOCH,
+        .finalized_epoch = tc.head_tracker.finalized_slot / preset.SLOTS_PER_EPOCH,
+        .weight = 1,
+        .validity = "valid",
+        .execution_block_hash = [_]u8{0} ** 32,
+    };
+
+    const resp = try getBlockHeaders(&tc.ctx, tc.head_tracker.head_slot, null);
+    defer std.testing.allocator.free(resp.data);
+
+    try std.testing.expectEqual(@as(usize, 2), resp.data.len);
+    try std.testing.expect(resp.data[0].canonical);
+    try std.testing.expectEqual(tc.head_tracker.head_root, resp.data[0].root);
+    try std.testing.expect(!resp.data[1].canonical);
+    try std.testing.expectEqual(sibling_root, resp.data[1].root);
+}
+
+test "getBlockHeaders returns finalized canonical child for parent_root filter" {
+    var tc = test_helpers.makeTestContext(std.testing.allocator);
+    defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
+
+    const parent_root = [_]u8{0x21} ** 32;
+    const child_root = [_]u8{0x22} ** 32;
+    var child_block = consensus_types.phase0.SignedBeaconBlock.default_value;
+    child_block.message.slot = 1;
+    child_block.message.parent_root = parent_root;
+    const child_size = consensus_types.phase0.SignedBeaconBlock.serializedSize(&child_block);
+    const child_bytes = try std.testing.allocator.alloc(u8, child_size);
+    defer std.testing.allocator.free(child_bytes);
+    _ = consensus_types.phase0.SignedBeaconBlock.serializeIntoBytes(&child_block, child_bytes);
+    try tc.db.putBlockArchiveCanonical(1, child_root, parent_root, child_bytes);
+
+    const resp = try getBlockHeaders(&tc.ctx, null, parent_root);
+    defer std.testing.allocator.free(resp.data);
+
+    try std.testing.expectEqual(@as(usize, 1), resp.data.len);
+    try std.testing.expectEqual(child_root, resp.data[0].root);
+    try std.testing.expect(resp.data[0].canonical);
+}
+
+test "getBlockHeaders applies parent_root filter to canonical slot match" {
+    var tc = test_helpers.makeTestContext(std.testing.allocator);
+    defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
+
+    const canonical_parent_root = [_]u8{0x11} ** 32;
+    try storePhase0HeadBlock(&tc, .{ .parent_root = canonical_parent_root });
+
+    var sibling_block = consensus_types.phase0.SignedBeaconBlock.default_value;
+    sibling_block.message.slot = tc.head_tracker.head_slot;
+    sibling_block.message.parent_root = [_]u8{0x44} ** 32;
+    const sibling_root = [_]u8{0x55} ** 32;
+    const sibling_size = consensus_types.phase0.SignedBeaconBlock.serializedSize(&sibling_block);
+    const sibling_bytes = try std.testing.allocator.alloc(u8, sibling_size);
+    defer std.testing.allocator.free(sibling_bytes);
+    _ = consensus_types.phase0.SignedBeaconBlock.serializeIntoBytes(&sibling_block, sibling_bytes);
+    try tc.db.putBlock(sibling_root, sibling_bytes);
+
+    tc.chain_fixture.fork_choice_nodes = try std.testing.allocator.alloc(types.ForkChoiceNode, 2);
+    tc.chain_fixture.fork_choice_nodes.?[0] = .{
+        .slot = tc.head_tracker.head_slot,
+        .block_root = tc.head_tracker.head_root,
+        .parent_root = canonical_parent_root,
+        .justified_epoch = tc.head_tracker.justified_slot / preset.SLOTS_PER_EPOCH,
+        .finalized_epoch = tc.head_tracker.finalized_slot / preset.SLOTS_PER_EPOCH,
+        .weight = 1,
+        .validity = "valid",
+        .execution_block_hash = [_]u8{0} ** 32,
+    };
+    tc.chain_fixture.fork_choice_nodes.?[1] = .{
+        .slot = tc.head_tracker.head_slot,
+        .block_root = sibling_root,
+        .parent_root = [_]u8{0x44} ** 32,
+        .justified_epoch = tc.head_tracker.justified_slot / preset.SLOTS_PER_EPOCH,
+        .finalized_epoch = tc.head_tracker.finalized_slot / preset.SLOTS_PER_EPOCH,
+        .weight = 1,
+        .validity = "valid",
+        .execution_block_hash = [_]u8{0} ** 32,
+    };
+
+    const resp = try getBlockHeaders(&tc.ctx, tc.head_tracker.head_slot, [_]u8{0x44} ** 32);
+    defer std.testing.allocator.free(resp.data);
+
+    try std.testing.expectEqual(@as(usize, 1), resp.data.len);
+    try std.testing.expectEqual(sibling_root, resp.data[0].root);
+    try std.testing.expectEqual([_]u8{0x44} ** 32, resp.data[0].header.message.parent_root);
+    try std.testing.expect(!resp.data[0].canonical);
 }
 
 test "getBlobSidecars returns archived blob sidecars for slot" {
@@ -1049,7 +1326,13 @@ test "getBlobSidecars filters requested indices" {
     std.mem.writeInt(u64, blob_bytes[sidecar_size .. sidecar_size + 8], 1, .little);
     std.mem.writeInt(u64, blob_bytes[sidecar_size * 2 .. sidecar_size * 2 + 8], 2, .little);
 
-    try tc.db.putBlock(block_root, "hot_block");
+    var signed_block = consensus_types.phase0.SignedBeaconBlock.default_value;
+    signed_block.message.slot = tc.head_tracker.head_slot;
+    const block_size = consensus_types.phase0.SignedBeaconBlock.serializedSize(&signed_block);
+    const block_bytes = try allocator.alloc(u8, block_size);
+    defer allocator.free(block_bytes);
+    _ = consensus_types.phase0.SignedBeaconBlock.serializeIntoBytes(&signed_block, block_bytes);
+    try tc.db.putBlock(block_root, block_bytes);
     try tc.db.putBlobSidecars(block_root, blob_bytes);
 
     const result = try getBlobSidecars(&tc.ctx, .{ .root = block_root }, &.{1});
@@ -1166,6 +1449,112 @@ test "getValidator with out-of-range index returns ValidatorNotFound" {
 
     const result = getValidator(&tc.ctx, .head, .{ .index = 99 });
     try std.testing.expectError(error.ValidatorNotFound, result);
+}
+
+test "getStateSyncCommittees returns validators for current sync period" {
+    const allocator = std.testing.allocator;
+    var tc = test_helpers.makeTestContext(allocator);
+    defer test_helpers.destroyTestContext(allocator, &tc);
+
+    const state_transition = @import("state_transition");
+    const Node = @import("persistent_merkle_tree").Node;
+    const TestCachedBeaconState = state_transition.test_utils.TestCachedBeaconState;
+
+    var pool = try Node.Pool.init(allocator, 500_000);
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 16);
+    defer test_state.deinit();
+    tc.chain_fixture.head_state = test_state.cached_state;
+
+    const resp = try getStateSyncCommittees(&tc.ctx, .head, null);
+    defer allocator.free(resp.data.validators);
+    for (resp.data.validator_aggregates) |aggregate| allocator.free(aggregate);
+    defer allocator.free(resp.data.validator_aggregates);
+
+    try std.testing.expect(resp.data.validators.len > 0);
+    try std.testing.expectEqual(@as(usize, 4), resp.data.validator_aggregates.len);
+}
+
+test "getStateSyncCommittees returns InvalidRequest for unsupported sync period" {
+    const allocator = std.testing.allocator;
+    var tc = test_helpers.makeTestContext(allocator);
+    defer test_helpers.destroyTestContext(allocator, &tc);
+
+    const state_transition = @import("state_transition");
+    const Node = @import("persistent_merkle_tree").Node;
+    const TestCachedBeaconState = state_transition.test_utils.TestCachedBeaconState;
+
+    var pool = try Node.Pool.init(allocator, 500_000);
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 16);
+    defer test_state.deinit();
+    tc.chain_fixture.head_state = test_state.cached_state;
+
+    const unsupported_epoch = test_state.cached_state.epoch_cache.epoch + (2 * preset.EPOCHS_PER_SYNC_COMMITTEE_PERIOD);
+    try std.testing.expectError(error.InvalidRequest, getStateSyncCommittees(&tc.ctx, .head, unsupported_epoch));
+}
+
+test "getStateCommittees returns InvalidRequest for unsupported epoch" {
+    const allocator = std.testing.allocator;
+    var tc = test_helpers.makeTestContext(allocator);
+    defer test_helpers.destroyTestContext(allocator, &tc);
+
+    const state_transition = @import("state_transition");
+    const Node = @import("persistent_merkle_tree").Node;
+    const TestCachedBeaconState = state_transition.test_utils.TestCachedBeaconState;
+
+    var pool = try Node.Pool.init(allocator, 500_000);
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 16);
+    defer test_state.deinit();
+    tc.chain_fixture.head_state = test_state.cached_state;
+
+    const unsupported_epoch = test_state.cached_state.epoch_cache.epoch + 2;
+    try std.testing.expectError(error.InvalidRequest, getStateCommittees(&tc.ctx, .head, unsupported_epoch, null, null));
+}
+
+test "getStateRandao returns InvalidRequest for future epoch" {
+    const allocator = std.testing.allocator;
+    var tc = test_helpers.makeTestContext(allocator);
+    defer test_helpers.destroyTestContext(allocator, &tc);
+
+    const state_transition = @import("state_transition");
+    const Node = @import("persistent_merkle_tree").Node;
+    const TestCachedBeaconState = state_transition.test_utils.TestCachedBeaconState;
+
+    var pool = try Node.Pool.init(allocator, 500_000);
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 16);
+    defer test_state.deinit();
+    tc.chain_fixture.head_state = test_state.cached_state;
+
+    const future_epoch = (try test_state.cached_state.state.slot()) / preset.SLOTS_PER_EPOCH + 1;
+    try std.testing.expectError(error.InvalidRequest, getStateRandao(&tc.ctx, .head, future_epoch));
+}
+
+test "getStateRandao returns InvalidRequest for overwritten historical epoch" {
+    const allocator = std.testing.allocator;
+    var tc = test_helpers.makeTestContext(allocator);
+    defer test_helpers.destroyTestContext(allocator, &tc);
+
+    const state_transition = @import("state_transition");
+    const Node = @import("persistent_merkle_tree").Node;
+    const TestCachedBeaconState = state_transition.test_utils.TestCachedBeaconState;
+
+    var pool = try Node.Pool.init(allocator, 500_000);
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 16);
+    defer test_state.deinit();
+    const current_epoch = preset.EPOCHS_PER_HISTORICAL_VECTOR + 2;
+    try test_state.cached_state.state.setSlot(current_epoch * preset.SLOTS_PER_EPOCH);
+    tc.chain_fixture.head_state = test_state.cached_state;
+
+    try std.testing.expectError(error.InvalidRequest, getStateRandao(&tc.ctx, .head, 0));
 }
 
 test "submitBlock returns NotImplemented when block_import is null" {
@@ -1340,6 +1729,22 @@ test "getPoolAttestations returns items from callback" {
     try std.testing.expectEqual(@as(u64, 43), resp.data[1].data.slot);
 }
 
+test "getPoolAttestationsV2 returns NotImplemented for Electra slot query" {
+    var tc = test_helpers.makeTestContext(std.testing.allocator);
+    defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
+
+    const electra_slot = tc.ctx.beacon_config.chain.ELECTRA_FORK_EPOCH * preset.SLOTS_PER_EPOCH;
+    try std.testing.expectError(error.NotImplemented, getPoolAttestationsV2(&tc.ctx, electra_slot, null));
+}
+
+test "getPoolAttestationsV2 returns NotImplemented when head is Electra" {
+    var tc = test_helpers.makeTestContext(std.testing.allocator);
+    defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
+
+    tc.head_tracker.head_slot = tc.ctx.beacon_config.chain.ELECTRA_FORK_EPOCH * preset.SLOTS_PER_EPOCH;
+    try std.testing.expectError(error.NotImplemented, getPoolAttestationsV2(&tc.ctx, null, null));
+}
+
 test "getPoolVoluntaryExits returns NotImplemented when no op_pool" {
     var tc = test_helpers.makeTestContext(std.testing.allocator);
     defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
@@ -1512,6 +1917,35 @@ const ResolvedStateMeta = struct {
     finalized: bool,
 };
 
+fn resolveStateMetaForRootAndSlot(
+    ctx: *ApiContext,
+    state_root: [32]u8,
+    slot: u64,
+) !ResolvedStateMeta {
+    const head = ctx.currentHeadTracker();
+    const canonical_root = try ctx.stateRootBySlot(slot);
+    const canonical = if (canonical_root) |canonical_state_root|
+        std.mem.eql(u8, &canonical_state_root, &state_root)
+    else
+        false;
+    return .{
+        .execution_optimistic = ctx.stateExecutionOptimisticByRoot(state_root),
+        .finalized = canonical and slot <= head.finalized_slot,
+    };
+}
+
+fn resolveStateMetaByRoot(ctx: *ApiContext, state_root: [32]u8) !ResolvedStateMeta {
+    if (try ctx.stateByRoot(state_root)) |state| {
+        return resolveStateMetaForRootAndSlot(ctx, state_root, try state.state.slot());
+    }
+
+    const state_bytes = (try ctx.stateBytesByRoot(state_root)) orelse return error.StateNotAvailable;
+    defer ctx.allocator.free(state_bytes);
+
+    const slot = readStateSlotFromSsz(state_bytes) orelse return error.StateNotAvailable;
+    return resolveStateMetaForRootAndSlot(ctx, state_root, slot);
+}
+
 /// Resolve a state_id to a CachedBeaconState.
 ///
 /// Supports all Beacon API state identifiers:
@@ -1532,7 +1966,7 @@ fn resolveState(ctx: *ApiContext, state_id: types.StateId) !struct { state: *Cac
                 .state = state,
                 .meta = .{
                     .execution_optimistic = ctx.blockExecutionOptimistic(head.head_root),
-                    .finalized = false,
+                    .finalized = std.mem.eql(u8, &head.head_root, &head.finalized_root),
                 },
             };
         },
@@ -1542,7 +1976,7 @@ fn resolveState(ctx: *ApiContext, state_id: types.StateId) !struct { state: *Cac
                 .state = state,
                 .meta = .{
                     .execution_optimistic = ctx.blockExecutionOptimistic(head.justified_root),
-                    .finalized = false,
+                    .finalized = std.mem.eql(u8, &head.justified_root, &head.finalized_root),
                 },
             };
         },
@@ -1574,10 +2008,7 @@ fn resolveState(ctx: *ApiContext, state_id: types.StateId) !struct { state: *Cac
             const state = (try ctx.stateByRoot(root)) orelse return error.StateNotAvailable;
             return .{
                 .state = state,
-                .meta = .{
-                    .execution_optimistic = ctx.stateExecutionOptimisticByRoot(root),
-                    .finalized = false,
-                },
+                .meta = try resolveStateMetaForRootAndSlot(ctx, root, try state.state.slot()),
             };
         },
     }
@@ -1606,6 +2037,9 @@ pub fn getStateCommittees(
     const epoch = epoch_opt orelse current_epoch;
 
     const epoch_cache = state.epoch_cache;
+    const committees_per_slot = epoch_cache.getCommitteeCountPerSlot(epoch) catch {
+        return error.InvalidRequest;
+    };
 
     // Determine which slots to enumerate.
     const epoch_start_slot = epoch * preset.SLOTS_PER_EPOCH;
@@ -1624,16 +2058,13 @@ pub fn getStateCommittees(
             if (slot != filter_slot) continue;
         }
 
-        // Get committee count for this slot.
-        const committees_per_slot = epoch_cache.getCommitteeCountPerSlot(epoch) catch continue;
-
         for (0..committees_per_slot) |committee_idx| {
             // Filter by index if provided.
             if (index_opt) |filter_index| {
                 if (committee_idx != filter_index) continue;
             }
 
-            const committee = epoch_cache.getBeaconCommittee(slot, @intCast(committee_idx)) catch continue;
+            const committee = epoch_cache.getBeaconCommittee(slot, @intCast(committee_idx)) catch unreachable;
 
             // Copy validator indices.
             const validators = try ctx.allocator.alloc(u64, committee.len);
@@ -1666,14 +2097,17 @@ pub fn getStateSyncCommittees(
     state_id: types.StateId,
     epoch_param: ?u64,
 ) !HandlerResult(types.SyncCommitteeData) {
-    _ = epoch_param;
-
     const resolved = try resolveState(ctx, state_id);
     const state = resolved.state;
 
+    const current_slot = try state.state.slot();
+    const current_epoch = current_slot / preset.SLOTS_PER_EPOCH;
+    const epoch = epoch_param orelse current_epoch;
+
     const epoch_cache = state.epoch_cache;
-    const sync_cache = epoch_cache.current_sync_committee_indexed;
-    const sc = sync_cache.get();
+    const sc = epoch_cache.getIndexedSyncCommitteeAtEpoch(epoch) catch {
+        return error.InvalidRequest;
+    };
 
     const sync_indices = sc.getValidatorIndices();
     if (sync_indices.len == 0) {
@@ -1738,6 +2172,11 @@ pub fn getStateRandao(
     const current_epoch = current_slot / preset.SLOTS_PER_EPOCH;
     const epoch = epoch_opt orelse current_epoch;
 
+    if (epoch > current_epoch) return error.InvalidRequest;
+    if (current_epoch >= preset.EPOCHS_PER_HISTORICAL_VECTOR and epoch + preset.EPOCHS_PER_HISTORICAL_VECTOR <= current_epoch) {
+        return error.InvalidRequest;
+    }
+
     // Read randao_mixes from the state.
     var randao_mixes = try state.state.randaoMixes();
     const mix_ptr = try randao_mixes.getFieldRoot(epoch % preset.EPOCHS_PER_HISTORICAL_VECTOR);
@@ -1764,39 +2203,86 @@ pub fn getBlockHeaders(
     slot_opt: ?u64,
     parent_root_opt: ?[32]u8,
 ) !HandlerResult([]const types.BlockHeaderData) {
-    // This endpoint currently serves the canonical head header or the canonical
-    // header for a requested slot. Parent-root filtering must be applied
-    // honestly to that resolved header rather than ignored.
     var headers = std.ArrayListUnmanaged(types.BlockHeaderData).empty;
     errdefer headers.deinit(ctx.allocator);
 
-    const target_block_id: types.BlockId = if (slot_opt) |slot|
-        .{ .slot = slot }
-    else
-        .head;
+    if (slot_opt == null and parent_root_opt == null) {
+        const header_result = try resolveBlockHeader(ctx, .head);
+        try headers.append(ctx.allocator, header_result.header);
+        return .{
+            .data = try headers.toOwnedSlice(ctx.allocator),
+            .meta = .{
+                .execution_optimistic = header_result.execution_optimistic,
+                .finalized = header_result.finalized,
+            },
+        };
+    }
 
-    const header_result = resolveBlockHeader(ctx, target_block_id) catch return .{
-        .data = try headers.toOwnedSlice(ctx.allocator),
-        .meta = .{},
-    };
+    const head = ctx.currentHeadTracker();
+    var seen_roots = std.AutoHashMap([32]u8, void).init(ctx.allocator);
+    defer seen_roots.deinit();
+    var meta = BlockHeaderListMeta{};
 
-    if (parent_root_opt) |parent_root| {
-        if (!std.mem.eql(u8, &header_result.header.header.message.parent_root, &parent_root)) {
-            return .{
-                .data = try headers.toOwnedSlice(ctx.allocator),
-                .meta = .{},
-            };
+    if (slot_opt) |slot| {
+        if (try ctx.blockRootBySlot(slot)) |root| {
+            try appendBlockHeaderMatch(ctx, &headers, &seen_roots, &meta, .{
+                .slot = slot,
+                .root = root,
+                .execution_optimistic = try ctx.blockExecutionOptimisticAtSlot(slot),
+                .finalized = slot <= head.finalized_slot,
+                .canonical = true,
+            }, parent_root_opt);
         }
     }
 
-    try headers.append(ctx.allocator, header_result.header);
+    if (parent_root_opt) |parent_root| {
+        if (try ctx.finalizedBlockRootByParentRoot(parent_root)) |root| {
+            const slot_info = try resolveBlockSlotAndRoot(ctx, .{ .root = root });
+            if (slot_opt == null or slot_info.slot == slot_opt.?) {
+                try appendBlockHeaderMatch(ctx, &headers, &seen_roots, &meta, slot_info, parent_root_opt);
+            }
+        }
+    }
+
+    const dump_opt = ctx.forkChoiceDump(ctx.allocator) catch |err| switch (err) {
+        error.NotImplemented => null,
+        else => return err,
+    };
+    if (dump_opt) |dump| {
+        defer ctx.allocator.free(dump.fork_choice_nodes);
+        for (dump.fork_choice_nodes) |node| {
+            if (slot_opt) |slot| {
+                if (node.slot != slot) continue;
+            }
+            if (parent_root_opt) |parent_root| {
+                const node_parent_root = node.parent_root orelse continue;
+                if (!std.mem.eql(u8, &node_parent_root, &parent_root)) continue;
+            }
+
+            const canonical_root = try ctx.blockRootBySlot(node.slot);
+            const canonical = if (canonical_root) |canonical_block_root|
+                std.mem.eql(u8, &canonical_block_root, &node.block_root)
+            else
+                false;
+            try appendBlockHeaderMatch(ctx, &headers, &seen_roots, &meta, .{
+                .slot = node.slot,
+                .root = node.block_root,
+                .execution_optimistic = ctx.blockExecutionOptimistic(node.block_root),
+                .finalized = canonical and node.slot <= head.finalized_slot,
+                .canonical = canonical,
+            }, parent_root_opt);
+        }
+    }
 
     return .{
         .data = try headers.toOwnedSlice(ctx.allocator),
-        .meta = .{
-            .execution_optimistic = header_result.execution_optimistic,
-            .finalized = header_result.finalized,
-        },
+        .meta = if (meta.saw_any)
+            .{
+                .execution_optimistic = meta.execution_optimistic,
+                .finalized = meta.finalized,
+            }
+        else
+            .{},
     };
 }
 

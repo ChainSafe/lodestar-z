@@ -50,7 +50,7 @@ const TestChainFixture = struct {
     state_by_root: ?*CachedBeaconState = null,
     state_by_slot: ?*CachedBeaconState = null,
     fork_choice_heads: ?[]const types.DebugChainHead = null,
-    fork_choice_nodes: ?[]const types.ForkChoiceNode = null,
+    fork_choice_nodes: ?[]types.ForkChoiceNode = null,
     block_rewards_result: ?types.BlockRewards = null,
     attestation_ideal_rewards: ?[]const types.IdealAttestationReward = null,
     attestation_total_rewards: ?[]const types.TotalAttestationReward = null,
@@ -73,7 +73,14 @@ fn readSignedBlockSlotFromSsz(block_bytes: []const u8) ?u64 {
 
 fn getTestBlockRootBySlot(ptr: *anyopaque, slot: u64) anyerror!?[32]u8 {
     const fixture: *TestChainFixture = @ptrCast(@alignCast(ptr));
+    if (slot == fixture.head_tracker.head_slot) return fixture.head_tracker.head_root;
     return fixture.db.getFinalizedBlockRootBySlot(slot);
+}
+
+fn getTestFinalizedBlockRootByParentRoot(ptr: *anyopaque, parent_root: [32]u8) anyerror!?[32]u8 {
+    const fixture: *TestChainFixture = @ptrCast(@alignCast(ptr));
+    const child = try fixture.db.getArchivedCanonicalChild(parent_root) orelse return null;
+    return child.root;
 }
 
 fn getTestBlockBytesByRoot(ptr: *anyopaque, root: [32]u8) anyerror!?[]const u8 {
@@ -302,6 +309,7 @@ pub fn makeTestContext(allocator: std.mem.Allocator) TestContext {
                 .getCurrentSlotFn = &getTestCurrentSlot,
                 .validatorSeenAtEpochFn = &getTestValidatorSeenAtEpoch,
                 .getBlockRootBySlotFn = &getTestBlockRootBySlot,
+                .getFinalizedBlockRootByParentRootFn = &getTestFinalizedBlockRootByParentRoot,
                 .getBlockBytesByRootFn = &getTestBlockBytesByRoot,
                 .getBlobSidecarsByRootFn = &getTestBlobSidecarsByRoot,
                 .getBlockExecutionOptimisticFn = &getTestBlockExecutionOptimistic,

@@ -965,11 +965,10 @@ pub const HttpServer = struct {
         const handler_res = try handlers.beacon.getPoolAttestationsV2(self.api_context, slot_filter, ci_filter);
         defer alloc.free(handler_res.data);
 
-        // V2: Fork-aware serialization.
-        // Pre-Electra attestations use phase0 Attestation format.
-        // Electra attestations use Electra Attestation format with committee_bits.
-        // Internally, attestations are stored in phase0 format with committee_index in data.index.
-        // For Electra, we reconstruct committee_bits from data.index and set data.index=0.
+        // V2: fork-aware serialization for the subset of attestation data the
+        // handler can represent honestly today. Electra-era pool attestations
+        // are rejected in the handler until the op-pool preserves
+        // committee_bits end to end.
         var aw: std.Io.Writer.Allocating = .init(alloc);
         errdefer aw.deinit();
         var stream: std.json.Stringify = .{ .writer = &aw.writer };
@@ -2586,6 +2585,20 @@ test "handleRequest GET /eth/v1/beacon/pool/attestations without op_pool returns
     try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"statusCode\":501") != null);
 }
 
+test "handleRequest GET /eth/v2/beacon/pool/attestations returns 501 on Electra head" {
+    var tc = test_helpers.makeTestContext(std.testing.allocator);
+    defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
+
+    tc.head_tracker.head_slot = tc.ctx.beacon_config.chain.ELECTRA_FORK_EPOCH * preset.SLOTS_PER_EPOCH;
+
+    var server = HttpServer.init(std.testing.allocator, &tc.ctx, "127.0.0.1", 0);
+    const resp = try server.handleRequest("GET", "/eth/v2/beacon/pool/attestations", null);
+    defer resp.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(u16, 501), resp.status);
+    try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"statusCode\":501") != null);
+}
+
 test "handleRequest pool submission POST returns 204" {
     var tc = test_helpers.makeTestContext(std.testing.allocator);
     defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
@@ -2886,6 +2899,16 @@ test "handleRequest GET /eth/v1/beacon/states/head/committees returns error with
 test "handleRequest GET /eth/v1/beacon/headers returns 200" {
     var tc = test_helpers.makeTestContext(std.testing.allocator);
     defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
+
+    const ct = @import("consensus_types");
+    var signed_block = ct.phase0.SignedBeaconBlock.default_value;
+    signed_block.message.slot = tc.head_tracker.head_slot;
+
+    const block_size = ct.phase0.SignedBeaconBlock.serializedSize(&signed_block);
+    const block_bytes = try std.testing.allocator.alloc(u8, block_size);
+    defer std.testing.allocator.free(block_bytes);
+    _ = ct.phase0.SignedBeaconBlock.serializeIntoBytes(&signed_block, block_bytes);
+    try tc.db.putBlock(tc.head_tracker.head_root, block_bytes);
 
     var server = HttpServer.init(std.testing.allocator, &tc.ctx, "127.0.0.1", 0);
     const resp = try server.handleRequest("GET", "/eth/v1/beacon/headers", null);
