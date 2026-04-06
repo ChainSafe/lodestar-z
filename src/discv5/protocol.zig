@@ -267,7 +267,7 @@ pub const Config = struct {
     /// Sequence number of our local ENR.
     local_enr_seq: u64 = 0,
     /// Time after which outbound requests are considered failed and removed.
-    request_timeout_ms: u64 = 1_000,
+    request_timeout_ms: u64 = 5_000,
     /// Time a replacement node waits before evicting the stalest disconnected bucket entry.
     bucket_pending_timeout_ms: u64 = kbucket.BUCKET_PENDING_TIMEOUT_MS,
 };
@@ -598,6 +598,11 @@ pub const Protocol = struct {
         try socket.send(dest_addr, pkt);
 
         // Store the pending request so handleWhoareyou can find it.
+        std.log.debug("discv5: sent ordinary msg to {any}, nonce={s} (total={d})", .{
+            dest_addr,
+            &std.fmt.bytesToHex(nonce, .lower),
+            self.pending_requests.items.len + 1,
+        });
         const pt_copy = try self.alloc.dupe(u8, msg_bytes);
         errdefer self.alloc.free(pt_copy);
         try self.pending_requests.append(self.alloc, .{
@@ -703,7 +708,17 @@ pub const Protocol = struct {
         }
 
         const idx = pending_idx orelse {
-            std.log.debug("discv5: WHOAREYOU for unknown nonce, ignoring", .{});
+            std.log.debug("discv5: WHOAREYOU for unknown nonce (pending={d}, nonce={s}, from={any})", .{
+                self.pending_requests.items.len,
+                &std.fmt.bytesToHex(request_nonce, .lower),
+                from,
+            });
+            if (self.pending_requests.items.len > 0) {
+                std.log.debug("discv5: first pending nonce={s}, dest={any}", .{
+                    &std.fmt.bytesToHex(self.pending_requests.items[0].nonce, .lower),
+                    self.pending_requests.items[0].dest_addr,
+                });
+            }
             return;
         };
 
