@@ -109,6 +109,8 @@ pub const NodeOptions = struct {
     // ── Sync ─────────────────────────────────────────────────────
     /// URL to fetch checkpoint state from a beacon API (--checkpoint-sync-url).
     checkpoint_sync_url: ?[]const u8 = null,
+    /// Declare synced without peers (--sync.isSingleNode). For single-node devnets.
+    sync_is_single_node: bool = false,
 
     // ── Caches ───────────────────────────────────────────────────
     max_block_states: u32 = 64,

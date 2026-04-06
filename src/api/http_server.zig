@@ -2464,13 +2464,26 @@ test "handleRequest GET /eth/v1/node/health syncing returns 206" {
     try std.testing.expectEqual(@as(u16, 206), resp.status);
 }
 
-test "handleRequest GET /eth/v1/node/health not initialized returns 503" {
+test "handleRequest GET /eth/v1/node/health at genesis returns 200" {
     var tc = test_helpers.makeTestContext(std.testing.allocator);
     defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
 
     var server = HttpServer.init(std.testing.allocator, &tc.ctx, "127.0.0.1", 0);
     tc.sync_status.is_syncing = false;
     tc.sync_status.head_slot = 0;
+    const resp = try server.handleRequest("GET", "/eth/v1/node/health", null);
+    defer resp.deinit(std.testing.allocator);
+
+    // Node is initialized (sync_status_view is wired) and not syncing → 200
+    try std.testing.expectEqual(@as(u16, 200), resp.status);
+}
+
+test "handleRequest GET /eth/v1/node/health no sync callback returns 503" {
+    var tc = test_helpers.makeTestContext(std.testing.allocator);
+    defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
+
+    tc.ctx.sync_status_view = null; // simulate uninitialized node
+    var server = HttpServer.init(std.testing.allocator, &tc.ctx, "127.0.0.1", 0);
     const resp = try server.handleRequest("GET", "/eth/v1/node/health", null);
     defer resp.deinit(std.testing.allocator);
 

@@ -58,9 +58,7 @@ fn rejectUnsupportedOptions(opts: anytype) void {
     if (opts.lastPersistedCheckpointState) {
         unsupportedOption("--lastPersistedCheckpointState", "DB resume already happens automatically when safe state exists");
     }
-    if (opts.sync_is_single_node or opts.@"sync.isSingleNode") {
-        unsupportedOption("--sync-single-node", "single-node sync override is not wired yet");
-    }
+    // --sync.isSingleNode / --sync-single-node: supported (devnet single-node mode)
     if (opts.sync_disable_range or opts.@"sync.disableRangeSync") {
         unsupportedOption("--sync-disable-range", "range-sync disabling is not wired yet");
     }
@@ -508,6 +506,7 @@ pub fn run(io: Io, allocator: Allocator, opts: anytype) !void {
         .suggested_fee_recipient = fee_recipient,
         .graffiti = graffiti_bytes,
         .checkpoint_sync_url = checkpoint_sync_url,
+        .sync_is_single_node = opts.sync_is_single_node or opts.@"sync.isSingleNode",
     };
 
     {

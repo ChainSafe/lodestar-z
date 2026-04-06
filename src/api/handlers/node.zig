@@ -55,15 +55,16 @@ pub fn getSyncing(ctx: *ApiContext) HandlerResult(types.SyncingStatus) {
 /// Returns a health status code:
 /// - 200: ready (synced)
 /// - 206: syncing
-/// - 503: not initialized
+/// - 503: not initialized (sync_status_view not wired)
 pub fn getHealth(ctx: *ApiContext) HandlerResult(void) {
+    // The API server only starts after the node is fully initialized
+    // (inside runBootstrappedNode), so reaching this handler means the
+    // chain is loaded. Return 503 only if the sync callback is not wired.
+    if (ctx.sync_status_view == null) {
+        return .{ .data = {}, .status = 503 };
+    }
     const sync = ctx.currentSyncStatus();
-    const status: u16 = if (sync.is_syncing)
-        206
-    else if (sync.head_slot == 0)
-        503
-    else
-        200;
+    const status: u16 = if (sync.is_syncing) 206 else 200;
     return .{ .data = {}, .status = status };
 }
 

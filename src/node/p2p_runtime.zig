@@ -1587,6 +1587,11 @@ fn initSyncPipeline(self: *BeaconNode) !void {
         self.currentHeadSlot(),
         0,
     );
+    sync_svc.is_single_node = self.node_options.sync_is_single_node;
+    if (sync_svc.is_single_node) {
+        // Trigger mode recalculation so the service starts in .synced mode.
+        sync_svc.onHeadUpdate(self.currentHeadSlot());
+    }
     self.sync_service_inst = sync_svc;
 
     std.log.info("Sync pipeline initialized (head_slot={d})", .{self.currentHeadSlot()});

@@ -159,6 +159,9 @@ pub const SyncService = struct {
     peer_count: usize,
     /// Highest known peer slot — recomputed from known_peers on disconnect.
     best_peer_slot: u64,
+    /// When true, skip the peer-count gate and declare synced immediately.
+    /// Used for single-node devnets where there are no peers to sync from.
+    is_single_node: bool,
 
     pub fn init(
         allocator: Allocator,
@@ -193,6 +196,7 @@ pub const SyncService = struct {
             .known_peers = std.StringHashMap(u64).init(allocator),
             .peer_count = 0,
             .best_peer_slot = 0,
+            .is_single_node = false,
         };
         svc.unknown_block_sync.setCallbacks(unknown_block_callbacks);
         return svc;
@@ -381,6 +385,10 @@ pub const SyncService = struct {
     // ── Internal ────────────────────────────────────────────────────
 
     fn updateMode(self: *SyncService) void {
+        if (self.is_single_node) {
+            self.setMode(.synced);
+            return;
+        }
         if (self.peer_count < sync_types.MIN_PEERS_TO_SYNC) {
             self.setMode(.idle);
             return;
