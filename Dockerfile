@@ -2,7 +2,7 @@
 # Build with: docker build --build-arg ZIG_PATH=/path/to/zig -t lodestar-z:local .
 # Or simpler: use the build script below
 
-FROM ubuntu:22.04
+FROM ubuntu:24.04
 
 # Install deps
 RUN apt-get update && apt-get install -y build-essential cmake ca-certificates libstdc++6 && \
