@@ -296,6 +296,16 @@ pub const CompletedForkchoiceUpdate = struct {
     elapsed_s: f64,
 };
 
+pub const MetricsSnapshot = struct {
+    has_cached_payload: bool,
+    pending_forkchoice_updates: u64,
+    pending_payload_verifications: u64,
+    completed_forkchoice_updates: u64,
+    completed_payload_verifications: u64,
+    failed_payload_preparations: u64,
+    el_offline: bool,
+};
+
 pub const ExecutionRuntime = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -1241,6 +1251,23 @@ pub const ExecutionRuntime = struct {
     pub fn builderAllowedFaults(self: *const ExecutionRuntime) u64 {
         const http_builder = self.http_builder orelse return 0;
         return http_builder.allowed_faults;
+    }
+
+    pub fn metricsSnapshot(self: *const ExecutionRuntime) MetricsSnapshot {
+        const mutable_self: *ExecutionRuntime = @constCast(self);
+        mutable_self.queue_mutex.lockUncancelable(mutable_self.io);
+        defer mutable_self.queue_mutex.unlock(mutable_self.io);
+        mutable_self.lane_mutex.lockUncancelable(mutable_self.io);
+        defer mutable_self.lane_mutex.unlock(mutable_self.io);
+        return .{
+            .has_cached_payload = self.cached_payload_id != null,
+            .pending_forkchoice_updates = @intCast(self.pending_forkchoice_updates.items.len),
+            .pending_payload_verifications = @intCast(self.pending_payload_verifications.items.len),
+            .completed_forkchoice_updates = @intCast(self.completed_forkchoice_updates.items.len),
+            .completed_payload_verifications = @intCast(self.completed_payload_verifications.items.len),
+            .failed_payload_preparations = @intCast(self.failed_payload_preparations.items.len),
+            .el_offline = self.el_offline,
+        };
     }
 
     pub fn lastBuilderStatusSlot(self: *const ExecutionRuntime) ?u64 {

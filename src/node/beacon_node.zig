@@ -37,6 +37,8 @@ const StateTransitionMetrics = state_transition.metrics.StateTransitionMetrics;
 const chain_mod = @import("chain");
 const Chain = chain_mod.Chain;
 const ChainRuntime = chain_mod.Runtime;
+const ChainRuntimeMetricsSnapshot = chain_mod.MetricsSnapshot;
+const PeerManagerMetricsSnapshot = networking.PeerManagerMetricsSnapshot;
 const ChainRuntimeBuilder = chain_mod.RuntimeBuilder;
 const ChainService = chain_mod.Service;
 const SharedStateGraph = chain_mod.SharedStateGraph;
@@ -148,6 +150,9 @@ const PendingSyncSegment = struct {
     imported_count: usize = 0,
     skipped_count: usize = 0,
     failed_count: usize = 0,
+    optimistic_imported_count: usize = 0,
+    epoch_transition_count: usize = 0,
+    error_counts: chain_mod.BlockImportErrorCounts = .{},
     stop_after_current: bool = false,
 
     pub fn deinit(self: *PendingSyncSegment, allocator: Allocator) void {
@@ -308,6 +313,8 @@ pub const BeaconNode = struct {
     // Optional pointer so BeaconNode doesn't own the metrics instance —
     // it's allocated by main() and passed in.
     metrics: ?*BeaconMetrics = null,
+    last_chain_metrics_snapshot: ?ChainRuntimeMetricsSnapshot = null,
+    last_peer_manager_metrics_snapshot: ?PeerManagerMetricsSnapshot = null,
 
     // HTTP server for the Beacon REST API (lazy-initialized via startApi).
     http_server: ?api_mod.HttpServer = null,
@@ -517,6 +524,7 @@ pub const BeaconNode = struct {
         const planned = self.chainService().planReadyBlockImport(&owned_ready) catch |err| {
             switch (err) {
                 error.ParentUnknown => {
+                    self.recordBlockImportResult(owned_ready.source, "queued_unknown_parent", 1);
                     if (raw_block_bytes) |bytes| {
                         self.queueOrphanBlock(owned_ready.block, bytes);
                     } else {
@@ -531,10 +539,12 @@ pub const BeaconNode = struct {
                     return .ignored;
                 },
                 error.AlreadyKnown, error.WouldRevertFinalizedSlot => {
+                    self.recordBlockImportResult(owned_ready.source, blockImportOutcomeLabel(err), 1);
                     owned_ready.deinit(self.allocator);
                     return .ignored;
                 },
                 else => {
+                    self.recordBlockImportResult(owned_ready.source, blockImportOutcomeLabel(err), 1);
                     owned_ready.deinit(self.allocator);
                     return err;
                 },
@@ -549,9 +559,10 @@ pub const BeaconNode = struct {
 
         const completed = self.chainService().executePlannedReadyBlockImportSync(planned);
         switch (completed) {
-            .failure => {
+            .failure => |failure| {
+                const source = failure.planned.block_input.source;
                 const outcome = try self.chainService().finishCompletedReadyBlockImport(completed);
-                const result = try self.finishImportOutcome(t0, outcome);
+                const result = try self.finishImportOutcome(source, t0, outcome);
                 self.processPendingChildren(result.block_root);
                 return .{ .imported = result };
             },
@@ -865,11 +876,13 @@ pub const BeaconNode = struct {
             owned_prepared = undefined;
         }
 
+        const source = owned_prepared.block_input.source;
         const outcome = self.chainService().finishPreparedReadyBlockImport(owned_prepared, exec_status) catch |err| {
+            self.recordBlockImportResult(source, blockImportOutcomeLabel(err), 1);
             log.logger(.node).warn("deferred block execution commit failed: {}", .{err});
             return;
         };
-        const result = self.finishImportOutcome(t0, outcome) catch |err| {
+        const result = self.finishImportOutcome(source, t0, outcome) catch |err| {
             log.logger(.node).warn("deferred block import commit failed: {}", .{err});
             return;
         };
@@ -902,10 +915,28 @@ pub const BeaconNode = struct {
             switch (err) {
                 error.ExecutionPayloadInvalid => {
                     segment.failed_count += 1;
+                    _ = recordBlockImportError(&segment.error_counts, error.ExecutionPayloadInvalid);
                     segment.stop_after_current = true;
                 },
                 else => {
                     segment.failed_count += 1;
+                    switch (err) {
+                        error.ParentUnknown,
+                        error.FutureSlot,
+                        error.BlacklistedBlock,
+                        error.InvalidProposer,
+                        error.InvalidSignature,
+                        error.DataUnavailable,
+                        error.InvalidKzgProof,
+                        error.PrestateMissing,
+                        error.StateTransitionFailed,
+                        error.InvalidStateRoot,
+                        error.ExecutionEngineUnavailable,
+                        error.ForkChoiceError,
+                        error.InternalError,
+                        => segment.error_counts.incr(err),
+                        else => {},
+                    }
                     log.logger(.node).warn("deferred sync segment block commit failed: {}", .{err});
                 },
             }
@@ -913,6 +944,8 @@ pub const BeaconNode = struct {
         };
 
         segment.imported_count += 1;
+        if (outcome.result.execution_optimistic) segment.optimistic_imported_count += 1;
+        if (outcome.result.epoch_transition) segment.epoch_transition_count += 1;
         self.processPendingChildren(outcome.result.block_root);
     }
 
@@ -924,6 +957,7 @@ pub const BeaconNode = struct {
     ) void {
         switch (owner) {
             .generic => {
+                self.recordBlockImportResult(prepared.block_input.source, blockImportOutcomeLabel(err), 1);
                 var owned_prepared = prepared;
                 owned_prepared.deinit(self.allocator);
                 log.logger(.node).warn("deferred block execution verification failed: {}", .{err});
@@ -943,10 +977,30 @@ pub const BeaconNode = struct {
                 switch (err) {
                     error.AlreadyKnown, error.WouldRevertFinalizedSlot, error.GenesisBlock => {
                         segment.skipped_count += 1;
+                        _ = recordBlockImportError(&segment.error_counts, err);
                     },
                     error.ExecutionPayloadInvalid => {
                         segment.failed_count += 1;
+                        _ = recordBlockImportError(&segment.error_counts, err);
                         segment.stop_after_current = true;
+                    },
+                    error.ParentUnknown,
+                    error.FutureSlot,
+                    error.BlacklistedBlock,
+                    error.InvalidProposer,
+                    error.InvalidSignature,
+                    error.DataUnavailable,
+                    error.InvalidKzgProof,
+                    error.PrestateMissing,
+                    error.StateTransitionFailed,
+                    error.InvalidStateRoot,
+                    error.ExecutionEngineUnavailable,
+                    error.ForkChoiceError,
+                    error.InternalError,
+                    => {
+                        segment.failed_count += 1;
+                        _ = recordBlockImportError(&segment.error_counts, err);
+                        log.logger(.node).warn("deferred sync segment execution verification failed: {}", .{err});
                     },
                     else => {
                         segment.failed_count += 1;
@@ -1034,8 +1088,101 @@ pub const BeaconNode = struct {
         return did_work;
     }
 
+    fn blockImportSourceLabel(source: chain_mod.BlockSource) []const u8 {
+        return @tagName(source);
+    }
+
+    fn blockImportOutcomeLabel(err: anyerror) []const u8 {
+        return switch (err) {
+            error.AlreadyKnown => "already_known",
+            error.WouldRevertFinalizedSlot => "would_revert_finalized",
+            error.GenesisBlock => "genesis_block",
+            error.ParentUnknown => "parent_unknown",
+            error.FutureSlot => "future_slot",
+            error.BlacklistedBlock => "blacklisted_block",
+            error.InvalidProposer => "invalid_proposer",
+            error.InvalidSignature => "invalid_signature",
+            error.DataUnavailable => "data_unavailable",
+            error.InvalidKzgProof => "invalid_kzg_proof",
+            error.PrestateMissing => "prestate_missing",
+            error.StateTransitionFailed => "state_transition_failed",
+            error.InvalidStateRoot => "invalid_state_root",
+            error.ExecutionPayloadInvalid => "execution_payload_invalid",
+            error.ExecutionEngineUnavailable => "execution_engine_unavailable",
+            error.ForkChoiceError => "forkchoice_error",
+            error.InternalError => "internal_error",
+            else => "failed",
+        };
+    }
+
+    fn recordBlockImportResult(
+        self: *BeaconNode,
+        source: chain_mod.BlockSource,
+        outcome: []const u8,
+        count: usize,
+    ) void {
+        if (self.metrics) |m| {
+            m.incrBlockImportResult(blockImportSourceLabel(source), outcome, @intCast(count));
+        }
+    }
+
+    fn recordBlockImportErrorCounts(
+        self: *BeaconNode,
+        source: chain_mod.BlockSource,
+        counts: chain_mod.BlockImportErrorCounts,
+    ) void {
+        inline for (std.meta.fields(chain_mod.BlockImportErrorCounts)) |field| {
+            const count: usize = @field(counts, field.name);
+            if (count > 0) self.recordBlockImportResult(source, field.name, count);
+        }
+    }
+
+    fn countBlockImportErrorCounts(counts: chain_mod.BlockImportErrorCounts) usize {
+        var total: usize = 0;
+        inline for (std.meta.fields(chain_mod.BlockImportErrorCounts)) |field| {
+            total += @field(counts, field.name);
+        }
+        return total;
+    }
+
+    fn recordBlockImportError(counts: *chain_mod.BlockImportErrorCounts, err: anyerror) bool {
+        switch (err) {
+            error.GenesisBlock => counts.incr(error.GenesisBlock),
+            error.WouldRevertFinalizedSlot => counts.incr(error.WouldRevertFinalizedSlot),
+            error.AlreadyKnown => counts.incr(error.AlreadyKnown),
+            error.ParentUnknown => counts.incr(error.ParentUnknown),
+            error.FutureSlot => counts.incr(error.FutureSlot),
+            error.BlacklistedBlock => counts.incr(error.BlacklistedBlock),
+            error.InvalidProposer => counts.incr(error.InvalidProposer),
+            error.InvalidSignature => counts.incr(error.InvalidSignature),
+            error.DataUnavailable => counts.incr(error.DataUnavailable),
+            error.InvalidKzgProof => counts.incr(error.InvalidKzgProof),
+            error.PrestateMissing => counts.incr(error.PrestateMissing),
+            error.StateTransitionFailed => counts.incr(error.StateTransitionFailed),
+            error.InvalidStateRoot => counts.incr(error.InvalidStateRoot),
+            error.ExecutionPayloadInvalid => counts.incr(error.ExecutionPayloadInvalid),
+            error.ExecutionEngineUnavailable => counts.incr(error.ExecutionEngineUnavailable),
+            error.ForkChoiceError => counts.incr(error.ForkChoiceError),
+            error.InternalError => counts.incr(error.InternalError),
+            else => return false,
+        }
+        return true;
+    }
+
+    fn observeImportedBlocks(
+        self: *BeaconNode,
+        source: chain_mod.BlockSource,
+        count: usize,
+        elapsed_s: f64,
+    ) void {
+        if (self.metrics) |m| {
+            m.observeImportedBlocks(blockImportSourceLabel(source), @intCast(count), elapsed_s);
+        }
+    }
+
     fn finishImportOutcome(
         self: *BeaconNode,
+        source: chain_mod.BlockSource,
         t0: std.Io.Timestamp,
         outcome: chain_mod.ImportOutcome,
     ) !ImportResult {
@@ -1049,8 +1196,9 @@ pub const BeaconNode = struct {
 
         // Update metrics.
         if (self.metrics) |m| {
-            m.blocks_imported_total.incr();
-            m.block_import_seconds.observe(elapsed_s);
+            self.observeImportedBlocks(source, 1, elapsed_s);
+            if (result.execution_optimistic) m.incrOptimisticImports(1);
+            if (result.epoch_transition) m.incrEpochTransitions(1);
             m.head_slot.set(outcome.snapshot.head.slot);
             m.finalized_epoch.set(outcome.snapshot.finalized.epoch);
             m.justified_epoch.set(outcome.snapshot.justified.epoch);
@@ -1091,9 +1239,18 @@ pub const BeaconNode = struct {
 
         if (self.metrics) |m| {
             if (outcome.imported_count > 0) {
-                m.blocks_imported_total.incrBy(@intCast(outcome.imported_count));
-                m.block_import_seconds.observe(elapsed_s);
+                self.observeImportedBlocks(.range_sync, outcome.imported_count, elapsed_s);
             }
+            if (outcome.optimistic_imported_count > 0) m.incrOptimisticImports(@intCast(outcome.optimistic_imported_count));
+            if (outcome.epoch_transition_count > 0) m.incrEpochTransitions(@intCast(outcome.epoch_transition_count));
+            self.recordBlockImportErrorCounts(.range_sync, outcome.error_counts);
+            const typed_error_count = countBlockImportErrorCounts(outcome.error_counts);
+            const total_non_success = outcome.skipped_count + outcome.failed_count;
+            const generic_failed_count = if (typed_error_count < total_non_success)
+                total_non_success - typed_error_count
+            else
+                0;
+            if (generic_failed_count > 0) self.recordBlockImportResult(.range_sync, "failed", generic_failed_count);
             m.head_slot.set(outcome.snapshot.head.slot);
             m.finalized_epoch.set(outcome.snapshot.finalized.epoch);
             m.justified_epoch.set(outcome.snapshot.justified.epoch);
@@ -1119,11 +1276,16 @@ pub const BeaconNode = struct {
         completed: chain_mod.CompletedBlockImport,
     ) void {
         const t0 = std.Io.Clock.awake.now(self.io);
+        const source = switch (completed) {
+            .success => |prepared| prepared.block_input.source,
+            .failure => |failure| failure.planned.block_input.source,
+        };
         const outcome = self.chainService().finishCompletedReadyBlockImport(completed) catch |err| {
+            self.recordBlockImportResult(source, blockImportOutcomeLabel(err), 1);
             log.logger(.node).warn("deferred block state work failed: {}", .{err});
             return;
         };
-        const result = self.finishImportOutcome(t0, outcome) catch |err| {
+        const result = self.finishImportOutcome(source, t0, outcome) catch |err| {
             log.logger(.node).warn("deferred block import commit failed: {}", .{err});
             return;
         };
@@ -1149,13 +1311,32 @@ pub const BeaconNode = struct {
             switch (err) {
                 error.AlreadyKnown, error.WouldRevertFinalizedSlot, error.GenesisBlock => {
                     segment.skipped_count += 1;
+                    _ = recordBlockImportError(&segment.error_counts, err);
                 },
                 error.ExecutionPayloadInvalid => {
                     segment.failed_count += 1;
+                    _ = recordBlockImportError(&segment.error_counts, error.ExecutionPayloadInvalid);
                     segment.stop_after_current = true;
                 },
                 else => {
                     segment.failed_count += 1;
+                    switch (err) {
+                        error.ParentUnknown,
+                        error.FutureSlot,
+                        error.BlacklistedBlock,
+                        error.InvalidProposer,
+                        error.InvalidSignature,
+                        error.DataUnavailable,
+                        error.InvalidKzgProof,
+                        error.PrestateMissing,
+                        error.StateTransitionFailed,
+                        error.InvalidStateRoot,
+                        error.ExecutionEngineUnavailable,
+                        error.ForkChoiceError,
+                        error.InternalError,
+                        => segment.error_counts.incr(err),
+                        else => {},
+                    }
                     log.logger(.node).warn("deferred sync segment block commit failed: {}", .{err});
                 },
             }
@@ -1163,6 +1344,8 @@ pub const BeaconNode = struct {
         };
 
         segment.imported_count += 1;
+        if (outcome.result.execution_optimistic) segment.optimistic_imported_count += 1;
+        if (outcome.result.epoch_transition) segment.epoch_transition_count += 1;
 
         self.processPendingChildren(outcome.result.block_root);
     }
@@ -1287,7 +1470,19 @@ pub const BeaconNode = struct {
     /// Listens on the configured address:port and dispatches requests
     /// to the Beacon API handlers.
     pub fn startApi(self: *BeaconNode, io: std.Io, address: []const u8, port: u16, cors_origin: ?[]const u8) !void {
-        self.http_server = api_mod.HttpServer.initWithCors(self.allocator, self.api_context, address, port, cors_origin);
+        var http_options: api_mod.HttpServer.Options = .{
+            .cors_origin = cors_origin,
+        };
+        if (self.metrics) |metrics| {
+            http_options.observer = metrics.apiObserver();
+        }
+        self.http_server = api_mod.HttpServer.initWithOptions(
+            self.allocator,
+            self.api_context,
+            address,
+            port,
+            http_options,
+        );
         log.logger(.rest).info("REST API listening", .{});
         try self.http_server.?.serve(io);
     }
@@ -1394,9 +1589,25 @@ pub const BeaconNode = struct {
                 switch (err) {
                     error.AlreadyKnown, error.WouldRevertFinalizedSlot, error.GenesisBlock => {
                         segment.skipped_count += 1;
+                        _ = recordBlockImportError(&segment.error_counts, err);
                     },
-                    else => {
+                    error.ParentUnknown,
+                    error.FutureSlot,
+                    error.BlacklistedBlock,
+                    error.InvalidProposer,
+                    error.InvalidSignature,
+                    error.DataUnavailable,
+                    error.InvalidKzgProof,
+                    error.PrestateMissing,
+                    error.StateTransitionFailed,
+                    error.InvalidStateRoot,
+                    error.ExecutionPayloadInvalid,
+                    error.ExecutionEngineUnavailable,
+                    error.ForkChoiceError,
+                    error.InternalError,
+                    => {
                         segment.failed_count += 1;
+                        _ = recordBlockImportError(&segment.error_counts, err);
                         log.logger(.node).warn("range sync block planning failed: {}", .{err});
                     },
                 }
@@ -1433,6 +1644,9 @@ pub const BeaconNode = struct {
             segment.imported_count,
             segment.skipped_count,
             segment.failed_count,
+            segment.optimistic_imported_count,
+            segment.epoch_transition_count,
+            segment.error_counts,
         );
         const all_failed = outcome.imported_count == 0 and outcome.skipped_count == 0 and outcome.failed_count > 0;
         self.finishSegmentImportOutcome(segment.started_at, outcome);

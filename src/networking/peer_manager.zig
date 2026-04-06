@@ -164,6 +164,118 @@ pub const HousekeepingActions = struct {
     }
 };
 
+pub const metric_connection_states = [_]ConnectionState{
+    .disconnected,
+    .dialing,
+    .connected,
+    .disconnecting,
+    .banned,
+};
+pub const metric_score_states = [_]ScoreState{ .healthy, .disconnected, .banned };
+pub const metric_relevance_states = [_]RelevanceStatus{ .unknown, .relevant, .irrelevant };
+pub const metric_report_sources = [_]ReportSource{ .gossipsub, .rpc, .processor, .sync, .peer_manager };
+pub const metric_peer_actions = [_]PeerAction{ .fatal, .low_tolerance, .mid_tolerance, .high_tolerance };
+
+pub const GoodbyeMetricReason = enum {
+    client_shutdown,
+    irrelevant_network,
+    fault_error,
+    unable_to_verify,
+    too_many_peers,
+    score_too_low,
+    banned,
+    other,
+};
+
+pub const metric_goodbye_reasons = [_]GoodbyeMetricReason{
+    .client_shutdown,
+    .irrelevant_network,
+    .fault_error,
+    .unable_to_verify,
+    .too_many_peers,
+    .score_too_low,
+    .banned,
+    .other,
+};
+
+pub const MetricsSnapshot = struct {
+    known_peers: u64 = 0,
+    connected_peers: u64 = 0,
+    inbound_connected_peers: u64 = 0,
+    outbound_connected_peers: u64 = 0,
+    connection_state_counts: [metric_connection_states.len]u64 = [_]u64{0} ** metric_connection_states.len,
+    score_state_counts: [metric_score_states.len]u64 = [_]u64{0} ** metric_score_states.len,
+    relevance_counts: [metric_relevance_states.len]u64 = [_]u64{0} ** metric_relevance_states.len,
+    peer_report_counts: [metric_report_sources.len][metric_peer_actions.len]u64 = [_][metric_peer_actions.len]u64{[_]u64{0} ** metric_peer_actions.len} ** metric_report_sources.len,
+    goodbye_received_counts: [metric_goodbye_reasons.len]u64 = [_]u64{0} ** metric_goodbye_reasons.len,
+
+    pub fn connectionStateCount(self: *const MetricsSnapshot, state: ConnectionState) u64 {
+        return self.connection_state_counts[
+            switch (state) {
+                .disconnected => 0,
+                .dialing => 1,
+                .connected => 2,
+                .disconnecting => 3,
+                .banned => 4,
+            }
+        ];
+    }
+
+    pub fn scoreStateCount(self: *const MetricsSnapshot, state: ScoreState) u64 {
+        return self.score_state_counts[
+            switch (state) {
+                .healthy => 0,
+                .disconnected => 1,
+                .banned => 2,
+            }
+        ];
+    }
+
+    pub fn relevanceCount(self: *const MetricsSnapshot, status: RelevanceStatus) u64 {
+        return self.relevance_counts[
+            switch (status) {
+                .unknown => 0,
+                .relevant => 1,
+                .irrelevant => 2,
+            }
+        ];
+    }
+
+    pub fn peerReportCount(self: *const MetricsSnapshot, source: ReportSource, action: PeerAction) u64 {
+        return self.peer_report_counts[
+            switch (source) {
+                .gossipsub => 0,
+                .rpc => 1,
+                .processor => 2,
+                .sync => 3,
+                .peer_manager => 4,
+            }
+        ][
+            switch (action) {
+                .fatal => 0,
+                .low_tolerance => 1,
+                .mid_tolerance => 2,
+                .high_tolerance => 3,
+            }
+        ];
+    }
+
+    pub fn goodbyeReceivedCount(self: *const MetricsSnapshot, reason: GoodbyeMetricReason) u64 {
+        return self.goodbye_received_counts[
+            switch (reason) {
+                .client_shutdown => 0,
+                .irrelevant_network => 1,
+                .fault_error => 2,
+                .unable_to_verify => 3,
+                .too_many_peers => 4,
+                .score_too_low => 5,
+                .banned => 6,
+                .other => 7,
+            }
+        ];
+    }
+};
+
 // ── PeerManager ─────────────────────────────────────────────────────────────
 
 /// The main peer manager.
@@ -174,6 +286,8 @@ pub const PeerManager = struct {
     allocator: Allocator,
     config: PeerManagerConfig,
     db: PeerDB,
+    peer_report_counts: [metric_report_sources.len][metric_peer_actions.len]u64 = [_][metric_peer_actions.len]u64{[_]u64{0} ** metric_peer_actions.len} ** metric_report_sources.len,
+    goodbye_received_counts: [metric_goodbye_reasons.len]u64 = [_]u64{0} ** metric_goodbye_reasons.len,
 
     pub fn init(allocator: Allocator, config: PeerManagerConfig) PeerManager {
         return .{
@@ -249,6 +363,7 @@ pub const PeerManager = struct {
         now_ms: u64,
     ) void {
         self.db.peerDisconnecting(peer_id);
+        self.goodbye_received_counts[goodbyeMetricReasonIndex(goodbyeReasonForMetrics(reason))] += 1;
         if (peer_scoring.reconnectionCoolDownMs(reason)) |cool_down_ms| {
             self.db.applyReconnectionCoolDown(peer_id, cool_down_ms, now_ms);
         }
@@ -348,6 +463,26 @@ pub const PeerManager = struct {
         return peer_scoring.negativeGossipsubIgnoreCount(self.config.target_peers);
     }
 
+    pub fn metricsSnapshot(self: *const PeerManager) MetricsSnapshot {
+        var snapshot: MetricsSnapshot = .{
+            .known_peers = @intCast(self.db.totalCount()),
+            .connected_peers = @intCast(self.db.connected_count),
+            .inbound_connected_peers = @intCast(self.db.inbound_count),
+            .outbound_connected_peers = @intCast(self.db.outbound_count),
+            .peer_report_counts = self.peer_report_counts,
+            .goodbye_received_counts = self.goodbye_received_counts,
+        };
+
+        var it = self.db.peers.valueIterator();
+        while (it.next()) |info| {
+            snapshot.connection_state_counts[connectionStateIndex(info.connection_state)] += 1;
+            snapshot.score_state_counts[scoreStateIndex(info.scoreState())] += 1;
+            snapshot.relevance_counts[relevanceStatusIndex(info.relevance)] += 1;
+        }
+
+        return snapshot;
+    }
+
     // ── Peer actions ────────────────────────────────────────────────
 
     /// Report a peer action (penalty or fatal error).
@@ -370,6 +505,7 @@ pub const PeerManager = struct {
         });
 
         const state = self.db.applyPeerAction(peer_id, action, now_ms) orelse return null;
+        self.peer_report_counts[reportSourceIndex(source)][peerActionIndex(action)] += 1;
 
         // Auto-ban on fatal.
         if (action == .fatal) {
@@ -959,6 +1095,77 @@ pub const PeerManager = struct {
         return std.mem.lessThan(u8, candidate.peer_id, current.peer_id);
     }
 
+    fn connectionStateIndex(state: ConnectionState) usize {
+        return switch (state) {
+            .disconnected => 0,
+            .dialing => 1,
+            .connected => 2,
+            .disconnecting => 3,
+            .banned => 4,
+        };
+    }
+
+    fn scoreStateIndex(state: ScoreState) usize {
+        return switch (state) {
+            .healthy => 0,
+            .disconnected => 1,
+            .banned => 2,
+        };
+    }
+
+    fn relevanceStatusIndex(status: RelevanceStatus) usize {
+        return switch (status) {
+            .unknown => 0,
+            .relevant => 1,
+            .irrelevant => 2,
+        };
+    }
+
+    fn reportSourceIndex(source: ReportSource) usize {
+        return switch (source) {
+            .gossipsub => 0,
+            .rpc => 1,
+            .processor => 2,
+            .sync => 3,
+            .peer_manager => 4,
+        };
+    }
+
+    fn peerActionIndex(action: PeerAction) usize {
+        return switch (action) {
+            .fatal => 0,
+            .low_tolerance => 1,
+            .mid_tolerance => 2,
+            .high_tolerance => 3,
+        };
+    }
+
+    fn goodbyeReasonForMetrics(reason: GoodbyeReason) GoodbyeMetricReason {
+        return switch (reason) {
+            .client_shutdown => .client_shutdown,
+            .irrelevant_network => .irrelevant_network,
+            .fault_error => .fault_error,
+            .unable_to_verify => .unable_to_verify,
+            .too_many_peers => .too_many_peers,
+            .score_too_low => .score_too_low,
+            .banned => .banned,
+            else => .other,
+        };
+    }
+
+    fn goodbyeMetricReasonIndex(reason: GoodbyeMetricReason) usize {
+        return switch (reason) {
+            .client_shutdown => 0,
+            .irrelevant_network => 1,
+            .fault_error => 2,
+            .unable_to_verify => 3,
+            .too_many_peers => 4,
+            .score_too_low => 5,
+            .banned => 6,
+            .other => 7,
+        };
+    }
+
     fn maxCustodyCoverageDeficit(self: *PeerManager) !u32 {
         if (self.config.local_custody_columns.len == 0) return 0;
 
@@ -1069,6 +1276,29 @@ test "PeerManager: report peer fatal → ban" {
     const state = pm.reportPeer("peer_a", .fatal, .rpc, 1000);
     try std.testing.expectEqual(ScoreState.banned, state.?);
     try std.testing.expect(pm.isBanned("peer_a"));
+}
+
+test "PeerManager: metrics snapshot exposes peer states and events" {
+    const allocator = std.testing.allocator;
+    var pm = PeerManager.init(allocator, .{});
+    defer pm.deinit();
+
+    _ = try pm.onPeerConnected("peer_a", .inbound, 1000);
+    _ = try pm.onPeerConnected("peer_b", .outbound, 1000);
+    _ = pm.reportPeer("peer_a", .low_tolerance, .rpc, 1100);
+    pm.onPeerGoodbye("peer_b", .too_many_peers, 1200);
+
+    const snapshot = pm.metricsSnapshot();
+    try std.testing.expectEqual(@as(u64, 2), snapshot.known_peers);
+    try std.testing.expectEqual(@as(u64, 1), snapshot.connected_peers);
+    try std.testing.expectEqual(@as(u64, 1), snapshot.inbound_connected_peers);
+    try std.testing.expectEqual(@as(u64, 0), snapshot.outbound_connected_peers);
+    try std.testing.expectEqual(@as(u64, 1), snapshot.connectionStateCount(.connected));
+    try std.testing.expectEqual(@as(u64, 1), snapshot.connectionStateCount(.disconnecting));
+    try std.testing.expectEqual(@as(u64, 2), snapshot.scoreStateCount(.healthy));
+    try std.testing.expectEqual(@as(u64, 2), snapshot.relevanceCount(.unknown));
+    try std.testing.expectEqual(@as(u64, 1), snapshot.peerReportCount(.rpc, .low_tolerance));
+    try std.testing.expectEqual(@as(u64, 1), snapshot.goodbyeReceivedCount(.too_many_peers));
 }
 
 test "PeerManager: update status and get sync target" {

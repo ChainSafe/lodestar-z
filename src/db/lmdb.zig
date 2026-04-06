@@ -80,7 +80,7 @@ fn checkRc(rc: c_int) LmdbError!void {
 fn toVal(data: []const u8) c.MDB_val {
     return .{
         .mv_size = data.len,
-        .mv_data = @constCast(@ptrCast(data.ptr)),
+        .mv_data = @ptrCast(@constCast(data.ptr)),
     };
 }
 
@@ -159,6 +159,20 @@ pub const LmdbEnv = struct {
         try checkRc(c.mdb_env_sync(self.env, @intFromBool(force)));
     }
 
+    /// Get environment-wide statistics.
+    pub fn stat(self: LmdbEnv) LmdbError!c.MDB_stat {
+        var s: c.MDB_stat = undefined;
+        try checkRc(c.mdb_env_stat(self.env, &s));
+        return s;
+    }
+
+    /// Get environment information such as map size and reader usage.
+    pub fn info(self: LmdbEnv) LmdbError!c.MDB_envinfo {
+        var i: c.MDB_envinfo = undefined;
+        try checkRc(c.mdb_env_info(self.env, &i));
+        return i;
+    }
+
     /// Get statistics for a named database.
     pub fn statDbi(self: LmdbEnv, dbi: Dbi) LmdbError!c.MDB_stat {
         var txn: ?*c.MDB_txn = null;
@@ -224,6 +238,13 @@ pub const LmdbTxn = struct {
         var cursor: ?*c.MDB_cursor = null;
         try checkRc(c.mdb_cursor_open(self.txn, dbi, &cursor));
         return .{ .cursor = cursor.? };
+    }
+
+    /// Get statistics for a named database within this transaction.
+    pub fn statDbi(self: LmdbTxn, dbi: Dbi) LmdbError!c.MDB_stat {
+        var s: c.MDB_stat = undefined;
+        try checkRc(c.mdb_stat(self.txn, dbi, &s));
+        return s;
     }
 
     /// Commit the transaction.

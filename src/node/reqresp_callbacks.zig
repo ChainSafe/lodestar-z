@@ -12,6 +12,9 @@ const StatusMessage = networking.messages.StatusMessage;
 const MetadataV2 = networking.messages.MetadataV2;
 const ReqRespContext = networking.ReqRespContext;
 const ReqRespServerPolicy = networking.ReqRespServerPolicy;
+const ReqRespServerDecision = networking.ReqRespServerDecision;
+const ReqRespRequestOutcome = networking.ReqRespRequestOutcome;
+const Method = networking.Method;
 const PayloadSink = networking.req_resp_handler.PayloadSink;
 const SlotPayload = networking.req_resp_handler.SlotPayload;
 const ForkSeq = config_mod.ForkSeq;
@@ -40,6 +43,7 @@ pub fn makeReqRespContext(ctx: *RequestContext) ReqRespContext {
         .getForkDigest = &reqRespGetForkDigest,
         .onGoodbye = &reqRespOnGoodbye,
         .onPeerStatus = &reqRespOnPeerStatus,
+        .onRequestCompleted = &reqRespOnRequestCompleted,
     };
 }
 
@@ -58,11 +62,11 @@ fn requestNode(ptr: *anyopaque) *BeaconNode {
     return @ptrCast(@alignCast(ctx.node));
 }
 
-fn reqRespAllowInboundRequest(ptr: *anyopaque, peer_id: ?[]const u8, method: networking.Method, request_bytes: []const u8) bool {
+fn reqRespAllowInboundRequest(ptr: *anyopaque, peer_id: ?[]const u8, method: networking.Method, request_bytes: []const u8) ReqRespServerDecision {
     const node = requestNode(ptr);
-    const peer_id_bytes = peer_id orelse return true;
-    const limiter = node.req_resp_rate_limiter orelse return true;
-    const protocol = networking.rate_limiter.methodToRateLimitProtocol(method) orelse return true;
+    const peer_id_bytes = peer_id orelse return .allow;
+    const limiter = node.req_resp_rate_limiter orelse return .allow;
+    const protocol = networking.rate_limiter.methodToRateLimitProtocol(method) orelse return .allow;
 
     const result = limiter.allowRequestN(
         peer_id_bytes,
@@ -71,9 +75,9 @@ fn reqRespAllowInboundRequest(ptr: *anyopaque, peer_id: ?[]const u8, method: net
         monotonicTimeNs(node.io),
     ) catch |err| {
         std.log.warn("Failed to apply req/resp rate limit for peer {s}: {}", .{ peer_id_bytes, err });
-        return true;
+        return .allow;
     };
-    if (result.isAllowed()) return true;
+    if (result.isAllowed()) return .allow;
 
     if (result.isPeerDenied()) {
         if (node.peer_manager) |pm| {
@@ -82,8 +86,9 @@ fn reqRespAllowInboundRequest(ptr: *anyopaque, peer_id: ?[]const u8, method: net
         if (node.p2p_service) |*svc| {
             _ = svc.disconnectPeer(node.io, peer_id_bytes);
         }
+        return .deny_peer;
     }
-    return false;
+    return .deny_global;
 }
 
 fn reqRespGetStatus(ptr: *anyopaque) StatusMessage.Type {
@@ -256,6 +261,18 @@ fn reqRespOnPeerStatus(ptr: *anyopaque, peer_id: ?[]const u8, status: StatusMess
             effective_peer_id,
             @tagName(code),
         });
+    }
+}
+
+fn reqRespOnRequestCompleted(
+    ptr: *anyopaque,
+    method: Method,
+    outcome: ReqRespRequestOutcome,
+    response_time_seconds: f64,
+) void {
+    const node = requestNode(ptr);
+    if (node.metrics) |metrics| {
+        metrics.observeReqRespInbound(method, outcome, response_time_seconds);
     }
 }
 

@@ -13,6 +13,7 @@ const kv_store = @import("kv_store.zig");
 const KVStore = kv_store.KVStore;
 const BatchOp = kv_store.BatchOp;
 const DatabaseId = @import("buckets.zig").DatabaseId;
+const DatabaseMetrics = @import("metrics.zig").MetricsSnapshot;
 
 const DataMap = std.StringArrayHashMap([]const u8);
 
@@ -64,6 +65,16 @@ pub const MemoryKVStore = struct {
     /// Number of entries in a specific database.
     pub fn countIn(self: *const MemoryKVStore, db_id: DatabaseId) usize {
         return self.databases[@intFromEnum(db_id)].count();
+    }
+
+    pub fn metricsSnapshot(self: *const MemoryKVStore) DatabaseMetrics {
+        var snapshot: DatabaseMetrics = .{};
+        for (DatabaseId.all, 0..) |db_id, i| {
+            const entry_count: u64 = @intCast(self.countIn(db_id));
+            snapshot.entry_counts[i] = entry_count;
+            snapshot.total_entries += entry_count;
+        }
+        return snapshot;
     }
 
     fn getDb(self: *MemoryKVStore, db_id: DatabaseId) *DataMap {

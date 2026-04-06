@@ -560,6 +560,7 @@ pub fn run(io: Io, allocator: Allocator, opts: anytype) !void {
     });
 
     var beacon_metrics = BeaconMetrics.initNoop();
+    defer beacon_metrics.deinit();
     var state_transition_metrics = StateTransitionMetrics.initNoop();
     defer state_transition_metrics.deinit();
     var metrics_surface = MetricsSurface{
@@ -568,7 +569,7 @@ pub fn run(io: Io, allocator: Allocator, opts: anytype) !void {
     };
     var metrics_runtime: ?metrics_server.Runtime = null;
     if (opts.metrics) {
-        beacon_metrics = BeaconMetrics.init();
+        beacon_metrics = try BeaconMetrics.init(allocator);
         state_transition_metrics = try StateTransitionMetrics.init(allocator, io, .{});
 
         metrics_runtime = metrics_server.Runtime.init(

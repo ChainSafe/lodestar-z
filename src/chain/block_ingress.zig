@@ -142,6 +142,10 @@ pub const PendingBlockIngress = struct {
 
         return to_remove.items.len;
     }
+
+    pub fn len(self: *const PendingBlockIngress) usize {
+        return self.pending.count();
+    }
 };
 
 fn isReadyStatus(status: DataAvailabilityStatus) bool {

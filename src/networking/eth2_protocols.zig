@@ -19,17 +19,41 @@ const ResponseChunk = req_resp_handler.ResponseChunk;
 
 const log = std.log.scoped(.eth2_protocols);
 
+pub const ReqRespServerDecision = enum {
+    allow,
+    deny_peer,
+    deny_global,
+};
+
+pub const ReqRespRequestOutcome = protocol.ReqRespRequestOutcome;
+
 pub const ReqRespServerPolicy = struct {
     ptr: *anyopaque,
-    allowInboundRequestFn: *const fn (ptr: *anyopaque, peer_id: ?[]const u8, method: protocol.Method, request_bytes: []const u8) bool,
+    allowInboundRequestFn: *const fn (ptr: *anyopaque, peer_id: ?[]const u8, method: protocol.Method, request_bytes: []const u8) ReqRespServerDecision,
 
-    pub fn allowInboundRequest(self: *const ReqRespServerPolicy, peer_id: ?[]const u8, method: protocol.Method, request_bytes: []const u8) bool {
+    pub fn allowInboundRequest(self: *const ReqRespServerPolicy, peer_id: ?[]const u8, method: protocol.Method, request_bytes: []const u8) ReqRespServerDecision {
         return self.allowInboundRequestFn(self.ptr, peer_id, method, request_bytes);
     }
 };
 
 fn peerIdFromCtx(ctx: anytype) ?[]const u8 {
     return if (@hasField(@TypeOf(ctx), "peer_id")) ctx.peer_id else null;
+}
+
+fn requestElapsedSeconds(io: Io, started_ns: i128) f64 {
+    const now_ns = std.Io.Clock.awake.now(io).nanoseconds;
+    const elapsed_ns = @max(now_ns - started_ns, 0);
+    return @as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(std.time.ns_per_s));
+}
+
+fn notifyRequestCompleted(
+    context: *const ReqRespContext,
+    io: Io,
+    method: protocol.Method,
+    started_ns: i128,
+    outcome: ReqRespRequestOutcome,
+) void {
+    context.onRequestCompleted(context.ptr, method, outcome, requestElapsedSeconds(io, started_ns));
 }
 
 fn makeProtocolHandler(
@@ -57,19 +81,30 @@ fn makeProtocolHandler(
                 .stream = stream,
             };
             var response_writer = response_writer_ctx.asWriter();
+            const started_ns = std.Io.Clock.awake.now(io).nanoseconds;
 
             const request_bytes = req_resp_encoding.readRequestFromStream(self.allocator, io, stream) catch |err| {
                 log.warn("{s} request decode error: {}", .{ id, err });
                 try response_writer.writeError(.invalid_request, "Malformed request");
+                notifyRequestCompleted(self.context, io, method, started_ns, .decode_error);
                 stream.closeWrite(io);
                 return;
             };
             defer self.allocator.free(request_bytes);
 
             if (self.server_policy) |server_policy| {
-                if (!server_policy.allowInboundRequest(peerIdFromCtx(ctx), method, request_bytes)) {
-                    stream.closeWrite(io);
-                    return;
+                switch (server_policy.allowInboundRequest(peerIdFromCtx(ctx), method, request_bytes)) {
+                    .allow => {},
+                    .deny_peer => {
+                        notifyRequestCompleted(self.context, io, method, started_ns, .rate_limited_peer);
+                        stream.closeWrite(io);
+                        return;
+                    },
+                    .deny_global => {
+                        notifyRequestCompleted(self.context, io, method, started_ns, .rate_limited_global);
+                        stream.closeWrite(io);
+                        return;
+                    },
                 }
             }
 
@@ -83,9 +118,22 @@ fn makeProtocolHandler(
                 &response_writer,
             ) catch |err| {
                 log.warn("{s} handler error: {}", .{ id, err });
+                notifyRequestCompleted(self.context, io, method, started_ns, .internal_error);
                 try response_writer.writeError(.server_error, "Internal server error");
+                stream.closeWrite(io);
+                return;
             };
 
+            notifyRequestCompleted(
+                self.context,
+                io,
+                method,
+                started_ns,
+                if (response_writer_ctx.first_result) |result|
+                    protocol.ReqRespRequestOutcome.fromResponseCode(result)
+                else
+                    .internal_error,
+            );
             stream.closeWrite(io);
         }
 
@@ -121,6 +169,7 @@ fn StreamResponseWriter(comptime StreamPtr: type) type {
         allocator: Allocator,
         io: Io,
         stream: StreamPtr,
+        first_result: ?protocol.ResponseCode = null,
 
         fn asWriter(self: *@This()) req_resp_handler.ResponseWriter {
             return .{
@@ -131,6 +180,7 @@ fn StreamResponseWriter(comptime StreamPtr: type) type {
 
         fn writeChunk(ptr: *anyopaque, chunk: ResponseChunk) anyerror!void {
             const self: *@This() = @ptrCast(@alignCast(ptr));
+            if (self.first_result == null) self.first_result = chunk.result;
             return req_resp_encoding.writeResponseChunkToStream(
                 self.allocator,
                 self.io,

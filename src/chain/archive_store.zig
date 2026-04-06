@@ -114,8 +114,31 @@ pub const FinalizedCheckpoint = struct {
     root: [32]u8,
 };
 
+pub const MetricsSnapshot = struct {
+    runs_total: u64 = 0,
+    failures_total: u64 = 0,
+    finalized_slots_advanced_total: u64 = 0,
+    state_epochs_archived_total: u64 = 0,
+    run_milliseconds_total: u64 = 0,
+    last_slots_advanced: u64 = 0,
+    last_batch_ops: u64 = 0,
+    last_run_milliseconds: u64 = 0,
+};
+
+const StateArchiveOpsResult = struct {
+    last_archived_epoch: ?u64 = null,
+    archived_count: u64 = 0,
+};
+
+const CatchUpResult = struct {
+    slots_advanced: u64 = 0,
+    state_epochs_archived: u64 = 0,
+    batch_ops: u64 = 0,
+};
+
 pub const ArchiveStore = struct {
     allocator: Allocator,
+    io: std.Io,
     db: *BeaconDB,
     state_regen: *StateRegen,
     config: ArchiveConfig,
@@ -124,24 +147,32 @@ pub const ArchiveStore = struct {
     last_archived_state_epoch: u64,
     /// Last finalized slot we have processed.
     last_finalized_slot: u64,
+    metrics: MetricsSnapshot,
 
     pub fn init(
         allocator: Allocator,
+        io: std.Io,
         db: *BeaconDB,
         state_regen: *StateRegen,
         config: ArchiveConfig,
     ) ArchiveStore {
         return .{
             .allocator = allocator,
+            .io = io,
             .db = db,
             .state_regen = state_regen,
             .config = config,
             .last_archived_state_epoch = 0,
             .last_finalized_slot = 0,
+            .metrics = .{},
         };
     }
 
     pub fn deinit(_: *ArchiveStore) void {}
+
+    pub fn metricsSnapshot(self: *const ArchiveStore) MetricsSnapshot {
+        return self.metrics;
+    }
 
     pub fn restoreProgress(self: *ArchiveStore, finalized_slot: Slot) !void {
         const persisted_finalized_slot = try self.db.getChainInfoU64(.archive_finalized_slot) orelse 0;
@@ -174,12 +205,20 @@ pub const ArchiveStore = struct {
     ) !void {
         const finalized_slot = plan.finalized_slot;
         if (finalized_slot <= self.last_finalized_slot) return;
+
         const from_slot = self.last_finalized_slot + 1;
+        const started_at_ns = std.Io.Timestamp.now(self.io, .awake).toNanoseconds();
+        errdefer self.metrics.failures_total += 1;
+
         try self.persistFinalizedIndices(plan, from_slot);
-        try self.catchUpToFinalized(.{
+        const result = try self.catchUpToFinalizedPersisted(.{
             .epoch = plan.finalized_epoch,
             .root = plan.finalized_root,
         }, block_to_state);
+        self.recordCatchUpMetrics(result, elapsedMilliseconds(
+            started_at_ns,
+            std.Io.Timestamp.now(self.io, .awake).toNanoseconds(),
+        ));
     }
 
     /// Archive finalized history up to the given checkpoint using the durable
@@ -192,6 +231,23 @@ pub const ArchiveStore = struct {
         const finalized_slot = checkpoint.epoch * preset.SLOTS_PER_EPOCH;
         if (finalized_slot <= self.last_finalized_slot) return;
 
+        const started_at_ns = std.Io.Timestamp.now(self.io, .awake).toNanoseconds();
+        errdefer self.metrics.failures_total += 1;
+        const result = try self.catchUpToFinalizedPersisted(checkpoint, block_to_state);
+        self.recordCatchUpMetrics(result, elapsedMilliseconds(
+            started_at_ns,
+            std.Io.Timestamp.now(self.io, .awake).toNanoseconds(),
+        ));
+    }
+
+    fn catchUpToFinalizedPersisted(
+        self: *ArchiveStore,
+        checkpoint: FinalizedCheckpoint,
+        block_to_state: *const BlockToStateMap,
+    ) !CatchUpResult {
+        const finalized_slot = checkpoint.epoch * preset.SLOTS_PER_EPOCH;
+        if (finalized_slot <= self.last_finalized_slot) return .{};
+
         const from_slot = self.last_finalized_slot + 1;
         const to_slot = finalized_slot;
 
@@ -200,22 +256,47 @@ pub const ArchiveStore = struct {
 
         try self.appendFinalizedRangeOps(&batch, from_slot, to_slot);
 
-        const archived_state_epoch = try self.appendDueStateArchiveOps(
+        const state_archive = try self.appendDueStateArchiveOps(
             &batch,
             checkpoint.epoch,
             block_to_state,
         );
 
-        try self.appendProgressOps(&batch, finalized_slot, archived_state_epoch);
+        const batch_ops: u64 = @intCast(batch.ops.items.len);
+        try self.appendProgressOps(&batch, finalized_slot, state_archive.last_archived_epoch);
         try self.db.writeBatch(batch.ops.items);
 
         self.last_finalized_slot = finalized_slot;
-        if (archived_state_epoch) |epoch| {
+        if (state_archive.last_archived_epoch) |epoch| {
             self.last_archived_state_epoch = epoch;
         }
         std.log.info("ArchiveStore: archived slots {d}..{d} (epoch {d})", .{
             from_slot, to_slot, checkpoint.epoch,
         });
+        return .{
+            .slots_advanced = finalized_slot - from_slot + 1,
+            .state_epochs_archived = state_archive.archived_count,
+            .batch_ops = batch_ops,
+        };
+    }
+
+    fn recordCatchUpMetrics(
+        self: *ArchiveStore,
+        result: CatchUpResult,
+        elapsed_milliseconds: u64,
+    ) void {
+        self.metrics.runs_total += 1;
+        self.metrics.finalized_slots_advanced_total += result.slots_advanced;
+        self.metrics.state_epochs_archived_total += result.state_epochs_archived;
+        self.metrics.run_milliseconds_total += elapsed_milliseconds;
+        self.metrics.last_slots_advanced = result.slots_advanced;
+        self.metrics.last_batch_ops = result.batch_ops;
+        self.metrics.last_run_milliseconds = elapsed_milliseconds;
+    }
+
+    fn elapsedMilliseconds(started_at_ns: i128, ended_at_ns: i128) u64 {
+        if (ended_at_ns <= started_at_ns) return 0;
+        return @intCast(@divTrunc(ended_at_ns - started_at_ns, std.time.ns_per_ms));
     }
 
     /// Move blocks for slots [from_slot, to_slot] from hot DB to archive.
@@ -327,19 +408,22 @@ pub const ArchiveStore = struct {
         batch: *FinalizationBatch,
         finalized_epoch: u64,
         block_to_state: *const BlockToStateMap,
-    ) !?u64 {
+    ) !StateArchiveOpsResult {
         const frequency = self.config.state_archive_every_n_epochs;
-        if (frequency == 0) return null;
+        if (frequency == 0) return .{};
 
         var next_epoch = if (self.last_archived_state_epoch == 0)
             frequency
         else
             self.last_archived_state_epoch + frequency;
-        var archived_state_epoch: ?u64 = null;
+        var result: StateArchiveOpsResult = .{};
 
         while (next_epoch <= finalized_epoch) : (next_epoch += frequency) {
             if (self.appendStateArchiveAtEpochOps(batch, next_epoch, block_to_state)) |did_archive| {
-                if (did_archive) archived_state_epoch = next_epoch;
+                if (did_archive) {
+                    result.last_archived_epoch = next_epoch;
+                    result.archived_count += 1;
+                }
             } else |err| switch (err) {
                 error.MissingFinalizedStateArchiveSource => {
                     std.log.debug(
@@ -352,7 +436,7 @@ pub const ArchiveStore = struct {
             }
         }
 
-        return archived_state_epoch;
+        return result;
     }
 
     fn appendFinalizedIndexOps(
@@ -585,7 +669,7 @@ test "ArchiveStore: init/deinit is safe" {
     var fixture = try RegenRuntimeFixture.init(std.testing.allocator, 16);
     defer fixture.deinit();
 
-    var store = ArchiveStore.init(std.testing.allocator, fixture.db, fixture.regen, .{});
+    var store = ArchiveStore.init(std.testing.allocator, std.testing.io, fixture.db, fixture.regen, .{});
     defer store.deinit();
 
     try std.testing.expectEqual(@as(u64, 0), store.last_finalized_slot);
@@ -595,7 +679,7 @@ test "ArchiveStore: archiveBlocks moves data from hot to archive" {
     var fixture = try RegenRuntimeFixture.init(std.testing.allocator, 16);
     defer fixture.deinit();
 
-    var store = ArchiveStore.init(std.testing.allocator, fixture.db, fixture.regen, .{
+    var store = ArchiveStore.init(std.testing.allocator, std.testing.io, fixture.db, fixture.regen, .{
         .state_archive_every_n_epochs = 1024,
         .prune_hot_blocks_after_archive = true,
     });
@@ -685,7 +769,7 @@ test "ArchiveStore: onFinalized archives epoch boundary state" {
     defer block_to_parent.deinit();
     try block_to_parent.put(block_root, [_]u8{0xAA} ** 32);
 
-    var store = ArchiveStore.init(allocator, fixture.db, fixture.regen, .{
+    var store = ArchiveStore.init(allocator, std.testing.io, fixture.db, fixture.regen, .{
         .state_archive_every_n_epochs = 1,
         .prune_hot_blocks_after_archive = true,
     });
@@ -738,7 +822,7 @@ test "ArchiveStore: onFinalized archives blocks even when state snapshot source 
     defer block_to_state.deinit();
     try block_to_state.put(block_root, state_root);
 
-    var store = ArchiveStore.init(allocator, fixture.db, fixture.regen, .{
+    var store = ArchiveStore.init(allocator, std.testing.io, fixture.db, fixture.regen, .{
         .state_archive_every_n_epochs = 1,
         .prune_hot_blocks_after_archive = true,
     });
@@ -800,7 +884,7 @@ test "ArchiveStore: onFinalized backfills multiple due state snapshots" {
         try block_to_state.put(root, state_root);
     }
 
-    var store = ArchiveStore.init(allocator, fixture.db, fixture.regen, .{
+    var store = ArchiveStore.init(allocator, std.testing.io, fixture.db, fixture.regen, .{
         .state_archive_every_n_epochs = 2,
         .prune_hot_blocks_after_archive = true,
     });
@@ -833,7 +917,7 @@ test "ArchiveStore: restoreProgress uses persisted archive progress" {
     try fixture.db.putChainInfoU64(.archive_finalized_slot, 64);
     try fixture.db.putChainInfoU64(.archive_state_epoch, 8);
 
-    var store = ArchiveStore.init(allocator, fixture.db, fixture.regen, .{});
+    var store = ArchiveStore.init(allocator, std.testing.io, fixture.db, fixture.regen, .{});
     defer store.deinit();
 
     try store.restoreProgress(128);
@@ -852,7 +936,7 @@ test "ArchiveStore: restoreProgress derives archived progress without metadata" 
     try fixture.db.putBlockArchiveCanonical(32, root_a, [_]u8{0x21} ** 32, "block_a");
     try fixture.db.putBlockArchiveCanonical(64, root_b, root_a, "block_b");
 
-    var store = ArchiveStore.init(allocator, fixture.db, fixture.regen, .{});
+    var store = ArchiveStore.init(allocator, std.testing.io, fixture.db, fixture.regen, .{});
     defer store.deinit();
 
     try store.restoreProgress(128);
@@ -883,7 +967,7 @@ test "ArchiveStore: onFinalized repairs missing finalized parent-root index" {
     var block_to_state = BlockToStateMap.init(allocator);
     defer block_to_state.deinit();
 
-    var store = ArchiveStore.init(allocator, fixture.db, fixture.regen, .{
+    var store = ArchiveStore.init(allocator, std.testing.io, fixture.db, fixture.regen, .{
         .state_archive_every_n_epochs = 1024,
         .prune_hot_blocks_after_archive = true,
     });
@@ -919,7 +1003,7 @@ test "ArchiveStore: onFinalized persists finalized indices before archival compl
     var block_to_state = BlockToStateMap.init(allocator);
     defer block_to_state.deinit();
 
-    var store = ArchiveStore.init(allocator, fixture.db, fixture.regen, .{});
+    var store = ArchiveStore.init(allocator, std.testing.io, fixture.db, fixture.regen, .{});
     defer store.deinit();
 
     var plan = try testFinalizationPlan(allocator, 1, root, &slot_to_root, &block_to_parent);
@@ -967,7 +1051,7 @@ test "ArchiveStore: onFinalized retries archival from durable finalized indices"
     var block_to_state = BlockToStateMap.init(allocator);
     defer block_to_state.deinit();
 
-    var store = ArchiveStore.init(allocator, fixture.db, fixture.regen, .{});
+    var store = ArchiveStore.init(allocator, std.testing.io, fixture.db, fixture.regen, .{});
     defer store.deinit();
 
     var initial_plan = try testFinalizationPlan(allocator, 1, root, &initial_slot_to_root, &initial_block_to_parent);
@@ -1002,7 +1086,7 @@ test "ArchiveStore: archiveBlocks archives blob sidecars and data columns" {
     var fixture = try RegenRuntimeFixture.init(allocator, 16);
     defer fixture.deinit();
 
-    var store = ArchiveStore.init(allocator, fixture.db, fixture.regen, .{
+    var store = ArchiveStore.init(allocator, std.testing.io, fixture.db, fixture.regen, .{
         .prune_hot_blocks_after_archive = true,
         .prune_hot_blobs_after_archive = true,
         .prune_hot_data_columns_after_archive = true,

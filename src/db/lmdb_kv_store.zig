@@ -16,6 +16,7 @@ const KVStore = kv_store.KVStore;
 const BatchOp = kv_store.BatchOp;
 const buckets = @import("buckets.zig");
 const DatabaseId = buckets.DatabaseId;
+const DatabaseMetrics = @import("metrics.zig").MetricsSnapshot;
 
 pub const LmdbKVStore = struct {
     allocator: Allocator,
@@ -67,7 +68,7 @@ pub const LmdbKVStore = struct {
         };
     }
 
-    fn getDbi(self: *LmdbKVStore, db_id: DatabaseId) lmdb.Dbi {
+    fn getDbi(self: *const LmdbKVStore, db_id: DatabaseId) lmdb.Dbi {
         return self.dbis[@intFromEnum(db_id)];
     }
 
@@ -77,6 +78,34 @@ pub const LmdbKVStore = struct {
             self.env.close();
             self.closed = true;
         }
+    }
+
+    pub fn metricsSnapshot(self: *const LmdbKVStore) !DatabaseMetrics {
+        if (self.closed) return error.StoreClosed;
+
+        var txn = try self.env.beginTxn(.{ .read_only = true });
+        defer txn.abort();
+
+        const env_info = try self.env.info();
+        const env_stat = try self.env.stat();
+
+        var snapshot: DatabaseMetrics = .{
+            .lmdb_map_size_bytes = @intCast(env_info.me_mapsize),
+            .lmdb_page_size_bytes = @intCast(env_stat.ms_psize),
+            .lmdb_last_page_number = @intCast(env_info.me_last_pgno),
+            .lmdb_last_txnid = @intCast(env_info.me_last_txnid),
+            .lmdb_readers_used = @intCast(env_info.me_numreaders),
+            .lmdb_readers_max = @intCast(env_info.me_maxreaders),
+        };
+        snapshot.lmdb_data_size_bytes = snapshot.lmdb_page_size_bytes * (snapshot.lmdb_last_page_number + 1);
+
+        for (DatabaseId.all, 0..) |db_id, i| {
+            const stat = try txn.statDbi(self.getDbi(db_id));
+            const entries: u64 = @intCast(stat.ms_entries);
+            snapshot.entry_counts[i] = entries;
+            snapshot.total_entries += entries;
+        }
+        return snapshot;
     }
 
     // ---- VTable ----

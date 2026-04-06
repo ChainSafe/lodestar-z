@@ -33,6 +33,7 @@ const ValidatorMonitor = chain_mod.ValidatorMonitor;
 const block_production_mod = @import("block_production.zig");
 const execution_mod = @import("execution");
 const api_rewards = @import("api_rewards.zig");
+const BeaconMetrics = @import("metrics.zig").BeaconMetrics;
 
 pub const ApiBindings = struct {
     block_import_ctx: *BlockImportCallbackCtx,
@@ -99,7 +100,10 @@ pub const ApiBindings = struct {
 
         bindings.notification_sink_ctx = try allocator.create(ChainNotificationSinkCtx);
         errdefer allocator.destroy(bindings.notification_sink_ctx);
-        bindings.notification_sink_ctx.* = .{ .event_bus = node.event_bus };
+        bindings.notification_sink_ctx.* = .{
+            .event_bus = node.event_bus,
+            .metrics = node.metrics,
+        };
 
         bindings.produce_block_ctx = try allocator.create(ProduceBlockCallbackCtx);
         errdefer allocator.destroy(bindings.produce_block_ctx);
@@ -283,6 +287,7 @@ pub const ValidatorMonitorCallbackCtx = struct {
 
 pub const ChainNotificationSinkCtx = struct {
     event_bus: *api_mod.EventBus,
+    metrics: ?*BeaconMetrics = null,
 };
 
 pub const ProduceBlockCallbackCtx = struct {
@@ -860,15 +865,18 @@ fn publishChainNotificationFn(ptr: *anyopaque, notification: chain_mod.ChainNoti
             .root = e.root,
             .state_root = e.state_root,
         } },
-        .chain_reorg => |e| .{ .chain_reorg = .{
-            .slot = e.slot,
-            .depth = e.depth,
-            .old_head_root = e.old_head_root,
-            .new_head_root = e.new_head_root,
-            .old_state_root = e.old_state_root,
-            .new_state_root = e.new_state_root,
-            .epoch = e.epoch,
-        } },
+        .chain_reorg => |e| blk: {
+            if (ctx.metrics) |metrics| metrics.observeChainReorg(e.depth);
+            break :blk .{ .chain_reorg = .{
+                .slot = e.slot,
+                .depth = e.depth,
+                .old_head_root = e.old_head_root,
+                .new_head_root = e.new_head_root,
+                .old_state_root = e.old_state_root,
+                .new_state_root = e.new_state_root,
+                .epoch = e.epoch,
+            } };
+        },
         .attestation => |e| .{ .attestation = .{
             .aggregation_bits = e.aggregation_bits,
             .slot = e.slot,

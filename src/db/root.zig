@@ -33,6 +33,9 @@ pub const Dbi = lmdb.Dbi;
 pub const lmdb_kv_store = @import("lmdb_kv_store.zig");
 pub const LmdbKVStore = lmdb_kv_store.LmdbKVStore;
 
+pub const metrics = @import("metrics.zig");
+pub const MetricsSnapshot = metrics.MetricsSnapshot;
+
 pub const beacon_db = @import("beacon_db.zig");
 pub const BeaconDB = beacon_db.BeaconDB;
 

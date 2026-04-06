@@ -25,6 +25,7 @@ const db_mod = @import("db");
 const BeaconDB = db_mod.BeaconDB;
 const MemoryKVStore = db_mod.MemoryKVStore;
 const LmdbKVStore = db_mod.LmdbKVStore;
+const DatabaseMetricsSnapshot = db_mod.MetricsSnapshot;
 
 const Chain = @import("chain.zig").Chain;
 const HeadTracker = @import("block_import.zig").HeadTracker;
@@ -364,7 +365,7 @@ fn initOwnedGraph(
 
     const archive_store = try allocator.create(ArchiveStore);
     errdefer allocator.destroy(archive_store);
-    archive_store.* = ArchiveStore.init(allocator, db, regen, .{});
+    archive_store.* = ArchiveStore.init(allocator, io, db, regen, .{});
     errdefer archive_store.deinit();
 
     const pending_block_ingress = try allocator.create(PendingBlockIngress);
@@ -472,6 +473,51 @@ fn runtimeFromOwnedGraph(
     };
 }
 
+pub const MetricsSnapshot = struct {
+    block_state_cache_entries: u64,
+    checkpoint_state_cache_entries: u64,
+    checkpoint_state_datastore_entries: u64,
+    queued_state_regen_cache_hits: u64,
+    queued_state_regen_queue_hits: u64,
+    queued_state_regen_dropped: u64,
+    queued_state_regen_queue_len: u64,
+    forkchoice_nodes: u64,
+    forkchoice_block_roots: u64,
+    forkchoice_votes: u64,
+    forkchoice_queued_attestation_slots: u64,
+    forkchoice_queued_attestations_previous_slot: u64,
+    forkchoice_validated_attestation_data_roots: u64,
+    forkchoice_equivocating_validators: u64,
+    forkchoice_proposer_boost_active: bool,
+    archive_last_finalized_slot: u64,
+    archive_last_archived_state_epoch: u64,
+    archive_runs_total: u64,
+    archive_failures_total: u64,
+    archive_finalized_slots_advanced_total: u64,
+    archive_state_epochs_archived_total: u64,
+    archive_run_milliseconds_total: u64,
+    archive_last_slots_advanced: u64,
+    archive_last_batch_ops: u64,
+    archive_last_run_milliseconds: u64,
+    validator_monitor_monitored_validators: u64,
+    validator_monitor_last_processed_epoch: u64,
+    attestation_pool_groups: u64,
+    aggregate_attestation_pool_groups: u64,
+    aggregate_attestation_pool_entries: u64,
+    voluntary_exit_pool_size: u64,
+    proposer_slashing_pool_size: u64,
+    attester_slashing_pool_size: u64,
+    bls_to_execution_change_pool_size: u64,
+    sync_committee_message_pool_size: u64,
+    sync_contribution_pool_size: u64,
+    beacon_proposer_cache_entries: u64,
+    pending_block_ingress_size: u64,
+    pending_payload_envelope_ingress_size: u64,
+    da_blob_tracker_entries: u64,
+    da_column_tracker_entries: u64,
+    da_pending_blocks: u64,
+};
+
 pub const Runtime = struct {
     allocator: Allocator,
     config: *const BeaconConfig,
@@ -517,6 +563,69 @@ pub const Runtime = struct {
 
     pub fn setValidatorMonitor(self: *Runtime, indices: []const u64) !void {
         try self.chain.replaceValidatorMonitor(indices);
+    }
+
+    pub fn metricsSnapshot(self: *const Runtime) MetricsSnapshot {
+        const queued_regen_metrics = self.chain.queued_regen.getMetrics();
+        const da_metrics = self.da_manager.metricsSnapshot();
+        const forkchoice_metrics = if (self.chain.fork_choice_storage) |fc|
+            fc.metricsSnapshot()
+        else
+            @import("fork_choice").MetricsSnapshot{};
+        const archive_store = self.archive_store;
+        const archive_metrics = archive_store.metricsSnapshot();
+        const validator_monitor = self.chain.validator_monitor;
+        return .{
+            .block_state_cache_entries = @intCast(self.block_state_cache.size()),
+            .checkpoint_state_cache_entries = @intCast(self.checkpoint_state_cache.size()),
+            .checkpoint_state_datastore_entries = @intCast(self.cp_datastore.count()),
+            .queued_state_regen_cache_hits = queued_regen_metrics.cache_hits,
+            .queued_state_regen_queue_hits = queued_regen_metrics.queue_hits,
+            .queued_state_regen_dropped = queued_regen_metrics.dropped,
+            .queued_state_regen_queue_len = @intCast(queued_regen_metrics.queue_len),
+            .forkchoice_nodes = forkchoice_metrics.proto_array_nodes,
+            .forkchoice_block_roots = forkchoice_metrics.proto_array_block_roots,
+            .forkchoice_votes = forkchoice_metrics.votes,
+            .forkchoice_queued_attestation_slots = forkchoice_metrics.queued_attestation_slots,
+            .forkchoice_queued_attestations_previous_slot = forkchoice_metrics.queued_attestations_previous_slot,
+            .forkchoice_validated_attestation_data_roots = forkchoice_metrics.validated_attestation_data_roots,
+            .forkchoice_equivocating_validators = forkchoice_metrics.equivocating_validators,
+            .forkchoice_proposer_boost_active = forkchoice_metrics.proposer_boost_active,
+            .archive_last_finalized_slot = archive_store.last_finalized_slot,
+            .archive_last_archived_state_epoch = archive_store.last_archived_state_epoch,
+            .archive_runs_total = archive_metrics.runs_total,
+            .archive_failures_total = archive_metrics.failures_total,
+            .archive_finalized_slots_advanced_total = archive_metrics.finalized_slots_advanced_total,
+            .archive_state_epochs_archived_total = archive_metrics.state_epochs_archived_total,
+            .archive_run_milliseconds_total = archive_metrics.run_milliseconds_total,
+            .archive_last_slots_advanced = archive_metrics.last_slots_advanced,
+            .archive_last_batch_ops = archive_metrics.last_batch_ops,
+            .archive_last_run_milliseconds = archive_metrics.last_run_milliseconds,
+            .validator_monitor_monitored_validators = if (validator_monitor) |monitor| @intCast(monitor.monitoredCount()) else 0,
+            .validator_monitor_last_processed_epoch = if (validator_monitor) |monitor| monitor.last_processed_epoch orelse 0 else 0,
+            .attestation_pool_groups = @intCast(self.op_pool.attestation_pool.groupCount()),
+            .aggregate_attestation_pool_groups = @intCast(self.op_pool.agg_attestation_pool.groupCount()),
+            .aggregate_attestation_pool_entries = @intCast(self.op_pool.agg_attestation_pool.entryCount()),
+            .voluntary_exit_pool_size = @intCast(self.op_pool.voluntary_exit_pool.size()),
+            .proposer_slashing_pool_size = @intCast(self.op_pool.proposer_slashing_pool.size()),
+            .attester_slashing_pool_size = @intCast(self.op_pool.attester_slashing_pool.size()),
+            .bls_to_execution_change_pool_size = @intCast(self.op_pool.bls_change_pool.size()),
+            .sync_committee_message_pool_size = @intCast(self.sync_committee_message_pool.size()),
+            .sync_contribution_pool_size = @intCast(self.sync_contribution_pool.size()),
+            .beacon_proposer_cache_entries = @intCast(self.beacon_proposer_cache.len()),
+            .pending_block_ingress_size = @intCast(self.pending_block_ingress.len()),
+            .pending_payload_envelope_ingress_size = @intCast(self.payload_envelope_ingress.len()),
+            .da_blob_tracker_entries = @intCast(da_metrics.blob_tracker_entries),
+            .da_column_tracker_entries = @intCast(da_metrics.column_tracker_entries),
+            .da_pending_blocks = @intCast(da_metrics.pending_blocks),
+        };
+    }
+
+    pub fn storageMetricsSnapshot(self: *Runtime) !DatabaseMetricsSnapshot {
+        return switch (self.storage_backend) {
+            .memory => |store| store.metricsSnapshot(),
+            .lmdb => |store| try store.metricsSnapshot(),
+        };
     }
 
     pub fn deinit(self: *Runtime) void {

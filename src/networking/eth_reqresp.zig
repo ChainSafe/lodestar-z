@@ -231,6 +231,8 @@ fn testOnGoodbye(_: *anyopaque, _: ?[]const u8, _: u64) void {}
 
 fn testOnPeerStatus(_: *anyopaque, _: ?[]const u8, _: messages.StatusMessage.Type, _: ?u64) void {}
 
+fn testOnRequestCompleted(_: *anyopaque, _: protocol.Method, _: protocol.ReqRespRequestOutcome, _: f64) void {}
+
 var _test_sentinel: u8 = 0;
 const test_context = ReqRespContext{
     .ptr = &_test_sentinel,
@@ -248,6 +250,7 @@ const test_context = ReqRespContext{
     .getForkDigest = &testGetForkDigest,
     .onGoodbye = &testOnGoodbye,
     .onPeerStatus = &testOnPeerStatus,
+    .onRequestCompleted = &testOnRequestCompleted,
 };
 
 test "EthReqRespAdapter: handle status request roundtrip" {

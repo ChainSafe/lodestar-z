@@ -238,6 +238,17 @@ pub const HeadResult = struct {
     payload_status: PayloadStatus = .full,
 };
 
+pub const MetricsSnapshot = struct {
+    proto_array_nodes: u64 = 0,
+    proto_array_block_roots: u64 = 0,
+    votes: u64 = 0,
+    queued_attestation_slots: u64 = 0,
+    queued_attestations_previous_slot: u64 = 0,
+    validated_attestation_data_roots: u64 = 0,
+    equivocating_validators: u64 = 0,
+    proposer_boost_active: bool = false,
+};
+
 // ── ForkChoice ──
 
 /// High-level fork choice struct wrapping ProtoArray, Votes, and checkpoint state.
@@ -1896,6 +1907,19 @@ pub const ForkChoice = struct {
     }
 
     // ── Debug / metrics ──
+
+    pub fn metricsSnapshot(self: *const ForkChoice) MetricsSnapshot {
+        return .{
+            .proto_array_nodes = @intCast(self.proto_array.nodes.items.len),
+            .proto_array_block_roots = @intCast(self.proto_array.length()),
+            .votes = @intCast(self.votes.len()),
+            .queued_attestation_slots = @intCast(self.queued_attestations.count()),
+            .queued_attestations_previous_slot = self.queued_attestations_previous_slot,
+            .validated_attestation_data_roots = @intCast(self.validated_attestation_datas.count()),
+            .equivocating_validators = @intCast(self.fc_store.equivocating_indices.count()),
+            .proposer_boost_active = self.proposer_boost_root != null,
+        };
+    }
 
     /// Get all leaf nodes (heads of chains).
     pub fn getHeads(self: *const ForkChoice, allocator: Allocator) ![]ProtoBlock {

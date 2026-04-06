@@ -99,4 +99,8 @@ pub const PayloadEnvelopeIngress = struct {
 
         return to_remove.items.len;
     }
+
+    pub fn len(self: *const PayloadEnvelopeIngress) usize {
+        return self.pending.count();
+    }
 };

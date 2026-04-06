@@ -269,8 +269,9 @@ pub const BlockImportError = error{
 pub const BatchBlockResult = union(enum) {
     /// Block was successfully verified and imported.
     success: ImportResult,
-    /// Block was skipped (already known, finalized, etc.)
-    skipped: void,
+    /// Block was skipped (already known, finalized, etc.), with the concrete
+    /// import error preserved for metrics and caller accounting.
+    skipped: BlockImportError,
     /// Block failed verification.
     failed: BlockImportError,
 };

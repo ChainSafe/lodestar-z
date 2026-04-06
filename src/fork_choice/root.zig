@@ -70,6 +70,7 @@ pub const CheckpointWithPayloadAndBalance = fork_choice.CheckpointWithPayloadAnd
 pub const CheckpointWithPayloadAndTotalBalance = fork_choice.CheckpointWithPayloadAndTotalBalance;
 pub const onBlockFromProto = fork_choice.onBlockFromProto;
 pub const HeadResult = fork_choice.HeadResult;
+pub const MetricsSnapshot = fork_choice.MetricsSnapshot;
 pub const initFromAnchor = fork_choice.initFromAnchor;
 pub const destroyFromAnchor = fork_choice.destroyFromAnchor;
 

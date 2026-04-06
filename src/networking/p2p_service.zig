@@ -477,6 +477,10 @@ pub const P2pService = struct {
         self.req_resp_self_limiter.pruneInactive(io);
     }
 
+    pub fn reqRespSelfLimiterPeerCount(self: *Self, io: Io) usize {
+        return self.req_resp_self_limiter.peerCount(io);
+    }
+
     /// Ask libp2p to open an outbound gossipsub stream to a connected peer.
     pub fn openGossipsubStream(self: *Self, io: Io, peer_id: []const u8) !void {
         try self.newStream(io, peer_id, GossipsubHandler, null);
@@ -595,7 +599,7 @@ pub const P2pService = struct {
     /// Spawn a background fiber for the gossipsub heartbeat timer.
     fn startHeartbeat(self: *Self, io: Io) void {
         switch (self.network) {
-            inline else => |*network| network.background.@"async"(io, heartbeatLoop, .{ self.gossipsub, io }),
+            inline else => |*network| network.background.async(io, heartbeatLoop, .{ self.gossipsub, io }),
         }
     }
 

@@ -37,6 +37,30 @@ pub const ResponseCode = enum(u8) {
     }
 };
 
+/// Normalized req/resp request outcomes for observability.
+pub const ReqRespRequestOutcome = enum {
+    success,
+    invalid_request,
+    server_error,
+    resource_unavailable,
+    decode_error,
+    rate_limited_peer,
+    rate_limited_global,
+    malformed_response,
+    self_rate_limited,
+    transport_error,
+    internal_error,
+
+    pub fn fromResponseCode(code: ResponseCode) ReqRespRequestOutcome {
+        return switch (code) {
+            .success => .success,
+            .invalid_request => .invalid_request,
+            .server_error => .server_error,
+            .resource_unavailable => .resource_unavailable,
+        };
+    }
+};
+
 /// The encoding used for the wire protocol.
 pub const Encoding = enum {
     ssz_snappy,

@@ -44,8 +44,9 @@ const Root = [32]u8;
 pub const SanityOutcome = union(enum) {
     /// Block passed sanity checks and should proceed through the pipeline.
     valid: SanityResult,
-    /// Block was intentionally skipped (ignore_if_known / ignore_if_finalized).
-    skipped: void,
+    /// Block was intentionally skipped (ignore_if_known / ignore_if_finalized),
+    /// preserving the concrete skip reason for batch metrics and callers.
+    skipped: BlockImportError,
 };
 
 // ---------------------------------------------------------------------------
@@ -107,7 +108,7 @@ pub fn verifySanity(
 
     // 1. Not genesis block.
     if (block_slot == 0) {
-        if (opts.ignore_if_known) return .{ .skipped = {} };
+        if (opts.ignore_if_known) return .{ .skipped = BlockImportError.GenesisBlock };
         return BlockImportError.GenesisBlock;
     }
 
@@ -116,7 +117,7 @@ pub fn verifySanity(
     // Note: the finalized block itself has block_slot == finalized_slot, so rejecting <= is correct.
     const finalized_slot = fork_choice.getFinalizedCheckpoint().epoch * preset.SLOTS_PER_EPOCH;
     if (block_slot <= finalized_slot) {
-        if (opts.ignore_if_finalized) return .{ .skipped = {} };
+        if (opts.ignore_if_finalized) return .{ .skipped = BlockImportError.WouldRevertFinalizedSlot };
         return BlockImportError.WouldRevertFinalizedSlot;
     }
 
@@ -130,7 +131,7 @@ pub fn verifySanity(
 
     // 4. Not already known.
     if (fork_choice.hasBlock(block_root)) {
-        if (opts.ignore_if_known) return .{ .skipped = {} };
+        if (opts.ignore_if_known) return .{ .skipped = BlockImportError.AlreadyKnown };
         return BlockImportError.AlreadyKnown;
     }
 
@@ -162,7 +163,7 @@ pub fn verifySanity(
 // ---------------------------------------------------------------------------
 
 test "SanityOutcome union layout" {
-    const outcome = SanityOutcome{ .skipped = {} };
+    const outcome = SanityOutcome{ .skipped = BlockImportError.AlreadyKnown };
     try std.testing.expect(outcome == .skipped);
 }
 

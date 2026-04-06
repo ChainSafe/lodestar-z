@@ -186,7 +186,10 @@ pub const PreparedBlockImport = struct {
 };
 
 pub const BlockPlanResult = union(enum) {
-    skipped: ImportResult,
+    skipped: struct {
+        result: ImportResult,
+        reason: BlockImportError,
+    },
     planned: PlannedBlockImport,
 };
 
@@ -207,7 +210,7 @@ pub fn processBlock(
 ) BlockImportError!ImportResult {
     const plan_result = try planBlockForImport(ctx, block_input, opts);
     return switch (plan_result) {
-        .skipped => |result| result,
+        .skipped => |skip| skip.result,
         .planned => |planned| {
             const prepared = try executePlannedBlockImport(
                 ctx.allocator,
@@ -248,18 +251,21 @@ pub fn planBlockForImport(
     );
 
     switch (sanity_outcome) {
-        .skipped => {
+        .skipped => |reason| {
             // Block was intentionally skipped (ignore_if_known/finalized).
-            // Return a synthetic result.
+            // Return a synthetic result plus the concrete skip reason.
             var block_root: [32]u8 = undefined;
             block_input.block.beaconBlock().hashTreeRoot(ctx.allocator, &block_root) catch
                 return BlockImportError.InternalError;
-            return .{ .skipped = ImportResult{
-                .block_root = block_root,
-                .state_root = [_]u8{0} ** 32,
-                .slot = block_input.block.beaconBlock().slot(),
-                .epoch_transition = false,
-                .execution_optimistic = false,
+            return .{ .skipped = .{
+                .result = ImportResult{
+                    .block_root = block_root,
+                    .state_root = [_]u8{0} ** 32,
+                    .slot = block_input.block.beaconBlock().slot(),
+                    .epoch_transition = false,
+                    .execution_optimistic = false,
+                },
+                .reason = reason,
             } };
         },
         .valid => |sanity| {
@@ -380,8 +386,8 @@ pub fn processBlockBatch(
         };
 
         switch (plan_result) {
-            .skipped => {
-                results[i] = .{ .skipped = {} };
+            .skipped => |skip| {
+                results[i] = .{ .skipped = skip.reason };
             },
             .planned => |planned| {
                 const prepared = executePlannedBlockImport(
@@ -445,7 +451,7 @@ fn processPreparedBatchBlock(
         BlockImportError.AlreadyKnown,
         BlockImportError.WouldRevertFinalizedSlot,
         BlockImportError.GenesisBlock,
-        => return .{ .skipped = {} },
+        => return .{ .skipped = err },
         else => return .{ .failed = err },
     };
     return .{ .success = result };
@@ -456,7 +462,7 @@ fn classifyBatchError(err: BlockImportError) BatchBlockResult {
         BlockImportError.AlreadyKnown,
         BlockImportError.WouldRevertFinalizedSlot,
         BlockImportError.GenesisBlock,
-        => .{ .skipped = {} },
+        => .{ .skipped = err },
         else => .{ .failed = err },
     };
 }
@@ -492,6 +498,6 @@ test "PipelineContext struct compiles" {
 }
 
 test "BatchBlockResult union layout" {
-    const result = BatchBlockResult{ .skipped = {} };
+    const result = BatchBlockResult{ .skipped = BlockImportError.AlreadyKnown };
     try std.testing.expect(result == .skipped);
 }

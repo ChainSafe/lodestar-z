@@ -72,6 +72,12 @@ pub const DaEventCallback = *const fn (block_root: Root) void;
 /// - Tracking received blobs/columns
 /// - Triggering reconstruction
 /// - Pruning old data
+pub const DataAvailabilityManagerMetrics = struct {
+    blob_tracker_entries: usize,
+    column_tracker_entries: usize,
+    pending_blocks: usize,
+};
+
 pub const DataAvailabilityManager = struct {
     allocator: Allocator,
     da_config: DaConfig,
@@ -308,6 +314,14 @@ pub const DataAvailabilityManager = struct {
             return current_slot - window_slots;
         }
         return 0;
+    }
+
+    pub fn metricsSnapshot(self: *const DataAvailabilityManager) DataAvailabilityManagerMetrics {
+        return .{
+            .blob_tracker_entries = self.blob_tracker.count(),
+            .column_tracker_entries = self.column_tracker.count(),
+            .pending_blocks = self.pending_blocks.count(),
+        };
     }
 };
 

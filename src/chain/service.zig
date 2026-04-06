@@ -271,14 +271,24 @@ pub const Service = struct {
         var imported_count: usize = 0;
         var skipped_count: usize = 0;
         var failed_count: usize = 0;
+        var optimistic_imported_count: usize = 0;
+        var epoch_transition_count: usize = 0;
+        var error_counts: chain_effects.BlockImportErrorCounts = .{};
         for (results) |result| {
             switch (result) {
                 .success => |import_result| {
                     imported_count += 1;
-                    _ = import_result;
+                    if (import_result.execution_optimistic) optimistic_imported_count += 1;
+                    if (import_result.epoch_transition) epoch_transition_count += 1;
                 },
-                .skipped => skipped_count += 1,
-                .failed => failed_count += 1,
+                .skipped => |reason| {
+                    skipped_count += 1;
+                    error_counts.incr(reason);
+                },
+                .failed => |err| {
+                    failed_count += 1;
+                    error_counts.incr(err);
+                },
             }
         }
 
@@ -288,6 +298,9 @@ pub const Service = struct {
             .imported_count = imported_count,
             .skipped_count = skipped_count,
             .failed_count = failed_count,
+            .optimistic_imported_count = optimistic_imported_count,
+            .epoch_transition_count = epoch_transition_count,
+            .error_counts = error_counts,
             .snapshot = snapshot,
             .effects = .{
                 .forkchoice_update = self.forkchoiceUpdateForHead(snapshot.head.root),
@@ -306,12 +319,18 @@ pub const Service = struct {
         imported_count: usize,
         skipped_count: usize,
         failed_count: usize,
+        optimistic_imported_count: usize,
+        epoch_transition_count: usize,
+        error_counts: chain_effects.BlockImportErrorCounts,
     ) chain_effects.SegmentImportOutcome {
         const snapshot = self.query().currentSnapshot();
         return .{
             .imported_count = imported_count,
             .skipped_count = skipped_count,
             .failed_count = failed_count,
+            .optimistic_imported_count = optimistic_imported_count,
+            .epoch_transition_count = epoch_transition_count,
+            .error_counts = error_counts,
             .snapshot = snapshot,
             .effects = .{
                 .forkchoice_update = self.forkchoiceUpdateForHead(snapshot.head.root),

@@ -66,6 +66,8 @@ pub const ReqRespRequestPermit = p2p_service.ReqRespRequestPermit;
 pub const QuicStream = p2p_service.QuicStream;
 pub const P2pConfig = p2p_service.P2pConfig;
 pub const ReqRespServerPolicy = eth2_protocols.ReqRespServerPolicy;
+pub const ReqRespServerDecision = eth2_protocols.ReqRespServerDecision;
+pub const ReqRespRequestOutcome = eth2_protocols.ReqRespRequestOutcome;
 
 // Discovery.
 pub const bootnodes = @import("bootnodes.zig");
@@ -92,13 +94,17 @@ pub const PeerDB = peer_db.PeerDB;
 pub const PeerManager = peer_manager.PeerManager;
 pub const PeerManagerConfig = peer_manager.PeerManagerConfig;
 pub const PeerAction = peer_info.PeerAction;
+pub const ReportSource = peer_info.ReportSource;
 pub const ConnectionDirection = peer_info.ConnectionDirection;
 pub const ConnectionState = peer_info.ConnectionState;
 pub const SyncInfo = peer_info.SyncInfo;
 pub const ScoreState = peer_info.ScoreState;
+pub const RelevanceStatus = peer_info.RelevanceStatus;
 pub const BanDuration = peer_info.BanDuration;
 pub const GoodbyeReason = peer_info.GoodbyeReason;
 pub const ClientKind = peer_info.ClientKind;
+pub const PeerManagerMetricsSnapshot = peer_manager.MetricsSnapshot;
+pub const PeerGoodbyeMetricReason = peer_manager.GoodbyeMetricReason;
 pub const ReqRespScoringProtocol = peer_scoring.ReqRespProtocol;
 
 // Subnet subscription management.

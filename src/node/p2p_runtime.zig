@@ -42,6 +42,7 @@ const sync_mod = @import("sync");
 const SyncService = sync_mod.SyncService;
 const BatchBlock = sync_mod.BatchBlock;
 
+const BeaconMetrics = @import("metrics.zig").BeaconMetrics;
 const GossipHandler = @import("gossip_handler.zig").GossipHandler;
 const gossip_ingress_mod = @import("gossip_ingress.zig");
 const reqresp_callbacks_mod = @import("reqresp_callbacks.zig");
@@ -517,27 +518,75 @@ fn closeOwnedQuicStream(io: std.Io, stream: *networking.QuicStream) void {
 const OpenedReqRespRequest = struct {
     permit: networking.ReqRespRequestPermit,
     stream: networking.QuicStream,
+    metrics: ?*BeaconMetrics,
+    method: networking.Method,
+    started_ns: i128,
+    finished: bool = false,
+
+    fn finish(self: *OpenedReqRespRequest, io: std.Io, outcome: networking.ReqRespRequestOutcome) void {
+        if (self.finished) return;
+        self.finished = true;
+        if (self.metrics) |metrics| {
+            metrics.observeReqRespOutbound(self.method, outcome, reqRespElapsedSeconds(io, self.started_ns));
+        }
+    }
 
     fn deinit(self: *OpenedReqRespRequest, io: std.Io) void {
+        if (!self.finished) self.finish(io, .transport_error);
         closeOwnedQuicStream(io, &self.stream);
         self.permit.deinit(io);
     }
 };
 
+fn reqRespElapsedSeconds(io: std.Io, started_ns: i128) f64 {
+    const now_ns = std.Io.Clock.awake.now(io).nanoseconds;
+    const elapsed_ns = @max(now_ns - started_ns, 0);
+    return @as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(std.time.ns_per_s));
+}
+
+fn reqRespMethodFromSelfLimitMethod(method: networking.rate_limiter.SelfRateLimitMethod) networking.Method {
+    return @enumFromInt(@intFromEnum(method));
+}
+
+fn responseCodeOutcome(code: networking.ResponseCode) networking.ReqRespRequestOutcome {
+    return networking.ReqRespRequestOutcome.fromResponseCode(code);
+}
+
 fn openReqRespRequest(
+    self: *BeaconNode,
     io: std.Io,
     svc: *networking.P2pService,
     peer_id: []const u8,
     method: networking.rate_limiter.SelfRateLimitMethod,
     protocol_id: []const u8,
 ) !OpenedReqRespRequest {
-    var permit = try svc.acquireReqRespRequestPermit(io, peer_id, method);
+    const started_ns = std.Io.Clock.awake.now(io).nanoseconds;
+    const req_resp_method = reqRespMethodFromSelfLimitMethod(method);
+
+    var permit = svc.acquireReqRespRequestPermit(io, peer_id, method) catch |err| {
+        if (self.metrics) |metrics| {
+            metrics.observeReqRespOutbound(
+                req_resp_method,
+                if (err == error.RequestSelfRateLimited) .self_rate_limited else .transport_error,
+                reqRespElapsedSeconds(io, started_ns),
+            );
+        }
+        return err;
+    };
     errdefer permit.deinit(io);
 
-    const stream = try svc.dialProtocol(io, peer_id, protocol_id);
+    const stream = svc.dialProtocol(io, peer_id, protocol_id) catch |err| {
+        if (self.metrics) |metrics| {
+            metrics.observeReqRespOutbound(req_resp_method, .transport_error, reqRespElapsedSeconds(io, started_ns));
+        }
+        return err;
+    };
     return .{
         .permit = permit,
         .stream = stream,
+        .metrics = self.metrics,
+        .method = req_resp_method,
+        .started_ns = started_ns,
     };
 }
 
@@ -557,15 +606,14 @@ const idle_p2p_tick_ns: u64 = 25 * std.time.ns_per_ms;
 const connectivity_maintenance_interval_ns: u64 = 100 * std.time.ns_per_ms;
 const discovery_maintenance_interval_ns: u64 = 6 * std.time.ns_per_s;
 const peer_maintenance_interval_ns: u64 = std.time.ns_per_s;
+const metrics_sampling_interval_ns: u64 = std.time.ns_per_s;
 const peer_manager_heartbeat_interval_ns: u64 = networking.peer_manager.HEARTBEAT_INTERVAL_MS * std.time.ns_per_ms;
 const max_discovery_dials_per_tick: u32 = 4;
 
 fn runDiscoveryMaintenance(self: *BeaconNode) bool {
     if (self.discovery_service) |ds| {
         if (self.peer_manager) |pm| {
-            const peer_count = pm.peerCount();
-            ds.setConnectedPeers(peer_count);
-            if (self.metrics) |metrics| metrics.peers_connected.set(@intCast(peer_count));
+            ds.setConnectedPeers(pm.peerCount());
         }
         ds.discoverPeers();
         if (self.metrics) |metrics| {
@@ -948,7 +996,6 @@ fn runRealtimeP2pTick(self: *BeaconNode, io: std.Io, svc: *networking.P2pService
 
     processSyncBatches(self, io, svc);
     processSyncByRootRequests(self, io, svc);
-    updateSyncMetrics(self);
     maybePrepareProposerPayload(self, io);
     pruneSyncCommitteePools(self);
     advanceChainClock(self, io);
@@ -962,6 +1009,7 @@ fn runLoop(self: *BeaconNode, io: std.Io, svc: *networking.P2pService) void {
     var next_connectivity_maintenance_ns = start_ns;
     var next_discovery_maintenance_ns = start_ns;
     var next_peer_maintenance_ns = start_ns;
+    var next_metrics_sampling_ns = start_ns;
     var next_peer_manager_heartbeat_ns = start_ns;
     while (!self.shutdown_requested.load(.acquire)) {
         const now_ns = std.Io.Timestamp.now(io, .awake).toNanoseconds();
@@ -985,6 +1033,12 @@ fn runLoop(self: *BeaconNode, io: std.Io, svc: *networking.P2pService) void {
         }
 
         did_work = runRealtimeP2pTick(self, io, svc) or did_work;
+
+        if (now_ns >= next_metrics_sampling_ns) {
+            updateSyncMetrics(self);
+            updateRuntimeMetrics(self);
+            next_metrics_sampling_ns = now_ns + metrics_sampling_interval_ns;
+        }
 
         const sleep_timeout: std.Io.Timeout = .{ .duration = .{
             .raw = std.Io.Duration.fromNanoseconds(@intCast(if (did_work) active_p2p_tick_ns else idle_p2p_tick_ns)),
@@ -1021,12 +1075,195 @@ fn maybeHandleForkTransition(self: *BeaconNode, svc: *networking.P2pService) voi
 
 fn updateSyncMetrics(self: *BeaconNode) void {
     if (self.metrics) |metrics| {
-        if (self.sync_service_inst) |sync_svc| {
-            const status = sync_svc.getSyncStatus();
-            metrics.sync_status.set(if (sync_svc.isSynced()) @as(u64, 0) else @as(u64, 1));
-            metrics.sync_distance.set(status.sync_distance);
+        const status = self.getSyncStatus();
+        metrics.setSyncSnapshot(
+            if (status.is_syncing) @as(u64, 1) else @as(u64, 0),
+            status.sync_distance,
+            status.is_optimistic,
+            status.el_offline,
+        );
+    }
+}
+
+fn updateChainRuntimeMetrics(self: *BeaconNode) void {
+    const metrics = self.metrics orelse return;
+    const snapshot = self.chain_runtime.metricsSnapshot();
+    const previous = self.last_chain_metrics_snapshot;
+
+    metrics.block_state_cache_entries.set(snapshot.block_state_cache_entries);
+    metrics.checkpoint_state_cache_entries.set(snapshot.checkpoint_state_cache_entries);
+    metrics.checkpoint_state_datastore_entries.set(snapshot.checkpoint_state_datastore_entries);
+    metrics.state_regen_queue_length.set(snapshot.queued_state_regen_queue_len);
+    metrics.setForkChoiceSnapshot(.{
+        .proto_array_nodes = snapshot.forkchoice_nodes,
+        .proto_array_block_roots = snapshot.forkchoice_block_roots,
+        .votes = snapshot.forkchoice_votes,
+        .queued_attestation_slots = snapshot.forkchoice_queued_attestation_slots,
+        .queued_attestations_previous_slot = @intCast(snapshot.forkchoice_queued_attestations_previous_slot),
+        .validated_attestation_data_roots = snapshot.forkchoice_validated_attestation_data_roots,
+        .equivocating_validators = snapshot.forkchoice_equivocating_validators,
+        .proposer_boost_active = snapshot.forkchoice_proposer_boost_active,
+    });
+    metrics.setArchiveProgress(snapshot.archive_last_finalized_slot, snapshot.archive_last_archived_state_epoch);
+    metrics.setArchiveOperationalSnapshot(
+        snapshot.archive_last_slots_advanced,
+        snapshot.archive_last_batch_ops,
+        snapshot.archive_last_run_milliseconds,
+    );
+    metrics.setValidatorMonitorSnapshot(snapshot.validator_monitor_monitored_validators, snapshot.validator_monitor_last_processed_epoch);
+    metrics.setProgressLag(
+        archiveFinalizedSlotLag(self, snapshot.archive_last_finalized_slot),
+        validatorMonitorEpochLag(self, snapshot.validator_monitor_monitored_validators, snapshot.validator_monitor_last_processed_epoch),
+    );
+    metrics.attestation_pool_groups.set(snapshot.attestation_pool_groups);
+    metrics.aggregate_attestation_pool_groups.set(snapshot.aggregate_attestation_pool_groups);
+    metrics.aggregate_attestation_pool_entries.set(snapshot.aggregate_attestation_pool_entries);
+    metrics.voluntary_exit_pool_size.set(snapshot.voluntary_exit_pool_size);
+    metrics.proposer_slashing_pool_size.set(snapshot.proposer_slashing_pool_size);
+    metrics.attester_slashing_pool_size.set(snapshot.attester_slashing_pool_size);
+    metrics.bls_to_execution_change_pool_size.set(snapshot.bls_to_execution_change_pool_size);
+    metrics.sync_committee_message_pool_size.set(snapshot.sync_committee_message_pool_size);
+    metrics.sync_contribution_pool_size.set(snapshot.sync_contribution_pool_size);
+    metrics.proposer_cache_entries.set(snapshot.beacon_proposer_cache_entries);
+    metrics.pending_block_ingress_size.set(snapshot.pending_block_ingress_size);
+    metrics.pending_payload_envelope_ingress_size.set(snapshot.pending_payload_envelope_ingress_size);
+    metrics.da_blob_tracker_entries.set(snapshot.da_blob_tracker_entries);
+    metrics.da_column_tracker_entries.set(snapshot.da_column_tracker_entries);
+    metrics.da_pending_blocks.set(snapshot.da_pending_blocks);
+
+    metrics.archive_runs_total.incrBy(monotonicDelta(
+        snapshot.archive_runs_total,
+        if (previous) |prev| prev.archive_runs_total else null,
+    ));
+    metrics.archive_failures_total.incrBy(monotonicDelta(
+        snapshot.archive_failures_total,
+        if (previous) |prev| prev.archive_failures_total else null,
+    ));
+    metrics.archive_finalized_slots_advanced_total.incrBy(monotonicDelta(
+        snapshot.archive_finalized_slots_advanced_total,
+        if (previous) |prev| prev.archive_finalized_slots_advanced_total else null,
+    ));
+    metrics.archive_state_epochs_archived_total.incrBy(monotonicDelta(
+        snapshot.archive_state_epochs_archived_total,
+        if (previous) |prev| prev.archive_state_epochs_archived_total else null,
+    ));
+    metrics.archive_run_milliseconds_total.incrBy(monotonicDelta(
+        snapshot.archive_run_milliseconds_total,
+        if (previous) |prev| prev.archive_run_milliseconds_total else null,
+    ));
+    metrics.state_regen_cache_hits_total.incrBy(monotonicDelta(
+        snapshot.queued_state_regen_cache_hits,
+        if (previous) |prev| prev.queued_state_regen_cache_hits else null,
+    ));
+    metrics.state_regen_queue_hits_total.incrBy(monotonicDelta(
+        snapshot.queued_state_regen_queue_hits,
+        if (previous) |prev| prev.queued_state_regen_queue_hits else null,
+    ));
+    metrics.state_regen_dropped_total.incrBy(monotonicDelta(
+        snapshot.queued_state_regen_dropped,
+        if (previous) |prev| prev.queued_state_regen_dropped else null,
+    ));
+
+    self.last_chain_metrics_snapshot = snapshot;
+}
+
+fn archiveFinalizedSlotLag(self: *BeaconNode, archived_finalized_slot: u64) u64 {
+    const finalized_slot = self.currentFinalizedSlot();
+    return finalized_slot -| archived_finalized_slot;
+}
+
+fn validatorMonitorEpochLag(
+    self: *BeaconNode,
+    monitored_validators: u64,
+    last_processed_epoch: u64,
+) u64 {
+    if (monitored_validators == 0) return 0;
+    const current_epoch = self.currentHeadSlot() / preset.SLOTS_PER_EPOCH;
+    return current_epoch -| last_processed_epoch;
+}
+
+fn updateExecutionRuntimeMetrics(self: *BeaconNode) void {
+    const metrics = self.metrics orelse return;
+    const snapshot = self.execution_runtime.metricsSnapshot();
+
+    metrics.execution_pending_forkchoice_updates.set(snapshot.pending_forkchoice_updates);
+    metrics.execution_pending_payload_verifications.set(snapshot.pending_payload_verifications);
+    metrics.execution_completed_forkchoice_updates.set(snapshot.completed_forkchoice_updates);
+    metrics.execution_completed_payload_verifications.set(snapshot.completed_payload_verifications);
+    metrics.execution_failed_payload_preparations.set(snapshot.failed_payload_preparations);
+    metrics.execution_cached_payload.set(if (snapshot.has_cached_payload) 1 else 0);
+    metrics.execution_offline.set(if (snapshot.el_offline) 1 else 0);
+}
+
+fn updatePeerManagerMetrics(self: *BeaconNode) void {
+    const metrics = self.metrics orelse return;
+    const snapshot = if (self.peer_manager) |pm|
+        pm.metricsSnapshot()
+    else
+        networking.PeerManagerMetricsSnapshot{};
+    const previous = self.last_peer_manager_metrics_snapshot;
+
+    metrics.setPeerManagerSnapshot(snapshot);
+
+    inline for (networking.peer_manager.metric_report_sources) |source| {
+        inline for (networking.peer_manager.metric_peer_actions) |action| {
+            const delta = monotonicDelta(
+                snapshot.peerReportCount(source, action),
+                if (previous) |prev| prev.peerReportCount(source, action) else null,
+            );
+            if (delta > 0) {
+                metrics.incrPeerReport(source, action, delta);
+            }
         }
     }
+
+    inline for (networking.peer_manager.metric_goodbye_reasons) |reason| {
+        const delta = monotonicDelta(
+            snapshot.goodbyeReceivedCount(reason),
+            if (previous) |prev| prev.goodbyeReceivedCount(reason) else null,
+        );
+        if (delta > 0) {
+            metrics.incrPeerGoodbyeReceived(reason, delta);
+        }
+    }
+
+    self.last_peer_manager_metrics_snapshot = snapshot;
+}
+
+fn updateStorageMetrics(self: *BeaconNode) void {
+    const metrics = self.metrics orelse return;
+    const snapshot = self.chain_runtime.storageMetricsSnapshot() catch |err| {
+        std.log.warn("Failed to collect storage metrics snapshot: {}", .{err});
+        return;
+    };
+    metrics.setDbSnapshot(snapshot);
+}
+
+fn updateReqRespMetrics(self: *BeaconNode) void {
+    const metrics = self.metrics orelse return;
+    const inbound_peers = if (self.req_resp_rate_limiter) |limiter|
+        limiter.peerCount()
+    else
+        0;
+    const outbound_peers = if (self.p2p_service) |*svc|
+        svc.reqRespSelfLimiterPeerCount(self.io)
+    else
+        0;
+    metrics.setReqRespLimiterPeers(inbound_peers, outbound_peers);
+}
+
+fn updateRuntimeMetrics(self: *BeaconNode) void {
+    if (self.metrics == null) return;
+    updateChainRuntimeMetrics(self);
+    updateExecutionRuntimeMetrics(self);
+    updatePeerManagerMetrics(self);
+    updateReqRespMetrics(self);
+    updateStorageMetrics(self);
+}
+
+fn monotonicDelta(current: u64, previous: ?u64) u64 {
+    const prev = previous orelse return current;
+    return if (current >= prev) current - prev else current;
 }
 
 fn pruneSyncCommitteePools(self: *BeaconNode) void {
@@ -1718,8 +1955,10 @@ fn fetchBlobSidecarsByRangeForMetas(
     const protocol_id = "/eth2/beacon_chain/req/blob_sidecars_by_range/1/ssz_snappy";
     const req_resp_encoding = networking.req_resp_encoding;
 
-    var outbound = try openReqRespRequest(io, svc, peer_id, .blob_sidecars_by_range, protocol_id);
+    var outbound = try openReqRespRequest(self, io, svc, peer_id, .blob_sidecars_by_range, protocol_id);
     defer outbound.deinit(io);
+    var request_outcome: networking.ReqRespRequestOutcome = .transport_error;
+    defer outbound.finish(io, request_outcome);
 
     const request = networking.messages.BlobSidecarsByRangeRequest.Type{
         .start_slot = start_slot,
@@ -1729,6 +1968,7 @@ fn fetchBlobSidecarsByRangeForMetas(
     _ = networking.messages.BlobSidecarsByRangeRequest.serializeIntoBytes(&request, &req_ssz);
     try req_resp_encoding.writeRequestToStream(self.allocator, io, &outbound.stream, &req_ssz);
     outbound.stream.closeWrite(io);
+    request_outcome = .malformed_response;
 
     var reader = req_resp_encoding.ResponseChunkStreamReader{
         .allocator = self.allocator,
@@ -1739,6 +1979,7 @@ fn fetchBlobSidecarsByRangeForMetas(
     while (try reader.next(io, &outbound.stream)) |decoded| {
         if (decoded.result != .success) {
             self.allocator.free(decoded.ssz_bytes);
+            request_outcome = responseCodeOutcome(decoded.result);
             return responseCodeError(decoded.result);
         }
         errdefer self.allocator.free(decoded.ssz_bytes);
@@ -1802,6 +2043,8 @@ fn fetchBlobSidecarsByRangeForMetas(
             return error.MissingBlobSidecar;
         }
     }
+
+    request_outcome = .success;
 }
 
 fn fetchBlobSidecarsByRootForMeta(
@@ -1831,14 +2074,17 @@ fn fetchBlobSidecarsByRootForMeta(
         });
     }
 
-    var outbound = try openReqRespRequest(io, svc, peer_id, .blob_sidecars_by_root, protocol_id);
+    var outbound = try openReqRespRequest(self, io, svc, peer_id, .blob_sidecars_by_root, protocol_id);
     defer outbound.deinit(io);
+    var request_outcome: networking.ReqRespRequestOutcome = .transport_error;
+    defer outbound.finish(io, request_outcome);
 
     const request_bytes = try self.allocator.alloc(u8, networking.messages.BlobSidecarsByRootRequest.serializedSize(&request));
     defer self.allocator.free(request_bytes);
     _ = networking.messages.BlobSidecarsByRootRequest.serializeIntoBytes(&request, request_bytes);
     try req_resp_encoding.writeRequestToStream(self.allocator, io, &outbound.stream, request_bytes);
     outbound.stream.closeWrite(io);
+    request_outcome = .malformed_response;
 
     var reader = req_resp_encoding.ResponseChunkStreamReader{
         .allocator = self.allocator,
@@ -1849,6 +2095,7 @@ fn fetchBlobSidecarsByRootForMeta(
     while (try reader.next(io, &outbound.stream)) |decoded| {
         if (decoded.result != .success) {
             self.allocator.free(decoded.ssz_bytes);
+            request_outcome = responseCodeOutcome(decoded.result);
             return responseCodeError(decoded.result);
         }
         errdefer self.allocator.free(decoded.ssz_bytes);
@@ -1898,6 +2145,8 @@ fn fetchBlobSidecarsByRootForMeta(
     if (self.chainService().dataAvailabilityStatusForBlock(meta.block_root, meta.any_signed) == .pending) {
         return error.MissingBlobSidecar;
     }
+
+    request_outcome = .success;
 }
 
 fn fetchDataColumnsByRangeForMetas(
@@ -1959,14 +2208,17 @@ fn fetchDataColumnsByRangeOnce(
     const protocol_id = "/eth2/beacon_chain/req/data_column_sidecars_by_range/1/ssz_snappy";
     const req_resp_encoding = networking.req_resp_encoding;
 
-    var outbound = try openReqRespRequest(io, svc, peer_id, .data_column_sidecars_by_range, protocol_id);
+    var outbound = try openReqRespRequest(self, io, svc, peer_id, .data_column_sidecars_by_range, protocol_id);
     defer outbound.deinit(io);
+    var request_outcome: networking.ReqRespRequestOutcome = .transport_error;
+    defer outbound.finish(io, request_outcome);
 
     const request_bytes = try self.allocator.alloc(u8, networking.messages.DataColumnSidecarsByRangeRequest.serializedSize(request));
     defer self.allocator.free(request_bytes);
     _ = networking.messages.DataColumnSidecarsByRangeRequest.serializeIntoBytes(request, request_bytes);
     try req_resp_encoding.writeRequestToStream(self.allocator, io, &outbound.stream, request_bytes);
     outbound.stream.closeWrite(io);
+    request_outcome = .malformed_response;
 
     var seen_columns = try self.allocator.alloc(std.StaticBitSet(MAX_COLUMNS), metas.len);
     defer self.allocator.free(seen_columns);
@@ -1981,6 +2233,7 @@ fn fetchDataColumnsByRangeOnce(
     while (try reader.next(io, &outbound.stream)) |decoded| {
         if (decoded.result != .success) {
             self.allocator.free(decoded.ssz_bytes);
+            request_outcome = responseCodeOutcome(decoded.result);
             return responseCodeError(decoded.result);
         }
         defer self.allocator.free(decoded.ssz_bytes);
@@ -2030,6 +2283,8 @@ fn fetchDataColumnsByRangeOnce(
             owned_ready.deinit(self.allocator);
         }
     }
+
+    request_outcome = .success;
 }
 
 fn fetchDataColumnsByRootForMeta(
@@ -2101,11 +2356,14 @@ fn fetchDataColumnsByRootOnce(
     const protocol_id = "/eth2/beacon_chain/req/data_column_sidecars_by_root/1/ssz_snappy";
     const req_resp_encoding = networking.req_resp_encoding;
 
-    var outbound = try openReqRespRequest(io, svc, peer_id, .data_column_sidecars_by_root, protocol_id);
+    var outbound = try openReqRespRequest(self, io, svc, peer_id, .data_column_sidecars_by_root, protocol_id);
     defer outbound.deinit(io);
+    var request_outcome: networking.ReqRespRequestOutcome = .transport_error;
+    defer outbound.finish(io, request_outcome);
 
     try req_resp_encoding.writeRequestToStream(self.allocator, io, &outbound.stream, request_bytes);
     outbound.stream.closeWrite(io);
+    request_outcome = .malformed_response;
 
     var seen_columns = std.StaticBitSet(MAX_COLUMNS).initEmpty();
     var reader = req_resp_encoding.ResponseChunkStreamReader{
@@ -2119,6 +2377,7 @@ fn fetchDataColumnsByRootOnce(
     while (try reader.next(io, &outbound.stream)) |decoded| {
         if (decoded.result != .success) {
             self.allocator.free(decoded.ssz_bytes);
+            request_outcome = responseCodeOutcome(decoded.result);
             return responseCodeError(decoded.result);
         }
         defer self.allocator.free(decoded.ssz_bytes);
@@ -2162,6 +2421,8 @@ fn fetchDataColumnsByRootOnce(
             owned_ready.deinit(self.allocator);
         }
     }
+
+    request_outcome = .success;
 }
 
 fn buildDataColumnRangeRequest(
@@ -2296,11 +2557,14 @@ fn fetchBlockByRoot(
     const protocol_id = "/eth2/beacon_chain/req/beacon_blocks_by_root/2/ssz_snappy";
     const req_resp_encoding = networking.req_resp_encoding;
 
-    var outbound = try openReqRespRequest(io, svc, peer_id, .beacon_blocks_by_root, protocol_id);
+    var outbound = try openReqRespRequest(self, io, svc, peer_id, .beacon_blocks_by_root, protocol_id);
     defer outbound.deinit(io);
+    var request_outcome: networking.ReqRespRequestOutcome = .transport_error;
+    defer outbound.finish(io, request_outcome);
 
     try req_resp_encoding.writeRequestToStream(self.allocator, io, &outbound.stream, &root);
     outbound.stream.closeWrite(io);
+    request_outcome = .malformed_response;
 
     var reader = req_resp_encoding.ResponseChunkStreamReader{
         .allocator = self.allocator,
@@ -2311,9 +2575,11 @@ fn fetchBlockByRoot(
     const decoded = (try reader.next(io, &outbound.stream)) orelse return error.NoBlockReturned;
     if (decoded.result != .success) {
         self.allocator.free(decoded.ssz_bytes);
+        request_outcome = responseCodeOutcome(decoded.result);
         return responseCodeError(decoded.result);
     }
 
+    request_outcome = .success;
     return decoded.ssz_bytes;
 }
 
@@ -2328,8 +2594,10 @@ fn fetchRawBlocksByRange(
     const protocol_id = "/eth2/beacon_chain/req/beacon_blocks_by_range/2/ssz_snappy";
     const req_resp_encoding = networking.req_resp_encoding;
 
-    var outbound = try openReqRespRequest(io, svc, peer_id, .beacon_blocks_by_range, protocol_id);
+    var outbound = try openReqRespRequest(self, io, svc, peer_id, .beacon_blocks_by_range, protocol_id);
     defer outbound.deinit(io);
+    var request_outcome: networking.ReqRespRequestOutcome = .transport_error;
+    defer outbound.finish(io, request_outcome);
 
     const request = networking.messages.BeaconBlocksByRangeRequest.Type{
         .start_slot = start_slot,
@@ -2339,6 +2607,7 @@ fn fetchRawBlocksByRange(
     _ = networking.messages.BeaconBlocksByRangeRequest.serializeIntoBytes(&request, &req_ssz);
     try req_resp_encoding.writeRequestToStream(self.allocator, io, &outbound.stream, &req_ssz);
     outbound.stream.closeWrite(io);
+    request_outcome = .malformed_response;
 
     var result: std.ArrayListUnmanaged(BatchBlock) = .empty;
     errdefer {
@@ -2358,6 +2627,7 @@ fn fetchRawBlocksByRange(
         const decoded = (try reader.next(io, &outbound.stream)) orelse break;
         if (decoded.result != .success) {
             self.allocator.free(decoded.ssz_bytes);
+            request_outcome = responseCodeOutcome(decoded.result);
             return responseCodeError(decoded.result);
         }
 
@@ -2374,6 +2644,7 @@ fn fetchRawBlocksByRange(
         blocks_received += 1;
     }
 
+    request_outcome = .success;
     return result.toOwnedSlice(self.allocator);
 }
 
@@ -2413,8 +2684,10 @@ fn sendStatus(
         "/eth2/beacon_chain/req/status/1/ssz_snappy";
     const req_resp_encoding = networking.req_resp_encoding;
 
-    var outbound = try openReqRespRequest(io, svc, peer_id, .status, status_protocol_id);
+    var outbound = try openReqRespRequest(self, io, svc, peer_id, .status, status_protocol_id);
     defer outbound.deinit(io);
+    var request_outcome: networking.ReqRespRequestOutcome = .transport_error;
+    defer outbound.finish(io, request_outcome);
 
     const our_status = self.getStatus();
     std.log.info("Sending Status: fork_digest={x:0>2}{x:0>2}{x:0>2}{x:0>2} head_slot={d} finalized_epoch={d}", .{
@@ -2444,6 +2717,7 @@ fn sendStatus(
         try req_resp_encoding.writeRequestToStream(self.allocator, io, &outbound.stream, &status_ssz);
     }
     outbound.stream.closeWrite(io);
+    request_outcome = .malformed_response;
 
     var reader = req_resp_encoding.ResponseChunkStreamReader{
         .allocator = self.allocator,
@@ -2459,6 +2733,7 @@ fn sendStatus(
 
     if (decoded.result != .success) {
         std.log.warn("Status response: error code {}", .{decoded.result});
+        request_outcome = responseCodeOutcome(decoded.result);
         return responseCodeError(decoded.result);
     }
 
@@ -2479,6 +2754,7 @@ fn sendStatus(
             peer_status_v2.earliest_available_slot,
         });
 
+        request_outcome = .success;
         return .{
             .status = .{
                 .fork_digest = peer_status_v2.fork_digest,
@@ -2510,6 +2786,7 @@ fn sendStatus(
         peer_status.finalized_root[3],
     });
 
+    request_outcome = .success;
     return .{ .status = peer_status };
 }
 
@@ -2522,8 +2799,10 @@ fn requestPeerPing(
     const ping_protocol_id = "/eth2/beacon_chain/req/ping/1/ssz_snappy";
     const req_resp_encoding = networking.req_resp_encoding;
 
-    var outbound = try openReqRespRequest(io, svc, peer_id, .ping, ping_protocol_id);
+    var outbound = try openReqRespRequest(self, io, svc, peer_id, .ping, ping_protocol_id);
     defer outbound.deinit(io);
+    var request_outcome: networking.ReqRespRequestOutcome = .transport_error;
+    defer outbound.finish(io, request_outcome);
 
     var ping_ssz: [networking.messages.Ping.fixed_size]u8 = undefined;
     const local_seq: networking.messages.Ping.Type = self.api_node_identity.metadata.seq_number;
@@ -2531,6 +2810,7 @@ fn requestPeerPing(
 
     try req_resp_encoding.writeRequestToStream(self.allocator, io, &outbound.stream, &ping_ssz);
     outbound.stream.closeWrite(io);
+    request_outcome = .malformed_response;
 
     var reader = req_resp_encoding.ResponseChunkStreamReader{
         .allocator = self.allocator,
@@ -2541,10 +2821,14 @@ fn requestPeerPing(
     const decoded = (try reader.next(io, &outbound.stream)) orelse return error.EmptyResponse;
     defer self.allocator.free(decoded.ssz_bytes);
 
-    if (decoded.result != .success) return responseCodeError(decoded.result);
+    if (decoded.result != .success) {
+        request_outcome = responseCodeOutcome(decoded.result);
+        return responseCodeError(decoded.result);
+    }
 
     var remote_seq: networking.messages.Ping.Type = undefined;
     try networking.messages.Ping.deserializeFromBytes(decoded.ssz_bytes, &remote_seq);
+    request_outcome = .success;
     return remote_seq;
 }
 
@@ -2562,11 +2846,14 @@ fn requestPeerMetadata(
         "/eth2/beacon_chain/req/metadata/2/ssz_snappy";
     const req_resp_encoding = networking.req_resp_encoding;
 
-    var outbound = try openReqRespRequest(io, svc, peer_id, .metadata, metadata_protocol_id);
+    var outbound = try openReqRespRequest(self, io, svc, peer_id, .metadata, metadata_protocol_id);
     defer outbound.deinit(io);
+    var request_outcome: networking.ReqRespRequestOutcome = .transport_error;
+    defer outbound.finish(io, request_outcome);
 
     try req_resp_encoding.writeRequestToStream(self.allocator, io, &outbound.stream, &.{});
     outbound.stream.closeWrite(io);
+    request_outcome = .malformed_response;
 
     var reader = req_resp_encoding.ResponseChunkStreamReader{
         .allocator = self.allocator,
@@ -2577,11 +2864,15 @@ fn requestPeerMetadata(
     const decoded = (try reader.next(io, &outbound.stream)) orelse return error.EmptyResponse;
     defer self.allocator.free(decoded.ssz_bytes);
 
-    if (decoded.result != .success) return responseCodeError(decoded.result);
+    if (decoded.result != .success) {
+        request_outcome = responseCodeOutcome(decoded.result);
+        return responseCodeError(decoded.result);
+    }
 
     if (use_metadata_v3) {
         var metadata_v3: MetadataV3.Type = undefined;
         try MetadataV3.deserializeFromBytes(decoded.ssz_bytes, &metadata_v3);
+        request_outcome = .success;
         return .{
             .metadata = .{
                 .seq_number = metadata_v3.seq_number,
@@ -2594,6 +2885,7 @@ fn requestPeerMetadata(
 
     var metadata: MetadataV2.Type = undefined;
     try MetadataV2.deserializeFromBytes(decoded.ssz_bytes, &metadata);
+    request_outcome = .success;
     return .{ .metadata = metadata };
 }
 
@@ -2667,8 +2959,10 @@ fn sendGoodbye(
     const goodbye_protocol_id = "/eth2/beacon_chain/req/goodbye/1/ssz_snappy";
     const req_resp_encoding = networking.req_resp_encoding;
 
-    var outbound = try openReqRespRequest(io, svc, peer_id, .goodbye, goodbye_protocol_id);
+    var outbound = try openReqRespRequest(self, io, svc, peer_id, .goodbye, goodbye_protocol_id);
     defer outbound.deinit(io);
+    var request_outcome: networking.ReqRespRequestOutcome = .transport_error;
+    defer outbound.finish(io, request_outcome);
 
     var goodbye_ssz: [networking.messages.GoodbyeReason.fixed_size]u8 = undefined;
     const reason_code: networking.messages.GoodbyeReason.Type = @intFromEnum(reason);
@@ -2676,6 +2970,7 @@ fn sendGoodbye(
 
     try req_resp_encoding.writeRequestToStream(self.allocator, io, &outbound.stream, &goodbye_ssz);
     outbound.stream.closeWrite(io);
+    request_outcome = .success;
 }
 
 fn attnetsFromMetadata(bytes: [8]u8) AttnetsBitfield {
