@@ -562,27 +562,18 @@ pub const Protocol = struct {
             }
         }
 
-        // No established session — send ordinary message and store as pending.
+        // No established session — send a random-data probe packet.
+        // Per the discv5 spec, the initial ordinary message carries opaque random
+        // bytes, not an encrypted payload. The remote will fail to decrypt and
+        // respond with WHOAREYOU.  The real request is retransmitted inside the
+        // handshake response after the session is established.
         const nonce = self.randomNonce();
         var masking_iv: [16]u8 = undefined;
         self.rng.random().bytes(&masking_iv);
         const authdata: [32]u8 = self.config.local_node_id;
 
-        // Use a zeroed key for the initial message (will be challenged).
-        const zero_key = [_]u8{0} ** 16;
-
-        const header_raw = try buildHeaderRaw(self.alloc, packet.FLAG_MESSAGE, &nonce, &authdata);
-        defer self.alloc.free(header_raw);
-
-        const ct = try packet.encryptMessage(
-            self.alloc,
-            &zero_key,
-            &nonce,
-            msg_bytes,
-            &masking_iv,
-            header_raw,
-        );
-        defer self.alloc.free(ct);
+        var random_msg: [44]u8 = undefined;
+        self.rng.random().bytes(&random_msg);
 
         const pkt = try packet.encode(
             self.alloc,
@@ -591,18 +582,11 @@ pub const Protocol = struct {
             packet.FLAG_MESSAGE,
             &nonce,
             &authdata,
-            ct,
+            &random_msg,
         );
         defer self.alloc.free(pkt);
 
         try socket.send(dest_addr, pkt);
-
-        // Store the pending request so handleWhoareyou can find it.
-        std.log.debug("discv5: sent ordinary msg to {any}, nonce={s} (total={d})", .{
-            dest_addr,
-            &std.fmt.bytesToHex(nonce, .lower),
-            self.pending_requests.items.len + 1,
-        });
         const pt_copy = try self.alloc.dupe(u8, msg_bytes);
         errdefer self.alloc.free(pt_copy);
         try self.pending_requests.append(self.alloc, .{
