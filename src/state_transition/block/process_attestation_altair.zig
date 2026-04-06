@@ -20,6 +20,7 @@ const getBeaconProposer = @import("../cache/get_beacon_proposer.zig").getBeaconP
 const Checkpoint = types.phase0.Checkpoint.Type;
 const isTimelyTarget = @import("./process_attestation_phase0.zig").isTimelyTarget;
 const increaseBalance = @import("../utils/balance.zig").increaseBalance;
+const ProposerRewards = @import("../cache/state_cache.zig").ProposerRewards;
 
 const PROPOSER_REWARD_DOMINATOR = ((c.WEIGHT_DENOMINATOR - c.PROPOSER_WEIGHT) * c.WEIGHT_DENOMINATOR) / c.PROPOSER_WEIGHT;
 
@@ -42,6 +43,7 @@ pub fn processAttestationsAltair(
     attestations: []const ForkTypes(fork).Attestation.Type,
     verify_signature: bool,
     batch_verifier: ?*BatchVerifier,
+    proposer_rewards: ?*ProposerRewards,
 ) !void {
     const effective_balance_increments = epoch_cache.effective_balance_increments.get().items;
     const state_slot = try state.slot();
@@ -132,7 +134,11 @@ pub fn processAttestationsAltair(
         proposer_reward += @divFloor(proposer_reward_numerator, PROPOSER_REWARD_DOMINATOR);
     }
     try increaseBalance(fork, state, try getBeaconProposer(fork, epoch_cache, state, state_slot), proposer_reward);
+    if (proposer_rewards) |rewards| {
+        rewards.attestations += proposer_reward;
+    }
 }
+
 
 pub fn getAttestationParticipationStatus(
     comptime fork: ForkSeq,

@@ -14,6 +14,7 @@ pub fn build(b: *std.Build) void {
     options_build_options.addOption(?u8, "zero_hash_max_depth", option_zero_hash_max_depth);
     const option_preset = b.option([]const u8, "preset", "") orelse "mainnet";
     options_build_options.addOption([]const u8, "preset", option_preset);
+    options_build_options.addOption([]const u8, "version", "0.1.0");
     const options_module_build_options = options_build_options.createModule();
 
     const options_download_era_options = b.addOptions();

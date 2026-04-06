@@ -13,9 +13,9 @@ const CachedBeaconState = context.CachedBeaconState;
 const constants = @import("constants");
 const preset = @import("preset").preset;
 const state_transition = @import("state_transition");
+const consensus_types = @import("consensus_types");
 const handler_result = @import("../handler_result.zig");
 const HandlerResult = handler_result.HandlerResult;
-const ResponseMeta = handler_result.ResponseMeta;
 
 // ---------------------------------------------------------------------------
 // Duty types
@@ -51,16 +51,24 @@ pub const SyncDuty = struct {
 };
 
 const PoolSubmitProbe = struct {
-    saw_body: ?[]const u8 = null,
+    aggregate_phase0_len: usize = 0,
+    aggregate_electra_len: usize = 0,
+    contribution_len: usize = 0,
 
-    fn submitAggregate(ptr: *anyopaque, json_bytes: []const u8) anyerror!void {
+    fn submitAggregate(ptr: *anyopaque, aggregates: context.SubmittedAggregateAndProofs) anyerror!void {
         const self: *PoolSubmitProbe = @ptrCast(@alignCast(ptr));
-        self.saw_body = json_bytes;
+        switch (aggregates) {
+            .phase0 => |items| self.aggregate_phase0_len = items.len,
+            .electra => |items| self.aggregate_electra_len = items.len,
+        }
     }
 
-    fn submitContribution(ptr: *anyopaque, json_bytes: []const u8) anyerror!void {
+    fn submitContribution(
+        ptr: *anyopaque,
+        contributions: []const consensus_types.altair.SignedContributionAndProof.Type,
+    ) anyerror!void {
         const self: *PoolSubmitProbe = @ptrCast(@alignCast(ptr));
-        self.saw_body = json_bytes;
+        self.contribution_len = contributions.len;
     }
 };
 
@@ -132,25 +140,24 @@ fn nextEpochProposers(state: *CachedBeaconState, allocator: std.mem.Allocator) !
 /// Returns the proposer duties for every slot in the given epoch.
 ///
 /// Uses the EpochCache from the head CachedBeaconState to look up real
-/// proposer assignments and validator pubkeys. Falls back to a zeroed
-/// stub if the head state is unavailable.
+/// proposer assignments and validator pubkeys for epochs the live cache
+/// actually covers.
 pub fn getProposerDuties(ctx: *ApiContext, epoch: u64) !HandlerResult([]ProposerDuty) {
     const head = ctx.currentHeadTracker();
     const slots_per_epoch = preset.SLOTS_PER_EPOCH;
     const epoch_start = epoch * slots_per_epoch;
-
-    const state = ctx.headState() orelse return error.NotImplemented;
+    const state = ctx.headState() orelse return error.NodeNotReady;
     const current_epoch = state.epoch_cache.epoch;
     const proposer_indices: [slots_per_epoch]u64 = blk: {
         if (epoch == current_epoch) break :blk state.epoch_cache.proposers;
         if (epoch == current_epoch + 1) {
             break :blk try nextEpochProposers(state, ctx.allocator);
         }
-        if (epoch + 1 == current_epoch) {
-            const prev = state.epoch_cache.proposers_prev_epoch orelse return error.NotImplemented;
+        if (current_epoch > 0 and epoch == current_epoch - 1) {
+            const prev = state.epoch_cache.proposers_prev_epoch orelse return error.NodeNotReady;
             break :blk prev;
         }
-        return error.NotImplemented;
+        return error.InvalidRequest;
     };
 
     const duties = try ctx.allocator.alloc(ProposerDuty, slots_per_epoch);
@@ -161,9 +168,9 @@ pub fn getProposerDuties(ctx: *ApiContext, epoch: u64) !HandlerResult([]Proposer
 
     for (duties, 0..) |*duty, i| {
         const proposer_index = proposer_indices[i];
-        const pubkey = if (proposer_index < validators.len) validators[proposer_index].pubkey else [_]u8{0} ** 48;
+        if (proposer_index >= validators.len) return error.CorruptState;
         duty.* = .{
-            .pubkey = pubkey,
+            .pubkey = validators[proposer_index].pubkey,
             .validator_index = proposer_index,
             .slot = epoch_start + i,
         };
@@ -189,11 +196,11 @@ pub fn getAttesterDuties(
     validator_indices: []const u64,
 ) !HandlerResult([]AttesterDuty) {
     const head = ctx.currentHeadTracker();
-    const state = ctx.headState() orelse return error.NotImplemented;
+    const state = ctx.headState() orelse return error.NodeNotReady;
     const epoch_cache = state.epoch_cache;
 
     // We can serve duties for the current or next epoch.
-    const shuffling = epoch_cache.getShufflingAtEpochOrNull(epoch) orelse return error.NotImplemented;
+    const shuffling = epoch_cache.getShufflingAtEpochOrNull(epoch) orelse return error.InvalidRequest;
 
     const validators = try state.state.validatorsSlice(ctx.allocator);
     defer ctx.allocator.free(validators);
@@ -250,11 +257,13 @@ pub fn getSyncDuties(
     validator_indices: []const u64,
 ) !HandlerResult([]SyncDuty) {
     const head = ctx.currentHeadTracker();
-    const state = ctx.headState() orelse return error.NotImplemented;
+    const state = ctx.headState() orelse return error.NodeNotReady;
     const epoch_cache = state.epoch_cache;
 
     // Get the indexed sync committee for this epoch.
-    const sync_committee = epoch_cache.getIndexedSyncCommitteeAtEpoch(epoch) catch return error.NotImplemented;
+    const sync_committee = epoch_cache.getIndexedSyncCommitteeAtEpoch(epoch) catch {
+        return error.InvalidRequest;
+    };
     const sync_indices = sync_committee.getValidatorIndices();
 
     const validators = try state.state.validatorsSlice(ctx.allocator);
@@ -320,53 +329,122 @@ pub fn prepareSyncCommitteeSubnets(
 
 const test_helpers = @import("../test_helpers.zig");
 
-test "getProposerDuties returns SLOTS_PER_EPOCH entries" {
+test "getProposerDuties returns NodeNotReady without head state" {
     var tc = test_helpers.makeTestContext(std.testing.allocator);
     defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
 
-    const result = try getProposerDuties(&tc.ctx, 0);
-    defer tc.ctx.allocator.free(result.data);
-
-    try std.testing.expectEqual(preset.SLOTS_PER_EPOCH, result.data.len);
+    const result = getProposerDuties(&tc.ctx, 0);
+    try std.testing.expectError(error.NodeNotReady, result);
 }
 
-test "getProposerDuties assigns correct slots for epoch 0" {
-    var tc = test_helpers.makeTestContext(std.testing.allocator);
-    defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
+test "getProposerDuties returns real duties for cached epoch" {
+    const allocator = std.testing.allocator;
+    var tc = test_helpers.makeTestContext(allocator);
+    defer test_helpers.destroyTestContext(allocator, &tc);
 
-    const result = try getProposerDuties(&tc.ctx, 0);
-    defer tc.ctx.allocator.free(result.data);
+    const persistent_merkle_tree = @import("persistent_merkle_tree");
+    const TestCachedBeaconState = state_transition.test_utils.TestCachedBeaconState;
 
-    for (result.data, 0..) |duty, i| {
-        try std.testing.expectEqual(@as(u64, i), duty.slot);
-    }
-}
+    var pool = try persistent_merkle_tree.Node.Pool.init(allocator, 500_000);
+    defer pool.deinit();
 
-test "getProposerDuties assigns correct slots for epoch 3" {
-    var tc = test_helpers.makeTestContext(std.testing.allocator);
-    defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 16);
+    defer test_state.deinit();
 
-    const epoch: u64 = 3;
+    tc.chain_fixture.head_state = test_state.cached_state;
+
+    const epoch = test_state.cached_state.epoch_cache.epoch;
     const result = try getProposerDuties(&tc.ctx, epoch);
     defer tc.ctx.allocator.free(result.data);
 
-    const expected_start = epoch * preset.SLOTS_PER_EPOCH;
-    try std.testing.expectEqual(expected_start, result.data[0].slot);
-    try std.testing.expectEqual(expected_start + preset.SLOTS_PER_EPOCH - 1, result.data[result.data.len - 1].slot);
+    try std.testing.expectEqual(preset.SLOTS_PER_EPOCH, result.data.len);
+    for (result.data, 0..) |duty, i| {
+        try std.testing.expectEqual(epoch * preset.SLOTS_PER_EPOCH + i, duty.slot);
+    }
 }
 
-test "getAttesterDuties returns NotImplemented without head state" {
+test "getProposerDuties returns InvalidRequest for unsupported epoch" {
+    const allocator = std.testing.allocator;
+    var tc = test_helpers.makeTestContext(allocator);
+    defer test_helpers.destroyTestContext(allocator, &tc);
+
+    const persistent_merkle_tree = @import("persistent_merkle_tree");
+    const TestCachedBeaconState = state_transition.test_utils.TestCachedBeaconState;
+
+    var pool = try persistent_merkle_tree.Node.Pool.init(allocator, 500_000);
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 16);
+    defer test_state.deinit();
+
+    tc.chain_fixture.head_state = test_state.cached_state;
+
+    const result = getProposerDuties(&tc.ctx, test_state.cached_state.epoch_cache.epoch + 2);
+    try std.testing.expectError(error.InvalidRequest, result);
+}
+
+test "getAttesterDuties returns NodeNotReady without head state" {
     var tc = test_helpers.makeTestContext(std.testing.allocator);
     defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
     const result = getAttesterDuties(&tc.ctx, 0, &[_]u64{});
-    try std.testing.expectError(error.NotImplemented, result);
+    try std.testing.expectError(error.NodeNotReady, result);
 }
 
-test "getSyncDuties returns NotImplemented without head state" {
+test "getSyncDuties returns NodeNotReady without head state" {
     var tc = test_helpers.makeTestContext(std.testing.allocator);
     defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
     const result = getSyncDuties(&tc.ctx, 0, &[_]u64{});
-    try std.testing.expectError(error.NotImplemented, result);
+    try std.testing.expectError(error.NodeNotReady, result);
+}
+
+test "getAttesterDuties returns InvalidRequest for unsupported epoch" {
+    const allocator = std.testing.allocator;
+    var tc = test_helpers.makeTestContext(allocator);
+    defer test_helpers.destroyTestContext(allocator, &tc);
+
+    const persistent_merkle_tree = @import("persistent_merkle_tree");
+    const TestCachedBeaconState = state_transition.test_utils.TestCachedBeaconState;
+
+    var pool = try persistent_merkle_tree.Node.Pool.init(allocator, 500_000);
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 16);
+    defer test_state.deinit();
+
+    tc.chain_fixture.head_state = test_state.cached_state;
+
+    const result = getAttesterDuties(&tc.ctx, test_state.cached_state.epoch_cache.epoch + 2, &.{0});
+    try std.testing.expectError(error.InvalidRequest, result);
+}
+
+test "getSyncDuties returns InvalidRequest for unsupported sync period" {
+    const allocator = std.testing.allocator;
+    var tc = test_helpers.makeTestContext(allocator);
+    defer test_helpers.destroyTestContext(allocator, &tc);
+
+    const persistent_merkle_tree = @import("persistent_merkle_tree");
+    const TestCachedBeaconState = state_transition.test_utils.TestCachedBeaconState;
+
+    var pool = try persistent_merkle_tree.Node.Pool.init(allocator, 500_000);
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 16);
+    defer test_state.deinit();
+
+    tc.chain_fixture.head_state = test_state.cached_state;
+
+    const unsupported_epoch = test_state.cached_state.epoch_cache.epoch + (2 * preset.EPOCHS_PER_SYNC_COMMITTEE_PERIOD);
+    const result = getSyncDuties(&tc.ctx, unsupported_epoch, &.{0});
+    try std.testing.expectError(error.InvalidRequest, result);
+}
+
+test "getValidatorLiveness returns NodeNotReady without current slot" {
+    var tc = test_helpers.makeTestContext(std.testing.allocator);
+    defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
+    tc.ctx.chain = null;
+
+    const result = getValidatorLiveness(&tc.ctx, 0, &.{0});
+    try std.testing.expectError(error.NodeNotReady, result);
 }
 
 test "prepareBeaconCommitteeSubnet forwards subscriptions to callback" {
@@ -493,40 +571,14 @@ pub fn produceBlock(
 ///
 /// Get attestation data for the given slot and committee index.
 /// This is the unsigned data that validators need to create an attestation.
-///
-/// Without an attestation_data callback, returns a stub response.
 pub fn getAttestationData(
     ctx: *ApiContext,
     slot: u64,
     committee_index: u64,
 ) !HandlerResult(context.AttestationDataResult) {
-    if (ctx.attestation_data) |cb| {
-        const result = try cb.getAttestationDataFn(cb.ptr, slot, committee_index);
-        return .{ .data = result, .meta = .{} };
-    }
-
-    const head = ctx.currentHeadTracker();
-    // Stub: return attestation data based on current head.
-    // W6: target_root is the block root at the START of the target epoch,
-    // not the current head root. Use justified_root as an approximation
-    // when no callback is wired (justified checkpoint root is at epoch start).
-    const target_epoch = slot / preset.SLOTS_PER_EPOCH;
-    const target_root = if (target_epoch == head.justified_slot / preset.SLOTS_PER_EPOCH)
-        head.justified_root
-    else
-        head.head_root; // best effort when no state available
-    return .{
-        .data = .{
-            .slot = slot,
-            .index = committee_index,
-            .beacon_block_root = head.head_root,
-            .source_epoch = head.justified_slot / preset.SLOTS_PER_EPOCH,
-            .source_root = head.justified_root,
-            .target_epoch = target_epoch,
-            .target_root = target_root,
-        },
-        .meta = .{},
-    };
+    const cb = ctx.attestation_data orelse return error.NotImplemented;
+    const result = try cb.getAttestationDataFn(cb.ptr, slot, committee_index);
+    return .{ .data = result, .meta = .{} };
 }
 
 /// GET /eth/v1/validator/aggregate_attestation
@@ -534,15 +586,14 @@ pub fn getAttestationData(
 /// Get the best aggregate attestation for the given slot and
 /// attestation_data_root (from the op pool).
 ///
-/// Returns the raw JSON from the aggregate_attestation callback,
-/// or NotImplemented if not wired.
 pub fn getAggregateAttestation(
     ctx: *ApiContext,
     slot: u64,
     attestation_data_root: [32]u8,
-) ![]const u8 {
+) !HandlerResult(context.AggregateAttestationResult) {
     const cb = ctx.aggregate_attestation orelse return error.NotImplemented;
-    return cb.getAggregateAttestationFn(cb.ptr, ctx.allocator, slot, attestation_data_root);
+    const result = try cb.getAggregateAttestationFn(cb.ptr, slot, attestation_data_root);
+    return .{ .data = result, .meta = .{} };
 }
 
 /// POST /eth/v1/validator/aggregate_and_proofs
@@ -551,12 +602,16 @@ pub fn getAggregateAttestation(
 /// and broadcast to gossip.
 pub fn publishAggregateAndProofs(
     ctx: *ApiContext,
-    body: []const u8,
+    aggregates: context.SubmittedAggregateAndProofs,
 ) !HandlerResult(void) {
-    if (body.len == 0) return .{ .data = {} };
+    const is_empty = switch (aggregates) {
+        .phase0 => |items| items.len == 0,
+        .electra => |items| items.len == 0,
+    };
+    if (is_empty) return .{ .data = {} };
     const cb = ctx.pool_submit orelse return error.NotImplemented;
     const submit_fn = cb.submitAggregateAndProofFn orelse return error.NotImplemented;
-    try submit_fn(cb.ptr, body);
+    try submit_fn(cb.ptr, aggregates);
     return .{ .data = {} };
 }
 
@@ -565,16 +620,15 @@ pub fn publishAggregateAndProofs(
 /// Get a sync committee contribution for the given slot, subcommittee_index,
 /// and beacon_block_root.
 ///
-/// Returns raw JSON from the sync_committee_contribution callback,
-/// or NotImplemented if not wired.
 pub fn getSyncCommitteeContribution(
     ctx: *ApiContext,
     slot: u64,
     subcommittee_index: u64,
     beacon_block_root: [32]u8,
-) ![]const u8 {
+) !HandlerResult(context.SyncCommitteeContributionResult) {
     const cb = ctx.sync_committee_contribution orelse return error.NotImplemented;
-    return cb.getSyncCommitteeContributionFn(cb.ptr, ctx.allocator, slot, subcommittee_index, beacon_block_root);
+    const result = try cb.getSyncCommitteeContributionFn(cb.ptr, slot, subcommittee_index, beacon_block_root);
+    return .{ .data = result, .meta = .{} };
 }
 
 /// POST /eth/v1/validator/contribution_and_proofs
@@ -582,12 +636,12 @@ pub fn getSyncCommitteeContribution(
 /// Submit signed contribution-and-proof objects for import and broadcast.
 pub fn publishContributionAndProofs(
     ctx: *ApiContext,
-    body: []const u8,
+    contributions: []const consensus_types.altair.SignedContributionAndProof.Type,
 ) !HandlerResult(void) {
-    if (body.len == 0) return .{ .data = {} };
+    if (contributions.len == 0) return .{ .data = {} };
     const cb = ctx.pool_submit orelse return error.NotImplemented;
     const submit_fn = cb.submitContributionAndProofFn orelse return error.NotImplemented;
-    try submit_fn(cb.ptr, body);
+    try submit_fn(cb.ptr, contributions);
     return .{ .data = {} };
 }
 
@@ -595,14 +649,12 @@ pub fn publishContributionAndProofs(
 // Tests for new endpoints
 // ---------------------------------------------------------------------------
 
-test "getAttestationData returns stub data without callback" {
+test "getAttestationData returns NotImplemented without callback" {
     var tc = test_helpers.makeTestContext(std.testing.allocator);
     defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
 
-    const result = try getAttestationData(&tc.ctx, 100, 0);
-    try std.testing.expectEqual(@as(u64, 100), result.data.slot);
-    try std.testing.expectEqual(@as(u64, 0), result.data.index);
-    try std.testing.expectEqual(tc.head_tracker.head_root, result.data.beacon_block_root);
+    const result = getAttestationData(&tc.ctx, 100, 0);
+    try std.testing.expectError(error.NotImplemented, result);
 }
 
 test "getAttestationData uses callback when wired" {
@@ -615,10 +667,8 @@ test "getAttestationData uses callback when wired" {
                 .slot = slot,
                 .index = committee_index,
                 .beacon_block_root = [_]u8{0x42} ** 32,
-                .source_epoch = 5,
-                .source_root = [_]u8{0x11} ** 32,
-                .target_epoch = 6,
-                .target_root = [_]u8{0x22} ** 32,
+                .source = .{ .epoch = 5, .root = [_]u8{0x11} ** 32 },
+                .target = .{ .epoch = 6, .root = [_]u8{0x22} ** 32 },
             };
         }
     };
@@ -632,6 +682,10 @@ test "getAttestationData uses callback when wired" {
     try std.testing.expectEqual(@as(u64, 200), result.data.slot);
     try std.testing.expectEqual(@as(u64, 3), result.data.index);
     try std.testing.expectEqual([_]u8{0x42} ** 32, result.data.beacon_block_root);
+    try std.testing.expectEqual(@as(u64, 5), result.data.source.epoch);
+    try std.testing.expectEqual([_]u8{0x11} ** 32, result.data.source.root);
+    try std.testing.expectEqual(@as(u64, 6), result.data.target.epoch);
+    try std.testing.expectEqual([_]u8{0x22} ** 32, result.data.target.root);
 }
 
 test "produceBlock returns NotImplemented without callback" {
@@ -670,6 +724,8 @@ test "produceBlock forwards extended params to callback" {
                 .fork = "electra",
                 .blinded = true,
                 .execution_payload_source = .engine,
+                .execution_payload_value = 123,
+                .consensus_block_value = 456,
             };
         }
     };
@@ -694,19 +750,61 @@ test "produceBlock forwards extended params to callback" {
     defer tc.ctx.allocator.free(result.data.ssz_bytes);
     try std.testing.expect(MockCb.saw_params);
     try std.testing.expect(result.data.blinded);
+    try std.testing.expectEqual(@as(u256, 123), result.data.execution_payload_value);
+    try std.testing.expectEqual(@as(u256, 456), result.data.consensus_block_value);
 }
 
 test "getAggregateAttestation returns NotImplemented without callback" {
+    // Callback is required on the live path.
     var tc = test_helpers.makeTestContext(std.testing.allocator);
     defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
     const result = getAggregateAttestation(&tc.ctx, 100, [_]u8{0} ** 32);
     try std.testing.expectError(error.NotImplemented, result);
 }
 
+test "getAggregateAttestation uses callback when wired" {
+    var tc = test_helpers.makeTestContext(std.testing.allocator);
+    defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
+
+    const MockCb = struct {
+        fn getAggregate(_: *anyopaque, slot: u64, attestation_data_root: [32]u8) anyerror!context.AggregateAttestationResult {
+            const AggregationBits = @FieldType(context.AggregateAttestationResult, "aggregation_bits");
+            var aggregation_bits = try AggregationBits.fromBitLen(std.testing.allocator, 8);
+            try aggregation_bits.set(std.testing.allocator, 0, true);
+            return .{
+                .aggregation_bits = aggregation_bits,
+                .data = .{
+                    .slot = slot,
+                    .index = 0,
+                    .beacon_block_root = attestation_data_root,
+                    .source = .{ .epoch = 1, .root = [_]u8{0x11} ** 32 },
+                    .target = .{ .epoch = 2, .root = [_]u8{0x22} ** 32 },
+                },
+                .signature = [_]u8{0x33} ** 96,
+            };
+        }
+    };
+
+    var dummy: u8 = 0;
+    tc.ctx.aggregate_attestation = .{
+        .ptr = &dummy,
+        .getAggregateAttestationFn = &MockCb.getAggregate,
+    };
+
+    const expected_root = [_]u8{0xAB} ** 32;
+    var result = try getAggregateAttestation(&tc.ctx, 100, expected_root);
+    defer consensus_types.phase0.Attestation.deinit(std.testing.allocator, &result.data);
+
+    try std.testing.expectEqual(@as(u64, 100), result.data.data.slot);
+    try std.testing.expectEqual(@as(u64, 0), result.data.data.index);
+    try std.testing.expectEqualSlices(u8, &expected_root, &result.data.data.beacon_block_root);
+    try std.testing.expect(try result.data.aggregation_bits.get(0));
+}
+
 test "publishAggregateAndProofs with empty body returns ok" {
     var tc = test_helpers.makeTestContext(std.testing.allocator);
     defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
-    const result = try publishAggregateAndProofs(&tc.ctx, "");
+    const result = try publishAggregateAndProofs(&tc.ctx, .{ .phase0 = &.{} });
     _ = result;
 }
 
@@ -714,7 +812,7 @@ test "publishAggregateAndProofs returns NotImplemented without callback when bod
     var tc = test_helpers.makeTestContext(std.testing.allocator);
     defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
 
-    const result = publishAggregateAndProofs(&tc.ctx, "[]");
+    const result = publishAggregateAndProofs(&tc.ctx, .{ .phase0 = &.{consensus_types.phase0.SignedAggregateAndProof.default_value} });
     try std.testing.expectError(error.NotImplemented, result);
 }
 
@@ -728,15 +826,15 @@ test "publishAggregateAndProofs forwards body to pool_submit callback" {
         .submitAggregateAndProofFn = &PoolSubmitProbe.submitAggregate,
     };
 
-    const body = "[{\"message\":{}}]";
-    _ = try publishAggregateAndProofs(&tc.ctx, body);
-    try std.testing.expectEqualStrings(body, probe.saw_body.?);
+    _ = try publishAggregateAndProofs(&tc.ctx, .{ .phase0 = &.{consensus_types.phase0.SignedAggregateAndProof.default_value} });
+    try std.testing.expectEqual(@as(usize, 1), probe.aggregate_phase0_len);
+    try std.testing.expectEqual(@as(usize, 0), probe.aggregate_electra_len);
 }
 
 test "publishContributionAndProofs with empty body returns ok" {
     var tc = test_helpers.makeTestContext(std.testing.allocator);
     defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
-    const result = try publishContributionAndProofs(&tc.ctx, "");
+    const result = try publishContributionAndProofs(&tc.ctx, &.{});
     _ = result;
 }
 
@@ -744,7 +842,7 @@ test "publishContributionAndProofs returns NotImplemented without callback when 
     var tc = test_helpers.makeTestContext(std.testing.allocator);
     defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
 
-    const result = publishContributionAndProofs(&tc.ctx, "[]");
+    const result = publishContributionAndProofs(&tc.ctx, &.{consensus_types.altair.SignedContributionAndProof.default_value});
     try std.testing.expectError(error.NotImplemented, result);
 }
 
@@ -758,9 +856,8 @@ test "publishContributionAndProofs forwards body to pool_submit callback" {
         .submitContributionAndProofFn = &PoolSubmitProbe.submitContribution,
     };
 
-    const body = "[{\"message\":{}}]";
-    _ = try publishContributionAndProofs(&tc.ctx, body);
-    try std.testing.expectEqualStrings(body, probe.saw_body.?);
+    _ = try publishContributionAndProofs(&tc.ctx, &.{consensus_types.altair.SignedContributionAndProof.default_value});
+    try std.testing.expectEqual(@as(usize, 1), probe.contribution_len);
 }
 
 test "getSyncCommitteeContribution returns NotImplemented without callback" {
@@ -770,6 +867,40 @@ test "getSyncCommitteeContribution returns NotImplemented without callback" {
     try std.testing.expectError(error.NotImplemented, result);
 }
 
+test "getSyncCommitteeContribution uses callback when wired" {
+    var tc = test_helpers.makeTestContext(std.testing.allocator);
+    defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
+
+    const MockCb = struct {
+        fn getContribution(_: *anyopaque, slot: u64, subcommittee_index: u64, beacon_block_root: [32]u8) anyerror!context.SyncCommitteeContributionResult {
+            var aggregation_bits = @FieldType(context.SyncCommitteeContributionResult, "aggregation_bits").empty;
+            try aggregation_bits.set(0, true);
+            try aggregation_bits.set(1, true);
+            return .{
+                .slot = slot,
+                .beacon_block_root = beacon_block_root,
+                .subcommittee_index = subcommittee_index,
+                .aggregation_bits = aggregation_bits,
+                .signature = [_]u8{0x44} ** 96,
+            };
+        }
+    };
+
+    var dummy: u8 = 0;
+    tc.ctx.sync_committee_contribution = .{
+        .ptr = &dummy,
+        .getSyncCommitteeContributionFn = &MockCb.getContribution,
+    };
+
+    const expected_root = [_]u8{0xCD} ** 32;
+    const result = try getSyncCommitteeContribution(&tc.ctx, 120, 2, expected_root);
+    try std.testing.expectEqual(@as(u64, 120), result.data.slot);
+    try std.testing.expectEqual(@as(u64, 2), result.data.subcommittee_index);
+    try std.testing.expectEqualSlices(u8, &expected_root, &result.data.beacon_block_root);
+    try std.testing.expect(try result.data.aggregation_bits.get(0));
+    try std.testing.expect(try result.data.aggregation_bits.get(1));
+}
+
 // ---------------------------------------------------------------------------
 // Validator liveness
 // ---------------------------------------------------------------------------
@@ -777,27 +908,57 @@ test "getSyncCommitteeContribution returns NotImplemented without callback" {
 /// POST /eth/v1/validator/liveness/{epoch}
 ///
 /// Check whether validators were live (made any on-chain activity) in the epoch.
-/// Stub — requires attestation inclusion tracking from the DB.
 pub fn getValidatorLiveness(
     ctx: *ApiContext,
     epoch: u64,
     validator_indices: []const u64,
 ) !HandlerResult([]types.ValidatorLiveness) {
-    const result = try ctx.allocator.alloc(types.ValidatorLiveness, validator_indices.len);
-    errdefer ctx.allocator.free(result);
+    const current_slot = ctx.currentSlot() orelse return error.NodeNotReady;
+    const current_epoch = current_slot / preset.SLOTS_PER_EPOCH;
 
-    for (validator_indices, 0..) |idx, i| {
-        result[i] = .{
-            .index = idx,
+    if ((current_epoch > 0 and epoch + 1 < current_epoch) or epoch > current_epoch + 1) {
+        return error.InvalidRequest;
+    }
+
+    const out = try ctx.allocator.alloc(types.ValidatorLiveness, validator_indices.len);
+    errdefer ctx.allocator.free(out);
+
+    for (validator_indices, out) |validator_index, *entry| {
+        entry.* = .{
+            .index = validator_index,
             .epoch = epoch,
-            .is_live = false, // stub: would check DB for attestation inclusion
+            .is_live = ctx.validatorSeenAtEpoch(validator_index, epoch),
         };
     }
 
-    return .{
-        .data = result,
-        .meta = .{},
-    };
+    return .{ .data = out };
+}
+
+test "getValidatorLiveness returns live results from chain liveness cache" {
+    var tc = test_helpers.makeTestContext(std.testing.allocator);
+    defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
+
+    const current_epoch = tc.chain_fixture.current_slot / preset.SLOTS_PER_EPOCH;
+    try tc.chain_fixture.markValidatorSeenAtEpoch(11, current_epoch);
+
+    const result = try getValidatorLiveness(&tc.ctx, current_epoch, &.{ 10, 11 });
+    defer std.testing.allocator.free(result.data);
+
+    try std.testing.expectEqual(@as(usize, 2), result.data.len);
+    try std.testing.expectEqual(types.ValidatorLiveness{ .index = 10, .epoch = current_epoch, .is_live = false }, result.data[0]);
+    try std.testing.expectEqual(types.ValidatorLiveness{ .index = 11, .epoch = current_epoch, .is_live = true }, result.data[1]);
+}
+
+test "getValidatorLiveness rejects epochs outside the supported window" {
+    var tc = test_helpers.makeTestContext(std.testing.allocator);
+    defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
+
+    const current_epoch = tc.chain_fixture.current_slot / preset.SLOTS_PER_EPOCH;
+
+    if (current_epoch > 1) {
+        try std.testing.expectError(error.InvalidRequest, getValidatorLiveness(&tc.ctx, current_epoch - 2, &.{0}));
+    }
+    try std.testing.expectError(error.InvalidRequest, getValidatorLiveness(&tc.ctx, current_epoch + 2, &.{0}));
 }
 
 // ---------------------------------------------------------------------------
@@ -820,17 +981,22 @@ pub fn prepareBeaconProposer(
 
 /// POST /eth/v1/validator/register_validator
 ///
-/// MEV-boost validator registration. Forward to builder API if wired.
+/// MEV-boost validator registration. Forward to the configured builder API.
 pub fn registerValidator(
     ctx: *ApiContext,
     registrations: []const types.SignedValidatorRegistrationV1,
 ) !HandlerResult(void) {
-    if (ctx.builder) |*builder_cb| {
-        builder_cb.registerValidators(registrations) catch |err| {
-            std.log.warn("registerValidator: builder relay error: {s}", .{@errorName(err)});
-        };
-    }
+    const builder_cb = ctx.builder orelse return error.BuilderNotConfigured;
+    try builder_cb.registerValidators(registrations);
     return .{ .data = {} };
+}
+
+test "registerValidator returns BuilderNotConfigured without builder callback" {
+    var tc = test_helpers.makeTestContext(std.testing.allocator);
+    defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
+
+    const result = registerValidator(&tc.ctx, &.{});
+    try std.testing.expectError(error.BuilderNotConfigured, result);
 }
 
 test "registerValidator forwards typed registrations to builder callback" {
@@ -872,4 +1038,24 @@ test "registerValidator forwards typed registrations to builder callback" {
     });
 
     try std.testing.expect(Mock.called);
+}
+
+test "registerValidator propagates builder errors" {
+    var tc = test_helpers.makeTestContext(std.testing.allocator);
+    defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
+
+    const Mock = struct {
+        fn register(_: *anyopaque, _: []const types.SignedValidatorRegistrationV1) anyerror!void {
+            return error.BuilderUnavailable;
+        }
+    };
+
+    var dummy: u8 = 0;
+    tc.ctx.builder = .{
+        .ptr = &dummy,
+        .registerValidatorsFn = &Mock.register,
+    };
+
+    const result = registerValidator(&tc.ctx, &.{});
+    try std.testing.expectError(error.BuilderUnavailable, result);
 }

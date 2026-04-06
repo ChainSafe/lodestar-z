@@ -8,6 +8,7 @@ const ctx_mod = @import("context.zig");
 const ApiContext = ctx_mod.ApiContext;
 const CachedBeaconState = ctx_mod.CachedBeaconState;
 const config_mod = @import("config");
+const preset = @import("preset").preset;
 const db_mod = @import("db");
 const MemoryKVStore = db_mod.memory_kv_store.MemoryKVStore;
 const AnySignedBeaconBlock = @import("fork_types").AnySignedBeaconBlock;
@@ -17,20 +18,52 @@ fn getTestHeadTracker(ptr: *anyopaque) ctx_mod.HeadTracker {
     return fixture.head_tracker.*;
 }
 
+fn getTestCurrentSlot(ptr: *anyopaque) u64 {
+    const fixture: *TestChainFixture = @ptrCast(@alignCast(ptr));
+    return fixture.current_slot;
+}
+
+fn getTestValidatorSeenAtEpoch(ptr: *anyopaque, validator_index: u64, epoch: u64) bool {
+    const fixture: *TestChainFixture = @ptrCast(@alignCast(ptr));
+    return fixture.seen_liveness.contains(.{ .epoch = epoch, .validator_index = validator_index });
+}
+
 fn getTestSyncStatus(ptr: *anyopaque) ctx_mod.SyncStatus {
     const status: *ctx_mod.SyncStatus = @ptrCast(@alignCast(ptr));
     return status.*;
 }
 
 const TestChainFixture = struct {
+    const LivenessKey = struct {
+        epoch: u64,
+        validator_index: u64,
+    };
+
     allocator: std.mem.Allocator,
     db: *db_mod.BeaconDB,
     head_tracker: *ctx_mod.HeadTracker,
     sync_status: *ctx_mod.SyncStatus,
     beacon_config: *const config_mod.BeaconConfig,
+    current_slot: u64,
+    seen_liveness: std.AutoHashMap(LivenessKey, void),
     head_state: ?*CachedBeaconState = null,
     state_by_root: ?*CachedBeaconState = null,
     state_by_slot: ?*CachedBeaconState = null,
+    fork_choice_heads: ?[]const types.DebugChainHead = null,
+    fork_choice_nodes: ?[]const types.ForkChoiceNode = null,
+    block_rewards_result: ?types.BlockRewards = null,
+    attestation_ideal_rewards: ?[]const types.IdealAttestationReward = null,
+    attestation_total_rewards: ?[]const types.TotalAttestationReward = null,
+    sync_committee_rewards: ?[]const types.SyncCommitteeReward = null,
+    last_block_rewards_root: ?[32]u8 = null,
+    last_attestation_rewards_epoch: ?u64 = null,
+    last_attestation_reward_indices: ?[]u64 = null,
+    last_sync_committee_rewards_root: ?[32]u8 = null,
+    last_sync_committee_reward_indices: ?[]u64 = null,
+
+    pub fn markValidatorSeenAtEpoch(self: *TestChainFixture, validator_index: u64, epoch: u64) !void {
+        try self.seen_liveness.put(.{ .epoch = epoch, .validator_index = validator_index }, {});
+    }
 };
 
 fn readSignedBlockSlotFromSsz(block_bytes: []const u8) ?u64 {
@@ -142,6 +175,95 @@ fn getTestStateExecutionOptimisticBySlot(ptr: *anyopaque, slot: u64) anyerror!bo
     return slot == fixture.head_tracker.head_slot and fixture.sync_status.is_optimistic;
 }
 
+fn replaceCapturedIndices(
+    allocator: std.mem.Allocator,
+    target: *?[]u64,
+    validator_indices: []const u64,
+) !void {
+    if (target.*) |existing| allocator.free(existing);
+    target.* = try allocator.dupe(u64, validator_indices);
+}
+
+fn getTestBlockRewards(ptr: *anyopaque, _: std.mem.Allocator, block_root: [32]u8) anyerror!types.BlockRewards {
+    const fixture: *TestChainFixture = @ptrCast(@alignCast(ptr));
+    fixture.last_block_rewards_root = block_root;
+    return fixture.block_rewards_result orelse error.NotImplemented;
+}
+
+fn getTestAttestationRewards(
+    ptr: *anyopaque,
+    allocator: std.mem.Allocator,
+    epoch: u64,
+    validator_indices: []const u64,
+) anyerror!types.AttestationRewardsData {
+    const fixture: *TestChainFixture = @ptrCast(@alignCast(ptr));
+    fixture.last_attestation_rewards_epoch = epoch;
+    try replaceCapturedIndices(fixture.allocator, &fixture.last_attestation_reward_indices, validator_indices);
+    const ideal = fixture.attestation_ideal_rewards orelse return error.NotImplemented;
+    const total = fixture.attestation_total_rewards orelse return error.NotImplemented;
+    return .{
+        .ideal_rewards = try allocator.dupe(types.IdealAttestationReward, ideal),
+        .total_rewards = try allocator.dupe(types.TotalAttestationReward, total),
+    };
+}
+
+fn getTestSyncCommitteeRewards(
+    ptr: *anyopaque,
+    allocator: std.mem.Allocator,
+    block_root: [32]u8,
+    validator_indices: []const u64,
+) anyerror![]const types.SyncCommitteeReward {
+    const fixture: *TestChainFixture = @ptrCast(@alignCast(ptr));
+    fixture.last_sync_committee_rewards_root = block_root;
+    try replaceCapturedIndices(fixture.allocator, &fixture.last_sync_committee_reward_indices, validator_indices);
+    const rewards = fixture.sync_committee_rewards orelse return error.NotImplemented;
+    return allocator.dupe(types.SyncCommitteeReward, rewards);
+}
+
+fn getTestForkChoiceHeads(ptr: *anyopaque, allocator: std.mem.Allocator) anyerror![]types.DebugChainHead {
+    const fixture: *TestChainFixture = @ptrCast(@alignCast(ptr));
+    if (fixture.fork_choice_heads) |heads| return allocator.dupe(types.DebugChainHead, heads);
+
+    const heads = try allocator.alloc(types.DebugChainHead, 1);
+    heads[0] = .{
+        .slot = fixture.head_tracker.head_slot,
+        .root = fixture.head_tracker.head_root,
+    };
+    return heads;
+}
+
+fn getTestForkChoiceDump(ptr: *anyopaque, allocator: std.mem.Allocator) anyerror!types.ForkChoiceDump {
+    const fixture: *TestChainFixture = @ptrCast(@alignCast(ptr));
+    const nodes = if (fixture.fork_choice_nodes) |items|
+        try allocator.dupe(types.ForkChoiceNode, items)
+    else blk: {
+        const out = try allocator.alloc(types.ForkChoiceNode, 1);
+        out[0] = .{
+            .slot = fixture.head_tracker.head_slot,
+            .block_root = fixture.head_tracker.head_root,
+            .parent_root = null,
+            .justified_epoch = fixture.head_tracker.justified_slot / preset.SLOTS_PER_EPOCH,
+            .finalized_epoch = fixture.head_tracker.finalized_slot / preset.SLOTS_PER_EPOCH,
+            .weight = 0,
+            .validity = "valid",
+            .execution_block_hash = [_]u8{0} ** 32,
+        };
+        break :blk out;
+    };
+
+    return .{
+        .justified_checkpoint = .{
+            .epoch = fixture.head_tracker.justified_slot / preset.SLOTS_PER_EPOCH,
+            .root = fixture.head_tracker.justified_root,
+        },
+        .finalized_checkpoint = .{
+            .epoch = fixture.head_tracker.finalized_slot / preset.SLOTS_PER_EPOCH,
+            .root = fixture.head_tracker.finalized_root,
+        },
+        .fork_choice_nodes = nodes,
+    };
+}
+
 /// Create a test ApiContext backed by a MemoryKVStore.
 /// Caller must call destroyTestContext when done.
 pub fn makeTestContext(allocator: std.mem.Allocator) TestContext {
@@ -160,6 +282,8 @@ pub fn makeTestContext(allocator: std.mem.Allocator) TestContext {
         .head_tracker = head_tracker,
         .sync_status = sync_status,
         .beacon_config = &default_beacon_config,
+        .current_slot = default_head_tracker.head_slot,
+        .seen_liveness = std.AutoHashMap(TestChainFixture.LivenessKey, void).init(allocator),
     };
 
     return .{
@@ -175,6 +299,8 @@ pub fn makeTestContext(allocator: std.mem.Allocator) TestContext {
             .chain = .{
                 .ptr = @ptrCast(chain_fixture),
                 .getHeadTrackerFn = &getTestHeadTracker,
+                .getCurrentSlotFn = &getTestCurrentSlot,
+                .validatorSeenAtEpochFn = &getTestValidatorSeenAtEpoch,
                 .getBlockRootBySlotFn = &getTestBlockRootBySlot,
                 .getBlockBytesByRootFn = &getTestBlockBytesByRoot,
                 .getBlobSidecarsByRootFn = &getTestBlobSidecarsByRoot,
@@ -191,16 +317,32 @@ pub fn makeTestContext(allocator: std.mem.Allocator) TestContext {
                 .getStateBySlotFn = &getTestStateBySlot,
                 .getStateExecutionOptimisticByRootFn = &getTestStateExecutionOptimisticByRoot,
                 .getStateExecutionOptimisticBySlotFn = &getTestStateExecutionOptimisticBySlot,
+                .getBlockRewardsFn = &getTestBlockRewards,
+                .getAttestationRewardsFn = &getTestAttestationRewards,
+                .getSyncCommitteeRewardsFn = &getTestSyncCommitteeRewards,
             },
             .sync_status_view = .{
                 .ptr = @ptrCast(sync_status),
                 .getSyncStatusFn = &getTestSyncStatus,
+            },
+            .fork_choice_debug = .{
+                .ptr = @ptrCast(chain_fixture),
+                .getHeadsFn = &getTestForkChoiceHeads,
+                .getForkChoiceDumpFn = &getTestForkChoiceDump,
             },
         },
     };
 }
 
 pub fn destroyTestContext(allocator: std.mem.Allocator, tc: *TestContext) void {
+    if (tc.chain_fixture.fork_choice_heads) |heads| allocator.free(heads);
+    if (tc.chain_fixture.fork_choice_nodes) |nodes| allocator.free(nodes);
+    if (tc.chain_fixture.attestation_ideal_rewards) |items| allocator.free(items);
+    if (tc.chain_fixture.attestation_total_rewards) |items| allocator.free(items);
+    if (tc.chain_fixture.sync_committee_rewards) |items| allocator.free(items);
+    if (tc.chain_fixture.last_attestation_reward_indices) |items| allocator.free(items);
+    if (tc.chain_fixture.last_sync_committee_reward_indices) |items| allocator.free(items);
+    tc.chain_fixture.seen_liveness.deinit();
     allocator.destroy(tc.chain_fixture);
     allocator.destroy(tc.sync_status);
     allocator.destroy(tc.head_tracker);

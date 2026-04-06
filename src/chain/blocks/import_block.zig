@@ -52,6 +52,7 @@ const HeadTracker = block_import.HeadTracker;
 const QueuedStateRegen = regen_mod.QueuedStateRegen;
 const reprocess_mod = @import("../reprocess.zig");
 const ReprocessQueue = reprocess_mod.ReprocessQueue;
+const SeenEpochValidators = @import("../seen_epoch_validators.zig").SeenEpochValidators;
 const PendingReason = reprocess_mod.PendingReason;
 
 /// Maximum number of slots in the past for which we publish block notifications.
@@ -88,6 +89,10 @@ pub const ImportContext = struct {
 
     // -- Block root → state root mapping --
     block_to_state: *std.AutoArrayHashMap([32]u8, [32]u8),
+
+    // -- Validator liveness caches --
+    seen_block_attesters: *SeenEpochValidators,
+    seen_block_proposers: *SeenEpochValidators,
 
     // -- Chain notifications --
     notification_sink: ?NotificationSink,
@@ -129,6 +134,8 @@ pub fn importVerifiedBlock(
     const block_root = verified.block_root;
     const state_root = verified.state_root;
     const block_slot = block_input.block.beaconBlock().slot();
+
+    const proposer_index = block_input.block.beaconBlock().proposerIndex();
 
     const prev_epoch = computeEpochAtSlot(if (block_slot > 0) block_slot - 1 else 0);
     const block_epoch = computeEpochAtSlot(block_slot);
@@ -227,6 +234,9 @@ pub fn importVerifiedBlock(
                                     error.OutOfMemory => return BlockImportError.InternalError,
                                     else => {},
                                 };
+                                ctx.seen_block_attesters.add(att_target_epoch, validator_index) catch |err| switch (err) {
+                                    error.EpochTooLow, error.OutOfMemory => {},
+                                };
                             }
                         }
                     },
@@ -247,6 +257,9 @@ pub fn importVerifiedBlock(
                                 ) catch |err| switch (err) {
                                     error.OutOfMemory => return BlockImportError.InternalError,
                                     else => {},
+                                };
+                                ctx.seen_block_attesters.add(att_target_epoch, validator_index) catch |err| switch (err) {
+                                    error.EpochTooLow, error.OutOfMemory => {},
                                 };
                             }
                         }
@@ -278,6 +291,10 @@ pub fn importVerifiedBlock(
             }
         } // end if (fc_block_ok)
     }
+
+    ctx.seen_block_proposers.add(block_epoch, proposer_index) catch |err| switch (err) {
+        error.EpochTooLow, error.OutOfMemory => {},
+    };
 
     // 3. Cache post-state via state regen.
     const cached_state_root = ctx.queued_regen.onNewBlock(post_state, true) catch

@@ -11,10 +11,11 @@ const CachedBeaconState = context.CachedBeaconState;
 const preset = @import("preset").preset;
 const fork_types = @import("fork_types");
 const AnySignedBeaconBlock = fork_types.AnySignedBeaconBlock;
+const AnyExecutionPayload = fork_types.AnyExecutionPayload;
+const AnyExecutionPayloadHeader = fork_types.AnyExecutionPayloadHeader;
 const BlockType = fork_types.BlockType;
 const handler_result = @import("../handler_result.zig");
 const HandlerResult = handler_result.HandlerResult;
-const ResponseMeta = handler_result.ResponseMeta;
 const consensus_types = @import("consensus_types");
 
 /// GET /eth/v1/beacon/genesis
@@ -81,6 +82,7 @@ pub const BlockResult = struct {
     execution_optimistic: bool,
     finalized: bool,
     fork_name: handler_result.Fork = .phase0,
+    block_type: BlockType = .full,
 };
 
 pub const BlobSidecarsResult = struct {
@@ -403,7 +405,9 @@ pub fn getFinalityCheckpoints(ctx: *ApiContext, state_id: types.StateId) !Handle
 ///
 /// Accepts raw SSZ bytes of a SignedBeaconBlock and forwards them to
 /// the block import pipeline registered on the ApiContext. Returns
-/// error.NotImplemented if no import callback is wired.
+/// `202 Accepted` when the live ingress path queues or drops the block
+/// without immediate import, and `error.NotImplemented` if no import
+/// callback is wired.
 pub fn submitBlock(
     ctx: *ApiContext,
     block_bytes: []const u8,
@@ -411,12 +415,18 @@ pub fn submitBlock(
     broadcast_validation: types.BroadcastValidation,
 ) !HandlerResult(void) {
     const cb = ctx.block_import orelse return error.NotImplemented;
-    try cb.importFn(cb.ptr, .{
+    const import_result = try cb.importFn(cb.ptr, .{
         .block_bytes = block_bytes,
         .block_type = block_type,
         .broadcast_validation = broadcast_validation,
     });
-    return .{ .data = {} };
+    return .{
+        .data = {},
+        .status = switch (import_result) {
+            .imported => 0,
+            .queued, .ignored => 202,
+        },
+    };
 }
 
 pub fn submitBlindedBlock(
@@ -443,11 +453,11 @@ pub fn submitBlindedBlock(
 /// Submit attestations to the local op pool.
 /// body is JSON: array of Attestation objects.
 /// Validates and forwards to the pool_submit callback if available.
-pub fn submitPoolAttestations(ctx: *ApiContext, body: []const u8) !HandlerResult(void) {
-    if (body.len == 0) return .{ .data = {} };
+pub fn submitPoolAttestations(ctx: *ApiContext, attestations: []const consensus_types.phase0.Attestation.Type) !HandlerResult(void) {
+    if (attestations.len == 0) return .{ .data = {} };
     const cb = ctx.pool_submit orelse return error.NotImplemented;
     const submit_fn = cb.submitAttestationFn orelse return error.NotImplemented;
-    try submit_fn(cb.ptr, body);
+    try submit_fn(cb.ptr, .{ .phase0 = attestations });
     return .{ .data = {} };
 }
 
@@ -457,66 +467,67 @@ pub fn submitPoolAttestations(ctx: *ApiContext, body: []const u8) !HandlerResult
 /// For Electra slots, expects SingleAttestation[] format:
 ///   {committee_index, attester_index, data, signature}
 /// For pre-Electra slots, falls back to phase0 Attestation[] format.
-pub fn submitPoolAttestationsV2(ctx: *ApiContext, body: []const u8) !HandlerResult(void) {
-    if (body.len == 0) return .{ .data = {} };
+pub fn submitPoolAttestationsV2(ctx: *ApiContext, attestations: context.SubmittedAttestations) !HandlerResult(void) {
+    const is_empty = switch (attestations) {
+        .phase0 => |items| items.len == 0,
+        .electra_single => |items| items.len == 0,
+    };
+    if (is_empty) return .{ .data = {} };
     const cb = ctx.pool_submit orelse return error.NotImplemented;
     const submit_fn = cb.submitAttestationFn orelse return error.NotImplemented;
-    try submit_fn(cb.ptr, body);
+    try submit_fn(cb.ptr, attestations);
     return .{ .data = {} };
 }
 
 /// POST /eth/v1/beacon/pool/voluntary_exits
 ///
 /// Submit a signed voluntary exit to the local op pool.
-pub fn submitPoolVoluntaryExits(ctx: *ApiContext, body: []const u8) !HandlerResult(void) {
-    if (body.len == 0) return .{ .data = {} };
+pub fn submitPoolVoluntaryExits(ctx: *ApiContext, exit: consensus_types.phase0.SignedVoluntaryExit.Type) !HandlerResult(void) {
     const cb = ctx.pool_submit orelse return error.NotImplemented;
     const submit_fn = cb.submitVoluntaryExitFn orelse return error.NotImplemented;
-    try submit_fn(cb.ptr, body);
+    try submit_fn(cb.ptr, exit);
     return .{ .data = {} };
 }
 
 /// POST /eth/v1/beacon/pool/proposer_slashings
 ///
 /// Submit a proposer slashing to the local op pool.
-pub fn submitPoolProposerSlashings(ctx: *ApiContext, body: []const u8) !HandlerResult(void) {
-    if (body.len == 0) return .{ .data = {} };
+pub fn submitPoolProposerSlashings(ctx: *ApiContext, slashing: consensus_types.phase0.ProposerSlashing.Type) !HandlerResult(void) {
     const cb = ctx.pool_submit orelse return error.NotImplemented;
     const submit_fn = cb.submitProposerSlashingFn orelse return error.NotImplemented;
-    try submit_fn(cb.ptr, body);
+    try submit_fn(cb.ptr, slashing);
     return .{ .data = {} };
 }
 
 /// POST /eth/v1/beacon/pool/attester_slashings
 ///
 /// Submit an attester slashing to the local op pool.
-pub fn submitPoolAttesterSlashings(ctx: *ApiContext, body: []const u8) !HandlerResult(void) {
-    if (body.len == 0) return .{ .data = {} };
+pub fn submitPoolAttesterSlashings(ctx: *ApiContext, slashing: context.SubmittedAttesterSlashing) !HandlerResult(void) {
     const cb = ctx.pool_submit orelse return error.NotImplemented;
     const submit_fn = cb.submitAttesterSlashingFn orelse return error.NotImplemented;
-    try submit_fn(cb.ptr, body);
+    try submit_fn(cb.ptr, slashing);
     return .{ .data = {} };
 }
 
 /// POST /eth/v1/beacon/pool/bls_to_execution_changes
 ///
 /// Submit BLS-to-execution changes to the local op pool.
-pub fn submitPoolBlsToExecutionChanges(ctx: *ApiContext, body: []const u8) !HandlerResult(void) {
-    if (body.len == 0) return .{ .data = {} };
+pub fn submitPoolBlsToExecutionChanges(ctx: *ApiContext, changes: []const consensus_types.capella.SignedBLSToExecutionChange.Type) !HandlerResult(void) {
+    if (changes.len == 0) return .{ .data = {} };
     const cb = ctx.pool_submit orelse return error.NotImplemented;
     const submit_fn = cb.submitBlsChangeFn orelse return error.NotImplemented;
-    try submit_fn(cb.ptr, body);
+    try submit_fn(cb.ptr, changes);
     return .{ .data = {} };
 }
 
 /// POST /eth/v1/beacon/pool/sync_committees
 ///
 /// Submit sync committee messages to the local pool.
-pub fn submitPoolSyncCommittees(ctx: *ApiContext, body: []const u8) !HandlerResult(void) {
-    if (body.len == 0) return .{ .data = {} };
+pub fn submitPoolSyncCommittees(ctx: *ApiContext, messages: []const consensus_types.altair.SyncCommitteeMessage.Type) !HandlerResult(void) {
+    if (messages.len == 0) return .{ .data = {} };
     const cb = ctx.pool_submit orelse return error.NotImplemented;
     const submit_fn = cb.submitSyncCommitteeMessageFn orelse return error.NotImplemented;
-    try submit_fn(cb.ptr, body);
+    try submit_fn(cb.ptr, messages);
     return .{ .data = {} };
 }
 
@@ -535,8 +546,8 @@ pub fn getPoolAttestations(
     slot_filter: ?u64,
     committee_index_filter: ?u64,
 ) !HandlerResult([]const OpPoolCallback.Phase0Attestation) {
-    const cb = ctx.op_pool orelse return .{ .data = &.{} };
-    const get_fn = cb.getAttestationsFn orelse return .{ .data = &.{} };
+    const cb = ctx.op_pool orelse return error.NotImplemented;
+    const get_fn = cb.getAttestationsFn orelse return error.NotImplemented;
     const items = try get_fn(cb.ptr, ctx.allocator, slot_filter, committee_index_filter);
     return .{ .data = items };
 }
@@ -563,8 +574,8 @@ pub fn getPoolAttestationsV2(
 ///
 /// Returns pending signed voluntary exits from the operation pool.
 pub fn getPoolVoluntaryExits(ctx: *ApiContext) !HandlerResult([]const OpPoolCallback.SignedVoluntaryExit) {
-    const cb = ctx.op_pool orelse return .{ .data = &.{} };
-    const get_fn = cb.getVoluntaryExitsFn orelse return .{ .data = &.{} };
+    const cb = ctx.op_pool orelse return error.NotImplemented;
+    const get_fn = cb.getVoluntaryExitsFn orelse return error.NotImplemented;
     const items = try get_fn(cb.ptr, ctx.allocator);
     return .{ .data = items };
 }
@@ -573,8 +584,8 @@ pub fn getPoolVoluntaryExits(ctx: *ApiContext) !HandlerResult([]const OpPoolCall
 ///
 /// Returns pending proposer slashings from the operation pool.
 pub fn getPoolProposerSlashings(ctx: *ApiContext) !HandlerResult([]const OpPoolCallback.ProposerSlashing) {
-    const cb = ctx.op_pool orelse return .{ .data = &.{} };
-    const get_fn = cb.getProposerSlashingsFn orelse return .{ .data = &.{} };
+    const cb = ctx.op_pool orelse return error.NotImplemented;
+    const get_fn = cb.getProposerSlashingsFn orelse return error.NotImplemented;
     const items = try get_fn(cb.ptr, ctx.allocator);
     return .{ .data = items };
 }
@@ -587,8 +598,8 @@ pub fn getPoolAttesterSlashings(ctx: *ApiContext) !HandlerResult([]const OpPoolC
     const head_slot = ctx.currentHeadTracker().head_slot;
     if (ctx.beacon_config.forkSeq(head_slot).gte(.electra)) return error.InvalidRequest;
 
-    const cb = ctx.op_pool orelse return .{ .data = &.{} };
-    const get_fn = cb.getAttesterSlashingsFn orelse return .{ .data = &.{} };
+    const cb = ctx.op_pool orelse return error.NotImplemented;
+    const get_fn = cb.getAttesterSlashingsFn orelse return error.NotImplemented;
     const items = try get_fn(cb.ptr, ctx.allocator);
     return .{ .data = items };
 }
@@ -597,8 +608,8 @@ pub fn getPoolAttesterSlashings(ctx: *ApiContext) !HandlerResult([]const OpPoolC
 ///
 /// Returns pending attester slashings from the operation pool in fork-aware format.
 pub fn getPoolAttesterSlashingsV2(ctx: *ApiContext) !HandlerResult([]const OpPoolCallback.AnyAttesterSlashing) {
-    const cb = ctx.op_pool orelse return .{ .data = &.{} };
-    const get_fn = cb.getAttesterSlashingsFn orelse return .{ .data = &.{} };
+    const cb = ctx.op_pool orelse return error.NotImplemented;
+    const get_fn = cb.getAttesterSlashingsFn orelse return error.NotImplemented;
     const items = try get_fn(cb.ptr, ctx.allocator);
     const slot = ctx.currentHeadTracker().head_slot;
     return .{
@@ -611,8 +622,8 @@ pub fn getPoolAttesterSlashingsV2(ctx: *ApiContext) !HandlerResult([]const OpPoo
 ///
 /// Returns pending signed BLS-to-execution changes from the operation pool.
 pub fn getPoolBlsToExecutionChanges(ctx: *ApiContext) !HandlerResult([]const OpPoolCallback.SignedBLSToExecutionChange) {
-    const cb = ctx.op_pool orelse return .{ .data = &.{} };
-    const get_fn = cb.getBlsToExecutionChangesFn orelse return .{ .data = &.{} };
+    const cb = ctx.op_pool orelse return error.NotImplemented;
+    const get_fn = cb.getBlsToExecutionChangesFn orelse return error.NotImplemented;
     const items = try get_fn(cb.ptr, ctx.allocator);
     return .{ .data = items };
 }
@@ -798,11 +809,15 @@ fn resolveStateSlot(ctx: *ApiContext, state_id: types.StateId) !u64 {
 const test_helpers = @import("../test_helpers.zig");
 
 const PoolSubmitProbe = struct {
-    saw_body: ?[]const u8 = null,
+    phase0_attestation_len: usize = 0,
+    electra_attestation_len: usize = 0,
 
-    fn submitAttestation(ptr: *anyopaque, json_bytes: []const u8) anyerror!void {
+    fn submitAttestation(ptr: *anyopaque, attestations: context.SubmittedAttestations) anyerror!void {
         const self: *PoolSubmitProbe = @ptrCast(@alignCast(ptr));
-        self.saw_body = json_bytes;
+        switch (attestations) {
+            .phase0 => |items| self.phase0_attestation_len = items.len,
+            .electra_single => |items| self.electra_attestation_len = items.len,
+        }
     }
 };
 
@@ -818,7 +833,7 @@ test "submitPoolAttestations returns NotImplemented without callback when body n
     var tc = test_helpers.makeTestContext(std.testing.allocator);
     defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
 
-    const result = submitPoolAttestations(&tc.ctx, "[]");
+    const result = submitPoolAttestations(&tc.ctx, &.{consensus_types.phase0.Attestation.default_value});
     try std.testing.expectError(error.NotImplemented, result);
 }
 
@@ -832,16 +847,16 @@ test "submitPoolAttestations forwards body to pool_submit callback" {
         .submitAttestationFn = &PoolSubmitProbe.submitAttestation,
     };
 
-    const body = "[{\"committee_index\":\"0\"}]";
-    _ = try submitPoolAttestations(&tc.ctx, body);
-    try std.testing.expectEqualStrings(body, probe.saw_body.?);
+    _ = try submitPoolAttestations(&tc.ctx, &.{consensus_types.phase0.Attestation.default_value});
+    try std.testing.expectEqual(@as(usize, 1), probe.phase0_attestation_len);
+    try std.testing.expectEqual(@as(usize, 0), probe.electra_attestation_len);
 }
 
 test "submitPoolAttestationsV2 returns NotImplemented without callback when body non-empty" {
     var tc = test_helpers.makeTestContext(std.testing.allocator);
     defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
 
-    const result = submitPoolAttestationsV2(&tc.ctx, "[]");
+    const result = submitPoolAttestationsV2(&tc.ctx, .{ .phase0 = &.{consensus_types.phase0.Attestation.default_value} });
     try std.testing.expectError(error.NotImplemented, result);
 }
 
@@ -947,13 +962,60 @@ test "getBlockHeader for head reports execution optimistic from chain query" {
     try std.testing.expect(resp.meta.execution_optimistic orelse false);
 }
 
+test "getBlockHeaders filters resolved header by parent_root" {
+    var tc = test_helpers.makeTestContext(std.testing.allocator);
+    defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
+
+    const matching = try getBlockHeaders(&tc.ctx, null, tc.head_tracker.head_root);
+    defer std.testing.allocator.free(matching.data);
+    try std.testing.expectEqual(@as(usize, 0), matching.data.len);
+
+    const parent_root = [_]u8{0x42} ** 32;
+    const ct = @import("consensus_types");
+    var signed_block = ct.phase0.SignedBeaconBlock.default_value;
+    signed_block.message.slot = tc.head_tracker.head_slot;
+    signed_block.message.parent_root = parent_root;
+
+    const block_size = ct.phase0.SignedBeaconBlock.serializedSize(&signed_block);
+    const block_bytes = try std.testing.allocator.alloc(u8, block_size);
+    defer std.testing.allocator.free(block_bytes);
+    _ = ct.phase0.SignedBeaconBlock.serializeIntoBytes(&signed_block, block_bytes);
+    try tc.db.putBlock(tc.head_tracker.head_root, block_bytes);
+
+    const filtered = try getBlockHeaders(&tc.ctx, null, parent_root);
+    defer std.testing.allocator.free(filtered.data);
+    try std.testing.expectEqual(@as(usize, 1), filtered.data.len);
+    try std.testing.expectEqual(parent_root, filtered.data[0].header.message.parent_root);
+}
+
+test "getBlockHeaders returns empty when parent_root filter mismatches" {
+    var tc = test_helpers.makeTestContext(std.testing.allocator);
+    defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
+
+    const ct = @import("consensus_types");
+    var signed_block = ct.phase0.SignedBeaconBlock.default_value;
+    signed_block.message.slot = tc.head_tracker.head_slot;
+    signed_block.message.parent_root = [_]u8{0x11} ** 32;
+
+    const block_size = ct.phase0.SignedBeaconBlock.serializedSize(&signed_block);
+    const block_bytes = try std.testing.allocator.alloc(u8, block_size);
+    defer std.testing.allocator.free(block_bytes);
+    _ = ct.phase0.SignedBeaconBlock.serializeIntoBytes(&signed_block, block_bytes);
+    try tc.db.putBlock(tc.head_tracker.head_root, block_bytes);
+
+    const filtered = try getBlockHeaders(&tc.ctx, null, [_]u8{0x22} ** 32);
+    defer std.testing.allocator.free(filtered.data);
+    try std.testing.expectEqual(@as(usize, 0), filtered.data.len);
+}
+
 test "getBlobSidecars returns archived blob sidecars for slot" {
     const allocator = std.testing.allocator;
     var tc = test_helpers.makeTestContext(allocator);
     defer test_helpers.destroyTestContext(allocator, &tc);
 
     const sidecar_size = consensus_types.deneb.BlobSidecar.fixed_size;
-    const slot: u64 = 128;
+    const slot: u64 = tc.ctx.beacon_config.chain.DENEB_FORK_EPOCH * preset.SLOTS_PER_EPOCH;
+    tc.head_tracker.finalized_slot = slot;
     const block_root = [_]u8{0x44} ** 32;
     const blob_bytes = try allocator.alloc(u8, sidecar_size * 2);
     defer allocator.free(blob_bytes);
@@ -1126,12 +1188,13 @@ test "submitBlock invokes block_import callback" {
         block_type: BlockType = .full,
         broadcast_validation: types.BroadcastValidation = .gossip,
 
-        fn importBlock(ptr: *anyopaque, params: context.PublishedBlockParams) anyerror!void {
+        fn importBlock(ptr: *anyopaque, params: context.PublishedBlockParams) anyerror!context.PublishedBlockImportResult {
             const self: *@This() = @ptrCast(@alignCast(ptr));
             self.called = true;
             self.received_len = params.block_bytes.len;
             self.block_type = params.block_type;
             self.broadcast_validation = params.broadcast_validation;
+            return .queued;
         }
     };
 
@@ -1143,12 +1206,33 @@ test "submitBlock invokes block_import callback" {
 
     const fake_bytes = [_]u8{ 0xDE, 0xAD, 0xBE, 0xEF } ** 4;
     const result = try submitBlock(&tc.ctx, &fake_bytes, .full, .consensus);
-    _ = result;
 
     try std.testing.expect(mock.called);
     try std.testing.expectEqual(fake_bytes.len, mock.received_len);
     try std.testing.expectEqual(BlockType.full, mock.block_type);
     try std.testing.expectEqual(types.BroadcastValidation.consensus, mock.broadcast_validation);
+    try std.testing.expectEqual(@as(u16, 202), result.status);
+}
+
+test "submitBlock keeps imported response on default status" {
+    var tc = test_helpers.makeTestContext(std.testing.allocator);
+    defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
+
+    const Importer = struct {
+        fn importBlock(_: *anyopaque, _: context.PublishedBlockParams) anyerror!context.PublishedBlockImportResult {
+            return .imported;
+        }
+    };
+
+    var dummy: u8 = 0;
+    tc.ctx.block_import = .{
+        .ptr = &dummy,
+        .importFn = &Importer.importBlock,
+    };
+
+    const fake_bytes = [_]u8{ 0xDE, 0xAD };
+    const result = try submitBlock(&tc.ctx, &fake_bytes, .full, .gossip);
+    try std.testing.expectEqual(@as(u16, 0), result.status);
 }
 
 test "submitBlock propagates error from callback" {
@@ -1156,7 +1240,7 @@ test "submitBlock propagates error from callback" {
     defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
 
     const FailImporter = struct {
-        fn importBlock(_: *anyopaque, _: context.PublishedBlockParams) anyerror!void {
+        fn importBlock(_: *anyopaque, _: context.PublishedBlockParams) anyerror!context.PublishedBlockImportResult {
             return error.BlockAlreadyKnown;
         }
     };
@@ -1172,11 +1256,47 @@ test "submitBlock propagates error from callback" {
     try std.testing.expectError(error.BlockAlreadyKnown, result);
 }
 
-test "getPoolAttestations returns empty when no op_pool" {
+test "getBlindedBlock returns pre-execution full block bytes" {
     var tc = test_helpers.makeTestContext(std.testing.allocator);
     defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
-    const resp = try getPoolAttestations(&tc.ctx, null, null);
-    try std.testing.expectEqual(@as(usize, 0), resp.data.len);
+
+    const block_bytes = "phase0_block";
+    try tc.db.putBlock(tc.head_tracker.head_root, block_bytes);
+
+    const result = try getBlindedBlock(&tc.ctx, .head);
+    defer std.testing.allocator.free(result.data);
+
+    try std.testing.expectEqual(handler_result.Fork.phase0, result.fork_name);
+    try std.testing.expectEqualSlices(u8, block_bytes, result.data);
+}
+
+test "getBlindedBlock returns blinded execution-fork block" {
+    var tc = test_helpers.makeTestContext(std.testing.allocator);
+    defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
+
+    const execution_slot = tc.ctx.beacon_config.chain.BELLATRIX_FORK_EPOCH * preset.SLOTS_PER_EPOCH;
+    const block_root = [_]u8{0x44} ** 32;
+    var block = consensus_types.bellatrix.SignedBeaconBlock.default_value;
+    block.message.slot = execution_slot;
+    const block_bytes = try std.testing.allocator.alloc(u8, consensus_types.bellatrix.SignedBeaconBlock.serializedSize(&block));
+    defer std.testing.allocator.free(block_bytes);
+    _ = consensus_types.bellatrix.SignedBeaconBlock.serializeIntoBytes(&block, block_bytes);
+    try tc.db.putBlockArchive(execution_slot, block_root, block_bytes);
+
+    const result = try getBlindedBlock(&tc.ctx, .{ .slot = execution_slot });
+    defer std.testing.allocator.free(result.data);
+
+    try std.testing.expectEqual(BlockType.blinded, result.block_type);
+    var blinded = try AnySignedBeaconBlock.deserialize(std.testing.allocator, .blinded, .bellatrix, result.data);
+    defer blinded.deinit(std.testing.allocator);
+    try std.testing.expectEqual(fork_types.BlockType.blinded, blinded.blockType());
+}
+
+test "getPoolAttestations returns NotImplemented when no op_pool" {
+    var tc = test_helpers.makeTestContext(std.testing.allocator);
+    defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
+    const resp = getPoolAttestations(&tc.ctx, null, null);
+    try std.testing.expectError(error.NotImplemented, resp);
 }
 
 test "getPoolAttestations returns items from callback" {
@@ -1220,32 +1340,32 @@ test "getPoolAttestations returns items from callback" {
     try std.testing.expectEqual(@as(u64, 43), resp.data[1].data.slot);
 }
 
-test "getPoolVoluntaryExits returns empty when no op_pool" {
+test "getPoolVoluntaryExits returns NotImplemented when no op_pool" {
     var tc = test_helpers.makeTestContext(std.testing.allocator);
     defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
-    const resp = try getPoolVoluntaryExits(&tc.ctx);
-    try std.testing.expectEqual(@as(usize, 0), resp.data.len);
+    const resp = getPoolVoluntaryExits(&tc.ctx);
+    try std.testing.expectError(error.NotImplemented, resp);
 }
 
-test "getPoolProposerSlashings returns empty when no op_pool" {
+test "getPoolProposerSlashings returns NotImplemented when no op_pool" {
     var tc = test_helpers.makeTestContext(std.testing.allocator);
     defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
-    const resp = try getPoolProposerSlashings(&tc.ctx);
-    try std.testing.expectEqual(@as(usize, 0), resp.data.len);
+    const resp = getPoolProposerSlashings(&tc.ctx);
+    try std.testing.expectError(error.NotImplemented, resp);
 }
 
-test "getPoolAttesterSlashings returns empty when no op_pool" {
+test "getPoolAttesterSlashings returns NotImplemented when no op_pool" {
     var tc = test_helpers.makeTestContext(std.testing.allocator);
     defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
-    const resp = try getPoolAttesterSlashings(&tc.ctx);
-    try std.testing.expectEqual(@as(usize, 0), resp.data.len);
+    const resp = getPoolAttesterSlashings(&tc.ctx);
+    try std.testing.expectError(error.NotImplemented, resp);
 }
 
-test "getPoolBlsToExecutionChanges returns empty when no op_pool" {
+test "getPoolBlsToExecutionChanges returns NotImplemented when no op_pool" {
     var tc = test_helpers.makeTestContext(std.testing.allocator);
     defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
-    const resp = try getPoolBlsToExecutionChanges(&tc.ctx);
-    try std.testing.expectEqual(@as(usize, 0), resp.data.len);
+    const resp = getPoolBlsToExecutionChanges(&tc.ctx);
+    try std.testing.expectError(error.NotImplemented, resp);
 }
 
 // ---------------------------------------------------------------------------
@@ -1642,11 +1762,11 @@ pub fn getStateRandao(
 pub fn getBlockHeaders(
     ctx: *ApiContext,
     slot_opt: ?u64,
-    _: ?[32]u8,
+    parent_root_opt: ?[32]u8,
 ) !HandlerResult([]const types.BlockHeaderData) {
-    // Return single head header or filtered set.
-    // Full implementation requires a slot→root index in the DB.
-    // For now, return the head header (or the requested slot's header).
+    // This endpoint currently serves the canonical head header or the canonical
+    // header for a requested slot. Parent-root filtering must be applied
+    // honestly to that resolved header rather than ignored.
     var headers = std.ArrayListUnmanaged(types.BlockHeaderData).empty;
     errdefer headers.deinit(ctx.allocator);
 
@@ -1660,6 +1780,15 @@ pub fn getBlockHeaders(
         .meta = .{},
     };
 
+    if (parent_root_opt) |parent_root| {
+        if (!std.mem.eql(u8, &header_result.header.header.message.parent_root, &parent_root)) {
+            return .{
+                .data = try headers.toOwnedSlice(ctx.allocator),
+                .meta = .{},
+            };
+        }
+    }
+
     try headers.append(ctx.allocator, header_result.header);
 
     return .{
@@ -1672,7 +1801,7 @@ pub fn getBlockHeaders(
 }
 
 // ---------------------------------------------------------------------------
-// Blob sidecars endpoint (stub — requires Deneb+ DB)
+// Blob sidecars endpoint
 // ---------------------------------------------------------------------------
 
 /// GET /eth/v1/beacon/blob_sidecars/{block_id}
@@ -1744,69 +1873,277 @@ fn containsU64(values: []const u64, needle: u64) bool {
 }
 
 // ---------------------------------------------------------------------------
-// Blinded blocks endpoint (stub)
+// Blinded blocks endpoint
 // ---------------------------------------------------------------------------
 
 /// GET /eth/v1/beacon/blinded_blocks/{block_id}
 ///
 /// Returns the blinded block for the given block identifier.
-/// For blocks without an execution payload, this is identical to the full block.
+/// For pre-Bellatrix forks, this is identical to the full block.
 pub fn getBlindedBlock(
     ctx: *ApiContext,
     block_id: types.BlockId,
-) !HandlerResult([]const u8) {
-    // Reuse getBlock — actual blinding (replacing execution payload with header)
-    // requires fork-specific code. For phase0/altair blocks this is identical.
-    const block_result = try getBlock(ctx, block_id);
-    return .{
-        .data = block_result.data,
-        .meta = .{
-            .version = block_result.fork_name,
-            .execution_optimistic = block_result.execution_optimistic,
-            .finalized = block_result.finalized,
+) !BlockResult {
+    const slot_info = try resolveBlockSlotAndRoot(ctx, block_id);
+    const fork_name = forkNameFromSlot(ctx, slot_info.slot);
+    return switch (fork_name) {
+        .phase0, .altair => try getBlock(ctx, block_id),
+        .gloas => error.NotImplemented,
+        else => blk: {
+            const full_block_bytes = (try ctx.blockBytesByRoot(slot_info.root)) orelse
+                return error.BlockNotFound;
+            defer ctx.allocator.free(full_block_bytes);
+
+            const fork_seq = ctx.beacon_config.forkSeq(slot_info.slot);
+            const full_block = try AnySignedBeaconBlock.deserialize(ctx.allocator, .full, fork_seq, full_block_bytes);
+            defer full_block.deinit(ctx.allocator);
+
+            break :blk .{
+                .data = try blindedBytesFromFullSignedBlock(ctx.allocator, full_block),
+                .slot = slot_info.slot,
+                .execution_optimistic = slot_info.execution_optimistic,
+                .finalized = slot_info.finalized,
+                .fork_name = fork_name,
+                .block_type = .blinded,
+            };
         },
-        .ssz_bytes = block_result.data,
     };
 }
 
+fn blindedBytesFromFullSignedBlock(allocator: std.mem.Allocator, full_block: AnySignedBeaconBlock) ![]u8 {
+    switch (full_block) {
+        .phase0, .altair => return error.InvalidFork,
+        .blinded_bellatrix, .blinded_capella, .blinded_deneb, .blinded_electra, .blinded_fulu => return error.InvalidBlockType,
+        .full_gloas => return error.InvalidFork,
+        .full_bellatrix => |block| {
+            var payload_header = try AnyExecutionPayloadHeader.init(.bellatrix);
+            defer payload_header.deinit(allocator);
+            const any_payload: AnyExecutionPayload = .{ .bellatrix = block.message.body.execution_payload };
+            try any_payload.createPayloadHeader(allocator, &payload_header);
+
+            const blinded = consensus_types.bellatrix.SignedBlindedBeaconBlock.Type{
+                .message = .{
+                    .slot = block.message.slot,
+                    .proposer_index = block.message.proposer_index,
+                    .parent_root = block.message.parent_root,
+                    .state_root = block.message.state_root,
+                    .body = .{
+                        .randao_reveal = block.message.body.randao_reveal,
+                        .eth1_data = block.message.body.eth1_data,
+                        .graffiti = block.message.body.graffiti,
+                        .proposer_slashings = block.message.body.proposer_slashings,
+                        .attester_slashings = block.message.body.attester_slashings,
+                        .attestations = block.message.body.attestations,
+                        .deposits = block.message.body.deposits,
+                        .voluntary_exits = block.message.body.voluntary_exits,
+                        .sync_aggregate = block.message.body.sync_aggregate,
+                        .execution_payload_header = payload_header.bellatrix,
+                    },
+                },
+                .signature = block.signature,
+            };
+            const out = try allocator.alloc(u8, consensus_types.bellatrix.SignedBlindedBeaconBlock.serializedSize(&blinded));
+            errdefer allocator.free(out);
+            _ = consensus_types.bellatrix.SignedBlindedBeaconBlock.serializeIntoBytes(&blinded, out);
+            return out;
+        },
+        .full_capella => |block| {
+            var payload_header = try AnyExecutionPayloadHeader.init(.capella);
+            defer payload_header.deinit(allocator);
+            const any_payload: AnyExecutionPayload = .{ .capella = block.message.body.execution_payload };
+            try any_payload.createPayloadHeader(allocator, &payload_header);
+
+            const blinded = consensus_types.capella.SignedBlindedBeaconBlock.Type{
+                .message = .{
+                    .slot = block.message.slot,
+                    .proposer_index = block.message.proposer_index,
+                    .parent_root = block.message.parent_root,
+                    .state_root = block.message.state_root,
+                    .body = .{
+                        .randao_reveal = block.message.body.randao_reveal,
+                        .eth1_data = block.message.body.eth1_data,
+                        .graffiti = block.message.body.graffiti,
+                        .proposer_slashings = block.message.body.proposer_slashings,
+                        .attester_slashings = block.message.body.attester_slashings,
+                        .attestations = block.message.body.attestations,
+                        .deposits = block.message.body.deposits,
+                        .voluntary_exits = block.message.body.voluntary_exits,
+                        .sync_aggregate = block.message.body.sync_aggregate,
+                        .execution_payload_header = payload_header.capella,
+                        .bls_to_execution_changes = block.message.body.bls_to_execution_changes,
+                    },
+                },
+                .signature = block.signature,
+            };
+            const out = try allocator.alloc(u8, consensus_types.capella.SignedBlindedBeaconBlock.serializedSize(&blinded));
+            errdefer allocator.free(out);
+            _ = consensus_types.capella.SignedBlindedBeaconBlock.serializeIntoBytes(&blinded, out);
+            return out;
+        },
+        .full_deneb => |block| {
+            var payload_header = try AnyExecutionPayloadHeader.init(.deneb);
+            defer payload_header.deinit(allocator);
+            const any_payload: AnyExecutionPayload = .{ .deneb = block.message.body.execution_payload };
+            try any_payload.createPayloadHeader(allocator, &payload_header);
+
+            const blinded = consensus_types.deneb.SignedBlindedBeaconBlock.Type{
+                .message = .{
+                    .slot = block.message.slot,
+                    .proposer_index = block.message.proposer_index,
+                    .parent_root = block.message.parent_root,
+                    .state_root = block.message.state_root,
+                    .body = .{
+                        .randao_reveal = block.message.body.randao_reveal,
+                        .eth1_data = block.message.body.eth1_data,
+                        .graffiti = block.message.body.graffiti,
+                        .proposer_slashings = block.message.body.proposer_slashings,
+                        .attester_slashings = block.message.body.attester_slashings,
+                        .attestations = block.message.body.attestations,
+                        .deposits = block.message.body.deposits,
+                        .voluntary_exits = block.message.body.voluntary_exits,
+                        .sync_aggregate = block.message.body.sync_aggregate,
+                        .execution_payload_header = payload_header.deneb,
+                        .bls_to_execution_changes = block.message.body.bls_to_execution_changes,
+                        .blob_kzg_commitments = block.message.body.blob_kzg_commitments,
+                    },
+                },
+                .signature = block.signature,
+            };
+            const out = try allocator.alloc(u8, consensus_types.deneb.SignedBlindedBeaconBlock.serializedSize(&blinded));
+            errdefer allocator.free(out);
+            _ = consensus_types.deneb.SignedBlindedBeaconBlock.serializeIntoBytes(&blinded, out);
+            return out;
+        },
+        .full_electra => |block| {
+            var payload_header = try AnyExecutionPayloadHeader.init(.electra);
+            defer payload_header.deinit(allocator);
+            const any_payload: AnyExecutionPayload = .{ .deneb = block.message.body.execution_payload };
+            try any_payload.createPayloadHeader(allocator, &payload_header);
+
+            const blinded = consensus_types.electra.SignedBlindedBeaconBlock.Type{
+                .message = .{
+                    .slot = block.message.slot,
+                    .proposer_index = block.message.proposer_index,
+                    .parent_root = block.message.parent_root,
+                    .state_root = block.message.state_root,
+                    .body = .{
+                        .randao_reveal = block.message.body.randao_reveal,
+                        .eth1_data = block.message.body.eth1_data,
+                        .graffiti = block.message.body.graffiti,
+                        .proposer_slashings = block.message.body.proposer_slashings,
+                        .attester_slashings = block.message.body.attester_slashings,
+                        .attestations = block.message.body.attestations,
+                        .deposits = block.message.body.deposits,
+                        .voluntary_exits = block.message.body.voluntary_exits,
+                        .sync_aggregate = block.message.body.sync_aggregate,
+                        .execution_payload_header = payload_header.deneb,
+                        .bls_to_execution_changes = block.message.body.bls_to_execution_changes,
+                        .blob_kzg_commitments = block.message.body.blob_kzg_commitments,
+                        .execution_requests = block.message.body.execution_requests,
+                    },
+                },
+                .signature = block.signature,
+            };
+            const out = try allocator.alloc(u8, consensus_types.electra.SignedBlindedBeaconBlock.serializedSize(&blinded));
+            errdefer allocator.free(out);
+            _ = consensus_types.electra.SignedBlindedBeaconBlock.serializeIntoBytes(&blinded, out);
+            return out;
+        },
+        .full_fulu => |block| {
+            var payload_header = try AnyExecutionPayloadHeader.init(.fulu);
+            defer payload_header.deinit(allocator);
+            const any_payload: AnyExecutionPayload = .{ .deneb = block.message.body.execution_payload };
+            try any_payload.createPayloadHeader(allocator, &payload_header);
+
+            const blinded = consensus_types.fulu.SignedBlindedBeaconBlock.Type{
+                .message = .{
+                    .slot = block.message.slot,
+                    .proposer_index = block.message.proposer_index,
+                    .parent_root = block.message.parent_root,
+                    .state_root = block.message.state_root,
+                    .body = .{
+                        .randao_reveal = block.message.body.randao_reveal,
+                        .eth1_data = block.message.body.eth1_data,
+                        .graffiti = block.message.body.graffiti,
+                        .proposer_slashings = block.message.body.proposer_slashings,
+                        .attester_slashings = block.message.body.attester_slashings,
+                        .attestations = block.message.body.attestations,
+                        .deposits = block.message.body.deposits,
+                        .voluntary_exits = block.message.body.voluntary_exits,
+                        .sync_aggregate = block.message.body.sync_aggregate,
+                        .execution_payload_header = payload_header.deneb,
+                        .bls_to_execution_changes = block.message.body.bls_to_execution_changes,
+                        .blob_kzg_commitments = block.message.body.blob_kzg_commitments,
+                        .execution_requests = block.message.body.execution_requests,
+                    },
+                },
+                .signature = block.signature,
+            };
+            const out = try allocator.alloc(u8, consensus_types.fulu.SignedBlindedBeaconBlock.serializedSize(&blinded));
+            errdefer allocator.free(out);
+            _ = consensus_types.fulu.SignedBlindedBeaconBlock.serializeIntoBytes(&blinded, out);
+            return out;
+        },
+    }
+}
+
 // ---------------------------------------------------------------------------
-// Rewards endpoints (stubs pending RewardCache)
+// Rewards endpoints
 // ---------------------------------------------------------------------------
 
 /// GET /eth/v1/beacon/rewards/blocks/{block_id}
 ///
 /// Returns proposer reward breakdown for the given block.
-/// Stub until reward computation is wired to the block processor.
 pub fn getBlockRewards(
-    _: *ApiContext,
-    _: types.BlockId,
+    ctx: *ApiContext,
+    block_id: types.BlockId,
 ) !HandlerResult(types.BlockRewards) {
-    // TODO: wire reward computation from block processor.
-    return error.NotImplemented;
+    const slot_info = try resolveBlockSlotAndRoot(ctx, block_id);
+    return .{
+        .data = try ctx.blockRewards(slot_info.root),
+        .meta = .{
+            .version = forkNameFromSlot(ctx, slot_info.slot),
+            .execution_optimistic = slot_info.execution_optimistic,
+            .finalized = slot_info.finalized,
+        },
+    };
 }
 
 /// POST /eth/v1/beacon/rewards/attestations/{epoch}
 ///
 /// Returns per-validator attestation rewards for the epoch.
-/// Stub until reward computation is wired.
 pub fn getAttestationRewards(
-    _: *ApiContext,
-    _: u64,
-    _: []const u64,
+    ctx: *ApiContext,
+    epoch: u64,
+    validator_indices: []const u64,
 ) !HandlerResult(types.AttestationRewardsData) {
-    // TODO: wire reward computation from block processor.
-    return error.NotImplemented;
+    const slot = (epoch + 1) * preset.SLOTS_PER_EPOCH - 1;
+    const head = ctx.currentHeadTracker();
+    return .{
+        .data = try ctx.attestationRewards(epoch, validator_indices),
+        .meta = .{
+            .version = forkNameFromSlot(ctx, slot),
+            .execution_optimistic = try ctx.stateExecutionOptimisticBySlot(slot),
+            .finalized = slot <= head.finalized_slot,
+        },
+    };
 }
 
 /// POST /eth/v1/beacon/rewards/sync_committee/{block_id}
 ///
 /// Returns sync committee rewards per validator for the given block.
-/// Stub until reward computation is wired.
 pub fn getSyncCommitteeRewards(
-    _: *ApiContext,
-    _: types.BlockId,
-    _: []const u64,
+    ctx: *ApiContext,
+    block_id: types.BlockId,
+    validator_indices: []const u64,
 ) !HandlerResult([]const types.SyncCommitteeReward) {
-    // TODO: wire reward computation from block processor.
-    return error.NotImplemented;
+    const slot_info = try resolveBlockSlotAndRoot(ctx, block_id);
+    return .{
+        .data = try ctx.syncCommitteeRewards(slot_info.root, validator_indices),
+        .meta = .{
+            .version = forkNameFromSlot(ctx, slot_info.slot),
+            .execution_optimistic = slot_info.execution_optimistic,
+            .finalized = slot_info.finalized,
+        },
+    };
 }

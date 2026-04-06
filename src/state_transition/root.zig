@@ -10,6 +10,7 @@ pub const metrics = @import("metrics.zig");
 pub const computeSigningRoot = @import("./utils/signing_root.zig").computeSigningRoot;
 pub const computeSigningRootAlloc = @import("./utils/signing_root.zig").computeSigningRootAlloc;
 pub const computeEpochAtSlot = @import("./utils/epoch.zig").computeEpochAtSlot;
+pub const computeEndSlotAtEpoch = @import("./utils/epoch.zig").computeEndSlotAtEpoch;
 pub const CachedBeaconState = @import("./cache/state_cache.zig").CachedBeaconState;
 pub const EffectiveBalanceIncrements = @import("./cache/effective_balance_increments.zig").EffectiveBalanceIncrements;
 pub const EffectiveBalanceIncrementsRc = @import("./cache/effective_balance_increments.zig").EffectiveBalanceIncrementsRc;
@@ -32,6 +33,7 @@ pub const processJustificationAndFinalization = @import("./epoch/process_justifi
 pub const computeUnrealizedCheckpoints = @import("./utils/unrealized_checkpoints.zig").computeUnrealizedCheckpoints;
 pub const UnrealizedCheckpoints = @import("./utils/unrealized_checkpoints.zig").UnrealizedCheckpoints;
 pub const processInactivityUpdates = @import("./epoch/process_inactivity_updates.zig").processInactivityUpdates;
+pub const isInInactivityLeak = @import("./epoch/inactivity_leak.zig").isInInactivityLeak;
 pub const processRegistryUpdates = @import("./epoch/process_registry_updates.zig").processRegistryUpdates;
 pub const processSlashings = @import("./epoch/process_slashings.zig").processSlashings;
 pub const processRewardsAndPenalties = @import("./epoch/process_rewards_and_penalties.zig").processRewardsAndPenalties;
@@ -83,6 +85,7 @@ pub const processConsolidationRequest = @import("./block/process_consolidation_r
 
 // utils
 pub const validator_status = @import("./utils/validator_status.zig");
+pub const attester_status = @import("./utils/attester_status.zig");
 pub const ValidatorStatus = validator_status.ValidatorStatus;
 pub const getValidatorStatus = validator_status.getValidatorStatus;
 pub const getBlockRootAtSlot = @import("./utils/block_root.zig").getBlockRootAtSlot;

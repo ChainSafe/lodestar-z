@@ -32,12 +32,14 @@ const ApiSyncStatus = api_mod.context.SyncStatus;
 const ValidatorMonitor = chain_mod.ValidatorMonitor;
 const block_production_mod = @import("block_production.zig");
 const execution_mod = @import("execution");
+const api_rewards = @import("api_rewards.zig");
 
 pub const ApiBindings = struct {
     block_import_ctx: *BlockImportCallbackCtx,
     chain_ctx: *ChainCallbackCtx,
     sync_status_ctx: *SyncStatusCallbackCtx,
     agg_att_cb_ctx: *AggregateAttestationCallbackCtx,
+    sync_contribution_cb_ctx: *SyncCommitteeContributionCallbackCtx,
     op_pool_cb_ctx: *OpPoolCallbackCtx,
     notification_sink_ctx: *ChainNotificationSinkCtx,
     produce_block_ctx: *ProduceBlockCallbackCtx,
@@ -56,6 +58,7 @@ pub const ApiBindings = struct {
             .chain_ctx = undefined,
             .sync_status_ctx = undefined,
             .agg_att_cb_ctx = undefined,
+            .sync_contribution_cb_ctx = undefined,
             .op_pool_cb_ctx = undefined,
             .notification_sink_ctx = undefined,
             .produce_block_ctx = undefined,
@@ -85,6 +88,10 @@ pub const ApiBindings = struct {
         bindings.agg_att_cb_ctx = try allocator.create(AggregateAttestationCallbackCtx);
         errdefer allocator.destroy(bindings.agg_att_cb_ctx);
         bindings.agg_att_cb_ctx.* = .{ .query = node.chainQuery() };
+
+        bindings.sync_contribution_cb_ctx = try allocator.create(SyncCommitteeContributionCallbackCtx);
+        errdefer allocator.destroy(bindings.sync_contribution_cb_ctx);
+        bindings.sync_contribution_cb_ctx.* = .{ .query = node.chainQuery() };
 
         bindings.op_pool_cb_ctx = try allocator.create(OpPoolCallbackCtx);
         errdefer allocator.destroy(bindings.op_pool_cb_ctx);
@@ -142,6 +149,7 @@ pub const ApiBindings = struct {
         allocator.destroy(self.produce_block_ctx);
         allocator.destroy(self.notification_sink_ctx);
         allocator.destroy(self.op_pool_cb_ctx);
+        allocator.destroy(self.sync_contribution_cb_ctx);
         allocator.destroy(self.agg_att_cb_ctx);
         allocator.destroy(self.sync_status_ctx);
         allocator.destroy(self.chain_ctx);
@@ -156,6 +164,8 @@ pub const ApiBindings = struct {
         api_ctx.chain = .{
             .ptr = @ptrCast(self.chain_ctx),
             .getHeadTrackerFn = &getChainHeadTrackerCallback,
+            .getCurrentSlotFn = &getChainCurrentSlotCallback,
+            .validatorSeenAtEpochFn = &getChainValidatorSeenAtEpochCallback,
             .getBlockRootBySlotFn = &getChainBlockRootBySlotCallback,
             .getBlockBytesByRootFn = &getChainBlockBytesByRootCallback,
             .getBlobSidecarsByRootFn = &getChainBlobSidecarsByRootCallback,
@@ -172,6 +182,14 @@ pub const ApiBindings = struct {
             .getStateBySlotFn = &getChainStateBySlotCallback,
             .getStateExecutionOptimisticByRootFn = &getChainStateExecutionOptimisticByRootCallback,
             .getStateExecutionOptimisticBySlotFn = &getChainStateExecutionOptimisticBySlotCallback,
+            .getBlockRewardsFn = &getChainBlockRewardsCallback,
+            .getAttestationRewardsFn = &getChainAttestationRewardsCallback,
+            .getSyncCommitteeRewardsFn = &getChainSyncCommitteeRewardsCallback,
+        };
+        api_ctx.fork_choice_debug = .{
+            .ptr = @ptrCast(self.chain_ctx),
+            .getHeadsFn = &getChainForkChoiceHeadsCallback,
+            .getForkChoiceDumpFn = &getChainForkChoiceDumpCallback,
         };
         api_ctx.sync_status_view = .{
             .ptr = @ptrCast(self.sync_status_ctx),
@@ -180,6 +198,10 @@ pub const ApiBindings = struct {
         api_ctx.aggregate_attestation = .{
             .ptr = @ptrCast(self.agg_att_cb_ctx),
             .getAggregateAttestationFn = &getAggregateAttestationCallback,
+        };
+        api_ctx.sync_committee_contribution = .{
+            .ptr = @ptrCast(self.sync_contribution_cb_ctx),
+            .getSyncCommitteeContributionFn = &getSyncCommitteeContributionCallback,
         };
         api_ctx.op_pool = .{
             .ptr = @ptrCast(self.op_pool_cb_ctx),
@@ -246,6 +268,10 @@ pub const AggregateAttestationCallbackCtx = struct {
     query: ChainQuery,
 };
 
+pub const SyncCommitteeContributionCallbackCtx = struct {
+    query: ChainQuery,
+};
+
 pub const SyncStatusCallbackCtx = struct {
     node: *BeaconNode,
 };
@@ -289,74 +315,6 @@ pub const OpPoolCallbackCtx = struct {
 fn computeAttestationSubnet(slot: u64, committees_at_slot: u64, committee_index: u64) u8 {
     const committees_since_epoch_start = committees_at_slot * (slot % preset.SLOTS_PER_EPOCH);
     return @intCast((committees_since_epoch_start + committee_index) % networking.peer_info.ATTESTATION_SUBNET_COUNT);
-}
-
-fn parseJsonValue(comptime SszType: type, allocator: std.mem.Allocator, json_bytes: []const u8) !SszType.Type {
-    var scanner = std.json.Scanner.initCompleteInput(allocator, json_bytes);
-    defer scanner.deinit();
-
-    var value = SszType.default_value;
-    errdefer if (!comptime isFixedType(SszType)) SszType.deinit(allocator, &value);
-
-    if (comptime isFixedType(SszType)) {
-        SszType.deserializeFromJson(&scanner, &value) catch return error.InvalidRequest;
-    } else {
-        SszType.deserializeFromJson(allocator, &scanner, &value) catch return error.InvalidRequest;
-    }
-
-    switch (scanner.next() catch return error.InvalidRequest) {
-        .end_of_document => {},
-        else => return error.InvalidRequest,
-    }
-
-    return value;
-}
-
-fn parseJsonArray(comptime SszType: type, allocator: std.mem.Allocator, json_bytes: []const u8) !std.ArrayListUnmanaged(SszType.Type) {
-    var scanner = std.json.Scanner.initCompleteInput(allocator, json_bytes);
-    defer scanner.deinit();
-
-    var items = std.ArrayListUnmanaged(SszType.Type).empty;
-    errdefer deinitParsedArray(SszType, allocator, &items);
-
-    switch (scanner.next() catch return error.InvalidRequest) {
-        .array_begin => {},
-        else => return error.InvalidRequest,
-    }
-
-    while (true) {
-        switch (scanner.peekNextTokenType() catch return error.InvalidRequest) {
-            .array_end => {
-                _ = scanner.next() catch return error.InvalidRequest;
-                break;
-            },
-            else => {},
-        }
-
-        const idx = items.items.len;
-        try items.append(allocator, SszType.default_value);
-        errdefer if (!comptime isFixedType(SszType)) SszType.deinit(allocator, &items.items[idx]);
-
-        if (comptime isFixedType(SszType)) {
-            SszType.deserializeFromJson(&scanner, &items.items[idx]) catch return error.InvalidRequest;
-        } else {
-            SszType.deserializeFromJson(allocator, &scanner, &items.items[idx]) catch return error.InvalidRequest;
-        }
-    }
-
-    switch (scanner.next() catch return error.InvalidRequest) {
-        .end_of_document => {},
-        else => return error.InvalidRequest,
-    }
-
-    return items;
-}
-
-fn deinitParsedArray(comptime SszType: type, allocator: std.mem.Allocator, items: *std.ArrayListUnmanaged(SszType.Type)) void {
-    if (!comptime isFixedType(SszType)) {
-        for (items.items) |*item| SszType.deinit(allocator, item);
-    }
-    items.deinit(allocator);
 }
 
 fn serializeSszValue(comptime SszType: type, allocator: std.mem.Allocator, value: *const SszType.Type) ![]u8 {
@@ -464,6 +422,16 @@ fn getChainHeadTrackerCallback(ptr: *anyopaque) ApiHeadTracker {
     };
 }
 
+fn getChainCurrentSlotCallback(ptr: *anyopaque) u64 {
+    const ctx: *ChainCallbackCtx = @ptrCast(@alignCast(ptr));
+    return ctx.query.currentSlot();
+}
+
+fn getChainValidatorSeenAtEpochCallback(ptr: *anyopaque, validator_index: u64, epoch: u64) bool {
+    const ctx: *ChainCallbackCtx = @ptrCast(@alignCast(ptr));
+    return ctx.query.validatorSeenAtEpoch(validator_index, epoch);
+}
+
 fn getNodeSyncStatusCallback(ptr: *anyopaque) ApiSyncStatus {
     const ctx: *SyncStatusCallbackCtx = @ptrCast(@alignCast(ptr));
     const status = ctx.node.getSyncStatus();
@@ -556,45 +524,118 @@ fn getChainStateExecutionOptimisticBySlotCallback(ptr: *anyopaque, slot: u64) an
     return ctx.query.stateExecutionOptimisticAtSlot(slot);
 }
 
+fn getChainBlockRewardsCallback(
+    ptr: *anyopaque,
+    allocator: std.mem.Allocator,
+    block_root: [32]u8,
+) anyerror!api_mod.types.BlockRewards {
+    const ctx: *ChainCallbackCtx = @ptrCast(@alignCast(ptr));
+    return api_rewards.computeBlockRewards(allocator, ctx.query, block_root);
+}
+
+fn getChainAttestationRewardsCallback(
+    ptr: *anyopaque,
+    allocator: std.mem.Allocator,
+    epoch: u64,
+    validator_indices: []const u64,
+) anyerror!api_mod.types.AttestationRewardsData {
+    const ctx: *ChainCallbackCtx = @ptrCast(@alignCast(ptr));
+    return api_rewards.computeAttestationRewards(allocator, ctx.query, epoch, validator_indices);
+}
+
+fn getChainSyncCommitteeRewardsCallback(
+    ptr: *anyopaque,
+    allocator: std.mem.Allocator,
+    block_root: [32]u8,
+    validator_indices: []const u64,
+) anyerror![]const api_mod.types.SyncCommitteeReward {
+    const ctx: *ChainCallbackCtx = @ptrCast(@alignCast(ptr));
+    return api_rewards.computeSyncCommitteeRewards(allocator, ctx.query, block_root, validator_indices);
+}
+
+fn getChainForkChoiceHeadsCallback(
+    ptr: *anyopaque,
+    allocator: std.mem.Allocator,
+) anyerror![]api_mod.types.DebugChainHead {
+    const ctx: *ChainCallbackCtx = @ptrCast(@alignCast(ptr));
+    const heads = try ctx.query.forkChoiceHeads(allocator);
+    defer allocator.free(heads);
+
+    const out = try allocator.alloc(api_mod.types.DebugChainHead, heads.len);
+    for (heads, 0..) |head, i| {
+        out[i] = .{
+            .slot = head.slot,
+            .root = head.block_root,
+        };
+    }
+    return out;
+}
+
+fn getChainForkChoiceDumpCallback(
+    ptr: *anyopaque,
+    allocator: std.mem.Allocator,
+) anyerror!api_mod.types.ForkChoiceDump {
+    const ctx: *ChainCallbackCtx = @ptrCast(@alignCast(ptr));
+    const nodes = ctx.query.forkChoiceNodes();
+    const out = try allocator.alloc(api_mod.types.ForkChoiceNode, nodes.len);
+
+    for (nodes, 0..) |node, i| {
+        const execution_block_hash = switch (node.extra_meta) {
+            .pre_merge => [_]u8{0} ** 32,
+            .post_merge => |post_merge| post_merge.execution_payload_block_hash,
+        };
+        const validity: []const u8 = switch (node.extra_meta) {
+            .pre_merge => "valid",
+            .post_merge => |post_merge| switch (post_merge.execution_status) {
+                .invalid => "invalid",
+                .syncing => "optimistic",
+                .valid, .pre_merge, .payload_separated => "valid",
+            },
+        };
+        out[i] = .{
+            .slot = node.slot,
+            .block_root = node.block_root,
+            .parent_root = if (std.mem.eql(u8, &node.parent_root, &([_]u8{0} ** 32))) null else node.parent_root,
+            .justified_epoch = node.justified_epoch,
+            .finalized_epoch = node.finalized_epoch,
+            .weight = if (node.weight > 0) @intCast(node.weight) else 0,
+            .validity = validity,
+            .execution_block_hash = execution_block_hash,
+        };
+    }
+
+    const justified = ctx.query.justifiedCheckpoint();
+    const finalized = ctx.query.finalizedCheckpoint();
+    return .{
+        .justified_checkpoint = .{
+            .epoch = justified.epoch,
+            .root = justified.root,
+        },
+        .finalized_checkpoint = .{
+            .epoch = finalized.epoch,
+            .root = finalized.root,
+        },
+        .fork_choice_nodes = out,
+    };
+}
+
 fn getAggregateAttestationCallback(
     ptr: *anyopaque,
-    alloc: std.mem.Allocator,
     slot: u64,
     attestation_data_root: [32]u8,
-) anyerror![]const u8 {
+) anyerror!api_mod.context.AggregateAttestationResult {
     const ctx: *AggregateAttestationCallbackCtx = @ptrCast(@alignCast(ptr));
-    const best = ctx.query.aggregateAttestation(@intCast(slot), attestation_data_root) orelse
-        return error.NotFound;
+    return try ctx.query.aggregateAttestation(@intCast(slot), attestation_data_root) orelse error.NotFound;
+}
 
-    var out: std.Io.Writer.Allocating = .init(alloc);
-    errdefer out.deinit();
-    const writer = &out.writer;
-
-    try writer.writeAll("{");
-    try writer.print("\"aggregation_bits\":\"0x", .{});
-    for (best.aggregation_bits.data.items) |byte| {
-        try writer.print("{x:0>2}", .{byte});
-    }
-    try writer.writeAll("\",");
-    try writer.print("\"data\":{{\"slot\":{d},\"index\":{d},", .{
-        best.data.slot,
-        best.data.index,
-    });
-    try writer.writeAll("\"beacon_block_root\":\"0x");
-    for (best.data.beacon_block_root) |byte| try writer.print("{x:0>2}", .{byte});
-    try writer.writeAll("\",");
-    try writer.print("\"source\":{{\"epoch\":{d},\"root\":\"0x", .{best.data.source.epoch});
-    for (best.data.source.root) |byte| try writer.print("{x:0>2}", .{byte});
-    try writer.writeAll("\"}},");
-    try writer.print("\"target\":{{\"epoch\":{d},\"root\":\"0x", .{best.data.target.epoch});
-    for (best.data.target.root) |byte| try writer.print("{x:0>2}", .{byte});
-    try writer.writeAll("\"}}},");
-    try writer.writeAll("\"signature\":\"0x");
-    for (best.signature) |byte| try writer.print("{x:0>2}", .{byte});
-    try writer.writeAll("\"");
-    try writer.writeAll("}");
-
-    return out.toOwnedSlice();
+fn getSyncCommitteeContributionCallback(
+    ptr: *anyopaque,
+    slot: u64,
+    subcommittee_index: u64,
+    beacon_block_root: [32]u8,
+) anyerror!api_mod.context.SyncCommitteeContributionResult {
+    const ctx: *SyncCommitteeContributionCallbackCtx = @ptrCast(@alignCast(ptr));
+    return ctx.query.syncCommitteeContribution(subcommittee_index, @intCast(slot), beacon_block_root) orelse error.NotFound;
 }
 
 fn readSignedBlockSlot(block_bytes: []const u8) ?u64 {
@@ -692,7 +733,7 @@ fn rollbackPublishEquivocationGuard(
 fn importBlockCallback(
     ptr: *anyopaque,
     params: api_mod.context.PublishedBlockParams,
-) anyerror!void {
+) anyerror!api_mod.context.PublishedBlockImportResult {
     const cb_ctx: *BlockImportCallbackCtx = @ptrCast(@alignCast(ptr));
     const node = cb_ctx.node;
 
@@ -727,105 +768,71 @@ fn importBlockCallback(
     errdefer rollbackPublishEquivocationGuard(node, equivocation_guard);
 
     try applyPublishValidation(node, imported, params.broadcast_validation);
-    _ = try node.ingestBlock(imported, .api);
+    return switch (try node.ingestBlock(imported, .api)) {
+        .ignored => .ignored,
+        .queued => .queued,
+        .imported => .imported,
+    };
 }
 
 fn getValidatorMonitorCallback(
     ptr: *anyopaque,
     alloc: std.mem.Allocator,
-) anyerror![]const u8 {
+) anyerror!api_mod.types.ValidatorMonitorData {
     const ctx: *ValidatorMonitorCallbackCtx = @ptrCast(@alignCast(ptr));
     const monitor = ctx.monitor;
 
-    var out: std.Io.Writer.Allocating = .init(alloc);
-    errdefer out.deinit();
-    const writer = &out.writer;
-
-    try writer.writeAll("{\"data\":{\"validators\":[");
-
-    var first = true;
     const indices = try monitor.getMonitoredIndices(alloc);
     defer alloc.free(indices);
 
+    var validators = std.ArrayListUnmanaged(api_mod.types.ValidatorMonitorValidator).empty;
+    errdefer validators.deinit(alloc);
+
     for (indices) |idx| {
-        if (monitor.getValidatorSummary(idx)) |summary| {
-            if (!first) try writer.writeAll(",");
-            first = false;
-
-            try writer.print(
-                "{{\"index\":{d},\"balance_gwei\":{d},\"effective_balance_gwei\":{d}," ++
-                    "\"balance_delta_gwei\":{d},\"effectiveness_score\":{d:.1}," ++
-                    "\"attestation_included\":{},\"attestation_delay\":",
-                .{
-                    summary.index,
-                    summary.balance_gwei,
-                    summary.effective_balance_gwei,
-                    summary.balance_delta_gwei,
-                    summary.effectiveness_score,
-                    summary.attestation_included,
-                },
-            );
-
-            if (summary.attestation_delay) |delay| {
-                try writer.print("{d}", .{delay});
-            } else {
-                try writer.writeAll("null");
-            }
-
-            try writer.print(
-                ",\"head_correct\":{},\"source_correct\":{},\"target_correct\":{}," ++
-                    "\"block_proposed\":{},\"sync_participated\":{}," ++
-                    "\"cumulative_reward_gwei\":{d}," ++
-                    "\"total_attestations_included\":{d},\"total_attestations_expected\":{d}," ++
-                    "\"inclusion_delay_histogram\":[{d},{d},{d},{d}]}}",
-                .{
-                    summary.head_correct,
-                    summary.source_correct,
-                    summary.target_correct,
-                    summary.block_proposed,
-                    summary.sync_participated,
-                    summary.cumulative_reward_gwei,
-                    summary.total_attestations_included,
-                    summary.total_attestations_expected,
-                    summary.inclusion_delay_histogram[0],
-                    summary.inclusion_delay_histogram[1],
-                    summary.inclusion_delay_histogram[2],
-                    summary.inclusion_delay_histogram[3],
-                },
-            );
-        }
+        const summary = monitor.getValidatorSummary(idx) orelse continue;
+        try validators.append(alloc, .{
+            .index = summary.index,
+            .balance_gwei = summary.balance_gwei,
+            .effective_balance_gwei = summary.effective_balance_gwei,
+            .balance_delta_gwei = summary.balance_delta_gwei,
+            .effectiveness_score = summary.effectiveness_score,
+            .attestation_included = summary.attestation_included,
+            .attestation_delay = summary.attestation_delay,
+            .head_correct = summary.head_correct,
+            .source_correct = summary.source_correct,
+            .target_correct = summary.target_correct,
+            .block_proposed = summary.block_proposed,
+            .sync_participated = summary.sync_participated,
+            .cumulative_reward_gwei = summary.cumulative_reward_gwei,
+            .total_attestations_included = summary.total_attestations_included,
+            .total_attestations_expected = summary.total_attestations_expected,
+            .inclusion_delay_histogram = summary.inclusion_delay_histogram,
+        });
     }
-
-    try writer.writeAll("],\"epoch_summaries\":[");
 
     const summaries = monitor.getAllEpochSummaries();
+    const epoch_summaries = try alloc.alloc(api_mod.types.ValidatorMonitorEpochSummary, summaries.len);
+    errdefer alloc.free(epoch_summaries);
     for (summaries, 0..) |summary, i| {
-        if (i > 0) try writer.writeAll(",");
-        try writer.print(
-            "{{\"epoch\":{d},\"validators_monitored\":{d}," ++
-                "\"attestation_hit_rate\":{d:.4},\"head_accuracy_rate\":{d:.4}," ++
-                "\"source_accuracy_rate\":{d:.4},\"target_accuracy_rate\":{d:.4}," ++
-                "\"avg_inclusion_delay\":{d:.2},\"blocks_proposed\":{d}," ++
-                "\"blocks_expected\":{d},\"sync_participation_rate\":{d:.4}," ++
-                "\"total_balance_delta_gwei\":{d}}}",
-            .{
-                summary.epoch,
-                summary.validators_monitored,
-                summary.attestation_hit_rate,
-                summary.head_accuracy_rate,
-                summary.source_accuracy_rate,
-                summary.target_accuracy_rate,
-                summary.avg_inclusion_delay,
-                summary.blocks_proposed,
-                summary.blocks_expected,
-                summary.sync_participation_rate,
-                summary.total_balance_delta_gwei,
-            },
-        );
+        epoch_summaries[i] = .{
+            .epoch = summary.epoch,
+            .validators_monitored = summary.validators_monitored,
+            .attestation_hit_rate = summary.attestation_hit_rate,
+            .head_accuracy_rate = summary.head_accuracy_rate,
+            .source_accuracy_rate = summary.source_accuracy_rate,
+            .target_accuracy_rate = summary.target_accuracy_rate,
+            .avg_inclusion_delay = summary.avg_inclusion_delay,
+            .blocks_proposed = summary.blocks_proposed,
+            .blocks_expected = summary.blocks_expected,
+            .sync_participation_rate = summary.sync_participation_rate,
+            .total_balance_delta_gwei = summary.total_balance_delta_gwei,
+        };
     }
 
-    try writer.writeAll("]}}");
-    return out.toOwnedSlice();
+    return .{
+        .validators = try validators.toOwnedSlice(alloc),
+        .epoch_summaries = epoch_summaries,
+    };
 }
 
 fn publishChainNotificationFn(ptr: *anyopaque, notification: chain_mod.ChainNotification) void {
@@ -942,6 +949,8 @@ fn produceBlockCallback(
                 .fork = serialized.fork_name,
                 .blinded = serialized.block_type == .blinded,
                 .execution_payload_source = .engine,
+                .execution_payload_value = produced.block_value,
+                .consensus_block_value = serialized.consensus_block_value,
             };
         },
         .default, .maxprofit => {
@@ -978,6 +987,8 @@ fn produceBlockCallback(
                         .fork = serialized.fork_name,
                         .blinded = true,
                         .execution_payload_source = .builder,
+                        .execution_payload_value = produced_blinded.block_value,
+                        .consensus_block_value = serialized.consensus_block_value,
                     };
                 },
                 .engine => |*produced_full| blk: {
@@ -997,6 +1008,8 @@ fn produceBlockCallback(
                         .fork = serialized.fork_name,
                         .blinded = serialized.block_type == .blinded,
                         .execution_payload_source = .engine,
+                        .execution_payload_value = produced_full.block_value,
+                        .consensus_block_value = serialized.consensus_block_value,
                     };
                 },
             };
@@ -1030,6 +1043,8 @@ fn produceBlockCallback(
                 .fork = serialized.fork_name,
                 .blinded = true,
                 .execution_payload_source = .builder,
+                .execution_payload_value = produced.block_value,
+                .consensus_block_value = serialized.consensus_block_value,
             };
         },
     }
@@ -1080,86 +1095,90 @@ fn getAttestationDataCallback(
         .slot = slot,
         .index = committee_index,
         .beacon_block_root = head_root,
-        .source_epoch = source_epoch,
-        .source_root = source_root,
-        .target_epoch = target_epoch,
-        .target_root = target_root,
+        .source = .{
+            .epoch = source_epoch,
+            .root = source_root,
+        },
+        .target = .{
+            .epoch = target_epoch,
+            .root = target_root,
+        },
     };
 }
 
-fn submitAttestationCallback(ptr: *anyopaque, json_bytes: []const u8) anyerror!void {
+fn submitAttestationCallback(
+    ptr: *anyopaque,
+    attestations: api_mod.context.SubmittedAttestations,
+) anyerror!void {
     const ctx: *PoolSubmitCallbackCtx = @ptrCast(@alignCast(ptr));
     const node = ctx.node;
     const cached = node.headState() orelse return error.StateNotAvailable;
 
-    if (parseJsonArray(types.electra.SingleAttestation, node.allocator, json_bytes)) |single_attestations| {
-        var parsed_single_attestations = single_attestations;
-        defer deinitParsedArray(types.electra.SingleAttestation, node.allocator, &parsed_single_attestations);
+    switch (attestations) {
+        .electra_single => |items| {
+            for (items) |*single| {
+                const committees_at_slot = try cached.epoch_cache.getCommitteeCountPerSlot(computeEpochAtSlot(single.data.slot));
+                const subnet = computeAttestationSubnet(single.data.slot, committees_at_slot, single.committee_index);
+                const gossip_attestation = AnyGossipAttestation{ .electra_single = single.* };
+                try importAttestationFromApi(node, &gossip_attestation);
 
-        for (parsed_single_attestations.items) |*single| {
-            const committees_at_slot = try cached.epoch_cache.getCommitteeCountPerSlot(computeEpochAtSlot(single.data.slot));
-            const subnet = computeAttestationSubnet(single.data.slot, committees_at_slot, single.committee_index);
-            const gossip_attestation = AnyGossipAttestation{ .electra_single = single.* };
-            try importAttestationFromApi(node, &gossip_attestation);
+                const ssz_bytes = try serializeSszValue(types.electra.SingleAttestation, node.allocator, single);
+                defer node.allocator.free(ssz_bytes);
+                try publishSsz(node, .beacon_attestation, subnet, ssz_bytes);
+            }
+        },
+        .phase0 => |items| {
+            for (items) |*attestation| {
+                const committees_at_slot = try cached.epoch_cache.getCommitteeCountPerSlot(computeEpochAtSlot(attestation.data.slot));
+                const subnet = computeAttestationSubnet(attestation.data.slot, committees_at_slot, attestation.data.index);
+                const gossip_attestation = AnyGossipAttestation{ .phase0 = attestation.* };
+                try importAttestationFromApi(node, &gossip_attestation);
 
-            const ssz_bytes = try serializeSszValue(types.electra.SingleAttestation, node.allocator, single);
-            defer node.allocator.free(ssz_bytes);
-            try publishSsz(node, .beacon_attestation, subnet, ssz_bytes);
-        }
-        return;
-    } else |_| {}
-
-    var attestations = try parseJsonArray(types.phase0.Attestation, node.allocator, json_bytes);
-    defer deinitParsedArray(types.phase0.Attestation, node.allocator, &attestations);
-
-    for (attestations.items) |*attestation| {
-        const committees_at_slot = try cached.epoch_cache.getCommitteeCountPerSlot(computeEpochAtSlot(attestation.data.slot));
-        const subnet = computeAttestationSubnet(attestation.data.slot, committees_at_slot, attestation.data.index);
-        const gossip_attestation = AnyGossipAttestation{ .phase0 = attestation.* };
-        try importAttestationFromApi(node, &gossip_attestation);
-
-        const ssz_bytes = try serializeSszValue(types.phase0.Attestation, node.allocator, attestation);
-        defer node.allocator.free(ssz_bytes);
-        try publishSsz(node, .beacon_attestation, subnet, ssz_bytes);
+                const ssz_bytes = try serializeSszValue(types.phase0.Attestation, node.allocator, attestation);
+                defer node.allocator.free(ssz_bytes);
+                try publishSsz(node, .beacon_attestation, subnet, ssz_bytes);
+            }
+        },
     }
 }
 
-fn submitAggregateAndProofCallback(ptr: *anyopaque, json_bytes: []const u8) anyerror!void {
+fn submitAggregateAndProofCallback(
+    ptr: *anyopaque,
+    aggregates: api_mod.context.SubmittedAggregateAndProofs,
+) anyerror!void {
     const ctx: *PoolSubmitCallbackCtx = @ptrCast(@alignCast(ptr));
     const node = ctx.node;
 
-    if (parseJsonArray(types.electra.SignedAggregateAndProof, node.allocator, json_bytes)) |aggregates| {
-        var parsed_aggregates = aggregates;
-        defer deinitParsedArray(types.electra.SignedAggregateAndProof, node.allocator, &parsed_aggregates);
+    switch (aggregates) {
+        .electra => |items| {
+            for (items) |*aggregate| {
+                const any_aggregate = AnySignedAggregateAndProof{ .electra = aggregate.* };
+                try importAggregateFromApi(node, &any_aggregate);
 
-        for (parsed_aggregates.items) |*aggregate| {
-            const any_aggregate = AnySignedAggregateAndProof{ .electra = aggregate.* };
-            try importAggregateFromApi(node, &any_aggregate);
+                const ssz_bytes = try serializeSszValue(types.electra.SignedAggregateAndProof, node.allocator, aggregate);
+                defer node.allocator.free(ssz_bytes);
+                try publishSsz(node, .beacon_aggregate_and_proof, null, ssz_bytes);
+            }
+        },
+        .phase0 => |items| {
+            for (items) |*aggregate| {
+                const any_aggregate = AnySignedAggregateAndProof{ .phase0 = aggregate.* };
+                try importAggregateFromApi(node, &any_aggregate);
 
-            const ssz_bytes = try serializeSszValue(types.electra.SignedAggregateAndProof, node.allocator, aggregate);
-            defer node.allocator.free(ssz_bytes);
-            try publishSsz(node, .beacon_aggregate_and_proof, null, ssz_bytes);
-        }
-        return;
-    } else |_| {}
-
-    var aggregates = try parseJsonArray(types.phase0.SignedAggregateAndProof, node.allocator, json_bytes);
-    defer deinitParsedArray(types.phase0.SignedAggregateAndProof, node.allocator, &aggregates);
-
-    for (aggregates.items) |*aggregate| {
-        const any_aggregate = AnySignedAggregateAndProof{ .phase0 = aggregate.* };
-        try importAggregateFromApi(node, &any_aggregate);
-
-        const ssz_bytes = try serializeSszValue(types.phase0.SignedAggregateAndProof, node.allocator, aggregate);
-        defer node.allocator.free(ssz_bytes);
-        try publishSsz(node, .beacon_aggregate_and_proof, null, ssz_bytes);
+                const ssz_bytes = try serializeSszValue(types.phase0.SignedAggregateAndProof, node.allocator, aggregate);
+                defer node.allocator.free(ssz_bytes);
+                try publishSsz(node, .beacon_aggregate_and_proof, null, ssz_bytes);
+            }
+        },
     }
 }
 
-fn submitVoluntaryExitCallback(ptr: *anyopaque, json_bytes: []const u8) anyerror!void {
+fn submitVoluntaryExitCallback(
+    ptr: *anyopaque,
+    exit: types.phase0.SignedVoluntaryExit.Type,
+) anyerror!void {
     const ctx: *PoolSubmitCallbackCtx = @ptrCast(@alignCast(ptr));
     const node = ctx.node;
-    const exit = try parseJsonValue(types.phase0.SignedVoluntaryExit, node.allocator, json_bytes);
     try node.chainService().importVoluntaryExit(exit);
 
     const ssz_bytes = try serializeSszValue(types.phase0.SignedVoluntaryExit, node.allocator, &exit);
@@ -1167,10 +1186,12 @@ fn submitVoluntaryExitCallback(ptr: *anyopaque, json_bytes: []const u8) anyerror
     try publishSsz(node, .voluntary_exit, null, ssz_bytes);
 }
 
-fn submitProposerSlashingCallback(ptr: *anyopaque, json_bytes: []const u8) anyerror!void {
+fn submitProposerSlashingCallback(
+    ptr: *anyopaque,
+    slashing: types.phase0.ProposerSlashing.Type,
+) anyerror!void {
     const ctx: *PoolSubmitCallbackCtx = @ptrCast(@alignCast(ptr));
     const node = ctx.node;
-    const slashing = try parseJsonValue(types.phase0.ProposerSlashing, node.allocator, json_bytes);
     try node.chainService().importProposerSlashing(slashing);
 
     const ssz_bytes = try serializeSszValue(types.phase0.ProposerSlashing, node.allocator, &slashing);
@@ -1178,40 +1199,41 @@ fn submitProposerSlashingCallback(ptr: *anyopaque, json_bytes: []const u8) anyer
     try publishSsz(node, .proposer_slashing, null, ssz_bytes);
 }
 
-fn submitAttesterSlashingCallback(ptr: *anyopaque, json_bytes: []const u8) anyerror!void {
+fn submitAttesterSlashingCallback(
+    ptr: *anyopaque,
+    slashing: api_mod.context.SubmittedAttesterSlashing,
+) anyerror!void {
     const ctx: *PoolSubmitCallbackCtx = @ptrCast(@alignCast(ptr));
     const node = ctx.node;
 
-    if (parseJsonValue(types.electra.AttesterSlashing, node.allocator, json_bytes)) |electra_slashing| {
-        var parsed_electra_slashing = electra_slashing;
-        defer types.electra.AttesterSlashing.deinit(node.allocator, &parsed_electra_slashing);
-        const any_slashing = AnyAttesterSlashing{ .electra = parsed_electra_slashing };
-        try node.chainService().importAttesterSlashing(&any_slashing);
+    switch (slashing) {
+        .electra => |electra_slashing| {
+            const any_slashing = AnyAttesterSlashing{ .electra = electra_slashing };
+            try node.chainService().importAttesterSlashing(&any_slashing);
 
-        const ssz_bytes = try serializeSszValue(types.electra.AttesterSlashing, node.allocator, &parsed_electra_slashing);
-        defer node.allocator.free(ssz_bytes);
-        try publishSsz(node, .attester_slashing, null, ssz_bytes);
-        return;
-    } else |_| {}
+            const ssz_bytes = try serializeSszValue(types.electra.AttesterSlashing, node.allocator, &electra_slashing);
+            defer node.allocator.free(ssz_bytes);
+            try publishSsz(node, .attester_slashing, null, ssz_bytes);
+        },
+        .phase0 => |phase0_slashing| {
+            const any_slashing = AnyAttesterSlashing{ .phase0 = phase0_slashing };
+            try node.chainService().importAttesterSlashing(&any_slashing);
 
-    var phase0_slashing = try parseJsonValue(types.phase0.AttesterSlashing, node.allocator, json_bytes);
-    defer types.phase0.AttesterSlashing.deinit(node.allocator, &phase0_slashing);
-
-    const any_slashing = AnyAttesterSlashing{ .phase0 = phase0_slashing };
-    try node.chainService().importAttesterSlashing(&any_slashing);
-
-    const ssz_bytes = try serializeSszValue(types.phase0.AttesterSlashing, node.allocator, &phase0_slashing);
-    defer node.allocator.free(ssz_bytes);
-    try publishSsz(node, .attester_slashing, null, ssz_bytes);
+            const ssz_bytes = try serializeSszValue(types.phase0.AttesterSlashing, node.allocator, &phase0_slashing);
+            defer node.allocator.free(ssz_bytes);
+            try publishSsz(node, .attester_slashing, null, ssz_bytes);
+        },
+    }
 }
 
-fn submitBlsChangeCallback(ptr: *anyopaque, json_bytes: []const u8) anyerror!void {
+fn submitBlsChangeCallback(
+    ptr: *anyopaque,
+    changes: []const types.capella.SignedBLSToExecutionChange.Type,
+) anyerror!void {
     const ctx: *PoolSubmitCallbackCtx = @ptrCast(@alignCast(ptr));
     const node = ctx.node;
-    var changes = try parseJsonArray(types.capella.SignedBLSToExecutionChange, node.allocator, json_bytes);
-    defer deinitParsedArray(types.capella.SignedBLSToExecutionChange, node.allocator, &changes);
 
-    for (changes.items) |*change| {
+    for (changes) |*change| {
         try node.chainService().importBlsChange(change.*);
         const ssz_bytes = try serializeSszValue(types.capella.SignedBLSToExecutionChange, node.allocator, change);
         defer node.allocator.free(ssz_bytes);
@@ -1219,14 +1241,15 @@ fn submitBlsChangeCallback(ptr: *anyopaque, json_bytes: []const u8) anyerror!voi
     }
 }
 
-fn submitSyncCommitteeMessageCallback(ptr: *anyopaque, json_bytes: []const u8) anyerror!void {
+fn submitSyncCommitteeMessageCallback(
+    ptr: *anyopaque,
+    messages: []const types.altair.SyncCommitteeMessage.Type,
+) anyerror!void {
     const ctx: *PoolSubmitCallbackCtx = @ptrCast(@alignCast(ptr));
     const node = ctx.node;
-    var messages = try parseJsonArray(types.altair.SyncCommitteeMessage, node.allocator, json_bytes);
-    defer deinitParsedArray(types.altair.SyncCommitteeMessage, node.allocator, &messages);
 
     const subcommittee_size = @divFloor(preset.SYNC_COMMITTEE_SIZE, networking.peer_info.SYNC_COMMITTEE_SUBNET_COUNT);
-    for (messages.items) |*msg| {
+    for (messages) |*msg| {
         const ssz_bytes = try serializeSszValue(types.altair.SyncCommitteeMessage, node.allocator, msg);
         defer node.allocator.free(ssz_bytes);
 
@@ -1246,13 +1269,14 @@ fn submitSyncCommitteeMessageCallback(ptr: *anyopaque, json_bytes: []const u8) a
     }
 }
 
-fn submitContributionAndProofCallback(ptr: *anyopaque, json_bytes: []const u8) anyerror!void {
+fn submitContributionAndProofCallback(
+    ptr: *anyopaque,
+    contributions: []const types.altair.SignedContributionAndProof.Type,
+) anyerror!void {
     const ctx: *PoolSubmitCallbackCtx = @ptrCast(@alignCast(ptr));
     const node = ctx.node;
-    var contributions = try parseJsonArray(types.altair.SignedContributionAndProof, node.allocator, json_bytes);
-    defer deinitParsedArray(types.altair.SignedContributionAndProof, node.allocator, &contributions);
 
-    for (contributions.items) |*contribution| {
+    for (contributions) |*contribution| {
         try node.chainService().importSyncContribution(&contribution.message.contribution);
         const ssz_bytes = try serializeSszValue(types.altair.SignedContributionAndProof, node.allocator, contribution);
         defer node.allocator.free(ssz_bytes);
@@ -1266,7 +1290,7 @@ fn builderRegisterValidatorsCallback(
 ) anyerror!void {
     const ctx: *BuilderCallbackCtx = @ptrCast(@alignCast(ptr));
     const node = ctx.node;
-    _ = node.execution_runtime.builderApi() orelse return;
+    const builder = node.execution_runtime.builderApi() orelse return error.NotImplemented;
 
     const relay_registrations = try node.allocator.alloc(
         execution_mod.builder.SignedValidatorRegistration,
@@ -1286,7 +1310,7 @@ fn builderRegisterValidatorsCallback(
         };
     }
 
-    node.registerValidatorsWithBuilder(relay_registrations);
+    try builder.registerValidators(relay_registrations);
 }
 
 fn opPoolGetCountsCallback(ptr: *anyopaque) [5]usize {

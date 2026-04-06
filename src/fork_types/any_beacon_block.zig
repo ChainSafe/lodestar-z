@@ -334,6 +334,167 @@ pub const AnyBeaconBlock = union(enum) {
     blinded_fulu: *ct.fulu.BlindedBeaconBlock.Type,
     full_gloas: *ct.gloas.BeaconBlock.Type,
 
+    pub fn deserialize(allocator: std.mem.Allocator, block_type: BlockType, fork_seq: ForkSeq, bytes: []const u8) !AnyBeaconBlock {
+        switch (fork_seq) {
+            .phase0 => {
+                if (block_type != .full) return error.InvalidBlockTypeForFork;
+                const block = try allocator.create(ct.phase0.BeaconBlock.Type);
+                errdefer allocator.destroy(block);
+                block.* = ct.phase0.BeaconBlock.default_value;
+                try ct.phase0.BeaconBlock.deserializeFromBytes(allocator, bytes, block);
+                return .{ .phase0 = block };
+            },
+            .altair => {
+                if (block_type != .full) return error.InvalidBlockTypeForFork;
+                const block = try allocator.create(ct.altair.BeaconBlock.Type);
+                errdefer allocator.destroy(block);
+                block.* = ct.altair.BeaconBlock.default_value;
+                try ct.altair.BeaconBlock.deserializeFromBytes(allocator, bytes, block);
+                return .{ .altair = block };
+            },
+            .bellatrix => {
+                if (block_type == .full) {
+                    const block = try allocator.create(ct.bellatrix.BeaconBlock.Type);
+                    errdefer allocator.destroy(block);
+                    block.* = ct.bellatrix.BeaconBlock.default_value;
+                    try ct.bellatrix.BeaconBlock.deserializeFromBytes(allocator, bytes, block);
+                    return .{ .full_bellatrix = block };
+                } else {
+                    const block = try allocator.create(ct.bellatrix.BlindedBeaconBlock.Type);
+                    errdefer allocator.destroy(block);
+                    block.* = ct.bellatrix.BlindedBeaconBlock.default_value;
+                    try ct.bellatrix.BlindedBeaconBlock.deserializeFromBytes(allocator, bytes, block);
+                    return .{ .blinded_bellatrix = block };
+                }
+            },
+            .capella => {
+                if (block_type == .full) {
+                    const block = try allocator.create(ct.capella.BeaconBlock.Type);
+                    errdefer allocator.destroy(block);
+                    block.* = ct.capella.BeaconBlock.default_value;
+                    try ct.capella.BeaconBlock.deserializeFromBytes(allocator, bytes, block);
+                    return .{ .full_capella = block };
+                } else {
+                    const block = try allocator.create(ct.capella.BlindedBeaconBlock.Type);
+                    errdefer allocator.destroy(block);
+                    block.* = ct.capella.BlindedBeaconBlock.default_value;
+                    try ct.capella.BlindedBeaconBlock.deserializeFromBytes(allocator, bytes, block);
+                    return .{ .blinded_capella = block };
+                }
+            },
+            .deneb => {
+                if (block_type == .full) {
+                    const block = try allocator.create(ct.deneb.BeaconBlock.Type);
+                    errdefer allocator.destroy(block);
+                    block.* = ct.deneb.BeaconBlock.default_value;
+                    try ct.deneb.BeaconBlock.deserializeFromBytes(allocator, bytes, block);
+                    return .{ .full_deneb = block };
+                } else {
+                    const block = try allocator.create(ct.deneb.BlindedBeaconBlock.Type);
+                    errdefer allocator.destroy(block);
+                    block.* = ct.deneb.BlindedBeaconBlock.default_value;
+                    try ct.deneb.BlindedBeaconBlock.deserializeFromBytes(allocator, bytes, block);
+                    return .{ .blinded_deneb = block };
+                }
+            },
+            .electra => {
+                if (block_type == .full) {
+                    const block = try allocator.create(ct.electra.BeaconBlock.Type);
+                    errdefer allocator.destroy(block);
+                    block.* = ct.electra.BeaconBlock.default_value;
+                    try ct.electra.BeaconBlock.deserializeFromBytes(allocator, bytes, block);
+                    return .{ .full_electra = block };
+                } else {
+                    const block = try allocator.create(ct.electra.BlindedBeaconBlock.Type);
+                    errdefer allocator.destroy(block);
+                    block.* = ct.electra.BlindedBeaconBlock.default_value;
+                    try ct.electra.BlindedBeaconBlock.deserializeFromBytes(allocator, bytes, block);
+                    return .{ .blinded_electra = block };
+                }
+            },
+            .fulu => {
+                if (block_type == .full) {
+                    const block = try allocator.create(ct.fulu.BeaconBlock.Type);
+                    errdefer allocator.destroy(block);
+                    block.* = ct.fulu.BeaconBlock.default_value;
+                    try ct.fulu.BeaconBlock.deserializeFromBytes(allocator, bytes, block);
+                    return .{ .full_fulu = block };
+                } else {
+                    const block = try allocator.create(ct.fulu.BlindedBeaconBlock.Type);
+                    errdefer allocator.destroy(block);
+                    block.* = ct.fulu.BlindedBeaconBlock.default_value;
+                    try ct.fulu.BlindedBeaconBlock.deserializeFromBytes(allocator, bytes, block);
+                    return .{ .blinded_fulu = block };
+                }
+            },
+            .gloas => {
+                if (block_type != .full) return error.InvalidBlockTypeForFork;
+                const block = try allocator.create(ct.gloas.BeaconBlock.Type);
+                errdefer allocator.destroy(block);
+                block.* = ct.gloas.BeaconBlock.default_value;
+                try ct.gloas.BeaconBlock.deserializeFromBytes(allocator, bytes, block);
+                return .{ .full_gloas = block };
+            },
+        }
+    }
+
+    pub fn deinit(self: AnyBeaconBlock, allocator: std.mem.Allocator) void {
+        switch (self) {
+            .phase0 => |block| {
+                ct.phase0.BeaconBlock.deinit(allocator, block);
+                allocator.destroy(block);
+            },
+            .altair => |block| {
+                ct.altair.BeaconBlock.deinit(allocator, block);
+                allocator.destroy(block);
+            },
+            .full_bellatrix => |block| {
+                ct.bellatrix.BeaconBlock.deinit(allocator, block);
+                allocator.destroy(block);
+            },
+            .blinded_bellatrix => |block| {
+                ct.bellatrix.BlindedBeaconBlock.deinit(allocator, block);
+                allocator.destroy(block);
+            },
+            .full_capella => |block| {
+                ct.capella.BeaconBlock.deinit(allocator, block);
+                allocator.destroy(block);
+            },
+            .blinded_capella => |block| {
+                ct.capella.BlindedBeaconBlock.deinit(allocator, block);
+                allocator.destroy(block);
+            },
+            .full_deneb => |block| {
+                ct.deneb.BeaconBlock.deinit(allocator, block);
+                allocator.destroy(block);
+            },
+            .blinded_deneb => |block| {
+                ct.deneb.BlindedBeaconBlock.deinit(allocator, block);
+                allocator.destroy(block);
+            },
+            .full_electra => |block| {
+                ct.electra.BeaconBlock.deinit(allocator, block);
+                allocator.destroy(block);
+            },
+            .blinded_electra => |block| {
+                ct.electra.BlindedBeaconBlock.deinit(allocator, block);
+                allocator.destroy(block);
+            },
+            .full_fulu => |block| {
+                ct.fulu.BeaconBlock.deinit(allocator, block);
+                allocator.destroy(block);
+            },
+            .blinded_fulu => |block| {
+                ct.fulu.BlindedBeaconBlock.deinit(allocator, block);
+                allocator.destroy(block);
+            },
+            .full_gloas => |block| {
+                ct.gloas.BeaconBlock.deinit(allocator, block);
+                allocator.destroy(block);
+            },
+        }
+    }
+
     pub fn blockType(self: *const AnyBeaconBlock) BlockType {
         return switch (self.*) {
             .phase0, .altair, .full_bellatrix, .full_capella, .full_deneb, .full_electra, .full_fulu, .full_gloas => .full,

@@ -11,6 +11,7 @@ const networking = @import("networking");
 const fork_types = @import("fork_types");
 const AnySignedBeaconBlock = fork_types.AnySignedBeaconBlock;
 const AnyAttesterSlashing = fork_types.AnyAttesterSlashing;
+const fork_choice_mod = @import("fork_choice");
 
 const Chain = @import("chain.zig").Chain;
 const chain_types = @import("types.zig");
@@ -21,9 +22,12 @@ const Slot = consensus_types.primitive.Slot.Type;
 const Epoch = consensus_types.primitive.Epoch.Type;
 const Root = [32]u8;
 const Phase0Attestation = consensus_types.phase0.Attestation.Type;
+const SyncCommitteeContribution = consensus_types.altair.SyncCommitteeContribution.Type;
 const SignedVoluntaryExit = consensus_types.phase0.SignedVoluntaryExit.Type;
 const ProposerSlashing = consensus_types.phase0.ProposerSlashing.Type;
 const SignedBLSToExecutionChange = consensus_types.capella.SignedBLSToExecutionChange.Type;
+const ProtoBlock = fork_choice_mod.ProtoBlock;
+const ProtoNode = fork_choice_mod.ProtoNode;
 
 pub const Query = struct {
     chain: *Chain,
@@ -38,6 +42,14 @@ pub const Query = struct {
 
     pub fn syncStatus(self: Query) chain_types.SyncStatus {
         return self.chain.getSyncStatus();
+    }
+
+    pub fn currentSlot(self: Query) Slot {
+        return self.chain.currentSlot();
+    }
+
+    pub fn validatorSeenAtEpoch(self: Query, validator_index: u64, epoch: Epoch) bool {
+        return self.chain.validatorSeenAtEpoch(validator_index, epoch);
     }
 
     pub fn blockExecutionOptimistic(self: Query, block_root: Root) bool {
@@ -89,6 +101,14 @@ pub const Query = struct {
             .slot = checkpointSlot(cp.epoch),
             .root = cp.root,
         };
+    }
+
+    pub fn forkChoiceHeads(self: Query, allocator: std.mem.Allocator) ![]ProtoBlock {
+        return self.chain.forkChoice().getHeads(allocator);
+    }
+
+    pub fn forkChoiceNodes(self: Query) []const ProtoNode {
+        return self.chain.forkChoice().getAllNodes();
     }
 
     pub fn blockRootAtSlot(self: Query, slot: Slot) !?Root {
@@ -282,8 +302,25 @@ pub const Query = struct {
         return @intCast(cached.epoch_cache.index_to_pubkey.items.len);
     }
 
-    pub fn aggregateAttestation(self: Query, slot: Slot, data_root: Root) ?Phase0Attestation {
-        return self.chain.op_pool.agg_attestation_pool.getAggregate(slot, data_root);
+    pub fn aggregateAttestation(self: Query, slot: Slot, data_root: Root) !?Phase0Attestation {
+        const attestation = self.chain.op_pool.agg_attestation_pool.getAggregate(slot, data_root) orelse return null;
+
+        var cloned = attestation;
+        const src = attestation.aggregation_bits.data.items;
+        var new_data = try std.ArrayListUnmanaged(u8).initCapacity(self.chain.allocator, src.len);
+        new_data.appendSliceAssumeCapacity(src);
+        cloned.aggregation_bits.data = new_data;
+        return cloned;
+    }
+
+    pub fn syncCommitteeContribution(
+        self: Query,
+        subcommittee_index: u64,
+        slot: Slot,
+        block_root: Root,
+    ) ?SyncCommitteeContribution {
+        const pool = self.chain.sync_committee_message_pool orelse return null;
+        return pool.getContribution(subcommittee_index, slot, block_root);
     }
 
     pub fn opPoolCounts(self: Query) [5]usize {

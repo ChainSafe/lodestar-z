@@ -30,6 +30,7 @@ const regen_mod = @import("../regen/root.zig");
 const CachedBeaconState = state_transition.CachedBeaconState;
 const StateGraphGate = regen_mod.StateGraphGate;
 const computeEpochAtSlot = state_transition.computeEpochAtSlot;
+const SeenEpochValidators = @import("../seen_epoch_validators.zig").SeenEpochValidators;
 const fork_choice_mod = @import("fork_choice");
 const ForkChoice = fork_choice_mod.ForkChoiceStruct;
 
@@ -99,6 +100,10 @@ pub const PipelineContext = struct {
     // -- Block root → state root mapping --
     block_to_state: *std.AutoArrayHashMap([32]u8, [32]u8),
 
+    // -- Validator liveness caches --
+    seen_block_attesters: *SeenEpochValidators,
+    seen_block_proposers: *SeenEpochValidators,
+
     // -- Chain notifications --
     notification_sink: ?@import("../types.zig").NotificationSink,
 
@@ -132,6 +137,8 @@ pub const PipelineContext = struct {
             .db = self.db,
             .head_tracker = self.head_tracker,
             .block_to_state = self.block_to_state,
+            .seen_block_attesters = self.seen_block_attesters,
+            .seen_block_proposers = self.seen_block_proposers,
             .notification_sink = self.notification_sink,
             .reprocess_queue = self.reprocess_queue,
             .on_finalized_ptr = self.on_finalized_ptr,

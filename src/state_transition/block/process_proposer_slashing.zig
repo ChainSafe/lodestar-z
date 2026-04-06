@@ -13,6 +13,7 @@ const verifySignature = @import("../utils/signature_sets.zig").verifySingleSigna
 const verifySingleSignatureSetOrDefer = @import("../utils/signature_sets.zig").verifySingleSignatureSetOrDefer;
 const BatchVerifier = @import("bls").BatchVerifier;
 const slashValidator = @import("./slash_validator.zig").slashValidator;
+const ProposerRewards = @import("../cache/state_cache.zig").ProposerRewards;
 
 pub fn processProposerSlashing(
     comptime fork: ForkSeq,
@@ -24,11 +25,12 @@ pub fn processProposerSlashing(
     proposer_slashing: *const ForkTypes(fork).ProposerSlashing.Type,
     verify_signatures: bool,
     batch_verifier: ?*BatchVerifier,
+    proposer_rewards: ?*ProposerRewards,
 ) !void {
     try buildSlashingsCacheIfNeeded(allocator, state, slashings_cache);
     try assertValidProposerSlashing(fork, config, epoch_cache, state, proposer_slashing, verify_signatures, batch_verifier);
     const proposer_index = proposer_slashing.signed_header_1.message.proposer_index;
-    try slashValidator(fork, config, epoch_cache, state, slashings_cache, proposer_index, null);
+    try slashValidator(fork, config, epoch_cache, state, slashings_cache, proposer_index, null, .proposer, proposer_rewards);
 }
 
 pub fn assertValidProposerSlashing(

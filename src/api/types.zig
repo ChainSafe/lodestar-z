@@ -36,7 +36,7 @@ pub const BroadcastValidation = enum {
 };
 
 pub const BuilderSelection = enum {
-    @"default",
+    default,
     maxprofit,
     builderalways,
     builderonly,
@@ -260,26 +260,6 @@ pub const ContentType = enum {
         if (std.mem.indexOf(u8, header, "application/octet-stream") != null) return .ssz;
         return .json;
     }
-};
-
-// ---------------------------------------------------------------------------
-// Response wrappers
-// ---------------------------------------------------------------------------
-
-/// Standard Beacon API JSON envelope: `{ "data": ..., "meta": ... }`.
-pub fn ApiResponse(comptime T: type) type {
-    return struct {
-        data: T,
-        /// Execution-optimistic flag (true when EL has not validated).
-        execution_optimistic: bool = false,
-        /// Whether the data comes from the finalized chain.
-        finalized: bool = false,
-    };
-}
-
-/// Version metadata for versioned responses (blocks, states).
-pub const VersionMeta = struct {
-    version: []const u8,
 };
 
 // ---------------------------------------------------------------------------
@@ -619,9 +599,142 @@ pub const ValidatorLiveness = struct {
     is_live: bool,
 };
 
+pub const ValidatorMonitorValidator = struct {
+    index: u64,
+    balance_gwei: u64,
+    effective_balance_gwei: u64,
+    balance_delta_gwei: i64,
+    effectiveness_score: f64,
+    attestation_included: bool,
+    attestation_delay: ?u32,
+    head_correct: bool,
+    source_correct: bool,
+    target_correct: bool,
+    block_proposed: bool,
+    sync_participated: bool,
+    cumulative_reward_gwei: i64,
+    total_attestations_included: u64,
+    total_attestations_expected: u64,
+    inclusion_delay_histogram: [4]u64,
+};
+
+pub const ValidatorMonitorEpochSummary = struct {
+    epoch: u64,
+    validators_monitored: u32,
+    attestation_hit_rate: f64,
+    head_accuracy_rate: f64,
+    source_accuracy_rate: f64,
+    target_accuracy_rate: f64,
+    avg_inclusion_delay: f64,
+    blocks_proposed: u32,
+    blocks_expected: u32,
+    sync_participation_rate: f64,
+    total_balance_delta_gwei: i64,
+};
+
+pub const ValidatorMonitorData = struct {
+    validators: []const ValidatorMonitorValidator,
+    epoch_summaries: []const ValidatorMonitorEpochSummary,
+};
+
+// ---------------------------------------------------------------------------
+// Keymanager types
+// ---------------------------------------------------------------------------
+
+pub const KeymanagerOperationStatus = enum {
+    imported,
+    duplicate,
+    deleted,
+    not_found,
+    not_active,
+    @"error",
+};
+
+pub const KeymanagerOperationResult = struct {
+    status: KeymanagerOperationStatus,
+    message: []const u8 = "",
+};
+
+pub const KeymanagerKeystore = struct {
+    validating_pubkey: [48]u8,
+    derivation_path: []const u8,
+    readonly: bool,
+};
+
+pub const KeymanagerFeeRecipientData = struct {
+    pubkey: [48]u8,
+    ethaddress: [20]u8,
+};
+
+pub const KeymanagerGraffitiData = struct {
+    pubkey: [48]u8,
+    graffiti: []const u8,
+};
+
+pub const KeymanagerGasLimitData = struct {
+    pubkey: [48]u8,
+    gas_limit: u64,
+};
+
+pub const KeymanagerBuilderBoostFactorData = struct {
+    pubkey: [48]u8,
+    builder_boost_factor: u64,
+};
+
+pub const KeymanagerInterchangeSignedBlock = struct {
+    slot: []const u8,
+    signing_root: ?[]const u8 = null,
+};
+
+pub const KeymanagerInterchangeSignedAttestation = struct {
+    source_epoch: []const u8,
+    target_epoch: []const u8,
+    signing_root: ?[]const u8 = null,
+};
+
+pub const KeymanagerInterchangeData = struct {
+    pubkey: []const u8,
+    signed_blocks: []const KeymanagerInterchangeSignedBlock,
+    signed_attestations: []const KeymanagerInterchangeSignedAttestation,
+};
+
+pub const KeymanagerInterchangeMetadata = struct {
+    interchange_format_version: []const u8,
+    genesis_validators_root: []const u8,
+};
+
+pub const KeymanagerInterchangeFormat = struct {
+    metadata: KeymanagerInterchangeMetadata,
+    data: []const KeymanagerInterchangeData,
+};
+
+pub const KeymanagerProposerConfigBuilderData = struct {
+    selection: ?BuilderSelection = null,
+    gasLimit: ?u64 = null,
+    boostFactor: ?u64 = null,
+};
+
+pub const KeymanagerProposerConfigData = struct {
+    graffiti: ?[]const u8 = null,
+    strictFeeRecipientCheck: ?bool = null,
+    feeRecipient: ?[20]u8 = null,
+    builder: ?KeymanagerProposerConfigBuilderData = null,
+};
+
+pub const KeymanagerDeleteKeystoresResponse = struct {
+    data: []const KeymanagerOperationResult,
+    slashing_protection: ?KeymanagerInterchangeFormat,
+};
+
 // ---------------------------------------------------------------------------
 // Fork choice debug types
 // ---------------------------------------------------------------------------
+
+/// A chain head visible to fork choice.
+pub const DebugChainHead = struct {
+    slot: u64,
+    root: [32]u8,
+};
 
 /// A single node in the fork choice tree.
 pub const ForkChoiceNode = struct {

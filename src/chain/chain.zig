@@ -56,6 +56,7 @@ const OpPool = op_pool_mod.OpPool;
 const seen_cache_mod = @import("seen_cache.zig");
 const SeenCache = seen_cache_mod.SeenCache;
 const SeenAttesters = @import("seen_attesters.zig").SeenAttesters;
+const SeenEpochValidators = @import("seen_epoch_validators.zig").SeenEpochValidators;
 const SeenAttestationData = @import("seen_attestation_data.zig").SeenAttestationData;
 const produce_block_mod = @import("produce_block.zig");
 const ProducedBlockBody = produce_block_mod.ProducedBlockBody;
@@ -150,6 +151,8 @@ pub const Chain = struct {
     op_pool: *OpPool,
     seen_cache: *SeenCache,
     seen_attesters: *SeenAttesters,
+    seen_block_attesters: *SeenEpochValidators,
+    seen_block_proposers: *SeenEpochValidators,
     attestation_data_cache: *SeenAttestationData,
     beacon_proposer_cache: *BeaconProposerCache,
 
@@ -218,6 +221,8 @@ pub const Chain = struct {
         op_pool: *OpPool,
         seen_cache: *SeenCache,
         seen_attesters: *SeenAttesters,
+        seen_block_attesters: *SeenEpochValidators,
+        seen_block_proposers: *SeenEpochValidators,
         attestation_data_cache: *SeenAttestationData,
         beacon_proposer_cache: *BeaconProposerCache,
     ) Chain {
@@ -235,6 +240,8 @@ pub const Chain = struct {
             .op_pool = op_pool,
             .seen_cache = seen_cache,
             .seen_attesters = seen_attesters,
+            .seen_block_attesters = seen_block_attesters,
+            .seen_block_proposers = seen_block_proposers,
             .attestation_data_cache = attestation_data_cache,
             .beacon_proposer_cache = beacon_proposer_cache,
             .da_manager = null,
@@ -796,6 +803,8 @@ pub const Chain = struct {
             .db = self.db,
             .head_tracker = self.head_tracker,
             .block_to_state = &self.block_to_state,
+            .seen_block_attesters = self.seen_block_attesters,
+            .seen_block_proposers = self.seen_block_proposers,
             .notification_sink = self.notification_sink,
             .execution_port = self.execution_port,
             .current_slot = current_slot,
@@ -896,7 +905,10 @@ pub const Chain = struct {
             0;
         self.seen_cache.pruneBlocks(min_slot);
         self.attestation_data_cache.onSlot(slot);
-        self.seen_attesters.prune(computeEpochAtSlot(slot));
+        const current_epoch = computeEpochAtSlot(slot);
+        self.seen_attesters.prune(current_epoch);
+        self.seen_block_attesters.prune(current_epoch);
+        self.seen_block_proposers.prune(current_epoch);
 
         // Prune aggregators at epoch boundaries.
         // The seen_aggregators map is keyed by (validator_index, epoch) so it grows
@@ -1048,6 +1060,13 @@ pub const Chain = struct {
     /// falls back to the naive head tracker.
     pub fn getHead(self: *const Chain) HeadInfo {
         return self.headInfo();
+    }
+
+    pub fn validatorSeenAtEpoch(self: *const Chain, validator_index: u64, epoch: u64) bool {
+        return self.seen_block_attesters.isKnown(epoch, validator_index) or
+            self.seen_attesters.isKnown(epoch, validator_index) or
+            self.seen_cache.hasSeenAggregator(validator_index, epoch) or
+            self.seen_block_proposers.isKnown(epoch, validator_index);
     }
 
     /// Threshold: if head is more than this many slots behind the wall-clock

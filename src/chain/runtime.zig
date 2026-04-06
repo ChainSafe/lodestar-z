@@ -32,6 +32,7 @@ const QueuedStateRegen = regen_mod.QueuedStateRegen;
 const OpPool = @import("op_pool.zig").OpPool;
 const SeenCache = @import("seen_cache.zig").SeenCache;
 const SeenAttesters = @import("seen_attesters.zig").SeenAttesters;
+const SeenEpochValidators = @import("seen_epoch_validators.zig").SeenEpochValidators;
 const SeenAttestationData = @import("seen_attestation_data.zig").SeenAttestationData;
 const sync_contribution_pool_mod = @import("sync_contribution_pool.zig");
 const SyncContributionAndProofPool = sync_contribution_pool_mod.SyncContributionAndProofPool;
@@ -98,6 +99,8 @@ const OwnedGraph = struct {
     op_pool: *OpPool,
     seen_cache: *SeenCache,
     seen_attesters: *SeenAttesters,
+    seen_block_attesters: *SeenEpochValidators,
+    seen_block_proposers: *SeenEpochValidators,
     seen_attestation_data: *SeenAttestationData,
     sync_contribution_pool: *SyncContributionAndProofPool,
     sync_committee_message_pool: *SyncCommitteeMessagePool,
@@ -145,6 +148,12 @@ const OwnedGraph = struct {
 
         self.seen_attesters.deinit();
         allocator.destroy(self.seen_attesters);
+
+        self.seen_block_attesters.deinit();
+        allocator.destroy(self.seen_block_attesters);
+
+        self.seen_block_proposers.deinit();
+        allocator.destroy(self.seen_block_proposers);
 
         self.seen_attestation_data.deinit();
         allocator.destroy(self.seen_attestation_data);
@@ -304,6 +313,16 @@ fn initOwnedGraph(
     seen_attesters.* = SeenAttesters.init(allocator);
     errdefer seen_attesters.deinit();
 
+    const seen_block_attesters = try allocator.create(SeenEpochValidators);
+    errdefer allocator.destroy(seen_block_attesters);
+    seen_block_attesters.* = SeenEpochValidators.init(allocator);
+    errdefer seen_block_attesters.deinit();
+
+    const seen_block_proposers = try allocator.create(SeenEpochValidators);
+    errdefer allocator.destroy(seen_block_proposers);
+    seen_block_proposers.* = SeenEpochValidators.init(allocator);
+    errdefer seen_block_proposers.deinit();
+
     const seen_attestation_data = try allocator.create(SeenAttestationData);
     errdefer allocator.destroy(seen_attestation_data);
     seen_attestation_data.* = SeenAttestationData.init(allocator);
@@ -374,6 +393,8 @@ fn initOwnedGraph(
         op_pool,
         seen_cache,
         seen_attesters,
+        seen_block_attesters,
+        seen_block_proposers,
         seen_attestation_data,
         proposer_cache,
     );
@@ -400,6 +421,8 @@ fn initOwnedGraph(
         .op_pool = op_pool,
         .seen_cache = seen_cache,
         .seen_attesters = seen_attesters,
+        .seen_block_attesters = seen_block_attesters,
+        .seen_block_proposers = seen_block_proposers,
         .seen_attestation_data = seen_attestation_data,
         .sync_contribution_pool = sync_contrib_pool,
         .sync_committee_message_pool = sync_msg_pool,
@@ -433,6 +456,8 @@ fn runtimeFromOwnedGraph(
         .op_pool = graph.op_pool,
         .seen_cache = graph.seen_cache,
         .seen_attesters = graph.seen_attesters,
+        .seen_block_attesters = graph.seen_block_attesters,
+        .seen_block_proposers = graph.seen_block_proposers,
         .seen_attestation_data = graph.seen_attestation_data,
         .sync_contribution_pool = graph.sync_contribution_pool,
         .sync_committee_message_pool = graph.sync_committee_message_pool,
@@ -460,6 +485,8 @@ pub const Runtime = struct {
     op_pool: *OpPool,
     seen_cache: *SeenCache,
     seen_attesters: *SeenAttesters,
+    seen_block_attesters: *SeenEpochValidators,
+    seen_block_proposers: *SeenEpochValidators,
     seen_attestation_data: *SeenAttestationData,
     sync_contribution_pool: *SyncContributionAndProofPool,
     sync_committee_message_pool: *SyncCommitteeMessagePool,
@@ -503,6 +530,8 @@ pub const Runtime = struct {
             .op_pool = self.op_pool,
             .seen_cache = self.seen_cache,
             .seen_attesters = self.seen_attesters,
+            .seen_block_attesters = self.seen_block_attesters,
+            .seen_block_proposers = self.seen_block_proposers,
             .seen_attestation_data = self.seen_attestation_data,
             .sync_contribution_pool = self.sync_contribution_pool,
             .sync_committee_message_pool = self.sync_committee_message_pool,

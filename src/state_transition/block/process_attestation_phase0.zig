@@ -12,6 +12,9 @@ const ForkTypes = @import("fork_types").ForkTypes;
 const BeaconState = @import("fork_types").BeaconState;
 const Slot = types.primitive.Slot.Type;
 const PendingAttestation = types.phase0.PendingAttestation.Type;
+const BASE_REWARD_FACTOR = preset.BASE_REWARD_FACTOR;
+const BASE_REWARDS_PER_EPOCH = @import("constants").BASE_REWARDS_PER_EPOCH;
+const ProposerRewards = @import("../cache/state_cache.zig").ProposerRewards;
 
 pub fn processAttestationPhase0(
     allocator: Allocator,
@@ -21,6 +24,7 @@ pub fn processAttestationPhase0(
     attestation: *const ForkTypes(.phase0).Attestation.Type,
     verify_signature: bool,
     batch_verifier: ?*BatchVerifier,
+    proposer_rewards: ?*ProposerRewards,
 ) !void {
     const slot = try state.slot();
     const validators_count = try state.validatorsCount();
@@ -67,6 +71,29 @@ pub fn processAttestationPhase0(
     )) {
         return error.InvalidAttestationInvalidIndexedAttestation;
     }
+
+    if (proposer_rewards) |rewards| {
+        rewards.attestations += computePhase0BlockAttestationReward(epoch_cache, indexed_attestation.attesting_indices.items);
+    }
+}
+
+fn computePhase0BlockAttestationReward(epoch_cache: *const EpochCache, attesting_indices: []const types.primitive.ValidatorIndex.Type) u64 {
+    var total_active_balance = epoch_cache.total_active_balance_increments * preset.EFFECTIVE_BALANCE_INCREMENT;
+    if (total_active_balance < 1) total_active_balance = 1;
+
+    const total_active_balance_f64: f64 = @floatFromInt(total_active_balance);
+    const balance_sq_root: u64 = @intFromFloat(@sqrt(total_active_balance_f64));
+    const effective_balance_increments = epoch_cache.getEffectiveBalanceIncrements().items;
+
+    var reward_total: u64 = 0;
+    for (attesting_indices) |validator_index| {
+        const increment = effective_balance_increments[@intCast(validator_index)];
+        const effective_balance = @as(u64, increment) * preset.EFFECTIVE_BALANCE_INCREMENT;
+        const base_reward = @divFloor(@divFloor(effective_balance * BASE_REWARD_FACTOR, balance_sq_root), BASE_REWARDS_PER_EPOCH);
+        reward_total += @divFloor(base_reward, preset.PROPOSER_REWARD_QUOTIENT);
+    }
+
+    return reward_total;
 }
 
 /// AT could be either Phase0Attestation or ElectraAttestation

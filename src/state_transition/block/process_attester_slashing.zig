@@ -14,6 +14,7 @@ const isValidIndexedAttestation = @import("./is_valid_indexed_attestation.zig").
 const isSlashableValidator = @import("../utils/validator.zig").isSlashableValidator;
 const slashValidator = @import("./slash_validator.zig").slashValidator;
 const BatchVerifier = @import("bls").BatchVerifier;
+const ProposerRewards = @import("../cache/state_cache.zig").ProposerRewards;
 
 /// AS is the AttesterSlashing type
 /// - for phase0 it is `types.phase0.AttesterSlashing.Type`
@@ -29,6 +30,7 @@ pub fn processAttesterSlashing(
     attester_slashing: *const ForkTypes(fork).AttesterSlashing.Type,
     verify_signature: bool,
     batch_verifier: ?*BatchVerifier,
+    proposer_rewards: ?*ProposerRewards,
 ) !void {
     try buildSlashingsCacheIfNeeded(allocator, state, slashings_cache);
     try assertValidAttesterSlashing(
@@ -60,7 +62,7 @@ pub fn processAttesterSlashing(
         try validators.getValue(undefined, validator_index, &validator);
 
         if (isSlashableValidator(&validator, current_epoch)) {
-            try slashValidator(fork, config, epoch_cache, state, slashings_cache, validator_index, null);
+            try slashValidator(fork, config, epoch_cache, state, slashings_cache, validator_index, null, .attester, proposer_rewards);
             slashed_any = true;
         }
     }

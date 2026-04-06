@@ -15,6 +15,8 @@
 //! - `Eth-Consensus-Finalized`      — "true" / "false"
 //! - `Eth-Consensus-Dependent-Root` — 0x-prefixed hex root
 //! - `Eth-Execution-Payload-Source` — "engine" / "builder"
+//! - `Eth-Execution-Payload-Value`  — execution payload value in wei
+//! - `Eth-Consensus-Block-Value`    — consensus proposer reward in wei
 //! - `Access-Control-Expose-Headers` — comma list of exposed custom headers
 
 const std = @import("std");
@@ -23,8 +25,10 @@ const api_types = @import("types.zig");
 /// Standard Beacon API metadata header names.
 pub const MetaHeader = struct {
     pub const version = "Eth-Consensus-Version";
+    pub const consensus_block_value = "Eth-Consensus-Block-Value";
     pub const execution_payload_blinded = "Eth-Execution-Payload-Blinded";
     pub const execution_payload_source = "Eth-Execution-Payload-Source";
+    pub const execution_payload_value = "Eth-Execution-Payload-Value";
     pub const execution_optimistic = "Eth-Execution-Optimistic";
     pub const finalized = "Eth-Consensus-Finalized";
     pub const dependent_root = "Eth-Consensus-Dependent-Root";
@@ -77,6 +81,10 @@ pub const ResponseMeta = struct {
     execution_payload_blinded: ?bool = null,
     /// Whether the execution payload came from the engine or builder flow.
     execution_payload_source: ?api_types.ExecutionPayloadSource = null,
+    /// Execution payload value in wei.
+    execution_payload_value: ?u256 = null,
+    /// Consensus proposer reward for the block in wei.
+    consensus_block_value: ?u256 = null,
     /// True if the data references an unverified execution payload.
     execution_optimistic: ?bool = null,
     /// True if the data references finalized chain history.
@@ -115,6 +123,16 @@ pub const ResponseMeta = struct {
             appendStr(buf, &pos, MetaHeader.execution_payload_source);
             first = false;
         }
+        if (self.execution_payload_value != null) {
+            if (!first) appendStr(buf, &pos, ",");
+            appendStr(buf, &pos, MetaHeader.execution_payload_value);
+            first = false;
+        }
+        if (self.consensus_block_value != null) {
+            if (!first) appendStr(buf, &pos, ",");
+            appendStr(buf, &pos, MetaHeader.consensus_block_value);
+            first = false;
+        }
         if (self.execution_optimistic != null) {
             if (!first) appendStr(buf, &pos, ",");
             appendStr(buf, &pos, MetaHeader.execution_optimistic);
@@ -139,6 +157,8 @@ pub const ResponseMeta = struct {
         return self.version != null or
             self.execution_payload_blinded != null or
             self.execution_payload_source != null or
+            self.execution_payload_value != null or
+            self.consensus_block_value != null or
             self.execution_optimistic != null or
             self.finalized != null or
             self.dependent_root != null;
@@ -153,19 +173,21 @@ pub const Header = struct {
 
 /// Result of writing metadata headers.
 ///
-/// Contains up to 7 headers (version, execution_payload_blinded,
-/// execution_payload_source, execution_optimistic, finalized, dependent_root,
-/// expose_headers) plus their
+/// Contains up to 9 headers (version, execution_payload_blinded,
+/// execution_payload_source, execution_payload_value, consensus_block_value,
+/// execution_optimistic, finalized, dependent_root, expose_headers) plus their
 /// value strings in fixed buffers.
 /// The struct is stack-allocated — no heap allocation needed.
 pub const MetaHeaders = struct {
     /// The header entries (name/value pairs).
-    headers: [7]Header = undefined,
+    headers: [9]Header = undefined,
     /// Number of valid entries in `headers`.
     count: usize = 0,
 
     // Backing buffers for formatted values.
     version_buf: [16]u8 = undefined,
+    execution_payload_value_buf: [80]u8 = undefined,
+    consensus_block_value_buf: [80]u8 = undefined,
     dep_root_buf: [66]u8 = undefined, // "0x" + 64 hex chars
     expose_buf: [256]u8 = undefined,
 
@@ -207,6 +229,24 @@ pub fn buildHeaders(meta: ResponseMeta, result: *MetaHeaders) void {
         result.headers[result.count] = .{
             .name = MetaHeader.execution_payload_source,
             .value = source.headerValue(),
+        };
+        result.count += 1;
+    }
+
+    if (meta.execution_payload_value) |value| {
+        const out = std.fmt.bufPrint(result.execution_payload_value_buf[0..], "{d}", .{value}) catch unreachable;
+        result.headers[result.count] = .{
+            .name = MetaHeader.execution_payload_value,
+            .value = out,
+        };
+        result.count += 1;
+    }
+
+    if (meta.consensus_block_value) |value| {
+        const out = std.fmt.bufPrint(result.consensus_block_value_buf[0..], "{d}", .{value}) catch unreachable;
+        result.headers[result.count] = .{
+            .name = MetaHeader.consensus_block_value,
+            .value = out,
         };
         result.count += 1;
     }
@@ -326,6 +366,28 @@ test "buildHeaders execution_payload_source" {
     try std.testing.expectEqual(@as(usize, 2), s.len);
     try std.testing.expectEqualStrings("Eth-Execution-Payload-Source", s[0].name);
     try std.testing.expectEqualStrings("builder", s[0].value);
+}
+
+test "buildHeaders execution_payload_value" {
+    const meta = ResponseMeta{ .execution_payload_value = 123456789 };
+    var hdrs: MetaHeaders = undefined;
+    buildHeaders(meta, &hdrs);
+    const s = hdrs.slice();
+
+    try std.testing.expectEqual(@as(usize, 2), s.len);
+    try std.testing.expectEqualStrings("Eth-Execution-Payload-Value", s[0].name);
+    try std.testing.expectEqualStrings("123456789", s[0].value);
+}
+
+test "buildHeaders consensus_block_value" {
+    const meta = ResponseMeta{ .consensus_block_value = 42000000000 };
+    var hdrs: MetaHeaders = undefined;
+    buildHeaders(meta, &hdrs);
+    const s = hdrs.slice();
+
+    try std.testing.expectEqual(@as(usize, 2), s.len);
+    try std.testing.expectEqualStrings("Eth-Consensus-Block-Value", s[0].name);
+    try std.testing.expectEqualStrings("42000000000", s[0].value);
 }
 
 test "buildHeaders finalized false" {

@@ -5,12 +5,12 @@
 //! without needing chain state.
 
 const std = @import("std");
-const builtin = @import("builtin");
 const types = @import("../types.zig");
 const context = @import("../context.zig");
 const ApiContext = context.ApiContext;
 const handler_result = @import("../handler_result.zig");
 const HandlerResult = handler_result.HandlerResult;
+const build_options = @import("build_options");
 
 /// GET /eth/v1/node/identity
 ///
@@ -25,7 +25,7 @@ pub fn getIdentity(ctx: *ApiContext) HandlerResult(types.NodeIdentity) {
 ///
 /// Returns the node's version string in the format: `lodestar-z/v{version}/{arch}-{os}`.
 /// The platform suffix is determined at comptime so the binary is correct on all targets.
-const version_string = "lodestar-z/v0.0.1/" ++ @tagName(builtin.cpu.arch) ++ "-" ++ @tagName(builtin.os.tag);
+const version_string = std.fmt.comptimePrint("lodestar-z/v{s}/{s}-{s}", .{ build_options.version, @tagName(@import("builtin").cpu.arch), @tagName(@import("builtin").os.tag) });
 pub fn getVersion(_: *ApiContext) HandlerResult(types.NodeVersion) {
     return .{
         .data = .{
@@ -70,22 +70,15 @@ pub fn getHealth(ctx: *ApiContext) HandlerResult(void) {
 /// GET /eth/v1/node/peers
 ///
 /// Returns the list of connected peers with their state, direction, and agent.
-/// Uses the PeerDBCallback if wired; returns empty list otherwise.
-pub fn getPeers(ctx: *ApiContext) HandlerResult([]const types.PeerInfo) {
-    const cb = ctx.peer_db orelse return .{
-        .data = &[_]types.PeerInfo{},
-    };
+pub fn getPeers(ctx: *ApiContext) !HandlerResult([]const types.PeerInfo) {
+    const cb = ctx.peer_db orelse return error.NotImplemented;
 
-    const entries = cb.getConnectedPeersFn(cb.ptr, ctx.allocator) catch return .{
-        .data = &[_]types.PeerInfo{},
-    };
+    const entries = try cb.getConnectedPeersFn(cb.ptr, ctx.allocator);
     // Free entries AFTER we have copied all strings we need from them.
     defer ctx.allocator.free(entries);
 
     // Convert PeerEntry to PeerInfo for JSON response.
-    const infos = ctx.allocator.alloc(types.PeerInfo, entries.len) catch {
-        return .{ .data = &[_]types.PeerInfo{} };
-    };
+    const infos = try ctx.allocator.alloc(types.PeerInfo, entries.len);
 
     for (entries, 0..) |entry, i| {
         // Dupe peer_id so it remains valid after entries is freed above.
@@ -107,16 +100,8 @@ pub fn getPeers(ctx: *ApiContext) HandlerResult([]const types.PeerInfo) {
 /// GET /eth/v1/node/peer_count
 ///
 /// Returns aggregate counts of peers in each connection state.
-/// Uses the PeerDBCallback if wired; returns zeros otherwise.
-pub fn getPeerCount(ctx: *ApiContext) HandlerResult(types.PeerCount) {
-    const cb = ctx.peer_db orelse return .{
-        .data = .{
-            .disconnected = 0,
-            .connecting = 0,
-            .connected = 0,
-            .disconnecting = 0,
-        },
-    };
+pub fn getPeerCount(ctx: *ApiContext) !HandlerResult(types.PeerCount) {
+    const cb = ctx.peer_db orelse return error.NotImplemented;
 
     const counts = cb.getPeerCountsFn(cb.ptr);
     return .{
@@ -185,19 +170,18 @@ test "getHealth returns ready (200) when synced" {
     try std.testing.expectEqual(@as(u16, 200), result.status);
 }
 
-test "getPeers returns empty list when no peer_db" {
+test "getPeers returns NotImplemented when no peer_db" {
     var tc = test_helpers.makeTestContext(std.testing.allocator);
     defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
     const resp = getPeers(&tc.ctx);
-    try std.testing.expectEqual(@as(usize, 0), resp.data.len);
+    try std.testing.expectError(error.NotImplemented, resp);
 }
 
-test "getPeerCount returns zero counts when no peer_db" {
+test "getPeerCount returns NotImplemented when no peer_db" {
     var tc = test_helpers.makeTestContext(std.testing.allocator);
     defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
     const resp = getPeerCount(&tc.ctx);
-    try std.testing.expectEqual(@as(u64, 0), resp.data.connected);
-    try std.testing.expectEqual(@as(u64, 0), resp.data.disconnected);
+    try std.testing.expectError(error.NotImplemented, resp);
 }
 
 test "getPeers returns peers from callback" {
@@ -241,7 +225,7 @@ test "getPeers returns peers from callback" {
         .getPeerCountsFn = &MockPeerDB.getPeerCounts,
     };
 
-    const resp = getPeers(&tc.ctx);
+    const resp = try getPeers(&tc.ctx);
     defer {
         for (resp.data) |peer| tc.ctx.allocator.free(peer.peer_id);
         tc.ctx.allocator.free(resp.data);
@@ -276,7 +260,7 @@ test "getPeerCount returns real counts from callback" {
         .getPeerCountsFn = &MockPeerDB.getPeerCounts,
     };
 
-    const resp = getPeerCount(&tc.ctx);
+    const resp = try getPeerCount(&tc.ctx);
     try std.testing.expectEqual(@as(u64, 5), resp.data.connected);
     try std.testing.expectEqual(@as(u64, 3), resp.data.disconnected);
     try std.testing.expectEqual(@as(u64, 1), resp.data.connecting);
@@ -286,7 +270,7 @@ test "getPeerCount returns real counts from callback" {
 ///
 /// Returns info about a specific peer.
 pub fn getPeer(ctx: *ApiContext, peer_id: []const u8) !HandlerResult(types.PeerDetail) {
-    const cb = ctx.peer_db orelse return error.PeerNotFound;
+    const cb = ctx.peer_db orelse return error.NotImplemented;
 
     const entries = try cb.getConnectedPeersFn(cb.ptr, ctx.allocator);
     defer ctx.allocator.free(entries);

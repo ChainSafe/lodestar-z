@@ -26,6 +26,7 @@ const processWithdrawals = @import("./process_withdrawals.zig").processWithdrawa
 const getExpectedWithdrawals = @import("./process_withdrawals.zig").getExpectedWithdrawals;
 const isExecutionEnabled = @import("../utils/execution.zig").isExecutionEnabled;
 const BatchVerifier = @import("bls").BatchVerifier;
+const ProposerRewards = @import("../cache/state_cache.zig").ProposerRewards;
 // TODO: proposer reward api
 // const ProposerRewardType = @import("../types/proposer_reward.zig").ProposerRewardType;
 
@@ -36,6 +37,7 @@ pub const ProcessBlockOpts = struct {
     /// after `processBlock` returns to perform the actual verification.
     /// This enables ~3-10x faster block processing on mainnet.
     batch_verifier: ?*BatchVerifier = null,
+    proposer_rewards: ?*ProposerRewards = null,
 };
 
 /// Process a block and update the state following Ethereum Consensus specifications.
@@ -116,7 +118,7 @@ pub fn processBlock(
     try processEth1Data(fork, state, body.eth1Data());
     try processOperations(fork, allocator, config, epoch_cache, state, slashings_cache, block_type, body, opts);
     if (comptime fork.gte(.altair)) {
-        try processSyncAggregate(fork, allocator, config, epoch_cache, state, body.syncAggregate(), opts.verify_signature, opts.batch_verifier);
+        try processSyncAggregate(fork, allocator, config, epoch_cache, state, body.syncAggregate(), opts.verify_signature, opts.batch_verifier, opts.proposer_rewards);
     }
 
     if (comptime fork.gte(.deneb)) {

@@ -1,22 +1,22 @@
 //! API context — the shared state that route handlers need.
 //!
-//! Each dependency is behind a pointer so the context struct stays small
-//! and copyable. Components that don't exist yet use opaque stub types
-//! with placeholder interfaces; they'll be swapped for real implementations
-//! once the corresponding modules land.
+//! Dependencies stay behind small type-erased callback surfaces so handlers
+//! can stay decoupled from node/runtime internals while still using the live
+//! production services.
 
 const std = @import("std");
 const types = @import("types.zig");
 const config_mod = @import("config");
 const BeaconConfig = config_mod.BeaconConfig;
 const state_transition = @import("state_transition");
+const consensus_types = @import("consensus_types");
 const fork_types = @import("fork_types");
 const AnySignedBeaconBlock = fork_types.AnySignedBeaconBlock;
 const BlockType = fork_types.BlockType;
 pub const CachedBeaconState = state_transition.CachedBeaconState;
 
 // ---------------------------------------------------------------------------
-// Stub types for components not yet implemented
+// Bridge snapshot types
 // ---------------------------------------------------------------------------
 
 /// Tracks the chain head (slot, root, state root).
@@ -61,6 +61,8 @@ pub const SyncStatus = struct {
 pub const ChainCallback = struct {
     ptr: *anyopaque,
     getHeadTrackerFn: *const fn (ptr: *anyopaque) HeadTracker,
+    getCurrentSlotFn: *const fn (ptr: *anyopaque) u64,
+    validatorSeenAtEpochFn: *const fn (ptr: *anyopaque, validator_index: u64, epoch: u64) bool,
     getBlockRootBySlotFn: *const fn (ptr: *anyopaque, slot: u64) anyerror!?[32]u8,
     getBlockBytesByRootFn: *const fn (ptr: *anyopaque, root: [32]u8) anyerror!?[]const u8,
     getBlobSidecarsByRootFn: *const fn (ptr: *anyopaque, root: [32]u8) anyerror!?[]const u8,
@@ -77,6 +79,9 @@ pub const ChainCallback = struct {
     getStateBySlotFn: *const fn (ptr: *anyopaque, slot: u64) anyerror!?*CachedBeaconState,
     getStateExecutionOptimisticByRootFn: *const fn (ptr: *anyopaque, state_root: [32]u8) bool,
     getStateExecutionOptimisticBySlotFn: *const fn (ptr: *anyopaque, slot: u64) anyerror!bool,
+    getBlockRewardsFn: *const fn (ptr: *anyopaque, allocator: std.mem.Allocator, block_root: [32]u8) anyerror!types.BlockRewards,
+    getAttestationRewardsFn: *const fn (ptr: *anyopaque, allocator: std.mem.Allocator, epoch: u64, validator_indices: []const u64) anyerror!types.AttestationRewardsData,
+    getSyncCommitteeRewardsFn: *const fn (ptr: *anyopaque, allocator: std.mem.Allocator, block_root: [32]u8, validator_indices: []const u64) anyerror![]const types.SyncCommitteeReward,
 };
 
 /// Type-erased callback for live node sync status.
@@ -86,6 +91,13 @@ pub const ChainCallback = struct {
 pub const SyncStatusCallback = struct {
     ptr: *anyopaque,
     getSyncStatusFn: *const fn (ptr: *anyopaque) SyncStatus,
+};
+
+/// Type-erased callback for fork-choice-backed debug views.
+pub const ForkChoiceDebugCallback = struct {
+    ptr: *anyopaque,
+    getHeadsFn: *const fn (ptr: *anyopaque, allocator: std.mem.Allocator) anyerror![]types.DebugChainHead,
+    getForkChoiceDumpFn: *const fn (ptr: *anyopaque, allocator: std.mem.Allocator) anyerror!types.ForkChoiceDump,
 };
 
 // Comptime ABI guard: verify field layout matches what BeaconNode writes via raw pointer.
@@ -106,18 +118,21 @@ comptime {
 // Block import callback
 // ---------------------------------------------------------------------------
 
-/// Callback for importing a signed beacon block from the API layer.
-/// The ptr field holds a type-erased pointer to the concrete importer;
-/// importFn receives raw request metadata and returns void or an error.
 pub const PublishedBlockParams = struct {
     block_bytes: []const u8,
     block_type: BlockType,
     broadcast_validation: types.BroadcastValidation = .gossip,
 };
 
+pub const PublishedBlockImportResult = enum {
+    imported,
+    queued,
+    ignored,
+};
+
 pub const BlockImportCallback = struct {
     ptr: *anyopaque,
-    importFn: *const fn (ptr: *anyopaque, params: PublishedBlockParams) anyerror!void,
+    importFn: *const fn (ptr: *anyopaque, params: PublishedBlockParams) anyerror!PublishedBlockImportResult,
 };
 
 // ---------------------------------------------------------------------------
@@ -184,25 +199,40 @@ pub const OpPoolCallback = struct {
 // Pool submission callback
 // ---------------------------------------------------------------------------
 
+pub const SubmittedAttestations = union(enum) {
+    phase0: []const consensus_types.phase0.Attestation.Type,
+    electra_single: []const consensus_types.electra.SingleAttestation.Type,
+};
+
+pub const SubmittedAttesterSlashing = union(enum) {
+    phase0: consensus_types.phase0.AttesterSlashing.Type,
+    electra: consensus_types.electra.AttesterSlashing.Type,
+};
+
+pub const SubmittedAggregateAndProofs = union(enum) {
+    phase0: []const consensus_types.phase0.SignedAggregateAndProof.Type,
+    electra: []const consensus_types.electra.SignedAggregateAndProof.Type,
+};
+
 /// Type-erased callback for submitting items to operation pools.
 pub const PoolSubmitCallback = struct {
     ptr: *anyopaque,
-    /// Submit attestations (raw JSON bytes, array of SingleAttestation or Attestation).
-    submitAttestationFn: ?*const fn (ptr: *anyopaque, json_bytes: []const u8) anyerror!void = null,
-    /// Submit a signed voluntary exit (raw JSON bytes).
-    submitVoluntaryExitFn: ?*const fn (ptr: *anyopaque, json_bytes: []const u8) anyerror!void = null,
-    /// Submit a proposer slashing (raw JSON bytes).
-    submitProposerSlashingFn: ?*const fn (ptr: *anyopaque, json_bytes: []const u8) anyerror!void = null,
-    /// Submit an attester slashing (raw JSON bytes).
-    submitAttesterSlashingFn: ?*const fn (ptr: *anyopaque, json_bytes: []const u8) anyerror!void = null,
-    /// Submit signed BLS-to-execution changes (raw JSON bytes, array).
-    submitBlsChangeFn: ?*const fn (ptr: *anyopaque, json_bytes: []const u8) anyerror!void = null,
-    /// Submit sync committee messages (raw JSON bytes, array).
-    submitSyncCommitteeMessageFn: ?*const fn (ptr: *anyopaque, json_bytes: []const u8) anyerror!void = null,
-    /// Submit aggregate and proofs (raw JSON bytes, array).
-    submitAggregateAndProofFn: ?*const fn (ptr: *anyopaque, json_bytes: []const u8) anyerror!void = null,
-    /// Submit contribution and proofs (raw JSON bytes, array).
-    submitContributionAndProofFn: ?*const fn (ptr: *anyopaque, json_bytes: []const u8) anyerror!void = null,
+    /// Submit attestations.
+    submitAttestationFn: ?*const fn (ptr: *anyopaque, attestations: SubmittedAttestations) anyerror!void = null,
+    /// Submit a signed voluntary exit.
+    submitVoluntaryExitFn: ?*const fn (ptr: *anyopaque, exit: consensus_types.phase0.SignedVoluntaryExit.Type) anyerror!void = null,
+    /// Submit a proposer slashing.
+    submitProposerSlashingFn: ?*const fn (ptr: *anyopaque, slashing: consensus_types.phase0.ProposerSlashing.Type) anyerror!void = null,
+    /// Submit an attester slashing.
+    submitAttesterSlashingFn: ?*const fn (ptr: *anyopaque, slashing: SubmittedAttesterSlashing) anyerror!void = null,
+    /// Submit signed BLS-to-execution changes.
+    submitBlsChangeFn: ?*const fn (ptr: *anyopaque, changes: []const consensus_types.capella.SignedBLSToExecutionChange.Type) anyerror!void = null,
+    /// Submit sync committee messages.
+    submitSyncCommitteeMessageFn: ?*const fn (ptr: *anyopaque, messages: []const consensus_types.altair.SyncCommitteeMessage.Type) anyerror!void = null,
+    /// Submit aggregate and proofs.
+    submitAggregateAndProofFn: ?*const fn (ptr: *anyopaque, aggregates: SubmittedAggregateAndProofs) anyerror!void = null,
+    /// Submit contribution and proofs.
+    submitContributionAndProofFn: ?*const fn (ptr: *anyopaque, contributions: []const consensus_types.altair.SignedContributionAndProof.Type) anyerror!void = null,
 };
 
 // ---------------------------------------------------------------------------
@@ -231,6 +261,10 @@ pub const ProducedBlockData = struct {
     blinded: bool = false,
     /// Source of the execution payload used to assemble the block.
     execution_payload_source: types.ExecutionPayloadSource = .engine,
+    /// Execution payload value in wei.
+    execution_payload_value: u256 = 0,
+    /// Consensus proposer reward for the block in wei.
+    consensus_block_value: u256 = 0,
 };
 
 /// Callback for producing blocks (GET /eth/v1/validator/blocks/{slot}).
@@ -254,10 +288,8 @@ pub const AttestationDataResult = struct {
     slot: u64,
     index: u64,
     beacon_block_root: [32]u8,
-    source_epoch: u64,
-    source_root: [32]u8,
-    target_epoch: u64,
-    target_root: [32]u8,
+    source: types.CheckpointData,
+    target: types.CheckpointData,
 };
 
 /// Callback for getting attestation data (GET /eth/v1/validator/attestation_data).
@@ -266,6 +298,9 @@ pub const AttestationDataCallback = struct {
     getAttestationDataFn: *const fn (ptr: *anyopaque, slot: u64, committee_index: u64) anyerror!AttestationDataResult,
 };
 
+pub const AggregateAttestationResult = consensus_types.phase0.Attestation.Type;
+pub const SyncCommitteeContributionResult = consensus_types.altair.SyncCommitteeContribution.Type;
+
 // ---------------------------------------------------------------------------
 // Aggregate attestation callback
 // ---------------------------------------------------------------------------
@@ -273,8 +308,7 @@ pub const AttestationDataCallback = struct {
 /// Callback for getting best aggregate attestation from pool.
 pub const AggregateAttestationCallback = struct {
     ptr: *anyopaque,
-    /// Returns raw JSON bytes of the best aggregate attestation. Caller owns.
-    getAggregateAttestationFn: *const fn (ptr: *anyopaque, allocator: std.mem.Allocator, slot: u64, attestation_data_root: [32]u8) anyerror![]const u8,
+    getAggregateAttestationFn: *const fn (ptr: *anyopaque, slot: u64, attestation_data_root: [32]u8) anyerror!AggregateAttestationResult,
 };
 
 // ---------------------------------------------------------------------------
@@ -284,8 +318,7 @@ pub const AggregateAttestationCallback = struct {
 /// Callback for getting sync committee contribution.
 pub const SyncCommitteeContributionCallback = struct {
     ptr: *anyopaque,
-    /// Returns raw JSON bytes of the contribution. Caller owns.
-    getSyncCommitteeContributionFn: *const fn (ptr: *anyopaque, allocator: std.mem.Allocator, slot: u64, subcommittee_index: u64, beacon_block_root: [32]u8) anyerror![]const u8,
+    getSyncCommitteeContributionFn: *const fn (ptr: *anyopaque, slot: u64, subcommittee_index: u64, beacon_block_root: [32]u8) anyerror!SyncCommitteeContributionResult,
 };
 
 /// Callback for validator-driven subnet subscription updates.
@@ -315,16 +348,16 @@ pub const KeymanagerCallback = struct {
     validateTokenFn: *const fn (ptr: *anyopaque, auth_header: ?[]const u8) anyerror!void,
     /// List all local validator keys. Caller owns result + slice.
     listKeysFn: *const fn (ptr: *anyopaque, allocator: std.mem.Allocator) anyerror![]ValidatorKeyInfo,
-    /// Import a keystore JSON string with password. Returns status string ("imported"/"duplicate"/"error").
-    importKeyFn: *const fn (ptr: *anyopaque, allocator: std.mem.Allocator, keystore_json: []const u8, password: []const u8, slashing_protection: ?[]const u8) anyerror![]const u8,
-    /// Delete a key by pubkey. Returns status ("deleted"/"not_found"/"error") + slashing protection JSON.
+    /// Import a keystore JSON string with password and optional typed EIP-3076 interchange data.
+    importKeyFn: *const fn (ptr: *anyopaque, keystore_json: []const u8, password: []const u8, slashing_protection: ?types.KeymanagerInterchangeFormat) anyerror!types.KeymanagerOperationStatus,
+    /// Delete a key by pubkey. Returns status + optional typed EIP-3076 interchange data.
     deleteKeyFn: *const fn (ptr: *anyopaque, allocator: std.mem.Allocator, pubkey: [48]u8) anyerror!DeleteKeyResult,
     /// List remote signer keys. Caller owns result + slice.
     listRemoteKeysFn: *const fn (ptr: *anyopaque, allocator: std.mem.Allocator) anyerror![]RemoteKeyInfo,
-    /// Import a remote key. Returns status string ("imported"/"duplicate"/"error").
-    importRemoteKeyFn: *const fn (ptr: *anyopaque, allocator: std.mem.Allocator, pubkey: [48]u8, url: []const u8) anyerror![]const u8,
-    /// Delete a remote key. Returns status string ("deleted"/"not_found"/"error").
-    deleteRemoteKeyFn: *const fn (ptr: *anyopaque, allocator: std.mem.Allocator, pubkey: [48]u8) anyerror![]const u8,
+    /// Import a remote key.
+    importRemoteKeyFn: *const fn (ptr: *anyopaque, pubkey: [48]u8, url: []const u8) anyerror!types.KeymanagerOperationStatus,
+    /// Delete a remote key.
+    deleteRemoteKeyFn: *const fn (ptr: *anyopaque, pubkey: [48]u8) anyerror!types.KeymanagerOperationStatus,
     /// Get the effective fee recipient for a validator.
     getFeeRecipientFn: *const fn (ptr: *anyopaque, pubkey: [48]u8) anyerror![20]u8,
     /// Set/delete per-validator fee recipient overrides.
@@ -342,18 +375,17 @@ pub const KeymanagerCallback = struct {
     getBuilderBoostFactorFn: *const fn (ptr: *anyopaque, pubkey: [48]u8) anyerror!u64,
     setBuilderBoostFactorFn: *const fn (ptr: *anyopaque, pubkey: [48]u8, builder_boost_factor: u64) anyerror!void,
     deleteBuilderBoostFactorFn: *const fn (ptr: *anyopaque, pubkey: [48]u8) anyerror!void,
-    /// Serialize the raw override config for a validator. Caller owns the bytes.
-    getProposerConfigFn: *const fn (ptr: *anyopaque, allocator: std.mem.Allocator, pubkey: [48]u8) anyerror![]const u8,
-    /// Sign and return a voluntary exit for the validator. Caller owns the bytes.
-    signVoluntaryExitFn: *const fn (ptr: *anyopaque, allocator: std.mem.Allocator, pubkey: [48]u8, epoch: ?u64) anyerror![]const u8,
+    /// Get the proposer-config override for a validator. Caller owns any allocated nested strings.
+    getProposerConfigFn: *const fn (ptr: *anyopaque, allocator: std.mem.Allocator, pubkey: [48]u8) anyerror!?types.KeymanagerProposerConfigData,
+    /// Sign and return a voluntary exit for the validator.
+    signVoluntaryExitFn: *const fn (ptr: *anyopaque, pubkey: [48]u8, epoch: ?u64) anyerror!consensus_types.phase0.SignedVoluntaryExit.Type,
 };
 
 /// Result of a key delete operation.
 pub const DeleteKeyResult = struct {
-    /// "deleted", "not_found", or "error"
-    status: []const u8,
-    /// EIP-3076 interchange JSON for the deleted key (empty if not_found).
-    slashing_protection: []const u8,
+    status: types.KeymanagerOperationStatus,
+    /// EIP-3076 interchange data for the deleted key, if any.
+    slashing_protection: ?types.KeymanagerInterchangeFormat,
 };
 
 // ---------------------------------------------------------------------------
@@ -386,6 +418,9 @@ pub const ApiContext = struct {
 
     /// Optional peer DB callback. Nil until wired by BeaconNode.init.
     peer_db: ?PeerDBCallback = null,
+
+    /// Optional fork-choice debug callback. Nil until wired by BeaconNode.init.
+    fork_choice_debug: ?ForkChoiceDebugCallback = null,
 
     /// Optional operation pool callback. Nil until wired by BeaconNode.init.
     op_pool: ?OpPoolCallback = null,
@@ -420,9 +455,29 @@ pub const ApiContext = struct {
         return std.mem.zeroes(HeadTracker);
     }
 
+    pub fn currentSlot(self: *const ApiContext) ?u64 {
+        if (self.chain) |cb| return cb.getCurrentSlotFn(cb.ptr);
+        return null;
+    }
+
+    pub fn validatorSeenAtEpoch(self: *const ApiContext, validator_index: u64, epoch: u64) bool {
+        if (self.chain) |cb| return cb.validatorSeenAtEpochFn(cb.ptr, validator_index, epoch);
+        return false;
+    }
+
     pub fn currentSyncStatus(self: *const ApiContext) SyncStatus {
         if (self.sync_status_view) |cb| return cb.getSyncStatusFn(cb.ptr);
         return std.mem.zeroes(SyncStatus);
+    }
+
+    pub fn forkChoiceHeads(self: *const ApiContext, allocator: std.mem.Allocator) ![]types.DebugChainHead {
+        const cb = self.fork_choice_debug orelse return error.NotImplemented;
+        return cb.getHeadsFn(cb.ptr, allocator);
+    }
+
+    pub fn forkChoiceDump(self: *const ApiContext, allocator: std.mem.Allocator) !types.ForkChoiceDump {
+        const cb = self.fork_choice_debug orelse return error.NotImplemented;
+        return cb.getForkChoiceDumpFn(cb.ptr, allocator);
     }
 
     pub fn blockRootBySlot(self: *const ApiContext, slot: u64) !?[32]u8 {
@@ -543,6 +598,21 @@ pub const ApiContext = struct {
         return false;
     }
 
+    pub fn blockRewards(self: *const ApiContext, block_root: [32]u8) !types.BlockRewards {
+        const cb = self.chain orelse return error.NotImplemented;
+        return cb.getBlockRewardsFn(cb.ptr, self.allocator, block_root);
+    }
+
+    pub fn attestationRewards(self: *const ApiContext, epoch: u64, validator_indices: []const u64) !types.AttestationRewardsData {
+        const cb = self.chain orelse return error.NotImplemented;
+        return cb.getAttestationRewardsFn(cb.ptr, self.allocator, epoch, validator_indices);
+    }
+
+    pub fn syncCommitteeRewards(self: *const ApiContext, block_root: [32]u8, validator_indices: []const u64) ![]const types.SyncCommitteeReward {
+        const cb = self.chain orelse return error.NotImplemented;
+        return cb.getSyncCommitteeRewardsFn(cb.ptr, self.allocator, block_root, validator_indices);
+    }
+
     fn readSignedBlockSlotFromSsz(block_bytes: []const u8) ?u64 {
         if (block_bytes.len < 108) return null;
         return std.mem.readInt(u64, block_bytes[100..108], .little);
@@ -584,6 +654,6 @@ pub const BuilderCallback = struct {
 /// Type-erased callback for querying the validator monitor.
 pub const ValidatorMonitorCallback = struct {
     ptr: *anyopaque,
-    /// Returns JSON bytes of all monitored validators' summaries. Caller owns.
-    getMonitorStatusFn: *const fn (ptr: *anyopaque, allocator: std.mem.Allocator) anyerror![]const u8,
+    /// Returns owned validator monitor snapshots for API encoding.
+    getMonitorStatusFn: *const fn (ptr: *anyopaque, allocator: std.mem.Allocator) anyerror!types.ValidatorMonitorData,
 };

@@ -130,6 +130,7 @@ pub fn executeStateTransition(
                     const process_opts = state_transition.ProcessBlockOpts{
                         .verify_signature = verify_signatures,
                         .batch_verifier = if (verify_signatures) &batch else null,
+                        .proposer_rewards = &post_state.proposer_rewards,
                     };
                     state_transition.processBlock(
                         f,

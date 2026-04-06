@@ -23,6 +23,7 @@ const getBlockRootAtSlot = @import("../utils/block_root.zig").getBlockRootAtSlot
 const Node = @import("persistent_merkle_tree").Node;
 const increaseBalance = balance_utils.increaseBalance;
 const decreaseBalance = balance_utils.decreaseBalance;
+const ProposerRewards = @import("../cache/state_cache.zig").ProposerRewards;
 
 pub fn processSyncAggregate(
     comptime fork: ForkSeq,
@@ -33,6 +34,7 @@ pub fn processSyncAggregate(
     sync_aggregate: *const SyncAggregate,
     verify_signatures: bool,
     batch_verifier: ?*BatchVerifier,
+    proposer_rewards: ?*ProposerRewards,
 ) !void {
     const committee_indices = @as(*const [preset.SYNC_COMMITTEE_SIZE]ValidatorIndex, @ptrCast(epoch_cache.current_sync_committee_indexed.get().getValidatorIndices()));
     const sync_committee_bits = sync_aggregate.sync_committee_bits;
@@ -97,7 +99,9 @@ pub fn processSyncAggregate(
 
             // Proposer reward
             proposer_balance += sync_proposer_reward;
-            // TODO: proposer_rewards inside state
+            if (proposer_rewards) |rewards| {
+                rewards.sync_aggregate += sync_proposer_reward;
+            }
         } else {
             // Negative rewards for non participants
             if (index == proposer_index) {
@@ -218,6 +222,7 @@ test "process sync aggregate - sanity" {
         &sync_aggregate,
         true,
         null,
+        null,
     );
     try std.testing.expect(res == error.SyncCommitteeSignatureInvalid);
 
@@ -231,6 +236,7 @@ test "process sync aggregate - sanity" {
         fork_state,
         &sync_aggregate,
         true,
+        null,
         null,
     );
 }

@@ -4,6 +4,8 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
 const api_context = @import("api").context;
+const api_json_response = @import("api").json_response;
+const api_types = @import("api").types;
 const DeleteKeyResult = api_context.DeleteKeyResult;
 const KeymanagerCallback = api_context.KeymanagerCallback;
 const RemoteKeyInfo = api_context.RemoteKeyInfo;
@@ -103,24 +105,23 @@ pub const KeymanagerRuntime = struct {
 
     fn importKey(
         ptr: *anyopaque,
-        allocator: Allocator,
         keystore_json: []const u8,
         password: []const u8,
-        slashing_protection: ?[]const u8,
-    ) ![]const u8 {
+        slashing_protection: ?api_types.KeymanagerInterchangeFormat,
+    ) !api_types.KeymanagerOperationStatus {
         const self: *KeymanagerRuntime = @ptrCast(@alignCast(ptr));
         const paths = self.client.config.persistence orelse return error.KeymanagerDisabled;
 
-        const secret_key = try keystore_mod.loadKeystore(allocator, keystore_json, password);
+        const secret_key = try keystore_mod.loadKeystore(self.allocator, keystore_json, password);
         const pubkey = secret_key.toPublicKey().compress();
 
         if (self.client.validator_store.signerKind(pubkey) != null) {
-            return allocator.dupe(u8, "duplicate");
+            return .duplicate;
         }
 
         const persisted = try persisted_keys.writeKeystore(
             self.io,
-            allocator,
+            self.allocator,
             paths,
             pubkey,
             keystore_json,
@@ -133,28 +134,27 @@ pub const KeymanagerRuntime = struct {
         var held_lock = persisted.lock;
         errdefer if (held_lock) |*lock| lock.deinit(self.io);
 
-        if (slashing_protection) |interchange_json| {
-            importSlashingForPubkey(self.client, allocator, pubkey, interchange_json) catch |err| {
-                _ = persisted_keys.deleteKeystore(self.io, allocator, paths, pubkey) catch {};
+        if (slashing_protection) |interchange| {
+            importSlashingForPubkey(self.allocator, self.client, pubkey, interchange) catch |err| {
+                _ = persisted_keys.deleteKeystore(self.io, self.allocator, paths, pubkey) catch {};
                 return err;
             };
         }
 
         self.client.addLocalKeyRuntime(secret_key, held_lock) catch |err| {
-            _ = persisted_keys.deleteKeystore(self.io, allocator, paths, pubkey) catch {};
+            _ = persisted_keys.deleteKeystore(self.io, self.allocator, paths, pubkey) catch {};
             return err;
         };
         held_lock = null;
 
-        return allocator.dupe(u8, "imported");
+        return .imported;
     }
 
     fn deleteKey(ptr: *anyopaque, allocator: Allocator, pubkey: [48]u8) !DeleteKeyResult {
         const self: *KeymanagerRuntime = @ptrCast(@alignCast(ptr));
         const paths = self.client.config.persistence orelse return error.KeymanagerDisabled;
 
-        const slashing_json = try exportSlashingForPubkey(self.client, allocator, pubkey);
-        errdefer allocator.free(slashing_json);
+        const slashing_protection = try exportSlashingForPubkey(allocator, self.client, pubkey);
 
         const signer_kind = self.client.validator_store.signerKind(pubkey);
         const runtime_removed = if (signer_kind == .local)
@@ -163,23 +163,20 @@ pub const KeymanagerRuntime = struct {
             false;
         const disk_deleted = try persisted_keys.deleteKeystore(self.io, allocator, paths, pubkey);
 
-        const status_name: []const u8 = if (signer_kind == .local)
-            (if (runtime_removed or disk_deleted) "deleted" else "not_active")
+        const status: api_types.KeymanagerOperationStatus = if (signer_kind == .local)
+            (if (runtime_removed or disk_deleted) .deleted else .not_active)
         else if (signer_kind == .remote)
-            "not_active"
+            .not_active
         else if (disk_deleted)
-            "deleted"
-        else if (std.mem.eql(u8, slashing_json, "{}"))
-            "not_found"
+            .deleted
+        else if (slashing_protection == null)
+            .not_found
         else
-            "not_active";
-
-        const status = try allocator.dupe(u8, status_name);
-        errdefer allocator.free(status);
+            .not_active;
 
         return .{
             .status = status,
-            .slashing_protection = slashing_json,
+            .slashing_protection = slashing_protection,
         };
     }
 
@@ -202,28 +199,27 @@ pub const KeymanagerRuntime = struct {
 
     fn importRemoteKey(
         ptr: *anyopaque,
-        allocator: Allocator,
         pubkey: [48]u8,
         url: []const u8,
-    ) ![]const u8 {
+    ) !api_types.KeymanagerOperationStatus {
         const self: *KeymanagerRuntime = @ptrCast(@alignCast(ptr));
         const paths = self.client.config.persistence orelse return error.KeymanagerDisabled;
 
         try startup_signers.validateRemoteSignerUrl(url);
 
         if (self.client.validator_store.signerKind(pubkey) != null) {
-            return allocator.dupe(u8, "duplicate");
+            return .duplicate;
         }
 
-        _ = try persisted_keys.writeRemoteKey(self.io, allocator, paths, pubkey, url, true);
+        _ = try persisted_keys.writeRemoteKey(self.io, self.allocator, paths, pubkey, url, true);
         self.client.addRemoteKeyRuntime(pubkey, url) catch |err| {
-            _ = persisted_keys.deleteRemoteKey(self.io, allocator, paths, pubkey) catch {};
+            _ = persisted_keys.deleteRemoteKey(self.io, self.allocator, paths, pubkey) catch {};
             return err;
         };
-        return allocator.dupe(u8, "imported");
+        return .imported;
     }
 
-    fn deleteRemoteKey(ptr: *anyopaque, allocator: Allocator, pubkey: [48]u8) ![]const u8 {
+    fn deleteRemoteKey(ptr: *anyopaque, pubkey: [48]u8) !api_types.KeymanagerOperationStatus {
         const self: *KeymanagerRuntime = @ptrCast(@alignCast(ptr));
         const paths = self.client.config.persistence orelse return error.KeymanagerDisabled;
 
@@ -232,18 +228,16 @@ pub const KeymanagerRuntime = struct {
             self.client.removeValidatorRuntime(pubkey) != null
         else
             false;
-        const disk_deleted = try persisted_keys.deleteRemoteKey(self.io, allocator, paths, pubkey);
+        const disk_deleted = try persisted_keys.deleteRemoteKey(self.io, self.allocator, paths, pubkey);
 
-        const status_name: []const u8 = if (signer_kind == .remote)
-            (if (runtime_removed or disk_deleted) "deleted" else "not_active")
+        return if (signer_kind == .remote)
+            (if (runtime_removed or disk_deleted) .deleted else .not_active)
         else if (signer_kind == .local)
-            "not_active"
+            .not_active
         else if (disk_deleted)
-            "deleted"
+            .deleted
         else
-            "not_found";
-
-        return allocator.dupe(u8, status_name);
+            .not_found;
     }
 
     fn getFeeRecipient(ptr: *anyopaque, pubkey: [48]u8) ![20]u8 {
@@ -355,20 +349,45 @@ pub const KeymanagerRuntime = struct {
         self.persistProposerConfig(paths, pubkey, previous) catch |err| return err;
     }
 
-    fn getProposerConfig(ptr: *anyopaque, allocator: Allocator, pubkey: [48]u8) ![]const u8 {
+    fn getProposerConfig(ptr: *anyopaque, allocator: Allocator, pubkey: [48]u8) !?api_types.KeymanagerProposerConfigData {
         const self: *KeymanagerRuntime = @ptrCast(@alignCast(ptr));
         try self.ensureKnownPubkey(pubkey);
-        const config = self.client.validator_store.getProposerConfig(pubkey) orelse
-            return allocator.dupe(u8, "null");
-        return persisted_keys.serializeProposerConfig(allocator, config);
+        const config = self.client.validator_store.getProposerConfig(pubkey) orelse return null;
+        return try proposerConfigToApi(allocator, config);
+    }
+
+    fn proposerConfigToApi(allocator: Allocator, config: ProposerConfig) !api_types.KeymanagerProposerConfigData {
+        var out = api_types.KeymanagerProposerConfigData{};
+        if (config.graffiti) |graffiti| {
+            out.graffiti = try graffitiToText(allocator, graffiti);
+        }
+        out.strictFeeRecipientCheck = config.strict_fee_recipient_check;
+        out.feeRecipient = config.fee_recipient;
+        if (config.builder_selection != null or config.gas_limit != null or config.builder_boost_factor != null) {
+            out.builder = .{
+                .selection = config.builder_selection,
+                .gasLimit = config.gas_limit,
+                .boostFactor = config.builder_boost_factor,
+            };
+        }
+        return out;
+    }
+
+    fn graffitiToText(allocator: Allocator, graffiti: [32]u8) ![]u8 {
+        var end = graffiti.len;
+        while (end > 0 and graffiti[end - 1] == 0) {
+            end -= 1;
+        }
+        const text = graffiti[0..end];
+        if (!std.unicode.utf8ValidateSlice(text)) return error.InvalidGraffiti;
+        return allocator.dupe(u8, text);
     }
 
     fn signVoluntaryExit(
         ptr: *anyopaque,
-        allocator: Allocator,
         pubkey: [48]u8,
         epoch: ?u64,
-    ) ![]const u8 {
+    ) !consensus_types.phase0.SignedVoluntaryExit.Type {
         const self: *KeymanagerRuntime = @ptrCast(@alignCast(ptr));
         try self.ensureKnownPubkey(pubkey);
 
@@ -389,13 +408,11 @@ pub const KeymanagerRuntime = struct {
         );
 
         const signature = try self.client.validator_store.signVoluntaryExit(self.io, pubkey, signing_root);
-        const signature_hex = std.fmt.bytesToHex(&signature.compress(), .lower);
 
-        return std.fmt.allocPrint(
-            allocator,
-            "{{\"message\":{{\"epoch\":\"{d}\",\"validator_index\":\"{d}\"}},\"signature\":\"0x{s}\"}}",
-            .{ exit_epoch, validator_index, signature_hex },
-        );
+        return .{
+            .message = voluntary_exit,
+            .signature = signature.compress(),
+        };
     }
 
     fn ensureKnownPubkey(self: *const KeymanagerRuntime, pubkey: [48]u8) !void {
@@ -429,12 +446,23 @@ pub const KeymanagerRuntime = struct {
     }
 };
 
+fn encodeApiValueAlloc(allocator: Allocator, comptime T: type, value: *const T) ![]u8 {
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    errdefer aw.deinit();
+    var stream: std.json.Stringify = .{ .writer = &aw.writer };
+    try api_json_response.writeApiValue(&stream, T, value);
+    return aw.toOwnedSlice();
+}
+
 fn importSlashingForPubkey(
-    client: *ValidatorClient,
     allocator: Allocator,
+    client: *ValidatorClient,
     pubkey: [48]u8,
-    interchange_json: []const u8,
+    interchange: api_types.KeymanagerInterchangeFormat,
 ) !void {
+    const interchange_json = try encodeApiValueAlloc(allocator, api_types.KeymanagerInterchangeFormat, &interchange);
+    defer allocator.free(interchange_json);
+
     const records = try interchange_mod.importInterchangeVerified(
         allocator,
         interchange_json,
@@ -449,17 +477,29 @@ fn importSlashingForPubkey(
 }
 
 fn exportSlashingForPubkey(
-    client: *ValidatorClient,
     allocator: Allocator,
+    client: *ValidatorClient,
     pubkey: [48]u8,
-) ![]const u8 {
+) !?api_types.KeymanagerInterchangeFormat {
     const history = try client.validator_store.slashing_db.exportHistory(allocator, pubkey) orelse
-        return interchange_mod.exportInterchange(allocator, &.{}, client.config.genesis_validators_root);
+        return null;
     defer {
         allocator.free(history.signed_blocks);
         allocator.free(history.signed_attestations);
     }
 
     const records = [_]validator_types.SlashingProtectionHistory{history};
-    return interchange_mod.exportInterchange(allocator, &records, client.config.genesis_validators_root);
+    const interchange_json = try interchange_mod.exportInterchange(
+        allocator,
+        &records,
+        client.config.genesis_validators_root,
+    );
+    defer allocator.free(interchange_json);
+
+    return try std.json.parseFromSliceLeaky(
+        api_types.KeymanagerInterchangeFormat,
+        allocator,
+        interchange_json,
+        .{ .allocate = .alloc_always },
+    );
 }

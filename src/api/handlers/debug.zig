@@ -10,19 +10,10 @@ const std = @import("std");
 const types = @import("../types.zig");
 const context = @import("../context.zig");
 const ApiContext = context.ApiContext;
-const CachedBeaconState = context.CachedBeaconState;
 const preset = @import("preset").preset;
 const handler_result = @import("../handler_result.zig");
 const HandlerResult = handler_result.HandlerResult;
 const ResponseMeta = handler_result.ResponseMeta;
-
-/// A beacon chain head for the debug API response: (slot, root) of a chain tip
-/// visible to fork-choice. This is the API response shape, not to be confused
-/// with chain.HeadInfo which includes additional chain state.
-pub const DebugChainHead = struct {
-    slot: u64,
-    root: [32]u8,
-};
 
 /// GET /eth/v2/debug/beacon/states/{state_id}
 ///
@@ -100,19 +91,10 @@ pub fn getState(ctx: *ApiContext, state_id: types.StateId) !HandlerResult([]cons
 ///
 /// Returns the list of fork-choice chain heads.
 ///
-/// Note: A full implementation would query the fork-choice store for all
-/// known tips. Currently the head tracker exposes only the canonical head,
-/// so we return that single entry.
-pub fn getHeads(ctx: *ApiContext) !HandlerResult([]const DebugChainHead) {
-    const head = ctx.currentHeadTracker();
-    // Allocate a single-element slice on ctx.allocator so the caller can
-    // free it uniformly.
-    const heads = try ctx.allocator.alloc(DebugChainHead, 1);
-    heads[0] = .{
-        .slot = head.head_slot,
-        .root = head.head_root,
-    };
-    return .{ .data = heads };
+/// The live node wires this through the fork-choice debug callback surface,
+/// so the handler does not fabricate a canonical-only fallback.
+pub fn getHeads(ctx: *ApiContext) !HandlerResult([]const types.DebugChainHead) {
+    return .{ .data = try ctx.forkChoiceHeads(ctx.allocator) };
 }
 
 // ---------------------------------------------------------------------------
@@ -202,7 +184,7 @@ test "getState root returns data from DB archive" {
     try std.testing.expectEqualSlices(u8, &fake_state, result.data);
 }
 
-test "getHeads returns single head entry" {
+test "getHeads returns callback-backed heads" {
     var tc = test_helpers.makeTestContext(std.testing.allocator);
     defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
 
@@ -221,38 +203,19 @@ test "getHeads returns single head entry" {
 /// GET /eth/v1/debug/fork_choice
 ///
 /// Returns the full fork choice tree for debugging.
-/// Stub until the fork-choice store is wired into the API context.
 pub fn getForkChoice(ctx: *ApiContext) !HandlerResult(types.ForkChoiceDump) {
-    const head = ctx.currentHeadTracker();
-    // TODO: query fork-choice store via a callback.
-    // For now return a single-node tree representing the current head.
-    const nodes = try ctx.allocator.alloc(types.ForkChoiceNode, 1);
-    nodes[0] = .{
-        .slot = head.head_slot,
-        .block_root = head.head_root,
-        .parent_root = null,
-        .justified_epoch = head.justified_slot / preset.SLOTS_PER_EPOCH,
-        .finalized_epoch = head.finalized_slot / preset.SLOTS_PER_EPOCH,
-        .weight = 0,
-        .validity = "valid",
-        .execution_block_hash = [_]u8{0} ** 32,
-    };
+    return .{ .data = try ctx.forkChoiceDump(ctx.allocator), .meta = .{} };
+}
 
-    const justified_epoch = head.justified_slot / preset.SLOTS_PER_EPOCH;
-    const finalized_epoch = head.finalized_slot / preset.SLOTS_PER_EPOCH;
+test "getForkChoice returns callback-backed dump" {
+    var tc = test_helpers.makeTestContext(std.testing.allocator);
+    defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
 
-    return .{
-        .data = .{
-            .justified_checkpoint = .{
-                .epoch = justified_epoch,
-                .root = head.justified_root,
-            },
-            .finalized_checkpoint = .{
-                .epoch = finalized_epoch,
-                .root = head.finalized_root,
-            },
-            .fork_choice_nodes = nodes,
-        },
-        .meta = .{},
-    };
+    const result = try getForkChoice(&tc.ctx);
+    defer tc.ctx.allocator.free(result.data.fork_choice_nodes);
+
+    try std.testing.expectEqual(@as(usize, 1), result.data.fork_choice_nodes.len);
+    try std.testing.expectEqual(tc.head_tracker.head_root, result.data.fork_choice_nodes[0].block_root);
+    try std.testing.expectEqual(tc.head_tracker.justified_root, result.data.justified_checkpoint.root);
+    try std.testing.expectEqual(tc.head_tracker.finalized_root, result.data.finalized_checkpoint.root);
 }

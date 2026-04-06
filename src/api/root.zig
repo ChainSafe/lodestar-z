@@ -35,7 +35,6 @@ pub const BlockId = types.BlockId;
 pub const StateId = types.StateId;
 pub const ValidatorId = types.ValidatorId;
 pub const ContentType = types.ContentType;
-pub const ApiResponse = types.ApiResponse;
 pub const HttpServer = http_server.HttpServer;
 pub const EventBus = event_bus.EventBus;
 pub const Event = event_bus.Event;

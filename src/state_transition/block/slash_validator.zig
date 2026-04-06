@@ -13,9 +13,15 @@ const initiateValidatorExit = @import("./initiate_validator_exit.zig").initiateV
 const computePreviousEpoch = @import("../utils/epoch.zig").computePreviousEpoch;
 const isActiveValidatorView = @import("../utils/validator.zig").isActiveValidatorView;
 const getBeaconProposer = @import("../cache/get_beacon_proposer.zig").getBeaconProposer;
+const ProposerRewards = @import("../cache/state_cache.zig").ProposerRewards;
 
 /// Same to https://github.com/ethereum/eth2.0-specs/blob/v1.1.0-alpha.5/specs/altair/beacon-chain.md#has_flag
 const TIMELY_TARGET = 1 << c.TIMELY_TARGET_FLAG_INDEX;
+
+pub const SlashingRewardKind = enum {
+    proposer,
+    attester,
+};
 
 pub fn slashValidator(
     comptime fork: ForkSeq,
@@ -25,6 +31,8 @@ pub fn slashValidator(
     slashings_cache: *SlashingsCache,
     slashed_index: ValidatorIndex,
     whistle_blower_index: ?ValidatorIndex,
+    reward_kind: SlashingRewardKind,
+    proposer_rewards: ?*ProposerRewards,
 ) !void {
     const epoch = epoch_cache.epoch;
     const effective_balance_increments = epoch_cache.effective_balance_increments;
@@ -84,12 +92,20 @@ pub fn slashValidator(
     if (whistle_blower_index) |_whistle_blower_index| {
         try increaseBalance(fork, state, proposer_index, proposer_reward);
         try increaseBalance(fork, state, _whistle_blower_index, whistleblower_reward - proposer_reward);
-        // TODO: implement RewardCache
-        // state.proposer_rewards.slashing += proposer_reward;
+        if (proposer_rewards) |rewards| {
+            switch (reward_kind) {
+                .proposer => rewards.proposer_slashings += proposer_reward,
+                .attester => rewards.attester_slashings += proposer_reward,
+            }
+        }
     } else {
         try increaseBalance(fork, state, proposer_index, whistleblower_reward);
-        // TODO: implement RewardCache
-        // state.proposerRewards.slashing += whistleblowerReward;
+        if (proposer_rewards) |rewards| {
+            switch (reward_kind) {
+                .proposer => rewards.proposer_slashings += whistleblower_reward,
+                .attester => rewards.attester_slashings += whistleblower_reward,
+            }
+        }
     }
 
     if (fork.gte(.altair)) {

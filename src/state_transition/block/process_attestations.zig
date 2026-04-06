@@ -13,6 +13,7 @@ const processAttestationPhase0 = @import("./process_attestation_phase0.zig").pro
 const processAttestationsAltair = @import("./process_attestation_altair.zig").processAttestationsAltair;
 const BatchVerifier = @import("bls").BatchVerifier;
 const Node = @import("persistent_merkle_tree").Node;
+const ProposerRewards = @import("../cache/state_cache.zig").ProposerRewards;
 
 pub fn processAttestations(
     comptime fork: ForkSeq,
@@ -24,6 +25,7 @@ pub fn processAttestations(
     attestations: []const ForkTypes(fork).Attestation.Type,
     verify_signatures: bool,
     batch_verifier: ?*BatchVerifier,
+    proposer_rewards: ?*ProposerRewards,
 ) !void {
     try buildSlashingsCacheIfNeeded(allocator, state, slashings_cache);
     if (comptime fork == .phase0) {
@@ -36,6 +38,7 @@ pub fn processAttestations(
                 &attestation,
                 verify_signatures,
                 batch_verifier,
+                proposer_rewards,
             );
         }
     } else {
@@ -49,6 +52,7 @@ pub fn processAttestations(
             attestations,
             verify_signatures,
             batch_verifier,
+            proposer_rewards,
         );
     }
 }
@@ -76,6 +80,7 @@ test "process attestations - sanity" {
             &test_state.cached_state.slashings_cache,
             electra.items,
             true,
+            null,
             null,
         ),
     );

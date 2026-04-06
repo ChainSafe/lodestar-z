@@ -29,6 +29,12 @@ pub const SerializedUnsignedBlock = struct {
     ssz_bytes: []u8,
     fork_name: []const u8,
     block_type: BlockType,
+    consensus_block_value: u256 = 0,
+};
+
+const ProducedStateTransitionMeta = struct {
+    state_root: [32]u8,
+    consensus_block_value: u256,
 };
 
 pub const ProducedProposal = union(enum) {
@@ -813,10 +819,10 @@ pub fn ensureProducedBlindedFeeRecipient(
     return error.FeeRecipientMismatch;
 }
 
-fn computeStateRootForAnyBlock(
+fn computeStateTransitionMetaForAnyBlock(
     self: *BeaconNode,
     any_block: fork_types.AnySignedBeaconBlock,
-) ![32]u8 {
+) !ProducedStateTransitionMeta {
     const head_state = self.headState() orelse return error.NoHeadState;
 
     var state_graph_lease = self.chainService().acquireStateGraphLease();
@@ -841,14 +847,17 @@ fn computeStateRootForAnyBlock(
         self.allocator.destroy(post_state);
     }
 
-    return (try post_state.state.hashTreeRoot()).*;
+    return .{
+        .state_root = (try post_state.state.hashTreeRoot()).*,
+        .consensus_block_value = @as(u256, post_state.getProposerRewards().total()) * @as(u256, 1_000_000_000),
+    };
 }
 
-fn computeProducedStateRoot(
+fn computeProducedStateTransitionMeta(
     self: *BeaconNode,
     slot: u64,
     produced: *const ProducedBlock,
-) ![32]u8 {
+) !ProducedStateTransitionMeta {
     var signed_block = types.electra.SignedBeaconBlock.Type{
         .message = .{
             .slot = slot,
@@ -865,14 +874,14 @@ fn computeProducedStateRoot(
         else => .{ .full_electra = &signed_block },
     };
 
-    return computeStateRootForAnyBlock(self, any_block);
+    return computeStateTransitionMetaForAnyBlock(self, any_block);
 }
 
-fn computeProducedBlindedStateRoot(
+fn computeProducedBlindedStateTransitionMeta(
     self: *BeaconNode,
     slot: u64,
     produced: *const ProducedBlindedBlock,
-) ![32]u8 {
+) !ProducedStateTransitionMeta {
     var signed_block = types.electra.SignedBlindedBeaconBlock.Type{
         .message = .{
             .slot = slot,
@@ -889,7 +898,7 @@ fn computeProducedBlindedStateRoot(
         else => .{ .blinded_electra = &signed_block },
     };
 
-    return computeStateRootForAnyBlock(self, any_block);
+    return computeStateTransitionMetaForAnyBlock(self, any_block);
 }
 
 pub fn serializeUnsignedBlock(
@@ -911,7 +920,8 @@ pub fn serializeUnsignedProducedBlindedBlock(
     slot: u64,
     produced: *const ProducedBlindedBlock,
 ) !SerializedUnsignedBlock {
-    const state_root = try computeProducedBlindedStateRoot(self, slot, produced);
+    const transition_meta = try computeProducedBlindedStateTransitionMeta(self, slot, produced);
+    const state_root = transition_meta.state_root;
     const fork_seq = self.config.forkSeq(slot);
     if (fork_seq.lt(.bellatrix)) return error.InvalidFork;
 
@@ -949,6 +959,7 @@ pub fn serializeUnsignedProducedBlindedBlock(
         .ssz_bytes = ssz_bytes,
         .fork_name = @tagName(fork_seq),
         .block_type = .blinded,
+        .consensus_block_value = transition_meta.consensus_block_value,
     };
 }
 
@@ -958,7 +969,8 @@ fn serializeUnsignedFullBlock(
     slot: u64,
     produced: *const ProducedBlock,
 ) !SerializedUnsignedBlock {
-    const state_root = try computeProducedStateRoot(self, slot, produced);
+    const transition_meta = try computeProducedStateTransitionMeta(self, slot, produced);
+    const state_root = transition_meta.state_root;
     const fork_seq = self.config.forkSeq(slot);
 
     var block = types.electra.BeaconBlock.Type{
@@ -990,6 +1002,7 @@ fn serializeUnsignedFullBlock(
         .ssz_bytes = ssz_bytes,
         .fork_name = @tagName(fork_seq),
         .block_type = .full,
+        .consensus_block_value = transition_meta.consensus_block_value,
     };
 }
 
@@ -1012,7 +1025,8 @@ fn serializeUnsignedBlindedBlock(
     slot: u64,
     produced: *const ProducedBlock,
 ) !SerializedUnsignedBlock {
-    const state_root = try computeProducedStateRoot(self, slot, produced);
+    const transition_meta = try computeProducedStateTransitionMeta(self, slot, produced);
+    const state_root = transition_meta.state_root;
     const fork_seq = self.config.forkSeq(slot);
     if (fork_seq.lt(.bellatrix)) return error.InvalidFork;
 
@@ -1081,6 +1095,7 @@ fn serializeUnsignedBlindedBlock(
         .ssz_bytes = ssz_bytes,
         .fork_name = @tagName(fork_seq),
         .block_type = .blinded,
+        .consensus_block_value = transition_meta.consensus_block_value,
     };
 }
 

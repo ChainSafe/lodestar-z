@@ -19,7 +19,12 @@ const StateTransitionMetrics = metrics_mod.StateTransitionMetrics;
 pub const ProposerRewards = struct {
     attestations: u64 = 0,
     sync_aggregate: u64 = 0,
-    slashing: u64 = 0,
+    proposer_slashings: u64 = 0,
+    attester_slashings: u64 = 0,
+
+    pub fn total(self: ProposerRewards) u64 {
+        return self.attestations + self.sync_aggregate + self.proposer_slashings + self.attester_slashings;
+    }
 };
 
 pub const CachedBeaconState = struct {
