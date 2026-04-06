@@ -31,9 +31,18 @@ pub const PendingIngressBlock = struct {
     seen_timestamp_sec: u64,
 };
 
+pub const MetricsSnapshot = struct {
+    added_total: u64 = 0,
+    replaced_total: u64 = 0,
+    resolved_total: u64 = 0,
+    removed_total: u64 = 0,
+    pruned_total: u64 = 0,
+};
+
 pub const PendingBlockIngress = struct {
     allocator: Allocator,
     pending: std.AutoHashMap(Root, *PendingIngressBlock),
+    metrics: MetricsSnapshot = .{},
 
     pub fn init(allocator: Allocator) PendingBlockIngress {
         return .{
@@ -63,6 +72,7 @@ pub const PendingBlockIngress = struct {
         if (isReadyStatus(da_status)) {
             if (self.pending.fetchRemove(block_root)) |entry| {
                 destroyPending(self, entry.value);
+                self.metrics.removed_total += 1;
             }
             return .{
                 .block = block,
@@ -77,6 +87,7 @@ pub const PendingBlockIngress = struct {
 
         if (self.pending.fetchRemove(block_root)) |entry| {
             destroyPending(self, entry.value);
+            self.metrics.replaced_total += 1;
         }
 
         const pending = try self.allocator.create(PendingIngressBlock);
@@ -94,6 +105,7 @@ pub const PendingBlockIngress = struct {
             pending.block.deinit(self.allocator);
         }
         try self.pending.put(block_root, pending);
+        self.metrics.added_total += 1;
         return null;
     }
 
@@ -107,6 +119,7 @@ pub const PendingBlockIngress = struct {
         const entry = self.pending.fetchRemove(block_root) orelse return null;
         defer self.allocator.destroy(entry.value);
         entry.value.block_data_plan.deinit(self.allocator);
+        self.metrics.resolved_total += 1;
 
         return .{
             .block = entry.value.block,
@@ -122,6 +135,7 @@ pub const PendingBlockIngress = struct {
     pub fn removePending(self: *PendingBlockIngress, block_root: Root) void {
         if (self.pending.fetchRemove(block_root)) |entry| {
             destroyPending(self, entry.value);
+            self.metrics.removed_total += 1;
         }
     }
 
@@ -137,7 +151,10 @@ pub const PendingBlockIngress = struct {
         }
 
         for (to_remove.items) |root| {
-            self.removePending(root);
+            if (self.pending.fetchRemove(root)) |entry| {
+                destroyPending(self, entry.value);
+                self.metrics.pruned_total += 1;
+            }
         }
 
         return to_remove.items.len;
@@ -145,6 +162,10 @@ pub const PendingBlockIngress = struct {
 
     pub fn len(self: *const PendingBlockIngress) usize {
         return self.pending.count();
+    }
+
+    pub fn metricsSnapshot(self: *const PendingBlockIngress) MetricsSnapshot {
+        return self.metrics;
     }
 };
 

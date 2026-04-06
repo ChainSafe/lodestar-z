@@ -190,10 +190,27 @@ pub const BeaconMetrics = struct {
     sync_contribution_pool_size: Gauge(u64),
     proposer_cache_entries: Gauge(u64),
     pending_block_ingress_size: Gauge(u64),
+    pending_block_ingress_added_total: Counter(u64),
+    pending_block_ingress_replaced_total: Counter(u64),
+    pending_block_ingress_resolved_total: Counter(u64),
+    pending_block_ingress_removed_total: Counter(u64),
+    pending_block_ingress_pruned_total: Counter(u64),
     pending_payload_envelope_ingress_size: Gauge(u64),
+    pending_payload_envelope_ingress_added_total: Counter(u64),
+    pending_payload_envelope_ingress_replaced_total: Counter(u64),
+    pending_payload_envelope_ingress_removed_total: Counter(u64),
+    pending_payload_envelope_ingress_pruned_total: Counter(u64),
+    reprocess_queue_size: Gauge(u64),
+    reprocess_queued_total: Counter(u64),
+    reprocess_released_total: Counter(u64),
+    reprocess_dropped_total: Counter(u64),
+    reprocess_pruned_total: Counter(u64),
     da_blob_tracker_entries: Gauge(u64),
     da_column_tracker_entries: Gauge(u64),
     da_pending_blocks: Gauge(u64),
+    da_pending_marked_total: Counter(u64),
+    da_pending_resolved_total: Counter(u64),
+    da_pending_pruned_total: Counter(u64),
 
     // Execution layer.
     execution_new_payload_seconds: Histogram(f64, &el_request_buckets),
@@ -394,10 +411,27 @@ pub const BeaconMetrics = struct {
             .sync_contribution_pool_size = Gauge(u64).init("beacon_sync_contribution_pool_size", .{}, ro),
             .proposer_cache_entries = Gauge(u64).init("beacon_proposer_cache_entries", .{}, ro),
             .pending_block_ingress_size = Gauge(u64).init("beacon_pending_block_ingress_size", .{}, ro),
+            .pending_block_ingress_added_total = Counter(u64).init("beacon_pending_block_ingress_added_total", .{}, ro),
+            .pending_block_ingress_replaced_total = Counter(u64).init("beacon_pending_block_ingress_replaced_total", .{}, ro),
+            .pending_block_ingress_resolved_total = Counter(u64).init("beacon_pending_block_ingress_resolved_total", .{}, ro),
+            .pending_block_ingress_removed_total = Counter(u64).init("beacon_pending_block_ingress_removed_total", .{}, ro),
+            .pending_block_ingress_pruned_total = Counter(u64).init("beacon_pending_block_ingress_pruned_total", .{}, ro),
             .pending_payload_envelope_ingress_size = Gauge(u64).init("beacon_pending_payload_envelope_ingress_size", .{}, ro),
+            .pending_payload_envelope_ingress_added_total = Counter(u64).init("beacon_pending_payload_envelope_ingress_added_total", .{}, ro),
+            .pending_payload_envelope_ingress_replaced_total = Counter(u64).init("beacon_pending_payload_envelope_ingress_replaced_total", .{}, ro),
+            .pending_payload_envelope_ingress_removed_total = Counter(u64).init("beacon_pending_payload_envelope_ingress_removed_total", .{}, ro),
+            .pending_payload_envelope_ingress_pruned_total = Counter(u64).init("beacon_pending_payload_envelope_ingress_pruned_total", .{}, ro),
+            .reprocess_queue_size = Gauge(u64).init("beacon_reprocess_queue_size", .{}, ro),
+            .reprocess_queued_total = Counter(u64).init("beacon_reprocess_queued_total", .{}, ro),
+            .reprocess_released_total = Counter(u64).init("beacon_reprocess_released_total", .{}, ro),
+            .reprocess_dropped_total = Counter(u64).init("beacon_reprocess_dropped_total", .{}, ro),
+            .reprocess_pruned_total = Counter(u64).init("beacon_reprocess_pruned_total", .{}, ro),
             .da_blob_tracker_entries = Gauge(u64).init("beacon_da_blob_tracker_entries", .{}, ro),
             .da_column_tracker_entries = Gauge(u64).init("beacon_da_column_tracker_entries", .{}, ro),
             .da_pending_blocks = Gauge(u64).init("beacon_da_pending_blocks", .{}, ro),
+            .da_pending_marked_total = Counter(u64).init("beacon_da_pending_marked_total", .{}, ro),
+            .da_pending_resolved_total = Counter(u64).init("beacon_da_pending_resolved_total", .{}, ro),
+            .da_pending_pruned_total = Counter(u64).init("beacon_da_pending_pruned_total", .{}, ro),
 
             .execution_new_payload_seconds = Histogram(f64, &el_request_buckets).init("execution_new_payload_seconds", .{}, ro),
             .execution_forkchoice_updated_seconds = Histogram(f64, &el_request_buckets).init("execution_forkchoice_updated_seconds", .{}, ro),
@@ -798,6 +832,13 @@ test "BeaconMetrics: init fields are accessible" {
     m.incrArchiveRunMilliseconds(500);
     m.setValidatorMonitorSnapshot(4, 1);
     m.setProgressLag(32, 3);
+    m.pending_block_ingress_size.set(6);
+    m.pending_block_ingress_added_total.incrBy(8);
+    m.pending_payload_envelope_ingress_size.set(3);
+    m.reprocess_queue_size.set(5);
+    m.reprocess_queued_total.incrBy(9);
+    m.da_pending_blocks.set(4);
+    m.da_pending_marked_total.incrBy(7);
     m.setDbSnapshot(.{
         .total_entries = 33,
         .lmdb_map_size_bytes = 4096,
@@ -843,6 +884,13 @@ test "BeaconMetrics: init fields are accessible" {
     try std.testing.expectEqual(@as(u64, 1), m.sync_optimistic.impl.value);
     try std.testing.expectEqual(@as(u64, 0), m.sync_el_offline.impl.value);
     try std.testing.expectEqual(@as(u64, 32), m.archive_finalized_slot_lag.impl.value);
+    try std.testing.expectEqual(@as(u64, 6), m.pending_block_ingress_size.impl.value);
+    try std.testing.expectEqual(@as(u64, 8), m.pending_block_ingress_added_total.impl.count);
+    try std.testing.expectEqual(@as(u64, 3), m.pending_payload_envelope_ingress_size.impl.value);
+    try std.testing.expectEqual(@as(u64, 5), m.reprocess_queue_size.impl.value);
+    try std.testing.expectEqual(@as(u64, 9), m.reprocess_queued_total.impl.count);
+    try std.testing.expectEqual(@as(u64, 4), m.da_pending_blocks.impl.value);
+    try std.testing.expectEqual(@as(u64, 7), m.da_pending_marked_total.impl.count);
     try std.testing.expectEqual(@as(u64, 4), m.validator_monitor_monitored_validators.impl.value);
     try std.testing.expectEqual(@as(u64, 3), m.validator_monitor_epoch_lag.impl.value);
     try std.testing.expectEqual(@as(u64, 33), m.db_total_entries.impl.value);
@@ -908,6 +956,13 @@ test "BeaconMetrics: write produces live Prometheus output" {
     m.incrArchiveRunMilliseconds(1500);
     m.setValidatorMonitorSnapshot(8, 12);
     m.setProgressLag(16, 1);
+    m.pending_block_ingress_size.set(6);
+    m.pending_block_ingress_added_total.incrBy(8);
+    m.pending_payload_envelope_ingress_size.set(3);
+    m.reprocess_queue_size.set(5);
+    m.reprocess_queued_total.incrBy(9);
+    m.da_pending_blocks.set(4);
+    m.da_pending_marked_total.incrBy(7);
     m.setDbSnapshot(.{
         .total_entries = 11,
         .entry_counts = blk: {
@@ -1000,6 +1055,10 @@ test "BeaconMetrics: write produces live Prometheus output" {
     try std.testing.expect(std.mem.indexOf(u8, buf, "beacon_archive_run_milliseconds_total") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf, "beacon_archive_last_batch_ops") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf, "beacon_archive_last_run_milliseconds") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf, "beacon_pending_block_ingress_added_total") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf, "beacon_pending_payload_envelope_ingress_size") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf, "beacon_reprocess_queue_size") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf, "beacon_da_pending_marked_total") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf, "beacon_validator_monitor_monitored_validators") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf, "beacon_validator_monitor_epoch_lag") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf, "beacon_db_total_entries") != null);

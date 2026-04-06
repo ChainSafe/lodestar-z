@@ -76,6 +76,9 @@ pub const DataAvailabilityManagerMetrics = struct {
     blob_tracker_entries: usize,
     column_tracker_entries: usize,
     pending_blocks: usize,
+    pending_marked_total: u64 = 0,
+    pending_resolved_total: u64 = 0,
+    pending_pruned_total: u64 = 0,
 };
 
 pub const DataAvailabilityManager = struct {
@@ -94,6 +97,9 @@ pub const DataAvailabilityManager = struct {
     /// Blocks pending DA completion: block_root → slot.
     /// When DA becomes complete, these are signaled for reprocessing.
     pending_blocks: std.AutoHashMap(Root, u64),
+    pending_marked_total: u64 = 0,
+    pending_resolved_total: u64 = 0,
+    pending_pruned_total: u64 = 0,
 
     pub fn init(
         allocator: Allocator,
@@ -236,7 +242,11 @@ pub const DataAvailabilityManager = struct {
     /// Mark a block as pending DA completion.
     /// When DA becomes available, the on_available callback will fire.
     pub fn markPending(self: *DataAvailabilityManager, block_root: Root, slot: u64) !void {
-        try self.pending_blocks.put(block_root, slot);
+        const gop = try self.pending_blocks.getOrPut(block_root);
+        if (!gop.found_existing) {
+            self.pending_marked_total += 1;
+        }
+        gop.value_ptr.* = slot;
     }
 
     /// Check if a block is pending DA.
@@ -250,7 +260,9 @@ pub const DataAvailabilityManager = struct {
     }
 
     fn onBlockAvailable(self: *DataAvailabilityManager, block_root: Root) void {
-        _ = self.pending_blocks.remove(block_root);
+        if (self.pending_blocks.remove(block_root)) {
+            self.pending_resolved_total += 1;
+        }
         if (self.on_available) |cb| {
             cb(block_root);
         }
@@ -301,7 +313,9 @@ pub const DataAvailabilityManager = struct {
         }
 
         for (to_remove[0..remove_count]) |root| {
-            _ = self.pending_blocks.remove(root);
+            if (self.pending_blocks.remove(root)) {
+                self.pending_pruned_total += 1;
+            }
         }
     }
 
@@ -321,6 +335,9 @@ pub const DataAvailabilityManager = struct {
             .blob_tracker_entries = self.blob_tracker.count(),
             .column_tracker_entries = self.column_tracker.count(),
             .pending_blocks = self.pending_blocks.count(),
+            .pending_marked_total = self.pending_marked_total,
+            .pending_resolved_total = self.pending_resolved_total,
+            .pending_pruned_total = self.pending_pruned_total,
         };
     }
 };

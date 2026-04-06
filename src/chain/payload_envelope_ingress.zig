@@ -33,9 +33,17 @@ pub const PendingPayloadEnvelope = struct {
     }
 };
 
+pub const MetricsSnapshot = struct {
+    added_total: u64 = 0,
+    replaced_total: u64 = 0,
+    removed_total: u64 = 0,
+    pruned_total: u64 = 0,
+};
+
 pub const PayloadEnvelopeIngress = struct {
     allocator: Allocator,
     pending: std.AutoHashMap(Root, *PendingPayloadEnvelope),
+    metrics: MetricsSnapshot = .{},
 
     pub fn init(allocator: Allocator) PayloadEnvelopeIngress {
         return .{
@@ -62,6 +70,7 @@ pub const PayloadEnvelopeIngress = struct {
         if (self.pending.fetchRemove(block_root)) |entry| {
             entry.value.deinit(self.allocator);
             self.allocator.destroy(entry.value);
+            self.metrics.replaced_total += 1;
         }
 
         const pending = try self.allocator.create(PendingPayloadEnvelope);
@@ -73,12 +82,14 @@ pub const PayloadEnvelopeIngress = struct {
         };
         errdefer pending.fetch_plan.deinit(self.allocator);
         try self.pending.put(block_root, pending);
+        self.metrics.added_total += 1;
     }
 
     pub fn remove(self: *PayloadEnvelopeIngress, block_root: Root) void {
         if (self.pending.fetchRemove(block_root)) |entry| {
             entry.value.deinit(self.allocator);
             self.allocator.destroy(entry.value);
+            self.metrics.removed_total += 1;
         }
     }
 
@@ -94,7 +105,11 @@ pub const PayloadEnvelopeIngress = struct {
         }
 
         for (to_remove.items) |root| {
-            self.remove(root);
+            if (self.pending.fetchRemove(root)) |entry| {
+                entry.value.deinit(self.allocator);
+                self.allocator.destroy(entry.value);
+                self.metrics.pruned_total += 1;
+            }
         }
 
         return to_remove.items.len;
@@ -102,5 +117,9 @@ pub const PayloadEnvelopeIngress = struct {
 
     pub fn len(self: *const PayloadEnvelopeIngress) usize {
         return self.pending.count();
+    }
+
+    pub fn metricsSnapshot(self: *const PayloadEnvelopeIngress) MetricsSnapshot {
+        return self.metrics;
     }
 };

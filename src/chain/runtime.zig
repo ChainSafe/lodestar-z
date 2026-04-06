@@ -512,10 +512,27 @@ pub const MetricsSnapshot = struct {
     sync_contribution_pool_size: u64,
     beacon_proposer_cache_entries: u64,
     pending_block_ingress_size: u64,
+    pending_block_ingress_added_total: u64,
+    pending_block_ingress_replaced_total: u64,
+    pending_block_ingress_resolved_total: u64,
+    pending_block_ingress_removed_total: u64,
+    pending_block_ingress_pruned_total: u64,
     pending_payload_envelope_ingress_size: u64,
+    pending_payload_envelope_ingress_added_total: u64,
+    pending_payload_envelope_ingress_replaced_total: u64,
+    pending_payload_envelope_ingress_removed_total: u64,
+    pending_payload_envelope_ingress_pruned_total: u64,
+    reprocess_queue_size: u64,
+    reprocess_queued_total: u64,
+    reprocess_released_total: u64,
+    reprocess_dropped_total: u64,
+    reprocess_pruned_total: u64,
     da_blob_tracker_entries: u64,
     da_column_tracker_entries: u64,
     da_pending_blocks: u64,
+    da_pending_marked_total: u64,
+    da_pending_resolved_total: u64,
+    da_pending_pruned_total: u64,
 };
 
 pub const Runtime = struct {
@@ -568,6 +585,12 @@ pub const Runtime = struct {
     pub fn metricsSnapshot(self: *const Runtime) MetricsSnapshot {
         const queued_regen_metrics = self.chain.queued_regen.getMetrics();
         const da_metrics = self.da_manager.metricsSnapshot();
+        const pending_block_ingress_metrics = self.pending_block_ingress.metricsSnapshot();
+        const payload_envelope_ingress_metrics = self.payload_envelope_ingress.metricsSnapshot();
+        const reprocess_metrics = if (self.chain.reprocess_queue) |queue|
+            queue.metricsSnapshot()
+        else
+            @import("reprocess.zig").MetricsSnapshot{};
         const forkchoice_metrics = if (self.chain.fork_choice_storage) |fc|
             fc.metricsSnapshot()
         else
@@ -614,10 +637,27 @@ pub const Runtime = struct {
             .sync_contribution_pool_size = @intCast(self.sync_contribution_pool.size()),
             .beacon_proposer_cache_entries = @intCast(self.beacon_proposer_cache.len()),
             .pending_block_ingress_size = @intCast(self.pending_block_ingress.len()),
+            .pending_block_ingress_added_total = pending_block_ingress_metrics.added_total,
+            .pending_block_ingress_replaced_total = pending_block_ingress_metrics.replaced_total,
+            .pending_block_ingress_resolved_total = pending_block_ingress_metrics.resolved_total,
+            .pending_block_ingress_removed_total = pending_block_ingress_metrics.removed_total,
+            .pending_block_ingress_pruned_total = pending_block_ingress_metrics.pruned_total,
             .pending_payload_envelope_ingress_size = @intCast(self.payload_envelope_ingress.len()),
+            .pending_payload_envelope_ingress_added_total = payload_envelope_ingress_metrics.added_total,
+            .pending_payload_envelope_ingress_replaced_total = payload_envelope_ingress_metrics.replaced_total,
+            .pending_payload_envelope_ingress_removed_total = payload_envelope_ingress_metrics.removed_total,
+            .pending_payload_envelope_ingress_pruned_total = payload_envelope_ingress_metrics.pruned_total,
+            .reprocess_queue_size = if (self.chain.reprocess_queue) |queue| queue.len() else 0,
+            .reprocess_queued_total = reprocess_metrics.queued_total,
+            .reprocess_released_total = reprocess_metrics.released_total,
+            .reprocess_dropped_total = reprocess_metrics.dropped_total,
+            .reprocess_pruned_total = reprocess_metrics.pruned_total,
             .da_blob_tracker_entries = @intCast(da_metrics.blob_tracker_entries),
             .da_column_tracker_entries = @intCast(da_metrics.column_tracker_entries),
             .da_pending_blocks = @intCast(da_metrics.pending_blocks),
+            .da_pending_marked_total = da_metrics.pending_marked_total,
+            .da_pending_resolved_total = da_metrics.pending_resolved_total,
+            .da_pending_pruned_total = da_metrics.pending_pruned_total,
         };
     }
 

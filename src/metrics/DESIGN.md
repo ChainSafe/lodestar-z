@@ -143,10 +143,15 @@ var m = BeaconMetrics.initNoop();
 - `beacon_sync_contribution_pool_size` — sync-contribution pool size
 - `beacon_proposer_cache_entries` — proposer-preparation cache entries
 - `beacon_pending_block_ingress_size` — pending beacon blocks awaiting attachments
+- `beacon_pending_block_ingress_added_total` / `replaced_total` / `resolved_total` / `removed_total` / `pruned_total` — lifecycle counters for pending beacon-block ingress
 - `beacon_pending_payload_envelope_ingress_size` — pending separated payload envelopes
+- `beacon_pending_payload_envelope_ingress_added_total` / `replaced_total` / `removed_total` / `pruned_total` — lifecycle counters for pending payload-envelope ingress
+- `beacon_reprocess_queue_size` — queued blocks awaiting parent-driven reprocessing
+- `beacon_reprocess_queued_total` / `released_total` / `dropped_total` / `pruned_total` — reprocess-queue lifecycle counters
 - `beacon_da_blob_tracker_entries` — tracked blob-availability entries
 - `beacon_da_column_tracker_entries` — tracked custody-column entries
 - `beacon_da_pending_blocks` — blocks still waiting on DA completion
+- `beacon_da_pending_marked_total` / `resolved_total` / `pruned_total` — pending-DA lifecycle counters
 
 #### Execution layer
 - `execution_new_payload_seconds` — `engine_newPayload*` latency
@@ -202,7 +207,7 @@ These are good future metrics, but they should not be exported until they are re
 | Gossip | `node/gossip_handler.zig` | gossip received/validated/rejected/ignored counters |
 | Beacon API | `api/http_server.zig`, `node/beacon_node.zig`, `node/metrics.zig` | active HTTP connections plus request/error/latency metrics by operation ID |
 | Peer/discovery/sync | `node/p2p_runtime.zig`, `node/reqresp_callbacks.zig`, `networking/eth2_protocols.zig`, `networking/peer_manager.zig` | peer counts/events, peer-state distributions, peer reports, Goodbye counters, discovery peer count, sync status/distance, req/resp request outcomes, limiter peer gauges |
-| Chain runtime | `chain/runtime.zig`, `node/p2p_runtime.zig`, `fork_choice/fork_choice.zig`, `chain/archive_store.zig`, `chain/validator_monitor.zig`, `db/*` | cache sizes, fork-choice DAG/vote state, archive progress, validator-monitor coverage, queued state-regen counters, pool sizes, pending ingress, DA tracking, named-DB entry counts |
+| Chain runtime | `chain/runtime.zig`, `node/p2p_runtime.zig`, `fork_choice/fork_choice.zig`, `chain/archive_store.zig`, `chain/validator_monitor.zig`, `chain/block_ingress.zig`, `chain/payload_envelope_ingress.zig`, `chain/reprocess.zig`, `chain/data_availability.zig`, `db/*` | cache sizes, fork-choice DAG/vote state, archive progress, validator-monitor coverage, queued state-regen counters, pool sizes, ingress/reprocess/DA lifecycle counters, named-DB entry counts |
 | Execution runtime | `node/execution_runtime.zig`, `node/p2p_runtime.zig` | EL queue depth, cached payload presence, offline state |
 | STF | `state_transition/metrics.zig` | runtime-owned STFN timing carried through cached states and regen/runtime paths |
 | Metrics HTTP | `metrics/server.zig`, `metrics/runtime.zig` | shared `/metrics` listener/runtime for beacon and validator |

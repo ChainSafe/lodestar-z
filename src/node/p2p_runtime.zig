@@ -1127,9 +1127,75 @@ fn updateChainRuntimeMetrics(self: *BeaconNode) void {
     metrics.proposer_cache_entries.set(snapshot.beacon_proposer_cache_entries);
     metrics.pending_block_ingress_size.set(snapshot.pending_block_ingress_size);
     metrics.pending_payload_envelope_ingress_size.set(snapshot.pending_payload_envelope_ingress_size);
+    metrics.reprocess_queue_size.set(snapshot.reprocess_queue_size);
     metrics.da_blob_tracker_entries.set(snapshot.da_blob_tracker_entries);
     metrics.da_column_tracker_entries.set(snapshot.da_column_tracker_entries);
     metrics.da_pending_blocks.set(snapshot.da_pending_blocks);
+
+    metrics.pending_block_ingress_added_total.incrBy(monotonicDelta(
+        snapshot.pending_block_ingress_added_total,
+        if (previous) |prev| prev.pending_block_ingress_added_total else null,
+    ));
+    metrics.pending_block_ingress_replaced_total.incrBy(monotonicDelta(
+        snapshot.pending_block_ingress_replaced_total,
+        if (previous) |prev| prev.pending_block_ingress_replaced_total else null,
+    ));
+    metrics.pending_block_ingress_resolved_total.incrBy(monotonicDelta(
+        snapshot.pending_block_ingress_resolved_total,
+        if (previous) |prev| prev.pending_block_ingress_resolved_total else null,
+    ));
+    metrics.pending_block_ingress_removed_total.incrBy(monotonicDelta(
+        snapshot.pending_block_ingress_removed_total,
+        if (previous) |prev| prev.pending_block_ingress_removed_total else null,
+    ));
+    metrics.pending_block_ingress_pruned_total.incrBy(monotonicDelta(
+        snapshot.pending_block_ingress_pruned_total,
+        if (previous) |prev| prev.pending_block_ingress_pruned_total else null,
+    ));
+    metrics.pending_payload_envelope_ingress_added_total.incrBy(monotonicDelta(
+        snapshot.pending_payload_envelope_ingress_added_total,
+        if (previous) |prev| prev.pending_payload_envelope_ingress_added_total else null,
+    ));
+    metrics.pending_payload_envelope_ingress_replaced_total.incrBy(monotonicDelta(
+        snapshot.pending_payload_envelope_ingress_replaced_total,
+        if (previous) |prev| prev.pending_payload_envelope_ingress_replaced_total else null,
+    ));
+    metrics.pending_payload_envelope_ingress_removed_total.incrBy(monotonicDelta(
+        snapshot.pending_payload_envelope_ingress_removed_total,
+        if (previous) |prev| prev.pending_payload_envelope_ingress_removed_total else null,
+    ));
+    metrics.pending_payload_envelope_ingress_pruned_total.incrBy(monotonicDelta(
+        snapshot.pending_payload_envelope_ingress_pruned_total,
+        if (previous) |prev| prev.pending_payload_envelope_ingress_pruned_total else null,
+    ));
+    metrics.reprocess_queued_total.incrBy(monotonicDelta(
+        snapshot.reprocess_queued_total,
+        if (previous) |prev| prev.reprocess_queued_total else null,
+    ));
+    metrics.reprocess_released_total.incrBy(monotonicDelta(
+        snapshot.reprocess_released_total,
+        if (previous) |prev| prev.reprocess_released_total else null,
+    ));
+    metrics.reprocess_dropped_total.incrBy(monotonicDelta(
+        snapshot.reprocess_dropped_total,
+        if (previous) |prev| prev.reprocess_dropped_total else null,
+    ));
+    metrics.reprocess_pruned_total.incrBy(monotonicDelta(
+        snapshot.reprocess_pruned_total,
+        if (previous) |prev| prev.reprocess_pruned_total else null,
+    ));
+    metrics.da_pending_marked_total.incrBy(monotonicDelta(
+        snapshot.da_pending_marked_total,
+        if (previous) |prev| prev.da_pending_marked_total else null,
+    ));
+    metrics.da_pending_resolved_total.incrBy(monotonicDelta(
+        snapshot.da_pending_resolved_total,
+        if (previous) |prev| prev.da_pending_resolved_total else null,
+    ));
+    metrics.da_pending_pruned_total.incrBy(monotonicDelta(
+        snapshot.da_pending_pruned_total,
+        if (previous) |prev| prev.da_pending_pruned_total else null,
+    ));
 
     metrics.archive_runs_total.incrBy(monotonicDelta(
         snapshot.archive_runs_total,

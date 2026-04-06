@@ -43,6 +43,13 @@ pub const PendingBlock = struct {
     queued_at_slot: u64,
 };
 
+pub const MetricsSnapshot = struct {
+    queued_total: u64 = 0,
+    released_total: u64 = 0,
+    dropped_total: u64 = 0,
+    pruned_total: u64 = 0,
+};
+
 pub const ReprocessQueue = struct {
     allocator: Allocator,
 
@@ -54,6 +61,8 @@ pub const ReprocessQueue = struct {
 
     /// Maximum total pending blocks before we start dropping.
     max_size: u32,
+
+    metrics: MetricsSnapshot = .{},
 
     pub fn init(allocator: Allocator, max_size: u32) ReprocessQueue {
         return .{
@@ -91,6 +100,7 @@ pub const ReprocessQueue = struct {
         }
         try gop.value_ptr.append(self.allocator, block);
         self.total_count += 1;
+        self.metrics.queued_total += 1;
 
         std.log.debug("ReprocessQueue: queued block root={s}... (reason={s}, total={d})", .{
             &std.fmt.bytesToHex(block.block_root[0..4], .lower),
@@ -112,6 +122,7 @@ pub const ReprocessQueue = struct {
         if (self.pending.fetchSwapRemove(imported_root)) |kv| {
             result = kv.value;
             self.total_count -= @intCast(result.items.len);
+            self.metrics.released_total += @intCast(result.items.len);
             std.log.debug("ReprocessQueue: reprocessing {d} blocks (parent={s}...)", .{
                 result.items.len,
                 &std.fmt.bytesToHex(imported_root[0..4], .lower),
@@ -137,6 +148,7 @@ pub const ReprocessQueue = struct {
                 if (entry.value_ptr.items[i].slot < finalized_slot) {
                     _ = entry.value_ptr.swapRemove(i);
                     self.total_count -= 1;
+                    self.metrics.pruned_total += 1;
                 } else {
                     i += 1;
                 }
@@ -157,6 +169,10 @@ pub const ReprocessQueue = struct {
     /// Number of pending blocks currently queued.
     pub fn len(self: *const ReprocessQueue) u32 {
         return self.total_count;
+    }
+
+    pub fn metricsSnapshot(self: *const ReprocessQueue) MetricsSnapshot {
+        return self.metrics;
     }
 
     // -----------------------------------------------------------------------
@@ -184,6 +200,7 @@ pub const ReprocessQueue = struct {
             const list = self.pending.getPtr(parent).?;
             _ = list.swapRemove(oldest_idx);
             self.total_count -= 1;
+            self.metrics.dropped_total += 1;
             if (list.items.len == 0) {
                 if (self.pending.fetchSwapRemove(parent)) |kv| {
                     var l = kv.value;
