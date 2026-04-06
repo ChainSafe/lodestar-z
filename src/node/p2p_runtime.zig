@@ -1339,8 +1339,10 @@ fn initDiscoveryService(self: *BeaconNode) !void {
 
     const ds = try self.allocator.create(DiscoveryService);
     errdefer self.allocator.destroy(ds);
-    const disc_port = self.node_options.discovery_port orelse self.node_options.p2p_port;
-    const disc_port6 = self.node_options.discovery_port6 orelse self.node_options.p2p_port6;
+    // QUIC transport binds p2p_port on UDP, so discv5 must use a separate port
+    // to avoid AddressInUse. Default to p2p_port + 1 when not explicitly set.
+    const disc_port = self.node_options.discovery_port orelse self.node_options.p2p_port + 1;
+    const disc_port6 = self.node_options.discovery_port6 orelse if (self.node_options.p2p_port6) |p6| p6 + 1 else null;
     const local_ip = if (self.node_options.p2p_host) |host|
         parseIp4(host) orelse return error.InvalidListenAddress
     else
