@@ -71,11 +71,11 @@ pub const spec = cli.command(.{
             .description = "Allow ENR configuration of non-local addresses",
             .env = "LODESTAR_Z_BOOTNODE_NAT",
         }, false),
-        .metrics = cli.flag(.{
+        .metrics = cli.option(bool, .{
             .long = "metrics",
             .description = "Enable Prometheus metrics HTTP server",
             .group = "metrics",
-        }),
+        }, false),
         .@"metrics.port" = cli.option(?u16, .{
             .long = "metrics.port",
             .description = "Listen TCP port for the Prometheus metrics HTTP server",

@@ -129,9 +129,7 @@ test aggregateWithRandomness {
     try sig.verify(true, &msgs[0], dst, null, &pk, true);
 }
 const std = @import("std");
-const c = @cImport({
-    @cInclude("blst.h");
-});
+const c = @import("blst");
 
 const BlstError = @import("error.zig").BlstError;
 const blst = @import("root.zig");

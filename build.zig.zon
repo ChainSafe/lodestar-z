@@ -4,10 +4,6 @@
     .fingerprint = 0xd1ddb6abe067ee04,
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
-        .blst = .{
-            .url = "git+https://github.com/lodekeeper-z/blst.zig#254f2869b9c72b7f70900b41ec90213807c7a675",
-            .hash = "blst_zig-0.0.0-cnAxzg4LAACIXTmj0X4unkf0FCYcFTZVzDdWE32PZl_A",
-        },
         .hashtree = .{
             .url = "git+https://github.com/lodekeeper-z/hashtree-z#1872bfe745b45b229020701b3adc956d869f245b",
             .hash = "hashtree-0.1.0-sBOovvQTAADvFx7ywy2dNIfryDr44T6tWJxtkF0sQpG7",
@@ -21,8 +17,8 @@
             .hash = "zig_yaml-0.1.0-C1161pOKAgAhsmZ2SAjaQ2cIzaccoi5dn4x6UmsN0eC_",
         },
         .zig_cli = .{
-            .url = "git+https://github.com/chainsafe/zig-cli#8bf1b822e15d89426ca68988e6925a14b034e384",
-            .hash = "zig_cli-0.1.0-0yK2aDJEAQA4wHAC0q4nt5wH6nlmCWHZr-YfCrxFNF95",
+            .url = "git+https://github.com/chainsafe/zig-cli#283e7333827717fd2673becd8bd26a52447f5836",
+            .hash = "zig_cli-0.1.0-0yK2aJFYAQBztt4pCprbwP_y4qi0ePoOWVM-NQKPIpID",
         },
         // TODO: re-enable when 0.16-compatible
         // .zapi = .{ .url = "git+https://github.com/lodekeeper-z/zapi#chore/zig-master" },
@@ -34,8 +30,8 @@
             .hash = "libp2p-0.1.0-Sj0LiLSeCAAy-MA1x2r6ThjKpb0mPIKazJfSvI9sj1rD",
         },
         .c_kzg = .{
-            .url = "git+https://github.com/chainsafe/c-kzg-zig#16ae6bd3c091967f7368958ed15a047245b5ed56",
-            .hash = "c_kzg_zig-0.1.0-w0aWQ-VKAABZlVO4U2iOLgn6feG0OBd4CxeOjugnJexf",
+            .url = "git+https://github.com/chainsafe/c-kzg-zig#ccbfc5c8efdd2bafa97490f54bb6ade79ceb003d",
+            .hash = "c_kzg_zig-0.1.0-w0aWQ7ZRAADhahQdDtFVrZsSXHCIy652A_W1Vet6CQEs",
         },
         .metrics = .{
             .url = "git+https://github.com/lodekeeper-z/metrics.zig?ref=chore/zig-0.16#c1ee3ae72de68dfd65784837603c6197462cb362",

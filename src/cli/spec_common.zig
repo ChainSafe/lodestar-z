@@ -114,21 +114,21 @@ pub const global_options = .{
         .description = "Logging verbosity level for emitting logs to terminal",
     }, null),
 
-    .supernode = cli.flag(.{
+    .supernode = cli.option(bool, .{
         .long = "supernode",
         .description = "Subscribe to and custody all data column sidecar subnets",
         .group = "network",
-    }),
+    }, false),
 
-    .semi_supernode = cli.flag(.{
+    .semi_supernode = cli.option(bool, .{
         .long = "semi-supernode",
         .description = "Subscribe to and custody half of data column sidecar subnets",
         .group = "network",
-    }),
+    }, false),
 
-    .semiSupernode = cli.flag(.{
+    .semiSupernode = cli.option(bool, .{
         .long = "semiSupernode",
         .description = "Subscribe to and custody half of data column sidecar subnets",
         .group = "network",
-    }),
+    }, false),
 };

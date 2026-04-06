@@ -24,10 +24,10 @@ pub const spec = cli.command(.{
             .long = "genesisTime",
             .description = "genesis_time to initialize interop genesis state",
         }, null),
-        .reset = cli.flag(.{
+        .reset = cli.option(bool, .{
             .long = "reset",
             .description = "Delete chain and validator directories before starting",
-        }),
+        }, false),
         .dumpTestnetFiles = cli.option(?[]const u8, .{
             .long = "dumpTestnetFiles",
             .description = "Dump testnet files and exit",

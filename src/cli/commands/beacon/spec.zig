@@ -65,22 +65,22 @@ pub const spec = cli.command(.{
             .description = "Optional identifier for JWT token claims",
             .group = "execution",
         }, null),
-        .engine_mock = cli.flag(.{
+        .engine_mock = cli.option(bool, .{
             .long = "engine-mock",
             .description = "Use mock execution engine (development only)",
             .group = "execution",
-        }),
-        .@"execution.engineMock" = cli.flag(.{
+        }, false),
+        .@"execution.engineMock" = cli.option(bool, .{
             .long = "execution.engineMock",
             .description = "Use mock execution engine (development only)",
             .group = "execution",
-        }),
+        }, false),
 
-        .rest = cli.flag(.{
+        .rest = cli.option(bool, .{
             .long = "rest",
             .description = "Enable the REST HTTP API",
             .group = "api",
-        }),
+        }, false),
         .@"rest.namespace" = cli.option(?[]const u8, .{
             .long = "rest.namespace",
             .description = "Comma-separated REST namespaces to expose",
@@ -125,16 +125,16 @@ pub const spec = cli.command(.{
             .description = "CORS Access-Control-Allow-Origin header value",
             .group = "api",
         }, null),
-        .api_swagger = cli.flag(.{
+        .api_swagger = cli.option(bool, .{
             .long = "api-swagger",
             .description = "Enable Swagger UI at /documentation",
             .group = "api",
-        }),
-        .@"rest.swaggerUI" = cli.flag(.{
+        }, false),
+        .@"rest.swaggerUI" = cli.option(bool, .{
             .long = "rest.swaggerUI",
             .description = "Enable Swagger UI at /documentation",
             .group = "api",
-        }),
+        }, false),
         .@"rest.headerLimit" = cli.option(?u32, .{
             .long = "rest.headerLimit",
             .description = "Maximum request header length in bytes",
@@ -145,11 +145,11 @@ pub const spec = cli.command(.{
             .description = "Maximum request body size in bytes",
             .group = "api",
         }, null),
-        .@"rest.stacktraces" = cli.flag(.{
+        .@"rest.stacktraces" = cli.option(bool, .{
             .long = "rest.stacktraces",
             .description = "Return stacktraces in HTTP error responses",
             .group = "api",
-        }),
+        }, false),
 
         .p2p_port = cli.option(u16, .{
             .long = "p2p-port",
@@ -233,26 +233,26 @@ pub const spec = cli.command(.{
             .description = "Target number of connected peers",
             .group = "network",
         }, null),
-        .subscribe_all_subnets = cli.flag(.{
+        .subscribe_all_subnets = cli.option(bool, .{
             .long = "subscribe-all-subnets",
             .description = "Subscribe to all attestation subnets",
             .group = "network",
-        }),
-        .subscribeAllSubnets = cli.flag(.{
+        }, false),
+        .subscribeAllSubnets = cli.option(bool, .{
             .long = "subscribeAllSubnets",
             .description = "Subscribe to all attestation subnets",
             .group = "network",
-        }),
-        .discv5 = cli.flag(.{
+        }, false),
+        .discv5 = cli.option(bool, .{
             .long = "discv5",
             .description = "Enable discv5 peer discovery",
             .group = "network",
-        }),
-        .mdns = cli.flag(.{
+        }, false),
+        .mdns = cli.option(bool, .{
             .long = "mdns",
             .description = "Enable mDNS local peer discovery",
             .group = "network",
-        }),
+        }, false),
         .direct_peers = cli.option(?[]const u8, .{
             .long = "direct-peers",
             .description = "Comma-separated direct peer multiaddrs or ENRs",
@@ -269,11 +269,11 @@ pub const spec = cli.command(.{
             .description = "Maximum number of peer connections allowed",
             .group = "network",
         }, null),
-        .@"network.allowPublishToZeroPeers" = cli.flag(.{
+        .@"network.allowPublishToZeroPeers" = cli.option(bool, .{
             .long = "network.allowPublishToZeroPeers",
             .description = "Allow publishing when no peers are connected",
             .group = "network",
-        }),
+        }, false),
         .@"network.targetGroupPeers" = cli.option(?u16, .{
             .long = "network.targetGroupPeers",
             .description = "Target peers per custody group",
@@ -308,16 +308,16 @@ pub const spec = cli.command(.{
             .description = "URL to fetch checkpoint state from a beacon API",
             .group = "sync",
         }, null),
-        .force_checkpoint_sync = cli.flag(.{
+        .force_checkpoint_sync = cli.option(bool, .{
             .long = "force-checkpoint-sync",
             .description = "Force checkpoint sync even if DB has recent state",
             .group = "sync",
-        }),
-        .forceCheckpointSync = cli.flag(.{
+        }, false),
+        .forceCheckpointSync = cli.option(bool, .{
             .long = "forceCheckpointSync",
             .description = "Force checkpoint sync even if DB has recent state",
             .group = "sync",
-        }),
+        }, false),
         .weak_subjectivity_checkpoint = cli.option(?[]const u8, .{
             .long = "weak-subjectivity-checkpoint",
             .description = "Weak subjectivity checkpoint (root:epoch format)",
@@ -329,36 +329,36 @@ pub const spec = cli.command(.{
             .description = "Weak subjectivity checkpoint (root:epoch format)",
             .group = "sync",
         }, null),
-        .ignoreWeakSubjectivityCheck = cli.flag(.{
+        .ignoreWeakSubjectivityCheck = cli.option(bool, .{
             .long = "ignoreWeakSubjectivityCheck",
             .description = "Ignore weak subjectivity check failures",
             .group = "sync",
-        }),
-        .sync_is_single_node = cli.flag(.{
+        }, false),
+        .sync_is_single_node = cli.option(bool, .{
             .long = "sync-single-node",
             .description = "Consider node synced without peers (single-node devnets only)",
             .group = "sync",
-        }),
-        .@"sync.isSingleNode" = cli.flag(.{
+        }, false),
+        .@"sync.isSingleNode" = cli.option(bool, .{
             .long = "sync.isSingleNode",
             .description = "Consider node synced without peers (single-node devnets only)",
             .group = "sync",
-        }),
-        .sync_disable_range = cli.flag(.{
+        }, false),
+        .sync_disable_range = cli.option(bool, .{
             .long = "sync-disable-range",
             .description = "Disable range sync (debugging only)",
             .group = "sync",
-        }),
-        .@"sync.disableRangeSync" = cli.flag(.{
+        }, false),
+        .@"sync.disableRangeSync" = cli.option(bool, .{
             .long = "sync.disableRangeSync",
             .description = "Disable range sync (debugging only)",
             .group = "sync",
-        }),
-        .@"sync.disableProcessAsChainSegment" = cli.flag(.{
+        }, false),
+        .@"sync.disableProcessAsChainSegment" = cli.option(bool, .{
             .long = "sync.disableProcessAsChainSegment",
             .description = "Disable processing block ranges as chain segments",
             .group = "sync",
-        }),
+        }, false),
         .@"sync.backfillBatchSize" = cli.option(?u32, .{
             .long = "sync.backfillBatchSize",
             .description = "Batch size for backfill sync",
@@ -370,11 +370,11 @@ pub const spec = cli.command(.{
             .group = "sync",
         }, null),
 
-        .metrics = cli.flag(.{
+        .metrics = cli.option(bool, .{
             .long = "metrics",
             .description = "Enable Prometheus metrics HTTP server",
             .group = "metrics",
-        }),
+        }, false),
         .metrics_port = cli.option(u16, .{
             .long = "metrics-port",
             .description = "Metrics HTTP server listen port",
@@ -398,11 +398,11 @@ pub const spec = cli.command(.{
             .group = "metrics",
         }, null),
 
-        .verify_signatures = cli.flag(.{
+        .verify_signatures = cli.option(bool, .{
             .long = "verify-signatures",
             .description = "Enable BLS signature verification",
             .group = "chain",
-        }),
+        }, false),
         .safe_slots_to_import = cli.option(?[]const u8, .{
             .long = "safe-slots-to-import-optimistically",
             .description = "Slots threshold for optimistic import",
@@ -426,16 +426,16 @@ pub const spec = cli.command(.{
             .env = "LODESTAR_Z_GRAFFITI",
             .group = "chain",
         }, null),
-        .emit_payload_attributes = cli.flag(.{
+        .emit_payload_attributes = cli.option(bool, .{
             .long = "emit-payload-attributes",
             .description = "SSE emit execution payloadAttributes before every slot",
             .group = "chain",
-        }),
-        .emitPayloadAttributes = cli.flag(.{
+        }, false),
+        .emitPayloadAttributes = cli.option(bool, .{
             .long = "emitPayloadAttributes",
             .description = "SSE emit execution payloadAttributes before every slot",
             .group = "chain",
-        }),
+        }, false),
         .archive_state_epoch_freq = cli.option(u16, .{
             .long = "archive-state-epoch-frequency",
             .description = "Minimum epochs between archived states",
@@ -447,16 +447,16 @@ pub const spec = cli.command(.{
             .description = "Minimum epochs between archived states",
             .group = "chain",
         }, null),
-        .prune_history = cli.flag(.{
+        .prune_history = cli.option(bool, .{
             .long = "prune-history",
             .description = "Prune historical blocks and state",
             .group = "chain",
-        }),
-        .@"chain.pruneHistory" = cli.flag(.{
+        }, false),
+        .@"chain.pruneHistory" = cli.option(bool, .{
             .long = "chain.pruneHistory",
             .description = "Prune historical blocks and state",
             .group = "chain",
-        }),
+        }, false),
         .@"chain.maxBlockStates" = cli.option(?u32, .{
             .long = "chain.maxBlockStates",
             .description = "Max block states to cache in memory",
@@ -473,11 +473,11 @@ pub const spec = cli.command(.{
             .group = "chain",
         }, null),
 
-        .builder = cli.flag(.{
+        .builder = cli.option(bool, .{
             .long = "builder",
             .description = "Enable external block builder",
             .group = "builder",
-        }),
+        }, false),
         .builder_url = cli.option(?[]const u8, .{
             .long = "builder-url",
             .description = "URL for external block builder API",
@@ -566,11 +566,11 @@ pub const spec = cli.command(.{
             .description = "Timeout for monitoring requests in milliseconds",
             .group = "monitoring",
         }, null),
-        .@"monitoring.collectSystemStats" = cli.flag(.{
+        .@"monitoring.collectSystemStats" = cli.option(bool, .{
             .long = "monitoring.collectSystemStats",
             .description = "Enable collecting system stats for monitoring",
             .group = "monitoring",
-        }),
+        }, false),
 
         .log_file = cli.option(?[]const u8, .{
             .long = "log-file",
@@ -632,11 +632,11 @@ pub const spec = cli.command(.{
             .description = "Unfinalized checkpoint state to start syncing from",
             .group = "beacon",
         }, null),
-        .lastPersistedCheckpointState = cli.flag(.{
+        .lastPersistedCheckpointState = cli.option(bool, .{
             .long = "lastPersistedCheckpointState",
             .description = "Use the last safe persisted checkpoint state",
             .group = "beacon",
-        }),
+        }, false),
         .dbDir = cli.option(?[]const u8, .{
             .long = "dbDir",
             .description = "Beacon DB directory override",
@@ -652,26 +652,26 @@ pub const spec = cli.command(.{
             .description = "Whether to reuse the same peer-id across restarts",
             .group = "beacon",
         }, null),
-        .private = cli.flag(.{
+        .private = cli.option(bool, .{
             .long = "private",
             .description = "Do not send implementation details over p2p identify protocol",
             .group = "beacon",
-        }),
-        .validatorMonitorLogs = cli.flag(.{
+        }, false),
+        .validatorMonitorLogs = cli.option(bool, .{
             .long = "validatorMonitorLogs",
             .description = "Log validator monitor events as info",
             .group = "beacon",
-        }),
-        .attachToGlobalThis = cli.flag(.{
+        }, false),
+        .attachToGlobalThis = cli.option(bool, .{
             .long = "attachToGlobalThis",
             .description = "Attach the beacon node to globalThis",
             .group = "beacon",
-        }),
-        .disableLightClientServer = cli.flag(.{
+        }, false),
+        .disableLightClientServer = cli.option(bool, .{
             .long = "disableLightClientServer",
             .description = "Disable light client server",
             .group = "beacon",
-        }),
+        }, false),
         .@"enr.ip" = cli.option(?[]const u8, .{
             .long = "enr.ip",
             .description = "Override ENR IPv4 entry",
@@ -702,10 +702,10 @@ pub const spec = cli.command(.{
             .description = "Override ENR IPv6 UDP entry",
             .group = "enr",
         }, null),
-        .nat = cli.flag(.{
+        .nat = cli.option(bool, .{
             .long = "nat",
             .description = "Allow configuration of non-local addresses",
             .group = "enr",
-        }),
+        }, false),
     },
 });

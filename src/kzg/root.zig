@@ -15,7 +15,8 @@
 
 const kzg = @import("kzg.zig");
 
-pub const c = @import("c.zig");
+pub const c = @import("c_kzg");
+pub const blst = @import("blst");
 pub const Kzg = kzg.Kzg;
 pub const KzgError = kzg.KzgError;
 

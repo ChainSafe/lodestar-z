@@ -197,9 +197,7 @@ const PublicKey = blst.PublicKey;
 const Signature = blst.Signature;
 const SignatureSet = @import("signature_set.zig").SignatureSet;
 const std = @import("std");
-const c = @cImport({
-    @cInclude("blst.h");
-});
+const c = @import("blst");
 
 test "verifySignatureSetsSameMessage verifies same-message sets" {
     const SecretKey = @import("SecretKey.zig");

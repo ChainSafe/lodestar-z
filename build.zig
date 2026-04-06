@@ -36,11 +36,6 @@ pub fn build(b: *std.Build) void {
     const options_module_spec_test_options = options_spec_test_options.createModule();
 
     // === Dependencies ===
-    const dep_blst = b.dependency("blst", .{
-        .optimize = optimize,
-        .target = target,
-    });
-
     const dep_hashtree = b.dependency("hashtree", .{
         .optimize = optimize,
         .target = target,
@@ -152,7 +147,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    module_bls.linkLibrary(dep_blst.artifact("blst"));
+    module_bls.addImport("blst", dep_c_kzg.module("blst"));
     b.modules.put(b.dupe("bls"), module_bls) catch @panic("OOM");
 
     // KZG module (c-kzg-4844 bindings for blob/cell verification)
@@ -162,9 +157,8 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
     });
-    module_kzg.linkLibrary(dep_c_kzg.artifact("c_kzg"));
-    module_kzg.linkLibrary(dep_blst.artifact("blst"));
-    module_kzg.addIncludePath(dep_c_kzg.artifact("c_kzg").getEmittedIncludeTree());
+    module_kzg.addImport("c_kzg", dep_c_kzg.module("c_kzg"));
+    module_kzg.addImport("blst", dep_c_kzg.module("blst"));
     module_kzg.addImport("trusted_setup", dep_c_kzg.module("trusted_setup"));
     b.modules.put(b.dupe("kzg"), module_kzg) catch @panic("OOM");
 

@@ -9,7 +9,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
-const c_kzg = @import("c.zig").c;
+const c_kzg = @import("c_kzg");
 const trusted_setup = @import("trusted_setup");
 
 pub const BYTES_PER_FIELD_ELEMENT: usize = c_kzg.BYTES_PER_FIELD_ELEMENT;

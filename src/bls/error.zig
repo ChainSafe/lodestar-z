@@ -1,6 +1,4 @@
-const c = @cImport({
-    @cInclude("blst.h");
-});
+const c = @import("blst");
 
 pub const BlstError = error{
     BadEncoding,

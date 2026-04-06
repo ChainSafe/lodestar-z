@@ -6,9 +6,7 @@ const ThreadPool = @This();
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const c = @cImport({
-    @cInclude("blst.h");
-});
+const c = @import("blst");
 const Pairing = @import("Pairing.zig");
 const blst = @import("root.zig");
 const fast_verify = @import("fast_verify.zig");

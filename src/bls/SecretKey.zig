@@ -156,6 +156,4 @@ const blst = @import("root.zig");
 const PublicKey = blst.PublicKey;
 const Signature = blst.Signature;
 
-const c = @cImport({
-    @cInclude("blst.h");
-});
+const c = @import("blst");

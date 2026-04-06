@@ -94,6 +94,4 @@ const BlstError = @import("error.zig").BlstError;
 const errorFromInt = @import("error.zig").errorFromInt;
 const AggregatePublicKey = @import("AggregatePublicKey.zig");
 
-const c = @cImport({
-    @cInclude("blst.h");
-});
+const c = @import("blst");

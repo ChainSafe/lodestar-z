@@ -2,9 +2,7 @@ const std = @import("std");
 const testing = std.testing;
 
 /// Expose c types for lodestar-bun bindings
-pub const c = @cImport({
-    @cInclude("blst.h");
-});
+pub const c = @import("blst");
 
 // blst Zig native types
 pub const Pairing = @import("Pairing.zig");

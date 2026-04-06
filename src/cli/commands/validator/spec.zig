@@ -35,14 +35,14 @@ pub const spec = cli.command(.{
             .long = "proposerDir",
             .description = "Directory for validator proposer configs",
         }, null),
-        .force = cli.flag(.{
+        .force = cli.option(bool, .{
             .long = "force",
             .description = "Load local keystores even if another process already holds their ownership lock",
-        }),
-        .disableKeystoresThreadPool = cli.flag(.{
+        }, false),
+        .disableKeystoresThreadPool = cli.option(bool, .{
             .long = "disableKeystoresThreadPool",
             .description = "Disable concurrent local-keystore decrypt workers and perform startup decryption on the main task",
-        }),
+        }, false),
         .graffiti = cli.option(?[]const u8, .{
             .long = "graffiti",
             .description = "Validator graffiti string",
@@ -56,23 +56,23 @@ pub const spec = cli.command(.{
             .long = "defaultGasLimit",
             .description = "Suggested gas limit for builder registrations",
         }, null),
-        .doppelgangerProtection = cli.flag(.{
+        .doppelgangerProtection = cli.option(bool, .{
             .long = "doppelgangerProtection",
             .description = "Enable doppelganger protection",
-        }),
+        }, false),
         .proposerSettingsFile = cli.option(?[]const u8, .{
             .long = "proposerSettingsFile",
             .description = "YAML file with default and per-validator proposer settings",
         }, null),
-        .strictFeeRecipientCheck = cli.flag(.{
+        .strictFeeRecipientCheck = cli.option(bool, .{
             .long = "strictFeeRecipientCheck",
             .description = "Reject produced blocks whose execution payload fee recipient does not match the configured validator policy",
-        }),
-        .builder = cli.flag(.{
+        }, false),
+        .builder = cli.option(bool, .{
             .long = "builder",
             .description = "Alias for --builder.selection default",
             .group = "builder",
-        }),
+        }, false),
         .@"builder.selection" = cli.option(?validator_mod.BuilderSelection, .{
             .long = "builder.selection",
             .description = "Block source selection policy for local beacon-node block production",
@@ -87,23 +87,23 @@ pub const spec = cli.command(.{
             .long = "broadcastValidation",
             .description = "Validations the beacon node should run before publishing the signed block",
         }, null),
-        .blindedLocal = cli.flag(.{
+        .blindedLocal = cli.option(bool, .{
             .long = "blindedLocal",
             .description = "Request locally produced validator blocks in blinded form when the beacon node can provide them",
-        }),
-        .distributed = cli.flag(.{
+        }, false),
+        .distributed = cli.option(bool, .{
             .long = "distributed",
             .description = "Enable Lodestar-style distributed validator aggregation-selection flows",
-        }),
+        }, false),
         .@"clock.skipSlots" = cli.option(?bool, .{
             .long = "clock.skipSlots",
             .description = "Allow the validator clock to skip slow slot tasks instead of processing every slot sequentially",
         }, null),
-        .keymanager = cli.flag(.{
+        .keymanager = cli.option(bool, .{
             .long = "keymanager",
             .description = "Enable the validator keymanager API server",
             .group = "keymanager",
-        }),
+        }, false),
         .@"keymanager.auth" = cli.option(bool, .{
             .long = "keymanager.auth",
             .description = "Enable bearer-token authentication for the validator keymanager API",
@@ -139,11 +139,11 @@ pub const spec = cli.command(.{
             .description = "Maximum accepted request-header size in bytes for the validator keymanager API server",
             .group = "keymanager",
         }, null),
-        .@"keymanager.stacktraces" = cli.flag(.{
+        .@"keymanager.stacktraces" = cli.option(bool, .{
             .long = "keymanager.stacktraces",
             .description = "Include Zig error return traces in validator keymanager HTTP error responses",
             .group = "keymanager",
-        }),
+        }, false),
         .@"externalSigner.urls" = cli.option(?[]const u8, .{
             .long = "externalSigner.urls",
             .description = "Comma-separated external signer URLs used for remote validator signing",
@@ -154,11 +154,11 @@ pub const spec = cli.command(.{
             .description = "Comma-separated validator pubkeys pinned to the configured external signer URL (supports exactly one URL)",
             .group = "externalSigner",
         }, null),
-        .@"externalSigner.fetch" = cli.flag(.{
+        .@"externalSigner.fetch" = cli.option(bool, .{
             .long = "externalSigner.fetch",
             .description = "Fetch validator pubkeys from the configured external signer URL(s) and refresh them periodically",
             .group = "externalSigner",
-        }),
+        }, false),
         .@"externalSigner.fetchInterval" = cli.option(?u64, .{
             .long = "externalSigner.fetchInterval",
             .description = "Refresh interval in milliseconds for fetching validator pubkeys from external signers (defaults to once per epoch)",
@@ -172,11 +172,11 @@ pub const spec = cli.command(.{
             .long = "importKeystoresPassword",
             .description = "Path to the shared password file used to decrypt all --importKeystores inputs during startup import",
         }, null),
-        .metrics = cli.flag(.{
+        .metrics = cli.option(bool, .{
             .long = "metrics",
             .description = "Enable the validator Prometheus metrics server",
             .group = "metrics",
-        }),
+        }, false),
         .@"metrics.port" = cli.option(?u16, .{
             .long = "metrics.port",
             .description = "Port for the validator Prometheus metrics server",
@@ -207,11 +207,11 @@ pub const spec = cli.command(.{
             .description = "Request timeout in milliseconds for validator monitoring uploads",
             .group = "monitoring",
         }, null),
-        .@"monitoring.collectSystemStats" = cli.flag(.{
+        .@"monitoring.collectSystemStats" = cli.option(bool, .{
             .long = "monitoring.collectSystemStats",
             .description = "Include host-level CPU, memory, and disk stats in validator monitoring uploads",
             .group = "monitoring",
-        }),
+        }, false),
         .logFile = cli.option(?[]const u8, .{
             .long = "logFile",
             .description = "Path to output all logs to a persistent log file",
