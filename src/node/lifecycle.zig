@@ -616,4 +616,3 @@ const api_callbacks_mod = @import("api_callbacks.zig");
 const p2p_runtime_mod = @import("p2p_runtime.zig");
 const beacon_node_mod = @import("beacon_node.zig");
 const BeaconNode = beacon_node_mod.BeaconNode;
-const HeadTracker = beacon_node_mod.HeadTracker;

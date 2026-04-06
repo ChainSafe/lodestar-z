@@ -11,15 +11,16 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 
 const chain_types = @import("types.zig");
+const blocks = @import("blocks/root.zig");
 const consensus_types = @import("consensus_types");
 const AnySignedBeaconBlock = @import("fork_types").AnySignedBeaconBlock;
 
 const Root = [32]u8;
 const Slot = consensus_types.primitive.Slot.Type;
-const BlockSource = chain_types.BlockSource;
+const BlockSource = blocks.BlockSource;
 const BlockDataFetchPlan = chain_types.BlockDataFetchPlan;
 const ReadyBlockInput = chain_types.ReadyBlockInput;
-const DataAvailabilityStatus = chain_types.DataAvailabilityStatus;
+const DataAvailabilityStatus = blocks.DataAvailabilityStatus;
 
 pub const PendingIngressBlock = struct {
     block: AnySignedBeaconBlock,

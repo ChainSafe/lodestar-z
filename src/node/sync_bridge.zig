@@ -73,7 +73,7 @@ pub const SyncCallbackCtx = struct {
         const node = ctx.node;
 
         const result = node.ingestRawBlockBytes(block_bytes, .unknown_block_sync) catch |err| {
-            if (err != error.BlockAlreadyKnown and err != error.BlockAlreadyFinalized) {
+            if (err != error.AlreadyKnown and err != error.WouldRevertFinalizedSlot) {
                 std.log.warn("SyncCallbackCtx: import error: {}", .{err});
             }
             return err;

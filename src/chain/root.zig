@@ -13,7 +13,7 @@ pub const service = @import("service.zig");
 pub const query = @import("query.zig");
 pub const regen = @import("regen/root.zig");
 pub const state_work_service = @import("state_work_service.zig");
-pub const block_import = @import("block_import.zig");
+const block_import = @import("block_import.zig");
 pub const op_pool = @import("op_pool.zig");
 pub const seen_cache = @import("seen_cache.zig");
 pub const seen_attesters = @import("seen_attesters.zig");
@@ -24,10 +24,9 @@ pub const gossip_validation = @import("gossip_validation.zig");
 
 // Chain struct and types
 pub const Chain = chain.Chain;
-// BlockInput is now consolidated to blocks/types.BlockInput (P1-7 fix).
 pub const BlockInput = blocks.BlockInput;
 pub const BlockSource = blocks.BlockSource;
-pub const DataAvailabilityStatus = chain_types.DataAvailabilityStatus;
+pub const DataAvailabilityStatus = blocks.DataAvailabilityStatus;
 pub const HeadInfo = chain_types.HeadInfo;
 pub const SyncStatus = chain_types.SyncStatus;
 pub const ForkchoiceUpdateState = chain_types.ForkchoiceUpdateState;
@@ -72,11 +71,10 @@ pub const StateRegen = regen.StateRegen;
 pub const StateWorkService = state_work_service.StateWorkService;
 pub const CompletedBlockImport = state_work_service.CompletedBlockImport;
 
-// Existing re-exports (kept for backward compatibility)
+// Primary import-pipeline exports.
 pub const HeadTracker = block_import.HeadTracker;
-// ImportResult is now consolidated to blocks/types.ImportResult (P1-8 fix).
 pub const ImportResult = blocks.ImportResult;
-pub const ImportError = block_import.ImportError;
+pub const BlockImportError = blocks.BlockImportError;
 pub const OpPool = op_pool.OpPool;
 pub const SeenCache = seen_cache.SeenCache;
 pub const SeenAttesters = seen_attesters.SeenAttesters;
@@ -126,7 +124,6 @@ pub const shuffling_cache = @import("shuffling_cache.zig");
 pub const beacon_proposer_cache = @import("beacon_proposer_cache.zig");
 pub const prepare_next_slot = @import("prepare_next_slot.zig");
 pub const archive_store = @import("archive_store.zig");
-// block_verification.zig removed — superseded by blocks/ pipeline (P1-6 fix).
 pub const reprocess = @import("reprocess.zig");
 pub const pending_block_ingress = @import("block_ingress.zig");
 pub const payload_envelope_ingress = @import("payload_envelope_ingress.zig");
@@ -147,7 +144,6 @@ pub const PayloadEnvelopeIngress = payload_envelope_ingress.PayloadEnvelopeIngre
 pub const PendingPayloadEnvelope = payload_envelope_ingress.PendingPayloadEnvelope;
 pub const PayloadEnvelopeFetchPlan = payload_envelope_ingress.PayloadEnvelopeFetchPlan;
 pub const FinalizationPlan = finalization_plan.FinalizationPlan;
-// BlockVerification removed — use blocks/pipeline.zig instead.
 
 // Queued state regeneration
 pub const queued_regen = regen.queued_regen;
@@ -167,16 +163,9 @@ pub const verifyDataColumnSidecar = blob_kzg_verification.verifyDataColumnSideca
 pub const blocks = @import("blocks/root.zig");
 pub const BlockPipeline = blocks.pipeline;
 pub const PipelineContext = blocks.PipelineContext;
-// PipelineBlockInput / PipelineImportResult are now consolidated to the primary names.
-// Keep aliases for backward compatibility.
-pub const PipelineBlockInput = blocks.BlockInput; // = BlockInput (same type now)
-pub const PipelineBlockSource = blocks.BlockSource; // = BlockSource (same type now)
-pub const PipelineImportOpts = blocks.ImportBlockOpts;
-pub const PipelineImportResult = blocks.ImportResult; // = ImportResult (same type now)
 pub const VerifiedBlock = blocks.VerifiedBlock;
 pub const ExecutionStatus = blocks.ExecutionStatus;
 pub const PipelineDataAvailabilityStatus = blocks.DataAvailabilityStatus;
-pub const BlockImportError = blocks.BlockImportError;
 pub const BatchBlockResult = blocks.BatchBlockResult;
 pub const SanityOutcome = blocks.SanityOutcome;
 pub const ExecutionPort = ports.ExecutionPort;

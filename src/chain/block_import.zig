@@ -9,8 +9,7 @@
 //! and verifyBlocksSanityChecks.ts, adapted for lodestar-z's architecture.
 //!
 //! Dependencies on db and fork_choice are avoided via the node-level BeaconNode
-//! which owns the full wiring. This module provides the types (HeadTracker,
-//! ImportResult, ImportError) and the sanity-check logic.
+//! which owns the full wiring. This module now just provides HeadTracker.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -21,28 +20,7 @@ const state_transition = @import("state_transition");
 const CachedBeaconState = state_transition.CachedBeaconState;
 const computeEpochAtSlot = state_transition.computeEpochAtSlot;
 
-// ---------------------------------------------------------------------------
-// Import result — re-exported from chain/blocks/types.zig (canonical version).
-// ---------------------------------------------------------------------------
 
-const blocks_types = @import("blocks/types.zig");
-pub const ImportResult = blocks_types.ImportResult;
-
-// ---------------------------------------------------------------------------
-// Import errors — expected operational errors, not assertions.
-// ---------------------------------------------------------------------------
-
-pub const ImportError = error{
-    /// Block's parent root is not in our chain. Caller should trigger
-    /// unknown block sync to fetch the parent.
-    UnknownParentBlock,
-    /// Block slot is at or before the finalized slot.
-    BlockAlreadyFinalized,
-    /// Block slot is zero — genesis block cannot be imported.
-    GenesisBlock,
-    /// Block has already been imported (duplicate).
-    BlockAlreadyKnown,
-};
 
 // ---------------------------------------------------------------------------
 // HeadTracker — tracks head root/slot and slot→root mapping.

@@ -116,7 +116,7 @@ pub const Service = struct {
     pub fn prepareBlockInput(
         self: Service,
         any_signed: fork_types.AnySignedBeaconBlock,
-        source: chain_types.BlockSource,
+        source: blocks.BlockSource,
     ) !ReadyBlockInput {
         const block_root = try hashBlock(self.chain.allocator, any_signed);
         return readyBlockInput(
@@ -132,7 +132,7 @@ pub const Service = struct {
     pub fn prepareRawBlockInput(
         self: Service,
         block_bytes: []const u8,
-        source: chain_types.BlockSource,
+        source: blocks.BlockSource,
     ) !ReadyBlockInput {
         const slot = try readBlockSlot(block_bytes);
         const any_signed = try deserializeRawBlockBytes(self.chain, slot, block_bytes);
@@ -246,7 +246,7 @@ pub const Service = struct {
             }
         }
 
-        const block_inputs = try allocator.alloc(chain_types.BlockInput, raw_blocks.len);
+        const block_inputs = try allocator.alloc(blocks.BlockInput, raw_blocks.len);
         defer allocator.free(block_inputs);
 
         for (raw_blocks, 0..) |raw_block, i| {
@@ -566,7 +566,7 @@ pub const Service = struct {
         self: Service,
         block_root: Root,
         any_signed: fork_types.AnySignedBeaconBlock,
-    ) chain_types.DataAvailabilityStatus {
+    ) blocks.DataAvailabilityStatus {
         return pipelineDaStatus(self.chain, block_root, any_signed);
     }
 
@@ -963,9 +963,9 @@ fn deserializeRawBlockBytes(
 
 fn readyBlockInput(
     any_signed: fork_types.AnySignedBeaconBlock,
-    source: chain_types.BlockSource,
+    source: blocks.BlockSource,
     block_root: Root,
-    da_status: chain_types.DataAvailabilityStatus,
+    da_status: blocks.DataAvailabilityStatus,
     seen_timestamp_sec: u64,
     block_data_plan: chain_types.BlockDataFetchPlan,
 ) ReadyBlockInput {
@@ -984,7 +984,7 @@ fn pipelineDaStatus(
     chain: *Chain,
     block_root: Root,
     any_signed: fork_types.AnySignedBeaconBlock,
-) chain_types.DataAvailabilityStatus {
+) blocks.DataAvailabilityStatus {
     return pipelineIngressReadiness(chain, block_root, any_signed).da_status;
 }
 
@@ -1035,7 +1035,7 @@ fn pipelineIngressReadiness(
             }
         }
 
-        const da_status: chain_types.DataAvailabilityStatus = switch (dam.checkBlockDataAvailability(block_root, slot, fork, blob_count).status) {
+        const da_status: blocks.DataAvailabilityStatus = switch (dam.checkBlockDataAvailability(block_root, slot, fork, blob_count).status) {
             .available, .reconstruction_possible => .available,
             .not_required => .not_required,
             .missing_blobs, .missing_columns => .pending,

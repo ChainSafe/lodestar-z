@@ -148,9 +148,9 @@ pub fn prepareRuntime(io: Io, allocator: Allocator, opts: anytype) !PreparedRunt
     const network = opts.network;
     const data_dir = opts.dataDir orelse opts.data_dir;
     const params_file = opts.paramsFile orelse opts.params_file;
-    const beacon_nodes_raw = opts.beaconNodes orelse opts.server;
+    const beacon_nodes_raw = opts.beaconNodes;
     const primary_beacon_url = if (beacon_nodes_raw) |raw| firstCsvValue(raw) else opts.beacon_url;
-    const external_signer_urls_raw = opts.@"externalSigner.urls" orelse opts.@"externalSigner.url";
+    const external_signer_urls_raw = opts.@"externalSigner.urls";
 
     var custom_chain_config: config_mod.ChainConfig = undefined;
     var custom_beacon_config: BeaconConfig = undefined;

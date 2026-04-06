@@ -11,26 +11,9 @@ const Slot = consensus_types.primitive.Slot.Type;
 const Epoch = consensus_types.primitive.Epoch.Type;
 const Root = [32]u8;
 
-// ---------------------------------------------------------------------------
-// BlockInput — re-export from blocks/types.zig (P1-7 consolidation fix).
-//
-// The pipeline's BlockInput (blocks/types.zig) is the single canonical type.
-// This alias keeps backward compatibility for callers using chain-level types.
-// ---------------------------------------------------------------------------
-
 const blocks_types = @import("blocks/types.zig");
-pub const BlockInput = blocks_types.BlockInput;
-pub const BlockSource = blocks_types.BlockSource;
-pub const DataAvailabilityStatus = blocks_types.DataAvailabilityStatus;
-
-// ---------------------------------------------------------------------------
-// ImportResult — re-export from blocks/types.zig (P1-8 consolidation fix).
-//
-// The pipeline's ImportResult (blocks/types.zig) is the single canonical type.
-// This alias keeps backward compatibility for callers using chain-level types.
-// ---------------------------------------------------------------------------
-
-pub const ImportResult = blocks_types.ImportResult;
+const BlockSource = blocks_types.BlockSource;
+const DataAvailabilityStatus = blocks_types.DataAvailabilityStatus;
 
 pub const ReadyBlockInput = struct {
     block: fork_types.AnySignedBeaconBlock,

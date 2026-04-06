@@ -1403,10 +1403,10 @@ pub const BeaconApiClient = struct {
 
     /// GET /eth/v1/config/spec
     ///
-    /// Parses a compatibility subset of the beacon node's config/spec response.
-    /// Different clients expose different key casing and may omit fields, so we
-    /// accept either snake_case or SCREAMING_SNAKE_CASE and only compare fields
-    /// that are present.
+    /// Parses the subset of the beacon node's config/spec response that the
+    /// validator actively verifies. Different clients expose different key casing
+    /// and may omit fields, so we accept either snake_case or
+    /// SCREAMING_SNAKE_CASE and only compare fields that are present.
     pub fn getConfigSpec(self: *BeaconApiClient, io: Io) !ConfigSpecResponse {
         const body = try self.get(io, route_ids.config_get_spec, "/eth/v1/config/spec");
         defer self.allocator.free(body);

@@ -5,9 +5,9 @@
 //! and exposes the core pipeline functions:
 //!
 //! - `importBlock` — full block import pipeline (sanity → STFN → FC → persist)
-//! - `importAttestation` — validate → FC weight → pool (stub)
+//! - `importAttestation` — FC vote update → pool insertion
 //! - `onSlot` — FC time update, seen cache prune
-//! - `onFinalized` — archive, prune caches, prune FC (stub)
+//! - `onFinalized` — archive and prune finalized history
 //! - `getHead` — current head info
 //! - `getStatus` — P2P status message
 //!
@@ -41,9 +41,7 @@ const computeEpochAtSlot = state_transition.computeEpochAtSlot;
 const db_mod = @import("db");
 const BeaconDB = db_mod.BeaconDB;
 
-const block_import_mod = @import("block_import.zig");
-const HeadTracker = block_import_mod.HeadTracker;
-const ImportError = block_import_mod.ImportError;
+const HeadTracker = @import("block_import.zig").HeadTracker;
 
 const blocks_mod = @import("blocks/root.zig");
 const PipelineContext = blocks_mod.PipelineContext;
@@ -78,7 +76,7 @@ const StatusMessage = networking.messages.StatusMessage;
 const chain_types = @import("types.zig");
 const gossip_validation_mod = @import("gossip_validation.zig");
 const ChainGossipState = gossip_validation_mod.ChainState;
-pub const ImportResult = chain_types.ImportResult;
+pub const ImportResult = blocks_mod.ImportResult;
 pub const HeadInfo = chain_types.HeadInfo;
 pub const SyncStatus = chain_types.SyncStatus;
 pub const NotificationSink = chain_types.NotificationSink;
@@ -117,7 +115,7 @@ fn unixTimestampSeconds() u64 {
     }
 }
 
-fn dummyBalancesGetterFn(
+fn emptyJustifiedBalancesGetterFn(
     _: ?*anyopaque,
     _: CheckpointWithPayloadStatus,
     _: *CachedBeaconState,
@@ -609,7 +607,7 @@ pub const Chain = struct {
                 .root = finalized_root,
             }, .full),
             balances.items,
-            .{ .getFn = dummyBalancesGetterFn },
+            .{ .getFn = emptyJustifiedBalancesGetterFn },
             .{},
             .{},
         );
@@ -650,26 +648,14 @@ pub const Chain = struct {
 
     fn importPipelineBlockInput(self: *Chain, block_input: PipelineBlockInput) !ImportResult {
         // Skip future-slot check: callers (gossip handler, API, sync) have already
-        // validated timing. The legacy importBlock never enforced this check.
+        // validated timing before reaching the pipeline.
         // Propagate verify_signatures from chain config: when false (default for tests),
         // skip BLS signature verification to avoid failures with dummy test signatures.
         const opts = PipelineImportOpts{
             .skip_future_slot = true,
             .skip_signatures = !self.verify_signatures,
         };
-        const pipeline_result = self.processBlockPipeline(block_input, opts) catch |err| {
-            // Translate pipeline error names to legacy names expected by callers.
-            return switch (err) {
-                BlockImportError.ParentUnknown => error.UnknownParentBlock,
-                BlockImportError.AlreadyKnown => error.BlockAlreadyKnown,
-                BlockImportError.WouldRevertFinalizedSlot => error.BlockAlreadyFinalized,
-                BlockImportError.GenesisBlock => error.GenesisBlock,
-                BlockImportError.PrestateMissing => error.NoPreStateAvailable,
-                BlockImportError.StateTransitionFailed => error.StateTransitionFailed,
-                BlockImportError.InternalError => error.InternalError,
-                else => err,
-            };
-        };
+        const pipeline_result = try self.processBlockPipeline(block_input, opts);
         return .{
             .block_root = pipeline_result.block_root,
             .state_root = pipeline_result.state_root,
@@ -690,9 +676,7 @@ pub const Chain = struct {
             .skip_future_slot = true,
             .skip_signatures = !self.verify_signatures,
         };
-        const plan_result = self.planPipelineBlockInput(block_input, opts) catch |err| {
-            return translatePipelineError(err);
-        };
+        const plan_result = try self.planPipelineBlockInput(block_input, opts);
         switch (plan_result) {
             .skipped => return error.InternalError,
             .planned => |planned| {
@@ -737,7 +721,7 @@ pub const Chain = struct {
         defer owned_completed.deinit(self.allocator);
 
         switch (owned_completed) {
-            .failure => |failure| return translatePipelineError(failure.err),
+            .failure => |failure| return failure.err,
             .success => |prepared| return self.finishPreparedReadyBlockImport(prepared, try blocks_mod.verifyExecutionPayload(
                 self.allocator,
                 prepared.block_input,
@@ -763,19 +747,6 @@ pub const Chain = struct {
     ) BlockImportError!blocks_mod.BlockPlanResult {
         const ctx = self.getPipelineContext();
         return blocks_mod.planBlockForImport(ctx, block_input, opts);
-    }
-
-    fn translatePipelineError(err: anyerror) anyerror {
-        return switch (err) {
-            BlockImportError.ParentUnknown => error.UnknownParentBlock,
-            BlockImportError.AlreadyKnown => error.BlockAlreadyKnown,
-            BlockImportError.WouldRevertFinalizedSlot => error.BlockAlreadyFinalized,
-            BlockImportError.GenesisBlock => error.GenesisBlock,
-            BlockImportError.PrestateMissing => error.NoPreStateAvailable,
-            BlockImportError.StateTransitionFailed => error.StateTransitionFailed,
-            BlockImportError.InternalError => error.InternalError,
-            else => err,
-        };
     }
 
     // -----------------------------------------------------------------------
@@ -837,7 +808,7 @@ pub const Chain = struct {
     }
 
     // -----------------------------------------------------------------------
-    // Attestation import (stub — to be implemented)
+    // Attestation import
     // -----------------------------------------------------------------------
 
     /// Import a validated attestation: apply to fork choice and insert into op pool.

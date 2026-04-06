@@ -249,7 +249,7 @@ pub fn produceBlockBody(
     op_pool: *OpPool,
 ) !ProducedBlockBody {
     // Use the aggregated pool for greedy maximum-coverage attestation selection.
-    // Falls back to the legacy pool if the aggregated pool is empty.
+    // Falls back to the simple pool if the aggregated pool is empty.
     const attestations = if (op_pool.agg_attestation_pool.entryCount() > 0)
         try op_pool.agg_attestation_pool.getAttestationsForBlock(allocator, slot, MAX_ATTESTATIONS)
     else

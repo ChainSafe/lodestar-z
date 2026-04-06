@@ -56,14 +56,14 @@ fn rejectUnsupportedOptions(opts: anytype) !void {
     if (opts.importKeystores != null and opts.importKeystoresPassword == null) {
         return unsupportedOption("--importKeystores requires --importKeystoresPassword pointing to the shared keystore password file.");
     }
-    const external_signer_urls = opts.@"externalSigner.urls" orelse opts.@"externalSigner.url";
+    const external_signer_urls = opts.@"externalSigner.urls";
     if (external_signer_urls) |raw| {
         const url_count = countCsvValues(raw);
         if (url_count == 0) {
-            return unsupportedOption("--externalSigner.url or --externalSigner.urls requires at least one non-empty signer URL.");
+            return unsupportedOption("--externalSigner.urls requires at least one non-empty signer URL.");
         }
         if (!opts.@"externalSigner.fetch" and opts.@"externalSigner.pubkeys" == null) {
-            return unsupportedOption("--externalSigner.url(s) requires either --externalSigner.fetch or --externalSigner.pubkeys.");
+            return unsupportedOption("--externalSigner.urls requires either --externalSigner.fetch or --externalSigner.pubkeys.");
         }
         if (opts.@"externalSigner.fetch" and opts.@"externalSigner.pubkeys" != null) {
             return unsupportedOption("--externalSigner.fetch conflicts with --externalSigner.pubkeys.");
@@ -78,10 +78,10 @@ fn rejectUnsupportedOptions(opts: anytype) !void {
         }
     } else {
         if (opts.@"externalSigner.fetch") {
-            return unsupportedOption("--externalSigner.fetch requires --externalSigner.url or --externalSigner.urls.");
+            return unsupportedOption("--externalSigner.fetch requires --externalSigner.urls.");
         }
         if (opts.@"externalSigner.pubkeys" != null) {
-            return unsupportedOption("--externalSigner.pubkeys requires --externalSigner.url or --externalSigner.urls.");
+            return unsupportedOption("--externalSigner.pubkeys requires --externalSigner.urls.");
         }
     }
 }

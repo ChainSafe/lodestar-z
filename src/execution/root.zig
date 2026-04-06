@@ -29,7 +29,6 @@ pub const RetryConfig = http_engine.RetryConfig;
 pub const ClientVersion = http_engine.ClientVersion;
 pub const TransitionConfiguration = http_engine.TransitionConfiguration;
 pub const BuilderApi = builder.BuilderApi;
-pub const StubBuilder = builder.StubBuilder;
 pub const HttpBuilder = builder.HttpBuilder;
 pub const MockBuilderTransport = builder.MockBuilderTransport;
 pub const BuilderStatus = builder.BuilderStatus;

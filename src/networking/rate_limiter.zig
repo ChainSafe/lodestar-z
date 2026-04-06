@@ -77,11 +77,6 @@ pub const RateLimitResult = union(enum) {
     pub fn isAllowed(self: RateLimitResult) bool {
         return self == .allowed;
     }
-
-    /// For backward compatibility: returns true if allowed.
-    pub fn toBool(self: RateLimitResult) bool {
-        return self == .allowed;
-    }
 };
 
 // ── Token bucket ──────────────────────────────────────────────────────────────
@@ -327,7 +322,7 @@ pub const RateLimiter = struct {
     /// Consumes a token if allowed. `now_ns` is a monotonic nanosecond timestamp.
     /// Returns false if rate limited (by either per-peer or global limit).
     pub fn allowRequest(self: *RateLimiter, peer_id: u64, protocol: Protocol, now_ns: i128) !bool {
-        return (try self.allowRequestN(peer_id, protocol, 1, now_ns)).toBool();
+        return (try self.allowRequestN(peer_id, protocol, 1, now_ns)).isAllowed();
     }
 
     /// Check whether a request consuming `count` tokens is allowed.

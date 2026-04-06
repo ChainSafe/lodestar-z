@@ -16,12 +16,11 @@ pub const identity = @import("identity.zig");
 pub const NodeIdentity = identity.NodeIdentity;
 
 pub const BeaconNode = beacon_node.BeaconNode;
-pub const HeadTracker = beacon_node.HeadTracker;
-pub const ImportResult = beacon_node.ImportResult;
+pub const HeadTracker = @import("chain").HeadTracker;
+pub const ImportResult = @import("chain").ImportResult;
 pub const HeadInfo = beacon_node.HeadInfo;
 pub const SyncStatus = beacon_node.SyncStatus;
 
-// sync_controller removed — SyncService is the direct entry point.
 
 pub const SlotClock = clock.SlotClock;
 pub const NodeOptions = options.NodeOptions;
@@ -54,9 +53,6 @@ pub const QueueConfig = processor_mod.QueueConfig;
 pub const jwt_mod = @import("jwt.zig");
 
 pub const block_production_mod = @import("block_production.zig");
-pub const block_import_mod = @import("block_import.zig");
-// BlockImporter re-exported via beacon_node.BlockImporter (which imports from block_import.zig)
-
 pub const api_callbacks_mod = @import("api_callbacks.zig");
 pub const p2p_runtime_mod = @import("p2p_runtime.zig");
 pub const gossip_ingress_mod = @import("gossip_ingress.zig");
@@ -65,7 +61,6 @@ pub const execution_runtime_mod = @import("execution_runtime.zig");
 pub const ExecutionRuntime = execution_runtime_mod.ExecutionRuntime;
 
 pub const sync_bridge_mod = @import("sync_bridge.zig");
-// SyncCallbackCtx re-exported via beacon_node.SyncCallbackCtx
 
 pub const reqresp_callbacks_mod = @import("reqresp_callbacks.zig");
 pub const RequestContext = reqresp_callbacks_mod.RequestContext;

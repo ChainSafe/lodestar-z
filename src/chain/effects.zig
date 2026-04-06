@@ -7,6 +7,7 @@ const std = @import("std");
 const consensus_types = @import("consensus_types");
 const networking = @import("networking");
 const chain_types = @import("types.zig");
+const blocks = @import("blocks/root.zig");
 const execution_ports = @import("ports/execution.zig");
 
 const Slot = consensus_types.primitive.Slot.Type;
@@ -40,7 +41,7 @@ pub const ImportEffects = struct {
 };
 
 pub const ImportOutcome = struct {
-    result: chain_types.ImportResult,
+    result: blocks.ImportResult,
     snapshot: ChainSnapshot,
     effects: ImportEffects,
 };

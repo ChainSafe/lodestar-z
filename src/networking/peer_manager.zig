@@ -729,7 +729,7 @@ pub const PeerManager = struct {
     }
 
     /// Run score decay, expired-ban cleanup, and low-score disconnection
-    /// selection without the legacy subnet-agnostic pruning path.
+    /// selection without subnet-agnostic pruning.
     pub fn housekeeping(self: *PeerManager, now_ms: u64) !HousekeepingActions {
         var actions = HousekeepingActions{};
         errdefer actions.deinit(self.allocator);

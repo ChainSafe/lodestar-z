@@ -356,13 +356,6 @@ pub const ValidatorStore = struct {
         log.debug("added validator pubkey={x}", .{pubkey_bytes});
     }
 
-    /// Add a validator at runtime (alias for addKey; thread-safe).
-    ///
-    /// Used by the Keymanager API POST /eth/v1/keystores.
-    pub fn addValidator(self: *ValidatorStore, secret_key: SecretKey) !void {
-        return self.addKey(secret_key);
-    }
-
     /// Register a remote signer pubkey without a local secret key (thread-safe).
     ///
     /// The validator will be tracked for duties but signing is delegated to RemoteSigner.
@@ -1060,12 +1053,12 @@ test "ValidatorStore: allPubkeys" {
     try testing.expectEqualSlices(u8, &sk.toPublicKey().compress(), &pks[0]);
 }
 
-test "ValidatorStore: addValidator, listLocalValidators, removeValidator" {
+test "ValidatorStore: addKey, listLocalValidators, removeValidator" {
     var store = try initTestStore();
     defer store.deinit();
 
     const sk = makeDummyKey();
-    try store.addValidator(sk);
+    try store.addKey(sk);
 
     const infos = try store.listLocalValidators(testing.allocator);
     defer testing.allocator.free(infos);

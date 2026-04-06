@@ -15,10 +15,6 @@ pub const spec = cli.command(.{
             .long = "beaconNodes",
             .description = "Comma-separated beacon node API URLs",
         }, null),
-        .server = cli.option(?[]const u8, .{
-            .long = "server",
-            .description = "Backward-compatible alias for beaconNodes",
-        }, null),
         .keystoresDir = cli.option(?[]const u8, .{
             .long = "keystoresDir",
             .description = "Directory for storing validator keystores",
@@ -151,11 +147,6 @@ pub const spec = cli.command(.{
         .@"externalSigner.urls" = cli.option(?[]const u8, .{
             .long = "externalSigner.urls",
             .description = "Comma-separated external signer URLs used for remote validator signing",
-            .group = "externalSigner",
-        }, null),
-        .@"externalSigner.url" = cli.option(?[]const u8, .{
-            .long = "externalSigner.url",
-            .description = "Backward-compatible alias for externalSigner.urls",
             .group = "externalSigner",
         }, null),
         .@"externalSigner.pubkeys" = cli.option(?[]const u8, .{

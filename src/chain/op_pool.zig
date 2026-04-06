@@ -657,7 +657,7 @@ pub const BlsChangePool = struct {
 pub const OpPool = struct {
     allocator: Allocator,
 
-    /// Legacy simple attestation pool (kept for backwards compat / fallback).
+    /// Simple attestation pool retained as raw storage and fallback selection.
     attestation_pool: AttestationPool,
     /// Optimized aggregated attestation pool for block production.
     /// Groups by AttestationData root, pre-aggregates non-overlapping bitlists,

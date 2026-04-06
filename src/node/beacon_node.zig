@@ -3,7 +3,7 @@
 //! Owns and wires the core components of a beacon chain node:
 //! - State caches (BlockStateCache, CheckpointStateCache, StateRegen)
 //! - Database (BeaconDB over KVStore)
-//! - Chain management (OpPool, SeenCache, HeadTracker, BlockImporter)
+//! - Chain management (OpPool, SeenCache, HeadTracker)
 //! - API context for the REST API
 //! - Clock for slot/epoch timing
 //!
@@ -43,9 +43,7 @@ const ProducedBlockBody = chain_mod.ProducedBlockBody;
 const ProducedBlock = chain_mod.ProducedBlock;
 const ValidatorMonitor = chain_mod.ValidatorMonitor;
 const BlockProductionConfig = chain_mod.BlockProductionConfig;
-pub const HeadTracker = chain_mod.HeadTracker;
-pub const ImportResult = chain_mod.ImportResult;
-const ImportError = chain_mod.ImportError;
+const ImportResult = chain_mod.ImportResult;
 const networking = @import("networking");
 const DiscoveryService = networking.DiscoveryService;
 const DiscoveryConfig = networking.DiscoveryConfig;
@@ -92,7 +90,6 @@ const gossip_handler_mod = @import("gossip_handler.zig");
 pub const GossipHandler = gossip_handler_mod.GossipHandler;
 const GossipIngressMetadata = gossip_handler_mod.GossipIngressMetadata;
 
-const block_import_mod = @import("block_import.zig");
 const api_callbacks_mod = @import("api_callbacks.zig");
 const block_production_mod = @import("block_production.zig");
 const ExecutionRuntime = @import("execution_runtime.zig").ExecutionRuntime;
@@ -114,18 +111,8 @@ const AttestationWork = processor_mod.work_item.AttestationWork;
 const AggregateWork = processor_mod.work_item.AggregateWork;
 const ResolvedAggregate = processor_mod.work_item.ResolvedAggregate;
 const ResolvedAttestation = processor_mod.work_item.ResolvedAttestation;
-// HeadTracker, ImportResult, ImportError are in chain_mod (src/chain).
-
-// dummyBalancesGetterFn is defined in block_import.zig.
-pub const dummyBalancesGetterFn = block_import_mod.dummyBalancesGetterFn;
-
-// ---------------------------------------------------------------------------
-// SyncCallbackCtx — bridging sync pipeline callbacks to P2P transport.
-// Defined in sync_bridge.zig; re-exported here for backwards compatibility.
-// ---------------------------------------------------------------------------
-
-pub const PendingBatchRequest = sync_bridge_mod.PendingBatchRequest;
-pub const SyncCallbackCtx = sync_bridge_mod.SyncCallbackCtx;
+// Chain import/result types come from chain_mod (src/chain).
+const SyncCallbackCtx = sync_bridge_mod.SyncCallbackCtx;
 
 // ---------------------------------------------------------------------------
 // SyncStatus
@@ -346,7 +333,6 @@ pub const BeaconNode = struct {
 
     // Sync controller — wires P2P events into the sync pipeline.
     // Optional: nil until initialized (e.g. when running without P2P).
-    // sync_controller removed — SyncService is the direct entry point.
 
     // Last known active fork digest — used to detect fork transitions
     // so we can resubscribe gossip topics under the new fork digest.
@@ -525,7 +511,7 @@ pub const BeaconNode = struct {
 
         const planned = self.chainService().planReadyBlockImport(&owned_ready) catch |err| {
             switch (err) {
-                error.UnknownParentBlock => {
+                error.ParentUnknown => {
                     if (raw_block_bytes) |bytes| {
                         self.queueOrphanBlock(owned_ready.block, bytes);
                     } else {
@@ -539,7 +525,7 @@ pub const BeaconNode = struct {
                     owned_ready.deinit(self.allocator);
                     return .ignored;
                 },
-                error.BlockAlreadyKnown, error.BlockAlreadyFinalized => {
+                error.AlreadyKnown, error.WouldRevertFinalizedSlot => {
                     owned_ready.deinit(self.allocator);
                     return .ignored;
                 },
@@ -950,7 +936,7 @@ pub const BeaconNode = struct {
                 segment.next_index += 1;
 
                 switch (err) {
-                    error.BlockAlreadyKnown, error.BlockAlreadyFinalized, error.GenesisBlock => {
+                    error.AlreadyKnown, error.WouldRevertFinalizedSlot, error.GenesisBlock => {
                         segment.skipped_count += 1;
                     },
                     error.ExecutionPayloadInvalid => {
@@ -1156,7 +1142,7 @@ pub const BeaconNode = struct {
 
         const outcome = self.chainService().finishCompletedReadyBlockImport(completed) catch |err| {
             switch (err) {
-                error.BlockAlreadyKnown, error.BlockAlreadyFinalized, error.GenesisBlock => {
+                error.AlreadyKnown, error.WouldRevertFinalizedSlot, error.GenesisBlock => {
                     segment.skipped_count += 1;
                 },
                 error.ExecutionPayloadInvalid => {
@@ -1401,7 +1387,7 @@ pub const BeaconNode = struct {
             const planned = self.chainService().planReadyBlockImport(&ready) catch |err| {
                 ready.deinit(self.allocator);
                 switch (err) {
-                    error.BlockAlreadyKnown, error.BlockAlreadyFinalized, error.GenesisBlock => {
+                    error.AlreadyKnown, error.WouldRevertFinalizedSlot, error.GenesisBlock => {
                         segment.skipped_count += 1;
                     },
                     else => {
@@ -2671,8 +2657,6 @@ fn handleQueuedSyncMessage(
 
 // Gossip callbacks are defined in gossip_node_callbacks.zig.
 // Req/resp callbacks are defined in reqresp_callbacks.zig.
-// The gossip_node module-level global has been removed — BeaconNode pointer
-// is now threaded through GossipHandler.node (*anyopaque).
 
 // ---------------------------------------------------------------------------
 // Tests

@@ -94,13 +94,6 @@ pub fn parseValidatorStatus(text: []const u8) ValidatorStatus {
     return .unknown;
 }
 
-// ---------------------------------------------------------------------------
-// Signing domains (removed — use constants module directly)
-// ---------------------------------------------------------------------------
-// Domain type constants were duplicated here and in signing.zig. They have been
-// removed. All callers should import from the `constants` module:
-//   const constants = @import("constants");
-//   const DOMAIN_BEACON_PROPOSER = constants.DOMAIN_BEACON_PROPOSER;
 
 // ---------------------------------------------------------------------------
 // Slashing protection
