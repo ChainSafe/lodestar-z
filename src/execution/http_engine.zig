@@ -2771,7 +2771,7 @@ pub fn hexDecodeU256(hex: []const u8) !u256 {
 /// Mock HTTP transport for testing.
 ///
 /// Records incoming requests and returns a pre-configured canned response.
-pub const MockTransport = struct {
+const MockTransport = struct {
     allocator: Allocator,
     /// Canned response body returned by every call.
     canned_response: []const u8,

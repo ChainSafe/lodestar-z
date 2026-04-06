@@ -15,7 +15,6 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const testing = std.testing;
 const types = @import("consensus_types");
 
 const networking = @import("networking");
@@ -47,6 +46,7 @@ const ResolvedAggregate = processor_mod.work_item.ResolvedAggregate;
 const ResolvedAttestation = processor_mod.work_item.ResolvedAttestation;
 const GossipAction = chain_gossip.GossipAction;
 const ChainState = chain_gossip.ChainState;
+const GossipRejectReason = networking.peer_scoring.GossipRejectReason;
 
 const SignedVoluntaryExit = types.phase0.SignedVoluntaryExit.Type;
 const ProposerSlashing = types.phase0.ProposerSlashing.Type;
@@ -60,6 +60,10 @@ pub const GossipHandlerError = error{
     ValidationIgnored,
     /// Gossip validation returned Reject — peer should be penalized.
     ValidationRejected,
+    /// Gossip message was validly parsed but routed to the wrong subnet.
+    WrongSubnet,
+    /// Gossip message failed BLS verification.
+    InvalidSignature,
     /// Decode failed (bad snappy or SSZ).
     DecodeFailed,
 };
@@ -67,8 +71,7 @@ pub const GossipHandlerError = error{
 pub const GossipProcessResult = union(enum) {
     accepted,
     ignored,
-    rejected,
-    decode_failed,
+    rejected: GossipRejectReason,
     failed: anyerror,
 };
 
@@ -417,7 +420,7 @@ pub const GossipHandler = struct {
     /// 2. Phase 1: fast validation (< 1 ms)
     /// 3. Phase 2: queue full import as a work item
     pub fn onBeaconBlock(self: *GossipHandler, message_data: []const u8) !void {
-        return self.onBeaconBlockWithMetadata(message_data, .{});
+        return self.onBeaconBlockWithMetadata(message_data, .{}) catch |err| return normalizeTopicError(err);
     }
 
     fn onBeaconBlockWithMetadata(
@@ -458,7 +461,7 @@ pub const GossipHandler = struct {
         if (self.verifyBlockSignatureFn) |verifyFn| {
             if (!verifyFn(self.node, ssz_bytes)) {
                 std.log.warn("Gossip block rejected: invalid proposer signature slot={d}", .{blk.slot});
-                return GossipHandlerError.ValidationRejected;
+                return GossipHandlerError.InvalidSignature;
             }
         }
 
@@ -489,7 +492,7 @@ pub const GossipHandler = struct {
     /// 2. Phase 1: fast validation (< 1 ms) — slot range, committee bounds, dedup
     /// 3. Phase 2: import to fork choice + attestation pool
     pub fn onAttestation(self: *GossipHandler, subnet_id: u64, message_data: []const u8) !void {
-        return self.onAttestationWithMetadata(subnet_id, message_data, .{});
+        return self.onAttestationWithMetadata(subnet_id, message_data, .{}) catch |err| return normalizeTopicError(err);
     }
 
     fn onAttestationWithMetadata(
@@ -541,7 +544,7 @@ pub const GossipHandler = struct {
             else => return err,
         };
         if (resolved.expected_subnet != subnet_id) {
-            return GossipHandlerError.ValidationRejected;
+            return GossipHandlerError.WrongSubnet;
         }
         if (resolved.already_seen) {
             return GossipHandlerError.ValidationIgnored;
@@ -569,7 +572,7 @@ pub const GossipHandler = struct {
         if (self.verifyAttestationSignatureFn) |verifyFn| {
             if (!verifyFn(self.node, &attestation, &resolved)) {
                 std.log.warn("Gossip attestation rejected: invalid signature slot={d}", .{data.slot});
-                return GossipHandlerError.ValidationRejected;
+                return GossipHandlerError.InvalidSignature;
             }
         }
 
@@ -588,7 +591,7 @@ pub const GossipHandler = struct {
     /// 2. Phase 1: fast validation (aggregator bounds, slot range, dedup)
     /// 3. Phase 2: import to fork choice + attestation pool
     pub fn onAggregateAndProof(self: *GossipHandler, message_data: []const u8) !void {
-        return self.onAggregateAndProofWithMetadata(message_data, .{});
+        return self.onAggregateAndProofWithMetadata(message_data, .{}) catch |err| return normalizeTopicError(err);
     }
 
     fn onAggregateAndProofWithMetadata(
@@ -674,7 +677,7 @@ pub const GossipHandler = struct {
         if (self.verifyAggregateSignatureFn) |verifyFn| {
             if (!verifyFn(self.node, &signed_aggregate, &resolved)) {
                 std.log.warn("Gossip aggregate rejected: invalid signature aggregator={d}", .{signed_aggregate.aggregatorIndex()});
-                return GossipHandlerError.ValidationRejected;
+                return GossipHandlerError.InvalidSignature;
             }
         }
 
@@ -694,7 +697,7 @@ pub const GossipHandler = struct {
     /// 2. Phase 1: basic bounds check (validator index within set)
     /// 3. Phase 2: import to op pool
     pub fn onVoluntaryExit(self: *GossipHandler, message_data: []const u8) !void {
-        return self.onVoluntaryExitWithMetadata(message_data, .{});
+        return self.onVoluntaryExitWithMetadata(message_data, .{}) catch |err| return normalizeTopicError(err);
     }
 
     fn onVoluntaryExitWithMetadata(
@@ -726,7 +729,7 @@ pub const GossipHandler = struct {
         if (self.verifyVoluntaryExitSignatureFn) |verifyFn| {
             if (!verifyFn(self.node, ssz_bytes)) {
                 std.log.warn("Gossip voluntary exit rejected: invalid signature validator={d}", .{exit.validator_index});
-                return GossipHandlerError.ValidationRejected;
+                return GossipHandlerError.InvalidSignature;
             }
         }
 
@@ -761,7 +764,7 @@ pub const GossipHandler = struct {
     /// 2. Phase 1: headers must have same slot but different body roots (different blocks)
     /// 3. Phase 2: import to op pool
     pub fn onProposerSlashing(self: *GossipHandler, message_data: []const u8) !void {
-        return self.onProposerSlashingWithMetadata(message_data, .{});
+        return self.onProposerSlashingWithMetadata(message_data, .{}) catch |err| return normalizeTopicError(err);
     }
 
     fn onProposerSlashingWithMetadata(
@@ -796,7 +799,7 @@ pub const GossipHandler = struct {
         if (self.verifyProposerSlashingSignatureFn) |verifyFn| {
             if (!verifyFn(self.node, ssz_bytes)) {
                 std.log.warn("Gossip proposer slashing rejected: invalid signature proposer={d}", .{ps.proposer_index});
-                return GossipHandlerError.ValidationRejected;
+                return GossipHandlerError.InvalidSignature;
             }
         }
 
@@ -831,7 +834,7 @@ pub const GossipHandler = struct {
     /// 2. Phase 1: attestation data must be slashable (double vote or surround vote)
     /// 3. Phase 2: import raw SSZ to op pool (full deserialization happens at pool layer)
     pub fn onAttesterSlashing(self: *GossipHandler, message_data: []const u8) !void {
-        return self.onAttesterSlashingWithMetadata(message_data, .{});
+        return self.onAttesterSlashingWithMetadata(message_data, .{}) catch |err| return normalizeTopicError(err);
     }
 
     fn onAttesterSlashingWithMetadata(
@@ -865,7 +868,7 @@ pub const GossipHandler = struct {
         if (self.verifyAttesterSlashingSignatureFn) |verifyFn| {
             if (!verifyFn(self.node, &slashing)) {
                 std.log.warn("Gossip attester slashing rejected: invalid signature", .{});
-                return GossipHandlerError.ValidationRejected;
+                return GossipHandlerError.InvalidSignature;
             }
         }
 
@@ -898,7 +901,7 @@ pub const GossipHandler = struct {
     /// 2. Phase 1: validator index must be within known set
     /// 3. Phase 2: import to op pool
     pub fn onBlsToExecutionChange(self: *GossipHandler, message_data: []const u8) !void {
-        return self.onBlsToExecutionChangeWithMetadata(message_data, .{});
+        return self.onBlsToExecutionChangeWithMetadata(message_data, .{}) catch |err| return normalizeTopicError(err);
     }
 
     fn onBlsToExecutionChangeWithMetadata(
@@ -929,7 +932,7 @@ pub const GossipHandler = struct {
         if (self.verifyBlsChangeSignatureFn) |verifyFn| {
             if (!verifyFn(self.node, ssz_bytes)) {
                 std.log.warn("Gossip BLS change rejected: invalid signature validator={d}", .{change.validator_index});
-                return GossipHandlerError.ValidationRejected;
+                return GossipHandlerError.InvalidSignature;
             }
         }
 
@@ -964,7 +967,7 @@ pub const GossipHandler = struct {
     /// 2. Phase 1: basic bounds check (aggregator within validator set)
     /// 3. Phase 2: log acceptance (no sync contribution pool yet)
     pub fn onSyncCommitteeContribution(self: *GossipHandler, message_data: []const u8) !void {
-        return self.onSyncCommitteeContributionWithMetadata(message_data, .{});
+        return self.onSyncCommitteeContributionWithMetadata(message_data, .{}) catch |err| return normalizeTopicError(err);
     }
 
     fn onSyncCommitteeContributionWithMetadata(
@@ -1024,7 +1027,7 @@ pub const GossipHandler = struct {
     /// 2. Phase 1: basic bounds check
     /// 3. Phase 2: import into the sync committee message pool
     pub fn onSyncCommitteeMessage(self: *GossipHandler, subnet_id: u64, message_data: []const u8) !void {
-        return self.onSyncCommitteeMessageWithMetadata(subnet_id, message_data, .{});
+        return self.onSyncCommitteeMessageWithMetadata(subnet_id, message_data, .{}) catch |err| return normalizeTopicError(err);
     }
 
     fn onSyncCommitteeMessageWithMetadata(
@@ -1053,7 +1056,7 @@ pub const GossipHandler = struct {
         try checkAction(action_sm);
 
         if (!self.isValidSyncCommitteeSubnetFn(self.node, msg.slot, msg.validator_index, subnet_id)) {
-            return GossipHandlerError.ValidationRejected;
+            return GossipHandlerError.WrongSubnet;
         }
 
         const sync_message = parseSyncCommitteeMessage(ssz_bytes) orelse return GossipHandlerError.DecodeFailed;
@@ -1073,7 +1076,7 @@ pub const GossipHandler = struct {
         if (self.verifySyncCommitteeSignatureFn) |verifyFn| {
             if (!verifyFn(self.node, ssz_bytes)) {
                 std.log.warn("Gossip sync committee message rejected: invalid signature validator={d}", .{msg.validator_index});
-                return GossipHandlerError.ValidationRejected;
+                return GossipHandlerError.InvalidSignature;
             }
         }
 
@@ -1099,7 +1102,7 @@ pub const GossipHandler = struct {
     /// 2. Phase 1: basic bounds check (slot range, proposer)
     /// 3. Phase 2: decompress full payload and import via BeaconNode
     pub fn onBlobSidecar(self: *GossipHandler, subnet_id: u64, message_data: []const u8) !void {
-        return self.onBlobSidecarWithMetadata(subnet_id, message_data, .{});
+        return self.onBlobSidecarWithMetadata(subnet_id, message_data, .{}) catch |err| return normalizeTopicError(err);
     }
 
     fn onBlobSidecarWithMetadata(
@@ -1157,7 +1160,7 @@ pub const GossipHandler = struct {
     }
 
     pub fn onDataColumnSidecar(self: *GossipHandler, message_data: []const u8) !void {
-        return self.onDataColumnSidecarWithMetadata(message_data, .{});
+        return self.onDataColumnSidecarWithMetadata(message_data, .{}) catch |err| return normalizeTopicError(err);
     }
 
     fn onDataColumnSidecarWithMetadata(
@@ -1212,10 +1215,35 @@ pub const GossipHandler = struct {
         switch (result) {
             .accepted => if (self.metrics) |m| m.gossip_messages_validated.incr(),
             .ignored => if (self.metrics) |m| m.gossip_messages_ignored.incr(),
-            .rejected, .decode_failed => if (self.metrics) |m| m.gossip_messages_rejected.incr(),
+            .rejected => if (self.metrics) |m| m.gossip_messages_rejected.incr(),
             .failed => {},
         }
         return result;
+    }
+
+    fn defaultRejectReason(topic: GossipTopicType) GossipRejectReason {
+        return networking.peer_scoring.defaultGossipRejectReason(topic);
+    }
+
+    fn processResultError(result: GossipProcessResult) anyerror!void {
+        switch (result) {
+            .accepted => {},
+            .ignored => return GossipHandlerError.ValidationIgnored,
+            .rejected => |reason| switch (reason) {
+                .decode_failed => return GossipHandlerError.DecodeFailed,
+                else => return GossipHandlerError.ValidationRejected,
+            },
+            .failed => |err| return err,
+        }
+    }
+
+    fn normalizeTopicError(err: anyerror) anyerror {
+        return switch (err) {
+            GossipHandlerError.WrongSubnet,
+            GossipHandlerError.InvalidSignature,
+            => GossipHandlerError.ValidationRejected,
+            else => err,
+        };
     }
 
     pub fn processGossipMessage(self: *GossipHandler, topic: GossipTopicType, data: []const u8) GossipProcessResult {
@@ -1234,8 +1262,10 @@ pub const GossipHandler = struct {
         self.onGossipMessageWithSubnetAndMetadata(topic, subnet_id, data, metadata) catch |err| {
             return self.recordProcessResult(switch (err) {
                 GossipHandlerError.ValidationIgnored => .ignored,
-                GossipHandlerError.ValidationRejected => .rejected,
-                GossipHandlerError.DecodeFailed => .decode_failed,
+                GossipHandlerError.WrongSubnet => .{ .rejected = .wrong_subnet },
+                GossipHandlerError.InvalidSignature => .{ .rejected = .invalid_signature },
+                GossipHandlerError.ValidationRejected => .{ .rejected = defaultRejectReason(topic) },
+                GossipHandlerError.DecodeFailed => .{ .rejected = .decode_failed },
                 else => .{ .failed = err },
             });
         };
@@ -1245,24 +1275,12 @@ pub const GossipHandler = struct {
 
     /// Route a gossip message by topic type.
     pub fn onGossipMessage(self: *GossipHandler, topic: GossipTopicType, data: []const u8) !void {
-        switch (self.processGossipMessage(topic, data)) {
-            .accepted => {},
-            .ignored => return GossipHandlerError.ValidationIgnored,
-            .rejected => return GossipHandlerError.ValidationRejected,
-            .decode_failed => return GossipHandlerError.DecodeFailed,
-            .failed => |err| return err,
-        }
+        try processResultError(self.processGossipMessage(topic, data));
     }
 
     /// Route a gossip message by topic type, with optional subnet_id for subnet-indexed topics.
     pub fn onGossipMessageWithSubnet(self: *GossipHandler, topic: GossipTopicType, subnet_id: ?u8, data: []const u8) !void {
-        switch (self.processGossipMessageWithSubnetAndMetadata(topic, subnet_id, data, .{})) {
-            .accepted => {},
-            .ignored => return GossipHandlerError.ValidationIgnored,
-            .rejected => return GossipHandlerError.ValidationRejected,
-            .decode_failed => return GossipHandlerError.DecodeFailed,
-            .failed => |err| return err,
-        }
+        try processResultError(self.processGossipMessageWithSubnetAndMetadata(topic, subnet_id, data, .{}));
     }
 
     pub fn onGossipMessageWithSubnetAndMetadata(
@@ -1287,390 +1305,3 @@ pub const GossipHandler = struct {
         }
     }
 };
-
-// ============================================================
-// Tests
-// ============================================================
-
-const consensus_types = @import("consensus_types");
-const phase0 = consensus_types.phase0;
-
-// --- Test stubs ---
-
-var g_imported_count: u32 = 0;
-
-fn stubImportBlock(_: *anyopaque, _: []const u8) anyerror!void {
-    g_imported_count += 1;
-}
-
-fn stubGetProposerIndex(_: *anyopaque, slot: u64) ?u32 {
-    return @intCast(slot % 100);
-}
-
-fn stubGetForkSeqForSlot(_: *anyopaque, _: u64) ForkSeq {
-    return .phase0;
-}
-
-fn stubIsKnownBlockRoot(_: *anyopaque, _: [32]u8) bool {
-    return true; // all parents known
-}
-
-fn stubGetValidatorCount(_: *anyopaque) u32 {
-    return 1000;
-}
-
-fn stubResolveAttestation(
-    _: *anyopaque,
-    attestation: *const AnyGossipAttestation,
-    _: *const [32]u8,
-) anyerror!ResolvedAttestation {
-    const committee_index = attestation.committeeIndex();
-    const slots_since_epoch_start = attestation.slot() % preset.SLOTS_PER_EPOCH;
-    return .{
-        .validator_index = switch (attestation.*) {
-            .phase0 => 0,
-            .electra_single => |single| single.attester_index,
-        },
-        .validator_committee_index = 0,
-        .committee_size = 1,
-        .signing_root = [_]u8{0} ** 32,
-        .expected_subnet = @intCast((slots_since_epoch_start + committee_index) % networking.peer_info.ATTESTATION_SUBNET_COUNT),
-    };
-}
-
-fn stubResolveAggregate(
-    _: *anyopaque,
-    _: *const AnySignedAggregateAndProof,
-    _: *const [32]u8,
-) anyerror!ResolvedAggregate {
-    return .{
-        .attestation_signing_root = [_]u8{0} ** 32,
-        .selection_signing_root = [_]u8{0} ** 32,
-        .aggregate_signing_root = [_]u8{0} ** 32,
-        .attesting_indices = &.{},
-    };
-}
-
-fn stubIsValidSyncCommitteeSubnet(_: *anyopaque, _: u64, validator_index: u64, subnet: u64) bool {
-    const subcommittee_size = preset.SYNC_COMMITTEE_SIZE / networking.peer_info.SYNC_COMMITTEE_SUBNET_COUNT;
-    return @divFloor(validator_index, subcommittee_size) == subnet;
-}
-
-fn makeTestHandler(allocator: Allocator) !*GossipHandler {
-    var dummy_node: u8 = 0;
-    return GossipHandler.create(
-        allocator,
-        @ptrCast(&dummy_node),
-        &stubImportBlock,
-        &stubGetForkSeqForSlot,
-        &stubGetProposerIndex,
-        &stubIsKnownBlockRoot,
-        &stubGetValidatorCount,
-        &stubResolveAttestation,
-        &stubResolveAggregate,
-        &stubIsValidSyncCommitteeSubnet,
-    );
-}
-
-fn makeSnappyBlock(allocator: Allocator, slot: u64, proposer: u64) ![]u8 {
-    const snappy = @import("snappy").frame;
-    var block: phase0.SignedBeaconBlock.Type = phase0.SignedBeaconBlock.default_value;
-    block.message.slot = slot;
-    block.message.proposer_index = proposer;
-    block.message.parent_root = [_]u8{0xAA} ** 32;
-
-    const ssz_size = phase0.SignedBeaconBlock.serializedSize(&block);
-    const ssz_buf = try allocator.alloc(u8, ssz_size);
-    defer allocator.free(ssz_buf);
-    _ = phase0.SignedBeaconBlock.serializeIntoBytes(&block, ssz_buf);
-
-    return snappy.compress(allocator, ssz_buf);
-}
-
-test "GossipHandler: onBeaconBlock imports valid block" {
-    const alloc = testing.allocator;
-    const handler = try makeTestHandler(alloc);
-    defer handler.deinit();
-
-    handler.updateClock(10, 0, 0);
-    g_imported_count = 0;
-
-    const compressed = try makeSnappyBlock(alloc, 10, 10);
-    defer alloc.free(compressed);
-
-    try handler.onBeaconBlock(compressed);
-    try testing.expectEqual(@as(u32, 1), g_imported_count);
-}
-
-test "GossipHandler: onBeaconBlock ignores duplicate block" {
-    const alloc = testing.allocator;
-    const handler = try makeTestHandler(alloc);
-    defer handler.deinit();
-
-    handler.updateClock(10, 0, 0);
-    g_imported_count = 0;
-
-    const compressed = try makeSnappyBlock(alloc, 10, 10);
-    defer alloc.free(compressed);
-
-    try handler.onBeaconBlock(compressed);
-    try testing.expectEqual(@as(u32, 1), g_imported_count);
-
-    const result = handler.onBeaconBlock(compressed);
-    try testing.expectError(GossipHandlerError.ValidationIgnored, result);
-    try testing.expectEqual(@as(u32, 1), g_imported_count);
-}
-
-test "GossipHandler: onBeaconBlock ignores future slot" {
-    const alloc = testing.allocator;
-    const handler = try makeTestHandler(alloc);
-    defer handler.deinit();
-
-    handler.updateClock(5, 0, 0);
-
-    const compressed = try makeSnappyBlock(alloc, 10, 10);
-    defer alloc.free(compressed);
-
-    const result = handler.onBeaconBlock(compressed);
-    try testing.expectError(GossipHandlerError.ValidationIgnored, result);
-}
-
-test "GossipHandler: onBeaconBlock ignores finalized block" {
-    const alloc = testing.allocator;
-    const handler = try makeTestHandler(alloc);
-    defer handler.deinit();
-
-    handler.updateClock(30, 0, 20);
-
-    const compressed = try makeSnappyBlock(alloc, 10, 10);
-    defer alloc.free(compressed);
-
-    const result = handler.onBeaconBlock(compressed);
-    try testing.expectError(GossipHandlerError.ValidationIgnored, result);
-}
-
-test "GossipHandler: onAttestation decodes and validates" {
-    const alloc = testing.allocator;
-    const snappy = @import("snappy").frame;
-    const handler = try makeTestHandler(alloc);
-    defer handler.deinit();
-
-    handler.updateClock(100, 3, 64);
-    handler.updateForkSeq(.electra); // SingleAttestation format requires Electra+
-
-    // Create a valid SingleAttestation, serialize, compress.
-    var att: consensus_types.electra.SingleAttestation.Type = consensus_types.electra.SingleAttestation.default_value;
-    att.committee_index = 0;
-    att.attester_index = 5;
-    att.data.slot = 96;
-    att.data.target.epoch = 3;
-    att.data.target.root = [_]u8{0xAA} ** 32; // known root (mock returns true)
-    att.data.beacon_block_root = [_]u8{0xBB} ** 32;
-
-    var ssz_buf: [consensus_types.electra.SingleAttestation.fixed_size]u8 = undefined;
-    _ = consensus_types.electra.SingleAttestation.serializeIntoBytes(&att, &ssz_buf);
-
-    const compressed = try snappy.compress(alloc, &ssz_buf);
-    defer alloc.free(compressed);
-
-    // Should pass validation (epoch 3 is current).
-    try handler.onAttestation(0, compressed);
-}
-
-test "GossipHandler: onAttestation rejects stale epoch" {
-    const alloc = testing.allocator;
-    const snappy = @import("snappy").frame;
-    const handler = try makeTestHandler(alloc);
-    defer handler.deinit();
-
-    handler.updateClock(100, 3, 64);
-    handler.updateForkSeq(.electra); // SingleAttestation format requires Electra+
-
-    // Attestation from epoch 0 — outside current/previous window.
-    var att: consensus_types.electra.SingleAttestation.Type = consensus_types.electra.SingleAttestation.default_value;
-    att.data.slot = 5;
-    att.data.target.epoch = 0;
-    att.data.target.root = [_]u8{0xAA} ** 32;
-
-    var ssz_buf: [consensus_types.electra.SingleAttestation.fixed_size]u8 = undefined;
-    _ = consensus_types.electra.SingleAttestation.serializeIntoBytes(&att, &ssz_buf);
-
-    const compressed = try snappy.compress(alloc, &ssz_buf);
-    defer alloc.free(compressed);
-
-    const result = handler.onAttestation(5, compressed);
-    try testing.expectError(GossipHandlerError.ValidationIgnored, result);
-}
-
-test "GossipHandler: onAttestation rejects pre-electra aggregated attestations" {
-    const alloc = testing.allocator;
-    const snappy = @import("snappy").frame;
-    const handler = try makeTestHandler(alloc);
-    defer handler.deinit();
-
-    handler.updateClock(100, 3, 64);
-    handler.updateForkSeq(.phase0);
-
-    var att: consensus_types.phase0.Attestation.Type = consensus_types.phase0.Attestation.default_value;
-    try att.aggregation_bits.data.append(alloc, 0x03);
-    att.aggregation_bits.bit_len = 2;
-    defer att.aggregation_bits.data.deinit(alloc);
-    att.data.slot = 96;
-    att.data.index = 0;
-    att.data.target.epoch = 3;
-    att.data.target.root = [_]u8{0xAA} ** 32;
-    att.data.beacon_block_root = [_]u8{0xBB} ** 32;
-
-    const ssz_size = consensus_types.phase0.Attestation.serializedSize(&att);
-    const ssz_buf = try alloc.alloc(u8, ssz_size);
-    defer alloc.free(ssz_buf);
-    _ = consensus_types.phase0.Attestation.serializeIntoBytes(&att, ssz_buf);
-
-    const compressed = try snappy.compress(alloc, ssz_buf);
-    defer alloc.free(compressed);
-
-    try testing.expectError(GossipHandlerError.ValidationRejected, handler.onAttestation(0, compressed));
-}
-
-test "GossipHandler: onAttestation rejects wrong subnet" {
-    const alloc = testing.allocator;
-    const snappy = @import("snappy").frame;
-    const handler = try makeTestHandler(alloc);
-    defer handler.deinit();
-
-    handler.updateClock(100, 3, 64);
-    handler.updateForkSeq(.electra);
-
-    var att: consensus_types.electra.SingleAttestation.Type = consensus_types.electra.SingleAttestation.default_value;
-    att.committee_index = 0;
-    att.attester_index = 5;
-    att.data.slot = 96;
-    att.data.target.epoch = 3;
-    att.data.target.root = [_]u8{0xAA} ** 32;
-    att.data.beacon_block_root = [_]u8{0xBB} ** 32;
-
-    var ssz_buf: [consensus_types.electra.SingleAttestation.fixed_size]u8 = undefined;
-    _ = consensus_types.electra.SingleAttestation.serializeIntoBytes(&att, &ssz_buf);
-
-    const compressed = try snappy.compress(alloc, &ssz_buf);
-    defer alloc.free(compressed);
-
-    try testing.expectError(GossipHandlerError.ValidationRejected, handler.onAttestation(1, compressed));
-}
-
-test "GossipHandler: onSyncCommitteeMessage rejects wrong subnet" {
-    const alloc = testing.allocator;
-    const snappy = @import("snappy").frame;
-    const handler = try makeTestHandler(alloc);
-    defer handler.deinit();
-
-    handler.updateClock(100, 3, 64);
-
-    const msg = consensus_types.altair.SyncCommitteeMessage.Type{
-        .slot = 100,
-        .beacon_block_root = [_]u8{0xAB} ** 32,
-        .validator_index = 7,
-        .signature = [_]u8{0xCD} ** 96,
-    };
-
-    var ssz_buf: [consensus_types.altair.SyncCommitteeMessage.fixed_size]u8 = undefined;
-    _ = consensus_types.altair.SyncCommitteeMessage.serializeIntoBytes(&msg, &ssz_buf);
-
-    const compressed = try snappy.compress(alloc, &ssz_buf);
-    defer alloc.free(compressed);
-
-    try testing.expectError(GossipHandlerError.ValidationRejected, handler.onSyncCommitteeMessage(1, compressed));
-}
-
-test "GossipHandler: onGossipMessage routes beacon_block" {
-    const alloc = testing.allocator;
-    const handler = try makeTestHandler(alloc);
-    defer handler.deinit();
-
-    handler.updateClock(42, 1, 0);
-    g_imported_count = 0;
-
-    const compressed = try makeSnappyBlock(alloc, 42, 42);
-    defer alloc.free(compressed);
-
-    try handler.onGossipMessage(.beacon_block, compressed);
-    try testing.expectEqual(@as(u32, 1), g_imported_count);
-}
-
-test "GossipHandler: decode failures are returned as errors" {
-    const alloc = testing.allocator;
-    const handler = try makeTestHandler(alloc);
-    defer handler.deinit();
-
-    // Sending invalid data (not valid snappy) should return DecodeFailed
-    // for topics that now have real handlers.
-    const dummy = [_]u8{ 0, 1, 2, 3 };
-    try testing.expectError(GossipHandlerError.DecodeFailed, handler.onGossipMessageWithSubnet(.voluntary_exit, null, &dummy));
-    try testing.expectError(GossipHandlerError.DecodeFailed, handler.onGossipMessageWithSubnet(.proposer_slashing, null, &dummy));
-    try testing.expectError(GossipHandlerError.DecodeFailed, handler.onGossipMessageWithSubnet(.attester_slashing, null, &dummy));
-    try testing.expectError(GossipHandlerError.DecodeFailed, handler.onGossipMessageWithSubnet(.bls_to_execution_change, null, &dummy));
-    try testing.expectError(GossipHandlerError.DecodeFailed, handler.onGossipMessageWithSubnet(.blob_sidecar, null, &dummy));
-    try testing.expectError(GossipHandlerError.DecodeFailed, handler.onGossipMessageWithSubnet(.data_column_sidecar, null, &dummy));
-    try testing.expectError(GossipHandlerError.DecodeFailed, handler.onGossipMessageWithSubnet(.sync_committee, null, &dummy));
-    try testing.expectError(GossipHandlerError.DecodeFailed, handler.onGossipMessageWithSubnet(.sync_committee_contribution_and_proof, null, &dummy));
-}
-
-test "GossipHandler: onAggregateAndProof validates and accepts" {
-    const alloc = testing.allocator;
-    const snappy = @import("snappy").frame;
-    const handler = try makeTestHandler(alloc);
-    defer handler.deinit();
-
-    handler.updateClock(100, 3, 64);
-
-    // Create a valid SignedAggregateAndProof.
-    var signed_agg: phase0.SignedAggregateAndProof.Type = phase0.SignedAggregateAndProof.default_value;
-    signed_agg.message.aggregator_index = 5;
-    signed_agg.message.aggregate.data.slot = 96;
-    signed_agg.message.aggregate.data.target.epoch = 3;
-    // Need at least 1 set bit for aggregation_bits.
-    // Default aggregation_bits is empty — allocate a single byte with bit 0 set.
-    try signed_agg.message.aggregate.aggregation_bits.data.append(alloc, 0x01);
-    signed_agg.message.aggregate.aggregation_bits.bit_len = 1;
-    defer signed_agg.message.aggregate.aggregation_bits.data.deinit(alloc);
-
-    const ssz_size = phase0.SignedAggregateAndProof.serializedSize(&signed_agg);
-    const ssz_buf = try alloc.alloc(u8, ssz_size);
-    defer alloc.free(ssz_buf);
-    _ = phase0.SignedAggregateAndProof.serializeIntoBytes(&signed_agg, ssz_buf);
-
-    const compressed = try snappy.compress(alloc, ssz_buf);
-    defer alloc.free(compressed);
-
-    try handler.onAggregateAndProof(compressed);
-}
-
-test "GossipHandler: onAggregateAndProof validates electra aggregates" {
-    const alloc = testing.allocator;
-    const snappy = @import("snappy").frame;
-    const handler = try makeTestHandler(alloc);
-    defer handler.deinit();
-
-    handler.updateClock(100, 3, 64);
-    handler.updateForkSeq(.electra);
-
-    var signed_agg: consensus_types.electra.SignedAggregateAndProof.Type = consensus_types.electra.SignedAggregateAndProof.default_value;
-    signed_agg.message.aggregator_index = 5;
-    signed_agg.message.aggregate.data.slot = 96;
-    signed_agg.message.aggregate.data.target.epoch = 3;
-    signed_agg.message.aggregate.data.index = 0;
-    try signed_agg.message.aggregate.committee_bits.set(0, true);
-    try signed_agg.message.aggregate.aggregation_bits.data.append(alloc, 0x01);
-    signed_agg.message.aggregate.aggregation_bits.bit_len = 1;
-    defer signed_agg.message.aggregate.aggregation_bits.data.deinit(alloc);
-
-    const ssz_size = consensus_types.electra.SignedAggregateAndProof.serializedSize(&signed_agg);
-    const ssz_buf = try alloc.alloc(u8, ssz_size);
-    defer alloc.free(ssz_buf);
-    _ = consensus_types.electra.SignedAggregateAndProof.serializeIntoBytes(&signed_agg, ssz_buf);
-
-    const compressed = try snappy.compress(alloc, ssz_buf);
-    defer alloc.free(compressed);
-
-    try handler.onAggregateAndProof(compressed);
-}

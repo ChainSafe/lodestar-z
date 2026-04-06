@@ -370,6 +370,25 @@ pub const PeerDB = struct {
         return info.peer_score.state();
     }
 
+    /// Update the mirrored gossipsub router score for a peer.
+    pub fn updateGossipsubScore(
+        self: *PeerDB,
+        peer_id: []const u8,
+        score: f64,
+        ignore_negative: bool,
+        now_ms: u64,
+    ) ?ScoreState {
+        const info = self.peers.getPtr(peer_id) orelse return null;
+        info.peer_score.updateGossipsubScore(score, ignore_negative, now_ms);
+        return info.peer_score.state();
+    }
+
+    /// Freeze score decay for a reconnection cool-down window.
+    pub fn applyReconnectionCoolDown(self: *PeerDB, peer_id: []const u8, cool_down_ms: u64, now_ms: u64) void {
+        const info = self.peers.getPtr(peer_id) orelse return;
+        info.peer_score.applyReconnectionCoolDown(cool_down_ms, now_ms);
+    }
+
     /// Decay all peer scores. Called periodically.
     pub fn decayAllScores(self: *PeerDB, now_ms: u64) void {
         var it = self.peers.valueIterator();
@@ -880,6 +899,17 @@ test "PeerDB: graceful disconnect flow" {
     // Complete disconnect.
     db.peerDisconnected("peer_a", 2000);
     try std.testing.expectEqual(ConnectionState.disconnected, db.getPeer("peer_a").?.connection_state);
+}
+
+test "PeerDB: negative gossipsub score influences combined state" {
+    const allocator = std.testing.allocator;
+    var db = PeerDB.init(allocator);
+    defer db.deinit();
+
+    _ = try db.peerConnected("peer_a", .outbound, 1000);
+
+    const state = db.updateGossipsubScore("peer_a", -20_000.0, false, 1000);
+    try std.testing.expectEqual(ScoreState.disconnected, state.?);
 }
 
 test "PeerDB: derives custody columns from discovery identity and metadata" {

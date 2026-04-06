@@ -11,6 +11,7 @@ const networking = @import("networking");
 const StatusMessage = networking.messages.StatusMessage;
 const MetadataV2 = networking.messages.MetadataV2;
 const ReqRespContext = networking.ReqRespContext;
+const ReqRespServerPolicy = networking.ReqRespServerPolicy;
 const PayloadSink = networking.req_resp_handler.PayloadSink;
 const SlotPayload = networking.req_resp_handler.SlotPayload;
 const ForkSeq = config_mod.ForkSeq;
@@ -42,12 +43,47 @@ pub fn makeReqRespContext(ctx: *RequestContext) ReqRespContext {
     };
 }
 
+pub fn makeReqRespServerPolicy(ctx: *RequestContext) ReqRespServerPolicy {
+    return .{
+        .ptr = @ptrCast(ctx),
+        .allowInboundRequestFn = &reqRespAllowInboundRequest,
+    };
+}
+
 const beacon_node_mod = @import("beacon_node.zig");
 const BeaconNode = beacon_node_mod.BeaconNode;
 
 fn requestNode(ptr: *anyopaque) *BeaconNode {
     const ctx: *RequestContext = @ptrCast(@alignCast(ptr));
     return @ptrCast(@alignCast(ctx.node));
+}
+
+fn reqRespAllowInboundRequest(ptr: *anyopaque, peer_id: ?[]const u8, method: networking.Method, request_bytes: []const u8) bool {
+    const node = requestNode(ptr);
+    const peer_id_bytes = peer_id orelse return true;
+    const limiter = node.req_resp_rate_limiter orelse return true;
+    const protocol = networking.rate_limiter.methodToRateLimitProtocol(method) orelse return true;
+
+    const result = limiter.allowRequestN(
+        peer_id_bytes,
+        protocol,
+        networking.rate_limiter.requestTokenCost(method, request_bytes),
+        monotonicTimeNs(node.io),
+    ) catch |err| {
+        std.log.warn("Failed to apply req/resp rate limit for peer {s}: {}", .{ peer_id_bytes, err });
+        return true;
+    };
+    if (result.isAllowed()) return true;
+
+    if (result.isPeerDenied()) {
+        if (node.peer_manager) |pm| {
+            _ = pm.reportPeer(peer_id_bytes, .fatal, .rpc, wallTimeMs(node.io));
+        }
+        if (node.p2p_service) |*svc| {
+            _ = svc.disconnectPeer(node.io, peer_id_bytes);
+        }
+    }
+    return false;
 }
 
 fn reqRespGetStatus(ptr: *anyopaque) StatusMessage.Type {
@@ -273,7 +309,7 @@ pub fn handlePeerStatus(
 
 pub fn handlePeerGoodbye(node: *BeaconNode, peer_id: []const u8, reason: u64) void {
     if (node.peer_manager) |pm| {
-        pm.onPeerDisconnecting(peer_id);
+        pm.onPeerGoodbye(peer_id, @enumFromInt(reason), wallTimeMs(node.io));
     }
     std.log.info("Peer sent Goodbye {s} reason={d}", .{ peer_id, reason });
 }
@@ -294,6 +330,10 @@ fn wallTimeMs(io: std.Io) u64 {
     if (now.nanoseconds <= 0) return 0;
     const ns = std.math.cast(u64, now.nanoseconds) orelse std.math.maxInt(u64);
     return ns / std.time.ns_per_ms;
+}
+
+fn monotonicTimeNs(io: std.Io) i128 {
+    return std.Io.Clock.awake.now(io).nanoseconds;
 }
 
 fn readSignedBeaconBlockSlot(bytes: []const u8) ?u64 {

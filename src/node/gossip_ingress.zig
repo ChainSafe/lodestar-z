@@ -64,13 +64,10 @@ fn processValidatedMessage(
         gh.updateForkSeq(fork_seq);
         switch (gh.processGossipMessageWithSubnetAndMetadata(parsed.topic_type, parsed.subnet_id, data, metadata)) {
             .accepted, .ignored => {},
-            .rejected => {
+            .rejected => |reason| {
                 recordInvalidMessage(p2p, peer, topic);
-                std.log.debug("Gossip {s} rejected", .{parsed.topic_type.topicName()});
-            },
-            .decode_failed => {
-                recordInvalidMessage(p2p, peer, topic);
-                std.log.debug("Gossip {s} decode failed", .{parsed.topic_type.topicName()});
+                applyGossipPenalty(self, io, p2p, peer, reason);
+                std.log.debug("Gossip {s} rejected ({s})", .{ parsed.topic_type.topicName(), @tagName(reason) });
             },
             .failed => |err| {
                 std.log.warn("Gossip {s} error: {}", .{ parsed.topic_type.topicName(), err });
@@ -89,11 +86,35 @@ fn recordInvalidMessage(p2p: *networking.P2pService, peer: ?[]const u8, topic: [
     if (peer) |peer_id| p2p.recordInvalidGossipMessage(peer_id, topic);
 }
 
+fn applyGossipPenalty(
+    self: *BeaconNode,
+    io: std.Io,
+    p2p: *networking.P2pService,
+    peer: ?[]const u8,
+    reason: networking.peer_scoring.GossipRejectReason,
+) void {
+    const peer_id = peer orelse return;
+    const pm = self.peer_manager orelse return;
+    const action = networking.peer_scoring.gossipFailureAction(reason);
+    const state = pm.reportPeer(peer_id, action, .gossipsub, currentUnixTimeMs(io)) orelse return;
+    switch (state) {
+        .healthy => {},
+        .disconnected, .banned => {
+            _ = p2p.disconnectPeer(io, peer_id);
+        },
+    }
+}
+
 fn currentNetworkSlot(self: *BeaconNode, io: std.Io) u64 {
     if (self.clock) |clock| {
         if (clock.currentSlot(io)) |slot| return slot;
     }
     return self.currentHeadSlot();
+}
+
+fn currentUnixTimeMs(io: std.Io) u64 {
+    const ms = std.Io.Timestamp.now(io, .real).toMilliseconds();
+    return if (ms < 0) 0 else @intCast(ms);
 }
 
 fn currentUnixTimeNs(io: std.Io) i64 {

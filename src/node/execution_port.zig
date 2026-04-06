@@ -47,7 +47,7 @@ fn submitNewPayload(node: *BeaconNode, request: NewPayloadRequest) NewPayloadRes
 
 test "execution adapter maps mock VALID payload to valid" {
     const allocator = std.testing.allocator;
-    var mock = execution_mod.MockEngine.init(allocator);
+    var mock = execution_mod.mock_engine.MockEngine.init(allocator);
     defer mock.deinit();
 
     const request = NewPayloadRequest{
@@ -81,7 +81,7 @@ test "execution adapter maps mock VALID payload to valid" {
 
 test "execution adapter maps mock SYNCING payload to syncing" {
     const allocator = std.testing.allocator;
-    var mock = execution_mod.MockEngine.init(allocator);
+    var mock = execution_mod.mock_engine.MockEngine.init(allocator);
     defer mock.deinit();
 
     const block_hash = [_]u8{0x22} ** 32;

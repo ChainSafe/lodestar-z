@@ -19,6 +19,7 @@ const Allocator = std.mem.Allocator;
 const testing = std.testing;
 
 const req_resp_protocol = @import("protocol.zig");
+const messages = @import("messages.zig");
 const log = std.log.scoped(.rate_limiter);
 
 // ── Protocol enum ─────────────────────────────────────────────────────────────
@@ -64,18 +65,82 @@ pub fn methodToRateLimitProtocol(method: req_resp_protocol.Method) ?Protocol {
     };
 }
 
+/// Conservative inbound token cost for a decoded request payload.
+/// Invalid or malformed payloads still consume at least one token.
+pub fn requestTokenCost(method: req_resp_protocol.Method, request_bytes: []const u8) u32 {
+    return switch (method) {
+        .status,
+        .goodbye,
+        .ping,
+        .metadata,
+        .light_client_bootstrap,
+        .light_client_updates_by_range,
+        .light_client_finality_update,
+        .light_client_optimistic_update,
+        => 1,
+        .beacon_blocks_by_range => rangeCountCost(messages.BeaconBlocksByRangeRequest, request_bytes),
+        .blob_sidecars_by_range => rangeCountCost(messages.BlobSidecarsByRangeRequest, request_bytes),
+        .data_column_sidecars_by_range => dataColumnRangeCost(request_bytes),
+        .beacon_blocks_by_root => fixedItemCountCost(request_bytes, 32),
+        .blob_sidecars_by_root => fixedItemCountCost(request_bytes, 40),
+        .data_column_sidecars_by_root => fixedItemCountCost(request_bytes, 40),
+    };
+}
+
+fn rangeCountCost(comptime RequestType: type, request_bytes: []const u8) u32 {
+    if (request_bytes.len != RequestType.fixed_size) return 1;
+    var request: RequestType.Type = undefined;
+    RequestType.deserializeFromBytes(request_bytes, &request) catch return 1;
+    return saturatingCount(request.count);
+}
+
+fn dataColumnRangeCost(request_bytes: []const u8) u32 {
+    if (request_bytes.len < 16) return 1;
+    const count = std.mem.readInt(u64, request_bytes[8..16], .little);
+    return saturatingCount(count);
+}
+
+fn fixedItemCountCost(request_bytes: []const u8, item_size: usize) u32 {
+    if (request_bytes.len == 0 or request_bytes.len % item_size != 0) return 1;
+    return saturatingCount(request_bytes.len / item_size);
+}
+
+fn saturatingCount(count: anytype) u32 {
+    const widened: u64 = switch (@typeInfo(@TypeOf(count))) {
+        .comptime_int, .int => @intCast(count),
+        else => @compileError("unsupported count type"),
+    };
+    if (widened == 0) return 1;
+    return std.math.cast(u32, widened) orelse std.math.maxInt(u32);
+}
+
 // ── Rate limit result ─────────────────────────────────────────────────────────
 
 /// Result of a rate limit check.
 pub const RateLimitResult = union(enum) {
     /// Request is allowed.
     allowed,
-    /// Request is denied. Contains the delay in nanoseconds before the
-    /// request could be retried (backpressure information).
-    denied: i128,
+    /// Request is denied by the peer-specific bucket.
+    denied_peer: i128,
+    /// Request is denied by the global bucket.
+    denied_global: i128,
 
     pub fn isAllowed(self: RateLimitResult) bool {
         return self == .allowed;
+    }
+
+    pub fn isPeerDenied(self: RateLimitResult) bool {
+        return switch (self) {
+            .denied_peer => true,
+            else => false,
+        };
+    }
+
+    pub fn isGlobalDenied(self: RateLimitResult) bool {
+        return switch (self) {
+            .denied_global => true,
+            else => false,
+        };
     }
 };
 
@@ -147,7 +212,7 @@ pub const TokenBucket = struct {
             @intFromFloat(@ceil(deficit / self.rate_per_ns))
         else
             std.math.maxInt(i128);
-        return .{ .denied = wait_ns };
+        return .{ .denied_peer = wait_ns };
     }
 
     /// Replenish tokens based on elapsed time.
@@ -224,18 +289,30 @@ pub const GlobalRateConfig = struct {
     burst: u32 = 1000,
 };
 
+/// Peers that have not sent inbound req/resp traffic within this timeout are
+/// considered inactive and their limiter state may be pruned.
+pub const INACTIVE_PEER_TIMEOUT_NS: i128 = 5 * 60 * std.time.ns_per_s;
+
 // ── Per-peer bucket set ───────────────────────────────────────────────────────
 
 /// One token bucket per protocol for a single peer.
 pub const PeerBuckets = struct {
     buckets: [Protocol.COUNT]TokenBucket,
+    last_request_ns: i128,
 
     pub fn init(configs: []const ProtocolRateConfig, now_ns: i128) PeerBuckets {
         var buckets: [Protocol.COUNT]TokenBucket = undefined;
         for (configs, 0..) |cfg, i| {
             buckets[i] = TokenBucket.init(@floatFromInt(cfg.burst), cfg.rate_per_second, now_ns);
         }
-        return .{ .buckets = buckets };
+        return .{
+            .buckets = buckets,
+            .last_request_ns = now_ns,
+        };
+    }
+
+    pub fn noteRequest(self: *PeerBuckets, now_ns: i128) void {
+        self.last_request_ns = now_ns;
     }
 
     pub fn tryConsume(self: *PeerBuckets, protocol: Protocol, now_ns: i128) bool {
@@ -263,22 +340,19 @@ pub const PeerBuckets = struct {
 /// - Global rate limit across all peers
 /// - Backpressure mode: returns wait time instead of just allow/deny
 /// - Response-count-based consumption for range requests
-/// - Rate limit hit counting for score penalty integration
 ///
 /// Time (now_ns) is passed explicitly to all methods. The caller is responsible
 /// for providing a monotonic timestamp in nanoseconds.
 ///
-/// Peers are identified by a u64 numeric id.
+/// Peers are identified by owned peer-id byte strings.
 pub const RateLimiter = struct {
     allocator: Allocator,
     /// Per-peer bucket sets.
-    peers: std.AutoHashMap(u64, PeerBuckets),
+    peers: std.StringHashMap(PeerBuckets),
     /// Rate limit configuration per protocol.
     configs: [Protocol.COUNT]ProtocolRateConfig,
     /// Global rate limit bucket (across all peers).
     global_bucket: TokenBucket,
-    /// Per-peer rate limit hit counter (for score penalty integration).
-    hit_counts: std.AutoHashMap(u64, u32),
     /// Stats: total requests allowed / denied.
     total_allowed: u64,
     total_denied: u64,
@@ -298,14 +372,13 @@ pub const RateLimiter = struct {
         @memcpy(&cfg, configs);
         return .{
             .allocator = allocator,
-            .peers = std.AutoHashMap(u64, PeerBuckets).init(allocator),
+            .peers = std.StringHashMap(PeerBuckets).init(allocator),
             .configs = cfg,
             .global_bucket = TokenBucket.init(
                 @floatFromInt(global_config.burst),
                 global_config.rate_per_second,
                 0,
             ),
-            .hit_counts = std.AutoHashMap(u64, u32).init(allocator),
             .total_allowed = 0,
             .total_denied = 0,
             .total_global_denied = 0,
@@ -313,15 +386,16 @@ pub const RateLimiter = struct {
     }
 
     pub fn deinit(self: *RateLimiter) void {
+        var peer_iter = self.peers.iterator();
+        while (peer_iter.next()) |entry| self.allocator.free(entry.key_ptr.*);
         self.peers.deinit();
-        self.hit_counts.deinit();
     }
 
     /// Check whether a request from the given peer on the given protocol is allowed.
     ///
     /// Consumes a token if allowed. `now_ns` is a monotonic nanosecond timestamp.
     /// Returns false if rate limited (by either per-peer or global limit).
-    pub fn allowRequest(self: *RateLimiter, peer_id: u64, protocol: Protocol, now_ns: i128) !bool {
+    pub fn allowRequest(self: *RateLimiter, peer_id: []const u8, protocol: Protocol, now_ns: i128) !bool {
         return (try self.allowRequestN(peer_id, protocol, 1, now_ns)).isAllowed();
     }
 
@@ -332,7 +406,7 @@ pub const RateLimiter = struct {
     /// 64 tokens instead of 1.
     pub fn allowRequestN(
         self: *RateLimiter,
-        peer_id: u64,
+        peer_id: []const u8,
         protocol: Protocol,
         count: u32,
         now_ns: i128,
@@ -342,19 +416,24 @@ pub const RateLimiter = struct {
         if (!global_result.isAllowed()) {
             self.total_denied += 1;
             self.total_global_denied += 1;
-            try self.recordHit(peer_id);
-            log.warn("global rate limit exceeded for peer {} on protocol {s}", .{
+            log.warn("global rate limit exceeded for peer {s} on protocol {s}", .{
                 peer_id,
                 @tagName(protocol),
             });
-            return global_result;
+            return .{ .denied_global = switch (global_result) {
+                .denied_peer => |wait_ns| wait_ns,
+                .denied_global => |wait_ns| wait_ns,
+                .allowed => unreachable,
+            } };
         }
 
         // Check per-peer limit.
         const entry = try self.peers.getOrPut(peer_id);
         if (!entry.found_existing) {
+            entry.key_ptr.* = try self.allocator.dupe(u8, peer_id);
             entry.value_ptr.* = PeerBuckets.init(&self.configs, now_ns);
         }
+        entry.value_ptr.noteRequest(now_ns);
 
         const peer_result = entry.value_ptr.tryConsumeWithBackpressure(protocol, count, now_ns);
         if (peer_result.isAllowed()) {
@@ -366,57 +445,51 @@ pub const RateLimiter = struct {
                 self.global_bucket.tokens + @as(f64, @floatFromInt(count)),
             );
             self.total_denied += 1;
-            try self.recordHit(peer_id);
-            log.warn("rate limit exceeded for peer {} on protocol {s}", .{
+            log.warn("rate limit exceeded for peer {s} on protocol {s}", .{
                 peer_id,
                 @tagName(protocol),
             });
+            return .{ .denied_peer = switch (peer_result) {
+                .denied_peer => |wait_ns| wait_ns,
+                .denied_global => unreachable,
+                .allowed => unreachable,
+            } };
         }
         return peer_result;
     }
 
-    /// Record a rate limit hit for score penalty tracking.
-    fn recordHit(self: *RateLimiter, peer_id: u64) !void {
-        const entry = try self.hit_counts.getOrPut(peer_id);
-        if (!entry.found_existing) {
-            entry.value_ptr.* = 0;
-        }
-        entry.value_ptr.* += 1;
-    }
-
-    /// Get the number of rate limit hits for a peer since last reset.
-    /// Used by the scoring system to apply penalties for repeated violations.
-    pub fn getHitCount(self: *const RateLimiter, peer_id: u64) u32 {
-        return self.hit_counts.get(peer_id) orelse 0;
-    }
-
-    /// Reset hit counts (called periodically by peer manager heartbeat).
-    pub fn resetHitCounts(self: *RateLimiter) void {
-        self.hit_counts.clearRetainingCapacity();
-    }
-
-    /// Called when a response is received (hook for future response-based limiting).
-    /// Reserved for extension.
-    pub fn onResponse(self: *RateLimiter, peer_id: u64, protocol: Protocol) void {
-        _ = self;
-        _ = peer_id;
-        _ = protocol;
-    }
-
     /// Remove disconnected peers from the limiter to free memory.
-    pub fn prune(self: *RateLimiter, disconnected_peers: []const u64) void {
+    pub fn prune(self: *RateLimiter, disconnected_peers: []const []const u8) void {
         for (disconnected_peers) |peer_id| {
-            if (self.peers.remove(peer_id)) {
-                log.debug("pruned rate limiter state for peer {}", .{peer_id});
+            const had_state = self.peers.contains(peer_id);
+            self.removePeer(peer_id);
+            if (had_state) {
+                log.debug("pruned rate limiter state for peer {s}", .{peer_id});
             }
-            _ = self.hit_counts.remove(peer_id);
+        }
+    }
+
+    /// Remove peers that have not sent inbound requests recently.
+    pub fn pruneInactive(self: *RateLimiter, now_ns: i128, inactive_timeout_ns: i128) void {
+        var stale_peers = std.ArrayListUnmanaged([]const u8).empty;
+        defer stale_peers.deinit(self.allocator);
+
+        const cutoff_ns = now_ns - inactive_timeout_ns;
+        var iter = self.peers.iterator();
+        while (iter.next()) |entry| {
+            if (entry.value_ptr.last_request_ns > cutoff_ns) continue;
+            stale_peers.append(self.allocator, entry.key_ptr.*) catch continue;
+        }
+
+        for (stale_peers.items) |peer_id| {
+            self.removePeer(peer_id);
+            log.debug("pruned inactive rate limiter state for peer {s}", .{peer_id});
         }
     }
 
     /// Remove a single peer.
-    pub fn removePeer(self: *RateLimiter, peer_id: u64) void {
-        _ = self.peers.remove(peer_id);
-        _ = self.hit_counts.remove(peer_id);
+    pub fn removePeer(self: *RateLimiter, peer_id: []const u8) void {
+        if (self.peers.fetchRemove(peer_id)) |entry| self.allocator.free(entry.key);
     }
 
     /// Number of tracked peers.
@@ -425,7 +498,7 @@ pub const RateLimiter = struct {
     }
 
     /// Check current token count for a (peer, protocol) pair without consuming.
-    pub fn tokenCount(self: *RateLimiter, peer_id: u64, protocol: Protocol, now_ns: i128) f64 {
+    pub fn tokenCount(self: *RateLimiter, peer_id: []const u8, protocol: Protocol, now_ns: i128) f64 {
         const buckets = self.peers.getPtr(peer_id) orelse {
             return @floatFromInt(self.configs[@intFromEnum(protocol)].burst);
         };
@@ -435,6 +508,160 @@ pub const RateLimiter = struct {
     /// Current global bucket tokens.
     pub fn globalTokenCount(self: *RateLimiter, now_ns: i128) f64 {
         return self.global_bucket.currentTokens(now_ns);
+    }
+};
+
+// ── Outbound self rate limiter ───────────────────────────────────────────────
+
+/// Maximum number of concurrent outbound requests per peer and protocol.
+pub const MAX_CONCURRENT_OUTBOUND_REQUESTS: usize = 2;
+/// Treat an outbound request as stale if it has not completed within this time.
+pub const OUTBOUND_REQUEST_TIMEOUT_NS: i128 = 30 * std.time.ns_per_s;
+/// Drop peer tracking if it has not sent or completed outbound work recently.
+pub const OUTBOUND_INACTIVE_PEER_TIMEOUT_NS: i128 = 60 * std.time.ns_per_s;
+
+pub const SelfRateLimitMethod = req_resp_protocol.Method;
+
+pub const SelfRateLimiter = struct {
+    const RequestId = u64;
+    const method_count = std.meta.fields(SelfRateLimitMethod).len;
+
+    const TrackedRequest = struct {
+        id: RequestId,
+        started_ns: i128,
+    };
+
+    const PeerRequests = struct {
+        last_seen_ns: i128 = 0,
+        protocols: [method_count]std.ArrayListUnmanaged(TrackedRequest) = [_]std.ArrayListUnmanaged(TrackedRequest){.empty} ** method_count,
+
+        fn deinit(self: *PeerRequests, allocator: Allocator) void {
+            for (&self.protocols) |*requests| requests.deinit(allocator);
+        }
+
+        fn isEmpty(self: *const PeerRequests) bool {
+            for (self.protocols) |requests| {
+                if (requests.items.len != 0) return false;
+            }
+            return true;
+        }
+    };
+
+    allocator: Allocator,
+    mutex: std.Io.Mutex = .init,
+    peers: std.StringHashMap(PeerRequests),
+    next_request_id: RequestId = 1,
+    max_concurrent_requests: usize,
+
+    pub fn init(allocator: Allocator) SelfRateLimiter {
+        return .{
+            .allocator = allocator,
+            .peers = std.StringHashMap(PeerRequests).init(allocator),
+            .max_concurrent_requests = MAX_CONCURRENT_OUTBOUND_REQUESTS,
+        };
+    }
+
+    pub fn deinit(self: *SelfRateLimiter) void {
+        var iter = self.peers.iterator();
+        while (iter.next()) |entry| {
+            entry.value_ptr.deinit(self.allocator);
+            self.allocator.free(entry.key_ptr.*);
+        }
+        self.peers.deinit();
+    }
+
+    pub fn allow(self: *SelfRateLimiter, io: std.Io, peer_id: []const u8, method: SelfRateLimitMethod) !RequestId {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+
+        const now_ns = std.Io.Clock.awake.now(io).nanoseconds;
+        const entry = try self.peers.getOrPut(peer_id);
+        if (!entry.found_existing) {
+            entry.key_ptr.* = try self.allocator.dupe(u8, peer_id);
+            entry.value_ptr.* = .{ .last_seen_ns = now_ns };
+        }
+
+        entry.value_ptr.last_seen_ns = now_ns;
+        const requests = &entry.value_ptr.protocols[@intFromEnum(method)];
+        pruneTimedOutRequests(requests, now_ns);
+        if (requests.items.len >= self.max_concurrent_requests) return error.RequestSelfRateLimited;
+
+        const request_id = self.next_request_id;
+        self.next_request_id += 1;
+        try requests.append(self.allocator, .{
+            .id = request_id,
+            .started_ns = now_ns,
+        });
+        return request_id;
+    }
+
+    pub fn requestCompleted(
+        self: *SelfRateLimiter,
+        io: std.Io,
+        peer_id: []const u8,
+        method: SelfRateLimitMethod,
+        request_id: RequestId,
+    ) void {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+
+        const entry = self.peers.getPtr(peer_id) orelse return;
+        entry.last_seen_ns = std.Io.Clock.awake.now(io).nanoseconds;
+        const requests = &entry.protocols[@intFromEnum(method)];
+        var i: usize = 0;
+        while (i < requests.items.len) : (i += 1) {
+            if (requests.items[i].id != request_id) continue;
+            _ = requests.swapRemove(i);
+            break;
+        }
+    }
+
+    pub fn pruneInactive(self: *SelfRateLimiter, io: std.Io) void {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+
+        const now_ns = std.Io.Clock.awake.now(io).nanoseconds;
+        var stale_peers = std.ArrayListUnmanaged([]const u8).empty;
+        defer stale_peers.deinit(self.allocator);
+
+        var iter = self.peers.iterator();
+        while (iter.next()) |entry| {
+            for (&entry.value_ptr.protocols) |*requests| {
+                pruneTimedOutRequests(requests, now_ns);
+            }
+            if (!entry.value_ptr.isEmpty()) continue;
+            if (now_ns - entry.value_ptr.last_seen_ns < OUTBOUND_INACTIVE_PEER_TIMEOUT_NS) continue;
+            stale_peers.append(self.allocator, entry.key_ptr.*) catch continue;
+        }
+
+        for (stale_peers.items) |peer_id| {
+            removePeer(self, peer_id);
+        }
+    }
+
+    pub fn peerCount(self: *SelfRateLimiter, io: std.Io) usize {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        return self.peers.count();
+    }
+
+    fn pruneTimedOutRequests(requests: *std.ArrayListUnmanaged(TrackedRequest), now_ns: i128) void {
+        var i: usize = 0;
+        while (i < requests.items.len) {
+            if (now_ns - requests.items[i].started_ns < OUTBOUND_REQUEST_TIMEOUT_NS) {
+                i += 1;
+                continue;
+            }
+            _ = requests.swapRemove(i);
+        }
+    }
+
+    fn removePeer(self: *SelfRateLimiter, peer_id: []const u8) void {
+        if (self.peers.fetchRemove(peer_id)) |entry| {
+            var value = entry.value;
+            value.deinit(self.allocator);
+            self.allocator.free(entry.key);
+        }
     }
 };
 
@@ -497,12 +724,13 @@ test "TokenBucket: backpressure returns wait time" {
     // Next request is denied with wait time.
     const r2 = bucket.tryConsumeWithBackpressure(1, 0);
     switch (r2) {
-        .denied => |wait_ns| {
+        .denied_peer => |wait_ns| {
             // Should need to wait ~1 second (1 token at 1/sec).
             try testing.expect(wait_ns > 0);
             try testing.expect(wait_ns <= std.time.ns_per_s);
         },
         .allowed => return error.TestUnexpectedResult,
+        .denied_global => return error.TestUnexpectedResult,
     }
 }
 
@@ -527,10 +755,10 @@ test "RateLimiter: allows requests within burst" {
 
     var i: usize = 0;
     while (i < 5) : (i += 1) {
-        const allowed = try limiter.allowRequest(42, .status, 0);
+        const allowed = try limiter.allowRequest("peer-42", .status, 0);
         try testing.expect(allowed);
     }
-    const denied = try limiter.allowRequest(42, .status, 0);
+    const denied = try limiter.allowRequest("peer-42", .status, 0);
     try testing.expect(!denied);
 }
 
@@ -540,10 +768,10 @@ test "RateLimiter: different peers are independent" {
 
     var i: usize = 0;
     while (i < 5) : (i += 1) {
-        _ = try limiter.allowRequest(1, .status, 0);
+        _ = try limiter.allowRequest("peer-1", .status, 0);
     }
-    try testing.expect(!(try limiter.allowRequest(1, .status, 0)));
-    try testing.expect(try limiter.allowRequest(2, .status, 0));
+    try testing.expect(!(try limiter.allowRequest("peer-1", .status, 0)));
+    try testing.expect(try limiter.allowRequest("peer-2", .status, 0));
 }
 
 test "RateLimiter: different protocols are independent" {
@@ -552,35 +780,52 @@ test "RateLimiter: different protocols are independent" {
 
     var i: usize = 0;
     while (i < 5) : (i += 1) {
-        _ = try limiter.allowRequest(1, .status, 0);
+        _ = try limiter.allowRequest("peer-1", .status, 0);
     }
-    try testing.expect(!(try limiter.allowRequest(1, .status, 0)));
-    try testing.expect(try limiter.allowRequest(1, .ping, 0));
+    try testing.expect(!(try limiter.allowRequest("peer-1", .status, 0)));
+    try testing.expect(try limiter.allowRequest("peer-1", .ping, 0));
 }
 
 test "RateLimiter: prune removes peers" {
     var limiter = RateLimiter.init(testing.allocator);
     defer limiter.deinit();
 
-    _ = try limiter.allowRequest(1, .ping, 0);
-    _ = try limiter.allowRequest(2, .ping, 0);
+    _ = try limiter.allowRequest("peer-1", .ping, 0);
+    _ = try limiter.allowRequest("peer-2", .ping, 0);
     try testing.expectEqual(@as(usize, 2), limiter.peerCount());
 
-    const disconnected = [_]u64{1};
+    const disconnected = [_][]const u8{"peer-1"};
     limiter.prune(&disconnected);
     try testing.expectEqual(@as(usize, 1), limiter.peerCount());
+}
+
+test "RateLimiter: pruneInactive keeps recent peers and removes stale peers" {
+    var limiter = RateLimiter.init(testing.allocator);
+    defer limiter.deinit();
+
+    _ = try limiter.allowRequest("peer-recent", .ping, 0);
+    _ = try limiter.allowRequest("peer-stale", .ping, 0);
+
+    // Refresh one peer well after the other so they straddle the inactivity cutoff.
+    _ = try limiter.allowRequest("peer-recent", .ping, 4 * 60 * std.time.ns_per_s);
+
+    limiter.pruneInactive(6 * 60 * std.time.ns_per_s, INACTIVE_PEER_TIMEOUT_NS);
+
+    try testing.expectEqual(@as(usize, 1), limiter.peerCount());
+    try testing.expect(limiter.peers.contains("peer-recent"));
+    try testing.expect(!limiter.peers.contains("peer-stale"));
 }
 
 test "RateLimiter: replenishment over time" {
     var limiter = RateLimiter.init(testing.allocator);
     defer limiter.deinit();
 
-    _ = try limiter.allowRequest(1, .ping, 0);
-    _ = try limiter.allowRequest(1, .ping, 0);
-    try testing.expect(!(try limiter.allowRequest(1, .ping, 0)));
+    _ = try limiter.allowRequest("peer-1", .ping, 0);
+    _ = try limiter.allowRequest("peer-1", .ping, 0);
+    try testing.expect(!(try limiter.allowRequest("peer-1", .ping, 0)));
 
     const two_minutes_ns: i128 = 2 * 60 * std.time.ns_per_s;
-    try testing.expect(try limiter.allowRequest(1, .ping, two_minutes_ns));
+    try testing.expect(try limiter.allowRequest("peer-1", .ping, two_minutes_ns));
 }
 
 test "RateLimiter: global rate limit" {
@@ -593,13 +838,13 @@ test "RateLimiter: global rate limit" {
     defer limiter.deinit();
 
     // 3 requests from different peers should all succeed (within global burst).
-    try testing.expect((try limiter.allowRequestN(1, .status, 1, 0)).isAllowed());
-    try testing.expect((try limiter.allowRequestN(2, .status, 1, 0)).isAllowed());
-    try testing.expect((try limiter.allowRequestN(3, .status, 1, 0)).isAllowed());
+    try testing.expect((try limiter.allowRequestN("peer-1", .status, 1, 0)).isAllowed());
+    try testing.expect((try limiter.allowRequestN("peer-2", .status, 1, 0)).isAllowed());
+    try testing.expect((try limiter.allowRequestN("peer-3", .status, 1, 0)).isAllowed());
 
     // 4th request should be denied by global limit even though per-peer has tokens.
-    const result = try limiter.allowRequestN(4, .status, 1, 0);
-    try testing.expect(!result.isAllowed());
+    const result = try limiter.allowRequestN("peer-4", .status, 1, 0);
+    try testing.expect(result.isGlobalDenied());
     try testing.expect(limiter.total_global_denied > 0);
 }
 
@@ -610,16 +855,17 @@ test "RateLimiter: backpressure provides wait time" {
     // Exhaust status tokens (burst = 5).
     var i: usize = 0;
     while (i < 5) : (i += 1) {
-        _ = try limiter.allowRequestN(1, .status, 1, 0);
+        _ = try limiter.allowRequestN("peer-1", .status, 1, 0);
     }
 
     // Next request should be denied with backpressure info.
-    const result = try limiter.allowRequestN(1, .status, 1, 0);
+    const result = try limiter.allowRequestN("peer-1", .status, 1, 0);
     switch (result) {
-        .denied => |wait_ns| {
+        .denied_peer => |wait_ns| {
             try testing.expect(wait_ns > 0);
         },
         .allowed => return error.TestUnexpectedResult,
+        .denied_global => return error.TestUnexpectedResult,
     }
 }
 
@@ -629,36 +875,13 @@ test "RateLimiter: multi-token consumption for range requests" {
 
     // beacon_blocks_by_range has burst=10.
     // Consume 8 tokens at once.
-    try testing.expect((try limiter.allowRequestN(1, .beacon_blocks_by_range, 8, 0)).isAllowed());
+    try testing.expect((try limiter.allowRequestN("peer-1", .beacon_blocks_by_range, 8, 0)).isAllowed());
 
     // Only 2 tokens left — requesting 5 should fail.
-    try testing.expect(!(try limiter.allowRequestN(1, .beacon_blocks_by_range, 5, 0)).isAllowed());
+    try testing.expect(!(try limiter.allowRequestN("peer-1", .beacon_blocks_by_range, 5, 0)).isAllowed());
 
     // But 2 should still work.
-    try testing.expect((try limiter.allowRequestN(1, .beacon_blocks_by_range, 2, 0)).isAllowed());
-}
-
-test "RateLimiter: hit count tracking" {
-    var limiter = RateLimiter.init(testing.allocator);
-    defer limiter.deinit();
-
-    // Exhaust status tokens.
-    var i: usize = 0;
-    while (i < 5) : (i += 1) {
-        _ = try limiter.allowRequest(1, .status, 0);
-    }
-
-    // Hit rate limit 3 times.
-    _ = try limiter.allowRequest(1, .status, 0);
-    _ = try limiter.allowRequest(1, .status, 0);
-    _ = try limiter.allowRequest(1, .status, 0);
-
-    try testing.expectEqual(@as(u32, 3), limiter.getHitCount(1));
-    try testing.expectEqual(@as(u32, 0), limiter.getHitCount(2));
-
-    // Reset should clear counts.
-    limiter.resetHitCounts();
-    try testing.expectEqual(@as(u32, 0), limiter.getHitCount(1));
+    try testing.expect((try limiter.allowRequestN("peer-1", .beacon_blocks_by_range, 2, 0)).isAllowed());
 }
 
 test "RateLimiter: global token count" {
@@ -671,6 +894,33 @@ test "RateLimiter: global token count" {
 
     try testing.expectEqual(@as(f64, 100.0), limiter.globalTokenCount(0));
 
-    _ = try limiter.allowRequest(1, .status, 0);
+    _ = try limiter.allowRequest("peer-1", .status, 0);
     try testing.expectEqual(@as(f64, 99.0), limiter.globalTokenCount(0));
+}
+
+test "SelfRateLimiter: denies third concurrent request for peer and method" {
+    var limiter = SelfRateLimiter.init(testing.allocator);
+    defer limiter.deinit();
+
+    const io = std.testing.io;
+    const peer_id = "peer-a";
+
+    const first = try limiter.allow(io, peer_id, .ping);
+    _ = try limiter.allow(io, peer_id, .ping);
+    try testing.expectError(error.RequestSelfRateLimited, limiter.allow(io, peer_id, .ping));
+
+    limiter.requestCompleted(io, peer_id, .ping, first);
+    _ = try limiter.allow(io, peer_id, .ping);
+}
+
+test "SelfRateLimiter: allows different methods concurrently" {
+    var limiter = SelfRateLimiter.init(testing.allocator);
+    defer limiter.deinit();
+
+    const io = std.testing.io;
+    const peer_id = "peer-a";
+
+    _ = try limiter.allow(io, peer_id, .ping);
+    _ = try limiter.allow(io, peer_id, .status);
+    _ = try limiter.allow(io, peer_id, .metadata);
 }

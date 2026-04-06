@@ -19,6 +19,15 @@ const ResponseChunk = req_resp_handler.ResponseChunk;
 
 const log = std.log.scoped(.eth2_protocols);
 
+pub const ReqRespServerPolicy = struct {
+    ptr: *anyopaque,
+    allowInboundRequestFn: *const fn (ptr: *anyopaque, peer_id: ?[]const u8, method: protocol.Method, request_bytes: []const u8) bool,
+
+    pub fn allowInboundRequest(self: *const ReqRespServerPolicy, peer_id: ?[]const u8, method: protocol.Method, request_bytes: []const u8) bool {
+        return self.allowInboundRequestFn(self.ptr, peer_id, method, request_bytes);
+    }
+};
+
 fn peerIdFromCtx(ctx: anytype) ?[]const u8 {
     return if (@hasField(@TypeOf(ctx), "peer_id")) ctx.peer_id else null;
 }
@@ -31,13 +40,14 @@ fn makeProtocolHandler(
     return struct {
         allocator: Allocator,
         context: *const ReqRespContext,
+        server_policy: ?*const ReqRespServerPolicy,
 
         pub const id: []const u8 = id_literal;
 
         const Self = @This();
 
-        pub fn init(allocator: Allocator, context: *const ReqRespContext) Self {
-            return .{ .allocator = allocator, .context = context };
+        pub fn init(allocator: Allocator, context: *const ReqRespContext, server_policy: ?*const ReqRespServerPolicy) Self {
+            return .{ .allocator = allocator, .context = context, .server_policy = server_policy };
         }
 
         pub fn handleInbound(self: *Self, io: Io, stream: anytype, ctx: anytype) !void {
@@ -55,6 +65,13 @@ fn makeProtocolHandler(
                 return;
             };
             defer self.allocator.free(request_bytes);
+
+            if (self.server_policy) |server_policy| {
+                if (!server_policy.allowInboundRequest(peerIdFromCtx(ctx), method, request_bytes)) {
+                    stream.closeWrite(io);
+                    return;
+                }
+            }
 
             req_resp_handler.serveRequestVersioned(
                 self.allocator,

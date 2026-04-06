@@ -39,9 +39,15 @@ const Multiaddr = @import("multiaddr").Multiaddr;
 
 const eth2_protocols = @import("eth2_protocols.zig");
 const eth_gossip = @import("eth_gossip.zig");
+const peer_manager_mod = @import("peer_manager.zig");
+const peer_scoring = @import("peer_scoring.zig");
+const rate_limiter = @import("rate_limiter.zig");
 const req_resp_handler = @import("req_resp_handler.zig");
 const config_mod = @import("config");
 const ForkSeq = config_mod.ForkSeq;
+const PeerManager = peer_manager_mod.PeerManager;
+const SelfRateLimiter = rate_limiter.SelfRateLimiter;
+const SelfRateLimitMethod = rate_limiter.SelfRateLimitMethod;
 
 const EthGossipAdapter = eth_gossip.EthGossipAdapter;
 pub const GossipTopicType = eth_gossip.GossipTopicType;
@@ -62,6 +68,7 @@ const BlobSidecarsByRangeProtocol = eth2_protocols.BlobSidecarsByRangeProtocol;
 const BlobSidecarsByRootProtocol = eth2_protocols.BlobSidecarsByRootProtocol;
 const DataColumnsByRangeProtocol = eth2_protocols.DataColumnsByRangeProtocol;
 const DataColumnsByRootProtocol = eth2_protocols.DataColumnsByRootProtocol;
+const ReqRespServerPolicy = eth2_protocols.ReqRespServerPolicy;
 const LightClientBootstrapProtocol = eth2_protocols.LightClientBootstrapProtocol;
 const LightClientUpdatesByRangeProtocol = eth2_protocols.LightClientUpdatesByRangeProtocol;
 const LightClientFinalityUpdateProtocol = eth2_protocols.LightClientFinalityUpdateProtocol;
@@ -269,6 +276,8 @@ pub const P2pConfig = struct {
     fork_seq: ForkSeq,
     /// Req/resp handler callbacks (provides blocks, status, etc.).
     req_resp_context: *const ReqRespContext,
+    /// Optional inbound req/resp server policy (rate limiting, disconnects).
+    req_resp_server_policy: ?*const ReqRespServerPolicy = null,
     /// Optional libp2p host identity for QUIC/TLS and peer-id derivation.
     /// When null, eth-p2p-z generates an ephemeral host identity.
     host_identity: ?identity_mod.KeyPair = null,
@@ -283,6 +292,20 @@ pub const P2pConfig = struct {
 
 // ─── P2pService ──────────────────────────────────────────────────────────────
 
+pub const ReqRespRequestPermit = struct {
+    limiter: *SelfRateLimiter,
+    peer_id: []const u8,
+    method: SelfRateLimitMethod,
+    request_id: u64,
+    active: bool = true,
+
+    pub fn deinit(self: *ReqRespRequestPermit, io: Io) void {
+        if (!self.active) return;
+        self.limiter.requestCompleted(io, self.peer_id, self.method, self.request_id);
+        self.active = false;
+    }
+};
+
 pub const P2pService = struct {
     const Self = @This();
 
@@ -291,6 +314,7 @@ pub const P2pService = struct {
     gossipsub: *GossipsubService,
     gossip_adapter: EthGossipAdapter,
     host_identity: ?*identity_mod.KeyPair,
+    req_resp_self_limiter: SelfRateLimiter,
 
     pub fn init(allocator: Allocator, config: P2pConfig) !Self {
         const gossipsub = try GossipsubService.init(allocator, config.gossipsub_config);
@@ -325,18 +349,18 @@ pub const P2pService = struct {
                 allocator,
                 .{ .host_identity = host_identity },
                 .{
-                    StatusProtocol.init(allocator, config.req_resp_context),
-                    StatusV2Protocol.init(allocator, config.req_resp_context),
-                    GoodbyeProtocol.init(allocator, config.req_resp_context),
-                    PingProtocol.init(allocator, config.req_resp_context),
-                    MetadataProtocol.init(allocator, config.req_resp_context),
-                    MetadataV3Protocol.init(allocator, config.req_resp_context),
-                    BlocksByRangeProtocol.init(allocator, config.req_resp_context),
-                    BlocksByRootProtocol.init(allocator, config.req_resp_context),
-                    BlobSidecarsByRangeProtocol.init(allocator, config.req_resp_context),
-                    BlobSidecarsByRootProtocol.init(allocator, config.req_resp_context),
-                    DataColumnsByRangeProtocol.init(allocator, config.req_resp_context),
-                    DataColumnsByRootProtocol.init(allocator, config.req_resp_context),
+                    StatusProtocol.init(allocator, config.req_resp_context, config.req_resp_server_policy),
+                    StatusV2Protocol.init(allocator, config.req_resp_context, config.req_resp_server_policy),
+                    GoodbyeProtocol.init(allocator, config.req_resp_context, config.req_resp_server_policy),
+                    PingProtocol.init(allocator, config.req_resp_context, config.req_resp_server_policy),
+                    MetadataProtocol.init(allocator, config.req_resp_context, config.req_resp_server_policy),
+                    MetadataV3Protocol.init(allocator, config.req_resp_context, config.req_resp_server_policy),
+                    BlocksByRangeProtocol.init(allocator, config.req_resp_context, config.req_resp_server_policy),
+                    BlocksByRootProtocol.init(allocator, config.req_resp_context, config.req_resp_server_policy),
+                    BlobSidecarsByRangeProtocol.init(allocator, config.req_resp_context, config.req_resp_server_policy),
+                    BlobSidecarsByRootProtocol.init(allocator, config.req_resp_context, config.req_resp_server_policy),
+                    DataColumnsByRangeProtocol.init(allocator, config.req_resp_context, config.req_resp_server_policy),
+                    DataColumnsByRootProtocol.init(allocator, config.req_resp_context, config.req_resp_server_policy),
                     GossipsubHandler{ .svc = gossipsub },
                     identify_handler,
                 },
@@ -346,22 +370,22 @@ pub const P2pService = struct {
                 allocator,
                 .{ .host_identity = host_identity },
                 .{
-                    StatusProtocol.init(allocator, config.req_resp_context),
-                    StatusV2Protocol.init(allocator, config.req_resp_context),
-                    GoodbyeProtocol.init(allocator, config.req_resp_context),
-                    PingProtocol.init(allocator, config.req_resp_context),
-                    MetadataProtocol.init(allocator, config.req_resp_context),
-                    MetadataV3Protocol.init(allocator, config.req_resp_context),
-                    BlocksByRangeProtocol.init(allocator, config.req_resp_context),
-                    BlocksByRootProtocol.init(allocator, config.req_resp_context),
-                    BlobSidecarsByRangeProtocol.init(allocator, config.req_resp_context),
-                    BlobSidecarsByRootProtocol.init(allocator, config.req_resp_context),
-                    DataColumnsByRangeProtocol.init(allocator, config.req_resp_context),
-                    DataColumnsByRootProtocol.init(allocator, config.req_resp_context),
-                    LightClientBootstrapProtocol.init(allocator, config.req_resp_context),
-                    LightClientUpdatesByRangeProtocol.init(allocator, config.req_resp_context),
-                    LightClientFinalityUpdateProtocol.init(allocator, config.req_resp_context),
-                    LightClientOptimisticUpdateProtocol.init(allocator, config.req_resp_context),
+                    StatusProtocol.init(allocator, config.req_resp_context, config.req_resp_server_policy),
+                    StatusV2Protocol.init(allocator, config.req_resp_context, config.req_resp_server_policy),
+                    GoodbyeProtocol.init(allocator, config.req_resp_context, config.req_resp_server_policy),
+                    PingProtocol.init(allocator, config.req_resp_context, config.req_resp_server_policy),
+                    MetadataProtocol.init(allocator, config.req_resp_context, config.req_resp_server_policy),
+                    MetadataV3Protocol.init(allocator, config.req_resp_context, config.req_resp_server_policy),
+                    BlocksByRangeProtocol.init(allocator, config.req_resp_context, config.req_resp_server_policy),
+                    BlocksByRootProtocol.init(allocator, config.req_resp_context, config.req_resp_server_policy),
+                    BlobSidecarsByRangeProtocol.init(allocator, config.req_resp_context, config.req_resp_server_policy),
+                    BlobSidecarsByRootProtocol.init(allocator, config.req_resp_context, config.req_resp_server_policy),
+                    DataColumnsByRangeProtocol.init(allocator, config.req_resp_context, config.req_resp_server_policy),
+                    DataColumnsByRootProtocol.init(allocator, config.req_resp_context, config.req_resp_server_policy),
+                    LightClientBootstrapProtocol.init(allocator, config.req_resp_context, config.req_resp_server_policy),
+                    LightClientUpdatesByRangeProtocol.init(allocator, config.req_resp_context, config.req_resp_server_policy),
+                    LightClientFinalityUpdateProtocol.init(allocator, config.req_resp_context, config.req_resp_server_policy),
+                    LightClientOptimisticUpdateProtocol.init(allocator, config.req_resp_context, config.req_resp_server_policy),
                     GossipsubHandler{ .svc = gossipsub },
                     identify_handler,
                 },
@@ -380,6 +404,7 @@ pub const P2pService = struct {
             .gossipsub = gossipsub,
             .gossip_adapter = gossip_adapter,
             .host_identity = host_identity,
+            .req_resp_self_limiter = SelfRateLimiter.init(allocator),
         };
     }
 
@@ -433,6 +458,25 @@ pub const P2pService = struct {
         return self.network.dialProtocol(io, peer_id, protocol_id);
     }
 
+    pub fn acquireReqRespRequestPermit(
+        self: *Self,
+        io: Io,
+        peer_id: []const u8,
+        method: SelfRateLimitMethod,
+    ) !ReqRespRequestPermit {
+        const request_id = try self.req_resp_self_limiter.allow(io, peer_id, method);
+        return .{
+            .limiter = &self.req_resp_self_limiter,
+            .peer_id = peer_id,
+            .method = method,
+            .request_id = request_id,
+        };
+    }
+
+    pub fn pruneReqRespSelfLimiter(self: *Self, io: Io) void {
+        self.req_resp_self_limiter.pruneInactive(io);
+    }
+
     /// Ask libp2p to open an outbound gossipsub stream to a connected peer.
     pub fn openGossipsubStream(self: *Self, io: Io, peer_id: []const u8) !void {
         try self.newStream(io, peer_id, GossipsubHandler, null);
@@ -471,6 +515,47 @@ pub const P2pService = struct {
         self.gossipsub.router.recordInvalidMessage(peer_id, topic);
     }
 
+    /// Mirror current gossipsub router scores into the peer manager's score state.
+    pub fn syncGossipsubScores(self: *Self, pm: *PeerManager, now_ms: u64) !void {
+        const ScoredPeer = struct {
+            peer_id: []const u8,
+            score: f64,
+        };
+
+        var scored_peers = std.ArrayListUnmanaged(ScoredPeer).empty;
+        defer scored_peers.deinit(self.allocator);
+
+        switch (self.network) {
+            inline else => |*network| {
+                var iter = network.connections.iterator();
+                while (iter.next()) |entry| {
+                    try scored_peers.append(self.allocator, .{
+                        .peer_id = entry.key_ptr.*,
+                        .score = self.gossipsub.router.peerScore(entry.key_ptr.*),
+                    });
+                }
+            },
+        }
+
+        std.mem.sort(ScoredPeer, scored_peers.items, {}, struct {
+            fn lessThan(_: void, a: ScoredPeer, b: ScoredPeer) bool {
+                return a.score > b.score;
+            }
+        }.lessThan);
+
+        var ignores_remaining = pm.negativeGossipsubIgnoreCount();
+        for (scored_peers.items) |scored_peer| {
+            const ignore_negative = if (scored_peer.score < 0.0 and
+                scored_peer.score > peer_scoring.NEGATIVE_GOSSIPSUB_IGNORE_THRESHOLD and
+                ignores_remaining > 0)
+            blk: {
+                ignores_remaining -= 1;
+                break :blk true;
+            } else false;
+            _ = pm.updateGossipsubScore(scored_peer.peer_id, scored_peer.score, ignore_negative, now_ms);
+        }
+    }
+
     /// Subscribe to a gossip subnet topic (e.g., attestation subnets).
     pub fn subscribeSubnet(self: *Self, topic_type: GossipTopicType, subnet_id: u8) !void {
         try self.gossip_adapter.subscribeSubnet(topic_type, subnet_id);
@@ -498,6 +583,7 @@ pub const P2pService = struct {
     /// Release all owned resources.
     pub fn deinit(self: *Self, io: Io) void {
         self.gossip_adapter.deinit();
+        self.req_resp_self_limiter.deinit();
         self.network.deinit(io);
         self.gossipsub.deinit();
         if (self.host_identity) |host_identity| {
@@ -509,7 +595,7 @@ pub const P2pService = struct {
     /// Spawn a background fiber for the gossipsub heartbeat timer.
     fn startHeartbeat(self: *Self, io: Io) void {
         switch (self.network) {
-            inline else => |*network| network.background.async(io, heartbeatLoop, .{ self.gossipsub, io }),
+            inline else => |*network| network.background.@"async"(io, heartbeatLoop, .{ self.gossipsub, io }),
         }
     }
 

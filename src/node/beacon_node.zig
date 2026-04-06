@@ -76,7 +76,6 @@ const BatchId = sync_mod.BatchId;
 const RangeSyncType = sync_mod.RangeSyncType;
 
 const execution_mod = @import("execution");
-const MockEngine = execution_mod.MockEngine;
 const PayloadAttributesV3 = execution_mod.engine_api_types.PayloadAttributesV3;
 const GetPayloadResponse = execution_mod.GetPayloadResponse;
 const constants = @import("constants");
@@ -325,10 +324,12 @@ pub const BeaconNode = struct {
     // Owns the libp2p Switch, gossipsub service, and gossip adapter.
     p2p_service: ?P2pService = null,
 
-    // Req/resp context used by the P2P service (persistent, heap-allocated).
-    // Uses self.allocator as scratch; block bytes returned by callbacks are copied
-    // by the handler before the callback returns.
+    // Req/resp context and server policy used by the P2P service.
+    // The callback context uses self.allocator as scratch; block bytes returned
+    // by callbacks are copied by the handler before the callback returns.
     p2p_req_resp_ctx: ?*ReqRespContext = null,
+    p2p_req_resp_policy: ?*networking.ReqRespServerPolicy = null,
+    req_resp_rate_limiter: ?*networking.RateLimiter = null,
     p2p_request_ctx: ?*reqresp_callbacks_mod.RequestContext = null,
 
     // Sync controller — wires P2P events into the sync pipeline.
@@ -1456,10 +1457,6 @@ pub const BeaconNode = struct {
         self.execution_runtime.submitForkchoiceUpdateAsync(update) catch |err| {
             log.logger(.node).warn("forkchoiceUpdated failed: {}", .{err});
         };
-    }
-
-    pub fn mockEngine(self: *const BeaconNode) ?*MockEngine {
-        return self.execution_runtime.mockEngine();
     }
 
     pub fn hasExecutionEngine(self: *const BeaconNode) bool {

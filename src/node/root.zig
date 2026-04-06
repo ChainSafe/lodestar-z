@@ -38,6 +38,7 @@ test {
 
 test {
     _ = @import("beacon_node_test.zig");
+    _ = @import("gossip_handler_test.zig");
 }
 
 pub const gossip_handler_mod = @import("gossip_handler.zig");

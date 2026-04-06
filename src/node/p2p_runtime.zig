@@ -26,7 +26,7 @@ const ReqRespContext = networking.ReqRespContext;
 const ConnectionDirection = networking.ConnectionDirection;
 const GoodbyeReason = networking.GoodbyeReason;
 const PeerAction = networking.PeerAction;
-const ReqRespProtocol = networking.ReqRespProtocol;
+const peer_scoring = networking.peer_scoring;
 const StatusMessage = networking.messages.StatusMessage;
 const StatusMessageV2 = networking.messages.StatusMessageV2;
 const MetadataV2 = networking.messages.MetadataV2;
@@ -68,6 +68,8 @@ const PeerMetadataResponse = struct {
     metadata: MetadataV2.Type,
     custody_group_count: ?u64 = null,
 };
+
+const ReqRespMaintenanceProtocol = peer_scoring.ReqRespProtocol;
 
 const SlotRange = struct {
     start_slot: u64,
@@ -235,6 +237,16 @@ pub fn start(self: *BeaconNode, io: std.Io, listen_addr: []const u8, port: u16) 
     req_resp_ctx.* = reqresp_callbacks_mod.makeReqRespContext(p2p_req_ctx);
     self.p2p_req_resp_ctx = req_resp_ctx;
 
+    const req_resp_server_policy = try self.allocator.create(networking.ReqRespServerPolicy);
+    errdefer self.allocator.destroy(req_resp_server_policy);
+    req_resp_server_policy.* = reqresp_callbacks_mod.makeReqRespServerPolicy(p2p_req_ctx);
+    self.p2p_req_resp_policy = req_resp_server_policy;
+
+    const req_resp_rate_limiter = try self.allocator.create(networking.RateLimiter);
+    errdefer self.allocator.destroy(req_resp_rate_limiter);
+    req_resp_rate_limiter.* = networking.RateLimiter.init(self.allocator);
+    self.req_resp_rate_limiter = req_resp_rate_limiter;
+
     const head_slot = self.currentHeadSlot();
     const fork_digest = self.config.forkDigestAtSlot(head_slot, self.genesis_validators_root);
 
@@ -254,6 +266,7 @@ pub fn start(self: *BeaconNode, io: std.Io, listen_addr: []const u8, port: u16) 
         .fork_digest = fork_digest,
         .fork_seq = self.config.forkSeq(head_slot),
         .req_resp_context = req_resp_ctx,
+        .req_resp_server_policy = req_resp_server_policy,
         .host_identity = host_identity,
         .identify_agent_version = self.identify_agent_version,
         .gossipsub_config = .{
@@ -316,6 +329,15 @@ pub fn deinitOwnedState(self: *BeaconNode) void {
         self.subnet_service = null;
     }
 
+    if (self.req_resp_rate_limiter) |limiter| {
+        limiter.deinit();
+        self.allocator.destroy(limiter);
+        self.req_resp_rate_limiter = null;
+    }
+    if (self.p2p_req_resp_policy) |policy| {
+        self.allocator.destroy(policy);
+        self.p2p_req_resp_policy = null;
+    }
     if (self.p2p_req_resp_ctx) |ctx| {
         self.allocator.destroy(ctx);
         self.p2p_req_resp_ctx = null;
@@ -377,6 +399,7 @@ pub fn processSyncBatches(self: *BeaconNode, io: std.Io, svc: *networking.P2pSer
         }
 
         const blocks = fetchRawBlocksByRange(self, io, svc, peer_id, req.start_slot, req.count) catch |err| {
+            reportReqRespFetchFailure(self, io, peer_id, .beacon_blocks_by_range, err);
             std.log.warn("Batch {d} fetch failed: {}", .{ req.batch_id, err });
             if (self.sync_service_inst) |sync_svc| {
                 sync_svc.onBatchError(req.chain_id, req.batch_id, req.generation, peer_id);
@@ -426,6 +449,7 @@ pub fn processSyncByRootRequests(self: *BeaconNode, io: std.Io, svc: *networking
         });
 
         const block_ssz = fetchBlockByRoot(self, io, svc, peer_id, root) catch |err| {
+            reportReqRespFetchFailure(self, io, peer_id, .beacon_blocks_by_root, err);
             std.log.warn("processSyncByRoot: fetch failed for root {x:0>2}{x:0>2}{x:0>2}{x:0>2}...: {}", .{
                 root[0], root[1], root[2], root[3], err,
             });
@@ -488,6 +512,33 @@ fn initSubnetService(self: *BeaconNode) !void {
 fn closeOwnedQuicStream(io: std.Io, stream: *networking.QuicStream) void {
     stream.close(io);
     stream.deinit();
+}
+
+const OpenedReqRespRequest = struct {
+    permit: networking.ReqRespRequestPermit,
+    stream: networking.QuicStream,
+
+    fn deinit(self: *OpenedReqRespRequest, io: std.Io) void {
+        closeOwnedQuicStream(io, &self.stream);
+        self.permit.deinit(io);
+    }
+};
+
+fn openReqRespRequest(
+    io: std.Io,
+    svc: *networking.P2pService,
+    peer_id: []const u8,
+    method: networking.rate_limiter.SelfRateLimitMethod,
+    protocol_id: []const u8,
+) !OpenedReqRespRequest {
+    var permit = try svc.acquireReqRespRequestPermit(io, peer_id, method);
+    errdefer permit.deinit(io);
+
+    const stream = try svc.dialProtocol(io, peer_id, protocol_id);
+    return .{
+        .permit = permit,
+        .stream = stream,
+    };
 }
 
 fn bootstrapBootnodes(self: *BeaconNode, io: std.Io, svc: *networking.P2pService) void {
@@ -777,6 +828,14 @@ fn runPeerManagerHeartbeat(self: *BeaconNode, io: std.Io, svc: *networking.P2pSe
     }
 
     var did_work = false;
+    svc.syncGossipsubScores(pm, now_ms) catch |err| {
+        std.log.warn("Failed to mirror gossipsub scores into peer manager: {}", .{err});
+    };
+    if (self.req_resp_rate_limiter) |limiter| {
+        limiter.pruneInactive(std.Io.Clock.awake.now(io).nanoseconds, networking.rate_limiter.INACTIVE_PEER_TIMEOUT_NS);
+    }
+    svc.pruneReqRespSelfLimiter(io);
+
     var actions = pm.heartbeat(now_ms) catch |err| {
         std.log.warn("PeerManager heartbeat failed: {}", .{err});
         return false;
@@ -1246,7 +1305,7 @@ fn dialDiscoveredPeers(
         const peer_id = svc.dial(io, peer_addr) catch |err| {
             if (pm) |peer_manager| {
                 if (predicted_peer_id) |known_peer_id| {
-                    peer_manager.onPeerDisconnected(known_peer_id, now_ms);
+                    notePeerDisconnected(self, peer_manager, known_peer_id, now_ms);
                 }
             }
             std.log.debug("Discovered peer dial failed: {}", .{err});
@@ -1256,7 +1315,7 @@ fn dialDiscoveredPeers(
         if (pm) |peer_manager| {
             if (predicted_peer_id) |known_peer_id| {
                 if (!std.mem.eql(u8, known_peer_id, peer_id)) {
-                    peer_manager.onPeerDisconnected(known_peer_id, now_ms);
+                    notePeerDisconnected(self, peer_manager, known_peer_id, now_ms);
                 }
             }
         }
@@ -1331,7 +1390,7 @@ fn reconcilePeerConnections(self: *BeaconNode, io: std.Io, svc: *networking.P2pS
     const now_ms = currentUnixTimeMs(io);
     for (managed_peer_ids) |peer_id| {
         if (containsPeerId(connected_peer_ids, peer_id)) continue;
-        pm.onPeerDisconnected(peer_id, now_ms);
+        notePeerDisconnected(self, pm, peer_id, now_ms);
         if (self.metrics) |metrics| metrics.peer_disconnected_total.incr();
         did_work = true;
     }
@@ -1485,6 +1544,10 @@ fn heartbeatDisconnectReason(maybe_peer: ?*const networking.PeerInfo) GoodbyeRea
     };
 }
 
+fn notePeerDisconnected(_: *BeaconNode, pm: *PeerManager, peer_id: []const u8, now_ms: u64) void {
+    pm.onPeerDisconnected(peer_id, now_ms);
+}
+
 fn containsPeerId(peer_ids: []const []const u8, needle: []const u8) bool {
     for (peer_ids) |peer_id| {
         if (std.mem.eql(u8, peer_id, needle)) return true;
@@ -1539,8 +1602,14 @@ fn ensureRangeSyncDataAvailability(
     const metas = try buildSyncBlockMetas(self, blocks);
     defer deinitSyncBlockMetas(self, metas);
 
-    try fetchBlobSidecarsByRangeForMetas(self, io, svc, peer_id, metas);
-    try fetchDataColumnsByRangeForMetas(self, io, svc, peer_id, metas);
+    fetchBlobSidecarsByRangeForMetas(self, io, svc, peer_id, metas) catch |err| {
+        reportReqRespFetchFailure(self, io, peer_id, .blob_sidecars_by_range, err);
+        return err;
+    };
+    fetchDataColumnsByRangeForMetas(self, io, svc, peer_id, metas) catch |err| {
+        reportReqRespFetchFailure(self, io, peer_id, .data_column_sidecars_by_range, err);
+        return err;
+    };
 }
 
 fn ensureByRootDataAvailability(
@@ -1557,11 +1626,17 @@ fn ensureByRootDataAvailability(
         .none => return,
         .blobs => |missing| {
             if (missing.len == 0) return;
-            try fetchBlobSidecarsByRootForMeta(self, io, svc, peer_id, meta, missing);
+            fetchBlobSidecarsByRootForMeta(self, io, svc, peer_id, meta, missing) catch |err| {
+                reportReqRespFetchFailure(self, io, peer_id, .blob_sidecars_by_root, err);
+                return err;
+            };
         },
         .columns => |missing| {
             if (missing.len == 0) return;
-            try fetchDataColumnsByRootForMeta(self, io, svc, peer_id, meta);
+            fetchDataColumnsByRootForMeta(self, io, svc, peer_id, meta) catch |err| {
+                reportReqRespFetchFailure(self, io, peer_id, .data_column_sidecars_by_root, err);
+                return err;
+            };
         },
     }
 }
@@ -1638,8 +1713,8 @@ fn fetchBlobSidecarsByRangeForMetas(
     const protocol_id = "/eth2/beacon_chain/req/blob_sidecars_by_range/1/ssz_snappy";
     const req_resp_encoding = networking.req_resp_encoding;
 
-    var stream = try svc.dialProtocol(io, peer_id, protocol_id);
-    defer closeOwnedQuicStream(io, &stream);
+    var outbound = try openReqRespRequest(io, svc, peer_id, .blob_sidecars_by_range, protocol_id);
+    defer outbound.deinit(io);
 
     const request = networking.messages.BlobSidecarsByRangeRequest.Type{
         .start_slot = start_slot,
@@ -1647,8 +1722,8 @@ fn fetchBlobSidecarsByRangeForMetas(
     };
     var req_ssz: [networking.messages.BlobSidecarsByRangeRequest.fixed_size]u8 = undefined;
     _ = networking.messages.BlobSidecarsByRangeRequest.serializeIntoBytes(&request, &req_ssz);
-    try req_resp_encoding.writeRequestToStream(self.allocator, io, &stream, &req_ssz);
-    stream.closeWrite(io);
+    try req_resp_encoding.writeRequestToStream(self.allocator, io, &outbound.stream, &req_ssz);
+    outbound.stream.closeWrite(io);
 
     var reader = req_resp_encoding.ResponseChunkStreamReader{
         .allocator = self.allocator,
@@ -1656,10 +1731,10 @@ fn fetchBlobSidecarsByRangeForMetas(
     };
     defer reader.deinit();
 
-    while (try reader.next(io, &stream)) |decoded| {
+    while (try reader.next(io, &outbound.stream)) |decoded| {
         if (decoded.result != .success) {
             self.allocator.free(decoded.ssz_bytes);
-            return error.ErrorResponse;
+            return responseCodeError(decoded.result);
         }
         errdefer self.allocator.free(decoded.ssz_bytes);
 
@@ -1751,14 +1826,14 @@ fn fetchBlobSidecarsByRootForMeta(
         });
     }
 
-    var stream = try svc.dialProtocol(io, peer_id, protocol_id);
-    defer closeOwnedQuicStream(io, &stream);
+    var outbound = try openReqRespRequest(io, svc, peer_id, .blob_sidecars_by_root, protocol_id);
+    defer outbound.deinit(io);
 
     const request_bytes = try self.allocator.alloc(u8, networking.messages.BlobSidecarsByRootRequest.serializedSize(&request));
     defer self.allocator.free(request_bytes);
     _ = networking.messages.BlobSidecarsByRootRequest.serializeIntoBytes(&request, request_bytes);
-    try req_resp_encoding.writeRequestToStream(self.allocator, io, &stream, request_bytes);
-    stream.closeWrite(io);
+    try req_resp_encoding.writeRequestToStream(self.allocator, io, &outbound.stream, request_bytes);
+    outbound.stream.closeWrite(io);
 
     var reader = req_resp_encoding.ResponseChunkStreamReader{
         .allocator = self.allocator,
@@ -1766,10 +1841,10 @@ fn fetchBlobSidecarsByRootForMeta(
     };
     defer reader.deinit();
 
-    while (try reader.next(io, &stream)) |decoded| {
+    while (try reader.next(io, &outbound.stream)) |decoded| {
         if (decoded.result != .success) {
             self.allocator.free(decoded.ssz_bytes);
-            return error.ErrorResponse;
+            return responseCodeError(decoded.result);
         }
         errdefer self.allocator.free(decoded.ssz_bytes);
 
@@ -1879,14 +1954,14 @@ fn fetchDataColumnsByRangeOnce(
     const protocol_id = "/eth2/beacon_chain/req/data_column_sidecars_by_range/1/ssz_snappy";
     const req_resp_encoding = networking.req_resp_encoding;
 
-    var stream = try svc.dialProtocol(io, peer_id, protocol_id);
-    defer closeOwnedQuicStream(io, &stream);
+    var outbound = try openReqRespRequest(io, svc, peer_id, .data_column_sidecars_by_range, protocol_id);
+    defer outbound.deinit(io);
 
     const request_bytes = try self.allocator.alloc(u8, networking.messages.DataColumnSidecarsByRangeRequest.serializedSize(request));
     defer self.allocator.free(request_bytes);
     _ = networking.messages.DataColumnSidecarsByRangeRequest.serializeIntoBytes(request, request_bytes);
-    try req_resp_encoding.writeRequestToStream(self.allocator, io, &stream, request_bytes);
-    stream.closeWrite(io);
+    try req_resp_encoding.writeRequestToStream(self.allocator, io, &outbound.stream, request_bytes);
+    outbound.stream.closeWrite(io);
 
     var seen_columns = try self.allocator.alloc(std.StaticBitSet(MAX_COLUMNS), metas.len);
     defer self.allocator.free(seen_columns);
@@ -1898,10 +1973,10 @@ fn fetchDataColumnsByRangeOnce(
     };
     defer reader.deinit();
 
-    while (try reader.next(io, &stream)) |decoded| {
+    while (try reader.next(io, &outbound.stream)) |decoded| {
         if (decoded.result != .success) {
             self.allocator.free(decoded.ssz_bytes);
-            return error.ErrorResponse;
+            return responseCodeError(decoded.result);
         }
         defer self.allocator.free(decoded.ssz_bytes);
 
@@ -2021,11 +2096,11 @@ fn fetchDataColumnsByRootOnce(
     const protocol_id = "/eth2/beacon_chain/req/data_column_sidecars_by_root/1/ssz_snappy";
     const req_resp_encoding = networking.req_resp_encoding;
 
-    var stream = try svc.dialProtocol(io, peer_id, protocol_id);
-    defer closeOwnedQuicStream(io, &stream);
+    var outbound = try openReqRespRequest(io, svc, peer_id, .data_column_sidecars_by_root, protocol_id);
+    defer outbound.deinit(io);
 
-    try req_resp_encoding.writeRequestToStream(self.allocator, io, &stream, request_bytes);
-    stream.closeWrite(io);
+    try req_resp_encoding.writeRequestToStream(self.allocator, io, &outbound.stream, request_bytes);
+    outbound.stream.closeWrite(io);
 
     var seen_columns = std.StaticBitSet(MAX_COLUMNS).initEmpty();
     var reader = req_resp_encoding.ResponseChunkStreamReader{
@@ -2036,10 +2111,10 @@ fn fetchDataColumnsByRootOnce(
 
     const blob_commitments = try meta.any_signed.beaconBlock().beaconBlockBody().blobKzgCommitments();
 
-    while (try reader.next(io, &stream)) |decoded| {
+    while (try reader.next(io, &outbound.stream)) |decoded| {
         if (decoded.result != .success) {
             self.allocator.free(decoded.ssz_bytes);
-            return error.ErrorResponse;
+            return responseCodeError(decoded.result);
         }
         defer self.allocator.free(decoded.ssz_bytes);
 
@@ -2197,6 +2272,15 @@ fn readSignedBeaconBlockSlot(bytes: []const u8) ?u64 {
     return std.mem.readInt(u64, bytes[msg_offset..][0..8], .little);
 }
 
+fn responseCodeError(code: networking.ResponseCode) anyerror {
+    return switch (code) {
+        .success => unreachable,
+        .invalid_request => error.InvalidRequestResponse,
+        .server_error => error.ServerErrorResponse,
+        .resource_unavailable => error.ResourceUnavailableResponse,
+    };
+}
+
 fn fetchBlockByRoot(
     self: *BeaconNode,
     io: std.Io,
@@ -2207,11 +2291,11 @@ fn fetchBlockByRoot(
     const protocol_id = "/eth2/beacon_chain/req/beacon_blocks_by_root/2/ssz_snappy";
     const req_resp_encoding = networking.req_resp_encoding;
 
-    var stream = try svc.dialProtocol(io, peer_id, protocol_id);
-    defer closeOwnedQuicStream(io, &stream);
+    var outbound = try openReqRespRequest(io, svc, peer_id, .beacon_blocks_by_root, protocol_id);
+    defer outbound.deinit(io);
 
-    try req_resp_encoding.writeRequestToStream(self.allocator, io, &stream, &root);
-    stream.closeWrite(io);
+    try req_resp_encoding.writeRequestToStream(self.allocator, io, &outbound.stream, &root);
+    outbound.stream.closeWrite(io);
 
     var reader = req_resp_encoding.ResponseChunkStreamReader{
         .allocator = self.allocator,
@@ -2219,10 +2303,10 @@ fn fetchBlockByRoot(
     };
     defer reader.deinit();
 
-    const decoded = (try reader.next(io, &stream)) orelse return error.NoBlockReturned;
+    const decoded = (try reader.next(io, &outbound.stream)) orelse return error.NoBlockReturned;
     if (decoded.result != .success) {
         self.allocator.free(decoded.ssz_bytes);
-        return error.ErrorResponse;
+        return responseCodeError(decoded.result);
     }
 
     return decoded.ssz_bytes;
@@ -2239,8 +2323,8 @@ fn fetchRawBlocksByRange(
     const protocol_id = "/eth2/beacon_chain/req/beacon_blocks_by_range/2/ssz_snappy";
     const req_resp_encoding = networking.req_resp_encoding;
 
-    var stream = try svc.dialProtocol(io, peer_id, protocol_id);
-    defer closeOwnedQuicStream(io, &stream);
+    var outbound = try openReqRespRequest(io, svc, peer_id, .beacon_blocks_by_range, protocol_id);
+    defer outbound.deinit(io);
 
     const request = networking.messages.BeaconBlocksByRangeRequest.Type{
         .start_slot = start_slot,
@@ -2248,8 +2332,8 @@ fn fetchRawBlocksByRange(
     };
     var req_ssz: [networking.messages.BeaconBlocksByRangeRequest.fixed_size]u8 = undefined;
     _ = networking.messages.BeaconBlocksByRangeRequest.serializeIntoBytes(&request, &req_ssz);
-    try req_resp_encoding.writeRequestToStream(self.allocator, io, &stream, &req_ssz);
-    stream.closeWrite(io);
+    try req_resp_encoding.writeRequestToStream(self.allocator, io, &outbound.stream, &req_ssz);
+    outbound.stream.closeWrite(io);
 
     var result: std.ArrayListUnmanaged(BatchBlock) = .empty;
     errdefer {
@@ -2266,10 +2350,10 @@ fn fetchRawBlocksByRange(
     var previous_slot: ?u64 = null;
 
     while (blocks_received < count) {
-        const decoded = (try reader.next(io, &stream)) orelse break;
+        const decoded = (try reader.next(io, &outbound.stream)) orelse break;
         if (decoded.result != .success) {
             self.allocator.free(decoded.ssz_bytes);
-            return error.ErrorResponse;
+            return responseCodeError(decoded.result);
         }
 
         const slot = validateFetchedBlockRangeChunk(self, start_slot, count, previous_slot, decoded.context_bytes, decoded.ssz_bytes) catch |err| {
@@ -2324,8 +2408,8 @@ fn sendStatus(
         "/eth2/beacon_chain/req/status/1/ssz_snappy";
     const req_resp_encoding = networking.req_resp_encoding;
 
-    var stream = try svc.dialProtocol(io, peer_id, status_protocol_id);
-    defer closeOwnedQuicStream(io, &stream);
+    var outbound = try openReqRespRequest(io, svc, peer_id, .status, status_protocol_id);
+    defer outbound.deinit(io);
 
     const our_status = self.getStatus();
     std.log.info("Sending Status: fork_digest={x:0>2}{x:0>2}{x:0>2}{x:0>2} head_slot={d} finalized_epoch={d}", .{
@@ -2348,13 +2432,13 @@ fn sendStatus(
         };
         var status_ssz: [StatusMessageV2.fixed_size]u8 = undefined;
         _ = StatusMessageV2.serializeIntoBytes(&our_status_v2, &status_ssz);
-        try req_resp_encoding.writeRequestToStream(self.allocator, io, &stream, &status_ssz);
+        try req_resp_encoding.writeRequestToStream(self.allocator, io, &outbound.stream, &status_ssz);
     } else {
         var status_ssz: [StatusMessage.fixed_size]u8 = undefined;
         _ = StatusMessage.serializeIntoBytes(&our_status, &status_ssz);
-        try req_resp_encoding.writeRequestToStream(self.allocator, io, &stream, &status_ssz);
+        try req_resp_encoding.writeRequestToStream(self.allocator, io, &outbound.stream, &status_ssz);
     }
-    stream.closeWrite(io);
+    outbound.stream.closeWrite(io);
 
     var reader = req_resp_encoding.ResponseChunkStreamReader{
         .allocator = self.allocator,
@@ -2362,7 +2446,7 @@ fn sendStatus(
     };
     defer reader.deinit();
 
-    const decoded = (try reader.next(io, &stream)) orelse {
+    const decoded = (try reader.next(io, &outbound.stream)) orelse {
         std.log.warn("Status: peer sent empty response", .{});
         return error.EmptyResponse;
     };
@@ -2370,7 +2454,7 @@ fn sendStatus(
 
     if (decoded.result != .success) {
         std.log.warn("Status response: error code {}", .{decoded.result});
-        return error.StatusRejected;
+        return responseCodeError(decoded.result);
     }
 
     if (use_status_v2) {
@@ -2433,15 +2517,15 @@ fn requestPeerPing(
     const ping_protocol_id = "/eth2/beacon_chain/req/ping/1/ssz_snappy";
     const req_resp_encoding = networking.req_resp_encoding;
 
-    var stream = try svc.dialProtocol(io, peer_id, ping_protocol_id);
-    defer closeOwnedQuicStream(io, &stream);
+    var outbound = try openReqRespRequest(io, svc, peer_id, .ping, ping_protocol_id);
+    defer outbound.deinit(io);
 
     var ping_ssz: [networking.messages.Ping.fixed_size]u8 = undefined;
     const local_seq: networking.messages.Ping.Type = self.api_node_identity.metadata.seq_number;
     _ = networking.messages.Ping.serializeIntoBytes(&local_seq, &ping_ssz);
 
-    try req_resp_encoding.writeRequestToStream(self.allocator, io, &stream, &ping_ssz);
-    stream.closeWrite(io);
+    try req_resp_encoding.writeRequestToStream(self.allocator, io, &outbound.stream, &ping_ssz);
+    outbound.stream.closeWrite(io);
 
     var reader = req_resp_encoding.ResponseChunkStreamReader{
         .allocator = self.allocator,
@@ -2449,10 +2533,10 @@ fn requestPeerPing(
     };
     defer reader.deinit();
 
-    const decoded = (try reader.next(io, &stream)) orelse return error.EmptyResponse;
+    const decoded = (try reader.next(io, &outbound.stream)) orelse return error.EmptyResponse;
     defer self.allocator.free(decoded.ssz_bytes);
 
-    if (decoded.result != .success) return error.PingRejected;
+    if (decoded.result != .success) return responseCodeError(decoded.result);
 
     var remote_seq: networking.messages.Ping.Type = undefined;
     try networking.messages.Ping.deserializeFromBytes(decoded.ssz_bytes, &remote_seq);
@@ -2473,11 +2557,11 @@ fn requestPeerMetadata(
         "/eth2/beacon_chain/req/metadata/2/ssz_snappy";
     const req_resp_encoding = networking.req_resp_encoding;
 
-    var stream = try svc.dialProtocol(io, peer_id, metadata_protocol_id);
-    defer closeOwnedQuicStream(io, &stream);
+    var outbound = try openReqRespRequest(io, svc, peer_id, .metadata, metadata_protocol_id);
+    defer outbound.deinit(io);
 
-    try req_resp_encoding.writeRequestToStream(self.allocator, io, &stream, &.{});
-    stream.closeWrite(io);
+    try req_resp_encoding.writeRequestToStream(self.allocator, io, &outbound.stream, &.{});
+    outbound.stream.closeWrite(io);
 
     var reader = req_resp_encoding.ResponseChunkStreamReader{
         .allocator = self.allocator,
@@ -2485,10 +2569,10 @@ fn requestPeerMetadata(
     };
     defer reader.deinit();
 
-    const decoded = (try reader.next(io, &stream)) orelse return error.EmptyResponse;
+    const decoded = (try reader.next(io, &outbound.stream)) orelse return error.EmptyResponse;
     defer self.allocator.free(decoded.ssz_bytes);
 
-    if (decoded.result != .success) return error.MetadataRejected;
+    if (decoded.result != .success) return responseCodeError(decoded.result);
 
     if (use_metadata_v3) {
         var metadata_v3: MetadataV3.Type = undefined;
@@ -2508,15 +2592,32 @@ fn requestPeerMetadata(
     return .{ .metadata = metadata };
 }
 
+fn reportReqRespFetchFailure(
+    self: *BeaconNode,
+    io: std.Io,
+    peer_id: []const u8,
+    protocol: ReqRespMaintenanceProtocol,
+    err: anyerror,
+) void {
+    const pm = self.peer_manager orelse return;
+    const action = peer_scoring.reqRespFailureAction(protocol, err) orelse return;
+    _ = pm.reportPeer(peer_id, action, .rpc, currentUnixTimeMs(io));
+}
+
 fn handleReqRespMaintenanceFailure(
     self: *BeaconNode,
     io: std.Io,
     svc: *networking.P2pService,
     peer_id: []const u8,
-    protocol: ReqRespProtocol,
+    protocol: ReqRespMaintenanceProtocol,
     err: anyerror,
 ) void {
     std.log.warn("Peer maintenance {s} failed for {s}: {}", .{ @tagName(protocol), peer_id, err });
+
+    if (err == error.RequestSelfRateLimited) {
+        std.log.debug("Local req/resp self rate limit hit for maintenance {s} to {s}", .{ @tagName(protocol), peer_id });
+        return;
+    }
 
     const pm = self.peer_manager orelse {
         _ = svc.disconnectPeer(io, peer_id);
@@ -2524,7 +2625,10 @@ fn handleReqRespMaintenanceFailure(
     };
 
     const now_ms = currentUnixTimeMs(io);
-    const action = reqRespMaintenanceFailureAction(protocol, err);
+    const action = reqRespMaintenanceFailureAction(protocol, err) orelse {
+        _ = svc.disconnectPeer(io, peer_id);
+        return;
+    };
     const score_state = pm.reportPeer(peer_id, action, .rpc, now_ms);
 
     var reason: GoodbyeReason = .fault_error;
@@ -2544,11 +2648,8 @@ fn handleReqRespMaintenanceFailure(
     sendGoodbyeAndDisconnect(self, io, svc, peer_id, reason);
 }
 
-fn reqRespMaintenanceFailureAction(protocol: ReqRespProtocol, _: anyerror) PeerAction {
-    return switch (protocol) {
-        .status, .ping, .metadata => protocol.timeoutSeverity(),
-        else => .mid_tolerance,
-    };
+fn reqRespMaintenanceFailureAction(protocol: ReqRespMaintenanceProtocol, err: anyerror) ?PeerAction {
+    return peer_scoring.reqRespFailureAction(protocol, err);
 }
 
 fn sendGoodbye(
@@ -2561,15 +2662,15 @@ fn sendGoodbye(
     const goodbye_protocol_id = "/eth2/beacon_chain/req/goodbye/1/ssz_snappy";
     const req_resp_encoding = networking.req_resp_encoding;
 
-    var stream = try svc.dialProtocol(io, peer_id, goodbye_protocol_id);
-    defer closeOwnedQuicStream(io, &stream);
+    var outbound = try openReqRespRequest(io, svc, peer_id, .goodbye, goodbye_protocol_id);
+    defer outbound.deinit(io);
 
     var goodbye_ssz: [networking.messages.GoodbyeReason.fixed_size]u8 = undefined;
     const reason_code: networking.messages.GoodbyeReason.Type = @intFromEnum(reason);
     _ = networking.messages.GoodbyeReason.serializeIntoBytes(&reason_code, &goodbye_ssz);
 
-    try req_resp_encoding.writeRequestToStream(self.allocator, io, &stream, &goodbye_ssz);
-    stream.closeWrite(io);
+    try req_resp_encoding.writeRequestToStream(self.allocator, io, &outbound.stream, &goodbye_ssz);
+    outbound.stream.closeWrite(io);
 }
 
 fn attnetsFromMetadata(bytes: [8]u8) AttnetsBitfield {

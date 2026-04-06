@@ -62,8 +62,10 @@ pub const gossipMessageIdFn = eth_gossip.messageIdFn;
 pub const eth2_protocols = @import("eth2_protocols.zig");
 pub const p2p_service = @import("p2p_service.zig");
 pub const P2pService = p2p_service.P2pService;
+pub const ReqRespRequestPermit = p2p_service.ReqRespRequestPermit;
 pub const QuicStream = p2p_service.QuicStream;
 pub const P2pConfig = p2p_service.P2pConfig;
+pub const ReqRespServerPolicy = eth2_protocols.ReqRespServerPolicy;
 
 // Discovery.
 pub const bootnodes = @import("bootnodes.zig");
@@ -76,8 +78,6 @@ test {
     testing.refAllDecls(@This());
 }
 
-pub const peer_scoring = @import("peer_scoring.zig");
-
 pub const gossip_context = @import("gossip_context.zig");
 pub const NodeGossipContext = gossip_context.NodeGossipContext;
 pub const GossipCallbacks = gossip_context.GossipCallbacks;
@@ -86,6 +86,7 @@ pub const GossipCallbacks = gossip_context.GossipCallbacks;
 pub const peer_info = @import("peer_info.zig");
 pub const peer_db = @import("peer_db.zig");
 pub const peer_manager = @import("peer_manager.zig");
+pub const peer_scoring = @import("peer_scoring.zig");
 pub const PeerInfo = peer_info.PeerInfo;
 pub const PeerDB = peer_db.PeerDB;
 pub const PeerManager = peer_manager.PeerManager;
@@ -98,7 +99,7 @@ pub const ScoreState = peer_info.ScoreState;
 pub const BanDuration = peer_info.BanDuration;
 pub const GoodbyeReason = peer_info.GoodbyeReason;
 pub const ClientKind = peer_info.ClientKind;
-
+pub const ReqRespScoringProtocol = peer_scoring.ReqRespProtocol;
 
 // Subnet subscription management.
 pub const subnet_service = @import("subnet_service.zig");
@@ -129,14 +130,6 @@ pub const status_cache = @import("status_cache.zig");
 pub const StatusCache = status_cache.StatusCache;
 pub const CachedStatus = status_cache.CachedStatus;
 pub const StatusInfo = status_cache.StatusInfo;
-
-// Multi-component peer scoring (v2).
-pub const PeerScoreService = peer_scoring.PeerScoreService;
-pub const PeerScoringStats = peer_scoring.PeerScoringStats;
-pub const GossipRejectReason = peer_scoring.GossipRejectReason;
-pub const ReqRespOutcome = peer_scoring.ReqRespOutcome;
-pub const ReqRespProtocol = peer_scoring.ReqRespProtocol;
-pub const reconnectionCoolDownMs = peer_scoring.reconnectionCoolDownMs;
 
 // Enhanced rate limiter.
 pub const RateLimitResult = rate_limiter.RateLimitResult;

@@ -243,16 +243,6 @@ pub const spec = cli.command(.{
             .description = "Subscribe to all attestation subnets",
             .group = "network",
         }),
-        .disable_peer_scoring = cli.flag(.{
-            .long = "disable-peer-scoring",
-            .description = "Disable peer scoring (for testing/devnets)",
-            .group = "network",
-        }),
-        .disablePeerScoring = cli.flag(.{
-            .long = "disablePeerScoring",
-            .description = "Disable peer scoring (for testing/devnets)",
-            .group = "network",
-        }),
         .discv5 = cli.flag(.{
             .long = "discv5",
             .description = "Enable discv5 peer discovery",

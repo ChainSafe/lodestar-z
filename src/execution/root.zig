@@ -17,11 +17,9 @@ pub const builder = @import("builder.zig");
 
 // Re-export primary types for convenience.
 pub const EngineApi = engine_api.EngineApi;
-pub const MockEngine = mock_engine.MockEngine;
 pub const HttpEngine = http_engine.HttpEngine;
 pub const Transport = http_engine.Transport;
 pub const Header = http_engine.Header;
-pub const MockTransport = http_engine.MockTransport;
 pub const IoHttpTransport = http_engine.IoHttpTransport;
 pub const PayloadIdCache = payload_id_cache.PayloadIdCache;
 pub const EngineState = http_engine.EngineState;
@@ -30,7 +28,6 @@ pub const ClientVersion = http_engine.ClientVersion;
 pub const TransitionConfiguration = http_engine.TransitionConfiguration;
 pub const BuilderApi = builder.BuilderApi;
 pub const HttpBuilder = builder.HttpBuilder;
-pub const MockBuilderTransport = builder.MockBuilderTransport;
 pub const BuilderStatus = builder.BuilderStatus;
 
 pub const ExecutionPayloadStatus = engine_api_types.ExecutionPayloadStatus;

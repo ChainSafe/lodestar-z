@@ -26,3 +26,7 @@ pub const ForkChoiceQuery = unknown_chain_sync.ForkChoiceQuery;
 test {
     std.testing.refAllDecls(@This());
 }
+
+test {
+    _ = @import("unknown_chain_sync_test.zig");
+}

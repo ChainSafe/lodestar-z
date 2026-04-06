@@ -12,7 +12,7 @@ const execution_mod = @import("execution");
 const NodeOptions = @import("options.zig").NodeOptions;
 
 const EngineApi = execution_mod.EngineApi;
-const MockEngine = execution_mod.MockEngine;
+const MockEngine = execution_mod.mock_engine.MockEngine;
 const HttpEngine = execution_mod.HttpEngine;
 const HttpBuilder = execution_mod.HttpBuilder;
 const IoHttpTransport = execution_mod.IoHttpTransport;
@@ -389,14 +389,7 @@ pub const ExecutionRuntime = struct {
                 },
             );
         } else {
-            const mock = try allocator.create(MockEngine);
-            errdefer allocator.destroy(mock);
-            mock.* = MockEngine.init(allocator);
-            errdefer mock.deinit();
-
-            self.mock_engine = mock;
-            self.engine_api = mock.engine();
-            std.log.info("Execution engine: MockEngine (no --execution-url)", .{});
+            return error.ExecutionEngineNotConfigured;
         }
 
         if (opts.builder_enabled) {
@@ -1209,10 +1202,6 @@ pub const ExecutionRuntime = struct {
 
     pub fn hasExecutionEngine(self: *const ExecutionRuntime) bool {
         return self.engine_api != null;
-    }
-
-    pub fn mockEngine(self: *const ExecutionRuntime) ?*MockEngine {
-        return self.mock_engine;
     }
 
     pub fn builderApi(self: *const ExecutionRuntime) ?BuilderApi {

@@ -1,118 +1,27 @@
-//! Multi-component peer scoring for gossipsub and req/resp.
+//! Shared peer scoring policy for networking events.
 //!
-//! Tracks per-peer scores across multiple dimensions:
-//! - Gossip validation outcomes (accept/reject/ignore per topic type)
-//! - Req/resp response quality (useful/timeout/error/invalid)
-//! - Application-level penalties via PeerAction
-//!
-//! Integrates with the PeerScore in peer_info.zig (which handles the combined
-//! lodestar_score + gossipsub_score and state transitions) by producing score
-//! deltas that feed into PeerInfo.peer_score.applyAction().
-//!
-//! This module serves as the bridge between protocol events (gossip validation,
-//! req/resp outcomes) and the peer scoring/management system.
-//!
-//! Design: see PEER_SCORING_DESIGN.md
+//! This module intentionally stays small. It provides the shared policy
+//! mapping from live networking events into `PeerAction` decisions without
+//! reviving the old unused scoring service/state layer.
 
 const std = @import("std");
-const Allocator = std.mem.Allocator;
 const testing = std.testing;
 
-const gossip_validation = @import("gossip_validation.zig");
-const ValidationResult = gossip_validation.ValidationResult;
-const peer_info_mod = @import("peer_info.zig");
-const PeerAction = peer_info_mod.PeerAction;
-const ReportSource = peer_info_mod.ReportSource;
-const GoodbyeReason = peer_info_mod.GoodbyeReason;
+const protocol = @import("protocol.zig");
+const gossip_topics = @import("gossip_topics.zig");
+const peer_info = @import("peer_info.zig");
 
-const log = std.log.scoped(.peer_scoring);
+const Method = protocol.Method;
+const GossipTopicType = gossip_topics.GossipTopicType;
+const PeerAction = peer_info.PeerAction;
+const GoodbyeReason = peer_info.GoodbyeReason;
 
-// ── Gossip reject reasons ───────────────────────────────────────────────────
+/// Ignore a bounded set of mildly negative gossipsub scores so recoverable
+/// peers can heal their router score without immediate disconnection pressure.
+pub const NEGATIVE_GOSSIPSUB_IGNORE_THRESHOLD: f64 = -1000.0;
+pub const ALLOWED_NEGATIVE_GOSSIPSUB_FACTOR: f64 = 0.1;
 
-/// Reason a gossip message was rejected, used to determine score penalty.
-///
-/// Different rejection reasons warrant different severity levels.
-/// Reference: Lodestar TS gossipHandlers.ts
-pub const GossipRejectReason = enum {
-    /// Invalid cryptographic signature (BLS verification failed).
-    invalid_signature,
-    /// Message targets wrong subnet (attestation on wrong subnet).
-    wrong_subnet,
-    /// Invalid slot — too old or too far in the future.
-    invalid_slot,
-    /// Invalid block that fails state transition (consensus violation).
-    invalid_block,
-    /// Invalid attestation (wrong target, bad committee index, etc.).
-    invalid_attestation,
-    /// Proposer slashing or other slashable offense detected.
-    slashable_offense,
-    /// Malformed SSZ encoding.
-    invalid_ssz,
-    /// Generic validation failure not covered above.
-    validation_failed,
-
-    /// Map reject reason to PeerAction severity.
-    ///
-    /// Follows Lodestar TS conventions:
-    /// - Consensus violations (invalid blocks, slashable) → fatal
-    /// - Crypto failures (bad signatures) → low_tolerance
-    /// - Routing errors (wrong subnet) → mid_tolerance
-    /// - Timing/minor issues → high_tolerance
-    pub fn toPeerAction(self: GossipRejectReason) PeerAction {
-        return switch (self) {
-            .invalid_block, .slashable_offense => .fatal,
-            .invalid_signature, .invalid_ssz => .low_tolerance,
-            .wrong_subnet, .invalid_attestation, .validation_failed => .mid_tolerance,
-            .invalid_slot => .high_tolerance,
-        };
-    }
-};
-
-// ── Req/resp outcome reasons ────────────────────────────────────────────────
-
-/// Outcome of an outgoing req/resp request, used for scoring the responding peer.
-///
-/// Reference: Lodestar TS reqresp/score.ts
-pub const ReqRespOutcome = enum {
-    /// Peer returned a valid, useful response.
-    success,
-    /// Peer returned an empty response when data was expected.
-    empty_response,
-    /// Response timed out.
-    response_timeout,
-    /// Response could not be decoded (invalid SSZ).
-    invalid_response,
-    /// Peer returned a server error.
-    server_error,
-    /// Peer returned an unknown error status code.
-    unknown_error,
-    /// Request too large (SSZ over max size).
-    request_too_large,
-    /// Dial failed or timed out.
-    dial_error,
-    /// Peer was rate limited (they told us to slow down).
-    rate_limited,
-    /// Protocol not supported by peer.
-    unsupported_protocol,
-
-    /// Map outcome to optional PeerAction.
-    ///
-    /// Returns null when no score change is warranted (success, rate_limited from us).
-    /// Follows Lodestar TS reqresp/score.ts conventions.
-    pub fn toPeerAction(self: ReqRespOutcome) ?PeerAction {
-        return switch (self) {
-            .success => null, // Positive scoring handled separately
-            .invalid_response, .request_too_large => .low_tolerance,
-            .server_error, .response_timeout => .mid_tolerance,
-            .unknown_error, .empty_response => .high_tolerance,
-            .dial_error => .low_tolerance,
-            .unsupported_protocol => .low_tolerance,
-            .rate_limited => null, // Don't penalize for rate limiting — could be our fault
-        };
-    }
-};
-
-/// Protocol context for req/resp scoring — some outcomes vary by protocol.
+/// Req/resp protocol context for penalty decisions.
 pub const ReqRespProtocol = enum {
     status,
     goodbye,
@@ -125,478 +34,222 @@ pub const ReqRespProtocol = enum {
     data_column_sidecars_by_range,
     data_column_sidecars_by_root,
 
-    /// Whether a timeout on this protocol warrants a stronger penalty.
-    /// Ping/Status/Metadata timeouts are worse (these are lightweight protocols).
+    pub fn fromMethod(method: Method) ?ReqRespProtocol {
+        return switch (method) {
+            .status => .status,
+            .goodbye => .goodbye,
+            .ping => .ping,
+            .metadata => .metadata,
+            .beacon_blocks_by_range => .beacon_blocks_by_range,
+            .beacon_blocks_by_root => .beacon_blocks_by_root,
+            .blob_sidecars_by_range => .blob_sidecars_by_range,
+            .blob_sidecars_by_root => .blob_sidecars_by_root,
+            .data_column_sidecars_by_range => .data_column_sidecars_by_range,
+            .data_column_sidecars_by_root => .data_column_sidecars_by_root,
+            .light_client_bootstrap,
+            .light_client_updates_by_range,
+            .light_client_finality_update,
+            .light_client_optimistic_update,
+            => null,
+        };
+    }
+
     pub fn timeoutSeverity(self: ReqRespProtocol) PeerAction {
         return switch (self) {
             .ping, .status, .metadata => .low_tolerance,
-            .beacon_blocks_by_range, .beacon_blocks_by_root => .mid_tolerance,
-            .blob_sidecars_by_range, .blob_sidecars_by_root => .mid_tolerance,
-            .data_column_sidecars_by_range, .data_column_sidecars_by_root => .mid_tolerance,
+            .beacon_blocks_by_range,
+            .beacon_blocks_by_root,
+            .blob_sidecars_by_range,
+            .blob_sidecars_by_root,
+            .data_column_sidecars_by_range,
+            .data_column_sidecars_by_root,
+            => .mid_tolerance,
             .goodbye => .high_tolerance,
         };
     }
 
-    /// Whether unsupported protocol on this type warrants a fatal penalty.
-    /// Not supporting Ping is fatal (required base protocol).
     pub fn unsupportedSeverity(self: ReqRespProtocol) PeerAction {
         return switch (self) {
             .ping => .fatal,
             .status, .metadata => .low_tolerance,
-            else => .high_tolerance, // Optional protocols
+            .goodbye,
+            .beacon_blocks_by_range,
+            .beacon_blocks_by_root,
+            .blob_sidecars_by_range,
+            .blob_sidecars_by_root,
+            .data_column_sidecars_by_range,
+            .data_column_sidecars_by_root,
+            => .high_tolerance,
         };
     }
 };
 
-// ── Reconnection cool-down ──────────────────────────────────────────────────
+pub const GossipRejectReason = enum {
+    decode_failed,
+    invalid_signature,
+    wrong_subnet,
+    invalid_block,
+    invalid_attestation,
+    invalid_aggregate,
+    invalid_voluntary_exit,
+    invalid_proposer_slashing,
+    invalid_attester_slashing,
+    invalid_bls_to_execution_change,
+    invalid_sync_contribution,
+    invalid_sync_committee_message,
+    invalid_blob_sidecar,
+    invalid_data_column_sidecar,
+};
 
-/// Calculate reconnection cool-down duration from a Goodbye reason code.
-///
-/// Returns cool-down duration in milliseconds, or null if no cool-down
-/// should be applied (let scoring handle it).
-///
-/// Reference: Lodestar TS score.ts RealScore.applyReconnectionCoolDown()
-pub fn reconnectionCoolDownMs(reason: GoodbyeReason) ?u64 {
-    return switch (reason) {
-        // Let scoring system handle decay by itself
-        .banned, .score_too_low => null,
-        // Transient: peer has too many connections, try again soon
-        .too_many_peers => 5 * 60 * 1000, // 5 minutes
-        // Peer shutting down or generic error
-        .client_shutdown, .fault_error => 60 * 60 * 1000, // 60 minutes
-        // Wrong network — very long cool-down
-        .irrelevant_network, .unable_to_verify => 240 * 60 * 1000, // 4 hours
-        // Unknown reason codes — moderate cool-down
-        _ => 30 * 60 * 1000, // 30 minutes
+pub fn defaultGossipRejectReason(topic: GossipTopicType) GossipRejectReason {
+    return switch (topic) {
+        .beacon_block => .invalid_block,
+        .beacon_attestation => .invalid_attestation,
+        .beacon_aggregate_and_proof => .invalid_aggregate,
+        .voluntary_exit => .invalid_voluntary_exit,
+        .proposer_slashing => .invalid_proposer_slashing,
+        .attester_slashing => .invalid_attester_slashing,
+        .bls_to_execution_change => .invalid_bls_to_execution_change,
+        .sync_committee_contribution_and_proof => .invalid_sync_contribution,
+        .sync_committee => .invalid_sync_committee_message,
+        .blob_sidecar => .invalid_blob_sidecar,
+        .data_column_sidecar => .invalid_data_column_sidecar,
     };
 }
 
-// ── Per-peer scoring stats ──────────────────────────────────────────────────
+pub fn gossipFailureAction(reason: GossipRejectReason) PeerAction {
+    return switch (reason) {
+        .invalid_block => .fatal,
+        .wrong_subnet => .mid_tolerance,
+        .decode_failed,
+        .invalid_signature,
+        .invalid_attestation,
+        .invalid_aggregate,
+        .invalid_voluntary_exit,
+        .invalid_proposer_slashing,
+        .invalid_attester_slashing,
+        .invalid_bls_to_execution_change,
+        .invalid_sync_contribution,
+        .invalid_sync_committee_message,
+        .invalid_blob_sidecar,
+        .invalid_data_column_sidecar,
+        => .low_tolerance,
+    };
+}
 
-/// Detailed scoring statistics tracked per peer.
+/// Map a req/resp maintenance failure into an optional penalty.
 ///
-/// Used for diagnostics, metrics, and informed pruning decisions.
-/// Complements the PeerScore in peer_info.zig which handles the actual
-/// score value and state transitions.
-pub const PeerScoringStats = struct {
-    // Gossip stats
-    gossip_accept_count: u64 = 0,
-    gossip_reject_count: u64 = 0,
-    gossip_ignore_count: u64 = 0,
+/// `PeerNotConnected` means transport state is already gone and does not
+/// warrant a further score penalty. Unsupported protocol negotiation should
+/// be treated differently from generic I/O failure.
+pub fn reqRespFailureAction(protocol_ctx: ReqRespProtocol, err: anyerror) ?PeerAction {
+    return switch (err) {
+        error.PeerNotConnected,
+        error.RequestSelfRateLimited,
+        => null,
+        error.NoSupportedProtocols => protocol_ctx.unsupportedSeverity(),
 
-    // Req/resp stats
-    reqresp_success_count: u64 = 0,
-    reqresp_error_count: u64 = 0,
-    reqresp_timeout_count: u64 = 0,
+        error.InvalidRequestResponse,
+        error.MalformedBlockBytes,
+        error.MalformedBlobSidecar,
+        error.MalformedDataColumnSidecar,
+        error.MissingContextBytes,
+        error.ForkDigestMismatch,
+        error.BlockOutsideRequestedRange,
+        error.UnsortedBlockRangeResponse,
+        error.UnexpectedBlobSidecar,
+        error.UnexpectedBlobSlot,
+        error.InvalidBlobIndex,
+        error.KzgCommitmentMismatch,
+        error.UnexpectedDataColumnSidecar,
+        error.UnexpectedColumnSlot,
+        error.InvalidColumnIndex,
+        error.KzgCommitmentLengthMismatch,
+        error.ColumnLengthMismatch,
+        error.ColumnProofLengthMismatch,
+        => .low_tolerance,
 
-    // Rate limiting stats
-    rate_limit_hit_count: u64 = 0,
+        error.ServerErrorResponse => .mid_tolerance,
 
-    /// Total interactions (for peer quality assessment).
-    pub fn totalInteractions(self: *const PeerScoringStats) u64 {
-        return self.gossip_accept_count + self.gossip_reject_count +
-            self.gossip_ignore_count + self.reqresp_success_count +
-            self.reqresp_error_count + self.reqresp_timeout_count;
-    }
+        error.ResourceUnavailableResponse,
+        error.EmptyResponse,
+        error.NoBlockReturned,
+        error.MissingBlobSidecar,
+        error.MissingDataColumnSidecar,
+        => .high_tolerance,
 
-    /// Ratio of successful interactions (0.0 to 1.0).
-    /// Returns 1.0 if no interactions yet (benefit of the doubt).
-    pub fn successRatio(self: *const PeerScoringStats) f64 {
-        const total = self.totalInteractions();
-        if (total == 0) return 1.0;
-        const good: f64 = @floatFromInt(self.gossip_accept_count + self.reqresp_success_count);
-        return good / @as(f64, @floatFromInt(total));
-    }
-};
-
-// ── PeerScoreService ────────────────────────────────────────────────────────
-
-/// Service that bridges protocol events to the peer scoring system.
-///
-/// This is the primary entry point for all scoring-related events.
-/// It maintains per-peer statistics and translates protocol outcomes
-/// into PeerAction calls on the PeerDB/PeerManager.
-///
-/// Usage pattern:
-/// ```
-/// var service = PeerScoreService.init(allocator);
-/// defer service.deinit();
-///
-/// // On gossip validation result:
-/// const action = service.onGossipValidation(peer_id, .reject, .invalid_signature);
-/// // action == PeerAction.low_tolerance → caller applies via peer_manager.reportPeer()
-///
-/// // On req/resp result:
-/// const action2 = service.onReqRespResult(peer_id, .response_timeout, .ping);
-/// // action2 == PeerAction.low_tolerance
-/// ```
-pub const PeerScoreService = struct {
-    allocator: Allocator,
-    /// Per-peer scoring statistics.
-    stats: std.StringHashMap(PeerScoringStats),
-    /// Aggregate stats across all peers.
-    total_gossip_accept: u64 = 0,
-    total_gossip_reject: u64 = 0,
-    total_gossip_ignore: u64 = 0,
-    total_reqresp_success: u64 = 0,
-    total_reqresp_error: u64 = 0,
-
-    pub fn init(allocator: Allocator) PeerScoreService {
-        return .{
-            .allocator = allocator,
-            .stats = std.StringHashMap(PeerScoringStats).init(allocator),
-        };
-    }
-
-    pub fn deinit(self: *PeerScoreService) void {
-        // Free owned keys.
-        var it = self.stats.keyIterator();
-        while (it.next()) |key| {
-            self.allocator.free(key.*);
-        }
-        self.stats.deinit();
-    }
-
-    /// Get or create stats entry for a peer. Allocates a copy of peer_id if new.
-    fn getOrCreateStats(self: *PeerScoreService, peer_id: []const u8) !*PeerScoringStats {
-        const result = try self.stats.getOrPut(peer_id);
-        if (!result.found_existing) {
-            const owned_id = try self.allocator.dupe(u8, peer_id);
-            result.key_ptr.* = owned_id;
-            result.value_ptr.* = .{};
-        }
-        return result.value_ptr;
-    }
-
-    /// Record a gossip validation outcome and return the PeerAction to apply (if any).
-    ///
-    /// - `accept` → null (positive scoring via small boost, tracked in stats)
-    /// - `reject` with reason → PeerAction based on severity
-    /// - `ignore` → null (no penalty for duplicates)
-    ///
-    /// The caller is responsible for applying the returned PeerAction via
-    /// `peer_manager.reportPeer()`.
-    pub fn onGossipValidation(
-        self: *PeerScoreService,
-        peer_id: []const u8,
-        result: ValidationResult,
-        reject_reason: ?GossipRejectReason,
-    ) !?PeerAction {
-        const stats = try self.getOrCreateStats(peer_id);
-
-        switch (result) {
-            .accept => {
-                stats.gossip_accept_count += 1;
-                self.total_gossip_accept += 1;
-                return null; // No negative action; positive scoring handled elsewhere
-            },
-            .reject => {
-                stats.gossip_reject_count += 1;
-                self.total_gossip_reject += 1;
-                const reason = reject_reason orelse .validation_failed;
-                const action = reason.toPeerAction();
-                log.debug("Gossip reject from {s}: reason={s} action={s}", .{
-                    peer_id,
-                    @tagName(reason),
-                    @tagName(action),
-                });
-                return action;
-            },
-            .ignore => {
-                stats.gossip_ignore_count += 1;
-                self.total_gossip_ignore += 1;
-                return null;
-            },
-        }
-    }
-
-    /// Record a req/resp outcome and return the PeerAction to apply (if any).
-    ///
-    /// Some outcomes are protocol-dependent (e.g., timeouts are more severe
-    /// for lightweight protocols like Ping/Status).
-    pub fn onReqRespResult(
-        self: *PeerScoreService,
-        peer_id: []const u8,
-        outcome: ReqRespOutcome,
-        proto: ReqRespProtocol,
-    ) !?PeerAction {
-        const stats = try self.getOrCreateStats(peer_id);
-
-        switch (outcome) {
-            .success => {
-                stats.reqresp_success_count += 1;
-                self.total_reqresp_success += 1;
-                return null;
-            },
-            .response_timeout => {
-                stats.reqresp_timeout_count += 1;
-                self.total_reqresp_error += 1;
-                // Timeout severity depends on protocol
-                return proto.timeoutSeverity();
-            },
-            .unsupported_protocol => {
-                stats.reqresp_error_count += 1;
-                self.total_reqresp_error += 1;
-                // Not supporting Ping is fatal
-                return proto.unsupportedSeverity();
-            },
-            else => {
-                stats.reqresp_error_count += 1;
-                self.total_reqresp_error += 1;
-                return outcome.toPeerAction();
-            },
-        }
-    }
-
-    /// Record a rate limit hit for a peer.
-    pub fn onRateLimitHit(self: *PeerScoreService, peer_id: []const u8) !void {
-        const stats = try self.getOrCreateStats(peer_id);
-        stats.rate_limit_hit_count += 1;
-    }
-
-    /// Get scoring stats for a peer. Returns null if peer is unknown.
-    pub fn getStats(self: *const PeerScoreService, peer_id: []const u8) ?*const PeerScoringStats {
-        return self.stats.getPtr(peer_id);
-    }
-
-    /// Remove stats for a disconnected peer (to free memory).
-    pub fn removePeer(self: *PeerScoreService, peer_id: []const u8) void {
-        if (self.stats.fetchRemove(peer_id)) |kv| {
-            self.allocator.free(kv.key);
-        }
-    }
-
-    /// Number of tracked peers.
-    pub fn peerCount(self: *const PeerScoreService) usize {
-        return self.stats.count();
-    }
-
-    /// Prune peers with zero interactions that haven't been seen recently.
-    /// Returns number of pruned entries.
-    pub fn pruneInactive(self: *PeerScoreService) u32 {
-        var to_remove: std.ArrayListUnmanaged([]const u8) = .empty;
-        defer to_remove.deinit(self.allocator);
-
-        var it = self.stats.iterator();
-        while (it.next()) |entry| {
-            if (entry.value_ptr.totalInteractions() == 0) {
-                to_remove.append(self.allocator, entry.key_ptr.*) catch continue;
-            }
-        }
-
-        var removed: u32 = 0;
-        for (to_remove.items) |key| {
-            if (self.stats.fetchRemove(key)) |kv| {
-                self.allocator.free(kv.key);
-                removed += 1;
-            }
-        }
-        return removed;
-    }
-};
-
-// ── Tests ───────────────────────────────────────────────────────────────────
-
-test "GossipRejectReason: fatal actions for consensus violations" {
-    try testing.expectEqual(PeerAction.fatal, GossipRejectReason.invalid_block.toPeerAction());
-    try testing.expectEqual(PeerAction.fatal, GossipRejectReason.slashable_offense.toPeerAction());
+        else => protocol_ctx.timeoutSeverity(),
+    };
 }
 
-test "GossipRejectReason: low tolerance for crypto failures" {
-    try testing.expectEqual(PeerAction.low_tolerance, GossipRejectReason.invalid_signature.toPeerAction());
-    try testing.expectEqual(PeerAction.low_tolerance, GossipRejectReason.invalid_ssz.toPeerAction());
+/// Reconnection cool-down derived from a remote Goodbye reason.
+pub fn reconnectionCoolDownMs(reason: GoodbyeReason) ?u64 {
+    return switch (reason) {
+        .banned, .score_too_low => null,
+        .too_many_peers => 5 * 60 * 1000,
+        .client_shutdown, .fault_error => 60 * 60 * 1000,
+        .irrelevant_network, .unable_to_verify => 240 * 60 * 1000,
+        _ => 30 * 60 * 1000,
+    };
 }
 
-test "GossipRejectReason: mid tolerance for routing errors" {
-    try testing.expectEqual(PeerAction.mid_tolerance, GossipRejectReason.wrong_subnet.toPeerAction());
-    try testing.expectEqual(PeerAction.mid_tolerance, GossipRejectReason.invalid_attestation.toPeerAction());
+/// Reconnection cool-down for peers that silently close an inbound connection
+/// without first sending Goodbye.
+pub fn inboundDisconnectCoolDownMs() u64 {
+    return 5 * 60 * 1000;
 }
 
-test "GossipRejectReason: high tolerance for timing issues" {
-    try testing.expectEqual(PeerAction.high_tolerance, GossipRejectReason.invalid_slot.toPeerAction());
+/// Number of connected peers whose mildly negative gossipsub score we ignore
+/// so they can recover. Matches Lodestar's bounded 10% allowance.
+pub fn negativeGossipsubIgnoreCount(target_peers: u32) u32 {
+    const raw = @as(f64, @floatFromInt(target_peers)) * ALLOWED_NEGATIVE_GOSSIPSUB_FACTOR;
+    const count: u32 = @intFromFloat(@ceil(raw));
+    return count;
 }
 
-test "ReqRespOutcome: no penalty for success and rate limiting" {
-    try testing.expectEqual(@as(?PeerAction, null), ReqRespOutcome.success.toPeerAction());
-    try testing.expectEqual(@as(?PeerAction, null), ReqRespOutcome.rate_limited.toPeerAction());
-}
-
-test "ReqRespOutcome: low tolerance for invalid responses" {
-    try testing.expectEqual(PeerAction.low_tolerance, ReqRespOutcome.invalid_response.toPeerAction().?);
-    try testing.expectEqual(PeerAction.low_tolerance, ReqRespOutcome.request_too_large.toPeerAction().?);
-}
-
-test "ReqRespOutcome: mid tolerance for server errors" {
-    try testing.expectEqual(PeerAction.mid_tolerance, ReqRespOutcome.server_error.toPeerAction().?);
-    try testing.expectEqual(PeerAction.mid_tolerance, ReqRespOutcome.response_timeout.toPeerAction().?);
-}
-
-test "ReqRespProtocol: timeout severity varies by protocol" {
+test "ReqRespProtocol timeoutSeverity follows maintenance severity policy" {
     try testing.expectEqual(PeerAction.low_tolerance, ReqRespProtocol.ping.timeoutSeverity());
     try testing.expectEqual(PeerAction.low_tolerance, ReqRespProtocol.status.timeoutSeverity());
     try testing.expectEqual(PeerAction.mid_tolerance, ReqRespProtocol.beacon_blocks_by_range.timeoutSeverity());
+    try testing.expectEqual(PeerAction.high_tolerance, ReqRespProtocol.goodbye.timeoutSeverity());
 }
 
-test "ReqRespProtocol: unsupported ping is fatal" {
-    try testing.expectEqual(PeerAction.fatal, ReqRespProtocol.ping.unsupportedSeverity());
-    try testing.expectEqual(PeerAction.low_tolerance, ReqRespProtocol.status.unsupportedSeverity());
+test "reqRespFailureAction distinguishes unsupported protocol and disconnected peer" {
+    try testing.expectEqual(@as(?PeerAction, .fatal), reqRespFailureAction(.ping, error.NoSupportedProtocols));
+    try testing.expectEqual(@as(?PeerAction, null), reqRespFailureAction(.ping, error.PeerNotConnected));
+    try testing.expectEqual(@as(?PeerAction, null), reqRespFailureAction(.ping, error.RequestSelfRateLimited));
+    try testing.expectEqual(@as(?PeerAction, .mid_tolerance), reqRespFailureAction(.beacon_blocks_by_root, error.ConnectionResetByPeer));
 }
 
-test "reconnectionCoolDownMs: varies by reason" {
-    try testing.expectEqual(@as(?u64, null), reconnectionCoolDownMs(.banned));
-    try testing.expectEqual(@as(?u64, null), reconnectionCoolDownMs(.score_too_low));
+test "reqRespFailureAction maps explicit response codes and malformed data" {
+    try testing.expectEqual(@as(?PeerAction, .low_tolerance), reqRespFailureAction(.status, error.InvalidRequestResponse));
+    try testing.expectEqual(@as(?PeerAction, .mid_tolerance), reqRespFailureAction(.metadata, error.ServerErrorResponse));
+    try testing.expectEqual(@as(?PeerAction, .high_tolerance), reqRespFailureAction(.beacon_blocks_by_root, error.ResourceUnavailableResponse));
+    try testing.expectEqual(@as(?PeerAction, .low_tolerance), reqRespFailureAction(.beacon_blocks_by_range, error.MalformedBlockBytes));
+}
+
+test "reconnectionCoolDownMs matches goodbye severity" {
     try testing.expectEqual(@as(?u64, 5 * 60 * 1000), reconnectionCoolDownMs(.too_many_peers));
-    try testing.expectEqual(@as(?u64, 60 * 60 * 1000), reconnectionCoolDownMs(.client_shutdown));
-    try testing.expectEqual(@as(?u64, 240 * 60 * 1000), reconnectionCoolDownMs(.irrelevant_network));
+    try testing.expectEqual(@as(?u64, 60 * 60 * 1000), reconnectionCoolDownMs(.fault_error));
+    try testing.expectEqual(@as(?u64, null), reconnectionCoolDownMs(.score_too_low));
 }
 
-test "PeerScoringStats: success ratio" {
-    var stats = PeerScoringStats{};
-
-    // No interactions → 1.0 (benefit of the doubt).
-    try testing.expectEqual(@as(f64, 1.0), stats.successRatio());
-
-    // All successes → 1.0.
-    stats.gossip_accept_count = 10;
-    stats.reqresp_success_count = 5;
-    try testing.expectEqual(@as(f64, 1.0), stats.successRatio());
-
-    // Mixed → ratio.
-    stats.gossip_reject_count = 5;
-    // 15 good / 20 total = 0.75
-    try testing.expectEqual(@as(f64, 0.75), stats.successRatio());
+test "negativeGossipsubIgnoreCount matches Lodestar allowance" {
+    try testing.expectEqual(@as(u32, 0), negativeGossipsubIgnoreCount(0));
+    try testing.expectEqual(@as(u32, 1), negativeGossipsubIgnoreCount(1));
+    try testing.expectEqual(@as(u32, 1), negativeGossipsubIgnoreCount(10));
+    try testing.expectEqual(@as(u32, 6), negativeGossipsubIgnoreCount(55));
 }
 
-test "PeerScoreService: gossip accept returns null" {
-    var service = PeerScoreService.init(testing.allocator);
-    defer service.deinit();
-
-    const action = try service.onGossipValidation("peer1", .accept, null);
-    try testing.expectEqual(@as(?PeerAction, null), action);
-    try testing.expectEqual(@as(u64, 1), service.total_gossip_accept);
-
-    const stats = service.getStats("peer1").?;
-    try testing.expectEqual(@as(u64, 1), stats.gossip_accept_count);
+test "gossipFailureAction maps production gossip penalties" {
+    try testing.expectEqual(PeerAction.fatal, gossipFailureAction(.invalid_block));
+    try testing.expectEqual(PeerAction.mid_tolerance, gossipFailureAction(.wrong_subnet));
+    try testing.expectEqual(PeerAction.low_tolerance, gossipFailureAction(.invalid_signature));
+    try testing.expectEqual(PeerAction.low_tolerance, gossipFailureAction(.decode_failed));
 }
 
-test "PeerScoreService: gossip reject returns action" {
-    var service = PeerScoreService.init(testing.allocator);
-    defer service.deinit();
-
-    const action = try service.onGossipValidation("peer1", .reject, .invalid_block);
-    try testing.expectEqual(PeerAction.fatal, action.?);
-    try testing.expectEqual(@as(u64, 1), service.total_gossip_reject);
+test "defaultGossipRejectReason follows topic families" {
+    try testing.expectEqual(GossipRejectReason.invalid_block, defaultGossipRejectReason(.beacon_block));
+    try testing.expectEqual(GossipRejectReason.invalid_sync_committee_message, defaultGossipRejectReason(.sync_committee));
+    try testing.expectEqual(GossipRejectReason.invalid_data_column_sidecar, defaultGossipRejectReason(.data_column_sidecar));
 }
-
-test "PeerScoreService: gossip ignore returns null" {
-    var service = PeerScoreService.init(testing.allocator);
-    defer service.deinit();
-
-    const action = try service.onGossipValidation("peer1", .ignore, null);
-    try testing.expectEqual(@as(?PeerAction, null), action);
-    try testing.expectEqual(@as(u64, 1), service.total_gossip_ignore);
-}
-
-test "PeerScoreService: reqresp success returns null" {
-    var service = PeerScoreService.init(testing.allocator);
-    defer service.deinit();
-
-    const action = try service.onReqRespResult("peer1", .success, .status);
-    try testing.expectEqual(@as(?PeerAction, null), action);
-    try testing.expectEqual(@as(u64, 1), service.total_reqresp_success);
-}
-
-test "PeerScoreService: reqresp timeout uses protocol severity" {
-    var service = PeerScoreService.init(testing.allocator);
-    defer service.deinit();
-
-    // Ping timeout → low_tolerance
-    const action1 = try service.onReqRespResult("peer1", .response_timeout, .ping);
-    try testing.expectEqual(PeerAction.low_tolerance, action1.?);
-
-    // Range timeout → mid_tolerance
-    const action2 = try service.onReqRespResult("peer1", .response_timeout, .beacon_blocks_by_range);
-    try testing.expectEqual(PeerAction.mid_tolerance, action2.?);
-}
-
-test "PeerScoreService: reqresp unsupported ping is fatal" {
-    var service = PeerScoreService.init(testing.allocator);
-    defer service.deinit();
-
-    const action = try service.onReqRespResult("peer1", .unsupported_protocol, .ping);
-    try testing.expectEqual(PeerAction.fatal, action.?);
-}
-
-test "PeerScoreService: rate limit tracking" {
-    var service = PeerScoreService.init(testing.allocator);
-    defer service.deinit();
-
-    try service.onRateLimitHit("peer1");
-    try service.onRateLimitHit("peer1");
-    try service.onRateLimitHit("peer1");
-
-    const stats = service.getStats("peer1").?;
-    try testing.expectEqual(@as(u64, 3), stats.rate_limit_hit_count);
-}
-
-test "PeerScoreService: remove peer frees memory" {
-    var service = PeerScoreService.init(testing.allocator);
-    defer service.deinit();
-
-    _ = try service.onGossipValidation("peer1", .accept, null);
-    try testing.expectEqual(@as(usize, 1), service.peerCount());
-
-    service.removePeer("peer1");
-    try testing.expectEqual(@as(usize, 0), service.peerCount());
-    try testing.expectEqual(@as(?*const PeerScoringStats, null), service.getStats("peer1"));
-}
-
-test "PeerScoreService: multiple peers tracked independently" {
-    var service = PeerScoreService.init(testing.allocator);
-    defer service.deinit();
-
-    _ = try service.onGossipValidation("peer1", .accept, null);
-    _ = try service.onGossipValidation("peer1", .accept, null);
-    _ = try service.onGossipValidation("peer2", .reject, .invalid_slot);
-
-    try testing.expectEqual(@as(usize, 2), service.peerCount());
-
-    const stats1 = service.getStats("peer1").?;
-    try testing.expectEqual(@as(u64, 2), stats1.gossip_accept_count);
-    try testing.expectEqual(@as(u64, 0), stats1.gossip_reject_count);
-
-    const stats2 = service.getStats("peer2").?;
-    try testing.expectEqual(@as(u64, 0), stats2.gossip_accept_count);
-    try testing.expectEqual(@as(u64, 1), stats2.gossip_reject_count);
-}
-
-test "PeerScoreService: integrated scoring flow" {
-    // Simulate a complete scoring flow:
-    // 1. Peer sends valid gossip → accept
-    // 2. Peer sends invalid block → fatal reject
-    // 3. Req/resp timeout on status → low_tolerance
-    var service = PeerScoreService.init(testing.allocator);
-    defer service.deinit();
-
-    const peer = "peer_badactor";
-
-    // Step 1: Valid gossip
-    const a1 = try service.onGossipValidation(peer, .accept, null);
-    try testing.expectEqual(@as(?PeerAction, null), a1);
-
-    // Step 2: Invalid block
-    const a2 = try service.onGossipValidation(peer, .reject, .invalid_block);
-    try testing.expectEqual(PeerAction.fatal, a2.?);
-
-    // Step 3: Status timeout
-    const a3 = try service.onReqRespResult(peer, .response_timeout, .status);
-    try testing.expectEqual(PeerAction.low_tolerance, a3.?);
-
-    // Verify stats
-    const stats = service.getStats(peer).?;
-    try testing.expectEqual(@as(u64, 1), stats.gossip_accept_count);
-    try testing.expectEqual(@as(u64, 1), stats.gossip_reject_count);
-    try testing.expectEqual(@as(u64, 0), stats.reqresp_success_count);
-    try testing.expectEqual(@as(u64, 1), stats.reqresp_timeout_count);
-}
-

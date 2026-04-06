@@ -130,10 +130,14 @@ pub const DEFAULT_SCORE: f64 = 0.0;
 pub const MIN_SCORE_BEFORE_DISCONNECT: f64 = -20.0;
 /// Minimum score before ban.
 pub const MIN_SCORE_BEFORE_BAN: f64 = -50.0;
+/// Lodestar score threshold below which gossipsub is ignored entirely.
+pub const MIN_LODESTAR_SCORE_BEFORE_BAN: f64 = -60.0;
 /// Maximum score a peer can obtain.
 pub const MAX_SCORE: f64 = 100.0;
 /// Minimum score a peer can obtain.
 pub const MIN_SCORE: f64 = -100.0;
+/// Drop decayed scores to zero below this absolute threshold.
+pub const SCORE_THRESHOLD: f64 = 1.0;
 /// Score halflife in milliseconds (10 minutes).
 pub const SCORE_HALFLIFE_MS: f64 = 600_000.0;
 /// Pre-computed decay constant: -ln(2) / halflife_ms.
@@ -234,14 +238,14 @@ pub const PeerScore = struct {
     /// Recompute the combined score from components.
     pub fn recomputeScore(self: *PeerScore) void {
         self.score = self.lodestar_score;
-        // If lodestar score is catastrophically low, ignore gossipsub entirely.
-        if (self.lodestar_score <= MIN_SCORE_BEFORE_BAN) return;
+        // If the application score is catastrophically low, ignore gossipsub.
+        if (self.score <= MIN_LODESTAR_SCORE_BEFORE_BAN) return;
         if (self.gossipsub_score >= 0.0) {
-            // Positive gossipsub score — use full weight to reward well-behaving peers.
+            // Positive gossipsub score uses the same Lodestar scaling.
             self.score += self.gossipsub_score * gossipsubPositiveScoreWeight();
         } else if (!self.ignore_negative_gossipsub) {
-            // Negative gossipsub score — apply dampened weight so gossipsub alone
-            // cannot push a peer below the disconnect threshold.
+            // Negative gossipsub score uses the same scaling unless the peer is
+            // temporarily allowed to recover from a mildly negative mesh score.
             self.score += self.gossipsub_score * gossipsubNegativeScoreWeight();
         }
     }
@@ -281,7 +285,7 @@ pub const PeerScore = struct {
         const decay_factor = @exp(HALFLIFE_DECAY_MS * elapsed_ms);
         self.lodestar_score *= decay_factor;
         // Drop tiny values to zero.
-        if (@abs(self.lodestar_score) < 0.01) self.lodestar_score = 0.0;
+        if (@abs(self.lodestar_score) < SCORE_THRESHOLD) self.lodestar_score = 0.0;
         self.recomputeScore();
     }
 
@@ -319,18 +323,16 @@ pub const PeerScore = struct {
     }
 };
 
-/// Gossipsub positive score weight. Well-behaving peers receive full credit.
+const GOSSIPSUB_GRAYLIST_THRESHOLD: f64 = -16_000.0;
+
+/// Gossipsub weight. Positive and negative scores use the same scaling so
+/// router scores alone never disconnect a peer.
 fn gossipsubPositiveScoreWeight() f64 {
-    return 1.0;
+    return (MIN_SCORE_BEFORE_DISCONNECT + 1.0) / GOSSIPSUB_GRAYLIST_THRESHOLD;
 }
 
-/// Gossipsub negative score weight. Ensures gossipsub scores alone
-/// never push a peer below disconnect threshold.
 fn gossipsubNegativeScoreWeight() f64 {
-    // This follows Lighthouse/Lodestar: weight = (MIN_SCORE_BEFORE_DISCONNECT + 1) / greylist_threshold
-    // Greylist threshold is typically around -16000. We use a conservative approximation.
-    // For now, a simple weight that prevents gossipsub from causing disconnects alone.
-    return 0.0012;
+    return gossipsubPositiveScoreWeight();
 }
 
 // ── Relevance status ────────────────────────────────────────────────────────
@@ -597,4 +599,24 @@ test "PeerScore: reconnection cool-down" {
     // After cool-down, decay should work.
     ps.decayScore(1000 + 5 * 60 * 1000 + 600_000); // After cool-down + 10 min
     try std.testing.expect(@abs(ps.lodestar_score) < 10.0);
+}
+
+test "PeerScore: gossipsub uses symmetric Lodestar weight" {
+    var ps = PeerScore{};
+    ps.last_updated_ms = 0;
+
+    ps.updateGossipsubScore(-16_000.0, false, 1000);
+    try std.testing.expectApproxEqAbs(@as(f64, MIN_SCORE_BEFORE_DISCONNECT + 1.0), ps.score, 0.0001);
+
+    ps.updateGossipsubScore(16_000.0, false, 1000);
+    try std.testing.expectApproxEqAbs(@as(f64, -(MIN_SCORE_BEFORE_DISCONNECT + 1.0)), ps.score, 0.0001);
+}
+
+test "PeerScore: catastrophically low Lodestar score ignores gossipsub" {
+    var ps = PeerScore{};
+    ps.last_updated_ms = 0;
+    ps.addDelta(MIN_LODESTAR_SCORE_BEFORE_BAN - 1.0, 1000);
+    ps.updateGossipsubScore(16_000.0, false, 1000);
+    try std.testing.expectEqual(ScoreState.banned, ps.state());
+    try std.testing.expect(ps.score <= MIN_SCORE_BEFORE_BAN);
 }

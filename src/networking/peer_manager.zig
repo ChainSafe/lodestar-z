@@ -54,6 +54,7 @@ const DisconnectReason = peer_prioritization.DisconnectReason;
 const status_cache = @import("status_cache.zig");
 const CachedStatus = status_cache.CachedStatus;
 const StatusCache = status_cache.StatusCache;
+const peer_scoring = @import("peer_scoring.zig");
 
 const subnet_service_mod = @import("subnet_service.zig");
 const SubnetService = subnet_service_mod.SubnetService;
@@ -219,7 +220,15 @@ pub const PeerManager = struct {
 
     /// Called when a peer disconnects.
     pub fn onPeerDisconnected(self: *PeerManager, peer_id: []const u8, now_ms: u64) void {
+        const apply_inbound_cooldown = if (self.db.getPeer(peer_id)) |info|
+            info.connection_state == .connected and info.direction == .inbound
+        else
+            false;
+
         self.db.peerDisconnected(peer_id, now_ms);
+        if (apply_inbound_cooldown) {
+            self.db.applyReconnectionCoolDown(peer_id, peer_scoring.inboundDisconnectCoolDownMs(), now_ms);
+        }
         log.debug("Peer disconnected {s} total={d}", .{
             peer_id,
             self.db.connected_count,
@@ -230,6 +239,19 @@ pub const PeerManager = struct {
     /// fully torn down yet.
     pub fn onPeerDisconnecting(self: *PeerManager, peer_id: []const u8) void {
         self.db.peerDisconnecting(peer_id);
+    }
+
+    /// Called when a peer initiates a Goodbye disconnect.
+    pub fn onPeerGoodbye(
+        self: *PeerManager,
+        peer_id: []const u8,
+        reason: GoodbyeReason,
+        now_ms: u64,
+    ) void {
+        self.db.peerDisconnecting(peer_id);
+        if (peer_scoring.reconnectionCoolDownMs(reason)) |cool_down_ms| {
+            self.db.applyReconnectionCoolDown(peer_id, cool_down_ms, now_ms);
+        }
     }
 
     /// Called when we initiate a dial to a peer.
@@ -309,6 +331,21 @@ pub const PeerManager = struct {
     /// Record a successful Status exchange.
     pub fn markStatusExchange(self: *PeerManager, peer_id: []const u8, now_ms: u64) void {
         self.db.markStatusExchange(peer_id, now_ms);
+    }
+
+    /// Mirror the live gossipsub router score into peer state.
+    pub fn updateGossipsubScore(
+        self: *PeerManager,
+        peer_id: []const u8,
+        score: f64,
+        ignore_negative: bool,
+        now_ms: u64,
+    ) ?ScoreState {
+        return self.db.updateGossipsubScore(peer_id, score, ignore_negative, now_ms);
+    }
+
+    pub fn negativeGossipsubIgnoreCount(self: *const PeerManager) u32 {
+        return peer_scoring.negativeGossipsubIgnoreCount(self.config.target_peers);
     }
 
     // ── Peer actions ────────────────────────────────────────────────
@@ -983,6 +1020,30 @@ test "PeerManager: basic connect/disconnect lifecycle" {
 
     pm.onPeerDisconnected("peer_a", 2000);
     try std.testing.expectEqual(@as(u32, 0), pm.peerCount());
+}
+
+test "PeerManager: inbound disconnect applies reconnection cool-down" {
+    const allocator = std.testing.allocator;
+    var pm = PeerManager.init(allocator, .{ .target_peers = 5, .max_peers = 10 });
+    defer pm.deinit();
+
+    _ = try pm.onPeerConnected("peer_a", .inbound, 1000);
+    pm.onPeerDisconnected("peer_a", 2000);
+
+    const peer = pm.getPeer("peer_a").?;
+    try std.testing.expect(peer.peer_score.isCoolingDown(2000));
+}
+
+test "PeerManager: outbound disconnect does not apply reconnection cool-down" {
+    const allocator = std.testing.allocator;
+    var pm = PeerManager.init(allocator, .{ .target_peers = 5, .max_peers = 10 });
+    defer pm.deinit();
+
+    _ = try pm.onPeerConnected("peer_a", .outbound, 1000);
+    pm.onPeerDisconnected("peer_a", 2000);
+
+    const peer = pm.getPeer("peer_a").?;
+    try std.testing.expect(!peer.peer_score.isCoolingDown(2000));
 }
 
 test "PeerManager: reject banned peer" {

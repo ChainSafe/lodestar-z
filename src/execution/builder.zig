@@ -952,7 +952,7 @@ pub fn freeExecutionPayload(allocator: Allocator, payload: types.ExecutionPayloa
 /// - GET /eth/v1/builder/header/... → bid JSON or empty (204 no bid)
 /// - POST /eth/v1/builder/validators → 200 OK
 /// - POST /eth/v1/builder/blinded_blocks → full payload JSON
-pub const MockBuilderTransport = struct {
+const MockBuilderTransport = struct {
     allocator: Allocator,
     /// Response to return for the next send() call.
     /// Empty string simulates 204 No Content.

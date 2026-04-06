@@ -542,7 +542,7 @@ test "BeaconNode: forkchoiceUpdated called after block import for post-merge hea
     try genesis_state.state.setSlot(0);
     try ctx.node.initFromGenesis(genesis_state);
 
-    const mock = ctx.node.mockEngine() orelse return error.TestFailed;
+    const mock = ctx.node.execution_runtime.mock_engine orelse return error.TestFailed;
     const genesis_root = ctx.node.getHead().root;
     const fake_exec_hash = [_]u8{0xab} ** 32;
     const post_merge_root = [_]u8{0xcd} ** 32;
@@ -588,7 +588,7 @@ test "BeaconNode: forkchoiceUpdated not called for pre-merge head" {
     try genesis_state.state.setSlot(0);
     try ctx.node.initFromGenesis(genesis_state);
 
-    const mock = ctx.node.mockEngine() orelse return error.TestFailed;
+    const mock = ctx.node.execution_runtime.mock_engine orelse return error.TestFailed;
     const genesis_root = ctx.node.getHead().root;
 
     try queueForkchoiceUpdateForHead(ctx.node, genesis_root);
