@@ -2,9 +2,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const ForkSeq = @import("config").ForkSeq;
 const metrics = @import("metrics.zig");
-const observeEpochTransitionStep = metrics.observeEpochTransitionStep;
-const observeEpochTransition = metrics.observeEpochTransition;
-const Timer = @import("metrics.zig").Timer;
+const StateTransitionMetrics = metrics.StateTransitionMetrics;
 
 const types = @import("consensus_types");
 const preset = @import("preset").preset;
@@ -54,6 +52,7 @@ pub fn processSlots(
     const config = cached_state.config;
     const epoch_cache = cached_state.epoch_cache;
     const state = cached_state.state;
+    const st_metrics = cached_state.metrics;
 
     if (try state.slot() > slot) return error.outdatedSlot;
 
@@ -62,9 +61,9 @@ pub fn processSlots(
 
         const next_slot = try state.slot() + 1;
         if (next_slot % preset.SLOTS_PER_EPOCH == 0) {
-            var epoch_transition_timer = Timer.start();
+            var epoch_transition_timer = st_metrics.startTimer();
 
-            var timer = Timer.start();
+            var timer = st_metrics.startTimer();
             var epoch_transition_cache = try EpochTransitionCache.init(
                 allocator,
                 config,
@@ -72,7 +71,7 @@ pub fn processSlots(
                 state,
             );
             defer epoch_transition_cache.deinit();
-            try observeEpochTransitionStep(.{ .step = .before_process_epoch }, timer.read());
+            try st_metrics.observeEpochTransitionStep(.{ .step = .before_process_epoch }, timer.read());
 
             switch (state.forkSeq()) {
                 inline else => |f| {
@@ -83,6 +82,7 @@ pub fn processSlots(
                         epoch_cache,
                         state.castToFork(f),
                         &epoch_transition_cache,
+                        st_metrics,
                     );
                 },
             }
@@ -90,9 +90,9 @@ pub fn processSlots(
 
             try state.setSlot(next_slot);
 
-            timer = Timer.start();
+            timer = st_metrics.startTimer();
             try epoch_cache.afterProcessEpoch(state, &epoch_transition_cache);
-            try observeEpochTransitionStep(.{ .step = .after_process_epoch }, timer.read());
+            try st_metrics.observeEpochTransitionStep(.{ .step = .after_process_epoch }, timer.read());
             // state.commit
 
             const state_epoch = computeEpochAtSlot(next_slot);
@@ -146,7 +146,7 @@ pub fn processSlots(
             }
 
             try epoch_cache.finalProcessEpoch(state);
-            metrics.state_transition.epoch_transition.observe(epoch_transition_timer.readSeconds());
+            st_metrics.epoch_transition.observe(epoch_transition_timer.readSeconds());
         } else {
             try state.setSlot(next_slot);
         }
@@ -189,8 +189,6 @@ pub fn stateTransition(
         allocator.destroy(post_cached_state);
     }
 
-    try metrics.state_transition.onStateClone(post_cached_state, .state_transition);
-
     try processSlots(
         allocator,
         post_cached_state,
@@ -216,7 +214,7 @@ pub fn stateTransition(
         return error.InvalidBlockForkForState;
     }
     // Note: time only on success
-    var timer = Timer.start();
+    var timer = post_cached_state.metrics.startTimer();
     switch (post_state.forkSeq()) {
         inline else => |f| {
             switch (block.blockType()) {
@@ -244,7 +242,7 @@ pub fn stateTransition(
             }
         },
     }
-    metrics.state_transition.process_block.observe(timer.readSeconds());
+    post_cached_state.metrics.process_block.observe(timer.readSeconds());
 
     //
     // TODO(bing): commit
@@ -252,13 +250,11 @@ pub fn stateTransition(
     //  postState.commit();
     //  processBlockCommitTimer?.();
 
-    try metrics.state_transition.onPostState(post_cached_state);
-
     // Verify state root
     if (opts.verify_state_root) {
-        timer = Timer.start();
+        timer = post_cached_state.metrics.startTimer();
         const post_state_root = try post_state.hashTreeRoot();
-        try metrics.state_transition.state_hash_tree_root.observe(.{ .source = .block_transition }, timer.readSeconds());
+        try post_cached_state.metrics.state_hash_tree_root.observe(.{ .source = .block_transition }, timer.readSeconds());
 
         const block_state_root = block.stateRoot();
         if (!std.mem.eql(u8, post_state_root, block_state_root)) {

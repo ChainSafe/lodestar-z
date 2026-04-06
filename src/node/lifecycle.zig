@@ -97,6 +97,7 @@ pub fn init(allocator: Allocator, io: std.Io, beacon_config: *const BeaconConfig
             .block_bls_thread_pool = bls_thread_pools.block,
             .validator_monitor_indices = opts.validator_monitor_indices,
             .custody_columns = custody_columns,
+            .state_transition_metrics = init_config.state_transition_metrics,
         },
     );
     var owned_chain_runtime: ?*chain_mod.Runtime = chain_runtime;
@@ -145,6 +146,7 @@ pub fn init(allocator: Allocator, io: std.Io, beacon_config: *const BeaconConfig
         .api_context = api_ctx,
         .api_node_identity = api_node_identity,
         .event_bus = event_bus_ptr,
+        .metrics = init_config.metrics,
         .published_proposals = std.AutoHashMap(BeaconNode.PublishedProposalKey, [32]u8).init(allocator),
         .unknown_block_sync = UnknownBlockSync.init(allocator),
         .unknown_chain_sync = UnknownChainSync.init(allocator),
@@ -240,6 +242,7 @@ pub fn initBuilder(
             .block_bls_thread_pool = bls_thread_pools.block,
             .validator_monitor_indices = opts.validator_monitor_indices,
             .custody_columns = custody_columns,
+            .state_transition_metrics = init_config.state_transition_metrics,
         },
     );
     var owns_runtime_builder = true;
@@ -285,6 +288,7 @@ pub fn initBuilder(
         .api_context = api_ctx,
         .api_node_identity = api_node_identity,
         .event_bus = event_bus_ptr,
+        .metrics = init_config.metrics,
         .bootstrap_peers = init_config.bootstrap_peers,
         .discovery_bootnodes = init_config.discovery_bootnodes,
         .identify_agent_version = init_config.identify_agent_version,
@@ -335,6 +339,7 @@ fn finishBuilder(
         .api_context = self.api_context.?,
         .api_node_identity = self.api_node_identity.?,
         .event_bus = self.event_bus.?,
+        .metrics = self.metrics,
         .published_proposals = std.AutoHashMap(BeaconNode.PublishedProposalKey, [32]u8).init(allocator),
         .unknown_block_sync = UnknownBlockSync.init(allocator),
         .unknown_chain_sync = UnknownChainSync.init(allocator),

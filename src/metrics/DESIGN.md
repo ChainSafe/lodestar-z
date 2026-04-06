@@ -9,28 +9,28 @@ monitoring, performance debugging, and operator visibility.
 
 ```
 ┌──────────────────┐     ┌──────────────────┐
-│  BeaconMetrics    │     │ ValidatorMetrics  │
-│  (50+ metrics)    │     │  (15+ metrics)    │
-└────────┬─────────┘     └────────┬──────────┘
+│  BeaconMetrics   │     │ ValidatorMetrics │
+│  node subsystem  │     │ validator client │
+└────────┬─────────┘     └────────┬─────────┘
          │                        │
-         │ ?*BeaconMetrics        │ ?*ValidatorMetrics
-         │ (optional pointer)     │ (optional pointer)
-         │                        │
-    ┌────┴────────────────────────┴───┐
-    │        Subsystem Instrumentation │
-    │  beacon_node.zig (chain, peers) │
-    │  gossip_handler.zig (gossip)    │
-    │  block_importer (EL timing)     │
-    │  state_transition/metrics.zig   │
-    └──────────────┬──────────────────┘
-                   │
-         ┌─────────┴──────────┐
-         │   MetricsServer    │
-         │   GET /metrics     │
-         │   :9090            │
-         └────────────────────┘
-                   │
-              Prometheus
+         │                 ┌──────┴────────────────────┐
+         │                 │ explicit launcher/runtime │
+         │                 │ ownership of metrics      │
+         │                 └────────────┬──────────────┘
+         │                              │
+┌────────┴──────────────────────────────┴──────────────┐
+│                subsystem instrumentation             │
+│ node/*, validator/*, chain/*, execution/*, sync/*   │
+│ state_transition/metrics.zig carried by cached state│
+└──────────────┬───────────────────────────────────────┘
+               │
+      ┌────────┴─────────┐
+      │ shared metrics   │
+      │ HTTP server/runtime │
+      │ GET /metrics     │
+      └──────────────────┘
+               │
+          Prometheus
 ```
 
 ## Metric Types
@@ -46,9 +46,9 @@ All types from the `metrics` library dependency (lock-free, noop-capable):
 
 ### Noop Mode (Zero Overhead)
 
-Every metric is a `union(enum) { noop, impl }`. When `--metrics` is not
-passed, `initNoop()` sets all fields to `.noop`, making every `incr()`,
-`set()`, `observe()` a no-op branch that the compiler can optimize away.
+Every metric is a `union(enum) { noop, impl }`. When metrics are disabled, the
+launcher/runtime owns noop metric values and passes them through the same APIs
+as live metrics. Hot subsystems do not have a separate initialization path.
 
 ```zig
 // Enabled:
@@ -60,74 +60,47 @@ var m = BeaconMetrics.initNoop();
 
 ## Metric Categories
 
-### Chain State ("Is my node healthy?")
-- `beacon_head_slot` — current head slot
+### Beacon Node (live today)
+
+#### Chain state
+- `beacon_head_slot` — current canonical head slot
+- `beacon_head_root` — first 8 bytes of the canonical head root, for change detection
 - `beacon_finalized_epoch` — finalized epoch
 - `beacon_justified_epoch` — justified epoch
-- `beacon_current_active_validators` — active validator count
-- `beacon_reorg_events_total` — fork choice reorgs
 
-### Block Processing ("How fast are blocks imported?")
-- `beacon_blocks_imported_total` — total imported blocks
+#### Block import
+- `beacon_blocks_imported_total` — successfully imported blocks
 - `beacon_block_import_seconds` — block import latency histogram
-- `beacon_block_slot_delta` — freshness of imported blocks
 
-### State Transition ("Where is STFN time spent?")
-- `beacon_state_transition_seconds` — full STF latency
-- `beacon_process_block_seconds` — processBlock latency
-- `beacon_process_epoch_seconds` — epoch transition latency
-- `beacon_state_regen_seconds` — state regeneration latency
-- `lodestar_stfn_*` — detailed per-step epoch transition (from state_transition/metrics.zig)
-
-### Fork Choice
-- `beacon_fork_choice_find_head_seconds` — findHead latency
-- `beacon_fork_choice_nodes` — DAG size
-- `beacon_fork_choice_reprocessed_total` — reprocessed blocks
-
-### Network / P2P ("What's happening on the network?")
+#### Network / P2P
 - `p2p_peer_count` — connected peers
 - `p2p_peer_connected_total` — peer connection events
 - `p2p_peer_disconnected_total` — peer disconnection events
-- `beacon_gossip_messages_received_total` — all gossip messages
-- `beacon_gossip_messages_validated_total` — accepted
-- `beacon_gossip_messages_rejected_total` — rejected
-- `beacon_gossip_messages_ignored_total` — ignored (dupes, stale)
-- `beacon_reqresp_requests_total` — req/resp count
-- `beacon_reqresp_request_seconds` — req/resp latency
+- `beacon_gossip_messages_received_total` — all inbound gossip messages
+- `beacon_gossip_messages_validated_total` — accepted gossip messages
+- `beacon_gossip_messages_rejected_total` — rejected gossip messages
+- `beacon_gossip_messages_ignored_total` — ignored gossip messages
 
-### Sync ("Is the node synced?")
+#### Discovery / sync
+- `beacon_discovery_peers_known` — known discovery peers
 - `beacon_sync_status` — 0=synced, 1=syncing
-- `beacon_sync_distance` — slots behind network head
-- `beacon_sync_batches_pending` — in-flight sync batches
+- `beacon_sync_distance` — slots behind the network head
 
-### API ("How is the REST API performing?")
-- `beacon_api_requests_total` — request count
-- `beacon_api_request_seconds` — request latency
+#### Execution layer
+- `execution_new_payload_seconds` — `engine_newPayload*` latency
+- `execution_forkchoice_updated_seconds` — `engine_forkchoiceUpdated*` latency
+- `execution_payload_valid_total` — VALID payload-status responses
+- `execution_payload_invalid_total` — INVALID payload-status responses
+- `execution_payload_syncing_total` — SYNCING/ACCEPTED payload-status responses
+- `execution_errors_total` — execution transport / request errors
 
-### Database
-- `beacon_db_read_seconds` — read latency
-- `beacon_db_write_seconds` — write latency
-- `beacon_db_block_count` — stored blocks
+### State Transition (live today)
+- `lodestar_stfn_epoch_transition_seconds` — epoch transition latency
+- `lodestar_stfn_epoch_transition_step_seconds` — per-step epoch transition latency
+- `lodestar_stfn_process_block_seconds` — `processBlock` latency
+- `lodestar_stfn_hash_tree_root_seconds` — post-state hash-tree-root latency
 
-### Execution Layer ("What's the EL doing?")
-- `execution_new_payload_seconds` — newPayload latency
-- `execution_forkchoice_updated_seconds` — forkchoiceUpdated latency
-- `execution_get_payload_seconds` — getPayload latency
-- `execution_payload_valid_total` — VALID status count
-- `execution_payload_invalid_total` — INVALID status count
-- `execution_payload_syncing_total` — SYNCING status count
-- `execution_errors_total` — transport/timeout errors
-
-### Caches ("What's the cache performance?")
-- `beacon_state_cache_size` — cached states
-- `beacon_state_cache_hit_total` — state cache hits
-- `beacon_state_cache_miss_total` — state cache misses
-- `beacon_shuffling_cache_hit_total` — shuffling cache hits
-- `beacon_shuffling_cache_miss_total` — shuffling cache misses
-- `beacon_checkpoint_cache_size` — checkpoint cache entries
-- `beacon_pmt_pool_used_nodes` — PMT pool usage
-
-### Validator ("Is my validator performing?")
+### Validator (live today)
 - `validator_attestation_published_total` — attestations published
 - `validator_attestation_missed_total` — attestations missed
 - `validator_attestation_delay_seconds` — attestation timing
@@ -145,16 +118,25 @@ var m = BeaconMetrics.initNoop();
 - `lodestar_monitoring_collect_data_seconds` — remote-monitoring payload collection latency
 - `lodestar_monitoring_send_data_seconds` — remote-monitoring upload latency by status
 
+### Not Yet Wired
+These are good future metrics, but they should not be exported until they are real runtime instrumentation:
+- beacon REST API request counters / latency
+- DB read/write latency and object counts
+- fork-choice DAG/reprocess timings
+- attestation/op-pool sizes
+- req/resp service latency and request totals
+- cache-size / cache-hit families outside the validator runtime
+
 ## Instrumentation Points
 
 | Subsystem | File | What's Measured |
 |-----------|------|-----------------|
-| Chain | `beacon_node.zig` | Block import time, head/finalized/justified updates |
-| Gossip | `gossip_handler.zig` | Message received/validated/rejected/ignored counts |
-| EL | `beacon_node.zig` | newPayload + forkchoiceUpdated latency, status |
-| STF | `state_transition/metrics.zig` | Epoch/block/commit latency, per-step breakdown |
-| Peers | `beacon_node.zig` | Peer count updated each tick |
-| Sync | `beacon_node.zig` | Sync status + distance updated each tick |
+| Chain import | `node/beacon_node.zig` | block import count/latency plus head/finalized/justified updates |
+| Execution | `node/beacon_node.zig`, `node/execution_port.zig` | newPayload/forkchoiceUpdated latency and payload status counters |
+| Gossip | `node/gossip_handler.zig` | gossip received/validated/rejected/ignored counters |
+| Peer/discovery/sync | `node/p2p_runtime.zig`, `node/reqresp_callbacks.zig` | peer counts/events, discovery peer count, sync status/distance |
+| STF | `state_transition/metrics.zig` | runtime-owned STFN timing carried through cached states and regen/runtime paths |
+| Metrics HTTP | `metrics/server.zig`, `metrics/runtime.zig` | shared `/metrics` listener/runtime for beacon and validator |
 
 ## Prometheus Text Format
 
@@ -177,10 +159,10 @@ beacon_block_import_seconds_count 10
 
 ## Adding New Metrics
 
-1. Add the field to `BeaconMetrics` or `ValidatorMetrics` in `src/node/metrics.zig`
-2. Add the `.init()` call in `init()` with the Prometheus name
-3. Use `if (self.metrics) |m| m.your_metric.incr();` at the instrumentation point
-4. The noop path is automatic — `initializeNoop` handles it
+1. Add the field to the owning subsystem metrics struct (`BeaconMetrics`, `ValidatorMetrics`, or `StateTransitionMetrics`)
+2. Wire real runtime instrumentation before documenting or exporting the metric
+3. Add the constructor / registry setup for the metric in that subsystem
+4. Thread the live or noop metrics object through the same runtime path so disabled mode stays structurally identical
 
 ## Future Work
 

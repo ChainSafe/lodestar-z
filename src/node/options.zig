@@ -100,12 +100,6 @@ pub const NodeOptions = struct {
     /// CORS origin for the REST API (--api-cors). Null = same-origin only.
     rest_cors_origin: ?[]const u8 = null,
 
-    // ── Metrics ──────────────────────────────────────────────────
-    /// Enable Prometheus metrics HTTP server (--metrics flag).
-    metrics_enabled: bool = false,
-    metrics_address: []const u8 = "127.0.0.1",
-    metrics_port: u16 = 8008,
-
     // ── Validator ────────────────────────────────────────────────
     suggested_fee_recipient: ?[20]u8 = null,
     /// Custom graffiti string (UTF-8, max 32 bytes, zero-padded).

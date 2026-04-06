@@ -6,7 +6,11 @@ const Allocator = std.mem.Allocator;
 const node_mod = @import("node");
 const log_mod = @import("log");
 const bootstrap = @import("bootstrap.zig");
+const metrics_server = @import("metrics_server.zig");
 const BeaconNode = node_mod.BeaconNode;
+const BeaconMetrics = node_mod.BeaconMetrics;
+const MetricsSurface = node_mod.MetricsSurface;
+const StateTransitionMetrics = state_transition.metrics.StateTransitionMetrics;
 const NodeOptions = node_mod.NodeOptions;
 const config_mod = @import("config");
 const BeaconConfig = config_mod.BeaconConfig;
@@ -224,6 +228,7 @@ fn runBootstrappedNode(
     api_cors_origin: ?[]const u8,
     p2p_bind_host: []const u8,
     p2p_bind_port: u16,
+    metrics_runtime: ?*metrics_server.Runtime,
 ) !void {
     var run_ctx = RunContext{
         .node = node,
@@ -233,6 +238,11 @@ fn runBootstrappedNode(
         .p2p_port = p2p_bind_port,
         .p2p_host = p2p_bind_host,
     };
+
+    if (metrics_runtime) |runtime| {
+        try runtime.start();
+    }
+    defer if (metrics_runtime) |runtime| runtime.stop();
 
     std.log.info("Starting services concurrently...", .{});
     std.log.info("  REST API: http://{s}:{d}", .{ api_address, api_port });
@@ -497,9 +507,6 @@ pub fn run(io: Io, allocator: Allocator, opts: anytype) !void {
         .nat = opts.nat,
         .suggested_fee_recipient = fee_recipient,
         .graffiti = graffiti_bytes,
-        .metrics_enabled = opts.metrics,
-        .metrics_port = metrics_port,
-        .metrics_address = metrics_address,
         .checkpoint_sync_url = checkpoint_sync_url,
     };
 
@@ -553,7 +560,34 @@ pub fn run(io: Io, allocator: Allocator, opts: anytype) !void {
         prepared_runtime.discovery_bootnodes.len,
     });
 
-    var node_builder = try BeaconNode.Builder.init(allocator, io, beacon_config, prepared_runtime.takeInitConfig(node_opts));
+    var beacon_metrics = BeaconMetrics.initNoop();
+    var state_transition_metrics = StateTransitionMetrics.initNoop();
+    defer state_transition_metrics.deinit();
+    var metrics_surface = MetricsSurface{
+        .beacon = &beacon_metrics,
+        .state_transition = &state_transition_metrics,
+    };
+    var metrics_runtime: ?metrics_server.Runtime = null;
+    if (opts.metrics) {
+        beacon_metrics = BeaconMetrics.init();
+        state_transition_metrics = try StateTransitionMetrics.init(allocator, io, .{});
+
+        metrics_runtime = metrics_server.Runtime.init(
+            io,
+            allocator,
+            &metrics_surface,
+            .{
+                .address = metrics_address,
+                .port = metrics_port,
+            },
+        );
+    }
+
+    var init_config = prepared_runtime.takeInitConfig(node_opts);
+    init_config.metrics = if (opts.metrics) &beacon_metrics else null;
+    init_config.state_transition_metrics = &state_transition_metrics;
+
+    var node_builder = try BeaconNode.Builder.init(allocator, io, beacon_config, init_config);
     defer node_builder.deinit();
 
     std.log.info("BeaconNode bootstrap initialized", .{});
@@ -585,6 +619,7 @@ pub fn run(io: Io, allocator: Allocator, opts: anytype) !void {
             beacon_config,
             node_builder.sharedStateGraph().validator_pubkeys,
             fetched.state_bytes,
+            &state_transition_metrics,
         ) catch |err| {
             std.log.err("Failed to deserialize checkpoint state: {}", .{err});
             std.log.err("  This may indicate a fork mismatch — check that the", .{});
@@ -615,7 +650,7 @@ pub fn run(io: Io, allocator: Allocator, opts: anytype) !void {
         }
         std.log.info("Initialized from checkpoint sync URL at slot {d}", .{cp_slot});
         logHeadSummary(node);
-        try runBootstrappedNode(io, node, api_port, api_address, api_cors, p2p_bind_host, p2p_bind_port);
+        try runBootstrappedNode(io, node, api_port, api_address, api_cors, p2p_bind_host, p2p_bind_port, if (metrics_runtime) |*runtime| runtime else null);
         return;
     } else if (checkpoint_state) |state_path| {
         std.log.info("Loading checkpoint state from: {s}", .{state_path});
@@ -627,6 +662,7 @@ pub fn run(io: Io, allocator: Allocator, opts: anytype) !void {
             node_builder.sharedStateGraph().validator_pubkeys,
             io,
             state_path,
+            &state_transition_metrics,
         ) catch |err| {
             std.log.err("Failed to load checkpoint state '{s}': {}", .{ state_path, err });
             std.process.exit(1);
@@ -656,7 +692,7 @@ pub fn run(io: Io, allocator: Allocator, opts: anytype) !void {
         }
         std.log.info("Initialized from checkpoint file at slot {d}", .{cp_slot});
         logHeadSummary(node);
-        try runBootstrappedNode(io, node, api_port, api_address, api_cors, p2p_bind_host, p2p_bind_port);
+        try runBootstrappedNode(io, node, api_port, api_address, api_cors, p2p_bind_host, p2p_bind_port, if (metrics_runtime) |*runtime| runtime else null);
         return;
     } else if (if (!force_checkpoint) node_builder.latestStateArchiveSlot() catch null else null) |db_slot| {
         std.log.info("Found persisted state in DB at slot {d}, resuming...", .{db_slot});
@@ -676,6 +712,7 @@ pub fn run(io: Io, allocator: Allocator, opts: anytype) !void {
             beacon_config,
             node_builder.sharedStateGraph().validator_pubkeys,
             state_bytes,
+            &state_transition_metrics,
         ) catch |err| {
             std.log.err("Failed to deserialize DB state at slot {d}: {}", .{ db_slot, err });
             std.log.err("  The database may be corrupted. Try --force-checkpoint-sync", .{});
@@ -689,7 +726,7 @@ pub fn run(io: Io, allocator: Allocator, opts: anytype) !void {
         }
         std.log.info("Resumed from DB state at slot {d}", .{db_slot});
         logHeadSummary(node);
-        try runBootstrappedNode(io, node, api_port, api_address, api_cors, p2p_bind_host, p2p_bind_port);
+        try runBootstrappedNode(io, node, api_port, api_address, api_cors, p2p_bind_host, p2p_bind_port, if (metrics_runtime) |*runtime| runtime else null);
         return;
     } else if (network == .minimal) {
         std.log.info("Generating minimal genesis state with 64 validators...", .{});
@@ -700,6 +737,7 @@ pub fn run(io: Io, allocator: Allocator, opts: anytype) !void {
             beacon_config,
             node_builder.sharedStateGraph().validator_pubkeys,
             64,
+            &state_transition_metrics,
         ) catch |err| {
             std.log.err("Failed to generate minimal genesis state: {}", .{err});
             std.process.exit(1);
@@ -712,7 +750,7 @@ pub fn run(io: Io, allocator: Allocator, opts: anytype) !void {
         }
         std.log.info("Initialized from minimal genesis state", .{});
         logHeadSummary(node);
-        try runBootstrappedNode(io, node, api_port, api_address, api_cors, p2p_bind_host, p2p_bind_port);
+        try runBootstrappedNode(io, node, api_port, api_address, api_cors, p2p_bind_host, p2p_bind_port, if (metrics_runtime) |*runtime| runtime else null);
         return;
     } else {
         std.log.err("No beacon state available. Provide one of:", .{});

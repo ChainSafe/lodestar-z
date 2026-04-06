@@ -33,6 +33,7 @@ const state_transition = @import("state_transition");
 const bls_mod = @import("bls");
 const BlsThreadPool = bls_mod.ThreadPool;
 const CachedBeaconState = state_transition.CachedBeaconState;
+const StateTransitionMetrics = state_transition.metrics.StateTransitionMetrics;
 const chain_mod = @import("chain");
 const Chain = chain_mod.Chain;
 const ChainRuntime = chain_mod.Runtime;
@@ -214,6 +215,8 @@ pub const BeaconNode = struct {
         bootstrap_peers: []const []const u8 = &.{},
         discovery_bootnodes: []const []const u8 = &.{},
         identify_agent_version: ?[]const u8 = null,
+        metrics: ?*BeaconMetrics = null,
+        state_transition_metrics: *StateTransitionMetrics = state_transition.metrics.noop(),
     };
 
     pub const Builder = struct {
@@ -229,6 +232,7 @@ pub const BeaconNode = struct {
         api_context: ?*ApiContext,
         api_node_identity: ?*api_mod.types.NodeIdentity,
         event_bus: ?*api_mod.EventBus,
+        metrics: ?*BeaconMetrics = null,
         bootstrap_peers: []const []const u8 = &.{},
         discovery_bootnodes: []const []const u8 = &.{},
         identify_agent_version: ?[]const u8 = null,

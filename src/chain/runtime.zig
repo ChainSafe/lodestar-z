@@ -50,6 +50,7 @@ const ArchiveStore = archive_store_mod.ArchiveStore;
 const kzg_mod = @import("kzg");
 const Kzg = kzg_mod.Kzg;
 const BlsThreadPool = @import("bls").ThreadPool;
+const StateTransitionMetrics = state_transition.metrics.StateTransitionMetrics;
 
 pub const RuntimeOptions = struct {
     pmt_pool_size: u32 = 200_000,
@@ -59,6 +60,7 @@ pub const RuntimeOptions = struct {
     block_bls_thread_pool: ?*BlsThreadPool = null,
     validator_monitor_indices: []const u64 = &.{},
     custody_columns: []const u64 = &.{},
+    state_transition_metrics: *StateTransitionMetrics = state_transition.metrics.noop(),
 };
 
 pub const StorageBackend = union(enum) {
@@ -228,6 +230,7 @@ fn initOwnedGraph(
         .validator_pubkeys = validator_pubkeys,
         .state_disposer = state_disposer,
         .gate = state_graph_gate,
+        .state_transition_metrics = opts.state_transition_metrics,
     };
 
     const block_cache = try allocator.create(BlockStateCache);
@@ -649,6 +652,7 @@ test "Runtime.Builder: finishCheckpoint repairs archive lag during bootstrap" {
     const checkpoint_state = try CachedBeaconState.createCachedBeaconState(
         allocator,
         raw_state,
+        shared_state_graph.state_transition_metrics,
         shared_state_graph.validator_pubkeys.immutableData(shared_state_graph.config),
         .{
             .skip_sync_committee_cache = raw_state.forkSeq() == .phase0,

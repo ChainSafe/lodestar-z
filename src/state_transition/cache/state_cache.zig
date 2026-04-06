@@ -13,6 +13,8 @@ const Index2PubkeyCache = @import("pubkey_cache.zig").Index2PubkeyCache;
 const CloneOpts = @import("ssz").CloneOpts;
 const SlashingsCache = @import("./slashings_cache.zig").SlashingsCache;
 const Node = @import("persistent_merkle_tree").Node;
+const metrics_mod = @import("../metrics.zig");
+const StateTransitionMetrics = metrics_mod.StateTransitionMetrics;
 
 pub const ProposerRewards = struct {
     attestations: u64 = 0,
@@ -31,22 +33,23 @@ pub const CachedBeaconState = struct {
     state: *AnyBeaconState,
     /// Proposer rewards accumulated during block processing
     proposer_rewards: ProposerRewards,
+    metrics: *StateTransitionMetrics,
 
     cloned_count: u32 = 0,
     cloned_count_with_transfer_cache: u32 = 0,
     created_with_transfer_cache: bool = false,
 
     /// This class takes ownership of state after this function and has responsibility to deinit it
-    pub fn createCachedBeaconState(allocator: Allocator, state: *AnyBeaconState, immutable_data: EpochCacheImmutableData, option: ?EpochCacheOpts) !*CachedBeaconState {
+    pub fn createCachedBeaconState(allocator: Allocator, state: *AnyBeaconState, metrics: *StateTransitionMetrics, immutable_data: EpochCacheImmutableData, option: ?EpochCacheOpts) !*CachedBeaconState {
         const cached_state = try allocator.create(CachedBeaconState);
         errdefer allocator.destroy(cached_state);
 
-        try cached_state.init(allocator, state, immutable_data, option);
+        try cached_state.init(allocator, state, metrics, immutable_data, option);
 
         return cached_state;
     }
 
-    pub fn init(self: *CachedBeaconState, allocator: Allocator, state: *AnyBeaconState, immutable_data: EpochCacheImmutableData, option: ?EpochCacheOpts) !void {
+    pub fn init(self: *CachedBeaconState, allocator: Allocator, state: *AnyBeaconState, metrics: *StateTransitionMetrics, immutable_data: EpochCacheImmutableData, option: ?EpochCacheOpts) !void {
         const epoch_cache = try EpochCache.createFromState(allocator, state, immutable_data, option);
         errdefer epoch_cache.deinit();
         self.* = .{
@@ -56,6 +59,7 @@ pub const CachedBeaconState = struct {
             .slashings_cache = try SlashingsCache.initEmpty(allocator),
             .state = state,
             .proposer_rewards = .{},
+            .metrics = metrics,
         };
     }
 
@@ -84,6 +88,7 @@ pub const CachedBeaconState = struct {
             .slashings_cache = slashings_cache,
             .state = state,
             .proposer_rewards = self.proposer_rewards,
+            .metrics = self.metrics,
             .created_with_transfer_cache = opts.transfer_cache,
         };
 
@@ -118,8 +123,6 @@ pub const CachedBeaconState = struct {
     }
 
     // loadCachedBeaconState is implemented in utils/load_cached_state.zig
-    
-    
 
     // TODO: implement getCachedBeaconState
     // this is used to create a CachedBeaconState based on a tree and an exising CachedBeaconState at fork transition

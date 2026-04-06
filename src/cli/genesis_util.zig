@@ -14,6 +14,7 @@ const deserializePublishedState = state_transition.deserializePublishedState;
 const SharedValidatorPubkeys = state_transition.SharedValidatorPubkeys;
 const EpochCacheImmutableData = state_transition.EpochCacheImmutableData;
 const generateElectraState = state_transition.test_utils.generateElectraState;
+const StateTransitionMetrics = state_transition.metrics.StateTransitionMetrics;
 
 const Node = @import("persistent_merkle_tree").Node;
 const BeaconConfig = @import("config").BeaconConfig;
@@ -37,6 +38,7 @@ pub fn createMinimalGenesis(
     config: *const BeaconConfig,
     shared_pubkeys: *SharedValidatorPubkeys,
     validator_count: usize,
+    st_metrics: *StateTransitionMetrics,
 ) !*CachedBeaconState {
     const state = try generateElectraState(allocator, pool, config.chain, validator_count);
     errdefer {
@@ -51,6 +53,7 @@ pub fn createMinimalGenesis(
     return CachedBeaconState.createCachedBeaconState(
         allocator,
         state,
+        st_metrics,
         EpochCacheImmutableData{
             .config = config,
             .pubkey_to_index = &shared_pubkeys.pubkey_to_index,
@@ -78,6 +81,7 @@ pub fn loadGenesisFromFile(
     shared_pubkeys: *SharedValidatorPubkeys,
     io: Io,
     path: []const u8,
+    st_metrics: *StateTransitionMetrics,
 ) !*CachedBeaconState {
     // Open the file.
     const file = try Io.Dir.cwd().openFile(io, path, .{});
@@ -96,5 +100,5 @@ pub fn loadGenesisFromFile(
     if (n != size) return error.ShortRead;
 
     // Deserialize into a CachedBeaconState.
-    return deserializePublishedState(allocator, pool, config, shared_pubkeys, buf);
+    return deserializePublishedState(allocator, pool, config, shared_pubkeys, buf, st_metrics);
 }

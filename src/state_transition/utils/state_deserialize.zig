@@ -15,6 +15,7 @@ const CachedBeaconState = @import("../cache/state_cache.zig").CachedBeaconState;
 const EpochCacheImmutableData = @import("../cache/epoch_cache.zig").EpochCacheImmutableData;
 const EpochCacheOpts = @import("../cache/epoch_cache.zig").EpochCacheOpts;
 const SharedValidatorPubkeys = @import("../cache/shared_pubkeys.zig").SharedValidatorPubkeys;
+const StateTransitionMetrics = @import("../metrics.zig").StateTransitionMetrics;
 
 fn createCachedStateWithPubkeys(
     allocator: Allocator,
@@ -23,6 +24,7 @@ fn createCachedStateWithPubkeys(
     shared_pubkeys: *SharedValidatorPubkeys,
     ssz_bytes: []const u8,
     sync_shared_pubkeys: bool,
+    st_metrics: *StateTransitionMetrics,
 ) !*CachedBeaconState {
     // 1. Detect fork from the slot field embedded in the SSZ bytes.
     if (ssz_bytes.len < 48) return error.StateBytesTooShort;
@@ -57,6 +59,7 @@ fn createCachedStateWithPubkeys(
     return CachedBeaconState.createCachedBeaconState(
         allocator,
         state_ptr,
+        st_metrics,
         immutable_data,
         opts,
     );
@@ -81,6 +84,7 @@ pub fn deserializeState(
     config: *const BeaconConfig,
     shared_pubkeys: *SharedValidatorPubkeys,
     ssz_bytes: []const u8,
+    st_metrics: *StateTransitionMetrics,
 ) !*CachedBeaconState {
     return createCachedStateWithPubkeys(
         allocator,
@@ -89,6 +93,7 @@ pub fn deserializeState(
         shared_pubkeys,
         ssz_bytes,
         false,
+        st_metrics,
     );
 }
 
@@ -100,6 +105,7 @@ pub fn deserializePublishedState(
     config: *const BeaconConfig,
     shared_pubkeys: *SharedValidatorPubkeys,
     ssz_bytes: []const u8,
+    st_metrics: *StateTransitionMetrics,
 ) !*CachedBeaconState {
     return createCachedStateWithPubkeys(
         allocator,
@@ -108,5 +114,6 @@ pub fn deserializePublishedState(
         shared_pubkeys,
         ssz_bytes,
         true,
+        st_metrics,
     );
 }

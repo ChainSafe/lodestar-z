@@ -184,6 +184,7 @@ pub const StateRegen = struct {
             self.shared_state_graph.config,
             self.shared_state_graph.validator_pubkeys,
             bytes,
+            self.shared_state_graph.state_transition_metrics,
         );
         return try self.cacheLoadedState(cached_state, false);
     }
@@ -207,6 +208,7 @@ pub const StateRegen = struct {
                 self.shared_state_graph.config,
                 self.shared_state_graph.validator_pubkeys,
                 bytes,
+                self.shared_state_graph.state_transition_metrics,
             );
             return try self.cacheLoadedState(cached_state, false);
         }
@@ -292,6 +294,7 @@ pub const StateRegen = struct {
                 self.shared_state_graph.config,
                 self.shared_state_graph.validator_pubkeys,
                 bytes,
+                self.shared_state_graph.state_transition_metrics,
             );
             return try self.cacheLoadedState(exact_state, false);
         }
@@ -359,6 +362,7 @@ pub const StateRegen = struct {
                 self.shared_state_graph.config,
                 self.shared_state_graph.validator_pubkeys,
                 bytes,
+                self.shared_state_graph.state_transition_metrics,
             );
         }
 
@@ -437,6 +441,7 @@ pub const StateRegen = struct {
             self.shared_state_graph.config,
             self.shared_state_graph.validator_pubkeys,
             bytes,
+            self.shared_state_graph.state_transition_metrics,
         );
     }
 
@@ -452,6 +457,7 @@ pub const StateRegen = struct {
             self.shared_state_graph.config,
             self.shared_state_graph.validator_pubkeys,
             bytes,
+            self.shared_state_graph.state_transition_metrics,
         );
     }
 

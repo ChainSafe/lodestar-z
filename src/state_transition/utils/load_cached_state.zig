@@ -95,6 +95,7 @@ pub fn loadCachedBeaconState(
     const cached_state = try CachedBeaconState.createCachedBeaconState(
         allocator,
         state_ptr,
+        seed_cached_state.metrics,
         immutable_data,
         .{ .skip_sync_pubkeys = true, .skip_sync_committee_cache = false },
     );

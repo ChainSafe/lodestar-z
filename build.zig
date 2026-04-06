@@ -230,6 +230,13 @@ pub fn build(b: *std.Build) void {
     });
     b.modules.put(b.dupe("log"), module_log) catch @panic("OOM");
 
+    const module_app_metrics = b.createModule(.{
+        .root_source_file = b.path("src/metrics/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    b.modules.put(b.dupe("app_metrics"), module_app_metrics) catch @panic("OOM");
+
     const module_node = b.createModule(.{
         .root_source_file = b.path("src/node/root.zig"),
         .target = target,
@@ -255,6 +262,7 @@ pub fn build(b: *std.Build) void {
     module_validator.addImport("ssz", module_ssz);
     module_validator.addImport("api", module_api);
     module_validator.addImport("metrics", dep_metrics.module("metrics"));
+    module_validator.addImport("app_metrics", module_app_metrics);
 
     const module_processor = b.createModule(.{
         .root_source_file = b.path("src/processor/root.zig"),
@@ -950,6 +958,7 @@ pub fn build(b: *std.Build) void {
     module_node_main.addImport("constants", module_constants);
     module_node_main.addImport("api", module_api);
     module_node_main.addImport("db", module_db);
+    module_node_main.addImport("app_metrics", module_app_metrics);
 
     const exe_node = b.addExecutable(.{
         .name = "lodestar-z",
@@ -992,6 +1001,7 @@ pub fn build(b: *std.Build) void {
     module_node.addImport("discv5", module_discv5);
     module_node.addImport("processor", module_processor);
     module_node.addImport("log", module_log);
+    module_node.addImport("app_metrics", module_app_metrics);
 
     module_processor.addImport("consensus_types", module_consensus_types);
     module_processor.addImport("fork_types", module_fork_types);

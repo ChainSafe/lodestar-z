@@ -5,6 +5,7 @@ const CachedBeaconState = state_transition.CachedBeaconState;
 const SharedValidatorPubkeys = state_transition.SharedValidatorPubkeys;
 const StateDisposer = @import("state_disposer.zig").StateDisposer;
 const StateGraphGate = @import("state_graph_gate.zig").StateGraphGate;
+const StateTransitionMetrics = state_transition.metrics.StateTransitionMetrics;
 
 /// Runtime-owned immutable/shared state graph borrowed by all published states.
 ///
@@ -17,6 +18,7 @@ pub const SharedStateGraph = struct {
     validator_pubkeys: *SharedValidatorPubkeys,
     state_disposer: *StateDisposer,
     gate: *StateGraphGate,
+    state_transition_metrics: *StateTransitionMetrics,
 
     pub fn acquireMutationLease(self: *SharedStateGraph) StateGraphGate.Lease {
         return self.gate.acquire();

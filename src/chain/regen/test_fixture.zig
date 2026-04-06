@@ -64,6 +64,7 @@ pub const RegenRuntimeFixture = struct {
         const published_state = try CachedBeaconState.createCachedBeaconState(
             allocator,
             raw_state,
+            state_transition.metrics.noop(),
             shared_pubkeys.immutableData(config),
             .{
                 .skip_sync_committee_cache = raw_state.forkSeq() == .phase0,
@@ -92,6 +93,7 @@ pub const RegenRuntimeFixture = struct {
             .validator_pubkeys = shared_pubkeys,
             .state_disposer = state_disposer,
             .gate = state_graph_gate,
+            .state_transition_metrics = state_transition.metrics.noop(),
         };
 
         const block_cache = try allocator.create(BlockStateCache);

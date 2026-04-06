@@ -21,13 +21,13 @@ pub const ImportResult = @import("chain").ImportResult;
 pub const HeadInfo = beacon_node.HeadInfo;
 pub const SyncStatus = beacon_node.SyncStatus;
 
-
 pub const SlotClock = clock.SlotClock;
 pub const NodeOptions = options.NodeOptions;
 pub const NetworkName = options.NetworkName;
 
 pub const metrics_mod = @import("metrics.zig");
 pub const BeaconMetrics = metrics_mod.BeaconMetrics;
+pub const MetricsSurface = metrics_mod.MetricsSurface;
 
 pub const metrics_server_mod = @import("metrics_server.zig");
 pub const MetricsServer = metrics_server_mod.MetricsServer;
