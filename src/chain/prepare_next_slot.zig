@@ -17,11 +17,13 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 
 const state_transition = @import("state_transition");
+const regen_mod = @import("regen/root.zig");
 const CachedBeaconState = state_transition.CachedBeaconState;
-const CheckpointStateCache = state_transition.CheckpointStateCache;
-const BlockStateCache = state_transition.BlockStateCache;
-const PmtMutator = state_transition.PmtMutator;
+const CheckpointStateCache = regen_mod.CheckpointStateCache;
+const BlockStateCache = regen_mod.BlockStateCache;
+const StateGraphGate = regen_mod.StateGraphGate;
 const computeEpochAtSlot = state_transition.computeEpochAtSlot;
+const RegenRuntimeFixture = @import("regen/test_fixture.zig").RegenRuntimeFixture;
 
 const preset = @import("preset").preset;
 
@@ -40,8 +42,8 @@ pub const PrepareNextSlot = struct {
     block_state_cache: *BlockStateCache,
     /// Reference to the checkpoint state cache (not owned).
     checkpoint_state_cache: *CheckpointStateCache,
-    /// Shared PMT mutator gate (optional until the runtime wires it).
-    pmt_mutator: ?*PmtMutator,
+    /// Shared published-state mutation gate.
+    state_graph_gate: *StateGraphGate,
 
     /// Slot for which we last ran the pre-computation.
     last_prepared_slot: u64,
@@ -50,6 +52,7 @@ pub const PrepareNextSlot = struct {
         allocator: Allocator,
         block_state_cache: *BlockStateCache,
         checkpoint_state_cache: *CheckpointStateCache,
+        state_graph_gate: *StateGraphGate,
         config: PrepareNextSlotConfig,
     ) PrepareNextSlot {
         return .{
@@ -57,16 +60,12 @@ pub const PrepareNextSlot = struct {
             .config = config,
             .block_state_cache = block_state_cache,
             .checkpoint_state_cache = checkpoint_state_cache,
-            .pmt_mutator = null,
+            .state_graph_gate = state_graph_gate,
             .last_prepared_slot = 0,
         };
     }
 
     pub fn deinit(_: *PrepareNextSlot) void {}
-
-    pub fn setPmtMutator(self: *PrepareNextSlot, pmt_mutator: *PmtMutator) void {
-        self.pmt_mutator = pmt_mutator;
-    }
 
     /// Called at the 2/3 slot tick (slot N) to pre-compute state for slot N+1.
     ///
@@ -93,8 +92,8 @@ pub const PrepareNextSlot = struct {
             return;
         };
 
-        var pmt_mutation_lease = PmtMutator.acquireOptional(self.pmt_mutator);
-        defer pmt_mutation_lease.release();
+        var state_graph_lease = self.state_graph_gate.acquire();
+        defer state_graph_lease.release();
 
         // Clone and advance.
         const advanced = try head_state.clone(self.allocator, .{ .transfer_cache = false });
@@ -148,47 +147,63 @@ pub const PrepareNextSlot = struct {
 // Tests
 // ---------------------------------------------------------------------------
 
-fn makeTestCaches(allocator: std.mem.Allocator) struct {
-    mem_ds: *state_transition.MemoryCPStateDatastore,
-    bsc: state_transition.BlockStateCache,
-    csc: state_transition.CheckpointStateCache,
-} {
-    const mem_ds = allocator.create(state_transition.MemoryCPStateDatastore) catch @panic("OOM");
-    mem_ds.* = state_transition.MemoryCPStateDatastore.init(allocator);
-    var bsc = state_transition.BlockStateCache.init(allocator, 64);
-    const csc = state_transition.CheckpointStateCache.init(allocator, mem_ds.datastore(), &bsc, 3);
-    return .{ .mem_ds = mem_ds, .bsc = bsc, .csc = csc };
-}
-
 test "PrepareNextSlot: init/deinit is safe" {
-    var t = makeTestCaches(std.testing.allocator);
-    defer {
-        t.csc.deinit();
-        t.bsc.deinit();
-        t.mem_ds.deinit();
-        std.testing.allocator.destroy(t.mem_ds);
-    }
+    var fixture = try RegenRuntimeFixture.init(std.testing.allocator, 16);
+    defer fixture.deinit();
 
-    var pns = PrepareNextSlot.init(std.testing.allocator, &t.bsc, &t.csc, .{});
+    var pns = PrepareNextSlot.init(
+        std.testing.allocator,
+        fixture.block_cache,
+        fixture.cp_cache,
+        fixture.shared_state_graph.gate,
+        .{},
+    );
     defer pns.deinit();
 
     try std.testing.expectEqual(@as(u64, 0), pns.last_prepared_slot);
 }
 
 test "PrepareNextSlot: disabled config skips work" {
-    var t = makeTestCaches(std.testing.allocator);
-    defer {
-        t.csc.deinit();
-        t.bsc.deinit();
-        t.mem_ds.deinit();
-        std.testing.allocator.destroy(t.mem_ds);
-    }
+    var fixture = try RegenRuntimeFixture.init(std.testing.allocator, 16);
+    defer fixture.deinit();
 
-    var pns = PrepareNextSlot.init(std.testing.allocator, &t.bsc, &t.csc, .{ .enabled = false });
+    var pns = PrepareNextSlot.init(
+        std.testing.allocator,
+        fixture.block_cache,
+        fixture.cp_cache,
+        fixture.shared_state_graph.gate,
+        .{ .enabled = false },
+    );
     defer pns.deinit();
 
     const zero_root = [_]u8{0} ** 32;
     // Should be a no-op since enabled = false.
     try pns.onSlot(5, zero_root);
     try std.testing.expectEqual(@as(u64, 0), pns.last_prepared_slot);
+}
+
+test "PrepareNextSlot: precomputes next-slot head state" {
+    defer state_transition.deinitStateTransition();
+
+    var fixture = try RegenRuntimeFixture.init(std.testing.allocator, 16);
+    defer fixture.deinit();
+
+    const head_state_root = try fixture.seedHeadState();
+    const current_slot = try fixture.published_state.state.slot();
+
+    var pns = PrepareNextSlot.init(
+        std.testing.allocator,
+        fixture.block_cache,
+        fixture.cp_cache,
+        fixture.shared_state_graph.gate,
+        .{},
+    );
+    defer pns.deinit();
+
+    const initial_cache_size = fixture.block_cache.size();
+
+    try pns.onSlot(current_slot, head_state_root);
+
+    try std.testing.expectEqual(current_slot + 1, pns.last_prepared_slot);
+    try std.testing.expectEqual(initial_cache_size + 1, fixture.block_cache.size());
 }

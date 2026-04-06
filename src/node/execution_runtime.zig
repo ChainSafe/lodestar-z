@@ -19,12 +19,282 @@ const IoHttpTransport = execution_mod.IoHttpTransport;
 const BuilderApi = execution_mod.BuilderApi;
 const GetPayloadResponse = execution_mod.GetPayloadResponse;
 const ForkchoiceUpdatedResponse = execution_mod.ForkchoiceUpdatedResponse;
+const ExecutionPayloadStatus = execution_mod.ExecutionPayloadStatus;
 const PayloadAttributesV3 = execution_mod.engine_api_types.PayloadAttributesV3;
+const Withdrawal = execution_mod.engine_api_types.Withdrawal;
 
 const ExecutionForkchoiceUpdate = chain_mod.ExecutionForkchoiceUpdate;
 const ExecutionPort = chain_mod.ExecutionPort;
 const NewPayloadRequest = chain_mod.NewPayloadRequest;
 const NewPayloadResult = chain_mod.NewPayloadResult;
+
+pub const DEFAULT_MAX_PENDING_PAYLOAD_VERIFICATIONS: usize = 1;
+
+const PendingPayloadVerification = struct {
+    ticket: u64,
+    request: NewPayloadRequest,
+};
+
+const FailedPayloadPreparation = struct {
+    ticket: u64,
+    status: enum {
+        unavailable,
+        failed,
+    },
+};
+
+const OwnedPayloadAttributes = struct {
+    timestamp: u64,
+    prev_randao: [32]u8,
+    suggested_fee_recipient: [20]u8,
+    withdrawals: []Withdrawal,
+    parent_beacon_block_root: [32]u8,
+
+    fn init(
+        allocator: std.mem.Allocator,
+        attrs: PayloadAttributesV3,
+    ) !OwnedPayloadAttributes {
+        const withdrawals = try allocator.dupe(Withdrawal, attrs.withdrawals);
+        errdefer if (withdrawals.len > 0) allocator.free(withdrawals);
+
+        return .{
+            .timestamp = attrs.timestamp,
+            .prev_randao = attrs.prev_randao,
+            .suggested_fee_recipient = attrs.suggested_fee_recipient,
+            .withdrawals = withdrawals,
+            .parent_beacon_block_root = attrs.parent_beacon_block_root,
+        };
+    }
+
+    fn deinit(self: *OwnedPayloadAttributes, allocator: std.mem.Allocator) void {
+        if (self.withdrawals.len > 0) allocator.free(self.withdrawals);
+        self.* = undefined;
+    }
+
+    fn borrowed(self: *const OwnedPayloadAttributes) PayloadAttributesV3 {
+        return .{
+            .timestamp = self.timestamp,
+            .prev_randao = self.prev_randao,
+            .suggested_fee_recipient = self.suggested_fee_recipient,
+            .withdrawals = self.withdrawals,
+            .parent_beacon_block_root = self.parent_beacon_block_root,
+        };
+    }
+};
+
+const PendingPayloadPreparation = struct {
+    slot: u64,
+    attrs: OwnedPayloadAttributes,
+
+    fn deinit(self: *PendingPayloadPreparation, allocator: std.mem.Allocator) void {
+        self.attrs.deinit(allocator);
+        self.* = undefined;
+    }
+};
+
+const PendingForkchoiceUpdate = struct {
+    priority: enum {
+        high,
+        normal,
+    } = .high,
+    ticket: u64,
+    update: ExecutionForkchoiceUpdate,
+    payload_preparation: ?PendingPayloadPreparation = null,
+
+    fn deinit(self: *PendingForkchoiceUpdate, allocator: std.mem.Allocator) void {
+        if (self.payload_preparation) |*payload_preparation| {
+            payload_preparation.deinit(allocator);
+        }
+        self.* = undefined;
+    }
+};
+
+pub const PayloadPreparationContext = struct {
+    slot: u64,
+    timestamp: u64,
+    prev_randao: [32]u8,
+    suggested_fee_recipient: [20]u8,
+    parent_beacon_block_root: [32]u8,
+};
+
+pub const PayloadPreparationSubmitResult = union(enum) {
+    ready,
+    queued: u64,
+    pending: u64,
+    unavailable,
+};
+
+pub const PayloadFetchResult = union(enum) {
+    pending,
+    success: GetPayloadResponse,
+    unavailable,
+    failure: anyerror,
+    canceled,
+};
+
+pub const BuilderBidFetchResult = union(enum) {
+    pending,
+    success: execution_mod.builder.SignedBuilderBid,
+    unavailable,
+    no_bid,
+    failure: anyerror,
+    canceled,
+};
+
+pub const PayloadFetchTask = struct {
+    runtime: *const ExecutionRuntime,
+    payload_id: [8]u8,
+    result: PayloadFetchResult = .pending,
+
+    pub fn run(self: *PayloadFetchTask) void {
+        self.result = self.runtime.fetchPreparedPayloadResult(self.payload_id);
+    }
+};
+
+pub const BuilderBidFetchTask = struct {
+    runtime: *const ExecutionRuntime,
+    slot: u64,
+    parent_hash: [32]u8,
+    proposer_pubkey: [48]u8,
+    result: BuilderBidFetchResult = .pending,
+
+    pub fn run(self: *BuilderBidFetchTask) void {
+        self.result = self.runtime.fetchBuilderBidResult(
+            self.slot,
+            self.parent_hash,
+            self.proposer_pubkey,
+        );
+    }
+};
+
+pub const PayloadFetchHandle = struct {
+    task: PayloadFetchTask,
+    thread: ?std.Thread,
+
+    pub fn deinit(self: *PayloadFetchHandle) void {
+        if (self.thread) |thread| {
+            thread.join();
+            self.thread = null;
+        }
+    }
+
+    pub fn finish(self: *PayloadFetchHandle) PayloadFetchResult {
+        self.deinit();
+        return self.task.result;
+    }
+};
+
+pub const BuilderBidFetchHandle = struct {
+    task: BuilderBidFetchTask,
+    thread: ?std.Thread,
+
+    pub fn deinit(self: *BuilderBidFetchHandle) void {
+        if (self.thread) |thread| {
+            thread.join();
+            self.thread = null;
+        }
+    }
+
+    pub fn finish(self: *BuilderBidFetchHandle) BuilderBidFetchResult {
+        self.deinit();
+        return self.task.result;
+    }
+};
+
+const ProposalRaceTimerResult = enum {
+    fired,
+    canceled,
+};
+
+const ProposalFetchEvent = union(enum) {
+    engine: PayloadFetchResult,
+    builder: BuilderBidFetchResult,
+    cutoff: ProposalRaceTimerResult,
+    timeout: ProposalRaceTimerResult,
+};
+
+const ProposalRaceState = struct {
+    engine_done: bool = false,
+    builder_done: bool = false,
+    cutoff_reached: bool = false,
+    timeout_reached: bool = false,
+    engine_available: bool = false,
+    builder_available: bool = false,
+    engine_should_override_builder: bool = false,
+
+    fn shouldStop(self: ProposalRaceState, stop_immediately_on_engine_success: bool) bool {
+        if (self.engine_available and (self.engine_should_override_builder or stop_immediately_on_engine_success)) {
+            return true;
+        }
+        if (self.engine_done and self.builder_done) return true;
+        if (self.timeout_reached) return true;
+        if (self.cutoff_reached and (self.engine_available or self.builder_available)) return true;
+        return false;
+    }
+};
+
+fn waitProposalRaceTimer(io: std.Io, timeout: std.Io.Timeout) ProposalRaceTimerResult {
+    timeout.sleep(io) catch |err| switch (err) {
+        error.Canceled => return .canceled,
+    };
+    return .fired;
+}
+
+pub const ProposalSourceFetchOutcome = struct {
+    payload: ?GetPayloadResponse = null,
+    builder_bid: ?execution_mod.builder.SignedBuilderBid = null,
+    engine_error: ?anyerror = null,
+    builder_error: ?anyerror = null,
+    builder_no_bid: bool = false,
+    timed_out: bool = false,
+
+    pub fn takePayload(self: *ProposalSourceFetchOutcome) ?GetPayloadResponse {
+        const payload = self.payload;
+        self.payload = null;
+        return payload;
+    }
+
+    pub fn takeBuilderBid(self: *ProposalSourceFetchOutcome) ?execution_mod.builder.SignedBuilderBid {
+        const builder_bid = self.builder_bid;
+        self.builder_bid = null;
+        return builder_bid;
+    }
+
+    pub fn deinit(
+        self: *ProposalSourceFetchOutcome,
+        runtime: *const ExecutionRuntime,
+        allocator: std.mem.Allocator,
+    ) void {
+        if (self.payload) |payload| runtime.freeGetPayloadResponse(payload);
+        if (self.builder_bid) |builder_bid| execution_mod.builder.freeBid(allocator, builder_bid);
+        self.* = undefined;
+    }
+};
+
+pub const CompletedPayloadVerification = struct {
+    ticket: u64,
+    result: NewPayloadResult,
+    had_engine: bool,
+    elapsed_s: f64,
+};
+
+pub const CompletedForkchoiceUpdate = struct {
+    ticket: u64,
+    update: ExecutionForkchoiceUpdate,
+    request: union(enum) {
+        plain,
+        payload_preparation: PayloadPreparationContext,
+    },
+    status: enum {
+        success,
+        unavailable,
+        failed,
+    },
+    payload_status: ?ExecutionPayloadStatus = null,
+    payload_id: ?[8]u8 = null,
+    had_engine: bool,
+    elapsed_s: f64,
+};
 
 pub const ExecutionRuntime = struct {
     allocator: std.mem.Allocator,
@@ -43,6 +313,18 @@ pub const ExecutionRuntime = struct {
     cached_payload_parent_root: ?[32]u8 = null,
     last_builder_status_slot: ?u64 = null,
     el_offline: bool = false,
+
+    lane_mutex: std.Io.Mutex = .init,
+    queue_mutex: std.Io.Mutex = .init,
+    queue_cond: std.Io.Condition = .init,
+    pending_forkchoice_updates: std.ArrayListUnmanaged(PendingForkchoiceUpdate) = .empty,
+    pending_payload_verifications: std.ArrayListUnmanaged(PendingPayloadVerification) = .empty,
+    completed_forkchoice_updates: std.ArrayListUnmanaged(CompletedForkchoiceUpdate) = .empty,
+    completed_payload_verifications: std.ArrayListUnmanaged(CompletedPayloadVerification) = .empty,
+    failed_payload_preparations: std.ArrayListUnmanaged(FailedPayloadPreparation) = .empty,
+    next_forkchoice_ticket: u64 = 1,
+    shutdown_requested: bool = false,
+    worker_thread: ?std.Thread = null,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -155,11 +437,33 @@ pub const ExecutionRuntime = struct {
             );
         }
 
+        self.worker_thread = try std.Thread.spawn(.{}, workerMain, .{self});
         return self;
     }
 
     pub fn deinit(self: *ExecutionRuntime) void {
         const allocator = self.allocator;
+
+        self.queue_mutex.lockUncancelable(self.io);
+        self.shutdown_requested = true;
+        self.queue_cond.signal(self.io);
+        self.queue_mutex.unlock(self.io);
+
+        if (self.worker_thread) |thread| {
+            thread.join();
+        }
+
+        for (self.pending_payload_verifications.items) |*pending| {
+            pending.request.deinit(allocator);
+        }
+        for (self.pending_forkchoice_updates.items) |*pending| {
+            pending.deinit(allocator);
+        }
+        self.pending_forkchoice_updates.deinit(allocator);
+        self.pending_payload_verifications.deinit(allocator);
+        self.completed_forkchoice_updates.deinit(allocator);
+        self.completed_payload_verifications.deinit(allocator);
+        self.failed_payload_preparations.deinit(allocator);
 
         if (self.mock_engine) |engine| {
             engine.deinit();
@@ -198,9 +502,185 @@ pub const ExecutionRuntime = struct {
     }
 
     pub fn submitNewPayload(self: *ExecutionRuntime, request: NewPayloadRequest) NewPayloadResult {
-        const engine = self.engine_api orelse return .unavailable;
+        return self.submitNewPayloadSerialized(request).result;
+    }
 
-        const result = switch (request) {
+    pub fn canAcceptPayloadVerification(self: *ExecutionRuntime) bool {
+        self.queue_mutex.lockUncancelable(self.io);
+        defer self.queue_mutex.unlock(self.io);
+        return !self.shutdown_requested and
+            self.pending_payload_verifications.items.len + self.completed_payload_verifications.items.len <
+                DEFAULT_MAX_PENDING_PAYLOAD_VERIFICATIONS;
+    }
+
+    pub fn submitForkchoiceUpdateAsync(
+        self: *ExecutionRuntime,
+        update: ExecutionForkchoiceUpdate,
+    ) !void {
+        self.queue_mutex.lockUncancelable(self.io);
+        defer self.queue_mutex.unlock(self.io);
+
+        if (self.shutdown_requested) return error.ShutdownRequested;
+
+        const ticket = self.next_forkchoice_ticket;
+        self.next_forkchoice_ticket += 1;
+        try self.pending_forkchoice_updates.append(self.allocator, .{
+            .priority = .high,
+            .ticket = ticket,
+            .update = update,
+        });
+        self.queue_cond.signal(self.io);
+    }
+
+    pub fn ensurePayloadPreparationAsync(
+        self: *ExecutionRuntime,
+        slot: u64,
+        update: ExecutionForkchoiceUpdate,
+        payload_attrs: PayloadAttributesV3,
+    ) !PayloadPreparationSubmitResult {
+        if (self.cachedPayloadFor(slot, update.beacon_block_root)) {
+            return .ready;
+        }
+
+        self.queue_mutex.lockUncancelable(self.io);
+        defer self.queue_mutex.unlock(self.io);
+
+        if (self.shutdown_requested) return .unavailable;
+
+        var i: usize = 0;
+        while (i < self.pending_forkchoice_updates.items.len) {
+            const pending = self.pending_forkchoice_updates.items[i];
+            const payload_preparation = pending.payload_preparation orelse {
+                i += 1;
+                continue;
+            };
+            if (payload_preparation.slot != slot) {
+                i += 1;
+                continue;
+            }
+            if (std.mem.eql(u8, &pending.update.beacon_block_root, &update.beacon_block_root)) {
+                return .{ .pending = pending.ticket };
+            }
+
+            var stale_pending = self.pending_forkchoice_updates.orderedRemove(i);
+            stale_pending.deinit(self.allocator);
+        }
+
+        const ticket = self.next_forkchoice_ticket;
+        self.next_forkchoice_ticket += 1;
+        try self.pending_forkchoice_updates.append(self.allocator, .{
+            .priority = .normal,
+            .ticket = ticket,
+            .update = update,
+            .payload_preparation = .{
+                .slot = slot,
+                .attrs = try OwnedPayloadAttributes.init(self.allocator, payload_attrs),
+            },
+        });
+        self.queue_cond.signal(self.io);
+        return .{ .queued = ticket };
+    }
+
+    pub fn submitPayloadVerification(
+        self: *ExecutionRuntime,
+        ticket: u64,
+        request: NewPayloadRequest,
+    ) !bool {
+        self.queue_mutex.lockUncancelable(self.io);
+        defer self.queue_mutex.unlock(self.io);
+
+        if (self.shutdown_requested) return false;
+        if (self.pending_payload_verifications.items.len + self.completed_payload_verifications.items.len >=
+            DEFAULT_MAX_PENDING_PAYLOAD_VERIFICATIONS) return false;
+
+        try self.pending_payload_verifications.append(self.allocator, .{
+            .ticket = ticket,
+            .request = request,
+        });
+        self.queue_cond.signal(self.io);
+        return true;
+    }
+
+    pub fn popCompletedPayloadVerification(self: *ExecutionRuntime) ?CompletedPayloadVerification {
+        self.queue_mutex.lockUncancelable(self.io);
+        defer self.queue_mutex.unlock(self.io);
+
+        if (self.completed_payload_verifications.items.len == 0) return null;
+        return self.completed_payload_verifications.orderedRemove(0);
+    }
+
+    pub fn popCompletedForkchoiceUpdate(self: *ExecutionRuntime) ?CompletedForkchoiceUpdate {
+        self.queue_mutex.lockUncancelable(self.io);
+        defer self.queue_mutex.unlock(self.io);
+
+        if (self.completed_forkchoice_updates.items.len == 0) return null;
+        return self.completed_forkchoice_updates.orderedRemove(0);
+    }
+
+    pub const PayloadPreparationWaitResult = enum {
+        ready,
+        unavailable,
+        failed,
+        shutdown,
+    };
+
+    pub fn waitForPayloadPreparation(
+        self: *ExecutionRuntime,
+        ticket: u64,
+        slot: u64,
+        parent_root: [32]u8,
+    ) PayloadPreparationWaitResult {
+        while (true) {
+            if (self.cachedPayloadFor(slot, parent_root)) return .ready;
+
+            self.queue_mutex.lockUncancelable(self.io);
+            while (true) {
+                for (self.failed_payload_preparations.items, 0..) |failed, i| {
+                    if (failed.ticket != ticket) continue;
+                    _ = self.failed_payload_preparations.orderedRemove(i);
+                    self.queue_mutex.unlock(self.io);
+                    return switch (failed.status) {
+                        .unavailable => .unavailable,
+                        .failed => .failed,
+                    };
+                }
+
+                if (self.shutdown_requested) {
+                    self.queue_mutex.unlock(self.io);
+                    return .shutdown;
+                }
+                self.queue_cond.waitUncancelable(self.io, &self.queue_mutex);
+                if (self.cachedPayloadFor(slot, parent_root)) {
+                    self.queue_mutex.unlock(self.io);
+                    return .ready;
+                }
+            }
+        }
+    }
+
+    fn submitNewPayloadSerialized(
+        self: *ExecutionRuntime,
+        request: NewPayloadRequest,
+    ) CompletedPayloadVerification {
+        self.lane_mutex.lockUncancelable(self.io);
+        defer self.lane_mutex.unlock(self.io);
+
+        const had_engine = self.engine_api != null;
+        const t0 = std.Io.Clock.awake.now(self.io);
+        var owned_request = request;
+        defer owned_request.deinit(self.allocator);
+
+        const engine = self.engine_api orelse {
+            const t1 = std.Io.Clock.awake.now(self.io);
+            return .{
+                .ticket = 0,
+                .result = .unavailable,
+                .had_engine = had_engine,
+                .elapsed_s = @as(f64, @floatFromInt(t1.nanoseconds - t0.nanoseconds)) / 1e9,
+            };
+        };
+
+        const engine_result = switch (owned_request) {
             .bellatrix => |prepared| engine.newPayloadV1(prepared.payload),
             .capella => |prepared| engine.newPayloadV2(prepared.payload),
             .deneb => |prepared| engine.newPayload(
@@ -216,31 +696,184 @@ pub const ExecutionRuntime = struct {
         } catch |err| {
             std.log.warn("execution runtime: engine_newPayload failed: {}", .{err});
             self.el_offline = true;
-            return .unavailable;
+            const t1 = std.Io.Clock.awake.now(self.io);
+            return .{
+                .ticket = 0,
+                .result = .unavailable,
+                .had_engine = had_engine,
+                .elapsed_s = @as(f64, @floatFromInt(t1.nanoseconds - t0.nanoseconds)) / 1e9,
+            };
         };
-        defer result.deinit(self.allocator);
+        defer engine_result.deinit(self.allocator);
+        const t1 = std.Io.Clock.awake.now(self.io);
+        const elapsed_s: f64 = @as(f64, @floatFromInt(t1.nanoseconds - t0.nanoseconds)) / 1e9;
 
         self.el_offline = false;
-        return switch (result.status) {
-            .valid => .{ .valid = .{
-                .latest_valid_hash = result.latest_valid_hash orelse request.blockHash(),
+        const response = switch (engine_result.status) {
+            .valid => NewPayloadResult{ .valid = .{
+                .latest_valid_hash = engine_result.latest_valid_hash orelse owned_request.blockHash(),
             } },
-            .invalid => .{ .invalid = .{
-                .latest_valid_hash = result.latest_valid_hash,
+            .invalid => NewPayloadResult{ .invalid = .{
+                .latest_valid_hash = engine_result.latest_valid_hash,
             } },
-            .invalid_block_hash => .{ .invalid_block_hash = .{
-                .latest_valid_hash = result.latest_valid_hash,
+            .invalid_block_hash => NewPayloadResult{ .invalid_block_hash = .{
+                .latest_valid_hash = engine_result.latest_valid_hash,
             } },
-            .syncing => .syncing,
-            .accepted => .accepted,
+            .syncing => NewPayloadResult.syncing,
+            .accepted => NewPayloadResult.accepted,
+        };
+        return .{
+            .ticket = 0,
+            .result = response,
+            .had_engine = had_engine,
+            .elapsed_s = elapsed_s,
         };
     }
 
-    pub fn forkchoiceUpdated(
+    fn submitForkchoiceUpdateSerialized(
+        self: *ExecutionRuntime,
+        pending: PendingForkchoiceUpdate,
+    ) CompletedForkchoiceUpdate {
+        defer {
+            var owned_pending = pending;
+            owned_pending.deinit(self.allocator);
+        }
+
+        const had_engine = self.engine_api != null;
+        const t0 = std.Io.Clock.awake.now(self.io);
+        const payload_attrs = if (pending.payload_preparation) |*payload_preparation|
+            payload_preparation.attrs.borrowed()
+        else
+            null;
+        const maybe_result = self.submitForkchoiceUpdateOnLane(pending.update, payload_attrs) catch |err| {
+            std.log.warn("execution runtime: engine_forkchoiceUpdated failed: {}", .{err});
+            const t1 = std.Io.Clock.awake.now(self.io);
+            return .{
+                .ticket = pending.ticket,
+                .update = pending.update,
+                .request = if (pending.payload_preparation) |payload_preparation|
+                    .{ .payload_preparation = .{
+                        .slot = payload_preparation.slot,
+                        .timestamp = payload_preparation.attrs.timestamp,
+                        .prev_randao = payload_preparation.attrs.prev_randao,
+                        .suggested_fee_recipient = payload_preparation.attrs.suggested_fee_recipient,
+                        .parent_beacon_block_root = payload_preparation.attrs.parent_beacon_block_root,
+                    } }
+                else
+                    .plain,
+                .status = .failed,
+                .had_engine = had_engine,
+                .elapsed_s = @as(f64, @floatFromInt(t1.nanoseconds - t0.nanoseconds)) / 1e9,
+            };
+        };
+        defer if (maybe_result) |*result| result.deinit(self.allocator);
+
+        if (pending.payload_preparation) |payload_preparation| {
+            self.recordPreparedPayloadContext(
+                payload_preparation.slot,
+                pending.update.beacon_block_root,
+            );
+        }
+
+        const t1 = std.Io.Clock.awake.now(self.io);
+        return .{
+            .ticket = pending.ticket,
+            .update = pending.update,
+            .request = if (pending.payload_preparation) |payload_preparation|
+                .{ .payload_preparation = .{
+                    .slot = payload_preparation.slot,
+                    .timestamp = payload_preparation.attrs.timestamp,
+                    .prev_randao = payload_preparation.attrs.prev_randao,
+                    .suggested_fee_recipient = payload_preparation.attrs.suggested_fee_recipient,
+                    .parent_beacon_block_root = payload_preparation.attrs.parent_beacon_block_root,
+                } }
+            else
+                .plain,
+            .status = if (maybe_result == null) .unavailable else .success,
+            .payload_status = if (maybe_result) |result| result.payload_status.status else null,
+            .payload_id = if (maybe_result) |result| result.payload_id else null,
+            .had_engine = had_engine,
+            .elapsed_s = @as(f64, @floatFromInt(t1.nanoseconds - t0.nanoseconds)) / 1e9,
+        };
+    }
+
+    fn workerMain(self: *ExecutionRuntime) void {
+        while (true) {
+            self.queue_mutex.lockUncancelable(self.io);
+            while (!self.shutdown_requested and
+                self.pending_forkchoice_updates.items.len == 0 and
+                self.pending_payload_verifications.items.len == 0)
+            {
+                self.queue_cond.waitUncancelable(self.io, &self.queue_mutex);
+            }
+
+            if (self.shutdown_requested and
+                self.pending_forkchoice_updates.items.len == 0 and
+                self.pending_payload_verifications.items.len == 0)
+            {
+                self.queue_mutex.unlock(self.io);
+                return;
+            }
+
+            if (self.pending_forkchoice_updates.items.len > 0) {
+                var pending_index: usize = 0;
+                for (self.pending_forkchoice_updates.items, 0..) |pending, i| {
+                    if (pending.priority == .high) {
+                        pending_index = i;
+                        break;
+                    }
+                }
+                const pending = self.pending_forkchoice_updates.orderedRemove(pending_index);
+                self.queue_mutex.unlock(self.io);
+
+                const completed = self.submitForkchoiceUpdateSerialized(pending);
+
+                self.queue_mutex.lockUncancelable(self.io);
+                self.completed_forkchoice_updates.append(self.allocator, completed) catch {
+                    self.queue_mutex.unlock(self.io);
+                    @panic("OOM queueing completed forkchoice update");
+                };
+                if (completed.request == .payload_preparation and completed.status != .success) {
+                    self.failed_payload_preparations.append(self.allocator, .{
+                        .ticket = completed.ticket,
+                        .status = switch (completed.status) {
+                            .success => unreachable,
+                            .unavailable => .unavailable,
+                            .failed => .failed,
+                        },
+                    }) catch {
+                        self.queue_mutex.unlock(self.io);
+                        @panic("OOM queueing failed payload preparation");
+                    };
+                }
+                self.queue_cond.signal(self.io);
+                self.queue_mutex.unlock(self.io);
+                continue;
+            }
+
+            const pending = self.pending_payload_verifications.orderedRemove(0);
+            self.queue_mutex.unlock(self.io);
+
+            var completed = self.submitNewPayloadSerialized(pending.request);
+            completed.ticket = pending.ticket;
+
+            self.queue_mutex.lockUncancelable(self.io);
+            self.completed_payload_verifications.append(self.allocator, completed) catch {
+                self.queue_mutex.unlock(self.io);
+                @panic("OOM queueing completed execution verification");
+            };
+            self.queue_cond.signal(self.io);
+            self.queue_mutex.unlock(self.io);
+        }
+    }
+
+    fn submitForkchoiceUpdateOnLane(
         self: *ExecutionRuntime,
         update: ExecutionForkchoiceUpdate,
         payload_attrs: ?PayloadAttributesV3,
     ) !?ForkchoiceUpdatedResponse {
+        self.lane_mutex.lockUncancelable(self.io);
+        defer self.lane_mutex.unlock(self.io);
         const engine = self.engine_api orelse return null;
         const fc_state = update.state;
 
@@ -264,6 +897,8 @@ pub const ExecutionRuntime = struct {
     }
 
     pub fn getPayload(self: *ExecutionRuntime) !GetPayloadResponse {
+        self.lane_mutex.lockUncancelable(self.io);
+        defer self.lane_mutex.unlock(self.io);
         const engine = self.engine_api orelse return error.NoEngineApi;
         const payload_id = self.cached_payload_id orelse return error.NoPayloadId;
 
@@ -277,6 +912,296 @@ pub const ExecutionRuntime = struct {
         return result;
     }
 
+    pub fn fetchPreparedPayloadResult(
+        self: *const ExecutionRuntime,
+        payload_id: [8]u8,
+    ) PayloadFetchResult {
+        if (self.http_engine) |http_engine| {
+            var request_engine = http_engine.requestClone();
+            const api = request_engine.engine();
+            const response = api.getPayload(payload_id) catch |err| switch (err) {
+                error.Canceled => return .canceled,
+                else => {
+                    const mutable_self: *ExecutionRuntime = @constCast(self);
+                    mutable_self.el_offline = true;
+                    return .{ .failure = err };
+                },
+            };
+            const mutable_self: *ExecutionRuntime = @constCast(self);
+            mutable_self.el_offline = false;
+            return .{ .success = response };
+        }
+
+        const mutable_self: *ExecutionRuntime = @constCast(self);
+        mutable_self.lane_mutex.lockUncancelable(mutable_self.io);
+        defer mutable_self.lane_mutex.unlock(mutable_self.io);
+        const engine = self.engine_api orelse return .unavailable;
+        const response = engine.getPayload(payload_id) catch |err| switch (err) {
+            error.Canceled => return .canceled,
+            else => {
+                mutable_self.el_offline = true;
+                return .{ .failure = err };
+            },
+        };
+        mutable_self.el_offline = false;
+        return .{ .success = response };
+    }
+
+    pub fn freePayloadFetchResult(self: *const ExecutionRuntime, result: PayloadFetchResult) void {
+        switch (result) {
+            .success => |response| self.freeGetPayloadResponse(response),
+            else => {},
+        }
+    }
+
+    pub fn fetchBuilderBidResult(
+        self: *const ExecutionRuntime,
+        slot: u64,
+        parent_hash: [32]u8,
+        proposer_pubkey: [48]u8,
+    ) BuilderBidFetchResult {
+        if (self.http_builder) |http_builder| {
+            var request_builder = http_builder.requestClone();
+            const api = request_builder.builder();
+            const bid = api.getHeader(slot, parent_hash, proposer_pubkey) catch |err| switch (err) {
+                error.Canceled => return .canceled,
+                else => return .{ .failure = err },
+            };
+            if (bid) |value| {
+                return .{ .success = value };
+            }
+            return .no_bid;
+        }
+
+        const builder = self.builder_api orelse return .unavailable;
+        const bid = builder.getHeader(slot, parent_hash, proposer_pubkey) catch |err| switch (err) {
+            error.Canceled => return .canceled,
+            else => return .{ .failure = err },
+        };
+        if (bid) |value| {
+            return .{ .success = value };
+        }
+        return .no_bid;
+    }
+
+    fn freeProposalFetchEvent(self: *const ExecutionRuntime, allocator: std.mem.Allocator, event: ProposalFetchEvent) void {
+        switch (event) {
+            .engine => |result| self.freePayloadFetchResult(result),
+            .builder => |result| switch (result) {
+                .success => |bid| execution_mod.builder.freeBid(allocator, bid),
+                else => {},
+            },
+            .cutoff, .timeout => {},
+        }
+    }
+
+    pub fn fetchProposalSources(
+        self: *const ExecutionRuntime,
+        allocator: std.mem.Allocator,
+        payload_id: [8]u8,
+        slot: u64,
+        parent_hash: [32]u8,
+        proposer_pubkey: [48]u8,
+        cutoff_ns: u64,
+        timeout_ms: u64,
+        stop_immediately_on_engine_success: bool,
+    ) !ProposalSourceFetchOutcome {
+        return self.fetchProposalSourcesWithSelect(
+            allocator,
+            payload_id,
+            slot,
+            parent_hash,
+            proposer_pubkey,
+            cutoff_ns,
+            timeout_ms,
+            stop_immediately_on_engine_success,
+        ) catch |err| switch (err) {
+            error.ConcurrencyUnavailable => self.fetchProposalSourcesBlocking(
+                payload_id,
+                slot,
+                parent_hash,
+                proposer_pubkey,
+            ),
+            else => err,
+        };
+    }
+
+    fn fetchProposalSourcesWithSelect(
+        self: *const ExecutionRuntime,
+        allocator: std.mem.Allocator,
+        payload_id: [8]u8,
+        slot: u64,
+        parent_hash: [32]u8,
+        proposer_pubkey: [48]u8,
+        cutoff_ns: u64,
+        timeout_ms: u64,
+        stop_immediately_on_engine_success: bool,
+    ) !ProposalSourceFetchOutcome {
+        var events_buf: [4]ProposalFetchEvent = undefined;
+        var select = std.Io.Select(ProposalFetchEvent).init(self.io, &events_buf);
+        errdefer while (select.cancel()) |event| {
+            self.freeProposalFetchEvent(allocator, event);
+        };
+
+        try select.concurrent(.engine, ExecutionRuntime.fetchPreparedPayloadResult, .{
+            self,
+            payload_id,
+        });
+        try select.concurrent(.builder, ExecutionRuntime.fetchBuilderBidResult, .{
+            self,
+            slot,
+            parent_hash,
+            proposer_pubkey,
+        });
+
+        var race_state = ProposalRaceState{};
+        if (cutoff_ns == 0) {
+            race_state.cutoff_reached = true;
+        } else {
+            select.async(.cutoff, waitProposalRaceTimer, .{
+                self.io,
+                .{ .duration = .{
+                    .raw = .{ .nanoseconds = @as(i96, @intCast(cutoff_ns)) },
+                    .clock = .real,
+                } },
+            });
+        }
+        select.async(.timeout, waitProposalRaceTimer, .{
+            self.io,
+            .{ .duration = .{
+                .raw = .{ .nanoseconds = @as(i96, @intCast(timeout_ms * std.time.ns_per_ms)) },
+                .clock = .real,
+            } },
+        });
+
+        var outcome = ProposalSourceFetchOutcome{};
+        while (true) {
+            const event = try select.await();
+            switch (event) {
+                .engine => |result| {
+                    race_state.engine_done = true;
+                    switch (result) {
+                        .success => |payload| {
+                            outcome.payload = payload;
+                            race_state.engine_available = true;
+                            race_state.engine_should_override_builder = payload.should_override_builder;
+                        },
+                        .unavailable => outcome.engine_error = error.NoEngineApi,
+                        .failure => |err| outcome.engine_error = err,
+                        .canceled, .pending => {},
+                    }
+                },
+                .builder => |result| {
+                    race_state.builder_done = true;
+                    switch (result) {
+                        .success => |builder_bid| {
+                            outcome.builder_bid = builder_bid;
+                            race_state.builder_available = true;
+                        },
+                        .unavailable => outcome.builder_error = error.BuilderNotConfigured,
+                        .no_bid => outcome.builder_no_bid = true,
+                        .failure => |err| outcome.builder_error = err,
+                        .canceled, .pending => {},
+                    }
+                },
+                .cutoff => |result| {
+                    if (result == .fired) race_state.cutoff_reached = true;
+                },
+                .timeout => |result| {
+                    if (result == .fired) race_state.timeout_reached = true;
+                },
+            }
+
+            if (race_state.shouldStop(stop_immediately_on_engine_success)) break;
+        }
+
+        while (select.cancel()) |event| {
+            self.freeProposalFetchEvent(allocator, event);
+        }
+
+        outcome.timed_out = race_state.timeout_reached;
+        return outcome;
+    }
+
+    fn fetchProposalSourcesBlocking(
+        self: *const ExecutionRuntime,
+        payload_id: [8]u8,
+        slot: u64,
+        parent_hash: [32]u8,
+        proposer_pubkey: [48]u8,
+    ) !ProposalSourceFetchOutcome {
+        var payload_fetch = PayloadFetchTask{
+            .runtime = self,
+            .payload_id = payload_id,
+        };
+        var builder_bid_fetch = BuilderBidFetchTask{
+            .runtime = self,
+            .slot = slot,
+            .parent_hash = parent_hash,
+            .proposer_pubkey = proposer_pubkey,
+        };
+
+        var payload_thread = try std.Thread.spawn(.{}, PayloadFetchTask.run, .{&payload_fetch});
+        errdefer payload_thread.join();
+        var builder_thread = try std.Thread.spawn(.{}, BuilderBidFetchTask.run, .{&builder_bid_fetch});
+        errdefer builder_thread.join();
+
+        payload_thread.join();
+        builder_thread.join();
+
+        var outcome = ProposalSourceFetchOutcome{};
+        switch (payload_fetch.result) {
+            .pending => unreachable,
+            .success => |payload| outcome.payload = payload,
+            .unavailable => outcome.engine_error = error.NoEngineApi,
+            .failure => |err| outcome.engine_error = err,
+            .canceled => {},
+        }
+        switch (builder_bid_fetch.result) {
+            .pending => unreachable,
+            .success => |builder_bid| outcome.builder_bid = builder_bid,
+            .unavailable => outcome.builder_error = error.BuilderNotConfigured,
+            .no_bid => outcome.builder_no_bid = true,
+            .failure => |err| outcome.builder_error = err,
+            .canceled => {},
+        }
+        return outcome;
+    }
+
+    pub fn startPreparedPayloadFetch(
+        self: *const ExecutionRuntime,
+        payload_id: [8]u8,
+    ) !PayloadFetchHandle {
+        var handle = PayloadFetchHandle{
+            .task = .{
+                .runtime = self,
+                .payload_id = payload_id,
+            },
+            .thread = null,
+        };
+        handle.thread = try std.Thread.spawn(.{}, PayloadFetchTask.run, .{&handle.task});
+        return handle;
+    }
+
+    pub fn startBuilderBidFetch(
+        self: *const ExecutionRuntime,
+        slot: u64,
+        parent_hash: [32]u8,
+        proposer_pubkey: [48]u8,
+    ) !BuilderBidFetchHandle {
+        var handle = BuilderBidFetchHandle{
+            .task = .{
+                .runtime = self,
+                .slot = slot,
+                .parent_hash = parent_hash,
+                .proposer_pubkey = proposer_pubkey,
+            },
+            .thread = null,
+        };
+        handle.thread = try std.Thread.spawn(.{}, BuilderBidFetchTask.run, .{&handle.task});
+        return handle;
+    }
+
     pub fn freeGetPayloadResponse(self: *const ExecutionRuntime, response: GetPayloadResponse) void {
         const engine = self.engine_api orelse return;
         engine.freeGetPayloadResponse(response);
@@ -284,10 +1209,6 @@ pub const ExecutionRuntime = struct {
 
     pub fn hasExecutionEngine(self: *const ExecutionRuntime) bool {
         return self.engine_api != null;
-    }
-
-    pub fn engineApi(self: *const ExecutionRuntime) ?EngineApi {
-        return self.engine_api;
     }
 
     pub fn mockEngine(self: *const ExecutionRuntime) ?*MockEngine {
@@ -298,17 +1219,10 @@ pub const ExecutionRuntime = struct {
         return self.builder_api;
     }
 
-    pub fn httpEngineRequestClone(self: *const ExecutionRuntime) ?HttpEngine {
-        const http_engine = self.http_engine orelse return null;
-        return http_engine.requestClone();
-    }
-
-    pub fn httpBuilderRequestClone(self: *const ExecutionRuntime) ?HttpBuilder {
-        const http_builder = self.http_builder orelse return null;
-        return http_builder.requestClone();
-    }
-
     pub fn currentBuilderStatus(self: *const ExecutionRuntime) execution_mod.BuilderStatus {
+        const mutable_self: *ExecutionRuntime = @constCast(self);
+        mutable_self.lane_mutex.lockUncancelable(mutable_self.io);
+        defer mutable_self.lane_mutex.unlock(mutable_self.io);
         const http_builder = self.http_builder orelse return .unavailable;
         return http_builder.current_status;
     }
@@ -317,6 +1231,8 @@ pub const ExecutionRuntime = struct {
         self: *ExecutionRuntime,
         status: execution_mod.BuilderStatus,
     ) void {
+        self.lane_mutex.lockUncancelable(self.io);
+        defer self.lane_mutex.unlock(self.io);
         if (self.http_builder) |http_builder| http_builder.updateStatus(status);
     }
 
@@ -339,14 +1255,22 @@ pub const ExecutionRuntime = struct {
     }
 
     pub fn lastBuilderStatusSlot(self: *const ExecutionRuntime) ?u64 {
+        const mutable_self: *ExecutionRuntime = @constCast(self);
+        mutable_self.lane_mutex.lockUncancelable(mutable_self.io);
+        defer mutable_self.lane_mutex.unlock(mutable_self.io);
         return self.last_builder_status_slot;
     }
 
     pub fn setLastBuilderStatusSlot(self: *ExecutionRuntime, slot: ?u64) void {
+        self.lane_mutex.lockUncancelable(self.io);
+        defer self.lane_mutex.unlock(self.io);
         self.last_builder_status_slot = slot;
     }
 
     pub fn cachedPayloadId(self: *const ExecutionRuntime) ?[8]u8 {
+        const mutable_self: *ExecutionRuntime = @constCast(self);
+        mutable_self.lane_mutex.lockUncancelable(mutable_self.io);
+        defer mutable_self.lane_mutex.unlock(mutable_self.io);
         return self.cached_payload_id;
     }
 
@@ -355,17 +1279,22 @@ pub const ExecutionRuntime = struct {
         slot: u64,
         parent_root: [32]u8,
     ) bool {
+        const mutable_self: *ExecutionRuntime = @constCast(self);
+        mutable_self.lane_mutex.lockUncancelable(mutable_self.io);
+        defer mutable_self.lane_mutex.unlock(mutable_self.io);
         return self.cached_payload_slot == slot and
             self.cached_payload_id != null and
             self.cached_payload_parent_root != null and
             std.mem.eql(u8, &self.cached_payload_parent_root.?, &parent_root);
     }
 
-    pub fn recordPreparedPayloadContext(
+    fn recordPreparedPayloadContext(
         self: *ExecutionRuntime,
         slot: u64,
         parent_root: [32]u8,
     ) void {
+        self.lane_mutex.lockUncancelable(self.io);
+        defer self.lane_mutex.unlock(self.io);
         if (self.cached_payload_id != null) {
             self.cached_payload_slot = slot;
             self.cached_payload_parent_root = parent_root;
@@ -380,6 +1309,8 @@ pub const ExecutionRuntime = struct {
         slot: u64,
         parent_root: [32]u8,
     ) void {
+        self.lane_mutex.lockUncancelable(self.io);
+        defer self.lane_mutex.unlock(self.io);
         if (self.cached_payload_slot) |cached_slot| {
             if (cached_slot != slot or
                 self.cached_payload_parent_root == null or
@@ -396,6 +1327,8 @@ pub const ExecutionRuntime = struct {
         parent_root: [32]u8,
         payload_id: [8]u8,
     ) void {
+        self.lane_mutex.lockUncancelable(self.io);
+        defer self.lane_mutex.unlock(self.io);
         if (self.cached_payload_slot != slot) return;
         const cached_parent_root = self.cached_payload_parent_root orelse return;
         if (!std.mem.eql(u8, &cached_parent_root, &parent_root)) return;
@@ -404,7 +1337,7 @@ pub const ExecutionRuntime = struct {
         self.clearCachedPayload();
     }
 
-    pub fn clearCachedPayload(self: *ExecutionRuntime) void {
+    fn clearCachedPayload(self: *ExecutionRuntime) void {
         self.cached_payload_id = null;
         self.cached_payload_slot = null;
         self.cached_payload_parent_root = null;

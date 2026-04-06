@@ -12,7 +12,7 @@
 //! └──────┬───────┘
 //!        │
 //! ┌──────▼───────┐
-//! │ getPreState  │ via queued regen
+//! │ getPreState  │ via cache lookup / worker cold regen
 //! └──────┬───────┘
 //!        │
 //! ┌──────▼───────┐
@@ -70,19 +70,25 @@ pub const SanityResult = types.SanityResult;
 pub const SanityOutcome = verify_sanity.SanityOutcome;
 pub const SignatureVerificationResult = verify_signatures.SignatureVerificationResult;
 pub const ExecutionPort = @import("../ports/execution.zig").ExecutionPort;
-pub const ExecutionVerifier = @import("../ports/execution.zig").ExecutionVerifier;
 pub const NewPayloadRequest = @import("../ports/execution.zig").NewPayloadRequest;
 pub const NewPayloadResult = @import("../ports/execution.zig").NewPayloadResult;
 pub const ImportContext = import_block.ImportContext;
 pub const PipelineContext = pipeline.PipelineContext;
 pub const StfResult = execute_state_transition.StfResult;
+pub const PlannedBlockImport = pipeline.PlannedBlockImport;
+pub const PreparedBlockImport = pipeline.PreparedBlockImport;
+pub const BlockPlanResult = pipeline.BlockPlanResult;
 
 // -- Public API --
 pub const processBlock = pipeline.processBlock;
 pub const processBlockBatch = pipeline.processBlockBatch;
+pub const planBlockForImport = pipeline.planBlockForImport;
+pub const executePlannedBlockImport = pipeline.executePlannedBlockImport;
+pub const finishPreparedBlockImport = pipeline.finishPreparedBlockImport;
 pub const verifySanity = verify_sanity.verifySanity;
 pub const verifyDataAvailability = verify_data_availability.verifyDataAvailability;
 pub const verifyExecutionPayload = verify_execution.verifyExecutionPayload;
+pub const executionStatusFromNewPayloadResult = verify_execution.executionStatusFromNewPayloadResult;
 pub const importVerifiedBlock = import_block.importVerifiedBlock;
 pub const shouldVerifySignatures = verify_signatures.shouldVerifySignatures;
 pub const createBlockBatchVerifier = verify_signatures.createBlockBatchVerifier;

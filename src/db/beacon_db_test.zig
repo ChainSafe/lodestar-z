@@ -87,7 +87,7 @@ test "BeaconDB: put and get block archive by slot" {
     try std.testing.expect(by_root != null);
     try std.testing.expectEqualSlices(u8, block_data, by_root.?);
 
-    const looked_up_root = try t.db.getBlockRootBySlot(slot);
+    const looked_up_root = try t.db.getFinalizedBlockRootBySlot(slot);
     try std.testing.expect(looked_up_root != null);
     try std.testing.expectEqualSlices(u8, &root, &looked_up_root.?);
 }
@@ -102,6 +102,50 @@ test "BeaconDB: get missing block archive returns null" {
 
     const by_root = try t.db.getBlockArchiveByRoot([_]u8{0x00} ** 32);
     try std.testing.expect(by_root == null);
+}
+
+test "BeaconDB: put and get canonical block archive by parent root" {
+    const allocator = std.testing.allocator;
+    var t = makeTestDB(allocator);
+    defer destroyTestDB(allocator, t.store);
+
+    const slot: u64 = 64;
+    const root = [_]u8{0xaa} ** 32;
+    const parent_root = [_]u8{0xbb} ** 32;
+
+    try t.db.putBlockArchiveCanonical(slot, root, parent_root, "archived_canonical_block");
+
+    const slot_result = try t.db.getFinalizedBlockSlotByParentRoot(parent_root);
+    try std.testing.expectEqual(@as(?u64, slot), slot_result);
+
+    const by_parent = try t.db.getBlockArchiveByParentRoot(parent_root);
+    defer if (by_parent) |b| allocator.free(b);
+    try std.testing.expect(by_parent != null);
+    try std.testing.expectEqualSlices(u8, "archived_canonical_block", by_parent.?);
+}
+
+test "BeaconDB: contiguous archived canonical head follows parent-root index" {
+    const allocator = std.testing.allocator;
+    var t = makeTestDB(allocator);
+    defer destroyTestDB(allocator, t.store);
+
+    const root_a = [_]u8{0x11} ** 32;
+    const root_b = [_]u8{0x22} ** 32;
+    const root_c = [_]u8{0x33} ** 32;
+
+    try t.db.putBlockArchiveCanonical(16, root_a, [_]u8{0x01} ** 32, "block_a");
+    try t.db.putBlockArchiveCanonical(32, root_b, root_a, "block_b");
+    try t.db.putBlockArchiveCanonical(48, root_c, root_b, "block_c");
+
+    const head_32 = try t.db.getContiguousArchivedCanonicalHead(32);
+    try std.testing.expect(head_32 != null);
+    try std.testing.expectEqual(@as(u64, 32), head_32.?.slot);
+    try std.testing.expectEqual(root_b, head_32.?.root);
+
+    const head_64 = try t.db.getContiguousArchivedCanonicalHead(64);
+    try std.testing.expect(head_64 != null);
+    try std.testing.expectEqual(@as(u64, 48), head_64.?.slot);
+    try std.testing.expectEqual(root_c, head_64.?.root);
 }
 
 // ---- State archive operations ----
@@ -304,6 +348,18 @@ test "BeaconDB: put and get chain info" {
     defer if (result) |r| allocator.free(r);
     try std.testing.expect(result != null);
     try std.testing.expectEqualSlices(u8, &finalized_root, result.?);
+}
+
+test "BeaconDB: put and get chain info u64" {
+    const allocator = std.testing.allocator;
+    var t = makeTestDB(allocator);
+    defer destroyTestDB(allocator, t.store);
+
+    try t.db.putChainInfoU64(.archive_finalized_slot, 1234);
+
+    const result = try t.db.getChainInfoU64(.archive_finalized_slot);
+    try std.testing.expect(result != null);
+    try std.testing.expectEqual(@as(u64, 1234), result.?);
 }
 
 // ---- Op pool ----

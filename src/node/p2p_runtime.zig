@@ -859,6 +859,9 @@ fn runRealtimeP2pTick(self: *BeaconNode, io: std.Io, svc: *networking.P2pService
     var did_work = false;
 
     did_work = gossip_ingress_mod.processEvents(self, io, svc) > 0 or did_work;
+    did_work = self.processPendingExecutionForkchoiceUpdates() or did_work;
+    did_work = self.processPendingExecutionPayloadVerifications() or did_work;
+    did_work = self.processPendingBlockStateWork() or did_work;
     did_work = self.processPendingGossipBlsBatch() or did_work;
 
     if (self.beacon_processor) |bp| {
@@ -880,6 +883,7 @@ fn runRealtimeP2pTick(self: *BeaconNode, io: std.Io, svc: *networking.P2pService
             std.log.warn("SyncService.tick failed: {}", .{err});
         };
     }
+    did_work = self.drivePendingSyncSegments() or did_work;
 
     maybeHandleForkTransition(self, svc);
 
@@ -982,13 +986,7 @@ fn advanceChainClock(self: *BeaconNode, io: std.Io) void {
     self.chainService().onSlot(current_slot);
     self.last_slot_tick = current_slot;
 
-    const outcome = self.chainService().revalidateCurrentOptimisticHead() catch |err| {
-        std.log.warn("Optimistic head revalidation failed: {}", .{err});
-        return;
-    };
-    if (outcome) |revalidated| {
-        self.finishExecutionRevalidationOutcome(revalidated);
-    }
+    self.queueCurrentOptimisticHeadRevalidation();
 }
 
 fn dialBootnodeEnr(self: *BeaconNode, io: std.Io, svc: *networking.P2pService, enr_str: []const u8) !void {

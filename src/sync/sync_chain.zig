@@ -31,6 +31,9 @@ pub const SyncChainCallbacks = struct {
     /// Import a segment of blocks. Returns error on failure.
     processChainSegmentFn: *const fn (
         ptr: *anyopaque,
+        chain_id: u32,
+        batch_id: BatchId,
+        generation: u32,
         blocks: []const BatchBlock,
         sync_type: RangeSyncType,
     ) anyerror!void,
@@ -51,10 +54,13 @@ pub const SyncChainCallbacks = struct {
 
     pub fn processChainSegment(
         self: SyncChainCallbacks,
+        chain_id: u32,
+        batch_id: BatchId,
+        generation: u32,
         blocks: []const BatchBlock,
         sync_type: RangeSyncType,
     ) !void {
-        return self.processChainSegmentFn(self.ptr, blocks, sync_type);
+        return self.processChainSegmentFn(self.ptr, chain_id, batch_id, generation, blocks, sync_type);
     }
 
     pub fn downloadByRange(
@@ -272,6 +278,31 @@ pub const SyncChain = struct {
         }
     }
 
+    pub fn onProcessingSuccess(self: *SyncChain, batch_id: BatchId, generation: u32) void {
+        for (self.batches.items) |*b| {
+            if (b.id != batch_id) continue;
+            if (b.generation != generation) return;
+            if (b.status != .processing) return;
+            b.onProcessingSuccess();
+            return;
+        }
+    }
+
+    pub fn onProcessingError(self: *SyncChain, batch_id: BatchId, generation: u32) void {
+        for (self.batches.items) |*b| {
+            if (b.id != batch_id) continue;
+            if (b.generation != generation) return;
+            if (b.status != .processing) return;
+            const download_peer = b.download_peer;
+            b.onProcessingError();
+            if (b.isProcessingExhausted()) {
+                if (download_peer) |peer_id| self.callbacks.reportPeer(peer_id);
+                self.status = .err;
+            }
+            return;
+        }
+    }
+
     // ── Internal helpers ────────────────────────────────────────────
 
     /// Recompute target as the highest slot among peers.
@@ -384,7 +415,16 @@ pub const SyncChain = struct {
         if (front.status != .awaiting_processing) return;
 
         front.startProcessing();
-        self.callbacks.processChainSegment(front.blocks, self.sync_type) catch |err| {
+        self.callbacks.processChainSegment(
+            self.id,
+            front.id,
+            front.generation,
+            front.blocks,
+            self.sync_type,
+        ) catch |err| {
+            if (err == error.ProcessingPending) {
+                return;
+            }
             std.log.warn("SyncChain: failed to import segment {d}..{d}: {}", .{
                 front.start_slot,
                 front.endSlot(),
@@ -445,7 +485,7 @@ const TestSyncCallbacks = struct {
     last_peer_id_len: usize = 0,
     should_fail_processing: bool = false,
 
-    fn processChainSegmentFn(ptr: *anyopaque, blocks: []const BatchBlock, _: RangeSyncType) anyerror!void {
+    fn processChainSegmentFn(ptr: *anyopaque, _: u32, _: BatchId, _: u32, blocks: []const BatchBlock, _: RangeSyncType) anyerror!void {
         const self: *TestSyncCallbacks = @ptrCast(@alignCast(ptr));
         if (self.should_fail_processing) return error.ProcessingFailed;
         self.processed_count += @intCast(blocks.len);
@@ -575,6 +615,77 @@ test "SyncChain: completes when all batches processed" {
     try std.testing.expectEqual(SyncChainStatus.done, chain.status);
     // 2 blocks were imported through the segment callback.
     try std.testing.expectEqual(@as(u32, 2), tc.processed_count);
+}
+
+test "SyncChain: pending processing waits for completion callback" {
+    const PendingCallbacks = struct {
+        download_count: u32 = 0,
+        processing_requests: u32 = 0,
+        last_batch_id: BatchId = 0,
+        last_generation: u32 = 0,
+
+        fn processChainSegmentFn(ptr: *anyopaque, _: u32, _: BatchId, _: u32, _: []const BatchBlock, _: RangeSyncType) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            self.processing_requests += 1;
+            return error.ProcessingPending;
+        }
+
+        fn downloadByRangeFn(ptr: *anyopaque, _: u32, batch_id: BatchId, generation: u32, _: []const u8, _: u64, _: u64) void {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            self.download_count += 1;
+            self.last_batch_id = batch_id;
+            self.last_generation = generation;
+        }
+
+        fn reportPeerFn(_: *anyopaque, _: []const u8) void {}
+
+        fn importBlockFn(_: *anyopaque, _: []const u8) anyerror!void {}
+
+        fn callbacks(self: *@This()) SyncChainCallbacks {
+            return .{
+                .ptr = self,
+                .importBlockFn = &importBlockFn,
+                .processChainSegmentFn = &processChainSegmentFn,
+                .downloadByRangeFn = &downloadByRangeFn,
+                .reportPeerFn = &reportPeerFn,
+            };
+        }
+    };
+
+    const allocator = std.testing.allocator;
+    var tc = PendingCallbacks{};
+    var chain = SyncChain.init(
+        allocator,
+        0,
+        .finalized,
+        0,
+        .{ .slot = 2, .root = [_]u8{0} ** 32 },
+        tc.callbacks(),
+    );
+    defer chain.deinit();
+
+    try chain.addPeer("p1", .{ .slot = 2, .root = [_]u8{0} ** 32 }, null);
+    chain.startSyncing();
+
+    _ = try chain.tick();
+    try std.testing.expectEqual(@as(usize, 1), chain.batches.items.len);
+    try std.testing.expectEqual(@as(u32, 1), tc.download_count);
+
+    const blocks = [_]BatchBlock{
+        .{ .slot = 1, .block_bytes = "b1" },
+        .{ .slot = 2, .block_bytes = "b2" },
+    };
+    chain.onBatchResponse(tc.last_batch_id, tc.last_generation, &blocks);
+
+    const done = try chain.tick();
+    try std.testing.expect(!done);
+    try std.testing.expectEqual(@as(u32, 1), tc.processing_requests);
+    try std.testing.expectEqual(BatchStatus.processing, chain.batches.items[0].status);
+
+    chain.onProcessingSuccess(tc.last_batch_id, tc.last_generation);
+    const done_after_completion = try chain.tick();
+    try std.testing.expect(done_after_completion);
+    try std.testing.expectEqual(SyncChainStatus.done, chain.status);
 }
 
 test "SyncChain: skips peers that cannot serve the batch start slot" {

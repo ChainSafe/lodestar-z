@@ -40,7 +40,7 @@ fn readSignedBlockSlotFromSsz(block_bytes: []const u8) ?u64 {
 
 fn getTestBlockRootBySlot(ptr: *anyopaque, slot: u64) anyerror!?[32]u8 {
     const fixture: *TestChainFixture = @ptrCast(@alignCast(ptr));
-    return fixture.db.getBlockRootBySlot(slot);
+    return fixture.db.getFinalizedBlockRootBySlot(slot);
 }
 
 fn getTestBlockBytesByRoot(ptr: *anyopaque, root: [32]u8) anyerror!?[]const u8 {
@@ -85,7 +85,7 @@ fn getTestStateRootByBlockRoot(ptr: *anyopaque, root: [32]u8) anyerror!?[32]u8 {
 fn getTestStateRootBySlot(ptr: *anyopaque, slot: u64) anyerror!?[32]u8 {
     const fixture: *TestChainFixture = @ptrCast(@alignCast(ptr));
     if (slot == fixture.head_tracker.head_slot) return fixture.head_tracker.head_state_root;
-    const block_root = try fixture.db.getBlockRootBySlot(slot) orelse return null;
+    const block_root = try fixture.db.getFinalizedBlockRootBySlot(slot) orelse return null;
     return getTestStateRootByBlockRoot(ptr, block_root);
 }
 

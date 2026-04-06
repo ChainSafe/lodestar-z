@@ -22,6 +22,7 @@ pub const shuffle = @import("./utils/shuffle.zig");
 pub const committee_indices = @import("./utils/committee_indices.zig");
 pub const PubkeyIndexMap = @import("./cache/pubkey_cache.zig").PubkeyIndexMap;
 pub const Index2PubkeyCache = @import("./cache/pubkey_cache.zig").Index2PubkeyCache;
+pub const SharedValidatorPubkeys = @import("./cache/shared_pubkeys.zig").SharedValidatorPubkeys;
 pub const syncPubkeys = @import("./cache/pubkey_cache.zig").syncPubkeys;
 pub const syncPubkeysParallel = @import("./cache/pubkey_cache.zig").syncPubkeysParallel;
 
@@ -120,17 +121,8 @@ pub const load_cached_state = @import("./utils/load_cached_state.zig");
 pub const loadCachedBeaconState = load_cached_state.loadCachedBeaconState;
 pub const state_deserialize = @import("./utils/state_deserialize.zig");
 pub const deserializeState = state_deserialize.deserializeState;
+pub const deserializePublishedState = state_deserialize.deserializePublishedState;
 
-// State caching layer
-pub const BlockStateCache = @import("./cache/block_state_cache.zig").BlockStateCache;
-pub const CheckpointStateCache = @import("./cache/checkpoint_state_cache.zig").CheckpointStateCache;
-pub const StateDisposer = @import("./cache/state_disposer.zig").StateDisposer;
-pub const PmtMutator = @import("./cache/pmt_mutator.zig").PmtMutator;
-pub const CPStateDatastore = @import("./cache/datastore.zig").CPStateDatastore;
-pub const MemoryCPStateDatastore = @import("./cache/datastore.zig").MemoryCPStateDatastore;
-pub const FileCPStateDatastore = @import("./cache/datastore.zig").FileCPStateDatastore;
-pub const CheckpointKey = @import("./cache/datastore.zig").CheckpointKey;
-pub const StateRegen = @import("./cache/state_regen.zig").StateRegen;
 const seed = @import("./utils/seed.zig");
 pub const state_transition = @import("./state_transition.zig");
 pub const BlockExternalData = state_transition.BlockExternalData;

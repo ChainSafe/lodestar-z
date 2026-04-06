@@ -242,10 +242,10 @@ pub const TestCachedBeaconState = struct {
         self.pubkey_index_map.deinit();
         self.allocator.destroy(self.pubkey_index_map);
         self.index_pubkey_cache.deinit();
+        self.allocator.destroy(self.index_pubkey_cache);
         self.epoch_transition_cache.deinit();
         @import("../state_transition.zig").deinitStateTransition();
         self.allocator.destroy(self.epoch_transition_cache);
-        self.allocator.destroy(self.index_pubkey_cache);
         self.allocator.destroy(self.config);
     }
 };

@@ -11,6 +11,8 @@ pub const ports = @import("ports/root.zig");
 pub const runtime = @import("runtime.zig");
 pub const service = @import("service.zig");
 pub const query = @import("query.zig");
+pub const regen = @import("regen/root.zig");
+pub const state_work_service = @import("state_work_service.zig");
 pub const block_import = @import("block_import.zig");
 pub const op_pool = @import("op_pool.zig");
 pub const seen_cache = @import("seen_cache.zig");
@@ -30,6 +32,8 @@ pub const HeadInfo = chain_types.HeadInfo;
 pub const SyncStatus = chain_types.SyncStatus;
 pub const ForkchoiceUpdateState = chain_types.ForkchoiceUpdateState;
 pub const ReadyBlockInput = chain_types.ReadyBlockInput;
+pub const PlannedBlockImport = blocks.PlannedBlockImport;
+pub const PreparedBlockImport = blocks.PreparedBlockImport;
 pub const RawBlockBytes = chain_types.RawBlockBytes;
 pub const PlannedBlockIngress = chain_types.PlannedBlockIngress;
 pub const BlockDataRequirement = chain_types.BlockDataRequirement;
@@ -41,19 +45,32 @@ pub const ChainNotification = chain_types.ChainNotification;
 pub const ImportOutcome = effects.ImportOutcome;
 pub const SegmentImportOutcome = effects.SegmentImportOutcome;
 pub const ExecutionRevalidationOutcome = effects.ExecutionRevalidationOutcome;
+pub const PendingExecutionRevalidation = effects.PendingExecutionRevalidation;
+pub const PreparedExecutionRevalidation = effects.PreparedExecutionRevalidation;
 pub const BootstrapOutcome = effects.BootstrapOutcome;
 pub const ImportEffects = effects.ImportEffects;
 pub const SegmentImportEffects = effects.SegmentImportEffects;
 pub const ChainSnapshot = effects.ChainSnapshot;
 pub const CheckpointSnapshot = effects.CheckpointSnapshot;
-pub const ArchiveStateRequest = effects.ArchiveStateRequest;
 pub const ExecutionForkchoiceUpdate = effects.ExecutionForkchoiceUpdate;
 pub const Runtime = runtime.Runtime;
+pub const RuntimeBuilder = runtime.Builder;
 pub const RuntimeOptions = runtime.RuntimeOptions;
 pub const StorageBackend = runtime.StorageBackend;
 pub const Service = service.Service;
 pub const Query = query.Query;
-pub const PmtMutator = @import("state_transition").PmtMutator;
+pub const CPStateDatastore = regen.CPStateDatastore;
+pub const MemoryCPStateDatastore = regen.MemoryCPStateDatastore;
+pub const FileCPStateDatastore = regen.FileCPStateDatastore;
+pub const CheckpointKey = regen.CheckpointKey;
+pub const BlockStateCache = regen.BlockStateCache;
+pub const CheckpointStateCache = regen.CheckpointStateCache;
+pub const StateDisposer = regen.StateDisposer;
+pub const SharedStateGraph = regen.SharedStateGraph;
+pub const StateGraphGate = regen.StateGraphGate;
+pub const StateRegen = regen.StateRegen;
+pub const StateWorkService = state_work_service.StateWorkService;
+pub const CompletedBlockImport = state_work_service.CompletedBlockImport;
 
 // Existing re-exports (kept for backward compatibility)
 pub const HeadTracker = block_import.HeadTracker;
@@ -113,6 +130,7 @@ pub const archive_store = @import("archive_store.zig");
 pub const reprocess = @import("reprocess.zig");
 pub const pending_block_ingress = @import("block_ingress.zig");
 pub const payload_envelope_ingress = @import("payload_envelope_ingress.zig");
+pub const finalization_plan = @import("finalization_plan.zig");
 
 // Re-exports
 pub const ShufflingCache = shuffling_cache.ShufflingCache;
@@ -128,10 +146,11 @@ pub const PendingIngressBlock = pending_block_ingress.PendingIngressBlock;
 pub const PayloadEnvelopeIngress = payload_envelope_ingress.PayloadEnvelopeIngress;
 pub const PendingPayloadEnvelope = payload_envelope_ingress.PendingPayloadEnvelope;
 pub const PayloadEnvelopeFetchPlan = payload_envelope_ingress.PayloadEnvelopeFetchPlan;
+pub const FinalizationPlan = finalization_plan.FinalizationPlan;
 // BlockVerification removed — use blocks/pipeline.zig instead.
 
 // Queued state regeneration
-pub const queued_regen = @import("queued_regen.zig");
+pub const queued_regen = regen.queued_regen;
 pub const QueuedStateRegen = queued_regen.QueuedStateRegen;
 pub const RegenPriority = queued_regen.RegenPriority;
 pub const RegenKey = queued_regen.RegenKey;
@@ -161,7 +180,6 @@ pub const BlockImportError = blocks.BlockImportError;
 pub const BatchBlockResult = blocks.BatchBlockResult;
 pub const SanityOutcome = blocks.SanityOutcome;
 pub const ExecutionPort = ports.ExecutionPort;
-pub const ExecutionVerifier = ports.ExecutionVerifier;
 pub const NewPayloadRequest = ports.NewPayloadRequest;
 pub const NewPayloadResult = ports.NewPayloadResult;
 // Data availability subsystem

@@ -125,10 +125,10 @@ pub const ApiBindings = struct {
         }
 
         wireApiContext(bindings, node.api_context);
-        node.chain.notification_sink = .{
+        node.chain.setNotificationSink(.{
             .ptr = @ptrCast(bindings.notification_sink_ctx),
             .publishFn = &publishChainNotificationFn,
-        };
+        });
         return bindings;
     }
 
@@ -727,7 +727,7 @@ fn importBlockCallback(
     errdefer rollbackPublishEquivocationGuard(node, equivocation_guard);
 
     try applyPublishValidation(node, imported, params.broadcast_validation);
-    _ = try node.importBlock(imported, .api);
+    _ = try node.ingestBlock(imported, .api);
 }
 
 fn getValidatorMonitorCallback(

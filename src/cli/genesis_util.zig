@@ -10,8 +10,10 @@ const Io = std.Io;
 
 const state_transition = @import("state_transition");
 const CachedBeaconState = state_transition.CachedBeaconState;
-const deserializeState = state_transition.deserializeState;
-const TestCachedBeaconState = state_transition.test_utils.TestCachedBeaconState;
+const deserializePublishedState = state_transition.deserializePublishedState;
+const SharedValidatorPubkeys = state_transition.SharedValidatorPubkeys;
+const EpochCacheImmutableData = state_transition.EpochCacheImmutableData;
+const generateElectraState = state_transition.test_utils.generateElectraState;
 
 const Node = @import("persistent_merkle_tree").Node;
 const BeaconConfig = @import("config").BeaconConfig;
@@ -32,16 +34,33 @@ const BeaconConfig = @import("config").BeaconConfig;
 pub fn createMinimalGenesis(
     allocator: Allocator,
     pool: *Node.Pool,
+    config: *const BeaconConfig,
+    shared_pubkeys: *SharedValidatorPubkeys,
     validator_count: usize,
 ) !*CachedBeaconState {
-    // TestCachedBeaconState.init creates a fully-initialised CachedBeaconState
-    // with pubkey caches and epoch cache populated.
-    const test_state = try TestCachedBeaconState.init(allocator, pool, validator_count);
+    const state = try generateElectraState(allocator, pool, config.chain, validator_count);
+    errdefer {
+        state.deinit();
+        allocator.destroy(state);
+    }
 
-    // Extract the CachedBeaconState pointer.  We intentionally do NOT call
-    // test_state.deinit() so that the heap objects it owns (BeaconConfig,
-    // pubkey caches) remain alive and accessible through the CachedBeaconState.
-    return test_state.cached_state;
+    const validators = try state.validatorsSlice(allocator);
+    defer allocator.free(validators);
+    try shared_pubkeys.syncFromValidators(validators);
+
+    return CachedBeaconState.createCachedBeaconState(
+        allocator,
+        state,
+        EpochCacheImmutableData{
+            .config = config,
+            .pubkey_to_index = &shared_pubkeys.pubkey_to_index,
+            .index_to_pubkey = &shared_pubkeys.index_to_pubkey,
+        },
+        .{
+            .skip_sync_committee_cache = state.forkSeq() == .phase0,
+            .skip_sync_pubkeys = true,
+        },
+    );
 }
 
 /// Load and deserialize a genesis / checkpoint state from an SSZ file.
@@ -56,6 +75,7 @@ pub fn loadGenesisFromFile(
     allocator: Allocator,
     pool: *Node.Pool,
     config: *const BeaconConfig,
+    shared_pubkeys: *SharedValidatorPubkeys,
     io: Io,
     path: []const u8,
 ) !*CachedBeaconState {
@@ -76,5 +96,5 @@ pub fn loadGenesisFromFile(
     if (n != size) return error.ShortRead;
 
     // Deserialize into a CachedBeaconState.
-    return deserializeState(allocator, pool, config, buf);
+    return deserializePublishedState(allocator, pool, config, shared_pubkeys, buf);
 }

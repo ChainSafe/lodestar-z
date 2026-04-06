@@ -10,12 +10,13 @@ const fork_types = @import("fork_types");
 const fork_choice_mod = @import("fork_choice");
 const preset = @import("preset").preset;
 const state_transition = @import("state_transition");
-const PmtMutator = state_transition.PmtMutator;
+const StateGraphGate = @import("regen/root.zig").StateGraphGate;
 
 const Chain = @import("chain.zig").Chain;
 const chain_types = @import("types.zig");
 const chain_effects = @import("effects.zig");
 const ports = @import("ports/root.zig");
+const blocks = @import("blocks/root.zig");
 const Query = @import("query.zig").Query;
 const produce_block = @import("produce_block.zig");
 const blob_kzg_verification = @import("blob_kzg_verification.zig");
@@ -49,6 +50,10 @@ const BlobVerifyInput = blob_kzg_verification.BlobVerifyInput;
 const BYTES_PER_CELL = blob_kzg_verification.BYTES_PER_CELL;
 const HeadResult = fork_choice_mod.HeadResult;
 const LVHExecResponse = fork_choice_mod.LVHExecResponse;
+pub const PlannedBlockImport = @import("blocks/root.zig").PlannedBlockImport;
+pub const CompletedBlockImport = @import("state_work_service.zig").CompletedBlockImport;
+pub const PreparedBlockImport = @import("blocks/root.zig").PreparedBlockImport;
+pub const ExecutionStatus = blocks.ExecutionStatus;
 
 fn eth1DataFromHeadState(cached: *CachedBeaconState) Eth1DataType {
     var eth1_data = Eth1Data.default_value;
@@ -97,8 +102,8 @@ pub const Service = struct {
         return Query.init(self.chain);
     }
 
-    pub fn acquirePmtMutationLease(self: Service) PmtMutator.Lease {
-        return self.chain.acquirePmtMutationLease();
+    pub fn acquireStateGraphLease(self: Service) StateGraphGate.Lease {
+        return self.chain.acquireStateGraphLease();
     }
 
     fn forkchoiceUpdateForHead(self: Service, head_root: Root) ?chain_effects.ExecutionForkchoiceUpdate {
@@ -108,59 +113,72 @@ pub const Service = struct {
             .state = state,
         };
     }
-
-    pub fn importBlock(
+    pub fn prepareBlockInput(
         self: Service,
         any_signed: fork_types.AnySignedBeaconBlock,
         source: chain_types.BlockSource,
-    ) !chain_effects.ImportOutcome {
-        const result = try self.chain.importBlock(any_signed, source);
-        const snapshot = self.query().currentSnapshot();
-
-        return .{
-            .result = result,
-            .snapshot = snapshot,
-            .effects = .{
-                .forkchoice_update = self.forkchoiceUpdateForHead(snapshot.head.root),
-                .archive_state = if (result.epoch_transition)
-                    .{
-                        .slot = result.slot,
-                        .state_root = result.state_root,
-                    }
-                else
-                    null,
-                .finalized_checkpoint = if (result.epoch_transition)
-                    snapshot.finalized
-                else
-                    null,
-            },
-        };
-    }
-
-    pub fn importRawBlockBytes(
-        self: Service,
-        block_bytes: []const u8,
-        source: chain_types.BlockSource,
-    ) !chain_effects.ImportOutcome {
-        const slot = try readBlockSlot(block_bytes);
-        var any_signed = try deserializeRawBlockBytes(self.chain, slot, block_bytes);
-        defer any_signed.deinit(self.chain.allocator);
+    ) !ReadyBlockInput {
         const block_root = try hashBlock(self.chain.allocator, any_signed);
-        return self.importReadyBlock(readyBlockInput(
+        return readyBlockInput(
             any_signed,
             source,
             block_root,
             self.dataAvailabilityStatusForBlock(block_root, any_signed),
             0,
             .none,
-        ));
+        );
     }
 
-    pub fn importReadyBlock(
+    pub fn prepareRawBlockInput(
         self: Service,
-        ready: ReadyBlockInput,
+        block_bytes: []const u8,
+        source: chain_types.BlockSource,
+    ) !ReadyBlockInput {
+        const slot = try readBlockSlot(block_bytes);
+        const any_signed = try deserializeRawBlockBytes(self.chain, slot, block_bytes);
+        const block_root = try hashBlock(self.chain.allocator, any_signed);
+        return readyBlockInput(
+            any_signed,
+            source,
+            block_root,
+            self.dataAvailabilityStatusForBlock(block_root, any_signed),
+            0,
+            .none,
+        );
+    }
+    /// Consumes `ready`. On success, ownership transfers into the returned plan.
+    /// On error, `ready` still owns its resources.
+    pub fn planReadyBlockImport(
+        self: Service,
+        ready: *ReadyBlockInput,
+    ) !PlannedBlockImport {
+        return self.chain.planReadyBlockImport(ready);
+    }
+
+    /// Consumes `planned` on both success and failure.
+    /// Returns `true` when queued for background STFN, `false` when the caller
+    /// still owns `planned` and should fall back to synchronous execution.
+    pub fn tryQueuePlannedReadyBlockImport(
+        self: Service,
+        planned: PlannedBlockImport,
+    ) !bool {
+        return self.chain.tryQueuePlannedReadyBlockImport(planned);
+    }
+
+    /// Consumes `planned`.
+    pub fn executePlannedReadyBlockImportSync(
+        self: Service,
+        planned: PlannedBlockImport,
+    ) CompletedBlockImport {
+        return self.chain.executePlannedReadyBlockImportSync(planned);
+    }
+
+    /// Consumes `completed`.
+    pub fn finishCompletedReadyBlockImport(
+        self: Service,
+        completed: CompletedBlockImport,
     ) !chain_effects.ImportOutcome {
-        const result = try self.chain.importReadyBlock(ready);
+        const result = try self.chain.finishCompletedReadyBlockImport(completed);
         const snapshot = self.query().currentSnapshot();
 
         return .{
@@ -168,19 +186,37 @@ pub const Service = struct {
             .snapshot = snapshot,
             .effects = .{
                 .forkchoice_update = self.forkchoiceUpdateForHead(snapshot.head.root),
-                .archive_state = if (result.epoch_transition)
-                    .{
-                        .slot = result.slot,
-                        .state_root = result.state_root,
-                    }
-                else
-                    null,
                 .finalized_checkpoint = if (result.epoch_transition)
                     snapshot.finalized
                 else
                     null,
             },
         };
+    }
+
+    pub fn finishPreparedReadyBlockImport(
+        self: Service,
+        prepared: PreparedBlockImport,
+        exec_status: ExecutionStatus,
+    ) !chain_effects.ImportOutcome {
+        const result = try self.chain.finishPreparedReadyBlockImport(prepared, exec_status);
+        const snapshot = self.query().currentSnapshot();
+
+        return .{
+            .result = result,
+            .snapshot = snapshot,
+            .effects = .{
+                .forkchoice_update = self.forkchoiceUpdateForHead(snapshot.head.root),
+                .finalized_checkpoint = if (result.epoch_transition)
+                    snapshot.finalized
+                else
+                    null,
+            },
+        };
+    }
+
+    pub fn popCompletedReadyBlockImport(self: Service) ?CompletedBlockImport {
+        return self.chain.popCompletedReadyBlockImport();
     }
 
     pub fn processRangeSyncSegment(
@@ -235,19 +271,11 @@ pub const Service = struct {
         var imported_count: usize = 0;
         var skipped_count: usize = 0;
         var failed_count: usize = 0;
-        var archive_states_builder: std.ArrayListUnmanaged(chain_effects.ArchiveStateRequest) = .empty;
-        defer archive_states_builder.deinit(allocator);
-
         for (results) |result| {
             switch (result) {
                 .success => |import_result| {
                     imported_count += 1;
-                    if (import_result.epoch_transition) {
-                        try archive_states_builder.append(allocator, .{
-                            .slot = import_result.slot,
-                            .state_root = import_result.state_root,
-                        });
-                    }
+                    _ = import_result;
                 },
                 .skipped => skipped_count += 1,
                 .failed => failed_count += 1,
@@ -255,10 +283,6 @@ pub const Service = struct {
         }
 
         const snapshot = self.query().currentSnapshot();
-        const archive_states = if (archive_states_builder.items.len == 0)
-            &[_]chain_effects.ArchiveStateRequest{}
-        else
-            try archive_states_builder.toOwnedSlice(allocator);
 
         return .{
             .imported_count = imported_count,
@@ -267,7 +291,30 @@ pub const Service = struct {
             .snapshot = snapshot,
             .effects = .{
                 .forkchoice_update = self.forkchoiceUpdateForHead(snapshot.head.root),
-                .archive_states = archive_states,
+                .finalized_checkpoint = if (snapshot.finalized.epoch != before_snapshot.finalized.epoch or
+                    !std.mem.eql(u8, &snapshot.finalized.root, &before_snapshot.finalized.root))
+                    snapshot.finalized
+                else
+                    null,
+            },
+        };
+    }
+
+    pub fn buildDeferredRangeSyncSegmentOutcome(
+        self: Service,
+        before_snapshot: chain_effects.ChainSnapshot,
+        imported_count: usize,
+        skipped_count: usize,
+        failed_count: usize,
+    ) chain_effects.SegmentImportOutcome {
+        const snapshot = self.query().currentSnapshot();
+        return .{
+            .imported_count = imported_count,
+            .skipped_count = skipped_count,
+            .failed_count = failed_count,
+            .snapshot = snapshot,
+            .effects = .{
+                .forkchoice_update = self.forkchoiceUpdateForHead(snapshot.head.root),
                 .finalized_checkpoint = if (snapshot.finalized.epoch != before_snapshot.finalized.epoch or
                     !std.mem.eql(u8, &snapshot.finalized.root, &before_snapshot.finalized.root))
                     snapshot.finalized
@@ -331,6 +378,7 @@ pub const Service = struct {
         genesis_state: *CachedBeaconState,
     ) !chain_effects.BootstrapOutcome {
         const bootstrap = try self.chain.bootstrapFromGenesis(genesis_state);
+        try self.chain.installForkChoice(bootstrap.fork_choice);
         return .{
             .snapshot = self.query().currentSnapshot(),
             .genesis_time = bootstrap.genesis_time,
@@ -344,6 +392,7 @@ pub const Service = struct {
         checkpoint_state: *CachedBeaconState,
     ) !chain_effects.BootstrapOutcome {
         const bootstrap = try self.chain.bootstrapFromCheckpoint(checkpoint_state);
+        try self.chain.installForkChoice(bootstrap.fork_choice);
         return .{
             .snapshot = self.query().currentSnapshot(),
             .genesis_time = bootstrap.genesis_time,
@@ -370,20 +419,17 @@ pub const Service = struct {
     ) !void {
         const data = attestation.data();
 
-        if (self.chain.fork_choice) |fc| {
-            for (attesting_indices) |validator_index| {
-                fc.onSingleVote(
-                    self.chain.allocator,
-                    validator_index,
-                    data.slot,
-                    data.beacon_block_root,
-                    data.target.epoch,
-                ) catch |err| {
-                    std.log.warn("FC onAggregate failed for validator {d} slot {d}: {}", .{
-                        validator_index, data.slot, err,
-                    });
-                };
-            }
+        for (attesting_indices) |validator_index| {
+            _ = self.chain.onSingleVote(
+                @intCast(validator_index),
+                data.slot,
+                data.beacon_block_root,
+                data.target.epoch,
+            ) catch |err| {
+                std.log.warn("FC onAggregate failed for validator {d} slot {d}: {}", .{
+                    validator_index, data.slot, err,
+                });
+            };
         }
 
         _ = try self.chain.op_pool.agg_attestation_pool.addAny(attestation);
@@ -396,15 +442,12 @@ pub const Service = struct {
         beacon_block_root: Root,
         target_epoch: u64,
     ) !void {
-        if (self.chain.fork_choice) |fc| {
-            try fc.onSingleVote(
-                self.chain.allocator,
-                @intCast(validator_index),
-                attestation_slot,
-                beacon_block_root,
-                target_epoch,
-            );
-        }
+        _ = try self.chain.onSingleVote(
+            @intCast(validator_index),
+            attestation_slot,
+            beacon_block_root,
+            target_epoch,
+        );
     }
 
     pub fn importVoluntaryExit(self: Service, exit: SignedVoluntaryExit) !void {
@@ -602,10 +645,6 @@ pub const Service = struct {
             cells,
             proofs,
         );
-    }
-
-    pub fn archiveState(self: Service, slot: Slot, state_root: Root) !void {
-        try self.chain.archiveState(slot, state_root);
     }
 
     pub fn updateBeaconProposerData(
@@ -816,12 +855,10 @@ pub const Service = struct {
         self.chain.onSlot(slot);
     }
 
-    pub fn revalidateCurrentOptimisticHead(self: Service) !?chain_effects.ExecutionRevalidationOutcome {
+    pub fn prepareCurrentOptimisticHeadRevalidation(self: Service) !?chain_effects.PreparedExecutionRevalidation {
         if (!self.chain.currentHeadExecutionOptimistic()) return null;
 
-        const fc = self.chain.fork_choice orelse return null;
-        const old_snapshot = self.query().currentSnapshot();
-        const head_root = old_snapshot.head.root;
+        const head_root = self.query().head().root;
         const block_bytes = (try self.query().blockBytesByRoot(head_root)) orelse return error.HeadBlockNotAvailable;
         defer self.chain.allocator.free(block_bytes);
 
@@ -829,21 +866,38 @@ pub const Service = struct {
         var any_signed = try deserializeRawBlockBytes(self.chain, slot, block_bytes);
         defer any_signed.deinit(self.chain.allocator);
 
-        const verifier = self.chain.execution_verifier orelse return null;
-        var request = try ports.execution.makeNewPayloadRequest(self.chain.allocator, any_signed) orelse return null;
-        defer request.deinit(self.chain.allocator);
+        const request = try ports.execution.makeNewPayloadRequest(self.chain.allocator, any_signed) orelse return null;
+        return .{
+            .pending = .{
+                .target_head_root = head_root,
+                .invalidate_from_parent_block_root = any_signed.beaconBlock().parentRoot().*,
+            },
+            .request = request,
+        };
+    }
 
-        const response: LVHExecResponse = switch (verifier.submitNewPayload(request)) {
+    pub fn finishCurrentOptimisticHeadRevalidation(
+        self: Service,
+        pending: chain_effects.PendingExecutionRevalidation,
+        result: ports.execution.NewPayloadResult,
+    ) !?chain_effects.ExecutionRevalidationOutcome {
+        if (!self.chain.currentHeadExecutionOptimistic()) return null;
+
+        const old_head = self.query().head();
+        if (!std.mem.eql(u8, &old_head.root, &pending.target_head_root)) return null;
+
+        const fc = self.chain.forkChoice();
+        const response: LVHExecResponse = switch (result) {
             .valid => |valid| .{ .valid = .{
                 .latest_valid_exec_hash = valid.latest_valid_hash,
             } },
             .invalid => |invalid| .{ .invalid = .{
                 .latest_valid_exec_hash = invalid.latest_valid_hash,
-                .invalidate_from_parent_block_root = any_signed.beaconBlock().parentRoot().*,
+                .invalidate_from_parent_block_root = pending.invalidate_from_parent_block_root,
             } },
             .invalid_block_hash => |invalid| .{ .invalid = .{
                 .latest_valid_exec_hash = invalid.latest_valid_hash,
-                .invalidate_from_parent_block_root = any_signed.beaconBlock().parentRoot().*,
+                .invalidate_from_parent_block_root = pending.invalidate_from_parent_block_root,
             } },
             .syncing, .accepted, .unavailable => return null,
         };
@@ -865,10 +919,10 @@ pub const Service = struct {
                 false,
             .payload_status = if (head_node) |node| node.payload_status else .full,
         };
-        self.chain.head_tracker.setHead(new_head.block_root, new_head.slot, new_head.state_root);
+        self.chain.setTrackedHead(new_head.block_root, new_head.slot, new_head.state_root);
 
         const snapshot = self.query().currentSnapshot();
-        const head_changed = !std.mem.eql(u8, &snapshot.head.root, &old_snapshot.head.root);
+        const head_changed = !std.mem.eql(u8, &snapshot.head.root, &pending.target_head_root);
         return .{
             .snapshot = snapshot,
             .head_changed = head_changed,

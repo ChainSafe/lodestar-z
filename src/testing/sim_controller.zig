@@ -125,11 +125,12 @@ pub const SimController = struct {
         // Node 0: from primary genesis state.
         const seed_0 = cluster_prng.random().int(u64);
         const bn0_identity = try identity_mod.createEphemeralIdentity(allocator, std.testing.io, .{});
-        const bn0 = try BeaconNode.init(allocator, std.testing.io, primary.config, .{
+        var bn0_builder = try BeaconNode.Builder.init(allocator, std.testing.io, primary.config, .{
             .options = .{ .engine_mock = true },
             .node_identity = bn0_identity,
         });
-        try bn0.initFromGenesis(primary.cached_state);
+        errdefer bn0_builder.deinit();
+        const bn0 = try bn0_builder.finishGenesis(primary.cached_state);
         beacon_nodes[0] = bn0;
         nodes[0] = SimNodeHarness.init(allocator, bn0, seed_0);
         nodes[0].participation_rate = config.participation_rate;
@@ -157,11 +158,12 @@ pub const SimController = struct {
 
             const seed_i = cluster_prng.random().int(u64);
             const bn_i_identity = try identity_mod.createEphemeralIdentity(allocator, std.testing.io, .{});
-            const bn_i = try BeaconNode.init(allocator, std.testing.io, primary.config, .{
+            var bn_i_builder = try BeaconNode.Builder.init(allocator, std.testing.io, primary.config, .{
                 .options = .{ .engine_mock = true },
                 .node_identity = bn_i_identity,
             });
-            try bn_i.initFromGenesis(cloned);
+            errdefer bn_i_builder.deinit();
+            const bn_i = try bn_i_builder.finishGenesis(cloned);
             beacon_nodes[i] = bn_i;
             nodes[i] = SimNodeHarness.init(allocator, bn_i, seed_i);
             nodes[i].participation_rate = config.participation_rate;

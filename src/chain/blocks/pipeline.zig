@@ -4,7 +4,7 @@
 //! in sequence, threading the output of each stage to the next:
 //!
 //! 1. verifySanity       — slot bounds, parent known, not duplicate
-//! 2. getPreState        — retrieve pre-state via queued regen
+//! 2. getPreState        — retrieve pre-state via cache lookup
 //! 3. verifyDA           — check data availability status
 //! 4. stateTransition    — run STFN (includes batch sig verification)
 //! 5. verifyExecution    — engine_newPayload (or optimistic)
@@ -26,8 +26,9 @@ const BlsThreadPool = @import("bls").ThreadPool;
 const consensus_types = @import("consensus_types");
 const preset = @import("preset").preset;
 const state_transition = @import("state_transition");
+const regen_mod = @import("../regen/root.zig");
 const CachedBeaconState = state_transition.CachedBeaconState;
-const PmtMutator = state_transition.PmtMutator;
+const StateGraphGate = regen_mod.StateGraphGate;
 const computeEpochAtSlot = state_transition.computeEpochAtSlot;
 const fork_choice_mod = @import("fork_choice");
 const ForkChoice = fork_choice_mod.ForkChoiceStruct;
@@ -48,11 +49,12 @@ const SanityOutcome = verify_sanity.SanityOutcome;
 const verify_da = @import("verify_data_availability.zig");
 const execute_stf = @import("execute_state_transition.zig");
 const verify_exec = @import("verify_execution.zig");
-const ExecutionVerifier = @import("../ports/execution.zig").ExecutionVerifier;
+const ExecutionPort = @import("../ports/execution.zig").ExecutionPort;
 const import_block = @import("import_block.zig");
 const ImportContext = import_block.ImportContext;
 
-const QueuedStateRegen = @import("../queued_regen.zig").QueuedStateRegen;
+const QueuedStateRegen = regen_mod.QueuedStateRegen;
+const StateRegen = regen_mod.StateRegen;
 const HeadTracker = @import("../block_import.zig").HeadTracker;
 const ReprocessQueue = @import("../reprocess.zig").ReprocessQueue;
 
@@ -70,7 +72,7 @@ const Slot = consensus_types.primitive.Slot.Type;
 /// Relationship to ImportContext (P1-9 note):
 /// `ImportContext` is a strict subset of `PipelineContext`. The import stage
 /// (import_block.zig) only needs the fields that appear in ImportContext —
-/// it doesn't need `execution_verifier` (handled before import) or
+/// it doesn't need `execution_port` (handled before import) or
 /// `current_slot` (used only for sanity/DA checks). The conversion via
 /// `toImportContext()` is intentional: it gives the import stage a focused
 /// interface and avoids import_block.zig depending on the full pipeline type
@@ -81,12 +83,12 @@ pub const PipelineContext = struct {
     allocator: Allocator,
 
     // -- State management --
-    block_state_cache: *state_transition.BlockStateCache,
-    state_regen: *state_transition.StateRegen,
-    queued_regen: ?*QueuedStateRegen,
+    block_state_cache: *regen_mod.BlockStateCache,
+    state_regen: *regen_mod.StateRegen,
+    queued_regen: *QueuedStateRegen,
 
     // -- Fork choice --
-    fork_choice: ?*ForkChoice,
+    fork_choice: *ForkChoice,
 
     // -- Persistence --
     db: *@import("db").BeaconDB,
@@ -101,13 +103,13 @@ pub const PipelineContext = struct {
     notification_sink: ?@import("../types.zig").NotificationSink,
 
     // -- Execution verification (optional) --
-    execution_verifier: ?ExecutionVerifier,
+    execution_port: ?ExecutionPort,
 
     // -- Clock --
     current_slot: Slot,
 
     // -- Shared PMT mutation --
-    pmt_mutator: ?*PmtMutator = null,
+    state_graph_gate: *StateGraphGate,
 
     // -- BLS verification --
     block_bls_thread_pool: ?*BlsThreadPool = null,
@@ -125,7 +127,6 @@ pub const PipelineContext = struct {
         return .{
             .allocator = self.allocator,
             .block_state_cache = self.block_state_cache,
-            .state_regen = self.state_regen,
             .queued_regen = self.queued_regen,
             .fork_choice = self.fork_choice,
             .db = self.db,
@@ -143,7 +144,23 @@ pub const PipelineContext = struct {
 // Single block processing
 // ---------------------------------------------------------------------------
 
-const PreparedBlock = struct {
+pub const PlannedBlockImport = struct {
+    block_input: BlockInput,
+    parent_block_root: [32]u8,
+    parent_state_root: [32]u8,
+    pre_state: ?*CachedBeaconState,
+    parent_slot: Slot,
+    data_availability_status: DataAvailabilityStatus,
+    precomputed_body_root: ?[32]u8,
+    opts: ImportBlockOpts,
+
+    pub fn deinit(self: *PlannedBlockImport, allocator: Allocator) void {
+        self.block_input.block.deinit(allocator);
+        self.* = undefined;
+    }
+};
+
+pub const PreparedBlockImport = struct {
     block_input: BlockInput,
     post_state: *CachedBeaconState,
     block_root: [32]u8,
@@ -151,11 +168,19 @@ const PreparedBlock = struct {
     parent_slot: Slot,
     data_availability_status: DataAvailabilityStatus,
     proposer_balance_delta: i64,
+    opts: ImportBlockOpts,
+
+    pub fn deinit(self: *PreparedBlockImport, allocator: Allocator) void {
+        self.block_input.block.deinit(allocator);
+        self.post_state.deinit();
+        allocator.destroy(self.post_state);
+        self.* = undefined;
+    }
 };
 
-const BlockPreparationResult = union(enum) {
+pub const BlockPlanResult = union(enum) {
     skipped: ImportResult,
-    prepared: PreparedBlock,
+    planned: PlannedBlockImport,
 };
 
 /// Process a single block through the full import pipeline.
@@ -173,27 +198,34 @@ pub fn processBlock(
     block_input: BlockInput,
     opts: ImportBlockOpts,
 ) BlockImportError!ImportResult {
-    const preparation = try prepareBlockForImport(ctx, block_input, opts);
-    return switch (preparation) {
+    const plan_result = try planBlockForImport(ctx, block_input, opts);
+    return switch (plan_result) {
         .skipped => |result| result,
-        .prepared => |prepared| {
+        .planned => |planned| {
+            const prepared = try executePlannedBlockImport(
+                ctx.allocator,
+                ctx.state_regen,
+                ctx.state_graph_gate,
+                ctx.block_bls_thread_pool,
+                planned,
+            );
             const exec_status = try verify_exec.verifyExecutionPayload(
                 ctx.allocator,
-                block_input,
-                ctx.execution_verifier,
-                opts,
+                prepared.block_input,
+                ctx.execution_port,
+                prepared.opts,
             );
-            return importPreparedBlock(ctx, prepared, exec_status, opts);
+            return finishPreparedBlockImport(ctx, prepared, exec_status);
         },
     };
 }
 
-fn prepareBlockForImport(
+pub fn planBlockForImport(
     ctx: PipelineContext,
     block_input: BlockInput,
     opts: ImportBlockOpts,
-) BlockImportError!BlockPreparationResult {
-    const fc = ctx.fork_choice orelse return BlockImportError.InternalError;
+) BlockImportError!BlockPlanResult {
+    const fc = ctx.fork_choice;
 
     // Stage 1: Sanity checks.
     // Note: verifySanity uses fork_choice for parent lookup. If the fork choice
@@ -224,42 +256,79 @@ fn prepareBlockForImport(
             } };
         },
         .valid => |sanity| {
-            // Stage 2: Get pre-state via queued regen.
-            const pre_state = getPreState(ctx, sanity.parent_root, sanity.block_slot) orelse
+            const parent_state_root = ctx.block_to_state.get(sanity.parent_root) orelse
                 return BlockImportError.PrestateMissing;
+            // Stage 2: Fast pre-state cache lookup only.
+            // Cold-path regen/replay now runs in executePlannedBlockImport so it
+            // can be offloaded to the state worker.
+            const pre_state = getCachedPreState(ctx, parent_state_root, sanity.block_slot) catch
+                return BlockImportError.InternalError;
 
             // Stage 3: Data availability check.
             const da_status = try verify_da.verifyDataAvailability(block_input, opts);
 
-            // Stage 4: State transition (includes batch signature verification).
-            const stf_result = try execute_stf.executeStateTransition(
-                ctx.allocator,
-                block_input,
-                pre_state,
-                da_status,
-                opts,
-                sanity.body_root,
-                ctx.pmt_mutator,
-                ctx.block_bls_thread_pool,
-            );
-            return .{ .prepared = .{
+            return .{ .planned = .{
                 .block_input = block_input,
-                .post_state = stf_result.post_state,
-                .block_root = stf_result.block_root,
-                .state_root = stf_result.state_root,
+                .parent_block_root = sanity.parent_root,
+                .parent_state_root = parent_state_root,
+                .pre_state = pre_state,
                 .parent_slot = sanity.parent_slot,
                 .data_availability_status = da_status,
-                .proposer_balance_delta = stf_result.proposer_balance_delta,
+                .precomputed_body_root = sanity.body_root,
+                .opts = opts,
             } };
         },
     }
 }
 
-fn importPreparedBlock(
+pub fn executePlannedBlockImport(
+    allocator: Allocator,
+    state_regen: *StateRegen,
+    state_graph_gate: *StateGraphGate,
+    block_bls_thread_pool: ?*BlsThreadPool,
+    planned: PlannedBlockImport,
+) BlockImportError!PreparedBlockImport {
+    var owned_pre_state: ?*CachedBeaconState = null;
+    defer if (owned_pre_state) |state| {
+        state_regen.destroyTransientState(state);
+    };
+
+    const pre_state = planned.pre_state orelse blk: {
+        const cold_state = state_regen.loadPreStateUncached(
+            planned.parent_block_root,
+            planned.parent_state_root,
+            planned.block_input.block.beaconBlock().slot(),
+        ) catch return BlockImportError.PrestateMissing;
+        owned_pre_state = cold_state;
+        break :blk cold_state;
+    };
+
+    const stf_result = try execute_stf.executeStateTransition(
+        allocator,
+        planned.block_input,
+        pre_state,
+        planned.data_availability_status,
+        planned.opts,
+        planned.precomputed_body_root,
+        state_graph_gate,
+        block_bls_thread_pool,
+    );
+    return .{
+        .block_input = planned.block_input,
+        .post_state = stf_result.post_state,
+        .block_root = stf_result.block_root,
+        .state_root = stf_result.state_root,
+        .parent_slot = planned.parent_slot,
+        .data_availability_status = planned.data_availability_status,
+        .proposer_balance_delta = stf_result.proposer_balance_delta,
+        .opts = planned.opts,
+    };
+}
+
+pub fn finishPreparedBlockImport(
     ctx: PipelineContext,
-    prepared: PreparedBlock,
+    prepared: PreparedBlockImport,
     exec_status: ExecutionStatus,
-    opts: ImportBlockOpts,
 ) BlockImportError!ImportResult {
     const verified = VerifiedBlock{
         .block_input = prepared.block_input,
@@ -272,7 +341,7 @@ fn importPreparedBlock(
         .proposer_balance_delta = prepared.proposer_balance_delta,
     };
 
-    return import_block.importVerifiedBlock(ctx.toImportContext(), verified, opts);
+    return import_block.importVerifiedBlock(ctx.toImportContext(), verified, prepared.opts);
 }
 
 /// Process a batch of blocks through the pipeline (for range sync).
@@ -298,21 +367,31 @@ pub fn processBlockBatch(
     batch_opts.ignore_if_finalized = true;
 
     for (block_inputs, 0..) |block_input, i| {
-        const preparation = prepareBlockForImport(ctx, block_input, batch_opts) catch |err| {
+        const plan_result = planBlockForImport(ctx, block_input, batch_opts) catch |err| {
             results[i] = classifyBatchError(err);
             continue;
         };
 
-        switch (preparation) {
+        switch (plan_result) {
             .skipped => {
                 results[i] = .{ .skipped = {} };
             },
-            .prepared => |prepared| {
+            .planned => |planned| {
+                const prepared = executePlannedBlockImport(
+                    ctx.allocator,
+                    ctx.state_regen,
+                    ctx.state_graph_gate,
+                    ctx.block_bls_thread_pool,
+                    planned,
+                ) catch |err| {
+                    results[i] = classifyBatchError(err);
+                    continue;
+                };
                 const exec_result = verify_exec.verifyExecutionPayloadDetailed(
                     ctx.allocator,
-                    block_input,
-                    ctx.execution_verifier,
-                    batch_opts,
+                    prepared.block_input,
+                    ctx.execution_port,
+                    prepared.opts,
                 ) catch |err| {
                     results[i] = classifyBatchError(err);
                     continue;
@@ -324,7 +403,6 @@ pub fn processBlockBatch(
                             ctx,
                             prepared,
                             exec_result.status(),
-                            batch_opts,
                         );
                     },
                     .invalid => |invalid| {
@@ -353,11 +431,10 @@ pub fn processBlockBatch(
 
 fn processPreparedBatchBlock(
     ctx: PipelineContext,
-    prepared: PreparedBlock,
+    prepared: PreparedBlockImport,
     exec_status: ExecutionStatus,
-    opts: ImportBlockOpts,
 ) BatchBlockResult {
-    const result = importPreparedBlock(ctx, prepared, exec_status, opts) catch |err| switch (err) {
+    const result = finishPreparedBlockImport(ctx, prepared, exec_status) catch |err| switch (err) {
         BlockImportError.AlreadyKnown,
         BlockImportError.WouldRevertFinalizedSlot,
         BlockImportError.GenesisBlock,
@@ -382,7 +459,7 @@ fn invalidateExecutionBranch(
     latest_valid_hash: ?[32]u8,
     invalidate_from_parent_block_root: [32]u8,
 ) void {
-    const fc = ctx.fork_choice orelse return;
+    const fc = ctx.fork_choice;
     fc.validateLatestHash(ctx.allocator, LVHExecResponse{ .invalid = .{
         .latest_valid_exec_hash = latest_valid_hash,
         .invalidate_from_parent_block_root = invalidate_from_parent_block_root,
@@ -390,34 +467,13 @@ fn invalidateExecutionBranch(
     _ = fc.updateAndGetHead(ctx.allocator, .get_canonical_head) catch {};
 }
 
-/// Get the pre-state for a block, trying queued regen first.
-///
-/// `parent_root` is the BLOCK root of the parent block (i.e., block.parent_root).
-/// QueuedStateRegen expects a STATE root as its cache key. We translate via the
-/// block_to_state map first, then pass the state_root to queued_regen.
-///
-/// Without the translation, qr.getPreState would always miss (block_root ≠ state_root),
-/// making the queued_regen fast path dead code (P0-2 / INT-4 fix).
-fn getPreState(
+/// Get the cached pre-state for a block without falling through to replay.
+fn getCachedPreState(
     ctx: PipelineContext,
-    parent_root: [32]u8,
+    parent_state_root: [32]u8,
     block_slot: Slot,
-) ?*CachedBeaconState {
-    // Translate block root → state root for cache lookups.
-    // block_to_state maps parent_block_root → parent_state_root.
-    const parent_state_root = ctx.block_to_state.get(parent_root) orelse return null;
-
-    // Try queued regen (with dedup + priority) first.
-    // Now passing the correct state_root (not block_root), so cache lookups work.
-    if (ctx.queued_regen) |qr| {
-        if (qr.getPreState(parent_state_root, block_slot, .block_import) catch null) |state| {
-            return state;
-        }
-        // qr missed (state not in regen cache) — fall through to block_state_cache.
-    }
-
-    // Direct state root lookup in block state cache.
-    return ctx.block_state_cache.get(parent_state_root);
+) !?*CachedBeaconState {
+    return ctx.queued_regen.getCachedPreState(parent_state_root, block_slot);
 }
 
 // ---------------------------------------------------------------------------

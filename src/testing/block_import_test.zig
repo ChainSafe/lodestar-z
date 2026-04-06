@@ -8,18 +8,19 @@ const testing = std.testing;
 const types = @import("consensus_types");
 const config_mod = @import("config");
 const state_transition = @import("state_transition");
+const chain = @import("chain");
 const db_mod = @import("db");
 const Node = @import("persistent_merkle_tree").Node;
 const preset = @import("preset").preset;
 const fork_types = @import("fork_types");
 
 const CachedBeaconState = state_transition.CachedBeaconState;
-const BlockStateCache = state_transition.BlockStateCache;
-const CheckpointStateCache = state_transition.CheckpointStateCache;
-const StateRegen = state_transition.StateRegen;
-const MemoryCPStateDatastore = state_transition.MemoryCPStateDatastore;
-const CheckpointKey = state_transition.CheckpointKey;
-const TestCachedBeaconState = state_transition.test_utils.TestCachedBeaconState;
+const BlockStateCache = chain.BlockStateCache;
+const CheckpointStateCache = chain.CheckpointStateCache;
+const StateRegen = chain.StateRegen;
+const RegenRuntimeFixture = @import("../chain/regen/test_fixture.zig").RegenRuntimeFixture;
+const MemoryCPStateDatastore = chain.MemoryCPStateDatastore;
+const CheckpointKey = chain.CheckpointKey;
 const BeaconDB = db_mod.BeaconDB;
 const MemoryKVStore = db_mod.MemoryKVStore;
 const computeEpochAtSlot = state_transition.computeEpochAtSlot;
@@ -32,13 +33,7 @@ const BlockGenerator = @import("block_generator.zig").BlockGenerator;
 /// Shared test harness that wires up all pipeline components.
 const PipelineHarness = struct {
     allocator: std.mem.Allocator,
-
-    // Lifetime-managing resources.
-    pool: *Node.Pool,
-    test_config: *config_mod.BeaconConfig,
-    pubkey_map: *state_transition.PubkeyIndexMap,
-    index_pubkey_cache: *state_transition.Index2PubkeyCache,
-    epoch_transition_cache: *state_transition.EpochTransitionCache,
+    fixture: RegenRuntimeFixture,
 
     // State caches.
     block_cache: *BlockStateCache,
@@ -65,42 +60,13 @@ const PipelineHarness = struct {
     const pool_size: u32 = 2_000_000;
 
     fn init(allocator: std.mem.Allocator) !PipelineHarness {
-        const pool = try allocator.create(Node.Pool);
-        pool.* = try Node.Pool.init(allocator, pool_size);
-
-        var test_state = try TestCachedBeaconState.init(allocator, pool, 64);
-
-        // Set up state caches.
-        const block_cache = try allocator.create(BlockStateCache);
-        block_cache.* = BlockStateCache.init(allocator, 32);
-
-        const cp_datastore = try allocator.create(MemoryCPStateDatastore);
-        cp_datastore.* = MemoryCPStateDatastore.init(allocator);
-
-        const cp_cache = try allocator.create(CheckpointStateCache);
-        cp_cache.* = CheckpointStateCache.init(
-            allocator,
-            cp_datastore.datastore(),
-            block_cache,
-            3,
-        );
-
-        // Set up DB.
-        const mem_kv = try allocator.create(MemoryKVStore);
-        mem_kv.* = MemoryKVStore.init(allocator);
-
-        const db = try allocator.create(BeaconDB);
-        db.* = BeaconDB.init(allocator, mem_kv.kvStore());
-
-        // Set up regen.
-        const regen = try allocator.create(StateRegen);
-        regen.* = StateRegen.initWithDB(allocator, block_cache, cp_cache, db, null, null);
+        var fixture = try RegenRuntimeFixture.init(allocator, 64);
 
         // Put the genesis state into block_cache. block_cache owns it after this.
-        const state_root = try regen.onNewBlock(test_state.cached_state, true);
+        const state_root = try fixture.seedHeadState();
 
         // Compute genesis block root from the latest block header.
-        var genesis_header = try test_state.cached_state.state.latestBlockHeader();
+        var genesis_header = try fixture.published_state.state.latestBlockHeader();
         const genesis_block_root = (try genesis_header.hashTreeRoot()).*;
 
         // Head tracker.
@@ -109,7 +75,14 @@ const PipelineHarness = struct {
 
         // Importer.
         const importer = try allocator.create(BlockImporter);
-        importer.* = BlockImporter.init(allocator, block_cache, cp_cache, regen, db, head_tracker);
+        importer.* = BlockImporter.init(
+            allocator,
+            fixture.block_cache,
+            fixture.cp_cache,
+            fixture.regen,
+            fixture.db,
+            head_tracker,
+        );
 
         // Register genesis: block_root → state_root.
         try importer.registerGenesisRoot(genesis_block_root, state_root);
@@ -120,21 +93,17 @@ const PipelineHarness = struct {
 
         return .{
             .allocator = allocator,
-            .pool = pool,
-            .test_config = test_state.config,
-            .pubkey_map = test_state.pubkey_index_map,
-            .index_pubkey_cache = test_state.index_pubkey_cache,
-            .epoch_transition_cache = test_state.epoch_transition_cache,
-            .block_cache = block_cache,
-            .cp_datastore = cp_datastore,
-            .cp_cache = cp_cache,
-            .regen = regen,
-            .mem_kv = mem_kv,
-            .db = db,
+            .fixture = fixture,
+            .block_cache = fixture.block_cache,
+            .cp_datastore = fixture.cp_datastore,
+            .cp_cache = fixture.cp_cache,
+            .regen = fixture.regen,
+            .mem_kv = fixture.mem_kv,
+            .db = fixture.db,
             .head_tracker = head_tracker,
             .importer = importer,
             .block_gen = block_gen,
-            .head_state = test_state.cached_state,
+            .head_state = fixture.published_state,
         };
     }
 
@@ -211,36 +180,7 @@ const PipelineHarness = struct {
         self.importer.deinit();
         self.allocator.destroy(self.importer);
         self.allocator.destroy(self.block_gen);
-
-        // Checkpoint cache owns its in-memory states.
-        self.cp_cache.deinit();
-        self.allocator.destroy(self.cp_cache);
-        self.cp_datastore.deinit();
-        self.allocator.destroy(self.cp_datastore);
-
-        // Block cache owns all cached states.
-        self.block_cache.deinit();
-        self.allocator.destroy(self.block_cache);
-
-        self.allocator.destroy(self.regen);
-
-        self.db.close();
-        self.mem_kv.deinit();
-        self.allocator.destroy(self.mem_kv);
-        self.allocator.destroy(self.db);
-
-        // Free TestCachedBeaconState ancillary resources.
-        self.pubkey_map.deinit();
-        self.allocator.destroy(self.pubkey_map);
-        self.index_pubkey_cache.deinit();
-        self.epoch_transition_cache.deinit();
-        state_transition.deinitStateTransition();
-        self.allocator.destroy(self.epoch_transition_cache);
-        self.allocator.destroy(self.index_pubkey_cache);
-        self.allocator.destroy(self.test_config);
-
-        self.pool.deinit();
-        self.allocator.destroy(self.pool);
+        self.fixture.deinit();
     }
 };
 

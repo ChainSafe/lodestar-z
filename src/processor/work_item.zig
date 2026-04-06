@@ -382,14 +382,6 @@ pub const ChainSegmentWork = struct {
     seen_timestamp_ns: i64,
 };
 
-/// Deferred EL forkchoice update derived from a completed chain import.
-pub const ExecutionForkchoiceWork = struct {
-    beacon_block_root: Root,
-    head_block_hash: Root,
-    safe_block_hash: Root,
-    finalized_block_hash: Root,
-};
-
 /// Backfill historical chain segment.
 pub const BackfillWork = struct {
     blocks: [*]AnySignedBeaconBlock,
@@ -437,7 +429,6 @@ pub const LightClientWork = struct {
 pub const WorkType = enum(u8) {
     // -- Sync (highest priority) --
     chain_segment = 0,
-    execution_forkchoice = 1,
     rpc_block = 2,
     rpc_blob = 3,
     rpc_custody_column = 4,
@@ -538,7 +529,6 @@ pub const WorkType = enum(u8) {
 pub const WorkItem = union(WorkType) {
     // -- Sync --
     chain_segment: ChainSegmentWork,
-    execution_forkchoice: ExecutionForkchoiceWork,
     rpc_block: RpcBlockWork,
     rpc_blob: RpcBlobWork,
     rpc_custody_column: RpcColumnWork,
@@ -617,7 +607,6 @@ pub const WorkItem = union(WorkType) {
 
     pub fn deinit(self: WorkItem, allocator: std.mem.Allocator) void {
         switch (self) {
-            .execution_forkchoice => {},
             .delayed_block => |work| work.block.deinit(allocator),
             .gossip_block => |work| work.block.deinit(allocator),
             .gossip_execution_payload => |work| work.payload.deinit(),

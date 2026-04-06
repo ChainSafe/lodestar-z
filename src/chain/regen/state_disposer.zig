@@ -1,7 +1,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
-const CachedBeaconState = @import("state_cache.zig").CachedBeaconState;
+const CachedBeaconState = @import("state_transition").CachedBeaconState;
 
 pub fn destroyCachedBeaconState(allocator: Allocator, state: *CachedBeaconState) void {
     state.deinit();
@@ -109,7 +109,7 @@ pub const StateDisposer = struct {
 
 test "StateDisposer: defers and flushes state teardown" {
     const Node = @import("persistent_merkle_tree").Node;
-    const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
+    const TestCachedBeaconState = @import("state_transition").test_utils.TestCachedBeaconState;
 
     const allocator = std.testing.allocator;
     const pool_size = 256 * 5;

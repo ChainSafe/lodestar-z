@@ -65,6 +65,9 @@ pub const SyncServiceCallbacks = struct {
     /// Import a contiguous range-sync segment through the chain pipeline.
     processChainSegmentFn: *const fn (
         ptr: *anyopaque,
+        chain_id: u32,
+        batch_id: BatchId,
+        generation: u32,
         blocks: []const BatchBlock,
         sync_type: RangeSyncType,
     ) anyerror!void,
@@ -102,10 +105,13 @@ pub const SyncServiceCallbacks = struct {
 
     pub fn processChainSegment(
         self: SyncServiceCallbacks,
+        chain_id: u32,
+        batch_id: BatchId,
+        generation: u32,
         blocks: []const BatchBlock,
         sync_type: RangeSyncType,
     ) !void {
-        return self.processChainSegmentFn(self.ptr, blocks, sync_type);
+        return self.processChainSegmentFn(self.ptr, chain_id, batch_id, generation, blocks, sync_type);
     }
 
     pub fn requestBlocksByRange(
@@ -305,6 +311,26 @@ pub const SyncService = struct {
         self.range_sync.onBatchError(chain_id, batch_id, generation, peer_id);
     }
 
+    pub fn onSegmentProcessingSuccess(
+        self: *SyncService,
+        chain_id: u32,
+        batch_id: BatchId,
+        generation: u32,
+    ) void {
+        self.range_sync.onSegmentProcessingSuccess(chain_id, batch_id, generation);
+        self.updateMode();
+    }
+
+    pub fn onSegmentProcessingError(
+        self: *SyncService,
+        chain_id: u32,
+        batch_id: BatchId,
+        generation: u32,
+    ) void {
+        self.range_sync.onSegmentProcessingError(chain_id, batch_id, generation);
+        self.updateMode();
+    }
+
     /// Add a pending unknown block (unknown parent).
     pub fn addUnknownBlock(
         self: *SyncService,
@@ -412,7 +438,7 @@ const TestSyncServiceCallbacks = struct {
         self.imported_count += 1;
     }
 
-    fn processChainSegmentFn(ptr: *anyopaque, blocks: []const BatchBlock, _: RangeSyncType) anyerror!void {
+    fn processChainSegmentFn(ptr: *anyopaque, _: u32, _: BatchId, _: u32, blocks: []const BatchBlock, _: RangeSyncType) anyerror!void {
         const self: *TestSyncServiceCallbacks = @ptrCast(@alignCast(ptr));
         self.processed_segments += 1;
         self.imported_count += @intCast(blocks.len);

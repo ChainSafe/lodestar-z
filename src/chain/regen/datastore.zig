@@ -1,4 +1,4 @@
-//! CPStateDatastore: interface and implementations for persisting checkpoint states.
+//! CPStateDatastore: chain-owned persistence for checkpoint states.
 //!
 //! Provides:
 //! - `CPStateDatastore` — vtable-based interface for checkpoint state persistence
@@ -334,8 +334,6 @@ test "CheckpointKey.toKeyString" {
     // root hex (64 chars of "ab" repeated)
     try std.testing.expectEqualSlices(u8, "abababababababababababababababababababababababababababababababab", key[17..81]);
 }
-
-
 
 test "readSlotFromBytes" {
     // Construct minimal state bytes: genesis_time(8) + genesis_validators_root(32) + slot(8) = 48 bytes
