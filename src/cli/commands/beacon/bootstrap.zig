@@ -164,6 +164,9 @@ fn collectDiscoveryBootnodes(
 fn networkDefaultBootnodes(network: NetworkName) []const BootnodeInfo {
     return switch (network) {
         .mainnet => &networking.bootnodes.mainnet,
+        .sepolia => &networking.bootnodes.sepolia,
+        .holesky => &networking.bootnodes.holesky,
+        .hoodi => &networking.bootnodes.hoodi,
         else => &.{},
     };
 }
