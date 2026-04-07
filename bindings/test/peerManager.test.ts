@@ -34,7 +34,7 @@ const localStatus = {
 
 describe("peerManager", () => {
   beforeEach(async () => {
-    bindings = await import("../src/index.js");
+    bindings = (await import("../src/index.js")).default;
     bindings.peerManager.init(defaultConfig);
   });
 
@@ -83,6 +83,15 @@ describe("peerManager", () => {
     bindings.peerManager.onConnectionOpen("peer1", "outbound");
     const actions = bindings.peerManager.heartbeat(100, localStatus);
     expect(Array.isArray(actions)).toBe(true);
+  });
+
+  it("heartbeat discovery includes custody group queries when sampling groups are set", () => {
+    bindings.peerManager.setSamplingGroups([0, 1, 2]);
+    const actions = bindings.peerManager.heartbeat(100, localStatus);
+    const discovery = actions.find((a: {type: string}) => a.type === "request_discovery");
+    expect(discovery).toBeDefined();
+    expect(Array.isArray(discovery.custodyGroupQueries)).toBe(true);
+    expect(discovery.custodyGroupQueries.length).toBeGreaterThan(0);
   });
 
   it("getPeerScore returns number", () => {

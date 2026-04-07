@@ -13,6 +13,7 @@ const PeerAction = peer_manager.PeerAction;
 const GoodbyeReasonCode = peer_manager.GoodbyeReasonCode;
 const GossipScoreUpdate = peer_manager.GossipScoreUpdate;
 const RequestedSubnet = peer_manager.RequestedSubnet;
+const parseExternalPeerActionName = peer_manager.parseExternalPeerActionName;
 
 /// Allocator for internal allocations.
 const allocator = std.heap.page_allocator;
@@ -201,6 +202,34 @@ fn readPeerId(value: napi.Value) ![]const u8 {
     return try value.getValueStringUtf8(&buf);
 }
 
+fn readOwnedPeerId(value: napi.Value) ![]u8 {
+    var buf: [128]u8 = undefined;
+    const peer_id = try value.getValueStringUtf8(&buf);
+    return allocator.dupe(u8, peer_id);
+}
+
+fn parsePeerActionName(action_name: []const u8) ?PeerAction {
+    return parseExternalPeerActionName(action_name);
+}
+
+fn parseOptionalU32Array(value: napi.Value) !?[]u32 {
+    const value_type = try value.typeof();
+    if (value_type == .undefined or value_type == .null) {
+        return null;
+    }
+
+    const len = try value.getArrayLength();
+    const items = try allocator.alloc(u32, len);
+    errdefer allocator.free(items);
+
+    for (0..len) |i| {
+        const elem = try value.getElement(@intCast(i));
+        items[i] = try elem.getValueUint32();
+    }
+
+    return items;
+}
+
 // ── Lifecycle ────────────────────────────────────────────────────────
 
 pub fn PeerManager_init(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
@@ -235,7 +264,8 @@ pub fn PeerManager_checkPingAndStatus(env: napi.Env, _: napi.CallbackInfo(0)) !n
 
 pub fn PeerManager_onConnectionOpen(env: napi.Env, cb: napi.CallbackInfo(2)) !napi.Value {
     const m = try getManager();
-    const peer_id = try readPeerId(cb.arg(0));
+    const peer_id = try readOwnedPeerId(cb.arg(0));
+    defer allocator.free(peer_id);
     var dir_buf: [16]u8 = undefined;
     const dir_str = try cb.arg(1).getValueStringUtf8(&dir_buf);
     const direction = std.meta.stringToEnum(Direction, dir_str) orelse
@@ -246,14 +276,16 @@ pub fn PeerManager_onConnectionOpen(env: napi.Env, cb: napi.CallbackInfo(2)) !na
 
 pub fn PeerManager_onConnectionClose(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
     const m = try getManager();
-    const peer_id = try readPeerId(cb.arg(0));
+    const peer_id = try readOwnedPeerId(cb.arg(0));
+    defer allocator.free(peer_id);
     const actions = try m.onConnectionClose(peer_id);
     return actionsToNapiArray(env, actions);
 }
 
 pub fn PeerManager_onStatusReceived(env: napi.Env, cb: napi.CallbackInfo(4)) !napi.Value {
     const m = try getManager();
-    const peer_id = try readPeerId(cb.arg(0));
+    const peer_id = try readOwnedPeerId(cb.arg(0));
+    defer allocator.free(peer_id);
     const remote_status = try statusFromObject(env, try cb.arg(1).coerceToObject());
     const local_status = try statusFromObject(env, try cb.arg(2).coerceToObject());
     const current_slot: u64 = @intCast(try cb.arg(3).getValueInt64());
@@ -263,7 +295,8 @@ pub fn PeerManager_onStatusReceived(env: napi.Env, cb: napi.CallbackInfo(4)) !na
 
 pub fn PeerManager_onMetadataReceived(env: napi.Env, cb: napi.CallbackInfo(2)) !napi.Value {
     const m = try getManager();
-    const peer_id = try readPeerId(cb.arg(0));
+    const peer_id = try readOwnedPeerId(cb.arg(0));
+    defer allocator.free(peer_id);
     const md_obj = try cb.arg(1).coerceToObject();
 
     var metadata: Metadata = undefined;
@@ -278,8 +311,10 @@ pub fn PeerManager_onMetadataReceived(env: napi.Env, cb: napi.CallbackInfo(2)) !
     @memcpy(&metadata.syncnets, syncnets_info.data[0..1]);
 
     metadata.custody_group_count = @intCast(try (try md_obj.getNamedProperty("custodyGroupCount")).getValueInt64());
-    metadata.custody_groups = null;
-    metadata.sampling_groups = null;
+    metadata.custody_groups = try parseOptionalU32Array(try md_obj.getNamedProperty("custodyGroups"));
+    errdefer if (metadata.custody_groups) |groups| allocator.free(groups);
+    metadata.sampling_groups = try parseOptionalU32Array(try md_obj.getNamedProperty("samplingGroups"));
+    errdefer if (metadata.sampling_groups) |groups| allocator.free(groups);
 
     m.onMetadataReceived(peer_id, metadata);
     return env.getUndefined();
@@ -287,14 +322,16 @@ pub fn PeerManager_onMetadataReceived(env: napi.Env, cb: napi.CallbackInfo(2)) !
 
 pub fn PeerManager_onMessageReceived(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
     const m = try getManager();
-    const peer_id = try readPeerId(cb.arg(0));
+    const peer_id = try readOwnedPeerId(cb.arg(0));
+    defer allocator.free(peer_id);
     m.onMessageReceived(peer_id);
     return env.getUndefined();
 }
 
 pub fn PeerManager_onGoodbye(env: napi.Env, cb: napi.CallbackInfo(2)) !napi.Value {
     const m = try getManager();
-    const peer_id = try readPeerId(cb.arg(0));
+    const peer_id = try readOwnedPeerId(cb.arg(0));
+    defer allocator.free(peer_id);
     const reason_raw: u64 = @intCast(try cb.arg(1).getValueInt64());
     const reason: GoodbyeReasonCode = @enumFromInt(reason_raw);
     const actions = try m.onGoodbye(peer_id, reason);
@@ -303,7 +340,8 @@ pub fn PeerManager_onGoodbye(env: napi.Env, cb: napi.CallbackInfo(2)) !napi.Valu
 
 pub fn PeerManager_onPing(env: napi.Env, cb: napi.CallbackInfo(2)) !napi.Value {
     const m = try getManager();
-    const peer_id = try readPeerId(cb.arg(0));
+    const peer_id = try readOwnedPeerId(cb.arg(0));
+    defer allocator.free(peer_id);
     const seq_number: u64 = @intCast(try cb.arg(1).getValueInt64());
     const actions = try m.onPing(peer_id, seq_number);
     return actionsToNapiArray(env, actions);
@@ -313,10 +351,11 @@ pub fn PeerManager_onPing(env: napi.Env, cb: napi.CallbackInfo(2)) !napi.Value {
 
 pub fn PeerManager_reportPeer(env: napi.Env, cb: napi.CallbackInfo(2)) !napi.Value {
     const m = try getManager();
-    const peer_id = try readPeerId(cb.arg(0));
+    const peer_id = try readOwnedPeerId(cb.arg(0));
+    defer allocator.free(peer_id);
     var action_buf: [32]u8 = undefined;
     const action_str = try cb.arg(1).getValueStringUtf8(&action_buf);
-    const action = std.meta.stringToEnum(PeerAction, action_str) orelse
+    const action = parsePeerActionName(action_str) orelse
         return error.InvalidPeerAction;
     m.reportPeer(peer_id, action);
     return env.getUndefined();
@@ -328,17 +367,24 @@ pub fn PeerManager_updateGossipScores(env: napi.Env, cb: napi.CallbackInfo(1)) !
     const len = try arr.getArrayLength();
     const scores = try allocator.alloc(GossipScoreUpdate, len);
     defer allocator.free(scores);
+    const peer_ids = try allocator.alloc([]u8, len);
+    defer allocator.free(peer_ids);
+    var initialized: usize = 0;
+    errdefer {
+        for (peer_ids[0..initialized]) |pid| allocator.free(pid);
+    }
 
     for (0..len) |i| {
         const entry = try arr.getElement(@intCast(i));
-        var pid_buf: [128]u8 = undefined;
-        const pid = try (try entry.getNamedProperty("peerId")).getValueStringUtf8(&pid_buf);
+        peer_ids[i] = try readOwnedPeerId(try entry.getNamedProperty("peerId"));
+        initialized += 1;
         scores[i] = .{
-            .peer_id = pid,
+            .peer_id = peer_ids[i],
             .new_score = try (try entry.getNamedProperty("score")).getValueDouble(),
         };
     }
     m.updateGossipScores(scores);
+    for (peer_ids) |pid| allocator.free(pid);
     return env.getUndefined();
 }
 
@@ -425,7 +471,8 @@ pub fn PeerManager_getConnectedPeers(env: napi.Env, _: napi.CallbackInfo(0)) !na
 
 pub fn PeerManager_getPeerData(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
     const m = try getManager();
-    const peer_id = try readPeerId(cb.arg(0));
+    const peer_id = try readOwnedPeerId(cb.arg(0));
+    defer allocator.free(peer_id);
     const peer = m.getPeerData(peer_id) orelse return env.getNull();
 
     const obj = try env.createObject();
@@ -459,28 +506,32 @@ pub fn PeerManager_getPeerData(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Va
 
 pub fn PeerManager_getEncodingPreference(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
     const m = try getManager();
-    const peer_id = try readPeerId(cb.arg(0));
+    const peer_id = try readOwnedPeerId(cb.arg(0));
+    defer allocator.free(peer_id);
     const encoding = m.getEncodingPreference(peer_id) orelse return env.getNull();
     return env.createStringUtf8(@tagName(encoding));
 }
 
 pub fn PeerManager_getPeerKind(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
     const m = try getManager();
-    const peer_id = try readPeerId(cb.arg(0));
+    const peer_id = try readOwnedPeerId(cb.arg(0));
+    defer allocator.free(peer_id);
     const kind = m.getPeerKind(peer_id) orelse return env.getNull();
     return env.createStringUtf8(@tagName(kind));
 }
 
 pub fn PeerManager_getAgentVersion(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
     const m = try getManager();
-    const peer_id = try readPeerId(cb.arg(0));
+    const peer_id = try readOwnedPeerId(cb.arg(0));
+    defer allocator.free(peer_id);
     const av = m.getAgentVersion(peer_id) orelse return env.getNull();
     return env.createStringUtf8(av);
 }
 
 pub fn PeerManager_getPeerScore(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
     const m = try getManager();
-    const peer_id = try readPeerId(cb.arg(0));
+    const peer_id = try readOwnedPeerId(cb.arg(0));
+    defer allocator.free(peer_id);
     return env.createDouble(m.getPeerScore(peer_id));
 }
 
@@ -525,4 +576,17 @@ pub fn register(env: napi.Env, exports: napi.Value) !void {
     try pm_obj.setNamedProperty("getPeerScore", try env.createFunction("getPeerScore", 1, PeerManager_getPeerScore, null));
 
     try exports.setNamedProperty("peerManager", pm_obj);
+}
+
+test "parsePeerActionName accepts Lodestar JS action names" {
+    try std.testing.expectEqual(PeerAction.mid_tolerance, parsePeerActionName("MidToleranceError").?);
+    try std.testing.expectEqual(PeerAction.low_tolerance, parsePeerActionName("LowToleranceError").?);
+    try std.testing.expectEqual(PeerAction.high_tolerance, parsePeerActionName("HighToleranceError").?);
+    try std.testing.expectEqual(PeerAction.fatal, parsePeerActionName("Fatal").?);
+}
+
+test "parsePeerActionName accepts Zig enum names" {
+    try std.testing.expectEqual(PeerAction.mid_tolerance, parsePeerActionName("mid_tolerance").?);
+    try std.testing.expectEqual(PeerAction.fatal, parsePeerActionName("fatal").?);
+    try std.testing.expect(parsePeerActionName("not-a-real-action") == null);
 }

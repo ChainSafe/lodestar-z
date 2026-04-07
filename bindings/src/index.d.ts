@@ -58,6 +58,150 @@ interface CompactMultiProof {
   descriptor: Uint8Array;
 }
 
+type PeerManagerDirection = "inbound" | "outbound";
+
+type PeerManagerForkName =
+  | "phase0"
+  | "altair"
+  | "bellatrix"
+  | "capella"
+  | "deneb"
+  | "electra"
+  | "fulu"
+  | "gloas"
+  | "heze";
+
+type PeerManagerReportPeerAction =
+  | "Fatal"
+  | "LowToleranceError"
+  | "MidToleranceError"
+  | "HighToleranceError"
+  | "fatal"
+  | "low_tolerance"
+  | "mid_tolerance"
+  | "high_tolerance";
+
+interface PeerManagerConfig {
+  targetPeers: number;
+  maxPeers: number;
+  targetGroupPeers: number;
+  pingIntervalInboundMs: number;
+  pingIntervalOutboundMs: number;
+  statusIntervalMs: number;
+  statusInboundGracePeriodMs: number;
+  gossipsubNegativeScoreWeight: number;
+  gossipsubPositiveScoreWeight: number;
+  negativeGossipScoreIgnoreThreshold: number;
+  disablePeerScoring: boolean;
+  initialForkName: PeerManagerForkName;
+  numberOfCustodyGroups: number;
+  custodyRequirement: number;
+  samplesPerSlot: number;
+  slotsPerEpoch: number;
+}
+
+interface PeerManagerStatus {
+  forkDigest: Uint8Array;
+  finalizedRoot: Uint8Array;
+  finalizedEpoch: number;
+  headRoot: Uint8Array;
+  headSlot: number;
+  earliestAvailableSlot?: number | null;
+}
+
+interface PeerManagerMetadata {
+  seqNumber: number;
+  attnets: Uint8Array;
+  syncnets: Uint8Array;
+  custodyGroupCount: number;
+  custodyGroups?: number[] | null;
+  samplingGroups?: number[] | null;
+}
+
+interface PeerManagerRequestedSubnet {
+  subnet: number;
+  toSlot: number;
+}
+
+interface PeerManagerGossipScoreUpdate {
+  peerId: string;
+  score: number;
+}
+
+interface PeerManagerDiscoveryQuery {
+  subnet: number;
+  toSlot: number;
+  maxPeersToDiscover: number;
+}
+
+interface PeerManagerCustodyGroupQuery {
+  group: number;
+  maxPeersToDiscover: number;
+}
+
+type PeerManagerAction =
+  | {type: "send_ping"; peerId: string}
+  | {type: "send_status"; peerId: string}
+  | {type: "send_goodbye"; peerId: string; reason: number}
+  | {type: "request_metadata"; peerId: string}
+  | {type: "disconnect_peer"; peerId: string}
+  | {
+      type: "request_discovery";
+      peersToConnect: number;
+      attnetQueries: PeerManagerDiscoveryQuery[];
+      syncnetQueries: PeerManagerDiscoveryQuery[];
+      custodyGroupQueries: PeerManagerCustodyGroupQuery[];
+    }
+  | {type: "tag_peer_relevant"; peerId: string}
+  | {type: "emit_peer_connected"; peerId: string; direction: PeerManagerDirection}
+  | {type: "emit_peer_disconnected"; peerId: string};
+
+interface PeerManagerPeerData {
+  peerId: string;
+  direction: PeerManagerDirection;
+  relevantStatus: "unknown" | "relevant" | "irrelevant";
+  connectedUnixTsMs: number;
+  lastReceivedMsgUnixTsMs: number;
+  lastStatusUnixTsMs: number;
+  agentVersion: string | null;
+  agentClient: string | null;
+  encodingPreference: string | null;
+}
+
+interface PeerManagerApi {
+  init: (config: PeerManagerConfig) => void;
+  close: () => void;
+  heartbeat: (currentSlot: number, localStatus: PeerManagerStatus) => PeerManagerAction[];
+  checkPingAndStatus: () => PeerManagerAction[];
+  onConnectionOpen: (peerId: string, direction: PeerManagerDirection) => PeerManagerAction[];
+  onConnectionClose: (peerId: string) => PeerManagerAction[];
+  onStatusReceived: (
+    peerId: string,
+    remoteStatus: PeerManagerStatus,
+    localStatus: PeerManagerStatus,
+    currentSlot: number
+  ) => PeerManagerAction[];
+  onMetadataReceived: (peerId: string, metadata: PeerManagerMetadata) => void;
+  onMessageReceived: (peerId: string) => void;
+  onGoodbye: (peerId: string, reason: number) => PeerManagerAction[];
+  onPing: (peerId: string, seqNumber: number) => PeerManagerAction[];
+  reportPeer: (peerId: string, action: PeerManagerReportPeerAction) => void;
+  updateGossipScores: (scores: PeerManagerGossipScoreUpdate[]) => void;
+  setSubnetRequirements: (
+    attnets: PeerManagerRequestedSubnet[],
+    syncnets: PeerManagerRequestedSubnet[]
+  ) => void;
+  setForkName: (forkName: PeerManagerForkName) => void;
+  setSamplingGroups: (groups: number[]) => void;
+  getConnectedPeerCount: () => number;
+  getConnectedPeers: () => string[];
+  getPeerData: (peerId: string) => PeerManagerPeerData | null;
+  getEncodingPreference: (peerId: string) => string | null;
+  getPeerKind: (peerId: string) => string | null;
+  getAgentVersion: (peerId: string) => string | null;
+  getPeerScore: (peerId: string) => number;
+}
+
 /** Options to control how state transition is run */
 interface TransitionOpts {
   /** Verify the post-state root matches the block's state root. Default: true. */
@@ -240,6 +384,7 @@ declare const bindings: {
     init: () => void;
     scrapeMetrics: () => string;
   };
+  peerManager: PeerManagerApi;
   BeaconStateView: typeof BeaconStateView;
 };
 
