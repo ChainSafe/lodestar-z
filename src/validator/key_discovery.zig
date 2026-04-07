@@ -117,7 +117,7 @@ pub const KeyDiscovery = struct {
             log.debug("discovered keystore pubkey={s}", .{dir_name});
         }
 
-        log.info("discovered {d} keystores in {s}", .{ results.items.len, keystores_dir });
+        log.debug("discovered {d} keystores in {s}", .{ results.items.len, keystores_dir });
         return results.toOwnedSlice();
     }
 
@@ -199,7 +199,7 @@ pub const KeyDiscovery = struct {
             log.debug("loaded validator key pubkey={s}", .{key.pubkey_hex});
         }
 
-        log.info("loaded {d}/{d} validator keys", .{ loaded.items.len, discovered.len });
+        log.debug("loaded {d}/{d} validator keys", .{ loaded.items.len, discovered.len });
         return loaded.toOwnedSlice();
     }
 };

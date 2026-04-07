@@ -233,7 +233,7 @@ fn runBootstrappedNode(
     }
     defer if (metrics_runtime) |runtime| runtime.stop();
 
-    std.log.info("Starting services concurrently...", .{});
+    std.log.info("starting services concurrently", .{});
     std.log.info("  REST API: http://{s}:{d}", .{ api_address, api_port });
     var p2p_multiaddr_buf: [160]u8 = undefined;
     const p2p_multiaddr = try formatP2pListenMultiaddr(&p2p_multiaddr_buf, p2p_bind_host, p2p_bind_port);
@@ -246,8 +246,8 @@ fn runBootstrappedNode(
 
     group.await(io) catch {};
 
-    std.log.info("Shutting down...", .{});
-    std.log.info("Goodbye.", .{});
+    std.log.info("shutting down", .{});
+    std.log.info("goodbye", .{});
 }
 
 pub fn run(io: Io, allocator: Allocator, opts: anytype) !void {
@@ -360,7 +360,7 @@ pub fn run(io: Io, allocator: Allocator, opts: anytype) !void {
     var custom_chain_config: config_mod.ChainConfig = undefined;
     var custom_beacon_config: BeaconConfig = undefined;
     const beacon_config: *const BeaconConfig = if (params_file) |config_path| blk: {
-        std.log.info("Loading custom network config from: {s}", .{config_path});
+        std.log.info("loading custom network config from {s}", .{config_path});
         var arena = std.heap.ArenaAllocator.init(allocator);
         const config_arena = arena.allocator();
         const config_bytes = readFile(io, allocator, config_path) catch |err| {
@@ -374,7 +374,7 @@ pub fn run(io: Io, allocator: Allocator, opts: anytype) !void {
             std.process.exit(1);
         };
         custom_beacon_config = BeaconConfig.init(custom_chain_config, [_]u8{0} ** 32);
-        std.log.info("Custom config loaded: SECONDS_PER_SLOT={d} CONFIG_NAME={s}", .{
+        std.log.info("custom config loaded: SECONDS_PER_SLOT={d} CONFIG_NAME={s}", .{
             custom_chain_config.SECONDS_PER_SLOT,
             custom_chain_config.CONFIG_NAME,
         });
@@ -581,14 +581,14 @@ pub fn run(io: Io, allocator: Allocator, opts: anytype) !void {
     var node_builder = try BeaconNode.Builder.init(allocator, io, beacon_config, init_config);
     defer node_builder.deinit();
 
-    std.log.info("BeaconNode bootstrap initialized", .{});
+    std.log.info("beacon node bootstrap initialized", .{});
     std.log.info("  peer-id:    {s}", .{node_builder.nodeIdentity().peer_id});
     std.log.info("  enr:        {s}", .{node_builder.nodeIdentity().enr});
 
     const force_checkpoint = force_checkpoint_sync;
 
     if (checkpoint_sync_url) |sync_url| {
-        std.log.info("Checkpoint sync from URL: {s}", .{sync_url});
+        std.log.info("checkpoint sync from URL: {s}", .{sync_url});
 
         const fetched = checkpoint_sync.fetchFinalizedState(allocator, io, sync_url) catch |err| {
             std.log.err("Failed to fetch checkpoint state from '{s}': {}", .{ sync_url, err });
@@ -600,7 +600,7 @@ pub fn run(io: Io, allocator: Allocator, opts: anytype) !void {
         };
         defer allocator.free(fetched.state_bytes);
 
-        std.log.info("Deserializing checkpoint state ({d} bytes, fork={s})...", .{
+        std.log.info("deserializing checkpoint state ({d} bytes, fork={s})...", .{
             fetched.state_bytes.len, fetched.fork_name,
         });
 
@@ -644,7 +644,7 @@ pub fn run(io: Io, allocator: Allocator, opts: anytype) !void {
         try runBootstrappedNode(io, node, api_port, api_address, api_cors, p2p_bind_host, p2p_bind_port, if (metrics_runtime) |*runtime| runtime else null);
         return;
     } else if (checkpoint_state) |state_path| {
-        std.log.info("Loading checkpoint state from: {s}", .{state_path});
+        std.log.info("loading checkpoint state from {s}", .{state_path});
 
         const cp_state = genesis_util.loadGenesisFromFile(
             allocator,
@@ -686,7 +686,7 @@ pub fn run(io: Io, allocator: Allocator, opts: anytype) !void {
         try runBootstrappedNode(io, node, api_port, api_address, api_cors, p2p_bind_host, p2p_bind_port, if (metrics_runtime) |*runtime| runtime else null);
         return;
     } else if (if (!force_checkpoint) node_builder.latestStateArchiveSlot() catch null else null) |db_slot| {
-        std.log.info("Found persisted state in DB at slot {d}, resuming...", .{db_slot});
+        std.log.info("found persisted state in DB at slot {d}, resuming", .{db_slot});
 
         const state_bytes = node_builder.stateArchiveAtSlot(db_slot) catch |err| {
             std.log.err("Failed to read state from DB at slot {d}: {}", .{ db_slot, err });
@@ -720,7 +720,7 @@ pub fn run(io: Io, allocator: Allocator, opts: anytype) !void {
         try runBootstrappedNode(io, node, api_port, api_address, api_cors, p2p_bind_host, p2p_bind_port, if (metrics_runtime) |*runtime| runtime else null);
         return;
     } else if (network == .minimal) {
-        std.log.info("Generating minimal genesis state with 64 validators...", .{});
+        std.log.info("generating minimal genesis state with 64 validators", .{});
 
         const genesis_state = genesis_util.createMinimalGenesis(
             allocator,

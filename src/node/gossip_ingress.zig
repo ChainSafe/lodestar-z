@@ -16,7 +16,7 @@ const GossipIngressMetadata = @import("gossip_handler.zig").GossipIngressMetadat
 
 pub fn processEvents(self: *BeaconNode, io: std.Io, p2p: *networking.P2pService) usize {
     const events = p2p.drainGossipEvents() catch |err| {
-        std.log.warn("Failed to drain gossip events: {}", .{err});
+        std.log.debug("failed to drain gossip events: {}", .{err});
         return 0;
     };
     defer self.allocator.free(events);
@@ -70,7 +70,7 @@ fn processValidatedMessage(
                 std.log.debug("Gossip {s} rejected ({s})", .{ parsed.topic_type.topicName(), @tagName(reason) });
             },
             .failed => |err| {
-                std.log.warn("Gossip {s} error: {}", .{ parsed.topic_type.topicName(), err });
+                std.log.debug("gossip {s} error: {}", .{ parsed.topic_type.topicName(), err });
             },
         }
     }

@@ -43,7 +43,7 @@ pub fn main(init: std.process.Init) !void {
                         std.log.err("Failed to load RC config '{s}': {}", .{ config_path, err });
                         std.process.exit(1);
                     };
-                    std.log.info("Loaded RC config from: {s}", .{config_path});
+                    std.log.debug("loaded RC config from {s}", .{config_path});
                 }
                 break;
             }

@@ -87,10 +87,6 @@ pub fn loadConfigFromYaml(
         }
         if (blob_entries.items.len > 0) {
             result.BLOB_SCHEDULE = try blob_entries.toOwnedSlice(arena);
-            std.log.debug("Parsed BLOB_SCHEDULE: {d} entries", .{result.BLOB_SCHEDULE.len});
-            for (result.BLOB_SCHEDULE) |entry| {
-                std.log.debug("  BLOB_SCHEDULE entry: epoch={d} max_blobs={d}", .{entry.EPOCH, entry.MAX_BLOBS_PER_BLOCK});
-            }
         }
     }
 

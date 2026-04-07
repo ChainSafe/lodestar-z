@@ -343,7 +343,7 @@ pub const HttpBuilder = struct {
         const response = self.transport.send(.POST, url, headers_buf[0..header_count], body, .{
             .timeout = http_engine.timeoutFromMs(self.request_timeout_ms),
         }) catch |err| {
-            std.log.warn("Builder: registerValidators failed: {}", .{err});
+            std.log.warn("builder validator registration failed: {}", .{err});
             return err;
         };
         defer self.allocator.free(response);
@@ -355,7 +355,7 @@ pub const HttpBuilder = struct {
             });
         }
 
-        std.log.debug("Builder: registered {d} validator(s) with relay", .{registrations.len});
+        std.log.debug("builder registered {d} validator(s) with relay", .{registrations.len});
     }
 
     fn getHeaderImpl(
@@ -387,24 +387,24 @@ pub const HttpBuilder = struct {
         const response = self.transport.send(.GET, url, headers_buf[0..header_count], "", .{
             .timeout = http_engine.timeoutFromMs(self.proposal_timeout_ms),
         }) catch |err| {
-            std.log.warn("Builder: getHeader failed (slot={d}): {} — falling back to local execution", .{ slot, err });
+            std.log.debug("builder getHeader failed at slot {d}: {} — falling back to local execution", .{ slot, err });
             return null;
         };
         defer self.allocator.free(response);
 
         // Empty response = 204 No Content = no bid available
         if (response.len == 0) {
-            std.log.debug("Builder: no bid available for slot {d}", .{slot});
+            std.log.debug("builder returned no bid for slot {d}", .{slot});
             return null;
         }
 
         // Parse the JSON response
         const bid = parseSignedBuilderBid(self.allocator, response) catch |err| {
-            std.log.warn("Builder: failed to parse bid response: {} — falling back", .{err});
+            std.log.debug("builder bid response parse failed: {} — falling back", .{err});
             return null;
         };
 
-        std.log.debug("Builder: received bid for slot {d}, value={d}", .{ slot, bid.message.value });
+        std.log.debug("builder returned bid for slot {d}, value={d}", .{ slot, bid.message.value });
         return bid;
     }
 
@@ -425,14 +425,14 @@ pub const HttpBuilder = struct {
         const response = self.transport.send(.POST, url, headers_buf[0..header_count], body, .{
             .timeout = http_engine.timeoutFromMs(self.request_timeout_ms),
         }) catch |err| {
-            std.log.err("Builder: submitBlindedBlock failed: {}", .{err});
+            std.log.err("builder submitBlindedBlock failed: {}", .{err});
             return err;
         };
         defer self.allocator.free(response);
 
         // Parse the full execution payload from response
         const payload = try parseExecutionPayload(self.allocator, response);
-        std.log.debug("Builder: successfully unblinded block, block_hash={x}", .{
+        std.log.debug("builder unblinded block, block_hash={x}", .{
             payload.block_hash[0..4],
         });
         return payload;

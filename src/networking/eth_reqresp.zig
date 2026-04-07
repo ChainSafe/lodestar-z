@@ -98,7 +98,7 @@ pub const EthReqRespAdapter = struct {
             ssz_bytes,
             self.context,
         ) catch |err| {
-            log.warn("Handler error for {s}: {}", .{ method.name(), err });
+            log.debug("handler error for {s}: {}", .{ method.name(), err });
             return error.HandlerError;
         };
         defer req_resp_handler.freeResponseChunks(self.allocator, chunks);
@@ -120,7 +120,7 @@ pub const EthReqRespAdapter = struct {
                 chunk.context_bytes,
                 chunk.ssz_payload,
             ) catch |err| {
-                log.warn("Failed to encode response chunk: {}", .{err});
+                log.debug("failed to encode response chunk: {}", .{err});
                 return error.EncodeError;
             };
             total_len += encoded.len;

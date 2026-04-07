@@ -1026,7 +1026,7 @@ pub const ValidatorClient = struct {
         if (self.doppelganger_task) |*task| {
             _ = task.cancel(self.io) catch |err| switch (err) {
                 error.Canceled => {},
-                else => log.warn("doppelganger task exited during shutdown: {s}", .{@errorName(err)}),
+                else => log.debug("doppelganger task exited during shutdown: {s}", .{@errorName(err)}),
             };
             self.doppelganger_task = null;
         }
@@ -1047,7 +1047,7 @@ pub const ValidatorClient = struct {
         if (self.header_tracker_task) |*task| {
             _ = task.cancel(self.io) catch |err| switch (err) {
                 error.Canceled => {},
-                else => log.warn("chain header tracker task exited during shutdown: {s}", .{@errorName(err)}),
+                else => log.debug("chain header tracker task exited during shutdown: {s}", .{@errorName(err)}),
             };
             self.header_tracker_task = null;
         }
@@ -1082,7 +1082,7 @@ pub const ValidatorClient = struct {
         if (self.remote_signer_sync_task) |*task| {
             _ = task.cancel(self.io) catch |err| switch (err) {
                 error.Canceled => {},
-                else => log.warn("remote signer sync task exited during shutdown: {s}", .{@errorName(err)}),
+                else => log.debug("remote signer sync task exited during shutdown: {s}", .{@errorName(err)}),
             };
             self.remote_signer_sync_task = null;
         }
@@ -1283,7 +1283,7 @@ pub const ValidatorClient = struct {
         if (self.runtime_mutation_task) |*task| {
             _ = task.cancel(self.io) catch |err| switch (err) {
                 error.Canceled => {},
-                else => log.warn("runtime mutation task exited during shutdown: {s}", .{@errorName(err)}),
+                else => log.debug("runtime mutation task exited during shutdown: {s}", .{@errorName(err)}),
             };
             self.runtime_mutation_task = null;
         }

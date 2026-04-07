@@ -402,7 +402,7 @@ pub const ValidatorMonitor = struct {
         self.epoch_summaries.append(self.allocator, summary) catch {};
         self.last_processed_epoch = epoch;
 
-        std.log.info("validator_monitor: epoch {d} — {d} monitored, att_rate={d:.1}%, head={d:.1}%, balance_delta={d}", .{
+        std.log.info("validator monitor: epoch {d} — {d} monitored, att_rate={d:.1}%, head={d:.1}%, balance_delta={d}", .{
             epoch,
             summary.validators_monitored,
             summary.attestation_hit_rate * 100.0,

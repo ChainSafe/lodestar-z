@@ -326,7 +326,7 @@ pub const HttpServer = struct {
             if (prev >= max_concurrent_connections) {
                 const old_count = self.active_connections.fetchSub(1, .release);
                 self.notifyActiveConnectionsChanged(old_count - 1);
-                log.warn("connection limit reached ({d}), rejecting new connection", .{max_concurrent_connections});
+                log.debug("connection limit reached ({d}), rejecting new connection", .{max_concurrent_connections});
                 // Send a minimal 503 response before closing.
                 var reject_buf: [128]u8 = undefined;
                 var reject_writer = stream.writer(io, &reject_buf);
@@ -388,7 +388,7 @@ pub const HttpServer = struct {
             var request = server.receiveHead() catch |err| switch (err) {
                 error.HttpConnectionClosing => return,
                 else => {
-                    log.err("receive head failed: {s}", .{@errorName(err)});
+                    log.debug("receive head failed: {s}", .{@errorName(err)});
                     return;
                 },
             };

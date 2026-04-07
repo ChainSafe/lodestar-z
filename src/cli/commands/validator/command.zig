@@ -162,7 +162,7 @@ pub fn run(io: Io, allocator: Allocator, opts: anytype) !void {
         watch_ctx.done.store(true, .release);
         _ = watcher.cancel(io) catch |err| switch (err) {
             error.Canceled => {},
-            else => std.log.warn("validator shutdown watcher exited during shutdown: {s}", .{@errorName(err)}),
+            else => std.log.debug("validator shutdown watcher exited during shutdown: {s}", .{@errorName(err)}),
         };
     }
 
@@ -217,7 +217,7 @@ pub fn run(io: Io, allocator: Allocator, opts: anytype) !void {
     };
     if (prepared.keymanager) |keymanager_config| {
         if (!keymanager_config.proposer_config_write_enabled) {
-            std.log.warn(
+            std.log.info(
                 "Validator keymanager proposer policy writes are disabled while --proposerSettingsFile owns proposer settings",
                 .{},
             );

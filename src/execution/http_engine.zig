@@ -282,10 +282,10 @@ pub const HttpEngine = struct {
         const old = self.state;
         self.state = new_state;
         switch (new_state) {
-            .online => std.log.info("Engine API: EL came online (was {s})", .{@tagName(old)}),
-            .offline => std.log.warn("Engine API: EL went offline (was {s})", .{@tagName(old)}),
-            .syncing => std.log.warn("Engine API: EL is syncing (was {s})", .{@tagName(old)}),
-            .auth_failed => std.log.err("Engine API: JWT authentication failed (was {s})", .{@tagName(old)}),
+            .online => std.log.info("execution engine came online (was {s})", .{@tagName(old)}),
+            .offline => std.log.warn("execution engine went offline (was {s})", .{@tagName(old)}),
+            .syncing => std.log.warn("execution engine is syncing (was {s})", .{@tagName(old)}),
+            .auth_failed => std.log.err("execution engine JWT authentication failed (was {s})", .{@tagName(old)}),
         }
     }
 
@@ -341,7 +341,7 @@ pub const HttpEngine = struct {
 
                 const backoff_ms = self.retry_config.initial_backoff_ms *
                     (@as(u64, 1) << @intCast(attempt - 1));
-                std.log.debug("Engine API: retrying request (attempt {d}/{d}) after {d}ms", .{
+                std.log.debug("execution engine retrying request (attempt {d}/{d}) after {d}ms", .{
                     attempt + 1, max_attempts, backoff_ms,
                 });
                 // Sleep if Io available; in tests without Io, skip sleep.
@@ -357,7 +357,7 @@ pub const HttpEngine = struct {
                 return response;
             } else |err| {
                 // Transport error — check if we should retry.
-                std.log.debug("Engine API: transport error on attempt {d}: {}", .{ attempt + 1, err });
+                std.log.debug("execution engine transport error on attempt {d}: {}", .{ attempt + 1, err });
                 if (attempt + 1 >= max_attempts) {
                     self.updateState(.offline);
                     return err;
@@ -524,7 +524,7 @@ pub const HttpEngine = struct {
             };
         }
 
-        std.log.debug("Engine API: EL client version: code={s} name={s} version={s}", .{
+        std.log.debug("execution engine client version: code={s} name={s} version={s}", .{
             if (result.len > 0) result[0].code else "?",
             if (result.len > 0) result[0].name else "?",
             if (result.len > 0) result[0].version else "?",

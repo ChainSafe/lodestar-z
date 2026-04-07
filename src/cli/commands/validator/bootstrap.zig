@@ -156,7 +156,7 @@ pub fn prepareRuntime(io: Io, allocator: Allocator, opts: anytype) !PreparedRunt
     var custom_beacon_config: BeaconConfig = undefined;
     const base_beacon_config = loadBeaconConfig(network);
     const beacon_config: *const BeaconConfig = if (params_file) |config_path| blk: {
-        std.log.info("Loading custom network config from: {s}", .{config_path});
+        std.log.info("loading custom network config from {s}", .{config_path});
         var arena = std.heap.ArenaAllocator.init(allocator);
         defer arena.deinit();
         const config_bytes = readFileAlloc(io, allocator, config_path) catch |err| {
@@ -804,7 +804,7 @@ fn waitForGenesis(
         const genesis = beacon_api.getGenesis(io) catch |err| {
             attempts += 1;
             if (attempts == 1 or attempts % 12 == 0) {
-                std.log.warn("Waiting for beacon genesis from {s}: {s}", .{ beacon_url, @errorName(err) });
+                std.log.info("Waiting for beacon genesis from {s}: {s}", .{ beacon_url, @errorName(err) });
             }
             try io.sleep(.{ .nanoseconds = 5 * std.time.ns_per_s }, .real);
             continue;

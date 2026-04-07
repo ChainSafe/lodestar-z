@@ -425,7 +425,7 @@ pub const SyncChain = struct {
             if (err == error.ProcessingPending) {
                 return;
             }
-            std.log.warn("SyncChain: failed to import segment {d}..{d}: {}", .{
+            std.log.debug("sync chain: failed to import segment {d}..{d}: {}", .{
                 front.start_slot,
                 front.endSlot(),
                 err,

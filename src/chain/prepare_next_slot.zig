@@ -88,7 +88,7 @@ pub const PrepareNextSlot = struct {
 
         // Find the head state.
         const head_state = self.block_state_cache.get(head_state_root) orelse {
-            std.log.debug("PrepareNextSlot: head state not in cache (slot {d})", .{current_slot});
+            std.log.debug("prepare next slot: head state not in cache at slot {d}", .{current_slot});
             return;
         };
 
@@ -129,7 +129,7 @@ pub const PrepareNextSlot = struct {
         }
 
         self.last_prepared_slot = target_slot;
-        std.log.debug("PrepareNextSlot: pre-computed state for slot {d}", .{target_slot});
+        std.log.debug("prepare next slot: pre-computed state for slot {d}", .{target_slot});
     }
 
     /// Reset the last-prepared tracker (call on chain reorg or resync).

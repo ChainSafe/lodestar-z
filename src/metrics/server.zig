@@ -105,7 +105,7 @@ pub fn Server(comptime SurfaceType: type, comptime server_label: []const u8) typ
                 };
 
                 self.handleConnection(io, stream) catch |err| {
-                    log.err("connection error: {s}", .{@errorName(err)});
+                    log.debug("connection error: {s}", .{@errorName(err)});
                 };
             }
         }

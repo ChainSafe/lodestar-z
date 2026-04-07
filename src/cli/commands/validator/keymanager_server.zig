@@ -155,7 +155,7 @@ pub const Runtime = struct {
         if (self.task) |*task| {
             _ = task.cancel(self.io) catch |err| switch (err) {
                 error.Canceled => {},
-                else => std.log.warn("validator keymanager task exited during shutdown: {s}", .{@errorName(err)}),
+                else => std.log.debug("validator keymanager task exited during shutdown: {s}", .{@errorName(err)}),
             };
             self.task = null;
         }

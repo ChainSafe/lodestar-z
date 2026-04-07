@@ -102,7 +102,7 @@ pub const ReprocessQueue = struct {
         self.total_count += 1;
         self.metrics.queued_total += 1;
 
-        std.log.debug("ReprocessQueue: queued block root={s}... (reason={s}, total={d})", .{
+        std.log.debug("reprocess queue: queued block root={s}... (reason={s}, total={d})", .{
             &std.fmt.bytesToHex(block.block_root[0..4], .lower),
             @tagName(block.reason),
             self.total_count,
@@ -123,7 +123,7 @@ pub const ReprocessQueue = struct {
             result = kv.value;
             self.total_count -= @intCast(result.items.len);
             self.metrics.released_total += @intCast(result.items.len);
-            std.log.debug("ReprocessQueue: reprocessing {d} blocks (parent={s}...)", .{
+            std.log.debug("reprocess queue: released {d} block(s) for parent {s}...", .{
                 result.items.len,
                 &std.fmt.bytesToHex(imported_root[0..4], .lower),
             });

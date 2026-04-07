@@ -270,7 +270,7 @@ pub const ArchiveStore = struct {
         if (state_archive.last_archived_epoch) |epoch| {
             self.last_archived_state_epoch = epoch;
         }
-        std.log.debug("ArchiveStore: archived slots {d}..{d} (epoch {d})", .{
+        std.log.debug("archive: archived slots {d}..{d} at epoch {d}", .{
             from_slot, to_slot, checkpoint.epoch,
         });
         return .{
@@ -325,7 +325,7 @@ pub const ArchiveStore = struct {
             // Prune from hot DB if configured.
             if (self.config.prune_hot_blocks_after_archive) {
                 self.db.deleteBlock(root) catch |err| {
-                    std.log.warn("ArchiveStore: failed to delete hot block slot={d}: {}", .{ slot, err });
+                    std.log.warn("archive: failed to delete hot block at slot {d}: {}", .{ slot, err });
                 };
             }
         }
@@ -340,7 +340,7 @@ pub const ArchiveStore = struct {
         state_root: Root,
     ) !void {
         const cached = self.state_regen.block_cache.get(state_root) orelse {
-            std.log.debug("ArchiveStore: state not in cache for slot {d}", .{slot});
+            std.log.debug("archive: state not in cache for slot {d}", .{slot});
             return;
         };
         const bytes = try cached.state.serialize(self.allocator);
@@ -351,7 +351,7 @@ pub const ArchiveStore = struct {
             try self.db.putChainInfoU64(.archive_state_epoch, epoch);
             self.last_archived_state_epoch = epoch;
         }
-        std.log.debug("ArchiveStore: archived state at slot {d}", .{slot});
+        std.log.debug("archive: archived state at slot {d}", .{slot});
     }
 
     // -----------------------------------------------------------------------
@@ -427,7 +427,7 @@ pub const ArchiveStore = struct {
             } else |err| switch (err) {
                 error.MissingFinalizedStateArchiveSource => {
                     std.log.debug(
-                        "ArchiveStore: stopping state snapshot backfill at epoch {d}: {}",
+                        "archive: stopping state snapshot backfill at epoch {d}: {}",
                         .{ next_epoch, err },
                     );
                     break;
@@ -624,7 +624,7 @@ pub const ArchiveStore = struct {
         try self.db.putBlobSidecarsArchive(slot, blob_bytes);
         if (self.config.prune_hot_blobs_after_archive) {
             self.db.deleteBlobSidecars(root) catch |err| {
-                std.log.warn("ArchiveStore: failed to delete hot blob sidecars slot={d}: {}", .{ slot, err });
+                std.log.warn("archive: failed to delete hot blob sidecars at slot {d}: {}", .{ slot, err });
             };
         }
     }
@@ -635,7 +635,7 @@ pub const ArchiveStore = struct {
             try self.db.putDataColumnSidecarsArchive(slot, columns_bytes);
             if (self.config.prune_hot_data_columns_after_archive) {
                 self.db.deleteDataColumnSidecars(root) catch |err| {
-                    std.log.warn("ArchiveStore: failed to delete hot data column sidecars slot={d}: {}", .{ slot, err });
+                    std.log.warn("archive: failed to delete hot data column sidecars at slot {d}: {}", .{ slot, err });
                 };
             }
         }
@@ -648,7 +648,7 @@ pub const ArchiveStore = struct {
             try self.db.putDataColumnArchive(slot, column_index, column_bytes);
             if (self.config.prune_hot_data_columns_after_archive) {
                 self.db.deleteDataColumn(root, column_index) catch |err| {
-                    std.log.warn("ArchiveStore: failed to delete hot data column slot={d} index={d}: {}", .{
+                    std.log.warn("archive: failed to delete hot data column at slot {d} index {d}: {}", .{
                         slot,
                         column_index,
                         err,

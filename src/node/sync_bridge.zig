@@ -74,7 +74,7 @@ pub const SyncCallbackCtx = struct {
 
         const result = node.ingestRawBlockBytes(block_bytes, .unknown_block_sync) catch |err| {
             if (err != error.AlreadyKnown and err != error.WouldRevertFinalizedSlot) {
-                std.log.warn("SyncCallbackCtx: import error: {}", .{err});
+                std.log.debug("sync callback import error: {}", .{err});
             }
             return err;
         };
@@ -120,7 +120,7 @@ pub const SyncCallbackCtx = struct {
     ) void {
         const ctx: *SyncCallbackCtx = @ptrCast(@alignCast(ptr));
         if (ctx.pending_count >= 32) {
-            std.log.warn("SyncCallbackCtx: pending request queue full, dropping batch {d}", .{batch_id});
+            std.log.warn("sync callback pending request queue full, dropping batch {d}", .{batch_id});
             return;
         }
         var req = PendingBatchRequest{
@@ -144,7 +144,7 @@ pub const SyncCallbackCtx = struct {
     fn syncRequestBlockByRoot(ptr: *anyopaque, root: [32]u8, peer_id: []const u8) void {
         const ctx: *SyncCallbackCtx = @ptrCast(@alignCast(ptr));
         if (ctx.pending_by_root_count >= 32) {
-            std.log.warn("SyncCallbackCtx: by-root queue full, dropping root {x:0>2}{x:0>2}{x:0>2}{x:0>2}...", .{
+            std.log.warn("sync callback by-root queue full, dropping root {x:0>2}{x:0>2}{x:0>2}{x:0>2}...", .{
                 root[0], root[1], root[2], root[3],
             });
             return;

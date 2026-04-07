@@ -445,7 +445,7 @@ pub const Service = struct {
                 data.beacon_block_root,
                 data.target.epoch,
             ) catch |err| {
-                std.log.warn("FC onAggregate failed for validator {d} slot {d}: {}", .{
+                std.log.debug("fork choice aggregate vote update failed for validator {d} at slot {d}: {}", .{
                     validator_index, data.slot, err,
                 });
             };

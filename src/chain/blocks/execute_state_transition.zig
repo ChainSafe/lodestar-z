@@ -170,7 +170,7 @@ pub fn executeStateTransition(
     const expected_root = block.stateRoot().*;
     const expected_is_zero = std.mem.allEqual(u8, &expected_root, 0);
     if (!expected_is_zero and !std.mem.eql(u8, &state_root, &expected_root)) {
-        std.log.warn("State root mismatch at slot {d}: computed={s}... expected={s}...", .{
+        std.log.debug("state root mismatch at slot {d}: computed={s}... expected={s}...", .{
             block_slot,
             &std.fmt.bytesToHex(state_root[0..8], .lower),
             &std.fmt.bytesToHex(expected_root[0..8], .lower),

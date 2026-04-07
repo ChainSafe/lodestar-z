@@ -593,10 +593,10 @@ fn openReqRespRequest(
 fn bootstrapBootnodes(self: *BeaconNode, io: std.Io, svc: *networking.P2pService) void {
     if (self.bootstrap_peers.len == 0) return;
 
-    std.log.info("Dialing {d} bootstrap peer(s)...", .{self.bootstrap_peers.len});
+    std.log.info("dialing {d} bootstrap peer(s)", .{self.bootstrap_peers.len});
     for (self.bootstrap_peers) |enr_str| {
         dialBootnodeEnr(self, io, svc, enr_str) catch |err| {
-            std.log.warn("Failed to dial bootnode: {}", .{err});
+            std.log.warn("failed to dial bootstrap peer: {}", .{err});
         };
     }
 }
@@ -1060,7 +1060,7 @@ fn maybeHandleForkTransition(self: *BeaconNode, svc: *networking.P2pService) voi
     if (!std.mem.eql(u8, &self.last_active_fork_digest, &[4]u8{ 0, 0, 0, 0 })) {
         const last_digest_hex = std.fmt.bytesToHex(&self.last_active_fork_digest, .lower);
         const current_digest_hex = std.fmt.bytesToHex(&current_digest, .lower);
-        std.log.info("Fork transition detected at slot {d}: {s} -> {s}", .{
+        std.log.info("fork transition detected at slot {d}: {s} -> {s}", .{
             head_slot,
             &last_digest_hex,
             &current_digest_hex,
@@ -1424,10 +1424,7 @@ fn dialBootnodeEnr(self: *BeaconNode, io: std.Io, svc: *networking.P2pService, e
     const peer_addr = try Multiaddr.fromString(self.allocator, ma_str);
     defer peer_addr.deinit();
 
-    const peer_id = svc.dial(io, peer_addr) catch |err| {
-        std.log.warn("Bootnode dial failed: {}", .{err});
-        return err;
-    };
+    const peer_id = svc.dial(io, peer_addr) catch |err| return err;
     std.log.debug("Connected to bootnode, peer_id: {s}", .{peer_id});
     _ = registerConnectedPeer(
         self,
@@ -1494,7 +1491,7 @@ fn initDiscoveryService(self: *BeaconNode) !void {
     self.discovery_service = ds;
     try refreshApiNodeIdentityFromDiscovery(self, ds);
 
-    std.log.info("Discovery service initialized (known_peers={d})", .{ds.knownPeerCount()});
+    std.log.info("discovery service initialized (known_peers={d})", .{ds.knownPeerCount()});
 }
 
 fn refreshApiNodeIdentityFromDiscovery(self: *BeaconNode, ds: *DiscoveryService) !void {
@@ -1621,7 +1618,7 @@ fn dialDiscoveredPeers(
 
         if (discoveryIdentityKnown(.{ .node_id = peer.node_id, .pubkey = peer.pubkey })) {
             predicted_peer_id = discoveryPeerIdTextFromPubkey(self.allocator, peer.pubkey) catch |err| {
-                std.log.warn("Failed to derive peer ID from discovered ENR: {}", .{err});
+                std.log.debug("Failed to derive peer ID from discovered ENR: {}", .{err});
                 continue;
             };
 
@@ -1646,7 +1643,7 @@ fn dialDiscoveredPeers(
         if (pm) |peer_manager| {
             if (predicted_peer_id) |known_peer_id| {
                 peer_manager.onDialing(known_peer_id, now_ms) catch |err| {
-                    std.log.warn("Failed to mark discovered peer {s} as dialing: {}", .{ known_peer_id, err });
+                    std.log.debug("Failed to mark discovered peer {s} as dialing: {}", .{ known_peer_id, err });
                     continue;
                 };
             }
@@ -1688,9 +1685,9 @@ fn reconcilePeerConnections(self: *BeaconNode, io: std.Io, svc: *networking.P2pS
     const pm = self.peer_manager orelse return false;
 
     const connected_peer_ids = svc.snapshotConnectedPeerIds(self.allocator) catch |err| {
-        std.log.warn("Failed to snapshot connected peers: {}", .{err});
-        return false;
-    };
+            std.log.debug("Failed to snapshot connected peers: {}", .{err});
+            return false;
+        };
     defer freeOwnedPeerIds(self.allocator, connected_peer_ids);
 
     var did_work = false;
@@ -1732,7 +1729,7 @@ fn reconcilePeerConnections(self: *BeaconNode, io: std.Io, svc: *networking.P2pS
     }
 
     const managed_peer_ids = pm.getConnectedPeerIds() catch |err| {
-        std.log.warn("Failed to snapshot peer-manager peers: {}", .{err});
+        std.log.debug("Failed to snapshot peer-manager peers: {}", .{err});
         return did_work;
     };
     defer freeOwnedPeerIds(self.allocator, managed_peer_ids);
@@ -1764,12 +1761,12 @@ fn registerConnectedPeer(
     if (discovery_identity) |identity| {
         if (discoveryIdentityKnown(identity)) {
             const matches = discoveryPeerIdMatches(self.allocator, peer_id, identity.pubkey) catch |err| {
-                std.log.warn("Failed to verify discovered ENR identity for peer {s}: {}", .{ peer_id, err });
+                std.log.debug("Failed to verify discovered ENR identity for peer {s}: {}", .{ peer_id, err });
                 _ = svc.disconnectPeer(io, peer_id);
                 return true;
             };
             if (!matches) {
-                std.log.warn("Discovered ENR identity did not match connected peer {s}; dropping connection", .{peer_id});
+                std.log.debug("Discovered ENR identity did not match connected peer {s}; dropping connection", .{peer_id});
                 _ = svc.disconnectPeer(io, peer_id);
                 return true;
             }
@@ -1788,7 +1785,7 @@ fn registerConnectedPeer(
 
     const connect_direction = if (existing) |peer| peer.direction orelse direction else direction;
     const connected = pm.onPeerConnected(peer_id, connect_direction, now_ms) catch |err| {
-        std.log.warn("Failed to register connected peer {s}: {}", .{ peer_id, err });
+        std.log.debug("Failed to register connected peer {s}: {}", .{ peer_id, err });
         return false;
     };
     if (connected == null) {
@@ -1798,7 +1795,7 @@ fn registerConnectedPeer(
 
     if (discovery_identity) |identity| {
         pm.updatePeerDiscoveryNodeId(peer_id, identity.node_id) catch |err| {
-            std.log.warn("Failed to record discovery node ID for peer {s}: {}", .{ peer_id, err });
+            std.log.debug("Failed to record discovery node ID for peer {s}: {}", .{ peer_id, err });
         };
     }
 
@@ -1835,7 +1832,7 @@ fn completePeerHandshake(
     applyPeerMetadata(self, peer_id, metadata, currentUnixTimeMs(io));
 
     svc.openGossipsubStream(io, peer_id) catch |err| {
-        std.log.warn("Failed to open outbound gossipsub stream to {s}: {}", .{ peer_id, err });
+        std.log.debug("Failed to open outbound gossipsub stream to {s}: {}", .{ peer_id, err });
     };
     return true;
 }
@@ -1851,7 +1848,7 @@ fn maybeRecordPeerIdentity(
 
     const identify_result = svc.identifyResult(peer_id) orelse return false;
     pm.updateAgentVersion(peer_id, identify_result.agentVersion()) catch |err| {
-        std.log.warn("Failed to record identify result for peer {s}: {}", .{ peer_id, err });
+        std.log.debug("Failed to record identify result for peer {s}: {}", .{ peer_id, err });
         return false;
     };
     return true;
@@ -1866,7 +1863,7 @@ fn applyPeerMetadata(self: *BeaconNode, peer_id: []const u8, metadata: PeerMetad
         syncnetsFromMetadata(metadata.metadata.syncnets.data),
         metadata.custody_group_count,
     ) catch |err| {
-        std.log.warn("Failed to update metadata for peer {s}: {}", .{ peer_id, err });
+        std.log.debug("Failed to update metadata for peer {s}: {}", .{ peer_id, err });
         return;
     };
     pm.notePeerSeen(peer_id, now_ms);
@@ -3197,7 +3194,7 @@ fn maybePrepareProposerPayload(self: *BeaconNode, io: std.Io) void {
         &.{},
         head_root,
     ) catch |err| {
-        std.log.warn("W7: preparePayload failed for slot {d}: {}", .{ next_slot, err });
+        std.log.warn("preparePayload failed for slot {d}: {}", .{ next_slot, err });
     };
 }
 

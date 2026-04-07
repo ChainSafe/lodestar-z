@@ -523,7 +523,7 @@ pub const PeerManager = struct {
         now_ms: u64,
     ) !void {
         try self.db.banPeer(peer_id, duration, now_ms);
-        log.info("Peer banned {s} duration={d}s", .{
+        log.info("peer banned {s} duration={d}s", .{
             peer_id,
             duration.seconds(),
         });

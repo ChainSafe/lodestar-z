@@ -9,5 +9,5 @@ pub fn run(opts: anytype) !void {
         return error.MissingValue;
     }
 
-    std.log.info("Light client CLI surface is wired, runtime is not yet implemented.", .{});
+    std.log.warn("light client CLI surface is wired, but the runtime is not yet implemented", .{});
 }

@@ -117,7 +117,7 @@ fn makeProtocolHandler(
                 self.context,
                 &response_writer,
             ) catch |err| {
-                log.warn("{s} handler error: {}", .{ id, err });
+                log.debug("{s} handler error: {}", .{ id, err });
                 notifyRequestCompleted(self.context, io, method, started_ns, .internal_error);
                 try response_writer.writeError(.server_error, "Internal server error");
                 stream.closeWrite(io);

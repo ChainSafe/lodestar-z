@@ -579,7 +579,7 @@ pub const GossipHandler = struct {
         // Fallback: inline processing.
         if (self.importResolvedAttestationFn) |importFn| {
             importFn(self.node, &attestation, &resolved) catch |err| {
-                std.log.warn("Attestation import failed for slot {d}: {}", .{ data.slot, err });
+                std.log.debug("attestation import failed for slot {d}: {}", .{ data.slot, err });
             };
         }
     }
@@ -684,7 +684,7 @@ pub const GossipHandler = struct {
         // Fallback: inline processing.
         if (self.importResolvedAggregateFn) |importFn| {
             importFn(self.node, &signed_aggregate, &resolved) catch |err| {
-                std.log.warn("Aggregate import failed for aggregator {d}: {}", .{ signed_aggregate.aggregatorIndex(), err });
+                std.log.debug("aggregate import failed for aggregator {d}: {}", .{ signed_aggregate.aggregatorIndex(), err });
             };
             return;
         }
@@ -748,7 +748,7 @@ pub const GossipHandler = struct {
         // Fallback: inline processing.
         if (self.importVoluntaryExitFn) |importFn| {
             importFn(self.node, &signed_exit) catch |err| {
-                std.log.warn("Voluntary exit import failed for validator {d}: {}", .{ exit.validator_index, err });
+                std.log.debug("voluntary exit import failed for validator {d}: {}", .{ exit.validator_index, err });
             };
         }
 
@@ -818,7 +818,7 @@ pub const GossipHandler = struct {
         // Fallback: inline processing.
         if (self.importProposerSlashingFn) |importFn| {
             importFn(self.node, &slashing) catch |err| {
-                std.log.warn("Proposer slashing import failed for proposer {d}: {}", .{ ps.proposer_index, err });
+                std.log.debug("proposer slashing import failed for proposer {d}: {}", .{ ps.proposer_index, err });
             };
         }
 
@@ -887,7 +887,7 @@ pub const GossipHandler = struct {
         // Fallback: inline processing.
         if (self.importAttesterSlashingFn) |importFn| {
             importFn(self.node, &slashing) catch |err| {
-                std.log.warn("Attester slashing import failed: {}", .{err});
+                std.log.debug("attester slashing import failed: {}", .{err});
             };
         }
 
@@ -951,7 +951,7 @@ pub const GossipHandler = struct {
         // Fallback: inline processing.
         if (self.importBlsChangeFn) |importFn| {
             importFn(self.node, &signed_change) catch |err| {
-                std.log.warn("BLS change import failed for validator {d}: {}", .{ change.validator_index, err });
+                std.log.debug("BLS change import failed for validator {d}: {}", .{ change.validator_index, err });
             };
         }
 
@@ -1009,7 +1009,7 @@ pub const GossipHandler = struct {
         // Fallback: inline processing.
         if (self.importSyncContributionFn) |importFn| {
             importFn(self.node, &signed_contribution) catch |err| {
-                std.log.warn("Sync contribution import failed: {}", .{err});
+                std.log.debug("sync contribution import failed: {}", .{err});
             };
         }
 
@@ -1084,7 +1084,7 @@ pub const GossipHandler = struct {
         // Fallback: inline processing.
         if (self.importSyncCommitteeMessageFn) |importFn| {
             importFn(self.node, &sync_message, subnet_id) catch |err| {
-                std.log.warn("Sync committee message import failed: {}", .{err});
+                std.log.debug("sync committee message import failed: {}", .{err});
             };
         }
 
@@ -1147,7 +1147,7 @@ pub const GossipHandler = struct {
         // Phase 2: hand off to chain DA ingress.
         if (self.importBlobSidecarFn) |importFn| {
             importFn(self.node, ssz_bytes) catch |err| {
-                std.log.warn("Blob sidecar import failed: {}", .{err});
+                std.log.debug("blob sidecar import failed: {}", .{err});
             };
         }
 
@@ -1200,7 +1200,7 @@ pub const GossipHandler = struct {
 
         if (self.importDataColumnSidecarFn) |importFn| {
             importFn(self.node, ssz_bytes) catch |err| {
-                std.log.warn("Data column sidecar import failed: {}", .{err});
+                std.log.debug("data column sidecar import failed: {}", .{err});
             };
         }
 

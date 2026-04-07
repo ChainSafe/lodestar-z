@@ -249,7 +249,7 @@ pub const DiscoveryService = struct {
         if (!std.mem.eql(u8, &self.config.secret_key, &([_]u8{0} ** 32))) {
             self.rebuildLocalEnrWithForkDigest() catch {};
         }
-        log.info("ENR updated: fork_digest={x:0>2}{x:0>2}{x:0>2}{x:0>2} seq={d}", .{
+        log.debug("ENR updated: fork_digest={x:0>2}{x:0>2}{x:0>2}{x:0>2} seq={d}", .{
             fork_digest[0], fork_digest[1], fork_digest[2], fork_digest[3], self.service.localEnrSeq(),
         });
     }
@@ -261,7 +261,7 @@ pub const DiscoveryService = struct {
         for (self.config.bootnodes) |enr_str| {
             if (self.decodeAndInsertEnr(enr_str)) seeded += 1;
         }
-        log.info("Seeded routing table with {d} bootnodes ({d} known peers total)", .{
+        log.info("seeded routing table with {d} bootnodes ({d} known peers total)", .{
             seeded, self.knownPeerCount(),
         });
     }
@@ -503,7 +503,7 @@ pub const DiscoveryService = struct {
             .subnet_id = subnet_id,
             .min_peers = min_peers,
         }) catch {
-            log.warn("Failed to queue {s} subnet query for subnet {d}", .{ @tagName(kind), subnet_id });
+            log.debug("failed to queue {s} subnet query for subnet {d}", .{ @tagName(kind), subnet_id });
         };
     }
 
@@ -512,7 +512,7 @@ pub const DiscoveryService = struct {
             .column_index = column_index,
             .min_peers = min_peers,
         }) catch {
-            log.warn("Failed to queue custody query for column {d}", .{column_index});
+            log.debug("failed to queue custody query for column {d}", .{column_index});
         };
     }
 

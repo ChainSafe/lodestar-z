@@ -2262,7 +2262,7 @@ fn importAttestationBatchItems(node: *BeaconNode, items: []AttestationWork, batc
             if (node.gossip_handler) |gh| {
                 if (gh.verifyAttestationSignatureFn) |verifyFn| {
                     if (!verifyFn(gh.node, &attestation, &item.resolved)) {
-                        std.log.warn("Attestation BLS failed in batch fallback slot={d}", .{attestation.slot()});
+                        std.log.debug("attestation BLS failed in batch fallback at slot {d}", .{attestation.slot()});
                         continue;
                     }
                 }
@@ -2273,7 +2273,7 @@ fn importAttestationBatchItems(node: *BeaconNode, items: []AttestationWork, batc
         const importFn = gh.importResolvedAttestationFn orelse continue;
 
         importFn(gh.node, &attestation, &item.resolved) catch |err| {
-            std.log.warn("Processor: attestation import failed for slot {d}: {}", .{
+            std.log.debug("processor attestation import failed for slot {d}: {}", .{
                 attestation.slot(), err,
             });
         };
@@ -2290,7 +2290,7 @@ fn importAggregateBatchItems(node: *BeaconNode, items: []AggregateWork, batch_va
             if (node.gossip_handler) |gh| {
                 if (gh.verifyAggregateSignatureFn) |verifyFn| {
                     if (!verifyFn(gh.node, &aggregate, &item.resolved)) {
-                        std.log.warn("Aggregate BLS failed in batch fallback slot={d}", .{
+                        std.log.debug("aggregate BLS failed in batch fallback at slot {d}", .{
                             aggregate.attestation().slot(),
                         });
                         continue;
@@ -2302,7 +2302,7 @@ fn importAggregateBatchItems(node: *BeaconNode, items: []AggregateWork, batch_va
         if (node.gossip_handler) |gh| {
             if (gh.importResolvedAggregateFn) |importFn| {
                 importFn(gh.node, &aggregate, &item.resolved) catch |err| {
-                    std.log.warn("Processor: aggregate import failed slot={d}: {}", .{
+                    std.log.debug("processor aggregate import failed at slot {d}: {}", .{
                         aggregate.attestation().slot(),
                         err,
                     });
@@ -2322,7 +2322,7 @@ fn importSyncMessageBatchItems(
             const gh = node.gossip_handler orelse continue;
             if (gh.verifySyncCommitteeSignatureFn != null) {
                 if (!gossip_node_callbacks_mod.verifySyncCommitteeMessage(gh.node, &item.message)) {
-                    std.log.warn("Sync committee message BLS failed in batch fallback slot={d}", .{
+                    std.log.debug("sync committee message BLS failed in batch fallback at slot {d}", .{
                         item.message.slot,
                     });
                     continue;
@@ -2547,7 +2547,7 @@ pub fn processorHandlerCallback(item: WorkItem, context: *anyopaque) void {
                 0;
             const accepted = node.chainService().acceptGossipBlock(work.block, seen_timestamp_sec) catch |err| {
                 work.block.deinit(node.allocator);
-                std.log.warn("Processor: gossip block ingress failed: {}", .{err});
+                std.log.debug("processor gossip block ingress failed: {}", .{err});
                 return;
             };
 
@@ -2557,7 +2557,7 @@ pub fn processorHandlerCallback(item: WorkItem, context: *anyopaque) void {
             };
 
             const maybe_result = node.completeReadyIngress(ready, null) catch |err| {
-                std.log.warn("Processor: gossip block import failed: {}", .{err});
+                std.log.debug("processor gossip block import failed: {}", .{err});
                 return;
             };
             if (maybe_result) |result| {
@@ -2622,7 +2622,7 @@ pub fn processorHandlerCallback(item: WorkItem, context: *anyopaque) void {
             if (node.gossip_handler) |gh| {
                 if (gh.verifyAggregateSignatureFn) |verifyFn| {
                     if (!verifyFn(gh.node, &work.aggregate, &work.resolved)) {
-                        std.log.warn("Single aggregate BLS failed aggregator={d}", .{work.aggregate.aggregatorIndex()});
+                        std.log.debug("single aggregate BLS failed for aggregator {d}", .{work.aggregate.aggregatorIndex()});
                         work.resolved.deinit(node.allocator);
                         var aggregate = work.aggregate;
                         aggregate.deinit(node.allocator);
@@ -2642,13 +2642,13 @@ pub fn processorHandlerCallback(item: WorkItem, context: *anyopaque) void {
             if (node.gossip_handler) |gh| {
                 if (gh.verifyAttestationSignatureFn) |verifyFn| {
                     if (!verifyFn(gh.node, &attestation, &att_work.resolved)) {
-                        std.log.warn("Single attestation BLS failed slot={d}", .{attestation.slot()});
+                        std.log.debug("single attestation BLS failed at slot {d}", .{attestation.slot()});
                         return;
                     }
                 }
                 const importFn = gh.importResolvedAttestationFn orelse return;
                 importFn(gh.node, &attestation, &att_work.resolved) catch |err| {
-                    std.log.warn("Processor: attestation import failed for slot {d}: {}", .{
+                    std.log.debug("processor attestation import failed for slot {d}: {}", .{
                         attestation.slot(), err,
                     });
                 };
@@ -2679,7 +2679,7 @@ pub fn processorHandlerCallback(item: WorkItem, context: *anyopaque) void {
             if (node.gossip_handler) |gh| {
                 if (gh.verifySyncCommitteeSignatureFn != null) {
                     if (!gossip_node_callbacks_mod.verifySyncCommitteeMessage(gh.node, &work.message)) {
-                        std.log.warn("Single sync committee message BLS failed validator={d} slot={d}", .{
+                        std.log.debug("single sync committee message BLS failed for validator {d} at slot {d}", .{
                             work.message.validator_index,
                             work.message.slot,
                         });
@@ -2716,7 +2716,7 @@ fn handleQueuedAggregate(node: *BeaconNode, work: processor_mod.work_item.Aggreg
     defer work.resolved.deinit(node.allocator);
 
     importFn(gh.node, &aggregate, &work.resolved) catch |err| {
-        std.log.warn("Processor: aggregate import failed for aggregator {d}: {}", .{
+        std.log.debug("processor aggregate import failed for aggregator {d}: {}", .{
             aggregate.aggregatorIndex(), err,
         });
     };
@@ -2731,7 +2731,7 @@ fn handleQueuedVoluntaryExit(node: *BeaconNode, work: processor_mod.work_item.Vo
     };
 
     importFn(gh.node, &work.exit) catch |err| {
-        std.log.warn("Processor: voluntary exit import failed for validator {d}: {}", .{
+        std.log.debug("processor voluntary exit import failed for validator {d}: {}", .{
             work.exit.message.validator_index, err,
         });
     };
@@ -2749,7 +2749,7 @@ fn handleQueuedAttesterSlashingTyped(
     };
 
     importFn(gh.node, slashing) catch |err| {
-        std.log.warn("Processor: attester slashing import failed: {}", .{err});
+        std.log.debug("processor attester slashing import failed: {}", .{err});
     };
 }
 
@@ -2765,7 +2765,7 @@ fn handleQueuedProposerSlashing(
     };
 
     importFn(gh.node, &work.slashing) catch |err| {
-        std.log.warn("Processor: proposer slashing import failed: {}", .{err});
+        std.log.debug("processor proposer slashing import failed: {}", .{err});
     };
 }
 
@@ -2790,7 +2790,7 @@ fn handleQueuedBlsChange(
     };
 
     importFn(gh.node, &work.change) catch |err| {
-        std.log.warn("Processor: BLS change import failed: {}", .{err});
+        std.log.debug("processor BLS change import failed: {}", .{err});
     };
 }
 
@@ -2806,7 +2806,7 @@ fn handleQueuedSyncContribution(
     };
 
     importFn(gh.node, &work.signed_contribution) catch |err| {
-        std.log.warn("Processor: sync contribution import failed: {}", .{err});
+        std.log.debug("processor sync contribution import failed: {}", .{err});
     };
 }
 
@@ -2828,7 +2828,7 @@ fn handleQueuedBlobSidecar(
     defer work.data.deinit();
 
     importFn(gh.node, queued.ssz_bytes) catch |err| {
-        std.log.warn("Processor: blob sidecar import failed: {}", .{err});
+        std.log.debug("processor blob sidecar import failed: {}", .{err});
     };
 }
 
@@ -2850,7 +2850,7 @@ fn handleQueuedDataColumnSidecar(
     defer work.data.deinit();
 
     importFn(gh.node, queued.ssz_bytes) catch |err| {
-        std.log.warn("Processor: data column sidecar import failed: {}", .{err});
+        std.log.debug("processor data column sidecar import failed: {}", .{err});
     };
 }
 
@@ -2866,7 +2866,7 @@ fn handleQueuedSyncMessage(
     };
 
     importFn(gh.node, &work.message, work.subnet_id) catch |err| {
-        std.log.warn("Processor: sync committee message import failed: {}", .{err});
+        std.log.debug("processor sync committee message import failed: {}", .{err});
     };
 }
 

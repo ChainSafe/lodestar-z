@@ -83,7 +83,7 @@ fn loadOrGenerateKey(io: Io, allocator: Allocator, dir_path: []const u8, persist
                 // Hex-encoded 32-byte key
                 var key: [32]u8 = undefined;
                 _ = std.fmt.hexToBytes(&key, buf[0..64]) catch return .{ .key = undefined, .created = true };
-                log.info("Loaded private key from {s}", .{key_path});
+                log.debug("loaded private key from {s}", .{key_path});
                 return .{ .key = key, .created = false };
             }
         } else |_| {}
@@ -107,11 +107,11 @@ fn loadOrGenerateKey(io: Io, allocator: Allocator, dir_path: []const u8, persist
 
         const hex_buf = std.fmt.bytesToHex(key, .lower);
         writeFileContents(io, key_path, &hex_buf) catch |err| {
-            log.warn("Failed to save private key to {s}: {}", .{ key_path, err });
+            log.warn("failed to save private key to {s}: {}", .{ key_path, err });
         };
-        log.info("Generated and saved new private key to {s}", .{key_path});
+        log.info("generated and saved new private key to {s}", .{key_path});
     } else {
-        log.info("Generated ephemeral private key (not persisted)", .{});
+        log.info("generated ephemeral private key (not persisted)", .{});
     }
 
     return .{ .key = key, .created = true };
@@ -138,7 +138,7 @@ fn saveEnrToDisk(io: Io, allocator: Allocator, dir_path: []const u8, enr_str: []
     const enr_path = try std.fmt.allocPrint(allocator, "{s}/enr", .{dir_path});
     defer allocator.free(enr_path);
     try writeFileContents(io, enr_path, enr_str);
-    log.info("Saved ENR to {s}", .{enr_path});
+    log.debug("saved ENR to {s}", .{enr_path});
 }
 
 /// Write bytes to a file, creating or truncating.
@@ -437,7 +437,7 @@ fn persistCurrentEnr(io: Io, allocator: Allocator, dir_path: []const u8, service
     const enr_text = encodeEnrText(allocator, local_enr) catch return;
     defer allocator.free(enr_text);
     saveEnrToDisk(io, allocator, dir_path, enr_text) catch |err| {
-        log.warn("Failed to persist ENR: {}", .{err});
+        log.warn("failed to persist ENR: {}", .{err});
     };
 }
 
@@ -471,7 +471,7 @@ fn drainBootnodeEvents(
 
         switch (owned) {
             .local_enr_updated => {
-                log.info("Advertised ENR updated", .{});
+                log.debug("advertised ENR updated", .{});
                 if (persist_identity and bootnode_dir.len > 0) {
                     persistCurrentEnr(io, allocator, bootnode_dir, service);
                 }

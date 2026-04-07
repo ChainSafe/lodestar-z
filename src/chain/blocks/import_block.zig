@@ -162,7 +162,7 @@ pub fn importVerifiedBlock(
             fc.updateTime(ctx.allocator, block_slot) catch |err| switch (err) {
                 error.OutOfMemory => return BlockImportError.InternalError,
                 else => {
-                    std.log.warn("FC updateTime failed at slot {d}: {}", .{ block_slot, err });
+                    std.log.warn("fork choice updateTime failed at slot {d}: {}", .{ block_slot, err });
                 },
             };
         }
@@ -200,7 +200,7 @@ pub fn importVerifiedBlock(
             fc_exec_status,
             fc_da_status,
         )) |_| true else |err| blk: {
-            std.log.warn("ForkChoice.onBlock failed for slot {d}: {}", .{ block_slot, err });
+            std.log.warn("fork choice onBlock failed for slot {d}: {}", .{ block_slot, err });
             break :blk false;
         };
 
@@ -340,7 +340,7 @@ pub fn importVerifiedBlock(
 
         // Recompute head: computeDeltas → applyScoreChanges → findHead.
         const uagh_result = fc.updateAndGetHead(ctx.allocator, .get_canonical_head) catch |err| {
-            std.log.warn("importBlock: getHead failed: {}", .{err});
+            std.log.warn("import block getHead failed: {}", .{err});
             break :head_recompute;
         };
         const head_node = fc.getBlockDefaultStatus(uagh_result.head.block_root);
@@ -437,7 +437,7 @@ pub fn importVerifiedBlock(
         // Log but don't reprocess inline (avoids deep recursion / stack overflow).
         // Callers should drain the queue asynchronously after import.
         if (released.items.len > 0) {
-            std.log.debug("importBlock: {d} block(s) queued for reprocessing (parent={s}...)", .{
+            std.log.debug("import block: {d} block(s) queued for reprocessing (parent={s}...)", .{
                 released.items.len,
                 &std.fmt.bytesToHex(block_root[0..4], .lower),
             });

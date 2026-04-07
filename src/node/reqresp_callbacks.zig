@@ -74,7 +74,7 @@ fn reqRespAllowInboundRequest(ptr: *anyopaque, peer_id: ?[]const u8, method: net
         networking.rate_limiter.requestTokenCost(method, request_bytes),
         monotonicTimeNs(node.io),
     ) catch |err| {
-        std.log.warn("Failed to apply req/resp rate limit for peer {s}: {}", .{ peer_id_bytes, err });
+        std.log.debug("failed to apply req/resp rate limit for peer {s}: {}", .{ peer_id_bytes, err });
         return .allow;
     };
     if (result.isAllowed()) return .allow;
@@ -316,7 +316,7 @@ pub fn handlePeerStatus(
 
     if (node.sync_service_inst) |sync_svc| {
         sync_svc.onPeerStatus(peer_id, status, earliest_available_slot) catch |err| {
-            std.log.warn("SyncService.onPeerStatus failed: {}", .{err});
+            std.log.debug("sync service onPeerStatus failed: {}", .{err});
         };
     }
     node.unknown_chain_sync.onPeerConnected(peer_id, status.head_root) catch {};
