@@ -762,8 +762,8 @@ pub const Protocol = struct {
         const sig_size: u8 = 64;
         const eph_key_size: u8 = 33;
 
-        // Determine if we need to include our ENR.
-        const include_enr = (enr_seq < self.config.local_enr_seq) and (self.config.local_enr != null);
+        // Always include our ENR so the remote can verify our identity.
+        const include_enr = self.config.local_enr != null;
         const enr_bytes: []const u8 = if (include_enr) self.config.local_enr.? else &[_]u8{};
 
         const authdata_total: usize = 34 + sig_size + eph_key_size + enr_bytes.len;
