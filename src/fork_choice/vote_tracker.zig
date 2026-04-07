@@ -66,9 +66,8 @@ pub const Votes = struct {
             return;
         }
 
-        try self.multi_list.ensureTotalCapacity(allocator, validator_count);
         // Initialize new slots to defaults.
-        self.multi_list.resize(allocator, validator_count) catch unreachable; // capacity already ensured
+        try self.multi_list.resize(allocator, validator_count);
         const current_indices = self.multi_list.items(.current_index);
         const next_indices = self.multi_list.items(.next_index);
         const next_slots = self.multi_list.items(.next_slot);

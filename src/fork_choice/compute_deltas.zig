@@ -62,7 +62,7 @@ pub fn computeDeltas(
     const num_validators = vote_next_indices.len;
 
     // Sort equivocating indices for pointer advancement in the loop.
-    const sorted_eq = try sortEquivocatingKeys(allocator, equivocating_indices.*);
+    const sorted_eq = try sortEquivocatingKeys(allocator, equivocating_indices);
     defer allocator.free(sorted_eq);
 
     var result: ComputeDeltasResult = .{ .deltas = deltas, .equivocating_validators = @intCast(sorted_eq.len) };
@@ -157,7 +157,7 @@ fn resolveBalances(
 }
 
 /// Copies equivocating keys into a heap buffer and sorts ascending for pointer advancement.
-fn sortEquivocatingKeys(allocator: Allocator, indices: EquivocatingIndices) ![]const ValidatorIndex {
+fn sortEquivocatingKeys(allocator: Allocator, indices: *const EquivocatingIndices) ![]const ValidatorIndex {
     const keys = indices.keys();
     const buf = try allocator.alloc(ValidatorIndex, keys.len);
     @memcpy(buf, keys);

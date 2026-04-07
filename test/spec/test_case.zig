@@ -44,6 +44,7 @@ pub fn TestCaseUtils(comptime fork: ForkSeq) type {
                 .deneb => .capella,
                 .electra => .deneb,
                 .fulu => .electra,
+                .gloas => .fulu,
                 else => unreachable,
             };
         }
