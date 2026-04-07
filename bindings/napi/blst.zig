@@ -872,17 +872,13 @@ fn asyncAggregateExecute(_: napi.Env, data: *AsyncAggregateData) void {
         }
     }
 
-    // Cast contiguous pk/sig arrays to affine point arrays
-    const pk_points: [*]const bls.c.blst_p1_affine = @ptrCast(data.pks.ptr);
-    const sig_points: [*]const bls.c.blst_p2_affine = @ptrCast(data.sigs.ptr);
-
     // Build pointer arrays for Pippenger API
     var pk_ptrs: [MAX_AGGREGATE_PER_JOB]*const bls.c.blst_p1_affine = undefined;
     var sig_ptrs: [MAX_AGGREGATE_PER_JOB]*const bls.c.blst_p2_affine = undefined;
     var sca_ptrs: [MAX_AGGREGATE_PER_JOB]*const u8 = undefined;
     for (0..n) |i| {
-        pk_ptrs[i] = &pk_points[i];
-        sig_ptrs[i] = &sig_points[i];
+        pk_ptrs[i] = &data.pks[i].point;
+        sig_ptrs[i] = &data.sigs[i].point;
         sca_ptrs[i] = &scalars[i * nbytes];
     }
 
