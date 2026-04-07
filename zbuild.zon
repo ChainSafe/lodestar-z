@@ -253,7 +253,7 @@
                     .config,
                     .fork_types,
                     .state_transition,
-                    "zapi:napi",
+                    "zapi:zapi",
                 },
             },
             .linkage = .dynamic,

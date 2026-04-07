@@ -1,5 +1,5 @@
 const std = @import("std");
-const napi = @import("zapi:napi");
+const napi = @import("zapi:zapi");
 const active_preset = @import("preset").active_preset;
 const c = @import("config");
 const BeaconConfig = @import("config").BeaconConfig;
