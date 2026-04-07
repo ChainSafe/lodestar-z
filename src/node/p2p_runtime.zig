@@ -2412,8 +2412,10 @@ fn sendStatus(
         "/eth2/beacon_chain/req/status/1/ssz_snappy";
     const req_resp_encoding = networking.req_resp_encoding;
 
+    std.log.info("sendStatus: opening stream for {s}", .{status_protocol_id});
     var outbound = try openReqRespRequest(io, svc, peer_id, .status, status_protocol_id);
     defer outbound.deinit(io);
+    std.log.info("sendStatus: stream opened, writing request", .{});
 
     const our_status = self.getStatus();
     std.log.info("Sending Status: fork_digest={x:0>2}{x:0>2}{x:0>2}{x:0>2} head_slot={d} finalized_epoch={d}", .{
@@ -2443,6 +2445,7 @@ fn sendStatus(
         try req_resp_encoding.writeRequestToStream(self.allocator, io, &outbound.stream, &status_ssz);
     }
     outbound.stream.closeWrite(io);
+    std.log.info("sendStatus: request written and write-side closed, waiting for response", .{});
 
     var reader = req_resp_encoding.ResponseChunkStreamReader{
         .allocator = self.allocator,
