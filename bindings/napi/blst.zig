@@ -108,7 +108,14 @@ pub fn PublicKey_finalize(_: napi.Env, pk: *PublicKey, _: ?*anyopaque) void {
 pub fn PublicKey_ctor(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
     const pk = try allocator.create(PublicKey);
     errdefer allocator.destroy(pk);
-    _ = try env.wrap(cb.this(), PublicKey, pk, PublicKey_finalize, null, null);
+    _ = try env.wrap(
+        cb.this(),
+        PublicKey,
+        pk,
+        PublicKey_finalize,
+        null, // finalize hint
+        null, // ref
+    );
     return cb.this();
 }
 
@@ -218,7 +225,14 @@ pub fn Signature_finalize(_: napi.Env, sig: *Signature, _: ?*anyopaque) void {
 pub fn Signature_ctor(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
     const sig = try allocator.create(Signature);
     errdefer allocator.destroy(sig);
-    _ = try env.wrap(cb.this(), Signature, sig, Signature_finalize, null, null);
+    _ = try env.wrap(
+        cb.this(),
+        Signature,
+        sig,
+        Signature_finalize,
+        null, // finalize hint
+        null, // ref
+    );
     return cb.this();
 }
 
@@ -327,7 +341,14 @@ pub fn SecretKey_finalize(_: napi.Env, sk: *SecretKey, _: ?*anyopaque) void {
 pub fn SecretKey_ctor(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
     const sk = try allocator.create(SecretKey);
     errdefer allocator.destroy(sk);
-    _ = try env.wrap(cb.this(), SecretKey, sk, SecretKey_finalize, null, null);
+    _ = try env.wrap(
+        cb.this(),
+        SecretKey,
+        sk,
+        SecretKey_finalize,
+        null, // finalize hint
+        null, // ref
+    );
     return cb.this();
 }
 
