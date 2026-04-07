@@ -38,7 +38,7 @@ fn register(env: napi.Env, exports: napi.Value) !void {
         // First environment — initialize shared state.
         const cpu_count = std.Thread.getCpuCount() catch 1;
         const n_workers = @min(cpu_count, @import("bls").ThreadPool.MAX_WORKERS);
-        try blst.initThreadPool(n_workers);
+        try blst.initThreadPool(@intCast(n_workers));
         try pool.state.init();
         try pubkeys.state.init();
         config.state.init();
