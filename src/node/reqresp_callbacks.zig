@@ -310,6 +310,10 @@ pub fn handlePeerStatusAtTime(
             }
         }
 
+        // Use the wall-clock slot for clock-skew detection, not the head slot.
+        // A syncing node's head lags behind the current time; comparing the
+        // remote against our stale head would wrongly flag peers as different_clocks.
+        const clock_slot = if (node.clock) |c| c.currentSlot(node.io) orelse node.currentHeadSlot() else node.currentHeadSlot();
         irrelevance = pm.onPeerStatus(
             peer_id,
             status.fork_digest,
@@ -320,7 +324,7 @@ pub fn handlePeerStatusAtTime(
             earliest_available_slot,
             localCachedStatus(node),
             node.config.forkSeq(node.currentHeadSlot()),
-            node.currentHeadSlot(),
+            clock_slot,
         );
         pm.markStatusExchange(peer_id, now_ms);
     }
