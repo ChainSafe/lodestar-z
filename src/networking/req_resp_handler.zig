@@ -892,6 +892,7 @@ test "BeaconBlocksByRange streams success chunks with context bytes" {
     const request: BeaconBlocksByRangeRequest.Type = .{
         .start_slot = 100,
         .count = 3,
+        .step = 1,
     };
     var request_bytes: [BeaconBlocksByRangeRequest.fixed_size]u8 = undefined;
     _ = BeaconBlocksByRangeRequest.serializeIntoBytes(&request, &request_bytes);
@@ -914,6 +915,7 @@ test "BeaconBlocksByRange clamps Deneb-era requests instead of rejecting them" {
     const request: BeaconBlocksByRangeRequest.Type = .{
         .start_slot = 100,
         .count = max_request_blocks_deneb + 1,
+        .step = 1,
     };
     var request_bytes: [BeaconBlocksByRangeRequest.fixed_size]u8 = undefined;
     _ = BeaconBlocksByRangeRequest.serializeIntoBytes(&request, &request_bytes);

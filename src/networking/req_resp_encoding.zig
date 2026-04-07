@@ -676,6 +676,7 @@ test "response chunk roundtrip with context bytes and BeaconBlocksByRange" {
     const request: messages.BeaconBlocksByRangeRequest.Type = .{
         .start_slot = 1000,
         .count = 64,
+        .step = 1,
     };
 
     var ssz_buf: [messages.BeaconBlocksByRangeRequest.fixed_size]u8 = undefined;
