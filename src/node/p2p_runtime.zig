@@ -1476,11 +1476,12 @@ fn completePeerHandshake(
         return true;
     }
 
-    const metadata = requestPeerMetadata(self, io, svc, peer_id) catch |err| {
-        handleReqRespMaintenanceFailure(self, io, svc, peer_id, .metadata, err);
-        return true;
-    };
-    applyPeerMetadata(self, peer_id, metadata, currentUnixTimeMs(io));
+    if (requestPeerMetadata(self, io, svc, peer_id)) |metadata| {
+        applyPeerMetadata(self, peer_id, metadata, currentUnixTimeMs(io));
+    } else |err| {
+        // Metadata failure is not fatal — peer already proved useful via STATUS.
+        std.log.warn("completePeerHandshake: metadata failed for peer, continuing: {}", .{err});
+    }
 
     svc.openGossipsubStream(io, peer_id) catch |err| {
         std.log.warn("Failed to open outbound gossipsub stream to {s}: {}", .{ peer_id, err });
