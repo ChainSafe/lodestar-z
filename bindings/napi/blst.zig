@@ -953,7 +953,6 @@ fn asyncAggregateComplete(env: napi.Env, _: napi.status.Status, data: *AsyncAggr
     data.deferred.resolve(result) catch return;
 }
 
-
 /// Asynchronously aggregates public keys and signatures with randomness using
 /// Pippenger multi-scalar multiplication. Heavy math runs on the libuv thread pool.
 ///
