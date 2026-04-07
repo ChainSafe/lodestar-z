@@ -10,8 +10,10 @@ const e2s = @import("e2s.zig");
 const era = @import("era.zig");
 
 config: c.BeaconConfig,
+/// The Io context
+io: std.Io,
 /// The file being read
-file: std.fs.File,
+file: std.Io.File,
 /// The era number retrieved from the file name
 era_number: u64,
 /// The short historical root retrieved from the file name
@@ -23,11 +25,11 @@ pool: *Node.Pool,
 
 const Reader = @This();
 
-pub fn open(allocator: std.mem.Allocator, config: c.BeaconConfig, path: []const u8) !Reader {
-    const file = try std.fs.cwd().openFile(path, .{});
-    errdefer file.close();
+pub fn open(allocator: std.mem.Allocator, io: std.Io, config: c.BeaconConfig, path: []const u8) !Reader {
+    const file = try std.Io.Dir.cwd().openFile(io, path, .{});
+    errdefer file.close(io);
     const era_file_name = try era.EraFileName.parse(path);
-    const group_indices = try era.readAllGroupIndices(allocator, file);
+    const group_indices = try era.readAllGroupIndices(allocator, io, file);
     errdefer {
         for (group_indices) |group_index| {
             allocator.free(group_index.state_index.offsets);
@@ -44,6 +46,7 @@ pub fn open(allocator: std.mem.Allocator, config: c.BeaconConfig, path: []const 
     errdefer pool.deinit();
     return .{
         .config = config,
+        .io = io,
         .file = file,
         .era_number = era_file_name.era_number,
         .short_historical_root = era_file_name.short_historical_root,
@@ -53,7 +56,7 @@ pub fn open(allocator: std.mem.Allocator, config: c.BeaconConfig, path: []const 
 }
 
 pub fn close(self: *Reader, allocator: std.mem.Allocator) void {
-    self.file.close();
+    self.file.close(self.io);
     for (self.group_indices) |group_index| {
         allocator.free(group_index.state_index.offsets);
         if (group_index.blocks_index) |bi| {
@@ -76,7 +79,7 @@ pub fn readCompressedState(self: Reader, allocator: std.mem.Allocator, era_numbe
     }
     const index = self.group_indices[group_index];
     const offset: u64 = @intCast(try std.math.add(i64, @intCast(index.state_index.record_start), index.state_index.offsets[0]));
-    const entry = try e2s.readEntry(allocator, self.file, offset);
+    const entry = try e2s.readEntry(allocator, self.file, self.io, offset);
     errdefer allocator.free(entry.data);
     if (entry.entry_type != .CompressedBeaconState) {
         return error.InvalidE2SHeader;
@@ -116,7 +119,7 @@ pub fn readCompressedBlock(self: Reader, allocator: std.mem.Allocator, slot: u64
     if (offset == 0) {
         return null; // Empty slot
     }
-    const entry = try e2s.readEntry(allocator, self.file, offset);
+    const entry = try e2s.readEntry(allocator, self.file, self.io, offset);
     errdefer allocator.free(entry.data);
     if (entry.entry_type != .CompressedSignedBeaconBlock) {
         return error.InvalidE2SHeader;
@@ -157,7 +160,7 @@ pub fn validate(self: Reader, allocator: std.mem.Allocator) !void {
         if (start < 0) {
             return error.InvalidGroupStartIndex;
         }
-        try e2s.readVersion(self.file, @intCast(start));
+        try e2s.readVersion(self.file, self.io, @intCast(start));
 
         // Genesis era cannot have a block index
         if (era_number == 0 and index.blocks_index != null) {

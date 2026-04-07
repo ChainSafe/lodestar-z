@@ -36,9 +36,8 @@ const HashOne_2 = struct {
     }
 };
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
     const allocator = std.heap.page_allocator;
-    const stdout = std.io.getStdOut().writer();
     var bench = zbench.Benchmark.init(allocator, .{});
     defer bench.deinit();
 
@@ -51,5 +50,5 @@ pub fn main() !void {
     const hashOne_2 = HashOne_2{ .obj1 = &obj1, .obj2 = &obj2, .out = &out };
     try bench.addParam("hashOne 2", &hashOne_2, .{});
 
-    try bench.run(stdout);
+    try bench.run(init.io, std.Io.File.stdout());
 }

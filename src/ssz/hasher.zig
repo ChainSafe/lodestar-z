@@ -111,11 +111,11 @@ pub fn Hasher(comptime ST: type) type {
 }
 
 pub const HasherData = struct {
-    chunks: std.ArrayList([32]u8),
+    chunks: std.array_list.AlignedManaged([32]u8, null),
     children: ?[]HasherData,
 
     pub fn initCapacity(allocator: std.mem.Allocator, capacity: usize, children: ?[]HasherData) !HasherData {
-        var chunks = try std.ArrayList([32]u8).initCapacity(allocator, capacity);
+        var chunks = try std.array_list.AlignedManaged([32]u8, null).initCapacity(allocator, capacity);
         chunks.expandToCapacity();
         @memset(chunks.items, [_]u8{0} ** 32);
         return HasherData{

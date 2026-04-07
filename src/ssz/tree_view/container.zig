@@ -13,38 +13,23 @@ const CloneOpts = @import("utils/clone_opts.zig").CloneOpts;
 ///
 /// For basic-type fields, it returns or accepts values directly; for complex fields, it returns or accepts corresponding tree view references.
 pub fn ContainerTreeView(comptime ST: type) type {
-    comptime var opt_treeview_fields: [ST.fields.len]std.builtin.Type.StructField = undefined;
+    @setEvalBranchQuota(100000);
+    comptime var _tv_field_names: [ST.fields.len][:0]const u8 = undefined;
+    comptime var _tv_field_types: [ST.fields.len]type = undefined;
+    comptime var _tv_field_attrs: [ST.fields.len]std.builtin.Type.StructField.Attributes = undefined;
     inline for (ST.fields, 0..) |field, i| {
-        opt_treeview_fields[i] = .{
-            .name = std.fmt.comptimePrint("{}", .{i}),
-            .type = if (isBasicType(field.type)) @Type(.{
-                .optional = .{
-                    .child = field.type.Type,
-                },
-            }) else blk: {
-                assertTreeViewType(field.type.TreeView);
-                break :blk @Type(.{
-                    .optional = .{
-                        .child = *field.type.TreeView,
-                    },
-                });
-            },
-            .default_value_ptr = null,
-            .is_comptime = false,
-            .alignment = if (isBasicType(field.type)) @alignOf(field.type.Type) else @alignOf(*field.type.TreeView),
+        _tv_field_names[i] = std.fmt.comptimePrint("{}", .{i});
+        _tv_field_types[i] = if (isBasicType(field.type))
+            ?field.type.Type
+        else blk: {
+            assertTreeViewType(field.type.TreeView);
+            break :blk ?*field.type.TreeView;
         };
+        _tv_field_attrs[i] = .{};
     }
 
-    const TreeViewData = @Type(.{
-        .@"struct" = .{
-            .layout = .auto,
-            .backing_integer = null,
-            .fields = opt_treeview_fields[0..],
-            // TODO: do we need to assign this value?
-            .decls = &[_]std.builtin.Type.Declaration{},
-            .is_tuple = true,
-        },
-    });
+    // Note: was is_tuple = true in old code, using @Tuple for tuple types
+    const TreeViewData = @Tuple(&_tv_field_types);
 
     const TreeView = struct {
         allocator: Allocator,

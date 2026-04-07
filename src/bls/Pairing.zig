@@ -60,9 +60,9 @@ pub fn aggregate(
     try errorFromInt(
         c.blst_pairing_chk_n_aggr_pk_in_g1(
             self.ctx,
-            &pk.point,
+            @ptrCast(&pk.point),
             pk_validate,
-            if (sig) |s| &s.point else null,
+            if (sig) |s| @ptrCast(&s.point) else null,
             sig_groupcheck,
             msg.ptr,
             msg.len,
@@ -88,9 +88,9 @@ pub fn mulAndAggregate(
     try errorFromInt(
         c.blst_pairing_chk_n_mul_n_aggr_pk_in_g1(
             self.ctx,
-            &pk.point,
+            @ptrCast(&pk.point),
             pk_validate,
-            &sig.point,
+            @ptrCast(&sig.point),
             sig_groupcheck,
             scalar.ptr,
             nbits,
@@ -104,7 +104,7 @@ pub fn mulAndAggregate(
 
 /// Compute the aggregated signature in G2.
 pub fn aggregated(gtsig: *c.blst_fp12, sig: *const Signature) void {
-    c.blst_aggregated_in_g2(gtsig, &sig.point);
+    c.blst_aggregated_in_g2(gtsig, @ptrCast(&sig.point));
 }
 
 /// Commit and finalize the aggregation in the pairing context.

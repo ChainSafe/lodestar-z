@@ -7,7 +7,7 @@ const build_options = @import("build_options");
 const default_max_depth = 64;
 
 // Allow overriding via `build.zig`
-const user_max_depth: u8 = build_options.zero_hash_max_depth orelse default_max_depth;
+const user_max_depth: u8 = if (build_options.zero_hash_max_depth) |d| (if (d > 0) d else default_max_depth) else default_max_depth;
 
 pub const GindexUint = std.meta.Int(.unsigned, @intCast(user_max_depth));
 pub const Depth = std.math.Log2Int(GindexUint);

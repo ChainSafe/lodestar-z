@@ -40,7 +40,7 @@ pub const ReadError = error{
     InvalidHeaderReservedBytes,
     Overflow,
     DataSizeTooLarge,
-} || std.fs.File.PReadError || std.mem.Allocator.Error;
+} || std.Io.File.ReadPositionalError || std.mem.Allocator.Error;
 
 /// Parsed entry from an E2Store (.e2s) file.
 pub const Entry = struct {
@@ -90,10 +90,10 @@ pub const header_size = 8;
 
 /// Read an entry at a specific offset from an open file handle.
 /// Reads the header first to determine data length, then reads the complete entry.
-pub fn readEntry(allocator: std.mem.Allocator, file: std.fs.File, offset: u64) ReadError!Entry {
+pub fn readEntry(allocator: std.mem.Allocator, file: std.Io.File, io: std.Io, offset: u64) ReadError!Entry {
     // Read header
     var header: [8]u8 = undefined;
-    const header_read_size = try file.pread(&header, offset);
+    const header_read_size = try file.readPositionalAll(io, &header, offset);
     if (header_read_size != header_size) {
         return error.UnexpectedEOF;
     }
@@ -117,7 +117,7 @@ pub fn readEntry(allocator: std.mem.Allocator, file: std.fs.File, offset: u64) R
     const data = try allocator.alloc(u8, data_len);
     errdefer allocator.free(data);
 
-    const data_read_size = try file.pread(data, offset + header_size);
+    const data_read_size = try file.readPositionalAll(io, data, offset + header_size);
     if (data_read_size != data_len) {
         return error.UnexpectedEOF;
     }
@@ -128,9 +128,9 @@ pub fn readEntry(allocator: std.mem.Allocator, file: std.fs.File, offset: u64) R
     };
 }
 
-pub fn readVersion(file: std.fs.File, offset: u64) ReadError!void {
+pub fn readVersion(file: std.Io.File, io: std.Io, offset: u64) ReadError!void {
     var header: [8]u8 = undefined;
-    const header_read_size = try file.pread(&header, offset);
+    const header_read_size = try file.readPositionalAll(io, &header, offset);
     if (header_read_size != header_size) {
         return error.UnexpectedEOF;
     }
@@ -142,10 +142,10 @@ pub fn readVersion(file: std.fs.File, offset: u64) ReadError!void {
 /// Read a SlotIndex entry at a specific offset from an open file handle.
 ///
 /// Ownership of the returned SlotIndex is transferred to the caller.
-pub fn readSlotIndex(allocator: std.mem.Allocator, file: std.fs.File, offset: u64) ReadError!SlotIndex {
+pub fn readSlotIndex(allocator: std.mem.Allocator, file: std.Io.File, io: std.Io, offset: u64) ReadError!SlotIndex {
     const record_end = offset;
     var count_buffer: [8]u8 = undefined;
-    const count_read_size = try file.pread(&count_buffer, record_end - 8);
+    const count_read_size = try file.readPositionalAll(io, &count_buffer, record_end - 8);
     if (count_read_size != header_size) {
         return error.UnexpectedEOF;
     }
@@ -158,7 +158,7 @@ pub fn readSlotIndex(allocator: std.mem.Allocator, file: std.fs.File, offset: u6
     // Validate index position is within file bounds
     const record_start = try std.math.sub(u64, record_end, (8 * count + 24));
 
-    const entry = try readEntry(allocator, file, record_start);
+    const entry = try readEntry(allocator, file, io, record_start);
     defer allocator.free(entry.data);
 
     if (entry.entry_type != EntryType.SlotIndex) {
@@ -187,18 +187,18 @@ pub fn readSlotIndex(allocator: std.mem.Allocator, file: std.fs.File, offset: u6
     };
 }
 
-pub const WriteError = error{} || std.fs.File.PWriteError;
+pub const WriteError = error{} || std.Io.File.WritePositionalError;
 
-pub fn writeEntry(file: std.fs.File, offset: u64, entry_type: EntryType, payload: []const u8) WriteError!void {
+pub fn writeEntry(file: std.Io.File, io: std.Io, offset: u64, entry_type: EntryType, payload: []const u8) WriteError!void {
     var header: [8]u8 = [_]u8{0} ** 8;
     std.mem.writeInt(u16, header[0..2], entry_type.toU16(), .little);
     std.mem.writeInt(u32, header[2..6], @intCast(payload.len), .little);
-    try file.pwriteAll(&header, offset);
-    try file.pwriteAll(payload, offset + header_size);
+    try file.writePositionalAll(io, &header, offset);
+    try file.writePositionalAll(io, payload, offset + header_size);
 }
 
-pub fn writeVersion(file: std.fs.File, offset: u64) WriteError!void {
-    try file.pwriteAll(&version_record_bytes, offset);
+pub fn writeVersion(file: std.Io.File, io: std.Io, offset: u64) WriteError!void {
+    try file.writePositionalAll(io, &version_record_bytes, offset);
 }
 
 // ── Unit tests ──────────────────────────────────────────────────────────

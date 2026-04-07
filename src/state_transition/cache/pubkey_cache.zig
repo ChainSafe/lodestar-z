@@ -7,7 +7,7 @@ const Validator = types.phase0.Validator.Type;
 pub const PubkeyIndexMap = std.AutoHashMap([48]u8, u64);
 
 /// Map from validator index to pubkey
-pub const Index2PubkeyCache = std.ArrayList(bls.PublicKey);
+pub const Index2PubkeyCache = std.array_list.AlignedManaged(bls.PublicKey, null);
 
 /// Populate `pubkey_to_index` and `index_to_pubkey` caches from validators list.
 pub fn syncPubkeys(
@@ -64,6 +64,7 @@ pub fn syncPubkeysParallel(
     pubkey_to_index: *PubkeyIndexMap,
     index_to_pubkey: *Index2PubkeyCache,
 ) !void {
+    _ = allocator; // TODO: re-use with parallel implementation
     const old_len = index_to_pubkey.items.len;
     if (pubkey_to_index.count() != old_len) {
         return error.InconsistentCache;
@@ -79,31 +80,22 @@ pub fn syncPubkeysParallel(
 
     try pubkey_to_index.ensureTotalCapacity(@intCast(new_count));
 
-    var thread_pool: std.Thread.Pool = undefined;
-    try thread_pool.init(.{ .allocator = allocator });
-    defer thread_pool.deinit();
-
-    var wg = std.Thread.WaitGroup{};
+    // TODO: Re-parallelize with std.Io batch API when 0.16 patterns are settled.
+    // For now, run serially.
     var uncompress_error = std.atomic.Value(bool).init(false);
 
     var i = old_len;
     const batch_size = 1000;
 
     while (i < new_count) : (i += batch_size) {
-        thread_pool.spawnWg(
-            &wg,
-            uncompressPubkeys,
-            .{
-                i,
-                @min(i + batch_size, new_count),
-                validators,
-                index_to_pubkey,
-                &uncompress_error,
-            },
+        uncompressPubkeys(
+            i,
+            @min(i + batch_size, new_count),
+            validators,
+            index_to_pubkey,
+            &uncompress_error,
         );
     }
-
-    wg.wait();
 
     if (uncompress_error.load(.acquire)) {
         return error.InvalidPubkey;

@@ -92,13 +92,12 @@ pub fn typeTest(comptime ST: type) type {
                 try ST.deserializeFromJson(&scanner, &json_value);
 
                 // serialize to json
-                var output_json = std.ArrayList(u8).init(allocator);
+                var output_json: std.Io.Writer.Allocating = .init(allocator);
                 defer output_json.deinit();
-                var write_stream = std.json.writeStream(output_json.writer(), .{});
-                defer write_stream.deinit();
+                var write_stream: std.json.Stringify = .{ .writer = &output_json.writer };
 
                 try ST.serializeIntoJson(&write_stream, &json_value);
-                try std.testing.expectEqualSlices(u8, tc.json, output_json.items);
+                try std.testing.expectEqualSlices(u8, tc.json, output_json.written());
             } else {
                 // deserialize
                 var value = ST.default_value;
@@ -130,15 +129,14 @@ pub fn typeTest(comptime ST: type) type {
                 try ST.deserializeFromJson(allocator, &scanner, &json_value);
 
                 // serialize to json
-                var output_json = std.ArrayList(u8).init(allocator);
+                var output_json: std.Io.Writer.Allocating = .init(allocator);
                 defer output_json.deinit();
-                var write_stream = std.json.writeStream(output_json.writer(), .{});
-                defer write_stream.deinit();
+                var write_stream: std.json.Stringify = .{ .writer = &output_json.writer };
 
                 try ST.serializeIntoJson(allocator, &write_stream, &json_value);
                 // sanity check first
-                try std.testing.expectEqual(tc.json.len, output_json.items.len);
-                try std.testing.expectEqualSlices(u8, tc.json, output_json.items);
+                try std.testing.expectEqual(tc.json.len, output_json.written().len);
+                try std.testing.expectEqualSlices(u8, tc.json, output_json.written());
             }
         }
     };

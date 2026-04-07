@@ -95,21 +95,21 @@ pub fn deriveMasterEip2333(ikm: []const u8) BlstError!Self {
     }
 
     var sk = Self{};
-    c.blst_derive_master_eip2333(&sk.value, ikm.ptr, ikm.len);
+    c.blst_derive_master_eip2333(@ptrCast(&sk.value), ikm.ptr, ikm.len);
     return sk;
 }
 
 /// Derive and return a child `SecretKey` using EIP-2333 key derivation.
 pub fn deriveChildEip2333(self: *const Self, child_index: u32) BlstError!Self {
     var sk = Self{};
-    c.blst_derive_child_eip2333(&sk.value, &self.value, child_index);
+    c.blst_derive_child_eip2333(@ptrCast(&sk.value), @ptrCast(&self.value), child_index);
     return sk;
 }
 
 /// Derive the `PublicKey` from this `SecretKey`.
 pub fn toPublicKey(self: *const Self) PublicKey {
     var pk = PublicKey{};
-    c.blst_sk_to_pk2_in_g1(null, &pk.point, &self.value);
+    c.blst_sk_to_pk2_in_g1(null, @ptrCast(&pk.point), @ptrCast(&self.value));
     return pk;
 }
 
@@ -118,7 +118,7 @@ pub fn sign(self: *const Self, msg: []const u8, dst: []const u8, aug: ?[]const u
     var sig = Signature{};
     var q = @import("AggregateSignature.zig"){};
     c.blst_hash_to_g2(
-        &q.point,
+        @ptrCast(&q.point),
         msg.ptr,
         msg.len,
         dst.ptr,
@@ -126,14 +126,14 @@ pub fn sign(self: *const Self, msg: []const u8, dst: []const u8, aug: ?[]const u
         if (aug) |a| a.ptr else null,
         if (aug) |a| a.len else 0,
     );
-    c.blst_sign_pk2_in_g1(null, &sig.point, &q.point, &self.value);
+    c.blst_sign_pk2_in_g1(null, @ptrCast(&sig.point), @ptrCast(&q.point), @ptrCast(&self.value));
     return sig;
 }
 
 /// Serialize the `SecretKey` to bytes.
 pub fn serialize(self: *const Self) [32]u8 {
     var sk_out = [_]u8{0} ** 32;
-    c.blst_bendian_from_scalar(&sk_out[0], &self.value);
+    c.blst_bendian_from_scalar(@ptrCast(&sk_out[0]), @ptrCast(&self.value));
     return sk_out;
 }
 
@@ -142,8 +142,8 @@ pub fn serialize(self: *const Self) [32]u8 {
 /// Returns `SecretKey` on success, `BlstError` on failure.
 pub fn deserialize(sk_in: *const [32]u8) BlstError!Self {
     var sk = Self{};
-    c.blst_scalar_from_bendian(&sk.value, sk_in);
-    if (!c.blst_sk_check(&sk.value)) {
+    c.blst_scalar_from_bendian(@ptrCast(&sk.value), sk_in);
+    if (!c.blst_sk_check(@ptrCast(&sk.value))) {
         return BlstError.BadEncoding;
     }
     return sk;

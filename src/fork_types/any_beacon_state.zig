@@ -133,7 +133,7 @@ pub const AnyBeaconState = union(ForkSeq) {
     pub fn format(
         self: AnyBeaconState,
         comptime fmt: []const u8,
-        options: std.fmt.FormatOptions,
+        options: std.fmt.Options,
         writer: anytype,
     ) !void {
         _ = fmt;

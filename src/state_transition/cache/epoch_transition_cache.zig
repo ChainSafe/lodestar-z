@@ -35,17 +35,17 @@ const computeBaseRewardPerIncrement = @import("../utils/sync_committee.zig").com
 const processPendingAttestations = @import("../epoch/process_pending_attestations.zig").processPendingAttestations;
 const Node = @import("persistent_merkle_tree").Node;
 
-const BoolArray = std.ArrayList(bool);
-const UsizeArray = std.ArrayList(usize);
-const U8Array = std.ArrayList(u8);
-const U64Array = std.ArrayList(u64);
+const BoolArray = std.array_list.AlignedManaged(bool, null);
+const UsizeArray = std.array_list.AlignedManaged(usize, null);
+const U8Array = std.array_list.AlignedManaged(u8, null);
+const U64Array = std.array_list.AlignedManaged(u64, null);
 
 const ValidatorActivation = struct {
     validator_index: ValidatorIndex,
     activation_eligibility_epoch: Epoch,
 };
 
-const ValidatorActivationList = std.ArrayList(ValidatorActivation);
+const ValidatorActivationList = std.array_list.AlignedManaged(ValidatorActivation, null);
 
 /// this is a cache that's never gc'd, it is used to store data that is reused across multiple epochs
 const ReusedEpochTransitionCache = struct {
@@ -60,7 +60,7 @@ const ReusedEpochTransitionCache = struct {
     flags: U8Array,
 
     // TODO: nextShufflingDecisionRoot, is it necessary without ShufflingCache?
-    next_epoch_shuffling_active_validator_indices: std.ArrayList(ValidatorIndex),
+    next_epoch_shuffling_active_validator_indices: std.array_list.AlignedManaged(ValidatorIndex, null),
 
     is_compounding_validator_arr: BoolArray,
 
@@ -84,7 +84,7 @@ const ReusedEpochTransitionCache = struct {
         errdefer self.inclusion_delays.deinit();
         self.flags = try U8Array.initCapacity(allocator, validator_count);
         errdefer self.flags.deinit();
-        self.next_epoch_shuffling_active_validator_indices = try std.ArrayList(ValidatorIndex).initCapacity(allocator, validator_count);
+        self.next_epoch_shuffling_active_validator_indices = try std.array_list.AlignedManaged(ValidatorIndex, null).initCapacity(allocator, validator_count);
         errdefer self.next_epoch_shuffling_active_validator_indices.deinit();
         self.is_compounding_validator_arr = try BoolArray.initCapacity(allocator, validator_count);
         errdefer self.is_compounding_validator_arr.deinit();
@@ -139,10 +139,12 @@ const ReusedEpochTransitionCache = struct {
 };
 
 var _reused_cache: ?*ReusedEpochTransitionCache = null;
-var _reused_lock: std.Thread.Mutex = std.Thread.Mutex{};
+var _reused_lock: std.atomic.Mutex = .unlocked;
 
 fn getReusedEpochTransitionCache(allocator: Allocator, validator_count: usize) !*ReusedEpochTransitionCache {
-    _reused_lock.lock();
+    while (!_reused_lock.tryLock()) {
+        std.atomic.spinLoopHint();
+    }
     defer _reused_lock.unlock();
 
     if (_reused_cache) |cache| {
@@ -160,7 +162,9 @@ fn getReusedEpochTransitionCache(allocator: Allocator, validator_count: usize) !
 }
 
 pub fn deinitReusedEpochTransitionCache() void {
-    _reused_lock.lock();
+    while (!_reused_lock.tryLock()) {
+        std.atomic.spinLoopHint();
+    }
     defer _reused_lock.unlock();
 
     if (_reused_cache) |cache| {
@@ -187,10 +191,10 @@ pub const EpochTransitionCache = struct {
     prev_epoch_unslashed_stake_target_by_increment: u64,
     prev_epoch_unslashed_stake_head_by_increment: u64,
     curr_epoch_unslashed_target_stake_by_increment: u64,
-    indices_to_slash: std.ArrayList(ValidatorIndex),
-    indices_eligible_for_activation_queue: std.ArrayList(ValidatorIndex),
-    indices_eligible_for_activation: std.ArrayList(ValidatorIndex),
-    indices_to_eject: std.ArrayList(ValidatorIndex),
+    indices_to_slash: std.array_list.AlignedManaged(ValidatorIndex, null),
+    indices_eligible_for_activation_queue: std.array_list.AlignedManaged(ValidatorIndex, null),
+    indices_eligible_for_activation: std.array_list.AlignedManaged(ValidatorIndex, null),
+    indices_to_eject: std.array_list.AlignedManaged(ValidatorIndex, null),
     // this is borrowed from ReusedEpochTransitionCache
     proposer_indices: []const usize,
     // phase0 only
@@ -229,12 +233,12 @@ pub const EpochTransitionCache = struct {
 
         const slashings_epoch = current_epoch + @divFloor(preset.EPOCHS_PER_SLASHINGS_VECTOR, 2);
 
-        var indices_to_slash = std.ArrayList(ValidatorIndex).init(allocator);
-        var indices_eligible_for_activation_queue = std.ArrayList(ValidatorIndex).init(allocator);
+        var indices_to_slash = std.array_list.AlignedManaged(ValidatorIndex, null).init(allocator);
+        var indices_eligible_for_activation_queue = std.array_list.AlignedManaged(ValidatorIndex, null).init(allocator);
         // we will extract indices_eligible_for_activation from validator_activation_list later
         var validator_activation_list = ValidatorActivationList.init(allocator);
         defer validator_activation_list.deinit();
-        var indices_to_eject = std.ArrayList(ValidatorIndex).init(allocator);
+        var indices_to_eject = std.array_list.AlignedManaged(ValidatorIndex, null).init(allocator);
 
         var total_active_stake_by_increment: u64 = 0;
         const validators = try state.validatorsSlice(allocator);
@@ -504,7 +508,7 @@ pub const EpochTransitionCache = struct {
         }
 
         // zig specific map function similar to "indicesEligibleForActivation.map(({validatorIndex}) => validatorIndex)"
-        var indices_eligible_for_activation = try std.ArrayList(ValidatorIndex).initCapacity(allocator, validator_activation_list.items.len);
+        var indices_eligible_for_activation = try std.array_list.AlignedManaged(ValidatorIndex, null).initCapacity(allocator, validator_activation_list.items.len);
         for (validator_activation_list.items) |activation| {
             try indices_eligible_for_activation.append(activation.validator_index);
         }
@@ -561,7 +565,9 @@ pub const EpochTransitionCache = struct {
     /// Ensure rewards/penalties arrays match the current validator count.
     /// This is only used in benchmark tests where we want to reuse the cache across steps.
     pub fn syncRewardPenaltyLengths(self: *EpochTransitionCache, validator_count: usize) !void {
-        _reused_lock.lock();
+        while (!_reused_lock.tryLock()) {
+            std.atomic.spinLoopHint();
+        }
         defer _reused_lock.unlock();
 
         const reused_cache = _reused_cache orelse return error.ReusedEpochTransitionCacheUnavailable;

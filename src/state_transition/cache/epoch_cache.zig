@@ -228,15 +228,15 @@ pub const EpochCache = struct {
         const total_slashings_by_increment = switch (state_fork_seq) {
             inline else => |f| try getTotalSlashingsByIncrement(f, state.castToFork(f)),
         };
-        var previous_active_indices_array_list = std.ArrayList(ValidatorIndex).init(allocator);
+        var previous_active_indices_array_list = std.array_list.AlignedManaged(ValidatorIndex, null).init(allocator);
         errdefer previous_active_indices_array_list.deinit();
         try previous_active_indices_array_list.ensureTotalCapacity(validator_count);
 
-        var current_active_indices_array_list = std.ArrayList(ValidatorIndex).init(allocator);
+        var current_active_indices_array_list = std.array_list.AlignedManaged(ValidatorIndex, null).init(allocator);
         errdefer current_active_indices_array_list.deinit();
         try current_active_indices_array_list.ensureTotalCapacity(validator_count);
 
-        var next_active_indices_array_list = std.ArrayList(ValidatorIndex).init(allocator);
+        var next_active_indices_array_list = std.array_list.AlignedManaged(ValidatorIndex, null).init(allocator);
         errdefer next_active_indices_array_list.deinit();
         try next_active_indices_array_list.ensureTotalCapacity(validator_count);
 
@@ -707,7 +707,7 @@ pub const EpochCache = struct {
         self: *const EpochCache,
         comptime fork: ForkSeq,
         attestation: *const ForkTypes(fork).Attestation.Type,
-    ) !std.ArrayList(ValidatorIndex) {
+    ) !std.array_list.AlignedManaged(ValidatorIndex, null) {
         return switch (fork) {
             .phase0 => self.getAttestingIndicesPhase0(attestation),
             .electra => self.getAttestingIndicesElectra(attestation),
@@ -715,7 +715,7 @@ pub const EpochCache = struct {
     }
 
     /// Consumer takes ownership of the returned array
-    pub fn getAttestingIndicesPhase0(self: *const EpochCache, attestation: *const types.phase0.Attestation.Type) !std.ArrayList(ValidatorIndex) {
+    pub fn getAttestingIndicesPhase0(self: *const EpochCache, attestation: *const types.phase0.Attestation.Type) !std.array_list.AlignedManaged(ValidatorIndex, null) {
         const aggregation_bits = attestation.aggregation_bits;
         const data = attestation.data;
         const validator_indices = try self.getBeaconCommittee(data.slot, data.index);
@@ -723,7 +723,7 @@ pub const EpochCache = struct {
     }
 
     /// consumer takes ownership of the returned array
-    pub fn getAttestingIndicesElectra(self: *const EpochCache, attestation: *const types.electra.Attestation.Type) !std.ArrayList(ValidatorIndex) {
+    pub fn getAttestingIndicesElectra(self: *const EpochCache, attestation: *const types.electra.Attestation.Type) !std.array_list.AlignedManaged(ValidatorIndex, null) {
         const aggregation_bits = attestation.aggregation_bits;
         const committee_bits = attestation.committee_bits;
         const data = attestation.data;

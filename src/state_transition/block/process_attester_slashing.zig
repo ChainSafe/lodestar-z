@@ -39,7 +39,7 @@ pub fn processAttesterSlashing(
         verify_signature,
     );
 
-    var intersecting_indices = try std.ArrayList(types.primitive.ValidatorIndex.Type).initCapacity(
+    var intersecting_indices = try std.array_list.AlignedManaged(types.primitive.ValidatorIndex.Type, null).initCapacity(
         allocator,
         @min(
             attester_slashing.attestation_1.attesting_indices.items.len,

@@ -199,10 +199,10 @@ pub fn BitList(comptime limit: comptime_int) type {
             comptime T: type,
             allocator: std.mem.Allocator,
             values: []const T,
-        ) !std.ArrayList(T) {
+        ) !std.array_list.AlignedManaged(T, null) {
             if (values.len != self.bit_len) return error.InvalidSize;
 
-            var indices = try std.ArrayList(T).initCapacity(allocator, self.bit_len);
+            var indices = try std.array_list.AlignedManaged(T, null).initCapacity(allocator, self.bit_len);
             const full_byte_len = self.bit_len / 8;
             const remainder_bits = self.bit_len % 8;
             for (0..full_byte_len) |i_byte| {
@@ -688,7 +688,7 @@ test "BitListType - intersectValues" {
 
         for (tc.expected) |i| try b.setAssumeCapacity(i, true);
 
-        var values = try std.ArrayList(u8).initCapacity(allocator, tc.bit_len);
+        var values = try std.array_list.AlignedManaged(u8, null).initCapacity(allocator, tc.bit_len);
         defer values.deinit();
         for (0..tc.bit_len) |i| values.appendAssumeCapacity(@intCast(i));
 

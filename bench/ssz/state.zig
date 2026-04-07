@@ -105,9 +105,8 @@ const HashStateSerialized = struct {
     }
 };
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
     const allocator = std.heap.page_allocator;
-    const stdout = std.io.getStdOut().writer();
     var bench = zbench.Benchmark.init(allocator, .{});
     defer bench.deinit();
 
@@ -116,7 +115,7 @@ pub fn main() !void {
         &[_][]const u8{ download_era_options.era_out_dir, download_era_options.era_files[0] },
     );
     defer allocator.free(era_path);
-    var era_reader = try era.Reader.open(allocator, config.mainnet.config, era_path);
+    var era_reader = try era.Reader.open(allocator, init.io, config.mainnet.config, era_path);
     defer era_reader.close(allocator);
 
     const state_bytes: []u8 = @constCast(try era_reader.readSerializedState(allocator, null));
@@ -157,5 +156,5 @@ pub fn main() !void {
     const hash_state_serialized = HashStateSerialized{ .bytes = state_bytes };
     try bench.addParam("hash state serialized", &hash_state_serialized, .{});
 
-    try bench.run(stdout);
+    try bench.run(init.io, std.Io.File.stdout());
 }

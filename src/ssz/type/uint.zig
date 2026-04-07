@@ -136,17 +136,16 @@ test "UintType - sanity" {
     try Uint8.deserializeFromJson(&json, &u);
 
     // Serialize u into "255"
-    var output_json = std.ArrayList(u8).init(allocator);
+    var output_json: std.Io.Writer.Allocating = .init(allocator);
     defer output_json.deinit();
-    var write_stream = std.json.writeStream(output_json.writer(), .{});
-    defer write_stream.deinit();
+    var write_stream: std.json.Stringify = .{ .writer = &output_json.writer };
     try Uint8.serializeIntoJson(&write_stream, &u);
     var cloned: Uint8.Type = undefined;
     try Uint8.clone(&u, &cloned);
     try expectEqualRoots(Uint8, u, cloned);
     try expectEqualSerialized(Uint8, u, cloned);
 
-    try std.testing.expectEqualSlices(u8, input_json, output_json.items);
+    try std.testing.expectEqualSlices(u8, input_json, output_json.written());
 }
 
 fn testFixed(

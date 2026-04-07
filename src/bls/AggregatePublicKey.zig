@@ -8,7 +8,7 @@ point: c.blst_p1 = c.blst_p1{},
 /// This converts from projective coordinates back to affine coordinates.
 pub fn toPublicKey(self: *const Self) PublicKey {
     var pk = PublicKey{};
-    c.blst_p1_to_affine(&pk.point, &self.point);
+    c.blst_p1_to_affine(@ptrCast(&pk.point), @ptrCast(&self.point));
     return pk;
 }
 
@@ -21,9 +21,9 @@ pub fn aggregate(pks: []const PublicKey, pks_validate: bool) BlstError!Self {
     if (pks_validate) for (pks) |pk| try pk.validate();
 
     var agg_pk = Self{};
-    c.blst_p1_from_affine(&agg_pk.point, &pks[0].point);
+    c.blst_p1_from_affine(@ptrCast(&agg_pk.point), @ptrCast(&pks[0].point));
     for (1..pks.len) |i| {
-        c.blst_p1_add_or_double_affine(&agg_pk.point, &agg_pk.point, &pks[i].point);
+        c.blst_p1_add_or_double_affine(@ptrCast(&agg_pk.point), @ptrCast(&agg_pk.point), @ptrCast(&pks[i].point));
     }
     return agg_pk;
 }
@@ -87,7 +87,8 @@ test aggregateWithRandomness {
 
     var prng = std.Random.DefaultPrng.init(blk: {
         var seed: u64 = undefined;
-        std.posix.getrandom(std.mem.asBytes(&seed)) catch unreachable;
+        var stack_dummy: u8 = 0;
+        seed = @truncate(@intFromPtr(&stack_dummy));
         break :blk seed;
     });
     const rand = prng.random();

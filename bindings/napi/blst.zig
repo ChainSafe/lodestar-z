@@ -39,7 +39,7 @@ const InstanceData = struct {
         return self;
     }
 
-    fn finalize(env: napi.c.napi_env, data: ?*anyopaque, _: ?*anyopaque) callconv(.C) void {
+    fn finalize(env: napi.c.napi_env, data: ?*anyopaque, _: ?*anyopaque) callconv(.c) void {
         const self: *InstanceData = @ptrCast(@alignCast(data orelse return));
         self.clearRefs(env);
         allocator.destroy(self);
@@ -197,14 +197,14 @@ pub fn PublicKey_toHex(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
     if (compress) {
         const bytes = pk.compress();
 
-        const hex = try std.fmt.allocPrint(allocator, "0x{x}", .{std.fmt.fmtSliceHexLower(&bytes)});
+        const hex = try std.fmt.allocPrint(allocator, "0x{s}", .{std.fmt.bytesToHex(bytes, .lower)});
         defer allocator.free(hex);
 
         return try env.createStringUtf8(hex);
     } else {
         const bytes = pk.serialize();
 
-        const hex = try std.fmt.allocPrint(allocator, "0x{x}", .{std.fmt.fmtSliceHexLower(&bytes)});
+        const hex = try std.fmt.allocPrint(allocator, "0x{s}", .{std.fmt.bytesToHex(bytes, .lower)});
         defer allocator.free(hex);
 
         return try env.createStringUtf8(hex);
@@ -306,14 +306,14 @@ pub fn Signature_toHex(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
     if (compress) {
         const bytes = sig.compress();
 
-        const hex = try std.fmt.allocPrint(allocator, "0x{x}", .{std.fmt.fmtSliceHexLower(&bytes)});
+        const hex = try std.fmt.allocPrint(allocator, "0x{s}", .{std.fmt.bytesToHex(bytes, .lower)});
         defer allocator.free(hex);
 
         return try env.createStringUtf8(hex);
     } else {
         const bytes = sig.serialize();
 
-        const hex = try std.fmt.allocPrint(allocator, "0x{x}", .{std.fmt.fmtSliceHexLower(&bytes)});
+        const hex = try std.fmt.allocPrint(allocator, "0x{s}", .{std.fmt.bytesToHex(bytes, .lower)});
         defer allocator.free(hex);
 
         return try env.createStringUtf8(hex);
@@ -367,7 +367,7 @@ pub fn SecretKey_toHex(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
     const sk = try env.unwrap(SecretKey, cb.this());
     const bytes = sk.serialize();
 
-    const hex = try std.fmt.allocPrint(allocator, "0x{x}", .{std.fmt.fmtSliceHexLower(&bytes)});
+    const hex = try std.fmt.allocPrint(allocator, "0x{s}", .{std.fmt.bytesToHex(bytes, .lower)});
     defer allocator.free(hex);
 
     return try env.createStringUtf8(hex);

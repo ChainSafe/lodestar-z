@@ -1,4 +1,11 @@
 const std = @import("std");
+const io = std.testing.io;
+
+fn readFileToEnd(file: std.Io.File, allocator: std.mem.Allocator, limit: usize) ![]u8 {
+    var read_buf: [4096]u8 = undefined;
+    var file_reader = file.reader(io, &read_buf);
+    return file_reader.interface.allocRemaining(allocator, @enumFromInt(limit));
+}
 const ct = @import("consensus_types");
 const ForkSeq = @import("config").ForkSeq;
 const test_case = @import("../test_case.zig");
@@ -41,14 +48,14 @@ pub fn TestCase(comptime fork: ForkSeq) type {
 
         const Self = @This();
 
-        pub fn execute(allocator: std.mem.Allocator, dir: std.fs.Dir) !void {
+        pub fn execute(allocator: std.mem.Allocator, dir: std.Io.Dir) !void {
             var tc = try Self.init(allocator, dir);
             defer tc.deinit();
 
             try tc.runTest();
         }
 
-        fn init(allocator: std.mem.Allocator, dir: std.fs.Dir) !Self {
+        fn init(allocator: std.mem.Allocator, dir: std.Io.Dir) !Self {
             var body = BeaconBlockBody.default_value;
             errdefer {
                 if (comptime @hasDecl(BeaconBlockBody, "deinit")) {
@@ -138,11 +145,11 @@ pub fn TestCase(comptime fork: ForkSeq) type {
             }
         }
 
-        fn loadProof(allocator: std.mem.Allocator, dir: std.fs.Dir, out: *MerkleProof) !void {
-            var file = try dir.openFile("proof.yaml", .{});
-            defer file.close();
+        fn loadProof(allocator: std.mem.Allocator, dir: std.Io.Dir, out: *MerkleProof) !void {
+            var file = try dir.openFile(io, "proof.yaml", .{});
+            defer file.close(io);
 
-            const contents = try file.readToEndAlloc(allocator, 4096);
+            const contents = try readFileToEnd(file, allocator, 4096);
             defer allocator.free(contents);
 
             out.* = try parseProofYaml(allocator, contents);

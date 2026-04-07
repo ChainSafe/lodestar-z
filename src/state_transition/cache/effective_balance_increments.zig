@@ -4,7 +4,7 @@ const preset = @import("preset").preset;
 const AnyBeaconState = @import("fork_types").AnyBeaconState;
 const ReferenceCount = @import("../utils/reference_count.zig").ReferenceCount;
 
-pub const EffectiveBalanceIncrements = std.ArrayList(u16);
+pub const EffectiveBalanceIncrements = std.array_list.AlignedManaged(u16, null);
 pub const EffectiveBalanceIncrementsRc = ReferenceCount(EffectiveBalanceIncrements);
 
 /// Allocates `EffectiveBalanceIncrements` with capacity slightly larger than `validator_count`.

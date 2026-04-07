@@ -18,7 +18,7 @@ pub fn hexToBytes(out: []u8, input: []const u8) ![]u8 {
 
 /// Convert bytes to hex with 0x-prefix
 pub fn bytesToHex(out: []u8, input: []const u8) ![]u8 {
-    return try fmt.bufPrint(out, "0x{x}", .{fmt.fmtSliceHexLower(input)});
+    return try fmt.bufPrint(out, "0x{x}", .{input});
 }
 
 pub fn hexToRoot(input: *const [66]u8) ![32]u8 {

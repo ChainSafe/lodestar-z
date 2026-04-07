@@ -16,8 +16,9 @@ const e2s = @import("e2s.zig");
 const era = @import("era.zig");
 
 config: c.BeaconConfig,
+io: std.Io,
 path: []const u8,
-file: std.fs.File,
+file: std.Io.File,
 era_number: u64,
 state: WriterState,
 
@@ -31,7 +32,7 @@ pub const WriterState = union(enum) {
     write_group: struct {
         era_number: u64,
         current_offset: u64,
-        block_offsets: std.ArrayList(u64),
+        block_offsets: std.array_list.AlignedManaged(u64, null),
         last_block_slot: u64,
     },
     finished_group: struct {
@@ -41,10 +42,11 @@ pub const WriterState = union(enum) {
     },
 };
 
-pub fn open(config: c.BeaconConfig, path: []const u8, era_number: u64) !Writer {
-    const file = try std.fs.cwd().createFile(path, .{ .truncate = true });
+pub fn open(config: c.BeaconConfig, io: std.Io, path: []const u8, era_number: u64) !Writer {
+    const file = try std.Io.Dir.cwd().createFile(io, path, .{ .truncate = true });
     return .{
         .config = config,
+        .io = io,
         .path = path,
         .file = file,
         .era_number = era_number,
@@ -65,7 +67,7 @@ pub fn finish(self: *Writer, allocator: std.mem.Allocator) ![]const u8 {
     if (self.state != .finished_group) {
         return error.NotFinished;
     }
-    self.file.close();
+    self.file.close(self.io);
 
     const new_base = try std.fmt.allocPrint(
         allocator,
@@ -79,35 +81,43 @@ pub fn finish(self: *Writer, allocator: std.mem.Allocator) ![]const u8 {
         &[_][]const u8{ std.fs.path.dirname(self.path) orelse ".", new_base },
     );
     errdefer allocator.free(new_path);
-    try std.fs.cwd().rename(self.path, new_path);
+    const cwd = std.Io.Dir.cwd();
+    try cwd.rename(self.path, cwd, new_path, self.io);
 
     return new_path;
 }
 
 pub fn writeVersion(self: *Writer, allocator: std.mem.Allocator) !void {
     if (self.state == .finished_group) {
+        const finished_era_number = self.state.finished_group.era_number;
+        const finished_current_offset = self.state.finished_group.current_offset;
         self.state = .{
             .init_group = .{
-                .era_number = self.state.finished_group.era_number + 1,
-                .current_offset = self.state.finished_group.current_offset,
+                .era_number = finished_era_number + 1,
+                .current_offset = finished_current_offset,
             },
         };
     }
     if (self.state != .init_group) {
         return error.AlreadyInitialized;
     }
-    try e2s.writeEntry(self.file, self.state.init_group.current_offset, .Version, &[0]u8{});
+    try e2s.writeEntry(self.file, self.io, self.state.init_group.current_offset, .Version, &[0]u8{});
+
+    // Save init_group values before transitioning state (Zig 0.16 enforces
+    // tagged union safety - can't read init_group after assigning write_group)
+    const init_era_number = self.state.init_group.era_number;
+    const init_current_offset = self.state.init_group.current_offset;
 
     // Move to writing blocks/state
     self.state = .{
         .write_group = .{
-            .era_number = self.state.init_group.era_number,
-            .current_offset = self.state.init_group.current_offset + e2s.header_size,
-            .block_offsets = try std.ArrayList(u64).initCapacity(allocator, preset.SLOTS_PER_HISTORICAL_ROOT),
-            .last_block_slot = if (self.state.init_group.era_number == 0)
+            .era_number = init_era_number,
+            .current_offset = init_current_offset + e2s.header_size,
+            .block_offsets = try std.array_list.AlignedManaged(u64, null).initCapacity(allocator, preset.SLOTS_PER_HISTORICAL_ROOT),
+            .last_block_slot = if (init_era_number == 0)
                 0
             else
-                (try era.computeStartBlockSlotFromEraNumber(self.state.init_group.era_number)) - 1,
+                (try era.computeStartBlockSlotFromEraNumber(init_era_number)) - 1,
         },
     };
 }
@@ -130,7 +140,7 @@ pub fn writeCompressedState(self: *Writer, allocator: std.mem.Allocator, slot: u
     );
 
     const state_offset = self.state.write_group.current_offset;
-    try e2s.writeEntry(self.file, self.state.write_group.current_offset, .CompressedBeaconState, data);
+    try e2s.writeEntry(self.file, self.io, self.state.write_group.current_offset, .CompressedBeaconState, data);
     self.state.write_group.current_offset += e2s.header_size + data.len;
 
     if (self.state.write_group.era_number > 0) {
@@ -151,7 +161,7 @@ pub fn writeCompressedState(self: *Writer, allocator: std.mem.Allocator, slot: u
         const blocks_index_payload = try blocks_index.serialize(allocator);
         defer allocator.free(blocks_index_payload);
 
-        try e2s.writeEntry(self.file, self.state.write_group.current_offset, .SlotIndex, blocks_index_payload);
+        try e2s.writeEntry(self.file, self.io, self.state.write_group.current_offset, .SlotIndex, blocks_index_payload);
         self.state.write_group.current_offset += e2s.header_size + blocks_index_payload.len;
     }
     // Given the bounds of the era spec and network configurations, overflow is not feasible here.
@@ -164,15 +174,17 @@ pub fn writeCompressedState(self: *Writer, allocator: std.mem.Allocator, slot: u
     const state_index_payload = try state_index.serialize(allocator);
     defer allocator.free(state_index_payload);
 
-    try e2s.writeEntry(self.file, self.state.write_group.current_offset, .SlotIndex, state_index_payload);
+    try e2s.writeEntry(self.file, self.io, self.state.write_group.current_offset, .SlotIndex, state_index_payload);
     self.state.write_group.current_offset += e2s.header_size + state_index_payload.len;
     self.state.write_group.last_block_slot = slot;
 
+    const write_era_number = self.state.write_group.era_number;
+    const write_current_offset = self.state.write_group.current_offset;
     self.state.write_group.block_offsets.deinit();
     self.state = .{
         .finished_group = .{
-            .era_number = self.state.write_group.era_number,
-            .current_offset = self.state.write_group.current_offset,
+            .era_number = write_era_number,
+            .current_offset = write_current_offset,
             .short_historical_root = short_historical_root,
         },
     };
@@ -217,7 +229,7 @@ pub fn writeCompressedBlock(self: *Writer, allocator: std.mem.Allocator, slot: u
     );
 
     const block_offset = self.state.write_group.current_offset;
-    try e2s.writeEntry(self.file, block_offset, .CompressedSignedBeaconBlock, data);
+    try e2s.writeEntry(self.file, self.io, block_offset, .CompressedSignedBeaconBlock, data);
     try self.state.write_group.block_offsets.append(block_offset);
     self.state.write_group.current_offset += e2s.header_size + data.len;
     self.state.write_group.last_block_slot = slot;

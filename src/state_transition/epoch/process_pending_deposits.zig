@@ -37,7 +37,7 @@ pub fn processPendingDeposits(
 
     var processed_amount: u64 = 0;
     var next_deposit_index: u64 = 0;
-    var deposits_to_postpone = std.ArrayList(PendingDeposit).init(allocator);
+    var deposits_to_postpone = std.array_list.AlignedManaged(PendingDeposit, null).init(allocator);
     defer deposits_to_postpone.deinit();
     var is_churn_limit_reached = false;
 

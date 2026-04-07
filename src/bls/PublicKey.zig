@@ -16,8 +16,8 @@ const Self = @This();
 ///
 /// Returns a `BlstError` if verification fails.
 pub fn validate(self: *const Self) BlstError!void {
-    if (c.blst_p1_affine_is_inf(&self.point)) return BlstError.PkIsInfinity;
-    if (!c.blst_p1_affine_in_g1(&self.point)) return BlstError.PointNotInGroup;
+    if (c.blst_p1_affine_is_inf(@ptrCast(&self.point))) return BlstError.PkIsInfinity;
+    if (!c.blst_p1_affine_in_g1(@ptrCast(&self.point))) return BlstError.PointNotInGroup;
 }
 
 /// Validate a serialized public key.
@@ -32,28 +32,28 @@ pub fn keyValidate(key: []const u8) BlstError!Self {
 /// Convert an `AggregatePublicKey` to a regular `PublicKey`.
 pub fn fromAggregate(agg_pk: *const AggregatePublicKey) Self {
     var pk_aff = @This(){};
-    c.blst_p1_to_affine(&pk_aff.point, &agg_pk.point);
+    c.blst_p1_to_affine(@ptrCast(&pk_aff.point), @ptrCast(&agg_pk.point));
     return pk_aff;
 }
 
 /// Convert a regular `PublicKey` to a `AggregatePublicKey`.
 pub fn toAggregate(self: *const Self) AggregatePublicKey {
     var agg_pk = AggregatePublicKey{};
-    c.blst_p1_from_affine(&agg_pk.point, &self.point);
+    c.blst_p1_from_affine(@ptrCast(&agg_pk.point), @ptrCast(&self.point));
     return agg_pk;
 }
 
 /// Compress the `PublicKey` to bytes.
 pub fn compress(self: *const Self) [COMPRESS_SIZE]u8 {
     var pk_comp = [_]u8{0} ** COMPRESS_SIZE;
-    c.blst_p1_affine_compress(&pk_comp, &self.point);
+    c.blst_p1_affine_compress(@ptrCast(&pk_comp), @ptrCast(&self.point));
     return pk_comp;
 }
 
 /// Serialize the `PublicKey` to bytes.
 pub fn serialize(self: *const Self) [SERIALIZE_SIZE]u8 {
     var pk_out = [_]u8{0} ** SERIALIZE_SIZE;
-    c.blst_p1_affine_serialize(&pk_out, &self.point);
+    c.blst_p1_affine_serialize(@ptrCast(&pk_out), @ptrCast(&self.point));
     return pk_out;
 }
 
@@ -63,7 +63,7 @@ pub fn serialize(self: *const Self) [SERIALIZE_SIZE]u8 {
 pub fn uncompress(pk_comp: []const u8) BlstError!Self {
     if (pk_comp.len == COMPRESS_SIZE or (pk_comp[0] & 0x80) != 0) {
         var pk = Self{};
-        try errorFromInt(c.blst_p1_uncompress(&pk.point, pk_comp.ptr));
+        try errorFromInt(c.blst_p1_uncompress(@ptrCast(&pk.point), pk_comp.ptr));
         return pk;
     }
     return BlstError.BadEncoding;
@@ -77,7 +77,7 @@ pub fn deserialize(pk_in: []const u8) BlstError!Self {
         (pk_in.len == COMPRESS_SIZE and (pk_in[0] & 0x80) != 0))
     {
         var pk = Self{};
-        try errorFromInt(c.blst_p1_deserialize(&pk.point, &pk_in[0]));
+        try errorFromInt(c.blst_p1_deserialize(@ptrCast(&pk.point), @ptrCast(&pk_in[0])));
         return pk;
     }
 
@@ -86,7 +86,7 @@ pub fn deserialize(pk_in: []const u8) BlstError!Self {
 
 /// Check if two public keys are equal.
 pub fn isEqual(self: *const Self, other: *const Self) bool {
-    return c.blst_p1_affine_is_equal(&self.point, &other.point);
+    return c.blst_p1_affine_is_equal(@ptrCast(&self.point), @ptrCast(&other.point));
 }
 
 const std = @import("std");

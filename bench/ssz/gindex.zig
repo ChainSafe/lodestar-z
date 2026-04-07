@@ -30,9 +30,8 @@ const Path = struct {
     }
 };
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
     const allocator = std.heap.page_allocator;
-    const stdout = std.io.getStdOut().writer();
     var bench = zbench.Benchmark.init(allocator, .{});
     defer bench.deinit();
 
@@ -42,5 +41,5 @@ pub fn main() !void {
     const path = Path{ .gindex = gindex };
     try bench.addParam("gindex - path", &path, .{});
 
-    try bench.run(stdout);
+    try bench.run(init.io, std.Io.File.stdout());
 }

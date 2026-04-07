@@ -114,9 +114,8 @@ const EqualsAttestation = struct {
     }
 };
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
     const allocator = std.heap.page_allocator;
-    const stdout = std.io.getStdOut().writer();
     var bench = zbench.Benchmark.init(allocator, .{});
     defer bench.deinit();
 
@@ -126,7 +125,7 @@ pub fn main() !void {
     );
     defer allocator.free(era_path);
 
-    var era_reader = try era.Reader.open(allocator, config.mainnet.config, era_path);
+    var era_reader = try era.Reader.open(allocator, init.io, config.mainnet.config, era_path);
     defer era_reader.close(allocator);
 
     const block_slot = try era.era.computeStartBlockSlotFromEraNumber(era_reader.era_number) + 1;
@@ -177,5 +176,5 @@ pub fn main() !void {
     const equals_attestation = EqualsAttestation{ .a = attestation, .b = attestation };
     try bench.addParam("equals attestation", &equals_attestation, .{});
 
-    try bench.run(stdout);
+    try bench.run(init.io, std.Io.File.stdout());
 }

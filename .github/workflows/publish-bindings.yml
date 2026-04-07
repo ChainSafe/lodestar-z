@@ -3,7 +3,7 @@ on:
   workflow_dispatch:
 
 env:
-  ZIG_VERSION: "0.14.1"
+  ZIG_VERSION: "0.16.0-dev.2915+065c6e794"
   NODE_VERSION: "24"
 
 jobs:
