@@ -1337,6 +1337,50 @@ fn pruneSyncCommitteePools(self: *BeaconNode) void {
     self.chainService().pruneSyncCommitteePools(head_slot);
 }
 
+const SlotStatusPhase = enum {
+    synced,
+    syncing,
+    searching,
+};
+
+fn slotStatusPhase(sync: SyncStatus, connected_peers: u32) SlotStatusPhase {
+    if (!sync.is_syncing) return .synced;
+    return if (connected_peers == 0) .searching else .syncing;
+}
+
+fn executionStatusLabel(sync: SyncStatus) []const u8 {
+    if (sync.el_offline) return "offline";
+    return if (sync.is_optimistic) "syncing" else "valid";
+}
+
+fn logPerSlotStatus(self: *BeaconNode, current_slot: u64) void {
+    const logger = log.logger(.node);
+    const head = self.getHead();
+    const finalized = self.chainQuery().finalizedCheckpoint();
+    const sync = self.getSyncStatus();
+    const connected_peers: u32 = if (self.peer_manager) |pm| pm.peerCount() else 0;
+    const exec_forkchoice = self.chainQuery().executionForkchoiceState(head.root);
+    const exec_head = if (exec_forkchoice) |fc| fc.head_block_hash else std.mem.zeroes([32]u8);
+    const ctx = .{
+        .slot = current_slot,
+        .head_slot = head.slot,
+        .head_lag_slots = current_slot -| head.slot,
+        .head_root = head.root,
+        .exec_status = executionStatusLabel(sync),
+        .exec_head = exec_head,
+        .finalized_epoch = finalized.epoch,
+        .finalized_root = finalized.root,
+        .peers = connected_peers,
+        .sync_distance = sync.sync_distance,
+    };
+
+    switch (slotStatusPhase(sync, connected_peers)) {
+        .synced => logger.info("Synced", ctx),
+        .syncing => logger.info("Syncing", ctx),
+        .searching => logger.info("Searching", ctx),
+    }
+}
+
 fn advanceChainClock(self: *BeaconNode, io: std.Io) void {
     const clock = self.clock orelse return;
     const current_slot = clock.currentSlot(io) orelse return;
@@ -1347,6 +1391,7 @@ fn advanceChainClock(self: *BeaconNode, io: std.Io) void {
 
     self.chainService().onSlot(current_slot);
     self.last_slot_tick = current_slot;
+    logPerSlotStatus(self, current_slot);
 
     self.queueCurrentOptimisticHeadRevalidation();
 }
@@ -3158,3 +3203,4 @@ fn maybePrepareProposerPayload(self: *BeaconNode, io: std.Io) void {
 
 const beacon_node_mod = @import("beacon_node.zig");
 const BeaconNode = beacon_node_mod.BeaconNode;
+const SyncStatus = beacon_node_mod.SyncStatus;
