@@ -141,6 +141,34 @@ pub const Reader = struct {
         return self.data[self.pos] >= 0xc0;
     }
 
+    /// Read the next complete RLP item (string or list) as raw bytes.
+    pub fn readRawItem(self: *Reader) Error![]const u8 {
+        if (self.pos >= self.data.len) return Error.InvalidEncoding;
+        const start = self.pos;
+        const b = self.data[self.pos];
+        if (b < 0x80) {
+            self.pos += 1;
+        } else if (b < 0xb8) {
+            const len: usize = b - 0x80;
+            self.pos += 1 + len;
+        } else if (b < 0xc0) {
+            const len_bytes: usize = b - 0xb7;
+            if (self.pos + 1 + len_bytes > self.data.len) return Error.InvalidEncoding;
+            const len = readBigEndianUsize(self.data[self.pos + 1 .. self.pos + 1 + len_bytes]);
+            self.pos += 1 + len_bytes + len;
+        } else if (b < 0xf8) {
+            const len: usize = b - 0xc0;
+            self.pos += 1 + len;
+        } else {
+            const len_bytes: usize = b - 0xf7;
+            if (self.pos + 1 + len_bytes > self.data.len) return Error.InvalidEncoding;
+            const len = readBigEndianUsize(self.data[self.pos + 1 .. self.pos + 1 + len_bytes]);
+            self.pos += 1 + len_bytes + len;
+        }
+        if (self.pos > self.data.len) return Error.InvalidEncoding;
+        return self.data[start..self.pos];
+    }
+
     pub fn readBytes(self: *Reader) Error![]const u8 {
         if (self.pos >= self.data.len) return Error.InvalidEncoding;
         const b = self.data[self.pos];

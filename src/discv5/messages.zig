@@ -219,7 +219,7 @@ pub const Nodes = struct {
         }
 
         while (!enr_list.atEnd()) {
-            const enr_bytes = enr_list.readBytes() catch return Error.InvalidEncoding;
+            const enr_bytes = enr_list.readRawItem() catch return Error.InvalidEncoding;
             try enrs.append(alloc, try alloc.dupe(u8, enr_bytes));
         }
         const owned = try enrs.toOwnedSlice(alloc);
