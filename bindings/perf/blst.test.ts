@@ -1,7 +1,7 @@
 //TODO(bing): The ts benchmarks are here really to ensure perf is up to par on the zig side.
 // Remove once we are happy
 import crypto from "node:crypto";
-import { bench, describe } from "@chainsafe/benchmark";
+import {bench, describe} from "@chainsafe/benchmark";
 import {
   SecretKey as SecretKeyTS,
   type Signature as SignatureTS,
@@ -23,7 +23,7 @@ import {
 
 interface SignatureSetZig {
   msg: Uint8Array;
-  pk: InstanceType<typeof SecretKeyZig> extends { toPublicKey(): infer P } ? P : never;
+  pk: InstanceType<typeof SecretKeyZig> extends {toPublicKey(): infer P} ? P : never;
   sig: InstanceType<typeof SignatureZig>;
 }
 
@@ -34,22 +34,22 @@ interface SignatureSetTS {
 }
 
 function generateZigSets(count: number): SignatureSetZig[] {
-  return Array.from({ length: count }, () => {
+  return Array.from({length: count}, () => {
     const msg = crypto.randomBytes(32);
     const sk = SecretKeyZig.fromKeygen(crypto.randomBytes(32));
     const pk = sk.toPublicKey();
     const sig = sk.sign(msg);
-    return { msg, pk, sig };
+    return {msg, pk, sig};
   });
 }
 
 function generateTSSets(count: number): SignatureSetTS[] {
-  return Array.from({ length: count }, () => {
+  return Array.from({length: count}, () => {
     const msg = crypto.randomBytes(32);
     const sk = SecretKeyTS.fromKeygen(crypto.randomBytes(32));
     const pk = sk.toPublicKey();
     const sig = sk.sign(msg);
-    return { msg, pk, sig };
+    return {msg, pk, sig};
   });
 }
 
@@ -104,7 +104,7 @@ describe("aggregateVerify", () => {
           signature: aggregateSignaturesZig(sets.map((s) => s.sig)),
         };
       },
-      fn: ({ messages, publicKeys, signature }) => {
+      fn: ({messages, publicKeys, signature}) => {
         const isValid = aggregateVerifyZig(messages, publicKeys, signature);
         if (!isValid) throw Error("Invalid");
       },
@@ -120,7 +120,7 @@ describe("aggregateVerify", () => {
           signature: aggregateSignaturesTS(sets.map((s) => s.sig)),
         };
       },
-      fn: ({ messages, publicKeys, signature }) => {
+      fn: ({messages, publicKeys, signature}) => {
         const isValid = aggregateVerifyTS(messages, publicKeys, signature);
         if (!isValid) throw Error("Invalid");
       },
@@ -156,7 +156,7 @@ describe("aggregateWithRandomness", () => {
     bench({
       beforeEach: () => {
         const sets = generateZigSets(count);
-        return sets.map((s) => ({ pk: s.pk, sig: s.sig.toBytes() }));
+        return sets.map((s) => ({pk: s.pk, sig: s.sig.toBytes()}));
       },
       fn: async (sets) => {
         await asyncAggregateWithRandomnessZig(sets);
@@ -167,7 +167,7 @@ describe("aggregateWithRandomness", () => {
     bench({
       beforeEach: () => {
         const sets = generateTSSets(count);
-        return sets.map((s) => ({ pk: s.pk, sig: s.sig.toBytes() }));
+        return sets.map((s) => ({pk: s.pk, sig: s.sig.toBytes()}));
       },
       fn: (sets) => {
         aggregateWithRandomnessTS(sets);
