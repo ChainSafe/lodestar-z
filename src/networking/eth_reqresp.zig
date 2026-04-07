@@ -91,16 +91,22 @@ pub const EthReqRespAdapter = struct {
         defer if (should_free_ssz) self.allocator.free(ssz_bytes);
 
         // 3. Route to handler.
-        const chunks = req_resp_handler.handleRequestVersioned(
+        var collector = req_resp_handler.CollectingWriter{ .allocator = self.allocator };
+        defer collector.deinit();
+        var writer = collector.writer();
+        req_resp_handler.serveRequestVersioned(
             self.allocator,
             method,
             info.version,
             ssz_bytes,
+            .{},
             self.context,
+            &writer,
         ) catch |err| {
             log.debug("handler error for {s}: {}", .{ method.name(), err });
-            return error.HandlerError;
+            try writer.writeError(.server_error, "Internal server error");
         };
+        const chunks = try collector.finish();
         defer req_resp_handler.freeResponseChunks(self.allocator, chunks);
 
         // 4. Encode all response chunks to wire format.
@@ -372,6 +378,117 @@ test "EthReqRespAdapter: handle MetadataV3 request (empty body)" {
 
     try testing.expectEqual(ResponseCode.success, decoded.result);
     try testing.expectEqual(messages.MetadataV3.fixed_size, decoded.ssz_bytes.len);
+}
+
+fn testDecodeWireResponse(
+    allocator: Allocator,
+    wire_bytes: []const u8,
+    method: Method,
+) ![]req_resp_encoding.DecodedResponseChunk {
+    return req_resp_encoding.decodeResponseChunks(
+        allocator,
+        wire_bytes,
+        method.hasContextBytes(),
+        method.hasMultipleResponses(),
+    );
+}
+
+const RangeStreamTestContext = struct {
+    chunks: []const req_resp_handler.SlotPayload,
+    fail_after_chunks: ?usize = null,
+
+    fn streamBlocksByRange(ptr: *anyopaque, _: u64, _: u64, sink: *const PayloadSink) anyerror!void {
+        const self: *RangeStreamTestContext = @ptrCast(@alignCast(ptr));
+        for (self.chunks, 0..) |chunk, i| {
+            try sink.write(chunk);
+            if (self.fail_after_chunks) |fail_after| {
+                if (i + 1 == fail_after) return error.TestServerFailure;
+            }
+        }
+    }
+};
+
+fn makeRangeStreamContext(test_ctx: *RangeStreamTestContext) ReqRespContext {
+    var ctx = test_context;
+    ctx.ptr = test_ctx;
+    ctx.streamBlocksByRange = &RangeStreamTestContext.streamBlocksByRange;
+    return ctx;
+}
+
+test "EthReqRespAdapter: BeaconBlocksByRange streams multiple response chunks with context bytes" {
+    const allocator = testing.allocator;
+
+    const chunk_0 = [_]u8{ 0xAA, 0xBB, 0xCC };
+    const chunk_1 = [_]u8{ 0xDD, 0xEE };
+    const slot_payloads = [_]req_resp_handler.SlotPayload{
+        .{ .slot = 11, .ssz_payload = &chunk_0 },
+        .{ .slot = 13, .ssz_payload = &chunk_1 },
+    };
+    var range_ctx_data = RangeStreamTestContext{ .chunks = &slot_payloads };
+    const range_ctx = makeRangeStreamContext(&range_ctx_data);
+    var adapter = EthReqRespAdapter.init(allocator, &range_ctx);
+
+    const request = messages.BeaconBlocksByRangeRequest.Type{
+        .start_slot = 11,
+        .count = 3,
+    };
+    var request_ssz: [messages.BeaconBlocksByRangeRequest.fixed_size]u8 = undefined;
+    _ = messages.BeaconBlocksByRangeRequest.serializeIntoBytes(&request, &request_ssz);
+    const wire_request = try req_resp_encoding.encodeRequest(allocator, &request_ssz);
+    defer allocator.free(wire_request);
+
+    const wire_response = try adapter.handleStream("/eth2/beacon_chain/req/beacon_blocks_by_range/2/ssz_snappy", wire_request);
+    defer allocator.free(wire_response);
+
+    const decoded = try testDecodeWireResponse(allocator, wire_response, .beacon_blocks_by_range);
+    defer req_resp_encoding.freeDecodedResponseChunks(allocator, decoded);
+
+    try testing.expectEqual(@as(usize, 2), decoded.len);
+    try testing.expectEqual(ResponseCode.success, decoded[0].result);
+    try testing.expectEqual(ResponseCode.success, decoded[1].result);
+    try testing.expectEqual(@as(?[4]u8, .{ 0x01, 0x02, 0x03, 0x04 }), decoded[0].context_bytes);
+    try testing.expectEqual(@as(?[4]u8, .{ 0x01, 0x02, 0x03, 0x04 }), decoded[1].context_bytes);
+    try testing.expectEqualSlices(u8, &chunk_0, decoded[0].ssz_bytes);
+    try testing.expectEqualSlices(u8, &chunk_1, decoded[1].ssz_bytes);
+}
+
+test "EthReqRespAdapter: BeaconBlocksByRange emits server error after streamed success chunks" {
+    const allocator = testing.allocator;
+
+    const chunk_0 = [_]u8{0xA1};
+    const chunk_1 = [_]u8{0xB2};
+    const slot_payloads = [_]req_resp_handler.SlotPayload{
+        .{ .slot = 1, .ssz_payload = &chunk_0 },
+        .{ .slot = 2, .ssz_payload = &chunk_1 },
+    };
+    var range_ctx_data = RangeStreamTestContext{
+        .chunks = &slot_payloads,
+        .fail_after_chunks = 2,
+    };
+    const range_ctx = makeRangeStreamContext(&range_ctx_data);
+    var adapter = EthReqRespAdapter.init(allocator, &range_ctx);
+
+    const request = messages.BeaconBlocksByRangeRequest.Type{
+        .start_slot = 1,
+        .count = 3,
+    };
+    var request_ssz: [messages.BeaconBlocksByRangeRequest.fixed_size]u8 = undefined;
+    _ = messages.BeaconBlocksByRangeRequest.serializeIntoBytes(&request, &request_ssz);
+    const wire_request = try req_resp_encoding.encodeRequest(allocator, &request_ssz);
+    defer allocator.free(wire_request);
+
+    const wire_response = try adapter.handleStream("/eth2/beacon_chain/req/beacon_blocks_by_range/2/ssz_snappy", wire_request);
+    defer allocator.free(wire_response);
+
+    const decoded = try testDecodeWireResponse(allocator, wire_response, .beacon_blocks_by_range);
+    defer req_resp_encoding.freeDecodedResponseChunks(allocator, decoded);
+
+    try testing.expectEqual(@as(usize, 3), decoded.len);
+    try testing.expectEqual(ResponseCode.success, decoded[0].result);
+    try testing.expectEqual(ResponseCode.success, decoded[1].result);
+    try testing.expectEqual(ResponseCode.server_error, decoded[2].result);
+    try testing.expectEqual(@as(?[4]u8, null), decoded[2].context_bytes);
+    try testing.expectEqualStrings("Internal server error", decoded[2].ssz_bytes);
 }
 
 test "EthReqRespAdapter: unknown protocol returns error" {

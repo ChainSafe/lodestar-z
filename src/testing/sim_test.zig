@@ -7,7 +7,6 @@
 const std = @import("std");
 const testing = std.testing;
 
-const Node = @import("persistent_merkle_tree").Node;
 
 const StateHistoryEntry = @import("invariant_checker.zig").StateHistoryEntry;
 
@@ -17,10 +16,8 @@ const SimTestHarness = @import("sim_test_harness.zig").SimTestHarness;
 
 test "sim: happy path — process slots with blocks" {
     const allocator = testing.allocator;
-    var pool = try Node.Pool.init(allocator, SimTestHarness.default_pool_size);
-    defer pool.deinit();
 
-    var harness = try SimTestHarness.init(allocator, &pool, 42);
+    var harness = try SimTestHarness.init(allocator, 42);
     defer harness.deinit();
 
     // Process 3 slots with blocks.
@@ -48,10 +45,8 @@ test "sim: happy path — process slots with blocks" {
 
 test "sim: skip slots — state advances without blocks" {
     const allocator = testing.allocator;
-    var pool = try Node.Pool.init(allocator, SimTestHarness.default_pool_size);
-    defer pool.deinit();
 
-    var harness = try SimTestHarness.init(allocator, &pool, 99);
+    var harness = try SimTestHarness.init(allocator, 99);
     defer harness.deinit();
 
     // Process a slot without a block (skip).
@@ -81,10 +76,8 @@ test "sim: deterministic replay — same seed produces identical state history" 
     defer history_storage[1].deinit(allocator);
 
     for (0..2) |run| {
-        var pool = try Node.Pool.init(allocator, SimTestHarness.default_pool_size);
-        defer pool.deinit();
 
-        var harness = try SimTestHarness.init(allocator, &pool, 42);
+        var harness = try SimTestHarness.init(allocator, 42);
         defer harness.deinit();
 
         try harness.sim.processSlots(num_slots, 0.0);
@@ -112,10 +105,8 @@ test "sim: deterministic replay — same seed produces identical state history" 
 
 test "sim: epoch boundary — processes full epoch with transition" {
     const allocator = testing.allocator;
-    var pool = try Node.Pool.init(allocator, SimTestHarness.default_pool_size);
-    defer pool.deinit();
 
-    var harness = try SimTestHarness.init(allocator, &pool, 77);
+    var harness = try SimTestHarness.init(allocator, 77);
     defer harness.deinit();
 
     // The generated test state starts at slot = ELECTRA_FORK_EPOCH * SLOTS_PER_EPOCH + 2025 * SLOTS_PER_EPOCH - 1
@@ -130,10 +121,8 @@ test "sim: epoch boundary — processes full epoch with transition" {
 
 test "sim: scenario with skip rate — some slots skipped deterministically" {
     const allocator = testing.allocator;
-    var pool = try Node.Pool.init(allocator, SimTestHarness.default_pool_size);
-    defer pool.deinit();
 
-    var harness = try SimTestHarness.init(allocator, &pool, 55);
+    var harness = try SimTestHarness.init(allocator, 55);
     defer harness.deinit();
 
     // Process 5 slots with 50% skip rate (deterministic via PRNG).
@@ -150,10 +139,8 @@ test "sim: scenario with skip rate — some slots skipped deterministically" {
 
 test "sim: blocks with attestations — single node, 40 slots" {
     const allocator = testing.allocator;
-    var pool = try Node.Pool.init(allocator, SimTestHarness.default_pool_size);
-    defer pool.deinit();
 
-    var harness = try SimTestHarness.init(allocator, &pool, 42);
+    var harness = try SimTestHarness.init(allocator, 42);
     defer harness.deinit();
 
     // Enable full attestation participation.
@@ -185,10 +172,8 @@ test "sim: deterministic attestation replay — same seed same finality" {
     defer history_storage[1].deinit(allocator);
 
     for (0..2) |run| {
-        var pool = try Node.Pool.init(allocator, SimTestHarness.default_pool_size);
-        defer pool.deinit();
 
-        var harness = try SimTestHarness.init(allocator, &pool, 42);
+        var harness = try SimTestHarness.init(allocator, 42);
         defer harness.deinit();
 
         harness.sim.participation_rate = 1.0;
@@ -220,10 +205,8 @@ test "sim: deterministic attestation replay — same seed same finality" {
 
 test "sim: blocks with attestations — single epoch then boundary" {
     const allocator = testing.allocator;
-    var pool = try Node.Pool.init(allocator, SimTestHarness.default_pool_size);
-    defer pool.deinit();
 
-    var harness = try SimTestHarness.init(allocator, &pool, 77);
+    var harness = try SimTestHarness.init(allocator, 77);
     defer harness.deinit();
 
     harness.sim.participation_rate = 1.0;

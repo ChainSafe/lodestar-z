@@ -18,9 +18,6 @@ const types = @import("consensus_types");
 const preset = @import("preset").preset;
 const config_mod = @import("config");
 const fork_types = @import("fork_types");
-const state_transition = @import("state_transition");
-const CachedBeaconState = state_transition.CachedBeaconState;
-const Node = @import("persistent_merkle_tree").Node;
 
 const node_pkg = @import("node");
 const BeaconNode = node_pkg.BeaconNode;
@@ -30,7 +27,7 @@ const sim_network = @import("sim_network.zig");
 const SimNetwork = sim_network.SimNetwork;
 const ClusterInvariantChecker = @import("cluster_invariant_checker.zig").ClusterInvariantChecker;
 
-const computeEpochAtSlot = state_transition.computeEpochAtSlot;
+const computeEpochAtSlot = @import("state_transition").computeEpochAtSlot;
 
 pub const ClusterConfig = struct {
     num_nodes: u8 = 4,
@@ -93,39 +90,20 @@ pub const SimCluster = struct {
     /// Track which nodes processed each slot (for invariant checking).
     nodes_processed: []bool,
 
-    /// Node 0 owns the primary TestCachedBeaconState ancillary resources.
+    /// Shared consensus config borrowed by every simulated node builder.
     primary_config: *config_mod.BeaconConfig,
-    primary_pubkey_map: *state_transition.PubkeyIndexMap,
-    primary_index_pubkey_cache: *state_transition.Index2PubkeyCache,
-    primary_epoch_transition_cache: *state_transition.EpochTransitionCache,
 
     /// BeaconNode pointers (owned, one per harness).
     beacon_nodes: []*BeaconNode,
 
-    /// Node pool (must outlive states).
-    pool: *Node.Pool,
-
     pub fn init(allocator: Allocator, config: ClusterConfig) !SimCluster {
-        const TestCachedBeaconState = state_transition.test_utils.TestCachedBeaconState;
-
         var cluster_prng = std.Random.DefaultPrng.init(config.seed);
 
         const net_prng = try allocator.create(std.Random.DefaultPrng);
         net_prng.* = std.Random.DefaultPrng.init(config.seed +% 100);
 
-        // Create a shared merkle tree pool.
-        const pool_nodes_per_sim_node: u32 = 500_000;
-        const pool = try allocator.create(Node.Pool);
-        pool.* = try Node.Pool.init(allocator, pool_nodes_per_sim_node * @as(u32, config.num_nodes));
-
-        // Create primary genesis state.
-        var primary = try TestCachedBeaconState.init(
-            allocator,
-            pool,
-            config.validator_count,
-        );
-
-        const start_slot = try primary.cached_state.state.slot();
+        const primary_config = try @import("sim_test_harness.zig").createTestConfig(allocator, config.validator_count);
+        errdefer allocator.destroy(primary_config);
 
         // Allocate node arrays.
         const nodes = try allocator.alloc(SimNodeHarness, config.num_nodes);
@@ -138,31 +116,37 @@ pub const SimCluster = struct {
         // Node 0: initialize from primary genesis state.
         const seed_0 = cluster_prng.random().int(u64);
         const bn0_identity = try identity_mod.createEphemeralIdentity(allocator, std.testing.io, .{});
-        var bn0_builder = try BeaconNode.Builder.init(allocator, std.testing.io, primary.config, .{
+        var bn0_builder = try BeaconNode.Builder.init(allocator, std.testing.io, primary_config, .{
             .options = .{ .engine_mock = true },
             .node_identity = bn0_identity,
         });
         errdefer bn0_builder.deinit();
-        const bn0 = try bn0_builder.finishGenesis(primary.cached_state);
+        const bn0_genesis = try @import("sim_test_harness.zig").createPublishedGenesisState(
+            allocator,
+            bn0_builder.sharedStateGraph(),
+            config.validator_count,
+        );
+        const start_slot = try bn0_genesis.state.slot();
+        const bn0 = try bn0_builder.finishGenesis(bn0_genesis);
         beacon_nodes[0] = bn0;
         nodes[0] = SimNodeHarness.init(allocator, bn0, seed_0);
         nodes[0].participation_rate = config.participation_rate;
 
         // Nodes 1..N: each gets a clone of the genesis state.
         for (1..config.num_nodes) |i| {
-            // Get the genesis state from node 0's cache to clone it.
-            const genesis_state_0 = bn0.headState() orelse
-                return error.NoGenesisState;
-            const cloned = try genesis_state_0.clone(allocator, .{ .transfer_cache = false });
-
             const seed_i = cluster_prng.random().int(u64);
             const bn_i_identity = try identity_mod.createEphemeralIdentity(allocator, std.testing.io, .{});
-            var bn_i_builder = try BeaconNode.Builder.init(allocator, std.testing.io, primary.config, .{
+            var bn_i_builder = try BeaconNode.Builder.init(allocator, std.testing.io, primary_config, .{
                 .options = .{ .engine_mock = true },
                 .node_identity = bn_i_identity,
             });
             errdefer bn_i_builder.deinit();
-            const bn_i = try bn_i_builder.finishGenesis(cloned);
+            const genesis_i = try @import("sim_test_harness.zig").createPublishedGenesisState(
+                allocator,
+                bn_i_builder.sharedStateGraph(),
+                config.validator_count,
+            );
+            const bn_i = try bn_i_builder.finishGenesis(genesis_i);
             beacon_nodes[i] = bn_i;
             nodes[i] = SimNodeHarness.init(allocator, bn_i, seed_i);
             nodes[i].participation_rate = config.participation_rate;
@@ -182,12 +166,8 @@ pub const SimCluster = struct {
             .proposer_offline_rate = config.proposer_offline_rate,
             .participation_rate = config.participation_rate,
             .nodes_processed = nodes_processed,
-            .primary_config = primary.config,
-            .primary_pubkey_map = primary.pubkey_index_map,
-            .primary_index_pubkey_cache = primary.index_pubkey_cache,
-            .primary_epoch_transition_cache = primary.epoch_transition_cache,
+            .primary_config = primary_config,
             .beacon_nodes = beacon_nodes,
-            .pool = pool,
         };
     }
 
@@ -198,14 +178,6 @@ pub const SimCluster = struct {
             self.beacon_nodes[i].deinit();
         }
 
-        // Free primary TestCachedBeaconState ancillary resources.
-        self.primary_pubkey_map.deinit();
-        self.allocator.destroy(self.primary_pubkey_map);
-        self.primary_index_pubkey_cache.deinit();
-        self.primary_epoch_transition_cache.deinit();
-        state_transition.deinitStateTransition();
-        self.allocator.destroy(self.primary_epoch_transition_cache);
-        self.allocator.destroy(self.primary_index_pubkey_cache);
         self.allocator.destroy(self.primary_config);
 
         self.checker.deinit();
@@ -215,8 +187,6 @@ pub const SimCluster = struct {
         self.allocator.free(self.beacon_nodes);
         self.allocator.free(self.nodes_processed);
 
-        self.pool.deinit();
-        self.allocator.destroy(self.pool);
     }
 
     /// Advance all nodes by one slot.

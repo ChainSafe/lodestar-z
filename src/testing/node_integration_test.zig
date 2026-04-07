@@ -18,7 +18,6 @@
 const std = @import("std");
 const testing = std.testing;
 
-const Node = @import("persistent_merkle_tree").Node;
 const state_transition = @import("state_transition");
 const preset = @import("preset").preset;
 
@@ -38,11 +37,9 @@ const SimTestHarness = @import("sim_test_harness.zig").SimTestHarness;
 
 test "node integration: genesis → blocks → API" {
     const allocator = testing.allocator;
-    var pool = try Node.Pool.init(allocator, SimTestHarness.default_pool_size);
-    defer pool.deinit();
 
     // Creates BeaconNode + genesis state (64 validators).
-    var harness = try SimTestHarness.init(allocator, &pool, 42);
+    var harness = try SimTestHarness.init(allocator, 42);
     defer harness.deinit();
 
     const node = harness.node;
@@ -123,10 +120,8 @@ test "node integration: genesis → blocks → API" {
 
 test "node integration: attestations → finality advances" {
     const allocator = testing.allocator;
-    var pool = try Node.Pool.init(allocator, SimTestHarness.default_pool_size);
-    defer pool.deinit();
 
-    var harness = try SimTestHarness.init(allocator, &pool, 99);
+    var harness = try SimTestHarness.init(allocator, 99);
     defer harness.deinit();
 
     const node = harness.node;
@@ -157,10 +152,8 @@ test "node integration: attestations → finality advances" {
 
 test "node integration: skip slots → head root unchanged" {
     const allocator = testing.allocator;
-    var pool = try Node.Pool.init(allocator, SimTestHarness.default_pool_size);
-    defer pool.deinit();
 
-    var harness = try SimTestHarness.init(allocator, &pool, 7);
+    var harness = try SimTestHarness.init(allocator, 7);
     defer harness.deinit();
 
     const node = harness.node;
@@ -202,10 +195,8 @@ test "node integration: skip slots → head root unchanged" {
 
 test "node integration: DB persistence — imported blocks retrievable by root" {
     const allocator = testing.allocator;
-    var pool = try Node.Pool.init(allocator, SimTestHarness.default_pool_size);
-    defer pool.deinit();
 
-    var harness = try SimTestHarness.init(allocator, &pool, 11);
+    var harness = try SimTestHarness.init(allocator, 11);
     defer harness.deinit();
 
     const node = harness.node;
@@ -229,46 +220,5 @@ test "node integration: DB persistence — imported blocks retrievable by root" 
             try testing.expect(bytes.len > 0);
             allocator.free(bytes);
         }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Test 5: BeaconBlocksByRange req/resp with real imported blocks
-// ---------------------------------------------------------------------------
-
-test "node integration: BeaconBlocksByRange req/resp with real blocks" {
-    const allocator = testing.allocator;
-    var pool = try Node.Pool.init(allocator, SimTestHarness.default_pool_size);
-    defer pool.deinit();
-
-    var harness = try SimTestHarness.init(allocator, &pool, 55);
-    defer harness.deinit();
-
-    const node = harness.node;
-    const initial_slot = node.getHead().slot;
-
-    // Import 4 blocks.
-    for (0..4) |_| {
-        _ = try harness.sim.processSlot(false);
-    }
-
-    // Request blocks for 3 consecutive slots starting at initial+1.
-    const range_req = networking.messages.BeaconBlocksByRangeRequest.Type{
-        .start_slot = initial_slot + 1,
-        .count = 3,
-        .step = 1,
-    };
-    var range_buf: [networking.messages.BeaconBlocksByRangeRequest.fixed_size]u8 = undefined;
-    _ = networking.messages.BeaconBlocksByRangeRequest.serializeIntoBytes(&range_req, &range_buf);
-
-    const chunks = try node.onReqResp(.beacon_blocks_by_range, &range_buf);
-    defer freeResponseChunks(allocator, chunks);
-
-    // 3 blocks for 3 slots.
-    try testing.expectEqual(@as(usize, 3), chunks.len);
-    for (chunks) |chunk| {
-        try testing.expectEqual(networking.protocol.ResponseCode.success, chunk.result);
-        // Each payload is non-empty SSZ.
-        try testing.expect(chunk.ssz_payload.len > 0);
     }
 }

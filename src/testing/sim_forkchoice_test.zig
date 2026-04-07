@@ -11,7 +11,6 @@
 const std = @import("std");
 const testing = std.testing;
 
-const Node = @import("persistent_merkle_tree").Node;
 const preset = @import("preset").preset;
 
 const SimTestHarness = @import("sim_test_harness.zig").SimTestHarness;
@@ -35,16 +34,12 @@ test "sim: fork choice — equivocation produces divergent chains" {
     const allocator = testing.allocator;
 
     // Chain A: seed 42
-    var pool_a = try Node.Pool.init(allocator, SimTestHarness.default_pool_size);
-    defer pool_a.deinit();
-    var harness_a = try SimTestHarness.init(allocator, &pool_a, 42);
+    var harness_a = try SimTestHarness.init(allocator, 42);
     defer harness_a.deinit();
     harness_a.sim.participation_rate = 1.0;
 
     // Chain B: seed 43 (different proposer, same genesis)
-    var pool_b = try Node.Pool.init(allocator, SimTestHarness.default_pool_size);
-    defer pool_b.deinit();
-    var harness_b = try SimTestHarness.init(allocator, &pool_b, 43);
+    var harness_b = try SimTestHarness.init(allocator, 43);
     defer harness_b.deinit();
     harness_b.sim.participation_rate = 1.0;
 
@@ -89,9 +84,7 @@ test "sim: fork choice — late attestations consistent with invariant checker" 
     const allocator = testing.allocator;
 
     // Phase 1: process slots WITHOUT attestations.
-    var pool = try Node.Pool.init(allocator, SimTestHarness.default_pool_size);
-    defer pool.deinit();
-    var harness = try SimTestHarness.init(allocator, &pool, 100);
+    var harness = try SimTestHarness.init(allocator, 100);
     defer harness.deinit();
 
     harness.sim.participation_rate = 0.0;
@@ -133,17 +126,13 @@ test "sim: fork choice — reorg: attestation weight beats chain length" {
     const allocator = testing.allocator;
 
     // Chain A: 5 slots with 100% participation (heavy weight).
-    var pool_a = try Node.Pool.init(allocator, SimTestHarness.default_pool_size);
-    defer pool_a.deinit();
-    var harness_a = try SimTestHarness.init(allocator, &pool_a, 77);
+    var harness_a = try SimTestHarness.init(allocator, 77);
     defer harness_a.deinit();
     harness_a.sim.participation_rate = 1.0;
     try harness_a.sim.processSlots(5, 0.0);
 
     // Chain B: 8 slots with 0% participation (long but no weight).
-    var pool_b = try Node.Pool.init(allocator, SimTestHarness.default_pool_size);
-    defer pool_b.deinit();
-    var harness_b = try SimTestHarness.init(allocator, &pool_b, 77);
+    var harness_b = try SimTestHarness.init(allocator, 77);
     defer harness_b.deinit();
     harness_b.sim.participation_rate = 0.0;
     try harness_b.sim.processSlots(8, 0.0);
@@ -175,17 +164,12 @@ test "sim: fork choice — deterministic equivocation replay" {
     var roots_b: [2][32]u8 = undefined;
 
     for (0..2) |run| {
-        var pool_a = try Node.Pool.init(allocator, SimTestHarness.default_pool_size);
-        defer pool_a.deinit();
-        var harness_a = try SimTestHarness.init(allocator, &pool_a, 200);
+        var harness_a = try SimTestHarness.init(allocator, 200);
         defer harness_a.deinit();
         harness_a.sim.participation_rate = 1.0;
         try harness_a.sim.processSlots(num_slots, 0.0);
         roots_a[run] = (try (harness_a.sim.getHeadState() orelse unreachable).state.hashTreeRoot()).*;
-
-        var pool_b = try Node.Pool.init(allocator, SimTestHarness.default_pool_size);
-        defer pool_b.deinit();
-        var harness_b = try SimTestHarness.init(allocator, &pool_b, 201);
+        var harness_b = try SimTestHarness.init(allocator, 201);
         defer harness_b.deinit();
         harness_b.sim.participation_rate = 1.0;
         try harness_b.sim.processSlots(num_slots, 0.0);
@@ -334,24 +318,11 @@ test "sim: fork choice — high skip rate no safety violations" {
 
 test "sim: competing forks — fork choice picks block with more attestation weight" {
     const allocator = testing.allocator;
-    const Node_PMT = @import("persistent_merkle_tree").Node;
-    const state_transition = @import("state_transition");
-    const fork_types = @import("fork_types");
-    const fork_choice_mod = @import("fork_choice");
-    const types = @import("consensus_types");
-
-    const SimTestHarness = @import("sim_test_harness.zig").SimTestHarness;
-    const BlockGenerator = @import("block_generator.zig").BlockGenerator;
 
     // Create two independent single-node chains from the same genesis.
-    var pool_a = try Node_PMT.Pool.init(allocator, SimTestHarness.default_pool_size);
-    defer pool_a.deinit();
-    var harness_a = try SimTestHarness.init(allocator, &pool_a, 500);
+    var harness_a = try SimTestHarness.init(allocator, 500);
     defer harness_a.deinit();
-
-    var pool_b = try Node_PMT.Pool.init(allocator, SimTestHarness.default_pool_size);
-    defer pool_b.deinit();
-    var harness_b = try SimTestHarness.init(allocator, &pool_b, 501);
+    var harness_b = try SimTestHarness.init(allocator, 501);
     defer harness_b.deinit();
 
     // Both chains process slot 1 identically (same genesis, deterministic).

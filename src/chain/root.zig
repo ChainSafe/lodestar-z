@@ -70,6 +70,7 @@ pub const StateDisposer = regen.StateDisposer;
 pub const SharedStateGraph = regen.SharedStateGraph;
 pub const StateGraphGate = regen.StateGraphGate;
 pub const StateRegen = regen.StateRegen;
+pub const RegenRuntimeFixture = @import("regen/test_fixture.zig").RegenRuntimeFixture;
 pub const StateWorkService = state_work_service.StateWorkService;
 pub const CompletedBlockImport = state_work_service.CompletedBlockImport;
 

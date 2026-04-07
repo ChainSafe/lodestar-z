@@ -179,15 +179,32 @@ pub const SimNodeHarness = struct {
             break :blk blk_val;
         };
 
-        defer {
-            const types = @import("consensus_types");
-            types.electra.SignedBeaconBlock.deinit(self.allocator, signed_block);
-            self.allocator.destroy(signed_block);
-        }
-
         // Import through BeaconNode's full pipeline.
+        // ingestBlock() consumes ownership of the produced block on both
+        // queued and synchronous paths, so the simulation harness must not
+        // free signed_block after this handoff.
         const any_signed = fork_types.AnySignedBeaconBlock{ .full_electra = @constCast(signed_block) };
-        const result = try self.node.importBlock(any_signed, .api);
+        const ingress_result = try self.node.ingestBlock(any_signed, .api);
+
+        var imported_state_root: ?[32]u8 = null;
+        switch (ingress_result) {
+            .ignored => return error.BlockIgnored,
+            .imported => |result| imported_state_root = result.state_root,
+            .queued => {
+                var spins: usize = 0;
+                while (spins < 10_000 and imported_state_root == null) : (spins += 1) {
+                    _ = self.node.processPendingBlockStateWork();
+                    _ = self.node.processPendingExecutionPayloadVerifications();
+                    _ = self.node.processPendingExecutionForkchoiceUpdates();
+                    if (self.node.getHead().slot >= target_slot) {
+                        imported_state_root = self.node.getHead().state_root;
+                        break;
+                    }
+                    std.Io.sleep(self.node.io, .{ .nanoseconds = std.time.ns_per_ms }, .real) catch {};
+                }
+                if (imported_state_root == null) return error.ImportPending;
+            },
+        }
 
         // Advance simulated time.
         self.sim_io.advanceToSlot(
@@ -205,10 +222,10 @@ pub const SimNodeHarness = struct {
         if (is_epoch_transition) self.epochs_processed += 1;
 
         return .{
-            .slot = result.slot,
+            .slot = target_slot,
             .block_processed = true,
-            .epoch_transition = result.epoch_transition,
-            .state_root = result.state_root,
+            .epoch_transition = is_epoch_transition,
+            .state_root = imported_state_root.?,
         };
     }
 

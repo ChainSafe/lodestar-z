@@ -3,7 +3,6 @@
 const std = @import("std");
 const testing = std.testing;
 
-const Node = @import("persistent_merkle_tree").Node;
 const preset = @import("preset").preset;
 const state_transition = @import("state_transition");
 const types = @import("consensus_types");
@@ -28,10 +27,8 @@ test "sim_validator: validator ownership range" {
 
 test "sim_validator: compute duties finds assignments" {
     const allocator = testing.allocator;
-    var pool = try Node.Pool.init(allocator, SimTestHarness.default_pool_size);
-    defer pool.deinit();
 
-    var harness = try SimTestHarness.init(allocator, &pool, 42);
+    var harness = try SimTestHarness.init(allocator, 42);
     defer harness.deinit();
 
     // Create a validator covering ALL validator indices (0..64).
@@ -65,10 +62,8 @@ test "sim_validator: compute duties finds assignments" {
 
 test "sim_validator: produces block when proposer" {
     const allocator = testing.allocator;
-    var pool = try Node.Pool.init(allocator, SimTestHarness.default_pool_size);
-    defer pool.deinit();
 
-    var harness = try SimTestHarness.init(allocator, &pool, 42);
+    var harness = try SimTestHarness.init(allocator, 42);
     defer harness.deinit();
 
     // Validator covering all indices (guaranteed to be proposer).
@@ -104,10 +99,8 @@ test "sim_validator: produces block when proposer" {
 
 test "sim_validator: skips proposal when skip_next_proposal is set" {
     const allocator = testing.allocator;
-    var pool = try Node.Pool.init(allocator, SimTestHarness.default_pool_size);
-    defer pool.deinit();
 
-    var harness = try SimTestHarness.init(allocator, &pool, 42);
+    var harness = try SimTestHarness.init(allocator, 42);
     defer harness.deinit();
 
     var val = SimValidator.init(allocator, 0, 64, 42);
@@ -134,10 +127,8 @@ test "sim_validator: skips proposal when skip_next_proposal is set" {
 
 test "sim_validator: produces attestations for assigned committees" {
     const allocator = testing.allocator;
-    var pool = try Node.Pool.init(allocator, SimTestHarness.default_pool_size);
-    defer pool.deinit();
 
-    var harness = try SimTestHarness.init(allocator, &pool, 42);
+    var harness = try SimTestHarness.init(allocator, 42);
     defer harness.deinit();
 
     // Process TWO slots to have a block root in the state for attestation.
@@ -171,10 +162,8 @@ test "sim_validator: produces attestations for assigned committees" {
 
 test "sim_validator: zero participation produces no attestations" {
     const allocator = testing.allocator;
-    var pool = try Node.Pool.init(allocator, SimTestHarness.default_pool_size);
-    defer pool.deinit();
 
-    var harness = try SimTestHarness.init(allocator, &pool, 42);
+    var harness = try SimTestHarness.init(allocator, 42);
     defer harness.deinit();
 
     _ = try harness.sim.processSlot(false);
@@ -196,10 +185,8 @@ test "sim_validator: zero participation produces no attestations" {
 
 test "sim_validator: skip_attestations flag prevents production" {
     const allocator = testing.allocator;
-    var pool = try Node.Pool.init(allocator, SimTestHarness.default_pool_size);
-    defer pool.deinit();
 
-    var harness = try SimTestHarness.init(allocator, &pool, 42);
+    var harness = try SimTestHarness.init(allocator, 42);
     defer harness.deinit();
 
     _ = try harness.sim.processSlot(false);

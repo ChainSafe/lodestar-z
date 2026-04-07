@@ -119,7 +119,6 @@ const SimIo = @import("sim_io.zig").SimIo;
 const SimNetwork = @import("sim_network.zig").SimNetwork;
 const SlotClock = @import("sim_clock.zig").SlotClock;
 const SimTestHarness = @import("sim_test_harness.zig").SimTestHarness;
-const Node = @import("persistent_merkle_tree").Node;
 const op_pool = @import("chain").op_pool;
 const types = @import("consensus_types");
 
@@ -313,10 +312,8 @@ test "DST audit: deterministic replay produces identical state" {
     var roots_b: [num_slots][32]u8 = undefined;
 
     for (0..2) |run| {
-        var pool = try Node.Pool.init(allocator, SimTestHarness.default_pool_size);
-        defer pool.deinit();
 
-        var harness = try SimTestHarness.init(allocator, &pool, seed);
+        var harness = try SimTestHarness.init(allocator, seed);
         defer harness.deinit();
 
         for (0..num_slots) |i| {
