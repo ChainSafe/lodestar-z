@@ -343,6 +343,7 @@ pub fn SecretKey_finalize(_: napi.Env, sk: *SecretKey, _: ?*anyopaque) void {
 pub fn SecretKey_ctor(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
     const sk = try allocator.create(SecretKey);
     errdefer allocator.destroy(sk);
+
     _ = try env.wrap(
         cb.this(),
         SecretKey,
