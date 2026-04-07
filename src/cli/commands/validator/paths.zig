@@ -99,7 +99,7 @@ pub const Paths = struct {
         try cwd.createDirPath(io, self.secrets_dir);
         try cwd.createDirPath(io, self.remote_keys_dir);
         try cwd.createDirPath(io, self.proposer_dir);
-        log.info("Validator directories ready under {s}", .{self.root});
+        log.debug("Validator directories ready under {s}", .{self.root});
     }
 
     pub fn deinit(self: *Paths) void {

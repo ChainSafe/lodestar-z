@@ -84,7 +84,7 @@ fn makeProtocolHandler(
             const started_ns = std.Io.Clock.awake.now(io).nanoseconds;
 
             const request_bytes = req_resp_encoding.readRequestFromStream(self.allocator, io, stream) catch |err| {
-                log.warn("{s} request decode error: {}", .{ id, err });
+                log.debug("{s} request decode error: {}", .{ id, err });
                 try response_writer.writeError(.invalid_request, "Malformed request");
                 notifyRequestCompleted(self.context, io, method, started_ns, .decode_error);
                 stream.closeWrite(io);

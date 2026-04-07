@@ -271,7 +271,7 @@ fn serveGoodbye(
         return writer.writeError(.invalid_request, "Malformed GoodbyeReason");
     };
 
-    log.info("Goodbye received: reason={d}", .{reason});
+    log.debug("Goodbye received: reason={d}", .{reason});
     context.onGoodbye(context.ptr, request_meta.peer_id, reason);
 }
 

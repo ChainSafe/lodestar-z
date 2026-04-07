@@ -416,7 +416,7 @@ pub const RateLimiter = struct {
         if (!global_result.isAllowed()) {
             self.total_denied += 1;
             self.total_global_denied += 1;
-            log.warn("global rate limit exceeded for peer {s} on protocol {s}", .{
+            log.debug("global rate limit exceeded for peer {s} on protocol {s}", .{
                 peer_id,
                 @tagName(protocol),
             });
@@ -445,7 +445,7 @@ pub const RateLimiter = struct {
                 self.global_bucket.tokens + @as(f64, @floatFromInt(count)),
             );
             self.total_denied += 1;
-            log.warn("rate limit exceeded for peer {s} on protocol {s}", .{
+            log.debug("rate limit exceeded for peer {s} on protocol {s}", .{
                 peer_id,
                 @tagName(protocol),
             });

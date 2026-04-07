@@ -360,14 +360,9 @@ pub fn computeForkDigest(fork_version: [4]u8, genesis_validators_root: [32]u8) [
 /// This matches Lighthouse's compute_fork_digest behavior.
 pub fn forkDigestAtSlot(self: *const BeaconConfig, slot: u64, genesis_validators_root: [32]u8) [4]u8 {
     const fi = self.forkInfo(slot);
-    const version = fi.version;
     const epoch = @divFloor(slot, preset.SLOTS_PER_EPOCH);
     const base_digest = self.forkDigestForForkInfo(fi, epoch, genesis_validators_root);
 
-    std.log.info("forkDigestAtSlot: slot={d} fork_seq={d} version={x:0>2}{x:0>2}{x:0>2}{x:0>2} digest={x:0>2}{x:0>2}{x:0>2}{x:0>2}", .{
-        slot,           @intFromEnum(fi.fork_seq), version[0],     version[1],     version[2], version[3],
-        base_digest[0], base_digest[1],            base_digest[2], base_digest[3],
-    });
     return base_digest;
 }
 

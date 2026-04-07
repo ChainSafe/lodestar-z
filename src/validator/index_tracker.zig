@@ -209,7 +209,7 @@ pub const IndexTracker = struct {
                         e.index = r.index;
                         e.status = status;
                         updated_count += 1;
-                        log.info("validator index status updated pubkey=0x{s} index={d} status={s}", .{
+                        log.debug("validator index status updated pubkey=0x{s} index={d} status={s}", .{
                             std.fmt.bytesToHex(e.pubkey[0..4], .lower),
                             r.index,
                             @tagName(status),
@@ -221,7 +221,7 @@ pub const IndexTracker = struct {
         }
 
         if (updated_count > 0) {
-            log.info("updated {d} validator index/status entries (total tracked={d})", .{
+            log.debug("updated {d} validator index/status entries (total tracked={d})", .{
                 updated_count,
                 self.entries.items.len,
             });

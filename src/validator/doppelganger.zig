@@ -146,18 +146,18 @@ pub const DoppelgangerService = struct {
             const previous_epoch = current_epoch - 1;
             if (self.slashing_db.hasAttestedInEpoch(pubkey, previous_epoch)) {
                 remaining_epochs = REMAINING_EPOCHS_IF_SKIPPED;
-                log.info(
+                log.debug(
                     "doppelganger detection skipped for validator because restart was detected pubkey=0x{x} previous_epoch={d}",
                     .{ pubkey[0..4], previous_epoch },
                 );
             } else {
-                log.info(
+                log.debug(
                     "registered validator for doppelganger detection pubkey=0x{x} remaining_epochs={d} next_epoch_to_check={d}",
                     .{ pubkey[0..4], remaining_epochs, next_epoch_to_check },
                 );
             }
         } else {
-            log.info(
+            log.debug(
                 "doppelganger detection skipped for validator initialized before or at genesis pubkey=0x{x} current_epoch={d}",
                 .{ pubkey[0..4], current_epoch },
             );
@@ -442,12 +442,12 @@ pub const DoppelgangerService = struct {
                     self.metrics.incrDoppelgangerEpochsChecked();
                     if (e.state.remaining_epochs == 0) {
                         e.state.status = .verified_safe;
-                        log.info("doppelganger detection complete pubkey=0x{x} epoch={d}", .{
+                        log.debug("doppelganger detection complete pubkey=0x{x} epoch={d}", .{
                             e.pubkey[0..4],
                             current_epoch,
                         });
                     } else {
-                        log.info("found no doppelganger pubkey=0x{x} remaining_epochs={d} next_epoch_to_check={d}", .{
+                        log.debug("found no doppelganger pubkey=0x{x} remaining_epochs={d} next_epoch_to_check={d}", .{
                             e.pubkey[0..4],
                             e.state.remaining_epochs,
                             e.state.next_epoch_to_check,

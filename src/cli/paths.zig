@@ -90,7 +90,7 @@ pub const DataPaths = struct {
             try cwd.createDirPath(io, network_dir);
         }
 
-        log.info("Data directories ready under {s}", .{self.root});
+        log.debug("Data directories ready under {s}", .{self.root});
     }
 
     pub fn deinit(self: *DataPaths) void {

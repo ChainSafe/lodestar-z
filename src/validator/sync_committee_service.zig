@@ -235,7 +235,7 @@ pub const SyncCommitteeService = struct {
 
         if (self.activatePrefetchedPeriod(period)) {
             log.info("sync committee period transition to period={d} at epoch={d}", .{ period, epoch });
-            log.info("activated pre-fetched sync committee duties for period={d}", .{period});
+            log.debug("activated pre-fetched sync committee duties for period={d}", .{period});
         }
 
         self.refreshDuties(io, epoch, period) catch |err| {
@@ -328,7 +328,7 @@ pub const SyncCommitteeService = struct {
             self.metrics.incrSyncCommitteeDutyReorg();
             log.warn("sync committee duties changed while refreshing next period={d}", .{period});
         }
-        log.info("pre-fetched {d} sync committee duties for period={d}", .{ fetched.len, period });
+        log.debug("pre-fetched {d} sync committee duties for period={d}", .{ fetched.len, period });
     }
 
     fn refreshDuties(
@@ -654,7 +654,7 @@ pub const SyncCommitteeService = struct {
                 log.warn("publishSyncCommitteeMessages slot={d} error={s}", .{ slot, @errorName(err) });
                 break :blk false;
             };
-            log.info("sync committee messages slot={d} count={d}", .{ slot, count });
+            log.debug("sync committee messages slot={d} count={d}", .{ slot, count });
             break :blk true;
         };
         if (publish_ok) {

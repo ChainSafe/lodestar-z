@@ -348,7 +348,7 @@ pub const ValidatorClient = struct {
             try self.validator_store.addKey(k.secret_key);
             loaded_count += 1;
         }
-        log.info("validator local keys loaded at startup: {d}", .{loaded_count});
+        log.debug("validator local keys loaded at startup: {d}", .{loaded_count});
 
         if (config.interchange_import_path) |ipath| {
             const interchange_data = fs.readFileAlloc(io, allocator, ipath, 16 * 1024 * 1024) catch |err| blk: {
@@ -767,7 +767,7 @@ pub const ValidatorClient = struct {
         // This is required before duties can be fetched (duties use validator index, not pubkey).
         //
         // TS: IndicesService.pollValidatorIndices() on startup.
-        log.info("resolving validator indices at startup", .{});
+        log.debug("resolving validator indices at startup", .{});
         self.index_tracker.resolveIndices(self.io) catch |err| {
             log.warn("startup index resolution failed: {s} — will retry on first epoch", .{@errorName(err)});
         };
@@ -1039,7 +1039,7 @@ pub const ValidatorClient = struct {
     fn startHeaderTrackerTask(self: *ValidatorClient) !void {
         std.debug.assert(self.header_tracker_task == null);
         self.header_tracker_task = try self.io.concurrent(runHeaderTrackerTask, .{self});
-        log.info("ChainHeaderTracker SSE subscription started as concurrent std.Io task", .{});
+        log.debug("ChainHeaderTracker SSE subscription started as concurrent std.Io task", .{});
     }
 
     fn stopHeaderTrackerTask(self: *ValidatorClient) void {
@@ -1246,7 +1246,7 @@ pub const ValidatorClient = struct {
                     });
                 };
                 added_count += 1;
-                log.info("registered remote validator pubkey=0x{s} url={s}", .{
+                log.debug("registered remote validator pubkey=0x{s} url={s}", .{
                     std.fmt.bytesToHex(pubkey, .lower),
                     signer.base_url,
                 });
@@ -1258,7 +1258,7 @@ pub const ValidatorClient = struct {
                 if (self.validator_store.removeValidator(pubkey)) {
                     self.unregisterValidatorTracking(pubkey);
                     removed_count += 1;
-                    log.info("removed remote validator pubkey=0x{s} url={s}", .{
+                    log.debug("removed remote validator pubkey=0x{s} url={s}", .{
                         std.fmt.bytesToHex(pubkey, .lower),
                         signer.base_url,
                     });

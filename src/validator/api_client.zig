@@ -987,7 +987,7 @@ pub const BeaconApiClient = struct {
         callback: SseCallback,
     ) !void {
         defer freeSseConnection(stream);
-        log.info("subscribing to SSE events url={s}", .{self.urlAtIndex(stream.url_idx)});
+        log.debug("subscribing to SSE events url={s}", .{self.urlAtIndex(stream.url_idx)});
 
         const stream_started_ns = time.awakeNanoseconds(io);
         defer self.observeStreamDuration(route_ids.events_eventstream, io, stream_started_ns);
@@ -1118,7 +1118,7 @@ pub const BeaconApiClient = struct {
         };
 
         if (response.head.status != .ok) {
-            log.warn("GET {s} → HTTP {d}", .{ path, @intFromEnum(response.head.status) });
+            log.debug("GET {s} → HTTP {d}", .{ path, @intFromEnum(response.head.status) });
             return error.HttpError;
         }
         var transfer_buf: [8192]u8 = undefined;
@@ -1174,7 +1174,7 @@ pub const BeaconApiClient = struct {
         };
 
         if (response.head.status != .ok) {
-            log.warn("GET(ssz) {s} → HTTP {d}", .{ path, @intFromEnum(response.head.status) });
+            log.debug("GET(ssz) {s} → HTTP {d}", .{ path, @intFromEnum(response.head.status) });
             return error.HttpError;
         }
 
@@ -1276,7 +1276,7 @@ pub const BeaconApiClient = struct {
         const status = response.head.status;
         // 2xx codes are all success; 204 has no body.
         if (@intFromEnum(status) < 200 or @intFromEnum(status) >= 300) {
-            log.warn("POST {s} → HTTP {d}", .{ path, @intFromEnum(status) });
+            log.debug("POST {s} → HTTP {d}", .{ path, @intFromEnum(status) });
             return error.HttpError;
         }
         if (status == .no_content) {
@@ -1350,7 +1350,7 @@ pub const BeaconApiClient = struct {
 
         const status = response.head.status;
         if (@intFromEnum(status) < 200 or @intFromEnum(status) >= 300) {
-            log.warn("POST(ssz) {s} → HTTP {d}", .{ path, @intFromEnum(status) });
+            log.debug("POST(ssz) {s} → HTTP {d}", .{ path, @intFromEnum(status) });
             return error.HttpError;
         }
         if (status != .no_content) {

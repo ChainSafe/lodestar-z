@@ -190,7 +190,7 @@ pub const LivenessTracker = struct {
                 return;
             }
         }
-        log.warn("recordAttestationDuty: unknown validator 0x{x}", .{pubkey[0..4]});
+        log.debug("recordAttestationDuty: unknown validator 0x{x}", .{pubkey[0..4]});
     }
 
     /// Record that a validator performed (or missed) a sync committee duty.
@@ -220,7 +220,7 @@ pub const LivenessTracker = struct {
                 return;
             }
         }
-        log.warn("recordSyncDuty: unknown validator 0x{x}", .{pubkey[0..4]});
+        log.debug("recordSyncDuty: unknown validator 0x{x}", .{pubkey[0..4]});
     }
 
     /// Log a summary of all tracked validator liveness.
@@ -231,7 +231,7 @@ pub const LivenessTracker = struct {
         defer self.mutex.unlock(self.io);
 
         for (self.entries.items) |e| {
-            log.info(
+            log.debug(
                 "liveness summary validator=0x{s} att_rate={d:.3} sync_rate={d:.3} missed_att_streak={d} missed_sync_streak={d}",
                 .{
                     std.fmt.bytesToHex(e.pubkey[0..4], .lower),

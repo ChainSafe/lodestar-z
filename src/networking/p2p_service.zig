@@ -417,7 +417,7 @@ pub const P2pService = struct {
         try self.network.listen(io, listen_addr);
         try self.gossip_adapter.subscribeEthTopics();
         self.startHeartbeat(io);
-        log.info("P2P service started", .{});
+        log.info("p2p service started", .{});
     }
 
     /// Dial a remote peer by QUIC multiaddr.
@@ -581,7 +581,7 @@ pub const P2pService = struct {
     /// Gracefully shut down (cancel background fibers, close QUIC engines).
     pub fn stop(self: *Self, io: Io) void {
         self.network.close(io);
-        log.info("P2P service stopped", .{});
+        log.info("p2p service stopped", .{});
     }
 
     /// Release all owned resources.

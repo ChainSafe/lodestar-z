@@ -176,7 +176,7 @@ pub const MonitoringService = struct {
     }
 
     pub fn run(self: *MonitoringService) !void {
-        log.info("Started validator monitoring service remote={s} interval_ms={d}", .{
+        log.info("validator monitoring started remote={s} interval_ms={d}", .{
             self.endpoint_host,
             self.options.interval_ms,
         });

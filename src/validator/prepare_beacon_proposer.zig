@@ -107,7 +107,7 @@ pub const PrepareBeaconProposerService = struct {
         log.debug("registering {d} fee recipients epoch={d}", .{ entries.items.len, epoch });
 
         try self.api.prepareBeaconProposer(io, json_body);
-        log.info("prepare_beacon_proposer registered {d} validators epoch={d}", .{ entries.items.len, epoch });
+        log.debug("prepare_beacon_proposer registered {d} validators epoch={d}", .{ entries.items.len, epoch });
     }
 
     fn serializeEntries(self: *PrepareBeaconProposerService, entries: []const FeeRecipientEntry) ![]const u8 {

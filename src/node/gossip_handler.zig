@@ -460,7 +460,7 @@ pub const GossipHandler = struct {
         // [REJECT] The proposer signature is valid.
         if (self.verifyBlockSignatureFn) |verifyFn| {
             if (!verifyFn(self.node, ssz_bytes)) {
-                std.log.warn("Gossip block rejected: invalid proposer signature slot={d}", .{blk.slot});
+                std.log.debug("Gossip block rejected: invalid proposer signature slot={d}", .{blk.slot});
                 return GossipHandlerError.InvalidSignature;
             }
         }
@@ -571,7 +571,7 @@ pub const GossipHandler = struct {
         // [REJECT] The attestation signature is valid.
         if (self.verifyAttestationSignatureFn) |verifyFn| {
             if (!verifyFn(self.node, &attestation, &resolved)) {
-                std.log.warn("Gossip attestation rejected: invalid signature slot={d}", .{data.slot});
+                std.log.debug("Gossip attestation rejected: invalid signature slot={d}", .{data.slot});
                 return GossipHandlerError.InvalidSignature;
             }
         }
@@ -676,7 +676,7 @@ pub const GossipHandler = struct {
         // [REJECT] selection_proof, aggregator signature, and aggregate signature are all valid.
         if (self.verifyAggregateSignatureFn) |verifyFn| {
             if (!verifyFn(self.node, &signed_aggregate, &resolved)) {
-                std.log.warn("Gossip aggregate rejected: invalid signature aggregator={d}", .{signed_aggregate.aggregatorIndex()});
+                std.log.debug("Gossip aggregate rejected: invalid signature aggregator={d}", .{signed_aggregate.aggregatorIndex()});
                 return GossipHandlerError.InvalidSignature;
             }
         }
@@ -728,7 +728,7 @@ pub const GossipHandler = struct {
         // [REJECT] The voluntary exit signature is valid.
         if (self.verifyVoluntaryExitSignatureFn) |verifyFn| {
             if (!verifyFn(self.node, ssz_bytes)) {
-                std.log.warn("Gossip voluntary exit rejected: invalid signature validator={d}", .{exit.validator_index});
+                std.log.debug("Gossip voluntary exit rejected: invalid signature validator={d}", .{exit.validator_index});
                 return GossipHandlerError.InvalidSignature;
             }
         }
@@ -752,7 +752,7 @@ pub const GossipHandler = struct {
             };
         }
 
-        std.log.info("Accepted voluntary_exit: validator={d} epoch={d}", .{
+        std.log.debug("Accepted voluntary_exit: validator={d} epoch={d}", .{
             exit.validator_index, exit.exit_epoch,
         });
     }
@@ -798,7 +798,7 @@ pub const GossipHandler = struct {
         // [REJECT] Both signed header signatures are valid.
         if (self.verifyProposerSlashingSignatureFn) |verifyFn| {
             if (!verifyFn(self.node, ssz_bytes)) {
-                std.log.warn("Gossip proposer slashing rejected: invalid signature proposer={d}", .{ps.proposer_index});
+                std.log.debug("Gossip proposer slashing rejected: invalid signature proposer={d}", .{ps.proposer_index});
                 return GossipHandlerError.InvalidSignature;
             }
         }
@@ -822,7 +822,7 @@ pub const GossipHandler = struct {
             };
         }
 
-        std.log.info("Accepted proposer_slashing: proposer={d} slot={d}", .{
+        std.log.debug("Accepted proposer_slashing: proposer={d} slot={d}", .{
             ps.proposer_index, ps.header_1_slot,
         });
     }
@@ -867,7 +867,7 @@ pub const GossipHandler = struct {
         // [REJECT] Both indexed attestation signatures are valid.
         if (self.verifyAttesterSlashingSignatureFn) |verifyFn| {
             if (!verifyFn(self.node, &slashing)) {
-                std.log.warn("Gossip attester slashing rejected: invalid signature", .{});
+                std.log.debug("Gossip attester slashing rejected: invalid signature", .{});
                 return GossipHandlerError.InvalidSignature;
             }
         }
@@ -891,7 +891,7 @@ pub const GossipHandler = struct {
             };
         }
 
-        std.log.info("Accepted attester_slashing", .{});
+        std.log.debug("Accepted attester_slashing", .{});
     }
 
     /// Called when a bls_to_execution_change gossip message arrives.
@@ -931,7 +931,7 @@ pub const GossipHandler = struct {
         // [REJECT] The BLS-to-execution change signature is valid.
         if (self.verifyBlsChangeSignatureFn) |verifyFn| {
             if (!verifyFn(self.node, ssz_bytes)) {
-                std.log.warn("Gossip BLS change rejected: invalid signature validator={d}", .{change.validator_index});
+                std.log.debug("Gossip BLS change rejected: invalid signature validator={d}", .{change.validator_index});
                 return GossipHandlerError.InvalidSignature;
             }
         }
@@ -955,7 +955,7 @@ pub const GossipHandler = struct {
             };
         }
 
-        std.log.info("Accepted bls_to_execution_change: validator={d}", .{
+        std.log.debug("Accepted bls_to_execution_change: validator={d}", .{
             change.validator_index,
         });
     }
@@ -1013,7 +1013,7 @@ pub const GossipHandler = struct {
             };
         }
 
-        std.log.info("Accepted sync_committee_contribution_and_proof: aggregator={d} slot={d} subcommittee={d}", .{
+        std.log.debug("Accepted sync_committee_contribution_and_proof: aggregator={d} slot={d} subcommittee={d}", .{
             contrib.aggregator_index,
             contrib.contribution_slot,
             contrib.subcommittee_index,
@@ -1075,7 +1075,7 @@ pub const GossipHandler = struct {
         // [REJECT] The sync committee message signature is valid.
         if (self.verifySyncCommitteeSignatureFn) |verifyFn| {
             if (!verifyFn(self.node, ssz_bytes)) {
-                std.log.warn("Gossip sync committee message rejected: invalid signature validator={d}", .{msg.validator_index});
+                std.log.debug("Gossip sync committee message rejected: invalid signature validator={d}", .{msg.validator_index});
                 return GossipHandlerError.InvalidSignature;
             }
         }
@@ -1088,7 +1088,7 @@ pub const GossipHandler = struct {
             };
         }
 
-        std.log.info("Accepted sync_committee message: validator={d} slot={d} subnet={d}", .{
+        std.log.debug("Accepted sync_committee message: validator={d} slot={d} subnet={d}", .{
             msg.validator_index,
             msg.slot,
             subnet_id,
@@ -1151,7 +1151,7 @@ pub const GossipHandler = struct {
             };
         }
 
-        std.log.info("Accepted blob_sidecar: index={d} slot={d} proposer={d} ({d} bytes)", .{
+        std.log.debug("Accepted blob_sidecar: index={d} slot={d} proposer={d} ({d} bytes)", .{
             blob.index,
             blob.slot,
             blob.proposer_index,
@@ -1204,7 +1204,7 @@ pub const GossipHandler = struct {
             };
         }
 
-        std.log.info("Accepted data_column_sidecar: index={d} slot={d} proposer={d}", .{
+        std.log.debug("Accepted data_column_sidecar: index={d} slot={d} proposer={d}", .{
             sidecar.index,
             sidecar.slot,
             sidecar.proposer_index,

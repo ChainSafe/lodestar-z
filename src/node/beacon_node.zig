@@ -820,11 +820,11 @@ pub const BeaconNode = struct {
         switch (completed.status) {
             .success => {
                 if (completed.payload_id) |payload_id| {
-                    std.log.info("forkchoiceUpdated: payload building started, id={s}", .{
+                    std.log.debug("forkchoiceUpdated: payload building started, id={s}", .{
                         &std.fmt.bytesToHex(payload_id[0..8], .lower),
                     });
                 }
-                std.log.info("forkchoiceUpdated: status={s} head={s}... safe={s}... finalized={s}...", .{
+                std.log.debug("forkchoiceUpdated: status={s} head={s}... safe={s}... finalized={s}...", .{
                     @tagName(completed.payload_status.?),
                     &std.fmt.bytesToHex(fc_state.head_block_hash[0..4], .lower),
                     &std.fmt.bytesToHex(fc_state.safe_block_hash[0..4], .lower),
@@ -1405,7 +1405,7 @@ pub const BeaconNode = struct {
     /// Each sidecar is stored independently to support per-column availability tracking.
     pub fn importDataColumnSidecar(self: *BeaconNode, root: [32]u8, column_index: u64, data: []const u8) !void {
         try self.chainService().importDataColumnSidecar(root, column_index, data);
-        std.log.info("Imported data column sidecar root={s}... column={d}", .{
+        std.log.debug("Imported data column sidecar root={s}... column={d}", .{
             &std.fmt.bytesToHex(root[0..4], .lower),
             column_index,
         });
@@ -1420,7 +1420,7 @@ pub const BeaconNode = struct {
     ) !?chain_mod.ReadyBlockInput {
         const ready = try self.chainService().ingestDataColumnSidecar(root, column_index, slot, data);
         if (ready != null) {
-            std.log.info("Imported data column sidecar root={s}... column={d}", .{
+            std.log.debug("Imported data column sidecar root={s}... column={d}", .{
                 &std.fmt.bytesToHex(root[0..4], .lower),
                 column_index,
             });
@@ -1529,7 +1529,7 @@ pub const BeaconNode = struct {
         ) catch return;
 
         if (added) {
-            std.log.info("Queued orphan block slot={d} parent={s}... ({d} pending)", .{
+            std.log.debug("Queued orphan block slot={d} parent={s}... ({d} pending)", .{
                 block_slot,
                 &std.fmt.bytesToHex(parent_root[0..4], .lower),
                 self.unknown_block_sync.pendingCount(),
@@ -2561,7 +2561,7 @@ pub fn processorHandlerCallback(item: WorkItem, context: *anyopaque) void {
                 return;
             };
             if (maybe_result) |result| {
-                std.log.info("PROCESSOR: block imported slot={d} root={x:0>2}{x:0>2}{x:0>2}{x:0>2}...", .{
+                std.log.debug("PROCESSOR: block imported slot={d} root={x:0>2}{x:0>2}{x:0>2}{x:0>2}...", .{
                     result.slot,
                     result.block_root[0],
                     result.block_root[1],

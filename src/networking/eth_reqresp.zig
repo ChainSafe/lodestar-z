@@ -68,7 +68,7 @@ pub const EthReqRespAdapter = struct {
     ) HandleError![]const u8 {
         // 1. Parse protocol ID → Method.
         const info = protocol.parseProtocolIdInfo(protocol_id) orelse {
-            log.warn("Unknown protocol ID: {s}", .{protocol_id});
+            log.debug("Unknown protocol ID: {s}", .{protocol_id});
             return error.UnknownProtocol;
         };
         const method = info.method;
@@ -82,7 +82,7 @@ pub const EthReqRespAdapter = struct {
                 self.allocator,
                 request_wire_bytes,
             ) catch |err| {
-                log.warn("Failed to decode request for {s}: {}", .{ method.name(), err });
+                log.debug("Failed to decode request for {s}: {}", .{ method.name(), err });
                 return error.DecodeError;
             };
             ssz_bytes = decoded.ssz_bytes;

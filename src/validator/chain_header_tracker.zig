@@ -167,7 +167,7 @@ pub const ChainHeaderTracker = struct {
     ///
     /// TS: ChainHeaderTracker.start(signal)
     pub fn start(self: *ChainHeaderTracker, io: Io) !void {
-        log.info("starting chain header tracker", .{});
+        log.debug("starting chain header tracker", .{});
 
         const topics = &[_][]const u8{ "head", "finalized_checkpoint" };
         const cb = SseCallback{
@@ -201,7 +201,7 @@ pub const ChainHeaderTracker = struct {
             };
 
             const sleep_ns = reconnect_backoff_ns;
-            log.info("reconnecting chain head SSE stream in {d}s", .{sleep_ns / std.time.ns_per_s});
+            log.debug("reconnecting chain head SSE stream in {d}s", .{sleep_ns / std.time.ns_per_s});
             io.sleep(.{ .nanoseconds = sleep_ns }, .real) catch return;
             reconnect_backoff_ns = @min(reconnect_backoff_ns * 2, reconnect_backoff_max_ns);
         }

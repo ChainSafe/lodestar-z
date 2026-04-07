@@ -82,7 +82,7 @@ pub const SyncCallbackCtx = struct {
             .ignored => {},
             .queued => return error.ImportPending,
             .imported => |imported| {
-                std.log.info("SyncCallbackCtx: imported slot={d}", .{imported.slot});
+                std.log.debug("SyncCallbackCtx: imported slot={d}", .{imported.slot});
             },
         }
     }
@@ -99,7 +99,7 @@ pub const SyncCallbackCtx = struct {
         const node = ctx.node;
 
         try node.enqueueSyncSegment(chain_id, batch_id, generation, blocks, sync_type);
-        std.log.info("SyncCallbackCtx: queued {d} {s} blocks for chain {d} batch {d}/gen {d}", .{
+        std.log.debug("SyncCallbackCtx: queued {d} {s} blocks for chain {d} batch {d}/gen {d}", .{
             blocks.len,
             @tagName(sync_type),
             chain_id,
@@ -207,7 +207,7 @@ pub const SyncCallbackCtx = struct {
     }
 
     fn syncSetGossipEnabled(_: *anyopaque, enabled: bool) void {
-        std.log.info("Gossip {s}", .{if (enabled) "enabled" else "disabled"});
+        std.log.info("gossip {s}", .{if (enabled) "enabled" else "disabled"});
     }
 };
 

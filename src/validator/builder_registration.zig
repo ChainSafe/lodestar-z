@@ -133,7 +133,7 @@ pub const BuilderRegistrationService = struct {
 
         log.debug("registering {d} validators with builder relay", .{registrations.items.len});
         try self.api.registerValidators(io, json_body);
-        log.info("builder registrations sent: {d} validators", .{registrations.items.len});
+        log.debug("builder registrations sent: {d} validators", .{registrations.items.len});
     }
 
     // -----------------------------------------------------------------------

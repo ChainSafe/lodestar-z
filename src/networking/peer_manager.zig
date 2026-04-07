@@ -561,7 +561,7 @@ pub const PeerManager = struct {
 
         if (irrelevance) |info| {
             self.db.setRelevanceStatus(peer_id, .irrelevant);
-            log.info("Peer irrelevant {s}: {s}", .{
+            log.debug("Peer irrelevant {s}: {s}", .{
                 peer_id,
                 @tagName(info.code()),
             });
@@ -887,7 +887,7 @@ pub const PeerManager = struct {
         _ = self.db.pruneStale(STALE_PEER_MS, now_ms);
 
         // 8. Log summary.
-        log.info("Heartbeat: connected={d} inbound={d} outbound={d} banned={d} " ++
+        log.debug("Heartbeat: connected={d} inbound={d} outbound={d} banned={d} " ++
             "to_disconnect={d} to_discover={d} subnets_uncovered={d}", .{
             self.db.connected_count,
             self.db.inbound_count,

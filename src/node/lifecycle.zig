@@ -604,10 +604,6 @@ pub fn initFromCheckpoint(self: *BeaconNode, checkpoint_state: *CachedBeaconStat
     self.applyBootstrapOutcome(outcome);
     try wireBootstrappedNode(self);
 
-    std.log.info("Genesis validators root: 0x{s}...", .{
-        &std.fmt.bytesToHex(self.genesis_validators_root[0..8], .lower),
-    });
-
     log.logger(.node).info("initialized from checkpoint", .{
         .slot = outcome.snapshot.head.slot,
         .finalized_epoch = outcome.snapshot.finalized.epoch,

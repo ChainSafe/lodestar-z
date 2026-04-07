@@ -196,7 +196,7 @@ pub const KeyDiscovery = struct {
                 .keystore_path = keystore_path_copy,
             });
 
-            log.info("loaded validator key pubkey={s}", .{key.pubkey_hex});
+            log.debug("loaded validator key pubkey={s}", .{key.pubkey_hex});
         }
 
         log.info("loaded {d}/{d} validator keys", .{ loaded.items.len, discovered.len });

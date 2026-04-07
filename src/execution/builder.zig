@@ -355,7 +355,7 @@ pub const HttpBuilder = struct {
             });
         }
 
-        std.log.info("Builder: registered {d} validator(s) with relay", .{registrations.len});
+        std.log.debug("Builder: registered {d} validator(s) with relay", .{registrations.len});
     }
 
     fn getHeaderImpl(
@@ -404,7 +404,7 @@ pub const HttpBuilder = struct {
             return null;
         };
 
-        std.log.info("Builder: received bid for slot {d}, value={d}", .{ slot, bid.message.value });
+        std.log.debug("Builder: received bid for slot {d}, value={d}", .{ slot, bid.message.value });
         return bid;
     }
 
@@ -432,7 +432,7 @@ pub const HttpBuilder = struct {
 
         // Parse the full execution payload from response
         const payload = try parseExecutionPayload(self.allocator, response);
-        std.log.info("Builder: successfully unblinded block, block_hash={x}", .{
+        std.log.debug("Builder: successfully unblinded block, block_hash={x}", .{
             payload.block_hash[0..4],
         });
         return payload;

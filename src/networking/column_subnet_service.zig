@@ -263,7 +263,7 @@ pub const ColumnSubnetService = struct {
     /// (should not happen with proper gossipsub topic filtering).
     pub fn validateIncomingColumn(self: *const Self, subnet_id: u64) bool {
         if (!self.isSubscribed(subnet_id)) {
-            log.warn("received data column gossip for unsubscribed subnet {}", .{subnet_id});
+            log.debug("received data column gossip for unsubscribed subnet {}", .{subnet_id});
             return false;
         }
         return true;

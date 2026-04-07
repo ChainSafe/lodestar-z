@@ -1007,7 +1007,7 @@ pub const AttestationService = struct {
                 log.warn("publishAttestations failed slot={d} error={s}", .{ slot, @errorName(err) });
                 break :blk false;
             };
-            log.info("attested slot={d} count={d}", .{ slot, signed_count });
+            log.debug("attested slot={d} count={d}", .{ slot, signed_count });
             break :blk true;
         };
 

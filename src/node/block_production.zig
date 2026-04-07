@@ -630,7 +630,7 @@ pub fn produceEngineOrBuilderProposal(
         std.log.warn("Engine: getPayload failed for slot={d}: {}", .{ slot, err });
     }
     if (fetched.builder_no_bid) {
-        std.log.info("Builder: no bid available for slot={d}", .{slot});
+        std.log.debug("Builder: no bid available for slot={d}", .{slot});
     }
     if (fetched.builder_error) |err| {
         std.log.warn("Builder: getHeader failed for slot={d}: {}", .{ slot, err });
@@ -664,7 +664,7 @@ pub fn produceEngineOrBuilderProposal(
     if (local_payload.should_override_builder or builder_boost_factor == 0) {
         if (fetched.takeBuilderBid()) |bid| execution_mod.builder.freeBid(self.allocator, bid);
         if (local_payload.should_override_builder) {
-            std.log.info("Builder: local execution payload overrides builder for slot={d}", .{slot});
+            std.log.debug("Builder: local execution payload overrides builder for slot={d}", .{slot});
         }
         return .{ .engine = try assembleFullBlockFromPayloadResponse(self, template, local_payload) };
     }
@@ -689,7 +689,7 @@ pub fn produceEngineOrBuilderProposal(
     if (bid.message.value == 0 or
         engineValueMeetsBuilderThreshold(local_payload.block_value, bid.message.value, builder_boost_factor))
     {
-        std.log.info(
+        std.log.debug(
             "Builder: local execution value {d} >= boosted builder value {d} (builder={d} boost={d}) for slot={d}",
             .{
                 @as(u64, @truncate(local_payload.block_value)),
@@ -776,7 +776,7 @@ pub fn produceBuilderBlindedBlock(
             return null;
         },
         .no_bid => {
-            std.log.info("Builder: no bid available for slot={d}", .{slot});
+            std.log.debug("Builder: no bid available for slot={d}", .{slot});
             if (require_builder) return error.BuilderBidUnavailable;
             return null;
         },
@@ -1152,7 +1152,7 @@ pub fn produceAndIngestBlock(
 
         signed_block.message.state_root = state_root.*;
 
-        std.log.info("Computed state root for block: slot={d} state_root={s}...", .{
+        std.log.debug("Computed state root for block: slot={d} state_root={s}...", .{
             slot,
             &std.fmt.bytesToHex(state_root[0..4], .lower),
         });

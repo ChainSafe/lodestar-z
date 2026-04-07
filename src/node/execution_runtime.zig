@@ -359,7 +359,7 @@ pub const ExecutionRuntime = struct {
 
             self.mock_engine = mock;
             self.engine_api = mock.engine();
-            std.log.info("Execution engine: MockEngine (--engine-mock)", .{});
+            std.log.info("execution engine: MockEngine (--engine-mock)", .{});
         } else if (opts.execution_urls.len > 0) {
             const transport = try allocator.create(IoHttpTransport);
             errdefer allocator.destroy(transport);
@@ -390,7 +390,7 @@ pub const ExecutionRuntime = struct {
             self.engine_api = http_engine.engine();
 
             std.log.info(
-                "Execution engine: HttpEngine -> {s} (retries={d} delay_ms={d} timeout_ms={d})",
+                "execution engine: HttpEngine -> {s} (retries={d} delay_ms={d} timeout_ms={d})",
                 .{
                     opts.execution_urls[0],
                     opts.execution_retries,
@@ -429,7 +429,7 @@ pub const ExecutionRuntime = struct {
             self.builder_api = http_builder.builder();
 
             std.log.info(
-                "Execution builder: HttpBuilder -> {s} (timeout_ms={d} proposal_timeout_ms={d} fault_window={d} allowed_faults={d})",
+                "execution builder: HttpBuilder -> {s} (timeout_ms={d} proposal_timeout_ms={d} fault_window={d} allowed_faults={d})",
                 .{
                     opts.builder_url,
                     http_builder.request_timeout_ms,

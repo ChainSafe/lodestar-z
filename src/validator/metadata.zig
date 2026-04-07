@@ -53,7 +53,7 @@ pub fn ensureGenesis(
     }
 
     try writeGenesis(io, allocator, path, expected);
-    log.info("persisted validator genesis metadata path={s}", .{path});
+    log.debug("persisted validator genesis metadata path={s}", .{path});
 }
 
 pub fn loadGenesis(io: Io, allocator: Allocator, path: []const u8) !GenesisMetadata {

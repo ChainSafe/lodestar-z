@@ -376,7 +376,7 @@ pub const ValidatorStore = struct {
             .status = .unknown,
         });
         try self.validator_index_by_pubkey.put(self.allocator, pubkey, self.validators.items.len - 1);
-        log.info("registered remote validator pubkey={x}", .{pubkey});
+        log.debug("registered remote validator pubkey={x}", .{pubkey});
     }
 
     /// Return true if the given pubkey belongs to a remote signer.
@@ -419,7 +419,7 @@ pub const ValidatorStore = struct {
             self.validator_index_by_pubkey.put(self.allocator, moved, idx) catch unreachable;
         }
 
-        log.info("removed validator pubkey={x}", .{pubkey});
+        log.debug("removed validator pubkey={x}", .{pubkey});
         return true;
     }
 

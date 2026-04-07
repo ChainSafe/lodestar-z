@@ -369,7 +369,7 @@ pub fn processSyncBatches(self: *BeaconNode, io: std.Io, svc: *networking.P2pSer
 
     while (cb_ctx.popPendingRequest()) |req| {
         const peer_id = req.peerId();
-        std.log.info("Processing sync chain {d} batch {d}/gen {d}: slots {d}..{d} from peer {s}", .{
+        std.log.debug("Processing sync chain {d} batch {d}/gen {d}: slots {d}..{d} from peer {s}", .{
             req.chain_id,
             req.batch_id,
             req.generation,
@@ -383,7 +383,7 @@ pub fn processSyncBatches(self: *BeaconNode, io: std.Io, svc: *networking.P2pSer
                 if (peer.sync_info) |sync_info| {
                     if (sync_info.earliest_available_slot) |earliest_available_slot| {
                         if (req.start_slot < earliest_available_slot) {
-                            std.log.warn("Batch {d}: peer {s} cannot serve requested range start_slot={d} earliest_available_slot={d}", .{
+                            std.log.debug("Batch {d}: peer {s} cannot serve requested range start_slot={d} earliest_available_slot={d}", .{
                                 req.batch_id,
                                 peer_id,
                                 req.start_slot,
@@ -401,7 +401,7 @@ pub fn processSyncBatches(self: *BeaconNode, io: std.Io, svc: *networking.P2pSer
 
         const blocks = fetchRawBlocksByRange(self, io, svc, peer_id, req.start_slot, req.count) catch |err| {
             reportReqRespFetchFailure(self, io, peer_id, .beacon_blocks_by_range, err);
-            std.log.warn("Batch {d} fetch failed: {}", .{ req.batch_id, err });
+            std.log.debug("Batch {d} fetch failed: {}", .{ req.batch_id, err });
             if (self.sync_service_inst) |sync_svc| {
                 sync_svc.onBatchError(req.chain_id, req.batch_id, req.generation, peer_id);
             }
@@ -413,7 +413,7 @@ pub fn processSyncBatches(self: *BeaconNode, io: std.Io, svc: *networking.P2pSer
         }
 
         if (blocks.len == 0) {
-            std.log.warn("Batch {d}: empty response from peer", .{req.batch_id});
+            std.log.debug("Batch {d}: empty response from peer", .{req.batch_id});
             if (self.sync_service_inst) |sync_svc| {
                 sync_svc.onBatchError(req.chain_id, req.batch_id, req.generation, peer_id);
             }
@@ -421,7 +421,7 @@ pub fn processSyncBatches(self: *BeaconNode, io: std.Io, svc: *networking.P2pSer
         }
 
         ensureRangeSyncDataAvailability(self, io, svc, peer_id, blocks) catch |err| {
-            std.log.warn("Batch {d}: DA prefetch failed: {}", .{ req.batch_id, err });
+            std.log.debug("Batch {d}: DA prefetch failed: {}", .{ req.batch_id, err });
             if (self.sync_service_inst) |sync_svc| {
                 sync_svc.onBatchError(req.chain_id, req.batch_id, req.generation, peer_id);
             }
@@ -432,7 +432,7 @@ pub fn processSyncBatches(self: *BeaconNode, io: std.Io, svc: *networking.P2pSer
             sync_svc.onBatchResponse(req.chain_id, req.batch_id, req.generation, blocks);
         }
 
-        std.log.info("Batch {d}: delivered {d} blocks to sync pipeline", .{
+        std.log.debug("Batch {d}: delivered {d} blocks to sync pipeline", .{
             req.batch_id,
             blocks.len,
         });
@@ -445,13 +445,13 @@ pub fn processSyncByRootRequests(self: *BeaconNode, io: std.Io, svc: *networking
     while (cb_ctx.popPendingByRootRequest()) |req| {
         const peer_id = req.peerId();
         const root = req.root;
-        std.log.info("processSyncByRoot: fetching root {x:0>2}{x:0>2}{x:0>2}{x:0>2}... from peer {s}", .{
+        std.log.debug("processSyncByRoot: fetching root {x:0>2}{x:0>2}{x:0>2}{x:0>2}... from peer {s}", .{
             root[0], root[1], root[2], root[3], peer_id,
         });
 
         const block_ssz = fetchBlockByRoot(self, io, svc, peer_id, root) catch |err| {
             reportReqRespFetchFailure(self, io, peer_id, .beacon_blocks_by_root, err);
-            std.log.warn("processSyncByRoot: fetch failed for root {x:0>2}{x:0>2}{x:0>2}{x:0>2}...: {}", .{
+            std.log.debug("processSyncByRoot: fetch failed for root {x:0>2}{x:0>2}{x:0>2}{x:0>2}...: {}", .{
                 root[0], root[1], root[2], root[3], err,
             });
             self.unknown_block_sync.onFetchFailed(root);
@@ -460,7 +460,7 @@ pub fn processSyncByRootRequests(self: *BeaconNode, io: std.Io, svc: *networking
         defer self.allocator.free(block_ssz);
 
         ensureByRootDataAvailability(self, io, svc, peer_id, block_ssz) catch |err| {
-            std.log.warn("processSyncByRoot: DA prefetch failed for root {x:0>2}{x:0>2}{x:0>2}{x:0>2}...: {}", .{
+            std.log.debug("processSyncByRoot: DA prefetch failed for root {x:0>2}{x:0>2}{x:0>2}{x:0>2}...: {}", .{
                 root[0], root[1], root[2], root[3], err,
             });
             self.unknown_block_sync.onFetchFailed(root);
@@ -1004,7 +1004,7 @@ fn runRealtimeP2pTick(self: *BeaconNode, io: std.Io, svc: *networking.P2pService
 }
 
 fn runLoop(self: *BeaconNode, io: std.Io, svc: *networking.P2pService) void {
-    std.log.info("Starting P2P runtime loop...", .{});
+    std.log.debug("Starting P2P runtime loop", .{});
     const start_ns = std.Io.Timestamp.now(io, .awake).toNanoseconds();
     var next_connectivity_maintenance_ns = start_ns;
     var next_discovery_maintenance_ns = start_ns;
@@ -1419,7 +1419,7 @@ fn dialBootnodeEnr(self: *BeaconNode, io: std.Io, svc: *networking.P2pService, e
     var ma_buf: [160]u8 = undefined;
     const ma_str = try formatDiscv5DialMultiaddr(&ma_buf, dial_addr);
 
-    std.log.info("Dialing bootnode at {s}", .{ma_str});
+    std.log.debug("Dialing bootnode at {s}", .{ma_str});
 
     const peer_addr = try Multiaddr.fromString(self.allocator, ma_str);
     defer peer_addr.deinit();
@@ -1428,7 +1428,7 @@ fn dialBootnodeEnr(self: *BeaconNode, io: std.Io, svc: *networking.P2pService, e
         std.log.warn("Bootnode dial failed: {}", .{err});
         return err;
     };
-    std.log.info("Connected to bootnode, peer_id: {s}", .{peer_id});
+    std.log.debug("Connected to bootnode, peer_id: {s}", .{peer_id});
     _ = registerConnectedPeer(
         self,
         io,
@@ -1670,7 +1670,7 @@ fn dialDiscoveredPeers(
             }
         }
 
-        std.log.info("Connected to discovered peer {s} via {s}", .{ peer_id, ma_str });
+        std.log.debug("Connected to discovered peer {s} via {s}", .{ peer_id, ma_str });
         did_work = registerConnectedPeer(
             self,
             io,
@@ -1919,7 +1919,7 @@ fn initPeerManager(self: *BeaconNode) !void {
         .local_custody_columns = self.chain_runtime.custody_columns,
     });
     self.peer_manager = pm;
-    std.log.info("Peer manager initialized (target_peers={d} target_group_peers={d})", .{
+    std.log.debug("Peer manager initialized (target_peers={d} target_group_peers={d})", .{
         pm.config.target_peers,
         pm.config.target_group_peers,
     });
@@ -1944,7 +1944,7 @@ fn initSyncPipeline(self: *BeaconNode) !void {
     }
     self.sync_service_inst = sync_svc;
 
-    std.log.info("Sync pipeline initialized (head_slot={d})", .{self.currentHeadSlot()});
+    std.log.debug("Sync pipeline initialized (head_slot={d})", .{self.currentHeadSlot()});
 }
 
 fn ensureRangeSyncDataAvailability(
@@ -2297,7 +2297,7 @@ fn fetchDataColumnsByRangeForMetas(
         try attempted_peers.append(self.allocator, selected_peer);
 
         fetchDataColumnsByRangeOnce(self, io, svc, selected_peer, metas, &request) catch |err| {
-            std.log.warn("Data column by-range fetch failed from peer {s}: {}", .{ selected_peer, err });
+            std.log.debug("Data column by-range fetch failed from peer {s}: {}", .{ selected_peer, err });
             last_err = err;
             continue;
         };
@@ -2432,7 +2432,7 @@ fn fetchDataColumnsByRootForMeta(
         try attempted_peers.append(self.allocator, selected_peer);
 
         fetchDataColumnsByRootOnce(self, io, svc, selected_peer, meta, missing) catch |err| {
-            std.log.warn("Data column by-root fetch failed from peer {s}: {}", .{ selected_peer, err });
+            std.log.debug("Data column by-root fetch failed from peer {s}: {}", .{ selected_peer, err });
             last_err = err;
             continue;
         };
@@ -2803,7 +2803,7 @@ fn sendStatus(
     defer outbound.finish(io, request_outcome);
 
     const our_status = self.getStatus();
-    std.log.info("Sending Status: fork_digest={x:0>2}{x:0>2}{x:0>2}{x:0>2} head_slot={d} finalized_epoch={d}", .{
+    std.log.debug("Sending Status: fork_digest={x:0>2}{x:0>2}{x:0>2}{x:0>2} head_slot={d} finalized_epoch={d}", .{
         our_status.fork_digest[0],
         our_status.fork_digest[1],
         our_status.fork_digest[2],
@@ -2839,13 +2839,13 @@ fn sendStatus(
     defer reader.deinit();
 
     const decoded = (try reader.next(io, &outbound.stream)) orelse {
-        std.log.warn("Status: peer sent empty response", .{});
+        std.log.debug("Status: peer sent empty response", .{});
         return error.EmptyResponse;
     };
     defer self.allocator.free(decoded.ssz_bytes);
 
     if (decoded.result != .success) {
-        std.log.warn("Status response: error code {}", .{decoded.result});
+        std.log.debug("Status response: error code {}", .{decoded.result});
         request_outcome = responseCodeOutcome(decoded.result);
         return responseCodeError(decoded.result);
     }
@@ -2853,11 +2853,11 @@ fn sendStatus(
     if (use_status_v2) {
         var peer_status_v2: StatusMessageV2.Type = undefined;
         StatusMessageV2.deserializeFromBytes(decoded.ssz_bytes, &peer_status_v2) catch |err| {
-            std.log.warn("StatusV2 SSZ deserialize error: {}", .{err});
+            std.log.debug("StatusV2 SSZ deserialize error: {}", .{err});
             return err;
         };
 
-        std.log.info("Peer StatusV2: fork_digest={x:0>2}{x:0>2}{x:0>2}{x:0>2} head_slot={d} finalized_epoch={d} earliest_available_slot={d}", .{
+        std.log.debug("Peer StatusV2: fork_digest={x:0>2}{x:0>2}{x:0>2}{x:0>2} head_slot={d} finalized_epoch={d} earliest_available_slot={d}", .{
             peer_status_v2.fork_digest[0],
             peer_status_v2.fork_digest[1],
             peer_status_v2.fork_digest[2],
@@ -2882,11 +2882,11 @@ fn sendStatus(
 
     var peer_status: StatusMessage.Type = undefined;
     StatusMessage.deserializeFromBytes(decoded.ssz_bytes, &peer_status) catch |err| {
-        std.log.warn("Status SSZ deserialize error: {}", .{err});
+        std.log.debug("Status SSZ deserialize error: {}", .{err});
         return err;
     };
 
-    std.log.info("Peer Status: fork_digest={x:0>2}{x:0>2}{x:0>2}{x:0>2} head_slot={d} finalized_epoch={d} finalized_root={x:0>2}{x:0>2}{x:0>2}{x:0>2}...", .{
+    std.log.debug("Peer Status: fork_digest={x:0>2}{x:0>2}{x:0>2}{x:0>2} head_slot={d} finalized_epoch={d} finalized_root={x:0>2}{x:0>2}{x:0>2}{x:0>2}...", .{
         peer_status.fork_digest[0],
         peer_status.fork_digest[1],
         peer_status.fork_digest[2],
@@ -3022,7 +3022,7 @@ fn handleReqRespMaintenanceFailure(
     protocol: ReqRespMaintenanceProtocol,
     err: anyerror,
 ) void {
-    std.log.warn("Peer maintenance {s} failed for {s}: {}", .{ @tagName(protocol), peer_id, err });
+    std.log.debug("Peer maintenance {s} failed for {s}: {}", .{ @tagName(protocol), peer_id, err });
 
     if (err == error.RequestSelfRateLimited) {
         std.log.debug("Local req/resp self rate limit hit for maintenance {s} to {s}", .{ @tagName(protocol), peer_id });

@@ -357,7 +357,7 @@ pub const HttpEngine = struct {
                 return response;
             } else |err| {
                 // Transport error — check if we should retry.
-                std.log.warn("Engine API: transport error on attempt {d}: {}", .{ attempt + 1, err });
+                std.log.debug("Engine API: transport error on attempt {d}: {}", .{ attempt + 1, err });
                 if (attempt + 1 >= max_attempts) {
                     self.updateState(.offline);
                     return err;
@@ -809,7 +809,7 @@ pub const HttpEngine = struct {
         defer self.allocator.free(body);
 
         const response = self.sendRequest(body) catch |err| {
-            std.log.warn("execution layer offline — retrying ({})", .{err});
+            std.log.debug("execution layer offline — retrying ({})", .{err});
             self.updateState(.offline);
             return err;
         };
@@ -825,14 +825,10 @@ pub const HttpEngine = struct {
             .bool => |b| {
                 if (!b) {
                     // false = fully synced
-                    if (self.state != .online) {
-                        std.log.info("execution layer connected", .{});
-                    }
                     self.updateState(.online);
                     return .synced;
                 }
                 // true = syncing but no detail
-                std.log.warn("execution layer syncing", .{});
                 self.updateState(.syncing);
                 return .{ .syncing = .{ .current_block = 0, .highest_block = 0 } };
             },
@@ -847,12 +843,12 @@ pub const HttpEngine = struct {
                 else
                     0;
 
-                std.log.warn("execution layer syncing: block {d}/{d}", .{ current, highest });
+                std.log.debug("execution layer syncing: block {d}/{d}", .{ current, highest });
                 self.updateState(.syncing);
                 return .{ .syncing = .{ .current_block = current, .highest_block = highest } };
             },
             else => {
-                std.log.warn("execution layer syncing: unexpected response type", .{});
+                std.log.debug("execution layer syncing: unexpected response type", .{});
                 self.updateState(.syncing);
                 return .{ .syncing = .{ .current_block = 0, .highest_block = 0 } };
             },

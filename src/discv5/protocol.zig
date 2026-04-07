@@ -703,7 +703,7 @@ pub const Protocol = struct {
         }
 
         const idx = pending_idx orelse {
-            std.log.warn("discv5: WHOAREYOU for unknown nonce, ignoring", .{});
+            std.log.debug("discv5: WHOAREYOU for unknown nonce, ignoring", .{});
             return;
         };
 
@@ -864,30 +864,30 @@ pub const Protocol = struct {
             if (authdata.len > enr_offset) {
                 const enr_bytes = authdata[enr_offset..];
                 var parsed_enr = enr_mod.decode(self.alloc, enr_bytes) catch {
-                    std.log.warn("discv5: handshake from unknown peer {any} has invalid ENR, rejecting", .{src_id});
+                    std.log.debug("discv5: handshake from unknown peer {any} has invalid ENR, rejecting", .{src_id});
                     return;
                 };
                 defer parsed_enr.deinit();
                 const pk = parsed_enr.pubkey orelse {
-                    std.log.warn("discv5: handshake ENR from {any} has no pubkey, rejecting", .{src_id});
+                    std.log.debug("discv5: handshake ENR from {any} has no pubkey, rejecting", .{src_id});
                     return;
                 };
                 // Verify the ENR node-id matches the claimed src_id.
                 const derived_id = enr_mod.nodeIdFromCompressedPubkey(&pk);
                 if (!std.mem.eql(u8, &derived_id, &src_id)) {
-                    std.log.warn("discv5: handshake ENR node-id mismatch, rejecting", .{});
+                    std.log.debug("discv5: handshake ENR node-id mismatch, rejecting", .{});
                     return;
                 }
                 break :blk pk;
             }
-            std.log.warn("discv5: handshake from unknown peer {any} with no ENR, rejecting", .{src_id});
+            std.log.debug("discv5: handshake from unknown peer {any} with no ENR, rejecting", .{src_id});
             return;
         };
 
         // Verify id-signature: SHA256("discovery v5 identity proof" || challenge_data || eph_pubkey || local_node_id)
         const id_sig_fixed: *const [64]u8 = id_sig[0..64];
         session_mod.verifyIdSignature(id_sig_fixed, &sender_pubkey, challenge, eph_pk, &self.config.local_node_id) catch {
-            std.log.warn("discv5: handshake id-signature verification failed for {any}, rejecting", .{src_id});
+            std.log.debug("discv5: handshake id-signature verification failed for {any}, rejecting", .{src_id});
             return;
         };
 

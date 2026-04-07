@@ -305,7 +305,7 @@ pub const HttpServer = struct {
         }
         self.startup_status.store(@intFromEnum(StartupStatus.started), .release);
 
-        log.info("Beacon API listening on {s}:{d}", .{ self.address, self.port });
+        log.info("beacon API listening on {s}:{d}", .{ self.address, self.port });
 
         while (!self.shutdown_requested.load(.acquire)) {
             const stream = tcp_server.accept(io) catch |err| {
@@ -1326,7 +1326,7 @@ pub const HttpServer = struct {
         var since_idx = bus.write_idx;
         var polls_remaining: i64 = @divTrunc(sse_max_duration_sec * 1000, sse_poll_interval_ms);
 
-        log.info("SSE client connected, topics: {s}", .{topics_value});
+        log.debug("SSE client connected, topics: {s}", .{topics_value});
 
         while (polls_remaining > 0 and !self.shutdown_requested.load(.acquire)) {
             polls_remaining -= 1;
@@ -1380,7 +1380,7 @@ pub const HttpServer = struct {
 
         // Max duration reached or shutdown — end the stream.
         body_writer.end() catch {};
-        log.info("SSE stream ended (max duration or shutdown)", .{});
+        log.debug("SSE stream ended (max duration or shutdown)", .{});
     }
 
     fn hGetEvents(self: *HttpServer, _: DispatchContext) !HandlerResult {

@@ -504,7 +504,7 @@ pub fn fetchRemoteSignerKeys(
             try unique_pubkeys.append(allocator, pubkey);
         }
 
-        log.info("fetched {d} remote validator key(s) from {s}", .{ unique_pubkeys.items.len, url });
+        log.debug("fetched {d} remote validator key(s) from {s}", .{ unique_pubkeys.items.len, url });
         try by_url.append(allocator, .{
             .url = try allocator.dupe(u8, url),
             .pubkeys = try unique_pubkeys.toOwnedSlice(allocator),

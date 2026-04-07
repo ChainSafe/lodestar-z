@@ -437,7 +437,7 @@ pub fn importVerifiedBlock(
         // Log but don't reprocess inline (avoids deep recursion / stack overflow).
         // Callers should drain the queue asynchronously after import.
         if (released.items.len > 0) {
-            std.log.info("importBlock: {d} block(s) queued for reprocessing (parent={s}...)", .{
+            std.log.debug("importBlock: {d} block(s) queued for reprocessing (parent={s}...)", .{
                 released.items.len,
                 &std.fmt.bytesToHex(block_root[0..4], .lower),
             });
@@ -471,7 +471,7 @@ fn detectAndEmitReorg(
 ) void {
     const fc = ctx.fork_choice;
 
-    std.log.info("head changed: old={s}... new={s}...", .{
+    std.log.debug("head changed: old={s}... new={s}...", .{
         &std.fmt.bytesToHex(old_head_root[0..4], .lower),
         &std.fmt.bytesToHex(new_head.block_root[0..4], .lower),
     });

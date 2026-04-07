@@ -257,7 +257,7 @@ fn reqRespOnPeerStatus(ptr: *anyopaque, peer_id: ?[]const u8, status: StatusMess
     const effective_peer_id = peer_id orelse return;
     const irrelevance = handlePeerStatus(node, effective_peer_id, status, earliest_available_slot);
     if (irrelevance) |code| {
-        std.log.info("Peer {s} failed relevance check during inbound status handling: {s}", .{
+        std.log.debug("Peer {s} failed relevance check during inbound status handling: {s}", .{
             effective_peer_id,
             @tagName(code),
         });
@@ -328,7 +328,7 @@ pub fn handlePeerGoodbye(node: *BeaconNode, peer_id: []const u8, reason: u64) vo
     if (node.peer_manager) |pm| {
         pm.onPeerGoodbye(peer_id, @enumFromInt(reason), wallTimeMs(node.io));
     }
-    std.log.info("Peer sent Goodbye {s} reason={d}", .{ peer_id, reason });
+    std.log.debug("Peer sent Goodbye {s} reason={d}", .{ peer_id, reason });
 }
 
 fn localCachedStatus(node: *const BeaconNode) networking.CachedStatus {

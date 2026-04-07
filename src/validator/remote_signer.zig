@@ -261,7 +261,7 @@ pub const RemoteSigner = struct {
         var response = try req.receiveHead(&redirect_buf);
 
         if (response.head.status != .ok) {
-            log.warn("GET {s} → HTTP {d}", .{ path, @intFromEnum(response.head.status) });
+            log.debug("GET {s} → HTTP {d}", .{ path, @intFromEnum(response.head.status) });
             return error.HttpError;
         }
 
@@ -306,7 +306,7 @@ pub const RemoteSigner = struct {
             // Web3Signer returns 412 when slashing protection is triggered.
             return error.HttpSlashingProtection;
         } else if (status_code < 200 or status_code >= 300) {
-            log.warn("POST {s} → HTTP {d}", .{ path, status_code });
+            log.debug("POST {s} → HTTP {d}", .{ path, status_code });
             return error.HttpError;
         }
 

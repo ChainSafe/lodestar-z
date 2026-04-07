@@ -540,7 +540,7 @@ pub fn assembleBlockFromTemplate(
         .execution_requests = execution_requests,
     };
 
-    std.log.info(
+    std.log.debug(
         "Assembled full block body: slot={d} proposer={d} txs={d} atts={d} exits={d} slashings={d} bls_changes={d} blobs={d} execution_requests={d}/{d}/{d}",
         .{
             template.slot,
@@ -594,7 +594,7 @@ pub fn assembleBlindedBlockFromTemplate(
         .execution_requests = execution_requests,
     };
 
-    std.log.info(
+    std.log.debug(
         "Assembled blinded block body: slot={d} proposer={d} atts={d} exits={d} slashings={d} bls_changes={d} blobs={d} execution_requests={d}/{d}/{d}",
         .{
             template.slot,
@@ -675,7 +675,7 @@ pub fn assembleBlock(
         .execution_requests = execution_requests,
     };
 
-    std.log.info(
+    std.log.debug(
         "Assembled full block body: slot={d} proposer={d} txs={d} atts={d} exits={d} slashings={d} bls_changes={d} blobs={d} execution_requests={d}/{d}/{d}",
         .{
             slot,
@@ -743,7 +743,7 @@ pub fn assembleBlindedBlock(
         .execution_requests = execution_requests,
     };
 
-    std.log.info(
+    std.log.debug(
         "Assembled blinded block body: slot={d} proposer={d} atts={d} exits={d} slashings={d} bls_changes={d} blobs={d} execution_requests={d}/{d}/{d}",
         .{
             slot,

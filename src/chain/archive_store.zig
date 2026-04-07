@@ -270,7 +270,7 @@ pub const ArchiveStore = struct {
         if (state_archive.last_archived_epoch) |epoch| {
             self.last_archived_state_epoch = epoch;
         }
-        std.log.info("ArchiveStore: archived slots {d}..{d} (epoch {d})", .{
+        std.log.debug("ArchiveStore: archived slots {d}..{d} (epoch {d})", .{
             from_slot, to_slot, checkpoint.epoch,
         });
         return .{

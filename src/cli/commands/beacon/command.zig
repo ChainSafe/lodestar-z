@@ -161,7 +161,7 @@ fn formatP2pListenMultiaddr(buf: []u8, host: []const u8, port: u16) ![]const u8 
 fn slotClockLoop(io: Io, node: *BeaconNode) !void {
     const clock = node.clock orelse return error.ClockNotInitialized;
 
-    std.log.info("Entering slot clock loop...", .{});
+    std.log.debug("Entering slot clock loop", .{});
 
     while (!ShutdownHandler.shouldStop()) {
         const current_slot = clock.currentSlot(io) orelse {
