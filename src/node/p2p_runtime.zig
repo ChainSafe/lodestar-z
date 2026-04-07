@@ -2023,7 +2023,7 @@ fn initSyncPipeline(self: *BeaconNode) !void {
         self.allocator,
         cb_ctx.syncServiceCallbacks(),
         self.currentHeadSlot(),
-        0,
+        self.getHead().finalized_epoch,
     );
     sync_svc.is_single_node = self.node_options.sync_is_single_node;
     if (sync_svc.is_single_node) {
