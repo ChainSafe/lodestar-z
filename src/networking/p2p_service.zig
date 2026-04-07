@@ -188,27 +188,11 @@ const Network = union(enum) {
     }
 
     fn snapshotConnectedPeerIds(self: *const @This(), allocator: Allocator) ![][]const u8 {
-        const connection_count = switch (self.*) {
-            inline else => |network| network.connections.count(),
+        // Delegate to Switch's safe snapshot method which deep-copies keys
+        // before any allocations that might yield to async tasks.
+        return switch (self.*) {
+            inline else => |network| network.snapshotConnectedPeerIds(allocator),
         };
-
-        var peer_ids = try allocator.alloc([]const u8, connection_count);
-        var copied: usize = 0;
-        errdefer {
-            for (peer_ids[0..copied]) |peer_id| allocator.free(peer_id);
-            allocator.free(peer_ids);
-        }
-
-        switch (self.*) {
-            inline else => |network| {
-                var iter = network.connections.iterator();
-                while (iter.next()) |entry| : (copied += 1) {
-                    peer_ids[copied] = try allocator.dupe(u8, entry.key_ptr.*);
-                }
-            },
-        }
-
-        return peer_ids;
     }
 
     fn newStreamWithPayload(
