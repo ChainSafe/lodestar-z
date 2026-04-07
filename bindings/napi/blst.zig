@@ -108,6 +108,7 @@ pub fn PublicKey_finalize(_: napi.Env, pk: *PublicKey, _: ?*anyopaque) void {
 pub fn PublicKey_ctor(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
     const pk = try allocator.create(PublicKey);
     errdefer allocator.destroy(pk);
+
     _ = try env.wrap(
         cb.this(),
         PublicKey,
@@ -225,6 +226,7 @@ pub fn Signature_finalize(_: napi.Env, sig: *Signature, _: ?*anyopaque) void {
 pub fn Signature_ctor(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
     const sig = try allocator.create(Signature);
     errdefer allocator.destroy(sig);
+
     _ = try env.wrap(
         cb.this(),
         Signature,
