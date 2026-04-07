@@ -267,7 +267,7 @@ pub const Config = struct {
     /// Sequence number of our local ENR.
     local_enr_seq: u64 = 0,
     /// Time after which outbound requests are considered failed and removed.
-    request_timeout_ms: u64 = 5_000,
+    request_timeout_ms: u64 = 15_000,
     /// Time a replacement node waits before evicting the stalest disconnected bucket entry.
     bucket_pending_timeout_ms: u64 = kbucket.BUCKET_PENDING_TIMEOUT_MS,
 };
