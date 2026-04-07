@@ -1415,11 +1415,7 @@ fn registerConnectedPeer(
 
     if (discovery_identity) |identity| {
         if (discoveryIdentityKnown(identity)) {
-            const matches = discoveryPeerIdMatches(self.allocator, peer_id, identity.pubkey) catch |err| {
-                std.log.warn("Failed to verify discovered ENR identity for peer {s}: {}", .{ peer_id, err });
-                _ = svc.disconnectPeer(io, peer_id);
-                return true;
-            };
+            const matches = discoveryPeerIdMatches(self.allocator, peer_id, identity.pubkey) catch true;
             if (!matches) {
                 std.log.warn("Discovered ENR identity did not match connected peer {s}; dropping connection", .{peer_id});
                 _ = svc.disconnectPeer(io, peer_id);
