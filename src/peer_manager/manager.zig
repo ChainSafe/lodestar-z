@@ -25,6 +25,7 @@ const ClientKind = types.ClientKind;
 const GoodbyeReasonCode = types.GoodbyeReasonCode;
 const GossipScoreUpdate = types.GossipScoreUpdate;
 const RequestedSubnet = types.RequestedSubnet;
+const CustodyGroupQuery = types.CustodyGroupQuery;
 const PrioritizePeersInput = prioritize_mod.PrioritizePeersInput;
 const PrioritizePeersOpts = prioritize_mod.PrioritizePeersOpts;
 const ScoreState = types.ScoreState;
@@ -45,6 +46,9 @@ pub const PeerManager = struct {
 
     // Reusable action buffer
     actions: std.ArrayList(Action),
+    discovery_attnet_queries: std.ArrayList(types.SubnetQuery),
+    discovery_syncnet_queries: std.ArrayList(types.SubnetQuery),
+    discovery_custody_group_queries: std.ArrayList(CustodyGroupQuery),
 
     pub fn init(
         allocator: Allocator,
@@ -63,6 +67,9 @@ pub const PeerManager = struct {
             .active_syncnets = std.ArrayList(RequestedSubnet).init(allocator),
             .our_sampling_groups = null,
             .actions = std.ArrayList(Action).init(allocator),
+            .discovery_attnet_queries = std.ArrayList(types.SubnetQuery).init(allocator),
+            .discovery_syncnet_queries = std.ArrayList(types.SubnetQuery).init(allocator),
+            .discovery_custody_group_queries = std.ArrayList(CustodyGroupQuery).init(allocator),
         };
     }
 
@@ -73,6 +80,9 @@ pub const PeerManager = struct {
         self.active_syncnets.deinit();
         if (self.our_sampling_groups) |g| self.allocator.free(g);
         self.actions.deinit();
+        self.discovery_attnet_queries.deinit();
+        self.discovery_syncnet_queries.deinit();
+        self.discovery_custody_group_queries.deinit();
     }
 
     // ── Tick Functions ──────────────────────────────────────────────
@@ -82,7 +92,7 @@ pub const PeerManager = struct {
         current_slot: u64,
         local_status: Status,
     ) ![]const Action {
-        self.actions.clearRetainingCapacity();
+        self.resetActionState();
         self.scorer.decayScores();
         try self.evictBadPeers();
         const starved = self.detectStarvation(current_slot);
@@ -92,7 +102,7 @@ pub const PeerManager = struct {
     }
 
     pub fn checkPingAndStatus(self: *PeerManager) ![]const Action {
-        self.actions.clearRetainingCapacity();
+        self.resetActionState();
         const now = self.clock_fn();
         var iter = self.store.iterPeers();
         while (iter.next()) |entry| {
@@ -109,7 +119,7 @@ pub const PeerManager = struct {
         peer_id: []const u8,
         direction: Direction,
     ) ![]const Action {
-        self.actions.clearRetainingCapacity();
+        self.resetActionState();
         if (self.store.contains(peer_id)) return self.actions.items;
 
         self.store.addPeer(
@@ -133,7 +143,7 @@ pub const PeerManager = struct {
         self: *PeerManager,
         peer_id: []const u8,
     ) ![]const Action {
-        self.actions.clearRetainingCapacity();
+        self.resetActionState();
         const peer = self.store.getPeerData(peer_id) orelse
             return self.actions.items;
 
@@ -155,7 +165,7 @@ pub const PeerManager = struct {
         local_status: Status,
         current_slot: u64,
     ) ![]const Action {
-        self.actions.clearRetainingCapacity();
+        self.resetActionState();
         self.store.updateStatus(peer_id, remote_status);
         self.store.updateLastStatus(peer_id, self.clock_fn());
 
@@ -208,7 +218,7 @@ pub const PeerManager = struct {
         reason: GoodbyeReasonCode,
     ) ![]const Action {
         _ = reason;
-        self.actions.clearRetainingCapacity();
+        self.resetActionState();
         try self.actions.append(.{ .disconnect_peer = peer_id });
         return self.actions.items;
     }
@@ -218,7 +228,7 @@ pub const PeerManager = struct {
         peer_id: []const u8,
         seq_number: u64,
     ) ![]const Action {
-        self.actions.clearRetainingCapacity();
+        self.resetActionState();
         const peer = self.store.getPeerData(peer_id) orelse
             return self.actions.items;
 
@@ -428,15 +438,43 @@ pub const PeerManager = struct {
         }
 
         if (result.peers_to_connect > 0) {
+            try self.discovery_attnet_queries.appendSlice(result.attnet_queries.items);
+            try self.discovery_syncnet_queries.appendSlice(result.syncnet_queries.items);
+
+            var custody_iter = result.custody_group_queries.iterator();
+            while (custody_iter.next()) |entry| {
+                try self.discovery_custody_group_queries.append(.{
+                    .group = entry.key_ptr.*,
+                    .max_peers_to_discover = entry.value_ptr.*,
+                });
+            }
+            std.mem.sort(
+                CustodyGroupQuery,
+                self.discovery_custody_group_queries.items,
+                {},
+                struct {
+                    fn lessThan(_: void, a: CustodyGroupQuery, b: CustodyGroupQuery) bool {
+                        return a.group < b.group;
+                    }
+                }.lessThan,
+            );
+
             try self.actions.append(.{
                 .request_discovery = .{
                     .peers_to_connect = result.peers_to_connect,
-                    .attnet_queries = result.attnet_queries.items,
-                    .syncnet_queries = result.syncnet_queries.items,
-                    .custody_group_queries = &.{},
+                    .attnet_queries = self.discovery_attnet_queries.items,
+                    .syncnet_queries = self.discovery_syncnet_queries.items,
+                    .custody_group_queries = self.discovery_custody_group_queries.items,
                 },
             });
         }
+    }
+
+    fn resetActionState(self: *PeerManager) void {
+        self.actions.clearRetainingCapacity();
+        self.discovery_attnet_queries.clearRetainingCapacity();
+        self.discovery_syncnet_queries.clearRetainingCapacity();
+        self.discovery_custody_group_queries.clearRetainingCapacity();
     }
 
     /// Check ping and status timers for a single peer.
@@ -714,4 +752,27 @@ test "heartbeat — below target triggers discovery" {
         if (a == .request_discovery) has_discovery = true;
     }
     try std.testing.expect(has_discovery);
+}
+
+test "heartbeat — discovery carries custody group queries" {
+    test_clock_value = 0;
+    var pm = try PeerManager.init(std.testing.allocator, testConfig(), &testClock);
+    defer pm.deinit();
+
+    try pm.setSamplingGroups(&.{ 0, 1, 2 });
+
+    const actions = try pm.heartbeat(100, makeLocalStatus());
+
+    var found_discovery = false;
+    for (actions) |action| {
+        switch (action) {
+            .request_discovery => |discovery| {
+                found_discovery = true;
+                try std.testing.expect(discovery.custody_group_queries.len > 0);
+            },
+            else => {},
+        }
+    }
+
+    try std.testing.expect(found_discovery);
 }
