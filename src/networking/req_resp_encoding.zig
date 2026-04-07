@@ -698,6 +698,60 @@ test "response chunk roundtrip with context bytes and BeaconBlocksByRange" {
     try testing.expectEqual(request.count, decoded_req.count);
 }
 
+test "decodeResponseChunk with Lodestar TS fixture bytes (Status)" {
+    // From lodestar/packages/reqresp/test/fixtures/messages.ts sszSnappyStatus
+    // Wire format: result_code(1) + context_bytes(4) + varint_length + snappy_framed_data
+    // The Lodestar fixture provides the varint+snappy part as "chunks".
+    // We prepend success(0x00) + fork_digest(4 bytes) to match blocks_by_range response format.
+    const allocator = testing.allocator;
+
+    // Lodestar status chunks concatenated (varint length + snappy frame):
+    const lodestar_wire = [_]u8{
+        // result code: success
+        0x00,
+        // context bytes (fork digest placeholder)
+        0xda, 0xda, 0xda, 0xda,
+        // varint length prefix: 0x54 = 84 bytes uncompressed
+        0x54,
+        // snappy framed data (from Lodestar fixture)
+        0xff, 0x06, 0x00, 0x00, 0x73, 0x4e, 0x61, 0x50, 0x70, 0x59, // stream identifier
+        0x00, 0x1b, 0x00, 0x00, 0x09, 0x78, 0x02, 0xc1, // compressed chunk header + crc
+        0x54, 0x00, 0xda, 0x8a, 0x01, 0x00, 0x04, 0x09, 0x00, 0x09, 0x01, 0x7e, 0x2b, 0x00, 0x1c, 0x09, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    };
+
+    const decoded = try decodeResponseChunk(allocator, &lodestar_wire, true);
+    defer allocator.free(decoded.ssz_bytes);
+
+    try testing.expectEqual(ResponseCode.success, decoded.result);
+    try testing.expect(decoded.context_bytes != null);
+    try testing.expectEqualSlices(u8, &[_]u8{ 0xda, 0xda, 0xda, 0xda }, &decoded.context_bytes.?);
+    // Status SSZ is 84 bytes
+    try testing.expectEqual(@as(usize, 84), decoded.ssz_bytes.len);
+}
+
+test "decodeResponseChunk with Lodestar TS fixture bytes (Ping)" {
+    const allocator = testing.allocator;
+
+    // Lodestar ping: varint(0x08=8) + snappy_frame
+    // Prepend result_code(0x00), NO context bytes for ping
+    const lodestar_wire = [_]u8{
+        0x00, // success
+        0x08, // varint: 8 bytes
+        0xff, 0x06, 0x00, 0x00, 0x73, 0x4e, 0x61, 0x50, 0x70, 0x59, // snappy identifier
+        0x01, 0x0c, 0x00, 0x00, 0x01, 0x75, 0xde, 0x41, // uncompressed chunk
+        0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    };
+
+    const decoded = try decodeResponseChunk(allocator, &lodestar_wire, false);
+    defer allocator.free(decoded.ssz_bytes);
+
+    try testing.expectEqual(ResponseCode.success, decoded.result);
+    try testing.expect(decoded.context_bytes == null);
+    try testing.expectEqual(@as(usize, 8), decoded.ssz_bytes.len);
+    // Ping value = 1
+    try testing.expectEqual(@as(u64, 1), std.mem.readInt(u64, decoded.ssz_bytes[0..8], .little));
+}
+
 /// Decode all response chunks from a complete response wire buffer.
 ///
 /// Iterates through the wire bytes, decoding one chunk at a time until all
