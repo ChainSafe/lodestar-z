@@ -587,6 +587,13 @@ pub const Protocol = struct {
         defer self.alloc.free(pkt);
 
         try socket.send(dest_addr, pkt);
+
+        // Only keep one pending request per destination. The bootnode replaces
+        // its challenge with each new probe from our address, so only the
+        // latest probe's WHOAREYOU will produce a valid handshake.
+        for (self.pending_requests.items) |pr| {
+            if (std.mem.eql(u8, &pr.dest_node_id, dest_node_id)) return;
+        }
         const pt_copy = try self.alloc.dupe(u8, msg_bytes);
         errdefer self.alloc.free(pt_copy);
         try self.pending_requests.append(self.alloc, .{
