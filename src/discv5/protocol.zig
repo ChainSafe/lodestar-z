@@ -713,8 +713,8 @@ pub const Protocol = struct {
             return;
         };
 
-        // Extract id_nonce and enr_seq from authdata.
-        const enr_seq = std.mem.readInt(u64, authdata[16..24], .big);
+        // Extract id_nonce from authdata (enr_seq at [16..24] unused — we always include ENR).
+        _ = authdata[16..24]; // enr_seq field
 
         // Build challenge_data = masking_iv || static_header || authdata
         // This is the raw header data of the WHOAREYOU packet (before masking).
