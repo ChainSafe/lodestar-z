@@ -134,11 +134,16 @@ test "cluster: epoch transition — all nodes cross boundary together" {
     });
     defer cluster.deinit();
 
-    // Process 1 slot — the test state starts 1 slot before epoch boundary.
-    const tick_result = try cluster.tick();
+    const preset = @import("preset").preset;
 
-    try testing.expect(tick_result.epoch_transition);
-    try testing.expect(tick_result.block_produced);
+    var saw_epoch_transition = false;
+    for (0..preset.SLOTS_PER_EPOCH) |_| {
+        const tick_result = try cluster.tick();
+        saw_epoch_transition = saw_epoch_transition or tick_result.epoch_transition;
+        try testing.expect(tick_result.block_produced);
+    }
+
+    try testing.expect(saw_epoch_transition);
 
     // Both nodes should have identical post-epoch-transition state.
     const root_0 = (try (cluster.nodes[0].getHeadState() orelse unreachable).state.hashTreeRoot()).*;
@@ -361,4 +366,48 @@ test "cluster: single node with attestations — finality progresses" {
 
     // With 100% participation, single node should reach finality.
     try testing.expect(result.finalized_epoch > 0);
+}
+
+test "cluster: network partition only delivers within proposer partition" {
+    const allocator = testing.allocator;
+
+    var cluster = try SimCluster.init(allocator, .{
+        .num_nodes = 4,
+        .seed = 2024,
+        .validator_count = 64,
+    });
+    defer cluster.deinit();
+
+    cluster.partitionGroups(&[_]u8{ 0, 1 }, &[_]u8{ 2, 3 });
+
+    const tick = try cluster.tick();
+    try testing.expect(tick.block_produced);
+    try testing.expectEqual(@as(u8, 2), tick.nodes_received_block);
+    try testing.expectEqual(@as(u64, 0), cluster.checker.safety_violations);
+    try testing.expect(cluster.checker.state_divergences > 0);
+}
+
+test "cluster: healed partition recovers head agreement via reqresp" {
+    const allocator = testing.allocator;
+
+    var cluster = try SimCluster.init(allocator, .{
+        .num_nodes = 4,
+        .seed = 2025,
+        .validator_count = 64,
+    });
+    defer cluster.deinit();
+
+    cluster.partitionGroups(&[_]u8{ 0, 1 }, &[_]u8{ 2, 3 });
+    _ = try cluster.run(2);
+
+    cluster.healAllPartitions();
+    _ = try cluster.run(3);
+
+    try testing.expectEqual(@as(u64, 0), cluster.checker.safety_violations);
+
+    const root_0 = (try (cluster.nodes[0].getHeadState() orelse unreachable).state.hashTreeRoot()).*;
+    for (1..4) |i| {
+        const root_i = (try (cluster.nodes[i].getHeadState() orelse unreachable).state.hashTreeRoot()).*;
+        try testing.expectEqualSlices(u8, &root_0, &root_i);
+    }
 }

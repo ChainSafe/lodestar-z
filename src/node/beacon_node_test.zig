@@ -133,7 +133,11 @@ fn queueForkchoiceUpdateForHead(node: *BeaconNode, head_root: [32]u8) !void {
     var spins: usize = 0;
     while (spins < 1_000) : (spins += 1) {
         if (node.processPendingExecutionForkchoiceUpdates()) return;
-        std.Io.sleep(std.testing.io, .{ .nanoseconds = std.time.ns_per_ms }, .real) catch {};
+        switch (node.execution_runtime.waitForAsyncCompletion()) {
+            .completed => continue,
+            .shutdown => return error.TestShutdown,
+            .idle => break,
+        }
     }
 
     return error.TestTimeout;

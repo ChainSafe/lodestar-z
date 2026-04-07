@@ -126,7 +126,7 @@ pub const ImportContext = struct {
 /// The block MUST have passed all verification stages before reaching this point.
 pub fn importVerifiedBlock(
     ctx: ImportContext,
-    verified: VerifiedBlock,
+    verified: *VerifiedBlock,
     opts: ImportBlockOpts,
 ) BlockImportError!ImportResult {
     const block_input = verified.block_input;
@@ -191,10 +191,11 @@ pub fn importVerifiedBlock(
             else => 5, // late — no proposer boost (threshold is >4s)
         };
         const beacon_block = verified.block_input.block.beaconBlock();
-        const fc_block_ok = if (fc.onBlock(
+        const fc_block_ok = if (fc.onBlockWithStateRoot(
             ctx.allocator,
             &beacon_block,
             post_state,
+            state_root,
             block_delay_sec,
             fc.getTime(),
             fc_exec_status,
@@ -299,6 +300,7 @@ pub fn importVerifiedBlock(
     // 3. Cache post-state via state regen.
     const cached_state_root = ctx.queued_regen.onNewBlock(post_state, true) catch
         return BlockImportError.InternalError;
+    verified.relinquishPostState();
     _ = cached_state_root;
 
     // Map block root → state root for future pre-state lookups.

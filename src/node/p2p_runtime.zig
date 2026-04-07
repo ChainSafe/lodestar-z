@@ -1923,9 +1923,15 @@ fn initPeerManager(self: *BeaconNode) !void {
 }
 
 fn initSyncPipeline(self: *BeaconNode) !void {
-    const cb_ctx = try self.allocator.create(SyncCallbackCtx);
-    cb_ctx.* = .{ .node = self };
-    self.sync_callback_ctx = cb_ctx;
+    const cb_ctx = self.sync_callback_ctx orelse blk: {
+        const created = try self.allocator.create(SyncCallbackCtx);
+        created.* = .{ .node = self };
+        self.sync_callback_ctx = created;
+        break :blk created;
+    };
+    self.unknown_block_sync.setCallbacks(cb_ctx.unknownBlockCallbacks());
+
+    if (self.sync_service_inst != null) return;
 
     const sync_svc = try self.allocator.create(SyncService);
     sync_svc.* = SyncService.init(

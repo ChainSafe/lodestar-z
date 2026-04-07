@@ -6,7 +6,7 @@
 
 const std = @import("std");
 const testing = std.testing;
-
+const preset = @import("preset").preset;
 
 const StateHistoryEntry = @import("invariant_checker.zig").StateHistoryEntry;
 
@@ -76,7 +76,6 @@ test "sim: deterministic replay — same seed produces identical state history" 
     defer history_storage[1].deinit(allocator);
 
     for (0..2) |run| {
-
         var harness = try SimTestHarness.init(allocator, 42);
         defer harness.deinit();
 
@@ -109,11 +108,12 @@ test "sim: epoch boundary — processes full epoch with transition" {
     var harness = try SimTestHarness.init(allocator, 77);
     defer harness.deinit();
 
-    // The generated test state starts at slot = ELECTRA_FORK_EPOCH * SLOTS_PER_EPOCH + 2025 * SLOTS_PER_EPOCH - 1
-    // which is 1 slot before the epoch boundary. Processing one slot should trigger an epoch transition.
-    const r1 = try harness.sim.processSlot(false);
-    try testing.expect(r1.block_processed);
-    try testing.expect(r1.epoch_transition);
+    // The simulation anchor now starts at the beginning of a coherent epoch.
+    // Processing a full epoch of blocks should trigger exactly one epoch transition.
+    try harness.sim.processSlots(preset.SLOTS_PER_EPOCH, 0.0);
+
+    try testing.expectEqual(preset.SLOTS_PER_EPOCH, harness.sim.slots_processed);
+    try testing.expectEqual(preset.SLOTS_PER_EPOCH, harness.sim.blocks_processed);
     try testing.expectEqual(@as(u64, 1), harness.sim.epochs_processed);
 }
 
@@ -133,7 +133,6 @@ test "sim: scenario with skip rate — some slots skipped deterministically" {
     try testing.expect(harness.sim.blocks_processed > 0);
     try testing.expect(harness.sim.blocks_processed < 5);
 }
-
 
 // ── Test 6: Blocks with attestations — single-node ───────────────────
 
@@ -172,7 +171,6 @@ test "sim: deterministic attestation replay — same seed same finality" {
     defer history_storage[1].deinit(allocator);
 
     for (0..2) |run| {
-
         var harness = try SimTestHarness.init(allocator, 42);
         defer harness.deinit();
 
@@ -211,17 +209,12 @@ test "sim: blocks with attestations — single epoch then boundary" {
 
     harness.sim.participation_rate = 1.0;
 
-    // The test state starts 1 slot before an epoch boundary.
-    // Process to the boundary (1 slot) — triggers epoch transition.
-    const r1 = try harness.sim.processSlot(false);
-    try testing.expect(r1.block_processed);
-    try testing.expect(r1.epoch_transition);
+    // The simulation anchor starts at the beginning of a coherent epoch.
+    // Process a full epoch plus one extra slot so attestation-bearing blocks cross
+    // a real epoch boundary under the normal runtime path.
+    try harness.sim.processSlots(preset.SLOTS_PER_EPOCH + 1, 0.0);
+
+    try testing.expectEqual(@as(u64, preset.SLOTS_PER_EPOCH + 1), harness.sim.slots_processed);
+    try testing.expectEqual(@as(u64, preset.SLOTS_PER_EPOCH + 1), harness.sim.blocks_processed);
     try testing.expectEqual(@as(u64, 1), harness.sim.epochs_processed);
-
-    // Now process a full epoch beyond the boundary.
-    const preset_mod = @import("preset").preset;
-    try harness.sim.processSlots(preset_mod.SLOTS_PER_EPOCH, 0.0);
-
-    try testing.expectEqual(@as(u64, 1 + preset_mod.SLOTS_PER_EPOCH), harness.sim.slots_processed);
-    try testing.expectEqual(@as(u64, 2), harness.sim.epochs_processed);
 }

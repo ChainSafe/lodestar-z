@@ -408,6 +408,29 @@ pub const ForkChoice = struct {
         execution_status: ExecutionStatus,
         data_availability_status: DataAvailabilityStatus,
     ) !ProtoBlock {
+        return self.onBlockWithStateRoot(
+            allocator,
+            block,
+            state,
+            block.stateRoot().*,
+            block_delay_sec,
+            current_slot,
+            execution_status,
+            data_availability_status,
+        );
+    }
+
+    pub fn onBlockWithStateRoot(
+        self: *ForkChoice,
+        allocator: Allocator,
+        block: *const AnyBeaconBlock,
+        state: *CachedBeaconState,
+        state_root: Root,
+        block_delay_sec: u32,
+        current_slot: Slot,
+        execution_status: ExecutionStatus,
+        data_availability_status: DataAvailabilityStatus,
+    ) !ProtoBlock {
         // Dispatch to comptime-specialized onBlockInner via inline switch.
         // Fork choice always receives full (unblinded) blocks.
         return switch (block.forkSeq()) {
@@ -416,6 +439,7 @@ pub const ForkChoice = struct {
                 allocator,
                 block.castToFork(.full, fork),
                 state,
+                state_root,
                 block_delay_sec,
                 current_slot,
                 execution_status,
@@ -437,6 +461,7 @@ pub const ForkChoice = struct {
         allocator: Allocator,
         block: *const BeaconBlock(.full, fork),
         state: *CachedBeaconState,
+        state_root: Root,
         block_delay_sec: u32,
         current_slot: Slot,
         execution_status: ExecutionStatus,
@@ -476,10 +501,20 @@ pub const ForkChoice = struct {
             return error.InvalidBlockNotFinalizedDescendant;
         }
 
-        // 5. Compute block root.
-        var block_root: Root = undefined;
+        // 5. Compute the canonical block root using the computed post-state root.
+        var body_root: Root = undefined;
         const ForkTypes = @import("fork_types").ForkTypes;
-        try ForkTypes(fork).BeaconBlock.hashTreeRoot(allocator, &block.inner, &block_root);
+        try ForkTypes(fork).BeaconBlockBody.hashTreeRoot(allocator, &block.body().inner, &body_root);
+
+        const block_header = consensus_types.phase0.BeaconBlockHeader.Type{
+            .slot = slot,
+            .proposer_index = block.inner.proposer_index,
+            .parent_root = parent_root,
+            .state_root = state_root,
+            .body_root = body_root,
+        };
+        var block_root: Root = undefined;
+        try consensus_types.phase0.BeaconBlockHeader.hashTreeRoot(&block_header, &block_root);
 
         // 6. Assign proposer score boost if the block is timely
         // (before attesting interval = before 1st interval).
@@ -612,7 +647,7 @@ pub const ForkChoice = struct {
             .slot = slot,
             .block_root = block_root,
             .parent_root = parent_root,
-            .state_root = block.inner.state_root,
+            .state_root = state_root,
             .target_root = target_root,
             .justified_epoch = justified_checkpoint.epoch,
             .justified_root = justified_checkpoint.root,

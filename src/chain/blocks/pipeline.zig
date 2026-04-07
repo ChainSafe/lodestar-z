@@ -32,7 +32,9 @@ const StateGraphGate = regen_mod.StateGraphGate;
 const computeEpochAtSlot = state_transition.computeEpochAtSlot;
 const SeenEpochValidators = @import("../seen_epoch_validators.zig").SeenEpochValidators;
 const fork_choice_mod = @import("fork_choice");
+const fork_types = @import("fork_types");
 const ForkChoice = fork_choice_mod.ForkChoiceStruct;
+const AnySignedBeaconBlock = fork_types.AnySignedBeaconBlock;
 
 const pipeline_types = @import("types.zig");
 const BlockInput = pipeline_types.BlockInput;
@@ -170,6 +172,7 @@ pub const PlannedBlockImport = struct {
 pub const PreparedBlockImport = struct {
     block_input: BlockInput,
     post_state: *CachedBeaconState,
+    owns_post_state: bool = true,
     block_root: [32]u8,
     state_root: [32]u8,
     parent_slot: Slot,
@@ -179,9 +182,15 @@ pub const PreparedBlockImport = struct {
 
     pub fn deinit(self: *PreparedBlockImport, allocator: Allocator) void {
         self.block_input.block.deinit(allocator);
-        self.post_state.deinit();
-        allocator.destroy(self.post_state);
+        if (self.owns_post_state) {
+            self.post_state.deinit();
+            allocator.destroy(self.post_state);
+        }
         self.* = undefined;
+    }
+
+    pub fn relinquishPostState(self: *PreparedBlockImport) void {
+        self.owns_post_state = false;
     }
 };
 
@@ -212,20 +221,21 @@ pub fn processBlock(
     return switch (plan_result) {
         .skipped => |skip| skip.result,
         .planned => |planned| {
-            const prepared = try executePlannedBlockImport(
+            var prepared = try executePlannedBlockImport(
                 ctx.allocator,
                 ctx.state_regen,
                 ctx.state_graph_gate,
                 ctx.block_bls_thread_pool,
                 planned,
             );
+            defer prepared.deinit(ctx.allocator);
             const exec_status = try verify_exec.verifyExecutionPayload(
                 ctx.allocator,
                 prepared.block_input,
                 ctx.execution_port,
                 prepared.opts,
             );
-            return finishPreparedBlockImport(ctx, prepared, exec_status);
+            return finishPreparedBlockImport(ctx, &prepared, exec_status);
         },
     };
 }
@@ -269,7 +279,8 @@ pub fn planBlockForImport(
             } };
         },
         .valid => |sanity| {
-            const parent_state_root = ctx.block_to_state.get(sanity.parent_root) orelse
+            const parent_state_root = (getParentStateRoot(ctx, sanity.parent_root) catch
+                return BlockImportError.InternalError) orelse
                 return BlockImportError.PrestateMissing;
             // Stage 2: Fast pre-state cache lookup only.
             // Cold-path regen/replay now runs in executePlannedBlockImport so it
@@ -340,12 +351,13 @@ pub fn executePlannedBlockImport(
 
 pub fn finishPreparedBlockImport(
     ctx: PipelineContext,
-    prepared: PreparedBlockImport,
+    prepared: *PreparedBlockImport,
     exec_status: ExecutionStatus,
 ) BlockImportError!ImportResult {
-    const verified = VerifiedBlock{
+    var verified = VerifiedBlock{
         .block_input = prepared.block_input,
         .post_state = prepared.post_state,
+        .owns_post_state = prepared.owns_post_state,
         .block_root = prepared.block_root,
         .state_root = prepared.state_root,
         .parent_slot = prepared.parent_slot,
@@ -354,7 +366,9 @@ pub fn finishPreparedBlockImport(
         .proposer_balance_delta = prepared.proposer_balance_delta,
     };
 
-    return import_block.importVerifiedBlock(ctx.toImportContext(), verified, prepared.opts);
+    const result = try import_block.importVerifiedBlock(ctx.toImportContext(), &verified, prepared.opts);
+    prepared.owns_post_state = verified.owns_post_state;
+    return result;
 }
 
 /// Process a batch of blocks through the pipeline (for range sync).
@@ -390,13 +404,15 @@ pub fn processBlockBatch(
                 results[i] = .{ .skipped = skip.reason };
             },
             .planned => |planned| {
-                const prepared = executePlannedBlockImport(
+                var owned_planned = planned;
+                var prepared = executePlannedBlockImport(
                     ctx.allocator,
                     ctx.state_regen,
                     ctx.state_graph_gate,
                     ctx.block_bls_thread_pool,
-                    planned,
+                    owned_planned,
                 ) catch |err| {
+                    owned_planned.deinit(ctx.allocator);
                     results[i] = classifyBatchError(err);
                     continue;
                 };
@@ -406,6 +422,7 @@ pub fn processBlockBatch(
                     ctx.execution_port,
                     prepared.opts,
                 ) catch |err| {
+                    prepared.deinit(ctx.allocator);
                     results[i] = classifyBatchError(err);
                     continue;
                 };
@@ -419,6 +436,7 @@ pub fn processBlockBatch(
                         );
                     },
                     .invalid => |invalid| {
+                        prepared.deinit(ctx.allocator);
                         invalidateExecutionBranch(
                             ctx,
                             invalid.latest_valid_hash,
@@ -447,7 +465,9 @@ fn processPreparedBatchBlock(
     prepared: PreparedBlockImport,
     exec_status: ExecutionStatus,
 ) BatchBlockResult {
-    const result = finishPreparedBlockImport(ctx, prepared, exec_status) catch |err| switch (err) {
+    var owned_prepared = prepared;
+    defer owned_prepared.deinit(ctx.allocator);
+    const result = finishPreparedBlockImport(ctx, &owned_prepared, exec_status) catch |err| switch (err) {
         BlockImportError.AlreadyKnown,
         BlockImportError.WouldRevertFinalizedSlot,
         BlockImportError.GenesisBlock,
@@ -487,6 +507,31 @@ fn getCachedPreState(
     block_slot: Slot,
 ) !?*CachedBeaconState {
     return ctx.queued_regen.getCachedPreState(parent_state_root, block_slot);
+}
+
+fn getParentStateRoot(ctx: PipelineContext, parent_root: [32]u8) !?[32]u8 {
+    if (ctx.block_to_state.get(parent_root)) |state_root| return state_root;
+
+    const block_bytes = try readPersistedBlockBytes(ctx, parent_root) orelse return null;
+    defer ctx.allocator.free(block_bytes);
+
+    return deserializeSignedBlockStateRoot(ctx, block_bytes);
+}
+
+fn readPersistedBlockBytes(ctx: PipelineContext, root: [32]u8) !?[]const u8 {
+    if (try ctx.db.getBlock(root)) |block_bytes| return block_bytes;
+    return ctx.db.getBlockArchiveByRoot(root);
+}
+
+fn deserializeSignedBlockStateRoot(ctx: PipelineContext, block_bytes: []const u8) !?[32]u8 {
+    if (block_bytes.len < 108) return null;
+
+    const slot = std.mem.readInt(u64, block_bytes[100..108], .little);
+    const fork_seq = ctx.state_regen.shared_state_graph.config.forkSeq(slot);
+    const any_signed = try AnySignedBeaconBlock.deserialize(ctx.allocator, .full, fork_seq, block_bytes);
+    defer any_signed.deinit(ctx.allocator);
+
+    return any_signed.beaconBlock().stateRoot().*;
 }
 
 // ---------------------------------------------------------------------------

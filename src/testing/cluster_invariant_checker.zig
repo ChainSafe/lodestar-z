@@ -9,7 +9,6 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
-
 pub const ClusterInvariantChecker = struct {
     /// Info about the last detected state divergence (for test diagnostics).
     pub const DivergenceInfo = struct {
@@ -161,34 +160,26 @@ pub const ClusterInvariantChecker = struct {
     }
 
     /// SAFETY: If two nodes both finalized the same epoch, they must agree
-    /// on state roots at the epoch boundary slot.
+    /// on the state root at the start slot of that finalized epoch.
     fn checkSafety(self: *ClusterInvariantChecker) !void {
         for (0..self.num_nodes) |i| {
             for (i + 1..self.num_nodes) |j| {
                 const epoch_i = self.node_finalized_epochs[i];
                 const epoch_j = self.node_finalized_epochs[j];
 
-                // Find the common finalized epoch.
                 const common_epoch = @min(epoch_i, epoch_j);
                 if (common_epoch == 0) continue;
 
-                // Both nodes should agree on state roots up to the common
-                // finalized epoch.  We check the latest common root.
-                const root_i = self.findLatestRootForNode(@intCast(i));
-                const root_j = self.findLatestRootForNode(@intCast(j));
+                const finalized_boundary_slot = common_epoch * 32;
+                const root_i = self.findLatestRootAtOrBeforeSlot(@intCast(i), finalized_boundary_slot);
+                const root_j = self.findLatestRootAtOrBeforeSlot(@intCast(j), finalized_boundary_slot);
+                if (root_i == null or root_j == null) continue;
 
-                if (root_i != null and root_j != null) {
-                    // If both are at the same slot and finalized the same
-                    // epoch, their roots must match.
-                    if (epoch_i == epoch_j and epoch_i > 0) {
-                        const ri = root_i.?;
-                        const rj = root_j.?;
-                        if (ri.slot == rj.slot and
-                            !std.mem.eql(u8, &ri.state_root, &rj.state_root))
-                        {
-                            self.safety_violations += 1;
-                        }
-                    }
+                const ri = root_i.?;
+                const rj = root_j.?;
+                if (ri.slot != rj.slot) continue;
+                if (!std.mem.eql(u8, &ri.state_root, &rj.state_root)) {
+                    self.safety_violations += 1;
                 }
             }
         }
@@ -231,6 +222,20 @@ pub const ClusterInvariantChecker = struct {
         const items = self.node_state_roots[node_id].items;
         if (items.len == 0) return null;
         return items[items.len - 1];
+    }
+
+    fn findLatestRootAtOrBeforeSlot(
+        self: *const ClusterInvariantChecker,
+        node_id: u8,
+        slot: u64,
+    ) ?SlotRoot {
+        const items = self.node_state_roots[node_id].items;
+        var latest: ?SlotRoot = null;
+        for (items) |entry| {
+            if (entry.slot > slot) continue;
+            latest = entry;
+        }
+        return latest;
     }
 
     /// Generate a final report summarizing all detected violations.
@@ -288,6 +293,26 @@ test "ClusterInvariantChecker: divergent roots detected" {
 
     try checker.checkTick(1, &processed);
     try std.testing.expectEqual(@as(u64, 1), checker.state_divergences);
+}
+
+test "ClusterInvariantChecker: divergent heads do not imply finalized safety violation" {
+    var checker = try ClusterInvariantChecker.init(std.testing.allocator, 2);
+    defer checker.deinit();
+
+    const root_a = [_]u8{0xAA} ** 32;
+    const root_b = [_]u8{0xBB} ** 32;
+    const processed = [_]bool{ true, true };
+
+    try checker.recordNodeState(0, 64, root_a, 2);
+    try checker.recordNodeState(1, 64, root_a, 2);
+    try checker.checkTick(64, &processed);
+
+    try checker.recordNodeState(0, 65, root_a, 2);
+    try checker.recordNodeState(1, 65, root_b, 2);
+    try checker.checkTick(65, &processed);
+
+    try std.testing.expectEqual(@as(u64, 1), checker.state_divergences);
+    try std.testing.expectEqual(@as(u64, 0), checker.safety_violations);
 }
 
 test "ClusterInvariantChecker: final report" {

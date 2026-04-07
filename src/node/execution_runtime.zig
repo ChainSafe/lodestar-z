@@ -332,9 +332,17 @@ pub const ExecutionRuntime = struct {
     completed_forkchoice_updates: std.ArrayListUnmanaged(CompletedForkchoiceUpdate) = .empty,
     completed_payload_verifications: std.ArrayListUnmanaged(CompletedPayloadVerification) = .empty,
     failed_payload_preparations: std.ArrayListUnmanaged(FailedPayloadPreparation) = .empty,
+    active_forkchoice_updates: usize = 0,
+    active_payload_verifications: usize = 0,
     next_forkchoice_ticket: u64 = 1,
     shutdown_requested: bool = false,
     worker_thread: ?std.Thread = null,
+
+    pub const AsyncWaitResult = enum {
+        completed,
+        idle,
+        shutdown,
+    };
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -512,8 +520,9 @@ pub const ExecutionRuntime = struct {
         self.queue_mutex.lockUncancelable(self.io);
         defer self.queue_mutex.unlock(self.io);
         return !self.shutdown_requested and
-            self.pending_payload_verifications.items.len + self.completed_payload_verifications.items.len <
-                DEFAULT_MAX_PENDING_PAYLOAD_VERIFICATIONS;
+            self.pending_payload_verifications.items.len +
+                self.completed_payload_verifications.items.len +
+                self.active_payload_verifications < DEFAULT_MAX_PENDING_PAYLOAD_VERIFICATIONS;
     }
 
     pub fn submitForkchoiceUpdateAsync(
@@ -593,8 +602,9 @@ pub const ExecutionRuntime = struct {
         defer self.queue_mutex.unlock(self.io);
 
         if (self.shutdown_requested) return false;
-        if (self.pending_payload_verifications.items.len + self.completed_payload_verifications.items.len >=
-            DEFAULT_MAX_PENDING_PAYLOAD_VERIFICATIONS) return false;
+        if (self.pending_payload_verifications.items.len +
+            self.completed_payload_verifications.items.len +
+            self.active_payload_verifications >= DEFAULT_MAX_PENDING_PAYLOAD_VERIFICATIONS) return false;
 
         try self.pending_payload_verifications.append(self.allocator, .{
             .ticket = ticket,
@@ -618,6 +628,32 @@ pub const ExecutionRuntime = struct {
 
         if (self.completed_forkchoice_updates.items.len == 0) return null;
         return self.completed_forkchoice_updates.orderedRemove(0);
+    }
+
+    pub fn waitForAsyncCompletion(self: *ExecutionRuntime) AsyncWaitResult {
+        self.queue_mutex.lockUncancelable(self.io);
+        defer self.queue_mutex.unlock(self.io);
+
+        while (!self.shutdown_requested and
+            self.completed_payload_verifications.items.len == 0 and
+            self.completed_forkchoice_updates.items.len == 0 and
+            self.failed_payload_preparations.items.len == 0 and
+            (self.pending_payload_verifications.items.len > 0 or
+                self.pending_forkchoice_updates.items.len > 0 or
+                self.active_payload_verifications > 0 or
+                self.active_forkchoice_updates > 0))
+        {
+            self.queue_cond.waitUncancelable(self.io, &self.queue_mutex);
+        }
+
+        if (self.completed_payload_verifications.items.len > 0 or
+            self.completed_forkchoice_updates.items.len > 0 or
+            self.failed_payload_preparations.items.len > 0)
+        {
+            return .completed;
+        }
+        if (self.shutdown_requested) return .shutdown;
+        return .idle;
     }
 
     pub const PayloadPreparationWaitResult = enum {
@@ -827,12 +863,14 @@ pub const ExecutionRuntime = struct {
                     }
                 }
                 const pending = self.pending_forkchoice_updates.orderedRemove(pending_index);
+                self.active_forkchoice_updates += 1;
                 self.queue_mutex.unlock(self.io);
 
                 const completed = self.submitForkchoiceUpdateSerialized(pending);
 
                 self.queue_mutex.lockUncancelable(self.io);
                 self.completed_forkchoice_updates.append(self.allocator, completed) catch {
+                    self.active_forkchoice_updates -= 1;
                     self.queue_mutex.unlock(self.io);
                     @panic("OOM queueing completed forkchoice update");
                 };
@@ -845,16 +883,19 @@ pub const ExecutionRuntime = struct {
                             .failed => .failed,
                         },
                     }) catch {
+                        self.active_forkchoice_updates -= 1;
                         self.queue_mutex.unlock(self.io);
                         @panic("OOM queueing failed payload preparation");
                     };
                 }
+                self.active_forkchoice_updates -= 1;
                 self.queue_cond.signal(self.io);
                 self.queue_mutex.unlock(self.io);
                 continue;
             }
 
             const pending = self.pending_payload_verifications.orderedRemove(0);
+            self.active_payload_verifications += 1;
             self.queue_mutex.unlock(self.io);
 
             var completed = self.submitNewPayloadSerialized(pending.request);
@@ -862,9 +903,11 @@ pub const ExecutionRuntime = struct {
 
             self.queue_mutex.lockUncancelable(self.io);
             self.completed_payload_verifications.append(self.allocator, completed) catch {
+                self.active_payload_verifications -= 1;
                 self.queue_mutex.unlock(self.io);
                 @panic("OOM queueing completed execution verification");
             };
+            self.active_payload_verifications -= 1;
             self.queue_cond.signal(self.io);
             self.queue_mutex.unlock(self.io);
         }

@@ -1,10 +1,10 @@
-//! Node integration test: genesis → block import → STFN → DB → API query → req/resp.
+//! Node integration test: anchor bootstrap → block import → STFN → DB → API query → req/resp.
 //!
 //! End-to-end test for the BeaconNode pipeline with real data — no mocks.
 //!
 //! Pipeline under test:
-//!   genesis state
-//!     → BeaconNode.initFromGenesis
+//!   published anchor state
+//!     → BeaconNode.Builder.finishCheckpoint
 //!     → BlockGenerator.generateBlock
 //!     → BeaconNode.importBlock (STFN + DB + fork choice)
 //!     → api_handlers.beacon.getGenesis / getBlockHeader
@@ -21,6 +21,7 @@ const testing = std.testing;
 const state_transition = @import("state_transition");
 const preset = @import("preset").preset;
 
+const chain_mod = @import("chain");
 const BeaconNode = @import("node").BeaconNode;
 const networking = @import("networking");
 const StatusMessage = networking.messages.StatusMessage;
@@ -31,6 +32,73 @@ const api_handlers = api_mod.handlers;
 
 const SimTestHarness = @import("sim_test_harness.zig").SimTestHarness;
 
+fn fetchBlockBytesByRootReqResp(
+    allocator: std.mem.Allocator,
+    peer: *BeaconNode,
+    root: [32]u8,
+) ![]u8 {
+    var request_bytes: [32]u8 = root;
+    const chunks = try peer.onReqResp(.beacon_blocks_by_root, &request_bytes);
+    defer freeResponseChunks(allocator, chunks);
+
+    if (chunks.len != 1) return error.UnexpectedReqRespChunkCount;
+    if (chunks[0].result != .success) return error.UnexpectedReqRespResponseCode;
+
+    return allocator.dupe(u8, chunks[0].ssz_payload);
+}
+
+fn importTrackedBlockBytes(
+    node: *BeaconNode,
+    block_bytes: []const u8,
+    source: chain_mod.BlockSource,
+) !bool {
+    return switch (try node.ingestRawBlockBytesTracked(block_bytes, source)) {
+        .ignored => false,
+        .imported => true,
+        .queued => |ticket| switch (node.waitForTrackedBlockIngress(ticket)) {
+            .completed => |completion| switch (completion) {
+                .ignored => false,
+                .failed => |err| err,
+                .imported => true,
+            },
+            .shutdown => error.ImportShutdown,
+            .lost => error.ImportLost,
+        },
+    };
+}
+
+fn waitForHead(
+    node: *BeaconNode,
+    expected_slot: u64,
+    expected_root: [32]u8,
+) !void {
+    for (0..128) |_| {
+        const head = node.getHead();
+        if (head.slot == expected_slot and std.mem.eql(u8, &head.root, &expected_root)) return;
+
+        var did_work = false;
+        did_work = node.processPendingBlockStateWork() or did_work;
+        did_work = node.processPendingExecutionPayloadVerifications() or did_work;
+        did_work = node.processPendingExecutionForkchoiceUpdates() or did_work;
+
+        const updated_head = node.getHead();
+        if (updated_head.slot == expected_slot and std.mem.eql(u8, &updated_head.root, &expected_root)) return;
+        if (did_work) continue;
+
+        switch (node.execution_runtime.waitForAsyncCompletion()) {
+            .completed => continue,
+            .shutdown => return error.NodeShutdown,
+            .idle => switch (node.chainService().waitForCompletedReadyBlockImport()) {
+                .completed => continue,
+                .shutdown => return error.NodeShutdown,
+                .idle => return error.ExpectedHeadNotReached,
+            },
+        }
+    }
+
+    return error.ExpectedHeadNotReached;
+}
+
 // ---------------------------------------------------------------------------
 // Test 1: Full pipeline — genesis → blocks → API → req/resp
 // ---------------------------------------------------------------------------
@@ -38,7 +106,7 @@ const SimTestHarness = @import("sim_test_harness.zig").SimTestHarness;
 test "node integration: genesis → blocks → API" {
     const allocator = testing.allocator;
 
-    // Creates BeaconNode + genesis state (64 validators).
+    // Creates BeaconNode + published anchor state (64 validators).
     var harness = try SimTestHarness.init(allocator, 42);
     defer harness.deinit();
 
@@ -47,7 +115,7 @@ test "node integration: genesis → blocks → API" {
     // Capture initial head slot (high value due to electra fork epoch offset).
     const initial_slot = node.getHead().slot;
 
-    // 1. Verify genesis head has a valid state (non-zero state root).
+    // 1. Verify anchor head has a valid state (non-zero state root).
     {
         const state_root = node.getHead().state_root;
         try testing.expect(!std.mem.eql(u8, &state_root, &([_]u8{0} ** 32)));
@@ -221,4 +289,75 @@ test "node integration: DB persistence — imported blocks retrievable by root" 
             allocator.free(bytes);
         }
     }
+}
+
+test "node integration: reqresp range sync catches lagging node up to finalized peer" {
+    const allocator = testing.allocator;
+
+    var leader = try SimTestHarness.initWithValidators(allocator, 101, 16);
+    defer leader.deinit();
+
+    var lagging = try SimTestHarness.initWithValidators(allocator, 202, 16);
+    defer lagging.deinit();
+
+    leader.sim.participation_rate = 1.0;
+
+    const slots_needed: u64 = 3 * preset.SLOTS_PER_EPOCH + 2;
+    try leader.sim.processSlots(slots_needed, 0.0);
+
+    const leader_before_sync = leader.node.getHead();
+    const lagging_before_sync = lagging.node.getHead();
+    try testing.expect(leader_before_sync.slot > lagging_before_sync.slot);
+    try testing.expect(leader_before_sync.finalized_epoch > lagging_before_sync.finalized_epoch);
+
+    const synced = try lagging.sim.syncBlocksByRangeFromPeer(
+        leader.node,
+        lagging_before_sync.slot + 1,
+        leader_before_sync.slot,
+    );
+    try testing.expectEqual(slots_needed, synced);
+
+    const leader_after_sync = leader.node.getHead();
+    const lagging_after_sync = lagging.node.getHead();
+    try testing.expectEqual(leader_after_sync.slot, lagging_after_sync.slot);
+    try testing.expectEqual(leader_after_sync.finalized_epoch, lagging_after_sync.finalized_epoch);
+    try testing.expectEqualSlices(u8, &leader_after_sync.root, &lagging_after_sync.root);
+    try testing.expectEqualSlices(u8, &leader_after_sync.state_root, &lagging_after_sync.state_root);
+}
+
+test "node integration: unknown parent recovery imports queued child after parent arrives" {
+    const allocator = testing.allocator;
+
+    var leader = try SimTestHarness.initWithValidators(allocator, 303, 16);
+    defer leader.deinit();
+
+    var follower = try SimTestHarness.initWithValidators(allocator, 404, 16);
+    defer follower.deinit();
+
+    const follower_anchor = follower.node.getHead();
+
+    _ = try leader.sim.processSlot(false);
+    const parent_head = leader.node.getHead();
+
+    _ = try leader.sim.processSlot(false);
+    const child_head = leader.node.getHead();
+
+    const child_bytes = try fetchBlockBytesByRootReqResp(allocator, leader.node, child_head.root);
+    defer allocator.free(child_bytes);
+
+    const child_ingress = try follower.node.ingestRawBlockBytes(child_bytes, .gossip);
+    try testing.expect(child_ingress == .ignored);
+    try testing.expectEqual(follower_anchor.slot, follower.node.getHead().slot);
+    try testing.expectEqualSlices(u8, &follower_anchor.root, &follower.node.getHead().root);
+
+    const parent_bytes = try fetchBlockBytesByRootReqResp(allocator, leader.node, parent_head.root);
+    defer allocator.free(parent_bytes);
+
+    try testing.expect(try importTrackedBlockBytes(follower.node, parent_bytes, .gossip));
+    try waitForHead(follower.node, child_head.slot, child_head.root);
+
+    const follower_head = follower.node.getHead();
+    try testing.expectEqual(child_head.slot, follower_head.slot);
+    try testing.expectEqualSlices(u8, &child_head.root, &follower_head.root);
+    try testing.expectEqualSlices(u8, &child_head.state_root, &follower_head.state_root);
 }

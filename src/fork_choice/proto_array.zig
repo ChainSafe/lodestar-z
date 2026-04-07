@@ -1445,54 +1445,24 @@ pub const ProtoArray = struct {
         block_root: Root,
         ancestor_slot: Slot,
     ) ProtoArrayError!*const ProtoNode {
-        // Get any variant to check the block (use defaultIndex)
         const vi = self.indices.get(block_root) orelse
             return error.MissingProtoArrayBlock;
-        const block_index = vi.defaultIndex();
-        const block = &self.nodes.items[block_index];
+        var current = &self.nodes.items[vi.defaultIndex()];
 
-        // If block is at or before queried slot, return PENDING variant (or FULL for pre-Gloas)
-        // For pre-Gloas: only FULL exists at defaultIndex
-        // For Gloas: PENDING is at defaultIndex
-        if (block.slot <= ancestor_slot) return block;
-
-        // Walk backwards through beacon blocks to find ancestor
-        // Start with the parent of the current block
-        var current_block = block;
-        var parent_vi = self.indices.get(
-            current_block.parent_root,
-        ) orelse return error.UnknownAncestor;
-        var parent_index = parent_vi.defaultIndex();
-        var parent_block = &self.nodes.items[parent_index];
-
-        // Walk backwards while parent.slot > ancestor_slot
-        while (parent_block.slot > ancestor_slot) {
-            current_block = parent_block;
-            parent_vi = self.indices.get(
-                current_block.parent_root,
-            ) orelse return error.UnknownAncestor;
-            parent_index = parent_vi.defaultIndex();
-            parent_block = &self.nodes.items[parent_index];
+        while (current.slot > ancestor_slot) {
+            const parent_index = (try self.getParentNodeIndex(current)) orelse {
+                // Checkpoint anchors intentionally truncate earlier history. They are
+                // represented as self-parent roots with no actual parent link in the
+                // proto-array, so any lower-slot ancestor request should stop here.
+                if (std.mem.eql(u8, &current.parent_root, &current.block_root)) {
+                    return current;
+                }
+                return error.UnknownAncestor;
+            };
+            current = &self.nodes.items[parent_index];
         }
 
-        // Now parent_block.slot <= ancestor_slot
-        // Return the parent with the correct payload status based on current_block
-        if (!current_block.isGloasBlock()) {
-            // Pre-Gloas: return FULL variant (only one that exists)
-            return parent_block;
-        }
-
-        // Gloas: determine which parent variant (EMPTY or FULL) based on parent_block_hash
-        const parent_status = try self.getParentPayloadStatus(
-            current_block.parent_root,
-            current_block.parent_block_hash,
-        );
-        const variant_index = self.getNodeIndexByRootAndStatus(
-            current_block.parent_root,
-            parent_status,
-        ) orelse return error.UnknownAncestor;
-        assert(variant_index < self.nodes.items.len);
-        return &self.nodes.items[variant_index];
+        return current;
     }
 
     /// Get ancestor node at a given slot, or null if not found.

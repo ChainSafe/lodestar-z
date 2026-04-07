@@ -17,8 +17,10 @@ const preset = @import("preset").preset;
 pub const Step = union(enum) {
     /// Advance simulation by one slot (with block production).
     advance_slot: void,
-    /// Advance to the first slot of the given epoch.
+    /// Advance to the first slot of the given absolute epoch.
     advance_to_epoch: u64,
+    /// Advance forward by N epochs from the current slot.
+    advance_epochs: u64,
     /// Skip a slot (proposer misses).
     skip_slot: void,
     /// Inject a fault into the simulation.
@@ -42,19 +44,19 @@ pub const Step = union(enum) {
 
 pub const Fault = union(enum) {
     // Block production faults
-    missed_proposal: usize,            // validator/node index misses proposal
-    missed_attestation: usize,         // validator/node index misses attestation
+    missed_proposal: usize, // validator/node index misses proposal
+    missed_attestation: usize, // validator/node index misses attestation
 
     // Network faults
     message_delay: struct {
         min_ms: u64,
         max_ms: u64,
     },
-    message_drop_rate: f64,            // randomly drop N% of messages
+    message_drop_rate: f64, // randomly drop N% of messages
 
     // Node faults
-    node_crash: u8,                    // node stops processing
-    node_restart: u8,                  // node restarts
+    node_crash: u8, // node stops processing
+    node_restart: u8, // node restarts
 };
 
 pub const Invariant = union(enum) {
@@ -89,7 +91,7 @@ const happy_path_steps = [_]Step{
     // Set full participation.
     .{ .set_participation_rate = 1.0 },
     // Advance through 5 epochs.
-    .{ .advance_to_epoch = 5 },
+    .{ .advance_epochs = 5 },
     // Check invariants.
     .{ .check_invariant = .safety },
     .{ .check_invariant = .finality_agreement },
@@ -106,7 +108,7 @@ pub const missed_proposals = Scenario{
 const missed_proposals_steps = [_]Step{
     .{ .set_participation_rate = 1.0 },
     // Normal epoch.
-    .{ .advance_to_epoch = 1 },
+    .{ .advance_epochs = 1 },
     // Skip a few slots.
     .{ .skip_slot = {} },
     .{ .skip_slot = {} },
@@ -119,13 +121,14 @@ const missed_proposals_steps = [_]Step{
     .{ .advance_slot = {} },
     .{ .advance_slot = {} },
     // Continue normally.
-    .{ .advance_to_epoch = 5 },
+    .{ .advance_epochs = 5 },
     // Verify safety still holds.
     .{ .check_invariant = .safety },
     .{ .check_invariant = .no_state_divergence },
 };
 
-/// Network partition: split [0,1] from [2,3], run, heal, verify convergence.
+/// Network partition: split [0,1] from [2,3], run under live delivery,
+/// then heal and recover through req/resp catch-up.
 pub const network_partition = Scenario{
     .name = "network_partition",
     .steps = &network_partition_steps,
@@ -134,22 +137,26 @@ pub const network_partition = Scenario{
 const network_partition_steps = [_]Step{
     .{ .set_participation_rate = 1.0 },
     // Establish baseline.
-    .{ .advance_to_epoch = 1 },
+    .{ .advance_slot = {} },
+    .{ .advance_slot = {} },
     .{ .check_invariant = .head_agreement },
     // Create partition.
     .{ .network_partition = .{
         .group_a = &[_]u8{ 0, 1 },
         .group_b = &[_]u8{ 2, 3 },
     } },
-    // Run during partition.
-    .{ .advance_to_epoch = 3 },
-    // Heal.
+    // Run during partition long enough to create a live fork.
+    .{ .advance_slot = {} },
+    .{ .advance_slot = {} },
+    .{ .advance_slot = {} },
+    .{ .advance_slot = {} },
+    // Heal and allow req/resp recovery to catch nodes up.
     .{ .heal_partition = {} },
-    // Recovery.
-    .{ .advance_to_epoch = 6 },
-    // Verify convergence.
+    .{ .advance_slot = {} },
+    .{ .advance_slot = {} },
+    // Verify recovery.
     .{ .check_invariant = .safety },
-    .{ .check_invariant = .no_state_divergence },
+    .{ .check_invariant = .finality_agreement },
     .{ .check_invariant = .head_agreement },
 };
 
@@ -162,10 +169,10 @@ pub const late_attestations = Scenario{
 const late_attestations_steps = [_]Step{
     // Phase 1: No attestations.
     .{ .set_participation_rate = 0.0 },
-    .{ .advance_to_epoch = 2 },
+    .{ .advance_epochs = 2 },
     // Phase 2: Full attestations.
     .{ .set_participation_rate = 1.0 },
-    .{ .advance_to_epoch = 7 },
+    .{ .advance_epochs = 5 },
     // Safety must hold throughout.
     .{ .check_invariant = .safety },
     .{ .check_invariant = .no_state_divergence },

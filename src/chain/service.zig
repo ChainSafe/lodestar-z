@@ -52,6 +52,7 @@ const HeadResult = fork_choice_mod.HeadResult;
 const LVHExecResponse = fork_choice_mod.LVHExecResponse;
 pub const PlannedBlockImport = @import("blocks/root.zig").PlannedBlockImport;
 pub const CompletedBlockImport = @import("state_work_service.zig").CompletedBlockImport;
+pub const CompletedBlockImportWaitResult = @import("state_work_service.zig").StateWorkService.WaitResult;
 pub const PreparedBlockImport = @import("blocks/root.zig").PreparedBlockImport;
 pub const ExecutionStatus = blocks.ExecutionStatus;
 
@@ -196,7 +197,7 @@ pub const Service = struct {
 
     pub fn finishPreparedReadyBlockImport(
         self: Service,
-        prepared: PreparedBlockImport,
+        prepared: *PreparedBlockImport,
         exec_status: ExecutionStatus,
     ) !chain_effects.ImportOutcome {
         const result = try self.chain.finishPreparedReadyBlockImport(prepared, exec_status);
@@ -219,6 +220,10 @@ pub const Service = struct {
         return self.chain.popCompletedReadyBlockImport();
     }
 
+    pub fn waitForCompletedReadyBlockImport(self: Service) CompletedBlockImportWaitResult {
+        return self.chain.waitForCompletedReadyBlockImport();
+    }
+
     pub fn processRangeSyncSegment(
         self: Service,
         raw_blocks: []const RawBlockBytes,
@@ -237,28 +242,26 @@ pub const Service = struct {
         }
 
         const allocator = self.chain.allocator;
-        const decoded_blocks = try allocator.alloc(fork_types.AnySignedBeaconBlock, raw_blocks.len);
-        defer allocator.free(decoded_blocks);
-        var decoded_count: usize = 0;
-        defer {
-            for (decoded_blocks[0..decoded_count]) |*any_signed| {
-                any_signed.deinit(allocator);
-            }
-        }
-
         const block_inputs = try allocator.alloc(blocks.BlockInput, raw_blocks.len);
         defer allocator.free(block_inputs);
 
+        var decoded_count: usize = 0;
+        var handed_off_to_pipeline = false;
+        defer if (!handed_off_to_pipeline) {
+            for (block_inputs[0..decoded_count]) |*block_input| {
+                block_input.block.deinit(allocator);
+            }
+        };
+
         for (raw_blocks, 0..) |raw_block, i| {
             const any_signed = try deserializeRawBlockBytes(self.chain, raw_block.slot, raw_block.bytes);
-            decoded_blocks[i] = any_signed;
-            decoded_count = i + 1;
             const block_root = try hashBlock(allocator, any_signed);
             block_inputs[i] = .{
                 .block = any_signed,
                 .source = .range_sync,
                 .da_status = self.dataAvailabilityStatusForBlock(block_root, any_signed),
             };
+            decoded_count = i + 1;
         }
 
         const results = try self.chain.processBlockBatchPipeline(block_inputs, .{
@@ -266,6 +269,7 @@ pub const Service = struct {
             .skip_future_slot = true,
             .skip_signatures = !self.chain.verify_signatures,
         });
+        handed_off_to_pipeline = true;
         defer allocator.free(results);
 
         var imported_count: usize = 0;

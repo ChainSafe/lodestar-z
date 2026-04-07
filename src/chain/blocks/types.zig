@@ -174,6 +174,8 @@ pub const VerifiedBlock = struct {
     block_input: BlockInput,
     /// The post-state after state transition.
     post_state: *CachedBeaconState,
+    /// True until state ownership transfers into regen/cache publication.
+    owns_post_state: bool = true,
     /// Computed block root.
     block_root: Root,
     /// Post-state root (from state transition).
@@ -186,6 +188,10 @@ pub const VerifiedBlock = struct {
     data_availability_status: DataAvailabilityStatus,
     /// Proposer balance delta (post - pre).
     proposer_balance_delta: i64,
+
+    pub fn relinquishPostState(self: *VerifiedBlock) void {
+        self.owns_post_state = false;
+    }
 };
 
 /// Outcome of a successful block import.

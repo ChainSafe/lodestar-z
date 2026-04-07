@@ -404,6 +404,7 @@ pub fn deinit(self: *BeaconNode) void {
     self.flushPendingGossipBlsBatch();
     self.pending_gossip_bls_batches.deinit(allocator);
     self.queued_state_work_owners.deinit(allocator);
+    self.completed_block_ingresses.deinit(allocator);
     for (self.waiting_execution_payloads.items) |*pending| {
         pending.deinit(allocator);
     }
@@ -583,6 +584,14 @@ fn freeAddressList(allocator: Allocator, addresses: []const []const u8) void {
 
 fn wireBootstrappedNode(self: *BeaconNode) !void {
     self.chain.setExecutionPort(execution_port_mod.make(self));
+
+    if (self.sync_callback_ctx == null) {
+        const cb_ctx = try self.allocator.create(SyncCallbackCtx);
+        cb_ctx.* = .{ .node = self };
+        self.sync_callback_ctx = cb_ctx;
+        self.unknown_block_sync.setCallbacks(cb_ctx.unknownBlockCallbacks());
+    }
+
     if (self.api_bindings == null) {
         self.api_bindings = try api_callbacks_mod.ApiBindings.init(self.allocator, self, self.config);
     }
@@ -614,6 +623,7 @@ pub fn initFromCheckpoint(self: *BeaconNode, checkpoint_state: *CachedBeaconStat
 
 const log = @import("log");
 const api_callbacks_mod = @import("api_callbacks.zig");
+const SyncCallbackCtx = @import("sync_bridge.zig").SyncCallbackCtx;
 const p2p_runtime_mod = @import("p2p_runtime.zig");
 const beacon_node_mod = @import("beacon_node.zig");
 const BeaconNode = beacon_node_mod.BeaconNode;

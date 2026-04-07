@@ -7,7 +7,7 @@
 //! simulated time.
 //!
 //! Usage:
-//!   1. Create a BeaconNode and call initFromGenesis on it.
+//!   1. Create a bootstrapped BeaconNode.
 //!   2. Create a SimNodeHarness wrapping the node.
 //!   3. Call processSlot() / processSlots() / processWithScenario().
 //!   4. Inspect stats and checker for correctness.
@@ -18,8 +18,12 @@ const Allocator = std.mem.Allocator;
 const preset = @import("preset").preset;
 const state_transition = @import("state_transition");
 const fork_types = @import("fork_types");
+const chain_mod = @import("chain");
+const networking = @import("networking");
 const CachedBeaconState = state_transition.CachedBeaconState;
 const computeEpochAtSlot = state_transition.computeEpochAtSlot;
+const BlockSource = chain_mod.BlockSource;
+const BeaconBlocksByRangeRequest = networking.messages.BeaconBlocksByRangeRequest;
 
 const BeaconNode = @import("node").BeaconNode;
 const BlockGenerator = @import("block_generator.zig").BlockGenerator;
@@ -32,6 +36,12 @@ pub const SlotResult = struct {
     block_processed: bool,
     epoch_transition: bool,
     state_root: [32]u8,
+};
+
+pub const ProducedBlockBytes = struct {
+    slot: u64,
+    epoch_transition: bool,
+    bytes: []u8,
 };
 
 pub const Scenario = struct {
@@ -59,9 +69,8 @@ pub const SimNodeHarness = struct {
 
     /// Initialize a harness wrapping an already-initialized BeaconNode.
     ///
-    /// The node must have been initialized via initFromGenesis before this call
-    /// so that the clock and head state are set up. The seed controls block
-    /// generation and skip-slot randomness.
+    /// The node must already be bootstrapped so that the clock and head state
+    /// are set up. The seed controls block generation and skip-slot randomness.
     pub fn init(
         allocator: Allocator,
         node: *BeaconNode,
@@ -102,131 +111,187 @@ pub const SimNodeHarness = struct {
         return self.node.headState();
     }
 
-    /// Advance the simulation by one slot.
-    ///
-    /// If `skip` is false, a block is generated and applied via BeaconNode.importBlock.
-    /// If `skip` is true, the slot is advanced without a block via BeaconNode.advanceSlot.
-    pub fn processSlot(self: *SimNodeHarness, skip: bool) !SlotResult {
+    pub fn currentSlot(self: *SimNodeHarness) !u64 {
+        const head_state = self.getHeadState() orelse return error.NoHeadState;
+        return head_state.state.slot();
+    }
+
+    pub fn produceNextSlotBlockBytes(self: *SimNodeHarness) !ProducedBlockBytes {
         const head_state = self.getHeadState() orelse return error.NoHeadState;
         const current_slot = try head_state.state.slot();
         const target_slot = current_slot + 1;
         const current_epoch = computeEpochAtSlot(current_slot);
         const target_epoch = computeEpochAtSlot(target_slot);
-        const is_epoch_transition = target_epoch != current_epoch;
 
-        if (skip) {
-            // Advance head state by one empty slot.
-            try self.node.advanceSlot(target_slot);
-
-            // Advance simulated time.
-            self.sim_io.advanceToSlot(
-                target_slot,
-                self.clock.genesis_time_s,
-                self.clock.seconds_per_slot,
-            );
-
-            // Check invariants on the new head state.
-            const new_head_state = self.getHeadState() orelse return error.NoHeadState;
-            try self.checker.checkSlot(new_head_state.state);
-
-            self.slots_processed += 1;
-            if (is_epoch_transition) self.epochs_processed += 1;
-
-            const state_root = try new_head_state.state.hashTreeRoot();
-            return .{
-                .slot = target_slot,
-                .block_processed = false,
-                .epoch_transition = is_epoch_transition,
-                .state_root = state_root.*,
-            };
-        }
-
-        // ── Block production path ────────────────────────────────
-
-        // Clone head state so we can advance it to look up the correct
-        // proposer. BeaconNode.importBlock does the same clone internally,
-        // but we need the post-advance epoch cache BEFORE building the block.
-        //
-        // Use a nested scope to ensure post_state cleanup errdefer does not
-        // fire after we manually free it below (Zig errdefers cannot be cancelled).
-        const signed_block = blk: {
-            var post_state = try head_state.clone(
-                self.allocator,
-                .{ .transfer_cache = false },
-            );
-            errdefer {
-                post_state.deinit();
-                self.allocator.destroy(post_state);
-            }
-
-            // Advance to target slot (triggers epoch transition if needed).
-            try state_transition.processSlots(
-                self.allocator,
-                post_state,
-                target_slot,
-                .{},
-            );
-
-            // Generate block using post-advance state (correct proposer / epoch cache).
-            const blk_val = try self.block_gen.generateBlockWithOpts(post_state, target_slot, .{
-                .participation_rate = self.participation_rate,
-            });
-
-            // Free the temporary post-state (BeaconNode.importBlock makes its own copy).
+        var post_state = try head_state.clone(
+            self.allocator,
+            .{ .transfer_cache = false },
+        );
+        errdefer {
             post_state.deinit();
             self.allocator.destroy(post_state);
-
-            break :blk blk_val;
-        };
-
-        // Import through BeaconNode's full pipeline.
-        // ingestBlock() consumes ownership of the produced block on both
-        // queued and synchronous paths, so the simulation harness must not
-        // free signed_block after this handoff.
-        const any_signed = fork_types.AnySignedBeaconBlock{ .full_electra = @constCast(signed_block) };
-        const ingress_result = try self.node.ingestBlock(any_signed, .api);
-
-        var imported_state_root: ?[32]u8 = null;
-        switch (ingress_result) {
-            .ignored => return error.BlockIgnored,
-            .imported => |result| imported_state_root = result.state_root,
-            .queued => {
-                var spins: usize = 0;
-                while (spins < 10_000 and imported_state_root == null) : (spins += 1) {
-                    _ = self.node.processPendingBlockStateWork();
-                    _ = self.node.processPendingExecutionPayloadVerifications();
-                    _ = self.node.processPendingExecutionForkchoiceUpdates();
-                    if (self.node.getHead().slot >= target_slot) {
-                        imported_state_root = self.node.getHead().state_root;
-                        break;
-                    }
-                    std.Io.sleep(self.node.io, .{ .nanoseconds = std.time.ns_per_ms }, .real) catch {};
-                }
-                if (imported_state_root == null) return error.ImportPending;
-            },
         }
 
-        // Advance simulated time.
+        try state_transition.processSlots(
+            self.allocator,
+            post_state,
+            target_slot,
+            .{},
+        );
+        try post_state.state.commit();
+
+        const signed_block = try self.block_gen.generateBlockWithOpts(post_state, target_slot, .{
+            .participation_rate = self.participation_rate,
+        });
+        var any_signed = fork_types.AnySignedBeaconBlock{ .full_electra = @constCast(signed_block) };
+        errdefer any_signed.deinit(self.allocator);
+
+        const block_bytes = try any_signed.serialize(self.allocator);
+        any_signed.deinit(self.allocator);
+
+        post_state.deinit();
+        self.allocator.destroy(post_state);
+
+        return .{
+            .slot = target_slot,
+            .epoch_transition = target_epoch != current_epoch,
+            .bytes = block_bytes,
+        };
+    }
+
+    pub fn importExternalBlockBytes(
+        self: *SimNodeHarness,
+        block_bytes: []const u8,
+        source: BlockSource,
+    ) !bool {
+        const ingress_result = try self.node.ingestRawBlockBytesTracked(block_bytes, source);
+        switch (ingress_result) {
+            .ignored => return false,
+            .imported => return true,
+            .queued => |ticket| {
+                return switch (self.node.waitForTrackedBlockIngress(ticket)) {
+                    .completed => |completion| switch (completion) {
+                        .ignored => false,
+                        .failed => |err| err,
+                        .imported => true,
+                    },
+                    .shutdown => error.ImportShutdown,
+                    .lost => error.ImportLost,
+                };
+            },
+        }
+    }
+
+    pub fn syncBlocksByRangeFromPeer(
+        self: *SimNodeHarness,
+        peer: *BeaconNode,
+        start_slot: u64,
+        target_slot: u64,
+    ) !u64 {
+        if (target_slot < start_slot) return 0;
+
+        const request = BeaconBlocksByRangeRequest.Type{
+            .start_slot = start_slot,
+            .count = target_slot - start_slot + 1,
+        };
+        var request_bytes: [BeaconBlocksByRangeRequest.fixed_size]u8 = undefined;
+        _ = BeaconBlocksByRangeRequest.serializeIntoBytes(&request, &request_bytes);
+
+        const chunks = try peer.onReqResp(.beacon_blocks_by_range, &request_bytes);
+        defer networking.freeResponseChunks(peer.allocator, chunks);
+
+        const raw_blocks = try self.allocator.alloc(chain_mod.RawBlockBytes, chunks.len);
+        defer self.allocator.free(raw_blocks);
+
+        var raw_count: usize = 0;
+        for (chunks) |chunk| {
+            if (chunk.result != .success) return error.RangeSyncReqRespFailed;
+            const slot = readSignedBlockSlotFromSsz(chunk.ssz_payload) orelse return error.InvalidReqRespBlock;
+            raw_blocks[raw_count] = .{
+                .slot = slot,
+                .bytes = chunk.ssz_payload,
+            };
+            raw_count += 1;
+        }
+
+        if (raw_count == 0) return 0;
+        try self.node.processRangeSyncSegment(raw_blocks[0..raw_count]);
+        return raw_count;
+    }
+
+    pub fn syncMissingBlocksFromPeer(
+        self: *SimNodeHarness,
+        peer: *BeaconNode,
+        target_slot: u64,
+    ) !u64 {
+        const current_slot = try self.currentSlot();
+        if (current_slot >= target_slot) return 0;
+        return self.syncBlocksByRangeFromPeer(peer, current_slot + 1, target_slot);
+    }
+
+    pub fn advanceEmptyToSlot(self: *SimNodeHarness, target_slot: u64) !void {
+        try self.node.advanceSlot(target_slot);
+    }
+
+    fn readSignedBlockSlotFromSsz(block_bytes: []const u8) ?u64 {
+        if (block_bytes.len < 108) return null;
+        return std.mem.readInt(u64, block_bytes[100..108], .little);
+    }
+
+    pub fn observeSlot(
+        self: *SimNodeHarness,
+        target_slot: u64,
+        block_processed: bool,
+    ) !SlotResult {
+        const new_head_state = self.getHeadState() orelse return error.NoHeadState;
+        const observed_slot = try new_head_state.state.slot();
+        if (observed_slot != target_slot) return error.UnexpectedHeadSlot;
+
         self.sim_io.advanceToSlot(
             target_slot,
             self.clock.genesis_time_s,
             self.clock.seconds_per_slot,
         );
 
-        // Check invariants on the post-import head state.
-        const new_head_state = self.getHeadState() orelse return error.NoHeadState;
         try self.checker.checkSlot(new_head_state.state);
 
         self.slots_processed += 1;
-        self.blocks_processed += 1;
-        if (is_epoch_transition) self.epochs_processed += 1;
+        if (block_processed) self.blocks_processed += 1;
 
+        const previous_epoch = computeEpochAtSlot(target_slot - 1);
+        const current_epoch = computeEpochAtSlot(target_slot);
+        if (current_epoch != previous_epoch) self.epochs_processed += 1;
+
+        const state_root = try new_head_state.state.hashTreeRoot();
         return .{
             .slot = target_slot,
-            .block_processed = true,
-            .epoch_transition = is_epoch_transition,
-            .state_root = imported_state_root.?,
+            .block_processed = block_processed,
+            .epoch_transition = current_epoch != previous_epoch,
+            .state_root = state_root.*,
         };
+    }
+
+    /// Advance the simulation by one slot.
+    ///
+    /// If `skip` is false, a block is generated and imported via the real raw
+    /// block ingress path. If `skip` is true, the slot is advanced without a
+    /// block via BeaconNode.advanceSlot.
+    pub fn processSlot(self: *SimNodeHarness, skip: bool) !SlotResult {
+        const current_slot = try self.currentSlot();
+        const target_slot = current_slot + 1;
+
+        if (skip) {
+            try self.advanceEmptyToSlot(target_slot);
+            return self.observeSlot(target_slot, false);
+        }
+
+        const produced = try self.produceNextSlotBlockBytes();
+        defer self.allocator.free(produced.bytes);
+
+        const imported = try self.importExternalBlockBytes(produced.bytes, .api);
+        if (!imported) return error.BlockIgnored;
+
+        return self.observeSlot(target_slot, true);
     }
 
     /// Process `count` consecutive slots. Each slot decides whether to
@@ -245,8 +310,7 @@ pub const SimNodeHarness = struct {
 
     /// Process until the end of the current epoch (triggers epoch transition).
     pub fn processToEpochBoundary(self: *SimNodeHarness) !void {
-        const head_state = self.getHeadState() orelse return error.NoHeadState;
-        const current_slot = try head_state.state.slot();
+        const current_slot = try self.currentSlot();
         const current_epoch = computeEpochAtSlot(current_slot);
         const next_epoch_start = (current_epoch + 1) * preset.SLOTS_PER_EPOCH;
         const remaining = next_epoch_start - current_slot;

@@ -704,6 +704,11 @@ pub const Chain = struct {
         return service.popCompletedBlockImport();
     }
 
+    pub fn waitForCompletedReadyBlockImport(self: *Chain) StateWorkService.WaitResult {
+        const service = self.state_work_service;
+        return service.waitForCompletion();
+    }
+
     pub fn executePlannedReadyBlockImportSync(
         self: *Chain,
         planned: blocks_mod.PlannedBlockImport,
@@ -729,7 +734,7 @@ pub const Chain = struct {
 
         switch (owned_completed) {
             .failure => |failure| return failure.err,
-            .success => |prepared| return self.finishPreparedReadyBlockImport(prepared, try blocks_mod.verifyExecutionPayload(
+            .success => |*prepared| return self.finishPreparedReadyBlockImport(prepared, try blocks_mod.verifyExecutionPayload(
                 self.allocator,
                 prepared.block_input,
                 self.execution_port,
@@ -740,7 +745,7 @@ pub const Chain = struct {
 
     pub fn finishPreparedReadyBlockImport(
         self: *Chain,
-        prepared: blocks_mod.PreparedBlockImport,
+        prepared: *blocks_mod.PreparedBlockImport,
         exec_status: blocks_mod.ExecutionStatus,
     ) !ImportResult {
         const ctx = self.getPipelineContext();

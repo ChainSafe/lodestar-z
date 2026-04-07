@@ -46,8 +46,15 @@ pub const StateWorkService = struct {
     cond: std.Io.Condition = .init,
     pending_block_imports: std.ArrayListUnmanaged(PlannedBlockImport) = .empty,
     completed_block_imports: std.ArrayListUnmanaged(CompletedBlockImport) = .empty,
+    active_block_imports: usize = 0,
     shutdown_requested: bool = false,
     thread: ?std.Thread = null,
+
+    pub const WaitResult = enum {
+        completed,
+        idle,
+        shutdown,
+    };
 
     pub fn init(
         allocator: Allocator,
@@ -99,7 +106,9 @@ pub const StateWorkService = struct {
     pub fn canAcceptBlockImport(self: *StateWorkService) bool {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
-        return self.pending_block_imports.items.len + self.completed_block_imports.items.len < self.max_pending_block_imports;
+        return self.pending_block_imports.items.len +
+            self.completed_block_imports.items.len +
+            self.active_block_imports < self.max_pending_block_imports;
     }
 
     pub fn submitBlockImport(self: *StateWorkService, planned: PlannedBlockImport) !bool {
@@ -107,7 +116,10 @@ pub const StateWorkService = struct {
         defer self.mutex.unlock(self.io);
 
         if (self.shutdown_requested) return false;
-        if (self.pending_block_imports.items.len + self.completed_block_imports.items.len >= self.max_pending_block_imports) {
+        if (self.pending_block_imports.items.len +
+            self.completed_block_imports.items.len +
+            self.active_block_imports >= self.max_pending_block_imports)
+        {
             return false;
         }
 
@@ -124,6 +136,22 @@ pub const StateWorkService = struct {
         return self.completed_block_imports.orderedRemove(0);
     }
 
+    pub fn waitForCompletion(self: *StateWorkService) WaitResult {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+
+        while (!self.shutdown_requested and
+            self.completed_block_imports.items.len == 0 and
+            (self.pending_block_imports.items.len > 0 or self.active_block_imports > 0))
+        {
+            self.cond.waitUncancelable(self.io, &self.mutex);
+        }
+
+        if (self.completed_block_imports.items.len > 0) return .completed;
+        if (self.shutdown_requested) return .shutdown;
+        return .idle;
+    }
+
     fn workerMain(self: *StateWorkService) void {
         while (true) {
             self.mutex.lockUncancelable(self.io);
@@ -137,6 +165,7 @@ pub const StateWorkService = struct {
             }
 
             const planned = self.pending_block_imports.orderedRemove(0);
+            self.active_block_imports += 1;
             self.mutex.unlock(self.io);
 
             const completed: CompletedBlockImport = blk: {
@@ -158,10 +187,13 @@ pub const StateWorkService = struct {
             self.mutex.lockUncancelable(self.io);
             self.completed_block_imports.append(self.allocator, completed) catch {
                 var owned_completed = completed;
+                self.active_block_imports -= 1;
                 self.mutex.unlock(self.io);
                 owned_completed.deinit(self.allocator);
                 @panic("OOM queueing completed block state work");
             };
+            self.active_block_imports -= 1;
+            self.cond.signal(self.io);
             self.mutex.unlock(self.io);
         }
     }

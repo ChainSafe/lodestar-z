@@ -1,12 +1,16 @@
 //! Shared test harness for single-node deterministic simulation.
 //!
 //! Bootstraps a real BeaconNode against the same runtime-owned shared-state
-//! graph contract used elsewhere in the codebase. The simulation harness owns
-//! only the borrowed BeaconConfig pointer plus the node/sim wrappers.
+//! graph contract used elsewhere in the codebase. The simulation harness uses
+//! a published anchor state, not a fake slot-0 genesis state, because the test
+//! fixture is intentionally Electra-era and finalized. The harness owns only
+//! the borrowed BeaconConfig pointer plus the node/sim wrappers.
 
 const std = @import("std");
 const config_mod = @import("config");
 const active_preset = @import("preset").active_preset;
+const preset = @import("preset").preset;
+const consensus_types = @import("consensus_types");
 const state_transition = @import("state_transition");
 
 const node_pkg = @import("node");
@@ -43,7 +47,7 @@ pub fn createTestConfig(
     return config;
 }
 
-pub fn createPublishedGenesisState(
+pub fn createPublishedAnchorState(
     allocator: std.mem.Allocator,
     shared_state_graph: *SharedStateGraph,
     validator_count: usize,
@@ -54,6 +58,38 @@ pub fn createPublishedGenesisState(
         active_chain_config,
         validator_count,
     );
+
+    const raw_slot = try raw_state.slot();
+    const anchor_slot = @divFloor(raw_slot, preset.SLOTS_PER_EPOCH) * preset.SLOTS_PER_EPOCH;
+    try raw_state.setSlot(anchor_slot);
+
+    var latest_header_view = try raw_state.latestBlockHeader();
+    var latest_header = consensus_types.phase0.BeaconBlockHeader.default_value;
+    try latest_header_view.toValue(undefined, &latest_header);
+    latest_header.slot = anchor_slot;
+    if (std.mem.eql(u8, &latest_header.state_root, &([_]u8{0} ** 32))) {
+        latest_header.state_root = (try raw_state.hashTreeRoot()).*;
+    }
+    try raw_state.setLatestBlockHeader(&latest_header);
+
+    var anchor_block_root: [32]u8 = undefined;
+    try consensus_types.phase0.BeaconBlockHeader.hashTreeRoot(&latest_header, &anchor_block_root);
+
+    var previous_justified = consensus_types.phase0.Checkpoint.default_value;
+    try raw_state.previousJustifiedCheckpoint(&previous_justified);
+    previous_justified.root = anchor_block_root;
+    try raw_state.setPreviousJustifiedCheckpoint(&previous_justified);
+
+    var current_justified = consensus_types.phase0.Checkpoint.default_value;
+    try raw_state.currentJustifiedCheckpoint(&current_justified);
+    current_justified.root = anchor_block_root;
+    try raw_state.setCurrentJustifiedCheckpoint(&current_justified);
+
+    var finalized = consensus_types.phase0.Checkpoint.default_value;
+    try raw_state.finalizedCheckpoint(&finalized);
+    finalized.root = anchor_block_root;
+    try raw_state.setFinalizedCheckpoint(&finalized);
+    try raw_state.commit();
 
     const validators = try raw_state.validatorsSlice(allocator);
     defer allocator.free(validators);
@@ -69,6 +105,15 @@ pub fn createPublishedGenesisState(
             .skip_sync_pubkeys = true,
         },
     );
+}
+
+pub fn finishBuilderFromPublishedAnchor(
+    builder: *BeaconNode.Builder,
+    anchor_state: *CachedBeaconState,
+) !*BeaconNode {
+    const anchor_slot = try anchor_state.state.slot();
+    if (anchor_slot == 0) return builder.finishGenesis(anchor_state);
+    return builder.finishCheckpoint(anchor_state);
 }
 
 pub const SimTestHarness = struct {
@@ -105,14 +150,13 @@ pub const SimTestHarness = struct {
         });
         errdefer builder.deinit();
 
-        const genesis_state = try createPublishedGenesisState(
+        const anchor_state = try createPublishedAnchorState(
             allocator,
             builder.sharedStateGraph(),
             validator_count,
         );
-        const node = try builder.finishGenesis(genesis_state);
+        const node = try finishBuilderFromPublishedAnchor(&builder, anchor_state);
         errdefer node.deinit();
-
         const sim = SimNodeHarness.init(allocator, node, seed);
 
         return .{

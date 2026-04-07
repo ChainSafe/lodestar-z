@@ -54,6 +54,16 @@ pub const SyncCallbackCtx = struct {
     /// Scratch buffer for connected peer IDs (avoids allocation in hot path).
     peer_id_scratch: [64][]const u8 = undefined,
 
+    /// Create UnknownBlockSync callbacks that reuse the node-owned import path.
+    pub fn unknownBlockCallbacks(self: *SyncCallbackCtx) sync_mod.UnknownBlockCallbacks {
+        return .{
+            .ptr = @ptrCast(self),
+            .requestBlockByRootFn = &syncRequestBlockByRoot,
+            .importBlockFn = &syncImportBlock,
+            .getConnectedPeersFn = &syncGetConnectedPeers,
+        };
+    }
+
     /// Create a SyncServiceCallbacks that bridges to this context.
     pub fn syncServiceCallbacks(self: *SyncCallbackCtx) SyncServiceCallbacks {
         return .{

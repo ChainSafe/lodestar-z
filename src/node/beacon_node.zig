@@ -134,9 +134,22 @@ const SyncSegmentKey = struct {
     generation: u32,
 };
 
+pub const BlockIngressTicket = u64;
+
 const QueuedStateWorkOwner = union(enum) {
-    generic,
+    generic: ?BlockIngressTicket,
     sync_segment: SyncSegmentKey,
+};
+
+pub const QueuedBlockIngressCompletion = union(enum) {
+    ignored: anyerror,
+    imported: ImportResult,
+    failed: anyerror,
+};
+
+const CompletedQueuedBlockIngress = struct {
+    ticket: BlockIngressTicket,
+    completion: QueuedBlockIngressCompletion,
 };
 
 const PendingSyncSegment = struct {
@@ -358,8 +371,11 @@ pub const BeaconNode = struct {
     sync_service_inst: ?*SyncService = null,
     sync_callback_ctx: ?*SyncCallbackCtx = null, // bridges to P2P transport
     queued_state_work_owners: std.ArrayListUnmanaged(QueuedStateWorkOwner) = .empty,
+    completed_block_ingresses: std.ArrayListUnmanaged(CompletedQueuedBlockIngress) = .empty,
     waiting_execution_payloads: std.ArrayListUnmanaged(WaitingExecutionPayload) = .empty,
     pending_execution_payloads: std.ArrayListUnmanaged(PendingExecutionPayload) = .empty,
+    next_block_ingress_ticket: BlockIngressTicket = 1,
+    pending_block_ingress_count: usize = 0,
     next_execution_ticket: u64 = 1,
     pending_sync_segments: std.ArrayListUnmanaged(PendingSyncSegment) = .empty,
 
@@ -477,12 +493,41 @@ pub const BeaconNode = struct {
         source: BlockSource,
     ) !ReadyIngressResult {
         const ready = try self.chainService().prepareBlockInput(any_signed, source);
-        return self.completeReadyIngressDetailed(ready, null);
+        return switch (try self.completeReadyIngressDetailed(ready, null, .untracked)) {
+            .ignored => .ignored,
+            .queued => .queued,
+            .imported => |result| .{ .imported = result },
+        };
+    }
+
+    pub fn ingestBlockTracked(
+        self: *BeaconNode,
+        any_signed: AnySignedBeaconBlock,
+        source: BlockSource,
+    ) !TrackedReadyIngressResult {
+        const ready = try self.chainService().prepareBlockInput(any_signed, source);
+        return switch (try self.completeReadyIngressDetailed(ready, null, .tracked)) {
+            .ignored => .ignored,
+            .queued => |ticket| .{ .queued = ticket orelse @panic("tracked ingress missing ticket") },
+            .imported => |result| .{ .imported = result },
+        };
     }
 
     pub const ReadyIngressResult = union(enum) {
         ignored,
         queued,
+        imported: ImportResult,
+    };
+
+    pub const TrackedReadyIngressResult = union(enum) {
+        ignored,
+        queued: BlockIngressTicket,
+        imported: ImportResult,
+    };
+
+    const DetailedReadyIngressResult = union(enum) {
+        ignored,
+        queued: ?BlockIngressTicket,
         imported: ImportResult,
     };
 
@@ -492,14 +537,46 @@ pub const BeaconNode = struct {
         source: BlockSource,
     ) !ReadyIngressResult {
         const ready = try self.chainService().prepareRawBlockInput(block_bytes, source);
-        return self.completeReadyIngressDetailed(ready, block_bytes);
+        return switch (try self.completeReadyIngressDetailed(ready, block_bytes, .untracked)) {
+            .ignored => .ignored,
+            .queued => .queued,
+            .imported => |result| .{ .imported = result },
+        };
+    }
+
+    pub fn ingestRawBlockBytesTracked(
+        self: *BeaconNode,
+        block_bytes: []const u8,
+        source: BlockSource,
+    ) !TrackedReadyIngressResult {
+        const ready = try self.chainService().prepareRawBlockInput(block_bytes, source);
+        return switch (try self.completeReadyIngressDetailed(ready, block_bytes, .tracked)) {
+            .ignored => .ignored,
+            .queued => |ticket| .{ .queued = ticket orelse @panic("tracked ingress missing ticket") },
+            .imported => |result| .{ .imported = result },
+        };
     }
 
     pub fn importReadyBlock(
         self: *BeaconNode,
         ready: chain_mod.ReadyBlockInput,
     ) !ReadyIngressResult {
-        return self.completeReadyIngressDetailed(ready, null);
+        return switch (try self.completeReadyIngressDetailed(ready, null, .untracked)) {
+            .ignored => .ignored,
+            .queued => .queued,
+            .imported => |result| .{ .imported = result },
+        };
+    }
+
+    pub fn importReadyBlockTracked(
+        self: *BeaconNode,
+        ready: chain_mod.ReadyBlockInput,
+    ) !TrackedReadyIngressResult {
+        return switch (try self.completeReadyIngressDetailed(ready, null, .tracked)) {
+            .ignored => .ignored,
+            .queued => |ticket| .{ .queued = ticket orelse @panic("tracked ingress missing ticket") },
+            .imported => |result| .{ .imported = result },
+        };
     }
 
     pub fn completeReadyIngress(
@@ -507,8 +584,9 @@ pub const BeaconNode = struct {
         ready: chain_mod.ReadyBlockInput,
         raw_block_bytes: ?[]const u8,
     ) !?ImportResult {
-        return switch (try self.completeReadyIngressDetailed(ready, raw_block_bytes)) {
-            .ignored, .queued => null,
+        return switch (try self.completeReadyIngressDetailed(ready, raw_block_bytes, .untracked)) {
+            .ignored => null,
+            .queued => null,
             .imported => |result| result,
         };
     }
@@ -517,9 +595,9 @@ pub const BeaconNode = struct {
         self: *BeaconNode,
         ready: chain_mod.ReadyBlockInput,
         raw_block_bytes: ?[]const u8,
-    ) !ReadyIngressResult {
+        receipt_mode: enum { untracked, tracked },
+    ) !DetailedReadyIngressResult {
         var owned_ready = ready;
-        const t0 = std.Io.Clock.awake.now(self.io);
 
         const planned = self.chainService().planReadyBlockImport(&owned_ready) catch |err| {
             switch (err) {
@@ -551,26 +629,202 @@ pub const BeaconNode = struct {
             }
         };
 
+        const maybe_ticket = switch (receipt_mode) {
+            .untracked => null,
+            .tracked => try self.reserveBlockIngressTicket(),
+        };
+        var ticket_reserved = maybe_ticket != null;
+        errdefer if (ticket_reserved) self.releaseReservedBlockIngressTicket();
+
         try self.queued_state_work_owners.ensureUnusedCapacity(self.allocator, 1);
-        if (try self.chainService().tryQueuePlannedReadyBlockImport(planned)) {
-            self.queued_state_work_owners.appendAssumeCapacity(.generic);
-            return .queued;
+
+        var owned_planned = planned;
+        const queued = self.chainService().tryQueuePlannedReadyBlockImport(owned_planned) catch |err| {
+            owned_planned.deinit(self.allocator);
+            return err;
+        };
+        if (queued) {
+            self.queued_state_work_owners.appendAssumeCapacity(.{ .generic = maybe_ticket });
+            ticket_reserved = false;
+            owned_planned = undefined;
+            return .{ .queued = maybe_ticket };
         }
 
-        const completed = self.chainService().executePlannedReadyBlockImportSync(planned);
+        const completed = self.chainService().executePlannedReadyBlockImportSync(owned_planned);
         switch (completed) {
             .failure => |failure| {
                 const source = failure.planned.block_input.source;
-                const outcome = try self.chainService().finishCompletedReadyBlockImport(completed);
-                const result = try self.finishImportOutcome(source, t0, outcome);
-                self.processPendingChildren(result.block_root);
-                return .{ .imported = result };
+                self.recordBlockImportResult(source, blockImportOutcomeLabel(failure.err), 1);
+                var owned_completed = completed;
+                owned_completed.deinit(self.allocator);
+                return failure.err;
             },
             .success => |prepared| {
-                self.queuePreparedBlockImportExecution(.generic, prepared);
-                return .queued;
+                ticket_reserved = false;
+                self.queuePreparedBlockImportExecution(.{ .generic = maybe_ticket }, prepared);
+                return .{ .queued = maybe_ticket };
             },
         }
+    }
+
+    fn reserveBlockIngressTicket(self: *BeaconNode) !BlockIngressTicket {
+        const required_capacity = self.completed_block_ingresses.items.len + self.pending_block_ingress_count + 1;
+        try self.completed_block_ingresses.ensureTotalCapacity(self.allocator, required_capacity);
+        const ticket = self.next_block_ingress_ticket;
+        self.next_block_ingress_ticket += 1;
+        self.pending_block_ingress_count += 1;
+        return ticket;
+    }
+
+    fn releaseReservedBlockIngressTicket(self: *BeaconNode) void {
+        if (self.pending_block_ingress_count == 0) {
+            @panic("released queued block ingress ticket without reservation");
+        }
+        self.pending_block_ingress_count -= 1;
+    }
+
+    fn recordCompletedBlockIngress(
+        self: *BeaconNode,
+        ticket: BlockIngressTicket,
+        completion: QueuedBlockIngressCompletion,
+    ) void {
+        if (self.pending_block_ingress_count == 0) {
+            @panic("completed queued block ingress without reservation");
+        }
+        self.completed_block_ingresses.appendAssumeCapacity(.{
+            .ticket = ticket,
+            .completion = completion,
+        });
+        self.pending_block_ingress_count -= 1;
+    }
+
+    fn isIgnoredBlockImportError(err: anyerror) bool {
+        return switch (err) {
+            error.AlreadyKnown,
+            error.WouldRevertFinalizedSlot,
+            error.GenesisBlock,
+            => true,
+            else => false,
+        };
+    }
+
+    fn recordGenericBlockIngressError(
+        self: *BeaconNode,
+        ticket: ?BlockIngressTicket,
+        err: anyerror,
+    ) void {
+        const owned_ticket = ticket orelse return;
+        if (isIgnoredBlockImportError(err)) {
+            self.recordCompletedBlockIngress(owned_ticket, .{ .ignored = err });
+            return;
+        }
+        self.recordCompletedBlockIngress(owned_ticket, .{ .failed = err });
+    }
+
+    pub fn takeCompletedBlockIngress(
+        self: *BeaconNode,
+        ticket: BlockIngressTicket,
+    ) ?QueuedBlockIngressCompletion {
+        for (self.completed_block_ingresses.items, 0..) |completed, i| {
+            if (completed.ticket != ticket) continue;
+            return self.completed_block_ingresses.orderedRemove(i).completion;
+        }
+        return null;
+    }
+
+    pub const WaitTrackedBlockIngressResult = union(enum) {
+        completed: QueuedBlockIngressCompletion,
+        shutdown,
+        lost,
+    };
+
+    const TrackedBlockIngressPhase = enum {
+        state_work,
+        execution,
+        none,
+    };
+
+    pub fn waitForTrackedBlockIngress(
+        self: *BeaconNode,
+        ticket: BlockIngressTicket,
+    ) WaitTrackedBlockIngressResult {
+        while (true) {
+            if (self.takeCompletedBlockIngress(ticket)) |completion| {
+                return .{ .completed = completion };
+            }
+
+            _ = self.processPendingBlockStateWork();
+            _ = self.processPendingExecutionPayloadVerifications();
+            _ = self.processPendingExecutionForkchoiceUpdates();
+            self.dispatchWaitingExecutionPayloads();
+
+            if (self.takeCompletedBlockIngress(ticket)) |completion| {
+                return .{ .completed = completion };
+            }
+
+            switch (self.trackedBlockIngressPhase(ticket)) {
+                .execution => switch (self.execution_runtime.waitForAsyncCompletion()) {
+                    .completed => continue,
+                    .shutdown => return .shutdown,
+                    .idle => {
+                        if (self.trackedBlockIngressPhase(ticket) == .none) return .lost;
+                        continue;
+                    },
+                },
+                .state_work => switch (self.chainService().waitForCompletedReadyBlockImport()) {
+                    .completed => continue,
+                    .shutdown => return .shutdown,
+                    .idle => {
+                        if (self.trackedBlockIngressPhase(ticket) == .none) return .lost;
+                        continue;
+                    },
+                },
+                .none => return .lost,
+            }
+        }
+    }
+
+    fn trackedBlockIngressPhase(
+        self: *BeaconNode,
+        ticket: BlockIngressTicket,
+    ) TrackedBlockIngressPhase {
+        if (self.hasTrackedExecutionPayload(ticket)) return .execution;
+        if (self.hasQueuedTrackedBlockIngress(ticket)) return .state_work;
+        return .none;
+    }
+
+    fn hasQueuedTrackedBlockIngress(self: *const BeaconNode, ticket: BlockIngressTicket) bool {
+        for (self.queued_state_work_owners.items) |owner| {
+            switch (owner) {
+                .generic => |maybe_ticket| if (maybe_ticket == ticket) return true,
+                .sync_segment => {},
+            }
+        }
+        return false;
+    }
+
+    fn hasTrackedExecutionPayload(self: *BeaconNode, ticket: BlockIngressTicket) bool {
+        for (self.waiting_execution_payloads.items) |waiting| {
+            switch (waiting) {
+                .import => |import_work| switch (import_work.owner) {
+                    .generic => |maybe_ticket| if (maybe_ticket == ticket) return true,
+                    .sync_segment => {},
+                },
+                .revalidation => {},
+            }
+        }
+
+        for (self.pending_execution_payloads.items) |pending| {
+            switch (pending.work) {
+                .import => |import_work| switch (import_work.owner) {
+                    .generic => |maybe_ticket| if (maybe_ticket == ticket) return true,
+                    .sync_segment => {},
+                },
+                .revalidation => {},
+            }
+        }
+
+        return false;
     }
 
     pub fn processPendingBlockStateWork(self: *BeaconNode) bool {
@@ -578,14 +832,16 @@ pub const BeaconNode = struct {
 
         while (self.chainService().popCompletedReadyBlockImport()) |completed| {
             did_work = true;
-            const owner: QueuedStateWorkOwner = if (self.queued_state_work_owners.items.len > 0)
-                self.queued_state_work_owners.orderedRemove(0)
-            else
-                .generic;
+            if (self.queued_state_work_owners.items.len == 0) {
+                log.logger(.node).warn("missing queued state work owner for completed block work", .{});
+                self.finishGenericQueuedBlockImport(null, completed);
+                continue;
+            }
 
+            const owner = self.queued_state_work_owners.orderedRemove(0);
             switch (completed) {
                 .failure => switch (owner) {
-                    .generic => self.finishGenericQueuedBlockImport(completed),
+                    .generic => |ticket| self.finishGenericQueuedBlockImport(ticket, completed),
                     .sync_segment => |key| self.finishSyncSegmentQueuedBlockImport(key, completed),
                 },
                 .success => |prepared| {
@@ -859,13 +1115,14 @@ pub const BeaconNode = struct {
         exec_status: chain_mod.ExecutionStatus,
     ) void {
         switch (owner) {
-            .generic => self.finishGenericPreparedQueuedBlockImport(prepared, exec_status),
+            .generic => |ticket| self.finishGenericPreparedQueuedBlockImport(ticket, prepared, exec_status),
             .sync_segment => |key| self.finishSyncSegmentPreparedQueuedBlockImport(key, prepared, exec_status),
         }
     }
 
     fn finishGenericPreparedQueuedBlockImport(
         self: *BeaconNode,
+        ticket: ?BlockIngressTicket,
         prepared: chain_mod.PreparedBlockImport,
         exec_status: chain_mod.ExecutionStatus,
     ) void {
@@ -877,16 +1134,21 @@ pub const BeaconNode = struct {
         }
 
         const source = owned_prepared.block_input.source;
-        const outcome = self.chainService().finishPreparedReadyBlockImport(owned_prepared, exec_status) catch |err| {
+        const outcome = self.chainService().finishPreparedReadyBlockImport(&owned_prepared, exec_status) catch |err| {
             self.recordBlockImportResult(source, blockImportOutcomeLabel(err), 1);
+            self.recordGenericBlockIngressError(ticket, err);
             log.logger(.node).warn("deferred block execution commit failed: {}", .{err});
             return;
         };
         const result = self.finishImportOutcome(source, t0, outcome) catch |err| {
+            self.recordGenericBlockIngressError(ticket, err);
             log.logger(.node).warn("deferred block import commit failed: {}", .{err});
             return;
         };
         self.processPendingChildren(result.block_root);
+        if (ticket) |owned_ticket| {
+            self.recordCompletedBlockIngress(owned_ticket, .{ .imported = result });
+        }
     }
 
     fn finishSyncSegmentPreparedQueuedBlockImport(
@@ -897,7 +1159,7 @@ pub const BeaconNode = struct {
     ) void {
         const index = findPendingSyncSegmentIndex(self, key) orelse {
             log.logger(.node).warn("missing pending sync segment for prepared block commit", .{});
-            self.finishGenericPreparedQueuedBlockImport(prepared, exec_status);
+            self.finishGenericPreparedQueuedBlockImport(null, prepared, exec_status);
             return;
         };
 
@@ -911,7 +1173,7 @@ pub const BeaconNode = struct {
             owned_prepared = undefined;
         }
 
-        const outcome = self.chainService().finishPreparedReadyBlockImport(owned_prepared, exec_status) catch |err| {
+        const outcome = self.chainService().finishPreparedReadyBlockImport(&owned_prepared, exec_status) catch |err| {
             switch (err) {
                 error.ExecutionPayloadInvalid => {
                     segment.failed_count += 1;
@@ -956,8 +1218,9 @@ pub const BeaconNode = struct {
         err: anyerror,
     ) void {
         switch (owner) {
-            .generic => {
+            .generic => |ticket| {
                 self.recordBlockImportResult(prepared.block_input.source, blockImportOutcomeLabel(err), 1);
+                self.recordGenericBlockIngressError(ticket, err);
                 var owned_prepared = prepared;
                 owned_prepared.deinit(self.allocator);
                 log.logger(.node).warn("deferred block execution verification failed: {}", .{err});
@@ -1273,6 +1536,7 @@ pub const BeaconNode = struct {
 
     fn finishGenericQueuedBlockImport(
         self: *BeaconNode,
+        ticket: ?BlockIngressTicket,
         completed: chain_mod.CompletedBlockImport,
     ) void {
         const t0 = std.Io.Clock.awake.now(self.io);
@@ -1282,14 +1546,19 @@ pub const BeaconNode = struct {
         };
         const outcome = self.chainService().finishCompletedReadyBlockImport(completed) catch |err| {
             self.recordBlockImportResult(source, blockImportOutcomeLabel(err), 1);
+            self.recordGenericBlockIngressError(ticket, err);
             log.logger(.node).warn("deferred block state work failed: {}", .{err});
             return;
         };
         const result = self.finishImportOutcome(source, t0, outcome) catch |err| {
+            self.recordGenericBlockIngressError(ticket, err);
             log.logger(.node).warn("deferred block import commit failed: {}", .{err});
             return;
         };
         self.processPendingChildren(result.block_root);
+        if (ticket) |owned_ticket| {
+            self.recordCompletedBlockIngress(owned_ticket, .{ .imported = result });
+        }
     }
 
     fn finishSyncSegmentQueuedBlockImport(
@@ -1299,7 +1568,7 @@ pub const BeaconNode = struct {
     ) void {
         const index = findPendingSyncSegmentIndex(self, key) orelse {
             log.logger(.node).warn("missing pending sync segment for completed block work", .{});
-            self.finishGenericQueuedBlockImport(completed);
+            self.finishGenericQueuedBlockImport(null, completed);
             return;
         };
 
@@ -1616,13 +1885,18 @@ pub const BeaconNode = struct {
             };
 
             try self.queued_state_work_owners.ensureUnusedCapacity(self.allocator, 1);
-            if (try self.chainService().tryQueuePlannedReadyBlockImport(planned)) {
+            var owned_planned = planned;
+            const queued = self.chainService().tryQueuePlannedReadyBlockImport(owned_planned) catch |err| {
+                owned_planned.deinit(self.allocator);
+                return err;
+            };
+            if (queued) {
                 self.queued_state_work_owners.appendAssumeCapacity(.{ .sync_segment = segment.key });
                 segment.in_flight = true;
+                owned_planned = undefined;
                 return true;
             }
 
-            var owned_planned = planned;
             owned_planned.deinit(self.allocator);
             return false;
         }

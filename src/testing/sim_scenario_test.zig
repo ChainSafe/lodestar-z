@@ -129,7 +129,88 @@ test "controller: deterministic replay — same seed same results" {
     try testing.expectEqual(results[0].finalized_epoch, results[1].finalized_epoch);
 }
 
-// ── Test 6: Missed proposals — no safety violations ──────────────────
+test "controller: built-in happy_path scenario reaches finality" {
+    const allocator = testing.allocator;
+
+    var ctrl = try SimController.init(allocator, .{
+        .num_nodes = 2,
+        .seed = 4242,
+        .validator_count = 64,
+        .participation_rate = 1.0,
+    });
+    defer ctrl.deinit();
+
+    const result = try ctrl.runScenario(scenario.happy_path);
+
+    try testing.expect(result.finalized_epoch > 0);
+    try testing.expectEqual(@as(u64, 0), result.safety_violations);
+    try testing.expectEqual(@as(u64, 0), result.state_divergences);
+}
+
+// ── Test 6: Built-in late-attestations scenario ─────────────────────
+
+test "controller: built-in late_attestations scenario recovers finality" {
+    const allocator = testing.allocator;
+
+    var ctrl = try SimController.init(allocator, .{
+        .num_nodes = 2,
+        .seed = 4343,
+        .validator_count = 64,
+        .participation_rate = 1.0,
+    });
+    defer ctrl.deinit();
+
+    const result = try ctrl.runScenario(scenario.late_attestations);
+
+    try testing.expect(result.finalized_epoch > 0);
+    try testing.expectEqual(@as(u64, 0), result.safety_violations);
+    try testing.expectEqual(@as(u64, 0), result.state_divergences);
+}
+
+test "controller: built-in missed_proposals scenario preserves safety and finality" {
+    const allocator = testing.allocator;
+
+    var ctrl = try SimController.init(allocator, .{
+        .num_nodes = 2,
+        .seed = 4444,
+        .validator_count = 64,
+        .participation_rate = 1.0,
+    });
+    defer ctrl.deinit();
+
+    const result = try ctrl.runScenario(scenario.missed_proposals);
+
+    try testing.expect(result.finalized_epoch > 0);
+    try testing.expect(result.blocks_produced < result.slots_processed);
+    try testing.expectEqual(@as(u64, 0), result.safety_violations);
+    try testing.expectEqual(@as(u64, 0), result.state_divergences);
+}
+
+test "controller: built-in happy_path scenario deterministic replay" {
+    const allocator = testing.allocator;
+
+    var results: [2]FinalityResult = undefined;
+
+    for (0..2) |run| {
+        var ctrl = try SimController.init(allocator, .{
+            .num_nodes = 2,
+            .seed = 5555,
+            .validator_count = 64,
+            .participation_rate = 1.0,
+        });
+        defer ctrl.deinit();
+
+        results[run] = try ctrl.runScenario(scenario.happy_path);
+    }
+
+    try testing.expectEqual(results[0].slots_processed, results[1].slots_processed);
+    try testing.expectEqual(results[0].blocks_produced, results[1].blocks_produced);
+    try testing.expectEqual(results[0].finalized_epoch, results[1].finalized_epoch);
+    try testing.expectEqual(results[0].safety_violations, results[1].safety_violations);
+    try testing.expectEqual(results[0].state_divergences, results[1].state_divergences);
+}
+
+// ── Test 8: Missed proposals — no safety violations ──────────────────
 
 test "controller: missed proposals — no safety violations" {
     const allocator = testing.allocator;
@@ -159,7 +240,7 @@ test "controller: missed proposals — no safety violations" {
     try testing.expectEqual(@as(u64, 0), result.state_divergences);
 }
 
-// ── Test 7: Late attestations — safety preserved ─────────────────────
+// ── Test 9: Late attestations — safety preserved ─────────────────────
 
 test "controller: late attestations — safety preserved" {
     const allocator = testing.allocator;
