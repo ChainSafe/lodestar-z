@@ -53,103 +53,103 @@ function generateTSSets(count: number): SignatureSetTS[] {
   });
 }
 
-//describe("aggregatePublicKeys", () => {
-//  for (const count of [1, 8, 32, 128, 256]) {
-//    bench({
-//      beforeEach: () => generateZigSets(count).map((s) => s.pk),
-//      fn: (publicKeys) => {
-//        aggregatePublicKeysZig(publicKeys);
-//      },
-//      id: `aggregatePublicKeys lodestar-z  ${count} keys`,
-//    });
-//
-//    bench({
-//      beforeEach: () => generateTSSets(count).map((s) => s.pk),
-//      fn: (publicKeys) => {
-//        aggregatePublicKeysTS(publicKeys);
-//      },
-//      id: `aggregatePublicKeys @chainsafe/blst  ${count} keys`,
-//    });
-//  }
-//});
-//
-//describe("aggregateSignatures", () => {
-//  for (const count of [1, 8, 32, 128, 256]) {
-//    bench({
-//      beforeEach: () => generateZigSets(count).map((s) => s.sig),
-//      fn: (signatures) => {
-//        aggregateSignaturesZig(signatures);
-//      },
-//      id: `aggregateSignatures lodestar-z  ${count} sigs`,
-//    });
-//
-//    bench({
-//      beforeEach: () => generateTSSets(count).map((s) => s.sig),
-//      fn: (signatures) => {
-//        aggregateSignaturesTS(signatures);
-//      },
-//      id: `aggregateSignatures @chainsafe/blst  ${count} sigs`,
-//    });
-//  }
-//});
-//
-//describe("aggregateVerify", () => {
-//  for (const count of [3, 8, 32, 64, 128]) {
-//    bench({
-//      beforeEach: () => {
-//        const sets = generateZigSets(count);
-//        return {
-//          messages: sets.map((s) => s.msg),
-//          publicKeys: sets.map((s) => s.pk),
-//          signature: aggregateSignaturesZig(sets.map((s) => s.sig)),
-//        };
-//      },
-//      fn: ({messages, publicKeys, signature}) => {
-//        const isValid = aggregateVerifyZig(messages, publicKeys, signature);
-//        if (!isValid) throw Error("Invalid");
-//      },
-//      id: `aggregateVerify lodestar-z  ${count} sets`,
-//    });
-//
-//    bench({
-//      beforeEach: () => {
-//        const sets = generateTSSets(count);
-//        return {
-//          messages: sets.map((s) => s.msg),
-//          publicKeys: sets.map((s) => s.pk),
-//          signature: aggregateSignaturesTS(sets.map((s) => s.sig)),
-//        };
-//      },
-//      fn: ({messages, publicKeys, signature}) => {
-//        const isValid = aggregateVerifyTS(messages, publicKeys, signature);
-//        if (!isValid) throw Error("Invalid");
-//      },
-//      id: `aggregateVerify @chainsafe/blst  ${count} sets`,
-//    });
-//  }
-//});
-//
-//describe("verifyMultipleAggregateSignatures", () => {
-//  for (const count of [3, 8, 32, 64, 128]) {
-//    bench({
-//      beforeEach: () => generateZigSets(count),
-//      fn: (sets) => {
-//        const isValid = verifyZig(sets);
-//        if (!isValid) throw Error("Invalid");
-//      },
-//      id: `lodestar-z  ${count} sets`,
-//    });
-//
-//    bench({
-//      beforeEach: () => generateTSSets(count),
-//      fn: (sets) => {
-//        const isValid = verifyTS(sets);
-//        if (!isValid) throw Error("Invalid");
-//      },
-//      id: `@chainsafe/blst  ${count} sets`,
-//    });
-//  }
-//});
+describe("aggregatePublicKeys", () => {
+  for (const count of [1, 8, 32, 128, 256]) {
+    bench({
+      beforeEach: () => generateZigSets(count).map((s) => s.pk),
+      fn: (publicKeys) => {
+        aggregatePublicKeysZig(publicKeys);
+      },
+      id: `aggregatePublicKeys lodestar-z  ${count} keys`,
+    });
+
+    bench({
+      beforeEach: () => generateTSSets(count).map((s) => s.pk),
+      fn: (publicKeys) => {
+        aggregatePublicKeysTS(publicKeys);
+      },
+      id: `aggregatePublicKeys @chainsafe/blst  ${count} keys`,
+    });
+  }
+});
+
+describe("aggregateSignatures", () => {
+  for (const count of [1, 8, 32, 128, 256]) {
+    bench({
+      beforeEach: () => generateZigSets(count).map((s) => s.sig),
+      fn: (signatures) => {
+        aggregateSignaturesZig(signatures);
+      },
+      id: `aggregateSignatures lodestar-z  ${count} sigs`,
+    });
+
+    bench({
+      beforeEach: () => generateTSSets(count).map((s) => s.sig),
+      fn: (signatures) => {
+        aggregateSignaturesTS(signatures);
+      },
+      id: `aggregateSignatures @chainsafe/blst  ${count} sigs`,
+    });
+  }
+});
+
+describe("aggregateVerify", () => {
+  for (const count of [3, 8, 32, 64, 128]) {
+    bench({
+      beforeEach: () => {
+        const sets = generateZigSets(count);
+        return {
+          messages: sets.map((s) => s.msg),
+          publicKeys: sets.map((s) => s.pk),
+          signature: aggregateSignaturesZig(sets.map((s) => s.sig)),
+        };
+      },
+      fn: ({ messages, publicKeys, signature }) => {
+        const isValid = aggregateVerifyZig(messages, publicKeys, signature);
+        if (!isValid) throw Error("Invalid");
+      },
+      id: `aggregateVerify lodestar-z  ${count} sets`,
+    });
+
+    bench({
+      beforeEach: () => {
+        const sets = generateTSSets(count);
+        return {
+          messages: sets.map((s) => s.msg),
+          publicKeys: sets.map((s) => s.pk),
+          signature: aggregateSignaturesTS(sets.map((s) => s.sig)),
+        };
+      },
+      fn: ({ messages, publicKeys, signature }) => {
+        const isValid = aggregateVerifyTS(messages, publicKeys, signature);
+        if (!isValid) throw Error("Invalid");
+      },
+      id: `aggregateVerify @chainsafe/blst  ${count} sets`,
+    });
+  }
+});
+
+describe("verifyMultipleAggregateSignatures", () => {
+  for (const count of [3, 8, 32, 64, 128]) {
+    bench({
+      beforeEach: () => generateZigSets(count),
+      fn: (sets) => {
+        const isValid = verifyZig(sets);
+        if (!isValid) throw Error("Invalid");
+      },
+      id: `lodestar-z  ${count} sets`,
+    });
+
+    bench({
+      beforeEach: () => generateTSSets(count),
+      fn: (sets) => {
+        const isValid = verifyTS(sets);
+        if (!isValid) throw Error("Invalid");
+      },
+      id: `@chainsafe/blst  ${count} sets`,
+    });
+  }
+});
 
 describe("aggregateWithRandomness", () => {
   for (const count of [1, 8, 32, 64, 128]) {
