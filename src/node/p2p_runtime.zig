@@ -1476,12 +1476,9 @@ fn completePeerHandshake(
         return true;
     }
 
-    if (requestPeerMetadata(self, io, svc, peer_id)) |metadata| {
-        applyPeerMetadata(self, peer_id, metadata, currentUnixTimeMs(io));
-    } else |err| {
-        // Metadata failure is not fatal — peer already proved useful via STATUS.
-        std.log.warn("completePeerHandshake: metadata failed for peer, continuing: {}", .{err});
-    }
+    // Skip metadata in the handshake — it blocks indefinitely when the
+    // peer disconnects (no read timeout). Metadata is requested lazily
+    // during peer manager maintenance ticks instead.
 
     svc.openGossipsubStream(io, peer_id) catch |err| {
         std.log.warn("Failed to open outbound gossipsub stream to {s}: {}", .{ peer_id, err });
