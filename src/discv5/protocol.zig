@@ -1908,3 +1908,68 @@ test "discv5 protocol: request timeout prunes active and pending state" {
     try std.testing.expectEqualSlices(u8, req_id.slice(), event.request_timeout.req_id.slice());
     try std.testing.expectEqual(RequestKind.ping, event.request_timeout.kind);
 }
+
+test "discv5 protocol: unsolicited WHOAREYOU is ignored" {
+    const alloc = std.testing.allocator;
+    const io = std.Options.debug_io;
+    const hex = @import("hex.zig");
+
+    const sk_a = hex.hexToBytesComptime(32, "eef77acb6c6a6eebc5b363a475ac583ec7eccdb42b6481424c60f59aa326547f");
+    const pk_a = try secp.pubkeyFromSecret(&sk_a);
+    const node_id_a = enr_mod.nodeIdFromCompressedPubkey(&pk_a);
+
+    var socket_a = try UdpSocket.bind(io, .{ .ip4 = .{ .bytes = .{ 127, 0, 0, 1 }, .port = 0 } });
+    defer socket_a.close();
+    var socket_b = try UdpSocket.bind(io, .{ .ip4 = .{ .bytes = .{ 127, 0, 0, 1 }, .port = 0 } });
+    defer socket_b.close();
+
+    const addr_a = socket_a.address;
+
+    var proto_a = try Protocol.init(io, alloc, .{
+        .local_secret_key = sk_a,
+        .local_node_id = node_id_a,
+    });
+    defer proto_a.deinit();
+
+    var request_nonce: [12]u8 = [_]u8{0x42} ** 12;
+    var id_nonce: [16]u8 = [_]u8{0x24} ** 16;
+    var authdata: [24]u8 = undefined;
+    @memcpy(authdata[0..16], &id_nonce);
+    std.mem.writeInt(u64, authdata[16..24], 0, .big);
+    var masking_iv: [16]u8 = [_]u8{0x11} ** 16;
+
+    const whoareyou = try packet.encode(
+        alloc,
+        &masking_iv,
+        &node_id_a,
+        packet.FLAG_WHOAREYOU,
+        &request_nonce,
+        &authdata,
+        &[_]u8{},
+    );
+    defer alloc.free(whoareyou);
+
+    try socket_b.send(addr_a, whoareyou);
+
+    var recv_buf_a: [MAX_PACKET_SIZE]u8 = undefined;
+    const inbound = try socket_a.receiveTimeout(&recv_buf_a, .{
+        .duration = .{
+            .raw = Io.Duration.fromMilliseconds(250),
+            .clock = .awake,
+        },
+    });
+    try proto_a.handlePacket(inbound.data, inbound.from, &socket_a);
+
+    try std.testing.expectEqual(@as(usize, 0), proto_a.pending_requests.items.len);
+    try std.testing.expectEqual(@as(usize, 0), proto_a.active_requests.count());
+    try std.testing.expectEqual(@as(usize, 0), proto_a.sessions.count());
+    try std.testing.expect(proto_a.popEvent() == null);
+
+    var recv_buf_b: [MAX_PACKET_SIZE]u8 = undefined;
+    try std.testing.expectError(error.Timeout, socket_b.receiveTimeout(&recv_buf_b, .{
+        .duration = .{
+            .raw = Io.Duration.fromMilliseconds(50),
+            .clock = .awake,
+        },
+    }));
+}

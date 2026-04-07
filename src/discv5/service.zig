@@ -1202,6 +1202,63 @@ fn recipientAddress(recipient_ip: messages.Pong.RecipientIp, port: u16) Address 
     };
 }
 
+const TestService = struct {
+    service: Service,
+    pubkey: [33]u8,
+    node_id: NodeId,
+
+    fn init(alloc: Allocator, io: Io, secret_key: [32]u8) !TestService {
+        const secp = @import("secp256k1.zig");
+        const pubkey = try secp.pubkeyFromSecret(&secret_key);
+        const node_id = enr_mod.nodeIdFromCompressedPubkey(&pubkey);
+
+        var service = try Service.init(io, alloc, .{
+            .bind_addresses = .{ .ip4 = .{ .ip4 = .{ .bytes = .{ 127, 0, 0, 1 }, .port = 0 } } },
+            .protocol_config = .{
+                .local_secret_key = secret_key,
+                .local_node_id = node_id,
+            },
+            .lookup_timeout_ms = 2_000,
+        });
+        errdefer service.deinit();
+
+        var builder = enr_mod.Builder.init(alloc, secret_key, 1);
+        builder.ip = .{ 127, 0, 0, 1 };
+        builder.udp = service.boundPort(.ip4) orelse return error.MissingBindAddress;
+        const local_enr = try builder.encode();
+        defer alloc.free(local_enr);
+        try service.setLocalEnr(local_enr);
+
+        return .{
+            .service = service,
+            .pubkey = pubkey,
+            .node_id = node_id,
+        };
+    }
+
+    fn deinit(self: *TestService) void {
+        self.service.deinit();
+    }
+
+    fn addr(self: *const TestService) Address {
+        return self.service.boundAddress(.ip4) orelse unreachable;
+    }
+
+    fn enr(self: *const TestService) []const u8 {
+        return self.service.localEnr() orelse unreachable;
+    }
+
+    fn addKnownEnr(self: *TestService, other: *const TestService) !void {
+        try std.testing.expect(self.service.addEnr(other.enr()));
+    }
+};
+
+fn pollServices(services: []const *Service) void {
+    for (services) |service| {
+        service.poll();
+    }
+}
+
 test "discv5 service: lookup emits lookup_finished" {
     const alloc = std.testing.allocator;
     const io = std.Options.debug_io;
@@ -1757,4 +1814,150 @@ test "discv5 service: ipv4-mapped ipv6 vote normalizes to ipv4" {
     defer updated.deinit();
     try std.testing.expectEqual([4]u8{ 198, 51, 100, 2 }, updated.ip.?);
     try std.testing.expectEqual(@as(?u16, 40404), updated.udp);
+}
+
+test "discv5 service: live lookup discovers node through intermediary" {
+    const alloc = std.testing.allocator;
+    const io = std.Options.debug_io;
+    const hex = @import("hex.zig");
+
+    const sk_0 = hex.hexToBytesComptime(32, "eef77acb6c6a6eebc5b363a475ac583ec7eccdb42b6481424c60f59aa326547f");
+    const sk_1 = hex.hexToBytesComptime(32, "66fb62bfbd66b9177a138c1e5cddbe4f7c30c343e94e68df8769459cb14571f7");
+    const sk_2 = hex.hexToBytesComptime(32, "7e8107fe766b7f1821c3a7fbc56d18f734f0ebf898f0b85f82412b6d1fa7f4d3");
+
+    var node_0 = try TestService.init(alloc, io, sk_0);
+    defer node_0.deinit();
+    var node_1 = try TestService.init(alloc, io, sk_1);
+    defer node_1.deinit();
+    var node_2 = try TestService.init(alloc, io, sk_2);
+    defer node_2.deinit();
+
+    try node_0.addKnownEnr(&node_1);
+    try node_1.addKnownEnr(&node_2);
+
+    const lookup_id = try node_0.service.startLookup(&node_2.node_id);
+    const services = [_]*Service{ &node_0.service, &node_1.service, &node_2.service };
+
+    var saw_discovered_target = false;
+    var saw_lookup_finished = false;
+    var lookup_included_intermediary = false;
+
+    for (0..192) |_| {
+        pollServices(services[0..]);
+
+        while (node_0.service.popEvent()) |event| {
+            var owned = event;
+            defer owned.deinit(alloc);
+
+            switch (owned) {
+                .discovered_enr => |discovered| {
+                    if (std.mem.eql(u8, &discovered.node_id, &node_2.node_id)) {
+                        saw_discovered_target = true;
+                        try std.testing.expectEqual(@as(?u32, lookup_id), discovered.lookup_id);
+                    }
+                },
+                .lookup_finished => |lookup_finished| {
+                    saw_lookup_finished = true;
+                    try std.testing.expectEqual(lookup_id, lookup_finished.lookup_id);
+                    try std.testing.expect(!lookup_finished.timed_out);
+
+                    for (lookup_finished.enrs) |raw_enr| {
+                        var parsed = try enr_mod.decode(alloc, raw_enr);
+                        defer parsed.deinit();
+                        const node_id = parsed.nodeId() orelse continue;
+                        if (std.mem.eql(u8, &node_id, &node_1.node_id)) {
+                            lookup_included_intermediary = true;
+                        }
+                    }
+                },
+                else => {},
+            }
+        }
+
+        while (node_1.service.popEvent()) |event| {
+            var owned = event;
+            defer owned.deinit(alloc);
+        }
+        while (node_2.service.popEvent()) |event| {
+            var owned = event;
+            defer owned.deinit(alloc);
+        }
+
+        if (saw_discovered_target and saw_lookup_finished) break;
+    }
+
+    const discovered_enr = node_0.service.findEnr(&node_2.node_id) orelse return error.MissingDiscoveredEnr;
+    try std.testing.expectEqualSlices(u8, node_2.enr(), discovered_enr);
+    try std.testing.expect(saw_discovered_target);
+    try std.testing.expect(saw_lookup_finished);
+    try std.testing.expect(lookup_included_intermediary);
+}
+
+test "discv5 service: live TALKREQ TALKRESP round-trip" {
+    const alloc = std.testing.allocator;
+    const io = std.Options.debug_io;
+    const hex = @import("hex.zig");
+
+    const sk_0 = hex.hexToBytesComptime(32, "eef77acb6c6a6eebc5b363a475ac583ec7eccdb42b6481424c60f59aa326547f");
+    const sk_1 = hex.hexToBytesComptime(32, "66fb62bfbd66b9177a138c1e5cddbe4f7c30c343e94e68df8769459cb14571f7");
+
+    var node_0 = try TestService.init(alloc, io, sk_0);
+    defer node_0.deinit();
+    var node_1 = try TestService.init(alloc, io, sk_1);
+    defer node_1.deinit();
+
+    try node_0.addKnownEnr(&node_1);
+
+    const req_id = try node_0.service.sendTalkRequest(
+        &node_1.node_id,
+        &node_1.pubkey,
+        node_1.addr(),
+        "/eth2/test",
+        "ping",
+    );
+
+    const services = [_]*Service{ &node_0.service, &node_1.service };
+    var saw_request = false;
+    var saw_response = false;
+
+    for (0..192) |_| {
+        pollServices(services[0..]);
+
+        while (node_1.service.popEvent()) |event| {
+            var owned = event;
+            defer owned.deinit(alloc);
+
+            switch (owned) {
+                .talkreq => |talkreq| {
+                    saw_request = true;
+                    try std.testing.expectEqual(node_0.node_id, talkreq.peer_id);
+                    try std.testing.expectEqualSlices(u8, req_id.slice(), talkreq.req_id.slice());
+                    try std.testing.expectEqualStrings("/eth2/test", talkreq.protocol);
+                    try std.testing.expectEqualStrings("ping", talkreq.request);
+                    try node_1.service.sendTalkResponse(talkreq.peer_id, talkreq.peer_addr, talkreq.req_id, "pong");
+                },
+                else => {},
+            }
+        }
+
+        while (node_0.service.popEvent()) |event| {
+            var owned = event;
+            defer owned.deinit(alloc);
+
+            switch (owned) {
+                .talkresp => |talkresp| {
+                    saw_response = true;
+                    try std.testing.expectEqual(node_1.node_id, talkresp.peer_id);
+                    try std.testing.expectEqualSlices(u8, req_id.slice(), talkresp.req_id.slice());
+                    try std.testing.expectEqualStrings("pong", talkresp.response);
+                },
+                else => {},
+            }
+        }
+
+        if (saw_request and saw_response) break;
+    }
+
+    try std.testing.expect(saw_request);
+    try std.testing.expect(saw_response);
 }
