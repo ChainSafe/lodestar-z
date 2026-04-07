@@ -139,20 +139,18 @@ pub fn generateElectraState(allocator: Allocator, pool: *Node.Pool, chain_config
 
     var next_sync_committee_pubkeys: [preset.SYNC_COMMITTEE_SIZE]BLSPubkey = undefined;
     var next_sync_committee_pubkeys_slices: [preset.SYNC_COMMITTEE_SIZE]bls.PublicKey = undefined;
-    var next_sync_committee_pubkey_ptrs: [preset.SYNC_COMMITTEE_SIZE]*const bls.PublicKey = undefined;
     var validators = try beacon_state.validators();
     for (next_sync_committee_indices, 0..next_sync_committee_indices.len) |index, i| {
         var validator = try validators.get(@intCast(index));
         var pubkey_view = try validator.get("pubkey");
         _ = try pubkey_view.getAllInto(next_sync_committee_pubkeys[i][0..]);
         next_sync_committee_pubkeys_slices[i] = try bls.PublicKey.uncompress(&next_sync_committee_pubkeys[i]);
-        next_sync_committee_pubkey_ptrs[i] = &next_sync_committee_pubkeys_slices[i];
     }
 
     var current_sync_committee = try beacon_state.currentSyncCommittee();
     var next_sync_committee = try beacon_state.nextSyncCommittee();
     // Rotate syncCommittee in state
-    const aggregate_pubkey = (try bls.AggregatePublicKey.aggregate(&next_sync_committee_pubkey_ptrs, false)).toPublicKey().compress();
+    const aggregate_pubkey = (try bls.AggregatePublicKey.aggregate(&next_sync_committee_pubkeys_slices, false)).toPublicKey().compress();
     try next_sync_committee.setValue("pubkeys", &next_sync_committee_pubkeys);
     try next_sync_committee.setValue("aggregate_pubkey", &aggregate_pubkey);
 

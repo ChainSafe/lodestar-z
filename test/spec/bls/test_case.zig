@@ -25,8 +25,6 @@ pub fn aggregate(gpa: Allocator, path: std.fs.Dir) !void {
     {
         const signatures = try allocator.alloc(bls.Signature, aggregate_test_data.input.len);
         defer allocator.free(signatures);
-        const sig_ptrs = try allocator.alloc(*const bls.Signature, aggregate_test_data.input.len);
-        defer allocator.free(sig_ptrs);
 
         var sig_buf: [bls.Signature.COMPRESS_SIZE]u8 = undefined;
 
@@ -36,19 +34,18 @@ pub fn aggregate(gpa: Allocator, path: std.fs.Dir) !void {
                 sig_hex_bytes[2..], // skip "0x" prefix
             );
             signatures[i] = try bls.Signature.deserialize(sig_bytes);
-            sig_ptrs[i] = &signatures[i];
         }
 
         // yaml library parses `null` as a string
         if (std.mem.eql(u8, aggregate_test_data.output, "null")) {
             // expect failure
-            try std.testing.expectError(bls.BlstError.AggrTypeMismatch, bls.AggregateSignature.aggregate(sig_ptrs, true));
+            try std.testing.expectError(bls.BlstError.AggrTypeMismatch, bls.AggregateSignature.aggregate(signatures, true));
         } else {
             const expected = try std.fmt.hexToBytes(
                 &sig_buf,
                 aggregate_test_data.output[2..], // skip "0x" prefix
             );
-            const aggregate_sig = try bls.AggregateSignature.aggregate(sig_ptrs, false);
+            const aggregate_sig = try bls.AggregateSignature.aggregate(signatures, false);
             const actual = aggregate_sig.toSignature().compress();
             try std.testing.expectEqualSlices(u8, expected, &actual);
         }
@@ -83,8 +80,6 @@ pub fn aggregate_verify(gpa: Allocator, path: std.fs.Dir) !void {
 
         const pubkeys = try allocator.alloc(bls.PublicKey, num_sigs);
         defer allocator.free(pubkeys);
-        const pk_ptrs = try allocator.alloc(*const bls.PublicKey, num_sigs);
-        defer allocator.free(pk_ptrs);
         const messages = try allocator.alloc([32]u8, num_sigs);
         defer allocator.free(messages);
 
@@ -98,7 +93,6 @@ pub fn aggregate_verify(gpa: Allocator, path: std.fs.Dir) !void {
                 pk_hex_bytes[2..], // skip "0x" prefix
             );
             pubkeys[i] = try bls.PublicKey.deserialize(pk_bytes);
-            pk_ptrs[i] = &pubkeys[i];
         }
 
         for (aggregate_verify_test_data.input.messages, 0..) |msg_hex_bytes, i| {
@@ -123,7 +117,7 @@ pub fn aggregate_verify(gpa: Allocator, path: std.fs.Dir) !void {
             &pairing_buf,
             messages,
             bls.DST,
-            pk_ptrs,
+            pubkeys,
             true,
         ) catch false;
         try std.testing.expectEqual(aggregate_verify_test_data.output, result);
@@ -157,8 +151,6 @@ pub fn fast_aggregate_verify(gpa: Allocator, path: std.fs.Dir) !void {
 
         const pubkeys = try allocator.alloc(bls.PublicKey, num_sigs);
         defer allocator.free(pubkeys);
-        const pk_ptrs = try allocator.alloc(*const bls.PublicKey, num_sigs);
-        defer allocator.free(pk_ptrs);
 
         var msg_bytes: [32]u8 = undefined;
         var pk_buf: [bls.PublicKey.COMPRESS_SIZE]u8 = undefined;
@@ -171,7 +163,6 @@ pub fn fast_aggregate_verify(gpa: Allocator, path: std.fs.Dir) !void {
                 pk_hex_bytes[2..], // skip "0x" prefix
             );
             pubkeys[i] = try bls.PublicKey.deserialize(pk_bytes);
-            pk_ptrs[i] = &pubkeys[i];
         }
 
         _ = try std.fmt.hexToBytes(
@@ -194,7 +185,7 @@ pub fn fast_aggregate_verify(gpa: Allocator, path: std.fs.Dir) !void {
             &pairing_buf,
             &msg_bytes,
             bls.DST,
-            pk_ptrs,
+            pubkeys,
             true,
         ) catch false;
         try std.testing.expectEqual(fast_aggregate_verify_test_data.output, result);
@@ -325,8 +316,6 @@ pub fn eth_aggregate_pubkeys(gpa: Allocator, path: std.fs.Dir) !void {
     {
         const pubkeys = try allocator.alloc(bls.PublicKey, eth_aggregate_pubkeys_test_data.input.len);
         defer allocator.free(pubkeys);
-        const pk_ptrs = try allocator.alloc(*const bls.PublicKey, eth_aggregate_pubkeys_test_data.input.len);
-        defer allocator.free(pk_ptrs);
 
         var pk_buf: [bls.PublicKey.COMPRESS_SIZE]u8 = undefined;
 
@@ -340,13 +329,12 @@ pub fn eth_aggregate_pubkeys(gpa: Allocator, path: std.fs.Dir) !void {
                 try std.testing.expect(std.mem.eql(u8, eth_aggregate_pubkeys_test_data.output, "null"));
                 return;
             };
-            pk_ptrs[i] = &pubkeys[i];
         }
 
         // yaml library parses `null` as a string
         if (std.mem.eql(u8, eth_aggregate_pubkeys_test_data.output, "null")) {
             // expect failure
-            _ = bls.AggregatePublicKey.aggregate(pk_ptrs, true) catch {
+            _ = bls.AggregatePublicKey.aggregate(pubkeys, true) catch {
                 return;
             };
             try std.testing.expect(false);
@@ -355,7 +343,7 @@ pub fn eth_aggregate_pubkeys(gpa: Allocator, path: std.fs.Dir) !void {
                 &pk_buf,
                 eth_aggregate_pubkeys_test_data.output[2..], // skip "0x" prefix
             );
-            const aggregate_pk = try bls.AggregatePublicKey.aggregate(pk_ptrs, false);
+            const aggregate_pk = try bls.AggregatePublicKey.aggregate(pubkeys, false);
             const actual = aggregate_pk.toPublicKey().compress();
             try std.testing.expectEqualSlices(u8, expected, &actual);
         }
@@ -389,8 +377,6 @@ pub fn eth_fast_aggregate_verify(gpa: Allocator, path: std.fs.Dir) !void {
 
         const pubkeys = try allocator.alloc(bls.PublicKey, num_sigs);
         defer allocator.free(pubkeys);
-        const pk_ptrs = try allocator.alloc(*const bls.PublicKey, num_sigs);
-        defer allocator.free(pk_ptrs);
 
         var msg_bytes: [32]u8 = undefined;
         var pk_buf: [bls.PublicKey.COMPRESS_SIZE]u8 = undefined;
@@ -407,7 +393,6 @@ pub fn eth_fast_aggregate_verify(gpa: Allocator, path: std.fs.Dir) !void {
                 try std.testing.expect(!eth_fast_aggregate_verify_test_data.output);
                 return;
             };
-            pk_ptrs[i] = &pubkeys[i];
         }
 
         _ = try std.fmt.hexToBytes(
@@ -433,7 +418,7 @@ pub fn eth_fast_aggregate_verify(gpa: Allocator, path: std.fs.Dir) !void {
             &pairing_buf,
             &msg_bytes,
             bls.DST,
-            pk_ptrs,
+            pubkeys,
             true,
         ) catch false;
         try std.testing.expectEqual(eth_fast_aggregate_verify_test_data.output, result);

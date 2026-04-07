@@ -492,12 +492,13 @@ pub fn Signature_aggregate(env: napi.Env, cb: napi.CallbackInfo(2)) !napi.Value 
     const sigs_len = try sigs_array.getArrayLength();
     if (sigs_len == 0) return error.EmptySignatureArray;
 
-    const sigs = try allocator.alloc(*const Signature, sigs_len);
+    const sigs = try allocator.alloc(Signature, sigs_len);
     defer allocator.free(sigs);
 
     for (0..sigs_len) |i| {
         const sig_value = try sigs_array.getElement(@intCast(i));
-        sigs[i] = try env.unwrap(Signature, sig_value);
+        const sig = try env.unwrap(Signature, sig_value);
+        sigs[i] = sig.*;
     }
 
     const agg_sig = AggregateSignature.aggregate(sigs, sigs_groupcheck) catch return error.AggregationFailed;
@@ -580,9 +581,8 @@ pub fn blst_aggregateVerify(
 
     const msgs = try allocator.alloc([32]u8, msgs_len);
     defer allocator.free(msgs);
-
-    const pks = try allocator.alloc(*PublicKey, pks_len);
-    defer allocator.free(pks);
+    const pk_ptrs = try allocator.alloc(*PublicKey, pks_len);
+    defer allocator.free(pk_ptrs);
 
     for (0..msgs_len) |i| {
         const msg_value = try msgs_array.getElement(@intCast(i));
@@ -591,11 +591,11 @@ pub fn blst_aggregateVerify(
         @memcpy(&msgs[i], msg_info.data[0..32]);
 
         const pk_value = try pks_array.getElement(@intCast(i));
-        pks[i] = try env.unwrap(PublicKey, pk_value);
+        pk_ptrs[i] = try env.unwrap(PublicKey, pk_value);
     }
 
     const pool = thread_pool orelse @panic("ThreadPool not initialized; call initThreadPool first");
-    const result = pool.aggregateVerify(sig, sig_groupcheck, msgs, DST, pks, pks_validate) catch {
+    const result = pool.aggregateVerify(sig, sig_groupcheck, msgs, DST, pk_ptrs, pks_validate) catch {
         return try env.getBoolean(false);
     };
 
@@ -627,12 +627,13 @@ pub fn blst_fastAggregateVerify(env: napi.Env, cb: napi.CallbackInfo(4)) !napi.V
         return try env.getBoolean(false);
     }
 
-    const pks = try allocator.alloc(*const PublicKey, pks_len);
+    const pks = try allocator.alloc(PublicKey, pks_len);
     defer allocator.free(pks);
 
     for (0..pks_len) |i| {
         const pk_value = try pks_array.getElement(@intCast(i));
-        pks[i] = try env.unwrap(PublicKey, pk_value);
+        const pk = try env.unwrap(PublicKey, pk_value);
+        pks[i] = pk.*;
     }
 
     var pairing_buf: [Pairing.sizeOf()]u8 align(@alignOf(Pairing)) = undefined;
@@ -740,12 +741,13 @@ pub fn blst_aggregateSignatures(env: napi.Env, cb: napi.CallbackInfo(2)) !napi.V
 
     if (sigs_len == 0) return error.EmptySignatureArray;
 
-    const sigs = try allocator.alloc(*const Signature, sigs_len);
+    const sigs = try allocator.alloc(Signature, sigs_len);
     defer allocator.free(sigs);
 
     for (0..sigs_len) |i| {
         const sig_value = try sigs_array.getElement(@intCast(i));
-        sigs[i] = try env.unwrap(Signature, sig_value);
+        const sig = try env.unwrap(Signature, sig_value);
+        sigs[i] = sig.*;
     }
 
     const agg_sig = AggregateSignature.aggregate(sigs, sigs_groupcheck) catch return error.AggregationFailed;
@@ -776,12 +778,13 @@ pub fn blst_aggregatePublicKeys(env: napi.Env, cb: napi.CallbackInfo(2)) !napi.V
         return error.EmptyPublicKeyArray;
     }
 
-    const pks = try allocator.alloc(*const PublicKey, pks_len);
+    const pks = try allocator.alloc(PublicKey, pks_len);
     defer allocator.free(pks);
 
     for (0..pks_len) |i| {
         const pk_value = try pks_array.getElement(@intCast(i));
-        pks[i] = try env.unwrap(PublicKey, pk_value);
+        const pk = try env.unwrap(PublicKey, pk_value);
+        pks[i] = pk.*;
     }
 
     const agg_pk = AggregatePublicKey.aggregate(pks, pks_validate) catch return error.AggregationFailed;
@@ -810,8 +813,6 @@ pub fn blst_aggregateSerializedPublicKeys(env: napi.Env, cb: napi.CallbackInfo(2
 
     const pks = try allocator.alloc(PublicKey, pks_len);
     defer allocator.free(pks);
-    const pk_ptrs = try allocator.alloc(*const PublicKey, pks_len);
-    defer allocator.free(pk_ptrs);
 
     for (0..pks_len) |i| {
         const pk_bytes_value = try pks_array.getElement(@intCast(i));
@@ -819,10 +820,9 @@ pub fn blst_aggregateSerializedPublicKeys(env: napi.Env, cb: napi.CallbackInfo(2
 
         pks[i] = PublicKey.deserialize(bytes_info.data) catch
             return error.DeserializationFailed;
-        pk_ptrs[i] = &pks[i];
     }
 
-    const agg_pk = AggregatePublicKey.aggregate(pk_ptrs, pks_validate) catch return error.AggregationFailed;
+    const agg_pk = AggregatePublicKey.aggregate(pks, pks_validate) catch return error.AggregationFailed;
     const result_pk = agg_pk.toPublicKey();
 
     const pk_value = try newPublicKeyInstance(env);

@@ -742,11 +742,7 @@ test "aggregateVerify multi-threaded" {
         pk_ptrs[i] = &pks[i];
     }
 
-    var sig_ptrs: [num_sigs]*const Signature = undefined;
-    for (0..num_sigs) |i| {
-        sig_ptrs[i] = &sigs[i];
-    }
-    const agg_sig = AggregateSignature.aggregate(&sig_ptrs, false) catch return error.AggregationFailed;
+    const agg_sig = AggregateSignature.aggregate(&sigs, false) catch return error.AggregationFailed;
     const final_sig = agg_sig.toSignature();
 
     try std.testing.expect(try pool.aggregateVerify(

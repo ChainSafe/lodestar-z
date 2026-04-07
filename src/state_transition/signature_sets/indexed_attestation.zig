@@ -35,10 +35,10 @@ pub fn getAttestationWithIndicesSignatureSet(
     signature: BLSSignature,
     attesting_indices: []u64,
 ) !AggregatedSignatureSet {
-    const pubkeys = try allocator.alloc(*const PublicKey, attesting_indices.len);
+    const pubkeys = try allocator.alloc(PublicKey, attesting_indices.len);
     errdefer allocator.free(pubkeys);
     for (0..attesting_indices.len) |i| {
-        pubkeys[i] = &epoch_cache.index_to_pubkey.items[@intCast(attesting_indices[i])];
+        pubkeys[i] = epoch_cache.index_to_pubkey.items[@intCast(attesting_indices[i])];
     }
 
     var signing_root: Root = undefined;

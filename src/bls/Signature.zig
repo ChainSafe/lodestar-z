@@ -64,7 +64,7 @@ pub fn aggregateVerify(
     buffer: *align(Pairing.buf_align) [Pairing.sizeOf()]u8,
     msgs: []const [32]u8,
     dst: []const u8,
-    pks: []const *const PublicKey,
+    pks: []const PublicKey,
     pks_validate: bool,
 ) BlstError!bool {
     const n_elems = pks.len;
@@ -73,7 +73,7 @@ pub fn aggregateVerify(
     }
     var pairing = Pairing.init(buffer, true, dst);
     try pairing.aggregate(
-        pks[0],
+        &pks[0],
         pks_validate,
         self,
         sig_groupcheck,
@@ -83,7 +83,7 @@ pub fn aggregateVerify(
 
     for (1..n_elems) |i| {
         try pairing.aggregate(
-            pks[i],
+            &pks[i],
             pks_validate,
             null,
             sig_groupcheck,
@@ -108,7 +108,7 @@ pub fn fastAggregateVerify(
     buffer: *align(Pairing.buf_align) [Pairing.sizeOf()]u8,
     msg: *const [32]u8,
     dst: []const u8,
-    pks: []const *const PublicKey,
+    pks: []const PublicKey,
     pks_validate: bool,
 ) BlstError!bool {
     const agg_pk = try AggregatePublicKey.aggregate(pks, pks_validate);
@@ -119,7 +119,7 @@ pub fn fastAggregateVerify(
         buffer,
         @ptrCast(msg),
         dst,
-        &[_]*const PublicKey{&pk},
+        &[_]PublicKey{pk},
         false,
     );
 }
@@ -135,12 +135,13 @@ pub fn fastAggregateVerifyPreAggregated(
     dst: []const u8,
     pk: *const PublicKey,
 ) BlstError!bool {
+    const pks: [*]const PublicKey = @ptrCast(pk);
     return try self.aggregateVerify(
         sig_groupcheck,
         buffer,
         @ptrCast(msg),
         dst,
-        &[_]*const PublicKey{pk},
+        pks[0..1],
         false,
     );
 }
@@ -280,15 +281,8 @@ test aggregateVerify {
         sigs[i] = sig;
     }
 
-    var sig_ptrs: [num_sigs]*const @This() = undefined;
-    var pk_ptrs: [num_sigs]*const PublicKey = undefined;
-    for (0..num_sigs) |i| {
-        sig_ptrs[i] = &sigs[i];
-        pk_ptrs[i] = &pks[i];
-    }
-
-    const agg_sig = try AggregateSignature.aggregate(&sig_ptrs, false);
+    const agg_sig = try AggregateSignature.aggregate(&sigs, false);
     const sig = @This().fromAggregate(&agg_sig);
 
-    try std.testing.expect(try sig.aggregateVerify(false, &buffer, &msgs, dst, &pk_ptrs, false));
+    try std.testing.expect(try sig.aggregateVerify(false, &buffer, &msgs, dst, &pks, false));
 }

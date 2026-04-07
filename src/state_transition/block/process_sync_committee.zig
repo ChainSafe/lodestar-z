@@ -50,10 +50,10 @@ pub fn processSyncAggregate(
             const root_signed = try getBlockRootAtSlot(fork, state, previous_slot);
             const domain = try config.getDomain(epoch_cache.epoch, c.DOMAIN_SYNC_COMMITTEE, previous_slot);
 
-            const pubkeys = try allocator.alloc(*const bls.PublicKey, participant_indices.items.len);
+            const pubkeys = try allocator.alloc(bls.PublicKey, participant_indices.items.len);
             defer allocator.free(pubkeys);
             for (0..participant_indices.items.len) |i| {
-                pubkeys[i] = &epoch_cache.index_to_pubkey.items[participant_indices.items[i]];
+                pubkeys[i] = epoch_cache.index_to_pubkey.items[participant_indices.items[i]];
             }
 
             var signing_root: Root = undefined;
@@ -158,9 +158,9 @@ pub fn getSyncCommitteeSignatureSet(
 
     const domain = try config.getDomain(epoch_cache.epoch, c.DOMAIN_SYNC_COMMITTEE, previous_slot);
 
-    const pubkeys = try allocator.alloc(*const bls.PublicKey, participant_indices_.len);
+    const pubkeys = try allocator.alloc(bls.PublicKey, participant_indices_.len);
     for (0..participant_indices_.len) |i| {
-        pubkeys[i] = &epoch_cache.index_to_pubkey.items[participant_indices_[i]];
+        pubkeys[i] = epoch_cache.index_to_pubkey.items[participant_indices_[i]];
     }
     var signing_root: Root = undefined;
     try computeSigningRoot(types.primitive.Root, &root_signed, domain, &signing_root);
@@ -199,7 +199,7 @@ test "process sync aggregate - sanity" {
     const sig0 = try test_utils.interopSign(committee_indices[0], &signing_root);
     // validator 1 signs
     const sig1 = try test_utils.interopSign(committee_indices[1], &signing_root);
-    const agg_sig = try bls.AggregateSignature.aggregate(&.{ &sig0, &sig1 }, true);
+    const agg_sig = try bls.AggregateSignature.aggregate(&.{ sig0, sig1 }, true);
 
     var sync_aggregate: types.electra.SyncAggregate.Type = types.electra.SyncAggregate.default_value;
     sync_aggregate.sync_committee_signature = agg_sig.toSignature().compress();
