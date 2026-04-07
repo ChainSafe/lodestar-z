@@ -90,6 +90,19 @@ pub const PeerAction = enum {
     }
 };
 
+pub fn parseExternalPeerActionName(action_name: []const u8) ?PeerAction {
+    if (std.meta.stringToEnum(PeerAction, action_name)) |action| {
+        return action;
+    }
+
+    if (std.mem.eql(u8, action_name, "Fatal")) return .fatal;
+    if (std.mem.eql(u8, action_name, "LowToleranceError")) return .low_tolerance;
+    if (std.mem.eql(u8, action_name, "MidToleranceError")) return .mid_tolerance;
+    if (std.mem.eql(u8, action_name, "HighToleranceError")) return .high_tolerance;
+
+    return null;
+}
+
 pub const GoodbyeReasonCode = enum(u64) {
     client_shutdown = 1,
     irrelevant_network = 2,
@@ -323,4 +336,17 @@ test "PeerAction.scoreDelta" {
     try std.testing.expectEqual(@as(f64, -10), PeerAction.low_tolerance.scoreDelta());
     try std.testing.expectEqual(@as(f64, -5), PeerAction.mid_tolerance.scoreDelta());
     try std.testing.expectEqual(@as(f64, -1), PeerAction.high_tolerance.scoreDelta());
+}
+
+test "parseExternalPeerActionName accepts Lodestar JS action names" {
+    try std.testing.expectEqual(PeerAction.mid_tolerance, parseExternalPeerActionName("MidToleranceError").?);
+    try std.testing.expectEqual(PeerAction.low_tolerance, parseExternalPeerActionName("LowToleranceError").?);
+    try std.testing.expectEqual(PeerAction.high_tolerance, parseExternalPeerActionName("HighToleranceError").?);
+    try std.testing.expectEqual(PeerAction.fatal, parseExternalPeerActionName("Fatal").?);
+}
+
+test "parseExternalPeerActionName accepts Zig enum names" {
+    try std.testing.expectEqual(PeerAction.mid_tolerance, parseExternalPeerActionName("mid_tolerance").?);
+    try std.testing.expectEqual(PeerAction.fatal, parseExternalPeerActionName("fatal").?);
+    try std.testing.expect(parseExternalPeerActionName("not-a-real-action") == null);
 }

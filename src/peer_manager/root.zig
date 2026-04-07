@@ -25,6 +25,7 @@ pub const GossipScoreUpdate = types_.GossipScoreUpdate;
 pub const IrrelevantPeerResult = types_.IrrelevantPeerResult;
 pub const Config = types_.Config;
 pub const getKnownClientFromAgentVersion = types_.getKnownClientFromAgentVersion;
+pub const parseExternalPeerActionName = types_.parseExternalPeerActionName;
 pub const getAttnetsActiveBits = types_.getAttnetsActiveBits;
 pub const getSyncnetsActiveBits = types_.getSyncnetsActiveBits;
 
