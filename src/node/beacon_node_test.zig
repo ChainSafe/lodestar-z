@@ -361,6 +361,7 @@ test "BeaconNode: onReqResp BeaconBlocksByRange returns blocks for known slots" 
     const request = networking.messages.BeaconBlocksByRangeRequest.Type{
         .start_slot = 10,
         .count = 3,
+        .step = 1,
     };
     var buf: [networking.messages.BeaconBlocksByRangeRequest.fixed_size]u8 = undefined;
     _ = networking.messages.BeaconBlocksByRangeRequest.serializeIntoBytes(&request, &buf);
