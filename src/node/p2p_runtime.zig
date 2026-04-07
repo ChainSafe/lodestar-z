@@ -2852,6 +2852,7 @@ fn fetchRawBlocksByRange(
     const request = networking.messages.BeaconBlocksByRangeRequest.Type{
         .start_slot = start_slot,
         .count = count,
+        .step = 1,
     };
     var req_ssz: [networking.messages.BeaconBlocksByRangeRequest.fixed_size]u8 = undefined;
     _ = networking.messages.BeaconBlocksByRangeRequest.serializeIntoBytes(&request, &req_ssz);

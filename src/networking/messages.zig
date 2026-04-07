@@ -50,11 +50,13 @@ pub const GoodbyeReason = p.Uint64;
 
 /// BeaconBlocksByRangeRequest requests a contiguous range of blocks.
 ///
-/// V2 protocol (post-Altair): just (start_slot, count) — 16 bytes on the wire.
-/// The `step` field from v1 was removed in v2.
+/// The `step` field is deprecated (always 1) but remains in the SSZ
+/// container for backwards compatibility — all implementations still
+/// encode/decode 24 bytes.
 pub const BeaconBlocksByRangeRequest = ssz.FixedContainerType(struct {
     start_slot: p.Slot,
     count: p.Uint64,
+    step: p.Uint64,
 });
 
 /// BeaconBlocksByRootRequest is a list of block roots to request.
@@ -183,8 +185,8 @@ test "Ping serialize roundtrip" {
 }
 
 test "BeaconBlocksByRangeRequest fixed size" {
-    // start_slot(8) + count(8) = 16.
-    try testing.expectEqual(@as(usize, 16), BeaconBlocksByRangeRequest.fixed_size);
+    // start_slot(8) + count(8) + step(8) = 24.
+    try testing.expectEqual(@as(usize, 24), BeaconBlocksByRangeRequest.fixed_size);
 }
 
 test "BlobSidecarsByRangeRequest fixed size" {
