@@ -378,8 +378,12 @@ pub const SyncService = struct {
     }
 
     /// Whether gossip should be enabled.
+    /// Keep gossip running during range sync so we maintain peer connections
+    /// needed for block fetching. The TS Lodestar also keeps gossip active
+    /// during initial sync.
     pub fn shouldEnableGossip(self: *const SyncService) bool {
-        return self.mode == .synced or self.mode == .idle;
+        _ = self;
+        return true;
     }
 
     // ── Internal ────────────────────────────────────────────────────
