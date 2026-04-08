@@ -13,8 +13,15 @@ const Node = @import("persistent_merkle_tree").Node;
 const Gindex = @import("persistent_merkle_tree").Gindex;
 const Depth = @import("persistent_merkle_tree").Depth;
 const ContainerTreeView = @import("../tree_view/root.zig").ContainerTreeView;
+const StructContainerTreeView = @import("../tree_view/root.zig").StructContainerTreeView;
+
+const TreeViewType = enum { container, struct_container };
 
 pub fn FixedContainerType(comptime ST: type) type {
+    return FixedContainerTypeWith(ST, .container);
+}
+
+fn FixedContainerTypeWith(comptime ST: type, comptime tree_view_type: TreeViewType) type {
     const ssz_fields = switch (@typeInfo(ST)) {
         .@"struct" => |s| s.fields,
         else => @compileError("Expected a struct type."),
@@ -55,7 +62,10 @@ pub fn FixedContainerType(comptime ST: type) type {
         pub const Fields: type = ST;
         pub const fields: []const std.builtin.Type.StructField = ssz_fields;
         pub const Type: type = T;
-        pub const TreeView: type = ContainerTreeView(@This());
+        pub const TreeView: type = switch (tree_view_type) {
+            .container => ContainerTreeView(@This()),
+            .struct_container => StructContainerTreeView(@This()),
+        };
         pub const fixed_size: usize = _fixed_size;
         pub const field_offsets: [fields.len]usize = _offsets;
         pub const chunk_count: usize = fields.len;
@@ -761,6 +771,12 @@ pub fn VariableContainerType(comptime ST: type) type {
             }
         }
     };
+}
+
+/// Fixed-size container type that uses `StructContainerTreeView` for tree-view operations.
+/// All fields must be fixed-size SSZ types.
+pub fn StructContainerType(comptime ST: type) type {
+    return FixedContainerTypeWith(ST, .struct_container);
 }
 
 const UintType = @import("uint.zig").UintType;

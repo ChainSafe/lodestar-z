@@ -427,6 +427,453 @@ pub fn ContainerTreeView(comptime ST: type) type {
     return TreeView;
 }
 
+pub fn StructContainerTreeView(comptime ST: type) type {
+    const T = ST.Type;
+
+    const TreeView = struct {
+        allocator: Allocator,
+        pool: *Node.Pool,
+        root: Node.Id,
+        value: T,
+        changed: std.StaticBitSet(ST.chunk_count),
+
+        pub const SszType = ST;
+
+        const Self = @This();
+
+        pub fn init(allocator: Allocator, pool: *Node.Pool, root: Node.Id) !*Self {
+            try pool.ref(root);
+            errdefer pool.unref(root);
+
+            const ptr = try allocator.create(Self);
+            errdefer allocator.destroy(ptr);
+
+            try ST.tree.toValue(root, pool, &ptr.value);
+
+            ptr.allocator = allocator;
+            ptr.pool = pool;
+            ptr.root = root;
+            ptr.changed = std.StaticBitSet(ST.chunk_count).initEmpty();
+            return ptr;
+        }
+
+        /// Clone creates a new view sharing the same committed state.
+        /// Uncommitted changes are committed first so the clone sees the current state.
+        pub fn clone(self: *Self, opts: CloneOpts) !*Self {
+            try self.commit();
+
+            try self.pool.ref(self.root);
+            errdefer self.pool.unref(self.root);
+
+            const ptr = try self.allocator.create(Self);
+            errdefer self.allocator.destroy(ptr);
+
+            ptr.allocator = self.allocator;
+            ptr.pool = self.pool;
+            ptr.root = self.root;
+            ptr.changed = std.StaticBitSet(ST.chunk_count).initEmpty();
+
+            if (opts.transfer_cache) {
+                ptr.value = self.value;
+            } else {
+                try ST.tree.toValue(self.root, self.pool, &ptr.value);
+            }
+
+            return ptr;
+        }
+
+        pub fn deinit(self: *Self) void {
+            self.pool.unref(self.root);
+            self.allocator.destroy(self);
+        }
+
+        pub fn commit(self: *Self) !void {
+            if (self.changed.count() == 0) {
+                return;
+            }
+
+            // Phase 1: Create leaf nodes for changed fields.
+            // Nodes are created with refcount 0 (pool convention).
+            var nodes: [ST.chunk_count]Node.Id = undefined;
+            var indices: [ST.chunk_count]usize = undefined;
+            var changed_idx: usize = 0;
+
+            // On error, free any nodes created so far (they have refcount 0, no tree owns them yet).
+            errdefer self.pool.free(nodes[0..changed_idx]);
+
+            inline for (ST.fields, 0..) |field, i| {
+                if (self.changed.isSet(i)) {
+                    const ChildST = ST.getFieldType(field.name);
+                    nodes[changed_idx] = try ChildST.tree.fromValue(self.pool, &@field(self.value, field.name));
+                    indices[changed_idx] = i;
+                    changed_idx += 1;
+                }
+            }
+
+            // Phase 2: Splice nodes into the tree.
+            // setNodesAtDepth refs each node via rebind (refcount 0 → 1, tree-owned).
+            // On success, the tree owns the only ref — do NOT free the nodes.
+            const new_root = try self.root.setNodesAtDepth(self.pool, ST.chunk_depth, indices[0..changed_idx], nodes[0..changed_idx]);
+            changed_idx = 0; // disarm errdefer — nodes are now tree-owned
+
+            // Phase 3: Update root ownership.
+            // new_root is at refcount 0 from setNodesAtDepth. ref to take ownership.
+            // ref can only fail with RefCountOverflow, which can't happen at refcount 0.
+            try self.pool.ref(new_root);
+            self.pool.unref(self.root);
+            self.root = new_root;
+            self.changed = std.StaticBitSet(ST.chunk_count).initEmpty();
+        }
+
+        pub fn getRoot(self: *const Self) Node.Id {
+            return self.root;
+        }
+
+        pub fn hashTreeRootInto(self: *Self, out: *[32]u8) !void {
+            try self.commit();
+            out.* = self.root.getRoot(self.pool).*;
+        }
+
+        pub fn hashTreeRoot(self: *Self) !*const [32]u8 {
+            try self.commit();
+            return self.root.getRoot(self.pool);
+        }
+
+        pub fn getFieldRoot(self: *Self, comptime field_name: []const u8) !*const [32]u8 {
+            try self.commit();
+            const field_index = comptime ST.getFieldIndex(field_name);
+            const node = try self.root.getNodeAtDepth(self.pool, ST.chunk_depth, field_index);
+            return node.getRoot(self.pool);
+        }
+
+        pub fn deserialize(allocator: Allocator, pool: *Node.Pool, bytes: []const u8) !*Self {
+            const root = try ST.tree.deserializeFromBytes(pool, bytes);
+            return try Self.init(allocator, pool, root);
+        }
+
+        pub fn fromValue(allocator: Allocator, pool: *Node.Pool, value: *const ST.Type) !*Self {
+            const root = try ST.tree.fromValue(pool, value);
+            // root is at refcount 0. ref can't overflow at 0.
+            try pool.ref(root);
+            errdefer pool.unref(root);
+
+            const ptr = try allocator.create(Self);
+            ptr.* = .{
+                .allocator = allocator,
+                .pool = pool,
+                .root = root,
+                .value = value.*,
+                .changed = std.StaticBitSet(ST.chunk_count).initEmpty(),
+            };
+            return ptr;
+        }
+
+        pub fn toValue(self: *Self, allocator: Allocator, out: *ST.Type) !void {
+            _ = allocator;
+            out.* = self.value;
+        }
+
+        pub fn Field(comptime field_name: []const u8) type {
+            const ChildST = ST.getFieldType(field_name);
+            return ChildST.Type;
+        }
+
+        pub fn get(self: *Self, comptime field_name: []const u8) !Field(field_name) {
+            return @field(self.value, field_name);
+        }
+
+        pub fn set(self: *Self, comptime field_name: []const u8, value: Field(field_name)) !void {
+            const field_index = comptime ST.getFieldIndex(field_name);
+            if (std.mem.eql(u8, std.mem.asBytes(&@field(self.value, field_name)), std.mem.asBytes(&value))) {
+                return;
+            }
+            @field(self.value, field_name) = value;
+            self.changed.set(field_index);
+        }
+
+        pub fn getValue(self: *Self, allocator: Allocator, comptime field_name: []const u8, out: *Field(field_name)) !void {
+            _ = allocator;
+            out.* = try self.get(field_name);
+        }
+
+        pub fn setValue(self: *Self, comptime field_name: []const u8, value: *const Field(field_name)) !void {
+            try self.set(field_name, value.*);
+        }
+
+        pub fn serializeIntoBytes(self: *Self, out: []u8) !usize {
+            return ST.serializeIntoBytes(&self.value, out);
+        }
+
+        pub fn serializedSize(_: *const Self) usize {
+            return ST.fixed_size;
+        }
+    };
+
+    assertTreeViewType(TreeView);
+    return TreeView;
+}
+
+test "StructContainerTreeView" {
+    const Validator = StructContainerType(struct {
+        pubkey: ByteVectorType(48),
+        withdrawal_credentials: ByteVectorType(32),
+        effective_balance: UintType(64),
+        slashed: BoolType(),
+        activation_eligibility_epoch: UintType(64),
+        activation_epoch: UintType(64),
+        exit_epoch: UintType(64),
+        withdrawable_epoch: UintType(64),
+    });
+
+    var pool = try Node.Pool.init(std.testing.allocator, 1000);
+    defer pool.deinit();
+
+    const validator_value: Validator.Type = .{
+        .pubkey = [_]u8{0} ** 48,
+        .withdrawal_credentials = [_]u8{1} ** 32,
+        .effective_balance = 32000000000,
+        .slashed = false,
+        .activation_eligibility_epoch = 0,
+        .activation_epoch = 0,
+        .exit_epoch = 18446744073709551615,
+        .withdrawable_epoch = 18446744073709551615,
+    };
+
+    const root_node = try Validator.tree.fromValue(&pool, &validator_value);
+    var validator_view = try StructContainerTreeView(Validator).init(std.testing.allocator, &pool, root_node);
+    defer validator_view.deinit();
+
+    var tree_root: [32]u8 = undefined;
+    try validator_view.hashTreeRootInto(&tree_root);
+    var out: [32]u8 = undefined;
+    try Validator.hashTreeRoot(&validator_value, &out);
+    try std.testing.expectEqualSlices(u8, out[0..], tree_root[0..]);
+
+    try std.testing.expectEqualSlices(u8, ([_]u8{0} ** 48)[0..], &(try validator_view.get("pubkey")));
+    try std.testing.expectEqual(32000000000, try validator_view.get("effective_balance"));
+    try std.testing.expectEqual(false, try validator_view.get("slashed"));
+
+    try validator_view.set("pubkey", [_]u8{2} ** 48);
+    try validator_view.set("effective_balance", 32100000000);
+    try validator_view.set("slashed", true);
+    try validator_view.commit();
+
+    try std.testing.expectEqualSlices(u8, ([_]u8{2} ** 48)[0..], &(try validator_view.get("pubkey")));
+    try std.testing.expectEqual(32100000000, try validator_view.get("effective_balance"));
+    try std.testing.expectEqual(true, try validator_view.get("slashed"));
+}
+
+test "StructContainerTreeView - partial update produces correct root" {
+    const Validator = StructContainerType(struct {
+        pubkey: ByteVectorType(48),
+        withdrawal_credentials: ByteVectorType(32),
+        effective_balance: UintType(64),
+        slashed: BoolType(),
+        activation_eligibility_epoch: UintType(64),
+        activation_epoch: UintType(64),
+        exit_epoch: UintType(64),
+        withdrawable_epoch: UintType(64),
+    });
+
+    var pool = try Node.Pool.init(std.testing.allocator, 1000);
+    defer pool.deinit();
+
+    const initial: Validator.Type = .{
+        .pubkey = [_]u8{0} ** 48,
+        .withdrawal_credentials = [_]u8{1} ** 32,
+        .effective_balance = 32000000000,
+        .slashed = false,
+        .activation_eligibility_epoch = 0,
+        .activation_epoch = 0,
+        .exit_epoch = 18446744073709551615,
+        .withdrawable_epoch = 18446744073709551615,
+    };
+
+    const root_node = try Validator.tree.fromValue(&pool, &initial);
+    var view = try StructContainerTreeView(Validator).init(std.testing.allocator, &pool, root_node);
+    defer view.deinit();
+
+    // Change only one field out of eight
+    try view.set("effective_balance", 31000000000);
+    try view.commit();
+
+    // The expected root is the hash of the full value with only effective_balance changed
+    var expected_value = initial;
+    expected_value.effective_balance = 31000000000;
+    var expected_root: [32]u8 = undefined;
+    try Validator.hashTreeRoot(&expected_value, &expected_root);
+
+    var actual_root: [32]u8 = undefined;
+    try view.hashTreeRootInto(&actual_root);
+    try std.testing.expectEqualSlices(u8, &expected_root, &actual_root);
+
+    // Verify toValue also reflects the change
+    var roundtrip: Validator.Type = undefined;
+    try view.toValue(std.testing.allocator, &roundtrip);
+    try std.testing.expectEqual(31000000000, roundtrip.effective_balance);
+    try std.testing.expectEqualSlices(u8, ([_]u8{0} ** 48)[0..], &roundtrip.pubkey);
+
+    // Second partial update — different field
+    try view.set("slashed", true);
+    try view.commit();
+
+    expected_value.slashed = true;
+    try Validator.hashTreeRoot(&expected_value, &expected_root);
+    try view.hashTreeRootInto(&actual_root);
+    try std.testing.expectEqualSlices(u8, &expected_root, &actual_root);
+}
+
+test "StructContainerTreeView - clone isolates changes" {
+    const Validator = StructContainerType(struct {
+        pubkey: ByteVectorType(48),
+        withdrawal_credentials: ByteVectorType(32),
+        effective_balance: UintType(64),
+        slashed: BoolType(),
+        activation_eligibility_epoch: UintType(64),
+        activation_epoch: UintType(64),
+        exit_epoch: UintType(64),
+        withdrawable_epoch: UintType(64),
+    });
+
+    var pool = try Node.Pool.init(std.testing.allocator, 1000);
+    defer pool.deinit();
+
+    const initial: Validator.Type = .{
+        .pubkey = [_]u8{0} ** 48,
+        .withdrawal_credentials = [_]u8{1} ** 32,
+        .effective_balance = 32000000000,
+        .slashed = false,
+        .activation_eligibility_epoch = 0,
+        .activation_epoch = 0,
+        .exit_epoch = 18446744073709551615,
+        .withdrawable_epoch = 18446744073709551615,
+    };
+
+    const root_node = try Validator.tree.fromValue(&pool, &initial);
+    var v1 = try StructContainerTreeView(Validator).init(std.testing.allocator, &pool, root_node);
+    defer v1.deinit();
+
+    try v1.set("effective_balance", 31000000000);
+    var v2 = try v1.clone(.{});
+    defer v2.deinit();
+
+    // v2 should see the committed change
+    try std.testing.expectEqual(31000000000, try v2.get("effective_balance"));
+
+    // mutating v2 should not affect v1
+    try v2.set("slashed", true);
+    try v2.commit();
+
+    try std.testing.expectEqual(false, try v1.get("slashed"));
+    try std.testing.expectEqual(true, try v2.get("slashed"));
+
+    // roots should diverge
+    var r1: [32]u8 = undefined;
+    var r2: [32]u8 = undefined;
+    try v1.hashTreeRootInto(&r1);
+    try v2.hashTreeRootInto(&r2);
+    try std.testing.expect(!std.mem.eql(u8, &r1, &r2));
+}
+
+test "StructContainerTreeView - repeated commits don't leak pool nodes" {
+    const Simple = StructContainerType(struct {
+        a: UintType(64),
+        b: UintType(64),
+    });
+
+    // Tight pool: tree for 2 fields needs ~5 nodes (2 leaves + ~3 branches).
+    // Each commit creates new leaf nodes. If they leak, the pool fills up fast.
+    // 64 slots gives room for ~10 commit cycles if nodes are properly freed by the tree.
+    var pool = try Node.Pool.init(std.testing.allocator, 64);
+    defer pool.deinit();
+
+    const value: Simple.Type = .{ .a = 1, .b = 2 };
+    const root_node = try Simple.tree.fromValue(&pool, &value);
+    var view = try StructContainerTreeView(Simple).init(std.testing.allocator, &pool, root_node);
+    defer view.deinit();
+
+    // Do many set+commit cycles. If commit leaks nodes, the pool will run out.
+    for (0..10) |i| {
+        try view.set("a", @as(u64, i));
+        try view.commit();
+    }
+
+    // Verify final state is correct
+    try std.testing.expectEqual(9, try view.get("a"));
+    try std.testing.expectEqual(2, try view.get("b"));
+
+    var expected_value: Simple.Type = .{ .a = 9, .b = 2 };
+    var expected_root: [32]u8 = undefined;
+    try Simple.hashTreeRoot(&expected_value, &expected_root);
+    var actual_root: [32]u8 = undefined;
+    try view.hashTreeRootInto(&actual_root);
+    try std.testing.expectEqualSlices(u8, &expected_root, &actual_root);
+}
+
+test "StructContainerTreeView - double commit is idempotent" {
+    const Simple = StructContainerType(struct {
+        a: UintType(64),
+        b: UintType(64),
+    });
+
+    var pool = try Node.Pool.init(std.testing.allocator, 128);
+    defer pool.deinit();
+
+    const value: Simple.Type = .{ .a = 1, .b = 2 };
+    const root_node = try Simple.tree.fromValue(&pool, &value);
+    var view = try StructContainerTreeView(Simple).init(std.testing.allocator, &pool, root_node);
+    defer view.deinit();
+
+    try view.set("a", @as(u64, 99));
+    try view.commit();
+
+    const root_after_first = view.getRoot();
+    try view.commit(); // no-op, nothing changed
+    try std.testing.expectEqual(root_after_first, view.getRoot());
+}
+
+test "StructContainerTreeView - deinit with uncommitted changes" {
+    const Simple = StructContainerType(struct {
+        a: UintType(64),
+        b: UintType(64),
+    });
+
+    var pool = try Node.Pool.init(std.testing.allocator, 128);
+    defer pool.deinit();
+
+    const value: Simple.Type = .{ .a = 1, .b = 2 };
+    const root_node = try Simple.tree.fromValue(&pool, &value);
+    var view = try StructContainerTreeView(Simple).init(std.testing.allocator, &pool, root_node);
+
+    // Set but don't commit, then deinit. Should not leak.
+    try view.set("a", @as(u64, 99));
+    view.deinit();
+}
+
+test "StructContainerTreeView - fromValue roundtrip" {
+    const Simple = StructContainerType(struct {
+        a: UintType(64),
+        b: UintType(64),
+    });
+
+    var pool = try Node.Pool.init(std.testing.allocator, 128);
+    defer pool.deinit();
+
+    const value: Simple.Type = .{ .a = 42, .b = 99 };
+    var view = try StructContainerTreeView(Simple).fromValue(std.testing.allocator, &pool, &value);
+    defer view.deinit();
+
+    try std.testing.expectEqual(42, try view.get("a"));
+    try std.testing.expectEqual(99, try view.get("b"));
+
+    // Root should match direct hash
+    var expected_root: [32]u8 = undefined;
+    try Simple.hashTreeRoot(&value, &expected_root);
+    var actual_root: [32]u8 = undefined;
+    try view.hashTreeRootInto(&actual_root);
+    try std.testing.expectEqualSlices(u8, &expected_root, &actual_root);
+}
+
 test "ContainerTreeView" {
     const Foo = FixedContainerType(struct {
         a: UintType(64),
@@ -503,7 +950,9 @@ test "ContainerTreeView" {
 
 const FixedContainerType = @import("../type/container.zig").FixedContainerType;
 const VariableContainerType = @import("../type/container.zig").VariableContainerType;
+const StructContainerType = @import("../type/container.zig").StructContainerType;
 const UintType = @import("../type/uint.zig").UintType;
+const BoolType = @import("../type/bool.zig").BoolType;
 const ByteVectorType = @import("../type/byte_vector.zig").ByteVectorType;
 const ByteListType = @import("../type/byte_list.zig").ByteListType;
 const FixedListType = @import("../type/list.zig").FixedListType;
