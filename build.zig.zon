@@ -26,8 +26,8 @@
         // .metrics = .{ .url = "..." },
         // .httpz = .{ .url = "..." },
         .eth_p2p_z = .{
-            .url = "git+https://github.com/chainsafe/eth-p2p-z?ref=fix/tls-handshake-lighthouse#0cbfa940aad5fcf95179a7d70bc6fa7b3f4a94e9",
-            .hash = "libp2p-0.1.0-Sj0LiK_FCABFGXt75SzLcGElZhTddYpnqr_E0SaEYqUm",
+            .url = "git+https://github.com/chainsafe/eth-p2p-z?ref=fix/tls-handshake-lighthouse#0b64ace588fd5e9afcfa3d856591539429c76766",
+            .hash = "libp2p-0.1.0-Sj0LiFjFCABUfChL8XyE8VhpiEGSu6QM7Zra6Kf9T4UU",
         },
         .c_kzg = .{
             .url = "git+https://github.com/chainsafe/c-kzg-zig#ccbfc5c8efdd2bafa97490f54bb6ade79ceb003d",
