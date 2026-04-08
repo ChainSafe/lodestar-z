@@ -3,7 +3,10 @@
 //! Orchestrates multi-node simulations with deterministic slot advancement:
 //!   tick clock → validators produce → gossip → nodes process → check invariants
 //!
-//! Sits above SimCluster, adding SimValidator integration and scenario support.
+//! This is the canonical multi-node simulation harness. It composes real
+//! BeaconNode-backed SimNodeHarness instances with SimValidator ownership,
+//! SimTopology transport semantics, and scenario execution.
+//!
 //! The controller owns the simulation lifecycle and provides higher-level
 //! operations like advanceToEpoch, runUntilFinality, and runScenario.
 
@@ -15,8 +18,6 @@ const preset = @import("preset").preset;
 const config_mod = @import("config");
 const fork_types = @import("fork_types");
 const AnyGossipAttestation = fork_types.AnyGossipAttestation;
-const networking = @import("networking");
-const StatusMessage = networking.messages.StatusMessage;
 
 const state_transition = @import("state_transition");
 const computeEpochAtSlot = state_transition.computeEpochAtSlot;
@@ -24,7 +25,6 @@ const computeEpochAtSlot = state_transition.computeEpochAtSlot;
 const node_pkg = @import("node");
 const BeaconNode = node_pkg.BeaconNode;
 const gossip_node_callbacks = node_pkg.gossip_node_callbacks_mod;
-const reqresp_callbacks = node_pkg.reqresp_callbacks_mod;
 const identity_mod = node_pkg.identity;
 const sim_node_harness = @import("sim_node_harness.zig");
 const SimNodeHarness = sim_node_harness.SimNodeHarness;
@@ -34,9 +34,11 @@ const SimNetwork = @import("sim_network.zig").SimNetwork;
 const sim_network = @import("sim_network.zig");
 const ClusterInvariantChecker = @import("cluster_invariant_checker.zig").ClusterInvariantChecker;
 const Scenario = @import("scenario.zig").Scenario;
+const AdvanceUntilCondition = @import("scenario.zig").AdvanceUntilCondition;
 const Step = @import("scenario.zig").Step;
 const Fault = @import("scenario.zig").Fault;
 const Invariant = @import("scenario.zig").Invariant;
+const SimTopology = @import("sim_topology.zig").SimTopology;
 
 pub const ControllerConfig = struct {
     num_nodes: u8 = 4,
@@ -100,7 +102,7 @@ pub const SimController = struct {
     config: ControllerConfig,
 
     pub fn init(allocator: Allocator, config: ControllerConfig) !SimController {
-        var cluster_prng = std.Random.DefaultPrng.init(config.seed);
+        var sim_prng = std.Random.DefaultPrng.init(config.seed);
 
         const net_prng = try allocator.create(std.Random.DefaultPrng);
         net_prng.* = std.Random.DefaultPrng.init(config.seed +% 100);
@@ -121,7 +123,7 @@ pub const SimController = struct {
         @memset(crashed_nodes, false);
 
         // Node 0: from the shared published anchor state.
-        const seed_0 = cluster_prng.random().int(u64);
+        const seed_0 = sim_prng.random().int(u64);
         const bn0_identity = try identity_mod.createEphemeralIdentity(allocator, std.testing.io, .{});
         var bn0_builder = try BeaconNode.Builder.init(allocator, std.testing.io, primary_config, .{
             .options = .{ .engine_mock = true },
@@ -148,7 +150,7 @@ pub const SimController = struct {
         for (0..config.num_nodes) |i| {
             const extra: u64 = if (i < remainder) 1 else 0;
             const vi_end = vi_start + per_node + extra;
-            const val_seed = cluster_prng.random().int(u64);
+            const val_seed = sim_prng.random().int(u64);
             validators[i] = SimValidator.init(allocator, vi_start, vi_end, val_seed);
             validators[i].participation_rate = config.participation_rate;
             vi_start = vi_end;
@@ -156,7 +158,7 @@ pub const SimController = struct {
 
         // Nodes 1..N: use the same published anchor state shape.
         for (1..config.num_nodes) |i| {
-            const seed_i = cluster_prng.random().int(u64);
+            const seed_i = sim_prng.random().int(u64);
             const bn_i_identity = try identity_mod.createEphemeralIdentity(allocator, std.testing.io, .{});
             var bn_i_builder = try BeaconNode.Builder.init(allocator, std.testing.io, primary_config, .{
                 .options = .{ .engine_mock = true },
@@ -178,7 +180,7 @@ pub const SimController = struct {
 
         var self = SimController{
             .allocator = allocator,
-            .prng = cluster_prng,
+            .prng = sim_prng,
             .nodes = nodes,
             .beacon_nodes = beacon_nodes,
             .num_nodes = config.num_nodes,
@@ -193,7 +195,8 @@ pub const SimController = struct {
             .config = config,
         };
         errdefer self.deinit();
-        try self.connectAllPeers();
+        var topo = self.topology();
+        try topo.connectAllPeers();
         return self;
     }
 
@@ -249,6 +252,7 @@ pub const SimController = struct {
         var node_imported = [_]bool{false} ** 256;
         var known_head_slots = [_]u64{0} ** 256;
         var produced_any = false;
+        var topo = self.topology();
 
         if (!skip) {
             for (0..self.num_nodes) |i| {
@@ -271,8 +275,8 @@ pub const SimController = struct {
             }
         }
 
-        try self.scheduleStatusMaintenanceRequests(send_time_ns);
-        try self.drainNetworkUntil(slot_deadline_ns, &node_imported);
+        try topo.scheduleStatusMaintenanceRequests(send_time_ns);
+        try topo.drainNetworkUntil(slot_deadline_ns, node_imported[0..self.num_nodes]);
 
         for (0..self.num_nodes) |i| {
             known_head_slots[i] = self.beacon_nodes[i].currentHeadSlot();
@@ -282,7 +286,7 @@ pub const SimController = struct {
             if (self.crashed_nodes[i]) continue;
 
             var peers_buf: [256]SyncPeer = undefined;
-            const peer_count = self.collectReachablePeers(i, &peers_buf);
+            const peer_count = topo.collectReachablePeers(i, &peers_buf);
             _ = try self.nodes[i].driveSyncWithPeers(peers_buf[0..peer_count]);
 
             var head_slot = try self.nodes[i].currentSlot();
@@ -318,13 +322,21 @@ pub const SimController = struct {
             known_head_slots[i] = result.slot;
             self.nodes_processed[i] = true;
 
-            const fin_epoch = self.nodes[i].checker.finalized_epoch;
-            try self.checker.recordNodeState(
-                @intCast(i),
-                result.slot,
-                result.state_root,
-                fin_epoch,
-            );
+            const snapshot = self.beacon_nodes[i].chainQuery().currentSnapshot();
+            try self.checker.recordNodeObservation(@intCast(i), .{
+                .clock_slot = target_slot,
+                .head_slot = snapshot.head.slot,
+                .head_block_root = snapshot.head.root,
+                .head_state_root = snapshot.head.state_root,
+                .finalized = .{
+                    .epoch = snapshot.finalized.epoch,
+                    .root = snapshot.finalized.root,
+                },
+                .justified = .{
+                    .epoch = snapshot.justified.epoch,
+                    .root = snapshot.justified.root,
+                },
+            });
         }
 
         try self.checker.checkTick(target_slot, self.nodes_processed);
@@ -437,173 +449,6 @@ pub const SimController = struct {
         gossip_node_callbacks.importAttestation(@ptrCast(self.beacon_nodes[node_idx]), &attestation) catch {};
     }
 
-    fn scheduleStatusMaintenanceRequests(self: *SimController, current_time_ns: u64) !void {
-        const now_ms = current_time_ns / std.time.ns_per_ms;
-
-        for (0..self.num_nodes) |node_idx| {
-            if (self.crashed_nodes[node_idx]) continue;
-
-            const pm = self.beacon_nodes[node_idx].peer_manager orelse continue;
-            var actions = pm.maintenance(now_ms, .{}) catch continue;
-            defer actions.deinit(self.allocator);
-
-            var request_bytes: [StatusMessage.fixed_size]u8 = undefined;
-            const local_status = self.beacon_nodes[node_idx].getStatus();
-            _ = StatusMessage.serializeIntoBytes(&local_status, &request_bytes);
-
-            for (actions.peers_to_restatus) |peer_id| {
-                const peer_idx = self.findNodeIndexByPeerId(peer_id) orelse continue;
-                if (self.crashed_nodes[peer_idx]) continue;
-                if (self.network.partition_set[node_idx][peer_idx] or self.network.partition_set[peer_idx][node_idx]) {
-                    continue;
-                }
-                _ = try self.network.send(
-                    @intCast(node_idx),
-                    @intCast(peer_idx),
-                    &request_bytes,
-                    .req_resp_request,
-                    current_time_ns,
-                );
-            }
-        }
-    }
-
-    fn drainNetworkUntil(self: *SimController, deadline_ns: u64, node_imported: *[256]bool) !void {
-        var iterations: usize = 0;
-        while (iterations < 32) : (iterations += 1) {
-            const delivered = try self.network.tick(deadline_ns);
-            if (delivered.len == 0) break;
-
-            for (delivered) |msg| {
-                defer self.allocator.free(msg.data);
-
-                const to: usize = @intCast(msg.to);
-                switch (msg.message_type) {
-                    .gossip => {
-                        if (self.crashed_nodes[to]) continue;
-                        const imported = try self.nodes[to].importExternalBlockBytes(msg.data, .gossip);
-                        node_imported[to] = node_imported[to] or imported;
-                    },
-                    .gossip_attestation => self.importDeliveredGossipAttestation(to, msg.data),
-                    .req_resp_request => try self.handleReqRespRequest(msg),
-                    .req_resp_response => try self.handleReqRespResponse(msg),
-                }
-            }
-        }
-    }
-
-    fn handleReqRespRequest(self: *SimController, msg: sim_network.DeliveredMessage) !void {
-        const to: usize = @intCast(msg.to);
-        if (self.crashed_nodes[to]) return;
-
-        const chunks = self.beacon_nodes[to].onReqResp(.status, msg.data) catch |err| {
-            const response_bytes = try sim_network.encodeReqRespResponse(self.allocator, .server_error, @errorName(err));
-            defer self.allocator.free(response_bytes);
-            _ = try self.network.send(msg.to, msg.from, response_bytes, .req_resp_response, msg.deliver_at_ns);
-            return;
-        };
-        defer networking.freeResponseChunks(self.beacon_nodes[to].allocator, chunks);
-
-        const chunk = if (chunks.len == 1) chunks[0] else networking.ResponseChunk{
-            .result = .server_error,
-            .context_bytes = null,
-            .ssz_payload = "unexpected_status_chunk_count",
-        };
-        const response_bytes = try sim_network.encodeReqRespResponse(self.allocator, chunk.result, chunk.ssz_payload);
-        defer self.allocator.free(response_bytes);
-        _ = try self.network.send(msg.to, msg.from, response_bytes, .req_resp_response, msg.deliver_at_ns);
-    }
-
-    fn handleReqRespResponse(self: *SimController, msg: sim_network.DeliveredMessage) !void {
-        const to: usize = @intCast(msg.to);
-        const from: usize = @intCast(msg.from);
-        if (self.crashed_nodes[to]) return;
-
-        const decoded = sim_network.decodeReqRespResponse(msg.data) catch return;
-        if (decoded.result != .success) return;
-
-        var peer_status: StatusMessage.Type = undefined;
-        StatusMessage.deserializeFromBytes(decoded.payload, &peer_status) catch return;
-        _ = reqresp_callbacks.handlePeerStatusAtTime(
-            self.beacon_nodes[to],
-            self.beacon_nodes[from].api_node_identity.peer_id,
-            peer_status,
-            null,
-            msg.deliver_at_ns / std.time.ns_per_ms,
-        );
-    }
-
-    fn findNodeIndexByPeerId(self: *const SimController, peer_id: []const u8) ?usize {
-        for (0..self.num_nodes) |idx| {
-            if (std.mem.eql(u8, self.beacon_nodes[idx].api_node_identity.peer_id, peer_id)) {
-                return idx;
-            }
-        }
-        return null;
-    }
-
-    fn connectAllPeers(self: *SimController) !void {
-        for (0..self.num_nodes) |a| {
-            for (a + 1..self.num_nodes) |b| {
-                try self.reconnectPeerPair(@intCast(a), @intCast(b));
-            }
-        }
-    }
-
-    fn reconnectAllReachablePeers(self: *SimController) void {
-        for (0..self.num_nodes) |a| {
-            for (a + 1..self.num_nodes) |b| {
-                if (self.crashed_nodes[a] or self.crashed_nodes[b]) continue;
-                if (self.network.partition_set[a][b] or self.network.partition_set[b][a]) continue;
-                self.reconnectPeerPair(@intCast(a), @intCast(b)) catch {};
-            }
-        }
-    }
-
-    fn reconnectPeerPair(self: *SimController, a: u8, b: u8) !void {
-        if (self.crashed_nodes[a] or self.crashed_nodes[b]) return;
-
-        const a_idx: usize = @intCast(a);
-        const b_idx: usize = @intCast(b);
-        try self.nodes[a_idx].connectPeer(.{
-            .peer_id = self.beacon_nodes[b_idx].api_node_identity.peer_id,
-            .node = self.beacon_nodes[b_idx],
-        });
-        try self.nodes[b_idx].connectPeer(.{
-            .peer_id = self.beacon_nodes[a_idx].api_node_identity.peer_id,
-            .node = self.beacon_nodes[a_idx],
-        });
-    }
-
-    fn disconnectPeerPair(self: *SimController, a: u8, b: u8) void {
-        const a_idx: usize = @intCast(a);
-        const b_idx: usize = @intCast(b);
-        self.nodes[a_idx].disconnectPeer(self.beacon_nodes[b_idx].api_node_identity.peer_id);
-        self.nodes[b_idx].disconnectPeer(self.beacon_nodes[a_idx].api_node_identity.peer_id);
-    }
-
-    fn collectReachablePeers(
-        self: *const SimController,
-        node_idx: usize,
-        buf: *[256]SyncPeer,
-    ) usize {
-        var count: usize = 0;
-        for (0..self.num_nodes) |peer_idx| {
-            if (peer_idx == node_idx) continue;
-            if (self.crashed_nodes[peer_idx]) continue;
-            if (self.network.partition_set[node_idx][peer_idx] or self.network.partition_set[peer_idx][node_idx]) {
-                continue;
-            }
-
-            buf[count] = .{
-                .peer_id = self.beacon_nodes[peer_idx].api_node_identity.peer_id,
-                .node = self.beacon_nodes[peer_idx],
-            };
-            count += 1;
-        }
-        return count;
-    }
-
     fn shouldSkip(self: *SimController) bool {
         if (self.proposer_offline_rate <= 0.0) return false;
         const val: f64 = @as(f64, @floatFromInt(self.prng.random().int(u32))) /
@@ -667,6 +512,9 @@ pub const SimController = struct {
             .advance_epochs => |count| {
                 try self.advanceEpochs(count);
             },
+            .advance_until => |step_cfg| {
+                try self.advanceUntil(step_cfg.condition, step_cfg.max_slots, step_cfg.produce_blocks);
+            },
             .skip_slot => {
                 _ = try self.advanceSlotImpl(true);
             },
@@ -679,32 +527,20 @@ pub const SimController = struct {
                 try self.checkInvariant(invariant);
             },
             .network_partition => |partition| {
-                for (partition.group_a) |a| {
-                    for (partition.group_b) |b| {
-                        self.network.partition(a, b);
-                        self.disconnectPeerPair(a, b);
-                    }
-                }
+                var topo = self.topology();
+                topo.partitionGroups(partition.group_a, partition.group_b);
             },
             .heal_partition => {
-                self.network.healAll();
-                self.reconnectAllReachablePeers();
+                var topo = self.topology();
+                topo.healAllPartitions();
             },
             .disconnect_node => |node_id| {
-                for (0..self.num_nodes) |i| {
-                    if (i != node_id) {
-                        self.network.partition(node_id, @intCast(i));
-                        self.disconnectPeerPair(node_id, @intCast(i));
-                    }
-                }
+                var topo = self.topology();
+                topo.disconnectNode(node_id);
             },
             .reconnect_node => |node_id| {
-                for (0..self.num_nodes) |i| {
-                    if (i != node_id) {
-                        self.network.heal(node_id, @intCast(i));
-                        self.reconnectPeerPair(node_id, @intCast(i)) catch {};
-                    }
-                }
+                var topo = self.topology();
+                topo.reconnectNode(node_id);
             },
             .inject_fault => |fault| {
                 self.injectFault(fault);
@@ -725,9 +561,13 @@ pub const SimController = struct {
         switch (invariant) {
             .finality_agreement => {
                 if (self.num_nodes < 2) return;
-                const first = self.checker.node_finalized_epochs[0];
-                for (self.checker.node_finalized_epochs[1..self.num_nodes]) |e| {
-                    if (e != first) return error.FinalityDisagreement;
+                const first = self.checker.latestObservation(0) orelse return;
+                for (1..self.num_nodes) |i| {
+                    const observation = self.checker.latestObservation(@intCast(i)) orelse return;
+                    if (observation.finalized.epoch != first.finalized.epoch) return error.FinalityDisagreement;
+                    if (!std.mem.eql(u8, &observation.finalized.root, &first.finalized.root)) {
+                        return error.FinalityDisagreement;
+                    }
                 }
             },
             .safety => {
@@ -787,6 +627,73 @@ pub const SimController = struct {
         }
     }
 
+    fn advanceUntil(
+        self: *SimController,
+        condition: AdvanceUntilCondition,
+        max_slots: u64,
+        produce_blocks: bool,
+    ) !void {
+        if (try self.conditionSatisfied(condition)) return;
+
+        for (0..max_slots) |_| {
+            _ = try self.advanceSlotImpl(!produce_blocks);
+            if (try self.conditionSatisfied(condition)) return;
+        }
+
+        return error.AdvanceUntilConditionUnsatisfied;
+    }
+
+    fn conditionSatisfied(self: *SimController, condition: AdvanceUntilCondition) !bool {
+        return switch (condition) {
+            .finalized_epoch_at_least => |epoch| self.finalizedEpoch() >= epoch,
+            .finality_agreement => self.finalityAgreementSatisfied(),
+            .head_agreement => try self.headAgreementSatisfied(),
+            .sync_idle => self.syncIdleSatisfied(),
+        };
+    }
+
+    fn finalityAgreementSatisfied(self: *const SimController) bool {
+        if (self.num_nodes < 2) return true;
+
+        var first: ?ClusterInvariantChecker.NodeObservation = null;
+        for (0..self.num_nodes) |i| {
+            if (self.crashed_nodes[i]) continue;
+            const observation = self.checker.latestObservation(@intCast(i)) orelse return false;
+            if (first) |ref| {
+                if (observation.finalized.epoch != ref.finalized.epoch) return false;
+                if (!std.mem.eql(u8, &observation.finalized.root, &ref.finalized.root)) return false;
+            } else {
+                first = observation;
+            }
+        }
+
+        return true;
+    }
+
+    fn headAgreementSatisfied(self: *SimController) !bool {
+        var first_head: ?@TypeOf(self.beacon_nodes[0].getHead()) = null;
+        for (0..self.num_nodes) |i| {
+            if (self.crashed_nodes[i]) continue;
+            const head = self.beacon_nodes[i].getHead();
+            if (first_head) |ref| {
+                if (head.slot != ref.slot) return false;
+                if (!std.mem.eql(u8, &head.root, &ref.root)) return false;
+            } else {
+                first_head = head;
+            }
+        }
+        return true;
+    }
+
+    fn syncIdleSatisfied(self: *const SimController) bool {
+        for (0..self.num_nodes) |i| {
+            if (self.crashed_nodes[i]) continue;
+            const sync_status = self.beacon_nodes[i].getSyncStatus();
+            if (sync_status.is_syncing or sync_status.sync_distance > 0) return false;
+        }
+        return true;
+    }
+
     /// Inject a fault into the simulation.
     fn injectFault(self: *SimController, fault: Fault) void {
         switch (fault) {
@@ -811,23 +718,15 @@ pub const SimController = struct {
                 if (node_idx < self.crashed_nodes.len) {
                     self.crashed_nodes[node_idx] = true;
                 }
-                for (0..self.num_nodes) |i| {
-                    if (i != node_idx) {
-                        self.network.partition(node_idx, @intCast(i));
-                        self.disconnectPeerPair(node_idx, @intCast(i));
-                    }
-                }
+                var topo = self.topology();
+                topo.disconnectNode(node_idx);
             },
             .node_restart => |node_idx| {
                 if (node_idx < self.crashed_nodes.len) {
                     self.crashed_nodes[node_idx] = false;
                 }
-                for (0..self.num_nodes) |i| {
-                    if (i != node_idx) {
-                        self.network.heal(node_idx, @intCast(i));
-                        self.reconnectPeerPair(node_idx, @intCast(i)) catch {};
-                    }
-                }
+                var topo = self.topology();
+                topo.reconnectNode(node_idx);
             },
         }
     }
@@ -854,5 +753,20 @@ pub const SimController = struct {
             max_epoch = @max(max_epoch, e);
         }
         return max_epoch;
+    }
+
+    fn topology(self: *SimController) SimTopology {
+        return SimTopology.init(
+            self.allocator,
+            self.nodes[0..self.num_nodes],
+            self.beacon_nodes[0..self.num_nodes],
+            &self.network,
+            self.crashed_nodes[0..self.num_nodes],
+        ).withAttestationImporter(@ptrCast(self), importDeliveredGossipAttestationShim);
+    }
+
+    fn importDeliveredGossipAttestationShim(ctx: *anyopaque, node_idx: usize, bytes: []const u8) void {
+        const self: *SimController = @ptrCast(@alignCast(ctx));
+        self.importDeliveredGossipAttestation(node_idx, bytes);
     }
 };

@@ -18,6 +18,13 @@
 const std = @import("std");
 const preset = @import("preset").preset;
 
+pub const AdvanceUntilCondition = union(enum) {
+    finalized_epoch_at_least: u64,
+    finality_agreement: void,
+    head_agreement: void,
+    sync_idle: void,
+};
+
 pub const Step = union(enum) {
     /// Advance simulation by one slot (with block production).
     advance_slot: void,
@@ -27,6 +34,12 @@ pub const Step = union(enum) {
     advance_to_epoch: u64,
     /// Advance forward by N epochs from the current slot.
     advance_epochs: u64,
+    /// Advance until a semantic condition is satisfied or a slot budget is exhausted.
+    advance_until: struct {
+        condition: AdvanceUntilCondition,
+        max_slots: u64,
+        produce_blocks: bool = true,
+    },
     /// Skip a slot (proposer misses).
     skip_slot: void,
     /// Skip forward by N empty slots.
@@ -98,8 +111,10 @@ pub const happy_path = Scenario{
 const happy_path_steps = [_]Step{
     // Set full participation.
     .{ .set_participation_rate = 1.0 },
-    // Advance through 5 epochs.
-    .{ .advance_epochs = 5 },
+    .{ .advance_until = .{
+        .condition = .{ .finalized_epoch_at_least = 1 },
+        .max_slots = 5 * preset.SLOTS_PER_EPOCH,
+    } },
     // Check invariants.
     .{ .check_invariant = .safety },
     .{ .check_invariant = .finality_agreement },
@@ -157,9 +172,13 @@ const network_partition_steps = [_]Step{
     // Run long enough that healing requires real range-sync catch-up,
     // not just short-gap unknown-parent recovery.
     .{ .advance_slots = preset.SLOTS_PER_EPOCH + 2 },
-    // Heal and keep the network running long enough for honest sync.
+    // Heal and keep the network running until the nodes re-converge on a
+    // single finalized checkpoint.
     .{ .heal_partition = {} },
-    .{ .advance_epochs = 2 },
+    .{ .advance_until = .{
+        .condition = .finality_agreement,
+        .max_slots = 2 * preset.SLOTS_PER_EPOCH,
+    } },
     // Verify recovery.
     .{ .check_invariant = .safety },
     .{ .check_invariant = .finality_agreement },
@@ -168,7 +187,7 @@ const network_partition_steps = [_]Step{
 
 /// Network partition with post-heal quiescence: after a short live period to
 /// expose the competing head, stop block production long enough for the healed
-/// cluster to drain sync and settle on one exact head.
+/// nodes to drain sync and settle on one exact head.
 pub const network_partition_quiescent_recovery = Scenario{
     .name = "network_partition_quiescent_recovery",
     .steps = &network_partition_quiescent_recovery_steps,
@@ -187,10 +206,14 @@ const network_partition_quiescent_recovery_steps = [_]Step{
     .{ .heal_partition = {} },
     // Keep producing briefly so nodes learn about the competing tip.
     .{ .advance_slots = 2 },
-    // Then quiesce for a full epoch so linked-chain sync can drain without a
-    // moving head racing ahead every slot.
-    .{ .skip_slots = preset.SLOTS_PER_EPOCH },
-    // Resume briefly so the healed cluster can build on one synchronized head.
+    // Then quiesce until linked-chain sync drains and the nodes settle on
+    // one exact head, without hard-coding a full epoch wait.
+    .{ .advance_until = .{
+        .condition = .head_agreement,
+        .max_slots = preset.SLOTS_PER_EPOCH + 2,
+        .produce_blocks = false,
+    } },
+    // Resume briefly so the healed network can build on one synchronized head.
     .{ .advance_slots = 2 },
     .{ .check_invariant = .safety },
     .{ .check_invariant = .finality_agreement },
@@ -209,7 +232,10 @@ const late_attestations_steps = [_]Step{
     .{ .advance_epochs = 2 },
     // Phase 2: Full attestations.
     .{ .set_participation_rate = 1.0 },
-    .{ .advance_epochs = 5 },
+    .{ .advance_until = .{
+        .condition = .{ .finalized_epoch_at_least = 1 },
+        .max_slots = 5 * preset.SLOTS_PER_EPOCH,
+    } },
     // Safety must hold throughout.
     .{ .check_invariant = .safety },
     .{ .check_invariant = .no_state_divergence },
@@ -226,8 +252,10 @@ const late_joiner_finalized_sync_steps = [_]Step{
     .{ .inject_fault = .{ .node_crash = 1 } },
     .{ .advance_slots = preset.SLOTS_PER_EPOCH + 2 },
     .{ .inject_fault = .{ .node_restart = 1 } },
-    .{ .advance_slot = {} },
-    .{ .advance_slot = {} },
+    .{ .advance_until = .{
+        .condition = .finality_agreement,
+        .max_slots = preset.SLOTS_PER_EPOCH + 4,
+    } },
     .{ .check_invariant = .safety },
     .{ .check_invariant = .finality_agreement },
     .{ .check_invariant = .head_agreement },
@@ -246,8 +274,10 @@ const short_gap_sync_steps = [_]Step{
     .{ .disconnect_node = 1 },
     .{ .advance_slot = {} },
     .{ .reconnect_node = 1 },
-    .{ .advance_slot = {} },
-    .{ .advance_slot = {} },
+    .{ .advance_until = .{
+        .condition = .head_agreement,
+        .max_slots = preset.SLOTS_PER_EPOCH,
+    } },
     .{ .check_invariant = .safety },
     .{ .check_invariant = .head_agreement },
 };
@@ -267,7 +297,11 @@ const short_gap_quiescent_sync_steps = [_]Step{
     .{ .inject_fault = .{ .node_crash = 1 } },
     .{ .advance_slots = 3 },
     .{ .inject_fault = .{ .node_restart = 1 } },
-    .{ .skip_slots = 3 },
+    .{ .advance_until = .{
+        .condition = .head_agreement,
+        .max_slots = preset.SLOTS_PER_EPOCH,
+        .produce_blocks = false,
+    } },
     .{ .check_invariant = .safety },
     .{ .check_invariant = .head_agreement },
 };

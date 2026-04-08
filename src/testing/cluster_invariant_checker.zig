@@ -1,6 +1,6 @@
 //! Cross-node consensus invariant checker for multi-node simulation.
 //!
-//! Verifies cluster-wide safety, liveness, and consistency invariants
+//! Verifies multi-node safety, liveness, and consistency invariants
 //! that a single-node checker cannot observe:
 //!   - SAFETY: No two nodes disagree on finalized blocks.
 //!   - LIVENESS: Finality progresses within bounded time.
@@ -8,6 +8,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const preset = @import("preset").preset;
 
 pub const ClusterInvariantChecker = struct {
     /// Info about the last detected state divergence (for test diagnostics).
@@ -19,12 +20,31 @@ pub const ClusterInvariantChecker = struct {
         root_b: [32]u8 = [_]u8{0} ** 32,
     };
 
+    pub const CheckpointObservation = struct {
+        epoch: u64 = 0,
+        root: [32]u8 = [_]u8{0} ** 32,
+    };
+
+    pub const NodeObservation = struct {
+        /// Simulation clock slot when this observation was recorded.
+        clock_slot: u64,
+        /// Node's current head slot.
+        head_slot: u64,
+        /// Current head block root.
+        head_block_root: [32]u8,
+        /// Current head state root.
+        head_state_root: [32]u8,
+        /// Latest finalized checkpoint observed by the node.
+        finalized: CheckpointObservation = .{},
+        /// Latest justified checkpoint observed by the node.
+        justified: CheckpointObservation = .{},
+    };
+
     allocator: Allocator,
     num_nodes: u8,
 
-    /// Per-node state root history indexed by slot offset.
-    /// node_state_roots[node_id] is an ArrayList of (slot, root) pairs.
-    node_state_roots: []std.ArrayListUnmanaged(SlotRoot),
+    /// Per-node observation history, one entry per simulated tick.
+    node_observations: []std.ArrayListUnmanaged(NodeObservation),
 
     /// Per-node finalized epoch (latest known).
     node_finalized_epochs: []u64,
@@ -55,11 +75,6 @@ pub const ClusterInvariantChecker = struct {
     /// Current simulation slot (updated on each tick check).
     current_slot: u64 = 0,
 
-    pub const SlotRoot = struct {
-        slot: u64,
-        state_root: [32]u8,
-    };
-
     pub const FinalReport = struct {
         safety_ok: bool,
         liveness_ok: bool,
@@ -69,8 +84,8 @@ pub const ClusterInvariantChecker = struct {
     };
 
     pub fn init(allocator: Allocator, num_nodes: u8) !ClusterInvariantChecker {
-        const roots = try allocator.alloc(std.ArrayListUnmanaged(SlotRoot), num_nodes);
-        for (roots) |*r| r.* = .empty;
+        const observations = try allocator.alloc(std.ArrayListUnmanaged(NodeObservation), num_nodes);
+        for (observations) |*r| r.* = .empty;
 
         const epochs = try allocator.alloc(u64, num_nodes);
         @memset(epochs, 0);
@@ -78,18 +93,28 @@ pub const ClusterInvariantChecker = struct {
         return .{
             .allocator = allocator,
             .num_nodes = num_nodes,
-            .node_state_roots = roots,
+            .node_observations = observations,
             .node_finalized_epochs = epochs,
         };
     }
 
     pub fn deinit(self: *ClusterInvariantChecker) void {
-        for (self.node_state_roots) |*r| r.deinit(self.allocator);
-        self.allocator.free(self.node_state_roots);
+        for (self.node_observations) |*r| r.deinit(self.allocator);
+        self.allocator.free(self.node_observations);
         self.allocator.free(self.node_finalized_epochs);
     }
 
-    /// Record a node's state root after processing a slot.
+    /// Record a node's full consensus observation after a simulated tick.
+    pub fn recordNodeObservation(
+        self: *ClusterInvariantChecker,
+        node_id: u8,
+        observation: NodeObservation,
+    ) !void {
+        try self.node_observations[node_id].append(self.allocator, observation);
+        self.node_finalized_epochs[node_id] = observation.finalized.epoch;
+    }
+
+    /// Legacy helper for tests that model head and finalized roots identically.
     pub fn recordNodeState(
         self: *ClusterInvariantChecker,
         node_id: u8,
@@ -97,14 +122,27 @@ pub const ClusterInvariantChecker = struct {
         state_root: [32]u8,
         finalized_epoch: u64,
     ) !void {
-        try self.node_state_roots[node_id].append(self.allocator, .{
-            .slot = slot,
-            .state_root = state_root,
+        try self.recordNodeObservation(node_id, .{
+            .clock_slot = slot,
+            .head_slot = slot,
+            .head_block_root = state_root,
+            .head_state_root = state_root,
+            .finalized = .{
+                .epoch = finalized_epoch,
+                .root = if (finalized_epoch == 0) [_]u8{0} ** 32 else state_root,
+            },
+            .justified = .{
+                .epoch = finalized_epoch,
+                .root = if (finalized_epoch == 0) [_]u8{0} ** 32 else state_root,
+            },
         });
-        self.node_finalized_epochs[node_id] = finalized_epoch;
     }
 
-    /// Check cluster invariants after a tick.
+    pub fn latestObservation(self: *const ClusterInvariantChecker, node_id: u8) ?NodeObservation {
+        return self.findLatestObservationForNode(node_id);
+    }
+
+    /// Check multi-node invariants after a tick.
     ///
     /// `nodes_that_processed` is a bitmask of which nodes processed the
     /// block this slot (used for consistency checks).
@@ -139,7 +177,8 @@ pub const ClusterInvariantChecker = struct {
             if (!nodes_that_processed[i]) continue;
 
             // Find this node's state root for the given slot.
-            const root = self.findRootAtSlot(@intCast(i), slot) orelse continue;
+            const observation = self.findObservationAtSlot(@intCast(i), slot) orelse continue;
+            const root = observation.head_state_root;
 
             if (reference_root) |ref| {
                 if (!std.mem.eql(u8, &ref, &root)) {
@@ -159,8 +198,8 @@ pub const ClusterInvariantChecker = struct {
         }
     }
 
-    /// SAFETY: If two nodes both finalized the same epoch, they must agree
-    /// on the state root at the start slot of that finalized epoch.
+    /// SAFETY: If two nodes share a finalized epoch, they must agree on the
+    /// finalized checkpoint root for that epoch.
     fn checkSafety(self: *ClusterInvariantChecker) !void {
         for (0..self.num_nodes) |i| {
             for (i + 1..self.num_nodes) |j| {
@@ -170,15 +209,9 @@ pub const ClusterInvariantChecker = struct {
                 const common_epoch = @min(epoch_i, epoch_j);
                 if (common_epoch == 0) continue;
 
-                const finalized_boundary_slot = common_epoch * 32;
-                const root_i = self.findLatestRootAtOrBeforeSlot(@intCast(i), finalized_boundary_slot);
-                const root_j = self.findLatestRootAtOrBeforeSlot(@intCast(j), finalized_boundary_slot);
-                if (root_i == null or root_j == null) continue;
-
-                const ri = root_i.?;
-                const rj = root_j.?;
-                if (ri.slot != rj.slot) continue;
-                if (!std.mem.eql(u8, &ri.state_root, &rj.state_root)) {
+                const finalized_i = self.findFinalizedCheckpointForEpoch(@intCast(i), common_epoch) orelse continue;
+                const finalized_j = self.findFinalizedCheckpointForEpoch(@intCast(j), common_epoch) orelse continue;
+                if (!std.mem.eql(u8, &finalized_i.root, &finalized_j.root)) {
                     self.safety_violations += 1;
                 }
             }
@@ -201,47 +234,55 @@ pub const ClusterInvariantChecker = struct {
             self.last_finality_advance_slot = slot;
         } else {
             // No finality advance. Check if we've stalled.
-            // Stall = >4 epochs (128 slots with 32 slots/epoch) without finality.
+            // Stall = >4 epochs without finality.
             const gap = slot - self.last_finality_advance_slot;
-            if (gap > 0 and gap % 128 == 0) {
+            if (gap > 0 and gap % (4 * preset.SLOTS_PER_EPOCH) == 0) {
                 self.liveness_stalls += 1;
             }
         }
     }
 
-    /// Look up a node's state root at a specific slot.
-    fn findRootAtSlot(self: *const ClusterInvariantChecker, node_id: u8, slot: u64) ?[32]u8 {
-        for (self.node_state_roots[node_id].items) |entry| {
-            if (entry.slot == slot) return entry.state_root;
+    /// Look up a node's observation at a specific simulated clock slot.
+    fn findObservationAtSlot(
+        self: *const ClusterInvariantChecker,
+        node_id: u8,
+        slot: u64,
+    ) ?NodeObservation {
+        for (self.node_observations[node_id].items) |entry| {
+            if (entry.clock_slot == slot) return entry;
         }
         return null;
     }
 
-    /// Get the latest (slot, root) pair for a node.
-    fn findLatestRootForNode(self: *const ClusterInvariantChecker, node_id: u8) ?SlotRoot {
-        const items = self.node_state_roots[node_id].items;
+    /// Get the latest observation for a node.
+    fn findLatestObservationForNode(
+        self: *const ClusterInvariantChecker,
+        node_id: u8,
+    ) ?NodeObservation {
+        const items = self.node_observations[node_id].items;
         if (items.len == 0) return null;
         return items[items.len - 1];
     }
 
-    fn findLatestRootAtOrBeforeSlot(
+    fn findFinalizedCheckpointForEpoch(
         self: *const ClusterInvariantChecker,
         node_id: u8,
-        slot: u64,
-    ) ?SlotRoot {
-        const items = self.node_state_roots[node_id].items;
-        var latest: ?SlotRoot = null;
-        for (items) |entry| {
-            if (entry.slot > slot) continue;
-            latest = entry;
+        epoch: u64,
+    ) ?CheckpointObservation {
+        const items = self.node_observations[node_id].items;
+        var i = items.len;
+        while (i > 0) {
+            i -= 1;
+            const observation = items[i];
+            if (observation.finalized.epoch == epoch) return observation.finalized;
+            if (observation.finalized.epoch < epoch) break;
         }
-        return latest;
+        return null;
     }
 
     /// Generate a final report summarizing all detected violations.
     pub fn checkFinal(self: *const ClusterInvariantChecker) FinalReport {
-        // Convert max gap from slots to epochs (32 slots/epoch).
-        const gap_epochs = self.max_finality_gap_slots / 32;
+        const gap_epochs = self.max_finality_gap_slots / preset.SLOTS_PER_EPOCH;
 
         return .{
             .safety_ok = self.safety_violations == 0,
@@ -330,4 +371,34 @@ test "ClusterInvariantChecker: final report" {
     try std.testing.expect(report.safety_ok);
     try std.testing.expect(report.liveness_ok);
     try std.testing.expectEqual(@as(u64, 0), report.state_divergences);
+}
+
+test "ClusterInvariantChecker: conflicting finalized checkpoints are detected by root" {
+    var checker = try ClusterInvariantChecker.init(std.testing.allocator, 2);
+    defer checker.deinit();
+
+    const shared_head = [_]u8{0xAA} ** 32;
+    const finalized_a = [_]u8{0x11} ** 32;
+    const finalized_b = [_]u8{0x22} ** 32;
+    const processed = [_]bool{ true, true };
+
+    try checker.recordNodeObservation(0, .{
+        .clock_slot = preset.SLOTS_PER_EPOCH * 2,
+        .head_slot = preset.SLOTS_PER_EPOCH * 2,
+        .head_block_root = shared_head,
+        .head_state_root = shared_head,
+        .finalized = .{ .epoch = 2, .root = finalized_a },
+        .justified = .{ .epoch = 3, .root = shared_head },
+    });
+    try checker.recordNodeObservation(1, .{
+        .clock_slot = preset.SLOTS_PER_EPOCH * 2,
+        .head_slot = preset.SLOTS_PER_EPOCH * 2,
+        .head_block_root = shared_head,
+        .head_state_root = shared_head,
+        .finalized = .{ .epoch = 2, .root = finalized_b },
+        .justified = .{ .epoch = 3, .root = shared_head },
+    });
+
+    try checker.checkTick(preset.SLOTS_PER_EPOCH * 2, &processed);
+    try std.testing.expectEqual(@as(u64, 1), checker.safety_violations);
 }

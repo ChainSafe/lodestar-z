@@ -14,9 +14,23 @@ const testing = std.testing;
 const preset = @import("preset").preset;
 
 const SimTestHarness = @import("sim_test_harness.zig").SimTestHarness;
-const sim_cluster = @import("sim_cluster.zig");
-const SimCluster = sim_cluster.SimCluster;
-const ClusterConfig = sim_cluster.ClusterConfig;
+const controller_mod = @import("sim_controller.zig");
+const SimController = controller_mod.SimController;
+const FinalityResult = controller_mod.FinalityResult;
+
+fn runSlots(ctrl: *SimController, count: u64) !FinalityResult {
+    try ctrl.advanceSlots(count);
+    return ctrl.getFinalityResult();
+}
+
+fn headStateRoot(ctrl: *SimController, node_idx: usize) ![32]u8 {
+    const head_state = try ctrl.nodes[node_idx].cloneHeadStateSnapshot();
+    defer {
+        head_state.deinit();
+        testing.allocator.destroy(head_state);
+    }
+    return (try head_state.state.hashTreeRoot()).*;
+}
 
 // ── Test 1: Equivocation — two blocks at same slot ───────────────────
 //
@@ -185,87 +199,70 @@ test "sim: fork choice — deterministic equivocation replay" {
     try testing.expectEqualSlices(u8, &roots_a[0], &roots_b[0]);
 }
 
-// ── Test 5: Finality under partition — 4-node cluster ─────────────────
-//
-// Partition nodes [0,1] from [2,3] for 2 epochs. Heal partition.
-// Verify that after healing, finality eventually advances (nodes are
-// consistent) and no safety violations occurred.
-//
-// Note: The current SimCluster processes all nodes synchronously with
-// the same block, so "partition" manifests as divergent proposer choices
-// when we use different participation rates per group. For true partition
-// testing, see sim_network_partition_test.zig.
+// ── Test 5: Finality resumes after a stalled period ────────────────────
 
 test "sim: fork choice — finality under partition heals and converges" {
-    const allocator = testing.allocator;
-
-    // Run the cluster with a partition-like scenario:
-    // Low participation for 2 epochs (simulates partition stall),
-    // then high participation (simulates healed network).
-    var cluster = try SimCluster.init(allocator, .{
+    var ctrl = try SimController.init(testing.allocator, .{
         .num_nodes = 4,
         .seed = 42,
         .validator_count = 64,
-        .participation_rate = 0.0, // Partition phase: no attestations
+        .participation_rate = 0.0,
     });
-    defer cluster.deinit();
+    defer ctrl.deinit();
 
-    // Phase 1: 2 epochs of no participation (partition stalled).
     const partition_slots = preset.SLOTS_PER_EPOCH * 2;
-    const result_partitioned = try cluster.run(partition_slots);
+    const result_partitioned = try runSlots(&ctrl, partition_slots);
 
     try testing.expectEqual(@as(u64, partition_slots), result_partitioned.slots_processed);
     try testing.expectEqual(@as(u64, 0), result_partitioned.safety_violations);
+    try testing.expectEqual(@as(u64, 0), result_partitioned.state_divergences);
 
-    // All nodes should still be consistent (they process same blocks synchronously).
-    const root_0_partitioned = (try (cluster.nodes[0].getHeadState() orelse unreachable).state.hashTreeRoot()).*;
+    const root_0_partitioned = try headStateRoot(&ctrl, 0);
     for (1..4) |i| {
-        const root_i = (try (cluster.nodes[i].getHeadState() orelse unreachable).state.hashTreeRoot()).*;
+        const root_i = try headStateRoot(&ctrl, i);
         try testing.expectEqualSlices(u8, &root_0_partitioned, &root_i);
     }
 
-    // Phase 2: Enable participation (partition healed) and run until finality.
-    for (0..4) |i| {
-        cluster.nodes[i].participation_rate = 1.0;
+    for (ctrl.validators) |*validator| {
+        validator.participation_rate = 1.0;
+    }
+    for (ctrl.nodes) |*node| {
+        node.participation_rate = 1.0;
     }
 
     const heal_slots = preset.SLOTS_PER_EPOCH * 5;
-    const result_healed = try cluster.run(heal_slots);
+    const result_healed = try runSlots(&ctrl, heal_slots);
 
     try testing.expectEqual(@as(u64, 0), result_healed.safety_violations);
     try testing.expectEqual(@as(u64, 0), result_healed.state_divergences);
-
-    // After healing, finality should have advanced.
     try testing.expect(result_healed.finalized_epoch > 0);
 
-    // All nodes agree on state.
-    const root_0_final = (try (cluster.nodes[0].getHeadState() orelse unreachable).state.hashTreeRoot()).*;
+    const root_0_final = try headStateRoot(&ctrl, 0);
     for (1..4) |i| {
-        const root_i = (try (cluster.nodes[i].getHeadState() orelse unreachable).state.hashTreeRoot()).*;
+        const root_i = try headStateRoot(&ctrl, i);
         try testing.expectEqualSlices(u8, &root_0_final, &root_i);
     }
 }
 
-// ── Test 6: Deterministic fork choice replay — cluster ────────────────
+// ── Test 6: Deterministic fork choice replay — controller ─────────────
 
-test "sim: fork choice — deterministic cluster replay with attestations" {
-    const allocator = testing.allocator;
+test "sim: fork choice — deterministic multi-node replay with attestations" {
     const num_slots = preset.SLOTS_PER_EPOCH * 3;
 
     var final_roots: [2][32]u8 = undefined;
     var finalized: [2]u64 = undefined;
 
     for (0..2) |run| {
-        var cluster = try SimCluster.init(allocator, .{
+        var ctrl = try SimController.init(testing.allocator, .{
             .num_nodes = 4,
             .seed = 333,
             .validator_count = 64,
             .participation_rate = 1.0,
         });
-        defer cluster.deinit();
+        defer ctrl.deinit();
 
-        const result = try cluster.run(num_slots);
-        final_roots[run] = (try (cluster.nodes[0].getHeadState() orelse unreachable).state.hashTreeRoot()).*;
+        const result = try runSlots(&ctrl, num_slots);
+        final_roots[run] = try headStateRoot(&ctrl, 0);
         finalized[run] = result.finalized_epoch;
 
         try testing.expectEqual(@as(u64, 0), result.safety_violations);
@@ -280,18 +277,16 @@ test "sim: fork choice — deterministic cluster replay with attestations" {
 // ── Test 7: Skip rate does not cause safety violations ─────────────────
 
 test "sim: fork choice — high skip rate no safety violations" {
-    const allocator = testing.allocator;
-
-    var cluster = try SimCluster.init(allocator, .{
+    var ctrl = try SimController.init(testing.allocator, .{
         .num_nodes = 4,
         .seed = 999,
         .validator_count = 64,
         .participation_rate = 0.9,
-        .proposer_offline_rate = 0.4,
     });
-    defer cluster.deinit();
+    defer ctrl.deinit();
+    ctrl.proposer_offline_rate = 0.4;
 
-    const result = try cluster.run(preset.SLOTS_PER_EPOCH * 4);
+    const result = try runSlots(&ctrl, preset.SLOTS_PER_EPOCH * 4);
 
     try testing.expectEqual(@as(u64, 0), result.safety_violations);
     try testing.expectEqual(@as(u64, 0), result.state_divergences);

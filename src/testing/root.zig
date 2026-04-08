@@ -20,8 +20,7 @@ pub const sim_node_harness = @import("sim_node_harness.zig");
 pub const sim_test_harness = @import("sim_test_harness.zig");
 pub const sim_test = @import("sim_test.zig");
 pub const cluster_invariant_checker = @import("cluster_invariant_checker.zig");
-pub const sim_cluster = @import("sim_cluster.zig");
-pub const sim_cluster_test = @import("sim_cluster_test.zig");
+pub const sim_multi_node_test = @import("sim_multi_node_test.zig");
 pub const head_tracker = @import("head_tracker.zig");
 pub const block_import = @import("block_import.zig");
 pub const block_import_test = @import("block_import_test.zig");
@@ -36,7 +35,6 @@ pub const InvariantChecker = invariant_checker.InvariantChecker;
 pub const SimTestHarness = sim_test_harness.SimTestHarness;
 pub const SimNodeHarness = sim_node_harness.SimNodeHarness;
 pub const ClusterInvariantChecker = cluster_invariant_checker.ClusterInvariantChecker;
-pub const SimCluster = sim_cluster.SimCluster;
 pub const HeadTracker = head_tracker.HeadTracker;
 pub const BlockImporter = block_import.BlockImporter;
 
@@ -229,8 +227,7 @@ comptime {
     _ = sim_test_harness;
     _ = sim_test;
     _ = cluster_invariant_checker;
-    _ = sim_cluster;
-    _ = sim_cluster_test;
+    _ = sim_multi_node_test;
     _ = head_tracker;
     _ = block_import;
     _ = block_import_test;
@@ -266,11 +263,15 @@ pub const sim_validator = @import("sim_validator.zig");
 pub const sim_controller = @import("sim_controller.zig");
 pub const scenario_mod = @import("scenario.zig");
 pub const sim_fuzzer = @import("sim_fuzzer.zig");
+pub const sim_topology = @import("sim_topology.zig");
 
 pub const SimValidator = sim_validator.SimValidator;
 pub const SimController = sim_controller.SimController;
 pub const Scenario = scenario_mod.Scenario;
+pub const AdvanceUntilCondition = scenario_mod.AdvanceUntilCondition;
+pub const Step = scenario_mod.Step;
 pub const SimFuzzer = sim_fuzzer.SimFuzzer;
+pub const SimTopology = sim_topology.SimTopology;
 
 pub const sim_validator_test = @import("sim_validator_test.zig");
 pub const sim_scenario_test = @import("sim_scenario_test.zig");
@@ -281,6 +282,7 @@ comptime {
     _ = sim_controller;
     _ = scenario_mod;
     _ = sim_fuzzer;
+    _ = sim_topology;
     _ = sim_validator_test;
     _ = sim_scenario_test;
     _ = sim_fuzzer_test;

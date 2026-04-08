@@ -7,7 +7,7 @@
 //!   - Deterministic replay: same seed = same fault sequence.
 //!
 //! These tests operate at the SimStorage level (unit tests) and at the
-//! cluster level for integration scenarios.
+//! controller-backed multi-node level for integration scenarios.
 
 const std = @import("std");
 const testing = std.testing;
@@ -18,9 +18,8 @@ const Node = @import("persistent_merkle_tree").Node;
 const sim_storage = @import("sim_storage.zig");
 const SimStorage = sim_storage.SimStorage;
 const StorageError = sim_storage.StorageError;
-const sim_cluster = @import("sim_cluster.zig");
-const SimCluster = sim_cluster.SimCluster;
 const SimTestHarness = @import("sim_test_harness.zig").SimTestHarness;
+const SimController = @import("sim_controller.zig").SimController;
 
 // ── Test 1: Write failure during epoch boundary ────────────────────────
 //
@@ -287,16 +286,14 @@ test "fault: deterministic replay — same seed, same fault pattern" {
     try testing.expectEqualSlices(bool, &failure_patterns[0], &failure_patterns[1]);
 }
 
-// ── Test 8: Fault injection in cluster context ────────────────────────
+// ── Test 8: Fault injection in multi-node context ─────────────────────
 //
-// Verify that a cluster run completes without panicking even when the
+// Verify that a multi-node run completes without panicking even when the
 // underlying network has both packet loss and reordering (stress test
-// of the fault injection integration with cluster simulation).
+// of the fault injection integration with controller-backed simulation).
 
-test "fault: cluster with network faults — no panics or safety violations" {
-    const allocator = testing.allocator;
-
-    var cluster = try SimCluster.init(allocator, .{
+test "fault: controller with network faults — no panics or safety violations" {
+    var ctrl = try SimController.init(testing.allocator, .{
         .num_nodes = 2,
         .seed = 888,
         .validator_count = 64,
@@ -309,9 +306,10 @@ test "fault: cluster with network faults — no panics or safety violations" {
             .max_latency_ms = 100,
         },
     });
-    defer cluster.deinit();
+    defer ctrl.deinit();
 
-    const result = try cluster.run(preset.SLOTS_PER_EPOCH * 3);
+    try ctrl.advanceSlots(preset.SLOTS_PER_EPOCH * 3);
+    const result = ctrl.getFinalityResult();
 
     try testing.expectEqual(@as(u64, 0), result.safety_violations);
     try testing.expectEqual(@as(u64, 0), result.state_divergences);

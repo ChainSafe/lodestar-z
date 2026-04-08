@@ -4,37 +4,50 @@
 //!   - Split-brain: 2 groups of 2 nodes, each producing blocks, then converge.
 //!   - Asymmetric partition: Node 0 sends to all, nodes 1-3 can't reach node 0.
 //!   - Intermittent drops: 50% packet loss for 1 epoch, then clean.
-//!   - Delayed delivery: all messages delayed by ~1 slot.
+//!   - Delayed delivery: all messages delayed heavily.
 //!
-//! These tests exercise the SimNetwork fault injection layer and verify that
-//! the cluster-level invariant checker detects no safety violations.
+//! The multi-node integration coverage now runs through SimController; only the
+//! raw SimNetwork routing semantics remain as unit tests at the transport layer.
 
 const std = @import("std");
 const testing = std.testing;
 
 const preset = @import("preset").preset;
-const Node = @import("persistent_merkle_tree").Node;
 
 const sim_network = @import("sim_network.zig");
 const SimNetwork = sim_network.SimNetwork;
-const sim_cluster = @import("sim_cluster.zig");
-const SimCluster = sim_cluster.SimCluster;
-const ClusterConfig = sim_cluster.ClusterConfig;
-const ClusterInvariantChecker = @import("cluster_invariant_checker.zig").ClusterInvariantChecker;
+const controller_mod = @import("sim_controller.zig");
+const SimController = controller_mod.SimController;
+const FinalityResult = controller_mod.FinalityResult;
+const scenario = @import("scenario.zig");
+
+fn runSlots(ctrl: *SimController, count: u64) !FinalityResult {
+    try ctrl.advanceSlots(count);
+    return ctrl.getFinalityResult();
+}
+
+fn headStateRoot(ctrl: *SimController, node_idx: usize) ![32]u8 {
+    const head_state = try ctrl.nodes[node_idx].cloneHeadStateSnapshot();
+    defer {
+        head_state.deinit();
+        testing.allocator.destroy(head_state);
+    }
+    return (try head_state.state.hashTreeRoot()).*;
+}
+
+fn expectAllNodesAgreeOnHeadState(ctrl: *SimController) !void {
+    const root_0 = try headStateRoot(ctrl, 0);
+    const num_nodes: usize = @intCast(ctrl.num_nodes);
+    for (1..num_nodes) |i| {
+        const root_i = try headStateRoot(ctrl, i);
+        try testing.expectEqualSlices(u8, &root_0, &root_i);
+    }
+}
 
 // ── Test 1: Split-brain — two groups produce blocks, then converge ────
-//
-// This test uses SimCluster's partitionGroups/healAllPartitions API.
-// During the partition phase, each group (0,1) and (2,3) processes
-// blocks independently (the current cluster impl processes all nodes
-// synchronously with the same blocks, so divergence would only occur
-// if the cluster had true per-group proposers — which is future work).
-// We verify: no safety violations, and convergence after healing.
 
 test "partition: split-brain — convergence after heal, no safety violations" {
-    const allocator = testing.allocator;
-
-    var cluster = try SimCluster.init(allocator, .{
+    var ctrl = try SimController.init(testing.allocator, .{
         .num_nodes = 4,
         .seed = 42,
         .validator_count = 64,
@@ -44,61 +57,20 @@ test "partition: split-brain — convergence after heal, no safety violations" {
             .max_latency_ms = 50,
         },
     });
-    defer cluster.deinit();
+    defer ctrl.deinit();
 
-    // Phase 1: Establish a baseline (1 epoch clean).
-    const baseline_slots = preset.SLOTS_PER_EPOCH;
-    const result_baseline = try cluster.run(baseline_slots);
-    try testing.expectEqual(@as(u64, 0), result_baseline.safety_violations);
-    try testing.expectEqual(@as(u64, 0), result_baseline.state_divergences);
+    const result = try ctrl.runScenario(scenario.network_partition_quiescent_recovery);
 
-    // Record all-nodes-agree state before partition.
-    const root_before = (try (cluster.nodes[0].getHeadState() orelse unreachable).state.hashTreeRoot()).*;
-    for (1..4) |i| {
-        const root_i = (try (cluster.nodes[i].getHeadState() orelse unreachable).state.hashTreeRoot()).*;
-        try testing.expectEqualSlices(u8, &root_before, &root_i);
-    }
-
-    // Phase 2: Partition [0,1] from [2,3].
-    const group_a = [_]u8{ 0, 1 };
-    const group_b = [_]u8{ 2, 3 };
-    cluster.partitionGroups(&group_a, &group_b);
-
-    // Run 2 epochs during partition.
-    const partition_slots = preset.SLOTS_PER_EPOCH * 2;
-    const result_partitioned = try cluster.run(partition_slots);
-
-    // No safety violations during partition (same blocks processed synchronously).
-    try testing.expectEqual(@as(u64, 0), result_partitioned.safety_violations);
-
-    // Phase 3: Heal partition.
-    cluster.healAllPartitions();
-
-    // Run 3 epochs to allow convergence.
-    const heal_slots = preset.SLOTS_PER_EPOCH * 3;
-    const result_healed = try cluster.run(heal_slots);
-
-    try testing.expectEqual(@as(u64, 0), result_healed.safety_violations);
-    try testing.expectEqual(@as(u64, 0), result_healed.state_divergences);
-
-    // After healing, all nodes agree.
-    const root_final = (try (cluster.nodes[0].getHeadState() orelse unreachable).state.hashTreeRoot()).*;
-    for (1..4) |i| {
-        const root_i = (try (cluster.nodes[i].getHeadState() orelse unreachable).state.hashTreeRoot()).*;
-        try testing.expectEqualSlices(u8, &root_final, &root_i);
-    }
+    try testing.expectEqual(@as(u64, 0), result.safety_violations);
+    try testing.expectEqual(@as(u64, 0), result.state_divergences);
+    try ctrl.checkInvariant(.head_agreement);
+    try expectAllNodesAgreeOnHeadState(&ctrl);
 }
 
 // ── Test 2: Asymmetric partition — node 0 sends to all, rest can't reach 0 ─
-//
-// Node 0 can propose blocks that get delivered to 1-3, but attestations
-// from 1-3 can't flow back. This exercises the partition_set asymmetry
-// in SimNetwork. We verify: no safety violations, deterministic outcome.
 
-test "partition: asymmetric — one-way partition, eventual consistency" {
-    const allocator = testing.allocator;
-
-    var cluster = try SimCluster.init(allocator, .{
+test "partition: asymmetric — one-way partition preserves safety and regains finality agreement" {
+    var ctrl = try SimController.init(testing.allocator, .{
         .num_nodes = 4,
         .seed = 55,
         .validator_count = 64,
@@ -108,50 +80,30 @@ test "partition: asymmetric — one-way partition, eventual consistency" {
             .max_latency_ms = 100,
         },
     });
-    defer cluster.deinit();
+    defer ctrl.deinit();
 
-    // Set asymmetric partition: nodes 1,2,3 can't reach node 0
-    // (but node 0 can still reach them).
-    cluster.network.partition_set[1][0] = true;
-    cluster.network.partition_set[2][0] = true;
-    cluster.network.partition_set[3][0] = true;
+    ctrl.network.partition_set[1][0] = true;
+    ctrl.network.partition_set[2][0] = true;
+    ctrl.network.partition_set[3][0] = true;
 
-    // Run 2 epochs with asymmetric partition.
-    const partition_slots = preset.SLOTS_PER_EPOCH * 2;
-    const result_partitioned = try cluster.run(partition_slots);
-
+    const result_partitioned = try runSlots(&ctrl, 6);
     try testing.expectEqual(@as(u64, 0), result_partitioned.safety_violations);
 
-    // Heal asymmetric partition.
-    cluster.network.partition_set[1][0] = false;
-    cluster.network.partition_set[2][0] = false;
-    cluster.network.partition_set[3][0] = false;
+    ctrl.network.partition_set[1][0] = false;
+    ctrl.network.partition_set[2][0] = false;
+    ctrl.network.partition_set[3][0] = false;
 
-    // Run recovery phase.
-    const recovery_slots = preset.SLOTS_PER_EPOCH * 3;
-    const result_recovered = try cluster.run(recovery_slots);
-
+    const result_recovered = try runSlots(&ctrl, 16);
     try testing.expectEqual(@as(u64, 0), result_recovered.safety_violations);
     try testing.expectEqual(@as(u64, 0), result_recovered.state_divergences);
-
-    // All nodes agree after recovery.
-    const root_0 = (try (cluster.nodes[0].getHeadState() orelse unreachable).state.hashTreeRoot()).*;
-    for (1..4) |i| {
-        const root_i = (try (cluster.nodes[i].getHeadState() orelse unreachable).state.hashTreeRoot()).*;
-        try testing.expectEqualSlices(u8, &root_0, &root_i);
-    }
+    try ctrl.checkInvariant(.finality_agreement);
+    try ctrl.checkInvariant(.{ .head_freshness = 8 });
 }
 
 // ── Test 3: Intermittent drops — 50% packet loss for 1 epoch ──────────
-//
-// Uses SimNetwork's packet_loss_rate config. Run 1 epoch with 50% loss,
-// then 1 epoch clean. Verify: no safety violations, finality resumes.
 
 test "partition: intermittent drops — 50% loss, no safety violations" {
-    const allocator = testing.allocator;
-
-    // Phase 1: 50% packet loss.
-    var cluster_lossy = try SimCluster.init(allocator, .{
+    var ctrl_lossy = try SimController.init(testing.allocator, .{
         .num_nodes = 4,
         .seed = 101,
         .validator_count = 64,
@@ -162,17 +114,13 @@ test "partition: intermittent drops — 50% loss, no safety violations" {
             .max_latency_ms = 50,
         },
     });
-    defer cluster_lossy.deinit();
+    defer ctrl_lossy.deinit();
 
-    const loss_slots = preset.SLOTS_PER_EPOCH;
-    const result_lossy = try cluster_lossy.run(loss_slots);
-
+    const result_lossy = try runSlots(&ctrl_lossy, preset.SLOTS_PER_EPOCH);
     try testing.expectEqual(@as(u64, 0), result_lossy.safety_violations);
-    // No state divergences because the cluster processes synchronously.
     try testing.expectEqual(@as(u64, 0), result_lossy.state_divergences);
 
-    // Phase 2: Clean network (new cluster, same seed).
-    var cluster_clean = try SimCluster.init(allocator, .{
+    var ctrl_clean = try SimController.init(testing.allocator, .{
         .num_nodes = 4,
         .seed = 101,
         .validator_count = 64,
@@ -183,69 +131,45 @@ test "partition: intermittent drops — 50% loss, no safety violations" {
             .max_latency_ms = 50,
         },
     });
-    defer cluster_clean.deinit();
+    defer ctrl_clean.deinit();
 
-    const clean_slots = preset.SLOTS_PER_EPOCH * 4;
-    const result_clean = try cluster_clean.run(clean_slots);
-
+    const result_clean = try runSlots(&ctrl_clean, preset.SLOTS_PER_EPOCH * 4);
     try testing.expectEqual(@as(u64, 0), result_clean.safety_violations);
     try testing.expectEqual(@as(u64, 0), result_clean.state_divergences);
-
-    // Clean network with 90% participation should reach finality.
     try testing.expect(result_clean.finalized_epoch > 0);
 }
 
-// ── Test 4: Delayed delivery — messages delayed by ~1 slot ────────────
-//
-// Uses SimNetwork with high max latency (≥ 1 slot = 12s).
-// Verifies consensus still works with slower (but not infinitely delayed) delivery.
+// ── Test 4: Delayed delivery — messages delayed heavily ───────────────
 
 test "partition: delayed delivery — 1-slot latency, no violations" {
-    const allocator = testing.allocator;
-
-    // One slot = 12 seconds = 12000ms latency is extremely high
-    // for a network sim. We use a more realistic "heavy latency" scenario:
-    // latency in the upper range but still < 1 slot.
-    var cluster = try SimCluster.init(allocator, .{
+    var ctrl = try SimController.init(testing.allocator, .{
         .num_nodes = 4,
         .seed = 999,
         .validator_count = 64,
         .participation_rate = 1.0,
         .network = .{
             .min_latency_ms = 100,
-            .max_latency_ms = 500, // Half a second max — heavy but sub-slot
+            .max_latency_ms = 500,
         },
     });
-    defer cluster.deinit();
+    defer ctrl.deinit();
 
-    const num_slots = preset.SLOTS_PER_EPOCH * 5;
-    const result = try cluster.run(num_slots);
+    const result = try runSlots(&ctrl, preset.SLOTS_PER_EPOCH * 5);
 
     try testing.expectEqual(@as(u64, 0), result.safety_violations);
     try testing.expectEqual(@as(u64, 0), result.state_divergences);
-
-    // With 100% participation and full blocks, finality should progress.
     try testing.expect(result.finalized_epoch > 0);
-
-    // All nodes agree.
-    const root_0 = (try (cluster.nodes[0].getHeadState() orelse unreachable).state.hashTreeRoot()).*;
-    for (1..4) |i| {
-        const root_i = (try (cluster.nodes[i].getHeadState() orelse unreachable).state.hashTreeRoot()).*;
-        try testing.expectEqualSlices(u8, &root_0, &root_i);
-    }
+    try expectAllNodesAgreeOnHeadState(&ctrl);
 }
 
 // ── Test 5: Deterministic partition replay ───────────────────────────
 
 test "partition: deterministic replay — same seed, same result" {
-    const allocator = testing.allocator;
-    const num_slots = preset.SLOTS_PER_EPOCH * 4;
-
     var final_roots: [2][32]u8 = undefined;
-    var final_results: [2]sim_cluster.RunResult = undefined;
+    var final_results: [2]FinalityResult = undefined;
 
     for (0..2) |run| {
-        var cluster = try SimCluster.init(allocator, .{
+        var ctrl = try SimController.init(testing.allocator, .{
             .num_nodes = 4,
             .seed = 777,
             .validator_count = 64,
@@ -257,27 +181,16 @@ test "partition: deterministic replay — same seed, same result" {
                 .max_latency_ms = 80,
             },
         });
-        defer cluster.deinit();
+        defer ctrl.deinit();
 
-        // Partition for 1 epoch.
-        const group_a = [_]u8{ 0, 1 };
-        const group_b = [_]u8{ 2, 3 };
-        cluster.partitionGroups(&group_a, &group_b);
-        _ = try cluster.run(preset.SLOTS_PER_EPOCH);
-
-        // Heal and run more.
-        cluster.healAllPartitions();
-        final_results[run] = try cluster.run(preset.SLOTS_PER_EPOCH * 3);
-
-        final_roots[run] = (try (cluster.nodes[0].getHeadState() orelse unreachable).state.hashTreeRoot()).*;
+        final_results[run] = try ctrl.runScenario(scenario.network_partition_quiescent_recovery);
+        final_roots[run] = try headStateRoot(&ctrl, 0);
     }
 
-    // Same seed → identical results.
     try testing.expectEqualSlices(u8, &final_roots[0], &final_roots[1]);
     try testing.expectEqual(final_results[0].slots_processed, final_results[1].slots_processed);
     try testing.expectEqual(final_results[0].blocks_produced, final_results[1].blocks_produced);
     try testing.expectEqual(final_results[0].finalized_epoch, final_results[1].finalized_epoch);
-    _ = num_slots;
 }
 
 // ── Test 6: SimNetwork partition semantics unit test ──────────────────
@@ -290,26 +203,21 @@ test "partition: SimNetwork split-brain message routing" {
     });
     defer net.deinit();
 
-    // Partition group A [0,1] from group B [2,3].
-    // A <-> A: allowed; B <-> B: allowed; A <-> B: blocked.
     net.partition(0, 2);
     net.partition(0, 3);
     net.partition(1, 2);
     net.partition(1, 3);
 
-    // Intra-group messages should go through.
     const sent_0_1 = try net.send(0, 1, "intra_a", .gossip, 0);
     const sent_2_3 = try net.send(2, 3, "intra_b", .gossip, 0);
     try testing.expect(sent_0_1);
     try testing.expect(sent_2_3);
 
-    // Cross-group messages should be dropped.
     const sent_0_2 = try net.send(0, 2, "cross_drop", .gossip, 0);
     const sent_1_3 = try net.send(1, 3, "cross_drop", .gossip, 0);
     try testing.expect(!sent_0_2);
     try testing.expect(!sent_1_3);
 
-    // Deliver intra-group messages.
     const delivered = try net.tick(100 * std.time.ns_per_ms);
     try testing.expectEqual(@as(usize, 2), delivered.len);
 
@@ -326,18 +234,14 @@ test "partition: SimNetwork asymmetric routing" {
     });
     defer net.deinit();
 
-    // Node 0 can send to node 1, but node 1 cannot send to node 0.
-    net.partition_set[1][0] = true; // 1 -> 0 blocked
+    net.partition_set[1][0] = true;
 
-    // 0 -> 1: should succeed
     const sent_fwd = try net.send(0, 1, "forward", .gossip, 0);
     try testing.expect(sent_fwd);
 
-    // 1 -> 0: should be dropped
     const sent_rev = try net.send(1, 0, "reverse", .gossip, 0);
     try testing.expect(!sent_rev);
 
-    // Deliver forward message.
     const delivered = try net.tick(50 * std.time.ns_per_ms);
     try testing.expectEqual(@as(usize, 1), delivered.len);
     try testing.expectEqualStrings("forward", delivered[0].data);
