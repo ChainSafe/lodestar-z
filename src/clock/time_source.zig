@@ -7,6 +7,17 @@
 const std = @import("std");
 const slot_math = @import("slot_math.zig");
 
+/// Production clock backed by std.Io wall-clock time.
+pub const RealClock = struct {
+    io: std.Io,
+
+    pub fn nowMs(self: RealClock) slot_math.UnixMs {
+        const ms = std.Io.Clock.real.now(self.io).toMilliseconds();
+        std.debug.assert(ms >= 0);
+        return @intCast(ms);
+    }
+};
+
 /// Controllable time source for deterministic testing.
 pub const FakeTime = struct {
     ms: slot_math.UnixMs = 0,
@@ -25,18 +36,12 @@ pub const FakeTime = struct {
 };
 
 pub const TimeSource = union(enum) {
-    /// Production: reads wall-clock time via std.Io.Clock.real.
-    io: std.Io,
-    /// Testing: reads from a mutable FakeTime pointer.
+    real: RealClock,
     fake: *FakeTime,
 
     pub fn nowMs(self: TimeSource) slot_math.UnixMs {
         return switch (self) {
-            .io => |io_handle| blk: {
-                const ms = std.Io.Clock.real.now(io_handle).toMilliseconds();
-                std.debug.assert(ms >= 0);
-                break :blk @intCast(ms);
-            },
+            .real => |c| c.nowMs(),
             .fake => |f| f.ms,
         };
     }

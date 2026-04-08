@@ -88,7 +88,7 @@ pub fn init(self: *EventClock, allocator: Allocator, config: Config, io_handle: 
         .clock = undefined,
         .waiters = WaiterQueue.initContext({}),
     };
-    self.clock = SlotClock.init(config, .{ .io = io_handle }) catch return error.InvalidConfig;
+    self.clock = SlotClock.init(config, .{ .real = .{ .io = io_handle } }) catch return error.InvalidConfig;
 }
 
 /// Start the auto-advance loop.  Idempotent; second call is a no-op.
