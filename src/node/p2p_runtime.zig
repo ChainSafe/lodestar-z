@@ -1484,11 +1484,25 @@ fn registerConnectedPeer(
     var did_work = !was_connected;
     if (!was_connected) {
         if (self.metrics) |metrics| metrics.peer_connected_total.incr();
-        did_work = completePeerHandshake(self, io, svc, peer_id) or did_work;
+        // Spawn handshake as background fiber so one slow peer doesn't
+        // block the main event loop from processing other peers.
+        self.handshake_group.async(io, completePeerHandshakeAsync, .{ self, io, svc, peer_id });
+        did_work = true;
     }
 
     did_work = maybeRecordPeerIdentity(self, svc, peer_id) or did_work;
     return did_work;
+}
+
+/// Fire-and-forget wrapper for completePeerHandshake.
+/// Called via Io.Group.async so it runs as a background fiber.
+fn completePeerHandshakeAsync(
+    self: *BeaconNode,
+    io: std.Io,
+    svc: *networking.P2pService,
+    peer_id: []const u8,
+) void {
+    _ = completePeerHandshake(self, io, svc, peer_id);
 }
 
 fn completePeerHandshake(

@@ -348,6 +348,10 @@ pub const BeaconNode = struct {
 
     // Sync subsystem components (lazily initialized when P2P starts).
 
+    /// Background fibers for peer handshakes (STATUS + metadata + gossipsub).
+    /// Fire-and-forget so one slow peer doesn't block the main event loop.
+    handshake_group: std.Io.Group = .init,
+
     sync_service_inst: ?*SyncService = null,
     sync_callback_ctx: ?*SyncCallbackCtx = null, // bridges to P2P transport
     queued_state_work_owners: std.ArrayListUnmanaged(QueuedStateWorkOwner) = .empty,
