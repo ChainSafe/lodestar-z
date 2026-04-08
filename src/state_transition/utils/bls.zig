@@ -16,22 +16,22 @@ pub fn sign(secret_key: SecretKey, message: []const u8) Signature {
 /// If `pk_validate` is `true`, the public key will be infinity and group checked.
 ///
 /// If `sig_groupcheck` is `true`, the signature will be group checked.
-pub fn verify(message: []const u8, public_key: *const PublicKey, signature: *const Signature, in_pk_validate: ?bool, in_sig_groupcheck: ?bool) bls.BlstError!void {
-    const sig_groupcheck = in_sig_groupcheck orelse false;
-    const pk_validate = in_pk_validate orelse false;
-    try signature.verify(sig_groupcheck, message, DST, null, public_key, pk_validate);
+pub fn verify(message: []const u8, public_key: *const PublicKey, signature: *const Signature, pk_validate: ?bool, sig_groupcheck: ?bool) bls.BlstError!void {
+    const sig_groupcheck_flag = sig_groupcheck orelse false;
+    const pk_validate_flag = pk_validate orelse false;
+    try signature.verify(sig_groupcheck_flag, message, DST, null, public_key, pk_validate_flag);
 }
 
 /// The `message` must be at least 32 bytes; only the first 32 are passed to
 /// fast aggregate verification.
-pub fn fastAggregateVerify(message: []const u8, public_keys: []const PublicKey, signature: *const Signature, in_pk_validate: ?bool, in_sigs_group_check: ?bool) !bool {
+pub fn fastAggregateVerify(message: []const u8, public_keys: []const PublicKey, signature: *const Signature, pk_validate: ?bool, sig_groupcheck: ?bool) !bool {
     std.debug.assert(message.len >= 32);
 
     var pairing_buf: [bls.Pairing.sizeOf()]u8 align(bls.Pairing.buf_align) = undefined;
 
-    const sigs_groupcheck = in_sigs_group_check orelse false;
-    const public_keys_validate = in_pk_validate orelse false;
-    return signature.fastAggregateVerify(sigs_groupcheck, &pairing_buf, message[0..32], DST, public_keys, public_keys_validate) catch return false;
+    const sig_groupcheck_flag = sig_groupcheck orelse false;
+    const pk_validate_flag = pk_validate orelse false;
+    return signature.fastAggregateVerify(sig_groupcheck_flag, &pairing_buf, message[0..32], DST, public_keys, pk_validate_flag) catch return false;
 }
 
 test "bls - sanity" {
