@@ -1300,7 +1300,11 @@ fn dialDiscoveredPeers(
     defer if (discovered_peers.len > 0) self.allocator.free(discovered_peers);
 
     if (discovered_peers.len > 0) {
-        std.log.info("dialDiscoveredPeers: {d} candidates (budget={d})", .{ discovered_peers.len, dial_budget });
+        var quic_count: u32 = 0;
+        for (discovered_peers) |peer| {
+            if (peer.has_quic) quic_count += 1;
+        }
+        std.log.info("dialDiscoveredPeers: {d} candidates ({d} quic, budget={d})", .{ discovered_peers.len, quic_count, dial_budget });
     }
 
     var did_work = false;
