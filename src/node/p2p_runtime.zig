@@ -514,6 +514,37 @@ fn closeOwnedQuicStream(io: std.Io, stream: *networking.QuicStream) void {
     stream.deinit();
 }
 
+/// Eth2 spec: TTFB_TIMEOUT is 5s, RESP_TIMEOUT is 10s.
+const RESP_TIMEOUT_MS: u64 = 10_000;
+
+/// Background timer that closes a stream after a timeout.
+/// Create with `init`, then `defer guard.cancel(io)` to disarm
+/// when the operation completes before the timeout.
+const StreamTimeoutGuard = struct {
+    timeout_group: std.Io.Group,
+
+    fn init(io: std.Io, stream: *networking.QuicStream) StreamTimeoutGuard {
+        var guard = StreamTimeoutGuard{ .timeout_group = .init };
+        guard.timeout_group.async(io, timeoutFn, .{ io, stream });
+        return guard;
+    }
+
+    fn cancel(self: *StreamTimeoutGuard, io: std.Io) void {
+        self.timeout_group.cancel(io);
+    }
+
+    fn timeoutFn(io: std.Io, stream: *networking.QuicStream) void {
+        const timeout: std.Io.Timeout = .{ .duration = .{
+            .raw = std.Io.Duration.fromMilliseconds(RESP_TIMEOUT_MS),
+            .clock = .awake,
+        } };
+        timeout.sleep(io) catch return; // canceled = operation completed in time
+        // Timeout fired — close the stream to unblock pending reads.
+        std.log.warn("req/resp timeout: closing stream after {d}ms", .{RESP_TIMEOUT_MS});
+        stream.close(io);
+    }
+};
+
 const OpenedReqRespRequest = struct {
     permit: networking.ReqRespRequestPermit,
     stream: networking.QuicStream,
@@ -1476,9 +1507,12 @@ fn completePeerHandshake(
         return true;
     }
 
-    // Skip metadata in the handshake — it blocks indefinitely when the
-    // peer disconnects (no read timeout). Metadata is requested lazily
-    // during peer manager maintenance ticks instead.
+    // Metadata is non-critical — timeout protects against hangs.
+    if (requestPeerMetadata(self, io, svc, peer_id)) |metadata| {
+        applyPeerMetadata(self, peer_id, metadata, currentUnixTimeMs(io));
+    } else |err| {
+        std.log.warn("completePeerHandshake: metadata failed: {}", .{err});
+    }
 
     svc.openGossipsubStream(io, peer_id) catch |err| {
         std.log.warn("Failed to open outbound gossipsub stream to {s}: {}", .{ peer_id, err });
@@ -2294,6 +2328,8 @@ fn fetchBlockByRoot(
 
     var outbound = try openReqRespRequest(io, svc, peer_id, .beacon_blocks_by_root, protocol_id);
     defer outbound.deinit(io);
+    var timeout_guard = StreamTimeoutGuard.init(io, &outbound.stream);
+    defer timeout_guard.cancel(io);
 
     try req_resp_encoding.writeRequestToStream(self.allocator, io, &outbound.stream, &root);
     outbound.stream.closeWrite(io);
@@ -2326,6 +2362,8 @@ fn fetchRawBlocksByRange(
 
     var outbound = try openReqRespRequest(io, svc, peer_id, .beacon_blocks_by_range, protocol_id);
     defer outbound.deinit(io);
+    var timeout_guard = StreamTimeoutGuard.init(io, &outbound.stream);
+    defer timeout_guard.cancel(io);
 
     const request = networking.messages.BeaconBlocksByRangeRequest.Type{
         .start_slot = start_slot,
@@ -2410,10 +2448,11 @@ fn sendStatus(
         "/eth2/beacon_chain/req/status/1/ssz_snappy";
     const req_resp_encoding = networking.req_resp_encoding;
 
-    std.log.info("sendStatus: opening stream for {s}", .{status_protocol_id});
     var outbound = try openReqRespRequest(io, svc, peer_id, .status, status_protocol_id);
     defer outbound.deinit(io);
-    std.log.info("sendStatus: stream opened, writing request", .{});
+    // Timeout guard: closes the stream if the peer doesn't respond within RESP_TIMEOUT_MS.
+    var timeout_guard = StreamTimeoutGuard.init(io, &outbound.stream);
+    defer timeout_guard.cancel(io);
 
     const our_status = self.getStatus();
     std.log.info("Sending Status: fork_digest={x:0>2}{x:0>2}{x:0>2}{x:0>2} head_slot={d} finalized_epoch={d}", .{
@@ -2524,6 +2563,8 @@ fn requestPeerPing(
 
     var outbound = try openReqRespRequest(io, svc, peer_id, .ping, ping_protocol_id);
     defer outbound.deinit(io);
+    var timeout_guard = StreamTimeoutGuard.init(io, &outbound.stream);
+    defer timeout_guard.cancel(io);
 
     var ping_ssz: [networking.messages.Ping.fixed_size]u8 = undefined;
     const local_seq: networking.messages.Ping.Type = self.api_node_identity.metadata.seq_number;
@@ -2564,6 +2605,8 @@ fn requestPeerMetadata(
 
     var outbound = try openReqRespRequest(io, svc, peer_id, .metadata, metadata_protocol_id);
     defer outbound.deinit(io);
+    var timeout_guard = StreamTimeoutGuard.init(io, &outbound.stream);
+    defer timeout_guard.cancel(io);
 
     try req_resp_encoding.writeRequestToStream(self.allocator, io, &outbound.stream, &.{});
     outbound.stream.closeWrite(io);
