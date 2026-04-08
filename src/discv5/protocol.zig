@@ -267,7 +267,7 @@ pub const Config = struct {
     /// Sequence number of our local ENR.
     local_enr_seq: u64 = 0,
     /// Time after which outbound requests are considered failed and removed.
-    request_timeout_ms: u64 = 15_000,
+    request_timeout_ms: u64 = 5_000,
     /// Time a replacement node waits before evicting the stalest disconnected bucket entry.
     bucket_pending_timeout_ms: u64 = kbucket.BUCKET_PENDING_TIMEOUT_MS,
 };
@@ -588,11 +588,16 @@ pub const Protocol = struct {
 
         try socket.send(dest_addr, pkt);
 
-        // Only keep one pending request per destination. The bootnode replaces
-        // its challenge with each new probe from our address, so only the
-        // latest probe's WHOAREYOU will produce a valid handshake.
-        for (self.pending_requests.items) |pr| {
-            if (std.mem.eql(u8, &pr.dest_node_id, dest_node_id)) return;
+        // Replace any existing pending request for this destination.
+        // The bootnode replaces its challenge state on each new probe from
+        // our address, so only the latest probe's nonce will match the
+        // WHOAREYOU response.
+        for (self.pending_requests.items, 0..) |*pr, i| {
+            if (std.mem.eql(u8, &pr.dest_node_id, dest_node_id)) {
+                pr.deinit();
+                _ = self.pending_requests.orderedRemove(i);
+                break;
+            }
         }
         const pt_copy = try self.alloc.dupe(u8, msg_bytes);
         errdefer self.alloc.free(pt_copy);
