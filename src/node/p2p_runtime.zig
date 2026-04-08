@@ -2495,8 +2495,9 @@ fn sendStatus(
         _ = StatusMessage.serializeIntoBytes(&our_status, &status_ssz);
         try req_resp_encoding.writeRequestToStream(self.allocator, io, &outbound.stream, &status_ssz);
     }
+    std.log.info("sendStatus: write done, calling closeWrite", .{});
     outbound.stream.closeWrite(io);
-    std.log.info("sendStatus: request written and write-side closed, waiting for response", .{});
+    std.log.info("sendStatus: closeWrite done, waiting for response", .{});
 
     var reader = req_resp_encoding.ResponseChunkStreamReader{
         .allocator = self.allocator,
