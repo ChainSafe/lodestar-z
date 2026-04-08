@@ -345,7 +345,185 @@ pub fn BeaconStateView_proposerLookahead(env: napi.Env, cb: napi.CallbackInfo(0)
 
 // pub fn BeaconStateView_executionPayloadAvailability
 
-// pub fn BeaconStateView_getShufflingAtEpoch
+/// Get the block root at a given epoch.
+/// Arguments:
+/// - arg 0: epoch (number)
+/// Returns: Root (Uint8Array)
+pub fn BeaconStateView_getBlockRootAtEpoch(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
+    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
+    const epoch: u64 = @intCast(try cb.arg(0).getValueInt64());
+
+    const result = switch (cached_state.state.forkSeq()) {
+        inline else => |f| st.getBlockRoot(f, cached_state.state.castToFork(f), epoch),
+    };
+    const root = result catch |err| {
+        const msg = switch (err) {
+            error.SlotTooBig => "Can only get block root in the past",
+            error.SlotTooSmall => "Cannot get block root more than SLOTS_PER_HISTORICAL_ROOT in the past",
+            else => "Failed to get block root",
+        };
+        try env.throwError("INVALID_EPOCH", msg);
+        return env.getNull();
+    };
+
+    return sszValueToNapiValue(env, ct.primitive.Root, root);
+}
+
+/// Get the state root at a given slot.
+/// Arguments:
+/// - arg 0: slot (number)
+/// Returns: Root (Uint8Array)
+pub fn BeaconStateView_getStateRootAtSlot(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
+    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
+    const slot: u64 = @intCast(try cb.arg(0).getValueInt64());
+
+    const state_slot = try cached_state.state.slot();
+    if (slot >= state_slot) {
+        try env.throwError("INVALID_SLOT", "Can only get state root in the past");
+        return env.getNull();
+    }
+
+    const oldest_stored_slot = if (state_slot > preset.SLOTS_PER_HISTORICAL_ROOT) state_slot - preset.SLOTS_PER_HISTORICAL_ROOT else 0;
+    if (slot < oldest_stored_slot) {
+        try env.throwError("INVALID_SLOT", "Cannot get state root more than SLOTS_PER_HISTORICAL_ROOT in the past");
+        return env.getNull();
+    }
+
+    var state_roots = try cached_state.state.stateRoots();
+    const root = try state_roots.getFieldRoot(slot % preset.SLOTS_PER_HISTORICAL_ROOT);
+    return sszValueToNapiValue(env, ct.primitive.Root, root);
+}
+
+/// Get all validator balances as a BigUint64Array.
+/// Returns: BigUint64Array
+pub fn BeaconStateView_getAllBalances(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
+    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
+    var balances = try cached_state.state.balances();
+    const all_balances = try balances.getAll(allocator);
+    defer allocator.free(all_balances);
+
+    return try numberSliceToNapiValue(env, u64, all_balances, .{});
+}
+
+/// Get all validators (NOT_IMPLEMENTED stub).
+pub fn BeaconStateView_getAllValidators(env: napi.Env, _: napi.CallbackInfo(0)) !napi.Value {
+    try env.throwError("NOT_IMPLEMENTED", "getAllValidators is not yet implemented");
+    return env.getNull();
+}
+
+/// Get a single validator's previous epoch participation flags.
+/// Arguments:
+/// - arg 0: validator index (number)
+/// Returns: number (u8 participation flags)
+pub fn BeaconStateView_getPreviousEpochParticipation(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
+    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
+    const index: u64 = @intCast(try cb.arg(0).getValueInt64());
+    var view = try cached_state.state.previousEpochParticipation();
+    const flags = try view.get(index);
+    return try env.createInt64(@intCast(flags));
+}
+
+/// Get a single validator's current epoch participation flags.
+/// Arguments:
+/// - arg 0: validator index (number)
+/// Returns: number (u8 participation flags)
+pub fn BeaconStateView_getCurrentEpochParticipation(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
+    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
+    const index: u64 = @intCast(try cb.arg(0).getValueInt64());
+    var view = try cached_state.state.currentEpochParticipation();
+    const flags = try view.get(index);
+    return try env.createInt64(@intCast(flags));
+}
+
+/// Get the previous epoch shuffling.
+/// Returns: object with epoch (number) and activeIndices (number[])
+pub fn BeaconStateView_getPreviousShuffling(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
+    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
+    const shuffling = cached_state.epoch_cache.getPreviousShuffling();
+    return epochShufflingToNapiValue(env, shuffling);
+}
+
+/// Get the current epoch shuffling.
+/// Returns: object with epoch (number) and activeIndices (number[])
+pub fn BeaconStateView_getCurrentShuffling(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
+    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
+    const shuffling = cached_state.epoch_cache.getCurrentShuffling();
+    return epochShufflingToNapiValue(env, shuffling);
+}
+
+/// Get the next epoch shuffling.
+/// Returns: object with epoch (number) and activeIndices (number[])
+pub fn BeaconStateView_getNextShuffling(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
+    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
+    const shuffling = cached_state.epoch_cache.getNextEpochShuffling();
+    return epochShufflingToNapiValue(env, shuffling);
+}
+
+/// Helper to convert an EpochShuffling to a NAPI object.
+fn epochShufflingToNapiValue(env: napi.Env, shuffling: anytype) !napi.Value {
+    const obj = try env.createObject();
+    try obj.setNamedProperty("epoch", try env.createInt64(@intCast(shuffling.epoch)));
+    try obj.setNamedProperty(
+        "activeIndices",
+        try numberSliceToNapiValue(env, u64, shuffling.active_indices, .{}),
+    );
+    try obj.setNamedProperty("committeesPerSlot", try env.createInt64(@intCast(shuffling.committees_per_slot)));
+    return obj;
+}
+
+/// Compute the anchor checkpoint for the state.
+/// Returns: {checkpoint: Checkpoint, blockHeader: BeaconBlockHeader}
+pub fn BeaconStateView_computeAnchorCheckpoint(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
+    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
+    const result = st.computeAnchorCheckpoint(cached_state.state) catch {
+        try env.throwError("STATE_ERROR", "Failed to compute anchor checkpoint");
+        return env.getNull();
+    };
+
+    const obj = try env.createObject();
+    try obj.setNamedProperty(
+        "checkpoint",
+        try sszValueToNapiValue(env, ct.phase0.Checkpoint, &result.checkpoint),
+    );
+    try obj.setNamedProperty(
+        "blockHeader",
+        try sszValueToNapiValue(env, ct.phase0.BeaconBlockHeader, &result.block_header),
+    );
+    return obj;
+}
+
+/// Get the indexed sync committee at a given slot.
+/// Arguments:
+/// - arg 0: slot (number)
+/// Returns: object with validatorIndices (number[])
+pub fn BeaconStateView_getIndexedSyncCommittee(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
+    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
+    const slot: u64 = @intCast(try cb.arg(0).getValueInt64());
+
+    const sync_committee = cached_state.epoch_cache.getIndexedSyncCommittee(slot) catch {
+        try env.throwError("NO_SYNC_COMMITTEE", "Sync committee not available for requested slot");
+        return env.getNull();
+    };
+
+    const obj = try env.createObject();
+    try obj.setNamedProperty(
+        "validatorIndices",
+        try numberSliceToNapiValue(env, u64, sync_committee.getValidatorIndices(), .{}),
+    );
+    return obj;
+}
+
+/// Get the epoch shuffling for a given epoch.
+/// Accepts: epoch (number)
+/// Returns: object with epoch, activeIndices, committeesPerSlot — or null if epoch not cached.
+pub fn BeaconStateView_getShufflingAtEpoch(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
+    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
+    const epoch: u64 = @intCast(try cb.arg(0).getValueInt64());
+    const shuffling = cached_state.epoch_cache.getShufflingAtEpochOrNull(epoch) orelse {
+        return env.getNull();
+    };
+    return epochShufflingToNapiValue(env, shuffling);
+}
 
 /// Get the previous decision root for the state.
 pub fn BeaconStateView_previousDecisionRoot(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
@@ -1009,9 +1187,13 @@ pub fn register(env: napi.Env, exports: napi.Value) !void {
             getter(BeaconStateView_currentJustifiedCheckpoint),
             getter(BeaconStateView_finalizedCheckpoint),
             method(1, BeaconStateView_getBlockRoot),
+            method(1, BeaconStateView_getBlockRootAtEpoch),
+            method(1, BeaconStateView_getStateRootAtSlot),
             method(1, BeaconStateView_getRandaoMix),
             getter(BeaconStateView_previousEpochParticipation),
             getter(BeaconStateView_currentEpochParticipation),
+            method(1, BeaconStateView_getPreviousEpochParticipation),
+            method(1, BeaconStateView_getCurrentEpochParticipation),
             getter(BeaconStateView_latestExecutionPayloadHeader),
             getter(BeaconStateView_historicalSummaries),
             getter(BeaconStateView_pendingDeposits),
@@ -1023,7 +1205,10 @@ pub fn register(env: napi.Env, exports: napi.Value) !void {
             getter(BeaconStateView_proposerLookahead),
             // getter(BeaconStateView_executionPayloadAvailability),
 
-            // method(1, BeaconStateView_getShufflingAtEpoch),
+            method(1, BeaconStateView_getShufflingAtEpoch),
+            method(0, BeaconStateView_getPreviousShuffling),
+            method(0, BeaconStateView_getCurrentShuffling),
+            method(0, BeaconStateView_getNextShuffling),
             getter(BeaconStateView_previousDecisionRoot),
             getter(BeaconStateView_currentDecisionRoot),
             getter(BeaconStateView_nextDecisionRoot),
@@ -1037,10 +1222,13 @@ pub fn register(env: napi.Env, exports: napi.Value) !void {
             getter(BeaconStateView_currentSyncCommitteeIndexed),
             getter(BeaconStateView_syncProposerReward),
             method(1, BeaconStateView_getIndexedSyncCommitteeAtEpoch),
+            method(1, BeaconStateView_getIndexedSyncCommittee),
 
             getter(BeaconStateView_effectiveBalanceIncrements),
             method(0, BeaconStateView_getEffectiveBalanceIncrementsZeroInactive),
             method(1, BeaconStateView_getBalance),
+            method(0, BeaconStateView_getAllBalances),
+            method(0, BeaconStateView_getAllValidators),
             method(1, BeaconStateView_getValidator),
             method(1, BeaconStateView_getValidatorStatus),
             getter(BeaconStateView_validatorCount),
@@ -1067,6 +1255,7 @@ pub fn register(env: napi.Env, exports: napi.Value) !void {
             method(1, BeaconStateView_createMultiProof),
 
             method(0, BeaconStateView_computeUnrealizedCheckpoints),
+            method(0, BeaconStateView_computeAnchorCheckpoint),
 
             getter(BeaconStateView_clonedCount),
             getter(BeaconStateView_clonedCountWithTransferCache),
