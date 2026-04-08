@@ -1,6 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
-const napi = @import("zapi:napi");
+const napi = @import("zapi:zapi");
 const state_transition = @import("state_transition");
 
 var gpa: std.heap.DebugAllocator(.{}) = .init;
