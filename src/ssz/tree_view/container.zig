@@ -773,7 +773,7 @@ test "TreeView container clone drops uncommitted changes" {
     try std.testing.expectEqual(@as(u64, 1), try dropped.get("n"));
 }
 
-test "TreeView container clone(true) does not transfer cache" {
+test "TreeView container clone(false) does not transfer cache" {
     const allocator = std.testing.allocator;
     var pool = try Node.Pool.init(allocator, 1024);
     defer pool.deinit();
@@ -799,7 +799,7 @@ test "TreeView container clone(true) does not transfer cache" {
     try std.testing.expect(cloned_no_cache.child_data[0] == null);
 }
 
-test "TreeView container clone(false) transfers cache and clears source" {
+test "TreeView container clone(true) transfers cache and clears source" {
     const allocator = std.testing.allocator;
     var pool = try Node.Pool.init(allocator, 1024);
     defer pool.deinit();
