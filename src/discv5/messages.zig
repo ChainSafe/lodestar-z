@@ -219,7 +219,7 @@ pub const Nodes = struct {
         }
 
         while (!enr_list.atEnd()) {
-            const enr_bytes = enr_list.readRawItem() catch return Error.InvalidEncoding;
+            const enr_bytes = enr_list.readBytes() catch return Error.InvalidEncoding;
             try enrs.append(alloc, try alloc.dupe(u8, enr_bytes));
         }
         const owned = try enrs.toOwnedSlice(alloc);
@@ -400,4 +400,40 @@ test "discv5 messages: NODES encode/decode" {
     try std.testing.expectEqual(@as(usize, 2), decoded.enrs.len);
     try std.testing.expectEqualSlices(u8, enr_a, decoded.enrs[0]);
     try std.testing.expectEqualSlices(u8, enr_b, decoded.enrs[1]);
+}
+
+test "discv5 messages: NODES decode returns encoded ENR bytes" {
+    const alloc = std.testing.allocator;
+    const enr_mod = @import("enr.zig");
+    const hex_mod = @import("hex.zig");
+
+    const secret_key = hex_mod.hexToBytesComptime(32, "b71c71a67e1177ad4e901695e1b4b9ee17ae16c6668d313eac2f96dbcda3f291");
+    var builder = enr_mod.Builder.init(alloc, secret_key, 1);
+    builder.ip = [4]u8{ 127, 0, 0, 1 };
+    builder.udp = 9000;
+    const enr_bytes = try builder.encode();
+    defer alloc.free(enr_bytes);
+
+    const req_id = try ReqId.fromSlice("id");
+    const msg = Nodes{
+        .req_id = req_id,
+        .total = 1,
+        .enrs = &.{enr_bytes},
+    };
+
+    const encoded = try msg.encode(alloc);
+    defer alloc.free(encoded);
+
+    const decoded = try Nodes.decode(alloc, encoded);
+    defer {
+        for (decoded.enrs) |enr| alloc.free(enr);
+        alloc.free(decoded.enrs);
+    }
+
+    try std.testing.expectEqual(@as(usize, 1), decoded.enrs.len);
+    try std.testing.expectEqualSlices(u8, enr_bytes, decoded.enrs[0]);
+
+    var parsed = try enr_mod.decode(alloc, decoded.enrs[0]);
+    defer parsed.deinit();
+    try std.testing.expect(parsed.nodeId() != null);
 }
