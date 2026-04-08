@@ -1,32 +1,43 @@
 //! Pluggable time source abstraction.
 //!
-//! Allows injecting fake clocks for deterministic testing while using
-//! `std.Io.Clock.real` in production via `fromIo`.
+//! Tagged union with two variants:
+//!   `.io`   – production: reads wall-clock time from `std.Io`
+//!   `.fake` – testing: reads from a mutable `FakeTime` struct
 
 const std = @import("std");
 const slot_math = @import("slot_math.zig");
 
-pub const TimeSource = struct {
-    ctx: ?*anyopaque = null,
-    now_ms_fn: *const fn (ctx: ?*anyopaque) slot_math.UnixMs,
+/// Controllable time source for deterministic testing.
+pub const FakeTime = struct {
+    ms: slot_math.UnixMs = 0,
 
-    pub fn nowMs(self: TimeSource) slot_math.UnixMs {
-        return self.now_ms_fn(self.ctx);
+    pub fn setMs(self: *FakeTime, ms: slot_math.UnixMs) void {
+        self.ms = ms;
     }
 
-    /// Construct a TimeSource backed by std.Io.Clock.real.
-    /// The caller must ensure the pointed-to std.Io outlives this TimeSource.
-    pub fn fromIo(io: *std.Io) TimeSource {
-        return .{
-            .ctx = @ptrCast(io),
-            .now_ms_fn = struct {
-                fn nowMs(ctx: ?*anyopaque) slot_math.UnixMs {
-                    const p: *std.Io = @ptrCast(@alignCast(ctx.?));
-                    const ms = std.Io.Clock.real.now(p.*).toMilliseconds();
-                    std.debug.assert(ms >= 0);
-                    return @intCast(ms);
-                }
-            }.nowMs,
+    pub fn advanceMs(self: *FakeTime, delta: u64) void {
+        self.ms += delta;
+    }
+
+    pub fn advanceSlot(self: *FakeTime, config: slot_math.Config) void {
+        self.ms += config.slotDurationMs() orelse return;
+    }
+};
+
+pub const TimeSource = union(enum) {
+    /// Production: reads wall-clock time via std.Io.Clock.real.
+    io: std.Io,
+    /// Testing: reads from a mutable FakeTime pointer.
+    fake: *FakeTime,
+
+    pub fn nowMs(self: TimeSource) slot_math.UnixMs {
+        return switch (self) {
+            .io => |io_handle| blk: {
+                const ms = std.Io.Clock.real.now(io_handle).toMilliseconds();
+                std.debug.assert(ms >= 0);
+                break :blk @intCast(ms);
+            },
+            .fake => |f| f.ms,
         };
     }
 };

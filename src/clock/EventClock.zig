@@ -73,16 +73,14 @@ stopped: bool = false,
 loop_future: ?std.Io.Future(void) = null,
 
 next_listener_id: ListenerId = 1,
-slot_listeners: std.ArrayListUnmanaged(SlotListenerEntry) = .{},
-epoch_listeners: std.ArrayListUnmanaged(EpochListenerEntry) = .{},
-slot_snapshot: std.ArrayListUnmanaged(SlotSnapshot) = .{},
-epoch_snapshot: std.ArrayListUnmanaged(EpochSnapshot) = .{},
+slot_listeners: std.ArrayListUnmanaged(SlotListenerEntry) = .empty,
+epoch_listeners: std.ArrayListUnmanaged(EpochListenerEntry) = .empty,
+slot_snapshot: std.ArrayListUnmanaged(SlotSnapshot) = .empty,
+epoch_snapshot: std.ArrayListUnmanaged(EpochSnapshot) = .empty,
 
 waiters: WaiterQueue,
 
-/// Initialise in-place.  Takes `*EventClock` (not returning by value)
-/// because `TimeSource.fromIo` stores a pointer into `self.io`, making
-/// the struct self-referential.
+/// Initialise in-place.
 pub fn init(self: *EventClock, allocator: Allocator, config: Config, io_handle: std.Io) Error!void {
     self.* = .{
         .allocator = allocator,
@@ -90,7 +88,7 @@ pub fn init(self: *EventClock, allocator: Allocator, config: Config, io_handle: 
         .clock = undefined,
         .waiters = WaiterQueue.initContext({}),
     };
-    self.clock = SlotClock.init(config, TimeSource.fromIo(&self.io)) catch return error.InvalidConfig;
+    self.clock = SlotClock.init(config, .{ .io = io_handle }) catch return error.InvalidConfig;
 }
 
 /// Start the auto-advance loop.  Idempotent; second call is a no-op.
@@ -106,12 +104,14 @@ pub fn stop(self: *EventClock) void {
     self.abortAllWaiters();
 }
 
-/// Cancel the loop fiber and wait for it to finish.
+/// Signal the loop to stop, cancel the fiber, and wait for it to finish.
 pub fn join(self: *EventClock) void {
+    self.stop();
     var maybe_future = self.loop_future;
     self.loop_future = null;
     if (maybe_future) |*future| {
         future.cancel(self.io);
+        future.await(self.io);
     }
 }
 
@@ -451,13 +451,14 @@ fn runAutoLoop(self: *EventClock) void {
         };
         const sleep_ms = std.math.cast(i64, @max(@as(u64, 1), next_ms)) orelse std.math.maxInt(i64);
 
-        // Sleep failure (e.g., cancel from join()) is expected —
-        // re-check `stopped` flag before continuing.
+        // Sleep failure: cancellation (from join()) exits the loop;
+        // other errors re-check the stopped flag.
         std.Io.sleep(
             self.io,
             std.Io.Duration.fromMilliseconds(sleep_ms),
             .awake,
         ) catch |err| {
+            if (err == error.Canceled) break;
             std.log.debug("EventClock: sleep failed ({s}), retrying", .{@errorName(err)});
             continue;
         };

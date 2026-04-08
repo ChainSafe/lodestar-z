@@ -173,17 +173,6 @@ pub fn advanceTo(self: *SlotClock, target: Slot) AdvanceIterator {
 
 const testing = std.testing;
 
-var fake_ms: slot_math.UnixMs = 0;
-
-fn fakeNowMs(_: ?*anyopaque) slot_math.UnixMs {
-    return fake_ms;
-}
-
-const fake_time = TimeSource{
-    .ctx = null,
-    .now_ms_fn = fakeNowMs,
-};
-
 const test_cfg = Config{
     .genesis_time_sec = 100,
     .seconds_per_slot = 12,
@@ -192,8 +181,8 @@ const test_cfg = Config{
 };
 
 test "pre-genesis returns null, genesis fallback returns zero" {
-    fake_ms = 99_000;
-    var clock = try SlotClock.init(test_cfg, fake_time);
+    var fake = time_source.FakeTime{ .ms = 99_000 };
+    var clock = try SlotClock.init(test_cfg, .{ .fake = &fake });
     try testing.expectEqual(@as(?Slot, null), clock.currentSlot());
     try testing.expectEqual(@as(?Epoch, null), clock.currentEpoch());
     try testing.expectEqual(@as(Slot, 0), clock.currentSlotOrGenesis());
@@ -201,26 +190,26 @@ test "pre-genesis returns null, genesis fallback returns zero" {
 }
 
 test "currentSlot at genesis and advancing" {
-    fake_ms = 100_000;
-    var clock = try SlotClock.init(test_cfg, fake_time);
+    var fake = time_source.FakeTime{ .ms = 100_000 };
+    var clock = try SlotClock.init(test_cfg, .{ .fake = &fake });
     try testing.expectEqual(@as(?Slot, 0), clock.currentSlot());
 
-    fake_ms = 112_000;
+    fake.setMs(112_000);
     try testing.expectEqual(@as(?Slot, 1), clock.currentSlot());
 
-    fake_ms = 124_000;
+    fake.setMs(124_000);
     try testing.expectEqual(@as(?Slot, 2), clock.currentSlot());
 }
 
 test "currentEpoch" {
-    fake_ms = 100_000 + 32 * 12 * 1000;
-    var clock = try SlotClock.init(test_cfg, fake_time);
+    var fake = time_source.FakeTime{ .ms = 100_000 + 32 * 12 * 1000 };
+    var clock = try SlotClock.init(test_cfg, .{ .fake = &fake });
     try testing.expectEqual(@as(?Epoch, 1), clock.currentEpoch());
 }
 
 test "advanceTo produces correct slot events" {
-    fake_ms = 100_000;
-    var clock = try SlotClock.init(test_cfg, fake_time);
+    var fake = time_source.FakeTime{ .ms = 100_000 };
+    var clock = try SlotClock.init(test_cfg, .{ .fake = &fake });
 
     var events: [16]Event = undefined;
     var count: usize = 0;
@@ -238,8 +227,8 @@ test "advanceTo produces correct slot events" {
 }
 
 test "advanceTo across epoch boundary emits slot then epoch" {
-    fake_ms = 100_000;
-    var clock = try SlotClock.init(test_cfg, fake_time);
+    var fake = time_source.FakeTime{ .ms = 100_000 };
+    var clock = try SlotClock.init(test_cfg, .{ .fake = &fake });
     clock.current_slot = 31;
 
     var events: [16]Event = undefined;
@@ -257,8 +246,8 @@ test "advanceTo across epoch boundary emits slot then epoch" {
 }
 
 test "advanceTo from null (pre-genesis)" {
-    fake_ms = 99_000;
-    var clock = try SlotClock.init(test_cfg, fake_time);
+    var fake = time_source.FakeTime{ .ms = 99_000 };
+    var clock = try SlotClock.init(test_cfg, .{ .fake = &fake });
     try testing.expectEqual(@as(?Slot, null), clock.current_slot);
 
     var events: [16]Event = undefined;
@@ -276,8 +265,8 @@ test "advanceTo from null (pre-genesis)" {
 }
 
 test "advanceTo already at target returns nothing" {
-    fake_ms = 112_000;
-    var clock = try SlotClock.init(test_cfg, fake_time);
+    var fake = time_source.FakeTime{ .ms = 112_000 };
+    var clock = try SlotClock.init(test_cfg, .{ .fake = &fake });
 
     var count: usize = 0;
     var iter = clock.advanceTo(1);
@@ -286,45 +275,45 @@ test "advanceTo already at target returns nothing" {
 }
 
 test "gossip disparity: far from boundary" {
-    fake_ms = 103_000;
-    var clock = try SlotClock.init(test_cfg, fake_time);
+    var fake = time_source.FakeTime{ .ms = 103_000 };
+    var clock = try SlotClock.init(test_cfg, .{ .fake = &fake });
     try testing.expectEqual(@as(Slot, 0), clock.currentSlotWithGossipDisparity());
     try testing.expect(clock.isCurrentSlotGivenGossipDisparity(0));
     try testing.expect(!clock.isCurrentSlotGivenGossipDisparity(1));
 }
 
 test "gossip disparity: near next slot boundary" {
-    fake_ms = 111_600;
-    var clock = try SlotClock.init(test_cfg, fake_time);
+    var fake = time_source.FakeTime{ .ms = 111_600 };
+    var clock = try SlotClock.init(test_cfg, .{ .fake = &fake });
     try testing.expectEqual(@as(Slot, 1), clock.currentSlotWithGossipDisparity());
     try testing.expect(clock.isCurrentSlotGivenGossipDisparity(1));
 }
 
 test "gossip disparity: just after slot boundary" {
-    fake_ms = 112_300;
-    var clock = try SlotClock.init(test_cfg, fake_time);
+    var fake = time_source.FakeTime{ .ms = 112_300 };
+    var clock = try SlotClock.init(test_cfg, .{ .fake = &fake });
     try testing.expect(clock.isCurrentSlotGivenGossipDisparity(0));
 }
 
 test "gossip disparity: exact threshold (500ms) does NOT apply" {
     // next_slot_ms - now_ms == 500 → NOT < 500, so disparity doesn't apply
     // Slot 1 starts at 112_000ms. 500ms before = 111_500ms.
-    fake_ms = 111_500;
-    var clock = try SlotClock.init(test_cfg, fake_time);
+    var fake = time_source.FakeTime{ .ms = 111_500 };
+    var clock = try SlotClock.init(test_cfg, .{ .fake = &fake });
     // At exactly the threshold, disparity should NOT bump to next slot
     try testing.expectEqual(@as(Slot, 0), clock.currentSlotWithGossipDisparity());
     try testing.expect(!clock.isCurrentSlotGivenGossipDisparity(1));
 
     // 1ms closer (111_501): 112_000 - 111_501 = 499 < 500, disparity applies
-    fake_ms = 111_501;
-    clock = try SlotClock.init(test_cfg, fake_time);
+    fake.setMs(111_501);
+    clock = try SlotClock.init(test_cfg, .{ .fake = &fake });
     try testing.expectEqual(@as(Slot, 1), clock.currentSlotWithGossipDisparity());
     try testing.expect(clock.isCurrentSlotGivenGossipDisparity(1));
 }
 
 test "tolerance helpers" {
-    fake_ms = 112_000;
-    var clock = try SlotClock.init(test_cfg, fake_time);
+    var fake = time_source.FakeTime{ .ms = 112_000 };
+    var clock = try SlotClock.init(test_cfg, .{ .fake = &fake });
     try testing.expectEqual(@as(?Slot, 2), clock.slotWithFutureTolerance(12_000));
     try testing.expectEqual(@as(?Slot, 0), clock.slotWithPastTolerance(12_000));
     try testing.expectEqual(@as(?Slot, null), clock.slotWithFutureTolerance(std.math.maxInt(u64)));
@@ -333,8 +322,8 @@ test "tolerance helpers" {
 }
 
 test "secFromSlot and msFromSlot" {
-    fake_ms = 118_000;
-    var clock = try SlotClock.init(test_cfg, fake_time);
+    var fake = time_source.FakeTime{ .ms = 118_000 };
+    var clock = try SlotClock.init(test_cfg, .{ .fake = &fake });
     try testing.expectEqual(@as(?i64, 6), clock.secFromSlot(1, null));
     try testing.expectEqual(@as(?i64, 6000), clock.msFromSlot(1, null));
     try testing.expectEqual(@as(?i64, 0), clock.secFromSlot(1, 112));
