@@ -1287,10 +1287,21 @@ fn dialDiscoveredPeers(
     ds: *DiscoveryService,
 ) bool {
     const dial_budget = discoveryDialBudget(self);
-    if (dial_budget == 0) return false;
+    if (dial_budget == 0) {
+        if (self.peer_manager) |pm| {
+            std.log.debug("dialDiscoveredPeers: budget=0 (peers={d} dialing={d} max={d})", .{
+                pm.peerCount(), pm.dialingPeerCount(), pm.config.max_peers,
+            });
+        }
+        return false;
+    }
 
     const discovered_peers = ds.takeDiscoveredPeers(dial_budget);
     defer if (discovered_peers.len > 0) self.allocator.free(discovered_peers);
+
+    if (discovered_peers.len > 0) {
+        std.log.info("dialDiscoveredPeers: {d} candidates (budget={d})", .{ discovered_peers.len, dial_budget });
+    }
 
     var did_work = false;
     const pm = self.peer_manager;
