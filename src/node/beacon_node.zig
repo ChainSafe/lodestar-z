@@ -135,6 +135,10 @@ const SyncSegmentKey = struct {
 };
 
 pub const BlockIngressTicket = u64;
+pub const WaitAsyncIdleResult = enum {
+    idle,
+    shutdown,
+};
 
 const QueuedStateWorkOwner = union(enum) {
     generic: ?BlockIngressTicket,
@@ -639,15 +643,20 @@ pub const BeaconNode = struct {
         try self.queued_state_work_owners.ensureUnusedCapacity(self.allocator, 1);
 
         var owned_planned = planned;
-        const queued = self.chainService().tryQueuePlannedReadyBlockImport(owned_planned) catch |err| {
-            owned_planned.deinit(self.allocator);
+        const queue_result = self.chainService().tryQueuePlannedReadyBlockImport(owned_planned) catch |err| {
+            self.chainService().deinitPlannedReadyBlockImport(&owned_planned);
             return err;
         };
-        if (queued) {
-            self.queued_state_work_owners.appendAssumeCapacity(.{ .generic = maybe_ticket });
-            ticket_reserved = false;
-            owned_planned = undefined;
-            return .{ .queued = maybe_ticket };
+        switch (queue_result) {
+            .queued => {
+                self.queued_state_work_owners.appendAssumeCapacity(.{ .generic = maybe_ticket });
+                ticket_reserved = false;
+                owned_planned = undefined;
+                return .{ .queued = maybe_ticket };
+            },
+            .not_queued => |returned_planned| {
+                owned_planned = returned_planned;
+            },
         }
 
         const completed = self.chainService().executePlannedReadyBlockImportSync(owned_planned);
@@ -656,7 +665,7 @@ pub const BeaconNode = struct {
                 const source = failure.planned.block_input.source;
                 self.recordBlockImportResult(source, blockImportOutcomeLabel(failure.err), 1);
                 var owned_completed = completed;
-                owned_completed.deinit(self.allocator);
+                self.chainService().deinitCompletedReadyBlockImport(&owned_completed);
                 return failure.err;
             },
             .success => |prepared| {
@@ -780,6 +789,27 @@ pub const BeaconNode = struct {
                     },
                 },
                 .none => return .lost,
+            }
+        }
+    }
+
+    pub fn waitForAsyncIdle(self: *BeaconNode) WaitAsyncIdleResult {
+        while (true) {
+            _ = self.processPendingBlockStateWork();
+            _ = self.processPendingExecutionPayloadVerifications();
+            _ = self.processPendingExecutionForkchoiceUpdates();
+            self.dispatchWaitingExecutionPayloads();
+
+            switch (self.chainService().waitForCompletedReadyBlockImport()) {
+                .completed => continue,
+                .shutdown => return .shutdown,
+                .idle => {},
+            }
+
+            switch (self.execution_runtime.waitForAsyncCompletion()) {
+                .completed => continue,
+                .shutdown => return .shutdown,
+                .idle => return .idle,
             }
         }
     }
@@ -1886,18 +1916,23 @@ pub const BeaconNode = struct {
 
             try self.queued_state_work_owners.ensureUnusedCapacity(self.allocator, 1);
             var owned_planned = planned;
-            const queued = self.chainService().tryQueuePlannedReadyBlockImport(owned_planned) catch |err| {
-                owned_planned.deinit(self.allocator);
+            const queue_result = self.chainService().tryQueuePlannedReadyBlockImport(owned_planned) catch |err| {
+                self.chainService().deinitPlannedReadyBlockImport(&owned_planned);
                 return err;
             };
-            if (queued) {
-                self.queued_state_work_owners.appendAssumeCapacity(.{ .sync_segment = segment.key });
-                segment.in_flight = true;
-                owned_planned = undefined;
-                return true;
+            switch (queue_result) {
+                .queued => {
+                    self.queued_state_work_owners.appendAssumeCapacity(.{ .sync_segment = segment.key });
+                    segment.in_flight = true;
+                    owned_planned = undefined;
+                    return true;
+                },
+                .not_queued => |returned_planned| {
+                    owned_planned = returned_planned;
+                },
             }
 
-            owned_planned.deinit(self.allocator);
+            self.chainService().deinitPlannedReadyBlockImport(&owned_planned);
             return false;
         }
 
@@ -2014,11 +2049,11 @@ pub const BeaconNode = struct {
     }
 
     pub fn currentHeadSlot(self: *const BeaconNode) u64 {
-        return self.getHead().slot;
+        return self.chain.forkChoice().head.slot;
     }
 
     pub fn currentHeadRoot(self: *const BeaconNode) [32]u8 {
-        return self.getHead().root;
+        return self.chain.forkChoice().head.block_root;
     }
 
     pub fn currentFinalizedSlot(self: *const BeaconNode) u64 {

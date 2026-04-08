@@ -18,11 +18,16 @@ const types = @import("consensus_types");
 const preset = @import("preset").preset;
 const config_mod = @import("config");
 const fork_types = @import("fork_types");
+const networking = @import("networking");
+const StatusMessage = networking.messages.StatusMessage;
 
 const node_pkg = @import("node");
 const BeaconNode = node_pkg.BeaconNode;
+const reqresp_callbacks = node_pkg.reqresp_callbacks_mod;
 const identity_mod = node_pkg.identity;
-const SimNodeHarness = @import("sim_node_harness.zig").SimNodeHarness;
+const sim_node_harness = @import("sim_node_harness.zig");
+const SimNodeHarness = sim_node_harness.SimNodeHarness;
+const SyncPeer = sim_node_harness.SyncPeer;
 const sim_network = @import("sim_network.zig");
 const SimNetwork = sim_network.SimNetwork;
 const ClusterInvariantChecker = @import("cluster_invariant_checker.zig").ClusterInvariantChecker;
@@ -155,7 +160,7 @@ pub const SimCluster = struct {
 
         const checker = try ClusterInvariantChecker.init(allocator, config.num_nodes);
 
-        return .{
+        var self = SimCluster{
             .allocator = allocator,
             .prng = cluster_prng,
             .net_prng = net_prng,
@@ -170,6 +175,9 @@ pub const SimCluster = struct {
             .primary_config = primary_config,
             .beacon_nodes = beacon_nodes,
         };
+        errdefer self.deinit();
+        try self.connectAllPeers();
+        return self;
     }
 
     pub fn deinit(self: *SimCluster) void {
@@ -226,26 +234,21 @@ pub const SimCluster = struct {
                 );
             }
 
-            const delivered = try self.network.tick(slot_deadline_ns);
-            for (delivered) |msg| {
-                defer self.allocator.free(msg.data);
-
-                if (msg.message_type != .gossip) continue;
-
-                const to: usize = @intCast(msg.to);
-                const imported = try self.nodes[to].importExternalBlockBytes(msg.data, .gossip);
-                node_imported[to] = node_imported[to] or imported;
-            }
+            try self.scheduleStatusMaintenanceRequests(send_time_ns);
+            try self.drainNetworkUntil(slot_deadline_ns, &node_imported);
         }
 
         var nodes_received: u8 = 0;
         for (0..self.num_nodes) |i| {
+            var peers_buf: [256]SyncPeer = undefined;
+            const peer_count = self.collectReachablePeers(i, &peers_buf);
+            _ = try self.nodes[i].driveSyncWithPeers(peers_buf[0..peer_count]);
+
             if (!node_imported[i]) {
-                node_imported[i] = try self.catchUpLaggingNodeViaReqResp(i, target_slot);
+                node_imported[i] = (try self.nodes[i].currentSlot()) >= target_slot;
             }
 
-            const head_state = self.nodes[i].getHeadState() orelse return error.NoHeadState;
-            const head_slot = try head_state.state.slot();
+            const head_slot = try self.nodes[i].currentSlot();
             if (head_slot < target_slot) {
                 try self.nodes[i].advanceEmptyToSlot(target_slot);
             }
@@ -315,11 +318,109 @@ pub const SimCluster = struct {
         };
     }
 
+    fn scheduleStatusMaintenanceRequests(self: *SimCluster, current_time_ns: u64) !void {
+        const now_ms = current_time_ns / std.time.ns_per_ms;
+
+        for (0..self.num_nodes) |node_idx| {
+            const pm = self.beacon_nodes[node_idx].peer_manager orelse continue;
+            var actions = pm.maintenance(now_ms, .{}) catch continue;
+            defer actions.deinit(self.allocator);
+
+            var request_bytes: [StatusMessage.fixed_size]u8 = undefined;
+            const local_status = self.beacon_nodes[node_idx].getStatus();
+            _ = StatusMessage.serializeIntoBytes(&local_status, &request_bytes);
+
+            for (actions.peers_to_restatus) |peer_id| {
+                const peer_idx = self.findNodeIndexByPeerId(peer_id) orelse continue;
+                if (self.network.partition_set[node_idx][peer_idx] or self.network.partition_set[peer_idx][node_idx]) {
+                    continue;
+                }
+                _ = try self.network.send(
+                    @intCast(node_idx),
+                    @intCast(peer_idx),
+                    &request_bytes,
+                    .req_resp_request,
+                    current_time_ns,
+                );
+            }
+        }
+    }
+
+    fn drainNetworkUntil(self: *SimCluster, deadline_ns: u64, node_imported: *[256]bool) !void {
+        var iterations: usize = 0;
+        while (iterations < 32) : (iterations += 1) {
+            const delivered = try self.network.tick(deadline_ns);
+            if (delivered.len == 0) break;
+
+            for (delivered) |msg| {
+                defer self.allocator.free(msg.data);
+
+                const to: usize = @intCast(msg.to);
+                switch (msg.message_type) {
+                    .gossip => {
+                        const imported = try self.nodes[to].importExternalBlockBytes(msg.data, .gossip);
+                        node_imported[to] = node_imported[to] or imported;
+                    },
+                    .gossip_attestation => {},
+                    .req_resp_request => try self.handleReqRespRequest(msg),
+                    .req_resp_response => try self.handleReqRespResponse(msg),
+                }
+            }
+        }
+    }
+
+    fn handleReqRespRequest(self: *SimCluster, msg: sim_network.DeliveredMessage) !void {
+        const to: usize = @intCast(msg.to);
+        const chunks = self.beacon_nodes[to].onReqResp(.status, msg.data) catch |err| {
+            const response_bytes = try sim_network.encodeReqRespResponse(self.allocator, .server_error, @errorName(err));
+            defer self.allocator.free(response_bytes);
+            _ = try self.network.send(msg.to, msg.from, response_bytes, .req_resp_response, msg.deliver_at_ns);
+            return;
+        };
+        defer networking.freeResponseChunks(self.beacon_nodes[to].allocator, chunks);
+
+        const chunk = if (chunks.len == 1) chunks[0] else networking.ResponseChunk{
+            .result = .server_error,
+            .context_bytes = null,
+            .ssz_payload = "unexpected_status_chunk_count",
+        };
+        const response_bytes = try sim_network.encodeReqRespResponse(self.allocator, chunk.result, chunk.ssz_payload);
+        defer self.allocator.free(response_bytes);
+        _ = try self.network.send(msg.to, msg.from, response_bytes, .req_resp_response, msg.deliver_at_ns);
+    }
+
+    fn handleReqRespResponse(self: *SimCluster, msg: sim_network.DeliveredMessage) !void {
+        const to: usize = @intCast(msg.to);
+        const from: usize = @intCast(msg.from);
+        const decoded = sim_network.decodeReqRespResponse(msg.data) catch return;
+        if (decoded.result != .success) return;
+
+        var peer_status: StatusMessage.Type = undefined;
+        StatusMessage.deserializeFromBytes(decoded.payload, &peer_status) catch return;
+        _ = reqresp_callbacks.handlePeerStatusAtTime(
+            self.beacon_nodes[to],
+            self.beacon_nodes[from].api_node_identity.peer_id,
+            peer_status,
+            null,
+            msg.deliver_at_ns / std.time.ns_per_ms,
+        );
+    }
+
+    fn findNodeIndexByPeerId(self: *const SimCluster, peer_id: []const u8) ?usize {
+        for (0..self.num_nodes) |idx| {
+            if (std.mem.eql(u8, self.beacon_nodes[idx].api_node_identity.peer_id, peer_id)) {
+                return idx;
+            }
+        }
+        return null;
+    }
+
     /// Create a network partition between two groups of nodes.
     pub fn partitionGroups(self: *SimCluster, group_a: []const u8, group_b: []const u8) void {
         for (group_a) |a| {
             for (group_b) |b| {
                 self.network.partition(a, b);
+                self.disconnectPeerPair(a, b);
             }
         }
     }
@@ -327,73 +428,65 @@ pub const SimCluster = struct {
     /// Heal all network partitions.
     pub fn healAllPartitions(self: *SimCluster) void {
         self.network.healAll();
+        self.reconnectAllPeers() catch {};
     }
 
-    fn catchUpLaggingNodeViaReqResp(
-        self: *SimCluster,
-        node_idx: usize,
-        target_slot: u64,
-    ) !bool {
-        var imported_any = false;
-
-        while (true) {
-            const local_head = self.beacon_nodes[node_idx].getHead();
-            const peer_idx = self.bestReachableSyncPeer(node_idx) orelse break;
-            const peer_head = self.beacon_nodes[peer_idx].getHead();
-
-            const local_finalized_slot = local_head.finalized_epoch * preset.SLOTS_PER_EPOCH;
-            const peer_finalized_slot = peer_head.finalized_epoch * preset.SLOTS_PER_EPOCH;
-            const common_finalized_slot = @min(local_finalized_slot, peer_finalized_slot);
-            const start_slot = common_finalized_slot + 1;
-
-            if (start_slot > peer_head.slot) break;
-
-            const imported = try self.nodes[node_idx].syncBlocksByRangeFromPeer(
-                self.beacon_nodes[peer_idx],
-                start_slot,
-                peer_head.slot,
-            );
-            if (imported == 0) break;
-            imported_any = true;
-
-            const updated_head = self.beacon_nodes[node_idx].getHead();
-            if (updated_head.slot >= target_slot and std.mem.eql(u8, &updated_head.root, &peer_head.root)) {
-                break;
+    fn connectAllPeers(self: *SimCluster) !void {
+        for (0..self.num_nodes) |a| {
+            for (a + 1..self.num_nodes) |b| {
+                try self.reconnectPeerPair(@intCast(a), @intCast(b));
             }
         }
-
-        return imported_any or (try self.nodes[node_idx].currentSlot()) >= target_slot;
     }
 
-    fn bestReachableSyncPeer(
+    fn reconnectAllPeers(self: *SimCluster) !void {
+        for (0..self.num_nodes) |a| {
+            for (a + 1..self.num_nodes) |b| {
+                if (self.network.partition_set[a][b] or self.network.partition_set[b][a]) continue;
+                try self.reconnectPeerPair(@intCast(a), @intCast(b));
+            }
+        }
+    }
+
+    fn reconnectPeerPair(self: *SimCluster, a: u8, b: u8) !void {
+        const a_idx: usize = @intCast(a);
+        const b_idx: usize = @intCast(b);
+        try self.nodes[a_idx].connectPeer(.{
+            .peer_id = self.beacon_nodes[b_idx].api_node_identity.peer_id,
+            .node = self.beacon_nodes[b_idx],
+        });
+        try self.nodes[b_idx].connectPeer(.{
+            .peer_id = self.beacon_nodes[a_idx].api_node_identity.peer_id,
+            .node = self.beacon_nodes[a_idx],
+        });
+    }
+
+    fn disconnectPeerPair(self: *SimCluster, a: u8, b: u8) void {
+        const a_idx: usize = @intCast(a);
+        const b_idx: usize = @intCast(b);
+        self.nodes[a_idx].disconnectPeer(self.beacon_nodes[b_idx].api_node_identity.peer_id);
+        self.nodes[b_idx].disconnectPeer(self.beacon_nodes[a_idx].api_node_identity.peer_id);
+    }
+
+    fn collectReachablePeers(
         self: *const SimCluster,
         node_idx: usize,
-    ) ?usize {
-        const local_head = self.beacon_nodes[node_idx].getHead();
-        var best_idx: ?usize = null;
-        var best_slot: u64 = local_head.slot;
-
+        buf: *[256]SyncPeer,
+    ) usize {
+        var count: usize = 0;
         for (0..self.num_nodes) |peer_idx| {
             if (peer_idx == node_idx) continue;
             if (self.network.partition_set[node_idx][peer_idx] or self.network.partition_set[peer_idx][node_idx]) {
                 continue;
             }
 
-            const peer_head = self.beacon_nodes[peer_idx].getHead();
-            if (peer_head.slot > best_slot) {
-                best_slot = peer_head.slot;
-                best_idx = peer_idx;
-                continue;
-            }
-            if (peer_head.slot == best_slot and
-                best_idx == null and
-                !std.mem.eql(u8, &peer_head.root, &local_head.root))
-            {
-                best_idx = peer_idx;
-            }
+            buf[count] = .{
+                .peer_id = self.beacon_nodes[peer_idx].api_node_identity.peer_id,
+                .node = self.beacon_nodes[peer_idx],
+            };
+            count += 1;
         }
-
-        return best_idx;
+        return count;
     }
 
     fn shouldSkip(self: *SimCluster) bool {

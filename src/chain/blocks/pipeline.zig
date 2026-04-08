@@ -25,6 +25,7 @@ const BlsThreadPool = @import("bls").ThreadPool;
 
 const consensus_types = @import("consensus_types");
 const preset = @import("preset").preset;
+const ssz = @import("ssz");
 const state_transition = @import("state_transition");
 const regen_mod = @import("../regen/root.zig");
 const CachedBeaconState = state_transition.CachedBeaconState;
@@ -157,7 +158,6 @@ pub const PlannedBlockImport = struct {
     block_input: BlockInput,
     parent_block_root: [32]u8,
     parent_state_root: [32]u8,
-    pre_state: ?*CachedBeaconState,
     parent_slot: Slot,
     data_availability_status: DataAvailabilityStatus,
     precomputed_body_root: ?[32]u8,
@@ -166,6 +166,25 @@ pub const PlannedBlockImport = struct {
     pub fn deinit(self: *PlannedBlockImport, allocator: Allocator) void {
         self.block_input.block.deinit(allocator);
         self.* = undefined;
+    }
+};
+
+pub const StateTransitionJob = struct {
+    planned: PlannedBlockImport,
+    transient_pre_state: *CachedBeaconState,
+
+    pub fn deinit(self: *StateTransitionJob, allocator: Allocator, state_regen: *StateRegen) void {
+        self.planned.deinit(allocator);
+        state_regen.destroyTransientState(self.transient_pre_state);
+        self.* = undefined;
+    }
+
+    pub fn releasePlanned(self: *StateTransitionJob) PlannedBlockImport {
+        const planned = self.planned;
+        self.planned = undefined;
+        self.transient_pre_state = undefined;
+        self.* = undefined;
+        return planned;
     }
 };
 
@@ -221,13 +240,18 @@ pub fn processBlock(
     return switch (plan_result) {
         .skipped => |skip| skip.result,
         .planned => |planned| {
+            var owned_planned = planned;
+            var planned_consumed = false;
+            errdefer if (!planned_consumed) owned_planned.deinit(ctx.allocator);
+            const pre_state = try getPlannedBlockImportPreState(ctx, owned_planned);
             var prepared = try executePlannedBlockImport(
                 ctx.allocator,
-                ctx.state_regen,
                 ctx.state_graph_gate,
                 ctx.block_bls_thread_pool,
-                planned,
+                &owned_planned,
+                pre_state,
             );
+            planned_consumed = true;
             defer prepared.deinit(ctx.allocator);
             const exec_status = try verify_exec.verifyExecutionPayload(
                 ctx.allocator,
@@ -283,9 +307,9 @@ pub fn planBlockForImport(
                 return BlockImportError.InternalError) orelse
                 return BlockImportError.PrestateMissing;
             // Stage 2: Fast pre-state cache lookup only.
-            // Cold-path regen/replay now runs in executePlannedBlockImport so it
-            // can be offloaded to the state worker.
-            const pre_state = getCachedPreState(ctx, parent_state_root, sanity.block_slot) catch
+            // Cold misses are resolved through queued regen immediately before
+            // execution so cache publication stays on the chain side.
+            _ = getCachedPreState(ctx, sanity.parent_root, parent_state_root, sanity.parent_slot, sanity.block_slot) catch
                 return BlockImportError.InternalError;
 
             // Stage 3: Data availability check.
@@ -295,7 +319,6 @@ pub fn planBlockForImport(
                 .block_input = block_input,
                 .parent_block_root = sanity.parent_root,
                 .parent_state_root = parent_state_root,
-                .pre_state = pre_state,
                 .parent_slot = sanity.parent_slot,
                 .data_availability_status = da_status,
                 .precomputed_body_root = sanity.body_root,
@@ -305,28 +328,29 @@ pub fn planBlockForImport(
     }
 }
 
+pub fn getPlannedBlockImportPreState(
+    ctx: PipelineContext,
+    planned: PlannedBlockImport,
+) BlockImportError!*CachedBeaconState {
+    return ctx.queued_regen.getPreState(
+        planned.parent_block_root,
+        planned.parent_state_root,
+        planned.parent_slot,
+        planned.block_input.block.beaconBlock().slot(),
+        .block_import,
+    ) catch |err| switch (err) {
+        error.NoPreStateAvailable => BlockImportError.PrestateMissing,
+        else => BlockImportError.InternalError,
+    };
+}
+
 pub fn executePlannedBlockImport(
     allocator: Allocator,
-    state_regen: *StateRegen,
     state_graph_gate: *StateGraphGate,
     block_bls_thread_pool: ?*BlsThreadPool,
-    planned: PlannedBlockImport,
+    planned: *PlannedBlockImport,
+    pre_state: *CachedBeaconState,
 ) BlockImportError!PreparedBlockImport {
-    var owned_pre_state: ?*CachedBeaconState = null;
-    defer if (owned_pre_state) |state| {
-        state_regen.destroyTransientState(state);
-    };
-
-    const pre_state = planned.pre_state orelse blk: {
-        const cold_state = state_regen.loadPreStateUncached(
-            planned.parent_block_root,
-            planned.parent_state_root,
-            planned.block_input.block.beaconBlock().slot(),
-        ) catch return BlockImportError.PrestateMissing;
-        owned_pre_state = cold_state;
-        break :blk cold_state;
-    };
-
     const stf_result = try execute_stf.executeStateTransition(
         allocator,
         planned.block_input,
@@ -337,16 +361,63 @@ pub fn executePlannedBlockImport(
         state_graph_gate,
         block_bls_thread_pool,
     );
+
+    const block_input = planned.block_input;
+    const parent_slot = planned.parent_slot;
+    const data_availability_status = planned.data_availability_status;
+    const opts = planned.opts;
+    planned.* = undefined;
+
     return .{
-        .block_input = planned.block_input,
+        .block_input = block_input,
         .post_state = stf_result.post_state,
         .block_root = stf_result.block_root,
         .state_root = stf_result.state_root,
-        .parent_slot = planned.parent_slot,
-        .data_availability_status = planned.data_availability_status,
+        .parent_slot = parent_slot,
+        .data_availability_status = data_availability_status,
         .proposer_balance_delta = stf_result.proposer_balance_delta,
-        .opts = planned.opts,
+        .opts = opts,
     };
+}
+
+pub fn captureStateTransitionJob(
+    allocator: Allocator,
+    state_graph_gate: *StateGraphGate,
+    planned: PlannedBlockImport,
+    pre_state: *CachedBeaconState,
+) BlockImportError!StateTransitionJob {
+    var state_graph_lease = state_graph_gate.acquire();
+    defer state_graph_lease.release();
+
+    const transient_pre_state = pre_state.clone(allocator, .{
+        .transfer_cache = false,
+    }) catch return BlockImportError.InternalError;
+    return .{
+        .planned = planned,
+        .transient_pre_state = transient_pre_state,
+    };
+}
+
+pub fn executeStateTransitionJob(
+    allocator: Allocator,
+    state_regen: *StateRegen,
+    state_graph_gate: *StateGraphGate,
+    block_bls_thread_pool: ?*BlsThreadPool,
+    job: *StateTransitionJob,
+) BlockImportError!PreparedBlockImport {
+    const transient_pre_state = job.transient_pre_state;
+    defer {
+        state_regen.destroyTransientState(transient_pre_state);
+        job.transient_pre_state = undefined;
+    }
+
+    return executePlannedBlockImport(
+        allocator,
+        state_graph_gate,
+        block_bls_thread_pool,
+        &job.planned,
+        transient_pre_state,
+    );
 }
 
 pub fn finishPreparedBlockImport(
@@ -405,12 +476,17 @@ pub fn processBlockBatch(
             },
             .planned => |planned| {
                 var owned_planned = planned;
+                const pre_state = getPlannedBlockImportPreState(ctx, owned_planned) catch |err| {
+                    owned_planned.deinit(ctx.allocator);
+                    results[i] = classifyBatchError(err);
+                    continue;
+                };
                 var prepared = executePlannedBlockImport(
                     ctx.allocator,
-                    ctx.state_regen,
                     ctx.state_graph_gate,
                     ctx.block_bls_thread_pool,
-                    owned_planned,
+                    &owned_planned,
+                    pre_state,
                 ) catch |err| {
                     owned_planned.deinit(ctx.allocator);
                     results[i] = classifyBatchError(err);
@@ -503,10 +579,17 @@ fn invalidateExecutionBranch(
 /// Get the cached pre-state for a block without falling through to replay.
 fn getCachedPreState(
     ctx: PipelineContext,
+    parent_block_root: [32]u8,
     parent_state_root: [32]u8,
+    parent_slot: Slot,
     block_slot: Slot,
 ) !?*CachedBeaconState {
-    return ctx.queued_regen.getCachedPreState(parent_state_root, block_slot);
+    return ctx.queued_regen.getCachedPreState(
+        parent_block_root,
+        parent_state_root,
+        parent_slot,
+        block_slot,
+    );
 }
 
 fn getParentStateRoot(ctx: PipelineContext, parent_root: [32]u8) !?[32]u8 {
@@ -538,6 +621,8 @@ fn deserializeSignedBlockStateRoot(ctx: PipelineContext, block_bytes: []const u8
 // Tests
 // ---------------------------------------------------------------------------
 
+const RegenRuntimeFixture = @import("../regen/test_fixture.zig").RegenRuntimeFixture;
+
 test "PipelineContext struct compiles" {
     _ = PipelineContext;
 }
@@ -545,4 +630,129 @@ test "PipelineContext struct compiles" {
 test "BatchBlockResult union layout" {
     const result = BatchBlockResult{ .skipped = BlockImportError.AlreadyKnown };
     try std.testing.expect(result == .skipped);
+}
+
+test "StateTransitionJob executes with transient worker-owned pre-state" {
+    const allocator = std.testing.allocator;
+    defer state_transition.deinitStateTransition();
+
+    var fixture = try RegenRuntimeFixture.init(allocator, 64);
+    defer fixture.deinit();
+
+    const parent_state_root = try fixture.seedHeadState();
+    const pre_state = fixture.block_cache.get(parent_state_root).?;
+
+    var latest_header = try fixture.published_state.state.latestBlockHeader();
+    const parent_block_root = (try latest_header.hashTreeRoot()).*;
+    const parent_slot = try fixture.published_state.state.slot();
+    const target_slot = parent_slot + 1;
+
+    var generation_state = try fixture.clonePublishedState();
+    defer {
+        generation_state.deinit();
+        allocator.destroy(generation_state);
+    }
+    try state_transition.processSlots(allocator, generation_state, target_slot, .{});
+
+    const signed_block = try createTestSignedBlock(allocator, generation_state, target_slot);
+
+    const planned = PlannedBlockImport{
+        .block_input = .{
+            .block = .{ .full_electra = signed_block },
+            .source = .gossip,
+            .da_status = .available,
+        },
+        .parent_block_root = parent_block_root,
+        .parent_state_root = parent_state_root,
+        .parent_slot = parent_slot,
+        .data_availability_status = .available,
+        .precomputed_body_root = null,
+        .opts = .{
+            .skip_future_slot = true,
+            .skip_signatures = true,
+        },
+    };
+
+    var job = try captureStateTransitionJob(
+        allocator,
+        fixture.shared_state_graph.gate,
+        planned,
+        pre_state,
+    );
+    try std.testing.expect(job.transient_pre_state != pre_state);
+
+    var prepared = try executeStateTransitionJob(
+        allocator,
+        fixture.regen,
+        fixture.shared_state_graph.gate,
+        null,
+        &job,
+    );
+    defer prepared.deinit(allocator);
+
+    try std.testing.expectEqual(target_slot, prepared.block_input.block.beaconBlock().slot());
+    try std.testing.expectEqual(parent_slot, prepared.parent_slot);
+}
+
+fn createTestSignedBlock(
+    allocator: Allocator,
+    cached_state: *CachedBeaconState,
+    target_slot: Slot,
+) !*consensus_types.electra.SignedBeaconBlock.Type {
+    const state = cached_state.state;
+    const epoch_cache = cached_state.epoch_cache;
+
+    const proposer_index = epoch_cache.getBeaconProposer(target_slot) catch 0;
+    var latest_header = try state.latestBlockHeader();
+    const parent_root = try latest_header.hashTreeRoot();
+
+    const genesis_time = try state.genesisTime();
+    const seconds_per_slot = cached_state.config.chain.SECONDS_PER_SLOT;
+    const expected_timestamp = genesis_time + target_slot * seconds_per_slot;
+
+    var execution_payload = consensus_types.electra.ExecutionPayload.default_value;
+    execution_payload.timestamp = expected_timestamp;
+    const latest_block_hash = state.latestExecutionPayloadHeaderBlockHash() catch &([_]u8{0} ** 32);
+    execution_payload.parent_hash = latest_block_hash.*;
+
+    const current_epoch = state_transition.computeEpochAtSlot(target_slot);
+    const randao_mix = try state_transition.getRandaoMix(
+        .electra,
+        state.castToFork(.electra),
+        current_epoch,
+    );
+    execution_payload.prev_randao = randao_mix.*;
+
+    const signed_block = try allocator.create(consensus_types.electra.SignedBeaconBlock.Type);
+    errdefer allocator.destroy(signed_block);
+
+    signed_block.* = .{
+        .message = .{
+            .slot = target_slot,
+            .proposer_index = proposer_index,
+            .parent_root = parent_root.*,
+            .state_root = [_]u8{0} ** 32,
+            .body = .{
+                .randao_reveal = [_]u8{0} ** 96,
+                .eth1_data = consensus_types.phase0.Eth1Data.default_value,
+                .graffiti = [_]u8{0} ** 32,
+                .proposer_slashings = consensus_types.phase0.ProposerSlashings.default_value,
+                .attester_slashings = consensus_types.phase0.AttesterSlashings.default_value,
+                .attestations = consensus_types.electra.Attestations.default_value,
+                .deposits = consensus_types.phase0.Deposits.default_value,
+                .voluntary_exits = consensus_types.phase0.VoluntaryExits.default_value,
+                .sync_aggregate = .{
+                    .sync_committee_bits = ssz.BitVectorType(preset.SYNC_COMMITTEE_SIZE).default_value,
+                    .sync_committee_signature = consensus_types.primitive.BLSSignature.default_value,
+                },
+                .execution_payload = execution_payload,
+                .bls_to_execution_changes = consensus_types.capella.SignedBLSToExecutionChanges.default_value,
+                .blob_kzg_commitments = consensus_types.electra.BlobKzgCommitments.default_value,
+                .execution_requests = consensus_types.electra.ExecutionRequests.default_value,
+            },
+        },
+        .signature = consensus_types.primitive.BLSSignature.default_value,
+    };
+
+    return signed_block;
 }

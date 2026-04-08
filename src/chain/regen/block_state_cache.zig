@@ -63,8 +63,12 @@ pub const BlockStateCache = struct {
     pub fn add(self: *BlockStateCache, state: *CachedBeaconState, is_head: bool) ![32]u8 {
         const root = (try state.state.hashTreeRoot()).*;
 
-        if (self.cache.get(root) != null) {
-            // Already exists — update position
+        if (self.cache.get(root)) |existing| {
+            // Already exists — keep the published cached state and drop any
+            // duplicate transient copy handed in by the caller.
+            if (existing != state) {
+                self.disposeState(state);
+            }
             if (is_head) {
                 self.moveToHead(root);
             } else {
@@ -453,4 +457,33 @@ test "BlockStateCache: re-adding existing state moves position" {
     _ = try cache.add(state1, false);
     try std.testing.expectEqual(@as(usize, 3), cache.size());
     try std.testing.expect(cache.get(root1) != null);
+}
+
+test "BlockStateCache: duplicate root disposes incoming transient state" {
+    const Node = @import("persistent_merkle_tree").Node;
+    const TestCachedBeaconState = @import("state_transition").test_utils.TestCachedBeaconState;
+    const allocator = std.testing.allocator;
+    const pool_size = 256 * 5;
+    var pool = try Node.Pool.init(allocator, pool_size);
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 16);
+    defer test_state.deinit();
+
+    var state_disposer = StateDisposer.init(allocator, std.testing.io);
+    defer state_disposer.deinit();
+
+    var cache = BlockStateCache.init(allocator, 2, &state_disposer);
+    defer cache.deinit();
+
+    const state1 = try test_state.cached_state.clone(allocator, .{});
+    const root1 = try cache.add(state1, false);
+
+    const duplicate = try test_state.cached_state.clone(allocator, .{});
+    const root2 = try cache.add(duplicate, true);
+
+    try std.testing.expectEqual(root1, root2);
+    try std.testing.expectEqual(@as(usize, 1), cache.size());
+    try std.testing.expect(cache.get(root1) == state1);
+    try std.testing.expectEqual(root1, cache.head_root.?);
 }

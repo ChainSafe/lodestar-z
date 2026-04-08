@@ -18,6 +18,7 @@ const ApiContext = api_mod.context.ApiContext;
 const ApiNodeIdentity = api_mod.types.NodeIdentity;
 const identity_mod = @import("identity.zig");
 const sync_mod = @import("sync");
+const SyncService = sync_mod.SyncService;
 const UnknownBlockSync = sync_mod.UnknownBlockSync;
 const UnknownChainSync = sync_mod.UnknownChainSync;
 const processor_mod = @import("processor");
@@ -29,7 +30,9 @@ const BeaconNodeBuilder = @import("beacon_node.zig").BeaconNode.Builder;
 const InitConfig = @import("beacon_node.zig").BeaconNode.InitConfig;
 const execution_port_mod = @import("execution_port.zig");
 const ExecutionRuntime = @import("execution_runtime.zig").ExecutionRuntime;
-const custody_mod = @import("networking").custody;
+const networking = @import("networking");
+const PeerManager = networking.PeerManager;
+const custody_mod = networking.custody;
 
 const BlsThreadPools = struct {
     block: *BlsThreadPool,
@@ -585,11 +588,41 @@ fn freeAddressList(allocator: Allocator, addresses: []const []const u8) void {
 fn wireBootstrappedNode(self: *BeaconNode) !void {
     self.chain.setExecutionPort(execution_port_mod.make(self));
 
-    if (self.sync_callback_ctx == null) {
-        const cb_ctx = try self.allocator.create(SyncCallbackCtx);
-        cb_ctx.* = .{ .node = self };
-        self.sync_callback_ctx = cb_ctx;
-        self.unknown_block_sync.setCallbacks(cb_ctx.unknownBlockCallbacks());
+    if (self.peer_manager == null) {
+        const pm = try self.allocator.create(PeerManager);
+        errdefer self.allocator.destroy(pm);
+        pm.* = PeerManager.init(self.allocator, .{
+            .target_peers = self.node_options.target_peers,
+            .target_group_peers = self.node_options.target_group_peers,
+            .local_custody_columns = self.chain_runtime.custody_columns,
+        });
+        self.peer_manager = pm;
+    }
+
+    const cb_ctx = self.sync_callback_ctx orelse blk: {
+        const created = try self.allocator.create(SyncCallbackCtx);
+        created.* = .{ .node = self };
+        self.sync_callback_ctx = created;
+        break :blk created;
+    };
+    self.unknown_block_sync.setCallbacks(cb_ctx.unknownBlockCallbacks());
+    self.unknown_chain_sync.setCallbacks(cb_ctx.unknownChainCallbacks());
+    self.unknown_chain_sync.setForkChoice(cb_ctx.unknownChainForkChoiceQuery());
+
+    if (self.sync_service_inst == null) {
+        const sync_svc = try self.allocator.create(SyncService);
+        errdefer self.allocator.destroy(sync_svc);
+        sync_svc.* = SyncService.init(
+            self.allocator,
+            cb_ctx.syncServiceCallbacks(),
+            self.currentHeadSlot(),
+            0,
+        );
+        sync_svc.is_single_node = self.node_options.sync_is_single_node;
+        if (sync_svc.is_single_node) {
+            sync_svc.onHeadUpdate(self.currentHeadSlot());
+        }
+        self.sync_service_inst = sync_svc;
     }
 
     if (self.api_bindings == null) {

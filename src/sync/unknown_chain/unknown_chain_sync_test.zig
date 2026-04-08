@@ -8,8 +8,8 @@ const UnknownChainSync = unknown_chain_sync_mod.UnknownChainSync;
 const Callbacks = unknown_chain_sync_mod.Callbacks;
 const ForkChoiceQuery = unknown_chain_sync_mod.ForkChoiceQuery;
 const MinimalHeader = backwards_chain.MinimalHeader;
+const PeerSet = backwards_chain.PeerSet;
 const MAX_CHAINS: usize = 64;
-
 
 /// Test stub for fork choice.
 const TestForkChoice = struct {
@@ -60,8 +60,9 @@ const TestCallbacks = struct {
         const self: *TestCallbacks = @ptrCast(@alignCast(ptr));
         self.fetch_requests.append(self.allocator, .{ .root = root }) catch {};
     }
-    fn processLinkedChain(ptr: *anyopaque, linking_root: [32]u8, headers: []const MinimalHeader) void {
+    fn processLinkedChain(ptr: *anyopaque, linking_root: [32]u8, headers: []const MinimalHeader, peers: *const PeerSet) void {
         const self: *TestCallbacks = @ptrCast(@alignCast(ptr));
+        _ = peers;
         self.linked_chains.append(self.allocator, .{
             .linking_root = linking_root,
             .header_count = headers.len,

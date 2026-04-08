@@ -217,7 +217,7 @@ pub fn computeSyncCommitteeRewards(
         if (filter.count() > 0 and !filter.contains(validator_index)) continue;
         try rewards.append(allocator, .{
             .validator_index = validator_index,
-            .reward = entry.value_ptr.*, 
+            .reward = entry.value_ptr.*,
         });
     }
 
@@ -244,7 +244,11 @@ fn loadFullBlock(
 fn getPreStateForBlock(query: ChainQuery, block: *const AnyBeaconBlock) !*CachedBeaconState {
     const parent_root = block.parentRoot().*;
     const parent_state_root = (try query.stateRootByBlockRoot(parent_root)) orelse return error.StateNotAvailable;
-    return query.chain.queued_regen.getPreState(parent_root, parent_state_root, block.slot(), .api) catch |err| switch (err) {
+    const parent_block_bytes = (try query.blockBytesByRoot(parent_root)) orelse return error.StateNotAvailable;
+    defer query.chain.allocator.free(parent_block_bytes);
+    const parent_slot = readSignedBlockSlotFromSsz(parent_block_bytes) orelse return error.StateNotAvailable;
+
+    return query.chain.queued_regen.getPreState(parent_root, parent_state_root, parent_slot, block.slot(), .api) catch |err| switch (err) {
         error.NoPreStateAvailable => error.StateNotAvailable,
         else => err,
     };

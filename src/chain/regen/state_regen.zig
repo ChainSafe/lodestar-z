@@ -51,6 +51,17 @@ pub const StateRegen = struct {
         };
     }
 
+    pub const PreparedCheckpointReload = struct {
+        persisted_key: []const u8,
+        seed_state: *CachedBeaconState,
+
+        pub fn deinit(self: *PreparedCheckpointReload, state_regen: *StateRegen) void {
+            state_regen.allocator.free(self.persisted_key);
+            state_regen.destroyTransientState(self.seed_state);
+            self.* = undefined;
+        }
+    };
+
     /// Verify that a published state borrows the runtime-owned immutable data.
     ///
     /// Published states must already reference the runtime-owned config, PMT
@@ -66,29 +77,27 @@ pub const StateRegen = struct {
     /// fall through to expensive replay from disk.
     pub fn getCachedPreState(
         self: *StateRegen,
+        parent_block_root: [32]u8,
         parent_state_root: [32]u8,
+        parent_slot: u64,
         block_slot: u64,
     ) !?*CachedBeaconState {
-        if (self.block_cache.get(parent_state_root)) |state| {
-            return state;
-        }
+        const parent_epoch = computeEpochAtSlot(parent_slot);
+        const block_epoch = computeEpochAtSlot(block_slot);
+        const exact_parent_state = self.block_cache.get(parent_state_root);
 
-        const target_epoch = computeEpochAtSlot(block_slot);
-        if (try self.checkpoint_cache.getOrReload(.{
-            .epoch = target_epoch,
-            .root = parent_state_root,
-        })) |state| {
-            return state;
-        }
-
-        if (target_epoch > 0) {
-            if (try self.checkpoint_cache.getOrReload(.{
-                .epoch = target_epoch - 1,
-                .root = parent_state_root,
-            })) |state| {
-                return state;
+        if (parent_epoch < block_epoch) {
+            if (self.checkpoint_cache.getLatest(parent_block_root, block_epoch)) |state| {
+                const state_epoch = computeEpochAtSlot(try state.state.slot());
+                if (state_epoch == block_epoch) return state;
             }
+            // Fallback to the exact parent state when no better checkpoint state
+            // is cached. This preserves correctness for epoch-boundary imports
+            // while still preferring Lodestar's checkpoint-shaped optimization.
+            if (exact_parent_state) |state| return state;
         }
+
+        if (exact_parent_state) |state| return state;
 
         return null;
     }
@@ -97,16 +106,26 @@ pub const StateRegen = struct {
     ///
     /// Strategy:
     /// 1. Try block cache (hot path — most recent blocks)
-    /// 2. Try checkpoint cache with reload (warm path — epoch boundary states)
+    /// 2. Try in-memory checkpoint cache (warm path — epoch boundary states)
     /// 3. Replay canonical history from the closest archived state (cold path)
     pub fn getPreState(
         self: *StateRegen,
         parent_block_root: [32]u8,
         parent_state_root: [32]u8,
+        parent_slot: u64,
         block_slot: u64,
     ) !*CachedBeaconState {
-        if (try self.getCachedPreState(parent_state_root, block_slot)) |state| {
+        const parent_epoch = computeEpochAtSlot(parent_slot);
+        const block_epoch = computeEpochAtSlot(block_slot);
+
+        if (try self.getCachedPreState(parent_block_root, parent_state_root, parent_slot, block_slot)) |state| {
             return state;
+        }
+
+        if (parent_epoch < block_epoch) {
+            if (try self.checkpoint_cache.getOrReloadLatest(parent_block_root, block_epoch)) |state| {
+                return state;
+            }
         }
 
         if (try self.getStateByRoot(parent_state_root)) |state| {
@@ -120,11 +139,11 @@ pub const StateRegen = struct {
         return error.NoPreStateAvailable;
     }
 
-    /// Cold pre-state load for off-main-thread block import.
+    /// Uncached archival pre-state helper for isolated callers.
     ///
-    /// Unlike `getPreState()`, this does not touch the shared caches. It
-    /// deserializes or replays directly from archival storage and returns an
-    /// uncached owned state for the caller to use temporarily.
+    /// Production block import resolves cold misses through `QueuedStateRegen`
+    /// and the normal cache publication path. This helper remains for tests and
+    /// standalone callers that need a temporary uncached state.
     pub fn loadPreStateUncached(
         self: *StateRegen,
         parent_block_root: [32]u8,
@@ -144,19 +163,123 @@ pub const StateRegen = struct {
         return error.NoPreStateAvailable;
     }
 
-    /// Destroy a temporary uncached state loaded via deserializeState/replay.
+    /// Uncached state-root load helper for queued regen workers.
     ///
-    /// Production cold-path states borrow the runtime singleton pubkey cache.
-    /// The fallback cache cleanup remains only for standalone/test callers that
-    /// construct detached immutable data without a cold-path binding.
+    /// Returns a temporary owned state that must be published or destroyed by
+    /// the caller. Unlike `getStateByRoot()`, this does not touch shared caches.
+    pub fn loadStateByRootUncached(
+        self: *StateRegen,
+        state_root: [32]u8,
+    ) !?*CachedBeaconState {
+        return self.loadArchivedStateByRootUncached(state_root);
+    }
+
+    /// Prepare a checkpoint reload request for off-thread execution.
+    ///
+    /// The returned ticket owns a detached seed clone and a copied persisted
+    /// datastore key. The caller must later publish or destroy the resulting
+    /// transient state on the owner thread.
+    pub fn prepareCheckpointReload(
+        self: *StateRegen,
+        cp: CheckpointKey,
+    ) !?PreparedCheckpointReload {
+        const persisted_key = (try self.checkpoint_cache.clonePersistedKey(self.allocator, cp)) orelse return null;
+        errdefer self.allocator.free(persisted_key);
+
+        const seed_state = self.checkpoint_cache.findSeedStateToReload(cp) orelse {
+            self.allocator.free(persisted_key);
+            return null;
+        };
+
+        var state_graph_lease = self.acquireStateGraphLease();
+        defer state_graph_lease.release();
+
+        const cloned_seed = try seed_state.clone(self.allocator, .{ .transfer_cache = false });
+        errdefer self.destroyTransientState(cloned_seed);
+
+        return .{
+            .persisted_key = persisted_key,
+            .seed_state = cloned_seed,
+        };
+    }
+
+    /// Reload a checkpoint state from persisted bytes using a detached seed.
+    ///
+    /// This is the worker-side half of checkpoint reload. It intentionally
+    /// returns a transient state so publication remains on the owner thread.
+    pub fn loadCheckpointStateUncached(
+        self: *StateRegen,
+        prepared: *const PreparedCheckpointReload,
+    ) !?*CachedBeaconState {
+        const state_bytes = (try self.checkpoint_cache.loadPersistedStateBytes(prepared.persisted_key)) orelse return null;
+        defer self.allocator.free(state_bytes);
+
+        const loadCachedBeaconState = state_transition.loadCachedBeaconState;
+        const Node = @import("persistent_merkle_tree").Node;
+
+        const seed_state = prepared.seed_state;
+        const fork_seq = seed_state.state.forkSeq();
+        const pool: *Node.Pool = switch (seed_state.state.*) {
+            inline else => |fork_state| fork_state.pool,
+        };
+
+        var state_graph_lease = self.acquireStateGraphLease();
+        defer state_graph_lease.release();
+
+        return loadCachedBeaconState(
+            self.allocator,
+            pool,
+            seed_state,
+            fork_seq,
+            state_bytes,
+            null,
+        );
+    }
+
+    /// Publish a transient loaded state into the runtime block-state cache.
+    ///
+    /// This is the caller-side publication step for queued regen slow-path
+    /// results that were deserialized or replayed off-thread.
+    pub fn publishLoadedState(
+        self: *StateRegen,
+        state: *CachedBeaconState,
+    ) !*CachedBeaconState {
+        var state_graph_lease = self.acquireStateGraphLease();
+        defer state_graph_lease.release();
+        return self.cacheLoadedState(state, false);
+    }
+
+    /// Publish a transient checkpoint reload result back into the checkpoint cache.
+    pub fn publishCheckpointReloadedState(
+        self: *StateRegen,
+        cp: CheckpointKey,
+        state: *CachedBeaconState,
+    ) !?*CachedBeaconState {
+        var state_graph_lease = self.acquireStateGraphLease();
+        defer state_graph_lease.release();
+        try sealPublishedState(state);
+        try self.verifyPublishedStateOwnership(state);
+        return self.checkpoint_cache.publishReloaded(cp, state);
+    }
+
+    /// Destroy a transient state cloned or deserialized against the runtime graph.
+    ///
+    /// These states borrow the runtime singleton pubkey cache and shared PMT
+    /// pool, so teardown must flow through the graph-aware disposer.
     pub fn destroyTransientState(self: *StateRegen, state: *CachedBeaconState) void {
-        state.deinit();
-        self.allocator.destroy(state);
+        self.disposeState(state) catch @panic("OOM disposing transient state");
     }
 
     /// Get a checkpoint state, potentially reloading from disk.
     pub fn getCheckpointState(self: *StateRegen, cp: CheckpointKey) !?*CachedBeaconState {
-        return self.checkpoint_cache.getOrReload(cp);
+        if (self.checkpoint_cache.get(cp)) |state| return state;
+
+        var prepared = (try self.prepareCheckpointReload(cp)) orelse return null;
+        defer prepared.deinit(self);
+
+        const transient = (try self.loadCheckpointStateUncached(&prepared)) orelse return null;
+        errdefer self.destroyTransientState(transient);
+        return try self.publishCheckpointReloadedState(cp, transient);
     }
 
     /// Look up a state by its state root across all stores.
@@ -218,12 +341,16 @@ pub const StateRegen = struct {
 
     /// Called after processing a new block — cache the resulting state.
     pub fn onNewBlock(self: *StateRegen, state: *CachedBeaconState, is_head: bool) ![32]u8 {
+        var state_graph_lease = self.acquireStateGraphLease();
+        defer state_graph_lease.release();
         try sealPublishedState(state);
         return self.block_cache.add(state, is_head);
     }
 
     /// Called when a new head is selected.
     pub fn onNewHead(self: *StateRegen, state: *CachedBeaconState) ![32]u8 {
+        var state_graph_lease = self.acquireStateGraphLease();
+        defer state_graph_lease.release();
         try sealPublishedState(state);
         return self.block_cache.setHeadState(state);
     }
@@ -234,6 +361,8 @@ pub const StateRegen = struct {
         cp: CheckpointKey,
         state: *CachedBeaconState,
     ) !void {
+        var state_graph_lease = self.acquireStateGraphLease();
+        defer state_graph_lease.release();
         try sealPublishedState(state);
         try self.checkpoint_cache.add(cp, state);
     }
@@ -522,6 +651,7 @@ fn clonePublishedStateWithSharedPubkeys(
     return CachedBeaconState.createCachedBeaconState(
         allocator,
         cloned_state,
+        source.metrics,
         shared_pubkeys.immutableData(source.config),
         .{
             .skip_sync_committee_cache = cloned_state.forkSeq() == .phase0,
@@ -538,9 +668,10 @@ test "StateRegen: basic getPreState from block cache" {
     // Add a state to block cache
     const state = try fixture.clonePublishedState();
     const root = try fixture.regen.onNewBlock(state, true);
+    const parent_slot = try state.state.slot();
 
     // Should find it via getPreState
-    const pre_state = try fixture.regen.getPreState(root, root, 100);
+    const pre_state = try fixture.regen.getPreState(root, root, parent_slot, parent_slot + 1);
     try std.testing.expectEqual(state, pre_state);
 }
 
@@ -550,7 +681,7 @@ test "StateRegen: getPreState returns error when nothing cached" {
     defer fixture.deinit();
 
     const unknown_root = [_]u8{0xde} ** 32;
-    try std.testing.expectError(error.NoPreStateAvailable, fixture.regen.getPreState(unknown_root, unknown_root, 100));
+    try std.testing.expectError(error.NoPreStateAvailable, fixture.regen.getPreState(unknown_root, unknown_root, 99, 100));
 }
 
 test "StateRegen: onFinalized prunes old states" {
@@ -624,7 +755,7 @@ test "StateRegen: getPreState returns error when nothing canonical is available"
     defer fixture.deinit();
 
     const unknown_root = [_]u8{0xbb} ** 32;
-    try std.testing.expectError(error.NoPreStateAvailable, fixture.regen.getPreState(unknown_root, unknown_root, 64));
+    try std.testing.expectError(error.NoPreStateAvailable, fixture.regen.getPreState(unknown_root, unknown_root, 63, 64));
 }
 
 test "StateRegen: loadPreStateUncached loads archived state root after verifying published ownership" {

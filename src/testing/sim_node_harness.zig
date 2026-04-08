@@ -24,8 +24,14 @@ const CachedBeaconState = state_transition.CachedBeaconState;
 const computeEpochAtSlot = state_transition.computeEpochAtSlot;
 const BlockSource = chain_mod.BlockSource;
 const BeaconBlocksByRangeRequest = networking.messages.BeaconBlocksByRangeRequest;
+const StatusMessage = networking.messages.StatusMessage;
+const freeResponseChunks = networking.freeResponseChunks;
 
-const BeaconNode = @import("node").BeaconNode;
+const node_mod = @import("node");
+const BeaconNode = node_mod.BeaconNode;
+const SyncServicePtr = @typeInfo(@FieldType(BeaconNode, "sync_service_inst")).optional.child;
+const BatchBlock = @typeInfo(@typeInfo(@TypeOf(BeaconNode.enqueueSyncSegment)).@"fn".params[4].type.?).pointer.child;
+const reqresp_callbacks = node_mod.reqresp_callbacks_mod;
 const BlockGenerator = @import("block_generator.zig").BlockGenerator;
 const InvariantChecker = @import("invariant_checker.zig").InvariantChecker;
 const SimIo = @import("sim_io.zig").SimIo;
@@ -42,6 +48,11 @@ pub const ProducedBlockBytes = struct {
     slot: u64,
     epoch_transition: bool,
     bytes: []u8,
+};
+
+pub const SyncPeer = struct {
+    peer_id: []const u8,
+    node: *BeaconNode,
 };
 
 pub const Scenario = struct {
@@ -111,26 +122,52 @@ pub const SimNodeHarness = struct {
         return self.node.headState();
     }
 
-    pub fn currentSlot(self: *SimNodeHarness) !u64 {
+    pub fn waitForNodeIdle(self: *SimNodeHarness) !void {
+        switch (self.node.waitForAsyncIdle()) {
+            .idle => {},
+            .shutdown => return error.NodeShutdown,
+        }
+    }
+
+    pub fn getHeadStateIdle(self: *SimNodeHarness) !*CachedBeaconState {
+        try self.waitForNodeIdle();
+        return self.getHeadState() orelse error.NoHeadState;
+    }
+
+    pub fn cloneHeadStateSnapshot(self: *SimNodeHarness) !*CachedBeaconState {
+        var state_graph_lease = self.node.chainService().acquireStateGraphLease();
+        defer state_graph_lease.release();
         const head_state = self.getHeadState() orelse return error.NoHeadState;
-        return head_state.state.slot();
+        return head_state.clone(self.allocator, .{ .transfer_cache = false });
+    }
+
+    pub fn currentSlot(self: *SimNodeHarness) !u64 {
+        return self.node.currentHeadSlot();
+    }
+
+    pub fn simNowMs(self: *const SimNodeHarness) u64 {
+        return self.sim_io.monotonic_ns / std.time.ns_per_ms;
+    }
+
+    pub fn advanceClockToSlot(self: *SimNodeHarness, target_slot: u64) void {
+        self.sim_io.advanceToSlot(
+            target_slot,
+            self.clock.genesis_time_s,
+            self.clock.seconds_per_slot,
+        );
     }
 
     pub fn produceNextSlotBlockBytes(self: *SimNodeHarness) !ProducedBlockBytes {
-        const head_state = self.getHeadState() orelse return error.NoHeadState;
-        const current_slot = try head_state.state.slot();
-        const target_slot = current_slot + 1;
-        const current_epoch = computeEpochAtSlot(current_slot);
-        const target_epoch = computeEpochAtSlot(target_slot);
-
-        var post_state = try head_state.clone(
-            self.allocator,
-            .{ .transfer_cache = false },
-        );
+        var post_state = try self.cloneHeadStateSnapshot();
         errdefer {
             post_state.deinit();
             self.allocator.destroy(post_state);
         }
+
+        const current_slot = try post_state.state.slot();
+        const target_slot = current_slot + 1;
+        const current_epoch = computeEpochAtSlot(current_slot);
+        const target_epoch = computeEpochAtSlot(target_slot);
 
         try state_transition.processSlots(
             self.allocator,
@@ -190,47 +227,288 @@ pub const SimNodeHarness = struct {
     ) !u64 {
         if (target_slot < start_slot) return 0;
 
+        const blocks = try fetchBlocksByRangeReqResp(
+            self.allocator,
+            peer,
+            start_slot,
+            target_slot - start_slot + 1,
+        );
+        defer {
+            for (blocks) |blk| self.allocator.free(blk.block_bytes);
+            self.allocator.free(blocks);
+        }
+
+        if (blocks.len == 0) return 0;
+
+        const raw_blocks = try self.allocator.alloc(chain_mod.RawBlockBytes, blocks.len);
+        defer self.allocator.free(raw_blocks);
+
+        for (blocks, 0..) |blk, i| {
+            raw_blocks[i] = .{
+                .slot = blk.slot,
+                .bytes = blk.block_bytes,
+            };
+        }
+
+        try self.node.processRangeSyncSegment(raw_blocks);
+        return @intCast(blocks.len);
+    }
+
+    pub fn connectPeer(self: *SimNodeHarness, peer: SyncPeer) !void {
+        const our_status = self.node.getStatus();
+        var request_bytes: [StatusMessage.fixed_size]u8 = undefined;
+        _ = StatusMessage.serializeIntoBytes(&our_status, &request_bytes);
+
+        const chunks = try peer.node.onReqResp(.status, &request_bytes);
+        defer freeResponseChunks(peer.node.allocator, chunks);
+
+        if (chunks.len != 1) return error.UnexpectedReqRespChunkCount;
+        if (chunks[0].result != .success) return error.UnexpectedReqRespResponseCode;
+
+        var peer_status: StatusMessage.Type = undefined;
+        try StatusMessage.deserializeFromBytes(chunks[0].ssz_payload, &peer_status);
+        _ = reqresp_callbacks.handlePeerStatusAtTime(self.node, peer.peer_id, peer_status, null, self.simNowMs());
+        if (self.node.sync_callback_ctx) |cb_ctx| cb_ctx.notePeerConnected(peer.peer_id);
+    }
+
+    pub fn disconnectPeer(self: *SimNodeHarness, peer_id: []const u8) void {
+        if (self.node.peer_manager) |pm| {
+            pm.onPeerDisconnected(peer_id, self.simNowMs());
+        }
+        if (self.node.sync_service_inst) |sync_svc| {
+            sync_svc.onPeerDisconnect(peer_id);
+        }
+        if (self.node.sync_callback_ctx) |cb_ctx| cb_ctx.notePeerDisconnected(peer_id);
+        self.node.unknown_chain_sync.onPeerDisconnected(peer_id);
+    }
+
+    pub fn driveSyncWithPeers(self: *SimNodeHarness, peers: []const SyncPeer) !bool {
+        if (self.node.sync_service_inst == null) return false;
+
+        var did_work_any = false;
+        var iterations: usize = 0;
+        while (iterations < 512) : (iterations += 1) {
+            var did_work = false;
+
+            did_work = self.node.processPendingExecutionForkchoiceUpdates() or did_work;
+            did_work = self.node.processPendingExecutionPayloadVerifications() or did_work;
+            did_work = self.node.processPendingBlockStateWork() or did_work;
+            did_work = self.node.processPendingGossipBlsBatch() or did_work;
+
+            if (self.node.beacon_processor) |bp| {
+                const dispatched = bp.tick(128);
+                did_work = dispatched > 0 or did_work;
+            }
+
+            if (self.node.sync_service_inst) |sync_svc| {
+                try sync_svc.tick();
+                self.node.unknown_block_sync.tick();
+                self.node.unknown_chain_sync.tick();
+                did_work = try self.processPendingSyncRequests(peers, sync_svc) or did_work;
+                did_work = self.node.drivePendingSyncSegments() or did_work;
+                self.node.unknown_chain_sync.tick();
+                did_work = try self.processPendingLinkedChainImports(peers) or did_work;
+            }
+
+            if (did_work) {
+                did_work_any = true;
+                continue;
+            }
+
+            break;
+        }
+
+        return did_work_any;
+    }
+
+    fn processPendingSyncRequests(
+        self: *SimNodeHarness,
+        peers: []const SyncPeer,
+        sync_svc: SyncServicePtr,
+    ) !bool {
+        const cb_ctx = self.node.sync_callback_ctx orelse return false;
+        var did_work = false;
+
+        while (cb_ctx.popPendingRequest()) |req| {
+            did_work = true;
+            const peer = findSyncPeer(peers, req.peerId()) orelse {
+                sync_svc.onBatchError(req.chain_id, req.batch_id, req.generation, req.peerId());
+                continue;
+            };
+
+            const blocks = fetchBlocksByRangeReqResp(
+                self.allocator,
+                peer.node,
+                req.start_slot,
+                req.count,
+            ) catch {
+                sync_svc.onBatchError(req.chain_id, req.batch_id, req.generation, req.peerId());
+                continue;
+            };
+            defer {
+                for (blocks) |blk| self.allocator.free(blk.block_bytes);
+                self.allocator.free(blocks);
+            }
+
+            if (blocks.len == 0) {
+                sync_svc.onBatchError(req.chain_id, req.batch_id, req.generation, req.peerId());
+                continue;
+            }
+
+            sync_svc.onBatchResponse(req.chain_id, req.batch_id, req.generation, blocks);
+        }
+
+        while (cb_ctx.popPendingByRootRequest()) |req| {
+            did_work = true;
+            const peer = findSyncPeer(peers, req.peerId()) orelse {
+                switch (req.kind) {
+                    .unknown_block_parent => self.node.unknown_block_sync.onFetchFailed(req.root),
+                    .unknown_chain_header => {},
+                }
+                continue;
+            };
+
+            const block_bytes = fetchBlockByRootReqResp(self.allocator, peer.node, req.root) catch {
+                switch (req.kind) {
+                    .unknown_block_parent => self.node.unknown_block_sync.onFetchFailed(req.root),
+                    .unknown_chain_header => {},
+                }
+                continue;
+            };
+            defer self.allocator.free(block_bytes);
+
+            switch (req.kind) {
+                .unknown_block_parent => {
+                    self.node.unknown_block_sync.onParentFetched(req.root, block_bytes) catch {
+                        self.node.unknown_block_sync.onFetchFailed(req.root);
+                    };
+                },
+                .unknown_chain_header => {
+                    const slot = readSignedBlockSlotFromSsz(block_bytes) orelse continue;
+                    const parent_root = readSignedBlockParentRootFromSsz(block_bytes) orelse continue;
+                    self.node.unknown_chain_sync.onUnknownBlockInput(slot, req.root, parent_root, req.peerId()) catch {};
+                },
+            }
+        }
+
+        return did_work;
+    }
+
+    fn processPendingLinkedChainImports(
+        self: *SimNodeHarness,
+        peers: []const SyncPeer,
+    ) !bool {
+        const cb_ctx = self.node.sync_callback_ctx orelse return false;
+        var did_work = false;
+
+        while (cb_ctx.popPendingLinkedChain()) |pending| {
+            var owned = pending;
+            defer owned.deinit(self.allocator);
+            did_work = true;
+
+            var peer_scratch: [64][]const u8 = undefined;
+            const peer_ids = owned.peerIds(&peer_scratch);
+            if (peer_ids.len == 0) continue;
+
+            var raw_blocks: std.ArrayListUnmanaged(chain_mod.RawBlockBytes) = .empty;
+            defer {
+                for (raw_blocks.items) |raw_block| self.allocator.free(raw_block.bytes);
+                raw_blocks.deinit(self.allocator);
+            }
+
+            var failed = false;
+            for (owned.headers) |header| {
+                const fetched = fetchBlockByRootReqRespFromPeers(self.allocator, peers, peer_ids, header.root) catch {
+                    failed = true;
+                    break;
+                };
+                raw_blocks.append(self.allocator, .{
+                    .slot = header.slot,
+                    .bytes = fetched,
+                }) catch |err| {
+                    self.allocator.free(fetched);
+                    return err;
+                };
+            }
+
+            if (failed or raw_blocks.items.len != owned.headers.len) continue;
+
+            self.node.processRangeSyncSegment(raw_blocks.items) catch {};
+        }
+
+        return did_work;
+    }
+
+    pub fn advanceEmptyToSlot(self: *SimNodeHarness, target_slot: u64) !void {
+        try self.node.advanceSlot(target_slot);
+    }
+
+    fn findSyncPeer(peers: []const SyncPeer, peer_id: []const u8) ?SyncPeer {
+        for (peers) |peer| {
+            if (std.mem.eql(u8, peer.peer_id, peer_id)) return peer;
+        }
+        return null;
+    }
+
+    fn fetchBlockByRootReqRespFromPeers(
+        allocator: std.mem.Allocator,
+        peers: []const SyncPeer,
+        peer_ids: []const []const u8,
+        root: [32]u8,
+    ) ![]u8 {
+        for (peer_ids) |peer_id| {
+            const peer = findSyncPeer(peers, peer_id) orelse continue;
+            return fetchBlockByRootReqResp(allocator, peer.node, root) catch continue;
+        }
+        return error.NoConnectedPeerHasBlock;
+    }
+
+    fn fetchBlockByRootReqResp(
+        allocator: std.mem.Allocator,
+        peer: *BeaconNode,
+        root: [32]u8,
+    ) ![]u8 {
+        var request_bytes: [32]u8 = root;
+        const chunks = try peer.onReqResp(.beacon_blocks_by_root, &request_bytes);
+        defer freeResponseChunks(peer.allocator, chunks);
+
+        if (chunks.len != 1) return error.UnexpectedReqRespChunkCount;
+        if (chunks[0].result != .success) return error.UnexpectedReqRespResponseCode;
+        return allocator.dupe(u8, chunks[0].ssz_payload);
+    }
+
+    fn fetchBlocksByRangeReqResp(
+        allocator: std.mem.Allocator,
+        peer: *BeaconNode,
+        start_slot: u64,
+        count: u64,
+    ) ![]BatchBlock {
         const request = BeaconBlocksByRangeRequest.Type{
             .start_slot = start_slot,
-            .count = target_slot - start_slot + 1,
+            .count = count,
         };
         var request_bytes: [BeaconBlocksByRangeRequest.fixed_size]u8 = undefined;
         _ = BeaconBlocksByRangeRequest.serializeIntoBytes(&request, &request_bytes);
 
         const chunks = try peer.onReqResp(.beacon_blocks_by_range, &request_bytes);
-        defer networking.freeResponseChunks(peer.allocator, chunks);
+        defer freeResponseChunks(peer.allocator, chunks);
 
-        const raw_blocks = try self.allocator.alloc(chain_mod.RawBlockBytes, chunks.len);
-        defer self.allocator.free(raw_blocks);
+        var blocks: std.ArrayListUnmanaged(BatchBlock) = .empty;
+        errdefer {
+            for (blocks.items) |blk| allocator.free(blk.block_bytes);
+            blocks.deinit(allocator);
+        }
 
-        var raw_count: usize = 0;
         for (chunks) |chunk| {
             if (chunk.result != .success) return error.RangeSyncReqRespFailed;
             const slot = readSignedBlockSlotFromSsz(chunk.ssz_payload) orelse return error.InvalidReqRespBlock;
-            raw_blocks[raw_count] = .{
+            try blocks.append(allocator, .{
                 .slot = slot,
-                .bytes = chunk.ssz_payload,
-            };
-            raw_count += 1;
+                .block_bytes = try allocator.dupe(u8, chunk.ssz_payload),
+            });
         }
 
-        if (raw_count == 0) return 0;
-        try self.node.processRangeSyncSegment(raw_blocks[0..raw_count]);
-        return raw_count;
-    }
-
-    pub fn syncMissingBlocksFromPeer(
-        self: *SimNodeHarness,
-        peer: *BeaconNode,
-        target_slot: u64,
-    ) !u64 {
-        const current_slot = try self.currentSlot();
-        if (current_slot >= target_slot) return 0;
-        return self.syncBlocksByRangeFromPeer(peer, current_slot + 1, target_slot);
-    }
-
-    pub fn advanceEmptyToSlot(self: *SimNodeHarness, target_slot: u64) !void {
-        try self.node.advanceSlot(target_slot);
+        return blocks.toOwnedSlice(allocator);
     }
 
     fn readSignedBlockSlotFromSsz(block_bytes: []const u8) ?u64 {
@@ -238,17 +516,27 @@ pub const SimNodeHarness = struct {
         return std.mem.readInt(u64, block_bytes[100..108], .little);
     }
 
-    pub fn observeSlot(
+    fn readSignedBlockParentRootFromSsz(block_bytes: []const u8) ?[32]u8 {
+        if (block_bytes.len < 140) return null;
+        var parent_root: [32]u8 = undefined;
+        @memcpy(&parent_root, block_bytes[116..148]);
+        return parent_root;
+    }
+
+    pub fn observeCurrentHead(
         self: *SimNodeHarness,
-        target_slot: u64,
+        clock_slot: u64,
         block_processed: bool,
     ) !SlotResult {
-        const new_head_state = self.getHeadState() orelse return error.NoHeadState;
+        const new_head_state = try self.cloneHeadStateSnapshot();
+        defer {
+            new_head_state.deinit();
+            self.allocator.destroy(new_head_state);
+        }
         const observed_slot = try new_head_state.state.slot();
-        if (observed_slot != target_slot) return error.UnexpectedHeadSlot;
 
         self.sim_io.advanceToSlot(
-            target_slot,
+            clock_slot,
             self.clock.genesis_time_s,
             self.clock.seconds_per_slot,
         );
@@ -258,17 +546,27 @@ pub const SimNodeHarness = struct {
         self.slots_processed += 1;
         if (block_processed) self.blocks_processed += 1;
 
-        const previous_epoch = computeEpochAtSlot(target_slot - 1);
-        const current_epoch = computeEpochAtSlot(target_slot);
+        const previous_epoch = computeEpochAtSlot(clock_slot - 1);
+        const current_epoch = computeEpochAtSlot(clock_slot);
         if (current_epoch != previous_epoch) self.epochs_processed += 1;
 
         const state_root = try new_head_state.state.hashTreeRoot();
         return .{
-            .slot = target_slot,
+            .slot = observed_slot,
             .block_processed = block_processed,
             .epoch_transition = current_epoch != previous_epoch,
             .state_root = state_root.*,
         };
+    }
+
+    pub fn observeSlot(
+        self: *SimNodeHarness,
+        target_slot: u64,
+        block_processed: bool,
+    ) !SlotResult {
+        const result = try self.observeCurrentHead(target_slot, block_processed);
+        if (result.slot != target_slot) return error.UnexpectedHeadSlot;
+        return result;
     }
 
     /// Advance the simulation by one slot.

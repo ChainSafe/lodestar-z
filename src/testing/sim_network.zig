@@ -9,9 +9,13 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Order = std.math.Order;
+const networking = @import("networking");
+
+const ResponseCode = networking.ResponseCode;
 
 pub const MessageType = enum {
     gossip,
+    gossip_attestation,
     req_resp_request,
     req_resp_response,
 };
@@ -29,9 +33,31 @@ pub const PendingMessage = struct {
 pub const DeliveredMessage = struct {
     from: u8,
     to: u8,
+    deliver_at_ns: u64,
     data: []const u8,
     message_type: MessageType,
 };
+
+pub fn encodeReqRespResponse(allocator: Allocator, result: ResponseCode, payload: []const u8) ![]u8 {
+    const encoded = try allocator.alloc(u8, 1 + payload.len);
+    encoded[0] = @intFromEnum(result);
+    @memcpy(encoded[1..], payload);
+    return encoded;
+}
+
+pub const DecodedReqRespResponse = struct {
+    result: ResponseCode,
+    payload: []const u8,
+};
+
+pub fn decodeReqRespResponse(bytes: []const u8) !DecodedReqRespResponse {
+    if (bytes.len == 0) return error.InvalidReqRespResponse;
+    const result = ResponseCode.fromByte(bytes[0]) orelse return error.InvalidReqRespResponse;
+    return .{
+        .result = result,
+        .payload = bytes[1..],
+    };
+}
 
 pub const Config = struct {
     /// Probability of dropping a packet (0.0 - 1.0).
@@ -202,6 +228,7 @@ pub const SimNetwork = struct {
             try self.delivered_buf.append(self.allocator, .{
                 .from = delivered.from,
                 .to = delivered.to,
+                .deliver_at_ns = delivered.deliver_at_ns,
                 .data = delivered.data,
                 .message_type = delivered.message_type,
             });

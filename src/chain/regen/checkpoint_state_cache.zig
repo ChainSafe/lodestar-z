@@ -11,6 +11,7 @@ const preset = @import("preset").preset;
 const state_transition = @import("state_transition");
 const computeEpochAtSlot = state_transition.computeEpochAtSlot;
 const computeStartSlotAtEpoch = state_transition.computeStartSlotAtEpoch;
+const getBlockRootAtSlot = state_transition.getBlockRootAtSlot;
 
 const CachedBeaconState = state_transition.CachedBeaconState;
 const BlockStateCache = @import("block_state_cache.zig").BlockStateCache;
@@ -22,8 +23,16 @@ const CheckpointKey = datastore_mod.CheckpointKey;
 
 pub const DEFAULT_MAX_EPOCHS_IN_MEMORY: u32 = 3;
 
+pub const InMemoryCacheItem = struct {
+    state: *CachedBeaconState,
+    /// Preserved datastore key when a persisted checkpoint is reloaded into
+    /// memory. This matches Lodestar's model and lets pruning / re-persisting
+    /// retain disk provenance instead of forgetting it.
+    persisted_key: ?[]const u8 = null,
+};
+
 pub const CacheItem = union(enum) {
-    in_memory: *CachedBeaconState,
+    in_memory: InMemoryCacheItem,
     /// Datastore key for the persisted state bytes.
     persisted: []const u8,
 };
@@ -81,7 +90,10 @@ pub const CheckpointStateCache = struct {
         // Free in-memory states and persisted keys
         for (self.cache.values()) |item| {
             switch (item) {
-                .in_memory => |state| self.disposeState(state),
+                .in_memory => |entry| {
+                    self.disposeState(entry.state);
+                    if (entry.persisted_key) |key| self.allocator.free(key);
+                },
                 .persisted => |key| {
                     self.allocator.free(key);
                 },
@@ -100,7 +112,7 @@ pub const CheckpointStateCache = struct {
     pub fn get(self: *CheckpointStateCache, cp: CheckpointKey) ?*CachedBeaconState {
         const item = self.cache.get(cp) orelse return null;
         return switch (item) {
-            .in_memory => |state| state,
+            .in_memory => |entry| entry.state,
             .persisted => null,
         };
     }
@@ -115,15 +127,15 @@ pub const CheckpointStateCache = struct {
         const item = self.cache.get(cp) orelse return null;
         const persisted_key = switch (item) {
             .persisted => |key| key,
-            .in_memory => |state| return state,
+            .in_memory => |entry| return entry.state,
         };
 
         // Read from disk
-        const state_bytes = try self.datastore.read(persisted_key) orelse return null;
+        const state_bytes = try self.loadPersistedStateBytes(persisted_key) orelse return null;
         defer self.allocator.free(state_bytes);
 
-        // Get seed state for tree-sharing reload
-        const seed_state = self.block_cache.getSeedState() orelse return null;
+        // Get seed state for tree-sharing reload.
+        const seed_state = self.findSeedStateToReload(cp) orelse return null;
 
         const loadCachedBeaconState = state_transition.loadCachedBeaconState;
         const Node = @import("persistent_merkle_tree").Node;
@@ -152,23 +164,114 @@ pub const CheckpointStateCache = struct {
             self.allocator.destroy(new_state);
         }
 
-        // Replace persisted entry with in-memory
-        self.cache.put(cp, .{ .in_memory = new_state }) catch {};
+        try sealReloadedState(new_state);
+        return try self.publishReloaded(cp, new_state);
+    }
 
-        return new_state;
+    pub fn clonePersistedKey(self: *CheckpointStateCache, allocator: Allocator, cp: CheckpointKey) !?[]u8 {
+        const item = self.cache.get(cp) orelse return null;
+        return switch (item) {
+            .persisted => |key| try allocator.dupe(u8, key),
+            .in_memory => null,
+        };
+    }
+
+    pub fn loadPersistedStateBytes(
+        self: *CheckpointStateCache,
+        persisted_key: []const u8,
+    ) !?[]const u8 {
+        return self.datastore.read(persisted_key);
+    }
+
+    pub fn findSeedStateToReload(self: *CheckpointStateCache, reloaded_cp: CheckpointKey) ?*CachedBeaconState {
+        const max_epoch = blk: {
+            var best: ?u64 = null;
+            for (self.epoch_index.keys()) |epoch| {
+                if (best == null or epoch > best.?) best = epoch;
+            }
+            break :blk best orelse return self.block_cache.getSeedState();
+        };
+
+        const min_epoch = max_epoch -| @as(u64, self.max_epochs_in_memory -| 1);
+        const reloaded_cp_slot = computeStartSlotAtEpoch(reloaded_cp.epoch);
+        var first_state: ?*CachedBeaconState = null;
+
+        var epoch = min_epoch;
+        while (epoch <= max_epoch) : (epoch += 1) {
+            if (first_state) |state| return state;
+
+            const roots = self.epoch_index.get(epoch) orelse continue;
+            for (roots.items) |root| {
+                const item = self.cache.get(.{ .epoch = epoch, .root = root }) orelse continue;
+                const state = switch (item) {
+                    .in_memory => |entry| entry.state,
+                    .persisted => continue,
+                };
+
+                if (first_state == null) first_state = state;
+
+                const state_slot = state.state.slot() catch continue;
+                if (reloaded_cp_slot >= state_slot) continue;
+
+                const actual_root = switch (state.state.forkSeq()) {
+                    inline else => |fork| getBlockRootAtSlot(
+                        fork,
+                        state.state.castToFork(fork),
+                        reloaded_cp_slot,
+                    ) catch continue,
+                };
+                if (std.mem.eql(u8, actual_root, &reloaded_cp.root)) {
+                    return state;
+                }
+            }
+        }
+
+        return first_state orelse self.block_cache.getSeedState();
+    }
+
+    pub fn publishReloaded(
+        self: *CheckpointStateCache,
+        cp: CheckpointKey,
+        state: *CachedBeaconState,
+    ) !?*CachedBeaconState {
+        const item = self.cache.get(cp) orelse {
+            self.disposeState(state);
+            return null;
+        };
+
+        switch (item) {
+            .in_memory => |entry| {
+                self.disposeState(state);
+                return entry.state;
+            },
+            .persisted => |persisted_key| {
+                try self.cache.put(cp, .{ .in_memory = .{
+                    .state = state,
+                    .persisted_key = persisted_key,
+                } });
+                return state;
+            },
+        }
     }
 
     /// Add a checkpoint state to the cache.
     pub fn add(self: *CheckpointStateCache, cp: CheckpointKey, state: *CachedBeaconState) !void {
         // If already in cache, free the old entry
+        var persisted_key_to_keep: ?[]const u8 = null;
         if (self.cache.get(cp)) |old_item| {
             switch (old_item) {
-                .persisted => |key| self.allocator.free(key),
-                .in_memory => |old_state| self.disposeState(old_state),
+                .persisted => |key| persisted_key_to_keep = key,
+                .in_memory => |entry| {
+                    persisted_key_to_keep = entry.persisted_key;
+                    self.disposeState(entry.state);
+                },
             }
         }
 
-        try self.cache.put(cp, .{ .in_memory = state });
+        try self.cache.put(cp, .{ .in_memory = .{
+            .state = state,
+            .persisted_key = persisted_key_to_keep,
+        } });
         try self.addToEpochIndex(cp.epoch, cp.root);
     }
 
@@ -184,7 +287,8 @@ pub const CheckpointStateCache = struct {
             if (cp.epoch > max_epoch) continue;
 
             switch (entry.value_ptr.*) {
-                .in_memory => |state| {
+                .in_memory => |cached_entry| {
+                    const state = cached_entry.state;
                     if (best_state == null or cp.epoch > best_epoch) {
                         best_state = state;
                         best_epoch = cp.epoch;
@@ -195,6 +299,31 @@ pub const CheckpointStateCache = struct {
         }
 
         return best_state;
+    }
+
+    /// Find the latest checkpoint key for a root, including persisted entries.
+    pub fn findLatestKey(self: *CheckpointStateCache, root: [32]u8, max_epoch: u64) ?CheckpointKey {
+        var best_cp: ?CheckpointKey = null;
+        var best_epoch: u64 = 0;
+
+        var it = self.cache.iterator();
+        while (it.next()) |entry| {
+            const cp = entry.key_ptr.*;
+            if (!std.mem.eql(u8, &cp.root, &root)) continue;
+            if (cp.epoch > max_epoch) continue;
+            if (best_cp == null or cp.epoch > best_epoch) {
+                best_cp = cp;
+                best_epoch = cp.epoch;
+            }
+        }
+
+        return best_cp;
+    }
+
+    /// Get the latest checkpoint state for a root, reloading from disk if needed.
+    pub fn getOrReloadLatest(self: *CheckpointStateCache, root: [32]u8, max_epoch: u64) !?*CachedBeaconState {
+        const cp = self.findLatestKey(root, max_epoch) orelse return null;
+        return self.getOrReload(cp);
     }
 
     /// Process a state: persist epochs older than max_epochs_in_memory, prune from memory.
@@ -287,21 +416,21 @@ pub const CheckpointStateCache = struct {
             const item = self.cache.get(cp) orelse continue;
 
             switch (item) {
-                .in_memory => |state_to_persist| {
-                    // Serialize state to bytes
-                    const state_bytes = try state_to_persist.state.serialize(self.allocator);
-                    defer self.allocator.free(state_bytes);
+                .in_memory => |entry| {
+                    const persisted_key = blk: {
+                        if (entry.persisted_key) |key| break :blk key;
 
-                    // Write to datastore — returns caller-owned key
-                    const ds_key = try self.datastore.write(cp, state_bytes);
-
-                    // Replace in cache with persisted entry (ds_key is caller-owned)
-                    self.cache.put(cp, .{ .persisted = ds_key }) catch {
-                        self.allocator.free(ds_key);
+                        const state_bytes = try entry.state.state.serialize(self.allocator);
+                        defer self.allocator.free(state_bytes);
+                        break :blk try self.datastore.write(cp, state_bytes);
                     };
 
-                    // Free the in-memory state
-                    self.disposeState(state_to_persist);
+                    self.cache.put(cp, .{ .persisted = persisted_key }) catch |err| {
+                        if (entry.persisted_key == null) self.allocator.free(persisted_key);
+                        return err;
+                    };
+
+                    self.disposeState(entry.state);
 
                     persist_count += 1;
                 },
@@ -325,7 +454,13 @@ pub const CheckpointStateCache = struct {
             const cp = CheckpointKey{ .epoch = epoch, .root = root };
             if (self.cache.fetchOrderedRemove(cp)) |kv| {
                 switch (kv.value) {
-                    .in_memory => |s| self.disposeState(s),
+                    .in_memory => |entry| {
+                        self.disposeState(entry.state);
+                        if (entry.persisted_key) |key| {
+                            self.datastore.remove(key) catch {};
+                            self.allocator.free(key);
+                        }
+                    },
                     .persisted => |key| {
                         self.datastore.remove(key) catch {};
                         self.allocator.free(key);
@@ -343,6 +478,11 @@ pub const CheckpointStateCache = struct {
 
     fn disposeState(self: *CheckpointStateCache, state: *CachedBeaconState) void {
         self.state_disposer.dispose(state) catch @panic("OOM deferring checkpoint-state disposal");
+    }
+
+    fn sealReloadedState(state: *CachedBeaconState) !void {
+        try state.state.commit();
+        _ = try state.state.hashTreeRoot();
     }
 };
 
@@ -730,4 +870,58 @@ test "CheckpointStateCache: replacement can defer state teardown" {
 
     try state_disposer.endDeferral();
     try std.testing.expectEqual(@as(usize, 0), state_disposer.pendingCount());
+}
+
+test "CheckpointStateCache: reload preserves persisted provenance for later pruning" {
+    const Node = @import("persistent_merkle_tree").Node;
+    const TestCachedBeaconState = @import("state_transition").test_utils.TestCachedBeaconState;
+    const MemoryCPStateDatastore = datastore_mod.MemoryCPStateDatastore;
+
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(allocator, 256 * 5);
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 16);
+    defer test_state.deinit();
+
+    var mem_store = MemoryCPStateDatastore.init(allocator);
+    defer mem_store.deinit();
+
+    var state_disposer = StateDisposer.init(allocator, std.testing.io);
+    defer state_disposer.deinit();
+    var state_graph_gate = StateGraphGate.init(std.testing.io, &state_disposer);
+
+    var block_cache = BlockStateCache.init(allocator, 4, &state_disposer);
+    defer block_cache.deinit();
+
+    const seed = try test_state.cached_state.clone(allocator, .{});
+    _ = try block_cache.add(seed, true);
+
+    var cp_cache = CheckpointStateCache.init(
+        allocator,
+        mem_store.datastore(),
+        &block_cache,
+        1,
+        &state_disposer,
+        &state_graph_gate,
+    );
+    defer cp_cache.deinit();
+
+    const cp1 = CheckpointKey{ .epoch = 1, .root = [_]u8{0x11} ** 32 };
+    const cp2 = CheckpointKey{ .epoch = 2, .root = [_]u8{0x22} ** 32 };
+    try cp_cache.add(cp1, try test_state.cached_state.clone(allocator, .{}));
+    try cp_cache.add(cp2, try test_state.cached_state.clone(allocator, .{}));
+
+    _ = try cp_cache.processState([_]u8{0xff} ** 32, test_state.cached_state);
+    try std.testing.expectEqual(@as(usize, 1), mem_store.count());
+    try std.testing.expect(cp_cache.get(cp1) == null);
+
+    const reloaded = try cp_cache.getOrReload(cp1);
+    try std.testing.expect(reloaded != null);
+    try std.testing.expectEqual(reloaded, cp_cache.get(cp1));
+    try std.testing.expectEqual(@as(usize, 1), mem_store.count());
+
+    try cp_cache.pruneFinalized(2);
+    try std.testing.expectEqual(@as(usize, 1), cp_cache.size());
+    try std.testing.expectEqual(@as(usize, 0), mem_store.count());
 }

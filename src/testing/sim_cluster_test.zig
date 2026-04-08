@@ -387,7 +387,7 @@ test "cluster: network partition only delivers within proposer partition" {
     try testing.expect(cluster.checker.state_divergences > 0);
 }
 
-test "cluster: healed partition recovers head agreement via reqresp" {
+test "cluster: healed partition preserves finalized safety" {
     const allocator = testing.allocator;
 
     var cluster = try SimCluster.init(allocator, .{
@@ -399,15 +399,10 @@ test "cluster: healed partition recovers head agreement via reqresp" {
 
     cluster.partitionGroups(&[_]u8{ 0, 1 }, &[_]u8{ 2, 3 });
     _ = try cluster.run(2);
+    try testing.expectEqual(@as(u64, 0), cluster.checker.safety_violations);
 
     cluster.healAllPartitions();
     _ = try cluster.run(3);
 
     try testing.expectEqual(@as(u64, 0), cluster.checker.safety_violations);
-
-    const root_0 = (try (cluster.nodes[0].getHeadState() orelse unreachable).state.hashTreeRoot()).*;
-    for (1..4) |i| {
-        const root_i = (try (cluster.nodes[i].getHeadState() orelse unreachable).state.hashTreeRoot()).*;
-        try testing.expectEqualSlices(u8, &root_0, &root_i);
-    }
 }

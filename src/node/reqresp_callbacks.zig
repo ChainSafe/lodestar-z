@@ -282,11 +282,26 @@ pub fn handlePeerStatus(
     status: StatusMessage.Type,
     earliest_available_slot: ?u64,
 ) ?networking.IrrelevantPeerCode {
+    return handlePeerStatusAtTime(
+        node,
+        peer_id,
+        status,
+        earliest_available_slot,
+        wallTimeMs(node.io),
+    );
+}
+
+pub fn handlePeerStatusAtTime(
+    node: *BeaconNode,
+    peer_id: []const u8,
+    status: StatusMessage.Type,
+    earliest_available_slot: ?u64,
+    now_ms: u64,
+) ?networking.IrrelevantPeerCode {
     var irrelevance: ?networking.IrrelevantPeerCode = null;
     var registered_new_peer = false;
 
     if (node.peer_manager) |pm| {
-        const now_ms = wallTimeMs(node.io);
         const existing = pm.getPeer(peer_id);
         if (existing == null or !existing.?.isConnected()) {
             const direction = if (existing) |info| info.direction orelse .inbound else .inbound;

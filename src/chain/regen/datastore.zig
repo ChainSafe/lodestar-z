@@ -77,11 +77,13 @@ pub const MemoryCPStateDatastore = struct {
     allocator: Allocator,
     /// key string -> state bytes (both owned by this struct)
     data: std.StringHashMap([]const u8),
+    mutex: std.atomic.Mutex,
 
     pub fn init(allocator: Allocator) MemoryCPStateDatastore {
         return .{
             .allocator = allocator,
             .data = std.StringHashMap([]const u8).init(allocator),
+            .mutex = .unlocked,
         };
     }
 
@@ -108,8 +110,16 @@ pub const MemoryCPStateDatastore = struct {
         .readKeys = memReadKeys,
     };
 
+    fn acquire(self: *MemoryCPStateDatastore) void {
+        while (!self.mutex.tryLock()) {
+            std.atomic.spinLoopHint();
+        }
+    }
+
     fn memWrite(ptr: *anyopaque, checkpoint: CheckpointKey, state_bytes: []const u8) anyerror![]const u8 {
         const self: *MemoryCPStateDatastore = @ptrCast(@alignCast(ptr));
+        self.acquire();
+        defer self.mutex.unlock();
         const key = try checkpoint.toKeyString(self.allocator);
         errdefer self.allocator.free(key);
 
@@ -130,6 +140,8 @@ pub const MemoryCPStateDatastore = struct {
 
     fn memRead(ptr: *anyopaque, key: []const u8) anyerror!?[]const u8 {
         const self: *MemoryCPStateDatastore = @ptrCast(@alignCast(ptr));
+        self.acquire();
+        defer self.mutex.unlock();
         const data = self.data.get(key) orelse return null;
         // Return owned copy — caller must free with the same allocator
         return try self.allocator.dupe(u8, data);
@@ -137,6 +149,8 @@ pub const MemoryCPStateDatastore = struct {
 
     fn memRemove(ptr: *anyopaque, key: []const u8) anyerror!void {
         const self: *MemoryCPStateDatastore = @ptrCast(@alignCast(ptr));
+        self.acquire();
+        defer self.mutex.unlock();
         if (self.data.fetchRemove(key)) |old| {
             self.allocator.free(old.value);
             self.allocator.free(old.key);
@@ -145,6 +159,8 @@ pub const MemoryCPStateDatastore = struct {
 
     fn memReadKeys(ptr: *anyopaque) anyerror![]const []const u8 {
         const self: *MemoryCPStateDatastore = @ptrCast(@alignCast(ptr));
+        self.acquire();
+        defer self.mutex.unlock();
         const keys = try self.allocator.alloc([]const u8, self.data.count());
         var i: usize = 0;
         var it = self.data.keyIterator();

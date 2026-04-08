@@ -1,14 +1,25 @@
 //! SyncBridge: bridges sync pipeline callbacks to the P2P transport.
 //!
-//! The sync state machine (RangeSyncManager) fires callbacks synchronously,
-//! but P2P operations require cooperative I/O. `SyncCallbackCtx` queues
-//! batch requests so the main loop can drain them via actual network calls.
+//! The sync state machine fires callbacks synchronously, but P2P operations
+//! require cooperative I/O. `SyncCallbackCtx` queues sync/network work so the
+//! main loop can drain it via the real node-owned transport path.
 
 const std = @import("std");
+const Allocator = std.mem.Allocator;
 const chain_mod = @import("chain");
 const sync_mod = @import("sync");
 const SyncServiceCallbacks = sync_mod.SyncServiceCallbacks;
 const BatchBlock = sync_mod.BatchBlock;
+const MinimalHeader = sync_mod.MinimalHeader;
+const UnknownChainCallbacks = sync_mod.unknown_chain.Callbacks;
+const UnknownChainForkChoiceQuery = sync_mod.unknown_chain.ForkChoiceQuery;
+const PeerSet = sync_mod.unknown_chain.PeerSet;
+const PeerEntry = PeerSet.PeerEntry;
+
+pub const PendingByRootRequestKind = enum {
+    unknown_block_parent,
+    unknown_chain_header,
+};
 
 pub const PendingBatchRequest = struct {
     chain_id: u32,
@@ -25,6 +36,7 @@ pub const PendingBatchRequest = struct {
 };
 
 pub const PendingByRootRequest = struct {
+    kind: PendingByRootRequestKind,
     root: [32]u8,
     peer_id_buf: [128]u8,
     peer_id_len: u8,
@@ -34,33 +46,94 @@ pub const PendingByRootRequest = struct {
     }
 };
 
+pub const PendingLinkedChainImport = struct {
+    linking_root: [32]u8,
+    headers: []MinimalHeader,
+    peers: []PeerEntry,
+
+    pub fn deinit(self: *PendingLinkedChainImport, allocator: Allocator) void {
+        allocator.free(self.headers);
+        allocator.free(self.peers);
+        self.* = undefined;
+    }
+
+    pub fn peerIds(
+        self: *const PendingLinkedChainImport,
+        scratch: *[64][]const u8,
+    ) []const []const u8 {
+        const n = @min(self.peers.len, scratch.len);
+        for (self.peers[0..n], 0..) |peer, i| {
+            scratch[i] = peer.id();
+        }
+        return scratch[0..n];
+    }
+};
+
 pub const SyncCallbackCtx = struct {
     /// Typed reference to the beacon node. The circular dependency is resolved
     /// by the lazy import of BeaconNode at the bottom of this file.
     node: *BeaconNode,
 
     /// Pending batch requests queued by the sync state machine.
-    /// Drained by processSyncBatches() in the main loop.
     pending_requests: [32]PendingBatchRequest = undefined,
     pending_head: u8 = 0,
     pending_count: u8 = 0,
 
-    /// Pending by-root requests queued by unknown block sync.
-    /// Drained by processSyncBatches() in the main loop.
-    pending_by_root_requests: [32]PendingByRootRequest = undefined,
+    /// Pending by-root requests queued by unknown block / unknown chain sync.
+    pending_by_root_requests: [64]PendingByRootRequest = undefined,
     pending_by_root_head: u8 = 0,
     pending_by_root_count: u8 = 0,
 
+    /// Pending linked unknown-chain imports, stored in forward order.
+    pending_linked_chains: [16]PendingLinkedChainImport = undefined,
+    pending_linked_head: u8 = 0,
+    pending_linked_count: u8 = 0,
+
+    /// Fallback connected-peer registry for non-P2P runtimes such as sim tests.
+    connected_peers: PeerSet = .empty,
+
     /// Scratch buffer for connected peer IDs (avoids allocation in hot path).
     peer_id_scratch: [64][]const u8 = undefined,
+
+    pub fn deinit(self: *SyncCallbackCtx, allocator: Allocator) void {
+        while (self.popPendingLinkedChain()) |pending| {
+            var owned = pending;
+            owned.deinit(allocator);
+        }
+        self.connected_peers.deinit(allocator);
+        self.* = undefined;
+    }
+
+    pub fn notePeerConnected(self: *SyncCallbackCtx, peer_id: []const u8) void {
+        _ = self.connected_peers.add(self.node.allocator, peer_id) catch {};
+    }
+
+    pub fn notePeerDisconnected(self: *SyncCallbackCtx, peer_id: []const u8) void {
+        _ = self.connected_peers.remove(peer_id);
+    }
 
     /// Create UnknownBlockSync callbacks that reuse the node-owned import path.
     pub fn unknownBlockCallbacks(self: *SyncCallbackCtx) sync_mod.UnknownBlockCallbacks {
         return .{
             .ptr = @ptrCast(self),
-            .requestBlockByRootFn = &syncRequestBlockByRoot,
+            .requestBlockByRootFn = &syncRequestBlockByRootUnknownBlock,
             .importBlockFn = &syncImportBlock,
             .getConnectedPeersFn = &syncGetConnectedPeers,
+        };
+    }
+
+    pub fn unknownChainCallbacks(self: *SyncCallbackCtx) UnknownChainCallbacks {
+        return .{
+            .ptr = @ptrCast(self),
+            .fetchBlockByRootFn = &unknownChainFetchBlockByRoot,
+            .processLinkedChainFn = &unknownChainProcessLinkedChain,
+        };
+    }
+
+    pub fn unknownChainForkChoiceQuery(self: *SyncCallbackCtx) UnknownChainForkChoiceQuery {
+        return .{
+            .ptr = @ptrCast(self),
+            .hasBlockFn = &unknownChainHasBlock,
         };
     }
 
@@ -71,7 +144,7 @@ pub const SyncCallbackCtx = struct {
             .importBlockFn = &syncImportBlock,
             .processChainSegmentFn = &syncProcessChainSegment,
             .requestBlocksByRangeFn = &syncRequestBlocksByRange,
-            .requestBlockByRootFn = &syncRequestBlockByRoot,
+            .requestBlockByRootFn = &syncRequestBlockByRootUnknownBlock,
             .reportPeerFn = &syncReportPeer,
             .getConnectedPeersFn = &syncGetConnectedPeers,
             .setGossipEnabledFn = &syncSetGossipEnabled,
@@ -129,7 +202,7 @@ pub const SyncCallbackCtx = struct {
         count: u64,
     ) void {
         const ctx: *SyncCallbackCtx = @ptrCast(@alignCast(ptr));
-        if (ctx.pending_count >= 32) {
+        if (ctx.pending_count >= ctx.pending_requests.len) {
             std.log.warn("sync callback pending request queue full, dropping batch {d}", .{batch_id});
             return;
         }
@@ -151,25 +224,84 @@ pub const SyncCallbackCtx = struct {
         });
     }
 
-    fn syncRequestBlockByRoot(ptr: *anyopaque, root: [32]u8, peer_id: []const u8) void {
+    fn syncRequestBlockByRootUnknownBlock(ptr: *anyopaque, root: [32]u8, peer_id: []const u8) void {
         const ctx: *SyncCallbackCtx = @ptrCast(@alignCast(ptr));
-        if (ctx.pending_by_root_count >= 32) {
+        ctx.enqueueByRootRequest(.unknown_block_parent, root, peer_id);
+    }
+
+    fn unknownChainFetchBlockByRoot(ptr: *anyopaque, root: [32]u8, peer_id: []const u8) void {
+        const ctx: *SyncCallbackCtx = @ptrCast(@alignCast(ptr));
+        ctx.enqueueByRootRequest(.unknown_chain_header, root, peer_id);
+    }
+
+    fn unknownChainProcessLinkedChain(
+        ptr: *anyopaque,
+        linking_root: [32]u8,
+        headers: []const MinimalHeader,
+        peers: *const PeerSet,
+    ) void {
+        const ctx: *SyncCallbackCtx = @ptrCast(@alignCast(ptr));
+        if (ctx.pending_linked_count >= ctx.pending_linked_chains.len) {
+            std.log.warn("SyncCallbackCtx: linked-chain queue full, dropping chain of {d} headers", .{headers.len});
+            return;
+        }
+
+        const allocator = ctx.node.allocator;
+        const headers_copy = allocator.dupe(MinimalHeader, headers) catch {
+            std.log.warn("SyncCallbackCtx: failed to copy linked chain headers", .{});
+            return;
+        };
+        errdefer allocator.free(headers_copy);
+
+        const peers_copy = allocator.dupe(PeerEntry, peers.peers.items) catch {
+            allocator.free(headers_copy);
+            std.log.warn("SyncCallbackCtx: failed to copy linked chain peers", .{});
+            return;
+        };
+
+        const write_index = (ctx.pending_linked_head + ctx.pending_linked_count) % ctx.pending_linked_chains.len;
+        ctx.pending_linked_chains[write_index] = .{
+            .linking_root = linking_root,
+            .headers = headers_copy,
+            .peers = peers_copy,
+        };
+        ctx.pending_linked_count += 1;
+    }
+
+    fn unknownChainHasBlock(ptr: *anyopaque, root: [32]u8) bool {
+        const ctx: *SyncCallbackCtx = @ptrCast(@alignCast(ptr));
+        const maybe_bytes = ctx.node.chainQuery().blockBytesByRoot(root) catch return false;
+        if (maybe_bytes) |bytes| {
+            ctx.node.allocator.free(bytes);
+            return true;
+        }
+        return false;
+    }
+
+    fn enqueueByRootRequest(
+        self: *SyncCallbackCtx,
+        kind: PendingByRootRequestKind,
+        root: [32]u8,
+        peer_id: []const u8,
+    ) void {
+        if (self.pending_by_root_count >= self.pending_by_root_requests.len) {
             std.log.warn("sync callback by-root queue full, dropping root {x:0>2}{x:0>2}{x:0>2}{x:0>2}...", .{
                 root[0], root[1], root[2], root[3],
             });
             return;
         }
         var req = PendingByRootRequest{
+            .kind = kind,
             .root = root,
             .peer_id_buf = undefined,
             .peer_id_len = @intCast(@min(peer_id.len, 128)),
         };
         @memcpy(req.peer_id_buf[0..req.peer_id_len], peer_id[0..req.peer_id_len]);
-        const write_index = (ctx.pending_by_root_head + ctx.pending_by_root_count) % ctx.pending_by_root_requests.len;
-        ctx.pending_by_root_requests[write_index] = req;
-        ctx.pending_by_root_count += 1;
-        std.log.debug("SyncCallbackCtx: queued by-root {x:0>2}{x:0>2}{x:0>2}{x:0>2}... for peer {s}", .{
-            root[0], root[1], root[2], root[3], peer_id,
+        const write_index = (self.pending_by_root_head + self.pending_by_root_count) % self.pending_by_root_requests.len;
+        self.pending_by_root_requests[write_index] = req;
+        self.pending_by_root_count += 1;
+        std.log.debug("SyncCallbackCtx: queued {s} by-root {x:0>2}{x:0>2}{x:0>2}{x:0>2}... for peer {s}", .{
+            @tagName(kind), root[0], root[1], root[2], root[3], peer_id,
         });
     }
 
@@ -189,6 +321,14 @@ pub const SyncCallbackCtx = struct {
         return req;
     }
 
+    pub fn popPendingLinkedChain(self: *SyncCallbackCtx) ?PendingLinkedChainImport {
+        if (self.pending_linked_count == 0) return null;
+        const pending = self.pending_linked_chains[self.pending_linked_head];
+        self.pending_linked_head = @intCast((self.pending_linked_head + 1) % self.pending_linked_chains.len);
+        self.pending_linked_count -= 1;
+        return pending;
+    }
+
     fn syncReportPeer(ptr: *anyopaque, peer_id: []const u8) void {
         const ctx: *SyncCallbackCtx = @ptrCast(@alignCast(ptr));
         const node: *BeaconNode = @ptrCast(@alignCast(ctx.node));
@@ -204,15 +344,20 @@ pub const SyncCallbackCtx = struct {
     fn syncGetConnectedPeers(ptr: *anyopaque) []const []const u8 {
         const ctx: *SyncCallbackCtx = @ptrCast(@alignCast(ptr));
         const node: *BeaconNode = @ptrCast(@alignCast(ctx.node));
-        const pm = node.peer_manager orelse return &.{};
-        // getBestPeers may fail (OOM); on failure return empty slice.
-        const peers = pm.getBestPeers(64) catch return &.{};
-        // Extract peer_id strings into the pre-allocated peer_id_scratch buffer.
-        const n = @min(peers.len, ctx.peer_id_scratch.len);
-        for (peers[0..n], 0..) |cp, i| {
-            ctx.peer_id_scratch[i] = cp.peer_id;
+        if (node.peer_manager) |pm| {
+            const peers = pm.getBestPeers(64) catch &.{};
+            defer if (@TypeOf(peers) != @TypeOf(&.{})) node.allocator.free(peers);
+            const n = @min(peers.len, ctx.peer_id_scratch.len);
+            for (peers[0..n], 0..) |cp, i| {
+                ctx.peer_id_scratch[i] = cp.peer_id;
+            }
+            if (n > 0) return ctx.peer_id_scratch[0..n];
         }
-        node.allocator.free(peers);
+
+        const n = @min(ctx.connected_peers.peers.items.len, ctx.peer_id_scratch.len);
+        for (ctx.connected_peers.peers.items[0..n], 0..) |peer, i| {
+            ctx.peer_id_scratch[i] = peer.id();
+        }
         return ctx.peer_id_scratch[0..n];
     }
 
@@ -221,9 +366,5 @@ pub const SyncCallbackCtx = struct {
     }
 };
 
-// BeaconNode is imported at the bottom to avoid circular dependency:
-// beacon_node.zig imports sync_bridge.zig; sync_bridge.zig needs BeaconNode.
-// Using a forward-reference struct pointer is not yet idiomatic in Zig, so
-// we resolve it lazily via the bottom-of-file import.
 const beacon_node_mod = @import("beacon_node.zig");
 const BeaconNode = beacon_node_mod.BeaconNode;

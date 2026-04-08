@@ -54,6 +54,7 @@ pub const PlannedBlockImport = @import("blocks/root.zig").PlannedBlockImport;
 pub const CompletedBlockImport = @import("state_work_service.zig").CompletedBlockImport;
 pub const CompletedBlockImportWaitResult = @import("state_work_service.zig").StateWorkService.WaitResult;
 pub const PreparedBlockImport = @import("blocks/root.zig").PreparedBlockImport;
+pub const QueuePlannedReadyBlockImportResult = Chain.QueuePlannedReadyBlockImportResult;
 pub const ExecutionStatus = blocks.ExecutionStatus;
 
 fn eth1DataFromHeadState(cached: *CachedBeaconState) Eth1DataType {
@@ -156,13 +157,14 @@ pub const Service = struct {
         return self.chain.planReadyBlockImport(ready);
     }
 
-    /// Consumes `planned` on both success and failure.
-    /// Returns `true` when queued for background STFN, `false` when the caller
-    /// still owns `planned` and should fall back to synchronous execution.
+    /// Consumes `planned`.
+    /// Returns `.queued` when ownership transfers into background state work.
+    /// Returns `.not_queued` with the original plan when the caller should
+    /// fall back to synchronous execution.
     pub fn tryQueuePlannedReadyBlockImport(
         self: Service,
         planned: PlannedBlockImport,
-    ) !bool {
+    ) !QueuePlannedReadyBlockImportResult {
         return self.chain.tryQueuePlannedReadyBlockImport(planned);
     }
 
@@ -172,6 +174,14 @@ pub const Service = struct {
         planned: PlannedBlockImport,
     ) CompletedBlockImport {
         return self.chain.executePlannedReadyBlockImportSync(planned);
+    }
+
+    pub fn deinitPlannedReadyBlockImport(self: Service, planned: *PlannedBlockImport) void {
+        self.chain.deinitPlannedReadyBlockImport(planned);
+    }
+
+    pub fn deinitCompletedReadyBlockImport(self: Service, completed: *CompletedBlockImport) void {
+        self.chain.deinitCompletedReadyBlockImport(completed);
     }
 
     /// Consumes `completed`.

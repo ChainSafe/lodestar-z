@@ -694,9 +694,44 @@ pub const Chain = struct {
         }
     }
 
-    pub fn tryQueuePlannedReadyBlockImport(self: *Chain, planned: blocks_mod.PlannedBlockImport) !bool {
+    fn getReadyBlockImportPreState(
+        self: *Chain,
+        planned: blocks_mod.PlannedBlockImport,
+    ) BlockImportError!*CachedBeaconState {
+        return blocks_mod.getPlannedBlockImportPreState(self.getPipelineContext(), planned);
+    }
+
+    pub const QueuePlannedReadyBlockImportResult = union(enum) {
+        queued,
+        not_queued: blocks_mod.PlannedBlockImport,
+    };
+
+    pub fn tryQueuePlannedReadyBlockImport(
+        self: *Chain,
+        planned: blocks_mod.PlannedBlockImport,
+    ) !QueuePlannedReadyBlockImportResult {
         const service = self.state_work_service;
-        return service.submitBlockImport(planned);
+        if (!service.canAcceptBlockImport()) return .{ .not_queued = planned };
+
+        const pre_state = try self.getReadyBlockImportPreState(planned);
+        var job = try blocks_mod.captureStateTransitionJob(
+            self.allocator,
+            self.state_graph_gate,
+            planned,
+            pre_state,
+        );
+
+        const submitted = service.submitBlockImport(job) catch |err| {
+            self.state_regen.destroyTransientState(job.transient_pre_state);
+            return err;
+        };
+        if (!submitted) {
+            const transient_pre_state = job.transient_pre_state;
+            const restored_planned = job.releasePlanned();
+            self.state_regen.destroyTransientState(transient_pre_state);
+            return .{ .not_queued = restored_planned };
+        }
+        return .queued;
     }
 
     pub fn popCompletedReadyBlockImport(self: *Chain) ?CompletedBlockImport {
@@ -713,19 +748,37 @@ pub const Chain = struct {
         self: *Chain,
         planned: blocks_mod.PlannedBlockImport,
     ) CompletedBlockImport {
+        var owned_planned = planned;
+        const pre_state = self.getReadyBlockImportPreState(owned_planned) catch |err| {
+            return .{ .failure = .{
+                .planned = owned_planned,
+                .err = err,
+            } };
+        };
         const prepared = blocks_mod.executePlannedBlockImport(
             self.allocator,
-            self.state_regen,
             self.state_graph_gate,
             self.block_bls_thread_pool,
-            planned,
+            &owned_planned,
+            pre_state,
         ) catch |err| {
             return .{ .failure = .{
-                .planned = planned,
+                .planned = owned_planned,
                 .err = err,
             } };
         };
         return .{ .success = prepared };
+    }
+
+    pub fn deinitPlannedReadyBlockImport(
+        self: *Chain,
+        planned: *blocks_mod.PlannedBlockImport,
+    ) void {
+        planned.deinit(self.allocator);
+    }
+
+    pub fn deinitCompletedReadyBlockImport(self: *Chain, completed: *CompletedBlockImport) void {
+        completed.deinit(self.allocator);
     }
 
     pub fn finishCompletedReadyBlockImport(self: *Chain, completed: CompletedBlockImport) !ImportResult {
@@ -1253,14 +1306,21 @@ pub const Chain = struct {
     /// blocks at the current slot as "future" if onSlot was called but advanceSlot was
     /// not (or vice versa).
     pub fn advanceSlot(self: *Chain, target_slot: u64) !void {
-        var state_graph_lease = self.state_graph_gate.acquire();
-        defer state_graph_lease.release();
+        const cloned = blk: {
+            var state_graph_lease = self.state_graph_gate.acquire();
+            defer state_graph_lease.release();
 
-        const head_state_root = self.headStateRoot();
-        const pre_state = self.block_state_cache.get(head_state_root) orelse
-            return error.NoHeadState;
+            const head_state_root = self.headStateRoot();
+            const pre_state = self.block_state_cache.get(head_state_root) orelse
+                return error.NoHeadState;
 
-        const post_state = try pre_state.clone(self.allocator, .{ .transfer_cache = false });
+            break :blk .{
+                .head_root = self.headRoot(),
+                .post_state = try pre_state.clone(self.allocator, .{ .transfer_cache = false }),
+            };
+        };
+        const head_root = cloned.head_root;
+        const post_state = cloned.post_state;
         errdefer {
             post_state.deinit();
             self.allocator.destroy(post_state);
@@ -1276,7 +1336,7 @@ pub const Chain = struct {
         // state), NOT the post-block state root. When a block is later imported at
         // this slot, the entry will be overwritten with the actual post-block state root.
         try self.block_to_state.put(
-            self.headRoot(),
+            head_root,
             new_state_root,
         );
 

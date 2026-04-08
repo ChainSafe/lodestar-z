@@ -182,7 +182,7 @@ pub const SimBeaconNode = struct {
             inline else => |f| {
                 switch (block.blockType()) {
                     inline else => |bt| {
-                        if (comptime bt == .blinded and f.lt(.bellatrix)) {
+                        if (comptime bt == .blinded and (f.lt(.bellatrix) or f.gte(.gloas))) {
                             return error.InvalidBlockTypeForFork;
                         }
                         try state_transition.processBlock(

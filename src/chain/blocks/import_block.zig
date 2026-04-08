@@ -297,17 +297,7 @@ pub fn importVerifiedBlock(
         error.EpochTooLow, error.OutOfMemory => {},
     };
 
-    // 3. Cache post-state via state regen.
-    const cached_state_root = ctx.queued_regen.onNewBlock(post_state, true) catch
-        return BlockImportError.InternalError;
-    verified.relinquishPostState();
-    _ = cached_state_root;
-
-    // Map block root → state root for future pre-state lookups.
-    ctx.block_to_state.put(block_root, state_root) catch
-        return BlockImportError.InternalError;
-
-    // 4. Cache checkpoint state at epoch boundaries.
+    // 3. Cache checkpoint state at epoch boundaries.
     if (is_epoch_transition) {
         const cp_state = post_state.clone(ctx.allocator, .{ .transfer_cache = false }) catch
             return BlockImportError.InternalError;
@@ -322,13 +312,22 @@ pub fn importVerifiedBlock(
         ) catch return BlockImportError.InternalError;
     }
 
-    // 5. Update head tracker.
+    // 4. Update head tracker.
     ctx.head_tracker.onBlock(block_root, block_slot, state_root) catch
         return BlockImportError.InternalError;
     if (is_epoch_transition) {
         ctx.head_tracker.onEpochTransition(post_state) catch
             return BlockImportError.InternalError;
     }
+
+    // 5. Cache post-state via state regen.
+    _ = ctx.queued_regen.onNewBlock(post_state, true) catch
+        return BlockImportError.InternalError;
+    verified.relinquishPostState();
+
+    // Map block root → state root for future pre-state lookups.
+    ctx.block_to_state.put(block_root, state_root) catch
+        return BlockImportError.InternalError;
 
     // 6. Recompute fork choice head and detect reorgs (if requested).
     head_recompute: {
@@ -361,8 +360,12 @@ pub fn importVerifiedBlock(
         };
 
         // Check finality changes.
+        const prev_finalized_epoch = ctx.head_tracker.finalized_epoch;
         const new_finalized = fc.getFinalizedCheckpoint();
-        if (new_finalized.epoch > ctx.head_tracker.finalized_epoch) {
+        const new_justified = fc.getJustifiedCheckpoint();
+        ctx.head_tracker.finalized_epoch = new_finalized.epoch;
+        ctx.head_tracker.justified_epoch = new_justified.epoch;
+        if (new_finalized.epoch > prev_finalized_epoch) {
             if (ctx.notification_sink) |sink| {
                 const fin_state_root = ctx.block_to_state.get(new_finalized.root) orelse
                     [_]u8{0} ** 32;

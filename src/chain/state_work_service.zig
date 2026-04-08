@@ -13,6 +13,7 @@ const StateRegen = regen_mod.StateRegen;
 
 const blocks = @import("blocks/root.zig");
 const PlannedBlockImport = blocks.pipeline.PlannedBlockImport;
+const StateTransitionJob = blocks.pipeline.StateTransitionJob;
 const PreparedBlockImport = blocks.pipeline.PreparedBlockImport;
 const BlockImportError = blocks.BlockImportError;
 
@@ -44,7 +45,7 @@ pub const StateWorkService = struct {
 
     mutex: std.Io.Mutex = .init,
     cond: std.Io.Condition = .init,
-    pending_block_imports: std.ArrayListUnmanaged(PlannedBlockImport) = .empty,
+    pending_block_imports: std.ArrayListUnmanaged(StateTransitionJob) = .empty,
     completed_block_imports: std.ArrayListUnmanaged(CompletedBlockImport) = .empty,
     active_block_imports: usize = 0,
     shutdown_requested: bool = false,
@@ -90,8 +91,8 @@ pub const StateWorkService = struct {
             thread.join();
         }
 
-        for (self.pending_block_imports.items) |*planned| {
-            planned.deinit(self.allocator);
+        for (self.pending_block_imports.items) |*job| {
+            job.deinit(self.allocator, self.state_regen);
         }
         self.pending_block_imports.deinit(self.allocator);
 
@@ -111,7 +112,7 @@ pub const StateWorkService = struct {
             self.active_block_imports < self.max_pending_block_imports;
     }
 
-    pub fn submitBlockImport(self: *StateWorkService, planned: PlannedBlockImport) !bool {
+    pub fn submitBlockImport(self: *StateWorkService, job: StateTransitionJob) !bool {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
 
@@ -123,7 +124,7 @@ pub const StateWorkService = struct {
             return false;
         }
 
-        try self.pending_block_imports.append(self.allocator, planned);
+        try self.pending_block_imports.append(self.allocator, job);
         self.cond.signal(self.io);
         return true;
     }
@@ -164,20 +165,20 @@ pub const StateWorkService = struct {
                 return;
             }
 
-            const planned = self.pending_block_imports.orderedRemove(0);
+            var job = self.pending_block_imports.orderedRemove(0);
             self.active_block_imports += 1;
             self.mutex.unlock(self.io);
 
             const completed: CompletedBlockImport = blk: {
-                const prepared = blocks.pipeline.executePlannedBlockImport(
+                const prepared = blocks.pipeline.executeStateTransitionJob(
                     self.allocator,
                     self.state_regen,
                     self.state_graph_gate,
                     self.block_bls_thread_pool,
-                    planned,
+                    &job,
                 ) catch |err| {
                     break :blk .{ .failure = .{
-                        .planned = planned,
+                        .planned = job.releasePlanned(),
                         .err = err,
                     } };
                 };

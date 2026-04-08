@@ -18,6 +18,7 @@ const Allocator = std.mem.Allocator;
 const backwards_chain = @import("backwards_chain.zig");
 const BackwardsChain = backwards_chain.BackwardsChain;
 const MinimalHeader = backwards_chain.MinimalHeader;
+const PeerSet = backwards_chain.PeerSet;
 const State = backwards_chain.State;
 
 /// Maximum number of concurrent backwards chains.
@@ -47,14 +48,20 @@ pub const Callbacks = struct {
         ptr: *anyopaque,
         linking_root: [32]u8,
         headers: []const MinimalHeader,
+        peers: *const PeerSet,
     ) void,
 
     pub fn fetchBlockByRoot(self: *const Callbacks, root: [32]u8, peer_id: []const u8) void {
         self.fetchBlockByRootFn(self.ptr, root, peer_id);
     }
 
-    pub fn processLinkedChain(self: *const Callbacks, linking_root: [32]u8, headers: []const MinimalHeader) void {
-        self.processLinkedChainFn(self.ptr, linking_root, headers);
+    pub fn processLinkedChain(
+        self: *const Callbacks,
+        linking_root: [32]u8,
+        headers: []const MinimalHeader,
+        peers: *const PeerSet,
+    ) void {
+        self.processLinkedChainFn(self.ptr, linking_root, headers, peers);
     }
 };
 
@@ -283,6 +290,7 @@ pub const UnknownChainSync = struct {
                 callbacks.processLinkedChain(
                     chain.ancestor_root,
                     chain.headers.items,
+                    &chain.peers,
                 );
                 self.linked_chains_processed += 1;
                 self.removeChain(i);

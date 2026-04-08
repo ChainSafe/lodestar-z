@@ -5,7 +5,8 @@
 //! - Deterministic simulation testing (DST)
 //! - Development without external dependencies
 //!
-//! Thread-safety: NOT thread-safe. Callers must synchronize externally.
+//! Thread-safety: protected by an internal spin mutex so tests can exercise
+//! background regen workers against the in-memory backend.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -21,6 +22,7 @@ pub const MemoryKVStore = struct {
     allocator: Allocator,
     /// One HashMap per named database.
     databases: [DatabaseId.count]DataMap,
+    mutex: std.atomic.Mutex,
     closed: bool,
 
     pub fn init(allocator: Allocator) MemoryKVStore {
@@ -31,6 +33,7 @@ pub const MemoryKVStore = struct {
         return .{
             .allocator = allocator,
             .databases = databases,
+            .mutex = .unlocked,
             .closed = false,
         };
     }
@@ -81,6 +84,12 @@ pub const MemoryKVStore = struct {
         return &self.databases[@intFromEnum(db_id)];
     }
 
+    fn acquire(self: *MemoryKVStore) void {
+        while (!self.mutex.tryLock()) {
+            std.atomic.spinLoopHint();
+        }
+    }
+
     // ---- VTable implementation ----
 
     const vtable = KVStore.VTable{
@@ -97,6 +106,8 @@ pub const MemoryKVStore = struct {
 
     fn memGet(ptr: *anyopaque, db_id: DatabaseId, key: []const u8) anyerror!?[]const u8 {
         const self: *MemoryKVStore = @ptrCast(@alignCast(ptr));
+        self.acquire();
+        defer self.mutex.unlock();
         if (self.closed) return error.StoreClosed;
         const db = self.getDb(db_id);
         const value = db.get(key) orelse return null;
@@ -105,6 +116,12 @@ pub const MemoryKVStore = struct {
 
     fn memPut(ptr: *anyopaque, db_id: DatabaseId, key: []const u8, value: []const u8) anyerror!void {
         const self: *MemoryKVStore = @ptrCast(@alignCast(ptr));
+        self.acquire();
+        defer self.mutex.unlock();
+        try putUnlocked(self, db_id, key, value);
+    }
+
+    fn putUnlocked(self: *MemoryKVStore, db_id: DatabaseId, key: []const u8, value: []const u8) !void {
         if (self.closed) return error.StoreClosed;
         const db = self.getDb(db_id);
 
@@ -124,6 +141,12 @@ pub const MemoryKVStore = struct {
 
     fn memDelete(ptr: *anyopaque, db_id: DatabaseId, key: []const u8) anyerror!void {
         const self: *MemoryKVStore = @ptrCast(@alignCast(ptr));
+        self.acquire();
+        defer self.mutex.unlock();
+        try deleteUnlocked(self, db_id, key);
+    }
+
+    fn deleteUnlocked(self: *MemoryKVStore, db_id: DatabaseId, key: []const u8) !void {
         if (self.closed) return error.StoreClosed;
         const db = self.getDb(db_id);
         if (db.fetchOrderedRemove(key)) |old| {
@@ -134,18 +157,22 @@ pub const MemoryKVStore = struct {
 
     fn memWriteBatch(ptr: *anyopaque, ops: []const BatchOp) anyerror!void {
         const self: *MemoryKVStore = @ptrCast(@alignCast(ptr));
+        self.acquire();
+        defer self.mutex.unlock();
         if (self.closed) return error.StoreClosed;
 
         for (ops) |op| {
             switch (op) {
-                .put => |p| try memPut(@ptrCast(self), p.db, p.key, p.value),
-                .delete => |d| try memDelete(@ptrCast(self), d.db, d.key),
+                .put => |p| try putUnlocked(self, p.db, p.key, p.value),
+                .delete => |d| try deleteUnlocked(self, d.db, d.key),
             }
         }
     }
 
     fn memAllKeys(ptr: *anyopaque, db_id: DatabaseId) anyerror![]const []const u8 {
         const self: *MemoryKVStore = @ptrCast(@alignCast(ptr));
+        self.acquire();
+        defer self.mutex.unlock();
         if (self.closed) return error.StoreClosed;
         const db = self.getDb(db_id);
 
@@ -165,6 +192,8 @@ pub const MemoryKVStore = struct {
 
     fn memAllEntries(ptr: *anyopaque, db_id: DatabaseId) anyerror!KVStore.EntryList {
         const self: *MemoryKVStore = @ptrCast(@alignCast(ptr));
+        self.acquire();
+        defer self.mutex.unlock();
         if (self.closed) return error.StoreClosed;
         const db = self.getDb(db_id);
 
@@ -193,6 +222,8 @@ pub const MemoryKVStore = struct {
     /// we iterate all keys to find the lexicographically smallest. For test use only.
     fn memFirstKey(ptr: *anyopaque, db_id: DatabaseId) anyerror!?[]const u8 {
         const self: *MemoryKVStore = @ptrCast(@alignCast(ptr));
+        self.acquire();
+        defer self.mutex.unlock();
         if (self.closed) return error.StoreClosed;
         const db = self.getDb(db_id);
         var best: ?[]const u8 = null;
@@ -211,6 +242,8 @@ pub const MemoryKVStore = struct {
     /// we iterate all keys to find the lexicographically largest. For test use only.
     fn memLastKey(ptr: *anyopaque, db_id: DatabaseId) anyerror!?[]const u8 {
         const self: *MemoryKVStore = @ptrCast(@alignCast(ptr));
+        self.acquire();
+        defer self.mutex.unlock();
         if (self.closed) return error.StoreClosed;
         const db = self.getDb(db_id);
         var best: ?[]const u8 = null;
@@ -227,6 +260,8 @@ pub const MemoryKVStore = struct {
 
     fn memClose(ptr: *anyopaque) void {
         const self: *MemoryKVStore = @ptrCast(@alignCast(ptr));
+        self.acquire();
+        defer self.mutex.unlock();
         self.closed = true;
     }
 };

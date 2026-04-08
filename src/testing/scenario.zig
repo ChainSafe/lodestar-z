@@ -10,6 +10,10 @@
 //!   - missed_proposals: some proposers skip
 //!   - network_partition: split then heal
 //!   - late_attestations: delayed attestations
+//!   - late_joiner_finalized_sync: reconnect after peers finalize
+//!   - short_gap_sync: recover after missing a parent slot
+//!   - short_gap_quiescent_sync: recover short-gap unknown head during empty slots
+//!   - network_partition_quiescent_recovery: heal then drain to exact head agreement
 
 const std = @import("std");
 const preset = @import("preset").preset;
@@ -17,12 +21,16 @@ const preset = @import("preset").preset;
 pub const Step = union(enum) {
     /// Advance simulation by one slot (with block production).
     advance_slot: void,
+    /// Advance forward by N slots from the current slot.
+    advance_slots: u64,
     /// Advance to the first slot of the given absolute epoch.
     advance_to_epoch: u64,
     /// Advance forward by N epochs from the current slot.
     advance_epochs: u64,
     /// Skip a slot (proposer misses).
     skip_slot: void,
+    /// Skip forward by N empty slots.
+    skip_slots: u64,
     /// Inject a fault into the simulation.
     inject_fault: Fault,
     /// Check that an invariant holds.
@@ -95,7 +103,7 @@ const happy_path_steps = [_]Step{
     // Check invariants.
     .{ .check_invariant = .safety },
     .{ .check_invariant = .finality_agreement },
-    .{ .check_invariant = .head_agreement },
+    .{ .check_invariant = .{ .head_freshness = 4 } },
     .{ .check_invariant = .no_state_divergence },
 };
 
@@ -127,8 +135,9 @@ const missed_proposals_steps = [_]Step{
     .{ .check_invariant = .no_state_divergence },
 };
 
-/// Network partition: split [0,1] from [2,3], run under live delivery,
-/// then heal and recover through req/resp catch-up.
+/// Network partition under continued block production: split [0,1] from [2,3],
+/// run long enough to require real range sync on heal, then verify safety and
+/// bounded recovery while the chain keeps moving.
 pub const network_partition = Scenario{
     .name = "network_partition",
     .steps = &network_partition_steps,
@@ -145,16 +154,44 @@ const network_partition_steps = [_]Step{
         .group_a = &[_]u8{ 0, 1 },
         .group_b = &[_]u8{ 2, 3 },
     } },
-    // Run during partition long enough to create a live fork.
-    .{ .advance_slot = {} },
-    .{ .advance_slot = {} },
-    .{ .advance_slot = {} },
-    .{ .advance_slot = {} },
-    // Heal and allow req/resp recovery to catch nodes up.
+    // Run long enough that healing requires real range-sync catch-up,
+    // not just short-gap unknown-parent recovery.
+    .{ .advance_slots = preset.SLOTS_PER_EPOCH + 2 },
+    // Heal and keep the network running long enough for honest sync.
     .{ .heal_partition = {} },
-    .{ .advance_slot = {} },
-    .{ .advance_slot = {} },
+    .{ .advance_epochs = 2 },
     // Verify recovery.
+    .{ .check_invariant = .safety },
+    .{ .check_invariant = .finality_agreement },
+    .{ .check_invariant = .{ .head_freshness = 4 } },
+};
+
+/// Network partition with post-heal quiescence: after a short live period to
+/// expose the competing head, stop block production long enough for the healed
+/// cluster to drain sync and settle on one exact head.
+pub const network_partition_quiescent_recovery = Scenario{
+    .name = "network_partition_quiescent_recovery",
+    .steps = &network_partition_quiescent_recovery_steps,
+};
+
+const network_partition_quiescent_recovery_steps = [_]Step{
+    .{ .set_participation_rate = 1.0 },
+    .{ .advance_slot = {} },
+    .{ .advance_slot = {} },
+    .{ .check_invariant = .head_agreement },
+    .{ .network_partition = .{
+        .group_a = &[_]u8{ 0, 1 },
+        .group_b = &[_]u8{ 2, 3 },
+    } },
+    .{ .advance_slots = preset.SLOTS_PER_EPOCH + 2 },
+    .{ .heal_partition = {} },
+    // Keep producing briefly so nodes learn about the competing tip.
+    .{ .advance_slots = 2 },
+    // Then quiesce for a full epoch so linked-chain sync can drain without a
+    // moving head racing ahead every slot.
+    .{ .skip_slots = preset.SLOTS_PER_EPOCH },
+    // Resume briefly so the healed cluster can build on one synchronized head.
+    .{ .advance_slots = 2 },
     .{ .check_invariant = .safety },
     .{ .check_invariant = .finality_agreement },
     .{ .check_invariant = .head_agreement },
@@ -176,4 +213,61 @@ const late_attestations_steps = [_]Step{
     // Safety must hold throughout.
     .{ .check_invariant = .safety },
     .{ .check_invariant = .no_state_divergence },
+};
+
+/// Lodestar-style finalized sync: one node joins late after peers already finalized.
+pub const late_joiner_finalized_sync = Scenario{
+    .name = "late_joiner_finalized_sync",
+    .steps = &late_joiner_finalized_sync_steps,
+};
+
+const late_joiner_finalized_sync_steps = [_]Step{
+    .{ .set_participation_rate = 1.0 },
+    .{ .inject_fault = .{ .node_crash = 1 } },
+    .{ .advance_slots = preset.SLOTS_PER_EPOCH + 2 },
+    .{ .inject_fault = .{ .node_restart = 1 } },
+    .{ .advance_slot = {} },
+    .{ .advance_slot = {} },
+    .{ .check_invariant = .safety },
+    .{ .check_invariant = .finality_agreement },
+    .{ .check_invariant = .head_agreement },
+};
+
+/// Short-gap recovery: a node misses one parent slot, then reconnects and catches up.
+pub const short_gap_sync = Scenario{
+    .name = "short_gap_sync",
+    .steps = &short_gap_sync_steps,
+};
+
+const short_gap_sync_steps = [_]Step{
+    .{ .set_participation_rate = 1.0 },
+    .{ .advance_slot = {} },
+    .{ .advance_slot = {} },
+    .{ .disconnect_node = 1 },
+    .{ .advance_slot = {} },
+    .{ .reconnect_node = 1 },
+    .{ .advance_slot = {} },
+    .{ .advance_slot = {} },
+    .{ .check_invariant = .safety },
+    .{ .check_invariant = .head_agreement },
+};
+
+/// Lodestar-style short-gap recovery without fresh block production after restart:
+/// a node misses a few slots, restarts, and catches up via status/by-root sync
+/// while subsequent slots are empty so the sync path can drain quiescently.
+pub const short_gap_quiescent_sync = Scenario{
+    .name = "short_gap_quiescent_sync",
+    .steps = &short_gap_quiescent_sync_steps,
+};
+
+const short_gap_quiescent_sync_steps = [_]Step{
+    .{ .set_participation_rate = 1.0 },
+    .{ .advance_slot = {} },
+    .{ .advance_slot = {} },
+    .{ .inject_fault = .{ .node_crash = 1 } },
+    .{ .advance_slots = 3 },
+    .{ .inject_fault = .{ .node_restart = 1 } },
+    .{ .skip_slots = 3 },
+    .{ .check_invariant = .safety },
+    .{ .check_invariant = .head_agreement },
 };

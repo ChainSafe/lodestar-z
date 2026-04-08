@@ -175,13 +175,13 @@ pub const SeenCache = struct {
     pub fn pruneDataColumns(self: *SeenCache, block_root: [32]u8) void {
         // Remove all column entries for this block root.
         // Since AutoHashMap doesn't support prefix deletion, we collect then remove.
-        var to_remove = std.ArrayList(DataColumnKey).init(self.allocator);
-        defer to_remove.deinit();
+        var to_remove: std.ArrayListUnmanaged(DataColumnKey) = .empty;
+        defer to_remove.deinit(self.allocator);
 
         var it = self.seen_data_columns.iterator();
         while (it.next()) |entry| {
             if (std.mem.eql(u8, &entry.key_ptr.block_root, &block_root)) {
-                to_remove.append(entry.key_ptr.*) catch continue;
+                to_remove.append(self.allocator, entry.key_ptr.*) catch continue;
             }
         }
         for (to_remove.items) |key| {

@@ -281,8 +281,9 @@ fn initOwnedGraph(
 
     const queued_regen = try allocator.create(QueuedStateRegen);
     errdefer allocator.destroy(queued_regen);
-    queued_regen.* = QueuedStateRegen.init(allocator, regen);
+    queued_regen.* = QueuedStateRegen.init(allocator, io, regen);
     errdefer queued_regen.deinit();
+    try queued_regen.start();
 
     const state_work_service = try StateWorkService.init(
         allocator,

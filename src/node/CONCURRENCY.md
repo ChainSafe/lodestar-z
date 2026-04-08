@@ -20,7 +20,9 @@ The current code has these important properties:
 - BLS verification is already offloaded to dedicated worker pools:
   - block pool
   - gossip pool
-- `QueuedStateRegen` exists, but its slow path is still effectively inline.
+- `QueuedStateRegen` now offloads pre-state, state-root, and checkpoint
+  slow-path regeneration to a bounded worker, but cache publication still stays
+  on the main owner thread.
 
 Those facts imply the current worst stall is not transport I/O. It is heavy
 chain compute, especially state transition and regen work that still runs on

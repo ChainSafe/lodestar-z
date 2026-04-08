@@ -354,10 +354,12 @@ pub fn deinitOwnedState(self: *BeaconNode) void {
     }
 
     if (self.sync_service_inst) |svc| {
+        svc.deinit();
         self.allocator.destroy(svc);
         self.sync_service_inst = null;
     }
     if (self.sync_callback_ctx) |ctx| {
+        ctx.deinit(self.allocator);
         self.allocator.destroy(ctx);
         self.sync_callback_ctx = null;
     }
@@ -445,30 +447,105 @@ pub fn processSyncByRootRequests(self: *BeaconNode, io: std.Io, svc: *networking
     while (cb_ctx.popPendingByRootRequest()) |req| {
         const peer_id = req.peerId();
         const root = req.root;
-        std.log.debug("processSyncByRoot: fetching root {x:0>2}{x:0>2}{x:0>2}{x:0>2}... from peer {s}", .{
-            root[0], root[1], root[2], root[3], peer_id,
+        std.log.debug("processSyncByRoot: fetching {s} root {x:0>2}{x:0>2}{x:0>2}{x:0>2}... from peer {s}", .{
+            @tagName(req.kind), root[0], root[1], root[2], root[3], peer_id,
         });
 
         const block_ssz = fetchBlockByRoot(self, io, svc, peer_id, root) catch |err| {
             reportReqRespFetchFailure(self, io, peer_id, .beacon_blocks_by_root, err);
-            std.log.debug("processSyncByRoot: fetch failed for root {x:0>2}{x:0>2}{x:0>2}{x:0>2}...: {}", .{
-                root[0], root[1], root[2], root[3], err,
+            std.log.debug("processSyncByRoot: fetch failed for {s} root {x:0>2}{x:0>2}{x:0>2}{x:0>2}...: {}", .{
+                @tagName(req.kind), root[0], root[1], root[2], root[3], err,
             });
-            self.unknown_block_sync.onFetchFailed(root);
+            switch (req.kind) {
+                .unknown_block_parent => self.unknown_block_sync.onFetchFailed(root),
+                .unknown_chain_header => {},
+            }
             continue;
         };
         defer self.allocator.free(block_ssz);
 
-        ensureByRootDataAvailability(self, io, svc, peer_id, block_ssz) catch |err| {
-            std.log.debug("processSyncByRoot: DA prefetch failed for root {x:0>2}{x:0>2}{x:0>2}{x:0>2}...: {}", .{
-                root[0], root[1], root[2], root[3], err,
-            });
-            self.unknown_block_sync.onFetchFailed(root);
-            continue;
-        };
+        switch (req.kind) {
+            .unknown_block_parent => {
+                ensureByRootDataAvailability(self, io, svc, peer_id, block_ssz) catch |err| {
+                    std.log.debug("processSyncByRoot: DA prefetch failed for root {x:0>2}{x:0>2}{x:0>2}{x:0>2}...: {}", .{
+                        root[0], root[1], root[2], root[3], err,
+                    });
+                    self.unknown_block_sync.onFetchFailed(root);
+                    continue;
+                };
 
-        self.unknown_block_sync.onParentFetched(root, block_ssz) catch |err| {
-            std.log.warn("processSyncByRoot: onParentFetched error: {}", .{err});
+                self.unknown_block_sync.onParentFetched(root, block_ssz) catch |err| {
+                    std.log.warn("processSyncByRoot: onParentFetched error: {}", .{err});
+                };
+            },
+            .unknown_chain_header => {
+                const slot = readSignedBlockSlotFromSsz(block_ssz) orelse {
+                    std.log.warn("processSyncByRoot: failed to read slot for unknown-chain root {x:0>2}{x:0>2}{x:0>2}{x:0>2}...", .{
+                        root[0], root[1], root[2], root[3],
+                    });
+                    continue;
+                };
+                const parent_root = readSignedBlockParentRootFromSsz(block_ssz) orelse {
+                    std.log.warn("processSyncByRoot: failed to read parent root for unknown-chain root {x:0>2}{x:0>2}{x:0>2}{x:0>2}...", .{
+                        root[0], root[1], root[2], root[3],
+                    });
+                    continue;
+                };
+                self.unknown_chain_sync.onUnknownBlockInput(slot, root, parent_root, peer_id) catch |err| {
+                    std.log.warn("processSyncByRoot: unknown-chain advance failed: {}", .{err});
+                };
+            },
+        }
+    }
+}
+
+pub fn processPendingLinkedChainImports(self: *BeaconNode, io: std.Io, svc: *networking.P2pService) void {
+    const cb_ctx = self.sync_callback_ctx orelse return;
+
+    while (cb_ctx.popPendingLinkedChain()) |pending| {
+        var owned = pending;
+        defer owned.deinit(self.allocator);
+
+        var peer_scratch: [64][]const u8 = undefined;
+        const peer_ids = owned.peerIds(&peer_scratch);
+        if (peer_ids.len == 0) continue;
+
+        var raw_blocks: std.ArrayListUnmanaged(chain_mod.RawBlockBytes) = .empty;
+        defer {
+            for (raw_blocks.items) |raw_block| self.allocator.free(raw_block.bytes);
+            raw_blocks.deinit(self.allocator);
+        }
+
+        var failed = false;
+        for (owned.headers) |header| {
+            const fetched = fetchBlockByRootFromPeers(self, io, svc, peer_ids, header.root) catch |err| {
+                std.log.warn("linked unknown-chain import: failed to fetch block at slot {d}: {}", .{ header.slot, err });
+                failed = true;
+                break;
+            };
+
+            ensureByRootDataAvailability(self, io, svc, fetched.peer_id, fetched.block_ssz) catch |err| {
+                self.allocator.free(fetched.block_ssz);
+                std.log.warn("linked unknown-chain import: DA prefetch failed at slot {d}: {}", .{ header.slot, err });
+                failed = true;
+                break;
+            };
+
+            raw_blocks.append(self.allocator, .{
+                .slot = header.slot,
+                .bytes = fetched.block_ssz,
+            }) catch |err| {
+                self.allocator.free(fetched.block_ssz);
+                std.log.warn("linked unknown-chain import: failed to queue block at slot {d}: {}", .{ header.slot, err });
+                failed = true;
+                break;
+            };
+        }
+
+        if (failed or raw_blocks.items.len != owned.headers.len) continue;
+
+        self.processRangeSyncSegment(raw_blocks.items) catch |err| {
+            std.log.warn("linked unknown-chain import failed: {}", .{err});
         };
     }
 }
@@ -990,12 +1067,16 @@ fn runRealtimeP2pTick(self: *BeaconNode, io: std.Io, svc: *networking.P2pService
             std.log.warn("SyncService.tick failed: {}", .{err});
         };
     }
+    self.unknown_block_sync.tick();
+    self.unknown_chain_sync.tick();
     did_work = self.drivePendingSyncSegments() or did_work;
 
     maybeHandleForkTransition(self, svc);
 
     processSyncBatches(self, io, svc);
     processSyncByRootRequests(self, io, svc);
+    self.unknown_chain_sync.tick();
+    processPendingLinkedChainImports(self, io, svc);
     maybePrepareProposerPayload(self, io);
     pruneSyncCommitteePools(self);
     advanceChainClock(self, io);
@@ -1908,6 +1989,8 @@ fn freeOwnedPeerIds(allocator: std.mem.Allocator, peer_ids: []const []const u8) 
 }
 
 fn initPeerManager(self: *BeaconNode) !void {
+    if (self.peer_manager != null) return;
+
     const pm = try self.allocator.create(PeerManager);
     errdefer self.allocator.destroy(pm);
     pm.* = PeerManager.init(self.allocator, .{
@@ -1930,6 +2013,8 @@ fn initSyncPipeline(self: *BeaconNode) !void {
         break :blk created;
     };
     self.unknown_block_sync.setCallbacks(cb_ctx.unknownBlockCallbacks());
+    self.unknown_chain_sync.setCallbacks(cb_ctx.unknownChainCallbacks());
+    self.unknown_chain_sync.setForkChoice(cb_ctx.unknownChainForkChoiceQuery());
 
     if (self.sync_service_inst != null) return;
 
@@ -2661,6 +2746,55 @@ fn responseCodeError(code: networking.ResponseCode) anyerror {
         .server_error => error.ServerErrorResponse,
         .resource_unavailable => error.ResourceUnavailableResponse,
     };
+}
+
+const LinkedChainFetchResult = struct {
+    peer_id: []const u8,
+    block_ssz: []const u8,
+};
+
+fn fetchBlockByRootFromPeers(
+    self: *BeaconNode,
+    io: std.Io,
+    svc: *networking.P2pService,
+    peer_ids: []const []const u8,
+    root: [32]u8,
+) !LinkedChainFetchResult {
+    for (peer_ids) |peer_id| {
+        const block_ssz = fetchBlockByRoot(self, io, svc, peer_id, root) catch |err| {
+            reportReqRespFetchFailure(self, io, peer_id, .beacon_blocks_by_root, err);
+            continue;
+        };
+        return .{
+            .peer_id = peer_id,
+            .block_ssz = block_ssz,
+        };
+    }
+    return error.NoConnectedPeerHasBlock;
+}
+
+fn readSignedBlockSlotFromSsz(block_bytes: []const u8) ?u64 {
+    const signature_size: usize = 96;
+    const bls_sig_offset: usize = 4;
+    const min_size = bls_sig_offset + signature_size + 8 + 8 + 32;
+    if (block_bytes.len < min_size) return null;
+    const message_offset = std.mem.readInt(u32, block_bytes[0..4], .little);
+    if (message_offset != bls_sig_offset + signature_size) return null;
+    if (block_bytes.len < message_offset + 8 + 8 + 32) return null;
+    return std.mem.readInt(u64, block_bytes[message_offset..][0..8], .little);
+}
+
+fn readSignedBlockParentRootFromSsz(block_bytes: []const u8) ?[32]u8 {
+    const signature_size: usize = 96;
+    const bls_sig_offset: usize = 4;
+    const min_size = bls_sig_offset + signature_size + 8 + 8 + 32;
+    if (block_bytes.len < min_size) return null;
+    const message_offset = std.mem.readInt(u32, block_bytes[0..4], .little);
+    if (message_offset != bls_sig_offset + signature_size) return null;
+    if (block_bytes.len < message_offset + 8 + 8 + 32) return null;
+    var parent_root: [32]u8 = undefined;
+    @memcpy(&parent_root, block_bytes[message_offset + 16 ..][0..32]);
+    return parent_root;
 }
 
 fn fetchBlockByRoot(

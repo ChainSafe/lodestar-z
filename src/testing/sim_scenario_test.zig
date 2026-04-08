@@ -266,3 +266,145 @@ test "controller: late attestations — safety preserved" {
     // Finality should advance after attestations start.
     try testing.expect(result.finalized_epoch > 0);
 }
+
+test "controller: built-in late_joiner_finalized_sync scenario catches up after finality" {
+    const allocator = testing.allocator;
+
+    var ctrl = try SimController.init(allocator, .{
+        .num_nodes = 2,
+        .seed = 6666,
+        .validator_count = 64,
+        .participation_rate = 1.0,
+    });
+    defer ctrl.deinit();
+
+    const result = try ctrl.runScenario(scenario.late_joiner_finalized_sync);
+
+    try testing.expect(result.finalized_epoch > 0);
+    try testing.expectEqual(@as(u64, 0), result.safety_violations);
+    try testing.expect(ctrl.checker.node_finalized_epochs[0] == ctrl.checker.node_finalized_epochs[1]);
+}
+
+test "controller: built-in short_gap_sync scenario recovers head agreement" {
+    const allocator = testing.allocator;
+
+    var ctrl = try SimController.init(allocator, .{
+        .num_nodes = 2,
+        .seed = 6767,
+        .validator_count = 64,
+        .participation_rate = 1.0,
+    });
+    defer ctrl.deinit();
+
+    const result = try ctrl.runScenario(scenario.short_gap_sync);
+
+    try testing.expectEqual(@as(u64, 0), result.safety_violations);
+    try testing.expect(ctrl.nodes[0].node.getHead().slot == ctrl.nodes[1].node.getHead().slot);
+    try testing.expectEqualSlices(u8, &ctrl.nodes[0].node.getHead().root, &ctrl.nodes[1].node.getHead().root);
+}
+
+test "controller: built-in short_gap_quiescent_sync scenario drains node-owned recovery" {
+    const allocator = testing.allocator;
+
+    var ctrl = try SimController.init(allocator, .{
+        .num_nodes = 2,
+        .seed = 6789,
+        .validator_count = 64,
+        .participation_rate = 1.0,
+    });
+    defer ctrl.deinit();
+
+    const result = try ctrl.runScenario(scenario.short_gap_quiescent_sync);
+
+    try testing.expectEqual(@as(u64, 0), result.safety_violations);
+    try testing.expect(ctrl.nodes[0].node.getHead().slot == ctrl.nodes[1].node.getHead().slot);
+    try testing.expectEqualSlices(u8, &ctrl.nodes[0].node.getHead().root, &ctrl.nodes[1].node.getHead().root);
+}
+
+test "controller: built-in network_partition scenario preserves safety and bounded lag after heal" {
+    const allocator = testing.allocator;
+
+    var ctrl = try SimController.init(allocator, .{
+        .num_nodes = 4,
+        .seed = 6969,
+        .validator_count = 64,
+        .participation_rate = 1.0,
+    });
+    defer ctrl.deinit();
+
+    const result = try ctrl.runScenario(scenario.network_partition);
+
+    try testing.expectEqual(@as(u64, 0), result.safety_violations);
+    try testing.expect(ctrl.checker.node_finalized_epochs[0] == ctrl.checker.node_finalized_epochs[1]);
+    try testing.expect(ctrl.checker.node_finalized_epochs[0] == ctrl.checker.node_finalized_epochs[2]);
+    try testing.expect(ctrl.checker.node_finalized_epochs[0] == ctrl.checker.node_finalized_epochs[3]);
+    try ctrl.checkInvariant(.{ .head_freshness = 4 });
+}
+
+test "controller: built-in network_partition scenario deterministic replay" {
+    const allocator = testing.allocator;
+
+    var results: [2]FinalityResult = undefined;
+
+    for (0..2) |run| {
+        var ctrl = try SimController.init(allocator, .{
+            .num_nodes = 4,
+            .seed = 7070,
+            .validator_count = 64,
+            .participation_rate = 1.0,
+        });
+        defer ctrl.deinit();
+
+        results[run] = try ctrl.runScenario(scenario.network_partition);
+    }
+
+    try testing.expectEqual(results[0].slots_processed, results[1].slots_processed);
+    try testing.expectEqual(results[0].blocks_produced, results[1].blocks_produced);
+    try testing.expectEqual(results[0].finalized_epoch, results[1].finalized_epoch);
+    try testing.expectEqual(results[0].safety_violations, results[1].safety_violations);
+    try testing.expectEqual(results[0].state_divergences, results[1].state_divergences);
+}
+
+test "controller: built-in network_partition_quiescent_recovery scenario regains head agreement" {
+    const allocator = testing.allocator;
+
+    var ctrl = try SimController.init(allocator, .{
+        .num_nodes = 4,
+        .seed = 7171,
+        .validator_count = 64,
+        .participation_rate = 1.0,
+    });
+    defer ctrl.deinit();
+
+    const result = try ctrl.runScenario(scenario.network_partition_quiescent_recovery);
+
+    try testing.expectEqual(@as(u64, 0), result.safety_violations);
+    try testing.expect(ctrl.checker.node_finalized_epochs[0] == ctrl.checker.node_finalized_epochs[1]);
+    try testing.expect(ctrl.checker.node_finalized_epochs[0] == ctrl.checker.node_finalized_epochs[2]);
+    try testing.expect(ctrl.checker.node_finalized_epochs[0] == ctrl.checker.node_finalized_epochs[3]);
+    try ctrl.checkInvariant(.head_agreement);
+}
+
+test "controller: built-in late_joiner_finalized_sync scenario deterministic replay" {
+    const allocator = testing.allocator;
+
+    var results: [2]FinalityResult = undefined;
+
+    for (0..2) |run| {
+        var ctrl = try SimController.init(allocator, .{
+            .num_nodes = 2,
+            .seed = 6868,
+            .validator_count = 64,
+            .participation_rate = 1.0,
+        });
+        defer ctrl.deinit();
+
+        results[run] = try ctrl.runScenario(scenario.late_joiner_finalized_sync);
+    }
+
+    try testing.expectEqual(results[0].slots_processed, results[1].slots_processed);
+    try testing.expectEqual(results[0].blocks_produced, results[1].blocks_produced);
+    try testing.expectEqual(results[0].finalized_epoch, results[1].finalized_epoch);
+    try testing.expectEqual(results[0].safety_violations, results[1].safety_violations);
+    try testing.expectEqual(results[0].state_divergences, results[1].state_divergences);
+}

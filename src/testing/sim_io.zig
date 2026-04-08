@@ -564,16 +564,16 @@ pub const SimIo = struct {
     }
 
     // Network stubs
-    fn netUnsupported1(_: ?*anyopaque, _: Io.net.IpAddress, _: Io.net.IpAddress.ListenOptions) Io.net.IpAddress.ListenError!Io.net.Server {
+    fn netUnsupported1(_: ?*anyopaque, _: *const Io.net.IpAddress, _: Io.net.IpAddress.ListenOptions) Io.net.IpAddress.ListenError!Io.net.Socket {
         @panic("SimIo: use SimNetwork for networking");
     }
-    fn netUnsupported2(_: ?*anyopaque, _: Io.net.Socket.Handle) Io.net.Server.AcceptError!Io.net.Stream {
+    fn netUnsupported2(_: ?*anyopaque, _: Io.net.Socket.Handle, _: Io.net.Server.AcceptOptions) Io.net.Server.AcceptError!Io.net.Socket {
         @panic("SimIo: use SimNetwork for networking");
     }
     fn netUnsupported3(_: ?*anyopaque, _: *const Io.net.IpAddress, _: Io.net.IpAddress.BindOptions) Io.net.IpAddress.BindError!Io.net.Socket {
         @panic("SimIo: use SimNetwork for networking");
     }
-    fn netUnsupported4(_: ?*anyopaque, _: *const Io.net.IpAddress, _: Io.net.IpAddress.ConnectOptions) Io.net.IpAddress.ConnectError!Io.net.Stream {
+    fn netUnsupported4(_: ?*anyopaque, _: *const Io.net.IpAddress, _: Io.net.IpAddress.ConnectOptions) Io.net.IpAddress.ConnectError!Io.net.Socket {
         @panic("SimIo: use SimNetwork for networking");
     }
     fn netUnsupported5(_: ?*anyopaque, _: *const Io.net.UnixAddress, _: Io.net.UnixAddress.ListenOptions) Io.net.UnixAddress.ListenError!Io.net.Socket.Handle {

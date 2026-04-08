@@ -824,6 +824,7 @@ test "assembleBlock: empty pool produces valid block structure" {
         null, // no blobs
         0, // no block value
         std.ArrayListUnmanaged(types.primitive.KZGCommitment.Type).empty, // no commitments
+        types.electra.ExecutionRequests.default_value,
         types.phase0.Eth1Data.default_value,
         .{},
         null, // no sync contribution pool
@@ -855,6 +856,7 @@ test "assembleBlock: custom graffiti" {
         null,
         0,
         std.ArrayListUnmanaged(types.primitive.KZGCommitment.Type).empty,
+        types.electra.ExecutionRequests.default_value,
         types.phase0.Eth1Data.default_value,
         .{ .graffiti = custom_graffiti },
         null, // no sync contribution pool
@@ -884,6 +886,7 @@ test "assembleBlock: with ops from pool" {
         null,
         0,
         std.ArrayListUnmanaged(types.primitive.KZGCommitment.Type).empty,
+        types.electra.ExecutionRequests.default_value,
         types.phase0.Eth1Data.default_value,
         .{},
         null, // no sync contribution pool
