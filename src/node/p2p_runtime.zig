@@ -1312,7 +1312,10 @@ fn dialDiscoveredPeers(
     const now_ms = currentUnixTimeMs(io);
     for (discovered_peers) |peer| {
         if (!peer.has_quic) continue;
-        const dial_addr = preferredDiscoveredDialAddress(self, &peer) orelse continue;
+        const dial_addr = preferredDiscoveredDialAddress(self, &peer) orelse {
+            std.log.debug("dialDiscoveredPeers: QUIC peer has no preferred address", .{});
+            continue;
+        };
 
         var predicted_peer_id: ?[]u8 = null;
         defer if (predicted_peer_id) |peer_id| self.allocator.free(peer_id);
@@ -1324,12 +1327,18 @@ fn dialDiscoveredPeers(
             };
 
             const peer_id = predicted_peer_id.?;
-            if (svc.isPeerConnected(peer_id)) continue;
+            if (svc.isPeerConnected(peer_id)) {
+                std.log.debug("dialDiscoveredPeers: QUIC peer already connected", .{});
+                continue;
+            }
 
             if (pm) |peer_manager| {
                 if (peer_manager.getPeer(peer_id)) |existing| {
                     switch (existing.connection_state) {
-                        .banned, .dialing, .connected, .disconnecting => continue,
+                        .banned, .dialing, .connected, .disconnecting => {
+                            std.log.debug("dialDiscoveredPeers: QUIC peer in state {s}", .{@tagName(existing.connection_state)});
+                            continue;
+                        },
                         .disconnected => {},
                     }
                 }
@@ -1350,6 +1359,7 @@ fn dialDiscoveredPeers(
             }
         }
 
+        std.log.info("dialDiscoveredPeers: dialing QUIC peer at {s}", .{ma_str});
         const peer_id = svc.dial(io, peer_addr) catch |err| {
             if (pm) |peer_manager| {
                 if (predicted_peer_id) |known_peer_id| {
