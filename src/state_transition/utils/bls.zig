@@ -47,9 +47,9 @@ test "bls - sanity" {
     const public_key = secret_key.toPublicKey();
     try verify(&message, &public_key, &signature, null, null);
 
-    var public_keys = [_]PublicKey{public_key};
-    var public_keys_slice: []const PublicKey = public_keys[0..1];
-    const fast_aggregate_verified = try fastAggregateVerify(&message, public_keys_slice[0..], &signature, null, null);
+    const public_keys = [_]PublicKey{public_key};
+    const public_keys_slice: []const PublicKey = public_keys[0..1];
+    const fast_aggregate_verified = try fastAggregateVerify(&message, public_keys_slice, &signature, null, null);
     try std.testing.expectEqual(true, fast_aggregate_verified);
 }
 
