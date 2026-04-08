@@ -141,6 +141,13 @@ pub fn build(b: *std.Build) void {
     });
     b.modules.put(b.dupe("state_transition"), module_state_transition) catch @panic("OOM");
 
+    const module_clock = b.createModule(.{
+        .root_source_file = b.path("src/clock/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    b.modules.put(b.dupe("clock"), module_clock) catch @panic("OOM");
+
     // === Executables ===
     const module_download_era_files = b.createModule(.{
         .root_source_file = b.path("scripts/download_era_files.zig"),
@@ -378,6 +385,17 @@ pub fn build(b: *std.Build) void {
     const tls_run_test_era = b.step("test:era", "Run the era test");
     tls_run_test_era.dependOn(&run_test_era.step);
     tls_run_test.dependOn(&run_test_era.step);
+
+    const test_clock = b.addTest(.{
+        .name = "clock",
+        .root_module = module_clock,
+        .filters = b.option([][]const u8, "clock.filters", "clock test filters") orelse &[_][]const u8{},
+    });
+    const run_test_clock = b.addRunArtifact(test_clock);
+    const tls_run_test_clock = b.step("test:clock", "Run the clock test");
+    tls_run_test_clock.dependOn(&run_test_clock.step);
+    tls_run_test.dependOn(&run_test_clock.step);
+
     // Spec test modules
     const module_int = b.createModule(.{
         .root_source_file = b.path("test/int/era/root.zig"),
