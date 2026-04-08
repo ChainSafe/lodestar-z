@@ -168,24 +168,17 @@ pub fn getIndex(pubkey: js.Uint8Array) !js.Value {
 
 /// JS: pubkeys.get(index) → PublicKey | undefined
 /// Returns the PublicKey at the given index, or undefined if out of bounds.
-/// Uses low-level N-API for PublicKey class interop.
-pub fn get(index: js.Number) !js.Value {
+pub fn get(index: js.Number) !?blst_bindings.PublicKey {
     if (!state.initialized) {
         return error.PubkeyIndexNotInitialized;
     }
 
-    const e = js.env();
     const idx = index.assertU32();
     if (idx >= state.index2pubkey.items.len) {
-        const undef = try e.getUndefined();
-        return .{ .val = undef };
+        return null;
     }
 
-    // Drop to low-level for PublicKey class interop
-    const out = try blst_bindings.newPublicKeyInstance(e);
-    const out_pubkey = try e.unwrap(bls.PublicKey, out);
-    out_pubkey.* = state.index2pubkey.items[@intCast(idx)];
-    return .{ .val = out };
+    return .{ .raw = state.index2pubkey.items[@intCast(idx)] };
 }
 
 /// JS: pubkeys.set(index, pubkeyBytes)

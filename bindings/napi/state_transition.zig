@@ -1,9 +1,11 @@
 const std = @import("std");
-const napi = @import("zapi").napi;
+const zapi = @import("zapi");
+const js = zapi.js;
+const napi = zapi.napi;
 const builtin = @import("builtin");
 const fork_types = @import("fork_types");
-const state_transition = @import("state_transition");
-const CachedBeaconState = state_transition.CachedBeaconState;
+const st = @import("state_transition");
+const CachedBeaconState = st.CachedBeaconState;
 const AnySignedBeaconBlock = fork_types.AnySignedBeaconBlock;
 
 var gpa: std.heap.DebugAllocator(.{}) = .init;
@@ -12,86 +14,64 @@ const allocator = if (builtin.mode == .Debug)
 else
     std.heap.c_allocator;
 
-/// Perform a state transition given a signed beacon block.
-///
-/// Arguments:
-/// - arg 0: BeaconStateView instance (the pre-state)
-/// - arg 1: signed block bytes (Uint8Array)
-/// - arg 2: options object (optional) with:
-///   - verifyStateRoot: bool (default true)
-///   - verifyProposer: bool (default true)
-///   - verifySignatures: bool (default false)
-///   - transferCache: bool (default true)
-///
-/// Returns: BeaconStateView (the post-state)
-pub fn stateTransition(
-    env: napi.Env,
-    cb: napi.CallbackInfo(3),
-) !napi.Value {
-    const pre_state_value = cb.arg(0);
-    const cached_state = try env.unwrap(CachedBeaconState, pre_state_value);
-
-    const bytes_info = try cb.arg(1).getTypedarrayInfo();
-
-    if (bytes_info.array_type != .uint8) {
-        return error.InvalidSignedBlockBytesType;
+fn parseOptions(options: ?js.Value) !st.TransitionOpt {
+    var opts: st.TransitionOpt = .{};
+    if (options) |value| {
+        const raw = value.toValue();
+        if (try raw.typeof() == .object) {
+            if (try raw.hasNamedProperty("verifyStateRoot")) {
+                opts.verify_state_root = try (try raw.getNamedProperty("verifyStateRoot")).getValueBool();
+            }
+            if (try raw.hasNamedProperty("verifyProposer")) {
+                opts.verify_proposer = try (try raw.getNamedProperty("verifyProposer")).getValueBool();
+            }
+            if (try raw.hasNamedProperty("verifySignatures")) {
+                opts.verify_signatures = try (try raw.getNamedProperty("verifySignatures")).getValueBool();
+            }
+            if (try raw.hasNamedProperty("transferCache")) {
+                opts.transfer_cache = try (try raw.getNamedProperty("transferCache")).getValueBool();
+            }
+        }
     }
-    const current_epoch = state_transition.computeEpochAtSlot(try cached_state.state.slot());
+    return opts;
+}
+
+pub fn stateTransition(
+    pre_state_value: js.Value,
+    signed_block_bytes: js.Uint8Array,
+    options: ?js.Value,
+) !js.Value {
+    const env = js.env();
+    const pre_state = pre_state_value.toValue();
+    const cached_state = try env.unwrap(CachedBeaconState, pre_state);
+    const bytes = try signed_block_bytes.toSlice();
+
+    const current_epoch = st.computeEpochAtSlot(try cached_state.state.slot());
     const fork = cached_state.config.forkSeqAtEpoch(current_epoch);
     const signed_block = try AnySignedBeaconBlock.deserialize(
         allocator,
         .full,
         fork,
-        bytes_info.data,
+        bytes,
     );
     defer signed_block.deinit(allocator);
 
-    var opts: state_transition.TransitionOpt = .{};
-    if (cb.getArg(2)) |options_arg| {
-        if (try options_arg.typeof() == .object) {
-            if (try options_arg.hasNamedProperty("verifyStateRoot")) {
-                opts.verify_state_root = try (try options_arg.getNamedProperty("verifyStateRoot")).getValueBool();
-            }
-            if (try options_arg.hasNamedProperty("verifyProposer")) {
-                opts.verify_proposer = try (try options_arg.getNamedProperty("verifyProposer")).getValueBool();
-            }
-            if (try options_arg.hasNamedProperty("verifySignatures")) {
-                opts.verify_signatures = try (try options_arg.getNamedProperty("verifySignatures")).getValueBool();
-            }
-            if (try options_arg.hasNamedProperty("transferCache")) {
-                opts.transfer_cache = try (try options_arg.getNamedProperty("transferCache")).getValueBool();
-            }
-        }
-    }
-
-    const post_state = try state_transition.stateTransition(
+    const post_state = try st.stateTransition(
         allocator,
         cached_state,
         signed_block,
-        opts,
+        try parseOptions(options),
     );
     errdefer {
         post_state.deinit();
         allocator.destroy(post_state);
     }
 
-    const ctor = try pre_state_value.getNamedProperty("constructor");
+    const ctor = try pre_state.getNamedProperty("constructor");
     const new_state_value = try env.newInstance(ctor, .{});
     const dummy_state = try env.unwrap(CachedBeaconState, new_state_value);
-
     dummy_state.* = post_state.*;
     allocator.destroy(post_state);
 
-    return new_state_value;
-}
-
-pub fn register(env: napi.Env, exports: napi.Value) !void {
-    const state_transition_obj = try env.createObject();
-    try state_transition_obj.setNamedProperty("stateTransition", try env.createFunction(
-        "stateTransition",
-        3,
-        stateTransition,
-        null,
-    ));
-    try exports.setNamedProperty("stateTransition", state_transition_obj);
+    return .{ .val = new_state_value };
 }
