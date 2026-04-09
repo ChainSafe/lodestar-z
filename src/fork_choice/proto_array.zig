@@ -1998,19 +1998,19 @@ pub const ProtoArray = struct {
     pub fn isDescendant(
         self: *const ProtoArray,
         ancestor_root: Root,
-        ancestor_status: PayloadStatus,
+        ancestor_payload_status: PayloadStatus,
         descendant_root: Root,
-        descendant_status: PayloadStatus,
+        descendant_payload_status: PayloadStatus,
     ) ProtoArrayError!bool {
-        const ancestor_node = self.getNode(ancestor_root, ancestor_status) orelse return false;
+        const ancestor_node = self.getNode(ancestor_root, ancestor_payload_status) orelse return false;
 
         // Same identity check.
-        if (std.mem.eql(u8, &ancestor_root, &descendant_root) and ancestor_status == descendant_status) {
+        if (std.mem.eql(u8, &ancestor_root, &descendant_root) and ancestor_payload_status == descendant_payload_status) {
             return true;
         }
 
         // Walk descendant's ancestor chain looking for ancestor.
-        var iter = self.iterateAncestors(descendant_root, descendant_status);
+        var iter = self.iterateAncestors(descendant_root, descendant_payload_status);
         while (try iter.next()) |node| {
             if (node.slot < ancestor_node.slot) return false;
             if (std.mem.eql(u8, &node.block_root, &ancestor_node.block_root) and
@@ -2060,10 +2060,10 @@ pub const ProtoArray = struct {
     pub fn validateLatestHash(
         self: *ProtoArray,
         allocator: Allocator,
-        response: LVHExecResponse,
+        exec_response: LVHExecResponse,
         current_slot: Slot,
     ) (Allocator.Error || ProtoArrayError)!void {
-        switch (response) {
+        switch (exec_response) {
             .valid => |v| {
                 var latest_valid_index: ?u32 = null;
                 var i: u32 = @intCast(self.nodes.items.len);
