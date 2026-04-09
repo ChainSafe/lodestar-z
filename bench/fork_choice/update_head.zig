@@ -22,6 +22,7 @@ const UpdateHeadBench = struct {
     vote1: u32,
     vote2: u32,
     flip: *bool,
+    io: std.Io,
 
     pub fn run(self: *UpdateHeadBench, allocator: std.mem.Allocator) void {
         const target = if (self.flip.*) self.vote2 else self.vote1;
@@ -29,13 +30,13 @@ const UpdateHeadBench = struct {
         @memset(vote_fields.next_indices, target);
         self.flip.* = !self.flip.*;
 
-        _ = self.fc.updateAndGetHead(allocator, .{ .get_canonical_head = {} }) catch unreachable;
+        _ = self.fc.updateAndGetHead(allocator, self.io, .{ .get_canonical_head = {} }) catch unreachable;
     }
 };
 
 /// Helper: set up one benchmark instance from the given parameters.
-fn setupBench(allocator: std.mem.Allocator, opts: util.Opts) !UpdateHeadBench {
-    const fc = try util.initializeForkChoice(allocator, opts);
+fn setupBench(allocator: std.mem.Allocator, io: std.Io, opts: util.Opts) !UpdateHeadBench {
+    const fc = try util.initializeForkChoice(allocator, io, opts);
 
     const vote1 = fc.proto_array.getDefaultNodeIndex(fc.head.block_root).?;
     const vote2 = fc.proto_array.getDefaultNodeIndex(fc.head.parent_root).?;
@@ -46,7 +47,7 @@ fn setupBench(allocator: std.mem.Allocator, opts: util.Opts) !UpdateHeadBench {
     @memset(vote_fields.next_indices, vote1);
 
     // Run one initial updateHead so internal caches are primed.
-    _ = fc.updateAndGetHead(allocator, .{ .get_canonical_head = {} }) catch unreachable;
+    _ = fc.updateAndGetHead(allocator, io, .{ .get_canonical_head = {} }) catch unreachable;
 
     const flip = try allocator.create(bool);
     flip.* = true;
@@ -56,6 +57,7 @@ fn setupBench(allocator: std.mem.Allocator, opts: util.Opts) !UpdateHeadBench {
         .vote1 = vote1,
         .vote2 = vote2,
         .flip = flip,
+        .io = io,
     };
 }
 
@@ -75,7 +77,7 @@ pub fn main(init: std.process.Init) !void {
 
     // ── Validator count sweep (block_count=64, equivocated=0) ──
 
-    const vc_100k = try setupBench(allocator, .{
+    const vc_100k = try setupBench(allocator, io, .{
         .initial_block_count = 64,
         .initial_validator_count = 100_000,
         .initial_equivocated_count = 0,
@@ -83,7 +85,7 @@ pub fn main(init: std.process.Init) !void {
     defer deinitBench(allocator, vc_100k);
     try bench.addParam("updateHead vc=100000 bc=64 eq=0", &vc_100k, .{});
 
-    const vc_600k = try setupBench(allocator, .{
+    const vc_600k = try setupBench(allocator, io, .{
         .initial_block_count = 64,
         .initial_validator_count = 600_000,
         .initial_equivocated_count = 0,
@@ -91,7 +93,7 @@ pub fn main(init: std.process.Init) !void {
     defer deinitBench(allocator, vc_600k);
     try bench.addParam("updateHead vc=600000 bc=64 eq=0", &vc_600k, .{});
 
-    const vc_1m = try setupBench(allocator, .{
+    const vc_1m = try setupBench(allocator, io, .{
         .initial_block_count = 64,
         .initial_validator_count = 1_000_000,
         .initial_equivocated_count = 0,
@@ -101,7 +103,7 @@ pub fn main(init: std.process.Init) !void {
 
     // ── Block count sweep (validators=600_000, equivocated=0) ──
 
-    const bc_320 = try setupBench(allocator, .{
+    const bc_320 = try setupBench(allocator, io, .{
         .initial_block_count = 320,
         .initial_validator_count = 600_000,
         .initial_equivocated_count = 0,
@@ -109,7 +111,7 @@ pub fn main(init: std.process.Init) !void {
     defer deinitBench(allocator, bc_320);
     try bench.addParam("updateHead vc=600000 bc=320 eq=0", &bc_320, .{});
 
-    const bc_1200 = try setupBench(allocator, .{
+    const bc_1200 = try setupBench(allocator, io, .{
         .initial_block_count = 1200,
         .initial_validator_count = 600_000,
         .initial_equivocated_count = 0,
@@ -117,7 +119,7 @@ pub fn main(init: std.process.Init) !void {
     defer deinitBench(allocator, bc_1200);
     try bench.addParam("updateHead vc=600000 bc=1200 eq=0", &bc_1200, .{});
 
-    const bc_7200 = try setupBench(allocator, .{
+    const bc_7200 = try setupBench(allocator, io, .{
         .initial_block_count = 7200,
         .initial_validator_count = 600_000,
         .initial_equivocated_count = 0,
@@ -127,7 +129,7 @@ pub fn main(init: std.process.Init) !void {
 
     // ── Equivocated count sweep (validators=600_000, blocks=64) ──
 
-    const eq_1k = try setupBench(allocator, .{
+    const eq_1k = try setupBench(allocator, io, .{
         .initial_block_count = 64,
         .initial_validator_count = 600_000,
         .initial_equivocated_count = 1_000,
@@ -135,7 +137,7 @@ pub fn main(init: std.process.Init) !void {
     defer deinitBench(allocator, eq_1k);
     try bench.addParam("updateHead vc=600000 bc=64 eq=1000", &eq_1k, .{});
 
-    const eq_10k = try setupBench(allocator, .{
+    const eq_10k = try setupBench(allocator, io, .{
         .initial_block_count = 64,
         .initial_validator_count = 600_000,
         .initial_equivocated_count = 10_000,
@@ -143,7 +145,7 @@ pub fn main(init: std.process.Init) !void {
     defer deinitBench(allocator, eq_10k);
     try bench.addParam("updateHead vc=600000 bc=64 eq=10000", &eq_10k, .{});
 
-    const eq_300k = try setupBench(allocator, .{
+    const eq_300k = try setupBench(allocator, io, .{
         .initial_block_count = 64,
         .initial_validator_count = 600_000,
         .initial_equivocated_count = 300_000,

@@ -77,7 +77,7 @@ fn makeBlock(slot: u64, root: [32]u8, parent_root: [32]u8) ProtoBlock {
 ///
 /// Allocates a ProtoArray, ForkChoiceStore, and ForkChoice on the heap.
 /// The returned pointer must be freed via `deinitForkChoice`.
-pub fn initializeForkChoice(allocator: Allocator, opts: Opts) !*ForkChoice {
+pub fn initializeForkChoice(allocator: Allocator, io: std.Io, opts: Opts) !*ForkChoice {
     // -- Balances: every validator has effective balance = 32 ETH (increment = 32) --
     const balances = try allocator.alloc(u16, opts.initial_validator_count);
     defer allocator.free(balances);
@@ -117,6 +117,7 @@ pub fn initializeForkChoice(allocator: Allocator, opts: Opts) !*ForkChoice {
     errdefer allocator.destroy(fc);
     try fc.init(
         allocator,
+        io,
         &config.mainnet.config,
         fc_store,
         pa,
