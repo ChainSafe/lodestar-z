@@ -411,6 +411,17 @@ pub fn deinitBeaconBlock(block: AnyBeaconBlock, allocator: std.mem.Allocator) vo
     }
 }
 
+/// Returns the decompressed SSZ size of a snappy-compressed file without full deserialization.
+pub fn getSszSnappyDecompressedSize(allocator: std.mem.Allocator, dir: std.fs.Dir, file_name: []const u8) !usize {
+    var object_file = try dir.openFile(file_name, .{});
+    defer object_file.close();
+
+    const value_bytes = try object_file.readToEndAlloc(allocator, 100_000_000);
+    defer allocator.free(value_bytes);
+
+    return snappy.uncompressedLength(value_bytes);
+}
+
 pub fn loadSszSnappyValue(comptime ST: type, allocator: std.mem.Allocator, dir: std.fs.Dir, file_name: []const u8, out: *ST.Type) !void {
     var object_file = try dir.openFile(file_name, .{});
     defer object_file.close();
