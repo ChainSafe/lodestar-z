@@ -862,6 +862,13 @@ fn asyncAggregateExecute(_: napi.Env, data: *AsyncAggregateData) void {
     const nbits: usize = 64;
     const nbytes: usize = 8;
 
+    for (0..n) |i| {
+        data.sigs[i].validate(true) catch {
+            data.err = true;
+            return;
+        };
+    }
+
     // Generate 8-byte scalars (64 bits each), contiguous, matching Rust blst crate layout
     var scalars: [8 * MAX_AGGREGATE_PER_JOB]u8 = undefined;
     std.crypto.random.bytes(scalars[0 .. n * nbytes]);
@@ -978,12 +985,10 @@ pub fn blst_asyncAggregateWithRandomness(env: napi.Env, cb: napi.CallbackInfo(1)
         const unwrapped_pk = try env.unwrap(PublicKey, pk_value);
         pks[i] = unwrapped_pk.*;
 
-        // Deserialize signature from Uint8Array with validation (infinity + group check),
-        // matching blst-ts Rust behavior
         const sig_value = try set_value.getNamedProperty("sig");
         const sig_bytes = try sig_value.getTypedarrayInfo();
+        // We defer signature validation to worker thread
         sigs[i] = Signature.deserialize(sig_bytes.data[0..]) catch return error.DeserializationFailed;
-        sigs[i].validate(true) catch return error.InvalidSignature;
     }
 
     const data = try allocator.create(AsyncAggregateData);
