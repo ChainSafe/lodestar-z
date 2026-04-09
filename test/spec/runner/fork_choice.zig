@@ -43,6 +43,7 @@ const ZERO_HASH: Root = [_]u8{0} ** 32;
 
 const test_case = @import("../test_case.zig");
 const loadSszSnappyValue = test_case.loadSszSnappyValue;
+const getSszSnappyDecompressedSize = test_case.getSszSnappyDecompressedSize;
 const loadSignedBeaconBlock = test_case.loadSignedBeaconBlock;
 const deinitSignedBeaconBlock = test_case.deinitSignedBeaconBlock;
 const loadBeaconBlock = test_case.loadBeaconBlock;
@@ -65,6 +66,7 @@ const BlockStep = struct {
     name: []const u8,
     valid: bool = true,
     blobs: ?[]const u8 = null,
+    blobs_count: usize = 0,
     proofs_count: usize = 0,
 };
 
@@ -333,6 +335,20 @@ pub fn TestCase(comptime fork: ForkSeq) type {
 
             const beacon_block = signed_block.beaconBlock();
 
+            // Resolve blobs_count from the SSZ blobs file if present.
+            // TS loads the blobs SSZ file (ssz.deneb.Blobs = List(Blob, limit)) and checks .length.
+            // Each Blob is a fixed-size ByteVector, so blob_count = decompressed_size / BYTES_PER_BLOB.
+            var resolved_step = block_step;
+            if (comptime fork.gte(.deneb) and !fork.gte(.fulu)) {
+                if (block_step.blobs) |blobs_name| {
+                    const blobs_file_name = try std.fmt.allocPrint(self.allocator, "{s}.ssz_snappy", .{blobs_name});
+                    defer self.allocator.free(blobs_file_name);
+                    const BYTES_PER_BLOB = 4096 * 32; // FIELD_ELEMENTS_PER_BLOB * BYTES_PER_FIELD_ELEMENT
+                    const decompressed_size = try getSszSnappyDecompressedSize(self.allocator, self.test_dir, blobs_file_name);
+                    resolved_step.blobs_count = decompressed_size / BYTES_PER_BLOB;
+                }
+            }
+
             // Look up the parent's post-state from cache; fall back to anchor state
             const parent_root = beacon_block.parentRoot().*;
             const input_state = if (self.state_cache.get(parent_root)) |cs|
@@ -387,7 +403,7 @@ pub fn TestCase(comptime fork: ForkSeq) type {
                 // TS verifies blobs.length === commitments.length && proofs.length === commitments.length.
                 // Fulu uses columns (not blobs/proofs), Gloas has no DA in beacon block.
                 if (comptime fork.gte(.deneb) and !fork.gte(.fulu)) {
-                    try self.validateBlobsProofs(&beacon_block, block_step);
+                    try self.validateBlobsProofs(&beacon_block, resolved_step);
                 }
 
                 // Call fork choice onBlock
@@ -419,7 +435,7 @@ pub fn TestCase(comptime fork: ForkSeq) type {
 
                 // Check blob/proof validation first (may catch the expected failure).
                 if (comptime fork.gte(.deneb) and !fork.gte(.fulu)) {
-                    self.validateBlobsProofs(&beacon_block, block_step) catch {
+                    self.validateBlobsProofs(&beacon_block, resolved_step) catch {
                         if (post_state_result) |ps| {
                             ps.deinit();
                             self.allocator.destroy(ps);
@@ -452,8 +468,13 @@ pub fn TestCase(comptime fork: ForkSeq) type {
                     ) catch {
                         return; // Expected failure in onBlock
                     };
-                    // If both succeed but block should be invalid, that's OK for some tests
-                    // (e.g., deneb blob validation happens outside state_transition)
+                    // Block was expected to be invalid (valid:false) but all checks passed.
+                    // Mirrors TS: `if (!isValid) throw Error("Expect error since this is a negative test")`
+                    // Only assert for deneb/electra where blob validation is fully implemented.
+                    // TODO: Enable for bellatrix (merge validation) and fulu+ (PeerDAS columns) once implemented.
+                    if (comptime fork.gte(.deneb) and !fork.gte(.fulu)) {
+                        return error.ExpectedInvalidBlock;
+                    }
                 } else |_| {
                     return; // Expected failure in state_transition
                 }
@@ -730,8 +751,7 @@ pub fn TestCase(comptime fork: ForkSeq) type {
 
         /// Validate blob/proof counts match blobKzgCommitments (deneb+ only).
         /// Mirrors TS: `if (blobs.length !== commitments.length || proofs.length !== commitments.length)`
-        /// We check proofs_count (parsed from YAML inline hex values) against commitments.
-        /// When blobs are present, TS requires all three counts to match.
+        /// We check both blobs_count and proofs_count against commitments.
         fn validateBlobsProofs(_: *Self, beacon_block: *const AnyBeaconBlock, block_step: BlockStep) !void {
             const body = beacon_block.beaconBlockBody();
             const commitments = try body.blobKzgCommitments();
@@ -740,6 +760,7 @@ pub fn TestCase(comptime fork: ForkSeq) type {
             // If this block step has no blobs/proofs data, default to count 0
             // (matching TS: `if (blobs === undefined) blobs = []`)
             const has_blobs = block_step.blobs != null;
+            const blobs_count = if (has_blobs) block_step.blobs_count else 0;
             const proofs_count = block_step.proofs_count;
 
             if (commitments_len == 0) {
@@ -750,6 +771,11 @@ pub fn TestCase(comptime fork: ForkSeq) type {
             if (!has_blobs and proofs_count == 0) {
                 // TS defaults missing blobs/proofs to empty arrays.
                 // Empty vs non-zero commitments would fail this check.
+                return error.InvalidBlobsOrProofsLength;
+            }
+
+            // TS: `if (blobs.length !== commitments.length || proofs.length !== commitments.length)`
+            if (blobs_count != commitments_len) {
                 return error.InvalidBlobsOrProofsLength;
             }
 
@@ -950,8 +976,17 @@ fn parseBlockStep(allocator: Allocator, lines: []const []const u8) !BlockStep {
                     blobs = val_trimmed;
                 }
             }
+            // If blobs: has empty value, next line is the blobs file name
+            if (blobs == null and i + 1 < lines.len) {
+                const next = std.mem.trim(u8, lines[i + 1], " \t\r");
+                if (std.mem.startsWith(u8, next, "blobs_")) {
+                    blobs = next;
+                    i += 1;
+                }
+            }
         } else if (std.mem.startsWith(u8, trimmed, "proofs:")) {
-            // proofs is a YAML list of hex strings: ['0x...', '0x...']
+            // proofs is a YAML list of hex strings.
+            // Flow-style: ['0x...', '0x...'] or block-style: - '0x...'
             // Count the number of entries by counting '0x' occurrences.
             if (extractValue(trimmed, "proofs:")) |val| {
                 var count: usize = 0;
@@ -960,11 +995,21 @@ fn parseBlockStep(allocator: Allocator, lines: []const []const u8) !BlockStep {
                     count += 1;
                     pos += idx + 2;
                 }
-                // If proofs span multiple lines, scan continuation lines
+                // If proofs span multiple lines, scan continuation lines.
                 if (std.mem.indexOfScalar(u8, val, ']') == null) {
                     var j = i + 1;
                     while (j < lines.len) : (j += 1) {
                         const next_trimmed = std.mem.trim(u8, lines[j], " \t\r");
+                        // Stop before YAML key lines that aren't part of the proofs list
+                        if (std.mem.startsWith(u8, next_trimmed, "valid:") or
+                            std.mem.startsWith(u8, next_trimmed, "blobs:") or
+                            std.mem.startsWith(u8, next_trimmed, "columns:") or
+                            std.mem.startsWith(u8, next_trimmed, "block:"))
+                        {
+                            // Backtrack so the outer loop processes this key line
+                            j -= 1;
+                            break;
+                        }
                         var npos: usize = 0;
                         while (std.mem.indexOf(u8, next_trimmed[npos..], "0x")) |idx| {
                             count += 1;
