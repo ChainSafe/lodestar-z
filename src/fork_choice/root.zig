@@ -6,6 +6,7 @@ pub const compute_deltas = @import("compute_deltas.zig");
 pub const proto_array = @import("proto_array.zig");
 pub const store = @import("store.zig");
 pub const fork_choice = @import("fork_choice.zig");
+pub const metrics = @import("metrics.zig");
 
 pub const ProtoBlock = proto_array.ProtoBlock;
 pub const ProtoNode = proto_array.ProtoNode;
