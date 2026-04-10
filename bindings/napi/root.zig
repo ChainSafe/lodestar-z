@@ -24,6 +24,8 @@ var init_mutex: std.Thread.Mutex = .{};
 
 const EnvCleanup = struct {
     fn hook(_: *EnvCleanup) void {
+        init_mutex.lock();
+        defer init_mutex.unlock();
         if (env_refcount.fetchSub(1, .acq_rel) == 1) {
             // Last environment — tear down shared state.
             config.state.deinit();
@@ -43,7 +45,10 @@ fn register(env: napi.Env, exports: napi.Value) !void {
         if (env_refcount.fetchAdd(1, .monotonic) == 0) {
             // First environment — initialize shared state.
             // On failure, roll back the refcount so the next caller retries.
-            errdefer _ = env_refcount.fetchSub(1, .monotonic);
+            errdefer {
+                const old = env_refcount.fetchSub(1, .monotonic);
+                std.debug.assert(old == 1);
+            }
             try pool.state.init();
             try pubkeys.state.init();
             config.state.init();
