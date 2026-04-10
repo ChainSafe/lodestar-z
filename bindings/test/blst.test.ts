@@ -352,15 +352,15 @@ describe("blst", () => {
       });
     });
 
-    it("should throw for invalid serialized (G2 point at infinity)", () => {
-      expect(() =>
+    it("should throw for invalid serialized (G2 point at infinity)", async () => {
+      await expect(
         asyncAggregateWithRandomness(
           sets.concat({
             pk: sets[0].pk,
             sig: G2_POINT_AT_INFINITY,
           })
         )
-      ).toThrow();
+      ).rejects.toThrow();
     });
 
     it("should return a {pk: PublicKey, sig: Signature} object", async () => {
