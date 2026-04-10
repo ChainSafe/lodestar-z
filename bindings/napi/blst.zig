@@ -879,50 +879,56 @@ fn asyncAggregateExecute(_: napi.Env, data: *AsyncAggregateData) void {
         }
     }
 
-    // Build pointer arrays for Pippenger API
-    var pk_ptrs: [MAX_AGGREGATE_PER_JOB]*const bls.c.blst_p1_affine = undefined;
-    var sig_ptrs: [MAX_AGGREGATE_PER_JOB]*const bls.c.blst_p2_affine = undefined;
-    var sca_ptrs: [MAX_AGGREGATE_PER_JOB]*const u8 = undefined;
-    for (0..n) |i| {
-        pk_ptrs[i] = &data.pks[i].point;
-        sig_ptrs[i] = &data.sigs[i].point;
-        sca_ptrs[i] = &scalars[i * nbytes];
+    // Use thread pool for parallel tiled Pippenger when available.
+    if (thread_pool) |pool| {
+        const p1_ret = pool.multP1(@ptrCast(data.pks.ptr), n, &scalars, nbits);
+        bls.c.blst_p1_to_affine(&data.result_pk.point, &p1_ret);
+
+        const p2_ret = pool.multP2(@ptrCast(data.sigs.ptr), n, &scalars, nbits);
+        bls.c.blst_p2_to_affine(&data.result_sig.point, &p2_ret);
+    } else {
+        // Fallback: single-threaded Pippenger (no thread pool initialized)
+        var pk_ptrs: [MAX_AGGREGATE_PER_JOB]*const bls.c.blst_p1_affine = undefined;
+        var sig_ptrs: [MAX_AGGREGATE_PER_JOB]*const bls.c.blst_p2_affine = undefined;
+        var sca_ptrs: [MAX_AGGREGATE_PER_JOB]*const u8 = undefined;
+        for (0..n) |i| {
+            pk_ptrs[i] = &data.pks[i].point;
+            sig_ptrs[i] = &data.sigs[i].point;
+            sca_ptrs[i] = &scalars[i * nbytes];
+        }
+
+        const scratch_size = @max(
+            bls.c.blst_p1s_mult_pippenger_scratch_sizeof(n),
+            bls.c.blst_p2s_mult_pippenger_scratch_sizeof(n),
+        );
+        const scratch = allocator.alloc(u64, scratch_size) catch {
+            data.err = true;
+            return;
+        };
+        defer allocator.free(scratch);
+
+        var p1_ret: bls.c.blst_p1 = std.mem.zeroes(bls.c.blst_p1);
+        bls.c.blst_p1s_mult_pippenger(
+            &p1_ret,
+            @ptrCast(&pk_ptrs),
+            n,
+            @ptrCast(&sca_ptrs),
+            nbits,
+            scratch.ptr,
+        );
+        bls.c.blst_p1_to_affine(&data.result_pk.point, &p1_ret);
+
+        var p2_ret: bls.c.blst_p2 = std.mem.zeroes(bls.c.blst_p2);
+        bls.c.blst_p2s_mult_pippenger(
+            &p2_ret,
+            @ptrCast(&sig_ptrs),
+            n,
+            @ptrCast(&sca_ptrs),
+            nbits,
+            scratch.ptr,
+        );
+        bls.c.blst_p2_to_affine(&data.result_sig.point, &p2_ret);
     }
-
-    // Per-call scratch allocation
-    const scratch_size = @max(
-        bls.c.blst_p1s_mult_pippenger_scratch_sizeof(n),
-        bls.c.blst_p2s_mult_pippenger_scratch_sizeof(n),
-    );
-    const scratch = allocator.alloc(u64, scratch_size) catch {
-        data.err = true;
-        return;
-    };
-    defer allocator.free(scratch);
-
-    // Pippenger multi-scalar multiplication on G1 (pubkeys)
-    var p1_ret: bls.c.blst_p1 = std.mem.zeroes(bls.c.blst_p1);
-    bls.c.blst_p1s_mult_pippenger(
-        &p1_ret,
-        @ptrCast(&pk_ptrs),
-        n,
-        @ptrCast(&sca_ptrs),
-        nbits,
-        scratch.ptr,
-    );
-    bls.c.blst_p1_to_affine(&data.result_pk.point, &p1_ret);
-
-    // Pippenger multi-scalar multiplication on G2 (signatures)
-    var p2_ret: bls.c.blst_p2 = std.mem.zeroes(bls.c.blst_p2);
-    bls.c.blst_p2s_mult_pippenger(
-        &p2_ret,
-        @ptrCast(&sig_ptrs),
-        n,
-        @ptrCast(&sca_ptrs),
-        nbits,
-        scratch.ptr,
-    );
-    bls.c.blst_p2_to_affine(&data.result_sig.point, &p2_ret);
 }
 
 fn asyncAggregateComplete(env: napi.Env, _: napi.status.Status, data: *AsyncAggregateData) void {
