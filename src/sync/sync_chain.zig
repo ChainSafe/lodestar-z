@@ -15,6 +15,7 @@ const Allocator = std.mem.Allocator;
 const sync_types = @import("sync_types.zig");
 const ChainTarget = sync_types.ChainTarget;
 const RangeSyncType = sync_types.RangeSyncType;
+const preset = @import("preset").preset;
 const batch_mod = @import("batch.zig");
 const Batch = batch_mod.Batch;
 const BatchStatus = batch_mod.BatchStatus;
@@ -52,6 +53,14 @@ pub const SyncChainCallbacks = struct {
     /// Report a peer for negative behavior.
     reportPeerFn: *const fn (ptr: *anyopaque, peer_id: []const u8) void,
 
+    /// Return whether a peer is eligible for this slot range.
+    peerCanServeRangeFn: ?*const fn (
+        ptr: *anyopaque,
+        peer_id: []const u8,
+        start_slot: u64,
+        count: u64,
+    ) bool = null,
+
     pub fn processChainSegment(
         self: SyncChainCallbacks,
         chain_id: u32,
@@ -77,6 +86,18 @@ pub const SyncChainCallbacks = struct {
 
     pub fn reportPeer(self: SyncChainCallbacks, peer_id: []const u8) void {
         self.reportPeerFn(self.ptr, peer_id);
+    }
+
+    pub fn peerCanServeRange(
+        self: SyncChainCallbacks,
+        peer_id: []const u8,
+        start_slot: u64,
+        count: u64,
+    ) bool {
+        if (self.peerCanServeRangeFn) |f| {
+            return f(self.ptr, peer_id, start_slot, count);
+        }
+        return true;
     }
 };
 
@@ -135,7 +156,10 @@ pub const SyncChain = struct {
         target: ChainTarget,
         callbacks: SyncChainCallbacks,
     ) SyncChain {
-        const start_slot = start_epoch * 32;
+        // Lodestar starts each range-sync batch at the epoch boundary. This
+        // intentionally re-requests a known checkpoint block when present so
+        // finalized sync can process the whole finalized checkpoint epoch.
+        const start_slot = start_epoch * preset.SLOTS_PER_EPOCH;
         return .{
             .allocator = allocator,
             .id = id,
@@ -153,6 +177,7 @@ pub const SyncChain = struct {
     }
 
     pub fn deinit(self: *SyncChain) void {
+        for (self.batches.items) |*batch| batch.deinit();
         self.batches.deinit(self.allocator);
         // Free owned peer_id keys before deiniting the map.
         for (self.peers.keys()) |k| self.allocator.free(k);
@@ -207,6 +232,16 @@ pub const SyncChain = struct {
         return self.status == .syncing;
     }
 
+    /// Whether this chain has work that can still complete without selecting
+    /// another peer. Lodestar does not abort an already-triggered batch
+    /// processor just because the serving peer left the peer set.
+    pub fn hasInFlightWork(self: *const SyncChain) bool {
+        for (self.batches.items) |batch| {
+            if (batch.status != .awaiting_download) return true;
+        }
+        return false;
+    }
+
     /// Start syncing — requests new batches if needed.
     pub fn startSyncing(self: *SyncChain) void {
         if (self.status == .syncing) return;
@@ -255,6 +290,7 @@ pub const SyncChain = struct {
         for (self.batches.items) |*b| {
             if (b.id == batch_id) {
                 if (!b.onDownloadSuccess(generation, blocks)) return;
+                self.processNextBatch() catch {};
                 return;
             }
         }
@@ -273,6 +309,23 @@ pub const SyncChain = struct {
                     // Report the peer that failed.
                     self.callbacks.reportPeer(peer_id);
                 }
+                return;
+            }
+        }
+    }
+
+    /// Called when a batch download produced usable blocks but is waiting for
+    /// required side data from an eligible peer. This mirrors Lodestar's
+    /// partial-download path: return the batch to AwaitingDownload without
+    /// consuming download retry budget or reporting the block peer.
+    pub fn onBatchDeferred(
+        self: *SyncChain,
+        batch_id: BatchId,
+        generation: u32,
+    ) void {
+        for (self.batches.items) |*b| {
+            if (b.id == batch_id) {
+                _ = b.onDownloadDeferred(generation);
                 return;
             }
         }
@@ -329,33 +382,49 @@ pub const SyncChain = struct {
     fn selectPeer(self: *const SyncChain, batch: *const Batch) ?[]const u8 {
         if (self.peers.count() == 0) return null;
 
-        var best_peer: ?[]const u8 = null;
-        var best_active_downloads: usize = std.math.maxInt(usize);
-        var best_target_slot: u64 = 0;
+        const last_failed_peer = batch.last_failed_peer;
 
-        for (self.peers.keys(), self.peers.values()) |peer_id, peer| {
-            if (peer.target.slot < batch.start_slot) continue;
-            if (self.sync_type == .head) {
-                if (batch.last_downloaded_slot) |last_downloaded_slot| {
-                    if (peer.target.slot < last_downloaded_slot) continue;
+        var pass: u8 = 0;
+        while (pass < 2) : (pass += 1) {
+            var best_peer: ?[]const u8 = null;
+            var best_active_downloads: usize = std.math.maxInt(usize);
+            var best_target_slot: u64 = 0;
+
+            for (self.peers.keys(), self.peers.values()) |peer_id, peer| {
+                if (batch.hasDeferredPeer(peer_id)) continue;
+                if (pass == 0) {
+                    if (last_failed_peer) |skip_peer| {
+                        if (std.mem.eql(u8, peer_id, skip_peer)) continue;
+                    }
+                }
+
+                if (peer.target.slot < batch.start_slot) continue;
+                if (self.sync_type == .head) {
+                    if (batch.last_downloaded_slot) |last_downloaded_slot| {
+                        if (peer.target.slot < last_downloaded_slot) continue;
+                    }
+                }
+                if (peer.earliest_available_slot) |earliest_available_slot| {
+                    if (earliest_available_slot > batch.start_slot) continue;
+                }
+                if (!self.callbacks.peerCanServeRange(peer_id, batch.start_slot, batch.count)) continue;
+
+                const active_downloads = self.activeDownloadsForPeer(peer_id);
+                if (best_peer == null or
+                    active_downloads < best_active_downloads or
+                    (active_downloads == best_active_downloads and peer.target.slot > best_target_slot))
+                {
+                    best_peer = peer_id;
+                    best_active_downloads = active_downloads;
+                    best_target_slot = peer.target.slot;
                 }
             }
-            if (peer.earliest_available_slot) |earliest_available_slot| {
-                if (earliest_available_slot > batch.start_slot) continue;
-            }
 
-            const active_downloads = self.activeDownloadsForPeer(peer_id);
-            if (best_peer == null or
-                active_downloads < best_active_downloads or
-                (active_downloads == best_active_downloads and peer.target.slot > best_target_slot))
-            {
-                best_peer = peer_id;
-                best_active_downloads = active_downloads;
-                best_target_slot = peer.target.slot;
-            }
+            if (best_peer != null) return best_peer;
+            if (last_failed_peer == null) break;
         }
 
-        return best_peer;
+        return null;
     }
 
     fn activeDownloadsForPeer(self: *const SyncChain, peer_id: []const u8) usize {
@@ -378,6 +447,14 @@ pub const SyncChain = struct {
                     continue;
                 }
                 const peer = self.selectPeer(b) orelse continue;
+                std.log.debug("SyncChain dispatch: chain={d} batch={d} gen={d} slots={d}..{d} peer={s}", .{
+                    self.id,
+                    b.id,
+                    b.generation +% 1,
+                    b.start_slot,
+                    b.endSlot(),
+                    peer,
+                });
                 b.startDownload(peer);
                 self.callbacks.downloadByRange(
                     self.id,
@@ -456,7 +533,7 @@ pub const SyncChain = struct {
         var drain_count: usize = 0;
         for (self.batches.items) |batch| {
             if (batch.status != .awaiting_validation) break;
-            self.validated_epochs += batch.count / 32;
+            self.validated_epochs += batch.count / preset.SLOTS_PER_EPOCH;
             drain_count += 1;
         }
 
@@ -677,6 +754,9 @@ test "SyncChain: pending processing waits for completion callback" {
     };
     chain.onBatchResponse(tc.last_batch_id, tc.last_generation, &blocks);
 
+    try std.testing.expectEqual(@as(u32, 1), tc.processing_requests);
+    try std.testing.expectEqual(BatchStatus.processing, chain.batches.items[0].status);
+
     const done = try chain.tick();
     try std.testing.expect(!done);
     try std.testing.expectEqual(@as(u32, 1), tc.processing_requests);
@@ -735,10 +815,9 @@ test "SyncChain: head retries avoid peers behind known batch progress" {
         .{ .slot = 0, .block_bytes = "b0" },
         .{ .slot = 10, .block_bytes = "b10" },
     };
+    tc.should_fail_processing = true;
     chain.onBatchResponse(tc.last_batch_id, tc.last_generation, &blocks);
 
-    tc.should_fail_processing = true;
-    try std.testing.expectError(error.ProcessingFailed, chain.tick());
     tc.should_fail_processing = false;
 
     _ = try chain.tick();

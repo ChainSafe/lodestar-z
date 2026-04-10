@@ -64,11 +64,15 @@ pub fn main(init: std.process.Init) !void {
         },
     };
 
-    switch (parsed) {
-        .beacon => |opts| try commands.beacon.command.run(io, allocator, opts),
-        .validator => |opts| try commands.validator.command.run(io, allocator, opts),
-        .lightclient => |opts| try commands.lightclient.command.run(opts),
-        .dev => |opts| try commands.dev.command.run(opts),
-        .bootnode => |opts| try commands.bootnode.command.run(io, allocator, opts),
+    switch (std.meta.activeTag(parsed)) {
+        .beacon => {
+            try commands.beacon.command.run(io, allocator, &parsed.beacon);
+        },
+        .validator => {
+            try commands.validator.command.run(io, allocator, &parsed.validator);
+        },
+        .lightclient => try commands.lightclient.command.run(&parsed.lightclient),
+        .dev => try commands.dev.command.run(&parsed.dev),
+        .bootnode => try commands.bootnode.command.run(io, allocator, &parsed.bootnode),
     }
 }

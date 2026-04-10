@@ -20,6 +20,7 @@
 const std = @import("std");
 const testing = std.testing;
 const snappy = @import("snappy").frame;
+const snappy_raw = @import("snappy").raw;
 const varint = @import("varint.zig");
 const protocol = @import("protocol.zig");
 const Io = std.Io;
@@ -307,31 +308,37 @@ pub const ResponseChunkStreamReader = struct {
     }
 
     pub fn next(self: *ResponseChunkStreamReader, io: Io, stream: anytype) anyerror!?DecodedResponseChunk {
-        while (true) {
-            if (self.buffer.items.len > 0) {
-                const decoded = decodeResponseChunk(self.allocator, self.buffer.items, self.has_context_bytes) catch |err| switch (err) {
-                    error.InsufficientData => null,
-                    else => return err,
-                };
-                if (decoded) |chunk| {
-                    discardPrefix(&self.buffer, chunk.bytes_consumed);
-                    return chunk;
-                }
-            }
-
-            if (self.reached_eof) {
-                if (self.buffer.items.len == 0) return null;
-                return error.UnexpectedEof;
-            }
-
-            var scratch: [4096]u8 = undefined;
-            const n = try stream.read(io, &scratch);
-            if (n == 0) {
-                self.reached_eof = true;
-                continue;
-            }
-            try self.buffer.appendSlice(self.allocator, scratch[0..n]);
+        var result_byte: [1]u8 = undefined;
+        const n = try stream.read(io, &result_byte);
+        if (n == 0) {
+            self.reached_eof = true;
+            return null;
         }
+        self.reached_eof = false;
+
+        const result = ResponseCode.fromByte(result_byte[0]) orelse
+            return DecodeError.InvalidResponseCode;
+
+        var context_bytes: ?[4]u8 = null;
+        if (self.has_context_bytes) {
+            var ctx: [4]u8 = undefined;
+            try readExact(io, stream, &ctx);
+            context_bytes = ctx;
+        }
+
+        const ssz_length = try readLengthPrefixFromStream(io, stream);
+        if (ssz_length > MAX_REQ_RESP_SIZE) return DecodeError.PayloadTooLarge;
+
+        const ssz_bytes = try readSnappyBodyFromStream(self.allocator, io, stream, ssz_length);
+        errdefer self.allocator.free(ssz_bytes);
+        if (ssz_bytes.len != ssz_length) return DecodeError.LengthMismatch;
+
+        return .{
+            .result = result,
+            .context_bytes = context_bytes,
+            .ssz_bytes = ssz_bytes,
+            .bytes_consumed = 0,
+        };
     }
 };
 
@@ -400,6 +407,15 @@ fn writeAll(io: Io, stream: anytype, data: []const u8) anyerror!void {
     }
 }
 
+fn readExact(io: Io, stream: anytype, buf: []u8) anyerror!void {
+    var offset: usize = 0;
+    while (offset < buf.len) {
+        const n = try stream.read(io, buf[offset..]);
+        if (n == 0) return error.UnexpectedEof;
+        offset += n;
+    }
+}
+
 fn readLengthPrefixFromStream(io: Io, stream: anytype) anyerror!usize {
     var buf: [varint.max_length]u8 = undefined;
     var len: usize = 0;
@@ -447,6 +463,57 @@ fn readSnappyFrameFromStream(
         if (n == 0) return error.UnexpectedEof;
         try buffer.appendSlice(allocator, scratch[0..n]);
     }
+}
+
+fn readSnappyBodyFromStream(
+    allocator: std.mem.Allocator,
+    io: Io,
+    stream: anytype,
+    expected_uncompressed: usize,
+) anyerror![]u8 {
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer out.deinit(allocator);
+
+    var saw_identifier = false;
+    while (out.items.len < expected_uncompressed) {
+        var header: [4]u8 = undefined;
+        try readExact(io, stream, &header);
+
+        const chunk_type = header[0];
+        const frame_size: usize = @intCast(std.mem.readInt(u24, header[1..4], .little));
+
+        var frame = try allocator.alloc(u8, frame_size);
+        defer allocator.free(frame);
+        try readExact(io, stream, frame);
+
+        switch (chunk_type) {
+            0xff => {
+                if (frame_size != 6 or !std.mem.eql(u8, frame, "sNaPpY")) {
+                    return error.BadIdentifier;
+                }
+                saw_identifier = true;
+            },
+            0x00 => {
+                if (!saw_identifier or frame_size < 4) return error.IllegalChunkLength;
+                var uncompressed: [65536]u8 = undefined;
+                const uncompressed_len = snappy_raw.uncompress(frame[4..], uncompressed[0..]) catch
+                    return error.LengthMismatch;
+                try out.appendSlice(allocator, uncompressed[0..uncompressed_len]);
+            },
+            0x01 => {
+                if (!saw_identifier or frame_size < 4) return error.IllegalChunkLength;
+                try out.appendSlice(allocator, frame[4..]);
+            },
+            0xfe => {},
+            0x80...0xfd => {},
+            else => return error.BadIdentifier,
+        }
+
+        if (out.items.len > expected_uncompressed) return error.LengthMismatch;
+    }
+
+    if (out.items.len == 0) return error.EmptyPayload;
+    return try out.toOwnedSlice(allocator);
 }
 
 fn discardPrefix(buffer: *std.ArrayListUnmanaged(u8), prefix_len: usize) void {

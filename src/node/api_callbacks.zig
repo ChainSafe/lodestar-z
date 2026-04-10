@@ -339,7 +339,7 @@ fn publishSsz(
     ssz_bytes: []const u8,
 ) !void {
     if (node.p2p_service) |*p2p| {
-        try p2p.publishGossip(topic_type, subnet_id, ssz_bytes);
+        try p2p.publishGossip(node.io, topic_type, subnet_id, ssz_bytes);
     }
 }
 

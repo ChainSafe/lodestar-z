@@ -358,6 +358,48 @@ pub fn importVerifiedBlock(
                 false,
             .payload_status = if (head_node) |node| node.payload_status else .full,
         };
+        if (block_slot > old_head_slot and new_head.slot <= old_head_slot) {
+            if (fc.getBlockDefaultStatus(block_root)) |imported_node| {
+                const args = .{
+                    block_slot,
+                    old_head_slot,
+                    new_head.slot,
+                    fc.getTime(),
+                    fc.fc_store.justified.checkpoint.epoch,
+                    fc.fc_store.finalized_checkpoint.epoch,
+                    imported_node.justified_epoch,
+                    imported_node.finalized_epoch,
+                    imported_node.unrealized_justified_epoch,
+                    imported_node.unrealized_finalized_epoch,
+                    @tagName(imported_node.extra_meta.executionStatus()),
+                    @tagName(imported_node.extra_meta.dataAvailabilityStatus()),
+                };
+                if (opts.from_range_sync) {
+                    std.log.debug(
+                        "imported block did not advance head: block_slot={d} old_head={d} new_head={d} fc_slot={d} store_justified={d} store_finalized={d} block_justified={d} block_finalized={d} block_unrealized_justified={d} block_unrealized_finalized={d} exec={s} da={s}",
+                        args,
+                    );
+                } else {
+                    std.log.warn(
+                        "imported block did not advance head: block_slot={d} old_head={d} new_head={d} fc_slot={d} store_justified={d} store_finalized={d} block_justified={d} block_finalized={d} block_unrealized_justified={d} block_unrealized_finalized={d} exec={s} da={s}",
+                        args,
+                    );
+                }
+            } else {
+                const args = .{ block_slot, old_head_slot, new_head.slot, fc.getTime() };
+                if (opts.from_range_sync) {
+                    std.log.debug(
+                        "imported block did not advance head and is missing from fork choice: block_slot={d} old_head={d} new_head={d} fc_slot={d}",
+                        args,
+                    );
+                } else {
+                    std.log.warn(
+                        "imported block did not advance head and is missing from fork choice: block_slot={d} old_head={d} new_head={d} fc_slot={d}",
+                        args,
+                    );
+                }
+            }
+        }
 
         // Check finality changes.
         const prev_finalized_epoch = ctx.head_tracker.finalized_epoch;

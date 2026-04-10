@@ -55,6 +55,15 @@ pub const RangeSyncCallbacks = struct {
 
     reportPeerFn: *const fn (ptr: *anyopaque, peer_id: []const u8) void,
 
+    hasBlockFn: ?*const fn (ptr: *anyopaque, root: [32]u8) bool = null,
+
+    peerCanServeRangeFn: ?*const fn (
+        ptr: *anyopaque,
+        peer_id: []const u8,
+        start_slot: u64,
+        count: u64,
+    ) bool = null,
+
     fn toSyncChainCallbacks(self: *const RangeSyncCallbacks) SyncChainCallbacks {
         return .{
             .ptr = self.ptr,
@@ -62,7 +71,13 @@ pub const RangeSyncCallbacks = struct {
             .processChainSegmentFn = self.processChainSegmentFn,
             .downloadByRangeFn = self.downloadByRangeFn,
             .reportPeerFn = self.reportPeerFn,
+            .peerCanServeRangeFn = self.peerCanServeRangeFn,
         };
+    }
+
+    fn hasBlock(self: RangeSyncCallbacks, root: [32]u8) bool {
+        if (self.hasBlockFn) |f| return f(self.ptr, root);
+        return false;
     }
 };
 
@@ -141,8 +156,23 @@ pub const RangeSync = struct {
     ) !void {
         self.local_finalized_epoch = local_finalized_epoch;
 
-        const sync_type = getRangeSyncType(local_finalized_epoch, peer_finalized_epoch);
+        const sync_type = getRangeSyncType(
+            local_finalized_epoch,
+            peer_finalized_epoch,
+            self.callbacks.hasBlock(peer_finalized_root),
+        );
         const start_epoch = local_finalized_epoch;
+        std.log.debug(
+            "RangeSync addPeer: peer={s} type={s} local_finalized={d} peer_finalized={d} peer_head={d} earliest={any}",
+            .{
+                peer_id,
+                @tagName(sync_type),
+                local_finalized_epoch,
+                peer_finalized_epoch,
+                peer_head_slot,
+                earliest_available_slot,
+            },
+        );
 
         switch (sync_type) {
             .finalized => {
@@ -170,14 +200,13 @@ pub const RangeSync = struct {
                     .slot = peer_head_slot,
                     .root = peer_head_root,
                 };
-                // Try to find an existing head chain with a matching target root.
-                for (self.head_chains.items) |*hc| {
-                    if (std.mem.eql(u8, &hc.target.root, &target.root)) {
-                        try hc.addPeer(peer_id, target, earliest_available_slot);
-                        return;
-                    }
+                // Lodestar keeps a single head sync chain and lets all advanced
+                // head peers contribute to it. Import semantics remain the
+                // correctness gate if a peer returns blocks from a different fork.
+                if (self.head_chains.items.len > 0) {
+                    try self.head_chains.items[0].addPeer(peer_id, target, earliest_available_slot);
+                    return;
                 }
-                // Create new head chain (if under limit).
                 if (self.head_chains.items.len < MAX_HEAD_CHAINS) {
                     var hc = SyncChain.init(
                         self.allocator,
@@ -200,25 +229,20 @@ pub const RangeSync = struct {
     pub fn removePeer(self: *RangeSync, peer_id: []const u8) void {
         if (self.finalized_chain) |*fc| {
             _ = fc.removePeer(peer_id);
-            if (fc.peerCount() == 0 and fc.status != .syncing) {
-                fc.deinit();
-                self.finalized_chain = null;
-            }
         }
 
-        // Remove from head chains; drop empty ones.
+        // Lodestar removes peers without running RangeSync.update()
+        // immediately; already-downloaded/in-flight batches may still finish.
         var i: usize = 0;
         while (i < self.head_chains.items.len) {
             _ = self.head_chains.items[i].removePeer(peer_id);
-            if (self.head_chains.items[i].peerCount() == 0 and
-                !self.head_chains.items[i].isSyncing())
-            {
-                self.head_chains.items[i].deinit();
-                _ = self.head_chains.swapRemove(i);
-            } else {
-                i += 1;
-            }
+            i += 1;
         }
+    }
+
+    pub fn onFinalizedUpdate(self: *RangeSync, finalized_epoch: u64) void {
+        self.local_finalized_epoch = finalized_epoch;
+        self.update();
     }
 
     /// Get the current range sync state.
@@ -240,6 +264,10 @@ pub const RangeSync = struct {
 
     /// Periodic tick — advance active chains.
     pub fn tick(self: *RangeSync) !void {
+        if (self.pruneUnusableChains()) {
+            self.update();
+        }
+
         // Tick finalized chain first (priority).
         if (self.finalized_chain) |*fc| {
             if (fc.isSyncing()) {
@@ -313,6 +341,27 @@ pub const RangeSync = struct {
         }
     }
 
+    /// Route a deferred batch to the correct chain.
+    pub fn onBatchDeferred(
+        self: *RangeSync,
+        chain_id: u32,
+        batch_id: BatchId,
+        generation: u32,
+    ) void {
+        if (self.finalized_chain) |*fc| {
+            if (fc.id == chain_id) {
+                fc.onBatchDeferred(batch_id, generation);
+                return;
+            }
+        }
+        for (self.head_chains.items) |*hc| {
+            if (hc.id == chain_id) {
+                hc.onBatchDeferred(batch_id, generation);
+                return;
+            }
+        }
+    }
+
     pub fn onSegmentProcessingSuccess(
         self: *RangeSync,
         chain_id: u32,
@@ -355,11 +404,52 @@ pub const RangeSync = struct {
 
     // ── Internal ────────────────────────────────────────────────────
 
+    /// Drop chains that cannot make further network progress. A peer-empty
+    /// chain is kept while it still has downloaded, downloading, processing,
+    /// or validation work because Lodestar does not abort the already-triggered
+    /// batch processor when a peer leaves the peer set.
+    fn pruneUnusableChains(self: *RangeSync) bool {
+        const local_finalized_slot = self.local_finalized_epoch * preset.SLOTS_PER_EPOCH;
+        var removed = false;
+
+        if (self.finalized_chain) |*fc| {
+            if (fc.status == .err or
+                fc.status == .done or
+                (fc.peerCount() == 0 and !fc.hasInFlightWork()) or
+                fc.target.slot < local_finalized_slot or
+                self.callbacks.hasBlock(fc.target.root))
+            {
+                fc.deinit();
+                self.finalized_chain = null;
+                removed = true;
+            }
+        }
+
+        var i: usize = 0;
+        while (i < self.head_chains.items.len) {
+            if (self.head_chains.items[i].status == .err or
+                self.head_chains.items[i].status == .done or
+                (self.head_chains.items[i].peerCount() == 0 and !self.head_chains.items[i].hasInFlightWork()) or
+                self.head_chains.items[i].target.slot < local_finalized_slot or
+                self.callbacks.hasBlock(self.head_chains.items[i].target.root))
+            {
+                self.head_chains.items[i].deinit();
+                _ = self.head_chains.swapRemove(i);
+                removed = true;
+            } else {
+                i += 1;
+            }
+        }
+        return removed;
+    }
+
     /// Update chain states — start/stop based on priority.
     fn update(self: *RangeSync) void {
+        _ = self.pruneUnusableChains();
+
         // Finalized chain has priority. If active, stop head chains.
         if (self.finalized_chain) |*fc| {
-            if (fc.peerCount() > 0) {
+            if (fc.peerCount() > 0 or fc.hasInFlightWork()) {
                 fc.startSyncing();
                 for (self.head_chains.items) |*hc| {
                     hc.stopSyncing();
@@ -370,7 +460,7 @@ pub const RangeSync = struct {
 
         // No finalized chain — start head chains.
         for (self.head_chains.items) |*hc| {
-            if (hc.peerCount() > 0) {
+            if (hc.peerCount() > 0 or hc.hasInFlightWork()) {
                 hc.startSyncing();
             }
         }
@@ -381,8 +471,9 @@ pub const RangeSync = struct {
 pub fn getRangeSyncType(
     local_finalized_epoch: u64,
     remote_finalized_epoch: u64,
+    remote_finalized_root_known: bool,
 ) RangeSyncType {
-    if (remote_finalized_epoch > local_finalized_epoch) {
+    if (remote_finalized_epoch > local_finalized_epoch and !remote_finalized_root_known) {
         return .finalized;
     }
     return .head;
@@ -394,6 +485,7 @@ const TestCallbacks = struct {
     processed: u32 = 0,
     downloaded: u32 = 0,
     reported: u32 = 0,
+    known_root: ?[32]u8 = null,
 
     fn importBlockFn(_: *anyopaque, _: []const u8) anyerror!void {}
 
@@ -412,6 +504,12 @@ const TestCallbacks = struct {
         self.reported += 1;
     }
 
+    fn hasBlockFn(ptr: *anyopaque, root: [32]u8) bool {
+        const self: *TestCallbacks = @ptrCast(@alignCast(ptr));
+        const known_root = self.known_root orelse return false;
+        return std.mem.eql(u8, &known_root, &root);
+    }
+
     fn rangeSyncCallbacks(self: *TestCallbacks) RangeSyncCallbacks {
         return .{
             .ptr = self,
@@ -419,6 +517,7 @@ const TestCallbacks = struct {
             .processChainSegmentFn = &processChainSegmentFn,
             .downloadByRangeFn = &downloadByRangeFn,
             .reportPeerFn = &reportPeerFn,
+            .hasBlockFn = &hasBlockFn,
         };
     }
 };
@@ -450,6 +549,20 @@ test "RangeSync: head peer creates head chain" {
     try std.testing.expectEqual(RangeSyncStatus.head, rs.getState().status);
 }
 
+test "RangeSync: head peers share one chain" {
+    const allocator = std.testing.allocator;
+    var tc = TestCallbacks{};
+    var rs = RangeSync.init(allocator, tc.rangeSyncCallbacks());
+    defer rs.deinit();
+
+    try rs.addPeer("p1", 5, 5, [_]u8{0} ** 32, 200, [_]u8{0xAA} ** 32, null);
+    try rs.addPeer("p2", 5, 5, [_]u8{0} ** 32, 300, [_]u8{0xBB} ** 32, null);
+
+    try std.testing.expectEqual(@as(usize, 1), rs.head_chains.items.len);
+    try std.testing.expectEqual(@as(usize, 2), rs.head_chains.items[0].peerCount());
+    try std.testing.expectEqual(@as(u64, 300), rs.head_chains.items[0].target.slot);
+}
+
 test "RangeSync: finalized chain has priority over head" {
     const allocator = std.testing.allocator;
     var tc = TestCallbacks{};
@@ -465,6 +578,67 @@ test "RangeSync: finalized chain has priority over head" {
     try std.testing.expectEqual(RangeSyncStatus.finalized, rs.getState().status);
 }
 
+test "RangeSync: peer-empty finalized chain yields priority back to head" {
+    const allocator = std.testing.allocator;
+    var tc = TestCallbacks{};
+    var rs = RangeSync.init(allocator, tc.rangeSyncCallbacks());
+    defer rs.deinit();
+
+    try rs.addPeer("p_head", 0, 0, [_]u8{0} ** 32, 200, [_]u8{0xCC} ** 32, null);
+    try rs.addPeer("p_fin", 0, 10, [_]u8{0xAA} ** 32, 500, [_]u8{0xBB} ** 32, null);
+    try std.testing.expectEqual(RangeSyncStatus.finalized, rs.getState().status);
+
+    rs.removePeer("p_fin");
+
+    try std.testing.expect(rs.finalized_chain != null);
+    try std.testing.expectEqual(RangeSyncStatus.finalized, rs.getState().status);
+
+    try rs.tick();
+
+    try std.testing.expect(rs.finalized_chain == null);
+    try std.testing.expectEqual(RangeSyncStatus.head, rs.getState().status);
+
+    try std.testing.expect(tc.downloaded > 0);
+}
+
+test "RangeSync: peer-empty finalized chain keeps in-flight downloaded work" {
+    const allocator = std.testing.allocator;
+    var tc = TestCallbacks{};
+    var rs = RangeSync.init(allocator, tc.rangeSyncCallbacks());
+    defer rs.deinit();
+
+    try rs.addPeer("p_fin", 0, 10, [_]u8{0xAA} ** 32, 500, [_]u8{0xBB} ** 32, null);
+    try rs.tick();
+
+    const chain_id = rs.finalized_chain.?.id;
+    const batch_id = rs.finalized_chain.?.batches.items[0].id;
+    const generation = rs.finalized_chain.?.batches.items[0].generation;
+    const block_bytes = [_]u8{ 0x11, 0x22, 0x33 };
+    var blocks = [_]BatchBlock{.{ .slot = 0, .block_bytes = &block_bytes }};
+    rs.onBatchResponse(chain_id, batch_id, generation, blocks[0..]);
+
+    rs.removePeer("p_fin");
+
+    try std.testing.expect(rs.finalized_chain != null);
+    try std.testing.expectEqual(@as(usize, 0), rs.finalized_chain.?.peerCount());
+    try std.testing.expect(rs.finalized_chain.?.hasInFlightWork());
+}
+
+test "RangeSync: known remote finalized root creates head chain" {
+    const allocator = std.testing.allocator;
+    const finalized_root = [_]u8{0xAA} ** 32;
+    const head_root = [_]u8{0xBB} ** 32;
+    var tc = TestCallbacks{ .known_root = finalized_root };
+    var rs = RangeSync.init(allocator, tc.rangeSyncCallbacks());
+    defer rs.deinit();
+
+    try rs.addPeer("p_known", 0, 10, finalized_root, 500, head_root, null);
+
+    try std.testing.expect(rs.finalized_chain == null);
+    try std.testing.expectEqual(@as(usize, 1), rs.head_chains.items.len);
+    try std.testing.expectEqual(RangeSyncType.head, rs.head_chains.items[0].sync_type);
+}
+
 test "RangeSync: idle when no chains" {
     const allocator = std.testing.allocator;
     var tc = TestCallbacks{};
@@ -475,7 +649,8 @@ test "RangeSync: idle when no chains" {
 }
 
 test "getRangeSyncType: finalized vs head" {
-    try std.testing.expectEqual(RangeSyncType.finalized, getRangeSyncType(0, 10));
-    try std.testing.expectEqual(RangeSyncType.head, getRangeSyncType(10, 10));
-    try std.testing.expectEqual(RangeSyncType.head, getRangeSyncType(10, 5));
+    try std.testing.expectEqual(RangeSyncType.finalized, getRangeSyncType(0, 10, false));
+    try std.testing.expectEqual(RangeSyncType.head, getRangeSyncType(0, 10, true));
+    try std.testing.expectEqual(RangeSyncType.head, getRangeSyncType(10, 10, false));
+    try std.testing.expectEqual(RangeSyncType.head, getRangeSyncType(10, 5, false));
 }

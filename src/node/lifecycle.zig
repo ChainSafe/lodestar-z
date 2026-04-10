@@ -33,11 +33,33 @@ const ExecutionRuntime = @import("execution_runtime.zig").ExecutionRuntime;
 const networking = @import("networking");
 const PeerManager = networking.PeerManager;
 const custody_mod = networking.custody;
+const ZERO_HASH = @import("constants").ZERO_HASH;
 
 const BlsThreadPools = struct {
     block: *BlsThreadPool,
     gossip: *BlsThreadPool,
 };
+
+const CheckpointExecutionAnchor = struct {
+    parent_hash: [32]u8,
+    block_hash: [32]u8,
+    block_number: u64,
+    timestamp: u64,
+};
+
+fn checkpointExecutionAnchor(
+    checkpoint_state: *CachedBeaconState,
+) !?CheckpointExecutionAnchor {
+    const block_hash = checkpoint_state.state.latestExecutionPayloadHeaderBlockHash() catch return null;
+    if (std.mem.eql(u8, block_hash[0..], ZERO_HASH[0..])) return null;
+
+    return .{
+        .parent_hash = (try checkpoint_state.state.latestExecutionPayloadHeaderParentHash()).*,
+        .block_hash = block_hash.*,
+        .block_number = try checkpoint_state.state.latestExecutionPayloadHeaderBlockNumber(),
+        .timestamp = try checkpoint_state.state.latestExecutionPayloadHeaderTimestamp(),
+    };
+}
 
 pub fn init(allocator: Allocator, io: std.Io, beacon_config: *const BeaconConfig, init_config: InitConfig) !*BeaconNode {
     const opts = init_config.options;
@@ -54,10 +76,11 @@ pub fn init(allocator: Allocator, io: std.Io, beacon_config: *const BeaconConfig
     const api_node_identity = try initApiNodeIdentity(allocator, opts, &node_identity);
     var owned_api_node_identity: ?*ApiNodeIdentity = api_node_identity;
     errdefer if (owned_api_node_identity) |identity| deinitApiNodeIdentity(allocator, identity);
+    const initial_custody_group_count = opts.initial_custody_group_count orelse beacon_config.chain.CUSTODY_REQUIREMENT;
     const custody_columns = try custody_mod.getCustodyColumns(
         allocator,
         node_identity.node_id,
-        beacon_config.chain.CUSTODY_REQUIREMENT,
+        initial_custody_group_count,
     );
     defer allocator.free(custody_columns);
 
@@ -70,12 +93,9 @@ pub fn init(allocator: Allocator, io: std.Io, beacon_config: *const BeaconConfig
         const lmdb_store = try allocator.create(LmdbKVStore);
         errdefer allocator.destroy(lmdb_store);
 
-        lmdb_store.* = LmdbKVStore.open(allocator, z_path, .{
+        lmdb_store.* = try LmdbKVStore.open(allocator, z_path, .{
             .map_size = 256 * 1024 * 1024 * 1024,
-        }) catch |err| {
-            allocator.destroy(lmdb_store);
-            return err;
-        };
+        });
         errdefer lmdb_store.deinit();
 
         storage_backend = .{ .lmdb = lmdb_store };
@@ -157,7 +177,9 @@ pub fn init(allocator: Allocator, io: std.Io, beacon_config: *const BeaconConfig
 
     node.validator_monitor = chain_runtime.chain.validator_monitor;
     if (chain_runtime.chain.validator_monitor != null) {
-        log.logger(.node).info("Validator monitor: tracking {d} validators", .{opts.validator_monitor_indices.len});
+        log.logger(.node).info("Validator monitor enabled", .{
+            .validator_count = opts.validator_monitor_indices.len,
+        });
     }
 
     owns_node_identity = false;
@@ -199,10 +221,11 @@ pub fn initBuilder(
     const api_node_identity = try initApiNodeIdentity(allocator, opts, &node_identity);
     var owned_api_node_identity: ?*ApiNodeIdentity = api_node_identity;
     errdefer if (owned_api_node_identity) |identity| deinitApiNodeIdentity(allocator, identity);
+    const initial_custody_group_count = opts.initial_custody_group_count orelse beacon_config.chain.CUSTODY_REQUIREMENT;
     const custody_columns = try custody_mod.getCustodyColumns(
         allocator,
         node_identity.node_id,
-        beacon_config.chain.CUSTODY_REQUIREMENT,
+        initial_custody_group_count,
     );
     defer allocator.free(custody_columns);
 
@@ -215,12 +238,9 @@ pub fn initBuilder(
         const lmdb_store = try allocator.create(LmdbKVStore);
         errdefer allocator.destroy(lmdb_store);
 
-        lmdb_store.* = LmdbKVStore.open(allocator, z_path, .{
+        lmdb_store.* = try LmdbKVStore.open(allocator, z_path, .{
             .map_size = 256 * 1024 * 1024 * 1024,
-        }) catch |err| {
-            allocator.destroy(lmdb_store);
-            return err;
-        };
+        });
         errdefer lmdb_store.deinit();
 
         storage_backend = .{ .lmdb = lmdb_store };
@@ -352,7 +372,9 @@ fn finishBuilder(
 
     node.validator_monitor = finished_runtime.runtime.chain.validator_monitor;
     if (finished_runtime.runtime.chain.validator_monitor != null) {
-        log.logger(.node).info("Validator monitor: tracking {d} validators", .{self.node_options.validator_monitor_indices.len});
+        log.logger(.node).info("Validator monitor enabled", .{
+            .validator_count = self.node_options.validator_monitor_indices.len,
+        });
     }
 
     const beacon_processor = try allocator.create(BeaconProcessor);
@@ -385,8 +407,19 @@ pub fn finishBuilderGenesis(self: *BeaconNodeBuilder, genesis_state: *CachedBeac
 }
 
 pub fn finishBuilderCheckpoint(self: *BeaconNodeBuilder, checkpoint_state: *CachedBeaconState) !*BeaconNode {
+    const exec_anchor = try checkpointExecutionAnchor(checkpoint_state);
     const finished_runtime = try self.runtime_builder.finishCheckpoint(checkpoint_state);
-    return finishBuilder(self, finished_runtime);
+    const node = try finishBuilder(self, finished_runtime);
+    errdefer node.deinit();
+    if (exec_anchor) |anchor| {
+        try node.execution_runtime.seedKnownPayload(
+            anchor.parent_hash,
+            anchor.block_hash,
+            anchor.block_number,
+            anchor.timestamp,
+        );
+    }
+    return node;
 }
 
 pub fn deinit(self: *BeaconNode) void {
@@ -420,6 +453,18 @@ pub fn deinit(self: *BeaconNode) void {
         segment.deinit(allocator);
     }
     self.pending_sync_segments.deinit(allocator);
+    for (self.completed_discovery_dials.items) |*completion| {
+        completion.deinit(allocator);
+    }
+    self.completed_discovery_dials.deinit(allocator);
+    for (self.pending_peer_reqresp_ids.items) |peer_id| {
+        allocator.free(peer_id);
+    }
+    self.pending_peer_reqresp_ids.deinit(allocator);
+    for (self.completed_peer_reqresp.items) |*completion| {
+        completion.deinit(allocator);
+    }
+    self.completed_peer_reqresp.deinit(allocator);
 
     if (self.beacon_processor) |bp| {
         bp.deinit();
@@ -455,9 +500,9 @@ fn initBlsThreadPools(allocator: Allocator, io: std.Io) !BlsThreadPools {
     });
     errdefer gossip_pool.deinit();
 
-    log.logger(.node).info("BLS thread pools initialized: block={d} gossip={d}", .{
-        block_pool.n_workers,
-        gossip_pool.n_workers,
+    log.logger(.node).info("BLS thread pools initialized", .{
+        .block_workers = block_pool.n_workers,
+        .gossip_workers = gossip_pool.n_workers,
     });
 
     return .{
@@ -593,6 +638,7 @@ fn wireBootstrappedNode(self: *BeaconNode) !void {
         errdefer self.allocator.destroy(pm);
         pm.* = PeerManager.init(self.allocator, .{
             .target_peers = self.node_options.target_peers,
+            .max_peers = networking.peer_manager.maxPeersForTarget(self.node_options.target_peers),
             .target_group_peers = self.node_options.target_group_peers,
             .local_custody_columns = self.chain_runtime.custody_columns,
         });
@@ -609,6 +655,8 @@ fn wireBootstrappedNode(self: *BeaconNode) !void {
     self.unknown_chain_sync.setCallbacks(cb_ctx.unknownChainCallbacks());
     self.unknown_chain_sync.setForkChoice(cb_ctx.unknownChainForkChoiceQuery());
 
+    const finalized_epoch = self.chainQuery().finalizedCheckpoint().epoch;
+
     if (self.sync_service_inst == null) {
         const sync_svc = try self.allocator.create(SyncService);
         errdefer self.allocator.destroy(sync_svc);
@@ -616,13 +664,16 @@ fn wireBootstrappedNode(self: *BeaconNode) !void {
             self.allocator,
             cb_ctx.syncServiceCallbacks(),
             self.currentHeadSlot(),
-            0,
+            finalized_epoch,
         );
         sync_svc.is_single_node = self.node_options.sync_is_single_node;
         if (sync_svc.is_single_node) {
             sync_svc.onHeadUpdate(self.currentHeadSlot());
         }
         self.sync_service_inst = sync_svc;
+    } else if (self.sync_service_inst) |sync_svc| {
+        sync_svc.onHeadUpdate(self.currentHeadSlot());
+        sync_svc.onFinalizedUpdate(finalized_epoch);
     }
 
     if (self.api_bindings == null) {
@@ -642,8 +693,17 @@ pub fn initFromGenesis(self: *BeaconNode, genesis_state: *CachedBeaconState) !vo
 }
 
 pub fn initFromCheckpoint(self: *BeaconNode, checkpoint_state: *CachedBeaconState) !void {
+    const exec_anchor = try checkpointExecutionAnchor(checkpoint_state);
     const outcome = try self.chainService().bootstrapFromCheckpoint(checkpoint_state);
     self.applyBootstrapOutcome(outcome);
+    if (exec_anchor) |anchor| {
+        try self.execution_runtime.seedKnownPayload(
+            anchor.parent_hash,
+            anchor.block_hash,
+            anchor.block_number,
+            anchor.timestamp,
+        );
+    }
     try wireBootstrappedNode(self);
 
     log.logger(.node).info("initialized from checkpoint", .{

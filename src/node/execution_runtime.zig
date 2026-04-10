@@ -544,6 +544,23 @@ pub const ExecutionRuntime = struct {
         self.queue_cond.signal(self.io);
     }
 
+    pub fn seedKnownPayload(
+        self: *ExecutionRuntime,
+        parent_hash: [32]u8,
+        block_hash: [32]u8,
+        block_number: u64,
+        timestamp: u64,
+    ) !void {
+        if (self.mock_engine) |mock| {
+            try mock.seedPayload(.{
+                .parent_hash = parent_hash,
+                .block_hash = block_hash,
+                .block_number = block_number,
+                .timestamp = timestamp,
+            });
+        }
+    }
+
     pub fn ensurePayloadPreparationAsync(
         self: *ExecutionRuntime,
         slot: u64,
@@ -706,8 +723,6 @@ pub const ExecutionRuntime = struct {
 
         const had_engine = self.engine_api != null;
         const t0 = std.Io.Clock.awake.now(self.io);
-        var owned_request = request;
-        defer owned_request.deinit(self.allocator);
 
         const engine = self.engine_api orelse {
             const t1 = std.Io.Clock.awake.now(self.io);
@@ -719,7 +734,7 @@ pub const ExecutionRuntime = struct {
             };
         };
 
-        const engine_result = switch (owned_request) {
+        const engine_result = switch (request) {
             .bellatrix => |prepared| engine.newPayloadV1(prepared.payload),
             .capella => |prepared| engine.newPayloadV2(prepared.payload),
             .deneb => |prepared| engine.newPayload(
@@ -750,7 +765,7 @@ pub const ExecutionRuntime = struct {
         self.el_offline = false;
         const response = switch (engine_result.status) {
             .valid => NewPayloadResult{ .valid = .{
-                .latest_valid_hash = engine_result.latest_valid_hash orelse owned_request.blockHash(),
+                .latest_valid_hash = engine_result.latest_valid_hash orelse request.blockHash(),
             } },
             .invalid => NewPayloadResult{ .invalid = .{
                 .latest_valid_hash = engine_result.latest_valid_hash,
@@ -897,6 +912,11 @@ pub const ExecutionRuntime = struct {
             const pending = self.pending_payload_verifications.orderedRemove(0);
             self.active_payload_verifications += 1;
             self.queue_mutex.unlock(self.io);
+
+            defer {
+                var owned_pending = pending;
+                owned_pending.request.deinit(self.allocator);
+            }
 
             var completed = self.submitNewPayloadSerialized(pending.request);
             completed.ticket = pending.ticket;

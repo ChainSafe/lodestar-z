@@ -53,7 +53,7 @@ test "execution adapter maps mock VALID payload to valid" {
     const request = NewPayloadRequest{
         .bellatrix = .{
             .payload = .{
-                .parent_hash = [_]u8{0x44} ** 32,
+                .parent_hash = std.mem.zeroes([32]u8),
                 .fee_recipient = [_]u8{0x55} ** 20,
                 .state_root = [_]u8{0x66} ** 32,
                 .receipts_root = [_]u8{0x77} ** 32,
@@ -90,7 +90,7 @@ test "execution adapter maps mock SYNCING payload to syncing" {
     const request = NewPayloadRequest{
         .bellatrix = .{
             .payload = .{
-                .parent_hash = [_]u8{0x44} ** 32,
+                .parent_hash = std.mem.zeroes([32]u8),
                 .fee_recipient = [_]u8{0x55} ** 20,
                 .state_root = [_]u8{0x66} ** 32,
                 .receipts_root = [_]u8{0x77} ** 32,

@@ -7,6 +7,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const chain_mod = @import("chain");
+const networking = @import("networking");
 const sync_mod = @import("sync");
 const SyncServiceCallbacks = sync_mod.SyncServiceCallbacks;
 const BatchBlock = sync_mod.BatchBlock;
@@ -146,6 +147,8 @@ pub const SyncCallbackCtx = struct {
             .requestBlocksByRangeFn = &syncRequestBlocksByRange,
             .requestBlockByRootFn = &syncRequestBlockByRootUnknownBlock,
             .reportPeerFn = &syncReportPeer,
+            .hasBlockFn = &syncHasBlock,
+            .peerCanServeRangeFn = &syncPeerCanServeRange,
             .getConnectedPeersFn = &syncGetConnectedPeers,
             .setGossipEnabledFn = &syncSetGossipEnabled,
         };
@@ -341,17 +344,26 @@ pub const SyncCallbackCtx = struct {
         std.log.debug("SyncCallbackCtx: reported peer {s} for sync misbehavior", .{peer_id});
     }
 
+    fn syncHasBlock(ptr: *anyopaque, root: [32]u8) bool {
+        const ctx: *SyncCallbackCtx = @ptrCast(@alignCast(ptr));
+        const node: *BeaconNode = @ptrCast(@alignCast(ctx.node));
+        return node.chain.hasCanonicalBlock(root);
+    }
+
     fn syncGetConnectedPeers(ptr: *anyopaque) []const []const u8 {
         const ctx: *SyncCallbackCtx = @ptrCast(@alignCast(ptr));
         const node: *BeaconNode = @ptrCast(@alignCast(ctx.node));
         if (node.peer_manager) |pm| {
-            const peers = pm.getBestPeers(64) catch &.{};
-            defer if (@TypeOf(peers) != @TypeOf(&.{})) node.allocator.free(peers);
-            const n = @min(peers.len, ctx.peer_id_scratch.len);
-            for (peers[0..n], 0..) |cp, i| {
-                ctx.peer_id_scratch[i] = cp.peer_id;
+            if (pm.getConnectedPeers()) |peers| {
+                defer node.allocator.free(peers);
+                const n = @min(peers.len, ctx.peer_id_scratch.len);
+                for (peers[0..n], 0..) |cp, i| {
+                    ctx.peer_id_scratch[i] = cp.peer_id;
+                }
+                return ctx.peer_id_scratch[0..n];
+            } else |_| {
+                // Fall through to the bridge-local set if PeerManager cannot allocate.
             }
-            if (n > 0) return ctx.peer_id_scratch[0..n];
         }
 
         const n = @min(ctx.connected_peers.peers.items.len, ctx.peer_id_scratch.len);
@@ -359,6 +371,30 @@ pub const SyncCallbackCtx = struct {
             ctx.peer_id_scratch[i] = peer.id();
         }
         return ctx.peer_id_scratch[0..n];
+    }
+
+    fn syncPeerCanServeRange(
+        ptr: *anyopaque,
+        peer_id: []const u8,
+        start_slot: u64,
+        _: u64,
+    ) bool {
+        const ctx: *SyncCallbackCtx = @ptrCast(@alignCast(ptr));
+        const node: *BeaconNode = @ptrCast(@alignCast(ctx.node));
+
+        if (!node.config.forkSeq(start_slot).gte(.fulu)) return true;
+        if (node.chain_runtime.custody_columns.len == 0) return true;
+
+        const pm = node.peer_manager orelse return false;
+        const peer = pm.getPeer(peer_id) orelse return false;
+        if (peer.connection_state != .connected) return false;
+
+        const peer_columns = peer.custody_columns orelse return false;
+
+        for (node.chain_runtime.custody_columns) |column_index| {
+            if (networking.custody.isCustodied(column_index, peer_columns)) return true;
+        }
+        return false;
     }
 
     fn syncSetGossipEnabled(_: *anyopaque, enabled: bool) void {

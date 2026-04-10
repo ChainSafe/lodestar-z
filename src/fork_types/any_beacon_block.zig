@@ -545,10 +545,8 @@ pub const AnyBeaconBlock = union(enum) {
                 @ptrCast(self.full_electra)
             else
                 @ptrCast(self.blinded_electra),
-            // Fulu is structurally identical to Electra — use electra fields
-            // when block was deserialized as electra (e.g., capped fork_seq).
             .fulu => if (block_type == .full)
-                @ptrCast(self.full_electra)
+                @ptrCast(self.full_fulu)
             else
                 @ptrCast(self.blinded_fulu),
             .gloas => if (block_type == .full)
@@ -672,10 +670,8 @@ pub const AnyBeaconBlockBody = union(enum) {
                 @ptrCast(self.full_electra)
             else
                 @ptrCast(self.blinded_electra),
-            // Fulu is structurally identical to Electra — use electra fields
-            // when block was deserialized as electra (e.g., capped fork_seq).
             .fulu => if (block_type == .full)
-                @ptrCast(self.full_electra)
+                @ptrCast(self.full_fulu)
             else
                 @ptrCast(self.blinded_fulu),
             .gloas => if (block_type == .full)
@@ -924,4 +920,15 @@ fn testBlockSanity(Block: type) !void {
 
 test "electra - sanity" {
     try testBlockSanity(AnyBeaconBlock);
+}
+
+test "fulu castToFork accepts native fulu block and body" {
+    var fulu_block = ct.fulu.BeaconBlock.default_value;
+    fulu_block.slot = 4242;
+
+    const block = AnyBeaconBlock{ .full_fulu = &fulu_block };
+    try expect(@intFromPtr(block.castToFork(.full, .fulu)) == @intFromPtr(&fulu_block));
+
+    const body = block.beaconBlockBody();
+    try expect(@intFromPtr(body.castToFork(.full, .fulu)) == @intFromPtr(&fulu_block.body));
 }

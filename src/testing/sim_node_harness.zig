@@ -486,6 +486,7 @@ pub const SimNodeHarness = struct {
         const request = BeaconBlocksByRangeRequest.Type{
             .start_slot = start_slot,
             .count = count,
+            .step = 1,
         };
         var request_bytes: [BeaconBlocksByRangeRequest.fixed_size]u8 = undefined;
         _ = BeaconBlocksByRangeRequest.serializeIntoBytes(&request, &request_bytes);

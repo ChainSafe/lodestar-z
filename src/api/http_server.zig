@@ -2325,6 +2325,32 @@ test "handleRequest GET /eth/v1/node/health syncing returns 206" {
     try std.testing.expectEqual(@as(u16, 206), resp.status);
 }
 
+test "handleRequest GET /eth/v1/node/health optimistic returns 206" {
+    var tc = test_helpers.makeTestContext(std.testing.allocator);
+    defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
+
+    var server = HttpServer.init(std.testing.allocator, &tc.ctx, "127.0.0.1", 0);
+    tc.sync_status.is_syncing = false;
+    tc.sync_status.is_optimistic = true;
+    const resp = try server.handleRequest("GET", "/eth/v1/node/health", null);
+    defer resp.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(u16, 206), resp.status);
+}
+
+test "handleRequest GET /eth/v1/node/health el offline returns 206" {
+    var tc = test_helpers.makeTestContext(std.testing.allocator);
+    defer test_helpers.destroyTestContext(std.testing.allocator, &tc);
+
+    var server = HttpServer.init(std.testing.allocator, &tc.ctx, "127.0.0.1", 0);
+    tc.sync_status.is_syncing = false;
+    tc.sync_status.el_offline = true;
+    const resp = try server.handleRequest("GET", "/eth/v1/node/health", null);
+    defer resp.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(u16, 206), resp.status);
+}
+
 test "handleRequest GET /eth/v1/node/health at genesis returns 200" {
     var tc = test_helpers.makeTestContext(std.testing.allocator);
     defer test_helpers.destroyTestContext(std.testing.allocator, &tc);

@@ -191,7 +191,7 @@ pub const Nodes = struct {
         try w.writeUint64(self.total);
         const enr_start = try w.beginList();
         for (self.enrs) |enr| {
-            try w.writeBytes(enr);
+            try w.writeRawItem(enr);
         }
         try w.finishList(enr_start);
         try w.finishList(list_start);
@@ -219,7 +219,7 @@ pub const Nodes = struct {
         }
 
         while (!enr_list.atEnd()) {
-            const enr_bytes = enr_list.readBytes() catch return Error.InvalidEncoding;
+            const enr_bytes = enr_list.readRawItem() catch return Error.InvalidEncoding;
             try enrs.append(alloc, try alloc.dupe(u8, enr_bytes));
         }
         const owned = try enrs.toOwnedSlice(alloc);
@@ -379,8 +379,19 @@ test "discv5 messages: TALKREQ encode/decode" {
 test "discv5 messages: NODES encode/decode" {
     const alloc = std.testing.allocator;
     const req_id = try ReqId.fromSlice("id");
-    const enr_a = "enr-a";
-    const enr_b = "enr-b";
+    var w_a = rlp.Writer.init(alloc);
+    defer w_a.deinit();
+    try w_a.writeBytes("enr-a");
+    const enr_a = try alloc.dupe(u8, w_a.bytes());
+    defer alloc.free(enr_a);
+
+    var w_b = rlp.Writer.init(alloc);
+    defer w_b.deinit();
+    const list_start = try w_b.beginList();
+    try w_b.writeBytes("enr-b");
+    try w_b.finishList(list_start);
+    const enr_b = try alloc.dupe(u8, w_b.bytes());
+    defer alloc.free(enr_b);
     const msg = Nodes{
         .req_id = req_id,
         .total = 2,

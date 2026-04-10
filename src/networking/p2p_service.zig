@@ -12,7 +12,7 @@
 //!
 //! Usage:
 //! ```zig
-//! var svc = try P2pService.init(allocator, .{
+//! var svc = try P2pService.init(io, allocator, .{
 //!     .fork_digest = node.getForkDigest(),
 //!     .req_resp_context = &rr_ctx,
 //! });
@@ -181,34 +181,29 @@ const Network = union(enum) {
         };
     }
 
-    fn isPeerConnected(self: *const @This(), peer_id: []const u8) bool {
+    fn isPeerConnected(self: *@This(), peer_id: []const u8) bool {
         return switch (self.*) {
-            inline else => |network| network.connections.contains(peer_id),
+            inline else => |*network| network.connections.contains(peer_id),
         };
     }
 
-    fn snapshotConnectedPeerIds(self: *const @This(), allocator: Allocator) ![][]const u8 {
-        const connection_count = switch (self.*) {
-            inline else => |network| network.connections.count(),
-        };
-
-        var peer_ids = try allocator.alloc([]const u8, connection_count);
-        var copied: usize = 0;
-        errdefer {
-            for (peer_ids[0..copied]) |peer_id| allocator.free(peer_id);
-            allocator.free(peer_ids);
-        }
-
+    fn snapshotConnectedPeerIds(self: *@This(), allocator: Allocator) ![][]const u8 {
         switch (self.*) {
-            inline else => |network| {
+            inline else => |*network| {
+                var peer_ids = try allocator.alloc([]const u8, network.connections.count());
+                var copied: usize = 0;
+                errdefer {
+                    for (peer_ids[0..copied]) |peer_id| allocator.free(peer_id);
+                    allocator.free(peer_ids);
+                }
+
                 var iter = network.connections.iterator();
                 while (iter.next()) |entry| : (copied += 1) {
                     peer_ids[copied] = try allocator.dupe(u8, entry.key_ptr.*);
                 }
+                return peer_ids;
             },
         }
-
-        return peer_ids;
     }
 
     fn newStreamWithPayload(
@@ -316,9 +311,9 @@ pub const P2pService = struct {
     host_identity: ?*identity_mod.KeyPair,
     req_resp_self_limiter: SelfRateLimiter,
 
-    pub fn init(allocator: Allocator, config: P2pConfig) !Self {
+    pub fn init(io: Io, allocator: Allocator, config: P2pConfig) !Self {
         const gossipsub = try GossipsubService.init(allocator, config.gossipsub_config);
-        errdefer gossipsub.deinit();
+        errdefer gossipsub.deinit(io);
 
         const host_identity = if (config.host_identity) |identity| blk: {
             const ptr = try allocator.create(identity_mod.KeyPair);
@@ -412,15 +407,15 @@ pub const P2pService = struct {
     pub fn start(self: *Self, io: Io, listen_addr: Multiaddr) !void {
         // Set initial time for gossipsub router (PRUNE backoff, scoring).
         {
-            self.gossipsub.setTime(unixTimeMs(io));
+            self.gossipsub.setTime(io, unixTimeMs(io));
         }
         try self.network.listen(io, listen_addr);
-        try self.gossip_adapter.subscribeEthTopics();
+        try self.gossip_adapter.subscribeEthTopics(io);
         self.startHeartbeat(io);
         log.info("p2p service started", .{});
     }
 
-    /// Dial a remote peer by QUIC multiaddr.
+    /// Dial a remote peer by QUIC multiaddr. Caller owns the returned peer ID.
     pub fn dial(self: *Self, io: Io, peer_addr: Multiaddr) ![]const u8 {
         return self.network.dial(io, peer_addr);
     }
@@ -486,6 +481,33 @@ pub const P2pService = struct {
         try self.newStream(io, peer_id, GossipsubHandler, null);
     }
 
+    /// Open an outbound gossipsub stream without blocking the caller. The
+    /// stream is long-lived, so doing this inline would stall the node loop.
+    pub fn openGossipsubStreamAsync(self: *Self, io: Io, peer_id: []const u8) !void {
+        const owned_peer_id = try self.allocator.dupe(u8, peer_id);
+        errdefer self.allocator.free(owned_peer_id);
+        switch (self.network) {
+            inline else => |*network| {
+                network.background.concurrent(io, gossipsubStreamTask, .{ self, io, owned_peer_id }) catch |err| {
+                    log.debug("Failed to spawn concurrent gossipsub stream task: {}", .{err});
+                    network.background.async(io, gossipsubStreamTask, .{ self, io, owned_peer_id });
+                };
+            },
+        }
+    }
+
+    fn gossipsubStreamTask(self: *Self, io: Io, peer_id: []u8) void {
+        defer self.allocator.free(peer_id);
+        self.openGossipsubStream(io, peer_id) catch |err| {
+            log.debug("Failed to open outbound gossipsub stream to {s}: {}", .{ peer_id, err });
+        };
+    }
+
+    /// Request libp2p identify data from a connected peer.
+    pub fn requestIdentify(self: *Self, io: Io, peer_id: []const u8) !void {
+        try self.newStream(io, peer_id, IdentifyHandler, null);
+    }
+
     /// Gracefully close a connected peer transport. The switch will clean up
     /// handler state when its connection task observes the closure.
     pub fn disconnectPeer(self: *Self, io: Io, peer_id: []const u8) bool {
@@ -502,16 +524,17 @@ pub const P2pService = struct {
     /// The message is Snappy-compressed internally by `EthGossipAdapter.publish`.
     pub fn publishGossip(
         self: *Self,
+        io: Io,
         topic_type: GossipTopicType,
         subnet_id: ?u8,
         ssz_bytes: []const u8,
     ) !void {
-        return self.gossip_adapter.publish(topic_type, subnet_id, ssz_bytes);
+        return self.gossip_adapter.publish(io, topic_type, subnet_id, ssz_bytes);
     }
 
     /// Drain pending gossipsub events. Caller owns the returned slice.
-    pub fn drainGossipEvents(self: *Self) ![]GossipEvent {
-        return self.gossipsub.drainEvents();
+    pub fn drainGossipEvents(self: *Self, io: Io) ![]GossipEvent {
+        return self.gossipsub.drainEvents(io);
     }
 
     /// Report an invalid inbound gossip message to gossipsub's mesh scorer.
@@ -561,21 +584,21 @@ pub const P2pService = struct {
     }
 
     /// Subscribe to a gossip subnet topic (e.g., attestation subnets).
-    pub fn subscribeSubnet(self: *Self, topic_type: GossipTopicType, subnet_id: u8) !void {
-        try self.gossip_adapter.subscribeSubnet(topic_type, subnet_id);
+    pub fn subscribeSubnet(self: *Self, io: Io, topic_type: GossipTopicType, subnet_id: u8) !void {
+        try self.gossip_adapter.subscribeSubnet(io, topic_type, subnet_id);
     }
 
     /// Unsubscribe from a gossip subnet topic.
-    pub fn unsubscribeSubnet(self: *Self, topic_type: GossipTopicType, subnet_id: u8) !void {
-        try self.gossip_adapter.unsubscribeSubnet(topic_type, subnet_id);
+    pub fn unsubscribeSubnet(self: *Self, io: Io, topic_type: GossipTopicType, subnet_id: u8) !void {
+        try self.gossip_adapter.unsubscribeSubnet(io, topic_type, subnet_id);
     }
 
     pub fn setPublishFork(self: *Self, new_fork_digest: [4]u8, new_fork_seq: ForkSeq) void {
         self.gossip_adapter.setPublishFork(new_fork_digest, new_fork_seq);
     }
 
-    pub fn setActiveGossipForks(self: *Self, forks: []const ActiveGossipFork) !void {
-        try self.gossip_adapter.setActiveForks(forks);
+    pub fn setActiveGossipForks(self: *Self, io: Io, forks: []const ActiveGossipFork) !void {
+        try self.gossip_adapter.setActiveForks(io, forks);
     }
 
     /// Gracefully shut down (cancel background fibers, close QUIC engines).
@@ -589,10 +612,23 @@ pub const P2pService = struct {
         self.gossip_adapter.deinit();
         self.req_resp_self_limiter.deinit();
         self.network.deinit(io);
-        self.gossipsub.deinit();
+        self.gossipsub.deinit(io);
         if (self.host_identity) |host_identity| {
             host_identity.deinit();
             self.allocator.destroy(host_identity);
+        }
+    }
+
+    /// Schedule work on the switch background group. Use this for network work
+    /// that must not block the node's main P2P/import loop.
+    pub fn spawnBackground(self: *Self, io: Io, comptime func: anytype, args: anytype) void {
+        switch (self.network) {
+            inline else => |*network| {
+                network.background.concurrent(io, func, args) catch |err| {
+                    log.warn("background concurrency unavailable; falling back to cooperative async: {}", .{err});
+                    network.background.async(io, func, args);
+                };
+            },
         }
     }
 
@@ -614,9 +650,9 @@ pub const P2pService = struct {
             // Without this, PRUNE backoff timers and other time-based logic
             // see time_ms=0 and malfunction (backoff always expired, etc.).
             {
-                gs.setTime(unixTimeMs(io));
+                gs.setTime(io, unixTimeMs(io));
             }
-            gs.heartbeat() catch {};
+            gs.heartbeat(io) catch {};
         }
     }
 

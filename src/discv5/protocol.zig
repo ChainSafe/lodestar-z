@@ -67,6 +67,7 @@ pub const SeenNonces = struct {
 pub const SessionState = enum {
     unknown,
     whoareyou_sent,
+    handshake_sent,
     established,
 };
 
@@ -560,20 +561,34 @@ pub const Protocol = struct {
                 try self.sendOrdinaryMessage(dest_node_id, &s.initiator_key, dest_addr, msg_bytes, socket);
                 return;
             }
+            if (s.state == .handshake_sent) {
+                return error.HandshakeInProgress;
+            }
         }
 
-        // No established session — send a random-data probe packet.
-        // Per the discv5 spec, the initial ordinary message carries opaque random
-        // bytes, not an encrypted payload. The remote will fail to decrypt and
-        // respond with WHOAREYOU.  The real request is retransmitted inside the
-        // handshake response after the session is established.
+        // No established session — send the real request encrypted under a
+        // random throwaway key. The peer cannot decrypt it, so it should answer
+        // with WHOAREYOU. Once challenged, we retransmit the original plaintext
+        // inside the authenticated handshake.
         const nonce = self.randomNonce();
         var masking_iv: [16]u8 = undefined;
         self.rng.random().bytes(&masking_iv);
         const authdata: [32]u8 = self.config.local_node_id;
+        var fake_key: [16]u8 = undefined;
+        self.rng.random().bytes(&fake_key);
 
-        var random_msg: [44]u8 = undefined;
-        self.rng.random().bytes(&random_msg);
+        const header_raw = try buildHeaderRaw(self.alloc, packet.FLAG_MESSAGE, &nonce, &authdata);
+        defer self.alloc.free(header_raw);
+
+        const ct = try packet.encryptMessage(
+            self.alloc,
+            &fake_key,
+            &nonce,
+            msg_bytes,
+            &masking_iv,
+            header_raw,
+        );
+        defer self.alloc.free(ct);
 
         const pkt = try packet.encode(
             self.alloc,
@@ -582,11 +597,15 @@ pub const Protocol = struct {
             packet.FLAG_MESSAGE,
             &nonce,
             &authdata,
-            &random_msg,
+            ct,
         );
         defer self.alloc.free(pkt);
 
         try socket.send(dest_addr, pkt);
+        std.log.debug("discv5: sent unauthenticated probe to {any} (msg_len={d})", .{
+            dest_addr,
+            msg_bytes.len,
+        });
 
         // Replace any existing pending request for this destination.
         // The bootnode replaces its challenge state on each new probe from
@@ -645,7 +664,7 @@ pub const Protocol = struct {
         const src_id: NodeId = authdata[0..32].*;
 
         if (self.sessions.getPtr(src_id)) |s| {
-            if (s.state == .established) {
+            if (s.state == .established or s.state == .handshake_sent) {
                 // Replay protection: drop packets with a nonce we've already processed.
                 if (s.seen_nonces.contains(&parsed.static_header.nonce)) return;
                 const pt = packet.decryptMessage(
@@ -656,12 +675,17 @@ pub const Protocol = struct {
                     &parsed.masking_iv,
                     parsed.header_raw,
                 ) catch {
-                    try self.sendWhoareyou(src_id, &parsed.static_header.nonce, from, socket);
+                    if (s.state == .established) {
+                        try self.sendWhoareyou(src_id, &parsed.static_header.nonce, from, socket);
+                    }
                     return;
                 };
                 defer self.alloc.free(pt);
                 // Record nonce only after successful decryption.
                 s.seen_nonces.insert(&parsed.static_header.nonce);
+                if (s.state == .handshake_sent) {
+                    s.state = .established;
+                }
                 self.markNodeSeen(src_id, from, .connected);
                 try self.dispatchMessage(pt, src_id, from, socket);
                 return;
@@ -700,6 +724,24 @@ pub const Protocol = struct {
             if (std.mem.eql(u8, &pr.nonce, &request_nonce)) {
                 pending_idx = i;
                 break;
+            }
+        }
+
+        // Some peers may reply with a WHOAREYOU tied to an earlier unauthenticated
+        // probe from the same address. We only keep one pending probe per
+        // destination, so fall back to the source address when the nonce no
+        // longer lines up.
+        if (pending_idx == null) {
+            for (self.pending_requests.items, 0..) |pr, i| {
+                if (pr.dest_addr.eql(&from)) {
+                    pending_idx = i;
+                    std.log.debug("discv5: WHOAREYOU matched by address after nonce miss (from={any}, pending_nonce={s}, whoareyou_nonce={s})", .{
+                        from,
+                        &std.fmt.bytesToHex(pr.nonce, .lower),
+                        &std.fmt.bytesToHex(request_nonce, .lower),
+                    });
+                    break;
+                }
             }
         }
 
@@ -828,11 +870,12 @@ pub const Protocol = struct {
 
         // Send the handshake packet.
         try socket.send(from, handshake_pkt);
+        std.log.debug("discv5: sent handshake to {any}", .{from});
 
         // Store the new session.
         try self.sessions.put(pending.dest_node_id, .{
             .node_id = pending.dest_node_id,
-            .state = .established,
+            .state = .handshake_sent,
             .challenge_data = undefined,
             .challenge_data_len = 0,
             .initiator_key = keys.initiator_key,
@@ -935,6 +978,7 @@ pub const Protocol = struct {
         if (!new_session.seen_nonces.contains(&parsed.static_header.nonce)) {
             new_session.seen_nonces.insert(&parsed.static_header.nonce);
             try self.sessions.put(src_id, new_session);
+            std.log.debug("discv5: handshake established with {any}", .{from});
             try self.dispatchMessage(pt, src_id, from, socket);
         }
     }
@@ -1294,6 +1338,7 @@ pub const Protocol = struct {
         if (request.kind != .ping) return;
 
         self.markNodeSeen(from, from_addr, .connected);
+        std.log.debug("discv5: received PONG from {any}", .{from_addr});
         self.completed_events.append(self.alloc, .{
             .pong = .{
                 .peer_id = from,
@@ -1365,7 +1410,10 @@ pub const Protocol = struct {
         if (decoded.msg.total == 0) return;
 
         const key = activeRequestKey(from, decoded.msg.req_id);
-        const request = self.active_requests.getPtr(key) orelse return;
+        const request = self.active_requests.getPtr(key) orelse {
+            std.log.debug("discv5: received NODES for unknown request from {any}", .{from_addr});
+            return;
+        };
         if (request.kind != .findnode) return;
 
         var findnode = &request.kind.findnode;
@@ -1381,6 +1429,12 @@ pub const Protocol = struct {
         }
         findnode.responses_received += 1;
         self.markNodeSeen(from, from_addr, .connected);
+        std.log.debug("discv5: received NODES chunk {d}/{d} from {any} ({d} ENRs)", .{
+            findnode.responses_received,
+            findnode.total_responses.?,
+            from_addr,
+            decoded.enrs.len,
+        });
 
         if (findnode.responses_received < findnode.total_responses.?) return;
 
@@ -1402,6 +1456,10 @@ pub const Protocol = struct {
             for (owned_enrs) |enr| self.alloc.free(enr);
             self.alloc.free(owned_enrs);
         };
+        std.log.debug("discv5: completed NODES response from {any} with {d} ENRs", .{
+            from_addr,
+            owned_enrs.len,
+        });
     }
 
     fn handleTalkReq(
@@ -1585,12 +1643,21 @@ test "discv5 protocol: WHOAREYOU handshake round-trip" {
     });
     try proto_a.handlePacket(inbound_b.data, inbound_b.from, &socket_a);
 
-    // Node A should now have an established session.
+    // Node A stores provisional keys immediately, but does not treat the
+    // session as established until B proves it accepted the handshake.
     const session_a = proto_a.sessions.get(node_id_b) orelse return error.NoSession;
-    try std.testing.expectEqual(SessionState.established, session_a.state);
+    try std.testing.expectEqual(SessionState.handshake_sent, session_a.state);
 
     // The pending request should be consumed.
     try std.testing.expectEqual(@as(usize, 0), proto_a.pending_requests.items.len);
+
+    try std.testing.expectError(error.HandshakeInProgress, proto_a.sendPing(
+        &node_id_b,
+        &pk_b,
+        addr_b,
+        1,
+        &socket_a,
+    ));
 
     // Step 4: Node B receives the handshake.
     const handshake = try socket_b.receiveTimeout(&recv_buf_b, .{
@@ -1612,24 +1679,10 @@ test "discv5 protocol: WHOAREYOU handshake round-trip" {
             .clock = .awake,
         },
     });
-    var parsed_pong = try packet.decode(alloc, pong_packet.data, &node_id_a);
-    defer parsed_pong.deinit();
-    const pong_plaintext = try packet.decryptMessage(
-        alloc,
-        &session_a.recipient_key,
-        &parsed_pong.static_header.nonce,
-        parsed_pong.message_ciphertext,
-        &parsed_pong.masking_iv,
-        parsed_pong.header_raw,
-    );
-    defer alloc.free(pong_plaintext);
-    const pong = try messages.Pong.decode(pong_plaintext);
-    try std.testing.expectEqualSlices(u8, ping.req_id.slice(), pong.req_id.slice());
-    try std.testing.expectEqual(addr_a.getPort(), pong.recipient_port);
-    switch (addr_a) {
-        .ip4 => |ip4| try std.testing.expectEqualDeep(messages.Pong.RecipientIp{ .ip4 = ip4.bytes }, pong.recipient_ip),
-        .ip6 => |ip6| try std.testing.expectEqualDeep(messages.Pong.RecipientIp{ .ip6 = ip6.bytes }, pong.recipient_ip),
-    }
+    try proto_a.handlePacket(pong_packet.data, pong_packet.from, &socket_a);
+
+    const session_a2 = proto_a.sessions.get(node_id_b) orelse return error.NoSession;
+    try std.testing.expectEqual(SessionState.established, session_a2.state);
 }
 
 test "discv5 protocol: FINDNODE assembles a completed NODES event" {
@@ -1918,6 +1971,96 @@ test "discv5 protocol: request timeout prunes active and pending state" {
     try std.testing.expectEqual(node_id_b, event.request_timeout.peer_id);
     try std.testing.expectEqualSlices(u8, req_id.slice(), event.request_timeout.req_id.slice());
     try std.testing.expectEqual(RequestKind.ping, event.request_timeout.kind);
+}
+
+test "discv5 protocol: WHOAREYOU falls back to pending request address" {
+    const alloc = std.testing.allocator;
+    const io = std.Options.debug_io;
+    const hex = @import("hex.zig");
+
+    const sk_a = hex.hexToBytesComptime(32, "eef77acb6c6a6eebc5b363a475ac583ec7eccdb42b6481424c60f59aa326547f");
+    const pk_a = try secp.pubkeyFromSecret(&sk_a);
+    const node_id_a = enr_mod.nodeIdFromCompressedPubkey(&pk_a);
+
+    const sk_b = hex.hexToBytesComptime(32, "66fb62bfbd66b9177a138c1e5cddbe4f7c30c343e94e68df8769459cb14571f7");
+    const pk_b = try secp.pubkeyFromSecret(&sk_b);
+    const node_id_b = enr_mod.nodeIdFromCompressedPubkey(&pk_b);
+
+    var socket_a = try UdpSocket.bind(io, .{ .ip4 = .{ .bytes = .{ 127, 0, 0, 1 }, .port = 0 } });
+    defer socket_a.close();
+    var socket_b = try UdpSocket.bind(io, .{ .ip4 = .{ .bytes = .{ 127, 0, 0, 1 }, .port = 0 } });
+    defer socket_b.close();
+
+    const addr_a = socket_a.address;
+    const addr_b = socket_b.address;
+
+    var proto_a = try Protocol.init(io, alloc, .{
+        .local_secret_key = sk_a,
+        .local_node_id = node_id_a,
+    });
+    defer proto_a.deinit();
+
+    var proto_b = try Protocol.init(io, alloc, .{
+        .local_secret_key = sk_b,
+        .local_node_id = node_id_b,
+    });
+    defer proto_b.deinit();
+    proto_b.addNode(node_id_a, &pk_a, addr_a, null);
+
+    const ping = messages.Ping{
+        .req_id = try messages.ReqId.fromSlice(&[_]u8{ 0x00, 0x00, 0x00, 0x01 }),
+        .enr_seq = 1,
+    };
+    const ping_bytes = try ping.encode(alloc);
+    defer alloc.free(ping_bytes);
+
+    try proto_a.sendRequest(&node_id_b, &pk_b, addr_b, ping_bytes, &socket_a);
+    try std.testing.expectEqual(@as(usize, 1), proto_a.pending_requests.items.len);
+
+    // Simulate a stale pending nonce while keeping the destination address
+    // intact so the WHOAREYOU can still be associated with this peer.
+    proto_a.pending_requests.items[0].nonce = [_]u8{0xaa} ** 12;
+
+    var recv_buf_b: [MAX_PACKET_SIZE]u8 = undefined;
+    const inbound_a = try socket_b.receiveTimeout(&recv_buf_b, .{
+        .duration = .{
+            .raw = Io.Duration.fromMilliseconds(250),
+            .clock = .awake,
+        },
+    });
+    try proto_b.handlePacket(inbound_a.data, inbound_a.from, &socket_b);
+
+    var recv_buf_a: [MAX_PACKET_SIZE]u8 = undefined;
+    const inbound_b = try socket_a.receiveTimeout(&recv_buf_a, .{
+        .duration = .{
+            .raw = Io.Duration.fromMilliseconds(250),
+            .clock = .awake,
+        },
+    });
+    try proto_a.handlePacket(inbound_b.data, inbound_b.from, &socket_a);
+
+    const session_a = proto_a.sessions.get(node_id_b) orelse return error.NoSession;
+    try std.testing.expectEqual(SessionState.handshake_sent, session_a.state);
+    try std.testing.expectEqual(@as(usize, 0), proto_a.pending_requests.items.len);
+
+    const handshake = try socket_b.receiveTimeout(&recv_buf_b, .{
+        .duration = .{
+            .raw = Io.Duration.fromMilliseconds(250),
+            .clock = .awake,
+        },
+    });
+    try proto_b.handlePacket(handshake.data, handshake.from, &socket_b);
+
+    const pong_packet = try socket_a.receiveTimeout(&recv_buf_a, .{
+        .duration = .{
+            .raw = Io.Duration.fromMilliseconds(250),
+            .clock = .awake,
+        },
+    });
+    try proto_a.handlePacket(pong_packet.data, pong_packet.from, &socket_a);
+
+    const session_a2 = proto_a.sessions.get(node_id_b) orelse return error.NoSession;
+    try std.testing.expectEqual(SessionState.established, session_a2.state);
 }
 
 test "discv5 protocol: unsolicited WHOAREYOU is ignored" {

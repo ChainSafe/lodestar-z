@@ -26,6 +26,7 @@ const BeaconBlocksByRangeRequest = messages.BeaconBlocksByRangeRequest;
 const BeaconBlocksByRootRequest = messages.BeaconBlocksByRootRequest;
 const BlobSidecarsByRangeRequest = messages.BlobSidecarsByRangeRequest;
 const BlobSidecarsByRootRequest = messages.BlobSidecarsByRootRequest;
+const DataColumnSidecarsByRootRequest = messages.DataColumnSidecarsByRootRequest;
 const DataColumnSidecarsByRangeRequest = messages.DataColumnSidecarsByRangeRequest;
 
 /// Maximum request payload size: 10 MiB.
@@ -163,7 +164,7 @@ pub fn serveRequestVersioned(
         .beacon_blocks_by_root => serveBeaconBlocksByRoot(request_bytes, context, writer),
         .blob_sidecars_by_range => serveBlobSidecarsByRange(request_bytes, context, writer),
         .blob_sidecars_by_root => serveBlobSidecarsByRoot(request_bytes, context, writer),
-        .data_column_sidecars_by_root => serveDataColumnSidecarsByRoot(request_bytes, context, writer),
+        .data_column_sidecars_by_root => serveDataColumnSidecarsByRoot(allocator, request_bytes, context, writer),
         .data_column_sidecars_by_range => serveDataColumnSidecarsByRange(allocator, request_bytes, context, writer),
         .light_client_bootstrap,
         .light_client_updates_by_range,
@@ -443,6 +444,7 @@ fn serveBlobSidecarsByRoot(
 }
 
 fn serveDataColumnSidecarsByRoot(
+    allocator: Allocator,
     request_bytes: []const u8,
     context: *const ReqRespContext,
     writer: *const ResponseWriter,
@@ -451,23 +453,34 @@ fn serveDataColumnSidecarsByRoot(
         return writer.writeError(.server_error, "DataColumnSidecarsByRoot not supported");
     };
 
-    const id_size = 40;
-    if (request_bytes.len == 0 or request_bytes.len % id_size != 0) {
-        return writer.writeError(.invalid_request, "Invalid DataColumnSidecarsByRootRequest size");
-    }
-
-    const num_ids = request_bytes.len / id_size;
-    if (num_ids > max_request_data_column_sidecars) {
-        return writer.writeError(.invalid_request, "Too many data column identifiers requested");
-    }
+    var request: DataColumnSidecarsByRootRequest.Type = .empty;
+    DataColumnSidecarsByRootRequest.deserializeFromBytes(allocator, request_bytes, &request) catch {
+        return writer.writeError(.invalid_request, "Malformed DataColumnSidecarsByRootRequest");
+    };
+    defer DataColumnSidecarsByRootRequest.deinit(allocator, &request);
 
     var emitter = ContextualEmitter{ .context = context, .writer = writer };
     var sink = emitter.asSink();
-    for (0..num_ids) |i| {
-        const offset = i * id_size;
-        const root: [32]u8 = request_bytes[offset..][0..32].*;
-        const index = std.mem.readInt(u64, request_bytes[offset + 32 ..][0..8], .little);
-        try findDataColumnByRoot(context.ptr, root, index, &sink);
+
+    var requested_columns: usize = 0;
+    for (request.items) |identifier| {
+        if (identifier.columns.items.len == 0) {
+            return writer.writeError(.invalid_request, "Columns must not be empty");
+        }
+        requested_columns += identifier.columns.items.len;
+    }
+
+    if (requested_columns == 0) {
+        return writer.writeError(.invalid_request, "Columns must not be empty");
+    }
+    if (requested_columns > max_request_data_column_sidecars) {
+        return writer.writeError(.invalid_request, "Too many data column identifiers requested");
+    }
+
+    for (request.items) |identifier| {
+        for (identifier.columns.items) |index| {
+            try findDataColumnByRoot(context.ptr, identifier.block_root, index, &sink);
+        }
     }
 }
 
@@ -1023,6 +1036,32 @@ test "DataColumnSidecarsByRange forwards requested columns to the context" {
     try testing.expectEqual(@as(usize, 2), chunks.len);
     try testing.expectEqualSlices(u8, &MockContext.mock_column_1, chunks[0].ssz_payload);
     try testing.expectEqualSlices(u8, &MockContext.mock_column_2, chunks[1].ssz_payload);
+}
+
+test "DataColumnSidecarsByRoot forwards grouped column identifiers to the context" {
+    const allocator = testing.allocator;
+    MockContext.reset();
+
+    var request: DataColumnSidecarsByRootRequest.Type = .empty;
+    defer DataColumnSidecarsByRootRequest.deinit(allocator, &request);
+
+    var identifier: messages.DataColumnsByRootIdentifier.Type = .{
+        .block_root = MockContext.known_root_1,
+        .columns = .empty,
+    };
+    errdefer messages.DataColumnsByRootIdentifier.deinit(allocator, &identifier);
+    try identifier.columns.appendSlice(allocator, &.{ 7, 9 });
+    try request.append(allocator, identifier);
+
+    const request_bytes = try allocator.alloc(u8, DataColumnSidecarsByRootRequest.serializedSize(&request));
+    _ = DataColumnSidecarsByRootRequest.serializeIntoBytes(&request, request_bytes);
+    defer allocator.free(request_bytes);
+
+    const chunks = try collectRequest(allocator, .data_column_sidecars_by_root, request_bytes, null);
+    defer freeResponseChunks(allocator, chunks);
+
+    try testing.expectEqual(@as(usize, 1), chunks.len);
+    try testing.expectEqualSlices(u8, &MockContext.mock_column_1, chunks[0].ssz_payload);
 }
 
 test "DataColumnSidecarsByRange rejects empty column lists" {

@@ -109,6 +109,13 @@ pub const PeerManagerConfig = struct {
     local_custody_columns: []const u64 = &.{},
 };
 
+/// Match Lodestar's CLI semantics: when a user raises target peers, reserve a
+/// small amount of headroom above the target for in-flight/outbound churn.
+pub fn maxPeersForTarget(target_peers: u32) u32 {
+    const scaled = (target_peers * 11) / 10;
+    return @max(target_peers, scaled);
+}
+
 // ── Heartbeat result ────────────────────────────────────────────────────────
 
 /// Actions requested by the heartbeat for the caller to execute.
@@ -726,10 +733,16 @@ pub const PeerManager = struct {
 
         var best_known: ?Candidate = null;
         var best_unknown: ?Candidate = null;
+        var connected_count: usize = 0;
+        var eligible_range_count: usize = 0;
+        var unknown_count: usize = 0;
+        var zero_overlap_count: usize = 0;
 
         for (connected) |cp| {
+            connected_count += 1;
             if (containsPeerId(excluded_peer_ids, cp.peer_id)) continue;
             if (!peerCanServeRange(cp.info, start_slot, end_slot)) continue;
+            eligible_range_count += 1;
 
             const is_preferred = if (preferred_peer_id) |preferred|
                 std.mem.eql(u8, cp.peer_id, preferred)
@@ -738,7 +751,10 @@ pub const PeerManager = struct {
 
             if (cp.info.custody_columns) |custody_columns| {
                 const coverage = custodyCoverageCount(custody_columns, missing_columns);
-                if (coverage == 0) continue;
+                if (coverage == 0) {
+                    zero_overlap_count += 1;
+                    continue;
+                }
 
                 const candidate: Candidate = .{
                     .peer_id = cp.peer_id,
@@ -751,6 +767,7 @@ pub const PeerManager = struct {
                     best_known = candidate;
                 }
             } else {
+                unknown_count += 1;
                 const candidate: Candidate = .{
                     .peer_id = cp.peer_id,
                     .coverage = 0,
@@ -770,6 +787,19 @@ pub const PeerManager = struct {
         if (best_unknown) |candidate| {
             return try self.allocator.dupe(u8, candidate.peer_id);
         }
+        log.info(
+            "No data column peer selected: connected={d} eligible_range={d} unknown={d} zero_overlap={d} missing_columns={d} preferred={s} slots={d}..{d}",
+            .{
+                connected_count,
+                eligible_range_count,
+                unknown_count,
+                zero_overlap_count,
+                missing_columns.len,
+                preferred_peer_id orelse "(none)",
+                start_slot,
+                end_slot,
+            },
+        );
         return null;
     }
 
@@ -816,6 +846,12 @@ pub const PeerManager = struct {
     /// Best sync target (connected peer with highest head slot).
     pub fn getSyncTarget(self: *PeerManager) ?SyncTarget {
         return self.db.getBestSyncTarget();
+    }
+
+    /// Get all connected peers for sync liveness checks.
+    /// Caller owns the returned slice.
+    pub fn getConnectedPeers(self: *PeerManager) ![]ConnectedPeer {
+        return self.db.getConnectedPeers();
     }
 
     /// Get up to `count` best peers for sync (sorted by head slot descending).
@@ -1042,12 +1078,9 @@ pub const PeerManager = struct {
     }
 
     fn peerNeedsStatusRefresh(peer: *const PeerInfo, now_ms: u64, interval_ms: u64) bool {
+        if (peer.last_status_exchange_ms == 0) return true;
         if (peer.last_status_fork_digest == null or peer.relevance == .unknown) return true;
-        const last_exchange_ms = if (peer.last_status_exchange_ms != 0)
-            peer.last_status_exchange_ms
-        else
-            peer.connected_at_ms;
-        return now_ms >= last_exchange_ms + interval_ms;
+        return now_ms >= peer.last_status_exchange_ms + interval_ms;
     }
 
     fn peerNeedsPing(peer: *const PeerInfo, now_ms: u64, config: MaintenanceConfig) bool {
@@ -1251,6 +1284,21 @@ test "PeerManager: outbound disconnect does not apply reconnection cool-down" {
 
     const peer = pm.getPeer("peer_a").?;
     try std.testing.expect(!peer.peer_score.isCoolingDown(2000));
+}
+
+test "PeerManager: goodbye cool-down prevents immediate outbound redial" {
+    const allocator = std.testing.allocator;
+    var pm = PeerManager.init(allocator, .{ .target_peers = 5, .max_peers = 10 });
+    defer pm.deinit();
+
+    _ = try pm.onPeerConnected("peer_a", .outbound, 1000);
+    pm.onPeerGoodbye("peer_a", .too_many_peers, 1200);
+    pm.onPeerDisconnected("peer_a", 1300);
+
+    try std.testing.expectError(error.PeerCoolingDown, pm.onDialing("peer_a", 1400));
+    try pm.onDialing("peer_a", 1200 + 5 * 60 * 1000 + 1);
+    const peer = pm.getPeer("peer_a").?;
+    try std.testing.expectEqual(ConnectionState.dialing, peer.connection_state);
 }
 
 test "PeerManager: reject banned peer" {
@@ -1483,6 +1531,26 @@ test "PeerManager: maintenance restatuses peers without prior status" {
     _ = try pm.onPeerConnected("peer_a", .inbound, 1_000);
 
     var actions = try pm.maintenance(2_000, .{ .max_ping_requests = 1, .max_status_requests = 1 });
+    defer actions.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 1), actions.peers_to_restatus.len);
+    try std.testing.expectEqualStrings("peer_a", actions.peers_to_restatus[0]);
+}
+
+test "PeerManager: maintenance restatuses newly reconnected peers immediately" {
+    const allocator = std.testing.allocator;
+    var pm = PeerManager.init(allocator, .{});
+    defer pm.deinit();
+
+    _ = try pm.onPeerConnected("peer_a", .outbound, 1_000);
+    pm.db.updatePeerStatus("peer_a", [_]u8{0x11} ** 4, [_]u8{0x22} ** 32, 1, 2, [_]u8{0x33} ** 32, null);
+    pm.db.setRelevanceStatus("peer_a", .relevant);
+    pm.markStatusExchange("peer_a", 1_000);
+
+    pm.onPeerDisconnected("peer_a", 2_000);
+    _ = try pm.onPeerConnected("peer_a", .outbound, 3_000);
+
+    var actions = try pm.maintenance(3_001, .{ .max_ping_requests = 1, .max_status_requests = 1 });
     defer actions.deinit(allocator);
 
     try std.testing.expectEqual(@as(usize, 1), actions.peers_to_restatus.len);

@@ -654,6 +654,36 @@ pub const AnyBeaconState = union(ForkSeq) {
         };
     }
 
+    pub fn latestExecutionPayloadHeaderParentHash(self: *AnyBeaconState) !*const [32]u8 {
+        return switch (self.*) {
+            .phase0, .altair, .gloas => error.InvalidAtFork,
+            inline else => |state| {
+                var header = try state.getReadonly("latest_execution_payload_header");
+                return try header.getFieldRoot("parent_hash");
+            },
+        };
+    }
+
+    pub fn latestExecutionPayloadHeaderBlockNumber(self: *AnyBeaconState) !u64 {
+        return switch (self.*) {
+            .phase0, .altair, .gloas => error.InvalidAtFork,
+            inline else => |state| {
+                var header = try state.getReadonly("latest_execution_payload_header");
+                return try header.getReadonly("block_number");
+            },
+        };
+    }
+
+    pub fn latestExecutionPayloadHeaderTimestamp(self: *AnyBeaconState) !u64 {
+        return switch (self.*) {
+            .phase0, .altair, .gloas => error.InvalidAtFork,
+            inline else => |state| {
+                var header = try state.getReadonly("latest_execution_payload_header");
+                return try header.getReadonly("timestamp");
+            },
+        };
+    }
+
     pub fn executionPayloadAvailability(self: *AnyBeaconState, index: usize) !bool {
         return switch (self.*) {
             .gloas => |state| {

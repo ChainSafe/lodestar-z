@@ -51,6 +51,8 @@ pub const NodeOptions = struct {
     enable_mdns: bool = false,
     /// Subscribe to all attestation subnets (--subscribe-all-subnets).
     subscribe_all_subnets: bool = false,
+    /// Initial PeerDAS custody group count. Null uses the spec default.
+    initial_custody_group_count: ?u64 = null,
     /// Override ENR IPv4 address.
     enr_ip: ?[]const u8 = null,
     /// Override ENR TCP port.

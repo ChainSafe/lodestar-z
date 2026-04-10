@@ -500,8 +500,17 @@ pub const Chain = struct {
         var genesis_header = try genesis_state.state.latestBlockHeader();
         const genesis_block_root = (try genesis_header.hashTreeRoot()).*;
         const genesis_slot = try genesis_state.state.slot();
+        const genesis_epoch = @divFloor(genesis_slot, preset.SLOTS_PER_EPOCH);
 
-        return self.bootstrapFromAnchorState(genesis_state, genesis_block_root, genesis_slot);
+        return self.bootstrapFromAnchorState(
+            genesis_state,
+            genesis_block_root,
+            genesis_block_root,
+            genesis_slot,
+            genesis_slot,
+            genesis_epoch,
+            .genesis,
+        );
     }
 
     pub fn bootstrapFromCheckpoint(self: *Chain, checkpoint_state: *CachedBeaconState) !BootstrapResult {
@@ -530,22 +539,40 @@ pub const Chain = struct {
         try consensus_types.phase0.BeaconBlockHeader.hashTreeRoot(&cp_header_val, &anchor_block_root);
 
         const checkpoint_slot = try checkpoint_state.state.slot();
-        return self.bootstrapFromAnchorState(checkpoint_state, anchor_block_root, checkpoint_slot);
+        const checkpoint_epoch = std.math.divCeil(u64, checkpoint_slot, preset.SLOTS_PER_EPOCH) catch unreachable;
+        return self.bootstrapFromAnchorState(
+            checkpoint_state,
+            anchor_block_root,
+            header_parent,
+            header_slot,
+            checkpoint_slot,
+            checkpoint_epoch,
+            .finalized_checkpoint,
+        );
     }
+
+    const AnchorBootstrapKind = enum {
+        genesis,
+        finalized_checkpoint,
+    };
 
     fn bootstrapFromAnchorState(
         self: *Chain,
         anchor_state: *CachedBeaconState,
         anchor_block_root: [32]u8,
-        anchor_slot: u64,
+        anchor_parent_root: [32]u8,
+        anchor_block_slot: u64,
+        anchor_state_slot: u64,
+        anchor_checkpoint_epoch: u64,
+        anchor_kind: AnchorBootstrapKind,
     ) !BootstrapResult {
         try self.state_regen.verifyPublishedStateOwnership(anchor_state);
 
         const cached_state_root = try self.queued_regen.onNewBlock(anchor_state, true);
 
         try self.registerGenesisRoot(anchor_block_root, cached_state_root);
-        try self.onTrackedBlock(anchor_block_root, anchor_slot, cached_state_root);
-        self.setTrackedHead(anchor_block_root, anchor_slot, cached_state_root);
+        try self.onTrackedBlock(anchor_block_root, anchor_block_slot, cached_state_root);
+        self.setTrackedHead(anchor_block_root, anchor_block_slot, cached_state_root);
         try self.onEpochTransition(anchor_state);
 
         const genesis_validators_root = (try anchor_state.state.genesisValidatorsRoot()).*;
@@ -554,49 +581,76 @@ pub const Chain = struct {
         self.genesis_time_s = genesis_time;
         const earliest_archived_slot = try self.db.getEarliestBlockArchiveSlot();
 
-        var justified_cp: consensus_types.phase0.Checkpoint.Type = undefined;
-        try anchor_state.state.currentJustifiedCheckpoint(&justified_cp);
-        var finalized_cp: consensus_types.phase0.Checkpoint.Type = undefined;
-        try anchor_state.state.finalizedCheckpoint(&finalized_cp);
+        const bootstrap_finalized_cp = consensus_types.phase0.Checkpoint.Type{
+            .epoch = anchor_checkpoint_epoch,
+            .root = anchor_block_root,
+        };
+        const bootstrap_justified_cp = switch (anchor_kind) {
+            .genesis => consensus_types.phase0.Checkpoint.Type{
+                .epoch = anchor_checkpoint_epoch,
+                .root = anchor_block_root,
+            },
+            .finalized_checkpoint => consensus_types.phase0.Checkpoint.Type{
+                .epoch = if (anchor_checkpoint_epoch == 0) 0 else anchor_checkpoint_epoch + 1,
+                .root = anchor_block_root,
+            },
+        };
 
         if (self.archive_store) |store| {
-            store.restoreProgress(finalized_cp.epoch * preset.SLOTS_PER_EPOCH) catch |err| {
-                log_mod.logger(.chain).warn("archive progress restore failed: {}", .{err});
+            store.restoreProgress(bootstrap_finalized_cp.epoch * preset.SLOTS_PER_EPOCH) catch |err| {
+                log_mod.logger(.chain).warn("archive progress restore failed", .{ .err = err });
             };
 
-            const finalized_slot = finalized_cp.epoch * preset.SLOTS_PER_EPOCH;
+            const finalized_slot = bootstrap_finalized_cp.epoch * preset.SLOTS_PER_EPOCH;
             if (store.last_finalized_slot < finalized_slot) {
                 store.catchUpToFinalized(
                     .{
-                        .epoch = finalized_cp.epoch,
-                        .root = anchor_block_root,
+                        .epoch = bootstrap_finalized_cp.epoch,
+                        .root = bootstrap_finalized_cp.root,
                     },
                     &self.block_to_state,
                 ) catch |err| {
-                    log_mod.logger(.chain).warn("archive catch-up during bootstrap failed: {}", .{err});
+                    log_mod.logger(.chain).warn("archive catch-up during bootstrap failed", .{ .err = err });
                 };
             }
         }
 
         const balances = anchor_state.epoch_cache.getEffectiveBalanceIncrements();
-        const justified_root = anchor_block_root;
-        const finalized_root = anchor_block_root;
+        const justified_root = bootstrap_justified_cp.root;
+        const finalized_root = bootstrap_finalized_cp.root;
+        const anchor_extra_meta: fork_choice_mod.BlockExtraMeta = blk: {
+            const exec_block_hash = anchor_state.state.latestExecutionPayloadHeaderBlockHash() catch {
+                break :blk fork_choice_mod.BlockExtraMeta{ .pre_merge = {} };
+            };
+            if (std.mem.eql(u8, exec_block_hash[0..], &([_]u8{0} ** 32))) {
+                break :blk fork_choice_mod.BlockExtraMeta{ .pre_merge = {} };
+            }
+
+            break :blk fork_choice_mod.BlockExtraMeta{
+                .post_merge = fork_choice_mod.BlockExtraMeta.PostMergeMeta.init(
+                    exec_block_hash.*,
+                    try anchor_state.state.latestExecutionPayloadHeaderBlockNumber(),
+                    .valid,
+                    .available,
+                ),
+            };
+        };
 
         const fc_anchor = ProtoBlock{
-            .slot = anchor_slot,
+            .slot = anchor_block_slot,
             .block_root = anchor_block_root,
-            .parent_root = anchor_block_root,
+            .parent_root = anchor_parent_root,
             .state_root = cached_state_root,
             .target_root = anchor_block_root,
-            .justified_epoch = justified_cp.epoch,
+            .justified_epoch = bootstrap_justified_cp.epoch,
             .justified_root = justified_root,
-            .finalized_epoch = finalized_cp.epoch,
+            .finalized_epoch = bootstrap_finalized_cp.epoch,
             .finalized_root = finalized_root,
-            .unrealized_justified_epoch = justified_cp.epoch,
+            .unrealized_justified_epoch = bootstrap_justified_cp.epoch,
             .unrealized_justified_root = justified_root,
-            .unrealized_finalized_epoch = finalized_cp.epoch,
+            .unrealized_finalized_epoch = bootstrap_finalized_cp.epoch,
             .unrealized_finalized_root = finalized_root,
-            .extra_meta = .{ .pre_merge = {} },
+            .extra_meta = anchor_extra_meta,
             .timeliness = true,
         };
 
@@ -604,32 +658,41 @@ pub const Chain = struct {
             self.allocator,
             self.config,
             fc_anchor,
-            anchor_slot,
+            @max(anchor_block_slot, anchor_state_slot),
             CheckpointWithPayloadStatus.fromCheckpoint(.{
-                .epoch = justified_cp.epoch,
+                .epoch = bootstrap_justified_cp.epoch,
                 .root = justified_root,
             }, .full),
             CheckpointWithPayloadStatus.fromCheckpoint(.{
-                .epoch = finalized_cp.epoch,
+                .epoch = bootstrap_finalized_cp.epoch,
                 .root = finalized_root,
             }, .full),
             balances.items,
             .{ .getFn = emptyJustifiedBalancesGetterFn },
             .{},
-            .{},
+            .{
+                .proposer_boost = true,
+                .proposer_boost_reorg = true,
+                .compute_unrealized = true,
+            },
         );
 
         return .{
             .fork_choice = fc,
             .genesis_time = genesis_time,
             .genesis_validators_root = genesis_validators_root,
-            .earliest_available_slot = if (earliest_archived_slot) |slot| @min(anchor_slot, slot) else anchor_slot,
+            .earliest_available_slot = if (earliest_archived_slot) |slot| @min(anchor_state_slot, slot) else anchor_state_slot,
         };
     }
 
     // -----------------------------------------------------------------------
     // Block import pipeline
     // -----------------------------------------------------------------------
+
+    pub const ReadyBlockPlanResult = union(enum) {
+        skipped: BlockImportError,
+        planned: blocks_mod.PlannedBlockImport,
+    };
 
     /// Full block import pipeline: sanity → STFN → fork choice → persist → head → notifications.
     ///
@@ -673,23 +736,48 @@ pub const Chain = struct {
     }
 
     pub fn planReadyBlockImport(self: *Chain, ready: *chain_types.ReadyBlockInput) !blocks_mod.PlannedBlockImport {
+        const plan_result = try self.planReadyBlockImportWithOpts(ready, .{
+            .skip_future_slot = true,
+            .skip_signatures = !self.verify_signatures,
+        });
+        return switch (plan_result) {
+            .skipped => error.InternalError,
+            .planned => |planned| planned,
+        };
+    }
+
+    pub fn planRangeSyncReadyBlockImport(self: *Chain, ready: *chain_types.ReadyBlockInput) !ReadyBlockPlanResult {
+        return self.planReadyBlockImportWithOpts(ready, self.rangeSyncImportOpts());
+    }
+
+    pub fn rangeSyncImportOpts(self: *const Chain) PipelineImportOpts {
+        return .{
+            .ignore_if_known = true,
+            .ignore_if_finalized = true,
+            .from_range_sync = true,
+            .skip_future_slot = true,
+            .skip_signatures = !self.verify_signatures,
+        };
+    }
+
+    fn planReadyBlockImportWithOpts(
+        self: *Chain,
+        ready: *chain_types.ReadyBlockInput,
+        opts: PipelineImportOpts,
+    ) !ReadyBlockPlanResult {
         const block_input = PipelineBlockInput{
             .block = ready.block,
             .source = ready.source,
             .da_status = ready.da_status,
             .seen_timestamp_sec = ready.seen_timestamp_sec,
         };
-        const opts = PipelineImportOpts{
-            .skip_future_slot = true,
-            .skip_signatures = !self.verify_signatures,
-        };
         const plan_result = try self.planPipelineBlockInput(block_input, opts);
         switch (plan_result) {
-            .skipped => return error.InternalError,
+            .skipped => |skip| return .{ .skipped = skip.reason },
             .planned => |planned| {
                 ready.block_data_plan.deinit(self.allocator);
                 ready.* = undefined;
-                return planned;
+                return .{ .planned = planned };
             },
         }
     }
@@ -903,8 +991,10 @@ pub const Chain = struct {
             data.beacon_block_root,
             data.target.epoch,
         ) catch |err| {
-            log_mod.logger(.chain).warn("FC onAttestation failed for validator {d} slot {d}: {}", .{
-                validator_index, data.slot, err,
+            log_mod.logger(.chain).warn("FC onAttestation failed", .{
+                .validator_index = validator_index,
+                .slot = data.slot,
+                .err = err,
             });
             // Non-fatal — still insert into pool for block packing.
         };
@@ -950,7 +1040,10 @@ pub const Chain = struct {
     pub fn onSlot(self: *Chain, slot: u64) void {
         // Update fork choice time (removes proposer boost from previous slot).
         self.updateForkChoiceTime(slot) catch |err| {
-            log_mod.logger(.chain).err("fork choice updateTime failed at slot {d}: {}", .{ slot, err });
+            log_mod.logger(.chain).err("fork choice updateTime failed", .{
+                .slot = slot,
+                .err = err,
+            });
             // Prune stale queued attestations to prevent unbounded growth when
             // updateTime fails (e.g. OOM during attestation processing).
             self.forkChoice().pruneStaleQueuedAttestations(self.allocator, slot);
@@ -1011,9 +1104,9 @@ pub const Chain = struct {
     /// If archival fails, pruning is skipped so the node retains the hot data
     /// needed to retry archival later.
     pub fn onFinalized(self: *Chain, finalized_epoch: u64, finalized_root: [32]u8) void {
-        log_mod.logger(.chain).info("onFinalized: epoch={d} root={s}...", .{
-            finalized_epoch,
-            &std.fmt.bytesToHex(finalized_root[0..4], .lower),
+        log_mod.logger(.chain).info("onFinalized", .{
+            .epoch = finalized_epoch,
+            .root = log_mod.hex(finalized_root[0..4]),
         });
 
         var plan = if (self.archive_store) |store| blk: {
@@ -1024,7 +1117,7 @@ pub const Chain = struct {
                 finalized_epoch,
                 finalized_root,
             ) catch |err| {
-                log_mod.logger(.chain).warn("onFinalized: failed to build finalization plan: {}", .{err});
+                log_mod.logger(.chain).warn("onFinalized: failed to build finalization plan", .{ .err = err });
                 return;
             };
         } else FinalizationPlan.init(self.allocator, finalized_epoch, finalized_root);
@@ -1032,19 +1125,19 @@ pub const Chain = struct {
 
         if (self.archive_store) |store| {
             store.onFinalized(&plan, &self.block_to_state) catch |err| {
-                log_mod.logger(.chain).warn("onFinalized: archive store failed: {}", .{err});
+                log_mod.logger(.chain).warn("onFinalized: archive store failed", .{ .err = err });
                 return;
             };
         }
 
         self.queued_regen.onFinalized(plan.finalized_epoch) catch |err| {
-            log_mod.logger(.chain).warn("onFinalized: regen prune failed: {}", .{err});
+            log_mod.logger(.chain).warn("onFinalized: regen prune failed", .{ .err = err });
             return;
         };
 
         // Prune fork choice DAG — remove nodes below finalized root.
         self.pruneForkChoice(plan.finalized_root, plan.finalized_epoch) catch |err| {
-            log_mod.logger(.chain).warn("onFinalized: fork choice prune failed: {}", .{err});
+            log_mod.logger(.chain).warn("onFinalized: fork choice prune failed", .{ .err = err });
             return;
         };
 
@@ -1344,7 +1437,10 @@ pub const Chain = struct {
         // onSlot already calls updateTime, but advanceSlot can be called independently
         // (e.g., from tests, batch sync). Both paths must call updateTime.
         self.updateForkChoiceTime(target_slot) catch |err| {
-            log_mod.logger(.chain).err("fork choice updateTime failed at slot {d}: {}", .{ target_slot, err });
+            log_mod.logger(.chain).err("fork choice updateTime failed", .{
+                .slot = target_slot,
+                .err = err,
+            });
         };
 
         try self.advanceHeadState(target_slot, new_state_root);

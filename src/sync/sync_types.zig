@@ -16,13 +16,20 @@ const preset = @import("preset").preset;
 pub const SYNC_DISTANCE_THRESHOLD: u64 = 32;
 
 /// Minimum number of connected peers before we begin syncing.
+///
+/// Keep this at one so range sync can keep retrying across rotating peers;
+/// partial PeerDAS column downloads are retained between attempts.
 pub const MIN_PEERS_TO_SYNC: usize = 1;
 
-/// Default batch size — slots per range request (spec max 128, we use 64).
-pub const BATCH_SIZE: u64 = 64;
+/// Default batch size — one epoch per range request.
+///
+/// Mirrors Lodestar's EPOCHS_PER_BATCH=1 and BATCH_SLOT_OFFSET=0 semantics:
+/// range-sync batches are epoch-aligned so finalized sync can process the
+/// finalized checkpoint epoch and then switch cleanly to head sync.
+pub const BATCH_SIZE: u64 = preset.SLOTS_PER_EPOCH;
 
-/// Maximum number of concurrent in-flight batches per sync chain.
-pub const MAX_PENDING_BATCHES: usize = 8;
+/// Maximum number of pending batches per sync chain.
+pub const MAX_PENDING_BATCHES: usize = 10;
 
 /// Maximum download retry attempts per batch before skipping.
 pub const MAX_BATCH_DOWNLOAD_ATTEMPTS: u8 = 5;
@@ -57,7 +64,7 @@ pub const SyncState = enum {
     synced,
 };
 
-/// Aggregate sync status for the node API and internal consumers.
+/// Aggregate peer-relative sync-service status for diagnostics and internal consumers.
 pub const SyncStatus = struct {
     state: SyncState,
     head_slot: u64,

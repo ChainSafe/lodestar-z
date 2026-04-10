@@ -15,7 +15,7 @@ const BeaconNode = @import("beacon_node.zig").BeaconNode;
 const GossipIngressMetadata = @import("gossip_handler.zig").GossipIngressMetadata;
 
 pub fn processEvents(self: *BeaconNode, io: std.Io, p2p: *networking.P2pService) usize {
-    const events = p2p.drainGossipEvents() catch |err| {
+    const events = p2p.drainGossipEvents(io) catch |err| {
         std.log.debug("failed to drain gossip events: {}", .{err});
         return 0;
     };

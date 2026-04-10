@@ -330,15 +330,17 @@ pub fn handlePeerStatusAtTime(
     }
 
     if (registered_new_peer) {
+        if (node.sync_callback_ctx) |cb_ctx| cb_ctx.notePeerConnected(peer_id);
         if (node.metrics) |metrics| metrics.peer_connected_total.incr();
     }
 
-    if (node.sync_service_inst) |sync_svc| {
+    const is_synced = if (node.sync_service_inst) |sync_svc| blk: {
         sync_svc.onPeerStatus(peer_id, status, earliest_available_slot) catch |err| {
             std.log.debug("sync service onPeerStatus failed: {}", .{err});
         };
-    }
-    node.unknown_chain_sync.onPeerConnected(peer_id, status.head_root) catch {};
+        break :blk sync_svc.isSynced();
+    } else !node.getSyncStatus().is_syncing;
+    if (is_synced) node.unknown_chain_sync.onPeerConnected(peer_id, status.head_root) catch {};
 
     return irrelevance;
 }
@@ -347,7 +349,11 @@ pub fn handlePeerGoodbye(node: *BeaconNode, peer_id: []const u8, reason: u64) vo
     if (node.peer_manager) |pm| {
         pm.onPeerGoodbye(peer_id, @enumFromInt(reason), wallTimeMs(node.io));
     }
-    std.log.debug("Peer sent Goodbye {s} reason={d}", .{ peer_id, reason });
+    std.log.info("Peer sent Goodbye {s} reason={s} ({d})", .{
+        peer_id,
+        goodbyeReasonName(reason),
+        reason,
+    });
 }
 
 fn localCachedStatus(node: *const BeaconNode) networking.CachedStatus {
@@ -358,6 +364,19 @@ fn localCachedStatus(node: *const BeaconNode) networking.CachedStatus {
         .finalized_epoch = status.finalized_epoch,
         .head_root = status.head_root,
         .head_slot = status.head_slot,
+    };
+}
+
+fn goodbyeReasonName(reason: u64) []const u8 {
+    return switch (@as(networking.GoodbyeReason, @enumFromInt(reason))) {
+        .client_shutdown => "client_shutdown",
+        .irrelevant_network => "irrelevant_network",
+        .fault_error => "fault_error",
+        .unable_to_verify => "unable_to_verify",
+        .too_many_peers => "too_many_peers",
+        .score_too_low => "score_too_low",
+        .banned => "banned",
+        _ => "unknown",
     };
 }
 

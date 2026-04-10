@@ -110,11 +110,17 @@ pub const DataColumnSidecarsByRangeRequest = ssz.VariableContainerType(struct {
     columns: ssz.FixedListType(p.Uint64, 128),
 });
 
-/// DataColumnIdentifier identifies a specific data column sidecar by block root + column index.
-pub const DataColumnIdentifier = ssz.FixedContainerType(struct {
+/// DataColumnsByRootIdentifier groups requested column indices by block root.
+pub const DataColumnsByRootIdentifier = ssz.VariableContainerType(struct {
     block_root: p.Root,
-    index: p.Uint64,
+    columns: ssz.FixedListType(p.Uint64, 128),
 });
+
+/// DataColumnSidecarsByRootRequest is a list of grouped block-root identifiers.
+pub const DataColumnSidecarsByRootRequest = ssz.VariableListType(
+    DataColumnsByRootIdentifier,
+    constants.MAX_REQUEST_BLOCKS_DENEB,
+);
 
 // === Tests ===
 

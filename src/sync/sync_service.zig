@@ -93,6 +93,18 @@ pub const SyncServiceCallbacks = struct {
     /// Report a peer for bad behavior.
     reportPeerFn: *const fn (ptr: *anyopaque, peer_id: []const u8) void,
 
+    /// Return whether fork choice already knows a block root.
+    hasBlockFn: ?*const fn (ptr: *anyopaque, root: [32]u8) bool = null,
+
+    /// Return whether a peer is eligible to serve a batch range.
+    /// Used for fork-specific constraints such as Fulu custody overlap.
+    peerCanServeRangeFn: ?*const fn (
+        ptr: *anyopaque,
+        peer_id: []const u8,
+        start_slot: u64,
+        count: u64,
+    ) bool = null,
+
     /// Get connected peer IDs.
     getConnectedPeersFn: *const fn (ptr: *anyopaque) []const []const u8,
 
@@ -128,6 +140,11 @@ pub const SyncServiceCallbacks = struct {
 
     pub fn reportPeer(self: SyncServiceCallbacks, peer_id: []const u8) void {
         self.reportPeerFn(self.ptr, peer_id);
+    }
+
+    pub fn hasBlock(self: SyncServiceCallbacks, root: [32]u8) bool {
+        if (self.hasBlockFn) |f| return f(self.ptr, root);
+        return false;
     }
 
     pub fn setGossipEnabled(self: SyncServiceCallbacks, enabled: bool) void {
@@ -175,6 +192,8 @@ pub const SyncService = struct {
             .processChainSegmentFn = callbacks.processChainSegmentFn,
             .downloadByRangeFn = callbacks.requestBlocksByRangeFn,
             .reportPeerFn = callbacks.reportPeerFn,
+            .hasBlockFn = callbacks.hasBlockFn,
+            .peerCanServeRangeFn = callbacks.peerCanServeRangeFn,
         };
 
         const unknown_block_callbacks = UnknownBlockCallbacks{
@@ -236,9 +255,23 @@ pub const SyncService = struct {
             status.head_slot - self.local_head_slot
         else
             0;
+        std.log.debug(
+            "SyncService peer status: peer={s} local_head={d} local_finalized={d} peer_head={d} peer_finalized={d} earliest={any} distance={d} known_peers={d}",
+            .{
+                peer_id,
+                self.local_head_slot,
+                self.local_finalized_epoch,
+                status.head_slot,
+                status.finalized_epoch,
+                earliest_available_slot,
+                sync_distance,
+                self.peer_count,
+            },
+        );
 
         if (sync_distance > sync_types.SYNC_DISTANCE_THRESHOLD) {
             // Peer is sufficiently ahead — add to range sync.
+            std.log.debug("SyncService adding peer to range sync: peer={s} distance={d}", .{ peer_id, sync_distance });
             try self.range_sync.addPeer(
                 peer_id,
                 self.local_finalized_epoch,
@@ -279,12 +312,21 @@ pub const SyncService = struct {
     /// Called when finalized checkpoint advances.
     pub fn onFinalizedUpdate(self: *SyncService, finalized_epoch: u64) void {
         self.local_finalized_epoch = finalized_epoch;
+        self.range_sync.onFinalizedUpdate(finalized_epoch);
+        self.updateMode();
     }
 
     /// Periodic tick — drive range sync and unknown block sync.
     pub fn tick(self: *SyncService) !void {
-        // Drive range sync.
-        try self.range_sync.tick();
+        try self.pruneDisconnectedPeers();
+
+        const range_state = self.range_sync.getState();
+
+        // Require a minimum peer count to start syncing, but keep driving an
+        // active chain so already-downloaded batches still import during peer churn.
+        if (self.peer_count >= sync_types.MIN_PEERS_TO_SYNC or range_state.status != .idle) {
+            try self.range_sync.tick();
+        }
 
         // Drive unknown block sync (active fetch loop).
         self.unknown_block_sync.tick();
@@ -313,6 +355,18 @@ pub const SyncService = struct {
         peer_id: []const u8,
     ) void {
         self.range_sync.onBatchError(chain_id, batch_id, generation, peer_id);
+    }
+
+    /// Route a deferred/incomplete batch from the network. Unlike a batch
+    /// error, this does not penalize the peer or consume retry budget.
+    pub fn onBatchDeferred(
+        self: *SyncService,
+        chain_id: u32,
+        batch_id: BatchId,
+        generation: u32,
+    ) void {
+        self.range_sync.onBatchDeferred(chain_id, batch_id, generation);
+        self.updateMode();
     }
 
     pub fn onSegmentProcessingSuccess(
@@ -351,7 +405,7 @@ pub const SyncService = struct {
         return self.mode == .synced;
     }
 
-    /// Return the current sync status for the API.
+    /// Return the current peer-relative sync-service status.
     pub fn getSyncStatus(self: *const SyncService) SyncStatus {
         const sync_distance = if (self.best_peer_slot > self.local_head_slot)
             self.best_peer_slot - self.local_head_slot
@@ -379,10 +433,52 @@ pub const SyncService = struct {
 
     /// Whether gossip should be enabled.
     pub fn shouldEnableGossip(self: *const SyncService) bool {
-        return self.mode == .synced or self.mode == .idle;
+        if (self.mode == .synced) return true;
+        if (self.mode != .idle) return false;
+
+        const sync_distance = if (self.best_peer_slot > self.local_head_slot)
+            self.best_peer_slot - self.local_head_slot
+        else
+            0;
+        return sync_distance <= sync_types.SYNC_DISTANCE_THRESHOLD;
     }
 
     // ── Internal ────────────────────────────────────────────────────
+
+    fn pruneDisconnectedPeers(self: *SyncService) !void {
+        if (self.known_peers.count() == 0) return;
+
+        const connected_peers = self.callbacks.getConnectedPeersFn(self.callbacks.ptr);
+
+        var stale_peers: std.ArrayListUnmanaged([]u8) = .empty;
+        defer {
+            for (stale_peers.items) |peer_id| self.allocator.free(peer_id);
+            stale_peers.deinit(self.allocator);
+        }
+
+        var it = self.known_peers.keyIterator();
+        while (it.next()) |peer_id| {
+            if (containsPeerId(connected_peers, peer_id.*)) continue;
+
+            const owned_peer_id = try self.allocator.dupe(u8, peer_id.*);
+            stale_peers.append(self.allocator, owned_peer_id) catch |err| {
+                self.allocator.free(owned_peer_id);
+                return err;
+            };
+        }
+
+        for (stale_peers.items) |peer_id| {
+            std.log.debug("SyncService pruning disconnected peer: peer={s}", .{peer_id});
+            self.onPeerDisconnect(peer_id);
+        }
+    }
+
+    fn containsPeerId(peer_ids: []const []const u8, peer_id: []const u8) bool {
+        for (peer_ids) |candidate| {
+            if (std.mem.eql(u8, candidate, peer_id)) return true;
+        }
+        return false;
+    }
 
     fn updateMode(self: *SyncService) void {
         if (self.is_single_node) {
@@ -408,10 +504,10 @@ pub const SyncService = struct {
         if (rs.status != .idle) {
             self.setMode(.range_sync);
         } else {
-            // We have peers ahead but no range sync chain is running.
-            // This can happen if all chains completed but peers are still
-            // ahead (e.g., gossip will catch up).
-            self.setMode(.synced);
+            // We still have peers ahead but currently lack an active sync
+            // chain. Treat this as an awaiting-peers / retry state rather than
+            // claiming sync success.
+            self.setMode(.idle);
         }
     }
 
@@ -440,6 +536,7 @@ const TestSyncServiceCallbacks = struct {
     requested_count: u32 = 0,
     reported_count: u32 = 0,
     gossip_enabled: ?bool = null,
+    connected_peers: []const []const u8 = &.{},
 
     fn importBlockFn(ptr: *anyopaque, _: []const u8) anyerror!void {
         const self: *TestSyncServiceCallbacks = @ptrCast(@alignCast(ptr));
@@ -464,8 +561,9 @@ const TestSyncServiceCallbacks = struct {
         self.reported_count += 1;
     }
 
-    fn getConnectedPeersFn(_: *anyopaque) []const []const u8 {
-        return &.{};
+    fn getConnectedPeersFn(ptr: *anyopaque) []const []const u8 {
+        const self: *TestSyncServiceCallbacks = @ptrCast(@alignCast(ptr));
+        return self.connected_peers;
     }
 
     fn setGossipEnabledFn(ptr: *anyopaque, enabled: bool) void {
@@ -481,6 +579,7 @@ const TestSyncServiceCallbacks = struct {
             .requestBlocksByRangeFn = &requestBlocksByRangeFn,
             .requestBlockByRootFn = &requestBlockByRootFn,
             .reportPeerFn = &reportPeerFn,
+            .hasBlockFn = null,
             .getConnectedPeersFn = &getConnectedPeersFn,
             .setGossipEnabledFn = &setGossipEnabledFn,
         };
@@ -554,6 +653,36 @@ test "SyncService: peer disconnect" {
 
     svc.onPeerDisconnect("p1");
     try std.testing.expectEqual(@as(usize, 0), svc.peer_count);
+}
+
+test "SyncService: tick prunes peers no longer connected" {
+    const allocator = std.testing.allocator;
+    var tc = TestSyncServiceCallbacks{};
+    const connected = [_][]const u8{"p1"};
+    tc.connected_peers = connected[0..];
+
+    var svc = SyncService.init(allocator, tc.callbacks(), 0, 0);
+    defer svc.deinit();
+
+    try svc.onPeerStatus("p1", .{
+        .fork_digest = .{ 0, 0, 0, 0 },
+        .finalized_root = [_]u8{0} ** 32,
+        .finalized_epoch = 10,
+        .head_root = [_]u8{0xAA} ** 32,
+        .head_slot = 500,
+    }, null);
+
+    try std.testing.expectEqual(@as(usize, 1), svc.peer_count);
+    try std.testing.expectEqual(SyncMode.range_sync, svc.mode);
+    try std.testing.expect(svc.range_sync.getState().status != .idle);
+
+    tc.connected_peers = &.{};
+    try svc.tick();
+
+    try std.testing.expectEqual(@as(usize, 0), svc.peer_count);
+    try std.testing.expectEqual(@as(u64, 0), svc.best_peer_slot);
+    try std.testing.expectEqual(SyncMode.idle, svc.mode);
+    try std.testing.expectEqual(RangeSyncStatus.idle, svc.range_sync.getState().status);
 }
 
 test "SyncService: gossip gating" {

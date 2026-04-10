@@ -48,6 +48,11 @@ pub const Writer = struct {
         }
     }
 
+    /// Append a pre-encoded RLP item directly.
+    pub fn writeRawItem(self: *Writer, data: []const u8) !void {
+        try self.buf.appendSlice(self.alloc, data);
+    }
+
     pub fn writeUint64(self: *Writer, v: u64) !void {
         if (v == 0) {
             try self.buf.append(self.alloc, 0x80);

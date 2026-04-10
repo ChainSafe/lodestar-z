@@ -129,6 +129,7 @@ pub const DiscoveryService = struct {
     /// Stores parsed ENR records indexed by node ID (hex string ownership).
     enr_cache: std.StringHashMap(CachedEnr),
     connected_peers: u32,
+    bootnode_session_wait_cycles: u8,
     generic_peers_to_discover: u32,
     total_lookups: u64,
     total_discovered: u64,
@@ -201,6 +202,7 @@ pub const DiscoveryService = struct {
             .lookup_sources = std.AutoHashMap(u32, DiscoverySource).init(allocator),
             .enr_cache = std.StringHashMap(CachedEnr).init(allocator),
             .connected_peers = 0,
+            .bootnode_session_wait_cycles = 0,
             .generic_peers_to_discover = 0,
             .total_lookups = 0,
             .total_discovered = 0,
@@ -258,34 +260,57 @@ pub const DiscoveryService = struct {
 
     pub fn seedBootnodes(self: *DiscoveryService) void {
         var seeded: u32 = 0;
+        var pinged: u32 = 0;
         for (self.config.bootnodes) |enr_str| {
-            if (self.decodeAndInsertEnr(enr_str)) seeded += 1;
+            const bootnode = self.decodeAndInsertEnr(enr_str) orelse continue;
+            seeded += 1;
+            _ = self.service.sendPing(
+                &bootnode.node_id,
+                &bootnode.pubkey,
+                bootnode.addr,
+                self.service.localEnrSeq(),
+            ) catch continue;
+            pinged += 1;
         }
-        log.info("seeded routing table with {d} bootnodes ({d} known peers total)", .{
-            seeded, self.knownPeerCount(),
+        log.info("seeded routing table with {d} bootnodes ({d} known peers total, {d} pinged)", .{
+            seeded, self.knownPeerCount(), pinged,
         });
     }
 
-    fn decodeAndInsertEnr(self: *DiscoveryService, enr_str: []const u8) bool {
+    const SeededBootnode = struct {
+        node_id: NodeId,
+        pubkey: [33]u8,
+        addr: Address,
+    };
+
+    fn decodeAndInsertEnr(self: *DiscoveryService, enr_str: []const u8) ?SeededBootnode {
         const enr_data = if (std.mem.startsWith(u8, enr_str, "enr:"))
             enr_str[4..]
         else
             enr_str;
 
-        const decoded_len = std.base64.url_safe_no_pad.Decoder.calcSizeForSlice(enr_data) catch return false;
-        if (decoded_len > MAX_ENR_DECODE_BUF) return false;
+        const decoded_len = std.base64.url_safe_no_pad.Decoder.calcSizeForSlice(enr_data) catch return null;
+        if (decoded_len > MAX_ENR_DECODE_BUF) return null;
 
         var buf: [MAX_ENR_DECODE_BUF]u8 = undefined;
-        std.base64.url_safe_no_pad.Decoder.decode(buf[0..decoded_len], enr_data) catch return false;
+        std.base64.url_safe_no_pad.Decoder.decode(buf[0..decoded_len], enr_data) catch return null;
 
-        var parsed = enr_mod.decode(self.allocator, buf[0..decoded_len]) catch return false;
+        var parsed = enr_mod.decode(self.allocator, buf[0..decoded_len]) catch return null;
         defer parsed.deinit();
 
-        const pk = parsed.pubkey orelse return false;
+        const pk = parsed.pubkey orelse return null;
         const node_id = enr_mod.nodeIdFromCompressedPubkey(&pk);
+        const addr = discoveryAddressFromEnr(&parsed, .ip4) orelse
+            discoveryAddressFromEnr(&parsed, .ip6) orelse
+            return null;
 
-        if (std.mem.eql(u8, &node_id, &self.service.protocol.config.local_node_id)) return false;
-        return self.service.addEnr(buf[0..decoded_len]);
+        if (std.mem.eql(u8, &node_id, &self.service.protocol.config.local_node_id)) return null;
+        if (!self.service.addEnr(buf[0..decoded_len])) return null;
+        return .{
+            .node_id = node_id,
+            .pubkey = pk,
+            .addr = addr,
+        };
     }
 
     // ── Peer Discovery ──────────────────────────────────────────────────
@@ -293,6 +318,22 @@ pub const DiscoveryService = struct {
     pub fn discoverPeers(self: *DiscoveryService) void {
         self.pollNetwork();
         if (!self.config.enabled) return;
+
+        // Let the initial bootnode PINGs establish at least one authenticated
+        // session before we start issuing FINDNODE lookups. Otherwise, the
+        // early lookup traffic can race the handshake and keep the bootnodes
+        // stuck in repeated WHOAREYOU challenges.
+        if (self.service.connectedPeerCount() > 0) {
+            self.bootnode_session_wait_cycles = 0;
+        } else if (self.knownPeerCount() > 0 and self.bootnode_session_wait_cycles < 3) {
+            self.bootnode_session_wait_cycles += 1;
+            log.debug("delaying lookups until a bootnode session is established (known_peers={d} wait={d}/3)", .{
+                self.knownPeerCount(),
+                self.bootnode_session_wait_cycles,
+            });
+            self.pollNetwork();
+            return;
+        }
 
         if (self.generic_peers_to_discover == 0 and self.connected_peers < self.config.target_peers) {
             self.generic_peers_to_discover = self.config.target_peers - self.connected_peers;
@@ -470,6 +511,12 @@ pub const DiscoveryService = struct {
             .fork_digest = fork_digest,
             .source = source,
         }) catch return false;
+        log.debug("queued discovered peer has_quic={} source={s} addr4={any} addr6={any}", .{
+            has_quic,
+            @tagName(source),
+            addr_ip4,
+            addr_ip6,
+        });
         self.total_discovered += 1;
         return true;
     }
@@ -521,16 +568,25 @@ pub const DiscoveryService = struct {
     pub fn takeDiscoveredPeers(self: *DiscoveryService, max_count: usize) []DiscoveredPeer {
         if (max_count == 0 or self.discovered_peers.items.len == 0) return &.{};
 
-        const take_count = @min(max_count, self.discovered_peers.items.len);
-        var peers = self.allocator.alloc(DiscoveredPeer, take_count) catch return &.{};
+        var peers = std.ArrayListUnmanaged(DiscoveredPeer).empty;
 
-        var taken: usize = 0;
-        while (taken < take_count) : (taken += 1) {
+        while (peers.items.len < max_count and self.discovered_peers.items.len > 0) {
             const best_index = self.bestDiscoveredPeerIndex();
-            peers[taken] = self.discovered_peers.orderedRemove(best_index);
+            const peer = self.discovered_peers.orderedRemove(best_index);
+            if (!peer.has_quic) {
+                self.total_filtered_out += 1;
+                continue;
+            }
+            peers.append(self.allocator, peer) catch {
+                peers.deinit(self.allocator);
+                return &.{};
+            };
         }
 
-        return peers;
+        return peers.toOwnedSlice(self.allocator) catch {
+            peers.deinit(self.allocator);
+            return &.{};
+        };
     }
 
     pub fn drainDiscoveredPeers(self: *DiscoveryService) []DiscoveredPeer {
@@ -864,6 +920,25 @@ fn addressFromEnr(enr: *const Enr, family: Address.Family) ?Address {
     };
 }
 
+fn discoveryAddressFromEnr(enr: *const Enr, family: Address.Family) ?Address {
+    return switch (family) {
+        .ip4 => if (enr.ip) |ip4|
+            if (enr.udp orelse enr.tcp orelse enr.quic) |port|
+                Address{ .ip4 = .{ .bytes = ip4, .port = port } }
+            else
+                null
+        else
+            null,
+        .ip6 => if (enr.ip6) |ip6|
+            if (enr.udp6 orelse enr.tcp6 orelse enr.quic6) |port|
+                Address{ .ip6 = .{ .bytes = ip6, .port = port } }
+            else
+                null
+        else
+            null,
+    };
+}
+
 fn syncSubnetSet(syncnets: [1]u8, subnet_id: u6) bool {
     return (syncnets[0] & (@as(u8, 1) << @intCast(subnet_id))) != 0;
 }
@@ -916,6 +991,32 @@ test "DiscoveryService: seedBootnodes with real key inserts peers" {
     defer svc.deinit();
     svc.seedBootnodes();
     try std.testing.expect(svc.knownPeerCount() > 0);
+}
+
+test "DiscoveryService: bootnode discovery address prefers udp over quic" {
+    var enr_data = [_]u8{0} ** 4;
+    const enr = Enr{
+        .seq = 1,
+        .pubkey = [_]u8{0x02} ** 33,
+        .ip = [4]u8{ 1, 2, 3, 4 },
+        .udp = 9000,
+        .tcp = 9001,
+        .ip6 = null,
+        .udp6 = null,
+        .tcp6 = null,
+        .quic = 9002,
+        .quic6 = null,
+        .eth2_fork_digest = null,
+        .eth2_raw = null,
+        .attnets = null,
+        .syncnets = null,
+        .custody_group_count = null,
+        .raw = &enr_data,
+        .alloc = std.testing.allocator,
+    };
+
+    const addr = discoveryAddressFromEnr(&enr, .ip4) orelse return error.MissingAddress;
+    try std.testing.expectEqual(Address{ .ip4 = .{ .bytes = .{ 1, 2, 3, 4 }, .port = 9000 } }, addr);
 }
 
 test "DiscoveryService: updateForkDigest bumps seq" {

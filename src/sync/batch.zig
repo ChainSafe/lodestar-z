@@ -50,6 +50,14 @@ pub const Batch = struct {
     generation: u32,
     /// Peer currently downloading this batch (valid when status == downloading).
     download_peer: ?[]const u8,
+    /// Last peer whose download failed. Used as a soft exclusion on retry.
+    last_failed_peer: ?[]u8,
+    /// Peers that returned usable blocks while required side data was
+    /// unavailable. Lodestar's range sync retries with a request narrowed to
+    /// the missing columns, which naturally excludes peers that cannot serve
+    /// those columns. This list preserves that behavior while our callback
+    /// still dispatches a coarse block-range request.
+    deferred_peers: std.ArrayListUnmanaged([]u8),
     /// Highest slot ever returned for this batch by a successful download.
     /// Used to avoid retrying against a head peer that is already behind known progress.
     last_downloaded_slot: ?u64,
@@ -72,6 +80,8 @@ pub const Batch = struct {
             .status = .awaiting_download,
             .generation = 0,
             .download_peer = null,
+            .last_failed_peer = null,
+            .deferred_peers = .empty,
             .last_downloaded_slot = null,
             .download_failures = 0,
             .processing_failures = 0,
@@ -94,6 +104,44 @@ pub const Batch = struct {
     /// Release all owned resources.
     pub fn deinit(self: *Batch) void {
         self.freeBlocks();
+        self.clearPeerMemory(&self.last_failed_peer);
+        self.clearDeferredPeers();
+    }
+
+    fn clearPeerMemory(self: *Batch, slot: *?[]u8) void {
+        if (slot.*) |peer_id| {
+            self.allocator.free(peer_id);
+            slot.* = null;
+        }
+    }
+
+    fn rememberPeer(self: *Batch, slot: *?[]u8) void {
+        const peer_id = self.download_peer orelse return;
+        self.clearPeerMemory(slot);
+        slot.* = self.allocator.dupe(u8, peer_id) catch null;
+    }
+
+    fn clearDeferredPeers(self: *Batch) void {
+        for (self.deferred_peers.items) |peer_id| {
+            self.allocator.free(peer_id);
+        }
+        self.deferred_peers.clearAndFree(self.allocator);
+    }
+
+    fn rememberDeferredPeer(self: *Batch) void {
+        const peer_id = self.download_peer orelse return;
+        if (self.hasDeferredPeer(peer_id)) return;
+        const owned_peer_id = self.allocator.dupe(u8, peer_id) catch return;
+        self.deferred_peers.append(self.allocator, owned_peer_id) catch {
+            self.allocator.free(owned_peer_id);
+        };
+    }
+
+    pub fn hasDeferredPeer(self: *const Batch, peer_id: []const u8) bool {
+        for (self.deferred_peers.items) |deferred_peer| {
+            if (std.mem.eql(u8, peer_id, deferred_peer)) return true;
+        }
+        return false;
     }
 
     /// The last slot covered by this batch (inclusive).
@@ -128,6 +176,8 @@ pub const Batch = struct {
             owned[i] = .{ .slot = blk.slot, .block_bytes = bytes };
         }
         self.freeBlocks(); // free any previous attempt's data
+        self.clearPeerMemory(&self.last_failed_peer);
+        self.clearDeferredPeers();
         self.blocks = owned;
         self.blocks_hash = hashBlocks(blocks);
         if (blocks.len > 0) {
@@ -147,6 +197,18 @@ pub const Batch = struct {
         if (generation != self.generation) return false;
         if (self.status != .downloading) return false;
         self.download_failures += 1;
+        self.rememberPeer(&self.last_failed_peer);
+        self.download_peer = null;
+        self.status = .awaiting_download;
+        return true;
+    }
+
+    /// Called when the peer response was usable, but a required dependency
+    /// such as data availability sidecars is not yet available from peers.
+    pub fn onDownloadDeferred(self: *Batch, generation: u32) bool {
+        if (generation != self.generation) return false;
+        if (self.status != .downloading) return false;
+        self.rememberDeferredPeer();
         self.download_peer = null;
         self.status = .awaiting_download;
         return true;
@@ -233,11 +295,25 @@ test "Batch: lifecycle" {
 
 test "Batch: download error retry" {
     var b = Batch.init(1, 0, 32, std.testing.allocator);
+    defer b.deinit();
     b.startDownload("peer_b");
     const gen = b.generation;
     try std.testing.expect(b.onDownloadError(gen));
     try std.testing.expectEqual(BatchStatus.awaiting_download, b.status);
     try std.testing.expectEqual(@as(u8, 1), b.download_failures);
+}
+
+test "Batch: download deferred does not consume retry budget" {
+    var b = Batch.init(3, 0, 32, std.testing.allocator);
+    defer b.deinit();
+
+    b.startDownload("peer_e");
+    const gen = b.generation;
+    try std.testing.expect(b.onDownloadDeferred(gen));
+    try std.testing.expectEqual(BatchStatus.awaiting_download, b.status);
+    try std.testing.expectEqual(@as(u8, 0), b.download_failures);
+    try std.testing.expectEqual(@as(usize, 1), b.deferred_peers.items.len);
+    try std.testing.expectEqualStrings("peer_e", b.deferred_peers.items[0]);
 }
 
 test "Batch: generation prevents stale error" {

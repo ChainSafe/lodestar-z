@@ -47,14 +47,18 @@ pub const PreparedRuntime = struct {
 
     pub fn takeInitConfig(self: *PreparedRuntime, options: NodeOptions) BeaconNode.InitConfig {
         const node_identity = self.node_identity.?;
+        const bootstrap_peers = self.bootstrap_peers;
+        const discovery_bootnodes = self.discovery_bootnodes;
         self.node_identity = null;
+        self.bootstrap_peers = &.{};
+        self.discovery_bootnodes = &.{};
         return .{
             .options = options,
             .db_path = self.paths.beacon_db,
             .node_identity = node_identity,
             .jwt_secret = self.jwt_secret,
-            .bootstrap_peers = self.bootstrap_peers,
-            .discovery_bootnodes = self.discovery_bootnodes,
+            .bootstrap_peers = bootstrap_peers,
+            .discovery_bootnodes = discovery_bootnodes,
             .identify_agent_version = self.identify_agent_version,
         };
     }
@@ -304,4 +308,57 @@ test "collectDiscoveryBootnodes appends network defaults without duplicating exp
     try std.testing.expectEqual(@as(usize, networking.bootnodes.mainnet.len + 1), peers.len);
     try std.testing.expectEqualStrings(networking.bootnodes.mainnet[0].enr, peers[0]);
     try std.testing.expectEqualStrings("enr:custom", peers[1]);
+}
+
+test "PreparedRuntime.takeInitConfig transfers bootnode ownership" {
+    const allocator = std.testing.allocator;
+
+    const bootstrap_peers = try allocator.alloc([]const u8, 1);
+    errdefer allocator.free(bootstrap_peers);
+    bootstrap_peers[0] = try allocator.dupe(u8, "enr:bootstrap");
+    errdefer allocator.free(bootstrap_peers[0]);
+
+    const discovery_bootnodes = try allocator.alloc([]const u8, 1);
+    errdefer allocator.free(discovery_bootnodes);
+    discovery_bootnodes[0] = try allocator.dupe(u8, networking.bootnodes.mainnet[0].enr);
+    errdefer allocator.free(discovery_bootnodes[0]);
+
+    var prepared = PreparedRuntime{
+        .paths = .{
+            .allocator = allocator,
+            .root = try allocator.dupe(u8, "/tmp/root"),
+            .network = try allocator.dupe(u8, "mainnet"),
+            .beacon_db = try allocator.dupe(u8, "/tmp/root/beacon-node/db"),
+            .enr_key = try allocator.dupe(u8, "/tmp/root/beacon-node/network/enr-key"),
+            .enr = try allocator.dupe(u8, "/tmp/root/beacon-node/network/enr"),
+            .peer_db = try allocator.dupe(u8, "/tmp/root/beacon-node/network/peer-db"),
+            .state_cache = try allocator.dupe(u8, "/tmp/root/beacon-node/state-cache"),
+            .jwt_secret = try allocator.dupe(u8, "/tmp/root/jwt.hex"),
+            .log_file = try allocator.dupe(u8, "/tmp/root/logs/lodestar-z.log"),
+        },
+        .node_identity = .{
+            .allocator = allocator,
+            .secret_key = [_]u8{0} ** 32,
+            .public_key = [_]u8{0} ** 33,
+            .node_id = [_]u8{0} ** 32,
+            .peer_id = try allocator.dupe(u8, "peer-id"),
+            .enr = try allocator.dupe(u8, "enr:-test"),
+        },
+        .jwt_secret = null,
+        .bootstrap_peers = bootstrap_peers,
+        .discovery_bootnodes = discovery_bootnodes,
+    };
+    defer prepared.deinit();
+
+    var init_config = prepared.takeInitConfig(.{});
+    defer init_config.node_identity.deinit();
+    defer freeOwnedStringList(allocator, init_config.bootstrap_peers);
+    defer freeOwnedStringList(allocator, init_config.discovery_bootnodes);
+
+    try std.testing.expectEqual(@as(usize, 0), prepared.bootstrap_peers.len);
+    try std.testing.expectEqual(@as(usize, 0), prepared.discovery_bootnodes.len);
+    try std.testing.expectEqual(@as(usize, 1), init_config.bootstrap_peers.len);
+    try std.testing.expectEqual(@as(usize, 1), init_config.discovery_bootnodes.len);
+    try std.testing.expectEqualStrings("enr:bootstrap", init_config.bootstrap_peers[0]);
+    try std.testing.expectEqualStrings(networking.bootnodes.mainnet[0].enr, init_config.discovery_bootnodes[0]);
 }

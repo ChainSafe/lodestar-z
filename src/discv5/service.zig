@@ -788,6 +788,11 @@ pub const Service = struct {
     }
 
     fn emitDiscoveredEnrs(self: *Service, nodes: *const protocol_mod.NodesEvent, lookup_id: ?u32) void {
+        std.log.debug("discv5 service: emitting {d} ENRs from {any} (lookup_id={any})", .{
+            nodes.enrs.len,
+            nodes.peer_addr,
+            lookup_id,
+        });
         for (nodes.enrs) |raw_enr| {
             var parsed = enr_mod.decode(self.allocator, raw_enr) catch continue;
             defer parsed.deinit();
@@ -1130,7 +1135,13 @@ pub const Service = struct {
                 else => return,
             };
 
-            self.protocol.handlePacket(result.data, result.from, socket) catch {};
+            std.log.debug("discv5: received UDP packet len={d} from={any}", .{
+                result.data.len,
+                result.from,
+            });
+            self.protocol.handlePacket(result.data, result.from, socket) catch |err| {
+                std.log.debug("discv5: handlePacket failed for {any}: {}", .{ result.from, err });
+            };
         }
     }
 

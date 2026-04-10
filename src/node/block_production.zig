@@ -167,7 +167,7 @@ pub fn refreshBuilderStatus(self: *BeaconNode, clock_slot: u64) void {
         self.execution_runtime.updateBuilderStatus(.circuit_breaker);
     } else if (self.execution_runtime.builderApi()) |builder| {
         const status = builder.status() catch |err| blk: {
-            log.logger(.node).warn("Builder status check failed: {}", .{err});
+            log.logger(.node).warn("Builder status check failed", .{ .err = err });
             break :blk execution_mod.BuilderStatus.unavailable;
         };
         self.execution_runtime.updateBuilderStatus(status);
@@ -1121,7 +1121,10 @@ pub fn produceAndIngestBlock(
     };
 
     if (self.headState()) |head_state| {
-        const any_block = fork_types.AnySignedBeaconBlock{ .full_electra = signed_block };
+        const any_block: fork_types.AnySignedBeaconBlock = switch (self.config.forkSeq(slot)) {
+            .fulu => .{ .full_fulu = @ptrCast(signed_block) },
+            else => .{ .full_electra = signed_block },
+        };
 
         var state_graph_lease = self.chainService().acquireStateGraphLease();
         defer state_graph_lease.release();
@@ -1206,14 +1209,7 @@ pub fn broadcastBlock(
     defer self.allocator.free(buf);
     _ = types.electra.SignedBeaconBlock.serializeIntoBytes(signed_block, buf);
 
-    const head_slot = self.getHead().slot;
-    const fork_digest = self.config.forkDigestAtSlot(head_slot, self.genesis_validators_root);
-    var topic_buf: [128]u8 = undefined;
-    const topic = std.fmt.bufPrint(&topic_buf, "/eth2/{s}/beacon_block/ssz_snappy", .{
-        &std.fmt.bytesToHex(fork_digest[0..], .lower),
-    }) catch return;
-
-    _ = p2p.publishGossip(topic, buf) catch |err| {
+    _ = p2p.publishGossip(self.io, .beacon_block, null, buf) catch |err| {
         std.log.warn("failed to broadcast block at slot={d}: {}", .{ signed_block.message.slot, err });
         return;
     };

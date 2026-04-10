@@ -8,6 +8,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const Io = std.Io;
 const testing = std.testing;
 
 const gossip_topics = @import("gossip_topics.zig");
@@ -128,7 +129,7 @@ pub const EthGossipAdapter = struct {
         self.fork_seq = new_fork_seq;
     }
 
-    pub fn setActiveForks(self: *Self, forks: []const ActiveFork) !void {
+    pub fn setActiveForks(self: *Self, io: Io, forks: []const ActiveFork) !void {
         std.debug.assert(forks.len > 0);
         if (sameActiveForks(self, forks)) return;
 
@@ -136,7 +137,7 @@ pub const EthGossipAdapter = struct {
         defer logical_topics.deinit(self.allocator);
         try self.collectLogicalTopics(&logical_topics);
 
-        try self.unsubscribeAndClearSubscribedTopics();
+        try self.unsubscribeAndClearSubscribedTopics(io);
 
         self.active_fork_count = forks.len;
         for (forks, 0..) |fork, i| {
@@ -144,7 +145,7 @@ pub const EthGossipAdapter = struct {
         }
 
         for (logical_topics.items) |logical_topic| {
-            try self.subscribeLogicalTopic(logical_topic.topic_type, logical_topic.subnet_id);
+            try self.subscribeLogicalTopic(io, logical_topic.topic_type, logical_topic.subnet_id);
         }
     }
 
@@ -157,9 +158,9 @@ pub const EthGossipAdapter = struct {
     ///
     /// Subscribes to global topics (beacon_block, aggregate_and_proof, etc.)
     /// but not subnet-indexed topics — use `subscribeSubnet` for those.
-    pub fn subscribeEthTopics(self: *Self) !void {
+    pub fn subscribeEthTopics(self: *Self, io: Io) !void {
         for (&global_topic_types) |topic_type| {
-            try self.subscribeLogicalTopic(topic_type, null);
+            try self.subscribeLogicalTopic(io, topic_type, null);
         }
     }
 
@@ -177,28 +178,30 @@ pub const EthGossipAdapter = struct {
     ///
     /// This must be called when the chain transitions to a new fork
     /// (e.g., Capella → Deneb, Deneb → Electra).
-    pub fn onForkTransition(self: *Self, new_fork_digest: [4]u8) !void {
+    pub fn onForkTransition(self: *Self, io: Io, new_fork_digest: [4]u8) !void {
         self.fork_digest = new_fork_digest;
-        try self.setActiveForks(&.{.{ .fork_digest = new_fork_digest, .fork_seq = self.fork_seq }});
+        try self.setActiveForks(io, &.{.{ .fork_digest = new_fork_digest, .fork_seq = self.fork_seq }});
     }
 
     /// Subscribe to a specific subnet-indexed topic.
     pub fn subscribeSubnet(
         self: *Self,
+        io: Io,
         topic_type: GossipTopicType,
         subnet_id: u8,
     ) !void {
-        try self.subscribeLogicalTopic(topic_type, subnet_id);
+        try self.subscribeLogicalTopic(io, topic_type, subnet_id);
     }
 
     /// Unsubscribe from a specific subnet-indexed topic.
     pub fn unsubscribeSubnet(
         self: *Self,
+        io: Io,
         topic_type: GossipTopicType,
         subnet_id: u8,
     ) !void {
         for (self.activeForks()) |fork| {
-            try self.unsubscribeTopicTypeForDigest(fork.fork_digest, topic_type, subnet_id);
+            try self.unsubscribeTopicTypeForDigest(io, fork.fork_digest, topic_type, subnet_id);
         }
     }
 
@@ -216,14 +219,15 @@ pub const EthGossipAdapter = struct {
         return true;
     }
 
-    fn subscribeLogicalTopic(self: *Self, topic_type: GossipTopicType, subnet_id: ?u8) !void {
+    fn subscribeLogicalTopic(self: *Self, io: Io, topic_type: GossipTopicType, subnet_id: ?u8) !void {
         for (self.activeForks()) |fork| {
-            try self.subscribeTopicTypeForDigest(fork.fork_digest, topic_type, subnet_id);
+            try self.subscribeTopicTypeForDigest(io, fork.fork_digest, topic_type, subnet_id);
         }
     }
 
     fn subscribeTopicTypeForDigest(
         self: *Self,
+        io: Io,
         fork_digest: [4]u8,
         topic_type: GossipTopicType,
         subnet_id: ?u8,
@@ -242,11 +246,12 @@ pub const EthGossipAdapter = struct {
         try self.subscribed_topics.put(self.allocator, topic_str, {});
         errdefer _ = self.subscribed_topics.remove(topic_str);
 
-        try self.gossipsub.subscribe(topic_str);
+        try self.gossipsub.subscribe(io, topic_str);
     }
 
     fn unsubscribeTopicTypeForDigest(
         self: *Self,
+        io: Io,
         fork_digest: [4]u8,
         topic_type: GossipTopicType,
         subnet_id: ?u8,
@@ -255,7 +260,7 @@ pub const EthGossipAdapter = struct {
         const topic_slice = gossip_topics.formatTopic(&buf, fork_digest, topic_type, subnet_id);
 
         const owned_topic = self.subscribed_topics.getKey(topic_slice) orelse return;
-        try self.gossipsub.unsubscribe(owned_topic);
+        try self.gossipsub.unsubscribe(io, owned_topic);
         _ = self.subscribed_topics.remove(owned_topic);
         self.allocator.free(owned_topic);
     }
@@ -268,10 +273,10 @@ pub const EthGossipAdapter = struct {
         self.subscribed_topics.clearRetainingCapacity();
     }
 
-    fn unsubscribeAndClearSubscribedTopics(self: *Self) !void {
+    fn unsubscribeAndClearSubscribedTopics(self: *Self, io: Io) !void {
         var iter = self.subscribed_topics.iterator();
         while (iter.next()) |entry| {
-            try self.gossipsub.unsubscribe(entry.key_ptr.*);
+            try self.gossipsub.unsubscribe(io, entry.key_ptr.*);
             self.allocator.free(entry.key_ptr.*);
         }
         self.subscribed_topics.clearRetainingCapacity();
@@ -300,6 +305,7 @@ pub const EthGossipAdapter = struct {
     /// Handles Snappy compression and topic string formatting.
     pub fn publish(
         self: *Self,
+        io: Io,
         topic_type: GossipTopicType,
         subnet_id: ?u8,
         ssz_bytes: []const u8,
@@ -313,7 +319,7 @@ pub const EthGossipAdapter = struct {
         const topic_str = gossip_topics.formatTopic(&buf, self.fork_digest, topic_type, subnet_id);
 
         // 3. Publish via gossipsub.
-        _ = try self.gossipsub.publish(topic_str, compressed);
+        _ = try self.gossipsub.publish(io, topic_str, compressed);
     }
 };
 
@@ -344,7 +350,7 @@ const TestAdapter = struct {
 
     fn destroy(self: *TestAdapter, allocator: Allocator) void {
         self.adapter.deinit();
-        self.gossipsub.deinit();
+        self.gossipsub.deinit(std.testing.io);
         allocator.destroy(self);
     }
 };
@@ -354,7 +360,7 @@ test "EthGossipAdapter: subscribeEthTopics formats correct topic strings" {
     const t = try TestAdapter.create(allocator);
     defer t.destroy(allocator);
 
-    try t.adapter.subscribeEthTopics();
+    try t.adapter.subscribeEthTopics(std.testing.io);
 
     // Verify the expected number of global topics were subscribed.
     try testing.expectEqual(global_topic_types.len, t.adapter.subscribed_topics.count());
@@ -373,10 +379,10 @@ test "EthGossipAdapter: duplicate subscriptions are idempotent" {
     const t = try TestAdapter.create(allocator);
     defer t.destroy(allocator);
 
-    try t.adapter.subscribeEthTopics();
-    try t.adapter.subscribeEthTopics();
-    try t.adapter.subscribeSubnet(.beacon_attestation, 3);
-    try t.adapter.subscribeSubnet(.beacon_attestation, 3);
+    try t.adapter.subscribeEthTopics(std.testing.io);
+    try t.adapter.subscribeEthTopics(std.testing.io);
+    try t.adapter.subscribeSubnet(std.testing.io, .beacon_attestation, 3);
+    try t.adapter.subscribeSubnet(std.testing.io, .beacon_attestation, 3);
 
     try testing.expectEqual(global_topic_types.len + 1, t.adapter.subscribed_topics.count());
 }
@@ -386,10 +392,10 @@ test "EthGossipAdapter: active fork updates preserve logical subscriptions" {
     const t = try TestAdapter.create(allocator);
     defer t.destroy(allocator);
 
-    try t.adapter.subscribeEthTopics();
-    try t.adapter.subscribeSubnet(.beacon_attestation, 3);
+    try t.adapter.subscribeEthTopics(std.testing.io);
+    try t.adapter.subscribeSubnet(std.testing.io, .beacon_attestation, 3);
 
-    try t.adapter.setActiveForks(&.{
+    try t.adapter.setActiveForks(std.testing.io, &.{
         .{ .fork_digest = .{ 0xab, 0xcd, 0xef, 0x01 }, .fork_seq = .electra },
         .{ .fork_digest = .{ 0x12, 0x34, 0x56, 0x78 }, .fork_seq = .fulu },
     });
@@ -434,11 +440,11 @@ test "EthGossipAdapter: publish compresses with snappy" {
     const t = try TestAdapter.create(allocator);
     defer t.destroy(allocator);
 
-    try t.adapter.subscribeEthTopics();
+    try t.adapter.subscribeEthTopics(std.testing.io);
 
     // Publish a fake SSZ payload — may fail with no peers (expected).
     const fake_ssz = &[_]u8{ 0x01, 0x02, 0x03, 0x04 };
-    t.adapter.publish(.beacon_block, null, fake_ssz) catch |err| {
+    t.adapter.publish(std.testing.io, .beacon_block, null, fake_ssz) catch |err| {
         log.debug("Publish (expected) error with no peers: {}", .{err});
     };
 }

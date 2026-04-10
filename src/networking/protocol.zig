@@ -171,6 +171,22 @@ pub const Method = enum {
             => false,
         };
     }
+
+    /// Returns true if an inbound request may be encoded as a bare stream close
+    /// with no SSZ-Snappy frame at all.
+    ///
+    /// Metadata requests are defined with an empty request body and widely sent
+    /// by peers as zero bytes on the wire rather than as an encoded empty
+    /// SSZ-Snappy payload.
+    pub fn allowsImplicitEmptyRequest(self: Method) bool {
+        return switch (self) {
+            .metadata,
+            .light_client_finality_update,
+            .light_client_optimistic_update,
+            => true,
+            else => false,
+        };
+    }
 };
 
 /// The protocol prefix used in all eth2 protocol IDs.
@@ -242,6 +258,13 @@ test "Method.hasContextBytes" {
     try testing.expect(Method.beacon_blocks_by_root.hasContextBytes());
     try testing.expect(Method.blob_sidecars_by_range.hasContextBytes());
     try testing.expect(Method.blob_sidecars_by_root.hasContextBytes());
+}
+
+test "Method.allowsImplicitEmptyRequest" {
+    try testing.expect(Method.metadata.allowsImplicitEmptyRequest());
+    try testing.expect(Method.light_client_finality_update.allowsImplicitEmptyRequest());
+    try testing.expect(!Method.status.allowsImplicitEmptyRequest());
+    try testing.expect(!Method.beacon_blocks_by_range.allowsImplicitEmptyRequest());
 }
 
 test "protocolId formatting" {

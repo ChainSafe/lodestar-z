@@ -108,6 +108,7 @@ pub const PeerDB = struct {
             result.value_ptr.* = PeerInfo{};
         }
         const info = result.value_ptr;
+        if (info.peer_score.isCoolingDown(now_ms)) return error.PeerCoolingDown;
 
         // Valid transitions: disconnected → dialing.
         // If already dialing/connected, skip.

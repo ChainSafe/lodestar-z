@@ -173,10 +173,48 @@ const PendingSyncSegment = struct {
     stop_after_current: bool = false,
 
     pub fn deinit(self: *PendingSyncSegment, allocator: Allocator) void {
-        _ = allocator;
+        freeBatchBlocks(allocator, self.blocks);
         self.* = undefined;
     }
 };
+
+fn cloneBatchBlocks(allocator: Allocator, blocks: []const BatchBlock) ![]BatchBlock {
+    const owned = try allocator.alloc(BatchBlock, blocks.len);
+    errdefer allocator.free(owned);
+
+    for (blocks, 0..) |block, i| {
+        const block_bytes = try allocator.dupe(u8, block.block_bytes);
+        errdefer allocator.free(block_bytes);
+        owned[i] = .{
+            .slot = block.slot,
+            .block_bytes = block_bytes,
+        };
+    }
+
+    return owned;
+}
+
+fn freeBatchBlocks(allocator: Allocator, blocks: []const BatchBlock) void {
+    for (blocks) |block| {
+        allocator.free(block.block_bytes);
+    }
+    allocator.free(blocks);
+}
+
+test "cloneBatchBlocks owns copied block bytes" {
+    var source_bytes = [_]u8{ 0x01, 0x02, 0x03 };
+    const source_blocks = [_]BatchBlock{
+        .{ .slot = 12, .block_bytes = source_bytes[0..] },
+    };
+
+    const owned_blocks = try cloneBatchBlocks(std.testing.allocator, source_blocks[0..]);
+    defer freeBatchBlocks(std.testing.allocator, owned_blocks);
+
+    source_bytes[0] = 0xFF;
+    try std.testing.expectEqual(@as(u64, 12), owned_blocks[0].slot);
+    try std.testing.expectEqual(@as(u8, 0x01), owned_blocks[0].block_bytes[0]);
+    try std.testing.expect(owned_blocks[0].block_bytes.ptr != source_blocks[0].block_bytes.ptr);
+}
 
 const ExecutionImportWork = struct {
     owner: QueuedStateWorkOwner,
@@ -213,6 +251,73 @@ const PendingExecutionPayload = struct {
             .import => |*pending| pending.deinit(allocator),
             .revalidation => {},
         }
+        self.* = undefined;
+    }
+};
+
+pub const DiscoveryDialCompletion = union(enum) {
+    success: struct {
+        peer_id: []const u8,
+        predicted_peer_id: []const u8,
+        ma_str: []const u8,
+        node_id: [32]u8,
+        pubkey: [33]u8,
+    },
+    failure: struct {
+        predicted_peer_id: []const u8,
+        ma_str: []const u8,
+        err: anyerror,
+    },
+
+    pub fn deinit(self: *DiscoveryDialCompletion, allocator: Allocator) void {
+        switch (self.*) {
+            .success => |success| {
+                allocator.free(success.peer_id);
+                allocator.free(success.predicted_peer_id);
+                allocator.free(success.ma_str);
+            },
+            .failure => |failure| {
+                allocator.free(failure.predicted_peer_id);
+                allocator.free(failure.ma_str);
+            },
+        }
+        self.* = undefined;
+    }
+};
+
+pub const PeerReqRespMetadata = struct {
+    metadata: networking.messages.MetadataV2.Type,
+    custody_group_count: ?u64 = null,
+};
+
+pub const PeerReqRespCompletion = union(enum) {
+    status: struct {
+        peer_id: []const u8,
+        status: StatusMessage.Type,
+        earliest_available_slot: ?u64 = null,
+        metadata: ?PeerReqRespMetadata = null,
+    },
+    ping: struct {
+        peer_id: []const u8,
+        remote_seq: u64,
+        metadata: ?PeerReqRespMetadata = null,
+    },
+    failure: struct {
+        peer_id: []const u8,
+        protocol: networking.ReqRespScoringProtocol,
+        err: anyerror,
+    },
+
+    pub fn peerId(self: *const PeerReqRespCompletion) []const u8 {
+        return switch (self.*) {
+            .status => |status| status.peer_id,
+            .ping => |ping| ping.peer_id,
+            .failure => |failure| failure.peer_id,
+        };
+    }
+
+    pub fn deinit(self: *PeerReqRespCompletion, allocator: Allocator) void {
+        allocator.free(self.peerId());
         self.* = undefined;
     }
 };
@@ -351,6 +456,12 @@ pub const BeaconNode = struct {
     // P2P service (lazy-initialized via startP2p).
     // Owns the libp2p Switch, gossipsub service, and gossip adapter.
     p2p_service: ?P2pService = null,
+    discovery_dial_mutex: std.Io.Mutex = .init,
+    completed_discovery_dials: std.ArrayListUnmanaged(DiscoveryDialCompletion) = .empty,
+    pending_discovery_dial_count: usize = 0,
+    peer_reqresp_mutex: std.Io.Mutex = .init,
+    pending_peer_reqresp_ids: std.ArrayListUnmanaged([]const u8) = .empty,
+    completed_peer_reqresp: std.ArrayListUnmanaged(PeerReqRespCompletion) = .empty,
 
     // Req/resp context and server policy used by the P2P service.
     // The callback context uses self.allocator as scratch; block bytes returned
@@ -439,6 +550,9 @@ pub const BeaconNode = struct {
 
     // Discovery seed ENRs prepared by the launcher.
     discovery_bootnodes: []const []const u8 = &.{},
+
+    // Runtime bootstrap cursor for `--direct-peers` dialing.
+    next_direct_peer_index: usize = 0,
 
     // Identify agent version exposed on libp2p identify. Null hides it.
     identify_agent_version: ?[]const u8 = null,
@@ -917,7 +1031,7 @@ pub const BeaconNode = struct {
                         revalidation,
                         completed.result,
                     ) catch |err| {
-                        log.logger(.node).warn("execution revalidation finish failed: {}", .{err});
+                        log.logger(.node).warn("execution revalidation finish failed", .{ .err = err });
                         pending = undefined;
                         self.dispatchWaitingExecutionPayloads();
                         continue;
@@ -1167,12 +1281,12 @@ pub const BeaconNode = struct {
         const outcome = self.chainService().finishPreparedReadyBlockImport(&owned_prepared, exec_status) catch |err| {
             self.recordBlockImportResult(source, blockImportOutcomeLabel(err), 1);
             self.recordGenericBlockIngressError(ticket, err);
-            log.logger(.node).warn("deferred block execution commit failed: {}", .{err});
+            log.logger(.node).warn("deferred block execution commit failed", .{ .err = err });
             return;
         };
         const result = self.finishImportOutcome(source, t0, outcome) catch |err| {
             self.recordGenericBlockIngressError(ticket, err);
-            log.logger(.node).warn("deferred block import commit failed: {}", .{err});
+            log.logger(.node).warn("deferred block import commit failed", .{ .err = err });
             return;
         };
         self.processPendingChildren(result.block_root);
@@ -1229,7 +1343,7 @@ pub const BeaconNode = struct {
                         => segment.error_counts.incr(err),
                         else => {},
                     }
-                    log.logger(.node).warn("deferred sync segment block commit failed: {}", .{err});
+                    log.logger(.node).warn("deferred sync segment block commit failed", .{ .err = err });
                 },
             }
             return;
@@ -1238,6 +1352,15 @@ pub const BeaconNode = struct {
         segment.imported_count += 1;
         if (outcome.result.execution_optimistic) segment.optimistic_imported_count += 1;
         if (outcome.result.epoch_transition) segment.epoch_transition_count += 1;
+        log.logger(.node).debug("deferred range sync block imported", .{
+            .slot = outcome.result.slot,
+            .chain_id = segment.key.chain_id,
+            .batch_id = segment.key.batch_id,
+            .generation = segment.key.generation,
+            .imported = segment.imported_count,
+            .skipped = segment.skipped_count,
+            .failed = segment.failed_count,
+        });
         self.processPendingChildren(outcome.result.block_root);
     }
 
@@ -1253,7 +1376,7 @@ pub const BeaconNode = struct {
                 self.recordGenericBlockIngressError(ticket, err);
                 var owned_prepared = prepared;
                 owned_prepared.deinit(self.allocator);
-                log.logger(.node).warn("deferred block execution verification failed: {}", .{err});
+                log.logger(.node).warn("deferred block execution verification failed", .{ .err = err });
             },
             .sync_segment => |key| {
                 const index = findPendingSyncSegmentIndex(self, key) orelse {
@@ -1293,11 +1416,11 @@ pub const BeaconNode = struct {
                     => {
                         segment.failed_count += 1;
                         _ = recordBlockImportError(&segment.error_counts, err);
-                        log.logger(.node).warn("deferred sync segment execution verification failed: {}", .{err});
+                        log.logger(.node).warn("deferred sync segment execution verification failed", .{ .err = err });
                     },
                     else => {
                         segment.failed_count += 1;
-                        log.logger(.node).warn("deferred sync segment execution verification failed: {}", .{err});
+                        log.logger(.node).warn("deferred sync segment execution verification failed", .{ .err = err });
                     },
                 }
 
@@ -1333,10 +1456,13 @@ pub const BeaconNode = struct {
         };
         if (findPendingSyncSegmentIndex(self, key) != null) return;
 
+        const owned_blocks = try cloneBatchBlocks(self.allocator, blocks);
+        errdefer freeBatchBlocks(self.allocator, owned_blocks);
+
         try self.pending_sync_segments.append(self.allocator, .{
             .key = key,
             .sync_type = sync_type,
-            .blocks = blocks,
+            .blocks = owned_blocks,
             .before_snapshot = self.chainService().query().currentSnapshot(),
             .started_at = std.Io.Clock.awake.now(self.io),
         });
@@ -1344,14 +1470,17 @@ pub const BeaconNode = struct {
 
     pub fn drivePendingSyncSegments(self: *BeaconNode) bool {
         var did_work = false;
-        var i: usize = 0;
+        const i: usize = 0;
+
+        // Lodestar serializes range-sync segment processing. Keep the deferred
+        // importer single-flight too, otherwise a newly prioritized finalized
+        // chain can start importing the same slots while an older head segment is
+        // still in progress.
+        for (self.pending_sync_segments.items) |segment| {
+            if (segment.in_flight) return false;
+        }
 
         while (i < self.pending_sync_segments.items.len) {
-            if (self.pending_sync_segments.items[i].in_flight) {
-                i += 1;
-                continue;
-            }
-
             if (self.pending_sync_segments.items[i].stop_after_current or
                 self.pending_sync_segments.items[i].next_index >= self.pending_sync_segments.items[i].blocks.len)
             {
@@ -1361,7 +1490,7 @@ pub const BeaconNode = struct {
             }
 
             const started = startPendingSyncSegmentBlock(self, i) catch |err| {
-                log.logger(.node).warn("failed to start pending sync segment block: {}", .{err});
+                log.logger(.node).warn("failed to start pending sync segment block", .{ .err = err });
                 self.pending_sync_segments.items[i].stop_after_current = true;
                 did_work = true;
                 continue;
@@ -1375,7 +1504,7 @@ pub const BeaconNode = struct {
                 }
                 break;
             }
-            i += 1;
+            break;
         }
 
         return did_work;
@@ -1577,12 +1706,12 @@ pub const BeaconNode = struct {
         const outcome = self.chainService().finishCompletedReadyBlockImport(completed) catch |err| {
             self.recordBlockImportResult(source, blockImportOutcomeLabel(err), 1);
             self.recordGenericBlockIngressError(ticket, err);
-            log.logger(.node).warn("deferred block state work failed: {}", .{err});
+            log.logger(.node).warn("deferred block state work failed", .{ .err = err });
             return;
         };
         const result = self.finishImportOutcome(source, t0, outcome) catch |err| {
             self.recordGenericBlockIngressError(ticket, err);
-            log.logger(.node).warn("deferred block import commit failed: {}", .{err});
+            log.logger(.node).warn("deferred block import commit failed", .{ .err = err });
             return;
         };
         self.processPendingChildren(result.block_root);
@@ -1636,7 +1765,7 @@ pub const BeaconNode = struct {
                         => segment.error_counts.incr(err),
                         else => {},
                     }
-                    log.logger(.node).warn("deferred sync segment block commit failed: {}", .{err});
+                    log.logger(.node).warn("deferred sync segment block commit failed", .{ .err = err });
                 },
             }
             return;
@@ -1645,6 +1774,15 @@ pub const BeaconNode = struct {
         segment.imported_count += 1;
         if (outcome.result.execution_optimistic) segment.optimistic_imported_count += 1;
         if (outcome.result.epoch_transition) segment.epoch_transition_count += 1;
+        log.logger(.node).debug("deferred range sync block imported", .{
+            .slot = outcome.result.slot,
+            .chain_id = segment.key.chain_id,
+            .batch_id = segment.key.batch_id,
+            .generation = segment.key.generation,
+            .imported = segment.imported_count,
+            .skipped = segment.skipped_count,
+            .failed = segment.failed_count,
+        });
 
         self.processPendingChildren(outcome.result.block_root);
     }
@@ -1879,11 +2017,11 @@ pub const BeaconNode = struct {
             var ready = self.chainService().prepareRawBlockInput(block.block_bytes, .range_sync) catch |err| {
                 segment.failed_count += 1;
                 segment.next_index += 1;
-                log.logger(.node).warn("range sync block preparation failed: {}", .{err});
+                log.logger(.node).warn("range sync block preparation failed", .{ .err = err });
                 continue;
             };
 
-            const planned = self.chainService().planReadyBlockImport(&ready) catch |err| {
+            const plan_result = self.chainService().planRangeSyncReadyBlockImport(&ready) catch |err| {
                 ready.deinit(self.allocator);
                 switch (err) {
                     error.AlreadyKnown, error.WouldRevertFinalizedSlot, error.GenesisBlock => {
@@ -1907,11 +2045,22 @@ pub const BeaconNode = struct {
                     => {
                         segment.failed_count += 1;
                         _ = recordBlockImportError(&segment.error_counts, err);
-                        log.logger(.node).warn("range sync block planning failed: {}", .{err});
+                        log.logger(.node).warn("range sync block planning failed", .{ .err = err });
                     },
                 }
                 segment.next_index += 1;
                 continue;
+            };
+
+            const planned = switch (plan_result) {
+                .skipped => |reason| {
+                    ready.deinit(self.allocator);
+                    segment.skipped_count += 1;
+                    _ = recordBlockImportError(&segment.error_counts, reason);
+                    segment.next_index += 1;
+                    continue;
+                },
+                .planned => |planned| planned,
             };
 
             try self.queued_state_work_owners.ensureUnusedCapacity(self.allocator, 1);
@@ -1925,6 +2074,13 @@ pub const BeaconNode = struct {
                     self.queued_state_work_owners.appendAssumeCapacity(.{ .sync_segment = segment.key });
                     segment.in_flight = true;
                     owned_planned = undefined;
+                    log.logger(.node).debug("queued range sync block state work", .{
+                        .slot = block.slot,
+                        .chain_id = segment.key.chain_id,
+                        .batch_id = segment.key.batch_id,
+                        .generation = segment.key.generation,
+                        .index = segment.next_index,
+                    });
                     return true;
                 },
                 .not_queued => |returned_planned| {
@@ -1982,7 +2138,7 @@ pub const BeaconNode = struct {
         update: chain_mod.ExecutionForkchoiceUpdate,
     ) void {
         self.execution_runtime.submitForkchoiceUpdateAsync(update) catch |err| {
-            log.logger(.node).warn("forkchoiceUpdated failed: {}", .{err});
+            log.logger(.node).warn("forkchoiceUpdated failed", .{ .err = err });
         };
     }
 
@@ -2061,28 +2217,18 @@ pub const BeaconNode = struct {
     }
 
     /// Get the current sync status.
-    ///
-    /// For now returns a simple status based on head slot. In production this
-    /// would compare against the clock's wall-clock slot to determine sync
-    /// distance.
     pub fn getSyncStatus(self: *const BeaconNode) SyncStatus {
         const chain_sync = self.chainQuery().syncStatus();
+        const has_wall_slot = self.chain.currentWallSlot() != null;
+        const connected_peers: u32 = if (self.peer_manager) |pm| pm.peerCount() else 0;
+        const has_sync_peers = self.node_options.sync_is_single_node or connected_peers > 0;
+        const is_synced = !has_wall_slot or
+            (chain_sync.sync_distance <= sync_mod.sync_types.SYNC_DISTANCE_THRESHOLD and has_sync_peers);
 
-        // Use the sync service state machine when available.
-        if (self.sync_service_inst) |svc| {
-            const ss = svc.getSyncStatus();
-            return .{
-                .head_slot = ss.head_slot,
-                .sync_distance = ss.sync_distance,
-                .is_syncing = ss.state == .syncing_finalized or ss.state == .syncing_head,
-                .is_optimistic = ss.is_optimistic or chain_sync.is_optimistic,
-                .el_offline = self.execution_runtime.el_offline,
-            };
-        }
         return .{
             .head_slot = chain_sync.head_slot,
-            .sync_distance = chain_sync.sync_distance,
-            .is_syncing = chain_sync.is_syncing,
+            .sync_distance = if (is_synced) 0 else chain_sync.sync_distance,
+            .is_syncing = !is_synced,
             .is_optimistic = chain_sync.is_optimistic,
             .el_offline = self.execution_runtime.el_offline,
         };
@@ -3463,6 +3609,7 @@ test "processorHandlerCallback imports queued sync committee messages" {
     var gh: GossipHandler = undefined;
     gh.node = @ptrCast(&ctx);
     gh.importSyncCommitteeMessageFn = &ProcessorImportTestContext.importSyncCommitteeMessage;
+    gh.verifySyncCommitteeSignatureFn = null;
     node.gossip_handler = &gh;
 
     var msg = types.altair.SyncCommitteeMessage.Type{

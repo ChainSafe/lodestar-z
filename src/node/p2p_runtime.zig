@@ -31,6 +31,8 @@ const StatusMessage = networking.messages.StatusMessage;
 const StatusMessageV2 = networking.messages.StatusMessageV2;
 const MetadataV2 = networking.messages.MetadataV2;
 const MetadataV3 = networking.messages.MetadataV3;
+const DataColumnsByRootIdentifier = networking.messages.DataColumnsByRootIdentifier;
+const DataColumnSidecarsByRootRequest = networking.messages.DataColumnSidecarsByRootRequest;
 const AttnetsBitfield = networking.peer_info.AttnetsBitfield;
 const SyncnetsBitfield = networking.peer_info.SyncnetsBitfield;
 const ATTESTATION_SUBNET_COUNT = networking.peer_info.ATTESTATION_SUBNET_COUNT;
@@ -57,6 +59,8 @@ const Libp2pPublicKey = @TypeOf((@as(libp2p.security.Session1, undefined)).remot
 
 const BYTES_PER_BLOB = kzg_mod.BYTES_PER_BLOB;
 const MAX_COLUMNS = preset_root.NUMBER_OF_COLUMNS;
+const INLINE_SECP256K1_PEER_ID_PREFIX = [_]u8{ 0x00, 0x25, 0x08, 0x02, 0x12, 0x21 };
+const INLINE_SECP256K1_PEER_ID_LEN = INLINE_SECP256K1_PEER_ID_PREFIX.len + 33;
 
 const SyncBlockMeta = chain_mod.PlannedBlockIngress;
 
@@ -80,6 +84,51 @@ const SlotRange = struct {
 const DiscoveryPeerIdentity = struct {
     node_id: [32]u8,
     pubkey: [33]u8,
+};
+
+const DiscoveryDialJob = struct {
+    ma_str: []const u8,
+    predicted_peer_id: []const u8,
+    node_id: [32]u8,
+    pubkey: [33]u8,
+
+    fn toSuccess(self: DiscoveryDialJob, peer_id: []const u8) DiscoveryDialCompletion {
+        return .{ .success = .{
+            .peer_id = peer_id,
+            .predicted_peer_id = self.predicted_peer_id,
+            .ma_str = self.ma_str,
+            .node_id = self.node_id,
+            .pubkey = self.pubkey,
+        } };
+    }
+
+    fn toFailure(self: DiscoveryDialJob, err: anyerror) DiscoveryDialCompletion {
+        return .{ .failure = .{
+            .predicted_peer_id = self.predicted_peer_id,
+            .ma_str = self.ma_str,
+            .err = err,
+        } };
+    }
+};
+
+const PeerReqRespJobKind = union(enum) {
+    status_only,
+    full_handshake,
+    restatus,
+    ping: struct {
+        known_metadata_seq: u64,
+    },
+};
+
+const PeerReqRespJob = struct {
+    peer_id: []const u8,
+    kind: PeerReqRespJobKind,
+};
+
+const OutboundHandshakeMode = enum {
+    none,
+    status_only,
+    full,
 };
 
 const BlobFetchState = struct {
@@ -167,18 +216,32 @@ fn formatListenMultiaddr(buf: []u8, host: []const u8, port: u16) ![]const u8 {
     return std.fmt.bufPrint(buf, "/ip4/{s}/udp/{d}/quic-v1", .{ host, port });
 }
 
-fn formatDiscv5DialMultiaddr(buf: []u8, addr: discv5.Address) ![]const u8 {
+fn formatDiscv5DialMultiaddr(buf: []u8, addr: discv5.Address, peer_id: ?[]const u8) ![]const u8 {
     return switch (addr) {
-        .ip4 => |ip4| std.fmt.bufPrint(buf, "/ip4/{d}.{d}.{d}.{d}/udp/{d}/quic-v1", .{
-            ip4.bytes[0], ip4.bytes[1], ip4.bytes[2], ip4.bytes[3], ip4.port,
-        }),
-        .ip6 => |ip6| std.fmt.bufPrint(buf, "/ip6/{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}/udp/{d}/quic-v1", .{
-            ip6.bytes[0],  ip6.bytes[1],  ip6.bytes[2],  ip6.bytes[3],
-            ip6.bytes[4],  ip6.bytes[5],  ip6.bytes[6],  ip6.bytes[7],
-            ip6.bytes[8],  ip6.bytes[9],  ip6.bytes[10], ip6.bytes[11],
-            ip6.bytes[12], ip6.bytes[13], ip6.bytes[14], ip6.bytes[15],
-            ip6.port,
-        }),
+        .ip4 => |ip4| if (peer_id) |pid|
+            std.fmt.bufPrint(buf, "/ip4/{d}.{d}.{d}.{d}/udp/{d}/quic-v1/p2p/{s}", .{
+                ip4.bytes[0], ip4.bytes[1], ip4.bytes[2], ip4.bytes[3], ip4.port, pid,
+            })
+        else
+            std.fmt.bufPrint(buf, "/ip4/{d}.{d}.{d}.{d}/udp/{d}/quic-v1", .{
+                ip4.bytes[0], ip4.bytes[1], ip4.bytes[2], ip4.bytes[3], ip4.port,
+            }),
+        .ip6 => |ip6| if (peer_id) |pid|
+            std.fmt.bufPrint(buf, "/ip6/{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}/udp/{d}/quic-v1/p2p/{s}", .{
+                ip6.bytes[0],  ip6.bytes[1],  ip6.bytes[2],  ip6.bytes[3],
+                ip6.bytes[4],  ip6.bytes[5],  ip6.bytes[6],  ip6.bytes[7],
+                ip6.bytes[8],  ip6.bytes[9],  ip6.bytes[10], ip6.bytes[11],
+                ip6.bytes[12], ip6.bytes[13], ip6.bytes[14], ip6.bytes[15],
+                ip6.port,      pid,
+            })
+        else
+            std.fmt.bufPrint(buf, "/ip6/{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}/udp/{d}/quic-v1", .{
+                ip6.bytes[0],  ip6.bytes[1],  ip6.bytes[2],  ip6.bytes[3],
+                ip6.bytes[4],  ip6.bytes[5],  ip6.bytes[6],  ip6.bytes[7],
+                ip6.bytes[8],  ip6.bytes[9],  ip6.bytes[10], ip6.bytes[11],
+                ip6.bytes[12], ip6.bytes[13], ip6.bytes[14], ip6.bytes[15],
+                ip6.port,
+            }),
     };
 }
 
@@ -188,7 +251,7 @@ fn discoveryIdentityKnown(identity: DiscoveryPeerIdentity) bool {
 
 fn discoveryPeerIdMatches(
     allocator: std.mem.Allocator,
-    peer_id_text: []const u8,
+    peer_id_bytes: []const u8,
     pubkey: [33]u8,
 ) !bool {
     const peer_data = try allocator.dupe(u8, pubkey[0..]);
@@ -200,8 +263,38 @@ fn discoveryPeerIdMatches(
     };
 
     const expected_peer_id = try Libp2pPeerId.fromPublicKey(allocator, &public_key);
-    const actual_peer_id = try Libp2pPeerId.fromString(allocator, peer_id_text);
-    return expected_peer_id.eql(&actual_peer_id);
+    var expected_peer_id_buf: [128]u8 = undefined;
+    const expected_peer_id_bytes = try expected_peer_id.toBytes(&expected_peer_id_buf);
+    return std.mem.eql(u8, expected_peer_id_bytes, peer_id_bytes);
+}
+
+fn discoveryPeerIdBytesFromPubkey(
+    allocator: std.mem.Allocator,
+    pubkey: [33]u8,
+) ![]u8 {
+    const peer_data = try allocator.dupe(u8, pubkey[0..]);
+    defer allocator.free(peer_data);
+
+    var public_key = Libp2pPublicKey{
+        .type = .SECP256K1,
+        .data = peer_data,
+    };
+
+    const peer_id = try Libp2pPeerId.fromPublicKey(allocator, &public_key);
+    var peer_id_buf: [128]u8 = undefined;
+    const peer_id_bytes = try peer_id.toBytes(&peer_id_buf);
+    return allocator.dupe(u8, peer_id_bytes);
+}
+
+fn nodeIdFromInlineSecp256k1PeerId(peer_id_bytes: []const u8) ?[32]u8 {
+    if (peer_id_bytes.len != INLINE_SECP256K1_PEER_ID_LEN) return null;
+    if (!std.mem.eql(u8, peer_id_bytes[0..INLINE_SECP256K1_PEER_ID_PREFIX.len], &INLINE_SECP256K1_PEER_ID_PREFIX)) {
+        return null;
+    }
+
+    const pubkey_slice = peer_id_bytes[INLINE_SECP256K1_PEER_ID_PREFIX.len..INLINE_SECP256K1_PEER_ID_LEN];
+    const pubkey: *const [33]u8 = @ptrCast(pubkey_slice.ptr);
+    return discv5.enr.nodeIdFromCompressedPubkey(pubkey);
 }
 
 fn discoveryPeerIdTextFromPubkey(
@@ -217,9 +310,43 @@ fn discoveryPeerIdTextFromPubkey(
     };
 
     const peer_id = try Libp2pPeerId.fromPublicKey(allocator, &public_key);
-    const peer_id_text = try allocator.alloc(u8, peer_id.toBase58Len());
-    _ = try peer_id.toBase58(peer_id_text);
-    return peer_id_text;
+    const text_buf = try allocator.alloc(u8, peer_id.toBase58Len());
+    defer allocator.free(text_buf);
+    const peer_id_text = try peer_id.toBase58(text_buf);
+    return allocator.dupe(u8, peer_id_text);
+}
+
+test "discovery peer id helpers use raw libp2p peer id bytes" {
+    const allocator = std.testing.allocator;
+    const pubkey = [33]u8{
+        0x02, 0x79, 0xbe, 0x66, 0x7e, 0xf9, 0xdc, 0xbb, 0xac,
+        0x55, 0xa0, 0x62, 0x95, 0xce, 0x87, 0x0b, 0x07, 0x02,
+        0x9b, 0xfc, 0xdb, 0x2d, 0xce, 0x28, 0xd9, 0x59, 0xf2,
+        0x81, 0x5b, 0x16, 0xf8, 0x17, 0x98,
+    };
+
+    const peer_id_bytes = try discoveryPeerIdBytesFromPubkey(allocator, pubkey);
+    defer allocator.free(peer_id_bytes);
+
+    try std.testing.expect(peer_id_bytes.len > 0);
+    try std.testing.expect(try discoveryPeerIdMatches(allocator, peer_id_bytes, pubkey));
+}
+
+test "discovery peer id helpers derive node id from inline secp256k1 peer id" {
+    const allocator = std.testing.allocator;
+    const pubkey = [33]u8{
+        0x02, 0x79, 0xbe, 0x66, 0x7e, 0xf9, 0xdc, 0xbb, 0xac,
+        0x55, 0xa0, 0x62, 0x95, 0xce, 0x87, 0x0b, 0x07, 0x02,
+        0x9b, 0xfc, 0xdb, 0x2d, 0xce, 0x28, 0xd9, 0x59, 0xf2,
+        0x81, 0x5b, 0x16, 0xf8, 0x17, 0x98,
+    };
+
+    const peer_id_bytes = try discoveryPeerIdBytesFromPubkey(allocator, pubkey);
+    defer allocator.free(peer_id_bytes);
+
+    const actual = nodeIdFromInlineSecp256k1PeerId(peer_id_bytes) orelse return error.TestUnexpectedResult;
+    const expected = discv5.enr.nodeIdFromCompressedPubkey(&pubkey);
+    try std.testing.expectEqualSlices(u8, &expected, &actual);
 }
 
 pub fn start(self: *BeaconNode, io: std.Io, listen_addr: []const u8, port: u16) !void {
@@ -263,7 +390,7 @@ pub fn start(self: *BeaconNode, io: std.Io, listen_addr: []const u8, port: u16) 
         }
     }
 
-    self.p2p_service = try networking.p2p_service.P2pService.init(self.allocator, .{
+    self.p2p_service = try networking.p2p_service.P2pService.init(self.io, self.allocator, .{
         .fork_digest = fork_digest,
         .fork_seq = self.config.forkSeq(head_slot),
         .req_resp_context = req_resp_ctx,
@@ -286,21 +413,22 @@ pub fn start(self: *BeaconNode, io: std.Io, listen_addr: []const u8, port: u16) 
     var svc = &self.p2p_service.?;
     try svc.start(io, listen_multiaddr);
     try initSubnetService(self);
-    subscribeInitialSubnets(self, svc);
+    subscribeInitialSubnets(self, io, svc);
 
     initDiscoveryService(self) catch |err| {
-        log.logger(.node).warn("Failed to initialize discovery service: {}", .{err});
+        log.logger(.node).warn("Failed to initialize discovery service", .{ .err = err });
     };
     initPeerManager(self) catch |err| {
-        log.logger(.node).warn("Failed to initialize peer manager: {}", .{err});
+        log.logger(.node).warn("Failed to initialize peer manager", .{ .err = err });
     };
 
     initGossipHandler(self);
     initSyncPipeline(self) catch |err| {
-        log.logger(.node).warn("Failed to initialize sync pipeline: {}", .{err});
+        log.logger(.node).warn("Failed to initialize sync pipeline", .{ .err = err });
     };
 
     bootstrapBootnodes(self, io, svc);
+    bootstrapDirectPeers(self, io, svc);
     runLoop(self, io, svc);
 }
 
@@ -402,6 +530,7 @@ pub fn processSyncBatches(self: *BeaconNode, io: std.Io, svc: *networking.P2pSer
         }
 
         const blocks = fetchRawBlocksByRange(self, io, svc, peer_id, req.start_slot, req.count) catch |err| {
+            noteSyncPeerGoneIfTransportClosed(self, io, svc, peer_id, err);
             reportReqRespFetchFailure(self, io, peer_id, .beacon_blocks_by_range, err);
             std.log.debug("Batch {d} fetch failed: {}", .{ req.batch_id, err });
             if (self.sync_service_inst) |sync_svc| {
@@ -423,9 +552,12 @@ pub fn processSyncBatches(self: *BeaconNode, io: std.Io, svc: *networking.P2pSer
         }
 
         ensureRangeSyncDataAvailability(self, io, svc, peer_id, blocks) catch |err| {
-            std.log.debug("Batch {d}: DA prefetch failed: {}", .{ req.batch_id, err });
+            std.log.debug("Batch {d}: DA prefetch deferred/failed: {}", .{ req.batch_id, err });
             if (self.sync_service_inst) |sync_svc| {
-                sync_svc.onBatchError(req.chain_id, req.batch_id, req.generation, peer_id);
+                switch (err) {
+                    error.MissingDataColumnSidecar => sync_svc.onBatchDeferred(req.chain_id, req.batch_id, req.generation),
+                    else => sync_svc.onBatchError(req.chain_id, req.batch_id, req.generation, peer_id),
+                }
             }
             continue;
         };
@@ -445,6 +577,10 @@ pub fn processSyncByRootRequests(self: *BeaconNode, io: std.Io, svc: *networking
     const cb_ctx = self.sync_callback_ctx orelse return;
 
     while (cb_ctx.popPendingByRootRequest()) |req| {
+        if (req.kind == .unknown_chain_header and !shouldDriveUnknownChainSync(self)) {
+            continue;
+        }
+
         const peer_id = req.peerId();
         const root = req.root;
         std.log.debug("processSyncByRoot: fetching {s} root {x:0>2}{x:0>2}{x:0>2}{x:0>2}... from peer {s}", .{
@@ -550,13 +686,13 @@ pub fn processPendingLinkedChainImports(self: *BeaconNode, io: std.Io, svc: *net
     }
 }
 
-fn subscribeInitialSubnets(self: *BeaconNode, svc: *networking.P2pService) void {
+fn subscribeInitialSubnets(self: *BeaconNode, io: std.Io, svc: *networking.P2pService) void {
     const gossip_topics = networking.gossip_topics;
 
     if (self.node_options.subscribe_all_subnets) {
         var attestation_subnet: u8 = 0;
         while (attestation_subnet < gossip_topics.MAX_ATTESTATION_SUBNET_ID) : (attestation_subnet += 1) {
-            svc.subscribeSubnet(.beacon_attestation, attestation_subnet) catch |err| {
+            svc.subscribeSubnet(io, .beacon_attestation, attestation_subnet) catch |err| {
                 std.log.warn("Failed to subscribe to attestation subnet {d}: {}", .{ attestation_subnet, err });
             };
         }
@@ -565,14 +701,17 @@ fn subscribeInitialSubnets(self: *BeaconNode, svc: *networking.P2pService) void 
         std.log.info("Attestation subnet gossip subscriptions will follow validator subnet demand", .{});
     }
 
-    const custody_req = self.config.chain.CUSTODY_REQUIREMENT;
+    const custody_group_count = @min(
+        self.chain_runtime.custody_columns.len,
+        @as(usize, gossip_topics.MAX_DATA_COLUMN_SIDECAR_SUBNET_ID),
+    );
     var data_column_subnet: u8 = 0;
-    while (data_column_subnet < custody_req and data_column_subnet < gossip_topics.MAX_DATA_COLUMN_SIDECAR_SUBNET_ID) : (data_column_subnet += 1) {
-        svc.subscribeSubnet(.data_column_sidecar, data_column_subnet) catch |err| {
+    while (@as(usize, data_column_subnet) < custody_group_count) : (data_column_subnet += 1) {
+        svc.subscribeSubnet(io, .data_column_sidecar, data_column_subnet) catch |err| {
             std.log.warn("Failed to subscribe to data column subnet {d}: {}", .{ data_column_subnet, err });
         };
     }
-    std.log.info("Subscribed to {d} data column subnets (custody requirement)", .{custody_req});
+    std.log.info("Subscribed to {d} data column subnets (local custody groups)", .{custody_group_count});
 }
 
 fn initSubnetService(self: *BeaconNode) !void {
@@ -652,6 +791,11 @@ fn openReqRespRequest(
     };
     errdefer permit.deinit(io);
 
+    std.log.debug("Opening req/resp stream: method={s} protocol={s}", .{
+        @tagName(method),
+        protocol_id,
+    });
+
     const stream = svc.dialProtocol(io, peer_id, protocol_id) catch |err| {
         if (self.metrics) |metrics| {
             metrics.observeReqRespOutbound(req_resp_method, .transport_error, reqRespElapsedSeconds(io, started_ns));
@@ -678,14 +822,42 @@ fn bootstrapBootnodes(self: *BeaconNode, io: std.Io, svc: *networking.P2pService
     }
 }
 
+fn bootstrapDirectPeers(self: *BeaconNode, io: std.Io, svc: *networking.P2pService) void {
+    _ = io;
+    _ = svc;
+    const direct_peers = self.node_options.direct_peers;
+    if (direct_peers.len == 0) return;
+
+    self.next_direct_peer_index = 0;
+    std.log.info("queuing {d} direct peer(s) for runtime bootstrap", .{direct_peers.len});
+}
+
 const active_p2p_tick_ns: u64 = std.time.ns_per_ms;
 const idle_p2p_tick_ns: u64 = 25 * std.time.ns_per_ms;
 const connectivity_maintenance_interval_ns: u64 = 100 * std.time.ns_per_ms;
 const discovery_maintenance_interval_ns: u64 = 6 * std.time.ns_per_s;
-const peer_maintenance_interval_ns: u64 = std.time.ns_per_s;
+const peer_maintenance_interval_ns: u64 = 100 * std.time.ns_per_ms;
 const metrics_sampling_interval_ns: u64 = std.time.ns_per_s;
 const peer_manager_heartbeat_interval_ns: u64 = networking.peer_manager.HEARTBEAT_INTERVAL_MS * std.time.ns_per_ms;
 const max_discovery_dials_per_tick: u32 = 4;
+const optional_reqresp_timeout_ms: u64 = 3_000;
+
+const ReqRespTimerResult = enum {
+    fired,
+    canceled,
+};
+
+fn waitReqRespTimeout(io: std.Io, timeout: std.Io.Timeout) ReqRespTimerResult {
+    timeout.sleep(io) catch |err| switch (err) {
+        error.Canceled => return .canceled,
+    };
+    return .fired;
+}
+
+fn shouldDriveUnknownChainSync(self: *const BeaconNode) bool {
+    if (self.sync_service_inst) |sync_svc| return sync_svc.isSynced();
+    return !self.getSyncStatus().is_syncing;
+}
 
 fn runDiscoveryMaintenance(self: *BeaconNode) bool {
     if (self.discovery_service) |ds| {
@@ -702,7 +874,9 @@ fn runDiscoveryMaintenance(self: *BeaconNode) bool {
 }
 
 fn runConnectivityMaintenance(self: *BeaconNode, io: std.Io, svc: *networking.P2pService) bool {
-    var did_work = syncSubnetState(self, svc);
+    var did_work = syncSubnetState(self, io, svc);
+
+    did_work = bootstrapNextDirectPeer(self, io, svc) or did_work;
 
     if (self.discovery_service) |ds| {
         ds.poll();
@@ -716,6 +890,35 @@ fn runConnectivityMaintenance(self: *BeaconNode, io: std.Io, svc: *networking.P2
     }
 
     return reconcilePeerConnections(self, io, svc) or did_work;
+}
+
+fn bootstrapNextDirectPeer(self: *BeaconNode, io: std.Io, svc: *networking.P2pService) bool {
+    const direct_peers = self.node_options.direct_peers;
+    if (self.next_direct_peer_index >= direct_peers.len) return false;
+
+    const pm = self.peer_manager orelse return false;
+    // Keep dialing curated direct peers until startup has a small set of
+    // connected or in-flight peers. A single transient peer is usually not
+    // enough to cover PeerDAS column fetches after checkpoint sync.
+    const connected_peers = pm.peerCount();
+    const dialing_peers = pm.dialingPeerCount();
+    const desired_startup_peers = sync_mod.sync_types.MIN_PEERS_TO_SYNC;
+    if (connected_peers >= desired_startup_peers) return false;
+    if (connected_peers + dialing_peers >= desired_startup_peers) return false;
+
+    const addr_str = direct_peers[self.next_direct_peer_index];
+    self.next_direct_peer_index += 1;
+
+    std.log.debug("runtime direct peer bootstrap {d}/{d}: {s}", .{
+        self.next_direct_peer_index,
+        direct_peers.len,
+        addr_str,
+    });
+
+    dialDirectPeer(self, io, svc, addr_str) catch |err| {
+        std.log.warn("failed to dial direct peer {s}: {}", .{ addr_str, err });
+    };
+    return true;
 }
 
 fn currentNetworkSlot(self: *BeaconNode, io: std.Io) ?u64 {
@@ -757,7 +960,7 @@ fn syncnetsBytesFromSubnets(subnets: []const SubnetId) [1]u8 {
     return bytes;
 }
 
-fn syncGossipForkState(self: *BeaconNode, svc: *networking.P2pService) bool {
+fn syncGossipForkState(self: *BeaconNode, io: std.Io, svc: *networking.P2pService) bool {
     const slot = currentNetworkSlot(self, self.io) orelse return false;
     const epoch = computeEpochAtSlot(slot);
     const active = self.config.activeGossipForksAtEpoch(epoch, self.genesis_validators_root);
@@ -770,7 +973,7 @@ fn syncGossipForkState(self: *BeaconNode, svc: *networking.P2pService) bool {
         };
     }
 
-    svc.setActiveGossipForks(active_forks[0..active.count]) catch |err| {
+    svc.setActiveGossipForks(io, active_forks[0..active.count]) catch |err| {
         std.log.warn("Failed to update active gossip fork boundaries: {}", .{err});
         return false;
     };
@@ -781,10 +984,10 @@ fn syncGossipForkState(self: *BeaconNode, svc: *networking.P2pService) bool {
     return true;
 }
 
-fn syncSubnetState(self: *BeaconNode, svc: *networking.P2pService) bool {
+fn syncSubnetState(self: *BeaconNode, io: std.Io, svc: *networking.P2pService) bool {
     const subnet_service = self.subnet_service orelse return false;
     const slot = currentNetworkSlot(self, self.io) orelse return false;
-    var did_work = syncGossipForkState(self, svc);
+    var did_work = syncGossipForkState(self, io, svc);
     if (subnet_service.current_slot != slot) {
         subnet_service.onSlot(slot);
     }
@@ -820,13 +1023,13 @@ fn syncSubnetState(self: *BeaconNode, svc: *networking.P2pService) bool {
         if (should_subscribe == is_subscribed) continue;
 
         if (should_subscribe) {
-            svc.subscribeSubnet(.beacon_attestation, @intCast(subnet)) catch |err| {
+            svc.subscribeSubnet(io, .beacon_attestation, @intCast(subnet)) catch |err| {
                 std.log.warn("Failed to subscribe attestation subnet {d}: {}", .{ subnet, err });
                 continue;
             };
             self.gossip_attestation_subscriptions.set(subnet);
         } else {
-            svc.unsubscribeSubnet(.beacon_attestation, @intCast(subnet)) catch |err| {
+            svc.unsubscribeSubnet(io, .beacon_attestation, @intCast(subnet)) catch |err| {
                 std.log.warn("Failed to unsubscribe attestation subnet {d}: {}", .{ subnet, err });
                 continue;
             };
@@ -842,13 +1045,13 @@ fn syncSubnetState(self: *BeaconNode, svc: *networking.P2pService) bool {
         if (should_subscribe == is_subscribed) continue;
 
         if (should_subscribe) {
-            svc.subscribeSubnet(.sync_committee, @intCast(subnet)) catch |err| {
+            svc.subscribeSubnet(io, .sync_committee, @intCast(subnet)) catch |err| {
                 std.log.warn("Failed to subscribe sync subnet {d}: {}", .{ subnet, err });
                 continue;
             };
             self.gossip_sync_subscriptions.set(subnet);
         } else {
-            svc.unsubscribeSubnet(.sync_committee, @intCast(subnet)) catch |err| {
+            svc.unsubscribeSubnet(io, .sync_committee, @intCast(subnet)) catch |err| {
                 std.log.warn("Failed to unsubscribe sync subnet {d}: {}", .{ subnet, err });
                 continue;
             };
@@ -998,42 +1201,30 @@ fn runPeerManagerMaintenance(self: *BeaconNode, io: std.Io, svc: *networking.P2p
     };
     defer actions.deinit(self.allocator);
 
+    if (actions.peers_to_restatus.len > 0 or actions.peers_to_ping.len > 0) {
+        std.log.debug("Peer maintenance scheduled: restatus={d} ping={d}", .{
+            actions.peers_to_restatus.len,
+            actions.peers_to_ping.len,
+        });
+    }
+
     var did_work = false;
 
     for (actions.peers_to_restatus) |peer_id| {
-        const peer_status = sendStatus(self, io, svc, peer_id) catch |err| {
-            handleReqRespMaintenanceFailure(self, io, svc, peer_id, .status, err);
-            did_work = true;
-            continue;
-        };
-
-        if (reqresp_callbacks_mod.handlePeerStatus(self, peer_id, peer_status.status, peer_status.earliest_available_slot)) |_| {
-            sendGoodbyeAndDisconnect(self, io, svc, peer_id, .irrelevant_network);
-            did_work = true;
+        const peer = pm.getPeer(peer_id) orelse continue;
+        if (peer.last_status_exchange_ms == 0) {
+            did_work = schedulePeerReqResp(self, io, svc, peer_id, .full_handshake) or did_work;
             continue;
         }
 
-        did_work = true;
+        did_work = schedulePeerReqResp(self, io, svc, peer_id, .restatus) or did_work;
     }
 
     for (actions.peers_to_ping) |peer_id| {
-        const remote_seq = requestPeerPing(self, io, svc, peer_id) catch |err| {
-            handleReqRespMaintenanceFailure(self, io, svc, peer_id, .ping, err);
-            did_work = true;
-            continue;
-        };
-
-        pm.markPingResponse(peer_id, currentUnixTimeMs(io));
-        did_work = true;
-
         const peer = pm.getPeer(peer_id) orelse continue;
-        if (remote_seq == peer.metadata_seq) continue;
-
-        const metadata = requestPeerMetadata(self, io, svc, peer_id) catch |err| {
-            handleReqRespMaintenanceFailure(self, io, svc, peer_id, .metadata, err);
-            continue;
-        };
-        applyPeerMetadata(self, peer_id, metadata, currentUnixTimeMs(io));
+        did_work = schedulePeerReqResp(self, io, svc, peer_id, .{ .ping = .{
+            .known_metadata_seq = peer.metadata_seq,
+        } }) or did_work;
     }
 
     return did_work;
@@ -1042,7 +1233,8 @@ fn runPeerManagerMaintenance(self: *BeaconNode, io: std.Io, svc: *networking.P2p
 fn runRealtimeP2pTick(self: *BeaconNode, io: std.Io, svc: *networking.P2pService) bool {
     var did_work = false;
 
-    did_work = gossip_ingress_mod.processEvents(self, io, svc) > 0 or did_work;
+    did_work = drainCompletedDiscoveryDials(self, io, svc) or did_work;
+    did_work = drainCompletedPeerReqResp(self, io, svc) or did_work;
     did_work = self.processPendingExecutionForkchoiceUpdates() or did_work;
     did_work = self.processPendingExecutionPayloadVerifications() or did_work;
     did_work = self.processPendingBlockStateWork() or did_work;
@@ -1068,15 +1260,20 @@ fn runRealtimeP2pTick(self: *BeaconNode, io: std.Io, svc: *networking.P2pService
         };
     }
     self.unknown_block_sync.tick();
-    self.unknown_chain_sync.tick();
+    if (shouldDriveUnknownChainSync(self)) self.unknown_chain_sync.tick();
     did_work = self.drivePendingSyncSegments() or did_work;
 
-    maybeHandleForkTransition(self, svc);
+    maybeHandleForkTransition(self, io, svc);
 
     processSyncBatches(self, io, svc);
     processSyncByRootRequests(self, io, svc);
-    self.unknown_chain_sync.tick();
+    if (shouldDriveUnknownChainSync(self)) self.unknown_chain_sync.tick();
     processPendingLinkedChainImports(self, io, svc);
+
+    // Sync must not wait behind gossip ingress. During range sync gossip is
+    // gated anyway, and once synced the next tick still drains gossip promptly.
+    did_work = gossip_ingress_mod.processEvents(self, io, svc) > 0 or did_work;
+
     maybePrepareProposerPayload(self, io);
     pruneSyncCommitteePools(self);
     advanceChainClock(self, io);
@@ -1096,6 +1293,8 @@ fn runLoop(self: *BeaconNode, io: std.Io, svc: *networking.P2pService) void {
         const now_ns = std.Io.Timestamp.now(io, .awake).toNanoseconds();
         var did_work = false;
 
+        did_work = runRealtimeP2pTick(self, io, svc) or did_work;
+
         if (now_ns >= next_connectivity_maintenance_ns) {
             did_work = runConnectivityMaintenance(self, io, svc) or did_work;
             next_connectivity_maintenance_ns = now_ns + connectivity_maintenance_interval_ns;
@@ -1113,8 +1312,6 @@ fn runLoop(self: *BeaconNode, io: std.Io, svc: *networking.P2pService) void {
             next_peer_manager_heartbeat_ns = now_ns + peer_manager_heartbeat_interval_ns;
         }
 
-        did_work = runRealtimeP2pTick(self, io, svc) or did_work;
-
         if (now_ns >= next_metrics_sampling_ns) {
             updateSyncMetrics(self);
             updateRuntimeMetrics(self);
@@ -1129,7 +1326,7 @@ fn runLoop(self: *BeaconNode, io: std.Io, svc: *networking.P2pService) void {
     }
 }
 
-fn maybeHandleForkTransition(self: *BeaconNode, svc: *networking.P2pService) void {
+fn maybeHandleForkTransition(self: *BeaconNode, io: std.Io, svc: *networking.P2pService) void {
     const head_slot = self.currentHeadSlot();
     const current_fork_seq = self.config.forkSeq(head_slot);
     const current_digest = self.config.forkDigestAtSlot(
@@ -1146,7 +1343,7 @@ fn maybeHandleForkTransition(self: *BeaconNode, svc: *networking.P2pService) voi
             &last_digest_hex,
             &current_digest_hex,
         });
-        _ = syncGossipForkState(self, svc);
+        _ = syncGossipForkState(self, io, svc);
         if (self.gossip_handler) |gh| {
             gh.updateForkSeq(current_fork_seq);
         }
@@ -1497,8 +1694,15 @@ fn dialBootnodeEnr(self: *BeaconNode, io: std.Io, svc: *networking.P2pService, e
 
     const dial_addr = preferredBootnodeDialAddress(self, &enr) orelse return error.NoDialableAddressInEnr;
 
-    var ma_buf: [160]u8 = undefined;
-    const ma_str = try formatDiscv5DialMultiaddr(&ma_buf, dial_addr);
+    var bootnode_peer_id_text: ?[]u8 = null;
+    defer if (bootnode_peer_id_text) |peer_id| self.allocator.free(peer_id);
+
+    if (enr.pubkey) |pubkey| {
+        bootnode_peer_id_text = try discoveryPeerIdTextFromPubkey(self.allocator, pubkey);
+    }
+
+    var ma_buf: [240]u8 = undefined;
+    const ma_str = try formatDiscv5DialMultiaddr(&ma_buf, dial_addr, bootnode_peer_id_text);
 
     std.log.debug("Dialing bootnode at {s}", .{ma_str});
 
@@ -1506,6 +1710,8 @@ fn dialBootnodeEnr(self: *BeaconNode, io: std.Io, svc: *networking.P2pService, e
     defer peer_addr.deinit();
 
     const peer_id = svc.dial(io, peer_addr) catch |err| return err;
+    defer self.allocator.free(peer_id);
+
     std.log.debug("Connected to bootnode, peer_id: {s}", .{peer_id});
     _ = registerConnectedPeer(
         self,
@@ -1517,7 +1723,21 @@ fn dialBootnodeEnr(self: *BeaconNode, io: std.Io, svc: *networking.P2pService, e
             .{ .node_id = discv5.enr.nodeIdFromCompressedPubkey(&pubkey), .pubkey = pubkey }
         else
             null,
+        .none,
     );
+}
+
+fn dialDirectPeer(self: *BeaconNode, io: std.Io, svc: *networking.P2pService, addr_str: []const u8) !void {
+    std.log.debug("Dialing direct peer at {s}", .{addr_str});
+
+    const peer_addr = try Multiaddr.fromString(self.allocator, addr_str);
+    defer peer_addr.deinit();
+
+    const peer_id = try svc.dial(io, peer_addr);
+    defer self.allocator.free(peer_id);
+
+    std.log.debug("Connected to direct peer {s} via {s}", .{ peer_id, addr_str });
+    _ = registerConnectedPeer(self, io, svc, peer_id, .outbound, null, .status_only);
 }
 
 fn initDiscoveryService(self: *BeaconNode) !void {
@@ -1675,6 +1895,302 @@ fn discoveryDialBudget(self: *BeaconNode) u32 {
     return @min(max_discovery_dials_per_tick, pm.config.max_peers - occupied_peers);
 }
 
+fn incrementPendingDiscoveryDials(self: *BeaconNode, io: std.Io) void {
+    self.discovery_dial_mutex.lockUncancelable(io);
+    self.pending_discovery_dial_count += 1;
+    self.discovery_dial_mutex.unlock(io);
+}
+
+fn enqueueDiscoveryDialCompletion(self: *BeaconNode, io: std.Io, completion: DiscoveryDialCompletion) void {
+    var owned = completion;
+    self.discovery_dial_mutex.lockUncancelable(io);
+    defer self.discovery_dial_mutex.unlock(io);
+
+    self.pending_discovery_dial_count -|= 1;
+    self.completed_discovery_dials.append(self.allocator, owned) catch |err| {
+        std.log.warn("Failed to enqueue discovery dial completion: {}", .{err});
+        owned.deinit(self.allocator);
+    };
+}
+
+fn discoveryDialTask(
+    self: *BeaconNode,
+    io: std.Io,
+    svc: *networking.P2pService,
+    job: DiscoveryDialJob,
+) void {
+    const peer_addr = Multiaddr.fromString(self.allocator, job.ma_str) catch |err| {
+        enqueueDiscoveryDialCompletion(self, io, job.toFailure(err));
+        return;
+    };
+    defer peer_addr.deinit();
+
+    const peer_id = svc.dial(io, peer_addr) catch |err| {
+        enqueueDiscoveryDialCompletion(self, io, job.toFailure(err));
+        return;
+    };
+
+    enqueueDiscoveryDialCompletion(self, io, job.toSuccess(peer_id));
+}
+
+fn drainCompletedDiscoveryDials(
+    self: *BeaconNode,
+    io: std.Io,
+    svc: *networking.P2pService,
+) bool {
+    var completions = std.ArrayListUnmanaged(DiscoveryDialCompletion).empty;
+    self.discovery_dial_mutex.lockUncancelable(io);
+    if (self.completed_discovery_dials.items.len > 0) {
+        completions = self.completed_discovery_dials;
+        self.completed_discovery_dials = .empty;
+    }
+    self.discovery_dial_mutex.unlock(io);
+    defer {
+        for (completions.items) |*completion| {
+            completion.deinit(self.allocator);
+        }
+        completions.deinit(self.allocator);
+    }
+
+    if (completions.items.len == 0) return false;
+
+    var did_work = false;
+    const now_ms = currentUnixTimeMs(io);
+    for (completions.items) |*completion| {
+        switch (completion.*) {
+            .success => |success| {
+                if (self.peer_manager) |peer_manager| {
+                    if (!std.mem.eql(u8, success.predicted_peer_id, success.peer_id)) {
+                        notePeerDisconnected(self, peer_manager, success.predicted_peer_id, now_ms);
+                    }
+                }
+
+                std.log.debug("Connected to discovered peer {s} via {s}", .{ success.peer_id, success.ma_str });
+                did_work = registerConnectedPeer(
+                    self,
+                    io,
+                    svc,
+                    success.peer_id,
+                    .outbound,
+                    .{ .node_id = success.node_id, .pubkey = success.pubkey },
+                    .full,
+                ) or did_work;
+            },
+            .failure => |failure| {
+                if (self.peer_manager) |peer_manager| {
+                    notePeerDisconnected(self, peer_manager, failure.predicted_peer_id, now_ms);
+                }
+                std.log.debug("Discovered peer dial failed via {s}: {}", .{ failure.ma_str, failure.err });
+                did_work = true;
+            },
+        }
+    }
+    return did_work;
+}
+
+fn peerReqRespMetadataCompletion(metadata: PeerMetadataResponse) beacon_node_mod.PeerReqRespMetadata {
+    return .{
+        .metadata = metadata.metadata,
+        .custody_group_count = metadata.custody_group_count,
+    };
+}
+
+fn pendingPeerReqRespIndex(ids: []const []const u8, peer_id: []const u8) ?usize {
+    for (ids, 0..) |pending_peer_id, i| {
+        if (std.mem.eql(u8, pending_peer_id, peer_id)) return i;
+    }
+    return null;
+}
+
+fn markPendingPeerReqResp(self: *BeaconNode, io: std.Io, peer_id: []const u8) !bool {
+    const owned_peer_id = try self.allocator.dupe(u8, peer_id);
+    errdefer self.allocator.free(owned_peer_id);
+
+    self.peer_reqresp_mutex.lockUncancelable(io);
+    defer self.peer_reqresp_mutex.unlock(io);
+
+    if (pendingPeerReqRespIndex(self.pending_peer_reqresp_ids.items, peer_id) != null) {
+        self.allocator.free(owned_peer_id);
+        return false;
+    }
+
+    try self.pending_peer_reqresp_ids.append(self.allocator, owned_peer_id);
+    return true;
+}
+
+fn clearPendingPeerReqRespLocked(self: *BeaconNode, peer_id: []const u8) void {
+    const index = pendingPeerReqRespIndex(self.pending_peer_reqresp_ids.items, peer_id) orelse return;
+    const owned_peer_id = self.pending_peer_reqresp_ids.orderedRemove(index);
+    self.allocator.free(owned_peer_id);
+}
+
+fn clearPendingPeerReqResp(self: *BeaconNode, io: std.Io, peer_id: []const u8) void {
+    self.peer_reqresp_mutex.lockUncancelable(io);
+    defer self.peer_reqresp_mutex.unlock(io);
+    clearPendingPeerReqRespLocked(self, peer_id);
+}
+
+fn enqueuePeerReqRespCompletion(self: *BeaconNode, io: std.Io, completion: PeerReqRespCompletion) void {
+    var owned = completion;
+    self.peer_reqresp_mutex.lockUncancelable(io);
+    defer self.peer_reqresp_mutex.unlock(io);
+
+    self.completed_peer_reqresp.append(self.allocator, owned) catch |err| {
+        const peer_id = owned.peerId();
+        std.log.warn("Failed to enqueue peer req/resp completion for {s}: {}", .{ peer_id, err });
+        clearPendingPeerReqRespLocked(self, peer_id);
+        owned.deinit(self.allocator);
+    };
+}
+
+fn peerReqRespFailure(peer_id: []const u8, protocol: ReqRespMaintenanceProtocol, err: anyerror) PeerReqRespCompletion {
+    return .{ .failure = .{
+        .peer_id = peer_id,
+        .protocol = protocol,
+        .err = err,
+    } };
+}
+
+fn peerReqRespTask(
+    self: *BeaconNode,
+    io: std.Io,
+    svc: *networking.P2pService,
+    job: PeerReqRespJob,
+) void {
+    switch (job.kind) {
+        .status_only, .full_handshake, .restatus => {
+            const peer_status = sendStatus(self, io, svc, job.peer_id) catch |err| {
+                enqueuePeerReqRespCompletion(self, io, peerReqRespFailure(job.peer_id, .status, err));
+                return;
+            };
+
+            var metadata: ?beacon_node_mod.PeerReqRespMetadata = null;
+            const wants_metadata = switch (job.kind) {
+                .full_handshake => true,
+                else => false,
+            };
+            if (wants_metadata) {
+                if (requestPeerMetadataWithTimeout(self, io, svc, job.peer_id, optional_reqresp_timeout_ms)) |peer_metadata| {
+                    metadata = peerReqRespMetadataCompletion(peer_metadata);
+                } else |err| {
+                    std.log.debug("Peer metadata unavailable for {s}: {}; continuing handshake", .{ job.peer_id, err });
+                }
+            }
+
+            enqueuePeerReqRespCompletion(self, io, .{ .status = .{
+                .peer_id = job.peer_id,
+                .status = peer_status.status,
+                .earliest_available_slot = peer_status.earliest_available_slot,
+                .metadata = metadata,
+            } });
+        },
+        .ping => |ping| {
+            const remote_seq = requestPeerPing(self, io, svc, job.peer_id) catch |err| {
+                enqueuePeerReqRespCompletion(self, io, peerReqRespFailure(job.peer_id, .ping, err));
+                return;
+            };
+
+            var metadata: ?beacon_node_mod.PeerReqRespMetadata = null;
+            if (remote_seq != ping.known_metadata_seq) {
+                if (requestPeerMetadataWithTimeout(self, io, svc, job.peer_id, optional_reqresp_timeout_ms)) |peer_metadata| {
+                    metadata = peerReqRespMetadataCompletion(peer_metadata);
+                } else |err| {
+                    std.log.debug("Peer metadata refresh failed for {s}: {}; keeping peer connected", .{ job.peer_id, err });
+                }
+            }
+
+            enqueuePeerReqRespCompletion(self, io, .{ .ping = .{
+                .peer_id = job.peer_id,
+                .remote_seq = remote_seq,
+                .metadata = metadata,
+            } });
+        },
+    }
+}
+
+fn schedulePeerReqResp(
+    self: *BeaconNode,
+    io: std.Io,
+    svc: *networking.P2pService,
+    peer_id: []const u8,
+    kind: PeerReqRespJobKind,
+) bool {
+    if (!svc.isPeerConnected(peer_id)) return false;
+
+    const marked = markPendingPeerReqResp(self, io, peer_id) catch |err| {
+        std.log.warn("Failed to track pending peer req/resp work for {s}: {}", .{ peer_id, err });
+        return false;
+    };
+    if (!marked) return false;
+
+    const owned_peer_id = self.allocator.dupe(u8, peer_id) catch |err| {
+        clearPendingPeerReqResp(self, io, peer_id);
+        std.log.warn("Failed to allocate peer req/resp job for {s}: {}", .{ peer_id, err });
+        return false;
+    };
+
+    svc.spawnBackground(io, peerReqRespTask, .{ self, io, svc, PeerReqRespJob{
+        .peer_id = owned_peer_id,
+        .kind = kind,
+    } });
+    return true;
+}
+
+fn drainCompletedPeerReqResp(
+    self: *BeaconNode,
+    io: std.Io,
+    svc: *networking.P2pService,
+) bool {
+    var completions = std.ArrayListUnmanaged(PeerReqRespCompletion).empty;
+    self.peer_reqresp_mutex.lockUncancelable(io);
+    if (self.completed_peer_reqresp.items.len > 0) {
+        completions = self.completed_peer_reqresp;
+        self.completed_peer_reqresp = .empty;
+    }
+    self.peer_reqresp_mutex.unlock(io);
+    defer {
+        for (completions.items) |*completion| {
+            completion.deinit(self.allocator);
+        }
+        completions.deinit(self.allocator);
+    }
+
+    if (completions.items.len == 0) return false;
+
+    var did_work = false;
+    for (completions.items) |*completion| {
+        clearPendingPeerReqResp(self, io, completion.peerId());
+        switch (completion.*) {
+            .status => |status| {
+                if (reqresp_callbacks_mod.handlePeerStatus(self, status.peer_id, status.status, status.earliest_available_slot)) |_| {
+                    sendGoodbyeAndDisconnect(self, io, svc, status.peer_id, .irrelevant_network);
+                } else if (status.metadata) |metadata| {
+                    applyPeerMetadata(self, status.peer_id, .{
+                        .metadata = metadata.metadata,
+                        .custody_group_count = metadata.custody_group_count,
+                    }, currentUnixTimeMs(io));
+                }
+                did_work = true;
+            },
+            .ping => |ping| {
+                if (self.peer_manager) |pm| pm.markPingResponse(ping.peer_id, currentUnixTimeMs(io));
+                if (ping.metadata) |metadata| {
+                    applyPeerMetadata(self, ping.peer_id, .{
+                        .metadata = metadata.metadata,
+                        .custody_group_count = metadata.custody_group_count,
+                    }, currentUnixTimeMs(io));
+                }
+                did_work = true;
+            },
+            .failure => |failure| {
+                handleReqRespMaintenanceFailure(self, io, svc, failure.peer_id, failure.protocol, failure.err);
+                did_work = true;
+            },
+        }
+    }
+    return did_work;
+}
+
 fn dialDiscoveredPeers(
     self: *BeaconNode,
     io: std.Io,
@@ -1686,77 +2202,82 @@ fn dialDiscoveredPeers(
 
     const discovered_peers = ds.takeDiscoveredPeers(dial_budget);
     defer if (discovered_peers.len > 0) self.allocator.free(discovered_peers);
+    if (discovered_peers.len > 0) {
+        std.log.debug("dialDiscoveredPeers: evaluating {d} discovered peers", .{discovered_peers.len});
+    }
 
     var did_work = false;
     const pm = self.peer_manager;
     const now_ms = currentUnixTimeMs(io);
     for (discovered_peers) |peer| {
-        if (!peer.has_quic) continue;
+        if (!peer.has_quic) {
+            std.log.debug("dialDiscoveredPeers: skipping discovered peer without quic", .{});
+            continue;
+        }
         const dial_addr = preferredDiscoveredDialAddress(self, &peer) orelse continue;
 
-        var predicted_peer_id: ?[]u8 = null;
-        defer if (predicted_peer_id) |peer_id| self.allocator.free(peer_id);
-
-        if (discoveryIdentityKnown(.{ .node_id = peer.node_id, .pubkey = peer.pubkey })) {
-            predicted_peer_id = discoveryPeerIdTextFromPubkey(self.allocator, peer.pubkey) catch |err| {
-                std.log.debug("Failed to derive peer ID from discovered ENR: {}", .{err});
-                continue;
-            };
-
-            const peer_id = predicted_peer_id.?;
-            if (svc.isPeerConnected(peer_id)) continue;
-
-            if (pm) |peer_manager| {
-                if (peer_manager.getPeer(peer_id)) |existing| {
-                    switch (existing.connection_state) {
-                        .banned, .dialing, .connected, .disconnecting => continue,
-                        .disconnected => {},
-                    }
-                }
-            }
+        const identity = DiscoveryPeerIdentity{ .node_id = peer.node_id, .pubkey = peer.pubkey };
+        if (!discoveryIdentityKnown(identity)) {
+            std.log.debug("dialDiscoveredPeers: skipping discovered peer without secp256k1 identity", .{});
+            continue;
         }
 
-        var ma_buf: [160]u8 = undefined;
-        const ma_str = formatDiscv5DialMultiaddr(&ma_buf, dial_addr) catch continue;
-        const peer_addr = Multiaddr.fromString(self.allocator, ma_str) catch continue;
-        defer peer_addr.deinit();
+        const predicted_peer_id = discoveryPeerIdBytesFromPubkey(self.allocator, peer.pubkey) catch |err| {
+            std.log.debug("Failed to derive peer ID from discovered ENR: {}", .{err});
+            continue;
+        };
+
+        const predicted_peer_id_text = discoveryPeerIdTextFromPubkey(self.allocator, peer.pubkey) catch |err| {
+            std.log.debug("Failed to derive peer ID text from discovered ENR: {}", .{err});
+            self.allocator.free(predicted_peer_id);
+            continue;
+        };
+        defer self.allocator.free(predicted_peer_id_text);
+
+        if (svc.isPeerConnected(predicted_peer_id)) {
+            self.allocator.free(predicted_peer_id);
+            continue;
+        }
 
         if (pm) |peer_manager| {
-            if (predicted_peer_id) |known_peer_id| {
-                peer_manager.onDialing(known_peer_id, now_ms) catch |err| {
-                    std.log.debug("Failed to mark discovered peer {s} as dialing: {}", .{ known_peer_id, err });
-                    continue;
-                };
+            if (peer_manager.getPeer(predicted_peer_id)) |existing| {
+                switch (existing.connection_state) {
+                    .banned, .dialing, .connected, .disconnecting => {
+                        self.allocator.free(predicted_peer_id);
+                        continue;
+                    },
+                    .disconnected => {},
+                }
             }
         }
 
-        const peer_id = svc.dial(io, peer_addr) catch |err| {
-            if (pm) |peer_manager| {
-                if (predicted_peer_id) |known_peer_id| {
-                    notePeerDisconnected(self, peer_manager, known_peer_id, now_ms);
-                }
-            }
-            std.log.debug("Discovered peer dial failed: {}", .{err});
+        var ma_buf: [240]u8 = undefined;
+        const ma_str = formatDiscv5DialMultiaddr(&ma_buf, dial_addr, predicted_peer_id_text) catch {
+            self.allocator.free(predicted_peer_id);
+            continue;
+        };
+        const owned_ma_str = self.allocator.dupe(u8, ma_str) catch {
+            self.allocator.free(predicted_peer_id);
             continue;
         };
 
         if (pm) |peer_manager| {
-            if (predicted_peer_id) |known_peer_id| {
-                if (!std.mem.eql(u8, known_peer_id, peer_id)) {
-                    notePeerDisconnected(self, peer_manager, known_peer_id, now_ms);
-                }
-            }
+            peer_manager.onDialing(predicted_peer_id, now_ms) catch |err| {
+                std.log.debug("Failed to mark discovered peer {s} as dialing: {}", .{ predicted_peer_id, err });
+                self.allocator.free(owned_ma_str);
+                self.allocator.free(predicted_peer_id);
+                continue;
+            };
         }
 
-        std.log.debug("Connected to discovered peer {s} via {s}", .{ peer_id, ma_str });
-        did_work = registerConnectedPeer(
-            self,
-            io,
-            svc,
-            peer_id,
-            .outbound,
-            .{ .node_id = peer.node_id, .pubkey = peer.pubkey },
-        ) or did_work;
+        incrementPendingDiscoveryDials(self, io);
+        svc.spawnBackground(io, discoveryDialTask, .{ self, io, svc, DiscoveryDialJob{
+            .ma_str = owned_ma_str,
+            .predicted_peer_id = predicted_peer_id,
+            .node_id = peer.node_id,
+            .pubkey = peer.pubkey,
+        } });
+        did_work = true;
     }
 
     return did_work;
@@ -1766,9 +2287,9 @@ fn reconcilePeerConnections(self: *BeaconNode, io: std.Io, svc: *networking.P2pS
     const pm = self.peer_manager orelse return false;
 
     const connected_peer_ids = svc.snapshotConnectedPeerIds(self.allocator) catch |err| {
-            std.log.debug("Failed to snapshot connected peers: {}", .{err});
-            return false;
-        };
+        std.log.debug("Failed to snapshot connected peers: {}", .{err});
+        return false;
+    };
     defer freeOwnedPeerIds(self.allocator, connected_peer_ids);
 
     var did_work = false;
@@ -1806,7 +2327,7 @@ fn reconcilePeerConnections(self: *BeaconNode, io: std.Io, svc: *networking.P2pS
             peer.direction orelse .inbound
         else
             .inbound;
-        did_work = registerConnectedPeer(self, io, svc, peer_id, direction, null) or did_work;
+        did_work = registerConnectedPeer(self, io, svc, peer_id, direction, null, .full) or did_work;
     }
 
     const managed_peer_ids = pm.getConnectedPeerIds() catch |err| {
@@ -1833,6 +2354,7 @@ fn registerConnectedPeer(
     peer_id: []const u8,
     direction: ConnectionDirection,
     discovery_identity: ?DiscoveryPeerIdentity,
+    handshake_mode: OutboundHandshakeMode,
 ) bool {
     const pm = self.peer_manager orelse return maybeRecordPeerIdentity(self, svc, peer_id);
     const now_ms = currentUnixTimeMs(io);
@@ -1879,11 +2401,22 @@ fn registerConnectedPeer(
             std.log.debug("Failed to record discovery node ID for peer {s}: {}", .{ peer_id, err });
         };
     }
+    recordPeerNodeIdFromPeerId(pm, peer_id);
 
     var did_work = !was_connected;
     if (!was_connected) {
+        if (self.sync_callback_ctx) |cb_ctx| cb_ctx.notePeerConnected(peer_id);
         if (self.metrics) |metrics| metrics.peer_connected_total.incr();
-        did_work = completePeerHandshake(self, io, svc, peer_id) or did_work;
+        // Mirror Lodestar's connect path: kick the initial req/resp handshake
+        // immediately for fresh outbound peers, but keep the actual req/resp I/O
+        // off the main node loop so sync imports are not blocked behind Status.
+        if (connect_direction == .outbound) {
+            switch (handshake_mode) {
+                .none => {},
+                .status_only => did_work = schedulePeerReqResp(self, io, svc, peer_id, .status_only) or did_work,
+                .full => did_work = schedulePeerReqResp(self, io, svc, peer_id, .full_handshake) or did_work,
+            }
+        }
     }
 
     did_work = maybeRecordPeerIdentity(self, svc, peer_id) or did_work;
@@ -1896,25 +2429,34 @@ fn completePeerHandshake(
     svc: *networking.P2pService,
     peer_id: []const u8,
 ) bool {
+    if (!bootstrapPeerStatusHandshake(self, io, svc, peer_id)) {
+        return true;
+    }
+
+    if (requestPeerMetadataWithTimeout(self, io, svc, peer_id, optional_reqresp_timeout_ms)) |metadata| {
+        applyPeerMetadata(self, peer_id, metadata, currentUnixTimeMs(io));
+    } else |err| {
+        std.log.debug("Peer metadata unavailable for {s}: {}; continuing handshake", .{ peer_id, err });
+    }
+    return true;
+}
+
+fn bootstrapPeerStatusHandshake(
+    self: *BeaconNode,
+    io: std.Io,
+    svc: *networking.P2pService,
+    peer_id: []const u8,
+) bool {
     const peer_status = sendStatus(self, io, svc, peer_id) catch |err| {
         handleReqRespMaintenanceFailure(self, io, svc, peer_id, .status, err);
-        return true;
+        return false;
     };
 
     if (reqresp_callbacks_mod.handlePeerStatus(self, peer_id, peer_status.status, peer_status.earliest_available_slot)) |_| {
         sendGoodbyeAndDisconnect(self, io, svc, peer_id, .irrelevant_network);
-        return true;
+        return false;
     }
 
-    const metadata = requestPeerMetadata(self, io, svc, peer_id) catch |err| {
-        handleReqRespMaintenanceFailure(self, io, svc, peer_id, .metadata, err);
-        return true;
-    };
-    applyPeerMetadata(self, peer_id, metadata, currentUnixTimeMs(io));
-
-    svc.openGossipsubStream(io, peer_id) catch |err| {
-        std.log.debug("Failed to open outbound gossipsub stream to {s}: {}", .{ peer_id, err });
-    };
     return true;
 }
 
@@ -1935,8 +2477,16 @@ fn maybeRecordPeerIdentity(
     return true;
 }
 
+fn recordPeerNodeIdFromPeerId(pm: *PeerManager, peer_id: []const u8) void {
+    const node_id = nodeIdFromInlineSecp256k1PeerId(peer_id) orelse return;
+    pm.updatePeerDiscoveryNodeId(peer_id, node_id) catch |err| {
+        std.log.debug("Failed to derive discovery node ID for peer {s}: {}", .{ peer_id, err });
+    };
+}
+
 fn applyPeerMetadata(self: *BeaconNode, peer_id: []const u8, metadata: PeerMetadataResponse, now_ms: u64) void {
     const pm = self.peer_manager orelse return;
+    recordPeerNodeIdFromPeerId(pm, peer_id);
     pm.updatePeerMetadata(
         peer_id,
         metadata.metadata.seq_number,
@@ -1948,6 +2498,28 @@ fn applyPeerMetadata(self: *BeaconNode, peer_id: []const u8, metadata: PeerMetad
         return;
     };
     pm.notePeerSeen(peer_id, now_ms);
+
+    if (pm.getPeer(peer_id)) |peer| {
+        const custody_columns = peer.custody_columns orelse &.{};
+        var local_overlap: usize = 0;
+        for (self.chain_runtime.custody_columns) |column_index| {
+            if (networking.custody.isCustodied(column_index, custody_columns)) {
+                local_overlap += 1;
+            }
+        }
+
+        std.log.debug(
+            "Applied peer metadata {s}: seq={d} custody_group_count={any} custody_columns={d} local_overlap={d}/{d}",
+            .{
+                peer_id,
+                metadata.metadata.seq_number,
+                metadata.custody_group_count,
+                custody_columns.len,
+                local_overlap,
+                self.chain_runtime.custody_columns.len,
+            },
+        );
+    }
 }
 
 fn sendGoodbyeAndDisconnect(
@@ -1972,8 +2544,11 @@ fn heartbeatDisconnectReason(maybe_peer: ?*const networking.PeerInfo) GoodbyeRea
     };
 }
 
-fn notePeerDisconnected(_: *BeaconNode, pm: *PeerManager, peer_id: []const u8, now_ms: u64) void {
+fn notePeerDisconnected(self: *BeaconNode, pm: *PeerManager, peer_id: []const u8, now_ms: u64) void {
     pm.onPeerDisconnected(peer_id, now_ms);
+    if (self.sync_callback_ctx) |cb_ctx| cb_ctx.notePeerDisconnected(peer_id);
+    if (self.sync_service_inst) |sync_svc| sync_svc.onPeerDisconnect(peer_id);
+    self.unknown_chain_sync.onPeerDisconnected(peer_id);
 }
 
 fn containsPeerId(peer_ids: []const []const u8, needle: []const u8) bool {
@@ -1995,6 +2570,7 @@ fn initPeerManager(self: *BeaconNode) !void {
     errdefer self.allocator.destroy(pm);
     pm.* = PeerManager.init(self.allocator, .{
         .target_peers = self.node_options.target_peers,
+        .max_peers = networking.peer_manager.maxPeersForTarget(self.node_options.target_peers),
         .target_group_peers = self.node_options.target_group_peers,
         .local_custody_columns = self.chain_runtime.custody_columns,
     });
@@ -2016,14 +2592,19 @@ fn initSyncPipeline(self: *BeaconNode) !void {
     self.unknown_chain_sync.setCallbacks(cb_ctx.unknownChainCallbacks());
     self.unknown_chain_sync.setForkChoice(cb_ctx.unknownChainForkChoiceQuery());
 
-    if (self.sync_service_inst != null) return;
+    const finalized_epoch = self.chainQuery().finalizedCheckpoint().epoch;
+    if (self.sync_service_inst) |sync_svc| {
+        sync_svc.onHeadUpdate(self.currentHeadSlot());
+        sync_svc.onFinalizedUpdate(finalized_epoch);
+        return;
+    }
 
     const sync_svc = try self.allocator.create(SyncService);
     sync_svc.* = SyncService.init(
         self.allocator,
         cb_ctx.syncServiceCallbacks(),
         self.currentHeadSlot(),
-        self.getHead().finalized_epoch,
+        finalized_epoch,
     );
     sync_svc.is_single_node = self.node_options.sync_is_single_node;
     if (sync_svc.is_single_node) {
@@ -2239,11 +2820,28 @@ fn fetchBlobSidecarsByRangeForMetas(
             var owned_ready = ready;
             owned_ready.deinit(self.allocator);
         }
+    }
 
+    var last_err: ?anyerror = null;
+    for (metas) |meta| {
+        if (!needsBlobFetch(meta)) continue;
         if (self.chainService().dataAvailabilityStatusForBlock(meta.block_root, meta.any_signed) == .pending) {
-            return error.MissingBlobSidecar;
+            const missing = try self.chainService().missingBlobSidecars(self.allocator, meta.block_root);
+            defer self.allocator.free(missing);
+            if (missing.len == 0) continue;
+
+            fetchBlobSidecarsByRootForMeta(self, io, svc, peer_id, meta, missing) catch |err| {
+                last_err = err;
+                continue;
+            };
+
+            if (self.chainService().dataAvailabilityStatusForBlock(meta.block_root, meta.any_signed) == .pending) {
+                last_err = error.MissingBlobSidecar;
+            }
         }
     }
+
+    if (last_err) |err| return err;
 
     request_outcome = .success;
 }
@@ -2395,6 +2993,11 @@ fn fetchDataColumnsByRangeForMetas(
         if (missing_after >= missing_before) continue;
     }
 
+    fetchDataColumnsByRootForMetas(self, io, svc, preferred_peer_id, metas) catch |err| {
+        last_err = err;
+    };
+
+    if (try countMissingDataColumnsForMetas(self, metas) == 0) return;
     return last_err orelse error.MissingDataColumnSidecar;
 }
 
@@ -2414,9 +3017,20 @@ fn fetchDataColumnsByRangeOnce(
     var request_outcome: networking.ReqRespRequestOutcome = .transport_error;
     defer outbound.finish(io, request_outcome);
 
-    const request_bytes = try self.allocator.alloc(u8, networking.messages.DataColumnSidecarsByRangeRequest.serializedSize(request));
+    const covered_columns = try dataColumnsCoveredByPeer(self, peer_id, request.columns.items);
+    defer self.allocator.free(covered_columns);
+    if (covered_columns.len == 0) return error.MissingDataColumnSidecar;
+
+    var filtered_request = request.*;
+    filtered_request.columns = .empty;
+    defer networking.messages.DataColumnSidecarsByRangeRequest.deinit(self.allocator, &filtered_request);
+    for (covered_columns) |column_index| {
+        try filtered_request.columns.append(self.allocator, column_index);
+    }
+
+    const request_bytes = try self.allocator.alloc(u8, networking.messages.DataColumnSidecarsByRangeRequest.serializedSize(&filtered_request));
     defer self.allocator.free(request_bytes);
-    _ = networking.messages.DataColumnSidecarsByRangeRequest.serializeIntoBytes(request, request_bytes);
+    _ = networking.messages.DataColumnSidecarsByRangeRequest.serializeIntoBytes(&filtered_request, request_bytes);
     try req_resp_encoding.writeRequestToStream(self.allocator, io, &outbound.stream, request_bytes);
     outbound.stream.closeWrite(io);
     request_outcome = .malformed_response;
@@ -2533,6 +3147,232 @@ fn fetchDataColumnsByRootForMeta(
     return last_err orelse error.MissingDataColumnSidecar;
 }
 
+const DataColumnByRootBatchRequest = struct {
+    start_slot: u64,
+    end_slot: u64,
+    missing_columns: []u64,
+    request_bytes: []u8,
+
+    fn deinit(self: *DataColumnByRootBatchRequest, allocator: std.mem.Allocator) void {
+        allocator.free(self.missing_columns);
+        allocator.free(self.request_bytes);
+    }
+};
+
+fn fetchDataColumnsByRootForMetas(
+    self: *BeaconNode,
+    io: std.Io,
+    svc: *networking.P2pService,
+    preferred_peer_id: []const u8,
+    metas: []const SyncBlockMeta,
+) !void {
+    var attempted_peers = std.ArrayListUnmanaged([]const u8).empty;
+    defer {
+        for (attempted_peers.items) |peer_id| self.allocator.free(peer_id);
+        attempted_peers.deinit(self.allocator);
+    }
+
+    var last_err: ?anyerror = null;
+
+    while (true) {
+        const missing_before = try countMissingDataColumnsForMetas(self, metas);
+        if (missing_before == 0) return;
+
+        var request = (try buildDataColumnsByRootBatchRequest(self, metas, null)) orelse return;
+        defer request.deinit(self.allocator);
+
+        const selected_peer = try selectDataColumnFetchPeer(
+            self,
+            request.missing_columns,
+            request.start_slot,
+            request.end_slot,
+            preferred_peer_id,
+            attempted_peers.items,
+        ) orelse break;
+        errdefer self.allocator.free(selected_peer);
+        try attempted_peers.append(self.allocator, selected_peer);
+
+        const covered_columns = try dataColumnsCoveredByPeer(self, selected_peer, request.missing_columns);
+        defer self.allocator.free(covered_columns);
+        if (covered_columns.len == 0) {
+            last_err = error.MissingDataColumnSidecar;
+            continue;
+        }
+
+        var filtered_request = (try buildDataColumnsByRootBatchRequest(self, metas, covered_columns)) orelse {
+            last_err = error.MissingDataColumnSidecar;
+            continue;
+        };
+        defer filtered_request.deinit(self.allocator);
+
+        fetchDataColumnsByRootOnceForMetas(self, io, svc, selected_peer, metas, filtered_request.request_bytes) catch |err| {
+            std.log.debug("Data column by-root batch fetch failed from peer {s}: {}", .{ selected_peer, err });
+            last_err = err;
+            continue;
+        };
+
+        const missing_after = try countMissingDataColumnsForMetas(self, metas);
+        if (missing_after == 0) return;
+        if (missing_after >= missing_before) continue;
+    }
+
+    return last_err orelse error.MissingDataColumnSidecar;
+}
+
+fn buildDataColumnsByRootBatchRequest(
+    self: *BeaconNode,
+    metas: []const SyncBlockMeta,
+    only_columns: ?[]const u64,
+) !?DataColumnByRootBatchRequest {
+    var requested_columns = std.StaticBitSet(MAX_COLUMNS).initEmpty();
+    var start_slot: u64 = std.math.maxInt(u64);
+    var end_slot: u64 = 0;
+    var request: DataColumnSidecarsByRootRequest.Type = .empty;
+    defer DataColumnSidecarsByRootRequest.deinit(self.allocator, &request);
+
+    for (metas) |meta| {
+        if (!needsColumnFetch(meta)) continue;
+
+        const missing = try self.chainService().missingDataColumns(self.allocator, meta.block_root);
+        defer self.allocator.free(missing);
+        if (missing.len == 0) continue;
+
+        var identifier: DataColumnsByRootIdentifier.Type = .{
+            .block_root = meta.block_root,
+            .columns = .empty,
+        };
+        errdefer DataColumnsByRootIdentifier.deinit(self.allocator, &identifier);
+
+        for (missing) |column_index| {
+            if (only_columns) |columns| {
+                if (!containsColumnIndex(columns, column_index)) continue;
+            }
+            try identifier.columns.append(self.allocator, column_index);
+            if (column_index < MAX_COLUMNS) {
+                requested_columns.set(@intCast(column_index));
+            }
+        }
+
+        if (identifier.columns.items.len == 0) {
+            DataColumnsByRootIdentifier.deinit(self.allocator, &identifier);
+            continue;
+        }
+
+        start_slot = @min(start_slot, meta.slot);
+        end_slot = @max(end_slot, meta.slot);
+        try request.append(self.allocator, identifier);
+    }
+
+    if (request.items.len == 0) return null;
+
+    var missing_columns = std.ArrayListUnmanaged(u64).empty;
+    defer missing_columns.deinit(self.allocator);
+    for (0..MAX_COLUMNS) |column_index| {
+        if (requested_columns.isSet(column_index)) {
+            try missing_columns.append(self.allocator, @intCast(column_index));
+        }
+    }
+    if (missing_columns.items.len == 0) return null;
+
+    const request_bytes = try self.allocator.alloc(u8, DataColumnSidecarsByRootRequest.serializedSize(&request));
+    errdefer self.allocator.free(request_bytes);
+    _ = DataColumnSidecarsByRootRequest.serializeIntoBytes(&request, request_bytes);
+
+    return .{
+        .start_slot = start_slot,
+        .end_slot = end_slot,
+        .missing_columns = try missing_columns.toOwnedSlice(self.allocator),
+        .request_bytes = request_bytes,
+    };
+}
+
+fn fetchDataColumnsByRootOnceForMetas(
+    self: *BeaconNode,
+    io: std.Io,
+    svc: *networking.P2pService,
+    peer_id: []const u8,
+    metas: []const SyncBlockMeta,
+    request_bytes: []const u8,
+) !void {
+    const protocol_id = "/eth2/beacon_chain/req/data_column_sidecars_by_root/1/ssz_snappy";
+    const req_resp_encoding = networking.req_resp_encoding;
+
+    var outbound = try openReqRespRequest(self, io, svc, peer_id, .data_column_sidecars_by_root, protocol_id);
+    defer outbound.deinit(io);
+    var request_outcome: networking.ReqRespRequestOutcome = .transport_error;
+    defer outbound.finish(io, request_outcome);
+
+    try req_resp_encoding.writeRequestToStream(self.allocator, io, &outbound.stream, request_bytes);
+    outbound.stream.closeWrite(io);
+    request_outcome = .malformed_response;
+
+    var seen_columns = try self.allocator.alloc(std.StaticBitSet(MAX_COLUMNS), metas.len);
+    defer self.allocator.free(seen_columns);
+    for (seen_columns) |*bits| bits.* = std.StaticBitSet(MAX_COLUMNS).initEmpty();
+
+    var reader = req_resp_encoding.ResponseChunkStreamReader{
+        .allocator = self.allocator,
+        .has_context_bytes = true,
+    };
+    defer reader.deinit();
+
+    while (try reader.next(io, &outbound.stream)) |decoded| {
+        if (decoded.result != .success) {
+            self.allocator.free(decoded.ssz_bytes);
+            request_outcome = responseCodeOutcome(decoded.result);
+            return responseCodeError(decoded.result);
+        }
+        defer self.allocator.free(decoded.ssz_bytes);
+
+        var sidecar = DataColumnSidecar.default_value;
+        DataColumnSidecar.deserializeFromBytes(self.allocator, decoded.ssz_bytes, &sidecar) catch return error.MalformedDataColumnSidecar;
+        defer DataColumnSidecar.deinit(self.allocator, &sidecar);
+
+        const slot = sidecar.signed_block_header.message.slot;
+        const context_bytes = decoded.context_bytes orelse return error.MissingContextBytes;
+        const expected_digest = self.config.forkDigestAtSlot(slot, self.genesis_validators_root);
+        if (!std.mem.eql(u8, &context_bytes, &expected_digest)) return error.ForkDigestMismatch;
+
+        var block_root: [32]u8 = undefined;
+        try types.phase0.BeaconBlockHeader.hashTreeRoot(&sidecar.signed_block_header.message, &block_root);
+
+        const meta_index = findMetaIndexByRoot(metas, block_root) orelse return error.UnexpectedDataColumnSidecar;
+        const meta = metas[meta_index];
+        if (!needsColumnFetch(meta)) continue;
+
+        const blob_commitments = try meta.any_signed.beaconBlock().beaconBlockBody().blobKzgCommitments();
+        if (slot != meta.slot) return error.UnexpectedColumnSlot;
+        if (sidecar.index >= MAX_COLUMNS) return error.InvalidColumnIndex;
+        if (seen_columns[meta_index].isSet(@intCast(sidecar.index))) continue;
+        seen_columns[meta_index].set(@intCast(sidecar.index));
+
+        if (sidecar.kzg_commitments.items.len != blob_commitments.items.len) return error.KzgCommitmentLengthMismatch;
+        if (sidecar.column.items.len != blob_commitments.items.len) return error.ColumnLengthMismatch;
+        if (sidecar.kzg_proofs.items.len != blob_commitments.items.len) return error.ColumnProofLengthMismatch;
+
+        for (blob_commitments.items, sidecar.kzg_commitments.items) |expected_commitment, actual_commitment| {
+            if (!std.mem.eql(u8, &expected_commitment, &actual_commitment)) {
+                return error.KzgCommitmentMismatch;
+            }
+        }
+
+        try self.chainService().verifyDataColumnSidecar(
+            self.allocator,
+            sidecar.index,
+            sidecar.kzg_commitments.items,
+            sidecar.column.items,
+            sidecar.kzg_proofs.items,
+        );
+
+        if (try self.chainService().ingestDataColumnSidecar(block_root, sidecar.index, slot, decoded.ssz_bytes)) |ready| {
+            var owned_ready = ready;
+            owned_ready.deinit(self.allocator);
+        }
+    }
+
+    request_outcome = .success;
+}
+
 fn fetchDataColumnsByRootOnce(
     self: *BeaconNode,
     io: std.Io,
@@ -2541,18 +3381,9 @@ fn fetchDataColumnsByRootOnce(
     meta: SyncBlockMeta,
     missing: []const u64,
 ) !void {
-    var request_bytes = try self.allocator.alloc(u8, missing.len * networking.messages.DataColumnIdentifier.fixed_size);
-    defer self.allocator.free(request_bytes);
-    for (missing, 0..) |column_index, i| {
-        const identifier = networking.messages.DataColumnIdentifier.Type{
-            .block_root = meta.block_root,
-            .index = column_index,
-        };
-        _ = networking.messages.DataColumnIdentifier.serializeIntoBytes(
-            &identifier,
-            request_bytes[i * networking.messages.DataColumnIdentifier.fixed_size ..][0..networking.messages.DataColumnIdentifier.fixed_size],
-        );
-    }
+    const covered_missing = try dataColumnsCoveredByPeer(self, peer_id, missing);
+    defer self.allocator.free(covered_missing);
+    if (covered_missing.len == 0) return error.MissingDataColumnSidecar;
 
     const protocol_id = "/eth2/beacon_chain/req/data_column_sidecars_by_root/1/ssz_snappy";
     const req_resp_encoding = networking.req_resp_encoding;
@@ -2561,6 +3392,23 @@ fn fetchDataColumnsByRootOnce(
     defer outbound.deinit(io);
     var request_outcome: networking.ReqRespRequestOutcome = .transport_error;
     defer outbound.finish(io, request_outcome);
+
+    var request: DataColumnSidecarsByRootRequest.Type = .empty;
+    defer DataColumnSidecarsByRootRequest.deinit(self.allocator, &request);
+
+    {
+        var identifier: DataColumnsByRootIdentifier.Type = .{
+            .block_root = meta.block_root,
+            .columns = .empty,
+        };
+        errdefer DataColumnsByRootIdentifier.deinit(self.allocator, &identifier);
+        try identifier.columns.appendSlice(self.allocator, covered_missing);
+        try request.append(self.allocator, identifier);
+    }
+
+    const request_bytes = try self.allocator.alloc(u8, DataColumnSidecarsByRootRequest.serializedSize(&request));
+    defer self.allocator.free(request_bytes);
+    _ = DataColumnSidecarsByRootRequest.serializeIntoBytes(&request, request_bytes);
 
     try req_resp_encoding.writeRequestToStream(self.allocator, io, &outbound.stream, request_bytes);
     outbound.stream.closeWrite(io);
@@ -2702,6 +3550,38 @@ fn selectDataColumnFetchPeer(
 
     if (containsPeerId(excluded_peer_ids, preferred_peer_id)) return null;
     return try self.allocator.dupe(u8, preferred_peer_id);
+}
+
+fn dataColumnsCoveredByPeer(
+    self: *BeaconNode,
+    peer_id: []const u8,
+    columns: []const u64,
+) ![]u64 {
+    if (columns.len == 0) return self.allocator.alloc(u64, 0);
+
+    if (self.peer_manager) |pm| {
+        if (pm.getPeer(peer_id)) |peer| {
+            if (peer.custody_columns) |custody_columns| {
+                var covered = std.ArrayListUnmanaged(u64).empty;
+                errdefer covered.deinit(self.allocator);
+                for (columns) |column_index| {
+                    if (networking.custody.isCustodied(column_index, custody_columns)) {
+                        try covered.append(self.allocator, column_index);
+                    }
+                }
+                return try covered.toOwnedSlice(self.allocator);
+            }
+        }
+    }
+
+    return try self.allocator.dupe(u64, columns);
+}
+
+fn containsColumnIndex(columns: []const u64, needle: u64) bool {
+    for (columns) |column_index| {
+        if (column_index == needle) return true;
+    }
+    return false;
 }
 
 fn needsBlobFetch(meta: SyncBlockMeta) bool {
@@ -2875,7 +3755,16 @@ fn fetchRawBlocksByRange(
     var previous_slot: ?u64 = null;
 
     while (blocks_received < count) {
-        const decoded = (try reader.next(io, &outbound.stream)) orelse break;
+        const decoded = reader.next(io, &outbound.stream) catch |err| {
+            if (err == error.UnexpectedEof and result.items.len > 0) {
+                std.log.debug("blocks-by-range from {s}: salvaging {d} block(s) after unexpected EOF", .{
+                    peer_id,
+                    result.items.len,
+                });
+                break;
+            }
+            return err;
+        } orelse break;
         if (decoded.result != .success) {
             self.allocator.free(decoded.ssz_bytes);
             request_outcome = responseCodeOutcome(decoded.result);
@@ -2941,13 +3830,17 @@ fn sendStatus(
     defer outbound.finish(io, request_outcome);
 
     const our_status = self.getStatus();
-    std.log.debug("Sending Status: fork_digest={x:0>2}{x:0>2}{x:0>2}{x:0>2} head_slot={d} finalized_epoch={d}", .{
+    std.log.debug("Sending Status to {s}: fork_digest={x:0>2}{x:0>2}{x:0>2}{x:0>2} head_slot={d} finalized_epoch={d} finalized_root={s} head_root={s} earliest_available_slot={d}", .{
+        peer_id,
         our_status.fork_digest[0],
         our_status.fork_digest[1],
         our_status.fork_digest[2],
         our_status.fork_digest[3],
         our_status.head_slot,
         our_status.finalized_epoch,
+        std.fmt.bytesToHex(our_status.finalized_root[0..4], .lower),
+        std.fmt.bytesToHex(our_status.head_root[0..4], .lower),
+        self.earliest_available_slot,
     });
 
     if (use_status_v2) {
@@ -2995,13 +3888,16 @@ fn sendStatus(
             return err;
         };
 
-        std.log.debug("Peer StatusV2: fork_digest={x:0>2}{x:0>2}{x:0>2}{x:0>2} head_slot={d} finalized_epoch={d} earliest_available_slot={d}", .{
+        std.log.debug("Peer StatusV2 from {s}: fork_digest={x:0>2}{x:0>2}{x:0>2}{x:0>2} head_slot={d} finalized_epoch={d} finalized_root={s} head_root={s} earliest_available_slot={d}", .{
+            peer_id,
             peer_status_v2.fork_digest[0],
             peer_status_v2.fork_digest[1],
             peer_status_v2.fork_digest[2],
             peer_status_v2.fork_digest[3],
             peer_status_v2.head_slot,
             peer_status_v2.finalized_epoch,
+            std.fmt.bytesToHex(peer_status_v2.finalized_root[0..4], .lower),
+            std.fmt.bytesToHex(peer_status_v2.head_root[0..4], .lower),
             peer_status_v2.earliest_available_slot,
         });
 
@@ -3024,7 +3920,8 @@ fn sendStatus(
         return err;
     };
 
-    std.log.debug("Peer Status: fork_digest={x:0>2}{x:0>2}{x:0>2}{x:0>2} head_slot={d} finalized_epoch={d} finalized_root={x:0>2}{x:0>2}{x:0>2}{x:0>2}...", .{
+    std.log.debug("Peer Status from {s}: fork_digest={x:0>2}{x:0>2}{x:0>2}{x:0>2} head_slot={d} finalized_epoch={d} finalized_root={x:0>2}{x:0>2}{x:0>2}{x:0>2}...", .{
+        peer_id,
         peer_status.fork_digest[0],
         peer_status.fork_digest[1],
         peer_status.fork_digest[2],
@@ -3091,10 +3988,85 @@ fn requestPeerMetadata(
 ) !PeerMetadataResponse {
     const current_fork_seq = self.config.forkSeq(self.currentHeadSlot());
     const use_metadata_v3 = current_fork_seq.gte(.fulu);
-    const metadata_protocol_id = if (use_metadata_v3)
-        "/eth2/beacon_chain/req/metadata/3/ssz_snappy"
-    else
-        "/eth2/beacon_chain/req/metadata/2/ssz_snappy";
+
+    if (!use_metadata_v3) {
+        return requestPeerMetadataAttempt(self, io, svc, peer_id, "/eth2/beacon_chain/req/metadata/2/ssz_snappy", false);
+    }
+
+    return requestPeerMetadataAttempt(self, io, svc, peer_id, "/eth2/beacon_chain/req/metadata/3/ssz_snappy", true);
+}
+
+const MetadataRequestResult = union(enum) {
+    success: PeerMetadataResponse,
+    failure: anyerror,
+    canceled,
+};
+
+const MetadataRequestEvent = union(enum) {
+    metadata: MetadataRequestResult,
+    timeout: ReqRespTimerResult,
+};
+
+fn requestPeerMetadataTask(
+    self: *BeaconNode,
+    io: std.Io,
+    svc: *networking.P2pService,
+    peer_id: []const u8,
+) MetadataRequestResult {
+    const metadata = requestPeerMetadata(self, io, svc, peer_id) catch |err| switch (err) {
+        error.Canceled => return .canceled,
+        else => return .{ .failure = err },
+    };
+    return .{ .success = metadata };
+}
+
+fn requestPeerMetadataWithTimeout(
+    self: *BeaconNode,
+    io: std.Io,
+    svc: *networking.P2pService,
+    peer_id: []const u8,
+    timeout_ms: u64,
+) !PeerMetadataResponse {
+    var events_buf: [2]MetadataRequestEvent = undefined;
+    var select = std.Io.Select(MetadataRequestEvent).init(io, &events_buf);
+    errdefer while (select.cancel()) |_| {};
+
+    try select.concurrent(.metadata, requestPeerMetadataTask, .{ self, io, svc, peer_id });
+    select.async(.timeout, waitReqRespTimeout, .{ io, .{ .duration = .{
+        .raw = std.Io.Duration.fromMilliseconds(@intCast(timeout_ms)),
+        .clock = .awake,
+    } } });
+
+    while (true) {
+        const event = try select.await();
+        switch (event) {
+            .metadata => |result| {
+                while (select.cancel()) |_| {}
+                return switch (result) {
+                    .success => |metadata| metadata,
+                    .failure => |err| err,
+                    .canceled => error.Canceled,
+                };
+            },
+            .timeout => |result| switch (result) {
+                .fired => {
+                    while (select.cancel()) |_| {}
+                    return error.Timeout;
+                },
+                .canceled => {},
+            },
+        }
+    }
+}
+
+fn requestPeerMetadataAttempt(
+    self: *BeaconNode,
+    io: std.Io,
+    svc: *networking.P2pService,
+    peer_id: []const u8,
+    metadata_protocol_id: []const u8,
+    expect_metadata_v3: bool,
+) !PeerMetadataResponse {
     const req_resp_encoding = networking.req_resp_encoding;
 
     var outbound = try openReqRespRequest(self, io, svc, peer_id, .metadata, metadata_protocol_id);
@@ -3112,7 +4084,28 @@ fn requestPeerMetadata(
     };
     defer reader.deinit();
 
-    const decoded = (try reader.next(io, &outbound.stream)) orelse return error.EmptyResponse;
+    const decoded = (reader.next(io, &outbound.stream) catch |err| {
+        std.log.debug(
+            "Metadata reader failed for {s}: {} buffered={d} eof={}",
+            .{
+                peer_id,
+                err,
+                reader.buffer.items.len,
+                reader.reached_eof,
+            },
+        );
+        return err;
+    }) orelse {
+        std.log.debug(
+            "Metadata peer sent empty response for {s} buffered={d} eof={}",
+            .{
+                peer_id,
+                reader.buffer.items.len,
+                reader.reached_eof,
+            },
+        );
+        return error.EmptyResponse;
+    };
     defer self.allocator.free(decoded.ssz_bytes);
 
     if (decoded.result != .success) {
@@ -3120,9 +4113,39 @@ fn requestPeerMetadata(
         return responseCodeError(decoded.result);
     }
 
-    if (use_metadata_v3) {
+    if (expect_metadata_v3) {
+        if (decoded.ssz_bytes.len == MetadataV2.fixed_size) {
+            var metadata_v2_fallback: MetadataV2.Type = undefined;
+            try MetadataV2.deserializeFromBytes(decoded.ssz_bytes, &metadata_v2_fallback);
+            std.log.debug("Metadata V3 fallback to V2 for {s}", .{peer_id});
+            request_outcome = .success;
+            return .{
+                .metadata = metadata_v2_fallback,
+                .custody_group_count = 0,
+            };
+        }
+
         var metadata_v3: MetadataV3.Type = undefined;
-        try MetadataV3.deserializeFromBytes(decoded.ssz_bytes, &metadata_v3);
+        MetadataV3.deserializeFromBytes(decoded.ssz_bytes, &metadata_v3) catch |err| {
+            std.log.debug(
+                "Metadata V3 decode failed for {s}: {} ssz_len={d} bytes={x}",
+                .{
+                    peer_id,
+                    err,
+                    decoded.ssz_bytes.len,
+                    decoded.ssz_bytes,
+                },
+            );
+            return err;
+        };
+        std.log.debug(
+            "Peer metadata v3 from {s}: seq={d} custody_group_count={d}",
+            .{
+                peer_id,
+                metadata_v3.seq_number,
+                metadata_v3.custody_group_count,
+            },
+        );
         request_outcome = .success;
         return .{
             .metadata = .{
@@ -3150,6 +4173,27 @@ fn reportReqRespFetchFailure(
     const pm = self.peer_manager orelse return;
     const action = peer_scoring.reqRespFailureAction(protocol, err) orelse return;
     _ = pm.reportPeer(peer_id, action, .rpc, currentUnixTimeMs(io));
+}
+
+fn noteSyncPeerGoneIfTransportClosed(
+    self: *BeaconNode,
+    io: std.Io,
+    svc: *networking.P2pService,
+    peer_id: []const u8,
+    err: anyerror,
+) void {
+    switch (err) {
+        error.PeerNotConnected,
+        error.ConnectionClosed,
+        error.ConnectionResetByPeer,
+        error.UnexpectedEof,
+        => {},
+        else => return,
+    }
+
+    if (svc.isPeerConnected(peer_id)) return;
+    const pm = self.peer_manager orelse return;
+    notePeerDisconnected(self, pm, peer_id, currentUnixTimeMs(io));
 }
 
 fn handleReqRespMaintenanceFailure(
@@ -3341,4 +4385,6 @@ fn maybePrepareProposerPayload(self: *BeaconNode, io: std.Io) void {
 
 const beacon_node_mod = @import("beacon_node.zig");
 const BeaconNode = beacon_node_mod.BeaconNode;
+const DiscoveryDialCompletion = beacon_node_mod.DiscoveryDialCompletion;
+const PeerReqRespCompletion = beacon_node_mod.PeerReqRespCompletion;
 const SyncStatus = beacon_node_mod.SyncStatus;

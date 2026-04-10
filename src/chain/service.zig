@@ -55,6 +55,7 @@ pub const CompletedBlockImport = @import("state_work_service.zig").CompletedBloc
 pub const CompletedBlockImportWaitResult = @import("state_work_service.zig").StateWorkService.WaitResult;
 pub const PreparedBlockImport = @import("blocks/root.zig").PreparedBlockImport;
 pub const QueuePlannedReadyBlockImportResult = Chain.QueuePlannedReadyBlockImportResult;
+pub const ReadyBlockPlanResult = Chain.ReadyBlockPlanResult;
 pub const ExecutionStatus = blocks.ExecutionStatus;
 
 fn eth1DataFromHeadState(cached: *CachedBeaconState) Eth1DataType {
@@ -115,6 +116,18 @@ pub const Service = struct {
             .state = state,
         };
     }
+
+    fn shouldNotifyForkchoiceUpdate(
+        before_snapshot: chain_effects.ChainSnapshot,
+        after_snapshot: chain_effects.ChainSnapshot,
+    ) bool {
+        // Lodestar only notifies EL after import when the canonical head changes
+        // or finality advances. Repeating FCUs for non-head range-sync blocks
+        // starves newPayload work in the node execution runtime.
+        return !std.mem.eql(u8, &before_snapshot.head.root, &after_snapshot.head.root) or
+            before_snapshot.finalized.epoch != after_snapshot.finalized.epoch;
+    }
+
     pub fn prepareBlockInput(
         self: Service,
         any_signed: fork_types.AnySignedBeaconBlock,
@@ -157,6 +170,15 @@ pub const Service = struct {
         return self.chain.planReadyBlockImport(ready);
     }
 
+    /// Consumes `ready` only when the returned result is `.planned`.
+    /// When `.skipped`, the caller still owns `ready` and must deinit it.
+    pub fn planRangeSyncReadyBlockImport(
+        self: Service,
+        ready: *ReadyBlockInput,
+    ) !ReadyBlockPlanResult {
+        return self.chain.planRangeSyncReadyBlockImport(ready);
+    }
+
     /// Consumes `planned`.
     /// Returns `.queued` when ownership transfers into background state work.
     /// Returns `.not_queued` with the original plan when the caller should
@@ -189,6 +211,7 @@ pub const Service = struct {
         self: Service,
         completed: CompletedBlockImport,
     ) !chain_effects.ImportOutcome {
+        const before_snapshot = self.query().currentSnapshot();
         const result = try self.chain.finishCompletedReadyBlockImport(completed);
         const snapshot = self.query().currentSnapshot();
 
@@ -196,7 +219,10 @@ pub const Service = struct {
             .result = result,
             .snapshot = snapshot,
             .effects = .{
-                .forkchoice_update = self.forkchoiceUpdateForHead(snapshot.head.root),
+                .forkchoice_update = if (shouldNotifyForkchoiceUpdate(before_snapshot, snapshot))
+                    self.forkchoiceUpdateForHead(snapshot.head.root)
+                else
+                    null,
                 .finalized_checkpoint = if (result.epoch_transition)
                     snapshot.finalized
                 else
@@ -210,6 +236,7 @@ pub const Service = struct {
         prepared: *PreparedBlockImport,
         exec_status: ExecutionStatus,
     ) !chain_effects.ImportOutcome {
+        const before_snapshot = self.query().currentSnapshot();
         const result = try self.chain.finishPreparedReadyBlockImport(prepared, exec_status);
         const snapshot = self.query().currentSnapshot();
 
@@ -217,7 +244,10 @@ pub const Service = struct {
             .result = result,
             .snapshot = snapshot,
             .effects = .{
-                .forkchoice_update = self.forkchoiceUpdateForHead(snapshot.head.root),
+                .forkchoice_update = if (shouldNotifyForkchoiceUpdate(before_snapshot, snapshot))
+                    self.forkchoiceUpdateForHead(snapshot.head.root)
+                else
+                    null,
                 .finalized_checkpoint = if (result.epoch_transition)
                     snapshot.finalized
                 else
@@ -245,9 +275,7 @@ pub const Service = struct {
                 .skipped_count = 0,
                 .failed_count = 0,
                 .snapshot = before_snapshot,
-                .effects = .{
-                    .forkchoice_update = self.forkchoiceUpdateForHead(before_snapshot.head.root),
-                },
+                .effects = .{},
             };
         }
 
@@ -274,11 +302,7 @@ pub const Service = struct {
             decoded_count = i + 1;
         }
 
-        const results = try self.chain.processBlockBatchPipeline(block_inputs, .{
-            .from_range_sync = true,
-            .skip_future_slot = true,
-            .skip_signatures = !self.chain.verify_signatures,
-        });
+        const results = try self.chain.processBlockBatchPipeline(block_inputs, self.chain.rangeSyncImportOpts());
         handed_off_to_pipeline = true;
         defer allocator.free(results);
 
@@ -317,7 +341,10 @@ pub const Service = struct {
             .error_counts = error_counts,
             .snapshot = snapshot,
             .effects = .{
-                .forkchoice_update = self.forkchoiceUpdateForHead(snapshot.head.root),
+                .forkchoice_update = if (shouldNotifyForkchoiceUpdate(before_snapshot, snapshot))
+                    self.forkchoiceUpdateForHead(snapshot.head.root)
+                else
+                    null,
                 .finalized_checkpoint = if (snapshot.finalized.epoch != before_snapshot.finalized.epoch or
                     !std.mem.eql(u8, &snapshot.finalized.root, &before_snapshot.finalized.root))
                     snapshot.finalized
@@ -347,7 +374,10 @@ pub const Service = struct {
             .error_counts = error_counts,
             .snapshot = snapshot,
             .effects = .{
-                .forkchoice_update = self.forkchoiceUpdateForHead(snapshot.head.root),
+                .forkchoice_update = if (shouldNotifyForkchoiceUpdate(before_snapshot, snapshot))
+                    self.forkchoiceUpdateForHead(snapshot.head.root)
+                else
+                    null,
                 .finalized_checkpoint = if (snapshot.finalized.epoch != before_snapshot.finalized.epoch or
                     !std.mem.eql(u8, &snapshot.finalized.root, &before_snapshot.finalized.root))
                     snapshot.finalized

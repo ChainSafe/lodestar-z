@@ -431,6 +431,7 @@ test "EthReqRespAdapter: BeaconBlocksByRange streams multiple response chunks wi
     const request = messages.BeaconBlocksByRangeRequest.Type{
         .start_slot = 11,
         .count = 3,
+        .step = 1,
     };
     var request_ssz: [messages.BeaconBlocksByRangeRequest.fixed_size]u8 = undefined;
     _ = messages.BeaconBlocksByRangeRequest.serializeIntoBytes(&request, &request_ssz);
@@ -471,6 +472,7 @@ test "EthReqRespAdapter: BeaconBlocksByRange emits server error after streamed s
     const request = messages.BeaconBlocksByRangeRequest.Type{
         .start_slot = 1,
         .count = 3,
+        .step = 1,
     };
     var request_ssz: [messages.BeaconBlocksByRangeRequest.fixed_size]u8 = undefined;
     _ = messages.BeaconBlocksByRangeRequest.serializeIntoBytes(&request, &request_ssz);

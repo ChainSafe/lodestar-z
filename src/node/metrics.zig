@@ -860,8 +860,8 @@ test "BeaconMetrics: init fields are accessible" {
     m.peer_connected_total.incr();
     try std.testing.expectEqual(@as(u64, 42), m.head_slot.impl.value);
     try std.testing.expectEqual(@as(u64, 1), m.blocks_imported_total.impl.count);
-    try std.testing.expectEqual(@as(usize, 1), m.block_import_source_seconds.impl.metrics.items.len);
-    try std.testing.expectEqual(@as(usize, 2), m.block_import_results_total.impl.metrics.items.len);
+    try std.testing.expectEqual(@as(usize, 1), m.block_import_source_seconds.impl.values.count());
+    try std.testing.expectEqual(@as(usize, 2), m.block_import_results_total.impl.values.count());
     try std.testing.expectEqual(@as(u64, 1), m.block_import_optimistic_total.impl.count);
     try std.testing.expectEqual(@as(u64, 1), m.epoch_transitions_total.impl.count);
     try std.testing.expectEqual(@as(u64, 1), m.chain_reorgs_total.impl.count);
@@ -1075,7 +1075,7 @@ test "BeaconMetrics: write produces live Prometheus output" {
 }
 
 test "MetricsSurface: skips noop state-transition metrics" {
-    var beacon = BeaconMetrics.initNoop();
+    var beacon = try BeaconMetrics.init(std.testing.allocator);
     defer beacon.deinit();
     var surface = MetricsSurface{ .beacon = &beacon };
     beacon.head_slot.set(12);

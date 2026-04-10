@@ -959,6 +959,7 @@ pub fn build(b: *std.Build) void {
         .name = "lodestar-z",
         .root_module = module_node_main,
     });
+    exe_node.stack_size = 64 * 1024 * 1024;
     const install_exe_node = b.addInstallArtifact(exe_node, .{});
     const tls_install_exe_node = b.step("build-exe:lodestar-z", "Install the lodestar-z beacon node executable");
     tls_install_exe_node.dependOn(&install_exe_node.step);

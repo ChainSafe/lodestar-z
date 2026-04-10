@@ -238,7 +238,7 @@ test "BeaconNode: getSyncStatus" {
 
     const sync = ctx.node.getSyncStatus();
     try std.testing.expectEqual(@as(u64, 0), sync.head_slot);
-    try std.testing.expect(!sync.is_syncing);
+    try std.testing.expect(sync.is_syncing);
     try std.testing.expect(!sync.el_offline);
 }
 
@@ -320,7 +320,7 @@ test "BeaconNode: onReqResp Status returns real head slot and root" {
 
     const expected_root = [_]u8{0xAB} ** 32;
     const finalized_slot = ctx.node.chain.forkChoice().getFinalizedCheckpoint().epoch * preset.SLOTS_PER_EPOCH;
-    const expected_slot: u64 = finalized_slot + 10;
+    const expected_slot: u64 = finalized_slot + 20;
     const state_root = [_]u8{0x11} ** 32;
     try installCanonicalTestBlock(ctx.node, expected_root, ctx.node.getHead().root, expected_slot, state_root);
 
@@ -353,7 +353,7 @@ test "BeaconNode: onReqResp StatusV2 returns earliest available slot" {
 
     const expected_root = [_]u8{0xBC} ** 32;
     const finalized_slot = ctx.node.chain.forkChoice().getFinalizedCheckpoint().epoch * preset.SLOTS_PER_EPOCH;
-    const expected_slot: u64 = finalized_slot + 10;
+    const expected_slot: u64 = finalized_slot + 20;
     const expected_earliest_slot: u64 = expected_slot - 16;
     const state_root = [_]u8{0x22} ** 32;
     try installCanonicalTestBlock(ctx.node, expected_root, ctx.node.getHead().root, expected_slot, state_root);
@@ -435,7 +435,7 @@ test "BeaconNode: onReqResp BeaconBlocksByRoot returns stored block" {
     try std.testing.expectEqualSlices(u8, &fake_block_bytes_2, chunks[1].ssz_payload);
 }
 
-test "BeaconNode: onReqResp Ping returns sequence 0" {
+test "BeaconNode: onReqResp Ping returns local metadata sequence" {
     const allocator = std.testing.allocator;
     var ctx = try TestContext.init(.{});
     defer ctx.deinit();
@@ -452,7 +452,7 @@ test "BeaconNode: onReqResp Ping returns sequence 0" {
 
     var resp_seq: networking.messages.Ping.Type = undefined;
     try networking.messages.Ping.deserializeFromBytes(chunks[0].ssz_payload, &resp_seq);
-    try std.testing.expectEqual(@as(u64, 0), resp_seq);
+    try std.testing.expectEqual(ctx.node.api_node_identity.metadata.seq_number, resp_seq);
 }
 
 test "BeaconNode: onReqResp BeaconBlocksByRange returns blocks for known slots" {
@@ -512,6 +512,7 @@ test "BeaconNode: onReqResp BeaconBlocksByRange skips missing slots and preserve
     const request = networking.messages.BeaconBlocksByRangeRequest.Type{
         .start_slot = start_slot,
         .count = 3,
+        .step = 1,
     };
     var buf: [networking.messages.BeaconBlocksByRangeRequest.fixed_size]u8 = undefined;
     _ = networking.messages.BeaconBlocksByRangeRequest.serializeIntoBytes(&request, &buf);
@@ -591,8 +592,8 @@ test "BeaconNode: onReqResp BlobSidecarsByRange returns stored blobs" {
     const sidecar_size = preset_root.BLOBSIDECAR_FIXED_SIZE;
     const root_5 = [_]u8{0x05} ** 32;
     const root_6 = [_]u8{0x06} ** 32;
-    try ctx.node.chain.onTrackedBlock(root_5, 5, [_]u8{0} ** 32);
-    try ctx.node.chain.onTrackedBlock(root_6, 6, [_]u8{0} ** 32);
+    try installCanonicalTestBlock(ctx.node, root_5, ctx.node.getHead().root, 5, [_]u8{0x15} ** 32);
+    try installCanonicalTestBlock(ctx.node, root_6, root_5, 6, [_]u8{0x16} ** 32);
 
     const blob_5 = try allocator.alloc(u8, sidecar_size * 2);
     defer allocator.free(blob_5);

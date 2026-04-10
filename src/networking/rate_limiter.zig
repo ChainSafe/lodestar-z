@@ -83,7 +83,7 @@ pub fn requestTokenCost(method: req_resp_protocol.Method, request_bytes: []const
         .data_column_sidecars_by_range => dataColumnRangeCost(request_bytes),
         .beacon_blocks_by_root => fixedItemCountCost(request_bytes, 32),
         .blob_sidecars_by_root => fixedItemCountCost(request_bytes, 40),
-        .data_column_sidecars_by_root => fixedItemCountCost(request_bytes, 40),
+        .data_column_sidecars_by_root => dataColumnByRootCost(request_bytes),
     };
 }
 
@@ -98,6 +98,16 @@ fn dataColumnRangeCost(request_bytes: []const u8) u32 {
     if (request_bytes.len < 16) return 1;
     const count = std.mem.readInt(u64, request_bytes[8..16], .little);
     return saturatingCount(count);
+}
+
+fn dataColumnByRootCost(request_bytes: []const u8) u32 {
+    var request: messages.DataColumnSidecarsByRootRequest.Type = .empty;
+    messages.DataColumnSidecarsByRootRequest.deserializeFromBytes(std.heap.page_allocator, request_bytes, &request) catch return 1;
+    defer messages.DataColumnSidecarsByRootRequest.deinit(std.heap.page_allocator, &request);
+
+    var requested_columns: usize = 0;
+    for (request.items) |identifier| requested_columns += identifier.columns.items.len;
+    return saturatingCount(requested_columns);
 }
 
 fn fixedItemCountCost(request_bytes: []const u8, item_size: usize) u32 {

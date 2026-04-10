@@ -7,6 +7,7 @@ const minimal_chain_config = @import("config").minimal.chain_config;
 const types = @import("consensus_types");
 const hex = @import("hex");
 const Epoch = types.primitive.Epoch.Type;
+const Slot = types.primitive.Slot.Type;
 const ElectraBeaconState = types.electra.BeaconState.Type;
 const BLSPubkey = types.primitive.BLSPubkey.Type;
 const ValidatorIndex = types.primitive.ValidatorIndex.Type;
@@ -43,14 +44,17 @@ pub fn generateElectraState(allocator: Allocator, pool: *Node.Pool, chain_config
     electra_state.genesis_time = 1596546008;
     electra_state.genesis_validators_root = try hex.hexToRoot("0x8a8b3f1f1e2d3c4b5a697887766554433221100ffeeddccbbaa9988776655443");
     // set the slot to be ready for the next epoch transition
-    electra_state.slot = chain_config.ELECTRA_FORK_EPOCH * preset.SLOTS_PER_EPOCH + 2025 * preset.SLOTS_PER_EPOCH - 1;
+    const synthetic_electra_fork_epoch: Epoch = blk: {
+        const max_safe_epoch = std.math.maxInt(Slot) / preset.SLOTS_PER_EPOCH - 2025;
+        if (chain_config.ELECTRA_FORK_EPOCH > max_safe_epoch) break :blk 0;
+        break :blk chain_config.ELECTRA_FORK_EPOCH;
+    };
+    electra_state.slot = (synthetic_electra_fork_epoch + 2025) * preset.SLOTS_PER_EPOCH - 1;
     const current_epoch = @divFloor(electra_state.slot, preset.SLOTS_PER_EPOCH);
-    var version: [4]u8 = undefined;
-    _ = try hex.hexToBytes(&version, "0x00000001");
     electra_state.fork = .{
-        .previous_version = version,
-        .current_version = version,
-        .epoch = chain_config.ELECTRA_FORK_EPOCH,
+        .previous_version = chain_config.DENEB_FORK_VERSION,
+        .current_version = chain_config.ELECTRA_FORK_VERSION,
+        .epoch = synthetic_electra_fork_epoch,
     };
     electra_state.latest_block_header = .{
         .slot = electra_state.slot - 1,

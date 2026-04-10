@@ -64,7 +64,7 @@ pub fn getHealth(ctx: *ApiContext) HandlerResult(void) {
         return .{ .data = {}, .status = 503 };
     }
     const sync = ctx.currentSyncStatus();
-    const status: u16 = if (sync.is_syncing) 206 else 200;
+    const status: u16 = if (sync.is_syncing or sync.is_optimistic or sync.el_offline) 206 else 200;
     return .{ .data = {}, .status = status };
 }
 
