@@ -215,7 +215,6 @@ fn ProcessSyncAggregateBench(comptime fork: ForkSeq, comptime opts: BenchOpts) t
 
             state_transition.processSyncAggregate(
                 fork,
-                allocator,
                 cloned.config,
                 cloned.epoch_cache,
                 cloned.state.castToFork(fork),

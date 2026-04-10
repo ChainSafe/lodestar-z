@@ -24,7 +24,6 @@ const decreaseBalance = balance_utils.decreaseBalance;
 
 pub fn processSyncAggregate(
     comptime fork: ForkSeq,
-    allocator: Allocator,
     config: *const BeaconConfig,
     epoch_cache: *const EpochCache,
     state: *BeaconState(fork),
@@ -37,23 +36,23 @@ pub fn processSyncAggregate(
 
     // different from the spec but not sure how to get through signature verification for default/empty SyncAggregate in the spec test
     if (verify_signatures) {
-        const participant_indices = try sync_committee_bits.intersectValues(
+        var participant_buf: [preset.SYNC_COMMITTEE_SIZE]ValidatorIndex = undefined;
+        const participant_indices = sync_committee_bits.intersectValues(
             ValidatorIndex,
-            allocator,
             committee_indices,
+            &participant_buf,
         );
-        defer participant_indices.deinit();
 
         // When there's no participation we cons ider the signature valid and just ignore it
-        if (participant_indices.items.len > 0) {
+        if (participant_indices.len > 0) {
             const previous_slot = @max(try state.slot(), 1) - 1;
             const root_signed = try getBlockRootAtSlot(fork, state, previous_slot);
             const domain = try config.getDomain(epoch_cache.epoch, c.DOMAIN_SYNC_COMMITTEE, previous_slot);
 
-            const pubkeys = try allocator.alloc(bls.PublicKey, participant_indices.items.len);
-            defer allocator.free(pubkeys);
-            for (0..participant_indices.items.len) |i| {
-                pubkeys[i] = epoch_cache.index_to_pubkey.items[participant_indices.items[i]];
+            var pubkeys_buf: [preset.SYNC_COMMITTEE_SIZE]bls.PublicKey = undefined;
+            const pubkeys = pubkeys_buf[0..participant_indices.len];
+            for (0..participant_indices.len) |i| {
+                pubkeys[i] = epoch_cache.index_to_pubkey.items[participant_indices[i]];
             }
 
             var signing_root: Root = undefined;
@@ -123,9 +122,10 @@ pub fn getSyncCommitteeSignatureSet(
 ) !?AggregatedSignatureSet {
     const signature = sync_aggregate.sync_committee_signature;
 
+    var participant_buf: [preset.SYNC_COMMITTEE_SIZE]ValidatorIndex = undefined;
     const participant_indices_ = if (participant_indices) |pi| pi else blk: {
         const committee_indices = @as(*const [preset.SYNC_COMMITTEE_SIZE]u64, @ptrCast(epoch_cache.current_sync_committee_indexed.get().getValidatorIndices()));
-        break :blk (try sync_aggregate.sync_committee_bits.intersectValues(ValidatorIndex, allocator, committee_indices)).items;
+        break :blk sync_aggregate.sync_committee_bits.intersectValues(ValidatorIndex, committee_indices, &participant_buf);
     };
     // When there's no participation we consider the signature valid and just ignore it
     if (participant_indices_.len == 0) {
@@ -208,7 +208,6 @@ test "process sync aggregate - sanity" {
 
     const res = processSyncAggregate(
         .electra,
-        allocator,
         config,
         epoch_cache,
         fork_state,
@@ -221,7 +220,6 @@ test "process sync aggregate - sanity" {
     try sync_aggregate.sync_committee_bits.set(1, true);
     try processSyncAggregate(
         .electra,
-        allocator,
         config,
         epoch_cache,
         fork_state,
