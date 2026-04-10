@@ -23,7 +23,7 @@ pub fn verify(msg: []const u8, pk: *const PublicKey, sig: *const Signature, in_p
 }
 
 pub fn fastAggregateVerify(msg: []const u8, pks: []const PublicKey, sig: *const Signature, in_pk_validate: ?bool, in_sigs_group_check: ?bool) !bool {
-    var pairing_buf: [bls.Pairing.sizeOf()]u8 align(@alignOf(bls.Pairing)) = undefined;
+    var pairing_buf: [bls.Pairing.sizeOf()]u8 align(bls.Pairing.buf_align) = undefined;
 
     const sigs_groupcheck = in_sigs_group_check orelse false;
     const pks_validate = in_pk_validate orelse false;
