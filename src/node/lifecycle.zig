@@ -177,9 +177,7 @@ pub fn init(allocator: Allocator, io: std.Io, beacon_config: *const BeaconConfig
 
     node.validator_monitor = chain_runtime.chain.validator_monitor;
     if (chain_runtime.chain.validator_monitor != null) {
-        log.logger(.node).info("Validator monitor enabled", .{
-            .validator_count = opts.validator_monitor_indices.len,
-        });
+        log.info("Validator monitor enabled validator_count={d}", .{opts.validator_monitor_indices.len});
     }
 
     owns_node_identity = false;
@@ -197,7 +195,7 @@ pub fn init(allocator: Allocator, io: std.Io, beacon_config: *const BeaconConfig
     );
     node.beacon_processor = beacon_processor;
 
-    log.logger(.node).info("beacon node initialized", .{});
+    log.info("beacon node initialized", .{});
     return node;
 }
 
@@ -372,9 +370,7 @@ fn finishBuilder(
 
     node.validator_monitor = finished_runtime.runtime.chain.validator_monitor;
     if (finished_runtime.runtime.chain.validator_monitor != null) {
-        log.logger(.node).info("Validator monitor enabled", .{
-            .validator_count = self.node_options.validator_monitor_indices.len,
-        });
+        log.info("Validator monitor enabled validator_count={d}", .{self.node_options.validator_monitor_indices.len});
     }
 
     const beacon_processor = try allocator.create(BeaconProcessor);
@@ -397,7 +393,7 @@ fn finishBuilder(
     node.applyBootstrapOutcome(finished_runtime.outcome);
     try wireBootstrappedNode(node);
 
-    log.logger(.node).info("beacon node initialized", .{});
+    log.info("beacon node initialized", .{});
     return node;
 }
 
@@ -500,10 +496,7 @@ fn initBlsThreadPools(allocator: Allocator, io: std.Io) !BlsThreadPools {
     });
     errdefer gossip_pool.deinit();
 
-    log.logger(.node).info("BLS thread pools initialized", .{
-        .block_workers = block_pool.n_workers,
-        .gossip_workers = gossip_pool.n_workers,
-    });
+    log.info("BLS thread pools initialized block_workers={d} gossip_workers={d}", .{ block_pool.n_workers, gossip_pool.n_workers });
 
     return .{
         .block = block_pool,
@@ -686,9 +679,9 @@ pub fn initFromGenesis(self: *BeaconNode, genesis_state: *CachedBeaconState) !vo
     self.applyBootstrapOutcome(outcome);
     try wireBootstrappedNode(self);
 
-    log.logger(.node).info("initialized from genesis", .{
-        .slot = outcome.snapshot.head.slot,
-        .genesis_validators_root = self.genesis_validators_root,
+    log.info("initialized from genesis slot={d} genesis_validators_root={s}...", .{
+        outcome.snapshot.head.slot,
+        &std.fmt.bytesToHex(self.genesis_validators_root[0..4], .lower),
     });
 }
 
@@ -706,15 +699,15 @@ pub fn initFromCheckpoint(self: *BeaconNode, checkpoint_state: *CachedBeaconStat
     }
     try wireBootstrappedNode(self);
 
-    log.logger(.node).info("initialized from checkpoint", .{
-        .slot = outcome.snapshot.head.slot,
-        .finalized_epoch = outcome.snapshot.finalized.epoch,
-        .justified_epoch = outcome.snapshot.justified.epoch,
-        .block_root = outcome.snapshot.head.root,
+    log.info("initialized from checkpoint slot={d} finalized_epoch={d} justified_epoch={d} block_root={s}...", .{
+        outcome.snapshot.head.slot,
+        outcome.snapshot.finalized.epoch,
+        outcome.snapshot.justified.epoch,
+        &std.fmt.bytesToHex(outcome.snapshot.head.root[0..4], .lower),
     });
 }
 
-const log = @import("log");
+const log = std.log.scoped(.node);
 const api_callbacks_mod = @import("api_callbacks.zig");
 const SyncCallbackCtx = @import("sync_bridge.zig").SyncCallbackCtx;
 const p2p_runtime_mod = @import("p2p_runtime.zig");

@@ -1,4 +1,5 @@
 const std = @import("std");
+const scoped_log = std.log.scoped(.validator_monitoring_runtime);
 
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -43,7 +44,7 @@ pub const Runtime = struct {
         if (self.task) |*task| {
             _ = task.cancel(self.io) catch |err| switch (err) {
                 error.Canceled => {},
-                else => std.log.debug("validator monitoring task exited during shutdown: {s}", .{@errorName(err)}),
+                else => scoped_log.debug("validator monitoring task exited during shutdown: {s}", .{@errorName(err)}),
             };
             self.task = null;
         }

@@ -14,6 +14,7 @@
 //! that the node layer can scrape into Prometheus gauges/counters.
 
 const std = @import("std");
+const scoped_log = std.log.scoped(.validator_monitor);
 const Allocator = std.mem.Allocator;
 const consensus_types = @import("consensus_types");
 const preset = @import("preset").preset;
@@ -182,7 +183,7 @@ pub const ValidatorMonitor = struct {
         return .{
             .allocator = allocator,
             .monitored = monitored,
-            
+
             .max_epochs = DEFAULT_MAX_EPOCHS,
         };
     }
@@ -402,7 +403,7 @@ pub const ValidatorMonitor = struct {
         self.epoch_summaries.append(self.allocator, summary) catch {};
         self.last_processed_epoch = epoch;
 
-        std.log.info("validator monitor: epoch {d} — {d} monitored, att_rate={d:.1}%, head={d:.1}%, balance_delta={d}", .{
+        scoped_log.info("validator monitor: epoch {d} — {d} monitored, att_rate={d:.1}%, head={d:.1}%, balance_delta={d}", .{
             epoch,
             summary.validators_monitored,
             summary.attestation_hit_rate * 100.0,

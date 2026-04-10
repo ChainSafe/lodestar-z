@@ -1,4 +1,5 @@
 const std = @import("std");
+const scoped_log = std.log.scoped(.validator_bootstrap);
 const yaml = @import("yaml");
 const Yaml = yaml.Yaml;
 
@@ -66,7 +67,7 @@ pub const PreparedRuntime = struct {
         if (counts.total > 0) return;
 
         if (self.keymanager != null and self.remote_signer_source == .fetch and self.external_signer_urls.len > 0) {
-            std.log.warn(
+            scoped_log.warn(
                 "No validator keys loaded at startup; waiting for keys from the keymanager API or {d} configured external signer(s)",
                 .{self.external_signer_urls.len},
             );
@@ -74,47 +75,47 @@ pub const PreparedRuntime = struct {
         }
 
         if (self.keymanager != null) {
-            std.log.warn("No validator keys loaded at startup; waiting for keys to be imported through the keymanager API", .{});
+            scoped_log.warn("No validator keys loaded at startup; waiting for keys to be imported through the keymanager API", .{});
             return;
         }
 
         if (self.remote_signer_source == .fetch and self.external_signer_urls.len > 0) {
-            std.log.warn(
+            scoped_log.warn(
                 "No validator keys loaded at startup; waiting for keys from {d} configured external signer(s)",
                 .{self.external_signer_urls.len},
             );
             return;
         }
 
-        std.log.err("No local validator keystores found under {s}", .{self.paths.keystores_dir});
-        std.log.err("Populate the keystores and secrets directories before starting the validator client.", .{});
+        scoped_log.err("No local validator keystores found under {s}", .{self.paths.keystores_dir});
+        scoped_log.err("Populate the keystores and secrets directories before starting the validator client.", .{});
         return error.NoValidatorsConfigured;
     }
 
     pub fn logStartup(self: *const PreparedRuntime) void {
         const counts = self.startup_signers.counts();
 
-        std.log.info("lodestar-z validator starting", .{});
-        std.log.info("  network:      {s}", .{@tagName(self.network.toNetworkName())});
-        std.log.info("  beacon-node:  {s}", .{self.primary_beacon_url});
-        std.log.info("  data-dir:     {s}", .{self.paths.root});
-        std.log.info("  validator-db: {s}", .{self.paths.validators_db_dir});
-        std.log.info("  keystores:    {s}", .{self.paths.keystores_dir});
-        std.log.info("  secrets:      {s}", .{self.paths.secrets_dir});
-        std.log.info("  slashing-db:  {s}", .{self.paths.slashing_protection_db});
-        std.log.info("  builder selection: {s}", .{@tagName(self.validator_config.builder_selection)});
-        std.log.info("  block publish validation: {s}", .{@tagName(self.validator_config.broadcast_validation)});
+        scoped_log.info("lodestar-z validator starting", .{});
+        scoped_log.info("  network:      {s}", .{@tagName(self.network.toNetworkName())});
+        scoped_log.info("  beacon-node:  {s}", .{self.primary_beacon_url});
+        scoped_log.info("  data-dir:     {s}", .{self.paths.root});
+        scoped_log.info("  validator-db: {s}", .{self.paths.validators_db_dir});
+        scoped_log.info("  keystores:    {s}", .{self.paths.keystores_dir});
+        scoped_log.info("  secrets:      {s}", .{self.paths.secrets_dir});
+        scoped_log.info("  slashing-db:  {s}", .{self.paths.slashing_protection_db});
+        scoped_log.info("  builder selection: {s}", .{@tagName(self.validator_config.builder_selection)});
+        scoped_log.info("  block publish validation: {s}", .{@tagName(self.validator_config.broadcast_validation)});
         if (self.validator_config.distributed) {
-            std.log.info("  distributed validator mode: enabled", .{});
+            scoped_log.info("  distributed validator mode: enabled", .{});
         }
-        std.log.info("  validators:   {d} total ({d} local, {d} remote)", .{
+        scoped_log.info("  validators:   {d} total ({d} local, {d} remote)", .{
             counts.total,
             counts.local,
             counts.remote,
         });
         if (self.external_signer_urls.len > 0) {
-            std.log.info("  web3signers:  {d} endpoint(s)", .{self.external_signer_urls.len});
-            std.log.info("  remote-mode:  {s}", .{
+            scoped_log.info("  web3signers:  {d} endpoint(s)", .{self.external_signer_urls.len});
+            scoped_log.info("  remote-mode:  {s}", .{
                 switch (self.remote_signer_source) {
                     .fetch => "fetch",
                     .pinned => "pinned",
@@ -123,23 +124,23 @@ pub const PreparedRuntime = struct {
                 },
             });
             for (self.external_signer_urls) |url| {
-                std.log.info("    external-signer: {s}", .{url});
+                scoped_log.info("    external-signer: {s}", .{url});
             }
         }
         if (self.keymanager) |keymanager| {
-            std.log.info("  keymanager:   http://{s}:{d}", .{ keymanager.address, keymanager.port });
+            scoped_log.info("  keymanager:   http://{s}:{d}", .{ keymanager.address, keymanager.port });
             if (!keymanager.proposer_config_write_enabled) {
-                std.log.info("  keymanager proposer writes: disabled (owned by proposer settings file)", .{});
+                scoped_log.info("  keymanager proposer writes: disabled (owned by proposer settings file)", .{});
             }
         }
         if (self.monitoring) |monitoring| {
-            std.log.info("  monitoring:   {s} every {d}ms", .{ monitoring.endpoint, monitoring.interval_ms });
+            scoped_log.info("  monitoring:   {s} every {d}ms", .{ monitoring.endpoint, monitoring.interval_ms });
             if (monitoring.collect_system_stats) {
-                std.log.info("  monitoring system stats: enabled", .{});
+                scoped_log.info("  monitoring system stats: enabled", .{});
             }
         }
         if (self.proposer_settings_file) |path| {
-            std.log.info("  proposer settings: {s}", .{path});
+            scoped_log.info("  proposer settings: {s}", .{path});
         }
     }
 };
@@ -156,16 +157,16 @@ pub fn prepareRuntime(io: Io, allocator: Allocator, opts: anytype) !PreparedRunt
     var custom_beacon_config: BeaconConfig = undefined;
     const base_beacon_config = loadBeaconConfig(network);
     const beacon_config: *const BeaconConfig = if (params_file) |config_path| blk: {
-        std.log.info("loading custom network config from {s}", .{config_path});
+        scoped_log.info("loading custom network config from {s}", .{config_path});
         var arena = std.heap.ArenaAllocator.init(allocator);
         defer arena.deinit();
         const config_bytes = readFileAlloc(io, allocator, config_path) catch |err| {
-            std.log.err("Failed to read config file '{s}': {}", .{ config_path, err });
+            scoped_log.err("Failed to read config file '{s}': {}", .{ config_path, err });
             return err;
         };
         defer allocator.free(config_bytes);
         custom_chain_config = config_loader.loadConfigFromYaml(arena.allocator(), config_bytes, &base_beacon_config.chain) catch |err| {
-            std.log.err("Failed to parse config YAML '{s}': {}", .{ config_path, err });
+            scoped_log.err("Failed to parse config YAML '{s}': {}", .{ config_path, err });
             return err;
         };
         custom_beacon_config = BeaconConfig.init(custom_chain_config, [_]u8{0} ** 32);
@@ -207,7 +208,7 @@ pub fn prepareRuntime(io: Io, allocator: Allocator, opts: anytype) !PreparedRunt
             import_paths,
             password_file,
         ) catch |err| {
-            std.log.err("Failed to import startup keystores: {}", .{err});
+            scoped_log.err("Failed to import startup keystores: {}", .{err});
             return err;
         };
     }
@@ -221,7 +222,7 @@ pub fn prepareRuntime(io: Io, allocator: Allocator, opts: anytype) !PreparedRunt
     errdefer freeOwnedStrings(allocator, external_signer_urls);
     for (external_signer_urls) |url| {
         validator_mod.validateRemoteSignerUrl(url) catch |err| {
-            std.log.err("Invalid external signer URL '{s}': {}", .{ url, err });
+            scoped_log.err("Invalid external signer URL '{s}': {}", .{ url, err });
             return err;
         };
     }
@@ -239,7 +240,7 @@ pub fn prepareRuntime(io: Io, allocator: Allocator, opts: anytype) !PreparedRunt
     if ((external_signer_fetch_enabled or opts.@"externalSigner.pubkeys" != null) and
         try directoryHasEntries(io, paths.remote_keys_dir))
     {
-        std.log.info(
+        scoped_log.info(
             "Ignoring persisted remote signer definitions under {s} because explicit external signer options were provided",
             .{paths.remote_keys_dir},
         );
@@ -293,7 +294,7 @@ pub fn prepareRuntime(io: Io, allocator: Allocator, opts: anytype) !PreparedRunt
 
     try ensureGenesisForkVersionMatches(beacon_config, genesis);
     const remote_spec = beacon_api.getConfigSpec(io) catch |err| {
-        std.log.err("Failed to fetch beacon config spec from {s}: {}", .{ primary_beacon_url, err });
+        scoped_log.err("Failed to fetch beacon config spec from {s}: {}", .{ primary_beacon_url, err });
         return err;
     };
     defer {
@@ -304,19 +305,19 @@ pub fn prepareRuntime(io: Io, allocator: Allocator, opts: anytype) !PreparedRunt
     try validator_mod.ensureGenesisMetadata(io, allocator, paths.metadata_file, genesis);
 
     const external_signer_fetch_interval_ms = parseExternalSignerFetchInterval(opts.@"externalSigner.fetchInterval") catch |err| {
-        std.log.err("Invalid --externalSigner.fetchInterval: {}", .{err});
+        scoped_log.err("Invalid --externalSigner.fetchInterval: {}", .{err});
         return err;
     };
     const keymanager_header_limit = parseKeymanagerHeaderLimit(opts.@"keymanager.headerLimit") catch |err| {
-        std.log.err("Invalid --keymanager.headerLimit: {}", .{err});
+        scoped_log.err("Invalid --keymanager.headerLimit: {}", .{err});
         return err;
     };
     const keymanager_body_limit = parseKeymanagerBodyLimit(opts.@"keymanager.bodyLimit") catch |err| {
-        std.log.err("Invalid --keymanager.bodyLimit: {}", .{err});
+        scoped_log.err("Invalid --keymanager.bodyLimit: {}", .{err});
         return err;
     };
     const monitoring = parseMonitoringConfig(opts) catch |err| {
-        std.log.err("Invalid --monitoring.* configuration: {}", .{err});
+        scoped_log.err("Invalid --monitoring.* configuration: {}", .{err});
         return err;
     };
 
@@ -327,7 +328,7 @@ pub fn prepareRuntime(io: Io, allocator: Allocator, opts: anytype) !PreparedRunt
 
     if (opts.proposerSettingsFile) |path| {
         if (try directoryHasEntries(io, paths.proposer_dir)) {
-            std.log.err(
+            scoped_log.err(
                 "Cannot use --proposerSettingsFile while persisted proposer configs exist under {s}. Clear that directory or remove --proposerSettingsFile.",
                 .{paths.proposer_dir},
             );
@@ -335,7 +336,7 @@ pub fn prepareRuntime(io: Io, allocator: Allocator, opts: anytype) !PreparedRunt
         }
 
         const parsed = loadProposerSettingsFile(io, allocator, path) catch |err| {
-            std.log.err("Invalid --proposerSettingsFile '{s}': {}", .{ path, err });
+            scoped_log.err("Invalid --proposerSettingsFile '{s}': {}", .{ path, err });
             return err;
         };
         proposer_configs = parsed.proposer_configs;
@@ -804,14 +805,14 @@ fn waitForGenesis(
         const genesis = beacon_api.getGenesis(io) catch |err| {
             attempts += 1;
             if (attempts == 1 or attempts % 12 == 0) {
-                std.log.info("Waiting for beacon genesis from {s}: {s}", .{ beacon_url, @errorName(err) });
+                scoped_log.info("Waiting for beacon genesis from {s}: {s}", .{ beacon_url, @errorName(err) });
             }
             try io.sleep(.{ .nanoseconds = 5 * std.time.ns_per_s }, .real);
             continue;
         };
 
         if (attempts > 0) {
-            std.log.info("Fetched beacon genesis from {s} after {d} retry attempt(s)", .{ beacon_url, attempts });
+            scoped_log.info("Fetched beacon genesis from {s} after {d} retry attempt(s)", .{ beacon_url, attempts });
         }
         return genesis;
     }
@@ -822,7 +823,7 @@ fn ensureGenesisForkVersionMatches(
     genesis: validator_mod.api_client.GenesisResponse,
 ) !void {
     if (!std.mem.eql(u8, &beacon_config.chain.GENESIS_FORK_VERSION, &genesis.genesis_fork_version)) {
-        std.log.err(
+        scoped_log.err(
             "Beacon node genesis fork version mismatch expected=0x{s} actual=0x{s}",
             .{
                 std.fmt.bytesToHex(&beacon_config.chain.GENESIS_FORK_VERSION, .lower),
@@ -836,7 +837,7 @@ fn ensureGenesisForkVersionMatches(
 fn compareOptionalUintField(name: []const u8, expected: u64, actual: ?u64) !void {
     if (actual) |value| {
         if (value != expected) {
-            std.log.err("Beacon node config mismatch field={s} expected={d} actual={d}", .{ name, expected, value });
+            scoped_log.err("Beacon node config mismatch field={s} expected={d} actual={d}", .{ name, expected, value });
             return error.BeaconConfigMismatch;
         }
     }
@@ -845,7 +846,7 @@ fn compareOptionalUintField(name: []const u8, expected: u64, actual: ?u64) !void
 fn compareOptionalVersionField(name: []const u8, expected: [4]u8, actual: ?[4]u8) !void {
     if (actual) |value| {
         if (!std.mem.eql(u8, &expected, &value)) {
-            std.log.err("Beacon node config mismatch field={s} expected=0x{s} actual=0x{s}", .{
+            scoped_log.err("Beacon node config mismatch field={s} expected=0x{s} actual=0x{s}", .{
                 name,
                 std.fmt.bytesToHex(&expected, .lower),
                 std.fmt.bytesToHex(&value, .lower),
@@ -858,7 +859,7 @@ fn compareOptionalVersionField(name: []const u8, expected: [4]u8, actual: ?[4]u8
 fn compareOptionalHexField(comptime name: []const u8, expected: anytype, actual: ?@TypeOf(expected)) !void {
     if (actual) |value| {
         if (!std.mem.eql(u8, &expected, &value)) {
-            std.log.err("Beacon node config mismatch field={s} expected=0x{s} actual=0x{s}", .{
+            scoped_log.err("Beacon node config mismatch field={s} expected=0x{s} actual=0x{s}", .{
                 name,
                 std.fmt.bytesToHex(&expected, .lower),
                 std.fmt.bytesToHex(&value, .lower),
@@ -957,7 +958,7 @@ fn compareBlobSchedule(
 ) !void {
     if (actual.len == 0) return;
     if (expected.len != actual.len) {
-        std.log.err("Beacon node config mismatch field=BLOB_SCHEDULE expected_len={d} actual_len={d}", .{
+        scoped_log.err("Beacon node config mismatch field=BLOB_SCHEDULE expected_len={d} actual_len={d}", .{
             expected.len,
             actual.len,
         });
@@ -966,7 +967,7 @@ fn compareBlobSchedule(
 
     for (expected, actual, 0..) |expected_entry, actual_entry, idx| {
         if (expected_entry.EPOCH != actual_entry.epoch) {
-            std.log.err("Beacon node config mismatch field=BLOB_SCHEDULE[{d}].EPOCH expected={d} actual={d}", .{
+            scoped_log.err("Beacon node config mismatch field=BLOB_SCHEDULE[{d}].EPOCH expected={d} actual={d}", .{
                 idx,
                 expected_entry.EPOCH,
                 actual_entry.epoch,
@@ -974,7 +975,7 @@ fn compareBlobSchedule(
             return error.BeaconConfigMismatch;
         }
         if (expected_entry.MAX_BLOBS_PER_BLOCK != actual_entry.max_blobs_per_block) {
-            std.log.err("Beacon node config mismatch field=BLOB_SCHEDULE[{d}].MAX_BLOBS_PER_BLOCK expected={d} actual={d}", .{
+            scoped_log.err("Beacon node config mismatch field=BLOB_SCHEDULE[{d}].MAX_BLOBS_PER_BLOCK expected={d} actual={d}", .{
                 idx,
                 expected_entry.MAX_BLOBS_PER_BLOCK,
                 actual_entry.max_blobs_per_block,

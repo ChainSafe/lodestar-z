@@ -10,6 +10,7 @@
 //! Reference: Lodestar `packages/beacon-node/src/chain/initState.ts`
 
 const std = @import("std");
+const scoped_log = std.log.scoped(.checkpoint_sync);
 const Allocator = std.mem.Allocator;
 const Sha256 = std.crypto.hash.sha2.Sha256;
 const db_mod = @import("db");
@@ -337,7 +338,7 @@ fn fetchBeaconEndpoint(
     const url = try std.fmt.allocPrint(allocator, "{s}{s}", .{ base_url, path });
     defer allocator.free(url);
 
-    std.log.info("Fetching {s} from {s}", .{ label, url });
+    scoped_log.info("Fetching {s} from {s}", .{ label, url });
 
     var client: std.http.Client = .{
         .allocator = allocator,
@@ -364,7 +365,7 @@ fn fetchBeaconEndpoint(
 
     // Check HTTP status.
     if (response.head.status != .ok) {
-        std.log.err("HTTP {d} fetching {s}", .{ @intFromEnum(response.head.status), label });
+        scoped_log.err("HTTP {d} fetching {s}", .{ @intFromEnum(response.head.status), label });
         return FetchError.HttpError;
     }
 
@@ -387,9 +388,9 @@ fn fetchBeaconEndpoint(
 
     // Log content length if known.
     if (response.head.content_length) |total| {
-        std.log.info("Downloading {s}: {d} bytes (fork={s})", .{ label, total, fork_name });
+        scoped_log.info("Downloading {s}: {d} bytes (fork={s})", .{ label, total, fork_name });
     } else {
-        std.log.info("Downloading {s}: chunked (fork={s})", .{ label, fork_name });
+        scoped_log.info("Downloading {s}: chunked (fork={s})", .{ label, fork_name });
     }
 
     // Read the entire response body.
@@ -398,7 +399,7 @@ fn fetchBeaconEndpoint(
     const reader = response.reader(&transfer_buf);
     const body = reader.allocRemaining(allocator, std.Io.Limit.limited(1024 * 1024 * 1024)) catch |err| switch (err) {
         error.ReadFailed => {
-            std.log.err("Read failed fetching {s}: {?}", .{ label, response.bodyErr() });
+            scoped_log.err("Read failed fetching {s}: {?}", .{ label, response.bodyErr() });
             return FetchError.RequestFailed;
         },
         else => |e| return e,
@@ -409,7 +410,7 @@ fn fetchBeaconEndpoint(
         return FetchError.EmptyResponse;
     }
 
-    std.log.info("Downloaded {s}: {d} bytes", .{ label, body.len });
+    scoped_log.info("Downloaded {s}: {d} bytes", .{ label, body.len });
     return .{ .state_bytes = body, .fork_name = fork_name };
 }
 
@@ -464,4 +465,3 @@ test "validateWeakSubjectivityCheckpoint: mismatched epoch" {
     const result = validateWeakSubjectivityCheckpoint(ws, 100, 32);
     try std.testing.expectError(error.WeakSubjectivityViolation, result);
 }
-

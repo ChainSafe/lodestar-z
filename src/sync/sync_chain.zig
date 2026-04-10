@@ -11,6 +11,7 @@
 //! Reference: Lodestar `packages/beacon-node/src/sync/range/chain.ts`
 
 const std = @import("std");
+const scoped_log = std.log.scoped(.sync_chain);
 const Allocator = std.mem.Allocator;
 const sync_types = @import("sync_types.zig");
 const ChainTarget = sync_types.ChainTarget;
@@ -447,7 +448,7 @@ pub const SyncChain = struct {
                     continue;
                 }
                 const peer = self.selectPeer(b) orelse continue;
-                std.log.debug("SyncChain dispatch: chain={d} batch={d} gen={d} slots={d}..{d} peer={s}", .{
+                scoped_log.debug("SyncChain dispatch: chain={d} batch={d} gen={d} slots={d}..{d} peer={s}", .{
                     self.id,
                     b.id,
                     b.generation +% 1,
@@ -502,7 +503,7 @@ pub const SyncChain = struct {
             if (err == error.ProcessingPending) {
                 return;
             }
-            std.log.debug("sync chain: failed to import segment {d}..{d}: {}", .{
+            scoped_log.debug("sync chain: failed to import segment {d}..{d}: {}", .{
                 front.start_slot,
                 front.endSlot(),
                 err,

@@ -11,6 +11,7 @@
 //! operations like advanceToEpoch, runUntilFinality, and runScenario.
 
 const std = @import("std");
+const scoped_log = std.log.scoped(.sim_controller);
 const Allocator = std.mem.Allocator;
 
 const types = @import("consensus_types");
@@ -597,7 +598,7 @@ pub const SimController = struct {
                         const head_summary_0 = self.nodes[0].node.getHead();
                         const head_summary_i = self.nodes[i].node.getHead();
                         const best_peer_slot = if (self.beacon_nodes[i].peer_manager) |pm| pm.getHighestPeerSlot() else 0;
-                        std.log.err(
+                        scoped_log.err(
                             "sim head disagreement at slot {d}: node0 head_slot={d} finalized={d} root={s}... node{d} head_slot={d} finalized={d} best_peer_slot={d} root={s}...",
                             .{
                                 self.current_slot,

@@ -13,6 +13,7 @@
 //!   4. On any error: fall back to local execution engine
 
 const std = @import("std");
+const scoped_log = std.log.scoped(.execution_builder);
 const testing = std.testing;
 const Allocator = std.mem.Allocator;
 
@@ -343,7 +344,7 @@ pub const HttpBuilder = struct {
         const response = self.transport.send(.POST, url, headers_buf[0..header_count], body, .{
             .timeout = http_engine.timeoutFromMs(self.request_timeout_ms),
         }) catch |err| {
-            std.log.warn("builder validator registration failed: {}", .{err});
+            scoped_log.warn("builder validator registration failed: {}", .{err});
             return err;
         };
         defer self.allocator.free(response);
@@ -355,7 +356,7 @@ pub const HttpBuilder = struct {
             });
         }
 
-        std.log.debug("builder registered {d} validator(s) with relay", .{registrations.len});
+        scoped_log.debug("builder registered {d} validator(s) with relay", .{registrations.len});
     }
 
     fn getHeaderImpl(
@@ -387,24 +388,24 @@ pub const HttpBuilder = struct {
         const response = self.transport.send(.GET, url, headers_buf[0..header_count], "", .{
             .timeout = http_engine.timeoutFromMs(self.proposal_timeout_ms),
         }) catch |err| {
-            std.log.debug("builder getHeader failed at slot {d}: {} — falling back to local execution", .{ slot, err });
+            scoped_log.debug("builder getHeader failed at slot {d}: {} — falling back to local execution", .{ slot, err });
             return null;
         };
         defer self.allocator.free(response);
 
         // Empty response = 204 No Content = no bid available
         if (response.len == 0) {
-            std.log.debug("builder returned no bid for slot {d}", .{slot});
+            scoped_log.debug("builder returned no bid for slot {d}", .{slot});
             return null;
         }
 
         // Parse the JSON response
         const bid = parseSignedBuilderBid(self.allocator, response) catch |err| {
-            std.log.debug("builder bid response parse failed: {} — falling back", .{err});
+            scoped_log.debug("builder bid response parse failed: {} — falling back", .{err});
             return null;
         };
 
-        std.log.debug("builder returned bid for slot {d}, value={d}", .{ slot, bid.message.value });
+        scoped_log.debug("builder returned bid for slot {d}, value={d}", .{ slot, bid.message.value });
         return bid;
     }
 
@@ -425,14 +426,14 @@ pub const HttpBuilder = struct {
         const response = self.transport.send(.POST, url, headers_buf[0..header_count], body, .{
             .timeout = http_engine.timeoutFromMs(self.request_timeout_ms),
         }) catch |err| {
-            std.log.err("builder submitBlindedBlock failed: {}", .{err});
+            scoped_log.err("builder submitBlindedBlock failed: {}", .{err});
             return err;
         };
         defer self.allocator.free(response);
 
         // Parse the full execution payload from response
         const payload = try parseExecutionPayload(self.allocator, response);
-        std.log.debug("builder unblinded block, block_hash={x}", .{
+        scoped_log.debug("builder unblinded block, block_hash={x}", .{
             payload.block_hash[0..4],
         });
         return payload;
@@ -562,7 +563,6 @@ fn encodeExecutionPayloadHeader(allocator: Allocator, h: ExecutionPayloadHeader)
     const tx_root = try http_engine.hexEncodeFixed(allocator, &h.transactions_root);
     defer allocator.free(tx_root);
 
-
     // Fix 3: conditionally include Deneb+ fields when present.
     if (h.withdrawals_root != null or h.blob_gas_used != null or h.excess_blob_gas != null) {
         const wr_hex = if (h.withdrawals_root) |wr|
@@ -580,7 +580,7 @@ fn encodeExecutionPayloadHeader(allocator: Allocator, h: ExecutionPayloadHeader)
         return std.fmt.allocPrint(allocator,
             \\{{"parent_hash":"{s}","fee_recipient":"{s}","state_root":"{s}","receipts_root":"{s}","logs_bloom":"{s}","prev_randao":"{s}","block_number":"{s}","gas_limit":"{s}","gas_used":"{s}","timestamp":"{s}","extra_data":"{s}","base_fee_per_gas":"{s}","block_hash":"{s}","transactions_root":"{s}","withdrawals_root":"{s}","blob_gas_used":"{s}","excess_blob_gas":"{s}"}}
         , .{
-            parent_hash, fee_recipient, state_root,  receipts_root,
+            parent_hash, fee_recipient, state_root,   receipts_root,
             logs_bloom,  prev_randao,   block_number, gas_limit,
             gas_used,    timestamp,     extra_data,   base_fee,
             block_hash,  tx_root,       wr_hex,       bgu_hex,
@@ -591,7 +591,7 @@ fn encodeExecutionPayloadHeader(allocator: Allocator, h: ExecutionPayloadHeader)
     return std.fmt.allocPrint(allocator,
         \\{{"parent_hash":"{s}","fee_recipient":"{s}","state_root":"{s}","receipts_root":"{s}","logs_bloom":"{s}","prev_randao":"{s}","block_number":"{s}","gas_limit":"{s}","gas_used":"{s}","timestamp":"{s}","extra_data":"{s}","base_fee_per_gas":"{s}","block_hash":"{s}","transactions_root":"{s}"}}
     , .{
-        parent_hash, fee_recipient, state_root,  receipts_root,
+        parent_hash, fee_recipient, state_root,   receipts_root,
         logs_bloom,  prev_randao,   block_number, gas_limit,
         gas_used,    timestamp,     extra_data,   base_fee,
         block_hash,  tx_root,
@@ -788,11 +788,11 @@ fn parseDepositRequests(
         if (item != .object) return error.InvalidExecutionRequestsType;
         const obj = item.object;
         out[i] = .{
-            .pubkey = try parseHex48((getObjectField(obj, &.{ "pubkey" }) orelse return error.MissingField).string),
+            .pubkey = try parseHex48((getObjectField(obj, &.{"pubkey"}) orelse return error.MissingField).string),
             .withdrawal_credentials = try parseHex32((getObjectField(obj, &.{ "withdrawal_credentials", "withdrawalCredentials" }) orelse return error.MissingField).string),
-            .amount = try parseQuantityU64((getObjectField(obj, &.{ "amount" }) orelse return error.MissingField).string),
-            .signature = try parseHex96((getObjectField(obj, &.{ "signature" }) orelse return error.MissingField).string),
-            .index = try parseQuantityU64((getObjectField(obj, &.{ "index" }) orelse return error.MissingField).string),
+            .amount = try parseQuantityU64((getObjectField(obj, &.{"amount"}) orelse return error.MissingField).string),
+            .signature = try parseHex96((getObjectField(obj, &.{"signature"}) orelse return error.MissingField).string),
+            .index = try parseQuantityU64((getObjectField(obj, &.{"index"}) orelse return error.MissingField).string),
         };
     }
 
@@ -818,7 +818,7 @@ fn parseWithdrawalRequests(
         out[i] = .{
             .source_address = try parseHex20((getObjectField(obj, &.{ "source_address", "sourceAddress" }) orelse return error.MissingField).string),
             .validator_pubkey = try parseHex48((getObjectField(obj, &.{ "validator_pubkey", "validatorPubkey" }) orelse return error.MissingField).string),
-            .amount = try parseQuantityU64((getObjectField(obj, &.{ "amount" }) orelse return error.MissingField).string),
+            .amount = try parseQuantityU64((getObjectField(obj, &.{"amount"}) orelse return error.MissingField).string),
         };
     }
 
@@ -1007,7 +1007,6 @@ const MockBuilderTransport = struct {
 };
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
-
 
 test "BuilderApi vtable struct layout" {
     const info = @typeInfo(BuilderApi.VTable);
@@ -1211,7 +1210,6 @@ test "HttpBuilder: getHeader — parses valid bid response" {
     try testing.expectEqual([_]u8{0xcc} ** 96, bid.signature);
 }
 
-
 test "HttpBuilder: submitBlindedBlock — calls correct endpoint" {
     const allocator = testing.allocator;
 
@@ -1237,7 +1235,6 @@ test "HttpBuilder: submitBlindedBlock — calls correct endpoint" {
     try testing.expect(std.mem.indexOf(u8, mock.last_url.?, "/eth/v1/builder/blinded_blocks") != null);
     try testing.expectEqual([_]u8{0xde} ** 32, payload.block_hash);
 }
-
 
 test "encodeRegistrations: empty returns []" {
     const allocator = testing.allocator;

@@ -1,6 +1,7 @@
 //! Higher-level discv5 service with integrated lookup orchestration.
 
 const std = @import("std");
+const scoped_log = std.log.scoped(.discv5_service);
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
@@ -788,7 +789,7 @@ pub const Service = struct {
     }
 
     fn emitDiscoveredEnrs(self: *Service, nodes: *const protocol_mod.NodesEvent, lookup_id: ?u32) void {
-        std.log.debug("discv5 service: emitting {d} ENRs from {any} (lookup_id={any})", .{
+        scoped_log.debug("discv5 service: emitting {d} ENRs from {any} (lookup_id={any})", .{
             nodes.enrs.len,
             nodes.peer_addr,
             lookup_id,
@@ -1135,12 +1136,12 @@ pub const Service = struct {
                 else => return,
             };
 
-            std.log.debug("discv5: received UDP packet len={d} from={any}", .{
+            scoped_log.debug("discv5: received UDP packet len={d} from={any}", .{
                 result.data.len,
                 result.from,
             });
             self.protocol.handlePacket(result.data, result.from, socket) catch |err| {
-                std.log.debug("discv5: handlePacket failed for {any}: {}", .{ result.from, err });
+                scoped_log.debug("discv5: handlePacket failed for {any}: {}", .{ result.from, err });
             };
         }
     }

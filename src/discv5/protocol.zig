@@ -1,6 +1,7 @@
 //! Discovery v5 protocol handler
 
 const std = @import("std");
+const scoped_log = std.log.scoped(.discv5_protocol);
 const Allocator = std.mem.Allocator;
 const NodeId = @import("enr.zig").NodeId;
 const kbucket = @import("kbucket.zig");
@@ -602,7 +603,7 @@ pub const Protocol = struct {
         defer self.alloc.free(pkt);
 
         try socket.send(dest_addr, pkt);
-        std.log.debug("discv5: sent unauthenticated probe to {any} (msg_len={d})", .{
+        scoped_log.debug("discv5: sent unauthenticated probe to {any} (msg_len={d})", .{
             dest_addr,
             msg_bytes.len,
         });
@@ -735,7 +736,7 @@ pub const Protocol = struct {
             for (self.pending_requests.items, 0..) |pr, i| {
                 if (pr.dest_addr.eql(&from)) {
                     pending_idx = i;
-                    std.log.debug("discv5: WHOAREYOU matched by address after nonce miss (from={any}, pending_nonce={s}, whoareyou_nonce={s})", .{
+                    scoped_log.debug("discv5: WHOAREYOU matched by address after nonce miss (from={any}, pending_nonce={s}, whoareyou_nonce={s})", .{
                         from,
                         &std.fmt.bytesToHex(pr.nonce, .lower),
                         &std.fmt.bytesToHex(request_nonce, .lower),
@@ -746,13 +747,13 @@ pub const Protocol = struct {
         }
 
         const idx = pending_idx orelse {
-            std.log.debug("discv5: WHOAREYOU for unknown nonce (pending={d}, nonce={s}, from={any})", .{
+            scoped_log.debug("discv5: WHOAREYOU for unknown nonce (pending={d}, nonce={s}, from={any})", .{
                 self.pending_requests.items.len,
                 &std.fmt.bytesToHex(request_nonce, .lower),
                 from,
             });
             if (self.pending_requests.items.len > 0) {
-                std.log.debug("discv5: first pending nonce={s}, dest={any}", .{
+                scoped_log.debug("discv5: first pending nonce={s}, dest={any}", .{
                     &std.fmt.bytesToHex(self.pending_requests.items[0].nonce, .lower),
                     self.pending_requests.items[0].dest_addr,
                 });
@@ -870,7 +871,7 @@ pub const Protocol = struct {
 
         // Send the handshake packet.
         try socket.send(from, handshake_pkt);
-        std.log.debug("discv5: sent handshake to {any}", .{from});
+        scoped_log.debug("discv5: sent handshake to {any}", .{from});
 
         // Store the new session.
         try self.sessions.put(pending.dest_node_id, .{
@@ -918,30 +919,30 @@ pub const Protocol = struct {
             if (authdata.len > enr_offset) {
                 const enr_bytes = authdata[enr_offset..];
                 var parsed_enr = enr_mod.decode(self.alloc, enr_bytes) catch {
-                    std.log.debug("discv5: handshake from unknown peer {any} has invalid ENR, rejecting", .{src_id});
+                    scoped_log.debug("discv5: handshake from unknown peer {any} has invalid ENR, rejecting", .{src_id});
                     return;
                 };
                 defer parsed_enr.deinit();
                 const pk = parsed_enr.pubkey orelse {
-                    std.log.debug("discv5: handshake ENR from {any} has no pubkey, rejecting", .{src_id});
+                    scoped_log.debug("discv5: handshake ENR from {any} has no pubkey, rejecting", .{src_id});
                     return;
                 };
                 // Verify the ENR node-id matches the claimed src_id.
                 const derived_id = enr_mod.nodeIdFromCompressedPubkey(&pk);
                 if (!std.mem.eql(u8, &derived_id, &src_id)) {
-                    std.log.debug("discv5: handshake ENR node-id mismatch, rejecting", .{});
+                    scoped_log.debug("discv5: handshake ENR node-id mismatch, rejecting", .{});
                     return;
                 }
                 break :blk pk;
             }
-            std.log.debug("discv5: handshake from unknown peer {any} with no ENR, rejecting", .{src_id});
+            scoped_log.debug("discv5: handshake from unknown peer {any} with no ENR, rejecting", .{src_id});
             return;
         };
 
         // Verify id-signature: SHA256("discovery v5 identity proof" || challenge_data || eph_pubkey || local_node_id)
         const id_sig_fixed: *const [64]u8 = id_sig[0..64];
         session_mod.verifyIdSignature(id_sig_fixed, &sender_pubkey, challenge, eph_pk, &self.config.local_node_id) catch {
-            std.log.debug("discv5: handshake id-signature verification failed for {any}, rejecting", .{src_id});
+            scoped_log.debug("discv5: handshake id-signature verification failed for {any}, rejecting", .{src_id});
             return;
         };
 
@@ -978,7 +979,7 @@ pub const Protocol = struct {
         if (!new_session.seen_nonces.contains(&parsed.static_header.nonce)) {
             new_session.seen_nonces.insert(&parsed.static_header.nonce);
             try self.sessions.put(src_id, new_session);
-            std.log.debug("discv5: handshake established with {any}", .{from});
+            scoped_log.debug("discv5: handshake established with {any}", .{from});
             try self.dispatchMessage(pt, src_id, from, socket);
         }
     }
@@ -1338,7 +1339,7 @@ pub const Protocol = struct {
         if (request.kind != .ping) return;
 
         self.markNodeSeen(from, from_addr, .connected);
-        std.log.debug("discv5: received PONG from {any}", .{from_addr});
+        scoped_log.debug("discv5: received PONG from {any}", .{from_addr});
         self.completed_events.append(self.alloc, .{
             .pong = .{
                 .peer_id = from,
@@ -1411,7 +1412,7 @@ pub const Protocol = struct {
 
         const key = activeRequestKey(from, decoded.msg.req_id);
         const request = self.active_requests.getPtr(key) orelse {
-            std.log.debug("discv5: received NODES for unknown request from {any}", .{from_addr});
+            scoped_log.debug("discv5: received NODES for unknown request from {any}", .{from_addr});
             return;
         };
         if (request.kind != .findnode) return;
@@ -1429,7 +1430,7 @@ pub const Protocol = struct {
         }
         findnode.responses_received += 1;
         self.markNodeSeen(from, from_addr, .connected);
-        std.log.debug("discv5: received NODES chunk {d}/{d} from {any} ({d} ENRs)", .{
+        scoped_log.debug("discv5: received NODES chunk {d}/{d} from {any} ({d} ENRs)", .{
             findnode.responses_received,
             findnode.total_responses.?,
             from_addr,
@@ -1456,7 +1457,7 @@ pub const Protocol = struct {
             for (owned_enrs) |enr| self.alloc.free(enr);
             self.alloc.free(owned_enrs);
         };
-        std.log.debug("discv5: completed NODES response from {any} with {d} ENRs", .{
+        scoped_log.debug("discv5: completed NODES response from {any} with {d} ENRs", .{
             from_addr,
             owned_enrs.len,
         });

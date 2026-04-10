@@ -18,6 +18,7 @@
 //! Reference: Lodestar chain/blocks/importBlock.ts
 
 const std = @import("std");
+const scoped_log = std.log.scoped(.import_block);
 const Allocator = std.mem.Allocator;
 
 const consensus_types = @import("consensus_types");
@@ -162,7 +163,7 @@ pub fn importVerifiedBlock(
             fc.updateTime(ctx.allocator, block_slot) catch |err| switch (err) {
                 error.OutOfMemory => return BlockImportError.InternalError,
                 else => {
-                    std.log.warn("fork choice updateTime failed at slot {d}: {}", .{ block_slot, err });
+                    scoped_log.warn("fork choice updateTime failed at slot {d}: {}", .{ block_slot, err });
                 },
             };
         }
@@ -201,7 +202,7 @@ pub fn importVerifiedBlock(
             fc_exec_status,
             fc_da_status,
         )) |_| true else |err| blk: {
-            std.log.warn("fork choice onBlock failed for slot {d}: {}", .{ block_slot, err });
+            scoped_log.warn("fork choice onBlock failed for slot {d}: {}", .{ block_slot, err });
             break :blk false;
         };
 
@@ -341,7 +342,7 @@ pub fn importVerifiedBlock(
 
         // Recompute head: computeDeltas → applyScoreChanges → findHead.
         const uagh_result = fc.updateAndGetHead(ctx.allocator, .get_canonical_head) catch |err| {
-            std.log.warn("import block getHead failed: {}", .{err});
+            scoped_log.warn("import block getHead failed: {}", .{err});
             break :head_recompute;
         };
         const head_node = fc.getBlockDefaultStatus(uagh_result.head.block_root);
@@ -375,12 +376,12 @@ pub fn importVerifiedBlock(
                     @tagName(imported_node.extra_meta.dataAvailabilityStatus()),
                 };
                 if (opts.from_range_sync) {
-                    std.log.debug(
+                    scoped_log.debug(
                         "imported block did not advance head: block_slot={d} old_head={d} new_head={d} fc_slot={d} store_justified={d} store_finalized={d} block_justified={d} block_finalized={d} block_unrealized_justified={d} block_unrealized_finalized={d} exec={s} da={s}",
                         args,
                     );
                 } else {
-                    std.log.warn(
+                    scoped_log.warn(
                         "imported block did not advance head: block_slot={d} old_head={d} new_head={d} fc_slot={d} store_justified={d} store_finalized={d} block_justified={d} block_finalized={d} block_unrealized_justified={d} block_unrealized_finalized={d} exec={s} da={s}",
                         args,
                     );
@@ -388,12 +389,12 @@ pub fn importVerifiedBlock(
             } else {
                 const args = .{ block_slot, old_head_slot, new_head.slot, fc.getTime() };
                 if (opts.from_range_sync) {
-                    std.log.debug(
+                    scoped_log.debug(
                         "imported block did not advance head and is missing from fork choice: block_slot={d} old_head={d} new_head={d} fc_slot={d}",
                         args,
                     );
                 } else {
-                    std.log.warn(
+                    scoped_log.warn(
                         "imported block did not advance head and is missing from fork choice: block_slot={d} old_head={d} new_head={d} fc_slot={d}",
                         args,
                     );
@@ -484,7 +485,7 @@ pub fn importVerifiedBlock(
         // Log but don't reprocess inline (avoids deep recursion / stack overflow).
         // Callers should drain the queue asynchronously after import.
         if (released.items.len > 0) {
-            std.log.debug("import block: {d} block(s) queued for reprocessing (parent={s}...)", .{
+            scoped_log.debug("import block: {d} block(s) queued for reprocessing (parent={s}...)", .{
                 released.items.len,
                 &std.fmt.bytesToHex(block_root[0..4], .lower),
             });
@@ -518,7 +519,7 @@ fn detectAndEmitReorg(
 ) void {
     const fc = ctx.fork_choice;
 
-    std.log.debug("head changed: old={s}... new={s}...", .{
+    scoped_log.debug("head changed: old={s}... new={s}...", .{
         &std.fmt.bytesToHex(old_head_root[0..4], .lower),
         &std.fmt.bytesToHex(new_head.block_root[0..4], .lower),
     });
@@ -535,7 +536,7 @@ fn detectAndEmitReorg(
             const reorg_depth = if (old_head_slot > anc.slot) old_head_slot - anc.slot else 0;
 
             if (reorg_depth > 0) {
-                std.log.warn("chain reorg detected depth={d} old={s}... new={s}...", .{
+                scoped_log.warn("chain reorg detected depth={d} old={s}... new={s}...", .{
                     reorg_depth,
                     &std.fmt.bytesToHex(old_head_root[0..4], .lower),
                     &std.fmt.bytesToHex(new_head.block_root[0..4], .lower),

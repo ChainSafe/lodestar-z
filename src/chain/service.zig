@@ -5,6 +5,7 @@
 //! mutate pools, caches, and storage directly.
 
 const std = @import("std");
+const scoped_log = std.log.scoped(.chain_service);
 const consensus_types = @import("consensus_types");
 const fork_types = @import("fork_types");
 const fork_choice_mod = @import("fork_choice");
@@ -489,7 +490,7 @@ pub const Service = struct {
                 data.beacon_block_root,
                 data.target.epoch,
             ) catch |err| {
-                std.log.debug("fork choice aggregate vote update failed for validator {d} at slot {d}: {}", .{
+                scoped_log.debug("fork choice aggregate vote update failed for validator {d} at slot {d}: {}", .{
                     validator_index, data.slot, err,
                 });
             };

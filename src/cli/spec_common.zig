@@ -36,9 +36,9 @@ pub const CliLogLevel = enum {
             .@"error" => .err,
             .warn => .warn,
             .info => .info,
-            .verbose => .verbose,
+            .verbose => .debug,
             .debug => .debug,
-            .trace => .trace,
+            .trace => .debug,
         };
     }
 };

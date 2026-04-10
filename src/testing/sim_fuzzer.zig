@@ -6,6 +6,7 @@
 //! All randomness comes from a seeded PRNG — same seed = identical fuzz run.
 
 const std = @import("std");
+const scoped_log = std.log.scoped(.sim_fuzzer);
 const Allocator = std.mem.Allocator;
 
 const SimController = @import("sim_controller.zig").SimController;
@@ -194,16 +195,16 @@ pub const SimFuzzer = struct {
     /// Dump the step history as a reproducer (for debugging).
     pub fn dumpReproducer(self: *const SimFuzzer, result: *const FuzzResult) void {
         _ = self;
-        std.log.info("=== Fuzzer Reproducer ===", .{});
-        std.log.info("Steps run: {d}", .{result.steps_run});
-        std.log.info("Failures: {d}", .{result.invariant_failures.items.len});
+        scoped_log.info("=== Fuzzer Reproducer ===", .{});
+        scoped_log.info("Steps run: {d}", .{result.steps_run});
+        scoped_log.info("Failures: {d}", .{result.invariant_failures.items.len});
 
         for (result.step_history.items, 0..) |step, i| {
             const is_failure = for (result.invariant_failures.items) |f| {
                 if (f.step_index == i) break true;
             } else false;
             const marker: []const u8 = if (is_failure) " <-- FAILURE" else "";
-            std.log.info("  Step {d}: {}{s}", .{ i, step, marker });
+            scoped_log.info("  Step {d}: {}{s}", .{ i, step, marker });
         }
     }
 };

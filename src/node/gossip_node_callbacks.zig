@@ -9,6 +9,7 @@
 //! instead of a module-level global — eliminating the gossip_node hack.
 
 const std = @import("std");
+const scoped_log = std.log.scoped(.gossip_node_callbacks);
 const config_mod = @import("config");
 const types = @import("consensus_types");
 const state_transition = @import("state_transition");
@@ -59,7 +60,7 @@ pub fn importBlockFromGossip(ptr: *anyopaque, block_bytes: []const u8) anyerror!
         fork_seq,
         block_bytes,
     ) catch |err| {
-        std.log.debug("Gossip block import deserialize failed: {}", .{err});
+        scoped_log.debug("Gossip block import deserialize failed: {}", .{err});
         return err;
     };
 
@@ -73,11 +74,11 @@ pub fn importBlockFromGossip(ptr: *anyopaque, block_bytes: []const u8) anyerror!
     };
 
     const maybe_result = node.completeReadyIngress(ready, block_bytes) catch |err| {
-        std.log.debug("Gossip block import failed: {}", .{err});
+        scoped_log.debug("Gossip block import failed: {}", .{err});
         return err;
     };
     if (maybe_result) |result| {
-        std.log.debug("GOSSIP BLOCK IMPORTED (via handler) slot={d}", .{result.slot});
+        scoped_log.debug("GOSSIP BLOCK IMPORTED (via handler) slot={d}", .{result.slot});
     }
 }
 
@@ -561,13 +562,13 @@ pub fn importBlobSidecar(ptr: *anyopaque, ssz_bytes: []const u8) anyerror!void {
 
     var sidecar: types.deneb.BlobSidecar.Type = undefined;
     types.deneb.BlobSidecar.deserializeFromBytes(ssz_bytes, &sidecar) catch |err| {
-        std.log.debug("BlobSidecar SSZ decode failed: {}", .{err});
+        scoped_log.debug("BlobSidecar SSZ decode failed: {}", .{err});
         return err;
     };
 
     var block_root: [32]u8 = undefined;
     types.phase0.BeaconBlockHeader.hashTreeRoot(&sidecar.signed_block_header.message, &block_root) catch |err| {
-        std.log.debug("BlobSidecar block root hash failed: {}", .{err});
+        scoped_log.debug("BlobSidecar block root hash failed: {}", .{err});
         return err;
     };
 
@@ -581,14 +582,14 @@ pub fn importDataColumnSidecar(ptr: *anyopaque, ssz_bytes: []const u8) anyerror!
 
     var sidecar = types.fulu.DataColumnSidecar.default_value;
     types.fulu.DataColumnSidecar.deserializeFromBytes(node.allocator, ssz_bytes, &sidecar) catch |err| {
-        std.log.debug("DataColumnSidecar SSZ decode failed: {}", .{err});
+        scoped_log.debug("DataColumnSidecar SSZ decode failed: {}", .{err});
         return err;
     };
     defer types.fulu.DataColumnSidecar.deinit(node.allocator, &sidecar);
 
     var block_root: [32]u8 = undefined;
     types.phase0.BeaconBlockHeader.hashTreeRoot(&sidecar.signed_block_header.message, &block_root) catch |err| {
-        std.log.debug("DataColumnSidecar block root hash failed: {}", .{err});
+        scoped_log.debug("DataColumnSidecar block root hash failed: {}", .{err});
         return err;
     };
 

@@ -583,13 +583,13 @@ pub const spec = cli.command(.{
             .description = "Path to persistent log file",
             .group = "logging",
         }, null),
-        .log_format = cli.option(log_mod.GlobalLogger.Format, .{
+        .log_format = cli.option(log_mod.Format, .{
             .long = "log-format",
             .description = "Log output format",
             .env = "LODESTAR_Z_LOG_FORMAT",
             .group = "logging",
         }, .human),
-        .logFormat = cli.option(?log_mod.GlobalLogger.Format, .{
+        .logFormat = cli.option(?log_mod.Format, .{
             .long = "logFormat",
             .description = "Log output format",
             .group = "logging",

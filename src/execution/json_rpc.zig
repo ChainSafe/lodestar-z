@@ -7,6 +7,7 @@
 //! Reference: https://www.jsonrpc.org/specification
 
 const std = @import("std");
+const scoped_log = std.log.scoped(.execution_json_rpc);
 const testing = std.testing;
 const json = std.json;
 const Allocator = std.mem.Allocator;
@@ -176,7 +177,7 @@ pub fn decodeResponse(
             if (err_val == .object) {
                 const code = if (err_val.object.get("code")) |c| c.integer else -1;
                 const msg = if (err_val.object.get("message")) |m| m.string else "unknown";
-                std.log.debug("JSON-RPC error code={d} message={s}", .{ code, msg });
+                scoped_log.debug("JSON-RPC error code={d} message={s}", .{ code, msg });
                 return mapErrorCode(code);
             }
             return error.UnknownErrorCode;

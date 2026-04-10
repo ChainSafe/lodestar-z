@@ -1,7 +1,7 @@
 //! Node-owned execution and block production helpers.
 
 const std = @import("std");
-const log = @import("log");
+const log = std.log.scoped(.node);
 
 const types = @import("consensus_types");
 const fork_types = @import("fork_types");
@@ -108,7 +108,7 @@ fn validateBuilderHeaderGasLimit(
     header_gas_limit: u64,
 ) !void {
     const registration = self.execution_runtime.getValidatorRegistration(proposer_pubkey) orelse {
-        log.logger(.node).warn(
+        log.warn(
             "Builder: missing cached validator registration, skipping header gas limit check slot={d} proposer=0x{s}",
             .{ slot, std.fmt.bytesToHex(proposer_pubkey[0..4], .lower) },
         );
@@ -119,7 +119,7 @@ fn validateBuilderHeaderGasLimit(
     const bounds = builderGasLimitBounds(parent_gas_limit, registration.gas_limit);
 
     if (header_gas_limit < bounds.lower or header_gas_limit > bounds.upper) {
-        log.logger(.node).warn(
+        log.warn(
             "Builder: rejecting bid with gas_limit={d} outside [{d}, {d}] slot={d} proposer=0x{s}",
             .{
                 header_gas_limit,
@@ -133,7 +133,7 @@ fn validateBuilderHeaderGasLimit(
     }
 
     if (header_gas_limit != bounds.expected) {
-        log.logger(.node).warn(
+        log.warn(
             "Builder: bid gas_limit={d} differs from expected={d} (parent={d} target={d}) slot={d} proposer=0x{s}",
             .{
                 header_gas_limit,
@@ -167,7 +167,7 @@ pub fn refreshBuilderStatus(self: *BeaconNode, clock_slot: u64) void {
         self.execution_runtime.updateBuilderStatus(.circuit_breaker);
     } else if (self.execution_runtime.builderApi()) |builder| {
         const status = builder.status() catch |err| blk: {
-            log.logger(.node).warn("Builder status check failed", .{ .err = err });
+            log.warn("Builder status check failed: {}", .{err});
             break :blk execution_mod.BuilderStatus.unavailable;
         };
         self.execution_runtime.updateBuilderStatus(status);
@@ -177,7 +177,7 @@ pub fn refreshBuilderStatus(self: *BeaconNode, clock_slot: u64) void {
 
     const current_status = self.execution_runtime.currentBuilderStatus();
     if (current_status != previous_status) {
-        log.logger(.node).info(
+        log.info(
             "External builder status updated: {s} -> {s} (slots_present={d} fault_window={d} allowed_faults={d})",
             .{
                 @tagName(previous_status),
@@ -266,7 +266,7 @@ pub fn registerValidatorsWithBuilder(
 ) void {
     const builder = self.execution_runtime.builderApi() orelse return;
     builder.registerValidators(registrations) catch |err| {
-        std.log.warn("builder registerValidators failed: {} — continuing", .{err});
+        log.warn("builder registerValidators failed: {} — continuing", .{err});
     };
 }
 
@@ -509,7 +509,7 @@ fn assembleFullBlockFromPayloadResponse(
         execution_requests,
     );
 
-    std.log.info("produced full block: slot={d} proposer={d} parent={s}... value={d}", .{
+    log.info("produced full block: slot={d} proposer={d} parent={s}... value={d}", .{
         block.slot,
         block.proposer_index,
         &std.fmt.bytesToHex(block.parent_root[0..4], .lower),
@@ -550,7 +550,7 @@ fn assembleBlindedBlockFromBuilderBid(
         execution_requests,
     );
 
-    std.log.info("produced builder blinded block: slot={d} proposer={d} parent={s}... value={d}", .{
+    log.info("produced builder blinded block: slot={d} proposer={d} parent={s}... value={d}", .{
         block.slot,
         block.proposer_index,
         &std.fmt.bytesToHex(block.parent_root[0..4], .lower),
@@ -580,7 +580,7 @@ pub fn produceFullBlock(self: *BeaconNode, slot: u64, prod_config: BlockProducti
         },
         .unavailable => return error.NoEngineApi,
         .failure => |err| {
-            std.log.warn("execution engine getPayload failed for slot={d}: {}", .{ slot, err });
+            log.warn("execution engine getPayload failed for slot={d}: {}", .{ slot, err });
             return err;
         },
         .canceled => return error.Canceled,
@@ -627,13 +627,13 @@ pub fn produceEngineOrBuilderProposal(
         clearCachedPayloadIdIfCurrent(self, &context.snapshot, payload_id);
     }
     if (fetched.engine_error) |err| {
-        std.log.warn("execution engine getPayload failed for slot={d}: {}", .{ slot, err });
+        log.warn("execution engine getPayload failed for slot={d}: {}", .{ slot, err });
     }
     if (fetched.builder_no_bid) {
-        std.log.debug("Builder: no bid available for slot={d}", .{slot});
+        log.debug("Builder: no bid available for slot={d}", .{slot});
     }
     if (fetched.builder_error) |err| {
-        std.log.warn("builder getHeader failed for slot={d}: {}", .{ slot, err });
+        log.warn("builder getHeader failed for slot={d}: {}", .{ slot, err });
     }
 
     if (fetched.payload == null and fetched.builder_bid == null and fetched.timed_out) {
@@ -664,7 +664,7 @@ pub fn produceEngineOrBuilderProposal(
     if (local_payload.should_override_builder or builder_boost_factor == 0) {
         if (fetched.takeBuilderBid()) |bid| execution_mod.builder.freeBid(self.allocator, bid);
         if (local_payload.should_override_builder) {
-            std.log.debug("Builder: local execution payload overrides builder for slot={d}", .{slot});
+            log.debug("Builder: local execution payload overrides builder for slot={d}", .{slot});
         }
         return .{ .engine = try assembleFullBlockFromPayloadResponse(self, template, local_payload) };
     }
@@ -689,7 +689,7 @@ pub fn produceEngineOrBuilderProposal(
     if (bid.message.value == 0 or
         engineValueMeetsBuilderThreshold(local_payload.block_value, bid.message.value, builder_boost_factor))
     {
-        std.log.debug(
+        log.debug(
             "Builder: local execution value {d} >= boosted builder value {d} (builder={d} boost={d}) for slot={d}",
             .{
                 @as(u64, @truncate(local_payload.block_value)),
@@ -776,12 +776,12 @@ pub fn produceBuilderBlindedBlock(
             return null;
         },
         .no_bid => {
-            std.log.debug("Builder: no bid available for slot={d}", .{slot});
+            log.debug("Builder: no bid available for slot={d}", .{slot});
             if (require_builder) return error.BuilderBidUnavailable;
             return null;
         },
         .failure => |err| {
-            std.log.warn("builder getHeader error for slot={d}: {}", .{ slot, err });
+            log.warn("builder getHeader error for slot={d}: {}", .{ slot, err });
             if (require_builder) return error.BuilderBidUnavailable;
             return null;
         },
@@ -797,7 +797,7 @@ pub fn ensureProducedFeeRecipient(
     if (!strict_fee_recipient_check) return;
     if (std.mem.eql(u8, &produced.block_body.execution_payload.fee_recipient, &expected_fee_recipient)) return;
 
-    std.log.err("Produced block fee recipient mismatch expected=0x{s} actual=0x{s}", .{
+    log.err("Produced block fee recipient mismatch expected=0x{s} actual=0x{s}", .{
         std.fmt.bytesToHex(&expected_fee_recipient, .lower),
         std.fmt.bytesToHex(&produced.block_body.execution_payload.fee_recipient, .lower),
     });
@@ -812,7 +812,7 @@ pub fn ensureProducedBlindedFeeRecipient(
     if (!strict_fee_recipient_check) return;
     if (std.mem.eql(u8, &produced.block_body.execution_payload_header.fee_recipient, &expected_fee_recipient)) return;
 
-    std.log.err("Produced blinded block fee recipient mismatch expected=0x{s} actual=0x{s}", .{
+    log.err("Produced blinded block fee recipient mismatch expected=0x{s} actual=0x{s}", .{
         std.fmt.bytesToHex(&expected_fee_recipient, .lower),
         std.fmt.bytesToHex(&produced.block_body.execution_payload_header.fee_recipient, .lower),
     });
@@ -839,7 +839,7 @@ fn computeStateTransitionMetaForAnyBlock(
             .transfer_cache = false,
         },
     ) catch |err| {
-        std.log.warn("state transition for block state root failed: {}", .{err});
+        log.warn("state transition for block state root failed: {}", .{err});
         return err;
     };
     defer {
@@ -1140,7 +1140,7 @@ pub fn produceAndIngestBlock(
                 .transfer_cache = false,
             },
         ) catch |err| {
-            std.log.warn("state transition for state root computation failed: {}", .{err});
+            log.warn("state transition for state root computation failed: {}", .{err});
             return err;
         };
         defer {
@@ -1149,18 +1149,18 @@ pub fn produceAndIngestBlock(
         }
 
         const state_root = post_state.state.hashTreeRoot() catch |err| {
-            std.log.warn("hashTreeRoot failed: {}", .{err});
+            log.warn("hashTreeRoot failed: {}", .{err});
             return err;
         };
 
         signed_block.message.state_root = state_root.*;
 
-        std.log.debug("Computed state root for block: slot={d} state_root={s}...", .{
+        log.debug("Computed state root for block: slot={d} state_root={s}...", .{
             slot,
             &std.fmt.bytesToHex(state_root[0..4], .lower),
         });
     } else {
-        std.log.warn("no head state available for state root computation at slot={d}", .{slot});
+        log.warn("no head state available for state root computation at slot={d}", .{slot});
     }
 
     const any_signed_produced: fork_types.AnySignedBeaconBlock = switch (self.config.forkSeq(slot)) {
@@ -1174,13 +1174,13 @@ pub fn produceAndIngestBlock(
 
     switch (ingress_result) {
         .ignored => {
-            std.log.info("block produced and ignored during local ingest: slot={d}", .{slot});
+            log.info("block produced and ignored during local ingest: slot={d}", .{slot});
         },
         .queued => {
-            std.log.info("block produced and queued for local ingest: slot={d}", .{slot});
+            log.info("block produced and queued for local ingest: slot={d}", .{slot});
         },
         .imported => |import_result| {
-            std.log.info("block produced and imported: slot={d} root={s}...", .{
+            log.info("block produced and imported: slot={d} root={s}...", .{
                 slot,
                 &std.fmt.bytesToHex(import_result.block_root[0..4], .lower),
             });
@@ -1200,7 +1200,7 @@ pub fn broadcastBlock(
     signed_block: *const types.electra.SignedBeaconBlock.Type,
 ) !void {
     const p2p = self.p2p_service orelse {
-        std.log.warn("no P2P service — cannot broadcast block at slot={d}", .{signed_block.message.slot});
+        log.warn("no P2P service — cannot broadcast block at slot={d}", .{signed_block.message.slot});
         return;
     };
 
@@ -1210,11 +1210,11 @@ pub fn broadcastBlock(
     _ = types.electra.SignedBeaconBlock.serializeIntoBytes(signed_block, buf);
 
     _ = p2p.publishGossip(self.io, .beacon_block, null, buf) catch |err| {
-        std.log.warn("failed to broadcast block at slot={d}: {}", .{ signed_block.message.slot, err });
+        log.warn("failed to broadcast block at slot={d}: {}", .{ signed_block.message.slot, err });
         return;
     };
 
-    std.log.info("broadcast block via gossip: slot={d}", .{signed_block.message.slot});
+    log.info("broadcast block via gossip: slot={d}", .{signed_block.message.slot});
 }
 
 fn convertTransactions(

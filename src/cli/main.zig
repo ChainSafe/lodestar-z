@@ -1,6 +1,7 @@
 //! CLI parse-and-dispatch entrypoint.
 
 const std = @import("std");
+const scoped_log = std.log.scoped(.cli_main);
 
 const cli = @import("zig_cli");
 const log_mod = @import("log");
@@ -40,10 +41,10 @@ pub fn main(init: std.process.Init) !void {
             if (std.mem.eql(u8, arg, "--rc-config")) {
                 if (scanner.next()) |config_path| {
                     rc_config.load(allocator, io, config_path) catch |err| {
-                        std.log.err("Failed to load RC config '{s}': {}", .{ config_path, err });
+                        scoped_log.err("Failed to load RC config '{s}': {}", .{ config_path, err });
                         std.process.exit(1);
                     };
-                    std.log.debug("loaded RC config from {s}", .{config_path});
+                    scoped_log.debug("loaded RC config from {s}", .{config_path});
                 }
                 break;
             }

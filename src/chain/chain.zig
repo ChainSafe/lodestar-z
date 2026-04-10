@@ -17,7 +17,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const log_mod = @import("log");
+const log = std.log.scoped(.chain);
 
 const consensus_types = @import("consensus_types");
 const preset = @import("preset").preset;
@@ -598,7 +598,7 @@ pub const Chain = struct {
 
         if (self.archive_store) |store| {
             store.restoreProgress(bootstrap_finalized_cp.epoch * preset.SLOTS_PER_EPOCH) catch |err| {
-                log_mod.logger(.chain).warn("archive progress restore failed", .{ .err = err });
+                log.warn("archive progress restore failed: {}", .{err});
             };
 
             const finalized_slot = bootstrap_finalized_cp.epoch * preset.SLOTS_PER_EPOCH;
@@ -610,7 +610,7 @@ pub const Chain = struct {
                     },
                     &self.block_to_state,
                 ) catch |err| {
-                    log_mod.logger(.chain).warn("archive catch-up during bootstrap failed", .{ .err = err });
+                    log.warn("archive catch-up during bootstrap failed: {}", .{err});
                 };
             }
         }
@@ -991,11 +991,7 @@ pub const Chain = struct {
             data.beacon_block_root,
             data.target.epoch,
         ) catch |err| {
-            log_mod.logger(.chain).warn("FC onAttestation failed", .{
-                .validator_index = validator_index,
-                .slot = data.slot,
-                .err = err,
-            });
+            log.warn("FC onAttestation failed validator_index={d} slot={d}: {}", .{ validator_index, data.slot, err });
             // Non-fatal — still insert into pool for block packing.
         };
 
@@ -1040,10 +1036,7 @@ pub const Chain = struct {
     pub fn onSlot(self: *Chain, slot: u64) void {
         // Update fork choice time (removes proposer boost from previous slot).
         self.updateForkChoiceTime(slot) catch |err| {
-            log_mod.logger(.chain).err("fork choice updateTime failed", .{
-                .slot = slot,
-                .err = err,
-            });
+            log.err("fork choice updateTime failed slot={d}: {}", .{ slot, err });
             // Prune stale queued attestations to prevent unbounded growth when
             // updateTime fails (e.g. OOM during attestation processing).
             self.forkChoice().pruneStaleQueuedAttestations(self.allocator, slot);
@@ -1104,10 +1097,7 @@ pub const Chain = struct {
     /// If archival fails, pruning is skipped so the node retains the hot data
     /// needed to retry archival later.
     pub fn onFinalized(self: *Chain, finalized_epoch: u64, finalized_root: [32]u8) void {
-        log_mod.logger(.chain).info("onFinalized", .{
-            .epoch = finalized_epoch,
-            .root = log_mod.hex(finalized_root[0..4]),
-        });
+        log.info("onFinalized epoch={d} root={s}...", .{ finalized_epoch, &std.fmt.bytesToHex(finalized_root[0..4], .lower) });
 
         var plan = if (self.archive_store) |store| blk: {
             break :blk FinalizationPlan.initForArchive(
@@ -1117,7 +1107,7 @@ pub const Chain = struct {
                 finalized_epoch,
                 finalized_root,
             ) catch |err| {
-                log_mod.logger(.chain).warn("onFinalized: failed to build finalization plan", .{ .err = err });
+                log.warn("onFinalized: failed to build finalization plan: {}", .{err});
                 return;
             };
         } else FinalizationPlan.init(self.allocator, finalized_epoch, finalized_root);
@@ -1125,19 +1115,19 @@ pub const Chain = struct {
 
         if (self.archive_store) |store| {
             store.onFinalized(&plan, &self.block_to_state) catch |err| {
-                log_mod.logger(.chain).warn("onFinalized: archive store failed", .{ .err = err });
+                log.warn("onFinalized: archive store failed: {}", .{err});
                 return;
             };
         }
 
         self.queued_regen.onFinalized(plan.finalized_epoch) catch |err| {
-            log_mod.logger(.chain).warn("onFinalized: regen prune failed", .{ .err = err });
+            log.warn("onFinalized: regen prune failed: {}", .{err});
             return;
         };
 
         // Prune fork choice DAG — remove nodes below finalized root.
         self.pruneForkChoice(plan.finalized_root, plan.finalized_epoch) catch |err| {
-            log_mod.logger(.chain).warn("onFinalized: fork choice prune failed", .{ .err = err });
+            log.warn("onFinalized: fork choice prune failed: {}", .{err});
             return;
         };
 
@@ -1172,7 +1162,7 @@ pub const Chain = struct {
                 self.forkChoice(),
                 &self.block_to_state,
             ) catch {
-                log_mod.logger(.chain).warn("onFinalized: OOM collecting roots_to_remove, skipping block_to_state prune", .{});
+                log.warn("onFinalized: OOM collecting roots_to_remove, skipping block_to_state prune", .{});
                 break :prune_b2s;
             };
             defer roots_to_remove.deinit();
@@ -1437,10 +1427,7 @@ pub const Chain = struct {
         // onSlot already calls updateTime, but advanceSlot can be called independently
         // (e.g., from tests, batch sync). Both paths must call updateTime.
         self.updateForkChoiceTime(target_slot) catch |err| {
-            log_mod.logger(.chain).err("fork choice updateTime failed", .{
-                .slot = target_slot,
-                .err = err,
-            });
+            log.err("fork choice updateTime failed slot={d}: {}", .{ target_slot, err });
         };
 
         try self.advanceHeadState(target_slot, new_state_root);

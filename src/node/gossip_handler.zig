@@ -14,6 +14,7 @@
 //! Reference: https://github.com/ethereum/consensus-specs/blob/dev/specs/phase0/p2p-interface.md#topics-and-messages
 
 const std = @import("std");
+const scoped_log = std.log.scoped(.gossip_handler);
 const Allocator = std.mem.Allocator;
 const types = @import("consensus_types");
 
@@ -460,7 +461,7 @@ pub const GossipHandler = struct {
         // [REJECT] The proposer signature is valid.
         if (self.verifyBlockSignatureFn) |verifyFn| {
             if (!verifyFn(self.node, ssz_bytes)) {
-                std.log.debug("Gossip block rejected: invalid proposer signature slot={d}", .{blk.slot});
+                scoped_log.debug("Gossip block rejected: invalid proposer signature slot={d}", .{blk.slot});
                 return GossipHandlerError.InvalidSignature;
             }
         }
@@ -571,7 +572,7 @@ pub const GossipHandler = struct {
         // [REJECT] The attestation signature is valid.
         if (self.verifyAttestationSignatureFn) |verifyFn| {
             if (!verifyFn(self.node, &attestation, &resolved)) {
-                std.log.debug("Gossip attestation rejected: invalid signature slot={d}", .{data.slot});
+                scoped_log.debug("Gossip attestation rejected: invalid signature slot={d}", .{data.slot});
                 return GossipHandlerError.InvalidSignature;
             }
         }
@@ -579,7 +580,7 @@ pub const GossipHandler = struct {
         // Fallback: inline processing.
         if (self.importResolvedAttestationFn) |importFn| {
             importFn(self.node, &attestation, &resolved) catch |err| {
-                std.log.debug("attestation import failed for slot {d}: {}", .{ data.slot, err });
+                scoped_log.debug("attestation import failed for slot {d}: {}", .{ data.slot, err });
             };
         }
     }
@@ -676,7 +677,7 @@ pub const GossipHandler = struct {
         // [REJECT] selection_proof, aggregator signature, and aggregate signature are all valid.
         if (self.verifyAggregateSignatureFn) |verifyFn| {
             if (!verifyFn(self.node, &signed_aggregate, &resolved)) {
-                std.log.debug("Gossip aggregate rejected: invalid signature aggregator={d}", .{signed_aggregate.aggregatorIndex()});
+                scoped_log.debug("Gossip aggregate rejected: invalid signature aggregator={d}", .{signed_aggregate.aggregatorIndex()});
                 return GossipHandlerError.InvalidSignature;
             }
         }
@@ -684,7 +685,7 @@ pub const GossipHandler = struct {
         // Fallback: inline processing.
         if (self.importResolvedAggregateFn) |importFn| {
             importFn(self.node, &signed_aggregate, &resolved) catch |err| {
-                std.log.debug("aggregate import failed for aggregator {d}: {}", .{ signed_aggregate.aggregatorIndex(), err });
+                scoped_log.debug("aggregate import failed for aggregator {d}: {}", .{ signed_aggregate.aggregatorIndex(), err });
             };
             return;
         }
@@ -728,7 +729,7 @@ pub const GossipHandler = struct {
         // [REJECT] The voluntary exit signature is valid.
         if (self.verifyVoluntaryExitSignatureFn) |verifyFn| {
             if (!verifyFn(self.node, ssz_bytes)) {
-                std.log.debug("Gossip voluntary exit rejected: invalid signature validator={d}", .{exit.validator_index});
+                scoped_log.debug("Gossip voluntary exit rejected: invalid signature validator={d}", .{exit.validator_index});
                 return GossipHandlerError.InvalidSignature;
             }
         }
@@ -748,11 +749,11 @@ pub const GossipHandler = struct {
         // Fallback: inline processing.
         if (self.importVoluntaryExitFn) |importFn| {
             importFn(self.node, &signed_exit) catch |err| {
-                std.log.debug("voluntary exit import failed for validator {d}: {}", .{ exit.validator_index, err });
+                scoped_log.debug("voluntary exit import failed for validator {d}: {}", .{ exit.validator_index, err });
             };
         }
 
-        std.log.debug("Accepted voluntary_exit: validator={d} epoch={d}", .{
+        scoped_log.debug("Accepted voluntary_exit: validator={d} epoch={d}", .{
             exit.validator_index, exit.exit_epoch,
         });
     }
@@ -798,7 +799,7 @@ pub const GossipHandler = struct {
         // [REJECT] Both signed header signatures are valid.
         if (self.verifyProposerSlashingSignatureFn) |verifyFn| {
             if (!verifyFn(self.node, ssz_bytes)) {
-                std.log.debug("Gossip proposer slashing rejected: invalid signature proposer={d}", .{ps.proposer_index});
+                scoped_log.debug("Gossip proposer slashing rejected: invalid signature proposer={d}", .{ps.proposer_index});
                 return GossipHandlerError.InvalidSignature;
             }
         }
@@ -818,11 +819,11 @@ pub const GossipHandler = struct {
         // Fallback: inline processing.
         if (self.importProposerSlashingFn) |importFn| {
             importFn(self.node, &slashing) catch |err| {
-                std.log.debug("proposer slashing import failed for proposer {d}: {}", .{ ps.proposer_index, err });
+                scoped_log.debug("proposer slashing import failed for proposer {d}: {}", .{ ps.proposer_index, err });
             };
         }
 
-        std.log.debug("Accepted proposer_slashing: proposer={d} slot={d}", .{
+        scoped_log.debug("Accepted proposer_slashing: proposer={d} slot={d}", .{
             ps.proposer_index, ps.header_1_slot,
         });
     }
@@ -867,7 +868,7 @@ pub const GossipHandler = struct {
         // [REJECT] Both indexed attestation signatures are valid.
         if (self.verifyAttesterSlashingSignatureFn) |verifyFn| {
             if (!verifyFn(self.node, &slashing)) {
-                std.log.debug("Gossip attester slashing rejected: invalid signature", .{});
+                scoped_log.debug("Gossip attester slashing rejected: invalid signature", .{});
                 return GossipHandlerError.InvalidSignature;
             }
         }
@@ -887,11 +888,11 @@ pub const GossipHandler = struct {
         // Fallback: inline processing.
         if (self.importAttesterSlashingFn) |importFn| {
             importFn(self.node, &slashing) catch |err| {
-                std.log.debug("attester slashing import failed: {}", .{err});
+                scoped_log.debug("attester slashing import failed: {}", .{err});
             };
         }
 
-        std.log.debug("Accepted attester_slashing", .{});
+        scoped_log.debug("Accepted attester_slashing", .{});
     }
 
     /// Called when a bls_to_execution_change gossip message arrives.
@@ -931,7 +932,7 @@ pub const GossipHandler = struct {
         // [REJECT] The BLS-to-execution change signature is valid.
         if (self.verifyBlsChangeSignatureFn) |verifyFn| {
             if (!verifyFn(self.node, ssz_bytes)) {
-                std.log.debug("Gossip BLS change rejected: invalid signature validator={d}", .{change.validator_index});
+                scoped_log.debug("Gossip BLS change rejected: invalid signature validator={d}", .{change.validator_index});
                 return GossipHandlerError.InvalidSignature;
             }
         }
@@ -951,11 +952,11 @@ pub const GossipHandler = struct {
         // Fallback: inline processing.
         if (self.importBlsChangeFn) |importFn| {
             importFn(self.node, &signed_change) catch |err| {
-                std.log.debug("BLS change import failed for validator {d}: {}", .{ change.validator_index, err });
+                scoped_log.debug("BLS change import failed for validator {d}: {}", .{ change.validator_index, err });
             };
         }
 
-        std.log.debug("Accepted bls_to_execution_change: validator={d}", .{
+        scoped_log.debug("Accepted bls_to_execution_change: validator={d}", .{
             change.validator_index,
         });
     }
@@ -1009,11 +1010,11 @@ pub const GossipHandler = struct {
         // Fallback: inline processing.
         if (self.importSyncContributionFn) |importFn| {
             importFn(self.node, &signed_contribution) catch |err| {
-                std.log.debug("sync contribution import failed: {}", .{err});
+                scoped_log.debug("sync contribution import failed: {}", .{err});
             };
         }
 
-        std.log.debug("Accepted sync_committee_contribution_and_proof: aggregator={d} slot={d} subcommittee={d}", .{
+        scoped_log.debug("Accepted sync_committee_contribution_and_proof: aggregator={d} slot={d} subcommittee={d}", .{
             contrib.aggregator_index,
             contrib.contribution_slot,
             contrib.subcommittee_index,
@@ -1075,7 +1076,7 @@ pub const GossipHandler = struct {
         // [REJECT] The sync committee message signature is valid.
         if (self.verifySyncCommitteeSignatureFn) |verifyFn| {
             if (!verifyFn(self.node, ssz_bytes)) {
-                std.log.debug("Gossip sync committee message rejected: invalid signature validator={d}", .{msg.validator_index});
+                scoped_log.debug("Gossip sync committee message rejected: invalid signature validator={d}", .{msg.validator_index});
                 return GossipHandlerError.InvalidSignature;
             }
         }
@@ -1084,11 +1085,11 @@ pub const GossipHandler = struct {
         // Fallback: inline processing.
         if (self.importSyncCommitteeMessageFn) |importFn| {
             importFn(self.node, &sync_message, subnet_id) catch |err| {
-                std.log.debug("sync committee message import failed: {}", .{err});
+                scoped_log.debug("sync committee message import failed: {}", .{err});
             };
         }
 
-        std.log.debug("Accepted sync_committee message: validator={d} slot={d} subnet={d}", .{
+        scoped_log.debug("Accepted sync_committee message: validator={d} slot={d} subnet={d}", .{
             msg.validator_index,
             msg.slot,
             subnet_id,
@@ -1147,11 +1148,11 @@ pub const GossipHandler = struct {
         // Phase 2: hand off to chain DA ingress.
         if (self.importBlobSidecarFn) |importFn| {
             importFn(self.node, ssz_bytes) catch |err| {
-                std.log.debug("blob sidecar import failed: {}", .{err});
+                scoped_log.debug("blob sidecar import failed: {}", .{err});
             };
         }
 
-        std.log.debug("Accepted blob_sidecar: index={d} slot={d} proposer={d} ({d} bytes)", .{
+        scoped_log.debug("Accepted blob_sidecar: index={d} slot={d} proposer={d} ({d} bytes)", .{
             blob.index,
             blob.slot,
             blob.proposer_index,
@@ -1200,11 +1201,11 @@ pub const GossipHandler = struct {
 
         if (self.importDataColumnSidecarFn) |importFn| {
             importFn(self.node, ssz_bytes) catch |err| {
-                std.log.debug("data column sidecar import failed: {}", .{err});
+                scoped_log.debug("data column sidecar import failed: {}", .{err});
             };
         }
 
-        std.log.debug("Accepted data_column_sidecar: index={d} slot={d} proposer={d}", .{
+        scoped_log.debug("Accepted data_column_sidecar: index={d} slot={d} proposer={d}", .{
             sidecar.index,
             sidecar.slot,
             sidecar.proposer_index,

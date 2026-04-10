@@ -10,6 +10,7 @@
 //! `BeaconBlockBody`.
 
 const std = @import("std");
+const scoped_log = std.log.scoped(.produce_block);
 const Allocator = std.mem.Allocator;
 
 const types = @import("consensus_types");
@@ -540,7 +541,7 @@ pub fn assembleBlockFromTemplate(
         .execution_requests = execution_requests,
     };
 
-    std.log.debug(
+    scoped_log.debug(
         "Assembled full block body: slot={d} proposer={d} txs={d} atts={d} exits={d} slashings={d} bls_changes={d} blobs={d} execution_requests={d}/{d}/{d}",
         .{
             template.slot,
@@ -594,7 +595,7 @@ pub fn assembleBlindedBlockFromTemplate(
         .execution_requests = execution_requests,
     };
 
-    std.log.debug(
+    scoped_log.debug(
         "Assembled blinded block body: slot={d} proposer={d} atts={d} exits={d} slashings={d} bls_changes={d} blobs={d} execution_requests={d}/{d}/{d}",
         .{
             template.slot,
@@ -675,7 +676,7 @@ pub fn assembleBlock(
         .execution_requests = execution_requests,
     };
 
-    std.log.debug(
+    scoped_log.debug(
         "Assembled full block body: slot={d} proposer={d} txs={d} atts={d} exits={d} slashings={d} bls_changes={d} blobs={d} execution_requests={d}/{d}/{d}",
         .{
             slot,
@@ -743,7 +744,7 @@ pub fn assembleBlindedBlock(
         .execution_requests = execution_requests,
     };
 
-    std.log.debug(
+    scoped_log.debug(
         "Assembled blinded block body: slot={d} proposer={d} atts={d} exits={d} slashings={d} bls_changes={d} blobs={d} execution_requests={d}/{d}/{d}",
         .{
             slot,

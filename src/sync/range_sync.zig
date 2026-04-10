@@ -12,6 +12,7 @@
 //! Reference: Lodestar `packages/beacon-node/src/sync/range/range.ts`
 
 const std = @import("std");
+const scoped_log = std.log.scoped(.range_sync);
 const Allocator = std.mem.Allocator;
 const sync_types = @import("sync_types.zig");
 const preset = @import("preset").preset;
@@ -162,7 +163,7 @@ pub const RangeSync = struct {
             self.callbacks.hasBlock(peer_finalized_root),
         );
         const start_epoch = local_finalized_epoch;
-        std.log.debug(
+        scoped_log.debug(
             "RangeSync addPeer: peer={s} type={s} local_finalized={d} peer_finalized={d} peer_head={d} earliest={any}",
             .{
                 peer_id,

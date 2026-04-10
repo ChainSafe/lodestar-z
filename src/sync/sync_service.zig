@@ -11,6 +11,7 @@
 //! Reference: Lodestar `packages/beacon-node/src/sync/sync.ts`
 
 const std = @import("std");
+const scoped_log = std.log.scoped(.sync_service);
 const Allocator = std.mem.Allocator;
 const networking = @import("networking");
 const StatusMessage = networking.messages.StatusMessage;
@@ -255,7 +256,7 @@ pub const SyncService = struct {
             status.head_slot - self.local_head_slot
         else
             0;
-        std.log.debug(
+        scoped_log.debug(
             "SyncService peer status: peer={s} local_head={d} local_finalized={d} peer_head={d} peer_finalized={d} earliest={any} distance={d} known_peers={d}",
             .{
                 peer_id,
@@ -271,7 +272,7 @@ pub const SyncService = struct {
 
         if (sync_distance > sync_types.SYNC_DISTANCE_THRESHOLD) {
             // Peer is sufficiently ahead — add to range sync.
-            std.log.debug("SyncService adding peer to range sync: peer={s} distance={d}", .{ peer_id, sync_distance });
+            scoped_log.debug("SyncService adding peer to range sync: peer={s} distance={d}", .{ peer_id, sync_distance });
             try self.range_sync.addPeer(
                 peer_id,
                 self.local_finalized_epoch,
@@ -468,7 +469,7 @@ pub const SyncService = struct {
         }
 
         for (stale_peers.items) |peer_id| {
-            std.log.debug("SyncService pruning disconnected peer: peer={s}", .{peer_id});
+            scoped_log.debug("SyncService pruning disconnected peer: peer={s}", .{peer_id});
             self.onPeerDisconnect(peer_id);
         }
     }

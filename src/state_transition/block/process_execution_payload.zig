@@ -1,4 +1,5 @@
 const std = @import("std");
+const scoped_log = std.log.scoped(.process_execution_payload);
 const Allocator = std.mem.Allocator;
 const types = @import("consensus_types");
 const config = @import("config");
@@ -59,7 +60,7 @@ pub fn processExecutionPayload(
     //   return uint64(state.genesis_time + slots_since_genesis * SECONDS_PER_SLOT)
     const expected_timestamp = (try state.genesisTime()) + (try state.slot()) * beacon_config.chain.SECONDS_PER_SLOT;
     if (timestamp != expected_timestamp) {
-        std.log.debug("invalid execution payload timestamp: got={d} expected={d} genesis_time={d} slot={d} secs_per_slot={d}", .{
+        scoped_log.debug("invalid execution payload timestamp: got={d} expected={d} genesis_time={d} slot={d} secs_per_slot={d}", .{
             timestamp, expected_timestamp, try state.genesisTime(), try state.slot(), beacon_config.chain.SECONDS_PER_SLOT,
         });
         return error.InvalidExecutionPayloadTimestamp;

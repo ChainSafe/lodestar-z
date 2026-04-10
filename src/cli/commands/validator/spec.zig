@@ -227,7 +227,7 @@ pub const spec = cli.command(.{
             .description = "Daily rotate log files, set to 0 to disable rotation",
             .group = "logging",
         }, null),
-        .logFormat = cli.option(?log_mod.GlobalLogger.Format, .{
+        .logFormat = cli.option(?log_mod.Format, .{
             .long = "logFormat",
             .description = "Log output format",
             .group = "logging",

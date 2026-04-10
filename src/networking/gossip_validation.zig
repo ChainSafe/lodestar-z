@@ -11,6 +11,7 @@
 //! The actual beacon state access is abstracted through `GossipValidationContext`.
 
 const std = @import("std");
+const scoped_log = std.log.scoped(.gossip_validation);
 const testing = std.testing;
 const consensus_types = @import("consensus_types");
 const phase0 = consensus_types.phase0;
@@ -57,7 +58,7 @@ pub const SeenSet = struct {
     pub fn initWithCapacity(allocator: std.mem.Allocator, max_capacity: u32) SeenSet {
         const cap: usize = @intCast(max_capacity);
         const ring = allocator.alloc(Key, cap) catch |err| {
-            std.log.err("SeenSet: ring buffer alloc failed (cap={d}): {s} — eviction disabled, map may grow unbounded", .{
+            scoped_log.err("SeenSet: ring buffer alloc failed (cap={d}): {s} — eviction disabled, map may grow unbounded", .{
                 cap, @errorName(err),
             });
             return .{
@@ -362,7 +363,6 @@ pub fn validateAttesterSlashing(
 
     return .accept;
 }
-
 
 /// Validate an `AttesterSlashing` using a precomputed slashable key and is_slashable flag.
 ///

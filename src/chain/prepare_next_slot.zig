@@ -14,6 +14,7 @@
 //! This is a best-effort optimization: failures are logged but not fatal.
 
 const std = @import("std");
+const scoped_log = std.log.scoped(.prepare_next_slot);
 const Allocator = std.mem.Allocator;
 
 const state_transition = @import("state_transition");
@@ -88,7 +89,7 @@ pub const PrepareNextSlot = struct {
 
         // Find the head state.
         const head_state = self.block_state_cache.get(head_state_root) orelse {
-            std.log.debug("prepare next slot: head state not in cache at slot {d}", .{current_slot});
+            scoped_log.debug("prepare next slot: head state not in cache at slot {d}", .{current_slot});
             return;
         };
 
@@ -129,7 +130,7 @@ pub const PrepareNextSlot = struct {
         }
 
         self.last_prepared_slot = target_slot;
-        std.log.debug("prepare next slot: pre-computed state for slot {d}", .{target_slot});
+        scoped_log.debug("prepare next slot: pre-computed state for slot {d}", .{target_slot});
     }
 
     /// Reset the last-prepared tracker (call on chain reorg or resync).

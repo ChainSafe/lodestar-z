@@ -4,6 +4,7 @@
 //! streaming payload emitters instead of eager slice materialization.
 
 const std = @import("std");
+const scoped_log = std.log.scoped(.reqresp_callbacks);
 
 const config_mod = @import("config");
 const preset_root = @import("preset");
@@ -74,7 +75,7 @@ fn reqRespAllowInboundRequest(ptr: *anyopaque, peer_id: ?[]const u8, method: net
         networking.rate_limiter.requestTokenCost(method, request_bytes),
         monotonicTimeNs(node.io),
     ) catch |err| {
-        std.log.debug("failed to apply req/resp rate limit for peer {s}: {}", .{ peer_id_bytes, err });
+        scoped_log.debug("failed to apply req/resp rate limit for peer {s}: {}", .{ peer_id_bytes, err });
         return .allow;
     };
     if (result.isAllowed()) return .allow;
@@ -257,7 +258,7 @@ fn reqRespOnPeerStatus(ptr: *anyopaque, peer_id: ?[]const u8, status: StatusMess
     const effective_peer_id = peer_id orelse return;
     const irrelevance = handlePeerStatus(node, effective_peer_id, status, earliest_available_slot);
     if (irrelevance) |code| {
-        std.log.debug("Peer {s} failed relevance check during inbound status handling: {s}", .{
+        scoped_log.debug("Peer {s} failed relevance check during inbound status handling: {s}", .{
             effective_peer_id,
             @tagName(code),
         });
@@ -336,7 +337,7 @@ pub fn handlePeerStatusAtTime(
 
     const is_synced = if (node.sync_service_inst) |sync_svc| blk: {
         sync_svc.onPeerStatus(peer_id, status, earliest_available_slot) catch |err| {
-            std.log.debug("sync service onPeerStatus failed: {}", .{err});
+            scoped_log.debug("sync service onPeerStatus failed: {}", .{err});
         };
         break :blk sync_svc.isSynced();
     } else !node.getSyncStatus().is_syncing;
@@ -349,7 +350,7 @@ pub fn handlePeerGoodbye(node: *BeaconNode, peer_id: []const u8, reason: u64) vo
     if (node.peer_manager) |pm| {
         pm.onPeerGoodbye(peer_id, @enumFromInt(reason), wallTimeMs(node.io));
     }
-    std.log.info("Peer sent Goodbye {s} reason={s} ({d})", .{
+    scoped_log.info("Peer sent Goodbye {s} reason={s} ({d})", .{
         peer_id,
         goodbyeReasonName(reason),
         reason,

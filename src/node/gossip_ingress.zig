@@ -4,6 +4,7 @@
 //! the main P2P runtime loop.
 
 const std = @import("std");
+const scoped_log = std.log.scoped(.gossip_ingress);
 
 const config_mod = @import("config");
 const state_transition = @import("state_transition");
@@ -16,7 +17,7 @@ const GossipIngressMetadata = @import("gossip_handler.zig").GossipIngressMetadat
 
 pub fn processEvents(self: *BeaconNode, io: std.Io, p2p: *networking.P2pService) usize {
     const events = p2p.drainGossipEvents(io) catch |err| {
-        std.log.debug("failed to drain gossip events: {}", .{err});
+        scoped_log.debug("failed to drain gossip events: {}", .{err});
         return 0;
     };
     defer self.allocator.free(events);
@@ -67,10 +68,10 @@ fn processValidatedMessage(
             .rejected => |reason| {
                 recordInvalidMessage(p2p, peer, topic);
                 applyGossipPenalty(self, io, p2p, peer, reason);
-                std.log.debug("Gossip {s} rejected ({s})", .{ parsed.topic_type.topicName(), @tagName(reason) });
+                scoped_log.debug("Gossip {s} rejected ({s})", .{ parsed.topic_type.topicName(), @tagName(reason) });
             },
             .failed => |err| {
-                std.log.debug("gossip {s} error: {}", .{ parsed.topic_type.topicName(), err });
+                scoped_log.debug("gossip {s} error: {}", .{ parsed.topic_type.topicName(), err });
             },
         }
     }

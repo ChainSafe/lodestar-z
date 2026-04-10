@@ -1,4 +1,5 @@
 const std = @import("std");
+const scoped_log = std.log.scoped(.metrics_runtime);
 
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -57,7 +58,7 @@ pub fn Runtime(comptime ServerType: type, comptime MetricsType: type, comptime r
             if (self.task) |*task| {
                 _ = task.cancel(self.io) catch |err| switch (err) {
                     error.Canceled => {},
-                    else => std.log.debug("{s} metrics task exited during shutdown: {s}", .{ runtime_label, @errorName(err) }),
+                    else => scoped_log.debug("{s} metrics task exited during shutdown: {s}", .{ runtime_label, @errorName(err) }),
                 };
                 self.task = null;
             }

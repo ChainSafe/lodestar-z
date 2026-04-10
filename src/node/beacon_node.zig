@@ -21,7 +21,9 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const log = @import("log");
+const node_log = std.log.scoped(.node);
+const chain_log = std.log.scoped(.chain);
+const rest_log = std.log.scoped(.rest);
 
 const types = @import("consensus_types");
 const preset = @import("preset").preset;
@@ -977,7 +979,7 @@ pub const BeaconNode = struct {
         while (self.chainService().popCompletedReadyBlockImport()) |completed| {
             did_work = true;
             if (self.queued_state_work_owners.items.len == 0) {
-                log.logger(.node).warn("missing queued state work owner for completed block work", .{});
+                node_log.warn("missing queued state work owner for completed block work", .{});
                 self.finishGenericQueuedBlockImport(null, completed);
                 continue;
             }
@@ -1005,7 +1007,7 @@ pub const BeaconNode = struct {
             self.observeExecutionPayloadVerification(completed);
 
             const pending_index = findPendingExecutionPayloadIndex(self, completed.ticket) orelse {
-                log.logger(.node).warn("missing pending execution payload for completed newPayload result", .{});
+                node_log.warn("missing pending execution payload for completed newPayload result", .{});
                 self.dispatchWaitingExecutionPayloads();
                 continue;
             };
@@ -1031,7 +1033,7 @@ pub const BeaconNode = struct {
                         revalidation,
                         completed.result,
                     ) catch |err| {
-                        log.logger(.node).warn("execution revalidation finish failed", .{ .err = err });
+                        node_log.warn("execution revalidation finish failed: {}", .{err});
                         pending = undefined;
                         self.dispatchWaitingExecutionPayloads();
                         continue;
@@ -1079,13 +1081,13 @@ pub const BeaconNode = struct {
         if (self.hasPendingExecutionRevalidation()) return;
 
         var prepared = self.chainService().prepareCurrentOptimisticHeadRevalidation() catch |err| {
-            std.log.warn("Optimistic head revalidation planning failed: {}", .{err});
+            node_log.warn("Optimistic head revalidation planning failed: {}", .{err});
             return;
         } orelse return;
 
         self.waiting_execution_payloads.append(self.allocator, .{ .revalidation = prepared }) catch |err| {
             prepared.deinit(self.allocator);
-            std.log.warn("failed to queue optimistic head revalidation: {}", .{err});
+            node_log.warn("failed to queue optimistic head revalidation: {}", .{err});
             return;
         };
         self.dispatchWaitingExecutionPayloads();
@@ -1108,7 +1110,7 @@ pub const BeaconNode = struct {
             var waiting = self.waiting_execution_payloads.orderedRemove(0);
             self.pending_execution_payloads.ensureUnusedCapacity(self.allocator, 1) catch |err| {
                 waiting.deinit(self.allocator);
-                std.log.warn("failed to allocate pending execution payload slot: {}", .{err});
+                node_log.warn("failed to allocate pending execution payload slot: {}", .{err});
                 continue;
             };
 
@@ -1173,7 +1175,7 @@ pub const BeaconNode = struct {
                         self.waiting_execution_payloads.insert(self.allocator, 0, .{ .revalidation = prepared }) catch |err| {
                             var owned_prepared = prepared;
                             owned_prepared.deinit(self.allocator);
-                            std.log.warn("failed to requeue optimistic head revalidation: {}", .{err});
+                            node_log.warn("failed to requeue optimistic head revalidation: {}", .{err});
                         };
                         waiting = undefined;
                         break;
@@ -1220,11 +1222,11 @@ pub const BeaconNode = struct {
         switch (completed.status) {
             .success => {
                 if (completed.payload_id) |payload_id| {
-                    std.log.debug("forkchoiceUpdated: payload building started, id={s}", .{
+                    node_log.debug("forkchoiceUpdated: payload building started, id={s}", .{
                         &std.fmt.bytesToHex(payload_id[0..8], .lower),
                     });
                 }
-                std.log.debug("forkchoiceUpdated: status={s} head={s}... safe={s}... finalized={s}...", .{
+                node_log.debug("forkchoiceUpdated: status={s} head={s}... safe={s}... finalized={s}...", .{
                     @tagName(completed.payload_status.?),
                     &std.fmt.bytesToHex(fc_state.head_block_hash[0..4], .lower),
                     &std.fmt.bytesToHex(fc_state.safe_block_hash[0..4], .lower),
@@ -1281,12 +1283,12 @@ pub const BeaconNode = struct {
         const outcome = self.chainService().finishPreparedReadyBlockImport(&owned_prepared, exec_status) catch |err| {
             self.recordBlockImportResult(source, blockImportOutcomeLabel(err), 1);
             self.recordGenericBlockIngressError(ticket, err);
-            log.logger(.node).warn("deferred block execution commit failed", .{ .err = err });
+            node_log.warn("deferred block execution commit failed: {}", .{err});
             return;
         };
         const result = self.finishImportOutcome(source, t0, outcome) catch |err| {
             self.recordGenericBlockIngressError(ticket, err);
-            log.logger(.node).warn("deferred block import commit failed", .{ .err = err });
+            node_log.warn("deferred block import commit failed: {}", .{err});
             return;
         };
         self.processPendingChildren(result.block_root);
@@ -1302,7 +1304,7 @@ pub const BeaconNode = struct {
         exec_status: chain_mod.ExecutionStatus,
     ) void {
         const index = findPendingSyncSegmentIndex(self, key) orelse {
-            log.logger(.node).warn("missing pending sync segment for prepared block commit", .{});
+            node_log.warn("missing pending sync segment for prepared block commit", .{});
             self.finishGenericPreparedQueuedBlockImport(null, prepared, exec_status);
             return;
         };
@@ -1343,7 +1345,7 @@ pub const BeaconNode = struct {
                         => segment.error_counts.incr(err),
                         else => {},
                     }
-                    log.logger(.node).warn("deferred sync segment block commit failed", .{ .err = err });
+                    node_log.warn("deferred sync segment block commit failed: {}", .{err});
                 },
             }
             return;
@@ -1352,14 +1354,14 @@ pub const BeaconNode = struct {
         segment.imported_count += 1;
         if (outcome.result.execution_optimistic) segment.optimistic_imported_count += 1;
         if (outcome.result.epoch_transition) segment.epoch_transition_count += 1;
-        log.logger(.node).debug("deferred range sync block imported", .{
-            .slot = outcome.result.slot,
-            .chain_id = segment.key.chain_id,
-            .batch_id = segment.key.batch_id,
-            .generation = segment.key.generation,
-            .imported = segment.imported_count,
-            .skipped = segment.skipped_count,
-            .failed = segment.failed_count,
+        node_log.debug("deferred range sync block imported slot={d} chain_id={d} batch_id={d} generation={d} imported={d} skipped={d} failed={d}", .{
+            outcome.result.slot,
+            segment.key.chain_id,
+            segment.key.batch_id,
+            segment.key.generation,
+            segment.imported_count,
+            segment.skipped_count,
+            segment.failed_count,
         });
         self.processPendingChildren(outcome.result.block_root);
     }
@@ -1376,13 +1378,13 @@ pub const BeaconNode = struct {
                 self.recordGenericBlockIngressError(ticket, err);
                 var owned_prepared = prepared;
                 owned_prepared.deinit(self.allocator);
-                log.logger(.node).warn("deferred block execution verification failed", .{ .err = err });
+                node_log.warn("deferred block execution verification failed: {}", .{err});
             },
             .sync_segment => |key| {
                 const index = findPendingSyncSegmentIndex(self, key) orelse {
                     var owned_prepared = prepared;
                     owned_prepared.deinit(self.allocator);
-                    log.logger(.node).warn("missing pending sync segment for execution verification failure", .{});
+                    node_log.warn("missing pending sync segment for execution verification failure", .{});
                     return;
                 };
 
@@ -1416,11 +1418,11 @@ pub const BeaconNode = struct {
                     => {
                         segment.failed_count += 1;
                         _ = recordBlockImportError(&segment.error_counts, err);
-                        log.logger(.node).warn("deferred sync segment execution verification failed", .{ .err = err });
+                        node_log.warn("deferred sync segment execution verification failed: {}", .{err});
                     },
                     else => {
                         segment.failed_count += 1;
-                        log.logger(.node).warn("deferred sync segment execution verification failed", .{ .err = err });
+                        node_log.warn("deferred sync segment execution verification failed: {}", .{err});
                     },
                 }
 
@@ -1490,7 +1492,7 @@ pub const BeaconNode = struct {
             }
 
             const started = startPendingSyncSegmentBlock(self, i) catch |err| {
-                log.logger(.node).warn("failed to start pending sync segment block", .{ .err = err });
+                node_log.warn("failed to start pending sync segment block: {}", .{err});
                 self.pending_sync_segments.items[i].stop_after_current = true;
                 did_work = true;
                 continue;
@@ -1633,17 +1635,17 @@ pub const BeaconNode = struct {
             if (outcome.effects.finalized_checkpoint) |finalized| {
                 self.unknown_chain_sync.onFinalized(finalized.slot);
             }
-            log.logger(.chain).info("epoch transition", .{
-                .slot = result.slot,
-                .finalized_epoch = outcome.snapshot.finalized.epoch,
-                .justified_epoch = outcome.snapshot.justified.epoch,
+            chain_log.info("epoch transition slot={d} finalized_epoch={d} justified_epoch={d}", .{
+                result.slot,
+                outcome.snapshot.finalized.epoch,
+                outcome.snapshot.justified.epoch,
             });
         }
 
-        log.logger(.chain).verbose("block imported", .{
-            .slot = result.slot,
-            .root = result.block_root,
-            .epoch_transition = result.epoch_transition,
+        chain_log.debug("block imported slot={d} root={s}... epoch_transition={}", .{
+            result.slot,
+            &std.fmt.bytesToHex(result.block_root[0..4], .lower),
+            result.epoch_transition,
         });
 
         return result;
@@ -1684,12 +1686,12 @@ pub const BeaconNode = struct {
             self.unknown_chain_sync.onFinalized(finalized.slot);
         }
 
-        log.logger(.chain).info("range sync segment imported", .{
-            .imported = outcome.imported_count,
-            .skipped = outcome.skipped_count,
-            .failed = outcome.failed_count,
-            .head_slot = outcome.snapshot.head.slot,
-            .finalized_epoch = outcome.snapshot.finalized.epoch,
+        chain_log.info("range sync segment imported imported={d} skipped={d} failed={d} head_slot={d} finalized_epoch={d}", .{
+            outcome.imported_count,
+            outcome.skipped_count,
+            outcome.failed_count,
+            outcome.snapshot.head.slot,
+            outcome.snapshot.finalized.epoch,
         });
     }
 
@@ -1706,12 +1708,12 @@ pub const BeaconNode = struct {
         const outcome = self.chainService().finishCompletedReadyBlockImport(completed) catch |err| {
             self.recordBlockImportResult(source, blockImportOutcomeLabel(err), 1);
             self.recordGenericBlockIngressError(ticket, err);
-            log.logger(.node).warn("deferred block state work failed", .{ .err = err });
+            node_log.warn("deferred block state work failed: {}", .{err});
             return;
         };
         const result = self.finishImportOutcome(source, t0, outcome) catch |err| {
             self.recordGenericBlockIngressError(ticket, err);
-            log.logger(.node).warn("deferred block import commit failed", .{ .err = err });
+            node_log.warn("deferred block import commit failed: {}", .{err});
             return;
         };
         self.processPendingChildren(result.block_root);
@@ -1726,7 +1728,7 @@ pub const BeaconNode = struct {
         completed: chain_mod.CompletedBlockImport,
     ) void {
         const index = findPendingSyncSegmentIndex(self, key) orelse {
-            log.logger(.node).warn("missing pending sync segment for completed block work", .{});
+            node_log.warn("missing pending sync segment for completed block work", .{});
             self.finishGenericQueuedBlockImport(null, completed);
             return;
         };
@@ -1765,7 +1767,7 @@ pub const BeaconNode = struct {
                         => segment.error_counts.incr(err),
                         else => {},
                     }
-                    log.logger(.node).warn("deferred sync segment block commit failed", .{ .err = err });
+                    node_log.warn("deferred sync segment block commit failed: {}", .{err});
                 },
             }
             return;
@@ -1774,14 +1776,14 @@ pub const BeaconNode = struct {
         segment.imported_count += 1;
         if (outcome.result.execution_optimistic) segment.optimistic_imported_count += 1;
         if (outcome.result.epoch_transition) segment.epoch_transition_count += 1;
-        log.logger(.node).debug("deferred range sync block imported", .{
-            .slot = outcome.result.slot,
-            .chain_id = segment.key.chain_id,
-            .batch_id = segment.key.batch_id,
-            .generation = segment.key.generation,
-            .imported = segment.imported_count,
-            .skipped = segment.skipped_count,
-            .failed = segment.failed_count,
+        node_log.debug("deferred range sync block imported slot={d} chain_id={d} batch_id={d} generation={d} imported={d} skipped={d} failed={d}", .{
+            outcome.result.slot,
+            segment.key.chain_id,
+            segment.key.batch_id,
+            segment.key.generation,
+            segment.imported_count,
+            segment.skipped_count,
+            segment.failed_count,
         });
 
         self.processPendingChildren(outcome.result.block_root);
@@ -1802,10 +1804,10 @@ pub const BeaconNode = struct {
         self.updateSyncProgress(outcome.snapshot);
 
         if (outcome.head_changed) {
-            log.logger(.chain).info("execution revalidation changed head", .{
-                .head_slot = outcome.snapshot.head.slot,
-                .head_root = outcome.snapshot.head.root,
-                .finalized_epoch = outcome.snapshot.finalized.epoch,
+            chain_log.info("execution revalidation changed head head_slot={d} head_root={s}... finalized_epoch={d}", .{
+                outcome.snapshot.head.slot,
+                &std.fmt.bytesToHex(outcome.snapshot.head.root[0..4], .lower),
+                outcome.snapshot.finalized.epoch,
             });
         }
     }
@@ -1842,7 +1844,7 @@ pub const BeaconNode = struct {
     /// Each sidecar is stored independently to support per-column availability tracking.
     pub fn importDataColumnSidecar(self: *BeaconNode, root: [32]u8, column_index: u64, data: []const u8) !void {
         try self.chainService().importDataColumnSidecar(root, column_index, data);
-        std.log.debug("Imported data column sidecar root={s}... column={d}", .{
+        node_log.debug("Imported data column sidecar root={s}... column={d}", .{
             &std.fmt.bytesToHex(root[0..4], .lower),
             column_index,
         });
@@ -1857,7 +1859,7 @@ pub const BeaconNode = struct {
     ) !?chain_mod.ReadyBlockInput {
         const ready = try self.chainService().ingestDataColumnSidecar(root, column_index, slot, data);
         if (ready != null) {
-            std.log.debug("Imported data column sidecar root={s}... column={d}", .{
+            node_log.debug("Imported data column sidecar root={s}... column={d}", .{
                 &std.fmt.bytesToHex(root[0..4], .lower),
                 column_index,
             });
@@ -1920,7 +1922,7 @@ pub const BeaconNode = struct {
             port,
             http_options,
         );
-        log.logger(.rest).info("REST API listening", .{});
+        rest_log.info("REST API listening", .{});
         try self.http_server.?.serve(io);
     }
 
@@ -1966,7 +1968,7 @@ pub const BeaconNode = struct {
         ) catch return;
 
         if (added) {
-            std.log.debug("Queued orphan block slot={d} parent={s}... ({d} pending)", .{
+            node_log.debug("Queued orphan block slot={d} parent={s}... ({d} pending)", .{
                 block_slot,
                 &std.fmt.bytesToHex(parent_root[0..4], .lower),
                 self.unknown_block_sync.pendingCount(),
@@ -2017,7 +2019,7 @@ pub const BeaconNode = struct {
             var ready = self.chainService().prepareRawBlockInput(block.block_bytes, .range_sync) catch |err| {
                 segment.failed_count += 1;
                 segment.next_index += 1;
-                log.logger(.node).warn("range sync block preparation failed", .{ .err = err });
+                node_log.warn("range sync block preparation failed: {}", .{err});
                 continue;
             };
 
@@ -2045,7 +2047,7 @@ pub const BeaconNode = struct {
                     => {
                         segment.failed_count += 1;
                         _ = recordBlockImportError(&segment.error_counts, err);
-                        log.logger(.node).warn("range sync block planning failed", .{ .err = err });
+                        node_log.warn("range sync block planning failed: {}", .{err});
                     },
                 }
                 segment.next_index += 1;
@@ -2074,12 +2076,12 @@ pub const BeaconNode = struct {
                     self.queued_state_work_owners.appendAssumeCapacity(.{ .sync_segment = segment.key });
                     segment.in_flight = true;
                     owned_planned = undefined;
-                    log.logger(.node).debug("queued range sync block state work", .{
-                        .slot = block.slot,
-                        .chain_id = segment.key.chain_id,
-                        .batch_id = segment.key.batch_id,
-                        .generation = segment.key.generation,
-                        .index = segment.next_index,
+                    node_log.debug("queued range sync block state work slot={d} chain_id={d} batch_id={d} generation={d} index={d}", .{
+                        block.slot,
+                        segment.key.chain_id,
+                        segment.key.batch_id,
+                        segment.key.generation,
+                        segment.next_index,
                     });
                     return true;
                 },
@@ -2138,7 +2140,7 @@ pub const BeaconNode = struct {
         update: chain_mod.ExecutionForkchoiceUpdate,
     ) void {
         self.execution_runtime.submitForkchoiceUpdateAsync(update) catch |err| {
-            log.logger(.node).warn("forkchoiceUpdated failed", .{ .err = err });
+            node_log.warn("forkchoiceUpdated failed: {}", .{err});
         };
     }
 
@@ -2717,7 +2719,7 @@ fn importAttestationBatchItems(node: *BeaconNode, items: []AttestationWork, batc
             if (node.gossip_handler) |gh| {
                 if (gh.verifyAttestationSignatureFn) |verifyFn| {
                     if (!verifyFn(gh.node, &attestation, &item.resolved)) {
-                        std.log.debug("attestation BLS failed in batch fallback at slot {d}", .{attestation.slot()});
+                        node_log.debug("attestation BLS failed in batch fallback at slot {d}", .{attestation.slot()});
                         continue;
                     }
                 }
@@ -2728,7 +2730,7 @@ fn importAttestationBatchItems(node: *BeaconNode, items: []AttestationWork, batc
         const importFn = gh.importResolvedAttestationFn orelse continue;
 
         importFn(gh.node, &attestation, &item.resolved) catch |err| {
-            std.log.debug("processor attestation import failed for slot {d}: {}", .{
+            node_log.debug("processor attestation import failed for slot {d}: {}", .{
                 attestation.slot(), err,
             });
         };
@@ -2745,7 +2747,7 @@ fn importAggregateBatchItems(node: *BeaconNode, items: []AggregateWork, batch_va
             if (node.gossip_handler) |gh| {
                 if (gh.verifyAggregateSignatureFn) |verifyFn| {
                     if (!verifyFn(gh.node, &aggregate, &item.resolved)) {
-                        std.log.debug("aggregate BLS failed in batch fallback at slot {d}", .{
+                        node_log.debug("aggregate BLS failed in batch fallback at slot {d}", .{
                             aggregate.attestation().slot(),
                         });
                         continue;
@@ -2757,7 +2759,7 @@ fn importAggregateBatchItems(node: *BeaconNode, items: []AggregateWork, batch_va
         if (node.gossip_handler) |gh| {
             if (gh.importResolvedAggregateFn) |importFn| {
                 importFn(gh.node, &aggregate, &item.resolved) catch |err| {
-                    std.log.debug("processor aggregate import failed at slot {d}: {}", .{
+                    node_log.debug("processor aggregate import failed at slot {d}: {}", .{
                         aggregate.attestation().slot(),
                         err,
                     });
@@ -2777,7 +2779,7 @@ fn importSyncMessageBatchItems(
             const gh = node.gossip_handler orelse continue;
             if (gh.verifySyncCommitteeSignatureFn != null) {
                 if (!gossip_node_callbacks_mod.verifySyncCommitteeMessage(gh.node, &item.message)) {
-                    std.log.debug("sync committee message BLS failed in batch fallback at slot {d}", .{
+                    node_log.debug("sync committee message BLS failed in batch fallback at slot {d}", .{
                         item.message.slot,
                     });
                     continue;
@@ -3002,7 +3004,7 @@ pub fn processorHandlerCallback(item: WorkItem, context: *anyopaque) void {
                 0;
             const accepted = node.chainService().acceptGossipBlock(work.block, seen_timestamp_sec) catch |err| {
                 work.block.deinit(node.allocator);
-                std.log.debug("processor gossip block ingress failed: {}", .{err});
+                node_log.debug("processor gossip block ingress failed: {}", .{err});
                 return;
             };
 
@@ -3012,11 +3014,11 @@ pub fn processorHandlerCallback(item: WorkItem, context: *anyopaque) void {
             };
 
             const maybe_result = node.completeReadyIngress(ready, null) catch |err| {
-                std.log.debug("processor gossip block import failed: {}", .{err});
+                node_log.debug("processor gossip block import failed: {}", .{err});
                 return;
             };
             if (maybe_result) |result| {
-                std.log.debug("PROCESSOR: block imported slot={d} root={x:0>2}{x:0>2}{x:0>2}{x:0>2}...", .{
+                node_log.debug("PROCESSOR: block imported slot={d} root={x:0>2}{x:0>2}{x:0>2}{x:0>2}...", .{
                     result.slot,
                     result.block_root[0],
                     result.block_root[1],
@@ -3026,7 +3028,7 @@ pub fn processorHandlerCallback(item: WorkItem, context: *anyopaque) void {
             }
         },
         .attestation_batch => |batch| {
-            std.log.debug("Processor: attestation batch (count={d})", .{batch.count});
+            node_log.debug("Processor: attestation batch (count={d})", .{batch.count});
             if (cloneAttestationBatchItems(node.allocator, batch.items[0..batch.count])) |owned_items| {
                 if (tryStartPendingAttestationBatch(node, owned_items)) {
                     return;
@@ -3042,7 +3044,7 @@ pub fn processorHandlerCallback(item: WorkItem, context: *anyopaque) void {
             }
         },
         .aggregate_batch => |batch| {
-            std.log.debug("Processor: aggregate batch (count={d})", .{batch.count});
+            node_log.debug("Processor: aggregate batch (count={d})", .{batch.count});
             if (cloneAggregateBatchItems(node.allocator, batch.items[0..batch.count])) |owned_items| {
                 if (tryStartPendingAggregateBatch(node, owned_items)) {
                     return;
@@ -3058,7 +3060,7 @@ pub fn processorHandlerCallback(item: WorkItem, context: *anyopaque) void {
             }
         },
         .sync_message_batch => |batch| {
-            std.log.debug("Processor: sync message batch (count={d})", .{batch.count});
+            node_log.debug("Processor: sync message batch (count={d})", .{batch.count});
             if (cloneSyncMessageBatchItems(node.allocator, batch.items[0..batch.count])) |owned_items| {
                 if (tryStartPendingSyncMessageBatch(node, owned_items)) {
                     return;
@@ -3077,7 +3079,7 @@ pub fn processorHandlerCallback(item: WorkItem, context: *anyopaque) void {
             if (node.gossip_handler) |gh| {
                 if (gh.verifyAggregateSignatureFn) |verifyFn| {
                     if (!verifyFn(gh.node, &work.aggregate, &work.resolved)) {
-                        std.log.debug("single aggregate BLS failed for aggregator {d}", .{work.aggregate.aggregatorIndex()});
+                        node_log.debug("single aggregate BLS failed for aggregator {d}", .{work.aggregate.aggregatorIndex()});
                         work.resolved.deinit(node.allocator);
                         var aggregate = work.aggregate;
                         aggregate.deinit(node.allocator);
@@ -3097,13 +3099,13 @@ pub fn processorHandlerCallback(item: WorkItem, context: *anyopaque) void {
             if (node.gossip_handler) |gh| {
                 if (gh.verifyAttestationSignatureFn) |verifyFn| {
                     if (!verifyFn(gh.node, &attestation, &att_work.resolved)) {
-                        std.log.debug("single attestation BLS failed at slot {d}", .{attestation.slot()});
+                        node_log.debug("single attestation BLS failed at slot {d}", .{attestation.slot()});
                         return;
                     }
                 }
                 const importFn = gh.importResolvedAttestationFn orelse return;
                 importFn(gh.node, &attestation, &att_work.resolved) catch |err| {
-                    std.log.debug("processor attestation import failed for slot {d}: {}", .{
+                    node_log.debug("processor attestation import failed for slot {d}: {}", .{
                         attestation.slot(), err,
                     });
                 };
@@ -3134,7 +3136,7 @@ pub fn processorHandlerCallback(item: WorkItem, context: *anyopaque) void {
             if (node.gossip_handler) |gh| {
                 if (gh.verifySyncCommitteeSignatureFn != null) {
                     if (!gossip_node_callbacks_mod.verifySyncCommitteeMessage(gh.node, &work.message)) {
-                        std.log.debug("single sync committee message BLS failed for validator {d} at slot {d}", .{
+                        node_log.debug("single sync committee message BLS failed for validator {d} at slot {d}", .{
                             work.message.validator_index,
                             work.message.slot,
                         });
@@ -3147,7 +3149,7 @@ pub fn processorHandlerCallback(item: WorkItem, context: *anyopaque) void {
         else => {
             // For all other work types, log at debug level.
             // Full handler wiring per work type is progressive — add as needed.
-            std.log.debug("Processor: dispatched {s}", .{@tagName(wtype)});
+            node_log.debug("Processor: dispatched {s}", .{@tagName(wtype)});
         },
     }
 }
@@ -3171,7 +3173,7 @@ fn handleQueuedAggregate(node: *BeaconNode, work: processor_mod.work_item.Aggreg
     defer work.resolved.deinit(node.allocator);
 
     importFn(gh.node, &aggregate, &work.resolved) catch |err| {
-        std.log.debug("processor aggregate import failed for aggregator {d}: {}", .{
+        node_log.debug("processor aggregate import failed for aggregator {d}: {}", .{
             aggregate.aggregatorIndex(), err,
         });
     };
@@ -3186,7 +3188,7 @@ fn handleQueuedVoluntaryExit(node: *BeaconNode, work: processor_mod.work_item.Vo
     };
 
     importFn(gh.node, &work.exit) catch |err| {
-        std.log.debug("processor voluntary exit import failed for validator {d}: {}", .{
+        node_log.debug("processor voluntary exit import failed for validator {d}: {}", .{
             work.exit.message.validator_index, err,
         });
     };
@@ -3204,7 +3206,7 @@ fn handleQueuedAttesterSlashingTyped(
     };
 
     importFn(gh.node, slashing) catch |err| {
-        std.log.debug("processor attester slashing import failed: {}", .{err});
+        node_log.debug("processor attester slashing import failed: {}", .{err});
     };
 }
 
@@ -3220,7 +3222,7 @@ fn handleQueuedProposerSlashing(
     };
 
     importFn(gh.node, &work.slashing) catch |err| {
-        std.log.debug("processor proposer slashing import failed: {}", .{err});
+        node_log.debug("processor proposer slashing import failed: {}", .{err});
     };
 }
 
@@ -3245,7 +3247,7 @@ fn handleQueuedBlsChange(
     };
 
     importFn(gh.node, &work.change) catch |err| {
-        std.log.debug("processor BLS change import failed: {}", .{err});
+        node_log.debug("processor BLS change import failed: {}", .{err});
     };
 }
 
@@ -3261,7 +3263,7 @@ fn handleQueuedSyncContribution(
     };
 
     importFn(gh.node, &work.signed_contribution) catch |err| {
-        std.log.debug("processor sync contribution import failed: {}", .{err});
+        node_log.debug("processor sync contribution import failed: {}", .{err});
     };
 }
 
@@ -3283,7 +3285,7 @@ fn handleQueuedBlobSidecar(
     defer work.data.deinit();
 
     importFn(gh.node, queued.ssz_bytes) catch |err| {
-        std.log.debug("processor blob sidecar import failed: {}", .{err});
+        node_log.debug("processor blob sidecar import failed: {}", .{err});
     };
 }
 
@@ -3305,7 +3307,7 @@ fn handleQueuedDataColumnSidecar(
     defer work.data.deinit();
 
     importFn(gh.node, queued.ssz_bytes) catch |err| {
-        std.log.debug("processor data column sidecar import failed: {}", .{err});
+        node_log.debug("processor data column sidecar import failed: {}", .{err});
     };
 }
 
@@ -3321,7 +3323,7 @@ fn handleQueuedSyncMessage(
     };
 
     importFn(gh.node, &work.message, work.subnet_id) catch |err| {
-        std.log.debug("processor sync committee message import failed: {}", .{err});
+        node_log.debug("processor sync committee message import failed: {}", .{err});
     };
 }
 

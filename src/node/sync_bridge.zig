@@ -5,6 +5,7 @@
 //! main loop can drain it via the real node-owned transport path.
 
 const std = @import("std");
+const scoped_log = std.log.scoped(.sync_bridge);
 const Allocator = std.mem.Allocator;
 const chain_mod = @import("chain");
 const networking = @import("networking");
@@ -160,7 +161,7 @@ pub const SyncCallbackCtx = struct {
 
         const result = node.ingestRawBlockBytes(block_bytes, .unknown_block_sync) catch |err| {
             if (err != error.AlreadyKnown and err != error.WouldRevertFinalizedSlot) {
-                std.log.debug("sync callback import error: {}", .{err});
+                scoped_log.debug("sync callback import error: {}", .{err});
             }
             return err;
         };
@@ -168,7 +169,7 @@ pub const SyncCallbackCtx = struct {
             .ignored => {},
             .queued => return error.ImportPending,
             .imported => |imported| {
-                std.log.debug("SyncCallbackCtx: imported slot={d}", .{imported.slot});
+                scoped_log.debug("SyncCallbackCtx: imported slot={d}", .{imported.slot});
             },
         }
     }
@@ -185,7 +186,7 @@ pub const SyncCallbackCtx = struct {
         const node = ctx.node;
 
         try node.enqueueSyncSegment(chain_id, batch_id, generation, blocks, sync_type);
-        std.log.debug("SyncCallbackCtx: queued {d} {s} blocks for chain {d} batch {d}/gen {d}", .{
+        scoped_log.debug("SyncCallbackCtx: queued {d} {s} blocks for chain {d} batch {d}/gen {d}", .{
             blocks.len,
             @tagName(sync_type),
             chain_id,
@@ -206,7 +207,7 @@ pub const SyncCallbackCtx = struct {
     ) void {
         const ctx: *SyncCallbackCtx = @ptrCast(@alignCast(ptr));
         if (ctx.pending_count >= ctx.pending_requests.len) {
-            std.log.warn("sync callback pending request queue full, dropping batch {d}", .{batch_id});
+            scoped_log.warn("sync callback pending request queue full, dropping batch {d}", .{batch_id});
             return;
         }
         var req = PendingBatchRequest{
@@ -222,7 +223,7 @@ pub const SyncCallbackCtx = struct {
         const write_index = (ctx.pending_head + ctx.pending_count) % ctx.pending_requests.len;
         ctx.pending_requests[write_index] = req;
         ctx.pending_count += 1;
-        std.log.debug("SyncCallbackCtx: queued chain {d} batch {d}/gen {d} slots {d}..{d} for peer {s}", .{
+        scoped_log.debug("SyncCallbackCtx: queued chain {d} batch {d}/gen {d} slots {d}..{d} for peer {s}", .{
             chain_id, batch_id, generation, start_slot, start_slot + count - 1, peer_id,
         });
     }
@@ -245,20 +246,20 @@ pub const SyncCallbackCtx = struct {
     ) void {
         const ctx: *SyncCallbackCtx = @ptrCast(@alignCast(ptr));
         if (ctx.pending_linked_count >= ctx.pending_linked_chains.len) {
-            std.log.warn("SyncCallbackCtx: linked-chain queue full, dropping chain of {d} headers", .{headers.len});
+            scoped_log.warn("SyncCallbackCtx: linked-chain queue full, dropping chain of {d} headers", .{headers.len});
             return;
         }
 
         const allocator = ctx.node.allocator;
         const headers_copy = allocator.dupe(MinimalHeader, headers) catch {
-            std.log.warn("SyncCallbackCtx: failed to copy linked chain headers", .{});
+            scoped_log.warn("SyncCallbackCtx: failed to copy linked chain headers", .{});
             return;
         };
         errdefer allocator.free(headers_copy);
 
         const peers_copy = allocator.dupe(PeerEntry, peers.peers.items) catch {
             allocator.free(headers_copy);
-            std.log.warn("SyncCallbackCtx: failed to copy linked chain peers", .{});
+            scoped_log.warn("SyncCallbackCtx: failed to copy linked chain peers", .{});
             return;
         };
 
@@ -288,7 +289,7 @@ pub const SyncCallbackCtx = struct {
         peer_id: []const u8,
     ) void {
         if (self.pending_by_root_count >= self.pending_by_root_requests.len) {
-            std.log.warn("sync callback by-root queue full, dropping root {x:0>2}{x:0>2}{x:0>2}{x:0>2}...", .{
+            scoped_log.warn("sync callback by-root queue full, dropping root {x:0>2}{x:0>2}{x:0>2}{x:0>2}...", .{
                 root[0], root[1], root[2], root[3],
             });
             return;
@@ -303,7 +304,7 @@ pub const SyncCallbackCtx = struct {
         const write_index = (self.pending_by_root_head + self.pending_by_root_count) % self.pending_by_root_requests.len;
         self.pending_by_root_requests[write_index] = req;
         self.pending_by_root_count += 1;
-        std.log.debug("SyncCallbackCtx: queued {s} by-root {x:0>2}{x:0>2}{x:0>2}{x:0>2}... for peer {s}", .{
+        scoped_log.debug("SyncCallbackCtx: queued {s} by-root {x:0>2}{x:0>2}{x:0>2}{x:0>2}... for peer {s}", .{
             @tagName(kind), root[0], root[1], root[2], root[3], peer_id,
         });
     }
@@ -341,7 +342,7 @@ pub const SyncCallbackCtx = struct {
             break :blk if (ms >= 0) @as(u64, @intCast(ms)) else 0;
         };
         _ = pm.reportPeer(peer_id, .mid_tolerance, .sync, now_ms);
-        std.log.debug("SyncCallbackCtx: reported peer {s} for sync misbehavior", .{peer_id});
+        scoped_log.debug("SyncCallbackCtx: reported peer {s} for sync misbehavior", .{peer_id});
     }
 
     fn syncHasBlock(ptr: *anyopaque, root: [32]u8) bool {
@@ -398,7 +399,7 @@ pub const SyncCallbackCtx = struct {
     }
 
     fn syncSetGossipEnabled(_: *anyopaque, enabled: bool) void {
-        std.log.info("gossip {s}", .{if (enabled) "enabled" else "disabled"});
+        scoped_log.info("gossip {s}", .{if (enabled) "enabled" else "disabled"});
     }
 };
 

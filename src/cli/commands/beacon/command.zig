@@ -1,4 +1,5 @@
 const std = @import("std");
+const scoped_log = std.log.scoped(.beacon_command);
 
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
@@ -49,7 +50,7 @@ const ResolvedRunInputs = struct {
     api_cors: ?[]const u8,
     log_level: common.CliLogLevel,
     log_file: ?[]const u8,
-    log_format: log_mod.GlobalLogger.Format,
+    log_format: log_mod.Format,
     log_file_level: common.CliLogLevel,
     log_file_daily_rotate: u16,
     p2p_host4: ?[]const u8,
@@ -126,7 +127,7 @@ const PreparedHandles = struct {
 };
 
 fn unsupportedOption(name: []const u8, reason: []const u8) noreturn {
-    std.log.err("{s} is not supported: {s}", .{ name, reason });
+    scoped_log.err("{s} is not supported: {s}", .{ name, reason });
     std.process.exit(1);
 }
 
@@ -203,12 +204,12 @@ fn maybePromoteSyntheticMinimalBeaconConfig(
     }
 
     const cfg = allocator.create(BeaconConfig) catch |err| {
-        std.log.err("Failed to allocate synthetic minimal beacon config: {}", .{err});
+        scoped_log.err("Failed to allocate synthetic minimal beacon config: {}", .{err});
         std.process.exit(1);
     };
     cfg.* = BeaconConfig.init(chain, beacon_config.genesis_validator_root);
     custom_beacon_config.* = cfg;
-    std.log.info("adjusted minimal beacon config for synthetic Electra genesis", .{});
+    scoped_log.info("adjusted minimal beacon config for synthetic Electra genesis", .{});
     return cfg;
 }
 
@@ -230,7 +231,7 @@ fn parseOptionalPort(raw: ?[]const u8) ?u16 {
 
 fn parseU64OrExit(flag_name: []const u8, raw: []const u8) u64 {
     return std.fmt.parseInt(u64, raw, 10) catch {
-        std.log.err("Invalid {s}: expected unsigned integer, got '{s}'", .{ flag_name, raw });
+        scoped_log.err("Invalid {s}: expected unsigned integer, got '{s}'", .{ flag_name, raw });
         std.process.exit(1);
     };
 }
@@ -284,7 +285,7 @@ fn formatP2pListenMultiaddr(buf: []u8, host: []const u8, port: u16) ![]const u8 
 fn slotClockLoop(io: Io, node: *BeaconNode) !void {
     const clock = node.clock orelse return error.ClockNotInitialized;
 
-    std.log.debug("Entering slot clock loop", .{});
+    scoped_log.debug("Entering slot clock loop", .{});
 
     while (!ShutdownHandler.shouldStop()) {
         const current_slot = clock.currentSlot(io) orelse {
@@ -303,26 +304,26 @@ fn slotClockLoop(io: Io, node: *BeaconNode) !void {
 
 fn runApiServer(io: Io, ctx: *RunContext) void {
     ctx.node.startApi(io, ctx.api_address, ctx.api_port, ctx.api_cors_origin) catch |err| {
-        std.log.err("API server failed: {}", .{err});
+        scoped_log.err("API server failed: {}", .{err});
     };
 }
 
 fn runP2p(io: Io, ctx: *RunContext) void {
     ctx.node.startP2p(io, ctx.p2p_host, ctx.p2p_port) catch |err| {
-        std.log.err("P2P networking failed: {}", .{err});
+        scoped_log.err("P2P networking failed: {}", .{err});
     };
 }
 
 fn runSlotClock(io: Io, node: *BeaconNode) void {
     slotClockLoop(io, node) catch |err| {
-        std.log.err("Slot clock failed: {}", .{err});
+        scoped_log.err("Slot clock failed: {}", .{err});
     };
 }
 
 fn logHeadSummary(node: *BeaconNode) void {
     const head = node.getHead();
-    std.log.info("Head: slot={d} root=0x{s}", .{ head.slot, &std.fmt.bytesToHex(head.root, .lower) });
-    std.log.info("  finalized_epoch={d} justified_epoch={d}", .{ head.finalized_epoch, head.justified_epoch });
+    scoped_log.info("Head: slot={d} root=0x{s}", .{ head.slot, &std.fmt.bytesToHex(head.root, .lower) });
+    scoped_log.info("  finalized_epoch={d} justified_epoch={d}", .{ head.finalized_epoch, head.justified_epoch });
 }
 
 fn runBootstrappedNode(
@@ -349,11 +350,11 @@ fn runBootstrappedNode(
     }
     defer if (metrics_runtime) |runtime| runtime.stop();
 
-    std.log.info("starting services concurrently", .{});
-    std.log.info("  REST API: http://{s}:{d}", .{ api_address, api_port });
+    scoped_log.info("starting services concurrently", .{});
+    scoped_log.info("  REST API: http://{s}:{d}", .{ api_address, api_port });
     var p2p_multiaddr_buf: [160]u8 = undefined;
     const p2p_multiaddr = try formatP2pListenMultiaddr(&p2p_multiaddr_buf, p2p_bind_host, p2p_bind_port);
-    std.log.info("  P2P:      {s}", .{p2p_multiaddr});
+    scoped_log.info("  P2P:      {s}", .{p2p_multiaddr});
 
     var group: Io.Group = .init;
     group.async(io, runApiServer, .{ io, &run_ctx });
@@ -362,8 +363,8 @@ fn runBootstrappedNode(
 
     group.await(io) catch {};
 
-    std.log.info("shutting down", .{});
-    std.log.info("goodbye", .{});
+    scoped_log.info("shutting down", .{});
+    scoped_log.info("goodbye", .{});
 }
 
 pub fn run(io: Io, allocator: Allocator, opts: anytype) !void {
@@ -477,12 +478,12 @@ fn resolveRunInputs(io: Io, allocator: Allocator, opts: anytype) ResolvedRunInpu
         else
             hex_str;
         if (stripped.len != 40) {
-            std.log.err("Invalid --suggest-fee-recipient: expected 40 hex chars, got {d}", .{stripped.len});
+            scoped_log.err("Invalid --suggest-fee-recipient: expected 40 hex chars, got {d}", .{stripped.len});
             break :blk null;
         }
         var addr: [20]u8 = undefined;
         _ = std.fmt.hexToBytes(&addr, stripped) catch {
-            std.log.err("Invalid --suggest-fee-recipient: bad hex encoding", .{});
+            scoped_log.err("Invalid --suggest-fee-recipient: bad hex encoding", .{});
             break :blk null;
         };
         break :blk addr;
@@ -510,26 +511,26 @@ fn resolveRunInputs(io: Io, allocator: Allocator, opts: anytype) ResolvedRunInpu
 
     var custom_beacon_config: ?*BeaconConfig = null;
     var beacon_config: *const BeaconConfig = if (params_file) |config_path| blk: {
-        std.log.info("loading custom network config from {s}", .{config_path});
+        scoped_log.info("loading custom network config from {s}", .{config_path});
         var arena = std.heap.ArenaAllocator.init(allocator);
         const config_arena = arena.allocator();
         const config_bytes = readFile(io, allocator, config_path) catch |err| {
-            std.log.err("Failed to read config file '{s}': {}", .{ config_path, err });
+            scoped_log.err("Failed to read config file '{s}': {}", .{ config_path, err });
             std.process.exit(1);
         };
         defer allocator.free(config_bytes);
         const base = loadBeaconConfig(network);
         const custom_chain_config = config_loader.loadConfigFromYaml(config_arena, config_bytes, &base.chain) catch |err| {
-            std.log.err("Failed to parse config YAML '{s}': {}", .{ config_path, err });
+            scoped_log.err("Failed to parse config YAML '{s}': {}", .{ config_path, err });
             std.process.exit(1);
         };
         const cfg = allocator.create(BeaconConfig) catch |err| {
-            std.log.err("Failed to allocate custom beacon config: {}", .{err});
+            scoped_log.err("Failed to allocate custom beacon config: {}", .{err});
             std.process.exit(1);
         };
         cfg.* = BeaconConfig.init(custom_chain_config, [_]u8{0} ** 32);
         custom_beacon_config = cfg;
-        std.log.info("custom config loaded: SECONDS_PER_SLOT={d} CONFIG_NAME={s}", .{
+        scoped_log.info("custom config loaded: SECONDS_PER_SLOT={d} CONFIG_NAME={s}", .{
             custom_chain_config.SECONDS_PER_SLOT,
             custom_chain_config.CONFIG_NAME,
         });
@@ -712,42 +713,42 @@ const NodeReadyContext = struct {
 };
 
 fn prepareRunContextStartup(io: Io, allocator: Allocator, inputs: *const ResolvedRunInputs, startup: *StartupPrep) !void {
-    logStartupConfig(inputs);
-
-    try @call(.never_inline, prepareStartupPeers, .{ allocator, inputs, startup });
-    log_mod.global = log_mod.GlobalLogger.init(inputs.log_level.toLogLevel(), inputs.log_format);
+    log_mod.configure(inputs.log_level.toLogLevel(), inputs.log_format);
     if (inputs.log_file != null) {
         prepareStartupFileTransport(io, inputs, startup);
     }
+    logStartupConfig(inputs);
+
+    try @call(.never_inline, prepareStartupPeers, .{ allocator, inputs, startup });
     return @call(.never_inline, prepareStartupRuntime, .{ io, allocator, inputs, startup });
 }
 
 fn logStartupConfig(inputs: *const ResolvedRunInputs) void {
-    std.log.info("lodestar-z v{s} starting", .{common.VERSION});
-    std.log.info("  network:    {s}", .{@tagName(inputs.network)});
-    std.log.info("  api:        http://{s}:{d}", .{ inputs.api_address, inputs.api_port });
-    if (inputs.p2p_host4) |host| std.log.info("  p2p4:       {s}:{d}", .{ host, inputs.p2p_port });
-    if (inputs.p2p_host6) |host| std.log.info("  p2p6:       [{s}]:{d}", .{ host, inputs.p2p_port6 orelse inputs.p2p_port });
+    scoped_log.info("lodestar-z v{s} starting", .{common.VERSION});
+    scoped_log.info("  network:    {s}", .{@tagName(inputs.network)});
+    scoped_log.info("  api:        http://{s}:{d}", .{ inputs.api_address, inputs.api_port });
+    if (inputs.p2p_host4) |host| scoped_log.info("  p2p4:       {s}:{d}", .{ host, inputs.p2p_port });
+    if (inputs.p2p_host6) |host| scoped_log.info("  p2p6:       [{s}]:{d}", .{ host, inputs.p2p_port6 orelse inputs.p2p_port });
     if (inputs.p2p_host4 == null and inputs.p2p_host6 == null) {
-        std.log.info("  p2p4:       0.0.0.0:{d}", .{inputs.p2p_port});
+        scoped_log.info("  p2p4:       0.0.0.0:{d}", .{inputs.p2p_port});
     }
     if (inputs.jwt_secret_override) |jwt| {
-        std.log.info("  jwt-secret: {s}", .{jwt});
+        scoped_log.info("  jwt-secret: {s}", .{jwt});
     }
-    std.log.info("  custody-groups: {d}", .{inputs.initial_custody_group_count});
-    std.log.info("  execution:  {s}", .{inputs.execution_urls});
-    std.log.info("  execution retry: attempts={d} delay_ms={d}", .{ inputs.execution_retries, inputs.execution_retry_delay });
+    scoped_log.info("  custody-groups: {d}", .{inputs.initial_custody_group_count});
+    scoped_log.info("  execution:  {s}", .{inputs.execution_urls});
+    scoped_log.info("  execution retry: attempts={d} delay_ms={d}", .{ inputs.execution_retries, inputs.execution_retry_delay });
     if (inputs.execution_timeout_ms) |value| {
-        std.log.info("  execution timeout: {d}ms", .{value});
+        scoped_log.info("  execution timeout: {d}ms", .{value});
     } else {
-        std.log.info("  execution timeout: default", .{});
+        scoped_log.info("  execution timeout: default", .{});
     }
     if (inputs.builder_enabled) {
-        std.log.info("  builder:    {s} (boost={d})", .{ inputs.builder_url orelse default_builder_url, inputs.builder_boost_factor });
+        scoped_log.info("  builder:    {s} (boost={d})", .{ inputs.builder_url orelse default_builder_url, inputs.builder_boost_factor });
         if (inputs.builder_timeout_ms) |value| {
-            std.log.info("  builder timeout: {d}ms", .{value});
+            scoped_log.info("  builder timeout: {d}ms", .{value});
         } else {
-            std.log.info("  builder timeout: default", .{});
+            scoped_log.info("  builder timeout: default", .{});
         }
     }
 }
@@ -781,12 +782,12 @@ fn prepareStartupFileTransport(io: Io, inputs: *const ResolvedRunInputs, startup
     });
 
     if (startup.file_transport) |*ft| {
-        if (log_mod.global.setFileTransport(ft)) |_| {
-            std.log.info("File logging enabled: {s} (level={s})", .{
+        if (log_mod.setFileTransport(ft)) |_| {
+            scoped_log.info("File logging enabled: {s} (level={s})", .{
                 log_file_path, file_level.asText(),
             });
         } else |err| {
-            std.log.err("Failed to start log file transport '{s}': {}", .{ log_file_path, err });
+            scoped_log.err("Failed to start log file transport '{s}': {}", .{ log_file_path, err });
             startup.file_transport = null;
         }
     }
@@ -857,8 +858,8 @@ fn prepareStartupRuntime(io: Io, allocator: Allocator, inputs: *const ResolvedRu
     );
     startup.prepared_runtime = prepared_runtime;
 
-    std.log.info("  data-dir:   {s}", .{prepared_runtime.paths.root});
-    std.log.info("  bootstrap:  {d} explicit, {d} discovery", .{
+    scoped_log.info("  data-dir:   {s}", .{prepared_runtime.paths.root});
+    scoped_log.info("  bootstrap:  {d} explicit, {d} discovery", .{
         prepared_runtime.bootstrap_peers.len,
         prepared_runtime.discovery_bootnodes.len,
     });
@@ -1006,26 +1007,26 @@ fn prepareNodeBuilder(io: Io, allocator: Allocator, beacon_config: *const Beacon
 }
 
 fn runFromPrepared(io: Io, allocator: Allocator, inputs: *const ResolvedRunInputs, handles: *PreparedHandles) !void {
-    std.log.info("beacon node bootstrap initialized", .{});
-    std.log.info("  peer-id:    {s}", .{handles.node_builder.nodeIdentity().peer_id});
-    std.log.info("  enr:        {s}", .{handles.node_builder.nodeIdentity().enr});
+    scoped_log.info("beacon node bootstrap initialized", .{});
+    scoped_log.info("  peer-id:    {s}", .{handles.node_builder.nodeIdentity().peer_id});
+    scoped_log.info("  enr:        {s}", .{handles.node_builder.nodeIdentity().enr});
 
     const force_checkpoint = inputs.force_checkpoint_sync;
 
     if (inputs.checkpoint_sync_url) |sync_url| {
-        std.log.info("checkpoint sync from URL: {s}", .{sync_url});
+        scoped_log.info("checkpoint sync from URL: {s}", .{sync_url});
 
         const fetched = checkpoint_sync.fetchFinalizedState(allocator, io, sync_url) catch |err| {
-            std.log.err("Failed to fetch checkpoint state from '{s}': {}", .{ sync_url, err });
-            std.log.err("  Suggestions:", .{});
-            std.log.err("    - Verify the URL is a beacon API endpoint", .{});
-            std.log.err("    - Try: curl -s {s}/eth/v1/node/version", .{sync_url});
-            std.log.err("    - Use --checkpoint-state <file> as alternative", .{});
+            scoped_log.err("Failed to fetch checkpoint state from '{s}': {}", .{ sync_url, err });
+            scoped_log.err("  Suggestions:", .{});
+            scoped_log.err("    - Verify the URL is a beacon API endpoint", .{});
+            scoped_log.err("    - Try: curl -s {s}/eth/v1/node/version", .{sync_url});
+            scoped_log.err("    - Use --checkpoint-state <file> as alternative", .{});
             std.process.exit(1);
         };
         defer allocator.free(fetched.state_bytes);
 
-        std.log.info("deserializing checkpoint state ({d} bytes, fork={s})...", .{
+        scoped_log.info("deserializing checkpoint state ({d} bytes, fork={s})...", .{
             fetched.state_bytes.len, fetched.fork_name,
         });
 
@@ -1037,37 +1038,37 @@ fn runFromPrepared(io: Io, allocator: Allocator, inputs: *const ResolvedRunInput
             fetched.state_bytes,
             handles.state_transition_metrics,
         ) catch |err| {
-            std.log.err("Failed to deserialize checkpoint state: {}", .{err});
-            std.log.err("  This may indicate a fork mismatch — check that the", .{});
-            std.log.err("  remote node and this node are on the same network.", .{});
+            scoped_log.err("Failed to deserialize checkpoint state: {}", .{err});
+            scoped_log.err("  This may indicate a fork mismatch — check that the", .{});
+            scoped_log.err("  remote node and this node are on the same network.", .{});
             std.process.exit(1);
         };
 
         if (inputs.weak_subjectivity_checkpoint) |ws_str| {
             const ws = checkpoint_sync.parseWeakSubjectivityCheckpoint(ws_str) catch |err| {
-                std.log.err("Invalid --weak-subjectivity-checkpoint '{s}': {}", .{ ws_str, err });
+                scoped_log.err("Invalid --weak-subjectivity-checkpoint '{s}': {}", .{ ws_str, err });
                 std.process.exit(1);
             };
             const cp_slot = cp_state.state.slot() catch 0;
             checkpoint_sync.validateWeakSubjectivityCheckpoint(ws, cp_slot, @as(u64, preset.SLOTS_PER_EPOCH)) catch {
-                std.log.err("Weak subjectivity violation! The checkpoint state does not", .{});
-                std.log.err("  match the expected root:epoch. Refusing to sync.", .{});
-                std.log.err("  Expected: {s}", .{ws_str});
+                scoped_log.err("Weak subjectivity violation! The checkpoint state does not", .{});
+                scoped_log.err("  match the expected root:epoch. Refusing to sync.", .{});
+                scoped_log.err("  Expected: {s}", .{ws_str});
                 std.process.exit(1);
             };
-            std.log.info("Weak subjectivity checkpoint validated (epoch {d})", .{ws.epoch});
+            scoped_log.info("Weak subjectivity checkpoint validated (epoch {d})", .{ws.epoch});
         }
 
         const cp_slot = cp_state.state.slot() catch 0;
         const node = try handles.node_builder.finishCheckpoint(cp_state);
         defer node.deinit();
         if (inputs.custom_beacon_config) |cfg| cfg.genesis_validator_root = node.genesis_validators_root;
-        std.log.info("Initialized from checkpoint sync URL at slot {d}", .{cp_slot});
+        scoped_log.info("Initialized from checkpoint sync URL at slot {d}", .{cp_slot});
         logHeadSummary(node);
         try runBootstrappedNode(io, node, inputs.api_port, inputs.api_address, inputs.api_cors, handles.p2p_bind_host, handles.p2p_bind_port, if (handles.metrics_runtime) |*runtime| runtime else null);
         return;
     } else if (inputs.checkpoint_state) |state_path| {
-        std.log.info("loading checkpoint state from {s}", .{state_path});
+        scoped_log.info("loading checkpoint state from {s}", .{state_path});
 
         const cp_state = genesis_util.loadGenesisFromFile(
             allocator,
@@ -1078,21 +1079,21 @@ fn runFromPrepared(io: Io, allocator: Allocator, inputs: *const ResolvedRunInput
             state_path,
             handles.state_transition_metrics,
         ) catch |err| {
-            std.log.err("Failed to load checkpoint state '{s}': {}", .{ state_path, err });
+            scoped_log.err("Failed to load checkpoint state '{s}': {}", .{ state_path, err });
             std.process.exit(1);
         };
 
         if (inputs.weak_subjectivity_checkpoint) |ws_str| {
             const ws = checkpoint_sync.parseWeakSubjectivityCheckpoint(ws_str) catch |err| {
-                std.log.err("Invalid --weak-subjectivity-checkpoint '{s}': {}", .{ ws_str, err });
+                scoped_log.err("Invalid --weak-subjectivity-checkpoint '{s}': {}", .{ ws_str, err });
                 std.process.exit(1);
             };
             const cp_slot = cp_state.state.slot() catch 0;
             checkpoint_sync.validateWeakSubjectivityCheckpoint(ws, cp_slot, @as(u64, preset.SLOTS_PER_EPOCH)) catch {
-                std.log.err("Weak subjectivity violation! Refusing to sync.", .{});
+                scoped_log.err("Weak subjectivity violation! Refusing to sync.", .{});
                 std.process.exit(1);
             };
-            std.log.info("Weak subjectivity checkpoint validated (epoch {d})", .{ws.epoch});
+            scoped_log.info("Weak subjectivity checkpoint validated (epoch {d})", .{ws.epoch});
         }
 
         const cp_slot = cp_state.state.slot() catch 0;
@@ -1102,18 +1103,18 @@ fn runFromPrepared(io: Io, allocator: Allocator, inputs: *const ResolvedRunInput
             try handles.node_builder.finishCheckpoint(cp_state);
         defer node.deinit();
         if (inputs.custom_beacon_config) |cfg| cfg.genesis_validator_root = node.genesis_validators_root;
-        std.log.info("Initialized from checkpoint file at slot {d}", .{cp_slot});
+        scoped_log.info("Initialized from checkpoint file at slot {d}", .{cp_slot});
         logHeadSummary(node);
         try runBootstrappedNode(io, node, inputs.api_port, inputs.api_address, inputs.api_cors, handles.p2p_bind_host, handles.p2p_bind_port, if (handles.metrics_runtime) |*runtime| runtime else null);
         return;
     } else if (if (!force_checkpoint) handles.node_builder.latestStateArchiveSlot() catch null else null) |db_slot| {
-        std.log.info("found persisted state in DB at slot {d}, resuming", .{db_slot});
+        scoped_log.info("found persisted state in DB at slot {d}, resuming", .{db_slot});
 
         const state_bytes = handles.node_builder.stateArchiveAtSlot(db_slot) catch |err| {
-            std.log.err("Failed to read state from DB at slot {d}: {}", .{ db_slot, err });
+            scoped_log.err("Failed to read state from DB at slot {d}: {}", .{ db_slot, err });
             std.process.exit(1);
         } orelse {
-            std.log.err("State archive at slot {d} unexpectedly empty", .{db_slot});
+            scoped_log.err("State archive at slot {d} unexpectedly empty", .{db_slot});
             std.process.exit(1);
         };
         defer allocator.free(state_bytes);
@@ -1126,20 +1127,20 @@ fn runFromPrepared(io: Io, allocator: Allocator, inputs: *const ResolvedRunInput
             state_bytes,
             handles.state_transition_metrics,
         ) catch |err| {
-            std.log.err("Failed to deserialize DB state at slot {d}: {}", .{ db_slot, err });
-            std.log.err("  The database may be corrupted. Try --force-checkpoint-sync", .{});
+            scoped_log.err("Failed to deserialize DB state at slot {d}: {}", .{ db_slot, err });
+            scoped_log.err("  The database may be corrupted. Try --force-checkpoint-sync", .{});
             std.process.exit(1);
         };
 
         const node = try handles.node_builder.finishCheckpoint(db_state);
         defer node.deinit();
         if (inputs.custom_beacon_config) |cfg| cfg.genesis_validator_root = node.genesis_validators_root;
-        std.log.info("Resumed from DB state at slot {d}", .{db_slot});
+        scoped_log.info("Resumed from DB state at slot {d}", .{db_slot});
         logHeadSummary(node);
         try runBootstrappedNode(io, node, inputs.api_port, inputs.api_address, inputs.api_cors, handles.p2p_bind_host, handles.p2p_bind_port, if (handles.metrics_runtime) |*runtime| runtime else null);
         return;
     } else if (inputs.network == .minimal) {
-        std.log.info("generating minimal genesis state with 64 validators", .{});
+        scoped_log.info("generating minimal genesis state with 64 validators", .{});
 
         const genesis_state = genesis_util.createMinimalGenesis(
             allocator,
@@ -1149,24 +1150,24 @@ fn runFromPrepared(io: Io, allocator: Allocator, inputs: *const ResolvedRunInput
             64,
             handles.state_transition_metrics,
         ) catch |err| {
-            std.log.err("Failed to generate minimal genesis state: {}", .{err});
+            scoped_log.err("Failed to generate minimal genesis state: {}", .{err});
             std.process.exit(1);
         };
 
         const node = try handles.node_builder.finishGenesis(genesis_state);
         defer node.deinit();
         if (inputs.custom_beacon_config) |cfg| cfg.genesis_validator_root = node.genesis_validators_root;
-        std.log.info("Initialized from minimal genesis state", .{});
+        scoped_log.info("Initialized from minimal genesis state", .{});
         logHeadSummary(node);
         try runBootstrappedNode(io, node, inputs.api_port, inputs.api_address, inputs.api_cors, handles.p2p_bind_host, handles.p2p_bind_port, if (handles.metrics_runtime) |*runtime| runtime else null);
         return;
     } else {
-        std.log.err("No beacon state available. Provide one of:", .{});
-        std.log.err("  --checkpoint-sync-url <URL>  Sync from a beacon API endpoint", .{});
-        std.log.err("  --checkpoint-state <FILE>    Load from an SSZ state file", .{});
-        std.log.err("  --network minimal            Generate a test genesis state", .{});
-        std.log.err("", .{});
-        std.log.err("Or ensure --data-dir points to a directory with prior chain data.", .{});
+        scoped_log.err("No beacon state available. Provide one of:", .{});
+        scoped_log.err("  --checkpoint-sync-url <URL>  Sync from a beacon API endpoint", .{});
+        scoped_log.err("  --checkpoint-state <FILE>    Load from an SSZ state file", .{});
+        scoped_log.err("  --network minimal            Generate a test genesis state", .{});
+        scoped_log.err("", .{});
+        scoped_log.err("Or ensure --data-dir points to a directory with prior chain data.", .{});
         std.process.exit(1);
     }
 }

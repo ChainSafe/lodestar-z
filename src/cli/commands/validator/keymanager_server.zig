@@ -1,4 +1,5 @@
 const std = @import("std");
+const scoped_log = std.log.scoped(.keymanager_server);
 
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -142,11 +143,11 @@ pub const Runtime = struct {
             }
         }
 
-        std.log.info("validator keymanager API listening on {s}:{d}", .{ self.config.address, self.config.port });
+        scoped_log.info("validator keymanager API listening on {s}:{d}", .{ self.config.address, self.config.port });
         if (self.config.auth_enabled) {
-            std.log.info("validator keymanager bearer token: {s}", .{self.config.token_file});
+            scoped_log.info("validator keymanager bearer token: {s}", .{self.config.token_file});
         } else {
-            std.log.warn("validator keymanager started without bearer authentication", .{});
+            scoped_log.warn("validator keymanager started without bearer authentication", .{});
         }
     }
 
@@ -155,7 +156,7 @@ pub const Runtime = struct {
         if (self.task) |*task| {
             _ = task.cancel(self.io) catch |err| switch (err) {
                 error.Canceled => {},
-                else => std.log.debug("validator keymanager task exited during shutdown: {s}", .{@errorName(err)}),
+                else => scoped_log.debug("validator keymanager task exited during shutdown: {s}", .{@errorName(err)}),
             };
             self.task = null;
         }

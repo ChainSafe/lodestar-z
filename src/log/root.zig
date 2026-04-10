@@ -1,40 +1,27 @@
-//! Logging framework for lodestar-z.
+//! Runtime backend for lodestar-z logging.
 //!
-//! Provides structured, per-module logging with level filtering, human-readable
-//! and JSON output formats, and zero overhead when disabled.
-//!
-//! Integrates with `std.log` — all existing `std.log.*` and `std.log.scoped()`
-//! calls are routed through the same output path via a custom `logFn`.
-//!
-//! ## Quick Start
-//!
-//! ```zig
-//! const log = @import("log");
-//! // In your module init, get a scoped logger:
-//! const logger = log.logger(.chain);
-//! logger.info("block imported", .{ .slot = slot, .root = root });
-//! ```
+//! Application code should use `std.log` or `std.log.scoped(.scope)`.
+//! This package is intentionally only the backend configured by
+//! `std.options.logFn`.
 
 pub const logger_mod = @import("logger.zig");
 
 pub const Level = logger_mod.Level;
-pub const Module = logger_mod.Module;
-pub const Logger = logger_mod.Logger;
-pub const GlobalLogger = logger_mod.GlobalLogger;
+pub const Format = logger_mod.Format;
+pub const Backend = logger_mod.Backend;
 pub const FileTransport = logger_mod.FileTransport;
 pub const RotationConfig = logger_mod.RotationConfig;
-pub const Text = logger_mod.Text;
-pub const Hex = logger_mod.Hex;
 pub const stdLogFn = logger_mod.stdLogFn;
-pub const text = logger_mod.text;
-pub const hex = logger_mod.hex;
 
-/// Process-wide logger instance. Initialized by the beacon node at startup.
-pub var global: GlobalLogger = GlobalLogger.init(.info, .human);
+/// Process-wide logging backend. Initialized by CLI startup before normal node work.
+pub var global: Backend = Backend.init(.info, .human);
 
-/// Convenience: get a module-scoped logger from the global instance.
-pub fn logger(module: Module) Logger {
-    return global.logger(module);
+pub fn configure(level: Level, format: Format) void {
+    global = Backend.init(level, format);
+}
+
+pub fn setFileTransport(transport: *FileTransport) !void {
+    try global.setFileTransport(transport);
 }
 
 test {

@@ -8,6 +8,7 @@
 //! while tests use MockTransport to inspect requests and return canned responses.
 
 const std = @import("std");
+const scoped_log = std.log.scoped(.http_engine);
 const testing = std.testing;
 const Allocator = std.mem.Allocator;
 const HmacSha256 = std.crypto.auth.hmac.sha2.HmacSha256;
@@ -282,10 +283,10 @@ pub const HttpEngine = struct {
         const old = self.state;
         self.state = new_state;
         switch (new_state) {
-            .online => std.log.info("execution engine came online (was {s})", .{@tagName(old)}),
-            .offline => std.log.warn("execution engine went offline (was {s})", .{@tagName(old)}),
-            .syncing => std.log.warn("execution engine is syncing (was {s})", .{@tagName(old)}),
-            .auth_failed => std.log.err("execution engine JWT authentication failed (was {s})", .{@tagName(old)}),
+            .online => scoped_log.info("execution engine came online (was {s})", .{@tagName(old)}),
+            .offline => scoped_log.warn("execution engine went offline (was {s})", .{@tagName(old)}),
+            .syncing => scoped_log.warn("execution engine is syncing (was {s})", .{@tagName(old)}),
+            .auth_failed => scoped_log.err("execution engine JWT authentication failed (was {s})", .{@tagName(old)}),
         }
     }
 
@@ -341,7 +342,7 @@ pub const HttpEngine = struct {
 
                 const backoff_ms = self.retry_config.initial_backoff_ms *
                     (@as(u64, 1) << @intCast(attempt - 1));
-                std.log.debug("execution engine retrying request (attempt {d}/{d}) after {d}ms", .{
+                scoped_log.debug("execution engine retrying request (attempt {d}/{d}) after {d}ms", .{
                     attempt + 1, max_attempts, backoff_ms,
                 });
                 // Sleep if Io available; in tests without Io, skip sleep.
@@ -357,7 +358,7 @@ pub const HttpEngine = struct {
                 return response;
             } else |err| {
                 // Transport error — check if we should retry.
-                std.log.debug("execution engine transport error on attempt {d}: {}", .{ attempt + 1, err });
+                scoped_log.debug("execution engine transport error on attempt {d}: {}", .{ attempt + 1, err });
                 if (attempt + 1 >= max_attempts) {
                     self.updateState(.offline);
                     return err;
@@ -524,7 +525,7 @@ pub const HttpEngine = struct {
             };
         }
 
-        std.log.debug("execution engine client version: code={s} name={s} version={s}", .{
+        scoped_log.debug("execution engine client version: code={s} name={s} version={s}", .{
             if (result.len > 0) result[0].code else "?",
             if (result.len > 0) result[0].name else "?",
             if (result.len > 0) result[0].version else "?",
@@ -551,7 +552,6 @@ pub const HttpEngine = struct {
         }
         self.allocator.free(capabilities);
     }
-
 
     /// Free all allocator-owned fields of a GetPayloadResponse.
     ///
@@ -601,7 +601,6 @@ pub const HttpEngine = struct {
         if (resp.blobs_bundle.proofs.len > 0) self.allocator.free(resp.blobs_bundle.proofs);
         if (resp.blobs_bundle.blobs.len > 0) self.allocator.free(resp.blobs_bundle.blobs);
     }
-
 
     // ── getPayloadBodies ──────────────────────────────────────────────────────
 
@@ -809,7 +808,7 @@ pub const HttpEngine = struct {
         defer self.allocator.free(body);
 
         const response = self.sendRequest(body) catch |err| {
-            std.log.debug("execution layer offline — retrying ({})", .{err});
+            scoped_log.debug("execution layer offline — retrying ({})", .{err});
             self.updateState(.offline);
             return err;
         };
@@ -843,12 +842,12 @@ pub const HttpEngine = struct {
                 else
                     0;
 
-                std.log.debug("execution layer syncing: block {d}/{d}", .{ current, highest });
+                scoped_log.debug("execution layer syncing: block {d}/{d}", .{ current, highest });
                 self.updateState(.syncing);
                 return .{ .syncing = .{ .current_block = current, .highest_block = highest } };
             },
             else => {
-                std.log.debug("execution layer syncing: unexpected response type", .{});
+                scoped_log.debug("execution layer syncing: unexpected response type", .{});
                 self.updateState(.syncing);
                 return .{ .syncing = .{ .current_block = 0, .highest_block = 0 } };
             },
@@ -952,7 +951,6 @@ pub const HttpEngine = struct {
 
         return decodeForkchoiceUpdatedResponse(self.allocator, parsed.value);
     }
-
 
     // ── Payload promotion helpers ─────────────────────────────────────────────
 
@@ -1788,10 +1786,10 @@ fn encodeExecutionPayloadV1(allocator: Allocator, p: ExecutionPayloadV1) ![]cons
         \\"transactions":{s}
         \\}}
     , .{
-        b.parent_hash,  b.fee_recipient, b.state_root,  b.receipts_root,
-        b.logs_bloom,   b.prev_randao,   b.block_number, b.gas_limit,
-        b.gas_used,     b.timestamp,     b.extra_data,   b.base_fee,
-        b.block_hash,   b.transactions,
+        b.parent_hash, b.fee_recipient, b.state_root,   b.receipts_root,
+        b.logs_bloom,  b.prev_randao,   b.block_number, b.gas_limit,
+        b.gas_used,    b.timestamp,     b.extra_data,   b.base_fee,
+        b.block_hash,  b.transactions,
     });
 }
 
@@ -1819,10 +1817,10 @@ fn encodeExecutionPayloadV2(allocator: Allocator, p: ExecutionPayloadV2) ![]cons
         \\"withdrawals":{s}
         \\}}
     , .{
-        b.parent_hash,  b.fee_recipient, b.state_root,   b.receipts_root,
-        b.logs_bloom,   b.prev_randao,   b.block_number,  b.gas_limit,
-        b.gas_used,     b.timestamp,     b.extra_data,    b.base_fee,
-        b.block_hash,   b.transactions,  withdrawals,
+        b.parent_hash, b.fee_recipient, b.state_root,   b.receipts_root,
+        b.logs_bloom,  b.prev_randao,   b.block_number, b.gas_limit,
+        b.gas_used,    b.timestamp,     b.extra_data,   b.base_fee,
+        b.block_hash,  b.transactions,  withdrawals,
     });
 }
 
@@ -1947,11 +1945,11 @@ fn encodeExecutionPayloadV4(allocator: Allocator, p: ExecutionPayloadV4) ![]cons
         \\"consolidationRequests":{s}
         \\}}
     , .{
-        b.parent_hash,          b.fee_recipient,        b.state_root,           b.receipts_root,
-        b.logs_bloom,           b.prev_randao,           b.block_number,         b.gas_limit,
-        b.gas_used,             b.timestamp,             b.extra_data,           b.base_fee,
-        b.block_hash,           b.transactions,          withdrawals,            blob_gas_used,
-        excess_blob_gas,        deposit_requests,        withdrawal_requests,    consolidation_requests,
+        b.parent_hash,   b.fee_recipient,  b.state_root,        b.receipts_root,
+        b.logs_bloom,    b.prev_randao,    b.block_number,      b.gas_limit,
+        b.gas_used,      b.timestamp,      b.extra_data,        b.base_fee,
+        b.block_hash,    b.transactions,   withdrawals,         blob_gas_used,
+        excess_blob_gas, deposit_requests, withdrawal_requests, consolidation_requests,
     });
 }
 
@@ -1985,10 +1983,10 @@ fn encodeExecutionPayloadV3(allocator: Allocator, p: ExecutionPayloadV3) ![]cons
         \\"excessBlobGas":"{s}"
         \\}}
     , .{
-        b.parent_hash,   b.fee_recipient, b.state_root,    b.receipts_root,
-        b.logs_bloom,    b.prev_randao,   b.block_number,  b.gas_limit,
-        b.gas_used,      b.timestamp,     b.extra_data,    b.base_fee,
-        b.block_hash,    b.transactions,  withdrawals,     blob_gas_used,
+        b.parent_hash,   b.fee_recipient, b.state_root,   b.receipts_root,
+        b.logs_bloom,    b.prev_randao,   b.block_number, b.gas_limit,
+        b.gas_used,      b.timestamp,     b.extra_data,   b.base_fee,
+        b.block_hash,    b.transactions,  withdrawals,    blob_gas_used,
         excess_blob_gas,
     });
 }
@@ -2528,7 +2526,6 @@ fn decodeBlobsBundle(allocator: Allocator, j: BlobsBundleJson) !BlobsBundle {
     return BlobsBundle{ .commitments = commitments, .proofs = proofs, .blobs = blobs };
 }
 
-
 // ── Payload body JSON types and decoding ──────────────────────────────────────
 
 /// JSON representation of an ExecutionPayloadBody V1.
@@ -2903,7 +2900,7 @@ test "jwt header is correct base64url" {
 
 test "jwt HMAC is deterministic" {
     const allocator = testing.allocator;
-    const secret = [_]u8{0xde, 0xad, 0xbe, 0xef} ++ [_]u8{0x00} ** 28;
+    const secret = [_]u8{ 0xde, 0xad, 0xbe, 0xef } ++ [_]u8{0x00} ** 28;
     const token1 = try generateJwt(allocator, secret, 999);
     defer allocator.free(token1);
     const token2 = try generateJwt(allocator, secret, 999);
@@ -2965,7 +2962,7 @@ test "HttpEngine: newPayloadV3 encodes block_hash in hex" {
     defer http_engine.deinit();
 
     const api = http_engine.engine();
-    const block_hash = [_]u8{0xde, 0xad, 0xbe, 0xef} ++ [_]u8{0x00} ** 28;
+    const block_hash = [_]u8{ 0xde, 0xad, 0xbe, 0xef } ++ [_]u8{0x00} ** 28;
     const payload = makeTestPayload(block_hash);
     _ = try api.newPayload(payload, &.{}, std.mem.zeroes([32]u8));
 

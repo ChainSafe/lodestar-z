@@ -1,4 +1,5 @@
 const std = @import("std");
+const scoped_log = std.log.scoped(.validator_command);
 
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
@@ -13,8 +14,8 @@ const metrics_server = @import("metrics_server.zig");
 const monitoring_runtime = @import("monitoring_runtime.zig");
 
 fn unsupportedOption(message: []const u8) error{UnsupportedValidatorOption}!void {
-    std.log.err("{s}", .{message});
-    std.log.err("Current validator-client simplifications are documented in src/validator/DESIGN.md.", .{});
+    scoped_log.err("{s}", .{message});
+    scoped_log.err("Current validator-client simplifications are documented in src/validator/DESIGN.md.", .{});
     return error.UnsupportedValidatorOption;
 }
 
@@ -93,7 +94,7 @@ pub fn run(io: Io, allocator: Allocator, opts: anytype) !void {
     const log_file_level = opts.logFileLevel orelse .debug;
     const log_file_daily_rotate = opts.logFileDailyRotate orelse 5;
 
-    log_mod.global = log_mod.GlobalLogger.init(log_level.toLogLevel(), log_format);
+    log_mod.configure(log_level.toLogLevel(), log_format);
     try rejectUnsupportedOptions(opts);
     ShutdownHandler.installSignalHandlers();
 
@@ -105,8 +106,8 @@ pub fn run(io: Io, allocator: Allocator, opts: anytype) !void {
             .daily = log_file_daily_rotate > 0,
         });
         if (file_transport) |*ft| {
-            if (log_mod.global.setFileTransport(ft)) |_| {} else |err| {
-                std.log.err("Failed to start log file transport '{s}': {}", .{ log_file_path, err });
+            if (log_mod.setFileTransport(ft)) |_| {} else |err| {
+                scoped_log.err("Failed to start log file transport '{s}': {}", .{ log_file_path, err });
                 file_transport = null;
             }
         }
@@ -162,7 +163,7 @@ pub fn run(io: Io, allocator: Allocator, opts: anytype) !void {
         watch_ctx.done.store(true, .release);
         _ = watcher.cancel(io) catch |err| switch (err) {
             error.Canceled => {},
-            else => std.log.debug("validator shutdown watcher exited during shutdown: {s}", .{@errorName(err)}),
+            else => scoped_log.debug("validator shutdown watcher exited during shutdown: {s}", .{@errorName(err)}),
         };
     }
 
@@ -181,7 +182,7 @@ pub fn run(io: Io, allocator: Allocator, opts: anytype) !void {
             },
         );
         try metrics_runtime.?.start();
-        std.log.info(
+        scoped_log.info(
             "validator metrics listening on http://{s}:{d}/metrics",
             .{
                 opts.@"metrics.address" orelse metrics_server.default_address,
@@ -203,7 +204,7 @@ pub fn run(io: Io, allocator: Allocator, opts: anytype) !void {
             common.VERSION,
         );
         try monitoring.?.start();
-        std.log.info(
+        scoped_log.info(
             "validator monitoring sending to {s} every {d}ms",
             .{ monitoring_config.endpoint, monitoring_config.interval_ms },
         );
@@ -217,7 +218,7 @@ pub fn run(io: Io, allocator: Allocator, opts: anytype) !void {
     };
     if (prepared.keymanager) |keymanager_config| {
         if (!keymanager_config.proposer_config_write_enabled) {
-            std.log.info(
+            scoped_log.info(
                 "Validator keymanager proposer policy writes are disabled while --proposerSettingsFile owns proposer settings",
                 .{},
             );

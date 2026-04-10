@@ -17,6 +17,7 @@
 //! Reference: Lodestar chain/blocks/verifyBlocksStateTransitionOnly.ts
 
 const std = @import("std");
+const scoped_log = std.log.scoped(.execute_state_transition);
 const Allocator = std.mem.Allocator;
 
 const consensus_types = @import("consensus_types");
@@ -170,16 +171,16 @@ pub fn executeStateTransition(
     const expected_root = block.stateRoot().*;
     const expected_is_zero = std.mem.allEqual(u8, &expected_root, 0);
     if (!expected_is_zero and !std.mem.eql(u8, &state_root, &expected_root)) {
-        std.log.debug("state root mismatch at slot {d}: computed={s}... expected={s}...", .{
+        scoped_log.debug("state root mismatch at slot {d}: computed={s}... expected={s}...", .{
             block_slot,
             &std.fmt.bytesToHex(state_root[0..8], .lower),
             &std.fmt.bytesToHex(expected_root[0..8], .lower),
         });
         return BlockImportError.InvalidStateRoot;
     } else if (expected_is_zero) {
-        std.log.debug("State root not set in block at slot {d} — skipping check", .{block_slot});
+        scoped_log.debug("State root not set in block at slot {d} — skipping check", .{block_slot});
     } else {
-        std.log.debug("State root verified at slot {d}: {s}...", .{
+        scoped_log.debug("State root verified at slot {d}: {s}...", .{
             block_slot, &std.fmt.bytesToHex(state_root[0..8], .lower),
         });
     }
