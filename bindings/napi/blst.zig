@@ -1,4 +1,26 @@
-//! Contains the necessary bindings for blst operations in lodestar-ts.
+//! NAPI bindings for BLS (blst) cryptographic operations used by lodestar.
+//!
+//! This module exposes two concurrency mechanisms to keep the Node.js event loop responsive
+//! while performing expensive BLS math:
+//!
+//! 1. **Zig ThreadPool** (`thread_pool`) — A fixed-size pool of OS threads initialized once
+//!    via `initThreadPool`. Used by synchronous NAPI functions (`aggregateVerify`,
+//!    `fastAggregateVerify`, `verifyMultipleAggregateSignatures`) to fan out pairing checks
+//!    across worker threads. The call still blocks the JS thread while it waits for the pool
+//!    to finish, but the crypto work itself is parallelized.
+//!
+//! 2. **libuv AsyncWork** (`napi.AsyncWork`) — Used by `asyncAggregateWithRandomness` to
+//!    move work off the JS main thread. The flow is:
+//!      a. **Main thread (JS):** parse arguments, copy/deserialize inputs (without verification)
+//!         into `AsyncAggregateData`.
+//!      b. **libuv worker thread (`asyncAggregateExecute`):** validate signatures, generate
+//!         random scalars, run Pippenger multi-scalar multiplication. No NAPI calls here.
+//!      c. **Main thread (`asyncAggregateComplete`):** wrap results as JS objects, resolve or
+//!         reject the `Promise` returned to the caller, free allocations.
+//!    This returns a `Promise` immediately so the event loop stays unblocked.
+//!
+//! The Zig ThreadPool and libuv async work are independent — the ThreadPool is not used by
+//! the async aggregation path, and the libuv pool is not used by the verification functions.
 const std = @import("std");
 const napi = @import("zapi:zapi");
 const bls = @import("bls");
