@@ -395,8 +395,25 @@ fn fetchBeaconEndpoint(
 
     // Read the entire response body.
     // State responses can be very large (hundreds of MB), so allow up to 1 GB.
+    // std.http.Client advertises Accept-Encoding by default, so use the
+    // decompressing reader to ensure we always deserialize raw SSZ bytes.
+    const decompress_buf: []u8 = switch (response.head.content_encoding) {
+        .identity => &.{},
+        .zstd => try allocator.alloc(u8, std.compress.zstd.default_window_len),
+        .deflate, .gzip => try allocator.alloc(u8, std.compress.flate.max_window_len),
+        .compress => {
+            std.log.err("Unsupported content-encoding fetching {s}: {s}", .{
+                label,
+                @tagName(response.head.content_encoding),
+            });
+            return FetchError.RequestFailed;
+        },
+    };
+    defer if (response.head.content_encoding != .identity) allocator.free(decompress_buf);
+
     var transfer_buf: [65536]u8 = undefined;
-    const reader = response.reader(&transfer_buf);
+    var decompress: std.http.Decompress = undefined;
+    const reader = response.readerDecompressing(&transfer_buf, &decompress, decompress_buf);
     const body = reader.allocRemaining(allocator, std.Io.Limit.limited(1024 * 1024 * 1024)) catch |err| switch (err) {
         error.ReadFailed => {
             scoped_log.err("Read failed fetching {s}: {?}", .{ label, response.bodyErr() });
