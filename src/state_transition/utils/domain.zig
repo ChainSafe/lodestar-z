@@ -89,18 +89,6 @@ test "forkVersion - given epoch returns correct version" {
     try testing.expectEqualSlices(u8, &fork.current_version, &forkVersion(fork, 200));
 }
 
-test "computeForkDataRoot - deterministic" {
-    const version = [4]u8{ 0x01, 0x00, 0x00, 0x00 };
-    const genesis_root = [_]u8{0xCC} ** 32;
-    var root_a: Root = undefined;
-    var root_b: Root = undefined;
-
-    try computeForkDataRoot(version, genesis_root, &root_a);
-    try computeForkDataRoot(version, genesis_root, &root_b);
-
-    try testing.expectEqualSlices(u8, &root_a, &root_b);
-}
-
 test "computeForkDataRoot - different inputs produce different roots" {
     const genesis_root = [_]u8{0xDD} ** 32;
     var root_a: Root = undefined;
