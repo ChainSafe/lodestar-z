@@ -33,14 +33,16 @@ pub fn computeForkDataRoot(current_version: Version, genesis_validators_root: Ro
 }
 
 const testing = std.testing;
+const constants = @import("constants");
+const DOMAIN_BEACON_PROPOSER = constants.DOMAIN_BEACON_PROPOSER;
+const DOMAIN_BEACON_ATTESTER = constants.DOMAIN_BEACON_ATTESTER;
 
 test "computeDomain - domain type is first 4 bytes" {
-    const domain_type = [4]u8{ 0x07, 0x00, 0x00, 0x00 }; // DOMAIN_VOLUNTARY_EXIT
     const fork_version = [4]u8{ 0x01, 0x00, 0x00, 0x00 };
     const genesis_root = [_]u8{0} ** 32;
     var domain: Domain = undefined;
 
-    try computeDomain(domain_type, fork_version, genesis_root, &domain);
+    try computeDomain(DOMAIN_VOLUNTARY_EXIT, fork_version, genesis_root, &domain);
 
     // First 4 bytes should be the domain type
     try testing.expectEqualSlices(u8, &domain_type, domain[0..4]);
@@ -61,17 +63,14 @@ test "computeDomain - different domain types produce different domains" {
 
     var domain_a: Domain = undefined;
     var domain_b: Domain = undefined;
-    const type_a = [4]u8{ 0x00, 0x00, 0x00, 0x00 }; // DOMAIN_BEACON_PROPOSER
-    const type_b = [4]u8{ 0x01, 0x00, 0x00, 0x00 }; // DOMAIN_BEACON_ATTESTER
 
-    try computeDomain(type_a, fork_version, genesis_root, &domain_a);
-    try computeDomain(type_b, fork_version, genesis_root, &domain_b);
+    try computeDomain(DOMAIN_BEACON_PROPOSER, fork_version, genesis_root, &domain_a);
+    try computeDomain(DOMAIN_BEACON_ATTESTER, fork_version, genesis_root, &domain_b);
 
     try testing.expect(!std.mem.eql(u8, &domain_a, &domain_b));
 }
 
 test "computeDomain - different fork versions produce different domains" {
-    const domain_type = [4]u8{ 0x00, 0x00, 0x00, 0x00 };
     const genesis_root = [_]u8{0xBB} ** 32;
 
     var domain_a: Domain = undefined;
@@ -79,8 +78,8 @@ test "computeDomain - different fork versions produce different domains" {
     const version_a = [4]u8{ 0x01, 0x00, 0x00, 0x00 };
     const version_b = [4]u8{ 0x02, 0x00, 0x00, 0x00 };
 
-    try computeDomain(domain_type, version_a, genesis_root, &domain_a);
-    try computeDomain(domain_type, version_b, genesis_root, &domain_b);
+    try computeDomain(DOMAIN_BEACON_PROPOSER, version_a, genesis_root, &domain_a);
+    try computeDomain(DOMAIN_BEACON_PROPOSER, version_b, genesis_root, &domain_b);
 
     // First 4 bytes (domain type) are the same
     try testing.expectEqualSlices(u8, domain_a[0..4], domain_b[0..4]);
