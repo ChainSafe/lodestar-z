@@ -2037,7 +2037,7 @@ fn enqueuePeerReqRespCompletion(self: *BeaconNode, io: std.Io, completion: PeerR
 
     self.completed_peer_reqresp.append(self.allocator, owned) catch |err| {
         const peer_id = owned.peerId();
-        log.warn("Failed to enqueue peer req/resp completion for {s}: {}", .{ peer_id, err });
+        log.warn("Failed to enqueue peer req/resp completion for {f}: {}", .{ networking.fmtPeerId(peer_id), err });
         clearPendingPeerReqRespLocked(self, peer_id);
         owned.deinit(self.allocator);
     };
@@ -2118,14 +2118,14 @@ fn schedulePeerReqResp(
     if (!svc.isPeerConnected(peer_id)) return false;
 
     const marked = markPendingPeerReqResp(self, io, peer_id) catch |err| {
-        log.warn("Failed to track pending peer req/resp work for {s}: {}", .{ peer_id, err });
+        log.warn("Failed to track pending peer req/resp work for {f}: {}", .{ networking.fmtPeerId(peer_id), err });
         return false;
     };
     if (!marked) return false;
 
     const owned_peer_id = self.allocator.dupe(u8, peer_id) catch |err| {
         clearPendingPeerReqResp(self, io, peer_id);
-        log.warn("Failed to allocate peer req/resp job for {s}: {}", .{ peer_id, err });
+        log.warn("Failed to allocate peer req/resp job for {f}: {}", .{ networking.fmtPeerId(peer_id), err });
         return false;
     };
 
@@ -4230,7 +4230,7 @@ fn handleReqRespMaintenanceFailure(
             .disconnected => reason = .score_too_low,
             .banned => {
                 pm.banPeer(peer_id, .medium, now_ms) catch |ban_err| {
-                    log.warn("Failed to ban peer {s} after req/resp failure: {}", .{ peer_id, ban_err });
+                    log.warn("Failed to ban peer {f} after req/resp failure: {}", .{ networking.fmtPeerId(peer_id), ban_err });
                 };
                 reason = .banned;
             },

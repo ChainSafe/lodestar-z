@@ -721,6 +721,7 @@ const StartupPrep = struct {
 const NodeMetricsPrep = struct {
     beacon_metrics: *BeaconMetrics,
     state_transition_metrics: *StateTransitionMetrics,
+    metrics_surface: *MetricsSurface,
     metrics_runtime: ?metrics_server.Runtime,
 
     fn deinit(self: *NodeMetricsPrep, allocator: Allocator) void {
@@ -728,6 +729,7 @@ const NodeMetricsPrep = struct {
         allocator.destroy(self.beacon_metrics);
         self.state_transition_metrics.deinit();
         allocator.destroy(self.state_transition_metrics);
+        allocator.destroy(self.metrics_surface);
     }
 };
 
@@ -1003,7 +1005,9 @@ fn prepareNodeMetrics(io: Io, allocator: Allocator, inputs: *const ResolvedRunIn
     state_transition_metrics.* = StateTransitionMetrics.initNoop();
     errdefer state_transition_metrics.deinit();
 
-    var metrics_surface = MetricsSurface{
+    const metrics_surface = try allocator.create(MetricsSurface);
+    errdefer allocator.destroy(metrics_surface);
+    metrics_surface.* = MetricsSurface{
         .beacon = beacon_metrics,
         .state_transition = state_transition_metrics,
     };
@@ -1014,7 +1018,7 @@ fn prepareNodeMetrics(io: Io, allocator: Allocator, inputs: *const ResolvedRunIn
         metrics_runtime = metrics_server.Runtime.init(
             io,
             allocator,
-            &metrics_surface,
+            metrics_surface,
             .{
                 .address = inputs.metrics_address,
                 .port = inputs.metrics_port,
@@ -1025,6 +1029,7 @@ fn prepareNodeMetrics(io: Io, allocator: Allocator, inputs: *const ResolvedRunIn
     metrics.* = .{
         .beacon_metrics = beacon_metrics,
         .state_transition_metrics = state_transition_metrics,
+        .metrics_surface = metrics_surface,
         .metrics_runtime = metrics_runtime,
     };
 }

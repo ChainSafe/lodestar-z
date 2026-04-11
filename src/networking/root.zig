@@ -87,8 +87,10 @@ pub const GossipCallbacks = gossip_context.GossipCallbacks;
 // Peer management (v2).
 pub const peer_info = @import("peer_info.zig");
 pub const peer_db = @import("peer_db.zig");
+pub const peer_id_fmt = @import("peer_id_fmt.zig");
 pub const peer_manager = @import("peer_manager.zig");
 pub const peer_scoring = @import("peer_scoring.zig");
+pub const fmtPeerId = peer_id_fmt.fmtPeerId;
 pub const PeerInfo = peer_info.PeerInfo;
 pub const PeerDB = peer_db.PeerDB;
 pub const PeerManager = peer_manager.PeerManager;

@@ -36,6 +36,7 @@ const SYNC_COMMITTEE_SUBNET_COUNT = peer_info_mod.SYNC_COMMITTEE_SUBNET_COUNT;
 const peer_db_mod = @import("peer_db.zig");
 const PeerDB = peer_db_mod.PeerDB;
 const ConnectedPeer = peer_db_mod.ConnectedPeer;
+const fmtPeerId = @import("peer_id_fmt.zig").fmtPeerId;
 
 const log = std.log.scoped(.peer_manager);
 
@@ -530,8 +531,8 @@ pub const PeerManager = struct {
         now_ms: u64,
     ) !void {
         try self.db.banPeer(peer_id, duration, now_ms);
-        log.info("peer banned {s} duration={d}s", .{
-            peer_id,
+        log.info("peer banned {f} duration={d}s", .{
+            fmtPeerId(peer_id),
             duration.seconds(),
         });
     }
@@ -788,14 +789,14 @@ pub const PeerManager = struct {
             return try self.allocator.dupe(u8, candidate.peer_id);
         }
         log.info(
-            "No data column peer selected: connected={d} eligible_range={d} unknown={d} zero_overlap={d} missing_columns={d} preferred={s} slots={d}..{d}",
+            "No data column peer selected: connected={d} eligible_range={d} unknown={d} zero_overlap={d} missing_columns={d} preferred={f} slots={d}..{d}",
             .{
                 connected_count,
                 eligible_range_count,
                 unknown_count,
                 zero_overlap_count,
                 missing_columns.len,
-                preferred_peer_id orelse "(none)",
+                fmtPeerId(preferred_peer_id),
                 start_slot,
                 end_slot,
             },

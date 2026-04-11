@@ -350,8 +350,8 @@ pub fn handlePeerGoodbye(node: *BeaconNode, peer_id: []const u8, reason: u64) vo
     if (node.peer_manager) |pm| {
         pm.onPeerGoodbye(peer_id, @enumFromInt(reason), wallTimeMs(node.io));
     }
-    scoped_log.info("Peer sent Goodbye {s} reason={s} ({d})", .{
-        peer_id,
+    scoped_log.info("Peer sent Goodbye {f} reason={s} ({d})", .{
+        networking.fmtPeerId(peer_id),
         goodbyeReasonName(reason),
         reason,
     });
