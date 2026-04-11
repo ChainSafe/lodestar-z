@@ -70,68 +70,28 @@ pub const AnyBeaconState = union(ForkSeq) {
     pub fn deserialize(allocator: Allocator, pool: *Node.Pool, fork_seq: ForkSeq, bytes: []const u8) !AnyBeaconState {
         return switch (fork_seq) {
             .phase0 => .{
-                .phase0 = try deserializeTreeViewWithValueFallback(
-                    allocator,
-                    pool,
-                    ct.phase0.BeaconState,
-                    bytes,
-                ),
+                .phase0 = try ct.phase0.BeaconState.TreeView.deserialize(allocator, pool, bytes),
             },
             .altair => .{
-                .altair = try deserializeTreeViewWithValueFallback(
-                    allocator,
-                    pool,
-                    ct.altair.BeaconState,
-                    bytes,
-                ),
+                .altair = try ct.altair.BeaconState.TreeView.deserialize(allocator, pool, bytes),
             },
             .bellatrix => .{
-                .bellatrix = try deserializeTreeViewWithValueFallback(
-                    allocator,
-                    pool,
-                    ct.bellatrix.BeaconState,
-                    bytes,
-                ),
+                .bellatrix = try ct.bellatrix.BeaconState.TreeView.deserialize(allocator, pool, bytes),
             },
             .capella => .{
-                .capella = try deserializeTreeViewWithValueFallback(
-                    allocator,
-                    pool,
-                    ct.capella.BeaconState,
-                    bytes,
-                ),
+                .capella = try ct.capella.BeaconState.TreeView.deserialize(allocator, pool, bytes),
             },
             .deneb => .{
-                .deneb = try deserializeTreeViewWithValueFallback(
-                    allocator,
-                    pool,
-                    ct.deneb.BeaconState,
-                    bytes,
-                ),
+                .deneb = try ct.deneb.BeaconState.TreeView.deserialize(allocator, pool, bytes),
             },
             .electra => .{
-                .electra = try deserializeTreeViewWithValueFallback(
-                    allocator,
-                    pool,
-                    ct.electra.BeaconState,
-                    bytes,
-                ),
+                .electra = try ct.electra.BeaconState.TreeView.deserialize(allocator, pool, bytes),
             },
             .fulu => .{
-                .fulu = try deserializeTreeViewWithValueFallback(
-                    allocator,
-                    pool,
-                    ct.fulu.BeaconState,
-                    bytes,
-                ),
+                .fulu = try ct.fulu.BeaconState.TreeView.deserialize(allocator, pool, bytes),
             },
             .gloas => .{
-                .gloas = try deserializeTreeViewWithValueFallback(
-                    allocator,
-                    pool,
-                    ct.gloas.BeaconState,
-                    bytes,
-                ),
+                .gloas = try ct.gloas.BeaconState.TreeView.deserialize(allocator, pool, bytes),
             },
         };
     }
@@ -1051,23 +1011,6 @@ pub const AnyBeaconState = union(ForkSeq) {
         };
     }
 };
-
-fn deserializeTreeViewWithValueFallback(
-    allocator: Allocator,
-    pool: *Node.Pool,
-    comptime ST: type,
-    bytes: []const u8,
-) !*ST.TreeView {
-    return ST.TreeView.deserialize(allocator, pool, bytes) catch |err| switch (err) {
-        error.offsetOutOfRange, error.offsetNotIncreasing => blk: {
-            var value = ST.default_value;
-            defer ST.deinit(allocator, &value);
-            try ST.deserializeFromBytes(allocator, bytes, &value);
-            break :blk try ST.TreeView.fromValue(allocator, pool, &value);
-        },
-        else => return err,
-    };
-}
 
 test "electra - sanity" {
     const allocator = std.testing.allocator;
