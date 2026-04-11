@@ -339,6 +339,7 @@ pub const BeaconNode = struct {
     pub const InitConfig = struct {
         options: NodeOptions,
         db_path: ?[]const u8 = null,
+        pubkey_cache_path: ?[]const u8 = null,
         node_identity: NodeIdentity,
         jwt_secret: ?[32]u8 = null,
         bootstrap_peers: []const []const u8 = &.{},
@@ -362,6 +363,7 @@ pub const BeaconNode = struct {
         api_node_identity: ?*api_mod.types.NodeIdentity,
         event_bus: ?*api_mod.EventBus,
         metrics: ?*BeaconMetrics = null,
+        pubkey_cache_path: ?[]const u8 = null,
         bootstrap_peers: []const []const u8 = &.{},
         discovery_bootnodes: []const []const u8 = &.{},
         identify_agent_version: ?[]const u8 = null,
@@ -540,6 +542,9 @@ pub const BeaconNode = struct {
 
     // Genesis validators root — set by initFromGenesis, used for fork digest computation.
     genesis_validators_root: [32]u8 = [_]u8{0} ** 32,
+
+    // Best-effort warm-start cache path for validator pubkeys.
+    pubkey_cache_path: ?[]const u8 = null,
 
     /// Earliest slot this node can honestly serve over req/resp.
     earliest_available_slot: u64 = 0,

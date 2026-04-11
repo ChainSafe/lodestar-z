@@ -11,6 +11,7 @@ pub const ExecutionPayloadHeader = @import("./execution_payload.zig").ExecutionP
 pub const any_beacon_state = @import("./any_beacon_state.zig");
 pub const AnyBeaconState = any_beacon_state.AnyBeaconState;
 pub const readSlotFromAnyBeaconStateBytes = any_beacon_state.readSlotFromAnyBeaconStateBytes;
+pub const readGenesisValidatorsRootFromAnyBeaconStateBytes = any_beacon_state.readGenesisValidatorsRootFromAnyBeaconStateBytes;
 pub const AnySignedBeaconBlock = @import("./any_beacon_block.zig").AnySignedBeaconBlock;
 pub const AnyBeaconBlock = @import("./any_beacon_block.zig").AnyBeaconBlock;
 pub const AnyBeaconBlockBody = @import("./any_beacon_block.zig").AnyBeaconBlockBody;

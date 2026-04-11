@@ -969,6 +969,28 @@ pub fn build(b: *std.Build) void {
     const tls_run_exe_node = b.step("run", "Run the lodestar-z beacon node");
     tls_run_exe_node.dependOn(&run_exe_node.step);
 
+    const module_pkix_dump = b.createModule(.{
+        .root_source_file = b.path("src/tools/pkix_dump.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    module_pkix_dump.addImport("config", module_config);
+    module_pkix_dump.addImport("state_transition", module_state_transition);
+    module_pkix_dump.addImport("fork_types", module_fork_types);
+    module_pkix_dump.addImport("persistent_merkle_tree", module_persistent_merkle_tree);
+
+    const exe_pkix_dump = b.addExecutable(.{
+        .name = "pkix-dump",
+        .root_module = module_pkix_dump,
+    });
+    const run_exe_pkix_dump = b.addRunArtifact(exe_pkix_dump);
+    if (b.args) |args| run_exe_pkix_dump.addArgs(args);
+    const tls_run_exe_pkix_dump = b.step(
+        "pkix-dump",
+        "Generate a PKIX validator pubkey cache from a beacon state",
+    );
+    tls_run_exe_pkix_dump.dependOn(&run_exe_pkix_dump.step);
+
     // node module imports
     module_node.addImport("consensus_types", module_consensus_types);
     module_node.addImport("preset", module_preset);

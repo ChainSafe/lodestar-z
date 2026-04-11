@@ -55,6 +55,7 @@ pub const PreparedRuntime = struct {
         return .{
             .options = options,
             .db_path = self.paths.beacon_db,
+            .pubkey_cache_path = self.paths.pubkey_cache,
             .node_identity = node_identity,
             .jwt_secret = self.jwt_secret,
             .bootstrap_peers = bootstrap_peers,
@@ -333,6 +334,7 @@ test "PreparedRuntime.takeInitConfig transfers bootnode ownership" {
             .enr = try allocator.dupe(u8, "/tmp/root/beacon-node/network/enr"),
             .peer_db = try allocator.dupe(u8, "/tmp/root/beacon-node/network/peer-db"),
             .state_cache = try allocator.dupe(u8, "/tmp/root/beacon-node/state-cache"),
+            .pubkey_cache = try allocator.dupe(u8, "/tmp/root/pkix"),
             .jwt_secret = try allocator.dupe(u8, "/tmp/root/jwt.hex"),
             .log_file = try allocator.dupe(u8, "/tmp/root/logs/lodestar-z.log"),
         },
@@ -359,6 +361,7 @@ test "PreparedRuntime.takeInitConfig transfers bootnode ownership" {
     try std.testing.expectEqual(@as(usize, 0), prepared.discovery_bootnodes.len);
     try std.testing.expectEqual(@as(usize, 1), init_config.bootstrap_peers.len);
     try std.testing.expectEqual(@as(usize, 1), init_config.discovery_bootnodes.len);
+    try std.testing.expectEqualStrings("/tmp/root/pkix", init_config.pubkey_cache_path.?);
     try std.testing.expectEqualStrings("enr:bootstrap", init_config.bootstrap_peers[0]);
     try std.testing.expectEqualStrings(networking.bootnodes.mainnet[0].enr, init_config.discovery_bootnodes[0]);
 }

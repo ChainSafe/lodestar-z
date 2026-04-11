@@ -345,6 +345,36 @@ fn runBootstrappedNode(
         .p2p_host = p2p_bind_host,
     };
 
+    const WatchCtx = struct {
+        io: Io,
+        node: *BeaconNode,
+        done: std.atomic.Value(bool),
+    };
+
+    var watch_ctx = WatchCtx{
+        .io = io,
+        .node = node,
+        .done = std.atomic.Value(bool).init(false),
+    };
+    var watcher = try io.concurrent(struct {
+        fn run(ctx: *WatchCtx) anyerror!void {
+            while (!ctx.done.load(.acquire)) {
+                if (ShutdownHandler.shouldStop()) {
+                    ctx.node.requestShutdown();
+                    return;
+                }
+                try ctx.io.sleep(.{ .nanoseconds = 100 * std.time.ns_per_ms }, .real);
+            }
+        }
+    }.run, .{&watch_ctx});
+    defer {
+        watch_ctx.done.store(true, .release);
+        _ = watcher.cancel(io) catch |err| switch (err) {
+            error.Canceled => {},
+            else => std.log.debug("beacon shutdown watcher exited during shutdown: {s}", .{@errorName(err)}),
+        };
+    }
+
     if (metrics_runtime) |runtime| {
         try runtime.start();
     }
@@ -1006,10 +1036,39 @@ fn prepareNodeBuilder(io: Io, allocator: Allocator, beacon_config: *const Beacon
     return node_builder;
 }
 
+fn readGenesisValidatorsRootFromStateBytes(bytes: []const u8) [32]u8 {
+    std.debug.assert(bytes.len >= 40);
+    var genesis_validators_root: [32]u8 = undefined;
+    @memcpy(&genesis_validators_root, bytes[8..40]);
+    return genesis_validators_root;
+}
+
+fn maybeLoadPubkeyCache(io: Io, node_builder: *BeaconNode.Builder, state_bytes: []const u8) void {
+    const cache_path = node_builder.pubkey_cache_path orelse return;
+    const genesis_validators_root = readGenesisValidatorsRootFromStateBytes(state_bytes);
+    const loaded = node_builder.sharedStateGraph().validator_pubkeys.tryLoadOpaqueCache(
+        io,
+        cache_path,
+        genesis_validators_root,
+    ) catch |err| {
+        std.log.warn("Failed to load validator pubkey cache '{s}': {}", .{ cache_path, err });
+        return;
+    };
+
+    if (loaded) {
+        std.log.info("Loaded validator pubkey cache from {s}", .{cache_path});
+    }
+}
+
 fn runFromPrepared(io: Io, allocator: Allocator, inputs: *const ResolvedRunInputs, handles: *PreparedHandles) !void {
     scoped_log.info("beacon node bootstrap initialized", .{});
     scoped_log.info("  peer-id:    {s}", .{handles.node_builder.nodeIdentity().peer_id});
     scoped_log.info("  enr:        {s}", .{handles.node_builder.nodeIdentity().enr});
+    if (handles.node_builder.pubkey_cache_path) |cache_path| {
+        scoped_log.debug("validator pubkey cache path: {s}", .{cache_path});
+    } else {
+        scoped_log.debug("validator pubkey cache path: <none>", .{});
+    }
 
     const force_checkpoint = inputs.force_checkpoint_sync;
 
@@ -1029,6 +1088,7 @@ fn runFromPrepared(io: Io, allocator: Allocator, inputs: *const ResolvedRunInput
         scoped_log.info("deserializing checkpoint state ({d} bytes, fork={s})...", .{
             fetched.state_bytes.len, fetched.fork_name,
         });
+        maybeLoadPubkeyCache(io, handles.node_builder, fetched.state_bytes);
 
         const cp_state = state_transition.deserializePublishedState(
             allocator,
@@ -1077,6 +1137,7 @@ fn runFromPrepared(io: Io, allocator: Allocator, inputs: *const ResolvedRunInput
             handles.node_builder.sharedStateGraph().validator_pubkeys,
             io,
             state_path,
+            handles.node_builder.pubkey_cache_path,
             handles.state_transition_metrics,
         ) catch |err| {
             scoped_log.err("Failed to load checkpoint state '{s}': {}", .{ state_path, err });
@@ -1118,6 +1179,7 @@ fn runFromPrepared(io: Io, allocator: Allocator, inputs: *const ResolvedRunInput
             std.process.exit(1);
         };
         defer allocator.free(state_bytes);
+        maybeLoadPubkeyCache(io, handles.node_builder, state_bytes);
 
         const db_state = state_transition.deserializePublishedState(
             allocator,

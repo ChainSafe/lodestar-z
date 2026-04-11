@@ -20,6 +20,13 @@ pub fn readSlotFromAnyBeaconStateBytes(bytes: []const u8) u64 {
     return std.mem.readInt(u64, bytes[40..][0..8], .little);
 }
 
+pub fn readGenesisValidatorsRootFromAnyBeaconStateBytes(bytes: []const u8) [32]u8 {
+    std.debug.assert(bytes.len >= 40);
+    var genesis_validators_root: [32]u8 = undefined;
+    @memcpy(&genesis_validators_root, bytes[8..40]);
+    return genesis_validators_root;
+}
+
 /// wrapper for all AnyBeaconState types across forks so that we don't have to do switch/case for all methods
 pub const AnyBeaconState = union(ForkSeq) {
     phase0: *ct.phase0.BeaconState.TreeView,

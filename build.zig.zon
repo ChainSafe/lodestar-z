@@ -30,8 +30,8 @@
             .hash = "libp2p-0.1.0-Sj0LiEUrCQA4vXL40G2UGUC8nqdBObl0aNOAq-AkqO8L",
         },
         .c_kzg = .{
-            .url = "git+https://github.com/chainsafe/c-kzg-zig#ccbfc5c8efdd2bafa97490f54bb6ade79ceb003d",
-            .hash = "c_kzg_zig-0.1.0-w0aWQ7ZRAADhahQdDtFVrZsSXHCIy652A_W1Vet6CQEs",
+            .url = "git+https://github.com/chainsafe/c-kzg-zig?ref=main#fea105ab430f9fbbe6863e58e1f3d4a363e010c5",
+            .hash = "c_kzg_zig-0.1.0-w0aWQ3VSAAAD3ZaxJlY69avJGtJqqUqwcBrYZ74Xzv9c",
         },
         .metrics = .{
             .url = "git+https://github.com/lodekeeper-z/metrics.zig?ref=chore/zig-0.16#c1ee3ae72de68dfd65784837603c6197462cb362",

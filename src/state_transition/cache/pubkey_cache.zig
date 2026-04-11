@@ -3,6 +3,9 @@ const bls = @import("bls");
 const types = @import("consensus_types");
 const Validator = types.phase0.Validator.Type;
 
+const max_parallel_workers: usize = 8;
+const min_parallel_batch_size: usize = 2048;
+
 /// Map from pubkey to validator index
 pub const PubkeyIndexMap = std.AutoHashMap([48]u8, u64);
 
@@ -56,6 +59,26 @@ fn uncompressPubkeys(
     }
 }
 
+const UncompressTask = struct {
+    start_index: usize,
+    end_index_exclusive: usize,
+    validators: []const Validator,
+    index_to_pubkey_items: []bls.PublicKey,
+    uncompress_error: *std.atomic.Value(bool),
+};
+
+fn uncompressPubkeysTask(task: UncompressTask) void {
+    std.debug.assert(task.end_index_exclusive <= task.index_to_pubkey_items.len);
+    for (task.start_index..task.end_index_exclusive) |i| {
+        if (task.uncompress_error.load(.monotonic)) return;
+        const pubkey = &task.validators[i].pubkey;
+        task.index_to_pubkey_items[i] = bls.PublicKey.uncompress(pubkey) catch {
+            task.uncompress_error.store(true, .release);
+            return;
+        };
+    }
+}
+
 /// Populate `pubkey_to_index` and `index_to_pubkey` caches from validators list.
 /// Spawns a temporary thread pool to parallelize the work.
 pub fn syncPubkeysParallel(
@@ -64,7 +87,7 @@ pub fn syncPubkeysParallel(
     pubkey_to_index: *PubkeyIndexMap,
     index_to_pubkey: *Index2PubkeyCache,
 ) !void {
-    _ = allocator; // TODO: re-use with parallel implementation
+    _ = allocator;
     const old_len = index_to_pubkey.items.len;
     if (pubkey_to_index.count() != old_len) {
         return error.InconsistentCache;
@@ -80,21 +103,59 @@ pub fn syncPubkeysParallel(
 
     try pubkey_to_index.ensureTotalCapacity(@intCast(new_count));
 
-    // TODO: Re-parallelize with std.Io batch API when 0.16 patterns are settled.
-    // For now, run serially.
     var uncompress_error = std.atomic.Value(bool).init(false);
+    const new_items = new_count - old_len;
+    const cpu_count = std.Thread.getCpuCount() catch 4;
+    const worker_count = @max(
+        @min(@min(new_items, cpu_count), max_parallel_workers),
+        1,
+    );
 
-    var i = old_len;
-    const batch_size = 1000;
-
-    while (i < new_count) : (i += batch_size) {
+    if (worker_count == 1 or new_items < min_parallel_batch_size) {
         uncompressPubkeys(
-            i,
-            @min(i + batch_size, new_count),
+            old_len,
+            new_count,
             validators,
             index_to_pubkey,
             &uncompress_error,
         );
+    } else {
+        var tasks: [max_parallel_workers]UncompressTask = undefined;
+        var threads: [max_parallel_workers - 1]std.Thread = undefined;
+        const batch_size = new_items / worker_count;
+        const remainder = new_items % worker_count;
+
+        var task_start = old_len;
+        for (0..worker_count) |worker_index| {
+            const extra: usize = if (worker_index < remainder) 1 else 0;
+            const task_end = task_start + batch_size + extra;
+            tasks[worker_index] = .{
+                .start_index = task_start,
+                .end_index_exclusive = task_end,
+                .validators = validators,
+                .index_to_pubkey_items = index_to_pubkey.items,
+                .uncompress_error = &uncompress_error,
+            };
+            task_start = task_end;
+        }
+
+        var started_threads: usize = 0;
+        var next_inline_task: usize = worker_count - 1;
+        for (0..worker_count - 1) |worker_index| {
+            threads[started_threads] = std.Thread.spawn(.{}, uncompressPubkeysTask, .{tasks[worker_index]}) catch {
+                next_inline_task = worker_index;
+                break;
+            };
+            started_threads += 1;
+        }
+
+        for (next_inline_task..worker_count) |worker_index| {
+            uncompressPubkeysTask(tasks[worker_index]);
+        }
+
+        for (threads[0..started_threads]) |*thread| {
+            thread.join();
+        }
     }
 
     if (uncompress_error.load(.acquire)) {
@@ -241,4 +302,33 @@ test "syncPubkeys detects inconsistent cache" {
     validators[0] = std.mem.zeroes(Validator);
 
     try testing.expectError(error.InconsistentCache, syncPubkeys(&validators, &pubkey_to_index, &index_to_pubkey));
+}
+
+test "syncPubkeysParallel populates both caches" {
+    const allocator = testing.allocator;
+    const count = 8;
+
+    var pubkeys: [count]types.primitive.BLSPubkey.Type = undefined;
+    try interop.interopPubkeysCached(count, &pubkeys);
+
+    var validators: [count]Validator = undefined;
+    for (0..count) |i| {
+        validators[i] = std.mem.zeroes(Validator);
+        validators[i].pubkey = pubkeys[i];
+    }
+
+    var pubkey_to_index = PubkeyIndexMap.init(allocator);
+    defer pubkey_to_index.deinit();
+    var index_to_pubkey = Index2PubkeyCache.init(allocator);
+    defer index_to_pubkey.deinit();
+
+    try syncPubkeysParallel(allocator, &validators, &pubkey_to_index, &index_to_pubkey);
+
+    try testing.expectEqual(@as(usize, count), index_to_pubkey.items.len);
+    try testing.expectEqual(@as(u32, count), pubkey_to_index.count());
+
+    for (0..count) |i| {
+        const idx = pubkey_to_index.get(pubkeys[i]).?;
+        try testing.expectEqual(@as(u64, i), idx);
+    }
 }

@@ -150,10 +150,17 @@ pub fn init(allocator: Allocator, io: std.Io, beacon_config: *const BeaconConfig
     var owned_execution_runtime: ?*ExecutionRuntime = execution_runtime;
     errdefer if (owned_execution_runtime) |runtime| runtime.deinit();
 
+    var owned_pubkey_cache_path = if (init_config.pubkey_cache_path) |path|
+        try allocator.dupe(u8, path)
+    else
+        null;
+    errdefer if (owned_pubkey_cache_path) |path| allocator.free(path);
+
     const node = try allocator.create(BeaconNode);
     node.* = .{
         .allocator = allocator,
         .config = beacon_config,
+        .pubkey_cache_path = owned_pubkey_cache_path,
         .bootstrap_peers = init_config.bootstrap_peers,
         .discovery_bootnodes = init_config.discovery_bootnodes,
         .identify_agent_version = init_config.identify_agent_version,
@@ -174,6 +181,7 @@ pub fn init(allocator: Allocator, io: std.Io, beacon_config: *const BeaconConfig
         .unknown_block_sync = UnknownBlockSync.init(allocator),
         .unknown_chain_sync = UnknownChainSync.init(allocator),
     };
+    owned_pubkey_cache_path = null;
 
     node.validator_monitor = chain_runtime.chain.validator_monitor;
     if (chain_runtime.chain.validator_monitor != null) {
@@ -291,11 +299,19 @@ pub fn initBuilder(
     var owned_execution_runtime: ?*ExecutionRuntime = execution_runtime;
     errdefer if (owned_execution_runtime) |runtime| runtime.deinit();
 
+    var owned_pubkey_cache_path = if (init_config.pubkey_cache_path) |path|
+        try allocator.dupe(u8, path)
+    else
+        null;
+    errdefer if (owned_pubkey_cache_path) |path| allocator.free(path);
+
     owns_node_identity = false;
     owned_api_node_identity = null;
     owned_execution_runtime = null;
     owns_runtime_builder = false;
 
+    const pubkey_cache_path = owned_pubkey_cache_path;
+    owned_pubkey_cache_path = null;
     return .{
         .allocator = allocator,
         .io = io,
@@ -310,6 +326,7 @@ pub fn initBuilder(
         .api_node_identity = api_node_identity,
         .event_bus = event_bus_ptr,
         .metrics = init_config.metrics,
+        .pubkey_cache_path = pubkey_cache_path,
         .bootstrap_peers = init_config.bootstrap_peers,
         .discovery_bootnodes = init_config.discovery_bootnodes,
         .identify_agent_version = init_config.identify_agent_version,
@@ -328,6 +345,7 @@ pub fn deinitBuilder(self: *BeaconNodeBuilder) void {
     self.gossip_bls_thread_pool.deinit();
     self.block_bls_thread_pool.deinit();
     self.runtime_builder.deinit();
+    if (self.pubkey_cache_path) |path| self.allocator.free(path);
 
     self.finished = true;
 }
@@ -345,6 +363,7 @@ fn finishBuilder(
     node.* = .{
         .allocator = allocator,
         .config = self.config,
+        .pubkey_cache_path = self.pubkey_cache_path,
         .bootstrap_peers = self.bootstrap_peers,
         .discovery_bootnodes = self.discovery_bootnodes,
         .identify_agent_version = self.identify_agent_version,
@@ -388,6 +407,7 @@ fn finishBuilder(
     self.api_context = null;
     self.api_node_identity = null;
     self.event_bus = null;
+    self.pubkey_cache_path = null;
     self.finished = true;
 
     node.applyBootstrapOutcome(finished_runtime.outcome);
@@ -475,6 +495,21 @@ pub fn deinit(self: *BeaconNode) void {
 
     self.gossip_bls_thread_pool.deinit();
     self.block_bls_thread_pool.deinit();
+    if (self.pubkey_cache_path) |path| {
+        if (!std.mem.eql(u8, self.genesis_validators_root[0..], ZERO_HASH[0..])) {
+            self.chain_runtime.shared_state_graph.validator_pubkeys.saveOpaqueCache(
+                self.io,
+                path,
+                self.genesis_validators_root,
+            ) catch |err| {
+                log.logger(.node).warn("failed to save validator pubkey cache", .{
+                    .path = path,
+                    .err = err,
+                });
+            };
+        }
+        allocator.free(path);
+    }
     self.chain_runtime.deinit();
 
     allocator.destroy(self);

@@ -19,6 +19,13 @@ const StateTransitionMetrics = state_transition.metrics.StateTransitionMetrics;
 const Node = @import("persistent_merkle_tree").Node;
 const BeaconConfig = @import("config").BeaconConfig;
 
+fn readGenesisValidatorsRootFromStateBytes(bytes: []const u8) [32]u8 {
+    std.debug.assert(bytes.len >= 40);
+    var genesis_validators_root: [32]u8 = undefined;
+    @memcpy(&genesis_validators_root, bytes[8..40]);
+    return genesis_validators_root;
+}
+
 /// Generate a synthetic genesis state with `validator_count` validators.
 ///
 /// Uses TestCachedBeaconState (electra, active-preset chain config) for a
@@ -81,6 +88,7 @@ pub fn loadGenesisFromFile(
     shared_pubkeys: *SharedValidatorPubkeys,
     io: Io,
     path: []const u8,
+    pubkey_cache_path: ?[]const u8,
     st_metrics: *StateTransitionMetrics,
 ) !*CachedBeaconState {
     // Open the file.
@@ -98,6 +106,14 @@ pub fn loadGenesisFromFile(
 
     const n = try file.readPositionalAll(io, buf, 0);
     if (n != size) return error.ShortRead;
+
+    if (pubkey_cache_path) |cache_path| {
+        const genesis_validators_root = readGenesisValidatorsRootFromStateBytes(buf);
+        const loaded = try shared_pubkeys.tryLoadOpaqueCache(io, cache_path, genesis_validators_root);
+        if (loaded) {
+            std.log.info("Loaded validator pubkey cache from {s}", .{cache_path});
+        }
+    }
 
     // Deserialize into a CachedBeaconState.
     return deserializePublishedState(allocator, pool, config, shared_pubkeys, buf, st_metrics);
