@@ -36,6 +36,7 @@ const testing = std.testing;
 const constants = @import("constants");
 const DOMAIN_BEACON_PROPOSER = constants.DOMAIN_BEACON_PROPOSER;
 const DOMAIN_BEACON_ATTESTER = constants.DOMAIN_BEACON_ATTESTER;
+const DOMAIN_VOLUNTARY_EXIT = constants.DOMAIN_VOLUNTARY_EXIT;
 
 test "computeDomain - domain type is first 4 bytes" {
     const fork_version = [4]u8{ 0x01, 0x00, 0x00, 0x00 };
@@ -44,17 +45,7 @@ test "computeDomain - domain type is first 4 bytes" {
 
     try computeDomain(DOMAIN_VOLUNTARY_EXIT, fork_version, genesis_root, &domain);
 
-    // First 4 bytes should be the domain type
-    try testing.expectEqualSlices(u8, &domain_type, domain[0..4]);
-    // Remaining 28 bytes should be from fork data root (non-zero due to hashing)
-    var all_zero = true;
-    for (domain[4..32]) |b| {
-        if (b != 0) {
-            all_zero = false;
-            break;
-        }
-    }
-    try testing.expect(!all_zero);
+    try testing.expectEqualSlices(u8, &DOMAIN_VOLUNTARY_EXIT, domain[0..4]);
 }
 
 test "computeDomain - different domain types produce different domains" {
