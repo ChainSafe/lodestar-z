@@ -32,8 +32,6 @@ pub fn computeForkDataRoot(current_version: Version, genesis_validators_root: Ro
     try types.phase0.ForkData.hashTreeRoot(&fork_data, out);
 }
 
-// ──── Tests ────
-
 const testing = std.testing;
 
 test "computeDomain - domain type is first 4 bytes" {
