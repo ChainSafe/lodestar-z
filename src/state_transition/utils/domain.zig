@@ -78,24 +78,15 @@ test "computeDomain - different fork versions produce different domains" {
     try testing.expect(!std.mem.eql(u8, domain_a[4..32], domain_b[4..32]));
 }
 
-test "forkVersion - before fork epoch returns previous version" {
+test "forkVersion - given epoch returns correct version" {
     const fork: Fork = .{
         .previous_version = [4]u8{ 0x01, 0x00, 0x00, 0x00 },
         .current_version = [4]u8{ 0x02, 0x00, 0x00, 0x00 },
         .epoch = 100,
     };
-    try testing.expectEqualSlices(u8, &[4]u8{ 0x01, 0x00, 0x00, 0x00 }, &forkVersion(fork, 50));
-    try testing.expectEqualSlices(u8, &[4]u8{ 0x01, 0x00, 0x00, 0x00 }, &forkVersion(fork, 99));
-}
-
-test "forkVersion - at or after fork epoch returns current version" {
-    const fork: Fork = .{
-        .previous_version = [4]u8{ 0x01, 0x00, 0x00, 0x00 },
-        .current_version = [4]u8{ 0x02, 0x00, 0x00, 0x00 },
-        .epoch = 100,
-    };
-    try testing.expectEqualSlices(u8, &[4]u8{ 0x02, 0x00, 0x00, 0x00 }, &forkVersion(fork, 100));
-    try testing.expectEqualSlices(u8, &[4]u8{ 0x02, 0x00, 0x00, 0x00 }, &forkVersion(fork, 200));
+    try testing.expectEqualSlices(u8, &fork.previous_version, &forkVersion(fork, 99));
+    try testing.expectEqualSlices(u8, &fork.current_version, &forkVersion(fork, 100));
+    try testing.expectEqualSlices(u8, &fork.current_version, &forkVersion(fork, 200));
 }
 
 test "computeForkDataRoot - deterministic" {
