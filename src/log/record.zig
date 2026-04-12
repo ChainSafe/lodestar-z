@@ -320,6 +320,67 @@ pub fn assertAppend(comptime T: type) void {
     }
 }
 
+// ────────────────────── Type-Erased Interfaces ──────────────────────
+
+/// Type-erased filter interface. Wraps any concrete filter via `.any()`.
+pub const AnyFilter = struct {
+    ptr: *anyopaque,
+    enabled_fn: *const fn (*anyopaque, Level, []const u8) FilterResult,
+    matches_fn: *const fn (*anyopaque, *const Record) FilterResult,
+
+    pub inline fn enabled(self: AnyFilter, level: Level, scope_name: []const u8) FilterResult {
+        return self.enabled_fn(self.ptr, level, scope_name);
+    }
+
+    pub inline fn matches(self: AnyFilter, record: *const Record) FilterResult {
+        return self.matches_fn(self.ptr, record);
+    }
+};
+
+/// Type-erased diagnostic interface. Wraps any concrete diagnostic via `.any()`.
+pub const AnyDiagnostic = struct {
+    ptr: *anyopaque,
+    enrich_fn: *const fn (*anyopaque, *Record) void,
+
+    pub inline fn enrich(self: AnyDiagnostic, record: *Record) void {
+        self.enrich_fn(self.ptr, record);
+    }
+};
+
+/// Type-erased appender interface. Wraps any concrete appender via `.any()`.
+pub const AnyAppend = struct {
+    ptr: *anyopaque,
+    append_fn: *const fn (*anyopaque, *const Record) void,
+    flush_fn: *const fn (*anyopaque) void,
+    deinit_fn: ?*const fn (*anyopaque) void = null,
+
+    pub inline fn append(self: AnyAppend, record: *const Record) void {
+        self.append_fn(self.ptr, record);
+    }
+
+    pub inline fn flush(self: AnyAppend) void {
+        self.flush_fn(self.ptr);
+    }
+
+    pub fn deinit(self: AnyAppend) void {
+        if (self.deinit_fn) |f| f(self.ptr);
+    }
+
+    /// No-op appender that discards all records.
+    pub fn noop() AnyAppend {
+        const S = struct {
+            fn noopAppend(_: *anyopaque, _: *const Record) void {}
+            fn noopFlush(_: *anyopaque) void {}
+            var sentinel: u8 = 0;
+        };
+        return .{
+            .ptr = @ptrCast(&S.sentinel),
+            .append_fn = S.noopAppend,
+            .flush_fn = S.noopFlush,
+        };
+    }
+};
+
 // ──────────────────────────── Tests ────────────────────────────
 
 test "scopeName" {
@@ -335,17 +396,23 @@ test "asText returns padded names" {
     try std.testing.expectEqualStrings("debug", asText(.debug));
 }
 
-test "parseLevel" {
-    try std.testing.expectEqual(Level.err, parseLevel("error").?);
-    try std.testing.expectEqual(Level.warn, parseLevel("warn").?);
-    try std.testing.expectEqual(Level.info, parseLevel("info").?);
-    try std.testing.expectEqual(Level.debug, parseLevel("debug").?);
-    try std.testing.expectEqual(Level.err, parseLevel("ERROR").?);
-    try std.testing.expectEqual(Level.err, parseLevel("err").?);
-    try std.testing.expectEqual(Level.warn, parseLevel("warning").?);
-    try std.testing.expect(parseLevel("") == null);
-    try std.testing.expect(parseLevel("verbose") == null);
-    try std.testing.expect(parseLevel("toolongstring") == null);
+test "parseLevel (table-driven)" {
+    const Case = struct { input: []const u8, expected: ?Level };
+    const cases = [_]Case{
+        .{ .input = "error", .expected = .err },
+        .{ .input = "err", .expected = .err },
+        .{ .input = "ERROR", .expected = .err },
+        .{ .input = "warn", .expected = .warn },
+        .{ .input = "warning", .expected = .warn },
+        .{ .input = "info", .expected = .info },
+        .{ .input = "debug", .expected = .debug },
+        .{ .input = "", .expected = null },
+        .{ .input = "verbose", .expected = null },
+        .{ .input = "toolongstring", .expected = null },
+    };
+    for (cases) |c| {
+        try std.testing.expectEqual(c.expected, parseLevel(c.input));
+    }
 }
 
 test "Attr convenience constructors" {
@@ -480,19 +547,145 @@ test "isAppend accepts valid Append and rejects non-Append" {
     try std.testing.expect(!isAppend(NotAFilter));
 }
 
-test "FilterResult combine semantics" {
-    try std.testing.expectEqual(FilterResult.reject, FilterResult.reject.combine(.accept));
-    try std.testing.expectEqual(FilterResult.reject, FilterResult.accept.combine(.reject));
-    try std.testing.expectEqual(FilterResult.reject, FilterResult.reject.combine(.neutral));
-    try std.testing.expectEqual(FilterResult.reject, FilterResult.neutral.combine(.reject));
-    try std.testing.expectEqual(FilterResult.accept, FilterResult.accept.combine(.neutral));
-    try std.testing.expectEqual(FilterResult.accept, FilterResult.neutral.combine(.accept));
-    try std.testing.expectEqual(FilterResult.accept, FilterResult.accept.combine(.accept));
-    try std.testing.expectEqual(FilterResult.neutral, FilterResult.neutral.combine(.neutral));
+test "FilterResult combine semantics (table-driven)" {
+    const Case = struct { a: FilterResult, b: FilterResult, expected: FilterResult };
+    const cases = [_]Case{
+        .{ .a = .reject, .b = .accept, .expected = .reject },
+        .{ .a = .accept, .b = .reject, .expected = .reject },
+        .{ .a = .reject, .b = .neutral, .expected = .reject },
+        .{ .a = .neutral, .b = .reject, .expected = .reject },
+        .{ .a = .accept, .b = .neutral, .expected = .accept },
+        .{ .a = .neutral, .b = .accept, .expected = .accept },
+        .{ .a = .accept, .b = .accept, .expected = .accept },
+        .{ .a = .neutral, .b = .neutral, .expected = .neutral },
+    };
+    for (cases) |c| {
+        try std.testing.expectEqual(c.expected, c.a.combine(c.b));
+    }
 }
 
 test "FilterResult shouldProceed" {
     try std.testing.expect(FilterResult.accept.shouldProceed());
     try std.testing.expect(FilterResult.neutral.shouldProceed());
     try std.testing.expect(!FilterResult.reject.shouldProceed());
+}
+
+test "AnyFilter delegates enabled and matches" {
+    var mock = MockFilter{};
+    const any_filter = AnyFilter{
+        .ptr = @ptrCast(&mock),
+        .enabled_fn = struct {
+            fn f(ptr: *anyopaque, level: Level, scope_name: []const u8) FilterResult {
+                const s: *const MockFilter = @ptrCast(@alignCast(ptr));
+                return s.enabled(level, scope_name);
+            }
+        }.f,
+        .matches_fn = struct {
+            fn f(ptr: *anyopaque, record: *const Record) FilterResult {
+                const s: *const MockFilter = @ptrCast(@alignCast(ptr));
+                return s.matches(record);
+            }
+        }.f,
+    };
+
+    try std.testing.expectEqual(FilterResult.accept, any_filter.enabled(.info, "test"));
+    var record = Record{ .timestamp_us = 0, .level = .info, .scope_name = "test", .message = "m" };
+    try std.testing.expectEqual(FilterResult.neutral, any_filter.matches(&record));
+}
+
+test "AnyDiagnostic delegates enrich" {
+    const Diag = struct {
+        called: bool = false,
+        pub fn enrich(self: *@This(), record: *Record) void {
+            _ = record;
+            self.called = true;
+        }
+    };
+
+    var diag = Diag{};
+    const any_diag = AnyDiagnostic{
+        .ptr = @ptrCast(&diag),
+        .enrich_fn = struct {
+            fn f(ptr: *anyopaque, record: *Record) void {
+                const s: *Diag = @ptrCast(@alignCast(ptr));
+                s.enrich(record);
+            }
+        }.f,
+    };
+
+    var record = Record{ .timestamp_us = 0, .level = .info, .scope_name = "test", .message = "m" };
+    any_diag.enrich(&record);
+    try std.testing.expect(diag.called);
+}
+
+test "AnyAppend delegates append, flush, deinit" {
+    const App = struct {
+        append_count: usize = 0,
+        flushed: bool = false,
+        deinited: bool = false,
+
+        pub fn append(self: *@This(), _: *const Record) void {
+            self.append_count += 1;
+        }
+        pub fn flush(self: *@This()) void {
+            self.flushed = true;
+        }
+        pub fn deinitFn(self: *@This()) void {
+            self.deinited = true;
+        }
+    };
+
+    var app = App{};
+    const any_app = AnyAppend{
+        .ptr = @ptrCast(&app),
+        .append_fn = struct {
+            fn f(ptr: *anyopaque, record: *const Record) void {
+                const s: *App = @ptrCast(@alignCast(ptr));
+                s.append(record);
+            }
+        }.f,
+        .flush_fn = struct {
+            fn f(ptr: *anyopaque) void {
+                const s: *App = @ptrCast(@alignCast(ptr));
+                s.flush();
+            }
+        }.f,
+        .deinit_fn = struct {
+            fn f(ptr: *anyopaque) void {
+                const s: *App = @ptrCast(@alignCast(ptr));
+                s.deinitFn();
+            }
+        }.f,
+    };
+
+    var record = Record{ .timestamp_us = 0, .level = .info, .scope_name = "test", .message = "m" };
+    any_app.append(&record);
+    try std.testing.expectEqual(@as(usize, 1), app.append_count);
+    any_app.flush();
+    try std.testing.expect(app.flushed);
+    any_app.deinit();
+    try std.testing.expect(app.deinited);
+}
+
+test "AnyAppend.noop does not crash" {
+    const noop_app = AnyAppend.noop();
+    var record = Record{ .timestamp_us = 0, .level = .info, .scope_name = "test", .message = "m" };
+    noop_app.append(&record);
+    noop_app.flush();
+    noop_app.deinit(); // deinit_fn is null, should not crash
+}
+
+test "AnyAppend with null deinit_fn" {
+    const any_app = AnyAppend{
+        .ptr = @ptrCast(&(struct {
+            var s: u8 = 0;
+        }).s),
+        .append_fn = struct {
+            fn f(_: *anyopaque, _: *const Record) void {}
+        }.f,
+        .flush_fn = struct {
+            fn f(_: *anyopaque) void {}
+        }.f,
+    };
+    any_app.deinit(); // should be safe with null deinit_fn
 }

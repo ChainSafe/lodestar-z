@@ -1,7 +1,7 @@
 //! Pipeline orchestration: Dispatch, Dispatcher, and Logger.
 //!
-//! Dispatch(Filters, Diagnostics, Appends) — single pipeline stage (all comptime).
-//! Dispatcher(Dispatches) — fan-out to N dispatch pipelines.
+//! Dispatch — single pipeline stage (runtime-configurable).
+//! Dispatcher — fan-out to N dispatch pipelines.
 //! AnyDispatcher — the ONLY type-erasure boundary (3 fn pointers).
 //! Logger(max_attrs) — user-facing frontend.
 
@@ -10,148 +10,161 @@ const rec = @import("record.zig");
 const Record = rec.Record;
 const Attr = rec.Attr;
 const FilterResult = rec.FilterResult;
+const AnyFilter = rec.AnyFilter;
+const AnyDiagnostic = rec.AnyDiagnostic;
+const AnyAppend = rec.AnyAppend;
+
+// ──────────────────────── Bounds ────────────────────────
+
+pub const max_filters = 8;
+pub const max_diagnostics = 4;
+pub const max_appenders = 8;
+pub const max_dispatches = 8;
 
 // ──────────────────────── Dispatch ────────────────────────
 
-/// Comptime-generic dispatch pipeline.
+/// Runtime-configurable dispatch pipeline.
 ///
 /// Pipeline order (aligned with logforth):
 ///   1. Diagnostic enrichment (before filtering).
-///   2. Filter gate — fold matches() with FilterResult semantics.
+///   2. Filter gate — first non-neutral result wins (short-circuit).
 ///   3. Append fan-out — each appender owns its Layout.
-pub fn Dispatch(
-    comptime Filters: type,
-    comptime Diagnostics: type,
-    comptime Appends: type,
-) type {
-    comptime {
-        for (@typeInfo(Filters).@"struct".fields) |f| {
-            rec.assertFilter(f.type);
+pub const Dispatch = struct {
+    const Self = @This();
+
+    filters: std.BoundedArray(AnyFilter, max_filters) = .{},
+    diagnostics: std.BoundedArray(AnyDiagnostic, max_diagnostics) = .{},
+    appenders: std.BoundedArray(AnyAppend, max_appenders) = .{},
+
+    pub fn init() Dispatch {
+        return .{};
+    }
+
+    pub fn addFilter(self: *Self, filter: AnyFilter) void {
+        self.filters.append(filter) catch {};
+    }
+
+    pub fn addDiagnostic(self: *Self, diagnostic: AnyDiagnostic) void {
+        self.diagnostics.append(diagnostic) catch {};
+    }
+
+    pub fn addAppend(self: *Self, appender: AnyAppend) void {
+        self.appenders.append(appender) catch {};
+    }
+
+    /// Fast pre-check: first non-neutral result wins (short-circuit).
+    pub fn enabled(self: *const Self, level: std.log.Level, scope_name: []const u8) FilterResult {
+        for (self.filters.constSlice()) |f| {
+            const result = f.enabled(level, scope_name);
+            if (result != .neutral) return result;
         }
-        for (@typeInfo(Diagnostics).@"struct".fields) |f| {
-            rec.assertDiagnostic(f.type);
+        return .neutral;
+    }
+
+    /// Process a record through the pipeline: diagnose → filter → append.
+    pub fn process(self: *Self, record: *Record) void {
+        for (self.diagnostics.constSlice()) |d| {
+            d.enrich(record);
         }
-        const append_fields = @typeInfo(Appends).@"struct".fields;
-        if (append_fields.len == 0) {
-            @compileError("Dispatch requires at least one appender (logforth invariant)");
-        }
-        for (append_fields) |f| {
-            rec.assertAppend(f.type);
+
+        const should_proceed = blk: {
+            for (self.filters.constSlice()) |f| {
+                const result = f.matches(record);
+                if (result != .neutral) break :blk result.shouldProceed();
+            }
+            break :blk true; // all neutral → proceed
+        };
+        if (!should_proceed) return;
+
+        for (self.appenders.constSlice()) |a| {
+            a.append(record);
         }
     }
 
-    return struct {
-        const Self = @This();
-
-        filters: Filters,
-        diagnostics: Diagnostics,
-        appenders: Appends,
-
-        /// Fast pre-check: first non-neutral result wins (short-circuit).
-        pub fn enabled(self: *Self, level: std.log.Level, scope_name: []const u8) FilterResult {
-            inline for (@typeInfo(Filters).@"struct".fields) |f| {
-                const result = @field(self.filters, f.name).enabled(level, scope_name);
-                if (result != .neutral) return result;
-            }
-            return .neutral;
+    /// Flush all appenders.
+    pub fn flush(self: *Self) void {
+        for (self.appenders.constSlice()) |a| {
+            a.flush();
         }
+    }
 
-        /// Process a record through the pipeline: diagnose → filter → append.
-        pub fn process(self: *Self, record: *Record) void {
-            inline for (@typeInfo(Diagnostics).@"struct".fields) |f| {
-                @field(self.diagnostics, f.name).enrich(record);
-            }
-
-            const should_proceed = blk: {
-                inline for (@typeInfo(Filters).@"struct".fields) |f| {
-                    const result = @field(self.filters, f.name).matches(record);
-                    if (result != .neutral) break :blk result.shouldProceed();
-                }
-                break :blk true; // all neutral → proceed
-            };
-            if (!should_proceed) return;
-
-            inline for (@typeInfo(Appends).@"struct".fields) |f| {
-                @field(self.appenders, f.name).append(record);
-            }
+    /// Deinit all appenders that have a deinit_fn.
+    pub fn deinit(self: *Self) void {
+        for (self.appenders.constSlice()) |a| {
+            a.deinit();
         }
-
-        /// Flush all appenders.
-        pub fn flush(self: *Self) void {
-            inline for (@typeInfo(Appends).@"struct".fields) |f| {
-                @field(self.appenders, f.name).flush();
-            }
-        }
-    };
-}
+    }
+};
 
 // ─────────────────────── Dispatcher ─────────────────────────
 
-/// Comptime fan-out dispatcher. Routes records to N dispatch pipelines.
-pub fn Dispatcher(comptime Dispatches: type) type {
-    comptime {
-        for (@typeInfo(Dispatches).@"struct".fields) |f| {
-            if (!@hasDecl(f.type, "process"))
-                @compileError(@typeName(f.type) ++ " does not have a process() method");
-            if (!@hasDecl(f.type, "flush"))
-                @compileError(@typeName(f.type) ++ " does not have a flush() method");
-            if (!@hasDecl(f.type, "enabled"))
-                @compileError(@typeName(f.type) ++ " does not have an enabled() method");
+/// Runtime fan-out dispatcher. Routes records to N dispatch pipelines.
+pub const Dispatcher = struct {
+    const Self = @This();
+
+    dispatches: std.BoundedArray(Dispatch, max_dispatches) = .{},
+
+    pub fn init() Dispatcher {
+        return .{};
+    }
+
+    pub fn addDispatch(self: *Self, dispatch: Dispatch) void {
+        self.dispatches.append(dispatch) catch {};
+    }
+
+    /// Fast pre-check: returns true if ANY dispatch pipeline might accept.
+    pub fn enabled(self: *Self, level: std.log.Level, scope_name: []const u8) bool {
+        for (self.dispatches.constSlice()) |*d| {
+            if (d.enabled(level, scope_name).shouldProceed()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// Fan-out: emit to all dispatch pipelines.
+    pub fn emit(self: *Self, record: *Record) void {
+        const saved_diag_len = record.diag_attrs.len;
+        for (self.dispatches.slice()) |*d| {
+            record.diag_attrs.len = saved_diag_len;
+            d.process(record);
         }
     }
 
-    return struct {
-        const Self = @This();
-
-        dispatches: Dispatches,
-
-        /// Fast pre-check: returns true if ANY dispatch pipeline might accept.
-        pub fn enabled(self: *Self, level: std.log.Level, scope_name: []const u8) bool {
-            inline for (@typeInfo(Dispatches).@"struct".fields) |f| {
-                if (@field(self.dispatches, f.name).enabled(level, scope_name).shouldProceed()) {
-                    return true;
-                }
-            }
-            return false;
+    /// Flush all dispatch pipelines (and their appenders).
+    pub fn flush(self: *Self) void {
+        for (self.dispatches.slice()) |*d| {
+            d.flush();
         }
+    }
 
-        /// Fan-out: inline for over comptime-known dispatch tuple.
-        pub fn emit(self: *Self, record: *Record) void {
-            const saved_diag_len = record.diag_attrs.len;
-            inline for (@typeInfo(Dispatches).@"struct".fields) |f| {
-                record.diag_attrs.len = saved_diag_len;
-                @field(self.dispatches, f.name).process(record);
-            }
+    /// Deinit all dispatch pipelines (and their appenders).
+    pub fn deinit(self: *Self) void {
+        for (self.dispatches.slice()) |*d| {
+            d.deinit();
         }
+    }
 
-        /// Flush all dispatch pipelines (and their appenders).
-        pub fn flush(self: *Self) void {
-            inline for (@typeInfo(Dispatches).@"struct".fields) |f| {
-                @field(self.dispatches, f.name).flush();
-            }
-        }
+    /// Type-erase to AnyDispatcher for use in Logger.
+    pub fn any(self: *Self) AnyDispatcher {
+        return AnyDispatcher.init(self, emitThunk, flushThunk, enabledThunk);
+    }
 
-        /// Type-erase to AnyDispatcher for use in Logger.
-        pub fn any(self: *Self) AnyDispatcher {
-            return AnyDispatcher.init(self, emitThunk, flushThunk, enabledThunk);
-        }
+    fn emitThunk(ptr: *anyopaque, record: *Record) void {
+        const self: *Self = @ptrCast(@alignCast(ptr));
+        self.emit(record);
+    }
 
-        fn emitThunk(ptr: *anyopaque, record: *Record) void {
-            const self: *Self = @ptrCast(@alignCast(ptr));
-            self.emit(record);
-        }
+    fn flushThunk(ptr: *anyopaque) void {
+        const self: *Self = @ptrCast(@alignCast(ptr));
+        self.flush();
+    }
 
-        fn flushThunk(ptr: *anyopaque) void {
-            const self: *Self = @ptrCast(@alignCast(ptr));
-            self.flush();
-        }
-
-        fn enabledThunk(ptr: *anyopaque, level: std.log.Level, scope_name: []const u8) bool {
-            const self: *Self = @ptrCast(@alignCast(ptr));
-            return self.enabled(level, scope_name);
-        }
-    };
-}
+    fn enabledThunk(ptr: *anyopaque, level: std.log.Level, scope_name: []const u8) bool {
+        const self: *Self = @ptrCast(@alignCast(ptr));
+        return self.enabled(level, scope_name);
+    }
+};
 
 // ─────────────────────── AnyDispatcher ─────────────────────────
 
@@ -298,18 +311,12 @@ test "Dispatch processes record through pipeline" {
     const layout = @import("layout.zig");
     const append_mod = @import("append.zig");
 
-    const TA = append_mod.TestingAppend(layout.TextLayout);
-    const MyDispatch = Dispatch(
-        struct { filter_mod.LevelFilter },
-        struct {},
-        struct { TA },
-    );
+    var level_filter = filter_mod.LevelFilter.init(.info);
+    var ta = append_mod.TestingAppend(layout.TextLayout).init(std.testing.allocator, layout.TextLayout{});
 
-    var d = MyDispatch{
-        .filters = .{filter_mod.LevelFilter.init(.info)},
-        .diagnostics = .{},
-        .appenders = .{TA.init(std.testing.allocator, layout.TextLayout{})},
-    };
+    var d = Dispatch.init();
+    d.addFilter(level_filter.any());
+    d.addAppend(ta.any());
 
     var record = Record{
         .timestamp_us = 1234,
@@ -320,8 +327,8 @@ test "Dispatch processes record through pipeline" {
     record.pushEventAttr(Attr.uint("slot", 42));
 
     d.process(&record);
-    try std.testing.expect(d.appenders[0].contains("block applied"));
-    try std.testing.expect(d.appenders[0].contains("slot=42"));
+    try std.testing.expect(ta.contains("block applied"));
+    try std.testing.expect(ta.contains("slot=42"));
 }
 
 test "Dispatch rejects below-level records" {
@@ -329,18 +336,12 @@ test "Dispatch rejects below-level records" {
     const layout = @import("layout.zig");
     const append_mod = @import("append.zig");
 
-    const TA = append_mod.TestingAppend(layout.TextLayout);
-    const MyDispatch = Dispatch(
-        struct { filter_mod.LevelFilter },
-        struct {},
-        struct { TA },
-    );
+    var level_filter = filter_mod.LevelFilter.init(.warn);
+    var ta = append_mod.TestingAppend(layout.TextLayout).init(std.testing.allocator, layout.TextLayout{});
 
-    var d = MyDispatch{
-        .filters = .{filter_mod.LevelFilter.init(.warn)},
-        .diagnostics = .{},
-        .appenders = .{TA.init(std.testing.allocator, layout.TextLayout{})},
-    };
+    var d = Dispatch.init();
+    d.addFilter(level_filter.any());
+    d.addAppend(ta.any());
 
     var record = Record{
         .timestamp_us = 1234,
@@ -350,25 +351,17 @@ test "Dispatch rejects below-level records" {
     };
 
     d.process(&record);
-    try std.testing.expectEqualStrings("", d.appenders[0].getOutput());
+    try std.testing.expectEqualStrings("", ta.getOutput());
 }
 
 test "Dispatch with no filters accepts all" {
     const layout = @import("layout.zig");
     const append_mod = @import("append.zig");
 
-    const TA = append_mod.TestingAppend(layout.TextLayout);
-    const NoFilterDispatch = Dispatch(
-        struct {},
-        struct {},
-        struct { TA },
-    );
+    var ta = append_mod.TestingAppend(layout.TextLayout).init(std.testing.allocator, layout.TextLayout{});
 
-    var d = NoFilterDispatch{
-        .filters = .{},
-        .diagnostics = .{},
-        .appenders = .{TA.init(std.testing.allocator, layout.TextLayout{})},
-    };
+    var d = Dispatch.init();
+    d.addAppend(ta.any());
 
     var record = Record{
         .timestamp_us = 0,
@@ -378,26 +371,19 @@ test "Dispatch with no filters accepts all" {
     };
 
     d.process(&record);
-    try std.testing.expect(d.appenders[0].contains("accepted"));
+    try std.testing.expect(ta.contains("accepted"));
 }
 
 test "Dispatch with multiple appenders fans out" {
     const layout = @import("layout.zig");
     const append_mod = @import("append.zig");
 
-    const TextTA = append_mod.TestingAppend(layout.TextLayout);
-    const JsonTA = append_mod.TestingAppend(layout.JsonLayout);
-    const MyDispatch = Dispatch(
-        struct {},
-        struct {},
-        struct { TextTA, JsonTA },
-    );
+    var text_ta = append_mod.TestingAppend(layout.TextLayout).init(std.testing.allocator, layout.TextLayout{});
+    var json_ta = append_mod.TestingAppend(layout.JsonLayout).init(std.testing.allocator, layout.JsonLayout{});
 
-    var d = MyDispatch{
-        .filters = .{},
-        .diagnostics = .{},
-        .appenders = .{ TextTA.init(std.testing.allocator, layout.TextLayout{}), JsonTA.init(std.testing.allocator, layout.JsonLayout{}) },
-    };
+    var d = Dispatch.init();
+    d.addAppend(text_ta.any());
+    d.addAppend(json_ta.any());
 
     var record = Record{
         .timestamp_us = 1000,
@@ -407,27 +393,17 @@ test "Dispatch with multiple appenders fans out" {
     };
 
     d.process(&record);
-    try std.testing.expect(d.appenders[0].contains("multi"));
-    try std.testing.expect(d.appenders[1].contains("\"msg\":\"multi\""));
+    try std.testing.expect(text_ta.contains("multi"));
+    try std.testing.expect(json_ta.contains("\"msg\":\"multi\""));
 }
 
 test "Dispatch enabled fast-path" {
     const filter_mod = @import("filter.zig");
-    const layout = @import("layout.zig");
-    const append_mod = @import("append.zig");
 
-    const TA = append_mod.TestingAppend(layout.TextLayout);
-    const MyDispatch = Dispatch(
-        struct { filter_mod.LevelFilter },
-        struct {},
-        struct { TA },
-    );
+    var level_filter = filter_mod.LevelFilter.init(.warn);
 
-    var d = MyDispatch{
-        .filters = .{filter_mod.LevelFilter.init(.warn)},
-        .diagnostics = .{},
-        .appenders = .{TA.init(std.testing.allocator, layout.TextLayout{})},
-    };
+    var d = Dispatch.init();
+    d.addFilter(level_filter.any());
 
     try std.testing.expect(d.enabled(.err, "").shouldProceed());
     try std.testing.expect(!d.enabled(.info, "").shouldProceed());
@@ -438,34 +414,49 @@ test "Dispatch diagnostics run before filters" {
     const layout = @import("layout.zig");
     const append_mod = @import("append.zig");
 
+    // A filter that accepts only if a "network" diagnostic attr is present.
     const DiagAttrFilter = struct {
-        pub fn enabled(_: @This(), _: std.log.Level, _: []const u8) FilterResult {
+        const Self = @This();
+
+        pub fn enabled(_: Self, _: std.log.Level, _: []const u8) FilterResult {
             return .neutral;
         }
-        pub fn matches(_: @This(), record: *const Record) FilterResult {
+        pub fn matches(_: Self, record: *const Record) FilterResult {
             for (record.diag_attrs.constSlice()) |attr| {
                 if (std.mem.eql(u8, attr.key, "network")) return .accept;
             }
             return .reject;
         }
+        pub fn any(self: *Self) AnyFilter {
+            return .{
+                .ptr = @ptrCast(self),
+                .enabled_fn = struct {
+                    fn f(ptr: *anyopaque, level: std.log.Level, scope_name: []const u8) FilterResult {
+                        const s: *const Self = @ptrCast(@alignCast(ptr));
+                        return s.enabled(level, scope_name);
+                    }
+                }.f,
+                .matches_fn = struct {
+                    fn f(ptr: *anyopaque, record: *const Record) FilterResult {
+                        const s: *const Self = @ptrCast(@alignCast(ptr));
+                        return s.matches(record);
+                    }
+                }.f,
+            };
+        }
     };
 
     const SD = diagnostic.StaticDiagnostic(4);
-    const TA = append_mod.TestingAppend(layout.TextLayout);
-    const MyDispatch = Dispatch(
-        struct { DiagAttrFilter },
-        struct { SD },
-        struct { TA },
-    );
-
     var diag = SD.init();
     diag.add(Attr.str("network", "mainnet"));
 
-    var d = MyDispatch{
-        .filters = .{DiagAttrFilter{}},
-        .diagnostics = .{diag},
-        .appenders = .{TA.init(std.testing.allocator, layout.TextLayout{})},
-    };
+    var diag_filter = DiagAttrFilter{};
+    var ta = append_mod.TestingAppend(layout.TextLayout).init(std.testing.allocator, layout.TextLayout{});
+
+    var d = Dispatch.init();
+    d.addDiagnostic(diag.any());
+    d.addFilter(diag_filter.any());
+    d.addAppend(ta.any());
 
     var record = Record{
         .timestamp_us = 0,
@@ -475,7 +466,7 @@ test "Dispatch diagnostics run before filters" {
     };
 
     d.process(&record);
-    try std.testing.expect(d.appenders[0].contains("diag-before-filter test"));
+    try std.testing.expect(ta.contains("diag-before-filter test"));
 }
 
 test "AnyDispatcher emit calls through function pointer" {
@@ -534,29 +525,22 @@ test "Dispatcher fans out to multiple dispatches" {
     const layout = @import("layout.zig");
     const append_mod = @import("append.zig");
 
-    const TA = append_mod.TestingAppend(layout.TextLayout);
-    const D = Dispatch(
-        struct { filter_mod.LevelFilter },
-        struct {},
-        struct { TA },
-    );
+    var info_filter = filter_mod.LevelFilter.init(.info);
+    var err_filter = filter_mod.LevelFilter.init(.err);
+    var ta1 = append_mod.TestingAppend(layout.TextLayout).init(std.testing.allocator, layout.TextLayout{});
+    var ta2 = append_mod.TestingAppend(layout.TextLayout).init(std.testing.allocator, layout.TextLayout{});
 
-    const MyDispatcher = Dispatcher(struct { D, D });
+    var d1 = Dispatch.init();
+    d1.addFilter(info_filter.any());
+    d1.addAppend(ta1.any());
 
-    var dispatcher = MyDispatcher{
-        .dispatches = .{
-            D{
-                .filters = .{filter_mod.LevelFilter.init(.info)},
-                .diagnostics = .{},
-                .appenders = .{TA.init(std.testing.allocator, layout.TextLayout{})},
-            },
-            D{
-                .filters = .{filter_mod.LevelFilter.init(.err)},
-                .diagnostics = .{},
-                .appenders = .{TA.init(std.testing.allocator, layout.TextLayout{})},
-            },
-        },
-    };
+    var d2 = Dispatch.init();
+    d2.addFilter(err_filter.any());
+    d2.addAppend(ta2.any());
+
+    var dispatcher = Dispatcher.init();
+    dispatcher.addDispatch(d1);
+    dispatcher.addDispatch(d2);
 
     var record = Record{
         .timestamp_us = 1000,
@@ -568,38 +552,25 @@ test "Dispatcher fans out to multiple dispatches" {
 
     dispatcher.emit(&record);
 
-    try std.testing.expect(dispatcher.dispatches[0].appenders[0].contains("hello"));
-    try std.testing.expectEqualStrings("", dispatcher.dispatches[1].appenders[0].getOutput());
+    try std.testing.expect(ta1.contains("hello"));
+    try std.testing.expectEqualStrings("", ta2.getOutput());
 }
 
 test "Dispatcher enabled returns true if any pipeline accepts" {
     const filter_mod = @import("filter.zig");
-    const layout = @import("layout.zig");
-    const append_mod = @import("append.zig");
 
-    const TA = append_mod.TestingAppend(layout.TextLayout);
-    const D = Dispatch(
-        struct { filter_mod.LevelFilter },
-        struct {},
-        struct { TA },
-    );
+    var err_filter = filter_mod.LevelFilter.init(.err);
+    var debug_filter = filter_mod.LevelFilter.init(.debug);
 
-    const MyDispatcher = Dispatcher(struct { D, D });
+    var d1 = Dispatch.init();
+    d1.addFilter(err_filter.any());
 
-    var dispatcher = MyDispatcher{
-        .dispatches = .{
-            D{
-                .filters = .{filter_mod.LevelFilter.init(.err)},
-                .diagnostics = .{},
-                .appenders = .{TA.init(std.testing.allocator, layout.TextLayout{})},
-            },
-            D{
-                .filters = .{filter_mod.LevelFilter.init(.debug)},
-                .diagnostics = .{},
-                .appenders = .{TA.init(std.testing.allocator, layout.TextLayout{})},
-            },
-        },
-    };
+    var d2 = Dispatch.init();
+    d2.addFilter(debug_filter.any());
+
+    var dispatcher = Dispatcher.init();
+    dispatcher.addDispatch(d1);
+    dispatcher.addDispatch(d2);
 
     try std.testing.expect(dispatcher.enabled(.info, ""));
     try std.testing.expect(dispatcher.enabled(.err, ""));
@@ -610,24 +581,15 @@ test "AnyDispatcher type-erases Dispatcher" {
     const layout = @import("layout.zig");
     const append_mod = @import("append.zig");
 
-    const TA = append_mod.TestingAppend(layout.TextLayout);
-    const D = Dispatch(
-        struct { filter_mod.LevelFilter },
-        struct {},
-        struct { TA },
-    );
+    var debug_filter = filter_mod.LevelFilter.init(.debug);
+    var ta = append_mod.TestingAppend(layout.TextLayout).init(std.testing.allocator, layout.TextLayout{});
 
-    const MyDispatcher = Dispatcher(struct { D });
+    var d = Dispatch.init();
+    d.addFilter(debug_filter.any());
+    d.addAppend(ta.any());
 
-    var dispatcher = MyDispatcher{
-        .dispatches = .{
-            D{
-                .filters = .{filter_mod.LevelFilter.init(.debug)},
-                .diagnostics = .{},
-                .appenders = .{TA.init(std.testing.allocator, layout.TextLayout{})},
-            },
-        },
-    };
+    var dispatcher = Dispatcher.init();
+    dispatcher.addDispatch(d);
 
     var any_d = dispatcher.any();
 
@@ -641,7 +603,7 @@ test "AnyDispatcher type-erases Dispatcher" {
     };
 
     any_d.emit(&record);
-    try std.testing.expect(dispatcher.dispatches[0].appenders[0].contains("type erased"));
+    try std.testing.expect(ta.contains("type erased"));
 }
 
 test "AnyDispatcher noop" {
@@ -803,33 +765,25 @@ test "Dispatch fans out to sync and async appenders" {
     const append = @import("append.zig");
     const filter = @import("filter.zig");
 
-    const TA = append.TestingAppend(layout.TextLayout);
-    const AA = append.AsyncAppend(layout.JsonLayout);
-
-    const Pipeline = Dispatch(
-        struct { filter.LevelFilter },
-        struct {},
-        struct { TA, AA },
-    );
+    var debug_filter = filter.LevelFilter.init(.debug);
+    var text_ta = append.TestingAppend(layout.TextLayout).init(std.testing.allocator, layout.TextLayout{});
 
     var json_out = std.ArrayList(u8).init(std.testing.allocator);
     defer json_out.deinit();
 
-    var pipeline = Pipeline{
-        .filters = .{filter.LevelFilter.init(.debug)},
-        .diagnostics = .{},
-        .appenders = .{
-            TA.init(std.testing.allocator, layout.TextLayout{}),
-            try AA.init(
-                std.testing.allocator,
-                16,
-                append.FlushableWriter.noFlush(json_out.writer().any()),
-                layout.JsonLayout{},
-                .block,
-            ),
-        },
-    };
-    try pipeline.appenders[1].start();
+    var async_appender = try append.AsyncAppend(layout.JsonLayout).init(
+        std.testing.allocator,
+        16,
+        append.FlushableWriter.noFlush(json_out.writer().any()),
+        layout.JsonLayout{},
+        .block,
+    );
+    try async_appender.start();
+
+    var d = Dispatch.init();
+    d.addFilter(debug_filter.any());
+    d.addAppend(text_ta.any());
+    d.addAppend(async_appender.any());
 
     var record = Record{
         .timestamp_us = 1234,
@@ -839,15 +793,15 @@ test "Dispatch fans out to sync and async appenders" {
     };
     record.pushEventAttr(Attr.uint("slot", 42));
 
-    pipeline.process(&record);
+    d.process(&record);
 
     std.time.sleep(50_000_000);
 
     // Sync appender (TextLayout) got the message.
-    try std.testing.expect(pipeline.appenders[0].contains("fan-out test"));
-    try std.testing.expect(pipeline.appenders[0].contains("slot=42"));
+    try std.testing.expect(text_ta.contains("fan-out test"));
+    try std.testing.expect(text_ta.contains("slot=42"));
 
-    pipeline.appenders[1].deinit();
+    async_appender.deinit();
 
     // Async appender (JsonLayout) also got the message.
     const json_output = json_out.items;
@@ -861,52 +815,57 @@ test "Dispatcher routes scopes to different pipelines" {
     const layout = @import("layout.zig");
     const append = @import("append.zig");
 
-    const TA_Text = append.TestingAppend(layout.TextLayout);
-    const TA_Json = append.TestingAppend(layout.JsonLayout);
-
-    // Test-local scope whitelist filter: accepts only the configured scope, rejects others.
+    // Scope whitelist filter: accepts only the configured scope, rejects others.
     const ScopeWhitelist = struct {
+        const Self = @This();
+
         scope: []const u8,
 
-        pub fn enabled(self: @This(), _: std.log.Level, scope_name: []const u8) FilterResult {
+        pub fn enabled(self: Self, _: std.log.Level, scope_name: []const u8) FilterResult {
             return if (std.mem.eql(u8, scope_name, self.scope)) .accept else .reject;
         }
 
-        pub fn matches(self: @This(), record: *const Record) FilterResult {
+        pub fn matches(self: Self, record: *const Record) FilterResult {
             return self.enabled(record.level, record.scope_name);
+        }
+
+        pub fn any(self: *Self) AnyFilter {
+            return .{
+                .ptr = @ptrCast(self),
+                .enabled_fn = struct {
+                    fn f(ptr: *anyopaque, level: std.log.Level, scope_name: []const u8) FilterResult {
+                        const s: *const Self = @ptrCast(@alignCast(ptr));
+                        return s.enabled(level, scope_name);
+                    }
+                }.f,
+                .matches_fn = struct {
+                    fn f(ptr: *anyopaque, record: *const Record) FilterResult {
+                        const s: *const Self = @ptrCast(@alignCast(ptr));
+                        return s.matches(record);
+                    }
+                }.f,
+            };
         }
     };
 
-    // Pipeline 1: fork_choice scope only, TextLayout
-    const FcPipeline = Dispatch(
-        struct { ScopeWhitelist },
-        struct {},
-        struct { TA_Text },
-    );
+    var fc_filter = ScopeWhitelist{ .scope = rec.scopeName(.fork_choice) };
+    var ssz_filter = ScopeWhitelist{ .scope = rec.scopeName(.ssz) };
+    var text_ta = append.TestingAppend(layout.TextLayout).init(std.testing.allocator, layout.TextLayout{});
+    var json_ta = append.TestingAppend(layout.JsonLayout).init(std.testing.allocator, layout.JsonLayout{});
 
-    // Pipeline 2: ssz scope only, JsonLayout
-    const SszPipeline = Dispatch(
-        struct { ScopeWhitelist },
-        struct {},
-        struct { TA_Json },
-    );
+    // Pipeline 1: fork_choice scope → TextLayout
+    var d1 = Dispatch.init();
+    d1.addFilter(fc_filter.any());
+    d1.addAppend(text_ta.any());
 
-    const MultiDispatcher = Dispatcher(struct { FcPipeline, SszPipeline });
+    // Pipeline 2: ssz scope → JsonLayout
+    var d2 = Dispatch.init();
+    d2.addFilter(ssz_filter.any());
+    d2.addAppend(json_ta.any());
 
-    var dispatcher = MultiDispatcher{
-        .dispatches = .{
-            FcPipeline{
-                .filters = .{ScopeWhitelist{ .scope = rec.scopeName(.fork_choice) }},
-                .diagnostics = .{},
-                .appenders = .{TA_Text.init(std.testing.allocator, layout.TextLayout{})},
-            },
-            SszPipeline{
-                .filters = .{ScopeWhitelist{ .scope = rec.scopeName(.ssz) }},
-                .diagnostics = .{},
-                .appenders = .{TA_Json.init(std.testing.allocator, layout.JsonLayout{})},
-            },
-        },
-    };
+    var dispatcher = Dispatcher.init();
+    dispatcher.addDispatch(d1);
+    dispatcher.addDispatch(d2);
 
     // Emit fork_choice record.
     var fc_record = Record{
@@ -927,12 +886,12 @@ test "Dispatcher routes scopes to different pipelines" {
     dispatcher.emit(&ssz_record);
 
     // fork_choice pipeline got only fork_choice message (TextLayout).
-    try std.testing.expect(dispatcher.dispatches[0].appenders[0].contains("block applied"));
-    try std.testing.expect(!dispatcher.dispatches[0].appenders[0].contains("invalid encoding"));
+    try std.testing.expect(text_ta.contains("block applied"));
+    try std.testing.expect(!text_ta.contains("invalid encoding"));
 
     // ssz pipeline got only ssz message (JsonLayout).
-    try std.testing.expect(dispatcher.dispatches[1].appenders[0].contains("\"msg\":\"invalid encoding\""));
-    try std.testing.expect(!dispatcher.dispatches[1].appenders[0].contains("block applied"));
+    try std.testing.expect(json_ta.contains("\"msg\":\"invalid encoding\""));
+    try std.testing.expect(!json_ta.contains("block applied"));
 }
 
 // ──────── Integration: multi-thread concurrent emit ────────
@@ -942,37 +901,25 @@ test "Dispatcher handles concurrent multi-thread emit" {
     const append = @import("append.zig");
     const filter = @import("filter.zig");
 
-    const AA = append.AsyncAppend(layout.TextLayout);
-
-    const Pipeline = Dispatch(
-        struct { filter.LevelFilter },
-        struct {},
-        struct { AA },
-    );
-
     var out_list = std.ArrayList(u8).init(std.testing.allocator);
     defer out_list.deinit();
 
-    const PipelineDispatcher = Dispatcher(struct { Pipeline });
+    var debug_filter = filter.LevelFilter.init(.debug);
+    var async_appender = try append.AsyncAppend(layout.TextLayout).init(
+        std.testing.allocator,
+        64,
+        append.FlushableWriter.noFlush(out_list.writer().any()),
+        layout.TextLayout{},
+        .block,
+    );
+    try async_appender.start();
 
-    var dispatcher = PipelineDispatcher{
-        .dispatches = .{
-            Pipeline{
-                .filters = .{filter.LevelFilter.init(.debug)},
-                .diagnostics = .{},
-                .appenders = .{
-                    try AA.init(
-                        std.testing.allocator,
-                        64,
-                        append.FlushableWriter.noFlush(out_list.writer().any()),
-                        layout.TextLayout{},
-                        .block,
-                    ),
-                },
-            },
-        },
-    };
-    try dispatcher.dispatches[0].appenders[0].start();
+    var d = Dispatch.init();
+    d.addFilter(debug_filter.any());
+    d.addAppend(async_appender.any());
+
+    var dispatcher = Dispatcher.init();
+    dispatcher.addDispatch(d);
 
     const num_threads: usize = 4;
     const msgs_per_thread: usize = 50;
@@ -980,7 +927,7 @@ test "Dispatcher handles concurrent multi-thread emit" {
     var threads: [num_threads]std.Thread = undefined;
     for (&threads, 0..) |*t, tid| {
         t.* = try std.Thread.spawn(.{}, struct {
-            fn run(d: *PipelineDispatcher, thread_id: usize, count: usize) void {
+            fn run(disp: *Dispatcher, thread_id: usize, count: usize) void {
                 for (0..count) |i| {
                     var buf: [64]u8 = undefined;
                     const msg = std.fmt.bufPrint(&buf, "t{d}-m{d}", .{ thread_id, i }) catch "?";
@@ -990,7 +937,7 @@ test "Dispatcher handles concurrent multi-thread emit" {
                         .scope_name = rec.scopeName(.default),
                         .message = msg,
                     };
-                    d.emit(&record);
+                    disp.emit(&record);
                 }
             }
         }.run, .{ &dispatcher, tid, msgs_per_thread });
@@ -999,7 +946,7 @@ test "Dispatcher handles concurrent multi-thread emit" {
     for (&threads) |*t| t.join();
 
     std.time.sleep(100_000_000);
-    dispatcher.dispatches[0].appenders[0].deinit();
+    async_appender.deinit();
 
     const output = out_list.items;
     // Verify at least some messages from each thread arrived.
@@ -1019,27 +966,12 @@ test "EnvFilter integrated into Dispatch pipeline" {
     const append = @import("append.zig");
     const filter = @import("filter.zig");
 
-    // Parse "warn,fork_choice=debug" — scope-first semantics:
-    //   - debug from fork_choice: scope match → accept (override trumps base)
-    //   - info from default: no scope match → base level (warn) → reject
-    //   - warn from default: no scope match → base level (warn) → accept
-    //   - err from any: always above threshold → accept
-    const env_filter = filter.parse("warn,fork_choice=debug").?;
+    var env_filter = filter.parse("warn,fork_choice=debug").?;
+    var ta = append.TestingAppend(layout.TextLayout).init(std.testing.allocator, layout.TextLayout{});
 
-    const TA = append.TestingAppend(layout.TextLayout);
-
-    // EnvFilter is a SINGLE composite filter in the pipeline.
-    const Pipeline = Dispatch(
-        struct { filter.EnvFilter },
-        struct {},
-        struct { TA },
-    );
-
-    var pipeline = Pipeline{
-        .filters = .{env_filter},
-        .diagnostics = .{},
-        .appenders = .{TA.init(std.testing.allocator, layout.TextLayout{})},
-    };
+    var pipeline = Dispatch.init();
+    pipeline.addFilter(env_filter.any());
+    pipeline.addAppend(ta.any());
 
     // info from default scope → rejected (below warn threshold).
     var info_default = Record{
@@ -1049,7 +981,7 @@ test "EnvFilter integrated into Dispatch pipeline" {
         .message = "should be rejected",
     };
     pipeline.process(&info_default);
-    try std.testing.expect(!pipeline.appenders[0].contains("should be rejected"));
+    try std.testing.expect(!ta.contains("should be rejected"));
 
     // warn from default scope → accepted.
     var warn_default = Record{
@@ -1059,7 +991,7 @@ test "EnvFilter integrated into Dispatch pipeline" {
         .message = "warn passes",
     };
     pipeline.process(&warn_default);
-    try std.testing.expect(pipeline.appenders[0].contains("warn passes"));
+    try std.testing.expect(ta.contains("warn passes"));
 
     // debug from fork_choice → accepted (scope override trumps base level).
     var debug_fc = Record{
@@ -1069,7 +1001,7 @@ test "EnvFilter integrated into Dispatch pipeline" {
         .message = "fc debug passes",
     };
     pipeline.process(&debug_fc);
-    try std.testing.expect(pipeline.appenders[0].contains("fc debug passes"));
+    try std.testing.expect(ta.contains("fc debug passes"));
 
     // warn from fork_choice → accepted (above scope override threshold).
     var warn_fc = Record{
@@ -1079,7 +1011,7 @@ test "EnvFilter integrated into Dispatch pipeline" {
         .message = "fc warn passes",
     };
     pipeline.process(&warn_fc);
-    try std.testing.expect(pipeline.appenders[0].contains("fc warn passes"));
+    try std.testing.expect(ta.contains("fc warn passes"));
 
     // err from any scope → accepted (above all thresholds).
     var err_default = Record{
@@ -1089,7 +1021,7 @@ test "EnvFilter integrated into Dispatch pipeline" {
         .message = "error always passes",
     };
     pipeline.process(&err_default);
-    try std.testing.expect(pipeline.appenders[0].contains("error always passes"));
+    try std.testing.expect(ta.contains("error always passes"));
 }
 
 // ──────── Integration: short-circuit filter semantics ────────
@@ -1099,23 +1031,16 @@ test "Short-circuit: ScopeFilter accept overrides LevelFilter reject" {
     const append = @import("append.zig");
     const filter = @import("filter.zig");
 
-    // Pipeline: ScopeFilter first (fork_choice=debug), LevelFilter second (warn threshold).
-    // With short-circuit, ScopeFilter's accept on fork_choice prevents LevelFilter from rejecting.
-    const TA = append.TestingAppend(layout.TextLayout);
-    const Pipeline = Dispatch(
-        struct { filter.ScopeFilter, filter.LevelFilter },
-        struct {},
-        struct { TA },
-    );
-
     var scope_filter = filter.ScopeFilter.init();
     scope_filter.addOverride(rec.scopeName(.fork_choice), .debug);
 
-    var pipeline = Pipeline{
-        .filters = .{ scope_filter, filter.LevelFilter.init(.warn) },
-        .diagnostics = .{},
-        .appenders = .{TA.init(std.testing.allocator, layout.TextLayout{})},
-    };
+    var level_filter = filter.LevelFilter.init(.warn);
+    var ta = append.TestingAppend(layout.TextLayout).init(std.testing.allocator, layout.TextLayout{});
+
+    var pipeline = Dispatch.init();
+    pipeline.addFilter(scope_filter.any());
+    pipeline.addFilter(level_filter.any());
+    pipeline.addAppend(ta.any());
 
     // debug from fork_choice → ScopeFilter accepts (scope match) → short-circuits → passes
     var debug_fc = Record{
@@ -1125,7 +1050,7 @@ test "Short-circuit: ScopeFilter accept overrides LevelFilter reject" {
         .message = "scope override passes",
     };
     pipeline.process(&debug_fc);
-    try std.testing.expect(pipeline.appenders[0].contains("scope override passes"));
+    try std.testing.expect(ta.contains("scope override passes"));
 
     // debug from default → ScopeFilter neutral → LevelFilter rejects → blocked
     var debug_default = Record{
@@ -1135,7 +1060,7 @@ test "Short-circuit: ScopeFilter accept overrides LevelFilter reject" {
         .message = "should be blocked",
     };
     pipeline.process(&debug_default);
-    try std.testing.expect(!pipeline.appenders[0].contains("should be blocked"));
+    try std.testing.expect(!ta.contains("should be blocked"));
 
     // warn from default → ScopeFilter neutral → LevelFilter accepts → passes
     var warn_default = Record{
@@ -1145,7 +1070,7 @@ test "Short-circuit: ScopeFilter accept overrides LevelFilter reject" {
         .message = "warn passes base",
     };
     pipeline.process(&warn_default);
-    try std.testing.expect(pipeline.appenders[0].contains("warn passes base"));
+    try std.testing.expect(ta.contains("warn passes base"));
 
     // enabled() also short-circuits
     try std.testing.expect(pipeline.enabled(.debug, rec.scopeName(.fork_choice)).shouldProceed());

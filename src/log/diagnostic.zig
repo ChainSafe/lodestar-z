@@ -32,6 +32,19 @@ pub fn StaticDiagnostic(comptime max_attrs: usize) type {
                 record.pushDiagAttr(attr);
             }
         }
+
+        /// Type-erase to AnyDiagnostic. Caller must keep `self` alive.
+        pub fn any(self: *const Self) rec.AnyDiagnostic {
+            return .{
+                .ptr = @ptrCast(@constCast(self)),
+                .enrich_fn = struct {
+                    fn f(ptr: *anyopaque, record: *Record) void {
+                        const s: *const Self = @ptrCast(@alignCast(ptr));
+                        s.enrich(record);
+                    }
+                }.f,
+            };
+        }
     };
 }
 
@@ -62,6 +75,19 @@ pub fn ThreadLocalDiagnostic(comptime max_attrs: usize) type {
             for (tls_attrs.constSlice()) |attr| {
                 record.pushDiagAttr(attr);
             }
+        }
+
+        /// Type-erase to AnyDiagnostic. Caller must keep `self` alive.
+        pub fn any(self: *const Self) rec.AnyDiagnostic {
+            return .{
+                .ptr = @ptrCast(@constCast(self)),
+                .enrich_fn = struct {
+                    fn f(ptr: *anyopaque, record: *Record) void {
+                        const s: *const Self = @ptrCast(@alignCast(ptr));
+                        s.enrich(record);
+                    }
+                }.f,
+            };
         }
     };
 }
@@ -168,4 +194,46 @@ test "ThreadLocalDiagnostic cross-thread isolation" {
     thread.join();
 
     try std.testing.expectEqual(@as(usize, 0), other_count.load(.acquire));
+}
+
+// ──────────────── .any() type-erasure tests ────────────────
+
+test "StaticDiagnostic.any enriches through type erasure" {
+    var diag = StaticDiagnostic(4).init();
+    diag.add(Attr.str("network", "mainnet"));
+
+    const any_diag = diag.any();
+
+    var record = Record{
+        .timestamp_us = 0,
+        .level = .info,
+        .scope_name = "default",
+        .message = "test",
+    };
+
+    any_diag.enrich(&record);
+    try std.testing.expectEqual(@as(usize, 1), record.diag_attrs.len);
+    try std.testing.expectEqualStrings("network", record.diag_attrs.constSlice()[0].key);
+}
+
+test "ThreadLocalDiagnostic.any enriches through type erasure" {
+    const TLD = ThreadLocalDiagnostic(4);
+    TLD.clear();
+    defer TLD.clear();
+
+    TLD.set(Attr.uint("slot", 99));
+
+    var diag = TLD{};
+    const any_diag = diag.any();
+
+    var record = Record{
+        .timestamp_us = 0,
+        .level = .info,
+        .scope_name = rec.scopeName(.default),
+        .message = "test",
+    };
+
+    any_diag.enrich(&record);
+    try std.testing.expectEqual(@as(usize, 1), record.diag_attrs.len);
+    try std.testing.expectEqualStrings("slot", record.diag_attrs.constSlice()[0].key);
 }

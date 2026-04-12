@@ -95,6 +95,25 @@ pub const FlushableWriter = struct {
 pub const NullAppend = struct {
     pub fn append(_: *NullAppend, _: *const Record) void {}
     pub fn flush(_: *NullAppend) void {}
+
+    /// Type-erase to AnyAppend.
+    pub fn any(self: *NullAppend) rec.AnyAppend {
+        return .{
+            .ptr = @ptrCast(self),
+            .append_fn = struct {
+                fn f(ptr: *anyopaque, record: *const Record) void {
+                    const s: *NullAppend = @ptrCast(@alignCast(ptr));
+                    s.append(record);
+                }
+            }.f,
+            .flush_fn = struct {
+                fn f(ptr: *anyopaque) void {
+                    const s: *NullAppend = @ptrCast(@alignCast(ptr));
+                    s.flush();
+                }
+            }.f,
+        };
+    }
 };
 
 // ────────────────── Error Reporting (BestEffortTrap) ──────────────────
@@ -156,6 +175,25 @@ pub fn WriterAppend(comptime LayoutT: type) type {
 
         pub fn flush(self: *Self) void {
             self.inner.flush();
+        }
+
+        /// Type-erase to AnyAppend.
+        pub fn any(self: *Self) rec.AnyAppend {
+            return .{
+                .ptr = @ptrCast(self),
+                .append_fn = struct {
+                    fn f(ptr: *anyopaque, record: *const Record) void {
+                        const s: *Self = @ptrCast(@alignCast(ptr));
+                        s.append(record);
+                    }
+                }.f,
+                .flush_fn = struct {
+                    fn f(ptr: *anyopaque) void {
+                        const s: *Self = @ptrCast(@alignCast(ptr));
+                        s.flush();
+                    }
+                }.f,
+            };
         }
     };
 }
@@ -224,6 +262,25 @@ pub fn TestingAppend(comptime LayoutT: type) type {
 
         pub fn reset(self: *Self) void {
             self.len = 0;
+        }
+
+        /// Type-erase to AnyAppend.
+        pub fn any(self: *Self) rec.AnyAppend {
+            return .{
+                .ptr = @ptrCast(self),
+                .append_fn = struct {
+                    fn f(ptr: *anyopaque, record: *const Record) void {
+                        const s: *Self = @ptrCast(@alignCast(ptr));
+                        s.append(record);
+                    }
+                }.f,
+                .flush_fn = struct {
+                    fn f(ptr: *anyopaque) void {
+                        const s: *Self = @ptrCast(@alignCast(ptr));
+                        s.flush();
+                    }
+                }.f,
+            };
         }
     };
 }
@@ -546,6 +603,31 @@ pub fn FileAppend(comptime LayoutT: type) type {
         pub fn deinit(self: *Self) void {
             self.rolling_writer.deinit();
         }
+
+        /// Type-erase to AnyAppend.
+        pub fn any(self: *Self) rec.AnyAppend {
+            return .{
+                .ptr = @ptrCast(self),
+                .append_fn = struct {
+                    fn f(ptr: *anyopaque, record: *const Record) void {
+                        const s: *Self = @ptrCast(@alignCast(ptr));
+                        s.append(record);
+                    }
+                }.f,
+                .flush_fn = struct {
+                    fn f(ptr: *anyopaque) void {
+                        const s: *Self = @ptrCast(@alignCast(ptr));
+                        s.flush();
+                    }
+                }.f,
+                .deinit_fn = struct {
+                    fn f(ptr: *anyopaque) void {
+                        const s: *Self = @ptrCast(@alignCast(ptr));
+                        s.deinit();
+                    }
+                }.f,
+            };
+        }
     };
 }
 
@@ -584,6 +666,25 @@ pub const OpenTelemetryAppend = struct {
 
     pub fn flush(self: *OpenTelemetryAppend) void {
         self.inner.flush();
+    }
+
+    /// Type-erase to AnyAppend.
+    pub fn any(self: *OpenTelemetryAppend) rec.AnyAppend {
+        return .{
+            .ptr = @ptrCast(self),
+            .append_fn = struct {
+                fn f(ptr: *anyopaque, record: *const Record) void {
+                    const s: *OpenTelemetryAppend = @ptrCast(@alignCast(ptr));
+                    s.append(record);
+                }
+            }.f,
+            .flush_fn = struct {
+                fn f(ptr: *anyopaque) void {
+                    const s: *OpenTelemetryAppend = @ptrCast(@alignCast(ptr));
+                    s.flush();
+                }
+            }.f,
+        };
     }
 
     fn formatOtlp(record: *const Record, writer: anytype) void {
@@ -787,6 +888,31 @@ pub fn AsyncAppend(comptime LayoutT: type) type {
             }
             self.drain();
             self.ring.deinit();
+        }
+
+        /// Type-erase to AnyAppend. Caller must call `start()` before this.
+        pub fn any(self: *Self) rec.AnyAppend {
+            return .{
+                .ptr = @ptrCast(self),
+                .append_fn = struct {
+                    fn f(ptr: *anyopaque, record: *const Record) void {
+                        const s: *Self = @ptrCast(@alignCast(ptr));
+                        s.append(record);
+                    }
+                }.f,
+                .flush_fn = struct {
+                    fn f(ptr: *anyopaque) void {
+                        const s: *Self = @ptrCast(@alignCast(ptr));
+                        s.flush();
+                    }
+                }.f,
+                .deinit_fn = struct {
+                    fn f(ptr: *anyopaque) void {
+                        const s: *Self = @ptrCast(@alignCast(ptr));
+                        s.deinit();
+                    }
+                }.f,
+            };
         }
 
         fn consumerLoop(self: *Self) void {
@@ -1633,26 +1759,20 @@ test "RollingFileWriter dual rollover (time + size)" {
     try std.testing.expect(archive1 != null);
 }
 
-// ──────────── Compile-time appender enforcement test ─────────────
+// ──────────── Appender enforcement test ─────────────
 
-test "Dispatch requires at least one appender (positive case)" {
-    // This test verifies that compilation succeeds with one appender.
+test "Dispatch processes records through appender" {
+    // This test verifies a basic pipeline with one appender.
     const filter_mod = @import("filter.zig");
     const layout = @import("layout.zig");
     const dispatch_mod = @import("dispatch.zig");
 
-    const TA = TestingAppend(layout.TextLayout);
-    const MyDispatch = dispatch_mod.Dispatch(
-        struct { filter_mod.LevelFilter },
-        struct {},
-        struct { TA },
-    );
+    var level_filter = filter_mod.LevelFilter.init(.debug);
+    var ta = TestingAppend(layout.TextLayout).init(std.testing.allocator, layout.TextLayout{});
 
-    var d = MyDispatch{
-        .filters = .{filter_mod.LevelFilter.init(.debug)},
-        .diagnostics = .{},
-        .appenders = .{TA.init(std.testing.allocator, layout.TextLayout{})},
-    };
+    var d = dispatch_mod.Dispatch.init();
+    d.addFilter(level_filter.any());
+    d.addAppend(ta.any());
 
     var record = Record{
         .timestamp_us = 0,
@@ -1661,5 +1781,5 @@ test "Dispatch requires at least one appender (positive case)" {
         .message = "enforced",
     };
     d.process(&record);
-    try std.testing.expect(d.appenders[0].contains("enforced"));
+    try std.testing.expect(ta.contains("enforced"));
 }

@@ -1,7 +1,7 @@
 //! Log integration smoke example.
 //!
-//! Demonstrates the V2 structured Logger API, std.log bridge,
-//! all three async builder configs, and all three layout formats.
+//! Demonstrates the structured Logger API, std.log bridge,
+//! caller-owned async pipelines, and all three layout formats.
 //!
 //! Run:
 //!   zig build run:log_smoke
@@ -11,7 +11,7 @@
 const std = @import("std");
 const log_mod = @import("log");
 
-/// Re-export std_options so std.log calls route through the V2 pipeline.
+/// Re-export std_options so std.log calls route through the pipeline.
 pub const std_options = log_mod.std_options;
 
 const Logger = log_mod.Logger;
@@ -21,9 +21,11 @@ const Dispatcher = log_mod.Dispatcher;
 const LevelFilter = log_mod.LevelFilter;
 const FlushableWriter = log_mod.FlushableWriter;
 const WriterAppend = log_mod.WriterAppend;
+const AsyncAppend = log_mod.AsyncAppend;
 const TextLayout = log_mod.TextLayout;
 const JsonLayout = log_mod.JsonLayout;
 const LogfmtLayout = log_mod.LogfmtLayout;
+const RollingFileWriter = log_mod.RollingFileWriter;
 
 /// Helper: emit a standard set of log lines through `log`.
 fn emitSample(log: anytype) void {
@@ -38,10 +40,21 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    // ── 1. Default (sync stderr, TextLayout) ─────────────────
+    // ── 1. Sync stderr pipeline (explicit TextLayout) ─────────────
 
-    std.debug.print("\n=== 1. Default (sync stderr, TextLayout) ===\n", .{});
+    std.debug.print("\n=== 1. Sync stderr pipeline (explicit TextLayout) ===\n", .{});
     {
+        var filter = LevelFilter.init(.debug);
+        var sync_appender = WriterAppend(TextLayout).init(allocator, TextLayout{ .color = true }, FlushableWriter.stderrWriter());
+
+        var d = Dispatch.init();
+        d.addFilter(filter.any());
+        d.addAppend(sync_appender.any());
+
+        var dispatcher = Dispatcher.init();
+        dispatcher.addDispatch(d);
+        log_mod.setGlobalDispatcher(dispatcher.any());
+
         const std_log = std.log.scoped(.smoke);
         std_log.err("std.log bridge err", .{});
         std_log.info("std.log bridge info", .{});
@@ -51,53 +64,114 @@ pub fn main() !void {
 
         const child = log.with(&[_]Attr{Attr.str("module", "fc")});
         child.info("child log", .{ .epoch = @as(u64, 7) });
+
+        log_mod.resetGlobalDispatcher();
     }
 
-    // ── 2. Console builder (async stderr, TextLayout) ────────
+    // ── 2. Async console pipeline (caller-owned) ────────────
 
-    std.debug.print("\n=== 2. Console builder (async stderr, TextLayout) ===\n", .{});
+    std.debug.print("\n=== 2. Async console pipeline (caller-owned) ===\n", .{});
     {
-        try log_mod.initConsoleDispatcher(allocator, .{ .min_level = .debug });
-        defer log_mod.deinitGlobalDispatcher();
+        var filter = LevelFilter.init(.debug);
+        var appender = try AsyncAppend(TextLayout).init(
+            allocator,
+            1024,
+            FlushableWriter.stderrWriter(),
+            TextLayout{ .color = true },
+            .block,
+        );
+        try appender.start();
+
+        var d = Dispatch.init();
+        d.addFilter(filter.any());
+        d.addAppend(appender.any());
+
+        var dispatcher = Dispatcher.init();
+        dispatcher.addDispatch(d);
+        log_mod.setGlobalDispatcher(dispatcher.any());
 
         const log = Logger(4).init(.smoke, log_mod.getGlobalDispatcher());
         emitSample(log);
         log_mod.flushGlobalDispatcher();
+
+        dispatcher.deinit();
+        log_mod.resetGlobalDispatcher();
     }
 
-    // ── 3. File builder (async rolling file, TextLayout) ─────
+    // ── 3. Async file pipeline (caller-owned) ─────
 
-    std.debug.print("\n=== 3. File builder (async rolling file, TextLayout) ===\n", .{});
+    std.debug.print("\n=== 3. Async file pipeline (caller-owned) ===\n", .{});
     {
-        try log_mod.initFileDispatcher(allocator, .{
-            .min_level = .debug,
-            .dir = std.fs.cwd(),
-            .base_name = "smoke.log",
-            .rolling = .{ .rotation = .never, .max_bytes = 1024 * 1024 },
-        });
-        defer log_mod.deinitGlobalDispatcher();
+        var rolling = try RollingFileWriter.init(std.fs.cwd(), "smoke.log", .{ .rotation = .never, .max_bytes = 1024 * 1024 });
+
+        var filter = LevelFilter.init(.debug);
+        var appender = try AsyncAppend(TextLayout).init(
+            allocator,
+            1024,
+            FlushableWriter.fromFlushable(&rolling),
+            TextLayout{},
+            .block,
+        );
+        try appender.start();
+
+        var d = Dispatch.init();
+        d.addFilter(filter.any());
+        d.addAppend(appender.any());
+
+        var dispatcher = Dispatcher.init();
+        dispatcher.addDispatch(d);
+        log_mod.setGlobalDispatcher(dispatcher.any());
 
         const log = Logger(4).init(.smoke, log_mod.getGlobalDispatcher());
         emitSample(log);
         log_mod.flushGlobalDispatcher();
+
+        dispatcher.deinit();
+        rolling.deinit();
+        log_mod.resetGlobalDispatcher();
         std.debug.print("  → wrote smoke.log\n", .{});
     }
 
-    // ── 4. Combined builder (async stderr + file, TextLayout) ─
+    // ── 4. Combined pipeline: console + file (caller-owned) ─
 
-    std.debug.print("\n=== 4. Combined builder (async stderr + file, TextLayout) ===\n", .{});
+    std.debug.print("\n=== 4. Combined pipeline: console + file (caller-owned) ===\n", .{});
     {
-        try log_mod.initCombinedDispatcher(allocator, .{
-            .min_level = .debug,
-            .dir = std.fs.cwd(),
-            .base_name = "smoke_combined.log",
-            .rolling = .{ .rotation = .never, .max_bytes = 1024 * 1024 },
-        });
-        defer log_mod.deinitGlobalDispatcher();
+        var rolling = try RollingFileWriter.init(std.fs.cwd(), "smoke_combined.log", .{ .rotation = .never, .max_bytes = 1024 * 1024 });
+
+        var filter = LevelFilter.init(.debug);
+        var console_appender = try AsyncAppend(TextLayout).init(
+            allocator,
+            1024,
+            FlushableWriter.stderrWriter(),
+            TextLayout{ .color = true },
+            .block,
+        );
+        var file_appender = try AsyncAppend(TextLayout).init(
+            allocator,
+            1024,
+            FlushableWriter.fromFlushable(&rolling),
+            TextLayout{},
+            .block,
+        );
+        try console_appender.start();
+        try file_appender.start();
+
+        var d = Dispatch.init();
+        d.addFilter(filter.any());
+        d.addAppend(console_appender.any());
+        d.addAppend(file_appender.any());
+
+        var dispatcher = Dispatcher.init();
+        dispatcher.addDispatch(d);
+        log_mod.setGlobalDispatcher(dispatcher.any());
 
         const log = Logger(4).init(.smoke, log_mod.getGlobalDispatcher());
         emitSample(log);
         log_mod.flushGlobalDispatcher();
+
+        dispatcher.deinit();
+        rolling.deinit();
+        log_mod.resetGlobalDispatcher();
         std.debug.print("  → wrote smoke_combined.log\n", .{});
     }
 
@@ -105,19 +179,15 @@ pub fn main() !void {
 
     std.debug.print("\n=== 5. JsonLayout (sync stderr) ===\n", .{});
     {
-        const WA = WriterAppend(JsonLayout);
-        const D = Dispatch(struct { LevelFilter }, struct {}, struct { WA });
-        const Disp = Dispatcher(struct { D });
+        var debug_filter = LevelFilter.init(.debug);
+        var json_appender = WriterAppend(JsonLayout).init(allocator, JsonLayout{}, FlushableWriter.stderrWriter());
 
-        var dispatcher = Disp{
-            .dispatches = .{
-                D{
-                    .filters = .{LevelFilter.init(.debug)},
-                    .diagnostics = .{},
-                    .appenders = .{WA.init(allocator, JsonLayout{}, FlushableWriter.stderrWriter())},
-                },
-            },
-        };
+        var d = Dispatch.init();
+        d.addFilter(debug_filter.any());
+        d.addAppend(json_appender.any());
+
+        var dispatcher = Dispatcher.init();
+        dispatcher.addDispatch(d);
 
         const log = Logger(4).init(.smoke, dispatcher.any());
         emitSample(log);
@@ -127,19 +197,15 @@ pub fn main() !void {
 
     std.debug.print("\n=== 6. LogfmtLayout (sync stderr) ===\n", .{});
     {
-        const WA = WriterAppend(LogfmtLayout);
-        const D = Dispatch(struct { LevelFilter }, struct {}, struct { WA });
-        const Disp = Dispatcher(struct { D });
+        var debug_filter = LevelFilter.init(.debug);
+        var logfmt_appender = WriterAppend(LogfmtLayout).init(allocator, LogfmtLayout{}, FlushableWriter.stderrWriter());
 
-        var dispatcher = Disp{
-            .dispatches = .{
-                D{
-                    .filters = .{LevelFilter.init(.debug)},
-                    .diagnostics = .{},
-                    .appenders = .{WA.init(allocator, LogfmtLayout{}, FlushableWriter.stderrWriter())},
-                },
-            },
-        };
+        var d = Dispatch.init();
+        d.addFilter(debug_filter.any());
+        d.addAppend(logfmt_appender.any());
+
+        var dispatcher = Dispatcher.init();
+        dispatcher.addDispatch(d);
 
         const log = Logger(4).init(.smoke, dispatcher.any());
         emitSample(log);

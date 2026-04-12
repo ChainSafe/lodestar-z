@@ -55,6 +55,25 @@ pub const LevelFilter = union(enum) {
         return self.check(record.level);
     }
 
+    /// Type-erase to AnyFilter. Caller must keep `self` alive.
+    pub fn any(self: *LevelFilter) rec.AnyFilter {
+        return .{
+            .ptr = @ptrCast(self),
+            .enabled_fn = struct {
+                fn f(ptr: *anyopaque, level: std.log.Level, scope_name: []const u8) FilterResult {
+                    const s: *const LevelFilter = @ptrCast(@alignCast(ptr));
+                    return s.enabled(level, scope_name);
+                }
+            }.f,
+            .matches_fn = struct {
+                fn f(ptr: *anyopaque, record: *const rec.Record) FilterResult {
+                    const s: *const LevelFilter = @ptrCast(@alignCast(ptr));
+                    return s.matches(record);
+                }
+            }.f,
+        };
+    }
+
     fn check(self: LevelFilter, level: std.log.Level) FilterResult {
         const lv = @intFromEnum(level);
         return switch (self) {
@@ -113,6 +132,25 @@ pub const ScopeFilter = struct {
     pub fn matches(self: ScopeFilter, record: *const Record) FilterResult {
         return self.enabled(record.level, record.scope_name);
     }
+
+    /// Type-erase to AnyFilter. Caller must keep `self` alive.
+    pub fn any(self: *ScopeFilter) rec.AnyFilter {
+        return .{
+            .ptr = @ptrCast(self),
+            .enabled_fn = struct {
+                fn f(ptr: *anyopaque, level: std.log.Level, scope_name: []const u8) FilterResult {
+                    const s: *const ScopeFilter = @ptrCast(@alignCast(ptr));
+                    return s.enabled(level, scope_name);
+                }
+            }.f,
+            .matches_fn = struct {
+                fn f(ptr: *anyopaque, record: *const rec.Record) FilterResult {
+                    const s: *const ScopeFilter = @ptrCast(@alignCast(ptr));
+                    return s.matches(record);
+                }
+            }.f,
+        };
+    }
 };
 
 // ──────────────────────── EnvFilter ────────────────────────
@@ -141,6 +179,25 @@ pub const EnvFilter = struct {
     /// Full record check: scope override wins over base level.
     pub fn matches(self: EnvFilter, record: *const Record) FilterResult {
         return self.enabled(record.level, record.scope_name);
+    }
+
+    /// Type-erase to AnyFilter. Caller must keep `self` alive.
+    pub fn any(self: *EnvFilter) rec.AnyFilter {
+        return .{
+            .ptr = @ptrCast(self),
+            .enabled_fn = struct {
+                fn f(ptr: *anyopaque, level: std.log.Level, scope_name: []const u8) FilterResult {
+                    const s: *const EnvFilter = @ptrCast(@alignCast(ptr));
+                    return s.enabled(level, scope_name);
+                }
+            }.f,
+            .matches_fn = struct {
+                fn f(ptr: *anyopaque, record: *const rec.Record) FilterResult {
+                    const s: *const EnvFilter = @ptrCast(@alignCast(ptr));
+                    return s.matches(record);
+                }
+            }.f,
+        };
     }
 };
 
@@ -189,26 +246,48 @@ pub fn parse(input: []const u8) ?EnvFilter {
 
 // ──────────────────────────── Tests ────────────────────────────
 
-test "LevelFilter enabled" {
-    const f = LevelFilter.init(.warn);
-    try std.testing.expectEqual(FilterResult.accept, f.enabled(.err, ""));
-    try std.testing.expectEqual(FilterResult.accept, f.enabled(.warn, ""));
-    try std.testing.expectEqual(FilterResult.reject, f.enabled(.info, ""));
-    try std.testing.expectEqual(FilterResult.reject, f.enabled(.debug, ""));
+test "LevelFilter enabled (table-driven)" {
+    const Case = struct {
+        filter: LevelFilter,
+        // Expected results for: err, warn, info, debug
+        expected: [4]FilterResult,
+    };
+    const A = FilterResult.accept;
+    const R = FilterResult.reject;
+
+    const cases = [_]Case{
+        // init(.warn) = more_severe_equal(.warn)
+        .{ .filter = LevelFilter.init(.warn), .expected = .{ A, A, R, R } },
+        // init(.debug) = accepts all
+        .{ .filter = LevelFilter.init(.debug), .expected = .{ A, A, A, A } },
+        .{ .filter = .off, .expected = .{ R, R, R, R } },
+        .{ .filter = .all, .expected = .{ A, A, A, A } },
+        .{ .filter = .{ .equal = .warn }, .expected = .{ R, A, R, R } },
+        .{ .filter = .{ .not_equal = .warn }, .expected = .{ A, R, A, A } },
+        // more_severe(.warn) → only err (0 < 1)
+        .{ .filter = .{ .more_severe = .warn }, .expected = .{ A, R, R, R } },
+        // more_severe_equal(.warn) → err + warn
+        .{ .filter = .{ .more_severe_equal = .warn }, .expected = .{ A, A, R, R } },
+        // more_verbose(.warn) → info + debug (2,3 > 1)
+        .{ .filter = .{ .more_verbose = .warn }, .expected = .{ R, R, A, A } },
+        // more_verbose_equal(.warn) → warn + info + debug
+        .{ .filter = .{ .more_verbose_equal = .warn }, .expected = .{ R, A, A, A } },
+    };
+
+    const levels = [_]std.log.Level{ .err, .warn, .info, .debug };
+    for (cases) |c| {
+        for (levels, 0..) |level, i| {
+            try std.testing.expectEqual(c.expected[i], c.filter.enabled(level, ""));
+        }
+    }
 }
 
-test "LevelFilter matches" {
+test "LevelFilter matches delegates to check" {
     const f = LevelFilter.init(.warn);
     const err_rec = Record{ .timestamp_us = 0, .level = .err, .scope_name = "default", .message = "" };
     try std.testing.expectEqual(FilterResult.accept, f.matches(&err_rec));
     const info_rec = Record{ .timestamp_us = 0, .level = .info, .scope_name = "default", .message = "" };
     try std.testing.expectEqual(FilterResult.reject, f.matches(&info_rec));
-}
-
-test "LevelFilter debug accepts all" {
-    const f = LevelFilter.init(.debug);
-    try std.testing.expectEqual(FilterResult.accept, f.enabled(.err, ""));
-    try std.testing.expectEqual(FilterResult.accept, f.enabled(.debug, ""));
 }
 
 test "ScopeFilter matches scope" {
@@ -288,72 +367,37 @@ test "EnvFilter matches delegates to enabled" {
     try std.testing.expectEqual(FilterResult.reject, f.matches(&debug_other));
 }
 
-// ──────────────── LevelFilter variant tests ────────────────
-
-test "LevelFilter off rejects everything" {
-    const f: LevelFilter = .off;
-    try std.testing.expectEqual(FilterResult.reject, f.enabled(.err, ""));
-    try std.testing.expectEqual(FilterResult.reject, f.enabled(.debug, ""));
-}
-
-test "LevelFilter all accepts everything" {
-    const f: LevelFilter = .all;
-    try std.testing.expectEqual(FilterResult.accept, f.enabled(.err, ""));
-    try std.testing.expectEqual(FilterResult.accept, f.enabled(.debug, ""));
-}
-
-test "LevelFilter equal" {
-    const f: LevelFilter = .{ .equal = .warn };
-    try std.testing.expectEqual(FilterResult.reject, f.enabled(.err, ""));
-    try std.testing.expectEqual(FilterResult.accept, f.enabled(.warn, ""));
-    try std.testing.expectEqual(FilterResult.reject, f.enabled(.info, ""));
-}
-
-test "LevelFilter not_equal" {
-    const f: LevelFilter = .{ .not_equal = .warn };
-    try std.testing.expectEqual(FilterResult.accept, f.enabled(.err, ""));
-    try std.testing.expectEqual(FilterResult.reject, f.enabled(.warn, ""));
-    try std.testing.expectEqual(FilterResult.accept, f.enabled(.info, ""));
-}
-
-test "LevelFilter more_severe (strict)" {
-    // more_severe(.warn) → only err passes (err=0 < warn=1)
-    const f: LevelFilter = .{ .more_severe = .warn };
-    try std.testing.expectEqual(FilterResult.accept, f.enabled(.err, ""));
-    try std.testing.expectEqual(FilterResult.reject, f.enabled(.warn, ""));
-    try std.testing.expectEqual(FilterResult.reject, f.enabled(.info, ""));
-}
-
-test "LevelFilter more_severe_equal (old threshold)" {
-    // more_severe_equal(.warn) → err + warn pass
-    const f: LevelFilter = .{ .more_severe_equal = .warn };
-    try std.testing.expectEqual(FilterResult.accept, f.enabled(.err, ""));
-    try std.testing.expectEqual(FilterResult.accept, f.enabled(.warn, ""));
-    try std.testing.expectEqual(FilterResult.reject, f.enabled(.info, ""));
-    try std.testing.expectEqual(FilterResult.reject, f.enabled(.debug, ""));
-}
-
-test "LevelFilter more_verbose (strict)" {
-    // more_verbose(.warn) → info + debug pass (info=2 > warn=1)
-    const f: LevelFilter = .{ .more_verbose = .warn };
-    try std.testing.expectEqual(FilterResult.reject, f.enabled(.err, ""));
-    try std.testing.expectEqual(FilterResult.reject, f.enabled(.warn, ""));
-    try std.testing.expectEqual(FilterResult.accept, f.enabled(.info, ""));
-    try std.testing.expectEqual(FilterResult.accept, f.enabled(.debug, ""));
-}
-
-test "LevelFilter more_verbose_equal" {
-    // more_verbose_equal(.warn) → warn + info + debug pass
-    const f: LevelFilter = .{ .more_verbose_equal = .warn };
-    try std.testing.expectEqual(FilterResult.reject, f.enabled(.err, ""));
-    try std.testing.expectEqual(FilterResult.accept, f.enabled(.warn, ""));
-    try std.testing.expectEqual(FilterResult.accept, f.enabled(.info, ""));
-    try std.testing.expectEqual(FilterResult.accept, f.enabled(.debug, ""));
-}
-
 test "LevelFilter getLevel" {
     try std.testing.expect((LevelFilter{ .off = {} }).getLevel() == null);
     try std.testing.expect((LevelFilter{ .all = {} }).getLevel() == null);
     try std.testing.expectEqual(std.log.Level.warn, (LevelFilter{ .equal = .warn }).getLevel().?);
     try std.testing.expectEqual(std.log.Level.info, LevelFilter.init(.info).getLevel().?);
+}
+
+// ──────────────── .any() type-erasure tests ────────────────
+
+test "LevelFilter.any delegates enabled and matches" {
+    var f = LevelFilter.init(.warn);
+    const a = f.any();
+    try std.testing.expectEqual(FilterResult.accept, a.enabled(.err, ""));
+    try std.testing.expectEqual(FilterResult.reject, a.enabled(.info, ""));
+
+    const err_rec = rec.Record{ .timestamp_us = 0, .level = .err, .scope_name = "x", .message = "" };
+    try std.testing.expectEqual(FilterResult.accept, a.matches(&err_rec));
+}
+
+test "ScopeFilter.any delegates enabled and matches" {
+    var f = ScopeFilter.init();
+    f.addOverride("ssz", .debug);
+    const a = f.any();
+    try std.testing.expectEqual(FilterResult.accept, a.enabled(.debug, "ssz"));
+    try std.testing.expectEqual(FilterResult.neutral, a.enabled(.debug, "other"));
+}
+
+test "EnvFilter.any delegates enabled and matches" {
+    var f = parse("warn,fork_choice=debug").?;
+    const a = f.any();
+    try std.testing.expectEqual(FilterResult.accept, a.enabled(.debug, "fork_choice"));
+    try std.testing.expectEqual(FilterResult.reject, a.enabled(.debug, "default"));
+    try std.testing.expectEqual(FilterResult.accept, a.enabled(.warn, "default"));
 }
