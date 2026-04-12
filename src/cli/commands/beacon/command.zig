@@ -109,6 +109,7 @@ const PreparedHandles = struct {
     direct_peers: []const []const u8,
     beacon_metrics: *BeaconMetrics,
     state_transition_metrics: *StateTransitionMetrics,
+    metrics_surface: *MetricsSurface,
     metrics_runtime: ?metrics_server.Runtime,
     node_builder: *BeaconNode.Builder,
     p2p_bind_host: []const u8,
@@ -121,6 +122,7 @@ const PreparedHandles = struct {
         allocator.destroy(self.beacon_metrics);
         self.state_transition_metrics.deinit();
         allocator.destroy(self.state_transition_metrics);
+        allocator.destroy(self.metrics_surface);
         if (self.direct_peers.len > 0) allocator.free(self.direct_peers);
         if (self.file_transport) |*ft| ft.close();
     }
@@ -703,6 +705,7 @@ fn prepareRunContextImpl(io: Io, allocator: Allocator, inputs: *const ResolvedRu
         .direct_peers = startup.direct_peers,
         .beacon_metrics = ready.metrics.beacon_metrics,
         .state_transition_metrics = ready.metrics.state_transition_metrics,
+        .metrics_surface = ready.metrics.metrics_surface,
         .metrics_runtime = ready.metrics.metrics_runtime,
         .node_builder = ready.node_builder,
         .p2p_bind_host = startup.p2p_bind_host,

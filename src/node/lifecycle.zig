@@ -345,6 +345,8 @@ pub fn deinitBuilder(self: *BeaconNodeBuilder) void {
     self.gossip_bls_thread_pool.deinit();
     self.block_bls_thread_pool.deinit();
     self.runtime_builder.deinit();
+    freeOwnedStringList(self.allocator, self.bootstrap_peers);
+    freeOwnedStringList(self.allocator, self.discovery_bootnodes);
     if (self.pubkey_cache_path) |path| self.allocator.free(path);
 
     self.finished = true;
@@ -408,6 +410,8 @@ fn finishBuilder(
     self.api_node_identity = null;
     self.event_bus = null;
     self.pubkey_cache_path = null;
+    self.bootstrap_peers = &.{};
+    self.discovery_bootnodes = &.{};
     self.finished = true;
 
     node.applyBootstrapOutcome(finished_runtime.outcome);
@@ -495,6 +499,8 @@ pub fn deinit(self: *BeaconNode) void {
 
     self.gossip_bls_thread_pool.deinit();
     self.block_bls_thread_pool.deinit();
+    freeOwnedStringList(allocator, self.bootstrap_peers);
+    freeOwnedStringList(allocator, self.discovery_bootnodes);
     if (self.pubkey_cache_path) |path| {
         if (!std.mem.eql(u8, self.genesis_validators_root[0..], ZERO_HASH[0..])) {
             self.chain_runtime.shared_state_graph.validator_pubkeys.saveOpaqueCache(
@@ -575,6 +581,12 @@ fn deinitApiNodeIdentity(allocator: Allocator, identity: *ApiNodeIdentity) void 
     freeAddressList(allocator, identity.discovery_addresses);
 
     allocator.destroy(identity);
+}
+
+fn freeOwnedStringList(allocator: Allocator, items: []const []const u8) void {
+    if (items.len == 0) return;
+    for (items) |item| allocator.free(item);
+    allocator.free(items);
 }
 
 const AddressKind = enum {
