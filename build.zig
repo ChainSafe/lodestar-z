@@ -149,6 +149,23 @@ pub fn build(b: *std.Build) void {
     module_bls.linkLibrary(dep_blst.artifact("blst"));
     b.modules.put(b.dupe("bls"), module_bls) catch @panic("OOM");
 
+    const module_ring_buffer = b.createModule(.{
+        .root_source_file = b.path("src/ring_buffer.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    b.modules.put(b.dupe("ring_buffer"), module_ring_buffer) catch @panic("OOM");
+
+    const module_log = b.createModule(.{
+        .root_source_file = b.path("src/log/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "ring_buffer", .module = module_ring_buffer },
+        },
+    });
+    b.modules.put(b.dupe("log"), module_log) catch @panic("OOM");
+
     const module_state_transition = b.createModule(.{
         .root_source_file = b.path("src/state_transition/root.zig"),
         .target = target,
@@ -201,6 +218,29 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| run_exe_metrics_stf.addArgs(args);
     const tls_run_exe_metrics_stf = b.step("run:metrics_stf", "Run the metrics_stf executable");
     tls_run_exe_metrics_stf.dependOn(&run_exe_metrics_stf.step);
+
+    const module_log_smoke = b.createModule(.{
+        .root_source_file = b.path("examples/log_smoke.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    b.modules.put(b.dupe("log_smoke"), module_log_smoke) catch @panic("OOM");
+
+    const exe_log_smoke = b.addExecutable(.{
+        .name = "log_smoke",
+        .root_module = module_log_smoke,
+    });
+
+    const install_exe_log_smoke = b.addInstallArtifact(exe_log_smoke, .{});
+
+    const tls_install_exe_log_smoke = b.step("build-exe:log_smoke", "Install the log_smoke executable");
+    tls_install_exe_log_smoke.dependOn(&install_exe_log_smoke.step);
+    b.getInstallStep().dependOn(&install_exe_log_smoke.step);
+
+    const run_exe_log_smoke = b.addRunArtifact(exe_log_smoke);
+    if (b.args) |args| run_exe_log_smoke.addArgs(args);
+    const tls_run_exe_log_smoke = b.step("run:log_smoke", "Run the log_smoke executable");
+    tls_run_exe_log_smoke.dependOn(&run_exe_log_smoke.step);
 
     const module_download_spec_tests = b.createModule(.{
         .root_source_file = b.path("test/spec/download_spec_tests.zig"),
@@ -681,6 +721,20 @@ pub fn build(b: *std.Build) void {
     tls_run_test_bls.dependOn(&run_test_bls.step);
     tls_run_test.dependOn(&run_test_bls.step);
 
+    const test_log = b.addTest(.{
+        .name = "log",
+        .root_module = module_log,
+        .filters = b.option([][]const u8, "log.filters", "log test filters") orelse &[_][]const u8{},
+    });
+    const install_test_log = b.addInstallArtifact(test_log, .{});
+    const tls_install_test_log = b.step("build-test:log", "Install the log test");
+    tls_install_test_log.dependOn(&install_test_log.step);
+
+    const run_test_log = b.addRunArtifact(test_log);
+    const tls_run_test_log = b.step("test:log", "Run the log test");
+    tls_run_test_log.dependOn(&run_test_log.step);
+    tls_run_test.dependOn(&run_test_log.step);
+
     const test_state_transition = b.addTest(.{
         .name = "state_transition",
         .root_module = module_state_transition,
@@ -722,6 +776,20 @@ pub fn build(b: *std.Build) void {
     const tls_run_test_metrics_stf = b.step("test:metrics_stf", "Run the metrics_stf test");
     tls_run_test_metrics_stf.dependOn(&run_test_metrics_stf.step);
     tls_run_test.dependOn(&run_test_metrics_stf.step);
+
+    const test_log_smoke = b.addTest(.{
+        .name = "log_smoke",
+        .root_module = module_log_smoke,
+        .filters = b.option([][]const u8, "log_smoke.filters", "log_smoke test filters") orelse &[_][]const u8{},
+    });
+    const install_test_log_smoke = b.addInstallArtifact(test_log_smoke, .{});
+    const tls_install_test_log_smoke = b.step("build-test:log_smoke", "Install the log_smoke test");
+    tls_install_test_log_smoke.dependOn(&install_test_log_smoke.step);
+
+    const run_test_log_smoke = b.addRunArtifact(test_log_smoke);
+    const tls_run_test_log_smoke = b.step("test:log_smoke", "Run the log_smoke test");
+    tls_run_test_log_smoke.dependOn(&run_test_log_smoke.step);
+    tls_run_test.dependOn(&run_test_log_smoke.step);
 
     const test_download_spec_tests = b.addTest(.{
         .name = "download_spec_tests",
@@ -1088,6 +1156,9 @@ pub fn build(b: *std.Build) void {
     module_metrics_stf.addImport("config", module_config);
     module_metrics_stf.addImport("preset", module_preset);
     module_metrics_stf.addImport("httpz", dep_httpz.module("httpz"));
+    module_metrics_stf.addImport("log", module_log);
+
+    module_log_smoke.addImport("log", module_log);
 
     module_download_spec_tests.addImport("spec_test_options", options_module_spec_test_options);
 

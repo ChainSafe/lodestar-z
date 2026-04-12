@@ -22,7 +22,7 @@
             .url = "git+https://github.com/chainsafe/zig-yaml#e0e5962579e990a66c21424416c7ac092b20b772",
         },
         .zapi = .{
-            .url = "git+https://github.com/chainsafe/zapi#cf013457cdf0612a62a6d008d65505ff79e85596",
+            .url = "git+https://github.com/chainsafe/zapi#5a51cf21121372451bd56af97db896f474bce384",
         },
         .zbench = .{
             .url = "git+https://github.com/hendriknielaender/zBench#d8c7dd485306b88b757d52005614ebcb0a336942",
@@ -119,6 +119,9 @@
             .root_source_file = "src/bls/root.zig",
             .link_libraries = .{"blst"},
         },
+        .log = .{
+            .root_source_file = "src/log/root.zig",
+        },
         .state_transition = .{
             .root_source_file = "src/state_transition/root.zig",
             .imports = .{
@@ -155,7 +158,14 @@
                     .config,
                     .preset,
                     .httpz,
+                    .log,
                 },
+            },
+        },
+        .log_smoke = .{
+            .root_module = .{
+                .root_source_file = "examples/log_smoke.zig",
+                .imports = .{.log},
             },
         },
         .download_spec_tests = .{
@@ -253,7 +263,7 @@
                     .config,
                     .fork_types,
                     .state_transition,
-                    "zapi:napi",
+                    "zapi:zapi",
                 },
             },
             .linkage = .dynamic,
