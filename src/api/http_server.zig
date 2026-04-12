@@ -265,6 +265,7 @@ pub const HttpServer = struct {
     /// Signal the serve loop to exit after the current connection completes.
     pub fn shutdown(self: *HttpServer, io: Io) void {
         self.shutdown_requested.store(true, .release);
+        self.wakeListener(io);
         self.listener_mutex.lock(io) catch return;
         defer self.listener_mutex.unlock(io);
         if (self.listener) |*listener| {
@@ -319,6 +320,11 @@ pub const HttpServer = struct {
                 log.err("accept failed: {s}", .{@errorName(err)});
                 continue;
             };
+            if (self.shutdown_requested.load(.acquire)) {
+                var stream_copy = stream;
+                stream_copy.close(io);
+                break;
+            }
 
             // Enforce maximum concurrent connection limit (DoS protection).
             const prev = self.active_connections.fetchAdd(1, .acquire);
@@ -398,6 +404,26 @@ pub const HttpServer = struct {
             };
             requests_served += 1;
         }
+    }
+
+    fn wakeListener(self: *HttpServer, io: Io) void {
+        const wake_addr = switch (parseIpAddress(self.address, self.port) catch return) {
+            .ip4 => |ip4| blk: {
+                if (std.mem.eql(u8, &ip4.bytes, &[_]u8{ 0, 0, 0, 0 })) {
+                    break :blk net.IpAddress.parseIp4("127.0.0.1", self.port) catch return;
+                }
+                break :blk net.IpAddress.parseIp4(self.address, self.port) catch return;
+            },
+            .ip6 => |ip6| blk: {
+                if (std.mem.eql(u8, &ip6.bytes, &([_]u8{0} ** 16))) {
+                    break :blk net.IpAddress.parseIp6("::1", self.port) catch return;
+                }
+                break :blk net.IpAddress.parseIp6(self.address, self.port) catch return;
+            },
+        };
+
+        var stream = net.IpAddress.connect(&wake_addr, io, .{ .mode = .stream }) catch return;
+        stream.close(io);
     }
 
     fn handleHttpRequest(self: *HttpServer, request: *http.Server.Request, io: Io) !void {

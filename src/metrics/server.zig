@@ -58,6 +58,7 @@ pub fn Server(comptime SurfaceType: type, comptime server_label: []const u8) typ
 
         pub fn shutdown(self: *Self, io: Io) void {
             self.shutdown_requested.store(true, .release);
+            self.wakeListener(io);
             self.listener_mutex.lock(io) catch return;
             defer self.listener_mutex.unlock(io);
             if (self.listener) |*listener| {
@@ -103,6 +104,11 @@ pub fn Server(comptime SurfaceType: type, comptime server_label: []const u8) typ
                     log.err("accept failed: {s}", .{@errorName(err)});
                     continue;
                 };
+                if (self.shutdown_requested.load(.acquire)) {
+                    var copy = stream;
+                    copy.close(io);
+                    break;
+                }
 
                 self.handleConnection(io, stream) catch |err| {
                     log.debug("connection error: {s}", .{@errorName(err)});
@@ -163,6 +169,26 @@ pub fn Server(comptime SurfaceType: type, comptime server_label: []const u8) typ
                     });
                 },
             }
+        }
+
+        fn wakeListener(self: *Self, io: Io) void {
+            const wake_addr = switch (parseIpAddress(self.address, self.port) catch return) {
+                .ip4 => |ip4| blk: {
+                    if (std.mem.eql(u8, &ip4.bytes, &[_]u8{ 0, 0, 0, 0 })) {
+                        break :blk net.IpAddress.parseIp4("127.0.0.1", self.port) catch return;
+                    }
+                    break :blk net.IpAddress.parseIp4(self.address, self.port) catch return;
+                },
+                .ip6 => |ip6| blk: {
+                    if (std.mem.eql(u8, &ip6.bytes, &([_]u8{0} ** 16))) {
+                        break :blk net.IpAddress.parseIp6("::1", self.port) catch return;
+                    }
+                    break :blk net.IpAddress.parseIp6(self.address, self.port) catch return;
+                },
+            };
+
+            var stream = net.IpAddress.connect(&wake_addr, io, .{ .mode = .stream }) catch return;
+            stream.close(io);
         }
     };
 }

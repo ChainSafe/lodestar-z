@@ -284,19 +284,31 @@ fn formatP2pListenMultiaddr(buf: []u8, host: []const u8, port: u16) ![]const u8 
 
 fn slotClockLoop(io: Io, node: *BeaconNode) !void {
     const clock = node.clock orelse return error.ClockNotInitialized;
+    const shutdown_poll_ns = 100 * std.time.ns_per_ms;
 
     scoped_log.debug("Entering slot clock loop", .{});
 
-    while (!ShutdownHandler.shouldStop()) {
+    while (!node.shutdown_requested.load(.acquire)) {
+        if (ShutdownHandler.shouldStop()) {
+            node.requestShutdown();
+            break;
+        }
         const current_slot = clock.currentSlot(io) orelse {
             io.sleep(.{ .nanoseconds = std.time.ns_per_s }, .real) catch return;
             continue;
         };
         const next_slot_ns: i96 = @intCast(clock.slotStartNs(current_slot + 1));
-        const now = std.Io.Clock.real.now(io);
-        const now_ns: i96 = now.nanoseconds;
-        if (next_slot_ns > now_ns) {
-            const sleep_ns: u64 = @intCast(next_slot_ns - now_ns);
+        while (!node.shutdown_requested.load(.acquire)) {
+            if (ShutdownHandler.shouldStop()) {
+                node.requestShutdown();
+                break;
+            }
+
+            const now_ns: i96 = std.Io.Clock.real.now(io).nanoseconds;
+            if (next_slot_ns <= now_ns) break;
+
+            const remaining_ns: u64 = @intCast(next_slot_ns - now_ns);
+            const sleep_ns = @min(remaining_ns, shutdown_poll_ns);
             io.sleep(.{ .nanoseconds = @intCast(sleep_ns) }, .real) catch return;
         }
     }
