@@ -880,9 +880,9 @@ pub fn blst_aggregateWithRandomness(env: napi.Env, cb: napi.CallbackInfo(1)) !na
     const nbits: usize = 64;
     const nbytes: usize = 8;
 
-    var pk_ptrs: [MAX_AGGREGATE_PER_JOB]*const bls.c.blst_p1_affine = undefined;
+    var pk_ptrs: [MAX_AGGREGATE_PER_JOB]*const PublicKey = undefined;
     var sigs: [MAX_AGGREGATE_PER_JOB]Signature = undefined;
-    var sig_ptrs: [MAX_AGGREGATE_PER_JOB]*const bls.c.blst_p2_affine = undefined;
+    var sig_ptrs: [MAX_AGGREGATE_PER_JOB]*const Signature = undefined;
 
     // Generate 8-byte scalars (64 bits each) using a fast PRNG seeded from OS entropy
     var prng = std.Random.DefaultPrng.init(std.crypto.random.int(u64));
@@ -896,13 +896,13 @@ pub fn blst_aggregateWithRandomness(env: napi.Env, cb: napi.CallbackInfo(1)) !na
 
         const pk_value = try set_value.getNamedProperty("pk");
         const unwrapped_pk = try env.unwrap(PublicKey, pk_value);
-        pk_ptrs[i] = &unwrapped_pk.point;
+        pk_ptrs[i] = unwrapped_pk;
 
         const sig_value = try set_value.getNamedProperty("sig");
         const sig_bytes = try sig_value.getTypedarrayInfo();
         sigs[i] = Signature.deserialize(sig_bytes.data[0..]) catch return error.DeserializationFailed;
         sigs[i].validate(true) catch return error.InvalidSignature;
-        sig_ptrs[i] = &sigs[i].point;
+        sig_ptrs[i] = &sigs[i];
 
         while (std.mem.allEqual(u8, scalars[i * nbytes ..][0..nbytes], 0)) {
             rand.bytes(scalars[i * nbytes ..][0..nbytes]);
@@ -910,7 +910,6 @@ pub fn blst_aggregateWithRandomness(env: napi.Env, cb: napi.CallbackInfo(1)) !na
         sca_ptrs[i] = &scalars[i * nbytes];
     }
 
-    // Per-call scratch allocation
     const scratch_size = @max(
         bls.c.blst_p1s_mult_pippenger_scratch_sizeof(n),
         bls.c.blst_p2s_mult_pippenger_scratch_sizeof(n),
