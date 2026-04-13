@@ -98,7 +98,7 @@ pub const NodeOptions = struct {
     /// Enable the REST HTTP API (--rest flag).
     rest_enabled: bool = false,
     rest_address: []const u8 = "127.0.0.1",
-    rest_port: u16 = 5052,
+    rest_port: u16 = 9596,
     /// CORS origin for the REST API (--api-cors). Null = same-origin only.
     rest_cors_origin: ?[]const u8 = null,
 

@@ -170,7 +170,7 @@ pub const ValidatorConfig = struct {
     /// The validator runtime uses these resolved paths for runtime keymanager
     /// mutations. Path policy and defaults stay in the CLI/bootstrap layer.
     persistence: ?PersistencePaths = null,
-    /// HTTP URL of the beacon node REST API (e.g. "http://localhost:5052").
+    /// HTTP URL of the beacon node REST API (e.g. "http://localhost:9596").
     beacon_node_url: []const u8,
     /// Genesis time (Unix seconds) — needed to compute current slot.
     genesis_time: u64,

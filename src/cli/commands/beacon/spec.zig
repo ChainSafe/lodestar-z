@@ -97,7 +97,7 @@ pub const spec = cli.command(.{
             .description = "REST API listen port",
             .env = "LODESTAR_Z_API_PORT",
             .group = "api",
-        }, 5052),
+        }, 9596),
         .@"rest.port" = cli.option(?u16, .{
             .long = "rest.port",
             .description = "REST API listen port",

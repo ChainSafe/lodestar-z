@@ -10,7 +10,7 @@ pub const spec = cli.command(.{
             .long = "beacon-url",
             .description = "Beacon node REST API URL",
             .env = "LODESTAR_Z_BEACON_URL",
-        }, "http://localhost:5052"),
+        }, "http://localhost:9596"),
         .beaconNodes = cli.option(?[]const u8, .{
             .long = "beaconNodes",
             .description = "Comma-separated beacon node API URLs",
