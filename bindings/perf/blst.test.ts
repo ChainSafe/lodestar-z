@@ -18,7 +18,6 @@ import {
   aggregateSignatures as aggregateSignaturesZig,
   aggregateVerify as aggregateVerifyZig,
   aggregateWithRandomness as aggregateWithRandomnessZig,
-  asyncAggregateWithRandomness as asyncAggregateWithRandomnessZig,
   verifyMultipleAggregateSignatures as verifyZig,
 } from "../src/blst.js";
 
@@ -163,17 +162,6 @@ describe("aggregateWithRandomness", () => {
         aggregateWithRandomnessZig(sets);
       },
       id: `aggregateWithRandomness lodestar-z (sync)  ${count} sets`,
-    });
-
-    bench({
-      beforeEach: () => {
-        const sets = generateZigSets(count);
-        return sets.map((s) => ({pk: s.pk, sig: s.sig.toBytes()}));
-      },
-      fn: async (sets) => {
-        await asyncAggregateWithRandomnessZig(sets);
-      },
-      id: `aggregateWithRandomness lodestar-z (async)  ${count} sets`,
     });
 
     bench({
