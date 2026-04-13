@@ -59,13 +59,13 @@ pub fn createAggregateSignatureSetFromComponents(pubkeys: []const PublicKey, sig
 }
 
 // Deterministic IKMs for tests only (not production secrets).
-const test_sk_ikm: [32]u8 = [_]u8{
+const input_key_material_a: [32]u8 = [_]u8{
     0x93, 0xad, 0x7e, 0x65, 0xde, 0xad, 0x05, 0x2a, 0x08, 0x3a,
     0x91, 0x0c, 0x8b, 0x72, 0x85, 0x91, 0x46, 0x4c, 0xca, 0x56,
     0x60, 0x5b, 0xb0, 0x56, 0xed, 0xfe, 0x2b, 0x60, 0xa6, 0x3c,
     0x48, 0x99,
 };
-const other_sk_ikm: [32]u8 = [_]u8{
+const input_key_material_b: [32]u8 = [_]u8{
     0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa,
     0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x00, 0x01, 0x02, 0x03, 0x04,
     0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e,
@@ -73,7 +73,7 @@ const other_sk_ikm: [32]u8 = [_]u8{
 };
 
 test "verifySingleSignatureSet accepts valid set" {
-    const secret_key = try SecretKey.keyGen(test_sk_ikm[0..], null);
+    const secret_key = try SecretKey.keyGen(input_key_material_a[0..], null);
     const signing_root = [_]u8{1} ** 32;
     const signature = sign(secret_key, &signing_root);
     const public_key = secret_key.toPublicKey();
@@ -86,7 +86,7 @@ test "verifySingleSignatureSet accepts valid set" {
 }
 
 test "verifySingleSignatureSet returns false when signing root does not match signed message" {
-    const secret_key = try SecretKey.keyGen(test_sk_ikm[0..], null);
+    const secret_key = try SecretKey.keyGen(input_key_material_a[0..], null);
     var signing_root = [_]u8{1} ** 32;
     const signature = sign(secret_key, &signing_root);
     const public_key = secret_key.toPublicKey();
@@ -100,8 +100,8 @@ test "verifySingleSignatureSet returns false when signing root does not match si
 }
 
 test "verifySingleSignatureSet returns false when pubkey is not the signer" {
-    const secret_key_a = try SecretKey.keyGen(test_sk_ikm[0..], null);
-    const secret_key_b = try SecretKey.keyGen(other_sk_ikm[0..], null);
+    const secret_key_a = try SecretKey.keyGen(input_key_material_a[0..], null);
+    const secret_key_b = try SecretKey.keyGen(input_key_material_b[0..], null);
     const signing_root = [_]u8{1} ** 32;
     const signature = sign(secret_key_a, &signing_root);
     const set = SingleSignatureSet{
@@ -113,7 +113,7 @@ test "verifySingleSignatureSet returns false when pubkey is not the signer" {
 }
 
 test "verifySingleSignatureSet returns error when signature bytes are not valid compressed G2" {
-    const secret_key = try SecretKey.keyGen(test_sk_ikm[0..], null);
+    const secret_key = try SecretKey.keyGen(input_key_material_a[0..], null);
     const signing_root = [_]u8{1} ** 32;
     const set = SingleSignatureSet{
         .pubkey = secret_key.toPublicKey(),
@@ -124,7 +124,7 @@ test "verifySingleSignatureSet returns error when signature bytes are not valid 
 }
 
 test "verifyAggregatedSignatureSet accepts valid single-key aggregate" {
-    const secret_key = try SecretKey.keyGen(test_sk_ikm[0..], null);
+    const secret_key = try SecretKey.keyGen(input_key_material_a[0..], null);
     const signing_root = [_]u8{1} ** 32;
     const signature = sign(secret_key, &signing_root);
     const public_key = secret_key.toPublicKey();
@@ -134,7 +134,7 @@ test "verifyAggregatedSignatureSet accepts valid single-key aggregate" {
 }
 
 test "verifyAggregatedSignatureSet returns false when signing root does not match" {
-    const secret_key = try SecretKey.keyGen(test_sk_ikm[0..], null);
+    const secret_key = try SecretKey.keyGen(input_key_material_a[0..], null);
     var signing_root = [_]u8{1} ** 32;
     const signature = sign(secret_key, &signing_root);
     const public_key = secret_key.toPublicKey();
@@ -145,8 +145,8 @@ test "verifyAggregatedSignatureSet returns false when signing root does not matc
 }
 
 test "verifyAggregatedSignatureSet returns false when pubkeys are not the signers" {
-    const secret_key_a = try SecretKey.keyGen(test_sk_ikm[0..], null);
-    const secret_key_b = try SecretKey.keyGen(other_sk_ikm[0..], null);
+    const secret_key_a = try SecretKey.keyGen(input_key_material_a[0..], null);
+    const secret_key_b = try SecretKey.keyGen(input_key_material_b[0..], null);
     const signing_root = [_]u8{1} ** 32;
     const signature = sign(secret_key_a, &signing_root);
     var pubkeys = [_]PublicKey{secret_key_b.toPublicKey()};
@@ -155,7 +155,7 @@ test "verifyAggregatedSignatureSet returns false when pubkeys are not the signer
 }
 
 test "createSingleSignatureSetFromComponents matches equivalent struct literal" {
-    const secret_key = try SecretKey.keyGen(test_sk_ikm[0..], null);
+    const secret_key = try SecretKey.keyGen(input_key_material_a[0..], null);
     var signing_root: Root = undefined;
     @memset(signing_root[0..], 0x77);
     const signature = sign(secret_key, signing_root[0..]);
