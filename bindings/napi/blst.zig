@@ -864,7 +864,7 @@ fn hexFromValue(value: napi.Value, buf: []u8) ![]const u8 {
 const MAX_AGGREGATE_PER_JOB = bls.MAX_AGGREGATE_PER_JOB;
 
 /// Synchronously aggregates public keys and signatures with randomness using
-/// Pippenger multi-scalar multiplication. Runs on the main thread.
+/// Pippenger multi-scalar multiplication. Runs on the worker thread.
 ///
 /// Arguments:
 /// 1) sets: Array of {pk: PublicKey, sig: Uint8Array}
