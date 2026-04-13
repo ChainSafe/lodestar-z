@@ -340,6 +340,9 @@ fn publishSsz(
 ) !void {
     if (node.p2p_service) |*p2p| {
         try p2p.publishGossip(node.io, topic_type, subnet_id, ssz_bytes);
+        if (node.metrics) |metrics| {
+            metrics.observeGossipsubTopicSentBytes(topic_type, false, @intCast(ssz_bytes.len));
+        }
     }
 }
 
@@ -932,11 +935,15 @@ fn produceBlockCallback(
 ) anyerror!api_mod.context.ProducedBlockData {
     const ctx: *ProduceBlockCallbackCtx = @ptrCast(@alignCast(ptr));
     const node = ctx.node;
+    const started_at = std.Io.Timestamp.now(node.io, .awake);
 
     var prod_config = chain_mod.BlockProductionConfig{};
     if (params.graffiti) |graffiti| prod_config.graffiti = graffiti;
     if (params.fee_recipient) |fee_recipient| prod_config.fee_recipient = fee_recipient;
     const selection = params.builder_selection orelse .executiononly;
+    if (node.metrics) |m| {
+        m.incrBlockProductionRequest(selection);
+    }
     prod_config.builder_boost_factor = builderBoostFactorForSelection(selection, params.builder_boost_factor);
     prod_config.randao_reveal = params.randao_reveal;
 
@@ -960,6 +967,7 @@ fn produceBlockCallback(
                 &produced,
                 if (params.blinded_local) .blinded else .full,
             );
+            observeBlockProductionSuccess(node, .engine, started_at);
             return .{
                 .ssz_bytes = serialized.ssz_bytes,
                 .fork = serialized.fork_name,
@@ -998,6 +1006,7 @@ fn produceBlockCallback(
                         params.slot,
                         produced_blinded,
                     );
+                    observeBlockProductionSuccess(node, .builder, started_at);
                     break :blk .{
                         .ssz_bytes = serialized.ssz_bytes,
                         .fork = serialized.fork_name,
@@ -1019,6 +1028,7 @@ fn produceBlockCallback(
                         produced_full,
                         if (params.blinded_local) .blinded else .full,
                     );
+                    observeBlockProductionSuccess(node, .engine, started_at);
                     break :blk .{
                         .ssz_bytes = serialized.ssz_bytes,
                         .fork = serialized.fork_name,
@@ -1054,6 +1064,7 @@ fn produceBlockCallback(
                 params.slot,
                 &produced,
             );
+            observeBlockProductionSuccess(node, .builder, started_at);
             return .{
                 .ssz_bytes = serialized.ssz_bytes,
                 .fork = serialized.fork_name,
@@ -1063,6 +1074,18 @@ fn produceBlockCallback(
                 .consensus_block_value = serialized.consensus_block_value,
             };
         },
+    }
+}
+
+fn observeBlockProductionSuccess(
+    node: *BeaconNode,
+    source: BeaconMetrics.BlockProductionSource,
+    started_at: std.Io.Timestamp,
+) void {
+    if (node.metrics) |m| {
+        const finished_at = std.Io.Timestamp.now(node.io, .awake);
+        const elapsed_s: f64 = @as(f64, @floatFromInt(finished_at.nanoseconds - started_at.nanoseconds)) / 1e9;
+        m.observeBlockProductionSuccess(source, elapsed_s);
     }
 }
 

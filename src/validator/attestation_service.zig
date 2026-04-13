@@ -1012,11 +1012,11 @@ pub const AttestationService = struct {
         };
 
         if (publish_ok) {
-            self.metrics.attestation_published_total.incrBy(signed_count);
+            self.metrics.recordAttestationPublished(signed_count);
             const delay_seconds = self.slotDelaySeconds(io, slot);
             var observed: u64 = 0;
             while (observed < signed_count) : (observed += 1) {
-                self.metrics.attestation_delay_seconds.observe(delay_seconds);
+                self.metrics.observeAttestationDelay(delay_seconds);
             }
         }
         const missed_count = duty_count_at_slot - if (publish_ok) signed_count else 0;

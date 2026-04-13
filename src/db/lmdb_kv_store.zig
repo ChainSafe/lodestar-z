@@ -16,17 +16,21 @@ const KVStore = kv_store.KVStore;
 const BatchOp = kv_store.BatchOp;
 const buckets = @import("buckets.zig");
 const DatabaseId = buckets.DatabaseId;
-const DatabaseMetrics = @import("metrics.zig").MetricsSnapshot;
-
+const db_metrics = @import("metrics.zig");
+const DatabaseMetrics = db_metrics.MetricsSnapshot;
+const DatabaseOperation = db_metrics.Operation;
 pub const LmdbKVStore = struct {
     allocator: Allocator,
+    io: std.Io,
     env: LmdbEnv,
     /// DBI handles indexed by DatabaseId enum value.
     dbis: [DatabaseId.count]lmdb.Dbi,
+    op_counts: [db_metrics.metric_operations.len]std.atomic.Value(u64),
+    op_time_ns: [db_metrics.metric_operations.len]std.atomic.Value(u64),
     closed: bool,
 
     /// Open an LMDB-backed KVStore with named databases at the given directory path.
-    pub fn open(allocator: Allocator, path: [*:0]const u8, opts: OpenOptions) LmdbError!LmdbKVStore {
+    pub fn open(allocator: Allocator, io: std.Io, path: [*:0]const u8, opts: OpenOptions) LmdbError!LmdbKVStore {
         const env = try LmdbEnv.open(path, .{
             .map_size = opts.map_size,
             .max_readers = opts.max_readers,
@@ -49,8 +53,11 @@ pub const LmdbKVStore = struct {
 
         return .{
             .allocator = allocator,
+            .io = io,
             .env = env,
             .dbis = dbis,
+            .op_counts = zeroAtomicCounters(),
+            .op_time_ns = zeroAtomicCounters(),
             .closed = false,
         };
     }
@@ -105,6 +112,11 @@ pub const LmdbKVStore = struct {
             snapshot.entry_counts[i] = entries;
             snapshot.total_entries += entries;
         }
+
+        inline for (db_metrics.metric_operations, 0..) |operation, i| {
+            snapshot.operation_counts[i] = self.op_counts[@intFromEnum(operation)].load(.monotonic);
+            snapshot.operation_time_ns[i] = self.op_time_ns[@intFromEnum(operation)].load(.monotonic);
+        }
         return snapshot;
     }
 
@@ -125,6 +137,8 @@ pub const LmdbKVStore = struct {
     fn vtableGet(ptr: *anyopaque, db_id: DatabaseId, key: []const u8) anyerror!?[]const u8 {
         const self: *LmdbKVStore = @ptrCast(@alignCast(ptr));
         if (self.closed) return error.StoreClosed;
+        const started_ns = self.nowNs();
+        defer self.recordOperation(.get, started_ns);
 
         var txn = try self.env.beginTxn(.{ .read_only = true });
         defer txn.abort();
@@ -136,6 +150,8 @@ pub const LmdbKVStore = struct {
     fn vtablePut(ptr: *anyopaque, db_id: DatabaseId, key: []const u8, value: []const u8) anyerror!void {
         const self: *LmdbKVStore = @ptrCast(@alignCast(ptr));
         if (self.closed) return error.StoreClosed;
+        const started_ns = self.nowNs();
+        defer self.recordOperation(.put, started_ns);
 
         var txn = try self.env.beginTxn(.{});
         txn.putToDbi(self.getDbi(db_id), key, value) catch |err| {
@@ -148,6 +164,8 @@ pub const LmdbKVStore = struct {
     fn vtableDelete(ptr: *anyopaque, db_id: DatabaseId, key: []const u8) anyerror!void {
         const self: *LmdbKVStore = @ptrCast(@alignCast(ptr));
         if (self.closed) return error.StoreClosed;
+        const started_ns = self.nowNs();
+        defer self.recordOperation(.delete, started_ns);
 
         var txn = try self.env.beginTxn(.{});
         _ = txn.delFromDbi(self.getDbi(db_id), key) catch |err| {
@@ -160,6 +178,8 @@ pub const LmdbKVStore = struct {
     fn vtableWriteBatch(ptr: *anyopaque, ops: []const BatchOp) anyerror!void {
         const self: *LmdbKVStore = @ptrCast(@alignCast(ptr));
         if (self.closed) return error.StoreClosed;
+        const started_ns = self.nowNs();
+        defer self.recordOperation(.write_batch, started_ns);
 
         var txn = try self.env.beginTxn(.{});
 
@@ -184,6 +204,8 @@ pub const LmdbKVStore = struct {
     fn vtableAllKeys(ptr: *anyopaque, db_id: DatabaseId) anyerror![]const []const u8 {
         const self: *LmdbKVStore = @ptrCast(@alignCast(ptr));
         if (self.closed) return error.StoreClosed;
+        const started_ns = self.nowNs();
+        defer self.recordOperation(.all_keys, started_ns);
 
         var txn = try self.env.beginTxn(.{ .read_only = true });
         defer txn.abort();
@@ -209,6 +231,8 @@ pub const LmdbKVStore = struct {
     fn vtableAllEntries(ptr: *anyopaque, db_id: DatabaseId) anyerror!KVStore.EntryList {
         const self: *LmdbKVStore = @ptrCast(@alignCast(ptr));
         if (self.closed) return error.StoreClosed;
+        const started_ns = self.nowNs();
+        defer self.recordOperation(.all_entries, started_ns);
 
         var txn = try self.env.beginTxn(.{ .read_only = true });
         defer txn.abort();
@@ -241,6 +265,8 @@ pub const LmdbKVStore = struct {
     fn vtableFirstKey(ptr: *anyopaque, db_id: DatabaseId) anyerror!?[]const u8 {
         const self: *LmdbKVStore = @ptrCast(@alignCast(ptr));
         if (self.closed) return error.StoreClosed;
+        const started_ns = self.nowNs();
+        defer self.recordOperation(.first_key, started_ns);
 
         var txn = try self.env.beginTxn(.{ .read_only = true });
         defer txn.abort();
@@ -255,6 +281,8 @@ pub const LmdbKVStore = struct {
     fn vtableLastKey(ptr: *anyopaque, db_id: DatabaseId) anyerror!?[]const u8 {
         const self: *LmdbKVStore = @ptrCast(@alignCast(ptr));
         if (self.closed) return error.StoreClosed;
+        const started_ns = self.nowNs();
+        defer self.recordOperation(.last_key, started_ns);
 
         var txn = try self.env.beginTxn(.{ .read_only = true });
         defer txn.abort();
@@ -264,6 +292,33 @@ pub const LmdbKVStore = struct {
 
         const entry = try cursor.last() orelse return null;
         return try self.allocator.dupe(u8, entry.key);
+    }
+
+    fn zeroAtomicCounters() [db_metrics.metric_operations.len]std.atomic.Value(u64) {
+        var counters: [db_metrics.metric_operations.len]std.atomic.Value(u64) = undefined;
+        for (&counters) |*counter| {
+            counter.* = std.atomic.Value(u64).init(0);
+        }
+        return counters;
+    }
+
+    fn nowNs(self: *const LmdbKVStore) i128 {
+        return std.Io.Timestamp.now(self.io, .awake).toNanoseconds();
+    }
+
+    fn recordOperation(
+        self: *LmdbKVStore,
+        operation: DatabaseOperation,
+        started_ns: i128,
+    ) void {
+        const idx = @intFromEnum(operation);
+        const ended_ns = self.nowNs();
+        const elapsed_ns: u64 = if (ended_ns > started_ns)
+            @intCast(ended_ns - started_ns)
+        else
+            0;
+        _ = self.op_counts[idx].fetchAdd(1, .monotonic);
+        _ = self.op_time_ns[idx].fetchAdd(elapsed_ns, .monotonic);
     }
 
     fn vtableClose(ptr: *anyopaque) void {

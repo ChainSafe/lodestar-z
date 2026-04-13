@@ -39,6 +39,7 @@ pub const BatchId = u32;
 /// The generation counter increments on every download attempt, ensuring
 /// that stale responses (from a previous peer or retry) are discarded.
 pub const Batch = struct {
+    io: std.Io,
     id: BatchId,
     /// Epoch-aligned start slot for this batch.
     start_slot: u64,
@@ -46,6 +47,10 @@ pub const Batch = struct {
     count: u64,
     /// Current status.
     status: BatchStatus,
+    /// Monotonic timestamp when the current download attempt started.
+    download_started_ns: i128,
+    /// Monotonic timestamp when segment processing started.
+    processing_started_ns: i128,
     /// Generation counter — incremented on each download attempt.
     generation: u32,
     /// Peer currently downloading this batch (valid when status == downloading).
@@ -72,12 +77,15 @@ pub const Batch = struct {
     /// Allocator used to own deep-copied block data.
     allocator: std.mem.Allocator,
 
-    pub fn init(id: BatchId, start_slot: u64, count: u64, allocator: std.mem.Allocator) Batch {
+    pub fn init(io: std.Io, id: BatchId, start_slot: u64, count: u64, allocator: std.mem.Allocator) Batch {
         return .{
+            .io = io,
             .id = id,
             .start_slot = start_slot,
             .count = count,
             .status = .awaiting_download,
+            .download_started_ns = 0,
+            .processing_started_ns = 0,
             .generation = 0,
             .download_peer = null,
             .last_failed_peer = null,
@@ -154,6 +162,7 @@ pub const Batch = struct {
     pub fn startDownload(self: *Batch, peer_id: []const u8) void {
         self.status = .downloading;
         self.download_peer = peer_id;
+        self.download_started_ns = nowNs(self.io);
         self.generation +%= 1;
     }
 
@@ -218,6 +227,7 @@ pub const Batch = struct {
     pub fn startProcessing(self: *Batch) void {
         std.debug.assert(self.status == .awaiting_processing);
         self.status = .processing;
+        self.processing_started_ns = nowNs(self.io);
     }
 
     /// Called when processing succeeds — move to awaiting_validation.
@@ -250,7 +260,30 @@ pub const Batch = struct {
     pub fn canRetry(self: *const Batch) bool {
         return !self.isDownloadExhausted() and !self.isProcessingExhausted();
     }
+
+    pub fn finishDownloadTiming(self: *Batch) u64 {
+        return takeElapsedNs(self.io, &self.download_started_ns);
+    }
+
+    pub fn finishProcessingTiming(self: *Batch) u64 {
+        return takeElapsedNs(self.io, &self.processing_started_ns);
+    }
 };
+
+fn nowNs(io: std.Io) i128 {
+    return std.Io.Timestamp.now(io, .awake).toNanoseconds();
+}
+
+fn takeElapsedNs(io: std.Io, started_ns: *i128) u64 {
+    if (started_ns.* == 0) return 0;
+    const ended_ns = nowNs(io);
+    const elapsed_ns: u64 = if (ended_ns > started_ns.*)
+        @intCast(ended_ns - started_ns.*)
+    else
+        0;
+    started_ns.* = 0;
+    return elapsed_ns;
+}
 
 /// Simple hash of block contents for duplicate detection between attempts.
 fn hashBlocks(blocks: []const BatchBlock) u64 {

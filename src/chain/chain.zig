@@ -1257,7 +1257,7 @@ pub const Chain = struct {
         const head = self.getHead();
         const finalized = self.forkChoice().getFinalizedCheckpoint();
         return .{
-            .fork_digest = self.config.forkDigestAtSlot(head.slot, self.genesis_validators_root),
+            .fork_digest = self.config.networkingForkDigestAtSlot(head.slot, self.genesis_validators_root),
             .finalized_root = finalized.root,
             .finalized_epoch = finalized.epoch,
             .head_root = head.root,

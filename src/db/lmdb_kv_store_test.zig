@@ -12,7 +12,7 @@ fn openTestStore() !struct { store: *LmdbKVStore, path: [:0]u8 } {
     const path = try tmp_dir.dir.realPathFileAlloc(testing.io, ".", testing.allocator);
 
     const store = try testing.allocator.create(LmdbKVStore);
-    store.* = try LmdbKVStore.open(testing.allocator, path, .{ .map_size = 10 * 1024 * 1024 });
+    store.* = try LmdbKVStore.open(testing.allocator, testing.io, path, .{ .map_size = 10 * 1024 * 1024 });
     return .{ .store = store, .path = path };
 }
 
@@ -191,7 +191,7 @@ test "LmdbKVStore: persistence across reopen" {
 
     // Write phase
     {
-        var store = try LmdbKVStore.open(testing.allocator, z_path, .{ .map_size = 10 * 1024 * 1024 });
+        var store = try LmdbKVStore.open(testing.allocator, testing.io, z_path, .{ .map_size = 10 * 1024 * 1024 });
         const kv = store.kvStore();
         try kv.getDatabase(.block).put("persist_key", "persist_value");
         kv.close();
@@ -199,7 +199,7 @@ test "LmdbKVStore: persistence across reopen" {
 
     // Read phase — reopen same path
     {
-        var store = try LmdbKVStore.open(testing.allocator, z_path, .{ .map_size = 10 * 1024 * 1024 });
+        var store = try LmdbKVStore.open(testing.allocator, testing.io, z_path, .{ .map_size = 10 * 1024 * 1024 });
         defer store.deinit();
         const kv = store.kvStore();
 

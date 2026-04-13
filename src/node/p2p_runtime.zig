@@ -10,6 +10,7 @@ const preset = @import("preset").preset;
 const preset_root = @import("preset");
 const config_mod = @import("config");
 const BeaconConfig = config_mod.BeaconConfig;
+const db_mod = @import("db");
 const ForkSeq = config_mod.ForkSeq;
 const state_transition = @import("state_transition");
 const computeEpochAtSlot = state_transition.computeEpochAtSlot;
@@ -43,8 +44,9 @@ const Multiaddr = @import("multiaddr").Multiaddr;
 const sync_mod = @import("sync");
 const SyncService = sync_mod.SyncService;
 const BatchBlock = sync_mod.BatchBlock;
-
-const BeaconMetrics = @import("metrics.zig").BeaconMetrics;
+const processor_mod = @import("processor");
+const metrics_mod = @import("metrics.zig");
+const BeaconMetrics = metrics_mod.BeaconMetrics;
 const GossipHandler = @import("gossip_handler.zig").GossipHandler;
 const gossip_ingress_mod = @import("gossip_ingress.zig");
 const reqresp_callbacks_mod = @import("reqresp_callbacks.zig");
@@ -91,25 +93,39 @@ const DiscoveryDialJob = struct {
     predicted_peer_id: []const u8,
     node_id: [32]u8,
     pubkey: [33]u8,
+    started_at_ns: u64,
 
-    fn toSuccess(self: DiscoveryDialJob, peer_id: []const u8) DiscoveryDialCompletion {
+    fn toSuccess(self: DiscoveryDialJob, io: std.Io, peer_id: []const u8) DiscoveryDialCompletion {
         return .{ .success = .{
             .peer_id = peer_id,
             .predicted_peer_id = self.predicted_peer_id,
             .ma_str = self.ma_str,
             .node_id = self.node_id,
             .pubkey = self.pubkey,
+            .elapsed_ns = elapsedSince(io, self.started_at_ns),
         } };
     }
 
-    fn toFailure(self: DiscoveryDialJob, err: anyerror) DiscoveryDialCompletion {
+    fn toFailure(self: DiscoveryDialJob, io: std.Io, err: anyerror) DiscoveryDialCompletion {
         return .{ .failure = .{
             .predicted_peer_id = self.predicted_peer_id,
             .ma_str = self.ma_str,
             .err = err,
+            .elapsed_ns = elapsedSince(io, self.started_at_ns),
         } };
     }
 };
+
+fn timestampNowNs(io: std.Io) u64 {
+    const now_ns = std.Io.Timestamp.now(io, .awake).toNanoseconds();
+    if (now_ns <= 0) return 0;
+    return std.math.cast(u64, now_ns) orelse std.math.maxInt(u64);
+}
+
+fn elapsedSince(io: std.Io, started_at_ns: u64) u64 {
+    const now = timestampNowNs(io);
+    return now -| started_at_ns;
+}
 
 const PeerReqRespJobKind = union(enum) {
     status_only,
@@ -376,7 +392,7 @@ pub fn start(self: *BeaconNode, io: std.Io, listen_addr: []const u8, port: u16) 
     self.req_resp_rate_limiter = req_resp_rate_limiter;
 
     const head_slot = self.currentHeadSlot();
-    const fork_digest = self.config.forkDigestAtSlot(head_slot, self.genesis_validators_root);
+    const fork_digest = self.config.networkingForkDigestAtSlot(head_slot, self.genesis_validators_root);
 
     var host_identity = self.node_identity.libp2pKeyPair();
     {
@@ -654,8 +670,8 @@ pub fn processPendingLinkedChainImports(self: *BeaconNode, io: std.Io, svc: *net
 
         var failed = false;
         for (owned.headers) |header| {
-            const fetched = fetchBlockByRootFromPeers(self, io, svc, peer_ids, header.root) catch |err| {
-                log.warn("linked unknown-chain import: failed to fetch block at slot {d}: {}", .{ header.slot, err });
+            const fetched = fetchBlockByRootFromPeers(self, io, svc, peer_ids, header.root) catch {
+                log.debug("linked unknown-chain import: no connected peer has block at slot {d}", .{header.slot});
                 failed = true;
                 break;
             };
@@ -737,13 +753,32 @@ const OpenedReqRespRequest = struct {
     metrics: ?*BeaconMetrics,
     method: networking.Method,
     started_ns: i128,
+    request_payload_bytes: u64 = 0,
+    response_payload_bytes: u64 = 0,
+    response_chunks: u64 = 0,
     finished: bool = false,
+
+    fn noteRequestPayload(self: *OpenedReqRespRequest, payload_bytes: usize) void {
+        self.request_payload_bytes +|= @as(u64, @intCast(payload_bytes));
+    }
+
+    fn noteResponseChunk(self: *OpenedReqRespRequest, payload_bytes: usize) void {
+        self.response_chunks +|= 1;
+        self.response_payload_bytes +|= @as(u64, @intCast(payload_bytes));
+    }
 
     fn finish(self: *OpenedReqRespRequest, io: std.Io, outcome: networking.ReqRespRequestOutcome) void {
         if (self.finished) return;
         self.finished = true;
         if (self.metrics) |metrics| {
-            metrics.observeReqRespOutbound(self.method, outcome, reqRespElapsedSeconds(io, self.started_ns));
+            metrics.observeReqRespOutbound(
+                self.method,
+                outcome,
+                reqRespElapsedSeconds(io, self.started_ns),
+                self.request_payload_bytes,
+                self.response_payload_bytes,
+                self.response_chunks,
+            );
         }
     }
 
@@ -785,6 +820,9 @@ fn openReqRespRequest(
                 req_resp_method,
                 if (err == error.RequestSelfRateLimited) .self_rate_limited else .transport_error,
                 reqRespElapsedSeconds(io, started_ns),
+                0,
+                0,
+                0,
             );
         }
         return err;
@@ -798,7 +836,7 @@ fn openReqRespRequest(
 
     const stream = svc.dialProtocol(io, peer_id, protocol_id) catch |err| {
         if (self.metrics) |metrics| {
-            metrics.observeReqRespOutbound(req_resp_method, .transport_error, reqRespElapsedSeconds(io, started_ns));
+            metrics.observeReqRespOutbound(req_resp_method, .transport_error, reqRespElapsedSeconds(io, started_ns), 0, 0, 0);
         }
         return err;
     };
@@ -978,7 +1016,7 @@ fn syncGossipForkState(self: *BeaconNode, io: std.Io, svc: *networking.P2pServic
         return false;
     };
     svc.setPublishFork(
-        self.config.forkDigestAtSlot(slot, self.genesis_validators_root),
+        self.config.networkingForkDigestAtSlot(slot, self.genesis_validators_root),
         self.config.forkSeq(slot),
     );
     return true;
@@ -1314,7 +1352,7 @@ fn runLoop(self: *BeaconNode, io: std.Io, svc: *networking.P2pService) void {
 
         if (now_ns >= next_metrics_sampling_ns) {
             updateSyncMetrics(self);
-            updateRuntimeMetrics(self);
+            updateRuntimeMetrics(self, io);
             next_metrics_sampling_ns = now_ns + metrics_sampling_interval_ns;
         }
 
@@ -1329,7 +1367,7 @@ fn runLoop(self: *BeaconNode, io: std.Io, svc: *networking.P2pService) void {
 fn maybeHandleForkTransition(self: *BeaconNode, io: std.Io, svc: *networking.P2pService) void {
     const head_slot = self.currentHeadSlot();
     const current_fork_seq = self.config.forkSeq(head_slot);
-    const current_digest = self.config.forkDigestAtSlot(
+    const current_digest = self.config.networkingForkDigestAtSlot(
         head_slot,
         self.genesis_validators_root,
     );
@@ -1354,12 +1392,19 @@ fn maybeHandleForkTransition(self: *BeaconNode, io: std.Io, svc: *networking.P2p
 fn updateSyncMetrics(self: *BeaconNode) void {
     if (self.metrics) |metrics| {
         const status = self.getSyncStatus();
+        const connected_peers: u32 = if (self.peer_manager) |pm| pm.peerCount() else 0;
         metrics.setSyncSnapshot(
             if (status.is_syncing) @as(u64, 1) else @as(u64, 0),
             status.sync_distance,
             status.is_optimistic,
             status.el_offline,
         );
+        metrics.setSyncState(if (!status.is_syncing)
+            1
+        else if (connected_peers == 0)
+            0
+        else
+            2);
     }
 }
 
@@ -1367,11 +1412,22 @@ fn updateChainRuntimeMetrics(self: *BeaconNode) void {
     const metrics = self.metrics orelse return;
     const snapshot = self.chain_runtime.metricsSnapshot();
     const previous = self.last_chain_metrics_snapshot;
+    const head = self.getHead();
+    const finalized = self.chainQuery().finalizedCheckpoint();
+    const justified = self.chainQuery().justifiedCheckpoint();
 
+    metrics.head_slot.set(head.slot);
+    metrics.head_root.set(metrics_mod.rootMetricValue(head.root));
+    metrics.finalized_epoch.set(finalized.epoch);
+    metrics.justified_epoch.set(justified.epoch);
     metrics.block_state_cache_entries.set(snapshot.block_state_cache_entries);
     metrics.checkpoint_state_cache_entries.set(snapshot.checkpoint_state_cache_entries);
     metrics.checkpoint_state_datastore_entries.set(snapshot.checkpoint_state_datastore_entries);
     metrics.state_regen_queue_length.set(snapshot.queued_state_regen_queue_len);
+    metrics.state_work_pending_jobs.set(snapshot.state_work_pending_jobs);
+    metrics.state_work_completed_jobs.set(snapshot.state_work_completed_jobs);
+    metrics.state_work_active_jobs.set(snapshot.state_work_active_jobs);
+    metrics.state_work_last_execution_time_ns.set(snapshot.state_work_last_execution_time_ns);
     metrics.setForkChoiceSnapshot(.{
         .proto_array_nodes = snapshot.forkchoice_nodes,
         .proto_array_block_roots = snapshot.forkchoice_block_roots,
@@ -1397,6 +1453,7 @@ fn updateChainRuntimeMetrics(self: *BeaconNode) void {
     metrics.aggregate_attestation_pool_groups.set(snapshot.aggregate_attestation_pool_groups);
     metrics.aggregate_attestation_pool_entries.set(snapshot.aggregate_attestation_pool_entries);
     metrics.voluntary_exit_pool_size.set(snapshot.voluntary_exit_pool_size);
+    metrics.pending_exits.set(snapshot.voluntary_exit_pool_size);
     metrics.proposer_slashing_pool_size.set(snapshot.proposer_slashing_pool_size);
     metrics.attester_slashing_pool_size.set(snapshot.attester_slashing_pool_size);
     metrics.bls_to_execution_change_pool_size.set(snapshot.bls_to_execution_change_pool_size);
@@ -1409,6 +1466,13 @@ fn updateChainRuntimeMetrics(self: *BeaconNode) void {
     metrics.da_blob_tracker_entries.set(snapshot.da_blob_tracker_entries);
     metrics.da_column_tracker_entries.set(snapshot.da_column_tracker_entries);
     metrics.da_pending_blocks.set(snapshot.da_pending_blocks);
+    const custody_group_count: u64 = if (self.chain.da_manager) |dam|
+        @intCast(dam.column_tracker.custody_columns.len)
+    else
+        0;
+    metrics.custody_groups.set(custody_group_count);
+    metrics.custody_groups_backfilled.set(if (self.getSyncStatus().is_syncing) 0 else custody_group_count);
+    updateDerivedStateMetrics(self, metrics);
 
     metrics.pending_block_ingress_added_total.incrBy(monotonicDelta(
         snapshot.pending_block_ingress_added_total,
@@ -1499,6 +1563,14 @@ fn updateChainRuntimeMetrics(self: *BeaconNode) void {
         snapshot.queued_state_regen_cache_hits,
         if (previous) |prev| prev.queued_state_regen_cache_hits else null,
     ));
+    metrics.store_beacon_block_cache_hit_total.incrBy(monotonicDelta(
+        snapshot.queued_state_regen_cache_hits,
+        if (previous) |prev| prev.queued_state_regen_cache_hits else null,
+    ));
+    metrics.state_data_cache_misses_total.incrBy(monotonicDelta(
+        snapshot.queued_state_regen_cache_misses,
+        if (previous) |prev| prev.queued_state_regen_cache_misses else null,
+    ));
     metrics.state_regen_queue_hits_total.incrBy(monotonicDelta(
         snapshot.queued_state_regen_queue_hits,
         if (previous) |prev| prev.queued_state_regen_queue_hits else null,
@@ -1506,6 +1578,26 @@ fn updateChainRuntimeMetrics(self: *BeaconNode) void {
     metrics.state_regen_dropped_total.incrBy(monotonicDelta(
         snapshot.queued_state_regen_dropped,
         if (previous) |prev| prev.queued_state_regen_dropped else null,
+    ));
+    metrics.state_work_submitted_total.incrBy(monotonicDelta(
+        snapshot.state_work_submitted_total,
+        if (previous) |prev| prev.state_work_submitted_total else null,
+    ));
+    metrics.state_work_rejected_total.incrBy(monotonicDelta(
+        snapshot.state_work_rejected_total,
+        if (previous) |prev| prev.state_work_rejected_total else null,
+    ));
+    metrics.state_work_success_total.incrBy(monotonicDelta(
+        snapshot.state_work_success_total,
+        if (previous) |prev| prev.state_work_success_total else null,
+    ));
+    metrics.state_work_failure_total.incrBy(monotonicDelta(
+        snapshot.state_work_failure_total,
+        if (previous) |prev| prev.state_work_failure_total else null,
+    ));
+    metrics.state_work_execution_time_ns_total.incrBy(monotonicDelta(
+        snapshot.state_work_execution_time_ns_total,
+        if (previous) |prev| prev.state_work_execution_time_ns_total else null,
     ));
 
     self.last_chain_metrics_snapshot = snapshot;
@@ -1580,7 +1672,26 @@ fn updateStorageMetrics(self: *BeaconNode) void {
         log.warn("Failed to collect storage metrics snapshot: {}", .{err});
         return;
     };
+    const previous = self.last_db_metrics_snapshot;
     metrics.setDbSnapshot(snapshot);
+    inline for (db_mod.metrics.metric_operations) |operation| {
+        const count_delta = monotonicDelta(
+            snapshot.operationCount(operation),
+            if (previous) |prev| prev.operationCount(operation) else null,
+        );
+        if (count_delta > 0) {
+            metrics.db_operation_total.incrBy(.{ .operation = @tagName(operation) }, count_delta) catch {};
+        }
+
+        const time_delta = monotonicDelta(
+            snapshot.operationTimeNs(operation),
+            if (previous) |prev| prev.operationTimeNs(operation) else null,
+        );
+        if (time_delta > 0) {
+            metrics.db_operation_time_ns_total.incrBy(.{ .operation = @tagName(operation) }, time_delta) catch {};
+        }
+    }
+    self.last_db_metrics_snapshot = snapshot;
 }
 
 fn updateReqRespMetrics(self: *BeaconNode) void {
@@ -1596,13 +1707,420 @@ fn updateReqRespMetrics(self: *BeaconNode) void {
     metrics.setReqRespLimiterPeers(inbound_peers, outbound_peers);
 }
 
-fn updateRuntimeMetrics(self: *BeaconNode) void {
+fn updateProcessorMetrics(self: *BeaconNode) void {
+    const metrics = self.metrics orelse return;
+    const processor = self.beacon_processor orelse return;
+    const snapshot = processor.metricsSnapshot();
+    const previous = self.last_processor_metrics_snapshot;
+
+    metrics.processor_queue_depth.set(.{ .queue = "total" }, snapshot.queue_depths.total) catch {};
+    metrics.processor_queue_depth.set(.{ .queue = "gossip_blocks" }, snapshot.queue_depths.gossip_blocks) catch {};
+    metrics.processor_queue_depth.set(.{ .queue = "attestations" }, snapshot.queue_depths.attestations) catch {};
+    metrics.processor_queue_depth.set(.{ .queue = "aggregates" }, snapshot.queue_depths.aggregates) catch {};
+    metrics.processor_queue_depth.set(.{ .queue = "sync_messages" }, snapshot.queue_depths.sync_messages) catch {};
+    metrics.processor_queue_depth.set(.{ .queue = "pool_objects" }, snapshot.queue_depths.pool_objects) catch {};
+    metrics.setGossipProcessorQueueDepth(.block, snapshot.queue_depths.gossip_blocks);
+    metrics.setGossipProcessorQueueDepth(.attestation, snapshot.queue_depths.attestations);
+    metrics.setGossipProcessorQueueDepth(.aggregate, snapshot.queue_depths.aggregates);
+    metrics.setGossipProcessorQueueDepth(.sync_message, snapshot.queue_depths.sync_messages);
+    metrics.setGossipProcessorQueueDepth(.pool_object, snapshot.queue_depths.pool_objects);
+
+    metrics.processor_loop_iterations_total.incrBy(monotonicDelta(
+        snapshot.loop_iterations,
+        if (previous) |prev| prev.loop_iterations else null,
+    ));
+    metrics.processor_items_received_total.incrBy(monotonicDelta(
+        snapshot.items_received,
+        if (previous) |prev| prev.items_received else null,
+    ));
+    metrics.processor_items_dispatched_total.incrBy(monotonicDelta(
+        snapshot.items_dispatched,
+        if (previous) |prev| prev.items_dispatched else null,
+    ));
+    metrics.processor_items_dropped_full_total.incrBy(monotonicDelta(
+        snapshot.items_dropped_full,
+        if (previous) |prev| prev.items_dropped_full else null,
+    ));
+    metrics.processor_items_dropped_sync_total.incrBy(monotonicDelta(
+        snapshot.items_dropped_sync,
+        if (previous) |prev| prev.items_dropped_sync else null,
+    ));
+
+    inline for (std.meta.tags(processor_mod.WorkType)) |work_type| {
+        const index = @intFromEnum(work_type);
+        const processed_delta = monotonicDelta(
+            snapshot.items_processed[index],
+            if (previous) |prev| prev.items_processed[index] else null,
+        );
+        if (processed_delta > 0) {
+            metrics.processor_items_processed_total.incrBy(
+                .{ .work_type = @tagName(work_type) },
+                processed_delta,
+            ) catch {};
+        }
+
+        const time_delta = monotonicDelta(
+            snapshot.processing_time_ns[index],
+            if (previous) |prev| prev.processing_time_ns[index] else null,
+        );
+        if (time_delta > 0) {
+            metrics.processor_processing_time_ns_total.incrBy(
+                .{ .work_type = @tagName(work_type) },
+                time_delta,
+            ) catch {};
+        }
+    }
+
+    self.last_processor_metrics_snapshot = snapshot;
+}
+
+fn updateGossipBlsMetrics(self: *BeaconNode) void {
+    const metrics = self.metrics orelse return;
+    const snapshot = self.gossipBlsPendingSnapshot();
+    metrics.setGossipBlsPendingSnapshot(.attestation, snapshot.attestation_batches, snapshot.attestation_items);
+    metrics.setGossipBlsPendingSnapshot(.aggregate, snapshot.aggregate_batches, snapshot.aggregate_items);
+    metrics.setGossipBlsPendingSnapshot(.sync_message, snapshot.sync_message_batches, snapshot.sync_message_items);
+}
+
+fn updateHeadCatchupMetrics(self: *BeaconNode) void {
+    const metrics = self.metrics orelse return;
+    const head = self.getHead();
+    const current_slot = if (self.clock) |clock| clock.currentSlot(self.io) else null;
+    const head_lag_slots = if (current_slot) |slot| slot -| head.slot else 0;
+    const current_ms = if (current_slot) |slot| self.currentTimeToHeadMs(slot, head.slot) else 0;
+    metrics.setHeadCatchupSnapshot(head_lag_slots, self.headCatchupPendingCount(), current_ms);
+}
+
+fn currentPendingDiscoveryDials(self: *BeaconNode, io: std.Io) usize {
+    self.discovery_dial_mutex.lockUncancelable(io);
+    defer self.discovery_dial_mutex.unlock(io);
+    return self.pending_discovery_dial_count;
+}
+
+fn updateDiscoveryMetrics(self: *BeaconNode, io: std.Io) void {
+    const metrics = self.metrics orelse return;
+    const snapshot: networking.discovery_service.DiscoveryStats = if (self.discovery_service) |ds|
+        ds.getStats()
+    else
+        .{
+            .known_peers = 0,
+            .connected_peers = 0,
+            .total_lookups = 0,
+            .total_discovered = 0,
+            .total_filtered_out = 0,
+            .queued_peers = 0,
+            .pending_subnet_queries = 0,
+            .enr_cache_size = 0,
+            .enr_seq = 0,
+        };
+    const previous = self.last_discovery_stats;
+
+    metrics.discovery_peers_known.set(@intCast(snapshot.known_peers));
+    metrics.discovery_connected_peers.set(snapshot.connected_peers);
+    metrics.discovery_queued_peers.set(@intCast(snapshot.queued_peers));
+    metrics.discovery_pending_subnet_queries.set(@intCast(snapshot.pending_subnet_queries));
+    metrics.discovery_enr_cache_size.set(@intCast(snapshot.enr_cache_size));
+    metrics.discovery_enr_seq.set(snapshot.enr_seq);
+    metrics.discovery_pending_dials.set(@intCast(currentPendingDiscoveryDials(self, io)));
+    metrics.discovery_lookups_total.incrBy(monotonicDelta(
+        snapshot.total_lookups,
+        if (previous) |prev| prev.total_lookups else null,
+    ));
+    metrics.discovery_discovered_total.incrBy(monotonicDelta(
+        snapshot.total_discovered,
+        if (previous) |prev| prev.total_discovered else null,
+    ));
+    metrics.discovery_filtered_total.incrBy(monotonicDelta(
+        snapshot.total_filtered_out,
+        if (previous) |prev| prev.total_filtered_out else null,
+    ));
+
+    self.last_discovery_stats = snapshot;
+}
+
+fn updateP2pServiceMetrics(self: *BeaconNode, io: std.Io) void {
+    const metrics = self.metrics orelse return;
+    const snapshot: networking.P2pGossipsubMetricsSnapshot = if (self.p2p_service) |*svc| blk: {
+        const current = svc.gossipsubMetricsSnapshot(io);
+        if (current.tracked_subscriptions > 0 and current.topic_peers > 0 and current.tracked_topics_with_peers == 0) {
+            const now_ns = timestampNowNs(io);
+            if (now_ns -| self.last_gossipsub_topic_mismatch_log_ns >= 30 * std.time.ns_per_s) {
+                self.last_gossipsub_topic_mismatch_log_ns = now_ns;
+                svc.logGossipsubTopicDiagnostics(io);
+            }
+        }
+        break :blk current;
+    } else .{};
+    metrics.setGossipsubSnapshot(snapshot);
+}
+
+fn setRangeSyncTypeMetrics(
+    metrics: *BeaconMetrics,
+    sync_type: sync_mod.RangeSyncType,
+    current: sync_mod.range_sync.TypeMetricsSnapshot,
+    previous: ?sync_mod.range_sync.TypeMetricsSnapshot,
+) void {
+    const label = @tagName(sync_type);
+
+    metrics.range_sync_active_chains.set(.{ .sync_type = label }, current.active_chains) catch {};
+    metrics.range_sync_peers.set(.{ .sync_type = label }, current.peer_count) catch {};
+    metrics.range_sync_target_slot.set(.{ .sync_type = label }, current.highest_target_slot) catch {};
+    metrics.range_sync_validated_epochs.set(.{ .sync_type = label }, current.validated_epochs) catch {};
+    metrics.range_sync_batches.set(.{ .sync_type = label }, current.batches_total) catch {};
+    metrics.range_sync_batch_statuses.set(.{ .sync_type = label, .status = "awaiting_download" }, current.batch_statuses.awaiting_download) catch {};
+    metrics.range_sync_batch_statuses.set(.{ .sync_type = label, .status = "downloading" }, current.batch_statuses.downloading) catch {};
+    metrics.range_sync_batch_statuses.set(.{ .sync_type = label, .status = "awaiting_processing" }, current.batch_statuses.awaiting_processing) catch {};
+    metrics.range_sync_batch_statuses.set(.{ .sync_type = label, .status = "processing" }, current.batch_statuses.processing) catch {};
+    metrics.range_sync_batch_statuses.set(.{ .sync_type = label, .status = "awaiting_validation" }, current.batch_statuses.awaiting_validation) catch {};
+
+    const prev: sync_mod.range_sync.TypeMetricsSnapshot = previous orelse .{};
+
+    const download_requests_delta = monotonicDelta(current.cumulative.download_requests_total, prev.cumulative.download_requests_total);
+    if (download_requests_delta > 0) metrics.range_sync_download_requests_total.incrBy(.{ .sync_type = label }, download_requests_delta) catch {};
+    const download_success_delta = monotonicDelta(current.cumulative.download_success_total, prev.cumulative.download_success_total);
+    if (download_success_delta > 0) metrics.range_sync_download_success_total.incrBy(.{ .sync_type = label }, download_success_delta) catch {};
+    const download_error_delta = monotonicDelta(current.cumulative.download_error_total, prev.cumulative.download_error_total);
+    if (download_error_delta > 0) metrics.range_sync_download_error_total.incrBy(.{ .sync_type = label }, download_error_delta) catch {};
+    const download_deferred_delta = monotonicDelta(current.cumulative.download_deferred_total, prev.cumulative.download_deferred_total);
+    if (download_deferred_delta > 0) metrics.range_sync_download_deferred_total.incrBy(.{ .sync_type = label }, download_deferred_delta) catch {};
+    const download_time_delta = monotonicDelta(current.cumulative.download_time_ns_total, prev.cumulative.download_time_ns_total);
+    if (download_time_delta > 0) metrics.range_sync_download_time_ns_total.incrBy(.{ .sync_type = label }, download_time_delta) catch {};
+    const processing_success_delta = monotonicDelta(current.cumulative.processing_success_total, prev.cumulative.processing_success_total);
+    if (processing_success_delta > 0) metrics.range_sync_processing_success_total.incrBy(.{ .sync_type = label }, processing_success_delta) catch {};
+    const processing_error_delta = monotonicDelta(current.cumulative.processing_error_total, prev.cumulative.processing_error_total);
+    if (processing_error_delta > 0) metrics.range_sync_processing_error_total.incrBy(.{ .sync_type = label }, processing_error_delta) catch {};
+    const processing_time_delta = monotonicDelta(current.cumulative.processing_time_ns_total, prev.cumulative.processing_time_ns_total);
+    if (processing_time_delta > 0) metrics.range_sync_processing_time_ns_total.incrBy(.{ .sync_type = label }, processing_time_delta) catch {};
+    const processed_blocks_delta = monotonicDelta(current.cumulative.processed_blocks_total, prev.cumulative.processed_blocks_total);
+    if (processed_blocks_delta > 0) metrics.range_sync_processed_blocks_total.incrBy(.{ .sync_type = label }, processed_blocks_delta) catch {};
+}
+
+const PendingRangeSyncSegmentMetrics = struct {
+    pending_segments: u64 = 0,
+    inflight_segments: u64 = 0,
+    pending_blocks: u64 = 0,
+    pending_remaining_blocks: u64 = 0,
+};
+
+fn updatePendingSyncSegmentMetrics(self: *BeaconNode) void {
+    const metrics = self.metrics orelse return;
+
+    var finalized: PendingRangeSyncSegmentMetrics = .{};
+    var head: PendingRangeSyncSegmentMetrics = .{};
+
+    for (self.pending_sync_segments.items) |segment| {
+        const current = switch (segment.sync_type) {
+            .finalized => &finalized,
+            .head => &head,
+        };
+        current.pending_segments += 1;
+        if (segment.in_flight) current.inflight_segments += 1;
+        current.pending_blocks += @intCast(segment.blocks.len);
+        const next_index = @min(segment.next_index, segment.blocks.len);
+        current.pending_remaining_blocks += @intCast(segment.blocks.len - next_index);
+    }
+
+    metrics.setRangeSyncPendingSnapshot(
+        .finalized,
+        finalized.pending_segments,
+        finalized.inflight_segments,
+        finalized.pending_blocks,
+        finalized.pending_remaining_blocks,
+    );
+    metrics.setRangeSyncPendingSnapshot(
+        .head,
+        head.pending_segments,
+        head.inflight_segments,
+        head.pending_blocks,
+        head.pending_remaining_blocks,
+    );
+}
+
+fn updateSyncServiceMetrics(self: *BeaconNode) void {
+    const metrics = self.metrics orelse return;
+    const sync_svc = self.sync_service_inst orelse return;
+    const snapshot = sync_svc.metricsSnapshot();
+    const previous = self.last_sync_service_metrics_snapshot;
+
+    metrics.sync_mode.set(@intFromEnum(snapshot.mode));
+    metrics.setSyncModeState(snapshot.mode);
+    metrics.sync_gossip_enabled.set(if (snapshot.gossip_state == .enabled) 1 else 0);
+    metrics.sync_peer_count.set(snapshot.peer_count);
+    metrics.sync_best_peer_slot.set(snapshot.best_peer_slot);
+    metrics.sync_local_head_slot.set(snapshot.local_head_slot);
+    metrics.sync_peer_distance.set(snapshot.best_peer_slot -| snapshot.local_head_slot);
+    metrics.sync_local_finalized_epoch.set(snapshot.local_finalized_epoch);
+    metrics.setUnknownBlockSnapshot(snapshot.unknown_block);
+
+    setRangeSyncTypeMetrics(
+        metrics,
+        .finalized,
+        snapshot.range_sync.finalized,
+        if (previous) |prev| prev.range_sync.finalized else null,
+    );
+    setRangeSyncTypeMetrics(
+        metrics,
+        .head,
+        snapshot.range_sync.head,
+        if (previous) |prev| prev.range_sync.head else null,
+    );
+
+    self.last_sync_service_metrics_snapshot = snapshot;
+}
+
+fn updateRuntimeMetrics(self: *BeaconNode, io: std.Io) void {
     if (self.metrics == null) return;
     updateChainRuntimeMetrics(self);
+    updateProcessMetrics(self);
     updateExecutionRuntimeMetrics(self);
     updatePeerManagerMetrics(self);
+    updateP2pServiceMetrics(self, io);
+    updateProcessorMetrics(self);
+    updateGossipBlsMetrics(self);
+    updateDiscoveryMetrics(self, io);
+    updateSyncServiceMetrics(self);
+    updatePendingSyncSegmentMetrics(self);
+    updateHeadCatchupMetrics(self);
     updateReqRespMetrics(self);
     updateStorageMetrics(self);
+}
+
+fn updateProcessMetrics(self: *BeaconNode) void {
+    const metrics = self.metrics orelse return;
+    metrics.process_cpu_seconds_total.set(currentProcessCpuSeconds());
+    metrics.process_max_fds.set(currentProcessMaxFds());
+}
+
+fn currentProcessCpuSeconds() f64 {
+    const usage = std.posix.getrusage(std.posix.rusage.SELF);
+    return timevalSeconds(usage.utime) + timevalSeconds(usage.stime);
+}
+
+fn currentProcessMaxFds() u64 {
+    const limits = std.posix.getrlimit(.NOFILE) catch return 0;
+    return @intCast(limits.cur);
+}
+
+fn timevalSeconds(tv: anytype) f64 {
+    return @as(f64, @floatFromInt(tv.sec)) + (@as(f64, @floatFromInt(tv.usec)) / 1_000_000.0);
+}
+
+fn updateDerivedStateMetrics(self: *BeaconNode, metrics: *BeaconMetrics) void {
+    const cached = self.headState() orelse return;
+    const head_state_root = self.chain.headStateRoot();
+    if (self.last_state_metrics_root) |last_root| {
+        if (std.mem.eql(u8, &last_root, &head_state_root)) return;
+    }
+    self.last_state_metrics_root = head_state_root;
+
+    metrics.head_state_root.set(metrics_mod.rootMetricValue(head_state_root));
+
+    const state_slot = cached.state.slot() catch return;
+    const current_epoch = computeEpochAtSlot(state_slot);
+    const validators_count = cached.state.validatorsCount() catch 0;
+
+    var current_justified: types.phase0.Checkpoint.Type = undefined;
+    if (cached.state.currentJustifiedCheckpoint(&current_justified)) |_| {
+        metrics.current_justified_epoch.set(current_justified.epoch);
+    } else |_| {}
+
+    var previous_justified: types.phase0.Checkpoint.Type = undefined;
+    if (cached.state.previousJustifiedCheckpoint(&previous_justified)) |_| {
+        metrics.previous_justified_epoch.set(previous_justified.epoch);
+        metrics.previous_justified_root.set(metrics_mod.rootMetricValue(previous_justified.root));
+    } else |_| {}
+
+    var finalized: types.phase0.Checkpoint.Type = undefined;
+    if (cached.state.finalizedCheckpoint(&finalized)) |_| {
+        metrics.head_state_finalized_root.set(metrics_mod.rootMetricValue(finalized.root));
+    } else |_| {}
+
+    metrics.current_active_validators.set(if (cached.epoch_cache.getActiveIndicesAtEpoch(current_epoch)) |indices|
+        @intCast(indices.len)
+    else
+        0);
+    metrics.current_validators.set(@intCast(validators_count));
+    metrics.previous_validators.set(@intCast(validators_count));
+    metrics.current_live_validators.set(currentLiveValidatorCount(self, cached, current_epoch));
+    metrics.previous_live_validators.set(previousLiveValidatorCount(self, cached, current_epoch));
+    metrics.pending_deposits.set(pendingDepositsCount(cached.state));
+    metrics.pending_partial_withdrawals.set(pendingPartialWithdrawalsCount(cached.state));
+    metrics.pending_consolidations.set(pendingConsolidationsCount(cached.state));
+    metrics.processed_deposits_total.set(cached.state.eth1DepositIndex() catch 0);
+
+    if (self.last_previous_epoch_orphaned_epoch == null or self.last_previous_epoch_orphaned_epoch.? != current_epoch) {
+        metrics.previous_epoch_orphaned_blocks.set(countPreviousEpochOrphanedBlocks(self, current_epoch));
+        self.last_previous_epoch_orphaned_epoch = current_epoch;
+    }
+}
+
+fn currentLiveValidatorCount(
+    self: *BeaconNode,
+    cached: *state_transition.CachedBeaconState,
+    current_epoch: u64,
+) u64 {
+    var current_participation = cached.state.currentEpochParticipation() catch return 0;
+    const participation = current_participation.getAll(self.allocator) catch return 0;
+    defer self.allocator.free(participation);
+    return countParticipatingActiveValidators(
+        cached.epoch_cache.getActiveIndicesAtEpoch(current_epoch),
+        participation,
+    );
+}
+
+fn previousLiveValidatorCount(
+    self: *BeaconNode,
+    cached: *state_transition.CachedBeaconState,
+    current_epoch: u64,
+) u64 {
+    if (current_epoch == 0) return 0;
+    var previous_participation = cached.state.previousEpochParticipation() catch return 0;
+    const participation = previous_participation.getAll(self.allocator) catch return 0;
+    defer self.allocator.free(participation);
+    return countParticipatingActiveValidators(
+        cached.epoch_cache.getActiveIndicesAtEpoch(current_epoch - 1),
+        participation,
+    );
+}
+
+fn countParticipatingActiveValidators(active_indices_opt: anytype, participation: []const u8) u64 {
+    const active_indices = active_indices_opt orelse return 0;
+    var count: u64 = 0;
+    for (active_indices) |validator_index| {
+        const index: usize = @intCast(validator_index);
+        if (index < participation.len and participation[index] != 0) count += 1;
+    }
+    return count;
+}
+
+fn pendingDepositsCount(state: *fork_types.AnyBeaconState) u64 {
+    var pending = state.pendingDeposits() catch return 0;
+    return @intCast(pending.length() catch 0);
+}
+
+fn pendingPartialWithdrawalsCount(state: *fork_types.AnyBeaconState) u64 {
+    var pending = state.pendingPartialWithdrawals() catch return 0;
+    return @intCast(pending.length() catch 0);
+}
+
+fn pendingConsolidationsCount(state: *fork_types.AnyBeaconState) u64 {
+    var pending = state.pendingConsolidations() catch return 0;
+    return @intCast(pending.length() catch 0);
+}
+
+fn countPreviousEpochOrphanedBlocks(self: *BeaconNode, current_epoch: u64) u64 {
+    if (current_epoch == 0) return 0;
+    const fc = self.chain.forkChoice();
+    const non_ancestors = fc.getAllNonAncestorBlocks(self.allocator, fc.head.block_root, fc.head.payload_status) catch
+        return 0;
+    defer self.allocator.free(non_ancestors);
+
+    var count: u64 = 0;
+    const previous_epoch = current_epoch - 1;
+    for (non_ancestors) |block| {
+        if (computeEpochAtSlot(block.slot) == previous_epoch) count += 1;
+    }
+    return count;
 }
 
 fn monotonicDelta(current: u64, previous: ?u64) u64 {
@@ -1636,6 +2154,13 @@ fn logPerSlotStatus(self: *BeaconNode, current_slot: u64) void {
     const finalized = self.chainQuery().finalizedCheckpoint();
     const sync = self.getSyncStatus();
     const connected_peers: u32 = if (self.peer_manager) |pm| pm.peerCount() else 0;
+    const sync_snapshot = if (self.sync_service_inst) |sync_svc| sync_svc.metricsSnapshot() else null;
+    const peer_sync_distance = if (sync_snapshot) |snapshot|
+        snapshot.best_peer_slot -| snapshot.local_head_slot
+    else
+        0;
+    const sync_mode = if (sync_snapshot) |snapshot| @tagName(snapshot.mode) else "none";
+    const gossip_state = if (sync_snapshot) |snapshot| @tagName(snapshot.gossip_state) else "unknown";
     const exec_forkchoice = self.chainQuery().executionForkchoiceState(head.root);
     const exec_head = if (exec_forkchoice) |fc| fc.head_block_hash else std.mem.zeroes([32]u8);
     const ctx = .{
@@ -1649,8 +2174,11 @@ fn logPerSlotStatus(self: *BeaconNode, current_slot: u64) void {
         &std.fmt.bytesToHex(finalized.root[0..4], .lower),
         connected_peers,
         sync.sync_distance,
+        peer_sync_distance,
+        sync_mode,
+        gossip_state,
     };
-    const fmt = "slot={d} head_slot={d} head_lag_slots={d} head_root={s}... exec_status={s} exec_head={s}... finalized_epoch={d} finalized_root={s}... peers={d} sync_distance={d}";
+    const fmt = "slot={d} head_slot={d} head_lag_slots={d} head_root={s}... exec_status={s} exec_head={s}... finalized_epoch={d} finalized_root={s}... peers={d} wall_sync_distance={d} peer_sync_distance={d} sync_mode={s} gossip_state={s}";
 
     switch (slotStatusPhase(sync, connected_peers)) {
         .synced => log.info("Synced " ++ fmt, ctx),
@@ -1662,6 +2190,7 @@ fn logPerSlotStatus(self: *BeaconNode, current_slot: u64) void {
 fn advanceChainClock(self: *BeaconNode, io: std.Io) void {
     const clock = self.clock orelse return;
     const current_slot = clock.currentSlot(io) orelse return;
+    const first_tracked_slot = if (self.last_slot_tick) |last_slot| last_slot + 1 else current_slot;
 
     if (self.last_slot_tick) |last_slot| {
         if (current_slot <= last_slot) return;
@@ -1669,6 +2198,8 @@ fn advanceChainClock(self: *BeaconNode, io: std.Io) void {
 
     self.chainService().onSlot(current_slot);
     self.last_slot_tick = current_slot;
+    self.noteHeadCatchupSlotsStarted(first_tracked_slot, current_slot);
+    self.observeHeadCatchup(self.getHead().slot);
     logPerSlotStatus(self, current_slot);
 
     self.queueCurrentOptimisticHeadRevalidation();
@@ -1741,7 +2272,7 @@ fn dialDirectPeer(self: *BeaconNode, io: std.Io, svc: *networking.P2pService, ad
 }
 
 fn initDiscoveryService(self: *BeaconNode) !void {
-    const fork_digest = self.config.forkDigestAtSlot(
+    const fork_digest = self.config.networkingForkDigestAtSlot(
         self.currentHeadSlot(),
         self.genesis_validators_root,
     );
@@ -1920,17 +2451,17 @@ fn discoveryDialTask(
     job: DiscoveryDialJob,
 ) void {
     const peer_addr = Multiaddr.fromString(self.allocator, job.ma_str) catch |err| {
-        enqueueDiscoveryDialCompletion(self, io, job.toFailure(err));
+        enqueueDiscoveryDialCompletion(self, io, job.toFailure(io, err));
         return;
     };
     defer peer_addr.deinit();
 
     const peer_id = svc.dial(io, peer_addr) catch |err| {
-        enqueueDiscoveryDialCompletion(self, io, job.toFailure(err));
+        enqueueDiscoveryDialCompletion(self, io, job.toFailure(io, err));
         return;
     };
 
-    enqueueDiscoveryDialCompletion(self, io, job.toSuccess(peer_id));
+    enqueueDiscoveryDialCompletion(self, io, job.toSuccess(io, peer_id));
 }
 
 fn drainCompletedDiscoveryDials(
@@ -1965,7 +2496,15 @@ fn drainCompletedDiscoveryDials(
                     }
                 }
 
-                log.debug("Connected to discovered peer {s} via {s}", .{ success.peer_id, success.ma_str });
+                if (self.metrics) |metrics| {
+                    metrics.discovery_dials_total.incr(.{ .outcome = "success" }) catch {};
+                    metrics.discovery_dial_time_ns_total.incrBy(.{ .outcome = "success" }, success.elapsed_ns) catch {};
+                }
+                log.debug("Connected to discovered peer {s} via {s} elapsed_ms={d}", .{
+                    success.peer_id,
+                    success.ma_str,
+                    success.elapsed_ns / std.time.ns_per_ms,
+                });
                 did_work = registerConnectedPeer(
                     self,
                     io,
@@ -1980,7 +2519,15 @@ fn drainCompletedDiscoveryDials(
                 if (self.peer_manager) |peer_manager| {
                     notePeerDisconnected(self, peer_manager, failure.predicted_peer_id, now_ms);
                 }
-                log.debug("Discovered peer dial failed via {s}: {}", .{ failure.ma_str, failure.err });
+                if (self.metrics) |metrics| {
+                    metrics.discovery_dials_total.incr(.{ .outcome = "failure" }) catch {};
+                    metrics.discovery_dial_time_ns_total.incrBy(.{ .outcome = "failure" }, failure.elapsed_ns) catch {};
+                }
+                log.debug("Discovered peer dial failed via {s}: {} elapsed_ms={d}", .{
+                    failure.ma_str,
+                    failure.err,
+                    failure.elapsed_ns / std.time.ns_per_ms,
+                });
                 did_work = true;
             },
         }
@@ -2276,6 +2823,7 @@ fn dialDiscoveredPeers(
             .predicted_peer_id = predicted_peer_id,
             .node_id = peer.node_id,
             .pubkey = peer.pubkey,
+            .started_at_ns = timestampNowNs(io),
         } });
         did_work = true;
     }
@@ -2407,6 +2955,9 @@ fn registerConnectedPeer(
     if (!was_connected) {
         if (self.sync_callback_ctx) |cb_ctx| cb_ctx.notePeerConnected(peer_id);
         if (self.metrics) |metrics| metrics.peer_connected_total.incr();
+        svc.openGossipsubStreamAsync(io, peer_id) catch |err| {
+            log.debug("Failed to open outbound gossipsub stream for {s}: {}", .{ peer_id, err });
+        };
         // Mirror Lodestar's connect path: kick the initial req/resp handshake
         // immediately for fresh outbound peers, but keep the actual req/resp I/O
         // off the main node loop so sync imports are not blocked behind Status.
@@ -2602,6 +3153,7 @@ fn initSyncPipeline(self: *BeaconNode) !void {
     const sync_svc = try self.allocator.create(SyncService);
     sync_svc.* = SyncService.init(
         self.allocator,
+        self.io,
         cb_ctx.syncServiceCallbacks(),
         self.currentHeadSlot(),
         finalized_epoch,
@@ -2749,6 +3301,7 @@ fn fetchBlobSidecarsByRangeForMetas(
     var req_ssz: [networking.messages.BlobSidecarsByRangeRequest.fixed_size]u8 = undefined;
     _ = networking.messages.BlobSidecarsByRangeRequest.serializeIntoBytes(&request, &req_ssz);
     try req_resp_encoding.writeRequestToStream(self.allocator, io, &outbound.stream, &req_ssz);
+    outbound.noteRequestPayload(req_ssz.len);
     outbound.stream.closeWrite(io);
     request_outcome = .malformed_response;
 
@@ -2759,6 +3312,7 @@ fn fetchBlobSidecarsByRangeForMetas(
     defer reader.deinit();
 
     while (try reader.next(io, &outbound.stream)) |decoded| {
+        outbound.noteResponseChunk(decoded.ssz_bytes.len);
         if (decoded.result != .success) {
             self.allocator.free(decoded.ssz_bytes);
             request_outcome = responseCodeOutcome(decoded.result);
@@ -2771,7 +3325,7 @@ fn fetchBlobSidecarsByRangeForMetas(
 
         const slot = sidecar.signed_block_header.message.slot;
         const context_bytes = decoded.context_bytes orelse return error.MissingContextBytes;
-        const expected_digest = self.config.forkDigestAtSlot(slot, self.genesis_validators_root);
+        const expected_digest = self.config.networkingForkDigestAtSlot(slot, self.genesis_validators_root);
         if (!std.mem.eql(u8, &context_bytes, &expected_digest)) return error.ForkDigestMismatch;
 
         var block_root: [32]u8 = undefined;
@@ -2882,6 +3436,7 @@ fn fetchBlobSidecarsByRootForMeta(
     defer self.allocator.free(request_bytes);
     _ = networking.messages.BlobSidecarsByRootRequest.serializeIntoBytes(&request, request_bytes);
     try req_resp_encoding.writeRequestToStream(self.allocator, io, &outbound.stream, request_bytes);
+    outbound.noteRequestPayload(request_bytes.len);
     outbound.stream.closeWrite(io);
     request_outcome = .malformed_response;
 
@@ -2892,6 +3447,7 @@ fn fetchBlobSidecarsByRootForMeta(
     defer reader.deinit();
 
     while (try reader.next(io, &outbound.stream)) |decoded| {
+        outbound.noteResponseChunk(decoded.ssz_bytes.len);
         if (decoded.result != .success) {
             self.allocator.free(decoded.ssz_bytes);
             request_outcome = responseCodeOutcome(decoded.result);
@@ -2903,7 +3459,7 @@ fn fetchBlobSidecarsByRootForMeta(
         BlobSidecar.deserializeFromBytes(decoded.ssz_bytes, &sidecar) catch return error.MalformedBlobSidecar;
 
         const context_bytes = decoded.context_bytes orelse return error.MissingContextBytes;
-        const expected_digest = self.config.forkDigestAtSlot(sidecar.signed_block_header.message.slot, self.genesis_validators_root);
+        const expected_digest = self.config.networkingForkDigestAtSlot(sidecar.signed_block_header.message.slot, self.genesis_validators_root);
         if (!std.mem.eql(u8, &context_bytes, &expected_digest)) return error.ForkDigestMismatch;
 
         var block_root: [32]u8 = undefined;
@@ -2946,6 +3502,28 @@ fn fetchBlobSidecarsByRootForMeta(
     }
 
     request_outcome = .success;
+}
+
+fn verifyDataColumnSidecarWithMetrics(
+    self: *BeaconNode,
+    column_index: u64,
+    commitments: []const [48]u8,
+    cells: []const [kzg_mod.BYTES_PER_CELL]u8,
+    proofs: []const [48]u8,
+) !void {
+    const started_ns = timestampNowNs(self.io);
+    try self.chainService().verifyDataColumnSidecar(
+        self.allocator,
+        column_index,
+        commitments,
+        cells,
+        proofs,
+    );
+    if (self.metrics) |metrics| {
+        const finished_ns = timestampNowNs(self.io);
+        const elapsed_ns = if (finished_ns > started_ns) finished_ns - started_ns else 0;
+        metrics.observeDataColumnKzgVerification(@as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(std.time.ns_per_s)));
+    }
 }
 
 fn fetchDataColumnsByRangeForMetas(
@@ -3032,6 +3610,7 @@ fn fetchDataColumnsByRangeOnce(
     defer self.allocator.free(request_bytes);
     _ = networking.messages.DataColumnSidecarsByRangeRequest.serializeIntoBytes(&filtered_request, request_bytes);
     try req_resp_encoding.writeRequestToStream(self.allocator, io, &outbound.stream, request_bytes);
+    outbound.noteRequestPayload(request_bytes.len);
     outbound.stream.closeWrite(io);
     request_outcome = .malformed_response;
 
@@ -3046,6 +3625,7 @@ fn fetchDataColumnsByRangeOnce(
     defer reader.deinit();
 
     while (try reader.next(io, &outbound.stream)) |decoded| {
+        outbound.noteResponseChunk(decoded.ssz_bytes.len);
         if (decoded.result != .success) {
             self.allocator.free(decoded.ssz_bytes);
             request_outcome = responseCodeOutcome(decoded.result);
@@ -3059,7 +3639,7 @@ fn fetchDataColumnsByRangeOnce(
 
         const slot = sidecar.signed_block_header.message.slot;
         const context_bytes = decoded.context_bytes orelse return error.MissingContextBytes;
-        const expected_digest = self.config.forkDigestAtSlot(slot, self.genesis_validators_root);
+        const expected_digest = self.config.networkingForkDigestAtSlot(slot, self.genesis_validators_root);
         if (!std.mem.eql(u8, &context_bytes, &expected_digest)) return error.ForkDigestMismatch;
 
         var block_root: [32]u8 = undefined;
@@ -3085,8 +3665,8 @@ fn fetchDataColumnsByRangeOnce(
             }
         }
 
-        try self.chainService().verifyDataColumnSidecar(
-            self.allocator,
+        try verifyDataColumnSidecarWithMetrics(
+            self,
             sidecar.index,
             sidecar.kzg_commitments.items,
             sidecar.column.items,
@@ -3303,6 +3883,7 @@ fn fetchDataColumnsByRootOnceForMetas(
     defer outbound.finish(io, request_outcome);
 
     try req_resp_encoding.writeRequestToStream(self.allocator, io, &outbound.stream, request_bytes);
+    outbound.noteRequestPayload(request_bytes.len);
     outbound.stream.closeWrite(io);
     request_outcome = .malformed_response;
 
@@ -3317,6 +3898,7 @@ fn fetchDataColumnsByRootOnceForMetas(
     defer reader.deinit();
 
     while (try reader.next(io, &outbound.stream)) |decoded| {
+        outbound.noteResponseChunk(decoded.ssz_bytes.len);
         if (decoded.result != .success) {
             self.allocator.free(decoded.ssz_bytes);
             request_outcome = responseCodeOutcome(decoded.result);
@@ -3330,7 +3912,7 @@ fn fetchDataColumnsByRootOnceForMetas(
 
         const slot = sidecar.signed_block_header.message.slot;
         const context_bytes = decoded.context_bytes orelse return error.MissingContextBytes;
-        const expected_digest = self.config.forkDigestAtSlot(slot, self.genesis_validators_root);
+        const expected_digest = self.config.networkingForkDigestAtSlot(slot, self.genesis_validators_root);
         if (!std.mem.eql(u8, &context_bytes, &expected_digest)) return error.ForkDigestMismatch;
 
         var block_root: [32]u8 = undefined;
@@ -3356,8 +3938,8 @@ fn fetchDataColumnsByRootOnceForMetas(
             }
         }
 
-        try self.chainService().verifyDataColumnSidecar(
-            self.allocator,
+        try verifyDataColumnSidecarWithMetrics(
+            self,
             sidecar.index,
             sidecar.kzg_commitments.items,
             sidecar.column.items,
@@ -3411,6 +3993,7 @@ fn fetchDataColumnsByRootOnce(
     _ = DataColumnSidecarsByRootRequest.serializeIntoBytes(&request, request_bytes);
 
     try req_resp_encoding.writeRequestToStream(self.allocator, io, &outbound.stream, request_bytes);
+    outbound.noteRequestPayload(request_bytes.len);
     outbound.stream.closeWrite(io);
     request_outcome = .malformed_response;
 
@@ -3424,6 +4007,7 @@ fn fetchDataColumnsByRootOnce(
     const blob_commitments = try meta.any_signed.beaconBlock().beaconBlockBody().blobKzgCommitments();
 
     while (try reader.next(io, &outbound.stream)) |decoded| {
+        outbound.noteResponseChunk(decoded.ssz_bytes.len);
         if (decoded.result != .success) {
             self.allocator.free(decoded.ssz_bytes);
             request_outcome = responseCodeOutcome(decoded.result);
@@ -3436,7 +4020,7 @@ fn fetchDataColumnsByRootOnce(
         defer DataColumnSidecar.deinit(self.allocator, &sidecar);
 
         const context_bytes = decoded.context_bytes orelse return error.MissingContextBytes;
-        const expected_digest = self.config.forkDigestAtSlot(sidecar.signed_block_header.message.slot, self.genesis_validators_root);
+        const expected_digest = self.config.networkingForkDigestAtSlot(sidecar.signed_block_header.message.slot, self.genesis_validators_root);
         if (!std.mem.eql(u8, &context_bytes, &expected_digest)) return error.ForkDigestMismatch;
 
         var block_root: [32]u8 = undefined;
@@ -3457,8 +4041,8 @@ fn fetchDataColumnsByRootOnce(
             }
         }
 
-        try self.chainService().verifyDataColumnSidecar(
-            self.allocator,
+        try verifyDataColumnSidecarWithMetrics(
+            self,
             sidecar.index,
             sidecar.kzg_commitments.items,
             sidecar.column.items,
@@ -3693,6 +4277,7 @@ fn fetchBlockByRoot(
     defer outbound.finish(io, request_outcome);
 
     try req_resp_encoding.writeRequestToStream(self.allocator, io, &outbound.stream, &root);
+    outbound.noteRequestPayload(root.len);
     outbound.stream.closeWrite(io);
     request_outcome = .malformed_response;
 
@@ -3703,6 +4288,7 @@ fn fetchBlockByRoot(
     defer reader.deinit();
 
     const decoded = (try reader.next(io, &outbound.stream)) orelse return error.NoBlockReturned;
+    outbound.noteResponseChunk(decoded.ssz_bytes.len);
     if (decoded.result != .success) {
         self.allocator.free(decoded.ssz_bytes);
         request_outcome = responseCodeOutcome(decoded.result);
@@ -3737,6 +4323,7 @@ fn fetchRawBlocksByRange(
     var req_ssz: [networking.messages.BeaconBlocksByRangeRequest.fixed_size]u8 = undefined;
     _ = networking.messages.BeaconBlocksByRangeRequest.serializeIntoBytes(&request, &req_ssz);
     try req_resp_encoding.writeRequestToStream(self.allocator, io, &outbound.stream, &req_ssz);
+    outbound.noteRequestPayload(req_ssz.len);
     outbound.stream.closeWrite(io);
     request_outcome = .malformed_response;
 
@@ -3765,6 +4352,7 @@ fn fetchRawBlocksByRange(
             }
             return err;
         } orelse break;
+        outbound.noteResponseChunk(decoded.ssz_bytes.len);
         if (decoded.result != .success) {
             self.allocator.free(decoded.ssz_bytes);
             request_outcome = responseCodeOutcome(decoded.result);
@@ -3804,7 +4392,7 @@ fn validateFetchedBlockRangeChunk(
     }
 
     const chunk_context = context_bytes orelse return error.MissingContextBytes;
-    const expected_digest = self.config.forkDigestAtSlot(slot, self.genesis_validators_root);
+    const expected_digest = self.config.networkingForkDigestAtSlot(slot, self.genesis_validators_root);
     if (!std.mem.eql(u8, &chunk_context, &expected_digest)) return error.ForkDigestMismatch;
 
     return slot;
@@ -3855,10 +4443,12 @@ fn sendStatus(
         var status_ssz: [StatusMessageV2.fixed_size]u8 = undefined;
         _ = StatusMessageV2.serializeIntoBytes(&our_status_v2, &status_ssz);
         try req_resp_encoding.writeRequestToStream(self.allocator, io, &outbound.stream, &status_ssz);
+        outbound.noteRequestPayload(status_ssz.len);
     } else {
         var status_ssz: [StatusMessage.fixed_size]u8 = undefined;
         _ = StatusMessage.serializeIntoBytes(&our_status, &status_ssz);
         try req_resp_encoding.writeRequestToStream(self.allocator, io, &outbound.stream, &status_ssz);
+        outbound.noteRequestPayload(status_ssz.len);
     }
     outbound.stream.closeWrite(io);
     request_outcome = .malformed_response;
@@ -3873,6 +4463,7 @@ fn sendStatus(
         log.debug("Status: peer sent empty response", .{});
         return error.EmptyResponse;
     };
+    outbound.noteResponseChunk(decoded.ssz_bytes.len);
     defer self.allocator.free(decoded.ssz_bytes);
 
     if (decoded.result != .success) {
@@ -3957,6 +4548,7 @@ fn requestPeerPing(
     _ = networking.messages.Ping.serializeIntoBytes(&local_seq, &ping_ssz);
 
     try req_resp_encoding.writeRequestToStream(self.allocator, io, &outbound.stream, &ping_ssz);
+    outbound.noteRequestPayload(ping_ssz.len);
     outbound.stream.closeWrite(io);
     request_outcome = .malformed_response;
 
@@ -3967,6 +4559,7 @@ fn requestPeerPing(
     defer reader.deinit();
 
     const decoded = (try reader.next(io, &outbound.stream)) orelse return error.EmptyResponse;
+    outbound.noteResponseChunk(decoded.ssz_bytes.len);
     defer self.allocator.free(decoded.ssz_bytes);
 
     if (decoded.result != .success) {
@@ -4075,6 +4668,7 @@ fn requestPeerMetadataAttempt(
     defer outbound.finish(io, request_outcome);
 
     try req_resp_encoding.writeRequestToStream(self.allocator, io, &outbound.stream, &.{});
+    outbound.noteRequestPayload(0);
     outbound.stream.closeWrite(io);
     request_outcome = .malformed_response;
 
@@ -4106,6 +4700,7 @@ fn requestPeerMetadataAttempt(
         );
         return error.EmptyResponse;
     };
+    outbound.noteResponseChunk(decoded.ssz_bytes.len);
     defer self.allocator.free(decoded.ssz_bytes);
 
     if (decoded.result != .success) {
@@ -4170,9 +4765,44 @@ fn reportReqRespFetchFailure(
     protocol: ReqRespMaintenanceProtocol,
     err: anyerror,
 ) void {
+    if (self.metrics) |metrics| {
+        metrics.incrReqRespMaintenanceError(
+            reqRespMaintenanceMethod(protocol),
+            reqRespMaintenanceErrorLabel(err),
+        );
+    }
     const pm = self.peer_manager orelse return;
     const action = peer_scoring.reqRespFailureAction(protocol, err) orelse return;
     _ = pm.reportPeer(peer_id, action, .rpc, currentUnixTimeMs(io));
+}
+
+fn reqRespMaintenanceMethod(protocol: ReqRespMaintenanceProtocol) networking.Method {
+    return switch (protocol) {
+        .status => .status,
+        .goodbye => .goodbye,
+        .ping => .ping,
+        .metadata => .metadata,
+        .beacon_blocks_by_range => .beacon_blocks_by_range,
+        .beacon_blocks_by_root => .beacon_blocks_by_root,
+        .blob_sidecars_by_range => .blob_sidecars_by_range,
+        .blob_sidecars_by_root => .blob_sidecars_by_root,
+        .data_column_sidecars_by_range => .data_column_sidecars_by_range,
+        .data_column_sidecars_by_root => .data_column_sidecars_by_root,
+    };
+}
+
+fn reqRespMaintenanceErrorLabel(err: anyerror) []const u8 {
+    return switch (err) {
+        error.RequestSelfRateLimited => "self_rate_limited",
+        error.PeerNotConnected,
+        error.ConnectionClosed,
+        error.ConnectionResetByPeer,
+        error.UnexpectedEof,
+        error.EndOfStream,
+        error.BrokenPipe,
+        => "transport_closed",
+        else => @errorName(err),
+    };
 }
 
 fn noteSyncPeerGoneIfTransportClosed(
@@ -4204,6 +4834,12 @@ fn handleReqRespMaintenanceFailure(
     protocol: ReqRespMaintenanceProtocol,
     err: anyerror,
 ) void {
+    if (self.metrics) |metrics| {
+        metrics.incrReqRespMaintenanceError(
+            reqRespMaintenanceMethod(protocol),
+            reqRespMaintenanceErrorLabel(err),
+        );
+    }
     log.debug("Peer maintenance {s} failed for {s}: {}", .{ @tagName(protocol), peer_id, err });
 
     if (err == error.RequestSelfRateLimited) {
@@ -4264,6 +4900,7 @@ fn sendGoodbye(
     _ = networking.messages.GoodbyeReason.serializeIntoBytes(&reason_code, &goodbye_ssz);
 
     try req_resp_encoding.writeRequestToStream(self.allocator, io, &outbound.stream, &goodbye_ssz);
+    outbound.noteRequestPayload(goodbye_ssz.len);
     outbound.stream.closeWrite(io);
     request_outcome = .success;
 }
@@ -4296,6 +4933,7 @@ fn initGossipHandler(self: *BeaconNode) void {
     const callbacks = gossip_node_callbacks_mod;
     self.gossip_handler = GossipHandler.create(
         self.allocator,
+        self.io,
         @ptrCast(self),
         &callbacks.importBlockFromGossip,
         &callbacks.getForkSeqForSlot,

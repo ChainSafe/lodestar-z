@@ -244,7 +244,7 @@ fn reqRespGetForkSeqForSlot(ptr: *anyopaque, slot: u64) ForkSeq {
 
 fn reqRespGetForkDigest(ptr: *anyopaque, slot: u64) [4]u8 {
     const node = requestNode(ptr);
-    return node.config.forkDigestAtSlot(slot, node.genesis_validators_root);
+    return node.config.networkingForkDigestAtSlot(slot, node.genesis_validators_root);
 }
 
 fn reqRespOnGoodbye(ptr: *anyopaque, peer_id: ?[]const u8, reason: u64) void {
@@ -270,10 +270,20 @@ fn reqRespOnRequestCompleted(
     method: Method,
     outcome: ReqRespRequestOutcome,
     response_time_seconds: f64,
+    request_payload_bytes: u64,
+    response_payload_bytes: u64,
+    response_chunks: u64,
 ) void {
     const node = requestNode(ptr);
     if (node.metrics) |metrics| {
-        metrics.observeReqRespInbound(method, outcome, response_time_seconds);
+        metrics.observeReqRespInbound(
+            method,
+            outcome,
+            response_time_seconds,
+            request_payload_bytes,
+            response_payload_bytes,
+            response_chunks,
+        );
     }
 }
 

@@ -43,6 +43,7 @@ const BeaconProposerCache = @import("beacon_proposer_cache.zig").BeaconProposerC
 const DataAvailabilityManager = @import("data_availability.zig").DataAvailabilityManager;
 const state_work_service_mod = @import("state_work_service.zig");
 const StateWorkService = state_work_service_mod.StateWorkService;
+const StateWorkServiceMetricsSnapshot = state_work_service_mod.MetricsSnapshot;
 const PendingBlockIngress = @import("block_ingress.zig").PendingBlockIngress;
 const PayloadEnvelopeIngress = @import("payload_envelope_ingress.zig").PayloadEnvelopeIngress;
 const Service = @import("service.zig").Service;
@@ -479,9 +480,19 @@ pub const MetricsSnapshot = struct {
     checkpoint_state_cache_entries: u64,
     checkpoint_state_datastore_entries: u64,
     queued_state_regen_cache_hits: u64,
+    queued_state_regen_cache_misses: u64,
     queued_state_regen_queue_hits: u64,
     queued_state_regen_dropped: u64,
     queued_state_regen_queue_len: u64,
+    state_work_pending_jobs: u64,
+    state_work_completed_jobs: u64,
+    state_work_active_jobs: u64,
+    state_work_submitted_total: u64,
+    state_work_rejected_total: u64,
+    state_work_success_total: u64,
+    state_work_failure_total: u64,
+    state_work_execution_time_ns_total: u64,
+    state_work_last_execution_time_ns: u64,
     forkchoice_nodes: u64,
     forkchoice_block_roots: u64,
     forkchoice_votes: u64,
@@ -585,6 +596,7 @@ pub const Runtime = struct {
 
     pub fn metricsSnapshot(self: *const Runtime) MetricsSnapshot {
         const queued_regen_metrics = self.chain.queued_regen.getMetrics();
+        const state_work_metrics: StateWorkServiceMetricsSnapshot = self.chain.state_work_service.metricsSnapshot();
         const da_metrics = self.da_manager.metricsSnapshot();
         const pending_block_ingress_metrics = self.pending_block_ingress.metricsSnapshot();
         const payload_envelope_ingress_metrics = self.payload_envelope_ingress.metricsSnapshot();
@@ -604,9 +616,19 @@ pub const Runtime = struct {
             .checkpoint_state_cache_entries = @intCast(self.checkpoint_state_cache.size()),
             .checkpoint_state_datastore_entries = @intCast(self.cp_datastore.count()),
             .queued_state_regen_cache_hits = queued_regen_metrics.cache_hits,
+            .queued_state_regen_cache_misses = queued_regen_metrics.cache_misses,
             .queued_state_regen_queue_hits = queued_regen_metrics.queue_hits,
             .queued_state_regen_dropped = queued_regen_metrics.dropped,
             .queued_state_regen_queue_len = @intCast(queued_regen_metrics.queue_len),
+            .state_work_pending_jobs = state_work_metrics.pending_jobs,
+            .state_work_completed_jobs = state_work_metrics.completed_jobs,
+            .state_work_active_jobs = state_work_metrics.active_jobs,
+            .state_work_submitted_total = state_work_metrics.submitted_total,
+            .state_work_rejected_total = state_work_metrics.rejected_total,
+            .state_work_success_total = state_work_metrics.success_total,
+            .state_work_failure_total = state_work_metrics.failure_total,
+            .state_work_execution_time_ns_total = state_work_metrics.execution_time_ns_total,
+            .state_work_last_execution_time_ns = state_work_metrics.last_execution_time_ns,
             .forkchoice_nodes = forkchoice_metrics.proto_array_nodes,
             .forkchoice_block_roots = forkchoice_metrics.proto_array_block_roots,
             .forkchoice_votes = forkchoice_metrics.votes,

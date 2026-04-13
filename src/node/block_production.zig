@@ -21,6 +21,11 @@ const BlockType = fork_types.BlockType;
 const AnyExecutionPayload = fork_types.AnyExecutionPayload;
 const AnyExecutionPayloadHeader = fork_types.AnyExecutionPayloadHeader;
 const execution_runtime_mod = @import("execution_runtime.zig");
+const BeaconMetrics = @import("metrics.zig").BeaconMetrics;
+const BlockProductionSource = BeaconMetrics.BlockProductionSource;
+const BlockProductionSelectionReason = BeaconMetrics.BlockProductionSelectionReason;
+const BlockProductionStep = BeaconMetrics.BlockProductionStep;
+const BlockProductionStepPath = BeaconMetrics.BlockProductionStepPath;
 
 const BLOCK_PRODUCTION_RACE_CUTOFF_MS: u64 = 2_000;
 const BLOCK_PRODUCTION_RACE_TIMEOUT_MS: u64 = 12_000;
@@ -281,6 +286,59 @@ fn payloadFeeRecipientForSlot(self: *BeaconNode, slot: u64) ?[20]u8 {
 fn slotStartTimestamp(self: *BeaconNode, slot: u64) u64 {
     if (self.clock) |clock| return clock.slotStartSeconds(slot);
     return self.api_context.genesis_time + slot * self.config.chain.SECONDS_PER_SLOT;
+}
+
+fn nowNs(io: std.Io) u64 {
+    return @intCast(std.Io.Timestamp.now(io, .awake).toNanoseconds());
+}
+
+fn nsToSeconds(ns: u64) f64 {
+    return @as(f64, @floatFromInt(ns)) / 1e9;
+}
+
+fn observeBlockProductionStep(
+    self: *BeaconNode,
+    path: BlockProductionStepPath,
+    step: BlockProductionStep,
+    started_at_ns: u64,
+) void {
+    if (self.metrics) |m| {
+        const elapsed_ns = nowNs(self.io) -| started_at_ns;
+        m.observeBlockProductionStep(path, step, nsToSeconds(elapsed_ns));
+    }
+}
+
+fn recordBlockProductionSelection(
+    self: *BeaconNode,
+    slot: u64,
+    source: BlockProductionSource,
+    reason: BlockProductionSelectionReason,
+) void {
+    if (self.metrics) |m| {
+        m.incrBlockProductionSelection(source, reason);
+    }
+    log.debug("block production selection: slot={d} source={s} reason={s}", .{
+        slot,
+        @tagName(source),
+        @tagName(reason),
+    });
+}
+
+fn builderSelectionReasonWithoutPayload(
+    fetched: *const execution_runtime_mod.ProposalSourceFetchOutcome,
+) BlockProductionSelectionReason {
+    if (fetched.engine_error != null) return .engine_error;
+    return .engine_pending;
+}
+
+fn engineSelectionReasonWithPayload(
+    fetched: *const execution_runtime_mod.ProposalSourceFetchOutcome,
+    builder_boost_factor: u64,
+) BlockProductionSelectionReason {
+    if (builder_boost_factor == 0) return .boost_zero;
+    if (fetched.builder_no_bid) return .builder_no_bid;
+    if (fetched.builder_error != null) return .builder_error;
+    return .builder_pending;
 }
 
 fn prepareProposalContext(
@@ -561,22 +619,33 @@ fn assembleBlindedBlockFromBuilderBid(
 }
 
 pub fn produceFullBlock(self: *BeaconNode, slot: u64, prod_config: BlockProductionConfig) !ProducedBlock {
+    const prepare_started_ns = nowNs(self.io);
     const context = try prepareProposalContext(self, slot, prod_config);
+    observeBlockProductionStep(self, .shared, .prepare_context, prepare_started_ns);
 
+    const ensure_payload_started_ns = nowNs(self.io);
     try ensureExecutionPayloadForTemplate(self, &context.snapshot, context.config.fee_recipient);
+    observeBlockProductionStep(self, .engine, .ensure_payload, ensure_payload_started_ns);
     const payload_id = self.execution_runtime.cachedPayloadId() orelse return error.NoPayloadId;
 
     var payload_fetch = try self.execution_runtime.startPreparedPayloadFetch(payload_id);
     errdefer payload_fetch.deinit();
 
+    const template_started_ns = nowNs(self.io);
     const template = try self.chainService().buildProposalTemplate(context.snapshot, context.config);
+    observeBlockProductionStep(self, .shared, .build_template, template_started_ns);
+    const fetch_payload_started_ns = nowNs(self.io);
     const payload_result = payload_fetch.finish();
+    observeBlockProductionStep(self, .engine, .fetch_payload, fetch_payload_started_ns);
 
     switch (payload_result) {
         .pending => unreachable,
         .success => |resp| {
             clearCachedPayloadIdIfCurrent(self, &context.snapshot, payload_id);
-            return assembleFullBlockFromPayloadResponse(self, template, resp);
+            const assemble_started_ns = nowNs(self.io);
+            const block = try assembleFullBlockFromPayloadResponse(self, template, resp);
+            observeBlockProductionStep(self, .engine, .assemble, assemble_started_ns);
+            return block;
         },
         .unavailable => return error.NoEngineApi,
         .failure => |err| {
@@ -594,23 +663,40 @@ pub fn produceEngineOrBuilderProposal(
     builder_boost_factor: u64,
 ) !ProducedProposal {
     if (self.execution_runtime.builderApi() == null) {
-        return .{ .engine = try produceFullBlock(self, slot, prod_config) };
+        const block = try produceFullBlock(self, slot, prod_config);
+        recordBlockProductionSelection(self, slot, .engine, .builder_disabled);
+        return .{ .engine = block };
     }
-    switch (currentBuilderStatus(self)) {
+    const builder_status = currentBuilderStatus(self);
+    switch (builder_status) {
         .available => {},
         .unavailable, .circuit_breaker => {
-            return .{ .engine = try produceFullBlock(self, slot, prod_config) };
+            const block = try produceFullBlock(self, slot, prod_config);
+            recordBlockProductionSelection(
+                self,
+                slot,
+                .engine,
+                if (builder_status == .unavailable) .builder_unavailable else .builder_circuit_breaker,
+            );
+            return .{ .engine = block };
         },
     }
 
+    const prepare_started_ns = nowNs(self.io);
     const context = try prepareProposalContext(self, slot, prod_config);
+    observeBlockProductionStep(self, .shared, .prepare_context, prepare_started_ns);
 
+    const ensure_payload_started_ns = nowNs(self.io);
     try ensureExecutionPayloadForTemplate(self, &context.snapshot, context.config.fee_recipient);
+    observeBlockProductionStep(self, .engine, .ensure_payload, ensure_payload_started_ns);
     const payload_id = self.execution_runtime.cachedPayloadId() orelse return error.NoPayloadId;
     const proposer_pubkey = context.snapshot.proposer_pubkey;
     const parent_hash = context.snapshot.execution_parent_hash;
 
+    const template_started_ns = nowNs(self.io);
     const template = try self.chainService().buildProposalTemplate(context.snapshot, context.config);
+    observeBlockProductionStep(self, .shared, .build_template, template_started_ns);
+    const fetch_sources_started_ns = nowNs(self.io);
     var fetched = try self.execution_runtime.fetchProposalSources(
         self.allocator,
         payload_id,
@@ -621,6 +707,7 @@ pub fn produceEngineOrBuilderProposal(
         BLOCK_PRODUCTION_RACE_TIMEOUT_MS,
         builder_boost_factor == 0,
     );
+    observeBlockProductionStep(self, .race, .fetch_sources, fetch_sources_started_ns);
     defer fetched.deinit(self.execution_runtime, self.allocator);
 
     if (fetched.payload != null) {
@@ -652,7 +739,11 @@ pub fn produceEngineOrBuilderProposal(
                     return err;
                 },
             };
-            return .{ .builder = try assembleBlindedBlockFromBuilderBid(self, template, bid) };
+            const assemble_started_ns = nowNs(self.io);
+            const block = try assembleBlindedBlockFromBuilderBid(self, template, bid);
+            observeBlockProductionStep(self, .builder, .assemble, assemble_started_ns);
+            recordBlockProductionSelection(self, slot, .builder, builderSelectionReasonWithoutPayload(&fetched));
+            return .{ .builder = block };
         }
         if (fetched.engine_error) |err| return err;
         if (fetched.builder_error) |err| return err;
@@ -666,17 +757,34 @@ pub fn produceEngineOrBuilderProposal(
         if (local_payload.should_override_builder) {
             log.debug("Builder: local execution payload overrides builder for slot={d}", .{slot});
         }
-        return .{ .engine = try assembleFullBlockFromPayloadResponse(self, template, local_payload) };
+        const assemble_started_ns = nowNs(self.io);
+        const block = try assembleFullBlockFromPayloadResponse(self, template, local_payload);
+        observeBlockProductionStep(self, .engine, .assemble, assemble_started_ns);
+        recordBlockProductionSelection(
+            self,
+            slot,
+            .engine,
+            if (local_payload.should_override_builder) .builder_censorship_override else .boost_zero,
+        );
+        return .{ .engine = block };
     }
 
     const bid = fetched.takeBuilderBid() orelse {
-        return .{ .engine = try assembleFullBlockFromPayloadResponse(self, template, local_payload) };
+        const assemble_started_ns = nowNs(self.io);
+        const block = try assembleFullBlockFromPayloadResponse(self, template, local_payload);
+        observeBlockProductionStep(self, .engine, .assemble, assemble_started_ns);
+        recordBlockProductionSelection(self, slot, .engine, engineSelectionReasonWithPayload(&fetched, builder_boost_factor));
+        return .{ .engine = block };
     };
 
     validateBuilderHeaderGasLimit(self, slot, proposer_pubkey, bid.message.header.gas_limit) catch |err| switch (err) {
         error.BuilderHeaderGasLimitOutOfRange => {
             execution_mod.builder.freeBid(self.allocator, bid);
-            return .{ .engine = try assembleFullBlockFromPayloadResponse(self, template, local_payload) };
+            const assemble_started_ns = nowNs(self.io);
+            const block = try assembleFullBlockFromPayloadResponse(self, template, local_payload);
+            observeBlockProductionStep(self, .engine, .assemble, assemble_started_ns);
+            recordBlockProductionSelection(self, slot, .engine, .builder_header_gas_limit_rejected);
+            return .{ .engine = block };
         },
         else => {
             self.execution_runtime.freeGetPayloadResponse(local_payload);
@@ -700,11 +808,19 @@ pub fn produceEngineOrBuilderProposal(
             },
         );
         execution_mod.builder.freeBid(self.allocator, bid);
-        return .{ .engine = try assembleFullBlockFromPayloadResponse(self, template, local_payload) };
+        const assemble_started_ns = nowNs(self.io);
+        const block = try assembleFullBlockFromPayloadResponse(self, template, local_payload);
+        observeBlockProductionStep(self, .engine, .assemble, assemble_started_ns);
+        recordBlockProductionSelection(self, slot, .engine, .builder_value_not_competitive);
+        return .{ .engine = block };
     }
 
     self.execution_runtime.freeGetPayloadResponse(local_payload);
-    return .{ .builder = try assembleBlindedBlockFromBuilderBid(self, template, bid) };
+    const assemble_started_ns = nowNs(self.io);
+    const block = try assembleBlindedBlockFromBuilderBid(self, template, bid);
+    observeBlockProductionStep(self, .builder, .assemble, assemble_started_ns);
+    recordBlockProductionSelection(self, slot, .builder, .builder_value_higher);
+    return .{ .builder = block };
 }
 
 pub fn produceBuilderBlindedBlock(
@@ -743,7 +859,9 @@ pub fn produceBuilderBlindedBlock(
         },
     }
 
+    const prepare_started_ns = nowNs(self.io);
     const context = try prepareProposalContext(self, slot, prod_config);
+    observeBlockProductionStep(self, .shared, .prepare_context, prepare_started_ns);
 
     const proposer_pubkey = context.snapshot.proposer_pubkey;
     const parent_hash = context.snapshot.execution_parent_hash;
@@ -755,8 +873,12 @@ pub fn produceBuilderBlindedBlock(
     );
     errdefer builder_bid_fetch.deinit();
 
+    const template_started_ns = nowNs(self.io);
     const template = try self.chainService().buildProposalTemplate(context.snapshot, context.config);
+    observeBlockProductionStep(self, .shared, .build_template, template_started_ns);
+    const fetch_bid_started_ns = nowNs(self.io);
     const builder_bid_result = builder_bid_fetch.finish();
+    observeBlockProductionStep(self, .builder, .fetch_bid, fetch_bid_started_ns);
 
     switch (builder_bid_result) {
         .pending => unreachable,
@@ -769,7 +891,11 @@ pub fn produceBuilderBlindedBlock(
                 },
                 else => return err,
             };
-            return try assembleBlindedBlockFromBuilderBid(self, template, bid);
+            const assemble_started_ns = nowNs(self.io);
+            const block = try assembleBlindedBlockFromBuilderBid(self, template, bid);
+            observeBlockProductionStep(self, .builder, .assemble, assemble_started_ns);
+            recordBlockProductionSelection(self, slot, .builder, .engine_disabled);
+            return block;
         },
         .unavailable => {
             if (require_builder) return error.BuilderNotConfigured;
@@ -1213,6 +1339,9 @@ pub fn broadcastBlock(
         log.warn("failed to broadcast block at slot={d}: {}", .{ signed_block.message.slot, err });
         return;
     };
+    if (self.metrics) |metrics| {
+        metrics.observeGossipsubTopicSentBytes(.beacon_block, false, @intCast(buf.len));
+    }
 
     log.info("broadcast block via gossip: slot={d}", .{signed_block.message.slot});
 }

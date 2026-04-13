@@ -52,8 +52,19 @@ fn notifyRequestCompleted(
     method: protocol.Method,
     started_ns: i128,
     outcome: ReqRespRequestOutcome,
+    request_payload_bytes: u64,
+    response_payload_bytes: u64,
+    response_chunks: u64,
 ) void {
-    context.onRequestCompleted(context.ptr, method, outcome, requestElapsedSeconds(io, started_ns));
+    context.onRequestCompleted(
+        context.ptr,
+        method,
+        outcome,
+        requestElapsedSeconds(io, started_ns),
+        request_payload_bytes,
+        response_payload_bytes,
+        response_chunks,
+    );
 }
 
 fn makeProtocolHandler(
@@ -90,7 +101,7 @@ fn makeProtocolHandler(
 
                 log.debug("{s} request decode error: {}", .{ id, err });
                 try response_writer.writeError(.invalid_request, "Malformed request");
-                notifyRequestCompleted(self.context, io, method, started_ns, .decode_error);
+                notifyRequestCompleted(self.context, io, method, started_ns, .decode_error, 0, response_writer_ctx.payload_bytes, response_writer_ctx.chunk_count);
                 stream.closeWrite(io);
                 return;
             };
@@ -100,12 +111,30 @@ fn makeProtocolHandler(
                 switch (server_policy.allowInboundRequest(peerIdFromCtx(ctx), method, request_bytes)) {
                     .allow => {},
                     .deny_peer => {
-                        notifyRequestCompleted(self.context, io, method, started_ns, .rate_limited_peer);
+                        notifyRequestCompleted(
+                            self.context,
+                            io,
+                            method,
+                            started_ns,
+                            .rate_limited_peer,
+                            @intCast(request_bytes.len),
+                            response_writer_ctx.payload_bytes,
+                            response_writer_ctx.chunk_count,
+                        );
                         stream.closeWrite(io);
                         return;
                     },
                     .deny_global => {
-                        notifyRequestCompleted(self.context, io, method, started_ns, .rate_limited_global);
+                        notifyRequestCompleted(
+                            self.context,
+                            io,
+                            method,
+                            started_ns,
+                            .rate_limited_global,
+                            @intCast(request_bytes.len),
+                            response_writer_ctx.payload_bytes,
+                            response_writer_ctx.chunk_count,
+                        );
                         stream.closeWrite(io);
                         return;
                     },
@@ -122,8 +151,17 @@ fn makeProtocolHandler(
                 &response_writer,
             ) catch |err| {
                 log.debug("{s} handler error: {}", .{ id, err });
-                notifyRequestCompleted(self.context, io, method, started_ns, .internal_error);
                 try response_writer.writeError(.server_error, "Internal server error");
+                notifyRequestCompleted(
+                    self.context,
+                    io,
+                    method,
+                    started_ns,
+                    .internal_error,
+                    @intCast(request_bytes.len),
+                    response_writer_ctx.payload_bytes,
+                    response_writer_ctx.chunk_count,
+                );
                 stream.closeWrite(io);
                 return;
             };
@@ -137,6 +175,9 @@ fn makeProtocolHandler(
                     protocol.ReqRespRequestOutcome.fromResponseCode(result)
                 else
                     .internal_error,
+                @intCast(request_bytes.len),
+                response_writer_ctx.payload_bytes,
+                response_writer_ctx.chunk_count,
             );
             stream.closeWrite(io);
         }
@@ -174,6 +215,8 @@ fn StreamResponseWriter(comptime StreamPtr: type) type {
         io: Io,
         stream: StreamPtr,
         first_result: ?protocol.ResponseCode = null,
+        payload_bytes: u64 = 0,
+        chunk_count: u64 = 0,
 
         fn asWriter(self: *@This()) req_resp_handler.ResponseWriter {
             return .{
@@ -185,6 +228,8 @@ fn StreamResponseWriter(comptime StreamPtr: type) type {
         fn writeChunk(ptr: *anyopaque, chunk: ResponseChunk) anyerror!void {
             const self: *@This() = @ptrCast(@alignCast(ptr));
             if (self.first_result == null) self.first_result = chunk.result;
+            self.chunk_count +|= 1;
+            self.payload_bytes +|= @as(u64, @intCast(chunk.ssz_payload.len));
             return req_resp_encoding.writeResponseChunkToStream(
                 self.allocator,
                 self.io,

@@ -27,10 +27,12 @@ const range_sync_mod = @import("range_sync.zig");
 const RangeSync = range_sync_mod.RangeSync;
 const RangeSyncCallbacks = range_sync_mod.RangeSyncCallbacks;
 const RangeSyncStatus = range_sync_mod.RangeSyncStatus;
+const RangeSyncMetricsSnapshot = range_sync_mod.MetricsSnapshot;
 
 const unknown_block_mod = @import("unknown_block.zig");
 const UnknownBlockSync = unknown_block_mod.UnknownBlockSync;
 const UnknownBlockCallbacks = unknown_block_mod.UnknownBlockCallbacks;
+const UnknownBlockMetricsSnapshot = unknown_block_mod.MetricsSnapshot;
 
 const batch_mod = @import("batch.zig");
 const BatchBlock = batch_mod.BatchBlock;
@@ -54,6 +56,18 @@ pub const SyncMode = enum {
     range_sync,
     /// Synced with the network.
     synced,
+};
+
+pub const MetricsSnapshot = struct {
+    mode: SyncMode,
+    gossip_state: GossipState,
+    peer_count: u64,
+    best_peer_slot: u64,
+    local_head_slot: u64,
+    local_finalized_epoch: u64,
+    unknown_block_pending: u64,
+    unknown_block: UnknownBlockMetricsSnapshot,
+    range_sync: RangeSyncMetricsSnapshot,
 };
 
 /// Callback vtable provided by BeaconNode.
@@ -183,6 +197,7 @@ pub const SyncService = struct {
 
     pub fn init(
         allocator: Allocator,
+        io: std.Io,
         callbacks: SyncServiceCallbacks,
         local_head_slot: u64,
         local_finalized_epoch: u64,
@@ -208,7 +223,7 @@ pub const SyncService = struct {
             .allocator = allocator,
             .mode = .idle,
             .gossip_state = .enabled,
-            .range_sync = RangeSync.init(allocator, range_callbacks),
+            .range_sync = RangeSync.init(allocator, io, range_callbacks),
             .unknown_block_sync = UnknownBlockSync.init(allocator),
             .callbacks = callbacks,
             .local_head_slot = local_head_slot,
@@ -444,6 +459,21 @@ pub const SyncService = struct {
         return sync_distance <= sync_types.SYNC_DISTANCE_THRESHOLD;
     }
 
+    pub fn metricsSnapshot(self: *const SyncService) MetricsSnapshot {
+        const unknown_block = self.unknown_block_sync.metricsSnapshot();
+        return .{
+            .mode = self.mode,
+            .gossip_state = self.gossip_state,
+            .peer_count = @intCast(self.peer_count),
+            .best_peer_slot = self.best_peer_slot,
+            .local_head_slot = self.local_head_slot,
+            .local_finalized_epoch = self.local_finalized_epoch,
+            .unknown_block_pending = unknown_block.pending_blocks,
+            .unknown_block = unknown_block,
+            .range_sync = self.range_sync.metricsSnapshot(),
+        };
+    }
+
     // ── Internal ────────────────────────────────────────────────────
 
     fn pruneDisconnectedPeers(self: *SyncService) !void {
@@ -518,14 +548,31 @@ pub const SyncService = struct {
         const old_mode = self.mode;
         self.mode = new_mode;
 
+        const sync_distance = if (self.best_peer_slot > self.local_head_slot)
+            self.best_peer_slot - self.local_head_slot
+        else
+            0;
+        const range_state = self.range_sync.getState();
+        scoped_log.info(
+            "mode transition old={s} new={s} peer_count={d} local_head={d} best_peer={d} sync_distance={d} range_status={s}",
+            .{
+                @tagName(old_mode),
+                @tagName(new_mode),
+                self.peer_count,
+                self.local_head_slot,
+                self.best_peer_slot,
+                sync_distance,
+                @tagName(range_state.status),
+            },
+        );
+
         // Gossip gating: disable during range sync, enable otherwise.
         const new_gossip: GossipState = if (self.shouldEnableGossip()) .enabled else .disabled;
         if (new_gossip != self.gossip_state) {
             self.gossip_state = new_gossip;
+            scoped_log.info("gossip subscriptions {s}", .{@tagName(new_gossip)});
             self.callbacks.setGossipEnabled(new_gossip == .enabled);
         }
-
-        _ = old_mode;
     }
 };
 
@@ -590,7 +637,7 @@ const TestSyncServiceCallbacks = struct {
 test "SyncService: idle with no peers" {
     const allocator = std.testing.allocator;
     var tc = TestSyncServiceCallbacks{};
-    var svc = SyncService.init(allocator, tc.callbacks(), 0, 0);
+    var svc = SyncService.init(allocator, std.testing.io, tc.callbacks(), 0, 0);
     defer svc.deinit();
 
     try std.testing.expectEqual(SyncMode.idle, svc.mode);
@@ -603,7 +650,7 @@ test "SyncService: idle with no peers" {
 test "SyncService: transitions to range_sync on advanced peer" {
     const allocator = std.testing.allocator;
     var tc = TestSyncServiceCallbacks{};
-    var svc = SyncService.init(allocator, tc.callbacks(), 0, 0);
+    var svc = SyncService.init(allocator, std.testing.io, tc.callbacks(), 0, 0);
     defer svc.deinit();
 
     try svc.onPeerStatus("p1", .{
@@ -622,7 +669,7 @@ test "SyncService: synced when peer is within threshold" {
     const allocator = std.testing.allocator;
     var tc = TestSyncServiceCallbacks{};
     // Local head at 490, threshold is 32.
-    var svc = SyncService.init(allocator, tc.callbacks(), 490, 15);
+    var svc = SyncService.init(allocator, std.testing.io, tc.callbacks(), 490, 15);
     defer svc.deinit();
 
     try svc.onPeerStatus("p1", .{
@@ -641,7 +688,7 @@ test "SyncService: synced when peer is within threshold" {
 test "SyncService: peer disconnect" {
     const allocator = std.testing.allocator;
     var tc = TestSyncServiceCallbacks{};
-    var svc = SyncService.init(allocator, tc.callbacks(), 0, 0);
+    var svc = SyncService.init(allocator, std.testing.io, tc.callbacks(), 0, 0);
     defer svc.deinit();
 
     try svc.onPeerStatus("p1", .{
@@ -662,7 +709,7 @@ test "SyncService: tick prunes peers no longer connected" {
     const connected = [_][]const u8{"p1"};
     tc.connected_peers = connected[0..];
 
-    var svc = SyncService.init(allocator, tc.callbacks(), 0, 0);
+    var svc = SyncService.init(allocator, std.testing.io, tc.callbacks(), 0, 0);
     defer svc.deinit();
 
     try svc.onPeerStatus("p1", .{
@@ -689,7 +736,7 @@ test "SyncService: tick prunes peers no longer connected" {
 test "SyncService: gossip gating" {
     const allocator = std.testing.allocator;
     var tc = TestSyncServiceCallbacks{};
-    var svc = SyncService.init(allocator, tc.callbacks(), 0, 0);
+    var svc = SyncService.init(allocator, std.testing.io, tc.callbacks(), 0, 0);
     defer svc.deinit();
 
     // Initially idle — gossip should be enabled (we're not range syncing).
@@ -712,7 +759,7 @@ test "SyncService: gossip gating" {
 test "SyncService: getSyncStatus reports correct state" {
     const allocator = std.testing.allocator;
     var tc = TestSyncServiceCallbacks{};
-    var svc = SyncService.init(allocator, tc.callbacks(), 100, 3);
+    var svc = SyncService.init(allocator, std.testing.io, tc.callbacks(), 100, 3);
     defer svc.deinit();
 
     try svc.onPeerStatus("p1", .{
@@ -731,7 +778,7 @@ test "SyncService: getSyncStatus reports correct state" {
 test "SyncService: stores earliest available slot for range sync peers" {
     const allocator = std.testing.allocator;
     var tc = TestSyncServiceCallbacks{};
-    var svc = SyncService.init(allocator, tc.callbacks(), 0, 0);
+    var svc = SyncService.init(allocator, std.testing.io, tc.callbacks(), 0, 0);
     defer svc.deinit();
 
     try svc.onPeerStatus("p1", .{

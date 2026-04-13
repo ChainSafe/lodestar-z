@@ -15,7 +15,6 @@ const Allocator = std.mem.Allocator;
 const Sha256 = std.crypto.hash.sha2.Sha256;
 const db_mod = @import("db");
 const BeaconDB = db_mod.BeaconDB;
-
 pub const CheckpointSyncResult = struct {
     state_slot: u64,
     state_root: [32]u8,
@@ -286,6 +285,16 @@ pub const FetchedBlock = struct {
     fork_name: []const u8,
 };
 
+fn elapsedMs(io: std.Io, started_ns: i128) u64 {
+    const now_ns = monotonicNowNs(io);
+    const delta_ns = if (now_ns > started_ns) now_ns - started_ns else 0;
+    return @intCast(@divTrunc(delta_ns, std.time.ns_per_ms));
+}
+
+fn monotonicNowNs(io: std.Io) i128 {
+    return std.Io.Timestamp.now(io, .awake).toNanoseconds();
+}
+
 /// Fetch the finalized beacon state from a remote beacon node via HTTP.
 ///
 /// Calls GET /eth/v2/debug/beacon/states/finalized with Accept: application/octet-stream
@@ -334,6 +343,7 @@ fn fetchBeaconEndpoint(
     path: []const u8,
     label: []const u8,
 ) !FetchedState {
+    const started_ns = monotonicNowNs(io);
     // Build full URL: base_url + path.
     const url = try std.fmt.allocPrint(allocator, "{s}{s}", .{ base_url, path });
     defer allocator.free(url);
@@ -427,7 +437,11 @@ fn fetchBeaconEndpoint(
         return FetchError.EmptyResponse;
     }
 
-    scoped_log.info("Downloaded {s}: {d} bytes", .{ label, body.len });
+    scoped_log.info("Downloaded {s}: {d} bytes elapsed_ms={d}", .{
+        label,
+        body.len,
+        elapsedMs(io, started_ns),
+    });
     return .{ .state_bytes = body, .fork_name = fork_name };
 }
 

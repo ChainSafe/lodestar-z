@@ -122,9 +122,13 @@ pub fn decodeRequest(
         return DecodeError.InsufficientData;
     }
 
-    // Decompress the Snappy-framed payload.
-    const decompressed = try snappy.uncompress(allocator, wire_bytes[payload_start..]);
-    const ssz_bytes = decompressed orelse return DecodeError.EmptyPayload;
+    const snappy_data = wire_bytes[payload_start..];
+    const snappy_consumed = try calcSnappyFrameSize(snappy_data, ssz_length);
+    const ssz_bytes = try decodeSnappyBodyFromBytes(
+        allocator,
+        snappy_data[0..snappy_consumed],
+        ssz_length,
+    );
 
     // Per spec, the varint is an exact-size prefix: decompressed length must equal ssz_length.
     if (ssz_bytes.len != ssz_length) {
@@ -134,7 +138,7 @@ pub fn decodeRequest(
 
     return .{
         .ssz_bytes = ssz_bytes,
-        .bytes_consumed = wire_bytes.len,
+        .bytes_consumed = payload_start + snappy_consumed,
     };
 }
 
@@ -146,11 +150,7 @@ pub fn readRequestFromStream(
     const ssz_length = try readLengthPrefixFromStream(io, stream);
     if (ssz_length > MAX_REQ_RESP_SIZE) return DecodeError.PayloadTooLarge;
 
-    const snappy_frame = try readSnappyFrameFromStream(allocator, io, stream, ssz_length);
-    defer allocator.free(snappy_frame);
-
-    const decompressed = try snappy.uncompress(allocator, snappy_frame);
-    const ssz_bytes = decompressed orelse return DecodeError.EmptyPayload;
+    const ssz_bytes = try readSnappyBodyFromStream(allocator, io, stream, ssz_length);
     errdefer allocator.free(ssz_bytes);
 
     if (ssz_bytes.len != ssz_length) {
@@ -279,8 +279,11 @@ pub fn decodeResponseChunk(
     const snappy_consumed = calcSnappyFrameSize(snappy_data, varint_result.value) catch
         return DecodeError.InsufficientData;
 
-    const decompressed = try snappy.uncompress(allocator, snappy_data[0..snappy_consumed]);
-    const ssz_bytes = decompressed orelse return DecodeError.EmptyPayload;
+    const ssz_bytes = try decodeSnappyBodyFromBytes(
+        allocator,
+        snappy_data[0..snappy_consumed],
+        varint_result.value,
+    );
 
     // Per spec, the varint is an exact-size prefix: decompressed length must equal declared length.
     if (ssz_bytes.len != varint_result.value) {
@@ -485,6 +488,56 @@ fn readSnappyBodyFromStream(
         var frame = try allocator.alloc(u8, frame_size);
         defer allocator.free(frame);
         try readExact(io, stream, frame);
+
+        switch (chunk_type) {
+            0xff => {
+                if (frame_size != 6 or !std.mem.eql(u8, frame, "sNaPpY")) {
+                    return error.BadIdentifier;
+                }
+                saw_identifier = true;
+            },
+            0x00 => {
+                if (!saw_identifier or frame_size < 4) return error.IllegalChunkLength;
+                var uncompressed: [65536]u8 = undefined;
+                const uncompressed_len = snappy_raw.uncompress(frame[4..], uncompressed[0..]) catch
+                    return error.LengthMismatch;
+                try out.appendSlice(allocator, uncompressed[0..uncompressed_len]);
+            },
+            0x01 => {
+                if (!saw_identifier or frame_size < 4) return error.IllegalChunkLength;
+                try out.appendSlice(allocator, frame[4..]);
+            },
+            0xfe => {},
+            0x80...0xfd => {},
+            else => return error.BadIdentifier,
+        }
+
+        if (out.items.len > expected_uncompressed) return error.LengthMismatch;
+    }
+
+    if (out.items.len == 0) return error.EmptyPayload;
+    return try out.toOwnedSlice(allocator);
+}
+
+fn decodeSnappyBodyFromBytes(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    expected_uncompressed: usize,
+) anyerror![]u8 {
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer out.deinit(allocator);
+
+    var pos: usize = 0;
+    var saw_identifier = false;
+    while (pos < bytes.len and out.items.len < expected_uncompressed) {
+        if (pos + 4 > bytes.len) return error.InsufficientData;
+
+        const chunk_type = bytes[pos];
+        const frame_size: usize = @intCast(std.mem.readInt(u24, bytes[pos + 1 ..][0..3], .little));
+        if (pos + 4 + frame_size > bytes.len) return error.InsufficientData;
+
+        const frame = bytes[pos + 4 .. pos + 4 + frame_size];
+        pos += 4 + frame_size;
 
         switch (chunk_type) {
             0xff => {
@@ -909,4 +962,23 @@ test "decodeRequest detects length mismatch" {
 
     const result = decodeRequest(allocator, wire);
     try testing.expectError(DecodeError.LengthMismatch, result);
+}
+
+test "decodeRequest rejects truncated snappy frame without panicking" {
+    const allocator = testing.allocator;
+
+    const payload = [_]u8{ 0x01, 0x02, 0x03, 0x04 };
+    const compressed = try snappy.compress(allocator, &payload);
+    defer allocator.free(compressed);
+
+    var varint_buf: [varint.max_length]u8 = undefined;
+    const varint_len = varint.encode(payload.len, &varint_buf);
+
+    const wire = try allocator.alloc(u8, varint_len + compressed.len - 1);
+    defer allocator.free(wire);
+    @memcpy(wire[0..varint_len], varint_buf[0..varint_len]);
+    @memcpy(wire[varint_len..], compressed[0 .. compressed.len - 1]);
+
+    const result = decodeRequest(allocator, wire);
+    try testing.expectError(error.InsufficientData, result);
 }

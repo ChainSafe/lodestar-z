@@ -116,9 +116,51 @@ pub fn stdLogFn(
 ) void {
     const log_root = @import("root.zig");
     const backend_level = Level.fromStd(level);
-    if (!log_root.global.enabled(backend_level)) return;
+    if (!shouldEmitStdLog(&log_root.global, backend_level, @tagName(scope), fmt)) return;
 
     log_root.global.writeStdLog(backend_level, @tagName(scope), fmt, args);
+}
+
+fn shouldEmitStdLog(
+    backend: *const Backend,
+    level: Level,
+    comptime scope: []const u8,
+    comptime fmt: []const u8,
+) bool {
+    if (!backend.enabled(level)) return false;
+
+    // Dependency scopes that are currently too chatty at info level. Keep them
+    // available when the operator explicitly opts into debug logging.
+    if (backend.level != .debug) {
+        if (scopeOverrideLevel(scope)) |scope_level| {
+            if (@intFromEnum(level) > @intFromEnum(scope_level)) return false;
+        }
+        if (shouldSuppressKnownDependencyNoise(level, scope, fmt)) return false;
+    }
+
+    return true;
+}
+
+fn scopeOverrideLevel(comptime scope: []const u8) ?Level {
+    if (std.mem.eql(u8, scope, "switch")) return .warn;
+    if (std.mem.eql(u8, scope, "quic_engine")) return .warn;
+    if (std.mem.eql(u8, scope, "gossipsub")) return .warn;
+    if (std.mem.eql(u8, scope, "gossipsub_service")) return .warn;
+    if (std.mem.eql(u8, scope, "identify")) return .warn;
+    return null;
+}
+
+fn shouldSuppressKnownDependencyNoise(
+    level: Level,
+    comptime scope: []const u8,
+    comptime fmt: []const u8,
+) bool {
+    if (std.mem.eql(u8, scope, "quic_engine") and level == .warn) {
+        if (std.mem.startsWith(u8, fmt, "CONNECTION_CLOSE received:")) return true;
+        if (std.mem.startsWith(u8, fmt, "onConnClosed: status=")) return true;
+        if (std.mem.startsWith(u8, fmt, "read: stream closed, no leftover data")) return true;
+    }
+    return false;
 }
 
 fn renderHumanStdLogLine(
@@ -678,6 +720,25 @@ test "Backend level filtering" {
 
     backend.setLevel(.debug);
     try testing.expect(backend.enabled(.debug));
+}
+
+test "noisy dependency scopes are filtered below debug" {
+    const testing = std.testing;
+    const info_backend = Backend.init(.info, .human);
+    try testing.expect(!shouldEmitStdLog(&info_backend, .info, "switch", "opened peer stream"));
+    try testing.expect(!shouldEmitStdLog(&info_backend, .info, "gossipsub", "heartbeat"));
+    try testing.expect(!shouldEmitStdLog(&info_backend, .info, "identify", "identify: sent {d} byte response"));
+    try testing.expect(!shouldEmitStdLog(&info_backend, .warn, "quic_engine", "CONNECTION_CLOSE received: app_error={d}, code=0x{x}, reason=\"{s}\""));
+    try testing.expect(!shouldEmitStdLog(&info_backend, .warn, "quic_engine", "onConnClosed: status={d}, errmsg={s}, lc={any}"));
+    try testing.expect(!shouldEmitStdLog(&info_backend, .warn, "quic_engine", "read: stream closed, no leftover data (has_received={}, lsquic={?*anyopaque})"));
+    try testing.expect(shouldEmitStdLog(&info_backend, .warn, "switch", "peer limit reached"));
+    try testing.expect(shouldEmitStdLog(&info_backend, .warn, "quic_engine", "unexpected transport failure: {}"));
+    try testing.expect(shouldEmitStdLog(&info_backend, .info, "node", "ready"));
+
+    const debug_backend = Backend.init(.debug, .human);
+    try testing.expect(shouldEmitStdLog(&debug_backend, .info, "switch", "opened peer stream"));
+    try testing.expect(shouldEmitStdLog(&debug_backend, .warn, "quic_engine", "CONNECTION_CLOSE received: app_error={d}, code=0x{x}, reason=\"{s}\""));
+    try testing.expect(shouldEmitStdLog(&debug_backend, .warn, "quic_engine", "read: stream closed, no leftover data (has_received={}, lsquic={?*anyopaque})"));
 }
 
 test "human std.log line includes scope and formatted message" {

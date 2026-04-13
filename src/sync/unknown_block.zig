@@ -66,6 +66,15 @@ pub const PendingBlock = struct {
     status: PendingStatus,
 };
 
+pub const MetricsSnapshot = struct {
+    pending_blocks: u64 = 0,
+    pending_parents: u64 = 0,
+    fetching_blocks: u64 = 0,
+    in_flight_requests: u64 = 0,
+    bad_roots: u64 = 0,
+    exhausted_blocks: u64 = 0,
+};
+
 /// Callback vtable for unknown block sync operations.
 pub const UnknownBlockCallbacks = struct {
     ptr: *anyopaque,
@@ -307,6 +316,23 @@ pub const UnknownBlockSync = struct {
     /// Number of pending blocks.
     pub fn pendingCount(self: *const UnknownBlockSync) usize {
         return self.pending.count();
+    }
+
+    pub fn metricsSnapshot(self: *const UnknownBlockSync) MetricsSnapshot {
+        var snapshot: MetricsSnapshot = .{
+            .pending_blocks = @intCast(self.pending.count()),
+            .pending_parents = @intCast(self.parents_needed.count()),
+            .in_flight_requests = @intCast(self.in_flight),
+            .bad_roots = @intCast(self.bad_roots.count()),
+        };
+
+        var it = self.pending.iterator();
+        while (it.next()) |entry| {
+            if (entry.value_ptr.status == .fetching) snapshot.fetching_blocks += 1;
+            if (entry.value_ptr.attempts >= sync_types.MAX_UNKNOWN_PARENT_ATTEMPTS) snapshot.exhausted_blocks += 1;
+        }
+
+        return snapshot;
     }
 
     /// Get needed parent roots (for external use / debugging).

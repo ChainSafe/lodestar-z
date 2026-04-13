@@ -92,6 +92,7 @@ fn makeTestHandler(allocator: Allocator) !*GossipHandler {
     var dummy_node: u8 = 0;
     return GossipHandler.create(
         allocator,
+        testing.io,
         @ptrCast(&dummy_node),
         &stubImportBlock,
         &stubGetForkSeqForSlot,

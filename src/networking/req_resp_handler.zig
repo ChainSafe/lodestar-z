@@ -127,7 +127,15 @@ pub const ReqRespContext = struct {
     getForkDigest: *const fn (ptr: *anyopaque, slot: u64) [4]u8,
     onGoodbye: *const fn (ptr: *anyopaque, peer_id: ?[]const u8, reason: u64) void,
     onPeerStatus: *const fn (ptr: *anyopaque, peer_id: ?[]const u8, status: StatusMessage.Type, earliest_available_slot: ?u64) void,
-    onRequestCompleted: *const fn (ptr: *anyopaque, method: Method, outcome: protocol.ReqRespRequestOutcome, response_time_seconds: f64) void,
+    onRequestCompleted: *const fn (
+        ptr: *anyopaque,
+        method: Method,
+        outcome: protocol.ReqRespRequestOutcome,
+        response_time_seconds: f64,
+        request_payload_bytes: u64,
+        response_payload_bytes: u64,
+        response_chunks: u64,
+    ) void,
 };
 
 /// Dispatch an incoming request into zero or more streamed response chunks.
@@ -736,7 +744,7 @@ const MockContext = struct {
         status_received_earliest_available_slot = earliest_available_slot;
     }
 
-    fn onRequestCompleted(_: *anyopaque, _: Method, _: protocol.ReqRespRequestOutcome, _: f64) void {}
+    fn onRequestCompleted(_: *anyopaque, _: Method, _: protocol.ReqRespRequestOutcome, _: f64, _: u64, _: u64, _: u64) void {}
 
     var sentinel: u8 = 0;
     const req_resp_context: ReqRespContext = .{

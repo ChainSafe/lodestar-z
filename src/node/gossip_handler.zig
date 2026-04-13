@@ -48,12 +48,12 @@ const ResolvedAttestation = processor_mod.work_item.ResolvedAttestation;
 const GossipAction = chain_gossip.GossipAction;
 const ChainState = chain_gossip.ChainState;
 const GossipRejectReason = networking.peer_scoring.GossipRejectReason;
-
 const SignedVoluntaryExit = types.phase0.SignedVoluntaryExit.Type;
 const ProposerSlashing = types.phase0.ProposerSlashing.Type;
 const SignedBLSToExecutionChange = types.capella.SignedBLSToExecutionChange.Type;
 const SignedContributionAndProof = types.altair.SignedContributionAndProof.Type;
 const SyncCommitteeMessage = types.altair.SyncCommitteeMessage.Type;
+const slow_gossip_phase1_log_ns: u64 = 100 * std.time.ns_per_ms;
 
 /// Error set for gossip processing failures.
 pub const GossipHandlerError = error{
@@ -106,6 +106,7 @@ pub const GossipIngressMetadata = struct {
 
 pub const GossipHandler = struct {
     allocator: Allocator,
+    io: std.Io,
 
     /// Type-erased *BeaconNode.
     node: *anyopaque,
@@ -239,6 +240,7 @@ pub const GossipHandler = struct {
     /// Allocate a GossipHandler on the heap and initialise owned SeenCache.
     pub fn create(
         allocator: Allocator,
+        io: std.Io,
         node: *anyopaque,
         importBlockFn: *const fn (ptr: *anyopaque, block_bytes: []const u8) anyerror!void,
         getForkSeqForSlot: *const fn (ptr: *anyopaque, slot: u64) ForkSeq,
@@ -260,6 +262,7 @@ pub const GossipHandler = struct {
         const self = try allocator.create(GossipHandler);
         self.* = .{
             .allocator = allocator,
+            .io = io,
             .node = node,
             .importBlockFn = importBlockFn,
             .resolveAttestationFn = resolveAttestationFn,
@@ -1212,12 +1215,66 @@ pub const GossipHandler = struct {
         });
     }
 
-    fn recordProcessResult(self: *GossipHandler, result: GossipProcessResult) GossipProcessResult {
+    fn elapsedPhase1Ns(self: *const GossipHandler, started_ns: i128) u64 {
+        const now_ns = monotonicNowNs(self.io);
+        return @intCast(if (now_ns > started_ns) now_ns - started_ns else 0);
+    }
+
+    fn monotonicNowNs(io: std.Io) i128 {
+        return std.Io.Timestamp.now(io, .awake).toNanoseconds();
+    }
+
+    fn maybeLogSlowPhase1(
+        topic: GossipTopicType,
+        outcome: []const u8,
+        elapsed_ns: u64,
+        payload_bytes: usize,
+    ) void {
+        if (elapsed_ns < slow_gossip_phase1_log_ns) return;
+        scoped_log.debug(
+            "slow gossip phase1 topic={s} outcome={s} elapsed_ms={d} payload_bytes={d}",
+            .{ topic.topicName(), outcome, @divTrunc(elapsed_ns, std.time.ns_per_ms), payload_bytes },
+        );
+    }
+
+    fn recordProcessResult(
+        self: *GossipHandler,
+        topic: GossipTopicType,
+        result: GossipProcessResult,
+        elapsed_ns: u64,
+        payload_bytes: usize,
+    ) GossipProcessResult {
+        const elapsed_seconds = @as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(std.time.ns_per_s));
         switch (result) {
-            .accepted => if (self.metrics) |m| m.gossip_messages_validated.incr(),
-            .ignored => if (self.metrics) |m| m.gossip_messages_ignored.incr(),
-            .rejected => if (self.metrics) |m| m.gossip_messages_rejected.incr(),
-            .failed => {},
+            .accepted => {
+                if (self.metrics) |m| {
+                    m.observeGossipResult(topic, .accepted);
+                    m.observeGossipPhase1(topic, .accepted, elapsed_seconds);
+                }
+                maybeLogSlowPhase1(topic, "accepted", elapsed_ns, payload_bytes);
+            },
+            .ignored => {
+                if (self.metrics) |m| {
+                    m.observeGossipResult(topic, .ignored);
+                    m.observeGossipPhase1(topic, .ignored, elapsed_seconds);
+                }
+                maybeLogSlowPhase1(topic, "ignored", elapsed_ns, payload_bytes);
+            },
+            .rejected => {
+                if (self.metrics) |m| {
+                    m.observeGossipResult(topic, .rejected);
+                    m.observeGossipPhase1(topic, .rejected, elapsed_seconds);
+                }
+                maybeLogSlowPhase1(topic, "rejected", elapsed_ns, payload_bytes);
+            },
+            .failed => |err| {
+                if (elapsed_ns >= slow_gossip_phase1_log_ns) {
+                    scoped_log.debug(
+                        "slow gossip phase1 topic={s} outcome=failed elapsed_ms={d} payload_bytes={d} err={}",
+                        .{ topic.topicName(), @divTrunc(elapsed_ns, std.time.ns_per_ms), payload_bytes, err },
+                    );
+                }
+            },
         }
         return result;
     }
@@ -1258,20 +1315,21 @@ pub const GossipHandler = struct {
         data: []const u8,
         metadata: GossipIngressMetadata,
     ) GossipProcessResult {
-        if (self.metrics) |m| m.gossip_messages_received.incr();
+        if (self.metrics) |m| m.incrGossipReceived(topic);
+        const started_ns = monotonicNowNs(self.io);
 
         self.onGossipMessageWithSubnetAndMetadata(topic, subnet_id, data, metadata) catch |err| {
-            return self.recordProcessResult(switch (err) {
+            return self.recordProcessResult(topic, switch (err) {
                 GossipHandlerError.ValidationIgnored => .ignored,
                 GossipHandlerError.WrongSubnet => .{ .rejected = .wrong_subnet },
                 GossipHandlerError.InvalidSignature => .{ .rejected = .invalid_signature },
                 GossipHandlerError.ValidationRejected => .{ .rejected = defaultRejectReason(topic) },
                 GossipHandlerError.DecodeFailed => .{ .rejected = .decode_failed },
                 else => .{ .failed = err },
-            });
+            }, self.elapsedPhase1Ns(started_ns), data.len);
         };
 
-        return self.recordProcessResult(.accepted);
+        return self.recordProcessResult(topic, .accepted, self.elapsedPhase1Ns(started_ns), data.len);
     }
 
     /// Route a gossip message by topic type.

@@ -1080,6 +1080,36 @@ fn maybeLoadPubkeyCache(io: Io, node_builder: *BeaconNode.Builder, state_bytes: 
     }
 }
 
+fn nowNs(io: Io) i128 {
+    return std.Io.Timestamp.now(io, .awake).toNanoseconds();
+}
+
+fn elapsedMs(io: Io, started_ns: i128) u64 {
+    const now_ns = nowNs(io);
+    const delta_ns = if (now_ns > started_ns) now_ns - started_ns else 0;
+    return @intCast(@divTrunc(delta_ns, std.time.ns_per_ms));
+}
+
+fn observeBootstrapMs(
+    metrics: *BeaconMetrics,
+    source: BeaconMetrics.BootstrapSource,
+    phase: BeaconMetrics.BootstrapPhase,
+    elapsed_ms: u64,
+) void {
+    metrics.observeBootstrapPhase(
+        source,
+        phase,
+        @as(f64, @floatFromInt(elapsed_ms)) / 1000.0,
+    );
+}
+
+fn fileSizeOrZero(io: Io, path: []const u8) usize {
+    const file = Io.Dir.cwd().openFile(io, path, .{}) catch return 0;
+    defer file.close(io);
+    const stat = file.stat(io) catch return 0;
+    return @intCast(stat.size);
+}
+
 fn runFromPrepared(io: Io, allocator: Allocator, inputs: *const ResolvedRunInputs, handles: *PreparedHandles) !void {
     scoped_log.info("beacon node bootstrap initialized", .{});
     scoped_log.info("  peer-id:    {s}", .{handles.node_builder.nodeIdentity().peer_id});
@@ -1093,8 +1123,12 @@ fn runFromPrepared(io: Io, allocator: Allocator, inputs: *const ResolvedRunInput
     const force_checkpoint = inputs.force_checkpoint_sync;
 
     if (inputs.checkpoint_sync_url) |sync_url| {
+        const bootstrap_source = BeaconMetrics.BootstrapSource.checkpoint_sync_url;
+        const total_started_ns = nowNs(io);
+        handles.beacon_metrics.setBootstrapSource(bootstrap_source);
         scoped_log.info("checkpoint sync from URL: {s}", .{sync_url});
 
+        const fetch_started_ns = nowNs(io);
         const fetched = checkpoint_sync.fetchFinalizedState(allocator, io, sync_url) catch |err| {
             scoped_log.err("Failed to fetch checkpoint state from '{s}': {}", .{ sync_url, err });
             scoped_log.err("  Suggestions:", .{});
@@ -1104,12 +1138,18 @@ fn runFromPrepared(io: Io, allocator: Allocator, inputs: *const ResolvedRunInput
             std.process.exit(1);
         };
         defer allocator.free(fetched.state_bytes);
+        const fetch_ms = elapsedMs(io, fetch_started_ns);
+        observeBootstrapMs(handles.beacon_metrics, bootstrap_source, .fetch, fetch_ms);
 
         scoped_log.info("deserializing checkpoint state ({d} bytes, fork={s})...", .{
             fetched.state_bytes.len, fetched.fork_name,
         });
+        const cache_seed_started_ns = nowNs(io);
         maybeLoadPubkeyCache(io, handles.node_builder, fetched.state_bytes);
+        const cache_seed_ms = elapsedMs(io, cache_seed_started_ns);
+        observeBootstrapMs(handles.beacon_metrics, bootstrap_source, .cache_seed, cache_seed_ms);
 
+        const deserialize_started_ns = nowNs(io);
         const cp_state = state_transition.deserializePublishedState(
             allocator,
             handles.node_builder.sharedStateGraph().pool,
@@ -1140,16 +1180,38 @@ fn runFromPrepared(io: Io, allocator: Allocator, inputs: *const ResolvedRunInput
         }
 
         const cp_slot = cp_state.state.slot() catch 0;
+        const deserialize_ms = elapsedMs(io, deserialize_started_ns);
+        handles.beacon_metrics.setBootstrapState(cp_slot, fetched.state_bytes.len);
+        observeBootstrapMs(handles.beacon_metrics, bootstrap_source, .deserialize, deserialize_ms);
+        scoped_log.info("checkpoint state deserialized slot={d} cache_seed_ms={d} deserialize_ms={d}", .{
+            cp_slot,
+            cache_seed_ms,
+            deserialize_ms,
+        });
+        const finish_started_ns = nowNs(io);
         const node = try handles.node_builder.finishCheckpoint(cp_state);
+        const finish_ms = elapsedMs(io, finish_started_ns);
+        observeBootstrapMs(handles.beacon_metrics, bootstrap_source, .finish, finish_ms);
         defer node.deinit();
         if (inputs.custom_beacon_config) |cfg| cfg.genesis_validator_root = node.genesis_validators_root;
-        scoped_log.info("Initialized from checkpoint sync URL at slot {d}", .{cp_slot});
+        const total_ms = elapsedMs(io, total_started_ns);
+        observeBootstrapMs(handles.beacon_metrics, bootstrap_source, .total, total_ms);
+        scoped_log.info("Initialized from checkpoint sync URL at slot {d} (finish_ms={d})", .{ cp_slot, finish_ms });
+        scoped_log.info(
+            "bootstrap completed source=checkpoint_sync_url slot={d} state_bytes={d} fetch_ms={d} cache_seed_ms={d} deserialize_ms={d} finish_ms={d} total_ms={d}",
+            .{ cp_slot, fetched.state_bytes.len, fetch_ms, cache_seed_ms, deserialize_ms, finish_ms, total_ms },
+        );
         logHeadSummary(node);
         try runBootstrappedNode(io, node, inputs.api_port, inputs.api_address, inputs.api_cors, handles.p2p_bind_host, handles.p2p_bind_port, if (handles.metrics_runtime) |*runtime| runtime else null);
         return;
     } else if (inputs.checkpoint_state) |state_path| {
+        const bootstrap_source = BeaconMetrics.BootstrapSource.checkpoint_file;
+        const total_started_ns = nowNs(io);
+        handles.beacon_metrics.setBootstrapSource(bootstrap_source);
         scoped_log.info("loading checkpoint state from {s}", .{state_path});
 
+        const state_bytes = fileSizeOrZero(io, state_path);
+        const load_started_ns = nowNs(io);
         const cp_state = genesis_util.loadGenesisFromFile(
             allocator,
             handles.node_builder.sharedStateGraph().pool,
@@ -1178,19 +1240,36 @@ fn runFromPrepared(io: Io, allocator: Allocator, inputs: *const ResolvedRunInput
         }
 
         const cp_slot = cp_state.state.slot() catch 0;
+        const load_ms = elapsedMs(io, load_started_ns);
+        handles.beacon_metrics.setBootstrapState(cp_slot, state_bytes);
+        observeBootstrapMs(handles.beacon_metrics, bootstrap_source, .load, load_ms);
+        scoped_log.info("checkpoint file loaded slot={d} load_ms={d}", .{ cp_slot, load_ms });
+        const finish_started_ns = nowNs(io);
         const node = if (cp_slot == 0)
             try handles.node_builder.finishGenesis(cp_state)
         else
             try handles.node_builder.finishCheckpoint(cp_state);
+        const finish_ms = elapsedMs(io, finish_started_ns);
+        observeBootstrapMs(handles.beacon_metrics, bootstrap_source, .finish, finish_ms);
         defer node.deinit();
         if (inputs.custom_beacon_config) |cfg| cfg.genesis_validator_root = node.genesis_validators_root;
-        scoped_log.info("Initialized from checkpoint file at slot {d}", .{cp_slot});
+        const total_ms = elapsedMs(io, total_started_ns);
+        observeBootstrapMs(handles.beacon_metrics, bootstrap_source, .total, total_ms);
+        scoped_log.info("Initialized from checkpoint file at slot {d} (finish_ms={d})", .{ cp_slot, finish_ms });
+        scoped_log.info(
+            "bootstrap completed source=checkpoint_file slot={d} state_bytes={d} load_ms={d} finish_ms={d} total_ms={d}",
+            .{ cp_slot, state_bytes, load_ms, finish_ms, total_ms },
+        );
         logHeadSummary(node);
         try runBootstrappedNode(io, node, inputs.api_port, inputs.api_address, inputs.api_cors, handles.p2p_bind_host, handles.p2p_bind_port, if (handles.metrics_runtime) |*runtime| runtime else null);
         return;
     } else if (if (!force_checkpoint) handles.node_builder.latestStateArchiveSlot() catch null else null) |db_slot| {
+        const bootstrap_source = BeaconMetrics.BootstrapSource.db_resume;
+        const total_started_ns = nowNs(io);
+        handles.beacon_metrics.setBootstrapSource(bootstrap_source);
         scoped_log.info("found persisted state in DB at slot {d}, resuming", .{db_slot});
 
+        const load_started_ns = nowNs(io);
         const state_bytes = handles.node_builder.stateArchiveAtSlot(db_slot) catch |err| {
             scoped_log.err("Failed to read state from DB at slot {d}: {}", .{ db_slot, err });
             std.process.exit(1);
@@ -1199,8 +1278,14 @@ fn runFromPrepared(io: Io, allocator: Allocator, inputs: *const ResolvedRunInput
             std.process.exit(1);
         };
         defer allocator.free(state_bytes);
+        const load_ms = elapsedMs(io, load_started_ns);
+        observeBootstrapMs(handles.beacon_metrics, bootstrap_source, .load, load_ms);
+        const cache_seed_started_ns = nowNs(io);
         maybeLoadPubkeyCache(io, handles.node_builder, state_bytes);
+        const cache_seed_ms = elapsedMs(io, cache_seed_started_ns);
+        observeBootstrapMs(handles.beacon_metrics, bootstrap_source, .cache_seed, cache_seed_ms);
 
+        const deserialize_started_ns = nowNs(io);
         const db_state = state_transition.deserializePublishedState(
             allocator,
             handles.node_builder.sharedStateGraph().pool,
@@ -1214,16 +1299,37 @@ fn runFromPrepared(io: Io, allocator: Allocator, inputs: *const ResolvedRunInput
             std.process.exit(1);
         };
 
+        const deserialize_ms = elapsedMs(io, deserialize_started_ns);
+        handles.beacon_metrics.setBootstrapState(db_slot, state_bytes.len);
+        observeBootstrapMs(handles.beacon_metrics, bootstrap_source, .deserialize, deserialize_ms);
+        scoped_log.info("DB state deserialized slot={d} cache_seed_ms={d} deserialize_ms={d}", .{
+            db_slot,
+            cache_seed_ms,
+            deserialize_ms,
+        });
+        const finish_started_ns = nowNs(io);
         const node = try handles.node_builder.finishCheckpoint(db_state);
+        const finish_ms = elapsedMs(io, finish_started_ns);
+        observeBootstrapMs(handles.beacon_metrics, bootstrap_source, .finish, finish_ms);
         defer node.deinit();
         if (inputs.custom_beacon_config) |cfg| cfg.genesis_validator_root = node.genesis_validators_root;
-        scoped_log.info("Resumed from DB state at slot {d}", .{db_slot});
+        const total_ms = elapsedMs(io, total_started_ns);
+        observeBootstrapMs(handles.beacon_metrics, bootstrap_source, .total, total_ms);
+        scoped_log.info("Resumed from DB state at slot {d} (finish_ms={d})", .{ db_slot, finish_ms });
+        scoped_log.info(
+            "bootstrap completed source=db_resume slot={d} state_bytes={d} load_ms={d} cache_seed_ms={d} deserialize_ms={d} finish_ms={d} total_ms={d}",
+            .{ db_slot, state_bytes.len, load_ms, cache_seed_ms, deserialize_ms, finish_ms, total_ms },
+        );
         logHeadSummary(node);
         try runBootstrappedNode(io, node, inputs.api_port, inputs.api_address, inputs.api_cors, handles.p2p_bind_host, handles.p2p_bind_port, if (handles.metrics_runtime) |*runtime| runtime else null);
         return;
     } else if (inputs.network == .minimal) {
+        const bootstrap_source = BeaconMetrics.BootstrapSource.minimal_genesis;
+        const total_started_ns = nowNs(io);
+        handles.beacon_metrics.setBootstrapSource(bootstrap_source);
         scoped_log.info("generating minimal genesis state with 64 validators", .{});
 
+        const generate_started_ns = nowNs(io);
         const genesis_state = genesis_util.createMinimalGenesis(
             allocator,
             handles.node_builder.sharedStateGraph().pool,
@@ -1235,11 +1341,23 @@ fn runFromPrepared(io: Io, allocator: Allocator, inputs: *const ResolvedRunInput
             scoped_log.err("Failed to generate minimal genesis state: {}", .{err});
             std.process.exit(1);
         };
+        const generate_ms = elapsedMs(io, generate_started_ns);
+        handles.beacon_metrics.setBootstrapState(0, 0);
+        observeBootstrapMs(handles.beacon_metrics, bootstrap_source, .generate, generate_ms);
 
+        const finish_started_ns = nowNs(io);
         const node = try handles.node_builder.finishGenesis(genesis_state);
+        const finish_ms = elapsedMs(io, finish_started_ns);
+        observeBootstrapMs(handles.beacon_metrics, bootstrap_source, .finish, finish_ms);
         defer node.deinit();
         if (inputs.custom_beacon_config) |cfg| cfg.genesis_validator_root = node.genesis_validators_root;
+        const total_ms = elapsedMs(io, total_started_ns);
+        observeBootstrapMs(handles.beacon_metrics, bootstrap_source, .total, total_ms);
         scoped_log.info("Initialized from minimal genesis state", .{});
+        scoped_log.info(
+            "bootstrap completed source=minimal_genesis slot=0 state_bytes=0 generate_ms={d} finish_ms={d} total_ms={d}",
+            .{ generate_ms, finish_ms, total_ms },
+        );
         logHeadSummary(node);
         try runBootstrappedNode(io, node, inputs.api_port, inputs.api_address, inputs.api_cors, handles.p2p_bind_host, handles.p2p_bind_port, if (handles.metrics_runtime) |*runtime| runtime else null);
         return;

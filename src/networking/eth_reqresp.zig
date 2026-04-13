@@ -237,7 +237,7 @@ fn testOnGoodbye(_: *anyopaque, _: ?[]const u8, _: u64) void {}
 
 fn testOnPeerStatus(_: *anyopaque, _: ?[]const u8, _: messages.StatusMessage.Type, _: ?u64) void {}
 
-fn testOnRequestCompleted(_: *anyopaque, _: protocol.Method, _: protocol.ReqRespRequestOutcome, _: f64) void {}
+fn testOnRequestCompleted(_: *anyopaque, _: protocol.Method, _: protocol.ReqRespRequestOutcome, _: f64, _: u64, _: u64, _: u64) void {}
 
 var _test_sentinel: u8 = 0;
 const test_context = ReqRespContext{

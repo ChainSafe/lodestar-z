@@ -93,7 +93,7 @@ pub fn init(allocator: Allocator, io: std.Io, beacon_config: *const BeaconConfig
         const lmdb_store = try allocator.create(LmdbKVStore);
         errdefer allocator.destroy(lmdb_store);
 
-        lmdb_store.* = try LmdbKVStore.open(allocator, z_path, .{
+        lmdb_store.* = try LmdbKVStore.open(allocator, io, z_path, .{
             .map_size = 256 * 1024 * 1024 * 1024,
         });
         errdefer lmdb_store.deinit();
@@ -244,7 +244,7 @@ pub fn initBuilder(
         const lmdb_store = try allocator.create(LmdbKVStore);
         errdefer allocator.destroy(lmdb_store);
 
-        lmdb_store.* = try LmdbKVStore.open(allocator, z_path, .{
+        lmdb_store.* = try LmdbKVStore.open(allocator, io, z_path, .{
             .map_size = 256 * 1024 * 1024 * 1024,
         });
         errdefer lmdb_store.deinit();
@@ -508,9 +508,9 @@ pub fn deinit(self: *BeaconNode) void {
                 path,
                 self.genesis_validators_root,
             ) catch |err| {
-                log.logger(.node).warn("failed to save validator pubkey cache", .{
-                    .path = path,
-                    .err = err,
+                std.log.scoped(.node).warn("failed to save validator pubkey cache path={s}: {}", .{
+                    path,
+                    err,
                 });
             };
         }
@@ -702,6 +702,7 @@ fn wireBootstrappedNode(self: *BeaconNode) !void {
         errdefer self.allocator.destroy(sync_svc);
         sync_svc.* = SyncService.init(
             self.allocator,
+            self.io,
             cb_ctx.syncServiceCallbacks(),
             self.currentHeadSlot(),
             finalized_epoch,

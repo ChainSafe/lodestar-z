@@ -236,7 +236,7 @@ pub fn forkVersion(self: *const BeaconConfig, slot: Slot) *const [4]u8 {
 /// Return the active blob parameters (epoch + max_blobs_per_block) for the given epoch.
 /// Used for fork digest masking in Fulu and later forks.
 pub fn getBlobParameters(self: *const BeaconConfig, epoch: Epoch) ?struct { epoch: u64, max_blobs_per_block: u64 } {
-    if (self.chain.BLOB_SCHEDULE.len == 0) return null;
+    if (@intFromEnum(self.forkSeqAtEpoch(epoch)) < @intFromEnum(ForkSeq.fulu)) return null;
     // Iterate in reverse to find the latest schedule entry at or before this epoch
     for (0..self.chain.BLOB_SCHEDULE.len) |i| {
         const schedule = self.chain.BLOB_SCHEDULE[self.chain.BLOB_SCHEDULE.len - i - 1];
@@ -244,7 +244,10 @@ pub fn getBlobParameters(self: *const BeaconConfig, epoch: Epoch) ?struct { epoc
             return .{ .epoch = schedule.EPOCH, .max_blobs_per_block = schedule.MAX_BLOBS_PER_BLOCK };
         }
     }
-    return null;
+    return .{
+        .epoch = self.chain.ELECTRA_FORK_EPOCH,
+        .max_blobs_per_block = self.chain.MAX_BLOBS_PER_BLOCK_ELECTRA,
+    };
 }
 
 /// Reference: https://eips.ethereum.org/EIPS/eip-7892
@@ -366,37 +369,41 @@ pub fn forkDigestAtSlot(self: *const BeaconConfig, slot: u64, genesis_validators
     return base_digest;
 }
 
+/// Return the networking fork digest for the active fork at `slot`.
+///
+/// This is the p2p-layer `compute_fork_digest(genesis_validators_root, epoch)`
+/// value used by gossip topics, discovery ENRs, Status, and req/resp context bytes.
+pub fn networkingForkDigestAtSlot(self: *const BeaconConfig, slot: u64, genesis_validators_root: [32]u8) [4]u8 {
+    return self.forkDigestAtSlot(slot, genesis_validators_root);
+}
+
 pub fn activeGossipForksAtEpoch(self: *const BeaconConfig, epoch: Epoch, genesis_validators_root: [32]u8) ActiveGossipForks {
     var active = ActiveGossipForks{
         .count = 0,
         .items = undefined,
     };
 
-    for (&self.forks_ascending_epoch_order, 0..) |*fork, i| {
-        const next_fork = if (i + 1 < self.forks_ascending_epoch_order.len)
-            &self.forks_ascending_epoch_order[i + 1]
-        else
-            null;
-
-        if (next_fork != null and fork.epoch == next_fork.?.epoch) {
-            continue;
-        }
-
-        const next_epoch = if (next_fork) |nf| nf.epoch else std.math.maxInt(Epoch);
-        const earliest_epoch = fork.epoch -| FORK_EPOCH_LOOKAHEAD;
-        const latest_epoch = if (next_epoch == std.math.maxInt(Epoch))
-            std.math.maxInt(Epoch)
-        else
-            next_epoch +| FORK_EPOCH_LOOKAHEAD;
-
-        if (epoch < earliest_epoch or epoch > latest_epoch) continue;
-
-        active.items[active.count] = .{
-            .fork_seq = fork.fork_seq,
-            .epoch = fork.epoch,
-            .digest = self.forkDigestForForkInfo(fork, fork.epoch, genesis_validators_root),
-        };
-        active.count += 1;
+    for (&self.forks_ascending_epoch_order) |*fork| {
+        maybeAppendActiveGossipBoundary(
+            self,
+            &active,
+            .regular,
+            fork.fork_seq,
+            fork.epoch,
+            epoch,
+            genesis_validators_root,
+        );
+    }
+    for (self.chain.BLOB_SCHEDULE) |entry| {
+        maybeAppendActiveGossipBoundary(
+            self,
+            &active,
+            .blob_schedule,
+            self.forkSeqAtEpoch(entry.EPOCH),
+            entry.EPOCH,
+            epoch,
+            genesis_validators_root,
+        );
     }
 
     return active;
@@ -438,6 +445,88 @@ fn forkDigestForForkInfo(
     }
 
     return base_digest;
+}
+
+const GossipBoundaryKind = enum(u1) {
+    regular = 0,
+    blob_schedule = 1,
+};
+
+fn maybeAppendActiveGossipBoundary(
+    self: *const BeaconConfig,
+    active: *ActiveGossipForks,
+    kind: GossipBoundaryKind,
+    fork_seq: ForkSeq,
+    boundary_epoch: Epoch,
+    current_epoch: Epoch,
+    genesis_validators_root: [32]u8,
+) void {
+    const next_epoch = nextGossipBoundaryEpoch(self, kind, boundary_epoch);
+    const earliest_epoch = boundary_epoch -| FORK_EPOCH_LOOKAHEAD;
+    const latest_epoch = if (next_epoch == std.math.maxInt(Epoch))
+        std.math.maxInt(Epoch)
+    else
+        next_epoch +| FORK_EPOCH_LOOKAHEAD;
+
+    if (current_epoch < earliest_epoch or current_epoch > latest_epoch) return;
+
+    active.items[active.count] = .{
+        .fork_seq = fork_seq,
+        .epoch = boundary_epoch,
+        .digest = self.forkDigestAtSlot(boundary_epoch * preset.SLOTS_PER_EPOCH, genesis_validators_root),
+    };
+    active.count += 1;
+}
+
+fn nextGossipBoundaryEpoch(
+    self: *const BeaconConfig,
+    kind: GossipBoundaryKind,
+    boundary_epoch: Epoch,
+) Epoch {
+    var next_epoch: Epoch = std.math.maxInt(Epoch);
+    var next_kind: GossipBoundaryKind = .blob_schedule;
+
+    for (&self.forks_ascending_epoch_order) |*fork| {
+        considerNextGossipBoundary(
+            &next_epoch,
+            &next_kind,
+            .regular,
+            fork.epoch,
+            kind,
+            boundary_epoch,
+        );
+    }
+    for (self.chain.BLOB_SCHEDULE) |entry| {
+        considerNextGossipBoundary(
+            &next_epoch,
+            &next_kind,
+            .blob_schedule,
+            entry.EPOCH,
+            kind,
+            boundary_epoch,
+        );
+    }
+
+    return next_epoch;
+}
+
+fn considerNextGossipBoundary(
+    next_epoch: *Epoch,
+    next_kind: *GossipBoundaryKind,
+    candidate_kind: GossipBoundaryKind,
+    candidate_epoch: Epoch,
+    current_kind: GossipBoundaryKind,
+    current_epoch: Epoch,
+) void {
+    if (candidate_epoch < current_epoch) return;
+    if (candidate_epoch == current_epoch and @intFromEnum(candidate_kind) <= @intFromEnum(current_kind)) return;
+
+    if (candidate_epoch < next_epoch.* or
+        (candidate_epoch == next_epoch.* and @intFromEnum(candidate_kind) < @intFromEnum(next_kind.*)))
+    {
+        next_epoch.* = candidate_epoch;
+        next_kind.* = candidate_kind;
+    }
 }
 
 fn computeDomain(domain_type: DomainType, fork_version: Version, genesis_validators_root: Root, out: *[32]u8) void {
@@ -517,4 +606,45 @@ test "activeGossipForksAtEpoch includes next fork during lookahead" {
         mainnet_gvr,
     );
     try std.testing.expectEqual(ForkSeq.altair, resolved.?);
+}
+
+test "getBlobParameters falls back to Electra defaults before first blob schedule entry" {
+    const mainnet_chain = @import("./networks/mainnet.zig").chain_config;
+    const mainnet_gvr = @import("./networks/mainnet.zig").genesis_validators_root;
+    const cfg = BeaconConfig.init(mainnet_chain, mainnet_gvr);
+
+    const blob_params = cfg.getBlobParameters(cfg.chain.FULU_FORK_EPOCH).?;
+    try std.testing.expectEqual(cfg.chain.ELECTRA_FORK_EPOCH, blob_params.epoch);
+    try std.testing.expectEqual(cfg.chain.MAX_BLOBS_PER_BLOCK_ELECTRA, blob_params.max_blobs_per_block);
+}
+
+test "activeGossipForksAtEpoch includes blob schedule boundaries during lookahead" {
+    const mainnet_gvr = @import("./networks/mainnet.zig").genesis_validators_root;
+    const cfg = BeaconConfig.init(@import("./networks/mainnet.zig").chain_config, mainnet_gvr);
+
+    const first_blob_epoch = cfg.chain.BLOB_SCHEDULE[0].EPOCH;
+    const active = cfg.activeGossipForksAtEpoch(first_blob_epoch - FORK_EPOCH_LOOKAHEAD, mainnet_gvr);
+
+    try std.testing.expect(active.count >= 2);
+
+    var saw_fulu_boundary = false;
+    var saw_blob_boundary = false;
+    for (active.asSlice()) |fork| {
+        if (fork.epoch == cfg.chain.FULU_FORK_EPOCH) saw_fulu_boundary = true;
+        if (fork.epoch == first_blob_epoch) saw_blob_boundary = true;
+    }
+
+    try std.testing.expect(saw_fulu_boundary);
+    try std.testing.expect(saw_blob_boundary);
+}
+
+test "forkSeqForGossipDigestAtEpoch resolves blob schedule boundary digest" {
+    const mainnet_gvr = @import("./networks/mainnet.zig").genesis_validators_root;
+    const cfg = BeaconConfig.init(@import("./networks/mainnet.zig").chain_config, mainnet_gvr);
+
+    const blob_epoch = cfg.chain.BLOB_SCHEDULE[cfg.chain.BLOB_SCHEDULE.len - 1].EPOCH;
+    const digest = cfg.forkDigestAtSlot(blob_epoch * preset.SLOTS_PER_EPOCH, mainnet_gvr);
+    const resolved = cfg.forkSeqForGossipDigestAtEpoch(blob_epoch, digest, mainnet_gvr);
+
+    try std.testing.expectEqual(ForkSeq.fulu, resolved.?);
 }

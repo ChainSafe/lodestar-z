@@ -110,6 +110,35 @@ pub const SyncChainStatus = enum {
     err,
 };
 
+pub const BatchStatusCounts = struct {
+    awaiting_download: u64 = 0,
+    downloading: u64 = 0,
+    awaiting_processing: u64 = 0,
+    processing: u64 = 0,
+    awaiting_validation: u64 = 0,
+};
+
+pub const CumulativeMetrics = struct {
+    download_requests_total: u64 = 0,
+    download_success_total: u64 = 0,
+    download_error_total: u64 = 0,
+    download_deferred_total: u64 = 0,
+    download_time_ns_total: u64 = 0,
+    processing_success_total: u64 = 0,
+    processing_error_total: u64 = 0,
+    processing_time_ns_total: u64 = 0,
+    processed_blocks_total: u64 = 0,
+};
+
+pub const MetricsSnapshot = struct {
+    peer_count: u64,
+    target_slot: u64,
+    validated_epochs: u64,
+    batches_total: u64,
+    batch_statuses: BatchStatusCounts,
+    cumulative: CumulativeMetrics,
+};
+
 /// A chain of batches being downloaded towards a target.
 pub const SyncChain = struct {
     const ChainPeer = struct {
@@ -118,6 +147,7 @@ pub const SyncChain = struct {
     };
 
     allocator: Allocator,
+    io: std.Io,
     /// Unique ID for this chain.
     id: u32,
     /// Finalized or head chain.
@@ -147,10 +177,12 @@ pub const SyncChain = struct {
     /// Peers assigned to this chain, including the serving limits that affect
     /// batch eligibility for this peer.
     peers: std.StringArrayHashMap(ChainPeer),
+    cumulative_metrics: CumulativeMetrics,
 
     /// Global chain ID counter.
     pub fn init(
         allocator: Allocator,
+        io: std.Io,
         id: u32,
         sync_type: RangeSyncType,
         start_epoch: u64,
@@ -163,6 +195,7 @@ pub const SyncChain = struct {
         const start_slot = start_epoch * preset.SLOTS_PER_EPOCH;
         return .{
             .allocator = allocator,
+            .io = io,
             .id = id,
             .sync_type = sync_type,
             .target = target,
@@ -174,6 +207,7 @@ pub const SyncChain = struct {
             .next_batch_id = 0,
             .next_batch_start = start_slot,
             .peers = std.StringArrayHashMap(ChainPeer).init(allocator),
+            .cumulative_metrics = .{},
         };
     }
 
@@ -291,6 +325,8 @@ pub const SyncChain = struct {
         for (self.batches.items) |*b| {
             if (b.id == batch_id) {
                 if (!b.onDownloadSuccess(generation, blocks)) return;
+                self.cumulative_metrics.download_success_total += 1;
+                self.cumulative_metrics.download_time_ns_total += b.finishDownloadTiming();
                 self.processNextBatch() catch {};
                 return;
             }
@@ -307,6 +343,8 @@ pub const SyncChain = struct {
         for (self.batches.items) |*b| {
             if (b.id == batch_id) {
                 if (b.onDownloadError(generation)) {
+                    self.cumulative_metrics.download_error_total += 1;
+                    self.cumulative_metrics.download_time_ns_total += b.finishDownloadTiming();
                     // Report the peer that failed.
                     self.callbacks.reportPeer(peer_id);
                 }
@@ -326,7 +364,9 @@ pub const SyncChain = struct {
     ) void {
         for (self.batches.items) |*b| {
             if (b.id == batch_id) {
-                _ = b.onDownloadDeferred(generation);
+                if (!b.onDownloadDeferred(generation)) return;
+                self.cumulative_metrics.download_deferred_total += 1;
+                self.cumulative_metrics.download_time_ns_total += b.finishDownloadTiming();
                 return;
             }
         }
@@ -337,7 +377,12 @@ pub const SyncChain = struct {
             if (b.id != batch_id) continue;
             if (b.generation != generation) return;
             if (b.status != .processing) return;
+            const processed_blocks = b.blocks.len;
+            const elapsed_ns = b.finishProcessingTiming();
             b.onProcessingSuccess();
+            self.cumulative_metrics.processing_success_total += 1;
+            self.cumulative_metrics.processing_time_ns_total += elapsed_ns;
+            self.cumulative_metrics.processed_blocks_total += @intCast(processed_blocks);
             return;
         }
     }
@@ -348,7 +393,10 @@ pub const SyncChain = struct {
             if (b.generation != generation) return;
             if (b.status != .processing) return;
             const download_peer = b.download_peer;
+            const elapsed_ns = b.finishProcessingTiming();
             b.onProcessingError();
+            self.cumulative_metrics.processing_error_total += 1;
+            self.cumulative_metrics.processing_time_ns_total += elapsed_ns;
             if (b.isProcessingExhausted()) {
                 if (download_peer) |peer_id| self.callbacks.reportPeer(peer_id);
                 self.status = .err;
@@ -457,6 +505,7 @@ pub const SyncChain = struct {
                     peer,
                 });
                 b.startDownload(peer);
+                self.cumulative_metrics.download_requests_total += 1;
                 self.callbacks.downloadByRange(
                     self.id,
                     b.id,
@@ -480,7 +529,7 @@ pub const SyncChain = struct {
             const id = self.next_batch_id;
             self.next_batch_id +%= 1;
 
-            self.batches.append(self.allocator, Batch.init(id, self.next_batch_start, count, self.allocator)) catch return;
+            self.batches.append(self.allocator, Batch.init(self.io, id, self.next_batch_start, count, self.allocator)) catch return;
             self.next_batch_start += count;
         }
     }
@@ -508,6 +557,8 @@ pub const SyncChain = struct {
                 front.endSlot(),
                 err,
             });
+            self.cumulative_metrics.processing_error_total += 1;
+            self.cumulative_metrics.processing_time_ns_total += front.finishProcessingTiming();
             front.onProcessingError();
             if (front.isProcessingExhausted()) {
                 if (front.download_peer) |p| self.callbacks.reportPeer(p);
@@ -515,7 +566,12 @@ pub const SyncChain = struct {
             }
             return err;
         };
+        const processed_blocks = front.blocks.len;
+        const elapsed_ns = front.finishProcessingTiming();
         front.onProcessingSuccess();
+        self.cumulative_metrics.processing_success_total += 1;
+        self.cumulative_metrics.processing_time_ns_total += elapsed_ns;
+        self.cumulative_metrics.processed_blocks_total += @intCast(processed_blocks);
 
         // If a previous batch was awaiting validation, it's now validated
         // since this batch imported successfully (proving continuity).
@@ -547,6 +603,44 @@ pub const SyncChain = struct {
         if (self.next_batch_start > self.target.slot and self.batches.items.len == 0) {
             self.status = .done;
         }
+    }
+
+    pub fn cumulativeMetricsSnapshot(self: *const SyncChain) CumulativeMetrics {
+        return self.cumulative_metrics;
+    }
+
+    pub fn metricsSnapshot(self: *const SyncChain) MetricsSnapshot {
+        var batch_statuses: BatchStatusCounts = .{};
+        for (self.batches.items) |batch| {
+            switch (batch.status) {
+                .awaiting_download => batch_statuses.awaiting_download += 1,
+                .downloading => batch_statuses.downloading += 1,
+                .awaiting_processing => batch_statuses.awaiting_processing += 1,
+                .processing => batch_statuses.processing += 1,
+                .awaiting_validation => batch_statuses.awaiting_validation += 1,
+            }
+        }
+
+        return .{
+            .peer_count = @intCast(self.peerCount()),
+            .target_slot = self.target.slot,
+            .validated_epochs = self.validated_epochs,
+            .batches_total = @intCast(self.batches.items.len),
+            .batch_statuses = batch_statuses,
+            .cumulative = self.cumulative_metrics,
+        };
+    }
+
+    pub fn accumulateCumulativeMetrics(dst: *CumulativeMetrics, src: CumulativeMetrics) void {
+        dst.download_requests_total +|= src.download_requests_total;
+        dst.download_success_total +|= src.download_success_total;
+        dst.download_error_total +|= src.download_error_total;
+        dst.download_deferred_total +|= src.download_deferred_total;
+        dst.download_time_ns_total +|= src.download_time_ns_total;
+        dst.processing_success_total +|= src.processing_success_total;
+        dst.processing_error_total +|= src.processing_error_total;
+        dst.processing_time_ns_total +|= src.processing_time_ns_total;
+        dst.processed_blocks_total +|= src.processed_blocks_total;
     }
 };
 
@@ -617,6 +711,7 @@ test "SyncChain: basic batch pipeline" {
     var tc = TestSyncCallbacks{};
     var chain = SyncChain.init(
         allocator,
+        std.testing.io,
         0, // chain id
         .finalized,
         0, // start epoch 0
@@ -639,6 +734,7 @@ test "SyncChain: peer management" {
     var tc = TestSyncCallbacks{};
     var chain = SyncChain.init(
         allocator,
+        std.testing.io,
         0, // chain id
         .head,
         0,
@@ -665,6 +761,7 @@ test "SyncChain: completes when all batches processed" {
     // Small target — just 2 slots.
     var chain = SyncChain.init(
         allocator,
+        std.testing.io,
         0, // chain id
         .finalized,
         0,
@@ -734,6 +831,7 @@ test "SyncChain: pending processing waits for completion callback" {
     var tc = PendingCallbacks{};
     var chain = SyncChain.init(
         allocator,
+        std.testing.io,
         0,
         .finalized,
         0,
@@ -774,6 +872,7 @@ test "SyncChain: skips peers that cannot serve the batch start slot" {
     var tc = TestSyncCallbacks{};
     var chain = SyncChain.init(
         allocator,
+        std.testing.io,
         0,
         .head,
         0,
@@ -797,6 +896,7 @@ test "SyncChain: head retries avoid peers behind known batch progress" {
     var tc = TestSyncCallbacks{};
     var chain = SyncChain.init(
         allocator,
+        std.testing.io,
         0,
         .head,
         0,

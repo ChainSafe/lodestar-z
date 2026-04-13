@@ -78,6 +78,17 @@ pub const ProcessorMetrics = struct {
     }
 };
 
+pub const MetricsSnapshot = struct {
+    items_processed: [WorkType.count]u64,
+    processing_time_ns: [WorkType.count]u64,
+    loop_iterations: u64,
+    items_dispatched: u64,
+    items_received: u64,
+    items_dropped_full: u64,
+    items_dropped_sync: u64,
+    queue_depths: BeaconProcessor.QueueDepths,
+};
+
 // ---------------------------------------------------------------------------
 // BeaconProcessor
 // ---------------------------------------------------------------------------
@@ -237,6 +248,19 @@ pub const BeaconProcessor = struct {
                 self.queues.gossip_proposer_slashing.len +
                 self.queues.gossip_attester_slashing.len +
                 self.queues.gossip_bls_to_exec.len,
+        };
+    }
+
+    pub fn metricsSnapshot(self: *const BeaconProcessor) MetricsSnapshot {
+        return .{
+            .items_processed = self.metrics.items_processed,
+            .processing_time_ns = self.metrics.processing_time_ns,
+            .loop_iterations = self.metrics.loop_iterations,
+            .items_dispatched = self.metrics.items_dispatched,
+            .items_received = self.metrics.items_received,
+            .items_dropped_full = self.queues.items_dropped_full,
+            .items_dropped_sync = self.queues.items_dropped_sync,
+            .queue_depths = self.getQueueDepths(),
         };
     }
 };

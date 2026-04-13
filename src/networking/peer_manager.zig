@@ -788,7 +788,7 @@ pub const PeerManager = struct {
         if (best_unknown) |candidate| {
             return try self.allocator.dupe(u8, candidate.peer_id);
         }
-        log.info(
+        log.debug(
             "No data column peer selected: connected={d} eligible_range={d} unknown={d} zero_overlap={d} missing_columns={d} preferred={f} slots={d}..{d}",
             .{
                 connected_count,

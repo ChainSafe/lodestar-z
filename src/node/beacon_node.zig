@@ -37,9 +37,11 @@ const BlsThreadPool = bls_mod.ThreadPool;
 const CachedBeaconState = state_transition.CachedBeaconState;
 const StateTransitionMetrics = state_transition.metrics.StateTransitionMetrics;
 const chain_mod = @import("chain");
+const db_mod = @import("db");
 const Chain = chain_mod.Chain;
 const ChainRuntime = chain_mod.Runtime;
 const ChainRuntimeMetricsSnapshot = chain_mod.MetricsSnapshot;
+const DatabaseMetricsSnapshot = db_mod.MetricsSnapshot;
 const PeerManagerMetricsSnapshot = networking.PeerManagerMetricsSnapshot;
 const ChainRuntimeBuilder = chain_mod.RuntimeBuilder;
 const ChainService = chain_mod.Service;
@@ -51,6 +53,7 @@ const BlockProductionConfig = chain_mod.BlockProductionConfig;
 const ImportResult = chain_mod.ImportResult;
 const networking = @import("networking");
 const DiscoveryService = networking.DiscoveryService;
+const DiscoveryStats = networking.discovery_service.DiscoveryStats;
 const DiscoveryConfig = networking.DiscoveryConfig;
 const PeerManager = networking.PeerManager;
 const PeerManagerConfig = networking.PeerManagerConfig;
@@ -75,6 +78,7 @@ const UnknownBlockSync = sync_mod.UnknownBlockSync;
 const UnknownChainSync = sync_mod.UnknownChainSync;
 const SyncService = sync_mod.SyncService;
 const SyncMode = sync_mod.SyncMode;
+const SyncServiceMetricsSnapshot = sync_mod.sync_service.MetricsSnapshot;
 const SyncServiceCallbacks = sync_mod.SyncServiceCallbacks;
 const BatchBlock = sync_mod.BatchBlock;
 const BatchId = sync_mod.BatchId;
@@ -108,6 +112,7 @@ const gossip_node_callbacks_mod = @import("gossip_node_callbacks.zig");
 // BeaconProcessor — central priority scheduling loop.
 const processor_mod = @import("processor");
 const BeaconProcessor = processor_mod.BeaconProcessor;
+const ProcessorMetricsSnapshot = processor_mod.processor.MetricsSnapshot;
 const QueueConfig = processor_mod.QueueConfig;
 const WorkItem = processor_mod.WorkItem;
 const WorkQueues = processor_mod.WorkQueues;
@@ -179,6 +184,48 @@ const PendingSyncSegment = struct {
         self.* = undefined;
     }
 };
+
+const RangeSyncSegmentLogContext = struct {
+    sync_type: RangeSyncType,
+    total_blocks: usize,
+    key: ?SyncSegmentKey = null,
+};
+
+const max_tracked_head_catchup_slots = 64;
+
+const PendingHeadCatchupSlot = struct {
+    slot: u64 = 0,
+    started_at_ns: i64 = 0,
+};
+
+const GossipBlsPendingSnapshot = struct {
+    attestation_batches: u64 = 0,
+    attestation_items: u64 = 0,
+    aggregate_batches: u64 = 0,
+    aggregate_items: u64 = 0,
+    sync_message_batches: u64 = 0,
+    sync_message_items: u64 = 0,
+};
+
+fn wallNowNs(io: std.Io) i64 {
+    const now_ns = std.Io.Timestamp.now(io, .real).toNanoseconds();
+    return std.math.cast(i64, now_ns) orelse if (now_ns < 0)
+        std.math.minInt(i64)
+    else
+        std.math.maxInt(i64);
+}
+
+fn elapsedNsBetween(start_ns: i64, end_ns: i64) u64 {
+    return if (end_ns > start_ns) @intCast(end_ns - start_ns) else 0;
+}
+
+fn secondsFromNs(elapsed_ns: u64) f64 {
+    return @as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(std.time.ns_per_s));
+}
+
+fn millisFromNs(elapsed_ns: u64) u64 {
+    return elapsed_ns / std.time.ns_per_ms;
+}
 
 fn cloneBatchBlocks(allocator: Allocator, blocks: []const BatchBlock) ![]BatchBlock {
     const owned = try allocator.alloc(BatchBlock, blocks.len);
@@ -264,11 +311,13 @@ pub const DiscoveryDialCompletion = union(enum) {
         ma_str: []const u8,
         node_id: [32]u8,
         pubkey: [33]u8,
+        elapsed_ns: u64,
     },
     failure: struct {
         predicted_peer_id: []const u8,
         ma_str: []const u8,
         err: anyerror,
+        elapsed_ns: u64,
     },
 
     pub fn deinit(self: *DiscoveryDialCompletion, allocator: Allocator) void {
@@ -441,6 +490,12 @@ pub const BeaconNode = struct {
     metrics: ?*BeaconMetrics = null,
     last_chain_metrics_snapshot: ?ChainRuntimeMetricsSnapshot = null,
     last_peer_manager_metrics_snapshot: ?PeerManagerMetricsSnapshot = null,
+    last_processor_metrics_snapshot: ?ProcessorMetricsSnapshot = null,
+    last_discovery_stats: ?DiscoveryStats = null,
+    last_sync_service_metrics_snapshot: ?SyncServiceMetricsSnapshot = null,
+    last_db_metrics_snapshot: ?DatabaseMetricsSnapshot = null,
+    last_state_metrics_root: ?[32]u8 = null,
+    last_previous_epoch_orphaned_epoch: ?u64 = null,
 
     // HTTP server for the Beacon REST API (lazy-initialized via startApi).
     http_server: ?api_mod.HttpServer = null,
@@ -481,9 +536,13 @@ pub const BeaconNode = struct {
     // Last known active fork digest — used to detect fork transitions
     // so we can resubscribe gossip topics under the new fork digest.
     last_active_fork_digest: [4]u8 = [4]u8{ 0, 0, 0, 0 },
+    last_gossipsub_topic_mismatch_log_ns: u64 = 0,
 
     // Last slot for which chain.onSlot() was applied.
     last_slot_tick: ?u64 = null,
+    last_time_to_head_observed_slot: ?u64 = null,
+    head_catchup_slots: [max_tracked_head_catchup_slots]PendingHeadCatchupSlot = [_]PendingHeadCatchupSlot{.{}} ** max_tracked_head_catchup_slots,
+    head_catchup_slots_len: usize = 0,
 
     // Sync subsystem components (lazily initialized when P2P starts).
 
@@ -777,6 +836,10 @@ pub const BeaconNode = struct {
             },
             .not_queued => |returned_planned| {
                 owned_planned = returned_planned;
+                node_log.debug("state work queue busy, falling back to synchronous import slot={d} source={s}", .{
+                    owned_planned.block_input.block.beaconBlock().slot(),
+                    blockImportSourceLabel(owned_planned.block_input.source),
+                });
             },
         }
 
@@ -1317,6 +1380,7 @@ pub const BeaconNode = struct {
         var segment = &self.pending_sync_segments.items[index];
         segment.in_flight = false;
         segment.next_index += 1;
+        const block_index = segment.next_index - 1;
 
         var owned_prepared = prepared;
         defer {
@@ -1330,6 +1394,7 @@ pub const BeaconNode = struct {
                     segment.failed_count += 1;
                     _ = recordBlockImportError(&segment.error_counts, error.ExecutionPayloadInvalid);
                     segment.stop_after_current = true;
+                    self.recordRangeSyncSegmentFailure(segment.sync_type, .commit, err);
                 },
                 else => {
                     segment.failed_count += 1;
@@ -1350,7 +1415,11 @@ pub const BeaconNode = struct {
                         => segment.error_counts.incr(err),
                         else => {},
                     }
-                    node_log.warn("deferred sync segment block commit failed: {}", .{err});
+                    self.recordRangeSyncSegmentFailure(segment.sync_type, .commit, err);
+                    node_log.warn(
+                        "deferred sync segment block commit failed slot_index={d} chain_id={d} batch_id={d} generation={d}: {}",
+                        .{ block_index, segment.key.chain_id, segment.key.batch_id, segment.key.generation, err },
+                    );
                 },
             }
             return;
@@ -1396,6 +1465,7 @@ pub const BeaconNode = struct {
                 var segment = &self.pending_sync_segments.items[index];
                 segment.in_flight = false;
                 segment.next_index += 1;
+                const block_index = segment.next_index - 1;
 
                 switch (err) {
                     error.AlreadyKnown, error.WouldRevertFinalizedSlot, error.GenesisBlock => {
@@ -1406,6 +1476,7 @@ pub const BeaconNode = struct {
                         segment.failed_count += 1;
                         _ = recordBlockImportError(&segment.error_counts, err);
                         segment.stop_after_current = true;
+                        self.recordRangeSyncSegmentFailure(segment.sync_type, .execution_verify, err);
                     },
                     error.ParentUnknown,
                     error.FutureSlot,
@@ -1423,11 +1494,19 @@ pub const BeaconNode = struct {
                     => {
                         segment.failed_count += 1;
                         _ = recordBlockImportError(&segment.error_counts, err);
-                        node_log.warn("deferred sync segment execution verification failed: {}", .{err});
+                        self.recordRangeSyncSegmentFailure(segment.sync_type, .execution_verify, err);
+                        node_log.warn(
+                            "deferred sync segment execution verification failed slot_index={d} chain_id={d} batch_id={d} generation={d}: {}",
+                            .{ block_index, segment.key.chain_id, segment.key.batch_id, segment.key.generation, err },
+                        );
                     },
                     else => {
                         segment.failed_count += 1;
-                        node_log.warn("deferred sync segment execution verification failed: {}", .{err});
+                        self.recordRangeSyncSegmentFailure(segment.sync_type, .execution_verify, err);
+                        node_log.warn(
+                            "deferred sync segment execution verification failed slot_index={d} chain_id={d} batch_id={d} generation={d}: {}",
+                            .{ block_index, segment.key.chain_id, segment.key.batch_id, segment.key.generation, err },
+                        );
                     },
                 }
 
@@ -1444,7 +1523,7 @@ pub const BeaconNode = struct {
         const t0 = std.Io.Clock.awake.now(self.io);
         const outcome = try self.chainService().processRangeSyncSegment(raw_blocks);
         const all_failed = outcome.imported_count == 0 and outcome.skipped_count == 0 and outcome.failed_count > 0;
-        self.finishSegmentImportOutcome(t0, outcome);
+        self.finishSegmentImportOutcome(t0, outcome, null);
         if (all_failed) return error.AllBlocksFailed;
     }
 
@@ -1497,8 +1576,12 @@ pub const BeaconNode = struct {
             }
 
             const started = startPendingSyncSegmentBlock(self, i) catch |err| {
-                node_log.warn("failed to start pending sync segment block: {}", .{err});
-                self.pending_sync_segments.items[i].stop_after_current = true;
+                const segment = &self.pending_sync_segments.items[i];
+                node_log.warn(
+                    "failed to start pending sync segment block chain_id={d} batch_id={d} generation={d} index={d}: {}",
+                    .{ segment.key.chain_id, segment.key.batch_id, segment.key.generation, segment.next_index, err },
+                );
+                segment.stop_after_current = true;
                 did_work = true;
                 continue;
             };
@@ -1542,6 +1625,43 @@ pub const BeaconNode = struct {
             error.InternalError => "internal_error",
             else => "failed",
         };
+    }
+
+    fn rangeSyncSegmentResult(
+        outcome: chain_mod.SegmentImportOutcome,
+    ) metrics_mod.BeaconMetrics.RangeSyncSegmentResult {
+        if (outcome.imported_count > 0 and outcome.failed_count == 0 and outcome.skipped_count == 0) {
+            return .complete;
+        }
+        if (outcome.imported_count > 0 and outcome.failed_count == 0 and outcome.skipped_count > 0) {
+            return .complete_with_skips;
+        }
+        if (outcome.imported_count > 0) return .partial;
+        if (outcome.failed_count > 0) return .failed;
+        return .skipped;
+    }
+
+    fn summarizeBlockImportErrorCounts(
+        buf: []u8,
+        counts: chain_mod.BlockImportErrorCounts,
+    ) []const u8 {
+        var written: usize = 0;
+        var wrote_any = false;
+
+        inline for (std.meta.fields(chain_mod.BlockImportErrorCounts)) |field| {
+            const count: usize = @field(counts, field.name);
+            if (count != 0) {
+                const formatted = std.fmt.bufPrint(
+                    buf[written..],
+                    "{s}{s}={d}",
+                    .{ if (wrote_any) "," else "", field.name, count },
+                ) catch break;
+                written += formatted.len;
+                wrote_any = true;
+            }
+        }
+
+        return if (wrote_any) buf[0..written] else "none";
     }
 
     fn recordBlockImportResult(
@@ -1609,6 +1729,26 @@ pub const BeaconNode = struct {
         }
     }
 
+    fn recordRangeSyncSegmentFailure(
+        self: *BeaconNode,
+        sync_type: RangeSyncType,
+        stage: metrics_mod.BeaconMetrics.RangeSyncSegmentStage,
+        err: anyerror,
+    ) void {
+        if (self.metrics) |m| {
+            m.incrRangeSyncSegmentFailure(sync_type, stage, blockImportOutcomeLabel(err));
+        }
+    }
+
+    fn incrRangeSyncSegmentQueueBusy(
+        self: *BeaconNode,
+        sync_type: RangeSyncType,
+    ) void {
+        if (self.metrics) |m| {
+            m.incrRangeSyncSegmentQueueBusy(sync_type);
+        }
+    }
+
     fn finishImportOutcome(
         self: *BeaconNode,
         source: chain_mod.BlockSource,
@@ -1631,10 +1771,10 @@ pub const BeaconNode = struct {
             m.head_slot.set(outcome.snapshot.head.slot);
             m.finalized_epoch.set(outcome.snapshot.finalized.epoch);
             m.justified_epoch.set(outcome.snapshot.justified.epoch);
-            // Encode first 8 bytes of block root as u64 for change detection.
-            m.head_root.set(std.mem.readInt(u64, outcome.snapshot.head.root[0..8], .big));
+            m.head_root.set(metrics_mod.rootMetricValue(outcome.snapshot.head.root));
         }
         self.updateSyncProgress(outcome.snapshot);
+        self.observeHeadCatchup(outcome.snapshot.head.slot);
 
         if (result.epoch_transition) {
             if (outcome.effects.finalized_checkpoint) |finalized| {
@@ -1660,11 +1800,14 @@ pub const BeaconNode = struct {
         self: *BeaconNode,
         t0: std.Io.Timestamp,
         outcome: chain_mod.SegmentImportOutcome,
+        log_ctx: ?RangeSyncSegmentLogContext,
     ) void {
         if (outcome.effects.forkchoice_update) |update| self.queueExecutionForkchoiceUpdate(update);
 
         const t1 = std.Io.Clock.awake.now(self.io);
         const elapsed_s: f64 = @as(f64, @floatFromInt(t1.nanoseconds - t0.nanoseconds)) / 1e9;
+        const elapsed_ms: u64 = @intFromFloat(elapsed_s * 1000.0);
+        const segment_result = rangeSyncSegmentResult(outcome);
 
         if (self.metrics) |m| {
             if (outcome.imported_count > 0) {
@@ -1683,21 +1826,75 @@ pub const BeaconNode = struct {
             m.head_slot.set(outcome.snapshot.head.slot);
             m.finalized_epoch.set(outcome.snapshot.finalized.epoch);
             m.justified_epoch.set(outcome.snapshot.justified.epoch);
-            m.head_root.set(std.mem.readInt(u64, outcome.snapshot.head.root[0..8], .big));
+            m.head_root.set(metrics_mod.rootMetricValue(outcome.snapshot.head.root));
+            if (log_ctx) |ctx| {
+                m.observeRangeSyncSegment(ctx.sync_type, segment_result, @intCast(ctx.total_blocks), elapsed_s);
+            }
         }
         self.updateSyncProgress(outcome.snapshot);
+        self.observeHeadCatchup(outcome.snapshot.head.slot);
 
         if (outcome.effects.finalized_checkpoint) |finalized| {
             self.unknown_chain_sync.onFinalized(finalized.slot);
         }
 
-        chain_log.info("range sync segment imported imported={d} skipped={d} failed={d} head_slot={d} finalized_epoch={d}", .{
-            outcome.imported_count,
-            outcome.skipped_count,
-            outcome.failed_count,
-            outcome.snapshot.head.slot,
-            outcome.snapshot.finalized.epoch,
-        });
+        if (log_ctx) |ctx| {
+            var errors_buf: [512]u8 = undefined;
+            const errors_summary = summarizeBlockImportErrorCounts(errors_buf[0..], outcome.error_counts);
+            if (ctx.key) |key| {
+                chain_log.info(
+                    "range sync segment completed sync_type={s} result={s} chain_id={d} batch_id={d} generation={d} blocks={d} imported={d} skipped={d} failed={d} optimistic={d} epoch_transitions={d} elapsed_ms={d} errors={s} head_slot={d} finalized_epoch={d}",
+                    .{
+                        @tagName(ctx.sync_type),
+                        @tagName(segment_result),
+                        key.chain_id,
+                        key.batch_id,
+                        key.generation,
+                        ctx.total_blocks,
+                        outcome.imported_count,
+                        outcome.skipped_count,
+                        outcome.failed_count,
+                        outcome.optimistic_imported_count,
+                        outcome.epoch_transition_count,
+                        elapsed_ms,
+                        errors_summary,
+                        outcome.snapshot.head.slot,
+                        outcome.snapshot.finalized.epoch,
+                    },
+                );
+            } else {
+                chain_log.info(
+                    "range sync segment completed sync_type={s} result={s} blocks={d} imported={d} skipped={d} failed={d} optimistic={d} epoch_transitions={d} elapsed_ms={d} errors={s} head_slot={d} finalized_epoch={d}",
+                    .{
+                        @tagName(ctx.sync_type),
+                        @tagName(segment_result),
+                        ctx.total_blocks,
+                        outcome.imported_count,
+                        outcome.skipped_count,
+                        outcome.failed_count,
+                        outcome.optimistic_imported_count,
+                        outcome.epoch_transition_count,
+                        elapsed_ms,
+                        errors_summary,
+                        outcome.snapshot.head.slot,
+                        outcome.snapshot.finalized.epoch,
+                    },
+                );
+            }
+            return;
+        }
+
+        chain_log.info(
+            "range sync segment imported imported={d} skipped={d} failed={d} elapsed_ms={d} head_slot={d} finalized_epoch={d}",
+            .{
+                outcome.imported_count,
+                outcome.skipped_count,
+                outcome.failed_count,
+                elapsed_ms,
+                outcome.snapshot.head.slot,
+                outcome.snapshot.finalized.epoch,
+            },
+        );
     }
 
     fn finishGenericQueuedBlockImport(
@@ -1741,6 +1938,7 @@ pub const BeaconNode = struct {
         var segment = &self.pending_sync_segments.items[index];
         segment.in_flight = false;
         segment.next_index += 1;
+        const block_index = segment.next_index - 1;
 
         const outcome = self.chainService().finishCompletedReadyBlockImport(completed) catch |err| {
             switch (err) {
@@ -1752,6 +1950,7 @@ pub const BeaconNode = struct {
                     segment.failed_count += 1;
                     _ = recordBlockImportError(&segment.error_counts, error.ExecutionPayloadInvalid);
                     segment.stop_after_current = true;
+                    self.recordRangeSyncSegmentFailure(segment.sync_type, .commit, err);
                 },
                 else => {
                     segment.failed_count += 1;
@@ -1772,7 +1971,11 @@ pub const BeaconNode = struct {
                         => segment.error_counts.incr(err),
                         else => {},
                     }
-                    node_log.warn("deferred sync segment block commit failed: {}", .{err});
+                    self.recordRangeSyncSegmentFailure(segment.sync_type, .commit, err);
+                    node_log.warn(
+                        "deferred sync segment block commit failed slot_index={d} chain_id={d} batch_id={d} generation={d}: {}",
+                        .{ block_index, segment.key.chain_id, segment.key.batch_id, segment.key.generation, err },
+                    );
                 },
             }
             return;
@@ -1804,9 +2007,10 @@ pub const BeaconNode = struct {
             m.head_slot.set(outcome.snapshot.head.slot);
             m.finalized_epoch.set(outcome.snapshot.finalized.epoch);
             m.justified_epoch.set(outcome.snapshot.justified.epoch);
-            m.head_root.set(std.mem.readInt(u64, outcome.snapshot.head.root[0..8], .big));
+            m.head_root.set(metrics_mod.rootMetricValue(outcome.snapshot.head.root));
         }
         self.updateSyncProgress(outcome.snapshot);
+        self.observeHeadCatchup(outcome.snapshot.head.slot);
 
         if (outcome.head_changed) {
             chain_log.info("execution revalidation changed head head_slot={d} head_root={s}... finalized_epoch={d}", .{
@@ -1822,6 +2026,111 @@ pub const BeaconNode = struct {
             svc.onHeadUpdate(snapshot.head.slot);
             svc.onFinalizedUpdate(snapshot.finalized.epoch);
         }
+    }
+
+    pub fn gossipBlsPendingSnapshot(self: *const BeaconNode) GossipBlsPendingSnapshot {
+        var snapshot: GossipBlsPendingSnapshot = .{};
+        for (self.pending_gossip_bls_batches.items) |pending| {
+            switch (pending) {
+                .attestation => |batch| {
+                    snapshot.attestation_batches += 1;
+                    snapshot.attestation_items += @intCast(batch.items.len);
+                },
+                .aggregate => |batch| {
+                    snapshot.aggregate_batches += 1;
+                    snapshot.aggregate_items += @intCast(batch.items.len);
+                },
+                .sync_message => |batch| {
+                    snapshot.sync_message_batches += 1;
+                    snapshot.sync_message_items += @intCast(batch.items.len);
+                },
+            }
+        }
+        return snapshot;
+    }
+
+    pub fn headCatchupPendingCount(self: *const BeaconNode) u64 {
+        return @intCast(self.head_catchup_slots_len);
+    }
+
+    pub fn currentTimeToHeadMs(self: *BeaconNode, current_slot: u64, head_slot: u64) u64 {
+        if (head_slot >= current_slot) return 0;
+        return millisFromNs(elapsedNsBetween(self.slotStartNs(current_slot), wallNowNs(self.io)));
+    }
+
+    pub fn noteHeadCatchupSlotsStarted(self: *BeaconNode, start_slot: u64, end_slot: u64) void {
+        if (start_slot > end_slot) return;
+
+        var slot = start_slot;
+        while (slot <= end_slot) : (slot += 1) {
+            self.appendHeadCatchupSlot(slot);
+        }
+    }
+
+    pub fn observeHeadCatchup(self: *BeaconNode, head_slot: u64) void {
+        const now_ns = wallNowNs(self.io);
+        if (self.metrics) |metrics| {
+            if (self.last_time_to_head_observed_slot) |last_slot| {
+                if (head_slot > last_slot) {
+                    var slot = last_slot + 1;
+                    while (slot <= head_slot) : (slot += 1) {
+                        const elapsed_ns = elapsedNsBetween(self.slotStartNs(slot), now_ns);
+                        metrics.observeTimeToHead(secondsFromNs(elapsed_ns), millisFromNs(elapsed_ns));
+                    }
+                    self.last_time_to_head_observed_slot = head_slot;
+                }
+            } else {
+                self.last_time_to_head_observed_slot = head_slot;
+            }
+        } else {
+            self.last_time_to_head_observed_slot = head_slot;
+        }
+
+        while (self.head_catchup_slots_len > 0 and self.head_catchup_slots[0].slot <= head_slot) {
+            const pending = self.head_catchup_slots[0];
+            var i: usize = 1;
+            while (i < self.head_catchup_slots_len) : (i += 1) {
+                self.head_catchup_slots[i - 1] = self.head_catchup_slots[i];
+            }
+            self.head_catchup_slots_len -= 1;
+
+            if (self.metrics) |metrics| {
+                const elapsed_ns = elapsedNsBetween(pending.started_at_ns, now_ns);
+                metrics.observeTimeToHead(secondsFromNs(elapsed_ns), millisFromNs(elapsed_ns));
+            }
+        }
+    }
+
+    fn appendHeadCatchupSlot(self: *BeaconNode, slot: u64) void {
+        if (self.head_catchup_slots_len > 0) {
+            const last = self.head_catchup_slots[self.head_catchup_slots_len - 1];
+            if (last.slot >= slot) return;
+        }
+
+        if (self.head_catchup_slots_len == self.head_catchup_slots.len) {
+            var i: usize = 1;
+            while (i < self.head_catchup_slots_len) : (i += 1) {
+                self.head_catchup_slots[i - 1] = self.head_catchup_slots[i];
+            }
+            self.head_catchup_slots_len -= 1;
+        }
+
+        self.head_catchup_slots[self.head_catchup_slots_len] = .{
+            .slot = slot,
+            .started_at_ns = self.slotStartNs(slot),
+        };
+        self.head_catchup_slots_len += 1;
+    }
+
+    fn slotStartNs(self: *BeaconNode, slot: u64) i64 {
+        if (self.clock) |clock| {
+            const start_ns = clock.slotStartNs(slot);
+            return if (start_ns > std.math.maxInt(i64))
+                std.math.maxInt(i64)
+            else
+                @intCast(start_ns);
+        }
+        return wallNowNs(self.io);
     }
 
     /// Store a blob sidecar received via gossip or req/resp.
@@ -2024,7 +2333,11 @@ pub const BeaconNode = struct {
             var ready = self.chainService().prepareRawBlockInput(block.block_bytes, .range_sync) catch |err| {
                 segment.failed_count += 1;
                 segment.next_index += 1;
-                node_log.warn("range sync block preparation failed: {}", .{err});
+                self.recordRangeSyncSegmentFailure(segment.sync_type, .prepare, err);
+                node_log.warn(
+                    "range sync block preparation failed slot={d} chain_id={d} batch_id={d} generation={d} index={d}: {}",
+                    .{ block.slot, segment.key.chain_id, segment.key.batch_id, segment.key.generation, segment.next_index - 1, err },
+                );
                 continue;
             };
 
@@ -2052,7 +2365,11 @@ pub const BeaconNode = struct {
                     => {
                         segment.failed_count += 1;
                         _ = recordBlockImportError(&segment.error_counts, err);
-                        node_log.warn("range sync block planning failed: {}", .{err});
+                        self.recordRangeSyncSegmentFailure(segment.sync_type, .plan, err);
+                        node_log.warn(
+                            "range sync block planning failed slot={d} chain_id={d} batch_id={d} generation={d} index={d}: {}",
+                            .{ block.slot, segment.key.chain_id, segment.key.batch_id, segment.key.generation, segment.next_index, err },
+                        );
                     },
                 }
                 segment.next_index += 1;
@@ -2074,6 +2391,7 @@ pub const BeaconNode = struct {
             var owned_planned = planned;
             const queue_result = self.chainService().tryQueuePlannedReadyBlockImport(owned_planned) catch |err| {
                 self.chainService().deinitPlannedReadyBlockImport(&owned_planned);
+                self.recordRangeSyncSegmentFailure(segment.sync_type, .queue, err);
                 return err;
             };
             switch (queue_result) {
@@ -2092,6 +2410,14 @@ pub const BeaconNode = struct {
                 },
                 .not_queued => |returned_planned| {
                     owned_planned = returned_planned;
+                    self.incrRangeSyncSegmentQueueBusy(segment.sync_type);
+                    node_log.debug("state work queue busy for range sync slot={d} chain_id={d} batch_id={d} generation={d} index={d}", .{
+                        block.slot,
+                        segment.key.chain_id,
+                        segment.key.batch_id,
+                        segment.key.generation,
+                        segment.next_index,
+                    });
                 },
             }
 
@@ -2121,7 +2447,11 @@ pub const BeaconNode = struct {
             segment.error_counts,
         );
         const all_failed = outcome.imported_count == 0 and outcome.skipped_count == 0 and outcome.failed_count > 0;
-        self.finishSegmentImportOutcome(segment.started_at, outcome);
+        self.finishSegmentImportOutcome(segment.started_at, outcome, .{
+            .sync_type = segment.sync_type,
+            .total_blocks = segment.blocks.len,
+            .key = segment.key,
+        });
 
         if (self.sync_service_inst) |sync_svc| {
             if (all_failed) {
@@ -2234,7 +2564,7 @@ pub const BeaconNode = struct {
 
         return .{
             .head_slot = chain_sync.head_slot,
-            .sync_distance = if (is_synced) 0 else chain_sync.sync_distance,
+            .sync_distance = chain_sync.sync_distance,
             .is_syncing = !is_synced,
             .is_optimistic = chain_sync.is_optimistic,
             .el_offline = self.execution_runtime.el_offline,
@@ -2333,6 +2663,9 @@ pub const BeaconNode = struct {
         self.genesis_validators_root = outcome.genesis_validators_root;
         self.earliest_available_slot = outcome.earliest_available_slot;
         self.last_slot_tick = null;
+        self.last_time_to_head_observed_slot = null;
+        self.last_state_metrics_root = null;
+        self.last_previous_epoch_orphaned_epoch = null;
         self.clock = SlotClock.fromGenesis(outcome.genesis_time, self.config.chain);
         self.api_context.genesis_time = outcome.genesis_time;
         _ = outcome.snapshot;
@@ -2351,13 +2684,32 @@ const PendingAttestationBlsBatch = struct {
     items: []AttestationWork,
     owned_sets: []bls_mod.OwnedSignatureSet,
     future: *BlsThreadPool.VerifySetsFuture,
+    enqueued_at_ns: i64,
+    started_at_ns: i64 = 0,
 
     fn isReady(self: *const PendingAttestationBlsBatch) bool {
         return self.future.isReady();
     }
 
-    fn finish(self: *PendingAttestationBlsBatch, node: *BeaconNode) void {
+    fn markStarted(self: *PendingAttestationBlsBatch, now_ns: i64) void {
+        if (self.started_at_ns == 0 and self.future.started.isSet()) {
+            self.started_at_ns = now_ns;
+        }
+    }
+
+    fn finish(self: *PendingAttestationBlsBatch, node: *BeaconNode, finished_at_ns: i64) void {
+        self.markStarted(finished_at_ns);
         const batch_valid = self.future.finish() catch false;
+        const verify_started_ns = if (self.started_at_ns != 0) self.started_at_ns else self.enqueued_at_ns;
+        recordGossipBlsVerificationMetrics(
+            node,
+            .attestation,
+            .batch_async,
+            if (batch_valid) .success else .fallback,
+            self.items.len,
+            if (self.started_at_ns != 0) secondsFromNs(elapsedNsBetween(self.enqueued_at_ns, self.started_at_ns)) else null,
+            elapsedNsBetween(verify_started_ns, finished_at_ns),
+        );
         importAttestationBatchItems(node, self.items, batch_valid);
         freeOwnedSignatureSets(node.allocator, self.owned_sets);
         node.allocator.free(self.items);
@@ -2368,13 +2720,32 @@ const PendingAggregateBlsBatch = struct {
     items: []AggregateWork,
     owned_sets: []bls_mod.OwnedSignatureSet,
     future: *BlsThreadPool.VerifySetsFuture,
+    enqueued_at_ns: i64,
+    started_at_ns: i64 = 0,
 
     fn isReady(self: *const PendingAggregateBlsBatch) bool {
         return self.future.isReady();
     }
 
-    fn finish(self: *PendingAggregateBlsBatch, node: *BeaconNode) void {
+    fn markStarted(self: *PendingAggregateBlsBatch, now_ns: i64) void {
+        if (self.started_at_ns == 0 and self.future.started.isSet()) {
+            self.started_at_ns = now_ns;
+        }
+    }
+
+    fn finish(self: *PendingAggregateBlsBatch, node: *BeaconNode, finished_at_ns: i64) void {
+        self.markStarted(finished_at_ns);
         const batch_valid = self.future.finish() catch false;
+        const verify_started_ns = if (self.started_at_ns != 0) self.started_at_ns else self.enqueued_at_ns;
+        recordGossipBlsVerificationMetrics(
+            node,
+            .aggregate,
+            .batch_async,
+            if (batch_valid) .success else .fallback,
+            self.items.len,
+            if (self.started_at_ns != 0) secondsFromNs(elapsedNsBetween(self.enqueued_at_ns, self.started_at_ns)) else null,
+            elapsedNsBetween(verify_started_ns, finished_at_ns),
+        );
         importAggregateBatchItems(node, self.items, batch_valid);
         freeOwnedSignatureSets(node.allocator, self.owned_sets);
         node.allocator.free(self.items);
@@ -2385,13 +2756,32 @@ const PendingSyncMessageBlsBatch = struct {
     items: []processor_mod.work_item.SyncMessageWork,
     owned_sets: []bls_mod.OwnedSignatureSet,
     future: *BlsThreadPool.VerifySetsFuture,
+    enqueued_at_ns: i64,
+    started_at_ns: i64 = 0,
 
     fn isReady(self: *const PendingSyncMessageBlsBatch) bool {
         return self.future.isReady();
     }
 
-    fn finish(self: *PendingSyncMessageBlsBatch, node: *BeaconNode) void {
+    fn markStarted(self: *PendingSyncMessageBlsBatch, now_ns: i64) void {
+        if (self.started_at_ns == 0 and self.future.started.isSet()) {
+            self.started_at_ns = now_ns;
+        }
+    }
+
+    fn finish(self: *PendingSyncMessageBlsBatch, node: *BeaconNode, finished_at_ns: i64) void {
+        self.markStarted(finished_at_ns);
         const batch_valid = self.future.finish() catch false;
+        const verify_started_ns = if (self.started_at_ns != 0) self.started_at_ns else self.enqueued_at_ns;
+        recordGossipBlsVerificationMetrics(
+            node,
+            .sync_message,
+            .batch_async,
+            if (batch_valid) .success else .fallback,
+            self.items.len,
+            if (self.started_at_ns != 0) secondsFromNs(elapsedNsBetween(self.enqueued_at_ns, self.started_at_ns)) else null,
+            elapsedNsBetween(verify_started_ns, finished_at_ns),
+        );
         importSyncMessageBatchItems(node, self.items, batch_valid);
         freeOwnedSignatureSets(node.allocator, self.owned_sets);
         node.allocator.free(self.items);
@@ -2427,11 +2817,27 @@ const PendingGossipBlsBatch = union(enum) {
         };
     }
 
-    fn finish(self: *PendingGossipBlsBatch, node: *BeaconNode) void {
+    fn itemCount(self: *const PendingGossipBlsBatch) usize {
+        return switch (self.*) {
+            .attestation => |batch| batch.items.len,
+            .aggregate => |batch| batch.items.len,
+            .sync_message => |batch| batch.items.len,
+        };
+    }
+
+    fn markStarted(self: *PendingGossipBlsBatch, now_ns: i64) void {
         switch (self.*) {
-            .attestation => |*batch| batch.finish(node),
-            .aggregate => |*batch| batch.finish(node),
-            .sync_message => |*batch| batch.finish(node),
+            .attestation => |*batch| batch.markStarted(now_ns),
+            .aggregate => |*batch| batch.markStarted(now_ns),
+            .sync_message => |*batch| batch.markStarted(now_ns),
+        }
+    }
+
+    fn finish(self: *PendingGossipBlsBatch, node: *BeaconNode, finished_at_ns: i64) void {
+        switch (self.*) {
+            .attestation => |*batch| batch.finish(node, finished_at_ns),
+            .aggregate => |*batch| batch.finish(node, finished_at_ns),
+            .sync_message => |*batch| batch.finish(node, finished_at_ns),
         }
     }
 };
@@ -2446,10 +2852,17 @@ fn setGossipBlsBatchDispatchState(node: *BeaconNode) void {
 fn processPendingGossipBlsBatchImpl(node: *BeaconNode) bool {
     defer setGossipBlsBatchDispatchState(node);
 
+    const now_ns = wallNowNs(node.io);
+    for (node.pending_gossip_bls_batches.items) |*pending| {
+        pending.markStarted(now_ns);
+    }
+
     var did_work = false;
     while (findReadyPendingGossipBlsBatch(node)) |ready_index| {
+        const finished_at_ns = wallNowNs(node.io);
         var ready = node.pending_gossip_bls_batches.orderedRemove(ready_index);
-        ready.finish(node);
+        ready.markStarted(finished_at_ns);
+        ready.finish(node, finished_at_ns);
         did_work = true;
     }
 
@@ -2461,8 +2874,10 @@ fn flushPendingGossipBlsBatchImpl(node: *BeaconNode) void {
 
     while (node.pending_gossip_bls_batches.items.len > 0) {
         const active_index = findStartedPendingGossipBlsBatch(node) orelse 0;
+        const finished_at_ns = wallNowNs(node.io);
         var pending = node.pending_gossip_bls_batches.orderedRemove(active_index);
-        pending.finish(node);
+        pending.markStarted(finished_at_ns);
+        pending.finish(node, finished_at_ns);
     }
 }
 
@@ -2519,6 +2934,98 @@ fn freeOwnedSignatureSets(allocator: Allocator, owned_sets: []bls_mod.OwnedSigna
         owned_set.deinit();
     }
     allocator.free(owned_sets);
+}
+
+fn queueSecondsFromSeenTimestamp(seen_timestamp_ns: i64, started_at_ns: i64) f64 {
+    if (seen_timestamp_ns <= 0) return 0;
+    return secondsFromNs(elapsedNsBetween(seen_timestamp_ns, started_at_ns));
+}
+
+fn recordGossipBlsVerificationMetrics(
+    node: *BeaconNode,
+    kind: metrics_mod.BeaconMetrics.GossipBlsKind,
+    path: metrics_mod.BeaconMetrics.GossipBlsPath,
+    outcome: metrics_mod.BeaconMetrics.GossipBlsOutcome,
+    item_count: usize,
+    queue_seconds: ?f64,
+    verify_elapsed_ns: u64,
+) void {
+    const metrics = node.metrics orelse return;
+    metrics.observeGossipBlsVerification(
+        kind,
+        path,
+        outcome,
+        @intCast(item_count),
+        queue_seconds,
+        secondsFromNs(verify_elapsed_ns),
+    );
+}
+
+fn observeGossipProcessorWork(
+    node: *BeaconNode,
+    kind: metrics_mod.BeaconMetrics.GossipProcessorKind,
+    seen_timestamp_ns: i64,
+    started_at_ns: i64,
+) void {
+    const metrics = node.metrics orelse return;
+    const finished_at_ns = wallNowNs(node.io);
+    metrics.observeGossipProcessor(
+        kind,
+        1,
+        queueSecondsFromSeenTimestamp(seen_timestamp_ns, started_at_ns),
+        secondsFromNs(elapsedNsBetween(started_at_ns, finished_at_ns)),
+    );
+}
+
+fn observeGossipProcessorAttestationBatch(
+    node: *BeaconNode,
+    items: []const AttestationWork,
+    started_at_ns: i64,
+) void {
+    const metrics = node.metrics orelse return;
+    const handle_seconds = secondsFromNs(elapsedNsBetween(started_at_ns, wallNowNs(node.io)));
+    for (items) |item| {
+        metrics.observeGossipProcessor(
+            .attestation,
+            1,
+            queueSecondsFromSeenTimestamp(item.seen_timestamp_ns, started_at_ns),
+            handle_seconds,
+        );
+    }
+}
+
+fn observeGossipProcessorAggregateBatch(
+    node: *BeaconNode,
+    items: []const AggregateWork,
+    started_at_ns: i64,
+) void {
+    const metrics = node.metrics orelse return;
+    const handle_seconds = secondsFromNs(elapsedNsBetween(started_at_ns, wallNowNs(node.io)));
+    for (items) |item| {
+        metrics.observeGossipProcessor(
+            .aggregate,
+            1,
+            queueSecondsFromSeenTimestamp(item.seen_timestamp_ns, started_at_ns),
+            handle_seconds,
+        );
+    }
+}
+
+fn observeGossipProcessorSyncMessageBatch(
+    node: *BeaconNode,
+    items: []const processor_mod.work_item.SyncMessageWork,
+    started_at_ns: i64,
+) void {
+    const metrics = node.metrics orelse return;
+    const handle_seconds = secondsFromNs(elapsedNsBetween(started_at_ns, wallNowNs(node.io)));
+    for (items) |item| {
+        metrics.observeGossipProcessor(
+            .sync_message,
+            1,
+            queueSecondsFromSeenTimestamp(item.seen_timestamp_ns, started_at_ns),
+            handle_seconds,
+        );
+    }
 }
 
 fn deinitAttestationBatchItems(node: *BeaconNode, items: []AttestationWork) void {
@@ -2859,6 +3366,7 @@ fn tryStartPendingAttestationBatch(node: *BeaconNode, items: []AttestationWork) 
         .items = items,
         .owned_sets = owned_sets,
         .future = future,
+        .enqueued_at_ns = wallNowNs(node.io),
     } });
     setGossipBlsBatchDispatchState(node);
     return true;
@@ -2916,6 +3424,7 @@ fn tryStartPendingAggregateBatch(node: *BeaconNode, items: []AggregateWork) bool
         .items = items,
         .owned_sets = owned_sets,
         .future = future,
+        .enqueued_at_ns = wallNowNs(node.io),
     } });
     setGossipBlsBatchDispatchState(node);
     return true;
@@ -2980,6 +3489,7 @@ fn tryStartPendingSyncMessageBatch(
         .items = items,
         .owned_sets = owned_sets,
         .future = future,
+        .enqueued_at_ns = wallNowNs(node.io),
     } });
     setGossipBlsBatchDispatchState(node);
     return true;
@@ -3003,6 +3513,8 @@ pub fn processorHandlerCallback(item: WorkItem, context: *anyopaque) void {
 
     switch (item) {
         .gossip_block => |work| {
+            const started_at_ns = wallNowNs(node.io);
+            defer observeGossipProcessorWork(node, .block, work.seen_timestamp_ns, started_at_ns);
             const seen_timestamp_sec: u64 = if (work.seen_timestamp_ns > 0)
                 @intCast(@divFloor(work.seen_timestamp_ns, std.time.ns_per_s))
             else
@@ -3033,57 +3545,136 @@ pub fn processorHandlerCallback(item: WorkItem, context: *anyopaque) void {
             }
         },
         .attestation_batch => |batch| {
+            const batch_items = batch.items[0..batch.count];
+            const started_at_ns = wallNowNs(node.io);
+            defer observeGossipProcessorAttestationBatch(node, batch_items, started_at_ns);
             node_log.debug("Processor: attestation batch (count={d})", .{batch.count});
-            if (cloneAttestationBatchItems(node.allocator, batch.items[0..batch.count])) |owned_items| {
+            if (cloneAttestationBatchItems(node.allocator, batch_items)) |owned_items| {
                 if (tryStartPendingAttestationBatch(node, owned_items)) {
                     return;
                 }
 
                 defer node.allocator.free(owned_items);
+                const verify_started_ns = wallNowNs(node.io);
                 const batch_valid = verifyAttestationBatchSync(node, owned_items);
+                recordGossipBlsVerificationMetrics(
+                    node,
+                    .attestation,
+                    .batch_sync,
+                    if (batch_valid) .success else .fallback,
+                    owned_items.len,
+                    null,
+                    elapsedNsBetween(verify_started_ns, wallNowNs(node.io)),
+                );
                 importAttestationBatchItems(node, owned_items, batch_valid);
             } else |_| {
-                const batch_items = batch.items[0..batch.count];
+                const verify_started_ns = wallNowNs(node.io);
                 const batch_valid = verifyAttestationBatchSync(node, batch_items);
+                recordGossipBlsVerificationMetrics(
+                    node,
+                    .attestation,
+                    .batch_sync,
+                    if (batch_valid) .success else .fallback,
+                    batch_items.len,
+                    null,
+                    elapsedNsBetween(verify_started_ns, wallNowNs(node.io)),
+                );
                 importAttestationBatchItems(node, batch_items, batch_valid);
             }
         },
         .aggregate_batch => |batch| {
+            const batch_items = batch.items[0..batch.count];
+            const started_at_ns = wallNowNs(node.io);
+            defer observeGossipProcessorAggregateBatch(node, batch_items, started_at_ns);
             node_log.debug("Processor: aggregate batch (count={d})", .{batch.count});
-            if (cloneAggregateBatchItems(node.allocator, batch.items[0..batch.count])) |owned_items| {
+            if (cloneAggregateBatchItems(node.allocator, batch_items)) |owned_items| {
                 if (tryStartPendingAggregateBatch(node, owned_items)) {
                     return;
                 }
 
                 defer node.allocator.free(owned_items);
+                const verify_started_ns = wallNowNs(node.io);
                 const batch_valid = verifyAggregateBatchSync(node, owned_items);
+                recordGossipBlsVerificationMetrics(
+                    node,
+                    .aggregate,
+                    .batch_sync,
+                    if (batch_valid) .success else .fallback,
+                    owned_items.len,
+                    null,
+                    elapsedNsBetween(verify_started_ns, wallNowNs(node.io)),
+                );
                 importAggregateBatchItems(node, owned_items, batch_valid);
             } else |_| {
-                const batch_items = batch.items[0..batch.count];
+                const verify_started_ns = wallNowNs(node.io);
                 const batch_valid = verifyAggregateBatchSync(node, batch_items);
+                recordGossipBlsVerificationMetrics(
+                    node,
+                    .aggregate,
+                    .batch_sync,
+                    if (batch_valid) .success else .fallback,
+                    batch_items.len,
+                    null,
+                    elapsedNsBetween(verify_started_ns, wallNowNs(node.io)),
+                );
                 importAggregateBatchItems(node, batch_items, batch_valid);
             }
         },
         .sync_message_batch => |batch| {
+            const batch_items = batch.items[0..batch.count];
+            const started_at_ns = wallNowNs(node.io);
+            defer observeGossipProcessorSyncMessageBatch(node, batch_items, started_at_ns);
             node_log.debug("Processor: sync message batch (count={d})", .{batch.count});
-            if (cloneSyncMessageBatchItems(node.allocator, batch.items[0..batch.count])) |owned_items| {
+            if (cloneSyncMessageBatchItems(node.allocator, batch_items)) |owned_items| {
                 if (tryStartPendingSyncMessageBatch(node, owned_items)) {
                     return;
                 }
 
                 defer node.allocator.free(owned_items);
+                const verify_started_ns = wallNowNs(node.io);
                 const batch_valid = verifySyncMessageBatchSync(node, owned_items);
+                recordGossipBlsVerificationMetrics(
+                    node,
+                    .sync_message,
+                    .batch_sync,
+                    if (batch_valid) .success else .fallback,
+                    owned_items.len,
+                    null,
+                    elapsedNsBetween(verify_started_ns, wallNowNs(node.io)),
+                );
                 importSyncMessageBatchItems(node, owned_items, batch_valid);
             } else |_| {
-                const batch_items = batch.items[0..batch.count];
+                const verify_started_ns = wallNowNs(node.io);
                 const batch_valid = verifySyncMessageBatchSync(node, batch_items);
+                recordGossipBlsVerificationMetrics(
+                    node,
+                    .sync_message,
+                    .batch_sync,
+                    if (batch_valid) .success else .fallback,
+                    batch_items.len,
+                    null,
+                    elapsedNsBetween(verify_started_ns, wallNowNs(node.io)),
+                );
                 importSyncMessageBatchItems(node, batch_items, batch_valid);
             }
         },
         .aggregate => |work| {
+            const started_at_ns = wallNowNs(node.io);
+            defer observeGossipProcessorWork(node, .aggregate, work.seen_timestamp_ns, started_at_ns);
             if (node.gossip_handler) |gh| {
                 if (gh.verifyAggregateSignatureFn) |verifyFn| {
-                    if (!verifyFn(gh.node, &work.aggregate, &work.resolved)) {
+                    const verify_started_ns = wallNowNs(node.io);
+                    const signature_valid = verifyFn(gh.node, &work.aggregate, &work.resolved);
+                    recordGossipBlsVerificationMetrics(
+                        node,
+                        .aggregate,
+                        .single,
+                        if (signature_valid) .success else .failure,
+                        1,
+                        null,
+                        elapsedNsBetween(verify_started_ns, wallNowNs(node.io)),
+                    );
+                    if (!signature_valid) {
                         node_log.debug("single aggregate BLS failed for aggregator {d}", .{work.aggregate.aggregatorIndex()});
                         work.resolved.deinit(node.allocator);
                         var aggregate = work.aggregate;
@@ -3095,6 +3686,8 @@ pub fn processorHandlerCallback(item: WorkItem, context: *anyopaque) void {
             handleQueuedAggregate(node, work);
         },
         .attestation => |att_work| {
+            const started_at_ns = wallNowNs(node.io);
+            defer observeGossipProcessorWork(node, .attestation, att_work.seen_timestamp_ns, started_at_ns);
             // Single attestation (not batched).
             // BLS verify and import to fork choice.
             var attestation = att_work.attestation;
@@ -3103,7 +3696,18 @@ pub fn processorHandlerCallback(item: WorkItem, context: *anyopaque) void {
             // BLS signature verification.
             if (node.gossip_handler) |gh| {
                 if (gh.verifyAttestationSignatureFn) |verifyFn| {
-                    if (!verifyFn(gh.node, &attestation, &att_work.resolved)) {
+                    const verify_started_ns = wallNowNs(node.io);
+                    const signature_valid = verifyFn(gh.node, &attestation, &att_work.resolved);
+                    recordGossipBlsVerificationMetrics(
+                        node,
+                        .attestation,
+                        .single,
+                        if (signature_valid) .success else .failure,
+                        1,
+                        null,
+                        elapsedNsBetween(verify_started_ns, wallNowNs(node.io)),
+                    );
+                    if (!signature_valid) {
                         node_log.debug("single attestation BLS failed at slot {d}", .{attestation.slot()});
                         return;
                     }
@@ -3117,30 +3721,57 @@ pub fn processorHandlerCallback(item: WorkItem, context: *anyopaque) void {
             }
         },
         .gossip_voluntary_exit => |work| {
+            const started_at_ns = wallNowNs(node.io);
+            defer observeGossipProcessorWork(node, .voluntary_exit, work.seen_timestamp_ns, started_at_ns);
             handleQueuedVoluntaryExit(node, work);
         },
         .gossip_proposer_slashing => |work| {
+            const started_at_ns = wallNowNs(node.io);
+            defer observeGossipProcessorWork(node, .proposer_slashing, work.seen_timestamp_ns, started_at_ns);
             handleQueuedProposerSlashing(node, work);
         },
         .gossip_attester_slashing => |work| {
+            const started_at_ns = wallNowNs(node.io);
+            defer observeGossipProcessorWork(node, .attester_slashing, work.seen_timestamp_ns, started_at_ns);
             handleQueuedAttesterSlashing(node, work);
         },
         .gossip_bls_to_exec => |work| {
+            const started_at_ns = wallNowNs(node.io);
+            defer observeGossipProcessorWork(node, .bls_to_execution_change, work.seen_timestamp_ns, started_at_ns);
             handleQueuedBlsChange(node, work);
         },
         .gossip_blob => |work| {
+            const started_at_ns = wallNowNs(node.io);
+            defer observeGossipProcessorWork(node, .blob_sidecar, work.seen_timestamp_ns, started_at_ns);
             handleQueuedBlobSidecar(node, work);
         },
         .gossip_data_column => |work| {
+            const started_at_ns = wallNowNs(node.io);
+            defer observeGossipProcessorWork(node, .data_column_sidecar, work.seen_timestamp_ns, started_at_ns);
             handleQueuedDataColumnSidecar(node, work);
         },
         .sync_contribution => |work| {
+            const started_at_ns = wallNowNs(node.io);
+            defer observeGossipProcessorWork(node, .sync_contribution, work.seen_timestamp_ns, started_at_ns);
             handleQueuedSyncContribution(node, work);
         },
         .sync_message => |work| {
+            const started_at_ns = wallNowNs(node.io);
+            defer observeGossipProcessorWork(node, .sync_message, work.seen_timestamp_ns, started_at_ns);
             if (node.gossip_handler) |gh| {
                 if (gh.verifySyncCommitteeSignatureFn != null) {
-                    if (!gossip_node_callbacks_mod.verifySyncCommitteeMessage(gh.node, &work.message)) {
+                    const verify_started_ns = wallNowNs(node.io);
+                    const signature_valid = gossip_node_callbacks_mod.verifySyncCommitteeMessage(gh.node, &work.message);
+                    recordGossipBlsVerificationMetrics(
+                        node,
+                        .sync_message,
+                        .single,
+                        if (signature_valid) .success else .failure,
+                        1,
+                        null,
+                        elapsedNsBetween(verify_started_ns, wallNowNs(node.io)),
+                    );
+                    if (!signature_valid) {
                         node_log.debug("single sync committee message BLS failed for validator {d} at slot {d}", .{
                             work.message.validator_index,
                             work.message.slot,

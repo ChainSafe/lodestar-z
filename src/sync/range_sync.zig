@@ -23,6 +23,9 @@ const sync_chain_mod = @import("sync_chain.zig");
 const SyncChain = sync_chain_mod.SyncChain;
 const SyncChainStatus = sync_chain_mod.SyncChainStatus;
 const SyncChainCallbacks = sync_chain_mod.SyncChainCallbacks;
+const SyncChainBatchStatusCounts = sync_chain_mod.BatchStatusCounts;
+const SyncChainCumulativeMetrics = sync_chain_mod.CumulativeMetrics;
+const SyncChainMetricsSnapshot = sync_chain_mod.MetricsSnapshot;
 const batch_mod = @import("batch.zig");
 const BatchId = batch_mod.BatchId;
 const BatchBlock = batch_mod.BatchBlock;
@@ -99,12 +102,28 @@ pub const RangeSyncState = struct {
     finalized_target: ?u64 = null,
 };
 
+pub const TypeMetricsSnapshot = struct {
+    active_chains: u64 = 0,
+    peer_count: u64 = 0,
+    highest_target_slot: u64 = 0,
+    validated_epochs: u64 = 0,
+    batches_total: u64 = 0,
+    batch_statuses: SyncChainBatchStatusCounts = .{},
+    cumulative: SyncChainCumulativeMetrics = .{},
+};
+
+pub const MetricsSnapshot = struct {
+    finalized: TypeMetricsSnapshot = .{},
+    head: TypeMetricsSnapshot = .{},
+};
+
 /// Maximum number of head chains to maintain.
 const MAX_HEAD_CHAINS: usize = 4;
 
 /// Range sync manager.
 pub const RangeSync = struct {
     allocator: Allocator,
+    io: std.Io,
     callbacks: RangeSyncCallbacks,
 
     /// The single active finalized sync chain (if any).
@@ -117,15 +136,20 @@ pub const RangeSync = struct {
     /// Monotonically-increasing chain ID counter. Owned here to avoid
     /// the data-race footgun of a file-scope mutable var.
     next_chain_id: u32,
+    completed_finalized_metrics: SyncChainCumulativeMetrics,
+    completed_head_metrics: SyncChainCumulativeMetrics,
 
-    pub fn init(allocator: Allocator, callbacks: RangeSyncCallbacks) RangeSync {
+    pub fn init(allocator: Allocator, io: std.Io, callbacks: RangeSyncCallbacks) RangeSync {
         return .{
             .allocator = allocator,
+            .io = io,
             .callbacks = callbacks,
             .finalized_chain = null,
             .head_chains = .empty,
             .local_finalized_epoch = 0,
             .next_chain_id = 0,
+            .completed_finalized_metrics = .{},
+            .completed_head_metrics = .{},
         };
     }
 
@@ -137,8 +161,14 @@ pub const RangeSync = struct {
     }
 
     pub fn deinit(self: *RangeSync) void {
-        if (self.finalized_chain) |*fc| fc.deinit();
-        for (self.head_chains.items) |*hc| hc.deinit();
+        if (self.finalized_chain) |*fc| {
+            self.foldCompletedChainMetrics(fc.sync_type, fc.cumulativeMetricsSnapshot());
+            fc.deinit();
+        }
+        for (self.head_chains.items) |*hc| {
+            self.foldCompletedChainMetrics(hc.sync_type, hc.cumulativeMetricsSnapshot());
+            hc.deinit();
+        }
         self.head_chains.deinit(self.allocator);
     }
 
@@ -186,6 +216,7 @@ pub const RangeSync = struct {
                 } else {
                     var fc = SyncChain.init(
                         self.allocator,
+                        self.io,
                         self.allocChainId(),
                         .finalized,
                         start_epoch,
@@ -211,6 +242,7 @@ pub const RangeSync = struct {
                 if (self.head_chains.items.len < MAX_HEAD_CHAINS) {
                     var hc = SyncChain.init(
                         self.allocator,
+                        self.io,
                         self.allocChainId(),
                         .head,
                         start_epoch,
@@ -274,6 +306,7 @@ pub const RangeSync = struct {
             if (fc.isSyncing()) {
                 const done = fc.tick() catch false;
                 if (done or fc.status == .done) {
+                    self.foldCompletedChainMetrics(fc.sync_type, fc.cumulativeMetricsSnapshot());
                     fc.deinit();
                     self.finalized_chain = null;
                     self.update();
@@ -289,6 +322,10 @@ pub const RangeSync = struct {
             if (self.head_chains.items[i].isSyncing()) {
                 const done = self.head_chains.items[i].tick() catch false;
                 if (done or self.head_chains.items[i].status == .done) {
+                    self.foldCompletedChainMetrics(
+                        self.head_chains.items[i].sync_type,
+                        self.head_chains.items[i].cumulativeMetricsSnapshot(),
+                    );
                     self.head_chains.items[i].deinit();
                     _ = self.head_chains.swapRemove(i);
                     continue;
@@ -403,6 +440,22 @@ pub const RangeSync = struct {
         }
     }
 
+    pub fn metricsSnapshot(self: *const RangeSync) MetricsSnapshot {
+        var snapshot: MetricsSnapshot = .{
+            .finalized = .{ .cumulative = self.completed_finalized_metrics },
+            .head = .{ .cumulative = self.completed_head_metrics },
+        };
+
+        if (self.finalized_chain) |fc| {
+            accumulateTypeMetrics(&snapshot.finalized, fc.metricsSnapshot());
+        }
+        for (self.head_chains.items) |hc| {
+            accumulateTypeMetrics(&snapshot.head, hc.metricsSnapshot());
+        }
+
+        return snapshot;
+    }
+
     // ── Internal ────────────────────────────────────────────────────
 
     /// Drop chains that cannot make further network progress. A peer-empty
@@ -420,6 +473,7 @@ pub const RangeSync = struct {
                 fc.target.slot < local_finalized_slot or
                 self.callbacks.hasBlock(fc.target.root))
             {
+                self.foldCompletedChainMetrics(fc.sync_type, fc.cumulativeMetricsSnapshot());
                 fc.deinit();
                 self.finalized_chain = null;
                 removed = true;
@@ -434,6 +488,10 @@ pub const RangeSync = struct {
                 self.head_chains.items[i].target.slot < local_finalized_slot or
                 self.callbacks.hasBlock(self.head_chains.items[i].target.root))
             {
+                self.foldCompletedChainMetrics(
+                    self.head_chains.items[i].sync_type,
+                    self.head_chains.items[i].cumulativeMetricsSnapshot(),
+                );
                 self.head_chains.items[i].deinit();
                 _ = self.head_chains.swapRemove(i);
                 removed = true;
@@ -466,7 +524,32 @@ pub const RangeSync = struct {
             }
         }
     }
+
+    fn foldCompletedChainMetrics(
+        self: *RangeSync,
+        sync_type: RangeSyncType,
+        metrics: SyncChainCumulativeMetrics,
+    ) void {
+        switch (sync_type) {
+            .finalized => SyncChain.accumulateCumulativeMetrics(&self.completed_finalized_metrics, metrics),
+            .head => SyncChain.accumulateCumulativeMetrics(&self.completed_head_metrics, metrics),
+        }
+    }
 };
+
+fn accumulateTypeMetrics(dst: *TypeMetricsSnapshot, src: SyncChainMetricsSnapshot) void {
+    dst.active_chains +|= 1;
+    dst.peer_count +|= src.peer_count;
+    dst.highest_target_slot = @max(dst.highest_target_slot, src.target_slot);
+    dst.validated_epochs +|= src.validated_epochs;
+    dst.batches_total +|= src.batches_total;
+    dst.batch_statuses.awaiting_download +|= src.batch_statuses.awaiting_download;
+    dst.batch_statuses.downloading +|= src.batch_statuses.downloading;
+    dst.batch_statuses.awaiting_processing +|= src.batch_statuses.awaiting_processing;
+    dst.batch_statuses.processing +|= src.batch_statuses.processing;
+    dst.batch_statuses.awaiting_validation +|= src.batch_statuses.awaiting_validation;
+    SyncChain.accumulateCumulativeMetrics(&dst.cumulative, src.cumulative);
+}
 
 /// Determine if a peer requires finalized or head sync.
 pub fn getRangeSyncType(
@@ -526,7 +609,7 @@ const TestCallbacks = struct {
 test "RangeSync: finalized peer creates finalized chain" {
     const allocator = std.testing.allocator;
     var tc = TestCallbacks{};
-    var rs = RangeSync.init(allocator, tc.rangeSyncCallbacks());
+    var rs = RangeSync.init(allocator, std.testing.io, tc.rangeSyncCallbacks());
     defer rs.deinit();
 
     // Peer with finalized epoch 10 vs our 0.
@@ -539,7 +622,7 @@ test "RangeSync: finalized peer creates finalized chain" {
 test "RangeSync: head peer creates head chain" {
     const allocator = std.testing.allocator;
     var tc = TestCallbacks{};
-    var rs = RangeSync.init(allocator, tc.rangeSyncCallbacks());
+    var rs = RangeSync.init(allocator, std.testing.io, tc.rangeSyncCallbacks());
     defer rs.deinit();
 
     // Peer with same finalized epoch but ahead head.
@@ -553,7 +636,7 @@ test "RangeSync: head peer creates head chain" {
 test "RangeSync: head peers share one chain" {
     const allocator = std.testing.allocator;
     var tc = TestCallbacks{};
-    var rs = RangeSync.init(allocator, tc.rangeSyncCallbacks());
+    var rs = RangeSync.init(allocator, std.testing.io, tc.rangeSyncCallbacks());
     defer rs.deinit();
 
     try rs.addPeer("p1", 5, 5, [_]u8{0} ** 32, 200, [_]u8{0xAA} ** 32, null);
@@ -567,7 +650,7 @@ test "RangeSync: head peers share one chain" {
 test "RangeSync: finalized chain has priority over head" {
     const allocator = std.testing.allocator;
     var tc = TestCallbacks{};
-    var rs = RangeSync.init(allocator, tc.rangeSyncCallbacks());
+    var rs = RangeSync.init(allocator, std.testing.io, tc.rangeSyncCallbacks());
     defer rs.deinit();
 
     // Add head peer first.
@@ -582,7 +665,7 @@ test "RangeSync: finalized chain has priority over head" {
 test "RangeSync: peer-empty finalized chain yields priority back to head" {
     const allocator = std.testing.allocator;
     var tc = TestCallbacks{};
-    var rs = RangeSync.init(allocator, tc.rangeSyncCallbacks());
+    var rs = RangeSync.init(allocator, std.testing.io, tc.rangeSyncCallbacks());
     defer rs.deinit();
 
     try rs.addPeer("p_head", 0, 0, [_]u8{0} ** 32, 200, [_]u8{0xCC} ** 32, null);
@@ -605,7 +688,7 @@ test "RangeSync: peer-empty finalized chain yields priority back to head" {
 test "RangeSync: peer-empty finalized chain keeps in-flight downloaded work" {
     const allocator = std.testing.allocator;
     var tc = TestCallbacks{};
-    var rs = RangeSync.init(allocator, tc.rangeSyncCallbacks());
+    var rs = RangeSync.init(allocator, std.testing.io, tc.rangeSyncCallbacks());
     defer rs.deinit();
 
     try rs.addPeer("p_fin", 0, 10, [_]u8{0xAA} ** 32, 500, [_]u8{0xBB} ** 32, null);
@@ -630,7 +713,7 @@ test "RangeSync: known remote finalized root creates head chain" {
     const finalized_root = [_]u8{0xAA} ** 32;
     const head_root = [_]u8{0xBB} ** 32;
     var tc = TestCallbacks{ .known_root = finalized_root };
-    var rs = RangeSync.init(allocator, tc.rangeSyncCallbacks());
+    var rs = RangeSync.init(allocator, std.testing.io, tc.rangeSyncCallbacks());
     defer rs.deinit();
 
     try rs.addPeer("p_known", 0, 10, finalized_root, 500, head_root, null);
@@ -643,7 +726,7 @@ test "RangeSync: known remote finalized root creates head chain" {
 test "RangeSync: idle when no chains" {
     const allocator = std.testing.allocator;
     var tc = TestCallbacks{};
-    var rs = RangeSync.init(allocator, tc.rangeSyncCallbacks());
+    var rs = RangeSync.init(allocator, std.testing.io, tc.rangeSyncCallbacks());
     defer rs.deinit();
 
     try std.testing.expectEqual(RangeSyncStatus.idle, rs.getState().status);

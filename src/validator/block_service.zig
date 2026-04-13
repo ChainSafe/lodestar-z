@@ -483,8 +483,8 @@ pub const BlockService = struct {
         log.info("published block slot={d} validator_index={d} fork={s} blinded={}", .{
             duty.slot, duty.validator_index, fork_name, block_resp.blinded,
         });
-        self.metrics.block_proposed_total.incr();
-        self.metrics.block_delay_seconds.observe(self.slotDelaySeconds(io, duty.slot));
+        self.metrics.recordBlockProposed();
+        self.metrics.observeBlockDelay(self.slotDelaySeconds(io, duty.slot));
         return true;
     }
 

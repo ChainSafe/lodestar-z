@@ -436,8 +436,7 @@ pub const ValidatorClient = struct {
 
     fn syncValidatorMetrics(self: *ValidatorClient) void {
         const counts = self.validator_store.counts();
-        self.metrics.total_validators.set(@intCast(counts.total));
-        self.metrics.active_validators.set(@intCast(counts.active));
+        self.metrics.setValidatorCounts(@intCast(counts.total), @intCast(counts.active));
     }
 
     /// Request graceful shutdown of the validator client.

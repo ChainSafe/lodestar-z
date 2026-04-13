@@ -19,6 +19,18 @@ const BlockImportError = blocks.BlockImportError;
 
 pub const DEFAULT_MAX_PENDING_BLOCK_IMPORTS: u16 = 32;
 
+pub const MetricsSnapshot = struct {
+    pending_jobs: u64 = 0,
+    completed_jobs: u64 = 0,
+    active_jobs: u64 = 0,
+    submitted_total: u64 = 0,
+    rejected_total: u64 = 0,
+    success_total: u64 = 0,
+    failure_total: u64 = 0,
+    execution_time_ns_total: u64 = 0,
+    last_execution_time_ns: u64 = 0,
+};
+
 pub const CompletedBlockImport = union(enum) {
     success: PreparedBlockImport,
     failure: struct {
@@ -48,6 +60,12 @@ pub const StateWorkService = struct {
     pending_block_imports: std.ArrayListUnmanaged(StateTransitionJob) = .empty,
     completed_block_imports: std.ArrayListUnmanaged(CompletedBlockImport) = .empty,
     active_block_imports: usize = 0,
+    submitted_total: u64 = 0,
+    rejected_total: u64 = 0,
+    success_total: u64 = 0,
+    failure_total: u64 = 0,
+    execution_time_ns_total: u64 = 0,
+    last_execution_time_ns: u64 = 0,
     shutdown_requested: bool = false,
     thread: ?std.Thread = null,
 
@@ -116,15 +134,20 @@ pub const StateWorkService = struct {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
 
-        if (self.shutdown_requested) return false;
+        if (self.shutdown_requested) {
+            self.rejected_total += 1;
+            return false;
+        }
         if (self.pending_block_imports.items.len +
             self.completed_block_imports.items.len +
             self.active_block_imports >= self.max_pending_block_imports)
         {
+            self.rejected_total += 1;
             return false;
         }
 
         try self.pending_block_imports.append(self.allocator, job);
+        self.submitted_total += 1;
         self.cond.signal(self.io);
         return true;
     }
@@ -153,6 +176,24 @@ pub const StateWorkService = struct {
         return .idle;
     }
 
+    pub fn metricsSnapshot(self: *const StateWorkService) MetricsSnapshot {
+        const mutable_self: *StateWorkService = @constCast(self);
+        mutable_self.mutex.lockUncancelable(mutable_self.io);
+        defer mutable_self.mutex.unlock(mutable_self.io);
+
+        return .{
+            .pending_jobs = @intCast(self.pending_block_imports.items.len),
+            .completed_jobs = @intCast(self.completed_block_imports.items.len),
+            .active_jobs = @intCast(self.active_block_imports),
+            .submitted_total = self.submitted_total,
+            .rejected_total = self.rejected_total,
+            .success_total = self.success_total,
+            .failure_total = self.failure_total,
+            .execution_time_ns_total = self.execution_time_ns_total,
+            .last_execution_time_ns = self.last_execution_time_ns,
+        };
+    }
+
     fn workerMain(self: *StateWorkService) void {
         while (true) {
             self.mutex.lockUncancelable(self.io);
@@ -169,6 +210,7 @@ pub const StateWorkService = struct {
             self.active_block_imports += 1;
             self.mutex.unlock(self.io);
 
+            const started_at_ns = std.Io.Timestamp.now(self.io, .awake).toNanoseconds();
             const completed: CompletedBlockImport = blk: {
                 const prepared = blocks.pipeline.executeStateTransitionJob(
                     self.allocator,
@@ -184,8 +226,15 @@ pub const StateWorkService = struct {
                 };
                 break :blk .{ .success = prepared };
             };
+            const elapsed_ns: u64 = @intCast(std.Io.Timestamp.now(self.io, .awake).toNanoseconds() - started_at_ns);
 
             self.mutex.lockUncancelable(self.io);
+            switch (completed) {
+                .success => self.success_total += 1,
+                .failure => self.failure_total += 1,
+            }
+            self.execution_time_ns_total += elapsed_ns;
+            self.last_execution_time_ns = elapsed_ns;
             self.completed_block_imports.append(self.allocator, completed) catch {
                 var owned_completed = completed;
                 self.active_block_imports -= 1;

@@ -39,6 +39,7 @@ const Multiaddr = @import("multiaddr").Multiaddr;
 
 const eth2_protocols = @import("eth2_protocols.zig");
 const eth_gossip = @import("eth_gossip.zig");
+const gossip_topics = @import("gossip_topics.zig");
 const peer_manager_mod = @import("peer_manager.zig");
 const peer_scoring = @import("peer_scoring.zig");
 const rate_limiter = @import("rate_limiter.zig");
@@ -303,6 +304,11 @@ pub const ReqRespRequestPermit = struct {
 
 pub const P2pService = struct {
     const Self = @This();
+    const TopicDigestSummary = struct {
+        digest: [4]u8 = [_]u8{0} ** 4,
+        topic_count: u64 = 0,
+        peer_count: u64 = 0,
+    };
 
     allocator: Allocator,
     network: Network,
@@ -310,6 +316,21 @@ pub const P2pService = struct {
     gossip_adapter: EthGossipAdapter,
     host_identity: ?*identity_mod.KeyPair,
     req_resp_self_limiter: SelfRateLimiter,
+
+    pub const GossipsubMetricsSnapshot = struct {
+        outbound_streams: u64 = 0,
+        tracked_subscriptions: u64 = 0,
+        known_topics: u64 = 0,
+        mesh_topics: u64 = 0,
+        mesh_peers: u64 = 0,
+        topic_peers: u64 = 0,
+        mesh_peers_by_topic: [std.meta.fields(gossip_topics.GossipTopicType).len]u64 = [_]u64{0} ** std.meta.fields(gossip_topics.GossipTopicType).len,
+        tracked_topics_with_peers: u64 = 0,
+        tracked_topic_peers: u64 = 0,
+        pending_events: u64 = 0,
+        pending_sends: u64 = 0,
+        pending_send_bytes: u64 = 0,
+    };
 
     pub fn init(io: Io, allocator: Allocator, config: P2pConfig) !Self {
         const gossipsub = try GossipsubService.init(allocator, config.gossipsub_config);
@@ -413,6 +434,139 @@ pub const P2pService = struct {
         try self.gossip_adapter.subscribeEthTopics(io);
         self.startHeartbeat(io);
         log.info("p2p service started", .{});
+    }
+
+    pub fn gossipsubMetricsSnapshot(self: *Self, io: Io) GossipsubMetricsSnapshot {
+        self.gossipsub.state_mu.lockUncancelable(io);
+        defer self.gossipsub.state_mu.unlock(io);
+
+        var snapshot: GossipsubMetricsSnapshot = .{
+            .outbound_streams = @intCast(self.gossipsub.outbound_streams.count()),
+            .tracked_subscriptions = @intCast(self.gossipsub.tracked_subscriptions.count()),
+            .known_topics = @intCast(self.gossipsub.router.topics.count()),
+            .mesh_topics = @intCast(self.gossipsub.router.mesh.count()),
+            .pending_events = @intCast(self.gossipsub.router.events.items.len),
+            .pending_sends = @intCast(self.gossipsub.pending_sends.items.len),
+            .pending_send_bytes = @intCast(self.gossipsub.pending_send_bytes),
+        };
+
+        var topic_iter = self.gossipsub.router.topics.iterator();
+        while (topic_iter.next()) |entry| {
+            snapshot.topic_peers +%= @intCast(entry.value_ptr.count());
+        }
+
+        var mesh_iter = self.gossipsub.router.mesh.iterator();
+        while (mesh_iter.next()) |entry| {
+            snapshot.mesh_peers +%= @intCast(entry.value_ptr.count());
+            if (gossip_topics.parseTopic(entry.key_ptr.*)) |parsed| {
+                snapshot.mesh_peers_by_topic[@intFromEnum(parsed.topic_type)] +%= @intCast(entry.value_ptr.count());
+            }
+        }
+
+        var tracked_iter = self.gossipsub.tracked_subscriptions.keyIterator();
+        while (tracked_iter.next()) |topic_key| {
+            if (self.gossipsub.router.topics.getPtr(topic_key.*)) |peer_set| {
+                const peer_count: u64 = @intCast(peer_set.count());
+                snapshot.tracked_topic_peers +%= peer_count;
+                if (peer_count > 0) snapshot.tracked_topics_with_peers += 1;
+            }
+        }
+
+        return snapshot;
+    }
+
+    pub fn logGossipsubTopicDiagnostics(self: *Self, io: Io) void {
+        const max_digest_summaries = 4;
+        var tracked_digests: [max_digest_summaries]TopicDigestSummary = [_]TopicDigestSummary{.{}} ** max_digest_summaries;
+        var tracked_digest_count: usize = 0;
+        var known_digests: [max_digest_summaries]TopicDigestSummary = [_]TopicDigestSummary{.{}} ** max_digest_summaries;
+        var known_digest_count: usize = 0;
+        var tracked_sample: ?[]const u8 = null;
+        var known_sample: ?[]const u8 = null;
+
+        self.gossipsub.state_mu.lockUncancelable(io);
+        defer self.gossipsub.state_mu.unlock(io);
+
+        var tracked_iter = self.gossipsub.tracked_subscriptions.keyIterator();
+        while (tracked_iter.next()) |topic_key| {
+            if (tracked_sample == null) tracked_sample = topic_key.*;
+            const parsed = gossip_topics.parseTopic(topic_key.*) orelse continue;
+            addDigestSummary(&tracked_digests, &tracked_digest_count, parsed.fork_digest, 1, 0);
+        }
+
+        var known_iter = self.gossipsub.router.topics.iterator();
+        while (known_iter.next()) |entry| {
+            if (known_sample == null) known_sample = entry.key_ptr.*;
+            const parsed = gossip_topics.parseTopic(entry.key_ptr.*) orelse continue;
+            addDigestSummary(
+                &known_digests,
+                &known_digest_count,
+                parsed.fork_digest,
+                1,
+                @intCast(entry.value_ptr.count()),
+            );
+        }
+
+        log.warn(
+            "gossipsub topic mismatch: tracked_subscriptions={d} known_topics={d} topic_peers={d} tracked_sample={s} known_sample={s}",
+            .{
+                self.gossipsub.tracked_subscriptions.count(),
+                self.gossipsub.router.topics.count(),
+                countTopicPeerRefs(self),
+                tracked_sample orelse "<none>",
+                known_sample orelse "<none>",
+            },
+        );
+
+        for (tracked_digests[0..tracked_digest_count]) |summary| {
+            const digest_hex = std.fmt.bytesToHex(&summary.digest, .lower);
+            log.warn("gossipsub tracked digest {s}: topics={d}", .{
+                &digest_hex,
+                summary.topic_count,
+            });
+        }
+
+        for (known_digests[0..known_digest_count]) |summary| {
+            const digest_hex = std.fmt.bytesToHex(&summary.digest, .lower);
+            log.warn("gossipsub known digest {s}: topics={d} peer_refs={d}", .{
+                &digest_hex,
+                summary.topic_count,
+                summary.peer_count,
+            });
+        }
+    }
+
+    fn addDigestSummary(
+        summaries: *[4]TopicDigestSummary,
+        summary_count: *usize,
+        digest: [4]u8,
+        topic_count: u64,
+        peer_count: u64,
+    ) void {
+        for (summaries[0..summary_count.*]) |*summary| {
+            if (std.mem.eql(u8, &summary.digest, &digest)) {
+                summary.topic_count +%= topic_count;
+                summary.peer_count +%= peer_count;
+                return;
+            }
+        }
+
+        if (summary_count.* >= summaries.len) return;
+        summaries[summary_count.*] = .{
+            .digest = digest,
+            .topic_count = topic_count,
+            .peer_count = peer_count,
+        };
+        summary_count.* += 1;
+    }
+
+    fn countTopicPeerRefs(self: *Self) u64 {
+        var total: u64 = 0;
+        var iter = self.gossipsub.router.topics.iterator();
+        while (iter.next()) |entry| {
+            total +%= @intCast(entry.value_ptr.count());
+        }
+        return total;
     }
 
     /// Dial a remote peer by QUIC multiaddr. Caller owns the returned peer ID.

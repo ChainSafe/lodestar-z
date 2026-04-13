@@ -133,6 +133,8 @@ pub const QueuedStateRegen = struct {
     // -- Metrics --
     /// Total requests served from cache (fast path).
     cache_hits: u64,
+    /// Total requests that missed the cache and had to prepare slow-path work.
+    cache_misses: u64,
     /// Total requests that went through the queue (slow path).
     queue_hits: u64,
     /// Total requests dropped due to queue pressure.
@@ -200,6 +202,7 @@ pub const QueuedStateRegen = struct {
             .regen = regen,
             .max_queue_len = max_queue_len,
             .cache_hits = 0,
+            .cache_misses = 0,
             .queue_hits = 0,
             .dropped = 0,
         };
@@ -272,6 +275,7 @@ pub const QueuedStateRegen = struct {
             }
         }
 
+        self.noteCacheMiss();
         return (try self.resolveSlowPath(.{ .pre_state = .{
             .parent_block_root = parent_block_root,
             .parent_state_root = parent_state_root,
@@ -296,6 +300,7 @@ pub const QueuedStateRegen = struct {
         }
 
         const prepared = (try self.regen.prepareCheckpointReload(cp)) orelse return null;
+        self.noteCacheMiss();
         return self.resolveSlowPath(.{ .checkpoint = cp }, priority, .{ .checkpoint = prepared });
     }
 
@@ -313,6 +318,7 @@ pub const QueuedStateRegen = struct {
         }
 
         const prepared = (try self.regen.prepareCheckpointReload(cp)) orelse return null;
+        self.noteCacheMiss();
         return self.resolveSlowPath(.{ .checkpoint = cp }, priority, .{ .checkpoint = prepared });
     }
 
@@ -331,6 +337,7 @@ pub const QueuedStateRegen = struct {
             return state;
         }
 
+        self.noteCacheMiss();
         return self.resolveSlowPath(.{ .state_root = state_root }, priority, .none);
     }
 
@@ -390,6 +397,7 @@ pub const QueuedStateRegen = struct {
 
     pub const Metrics = struct {
         cache_hits: u64,
+        cache_misses: u64,
         queue_hits: u64,
         dropped: u64,
         queue_len: usize,
@@ -401,6 +409,7 @@ pub const QueuedStateRegen = struct {
         defer mutable_self.mutex.unlock(mutable_self.io);
         return .{
             .cache_hits = mutable_self.cache_hits,
+            .cache_misses = mutable_self.cache_misses,
             .queue_hits = mutable_self.queue_hits,
             .dropped = mutable_self.dropped,
             .queue_len = mutable_self.activeRequestCountLocked(),
@@ -414,6 +423,12 @@ pub const QueuedStateRegen = struct {
     fn noteCacheHit(self: *QueuedStateRegen) void {
         self.mutex.lockUncancelable(self.io);
         self.cache_hits += 1;
+        self.mutex.unlock(self.io);
+    }
+
+    fn noteCacheMiss(self: *QueuedStateRegen) void {
+        self.mutex.lockUncancelable(self.io);
+        self.cache_misses += 1;
         self.mutex.unlock(self.io);
     }
 
