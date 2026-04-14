@@ -49,9 +49,11 @@ pub const PeerStore = struct {
         now_ms: i64,
         config: Config,
     ) AddPeerError!void {
-        if (self.peers.contains(peer_id)) return error.PeerAlreadyExists;
+        // Use getOrPut to avoid double lookup and unnecessary allocation.
+        const entry = try self.peers.getOrPut(peer_id); // This will allocate if not exists
+        if (entry.found_existing) return error.PeerAlreadyExists;
 
-        const owned_key = try self.allocator.dupe(u8, peer_id);
+        const owned_key = entry.key_ptr.*; // getOrPut already assigned the key
         errdefer self.allocator.free(owned_key);
 
         const last_received: i64 = switch (direction) {
