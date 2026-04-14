@@ -20,11 +20,6 @@ pub fn isSlashableAttestationData(data1: *const AttestationData, data2: *const A
     return false;
 }
 
-pub fn isValidAttestationSlot(attestation_slot: Slot, current_slot: Slot) bool {
-    return attestation_slot + preset.MIN_ATTESTATION_INCLUSION_DELAY <= current_slot and
-        current_slot <= attestation_slot + preset.SLOTS_PER_EPOCH;
-}
-
 /// Two-pointer sorted merge membership check for attesting indices to slash without auxiliary allocations.
 ///
 /// Pre-requisite: isValidIndexedAttestation already checks for attesting indices to be sorted and unique.
