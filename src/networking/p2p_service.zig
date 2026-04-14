@@ -688,22 +688,23 @@ pub const P2pService = struct {
             score: f64,
         };
 
+        const connected_peer_ids = try self.snapshotConnectedPeerIds(io, self.allocator);
+        defer {
+            for (connected_peer_ids) |peer_id| self.allocator.free(peer_id);
+            self.allocator.free(connected_peer_ids);
+        }
+
         var scored_peers = std.ArrayListUnmanaged(ScoredPeer).empty;
         defer scored_peers.deinit(self.allocator);
 
-        switch (self.network) {
-            inline else => |*network| {
-                var iter = network.connections.iterator();
-                while (iter.next()) |entry| {
-                    self.gossipsub.state_mu.lockUncancelable(io);
-                    const score = self.gossipsub.router.peerScore(entry.key_ptr.*);
-                    self.gossipsub.state_mu.unlock(io);
-                    try scored_peers.append(self.allocator, .{
-                        .peer_id = entry.key_ptr.*,
-                        .score = score,
-                    });
-                }
-            },
+        for (connected_peer_ids) |peer_id| {
+            self.gossipsub.state_mu.lockUncancelable(io);
+            const score = self.gossipsub.router.peerScore(peer_id);
+            self.gossipsub.state_mu.unlock(io);
+            try scored_peers.append(self.allocator, .{
+                .peer_id = peer_id,
+                .score = score,
+            });
         }
 
         std.mem.sort(ScoredPeer, scored_peers.items, {}, struct {

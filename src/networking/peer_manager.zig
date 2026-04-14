@@ -294,6 +294,7 @@ pub const PeerManager = struct {
     allocator: Allocator,
     config: PeerManagerConfig,
     db: PeerDB,
+    connected_count_atomic: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
     peer_report_counts: [metric_report_sources.len][metric_peer_actions.len]u64 = [_][metric_peer_actions.len]u64{[_]u64{0} ** metric_peer_actions.len} ** metric_report_sources.len,
     goodbye_received_counts: [metric_goodbye_reasons.len]u64 = [_]u64{0} ** metric_goodbye_reasons.len,
 
@@ -307,6 +308,10 @@ pub const PeerManager = struct {
 
     pub fn deinit(self: *PeerManager) void {
         self.db.deinit();
+    }
+
+    fn syncConnectedCount(self: *PeerManager) void {
+        self.connected_count_atomic.store(self.db.connected_count, .release);
     }
 
     // ── Connection events ───────────────────────────────────────────
@@ -330,6 +335,7 @@ pub const PeerManager = struct {
         // Accept even if at max peers — the heartbeat will prune.
         // This follows Lodestar's pattern: accept first, prune later.
         const info = try self.db.peerConnected(peer_id, direction, now_ms);
+        self.syncConnectedCount();
 
         log.debug("Peer connected {s} direction={s} total={d}", .{
             peer_id,
@@ -348,6 +354,7 @@ pub const PeerManager = struct {
             false;
 
         self.db.peerDisconnected(peer_id, now_ms);
+        self.syncConnectedCount();
         if (apply_inbound_cooldown) {
             self.db.applyReconnectionCoolDown(peer_id, peer_scoring.inboundDisconnectCoolDownMs(), now_ms);
         }
@@ -361,6 +368,7 @@ pub const PeerManager = struct {
     /// fully torn down yet.
     pub fn onPeerDisconnecting(self: *PeerManager, peer_id: []const u8) void {
         self.db.peerDisconnecting(peer_id);
+        self.syncConnectedCount();
     }
 
     /// Called when a peer initiates a Goodbye disconnect.
@@ -518,6 +526,7 @@ pub const PeerManager = struct {
         // Auto-ban on fatal.
         if (action == .fatal) {
             self.db.banPeer(peer_id, .long, now_ms) catch {};
+            self.syncConnectedCount();
         }
 
         return state;
@@ -531,6 +540,7 @@ pub const PeerManager = struct {
         now_ms: u64,
     ) !void {
         try self.db.banPeer(peer_id, duration, now_ms);
+        self.syncConnectedCount();
         log.info("peer banned {f} duration={d}s", .{
             fmtPeerId(peer_id),
             duration.seconds(),
@@ -668,7 +678,7 @@ pub const PeerManager = struct {
 
     /// Number of connected peers.
     pub fn peerCount(self: *const PeerManager) u32 {
-        return self.db.connected_count;
+        return self.connected_count_atomic.load(.acquire);
     }
 
     /// Number of outbound dials currently in flight.

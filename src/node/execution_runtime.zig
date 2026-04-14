@@ -323,7 +323,7 @@ pub const ExecutionRuntime = struct {
     cached_payload_slot: ?u64 = null,
     cached_payload_parent_root: ?[32]u8 = null,
     last_builder_status_slot: ?u64 = null,
-    el_offline: bool = false,
+    el_offline: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 
     lane_mutex: std.Io.Mutex = .init,
     queue_mutex: std.Io.Mutex = .init,
@@ -344,6 +344,14 @@ pub const ExecutionRuntime = struct {
         idle,
         shutdown,
     };
+
+    fn setElOffline(self: *ExecutionRuntime, el_offline: bool) void {
+        self.el_offline.store(el_offline, .release);
+    }
+
+    pub fn isElOffline(self: *const ExecutionRuntime) bool {
+        return self.el_offline.load(.acquire);
+    }
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -750,7 +758,7 @@ pub const ExecutionRuntime = struct {
             ),
         } catch |err| {
             scoped_log.warn("execution runtime: engine_newPayload failed: {}", .{err});
-            self.el_offline = true;
+            self.setElOffline(true);
             const t1 = std.Io.Clock.awake.now(self.io);
             return .{
                 .ticket = 0,
@@ -763,7 +771,7 @@ pub const ExecutionRuntime = struct {
         const t1 = std.Io.Clock.awake.now(self.io);
         const elapsed_s: f64 = @as(f64, @floatFromInt(t1.nanoseconds - t0.nanoseconds)) / 1e9;
 
-        self.el_offline = false;
+        self.setElOffline(false);
         const response = switch (engine_result.status) {
             .valid => NewPayloadResult{ .valid = .{
                 .latest_valid_hash = engine_result.latest_valid_hash orelse request.blockHash(),
@@ -949,11 +957,11 @@ pub const ExecutionRuntime = struct {
             .safe_block_hash = fc_state.safe_block_hash,
             .finalized_block_hash = fc_state.finalized_block_hash,
         }, payload_attrs) catch |err| {
-            self.el_offline = true;
+            self.setElOffline(true);
             return err;
         };
 
-        self.el_offline = false;
+        self.setElOffline(false);
         if (result.payload_id) |payload_id| {
             self.cached_payload_id = payload_id;
             if (payload_attrs != null) self.cached_payload_parent_root = update.beacon_block_root;
@@ -970,11 +978,11 @@ pub const ExecutionRuntime = struct {
         const payload_id = self.cached_payload_id orelse return error.NoPayloadId;
 
         const result = engine.getPayload(payload_id) catch |err| {
-            self.el_offline = true;
+            self.setElOffline(true);
             return err;
         };
 
-        self.el_offline = false;
+        self.setElOffline(false);
         self.clearCachedPayload();
         return result;
     }
@@ -990,12 +998,12 @@ pub const ExecutionRuntime = struct {
                 error.Canceled => return .canceled,
                 else => {
                     const mutable_self: *ExecutionRuntime = @constCast(self);
-                    mutable_self.el_offline = true;
+                    mutable_self.setElOffline(true);
                     return .{ .failure = err };
                 },
             };
             const mutable_self: *ExecutionRuntime = @constCast(self);
-            mutable_self.el_offline = false;
+            mutable_self.setElOffline(false);
             return .{ .success = response };
         }
 
@@ -1006,11 +1014,11 @@ pub const ExecutionRuntime = struct {
         const response = engine.getPayload(payload_id) catch |err| switch (err) {
             error.Canceled => return .canceled,
             else => {
-                mutable_self.el_offline = true;
+                mutable_self.setElOffline(true);
                 return .{ .failure = err };
             },
         };
-        mutable_self.el_offline = false;
+        mutable_self.setElOffline(false);
         return .{ .success = response };
     }
 
@@ -1330,7 +1338,7 @@ pub const ExecutionRuntime = struct {
             .completed_forkchoice_updates = @intCast(self.completed_forkchoice_updates.items.len),
             .completed_payload_verifications = @intCast(self.completed_payload_verifications.items.len),
             .failed_payload_preparations = @intCast(self.failed_payload_preparations.items.len),
-            .el_offline = self.el_offline,
+            .el_offline = self.isElOffline(),
         };
     }
 

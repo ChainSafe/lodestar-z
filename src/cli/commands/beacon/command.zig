@@ -348,8 +348,12 @@ fn runBootstrappedNode(
     api_cors_origin: ?[]const u8,
     p2p_bind_host: []const u8,
     p2p_bind_port: u16,
+    metrics_surface: *MetricsSurface,
     metrics_runtime: ?*metrics_server.Runtime,
 ) !void {
+    metrics_surface.setScrapeCollector(node_mod.metrics_mod.ScrapeCollector.init(node, BeaconNode.refreshScrapeMetrics));
+    defer metrics_surface.clearScrapeCollector();
+
     var run_ctx = RunContext{
         .node = node,
         .api_port = api_port,
@@ -1202,7 +1206,7 @@ fn runFromPrepared(io: Io, allocator: Allocator, inputs: *const ResolvedRunInput
             .{ cp_slot, fetched.state_bytes.len, fetch_ms, cache_seed_ms, deserialize_ms, finish_ms, total_ms },
         );
         logHeadSummary(node);
-        try runBootstrappedNode(io, node, inputs.api_port, inputs.api_address, inputs.api_cors, handles.p2p_bind_host, handles.p2p_bind_port, if (handles.metrics_runtime) |*runtime| runtime else null);
+        try runBootstrappedNode(io, node, inputs.api_port, inputs.api_address, inputs.api_cors, handles.p2p_bind_host, handles.p2p_bind_port, handles.metrics_surface, if (handles.metrics_runtime) |*runtime| runtime else null);
         return;
     } else if (inputs.checkpoint_state) |state_path| {
         const bootstrap_source = BeaconMetrics.BootstrapSource.checkpoint_file;
@@ -1261,7 +1265,7 @@ fn runFromPrepared(io: Io, allocator: Allocator, inputs: *const ResolvedRunInput
             .{ cp_slot, state_bytes, load_ms, finish_ms, total_ms },
         );
         logHeadSummary(node);
-        try runBootstrappedNode(io, node, inputs.api_port, inputs.api_address, inputs.api_cors, handles.p2p_bind_host, handles.p2p_bind_port, if (handles.metrics_runtime) |*runtime| runtime else null);
+        try runBootstrappedNode(io, node, inputs.api_port, inputs.api_address, inputs.api_cors, handles.p2p_bind_host, handles.p2p_bind_port, handles.metrics_surface, if (handles.metrics_runtime) |*runtime| runtime else null);
         return;
     } else if (if (!force_checkpoint) handles.node_builder.latestStateArchiveSlot() catch null else null) |db_slot| {
         const bootstrap_source = BeaconMetrics.BootstrapSource.db_resume;
@@ -1321,7 +1325,7 @@ fn runFromPrepared(io: Io, allocator: Allocator, inputs: *const ResolvedRunInput
             .{ db_slot, state_bytes.len, load_ms, cache_seed_ms, deserialize_ms, finish_ms, total_ms },
         );
         logHeadSummary(node);
-        try runBootstrappedNode(io, node, inputs.api_port, inputs.api_address, inputs.api_cors, handles.p2p_bind_host, handles.p2p_bind_port, if (handles.metrics_runtime) |*runtime| runtime else null);
+        try runBootstrappedNode(io, node, inputs.api_port, inputs.api_address, inputs.api_cors, handles.p2p_bind_host, handles.p2p_bind_port, handles.metrics_surface, if (handles.metrics_runtime) |*runtime| runtime else null);
         return;
     } else if (inputs.network == .minimal) {
         const bootstrap_source = BeaconMetrics.BootstrapSource.minimal_genesis;
@@ -1359,7 +1363,7 @@ fn runFromPrepared(io: Io, allocator: Allocator, inputs: *const ResolvedRunInput
             .{ generate_ms, finish_ms, total_ms },
         );
         logHeadSummary(node);
-        try runBootstrappedNode(io, node, inputs.api_port, inputs.api_address, inputs.api_cors, handles.p2p_bind_host, handles.p2p_bind_port, if (handles.metrics_runtime) |*runtime| runtime else null);
+        try runBootstrappedNode(io, node, inputs.api_port, inputs.api_address, inputs.api_cors, handles.p2p_bind_host, handles.p2p_bind_port, handles.metrics_surface, if (handles.metrics_runtime) |*runtime| runtime else null);
         return;
     } else {
         scoped_log.err("No beacon state available. Provide one of:", .{});

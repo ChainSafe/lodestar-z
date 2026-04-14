@@ -1349,7 +1349,6 @@ fn runLoop(self: *BeaconNode, io: std.Io, svc: *networking.P2pService) void {
             did_work = runPeerManagerHeartbeat(self, io, svc) or did_work;
             next_peer_manager_heartbeat_ns = now_ns + peer_manager_heartbeat_interval_ns;
         }
-
         if (now_ns >= next_metrics_sampling_ns) {
             updateSyncMetrics(self);
             updateRuntimeMetrics(self, io);
@@ -1391,20 +1390,7 @@ fn maybeHandleForkTransition(self: *BeaconNode, io: std.Io, svc: *networking.P2p
 
 fn updateSyncMetrics(self: *BeaconNode) void {
     if (self.metrics) |metrics| {
-        const status = self.getSyncStatus();
-        const connected_peers: u32 = if (self.peer_manager) |pm| pm.peerCount() else 0;
-        metrics.setSyncSnapshot(
-            if (status.is_syncing) @as(u64, 1) else @as(u64, 0),
-            status.sync_distance,
-            status.is_optimistic,
-            status.el_offline,
-        );
-        metrics.setSyncState(if (!status.is_syncing)
-            1
-        else if (connected_peers == 0)
-            0
-        else
-            2);
+        BeaconNode.publishSyncMetrics(metrics, self.currentComputedSyncStatus());
     }
 }
 
@@ -1983,6 +1969,25 @@ fn updateRuntimeMetrics(self: *BeaconNode, io: std.Io) void {
     updateHeadCatchupMetrics(self);
     updateReqRespMetrics(self);
     updateStorageMetrics(self);
+}
+
+pub fn refreshScrapeMetrics(self: *BeaconNode) void {
+    refreshScrapeSyncMetrics(self);
+    refreshScrapeHeadCatchupMetrics(self);
+}
+
+fn refreshScrapeSyncMetrics(self: *BeaconNode) void {
+    const metrics = self.metrics orelse return;
+    BeaconNode.publishSyncMetrics(metrics, self.scrapeComputedSyncStatus());
+}
+
+fn refreshScrapeHeadCatchupMetrics(self: *BeaconNode) void {
+    const metrics = self.metrics orelse return;
+    const head_slot = self.latestHeadProgressForMetrics().slot;
+    const current_slot = if (self.clock) |clock| clock.currentSlot(self.io) else null;
+    const head_lag_slots = if (current_slot) |slot| slot -| head_slot else 0;
+    const current_ms = if (current_slot) |slot| self.currentTimeToHeadMs(slot, head_slot) else 0;
+    metrics.setHeadCatchupSnapshot(head_lag_slots, self.headCatchupPendingCount(), current_ms);
 }
 
 fn updateProcessMetrics(self: *BeaconNode) void {
