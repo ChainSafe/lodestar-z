@@ -124,8 +124,8 @@ pub fn init(allocator_: Allocator, opts: Opts) (Allocator.Error || std.Thread.Sp
 ///
 /// Cleanup happens in 3 phases:
 ///   1) stop accepting new work,
-///   2) finish existing work,
-///   3) cleaning up resources.
+///   2) tell workers to drain queue then exist,
+///   3) wait for workers to finish draining then cleanup
 ///
 /// The pool pointer is invalid after this call.
 pub fn deinit(pool: *ThreadPool) void {
@@ -138,7 +138,7 @@ pub fn deinit(pool: *ThreadPool) void {
     pool.queue.cond.broadcast();
     pool.queue.mutex.unlock();
 
-    // Phase 3: wait for workers to finish draining and exit
+    // Phase 3: wait for workers to finish draining and cleanup
     for (pool.threads[0..pool.n_workers]) |t| t.join();
     pool.allocator.destroy(pool);
 }
