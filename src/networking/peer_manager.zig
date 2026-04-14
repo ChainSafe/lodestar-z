@@ -337,8 +337,8 @@ pub const PeerManager = struct {
         const info = try self.db.peerConnected(peer_id, direction, now_ms);
         self.syncConnectedCount();
 
-        log.debug("Peer connected {s} direction={s} total={d}", .{
-            peer_id,
+        log.debug("Peer connected {f} direction={s} total={d}", .{
+            fmtPeerId(peer_id),
             @tagName(direction),
             self.db.connected_count,
         });
@@ -358,8 +358,8 @@ pub const PeerManager = struct {
         if (apply_inbound_cooldown) {
             self.db.applyReconnectionCoolDown(peer_id, peer_scoring.inboundDisconnectCoolDownMs(), now_ms);
         }
-        log.debug("Peer disconnected {s} total={d}", .{
-            peer_id,
+        log.debug("Peer disconnected {f} total={d}", .{
+            fmtPeerId(peer_id),
             self.db.connected_count,
         });
     }

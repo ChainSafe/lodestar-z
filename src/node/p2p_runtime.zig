@@ -2647,7 +2647,10 @@ fn peerReqRespTask(
                 if (requestPeerMetadataWithTimeout(self, io, svc, job.peer_id, optional_reqresp_timeout_ms)) |peer_metadata| {
                     metadata = peerReqRespMetadataCompletion(peer_metadata);
                 } else |err| {
-                    log.debug("Peer metadata refresh failed for {s}: {}; keeping peer connected", .{ job.peer_id, err });
+                    log.debug("Peer metadata refresh failed for {f}: {}; keeping peer connected", .{
+                        networking.fmtPeerId(job.peer_id),
+                        err,
+                    });
                 }
             }
 
@@ -2815,7 +2818,7 @@ fn dialDiscoveredPeers(
 
         if (pm) |peer_manager| {
             peer_manager.onDialing(predicted_peer_id, now_ms) catch |err| {
-                log.debug("Failed to mark discovered peer {s} as dialing: {}", .{ predicted_peer_id, err });
+                log.debug("Failed to mark discovered peer {s} as dialing: {}", .{ predicted_peer_id_text, err });
                 self.allocator.free(owned_ma_str);
                 self.allocator.free(predicted_peer_id);
                 continue;
@@ -4797,16 +4800,23 @@ fn reqRespMaintenanceMethod(protocol: ReqRespMaintenanceProtocol) networking.Met
 }
 
 fn reqRespMaintenanceErrorLabel(err: anyerror) []const u8 {
+    if (isReqRespTransportClosedError(err)) return "transport_closed";
     return switch (err) {
         error.RequestSelfRateLimited => "self_rate_limited",
+        else => @errorName(err),
+    };
+}
+
+fn isReqRespTransportClosedError(err: anyerror) bool {
+    return switch (err) {
         error.PeerNotConnected,
         error.ConnectionClosed,
         error.ConnectionResetByPeer,
         error.UnexpectedEof,
         error.EndOfStream,
         error.BrokenPipe,
-        => "transport_closed",
-        else => @errorName(err),
+        => true,
+        else => false,
     };
 }
 
@@ -4817,14 +4827,7 @@ fn noteSyncPeerGoneIfTransportClosed(
     peer_id: []const u8,
     err: anyerror,
 ) void {
-    switch (err) {
-        error.PeerNotConnected,
-        error.ConnectionClosed,
-        error.ConnectionResetByPeer,
-        error.UnexpectedEof,
-        => {},
-        else => return,
-    }
+    if (!isReqRespTransportClosedError(err)) return;
 
     if (svc.isPeerConnected(io, peer_id)) return;
     const pm = self.peer_manager orelse return;
@@ -4845,10 +4848,26 @@ fn handleReqRespMaintenanceFailure(
             reqRespMaintenanceErrorLabel(err),
         );
     }
-    log.debug("Peer maintenance {s} failed for {s}: {}", .{ @tagName(protocol), peer_id, err });
+    log.debug("Peer maintenance {s} failed for {f}: {}", .{
+        @tagName(protocol),
+        networking.fmtPeerId(peer_id),
+        err,
+    });
+
+    if (isReqRespTransportClosedError(err)) {
+        noteSyncPeerGoneIfTransportClosed(self, io, svc, peer_id, err);
+        log.debug("Peer maintenance {s} saw closed transport for {f}; deferring to transport state", .{
+            @tagName(protocol),
+            networking.fmtPeerId(peer_id),
+        });
+        return;
+    }
 
     if (err == error.RequestSelfRateLimited) {
-        log.debug("Local req/resp self rate limit hit for maintenance {s} to {s}", .{ @tagName(protocol), peer_id });
+        log.debug("Local req/resp self rate limit hit for maintenance {s} to {f}", .{
+            @tagName(protocol),
+            networking.fmtPeerId(peer_id),
+        });
         return;
     }
 
