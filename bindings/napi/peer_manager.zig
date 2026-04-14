@@ -454,17 +454,12 @@ pub fn PeerManager_getConnectedPeerCount(env: napi.Env, _: napi.CallbackInfo(0))
 
 pub fn PeerManager_getConnectedPeers(env: napi.Env, _: napi.CallbackInfo(0)) !napi.Value {
     const m = try getManager();
-    var iter = m.store.iterPeers();
-    var count: u32 = 0;
-    // Count first to create array with correct length.
-    var iter_count = m.store.iterPeers();
-    while (iter_count.next()) |_| count += 1;
+    const peers = try m.getConnectedPeers(allocator);
+    defer allocator.free(peers);
 
-    const arr = try env.createArrayWithLength(count);
-    var idx: u32 = 0;
-    while (iter.next()) |entry| {
-        try arr.setElement(idx, try env.createStringUtf8(entry.value_ptr.peer_id));
-        idx += 1;
+    const arr = try env.createArrayWithLength(@intCast(peers.len));
+    for (peers, 0..) |peer_id, idx| {
+        try arr.setElement(@intCast(idx), try env.createStringUtf8(peer_id));
     }
     return arr;
 }

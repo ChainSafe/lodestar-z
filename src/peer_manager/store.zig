@@ -105,6 +105,47 @@ pub const PeerStore = struct {
         return @intCast(self.peers.count());
     }
 
+    pub fn getConnectedPeers(
+        self: *const PeerStore,
+        allocator: Allocator,
+    ) ![]const []const u8 {
+        const peer_ids = try allocator.alloc([]const u8, self.peers.count());
+        errdefer allocator.free(peer_ids);
+
+        var iter = self.peers.iterator();
+        var idx: usize = 0;
+        while (iter.next()) |entry| {
+            peer_ids[idx] = entry.value_ptr.peer_id;
+            idx += 1;
+        }
+
+        return peer_ids;
+    }
+
+    pub fn getEncodingPreference(
+        self: *const PeerStore,
+        peer_id: []const u8,
+    ) ?Encoding {
+        const peer = self.peers.getPtr(peer_id) orelse return null;
+        return peer.encoding_preference;
+    }
+
+    pub fn getAgentVersion(
+        self: *const PeerStore,
+        peer_id: []const u8,
+    ) ?[]const u8 {
+        const peer = self.peers.getPtr(peer_id) orelse return null;
+        return peer.agent_version;
+    }
+
+    pub fn getPeerKind(
+        self: *const PeerStore,
+        peer_id: []const u8,
+    ) ?ClientKind {
+        const peer = self.peers.getPtr(peer_id) orelse return null;
+        return peer.agent_client;
+    }
+
     // --- Mutators ---
 
     pub fn updateStatus(
@@ -213,6 +254,27 @@ test "addPeer and getConnectedPeerCount" {
     try std.testing.expectEqual(@as(u32, 2), store.getConnectedPeerCount());
 }
 
+test "getConnectedPeers returns all peer ids" {
+    var store = PeerStore.init(std.testing.allocator);
+    defer store.deinit();
+
+    try store.addPeer("peer-a", .inbound, 1000, testConfig());
+    try store.addPeer("peer-b", .outbound, 2000, testConfig());
+
+    const peers = try store.getConnectedPeers(std.testing.allocator);
+    defer std.testing.allocator.free(peers);
+
+    try std.testing.expectEqual(@as(usize, 2), peers.len);
+    var found_peer_a = false;
+    var found_peer_b = false;
+    for (peers) |peer_id| {
+        if (std.mem.eql(u8, peer_id, "peer-a")) found_peer_a = true;
+        if (std.mem.eql(u8, peer_id, "peer-b")) found_peer_b = true;
+    }
+    try std.testing.expect(found_peer_a);
+    try std.testing.expect(found_peer_b);
+}
+
 test "addPeer duplicate returns error" {
     var store = PeerStore.init(std.testing.allocator);
     defer store.deinit();
@@ -270,15 +332,27 @@ test "setAgentVersion frees previous" {
     defer store.deinit();
 
     try store.addPeer("peer-a", .inbound, 1000, testConfig());
-    try store.setAgentVersion("peer-a", "Lighthouse/v4.0.0");
-    try store.setAgentVersion("peer-a", "Teku/v23.1.0");
+    try store.setAgentVersion("peer-a", "Lighthouse/v1.0.0");
+    try store.setAgentVersion("peer-a", "Teku/v2.0.0");
 
     const peer = store.getPeerData("peer-a").?;
-    try std.testing.expectEqualStrings("Teku/v23.1.0", peer.agent_version.?);
-    try std.testing.expectEqual(ClientKind.teku, peer.agent_client.?);
+    try std.testing.expectEqualStrings("Teku/v2.0.0", peer.agent_version.?);
 }
 
-test "updateStatus round-trip" {
+test "peer accessors expose stored interface fields" {
+    var store = PeerStore.init(std.testing.allocator);
+    defer store.deinit();
+
+    try store.addPeer("peer-a", .inbound, 1000, testConfig());
+    try store.setAgentVersion("peer-a", "Lighthouse/v4.0.0");
+    store.setEncodingPreference("peer-a", .ssz_snappy);
+
+    try std.testing.expectEqual(Encoding.ssz_snappy, store.getEncodingPreference("peer-a").?);
+    try std.testing.expectEqualStrings("Lighthouse/v4.0.0", store.getAgentVersion("peer-a").?);
+    try std.testing.expectEqual(ClientKind.lighthouse, store.getPeerKind("peer-a").?);
+}
+
+test "updateStatus" {
     var store = PeerStore.init(std.testing.allocator);
     defer store.deinit();
 

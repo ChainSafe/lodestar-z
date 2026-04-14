@@ -217,7 +217,6 @@ pub const PeerManager = struct {
         peer_id: []const u8,
         reason: GoodbyeReasonCode,
     ) ![]const Action {
-        _ = reason;
         self.resetActionState();
         _ = self.scorer.applyReconnectionCoolDown(peer_id, reason);
         try self.actions.append(.{ .disconnect_peer = peer_id });
@@ -296,28 +295,32 @@ pub const PeerManager = struct {
         return self.store.getConnectedPeerCount();
     }
 
+    pub fn getConnectedPeers(
+        self: *const PeerManager,
+        allocator: Allocator,
+    ) ![]const []const u8 {
+        return self.store.getConnectedPeers(allocator);
+    }
+
     pub fn getEncodingPreference(
         self: *const PeerManager,
         peer_id: []const u8,
     ) ?Encoding {
-        const peer = self.store.getPeerData(peer_id) orelse return null;
-        return peer.encoding_preference;
+        return self.store.getEncodingPreference(peer_id);
     }
 
     pub fn getPeerKind(
         self: *const PeerManager,
         peer_id: []const u8,
     ) ?ClientKind {
-        const peer = self.store.getPeerData(peer_id) orelse return null;
-        return peer.agent_client;
+        return self.store.getPeerKind(peer_id);
     }
 
     pub fn getAgentVersion(
         self: *const PeerManager,
         peer_id: []const u8,
     ) ?[]const u8 {
-        const peer = self.store.getPeerData(peer_id) orelse return null;
-        return peer.agent_version;
+        return self.store.getAgentVersion(peer_id);
     }
 
     pub fn getPeerScore(
@@ -495,6 +498,13 @@ pub const PeerManager = struct {
         };
         if (now - peer.last_received_msg_unix_ts_ms > ping_interval) {
             try self.actions.append(.{ .send_ping = peer.peer_id });
+        }
+        if (peer.direction == .inbound and
+            peer.status == null and
+            now - peer.connected_unix_ts_ms > self.config.status_inbound_grace_period_ms)
+        {
+            try self.actions.append(.{ .disconnect_peer = peer.peer_id });
+            return;
         }
         if (now - peer.last_status_unix_ts_ms > self.config.status_interval_ms) {
             try self.actions.append(.{ .send_status = peer.peer_id });
@@ -715,6 +725,49 @@ test "checkPingAndStatus — past status interval emits status" {
         if (a == .send_status) has_status = true;
     }
     try std.testing.expect(has_status);
+}
+
+test "checkPingAndStatus — inbound peer without status disconnects after grace period" {
+    test_clock_value = 1000;
+    var pm = try PeerManager.init(std.testing.allocator, testConfig(), &testClock);
+    defer pm.deinit();
+
+    _ = try pm.onConnectionOpen("peer-a", .inbound);
+    test_clock_value = 1000 + pm.config.status_inbound_grace_period_ms + 1;
+    const actions = try pm.checkPingAndStatus();
+
+    var has_disconnect = false;
+    var has_status = false;
+    for (actions) |a| {
+        if (a == .disconnect_peer) has_disconnect = true;
+        if (a == .send_status) has_status = true;
+    }
+
+    try std.testing.expect(has_disconnect);
+    try std.testing.expect(!has_status);
+}
+
+test "getConnectedPeers returns all peer ids" {
+    test_clock_value = 1000;
+    var pm = try PeerManager.init(std.testing.allocator, testConfig(), &testClock);
+    defer pm.deinit();
+
+    _ = try pm.onConnectionOpen("peer-a", .outbound);
+    _ = try pm.onConnectionOpen("peer-b", .inbound);
+
+    const peers = try pm.getConnectedPeers(std.testing.allocator);
+    defer std.testing.allocator.free(peers);
+
+    try std.testing.expectEqual(@as(usize, 2), peers.len);
+    var found_peer_a = false;
+    var found_peer_b = false;
+    for (peers) |peer_id| {
+        if (std.mem.eql(u8, peer_id, "peer-a")) found_peer_a = true;
+        if (std.mem.eql(u8, peer_id, "peer-b")) found_peer_b = true;
+    }
+
+    try std.testing.expect(found_peer_a);
+    try std.testing.expect(found_peer_b);
 }
 
 test "heartbeat — banned peer gets goodbye" {
