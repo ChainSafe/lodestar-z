@@ -561,6 +561,13 @@ pub const ProtoArray = struct {
         anchor.target_root = block.block_root;
 
         try self.onBlock(allocator, anchor, current_slot, null);
+
+        // Anchor block PTC votes must be all-true per spec get_forkchoice_store:
+        // payload_timeliness_vote={anchor_root: Vector[boolean, PTC_SIZE](True for _ in range(PTC_SIZE))}
+        // Spec: https://github.com/ethereum/consensus-specs/blob/v1.7.0-alpha.4/specs/gloas/fork-choice.md#modified-get_forkchoice_store
+        if (self.ptc_votes.getPtr(block.block_root)) |votes| {
+            votes.* = PtcVotes.initFull();
+        }
     }
 
     // ── Accessors ──
@@ -598,6 +605,16 @@ pub const ProtoArray = struct {
     /// Returns true if a block with the given root has been inserted.
     pub fn hasBlock(self: *const ProtoArray, root: Root) bool {
         return self.indices.contains(root);
+    }
+
+    /// Returns true if the FULL payload variant exists for this block root.
+    /// This means the SignedExecutionPayloadEnvelope has been received and processed.
+    pub fn hasPayload(self: *const ProtoArray, root: Root) bool {
+        const vi = self.indices.get(root) orelse return false;
+        return switch (vi) {
+            .pre_gloas => true, // Pre-Gloas blocks always have their payload.
+            .gloas => |g| g.full != null,
+        };
     }
 
     // ── onBlock ──
@@ -1710,12 +1727,8 @@ pub const ProtoArray = struct {
         // Block not found or not a Gloas block.
         const votes = self.ptc_votes.get(block_root) orelse return false;
 
-        // Payload is locally available if proto array
-        // has FULL variant of the block.
-        if (self.getNodeIndexByRootAndStatus(
-            block_root,
-            .full,
-        ) == null) return false;
+        // Payload is locally available if FULL variant exists.
+        if (!self.hasPayload(block_root)) return false;
 
         // Count votes for payload_present=true.
         return votes.count() > PAYLOAD_TIMELY_THRESHOLD;
@@ -5170,4 +5183,41 @@ test "invalid node not re-validated by valid LVH" {
 
     // B must remain invalid — the valid response must NOT resurrect it.
     try testing.expectEqual(ExecutionStatus.invalid, pa.nodes.items[idx_b].extra_meta.executionStatus());
+}
+
+test "initialize sets Gloas anchor PTC votes to all-true" {
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    defer pa.deinit(testing.allocator);
+
+    const root = makeRoot(1);
+    const anchor = TestBlock.asGloas(TestBlock.withRoot(root));
+    try pa.initialize(testing.allocator, anchor, 0);
+
+    // Anchor block PTC votes must be all-true per spec get_forkchoice_store.
+    const votes = pa.ptc_votes.get(root).?;
+    try testing.expectEqual(preset.PTC_SIZE, votes.count());
+}
+
+test "hasPayload returns false before and true after onExecutionPayload" {
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    defer pa.deinit(testing.allocator);
+
+    // Pre-Gloas block always has payload.
+    const pre_gloas_root = makeRoot(0xAA);
+    try pa.onBlock(testing.allocator, TestBlock.genesis(), 0, null);
+    try testing.expect(pa.hasPayload(ZERO_HASH));
+
+    // Gloas block: no FULL variant yet.
+    const root = makeRoot(1);
+    try pa.onBlock(testing.allocator, TestBlock.asGloas(TestBlock.withRoot(root)), 0, null);
+    try testing.expect(!pa.hasPayload(root));
+
+    // After onExecutionPayload, FULL variant exists.
+    try pa.onExecutionPayload(testing.allocator, root, 0, makeRoot(0xBB), 42, ZERO_HASH, null, .valid);
+    try testing.expect(pa.hasPayload(root));
+
+    // Unknown root returns false.
+    try testing.expect(!pa.hasPayload(pre_gloas_root));
 }

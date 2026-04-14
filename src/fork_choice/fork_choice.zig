@@ -77,6 +77,7 @@ pub const ForkChoiceError = ProtoArrayError || error{
     InvalidAttestationAttestsToFutureBlock,
     InvalidAttestationFutureSlot,
     InvalidAttestationInvalidDataIndex,
+    InvalidAttestationUnknownPayloadStatus,
     // InvalidBlock inner codes
     InvalidBlockUnknownParent,
     InvalidBlockFutureSlot,
@@ -808,9 +809,18 @@ pub const ForkChoice = struct {
         // the case, the attestation should not be considered.
         if (block.slot > slot) return error.InvalidAttestationAttestsToFutureBlock;
 
-        // INVALID_DATA_INDEX: For Gloas blocks, attestation index must be 0 or 1.
+        // Gloas attestation validation.
         const att_index = attestation.index();
-        if (block.isGloasBlock() and att_index != 0 and att_index != 1) return error.InvalidAttestationInvalidDataIndex;
+        if (block.isGloasBlock()) {
+            // INVALID_DATA_INDEX: For Gloas blocks, attestation index must be 0 or 1.
+            if (att_index != 0 and att_index != 1) return error.InvalidAttestationInvalidDataIndex;
+
+            // Same-slot attestations can only vote for the PENDING variant (index 0).
+            if (block.slot == slot and att_index != 0) return error.InvalidAttestationInvalidDataIndex;
+
+            // Voting for FULL (index=1) requires the FULL variant to exist.
+            if (att_index == 1 and !self.proto_array.hasPayload(block_root)) return error.InvalidAttestationUnknownPayloadStatus;
+        }
 
         // Cache validated attestation data root.
         try self.validated_attestation_datas.put(
@@ -1572,6 +1582,12 @@ pub const ForkChoice = struct {
     /// Same as hasBlock but without checking if the block is a descendant of the finalized root.
     pub fn hasBlockUnsafe(self: *const ForkChoice, block_root: Root) bool {
         return self.proto_array.hasBlock(block_root);
+    }
+
+    /// Returns true if the FULL payload variant (execution payload envelope) exists for this
+    /// block root, without checking finalized-descendant status.
+    pub fn hasPayloadUnsafe(self: *const ForkChoice, block_root: Root) bool {
+        return self.proto_array.hasPayload(block_root);
     }
 
     /// Returns a `ProtoBlock` if the block is known **and** a descendant of the finalized root.
@@ -4139,4 +4155,134 @@ test "onAttestation: equivocating validator votes are not counted" {
     // Head should be B since validator 0's vote was excluded.
     try fc.updateHead(allocator);
     try testing.expectEqual(b_root, fc.head.block_root);
+}
+
+test "onAttestation: reject same-slot full vote for Gloas block" {
+    const allocator = testing.allocator;
+    const genesis_root = hashFromByte(0x01);
+    const block_root = hashFromByte(0x02);
+    const genesis_block = makeTestBlock(0, genesis_root, ZERO_HASH);
+    const balances = [_]u16{100} ** 2;
+
+    var fc = try initTestForkChoice(
+        allocator,
+        genesis_block,
+        10,
+        makeTestCheckpoint(0, genesis_root),
+        makeTestCheckpoint(0, genesis_root),
+        &balances,
+    );
+    defer deinitTestForkChoice(allocator, fc);
+
+    // Add a Gloas block at slot 1.
+    try onBlockFromProto(fc, allocator, makeGloasTestBlock(1, block_root, genesis_root, ZERO_HASH), 10);
+
+    // Same-slot attestation (slot=1) with index=1 (FULL vote) must be rejected.
+    const indices = [_]ValidatorIndex{0};
+    var att = makeTestIndexedAttestation(&indices, 1, block_root, 0, block_root, 0, genesis_root, 1);
+    const any_att = AnyIndexedAttestation{ .phase0 = &att };
+    try testing.expectError(
+        error.InvalidAttestationInvalidDataIndex,
+        fc.onAttestation(allocator, &any_att, hashFromByte(0xB1), false),
+    );
+}
+
+test "onAttestation: reject full vote when FULL variant missing" {
+    const allocator = testing.allocator;
+    const genesis_root = hashFromByte(0x01);
+    const block_root = hashFromByte(0x02);
+    const genesis_block = makeTestBlock(0, genesis_root, ZERO_HASH);
+    const balances = [_]u16{100} ** 2;
+
+    var fc = try initTestForkChoice(
+        allocator,
+        genesis_block,
+        10,
+        makeTestCheckpoint(0, genesis_root),
+        makeTestCheckpoint(0, genesis_root),
+        &balances,
+    );
+    defer deinitTestForkChoice(allocator, fc);
+
+    // Add a Gloas block at slot 1 (only PENDING + EMPTY, no FULL).
+    try onBlockFromProto(fc, allocator, makeGloasTestBlock(1, block_root, genesis_root, ZERO_HASH), 10);
+
+    // Attestation from a later slot (slot=2) with index=1 (FULL vote)
+    // must be rejected because no FULL variant exists yet.
+    const indices = [_]ValidatorIndex{0};
+    var att = makeTestIndexedAttestation(&indices, 2, block_root, 0, block_root, 0, genesis_root, 1);
+    const any_att = AnyIndexedAttestation{ .phase0 = &att };
+    try testing.expectError(
+        error.InvalidAttestationUnknownPayloadStatus,
+        fc.onAttestation(allocator, &any_att, hashFromByte(0xB2), false),
+    );
+}
+
+test "hasPayloadUnsafe reflects onExecutionPayload" {
+    const allocator = testing.allocator;
+    const genesis_root = hashFromByte(0x01);
+    const block_root = hashFromByte(0x02);
+    const genesis_block = makeTestBlock(0, genesis_root, ZERO_HASH);
+    const balances = [_]u16{100} ** 2;
+
+    var fc = try initTestForkChoice(
+        allocator,
+        genesis_block,
+        10,
+        makeTestCheckpoint(0, genesis_root),
+        makeTestCheckpoint(0, genesis_root),
+        &balances,
+    );
+    defer deinitTestForkChoice(allocator, fc);
+
+    // Pre-Gloas genesis always has payload.
+    try testing.expect(fc.hasPayloadUnsafe(genesis_root));
+
+    // Add Gloas block — no FULL yet.
+    try onBlockFromProto(fc, allocator, makeGloasTestBlock(1, block_root, genesis_root, ZERO_HASH), 10);
+    try testing.expect(!fc.hasPayloadUnsafe(block_root));
+
+    // After execution payload arrives, FULL exists.
+    try fc.onExecutionPayload(allocator, block_root, hashFromByte(0xEE), 1, ZERO_HASH, .valid);
+    try testing.expect(fc.hasPayloadUnsafe(block_root));
+}
+
+test "getCanonicalBlockByRoot finds ancestor on canonical chain" {
+    const allocator = testing.allocator;
+    const genesis_root = hashFromByte(0x01);
+    const a_root = hashFromByte(0x0A);
+    const b_root = hashFromByte(0x0B);
+    const genesis_block = makeTestBlock(0, genesis_root, ZERO_HASH);
+    const balances = [_]u16{100} ** 2;
+
+    var fc = try initTestForkChoice(
+        allocator,
+        genesis_block,
+        10,
+        makeTestCheckpoint(0, genesis_root),
+        makeTestCheckpoint(0, genesis_root),
+        &balances,
+    );
+    defer deinitTestForkChoice(allocator, fc);
+
+    try onBlockFromProto(fc, allocator, makeTestBlock(1, a_root, genesis_root), 10);
+    try onBlockFromProto(fc, allocator, makeTestBlock(2, b_root, a_root), 10);
+    try fc.updateHead(allocator);
+
+    // Head should be B (longest chain).
+    try testing.expectEqual(b_root, fc.head.block_root);
+
+    // A is on the canonical chain.
+    const found_a = try fc.getCanonicalBlockByRoot(a_root);
+    try testing.expect(found_a != null);
+    try testing.expectEqual(a_root, found_a.?.block_root);
+
+    // Head itself is found.
+    const found_b = try fc.getCanonicalBlockByRoot(b_root);
+    try testing.expect(found_b != null);
+    try testing.expectEqual(b_root, found_b.?.block_root);
+
+    // Non-existent root returns null.
+    const not_found = try fc.getCanonicalBlockByRoot(hashFromByte(0xFF));
+    try testing.expect(not_found == null);
 }
