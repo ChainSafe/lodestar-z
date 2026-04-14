@@ -1,5 +1,5 @@
 const std = @import("std");
-const napi = @import("zapi:napi");
+const napi = @import("zapi:zapi");
 const peer_manager = @import("peer_manager");
 
 const PeerManager = peer_manager.PeerManager;
