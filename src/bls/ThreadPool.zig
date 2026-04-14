@@ -22,6 +22,11 @@ const Signature = blst.Signature;
 const BlstError = @import("error.zig").BlstError;
 const SecretKey = @import("SecretKey.zig");
 
+const PoolError = error{
+    /// Pool is currently shutting down.
+    ShuttingDown,
+};
+
 /// This is pretty arbitrary
 pub const MAX_WORKERS: usize = 16;
 
@@ -39,7 +44,12 @@ pub const Opts = struct {
 allocator: Allocator,
 n_workers: usize,
 threads: [MAX_WORKERS]std.Thread = undefined,
+/// Signals workers to exit after draining the queue. Checked by `workerLoop`
+/// only when the queue is empty, so all pending items are processed first.
 shutdown: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+/// Signals `pushBatch` to reject new work. Set before `shutdown` so no new
+/// items enter the queue while workers are draining it.
+shutting_down: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 queue: JobQueue,
 
 /// Thread-safe FIFO work queue. Workers wait on `cond` for new items
@@ -50,9 +60,15 @@ const JobQueue = struct {
     head: ?*WorkItem = null,
     tail: ?*WorkItem = null,
 
-    fn pushBatch(self: *JobQueue, items: []*WorkItem) void {
+    /// Pushes a batch of `WorkItem`s to the `JobQueue`.
+    ///
+    /// Returns false if the pool has signalled that it is shutting down and does
+    /// not push any work.
+    fn pushBatch(self: *JobQueue, pool: *ThreadPool, items: []*WorkItem) bool {
         self.mutex.lock();
         defer self.mutex.unlock();
+
+        if (pool.shutting_down.load(.acquire)) return false;
 
         for (items) |item| {
             item.next = null;
@@ -64,6 +80,7 @@ const JobQueue = struct {
             self.tail = item;
         }
         self.cond.broadcast();
+        return true;
     }
 
     fn pop(self: *JobQueue) ?*WorkItem {
@@ -104,20 +121,36 @@ pub fn init(allocator_: Allocator, opts: Opts) (Allocator.Error || std.Thread.Sp
 }
 
 /// Shuts down the thread pool and frees resources.
+///
+/// Cleanup happens in 3 phases:
+///   1) stop accepting new work,
+///   2) finish existing work,
+///   3) cleaning up resources.
+///
 /// The pool pointer is invalid after this call.
 pub fn deinit(pool: *ThreadPool) void {
+    // Phase 1: stop accepting new work
+    pool.queue.mutex.lock();
+    pool.shutting_down.store(true, .release);
+
+    // Phase 2: tell workers to drain queue then exit
     pool.shutdown.store(true, .release);
-    {
-        pool.queue.mutex.lock();
-        defer pool.queue.mutex.unlock();
-        pool.queue.cond.broadcast();
-    }
-    for (pool.threads[0..pool.n_workers]) |t| {
-        t.join();
-    }
+    pool.queue.cond.broadcast();
+    pool.queue.mutex.unlock();
+
+    // Phase 3: wait for workers to finish draining and exit
+    for (pool.threads[0..pool.n_workers]) |t| t.join();
     pool.allocator.destroy(pool);
 }
 
+/// Main loop for worker threads.
+///
+/// Pops work first before checking for `shutdown` signal, allowing
+/// workers to finish their work before closing.
+///
+/// Safety: it is safe to pop work first since we stop accepting work
+/// in `pushBatch` by checking for the `shutting_down` signal; no new
+/// work can be accepted at the point of entry into this loop.
 fn workerLoop(pool: *ThreadPool) void {
     while (true) {
         const item: *WorkItem = blk: {
@@ -125,10 +158,8 @@ fn workerLoop(pool: *ThreadPool) void {
             defer pool.queue.mutex.unlock();
 
             while (true) {
+                if (pool.queue.pop()) |wi| break :blk wi;
                 if (pool.shutdown.load(.acquire)) return;
-                if (pool.queue.pop()) |wi| {
-                    break :blk wi;
-                }
                 pool.queue.cond.wait(&pool.queue.mutex);
             }
         };
@@ -139,8 +170,8 @@ fn workerLoop(pool: *ThreadPool) void {
 }
 
 /// Submit work items to the pool and wait for all to complete.
-fn submitAndWait(pool: *ThreadPool, items: []*WorkItem) void {
-    pool.queue.pushBatch(items);
+fn submitAndWait(pool: *ThreadPool, items: []*WorkItem) PoolError!void {
+    if (!pool.queue.pushBatch(pool, items)) return PoolError.ShuttingDown;
     for (items) |item| {
         item.done.wait();
     }
@@ -220,7 +251,7 @@ pub fn verifyMultipleAggregateSignatures(
     sigs: []const *Signature,
     sigs_groupcheck: bool,
     rands: []const [32]u8,
-) BlstError!bool {
+) (BlstError || PoolError)!bool {
     if (n_elems == 0 or
         pks.len != n_elems or
         sigs.len != n_elems or
@@ -274,7 +305,7 @@ pub fn verifyMultipleAggregateSignatures(
         item_ptrs[i] = &work_items[i].base;
     }
 
-    pool.submitAndWait(item_ptrs[0..n_active]);
+    try pool.submitAndWait(item_ptrs[0..n_active]);
 
     if (job.err_flag.load(.acquire)) return BlstError.VerifyFail;
 
@@ -349,7 +380,7 @@ pub fn aggregateVerify(
     dst: []const u8,
     pks: []const *PublicKey,
     pks_validate: bool,
-) BlstError!bool {
+) (BlstError || PoolError)!bool {
     const n_elems = pks.len;
     if (n_elems == 0 or msgs.len != n_elems) return BlstError.VerifyFail;
 
@@ -395,7 +426,7 @@ pub fn aggregateVerify(
         item_ptrs[i] = &work_items[i].base;
     }
 
-    pool.submitAndWait(item_ptrs[0..n_active]);
+    try pool.submitAndWait(item_ptrs[0..n_active]);
 
     if (job.err_flag.load(.acquire)) return false;
 
