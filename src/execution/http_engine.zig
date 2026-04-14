@@ -3517,6 +3517,12 @@ pub const IoHttpTransport = struct {
         body: []const u8,
     ) anyerror![]const u8 {
         const client = &self.http_client;
+        const url_ptr = @intFromPtr(url.ptr);
+
+        if (url.len == 0 or url_ptr < 4096) {
+            scoped_log.err("invalid execution URL slice ptr=0x{x} len={d}", .{ url_ptr, url.len });
+            return error.InvalidExecutionUrl;
+        }
 
         // Parse URI.
         const uri = try std.Uri.parse(url);

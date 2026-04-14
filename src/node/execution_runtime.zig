@@ -314,6 +314,7 @@ pub const ExecutionRuntime = struct {
     mock_engine: ?*MockEngine = null,
     http_engine: ?*HttpEngine = null,
     io_transport: ?*IoHttpTransport = null,
+    execution_url: ?[]u8 = null,
     engine_api: ?EngineApi = null,
     http_builder: ?*HttpBuilder = null,
     builder_transport: ?*IoHttpTransport = null,
@@ -378,6 +379,12 @@ pub const ExecutionRuntime = struct {
             self.engine_api = mock.engine();
             scoped_log.info("execution engine: MockEngine (--engine-mock)", .{});
         } else if (opts.execution_urls.len > 0) {
+            self.execution_url = try allocator.dupe(u8, opts.execution_urls[0]);
+            errdefer {
+                allocator.free(self.execution_url.?);
+                self.execution_url = null;
+            }
+
             const transport = try allocator.create(IoHttpTransport);
             errdefer allocator.destroy(transport);
             transport.* = IoHttpTransport.init(allocator, io);
@@ -397,7 +404,7 @@ pub const ExecutionRuntime = struct {
             http_engine.* = HttpEngine.initWithRetry(
                 allocator,
                 io,
-                opts.execution_urls[0],
+                self.execution_url.?,
                 jwt_secret,
                 transport.transport(),
                 retry_config,
@@ -475,6 +482,9 @@ pub const ExecutionRuntime = struct {
         if (self.http_engine) |engine| {
             engine.deinit();
             allocator.destroy(engine);
+        }
+        if (self.execution_url) |url| {
+            allocator.free(url);
         }
         if (self.http_builder) |builder| {
             builder.deinit();

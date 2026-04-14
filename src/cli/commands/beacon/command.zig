@@ -17,7 +17,8 @@ const config_mod = @import("config");
 const BeaconConfig = config_mod.BeaconConfig;
 const config_loader = config_mod.config_loader;
 const state_transition = @import("state_transition");
-const custody = @import("networking").custody;
+const networking = @import("networking");
+const custody = networking.custody;
 const preset = @import("preset").preset;
 const genesis_util = @import("../../genesis_util.zig");
 const ShutdownHandler = @import("../../shutdown.zig").ShutdownHandler;
@@ -26,6 +27,7 @@ const checkpoint_sync = sync_mod.checkpoint_sync;
 const common = @import("../../spec_common.zig");
 
 const default_builder_url = "http://localhost:8661";
+const p2p_async_task_headroom: usize = 32;
 
 const RunContext = struct {
     node: *BeaconNode,
@@ -41,6 +43,7 @@ const ResolvedRunInputs = struct {
     data_dir: []const u8,
     db_path_override: ?[]const u8,
     execution_urls: []const u8,
+    execution_url_list: [1][]const u8,
     execution_retries: u32,
     execution_retry_delay: u64,
     execution_timeout_ms: ?u64,
@@ -131,6 +134,18 @@ const PreparedHandles = struct {
 fn unsupportedOption(name: []const u8, reason: []const u8) noreturn {
     scoped_log.err("{s} is not supported: {s}", .{ name, reason });
     std.process.exit(1);
+}
+
+fn ensureP2pAsyncCapacity(io: Io, target_peers: u32) void {
+    // std.start currently constructs process init.io from std.Io.Threaded.
+    // Beacon networking keeps several long-lived async tasks alive at once
+    // (receive loops, timer loop, accept loop, peer handlers, stream bursts).
+    // The default cpu_count-1 async limit is too low on small-core hosts and
+    // can inline these tasks, stalling P2P startup.
+    const threaded: *std.Io.Threaded = @ptrCast(@alignCast(io.userdata orelse return));
+    const desired_floor = networking.peer_manager.maxPeersForTarget(target_peers) + p2p_async_task_headroom;
+    if (@intFromEnum(threaded.async_limit) >= desired_floor) return;
+    threaded.setAsyncLimit(std.Io.Limit.limited(desired_floor));
 }
 
 fn rejectUnsupportedOptions(opts: anytype) void {
@@ -462,6 +477,7 @@ fn resolveRunInputs(io: Io, allocator: Allocator, opts: anytype) ResolvedRunInpu
     const enr_tcp6 = opts.@"enr.tcp6";
     const enr_udp6 = opts.@"enr.udp6";
     const target_peers = opts.targetPeers orelse opts.target_peers;
+    ensureP2pAsyncCapacity(io, target_peers);
     const target_group_peers = opts.@"network.targetGroupPeers" orelse 6;
     const direct_peers_raw = opts.directPeers orelse opts.direct_peers;
     const checkpoint_state = opts.checkpointState orelse opts.checkpoint_state;
@@ -606,6 +622,7 @@ fn resolveRunInputs(io: Io, allocator: Allocator, opts: anytype) ResolvedRunInpu
         .data_dir = data_dir,
         .db_path_override = db_path_override,
         .execution_urls = execution_urls,
+        .execution_url_list = .{execution_urls},
         .execution_retries = execution_retries,
         .execution_retry_delay = execution_retry_delay,
         .execution_timeout_ms = execution_timeout_ms,
@@ -851,7 +868,7 @@ fn prepareStartupRuntime(io: Io, allocator: Allocator, inputs: *const ResolvedRu
         .rest_port = inputs.api_port,
         .rest_address = inputs.api_address,
         .rest_cors_origin = inputs.api_cors,
-        .execution_urls = &.{inputs.execution_urls},
+        .execution_urls = inputs.execution_url_list[0..],
         .engine_mock = inputs.engine_mock,
         .execution_retries = inputs.execution_retries,
         .execution_retry_delay_ms = inputs.execution_retry_delay,
@@ -968,7 +985,7 @@ fn fillNodeOptions(inputs: *const ResolvedRunInputs, direct_peers: []const []con
         .rest_port = inputs.api_port,
         .rest_address = inputs.api_address,
         .rest_cors_origin = inputs.api_cors,
-        .execution_urls = &.{inputs.execution_urls},
+        .execution_urls = inputs.execution_url_list[0..],
         .engine_mock = inputs.engine_mock,
         .execution_retries = inputs.execution_retries,
         .execution_retry_delay_ms = inputs.execution_retry_delay,
