@@ -22,6 +22,31 @@ pub const GaugeVec = metrics_lib.GaugeVec;
 pub const Histogram = metrics_lib.Histogram;
 pub const HistogramVec = metrics_lib.HistogramVec;
 
+pub const ScrapeCollector = struct {
+    ctx: *anyopaque,
+    collectFn: *const fn (*anyopaque) void,
+
+    pub fn init(
+        ptr: anytype,
+        comptime collectFn: *const fn (@TypeOf(ptr)) void,
+    ) ScrapeCollector {
+        const Adapter = struct {
+            fn call(ctx: *anyopaque) void {
+                collectFn(@ptrCast(@alignCast(ctx)));
+            }
+        };
+
+        return .{
+            .ctx = ptr,
+            .collectFn = Adapter.call,
+        };
+    }
+
+    pub fn collect(self: ScrapeCollector) void {
+        self.collectFn(self.ctx);
+    }
+};
+
 const ApiOperationLabels = struct {
     operation_id: []const u8,
 };
@@ -189,9 +214,21 @@ const BootstrapPhaseLabels = struct {
 
 pub const MetricsSurface = struct {
     beacon: *BeaconMetrics,
+    scrape_collector: ?ScrapeCollector = null,
     state_transition: *state_transition.metrics.StateTransitionMetrics = state_transition.metrics.noop(),
 
+    pub fn setScrapeCollector(self: *MetricsSurface, collector: ScrapeCollector) void {
+        self.scrape_collector = collector;
+    }
+
+    pub fn clearScrapeCollector(self: *MetricsSurface) void {
+        self.scrape_collector = null;
+    }
+
     pub fn write(self: *MetricsSurface, writer: *std.Io.Writer) !void {
+        if (self.scrape_collector) |collector| {
+            collector.collect();
+        }
         try self.beacon.write(writer);
         if (self.state_transition.isEnabled()) {
             try writer.writeByte('\n');
@@ -2673,6 +2710,32 @@ test "MetricsSurface: includes enabled state-transition metrics" {
     const buf = out.writer.buffered();
     try std.testing.expect(std.mem.indexOf(u8, buf, "beacon_head_slot") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf, "lodestar_stfn_epoch_transition_seconds") != null);
+}
+
+test "MetricsSurface: runs scrape collector before write" {
+    var beacon = try BeaconMetrics.init(std.testing.allocator);
+    defer beacon.deinit();
+
+    const CollectorState = struct {
+        beacon: *BeaconMetrics,
+
+        fn collect(self: *@This()) void {
+            self.beacon.head_slot.set(77);
+        }
+    };
+
+    var collector_state = CollectorState{ .beacon = &beacon };
+    var surface = MetricsSurface{ .beacon = &beacon };
+    surface.setScrapeCollector(ScrapeCollector.init(&collector_state, CollectorState.collect));
+
+    beacon.head_slot.set(12);
+
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    try surface.write(&out.writer);
+
+    const buf = out.writer.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, buf, "beacon_head_slot 77") != null);
 }
 
 test "BeaconMetrics: api observer updates live metrics" {

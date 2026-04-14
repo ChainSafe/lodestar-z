@@ -197,7 +197,7 @@ pub const spec = cli.command(.{
         }, null),
         .discovery_port = cli.option(?[]const u8, .{
             .long = "discovery-port",
-            .description = "UDP port for discv5 discovery (defaults to p2p-port)",
+            .description = "UDP port for discv5 discovery (defaults to p2p-port + 1)",
             .env = "LODESTAR_Z_DISCOVERY_PORT",
             .group = "network",
         }, null),
@@ -208,7 +208,7 @@ pub const spec = cli.command(.{
         }, null),
         .discoveryPort6 = cli.option(?u16, .{
             .long = "discoveryPort6",
-            .description = "IPv6 UDP port for discv5 discovery",
+            .description = "IPv6 UDP port for discv5 discovery (defaults to a distinct dual-stack port)",
             .group = "network",
         }, null),
         .bootnodes = cli.option(?[]const u8, .{

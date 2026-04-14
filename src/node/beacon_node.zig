@@ -135,6 +135,56 @@ pub const SyncStatus = struct {
     el_offline: bool,
 };
 
+const SyncStatusInputs = struct {
+    head_slot: u64,
+    sync_distance: u64,
+    connected_peers: u32,
+    is_optimistic: bool,
+    el_offline: bool,
+    has_wall_slot: bool,
+};
+
+const ComputedSyncStatus = struct {
+    status: SyncStatus,
+    sync_state: u64,
+};
+
+const HeadProgressSnapshot = struct {
+    slot: u64,
+    optimistic: bool,
+};
+
+const SyncMetricsCache = struct {
+    const optimistic_bit: u64 = @as(u64, 1) << 63;
+
+    latest_head_progress: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
+    head_catchup_pending_slots: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
+
+    fn headProgress(self: *const @This()) HeadProgressSnapshot {
+        const encoded = self.latest_head_progress.load(.acquire);
+        return .{
+            .slot = encoded & ~optimistic_bit,
+            .optimistic = (encoded & optimistic_bit) != 0,
+        };
+    }
+
+    fn headCatchupPendingCount(self: *const @This()) u64 {
+        return self.head_catchup_pending_slots.load(.acquire);
+    }
+
+    fn syncHeadProgress(self: *@This(), head_slot: u64, optimistic: bool) void {
+        std.debug.assert(head_slot < optimistic_bit);
+        self.latest_head_progress.store(
+            head_slot | if (optimistic) optimistic_bit else 0,
+            .release,
+        );
+    }
+
+    fn setHeadCatchupPendingCount(self: *@This(), pending_slots: u64) void {
+        self.head_catchup_pending_slots.store(pending_slots, .release);
+    }
+};
+
 const SyncSegmentKey = struct {
     chain_id: u32,
     batch_id: BatchId,
@@ -541,6 +591,7 @@ pub const BeaconNode = struct {
     // Last slot for which chain.onSlot() was applied.
     last_slot_tick: ?u64 = null,
     last_time_to_head_observed_slot: ?u64 = null,
+    sync_metrics_cache: SyncMetricsCache = .{},
     head_catchup_slots: [max_tracked_head_catchup_slots]PendingHeadCatchupSlot = [_]PendingHeadCatchupSlot{.{}} ** max_tracked_head_catchup_slots,
     head_catchup_slots_len: usize = 0,
 
@@ -2050,12 +2101,16 @@ pub const BeaconNode = struct {
     }
 
     pub fn headCatchupPendingCount(self: *const BeaconNode) u64 {
-        return @intCast(self.head_catchup_slots_len);
+        return self.sync_metrics_cache.headCatchupPendingCount();
     }
 
     pub fn currentTimeToHeadMs(self: *BeaconNode, current_slot: u64, head_slot: u64) u64 {
         if (head_slot >= current_slot) return 0;
         return millisFromNs(elapsedNsBetween(self.slotStartNs(current_slot), wallNowNs(self.io)));
+    }
+
+    pub fn latestHeadSlotForMetrics(self: *const BeaconNode) u64 {
+        return self.sync_metrics_cache.headProgress().slot;
     }
 
     pub fn noteHeadCatchupSlotsStarted(self: *BeaconNode, start_slot: u64, end_slot: u64) void {
@@ -2069,6 +2124,7 @@ pub const BeaconNode = struct {
 
     pub fn observeHeadCatchup(self: *BeaconNode, head_slot: u64) void {
         const now_ns = wallNowNs(self.io);
+        self.syncHeadProgressForMetrics(head_slot);
         if (self.metrics) |metrics| {
             if (self.last_time_to_head_observed_slot) |last_slot| {
                 if (head_slot > last_slot) {
@@ -2093,6 +2149,7 @@ pub const BeaconNode = struct {
                 self.head_catchup_slots[i - 1] = self.head_catchup_slots[i];
             }
             self.head_catchup_slots_len -= 1;
+            self.syncHeadCatchupPendingCount();
 
             if (self.metrics) |metrics| {
                 const elapsed_ns = elapsedNsBetween(pending.started_at_ns, now_ns);
@@ -2120,6 +2177,19 @@ pub const BeaconNode = struct {
             .started_at_ns = self.slotStartNs(slot),
         };
         self.head_catchup_slots_len += 1;
+        self.syncHeadCatchupPendingCount();
+    }
+
+    fn syncHeadCatchupPendingCount(self: *BeaconNode) void {
+        self.sync_metrics_cache.setHeadCatchupPendingCount(@intCast(self.head_catchup_slots_len));
+    }
+
+    pub fn latestHeadProgressForMetrics(self: *const BeaconNode) HeadProgressSnapshot {
+        return self.sync_metrics_cache.headProgress();
+    }
+
+    fn syncHeadProgressForMetrics(self: *BeaconNode, head_slot: u64) void {
+        self.sync_metrics_cache.syncHeadProgress(head_slot, self.chain.currentHeadExecutionOptimistic());
     }
 
     fn slotStartNs(self: *BeaconNode, slot: u64) i64 {
@@ -2216,6 +2286,7 @@ pub const BeaconNode = struct {
     pub fn advanceSlot(self: *BeaconNode, target_slot: u64) !void {
         try self.chainService().advanceSlot(target_slot);
         self.last_slot_tick = target_slot;
+        self.syncHeadProgressForMetrics(target_slot);
     }
 
     /// Start the Beacon REST API HTTP server (blocking).
@@ -2524,6 +2595,69 @@ pub const BeaconNode = struct {
         block_production_mod.refreshBuilderStatus(self, clock_slot);
     }
 
+    pub fn refreshScrapeMetrics(self: *BeaconNode) void {
+        p2p_runtime_mod.refreshScrapeMetrics(self);
+    }
+
+    fn computeSyncStatus(self: *const BeaconNode, inputs: SyncStatusInputs) ComputedSyncStatus {
+        const has_sync_peers = self.node_options.sync_is_single_node or inputs.connected_peers > 0;
+        const is_synced = !inputs.has_wall_slot or
+            (inputs.sync_distance <= sync_mod.sync_types.SYNC_DISTANCE_THRESHOLD and has_sync_peers);
+
+        return .{
+            .status = .{
+                .head_slot = inputs.head_slot,
+                .sync_distance = inputs.sync_distance,
+                .is_syncing = !is_synced,
+                .is_optimistic = inputs.is_optimistic,
+                .el_offline = inputs.el_offline,
+            },
+            .sync_state = if (!is_synced)
+                if (has_sync_peers) 2 else 0
+            else
+                1,
+        };
+    }
+
+    fn currentSyncStatusInputs(self: *const BeaconNode) SyncStatusInputs {
+        const chain_sync = self.chainQuery().syncStatus();
+        return .{
+            .head_slot = chain_sync.head_slot,
+            .sync_distance = chain_sync.sync_distance,
+            .connected_peers = if (self.peer_manager) |pm| pm.peerCount() else 0,
+            .is_optimistic = chain_sync.is_optimistic,
+            .el_offline = self.execution_runtime.isElOffline(),
+            .has_wall_slot = self.chain.currentWallSlot() != null,
+        };
+    }
+
+    pub fn currentComputedSyncStatus(self: *const BeaconNode) ComputedSyncStatus {
+        return self.computeSyncStatus(self.currentSyncStatusInputs());
+    }
+
+    pub fn scrapeComputedSyncStatus(self: *const BeaconNode) ComputedSyncStatus {
+        const head_progress = self.latestHeadProgressForMetrics();
+        const wall_slot = self.chain.currentWallSlot();
+        return self.computeSyncStatus(.{
+            .head_slot = head_progress.slot,
+            .sync_distance = (wall_slot orelse head_progress.slot) -| head_progress.slot,
+            .connected_peers = if (self.peer_manager) |pm| pm.peerCount() else 0,
+            .is_optimistic = head_progress.optimistic,
+            .el_offline = self.execution_runtime.isElOffline(),
+            .has_wall_slot = wall_slot != null,
+        });
+    }
+
+    pub fn publishSyncMetrics(metrics: *BeaconMetrics, sync: ComputedSyncStatus) void {
+        metrics.setSyncSnapshot(
+            if (sync.status.is_syncing) @as(u64, 1) else @as(u64, 0),
+            sync.status.sync_distance,
+            sync.status.is_optimistic,
+            sync.status.el_offline,
+        );
+        metrics.setSyncState(sync.sync_state);
+    }
+
     /// Get the current head info.
     pub fn getHead(self: *const BeaconNode) HeadInfo {
         return self.chainQuery().head();
@@ -2555,20 +2689,7 @@ pub const BeaconNode = struct {
 
     /// Get the current sync status.
     pub fn getSyncStatus(self: *const BeaconNode) SyncStatus {
-        const chain_sync = self.chainQuery().syncStatus();
-        const has_wall_slot = self.chain.currentWallSlot() != null;
-        const connected_peers: u32 = if (self.peer_manager) |pm| pm.peerCount() else 0;
-        const has_sync_peers = self.node_options.sync_is_single_node or connected_peers > 0;
-        const is_synced = !has_wall_slot or
-            (chain_sync.sync_distance <= sync_mod.sync_types.SYNC_DISTANCE_THRESHOLD and has_sync_peers);
-
-        return .{
-            .head_slot = chain_sync.head_slot,
-            .sync_distance = chain_sync.sync_distance,
-            .is_syncing = !is_synced,
-            .is_optimistic = chain_sync.is_optimistic,
-            .el_offline = self.execution_runtime.el_offline,
-        };
+        return self.currentComputedSyncStatus().status;
     }
 
     /// Produce a block body from the operation pool.
@@ -2666,6 +2787,9 @@ pub const BeaconNode = struct {
         self.last_time_to_head_observed_slot = null;
         self.last_state_metrics_root = null;
         self.last_previous_epoch_orphaned_epoch = null;
+        self.syncHeadProgressForMetrics(outcome.snapshot.head.slot);
+        self.head_catchup_slots_len = 0;
+        self.sync_metrics_cache.setHeadCatchupPendingCount(0);
         self.clock = SlotClock.fromGenesis(outcome.genesis_time, self.config.chain);
         self.api_context.genesis_time = outcome.genesis_time;
         _ = outcome.snapshot;

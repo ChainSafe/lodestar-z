@@ -176,8 +176,12 @@ pub const ExecutionPayloadV3 = struct {
     excess_blob_gas: u64,
 };
 
-/// Execution payload V4 (Electra): adds deposit_requests, withdrawal_requests,
-/// consolidation_requests.
+/// Internal Electra payload carrier.
+///
+/// On the Prague Engine API wire, `executionPayload` is still V3 and the
+/// Electra execution requests are carried as a separate `executionRequests`
+/// top-level field/parameter. We keep them attached here internally because
+/// the CL pipeline naturally handles them together.
 pub const ExecutionPayloadV4 = struct {
     parent_hash: [32]u8,
     fee_recipient: [20]u8,
@@ -233,6 +237,10 @@ pub const GetPayloadResponse = struct {
 };
 
 /// Response from engine_getPayloadV4 (Electra).
+///
+/// The HTTP codec reconstructs this combined internal form from the Prague
+/// wire response (`executionPayload: ExecutionPayloadV3` plus
+/// `executionRequests: Array<DATA>`).
 pub const GetPayloadResponseV4 = struct {
     execution_payload: ExecutionPayloadV4,
     block_value: u256,

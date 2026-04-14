@@ -314,6 +314,7 @@ pub const ExecutionRuntime = struct {
     mock_engine: ?*MockEngine = null,
     http_engine: ?*HttpEngine = null,
     io_transport: ?*IoHttpTransport = null,
+    execution_url: ?[]u8 = null,
     engine_api: ?EngineApi = null,
     http_builder: ?*HttpBuilder = null,
     builder_transport: ?*IoHttpTransport = null,
@@ -323,7 +324,7 @@ pub const ExecutionRuntime = struct {
     cached_payload_slot: ?u64 = null,
     cached_payload_parent_root: ?[32]u8 = null,
     last_builder_status_slot: ?u64 = null,
-    el_offline: bool = false,
+    el_offline: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 
     lane_mutex: std.Io.Mutex = .init,
     queue_mutex: std.Io.Mutex = .init,
@@ -344,6 +345,14 @@ pub const ExecutionRuntime = struct {
         idle,
         shutdown,
     };
+
+    fn setElOffline(self: *ExecutionRuntime, el_offline: bool) void {
+        self.el_offline.store(el_offline, .release);
+    }
+
+    pub fn isElOffline(self: *const ExecutionRuntime) bool {
+        return self.el_offline.load(.acquire);
+    }
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -370,6 +379,12 @@ pub const ExecutionRuntime = struct {
             self.engine_api = mock.engine();
             scoped_log.info("execution engine: MockEngine (--engine-mock)", .{});
         } else if (opts.execution_urls.len > 0) {
+            self.execution_url = try allocator.dupe(u8, opts.execution_urls[0]);
+            errdefer {
+                allocator.free(self.execution_url.?);
+                self.execution_url = null;
+            }
+
             const transport = try allocator.create(IoHttpTransport);
             errdefer allocator.destroy(transport);
             transport.* = IoHttpTransport.init(allocator, io);
@@ -389,7 +404,7 @@ pub const ExecutionRuntime = struct {
             http_engine.* = HttpEngine.initWithRetry(
                 allocator,
                 io,
-                opts.execution_urls[0],
+                self.execution_url.?,
                 jwt_secret,
                 transport.transport(),
                 retry_config,
@@ -398,15 +413,7 @@ pub const ExecutionRuntime = struct {
             self.http_engine = http_engine;
             self.engine_api = http_engine.engine();
 
-            scoped_log.info(
-                "execution engine: HttpEngine -> {s} (retries={d} delay_ms={d} timeout_ms={d})",
-                .{
-                    opts.execution_urls[0],
-                    opts.execution_retries,
-                    opts.execution_retry_delay_ms,
-                    retry_config.default_timeout_ms,
-                },
-            );
+            scoped_log.info("execution engine: HttpEngine configured", .{});
         } else {
             return error.ExecutionEngineNotConfigured;
         }
@@ -437,16 +444,7 @@ pub const ExecutionRuntime = struct {
             self.http_builder = http_builder;
             self.builder_api = http_builder.builder();
 
-            scoped_log.info(
-                "execution builder: HttpBuilder -> {s} (timeout_ms={d} proposal_timeout_ms={d} fault_window={d} allowed_faults={d})",
-                .{
-                    opts.builder_url,
-                    http_builder.request_timeout_ms,
-                    http_builder.proposal_timeout_ms,
-                    http_builder.fault_inspection_window,
-                    http_builder.allowed_faults,
-                },
-            );
+            scoped_log.info("execution builder: HttpBuilder configured", .{});
         }
 
         self.worker_thread = try std.Thread.spawn(.{}, workerMain, .{self});
@@ -484,6 +482,9 @@ pub const ExecutionRuntime = struct {
         if (self.http_engine) |engine| {
             engine.deinit();
             allocator.destroy(engine);
+        }
+        if (self.execution_url) |url| {
+            allocator.free(url);
         }
         if (self.http_builder) |builder| {
             builder.deinit();
@@ -750,7 +751,7 @@ pub const ExecutionRuntime = struct {
             ),
         } catch |err| {
             scoped_log.warn("execution runtime: engine_newPayload failed: {}", .{err});
-            self.el_offline = true;
+            self.setElOffline(true);
             const t1 = std.Io.Clock.awake.now(self.io);
             return .{
                 .ticket = 0,
@@ -763,7 +764,7 @@ pub const ExecutionRuntime = struct {
         const t1 = std.Io.Clock.awake.now(self.io);
         const elapsed_s: f64 = @as(f64, @floatFromInt(t1.nanoseconds - t0.nanoseconds)) / 1e9;
 
-        self.el_offline = false;
+        self.setElOffline(false);
         const response = switch (engine_result.status) {
             .valid => NewPayloadResult{ .valid = .{
                 .latest_valid_hash = engine_result.latest_valid_hash orelse request.blockHash(),
@@ -949,11 +950,11 @@ pub const ExecutionRuntime = struct {
             .safe_block_hash = fc_state.safe_block_hash,
             .finalized_block_hash = fc_state.finalized_block_hash,
         }, payload_attrs) catch |err| {
-            self.el_offline = true;
+            self.setElOffline(true);
             return err;
         };
 
-        self.el_offline = false;
+        self.setElOffline(false);
         if (result.payload_id) |payload_id| {
             self.cached_payload_id = payload_id;
             if (payload_attrs != null) self.cached_payload_parent_root = update.beacon_block_root;
@@ -970,11 +971,11 @@ pub const ExecutionRuntime = struct {
         const payload_id = self.cached_payload_id orelse return error.NoPayloadId;
 
         const result = engine.getPayload(payload_id) catch |err| {
-            self.el_offline = true;
+            self.setElOffline(true);
             return err;
         };
 
-        self.el_offline = false;
+        self.setElOffline(false);
         self.clearCachedPayload();
         return result;
     }
@@ -990,12 +991,12 @@ pub const ExecutionRuntime = struct {
                 error.Canceled => return .canceled,
                 else => {
                     const mutable_self: *ExecutionRuntime = @constCast(self);
-                    mutable_self.el_offline = true;
+                    mutable_self.setElOffline(true);
                     return .{ .failure = err };
                 },
             };
             const mutable_self: *ExecutionRuntime = @constCast(self);
-            mutable_self.el_offline = false;
+            mutable_self.setElOffline(false);
             return .{ .success = response };
         }
 
@@ -1006,11 +1007,11 @@ pub const ExecutionRuntime = struct {
         const response = engine.getPayload(payload_id) catch |err| switch (err) {
             error.Canceled => return .canceled,
             else => {
-                mutable_self.el_offline = true;
+                mutable_self.setElOffline(true);
                 return .{ .failure = err };
             },
         };
-        mutable_self.el_offline = false;
+        mutable_self.setElOffline(false);
         return .{ .success = response };
     }
 
@@ -1330,7 +1331,7 @@ pub const ExecutionRuntime = struct {
             .completed_forkchoice_updates = @intCast(self.completed_forkchoice_updates.items.len),
             .completed_payload_verifications = @intCast(self.completed_payload_verifications.items.len),
             .failed_payload_preparations = @intCast(self.failed_payload_preparations.items.len),
-            .el_offline = self.el_offline,
+            .el_offline = self.isElOffline(),
         };
     }
 

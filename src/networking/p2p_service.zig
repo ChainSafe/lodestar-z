@@ -182,28 +182,15 @@ const Network = union(enum) {
         };
     }
 
-    fn isPeerConnected(self: *@This(), peer_id: []const u8) bool {
+    fn isPeerConnected(self: *@This(), io: Io, peer_id: []const u8) bool {
         return switch (self.*) {
-            inline else => |*network| network.connections.contains(peer_id),
+            inline else => |*network| network.isPeerConnected(io, peer_id),
         };
     }
 
-    fn snapshotConnectedPeerIds(self: *@This(), allocator: Allocator) ![][]const u8 {
+    fn snapshotConnectedPeerIds(self: *@This(), io: Io, allocator: Allocator) ![][]const u8 {
         switch (self.*) {
-            inline else => |*network| {
-                var peer_ids = try allocator.alloc([]const u8, network.connections.count());
-                var copied: usize = 0;
-                errdefer {
-                    for (peer_ids[0..copied]) |peer_id| allocator.free(peer_id);
-                    allocator.free(peer_ids);
-                }
-
-                var iter = network.connections.iterator();
-                while (iter.next()) |entry| : (copied += 1) {
-                    peer_ids[copied] = try allocator.dupe(u8, entry.key_ptr.*);
-                }
-                return peer_ids;
-            },
+            inline else => |*network| return network.snapshotConnectedPeerIds(io, allocator),
         }
     }
 
@@ -227,11 +214,7 @@ const Network = union(enum) {
 
     fn disconnectPeer(self: *@This(), io: Io, peer_id: []const u8) bool {
         return switch (self.*) {
-            inline else => |*network| blk: {
-                const conn = network.connections.get(peer_id) orelse break :blk false;
-                conn.close(io);
-                break :blk true;
-            },
+            inline else => |*network| network.disconnectPeer(io, peer_id),
         };
     }
 
@@ -296,6 +279,11 @@ pub const ReqRespRequestPermit = struct {
     active: bool = true,
 
     pub fn deinit(self: *ReqRespRequestPermit, io: Io) void {
+        defer if (self.peer_id.len != 0) {
+            self.limiter.allocator.free(self.peer_id);
+            self.peer_id = &.{};
+        };
+
         if (!self.active) return;
         self.limiter.requestCompleted(io, self.peer_id, self.method, self.request_id);
         self.active = false;
@@ -575,13 +563,13 @@ pub const P2pService = struct {
     }
 
     /// Return whether the peer currently has an active transport connection.
-    pub fn isPeerConnected(self: *Self, peer_id: []const u8) bool {
-        return self.network.isPeerConnected(peer_id);
+    pub fn isPeerConnected(self: *Self, io: Io, peer_id: []const u8) bool {
+        return self.network.isPeerConnected(io, peer_id);
     }
 
     /// Snapshot the currently connected peer IDs. Caller owns the returned slice and entries.
-    pub fn snapshotConnectedPeerIds(self: *Self, allocator: Allocator) ![][]const u8 {
-        return self.network.snapshotConnectedPeerIds(allocator);
+    pub fn snapshotConnectedPeerIds(self: *Self, io: Io, allocator: Allocator) ![][]const u8 {
+        return self.network.snapshotConnectedPeerIds(io, allocator);
     }
 
     /// Open a new outbound stream for a protocol to a connected peer.
@@ -613,10 +601,13 @@ pub const P2pService = struct {
         peer_id: []const u8,
         method: SelfRateLimitMethod,
     ) !ReqRespRequestPermit {
-        const request_id = try self.req_resp_self_limiter.allow(io, peer_id, method);
+        const owned_peer_id = try self.allocator.dupe(u8, peer_id);
+        errdefer self.allocator.free(owned_peer_id);
+
+        const request_id = try self.req_resp_self_limiter.allow(io, owned_peer_id, method);
         return .{
             .limiter = &self.req_resp_self_limiter,
-            .peer_id = peer_id,
+            .peer_id = owned_peer_id,
             .method = method,
             .request_id = request_id,
         };
@@ -705,22 +696,23 @@ pub const P2pService = struct {
             score: f64,
         };
 
+        const connected_peer_ids = try self.snapshotConnectedPeerIds(io, self.allocator);
+        defer {
+            for (connected_peer_ids) |peer_id| self.allocator.free(peer_id);
+            self.allocator.free(connected_peer_ids);
+        }
+
         var scored_peers = std.ArrayListUnmanaged(ScoredPeer).empty;
         defer scored_peers.deinit(self.allocator);
 
-        switch (self.network) {
-            inline else => |*network| {
-                var iter = network.connections.iterator();
-                while (iter.next()) |entry| {
-                    self.gossipsub.state_mu.lockUncancelable(io);
-                    const score = self.gossipsub.router.peerScore(entry.key_ptr.*);
-                    self.gossipsub.state_mu.unlock(io);
-                    try scored_peers.append(self.allocator, .{
-                        .peer_id = entry.key_ptr.*,
-                        .score = score,
-                    });
-                }
-            },
+        for (connected_peer_ids) |peer_id| {
+            self.gossipsub.state_mu.lockUncancelable(io);
+            const score = self.gossipsub.router.peerScore(peer_id);
+            self.gossipsub.state_mu.unlock(io);
+            try scored_peers.append(self.allocator, .{
+                .peer_id = peer_id,
+                .score = score,
+            });
         }
 
         std.mem.sort(ScoredPeer, scored_peers.items, {}, struct {

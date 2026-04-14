@@ -1349,7 +1349,6 @@ fn runLoop(self: *BeaconNode, io: std.Io, svc: *networking.P2pService) void {
             did_work = runPeerManagerHeartbeat(self, io, svc) or did_work;
             next_peer_manager_heartbeat_ns = now_ns + peer_manager_heartbeat_interval_ns;
         }
-
         if (now_ns >= next_metrics_sampling_ns) {
             updateSyncMetrics(self);
             updateRuntimeMetrics(self, io);
@@ -1391,20 +1390,7 @@ fn maybeHandleForkTransition(self: *BeaconNode, io: std.Io, svc: *networking.P2p
 
 fn updateSyncMetrics(self: *BeaconNode) void {
     if (self.metrics) |metrics| {
-        const status = self.getSyncStatus();
-        const connected_peers: u32 = if (self.peer_manager) |pm| pm.peerCount() else 0;
-        metrics.setSyncSnapshot(
-            if (status.is_syncing) @as(u64, 1) else @as(u64, 0),
-            status.sync_distance,
-            status.is_optimistic,
-            status.el_offline,
-        );
-        metrics.setSyncState(if (!status.is_syncing)
-            1
-        else if (connected_peers == 0)
-            0
-        else
-            2);
+        BeaconNode.publishSyncMetrics(metrics, self.currentComputedSyncStatus());
     }
 }
 
@@ -1983,6 +1969,25 @@ fn updateRuntimeMetrics(self: *BeaconNode, io: std.Io) void {
     updateHeadCatchupMetrics(self);
     updateReqRespMetrics(self);
     updateStorageMetrics(self);
+}
+
+pub fn refreshScrapeMetrics(self: *BeaconNode) void {
+    refreshScrapeSyncMetrics(self);
+    refreshScrapeHeadCatchupMetrics(self);
+}
+
+fn refreshScrapeSyncMetrics(self: *BeaconNode) void {
+    const metrics = self.metrics orelse return;
+    BeaconNode.publishSyncMetrics(metrics, self.scrapeComputedSyncStatus());
+}
+
+fn refreshScrapeHeadCatchupMetrics(self: *BeaconNode) void {
+    const metrics = self.metrics orelse return;
+    const head_slot = self.latestHeadProgressForMetrics().slot;
+    const current_slot = if (self.clock) |clock| clock.currentSlot(self.io) else null;
+    const head_lag_slots = if (current_slot) |slot| slot -| head_slot else 0;
+    const current_ms = if (current_slot) |slot| self.currentTimeToHeadMs(slot, head_slot) else 0;
+    metrics.setHeadCatchupSnapshot(head_lag_slots, self.headCatchupPendingCount(), current_ms);
 }
 
 fn updateProcessMetrics(self: *BeaconNode) void {
@@ -2642,7 +2647,10 @@ fn peerReqRespTask(
                 if (requestPeerMetadataWithTimeout(self, io, svc, job.peer_id, optional_reqresp_timeout_ms)) |peer_metadata| {
                     metadata = peerReqRespMetadataCompletion(peer_metadata);
                 } else |err| {
-                    log.debug("Peer metadata refresh failed for {s}: {}; keeping peer connected", .{ job.peer_id, err });
+                    log.debug("Peer metadata refresh failed for {f}: {}; keeping peer connected", .{
+                        networking.fmtPeerId(job.peer_id),
+                        err,
+                    });
                 }
             }
 
@@ -2662,7 +2670,7 @@ fn schedulePeerReqResp(
     peer_id: []const u8,
     kind: PeerReqRespJobKind,
 ) bool {
-    if (!svc.isPeerConnected(peer_id)) return false;
+    if (!svc.isPeerConnected(io, peer_id)) return false;
 
     const marked = markPendingPeerReqResp(self, io, peer_id) catch |err| {
         log.warn("Failed to track pending peer req/resp work for {f}: {}", .{ networking.fmtPeerId(peer_id), err });
@@ -2781,7 +2789,7 @@ fn dialDiscoveredPeers(
         };
         defer self.allocator.free(predicted_peer_id_text);
 
-        if (svc.isPeerConnected(predicted_peer_id)) {
+        if (svc.isPeerConnected(io, predicted_peer_id)) {
             self.allocator.free(predicted_peer_id);
             continue;
         }
@@ -2810,7 +2818,7 @@ fn dialDiscoveredPeers(
 
         if (pm) |peer_manager| {
             peer_manager.onDialing(predicted_peer_id, now_ms) catch |err| {
-                log.debug("Failed to mark discovered peer {s} as dialing: {}", .{ predicted_peer_id, err });
+                log.debug("Failed to mark discovered peer {s} as dialing: {}", .{ predicted_peer_id_text, err });
                 self.allocator.free(owned_ma_str);
                 self.allocator.free(predicted_peer_id);
                 continue;
@@ -2834,7 +2842,7 @@ fn dialDiscoveredPeers(
 fn reconcilePeerConnections(self: *BeaconNode, io: std.Io, svc: *networking.P2pService) bool {
     const pm = self.peer_manager orelse return false;
 
-    const connected_peer_ids = svc.snapshotConnectedPeerIds(self.allocator) catch |err| {
+    const connected_peer_ids = svc.snapshotConnectedPeerIds(io, self.allocator) catch |err| {
         log.debug("Failed to snapshot connected peers: {}", .{err});
         return false;
     };
@@ -4792,16 +4800,23 @@ fn reqRespMaintenanceMethod(protocol: ReqRespMaintenanceProtocol) networking.Met
 }
 
 fn reqRespMaintenanceErrorLabel(err: anyerror) []const u8 {
+    if (isReqRespTransportClosedError(err)) return "transport_closed";
     return switch (err) {
         error.RequestSelfRateLimited => "self_rate_limited",
+        else => @errorName(err),
+    };
+}
+
+fn isReqRespTransportClosedError(err: anyerror) bool {
+    return switch (err) {
         error.PeerNotConnected,
         error.ConnectionClosed,
         error.ConnectionResetByPeer,
         error.UnexpectedEof,
         error.EndOfStream,
         error.BrokenPipe,
-        => "transport_closed",
-        else => @errorName(err),
+        => true,
+        else => false,
     };
 }
 
@@ -4812,16 +4827,9 @@ fn noteSyncPeerGoneIfTransportClosed(
     peer_id: []const u8,
     err: anyerror,
 ) void {
-    switch (err) {
-        error.PeerNotConnected,
-        error.ConnectionClosed,
-        error.ConnectionResetByPeer,
-        error.UnexpectedEof,
-        => {},
-        else => return,
-    }
+    if (!isReqRespTransportClosedError(err)) return;
 
-    if (svc.isPeerConnected(peer_id)) return;
+    if (svc.isPeerConnected(io, peer_id)) return;
     const pm = self.peer_manager orelse return;
     notePeerDisconnected(self, pm, peer_id, currentUnixTimeMs(io));
 }
@@ -4840,10 +4848,26 @@ fn handleReqRespMaintenanceFailure(
             reqRespMaintenanceErrorLabel(err),
         );
     }
-    log.debug("Peer maintenance {s} failed for {s}: {}", .{ @tagName(protocol), peer_id, err });
+    log.debug("Peer maintenance {s} failed for {f}: {}", .{
+        @tagName(protocol),
+        networking.fmtPeerId(peer_id),
+        err,
+    });
+
+    if (isReqRespTransportClosedError(err)) {
+        noteSyncPeerGoneIfTransportClosed(self, io, svc, peer_id, err);
+        log.debug("Peer maintenance {s} saw closed transport for {f}; deferring to transport state", .{
+            @tagName(protocol),
+            networking.fmtPeerId(peer_id),
+        });
+        return;
+    }
 
     if (err == error.RequestSelfRateLimited) {
-        log.debug("Local req/resp self rate limit hit for maintenance {s} to {s}", .{ @tagName(protocol), peer_id });
+        log.debug("Local req/resp self rate limit hit for maintenance {s} to {f}", .{
+            @tagName(protocol),
+            networking.fmtPeerId(peer_id),
+        });
         return;
     }
 
