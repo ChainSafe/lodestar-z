@@ -219,6 +219,7 @@ pub const PeerManager = struct {
     ) ![]const Action {
         _ = reason;
         self.resetActionState();
+        _ = self.scorer.applyReconnectionCoolDown(peer_id, reason);
         try self.actions.append(.{ .disconnect_peer = peer_id });
         return self.actions.items;
     }
