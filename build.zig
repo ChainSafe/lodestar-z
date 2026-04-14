@@ -156,6 +156,13 @@ pub fn build(b: *std.Build) void {
     });
     b.modules.put(b.dupe("state_transition"), module_state_transition) catch @panic("OOM");
 
+    const module_peer_manager = b.createModule(.{
+        .root_source_file = b.path("src/peer_manager/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    b.modules.put(b.dupe("peer_manager"), module_peer_manager) catch @panic("OOM");
+
     const module_download_era_files = b.createModule(.{
         .root_source_file = b.path("scripts/download_era_files.zig"),
         .target = target,
@@ -1176,6 +1183,7 @@ pub fn build(b: *std.Build) void {
     module_bindings.addImport("fork_types", module_fork_types);
     module_bindings.addImport("state_transition", module_state_transition);
     module_bindings.addImport("zapi:zapi", dep_zapi.module("zapi"));
+    module_bindings.addImport("peer_manager", module_peer_manager);
 
     module_int.addImport("config", module_config);
     module_int.addImport("download_era_options", options_module_download_era_options);
