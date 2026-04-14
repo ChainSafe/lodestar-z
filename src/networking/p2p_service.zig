@@ -692,12 +692,14 @@ pub const P2pService = struct {
     }
 
     /// Report an invalid inbound gossip message to gossipsub's mesh scorer.
-    pub fn recordInvalidGossipMessage(self: *Self, peer_id: []const u8, topic: []const u8) void {
+    pub fn recordInvalidGossipMessage(self: *Self, io: Io, peer_id: []const u8, topic: []const u8) void {
+        self.gossipsub.state_mu.lockUncancelable(io);
+        defer self.gossipsub.state_mu.unlock(io);
         self.gossipsub.router.recordInvalidMessage(peer_id, topic);
     }
 
     /// Mirror current gossipsub router scores into the peer manager's score state.
-    pub fn syncGossipsubScores(self: *Self, pm: *PeerManager, now_ms: u64) !void {
+    pub fn syncGossipsubScores(self: *Self, io: Io, pm: *PeerManager, now_ms: u64) !void {
         const ScoredPeer = struct {
             peer_id: []const u8,
             score: f64,
@@ -710,9 +712,12 @@ pub const P2pService = struct {
             inline else => |*network| {
                 var iter = network.connections.iterator();
                 while (iter.next()) |entry| {
+                    self.gossipsub.state_mu.lockUncancelable(io);
+                    const score = self.gossipsub.router.peerScore(entry.key_ptr.*);
+                    self.gossipsub.state_mu.unlock(io);
                     try scored_peers.append(self.allocator, .{
                         .peer_id = entry.key_ptr.*,
-                        .score = self.gossipsub.router.peerScore(entry.key_ptr.*),
+                        .score = score,
                     });
                 }
             },

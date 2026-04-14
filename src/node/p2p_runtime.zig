@@ -1194,7 +1194,7 @@ fn runPeerManagerHeartbeat(self: *BeaconNode, io: std.Io, svc: *networking.P2pSe
     }
 
     var did_work = false;
-    svc.syncGossipsubScores(pm, now_ms) catch |err| {
+    svc.syncGossipsubScores(io, pm, now_ms) catch |err| {
         log.warn("Failed to mirror gossipsub scores into peer manager: {}", .{err});
     };
     if (self.req_resp_rate_limiter) |limiter| {
