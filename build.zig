@@ -25,7 +25,7 @@ pub fn build(b: *std.Build) void {
     const options_spec_test_options = b.addOptions();
     const option_spec_test_url = b.option([]const u8, "spec_test_url", "") orelse "https://github.com/ethereum/consensus-specs";
     options_spec_test_options.addOption([]const u8, "spec_test_url", option_spec_test_url);
-    const option_spec_test_version = b.option([]const u8, "spec_test_version", "") orelse "v1.6.0-beta.2";
+    const option_spec_test_version = b.option([]const u8, "spec_test_version", "") orelse "v1.7.0-alpha.2";
     options_spec_test_options.addOption([]const u8, "spec_test_version", option_spec_test_version);
     const option_spec_test_out_dir = b.option([]const u8, "spec_test_out_dir", "") orelse "test/spec/spec_tests";
     options_spec_test_options.addOption([]const u8, "spec_test_out_dir", option_spec_test_out_dir);
@@ -1335,6 +1335,7 @@ pub fn build(b: *std.Build) void {
     module_spec_tests.addImport("bls", module_bls);
     module_spec_tests.addImport("persistent_merkle_tree", module_persistent_merkle_tree);
     module_spec_tests.addImport("hex", module_hex);
+    module_spec_tests.addImport("fork_choice", module_fork_choice);
 
     module_ssz_generic_spec_tests.addImport("hex", module_hex);
     module_ssz_generic_spec_tests.addImport("snappy", dep_snappy.module("snappy"));

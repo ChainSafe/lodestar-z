@@ -6,6 +6,7 @@ const isFixedType = @import("ssz").isFixedType;
 const state_transition = @import("state_transition");
 const Node = @import("persistent_merkle_tree").Node;
 const AnySignedBeaconBlock = @import("fork_types").AnySignedBeaconBlock;
+const AnyBeaconBlock = @import("fork_types").AnyBeaconBlock;
 const AnyBeaconState = @import("fork_types").AnyBeaconState;
 const TestCachedBeaconState = state_transition.test_utils.TestCachedBeaconState;
 
@@ -72,6 +73,26 @@ pub fn TestCaseUtils(comptime fork: ForkSeq) type {
         pub fn loadPreState(allocator: Allocator, pool: *Node.Pool, dir: std.fs.Dir) !TestCachedBeaconState {
             var pre_state = ForkTypes.BeaconState.default_value;
             try loadSszSnappyValue(ForkTypes.BeaconState, allocator, dir, "pre.ssz_snappy", &pre_state);
+            defer ForkTypes.BeaconState.deinit(allocator, &pre_state);
+
+            const pre_state_all_forks = try allocator.create(AnyBeaconState);
+            errdefer allocator.destroy(pre_state_all_forks);
+
+            pre_state_all_forks.* = @unionInit(
+                AnyBeaconState,
+                fork.name(),
+                try ForkTypes.BeaconState.TreeView.fromValue(allocator, pool, &pre_state),
+            );
+            errdefer pre_state_all_forks.deinit();
+
+            var f = try pre_state_all_forks.fork();
+            const fork_epoch = try f.get("epoch");
+            return try TestCachedBeaconState.initFromState(allocator, pool, pre_state_all_forks, fork, fork_epoch);
+        }
+
+        pub fn loadPreStateFromFile(allocator: Allocator, pool: *Node.Pool, dir: std.fs.Dir, file_name: []const u8) !TestCachedBeaconState {
+            var pre_state = ForkTypes.BeaconState.default_value;
+            try loadSszSnappyValue(ForkTypes.BeaconState, allocator, dir, file_name, &pre_state);
             defer ForkTypes.BeaconState.deinit(allocator, &pre_state);
 
             const pre_state_all_forks = try allocator.create(AnyBeaconState);
@@ -261,6 +282,145 @@ pub fn deinitSignedBeaconBlock(signed_block: AnySignedBeaconBlock, allocator: st
             allocator.destroy(b);
         },
     }
+}
+
+/// load BeaconBlock (unsigned) from file using runtime fork
+/// consumer should deinit the returned block and destroy the pointer
+pub fn loadBeaconBlock(allocator: std.mem.Allocator, fork: ForkSeq, dir: std.fs.Dir, file_name: []const u8) !AnyBeaconBlock {
+    return switch (fork) {
+        .phase0 => blk: {
+            const out = try allocator.create(phase0.BeaconBlock.Type);
+            out.* = phase0.BeaconBlock.default_value;
+            try loadSszSnappyValue(types.phase0.BeaconBlock, allocator, dir, file_name, out);
+            break :blk AnyBeaconBlock{
+                .phase0 = out,
+            };
+        },
+        .altair => blk: {
+            const out = try allocator.create(altair.BeaconBlock.Type);
+            out.* = altair.BeaconBlock.default_value;
+            try loadSszSnappyValue(types.altair.BeaconBlock, allocator, dir, file_name, out);
+            break :blk AnyBeaconBlock{
+                .altair = out,
+            };
+        },
+        .bellatrix => blk: {
+            const out = try allocator.create(bellatrix.BeaconBlock.Type);
+            out.* = bellatrix.BeaconBlock.default_value;
+            try loadSszSnappyValue(types.bellatrix.BeaconBlock, allocator, dir, file_name, out);
+            break :blk AnyBeaconBlock{
+                .full_bellatrix = out,
+            };
+        },
+        .capella => blk: {
+            const out = try allocator.create(capella.BeaconBlock.Type);
+            out.* = capella.BeaconBlock.default_value;
+            try loadSszSnappyValue(types.capella.BeaconBlock, allocator, dir, file_name, out);
+            break :blk AnyBeaconBlock{
+                .full_capella = out,
+            };
+        },
+        .deneb => blk: {
+            const out = try allocator.create(deneb.BeaconBlock.Type);
+            out.* = deneb.BeaconBlock.default_value;
+            try loadSszSnappyValue(types.deneb.BeaconBlock, allocator, dir, file_name, out);
+            break :blk AnyBeaconBlock{
+                .full_deneb = out,
+            };
+        },
+        .electra => blk: {
+            const out = try allocator.create(electra.BeaconBlock.Type);
+            out.* = electra.BeaconBlock.default_value;
+            try loadSszSnappyValue(types.electra.BeaconBlock, allocator, dir, file_name, out);
+            break :blk AnyBeaconBlock{
+                .full_electra = out,
+            };
+        },
+        .fulu => blk: {
+            const out = try allocator.create(fulu.BeaconBlock.Type);
+            out.* = fulu.BeaconBlock.default_value;
+            try loadSszSnappyValue(types.fulu.BeaconBlock, allocator, dir, file_name, out);
+            break :blk AnyBeaconBlock{
+                .full_fulu = out,
+            };
+        },
+        .gloas => blk: {
+            const out = try allocator.create(gloas.BeaconBlock.Type);
+            out.* = gloas.BeaconBlock.default_value;
+            try loadSszSnappyValue(types.gloas.BeaconBlock, allocator, dir, file_name, out);
+            break :blk AnyBeaconBlock{
+                .full_gloas = out,
+            };
+        },
+    };
+}
+
+pub fn deinitBeaconBlock(block: AnyBeaconBlock, allocator: std.mem.Allocator) void {
+    switch (block) {
+        .phase0 => |b| {
+            phase0.BeaconBlock.deinit(allocator, @constCast(b));
+            allocator.destroy(b);
+        },
+        .altair => |b| {
+            altair.BeaconBlock.deinit(allocator, @constCast(b));
+            allocator.destroy(b);
+        },
+        .full_bellatrix => |b| {
+            bellatrix.BeaconBlock.deinit(allocator, @constCast(b));
+            allocator.destroy(b);
+        },
+        .blinded_bellatrix => |b| {
+            bellatrix.BlindedBeaconBlock.deinit(allocator, @constCast(b));
+            allocator.destroy(b);
+        },
+        .full_capella => |b| {
+            capella.BeaconBlock.deinit(allocator, @constCast(b));
+            allocator.destroy(b);
+        },
+        .blinded_capella => |b| {
+            capella.BlindedBeaconBlock.deinit(allocator, @constCast(b));
+            allocator.destroy(b);
+        },
+        .full_deneb => |b| {
+            deneb.BeaconBlock.deinit(allocator, @constCast(b));
+            allocator.destroy(b);
+        },
+        .blinded_deneb => |b| {
+            deneb.BlindedBeaconBlock.deinit(allocator, @constCast(b));
+            allocator.destroy(b);
+        },
+        .full_electra => |b| {
+            electra.BeaconBlock.deinit(allocator, @constCast(b));
+            allocator.destroy(b);
+        },
+        .blinded_electra => |b| {
+            electra.BlindedBeaconBlock.deinit(allocator, @constCast(b));
+            allocator.destroy(b);
+        },
+        .full_fulu => |b| {
+            fulu.BeaconBlock.deinit(allocator, @constCast(b));
+            allocator.destroy(b);
+        },
+        .blinded_fulu => |b| {
+            fulu.BlindedBeaconBlock.deinit(allocator, @constCast(b));
+            allocator.destroy(b);
+        },
+        .full_gloas => |b| {
+            gloas.BeaconBlock.deinit(allocator, @constCast(b));
+            allocator.destroy(b);
+        },
+    }
+}
+
+/// Returns the decompressed SSZ size of a snappy-compressed file without full deserialization.
+pub fn getSszSnappyDecompressedSize(allocator: std.mem.Allocator, dir: std.fs.Dir, file_name: []const u8) !usize {
+    var object_file = try dir.openFile(file_name, .{});
+    defer object_file.close();
+
+    const value_bytes = try object_file.readToEndAlloc(allocator, 100_000_000);
+    defer allocator.free(value_bytes);
+
+    return snappy.uncompressedLength(value_bytes);
 }
 
 pub fn loadSszSnappyValue(comptime ST: type, allocator: std.mem.Allocator, dir: std.fs.Dir, file_name: []const u8, out: *ST.Type) !void {
