@@ -279,6 +279,11 @@ pub const ReqRespRequestPermit = struct {
     active: bool = true,
 
     pub fn deinit(self: *ReqRespRequestPermit, io: Io) void {
+        defer if (self.peer_id.len != 0) {
+            self.limiter.allocator.free(self.peer_id);
+            self.peer_id = &.{};
+        };
+
         if (!self.active) return;
         self.limiter.requestCompleted(io, self.peer_id, self.method, self.request_id);
         self.active = false;
@@ -596,10 +601,13 @@ pub const P2pService = struct {
         peer_id: []const u8,
         method: SelfRateLimitMethod,
     ) !ReqRespRequestPermit {
-        const request_id = try self.req_resp_self_limiter.allow(io, peer_id, method);
+        const owned_peer_id = try self.allocator.dupe(u8, peer_id);
+        errdefer self.allocator.free(owned_peer_id);
+
+        const request_id = try self.req_resp_self_limiter.allow(io, owned_peer_id, method);
         return .{
             .limiter = &self.req_resp_self_limiter,
-            .peer_id = peer_id,
+            .peer_id = owned_peer_id,
             .method = method,
             .request_id = request_id,
         };
