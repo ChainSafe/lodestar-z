@@ -35,7 +35,7 @@ pub fn processEvents(self: *BeaconNode, io: std.Io, p2p: *networking.P2pService)
                 };
 
                 const parsed = networking.gossip_topics.parseTopic(msg.topic) orelse {
-                    recordInvalidMessage(p2p, msg.from, msg.topic);
+                    recordInvalidMessage(io, p2p, msg.from, msg.topic);
                     continue;
                 };
                 const fork_seq = resolveForkSeq(self, io, parsed) orelse continue;
@@ -66,7 +66,7 @@ fn processValidatedMessage(
         switch (gh.processGossipMessageWithSubnetAndMetadata(parsed.topic_type, parsed.subnet_id, data, metadata)) {
             .accepted, .ignored => {},
             .rejected => |reason| {
-                recordInvalidMessage(p2p, peer, topic);
+                recordInvalidMessage(io, p2p, peer, topic);
                 applyGossipPenalty(self, io, p2p, peer, reason);
                 scoped_log.debug("Gossip {s} rejected ({s})", .{ parsed.topic_type.topicName(), @tagName(reason) });
             },
@@ -83,8 +83,8 @@ fn resolveForkSeq(self: *BeaconNode, io: std.Io, parsed: networking.GossipTopic)
     return self.config.forkSeqForGossipDigestAtEpoch(epoch, parsed.fork_digest, self.genesis_validators_root);
 }
 
-fn recordInvalidMessage(p2p: *networking.P2pService, peer: ?[]const u8, topic: []const u8) void {
-    if (peer) |peer_id| p2p.recordInvalidGossipMessage(peer_id, topic);
+fn recordInvalidMessage(io: std.Io, p2p: *networking.P2pService, peer: ?[]const u8, topic: []const u8) void {
+    if (peer) |peer_id| p2p.recordInvalidGossipMessage(io, peer_id, topic);
 }
 
 fn applyGossipPenalty(
