@@ -128,8 +128,8 @@ pub const PeerManager = struct {
             self.clock_fn(),
             self.config,
         ) catch |err| switch (err) {
-            error.PeerAlreadyExists => return self.actions.items,
-            error.OutOfMemory => return err,
+            error.PeerAlreadyExists => {}, // Already guarded by contains check before, so this should not be reached
+            error.OutOfMemory => return err, // Propagate fatal OOM error
         };
 
         if (direction == .outbound) {
