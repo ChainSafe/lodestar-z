@@ -406,15 +406,7 @@ pub const ExecutionRuntime = struct {
             self.http_engine = http_engine;
             self.engine_api = http_engine.engine();
 
-            scoped_log.info(
-                "execution engine: HttpEngine -> {s} (retries={d} delay_ms={d} timeout_ms={d})",
-                .{
-                    opts.execution_urls[0],
-                    opts.execution_retries,
-                    opts.execution_retry_delay_ms,
-                    retry_config.default_timeout_ms,
-                },
-            );
+            scoped_log.info("execution engine: HttpEngine configured", .{});
         } else {
             return error.ExecutionEngineNotConfigured;
         }
@@ -445,16 +437,7 @@ pub const ExecutionRuntime = struct {
             self.http_builder = http_builder;
             self.builder_api = http_builder.builder();
 
-            scoped_log.info(
-                "execution builder: HttpBuilder -> {s} (timeout_ms={d} proposal_timeout_ms={d} fault_window={d} allowed_faults={d})",
-                .{
-                    opts.builder_url,
-                    http_builder.request_timeout_ms,
-                    http_builder.proposal_timeout_ms,
-                    http_builder.fault_inspection_window,
-                    http_builder.allowed_faults,
-                },
-            );
+            scoped_log.info("execution builder: HttpBuilder configured", .{});
         }
 
         self.worker_thread = try std.Thread.spawn(.{}, workerMain, .{self});
