@@ -182,28 +182,15 @@ const Network = union(enum) {
         };
     }
 
-    fn isPeerConnected(self: *@This(), peer_id: []const u8) bool {
+    fn isPeerConnected(self: *@This(), io: Io, peer_id: []const u8) bool {
         return switch (self.*) {
-            inline else => |*network| network.connections.contains(peer_id),
+            inline else => |*network| network.isPeerConnected(io, peer_id),
         };
     }
 
-    fn snapshotConnectedPeerIds(self: *@This(), allocator: Allocator) ![][]const u8 {
+    fn snapshotConnectedPeerIds(self: *@This(), io: Io, allocator: Allocator) ![][]const u8 {
         switch (self.*) {
-            inline else => |*network| {
-                var peer_ids = try allocator.alloc([]const u8, network.connections.count());
-                var copied: usize = 0;
-                errdefer {
-                    for (peer_ids[0..copied]) |peer_id| allocator.free(peer_id);
-                    allocator.free(peer_ids);
-                }
-
-                var iter = network.connections.iterator();
-                while (iter.next()) |entry| : (copied += 1) {
-                    peer_ids[copied] = try allocator.dupe(u8, entry.key_ptr.*);
-                }
-                return peer_ids;
-            },
+            inline else => |*network| return network.snapshotConnectedPeerIds(io, allocator),
         }
     }
 
@@ -227,11 +214,7 @@ const Network = union(enum) {
 
     fn disconnectPeer(self: *@This(), io: Io, peer_id: []const u8) bool {
         return switch (self.*) {
-            inline else => |*network| blk: {
-                const conn = network.connections.get(peer_id) orelse break :blk false;
-                conn.close(io);
-                break :blk true;
-            },
+            inline else => |*network| network.disconnectPeer(io, peer_id),
         };
     }
 
@@ -575,13 +558,13 @@ pub const P2pService = struct {
     }
 
     /// Return whether the peer currently has an active transport connection.
-    pub fn isPeerConnected(self: *Self, peer_id: []const u8) bool {
-        return self.network.isPeerConnected(peer_id);
+    pub fn isPeerConnected(self: *Self, io: Io, peer_id: []const u8) bool {
+        return self.network.isPeerConnected(io, peer_id);
     }
 
     /// Snapshot the currently connected peer IDs. Caller owns the returned slice and entries.
-    pub fn snapshotConnectedPeerIds(self: *Self, allocator: Allocator) ![][]const u8 {
-        return self.network.snapshotConnectedPeerIds(allocator);
+    pub fn snapshotConnectedPeerIds(self: *Self, io: Io, allocator: Allocator) ![][]const u8 {
+        return self.network.snapshotConnectedPeerIds(io, allocator);
     }
 
     /// Open a new outbound stream for a protocol to a connected peer.

@@ -2662,7 +2662,7 @@ fn schedulePeerReqResp(
     peer_id: []const u8,
     kind: PeerReqRespJobKind,
 ) bool {
-    if (!svc.isPeerConnected(peer_id)) return false;
+    if (!svc.isPeerConnected(io, peer_id)) return false;
 
     const marked = markPendingPeerReqResp(self, io, peer_id) catch |err| {
         log.warn("Failed to track pending peer req/resp work for {f}: {}", .{ networking.fmtPeerId(peer_id), err });
@@ -2781,7 +2781,7 @@ fn dialDiscoveredPeers(
         };
         defer self.allocator.free(predicted_peer_id_text);
 
-        if (svc.isPeerConnected(predicted_peer_id)) {
+        if (svc.isPeerConnected(io, predicted_peer_id)) {
             self.allocator.free(predicted_peer_id);
             continue;
         }
@@ -2834,7 +2834,7 @@ fn dialDiscoveredPeers(
 fn reconcilePeerConnections(self: *BeaconNode, io: std.Io, svc: *networking.P2pService) bool {
     const pm = self.peer_manager orelse return false;
 
-    const connected_peer_ids = svc.snapshotConnectedPeerIds(self.allocator) catch |err| {
+    const connected_peer_ids = svc.snapshotConnectedPeerIds(io, self.allocator) catch |err| {
         log.debug("Failed to snapshot connected peers: {}", .{err});
         return false;
     };
@@ -4821,7 +4821,7 @@ fn noteSyncPeerGoneIfTransportClosed(
         else => return,
     }
 
-    if (svc.isPeerConnected(peer_id)) return;
+    if (svc.isPeerConnected(io, peer_id)) return;
     const pm = self.peer_manager orelse return;
     notePeerDisconnected(self, pm, peer_id, currentUnixTimeMs(io));
 }
