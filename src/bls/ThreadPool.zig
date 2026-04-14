@@ -42,25 +42,36 @@ threads: [MAX_WORKERS]std.Thread = undefined,
 shutdown: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 queue: JobQueue,
 
+/// Thread-safe FIFO work queue. Workers wait on `cond` for new items
+/// and pop them in submission order.
 const JobQueue = struct {
     mutex: std.Thread.Mutex = .{},
     cond: std.Thread.Condition = .{},
     head: ?*WorkItem = null,
+    tail: ?*WorkItem = null,
 
     fn pushBatch(self: *JobQueue, items: []*WorkItem) void {
         self.mutex.lock();
         defer self.mutex.unlock();
+
         for (items) |item| {
-            item.next = self.head;
-            self.head = item;
+            item.next = null;
+            if (self.tail) |tail| {
+                tail.next = item;
+            } else {
+                self.head = item;
+            }
+            self.tail = item;
         }
         self.cond.broadcast();
     }
 
     fn pop(self: *JobQueue) ?*WorkItem {
-        // Called with mutex held
         const item = self.head orelse return null;
         self.head = item.next;
+        if (self.head == null) {
+            self.tail = null;
+        }
         item.next = null;
         return item;
     }
