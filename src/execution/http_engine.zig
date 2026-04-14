@@ -41,6 +41,15 @@ const ConsolidationRequest = types.ConsolidationRequest;
 const ExecutionPayloadBodyV1 = types.ExecutionPayloadBodyV1;
 const ExecutionPayloadBodyV2 = types.ExecutionPayloadBodyV2;
 
+// Prague execution request type bytes as defined by EIP-7685/Electra.
+const deposit_request_type: u8 = 0x00;
+const withdrawal_request_type: u8 = 0x01;
+const consolidation_request_type: u8 = 0x02;
+
+const deposit_request_size = 48 + 32 + 8 + 96 + 8;
+const withdrawal_request_size = 20 + 48 + 8;
+const consolidation_request_size = 20 + 48 + 48;
+
 // ── Connection state ──────────────────────────────────────────────────────────
 
 /// EL connection state machine.
@@ -377,6 +386,39 @@ pub const HttpEngine = struct {
         return self.sendRequestWithTimeout(body, self.retry_config.new_payload_timeout_ms);
     }
 
+    fn decodePayloadStatusLogged(
+        self: *HttpEngine,
+        method: []const u8,
+        response: []const u8,
+    ) !json_rpc.ParsedResponse(PayloadStatusJson) {
+        return self.decodeResponseLogged(PayloadStatusJson, method, response) catch |err| {
+            const prefix_len = @min(response.len, @as(usize, 512));
+            scoped_log.warn(
+                "{s}: payload status decode failed: {} bytes={d} response_prefix={s}",
+                .{ method, err, response.len, response[0..prefix_len] },
+            );
+            return err;
+        };
+    }
+
+    fn decodeResponseLogged(
+        self: *HttpEngine,
+        comptime T: type,
+        method: []const u8,
+        response: []const u8,
+    ) !json_rpc.ParsedResponse(T) {
+        return json_rpc.decodeResponse(T, self.allocator, response) catch |err| {
+            if (err == error.SyntaxError) {
+                const prefix_len = @min(response.len, @as(usize, 512));
+                scoped_log.warn(
+                    "{s}: failed to decode Engine API response: {} bytes={d} response_prefix={s}",
+                    .{ method, err, response.len, response[0..prefix_len] },
+                );
+            }
+            return err;
+        };
+    }
+
     // ── Additional Engine API methods ─────────────────────────────────────────
 
     /// engine_exchangeCapabilities: negotiate supported methods with the EL.
@@ -597,6 +639,9 @@ pub const HttpEngine = struct {
         for (ep.transactions) |tx| self.allocator.free(tx);
         if (ep.transactions.len > 0) self.allocator.free(ep.transactions);
         if (ep.withdrawals.len > 0) self.allocator.free(ep.withdrawals);
+        if (ep.deposit_requests.len > 0) self.allocator.free(ep.deposit_requests);
+        if (ep.withdrawal_requests.len > 0) self.allocator.free(ep.withdrawal_requests);
+        if (ep.consolidation_requests.len > 0) self.allocator.free(ep.consolidation_requests);
         if (resp.blobs_bundle.commitments.len > 0) self.allocator.free(resp.blobs_bundle.commitments);
         if (resp.blobs_bundle.proofs.len > 0) self.allocator.free(resp.blobs_bundle.proofs);
         if (resp.blobs_bundle.blobs.len > 0) self.allocator.free(resp.blobs_bundle.blobs);
@@ -946,7 +991,7 @@ pub const HttpEngine = struct {
         const response = try self.sendRequest(body);
         defer self.allocator.free(response);
 
-        var parsed = try json_rpc.decodeResponse(ForkchoiceUpdatedJson, self.allocator, response);
+        var parsed = try self.decodeResponseLogged(ForkchoiceUpdatedJson, method, response);
         defer parsed.deinit();
 
         return decodeForkchoiceUpdatedResponse(self.allocator, parsed.value);
@@ -1088,7 +1133,7 @@ pub const HttpEngine = struct {
         const response = try self.sendNewPayloadRequest(body);
         defer self.allocator.free(response);
 
-        var parsed = try json_rpc.decodeResponse(PayloadStatusJson, self.allocator, response);
+        var parsed = try self.decodePayloadStatusLogged("engine_newPayloadV3", response);
         defer parsed.deinit();
 
         return decodePayloadStatus(self.allocator, parsed.value);
@@ -1127,7 +1172,7 @@ pub const HttpEngine = struct {
         const response = try self.sendRequest(body);
         defer self.allocator.free(response);
 
-        var parsed = try json_rpc.decodeResponse(ForkchoiceUpdatedJson, self.allocator, response);
+        var parsed = try self.decodeResponseLogged(ForkchoiceUpdatedJson, "engine_forkchoiceUpdatedV3", response);
         defer parsed.deinit();
 
         return decodeForkchoiceUpdatedResponse(self.allocator, parsed.value);
@@ -1187,7 +1232,7 @@ pub const HttpEngine = struct {
         const response = try self.sendNewPayloadRequest(body);
         defer self.allocator.free(response);
 
-        var parsed = try json_rpc.decodeResponse(PayloadStatusJson, self.allocator, response);
+        var parsed = try self.decodePayloadStatusLogged("engine_newPayloadV1", response);
         defer parsed.deinit();
 
         return decodePayloadStatus(self.allocator, parsed.value);
@@ -1216,7 +1261,7 @@ pub const HttpEngine = struct {
         const response = try self.sendNewPayloadRequest(body);
         defer self.allocator.free(response);
 
-        var parsed = try json_rpc.decodeResponse(PayloadStatusJson, self.allocator, response);
+        var parsed = try self.decodePayloadStatusLogged("engine_newPayloadV2", response);
         defer parsed.deinit();
 
         return decodePayloadStatus(self.allocator, parsed.value);
@@ -1240,10 +1285,13 @@ pub const HttpEngine = struct {
         const pbr_hex = try hexEncodeFixed(self.allocator, &parent_beacon_root);
         defer self.allocator.free(pbr_hex);
 
+        const execution_requests_json = try encodeExecutionRequestsV4(self.allocator, payload);
+        defer self.allocator.free(execution_requests_json);
+
         const params_json = try std.fmt.allocPrint(
             self.allocator,
-            "[{s},{s},\"{s}\"]",
-            .{ payload_json, vh_json, pbr_hex },
+            "[{s},{s},\"{s}\",{s}]",
+            .{ payload_json, vh_json, pbr_hex, execution_requests_json },
         );
         defer self.allocator.free(params_json);
 
@@ -1253,7 +1301,7 @@ pub const HttpEngine = struct {
         const response = try self.sendNewPayloadRequest(body);
         defer self.allocator.free(response);
 
-        var parsed = try json_rpc.decodeResponse(PayloadStatusJson, self.allocator, response);
+        var parsed = try self.decodePayloadStatusLogged("engine_newPayloadV4", response);
         defer parsed.deinit();
 
         return decodePayloadStatus(self.allocator, parsed.value);
@@ -1292,7 +1340,7 @@ pub const HttpEngine = struct {
         const response = try self.sendRequest(body);
         defer self.allocator.free(response);
 
-        var parsed = try json_rpc.decodeResponse(ForkchoiceUpdatedJson, self.allocator, response);
+        var parsed = try self.decodeResponseLogged(ForkchoiceUpdatedJson, "engine_forkchoiceUpdatedV1", response);
         defer parsed.deinit();
 
         return decodeForkchoiceUpdatedResponse(self.allocator, parsed.value);
@@ -1329,7 +1377,7 @@ pub const HttpEngine = struct {
         const response = try self.sendRequest(body);
         defer self.allocator.free(response);
 
-        var parsed = try json_rpc.decodeResponse(ForkchoiceUpdatedJson, self.allocator, response);
+        var parsed = try self.decodeResponseLogged(ForkchoiceUpdatedJson, "engine_forkchoiceUpdatedV2", response);
         defer parsed.deinit();
 
         return decodeForkchoiceUpdatedResponse(self.allocator, parsed.value);
@@ -1906,6 +1954,80 @@ fn encodeConsolidationRequests(allocator: Allocator, requests: []const Consolida
     return joinJsonArray(allocator, parts.items);
 }
 
+fn appendLittleEndianU64(
+    allocator: Allocator,
+    bytes: *std.ArrayListUnmanaged(u8),
+    value: u64,
+) !void {
+    var le: [8]u8 = undefined;
+    std.mem.writeInt(u64, &le, value, .little);
+    try bytes.appendSlice(allocator, &le);
+}
+
+fn encodeDepositRequestBytes(allocator: Allocator, requests: []const DepositRequest) ![]const u8 {
+    var bytes: std.ArrayListUnmanaged(u8) = .empty;
+    defer bytes.deinit(allocator);
+
+    try bytes.append(allocator, deposit_request_type);
+    for (requests) |request| {
+        try bytes.appendSlice(allocator, &request.pubkey);
+        try bytes.appendSlice(allocator, &request.withdrawal_credentials);
+        try appendLittleEndianU64(allocator, &bytes, request.amount);
+        try bytes.appendSlice(allocator, &request.signature);
+        try appendLittleEndianU64(allocator, &bytes, request.index);
+    }
+
+    return hexEncode(allocator, bytes.items);
+}
+
+fn encodeWithdrawalRequestBytes(allocator: Allocator, requests: []const WithdrawalRequest) ![]const u8 {
+    var bytes: std.ArrayListUnmanaged(u8) = .empty;
+    defer bytes.deinit(allocator);
+
+    try bytes.append(allocator, withdrawal_request_type);
+    for (requests) |request| {
+        try bytes.appendSlice(allocator, &request.source_address);
+        try bytes.appendSlice(allocator, &request.validator_pubkey);
+        try appendLittleEndianU64(allocator, &bytes, request.amount);
+    }
+
+    return hexEncode(allocator, bytes.items);
+}
+
+fn encodeConsolidationRequestBytes(allocator: Allocator, requests: []const ConsolidationRequest) ![]const u8 {
+    var bytes: std.ArrayListUnmanaged(u8) = .empty;
+    defer bytes.deinit(allocator);
+
+    try bytes.append(allocator, consolidation_request_type);
+    for (requests) |request| {
+        try bytes.appendSlice(allocator, &request.source_address);
+        try bytes.appendSlice(allocator, &request.source_pubkey);
+        try bytes.appendSlice(allocator, &request.target_pubkey);
+    }
+
+    return hexEncode(allocator, bytes.items);
+}
+
+fn encodeExecutionRequestsV4(allocator: Allocator, payload: ExecutionPayloadV4) ![]const u8 {
+    var parts: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer {
+        for (parts.items) |part| allocator.free(part);
+        parts.deinit(allocator);
+    }
+
+    if (payload.deposit_requests.len > 0) {
+        try parts.append(allocator, try encodeDepositRequestBytes(allocator, payload.deposit_requests));
+    }
+    if (payload.withdrawal_requests.len > 0) {
+        try parts.append(allocator, try encodeWithdrawalRequestBytes(allocator, payload.withdrawal_requests));
+    }
+    if (payload.consolidation_requests.len > 0) {
+        try parts.append(allocator, try encodeConsolidationRequestBytes(allocator, payload.consolidation_requests));
+    }
+
+    return joinJsonArray(allocator, parts.items);
+}
+
 fn encodeExecutionPayloadV4(allocator: Allocator, p: ExecutionPayloadV4) ![]const u8 {
     const b = try encodeBasePayloadFields(allocator, p);
     defer b.deinit(allocator);
@@ -1915,12 +2037,6 @@ fn encodeExecutionPayloadV4(allocator: Allocator, p: ExecutionPayloadV4) ![]cons
     defer allocator.free(blob_gas_used);
     const excess_blob_gas = try hexEncodeQuantity(allocator, p.excess_blob_gas);
     defer allocator.free(excess_blob_gas);
-    const deposit_requests = try encodeDepositRequests(allocator, p.deposit_requests);
-    defer allocator.free(deposit_requests);
-    const withdrawal_requests = try encodeWithdrawalRequests(allocator, p.withdrawal_requests);
-    defer allocator.free(withdrawal_requests);
-    const consolidation_requests = try encodeConsolidationRequests(allocator, p.consolidation_requests);
-    defer allocator.free(consolidation_requests);
     return std.fmt.allocPrint(allocator,
         \\{{
         \\"parentHash":"{s}",
@@ -1939,17 +2055,14 @@ fn encodeExecutionPayloadV4(allocator: Allocator, p: ExecutionPayloadV4) ![]cons
         \\"transactions":{s},
         \\"withdrawals":{s},
         \\"blobGasUsed":"{s}",
-        \\"excessBlobGas":"{s}",
-        \\"depositRequests":{s},
-        \\"withdrawalRequests":{s},
-        \\"consolidationRequests":{s}
+        \\"excessBlobGas":"{s}"
         \\}}
     , .{
-        b.parent_hash,   b.fee_recipient,  b.state_root,        b.receipts_root,
-        b.logs_bloom,    b.prev_randao,    b.block_number,      b.gas_limit,
-        b.gas_used,      b.timestamp,      b.extra_data,        b.base_fee,
-        b.block_hash,    b.transactions,   withdrawals,         blob_gas_used,
-        excess_blob_gas, deposit_requests, withdrawal_requests, consolidation_requests,
+        b.parent_hash,   b.fee_recipient, b.state_root,   b.receipts_root,
+        b.logs_bloom,    b.prev_randao,   b.block_number, b.gas_limit,
+        b.gas_used,      b.timestamp,     b.extra_data,   b.base_fee,
+        b.block_hash,    b.transactions,  withdrawals,    blob_gas_used,
+        excess_blob_gas,
     });
 }
 
@@ -2364,35 +2477,24 @@ const ConsolidationRequestJson = struct {
     targetPubkey: []const u8,
 };
 
-/// JSON representation for ExecutionPayloadV4 (Electra, adds request arrays).
-const ExecutionPayloadJsonV4 = struct {
-    parentHash: []const u8,
-    feeRecipient: []const u8,
-    stateRoot: []const u8,
-    receiptsRoot: []const u8,
-    logsBloom: []const u8,
-    prevRandao: []const u8,
-    blockNumber: []const u8,
-    gasLimit: []const u8,
-    gasUsed: []const u8,
-    timestamp: []const u8,
-    extraData: []const u8,
-    baseFeePerGas: []const u8,
-    blockHash: []const u8,
-    transactions: []const []const u8,
-    withdrawals: []const WithdrawalJson,
-    blobGasUsed: []const u8,
-    excessBlobGas: []const u8,
-    depositRequests: []const DepositRequestJson,
-    withdrawalRequests: []const WithdrawalRequestJson,
-    consolidationRequests: []const ConsolidationRequestJson,
-};
-
 const GetPayloadV4Json = struct {
-    executionPayload: ExecutionPayloadJsonV4,
+    executionPayload: ExecutionPayloadJsonV3,
     blockValue: []const u8,
     blobsBundle: BlobsBundleJson,
     shouldOverrideBuilder: bool,
+    executionRequests: []const []const u8,
+};
+
+const DecodedExecutionRequests = struct {
+    deposit_requests: []const DepositRequest = &.{},
+    withdrawal_requests: []const WithdrawalRequest = &.{},
+    consolidation_requests: []const ConsolidationRequest = &.{},
+
+    fn deinit(self: DecodedExecutionRequests, allocator: Allocator) void {
+        if (self.deposit_requests.len > 0) allocator.free(self.deposit_requests);
+        if (self.withdrawal_requests.len > 0) allocator.free(self.withdrawal_requests);
+        if (self.consolidation_requests.len > 0) allocator.free(self.consolidation_requests);
+    }
 };
 
 fn decodeGetPayloadResponseV4(allocator: Allocator, j: GetPayloadV4Json) !GetPayloadResponseV4 {
@@ -2410,14 +2512,8 @@ fn decodeGetPayloadResponseV4(allocator: Allocator, j: GetPayloadV4Json) !GetPay
     const withdrawals = try decodeWithdrawalsOwned(allocator, ep.withdrawals);
     errdefer if (withdrawals.len > 0) allocator.free(withdrawals);
 
-    const deposit_requests = try decodeDepositRequests(allocator, ep.depositRequests);
-    errdefer if (deposit_requests.len > 0) allocator.free(deposit_requests);
-
-    const withdrawal_requests = try decodeWithdrawalRequests(allocator, ep.withdrawalRequests);
-    errdefer if (withdrawal_requests.len > 0) allocator.free(withdrawal_requests);
-
-    const consolidation_requests = try decodeConsolidationRequests(allocator, ep.consolidationRequests);
-    errdefer if (consolidation_requests.len > 0) allocator.free(consolidation_requests);
+    const execution_requests = try decodeExecutionRequests(allocator, j.executionRequests);
+    errdefer execution_requests.deinit(allocator);
 
     const blobs_bundle = try decodeBlobsBundle(allocator, j.blobsBundle);
     errdefer {
@@ -2444,9 +2540,9 @@ fn decodeGetPayloadResponseV4(allocator: Allocator, j: GetPayloadV4Json) !GetPay
         .withdrawals = withdrawals,
         .blob_gas_used = try hexDecodeQuantity(ep.blobGasUsed),
         .excess_blob_gas = try hexDecodeQuantity(ep.excessBlobGas),
-        .deposit_requests = deposit_requests,
-        .withdrawal_requests = withdrawal_requests,
-        .consolidation_requests = consolidation_requests,
+        .deposit_requests = execution_requests.deposit_requests,
+        .withdrawal_requests = execution_requests.withdrawal_requests,
+        .consolidation_requests = execution_requests.consolidation_requests,
     };
 
     return GetPayloadResponseV4{
@@ -2455,6 +2551,127 @@ fn decodeGetPayloadResponseV4(allocator: Allocator, j: GetPayloadV4Json) !GetPay
         .blobs_bundle = blobs_bundle,
         .should_override_builder = j.shouldOverrideBuilder,
     };
+}
+
+fn decodeHexBytesOwned(allocator: Allocator, hex: []const u8) ![]const u8 {
+    const stripped = try hexStrip0x(hex);
+    if (stripped.len == 0 or (stripped.len & 1) != 0) return error.InvalidHexLength;
+
+    const out = try allocator.alloc(u8, stripped.len / 2);
+    errdefer allocator.free(out);
+
+    _ = try std.fmt.hexToBytes(out, stripped);
+    return out;
+}
+
+fn decodeU64LittleEndian(bytes: []const u8) !u64 {
+    if (bytes.len != 8) return error.InvalidExecutionRequestsLength;
+
+    var le: [8]u8 = undefined;
+    @memcpy(le[0..], bytes);
+    return std.mem.readInt(u64, &le, .little);
+}
+
+fn decodeDepositRequestBytes(allocator: Allocator, bytes: []const u8) ![]const DepositRequest {
+    if (bytes.len == 0 or bytes.len % deposit_request_size != 0) return error.InvalidExecutionRequestsLength;
+
+    const count = bytes.len / deposit_request_size;
+    const result = try allocator.alloc(DepositRequest, count);
+    errdefer allocator.free(result);
+
+    var offset: usize = 0;
+    for (result) |*request| {
+        @memcpy(request.pubkey[0..], bytes[offset .. offset + 48]);
+        offset += 48;
+        @memcpy(request.withdrawal_credentials[0..], bytes[offset .. offset + 32]);
+        offset += 32;
+        request.amount = try decodeU64LittleEndian(bytes[offset .. offset + 8]);
+        offset += 8;
+        @memcpy(request.signature[0..], bytes[offset .. offset + 96]);
+        offset += 96;
+        request.index = try decodeU64LittleEndian(bytes[offset .. offset + 8]);
+        offset += 8;
+    }
+
+    return result;
+}
+
+fn decodeWithdrawalRequestBytes(allocator: Allocator, bytes: []const u8) ![]const WithdrawalRequest {
+    if (bytes.len == 0 or bytes.len % withdrawal_request_size != 0) return error.InvalidExecutionRequestsLength;
+
+    const count = bytes.len / withdrawal_request_size;
+    const result = try allocator.alloc(WithdrawalRequest, count);
+    errdefer allocator.free(result);
+
+    var offset: usize = 0;
+    for (result) |*request| {
+        @memcpy(request.source_address[0..], bytes[offset .. offset + 20]);
+        offset += 20;
+        @memcpy(request.validator_pubkey[0..], bytes[offset .. offset + 48]);
+        offset += 48;
+        request.amount = try decodeU64LittleEndian(bytes[offset .. offset + 8]);
+        offset += 8;
+    }
+
+    return result;
+}
+
+fn decodeConsolidationRequestBytes(allocator: Allocator, bytes: []const u8) ![]const ConsolidationRequest {
+    if (bytes.len == 0 or bytes.len % consolidation_request_size != 0) return error.InvalidExecutionRequestsLength;
+
+    const count = bytes.len / consolidation_request_size;
+    const result = try allocator.alloc(ConsolidationRequest, count);
+    errdefer allocator.free(result);
+
+    var offset: usize = 0;
+    for (result) |*request| {
+        @memcpy(request.source_address[0..], bytes[offset .. offset + 20]);
+        offset += 20;
+        @memcpy(request.source_pubkey[0..], bytes[offset .. offset + 48]);
+        offset += 48;
+        @memcpy(request.target_pubkey[0..], bytes[offset .. offset + 48]);
+        offset += 48;
+    }
+
+    return result;
+}
+
+fn decodeExecutionRequests(allocator: Allocator, request_list: []const []const u8) !DecodedExecutionRequests {
+    var decoded: DecodedExecutionRequests = .{};
+    errdefer decoded.deinit(allocator);
+
+    var previous_type: ?u8 = null;
+    for (request_list) |request_hex| {
+        const request_bytes = try decodeHexBytesOwned(allocator, request_hex);
+        defer allocator.free(request_bytes);
+
+        if (request_bytes.len <= 1) return error.InvalidExecutionRequestsLength;
+
+        const request_type = request_bytes[0];
+        if (previous_type) |previous| {
+            if (request_type <= previous) return error.InvalidExecutionRequestsOrder;
+        }
+        previous_type = request_type;
+
+        const request_data = request_bytes[1..];
+        switch (request_type) {
+            deposit_request_type => {
+                if (decoded.deposit_requests.len != 0) return error.DuplicateExecutionRequestType;
+                decoded.deposit_requests = try decodeDepositRequestBytes(allocator, request_data);
+            },
+            withdrawal_request_type => {
+                if (decoded.withdrawal_requests.len != 0) return error.DuplicateExecutionRequestType;
+                decoded.withdrawal_requests = try decodeWithdrawalRequestBytes(allocator, request_data);
+            },
+            consolidation_request_type => {
+                if (decoded.consolidation_requests.len != 0) return error.DuplicateExecutionRequestType;
+                decoded.consolidation_requests = try decodeConsolidationRequestBytes(allocator, request_data);
+            },
+            else => return error.UnknownExecutionRequestType,
+        }
+    }
+
+    return decoded;
 }
 
 /// Decode DepositRequest array. Caller owns the slice.
@@ -3090,6 +3307,70 @@ test "HttpEngine: request id increments" {
     try testing.expect(std.mem.indexOf(u8, body2, "\"id\":2") != null);
 }
 
+test "HttpEngine: newPayloadV4 encodes Prague executionRequests as the fourth param" {
+    const allocator = testing.allocator;
+
+    const canned =
+        \\{"jsonrpc":"2.0","id":1,"result":{"status":"VALID","latestValidHash":null,"validationError":null}}
+    ;
+    var mock = MockTransport.init(allocator, canned);
+    defer mock.deinit();
+
+    var http_engine = HttpEngine.init(allocator, testing.io, "http://localhost:8551", null, mock.transport());
+    defer http_engine.deinit();
+
+    const deposit_requests = [_]DepositRequest{.{
+        .pubkey = [_]u8{0x01} ** 48,
+        .withdrawal_credentials = [_]u8{0x02} ** 32,
+        .amount = 0x0102030405060708,
+        .signature = [_]u8{0x03} ** 96,
+        .index = 1,
+    }};
+    const withdrawal_requests = [_]WithdrawalRequest{.{
+        .source_address = [_]u8{0x04} ** 20,
+        .validator_pubkey = [_]u8{0x05} ** 48,
+        .amount = 1_000_000_000,
+    }};
+    const consolidation_requests = [_]ConsolidationRequest{.{
+        .source_address = [_]u8{0x06} ** 20,
+        .source_pubkey = [_]u8{0x07} ** 48,
+        .target_pubkey = [_]u8{0x08} ** 48,
+    }};
+
+    const api = http_engine.engine();
+    _ = try api.newPayloadV4(.{
+        .parent_hash = std.mem.zeroes([32]u8),
+        .fee_recipient = std.mem.zeroes([20]u8),
+        .state_root = std.mem.zeroes([32]u8),
+        .receipts_root = std.mem.zeroes([32]u8),
+        .logs_bloom = std.mem.zeroes([256]u8),
+        .prev_randao = std.mem.zeroes([32]u8),
+        .block_number = 1,
+        .gas_limit = 30_000_000,
+        .gas_used = 21_000,
+        .timestamp = 1_700_000_000,
+        .extra_data = &.{},
+        .base_fee_per_gas = 1_000_000_000,
+        .block_hash = [_]u8{0x40} ** 32,
+        .transactions = &.{},
+        .withdrawals = &.{},
+        .blob_gas_used = 0,
+        .excess_blob_gas = 0,
+        .deposit_requests = &deposit_requests,
+        .withdrawal_requests = &withdrawal_requests,
+        .consolidation_requests = &consolidation_requests,
+    }, &.{}, std.mem.zeroes([32]u8));
+
+    const body = mock.last_body orelse return error.NoRequestRecorded;
+    try testing.expect(std.mem.indexOf(u8, body, "engine_newPayloadV4") != null);
+    try testing.expect(std.mem.indexOf(u8, body, "\"params\":[") != null);
+    try testing.expect(std.mem.indexOf(u8, body, "0807060504030201") != null);
+    try testing.expect(std.mem.indexOf(u8, body, "00ca9a3b00000000") != null);
+    try testing.expect(std.mem.indexOf(u8, body, "\"depositRequests\"") == null);
+    try testing.expect(std.mem.indexOf(u8, body, "\"withdrawalRequests\"") == null);
+    try testing.expect(std.mem.indexOf(u8, body, "\"consolidationRequests\"") == null);
+}
+
 fn makeTestPayload(block_hash: [32]u8) ExecutionPayloadV3 {
     return .{
         .parent_hash = std.mem.zeroes([32]u8),
@@ -3558,10 +3839,18 @@ pub const IoHttpTransport = struct {
         var redirect_buf: [1024]u8 = undefined;
         var response = try req.receiveHead(&redirect_buf);
 
-        // Read the entire response body via std.Io.Reader.
+        // Read and transparently decompress the response body.
+        const decompress_buf: []u8 = switch (response.head.content_encoding) {
+            .identity => &.{},
+            .zstd => try self.allocator.alloc(u8, std.compress.zstd.default_window_len),
+            .deflate, .gzip => try self.allocator.alloc(u8, std.compress.flate.max_window_len),
+            .compress => return error.UnsupportedCompressionMethod,
+        };
+        defer if (response.head.content_encoding != .identity) self.allocator.free(decompress_buf);
+
         var transfer_buf: [8192]u8 = undefined;
-        const reader = response.reader(&transfer_buf);
-        // allocRemaining reads until EOF and returns an owned slice.
+        var decompress: std.http.Decompress = undefined;
+        const reader = response.readerDecompressing(&transfer_buf, &decompress, decompress_buf);
         return reader.allocRemaining(self.allocator, std.Io.Limit.limited(4 * 1024 * 1024)) catch |err| switch (err) {
             error.ReadFailed => return response.bodyErr() orelse error.ReadFailed,
             else => |e| return e,
@@ -3708,10 +3997,37 @@ test "getPayloadV3: parses ExecutionPayload + blockValue + BlobsBundle response"
 test "getPayloadV4: parses ExecutionPayload + blockValue + BlobsBundle + executionRequests" {
     const allocator = testing.allocator;
 
-    // V4 response: Electra — adds depositRequests/withdrawalRequests/consolidationRequests
-    const canned =
-        \\{"jsonrpc":"2.0","id":1,"result":{"executionPayload":{"parentHash":"0x0000000000000000000000000000000000000000000000000000000000000000","feeRecipient":"0x0000000000000000000000000000000000000000","stateRoot":"0x0000000000000000000000000000000000000000000000000000000000000000","receiptsRoot":"0x0000000000000000000000000000000000000000000000000000000000000000","logsBloom":"0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000","prevRandao":"0x0000000000000000000000000000000000000000000000000000000000000000","blockNumber":"0x4","gasLimit":"0x1c9c380","gasUsed":"0x0","timestamp":"0x6553f400","extraData":"0x","baseFeePerGas":"0x3b9aca00","blockHash":"0x0404040404040404040404040404040404040404040404040404040404040404","transactions":[],"withdrawals":[],"blobGasUsed":"0x0","excessBlobGas":"0x0","depositRequests":[],"withdrawalRequests":[],"consolidationRequests":[]},"blockValue":"0xff","blobsBundle":{"commitments":[],"proofs":[],"blobs":[]},"shouldOverrideBuilder":true}}
-    ;
+    const deposit_requests = [_]DepositRequest{.{
+        .pubkey = [_]u8{0x01} ** 48,
+        .withdrawal_credentials = [_]u8{0x02} ** 32,
+        .amount = 0x773593ff,
+        .signature = [_]u8{0x03} ** 96,
+        .index = 0,
+    }};
+    const withdrawal_requests = [_]WithdrawalRequest{.{
+        .source_address = [_]u8{0x04} ** 20,
+        .validator_pubkey = [_]u8{0x05} ** 48,
+        .amount = 1_000_000_000,
+    }};
+    const consolidation_requests = [_]ConsolidationRequest{.{
+        .source_address = [_]u8{0x06} ** 20,
+        .source_pubkey = [_]u8{0x07} ** 48,
+        .target_pubkey = [_]u8{0x08} ** 48,
+    }};
+
+    const deposit_hex = try encodeDepositRequestBytes(allocator, &deposit_requests);
+    defer allocator.free(deposit_hex);
+    const withdrawal_hex = try encodeWithdrawalRequestBytes(allocator, &withdrawal_requests);
+    defer allocator.free(withdrawal_hex);
+    const consolidation_hex = try encodeConsolidationRequestBytes(allocator, &consolidation_requests);
+    defer allocator.free(consolidation_hex);
+
+    const canned = try std.fmt.allocPrint(
+        allocator,
+        "{{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{{\"executionPayload\":{{\"parentHash\":\"0x0000000000000000000000000000000000000000000000000000000000000000\",\"feeRecipient\":\"0x0000000000000000000000000000000000000000\",\"stateRoot\":\"0x0000000000000000000000000000000000000000000000000000000000000000\",\"receiptsRoot\":\"0x0000000000000000000000000000000000000000000000000000000000000000\",\"logsBloom\":\"0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000\",\"prevRandao\":\"0x0000000000000000000000000000000000000000000000000000000000000000\",\"blockNumber\":\"0x4\",\"gasLimit\":\"0x1c9c380\",\"gasUsed\":\"0x0\",\"timestamp\":\"0x6553f400\",\"extraData\":\"0x\",\"baseFeePerGas\":\"0x3b9aca00\",\"blockHash\":\"0x0404040404040404040404040404040404040404040404040404040404040404\",\"transactions\":[],\"withdrawals\":[],\"blobGasUsed\":\"0x0\",\"excessBlobGas\":\"0x0\"}},\"blockValue\":\"0xff\",\"blobsBundle\":{{\"commitments\":[],\"proofs\":[],\"blobs\":[]}},\"shouldOverrideBuilder\":true,\"executionRequests\":[\"{s}\",\"{s}\",\"{s}\"]}}}}",
+        .{ deposit_hex, withdrawal_hex, consolidation_hex },
+    );
+    defer allocator.free(canned);
 
     var mock = MockTransport.init(allocator, canned);
     defer mock.deinit();
@@ -3720,16 +4036,21 @@ test "getPayloadV4: parses ExecutionPayload + blockValue + BlobsBundle + executi
 
     const api4 = engine.engine();
     const result = try api4.getPayloadV4([_]u8{0x12} ** 8);
+    defer engine.freeGetPayloadResponseV4(result);
 
     try testing.expectEqual(@as(u64, 4), result.execution_payload.block_number);
     try testing.expectEqual([_]u8{0x04} ** 32, result.execution_payload.block_hash);
     // blockValue = 0xff = 255
     try testing.expectEqual(@as(u256, 255), result.block_value);
     try testing.expect(result.should_override_builder);
-    // Empty request arrays
-    try testing.expectEqual(@as(usize, 0), result.execution_payload.deposit_requests.len);
-    try testing.expectEqual(@as(usize, 0), result.execution_payload.withdrawal_requests.len);
-    try testing.expectEqual(@as(usize, 0), result.execution_payload.consolidation_requests.len);
+    try testing.expectEqual(@as(usize, 1), result.execution_payload.deposit_requests.len);
+    try testing.expectEqual(@as(usize, 1), result.execution_payload.withdrawal_requests.len);
+    try testing.expectEqual(@as(usize, 1), result.execution_payload.consolidation_requests.len);
+    try testing.expectEqual([_]u8{0x01} ** 48, result.execution_payload.deposit_requests[0].pubkey);
+    try testing.expectEqual(@as(u64, 0x773593ff), result.execution_payload.deposit_requests[0].amount);
+    try testing.expectEqual([_]u8{0x04} ** 20, result.execution_payload.withdrawal_requests[0].source_address);
+    try testing.expectEqual(@as(u64, 1_000_000_000), result.execution_payload.withdrawal_requests[0].amount);
+    try testing.expectEqual([_]u8{0x06} ** 20, result.execution_payload.consolidation_requests[0].source_address);
 
     const body = mock.last_body orelse return error.NoRequest;
     try testing.expect(std.mem.indexOf(u8, body, "engine_getPayloadV4") != null);
@@ -3794,7 +4115,7 @@ test "getPayloadForFork: capella dispatches to V2" {
 test "getPayloadForFork: electra dispatches to V4" {
     const allocator = testing.allocator;
     const canned =
-        \\{"jsonrpc":"2.0","id":1,"result":{"executionPayload":{"parentHash":"0x0000000000000000000000000000000000000000000000000000000000000000","feeRecipient":"0x0000000000000000000000000000000000000000","stateRoot":"0x0000000000000000000000000000000000000000000000000000000000000000","receiptsRoot":"0x0000000000000000000000000000000000000000000000000000000000000000","logsBloom":"0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000","prevRandao":"0x0000000000000000000000000000000000000000000000000000000000000000","blockNumber":"0x5","gasLimit":"0x0","gasUsed":"0x0","timestamp":"0x0","extraData":"0x","baseFeePerGas":"0x0","blockHash":"0x0505050505050505050505050505050505050505050505050505050505050505","transactions":[],"withdrawals":[],"blobGasUsed":"0x0","excessBlobGas":"0x0","depositRequests":[],"withdrawalRequests":[],"consolidationRequests":[]},"blockValue":"0x0","blobsBundle":{"commitments":[],"proofs":[],"blobs":[]},"shouldOverrideBuilder":false}}
+        \\{"jsonrpc":"2.0","id":1,"result":{"executionPayload":{"parentHash":"0x0000000000000000000000000000000000000000000000000000000000000000","feeRecipient":"0x0000000000000000000000000000000000000000","stateRoot":"0x0000000000000000000000000000000000000000000000000000000000000000","receiptsRoot":"0x0000000000000000000000000000000000000000000000000000000000000000","logsBloom":"0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000","prevRandao":"0x0000000000000000000000000000000000000000000000000000000000000000","blockNumber":"0x5","gasLimit":"0x0","gasUsed":"0x0","timestamp":"0x0","extraData":"0x","baseFeePerGas":"0x0","blockHash":"0x0505050505050505050505050505050505050505050505050505050505050505","transactions":[],"withdrawals":[],"blobGasUsed":"0x0","excessBlobGas":"0x0"},"blockValue":"0x0","blobsBundle":{"commitments":[],"proofs":[],"blobs":[]},"shouldOverrideBuilder":false,"executionRequests":[]}}
     ;
 
     var mock = MockTransport.init(allocator, canned);
