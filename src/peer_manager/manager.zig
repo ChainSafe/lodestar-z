@@ -361,8 +361,13 @@ pub const PeerManager = struct {
     /// Detect if the heartbeat has stalled (same slot for >2 epochs).
     fn detectStarvation(self: *const PeerManager, current_slot: u64) bool {
         if (current_slot == 0) return false;
-        if (self.last_heartbeat_slot == 0) return false;
-        return current_slot == self.last_heartbeat_slot;
+        const EPOCHS_IN_SLOTS = 32; // Assuming 32 slots per epoch as per Ethereum spec
+        const STARVATION_EPOCHS = 2;
+
+        if (self.last_heartbeat_slot == 0) return false; // Initial state, no starvation.
+
+        // Starvation logic: if current_slot is not advancing past 2 epochs from the last heartbeat.
+        return (current_slot - self.last_heartbeat_slot) <= (STARVATION_EPOCHS * EPOCHS_IN_SLOTS);
     }
 
     /// Build inputs, run prioritizePeers, convert result to actions.
