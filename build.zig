@@ -13,6 +13,11 @@ pub fn build(b: *std.Build) void {
     options_build_options.addOption([]const u8, "preset", option_preset);
     const options_module_build_options = options_build_options.createModule();
 
+    const options_bls_options = b.addOptions();
+    const option_thread_count = b.option(u8, "thread_count", "") orelse 0;
+    options_bls_options.addOption(u8, "thread_count", option_thread_count);
+    const options_module_bls_options = options_bls_options.createModule();
+
     const options_download_era_options = b.addOptions();
     const option_era_base_url = b.option([]const u8, "era_base_url", "") orelse "https://mainnet.era.nimbus.team";
     options_download_era_options.addOption([]const u8, "era_base_url", option_era_base_url);
@@ -1153,6 +1158,7 @@ pub fn build(b: *std.Build) void {
     module_bench_process_epoch.addImport("era", module_era);
 
     module_bindings.addImport("bls", module_bls);
+    module_bindings.addImport("bls_options", options_module_bls_options);
     module_bindings.addImport("persistent_merkle_tree", module_persistent_merkle_tree);
     module_bindings.addImport("ssz", module_ssz);
     module_bindings.addImport("consensus_types", module_consensus_types);
