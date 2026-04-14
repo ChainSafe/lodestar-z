@@ -1,5 +1,5 @@
 import crypto from "node:crypto";
-import { beforeEach, describe, expect, it } from "vitest";
+import {beforeEach, describe, expect, it} from "vitest";
 import {
   PublicKey,
   SecretKey,
@@ -322,8 +322,8 @@ describe("blst", () => {
 
   describe("aggregateWithRandomness", () => {
     it("should return aggregated pk and sig", () => {
-      const { msg, sets } = getTestSetsSameMessage(8);
-      const input = sets.map((s) => ({ pk: s.pk, sig: s.sig.toBytes() }));
+      const {_, sets} = getTestSetsSameMessage(8);
+      const input = sets.map((s) => ({pk: s.pk, sig: s.sig.toBytes()}));
       const result = aggregateWithRandomness(input);
       expect(result).toHaveProperty("pk");
       expect(result).toHaveProperty("sig");
@@ -331,17 +331,17 @@ describe("blst", () => {
     });
 
     it("should produce a valid aggregated signature", () => {
-      const { msg, sets } = getTestSetsSameMessage(8);
-      const input = sets.map((s) => ({ pk: s.pk, sig: s.sig.toBytes() }));
-      const { pk, sig } = aggregateWithRandomness(input);
+      const {msg, sets} = getTestSetsSameMessage(8);
+      const input = sets.map((s) => ({pk: s.pk, sig: s.sig.toBytes()}));
+      const {pk, sig} = aggregateWithRandomness(input);
       const isValid = verify(msg, pk, sig, false, false);
       expect(isValid).toBe(true);
     });
 
     it("should work with a single set", () => {
-      const { msg, sets } = getTestSetsSameMessage(1);
-      const input = sets.map((s) => ({ pk: s.pk, sig: s.sig.toBytes() }));
-      const { pk, sig } = aggregateWithRandomness(input);
+      const {msg, sets} = getTestSetsSameMessage(1);
+      const input = sets.map((s) => ({pk: s.pk, sig: s.sig.toBytes()}));
+      const {pk, sig} = aggregateWithRandomness(input);
       const isValid = verify(msg, pk, sig, false, false);
       expect(isValid).toBe(true);
     });
@@ -351,8 +351,8 @@ describe("blst", () => {
     });
 
     it("should reject invalid signature bytes", () => {
-      const { sets } = getTestSetsSameMessage(4);
-      const input = sets.map((s) => ({ pk: s.pk, sig: s.sig.toBytes() }));
+      const {sets} = getTestSetsSameMessage(4);
+      const input = sets.map((s) => ({pk: s.pk, sig: s.sig.toBytes()}));
       input[2].sig = new Uint8Array(96).fill(0xff);
       expect(() => aggregateWithRandomness(input)).toThrow();
     });
@@ -447,8 +447,8 @@ const invalidInputs: [string, any][] = [
   ["symbol", Symbol("foo")],
   ["null", null],
   ["undefined", undefined],
-  ["object", { foo: "bar" }],
-  ["proxy", new Proxy({ foo: "bar" }, {})],
+  ["object", {foo: "bar"}],
+  ["proxy", new Proxy({foo: "bar"}, {})],
   ["date", new Date("1982-03-24T16:00:00-06:00")],
   [
     "function",
@@ -504,11 +504,11 @@ function getTestSetSameMessage(i: number): TestSet {
 
 function getTestSetsSameMessage(count: number): {
   msg: Uint8Array;
-  sets: { sk: SecretKey; pk: PublicKey; sig: Signature }[];
+  sets: {sk: SecretKey; pk: PublicKey; sig: Signature}[];
 } {
   const sets = arrayOfIndexes(0, count - 1).map(getTestSetSameMessage);
   return {
     msg: sets[0].msg,
-    sets: sets.map(({ sk, pk, sig }) => ({ pk, sig, sk })),
+    sets: sets.map(({sk, pk, sig}) => ({pk, sig, sk})),
   };
 }
