@@ -8,6 +8,7 @@ const metrics = @import("./metrics.zig");
 const BeaconStateView = @import("./BeaconStateView.zig");
 const blst = @import("./blst.zig");
 const state_transition = @import("./state_transition.zig");
+const peer_manager_bindings = @import("./peer_manager.zig");
 
 comptime {
     napi.module.register(register);
@@ -22,6 +23,7 @@ const EnvCleanup = struct {
     fn hook(_: *EnvCleanup) void {
         if (env_refcount.fetchSub(1, .acq_rel) == 1) {
             // Last environment — tear down shared state.
+            peer_manager_bindings.state.deinit();
             config.state.deinit();
             pubkeys.state.deinit();
             pool.state.deinit();
@@ -50,4 +52,5 @@ fn register(env: napi.Env, exports: napi.Value) !void {
     try blst.register(env, exports);
     try state_transition.register(env, exports);
     try metrics.register(env, exports);
+    try peer_manager_bindings.register(env, exports);
 }

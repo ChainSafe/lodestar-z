@@ -135,6 +135,9 @@
                 .metrics,
             },
         },
+        .peer_manager = .{
+            .root_source_file = "src/peer_manager/root.zig",
+        },
     },
     .executables = .{
         .download_era_files = .{
@@ -254,6 +257,7 @@
                     .fork_types,
                     .state_transition,
                     "zapi:zapi",
+                    .peer_manager,
                 },
             },
             .linkage = .dynamic,
