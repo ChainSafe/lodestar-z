@@ -145,6 +145,7 @@
                 .fork_types,
                 .hex,
                 .constants,
+                .metrics,
             },
         },
     },

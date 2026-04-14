@@ -1217,6 +1217,7 @@ pub fn build(b: *std.Build) void {
     module_fork_choice.addImport("fork_types", module_fork_types);
     module_fork_choice.addImport("hex", module_hex);
     module_fork_choice.addImport("constants", module_constants);
+    module_fork_choice.addImport("metrics", dep_metrics.module("metrics"));
 
     module_download_era_files.addImport("download_era_options", options_module_download_era_options);
 

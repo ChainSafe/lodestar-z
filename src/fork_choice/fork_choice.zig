@@ -42,6 +42,8 @@ const compute_deltas = @import("compute_deltas.zig");
 const computeDeltas = compute_deltas.computeDeltas;
 const DeltasCache = compute_deltas.DeltasCache;
 
+const metrics = @import("metrics.zig");
+
 const store = @import("store.zig");
 pub const ForkChoiceStore = store.ForkChoiceStore;
 pub const Checkpoint = store.Checkpoint;
@@ -952,6 +954,8 @@ pub const ForkChoice = struct {
         const old_balances = self.balances.get().items;
         const new_balances = self.fc_store.justified.balances.get().items;
 
+        var compute_deltas_timer = try std.time.Timer.start();
+
         const vote_fields = self.votes.fields();
         const result = try computeDeltas(
             allocator,
@@ -963,6 +967,21 @@ pub const ForkChoice = struct {
             new_balances,
             &self.fc_store.equivocating_indices,
         );
+
+        metrics.fork_choice_metrics.compute_deltas_duration.observe(metrics.readSeconds(&compute_deltas_timer));
+        metrics.fork_choice_metrics.compute_deltas_deltas_count.set(@intCast(result.deltas.len));
+        metrics.fork_choice_metrics.compute_deltas_equivocating_validators.set(result.equivocating_validators);
+        metrics.fork_choice_metrics.compute_deltas_old_inactive_validators.set(result.old_inactive_validators);
+        metrics.fork_choice_metrics.compute_deltas_new_inactive_validators.set(result.new_inactive_validators);
+        metrics.fork_choice_metrics.compute_deltas_unchanged_vote_validators.set(result.unchanged_vote_validators);
+        metrics.fork_choice_metrics.compute_deltas_new_vote_validators.set(result.new_vote_validators);
+
+        // Count zero deltas.
+        var zero_count: u64 = 0;
+        for (result.deltas) |d| {
+            if (d == 0) zero_count += 1;
+        }
+        metrics.fork_choice_metrics.compute_deltas_zero_deltas_count.set(zero_count);
 
         self.balances.release();
         self.balances = self.fc_store.justified.balances.acquire();
