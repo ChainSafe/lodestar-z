@@ -15,6 +15,7 @@ const Io = std.Io;
 const Allocator = std.mem.Allocator;
 
 const discv5 = @import("discv5");
+const networking = @import("networking");
 const BindAddresses = discv5.BindAddresses;
 const Discv5Service = discv5.Service;
 const Enr = discv5.enr.Enr;
@@ -233,6 +234,7 @@ fn resolveBindAddresses(opts: BootnodeOpts) !BindAddresses {
     var wants_ip4 = listen_address4 != null or opts.enr_ip != null or opts.enr_udp != null;
     const wants_ip6 = listen_address6 != null or opts.port6 != null or opts.enr_ip6 != null or opts.enr_udp6 != null;
     if (!wants_ip4 and !wants_ip6) wants_ip4 = true;
+    const listen_port6 = networking.discovery_service.resolveListenPort6(opts.port, opts.port6, wants_ip4, wants_ip6);
 
     var bind_addresses = BindAddresses{};
     if (wants_ip4) {
@@ -248,7 +250,7 @@ fn resolveBindAddresses(opts: BootnodeOpts) !BindAddresses {
             parseIp6(addr) orelse return error.InvalidListenAddress
         else
             [_]u8{0} ** 16;
-        bind_addresses.ip6 = .{ .ip6 = .{ .bytes = ip6, .port = opts.port6 orelse opts.port } };
+        bind_addresses.ip6 = .{ .ip6 = .{ .bytes = ip6, .port = listen_port6.? } };
     }
 
     return bind_addresses;

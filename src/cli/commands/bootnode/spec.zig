@@ -24,12 +24,12 @@ pub const spec = cli.command(.{
         }, null),
         .port6 = cli.option(?u16, .{
             .long = "port6",
-            .description = "IPv6 UDP port for bootnode discv5",
+            .description = "IPv6 UDP port for bootnode discv5 (defaults to a distinct dual-stack port)",
             .env = "LODESTAR_Z_BOOTNODE_PORT6",
         }, null),
         .discoveryPort6 = cli.option(?u16, .{
             .long = "discoveryPort6",
-            .description = "IPv6 UDP port for bootnode discv5",
+            .description = "IPv6 UDP port for bootnode discv5 (defaults to a distinct dual-stack port)",
         }, null),
         .bootnodes = cli.option(?[]const u8, .{
             .long = "bootnodes",

@@ -41,9 +41,10 @@ pub const NodeOptions = struct {
     // ── Discovery ────────────────────────────────────────────────
     /// Enable discv5 peer discovery (default: true).
     enable_discv5: bool = true,
-    /// UDP port for discv5 (default: same as p2p port, set via --discovery-port).
+    /// UDP port for discv5 IPv4 (default: p2p port + 1, set via --discovery-port).
     discovery_port: ?u16 = null,
-    /// UDP port for discv5 IPv6 (default: same as p2p-port6 or p2p-port).
+    /// UDP port for discv5 IPv6.
+    /// Defaults to a distinct UDP port when dual-stack discovery is enabled.
     discovery_port6: ?u16 = null,
     /// Direct peers to always connect to (multiaddr strings from --direct-peers).
     direct_peers: []const []const u8 = &.{},

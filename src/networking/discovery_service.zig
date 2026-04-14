@@ -64,6 +64,22 @@ pub const DiscoveryConfig = struct {
     enabled: bool = true,
 };
 
+/// Choose an IPv6 UDP listen port for dual-stack discovery.
+///
+/// On some hosts, binding IPv4 and IPv6 discv5 sockets to the same UDP port
+/// fails unless the IPv6 socket is explicitly v6-only. When both families are
+/// enabled and no distinct IPv6 port was requested, prefer the next UDP port
+/// to avoid AddressInUse during discovery startup.
+pub fn resolveListenPort6(listen_port: u16, listen_port6: ?u16, wants_ip4: bool, wants_ip6: bool) ?u16 {
+    if (!wants_ip6) return null;
+
+    const resolved = listen_port6 orelse listen_port;
+    if (!wants_ip4 or resolved != listen_port) return resolved;
+
+    if (listen_port == std.math.maxInt(u16)) return resolved;
+    return listen_port + 1;
+}
+
 // ── Discovered Peer ─────────────────────────────────────────────────────────
 
 pub const DiscoveredPeer = struct {
@@ -862,6 +878,7 @@ fn deriveCustodyColumnsBitfield(allocator: Allocator, node_id: NodeId, custody_g
 fn resolveBindAddresses(config: *const DiscoveryConfig) BindAddresses {
     const wants_ip6 = config.local_ip6 != null or config.listen_port6 != null or config.enr_ip6 != null or config.enr_udp6 != null or config.p2p_port6 != null;
     const wants_ip4 = config.local_ip != null or config.enr_ip != null or config.enr_udp != null or !wants_ip6;
+    const listen_port6 = resolveListenPort6(config.listen_port, config.listen_port6, wants_ip4, wants_ip6);
 
     var bind_addresses = BindAddresses{};
     if (wants_ip4) {
@@ -876,7 +893,7 @@ fn resolveBindAddresses(config: *const DiscoveryConfig) BindAddresses {
         bind_addresses.ip6 = .{
             .ip6 = .{
                 .bytes = config.local_ip6 orelse ([_]u8{0} ** 16),
-                .port = config.listen_port6 orelse config.listen_port,
+                .port = listen_port6.?,
             },
         };
     }
@@ -1294,6 +1311,13 @@ test "DiscoveryService: buildLocalEnr supports ipv6-only" {
     try std.testing.expectEqual(@as(?u16, null), svc.service.boundPort(.ip4));
     try std.testing.expectEqual(svc.service.boundPort(.ip6), parsed.udp6);
     try std.testing.expectEqual(@as(?u16, 9001), parsed.tcp6);
+}
+
+test "resolveListenPort6 chooses distinct port for dual-stack defaults" {
+    try std.testing.expectEqual(@as(?u16, 9002), resolveListenPort6(9001, null, true, true));
+    try std.testing.expectEqual(@as(?u16, 9010), resolveListenPort6(9001, 9010, true, true));
+    try std.testing.expectEqual(@as(?u16, 9001), resolveListenPort6(9001, null, false, true));
+    try std.testing.expectEqual(@as(?u16, null), resolveListenPort6(9001, null, true, false));
 }
 
 test "DiscoveryService: updateForkDigest preserves live ENR address" {
