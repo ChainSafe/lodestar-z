@@ -345,6 +345,11 @@ pub fn handlePeerStatusAtTime(
         if (node.metrics) |metrics| metrics.peer_connected_total.incr();
     }
 
+    if (irrelevance != null) {
+        if (node.sync_service_inst) |sync_svc| sync_svc.onPeerDisconnect(peer_id);
+        return irrelevance;
+    }
+
     const is_synced = if (node.sync_service_inst) |sync_svc| blk: {
         sync_svc.onPeerStatus(peer_id, status, earliest_available_slot) catch |err| {
             scoped_log.debug("sync service onPeerStatus failed: {}", .{err});

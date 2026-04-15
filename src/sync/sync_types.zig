@@ -96,6 +96,50 @@ pub const RangeSyncType = enum {
     head,
 };
 
+/// The type of peer relative to our current sync state.
+pub const PeerSyncType = enum {
+    fully_synced,
+    advanced,
+    behind,
+};
+
+fn withinRangeOf(value: u64, target: u64, range: u64) bool {
+    return value >= target -| range and value <= target +| range;
+}
+
+/// Classify a peer using Lodestar's peer-sync rules.
+pub fn getPeerSyncType(
+    local_head_slot: u64,
+    local_finalized_epoch: u64,
+    remote_head_slot: u64,
+    remote_head_known: bool,
+    remote_finalized_epoch: u64,
+) PeerSyncType {
+    if (remote_finalized_epoch < local_finalized_epoch) {
+        return .behind;
+    }
+
+    if (remote_finalized_epoch > local_finalized_epoch) {
+        if ((local_finalized_epoch +| 1 == remote_finalized_epoch and
+            withinRangeOf(remote_head_slot, local_head_slot, SYNC_DISTANCE_THRESHOLD)) or
+            remote_head_known)
+        {
+            return .fully_synced;
+        }
+        return .advanced;
+    }
+
+    if (remote_head_slot < local_head_slot -| SYNC_DISTANCE_THRESHOLD) {
+        return .behind;
+    }
+
+    if (remote_head_slot > local_head_slot +| SYNC_DISTANCE_THRESHOLD and !remote_head_known) {
+        return .advanced;
+    }
+
+    return .fully_synced;
+}
+
 // ── Per-peer sync info ───────────────────────────────────────────────
 
 /// Per-peer view of the chain, extracted from Status handshakes.
@@ -184,4 +228,25 @@ test "ChainTarget: equality" {
     const c = ChainTarget{ .slot = 200, .root = [_]u8{1} ** 32 };
     try std.testing.expect(a.eql(b));
     try std.testing.expect(!a.eql(c));
+}
+
+test "getPeerSyncType: lower finalized peer is behind" {
+    try std.testing.expectEqual(
+        PeerSyncType.behind,
+        getPeerSyncType(320, 10, 400, false, 9),
+    );
+}
+
+test "getPeerSyncType: same finalized peer ahead of tolerance is advanced" {
+    try std.testing.expectEqual(
+        PeerSyncType.advanced,
+        getPeerSyncType(320, 10, 400, false, 10),
+    );
+}
+
+test "getPeerSyncType: next finalized epoch with near head is fully synced" {
+    try std.testing.expectEqual(
+        PeerSyncType.fully_synced,
+        getPeerSyncType(320, 10, 330, false, 11),
+    );
 }
