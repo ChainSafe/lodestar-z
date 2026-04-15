@@ -211,10 +211,23 @@ jobs:
           zig build test:bls_spec_tests
 
   spec-test-minimal:
-    name: spec tests - minimal
+    name: spec tests - minimal (${{ matrix.runner }})
     # It takes time to download and run spec tests, so we only run them on ubuntu-latest
     runs-on: ubuntu-latest
     needs: build-test
+    strategy:
+      fail-fast: false
+      matrix:
+        runner:
+          - operations
+          - epoch_processing
+          - sanity
+          - rewards
+          - transition
+          - random
+          - fork
+          - finality
+          - merkle_proof
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -231,20 +244,30 @@ jobs:
       - name: Download spec tests
         run: |
           zig build run:download_spec_tests
-
       - name: Write spec tests
         run: |
           zig build run:write_spec_tests
-
-      - name: Run spec tests - minimal
+      - name: Run spec tests - minimal (${{ matrix.runner }})
         run: |
-          zig build test:spec_tests -Dpreset=minimal
+          zig build test:spec_tests_${{ matrix.runner }} -Dpreset=minimal
 
   spec-test-mainnet:
-    name: spec tests - mainnet
-    # It takes time to download and run spec tests, so we only run them on ubuntu-latest
+    name: spec tests - mainnet (${{ matrix.runner }})
     runs-on: ubuntu-latest
     needs: build-test
+    strategy:
+      fail-fast: false
+      matrix:
+        runner:
+          - operations
+          - epoch_processing
+          - sanity
+          - rewards
+          - transition
+          - random
+          - fork
+          - finality
+          - merkle_proof
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -264,9 +287,9 @@ jobs:
       - name: Write spec tests
         run: |
           zig build run:write_spec_tests
-      - name: Run spec tests - mainnet
+      - name: Run spec tests - mainnet (${{ matrix.runner }})
         run: |
-          zig build test:spec_tests -Dpreset=mainnet -Doptimize=ReleaseSafe
+          zig build test:spec_tests_${{ matrix.runner }} -Dpreset=mainnet -Doptimize=ReleaseSafe
 
   build-fuzz:
     name: build fuzz harnesses
