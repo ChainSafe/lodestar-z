@@ -49,8 +49,6 @@ const ForkTypes = @import("fork_types").ForkTypes;
 
 const syncPubkeys = @import("./pubkey_cache.zig").syncPubkeys;
 
-const RefCount = @import("../utils/ref_count.zig").RefCount;
-
 pub const EpochCacheImmutableData = struct {
     config: *const BeaconConfig,
     pubkey_to_index: *PubkeyIndexMap,
@@ -66,10 +64,6 @@ const proposer_weight: f64 = @floatFromInt(c.PROPOSER_WEIGHT);
 const weight_denominator: f64 = @floatFromInt(c.WEIGHT_DENOMINATOR);
 
 pub const proposer_weight_factor: f64 = proposer_weight / (weight_denominator - proposer_weight);
-/// an EpochCache is shared by multiple CachedBeaconStateAllForks instances
-/// a CachedBeaconStateAllForks should increase the reference count of EpochCache when it is created
-/// and decrease the reference count when it is deinitialized
-pub const EpochCacheRc = ReferenceCount(*EpochCache);
 
 pub const EpochCache = struct {
     allocator: Allocator,

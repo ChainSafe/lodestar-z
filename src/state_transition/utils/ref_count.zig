@@ -19,20 +19,18 @@ pub fn RefCount(comptime T: type) type {
             return ptr;
         }
 
-        /// private deinit, consumer should call unref() instead
+        /// private deinit, consumer should call release() instead
         fn deinit(self: *@This()) void {
             self.instance.deinit();
             self.allocator.destroy(self);
         }
 
-        /// caution: this returns a copy of the instance, make sure this does not have copy overhead
-        /// or use pointer type instead
         pub fn get(self: *@This()) T {
             return self.instance;
         }
 
         pub fn ref(self: *@This()) *@This() {
-            _ = self._ref_count.fetchAdd(1, .acquire);
+            _ = self._ref_count.fetchAdd(1, .monotonic);
             return self;
         }
 

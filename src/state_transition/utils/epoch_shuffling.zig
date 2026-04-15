@@ -11,8 +11,6 @@ const Epoch = types.primitive.Epoch.Type;
 const computeStartSlotAtEpoch = @import("./epoch.zig").computeStartSlotAtEpoch;
 const getBlockRootAtSlot = @import("./block_root.zig").getBlockRootAtSlot;
 const computeAnchorCheckpoint = @import("./anchor_checkpoint.zig").computeAnchorCheckpoint;
-const Epoch = ssz.primitive.Epoch.Type;
-const ReferenceCount = @import("./reference_count.zig").ReferenceCount;
 const RefCount = @import("./ref_count.zig").RefCount;
 
 pub const EpochShufflingRc = RefCount(*EpochShuffling);

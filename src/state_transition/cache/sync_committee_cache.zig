@@ -11,13 +11,12 @@ const SyncCommitteeIndices = std.ArrayList(u32);
 const SyncComitteeValidatorIndexMap = std.AutoHashMap(ValidatorIndex, SyncCommitteeIndices);
 const RefCount = @import("../utils/ref_count.zig").RefCount;
 
-pub const SyncCommitteeCacheRc = ReferenceCount(SyncCommitteeCacheAllForks);
-pub const SyncCommitteeCacheRc = RefCount(SyncCommitteeCacheAllForks);
+pub const SyncCommitteeCacheRc = RefCount(SyncCommitteeCache);
 
 /// EpochCache is the only consumer of this cache but an instance of SyncCommitteeCacheAllForks is shared across EpochCache instances
 /// no EpochCache instance takes the ownership of SyncCommitteeCacheAllForks instance
-/// instead of that, we count on reference counting to deallocate the memory, see ReferenceCount() utility
-pub const SyncCommitteeCacheAllForks = union(enum) {
+/// instead of that, we count on reference counting to deallocate the memory, see RefCount() utility
+pub const SyncCommitteeCache = union(enum) {
     phase0: void,
     altair: *SyncCommitteeCacheAltair,
 
