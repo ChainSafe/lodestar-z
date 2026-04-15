@@ -1256,8 +1256,9 @@ pub const Chain = struct {
     pub fn getStatus(self: *const Chain) StatusMessage.Type {
         const head = self.getHead();
         const finalized = self.forkChoice().getFinalizedCheckpoint();
+        const network_slot = self.currentWallSlot() orelse head.slot;
         return .{
-            .fork_digest = self.config.networkingForkDigestAtSlot(head.slot, self.genesis_validators_root),
+            .fork_digest = self.config.networkingForkDigestAtSlot(network_slot, self.genesis_validators_root),
             .finalized_root = finalized.root,
             .finalized_epoch = finalized.epoch,
             .head_root = head.root,

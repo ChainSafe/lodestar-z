@@ -334,7 +334,7 @@ pub fn handlePeerStatusAtTime(
             status.head_slot,
             earliest_available_slot,
             localCachedStatus(node),
-            node.config.forkSeq(node.currentHeadSlot()),
+            node.config.forkSeq(clock_slot),
             clock_slot,
         );
         pm.markStatusExchange(peer_id, now_ms);

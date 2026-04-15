@@ -247,8 +247,14 @@ test "BeaconNode: getStatus returns current chain state" {
     defer ctx.deinit();
 
     const status = ctx.node.getStatus();
+    const wall_slot = ctx.node.chain.currentWallSlot() orelse status.head_slot;
+    const expected_fork_digest = ctx.node.config.networkingForkDigestAtSlot(
+        wall_slot,
+        ctx.node.genesis_validators_root,
+    );
     try std.testing.expectEqual(@as(u64, 0), status.head_slot);
     try std.testing.expectEqual(@as(u64, 0), status.finalized_epoch);
+    try std.testing.expectEqualDeep(expected_fork_digest, status.fork_digest);
 }
 
 test "BeaconNode: produceBlock from empty pool" {

@@ -391,8 +391,8 @@ pub fn start(self: *BeaconNode, io: std.Io, listen_addr: []const u8, port: u16) 
     req_resp_rate_limiter.* = networking.RateLimiter.init(self.allocator);
     self.req_resp_rate_limiter = req_resp_rate_limiter;
 
-    const head_slot = self.currentHeadSlot();
-    const fork_digest = self.config.networkingForkDigestAtSlot(head_slot, self.genesis_validators_root);
+    const network_slot = currentNetworkSlot(self, self.io) orelse self.currentHeadSlot();
+    const fork_digest = self.config.networkingForkDigestAtSlot(network_slot, self.genesis_validators_root);
 
     var host_identity = self.node_identity.libp2pKeyPair();
     {
@@ -408,7 +408,7 @@ pub fn start(self: *BeaconNode, io: std.Io, listen_addr: []const u8, port: u16) 
 
     self.p2p_service = try networking.p2p_service.P2pService.init(self.io, self.allocator, .{
         .fork_digest = fork_digest,
-        .fork_seq = self.config.forkSeq(head_slot),
+        .fork_seq = self.config.forkSeq(network_slot),
         .req_resp_context = req_resp_ctx,
         .req_resp_server_policy = req_resp_server_policy,
         .host_identity = host_identity,
@@ -1377,10 +1377,10 @@ fn runLoop(self: *BeaconNode, io: std.Io, svc: *networking.P2pService) void {
 }
 
 fn maybeHandleForkTransition(self: *BeaconNode, io: std.Io, svc: *networking.P2pService) void {
-    const head_slot = self.currentHeadSlot();
-    const current_fork_seq = self.config.forkSeq(head_slot);
+    const network_slot = currentNetworkSlot(self, io) orelse self.currentHeadSlot();
+    const current_fork_seq = self.config.forkSeq(network_slot);
     const current_digest = self.config.networkingForkDigestAtSlot(
-        head_slot,
+        network_slot,
         self.genesis_validators_root,
     );
     if (std.mem.eql(u8, &current_digest, &self.last_active_fork_digest)) return;
@@ -1389,7 +1389,7 @@ fn maybeHandleForkTransition(self: *BeaconNode, io: std.Io, svc: *networking.P2p
         const last_digest_hex = std.fmt.bytesToHex(&self.last_active_fork_digest, .lower);
         const current_digest_hex = std.fmt.bytesToHex(&current_digest, .lower);
         log.info("fork transition detected at slot {d}: {s} -> {s}", .{
-            head_slot,
+            network_slot,
             &last_digest_hex,
             &current_digest_hex,
         });
@@ -2294,7 +2294,7 @@ fn dialDirectPeer(self: *BeaconNode, io: std.Io, svc: *networking.P2pService, ad
 
 fn initDiscoveryService(self: *BeaconNode) !void {
     const fork_digest = self.config.networkingForkDigestAtSlot(
-        self.currentHeadSlot(),
+        currentNetworkSlot(self, self.io) orelse self.currentHeadSlot(),
         self.genesis_validators_root,
     );
 
@@ -4428,7 +4428,7 @@ fn sendStatus(
     svc: *networking.P2pService,
     peer_id: []const u8,
 ) !PeerStatusResponse {
-    const current_fork_seq = self.config.forkSeq(self.currentHeadSlot());
+    const current_fork_seq = self.config.forkSeq(currentNetworkSlot(self, io) orelse self.currentHeadSlot());
     const use_status_v2 = current_fork_seq.gte(.fulu);
     const status_protocol_id = if (use_status_v2)
         "/eth2/beacon_chain/req/status/2/ssz_snappy"
@@ -4603,7 +4603,7 @@ fn requestPeerMetadata(
     svc: *networking.P2pService,
     peer_id: []const u8,
 ) !PeerMetadataResponse {
-    const current_fork_seq = self.config.forkSeq(self.currentHeadSlot());
+    const current_fork_seq = self.config.forkSeq(currentNetworkSlot(self, io) orelse self.currentHeadSlot());
     const use_metadata_v3 = current_fork_seq.gte(.fulu);
 
     if (!use_metadata_v3) {
