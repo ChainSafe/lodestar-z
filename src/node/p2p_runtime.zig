@@ -1949,7 +1949,10 @@ fn updateSyncServiceMetrics(self: *BeaconNode) void {
     metrics.sync_local_head_slot.set(snapshot.local_head_slot);
     metrics.sync_peer_distance.set(snapshot.best_peer_slot -| snapshot.local_head_slot);
     metrics.sync_local_finalized_epoch.set(snapshot.local_finalized_epoch);
-    metrics.setUnknownBlockSnapshot(snapshot.unknown_block);
+    // Gossip/orphan recovery is driven by the node-owned UnknownBlockSync.
+    // SyncService still has a stale internal instance, so its snapshot does
+    // not reflect the live orphan queue.
+    metrics.setUnknownBlockSnapshot(self.unknown_block_sync.metricsSnapshot());
 
     setRangeSyncTypeMetrics(
         metrics,
