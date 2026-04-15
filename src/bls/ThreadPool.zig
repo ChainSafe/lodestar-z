@@ -151,7 +151,7 @@ fn execVerifyMulti(pool: *ThreadPool, job: *VerifyMultiJob, worker_index: usize)
     while (true) {
         const i = job.counter.fetchAdd(1, .monotonic);
         if (i >= n_elems) break;
-        if (job.err_flag.load(.acquire)) break;
+        if (job.err_flag.load(.monotonic)) break;
 
         did_work = true;
 
@@ -257,7 +257,7 @@ fn execAggVerify(pool: *ThreadPool, job: *AggVerifyJob, worker_index: usize) voi
     while (true) {
         const i = job.counter.fetchAdd(1, .monotonic);
         if (i >= job.n_elems) break;
-        if (job.err_flag.load(.acquire)) break;
+        if (job.err_flag.load(.monotonic)) break;
 
         did_work = true;
 

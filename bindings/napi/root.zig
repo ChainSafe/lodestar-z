@@ -18,8 +18,14 @@ comptime {
 /// and torn down only when the last environment exits.
 var env_refcount: std.atomic.Value(u32) = std.atomic.Value(u32).init(0);
 
+/// Guards shared state initialization so that concurrent `register` calls
+/// (e.g. from Node.js Worker threads) cannot observe partially-initialized state.
+var init_mutex: std.Thread.Mutex = .{};
+
 const EnvCleanup = struct {
     fn hook(_: *EnvCleanup) void {
+        init_mutex.lock();
+        defer init_mutex.unlock();
         if (env_refcount.fetchSub(1, .acq_rel) == 1) {
             // Last environment — tear down shared state.
             config.state.deinit();
@@ -33,11 +39,20 @@ const EnvCleanup = struct {
 var env_cleanup: EnvCleanup = .{};
 
 fn register(env: napi.Env, exports: napi.Value) !void {
-    if (env_refcount.fetchAdd(1, .monotonic) == 0) {
-        // First environment — initialize shared state.
-        try pool.state.init();
-        try pubkeys.state.init();
-        config.state.init();
+    {
+        init_mutex.lock();
+        defer init_mutex.unlock();
+        if (env_refcount.fetchAdd(1, .monotonic) == 0) {
+            // First environment — initialize shared state.
+            // On failure, roll back the refcount so the next caller retries.
+            errdefer {
+                const old = env_refcount.fetchSub(1, .monotonic);
+                std.debug.assert(old == 1);
+            }
+            try pool.state.init();
+            try pubkeys.state.init();
+            config.state.init();
+        }
     }
 
     try env.addEnvCleanupHook(EnvCleanup, &env_cleanup, EnvCleanup.hook);
