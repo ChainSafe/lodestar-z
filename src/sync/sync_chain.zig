@@ -289,16 +289,14 @@ pub const SyncChain = struct {
         self.status = .stopped;
     }
 
-    /// Advance the chain: dispatch downloads, process ready batches, drain validated.
+    /// Advance the chain: dispatch downloads and process the next ready batch.
     /// Returns true if the chain completed (reached target).
     pub fn tick(self: *SyncChain) !bool {
+        if (self.status == .done) return true;
         if (self.status != .syncing) return false;
 
-        // Check completion.
-        if (self.next_batch_start > self.target.slot and self.batches.items.len == 0) {
-            self.status = .done;
-            return true;
-        }
+        self.markDoneIfComplete();
+        if (self.status == .done) return true;
 
         // 1. Fill the batch window with new batches.
         self.fillBatchWindow();
@@ -306,11 +304,10 @@ pub const SyncChain = struct {
         // 2. Dispatch downloads for awaiting_download batches.
         self.dispatchDownloads();
 
-        // 3. Process the next ready batch (front of the queue).
+        // 3. Process the next ready batch after any awaiting-validation prefix.
         try self.processNextBatch();
 
-        // 4. Drain validated batches from the front.
-        self.drainValidated();
+        self.markDoneIfComplete();
 
         return self.status == .done;
     }
@@ -373,7 +370,7 @@ pub const SyncChain = struct {
     }
 
     pub fn onProcessingSuccess(self: *SyncChain, batch_id: BatchId, generation: u32) void {
-        for (self.batches.items) |*b| {
+        for (self.batches.items, 0..) |*b, index| {
             if (b.id != batch_id) continue;
             if (b.generation != generation) return;
             if (b.status != .processing) return;
@@ -383,12 +380,14 @@ pub const SyncChain = struct {
             self.cumulative_metrics.processing_success_total += 1;
             self.cumulative_metrics.processing_time_ns_total += elapsed_ns;
             self.cumulative_metrics.processed_blocks_total += @intCast(processed_blocks);
+            if (processed_blocks > 0 and index > 0) self.drainValidatedPrefix(index);
+            self.markDoneIfComplete();
             return;
         }
     }
 
     pub fn onProcessingError(self: *SyncChain, batch_id: BatchId, generation: u32) void {
-        for (self.batches.items) |*b| {
+        for (self.batches.items, 0..) |*b, index| {
             if (b.id != batch_id) continue;
             if (b.generation != generation) return;
             if (b.status != .processing) return;
@@ -397,6 +396,7 @@ pub const SyncChain = struct {
             b.onProcessingError();
             self.cumulative_metrics.processing_error_total += 1;
             self.cumulative_metrics.processing_time_ns_total += elapsed_ns;
+            if (index > 0) self.rewindValidatedPrefix(index);
             if (b.isProcessingExhausted()) {
                 if (download_peer) |peer_id| self.callbacks.reportPeer(peer_id);
                 self.status = .err;
@@ -534,12 +534,57 @@ pub const SyncChain = struct {
         }
     }
 
-    /// Process the first batch that is awaiting_processing (must be at front).
-    fn processNextBatch(self: *SyncChain) !void {
-        if (self.batches.items.len == 0) return;
+    fn nextProcessableBatchIndex(self: *const SyncChain) ?usize {
+        for (self.batches.items, 0..) |batch, index| {
+            switch (batch.status) {
+                .awaiting_validation => {},
+                .awaiting_processing => return index,
+                .awaiting_download,
+                .downloading,
+                .processing,
+                => return null,
+            }
+        }
+        return null;
+    }
 
-        const front = &self.batches.items[0];
-        if (front.status != .awaiting_processing) return;
+    fn drainValidatedPrefix(self: *SyncChain, drain_count: usize) void {
+        if (drain_count == 0) return;
+        for (self.batches.items[0..drain_count]) |batch| {
+            std.debug.assert(batch.status == .awaiting_validation);
+            self.validated_epochs += batch.count / preset.SLOTS_PER_EPOCH;
+        }
+        self.batches.replaceRangeAssumeCapacity(0, drain_count, &.{});
+    }
+
+    fn rewindValidatedPrefix(self: *SyncChain, rewind_count: usize) void {
+        if (rewind_count == 0) return;
+        for (self.batches.items[0..rewind_count]) |*batch| {
+            std.debug.assert(batch.status == .awaiting_validation);
+            batch.onValidationError();
+            if (batch.isProcessingExhausted()) {
+                if (batch.download_peer) |peer_id| self.callbacks.reportPeer(peer_id);
+                self.status = .err;
+            }
+        }
+    }
+
+    fn markDoneIfComplete(self: *SyncChain) void {
+        if (self.next_batch_start <= self.target.slot) return;
+        if (self.batches.items.len == 0) {
+            self.status = .done;
+            return;
+        }
+        for (self.batches.items) |batch| {
+            if (batch.status != .awaiting_validation) return;
+        }
+        self.status = .done;
+    }
+
+    /// Process the next batch that is awaiting_processing after any awaiting-validation prefix.
+    fn processNextBatch(self: *SyncChain) !void {
+        const index = self.nextProcessableBatchIndex() orelse return;
+        const front = &self.batches.items[index];
 
         front.startProcessing();
         self.callbacks.processChainSegment(
@@ -560,6 +605,7 @@ pub const SyncChain = struct {
             self.cumulative_metrics.processing_error_total += 1;
             self.cumulative_metrics.processing_time_ns_total += front.finishProcessingTiming();
             front.onProcessingError();
+            if (index > 0) self.rewindValidatedPrefix(index);
             if (front.isProcessingExhausted()) {
                 if (front.download_peer) |p| self.callbacks.reportPeer(p);
                 self.status = .err;
@@ -572,37 +618,8 @@ pub const SyncChain = struct {
         self.cumulative_metrics.processing_success_total += 1;
         self.cumulative_metrics.processing_time_ns_total += elapsed_ns;
         self.cumulative_metrics.processed_blocks_total += @intCast(processed_blocks);
-
-        // If a previous batch was awaiting validation, it's now validated
-        // since this batch imported successfully (proving continuity).
-    }
-
-    /// Drain validated/completed batches from the front.
-    ///
-    /// Previous implementation used `orderedRemove(0)` in a loop, which is O(n)
-    /// per removal (shifts the entire slice each time), yielding O(n²) total for
-    /// a run of n validated batches.
-    ///
-    /// This version counts validated batches first, then removes them in a single
-    /// bulk `replaceRange` call — O(n) total regardless of how many are drained.
-    fn drainValidated(self: *SyncChain) void {
-        // Count how many leading batches are validated.
-        var drain_count: usize = 0;
-        for (self.batches.items) |batch| {
-            if (batch.status != .awaiting_validation) break;
-            self.validated_epochs += batch.count / preset.SLOTS_PER_EPOCH;
-            drain_count += 1;
-        }
-
-        // Bulk-remove the first drain_count elements in one shift (O(n)).
-        if (drain_count > 0) {
-            self.batches.replaceRangeAssumeCapacity(0, drain_count, &.{});
-        }
-
-        // Check if we're done after draining.
-        if (self.next_batch_start > self.target.slot and self.batches.items.len == 0) {
-            self.status = .done;
-        }
+        if (processed_blocks > 0 and index > 0) self.drainValidatedPrefix(index);
+        self.markDoneIfComplete();
     }
 
     pub fn cumulativeMetricsSnapshot(self: *const SyncChain) CumulativeMetrics {
@@ -865,6 +882,84 @@ test "SyncChain: pending processing waits for completion callback" {
     const done_after_completion = try chain.tick();
     try std.testing.expect(done_after_completion);
     try std.testing.expectEqual(SyncChainStatus.done, chain.status);
+}
+
+test "SyncChain: later batch validates earlier batch" {
+    const allocator = std.testing.allocator;
+    var tc = TestSyncCallbacks{};
+    var chain = SyncChain.init(
+        allocator,
+        std.testing.io,
+        0,
+        .finalized,
+        0,
+        .{ .slot = 40, .root = [_]u8{0x44} ** 32 },
+        tc.callbacks(),
+    );
+    defer chain.deinit();
+
+    try chain.addPeer("p1", .{ .slot = 40, .root = [_]u8{0x44} ** 32 }, null);
+    chain.startSyncing();
+
+    _ = try chain.tick();
+    try std.testing.expectEqual(@as(usize, 2), chain.batches.items.len);
+
+    const batch0_id = chain.batches.items[0].id;
+    const batch0_gen = chain.batches.items[0].generation;
+    const batch1_id = chain.batches.items[1].id;
+    const batch1_gen = chain.batches.items[1].generation;
+    const blocks0 = [_]BatchBlock{.{ .slot = 1, .block_bytes = "b1" }};
+    const blocks1 = [_]BatchBlock{.{ .slot = 33, .block_bytes = "b33" }};
+
+    chain.onBatchResponse(batch0_id, batch0_gen, &blocks0);
+    try std.testing.expectEqual(BatchStatus.awaiting_validation, chain.batches.items[0].status);
+    try std.testing.expectEqual(@as(usize, 2), chain.batches.items.len);
+
+    chain.onBatchResponse(batch1_id, batch1_gen, &blocks1);
+    try std.testing.expectEqual(SyncChainStatus.done, chain.status);
+    try std.testing.expectEqual(@as(usize, 1), chain.batches.items.len);
+    try std.testing.expectEqual(@as(u64, 32), chain.batches.items[0].start_slot);
+    try std.testing.expectEqual(@as(u64, 1), chain.validated_epochs);
+}
+
+test "SyncChain: processing error rewinds awaiting-validation prefix" {
+    const allocator = std.testing.allocator;
+    var tc = TestSyncCallbacks{};
+    var chain = SyncChain.init(
+        allocator,
+        std.testing.io,
+        0,
+        .finalized,
+        0,
+        .{ .slot = 40, .root = [_]u8{0x55} ** 32 },
+        tc.callbacks(),
+    );
+    defer chain.deinit();
+
+    try chain.addPeer("p1", .{ .slot = 40, .root = [_]u8{0x55} ** 32 }, null);
+    chain.startSyncing();
+
+    _ = try chain.tick();
+    try std.testing.expectEqual(@as(usize, 2), chain.batches.items.len);
+
+    const batch0_id = chain.batches.items[0].id;
+    const batch0_gen = chain.batches.items[0].generation;
+    const batch1_id = chain.batches.items[1].id;
+    const batch1_gen = chain.batches.items[1].generation;
+    const blocks0 = [_]BatchBlock{.{ .slot = 1, .block_bytes = "b1" }};
+    const blocks1 = [_]BatchBlock{.{ .slot = 33, .block_bytes = "b33" }};
+
+    chain.onBatchResponse(batch0_id, batch0_gen, &blocks0);
+    try std.testing.expectEqual(BatchStatus.awaiting_validation, chain.batches.items[0].status);
+
+    tc.should_fail_processing = true;
+    chain.onBatchResponse(batch1_id, batch1_gen, &blocks1);
+    tc.should_fail_processing = false;
+
+    try std.testing.expectEqual(BatchStatus.awaiting_download, chain.batches.items[0].status);
+    try std.testing.expectEqual(BatchStatus.awaiting_download, chain.batches.items[1].status);
+    try std.testing.expectEqual(@as(u8, 1), chain.batches.items[0].processing_failures);
+    try std.testing.expectEqual(@as(u8, 1), chain.batches.items[1].processing_failures);
 }
 
 test "SyncChain: skips peers that cannot serve the batch start slot" {

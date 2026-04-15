@@ -246,6 +246,13 @@ pub const Batch = struct {
         self.download_peer = null;
     }
 
+    /// Called when a later batch shows this processed batch must be retried.
+    pub fn onValidationError(self: *Batch) void {
+        std.debug.assert(self.status == .awaiting_validation);
+        self.processing_failures += 1;
+        self.status = .awaiting_download;
+    }
+
     /// Whether this batch has exceeded download retry limits.
     pub fn isDownloadExhausted(self: *const Batch) bool {
         return self.download_failures >= sync_types.MAX_BATCH_DOWNLOAD_ATTEMPTS;
@@ -300,7 +307,8 @@ fn hashBlocks(blocks: []const BatchBlock) u64 {
 // ── Tests ────────────────────────────────────────────────────────────
 
 test "Batch: lifecycle" {
-    var b = Batch.init(0, 100, 64, std.testing.allocator);
+    var b = Batch.init(std.testing.io, 0, 100, 64, std.testing.allocator);
+    defer b.deinit();
     try std.testing.expectEqual(BatchStatus.awaiting_download, b.status);
     try std.testing.expectEqual(@as(u64, 163), b.endSlot());
 
@@ -327,7 +335,7 @@ test "Batch: lifecycle" {
 }
 
 test "Batch: download error retry" {
-    var b = Batch.init(1, 0, 32, std.testing.allocator);
+    var b = Batch.init(std.testing.io, 1, 0, 32, std.testing.allocator);
     defer b.deinit();
     b.startDownload("peer_b");
     const gen = b.generation;
@@ -337,7 +345,7 @@ test "Batch: download error retry" {
 }
 
 test "Batch: download deferred does not consume retry budget" {
-    var b = Batch.init(3, 0, 32, std.testing.allocator);
+    var b = Batch.init(std.testing.io, 3, 0, 32, std.testing.allocator);
     defer b.deinit();
 
     b.startDownload("peer_e");
@@ -350,7 +358,8 @@ test "Batch: download deferred does not consume retry budget" {
 }
 
 test "Batch: generation prevents stale error" {
-    var b = Batch.init(2, 50, 10, std.testing.allocator);
+    var b = Batch.init(std.testing.io, 2, 50, 10, std.testing.allocator);
+    defer b.deinit();
     b.startDownload("peer_c");
     const old_gen = b.generation;
 
@@ -362,4 +371,22 @@ test "Batch: generation prevents stale error" {
     // Old generation error is rejected.
     try std.testing.expect(!b.onDownloadError(old_gen));
     try std.testing.expectEqual(BatchStatus.downloading, b.status);
+}
+
+test "Batch: validation error retries processed batch" {
+    var b = Batch.init(std.testing.io, 4, 0, 32, std.testing.allocator);
+    defer b.deinit();
+
+    b.startDownload("peer_f");
+    const gen = b.generation;
+    const blocks = [_]BatchBlock{.{ .slot = 1, .block_bytes = "b1" }};
+    try std.testing.expect(b.onDownloadSuccess(gen, &blocks));
+
+    b.startProcessing();
+    b.onProcessingSuccess();
+    try std.testing.expectEqual(BatchStatus.awaiting_validation, b.status);
+
+    b.onValidationError();
+    try std.testing.expectEqual(BatchStatus.awaiting_download, b.status);
+    try std.testing.expectEqual(@as(u8, 1), b.processing_failures);
 }
