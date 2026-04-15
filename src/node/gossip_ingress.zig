@@ -32,6 +32,7 @@ pub fn processEvents(self: *BeaconNode, io: std.Io, p2p: *networking.P2pService)
                     .source = processor.work_item.GossipSource.fromOpaqueBytes(0x70656572, msg.from),
                     .message_id = networking.computeGossipMessageId(self.allocator, msg.data) catch std.mem.zeroes(networking.GossipMessageId),
                     .seen_timestamp_ns = currentUnixTimeNs(io),
+                    .peer_id = msg.from,
                 };
 
                 const parsed = networking.gossip_topics.parseTopic(msg.topic) orelse {

@@ -33,6 +33,7 @@ const unknown_block_mod = @import("unknown_block.zig");
 const UnknownBlockSync = unknown_block_mod.UnknownBlockSync;
 const UnknownBlockCallbacks = unknown_block_mod.UnknownBlockCallbacks;
 const UnknownBlockMetricsSnapshot = unknown_block_mod.MetricsSnapshot;
+const PreparedBlockInput = @import("prepared_block").PreparedBlockInput;
 
 const batch_mod = @import("batch.zig");
 const BatchBlock = batch_mod.BatchBlock;
@@ -76,6 +77,7 @@ pub const SyncServiceCallbacks = struct {
 
     /// Import a single block through the chain pipeline.
     importBlockFn: *const fn (ptr: *anyopaque, block_bytes: []const u8) anyerror!void,
+    importPreparedBlockFn: *const fn (ptr: *anyopaque, prepared: PreparedBlockInput) anyerror!void,
 
     /// Import a contiguous range-sync segment through the chain pipeline.
     processChainSegmentFn: *const fn (
@@ -128,6 +130,10 @@ pub const SyncServiceCallbacks = struct {
 
     pub fn importBlock(self: SyncServiceCallbacks, block_bytes: []const u8) !void {
         return self.importBlockFn(self.ptr, block_bytes);
+    }
+
+    pub fn importPreparedBlock(self: SyncServiceCallbacks, prepared: PreparedBlockInput) !void {
+        return self.importPreparedBlockFn(self.ptr, prepared);
     }
 
     pub fn processChainSegment(
@@ -215,7 +221,7 @@ pub const SyncService = struct {
         const unknown_block_callbacks = UnknownBlockCallbacks{
             .ptr = callbacks.ptr,
             .requestBlockByRootFn = callbacks.requestBlockByRootFn,
-            .importBlockFn = callbacks.importBlockFn,
+            .importBlockFn = callbacks.importPreparedBlockFn,
             .getConnectedPeersFn = callbacks.getConnectedPeersFn,
         };
 
@@ -408,12 +414,9 @@ pub const SyncService = struct {
     /// Add a pending unknown block (unknown parent).
     pub fn addUnknownBlock(
         self: *SyncService,
-        block_root: [32]u8,
-        parent_root: [32]u8,
-        slot: u64,
-        block_bytes: []const u8,
+        prepared: PreparedBlockInput,
     ) !bool {
-        return self.unknown_block_sync.addPendingBlock(block_root, parent_root, slot, block_bytes);
+        return self.unknown_block_sync.addPendingBlock(prepared);
     }
 
     /// Whether we're synced with the network.
@@ -591,6 +594,13 @@ const TestSyncServiceCallbacks = struct {
         self.imported_count += 1;
     }
 
+    fn importPreparedBlockFn(ptr: *anyopaque, prepared: PreparedBlockInput) anyerror!void {
+        const self: *TestSyncServiceCallbacks = @ptrCast(@alignCast(ptr));
+        self.imported_count += 1;
+        var owned = prepared;
+        owned.deinit(std.testing.allocator);
+    }
+
     fn processChainSegmentFn(ptr: *anyopaque, _: u32, _: BatchId, _: u32, blocks: []const BatchBlock, _: RangeSyncType) anyerror!void {
         const self: *TestSyncServiceCallbacks = @ptrCast(@alignCast(ptr));
         self.processed_segments += 1;
@@ -623,6 +633,7 @@ const TestSyncServiceCallbacks = struct {
         return .{
             .ptr = self,
             .importBlockFn = &importBlockFn,
+            .importPreparedBlockFn = &importPreparedBlockFn,
             .processChainSegmentFn = &processChainSegmentFn,
             .requestBlocksByRangeFn = &requestBlocksByRangeFn,
             .requestBlockByRootFn = &requestBlockByRootFn,

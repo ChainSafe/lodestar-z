@@ -14,6 +14,7 @@ const config_mod = @import("config");
 const types = @import("consensus_types");
 const state_transition = @import("state_transition");
 const bls_mod = @import("bls");
+const chain_mod = @import("chain");
 const fork_types = @import("fork_types");
 const AnyAttestation = fork_types.AnyAttestation;
 const AnyAttesterSlashing = fork_types.AnyAttesterSlashing;
@@ -26,6 +27,8 @@ const ssz = @import("ssz");
 const processor_mod = @import("processor");
 const ResolvedAggregate = processor_mod.work_item.ResolvedAggregate;
 const ResolvedAttestation = processor_mod.work_item.ResolvedAttestation;
+const gossip_handler_mod = @import("gossip_handler.zig");
+const UnknownParentBlock = gossip_handler_mod.UnknownParentBlock;
 
 // Import BeaconNode lazily to avoid circular dependency.
 const beacon_node_mod = @import("beacon_node.zig");
@@ -39,47 +42,34 @@ const ResolvedAttestationData = struct {
     expected_subnet: u8,
 };
 
-fn readSignedBeaconBlockSlot(bytes: []const u8) ?u64 {
-    if (bytes.len < 4) return null;
-    const msg_offset = std.mem.readInt(u32, bytes[0..4], .little);
-    if (bytes.len < @as(usize, msg_offset) + 8) return null;
-    return std.mem.readInt(u64, bytes[msg_offset..][0..8], .little);
-}
-
 // ---------------------------------------------------------------------------
 // Block import callback
 // ---------------------------------------------------------------------------
 
-pub fn importBlockFromGossip(ptr: *anyopaque, block_bytes: []const u8) anyerror!void {
+pub fn importBlockFromGossip(ptr: *anyopaque, prepared: chain_mod.PreparedBlockInput) anyerror!void {
     const node: *BeaconNode = @ptrCast(@alignCast(ptr));
-    const block_slot = readSignedBeaconBlockSlot(block_bytes) orelse node.currentHeadSlot();
-    const fork_seq = node.config.forkSeq(block_slot);
-    const any_signed = AnySignedBeaconBlock.deserialize(
-        node.allocator,
-        .full,
-        fork_seq,
-        block_bytes,
-    ) catch |err| {
-        scoped_log.debug("Gossip block import deserialize failed: {}", .{err});
-        return err;
-    };
-
-    const accepted = node.chainService().acceptGossipBlock(any_signed, 0) catch |err| {
-        any_signed.deinit(node.allocator);
-        return err;
-    };
-    const ready = switch (accepted) {
-        .pending_block_data => return,
-        .ready => |ready| ready,
-    };
-
-    const maybe_result = node.completeReadyIngress(ready, block_bytes) catch |err| {
+    const result = node.importPreparedBlock(prepared) catch |err| {
         scoped_log.debug("Gossip block import failed: {}", .{err});
         return err;
     };
-    if (maybe_result) |result| {
-        scoped_log.debug("GOSSIP BLOCK IMPORTED (via handler) slot={d}", .{result.slot});
+    switch (result) {
+        .ignored, .pending => {},
+        .imported => |imported| {
+            scoped_log.debug("GOSSIP BLOCK IMPORTED (via handler) slot={d}", .{imported.slot});
+        },
     }
+}
+
+pub fn queueUnknownBlockFromGossip(ptr: *anyopaque, block: UnknownParentBlock) anyerror!void {
+    const node: *BeaconNode = @ptrCast(@alignCast(ptr));
+    var prepared = chain_mod.PreparedBlockInput{
+        .block = block.block,
+        .source = .gossip,
+        .block_root = block.block_root,
+        .seen_timestamp_sec = block.seen_timestamp_sec,
+    };
+    prepared.setPeerId(block.peer_id);
+    _ = try node.queueOrphanPreparedBlock(prepared, block.peer_id);
 }
 
 // ---------------------------------------------------------------------------
@@ -602,25 +592,15 @@ pub fn importDataColumnSidecar(ptr: *anyopaque, ssz_bytes: []const u8) anyerror!
 // BLS signature verification callbacks
 // ---------------------------------------------------------------------------
 
-pub fn verifyBlockSignature(ptr: *anyopaque, ssz_bytes: []const u8) bool {
+pub fn verifyBlockSignature(ptr: *anyopaque, any_signed: *const AnySignedBeaconBlock) bool {
     const node: *BeaconNode = @ptrCast(@alignCast(ptr));
     const cached = node.headState() orelse return true;
-
-    const block_slot = readSignedBeaconBlockSlot(ssz_bytes) orelse node.currentHeadSlot();
-    const fork_seq = node.config.forkSeq(block_slot);
-    const any_signed = fork_types.AnySignedBeaconBlock.deserialize(
-        node.allocator,
-        .full,
-        fork_seq,
-        ssz_bytes,
-    ) catch return false;
-    defer any_signed.deinit(node.allocator);
 
     const sig_set = state_transition.signature_sets.proposer.getBlockProposerSignatureSet(
         node.allocator,
         node.config,
         cached.epoch_cache,
-        any_signed,
+        any_signed.*,
     ) catch return false;
 
     return state_transition.signature_sets.verifySingleSignatureSet(&sig_set) catch false;

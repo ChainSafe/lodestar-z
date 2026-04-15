@@ -34,6 +34,13 @@ pub const GossipAction = enum {
     ignore,
 };
 
+pub const GossipBlockValidation = enum {
+    accept,
+    reject,
+    ignore,
+    ignore_parent_unknown,
+};
+
 /// Maximum number of slots a block can be in the future before we ignore it.
 /// Accounts for MAXIMUM_GOSSIP_CLOCK_DISPARITY (500 ms ≈ 0–1 slots).
 const MAX_FUTURE_SLOT_TOLERANCE: u64 = 1;
@@ -75,13 +82,13 @@ pub const ChainState = struct {
 /// 4. [REJECT] Proposer index is within the known validator set.
 /// 5. [REJECT] Proposer matches the expected proposer for the slot.
 /// 6. [IGNORE] Parent block root is known.
-pub fn validateGossipBlock(
+pub fn validateGossipBlockDetailed(
     block_slot: u64,
     proposer_index: u64,
     parent_root: [32]u8,
     block_root: [32]u8,
     state: *const ChainState,
-) GossipAction {
+) GossipBlockValidation {
     // [IGNORE] Not from a future slot (tolerate current_slot + 1 for clock disparity).
     if (block_slot > state.current_slot + MAX_FUTURE_SLOT_TOLERANCE) return .ignore;
 
@@ -104,13 +111,33 @@ pub fn validateGossipBlock(
     }
 
     // [IGNORE] Parent root is known in our fork choice.
-    if (!state.isKnownBlockRoot(state.ptr, parent_root)) return .ignore;
+    if (!state.isKnownBlockRoot(state.ptr, parent_root)) return .ignore_parent_unknown;
 
     // Mark block as seen only after ALL checks pass — avoids poisoning the
     // seen-cache with blocks that would be rejected/ignored.
     state.seen_cache.markBlockSeen(block_root, block_slot) catch return .ignore;
 
     return .accept;
+}
+
+pub fn validateGossipBlock(
+    block_slot: u64,
+    proposer_index: u64,
+    parent_root: [32]u8,
+    block_root: [32]u8,
+    state: *const ChainState,
+) GossipAction {
+    return switch (validateGossipBlockDetailed(
+        block_slot,
+        proposer_index,
+        parent_root,
+        block_root,
+        state,
+    )) {
+        .accept => .accept,
+        .reject => .reject,
+        .ignore, .ignore_parent_unknown => .ignore,
+    };
 }
 
 // ── Attestation validation ──────────────────────────────────────────────────
@@ -344,6 +371,15 @@ test "gossip block: ignore unknown parent" {
     // Zero root is "unknown" in mock.
     const result = validateGossipBlock(100, 5, [_]u8{0} ** 32, [_]u8{0xCC} ** 32, &state);
     try testing.expectEqual(GossipAction.ignore, result);
+}
+
+test "gossip block: detailed validation distinguishes unknown parent" {
+    var cache = SeenCache.init(testing.allocator);
+    defer cache.deinit();
+
+    const state = makeMockChainState(&cache);
+    const result = validateGossipBlockDetailed(100, 5, [_]u8{0} ** 32, [_]u8{0xCC} ** 32, &state);
+    try testing.expectEqual(GossipBlockValidation.ignore_parent_unknown, result);
 }
 
 // ── Attestation tests ───────────────────────────────────────────────────────

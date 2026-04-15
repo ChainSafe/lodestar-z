@@ -32,6 +32,7 @@ const gossip_decoding = networking.gossip_decoding;
 
 const chain = @import("chain");
 const SeenCache = chain.SeenCache;
+const PreparedBlockInput = chain.PreparedBlockInput;
 const chain_gossip = chain.gossip_validation;
 
 const BeaconMetrics = @import("metrics.zig").BeaconMetrics;
@@ -102,6 +103,14 @@ pub const GossipIngressMetadata = struct {
     source: GossipSource = .{},
     message_id: MessageId = std.mem.zeroes(MessageId),
     seen_timestamp_ns: i64 = 0,
+    peer_id: ?[]const u8 = null,
+};
+
+pub const UnknownParentBlock = struct {
+    block: AnySignedBeaconBlock,
+    block_root: [32]u8,
+    seen_timestamp_sec: u64,
+    peer_id: ?[]const u8,
 };
 
 pub const GossipHandler = struct {
@@ -112,8 +121,13 @@ pub const GossipHandler = struct {
     node: *anyopaque,
 
     /// Called to run full STFN + chain import on a validated block.
-    /// Receives raw SSZ bytes (decompressed, not Snappy-wrapped).
-    importBlockFn: *const fn (ptr: *anyopaque, block_bytes: []const u8) anyerror!void,
+    /// Receives a parsed block plus canonical root/provenance metadata.
+    importPreparedBlockFn: *const fn (ptr: *anyopaque, prepared: PreparedBlockInput) anyerror!void,
+
+    /// Called when a gossip block has an unknown parent. The block should be
+    /// retained locally for unknown-parent sync, while still returning IGNORE
+    /// to gossipsub so it is not propagated onward.
+    queueUnknownBlockFn: ?*const fn (ptr: *anyopaque, block: UnknownParentBlock) anyerror!void = null,
 
     /// Resolve attestation committee metadata, signing root, and duplicate state.
     resolveAttestationFn: *const fn (
@@ -163,7 +177,7 @@ pub const GossipHandler = struct {
     // When null, signature verification is skipped (unsafe — for testing only).
 
     /// Verify block proposer BLS signature. Returns true if valid.
-    verifyBlockSignatureFn: ?*const fn (ptr: *anyopaque, ssz_bytes: []const u8) bool,
+    verifyBlockSignatureFn: ?*const fn (ptr: *anyopaque, block: *const AnySignedBeaconBlock) bool,
 
     /// Verify voluntary exit BLS signature. Returns true if valid.
     verifyVoluntaryExitSignatureFn: ?*const fn (ptr: *anyopaque, ssz_bytes: []const u8) bool,
@@ -242,7 +256,7 @@ pub const GossipHandler = struct {
         allocator: Allocator,
         io: std.Io,
         node: *anyopaque,
-        importBlockFn: *const fn (ptr: *anyopaque, block_bytes: []const u8) anyerror!void,
+        importPreparedBlockFn: *const fn (ptr: *anyopaque, prepared: PreparedBlockInput) anyerror!void,
         getForkSeqForSlot: *const fn (ptr: *anyopaque, slot: u64) ForkSeq,
         getProposerIndex: *const fn (ptr: *anyopaque, slot: u64) ?u32,
         isKnownBlockRoot: *const fn (ptr: *anyopaque, root: [32]u8) bool,
@@ -264,7 +278,8 @@ pub const GossipHandler = struct {
             .allocator = allocator,
             .io = io,
             .node = node,
-            .importBlockFn = importBlockFn,
+            .importPreparedBlockFn = importPreparedBlockFn,
+            .queueUnknownBlockFn = null,
             .resolveAttestationFn = resolveAttestationFn,
             .resolveAggregateFn = resolveAggregateFn,
             .importResolvedAttestationFn = null,
@@ -379,6 +394,15 @@ pub const GossipHandler = struct {
         return AnySignedAggregateAndProof.deserialize(self.allocator, self.current_fork_seq, ssz_bytes) catch null;
     }
 
+    fn parseSignedBeaconBlock(self: *GossipHandler, slot: u64, ssz_bytes: []const u8) ?AnySignedBeaconBlock {
+        return AnySignedBeaconBlock.deserialize(
+            self.allocator,
+            .full,
+            self.getForkSeqForSlot(self.node, slot),
+            ssz_bytes,
+        ) catch null;
+    }
+
     fn parseGossipAttestation(self: *GossipHandler, ssz_bytes: []const u8) ?AnyGossipAttestation {
         return AnyGossipAttestation.deserialize(self.allocator, self.current_fork_seq, ssz_bytes) catch null;
     }
@@ -451,42 +475,85 @@ pub const GossipHandler = struct {
 
         // Phase 1b: Fast validation.
         var chain_state = self.makeChainState();
-        const action = chain_gossip.validateGossipBlock(
+        const validation = chain_gossip.validateGossipBlockDetailed(
             blk.slot,
             blk.proposer_index,
             blk.parent_root,
             block_root,
             &chain_state,
         );
-        try checkAction(action);
+        switch (validation) {
+            .accept => {
+                var any_signed: ?AnySignedBeaconBlock = self.parseSignedBeaconBlock(blk.slot, ssz_bytes) orelse return GossipHandlerError.DecodeFailed;
+                errdefer if (any_signed) |*block| block.deinit(self.allocator);
 
-        // Phase 1c: BLS signature verification (expensive but required before ACCEPT).
-        // [REJECT] The proposer signature is valid.
-        if (self.verifyBlockSignatureFn) |verifyFn| {
-            if (!verifyFn(self.node, ssz_bytes)) {
-                scoped_log.debug("Gossip block rejected: invalid proposer signature slot={d}", .{blk.slot});
-                return GossipHandlerError.InvalidSignature;
-            }
+                // Phase 1c: BLS signature verification (expensive but required before ACCEPT).
+                // [REJECT] The proposer signature is valid.
+                if (self.verifyBlockSignatureFn) |verifyFn| {
+                    if (!verifyFn(self.node, &any_signed.?)) {
+                        scoped_log.debug("Gossip block rejected: invalid proposer signature slot={d}", .{blk.slot});
+                        return GossipHandlerError.InvalidSignature;
+                    }
+                }
+
+                // Phase 2: Full import (STFN + fork choice).
+                if (self.beacon_processor) |bp| {
+                    bp.ingest(.{ .gossip_block = .{
+                        .source = metadata.source,
+                        .message_id = metadata.message_id,
+                        .block = any_signed.?,
+                        .peer_id = if (metadata.peer_id) |peer_id|
+                            processor_mod.PeerIdHandle.initOwned(self.allocator, peer_id) catch .none
+                        else
+                            .none,
+                        .seen_timestamp_ns = metadata.seen_timestamp_ns,
+                    } });
+                    any_signed = null;
+                    return;
+                }
+
+                var full_block_root: [32]u8 = undefined;
+                try any_signed.?.beaconBlock().hashTreeRoot(self.allocator, &full_block_root);
+                const seen_timestamp_sec: u64 = if (metadata.seen_timestamp_ns > 0)
+                    @intCast(@divFloor(metadata.seen_timestamp_ns, std.time.ns_per_s))
+                else
+                    0;
+                var prepared: PreparedBlockInput = .{
+                    .block = any_signed.?,
+                    .source = .gossip,
+                    .block_root = full_block_root,
+                    .seen_timestamp_sec = seen_timestamp_sec,
+                };
+                prepared.setPeerId(metadata.peer_id);
+                any_signed = null;
+                try self.importPreparedBlockFn(self.node, prepared);
+                return;
+            },
+            .reject => return GossipHandlerError.ValidationRejected,
+            .ignore => return GossipHandlerError.ValidationIgnored,
+            .ignore_parent_unknown => {
+                if (self.queueUnknownBlockFn) |queueFn| {
+                    var any_signed = self.parseSignedBeaconBlock(blk.slot, ssz_bytes) orelse return GossipHandlerError.DecodeFailed;
+                    errdefer any_signed.deinit(self.allocator);
+
+                    var full_block_root: [32]u8 = undefined;
+                    try any_signed.beaconBlock().hashTreeRoot(self.allocator, &full_block_root);
+                    const seen_timestamp_sec: u64 = if (metadata.seen_timestamp_ns > 0)
+                        @intCast(@divFloor(metadata.seen_timestamp_ns, std.time.ns_per_s))
+                    else
+                        0;
+                    try queueFn(self.node, .{
+                        .block = any_signed,
+                        .block_root = full_block_root,
+                        .seen_timestamp_sec = seen_timestamp_sec,
+                        .peer_id = metadata.peer_id,
+                    });
+                    any_signed = undefined;
+                    self.seen_cache.markBlockSeen(block_root, blk.slot) catch {};
+                }
+                return GossipHandlerError.ValidationIgnored;
+            },
         }
-
-        // Phase 2: Full import (STFN + fork choice).
-        if (self.beacon_processor) |bp| {
-            const any_signed = AnySignedBeaconBlock.deserialize(
-                self.allocator,
-                .full,
-                self.getForkSeqForSlot(self.node, blk.slot),
-                ssz_bytes,
-            ) catch return GossipHandlerError.DecodeFailed;
-            bp.ingest(.{ .gossip_block = .{
-                .source = metadata.source,
-                .message_id = metadata.message_id,
-                .block = any_signed,
-                .seen_timestamp_ns = metadata.seen_timestamp_ns,
-            } });
-            return;
-        }
-
-        try self.importBlockFn(self.node, ssz_bytes);
     }
 
     /// Called when a gossip attestation arrives on a `beacon_attestation_{subnet}` topic.

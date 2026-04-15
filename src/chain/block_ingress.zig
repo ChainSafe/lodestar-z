@@ -20,6 +20,7 @@ const Slot = consensus_types.primitive.Slot.Type;
 const BlockSource = blocks.BlockSource;
 const BlockDataFetchPlan = chain_types.BlockDataFetchPlan;
 const ReadyBlockInput = chain_types.ReadyBlockInput;
+const PeerProvenance = chain_types.PeerProvenance;
 const DataAvailabilityStatus = blocks.DataAvailabilityStatus;
 
 pub const PendingIngressBlock = struct {
@@ -29,6 +30,7 @@ pub const PendingIngressBlock = struct {
     slot: Slot,
     block_data_plan: BlockDataFetchPlan,
     seen_timestamp_sec: u64,
+    peer: PeerProvenance,
 };
 
 pub const MetricsSnapshot = struct {
@@ -67,6 +69,7 @@ pub const PendingBlockIngress = struct {
         source: BlockSource,
         block_data_plan: BlockDataFetchPlan,
         seen_timestamp_sec: u64,
+        peer: PeerProvenance,
         da_status: DataAvailabilityStatus,
     ) !?ReadyBlockInput {
         if (isReadyStatus(da_status)) {
@@ -82,6 +85,7 @@ pub const PendingBlockIngress = struct {
                 .da_status = da_status,
                 .block_data_plan = block_data_plan,
                 .seen_timestamp_sec = seen_timestamp_sec,
+                .peer = peer,
             };
         }
 
@@ -99,6 +103,7 @@ pub const PendingBlockIngress = struct {
             .slot = slot,
             .block_data_plan = block_data_plan,
             .seen_timestamp_sec = seen_timestamp_sec,
+            .peer = peer,
         };
         errdefer {
             pending.block_data_plan.deinit(self.allocator);
@@ -129,6 +134,7 @@ pub const PendingBlockIngress = struct {
             .da_status = da_status,
             .block_data_plan = .none,
             .seen_timestamp_sec = entry.value.seen_timestamp_sec,
+            .peer = entry.value.peer,
         };
     }
 

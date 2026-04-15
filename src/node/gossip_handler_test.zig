@@ -3,6 +3,7 @@ const testing = std.testing;
 const Allocator = std.mem.Allocator;
 
 const networking = @import("networking");
+const chain_mod = @import("chain");
 const config_mod = @import("config");
 const ForkSeq = config_mod.ForkSeq;
 const preset = @import("preset").preset;
@@ -15,6 +16,7 @@ const ResolvedAttestation = processor_mod.work_item.ResolvedAttestation;
 const gossip_handler_mod = @import("gossip_handler.zig");
 const GossipHandler = gossip_handler_mod.GossipHandler;
 const GossipHandlerError = gossip_handler_mod.GossipHandlerError;
+const UnknownParentBlock = gossip_handler_mod.UnknownParentBlock;
 const snappy = @import("snappy").raw;
 
 // ============================================================
@@ -27,9 +29,22 @@ const phase0 = consensus_types.phase0;
 // --- Test stubs ---
 
 var g_imported_count: u32 = 0;
+var g_queued_unknown_block_count: u32 = 0;
+var g_last_unknown_slot: ?u64 = null;
+var g_last_unknown_peer: ?[]const u8 = null;
 
-fn stubImportBlock(_: *anyopaque, _: []const u8) anyerror!void {
+fn stubImportBlock(_: *anyopaque, prepared: chain_mod.PreparedBlockInput) anyerror!void {
+    var owned = prepared;
+    defer owned.deinit(testing.allocator);
     g_imported_count += 1;
+}
+
+fn stubQueueUnknownBlock(_: *anyopaque, block: UnknownParentBlock) anyerror!void {
+    var owned = block;
+    g_queued_unknown_block_count += 1;
+    g_last_unknown_slot = owned.block.beaconBlock().slot();
+    g_last_unknown_peer = owned.peer_id;
+    owned.block.deinit(testing.allocator);
 }
 
 fn stubGetProposerIndex(_: *anyopaque, slot: u64) ?u32 {
@@ -42,6 +57,10 @@ fn stubGetForkSeqForSlot(_: *anyopaque, _: u64) ForkSeq {
 
 fn stubIsKnownBlockRoot(_: *anyopaque, _: [32]u8) bool {
     return true; // all parents known
+}
+
+fn stubIsKnownBlockRootFalse(_: *anyopaque, _: [32]u8) bool {
+    return false;
 }
 
 fn stubGetValidatorCount(_: *anyopaque) u32 {
@@ -191,6 +210,39 @@ test "GossipHandler: onBeaconBlock ignores finalized block" {
 
     const result = handler.onBeaconBlock(compressed);
     try testing.expectError(GossipHandlerError.ValidationIgnored, result);
+}
+
+test "GossipHandler: onBeaconBlock queues unknown parent and ignores propagation" {
+    const alloc = testing.allocator;
+    const handler = try makeTestHandler(alloc);
+    defer handler.deinit();
+
+    handler.updateClock(10, 0, 0);
+    handler.isKnownBlockRoot = &stubIsKnownBlockRootFalse;
+    handler.queueUnknownBlockFn = &stubQueueUnknownBlock;
+    g_imported_count = 0;
+    g_queued_unknown_block_count = 0;
+    g_last_unknown_slot = null;
+    g_last_unknown_peer = null;
+
+    const compressed = try makeSnappyBlock(alloc, 10, 10);
+    defer alloc.free(compressed);
+
+    const result = handler.processGossipMessageWithSubnetAndMetadata(.beacon_block, null, compressed, .{
+        .peer_id = "peer-1",
+    });
+    switch (result) {
+        .ignored => {},
+        else => return error.TestUnexpectedResult,
+    }
+    try testing.expectEqual(@as(u32, 0), g_imported_count);
+    try testing.expectEqual(@as(u32, 1), g_queued_unknown_block_count);
+    try testing.expectEqual(@as(?u64, 10), g_last_unknown_slot);
+    try testing.expectEqualStrings("peer-1", g_last_unknown_peer.?);
+
+    const result2 = handler.onBeaconBlock(compressed);
+    try testing.expectError(GossipHandlerError.ValidationIgnored, result2);
+    try testing.expectEqual(@as(u32, 1), g_queued_unknown_block_count);
 }
 
 test "GossipHandler: onAttestation decodes and validates" {

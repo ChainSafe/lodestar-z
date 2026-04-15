@@ -626,7 +626,15 @@ pub fn processSyncByRootRequests(self: *BeaconNode, io: std.Io, svc: *networking
                     continue;
                 };
 
-                self.unknown_block_sync.onParentFetched(root, block_ssz) catch |err| {
+                const prepared = self.chainService().prepareRawPreparedBlockInput(block_ssz, .unknown_block_sync) catch |err| {
+                    log.warn("processSyncByRoot: block preparation failed for root {x:0>2}{x:0>2}{x:0>2}{x:0>2}...: {}", .{
+                        root[0], root[1], root[2], root[3], err,
+                    });
+                    self.unknown_block_sync.onFetchFailed(root);
+                    continue;
+                };
+
+                self.unknown_block_sync.onParentFetched(root, prepared) catch |err| {
                     log.warn("processSyncByRoot: onParentFetched error: {}", .{err});
                 };
             },
@@ -4982,6 +4990,7 @@ fn initGossipHandler(self: *BeaconNode) void {
     };
 
     if (self.gossip_handler) |gh| {
+        gh.queueUnknownBlockFn = &callbacks.queueUnknownBlockFromGossip;
         gh.importResolvedAttestationFn = &callbacks.importResolvedAttestation;
         gh.importResolvedAggregateFn = &callbacks.importResolvedAggregate;
         gh.importVoluntaryExitFn = &callbacks.importVoluntaryExit;

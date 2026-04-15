@@ -730,6 +730,7 @@ pub const BeaconNode = struct {
         const ready = try self.chainService().prepareBlockInput(any_signed, source);
         return switch (try self.completeReadyIngressDetailed(ready, null, .untracked)) {
             .ignored => .ignored,
+            .pending => .ignored,
             .queued => .queued,
             .imported => |result| .{ .imported = result },
         };
@@ -743,6 +744,7 @@ pub const BeaconNode = struct {
         const ready = try self.chainService().prepareBlockInput(any_signed, source);
         return switch (try self.completeReadyIngressDetailed(ready, null, .tracked)) {
             .ignored => .ignored,
+            .pending => .ignored,
             .queued => |ticket| .{ .queued = ticket orelse @panic("tracked ingress missing ticket") },
             .imported => |result| .{ .imported = result },
         };
@@ -760,8 +762,15 @@ pub const BeaconNode = struct {
         imported: ImportResult,
     };
 
+    pub const PreparedBlockIngressResult = union(enum) {
+        ignored,
+        pending,
+        imported: ImportResult,
+    };
+
     const DetailedReadyIngressResult = union(enum) {
         ignored,
+        pending,
         queued: ?BlockIngressTicket,
         imported: ImportResult,
     };
@@ -774,6 +783,7 @@ pub const BeaconNode = struct {
         const ready = try self.chainService().prepareRawBlockInput(block_bytes, source);
         return switch (try self.completeReadyIngressDetailed(ready, block_bytes, .untracked)) {
             .ignored => .ignored,
+            .pending => .ignored,
             .queued => .queued,
             .imported => |result| .{ .imported = result },
         };
@@ -787,6 +797,7 @@ pub const BeaconNode = struct {
         const ready = try self.chainService().prepareRawBlockInput(block_bytes, source);
         return switch (try self.completeReadyIngressDetailed(ready, block_bytes, .tracked)) {
             .ignored => .ignored,
+            .pending => .ignored,
             .queued => |ticket| .{ .queued = ticket orelse @panic("tracked ingress missing ticket") },
             .imported => |result| .{ .imported = result },
         };
@@ -798,6 +809,7 @@ pub const BeaconNode = struct {
     ) !ReadyIngressResult {
         return switch (try self.completeReadyIngressDetailed(ready, null, .untracked)) {
             .ignored => .ignored,
+            .pending => .ignored,
             .queued => .queued,
             .imported => |result| .{ .imported = result },
         };
@@ -809,6 +821,7 @@ pub const BeaconNode = struct {
     ) !TrackedReadyIngressResult {
         return switch (try self.completeReadyIngressDetailed(ready, null, .tracked)) {
             .ignored => .ignored,
+            .pending => .ignored,
             .queued => |ticket| .{ .queued = ticket orelse @panic("tracked ingress missing ticket") },
             .imported => |result| .{ .imported = result },
         };
@@ -821,8 +834,33 @@ pub const BeaconNode = struct {
     ) !?ImportResult {
         return switch (try self.completeReadyIngressDetailed(ready, raw_block_bytes, .untracked)) {
             .ignored => null,
+            .pending => null,
             .queued => null,
             .imported => |result| result,
+        };
+    }
+
+    pub fn importPreparedBlock(
+        self: *BeaconNode,
+        prepared: chain_mod.PreparedBlockInput,
+    ) !PreparedBlockIngressResult {
+        if (prepared.source == .gossip) {
+            const accepted = try self.chainService().acceptPreparedGossipBlock(prepared);
+            return switch (accepted) {
+                .pending_block_data => .pending,
+                .ready => |ready| switch (try self.completeReadyIngressDetailed(ready, null, .untracked)) {
+                    .ignored => .ignored,
+                    .pending, .queued => .pending,
+                    .imported => |result| .{ .imported = result },
+                },
+            };
+        }
+
+        const ready = try self.chainService().readyBlockInputFromPrepared(prepared);
+        return switch (try self.completeReadyIngressDetailed(ready, null, .untracked)) {
+            .ignored => .ignored,
+            .pending, .queued => .pending,
+            .imported => |result| .{ .imported = result },
         };
     }
 
@@ -838,18 +876,11 @@ pub const BeaconNode = struct {
             switch (err) {
                 error.ParentUnknown => {
                     self.recordBlockImportResult(owned_ready.source, "queued_unknown_parent", 1);
-                    if (raw_block_bytes) |bytes| {
-                        self.queueOrphanBlock(owned_ready.block, bytes);
-                    } else {
-                        const serialized = owned_ready.block.serialize(self.allocator) catch |serialize_err| {
-                            owned_ready.deinit(self.allocator);
-                            return serialize_err;
-                        };
-                        defer self.allocator.free(serialized);
-                        self.queueOrphanBlock(owned_ready.block, serialized);
-                    }
-                    owned_ready.deinit(self.allocator);
-                    return .ignored;
+                    _ = raw_block_bytes;
+                    const peer_id = owned_ready.peerId();
+                    const prepared = owned_ready.intoPrepared(self.allocator);
+                    _ = try self.queueOrphanPreparedBlock(prepared, peer_id);
+                    return .pending;
                 },
                 error.AlreadyKnown, error.WouldRevertFinalizedSlot => {
                     self.recordBlockImportResult(owned_ready.source, blockImportOutcomeLabel(err), 1);
@@ -2329,32 +2360,23 @@ pub const BeaconNode = struct {
 
     /// Queue an orphan block whose parent is not yet known.
     ///
-    /// Computes the block root and stores the raw SSZ bytes in the
-    /// UnknownBlockSync pending set. The parent will be fetched via
-    /// BeaconBlocksByRoot during the next sync cycle.
-    pub fn queueOrphanBlock(
+    /// Stores the parsed block plus canonical metadata in UnknownBlockSync and
+    /// seeds UnknownChainSync with the same root/peer provenance.
+    pub fn queueOrphanPreparedBlock(
         self: *BeaconNode,
-        any_signed: AnySignedBeaconBlock,
-        ssz_bytes: []const u8,
-    ) void {
-        // Compute the block root using the fork-polymorphic interface.
-        const beacon_block = any_signed.beaconBlock();
-        const block_slot = beacon_block.slot();
-        const parent_root = beacon_block.parentRoot().*;
+        prepared: chain_mod.PreparedBlockInput,
+        peer_id: ?[]const u8,
+    ) !bool {
+        const effective_peer_id = prepared.peerId() orelse peer_id;
+        const slot = prepared.slot();
+        const parent_root = prepared.block.beaconBlock().parentRoot().*;
+        const block_root = prepared.block_root;
 
-        var block_root: [32]u8 = undefined;
-        beacon_block.hashTreeRoot(self.allocator, &block_root) catch return;
-
-        const added = self.unknown_block_sync.addPendingBlock(
-            block_root,
-            parent_root,
-            block_slot,
-            ssz_bytes,
-        ) catch return;
+        const added = try self.unknown_block_sync.addPendingBlockWithPeer(prepared, effective_peer_id);
 
         if (added) {
             node_log.debug("Queued orphan block slot={d} parent={s}... ({d} pending)", .{
-                block_slot,
+                slot,
                 &std.fmt.bytesToHex(parent_root[0..4], .lower),
                 self.unknown_block_sync.pendingCount(),
             });
@@ -2363,17 +2385,35 @@ pub const BeaconNode = struct {
         // Also feed the unknown chain sync — it tracks the parent root as
         // an unknown chain and builds backwards to our fork choice.
         self.unknown_chain_sync.onUnknownBlockInput(
-            block_slot,
+            slot,
             block_root,
             parent_root,
-            null, // peer_id not available from gossip context
+            effective_peer_id,
         ) catch {};
 
         // If the parent root is truly unknown, start a chain for it.
         self.unknown_chain_sync.onUnknownBlockRoot(
             parent_root,
-            null,
+            effective_peer_id,
         ) catch {};
+
+        return added;
+    }
+
+    /// Queue an orphan block whose parent is not yet known.
+    ///
+    /// Computes the canonical block root once and forwards into the prepared
+    /// orphan queue.
+    pub fn queueOrphanBlock(
+        self: *BeaconNode,
+        any_signed: AnySignedBeaconBlock,
+        source: BlockSource,
+        seen_timestamp_sec: u64,
+        peer_id: ?[]const u8,
+    ) !bool {
+        var prepared = try self.chainService().preparePreparedBlockInput(any_signed, source, seen_timestamp_sec);
+        prepared.setPeerId(peer_id);
+        return self.queueOrphanPreparedBlock(prepared, peer_id);
     }
 
     /// After a block is successfully imported, check if any orphan children
@@ -3639,33 +3679,34 @@ pub fn processorHandlerCallback(item: WorkItem, context: *anyopaque) void {
         .gossip_block => |work| {
             const started_at_ns = wallNowNs(node.io);
             defer observeGossipProcessorWork(node, .block, work.seen_timestamp_ns, started_at_ns);
+            var peer_id = work.peer_id;
+            defer peer_id.deinit();
             const seen_timestamp_sec: u64 = if (work.seen_timestamp_ns > 0)
                 @intCast(@divFloor(work.seen_timestamp_ns, std.time.ns_per_s))
             else
                 0;
-            const accepted = node.chainService().acceptGossipBlock(work.block, seen_timestamp_sec) catch |err| {
+            var prepared = node.chainService().preparePreparedBlockInput(work.block, .gossip, seen_timestamp_sec) catch |err| {
                 work.block.deinit(node.allocator);
                 node_log.debug("processor gossip block ingress failed: {}", .{err});
                 return;
             };
+            prepared.setPeerId(peer_id.bytes());
 
-            const ready = switch (accepted) {
-                .pending_block_data => return,
-                .ready => |ready| ready,
-            };
-
-            const maybe_result = node.completeReadyIngress(ready, null) catch |err| {
+            const result = node.importPreparedBlock(prepared) catch |err| {
                 node_log.debug("processor gossip block import failed: {}", .{err});
                 return;
             };
-            if (maybe_result) |result| {
-                node_log.debug("PROCESSOR: block imported slot={d} root={x:0>2}{x:0>2}{x:0>2}{x:0>2}...", .{
-                    result.slot,
-                    result.block_root[0],
-                    result.block_root[1],
-                    result.block_root[2],
-                    result.block_root[3],
-                });
+            switch (result) {
+                .ignored, .pending => {},
+                .imported => |imported| {
+                    node_log.debug("PROCESSOR: block imported slot={d} root={x:0>2}{x:0>2}{x:0>2}{x:0>2}...", .{
+                        imported.slot,
+                        imported.block_root[0],
+                        imported.block_root[1],
+                        imported.block_root[2],
+                        imported.block_root[3],
+                    });
+                },
             }
         },
         .attestation_batch => |batch| {

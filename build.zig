@@ -204,6 +204,13 @@ pub fn build(b: *std.Build) void {
     });
     b.modules.put(b.dupe("fork_choice"), module_fork_choice) catch @panic("OOM");
 
+    const module_prepared_block = b.createModule(.{
+        .root_source_file = b.path("src/prepared_block.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    b.modules.put(b.dupe("prepared_block"), module_prepared_block) catch @panic("OOM");
+
     const module_chain = b.createModule(.{
         .root_source_file = b.path("src/chain/root.zig"),
         .target = target,
@@ -870,6 +877,9 @@ pub fn build(b: *std.Build) void {
     module_testing.addImport("api", module_api);
     module_testing.addImport("chain", module_chain);
 
+    module_prepared_block.addImport("consensus_types", module_consensus_types);
+    module_prepared_block.addImport("fork_types", module_fork_types);
+
     // chain module imports
     module_chain.addImport("consensus_types", module_consensus_types);
     module_chain.addImport("preset", module_preset);
@@ -886,11 +896,15 @@ pub fn build(b: *std.Build) void {
     module_chain.addImport("kzg", module_kzg);
     module_chain.addImport("execution", module_execution);
     module_chain.addImport("log", module_log);
+    module_chain.addImport("prepared_block", module_prepared_block);
 
     // sync module imports
     module_sync.addImport("db", module_db);
     module_sync.addImport("networking", module_networking);
     module_sync.addImport("preset", module_preset);
+    module_sync.addImport("prepared_block", module_prepared_block);
+    module_sync.addImport("consensus_types", module_consensus_types);
+    module_sync.addImport("fork_types", module_fork_types);
 
     // api module imports
     module_api.addImport("fork_types", module_fork_types);

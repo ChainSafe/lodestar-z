@@ -119,7 +119,7 @@ pub const SyncCallbackCtx = struct {
         return .{
             .ptr = @ptrCast(self),
             .requestBlockByRootFn = &syncRequestBlockByRootUnknownBlock,
-            .importBlockFn = &syncImportBlock,
+            .importBlockFn = &syncImportPreparedBlock,
             .getConnectedPeersFn = &syncGetConnectedPeers,
         };
     }
@@ -144,6 +144,7 @@ pub const SyncCallbackCtx = struct {
         return .{
             .ptr = @ptrCast(self),
             .importBlockFn = &syncImportBlock,
+            .importPreparedBlockFn = &syncImportPreparedBlock,
             .processChainSegmentFn = &syncProcessChainSegment,
             .requestBlocksByRangeFn = &syncRequestBlocksByRange,
             .requestBlockByRootFn = &syncRequestBlockByRootUnknownBlock,
@@ -170,6 +171,25 @@ pub const SyncCallbackCtx = struct {
             .queued => return error.ImportPending,
             .imported => |imported| {
                 scoped_log.debug("SyncCallbackCtx: imported slot={d}", .{imported.slot});
+            },
+        }
+    }
+
+    fn syncImportPreparedBlock(ptr: *anyopaque, prepared: chain_mod.PreparedBlockInput) anyerror!void {
+        const ctx: *SyncCallbackCtx = @ptrCast(@alignCast(ptr));
+        const node = ctx.node;
+
+        const result = node.importPreparedBlock(prepared) catch |err| {
+            if (err != error.AlreadyKnown and err != error.WouldRevertFinalizedSlot) {
+                scoped_log.debug("sync prepared import error: {}", .{err});
+            }
+            return err;
+        };
+        switch (result) {
+            .ignored => {},
+            .pending => return error.ImportPending,
+            .imported => |imported| {
+                scoped_log.debug("SyncCallbackCtx: imported prepared slot={d}", .{imported.slot});
             },
         }
     }

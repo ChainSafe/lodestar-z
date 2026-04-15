@@ -175,6 +175,7 @@ pub const GossipBlockWork = struct {
     source: GossipSource,
     message_id: MessageId,
     block: AnySignedBeaconBlock,
+    peer_id: PeerIdHandle = .none,
     seen_timestamp_ns: i64,
 };
 
@@ -608,7 +609,10 @@ pub const WorkItem = union(WorkType) {
     pub fn deinit(self: WorkItem, allocator: std.mem.Allocator) void {
         switch (self) {
             .delayed_block => |work| work.block.deinit(allocator),
-            .gossip_block => |work| work.block.deinit(allocator),
+            .gossip_block => |work| {
+                work.block.deinit(allocator);
+                work.peer_id.deinit();
+            },
             .gossip_execution_payload => |work| work.payload.deinit(),
             .gossip_blob => |work| work.data.deinit(),
             .gossip_data_column => |work| work.data.deinit(),
