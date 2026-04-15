@@ -19,7 +19,10 @@ pub fn RefCount(comptime T: type) type {
             return ptr;
         }
 
-        /// private deinit, consumer should call release() instead
+        /// Private deinit invoked internally only by
+        /// the last remaining reference counted instance of T.
+        ///
+        /// Consumer should call unref() instead.
         fn deinit(self: *@This()) void {
             self.instance.deinit();
             self.allocator.destroy(self);
