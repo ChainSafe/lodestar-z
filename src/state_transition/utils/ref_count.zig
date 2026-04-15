@@ -35,8 +35,8 @@ pub fn RefCount(comptime T: type) type {
         }
 
         pub fn unref(self: *@This()) void {
-            const old_rc = self._ref_count.fetchSub(1, .release);
-            if (old_rc == 1) {
+            if (self._ref_count.fetchSub(1, .release) == 1) {
+                _ = self._ref_count.load(.acquire);
                 self.deinit();
             }
         }
