@@ -156,7 +156,7 @@ export function verifyMultipleAggregateSignatures(
  *
  * Signatures are deserialized and validated with infinity and group checks before aggregation.
  */
-export declare function asyncAggregateWithRandomness(sets: PkAndSerializedSig[]): Promise<PkAndSig>;
+export declare function aggregateWithRandomness(sets: PkAndSerializedSig[]): PkAndSig;
 
 /**
  * Aggregate multiple signatures into a single signature.

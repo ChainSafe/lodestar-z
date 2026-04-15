@@ -2,6 +2,12 @@
 //!
 //! Provides multi-threaded versions of aggregation and verification functions
 //! using a persistent pool of worker threads to avoid thread creation overhead.
+//!
+//! Multiple callers can dispatch work concurrently. Each job owns its own
+//! pairing buffers. Workers pull work items from a shared queue and use atomic
+//! counters within each job to grab individual signature sets to process,
+//! similar to how the Rust `blst` crate's `verify_multiple_aggregate_signatures`
+//! works with `threadpool::ThreadPool`.
 const ThreadPool = @This();
 
 const std = @import("std");
@@ -16,6 +22,11 @@ const Signature = blst.Signature;
 const BlstError = @import("error.zig").BlstError;
 const SecretKey = @import("SecretKey.zig");
 
+const PoolError = error{
+    /// Pool is currently shutting down.
+    ShuttingDown,
+};
+
 /// This is pretty arbitrary
 pub const MAX_WORKERS: usize = 16;
 
@@ -26,103 +37,143 @@ const PairingBuf = struct {
     data: [Pairing.sizeOf()]u8 align(Pairing.buf_align) = undefined,
 };
 
-const WorkItem = union(enum) {
-    verify_multi: *VerifyMultiJob,
-    aggregate_verify: *AggVerifyJob,
-};
-
 pub const Opts = struct {
     n_workers: u16 = 1,
 };
 
 allocator: Allocator,
 n_workers: usize,
-threads: [MAX_WORKERS - 1]std.Thread = undefined,
-work_ready: [MAX_WORKERS]std.Thread.ResetEvent = [_]std.Thread.ResetEvent{.{}} ** MAX_WORKERS,
-work_done: [MAX_WORKERS]std.Thread.ResetEvent = [_]std.Thread.ResetEvent{.{}} ** MAX_WORKERS,
-work_items: [MAX_WORKERS]?WorkItem = [_]?WorkItem{null} ** MAX_WORKERS,
+threads: [MAX_WORKERS]std.Thread = undefined,
+/// Signals workers to exit after draining the queue. Checked by `workerLoop`
+/// only when the queue is empty, so all pending items are processed first.
 shutdown: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
-pairing_bufs: [MAX_WORKERS]PairingBuf = [_]PairingBuf{.{}} ** MAX_WORKERS,
-partial_p1: [MAX_WORKERS]c.blst_p1 = undefined,
-partial_p2: [MAX_WORKERS]c.blst_p2 = undefined,
-has_work: [MAX_WORKERS]bool = [_]bool{false} ** MAX_WORKERS,
-/// Mutex for dispatching multi-threaded verification work.
-dispatch_mutex: std.Thread.Mutex = .{},
+/// Signals `pushBatch` to reject new work. Set before `shutdown` so no new
+/// items enter the queue while workers are draining it.
+shutting_down: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+queue: JobQueue,
+
+/// Thread-safe FIFO work queue. Workers wait on `cond` for new items
+/// and pop them in submission order.
+const JobQueue = struct {
+    mutex: std.Thread.Mutex = .{},
+    cond: std.Thread.Condition = .{},
+    head: ?*WorkItem = null,
+    tail: ?*WorkItem = null,
+
+    /// Pushes a batch of `WorkItem`s to the `JobQueue`.
+    ///
+    /// Returns false if the pool has signalled that it is shutting down and does
+    /// not push any work.
+    fn pushBatch(self: *JobQueue, pool: *ThreadPool, items: []*WorkItem) bool {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        if (pool.shutting_down.load(.acquire)) return false;
+
+        for (items) |item| {
+            item.next = null;
+            if (self.tail) |tail| {
+                tail.next = item;
+            } else {
+                self.head = item;
+            }
+            self.tail = item;
+        }
+        self.cond.broadcast();
+        return true;
+    }
+
+    fn pop(self: *JobQueue) ?*WorkItem {
+        const item = self.head orelse return null;
+        self.head = item.next;
+        if (self.head == null) {
+            self.tail = null;
+        }
+        item.next = null;
+        return item;
+    }
+};
+
+/// A work item submitted to the queue. Each worker that picks one up
+/// executes the work function, then signals `done`.
+const WorkItem = struct {
+    exec_fn: *const fn (*WorkItem) void,
+    done: std.Thread.ResetEvent = .{},
+    next: ?*WorkItem = null,
+};
 
 /// Creates a thread pool with the specified number of workers.
 /// The caller owns the returned pool and must call `deinit` when done.
-pub fn init(allocator: Allocator, opts: Opts) (Allocator.Error || std.Thread.SpawnError)!*ThreadPool {
-    std.debug.assert(opts.n_workers >= 1 and opts.n_workers <= MAX_WORKERS);
-    const pool = try allocator.create(ThreadPool);
-    pool.* = .{ .allocator = allocator, .n_workers = opts.n_workers };
-    // Workers start from index 1; index 0 is reserved for the calling thread
-    // which executes as worker 0 inside dispatch() to avoid wasting a core.
-    for (1..pool.n_workers) |i| {
-        pool.threads[i - 1] = try std.Thread.spawn(.{}, workerLoop, .{ pool, i });
+pub fn init(allocator_: Allocator, opts: Opts) (Allocator.Error || std.Thread.SpawnError)!*ThreadPool {
+    std.debug.assert(opts.n_workers >= 1);
+    std.debug.assert(opts.n_workers <= MAX_WORKERS);
+
+    const pool = try allocator_.create(ThreadPool);
+    pool.* = .{
+        .allocator = allocator_,
+        .n_workers = opts.n_workers,
+        .queue = .{},
+    };
+    for (0..pool.n_workers) |i| {
+        pool.threads[i] = try std.Thread.spawn(.{}, workerLoop, .{pool});
     }
     return pool;
 }
 
 /// Shuts down the thread pool and frees resources.
+///
+/// Cleanup happens in 3 phases:
+///   1) stop accepting new work,
+///   2) tell workers to drain queue then exist,
+///   3) wait for workers to finish draining then cleanup
+///
 /// The pool pointer is invalid after this call.
 pub fn deinit(pool: *ThreadPool) void {
+    // Phase 1: stop accepting new work
+    pool.queue.mutex.lock();
+    pool.shutting_down.store(true, .release);
+
+    // Phase 2: tell workers to drain queue then exit
     pool.shutdown.store(true, .release);
-    const n_workers = pool.n_workers;
-    for (1..n_workers) |i| {
-        pool.work_ready[i].set();
-    }
-    for (pool.threads[0 .. n_workers - 1]) |t| {
-        t.join();
-    }
+    pool.queue.cond.broadcast();
+    pool.queue.mutex.unlock();
+
+    // Phase 3: wait for workers to finish draining and cleanup
+    for (pool.threads[0..pool.n_workers]) |t| t.join();
     pool.allocator.destroy(pool);
 }
 
-/// Handles a `WorkItem`.
+/// Main loop for worker threads.
 ///
-/// Currently supports `aggregateVerify` and `verifyMultipleAggregateSignatures`.
-fn workerLoop(pool: *ThreadPool, worker_index: usize) void {
+/// Pops work first before checking for `shutdown` signal, allowing
+/// workers to finish their work before closing.
+///
+/// Safety: it is safe to pop work first since we stop accepting work
+/// in `pushBatch` by checking for the `shutting_down` signal; no new
+/// work can be accepted at the point of entry into this loop.
+fn workerLoop(pool: *ThreadPool) void {
     while (true) {
-        pool.work_ready[worker_index].wait();
-        pool.work_ready[worker_index].reset();
+        const item: *WorkItem = blk: {
+            pool.queue.mutex.lock();
+            defer pool.queue.mutex.unlock();
 
-        if (pool.shutdown.load(.acquire)) return;
-
-        const item = pool.work_items[worker_index] orelse {
-            pool.work_done[worker_index].set();
-            continue;
+            while (true) {
+                if (pool.queue.pop()) |wi| break :blk wi;
+                if (pool.shutdown.load(.acquire)) return;
+                pool.queue.cond.wait(&pool.queue.mutex);
+            }
         };
 
-        switch (item) {
-            .verify_multi => |job| execVerifyMulti(pool, job, worker_index),
-            .aggregate_verify => |job| execAggVerify(pool, job, worker_index),
-        }
-
-        pool.work_items[worker_index] = null;
-        pool.work_done[worker_index].set();
+        item.exec_fn(item);
+        item.done.set();
     }
 }
 
-fn dispatch(pool: *ThreadPool, item: WorkItem, n_active: usize) void {
-    std.debug.assert(n_active <= pool.n_workers);
-
-    // Signal background workers before main thread starts
-    for (1..n_active) |i| {
-        pool.work_items[i] = item;
-        pool.work_ready[i].set();
-    }
-
-    // Main thread executes as worker 0
-    pool.work_items[0] = item;
-    switch (item) {
-        .verify_multi => |job| execVerifyMulti(pool, job, 0),
-        .aggregate_verify => |job| execAggVerify(pool, job, 0),
-    }
-    pool.work_items[0] = null;
-
-    // Wait for all background workers
-    for (1..n_active) |i| {
-        pool.work_done[i].wait();
-        pool.work_done[i].reset();
+/// Submit work items to the pool and wait for all to complete.
+fn submitAndWait(pool: *ThreadPool, items: []*WorkItem) PoolError!void {
+    if (!pool.queue.pushBatch(pool, items)) return PoolError.ShuttingDown;
+    for (items) |item| {
+        item.done.wait();
     }
 }
 
@@ -136,46 +187,60 @@ const VerifyMultiJob = struct {
     sigs_groupcheck: bool,
     counter: std.atomic.Value(usize),
     err_flag: std.atomic.Value(bool),
+    /// Workers write committed pairing results here. Indexed by result_count.
+    result_bufs: []PairingBuf,
+    result_count: std.atomic.Value(usize),
 };
 
-fn execVerifyMulti(pool: *ThreadPool, job: *VerifyMultiJob, worker_index: usize) void {
-    var pairing = Pairing.init(
-        &pool.pairing_bufs[worker_index].data,
-        true,
-        job.dst,
-    );
+const VerifyMultiWorkItem = struct {
+    base: WorkItem,
+    job: *VerifyMultiJob,
 
-    var did_work = false;
-    const n_elems = job.pks.len;
+    fn exec(base_item: *WorkItem) void {
+        const self: *VerifyMultiWorkItem = @fieldParentPtr("base", base_item);
+        const job = self.job;
 
-    while (true) {
-        const i = job.counter.fetchAdd(1, .monotonic);
-        if (i >= n_elems) break;
-        if (job.err_flag.load(.acquire)) break;
+        // Each worker gets its own pairing buffer on the stack
+        var buf: PairingBuf = .{};
+        var pairing = Pairing.init(&buf.data, true, job.dst);
 
-        did_work = true;
+        var did_work = false;
+        const n_elems = job.pks.len;
 
-        pairing.mulAndAggregate(
-            job.pks[i],
-            job.pks_validate,
-            job.sigs[i],
-            job.sigs_groupcheck,
-            &job.rands[i],
-            RAND_BITS,
-            &job.msgs[i],
-        ) catch {
-            job.err_flag.store(true, .release);
-            break;
-        };
+        while (true) {
+            const i = job.counter.fetchAdd(1, .monotonic);
+            if (i >= n_elems) break;
+            if (job.err_flag.load(.acquire)) break;
+
+            did_work = true;
+
+            pairing.mulAndAggregate(
+                job.pks[i],
+                job.pks_validate,
+                job.sigs[i],
+                job.sigs_groupcheck,
+                &job.rands[i],
+                RAND_BITS,
+                &job.msgs[i],
+            ) catch {
+                job.err_flag.store(true, .release);
+                break;
+            };
+        }
+
+        if (did_work) {
+            pairing.commit();
+            const slot = job.result_count.fetchAdd(1, .acq_rel);
+            job.result_bufs[slot] = buf;
+        }
     }
-
-    if (did_work) pairing.commit();
-    pool.has_work[worker_index] = did_work;
-}
+};
 
 /// Verifies multiple aggregate signatures in parallel using the thread pool.
 ///
 /// This is the multi-threaded version of the same function in `fast_verify.zig`.
+/// Multiple callers may invoke this concurrently — each call owns its own
+/// pairing buffers and job state, workers pull from a shared queue.
 pub fn verifyMultipleAggregateSignatures(
     pool: *ThreadPool,
     n_elems: usize,
@@ -186,7 +251,7 @@ pub fn verifyMultipleAggregateSignatures(
     sigs: []const *Signature,
     sigs_groupcheck: bool,
     rands: []const [32]u8,
-) BlstError!bool {
+) (BlstError || PoolError)!bool {
     if (n_elems == 0 or
         pks.len != n_elems or
         sigs.len != n_elems or
@@ -194,14 +259,12 @@ pub fn verifyMultipleAggregateSignatures(
         rands.len != n_elems)
         return BlstError.VerifyFail;
 
-    pool.dispatch_mutex.lock();
-    defer pool.dispatch_mutex.unlock();
-
     // Single-threaded fallback for small inputs or single worker
     if (n_elems <= 2 or pool.n_workers <= 1) {
+        var buf: PairingBuf = .{};
         const fast_verify = @import("fast_verify.zig");
         return fast_verify.verifyMultipleAggregateSignatures(
-            &pool.pairing_bufs[0].data,
+            &buf.data,
             n_elems,
             msgs,
             dst,
@@ -215,6 +278,8 @@ pub fn verifyMultipleAggregateSignatures(
 
     const n_active = @min(pool.n_workers, n_elems);
 
+    var result_bufs: [MAX_WORKERS]PairingBuf = undefined;
+
     var job = VerifyMultiJob{
         .pks = pks[0..n_elems],
         .sigs = sigs[0..n_elems],
@@ -225,14 +290,29 @@ pub fn verifyMultipleAggregateSignatures(
         .sigs_groupcheck = sigs_groupcheck,
         .counter = std.atomic.Value(usize).init(0),
         .err_flag = std.atomic.Value(bool).init(false),
+        .result_bufs = &result_bufs,
+        .result_count = std.atomic.Value(usize).init(0),
     };
 
-    @memset(pool.has_work[0..n_active], false);
-    pool.dispatch(.{ .verify_multi = &job }, n_active);
+    // Create work items on the stack — one per active worker
+    var work_items: [MAX_WORKERS]VerifyMultiWorkItem = undefined;
+    var item_ptrs: [MAX_WORKERS]*WorkItem = undefined;
+    for (0..n_active) |i| {
+        work_items[i] = .{
+            .base = .{ .exec_fn = VerifyMultiWorkItem.exec },
+            .job = &job,
+        };
+        item_ptrs[i] = &work_items[i].base;
+    }
+
+    try pool.submitAndWait(item_ptrs[0..n_active]);
 
     if (job.err_flag.load(.acquire)) return BlstError.VerifyFail;
 
-    return mergeAndVerify(pool, n_active, null);
+    const n_results = job.result_count.load(.acquire);
+    if (n_results == 0) return BlstError.VerifyFail;
+
+    return mergeAndVerify(&result_bufs, n_results, null);
 }
 
 const AggVerifyJob = struct {
@@ -243,42 +323,50 @@ const AggVerifyJob = struct {
     n_elems: usize,
     counter: std.atomic.Value(usize),
     err_flag: std.atomic.Value(bool),
+    result_bufs: []PairingBuf,
+    result_count: std.atomic.Value(usize),
 };
 
-fn execAggVerify(pool: *ThreadPool, job: *AggVerifyJob, worker_index: usize) void {
-    var pairing = Pairing.init(
-        &pool.pairing_bufs[worker_index].data,
-        true,
-        job.dst,
-    );
+const AggVerifyWorkItem = struct {
+    base: WorkItem,
+    job: *AggVerifyJob,
 
-    var did_work = false;
+    fn exec(base_item: *WorkItem) void {
+        const self: *AggVerifyWorkItem = @fieldParentPtr("base", base_item);
+        const job = self.job;
 
-    while (true) {
-        const i = job.counter.fetchAdd(1, .monotonic);
-        if (i >= job.n_elems) break;
-        if (job.err_flag.load(.acquire)) break;
+        var buf: PairingBuf = .{};
+        var pairing = Pairing.init(&buf.data, true, job.dst);
 
-        did_work = true;
+        var did_work = false;
 
-        // Workers only aggregate pk+msg pairs; the signature is handled
-        // separately on the main thread after dispatch.
-        pairing.aggregate(
-            job.pks[i],
-            job.pks_validate,
-            null,
-            false,
-            &job.msgs[i],
-            null,
-        ) catch {
-            job.err_flag.store(true, .release);
-            break;
-        };
+        while (true) {
+            const i = job.counter.fetchAdd(1, .monotonic);
+            if (i >= job.n_elems) break;
+            if (job.err_flag.load(.acquire)) break;
+
+            did_work = true;
+
+            pairing.aggregate(
+                job.pks[i],
+                job.pks_validate,
+                null,
+                false,
+                &job.msgs[i],
+                null,
+            ) catch {
+                job.err_flag.store(true, .release);
+                break;
+            };
+        }
+
+        if (did_work) {
+            pairing.commit();
+            const slot = job.result_count.fetchAdd(1, .acq_rel);
+            job.result_bufs[slot] = buf;
+        }
     }
-
-    if (did_work) pairing.commit();
-    pool.has_work[worker_index] = did_work;
-}
+};
 
 /// Verifies an aggregated signature against multiple messages and public keys
 /// in parallel using the thread pool.
@@ -292,16 +380,14 @@ pub fn aggregateVerify(
     dst: []const u8,
     pks: []const *PublicKey,
     pks_validate: bool,
-) BlstError!bool {
+) (BlstError || PoolError)!bool {
     const n_elems = pks.len;
     if (n_elems == 0 or msgs.len != n_elems) return BlstError.VerifyFail;
 
-    pool.dispatch_mutex.lock();
-    defer pool.dispatch_mutex.unlock();
-
     // Single-threaded fallback
     if (n_elems <= 2 or pool.n_workers <= 1) {
-        var pairing = Pairing.init(&pool.pairing_bufs[0].data, true, dst);
+        var buf: PairingBuf = .{};
+        var pairing = Pairing.init(&buf.data, true, dst);
         try pairing.aggregate(pks[0], pks_validate, sig, sig_groupcheck, &msgs[0], null);
         for (1..n_elems) |i| {
             try pairing.aggregate(pks[i], pks_validate, null, false, &msgs[i], null);
@@ -314,8 +400,10 @@ pub fn aggregateVerify(
 
     const n_active = @min(pool.n_workers, n_elems);
 
-    // Validate `sig` on the main thread (runs concurrently with merge below)
     if (sig_groupcheck) sig.validate(false) catch return false;
+
+    var result_bufs: [MAX_WORKERS]PairingBuf = undefined;
+
     var job = AggVerifyJob{
         .pks = pks[0..n_elems],
         .msgs = msgs[0..n_elems],
@@ -324,39 +412,46 @@ pub fn aggregateVerify(
         .n_elems = n_elems,
         .counter = std.atomic.Value(usize).init(0),
         .err_flag = std.atomic.Value(bool).init(false),
+        .result_bufs = &result_bufs,
+        .result_count = std.atomic.Value(usize).init(0),
     };
 
-    @memset(pool.has_work[0..n_active], false);
-    pool.dispatch(.{ .aggregate_verify = &job }, n_active);
+    var work_items: [MAX_WORKERS]AggVerifyWorkItem = undefined;
+    var item_ptrs: [MAX_WORKERS]*WorkItem = undefined;
+    for (0..n_active) |i| {
+        work_items[i] = .{
+            .base = .{ .exec_fn = AggVerifyWorkItem.exec },
+            .job = &job,
+        };
+        item_ptrs[i] = &work_items[i].base;
+    }
+
+    try pool.submitAndWait(item_ptrs[0..n_active]);
 
     if (job.err_flag.load(.acquire)) return false;
+
+    const n_results = job.result_count.load(.acquire);
+    if (n_results == 0) return false;
 
     var gtsig = c.blst_fp12{};
     Pairing.aggregated(&gtsig, sig);
 
-    return mergeAndVerify(pool, n_active, &gtsig);
+    return mergeAndVerify(&result_bufs, n_results, &gtsig);
 }
 
-/// Merges all of `pool`'s `pairing_bufs` and execute `finalVerify` on the accumulated `acc`.
-///
-/// Perform final verification of `gtsig`, returning `false` if verification fails.
-fn mergeAndVerify(pool: *ThreadPool, n_active: usize, gtsig: ?*const c.blst_fp12) BlstError!bool {
-    var acc_idx: ?usize = null;
-    for (0..n_active) |i| {
-        if (pool.has_work[i]) {
-            acc_idx = i;
-            break;
-        }
-    }
+/// Merges the first `n_results` pairing buffers and executes `finalVerify`.
+fn mergeAndVerify(
+    result_bufs: *[MAX_WORKERS]PairingBuf,
+    n_results: usize,
+    gtsig: ?*const c.blst_fp12,
+) BlstError!bool {
+    if (n_results == 0) return BlstError.MergeError;
 
-    const first = acc_idx orelse return BlstError.MergeError;
-    var acc = Pairing{ .ctx = @ptrCast(&pool.pairing_bufs[first].data) };
+    var acc = Pairing{ .ctx = @ptrCast(&result_bufs[0].data) };
 
-    for (first + 1..n_active) |i| {
-        if (pool.has_work[i]) {
-            const other = Pairing{ .ctx = @ptrCast(&pool.pairing_bufs[i].data) };
-            try acc.merge(&other);
-        }
+    for (1..n_results) |i| {
+        const other = Pairing{ .ctx = @ptrCast(&result_bufs[i].data) };
+        try acc.merge(&other);
     }
 
     return acc.finalVerify(gtsig);

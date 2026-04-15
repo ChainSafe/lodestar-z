@@ -3,6 +3,7 @@ const napi = @import("zapi:zapi");
 const pool = @import("./pool.zig");
 const pubkeys = @import("./pubkeys.zig");
 const config = @import("./config.zig");
+const options = @import("bls_options");
 const shuffle = @import("./shuffle.zig");
 const metrics = @import("./metrics.zig");
 const BeaconStateView = @import("./BeaconStateView.zig");
@@ -22,6 +23,7 @@ const EnvCleanup = struct {
     fn hook(_: *EnvCleanup) void {
         if (env_refcount.fetchSub(1, .acq_rel) == 1) {
             // Last environment — tear down shared state.
+            blst.deinitThreadPool();
             config.state.deinit();
             pubkeys.state.deinit();
             pool.state.deinit();
@@ -35,6 +37,15 @@ var env_cleanup: EnvCleanup = .{};
 fn register(env: napi.Env, exports: napi.Value) !void {
     if (env_refcount.fetchAdd(1, .monotonic) == 0) {
         // First environment — initialize shared state.
+        // in your threadpool init
+        var cpu_count: usize = options.thread_count;
+        if (options.thread_count == 0) {
+            std.debug.print("Note: no -Dthread-count set, will use runtime CPU count minus 1: {}\n", .{cpu_count});
+            cpu_count = @max((try std.Thread.getCpuCount()) - 1, 1);
+        }
+
+        const n_workers = @min(cpu_count, @import("bls").ThreadPool.MAX_WORKERS);
+        try blst.initThreadPool(@intCast(n_workers));
         try pool.state.init();
         try pubkeys.state.init();
         config.state.init();
