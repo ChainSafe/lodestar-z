@@ -68,10 +68,23 @@ fn processValidatedMessage(
             .rejected => |reason| {
                 recordInvalidMessage(io, p2p, peer, topic);
                 applyGossipPenalty(self, io, p2p, peer, reason);
-                scoped_log.debug("Gossip {s} rejected ({s})", .{ parsed.topic_type.topicName(), @tagName(reason) });
+                scoped_log.debug(
+                    "Gossip {s} rejected ({s}) fork_seq={s} subnet={?d} topic={s} payload_len={d}",
+                    .{
+                        parsed.topic_type.topicName(),
+                        @tagName(reason),
+                        @tagName(fork_seq),
+                        parsed.subnet_id,
+                        topic,
+                        data.len,
+                    },
+                );
             },
             .failed => |err| {
-                scoped_log.debug("gossip {s} error: {}", .{ parsed.topic_type.topicName(), err });
+                scoped_log.debug(
+                    "gossip {s} error: {} fork_seq={s} subnet={?d} topic={s} payload_len={d}",
+                    .{ parsed.topic_type.topicName(), err, @tagName(fork_seq), parsed.subnet_id, topic, data.len },
+                );
             },
         }
     }

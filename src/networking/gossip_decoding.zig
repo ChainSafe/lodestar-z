@@ -1,6 +1,6 @@
 //! Gossip message decoding for the Ethereum consensus P2P protocol.
 //!
-//! Gossip messages are SSZ-Snappy encoded (Snappy frame compression over SSZ-serialized data).
+//! Gossip messages are SSZ-Snappy encoded (Snappy block compression over SSZ-serialized data).
 //! This module bridges the wire encoding to the validation layer by:
 //! 1. Snappy-decompressing the raw gossip data
 //! 2. Determining the SSZ type based on the topic
@@ -8,15 +8,16 @@
 //!
 //! Reference: https://github.com/ethereum/consensus-specs/blob/dev/specs/phase0/p2p-interface.md#encodings
 //!
-//! Security note (CL-2024-08): Snappy frame format requires per-chunk CRC32C checksum
-//! verification to prevent acceptance of corrupted or maliciously crafted data. This was
-//! a known vulnerability in Lodestar TS (https://github.com/sigp/beacon-fuzz/blob/master/reports/CL-2024-08.md).
-//! Our snappy.zig dependency (snappy.frame) verifies checksums on both compressed and
-//! uncompressed chunks in `uncompress()`. Verified present: see snappy/src/frame.zig.
+//! Gossip uses basic Snappy block compression, not framed Snappy streams.
+//! That differs from req/resp, which uses Snappy framing plus an SSZ-length varint.
+//! For gossip we therefore:
+//! 1. Read the raw block's declared uncompressed size up front.
+//! 2. Reject messages whose declared size exceeds the topic-specific cap.
+//! 3. Decompress with the raw Snappy codec.
 
 const std = @import("std");
 const testing = std.testing;
-const snappy = @import("snappy").frame;
+const snappy = @import("snappy").raw;
 const consensus_types = @import("consensus_types");
 const phase0 = consensus_types.phase0;
 const electra = consensus_types.electra;
@@ -67,7 +68,7 @@ pub fn maxGossipSize(topic: GossipTopicType) usize {
 }
 
 /// Errors that can occur during gossip message decoding.
-pub const DecodeError = snappy.UncompressError || error{
+pub const DecodeError = snappy.Error || error{
     /// Snappy decompression produced no output.
     EmptyPayload,
     /// SSZ deserialization failed.
@@ -77,6 +78,8 @@ pub const DecodeError = snappy.UncompressError || error{
     /// The decompressed payload exceeds the allowed maximum size for this topic.
     /// This prevents decompression-bomb attacks from exhausting memory.
     DecompressionBombDetected,
+    /// Allocation failed while materializing the decompressed payload.
+    OutOfMemory,
 };
 
 /// Result of decoding a beacon_block gossip message.
@@ -244,7 +247,7 @@ pub const DecodedGossipMessage = union(GossipTopicType) {
     data_column_sidecar: DecodedDataColumnSidecar,
 };
 
-/// Decompress a Snappy-framed gossip payload, rejecting payloads that would
+/// Decompress a Snappy-block gossip payload, rejecting payloads that would
 /// expand beyond `max_decompressed_size` bytes.
 ///
 /// A malicious peer can craft a tiny compressed stream that decompresses to
@@ -261,29 +264,28 @@ pub fn decompressGossipPayload(
     compressed_data: []const u8,
     max_decompressed_size: usize,
 ) DecodeError![]const u8 {
-    // `snappy.frame.uncompress()` asserts that the buffer is larger than the
-    // 10-byte identifier frame. Reject tiny inputs here so malformed gossip
-    // yields a decode error instead of aborting the process.
-    if (compressed_data.len <= 10) return error.BadIdentifier;
+    const uncompressed_len = snappy.uncompressedLength(compressed_data) catch |err| return err;
+    if (uncompressed_len == 0) return error.EmptyPayload;
+    if (uncompressed_len > max_decompressed_size) return error.DecompressionBombDetected;
 
-    const decompressed = snappy.uncompress(allocator, compressed_data) catch |err| return err;
-    if (decompressed == null) return error.EmptyPayload;
-    const result = decompressed.?;
-    if (result.len > max_decompressed_size) {
-        allocator.free(result);
-        return error.DecompressionBombDetected;
-    }
+    const result = try allocator.alloc(u8, uncompressed_len);
+    errdefer allocator.free(result);
+
+    const actual_len = snappy.uncompress(compressed_data, result) catch |err| return err;
+    if (actual_len == 0) return error.EmptyPayload;
+    if (actual_len != result.len) return error.invalid_input;
+
     return result;
 }
 
 /// Decode a raw gossip message (Snappy-compressed SSZ) into its typed representation.
 ///
 /// This performs:
-/// 1. Snappy decompression (bounded by per-topic size limit)
+/// 1. Snappy block decompression (bounded by per-topic size limit)
 /// 2. SSZ deserialization based on the topic type and active fork
 /// 3. Extraction of validation-relevant fields
 ///
-/// The `raw_data` is the Snappy-framed payload received from gossipsub.
+/// The `raw_data` is the Snappy-block payload received from gossipsub.
 /// `fork_seq` must reflect the active fork at the time the message was received
 /// so that the correct SSZ schema is selected (e.g. electra vs phase0 attestations).
 pub fn decodeGossipMessage(
@@ -595,9 +597,20 @@ pub fn decodeFromSszBytes(
 
 // === Tests ===
 
+fn compressSnappyBlock(allocator: Allocator, payload: []const u8) ![]u8 {
+    const max_len = snappy.maxCompressedLength(payload.len);
+    const scratch = try allocator.alloc(u8, max_len);
+    defer allocator.free(scratch);
+
+    const compressed_len = try snappy.compress(payload, scratch);
+    const compressed = try allocator.alloc(u8, compressed_len);
+    @memcpy(compressed, scratch[0..compressed_len]);
+    return compressed;
+}
+
 test "decompressGossipPayload roundtrip" {
     const original = "hello gossip world";
-    const compressed = try snappy.compress(testing.allocator, original);
+    const compressed = try compressSnappyBlock(testing.allocator, original);
     defer testing.allocator.free(compressed);
 
     const decompressed = try decompressGossipPayload(testing.allocator, compressed, MAX_GOSSIP_SIZE_DEFAULT);
@@ -610,7 +623,7 @@ test "decompressGossipPayload rejects decompression bomb" {
     // Craft a payload that decompresses to more bytes than the limit.
     // Use a small limit so our test data triggers it.
     const original = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"; // 64 bytes
-    const compressed = try snappy.compress(testing.allocator, original);
+    const compressed = try compressSnappyBlock(testing.allocator, original);
     defer testing.allocator.free(compressed);
 
     // Allow only 10 bytes — the 64-byte decompressed result should be rejected.
@@ -752,7 +765,7 @@ test "decode invalid SSZ data returns error" {
     try testing.expectError(error.SszDeserializationFailed, result);
 }
 
-test "end-to-end: snappy compress then decode beacon_block" {
+test "end-to-end: snappy block compress then decode beacon_block" {
     var block: phase0.SignedBeaconBlock.Type = phase0.SignedBeaconBlock.default_value;
     block.message.slot = 99;
     block.message.proposer_index = 3;
@@ -764,7 +777,7 @@ test "end-to-end: snappy compress then decode beacon_block" {
     _ = phase0.SignedBeaconBlock.serializeIntoBytes(&block, ssz_buf);
 
     // Compress with Snappy (simulates what a peer would send).
-    const compressed = try snappy.compress(testing.allocator, ssz_buf);
+    const compressed = try compressSnappyBlock(testing.allocator, ssz_buf);
     defer testing.allocator.free(compressed);
 
     // Full decode pipeline.

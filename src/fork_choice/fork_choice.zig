@@ -1558,43 +1558,59 @@ pub const ForkChoice = struct {
     /// for processing due to the slot clock incrementing.
     fn processAttestationQueue(self: *ForkChoice, allocator: Allocator) !void {
         const current_slot = self.fc_store.current_slot;
-        var remove_count: u32 = 0;
+        var processed_slots: std.ArrayListUnmanaged(Slot) = .empty;
+        defer processed_slots.deinit(allocator);
+        var queued_previous_slot_count: u32 = 0;
 
         var slot_iter = self.queued_attestations.iterator();
         while (slot_iter.next()) |entry| {
             const att_slot = entry.key_ptr.*;
             if (att_slot < current_slot) {
                 // Process all attestations for this slot.
+                var slot_vote_count: u32 = 0;
                 var block_iter = entry.value_ptr.iterator();
                 while (block_iter.next()) |block_entry| {
                     const block_root = block_entry.key_ptr.*;
                     var vote_iter = block_entry.value_ptr.iterator();
                     while (vote_iter.next()) |vote_entry| {
-                        try self.addLatestMessage(
+                        slot_vote_count += 1;
+                        self.addLatestMessage(
                             allocator,
                             vote_entry.key_ptr.*,
                             att_slot,
                             block_root,
                             vote_entry.value_ptr.*,
-                        );
+                        ) catch |err| switch (err) {
+                            // A queued attestation whose block is no longer present in the
+                            // proto-array cannot affect fork choice anymore. Drop it rather
+                            // than poisoning the whole slot-tick path.
+                            error.MissingProtoArrayBlock => continue,
+                            else => return err,
+                        };
                     }
-
-                    if (att_slot == current_slot - 1) {
-                        self.queued_attestations_previous_slot += @intCast(block_entry.value_ptr.count());
-                    }
-                    block_entry.value_ptr.deinit(allocator);
                 }
-                entry.value_ptr.deinit(allocator);
-                remove_count += 1;
+                if (att_slot == current_slot - 1) {
+                    queued_previous_slot_count += slot_vote_count;
+                }
+                try processed_slots.append(allocator, att_slot);
             } else {
                 break;
             }
         }
 
-        // Remove processed slots from front.
-        for (0..remove_count) |_| {
-            const key = self.queued_attestations.keys()[0];
-            _ = self.queued_attestations.orderedRemove(key);
+        self.queued_attestations_previous_slot = queued_previous_slot_count;
+
+        // Remove processed slots only after their votes have been fully walked so
+        // a mid-slot error cannot leave freed inner maps behind in the queue.
+        for (processed_slots.items) |slot| {
+            if (self.queued_attestations.getPtr(slot)) |block_map| {
+                var block_iter = block_map.iterator();
+                while (block_iter.next()) |block_entry| {
+                    block_entry.value_ptr.deinit(allocator);
+                }
+                block_map.deinit(allocator);
+            }
+            _ = self.queued_attestations.orderedRemove(slot);
         }
     }
 
@@ -4104,6 +4120,43 @@ test "onAttestation: valid attestation queued (same slot)" {
 
     // Should be in the queue, not yet applied.
     try testing.expect(fc.queued_attestations.count() > 0);
+}
+
+test "updateTime drops queued votes for missing proto-array blocks without corrupting queue state" {
+    const allocator = testing.allocator;
+    const genesis_root = hashFromByte(0x01);
+    const block_root = hashFromByte(0x02);
+    const missing_root = hashFromByte(0x99);
+    const genesis_block = makeTestBlock(0, genesis_root, ZERO_HASH);
+    const balances = [_]u16{100} ** 2;
+
+    var fc = try initTestForkChoice(
+        allocator,
+        genesis_block,
+        3,
+        makeTestCheckpoint(0, genesis_root),
+        makeTestCheckpoint(0, genesis_root),
+        &balances,
+    );
+    defer deinitTestForkChoice(allocator, fc);
+
+    try onBlockFromProto(fc, allocator, makeTestBlock(1, block_root, genesis_root), 3);
+
+    try fc.onSingleVote(allocator, 0, 3, block_root, 0);
+    try fc.onSingleVote(allocator, 1, 3, missing_root, 0);
+    try testing.expectEqual(@as(usize, 1), fc.queued_attestations.count());
+
+    try fc.updateTime(allocator, 4);
+    try testing.expectEqual(@as(usize, 0), fc.queued_attestations.count());
+    try testing.expectEqual(@as(u32, 2), fc.queued_attestations_previous_slot);
+
+    const fields = fc.votes.fields();
+    try testing.expectEqual(@as(usize, 1), fields.next_slots.len);
+    try testing.expectEqual(@as(Slot, 3), fields.next_slots[0]);
+
+    // A second tick should not revisit freed inner maps.
+    try fc.updateTime(allocator, 5);
+    try testing.expectEqual(@as(usize, 0), fc.queued_attestations.count());
 }
 
 test "onAttestation: zero hash beacon_block_root is silently ignored" {

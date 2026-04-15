@@ -761,9 +761,11 @@ pub const P2pService = struct {
     /// Release all owned resources.
     pub fn deinit(self: *Self, io: Io) void {
         self.gossip_adapter.deinit();
-        self.req_resp_self_limiter.deinit();
+        // Req/resp permits complete during network shutdown, so the limiter must
+        // outlive the network teardown path that returns those permits.
         self.network.deinit(io);
         self.gossipsub.deinit(io);
+        self.req_resp_self_limiter.deinit();
         if (self.host_identity) |host_identity| {
             host_identity.deinit();
             self.allocator.destroy(host_identity);

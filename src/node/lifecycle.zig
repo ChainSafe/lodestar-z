@@ -447,16 +447,6 @@ pub fn deinit(self: *BeaconNode) void {
 
     self.execution_runtime.deinit();
 
-    if (self.api_bindings) |bindings| {
-        bindings.deinit(allocator);
-        allocator.destroy(bindings);
-    }
-
-    deinitApiNodeIdentity(allocator, self.api_node_identity);
-    self.node_identity.deinit();
-    allocator.destroy(self.api_context);
-    allocator.destroy(self.event_bus);
-
     self.flushPendingGossipBlsBatch();
     self.pending_gossip_bls_batches.deinit(allocator);
     self.queued_state_work_owners.deinit(allocator);
@@ -517,6 +507,16 @@ pub fn deinit(self: *BeaconNode) void {
         allocator.free(path);
     }
     self.chain_runtime.deinit();
+
+    if (self.api_bindings) |bindings| {
+        bindings.deinit(allocator, self);
+        allocator.destroy(bindings);
+    }
+
+    deinitApiNodeIdentity(allocator, self.api_node_identity);
+    self.node_identity.deinit();
+    allocator.destroy(self.api_context);
+    allocator.destroy(self.event_bus);
 
     allocator.destroy(self);
 }

@@ -743,7 +743,9 @@ fn initSubnetService(self: *BeaconNode) !void {
 }
 
 fn closeOwnedQuicStream(io: std.Io, stream: *networking.QuicStream) void {
-    stream.close(io);
+    _ = io;
+    // `deinit()` already closes the QUIC stream while holding a temporary
+    // self-reference; calling `close()` first creates an avoidable race.
     stream.deinit();
 }
 
@@ -874,7 +876,10 @@ const active_p2p_tick_ns: u64 = std.time.ns_per_ms;
 const idle_p2p_tick_ns: u64 = 25 * std.time.ns_per_ms;
 const connectivity_maintenance_interval_ns: u64 = 100 * std.time.ns_per_ms;
 const discovery_maintenance_interval_ns: u64 = 6 * std.time.ns_per_s;
-const peer_maintenance_interval_ns: u64 = 100 * std.time.ns_per_ms;
+// Match Lodestar's periodic ping/status timeout check cadence. Running this
+// loop at 100ms causes repeated re-status storms after transient transport
+// churn, which in turn destabilizes peer retention during sync.
+const peer_maintenance_interval_ns: u64 = 10 * std.time.ns_per_s;
 const metrics_sampling_interval_ns: u64 = std.time.ns_per_s;
 const peer_manager_heartbeat_interval_ns: u64 = networking.peer_manager.HEARTBEAT_INTERVAL_MS * std.time.ns_per_ms;
 const max_discovery_dials_per_tick: u32 = 4;
@@ -1380,10 +1385,10 @@ fn maybeHandleForkTransition(self: *BeaconNode, io: std.Io, svc: *networking.P2p
             &last_digest_hex,
             &current_digest_hex,
         });
-        _ = syncGossipForkState(self, io, svc);
-        if (self.gossip_handler) |gh| {
-            gh.updateForkSeq(current_fork_seq);
-        }
+    }
+    _ = syncGossipForkState(self, io, svc);
+    if (self.gossip_handler) |gh| {
+        gh.updateForkSeq(current_fork_seq);
     }
     self.last_active_fork_digest = current_digest;
 }
@@ -4955,6 +4960,10 @@ fn initGossipHandler(self: *BeaconNode) void {
     if (self.gossip_handler != null) return;
 
     const callbacks = gossip_node_callbacks_mod;
+    const initial_fork_seq = if (currentNetworkSlot(self, self.io)) |slot|
+        self.config.forkSeq(slot)
+    else
+        self.config.forkSeq(self.currentHeadSlot());
     self.gossip_handler = GossipHandler.create(
         self.allocator,
         self.io,
@@ -4994,6 +5003,7 @@ fn initGossipHandler(self: *BeaconNode) void {
         gh.importSyncContributionFn = &callbacks.importSyncContribution;
         gh.importSyncCommitteeMessageFn = &callbacks.importSyncCommitteeMessage;
 
+        gh.updateForkSeq(initial_fork_seq);
         gh.metrics = self.metrics;
         gh.beacon_processor = self.beacon_processor;
     }

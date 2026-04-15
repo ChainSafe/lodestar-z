@@ -144,7 +144,10 @@ pub const ApiBindings = struct {
         return bindings;
     }
 
-    pub fn deinit(self: *ApiBindings, allocator: std.mem.Allocator) void {
+    pub fn deinit(self: *ApiBindings, allocator: std.mem.Allocator, node: *BeaconNode) void {
+        node.chain.setNotificationSink(null);
+        unwireApiContext(node.api_context);
+
         if (self.builder_cb_ctx) |ctx| allocator.destroy(ctx);
         if (self.validator_monitor_cb_ctx) |ctx| allocator.destroy(ctx);
         allocator.destroy(self.subnet_subscription_cb_ctx);
@@ -159,6 +162,26 @@ pub const ApiBindings = struct {
         allocator.destroy(self.sync_status_ctx);
         allocator.destroy(self.chain_ctx);
         allocator.destroy(self.block_import_ctx);
+    }
+
+    fn unwireApiContext(api_ctx: *ApiContext) void {
+        api_ctx.event_bus = null;
+        api_ctx.block_import = null;
+        api_ctx.chain = null;
+        api_ctx.sync_status_view = null;
+        api_ctx.peer_db = null;
+        api_ctx.fork_choice_debug = null;
+        api_ctx.op_pool = null;
+        api_ctx.pool_submit = null;
+        api_ctx.produce_block = null;
+        api_ctx.prepare_beacon_proposer = null;
+        api_ctx.attestation_data = null;
+        api_ctx.aggregate_attestation = null;
+        api_ctx.sync_committee_contribution = null;
+        api_ctx.subnet_subscriptions = null;
+        api_ctx.keymanager = null;
+        api_ctx.validator_monitor = null;
+        api_ctx.builder = null;
     }
 
     fn wireApiContext(self: *ApiBindings, api_ctx: *ApiContext) void {

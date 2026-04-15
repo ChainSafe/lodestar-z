@@ -512,7 +512,13 @@ pub const GossipHandler = struct {
 
         // Phase 1a: Deserialize the full gossip attestation wrapper once so the
         // processor and importer can use the real fork-typed object.
-        var attestation = self.parseGossipAttestation(ssz_bytes) orelse return GossipHandlerError.DecodeFailed;
+        var attestation = self.parseGossipAttestation(ssz_bytes) orelse {
+            scoped_log.debug(
+                "Failed to parse gossip attestation: fork_seq={s} subnet={d} compressed_len={d} ssz_len={d}",
+                .{ @tagName(self.current_fork_seq), subnet_id, message_data.len, ssz_bytes.len },
+            );
+            return GossipHandlerError.DecodeFailed;
+        };
         var attestation_owned = true;
         defer if (attestation_owned) attestation.deinit(self.allocator);
         const data = attestation.data();
@@ -523,13 +529,23 @@ pub const GossipHandler = struct {
 
         // Phase 1b: Fast validation.
         var chain_state = self.makeChainState();
-        const action = chain_gossip.validateGossipAttestation(
-            data.slot,
-            committee_index,
-            data.target.epoch,
-            data.target.root,
-            &chain_state,
-        );
+        const action = if (self.current_fork_seq.gte(.electra))
+            chain_gossip.validateGossipElectraAttestation(
+                data.slot,
+                data.index,
+                data.target.epoch,
+                data.target.root,
+                committee_index,
+                &chain_state,
+            )
+        else
+            chain_gossip.validateGossipAttestation(
+                data.slot,
+                committee_index,
+                data.target.epoch,
+                data.target.root,
+                &chain_state,
+            );
         try checkAction(action);
 
         if (attestation.participantCount() != 1) {
