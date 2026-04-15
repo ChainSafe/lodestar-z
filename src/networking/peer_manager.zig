@@ -731,6 +731,8 @@ pub const PeerManager = struct {
         preferred_peer_id: ?[]const u8,
         excluded_peer_ids: []const []const u8,
     ) !?[]const u8 {
+        _ = start_slot;
+        _ = end_slot;
         const connected = try self.db.getConnectedPeers();
         defer self.allocator.free(connected);
 
@@ -745,15 +747,13 @@ pub const PeerManager = struct {
         var best_known: ?Candidate = null;
         var best_unknown: ?Candidate = null;
         var connected_count: usize = 0;
-        var eligible_range_count: usize = 0;
         var unknown_count: usize = 0;
         var zero_overlap_count: usize = 0;
 
         for (connected) |cp| {
             connected_count += 1;
             if (containsPeerId(excluded_peer_ids, cp.peer_id)) continue;
-            if (!peerCanServeRange(cp.info, start_slot, end_slot)) continue;
-            eligible_range_count += 1;
+            if (cp.info.relevance == .irrelevant) continue;
 
             const is_preferred = if (preferred_peer_id) |preferred|
                 std.mem.eql(u8, cp.peer_id, preferred)
@@ -799,16 +799,13 @@ pub const PeerManager = struct {
             return try self.allocator.dupe(u8, candidate.peer_id);
         }
         log.debug(
-            "No data column peer selected: connected={d} eligible_range={d} unknown={d} zero_overlap={d} missing_columns={d} preferred={f} slots={d}..{d}",
+            "No data column peer selected: connected={d} unknown={d} zero_overlap={d} missing_columns={d} preferred={f}",
             .{
                 connected_count,
-                eligible_range_count,
                 unknown_count,
                 zero_overlap_count,
                 missing_columns.len,
                 fmtPeerId(preferred_peer_id),
-                start_slot,
-                end_slot,
             },
         );
         return null;
@@ -1600,7 +1597,7 @@ test "PeerManager: selectDataColumnPeer prefers custody overlap" {
     try std.testing.expectEqualStrings("custody_peer", selected);
 }
 
-test "PeerManager: selectDataColumnPeer respects serving range eligibility" {
+test "PeerManager: selectDataColumnPeer ignores stale status range for by-root fetches" {
     const allocator = std.testing.allocator;
     var pm = PeerManager.init(allocator, .{});
     defer pm.deinit();
@@ -1629,5 +1626,5 @@ test "PeerManager: selectDataColumnPeer respects serving range eligibility" {
     const selected = (try pm.selectDataColumnPeer(&missing, 64, 64, "preferred_peer", &.{})).?;
     defer allocator.free(selected);
 
-    try std.testing.expectEqualStrings("preferred_peer", selected);
+    try std.testing.expectEqualStrings("custody_peer", selected);
 }
