@@ -830,7 +830,7 @@ pub const EpochCache = struct {
         // unref the old instance
         self.current_sync_committee_indexed.unref();
         // this is the transfer of reference count
-        // should not do an unref() then acquire() here as it may trigger a deinit()
+        // should not do an unref() then ref() here as it may trigger a deinit()
         self.current_sync_committee_indexed = self.next_sync_committee_indexed;
         const next_sync_committee_indexed = try SyncCommitteeCacheAllForks.initValidatorIndices(allocator, next_sync_committee_indices);
         self.next_sync_committee_indexed = try SyncCommitteeCacheRc.init(allocator, next_sync_committee_indexed);
