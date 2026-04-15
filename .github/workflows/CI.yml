@@ -177,7 +177,7 @@ jobs:
 
       - name: Run minimal ssz_static spec tests
         run: |
-          zig build test:ssz_static_spec_tests -Dpreset=minimal
+          zig build test:ssz_static_spec_tests -Dpreset=minimal -Doptimize=ReleaseSafe
 
       - name: Run mainnet ssz_static spec tests
         run: |
@@ -266,7 +266,7 @@ jobs:
           zig build run:write_spec_tests
       - name: Run spec tests - mainnet
         run: |
-          zig build test:spec_tests -Dpreset=mainnet
+          zig build test:spec_tests -Dpreset=mainnet -Doptimize=ReleaseSafe
 
   build-fuzz:
     name: build fuzz harnesses
