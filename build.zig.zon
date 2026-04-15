@@ -26,8 +26,8 @@
         // .metrics = .{ .url = "..." },
         // .httpz = .{ .url = "..." },
         .eth_p2p_z = .{
-            .url = "git+https://github.com/ChainSafe/eth-p2p-z?ref=stabilize/zig-0.16-refactor#366341f8822ed09a33faf9468ef33c88b8f41113",
-            .hash = "libp2p-0.1.0-Sj0LiOFZCQBzTBZySTwXnaD_RtX_te1dQQSX2h8zDmod",
+            .url = "git+https://github.com/ChainSafe/eth-p2p-z?ref=stabilize/zig-0.16-refactor#e8b7bc66128006d9867085bb67704866dc4ec858",
+            .hash = "libp2p-0.1.0-Sj0LiAFbCQAWLxioIUsfHM4pQOUzDJ5WoQ14M49OhkRs",
         },
         .c_kzg = .{
             .url = "git+https://github.com/chainsafe/c-kzg-zig?ref=main#fea105ab430f9fbbe6863e58e1f3d4a363e010c5",
