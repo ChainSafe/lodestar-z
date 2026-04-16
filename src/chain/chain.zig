@@ -479,7 +479,7 @@ pub const Chain = struct {
     pub fn advanceHeadState(self: *Chain, target_slot: u64, new_state_root: [32]u8) !void {
         self.head_tracker.head_state_root = new_state_root;
         self.head_tracker.head_slot = target_slot;
-        try self.head_tracker.slot_roots.put(target_slot, self.head_tracker.head_root);
+        try self.head_tracker.slot_roots.put(self.allocator, target_slot, self.head_tracker.head_root);
     }
 
     pub fn pruneTrackedBlocksBelow(self: *Chain, slot: u64) void {

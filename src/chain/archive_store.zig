@@ -717,19 +717,19 @@ fn testFinalizationPlan(
     slot_to_root: *const SlotToRootMap,
     block_to_parent: *const BlockToParentMap,
 ) !FinalizationPlan {
-    var finalized_slot_roots = SlotToRootMap.init(allocator);
-    errdefer finalized_slot_roots.deinit();
-    var finalized_parent_roots = BlockToParentMap.init(allocator);
-    errdefer finalized_parent_roots.deinit();
+    var finalized_slot_roots: SlotToRootMap = .empty;
+    errdefer finalized_slot_roots.deinit(allocator);
+    var finalized_parent_roots: BlockToParentMap = .empty;
+    errdefer finalized_parent_roots.deinit(allocator);
 
     var slot_iter = slot_to_root.iterator();
     while (slot_iter.next()) |entry| {
-        try finalized_slot_roots.put(entry.key_ptr.*, entry.value_ptr.*);
+        try finalized_slot_roots.put(allocator, entry.key_ptr.*, entry.value_ptr.*);
     }
 
     var parent_iter = block_to_parent.iterator();
     while (parent_iter.next()) |entry| {
-        try finalized_parent_roots.put(entry.key_ptr.*, entry.value_ptr.*);
+        try finalized_parent_roots.put(allocator, entry.key_ptr.*, entry.value_ptr.*);
     }
 
     return .{
@@ -759,16 +759,16 @@ test "ArchiveStore: onFinalized archives epoch boundary state" {
     const block_root = [_]u8{0xBC} ** 32;
     try fixture.db.putBlock(block_root, "epoch-boundary-block");
 
-    var slot_to_root = SlotToRootMap.init(allocator);
-    defer slot_to_root.deinit();
-    try slot_to_root.put(preset.SLOTS_PER_EPOCH, block_root);
+    var slot_to_root: SlotToRootMap = .empty;
+    defer slot_to_root.deinit(allocator);
+    try slot_to_root.put(allocator, preset.SLOTS_PER_EPOCH, block_root);
 
-    var block_to_state = BlockToStateMap.init(allocator);
-    defer block_to_state.deinit();
-    try block_to_state.put(block_root, state_root);
-    var block_to_parent = BlockToParentMap.init(allocator);
-    defer block_to_parent.deinit();
-    try block_to_parent.put(block_root, [_]u8{0xAA} ** 32);
+    var block_to_state: BlockToStateMap = .empty;
+    defer block_to_state.deinit(allocator);
+    try block_to_state.put(allocator, block_root, state_root);
+    var block_to_parent: BlockToParentMap = .empty;
+    defer block_to_parent.deinit(allocator);
+    try block_to_parent.put(allocator, block_root, [_]u8{0xAA} ** 32);
 
     var store = ArchiveStore.init(allocator, std.testing.io, fixture.db, fixture.regen, .{
         .state_archive_every_n_epochs = 1,
@@ -811,17 +811,17 @@ test "ArchiveStore: onFinalized archives blocks even when state snapshot source 
 
     try fixture.db.putBlock(block_root, "finalized-block");
 
-    var slot_to_root = SlotToRootMap.init(allocator);
-    defer slot_to_root.deinit();
-    try slot_to_root.put(slot, block_root);
+    var slot_to_root: SlotToRootMap = .empty;
+    defer slot_to_root.deinit(allocator);
+    try slot_to_root.put(allocator, slot, block_root);
 
-    var block_to_parent = BlockToParentMap.init(allocator);
-    defer block_to_parent.deinit();
-    try block_to_parent.put(block_root, parent_root);
+    var block_to_parent: BlockToParentMap = .empty;
+    defer block_to_parent.deinit(allocator);
+    try block_to_parent.put(allocator, block_root, parent_root);
 
-    var block_to_state = BlockToStateMap.init(allocator);
-    defer block_to_state.deinit();
-    try block_to_state.put(block_root, state_root);
+    var block_to_state: BlockToStateMap = .empty;
+    defer block_to_state.deinit(allocator);
+    try block_to_state.put(allocator, block_root, state_root);
 
     var store = ArchiveStore.init(allocator, std.testing.io, fixture.db, fixture.regen, .{
         .state_archive_every_n_epochs = 1,
@@ -854,12 +854,12 @@ test "ArchiveStore: onFinalized backfills multiple due state snapshots" {
     var fixture = try RegenRuntimeFixture.init(allocator, 16);
     defer fixture.deinit();
 
-    var slot_to_root = SlotToRootMap.init(allocator);
-    defer slot_to_root.deinit();
-    var block_to_parent = BlockToParentMap.init(allocator);
-    defer block_to_parent.deinit();
-    var block_to_state = BlockToStateMap.init(allocator);
-    defer block_to_state.deinit();
+    var slot_to_root: SlotToRootMap = .empty;
+    defer slot_to_root.deinit(allocator);
+    var block_to_parent: BlockToParentMap = .empty;
+    defer block_to_parent.deinit(allocator);
+    var block_to_state: BlockToStateMap = .empty;
+    defer block_to_state.deinit(allocator);
 
     const epochs = [_]u64{ 2, 4, 6 };
     const roots = [_]Root{
@@ -880,9 +880,9 @@ test "ArchiveStore: onFinalized backfills multiple due state snapshots" {
         const state_root = try fixture.block_cache.add(state, false);
 
         try fixture.db.putBlock(root, "finalized-block");
-        try slot_to_root.put(epoch * preset.SLOTS_PER_EPOCH, root);
-        try block_to_parent.put(root, parent_root);
-        try block_to_state.put(root, state_root);
+        try slot_to_root.put(allocator, epoch * preset.SLOTS_PER_EPOCH, root);
+        try block_to_parent.put(allocator, root, parent_root);
+        try block_to_state.put(allocator, root, state_root);
     }
 
     var store = ArchiveStore.init(allocator, std.testing.io, fixture.db, fixture.regen, .{
@@ -957,16 +957,16 @@ test "ArchiveStore: onFinalized repairs missing finalized parent-root index" {
 
     try fixture.db.putBlockArchive(slot, root, "epoch-boundary-block");
 
-    var slot_to_root = SlotToRootMap.init(allocator);
-    defer slot_to_root.deinit();
-    try slot_to_root.put(slot, root);
+    var slot_to_root: SlotToRootMap = .empty;
+    defer slot_to_root.deinit(allocator);
+    try slot_to_root.put(allocator, slot, root);
 
-    var block_to_parent = BlockToParentMap.init(allocator);
-    defer block_to_parent.deinit();
-    try block_to_parent.put(root, parent_root);
+    var block_to_parent: BlockToParentMap = .empty;
+    defer block_to_parent.deinit(allocator);
+    try block_to_parent.put(allocator, root, parent_root);
 
-    var block_to_state = BlockToStateMap.init(allocator);
-    defer block_to_state.deinit();
+    var block_to_state: BlockToStateMap = .empty;
+    defer block_to_state.deinit(allocator);
 
     var store = ArchiveStore.init(allocator, std.testing.io, fixture.db, fixture.regen, .{
         .state_archive_every_n_epochs = 1024,
@@ -993,16 +993,16 @@ test "ArchiveStore: onFinalized persists finalized indices before archival compl
     const root = [_]u8{0xD1} ** 32;
     const parent_root = [_]u8{0xE2} ** 32;
 
-    var slot_to_root = SlotToRootMap.init(allocator);
-    defer slot_to_root.deinit();
-    try slot_to_root.put(slot, root);
+    var slot_to_root: SlotToRootMap = .empty;
+    defer slot_to_root.deinit(allocator);
+    try slot_to_root.put(allocator, slot, root);
 
-    var block_to_parent = BlockToParentMap.init(allocator);
-    defer block_to_parent.deinit();
-    try block_to_parent.put(root, parent_root);
+    var block_to_parent: BlockToParentMap = .empty;
+    defer block_to_parent.deinit(allocator);
+    try block_to_parent.put(allocator, root, parent_root);
 
-    var block_to_state = BlockToStateMap.init(allocator);
-    defer block_to_state.deinit();
+    var block_to_state: BlockToStateMap = .empty;
+    defer block_to_state.deinit(allocator);
 
     var store = ArchiveStore.init(allocator, std.testing.io, fixture.db, fixture.regen, .{});
     defer store.deinit();
@@ -1041,16 +1041,16 @@ test "ArchiveStore: onFinalized retries archival from durable finalized indices"
     const root = [_]u8{0xD3} ** 32;
     const parent_root = [_]u8{0xE4} ** 32;
 
-    var initial_slot_to_root = SlotToRootMap.init(allocator);
-    defer initial_slot_to_root.deinit();
-    try initial_slot_to_root.put(slot, root);
+    var initial_slot_to_root: SlotToRootMap = .empty;
+    defer initial_slot_to_root.deinit(allocator);
+    try initial_slot_to_root.put(allocator, slot, root);
 
-    var initial_block_to_parent = BlockToParentMap.init(allocator);
-    defer initial_block_to_parent.deinit();
-    try initial_block_to_parent.put(root, parent_root);
+    var initial_block_to_parent: BlockToParentMap = .empty;
+    defer initial_block_to_parent.deinit(allocator);
+    try initial_block_to_parent.put(allocator, root, parent_root);
 
-    var block_to_state = BlockToStateMap.init(allocator);
-    defer block_to_state.deinit();
+    var block_to_state: BlockToStateMap = .empty;
+    defer block_to_state.deinit(allocator);
 
     var store = ArchiveStore.init(allocator, std.testing.io, fixture.db, fixture.regen, .{});
     defer store.deinit();
@@ -1064,10 +1064,10 @@ test "ArchiveStore: onFinalized retries archival from durable finalized indices"
 
     try fixture.db.putBlock(root, "retryable-finalized-block");
 
-    var empty_slot_to_root = SlotToRootMap.init(allocator);
-    defer empty_slot_to_root.deinit();
-    var empty_block_to_parent = BlockToParentMap.init(allocator);
-    defer empty_block_to_parent.deinit();
+    var empty_slot_to_root: SlotToRootMap = .empty;
+    defer empty_slot_to_root.deinit(allocator);
+    var empty_block_to_parent: BlockToParentMap = .empty;
+    defer empty_block_to_parent.deinit(allocator);
 
     var retry_plan = try testFinalizationPlan(allocator, 1, root, &empty_slot_to_root, &empty_block_to_parent);
     defer retry_plan.deinit();
@@ -1101,9 +1101,9 @@ test "ArchiveStore: archiveBlocks archives blob sidecars and data columns" {
     try fixture.db.putDataColumn(root, 3, "column-3");
     try fixture.db.putDataColumn(root, 7, "column-7");
 
-    var slot_to_root = SlotToRootMap.init(allocator);
-    defer slot_to_root.deinit();
-    try slot_to_root.put(slot, root);
+    var slot_to_root: SlotToRootMap = .empty;
+    defer slot_to_root.deinit(allocator);
+    try slot_to_root.put(allocator, slot, root);
 
     try store.archiveBlocks(slot, slot, &slot_to_root);
 
