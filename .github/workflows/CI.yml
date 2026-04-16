@@ -178,21 +178,86 @@ jobs:
         with:
           name: spec-test-generated
           path: |
-            test/spec/root*.zig
             test/spec/test_case/
             test/spec/ssz/generic_tests.zig
             test/spec/ssz/static_tests.zig
             test/spec/bls/spec_tests.zig
           retention-days: 1
 
+  spec-test-ssz-generic:
+    name: spec tests - ssz generic
+    runs-on: ubuntu-latest
+    needs: [build-test, spec-test-prep]
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+          cache-key: ubuntu-latest-${{ env.ZIG_VERSION }}
+      - name: Restore spec tests cache
+        uses: actions/cache@v4
+        with:
+          path: test/spec/spec_tests
+          key: spec-test-data-${{ hashFiles('build.zig') }}
+      - name: Download generated test files
+        uses: actions/download-artifact@v4
+        with:
+          name: spec-test-generated
+          path: test/spec
       - name: Run ssz_generic spec tests
         run: |
           zig build test:ssz_generic_spec_tests
 
+  spec-test-ssz-static-minimal:
+    name: spec tests - ssz static minimal
+    runs-on: ubuntu-latest
+    needs: [build-test, spec-test-prep]
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+          cache-key: ubuntu-latest-${{ env.ZIG_VERSION }}
+      - name: Restore spec tests cache
+        uses: actions/cache@v4
+        with:
+          path: test/spec/spec_tests
+          key: spec-test-data-${{ hashFiles('build.zig') }}
+      - name: Download generated test files
+        uses: actions/download-artifact@v4
+        with:
+          name: spec-test-generated
+          path: test/spec
       - name: Run minimal ssz_static spec tests
         run: |
           zig build test:ssz_static_spec_tests -Dpreset=minimal -Doptimize=ReleaseSafe
 
+  spec-test-ssz-static-mainnet:
+    name: spec tests - ssz static mainnet
+    runs-on: ubuntu-latest
+    needs: [build-test, spec-test-prep]
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+          cache-key: ubuntu-latest-${{ env.ZIG_VERSION }}
+      - name: Restore spec tests cache
+        uses: actions/cache@v4
+        with:
+          path: test/spec/spec_tests
+          key: spec-test-data-${{ hashFiles('build.zig') }}
+      - name: Download generated test files
+        uses: actions/download-artifact@v4
+        with:
+          name: spec-test-generated
+          path: test/spec
       - name: Run mainnet ssz_static spec tests
         run: |
           zig build test:ssz_static_spec_tests -Dpreset=mainnet
