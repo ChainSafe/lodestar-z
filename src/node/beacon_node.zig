@@ -2077,6 +2077,8 @@ pub const BeaconNode = struct {
             segment.failed_count,
         });
 
+        self.updateSyncProgress(outcome.snapshot);
+        self.observeHeadCatchup(outcome.snapshot.head.slot);
         self.processPendingChildren(outcome.result.block_root);
     }
 
