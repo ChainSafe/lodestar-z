@@ -401,11 +401,9 @@ pub fn importVerifiedBlock(
                 }
             }
 
-            // Range sync imports historical descendants before fork choice can
-            // necessarily make them the head immediately. Lodestar continues
-            // importing those batches and relies on sequential validation plus
-            // fork choice, rather than treating non-head-advancing blocks as a
-            // hard failure.
+            // Lodestar continues importing range-sync segments even when early
+            // post-checkpoint blocks are not yet head-viable at the current
+            // wall-clock slot. Rejecting them here stalls checkpoint catch-up.
         }
 
         // Check finality changes.

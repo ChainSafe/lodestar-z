@@ -284,6 +284,21 @@ pub const BatchBlockResult = union(enum) {
     failed: BlockImportError,
 };
 
+/// Lodestar continues past ignored range-sync blocks (`already known`,
+/// `would revert finalized`, `genesis`) and does not treat temporary
+/// head-non-viability as a fatal segment error while backfilling from a
+/// checkpoint. Abort the rest of the linear segment only on real failures.
+pub fn shouldAbortLinearRangeSyncSegment(err: anyerror) bool {
+    return switch (err) {
+        error.AlreadyKnown,
+        error.WouldRevertFinalizedSlot,
+        error.GenesisBlock,
+        error.NotViableForHead,
+        => false,
+        else => true,
+    };
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -298,6 +313,15 @@ test "DataAvailabilityStatus enum values" {
 
 test "ExecutionStatus enum values" {
     try std.testing.expectEqual(@as(usize, 4), @typeInfo(ExecutionStatus).@"enum".fields.len);
+}
+
+test "shouldAbortLinearRangeSyncSegment matches Lodestar skip semantics" {
+    try std.testing.expect(!shouldAbortLinearRangeSyncSegment(error.AlreadyKnown));
+    try std.testing.expect(!shouldAbortLinearRangeSyncSegment(error.WouldRevertFinalizedSlot));
+    try std.testing.expect(!shouldAbortLinearRangeSyncSegment(error.GenesisBlock));
+    try std.testing.expect(!shouldAbortLinearRangeSyncSegment(error.NotViableForHead));
+    try std.testing.expect(shouldAbortLinearRangeSyncSegment(error.ParentUnknown));
+    try std.testing.expect(shouldAbortLinearRangeSyncSegment(error.PrestateMissing));
 }
 
 test "ImportBlockOpts defaults" {
