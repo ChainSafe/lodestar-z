@@ -421,6 +421,7 @@ pub const PeerReqRespCompletion = union(enum) {
         status: StatusMessage.Type,
         earliest_available_slot: ?u64 = null,
         metadata: ?PeerReqRespMetadata = null,
+        follow_up_ping: bool = false,
     },
     ping: struct {
         peer_id: []const u8,

@@ -176,6 +176,19 @@ fn statusReqRespPolicy(kind: PeerReqRespJobKind) StatusReqRespPolicy {
     };
 }
 
+fn statusReqRespFollowUpPing(kind: PeerReqRespJobKind) bool {
+    return switch (kind) {
+        // Lodestar sends STATUS and PING immediately on outbound connect.
+        // We preserve our single in-flight req/resp invariant by issuing the
+        // initial PING as soon as the first STATUS response proves the peer is usable.
+        .status_only => true,
+        .full_handshake,
+        .restatus,
+        .ping,
+        => false,
+    };
+}
+
 fn peerNeedsMetadata(peer: *const networking.PeerInfo) bool {
     return !peer.metadata_known;
 }
@@ -419,6 +432,11 @@ test "status req/resp policy tolerates status transport failures" {
     const restatus = statusReqRespPolicy(.restatus);
     try std.testing.expect(!restatus.request_metadata);
     try std.testing.expect(!restatus.disconnect_peer_on_failure);
+
+    try std.testing.expect(statusReqRespFollowUpPing(.status_only));
+    try std.testing.expect(!statusReqRespFollowUpPing(.full_handshake));
+    try std.testing.expect(!statusReqRespFollowUpPing(.restatus));
+    try std.testing.expect(!statusReqRespFollowUpPing(.{ .ping = .{ .known_metadata_seq = 0 } }));
 }
 
 test "peerNeedsMetadata distinguishes unknown metadata from seq zero" {
@@ -2830,6 +2848,7 @@ fn peerReqRespTask(
                 .status = peer_status.status,
                 .earliest_available_slot = peer_status.earliest_available_slot,
                 .metadata = metadata,
+                .follow_up_ping = statusReqRespFollowUpPing(job.kind),
             } });
         },
         .ping => |ping| {
@@ -2922,13 +2941,28 @@ fn drainCompletedPeerReqResp(
         clearPendingPeerReqResp(self, io, completion.peerId());
         switch (completion.*) {
             .status => |status| {
-                if (reqresp_callbacks_mod.handlePeerStatus(self, status.peer_id, status.status, status.earliest_available_slot)) |_| {
+                const relevant = if (reqresp_callbacks_mod.handlePeerStatus(
+                    self,
+                    status.peer_id,
+                    status.status,
+                    status.earliest_available_slot,
+                )) |_| false else true;
+                if (!relevant) {
                     sendGoodbyeAndDisconnect(self, io, svc, status.peer_id, .irrelevant_network);
                 } else if (status.metadata) |metadata| {
                     applyPeerMetadata(self, status.peer_id, .{
                         .metadata = metadata.metadata,
                         .custody_group_count = metadata.custody_group_count,
                     }, currentUnixTimeMs(io));
+                }
+                if (relevant and status.follow_up_ping) {
+                    const known_metadata_seq = if (self.peer_manager) |pm|
+                        if (pm.getPeer(status.peer_id)) |peer| peer.metadata_seq else 0
+                    else
+                        0;
+                    did_work = schedulePeerReqResp(self, io, svc, status.peer_id, .{
+                        .ping = .{ .known_metadata_seq = known_metadata_seq },
+                    }) or did_work;
                 }
                 did_work = true;
             },
