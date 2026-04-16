@@ -731,6 +731,27 @@ pub const P2pService = struct {
         try self.newStream(io, peer_id, IdentifyHandler, null);
     }
 
+    /// Request libp2p identify data without blocking the caller.
+    pub fn requestIdentifyAsync(self: *Self, io: Io, peer_id: []const u8) !void {
+        const owned_peer_id = try self.allocator.dupe(u8, peer_id);
+        errdefer self.allocator.free(owned_peer_id);
+        switch (self.network) {
+            inline else => |*network| {
+                network.background.concurrent(io, identifyStreamTask, .{ self, io, owned_peer_id }) catch |err| {
+                    log.debug("Failed to spawn concurrent identify task: {}", .{err});
+                    network.background.async(io, identifyStreamTask, .{ self, io, owned_peer_id });
+                };
+            },
+        }
+    }
+
+    fn identifyStreamTask(self: *Self, io: Io, peer_id: []u8) void {
+        defer self.allocator.free(peer_id);
+        self.requestIdentify(io, peer_id) catch |err| {
+            log.debug("Failed to open outbound identify stream to {s}: {}", .{ peer_id, err });
+        };
+    }
+
     /// Gracefully close a connected peer transport. The switch will clean up
     /// handler state when its connection task observes the closure.
     pub fn disconnectPeer(self: *Self, io: Io, peer_id: []const u8) bool {

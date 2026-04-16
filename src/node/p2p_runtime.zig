@@ -3213,6 +3213,11 @@ fn registerConnectedPeer(
         svc.openGossipsubStreamAsync(io, peer_id) catch |err| {
             log.debug("Failed to open outbound gossipsub stream for {s}: {}", .{ peer_id, err });
         };
+        // Match Lodestar's connect flow: kick off identify immediately so
+        // agentVersion/client metrics are populated from the live connection.
+        svc.requestIdentifyAsync(io, peer_id) catch |err| {
+            log.debug("Failed to request identify for {s}: {}", .{ peer_id, err });
+        };
         // Mirror Lodestar's connect path: prove fresh outbound peers with
         // STATUS immediately, but do not front-load metadata fetches on the
         // first successful transport connection.
