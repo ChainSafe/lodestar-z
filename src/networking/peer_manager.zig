@@ -73,6 +73,8 @@ pub const INBOUND_PING_INTERVAL_MS: u64 = 15_000;
 pub const OUTBOUND_PING_INTERVAL_MS: u64 = 20_000;
 /// Periodic Status refresh interval for connected peers.
 pub const STATUS_REFRESH_INTERVAL_MS: u64 = 5 * 60_000;
+/// Retry backoff for peers that have not yet completed any Status exchange.
+pub const STATUS_INITIAL_RETRY_BACKOFF_MS: u64 = 60_000;
 
 /// Target number of peers desired per attestation subnet.
 const TARGET_SUBNET_PEERS: u32 = 6;
@@ -457,6 +459,11 @@ pub const PeerManager = struct {
     /// Record a successful outbound ping response.
     pub fn markPingResponse(self: *PeerManager, peer_id: []const u8, now_ms: u64) void {
         self.db.markPingResponse(peer_id, now_ms);
+    }
+
+    /// Record an outbound Status attempt.
+    pub fn markStatusAttempt(self: *PeerManager, peer_id: []const u8, now_ms: u64) void {
+        self.db.markStatusAttempt(peer_id, now_ms);
     }
 
     /// Record a successful Status exchange.
@@ -1086,7 +1093,10 @@ pub const PeerManager = struct {
     }
 
     fn peerNeedsStatusRefresh(peer: *const PeerInfo, now_ms: u64, interval_ms: u64) bool {
-        if (peer.last_status_exchange_ms == 0) return true;
+        if (peer.last_status_exchange_ms == 0) {
+            if (peer.last_status_attempt_ms == 0) return true;
+            return now_ms >= peer.last_status_attempt_ms + STATUS_INITIAL_RETRY_BACKOFF_MS;
+        }
         if (peer.last_status_fork_digest == null or peer.relevance == .unknown) return true;
         return now_ms >= peer.last_status_exchange_ms + interval_ms;
     }
@@ -1543,6 +1553,26 @@ test "PeerManager: maintenance restatuses peers without prior status" {
 
     try std.testing.expectEqual(@as(usize, 1), actions.peers_to_restatus.len);
     try std.testing.expectEqualStrings("peer_a", actions.peers_to_restatus[0]);
+}
+
+test "PeerManager: maintenance backs off failed initial status retries" {
+    const allocator = std.testing.allocator;
+    var pm = PeerManager.init(allocator, .{});
+    defer pm.deinit();
+
+    _ = try pm.onPeerConnected("peer_a", .inbound, 1_000);
+    pm.markStatusAttempt("peer_a", 1_500);
+
+    var actions = try pm.maintenance(2_000, .{ .max_ping_requests = 1, .max_status_requests = 1 });
+    defer actions.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 0), actions.peers_to_restatus.len);
+
+    var retry_actions = try pm.maintenance(1_500 + STATUS_INITIAL_RETRY_BACKOFF_MS, .{ .max_ping_requests = 1, .max_status_requests = 1 });
+    defer retry_actions.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 1), retry_actions.peers_to_restatus.len);
+    try std.testing.expectEqualStrings("peer_a", retry_actions.peers_to_restatus[0]);
 }
 
 test "PeerManager: maintenance restatuses newly reconnected peers immediately" {

@@ -156,6 +156,7 @@ pub const PeerDB = struct {
         info.connected_at_ms = now_ms;
         info.last_seen_ms = now_ms;
         info.last_ping_response_ms = 0;
+        info.last_status_attempt_ms = 0;
         info.last_status_exchange_ms = 0;
         info.peer_score.last_updated_ms = now_ms;
 
@@ -319,9 +320,16 @@ pub const PeerDB = struct {
         info.last_seen_ms = now_ms;
     }
 
+    /// Record an outbound Status attempt.
+    pub fn markStatusAttempt(self: *PeerDB, peer_id: []const u8, now_ms: u64) void {
+        const info = self.peers.getPtr(peer_id) orelse return;
+        info.last_status_attempt_ms = now_ms;
+    }
+
     /// Record a successful Status exchange.
     pub fn markStatusExchange(self: *PeerDB, peer_id: []const u8, now_ms: u64) void {
         const info = self.peers.getPtr(peer_id) orelse return;
+        info.last_status_attempt_ms = now_ms;
         info.last_status_exchange_ms = now_ms;
         info.last_seen_ms = now_ms;
     }

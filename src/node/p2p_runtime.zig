@@ -2710,6 +2710,11 @@ fn schedulePeerReqResp(
         return false;
     };
 
+    if (self.peer_manager) |pm| switch (kind) {
+        .status_only, .full_handshake, .restatus => pm.markStatusAttempt(peer_id, currentUnixTimeMs(io)),
+        .ping => {},
+    };
+
     svc.spawnBackground(io, peerReqRespTask, .{ self, io, svc, PeerReqRespJob{
         .peer_id = owned_peer_id,
         .kind = kind,

@@ -384,6 +384,8 @@ pub const PeerInfo = struct {
     last_seen_ms: u64 = 0,
     /// Timestamp (ms) of the last successful outbound ping response.
     last_ping_response_ms: u64 = 0,
+    /// Timestamp (ms) of the last outbound Status attempt.
+    last_status_attempt_ms: u64 = 0,
     /// Timestamp (ms) of the last successful Status exchange.
     last_status_exchange_ms: u64 = 0,
     /// Ban expiry timestamp (ms). Only meaningful when connection_state == .banned.
