@@ -144,8 +144,32 @@ const PeerReqRespJob = struct {
 const OutboundHandshakeMode = enum {
     none,
     status_only,
-    full,
 };
+
+const StatusReqRespPolicy = struct {
+    request_metadata: bool,
+    disconnect_peer_on_failure: bool,
+};
+
+fn statusReqRespPolicy(kind: PeerReqRespJobKind) StatusReqRespPolicy {
+    return switch (kind) {
+        .status_only => .{
+            .request_metadata = false,
+            // Align with Lodestar's peer manager: a failed outbound STATUS
+            // request is not, by itself, grounds to evict the peer.
+            .disconnect_peer_on_failure = false,
+        },
+        .full_handshake => .{
+            .request_metadata = true,
+            .disconnect_peer_on_failure = false,
+        },
+        .restatus => .{
+            .request_metadata = false,
+            .disconnect_peer_on_failure = false,
+        },
+        .ping => unreachable,
+    };
+}
 
 const BlobFetchState = struct {
     existing: ?[]const u8 = null,
@@ -363,6 +387,20 @@ test "discovery peer id helpers derive node id from inline secp256k1 peer id" {
     const actual = nodeIdFromInlineSecp256k1PeerId(peer_id_bytes) orelse return error.TestUnexpectedResult;
     const expected = discv5.enr.nodeIdFromCompressedPubkey(&pubkey);
     try std.testing.expectEqualSlices(u8, &expected, &actual);
+}
+
+test "status req/resp policy tolerates status transport failures" {
+    const status_only = statusReqRespPolicy(.status_only);
+    try std.testing.expect(!status_only.request_metadata);
+    try std.testing.expect(!status_only.disconnect_peer_on_failure);
+
+    const full_handshake = statusReqRespPolicy(.full_handshake);
+    try std.testing.expect(full_handshake.request_metadata);
+    try std.testing.expect(!full_handshake.disconnect_peer_on_failure);
+
+    const restatus = statusReqRespPolicy(.restatus);
+    try std.testing.expect(!restatus.request_metadata);
+    try std.testing.expect(!restatus.disconnect_peer_on_failure);
 }
 
 pub fn start(self: *BeaconNode, io: std.Io, listen_addr: []const u8, port: u16) !void {
@@ -2545,6 +2583,9 @@ fn drainCompletedDiscoveryDials(
                     success.ma_str,
                     success.elapsed_ns / std.time.ns_per_ms,
                 });
+                // Keep the initial outbound connect path lightweight. Fetching
+                // metadata eagerly on first contact diverges from Lodestar and
+                // increases the number of streams we burn on fragile peers.
                 did_work = registerConnectedPeer(
                     self,
                     io,
@@ -2552,7 +2593,7 @@ fn drainCompletedDiscoveryDials(
                     success.peer_id,
                     .outbound,
                     .{ .node_id = success.node_id, .pubkey = success.pubkey },
-                    .full,
+                    .status_only,
                 ) or did_work;
             },
             .failure => |failure| {
@@ -2652,21 +2693,18 @@ fn peerReqRespTask(
 ) void {
     switch (job.kind) {
         .status_only, .full_handshake, .restatus => {
+            const policy = statusReqRespPolicy(job.kind);
             const peer_status = sendStatus(self, io, svc, job.peer_id) catch |err| {
-                const disconnect_peer = switch (job.kind) {
-                    .restatus => false,
-                    else => true,
-                };
-                enqueuePeerReqRespCompletion(self, io, peerReqRespFailure(job.peer_id, .status, err, disconnect_peer));
+                enqueuePeerReqRespCompletion(
+                    self,
+                    io,
+                    peerReqRespFailure(job.peer_id, .status, err, policy.disconnect_peer_on_failure),
+                );
                 return;
             };
 
             var metadata: ?beacon_node_mod.PeerReqRespMetadata = null;
-            const wants_metadata = switch (job.kind) {
-                .full_handshake => true,
-                else => false,
-            };
-            if (wants_metadata) {
+            if (policy.request_metadata) {
                 if (requestPeerMetadataWithTimeout(self, io, svc, job.peer_id, optional_reqresp_timeout_ms)) |peer_metadata| {
                     metadata = peerReqRespMetadataCompletion(peer_metadata);
                 } else |err| {
@@ -2941,7 +2979,7 @@ fn reconcilePeerConnections(self: *BeaconNode, io: std.Io, svc: *networking.P2pS
             peer.direction orelse .inbound
         else
             .inbound;
-        did_work = registerConnectedPeer(self, io, svc, peer_id, direction, null, .full) or did_work;
+        did_work = registerConnectedPeer(self, io, svc, peer_id, direction, null, .status_only) or did_work;
     }
 
     const managed_peer_ids = pm.getConnectedPeerIds() catch |err| {
@@ -3024,14 +3062,13 @@ fn registerConnectedPeer(
         svc.openGossipsubStreamAsync(io, peer_id) catch |err| {
             log.debug("Failed to open outbound gossipsub stream for {s}: {}", .{ peer_id, err });
         };
-        // Mirror Lodestar's connect path: kick the initial req/resp handshake
-        // immediately for fresh outbound peers, but keep the actual req/resp I/O
-        // off the main node loop so sync imports are not blocked behind Status.
+        // Mirror Lodestar's connect path: prove fresh outbound peers with
+        // STATUS immediately, but do not front-load metadata fetches on the
+        // first successful transport connection.
         if (connect_direction == .outbound) {
             switch (handshake_mode) {
                 .none => {},
                 .status_only => did_work = schedulePeerReqResp(self, io, svc, peer_id, .status_only) or did_work,
-                .full => did_work = schedulePeerReqResp(self, io, svc, peer_id, .full_handshake) or did_work,
             }
         }
     }
