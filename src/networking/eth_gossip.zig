@@ -189,6 +189,17 @@ pub const EthGossipAdapter = struct {
         }
     }
 
+    /// Unsubscribe from all standard Ethereum gossip topics for every active fork.
+    ///
+    /// Subnet-indexed topics are managed separately via `unsubscribeSubnet`.
+    pub fn unsubscribeEthTopics(self: *Self, io: Io) !void {
+        for (&global_topic_types) |topic_type| {
+            for (self.activeForks()) |fork| {
+                try self.unsubscribeTopicTypeForDigest(io, fork.fork_digest, topic_type, null);
+            }
+        }
+    }
+
     /// Handle a fork transition by migrating subscriptions to the new fork digest.
     ///
     /// When a fork activates, gossip topic strings change because the fork digest
@@ -410,6 +421,19 @@ test "EthGossipAdapter: duplicate subscriptions are idempotent" {
     try t.adapter.subscribeSubnet(std.testing.io, .beacon_attestation, 3);
 
     try testing.expectEqual(global_topic_types.len + 1, t.adapter.subscribed_topics.count());
+}
+
+test "EthGossipAdapter: unsubscribeEthTopics preserves subnet subscriptions" {
+    const allocator = testing.allocator;
+    const t = try TestAdapter.create(allocator);
+    defer t.destroy(allocator);
+
+    try t.adapter.subscribeEthTopics(std.testing.io);
+    try t.adapter.subscribeSubnet(std.testing.io, .beacon_attestation, 3);
+
+    try t.adapter.unsubscribeEthTopics(std.testing.io);
+
+    try testing.expectEqual(@as(usize, 1), t.adapter.subscribed_topics.count());
 }
 
 test "EthGossipAdapter: active fork updates preserve logical subscriptions" {

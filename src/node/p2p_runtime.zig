@@ -795,6 +795,80 @@ fn subscribeInitialSubnets(self: *BeaconNode, io: std.Io, svc: *networking.P2pSe
     log.info("Subscribed to {d} data column subnets (local custody groups)", .{custody_group_count});
 }
 
+fn setInitialSubnetSubscriptionsEnabled(
+    self: *BeaconNode,
+    io: std.Io,
+    svc: *networking.P2pService,
+    enabled: bool,
+) void {
+    const gossip_topics = networking.gossip_topics;
+
+    if (self.node_options.subscribe_all_subnets) {
+        var attestation_subnet: u8 = 0;
+        while (attestation_subnet < gossip_topics.MAX_ATTESTATION_SUBNET_ID) : (attestation_subnet += 1) {
+            if (enabled) {
+                svc.subscribeSubnet(io, .beacon_attestation, attestation_subnet) catch |err| {
+                    log.warn("Failed to subscribe to attestation subnet {d}: {}", .{ attestation_subnet, err });
+                };
+            } else {
+                svc.unsubscribeSubnet(io, .beacon_attestation, attestation_subnet) catch |err| {
+                    log.warn("Failed to unsubscribe from attestation subnet {d}: {}", .{ attestation_subnet, err });
+                };
+            }
+        }
+    }
+
+    const custody_group_count = @min(
+        self.chain_runtime.custody_columns.len,
+        @as(usize, gossip_topics.MAX_DATA_COLUMN_SIDECAR_SUBNET_ID),
+    );
+    var data_column_subnet: u8 = 0;
+    while (@as(usize, data_column_subnet) < custody_group_count) : (data_column_subnet += 1) {
+        if (enabled) {
+            svc.subscribeSubnet(io, .data_column_sidecar, data_column_subnet) catch |err| {
+                log.warn("Failed to subscribe to data column subnet {d}: {}", .{ data_column_subnet, err });
+            };
+        } else {
+            svc.unsubscribeSubnet(io, .data_column_sidecar, data_column_subnet) catch |err| {
+                log.warn("Failed to unsubscribe from data column subnet {d}: {}", .{ data_column_subnet, err });
+            };
+        }
+    }
+}
+
+fn setSyncGossipCoreTopicsEnabled(
+    self: *BeaconNode,
+    io: std.Io,
+    svc: *networking.P2pService,
+    enabled: bool,
+) void {
+    if (enabled) {
+        svc.subscribeEthTopics(io) catch |err| {
+            log.warn("Failed to subscribe gossip core topics: {}", .{err});
+            return;
+        };
+        setInitialSubnetSubscriptionsEnabled(self, io, svc, true);
+    } else {
+        svc.unsubscribeEthTopics(io) catch |err| {
+            log.warn("Failed to unsubscribe gossip core topics: {}", .{err});
+            return;
+        };
+        setInitialSubnetSubscriptionsEnabled(self, io, svc, false);
+    }
+    log.info("gossip core topics {s}", .{if (enabled) "enabled" else "disabled"});
+}
+
+fn processPendingSyncGossipSubscriptionUpdates(
+    self: *BeaconNode,
+    io: std.Io,
+    svc: *networking.P2pService,
+) bool {
+    const cb_ctx = self.sync_callback_ctx orelse return false;
+    const enabled = cb_ctx.takePendingGossipEnabled() orelse return false;
+    setSyncGossipCoreTopicsEnabled(self, io, svc, enabled);
+    return true;
+}
+
 fn initSubnetService(self: *BeaconNode) !void {
     const svc = try self.allocator.create(SubnetService);
     errdefer self.allocator.destroy(svc);
@@ -1373,6 +1447,7 @@ fn runRealtimeP2pTick(self: *BeaconNode, io: std.Io, svc: *networking.P2pService
 
     maybeHandleForkTransition(self, io, svc);
 
+    did_work = processPendingSyncGossipSubscriptionUpdates(self, io, svc) or did_work;
     processSyncBatches(self, io, svc);
     processSyncByRootRequests(self, io, svc);
     if (shouldDriveUnknownChainSync(self)) self.unknown_chain_sync.tick();

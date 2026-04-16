@@ -92,6 +92,9 @@ pub const SyncCallbackCtx = struct {
     pending_linked_head: u8 = 0,
     pending_linked_count: u8 = 0,
 
+    /// Pending sync-driven gossip-core subscription state change.
+    pending_gossip_enabled: ?bool = null,
+
     /// Fallback connected-peer registry for non-P2P runtimes such as sim tests.
     connected_peers: PeerSet = .empty,
 
@@ -360,6 +363,12 @@ pub const SyncCallbackCtx = struct {
         return pending;
     }
 
+    pub fn takePendingGossipEnabled(self: *SyncCallbackCtx) ?bool {
+        const enabled = self.pending_gossip_enabled;
+        self.pending_gossip_enabled = null;
+        return enabled;
+    }
+
     fn syncReportPeer(ptr: *anyopaque, peer_id: []const u8, reason: SyncPeerReportReason) void {
         const ctx: *SyncCallbackCtx = @ptrCast(@alignCast(ptr));
         const node: *BeaconNode = @ptrCast(@alignCast(ctx.node));
@@ -433,7 +442,9 @@ pub const SyncCallbackCtx = struct {
         return false;
     }
 
-    fn syncSetGossipEnabled(_: *anyopaque, enabled: bool) void {
+    fn syncSetGossipEnabled(ptr: *anyopaque, enabled: bool) void {
+        const ctx: *SyncCallbackCtx = @ptrCast(@alignCast(ptr));
+        ctx.pending_gossip_enabled = enabled;
         scoped_log.info("gossip {s}", .{if (enabled) "enabled" else "disabled"});
     }
 };

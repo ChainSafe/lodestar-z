@@ -419,9 +419,17 @@ pub const P2pService = struct {
             self.gossipsub.setTime(io, unixTimeMs(io));
         }
         try self.network.listen(io, listen_addr);
-        try self.gossip_adapter.subscribeEthTopics(io);
+        try self.subscribeEthTopics(io);
         self.startHeartbeat(io);
         log.info("p2p service started", .{});
+    }
+
+    pub fn subscribeEthTopics(self: *Self, io: Io) !void {
+        try self.gossip_adapter.subscribeEthTopics(io);
+    }
+
+    pub fn unsubscribeEthTopics(self: *Self, io: Io) !void {
+        try self.gossip_adapter.unsubscribeEthTopics(io);
     }
 
     pub fn gossipsubMetricsSnapshot(self: *Self, io: Io) GossipsubMetricsSnapshot {
