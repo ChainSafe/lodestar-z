@@ -1672,6 +1672,7 @@ pub const BeaconNode = struct {
 
             const started = startPendingSyncSegmentBlock(self, i) catch |err| {
                 const segment = &self.pending_sync_segments.items[i];
+                _ = recordBlockImportError(&segment.error_counts, err);
                 node_log.warn(
                     "failed to start pending sync segment block chain_id={d} batch_id={d} generation={d} index={d}: {}",
                     .{ segment.key.chain_id, segment.key.batch_id, segment.key.generation, segment.next_index, err },

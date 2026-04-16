@@ -22,6 +22,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const BlsThreadPool = @import("bls").ThreadPool;
+const scoped_log = std.log.scoped(.pipeline);
 
 const consensus_types = @import("consensus_types");
 const preset = @import("preset").preset;
@@ -340,7 +341,13 @@ pub fn getPlannedBlockImportPreState(
         .block_import,
     ) catch |err| switch (err) {
         error.NoPreStateAvailable => BlockImportError.PrestateMissing,
-        else => BlockImportError.InternalError,
+        else => blk: {
+            scoped_log.warn(
+                "queued pre-state resolution failed parent_slot={d} block_slot={d}: {}",
+                .{ planned.parent_slot, planned.block_input.block.beaconBlock().slot(), err },
+            );
+            break :blk BlockImportError.InternalError;
+        },
     };
 }
 
@@ -391,7 +398,13 @@ pub fn captureStateTransitionJob(
 
     const transient_pre_state = pre_state.clone(allocator, .{
         .transfer_cache = false,
-    }) catch return BlockImportError.InternalError;
+    }) catch |err| {
+        scoped_log.warn(
+            "failed to clone queued pre-state parent_slot={d} block_slot={d}: {}",
+            .{ planned.parent_slot, planned.block_input.block.beaconBlock().slot(), err },
+        );
+        return BlockImportError.InternalError;
+    };
     return .{
         .planned = planned,
         .transient_pre_state = transient_pre_state,
