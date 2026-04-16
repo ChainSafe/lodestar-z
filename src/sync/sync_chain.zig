@@ -418,17 +418,41 @@ pub const SyncChain = struct {
 
     // ── Internal helpers ────────────────────────────────────────────
 
-    /// Recompute target as the highest slot among peers.
+    /// Recompute target from the current peer set.
     ///
-    /// Initialized from peers only so that when the highest-target peer disconnects,
-    /// the target correctly decreases (instead of sticking at the stale watermark).
+    /// Lodestar selects the highest slot and, when multiple peers advertise the
+    /// same highest slot on different forks, prefers the most common target
+    /// root among that slot cohort. This prevents the chain target from
+    /// drifting arbitrarily across same-slot forks.
     fn computeTarget(self: *SyncChain) void {
-        var best: ?ChainTarget = null;
+        var highest_slot: ?u64 = null;
         for (self.peers.values()) |peer| {
             const t = peer.target;
-            if (best == null or t.slot > best.?.slot) best = t;
+            if (highest_slot == null or t.slot > highest_slot.?) {
+                highest_slot = t.slot;
+            }
         }
-        if (best) |b| self.target = b;
+        const slot = highest_slot orelse return;
+
+        var best: ?ChainTarget = null;
+        var best_count: usize = 0;
+        for (self.peers.values()) |peer| {
+            const candidate = peer.target;
+            if (candidate.slot != slot) continue;
+
+            var count: usize = 0;
+            for (self.peers.values()) |other| {
+                if (other.target.slot != slot) continue;
+                if (other.target.eql(candidate)) count += 1;
+            }
+
+            if (best == null or count > best_count) {
+                best = candidate;
+                best_count = count;
+            }
+        }
+
+        if (best) |target| self.target = target;
     }
 
     /// Select the most suitable peer for the given batch.
@@ -456,6 +480,7 @@ pub const SyncChain = struct {
                     if (last_failed_peer) |skip_peer| {
                         if (std.mem.eql(u8, peer_id, skip_peer)) continue;
                     }
+                    if (batch.hasFailedProcessingPeer(peer_id)) continue;
                 }
 
                 if (peer.target.slot < batch.start_slot) continue;
@@ -481,7 +506,7 @@ pub const SyncChain = struct {
             }
 
             if (best_peer != null) return best_peer;
-            if (last_failed_peer == null) break;
+            if (last_failed_peer == null and !batch.hasFailedProcessingPeers()) break;
         }
 
         return null;
@@ -561,9 +586,10 @@ pub const SyncChain = struct {
 
     fn drainValidatedPrefix(self: *SyncChain, drain_count: usize) void {
         if (drain_count == 0) return;
-        for (self.batches.items[0..drain_count]) |batch| {
+        for (self.batches.items[0..drain_count]) |*batch| {
             std.debug.assert(batch.status == .awaiting_validation);
             self.validated_epochs += batch.count / preset.SLOTS_PER_EPOCH;
+            batch.deinit();
         }
         self.batches.replaceRangeAssumeCapacity(0, drain_count, &.{});
     }
@@ -1019,6 +1045,65 @@ test "SyncChain: processing error rewinds awaiting-validation prefix" {
     try std.testing.expectEqual(BatchStatus.awaiting_download, chain.batches.items[1].status);
     try std.testing.expectEqual(@as(u8, 1), chain.batches.items[0].processing_failures);
     try std.testing.expectEqual(@as(u8, 1), chain.batches.items[1].processing_failures);
+}
+
+test "SyncChain: processing retry avoids prior invalid batch peer when alternative exists" {
+    const allocator = std.testing.allocator;
+    var tc = TestSyncCallbacks{};
+    var chain = SyncChain.init(
+        allocator,
+        std.testing.io,
+        0,
+        .finalized,
+        0,
+        .{ .slot = 2, .root = [_]u8{0x77} ** 32 },
+        tc.callbacks(),
+    );
+    defer chain.deinit();
+
+    try chain.addPeer("bad", .{ .slot = 10, .root = [_]u8{0x77} ** 32 }, null);
+    try chain.addPeer("good", .{ .slot = 2, .root = [_]u8{0x77} ** 32 }, null);
+    chain.startSyncing();
+
+    _ = try chain.tick();
+    try std.testing.expectEqualStrings("bad", tc.lastPeerId());
+
+    const blocks = [_]BatchBlock{
+        .{ .slot = 1, .block_bytes = "b1" },
+        .{ .slot = 2, .block_bytes = "b2" },
+    };
+    tc.should_fail_processing = true;
+    chain.onBatchResponse(tc.last_batch_id, tc.last_generation, &blocks);
+    tc.should_fail_processing = false;
+
+    _ = try chain.tick();
+    try std.testing.expectEqual(@as(u32, 2), tc.downloaded_count);
+    try std.testing.expectEqualStrings("good", tc.lastPeerId());
+}
+
+test "SyncChain: computeTarget chooses most common root among highest-slot peers" {
+    const allocator = std.testing.allocator;
+    var tc = TestSyncCallbacks{};
+    var chain = SyncChain.init(
+        allocator,
+        std.testing.io,
+        0,
+        .head,
+        0,
+        .{ .slot = 0, .root = [_]u8{0x11} ** 32 },
+        tc.callbacks(),
+    );
+    defer chain.deinit();
+
+    const root_a = [_]u8{0xAA} ** 32;
+    const root_b = [_]u8{0xBB} ** 32;
+
+    try chain.addPeer("p1", .{ .slot = 64, .root = root_a }, null);
+    try chain.addPeer("p2", .{ .slot = 64, .root = root_b }, null);
+    try chain.addPeer("p3", .{ .slot = 64, .root = root_b }, null);
+
+    try std.testing.expectEqual(@as(u64, 64), chain.target.slot);
+    try std.testing.expectEqual(root_b, chain.target.root);
 }
 
 test "SyncChain: skips peers that cannot serve the batch start slot" {

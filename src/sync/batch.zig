@@ -57,12 +57,20 @@ pub const Batch = struct {
     download_peer: ?[]const u8,
     /// Last peer whose download failed. Used as a soft exclusion on retry.
     last_failed_peer: ?[]u8,
+    /// Owned copy of the peer that supplied the currently retained batch data.
+    /// This remains valid even if that peer later disconnects and its peer-map
+    /// storage is freed.
+    current_attempt_peer: ?[]u8,
     /// Peers that returned usable blocks while required side data was
     /// unavailable. Lodestar's range sync retries with a request narrowed to
     /// the missing columns, which naturally excludes peers that cannot serve
     /// those columns. This list preserves that behavior while our callback
     /// still dispatches a coarse block-range request.
     deferred_peers: std.ArrayListUnmanaged([]u8),
+    /// Peers whose batch data failed processing or later validation. Lodestar
+    /// deprioritizes these peers on the next retry instead of immediately
+    /// requesting the same invalid batch from them again.
+    failed_processing_peers: std.ArrayListUnmanaged([]u8),
     /// Highest slot ever returned for this batch by a successful download.
     /// Used to avoid retrying against a head peer that is already behind known progress.
     last_downloaded_slot: ?u64,
@@ -90,7 +98,9 @@ pub const Batch = struct {
             .generation = 0,
             .download_peer = null,
             .last_failed_peer = null,
+            .current_attempt_peer = null,
             .deferred_peers = .empty,
+            .failed_processing_peers = .empty,
             .last_downloaded_slot = null,
             .download_failures = 0,
             .processing_failures = 0,
@@ -114,7 +124,9 @@ pub const Batch = struct {
     pub fn deinit(self: *Batch) void {
         self.freeBlocks();
         self.clearPeerMemory(&self.last_failed_peer);
+        self.clearPeerMemory(&self.current_attempt_peer);
         self.clearDeferredPeers();
+        self.clearFailedProcessingPeers();
     }
 
     fn rememberDownloadedBlocks(self: *Batch, blocks: []const BatchBlock) bool {
@@ -170,11 +182,22 @@ pub const Batch = struct {
         slot.* = self.allocator.dupe(u8, peer_id) catch null;
     }
 
+    fn rememberCurrentAttemptPeer(self: *Batch) void {
+        self.rememberPeer(&self.current_attempt_peer);
+    }
+
     fn clearDeferredPeers(self: *Batch) void {
         for (self.deferred_peers.items) |peer_id| {
             self.allocator.free(peer_id);
         }
         self.deferred_peers.clearAndFree(self.allocator);
+    }
+
+    fn clearFailedProcessingPeers(self: *Batch) void {
+        for (self.failed_processing_peers.items) |peer_id| {
+            self.allocator.free(peer_id);
+        }
+        self.failed_processing_peers.clearAndFree(self.allocator);
     }
 
     fn rememberDeferredPeer(self: *Batch) void {
@@ -191,6 +214,26 @@ pub const Batch = struct {
             if (std.mem.eql(u8, peer_id, deferred_peer)) return true;
         }
         return false;
+    }
+
+    fn rememberFailedProcessingPeer(self: *Batch) void {
+        const peer_id = self.current_attempt_peer orelse return;
+        if (self.hasFailedProcessingPeer(peer_id)) return;
+        const owned_peer_id = self.allocator.dupe(u8, peer_id) catch return;
+        self.failed_processing_peers.append(self.allocator, owned_peer_id) catch {
+            self.allocator.free(owned_peer_id);
+        };
+    }
+
+    pub fn hasFailedProcessingPeer(self: *const Batch, peer_id: []const u8) bool {
+        for (self.failed_processing_peers.items) |failed_peer| {
+            if (std.mem.eql(u8, peer_id, failed_peer)) return true;
+        }
+        return false;
+    }
+
+    pub fn hasFailedProcessingPeers(self: *const Batch) bool {
+        return self.failed_processing_peers.items.len > 0;
     }
 
     /// The last slot covered by this batch (inclusive).
@@ -218,6 +261,7 @@ pub const Batch = struct {
         if (self.status != .downloading) return false;
 
         if (!self.rememberDownloadedBlocks(blocks)) return false;
+        self.rememberCurrentAttemptPeer();
         self.clearPeerMemory(&self.last_failed_peer);
         self.clearDeferredPeers();
         self.status = .awaiting_processing;
@@ -269,6 +313,7 @@ pub const Batch = struct {
     pub fn onProcessingError(self: *Batch) void {
         std.debug.assert(self.status == .processing);
         self.processing_failures += 1;
+        self.rememberFailedProcessingPeer();
         self.freeBlocks();
         self.status = .awaiting_download;
         self.download_peer = null;
@@ -278,6 +323,7 @@ pub const Batch = struct {
     pub fn onValidationError(self: *Batch) void {
         std.debug.assert(self.status == .awaiting_validation);
         self.processing_failures += 1;
+        self.rememberFailedProcessingPeer();
         self.status = .awaiting_download;
     }
 
@@ -419,6 +465,7 @@ test "Batch: validation error retries processed batch" {
     b.onValidationError();
     try std.testing.expectEqual(BatchStatus.awaiting_download, b.status);
     try std.testing.expectEqual(@as(u8, 1), b.processing_failures);
+    try std.testing.expect(b.hasFailedProcessingPeer("peer_f"));
 }
 
 test "Batch: deferred blocks are reused on successful retry" {
@@ -442,4 +489,20 @@ test "Batch: deferred blocks are reused on successful retry" {
     try std.testing.expect(b.onDownloadSuccess(second_gen, retained));
     try std.testing.expectEqual(BatchStatus.awaiting_processing, b.status);
     try std.testing.expectEqual(retained_ptr, b.getBlocks().ptr);
+}
+
+test "Batch: processing error remembers batch producer" {
+    var b = Batch.init(std.testing.io, 6, 0, 32, std.testing.allocator);
+    defer b.deinit();
+
+    b.startDownload("peer_g");
+    const gen = b.generation;
+    const blocks = [_]BatchBlock{.{ .slot = 1, .block_bytes = "b1" }};
+    try std.testing.expect(b.onDownloadSuccess(gen, &blocks));
+
+    b.startProcessing();
+    b.onProcessingError();
+
+    try std.testing.expectEqual(BatchStatus.awaiting_download, b.status);
+    try std.testing.expect(b.hasFailedProcessingPeer("peer_g"));
 }
