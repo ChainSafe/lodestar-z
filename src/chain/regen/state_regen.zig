@@ -1,7 +1,7 @@
 //! StateRegen: state regeneration from caches, disk, and block replay.
 //!
-//! Ties together BlockStateCache, CheckpointStateCache, and (eventually)
-//! fork choice + BeaconDB to produce pre-states for block processing.
+//! Ties together BlockStateCache, CheckpointStateCache, fork choice, and
+//! BeaconDB to produce pre-states for block processing.
 //!
 //! Design mirrors Lodestar's StateRegenerator / QueuedStateRegenerator.
 const std = @import("std");
@@ -26,14 +26,19 @@ const BeaconDB = @import("db").BeaconDB;
 const deserializeState = state_transition.deserializeState;
 const AnyBeaconState = @import("fork_types").AnyBeaconState;
 const AnySignedBeaconBlock = @import("fork_types").AnySignedBeaconBlock;
+const fork_choice_mod = @import("fork_choice");
+const ForkChoice = fork_choice_mod.ForkChoiceStruct;
+const ProtoBlock = fork_choice_mod.ProtoBlock;
 
 pub const StateRegen = struct {
     allocator: Allocator,
     block_cache: *BlockStateCache,
     checkpoint_cache: *CheckpointStateCache,
-    // fork_choice: *ForkChoice,   // TODO: wire when available
+    fork_choice: ?*const ForkChoice = null,
     db: *BeaconDB,
     shared_state_graph: *SharedStateGraph,
+
+    const MAX_FORK_CHOICE_REPLAY_BLOCKS: usize = 5 * preset.SLOTS_PER_EPOCH;
 
     pub fn initForRuntime(
         allocator: Allocator,
@@ -46,9 +51,18 @@ pub const StateRegen = struct {
             .allocator = allocator,
             .block_cache = block_cache,
             .checkpoint_cache = checkpoint_cache,
+            .fork_choice = null,
             .db = db,
             .shared_state_graph = shared_state_graph,
         };
+    }
+
+    pub fn setForkChoice(self: *StateRegen, fork_choice: *const ForkChoice) void {
+        self.fork_choice = fork_choice;
+    }
+
+    pub fn clearForkChoice(self: *StateRegen) void {
+        self.fork_choice = null;
     }
 
     pub const PreparedCheckpointReload = struct {
@@ -107,7 +121,8 @@ pub const StateRegen = struct {
     /// Strategy:
     /// 1. Try block cache (hot path — most recent blocks)
     /// 2. Try in-memory checkpoint cache (warm path — epoch boundary states)
-    /// 3. Replay canonical history from the closest archived state (cold path)
+    /// 3. Replay fork-choice history from a cached/checkpoint seed (cold path)
+    /// 4. Replay canonical history from the closest archived state (fallback)
     pub fn getPreState(
         self: *StateRegen,
         parent_block_root: [32]u8,
@@ -152,7 +167,7 @@ pub const StateRegen = struct {
     ) !*CachedBeaconState {
         _ = block_slot;
 
-        if (try self.loadArchivedStateByRootUncached(parent_state_root)) |state| {
+        if (try self.loadStateByRootUncached(parent_state_root)) |state| {
             return state;
         }
 
@@ -171,7 +186,11 @@ pub const StateRegen = struct {
         self: *StateRegen,
         state_root: [32]u8,
     ) !?*CachedBeaconState {
-        return self.loadArchivedStateByRootUncached(state_root);
+        if (try self.loadArchivedStateByRootUncached(state_root)) |state| {
+            return state;
+        }
+
+        return self.replayForkChoiceStateToRootUncached(state_root);
     }
 
     /// Prepare a checkpoint reload request for off-thread execution.
@@ -287,6 +306,7 @@ pub const StateRegen = struct {
     /// Search order:
     /// 1. Block state cache (hot path)
     /// 2. DB state archive by root (cold path)
+    /// 3. Fork-choice replay from a cached/checkpoint seed (fallback)
     ///
     pub fn getStateByRoot(self: *StateRegen, state_root: [32]u8) !?*CachedBeaconState {
         // 1. Check block cache — O(1) lookup
@@ -297,19 +317,12 @@ pub const StateRegen = struct {
         // so we cannot efficiently look up by state_root here. Skip for now.
 
         // 3. Try DB archived state
-        const bytes = (try self.db.getStateArchiveByRoot(state_root)) orelse return null;
-        defer self.allocator.free(bytes);
-        var state_graph_lease = self.acquireStateGraphLease();
-        defer state_graph_lease.release();
-        const cached_state = try deserializeState(
-            self.allocator,
-            self.shared_state_graph.pool,
-            self.shared_state_graph.config,
-            self.shared_state_graph.validator_pubkeys,
-            bytes,
-            self.shared_state_graph.state_transition_metrics,
-        );
-        return try self.cacheLoadedState(cached_state, false);
+        if (try self.loadArchivedStateByRootUncached(state_root)) |cached_state| {
+            errdefer self.destroyTransientState(cached_state);
+            return try self.publishLoadedState(cached_state);
+        }
+
+        return self.replayForkChoiceStateToRoot(state_root);
     }
 
     /// Look up an archived state by slot.
@@ -409,6 +422,112 @@ pub const StateRegen = struct {
         if (!std.mem.eql(u8, &canonical_root, &block_root)) return null;
 
         return self.replayCanonicalStateToSlotUncached(slot);
+    }
+
+    fn replayForkChoiceStateToRoot(self: *StateRegen, target_state_root: [32]u8) !?*CachedBeaconState {
+        const transient = (try self.replayForkChoiceStateToRootInternal(target_state_root, true)) orelse return null;
+        errdefer self.destroyTransientState(transient);
+
+        var state_graph_lease = self.acquireStateGraphLease();
+        defer state_graph_lease.release();
+        return try self.cacheLoadedState(transient, false);
+    }
+
+    fn replayForkChoiceStateToRootUncached(self: *StateRegen, target_state_root: [32]u8) !?*CachedBeaconState {
+        return self.replayForkChoiceStateToRootInternal(target_state_root, false);
+    }
+
+    fn replayForkChoiceStateToRootInternal(
+        self: *StateRegen,
+        target_state_root: [32]u8,
+        allow_checkpoint_reload: bool,
+    ) !?*CachedBeaconState {
+        const fc = self.fork_choice orelse return null;
+        const target_block = self.findForkChoiceBlockByStateRoot(fc, target_state_root) orelse return null;
+        if (target_block.payload_status == .pending) return error.PendingForkChoiceBlock;
+
+        var blocks_to_replay: std.ArrayListUnmanaged(ProtoBlock) = .empty;
+        defer blocks_to_replay.deinit(self.allocator);
+        try blocks_to_replay.append(self.allocator, target_block);
+
+        var seed_state: ?*CachedBeaconState = null;
+        var ancestor_iter = fc.iterateAncestorBlocks(target_block.block_root, target_block.payload_status);
+        while (try ancestor_iter.next()) |ancestor_node| {
+            if (ancestor_node.payload_status == .pending) return error.PendingForkChoiceBlock;
+
+            if (self.block_cache.get(ancestor_node.state_root)) |cached| {
+                seed_state = cached;
+                break;
+            }
+
+            const last_block_to_replay = blocks_to_replay.items[blocks_to_replay.items.len - 1];
+            const checkpoint_epoch = computeEpochAtSlot(last_block_to_replay.slot -| 1);
+            const checkpoint_state = if (allow_checkpoint_reload)
+                try self.checkpoint_cache.getOrReloadLatest(ancestor_node.block_root, checkpoint_epoch)
+            else
+                self.checkpoint_cache.getLatest(ancestor_node.block_root, checkpoint_epoch);
+            if (checkpoint_state) |state| {
+                seed_state = state;
+                break;
+            }
+
+            if (blocks_to_replay.items.len >= MAX_FORK_CHOICE_REPLAY_BLOCKS) {
+                return error.TooManyForkChoiceBlocksToReplay;
+            }
+            try blocks_to_replay.append(self.allocator, ancestor_node.toBlock());
+        }
+
+        const seed = seed_state orelse return null;
+
+        var state_graph_lease = self.acquireStateGraphLease();
+        defer state_graph_lease.release();
+
+        var working_state = try seed.clone(self.allocator, .{ .transfer_cache = false });
+        errdefer {
+            working_state.deinit();
+            self.allocator.destroy(working_state);
+        }
+
+        const replay_count = blocks_to_replay.items.len;
+        var replay_index: usize = replay_count;
+        while (replay_index > 0) {
+            replay_index -= 1;
+            const replay_block = blocks_to_replay.items[replay_index];
+            const block_bytes = (try self.getBlockBytesByRoot(replay_block.block_root)) orelse
+                return error.ForkChoiceBlockMissingFromDb;
+            defer self.allocator.free(block_bytes);
+
+            var any_signed = try self.deserializeSignedBlock(replay_block.slot, block_bytes);
+            defer any_signed.deinit(self.allocator);
+
+            var actual_block_root: [32]u8 = undefined;
+            try any_signed.beaconBlock().hashTreeRoot(self.allocator, &actual_block_root);
+            if (!std.mem.eql(u8, &actual_block_root, &replay_block.block_root)) {
+                return error.ForkChoiceBlockRootMismatch;
+            }
+
+            const next_state = try stateTransition(
+                self.allocator,
+                working_state,
+                any_signed,
+                TransitionOpt{
+                    .verify_state_root = true,
+                    .verify_proposer = false,
+                    .verify_signatures = false,
+                    .transfer_cache = false,
+                },
+            );
+            working_state.deinit();
+            self.allocator.destroy(working_state);
+            working_state = next_state;
+
+            const actual_state_root = (try working_state.state.hashTreeRoot()).*;
+            if (!std.mem.eql(u8, &actual_state_root, &replay_block.state_root)) {
+                return error.ForkChoiceStateRootMismatch;
+            }
+        }
+
+        return working_state;
     }
 
     fn replayCanonicalStateToSlot(self: *StateRegen, target_slot: u64) !?*CachedBeaconState {
@@ -590,6 +709,21 @@ pub const StateRegen = struct {
         );
     }
 
+    fn findForkChoiceBlockByStateRoot(
+        self: *StateRegen,
+        fork_choice: *const ForkChoice,
+        state_root: [32]u8,
+    ) ?ProtoBlock {
+        _ = self;
+        for (fork_choice.getAllNodes()) |node| {
+            if (node.payload_status == .pending) continue;
+            if (std.mem.eql(u8, &node.state_root, &state_root)) {
+                return node.toBlock();
+            }
+        }
+        return null;
+    }
+
     fn getBlockBytesByRoot(self: *StateRegen, block_root: [32]u8) !?[]const u8 {
         if (try self.db.getBlock(block_root)) |block_bytes| return block_bytes;
         return self.db.getBlockArchiveByRoot(block_root);
@@ -634,6 +768,21 @@ pub const StateRegen = struct {
 
 const RegenRuntimeFixture = @import("test_fixture.zig").RegenRuntimeFixture;
 
+const ReplayTestBlock = struct {
+    block_root: [32]u8,
+    state_root: [32]u8,
+    parent_root: [32]u8,
+    slot: u64,
+    post_state: *CachedBeaconState,
+};
+
+const ReplayScenario = struct {
+    fork_choice: *ForkChoice,
+    block1: ReplayTestBlock,
+    block2: ReplayTestBlock,
+    block3: ReplayTestBlock,
+};
+
 fn clonePublishedStateWithSharedPubkeys(
     allocator: Allocator,
     shared_pubkeys: *SharedValidatorPubkeys,
@@ -658,6 +807,273 @@ fn clonePublishedStateWithSharedPubkeys(
             .skip_sync_pubkeys = true,
         },
     );
+}
+
+fn testJustifiedBalancesGetter(
+    _: ?*anyopaque,
+    _: fork_choice_mod.CheckpointWithPayloadStatus,
+    state: *CachedBeaconState,
+) fork_choice_mod.JustifiedBalances {
+    return state.epoch_cache.getEffectiveBalanceIncrements();
+}
+
+fn initForkChoiceForReplayTest(
+    allocator: Allocator,
+    fixture: *RegenRuntimeFixture,
+    genesis_block_root: [32]u8,
+    genesis_state_root: [32]u8,
+) !*ForkChoice {
+    const genesis_slot = try fixture.published_state.state.slot();
+    const justified = fork_choice_mod.CheckpointWithPayloadStatus.fromCheckpoint(.{
+        .epoch = computeEpochAtSlot(genesis_slot),
+        .root = genesis_block_root,
+    }, .full);
+    const balances = fixture.published_state.epoch_cache.getEffectiveBalanceIncrements();
+
+    return fork_choice_mod.initFromAnchor(
+        allocator,
+        fixture.shared_state_graph.config,
+        .{
+            .slot = genesis_slot,
+            .block_root = genesis_block_root,
+            .parent_root = genesis_block_root,
+            .state_root = genesis_state_root,
+            .target_root = genesis_block_root,
+            .justified_epoch = justified.epoch,
+            .justified_root = justified.root,
+            .finalized_epoch = justified.epoch,
+            .finalized_root = justified.root,
+            .unrealized_justified_epoch = justified.epoch,
+            .unrealized_justified_root = justified.root,
+            .unrealized_finalized_epoch = justified.epoch,
+            .unrealized_finalized_root = justified.root,
+            .extra_meta = .{ .pre_merge = {} },
+            .timeliness = true,
+        },
+        genesis_slot,
+        justified,
+        justified,
+        balances.items,
+        .{ .getFn = testJustifiedBalancesGetter },
+        .{},
+        .{
+            .proposer_boost = true,
+            .proposer_boost_reorg = true,
+            .compute_unrealized = true,
+        },
+    );
+}
+
+fn createReplaySignedBlock(
+    allocator: Allocator,
+    cached_state: *CachedBeaconState,
+    target_slot: u64,
+) !*@import("consensus_types").electra.SignedBeaconBlock.Type {
+    const state = cached_state.state;
+    const epoch_cache = cached_state.epoch_cache;
+
+    const proposer_index = epoch_cache.getBeaconProposer(target_slot) catch 0;
+    var latest_header = try state.latestBlockHeader();
+    const parent_root = try latest_header.hashTreeRoot();
+
+    const genesis_time = try state.genesisTime();
+    const seconds_per_slot = cached_state.config.chain.SECONDS_PER_SLOT;
+    const expected_timestamp = genesis_time + target_slot * seconds_per_slot;
+
+    var execution_payload = @import("consensus_types").electra.ExecutionPayload.default_value;
+    execution_payload.timestamp = expected_timestamp;
+    const latest_block_hash = state.latestExecutionPayloadHeaderBlockHash() catch &([_]u8{0} ** 32);
+    execution_payload.parent_hash = latest_block_hash.*;
+
+    const current_epoch = computeEpochAtSlot(target_slot);
+    const randao_mix = try state_transition.getRandaoMix(
+        .electra,
+        state.castToFork(.electra),
+        current_epoch,
+    );
+    execution_payload.prev_randao = randao_mix.*;
+
+    const signed_block = try allocator.create(@import("consensus_types").electra.SignedBeaconBlock.Type);
+    errdefer allocator.destroy(signed_block);
+
+    signed_block.* = .{
+        .message = .{
+            .slot = target_slot,
+            .proposer_index = proposer_index,
+            .parent_root = parent_root.*,
+            .state_root = [_]u8{0} ** 32,
+            .body = .{
+                .randao_reveal = [_]u8{0} ** 96,
+                .eth1_data = @import("consensus_types").phase0.Eth1Data.default_value,
+                .graffiti = [_]u8{0} ** 32,
+                .proposer_slashings = @import("consensus_types").phase0.ProposerSlashings.default_value,
+                .attester_slashings = @import("consensus_types").phase0.AttesterSlashings.default_value,
+                .attestations = @import("consensus_types").electra.Attestations.default_value,
+                .deposits = @import("consensus_types").phase0.Deposits.default_value,
+                .voluntary_exits = @import("consensus_types").phase0.VoluntaryExits.default_value,
+                .sync_aggregate = .{
+                    .sync_committee_bits = @import("ssz").BitVectorType(preset.SYNC_COMMITTEE_SIZE).default_value,
+                    .sync_committee_signature = @import("consensus_types").primitive.BLSSignature.default_value,
+                },
+                .execution_payload = execution_payload,
+                .bls_to_execution_changes = @import("consensus_types").capella.SignedBLSToExecutionChanges.default_value,
+                .blob_kzg_commitments = @import("consensus_types").electra.BlobKzgCommitments.default_value,
+                .execution_requests = @import("consensus_types").electra.ExecutionRequests.default_value,
+            },
+        },
+        .signature = @import("consensus_types").primitive.BLSSignature.default_value,
+    };
+
+    return signed_block;
+}
+
+fn importReplayTestBlock(
+    allocator: Allocator,
+    fixture: *RegenRuntimeFixture,
+    parent_state: *CachedBeaconState,
+) !ReplayTestBlock {
+    const parent_slot = try parent_state.state.slot();
+    const target_slot = parent_slot + 1;
+
+    var generation_state = try parent_state.clone(allocator, .{ .transfer_cache = false });
+    defer {
+        generation_state.deinit();
+        allocator.destroy(generation_state);
+    }
+    try processSlots(allocator, generation_state, target_slot, .{});
+
+    const signed_block = try createReplaySignedBlock(allocator, generation_state, target_slot);
+    defer {
+        @import("consensus_types").electra.SignedBeaconBlock.deinit(allocator, signed_block);
+        allocator.destroy(signed_block);
+    }
+
+    var any_signed = AnySignedBeaconBlock{ .full_electra = signed_block };
+    var transition_pre_state = try parent_state.clone(allocator, .{ .transfer_cache = false });
+    errdefer {
+        transition_pre_state.deinit();
+        allocator.destroy(transition_pre_state);
+    }
+
+    const post_state = try stateTransition(
+        allocator,
+        transition_pre_state,
+        any_signed,
+        TransitionOpt{
+            .verify_state_root = false,
+            .verify_proposer = false,
+            .verify_signatures = false,
+            .transfer_cache = false,
+        },
+    );
+    transition_pre_state.deinit();
+    allocator.destroy(transition_pre_state);
+    errdefer {
+        post_state.deinit();
+        allocator.destroy(post_state);
+    }
+
+    try post_state.state.commit();
+    const state_root = (try post_state.state.hashTreeRoot()).*;
+    signed_block.message.state_root = state_root;
+
+    var body_root: [32]u8 = undefined;
+    try any_signed.beaconBlock().beaconBlockBody().hashTreeRoot(allocator, &body_root);
+    const block_header = @import("consensus_types").phase0.BeaconBlockHeader.Type{
+        .slot = target_slot,
+        .proposer_index = signed_block.message.proposer_index,
+        .parent_root = signed_block.message.parent_root,
+        .state_root = state_root,
+        .body_root = body_root,
+    };
+    var block_root: [32]u8 = undefined;
+    try @import("consensus_types").phase0.BeaconBlockHeader.hashTreeRoot(&block_header, &block_root);
+
+    const block_bytes = try any_signed.serialize(allocator);
+    defer allocator.free(block_bytes);
+    try fixture.db.putBlock(block_root, block_bytes);
+
+    const cached_state_root = try fixture.regen.onNewBlock(post_state, true);
+    try std.testing.expectEqualSlices(u8, &state_root, &cached_state_root);
+
+    return .{
+        .block_root = block_root,
+        .state_root = state_root,
+        .parent_root = signed_block.message.parent_root,
+        .slot = target_slot,
+        .post_state = post_state,
+    };
+}
+
+fn replayProtoBlock(block: ReplayTestBlock) ProtoBlock {
+    return .{
+        .slot = block.slot,
+        .block_root = block.block_root,
+        .parent_root = block.parent_root,
+        .state_root = block.state_root,
+        .target_root = block.block_root,
+        .justified_epoch = 0,
+        .justified_root = [_]u8{0} ** 32,
+        .finalized_epoch = 0,
+        .finalized_root = [_]u8{0} ** 32,
+        .unrealized_justified_epoch = 0,
+        .unrealized_justified_root = [_]u8{0} ** 32,
+        .unrealized_finalized_epoch = 0,
+        .unrealized_finalized_root = [_]u8{0} ** 32,
+        .extra_meta = .{ .pre_merge = {} },
+        .timeliness = true,
+    };
+}
+
+fn evictStateFromBlockCache(cache: *BlockStateCache, state_root: [32]u8) !void {
+    if (cache.head_root) |head_root| {
+        try std.testing.expect(!std.mem.eql(u8, &head_root, &state_root));
+    }
+
+    const removed = cache.cache.fetchOrderedRemove(state_root) orelse return error.StateNotFound;
+    for (cache.key_order.items, 0..) |key, idx| {
+        if (std.mem.eql(u8, &key, &state_root)) {
+            _ = cache.key_order.orderedRemove(idx);
+            break;
+        }
+    }
+    try cache.state_disposer.dispose(removed.value);
+}
+
+fn initReplayScenario(
+    allocator: Allocator,
+    fixture: *RegenRuntimeFixture,
+) !ReplayScenario {
+    const genesis_state_root = try fixture.seedHeadState();
+    var genesis_header = try fixture.published_state.state.latestBlockHeader();
+    const genesis_block_root = (try genesis_header.hashTreeRoot()).*;
+
+    const fork_choice = try initForkChoiceForReplayTest(
+        allocator,
+        fixture,
+        genesis_block_root,
+        genesis_state_root,
+    );
+    errdefer fork_choice_mod.destroyFromAnchor(allocator, fork_choice);
+    fixture.regen.setForkChoice(fork_choice);
+    errdefer fixture.regen.clearForkChoice();
+
+    const genesis_state = fixture.block_cache.get(genesis_state_root).?;
+    const block1 = try importReplayTestBlock(allocator, fixture, genesis_state);
+    try fork_choice_mod.onBlockFromProto(fork_choice, allocator, replayProtoBlock(block1), block1.slot);
+
+    const block2 = try importReplayTestBlock(allocator, fixture, block1.post_state);
+    try fork_choice_mod.onBlockFromProto(fork_choice, allocator, replayProtoBlock(block2), block2.slot);
+
+    const block3 = try importReplayTestBlock(allocator, fixture, block2.post_state);
+    try fork_choice_mod.onBlockFromProto(fork_choice, allocator, replayProtoBlock(block3), block3.slot);
+
+    return .{
+        .fork_choice = fork_choice,
+        .block1 = block1,
+        .block2 = block2,
+        .block3 = block3,
+    };
 }
 
 test "StateRegen: basic getPreState from block cache" {
@@ -788,6 +1204,134 @@ test "StateRegen: loadPreStateUncached loads archived state root after verifying
 
     try std.testing.expectEqual(archived_slot, try loaded.state.slot());
     try std.testing.expectEqual(@as(usize, 0), fixture.block_cache.size());
+}
+
+test "StateRegen: getStateByRoot replays fork-choice state from cached ancestor" {
+    const allocator = std.testing.allocator;
+    var fixture = try RegenRuntimeFixture.init(allocator, 64);
+    defer fixture.deinit();
+
+    const scenario = try initReplayScenario(allocator, &fixture);
+    defer {
+        fixture.regen.clearForkChoice();
+        fork_choice_mod.destroyFromAnchor(allocator, scenario.fork_choice);
+    }
+
+    try evictStateFromBlockCache(fixture.block_cache, scenario.block2.state_root);
+    try std.testing.expect(fixture.block_cache.get(scenario.block2.state_root) == null);
+    try std.testing.expect(fixture.block_cache.get(scenario.block1.state_root) != null);
+
+    const replayed = (try fixture.regen.getStateByRoot(scenario.block2.state_root)).?;
+    try std.testing.expectEqual(replayed, fixture.block_cache.get(scenario.block2.state_root).?);
+    try std.testing.expectEqual(scenario.block2.slot, try replayed.state.slot());
+
+    const replayed_state_root = (try replayed.state.hashTreeRoot()).*;
+    try std.testing.expectEqualSlices(u8, &scenario.block2.state_root, &replayed_state_root);
+}
+
+test "StateRegen: loadPreStateUncached replays parent state from fork choice" {
+    const allocator = std.testing.allocator;
+    var fixture = try RegenRuntimeFixture.init(allocator, 64);
+    defer fixture.deinit();
+
+    const scenario = try initReplayScenario(allocator, &fixture);
+    defer {
+        fixture.regen.clearForkChoice();
+        fork_choice_mod.destroyFromAnchor(allocator, scenario.fork_choice);
+    }
+
+    try evictStateFromBlockCache(fixture.block_cache, scenario.block2.state_root);
+    try std.testing.expect(fixture.block_cache.get(scenario.block2.state_root) == null);
+    try std.testing.expect(fixture.block_cache.get(scenario.block1.state_root) != null);
+
+    const replayed = try fixture.regen.loadPreStateUncached(
+        scenario.block2.block_root,
+        scenario.block2.state_root,
+        scenario.block3.slot,
+    );
+    defer fixture.regen.destroyTransientState(replayed);
+
+    try std.testing.expectEqual(scenario.block2.slot, try replayed.state.slot());
+    const replayed_state_root = (try replayed.state.hashTreeRoot()).*;
+    try std.testing.expectEqualSlices(u8, &scenario.block2.state_root, &replayed_state_root);
+    try std.testing.expect(fixture.block_cache.get(scenario.block2.state_root) == null);
+}
+
+test "StateRegen: getStateByRoot reloads persisted checkpoint seed during fork-choice replay" {
+    const allocator = std.testing.allocator;
+    var fixture = try RegenRuntimeFixture.init(allocator, 64);
+    defer fixture.deinit();
+
+    const genesis_state_root = try fixture.seedHeadState();
+    var genesis_header = try fixture.published_state.state.latestBlockHeader();
+    const genesis_block_root = (try genesis_header.hashTreeRoot()).*;
+
+    const fork_choice = try initForkChoiceForReplayTest(
+        allocator,
+        &fixture,
+        genesis_block_root,
+        genesis_state_root,
+    );
+    defer {
+        fixture.regen.clearForkChoice();
+        fork_choice_mod.destroyFromAnchor(allocator, fork_choice);
+    }
+    fixture.regen.setForkChoice(fork_choice);
+
+    var persisted_seed_source: ?*CachedBeaconState = null;
+    defer if (persisted_seed_source) |state| {
+        fixture.regen.destroyTransientState(state);
+    };
+
+    const replay_block_count = preset.SLOTS_PER_EPOCH + 2;
+    var blocks: [replay_block_count]ReplayTestBlock = undefined;
+    var previous_state = fixture.block_cache.get(genesis_state_root).?;
+    var persisted_cp: ?CheckpointKey = null;
+
+    for (0..replay_block_count) |i| {
+        const block = try importReplayTestBlock(allocator, &fixture, previous_state);
+        blocks[i] = block;
+        try fork_choice_mod.onBlockFromProto(fork_choice, allocator, replayProtoBlock(block), block.slot);
+
+        if (i == 0) {
+            persisted_seed_source = try block.post_state.clone(allocator, .{ .transfer_cache = false });
+            const seed_checkpoint_state = try block.post_state.clone(allocator, .{ .transfer_cache = false });
+            const checkpoint = CheckpointKey{
+                .epoch = computeEpochAtSlot(block.slot),
+                .root = block.block_root,
+            };
+            persisted_cp = checkpoint;
+            try fixture.regen.onCheckpoint(checkpoint, seed_checkpoint_state);
+        }
+
+        previous_state = block.post_state;
+    }
+
+    const checkpoint_seed_source = persisted_seed_source.?;
+    const checkpoint = persisted_cp.?;
+    for (1..5) |offset| {
+        const dummy_state = try checkpoint_seed_source.clone(allocator, .{ .transfer_cache = false });
+        try fixture.regen.onCheckpoint(.{
+            .epoch = checkpoint.epoch + offset,
+            .root = [_]u8{@as(u8, @intCast(offset))} ** 32,
+        }, dummy_state);
+    }
+
+    _ = try fixture.cp_cache.processState([_]u8{0xff} ** 32, fixture.published_state);
+    try std.testing.expect(fixture.cp_cache.getLatest(checkpoint.root, checkpoint.epoch) == null);
+
+    const target_index = replay_block_count - 2;
+    try evictStateFromBlockCache(fixture.block_cache, blocks[target_index].state_root);
+    try evictStateFromBlockCache(fixture.block_cache, blocks[target_index - 1].state_root);
+    try evictStateFromBlockCache(fixture.block_cache, blocks[target_index - 2].state_root);
+    try std.testing.expect(fixture.block_cache.get(blocks[target_index].state_root) == null);
+
+    const replayed = (try fixture.regen.getStateByRoot(blocks[target_index].state_root)).?;
+    try std.testing.expectEqual(blocks[target_index].slot, try replayed.state.slot());
+
+    const replayed_state_root = (try replayed.state.hashTreeRoot()).*;
+    try std.testing.expectEqualSlices(u8, &blocks[target_index].state_root, &replayed_state_root);
+    try std.testing.expect(fixture.cp_cache.getLatest(checkpoint.root, checkpoint.epoch) != null);
 }
 
 test "StateRegen: verifyPublishedStateOwnership accepts runtime-owned shared singleton" {

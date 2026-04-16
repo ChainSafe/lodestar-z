@@ -267,6 +267,7 @@ pub const Chain = struct {
 
     fn destroyForkChoice(self: *Chain) void {
         if (self.fork_choice_storage) |fc| {
+            self.state_regen.clearForkChoice();
             fork_choice_mod.destroyFromAnchor(self.allocator, fc);
         }
         self.fork_choice_storage = null;
@@ -275,6 +276,7 @@ pub const Chain = struct {
     pub fn installForkChoice(self: *Chain, fork_choice: *ForkChoice) !void {
         if (self.fork_choice_storage != null) return error.ForkChoiceAlreadyInstalled;
         self.fork_choice_storage = fork_choice;
+        self.state_regen.setForkChoice(fork_choice);
     }
 
     pub fn forkChoice(self: *const Chain) *ForkChoice {
