@@ -300,6 +300,13 @@ fn freeBatchBlocks(allocator: Allocator, blocks: []const BatchBlock) void {
     allocator.free(blocks);
 }
 
+fn segmentHasProcessingFailure(outcome: chain_mod.SegmentImportOutcome) bool {
+    // Lodestar retries a range-sync batch whenever processing throws, even if
+    // some earlier blocks in the segment were already known or finalized.
+    // Advancing the batch past parent/prestate failures strands the chain.
+    return outcome.failed_count > 0;
+}
+
 test "cloneBatchBlocks owns copied block bytes" {
     var source_bytes = [_]u8{ 0x01, 0x02, 0x03 };
     const source_blocks = [_]BatchBlock{
@@ -313,6 +320,23 @@ test "cloneBatchBlocks owns copied block bytes" {
     try std.testing.expectEqual(@as(u64, 12), owned_blocks[0].slot);
     try std.testing.expectEqual(@as(u8, 0x01), owned_blocks[0].block_bytes[0]);
     try std.testing.expect(owned_blocks[0].block_bytes.ptr != source_blocks[0].block_bytes.ptr);
+}
+
+test "segmentHasProcessingFailure retries mixed skipped and failed outcomes" {
+    try std.testing.expect(segmentHasProcessingFailure(.{
+        .imported_count = 0,
+        .skipped_count = 2,
+        .failed_count = 1,
+        .snapshot = undefined,
+        .effects = .{},
+    }));
+    try std.testing.expect(!segmentHasProcessingFailure(.{
+        .imported_count = 0,
+        .skipped_count = 2,
+        .failed_count = 0,
+        .snapshot = undefined,
+        .effects = .{},
+    }));
 }
 
 const ExecutionImportWork = struct {
@@ -1617,9 +1641,9 @@ pub const BeaconNode = struct {
     ) !void {
         const t0 = std.Io.Clock.awake.now(self.io);
         const outcome = try self.chainService().processRangeSyncSegment(raw_blocks);
-        const all_failed = outcome.imported_count == 0 and outcome.skipped_count == 0 and outcome.failed_count > 0;
+        const segment_failed = segmentHasProcessingFailure(outcome);
         self.finishSegmentImportOutcome(t0, outcome, null);
-        if (all_failed) return error.AllBlocksFailed;
+        if (segment_failed) return error.SegmentImportFailed;
     }
 
     pub fn enqueueSyncSegment(
@@ -1702,7 +1726,7 @@ pub const BeaconNode = struct {
             return;
         };
 
-        const all_failed = outcome.imported_count == 0 and outcome.skipped_count == 0 and outcome.failed_count > 0;
+        const segment_failed = segmentHasProcessingFailure(outcome);
         self.finishSegmentImportOutcome(segment.started_at, outcome, .{
             .sync_type = segment.sync_type,
             .total_blocks = segment.blocks.len,
@@ -1710,7 +1734,7 @@ pub const BeaconNode = struct {
         });
 
         if (self.sync_service_inst) |sync_svc| {
-            if (all_failed) {
+            if (segment_failed) {
                 sync_svc.onSegmentProcessingError(
                     segment.key.chain_id,
                     segment.key.batch_id,
@@ -2621,7 +2645,7 @@ pub const BeaconNode = struct {
             segment.epoch_transition_count,
             segment.error_counts,
         );
-        const all_failed = outcome.imported_count == 0 and outcome.skipped_count == 0 and outcome.failed_count > 0;
+        const segment_failed = segmentHasProcessingFailure(outcome);
         self.finishSegmentImportOutcome(segment.started_at, outcome, .{
             .sync_type = segment.sync_type,
             .total_blocks = segment.blocks.len,
@@ -2629,7 +2653,7 @@ pub const BeaconNode = struct {
         });
 
         if (self.sync_service_inst) |sync_svc| {
-            if (all_failed) {
+            if (segment_failed) {
                 sync_svc.onSegmentProcessingError(
                     segment.key.chain_id,
                     segment.key.batch_id,

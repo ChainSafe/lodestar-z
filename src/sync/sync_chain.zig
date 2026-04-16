@@ -16,6 +16,7 @@ const Allocator = std.mem.Allocator;
 const sync_types = @import("sync_types.zig");
 const ChainTarget = sync_types.ChainTarget;
 const RangeSyncType = sync_types.RangeSyncType;
+const SyncPeerReportReason = sync_types.SyncPeerReportReason;
 const preset = @import("preset").preset;
 const batch_mod = @import("batch.zig");
 const Batch = batch_mod.Batch;
@@ -52,7 +53,7 @@ pub const SyncChainCallbacks = struct {
     ) void,
 
     /// Report a peer for negative behavior.
-    reportPeerFn: *const fn (ptr: *anyopaque, peer_id: []const u8) void,
+    reportPeerFn: *const fn (ptr: *anyopaque, peer_id: []const u8, reason: SyncPeerReportReason) void,
 
     /// Return whether a peer is eligible for this slot range.
     peerCanServeRangeFn: ?*const fn (
@@ -85,8 +86,8 @@ pub const SyncChainCallbacks = struct {
         self.downloadByRangeFn(self.ptr, chain_id, batch_id, generation, peer_id, start_slot, count);
     }
 
-    pub fn reportPeer(self: SyncChainCallbacks, peer_id: []const u8) void {
-        self.reportPeerFn(self.ptr, peer_id);
+    pub fn reportPeer(self: SyncChainCallbacks, peer_id: []const u8, reason: SyncPeerReportReason) void {
+        self.reportPeerFn(self.ptr, peer_id, reason);
     }
 
     pub fn peerCanServeRange(
@@ -343,7 +344,7 @@ pub const SyncChain = struct {
                     self.cumulative_metrics.download_error_total += 1;
                     self.cumulative_metrics.download_time_ns_total += b.finishDownloadTiming();
                     // Report the peer that failed.
-                    self.callbacks.reportPeer(peer_id);
+                    self.callbacks.reportPeer(peer_id, .download_error);
                 }
                 return;
             }
@@ -358,15 +359,25 @@ pub const SyncChain = struct {
         self: *SyncChain,
         batch_id: BatchId,
         generation: u32,
+        blocks: []const BatchBlock,
     ) void {
         for (self.batches.items) |*b| {
             if (b.id == batch_id) {
-                if (!b.onDownloadDeferred(generation)) return;
+                if (!b.onDownloadDeferred(generation, blocks)) return;
                 self.cumulative_metrics.download_deferred_total += 1;
                 self.cumulative_metrics.download_time_ns_total += b.finishDownloadTiming();
                 return;
             }
         }
+    }
+
+    pub fn getBatchBlocks(self: *const SyncChain, batch_id: BatchId, generation: u32) ?[]const BatchBlock {
+        for (self.batches.items) |batch| {
+            if (batch.id != batch_id) continue;
+            if (batch.generation != generation) return null;
+            return batch.getBlocks();
+        }
+        return null;
     }
 
     pub fn onProcessingSuccess(self: *SyncChain, batch_id: BatchId, generation: u32) void {
@@ -391,15 +402,15 @@ pub const SyncChain = struct {
             if (b.id != batch_id) continue;
             if (b.generation != generation) return;
             if (b.status != .processing) return;
-            const download_peer = b.download_peer;
             const elapsed_ns = b.finishProcessingTiming();
             b.onProcessingError();
             self.cumulative_metrics.processing_error_total += 1;
             self.cumulative_metrics.processing_time_ns_total += elapsed_ns;
-            if (index > 0) self.rewindValidatedPrefix(index);
-            if (b.isProcessingExhausted()) {
-                if (download_peer) |peer_id| self.callbacks.reportPeer(peer_id);
-                self.status = .err;
+            var exhausted = false;
+            if (index > 0) exhausted = self.rewindValidatedPrefix(index);
+            if (b.isProcessingExhausted()) exhausted = true;
+            if (exhausted) {
+                self.failForProcessingExhaustion();
             }
             return;
         }
@@ -557,16 +568,17 @@ pub const SyncChain = struct {
         self.batches.replaceRangeAssumeCapacity(0, drain_count, &.{});
     }
 
-    fn rewindValidatedPrefix(self: *SyncChain, rewind_count: usize) void {
-        if (rewind_count == 0) return;
+    fn rewindValidatedPrefix(self: *SyncChain, rewind_count: usize) bool {
+        if (rewind_count == 0) return false;
+        var exhausted = false;
         for (self.batches.items[0..rewind_count]) |*batch| {
             std.debug.assert(batch.status == .awaiting_validation);
             batch.onValidationError();
             if (batch.isProcessingExhausted()) {
-                if (batch.download_peer) |peer_id| self.callbacks.reportPeer(peer_id);
-                self.status = .err;
+                exhausted = true;
             }
         }
+        return exhausted;
     }
 
     fn markDoneIfComplete(self: *SyncChain) void {
@@ -579,6 +591,16 @@ pub const SyncChain = struct {
             if (batch.status != .awaiting_validation) return;
         }
         self.status = .done;
+    }
+
+    fn failForProcessingExhaustion(self: *SyncChain) void {
+        // Lodestar reports every peer in the chain when a batch reaches
+        // MAX_PROCESSING_ATTEMPTS. At that point the whole chain peer-set is
+        // considered suspect, not only the most recent download peer.
+        for (self.peers.keys()) |peer_id| {
+            self.callbacks.reportPeer(peer_id, .processing_exhausted);
+        }
+        self.status = .err;
     }
 
     /// Process the next batch that is awaiting_processing after any awaiting-validation prefix.
@@ -605,10 +627,11 @@ pub const SyncChain = struct {
             self.cumulative_metrics.processing_error_total += 1;
             self.cumulative_metrics.processing_time_ns_total += front.finishProcessingTiming();
             front.onProcessingError();
-            if (index > 0) self.rewindValidatedPrefix(index);
-            if (front.isProcessingExhausted()) {
-                if (front.download_peer) |p| self.callbacks.reportPeer(p);
-                self.status = .err;
+            var exhausted = false;
+            if (index > 0) exhausted = self.rewindValidatedPrefix(index);
+            if (front.isProcessingExhausted()) exhausted = true;
+            if (exhausted) {
+                self.failForProcessingExhaustion();
             }
             return err;
         };
@@ -667,6 +690,8 @@ const TestSyncCallbacks = struct {
     processed_count: u32 = 0,
     downloaded_count: u32 = 0,
     reported_count: u32 = 0,
+    reported_download_count: u32 = 0,
+    reported_processing_exhausted_count: u32 = 0,
     last_chain_id: u32 = 0,
     last_batch_id: BatchId = 0,
     last_generation: u32 = 0,
@@ -698,9 +723,13 @@ const TestSyncCallbacks = struct {
         @memcpy(self.last_peer_id_buf[0..self.last_peer_id_len], peer_id[0..self.last_peer_id_len]);
     }
 
-    fn reportPeerFn(ptr: *anyopaque, _: []const u8) void {
+    fn reportPeerFn(ptr: *anyopaque, _: []const u8, reason: SyncPeerReportReason) void {
         const self: *TestSyncCallbacks = @ptrCast(@alignCast(ptr));
         self.reported_count += 1;
+        switch (reason) {
+            .download_error => self.reported_download_count += 1,
+            .processing_exhausted => self.reported_processing_exhausted_count += 1,
+        }
     }
 
     fn importBlockFnTest(ptr: *anyopaque, _: []const u8) anyerror!void {
@@ -809,6 +838,36 @@ test "SyncChain: completes when all batches processed" {
     try std.testing.expectEqual(@as(u32, 2), tc.processed_count);
 }
 
+test "SyncChain: deferred batch retains blocks for retry" {
+    const allocator = std.testing.allocator;
+    var tc = TestSyncCallbacks{};
+    var chain = SyncChain.init(
+        allocator,
+        std.testing.io,
+        0,
+        .finalized,
+        0,
+        .{ .slot = 2, .root = [_]u8{0x11} ** 32 },
+        tc.callbacks(),
+    );
+    defer chain.deinit();
+
+    try chain.addPeer("p1", .{ .slot = 2, .root = [_]u8{0x11} ** 32 }, null);
+    chain.startSyncing();
+
+    _ = try chain.tick();
+
+    const blocks = [_]BatchBlock{
+        .{ .slot = 1, .block_bytes = "b1" },
+        .{ .slot = 2, .block_bytes = "b2" },
+    };
+    chain.onBatchDeferred(tc.last_batch_id, tc.last_generation, &blocks);
+
+    const retained = chain.getBatchBlocks(tc.last_batch_id, tc.last_generation) orelse unreachable;
+    try std.testing.expectEqual(@as(usize, 2), retained.len);
+    try std.testing.expectEqual(BatchStatus.awaiting_download, chain.batches.items[0].status);
+}
+
 test "SyncChain: pending processing waits for completion callback" {
     const PendingCallbacks = struct {
         download_count: u32 = 0,
@@ -829,7 +888,7 @@ test "SyncChain: pending processing waits for completion callback" {
             self.last_generation = generation;
         }
 
-        fn reportPeerFn(_: *anyopaque, _: []const u8) void {}
+        fn reportPeerFn(_: *anyopaque, _: []const u8, _: SyncPeerReportReason) void {}
 
         fn importBlockFn(_: *anyopaque, _: []const u8) anyerror!void {}
 
@@ -1019,4 +1078,42 @@ test "SyncChain: head retries avoid peers behind known batch progress" {
     _ = try chain.tick();
     try std.testing.expectEqual(@as(u32, 2), tc.downloaded_count);
     try std.testing.expectEqualStrings("fresh", tc.lastPeerId());
+}
+
+test "SyncChain: processing exhaustion reports all chain peers once" {
+    const allocator = std.testing.allocator;
+    var tc = TestSyncCallbacks{};
+    var chain = SyncChain.init(
+        allocator,
+        std.testing.io,
+        0,
+        .finalized,
+        0,
+        .{ .slot = 2, .root = [_]u8{0x66} ** 32 },
+        tc.callbacks(),
+    );
+    defer chain.deinit();
+
+    try chain.addPeer("p1", .{ .slot = 2, .root = [_]u8{0x66} ** 32 }, null);
+    try chain.addPeer("p2", .{ .slot = 2, .root = [_]u8{0x66} ** 32 }, null);
+    chain.startSyncing();
+    tc.should_fail_processing = true;
+
+    var attempts: u8 = 0;
+    while (chain.status != .err) {
+        _ = try chain.tick();
+        const blocks = [_]BatchBlock{
+            .{ .slot = 1, .block_bytes = "b1" },
+            .{ .slot = 2, .block_bytes = "b2" },
+        };
+        chain.onBatchResponse(tc.last_batch_id, tc.last_generation, &blocks);
+        attempts += 1;
+        try std.testing.expect(attempts <= sync_types.MAX_BATCH_PROCESSING_ATTEMPTS);
+    }
+
+    try std.testing.expectEqual(sync_types.MAX_BATCH_PROCESSING_ATTEMPTS, attempts);
+    try std.testing.expectEqual(SyncChainStatus.err, chain.status);
+    try std.testing.expectEqual(@as(u32, 2), tc.reported_count);
+    try std.testing.expectEqual(@as(u32, 0), tc.reported_download_count);
+    try std.testing.expectEqual(@as(u32, 2), tc.reported_processing_exhausted_count);
 }

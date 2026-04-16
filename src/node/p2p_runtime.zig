@@ -545,19 +545,38 @@ pub fn processSyncBatches(self: *BeaconNode, io: std.Io, svc: *networking.P2pSer
             }
         }
 
-        const blocks = fetchRawBlocksByRange(self, io, svc, peer_id, req.start_slot, req.count) catch |err| {
-            noteSyncPeerGoneIfTransportClosed(self, io, svc, peer_id, err);
-            reportReqRespFetchFailure(self, io, peer_id, .beacon_blocks_by_range, err);
-            log.debug("Batch {d} fetch failed: {}", .{ req.batch_id, err });
-            if (self.sync_service_inst) |sync_svc| {
-                sync_svc.onBatchError(req.chain_id, req.batch_id, req.generation, peer_id);
-            }
+        const retained_blocks = if (self.sync_service_inst) |sync_svc|
+            sync_svc.getBatchBlocks(req.chain_id, req.batch_id, req.generation)
+        else
+            null;
+        if (retained_blocks == null) {
+            log.debug("Batch {d}: stale request for generation {d}", .{ req.batch_id, req.generation });
             continue;
-        };
-        defer {
-            for (blocks) |blk| self.allocator.free(blk.block_bytes);
-            self.allocator.free(blocks);
         }
+
+        var fetched_blocks: ?[]BatchBlock = null;
+        defer if (fetched_blocks) |owned_blocks| {
+            for (owned_blocks) |blk| self.allocator.free(blk.block_bytes);
+            self.allocator.free(owned_blocks);
+        };
+
+        const blocks = blk: {
+            if (retained_blocks.?.len != 0) {
+                break :blk retained_blocks.?;
+            }
+
+            const owned_blocks = fetchRawBlocksByRange(self, io, svc, peer_id, req.start_slot, req.count) catch |err| {
+                noteSyncPeerGoneIfTransportClosed(self, io, svc, peer_id, err);
+                reportReqRespFetchFailure(self, io, peer_id, .beacon_blocks_by_range, err);
+                log.debug("Batch {d} fetch failed: {}", .{ req.batch_id, err });
+                if (self.sync_service_inst) |sync_svc| {
+                    sync_svc.onBatchError(req.chain_id, req.batch_id, req.generation, peer_id);
+                }
+                continue;
+            };
+            fetched_blocks = owned_blocks;
+            break :blk owned_blocks;
+        };
 
         if (blocks.len == 0) {
             log.debug("Batch {d}: empty response from peer", .{req.batch_id});
@@ -571,7 +590,7 @@ pub fn processSyncBatches(self: *BeaconNode, io: std.Io, svc: *networking.P2pSer
             log.debug("Batch {d}: DA prefetch deferred/failed: {}", .{ req.batch_id, err });
             if (self.sync_service_inst) |sync_svc| {
                 switch (err) {
-                    error.MissingDataColumnSidecar => sync_svc.onBatchDeferred(req.chain_id, req.batch_id, req.generation),
+                    error.MissingDataColumnSidecar => sync_svc.onBatchDeferred(req.chain_id, req.batch_id, req.generation, blocks),
                     else => sync_svc.onBatchError(req.chain_id, req.batch_id, req.generation, peer_id),
                 }
             }

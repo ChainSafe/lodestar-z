@@ -70,7 +70,8 @@ pub const Batch = struct {
     download_failures: u8,
     /// Number of failed processing attempts.
     processing_failures: u8,
-    /// Blocks received (valid when status >= awaiting_processing).
+    /// Blocks retained for this batch. During Lodestar-style partial retries,
+    /// AwaitingDownload batches may also hold previously downloaded blocks.
     blocks: []const BatchBlock,
     /// The hash of the block content for this attempt (for duplicate detection).
     blocks_hash: u64,
@@ -116,6 +117,46 @@ pub const Batch = struct {
         self.clearDeferredPeers();
     }
 
+    fn rememberDownloadedBlocks(self: *Batch, blocks: []const BatchBlock) bool {
+        if (blocks.len == 0) {
+            self.freeBlocks();
+            self.blocks_hash = 0;
+            self.last_downloaded_slot = null;
+            return true;
+        }
+
+        if (self.blocks.len == blocks.len and self.blocks.ptr == blocks.ptr) {
+            self.blocks_hash = hashBlocks(blocks);
+            var highest_slot = blocks[0].slot;
+            for (blocks[1..]) |blk| {
+                highest_slot = @max(highest_slot, blk.slot);
+            }
+            self.last_downloaded_slot = highest_slot;
+            return true;
+        }
+
+        const owned = self.allocator.alloc(BatchBlock, blocks.len) catch return false;
+        for (blocks, 0..) |blk, i| {
+            const bytes = self.allocator.dupe(u8, blk.block_bytes) catch {
+                for (owned[0..i]) |prev| self.allocator.free(prev.block_bytes);
+                self.allocator.free(owned);
+                return false;
+            };
+            owned[i] = .{ .slot = blk.slot, .block_bytes = bytes };
+        }
+
+        self.freeBlocks();
+        self.blocks = owned;
+        self.blocks_hash = hashBlocks(blocks);
+
+        var highest_slot = blocks[0].slot;
+        for (blocks[1..]) |blk| {
+            highest_slot = @max(highest_slot, blk.slot);
+        }
+        self.last_downloaded_slot = highest_slot;
+        return true;
+    }
+
     fn clearPeerMemory(self: *Batch, slot: *?[]u8) void {
         if (slot.*) |peer_id| {
             self.allocator.free(peer_id);
@@ -158,6 +199,10 @@ pub const Batch = struct {
         return self.start_slot + self.count - 1;
     }
 
+    pub fn getBlocks(self: *const Batch) []const BatchBlock {
+        return self.blocks;
+    }
+
     /// Transition to downloading state — assigns a peer and bumps generation.
     pub fn startDownload(self: *Batch, peer_id: []const u8) void {
         self.status = .downloading;
@@ -172,30 +217,9 @@ pub const Batch = struct {
         if (generation != self.generation) return false;
         if (self.status != .downloading) return false;
 
-        // Deep-copy blocks into owned memory so the caller can free the
-        // network buffer immediately.
-        const owned = self.allocator.alloc(BatchBlock, blocks.len) catch return false;
-        for (blocks, 0..) |blk, i| {
-            const bytes = self.allocator.dupe(u8, blk.block_bytes) catch {
-                // Rollback already-duped entries.
-                for (owned[0..i]) |prev| self.allocator.free(prev.block_bytes);
-                self.allocator.free(owned);
-                return false;
-            };
-            owned[i] = .{ .slot = blk.slot, .block_bytes = bytes };
-        }
-        self.freeBlocks(); // free any previous attempt's data
+        if (!self.rememberDownloadedBlocks(blocks)) return false;
         self.clearPeerMemory(&self.last_failed_peer);
         self.clearDeferredPeers();
-        self.blocks = owned;
-        self.blocks_hash = hashBlocks(blocks);
-        if (blocks.len > 0) {
-            var highest_slot = blocks[0].slot;
-            for (blocks[1..]) |blk| {
-                highest_slot = @max(highest_slot, blk.slot);
-            }
-            self.last_downloaded_slot = highest_slot;
-        }
         self.status = .awaiting_processing;
         return true;
     }
@@ -214,9 +238,13 @@ pub const Batch = struct {
 
     /// Called when the peer response was usable, but a required dependency
     /// such as data availability sidecars is not yet available from peers.
-    pub fn onDownloadDeferred(self: *Batch, generation: u32) bool {
+    pub fn onDownloadDeferred(self: *Batch, generation: u32, blocks: []const BatchBlock) bool {
         if (generation != self.generation) return false;
         if (self.status != .downloading) return false;
+
+        if (blocks.len > 0 and !self.rememberDownloadedBlocks(blocks)) return false;
+
+        self.clearPeerMemory(&self.last_failed_peer);
         self.rememberDeferredPeer();
         self.download_peer = null;
         self.status = .awaiting_download;
@@ -350,9 +378,11 @@ test "Batch: download deferred does not consume retry budget" {
 
     b.startDownload("peer_e");
     const gen = b.generation;
-    try std.testing.expect(b.onDownloadDeferred(gen));
+    const blocks = [_]BatchBlock{.{ .slot = 1, .block_bytes = "b1" }};
+    try std.testing.expect(b.onDownloadDeferred(gen, &blocks));
     try std.testing.expectEqual(BatchStatus.awaiting_download, b.status);
     try std.testing.expectEqual(@as(u8, 0), b.download_failures);
+    try std.testing.expectEqual(@as(usize, 1), b.getBlocks().len);
     try std.testing.expectEqual(@as(usize, 1), b.deferred_peers.items.len);
     try std.testing.expectEqualStrings("peer_e", b.deferred_peers.items[0]);
 }
@@ -389,4 +419,27 @@ test "Batch: validation error retries processed batch" {
     b.onValidationError();
     try std.testing.expectEqual(BatchStatus.awaiting_download, b.status);
     try std.testing.expectEqual(@as(u8, 1), b.processing_failures);
+}
+
+test "Batch: deferred blocks are reused on successful retry" {
+    var b = Batch.init(std.testing.io, 5, 64, 32, std.testing.allocator);
+    defer b.deinit();
+
+    const blocks = [_]BatchBlock{
+        .{ .slot = 64, .block_bytes = "b64" },
+        .{ .slot = 65, .block_bytes = "b65" },
+    };
+
+    b.startDownload("peer_a");
+    const first_gen = b.generation;
+    try std.testing.expect(b.onDownloadDeferred(first_gen, &blocks));
+
+    const retained = b.getBlocks();
+    const retained_ptr = retained.ptr;
+
+    b.startDownload("peer_b");
+    const second_gen = b.generation;
+    try std.testing.expect(b.onDownloadSuccess(second_gen, retained));
+    try std.testing.expectEqual(BatchStatus.awaiting_processing, b.status);
+    try std.testing.expectEqual(retained_ptr, b.getBlocks().ptr);
 }

@@ -19,6 +19,7 @@ const preset = @import("preset").preset;
 const RangeSyncType = sync_types.RangeSyncType;
 const ChainTarget = sync_types.ChainTarget;
 const SyncState = sync_types.SyncState;
+const SyncPeerReportReason = sync_types.SyncPeerReportReason;
 const sync_chain_mod = @import("sync_chain.zig");
 const SyncChain = sync_chain_mod.SyncChain;
 const SyncChainStatus = sync_chain_mod.SyncChainStatus;
@@ -57,7 +58,7 @@ pub const RangeSyncCallbacks = struct {
         count: u64,
     ) void,
 
-    reportPeerFn: *const fn (ptr: *anyopaque, peer_id: []const u8) void,
+    reportPeerFn: *const fn (ptr: *anyopaque, peer_id: []const u8, reason: SyncPeerReportReason) void,
 
     hasBlockFn: ?*const fn (ptr: *anyopaque, root: [32]u8) bool = null,
 
@@ -385,19 +386,39 @@ pub const RangeSync = struct {
         chain_id: u32,
         batch_id: BatchId,
         generation: u32,
+        blocks: []const BatchBlock,
     ) void {
         if (self.finalized_chain) |*fc| {
             if (fc.id == chain_id) {
-                fc.onBatchDeferred(batch_id, generation);
+                fc.onBatchDeferred(batch_id, generation, blocks);
                 return;
             }
         }
         for (self.head_chains.items) |*hc| {
             if (hc.id == chain_id) {
-                hc.onBatchDeferred(batch_id, generation);
+                hc.onBatchDeferred(batch_id, generation, blocks);
                 return;
             }
         }
+    }
+
+    pub fn getBatchBlocks(
+        self: *const RangeSync,
+        chain_id: u32,
+        batch_id: BatchId,
+        generation: u32,
+    ) ?[]const BatchBlock {
+        if (self.finalized_chain) |fc| {
+            if (fc.id == chain_id) {
+                return fc.getBatchBlocks(batch_id, generation);
+            }
+        }
+        for (self.head_chains.items) |hc| {
+            if (hc.id == chain_id) {
+                return hc.getBatchBlocks(batch_id, generation);
+            }
+        }
+        return null;
     }
 
     pub fn onSegmentProcessingSuccess(
@@ -583,7 +604,7 @@ const TestCallbacks = struct {
         self.downloaded += 1;
     }
 
-    fn reportPeerFn(ptr: *anyopaque, _: []const u8) void {
+    fn reportPeerFn(ptr: *anyopaque, _: []const u8, _: SyncPeerReportReason) void {
         const self: *TestCallbacks = @ptrCast(@alignCast(ptr));
         self.reported += 1;
     }

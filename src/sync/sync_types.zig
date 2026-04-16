@@ -96,6 +96,18 @@ pub const RangeSyncType = enum {
     head,
 };
 
+/// Sync-local peer report reasons. The networking layer maps these semantic
+/// reasons onto concrete peer-score penalties.
+pub const SyncPeerReportReason = enum {
+    /// A batch download failed and sync wants the serving peer deprioritized,
+    /// but not treated as a definitively bad chain source.
+    download_error,
+    /// A batch exhausted processing retries. This mirrors Lodestar's
+    /// MAX_PROCESSING_ATTEMPTS handling where the entire chain peer-set is
+    /// considered suspect.
+    processing_exhausted,
+};
+
 /// The type of peer relative to our current sync state.
 pub const PeerSyncType = enum {
     fully_synced,

@@ -13,6 +13,7 @@ const sync_mod = @import("sync");
 const SyncServiceCallbacks = sync_mod.SyncServiceCallbacks;
 const BatchBlock = sync_mod.BatchBlock;
 const MinimalHeader = sync_mod.MinimalHeader;
+const SyncPeerReportReason = sync_mod.SyncPeerReportReason;
 const UnknownChainCallbacks = sync_mod.unknown_chain.Callbacks;
 const UnknownChainForkChoiceQuery = sync_mod.unknown_chain.ForkChoiceQuery;
 const PeerSet = sync_mod.unknown_chain.PeerSet;
@@ -359,7 +360,7 @@ pub const SyncCallbackCtx = struct {
         return pending;
     }
 
-    fn syncReportPeer(ptr: *anyopaque, peer_id: []const u8) void {
+    fn syncReportPeer(ptr: *anyopaque, peer_id: []const u8, reason: SyncPeerReportReason) void {
         const ctx: *SyncCallbackCtx = @ptrCast(@alignCast(ptr));
         const node: *BeaconNode = @ptrCast(@alignCast(ctx.node));
         const pm = node.peer_manager orelse return;
@@ -367,8 +368,16 @@ pub const SyncCallbackCtx = struct {
             const ms = std.Io.Timestamp.now(node.io, .real).toMilliseconds();
             break :blk if (ms >= 0) @as(u64, @intCast(ms)) else 0;
         };
-        _ = pm.reportPeer(peer_id, .mid_tolerance, .sync, now_ms);
-        scoped_log.debug("SyncCallbackCtx: reported peer {s} for sync misbehavior", .{peer_id});
+        const action: networking.PeerAction = switch (reason) {
+            .download_error => .mid_tolerance,
+            .processing_exhausted => .low_tolerance,
+        };
+        _ = pm.reportPeer(peer_id, action, .sync, now_ms);
+        scoped_log.debug("SyncCallbackCtx: reported peer {s} for sync reason={s} action={s}", .{
+            peer_id,
+            @tagName(reason),
+            @tagName(action),
+        });
     }
 
     fn syncHasBlock(ptr: *anyopaque, root: [32]u8) bool {

@@ -23,6 +23,7 @@ const SyncStatus = sync_types.SyncStatus;
 const ChainTarget = sync_types.ChainTarget;
 const RangeSyncType = sync_types.RangeSyncType;
 const PeerSyncType = sync_types.PeerSyncType;
+const SyncPeerReportReason = sync_types.SyncPeerReportReason;
 
 const range_sync_mod = @import("range_sync.zig");
 const RangeSync = range_sync_mod.RangeSync;
@@ -108,8 +109,9 @@ pub const SyncServiceCallbacks = struct {
         peer_id: []const u8,
     ) void,
 
-    /// Report a peer for bad behavior.
-    reportPeerFn: *const fn (ptr: *anyopaque, peer_id: []const u8) void,
+    /// Report a peer for bad behavior. The reason is kept sync-local so the
+    /// bridge can map it onto the production networking scoring policy.
+    reportPeerFn: *const fn (ptr: *anyopaque, peer_id: []const u8, reason: SyncPeerReportReason) void,
 
     /// Return whether fork choice already knows a block root.
     hasBlockFn: ?*const fn (ptr: *anyopaque, root: [32]u8) bool = null,
@@ -160,8 +162,8 @@ pub const SyncServiceCallbacks = struct {
         self.requestBlocksByRangeFn(self.ptr, chain_id, batch_id, generation, peer_id, start_slot, count);
     }
 
-    pub fn reportPeer(self: SyncServiceCallbacks, peer_id: []const u8) void {
-        self.reportPeerFn(self.ptr, peer_id);
+    pub fn reportPeer(self: SyncServiceCallbacks, peer_id: []const u8, reason: SyncPeerReportReason) void {
+        self.reportPeerFn(self.ptr, peer_id, reason);
     }
 
     pub fn hasBlock(self: SyncServiceCallbacks, root: [32]u8) bool {
@@ -413,9 +415,19 @@ pub const SyncService = struct {
         chain_id: u32,
         batch_id: BatchId,
         generation: u32,
+        blocks: []const BatchBlock,
     ) void {
-        self.range_sync.onBatchDeferred(chain_id, batch_id, generation);
+        self.range_sync.onBatchDeferred(chain_id, batch_id, generation, blocks);
         self.updateMode();
+    }
+
+    pub fn getBatchBlocks(
+        self: *const SyncService,
+        chain_id: u32,
+        batch_id: BatchId,
+        generation: u32,
+    ) ?[]const BatchBlock {
+        return self.range_sync.getBatchBlocks(chain_id, batch_id, generation);
     }
 
     pub fn onSegmentProcessingSuccess(
@@ -655,7 +667,7 @@ const TestSyncServiceCallbacks = struct {
 
     fn requestBlockByRootFn(_: *anyopaque, _: [32]u8, _: []const u8) void {}
 
-    fn reportPeerFn(ptr: *anyopaque, _: []const u8) void {
+    fn reportPeerFn(ptr: *anyopaque, _: []const u8, _: SyncPeerReportReason) void {
         const self: *TestSyncServiceCallbacks = @ptrCast(@alignCast(ptr));
         self.reported_count += 1;
     }
