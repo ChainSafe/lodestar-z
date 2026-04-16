@@ -73,8 +73,13 @@ pub const INBOUND_PING_INTERVAL_MS: u64 = 15_000;
 pub const OUTBOUND_PING_INTERVAL_MS: u64 = 20_000;
 /// Periodic Status refresh interval for connected peers.
 pub const STATUS_REFRESH_INTERVAL_MS: u64 = 5 * 60_000;
-/// Retry backoff for peers that have not yet completed any Status exchange.
-pub const STATUS_INITIAL_RETRY_BACKOFF_MS: u64 = 60_000;
+/// Inbound peers are given a short window to Status us first, matching
+/// Lodestar's inbound grace behavior before we proactively request Status.
+pub const STATUS_INBOUND_GRACE_PERIOD_MS: u64 = 15_000;
+/// Retry cadence for peers whose initial Status exchange has not completed.
+/// Lodestar retries unresolved peers on its 10s maintenance loop rather than
+/// backing off for a full minute.
+pub const STATUS_FAILED_RETRY_BACKOFF_MS: u64 = 10_000;
 
 /// Target number of peers desired per attestation subnet.
 const TARGET_SUBNET_PEERS: u32 = 6;
@@ -1094,8 +1099,14 @@ pub const PeerManager = struct {
 
     fn peerNeedsStatusRefresh(peer: *const PeerInfo, now_ms: u64, interval_ms: u64) bool {
         if (peer.last_status_exchange_ms == 0) {
-            if (peer.last_status_attempt_ms == 0) return true;
-            return now_ms >= peer.last_status_attempt_ms + STATUS_INITIAL_RETRY_BACKOFF_MS;
+            if (peer.last_status_attempt_ms == 0) {
+                const first_status_at_ms = switch (peer.direction orelse .inbound) {
+                    .outbound => peer.connected_at_ms,
+                    .inbound => peer.connected_at_ms + STATUS_INBOUND_GRACE_PERIOD_MS,
+                };
+                return now_ms >= first_status_at_ms;
+            }
+            return now_ms >= peer.last_status_attempt_ms + STATUS_FAILED_RETRY_BACKOFF_MS;
         }
         if (peer.last_status_fork_digest == null or peer.relevance == .unknown) return true;
         return now_ms >= peer.last_status_exchange_ms + interval_ms;
@@ -1541,12 +1552,12 @@ test "PeerManager: maintenance prioritizes status refresh over ping" {
     try std.testing.expectEqual(@as(usize, 0), actions.peers_to_ping.len);
 }
 
-test "PeerManager: maintenance restatuses peers without prior status" {
+test "PeerManager: maintenance restatuses outbound peers without prior status immediately" {
     const allocator = std.testing.allocator;
     var pm = PeerManager.init(allocator, .{});
     defer pm.deinit();
 
-    _ = try pm.onPeerConnected("peer_a", .inbound, 1_000);
+    _ = try pm.onPeerConnected("peer_a", .outbound, 1_000);
 
     var actions = try pm.maintenance(2_000, .{ .max_ping_requests = 1, .max_status_requests = 1 });
     defer actions.deinit(allocator);
@@ -1555,12 +1566,31 @@ test "PeerManager: maintenance restatuses peers without prior status" {
     try std.testing.expectEqualStrings("peer_a", actions.peers_to_restatus[0]);
 }
 
-test "PeerManager: maintenance backs off failed initial status retries" {
+test "PeerManager: maintenance gives inbound peers a status grace period" {
     const allocator = std.testing.allocator;
     var pm = PeerManager.init(allocator, .{});
     defer pm.deinit();
 
     _ = try pm.onPeerConnected("peer_a", .inbound, 1_000);
+
+    var early_actions = try pm.maintenance(1_000 + STATUS_INBOUND_GRACE_PERIOD_MS - 1, .{ .max_ping_requests = 1, .max_status_requests = 1 });
+    defer early_actions.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 0), early_actions.peers_to_restatus.len);
+
+    var ready_actions = try pm.maintenance(1_000 + STATUS_INBOUND_GRACE_PERIOD_MS, .{ .max_ping_requests = 1, .max_status_requests = 1 });
+    defer ready_actions.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 1), ready_actions.peers_to_restatus.len);
+    try std.testing.expectEqualStrings("peer_a", ready_actions.peers_to_restatus[0]);
+}
+
+test "PeerManager: maintenance retries failed initial status exchanges quickly" {
+    const allocator = std.testing.allocator;
+    var pm = PeerManager.init(allocator, .{});
+    defer pm.deinit();
+
+    _ = try pm.onPeerConnected("peer_a", .outbound, 1_000);
     pm.markStatusAttempt("peer_a", 1_500);
 
     var actions = try pm.maintenance(2_000, .{ .max_ping_requests = 1, .max_status_requests = 1 });
@@ -1568,7 +1598,7 @@ test "PeerManager: maintenance backs off failed initial status retries" {
 
     try std.testing.expectEqual(@as(usize, 0), actions.peers_to_restatus.len);
 
-    var retry_actions = try pm.maintenance(1_500 + STATUS_INITIAL_RETRY_BACKOFF_MS, .{ .max_ping_requests = 1, .max_status_requests = 1 });
+    var retry_actions = try pm.maintenance(1_500 + STATUS_FAILED_RETRY_BACKOFF_MS, .{ .max_ping_requests = 1, .max_status_requests = 1 });
     defer retry_actions.deinit(allocator);
 
     try std.testing.expectEqual(@as(usize, 1), retry_actions.peers_to_restatus.len);
