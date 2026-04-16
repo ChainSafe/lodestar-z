@@ -362,7 +362,7 @@ pub const SimNodeHarness = struct {
             did_work = true;
             const peer = findSyncPeer(peers, req.peerId()) orelse {
                 switch (req.kind) {
-                    .unknown_block_parent => self.node.unknown_block_sync.onFetchFailed(req.root),
+                    .unknown_block_parent => self.node.unknown_block_sync.onFetchFailed(req.root, req.peerId()),
                     .unknown_chain_header => {},
                 }
                 continue;
@@ -370,7 +370,7 @@ pub const SimNodeHarness = struct {
 
             const block_bytes = fetchBlockByRootReqResp(self.allocator, peer.node, req.root) catch {
                 switch (req.kind) {
-                    .unknown_block_parent => self.node.unknown_block_sync.onFetchFailed(req.root),
+                    .unknown_block_parent => self.node.unknown_block_sync.onFetchFailed(req.root, req.peerId()),
                     .unknown_chain_header => {},
                 }
                 continue;
@@ -380,11 +380,11 @@ pub const SimNodeHarness = struct {
             switch (req.kind) {
                 .unknown_block_parent => {
                     const prepared = self.node.chainService().prepareRawPreparedBlockInput(block_bytes, .unknown_block_sync) catch {
-                        self.node.unknown_block_sync.onFetchFailed(req.root);
+                        self.node.unknown_block_sync.onFetchFailed(req.root, req.peerId());
                         continue;
                     };
                     self.node.unknown_block_sync.onParentFetched(req.root, prepared) catch {
-                        self.node.unknown_block_sync.onFetchFailed(req.root);
+                        self.node.unknown_block_sync.onFetchFailed(req.root, req.peerId());
                     };
                 },
                 .unknown_chain_header => {

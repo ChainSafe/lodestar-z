@@ -785,7 +785,7 @@ pub fn processSyncByRootRequests(self: *BeaconNode, io: std.Io, svc: *networking
                 @tagName(req.kind), root[0], root[1], root[2], root[3], err,
             });
             switch (req.kind) {
-                .unknown_block_parent => self.unknown_block_sync.onFetchFailed(root),
+                .unknown_block_parent => self.unknown_block_sync.onFetchFailed(root, peer_id),
                 .unknown_chain_header => {},
             }
             continue;
@@ -798,7 +798,7 @@ pub fn processSyncByRootRequests(self: *BeaconNode, io: std.Io, svc: *networking
                     log.debug("processSyncByRoot: DA prefetch failed for root {x:0>2}{x:0>2}{x:0>2}{x:0>2}...: {}", .{
                         root[0], root[1], root[2], root[3], err,
                     });
-                    self.unknown_block_sync.onFetchFailed(root);
+                    self.unknown_block_sync.onFetchFailed(root, peer_id);
                     continue;
                 };
 
@@ -806,7 +806,7 @@ pub fn processSyncByRootRequests(self: *BeaconNode, io: std.Io, svc: *networking
                     log.warn("processSyncByRoot: block preparation failed for root {x:0>2}{x:0>2}{x:0>2}{x:0>2}...: {}", .{
                         root[0], root[1], root[2], root[3], err,
                     });
-                    self.unknown_block_sync.onFetchFailed(root);
+                    self.unknown_block_sync.onFetchFailed(root, peer_id);
                     continue;
                 };
 
