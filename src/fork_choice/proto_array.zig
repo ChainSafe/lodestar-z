@@ -1763,6 +1763,18 @@ pub const ProtoArray = struct {
         return node.toBlock();
     }
 
+    /// Return whether the specified block root + payload status is viable for
+    /// head selection at `current_slot`.
+    pub fn isBlockViableForHead(
+        self: *const ProtoArray,
+        root: Root,
+        status: PayloadStatus,
+        current_slot: Slot,
+    ) bool {
+        const node = self.getNode(root, status) orelse return false;
+        return self.nodeIsViableForHead(node, current_slot);
+    }
+
     /// Return EMPTY or FULL ProtoBlock matching both block root and execution block hash.
     pub fn getBlockAndBlockHash(self: *const ProtoArray, block_root: Root, block_hash: Root) ?ProtoBlock {
         const variant_indices = self.indices.get(block_root) orelse return null;

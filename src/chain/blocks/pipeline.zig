@@ -505,11 +505,23 @@ pub fn processBlockBatch(
 
                 switch (exec_result) {
                     .valid, .syncing, .pre_merge => {
-                        results[i] = processPreparedBatchBlock(
+                        const batch_result = processPreparedBatchBlock(
                             ctx,
                             prepared,
                             exec_result.status(),
                         );
+                        results[i] = batch_result;
+                        switch (batch_result) {
+                            .failed => |err| {
+                                if (err == BlockImportError.NotViableForHead) {
+                                    for (i + 1..block_inputs.len) |j| {
+                                        results[j] = .{ .failed = BlockImportError.NotViableForHead };
+                                    }
+                                    break;
+                                }
+                            },
+                            else => {},
+                        }
                     },
                     .invalid => |invalid| {
                         prepared.deinit(ctx.allocator);

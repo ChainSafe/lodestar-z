@@ -1712,6 +1712,13 @@ pub const ForkChoice = struct {
         return self.getBlock(block_root, default_status);
     }
 
+    /// Return whether the default variant for `block_root` is viable for head
+    /// selection at the current fork-choice time.
+    pub fn isDefaultBlockViableForHead(self: *const ForkChoice, block_root: Root) bool {
+        const default_status = self.proto_array.getDefaultVariant(block_root) orelse return false;
+        return self.proto_array.isBlockViableForHead(block_root, default_status, self.getTime());
+    }
+
     /// Returns EMPTY or FULL `ProtoBlock` that has matching block root and block hash.
     pub fn getBlockAndBlockHash(self: *const ForkChoice, block_root: Root, block_hash: Root) ?ProtoBlock {
         return self.proto_array.getBlockAndBlockHash(block_root, block_hash);

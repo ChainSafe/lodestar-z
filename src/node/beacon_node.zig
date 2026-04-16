@@ -1479,6 +1479,12 @@ pub const BeaconNode = struct {
                     segment.stop_after_current = true;
                     self.recordRangeSyncSegmentFailure(segment.sync_type, .commit, err);
                 },
+                error.NotViableForHead => {
+                    segment.failed_count += 1;
+                    _ = recordBlockImportError(&segment.error_counts, err);
+                    segment.stop_after_current = true;
+                    self.recordRangeSyncSegmentFailure(segment.sync_type, .commit, err);
+                },
                 else => {
                     segment.failed_count += 1;
                     switch (err) {
@@ -1556,6 +1562,12 @@ pub const BeaconNode = struct {
                         _ = recordBlockImportError(&segment.error_counts, err);
                     },
                     error.ExecutionPayloadInvalid => {
+                        segment.failed_count += 1;
+                        _ = recordBlockImportError(&segment.error_counts, err);
+                        segment.stop_after_current = true;
+                        self.recordRangeSyncSegmentFailure(segment.sync_type, .execution_verify, err);
+                    },
+                    error.NotViableForHead => {
                         segment.failed_count += 1;
                         _ = recordBlockImportError(&segment.error_counts, err);
                         segment.stop_after_current = true;
@@ -1705,6 +1717,7 @@ pub const BeaconNode = struct {
             error.ExecutionPayloadInvalid => "execution_payload_invalid",
             error.ExecutionEngineUnavailable => "execution_engine_unavailable",
             error.ForkChoiceError => "forkchoice_error",
+            error.NotViableForHead => "not_viable_for_head",
             error.InternalError => "internal_error",
             else => "failed",
         };
@@ -1795,6 +1808,7 @@ pub const BeaconNode = struct {
             error.ExecutionPayloadInvalid => counts.incr(error.ExecutionPayloadInvalid),
             error.ExecutionEngineUnavailable => counts.incr(error.ExecutionEngineUnavailable),
             error.ForkChoiceError => counts.incr(error.ForkChoiceError),
+            error.NotViableForHead => counts.incr(error.NotViableForHead),
             error.InternalError => counts.incr(error.InternalError),
             else => return false,
         }
@@ -2032,6 +2046,12 @@ pub const BeaconNode = struct {
                 error.ExecutionPayloadInvalid => {
                     segment.failed_count += 1;
                     _ = recordBlockImportError(&segment.error_counts, error.ExecutionPayloadInvalid);
+                    segment.stop_after_current = true;
+                    self.recordRangeSyncSegmentFailure(segment.sync_type, .commit, err);
+                },
+                error.NotViableForHead => {
+                    segment.failed_count += 1;
+                    _ = recordBlockImportError(&segment.error_counts, err);
                     segment.stop_after_current = true;
                     self.recordRangeSyncSegmentFailure(segment.sync_type, .commit, err);
                 },
@@ -2461,6 +2481,16 @@ pub const BeaconNode = struct {
                     error.AlreadyKnown, error.WouldRevertFinalizedSlot, error.GenesisBlock => {
                         segment.skipped_count += 1;
                         _ = recordBlockImportError(&segment.error_counts, err);
+                    },
+                    error.NotViableForHead => {
+                        segment.failed_count += 1;
+                        _ = recordBlockImportError(&segment.error_counts, err);
+                        segment.stop_after_current = true;
+                        self.recordRangeSyncSegmentFailure(segment.sync_type, .plan, err);
+                        node_log.warn(
+                            "range sync block planning failed slot={d} chain_id={d} batch_id={d} generation={d} index={d}: {}",
+                            .{ block.slot, segment.key.chain_id, segment.key.batch_id, segment.key.generation, segment.next_index, err },
+                        );
                     },
                     error.ParentUnknown,
                     error.FutureSlot,

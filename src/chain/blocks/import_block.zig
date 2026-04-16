@@ -400,6 +400,10 @@ pub fn importVerifiedBlock(
                     );
                 }
             }
+
+            if (opts.from_range_sync and !fc.isDefaultBlockViableForHead(block_root)) {
+                return BlockImportError.NotViableForHead;
+            }
         }
 
         // Check finality changes.

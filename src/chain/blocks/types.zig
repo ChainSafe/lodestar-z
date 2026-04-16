@@ -263,6 +263,8 @@ pub const BlockImportError = error{
     // -- Import errors --
     /// Fork choice rejected the block during onBlock.
     ForkChoiceError,
+    /// Range-sync block imported into fork choice but is not viable for head selection.
+    NotViableForHead,
     /// Internal error (allocation failure, etc.)
     InternalError,
 };
