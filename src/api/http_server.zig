@@ -2200,8 +2200,13 @@ fn respondApiError(
 }
 
 fn makeErrorStacktraces(allocator: Allocator, trace: *const std.builtin.StackTrace) ![]const []const u8 {
+    const len = @min(trace.instruction_addresses.len, trace.index);
+    const formatted_trace: std.debug.StackTrace = .{
+        .return_addresses = trace.instruction_addresses[0..len],
+        .skipped = @enumFromInt(trace.index - len),
+    };
     const formatted = try std.fmt.allocPrint(allocator, "{f}", .{
-        std.debug.FormatStackTrace{ .stack_trace = trace.* },
+        std.debug.FormatStackTrace{ .stack_trace = formatted_trace },
     });
     defer allocator.free(formatted);
 

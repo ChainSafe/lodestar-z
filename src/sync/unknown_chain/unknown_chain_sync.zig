@@ -84,7 +84,7 @@ pub const UnknownChainSync = struct {
 
     /// Set of roots we've already seen — prevents duplicate chain creation.
     /// Maps head_root → chain index.
-    known_roots: std.AutoArrayHashMap([32]u8, usize),
+    known_roots: std.array_hash_map.Auto([32]u8, usize),
 
     /// Callbacks for external I/O.
     callbacks: ?Callbacks,
@@ -102,7 +102,7 @@ pub const UnknownChainSync = struct {
         return .{
             .allocator = allocator,
             .chains = .empty,
-            .known_roots = std.AutoArrayHashMap([32]u8, usize).init(allocator),
+            .known_roots = .empty,
             .callbacks = null,
             .fork_choice = null,
             .linked_chains_processed = 0,
@@ -115,7 +115,7 @@ pub const UnknownChainSync = struct {
             chain.deinit();
         }
         self.chains.deinit(self.allocator);
-        self.known_roots.deinit();
+        self.known_roots.deinit(self.allocator);
     }
 
     /// Set the callback vtable. Must be called before tick().
@@ -162,7 +162,7 @@ pub const UnknownChainSync = struct {
 
         const idx = self.chains.items.len;
         try self.chains.append(self.allocator, chain);
-        try self.known_roots.put(root, idx);
+        try self.known_roots.put(self.allocator, root, idx);
     }
 
     /// Feed a block header for an unknown chain.

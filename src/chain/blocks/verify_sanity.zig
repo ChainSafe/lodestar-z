@@ -73,7 +73,7 @@ pub fn verifySanity(
     block_input: BlockInput,
     fork_choice: *const ForkChoice,
     current_slot: Slot,
-    block_to_state: *const std.AutoArrayHashMap([32]u8, [32]u8),
+    block_to_state: *const std.array_hash_map.Auto([32]u8, [32]u8),
     opts: ImportBlockOpts,
 ) BlockImportError!SanityOutcome {
     const block = block_input.block.beaconBlock();

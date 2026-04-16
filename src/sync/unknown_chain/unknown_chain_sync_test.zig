@@ -13,16 +13,20 @@ const MAX_CHAINS: usize = 64;
 
 /// Test stub for fork choice.
 const TestForkChoice = struct {
-    known_roots: std.AutoArrayHashMap([32]u8, void),
+    known_roots: std.array_hash_map.Auto([32]u8, void),
+    allocator: Allocator,
 
     fn init(alloc: Allocator) TestForkChoice {
-        return .{ .known_roots = std.AutoArrayHashMap([32]u8, void).init(alloc) };
+        return .{
+            .known_roots = .empty,
+            .allocator = alloc,
+        };
     }
     fn deinit(self: *TestForkChoice) void {
-        self.known_roots.deinit();
+        self.known_roots.deinit(self.allocator);
     }
     fn addRoot(self: *TestForkChoice, root: [32]u8) !void {
-        try self.known_roots.put(root, {});
+        try self.known_roots.put(self.allocator, root, {});
     }
     fn hasBlock(ptr: *anyopaque, root: [32]u8) bool {
         const self: *TestForkChoice = @ptrCast(@alignCast(ptr));

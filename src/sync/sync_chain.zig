@@ -177,7 +177,7 @@ pub const SyncChain = struct {
 
     /// Peers assigned to this chain, including the serving limits that affect
     /// batch eligibility for this peer.
-    peers: std.StringArrayHashMap(ChainPeer),
+    peers: std.array_hash_map.String(ChainPeer),
     cumulative_metrics: CumulativeMetrics,
 
     /// Global chain ID counter.
@@ -207,7 +207,7 @@ pub const SyncChain = struct {
             .batches = .empty,
             .next_batch_id = 0,
             .next_batch_start = start_slot,
-            .peers = std.StringArrayHashMap(ChainPeer).init(allocator),
+            .peers = .empty,
             .cumulative_metrics = .{},
         };
     }
@@ -217,7 +217,7 @@ pub const SyncChain = struct {
         self.batches.deinit(self.allocator);
         // Free owned peer_id keys before deiniting the map.
         for (self.peers.keys()) |k| self.allocator.free(k);
-        self.peers.deinit();
+        self.peers.deinit(self.allocator);
     }
 
     /// Add a peer and update the chain target.
@@ -241,7 +241,7 @@ pub const SyncChain = struct {
         }
         const owned_id = try self.allocator.dupe(u8, peer_id);
         errdefer self.allocator.free(owned_id);
-        try self.peers.put(owned_id, .{
+        try self.peers.put(self.allocator, owned_id, .{
             .target = target,
             .earliest_available_slot = earliest_available_slot,
         });

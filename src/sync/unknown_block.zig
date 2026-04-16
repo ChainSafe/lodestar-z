@@ -141,13 +141,13 @@ pub const UnknownBlockSync = struct {
     allocator: Allocator,
 
     /// Pending blocks keyed by their own block_root.
-    pending: std.AutoArrayHashMap([32]u8, PendingBlock),
+    pending: std.array_hash_map.Auto([32]u8, PendingBlock),
 
     /// Parent roots → list of child block roots waiting on them.
-    parents_needed: std.AutoArrayHashMap([32]u8, std.ArrayListUnmanaged([32]u8)),
+    parents_needed: std.array_hash_map.Auto([32]u8, std.ArrayListUnmanaged([32]u8)),
 
     /// Roots known to be bad — avoid re-fetching.
-    bad_roots: std.AutoArrayHashMap([32]u8, void),
+    bad_roots: std.array_hash_map.Auto([32]u8, void),
 
     /// Number of currently in-flight requests.
     in_flight: usize,
@@ -161,9 +161,9 @@ pub const UnknownBlockSync = struct {
     pub fn init(allocator: Allocator) UnknownBlockSync {
         return .{
             .allocator = allocator,
-            .pending = std.AutoArrayHashMap([32]u8, PendingBlock).init(allocator),
-            .parents_needed = std.AutoArrayHashMap([32]u8, std.ArrayListUnmanaged([32]u8)).init(allocator),
-            .bad_roots = std.AutoArrayHashMap([32]u8, void).init(allocator),
+            .pending = .empty,
+            .parents_needed = .empty,
+            .bad_roots = .empty,
             .in_flight = 0,
             .peer_index = 0,
             .callbacks = null,
@@ -175,14 +175,14 @@ pub const UnknownBlockSync = struct {
         while (it.next()) |entry| {
             entry.value_ptr.prepared.deinit(self.allocator);
         }
-        self.pending.deinit();
+        self.pending.deinit(self.allocator);
 
         var pit = self.parents_needed.iterator();
         while (pit.next()) |entry| {
             entry.value_ptr.deinit(self.allocator);
         }
-        self.parents_needed.deinit();
-        self.bad_roots.deinit();
+        self.parents_needed.deinit(self.allocator);
+        self.bad_roots.deinit(self.allocator);
     }
 
     /// Set callbacks (called once after init, when network is available).
@@ -222,7 +222,7 @@ pub const UnknownBlockSync = struct {
             self.evictOldest();
         }
 
-        try self.pending.put(block_root, .{
+        try self.pending.put(self.allocator, block_root, .{
             .prepared = owned,
             .preferred_peer_id_buf = undefined,
             .preferred_peer_id_len = 0,
@@ -235,7 +235,7 @@ pub const UnknownBlockSync = struct {
         }
 
         // Track parent.
-        const gop = try self.parents_needed.getOrPut(parent_root);
+        const gop = try self.parents_needed.getOrPut(self.allocator, parent_root);
         if (!gop.found_existing) {
             gop.value_ptr.* = .empty;
         }
@@ -343,7 +343,7 @@ pub const UnknownBlockSync = struct {
 
     /// Mark a root as bad — removes all descendants.
     pub fn markBad(self: *UnknownBlockSync, root: [32]u8) !void {
-        try self.bad_roots.put(root, {});
+        try self.bad_roots.put(self.allocator, root, {});
         // Remove any pending blocks with this as parent.
         if (self.parents_needed.fetchSwapRemove(root)) |kv| {
             var children = kv.value;

@@ -17,13 +17,13 @@ const EPOCH_LOOKBACK_LIMIT: Epoch = 2;
 
 pub const SeenAttesters = struct {
     allocator: Allocator,
-    validator_indexes_by_epoch: std.AutoArrayHashMap(Epoch, std.AutoHashMap(ValidatorIndex, void)),
+    validator_indexes_by_epoch: std.array_hash_map.Auto(Epoch, std.AutoHashMap(ValidatorIndex, void)),
     lowest_permissible_epoch: Epoch = 0,
 
     pub fn init(allocator: Allocator) SeenAttesters {
         return .{
             .allocator = allocator,
-            .validator_indexes_by_epoch = std.AutoArrayHashMap(Epoch, std.AutoHashMap(ValidatorIndex, void)).init(allocator),
+            .validator_indexes_by_epoch = .empty,
         };
     }
 
@@ -31,7 +31,7 @@ pub const SeenAttesters = struct {
         for (self.validator_indexes_by_epoch.values()) |*validator_indexes| {
             validator_indexes.deinit();
         }
-        self.validator_indexes_by_epoch.deinit();
+        self.validator_indexes_by_epoch.deinit(self.allocator);
     }
 
     pub fn isKnown(self: *const SeenAttesters, target_epoch: Epoch, validator_index: ValidatorIndex) bool {
@@ -42,7 +42,7 @@ pub const SeenAttesters = struct {
     pub fn add(self: *SeenAttesters, target_epoch: Epoch, validator_index: ValidatorIndex) !void {
         if (target_epoch < self.lowest_permissible_epoch) return error.EpochTooLow;
 
-        const gop = try self.validator_indexes_by_epoch.getOrPut(target_epoch);
+        const gop = try self.validator_indexes_by_epoch.getOrPut(self.allocator, target_epoch);
         if (!gop.found_existing) {
             gop.value_ptr.* = std.AutoHashMap(ValidatorIndex, void).init(self.allocator);
         }

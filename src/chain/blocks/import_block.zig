@@ -89,7 +89,7 @@ pub const ImportContext = struct {
     head_tracker: *HeadTracker,
 
     // -- Block root → state root mapping --
-    block_to_state: *std.AutoArrayHashMap([32]u8, [32]u8),
+    block_to_state: *std.array_hash_map.Auto([32]u8, [32]u8),
 
     // -- Validator liveness caches --
     seen_block_attesters: *SeenEpochValidators,
@@ -327,7 +327,7 @@ pub fn importVerifiedBlock(
     verified.relinquishPostState();
 
     // Map block root → state root for future pre-state lookups.
-    ctx.block_to_state.put(block_root, state_root) catch
+    ctx.block_to_state.put(ctx.allocator, block_root, state_root) catch
         return BlockImportError.InternalError;
 
     // 6. Recompute fork choice head and detect reorgs (if requested).

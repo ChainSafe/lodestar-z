@@ -19,7 +19,7 @@ pub const DEFAULT_MAX_STATES: u32 = 64;
 pub const BlockStateCache = struct {
     allocator: Allocator,
     /// State root (32 bytes) -> CachedBeaconState
-    cache: std.AutoArrayHashMap([32]u8, *CachedBeaconState),
+    cache: std.array_hash_map.Auto([32]u8, *CachedBeaconState),
     /// Key order for FIFO eviction (index 0 = head/newest, last = oldest/tail)
     key_order: std.ArrayListUnmanaged([32]u8),
     /// Max states to keep
@@ -35,7 +35,7 @@ pub const BlockStateCache = struct {
     ) BlockStateCache {
         return .{
             .allocator = allocator,
-            .cache = std.AutoArrayHashMap([32]u8, *CachedBeaconState).init(allocator),
+            .cache = .empty,
             .key_order = .empty,
             .max_states = max_states,
             .head_root = null,
@@ -48,7 +48,7 @@ pub const BlockStateCache = struct {
         for (self.cache.values()) |state| {
             self.disposeState(state);
         }
-        self.cache.deinit();
+        self.cache.deinit(self.allocator);
         self.key_order.deinit(self.allocator);
     }
 
@@ -78,7 +78,7 @@ pub const BlockStateCache = struct {
         }
 
         // New state
-        try self.cache.put(root, state);
+        try self.cache.put(self.allocator, root, state);
         errdefer _ = self.cache.orderedRemove(root);
 
         if (is_head) {

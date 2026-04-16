@@ -55,7 +55,7 @@ pub const ReprocessQueue = struct {
     allocator: Allocator,
 
     /// parent_root -> list of pending blocks waiting for that parent.
-    pending: std.AutoArrayHashMap([32]u8, std.ArrayListUnmanaged(PendingBlock)),
+    pending: std.array_hash_map.Auto([32]u8, std.ArrayListUnmanaged(PendingBlock)),
 
     /// Total number of pending blocks across all parents.
     total_count: u32,
@@ -68,7 +68,7 @@ pub const ReprocessQueue = struct {
     pub fn init(allocator: Allocator, max_size: u32) ReprocessQueue {
         return .{
             .allocator = allocator,
-            .pending = std.AutoArrayHashMap([32]u8, std.ArrayListUnmanaged(PendingBlock)).init(allocator),
+            .pending = .empty,
             .total_count = 0,
             .max_size = max_size,
         };
@@ -79,7 +79,7 @@ pub const ReprocessQueue = struct {
         while (it.next()) |entry| {
             entry.value_ptr.deinit(self.allocator);
         }
-        self.pending.deinit();
+        self.pending.deinit(self.allocator);
     }
 
     /// Queue a block pending reprocessing.
@@ -95,7 +95,7 @@ pub const ReprocessQueue = struct {
             self.dropOldest();
         }
 
-        const gop = try self.pending.getOrPut(block.parent_root);
+        const gop = try self.pending.getOrPut(self.allocator, block.parent_root);
         if (!gop.found_existing) {
             gop.value_ptr.* = std.ArrayListUnmanaged(PendingBlock).empty;
         }

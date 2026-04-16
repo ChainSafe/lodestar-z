@@ -191,8 +191,8 @@ pub fn computeSyncCommitteeRewards(
         @ptrCast(working_state.epoch_cache.current_sync_committee_indexed.get().getValidatorIndices()),
     );
 
-    var reward_deltas = std.AutoArrayHashMap(u64, i64).init(allocator);
-    defer reward_deltas.deinit();
+    var reward_deltas: std.array_hash_map.Auto(u64, i64) = .empty;
+    defer reward_deltas.deinit(allocator);
 
     const sync_participant_reward = try u64ToI64(working_state.epoch_cache.sync_participant_reward);
     for (0..preset.SYNC_COMMITTEE_SIZE) |i| {
@@ -202,7 +202,7 @@ pub fn computeSyncCommitteeRewards(
             current_delta + sync_participant_reward
         else
             current_delta - sync_participant_reward;
-        try reward_deltas.put(validator_index, next_delta);
+        try reward_deltas.put(allocator, validator_index, next_delta);
     }
 
     var filter = try makeValidatorFilter(allocator, validator_indices);

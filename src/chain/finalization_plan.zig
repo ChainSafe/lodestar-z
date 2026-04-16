@@ -6,9 +6,9 @@ const fork_choice_mod = @import("fork_choice");
 const ForkChoice = fork_choice_mod.ForkChoiceStruct;
 
 pub const Root = [32]u8;
-pub const SlotToRootMap = std.AutoArrayHashMap(u64, Root);
-pub const BlockToParentMap = std.AutoArrayHashMap(Root, Root);
-pub const BlockToStateMap = std.AutoArrayHashMap(Root, Root);
+pub const SlotToRootMap = std.array_hash_map.Auto(u64, Root);
+pub const BlockToParentMap = std.array_hash_map.Auto(Root, Root);
+pub const BlockToStateMap = std.array_hash_map.Auto(Root, Root);
 
 pub const FinalizationPlan = struct {
     allocator: Allocator,
@@ -33,8 +33,8 @@ pub const FinalizationPlan = struct {
                 (finalized_epoch - 2) * preset.SLOTS_PER_EPOCH
             else
                 0,
-            .finalized_slot_roots = SlotToRootMap.init(allocator),
-            .finalized_parent_roots = BlockToParentMap.init(allocator),
+            .finalized_slot_roots = .empty,
+            .finalized_parent_roots = .empty,
         };
     }
 
@@ -53,8 +53,8 @@ pub const FinalizationPlan = struct {
     }
 
     pub fn deinit(self: *FinalizationPlan) void {
-        self.finalized_parent_roots.deinit();
-        self.finalized_slot_roots.deinit();
+        self.finalized_parent_roots.deinit(self.allocator);
+        self.finalized_slot_roots.deinit(self.allocator);
     }
 
     pub fn collectBlockStateRemovals(
@@ -97,7 +97,7 @@ pub const FinalizationPlan = struct {
         }
     }
     fn recordCanonicalNode(self: *FinalizationPlan, node: fork_choice_mod.ProtoNode) !void {
-        try self.finalized_slot_roots.put(node.slot, node.block_root);
-        try self.finalized_parent_roots.put(node.block_root, node.parent_root);
+        try self.finalized_slot_roots.put(self.allocator, node.slot, node.block_root);
+        try self.finalized_parent_roots.put(self.allocator, node.block_root, node.parent_root);
     }
 };

@@ -1,6 +1,6 @@
 //! MemoryKVStore: in-memory KVStore implementation with named database support.
 //!
-//! Uses a separate StringArrayHashMap per DatabaseId. Suitable for:
+//! Uses a separate StringHashMap per DatabaseId. Suitable for:
 //! - Unit tests
 //! - Deterministic simulation testing (DST)
 //! - Development without external dependencies
@@ -16,7 +16,7 @@ const BatchOp = kv_store.BatchOp;
 const DatabaseId = @import("buckets.zig").DatabaseId;
 const DatabaseMetrics = @import("metrics.zig").MetricsSnapshot;
 
-const DataMap = std.StringArrayHashMap([]const u8);
+const DataMap = std.StringHashMap([]const u8);
 
 pub const MemoryKVStore = struct {
     allocator: Allocator,
@@ -149,7 +149,7 @@ pub const MemoryKVStore = struct {
     fn deleteUnlocked(self: *MemoryKVStore, db_id: DatabaseId, key: []const u8) !void {
         if (self.closed) return error.StoreClosed;
         const db = self.getDb(db_id);
-        if (db.fetchOrderedRemove(key)) |old| {
+        if (db.fetchRemove(key)) |old| {
             self.allocator.free(old.value);
             self.allocator.free(old.key);
         }

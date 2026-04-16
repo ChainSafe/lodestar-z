@@ -50,7 +50,7 @@ pub const BlockImporter = struct {
     /// Maps block root → state root for state lookup in block cache.
     /// The block cache is keyed by state root, but we receive parent_root
     /// (a block root) from incoming blocks.
-    block_to_state: std.AutoArrayHashMap([32]u8, [32]u8),
+    block_to_state: std.array_hash_map.Auto([32]u8, [32]u8),
 
     pub fn init(
         allocator: Allocator,
@@ -67,18 +67,18 @@ pub const BlockImporter = struct {
             .regen = regen,
             .db = db,
             .head_tracker = head_tracker,
-            .block_to_state = std.AutoArrayHashMap([32]u8, [32]u8).init(allocator),
+            .block_to_state = .empty,
         };
     }
 
     pub fn deinit(self: *BlockImporter) void {
-        self.block_to_state.deinit();
+        self.block_to_state.deinit(self.allocator);
     }
 
     /// Register a genesis block root → state root mapping so the first
     /// block import can find its parent state.
     pub fn registerGenesisRoot(self: *BlockImporter, block_root: [32]u8, state_root: [32]u8) !void {
-        try self.block_to_state.put(block_root, state_root);
+        try self.block_to_state.put(self.allocator, block_root, state_root);
     }
 
     /// Get state for a block root by first resolving to state root.
@@ -112,7 +112,7 @@ pub const BlockImporter = struct {
         _ = cached_state_root;
 
         // Record block_root → state_root mapping for future lookups.
-        try self.block_to_state.put(stfn_result.block_root, stfn_result.state_root);
+        try self.block_to_state.put(self.allocator, stfn_result.block_root, stfn_result.state_root);
 
         // 7. Persist block to BeaconDB.
         const any_signed = AnySignedBeaconBlock{ .full_electra = @constCast(signed_block) };

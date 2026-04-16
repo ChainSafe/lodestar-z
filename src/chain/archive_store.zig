@@ -692,9 +692,9 @@ test "ArchiveStore: archiveBlocks moves data from hot to archive" {
     try fixture.db.putBlock(root, data);
 
     // Build a slot_to_root mapping.
-    var slot_to_root = std.AutoArrayHashMap(u64, [32]u8).init(std.testing.allocator);
-    defer slot_to_root.deinit();
-    try slot_to_root.put(10, root);
+    var slot_to_root: std.array_hash_map.Auto(u64, [32]u8) = .empty;
+    defer slot_to_root.deinit(std.testing.allocator);
+    try slot_to_root.put(std.testing.allocator, 10, root);
 
     // Archive slot 10.
     try store.archiveBlocks(10, 10, &slot_to_root);

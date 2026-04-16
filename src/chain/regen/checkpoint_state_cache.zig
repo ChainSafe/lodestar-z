@@ -37,7 +37,7 @@ pub const CacheItem = union(enum) {
     persisted: []const u8,
 };
 
-/// Hash + equality context for CheckpointKey in std.ArrayHashMap.
+/// Hash + equality context for CheckpointKey in std.array_hash_map.ArrayHashMap.
 const CheckpointKeyContext = struct {
     pub fn hash(_: CheckpointKeyContext, key: CheckpointKey) u32 {
         var h = std.hash.Wyhash.init(0);
@@ -54,9 +54,9 @@ const CheckpointKeyContext = struct {
 pub const CheckpointStateCache = struct {
     allocator: Allocator,
     /// In-memory + persisted cache
-    cache: std.ArrayHashMap(CheckpointKey, CacheItem, CheckpointKeyContext, true),
+    cache: std.array_hash_map.ArrayHashMap(CheckpointKey, CacheItem, CheckpointKeyContext, true),
     /// Epoch -> list of roots that have checkpoint states at that epoch
-    epoch_index: std.AutoArrayHashMap(u64, std.ArrayListUnmanaged([32]u8)),
+    epoch_index: std.array_hash_map.Auto(u64, std.ArrayListUnmanaged([32]u8)),
     /// Disk persistence backend
     datastore: CPStateDatastore,
     /// Block state cache (for seed states on reload)
@@ -76,8 +76,8 @@ pub const CheckpointStateCache = struct {
     ) CheckpointStateCache {
         return .{
             .allocator = allocator,
-            .cache = std.ArrayHashMap(CheckpointKey, CacheItem, CheckpointKeyContext, true).init(allocator),
-            .epoch_index = std.AutoArrayHashMap(u64, std.ArrayListUnmanaged([32]u8)).init(allocator),
+            .cache = .empty,
+            .epoch_index = .empty,
             .datastore = ds,
             .block_cache = block_cache,
             .max_epochs_in_memory = max_epochs,
@@ -99,13 +99,13 @@ pub const CheckpointStateCache = struct {
                 },
             }
         }
-        self.cache.deinit();
+        self.cache.deinit(self.allocator);
 
         // Free epoch index
         for (self.epoch_index.values()) |*list| {
             list.deinit(self.allocator);
         }
-        self.epoch_index.deinit();
+        self.epoch_index.deinit(self.allocator);
     }
 
     /// Get from memory only (fast path). Returns null if not present or persisted.
@@ -245,7 +245,7 @@ pub const CheckpointStateCache = struct {
                 return entry.state;
             },
             .persisted => |persisted_key| {
-                try self.cache.put(cp, .{ .in_memory = .{
+                try self.cache.put(self.allocator, cp, .{ .in_memory = .{
                     .state = state,
                     .persisted_key = persisted_key,
                 } });
@@ -268,7 +268,7 @@ pub const CheckpointStateCache = struct {
             }
         }
 
-        try self.cache.put(cp, .{ .in_memory = .{
+        try self.cache.put(self.allocator, cp, .{ .in_memory = .{
             .state = state,
             .persisted_key = persisted_key_to_keep,
         } });
@@ -379,7 +379,7 @@ pub const CheckpointStateCache = struct {
     // -- Internal helpers --
 
     fn addToEpochIndex(self: *CheckpointStateCache, epoch: u64, root: [32]u8) !void {
-        const gop = try self.epoch_index.getOrPut(epoch);
+        const gop = try self.epoch_index.getOrPut(self.allocator, epoch);
         if (!gop.found_existing) {
             gop.value_ptr.* = .empty;
         }
@@ -425,7 +425,7 @@ pub const CheckpointStateCache = struct {
                         break :blk try self.datastore.write(cp, state_bytes);
                     };
 
-                    self.cache.put(cp, .{ .persisted = persisted_key }) catch |err| {
+                    self.cache.put(self.allocator, cp, .{ .persisted = persisted_key }) catch |err| {
                         if (entry.persisted_key == null) self.allocator.free(persisted_key);
                         return err;
                     };

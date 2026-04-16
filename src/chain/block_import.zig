@@ -36,7 +36,7 @@ pub const HeadTracker = struct {
     /// Last-seen block root per slot for lightweight tracking only.
     /// This is NOT a canonical slot->root map and must not be used for
     /// finalized archival or canonical-history queries.
-    slot_roots: std.AutoArrayHashMap(u64, [32]u8),
+    slot_roots: std.array_hash_map.Auto(u64, [32]u8),
     allocator: Allocator,
 
     pub fn init(allocator: Allocator, genesis_root: [32]u8) HeadTracker {
@@ -46,13 +46,13 @@ pub const HeadTracker = struct {
             .finalized_epoch = 0,
             .justified_epoch = 0,
             .head_state_root = [_]u8{0} ** 32,
-            .slot_roots = std.AutoArrayHashMap(u64, [32]u8).init(allocator),
+            .slot_roots = .empty,
             .allocator = allocator,
         };
     }
 
     pub fn deinit(self: *HeadTracker) void {
-        self.slot_roots.deinit();
+        self.slot_roots.deinit(self.allocator);
     }
 
     pub fn onBlock(self: *HeadTracker, block_root: [32]u8, slot: u64, state_root: [32]u8) !void {
@@ -63,7 +63,7 @@ pub const HeadTracker = struct {
         // Naive slot comparison (slot >= head_slot) fails during forks where a
         // lower-slot block on a heavier branch should become the new head.
         // See: P0-3 fix — head is set only by fork choice updateAndGetHead results.
-        try self.slot_roots.put(slot, block_root);
+        try self.slot_roots.put(self.allocator, slot, block_root);
         _ = state_root; // state_root stored by fork choice / block_to_state map
     }
 

@@ -4,6 +4,10 @@
 
 const std = @import("std");
 
+fn registerModule(b: *std.Build, name: []const u8, module: *std.Build.Module) void {
+    b.modules.put(b.allocator, b.dupe(name), module) catch @panic("OOM");
+}
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -77,70 +81,70 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    b.modules.put(b.dupe("constants"), module_constants) catch @panic("OOM");
+    registerModule(b, "constants", module_constants);
 
     const module_config = b.createModule(.{
         .root_source_file = b.path("src/config/root.zig"),
         .target = target,
         .optimize = optimize,
     });
-    b.modules.put(b.dupe("config"), module_config) catch @panic("OOM");
+    registerModule(b, "config", module_config);
 
     const module_consensus_types = b.createModule(.{
         .root_source_file = b.path("src/consensus_types/root.zig"),
         .target = target,
         .optimize = optimize,
     });
-    b.modules.put(b.dupe("consensus_types"), module_consensus_types) catch @panic("OOM");
+    registerModule(b, "consensus_types", module_consensus_types);
 
     const module_era = b.createModule(.{
         .root_source_file = b.path("src/era/root.zig"),
         .target = target,
         .optimize = optimize,
     });
-    b.modules.put(b.dupe("era"), module_era) catch @panic("OOM");
+    registerModule(b, "era", module_era);
 
     const module_hashing = b.createModule(.{
         .root_source_file = b.path("src/hashing/root.zig"),
         .target = target,
         .optimize = optimize,
     });
-    b.modules.put(b.dupe("hashing"), module_hashing) catch @panic("OOM");
+    registerModule(b, "hashing", module_hashing);
 
     const module_hex = b.createModule(.{
         .root_source_file = b.path("src/hex.zig"),
         .target = target,
         .optimize = optimize,
     });
-    b.modules.put(b.dupe("hex"), module_hex) catch @panic("OOM");
+    registerModule(b, "hex", module_hex);
 
     const module_fork_types = b.createModule(.{
         .root_source_file = b.path("src/fork_types/root.zig"),
         .target = target,
         .optimize = optimize,
     });
-    b.modules.put(b.dupe("fork_types"), module_fork_types) catch @panic("OOM");
+    registerModule(b, "fork_types", module_fork_types);
 
     const module_persistent_merkle_tree = b.createModule(.{
         .root_source_file = b.path("src/persistent_merkle_tree/root.zig"),
         .target = target,
         .optimize = optimize,
     });
-    b.modules.put(b.dupe("persistent_merkle_tree"), module_persistent_merkle_tree) catch @panic("OOM");
+    registerModule(b, "persistent_merkle_tree", module_persistent_merkle_tree);
 
     const module_preset = b.createModule(.{
         .root_source_file = b.path("src/preset/root.zig"),
         .target = target,
         .optimize = optimize,
     });
-    b.modules.put(b.dupe("preset"), module_preset) catch @panic("OOM");
+    registerModule(b, "preset", module_preset);
 
     const module_ssz = b.createModule(.{
         .root_source_file = b.path("src/ssz/root.zig"),
         .target = target,
         .optimize = optimize,
     });
-    b.modules.put(b.dupe("ssz"), module_ssz) catch @panic("OOM");
+    registerModule(b, "ssz", module_ssz);
 
     const module_bls = b.createModule(.{
         .root_source_file = b.path("src/bls/root.zig"),
@@ -148,7 +152,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     module_bls.addImport("blst", dep_c_kzg.module("blst"));
-    b.modules.put(b.dupe("bls"), module_bls) catch @panic("OOM");
+    registerModule(b, "bls", module_bls);
 
     // KZG module (c-kzg-4844 bindings for blob/cell verification)
     const module_kzg = b.createModule(.{
@@ -160,21 +164,21 @@ pub fn build(b: *std.Build) void {
     module_kzg.addImport("c_kzg", dep_c_kzg.module("c_kzg"));
     module_kzg.addImport("blst", dep_c_kzg.module("blst"));
     module_kzg.addImport("trusted_setup", dep_c_kzg.module("trusted_setup"));
-    b.modules.put(b.dupe("kzg"), module_kzg) catch @panic("OOM");
+    registerModule(b, "kzg", module_kzg);
 
     const module_state_transition = b.createModule(.{
         .root_source_file = b.path("src/state_transition/root.zig"),
         .target = target,
         .optimize = optimize,
     });
-    b.modules.put(b.dupe("state_transition"), module_state_transition) catch @panic("OOM");
+    registerModule(b, "state_transition", module_state_transition);
 
     const module_networking = b.createModule(.{
         .root_source_file = b.path("src/networking/root.zig"),
         .target = target,
         .optimize = optimize,
     });
-    b.modules.put(b.dupe("networking"), module_networking) catch @panic("OOM");
+    registerModule(b, "networking", module_networking);
 
     const module_db = b.createModule(.{
         .root_source_file = b.path("src/db/root.zig"),
@@ -188,63 +192,63 @@ pub fn build(b: *std.Build) void {
     });
     module_db.addIncludePath(b.path("vendor/lmdb"));
     module_db.linkSystemLibrary("c", .{});
-    b.modules.put(b.dupe("db"), module_db) catch @panic("OOM");
+    registerModule(b, "db", module_db);
 
     const module_api = b.createModule(.{
         .root_source_file = b.path("src/api/root.zig"),
         .target = target,
         .optimize = optimize,
     });
-    b.modules.put(b.dupe("api"), module_api) catch @panic("OOM");
+    registerModule(b, "api", module_api);
 
     const module_fork_choice = b.createModule(.{
         .root_source_file = b.path("src/fork_choice/root.zig"),
         .target = target,
         .optimize = optimize,
     });
-    b.modules.put(b.dupe("fork_choice"), module_fork_choice) catch @panic("OOM");
+    registerModule(b, "fork_choice", module_fork_choice);
 
     const module_prepared_block = b.createModule(.{
         .root_source_file = b.path("src/prepared_block.zig"),
         .target = target,
         .optimize = optimize,
     });
-    b.modules.put(b.dupe("prepared_block"), module_prepared_block) catch @panic("OOM");
+    registerModule(b, "prepared_block", module_prepared_block);
 
     const module_chain = b.createModule(.{
         .root_source_file = b.path("src/chain/root.zig"),
         .target = target,
         .optimize = optimize,
     });
-    b.modules.put(b.dupe("chain"), module_chain) catch @panic("OOM");
+    registerModule(b, "chain", module_chain);
 
     const module_sync = b.createModule(.{
         .root_source_file = b.path("src/sync/root.zig"),
         .target = target,
         .optimize = optimize,
     });
-    b.modules.put(b.dupe("sync"), module_sync) catch @panic("OOM");
+    registerModule(b, "sync", module_sync);
 
     const module_log = b.createModule(.{
         .root_source_file = b.path("src/log/root.zig"),
         .target = target,
         .optimize = optimize,
     });
-    b.modules.put(b.dupe("log"), module_log) catch @panic("OOM");
+    registerModule(b, "log", module_log);
 
     const module_app_metrics = b.createModule(.{
         .root_source_file = b.path("src/metrics/root.zig"),
         .target = target,
         .optimize = optimize,
     });
-    b.modules.put(b.dupe("app_metrics"), module_app_metrics) catch @panic("OOM");
+    registerModule(b, "app_metrics", module_app_metrics);
 
     const module_node = b.createModule(.{
         .root_source_file = b.path("src/node/root.zig"),
         .target = target,
         .optimize = optimize,
     });
-    b.modules.put(b.dupe("node"), module_node) catch @panic("OOM");
+    registerModule(b, "node", module_node);
 
     const module_validator = b.createModule(.{
         .root_source_file = b.path("src/validator/root.zig"),
@@ -252,7 +256,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
     });
-    b.modules.put(b.dupe("validator"), module_validator) catch @panic("OOM");
+    registerModule(b, "validator", module_validator);
     module_validator.addImport("bls", module_bls);
     module_validator.addImport("consensus_types", module_consensus_types);
     module_validator.addImport("config", module_config);
@@ -271,13 +275,13 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    b.modules.put(b.dupe("processor"), module_processor) catch @panic("OOM");
+    registerModule(b, "processor", module_processor);
     const module_execution = b.createModule(.{
         .root_source_file = b.path("src/execution/root.zig"),
         .target = target,
         .optimize = optimize,
     });
-    b.modules.put(b.dupe("execution"), module_execution) catch @panic("OOM");
+    registerModule(b, "execution", module_execution);
     module_execution.addImport("consensus_types", module_consensus_types);
     module_execution.addImport("fork_types", module_fork_types);
     module_execution.addImport("preset", module_preset);
@@ -287,7 +291,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    b.modules.put(b.dupe("testing"), module_testing) catch @panic("OOM");
+    registerModule(b, "testing", module_testing);
     // === Executables ===
     const module_download_era_files = b.createModule(.{
         .root_source_file = b.path("scripts/download_era_files.zig"),
@@ -933,7 +937,7 @@ pub fn build(b: *std.Build) void {
     });
     module_discv5.linkLibrary(secp256k1_lib);
     module_discv5.addIncludePath(secp256k1_dep.builder.dependency("libsecp256k1", .{}).path("include"));
-    b.modules.put(b.dupe("discv5"), module_discv5) catch @panic("OOM");
+    registerModule(b, "discv5", module_discv5);
     module_networking.addImport("discv5", module_discv5);
 
     const test_discv5 = b.addTest(.{

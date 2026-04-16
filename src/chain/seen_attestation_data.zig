@@ -36,14 +36,14 @@ pub const AttestationDataCacheEntry = struct {
 };
 
 const CommitteeEntries = std.AutoHashMap(Root, AttestationDataCacheEntry);
-const SlotEntries = std.AutoArrayHashMap(u64, CommitteeEntries);
+const SlotEntries = std.array_hash_map.Auto(u64, CommitteeEntries);
 
 pub const SeenAttestationData = struct {
     allocator: Allocator,
     cache_slot_distance: Slot,
     max_cache_size_per_slot: usize,
     lowest_permissible_slot: Slot = 0,
-    entries_by_slot: std.AutoArrayHashMap(Slot, SlotEntries),
+    entries_by_slot: std.array_hash_map.Auto(Slot, SlotEntries),
 
     pub fn init(allocator: Allocator) SeenAttestationData {
         return initWithConfig(
@@ -62,7 +62,7 @@ pub const SeenAttestationData = struct {
             .allocator = allocator,
             .cache_slot_distance = cache_slot_distance,
             .max_cache_size_per_slot = max_cache_size_per_slot,
-            .entries_by_slot = std.AutoArrayHashMap(Slot, SlotEntries).init(allocator),
+            .entries_by_slot = .empty,
         };
     }
 
@@ -71,7 +71,7 @@ pub const SeenAttestationData = struct {
         while (slot_index < self.entries_by_slot.count()) : (slot_index += 1) {
             deinitSlotEntries(self.allocator, &self.entries_by_slot.values()[slot_index]);
         }
-        self.entries_by_slot.deinit();
+        self.entries_by_slot.deinit(self.allocator);
     }
 
     pub fn get(
@@ -96,12 +96,12 @@ pub const SeenAttestationData = struct {
     ) !InsertResult {
         if (slot < self.lowest_permissible_slot) return .too_old;
 
-        const slot_gop = try self.entries_by_slot.getOrPut(slot);
+        const slot_gop = try self.entries_by_slot.getOrPut(self.allocator, slot);
         if (!slot_gop.found_existing) {
-            slot_gop.value_ptr.* = SlotEntries.init(self.allocator);
+            slot_gop.value_ptr.* = .empty;
         }
 
-        const committee_gop = try slot_gop.value_ptr.getOrPut(committee_index_lookup);
+        const committee_gop = try slot_gop.value_ptr.getOrPut(self.allocator, committee_index_lookup);
         if (!committee_gop.found_existing) {
             committee_gop.value_ptr.* = CommitteeEntries.init(self.allocator);
         }
@@ -153,7 +153,7 @@ fn deinitSlotEntries(allocator: Allocator, slot_entries: *SlotEntries) void {
         }
         committee_entries.deinit();
     }
-    slot_entries.deinit();
+    slot_entries.deinit(allocator);
 }
 
 const testing = std.testing;

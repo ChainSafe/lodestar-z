@@ -23,7 +23,7 @@ pub const Pool = struct {
     next_free: Id,
 
     /// denormalized parent data: parent -> children
-    parent_views: std.AutoHashMap(Id, std.AutoArrayHashMap(Id, void)),
+    parent_views: std.AutoHashMap(Id, std.array_hash_map.Auto(Id, void)),
 
     pub fn init(allocator: Allocator, initial_capacity: usize, node_pool: *Node.Pool) Allocator.Error!Pool {
         var pool = Pool{
@@ -31,7 +31,7 @@ pub const Pool = struct {
             .node_pool = node_pool,
             .views = std.array_list.AlignedManaged(View, null).init(allocator),
             .next_free = @enumFromInt(0),
-            .parent_views = std.AutoHashMap(Id, std.AutoArrayHashMap(Id, void)).init(allocator),
+            .parent_views = std.AutoHashMap(Id, std.array_hash_map.Auto(Id, void)).init(allocator),
         };
         try pool.preheat(initial_capacity);
         return pool;
@@ -41,7 +41,7 @@ pub const Pool = struct {
         self.views.deinit();
         var parents_iter = self.parent_views.valueIterator();
         while (parents_iter.next()) |children| {
-            children.deinit();
+            children.deinit(self.allocator);
         }
         self.parent_views.deinit();
         self.* = undefined;
@@ -84,9 +84,9 @@ pub const Pool = struct {
         if (parent) |p| {
             const entry = try self.parent_views.getOrPut(p.root_view);
             if (!entry.found_existing) {
-                entry.value_ptr.* = std.AutoArrayHashMap(View.Id, void).init(self.allocator);
+                entry.value_ptr.* = .empty;
             }
-            try entry.value_ptr.put(n, {});
+            try entry.value_ptr.put(self.allocator, n, {});
         }
         return n;
     }
@@ -96,7 +96,7 @@ pub const Pool = struct {
         // delink the view from its children and deinit the children hashmap
         if (self.parent_views.fetchRemove(view_id)) |kv| {
             var children = kv.value;
-            children.deinit();
+            children.deinit(self.allocator);
         }
         // delink the view from its parent
         if (view.parent) |parent| {
@@ -150,7 +150,7 @@ pub const Id = enum(u32) {
     }
 
     /// Update linked children of the view affected by a change at gindex
-    fn updateChildrenUnsafe(pool: *Pool, root_node: Node.Id, children: std.AutoArrayHashMap(View.Id, void), gindex: Gindex) Node.Error!void {
+    fn updateChildrenUnsafe(pool: *Pool, root_node: Node.Id, children: std.array_hash_map.Auto(View.Id, void), gindex: Gindex) Node.Error!void {
         // update linked children that were affected
         for (children.keys()) |child_id| {
             // self + gindex

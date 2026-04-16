@@ -29,17 +29,17 @@ pub const PROPOSER_PRESERVE_EPOCHS: u64 = 2;
 pub const BeaconProposerCache = struct {
     allocator: Allocator,
     /// validator_index -> latest proposer info
-    entries: std.AutoArrayHashMap(u64, ProposerInfo),
+    entries: std.array_hash_map.Auto(u64, ProposerInfo),
 
     pub fn init(allocator: Allocator) BeaconProposerCache {
         return .{
             .allocator = allocator,
-            .entries = std.AutoArrayHashMap(u64, ProposerInfo).init(allocator),
+            .entries = .empty,
         };
     }
 
     pub fn deinit(self: *BeaconProposerCache) void {
-        self.entries.deinit();
+        self.entries.deinit(self.allocator);
     }
 
     /// Register or refresh a proposer's fee recipient for the given epoch.
@@ -49,7 +49,7 @@ pub const BeaconProposerCache = struct {
         validator_index: u64,
         fee_recipient: FeeRecipient,
     ) !void {
-        try self.entries.put(validator_index, .{
+        try self.entries.put(self.allocator, validator_index, .{
             .epoch = epoch,
             .fee_recipient = fee_recipient,
         });

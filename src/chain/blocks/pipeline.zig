@@ -102,7 +102,7 @@ pub const PipelineContext = struct {
     head_tracker: *HeadTracker,
 
     // -- Block root → state root mapping --
-    block_to_state: *std.AutoArrayHashMap([32]u8, [32]u8),
+    block_to_state: *std.array_hash_map.Auto([32]u8, [32]u8),
 
     // -- Validator liveness caches --
     seen_block_attesters: *SeenEpochValidators,

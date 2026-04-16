@@ -189,7 +189,7 @@ pub const Chain = struct {
     /// Shared BLS worker pool used by the block STF batch verifier.
     block_bls_thread_pool: ?*BlsThreadPool = null,
     /// Maps block root → state root for pre-state lookup.
-    block_to_state: std.AutoArrayHashMap([32]u8, [32]u8),
+    block_to_state: std.array_hash_map.Auto([32]u8, [32]u8),
 
     // --- Genesis info ---
     genesis_validators_root: [32]u8,
@@ -253,7 +253,7 @@ pub const Chain = struct {
             .sync_committee_message_pool = null,
             .verify_signatures = false,
             .block_bls_thread_pool = null,
-            .block_to_state = std.AutoArrayHashMap([32]u8, [32]u8).init(allocator),
+            .block_to_state = .empty,
             .genesis_validators_root = [_]u8{0} ** 32,
             .genesis_time_s = 0,
         };
@@ -262,7 +262,7 @@ pub const Chain = struct {
     pub fn deinit(self: *Chain) void {
         self.destroyForkChoice();
         self.replaceValidatorMonitor(&.{}) catch @panic("validator monitor deinit failed");
-        self.block_to_state.deinit();
+        self.block_to_state.deinit(self.allocator);
     }
 
     fn destroyForkChoice(self: *Chain) void {
@@ -491,7 +491,7 @@ pub const Chain = struct {
     /// Register the genesis block root → state root mapping so the first
     /// block import can find its parent pre-state.
     pub fn registerGenesisRoot(self: *Chain, block_root: [32]u8, state_root: [32]u8) !void {
-        try self.block_to_state.put(block_root, state_root);
+        try self.block_to_state.put(self.allocator, block_root, state_root);
     }
 
     pub fn bootstrapFromGenesis(self: *Chain, genesis_state: *CachedBeaconState) !BootstrapResult {
@@ -1420,6 +1420,7 @@ pub const Chain = struct {
         // state), NOT the post-block state root. When a block is later imported at
         // this slot, the entry will be overwritten with the actual post-block state root.
         try self.block_to_state.put(
+            self.allocator,
             head_root,
             new_state_root,
         );

@@ -345,7 +345,7 @@ pub const P2pService = struct {
                 else
                     identify_supported_protocols_with_light_client,
             },
-            .peer_results = std.StringArrayHashMap(identify_mod.IdentifyResult).init(allocator),
+            .peer_results = .empty,
         };
 
         const network: Network = if (config.disable_light_client_server)

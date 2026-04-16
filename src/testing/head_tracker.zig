@@ -21,7 +21,7 @@ pub const HeadTracker = struct {
 
     /// Block roots indexed by slot for ancestor lookups.
     /// Only tracks slots with blocks (not skipped slots).
-    slot_roots: std.AutoArrayHashMap(u64, [32]u8),
+    slot_roots: std.array_hash_map.Auto(u64, [32]u8),
     allocator: std.mem.Allocator,
 
     pub fn init(allocator: std.mem.Allocator, genesis_root: [32]u8) HeadTracker {
@@ -30,19 +30,19 @@ pub const HeadTracker = struct {
             .head_slot = 0,
             .finalized_epoch = 0,
             .justified_epoch = 0,
-            .slot_roots = std.AutoArrayHashMap(u64, [32]u8).init(allocator),
+            .slot_roots = .empty,
             .allocator = allocator,
         };
     }
 
     pub fn deinit(self: *HeadTracker) void {
-        self.slot_roots.deinit();
+        self.slot_roots.deinit(self.allocator);
     }
 
     /// Update head after importing a block.
     /// Simple strategy: head is always the block with the highest slot.
     pub fn onBlock(self: *HeadTracker, block_root: [32]u8, slot: u64) !void {
-        try self.slot_roots.put(slot, block_root);
+        try self.slot_roots.put(self.allocator, slot, block_root);
         if (slot > self.head_slot) {
             self.head_root = block_root;
             self.head_slot = slot;

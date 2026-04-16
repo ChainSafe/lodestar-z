@@ -22,7 +22,7 @@ pub const DEFAULT_SHUFFLING_CACHE_SIZE: u32 = 4;
 pub const ShufflingCache = struct {
     allocator: Allocator,
     /// Epoch -> EpochShuffling pointer (not owned — caller manages lifetime via RC).
-    cache: std.AutoArrayHashMap(u64, *EpochShuffling),
+    cache: std.array_hash_map.Auto(u64, *EpochShuffling),
     /// LRU order: index 0 = most recently used.
     lru_order: std.ArrayListUnmanaged(u64),
     /// Max epochs to retain.
@@ -31,7 +31,7 @@ pub const ShufflingCache = struct {
     pub fn init(allocator: Allocator, capacity: u32) ShufflingCache {
         return .{
             .allocator = allocator,
-            .cache = std.AutoArrayHashMap(u64, *EpochShuffling).init(allocator),
+            .cache = .empty,
             .lru_order = .empty,
             .capacity = capacity,
         };
@@ -39,7 +39,7 @@ pub const ShufflingCache = struct {
 
     pub fn deinit(self: *ShufflingCache) void {
         // We don't own the EpochShuffling pointers — caller is responsible.
-        self.cache.deinit();
+        self.cache.deinit(self.allocator);
         self.lru_order.deinit(self.allocator);
     }
 
@@ -55,7 +55,7 @@ pub const ShufflingCache = struct {
     /// Evicts the least-recently-used entry if over capacity.
     pub fn put(self: *ShufflingCache, epoch: u64, shuffling: *EpochShuffling) !void {
         const already_present = self.cache.contains(epoch);
-        try self.cache.put(epoch, shuffling);
+        try self.cache.put(self.allocator, epoch, shuffling);
 
         if (already_present) {
             self.touchLru(epoch);
