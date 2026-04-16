@@ -72,44 +72,49 @@ const input_key_material_b: [32]u8 = [_]u8{
     0x0f, 0x10,
 };
 
-test "verifySingleSignatureSet accepts valid set" {
-    const secret_key = try SecretKey.keyGen(input_key_material_a[0..], null);
-    const signing_root = [_]u8{1} ** 32;
-    const signature = sign(secret_key, &signing_root);
-    const public_key = secret_key.toPublicKey();
-    const set = SingleSignatureSet{
-        .pubkey = public_key,
-        .signing_root = signing_root,
-        .signature = signature.compress(),
-    };
-    try std.testing.expect(try verifySingleSignatureSet(&set));
-}
-
-test "verifySingleSignatureSet returns false when signing root does not match signed message" {
-    const secret_key = try SecretKey.keyGen(input_key_material_a[0..], null);
-    var signing_root = [_]u8{1} ** 32;
-    const signature = sign(secret_key, &signing_root);
-    const public_key = secret_key.toPublicKey();
-    signing_root[0] ^= 1;
-    const set = SingleSignatureSet{
-        .pubkey = public_key,
-        .signing_root = signing_root,
-        .signature = signature.compress(),
-    };
-    try std.testing.expect(!try verifySingleSignatureSet(&set));
-}
-
-test "verifySingleSignatureSet returns false when pubkey is not the signer" {
+test "verifySingleSignatureSet returns expected result for each scenario" {
     const secret_key_a = try SecretKey.keyGen(input_key_material_a[0..], null);
     const secret_key_b = try SecretKey.keyGen(input_key_material_b[0..], null);
-    const signing_root = [_]u8{1} ** 32;
-    const signature = sign(secret_key_a, &signing_root);
-    const set = SingleSignatureSet{
-        .pubkey = secret_key_b.toPublicKey(),
-        .signing_root = signing_root,
-        .signature = signature.compress(),
+    const valid_signing_root = [_]u8{1} ** 32;
+    var mismatched_signing_root = valid_signing_root;
+    mismatched_signing_root[0] ^= 1;
+    const signature = sign(secret_key_a, &valid_signing_root);
+    const signer_public_key = secret_key_a.toPublicKey();
+
+    const cases = [_]struct {
+        set: SingleSignatureSet,
+        expected: bool,
+    }{
+        .{
+            .set = .{
+                .pubkey = signer_public_key,
+                .signing_root = valid_signing_root,
+                .signature = signature.compress(),
+            },
+            .expected = true,
+        },
+        .{
+            .set = .{
+                .pubkey = signer_public_key,
+                .signing_root = mismatched_signing_root,
+                .signature = signature.compress(),
+            },
+            .expected = false,
+        },
+        .{
+            .set = .{
+                .pubkey = secret_key_b.toPublicKey(),
+                .signing_root = valid_signing_root,
+                .signature = signature.compress(),
+            },
+            .expected = false,
+        },
     };
-    try std.testing.expect(!try verifySingleSignatureSet(&set));
+
+    for (cases) |case| {
+        const actual = try verifySingleSignatureSet(&case.set);
+        try std.testing.expectEqual(case.expected, actual);
+    }
 }
 
 test "verifySingleSignatureSet returns error when signature bytes are not valid compressed G2" {
@@ -141,7 +146,7 @@ test "verifyAggregatedSignatureSet returns false when signing root does not matc
     signing_root[31] ^= 0xff;
     var pubkeys = [_]PublicKey{public_key};
     const set = createAggregateSignatureSetFromComponents(pubkeys[0..], signing_root, signature.compress());
-    try std.testing.expect(!try verifyAggregatedSignatureSet(&set));
+    try std.testing.expectEqual(false, try verifyAggregatedSignatureSet(&set));
 }
 
 test "verifyAggregatedSignatureSet returns false when pubkeys are not the signers" {
@@ -151,7 +156,7 @@ test "verifyAggregatedSignatureSet returns false when pubkeys are not the signer
     const signature = sign(secret_key_a, &signing_root);
     var pubkeys = [_]PublicKey{secret_key_b.toPublicKey()};
     const set = createAggregateSignatureSetFromComponents(pubkeys[0..], signing_root, signature.compress());
-    try std.testing.expect(!try verifyAggregatedSignatureSet(&set));
+    try std.testing.expectEqual(false, try verifyAggregatedSignatureSet(&set));
 }
 
 test "createSingleSignatureSetFromComponents matches equivalent struct literal" {
