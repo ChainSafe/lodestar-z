@@ -213,6 +213,21 @@ const CompletedQueuedBlockIngress = struct {
     completion: QueuedBlockIngressCompletion,
 };
 
+// Keep the secondary planned-import backlog in the same range as the
+// unknown-parent sync DOS limit. The stash's 1024-entry queue was too large
+// for full block inputs with attached data.
+const max_waiting_planned_block_imports: usize = sync_mod.sync_types.MAX_PENDING_BLOCKS;
+
+const WaitingPlannedBlockImport = struct {
+    owner: ?BlockIngressTicket,
+    planned: chain_mod.blocks.PlannedBlockImport,
+
+    pub fn deinit(self: *WaitingPlannedBlockImport, allocator: Allocator) void {
+        self.planned.deinit(allocator);
+        self.* = undefined;
+    }
+};
+
 const PendingSyncSegment = struct {
     key: SyncSegmentKey,
     sync_type: RangeSyncType,
@@ -305,6 +320,36 @@ fn segmentHasProcessingFailure(outcome: chain_mod.SegmentImportOutcome) bool {
     // some earlier blocks in the segment were already known or finalized.
     // Advancing the batch past parent/prestate failures strands the chain.
     return outcome.failed_count > 0;
+}
+
+fn shouldDropIncomingStateWorkBacklog(
+    owner: ?BlockIngressTicket,
+    source: BlockSource,
+) bool {
+    return owner == null and source == .gossip;
+}
+
+fn shouldEvictWaitingStateWorkBacklog(
+    waiting_owner: ?BlockIngressTicket,
+    waiting_source: BlockSource,
+    incoming_source: BlockSource,
+) bool {
+    return incoming_source != .gossip and shouldDropIncomingStateWorkBacklog(waiting_owner, waiting_source);
+}
+
+test "state work backlog drops only untracked gossip" {
+    try std.testing.expect(shouldDropIncomingStateWorkBacklog(null, .gossip));
+    try std.testing.expect(!shouldDropIncomingStateWorkBacklog(7, .gossip));
+    try std.testing.expect(!shouldDropIncomingStateWorkBacklog(null, .unknown_block_sync));
+    try std.testing.expect(!shouldDropIncomingStateWorkBacklog(null, .api));
+}
+
+test "higher priority state work backlog can evict waiting gossip" {
+    try std.testing.expect(shouldEvictWaitingStateWorkBacklog(null, .gossip, .unknown_block_sync));
+    try std.testing.expect(shouldEvictWaitingStateWorkBacklog(null, .gossip, .api));
+    try std.testing.expect(!shouldEvictWaitingStateWorkBacklog(null, .gossip, .gossip));
+    try std.testing.expect(!shouldEvictWaitingStateWorkBacklog(3, .gossip, .unknown_block_sync));
+    try std.testing.expect(!shouldEvictWaitingStateWorkBacklog(null, .unknown_block_sync, .api));
 }
 
 test "cloneBatchBlocks owns copied block bytes" {
@@ -625,6 +670,7 @@ pub const BeaconNode = struct {
 
     sync_service_inst: ?*SyncService = null,
     sync_callback_ctx: ?*SyncCallbackCtx = null, // bridges to P2P transport
+    waiting_planned_block_imports: std.ArrayListUnmanaged(WaitingPlannedBlockImport) = .empty,
     queued_state_work_owners: std.ArrayListUnmanaged(QueuedStateWorkOwner) = .empty,
     completed_block_ingresses: std.ArrayListUnmanaged(CompletedQueuedBlockIngress) = .empty,
     waiting_execution_payloads: std.ArrayListUnmanaged(WaitingExecutionPayload) = .empty,
@@ -944,25 +990,61 @@ pub const BeaconNode = struct {
             },
             .not_queued => |returned_planned| {
                 owned_planned = returned_planned;
-                node_log.debug("state work queue busy, falling back to synchronous import slot={d} source={s}", .{
-                    owned_planned.block_input.block.beaconBlock().slot(),
-                    blockImportSourceLabel(owned_planned.block_input.source),
-                });
-            },
-        }
+                const block_slot = owned_planned.block_input.block.beaconBlock().slot();
+                const source = owned_planned.block_input.source;
 
-        const completed = self.chainService().executePlannedReadyBlockImportSync(owned_planned);
-        switch (completed) {
-            .failure => |failure| {
-                const source = failure.planned.block_input.source;
-                self.recordBlockImportResult(source, blockImportOutcomeLabel(failure.err), 1);
-                var owned_completed = completed;
-                self.chainService().deinitCompletedReadyBlockImport(&owned_completed);
-                return failure.err;
-            },
-            .success => |prepared| {
+                if (self.waiting_planned_block_imports.items.len >= max_waiting_planned_block_imports) {
+                    for (self.waiting_planned_block_imports.items, 0..) |waiting, i| {
+                        if (!shouldEvictWaitingStateWorkBacklog(waiting.owner, waiting.planned.block_input.source, source)) continue;
+
+                        var evicted = self.waiting_planned_block_imports.orderedRemove(i);
+                        self.recordBlockImportResult(evicted.planned.block_input.source, "dropped_state_work_backlog_evicted", 1);
+                        node_log.debug(
+                            "evicting deferred gossip block from state work backlog slot={d} source={s}",
+                            .{
+                                evicted.planned.block_input.block.beaconBlock().slot(),
+                                blockImportSourceLabel(evicted.planned.block_input.source),
+                            },
+                        );
+                        evicted.deinit(self.allocator);
+                        break;
+                    }
+                }
+
+                if (self.waiting_planned_block_imports.items.len >= max_waiting_planned_block_imports) {
+                    self.recordBlockImportResult(source, "dropped_state_work_backlog_full", 1);
+                    node_log.debug(
+                        "state work backlog full, dropping ready block slot={d} source={s} backlog={d}",
+                        .{
+                            block_slot,
+                            blockImportSourceLabel(source),
+                            self.waiting_planned_block_imports.items.len,
+                        },
+                    );
+                    self.chainService().deinitPlannedReadyBlockImport(&owned_planned);
+                    if (shouldDropIncomingStateWorkBacklog(maybe_ticket, source)) {
+                        if (ticket_reserved) {
+                            self.releaseReservedBlockIngressTicket();
+                            ticket_reserved = false;
+                        }
+                        return .ignored;
+                    }
+                    return error.StateWorkBacklogFull;
+                }
+
+                try self.waiting_planned_block_imports.ensureUnusedCapacity(self.allocator, 1);
+                self.waiting_planned_block_imports.appendAssumeCapacity(.{
+                    .owner = maybe_ticket,
+                    .planned = owned_planned,
+                });
                 ticket_reserved = false;
-                self.queuePreparedBlockImportExecution(.{ .generic = maybe_ticket }, prepared);
+                owned_planned = undefined;
+                self.recordBlockImportResult(source, "queued_state_work_backlog", 1);
+                node_log.debug("state work queue busy, queued ready block backlog slot={d} source={s} backlog={d}", .{
+                    block_slot,
+                    blockImportSourceLabel(source),
+                    self.waiting_planned_block_imports.items.len,
+                });
                 return .{ .queued = maybe_ticket };
             },
         }
@@ -1116,6 +1198,9 @@ pub const BeaconNode = struct {
     }
 
     fn hasQueuedTrackedBlockIngress(self: *const BeaconNode, ticket: BlockIngressTicket) bool {
+        for (self.waiting_planned_block_imports.items) |waiting| {
+            if (waiting.owner == ticket) return true;
+        }
         for (self.queued_state_work_owners.items) |owner| {
             switch (owner) {
                 .generic => |maybe_ticket| if (maybe_ticket == ticket) return true,
@@ -1168,6 +1253,58 @@ pub const BeaconNode = struct {
                 },
                 .success => |prepared| {
                     self.queuePreparedBlockImportExecution(owner, prepared);
+                },
+            }
+        }
+
+        return self.dispatchWaitingPlannedBlockImports() or did_work;
+    }
+
+    fn dispatchWaitingPlannedBlockImports(self: *BeaconNode) bool {
+        var did_work = false;
+
+        while (self.waiting_planned_block_imports.items.len > 0) {
+            self.queued_state_work_owners.ensureUnusedCapacity(self.allocator, 1) catch |err| {
+                node_log.warn("failed to reserve queued state work owner slot: {}", .{err});
+                break;
+            };
+
+            var waiting = &self.waiting_planned_block_imports.items[0];
+            var owned_planned = waiting.planned;
+            const owner = waiting.owner;
+            const block_slot = owned_planned.block_input.block.beaconBlock().slot();
+            const source = owned_planned.block_input.source;
+            const queue_result = self.chainService().tryQueuePlannedReadyBlockImport(owned_planned) catch |err| {
+                waiting.planned = undefined;
+                _ = self.waiting_planned_block_imports.orderedRemove(0);
+                self.recordBlockImportResult(source, blockImportOutcomeLabel(err), 1);
+                node_log.warn("deferred block state work queue failed slot={d} source={s}: {}", .{
+                    block_slot,
+                    blockImportSourceLabel(source),
+                    err,
+                });
+                if (owner) |ticket| {
+                    self.recordCompletedBlockIngress(ticket, .{ .failed = err });
+                }
+                did_work = true;
+                continue;
+            };
+
+            switch (queue_result) {
+                .queued => {
+                    waiting.planned = undefined;
+                    _ = self.waiting_planned_block_imports.orderedRemove(0);
+                    self.queued_state_work_owners.appendAssumeCapacity(.{ .generic = owner });
+                    node_log.debug("queued deferred block state work slot={d} source={s} remaining_backlog={d}", .{
+                        block_slot,
+                        blockImportSourceLabel(source),
+                        self.waiting_planned_block_imports.items.len,
+                    });
+                    did_work = true;
+                },
+                .not_queued => |returned_planned| {
+                    waiting.planned = returned_planned;
+                    break;
                 },
             }
         }

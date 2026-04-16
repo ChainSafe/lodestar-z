@@ -268,8 +268,8 @@ pub const Service = struct {
 
     /// Consumes `planned`.
     /// Returns `.queued` when ownership transfers into background state work.
-    /// Returns `.not_queued` with the original plan when the caller should
-    /// fall back to synchronous execution.
+    /// Returns `.not_queued` with the original plan when the caller must
+    /// choose another policy such as retrying later or deferring ingress.
     pub fn tryQueuePlannedReadyBlockImport(
         self: Service,
         planned: PlannedBlockImport,
