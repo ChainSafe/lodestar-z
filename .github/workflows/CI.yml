@@ -142,11 +142,9 @@ jobs:
         run: |
           zig build test:int
 
-  spec-test-ssz:
-    name: spec tests - ssz
-    # It takes time to download and run spec tests, so we only run them on ubuntu-latest
+  spec-test-prep:
+    name: spec tests - prepare
     runs-on: ubuntu-latest
-    needs: build-test
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -163,13 +161,29 @@ jobs:
       - name: Download spec tests
         run: |
           zig build run:download_spec_tests
+      - name: Write spec tests
+        run: |
+          zig build run:write_spec_tests
       - name: Write ssz_generic spec tests
         run: |
           zig build run:write_ssz_generic_spec_tests
-
       - name: Write ssz_static spec tests
         run: |
           zig build run:write_ssz_static_spec_tests
+      - name: Write BLS spec tests
+        run: |
+          zig build run:write_bls_spec_tests
+      - name: Upload generated test files
+        uses: actions/upload-artifact@v4
+        with:
+          name: spec-test-generated
+          path: |
+            test/spec/root*.zig
+            test/spec/test_case/
+            test/spec/ssz/generic_tests.zig
+            test/spec/ssz/static_tests.zig
+            test/spec/bls/spec_tests.zig
+          retention-days: 1
 
       - name: Run ssz_generic spec tests
         run: |
@@ -186,7 +200,7 @@ jobs:
   spec-test-bls:
     name: spec tests - bls
     runs-on: ubuntu-latest
-    needs: build-test
+    needs: [build-test, spec-test-prep]
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -200,21 +214,19 @@ jobs:
         with:
           path: test/spec/spec_tests
           key: spec-test-data-${{ hashFiles('build.zig') }}
-      - name: Download spec tests
-        run: |
-          zig build run:download_spec_tests
-      - name: Write BLS spec tests
-        run: |
-          zig build run:write_bls_spec_tests
+      - name: Download generated test files
+        uses: actions/download-artifact@v4
+        with:
+          name: spec-test-generated
+          path: test/spec
       - name: Run BLS spec tests
         run: |
           zig build test:bls_spec_tests
 
   spec-test-minimal:
     name: spec tests - minimal (${{ matrix.runner }})
-    # It takes time to download and run spec tests, so we only run them on ubuntu-latest
     runs-on: ubuntu-latest
-    needs: build-test
+    needs: [build-test, spec-test-prep]
     strategy:
       fail-fast: false
       matrix:
@@ -240,13 +252,12 @@ jobs:
         uses: actions/cache@v4
         with:
           path: test/spec/spec_tests
-          key: spec-test-data-${{ hashFiles('build.zig') }} # spec test version is defined in build.zig
-      - name: Download spec tests
-        run: |
-          zig build run:download_spec_tests
-      - name: Write spec tests
-        run: |
-          zig build run:write_spec_tests
+          key: spec-test-data-${{ hashFiles('build.zig') }}
+      - name: Download generated test files
+        uses: actions/download-artifact@v4
+        with:
+          name: spec-test-generated
+          path: test/spec
       - name: Run spec tests - minimal (${{ matrix.runner }})
         run: |
           zig build test:spec_tests_${{ matrix.runner }} -Dpreset=minimal
@@ -254,7 +265,7 @@ jobs:
   spec-test-mainnet:
     name: spec tests - mainnet (${{ matrix.runner }})
     runs-on: ubuntu-latest
-    needs: build-test
+    needs: [build-test, spec-test-prep]
     strategy:
       fail-fast: false
       matrix:
@@ -280,13 +291,12 @@ jobs:
         uses: actions/cache@v4
         with:
           path: test/spec/spec_tests
-          key: spec-test-data-${{ hashFiles('build.zig') }} # spec test version is defined in build.zig
-      - name: Download spec tests
-        run: |
-          zig build run:download_spec_tests
-      - name: Write spec tests
-        run: |
-          zig build run:write_spec_tests
+          key: spec-test-data-${{ hashFiles('build.zig') }}
+      - name: Download generated test files
+        uses: actions/download-artifact@v4
+        with:
+          name: spec-test-generated
+          path: test/spec
       - name: Run spec tests - mainnet (${{ matrix.runner }})
         run: |
           zig build test:spec_tests_${{ matrix.runner }} -Dpreset=mainnet -Doptimize=ReleaseSafe
