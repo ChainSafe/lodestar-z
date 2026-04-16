@@ -61,8 +61,6 @@ pub fn main() !void {
         const writer = out.writer().any();
         try writeTestRoot(&supported_test_runners, writer);
     }
-
-
 }
 
 pub fn writeTestRoot(comptime kinds: []const RunnerKind, writer: std.io.AnyWriter) !void {
