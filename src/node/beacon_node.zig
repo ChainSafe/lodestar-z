@@ -1650,50 +1650,80 @@ pub const BeaconNode = struct {
     }
 
     pub fn drivePendingSyncSegments(self: *BeaconNode) bool {
-        var did_work = false;
-        const i: usize = 0;
+        if (self.pending_sync_segments.items.len == 0) return false;
 
-        // Lodestar serializes range-sync segment processing. Keep the deferred
-        // importer single-flight too, otherwise a newly prioritized finalized
-        // chain can start importing the same slots while an older head segment is
-        // still in progress.
-        for (self.pending_sync_segments.items) |segment| {
-            if (segment.in_flight) return false;
-        }
+        // Keep queued range-sync segment processing single-flight like
+        // Lodestar's batch processor, but execute the whole segment through the
+        // direct batch pipeline instead of cloning a pre-state per block into
+        // StateWorkService.
+        var segment = self.pending_sync_segments.orderedRemove(0);
+        defer segment.deinit(self.allocator);
 
-        while (i < self.pending_sync_segments.items.len) {
-            if (self.pending_sync_segments.items[i].stop_after_current or
-                self.pending_sync_segments.items[i].next_index >= self.pending_sync_segments.items[i].blocks.len)
-            {
-                finalizePendingSyncSegment(self, i);
-                did_work = true;
-                continue;
-            }
+        processQueuedSyncSegment(self, &segment);
+        return true;
+    }
 
-            const started = startPendingSyncSegmentBlock(self, i) catch |err| {
-                const segment = &self.pending_sync_segments.items[i];
-                _ = recordBlockImportError(&segment.error_counts, err);
-                node_log.warn(
-                    "failed to start pending sync segment block chain_id={d} batch_id={d} generation={d} index={d}: {}",
-                    .{ segment.key.chain_id, segment.key.batch_id, segment.key.generation, segment.next_index, err },
+    fn processQueuedSyncSegment(self: *BeaconNode, segment: *PendingSyncSegment) void {
+        const raw_blocks = self.allocator.alloc(chain_mod.RawBlockBytes, segment.blocks.len) catch |err| {
+            node_log.warn(
+                "failed to allocate queued sync segment chain_id={d} batch_id={d} generation={d}: {}",
+                .{ segment.key.chain_id, segment.key.batch_id, segment.key.generation, err },
+            );
+            if (self.sync_service_inst) |sync_svc| {
+                sync_svc.onSegmentProcessingError(
+                    segment.key.chain_id,
+                    segment.key.batch_id,
+                    segment.key.generation,
                 );
-                segment.stop_after_current = true;
-                did_work = true;
-                continue;
-            };
-            did_work = started or did_work;
-            if (!started) {
-                const segment = &self.pending_sync_segments.items[i];
-                if (segment.stop_after_current or segment.next_index >= segment.blocks.len) {
-                    did_work = true;
-                    continue;
-                }
-                break;
             }
-            break;
+            return;
+        };
+        defer self.allocator.free(raw_blocks);
+
+        for (segment.blocks, 0..) |block, i| {
+            raw_blocks[i] = .{
+                .slot = block.slot,
+                .bytes = block.block_bytes,
+            };
         }
 
-        return did_work;
+        const outcome = self.chainService().processRangeSyncSegment(raw_blocks) catch |err| {
+            node_log.warn(
+                "queued sync segment processing failed chain_id={d} batch_id={d} generation={d}: {}",
+                .{ segment.key.chain_id, segment.key.batch_id, segment.key.generation, err },
+            );
+            if (self.sync_service_inst) |sync_svc| {
+                sync_svc.onSegmentProcessingError(
+                    segment.key.chain_id,
+                    segment.key.batch_id,
+                    segment.key.generation,
+                );
+            }
+            return;
+        };
+
+        const all_failed = outcome.imported_count == 0 and outcome.skipped_count == 0 and outcome.failed_count > 0;
+        self.finishSegmentImportOutcome(segment.started_at, outcome, .{
+            .sync_type = segment.sync_type,
+            .total_blocks = segment.blocks.len,
+            .key = segment.key,
+        });
+
+        if (self.sync_service_inst) |sync_svc| {
+            if (all_failed) {
+                sync_svc.onSegmentProcessingError(
+                    segment.key.chain_id,
+                    segment.key.batch_id,
+                    segment.key.generation,
+                );
+            } else {
+                sync_svc.onSegmentProcessingSuccess(
+                    segment.key.chain_id,
+                    segment.key.batch_id,
+                    segment.key.generation,
+                );
+            }
+        }
     }
 
     fn blockImportSourceLabel(source: chain_mod.BlockSource) []const u8 {
