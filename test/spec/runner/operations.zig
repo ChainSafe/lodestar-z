@@ -233,6 +233,8 @@ pub fn TestCase(comptime fork: ForkSeq, comptime operation: Operation) type {
                         &cached_state.slashings_cache,
                         &self.op,
                         verify,
+                        null,
+                        null,
                     );
                 },
                 .sync_aggregate => {
