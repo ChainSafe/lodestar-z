@@ -82,8 +82,10 @@ var m = BeaconMetrics.initNoop();
 - `p2p_peer_count` — connected peers
 - `p2p_connected_peer_direction_count` — connected peers by direction (`inbound`/`outbound`)
 - `p2p_peer_connection_state_count` — known peers by connection state
-- `p2p_peer_score_state_count` — known peers by peer-score state
-- `p2p_peer_relevance_count` — known peers by relevance status
+- `p2p_peer_score_state_count` — connected peers by peer-score state
+- `p2p_known_peer_score_state_count` — known peers by peer-score state
+- `p2p_peer_relevance_count` — connected peers by relevance status
+- `p2p_known_peer_relevance_count` — known peers by relevance status
 - `p2p_peer_connected_total` — peer connection events
 - `p2p_peer_disconnected_total` — peer disconnection events
 - `p2p_peer_reports_total` — peer penalty reports by source and action

@@ -232,7 +232,9 @@ pub const MetricsSnapshot = struct {
     connection_state_counts: [metric_connection_states.len]u64 = [_]u64{0} ** metric_connection_states.len,
     client_kind_counts: [metric_client_kinds.len]u64 = [_]u64{0} ** metric_client_kinds.len,
     score_state_counts: [metric_score_states.len]u64 = [_]u64{0} ** metric_score_states.len,
+    known_score_state_counts: [metric_score_states.len]u64 = [_]u64{0} ** metric_score_states.len,
     relevance_counts: [metric_relevance_states.len]u64 = [_]u64{0} ** metric_relevance_states.len,
+    known_relevance_counts: [metric_relevance_states.len]u64 = [_]u64{0} ** metric_relevance_states.len,
     peer_report_counts: [metric_report_sources.len][metric_peer_actions.len]u64 = [_][metric_peer_actions.len]u64{[_]u64{0} ** metric_peer_actions.len} ** metric_report_sources.len,
     goodbye_received_counts: [metric_goodbye_reasons.len]u64 = [_]u64{0} ** metric_goodbye_reasons.len,
 
@@ -273,8 +275,28 @@ pub const MetricsSnapshot = struct {
         ];
     }
 
+    pub fn knownScoreStateCount(self: *const MetricsSnapshot, state: ScoreState) u64 {
+        return self.known_score_state_counts[
+            switch (state) {
+                .healthy => 0,
+                .disconnected => 1,
+                .banned => 2,
+            }
+        ];
+    }
+
     pub fn relevanceCount(self: *const MetricsSnapshot, status: RelevanceStatus) u64 {
         return self.relevance_counts[
+            switch (status) {
+                .unknown => 0,
+                .relevant => 1,
+                .irrelevant => 2,
+            }
+        ];
+    }
+
+    pub fn knownRelevanceCount(self: *const MetricsSnapshot, status: RelevanceStatus) u64 {
+        return self.known_relevance_counts[
             switch (status) {
                 .unknown => 0,
                 .relevant => 1,
@@ -531,11 +553,13 @@ pub const PeerManager = struct {
         var it = self.db.peers.valueIterator();
         while (it.next()) |info| {
             snapshot.connection_state_counts[connectionStateIndex(info.connection_state)] += 1;
+            snapshot.known_score_state_counts[scoreStateIndex(info.scoreState())] += 1;
+            snapshot.known_relevance_counts[relevanceStatusIndex(info.relevance)] += 1;
             if (info.connection_state == .connected) {
                 snapshot.client_kind_counts[clientKindIndex(info.client_kind)] += 1;
+                snapshot.score_state_counts[scoreStateIndex(info.scoreState())] += 1;
+                snapshot.relevance_counts[relevanceStatusIndex(info.relevance)] += 1;
             }
-            snapshot.score_state_counts[scoreStateIndex(info.scoreState())] += 1;
-            snapshot.relevance_counts[relevanceStatusIndex(info.relevance)] += 1;
         }
 
         return snapshot;
@@ -1421,8 +1445,10 @@ test "PeerManager: metrics snapshot exposes peer states and events" {
     try std.testing.expectEqual(@as(u64, 1), snapshot.clientKindCount(.lighthouse));
     try std.testing.expectEqual(@as(u64, 1), snapshot.clientKindCount(.lodestar_z));
     try std.testing.expectEqual(@as(u64, 0), snapshot.clientKindCount(.unknown));
-    try std.testing.expectEqual(@as(u64, 3), snapshot.scoreStateCount(.healthy));
-    try std.testing.expectEqual(@as(u64, 3), snapshot.relevanceCount(.unknown));
+    try std.testing.expectEqual(@as(u64, 2), snapshot.scoreStateCount(.healthy));
+    try std.testing.expectEqual(@as(u64, 3), snapshot.knownScoreStateCount(.healthy));
+    try std.testing.expectEqual(@as(u64, 2), snapshot.relevanceCount(.unknown));
+    try std.testing.expectEqual(@as(u64, 3), snapshot.knownRelevanceCount(.unknown));
     try std.testing.expectEqual(@as(u64, 1), snapshot.peerReportCount(.rpc, .low_tolerance));
     try std.testing.expectEqual(@as(u64, 1), snapshot.goodbyeReceivedCount(.too_many_peers));
 }

@@ -56,6 +56,7 @@ pub const ActiveGossipFork = eth_gossip.EthGossipAdapter.ActiveFork;
 pub const GossipEvent = gossipsub_mod.config.Event;
 pub const QuicStream = quic_mod.Stream;
 const ReqRespContext = req_resp_handler.ReqRespContext;
+const TopicTypeCount = std.meta.fields(gossip_topics.GossipTopicType).len;
 
 const StatusProtocol = eth2_protocols.StatusProtocol;
 const StatusV2Protocol = eth2_protocols.StatusV2Protocol;
@@ -80,6 +81,82 @@ const log = std.log.scoped(.p2p_service);
 fn unixTimeMs(io: Io) u64 {
     const ms = std.Io.Timestamp.now(io, .real).toMilliseconds();
     return if (ms >= 0) @intCast(ms) else 0;
+}
+
+const UniqueGossipsubPeerStats = struct {
+    topic_peers: u64 = 0,
+    mesh_peers: u64 = 0,
+    mesh_peers_by_topic: [TopicTypeCount]u64 = [_]u64{0} ** TopicTypeCount,
+    tracked_topics_with_peers: u64 = 0,
+    tracked_topic_peers: u64 = 0,
+};
+
+fn addUniquePeers(
+    unique_peers: *std.StringHashMap(void),
+    peer_set: *const std.StringHashMap(void),
+) !void {
+    var peer_iter = peer_set.keyIterator();
+    while (peer_iter.next()) |peer_id| {
+        _ = try unique_peers.getOrPut(peer_id.*);
+    }
+}
+
+fn computeUniqueGossipsubPeerStats(
+    allocator: Allocator,
+    topic_map: *const std.StringHashMap(std.StringHashMap(void)),
+    mesh_map: *const std.StringHashMap(std.StringHashMap(void)),
+    tracked_subscriptions: *const std.StringHashMap(void),
+) !UniqueGossipsubPeerStats {
+    var stack_alloc = std.heap.stackFallback(4096, allocator);
+    const temp_alloc = stack_alloc.get();
+
+    var topic_unique = std.StringHashMap(void).init(temp_alloc);
+    defer topic_unique.deinit();
+    var mesh_unique = std.StringHashMap(void).init(temp_alloc);
+    defer mesh_unique.deinit();
+    var tracked_unique = std.StringHashMap(void).init(temp_alloc);
+    defer tracked_unique.deinit();
+    var mesh_unique_by_topic: [TopicTypeCount]std.StringHashMap(void) = undefined;
+    for (&mesh_unique_by_topic) |*unique_by_topic| {
+        unique_by_topic.* = std.StringHashMap(void).init(temp_alloc);
+    }
+    defer {
+        for (&mesh_unique_by_topic) |*unique_by_topic| unique_by_topic.deinit();
+    }
+
+    var topic_iter = topic_map.iterator();
+    while (topic_iter.next()) |entry| {
+        try addUniquePeers(&topic_unique, entry.value_ptr);
+    }
+
+    var mesh_iter = mesh_map.iterator();
+    while (mesh_iter.next()) |entry| {
+        try addUniquePeers(&mesh_unique, entry.value_ptr);
+        if (gossip_topics.parseTopic(entry.key_ptr.*)) |parsed| {
+            try addUniquePeers(&mesh_unique_by_topic[@intFromEnum(parsed.topic_type)], entry.value_ptr);
+        }
+    }
+
+    var tracked_topics_with_peers: u64 = 0;
+    var tracked_iter = tracked_subscriptions.keyIterator();
+    while (tracked_iter.next()) |topic_key| {
+        if (topic_map.getPtr(topic_key.*)) |peer_set| {
+            if (peer_set.count() == 0) continue;
+            tracked_topics_with_peers += 1;
+            try addUniquePeers(&tracked_unique, peer_set);
+        }
+    }
+
+    var stats: UniqueGossipsubPeerStats = .{
+        .topic_peers = topic_unique.count(),
+        .mesh_peers = mesh_unique.count(),
+        .tracked_topics_with_peers = tracked_topics_with_peers,
+        .tracked_topic_peers = tracked_unique.count(),
+    };
+    for (&mesh_unique_by_topic, 0..) |unique_by_topic, idx| {
+        stats.mesh_peers_by_topic[idx] = unique_by_topic.count();
+    }
+    return stats;
 }
 
 const identify_supported_protocols_without_light_client = &.{
@@ -312,7 +389,7 @@ pub const P2pService = struct {
         mesh_topics: u64 = 0,
         mesh_peers: u64 = 0,
         topic_peers: u64 = 0,
-        mesh_peers_by_topic: [std.meta.fields(gossip_topics.GossipTopicType).len]u64 = [_]u64{0} ** std.meta.fields(gossip_topics.GossipTopicType).len,
+        mesh_peers_by_topic: [TopicTypeCount]u64 = [_]u64{0} ** TopicTypeCount,
         tracked_topics_with_peers: u64 = 0,
         tracked_topic_peers: u64 = 0,
         pending_events: u64 = 0,
@@ -446,27 +523,20 @@ pub const P2pService = struct {
             .pending_send_bytes = @intCast(self.gossipsub.pending_send_bytes),
         };
 
-        var topic_iter = self.gossipsub.router.topics.iterator();
-        while (topic_iter.next()) |entry| {
-            snapshot.topic_peers +%= @intCast(entry.value_ptr.count());
-        }
-
-        var mesh_iter = self.gossipsub.router.mesh.iterator();
-        while (mesh_iter.next()) |entry| {
-            snapshot.mesh_peers +%= @intCast(entry.value_ptr.count());
-            if (gossip_topics.parseTopic(entry.key_ptr.*)) |parsed| {
-                snapshot.mesh_peers_by_topic[@intFromEnum(parsed.topic_type)] +%= @intCast(entry.value_ptr.count());
-            }
-        }
-
-        var tracked_iter = self.gossipsub.tracked_subscriptions.keyIterator();
-        while (tracked_iter.next()) |topic_key| {
-            if (self.gossipsub.router.topics.getPtr(topic_key.*)) |peer_set| {
-                const peer_count: u64 = @intCast(peer_set.count());
-                snapshot.tracked_topic_peers +%= peer_count;
-                if (peer_count > 0) snapshot.tracked_topics_with_peers += 1;
-            }
-        }
+        const unique_stats = computeUniqueGossipsubPeerStats(
+            self.allocator,
+            &self.gossipsub.router.topics,
+            &self.gossipsub.router.mesh,
+            &self.gossipsub.tracked_subscriptions,
+        ) catch |err| {
+            log.warn("failed to compute unique gossipsub peer metrics: {}", .{err});
+            return snapshot;
+        };
+        snapshot.mesh_peers = unique_stats.mesh_peers;
+        snapshot.topic_peers = unique_stats.topic_peers;
+        snapshot.mesh_peers_by_topic = unique_stats.mesh_peers_by_topic;
+        snapshot.tracked_topics_with_peers = unique_stats.tracked_topics_with_peers;
+        snapshot.tracked_topic_peers = unique_stats.tracked_topic_peers;
 
         return snapshot;
     }
@@ -824,6 +894,85 @@ pub const P2pService = struct {
 };
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
+
+test "P2pService: gossipsub unique peer stats deduplicate topic memberships" {
+    const allocator = std.testing.allocator;
+
+    var topics = std.StringHashMap(std.StringHashMap(void)).init(allocator);
+    defer {
+        var it = topics.valueIterator();
+        while (it.next()) |peer_set| peer_set.deinit();
+        topics.deinit();
+    }
+    var topic_blocks = std.StringHashMap(void).init(allocator);
+    try topic_blocks.put("peer-1", {});
+    try topic_blocks.put("peer-2", {});
+    try topics.put("/eth2/00000000/beacon_block/ssz_snappy", topic_blocks);
+
+    var topic_blobs = std.StringHashMap(void).init(allocator);
+    try topic_blobs.put("peer-2", {});
+    try topic_blobs.put("peer-3", {});
+    try topics.put("/eth2/00000000/blob_sidecar_0/ssz_snappy", topic_blobs);
+
+    var topic_attestations = std.StringHashMap(void).init(allocator);
+    try topic_attestations.put("peer-1", {});
+    try topic_attestations.put("peer-4", {});
+    try topics.put("/eth2/00000000/beacon_attestation_1/ssz_snappy", topic_attestations);
+
+    var mesh_topics = std.StringHashMap(std.StringHashMap(void)).init(allocator);
+    defer {
+        var it = mesh_topics.valueIterator();
+        while (it.next()) |peer_set| peer_set.deinit();
+        mesh_topics.deinit();
+    }
+    var mesh_blocks = std.StringHashMap(void).init(allocator);
+    try mesh_blocks.put("peer-1", {});
+    try mesh_topics.put("/eth2/00000000/beacon_block/ssz_snappy", mesh_blocks);
+
+    var mesh_attestations = std.StringHashMap(void).init(allocator);
+    try mesh_attestations.put("peer-1", {});
+    try mesh_attestations.put("peer-4", {});
+    try mesh_topics.put("/eth2/00000000/beacon_attestation_1/ssz_snappy", mesh_attestations);
+
+    var tracked = std.StringHashMap(void).init(allocator);
+    defer tracked.deinit();
+    try tracked.put("/eth2/00000000/beacon_block/ssz_snappy", {});
+    try tracked.put("/eth2/00000000/beacon_attestation_1/ssz_snappy", {});
+
+    const stats = try computeUniqueGossipsubPeerStats(allocator, &topics, &mesh_topics, &tracked);
+    try std.testing.expectEqual(@as(u64, 4), stats.topic_peers);
+    try std.testing.expectEqual(@as(u64, 2), stats.mesh_peers);
+    try std.testing.expectEqual(@as(u64, 1), stats.mesh_peers_by_topic[@intFromEnum(gossip_topics.GossipTopicType.beacon_block)]);
+    try std.testing.expectEqual(@as(u64, 2), stats.mesh_peers_by_topic[@intFromEnum(gossip_topics.GossipTopicType.beacon_attestation)]);
+    try std.testing.expectEqual(@as(u64, 2), stats.tracked_topics_with_peers);
+    try std.testing.expectEqual(@as(u64, 3), stats.tracked_topic_peers);
+}
+
+test "P2pService: gossipsub unique peer stats ignore empty tracked topics" {
+    const allocator = std.testing.allocator;
+
+    var topics = std.StringHashMap(std.StringHashMap(void)).init(allocator);
+    defer {
+        var it = topics.valueIterator();
+        while (it.next()) |peer_set| peer_set.deinit();
+        topics.deinit();
+    }
+    const empty_topic = std.StringHashMap(void).init(allocator);
+    try topics.put("/eth2/00000000/beacon_block/ssz_snappy", empty_topic);
+
+    var mesh_topics = std.StringHashMap(std.StringHashMap(void)).init(allocator);
+    defer mesh_topics.deinit();
+
+    var tracked = std.StringHashMap(void).init(allocator);
+    defer tracked.deinit();
+    try tracked.put("/eth2/00000000/beacon_block/ssz_snappy", {});
+
+    const stats = try computeUniqueGossipsubPeerStats(allocator, &topics, &mesh_topics, &tracked);
+    try std.testing.expectEqual(@as(u64, 0), stats.topic_peers);
+    try std.testing.expectEqual(@as(u64, 0), stats.mesh_peers);
+    try std.testing.expectEqual(@as(u64, 0), stats.tracked_topics_with_peers);
+    try std.testing.expectEqual(@as(u64, 0), stats.tracked_topic_peers);
+}
 
 test "P2pService: Eth2SwitchWithoutLightClient compiles with 14 protocols" {
     const protocols = [_]type{

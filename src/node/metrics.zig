@@ -328,7 +328,9 @@ pub const BeaconMetrics = struct {
     peer_connection_state_count: GaugeVec(u64, PeerConnectionStateLabels),
     peer_client_count: GaugeVec(u64, PeerClientLabels),
     peer_score_state_count: GaugeVec(u64, PeerScoreStateLabels),
+    known_peer_score_state_count: GaugeVec(u64, PeerScoreStateLabels),
     peer_relevance_count: GaugeVec(u64, PeerRelevanceStatusLabels),
+    known_peer_relevance_count: GaugeVec(u64, PeerRelevanceStatusLabels),
     peer_connected_total: Counter(u64),
     peer_disconnected_total: Counter(u64),
     peer_reports_total: CounterVec(u64, PeerReportLabels),
@@ -807,13 +809,25 @@ pub const BeaconMetrics = struct {
             .peer_score_state_count = try GaugeVec(u64, PeerScoreStateLabels).init(
                 allocator,
                 "p2p_peer_score_state_count",
-                .{ .help = "Current number of peers by score state." },
+                .{ .help = "Current number of connected peers by score state." },
+                ro,
+            ),
+            .known_peer_score_state_count = try GaugeVec(u64, PeerScoreStateLabels).init(
+                allocator,
+                "p2p_known_peer_score_state_count",
+                .{ .help = "Current number of peer-database entries by score state." },
                 ro,
             ),
             .peer_relevance_count = try GaugeVec(u64, PeerRelevanceStatusLabels).init(
                 allocator,
                 "p2p_peer_relevance_count",
-                .{ .help = "Current number of peers by relevance status." },
+                .{ .help = "Current number of connected peers by relevance status." },
+                ro,
+            ),
+            .known_peer_relevance_count = try GaugeVec(u64, PeerRelevanceStatusLabels).init(
+                allocator,
+                "p2p_known_peer_relevance_count",
+                .{ .help = "Current number of peer-database entries by relevance status." },
                 ro,
             ),
             .peer_connected_total = Counter(u64).init(
@@ -1123,24 +1137,24 @@ pub const BeaconMetrics = struct {
             ),
             .gossipsub_mesh_peers = Gauge(u64).init(
                 "beacon_gossipsub_mesh_peers",
-                .{ .help = "Current total number of peers across all gossipsub meshes." },
+                .{ .help = "Current number of unique peers across all gossipsub meshes." },
                 ro,
             ),
             .gossipsub_topic_peers = Gauge(u64).init(
                 "beacon_gossipsub_topic_peers",
-                .{ .help = "Current total number of topic peers tracked by gossipsub." },
+                .{ .help = "Current number of unique peers across all gossipsub topic peer sets." },
                 ro,
             ),
             .gossipsub_mesh_peers_per_main_topic = try GaugeVec(u64, GossipTopicLabels).init(
                 allocator,
                 "gossipsub_mesh_peers_per_main_topic",
-                .{ .help = "Current number of mesh peers for each main gossip topic." },
+                .{ .help = "Current number of unique mesh peers for each main gossip topic." },
                 ro,
             ),
             .gossipsub_mesh_peer_counts = try GaugeVec(u64, GossipsubMeshPeerCountLabels).init(
                 allocator,
                 "gossipsub_mesh_peer_counts",
-                .{ .help = "Current number of mesh peers by topic and partial-support bucket." },
+                .{ .help = "Current number of unique mesh peers by topic and partial-support bucket." },
                 ro,
             ),
             .gossipsub_topic_msg_sent_bytes = try CounterVec(u64, GossipTopicSentBytesLabels).init(
@@ -1156,7 +1170,7 @@ pub const BeaconMetrics = struct {
             ),
             .gossipsub_tracked_topic_peers = Gauge(u64).init(
                 "beacon_gossipsub_tracked_topic_peers",
-                .{ .help = "Current total number of peers across tracked gossipsub topics." },
+                .{ .help = "Current number of unique peers across tracked gossipsub topics." },
                 ro,
             ),
             .gossipsub_pending_events = Gauge(u64).init(
@@ -2191,7 +2205,9 @@ pub const BeaconMetrics = struct {
         self.peer_connection_state_count.deinit();
         self.peer_client_count.deinit();
         self.peer_score_state_count.deinit();
+        self.known_peer_score_state_count.deinit();
         self.peer_relevance_count.deinit();
+        self.known_peer_relevance_count.deinit();
         self.peer_reports_total.deinit();
         self.peer_goodbye_received_total.deinit();
         self.db_entries.deinit();
@@ -2371,12 +2387,20 @@ pub const BeaconMetrics = struct {
                 .{ .state = scoreStateLabel(state) },
                 snapshot.scoreStateCount(state),
             ) catch {};
+            self.known_peer_score_state_count.set(
+                .{ .state = scoreStateLabel(state) },
+                snapshot.knownScoreStateCount(state),
+            ) catch {};
         }
 
         inline for (networking.peer_manager.metric_relevance_states) |status| {
             self.peer_relevance_count.set(
                 .{ .status = relevanceStatusLabel(status) },
                 snapshot.relevanceCount(status),
+            ) catch {};
+            self.known_peer_relevance_count.set(
+                .{ .status = relevanceStatusLabel(status) },
+                snapshot.knownRelevanceCount(status),
             ) catch {};
         }
     }
@@ -3411,7 +3435,9 @@ test "BeaconMetrics: write produces live Prometheus output" {
     try std.testing.expect(std.mem.indexOf(u8, buf, "p2p_peer_connection_state_count") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf, "p2p_peer_client_count") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf, "p2p_peer_score_state_count") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf, "p2p_known_peer_score_state_count") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf, "p2p_peer_relevance_count") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf, "p2p_known_peer_relevance_count") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf, "p2p_peer_reports_total") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf, "p2p_peer_goodbye_received_total") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf, "beacon_api_active_connections") != null);
