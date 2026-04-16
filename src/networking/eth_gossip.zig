@@ -17,7 +17,7 @@ const ForkSeq = config_mod.ForkSeq;
 
 pub const GossipTopicType = gossip_topics.GossipTopicType;
 
-const snappy = @import("snappy").frame;
+const snappy = @import("snappy").raw;
 const libp2p = @import("zig-libp2p");
 const GossipsubService = libp2p.gossipsub.Service;
 const rpc = libp2p.protobuf.rpc;
@@ -28,13 +28,38 @@ pub const MessageId = [20]u8;
 
 pub const MESSAGE_DOMAIN_INVALID_SNAPPY = [_]u8{ 0x00, 0x00, 0x00, 0x00 };
 pub const MESSAGE_DOMAIN_VALID_SNAPPY = [_]u8{ 0x01, 0x00, 0x00, 0x00 };
-const MIN_SNAPPY_FRAME_LEN: usize = 10;
+
+fn compressSnappyBlock(allocator: Allocator, payload: []const u8) ![]u8 {
+    const max_len = snappy.maxCompressedLength(payload.len);
+    const scratch = try allocator.alloc(u8, max_len);
+    defer allocator.free(scratch);
+
+    const compressed_len = try snappy.compress(payload, scratch);
+    const compressed = try allocator.alloc(u8, compressed_len);
+    @memcpy(compressed, scratch[0..compressed_len]);
+    return compressed;
+}
+
+fn uncompressSnappyBlock(allocator: Allocator, compressed_data: []const u8) ?[]u8 {
+    const uncompressed_len = snappy.uncompressedLength(compressed_data) catch return null;
+    if (uncompressed_len == 0) return null;
+
+    const uncompressed = allocator.alloc(u8, uncompressed_len) catch return null;
+
+    const actual_len = snappy.uncompress(compressed_data, uncompressed) catch {
+        allocator.free(uncompressed);
+        return null;
+    };
+    if (actual_len != uncompressed_len) {
+        allocator.free(uncompressed);
+        return null;
+    }
+
+    return uncompressed;
+}
 
 pub fn computeMessageId(allocator: Allocator, compressed_data: []const u8) !MessageId {
-    const maybe_uncompressed = if (compressed_data.len <= MIN_SNAPPY_FRAME_LEN)
-        null
-    else
-        snappy.uncompress(allocator, compressed_data) catch null;
+    const maybe_uncompressed = uncompressSnappyBlock(allocator, compressed_data);
     defer if (maybe_uncompressed) |uncompressed| allocator.free(uncompressed);
 
     const domain = if (maybe_uncompressed != null)
@@ -161,6 +186,17 @@ pub const EthGossipAdapter = struct {
     pub fn subscribeEthTopics(self: *Self, io: Io) !void {
         for (&global_topic_types) |topic_type| {
             try self.subscribeLogicalTopic(io, topic_type, null);
+        }
+    }
+
+    /// Unsubscribe from all standard Ethereum gossip topics for every active fork.
+    ///
+    /// Subnet-indexed topics are managed separately via `unsubscribeSubnet`.
+    pub fn unsubscribeEthTopics(self: *Self, io: Io) !void {
+        for (&global_topic_types) |topic_type| {
+            for (self.activeForks()) |fork| {
+                try self.unsubscribeTopicTypeForDigest(io, fork.fork_digest, topic_type, null);
+            }
         }
     }
 
@@ -310,8 +346,8 @@ pub const EthGossipAdapter = struct {
         subnet_id: ?u8,
         ssz_bytes: []const u8,
     ) !void {
-        // 1. Snappy compress the SSZ payload.
-        const compressed = try snappy.compress(self.allocator, ssz_bytes);
+        // 1. Snappy-block compress the SSZ payload.
+        const compressed = try compressSnappyBlock(self.allocator, ssz_bytes);
         defer self.allocator.free(compressed);
 
         // 2. Format the topic string.
@@ -387,6 +423,19 @@ test "EthGossipAdapter: duplicate subscriptions are idempotent" {
     try testing.expectEqual(global_topic_types.len + 1, t.adapter.subscribed_topics.count());
 }
 
+test "EthGossipAdapter: unsubscribeEthTopics preserves subnet subscriptions" {
+    const allocator = testing.allocator;
+    const t = try TestAdapter.create(allocator);
+    defer t.destroy(allocator);
+
+    try t.adapter.subscribeEthTopics(std.testing.io);
+    try t.adapter.subscribeSubnet(std.testing.io, .beacon_attestation, 3);
+
+    try t.adapter.unsubscribeEthTopics(std.testing.io);
+
+    try testing.expectEqual(@as(usize, 1), t.adapter.subscribed_topics.count());
+}
+
 test "EthGossipAdapter: active fork updates preserve logical subscriptions" {
     const allocator = testing.allocator;
     const t = try TestAdapter.create(allocator);
@@ -406,7 +455,7 @@ test "EthGossipAdapter: active fork updates preserve logical subscriptions" {
 test "computeMessageId uses valid-snappy domain for decompressible payloads" {
     const allocator = testing.allocator;
     const payload = "hello gossip";
-    const compressed = try snappy.compress(allocator, payload);
+    const compressed = try compressSnappyBlock(allocator, payload);
     defer allocator.free(compressed);
 
     const got = try computeMessageId(allocator, compressed);

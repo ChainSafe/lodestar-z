@@ -83,6 +83,11 @@ const SlotRange = struct {
     count: u64,
 };
 
+const ValidatedBlockRangeChunk = struct {
+    slot: u64,
+    block_root: [32]u8,
+};
+
 const DiscoveryPeerIdentity = struct {
     node_id: [32]u8,
     pubkey: [33]u8,
@@ -144,8 +149,58 @@ const PeerReqRespJob = struct {
 const OutboundHandshakeMode = enum {
     none,
     status_only,
-    full,
 };
+
+const StatusReqRespPolicy = struct {
+    request_metadata: bool,
+    disconnect_peer_on_failure: bool,
+};
+
+fn statusReqRespPolicy(kind: PeerReqRespJobKind) StatusReqRespPolicy {
+    return switch (kind) {
+        .status_only => .{
+            .request_metadata = false,
+            // Align with Lodestar's peer manager: a failed outbound STATUS
+            // request is not, by itself, grounds to evict the peer.
+            .disconnect_peer_on_failure = false,
+        },
+        .full_handshake => .{
+            .request_metadata = true,
+            .disconnect_peer_on_failure = false,
+        },
+        .restatus => .{
+            .request_metadata = false,
+            .disconnect_peer_on_failure = false,
+        },
+        .ping => unreachable,
+    };
+}
+
+fn statusReqRespFollowUpPing(kind: PeerReqRespJobKind) bool {
+    return switch (kind) {
+        // Lodestar sends STATUS and PING immediately on outbound connect.
+        // We preserve our single in-flight req/resp invariant by issuing the
+        // initial PING as soon as the first STATUS response proves the peer is usable.
+        .status_only => true,
+        .full_handshake,
+        .restatus,
+        .ping,
+        => false,
+    };
+}
+
+fn peerNeedsMetadata(peer: *const networking.PeerInfo) bool {
+    return !peer.metadata_known;
+}
+
+fn shouldRefreshMetadataAfterPing(
+    peer: ?*const networking.PeerInfo,
+    remote_seq: u64,
+    known_metadata_seq: u64,
+) bool {
+    const resolved_peer = peer orelse return remote_seq != known_metadata_seq;
+    return peerNeedsMetadata(resolved_peer) or remote_seq != known_metadata_seq;
+}
 
 const BlobFetchState = struct {
     existing: ?[]const u8 = null,
@@ -365,6 +420,45 @@ test "discovery peer id helpers derive node id from inline secp256k1 peer id" {
     try std.testing.expectEqualSlices(u8, &expected, &actual);
 }
 
+test "status req/resp policy tolerates status transport failures" {
+    const status_only = statusReqRespPolicy(.status_only);
+    try std.testing.expect(!status_only.request_metadata);
+    try std.testing.expect(!status_only.disconnect_peer_on_failure);
+
+    const full_handshake = statusReqRespPolicy(.full_handshake);
+    try std.testing.expect(full_handshake.request_metadata);
+    try std.testing.expect(!full_handshake.disconnect_peer_on_failure);
+
+    const restatus = statusReqRespPolicy(.restatus);
+    try std.testing.expect(!restatus.request_metadata);
+    try std.testing.expect(!restatus.disconnect_peer_on_failure);
+
+    try std.testing.expect(statusReqRespFollowUpPing(.status_only));
+    try std.testing.expect(!statusReqRespFollowUpPing(.full_handshake));
+    try std.testing.expect(!statusReqRespFollowUpPing(.restatus));
+    try std.testing.expect(!statusReqRespFollowUpPing(.{ .ping = .{ .known_metadata_seq = 0 } }));
+}
+
+test "peerNeedsMetadata distinguishes unknown metadata from seq zero" {
+    var peer = networking.PeerInfo{};
+    try std.testing.expect(peerNeedsMetadata(&peer));
+
+    peer.metadata_seq = 0;
+    peer.metadata_known = true;
+    try std.testing.expect(!peerNeedsMetadata(&peer));
+}
+
+test "shouldRefreshMetadataAfterPing requests metadata when unknown or seq advances" {
+    var peer = networking.PeerInfo{};
+    try std.testing.expect(shouldRefreshMetadataAfterPing(&peer, 0, 0));
+
+    peer.metadata_known = true;
+    try std.testing.expect(!shouldRefreshMetadataAfterPing(&peer, 0, 0));
+    try std.testing.expect(shouldRefreshMetadataAfterPing(&peer, 1, 0));
+    try std.testing.expect(!shouldRefreshMetadataAfterPing(null, 0, 0));
+    try std.testing.expect(shouldRefreshMetadataAfterPing(null, 2, 1));
+}
+
 pub fn start(self: *BeaconNode, io: std.Io, listen_addr: []const u8, port: u16) !void {
     var ma_buf: [160]u8 = undefined;
     const ma_str = try formatListenMultiaddr(&ma_buf, listen_addr, port);
@@ -391,8 +485,8 @@ pub fn start(self: *BeaconNode, io: std.Io, listen_addr: []const u8, port: u16) 
     req_resp_rate_limiter.* = networking.RateLimiter.init(self.allocator);
     self.req_resp_rate_limiter = req_resp_rate_limiter;
 
-    const head_slot = self.currentHeadSlot();
-    const fork_digest = self.config.networkingForkDigestAtSlot(head_slot, self.genesis_validators_root);
+    const network_slot = currentNetworkSlot(self, self.io) orelse self.currentHeadSlot();
+    const fork_digest = self.config.networkingForkDigestAtSlot(network_slot, self.genesis_validators_root);
 
     var host_identity = self.node_identity.libp2pKeyPair();
     {
@@ -408,7 +502,7 @@ pub fn start(self: *BeaconNode, io: std.Io, listen_addr: []const u8, port: u16) 
 
     self.p2p_service = try networking.p2p_service.P2pService.init(self.io, self.allocator, .{
         .fork_digest = fork_digest,
-        .fork_seq = self.config.forkSeq(head_slot),
+        .fork_seq = self.config.forkSeq(network_slot),
         .req_resp_context = req_resp_ctx,
         .req_resp_server_policy = req_resp_server_policy,
         .host_identity = host_identity,
@@ -545,19 +639,38 @@ pub fn processSyncBatches(self: *BeaconNode, io: std.Io, svc: *networking.P2pSer
             }
         }
 
-        const blocks = fetchRawBlocksByRange(self, io, svc, peer_id, req.start_slot, req.count) catch |err| {
-            noteSyncPeerGoneIfTransportClosed(self, io, svc, peer_id, err);
-            reportReqRespFetchFailure(self, io, peer_id, .beacon_blocks_by_range, err);
-            log.debug("Batch {d} fetch failed: {}", .{ req.batch_id, err });
-            if (self.sync_service_inst) |sync_svc| {
-                sync_svc.onBatchError(req.chain_id, req.batch_id, req.generation, peer_id);
-            }
+        const retained_blocks = if (self.sync_service_inst) |sync_svc|
+            sync_svc.getBatchBlocks(req.chain_id, req.batch_id, req.generation)
+        else
+            null;
+        if (retained_blocks == null) {
+            log.debug("Batch {d}: stale request for generation {d}", .{ req.batch_id, req.generation });
             continue;
-        };
-        defer {
-            for (blocks) |blk| self.allocator.free(blk.block_bytes);
-            self.allocator.free(blocks);
         }
+
+        var fetched_blocks: ?[]BatchBlock = null;
+        defer if (fetched_blocks) |owned_blocks| {
+            for (owned_blocks) |blk| self.allocator.free(blk.block_bytes);
+            self.allocator.free(owned_blocks);
+        };
+
+        const blocks = blk: {
+            if (retained_blocks.?.len != 0) {
+                break :blk retained_blocks.?;
+            }
+
+            const owned_blocks = fetchRawBlocksByRange(self, io, svc, peer_id, req.start_slot, req.count) catch |err| {
+                noteSyncPeerGoneIfTransportClosed(self, io, svc, peer_id, err);
+                reportReqRespFetchFailure(self, io, peer_id, .beacon_blocks_by_range, err);
+                log.debug("Batch {d} fetch failed: {}", .{ req.batch_id, err });
+                if (self.sync_service_inst) |sync_svc| {
+                    sync_svc.onBatchError(req.chain_id, req.batch_id, req.generation, peer_id);
+                }
+                continue;
+            };
+            fetched_blocks = owned_blocks;
+            break :blk owned_blocks;
+        };
 
         if (blocks.len == 0) {
             log.debug("Batch {d}: empty response from peer", .{req.batch_id});
@@ -571,7 +684,7 @@ pub fn processSyncBatches(self: *BeaconNode, io: std.Io, svc: *networking.P2pSer
             log.debug("Batch {d}: DA prefetch deferred/failed: {}", .{ req.batch_id, err });
             if (self.sync_service_inst) |sync_svc| {
                 switch (err) {
-                    error.MissingDataColumnSidecar => sync_svc.onBatchDeferred(req.chain_id, req.batch_id, req.generation),
+                    error.MissingDataColumnSidecar => sync_svc.onBatchDeferred(req.chain_id, req.batch_id, req.generation, blocks),
                     else => sync_svc.onBatchError(req.chain_id, req.batch_id, req.generation, peer_id),
                 }
             }
@@ -626,7 +739,15 @@ pub fn processSyncByRootRequests(self: *BeaconNode, io: std.Io, svc: *networking
                     continue;
                 };
 
-                self.unknown_block_sync.onParentFetched(root, block_ssz) catch |err| {
+                const prepared = self.chainService().prepareRawPreparedBlockInput(block_ssz, .unknown_block_sync) catch |err| {
+                    log.warn("processSyncByRoot: block preparation failed for root {x:0>2}{x:0>2}{x:0>2}{x:0>2}...: {}", .{
+                        root[0], root[1], root[2], root[3], err,
+                    });
+                    self.unknown_block_sync.onFetchFailed(root);
+                    continue;
+                };
+
+                self.unknown_block_sync.onParentFetched(root, prepared) catch |err| {
                     log.warn("processSyncByRoot: onParentFetched error: {}", .{err});
                 };
             },
@@ -730,6 +851,80 @@ fn subscribeInitialSubnets(self: *BeaconNode, io: std.Io, svc: *networking.P2pSe
     log.info("Subscribed to {d} data column subnets (local custody groups)", .{custody_group_count});
 }
 
+fn setInitialSubnetSubscriptionsEnabled(
+    self: *BeaconNode,
+    io: std.Io,
+    svc: *networking.P2pService,
+    enabled: bool,
+) void {
+    const gossip_topics = networking.gossip_topics;
+
+    if (self.node_options.subscribe_all_subnets) {
+        var attestation_subnet: u8 = 0;
+        while (attestation_subnet < gossip_topics.MAX_ATTESTATION_SUBNET_ID) : (attestation_subnet += 1) {
+            if (enabled) {
+                svc.subscribeSubnet(io, .beacon_attestation, attestation_subnet) catch |err| {
+                    log.warn("Failed to subscribe to attestation subnet {d}: {}", .{ attestation_subnet, err });
+                };
+            } else {
+                svc.unsubscribeSubnet(io, .beacon_attestation, attestation_subnet) catch |err| {
+                    log.warn("Failed to unsubscribe from attestation subnet {d}: {}", .{ attestation_subnet, err });
+                };
+            }
+        }
+    }
+
+    const custody_group_count = @min(
+        self.chain_runtime.custody_columns.len,
+        @as(usize, gossip_topics.MAX_DATA_COLUMN_SIDECAR_SUBNET_ID),
+    );
+    var data_column_subnet: u8 = 0;
+    while (@as(usize, data_column_subnet) < custody_group_count) : (data_column_subnet += 1) {
+        if (enabled) {
+            svc.subscribeSubnet(io, .data_column_sidecar, data_column_subnet) catch |err| {
+                log.warn("Failed to subscribe to data column subnet {d}: {}", .{ data_column_subnet, err });
+            };
+        } else {
+            svc.unsubscribeSubnet(io, .data_column_sidecar, data_column_subnet) catch |err| {
+                log.warn("Failed to unsubscribe from data column subnet {d}: {}", .{ data_column_subnet, err });
+            };
+        }
+    }
+}
+
+fn setSyncGossipCoreTopicsEnabled(
+    self: *BeaconNode,
+    io: std.Io,
+    svc: *networking.P2pService,
+    enabled: bool,
+) void {
+    if (enabled) {
+        svc.subscribeEthTopics(io) catch |err| {
+            log.warn("Failed to subscribe gossip core topics: {}", .{err});
+            return;
+        };
+        setInitialSubnetSubscriptionsEnabled(self, io, svc, true);
+    } else {
+        svc.unsubscribeEthTopics(io) catch |err| {
+            log.warn("Failed to unsubscribe gossip core topics: {}", .{err});
+            return;
+        };
+        setInitialSubnetSubscriptionsEnabled(self, io, svc, false);
+    }
+    log.info("gossip core topics {s}", .{if (enabled) "enabled" else "disabled"});
+}
+
+fn processPendingSyncGossipSubscriptionUpdates(
+    self: *BeaconNode,
+    io: std.Io,
+    svc: *networking.P2pService,
+) bool {
+    const cb_ctx = self.sync_callback_ctx orelse return false;
+    const enabled = cb_ctx.takePendingGossipEnabled() orelse return false;
+    setSyncGossipCoreTopicsEnabled(self, io, svc, enabled);
+    return true;
+}
+
 fn initSubnetService(self: *BeaconNode) !void {
     const svc = try self.allocator.create(SubnetService);
     errdefer self.allocator.destroy(svc);
@@ -743,7 +938,9 @@ fn initSubnetService(self: *BeaconNode) !void {
 }
 
 fn closeOwnedQuicStream(io: std.Io, stream: *networking.QuicStream) void {
-    stream.close(io);
+    _ = io;
+    // `deinit()` already closes the QUIC stream while holding a temporary
+    // self-reference; calling `close()` first creates an avoidable race.
     stream.deinit();
 }
 
@@ -874,7 +1071,10 @@ const active_p2p_tick_ns: u64 = std.time.ns_per_ms;
 const idle_p2p_tick_ns: u64 = 25 * std.time.ns_per_ms;
 const connectivity_maintenance_interval_ns: u64 = 100 * std.time.ns_per_ms;
 const discovery_maintenance_interval_ns: u64 = 6 * std.time.ns_per_s;
-const peer_maintenance_interval_ns: u64 = 100 * std.time.ns_per_ms;
+// Match Lodestar's periodic ping/status timeout check cadence. Running this
+// loop at 100ms causes repeated re-status storms after transient transport
+// churn, which in turn destabilizes peer retention during sync.
+const peer_maintenance_interval_ns: u64 = 10 * std.time.ns_per_s;
 const metrics_sampling_interval_ns: u64 = std.time.ns_per_s;
 const peer_manager_heartbeat_interval_ns: u64 = networking.peer_manager.HEARTBEAT_INTERVAL_MS * std.time.ns_per_ms;
 const max_discovery_dials_per_tick: u32 = 4;
@@ -1250,7 +1450,7 @@ fn runPeerManagerMaintenance(self: *BeaconNode, io: std.Io, svc: *networking.P2p
 
     for (actions.peers_to_restatus) |peer_id| {
         const peer = pm.getPeer(peer_id) orelse continue;
-        if (peer.last_status_exchange_ms == 0) {
+        if (peer.last_status_exchange_ms == 0 or peerNeedsMetadata(peer)) {
             did_work = schedulePeerReqResp(self, io, svc, peer_id, .full_handshake) or did_work;
             continue;
         }
@@ -1303,6 +1503,7 @@ fn runRealtimeP2pTick(self: *BeaconNode, io: std.Io, svc: *networking.P2pService
 
     maybeHandleForkTransition(self, io, svc);
 
+    did_work = processPendingSyncGossipSubscriptionUpdates(self, io, svc) or did_work;
     processSyncBatches(self, io, svc);
     processSyncByRootRequests(self, io, svc);
     if (shouldDriveUnknownChainSync(self)) self.unknown_chain_sync.tick();
@@ -1364,10 +1565,10 @@ fn runLoop(self: *BeaconNode, io: std.Io, svc: *networking.P2pService) void {
 }
 
 fn maybeHandleForkTransition(self: *BeaconNode, io: std.Io, svc: *networking.P2pService) void {
-    const head_slot = self.currentHeadSlot();
-    const current_fork_seq = self.config.forkSeq(head_slot);
+    const network_slot = currentNetworkSlot(self, io) orelse self.currentHeadSlot();
+    const current_fork_seq = self.config.forkSeq(network_slot);
     const current_digest = self.config.networkingForkDigestAtSlot(
-        head_slot,
+        network_slot,
         self.genesis_validators_root,
     );
     if (std.mem.eql(u8, &current_digest, &self.last_active_fork_digest)) return;
@@ -1376,14 +1577,14 @@ fn maybeHandleForkTransition(self: *BeaconNode, io: std.Io, svc: *networking.P2p
         const last_digest_hex = std.fmt.bytesToHex(&self.last_active_fork_digest, .lower);
         const current_digest_hex = std.fmt.bytesToHex(&current_digest, .lower);
         log.info("fork transition detected at slot {d}: {s} -> {s}", .{
-            head_slot,
+            network_slot,
             &last_digest_hex,
             &current_digest_hex,
         });
-        _ = syncGossipForkState(self, io, svc);
-        if (self.gossip_handler) |gh| {
-            gh.updateForkSeq(current_fork_seq);
-        }
+    }
+    _ = syncGossipForkState(self, io, svc);
+    if (self.gossip_handler) |gh| {
+        gh.updateForkSeq(current_fork_seq);
     }
     self.last_active_fork_digest = current_digest;
 }
@@ -1936,7 +2137,10 @@ fn updateSyncServiceMetrics(self: *BeaconNode) void {
     metrics.sync_local_head_slot.set(snapshot.local_head_slot);
     metrics.sync_peer_distance.set(snapshot.best_peer_slot -| snapshot.local_head_slot);
     metrics.sync_local_finalized_epoch.set(snapshot.local_finalized_epoch);
-    metrics.setUnknownBlockSnapshot(snapshot.unknown_block);
+    // Gossip/orphan recovery is driven by the node-owned UnknownBlockSync.
+    // SyncService still has a stale internal instance, so its snapshot does
+    // not reflect the live orphan queue.
+    metrics.setUnknownBlockSnapshot(self.unknown_block_sync.metricsSnapshot());
 
     setRangeSyncTypeMetrics(
         metrics,
@@ -2278,7 +2482,7 @@ fn dialDirectPeer(self: *BeaconNode, io: std.Io, svc: *networking.P2pService, ad
 
 fn initDiscoveryService(self: *BeaconNode) !void {
     const fork_digest = self.config.networkingForkDigestAtSlot(
-        self.currentHeadSlot(),
+        currentNetworkSlot(self, self.io) orelse self.currentHeadSlot(),
         self.genesis_validators_root,
     );
 
@@ -2510,6 +2714,9 @@ fn drainCompletedDiscoveryDials(
                     success.ma_str,
                     success.elapsed_ns / std.time.ns_per_ms,
                 });
+                // Keep the initial outbound connect path lightweight. Fetching
+                // metadata eagerly on first contact diverges from Lodestar and
+                // increases the number of streams we burn on fragile peers.
                 did_work = registerConnectedPeer(
                     self,
                     io,
@@ -2517,7 +2724,7 @@ fn drainCompletedDiscoveryDials(
                     success.peer_id,
                     .outbound,
                     .{ .node_id = success.node_id, .pubkey = success.pubkey },
-                    .full,
+                    .status_only,
                 ) or did_work;
             },
             .failure => |failure| {
@@ -2595,11 +2802,17 @@ fn enqueuePeerReqRespCompletion(self: *BeaconNode, io: std.Io, completion: PeerR
     };
 }
 
-fn peerReqRespFailure(peer_id: []const u8, protocol: ReqRespMaintenanceProtocol, err: anyerror) PeerReqRespCompletion {
+fn peerReqRespFailure(
+    peer_id: []const u8,
+    protocol: ReqRespMaintenanceProtocol,
+    err: anyerror,
+    disconnect_peer: bool,
+) PeerReqRespCompletion {
     return .{ .failure = .{
         .peer_id = peer_id,
         .protocol = protocol,
         .err = err,
+        .disconnect_peer = disconnect_peer,
     } };
 }
 
@@ -2611,17 +2824,18 @@ fn peerReqRespTask(
 ) void {
     switch (job.kind) {
         .status_only, .full_handshake, .restatus => {
+            const policy = statusReqRespPolicy(job.kind);
             const peer_status = sendStatus(self, io, svc, job.peer_id) catch |err| {
-                enqueuePeerReqRespCompletion(self, io, peerReqRespFailure(job.peer_id, .status, err));
+                enqueuePeerReqRespCompletion(
+                    self,
+                    io,
+                    peerReqRespFailure(job.peer_id, .status, err, policy.disconnect_peer_on_failure),
+                );
                 return;
             };
 
             var metadata: ?beacon_node_mod.PeerReqRespMetadata = null;
-            const wants_metadata = switch (job.kind) {
-                .full_handshake => true,
-                else => false,
-            };
-            if (wants_metadata) {
+            if (policy.request_metadata) {
                 if (requestPeerMetadataWithTimeout(self, io, svc, job.peer_id, optional_reqresp_timeout_ms)) |peer_metadata| {
                     metadata = peerReqRespMetadataCompletion(peer_metadata);
                 } else |err| {
@@ -2634,16 +2848,21 @@ fn peerReqRespTask(
                 .status = peer_status.status,
                 .earliest_available_slot = peer_status.earliest_available_slot,
                 .metadata = metadata,
+                .follow_up_ping = statusReqRespFollowUpPing(job.kind),
             } });
         },
         .ping => |ping| {
             const remote_seq = requestPeerPing(self, io, svc, job.peer_id) catch |err| {
-                enqueuePeerReqRespCompletion(self, io, peerReqRespFailure(job.peer_id, .ping, err));
+                enqueuePeerReqRespCompletion(self, io, peerReqRespFailure(job.peer_id, .ping, err, false));
                 return;
             };
 
             var metadata: ?beacon_node_mod.PeerReqRespMetadata = null;
-            if (remote_seq != ping.known_metadata_seq) {
+            const should_refresh_metadata = if (self.peer_manager) |pm|
+                shouldRefreshMetadataAfterPing(pm.getPeer(job.peer_id), remote_seq, ping.known_metadata_seq)
+            else
+                shouldRefreshMetadataAfterPing(null, remote_seq, ping.known_metadata_seq);
+            if (should_refresh_metadata) {
                 if (requestPeerMetadataWithTimeout(self, io, svc, job.peer_id, optional_reqresp_timeout_ms)) |peer_metadata| {
                     metadata = peerReqRespMetadataCompletion(peer_metadata);
                 } else |err| {
@@ -2684,6 +2903,11 @@ fn schedulePeerReqResp(
         return false;
     };
 
+    if (self.peer_manager) |pm| switch (kind) {
+        .status_only, .full_handshake, .restatus => pm.markStatusAttempt(peer_id, currentUnixTimeMs(io)),
+        .ping => {},
+    };
+
     svc.spawnBackground(io, peerReqRespTask, .{ self, io, svc, PeerReqRespJob{
         .peer_id = owned_peer_id,
         .kind = kind,
@@ -2717,13 +2941,28 @@ fn drainCompletedPeerReqResp(
         clearPendingPeerReqResp(self, io, completion.peerId());
         switch (completion.*) {
             .status => |status| {
-                if (reqresp_callbacks_mod.handlePeerStatus(self, status.peer_id, status.status, status.earliest_available_slot)) |_| {
+                const relevant = if (reqresp_callbacks_mod.handlePeerStatus(
+                    self,
+                    status.peer_id,
+                    status.status,
+                    status.earliest_available_slot,
+                )) |_| false else true;
+                if (!relevant) {
                     sendGoodbyeAndDisconnect(self, io, svc, status.peer_id, .irrelevant_network);
                 } else if (status.metadata) |metadata| {
                     applyPeerMetadata(self, status.peer_id, .{
                         .metadata = metadata.metadata,
                         .custody_group_count = metadata.custody_group_count,
                     }, currentUnixTimeMs(io));
+                }
+                if (relevant and status.follow_up_ping) {
+                    const known_metadata_seq = if (self.peer_manager) |pm|
+                        if (pm.getPeer(status.peer_id)) |peer| peer.metadata_seq else 0
+                    else
+                        0;
+                    did_work = schedulePeerReqResp(self, io, svc, status.peer_id, .{
+                        .ping = .{ .known_metadata_seq = known_metadata_seq },
+                    }) or did_work;
                 }
                 did_work = true;
             },
@@ -2738,7 +2977,15 @@ fn drainCompletedPeerReqResp(
                 did_work = true;
             },
             .failure => |failure| {
-                handleReqRespMaintenanceFailure(self, io, svc, failure.peer_id, failure.protocol, failure.err);
+                handleReqRespMaintenanceFailure(
+                    self,
+                    io,
+                    svc,
+                    failure.peer_id,
+                    failure.protocol,
+                    failure.err,
+                    failure.disconnect_peer,
+                );
                 did_work = true;
             },
         }
@@ -2883,7 +3130,7 @@ fn reconcilePeerConnections(self: *BeaconNode, io: std.Io, svc: *networking.P2pS
             peer.direction orelse .inbound
         else
             .inbound;
-        did_work = registerConnectedPeer(self, io, svc, peer_id, direction, null, .full) or did_work;
+        did_work = registerConnectedPeer(self, io, svc, peer_id, direction, null, .status_only) or did_work;
     }
 
     const managed_peer_ids = pm.getConnectedPeerIds() catch |err| {
@@ -2966,14 +3213,13 @@ fn registerConnectedPeer(
         svc.openGossipsubStreamAsync(io, peer_id) catch |err| {
             log.debug("Failed to open outbound gossipsub stream for {s}: {}", .{ peer_id, err });
         };
-        // Mirror Lodestar's connect path: kick the initial req/resp handshake
-        // immediately for fresh outbound peers, but keep the actual req/resp I/O
-        // off the main node loop so sync imports are not blocked behind Status.
+        // Mirror Lodestar's connect path: prove fresh outbound peers with
+        // STATUS immediately, but do not front-load metadata fetches on the
+        // first successful transport connection.
         if (connect_direction == .outbound) {
             switch (handshake_mode) {
                 .none => {},
                 .status_only => did_work = schedulePeerReqResp(self, io, svc, peer_id, .status_only) or did_work,
-                .full => did_work = schedulePeerReqResp(self, io, svc, peer_id, .full_handshake) or did_work,
             }
         }
     }
@@ -3007,7 +3253,7 @@ fn bootstrapPeerStatusHandshake(
     peer_id: []const u8,
 ) bool {
     const peer_status = sendStatus(self, io, svc, peer_id) catch |err| {
-        handleReqRespMaintenanceFailure(self, io, svc, peer_id, .status, err);
+        handleReqRespMaintenanceFailure(self, io, svc, peer_id, .status, err, true);
         return false;
     };
 
@@ -4347,7 +4593,7 @@ fn fetchRawBlocksByRange(
     };
     defer reader.deinit();
     var blocks_received: u64 = 0;
-    var previous_slot: ?u64 = null;
+    var previous_chunk: ?ValidatedBlockRangeChunk = null;
 
     while (blocks_received < count) {
         const decoded = reader.next(io, &outbound.stream) catch |err| {
@@ -4367,17 +4613,32 @@ fn fetchRawBlocksByRange(
             return responseCodeError(decoded.result);
         }
 
-        const slot = validateFetchedBlockRangeChunk(self, start_slot, count, previous_slot, decoded.context_bytes, decoded.ssz_bytes) catch |err| {
+        const chunk = validateFetchedBlockRangeChunk(self, start_slot, count, previous_chunk, decoded.context_bytes, decoded.ssz_bytes) catch |err| {
             self.allocator.free(decoded.ssz_bytes);
             return err;
         };
-        previous_slot = slot;
+        previous_chunk = chunk;
 
         try result.append(self.allocator, .{
-            .slot = slot,
+            .slot = chunk.slot,
             .block_bytes = decoded.ssz_bytes,
         });
         blocks_received += 1;
+    }
+
+    if (blocks_received == count) {
+        const extra = reader.next(io, &outbound.stream) catch |err| {
+            if (err == error.UnexpectedEof) return error.MalformedBlockBytes;
+            return err;
+        };
+        if (extra) |decoded| {
+            defer self.allocator.free(decoded.ssz_bytes);
+            if (decoded.result != .success) {
+                request_outcome = responseCodeOutcome(decoded.result);
+                return responseCodeError(decoded.result);
+            }
+            return error.ExtraBlocksByRangeResponse;
+        }
     }
 
     request_outcome = .success;
@@ -4388,22 +4649,45 @@ fn validateFetchedBlockRangeChunk(
     self: *const BeaconNode,
     start_slot: u64,
     count: u64,
-    previous_slot: ?u64,
+    previous_chunk: ?ValidatedBlockRangeChunk,
     context_bytes: ?[4]u8,
     ssz_bytes: []const u8,
-) !u64 {
+) !ValidatedBlockRangeChunk {
     const slot = readSignedBeaconBlockSlot(ssz_bytes) orelse return error.MalformedBlockBytes;
     if (slot < start_slot) return error.BlockOutsideRequestedRange;
     if (slot - start_slot >= count) return error.BlockOutsideRequestedRange;
-    if (previous_slot) |prev| {
-        if (slot <= prev) return error.UnsortedBlockRangeResponse;
+    if (previous_chunk) |prev| {
+        if (slot <= prev.slot) return error.UnsortedBlockRangeResponse;
+        const parent_root = readSignedBlockParentRootFromSsz(ssz_bytes) orelse return error.MalformedBlockBytes;
+        try validateFetchedBlockRangeLink(prev.block_root, parent_root);
     }
 
     const chunk_context = context_bytes orelse return error.MissingContextBytes;
     const expected_digest = self.config.networkingForkDigestAtSlot(slot, self.genesis_validators_root);
     if (!std.mem.eql(u8, &chunk_context, &expected_digest)) return error.ForkDigestMismatch;
 
-    return slot;
+    return .{
+        .slot = slot,
+        .block_root = try readSignedBeaconBlockRootFromSsz(self, slot, ssz_bytes),
+    };
+}
+
+fn validateFetchedBlockRangeLink(previous_block_root: [32]u8, parent_root: [32]u8) !void {
+    if (!std.mem.eql(u8, &previous_block_root, &parent_root)) return error.ParentRootMismatch;
+}
+
+fn readSignedBeaconBlockRootFromSsz(self: *const BeaconNode, slot: u64, block_bytes: []const u8) ![32]u8 {
+    var any_signed = try fork_types.AnySignedBeaconBlock.deserialize(
+        self.allocator,
+        .full,
+        self.config.forkSeq(slot),
+        block_bytes,
+    );
+    defer any_signed.deinit(self.allocator);
+
+    var block_root: [32]u8 = undefined;
+    try any_signed.beaconBlock().hashTreeRoot(self.allocator, &block_root);
+    return block_root;
 }
 
 fn sendStatus(
@@ -4412,7 +4696,7 @@ fn sendStatus(
     svc: *networking.P2pService,
     peer_id: []const u8,
 ) !PeerStatusResponse {
-    const current_fork_seq = self.config.forkSeq(self.currentHeadSlot());
+    const current_fork_seq = self.config.forkSeq(currentNetworkSlot(self, io) orelse self.currentHeadSlot());
     const use_status_v2 = current_fork_seq.gte(.fulu);
     const status_protocol_id = if (use_status_v2)
         "/eth2/beacon_chain/req/status/2/ssz_snappy"
@@ -4587,7 +4871,7 @@ fn requestPeerMetadata(
     svc: *networking.P2pService,
     peer_id: []const u8,
 ) !PeerMetadataResponse {
-    const current_fork_seq = self.config.forkSeq(self.currentHeadSlot());
+    const current_fork_seq = self.config.forkSeq(currentNetworkSlot(self, io) orelse self.currentHeadSlot());
     const use_metadata_v3 = current_fork_seq.gte(.fulu);
 
     if (!use_metadata_v3) {
@@ -4841,6 +5125,7 @@ fn handleReqRespMaintenanceFailure(
     peer_id: []const u8,
     protocol: ReqRespMaintenanceProtocol,
     err: anyerror,
+    disconnect_peer: bool,
 ) void {
     if (self.metrics) |metrics| {
         metrics.incrReqRespMaintenanceError(
@@ -4872,16 +5157,17 @@ fn handleReqRespMaintenanceFailure(
     }
 
     const pm = self.peer_manager orelse {
-        _ = svc.disconnectPeer(io, peer_id);
+        if (disconnect_peer) _ = svc.disconnectPeer(io, peer_id);
         return;
     };
 
     const now_ms = currentUnixTimeMs(io);
     const action = reqRespMaintenanceFailureAction(protocol, err) orelse {
-        _ = svc.disconnectPeer(io, peer_id);
+        if (disconnect_peer) _ = svc.disconnectPeer(io, peer_id);
         return;
     };
     const score_state = pm.reportPeer(peer_id, action, .rpc, now_ms);
+    if (!disconnect_peer) return;
 
     var reason: GoodbyeReason = .fault_error;
     if (score_state) |state| {
@@ -4955,6 +5241,10 @@ fn initGossipHandler(self: *BeaconNode) void {
     if (self.gossip_handler != null) return;
 
     const callbacks = gossip_node_callbacks_mod;
+    const initial_fork_seq = if (currentNetworkSlot(self, self.io)) |slot|
+        self.config.forkSeq(slot)
+    else
+        self.config.forkSeq(self.currentHeadSlot());
     self.gossip_handler = GossipHandler.create(
         self.allocator,
         self.io,
@@ -4973,6 +5263,7 @@ fn initGossipHandler(self: *BeaconNode) void {
     };
 
     if (self.gossip_handler) |gh| {
+        gh.queueUnknownBlockFn = &callbacks.queueUnknownBlockFromGossip;
         gh.importResolvedAttestationFn = &callbacks.importResolvedAttestation;
         gh.importResolvedAggregateFn = &callbacks.importResolvedAggregate;
         gh.importVoluntaryExitFn = &callbacks.importVoluntaryExit;
@@ -4994,6 +5285,7 @@ fn initGossipHandler(self: *BeaconNode) void {
         gh.importSyncContributionFn = &callbacks.importSyncContribution;
         gh.importSyncCommitteeMessageFn = &callbacks.importSyncCommitteeMessage;
 
+        gh.updateForkSeq(initial_fork_seq);
         gh.metrics = self.metrics;
         gh.beacon_processor = self.beacon_processor;
     }
@@ -5050,3 +5342,15 @@ const BeaconNode = beacon_node_mod.BeaconNode;
 const DiscoveryDialCompletion = beacon_node_mod.DiscoveryDialCompletion;
 const PeerReqRespCompletion = beacon_node_mod.PeerReqRespCompletion;
 const SyncStatus = beacon_node_mod.SyncStatus;
+
+test "validateFetchedBlockRangeLink accepts matching parent root" {
+    const root = [_]u8{0xAB} ** 32;
+    try validateFetchedBlockRangeLink(root, root);
+}
+
+test "validateFetchedBlockRangeLink rejects mismatched parent root" {
+    try std.testing.expectError(
+        error.ParentRootMismatch,
+        validateFetchedBlockRangeLink([_]u8{0xAB} ** 32, [_]u8{0xCD} ** 32),
+    );
+}

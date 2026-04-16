@@ -2016,13 +2016,19 @@ fn encodeExecutionRequestsV4(allocator: Allocator, payload: ExecutionPayloadV4) 
     }
 
     if (payload.deposit_requests.len > 0) {
-        try parts.append(allocator, try encodeDepositRequestBytes(allocator, payload.deposit_requests));
+        const encoded = try encodeDepositRequestBytes(allocator, payload.deposit_requests);
+        defer allocator.free(encoded);
+        try parts.append(allocator, try std.fmt.allocPrint(allocator, "\"{s}\"", .{encoded}));
     }
     if (payload.withdrawal_requests.len > 0) {
-        try parts.append(allocator, try encodeWithdrawalRequestBytes(allocator, payload.withdrawal_requests));
+        const encoded = try encodeWithdrawalRequestBytes(allocator, payload.withdrawal_requests);
+        defer allocator.free(encoded);
+        try parts.append(allocator, try std.fmt.allocPrint(allocator, "\"{s}\"", .{encoded}));
     }
     if (payload.consolidation_requests.len > 0) {
-        try parts.append(allocator, try encodeConsolidationRequestBytes(allocator, payload.consolidation_requests));
+        const encoded = try encodeConsolidationRequestBytes(allocator, payload.consolidation_requests);
+        defer allocator.free(encoded);
+        try parts.append(allocator, try std.fmt.allocPrint(allocator, "\"{s}\"", .{encoded}));
     }
 
     return joinJsonArray(allocator, parts.items);
@@ -3364,11 +3370,24 @@ test "HttpEngine: newPayloadV4 encodes Prague executionRequests as the fourth pa
     const body = mock.last_body orelse return error.NoRequestRecorded;
     try testing.expect(std.mem.indexOf(u8, body, "engine_newPayloadV4") != null);
     try testing.expect(std.mem.indexOf(u8, body, "\"params\":[") != null);
-    try testing.expect(std.mem.indexOf(u8, body, "0807060504030201") != null);
-    try testing.expect(std.mem.indexOf(u8, body, "00ca9a3b00000000") != null);
     try testing.expect(std.mem.indexOf(u8, body, "\"depositRequests\"") == null);
     try testing.expect(std.mem.indexOf(u8, body, "\"withdrawalRequests\"") == null);
     try testing.expect(std.mem.indexOf(u8, body, "\"consolidationRequests\"") == null);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, body, .{});
+    defer parsed.deinit();
+
+    const root = parsed.value.object;
+    const params = (root.get("params") orelse return error.MissingField).array.items;
+    try testing.expectEqual(@as(usize, 4), params.len);
+
+    const execution_requests = params[3].array.items;
+    try testing.expectEqual(@as(usize, 3), execution_requests.len);
+    try testing.expectEqualStrings("0x00", execution_requests[0].string[0..4]);
+    try testing.expectEqualStrings("0x01", execution_requests[1].string[0..4]);
+    try testing.expectEqualStrings("0x02", execution_requests[2].string[0..4]);
+    try testing.expect(std.mem.endsWith(u8, execution_requests[0].string, "0100000000000000"));
+    try testing.expect(std.mem.endsWith(u8, execution_requests[1].string, "00ca9a3b00000000"));
 }
 
 fn makeTestPayload(block_hash: [32]u8) ExecutionPayloadV3 {

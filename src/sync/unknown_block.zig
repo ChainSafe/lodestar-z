@@ -17,8 +17,8 @@
 //!
 //! ### UnknownBlockSync (this module)
 //! - Triggered by: gossip blocks with an unknown *parent* root
-//! - Has full block bytes in hand; only the parent chain is missing
-//! - Stores: full block bytes ([]const u8) per pending block
+//! - Has the full block in hand; only the parent chain is missing
+//! - Stores: parsed block plus canonical metadata per pending block
 //! - Resolves by: walking the parent chain by root until reaching a known block,
 //!   then recursively importing children
 //! - Use case: filling in the gap for a gossip block that arrived out of order
@@ -40,7 +40,9 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const prepared_block_mod = @import("prepared_block");
 const sync_types = @import("sync_types.zig");
+const PreparedBlockInput = prepared_block_mod.PreparedBlockInput;
 
 /// Status of a pending block entry.
 pub const PendingStatus = enum {
@@ -52,18 +54,30 @@ pub const PendingStatus = enum {
 
 /// A block waiting for its parent chain to be resolved.
 pub const PendingBlock = struct {
-    /// The block's own root.
-    block_root: [32]u8,
-    /// The parent root this block references (what we need).
-    parent_root: [32]u8,
-    /// The block's slot.
-    slot: u64,
-    /// Raw SSZ bytes of the signed block (owned copy).
-    block_bytes: []const u8,
+    /// The parsed block plus canonical metadata.
+    prepared: PreparedBlockInput,
+    /// Preferred peer to ask first for the missing parent, if gossip gave us one.
+    preferred_peer_id_buf: [128]u8,
+    preferred_peer_id_len: u8,
     /// Number of fetch attempts for this block's parent.
     attempts: u8,
     /// Current status.
     status: PendingStatus,
+
+    pub fn preferredPeerId(self: *const PendingBlock) ?[]const u8 {
+        if (self.preferred_peer_id_len == 0) return null;
+        return self.preferred_peer_id_buf[0..self.preferred_peer_id_len];
+    }
+
+    fn setPreferredPeer(self: *PendingBlock, peer_id: ?[]const u8) void {
+        const peer = peer_id orelse return;
+        self.preferred_peer_id_len = @intCast(@min(peer.len, self.preferred_peer_id_buf.len));
+        @memcpy(self.preferred_peer_id_buf[0..self.preferred_peer_id_len], peer[0..self.preferred_peer_id_len]);
+    }
+
+    fn slot(self: *const PendingBlock) u64 {
+        return self.prepared.slot();
+    }
 };
 
 pub const MetricsSnapshot = struct {
@@ -89,8 +103,14 @@ pub const UnknownBlockCallbacks = struct {
     /// Import a block. Returns error on failure.
     importBlockFn: *const fn (
         ptr: *anyopaque,
-        block_bytes: []const u8,
+        prepared: PreparedBlockInput,
     ) anyerror!void,
+
+    /// Returns true when a block root is already known to fork choice.
+    hasBlockFn: *const fn (
+        ptr: *anyopaque,
+        root: [32]u8,
+    ) bool,
 
     /// Get a list of connected peer IDs for balancing.
     getConnectedPeersFn: *const fn (
@@ -101,8 +121,12 @@ pub const UnknownBlockCallbacks = struct {
         self.requestBlockByRootFn(self.ptr, root, peer_id);
     }
 
-    pub fn importBlock(self: UnknownBlockCallbacks, block_bytes: []const u8) !void {
-        return self.importBlockFn(self.ptr, block_bytes);
+    pub fn importBlock(self: UnknownBlockCallbacks, prepared: PreparedBlockInput) !void {
+        return self.importBlockFn(self.ptr, prepared);
+    }
+
+    pub fn hasBlock(self: UnknownBlockCallbacks, root: [32]u8) bool {
+        return self.hasBlockFn(self.ptr, root);
     }
 
     pub fn getConnectedPeers(self: UnknownBlockCallbacks) []const []const u8 {
@@ -149,7 +173,7 @@ pub const UnknownBlockSync = struct {
     pub fn deinit(self: *UnknownBlockSync) void {
         var it = self.pending.iterator();
         while (it.next()) |entry| {
-            self.allocator.free(entry.value_ptr.block_bytes);
+            entry.value_ptr.prepared.deinit(self.allocator);
         }
         self.pending.deinit();
 
@@ -170,30 +194,45 @@ pub const UnknownBlockSync = struct {
     /// Returns true if the block was added.
     pub fn addPendingBlock(
         self: *UnknownBlockSync,
-        block_root: [32]u8,
-        parent_root: [32]u8,
-        slot: u64,
-        block_bytes: []const u8,
+        prepared: PreparedBlockInput,
     ) !bool {
+        return self.addPendingBlockWithPeer(prepared, null);
+    }
+
+    pub fn addPendingBlockWithPeer(
+        self: *UnknownBlockSync,
+        prepared: PreparedBlockInput,
+        peer_id: ?[]const u8,
+    ) !bool {
+        var owned = prepared;
+        var inserted = false;
+        defer if (!inserted) owned.deinit(self.allocator);
+
+        const block_root = owned.block_root;
+        const parent_root = owned.block.beaconBlock().parentRoot().*;
+
         if (self.bad_roots.contains(parent_root)) return false;
-        if (self.pending.contains(block_root)) return false;
+        if (self.pending.getPtr(block_root)) |pending| {
+            pending.setPreferredPeer(peer_id);
+            return false;
+        }
 
         // Evict oldest if at capacity.
         if (self.pending.count() >= sync_types.MAX_PENDING_BLOCKS) {
             self.evictOldest();
         }
 
-        const bytes_copy = try self.allocator.dupe(u8, block_bytes);
-        errdefer self.allocator.free(bytes_copy);
-
         try self.pending.put(block_root, .{
-            .block_root = block_root,
-            .parent_root = parent_root,
-            .slot = slot,
-            .block_bytes = bytes_copy,
+            .prepared = owned,
+            .preferred_peer_id_buf = undefined,
+            .preferred_peer_id_len = 0,
             .attempts = 0,
             .status = .pending,
         });
+        inserted = true;
+        if (self.pending.getPtr(block_root)) |pending| {
+            pending.setPreferredPeer(peer_id);
+        }
 
         // Track parent.
         const gop = try self.parents_needed.getOrPut(parent_root);
@@ -209,6 +248,12 @@ pub const UnknownBlockSync = struct {
     /// This is the active fetch loop — called periodically by SyncService.
     pub fn tick(self: *UnknownBlockSync) void {
         const cbs = self.callbacks orelse return;
+
+        // Lodestar processes pending "ancestor" blocks once their parent is
+        // already known, even if there is no live by-root fetch to drive the
+        // transition. Do the same here to recover orphan gossip blocks after a
+        // range-sync import or a previously queued unknown-block import.
+        self.resolveKnownParentChildren(cbs);
 
         // Get peers for balancing.
         const peers = cbs.getConnectedPeers();
@@ -235,9 +280,11 @@ pub const UnknownBlockSync = struct {
             }
             if (!any_live) continue;
 
-            // Select peer via round-robin.
-            const peer = peers[self.peer_index % peers.len];
-            self.peer_index +%= 1;
+            const peer = self.preferredPeerForChildren(entry.value_ptr.items, peers) orelse blk: {
+                const selected = peers[self.peer_index % peers.len];
+                self.peer_index +%= 1;
+                break :blk selected;
+            };
 
             // Mark children as fetching and bump attempt count.
             for (entry.value_ptr.items) |child_root| {
@@ -260,13 +307,15 @@ pub const UnknownBlockSync = struct {
     pub fn onParentFetched(
         self: *UnknownBlockSync,
         parent_root: [32]u8,
-        parent_block_bytes: []const u8,
+        prepared: PreparedBlockInput,
     ) !void {
         self.in_flight -|= 1;
         const cbs = self.callbacks orelse return;
+        var owned_prepared = prepared;
 
         // Import the fetched parent.
-        cbs.importBlock(parent_block_bytes) catch |err| {
+        cbs.importBlock(owned_prepared) catch |err| {
+            owned_prepared = undefined;
             if (err == error.ImportPending) {
                 return;
             }
@@ -274,6 +323,7 @@ pub const UnknownBlockSync = struct {
             try self.markBad(parent_root);
             return err;
         };
+        owned_prepared = undefined;
 
         // Resolve children waiting on this parent.
         try self.resolveChildren(parent_root);
@@ -299,7 +349,8 @@ pub const UnknownBlockSync = struct {
             var children = kv.value;
             for (children.items) |child_root| {
                 if (self.pending.fetchSwapRemove(child_root)) |ckv| {
-                    self.allocator.free(ckv.value.block_bytes);
+                    var removed_child = ckv.value;
+                    removed_child.prepared.deinit(self.allocator);
                 }
             }
             children.deinit(self.allocator);
@@ -366,21 +417,55 @@ pub const UnknownBlockSync = struct {
 
         for (children_list.items) |child_root| {
             if (self.pending.fetchSwapRemove(child_root)) |kv| {
-                const child = kv.value;
-                defer self.allocator.free(child.block_bytes);
+                var child = kv.value;
+                const child_block_root = child.prepared.block_root;
 
                 // Try to import the child — its parent is now known.
-                cbs.importBlock(child.block_bytes) catch |err| switch (err) {
+                var owned_child = child.prepared;
+                cbs.importBlock(owned_child) catch |err| switch (err) {
                     error.ImportPending => continue,
                     else => {
                         // Child failed import — don't propagate, just drop.
                         continue;
                     },
                 };
+                owned_child = undefined;
+                child = undefined;
 
                 // This child is now imported — resolve ITS children recursively.
-                self.resolveChildren(child.block_root) catch {};
+                self.resolveChildren(child_block_root) catch {};
             }
+        }
+    }
+
+    fn preferredPeerForChildren(
+        self: *UnknownBlockSync,
+        child_roots: []const [32]u8,
+        peers: []const []const u8,
+    ) ?[]const u8 {
+        for (child_roots) |child_root| {
+            const pending = self.pending.getPtr(child_root) orelse continue;
+            const preferred = pending.preferredPeerId() orelse continue;
+            for (peers) |peer| {
+                if (std.mem.eql(u8, peer, preferred)) return peer;
+            }
+        }
+        return null;
+    }
+
+    fn resolveKnownParentChildren(self: *UnknownBlockSync, cbs: UnknownBlockCallbacks) void {
+        var ready_parents = std.ArrayListUnmanaged([32]u8).empty;
+        defer ready_parents.deinit(self.allocator);
+
+        var pit = self.parents_needed.iterator();
+        while (pit.next()) |entry| {
+            const parent_root = entry.key_ptr.*;
+            if (!cbs.hasBlock(parent_root)) continue;
+            ready_parents.append(self.allocator, parent_root) catch return;
+        }
+
+        for (ready_parents.items) |parent_root| {
+            self.resolveChildren(parent_root) catch {};
         }
     }
 
@@ -391,21 +476,48 @@ pub const UnknownBlockSync = struct {
 
         var it = self.pending.iterator();
         while (it.next()) |entry| {
-            if (entry.value_ptr.slot < oldest_slot) {
-                oldest_slot = entry.value_ptr.slot;
+            if (entry.value_ptr.slot() < oldest_slot) {
+                oldest_slot = entry.value_ptr.slot();
                 oldest_root = entry.key_ptr.*;
             }
         }
 
         if (oldest_root) |root| {
             if (self.pending.fetchSwapRemove(root)) |kv| {
-                self.allocator.free(kv.value.block_bytes);
+                var removed = kv.value;
+                removed.prepared.deinit(self.allocator);
             }
         }
     }
 };
 
 // ── Tests ────────────────────────────────────────────────────────────
+
+fn makeTestPreparedBlock(
+    allocator: Allocator,
+    slot: u64,
+    parent_root: [32]u8,
+    block_root: [32]u8,
+) !PreparedBlockInput {
+    const consensus_types = @import("consensus_types");
+    const fork_types = @import("fork_types");
+
+    var block: consensus_types.phase0.SignedBeaconBlock.Type = consensus_types.phase0.SignedBeaconBlock.default_value;
+    block.message.slot = slot;
+    block.message.parent_root = parent_root;
+
+    const ssz_size = consensus_types.phase0.SignedBeaconBlock.serializedSize(&block);
+    const ssz_bytes = try allocator.alloc(u8, ssz_size);
+    defer allocator.free(ssz_bytes);
+    _ = consensus_types.phase0.SignedBeaconBlock.serializeIntoBytes(&block, ssz_bytes);
+
+    return .{
+        .block = try fork_types.AnySignedBeaconBlock.deserialize(allocator, .full, .phase0, ssz_bytes),
+        .source = .gossip,
+        .block_root = block_root,
+        .seen_timestamp_sec = 0,
+    };
+}
 
 test "UnknownBlockSync: add and retrieve pending block" {
     const alloc = std.testing.allocator;
@@ -415,12 +527,12 @@ test "UnknownBlockSync: add and retrieve pending block" {
     const block_root = [_]u8{0x01} ** 32;
     const parent_root = [_]u8{0x02} ** 32;
 
-    const added = try sync.addPendingBlock(block_root, parent_root, 42, &[_]u8{ 0xDE, 0xAD });
+    const added = try sync.addPendingBlock(try makeTestPreparedBlock(alloc, 42, parent_root, block_root));
     try std.testing.expect(added);
     try std.testing.expectEqual(@as(usize, 1), sync.pendingCount());
 
     // Duplicate rejected.
-    const dup = try sync.addPendingBlock(block_root, parent_root, 42, &[_]u8{ 0xDE, 0xAD });
+    const dup = try sync.addPendingBlock(try makeTestPreparedBlock(alloc, 42, parent_root, block_root));
     try std.testing.expect(!dup);
 }
 
@@ -430,7 +542,7 @@ test "UnknownBlockSync: getNeededParents" {
     defer sync.deinit();
 
     const parent = [_]u8{0xAA} ** 32;
-    _ = try sync.addPendingBlock([_]u8{0x01} ** 32, parent, 10, &[_]u8{0});
+    _ = try sync.addPendingBlock(try makeTestPreparedBlock(alloc, 10, parent, [_]u8{0x01} ** 32));
 
     var needed = std.ArrayListUnmanaged([32]u8).empty;
     defer needed.deinit(alloc);
@@ -446,7 +558,7 @@ test "UnknownBlockSync: bad root blocks adds" {
     const bad_parent = [_]u8{0xFF} ** 32;
     try sync.markBad(bad_parent);
 
-    const added = try sync.addPendingBlock([_]u8{0x01} ** 32, bad_parent, 5, &[_]u8{0});
+    const added = try sync.addPendingBlock(try makeTestPreparedBlock(alloc, 5, bad_parent, [_]u8{0x01} ** 32));
     try std.testing.expect(!added);
 }
 
@@ -460,31 +572,36 @@ test "UnknownBlockSync: evicts oldest at capacity" {
         root[0] = @intCast(i);
         var parent: [32]u8 = [_]u8{0xFF} ** 32;
         parent[0] = @intCast(i);
-        _ = try sync.addPendingBlock(root, parent, @as(u64, @intCast(i)) + 100, &[_]u8{0});
+        _ = try sync.addPendingBlock(try makeTestPreparedBlock(alloc, @as(u64, @intCast(i)) + 100, parent, root));
     }
     try std.testing.expectEqual(sync_types.MAX_PENDING_BLOCKS, sync.pendingCount());
 
     const new_root: [32]u8 = [_]u8{0xEE} ** 32;
     const new_parent: [32]u8 = [_]u8{0xDD} ** 32;
-    _ = try sync.addPendingBlock(new_root, new_parent, 999, &[_]u8{0});
+    _ = try sync.addPendingBlock(try makeTestPreparedBlock(alloc, 999, new_parent, new_root));
     try std.testing.expectEqual(sync_types.MAX_PENDING_BLOCKS, sync.pendingCount());
 }
 
-test "UnknownBlockSync: import pending defers child resolution until notify" {
+test "UnknownBlockSync: prefers gossip peer for parent fetch" {
     const TestCallbacks = struct {
-        import_pending: bool = true,
-        import_calls: usize = 0,
+        requested_peer: ?[]const u8 = null,
 
-        fn requestBlockByRootFn(_: *anyopaque, _: [32]u8, _: []const u8) void {}
-
-        fn importBlockFn(ptr: *anyopaque, _: []const u8) anyerror!void {
+        fn requestBlockByRootFn(ptr: *anyopaque, _: [32]u8, peer_id: []const u8) void {
             const self: *@This() = @ptrCast(@alignCast(ptr));
-            self.import_calls += 1;
-            if (self.import_pending) return error.ImportPending;
+            self.requested_peer = peer_id;
+        }
+
+        fn importBlockFn(_: *anyopaque, prepared: PreparedBlockInput) anyerror!void {
+            var owned = prepared;
+            owned.deinit(std.testing.allocator);
+        }
+
+        fn hasBlockFn(_: *anyopaque, _: [32]u8) bool {
+            return false;
         }
 
         fn getConnectedPeersFn(_: *anyopaque) []const []const u8 {
-            return &.{};
+            return &.{ "peer-a", "peer-b" };
         }
 
         fn callbacks(self: *@This()) UnknownBlockCallbacks {
@@ -492,6 +609,7 @@ test "UnknownBlockSync: import pending defers child resolution until notify" {
                 .ptr = self,
                 .requestBlockByRootFn = &requestBlockByRootFn,
                 .importBlockFn = &importBlockFn,
+                .hasBlockFn = &hasBlockFn,
                 .getConnectedPeersFn = &getConnectedPeersFn,
             };
         }
@@ -506,9 +624,62 @@ test "UnknownBlockSync: import pending defers child resolution until notify" {
 
     const parent_root = [_]u8{0xAA} ** 32;
     const child_root = [_]u8{0xBB} ** 32;
-    _ = try sync.addPendingBlock(child_root, parent_root, 42, &[_]u8{0x01});
+    _ = try sync.addPendingBlockWithPeer(try makeTestPreparedBlock(alloc, 42, parent_root, child_root), "peer-b");
 
-    try sync.onParentFetched(parent_root, &[_]u8{0x02});
+    sync.tick();
+    try std.testing.expectEqualStrings("peer-b", callbacks.requested_peer.?);
+}
+
+test "UnknownBlockSync: import pending defers child resolution until notify" {
+    const TestCallbacks = struct {
+        import_pending: bool = true,
+        import_calls: usize = 0,
+
+        fn requestBlockByRootFn(_: *anyopaque, _: [32]u8, _: []const u8) void {}
+
+        fn importBlockFn(ptr: *anyopaque, prepared: PreparedBlockInput) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            self.import_calls += 1;
+            if (self.import_pending) {
+                var owned = prepared;
+                owned.deinit(std.testing.allocator);
+                return error.ImportPending;
+            }
+            var owned = prepared;
+            owned.deinit(std.testing.allocator);
+        }
+
+        fn hasBlockFn(_: *anyopaque, _: [32]u8) bool {
+            return false;
+        }
+
+        fn getConnectedPeersFn(_: *anyopaque) []const []const u8 {
+            return &.{};
+        }
+
+        fn callbacks(self: *@This()) UnknownBlockCallbacks {
+            return .{
+                .ptr = self,
+                .requestBlockByRootFn = &requestBlockByRootFn,
+                .importBlockFn = &importBlockFn,
+                .hasBlockFn = &hasBlockFn,
+                .getConnectedPeersFn = &getConnectedPeersFn,
+            };
+        }
+    };
+
+    const alloc = std.testing.allocator;
+    var sync = UnknownBlockSync.init(alloc);
+    defer sync.deinit();
+
+    var callbacks = TestCallbacks{};
+    sync.setCallbacks(callbacks.callbacks());
+
+    const parent_root = [_]u8{0xAA} ** 32;
+    const child_root = [_]u8{0xBB} ** 32;
+    _ = try sync.addPendingBlock(try makeTestPreparedBlock(alloc, 42, parent_root, child_root));
+
+    try sync.onParentFetched(parent_root, try makeTestPreparedBlock(alloc, 41, [_]u8{0x09} ** 32, parent_root));
     try std.testing.expectEqual(@as(usize, 1), sync.pendingCount());
     try std.testing.expectEqual(@as(usize, 1), callbacks.import_calls);
 
@@ -516,4 +687,63 @@ test "UnknownBlockSync: import pending defers child resolution until notify" {
     try sync.notifyBlockImported(parent_root);
     try std.testing.expectEqual(@as(usize, 0), sync.pendingCount());
     try std.testing.expectEqual(@as(usize, 2), callbacks.import_calls);
+}
+
+test "UnknownBlockSync: tick imports pending child when parent is already known" {
+    const TestCallbacks = struct {
+        imported: usize = 0,
+        requested: usize = 0,
+        known_parent: [32]u8,
+
+        fn requestBlockByRootFn(ptr: *anyopaque, _: [32]u8, _: []const u8) void {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            self.requested += 1;
+        }
+
+        fn importBlockFn(ptr: *anyopaque, prepared: PreparedBlockInput) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            self.imported += 1;
+            var owned = prepared;
+            owned.deinit(std.testing.allocator);
+        }
+
+        fn hasBlockFn(ptr: *anyopaque, root: [32]u8) bool {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            return std.mem.eql(u8, &self.known_parent, &root);
+        }
+
+        fn getConnectedPeersFn(_: *anyopaque) []const []const u8 {
+            return &.{ "peer-a" };
+        }
+
+        fn callbacks(self: *@This()) UnknownBlockCallbacks {
+            return .{
+                .ptr = self,
+                .requestBlockByRootFn = &requestBlockByRootFn,
+                .importBlockFn = &importBlockFn,
+                .hasBlockFn = &hasBlockFn,
+                .getConnectedPeersFn = &getConnectedPeersFn,
+            };
+        }
+    };
+
+    const alloc = std.testing.allocator;
+    var sync = UnknownBlockSync.init(alloc);
+    defer sync.deinit();
+
+    const parent_root = [_]u8{0x31} ** 32;
+    const child_root = [_]u8{0x32} ** 32;
+
+    var callbacks = TestCallbacks{ .known_parent = parent_root };
+    sync.setCallbacks(callbacks.callbacks());
+
+    _ = try sync.addPendingBlock(try makeTestPreparedBlock(alloc, 42, parent_root, child_root));
+    try std.testing.expectEqual(@as(usize, 1), sync.pendingCount());
+
+    sync.tick();
+
+    try std.testing.expectEqual(@as(usize, 1), callbacks.imported);
+    try std.testing.expectEqual(@as(usize, 0), callbacks.requested);
+    try std.testing.expectEqual(@as(usize, 0), sync.pendingCount());
+    try std.testing.expectEqual(@as(usize, 0), sync.parents_needed.count());
 }

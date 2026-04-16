@@ -73,6 +73,13 @@ pub const INBOUND_PING_INTERVAL_MS: u64 = 15_000;
 pub const OUTBOUND_PING_INTERVAL_MS: u64 = 20_000;
 /// Periodic Status refresh interval for connected peers.
 pub const STATUS_REFRESH_INTERVAL_MS: u64 = 5 * 60_000;
+/// Inbound peers are given a short window to Status us first, matching
+/// Lodestar's inbound grace behavior before we proactively request Status.
+pub const STATUS_INBOUND_GRACE_PERIOD_MS: u64 = 15_000;
+/// Retry cadence for peers whose initial Status exchange has not completed.
+/// Lodestar retries unresolved peers on its 10s maintenance loop rather than
+/// backing off for a full minute.
+pub const STATUS_FAILED_RETRY_BACKOFF_MS: u64 = 10_000;
 
 /// Target number of peers desired per attestation subnet.
 const TARGET_SUBNET_PEERS: u32 = 6;
@@ -459,6 +466,11 @@ pub const PeerManager = struct {
         self.db.markPingResponse(peer_id, now_ms);
     }
 
+    /// Record an outbound Status attempt.
+    pub fn markStatusAttempt(self: *PeerManager, peer_id: []const u8, now_ms: u64) void {
+        self.db.markStatusAttempt(peer_id, now_ms);
+    }
+
     /// Record a successful Status exchange.
     pub fn markStatusExchange(self: *PeerManager, peer_id: []const u8, now_ms: u64) void {
         self.db.markStatusExchange(peer_id, now_ms);
@@ -731,6 +743,8 @@ pub const PeerManager = struct {
         preferred_peer_id: ?[]const u8,
         excluded_peer_ids: []const []const u8,
     ) !?[]const u8 {
+        _ = start_slot;
+        _ = end_slot;
         const connected = try self.db.getConnectedPeers();
         defer self.allocator.free(connected);
 
@@ -745,15 +759,13 @@ pub const PeerManager = struct {
         var best_known: ?Candidate = null;
         var best_unknown: ?Candidate = null;
         var connected_count: usize = 0;
-        var eligible_range_count: usize = 0;
         var unknown_count: usize = 0;
         var zero_overlap_count: usize = 0;
 
         for (connected) |cp| {
             connected_count += 1;
             if (containsPeerId(excluded_peer_ids, cp.peer_id)) continue;
-            if (!peerCanServeRange(cp.info, start_slot, end_slot)) continue;
-            eligible_range_count += 1;
+            if (cp.info.relevance == .irrelevant) continue;
 
             const is_preferred = if (preferred_peer_id) |preferred|
                 std.mem.eql(u8, cp.peer_id, preferred)
@@ -799,16 +811,13 @@ pub const PeerManager = struct {
             return try self.allocator.dupe(u8, candidate.peer_id);
         }
         log.debug(
-            "No data column peer selected: connected={d} eligible_range={d} unknown={d} zero_overlap={d} missing_columns={d} preferred={f} slots={d}..{d}",
+            "No data column peer selected: connected={d} unknown={d} zero_overlap={d} missing_columns={d} preferred={f}",
             .{
                 connected_count,
-                eligible_range_count,
                 unknown_count,
                 zero_overlap_count,
                 missing_columns.len,
                 fmtPeerId(preferred_peer_id),
-                start_slot,
-                end_slot,
             },
         );
         return null;
@@ -1089,7 +1098,16 @@ pub const PeerManager = struct {
     }
 
     fn peerNeedsStatusRefresh(peer: *const PeerInfo, now_ms: u64, interval_ms: u64) bool {
-        if (peer.last_status_exchange_ms == 0) return true;
+        if (peer.last_status_exchange_ms == 0) {
+            if (peer.last_status_attempt_ms == 0) {
+                const first_status_at_ms = switch (peer.direction orelse .inbound) {
+                    .outbound => peer.connected_at_ms,
+                    .inbound => peer.connected_at_ms + STATUS_INBOUND_GRACE_PERIOD_MS,
+                };
+                return now_ms >= first_status_at_ms;
+            }
+            return now_ms >= peer.last_status_attempt_ms + STATUS_FAILED_RETRY_BACKOFF_MS;
+        }
         if (peer.last_status_fork_digest == null or peer.relevance == .unknown) return true;
         return now_ms >= peer.last_status_exchange_ms + interval_ms;
     }
@@ -1534,18 +1552,57 @@ test "PeerManager: maintenance prioritizes status refresh over ping" {
     try std.testing.expectEqual(@as(usize, 0), actions.peers_to_ping.len);
 }
 
-test "PeerManager: maintenance restatuses peers without prior status" {
+test "PeerManager: maintenance restatuses outbound peers without prior status immediately" {
     const allocator = std.testing.allocator;
     var pm = PeerManager.init(allocator, .{});
     defer pm.deinit();
 
-    _ = try pm.onPeerConnected("peer_a", .inbound, 1_000);
+    _ = try pm.onPeerConnected("peer_a", .outbound, 1_000);
 
     var actions = try pm.maintenance(2_000, .{ .max_ping_requests = 1, .max_status_requests = 1 });
     defer actions.deinit(allocator);
 
     try std.testing.expectEqual(@as(usize, 1), actions.peers_to_restatus.len);
     try std.testing.expectEqualStrings("peer_a", actions.peers_to_restatus[0]);
+}
+
+test "PeerManager: maintenance gives inbound peers a status grace period" {
+    const allocator = std.testing.allocator;
+    var pm = PeerManager.init(allocator, .{});
+    defer pm.deinit();
+
+    _ = try pm.onPeerConnected("peer_a", .inbound, 1_000);
+
+    var early_actions = try pm.maintenance(1_000 + STATUS_INBOUND_GRACE_PERIOD_MS - 1, .{ .max_ping_requests = 1, .max_status_requests = 1 });
+    defer early_actions.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 0), early_actions.peers_to_restatus.len);
+
+    var ready_actions = try pm.maintenance(1_000 + STATUS_INBOUND_GRACE_PERIOD_MS, .{ .max_ping_requests = 1, .max_status_requests = 1 });
+    defer ready_actions.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 1), ready_actions.peers_to_restatus.len);
+    try std.testing.expectEqualStrings("peer_a", ready_actions.peers_to_restatus[0]);
+}
+
+test "PeerManager: maintenance retries failed initial status exchanges quickly" {
+    const allocator = std.testing.allocator;
+    var pm = PeerManager.init(allocator, .{});
+    defer pm.deinit();
+
+    _ = try pm.onPeerConnected("peer_a", .outbound, 1_000);
+    pm.markStatusAttempt("peer_a", 1_500);
+
+    var actions = try pm.maintenance(2_000, .{ .max_ping_requests = 1, .max_status_requests = 1 });
+    defer actions.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 0), actions.peers_to_restatus.len);
+
+    var retry_actions = try pm.maintenance(1_500 + STATUS_FAILED_RETRY_BACKOFF_MS, .{ .max_ping_requests = 1, .max_status_requests = 1 });
+    defer retry_actions.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 1), retry_actions.peers_to_restatus.len);
+    try std.testing.expectEqualStrings("peer_a", retry_actions.peers_to_restatus[0]);
 }
 
 test "PeerManager: maintenance restatuses newly reconnected peers immediately" {
@@ -1600,7 +1657,7 @@ test "PeerManager: selectDataColumnPeer prefers custody overlap" {
     try std.testing.expectEqualStrings("custody_peer", selected);
 }
 
-test "PeerManager: selectDataColumnPeer respects serving range eligibility" {
+test "PeerManager: selectDataColumnPeer ignores stale status range for by-root fetches" {
     const allocator = std.testing.allocator;
     var pm = PeerManager.init(allocator, .{});
     defer pm.deinit();
@@ -1629,5 +1686,5 @@ test "PeerManager: selectDataColumnPeer respects serving range eligibility" {
     const selected = (try pm.selectDataColumnPeer(&missing, 64, 64, "preferred_peer", &.{})).?;
     defer allocator.free(selected);
 
-    try std.testing.expectEqualStrings("preferred_peer", selected);
+    try std.testing.expectEqualStrings("custody_peer", selected);
 }

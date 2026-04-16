@@ -13,6 +13,7 @@ const sync_mod = @import("sync");
 const SyncServiceCallbacks = sync_mod.SyncServiceCallbacks;
 const BatchBlock = sync_mod.BatchBlock;
 const MinimalHeader = sync_mod.MinimalHeader;
+const SyncPeerReportReason = sync_mod.SyncPeerReportReason;
 const UnknownChainCallbacks = sync_mod.unknown_chain.Callbacks;
 const UnknownChainForkChoiceQuery = sync_mod.unknown_chain.ForkChoiceQuery;
 const PeerSet = sync_mod.unknown_chain.PeerSet;
@@ -91,6 +92,9 @@ pub const SyncCallbackCtx = struct {
     pending_linked_head: u8 = 0,
     pending_linked_count: u8 = 0,
 
+    /// Pending sync-driven gossip-core subscription state change.
+    pending_gossip_enabled: ?bool = null,
+
     /// Fallback connected-peer registry for non-P2P runtimes such as sim tests.
     connected_peers: PeerSet = .empty,
 
@@ -119,7 +123,8 @@ pub const SyncCallbackCtx = struct {
         return .{
             .ptr = @ptrCast(self),
             .requestBlockByRootFn = &syncRequestBlockByRootUnknownBlock,
-            .importBlockFn = &syncImportBlock,
+            .importBlockFn = &syncImportPreparedBlock,
+            .hasBlockFn = &unknownBlockHasBlock,
             .getConnectedPeersFn = &syncGetConnectedPeers,
         };
     }
@@ -144,6 +149,7 @@ pub const SyncCallbackCtx = struct {
         return .{
             .ptr = @ptrCast(self),
             .importBlockFn = &syncImportBlock,
+            .importPreparedBlockFn = &syncImportPreparedBlock,
             .processChainSegmentFn = &syncProcessChainSegment,
             .requestBlocksByRangeFn = &syncRequestBlocksByRange,
             .requestBlockByRootFn = &syncRequestBlockByRootUnknownBlock,
@@ -170,6 +176,25 @@ pub const SyncCallbackCtx = struct {
             .queued => return error.ImportPending,
             .imported => |imported| {
                 scoped_log.debug("SyncCallbackCtx: imported slot={d}", .{imported.slot});
+            },
+        }
+    }
+
+    fn syncImportPreparedBlock(ptr: *anyopaque, prepared: chain_mod.PreparedBlockInput) anyerror!void {
+        const ctx: *SyncCallbackCtx = @ptrCast(@alignCast(ptr));
+        const node = ctx.node;
+
+        const result = node.importPreparedBlock(prepared) catch |err| {
+            if (err != error.AlreadyKnown and err != error.WouldRevertFinalizedSlot) {
+                scoped_log.debug("sync prepared import error: {}", .{err});
+            }
+            return err;
+        };
+        switch (result) {
+            .ignored => {},
+            .pending => return error.ImportPending,
+            .imported => |imported| {
+                scoped_log.debug("SyncCallbackCtx: imported prepared slot={d}", .{imported.slot});
             },
         }
     }
@@ -231,6 +256,11 @@ pub const SyncCallbackCtx = struct {
     fn syncRequestBlockByRootUnknownBlock(ptr: *anyopaque, root: [32]u8, peer_id: []const u8) void {
         const ctx: *SyncCallbackCtx = @ptrCast(@alignCast(ptr));
         ctx.enqueueByRootRequest(.unknown_block_parent, root, peer_id);
+    }
+
+    fn unknownBlockHasBlock(ptr: *anyopaque, root: [32]u8) bool {
+        const ctx: *SyncCallbackCtx = @ptrCast(@alignCast(ptr));
+        return ctx.node.chainQuery().isKnownBlockRoot(root);
     }
 
     fn unknownChainFetchBlockByRoot(ptr: *anyopaque, root: [32]u8, peer_id: []const u8) void {
@@ -333,7 +363,13 @@ pub const SyncCallbackCtx = struct {
         return pending;
     }
 
-    fn syncReportPeer(ptr: *anyopaque, peer_id: []const u8) void {
+    pub fn takePendingGossipEnabled(self: *SyncCallbackCtx) ?bool {
+        const enabled = self.pending_gossip_enabled;
+        self.pending_gossip_enabled = null;
+        return enabled;
+    }
+
+    fn syncReportPeer(ptr: *anyopaque, peer_id: []const u8, reason: SyncPeerReportReason) void {
         const ctx: *SyncCallbackCtx = @ptrCast(@alignCast(ptr));
         const node: *BeaconNode = @ptrCast(@alignCast(ctx.node));
         const pm = node.peer_manager orelse return;
@@ -341,8 +377,16 @@ pub const SyncCallbackCtx = struct {
             const ms = std.Io.Timestamp.now(node.io, .real).toMilliseconds();
             break :blk if (ms >= 0) @as(u64, @intCast(ms)) else 0;
         };
-        _ = pm.reportPeer(peer_id, .mid_tolerance, .sync, now_ms);
-        scoped_log.debug("SyncCallbackCtx: reported peer {s} for sync misbehavior", .{peer_id});
+        const action: networking.PeerAction = switch (reason) {
+            .download_error => .mid_tolerance,
+            .processing_exhausted => .low_tolerance,
+        };
+        _ = pm.reportPeer(peer_id, action, .sync, now_ms);
+        scoped_log.debug("SyncCallbackCtx: reported peer {s} for sync reason={s} action={s}", .{
+            peer_id,
+            @tagName(reason),
+            @tagName(action),
+        });
     }
 
     fn syncHasBlock(ptr: *anyopaque, root: [32]u8) bool {
@@ -398,7 +442,9 @@ pub const SyncCallbackCtx = struct {
         return false;
     }
 
-    fn syncSetGossipEnabled(_: *anyopaque, enabled: bool) void {
+    fn syncSetGossipEnabled(ptr: *anyopaque, enabled: bool) void {
+        const ctx: *SyncCallbackCtx = @ptrCast(@alignCast(ptr));
+        ctx.pending_gossip_enabled = enabled;
         scoped_log.info("gossip {s}", .{if (enabled) "enabled" else "disabled"});
     }
 };

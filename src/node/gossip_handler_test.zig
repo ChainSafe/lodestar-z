@@ -3,6 +3,7 @@ const testing = std.testing;
 const Allocator = std.mem.Allocator;
 
 const networking = @import("networking");
+const chain_mod = @import("chain");
 const config_mod = @import("config");
 const ForkSeq = config_mod.ForkSeq;
 const preset = @import("preset").preset;
@@ -15,6 +16,8 @@ const ResolvedAttestation = processor_mod.work_item.ResolvedAttestation;
 const gossip_handler_mod = @import("gossip_handler.zig");
 const GossipHandler = gossip_handler_mod.GossipHandler;
 const GossipHandlerError = gossip_handler_mod.GossipHandlerError;
+const UnknownParentBlock = gossip_handler_mod.UnknownParentBlock;
+const snappy = @import("snappy").raw;
 
 // ============================================================
 // Tests
@@ -26,9 +29,22 @@ const phase0 = consensus_types.phase0;
 // --- Test stubs ---
 
 var g_imported_count: u32 = 0;
+var g_queued_unknown_block_count: u32 = 0;
+var g_last_unknown_slot: ?u64 = null;
+var g_last_unknown_peer: ?[]const u8 = null;
 
-fn stubImportBlock(_: *anyopaque, _: []const u8) anyerror!void {
+fn stubImportBlock(_: *anyopaque, prepared: chain_mod.PreparedBlockInput) anyerror!void {
+    var owned = prepared;
+    defer owned.deinit(testing.allocator);
     g_imported_count += 1;
+}
+
+fn stubQueueUnknownBlock(_: *anyopaque, block: UnknownParentBlock) anyerror!void {
+    var owned = block;
+    g_queued_unknown_block_count += 1;
+    g_last_unknown_slot = owned.block.beaconBlock().slot();
+    g_last_unknown_peer = owned.peer_id;
+    owned.block.deinit(testing.allocator);
 }
 
 fn stubGetProposerIndex(_: *anyopaque, slot: u64) ?u32 {
@@ -41,6 +57,10 @@ fn stubGetForkSeqForSlot(_: *anyopaque, _: u64) ForkSeq {
 
 fn stubIsKnownBlockRoot(_: *anyopaque, _: [32]u8) bool {
     return true; // all parents known
+}
+
+fn stubIsKnownBlockRootFalse(_: *anyopaque, _: [32]u8) bool {
+    return false;
 }
 
 fn stubGetValidatorCount(_: *anyopaque) u32 {
@@ -105,8 +125,18 @@ fn makeTestHandler(allocator: Allocator) !*GossipHandler {
     );
 }
 
+fn compressSnappyBlock(allocator: Allocator, payload: []const u8) ![]u8 {
+    const max_len = snappy.maxCompressedLength(payload.len);
+    const scratch = try allocator.alloc(u8, max_len);
+    defer allocator.free(scratch);
+
+    const compressed_len = try snappy.compress(payload, scratch);
+    const compressed = try allocator.alloc(u8, compressed_len);
+    @memcpy(compressed, scratch[0..compressed_len]);
+    return compressed;
+}
+
 fn makeSnappyBlock(allocator: Allocator, slot: u64, proposer: u64) ![]u8 {
-    const snappy = @import("snappy").frame;
     var block: phase0.SignedBeaconBlock.Type = phase0.SignedBeaconBlock.default_value;
     block.message.slot = slot;
     block.message.proposer_index = proposer;
@@ -117,7 +147,7 @@ fn makeSnappyBlock(allocator: Allocator, slot: u64, proposer: u64) ![]u8 {
     defer allocator.free(ssz_buf);
     _ = phase0.SignedBeaconBlock.serializeIntoBytes(&block, ssz_buf);
 
-    return snappy.compress(allocator, ssz_buf);
+    return compressSnappyBlock(allocator, ssz_buf);
 }
 
 test "GossipHandler: onBeaconBlock imports valid block" {
@@ -182,9 +212,41 @@ test "GossipHandler: onBeaconBlock ignores finalized block" {
     try testing.expectError(GossipHandlerError.ValidationIgnored, result);
 }
 
+test "GossipHandler: onBeaconBlock queues unknown parent and ignores propagation" {
+    const alloc = testing.allocator;
+    const handler = try makeTestHandler(alloc);
+    defer handler.deinit();
+
+    handler.updateClock(10, 0, 0);
+    handler.isKnownBlockRoot = &stubIsKnownBlockRootFalse;
+    handler.queueUnknownBlockFn = &stubQueueUnknownBlock;
+    g_imported_count = 0;
+    g_queued_unknown_block_count = 0;
+    g_last_unknown_slot = null;
+    g_last_unknown_peer = null;
+
+    const compressed = try makeSnappyBlock(alloc, 10, 10);
+    defer alloc.free(compressed);
+
+    const result = handler.processGossipMessageWithSubnetAndMetadata(.beacon_block, null, compressed, .{
+        .peer_id = "peer-1",
+    });
+    switch (result) {
+        .ignored => {},
+        else => return error.TestUnexpectedResult,
+    }
+    try testing.expectEqual(@as(u32, 0), g_imported_count);
+    try testing.expectEqual(@as(u32, 1), g_queued_unknown_block_count);
+    try testing.expectEqual(@as(?u64, 10), g_last_unknown_slot);
+    try testing.expectEqualStrings("peer-1", g_last_unknown_peer.?);
+
+    const result2 = handler.onBeaconBlock(compressed);
+    try testing.expectError(GossipHandlerError.ValidationIgnored, result2);
+    try testing.expectEqual(@as(u32, 1), g_queued_unknown_block_count);
+}
+
 test "GossipHandler: onAttestation decodes and validates" {
     const alloc = testing.allocator;
-    const snappy = @import("snappy").frame;
     const handler = try makeTestHandler(alloc);
     defer handler.deinit();
 
@@ -203,7 +265,7 @@ test "GossipHandler: onAttestation decodes and validates" {
     var ssz_buf: [consensus_types.electra.SingleAttestation.fixed_size]u8 = undefined;
     _ = consensus_types.electra.SingleAttestation.serializeIntoBytes(&att, &ssz_buf);
 
-    const compressed = try snappy.compress(alloc, &ssz_buf);
+    const compressed = try compressSnappyBlock(alloc, &ssz_buf);
     defer alloc.free(compressed);
 
     // Should pass validation (epoch 3 is current).
@@ -212,7 +274,6 @@ test "GossipHandler: onAttestation decodes and validates" {
 
 test "GossipHandler: onAttestation rejects stale epoch" {
     const alloc = testing.allocator;
-    const snappy = @import("snappy").frame;
     const handler = try makeTestHandler(alloc);
     defer handler.deinit();
 
@@ -228,7 +289,7 @@ test "GossipHandler: onAttestation rejects stale epoch" {
     var ssz_buf: [consensus_types.electra.SingleAttestation.fixed_size]u8 = undefined;
     _ = consensus_types.electra.SingleAttestation.serializeIntoBytes(&att, &ssz_buf);
 
-    const compressed = try snappy.compress(alloc, &ssz_buf);
+    const compressed = try compressSnappyBlock(alloc, &ssz_buf);
     defer alloc.free(compressed);
 
     const result = handler.onAttestation(5, compressed);
@@ -237,7 +298,6 @@ test "GossipHandler: onAttestation rejects stale epoch" {
 
 test "GossipHandler: onAttestation rejects pre-electra aggregated attestations" {
     const alloc = testing.allocator;
-    const snappy = @import("snappy").frame;
     const handler = try makeTestHandler(alloc);
     defer handler.deinit();
 
@@ -259,7 +319,7 @@ test "GossipHandler: onAttestation rejects pre-electra aggregated attestations" 
     defer alloc.free(ssz_buf);
     _ = consensus_types.phase0.Attestation.serializeIntoBytes(&att, ssz_buf);
 
-    const compressed = try snappy.compress(alloc, ssz_buf);
+    const compressed = try compressSnappyBlock(alloc, ssz_buf);
     defer alloc.free(compressed);
 
     try testing.expectError(GossipHandlerError.ValidationRejected, handler.onAttestation(0, compressed));
@@ -267,7 +327,6 @@ test "GossipHandler: onAttestation rejects pre-electra aggregated attestations" 
 
 test "GossipHandler: process result classifies wrong subnet" {
     const alloc = testing.allocator;
-    const snappy = @import("snappy").frame;
     const handler = try makeTestHandler(alloc);
     defer handler.deinit();
 
@@ -285,7 +344,7 @@ test "GossipHandler: process result classifies wrong subnet" {
     var ssz_buf: [consensus_types.electra.SingleAttestation.fixed_size]u8 = undefined;
     _ = consensus_types.electra.SingleAttestation.serializeIntoBytes(&att, &ssz_buf);
 
-    const compressed = try snappy.compress(alloc, &ssz_buf);
+    const compressed = try compressSnappyBlock(alloc, &ssz_buf);
     defer alloc.free(compressed);
 
     const result = handler.processGossipMessageWithSubnetAndMetadata(.beacon_attestation, 1, compressed, .{});
@@ -297,7 +356,6 @@ test "GossipHandler: process result classifies wrong subnet" {
 
 test "GossipHandler: onAttestation rejects wrong subnet" {
     const alloc = testing.allocator;
-    const snappy = @import("snappy").frame;
     const handler = try makeTestHandler(alloc);
     defer handler.deinit();
 
@@ -315,7 +373,7 @@ test "GossipHandler: onAttestation rejects wrong subnet" {
     var ssz_buf: [consensus_types.electra.SingleAttestation.fixed_size]u8 = undefined;
     _ = consensus_types.electra.SingleAttestation.serializeIntoBytes(&att, &ssz_buf);
 
-    const compressed = try snappy.compress(alloc, &ssz_buf);
+    const compressed = try compressSnappyBlock(alloc, &ssz_buf);
     defer alloc.free(compressed);
 
     try testing.expectError(GossipHandlerError.ValidationRejected, handler.onAttestation(1, compressed));
@@ -323,7 +381,6 @@ test "GossipHandler: onAttestation rejects wrong subnet" {
 
 test "GossipHandler: onSyncCommitteeMessage rejects wrong subnet" {
     const alloc = testing.allocator;
-    const snappy = @import("snappy").frame;
     const handler = try makeTestHandler(alloc);
     defer handler.deinit();
 
@@ -339,7 +396,7 @@ test "GossipHandler: onSyncCommitteeMessage rejects wrong subnet" {
     var ssz_buf: [consensus_types.altair.SyncCommitteeMessage.fixed_size]u8 = undefined;
     _ = consensus_types.altair.SyncCommitteeMessage.serializeIntoBytes(&msg, &ssz_buf);
 
-    const compressed = try snappy.compress(alloc, &ssz_buf);
+    const compressed = try compressSnappyBlock(alloc, &ssz_buf);
     defer alloc.free(compressed);
 
     try testing.expectError(GossipHandlerError.ValidationRejected, handler.onSyncCommitteeMessage(1, compressed));
@@ -362,7 +419,6 @@ test "GossipHandler: onGossipMessage routes beacon_block" {
 
 test "GossipHandler: process result classifies invalid sync signature" {
     const alloc = testing.allocator;
-    const snappy = @import("snappy").frame;
     const handler = try makeTestHandler(alloc);
     defer handler.deinit();
 
@@ -379,7 +435,7 @@ test "GossipHandler: process result classifies invalid sync signature" {
     var ssz_buf: [consensus_types.altair.SyncCommitteeMessage.fixed_size]u8 = undefined;
     _ = consensus_types.altair.SyncCommitteeMessage.serializeIntoBytes(&msg, &ssz_buf);
 
-    const compressed = try snappy.compress(alloc, &ssz_buf);
+    const compressed = try compressSnappyBlock(alloc, &ssz_buf);
     defer alloc.free(compressed);
 
     const result = handler.processGossipMessageWithSubnetAndMetadata(.sync_committee, 0, compressed, .{});
@@ -409,7 +465,6 @@ test "GossipHandler: decode failures are returned as errors" {
 
 test "GossipHandler: onAggregateAndProof validates and accepts" {
     const alloc = testing.allocator;
-    const snappy = @import("snappy").frame;
     const handler = try makeTestHandler(alloc);
     defer handler.deinit();
 
@@ -431,7 +486,7 @@ test "GossipHandler: onAggregateAndProof validates and accepts" {
     defer alloc.free(ssz_buf);
     _ = phase0.SignedAggregateAndProof.serializeIntoBytes(&signed_agg, ssz_buf);
 
-    const compressed = try snappy.compress(alloc, ssz_buf);
+    const compressed = try compressSnappyBlock(alloc, ssz_buf);
     defer alloc.free(compressed);
 
     try handler.onAggregateAndProof(compressed);
@@ -439,7 +494,6 @@ test "GossipHandler: onAggregateAndProof validates and accepts" {
 
 test "GossipHandler: onAggregateAndProof validates electra aggregates" {
     const alloc = testing.allocator;
-    const snappy = @import("snappy").frame;
     const handler = try makeTestHandler(alloc);
     defer handler.deinit();
 
@@ -461,7 +515,7 @@ test "GossipHandler: onAggregateAndProof validates electra aggregates" {
     defer alloc.free(ssz_buf);
     _ = consensus_types.electra.SignedAggregateAndProof.serializeIntoBytes(&signed_agg, ssz_buf);
 
-    const compressed = try snappy.compress(alloc, ssz_buf);
+    const compressed = try compressSnappyBlock(alloc, ssz_buf);
     defer alloc.free(compressed);
 
     try handler.onAggregateAndProof(compressed);

@@ -376,7 +376,7 @@ pub fn importVerifiedBlock(
                     @tagName(imported_node.extra_meta.dataAvailabilityStatus()),
                 };
                 if (opts.from_range_sync) {
-                    scoped_log.debug(
+                    scoped_log.info(
                         "imported block did not advance head: block_slot={d} old_head={d} new_head={d} fc_slot={d} store_justified={d} store_finalized={d} block_justified={d} block_finalized={d} block_unrealized_justified={d} block_unrealized_finalized={d} exec={s} da={s}",
                         args,
                     );
@@ -389,7 +389,7 @@ pub fn importVerifiedBlock(
             } else {
                 const args = .{ block_slot, old_head_slot, new_head.slot, fc.getTime() };
                 if (opts.from_range_sync) {
-                    scoped_log.debug(
+                    scoped_log.info(
                         "imported block did not advance head and is missing from fork choice: block_slot={d} old_head={d} new_head={d} fc_slot={d}",
                         args,
                     );
@@ -400,6 +400,12 @@ pub fn importVerifiedBlock(
                     );
                 }
             }
+
+            // Range sync imports historical descendants before fork choice can
+            // necessarily make them the head immediately. Lodestar continues
+            // importing those batches and relies on sequential validation plus
+            // fork choice, rather than treating non-head-advancing blocks as a
+            // hard failure.
         }
 
         // Check finality changes.

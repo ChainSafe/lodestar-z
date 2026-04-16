@@ -6,6 +6,7 @@
 const std = @import("std");
 const consensus_types = @import("consensus_types");
 const fork_types = @import("fork_types");
+const prepared_block_mod = @import("prepared_block");
 
 const Slot = consensus_types.primitive.Slot.Type;
 const Epoch = consensus_types.primitive.Epoch.Type;
@@ -14,6 +15,31 @@ const Root = [32]u8;
 const blocks_types = @import("blocks/types.zig");
 const BlockSource = blocks_types.BlockSource;
 const DataAvailabilityStatus = blocks_types.DataAvailabilityStatus;
+pub const PreparedBlockInput = prepared_block_mod.PreparedBlockInput;
+pub const PreparedBlockSource = prepared_block_mod.PreparedBlockSource;
+pub const PeerProvenance = prepared_block_mod.PeerProvenance;
+
+pub fn toPreparedBlockSource(source: BlockSource) PreparedBlockSource {
+    return switch (source) {
+        .gossip => .gossip,
+        .range_sync => .range_sync,
+        .unknown_block_sync => .unknown_block_sync,
+        .api => .api,
+        .checkpoint_sync => .checkpoint_sync,
+        .regen => .regen,
+    };
+}
+
+pub fn toChainBlockSource(source: PreparedBlockSource) BlockSource {
+    return switch (source) {
+        .gossip => .gossip,
+        .range_sync => .range_sync,
+        .unknown_block_sync => .unknown_block_sync,
+        .api => .api,
+        .checkpoint_sync => .checkpoint_sync,
+        .regen => .regen,
+    };
+}
 
 pub const ReadyBlockInput = struct {
     block: fork_types.AnySignedBeaconBlock,
@@ -23,11 +49,29 @@ pub const ReadyBlockInput = struct {
     da_status: DataAvailabilityStatus,
     block_data_plan: BlockDataFetchPlan = .none,
     seen_timestamp_sec: u64 = 0,
+    peer: PeerProvenance = .{},
 
     pub fn deinit(self: *ReadyBlockInput, allocator: std.mem.Allocator) void {
         self.block_data_plan.deinit(allocator);
         self.block.deinit(allocator);
         self.* = undefined;
+    }
+
+    pub fn peerId(self: *const ReadyBlockInput) ?[]const u8 {
+        return self.peer.peerId();
+    }
+
+    pub fn intoPrepared(self: *ReadyBlockInput, allocator: std.mem.Allocator) PreparedBlockInput {
+        const prepared: PreparedBlockInput = .{
+            .block = self.block,
+            .source = toPreparedBlockSource(self.source),
+            .block_root = self.block_root,
+            .seen_timestamp_sec = self.seen_timestamp_sec,
+            .peer = self.peer,
+        };
+        self.block_data_plan.deinit(allocator);
+        self.* = undefined;
+        return prepared;
     }
 };
 

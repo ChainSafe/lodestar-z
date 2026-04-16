@@ -30,6 +30,7 @@ pub const DataAvailabilityStatus = blocks.DataAvailabilityStatus;
 pub const HeadInfo = chain_types.HeadInfo;
 pub const SyncStatus = chain_types.SyncStatus;
 pub const ForkchoiceUpdateState = chain_types.ForkchoiceUpdateState;
+pub const PreparedBlockInput = chain_types.PreparedBlockInput;
 pub const ReadyBlockInput = chain_types.ReadyBlockInput;
 pub const PlannedBlockImport = blocks.PlannedBlockImport;
 pub const PreparedBlockImport = blocks.PreparedBlockImport;

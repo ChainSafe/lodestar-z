@@ -379,7 +379,11 @@ pub const SimNodeHarness = struct {
 
             switch (req.kind) {
                 .unknown_block_parent => {
-                    self.node.unknown_block_sync.onParentFetched(req.root, block_bytes) catch {
+                    const prepared = self.node.chainService().prepareRawPreparedBlockInput(block_bytes, .unknown_block_sync) catch {
+                        self.node.unknown_block_sync.onFetchFailed(req.root);
+                        continue;
+                    };
+                    self.node.unknown_block_sync.onParentFetched(req.root, prepared) catch {
                         self.node.unknown_block_sync.onFetchFailed(req.root);
                     };
                 },

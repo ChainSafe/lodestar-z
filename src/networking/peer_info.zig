@@ -372,6 +372,8 @@ pub const PeerInfo = struct {
     syncnets: SyncnetsBitfield = SyncnetsBitfield.initEmpty(),
     /// Metadata sequence number from Metadata req/resp.
     metadata_seq: u64 = 0,
+    /// Whether metadata has been fetched successfully at least once.
+    metadata_known: bool = false,
     /// ENR node ID from verified discovery/bootnode identity when known.
     discovery_node_id: ?[32]u8 = null,
     /// PeerDAS custody group count from MetadataV3 when available.
@@ -384,6 +386,8 @@ pub const PeerInfo = struct {
     last_seen_ms: u64 = 0,
     /// Timestamp (ms) of the last successful outbound ping response.
     last_ping_response_ms: u64 = 0,
+    /// Timestamp (ms) of the last outbound Status attempt.
+    last_status_attempt_ms: u64 = 0,
     /// Timestamp (ms) of the last successful Status exchange.
     last_status_exchange_ms: u64 = 0,
     /// Ban expiry timestamp (ms). Only meaningful when connection_state == .banned.

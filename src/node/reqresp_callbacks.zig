@@ -334,7 +334,7 @@ pub fn handlePeerStatusAtTime(
             status.head_slot,
             earliest_available_slot,
             localCachedStatus(node),
-            node.config.forkSeq(node.currentHeadSlot()),
+            node.config.forkSeq(clock_slot),
             clock_slot,
         );
         pm.markStatusExchange(peer_id, now_ms);
@@ -343,6 +343,11 @@ pub fn handlePeerStatusAtTime(
     if (registered_new_peer) {
         if (node.sync_callback_ctx) |cb_ctx| cb_ctx.notePeerConnected(peer_id);
         if (node.metrics) |metrics| metrics.peer_connected_total.incr();
+    }
+
+    if (irrelevance != null) {
+        if (node.sync_service_inst) |sync_svc| sync_svc.onPeerDisconnect(peer_id);
+        return irrelevance;
     }
 
     const is_synced = if (node.sync_service_inst) |sync_svc| blk: {

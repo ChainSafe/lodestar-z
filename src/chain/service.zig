@@ -88,6 +88,7 @@ fn prevRandaoForSlot(cached: *CachedBeaconState, slot: Slot) ![32]u8 {
 }
 
 pub const ReadyBlockInput = chain_types.ReadyBlockInput;
+pub const PreparedBlockInput = chain_types.PreparedBlockInput;
 pub const RawBlockBytes = chain_types.RawBlockBytes;
 pub const PlannedBlockIngress = chain_types.PlannedBlockIngress;
 pub const BlockIngressReadiness = chain_types.BlockIngressReadiness;
@@ -134,15 +135,8 @@ pub const Service = struct {
         any_signed: fork_types.AnySignedBeaconBlock,
         source: blocks.BlockSource,
     ) !ReadyBlockInput {
-        const block_root = try hashBlock(self.chain.allocator, any_signed);
-        return readyBlockInput(
-            any_signed,
-            source,
-            block_root,
-            self.dataAvailabilityStatusForBlock(block_root, any_signed),
-            0,
-            .none,
-        );
+        const prepared = try self.preparePreparedBlockInput(any_signed, source, 0);
+        return self.readyBlockInputFromPrepared(prepared);
     }
 
     pub fn prepareRawBlockInput(
@@ -150,17 +144,109 @@ pub const Service = struct {
         block_bytes: []const u8,
         source: blocks.BlockSource,
     ) !ReadyBlockInput {
+        const prepared = try self.prepareRawPreparedBlockInput(block_bytes, source);
+        return self.readyBlockInputFromPrepared(prepared);
+    }
+
+    pub fn preparePreparedBlockInput(
+        self: Service,
+        any_signed: fork_types.AnySignedBeaconBlock,
+        source: blocks.BlockSource,
+        seen_timestamp_sec: u64,
+    ) !PreparedBlockInput {
+        const block_root = try hashBlock(self.chain.allocator, any_signed);
+        return preparedBlockInput(any_signed, chain_types.toPreparedBlockSource(source), block_root, seen_timestamp_sec);
+    }
+
+    pub fn preparePreparedBlockInputWithRoot(
+        self: Service,
+        any_signed: fork_types.AnySignedBeaconBlock,
+        source: blocks.BlockSource,
+        block_root: Root,
+        seen_timestamp_sec: u64,
+    ) PreparedBlockInput {
+        _ = self;
+        return preparedBlockInput(any_signed, chain_types.toPreparedBlockSource(source), block_root, seen_timestamp_sec);
+    }
+
+    pub fn prepareRawPreparedBlockInput(
+        self: Service,
+        block_bytes: []const u8,
+        source: blocks.BlockSource,
+    ) !PreparedBlockInput {
         const slot = try readBlockSlot(block_bytes);
         const any_signed = try deserializeRawBlockBytes(self.chain, slot, block_bytes);
         const block_root = try hashBlock(self.chain.allocator, any_signed);
-        return readyBlockInput(
-            any_signed,
-            source,
-            block_root,
-            self.dataAvailabilityStatusForBlock(block_root, any_signed),
-            0,
-            .none,
+        return preparedBlockInput(any_signed, chain_types.toPreparedBlockSource(source), block_root, 0);
+    }
+
+    pub fn readyBlockInputFromPrepared(
+        self: Service,
+        prepared: PreparedBlockInput,
+    ) !ReadyBlockInput {
+        var owned = prepared;
+        errdefer owned.deinit(self.chain.allocator);
+
+        const da_status = self.dataAvailabilityStatusForBlock(owned.block_root, owned.block);
+        const block_data_plan = try self.blockDataFetchPlan(self.chain.allocator, owned.block_root, owned.block);
+        const ready = readyBlockInput(
+            owned.block,
+            chain_types.toChainBlockSource(owned.source),
+            owned.block_root,
+            da_status,
+            owned.seen_timestamp_sec,
+            block_data_plan,
         );
+        var with_peer = ready;
+        with_peer.peer = owned.peer;
+        owned = undefined;
+        return with_peer;
+    }
+
+    pub fn acceptPreparedGossipBlock(
+        self: Service,
+        prepared: PreparedBlockInput,
+    ) !BlockIngressResult {
+        var owned = prepared;
+        errdefer owned.deinit(self.chain.allocator);
+
+        const readiness = self.ingressReadinessForBlock(owned.block_root, owned.block);
+        const block_data_plan = try self.blockDataFetchPlan(self.chain.allocator, owned.block_root, owned.block);
+
+        if (self.chain.pending_block_ingress) |pending| {
+            const ready = try pending.acceptBlock(
+                owned.block,
+                owned.block_root,
+                owned.slot(),
+                .gossip,
+                block_data_plan,
+                owned.seen_timestamp_sec,
+                owned.peer,
+                readiness.da_status,
+            );
+            owned = undefined;
+            if (ready) |block| return .{ .ready = block };
+            if (self.chain.da_manager) |dam| {
+                dam.markPending(prepared.block_root, prepared.slot()) catch |err| {
+                    pending.removePending(prepared.block_root);
+                    return err;
+                };
+            }
+            return .{ .pending_block_data = prepared.block_root };
+        }
+
+        const ready = readyBlockInput(
+            owned.block,
+            .gossip,
+            owned.block_root,
+            readiness.da_status,
+            owned.seen_timestamp_sec,
+            block_data_plan,
+        );
+        var with_peer = ready;
+        with_peer.peer = owned.peer;
+        owned = undefined;
+        return .{ .ready = with_peer };
     }
     /// Consumes `ready`. On success, ownership transfers into the returned plan.
     /// On error, `ready` still owns its resources.
@@ -422,6 +508,7 @@ pub const Service = struct {
                 .gossip,
                 block_data_plan,
                 seen_timestamp_sec,
+                .{},
                 readiness.da_status,
             );
             if (ready) |block| return .{ .ready = block };
@@ -1040,6 +1127,20 @@ fn readyBlockInput(
         .slot = any_signed.beaconBlock().slot(),
         .da_status = da_status,
         .block_data_plan = block_data_plan,
+        .seen_timestamp_sec = seen_timestamp_sec,
+    };
+}
+
+fn preparedBlockInput(
+    any_signed: fork_types.AnySignedBeaconBlock,
+    source: chain_types.PreparedBlockSource,
+    block_root: Root,
+    seen_timestamp_sec: u64,
+) PreparedBlockInput {
+    return .{
+        .block = any_signed,
+        .source = source,
+        .block_root = block_root,
         .seen_timestamp_sec = seen_timestamp_sec,
     };
 }

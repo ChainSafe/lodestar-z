@@ -32,6 +32,7 @@ pub fn processEvents(self: *BeaconNode, io: std.Io, p2p: *networking.P2pService)
                     .source = processor.work_item.GossipSource.fromOpaqueBytes(0x70656572, msg.from),
                     .message_id = networking.computeGossipMessageId(self.allocator, msg.data) catch std.mem.zeroes(networking.GossipMessageId),
                     .seen_timestamp_ns = currentUnixTimeNs(io),
+                    .peer_id = msg.from,
                 };
 
                 const parsed = networking.gossip_topics.parseTopic(msg.topic) orelse {
@@ -68,10 +69,23 @@ fn processValidatedMessage(
             .rejected => |reason| {
                 recordInvalidMessage(io, p2p, peer, topic);
                 applyGossipPenalty(self, io, p2p, peer, reason);
-                scoped_log.debug("Gossip {s} rejected ({s})", .{ parsed.topic_type.topicName(), @tagName(reason) });
+                scoped_log.debug(
+                    "Gossip {s} rejected ({s}) fork_seq={s} subnet={?d} topic={s} payload_len={d}",
+                    .{
+                        parsed.topic_type.topicName(),
+                        @tagName(reason),
+                        @tagName(fork_seq),
+                        parsed.subnet_id,
+                        topic,
+                        data.len,
+                    },
+                );
             },
             .failed => |err| {
-                scoped_log.debug("gossip {s} error: {}", .{ parsed.topic_type.topicName(), err });
+                scoped_log.debug(
+                    "gossip {s} error: {} fork_seq={s} subnet={?d} topic={s} payload_len={d}",
+                    .{ parsed.topic_type.topicName(), err, @tagName(fork_seq), parsed.subnet_id, topic, data.len },
+                );
             },
         }
     }

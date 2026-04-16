@@ -28,6 +28,7 @@ pub const SyncStatus = sync_types.SyncStatus;
 pub const PeerSyncInfo = sync_types.PeerSyncInfo;
 pub const ChainTarget = sync_types.ChainTarget;
 pub const RangeSyncType = sync_types.RangeSyncType;
+pub const SyncPeerReportReason = sync_types.SyncPeerReportReason;
 
 pub const Batch = batch.Batch;
 pub const BatchStatus = batch.BatchStatus;

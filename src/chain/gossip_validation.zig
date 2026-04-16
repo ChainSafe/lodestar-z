@@ -34,6 +34,13 @@ pub const GossipAction = enum {
     ignore,
 };
 
+pub const GossipBlockValidation = enum {
+    accept,
+    reject,
+    ignore,
+    ignore_parent_unknown,
+};
+
 /// Maximum number of slots a block can be in the future before we ignore it.
 /// Accounts for MAXIMUM_GOSSIP_CLOCK_DISPARITY (500 ms ≈ 0–1 slots).
 const MAX_FUTURE_SLOT_TOLERANCE: u64 = 1;
@@ -75,13 +82,13 @@ pub const ChainState = struct {
 /// 4. [REJECT] Proposer index is within the known validator set.
 /// 5. [REJECT] Proposer matches the expected proposer for the slot.
 /// 6. [IGNORE] Parent block root is known.
-pub fn validateGossipBlock(
+pub fn validateGossipBlockDetailed(
     block_slot: u64,
     proposer_index: u64,
     parent_root: [32]u8,
     block_root: [32]u8,
     state: *const ChainState,
-) GossipAction {
+) GossipBlockValidation {
     // [IGNORE] Not from a future slot (tolerate current_slot + 1 for clock disparity).
     if (block_slot > state.current_slot + MAX_FUTURE_SLOT_TOLERANCE) return .ignore;
 
@@ -104,13 +111,33 @@ pub fn validateGossipBlock(
     }
 
     // [IGNORE] Parent root is known in our fork choice.
-    if (!state.isKnownBlockRoot(state.ptr, parent_root)) return .ignore;
+    if (!state.isKnownBlockRoot(state.ptr, parent_root)) return .ignore_parent_unknown;
 
     // Mark block as seen only after ALL checks pass — avoids poisoning the
     // seen-cache with blocks that would be rejected/ignored.
     state.seen_cache.markBlockSeen(block_root, block_slot) catch return .ignore;
 
     return .accept;
+}
+
+pub fn validateGossipBlock(
+    block_slot: u64,
+    proposer_index: u64,
+    parent_root: [32]u8,
+    block_root: [32]u8,
+    state: *const ChainState,
+) GossipAction {
+    return switch (validateGossipBlockDetailed(
+        block_slot,
+        proposer_index,
+        parent_root,
+        block_root,
+        state,
+    )) {
+        .accept => .accept,
+        .reject => .reject,
+        .ignore, .ignore_parent_unknown => .ignore,
+    };
 }
 
 // ── Attestation validation ──────────────────────────────────────────────────
@@ -153,26 +180,23 @@ pub fn validateGossipAttestation(
 
 // ── Electra attestation validation ──────────────────────────────────────────
 
-/// Fast Phase 1 validation for an Electra attestation on a `beacon_attestation_{subnet}` topic.
-///
-/// Electra (EIP-7549) changes:
-///   - `data.index` must be 0 (committee identity moved to `committee_bits`)
-///   - `committee_bits` must have exactly one bit set (for unaggregated attestations)
-///   - The set bit in `committee_bits` identifies the committee
+/// Fast Phase 1 validation for an Electra/Fulu `SingleAttestation` on a
+/// `beacon_attestation_{subnet}` topic.
 ///
 /// Checks (spec reference: electra/p2p-interface.md#beacon_attestation_subnet_id):
 /// 1. [IGNORE] Attestation slot is within propagation range (current/previous epoch).
 /// 2. [REJECT] Attestation epoch matches the target epoch.
-/// 3. [REJECT] data.index must be 0.
-/// 4. [REJECT] committee_bits must have exactly one bit set.
-/// 5. [REJECT] The committee index (from committee_bits) must be in bounds.
-/// 6. [IGNORE] Target block root is known.
+/// 3. [REJECT] `attestation.data.index == 0`.
+/// 4. [REJECT] `attestation.committee_index` is in bounds.
+/// 5. [IGNORE] Target block root is known.
+///
+/// Membership of `attester_index` in the resolved committee is checked later,
+/// once committee data has been loaded from the epoch cache.
 pub fn validateGossipElectraAttestation(
     attestation_slot: u64,
     data_index: u64,
     target_epoch: u64,
     target_root: [32]u8,
-    committee_bits_count: u32,
     committee_index: u64,
     state: *const ChainState,
 ) GossipAction {
@@ -188,9 +212,6 @@ pub fn validateGossipElectraAttestation(
 
     // [REJECT] data.index must be 0 in Electra.
     if (data_index != 0) return .reject;
-
-    // [REJECT] committee_bits must have exactly one bit set (unaggregated).
-    if (committee_bits_count != 1) return .reject;
 
     // [REJECT] Committee index must be in bounds.
     if (committee_index >= preset.MAX_COMMITTEES_PER_SLOT) return .reject;
@@ -350,6 +371,15 @@ test "gossip block: ignore unknown parent" {
     // Zero root is "unknown" in mock.
     const result = validateGossipBlock(100, 5, [_]u8{0} ** 32, [_]u8{0xCC} ** 32, &state);
     try testing.expectEqual(GossipAction.ignore, result);
+}
+
+test "gossip block: detailed validation distinguishes unknown parent" {
+    var cache = SeenCache.init(testing.allocator);
+    defer cache.deinit();
+
+    const state = makeMockChainState(&cache);
+    const result = validateGossipBlockDetailed(100, 5, [_]u8{0} ** 32, [_]u8{0xCC} ** 32, &state);
+    try testing.expectEqual(GossipBlockValidation.ignore_parent_unknown, result);
 }
 
 // ── Attestation tests ───────────────────────────────────────────────────────
@@ -1045,8 +1075,8 @@ test "gossip electra attestation: accept valid attestation" {
     var cache = SeenCache.init(testing.allocator);
     defer cache.deinit();
     const state = makeMockChainState(&cache);
-    // Slot 96 = epoch 3 (current), data.index=0, 1 committee bit set, committee_index=2
-    const result = validateGossipElectraAttestation(96, 0, 3, [_]u8{0xAA} ** 32, 1, 2, &state);
+    // Slot 96 = epoch 3 (current), data.index=0, committee_index=2
+    const result = validateGossipElectraAttestation(96, 0, 3, [_]u8{0xAA} ** 32, 2, &state);
     try testing.expectEqual(GossipAction.accept, result);
 }
 
@@ -1054,24 +1084,7 @@ test "gossip electra attestation: reject nonzero data.index" {
     var cache = SeenCache.init(testing.allocator);
     defer cache.deinit();
     const state = makeMockChainState(&cache);
-    const result = validateGossipElectraAttestation(96, 1, 3, [_]u8{0xAA} ** 32, 1, 0, &state);
-    try testing.expectEqual(GossipAction.reject, result);
-}
-
-test "gossip electra attestation: reject multiple committee bits" {
-    var cache = SeenCache.init(testing.allocator);
-    defer cache.deinit();
-    const state = makeMockChainState(&cache);
-    // 2 bits set — must be exactly 1 for unaggregated
-    const result = validateGossipElectraAttestation(96, 0, 3, [_]u8{0xAA} ** 32, 2, 0, &state);
-    try testing.expectEqual(GossipAction.reject, result);
-}
-
-test "gossip electra attestation: reject zero committee bits" {
-    var cache = SeenCache.init(testing.allocator);
-    defer cache.deinit();
-    const state = makeMockChainState(&cache);
-    const result = validateGossipElectraAttestation(96, 0, 3, [_]u8{0xAA} ** 32, 0, 0, &state);
+    const result = validateGossipElectraAttestation(96, 1, 3, [_]u8{0xAA} ** 32, 0, &state);
     try testing.expectEqual(GossipAction.reject, result);
 }
 
@@ -1079,7 +1092,7 @@ test "gossip electra attestation: reject committee index out of bounds" {
     var cache = SeenCache.init(testing.allocator);
     defer cache.deinit();
     const state = makeMockChainState(&cache);
-    const result = validateGossipElectraAttestation(96, 0, 3, [_]u8{0xAA} ** 32, 1, preset.MAX_COMMITTEES_PER_SLOT, &state);
+    const result = validateGossipElectraAttestation(96, 0, 3, [_]u8{0xAA} ** 32, preset.MAX_COMMITTEES_PER_SLOT, &state);
     try testing.expectEqual(GossipAction.reject, result);
 }
 
@@ -1087,7 +1100,7 @@ test "gossip electra attestation: ignore unknown target root" {
     var cache = SeenCache.init(testing.allocator);
     defer cache.deinit();
     const state = makeMockChainState(&cache);
-    const result = validateGossipElectraAttestation(96, 0, 3, [_]u8{0} ** 32, 1, 0, &state);
+    const result = validateGossipElectraAttestation(96, 0, 3, [_]u8{0} ** 32, 0, &state);
     try testing.expectEqual(GossipAction.ignore, result);
 }
 

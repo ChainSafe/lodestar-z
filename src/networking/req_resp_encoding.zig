@@ -523,7 +523,7 @@ fn decodeSnappyBodyFromBytes(
     allocator: std.mem.Allocator,
     bytes: []const u8,
     expected_uncompressed: usize,
-) anyerror![]u8 {
+) DecodeError![]u8 {
     var out: std.ArrayListUnmanaged(u8) = .empty;
     errdefer out.deinit(allocator);
 
@@ -731,7 +731,6 @@ test "roundtrip with large payload" {
     try testing.expectEqualSlices(u8, &ssz_payload, decoded.ssz_bytes);
 }
 
-
 test "full wire encoding roundtrip with StatusMessage" {
     const messages = @import("messages.zig");
     const allocator = testing.allocator;
@@ -831,13 +830,18 @@ test "decodeResponseChunk with Lodestar TS fixture bytes (Status)" {
         // result code: success
         0x00,
         // context bytes (fork digest placeholder)
-        0xda, 0xda, 0xda, 0xda,
+        0xda,
+        0xda,
+        0xda,
+        0xda,
         // varint length prefix: 0x54 = 84 bytes uncompressed
         0x54,
         // snappy framed data (from Lodestar fixture)
         0xff, 0x06, 0x00, 0x00, 0x73, 0x4e, 0x61, 0x50, 0x70, 0x59, // stream identifier
         0x00, 0x1b, 0x00, 0x00, 0x09, 0x78, 0x02, 0xc1, // compressed chunk header + crc
-        0x54, 0x00, 0xda, 0x8a, 0x01, 0x00, 0x04, 0x09, 0x00, 0x09, 0x01, 0x7e, 0x2b, 0x00, 0x1c, 0x09, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x54, 0x00, 0xda, 0x8a, 0x01, 0x00, 0x04, 0x09,
+        0x00, 0x09, 0x01, 0x7e, 0x2b, 0x00, 0x1c, 0x09,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     };
 
     const decoded = try decodeResponseChunk(allocator, &lodestar_wire, true);

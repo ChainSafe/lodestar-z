@@ -64,6 +64,7 @@ pub const BlockImportErrorCounts = struct {
     execution_payload_invalid: usize = 0,
     execution_engine_unavailable: usize = 0,
     forkchoice_error: usize = 0,
+    not_viable_for_head: usize = 0,
     internal_error: usize = 0,
 
     pub fn incr(self: *BlockImportErrorCounts, err: block_types.BlockImportError) void {
@@ -84,6 +85,7 @@ pub const BlockImportErrorCounts = struct {
             error.ExecutionPayloadInvalid => self.execution_payload_invalid += 1,
             error.ExecutionEngineUnavailable => self.execution_engine_unavailable += 1,
             error.ForkChoiceError => self.forkchoice_error += 1,
+            error.NotViableForHead => self.not_viable_for_head += 1,
             error.InternalError => self.internal_error += 1,
         }
     }
