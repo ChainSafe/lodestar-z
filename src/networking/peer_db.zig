@@ -301,6 +301,7 @@ pub const PeerDB = struct {
     ) !void {
         const info = self.peers.getPtr(peer_id) orelse return;
         info.metadata_seq = metadata_seq;
+        info.metadata_known = true;
         info.attnets = attnets;
         info.syncnets = syncnets;
         info.custody_group_count = custody_group_count;
@@ -944,6 +945,7 @@ test "PeerDB: derives custody columns from discovery identity and metadata" {
     defer allocator.free(expected);
 
     const peer = db.getPeer("peer_a").?;
+    try std.testing.expect(peer.metadata_known);
     try std.testing.expect(peer.custody_columns != null);
     try std.testing.expectEqualSlices(u64, expected, peer.custody_columns.?);
 

@@ -171,6 +171,19 @@ fn statusReqRespPolicy(kind: PeerReqRespJobKind) StatusReqRespPolicy {
     };
 }
 
+fn peerNeedsMetadata(peer: *const networking.PeerInfo) bool {
+    return !peer.metadata_known;
+}
+
+fn shouldRefreshMetadataAfterPing(
+    peer: ?*const networking.PeerInfo,
+    remote_seq: u64,
+    known_metadata_seq: u64,
+) bool {
+    const resolved_peer = peer orelse return remote_seq != known_metadata_seq;
+    return peerNeedsMetadata(resolved_peer) or remote_seq != known_metadata_seq;
+}
+
 const BlobFetchState = struct {
     existing: ?[]const u8 = null,
     sidecars: []?[]const u8,
@@ -401,6 +414,26 @@ test "status req/resp policy tolerates status transport failures" {
     const restatus = statusReqRespPolicy(.restatus);
     try std.testing.expect(!restatus.request_metadata);
     try std.testing.expect(!restatus.disconnect_peer_on_failure);
+}
+
+test "peerNeedsMetadata distinguishes unknown metadata from seq zero" {
+    var peer = networking.PeerInfo{};
+    try std.testing.expect(peerNeedsMetadata(&peer));
+
+    peer.metadata_seq = 0;
+    peer.metadata_known = true;
+    try std.testing.expect(!peerNeedsMetadata(&peer));
+}
+
+test "shouldRefreshMetadataAfterPing requests metadata when unknown or seq advances" {
+    var peer = networking.PeerInfo{};
+    try std.testing.expect(shouldRefreshMetadataAfterPing(&peer, 0, 0));
+
+    peer.metadata_known = true;
+    try std.testing.expect(!shouldRefreshMetadataAfterPing(&peer, 0, 0));
+    try std.testing.expect(shouldRefreshMetadataAfterPing(&peer, 1, 0));
+    try std.testing.expect(!shouldRefreshMetadataAfterPing(null, 0, 0));
+    try std.testing.expect(shouldRefreshMetadataAfterPing(null, 2, 1));
 }
 
 pub fn start(self: *BeaconNode, io: std.Io, listen_addr: []const u8, port: u16) !void {
@@ -1394,7 +1427,7 @@ fn runPeerManagerMaintenance(self: *BeaconNode, io: std.Io, svc: *networking.P2p
 
     for (actions.peers_to_restatus) |peer_id| {
         const peer = pm.getPeer(peer_id) orelse continue;
-        if (peer.last_status_exchange_ms == 0) {
+        if (peer.last_status_exchange_ms == 0 or peerNeedsMetadata(peer)) {
             did_work = schedulePeerReqResp(self, io, svc, peer_id, .full_handshake) or did_work;
             continue;
         }
@@ -2801,7 +2834,11 @@ fn peerReqRespTask(
             };
 
             var metadata: ?beacon_node_mod.PeerReqRespMetadata = null;
-            if (remote_seq != ping.known_metadata_seq) {
+            const should_refresh_metadata = if (self.peer_manager) |pm|
+                shouldRefreshMetadataAfterPing(pm.getPeer(job.peer_id), remote_seq, ping.known_metadata_seq)
+            else
+                shouldRefreshMetadataAfterPing(null, remote_seq, ping.known_metadata_seq);
+            if (should_refresh_metadata) {
                 if (requestPeerMetadataWithTimeout(self, io, svc, job.peer_id, optional_reqresp_timeout_ms)) |peer_metadata| {
                     metadata = peerReqRespMetadataCompletion(peer_metadata);
                 } else |err| {

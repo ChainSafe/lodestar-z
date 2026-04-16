@@ -372,6 +372,8 @@ pub const PeerInfo = struct {
     syncnets: SyncnetsBitfield = SyncnetsBitfield.initEmpty(),
     /// Metadata sequence number from Metadata req/resp.
     metadata_seq: u64 = 0,
+    /// Whether metadata has been fetched successfully at least once.
+    metadata_known: bool = false,
     /// ENR node ID from verified discovery/bootnode identity when known.
     discovery_node_id: ?[32]u8 = null,
     /// PeerDAS custody group count from MetadataV3 when available.
