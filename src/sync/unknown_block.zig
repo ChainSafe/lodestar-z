@@ -333,10 +333,22 @@ pub const UnknownBlockSync = struct {
     pub fn onFetchFailed(self: *UnknownBlockSync, parent_root: [32]u8) void {
         self.in_flight -|= 1;
         if (self.parents_needed.get(parent_root)) |children| {
+            var exhausted_roots: [sync_types.MAX_PENDING_BLOCKS][32]u8 = undefined;
+            var exhausted_count: usize = 0;
             for (children.items) |child_root| {
                 if (self.pending.getPtr(child_root)) |pb| {
+                    if (pb.attempts >= sync_types.MAX_UNKNOWN_PARENT_ATTEMPTS) {
+                        if (exhausted_count < exhausted_roots.len) {
+                            exhausted_roots[exhausted_count] = child_root;
+                            exhausted_count += 1;
+                        }
+                        continue;
+                    }
                     pb.status = .pending; // Reset to pending for retry.
                 }
+            }
+            for (exhausted_roots[0..exhausted_count]) |child_root| {
+                self.removePendingTree(child_root);
             }
         }
     }
@@ -344,16 +356,18 @@ pub const UnknownBlockSync = struct {
     /// Mark a root as bad — removes all descendants.
     pub fn markBad(self: *UnknownBlockSync, root: [32]u8) !void {
         try self.bad_roots.put(self.allocator, root, {});
-        // Remove any pending blocks with this as parent.
-        if (self.parents_needed.fetchSwapRemove(root)) |kv| {
-            var children = kv.value;
+        if (self.parents_needed.get(root)) |children| {
+            var child_roots: [sync_types.MAX_PENDING_BLOCKS][32]u8 = undefined;
+            var child_count: usize = 0;
             for (children.items) |child_root| {
-                if (self.pending.fetchSwapRemove(child_root)) |ckv| {
-                    var removed_child = ckv.value;
-                    removed_child.prepared.deinit(self.allocator);
+                if (child_count < child_roots.len) {
+                    child_roots[child_count] = child_root;
+                    child_count += 1;
                 }
             }
-            children.deinit(self.allocator);
+            for (child_roots[0..child_count]) |child_root| {
+                self.removePendingTree(child_root);
+            }
         }
     }
 
@@ -425,7 +439,8 @@ pub const UnknownBlockSync = struct {
                 cbs.importBlock(owned_child) catch |err| switch (err) {
                     error.ImportPending => continue,
                     else => {
-                        // Child failed import — don't propagate, just drop.
+                        // Child failed import — drop the entire descendant subtree.
+                        self.removePendingTree(child_block_root);
                         continue;
                     },
                 };
@@ -483,9 +498,42 @@ pub const UnknownBlockSync = struct {
         }
 
         if (oldest_root) |root| {
-            if (self.pending.fetchSwapRemove(root)) |kv| {
+            self.removePendingTree(root);
+        }
+    }
+
+    fn removePendingTree(self: *UnknownBlockSync, root: [32]u8) void {
+        if (self.parents_needed.fetchSwapRemove(root)) |kv| {
+            var children = kv.value;
+            defer children.deinit(self.allocator);
+            for (children.items) |child_root| {
+                self.removePendingTree(child_root);
+            }
+        }
+
+        if (self.pending.fetchSwapRemove(root)) |kv| {
+            const parent_root = kv.value.prepared.block.beaconBlock().parentRoot().*;
+            var removed = kv.value;
+            removed.prepared.deinit(self.allocator);
+            self.removeChildReference(parent_root, root);
+        }
+    }
+
+    fn removeChildReference(self: *UnknownBlockSync, parent_root: [32]u8, child_root: [32]u8) void {
+        const children = self.parents_needed.getPtr(parent_root) orelse return;
+
+        var i: usize = 0;
+        while (i < children.items.len) : (i += 1) {
+            if (std.mem.eql(u8, &children.items[i], &child_root)) {
+                _ = children.swapRemove(i);
+                break;
+            }
+        }
+
+        if (children.items.len == 0) {
+            if (self.parents_needed.fetchSwapRemove(parent_root)) |kv| {
                 var removed = kv.value;
-                removed.prepared.deinit(self.allocator);
+                removed.deinit(self.allocator);
             }
         }
     }
@@ -687,6 +735,110 @@ test "UnknownBlockSync: import pending defers child resolution until notify" {
     try sync.notifyBlockImported(parent_root);
     try std.testing.expectEqual(@as(usize, 0), sync.pendingCount());
     try std.testing.expectEqual(@as(usize, 2), callbacks.import_calls);
+}
+
+test "UnknownBlockSync: exhausted fetch drops pending subtree" {
+    const TestCallbacks = struct {
+        fn requestBlockByRootFn(_: *anyopaque, _: [32]u8, _: []const u8) void {}
+
+        fn importBlockFn(_: *anyopaque, prepared: PreparedBlockInput) anyerror!void {
+            var owned = prepared;
+            owned.deinit(std.testing.allocator);
+        }
+
+        fn hasBlockFn(_: *anyopaque, _: [32]u8) bool {
+            return false;
+        }
+
+        fn getConnectedPeersFn(_: *anyopaque) []const []const u8 {
+            return &.{ "peer-1" };
+        }
+
+        fn callbacks(self: *@This()) UnknownBlockCallbacks {
+            return .{
+                .ptr = self,
+                .requestBlockByRootFn = &requestBlockByRootFn,
+                .importBlockFn = &importBlockFn,
+                .hasBlockFn = &hasBlockFn,
+                .getConnectedPeersFn = &getConnectedPeersFn,
+            };
+        }
+    };
+
+    const alloc = std.testing.allocator;
+    var sync = UnknownBlockSync.init(alloc);
+    defer sync.deinit();
+
+    var callbacks = TestCallbacks{};
+    sync.setCallbacks(callbacks.callbacks());
+
+    const parent_root = [_]u8{0x10} ** 32;
+    const child_root = [_]u8{0x11} ** 32;
+    const grandchild_root = [_]u8{0x12} ** 32;
+
+    _ = try sync.addPendingBlock(try makeTestPreparedBlock(alloc, 42, parent_root, child_root));
+    _ = try sync.addPendingBlock(try makeTestPreparedBlock(alloc, 43, child_root, grandchild_root));
+
+    for (0..sync_types.MAX_UNKNOWN_PARENT_ATTEMPTS) |_| {
+        sync.tick();
+        sync.onFetchFailed(parent_root);
+    }
+
+    try std.testing.expectEqual(@as(usize, 0), sync.pendingCount());
+    try std.testing.expectEqual(@as(usize, 0), sync.parents_needed.count());
+    try std.testing.expectEqual(@as(u64, 0), sync.metricsSnapshot().exhausted_blocks);
+}
+
+test "UnknownBlockSync: failed child import drops descendants" {
+    const TestCallbacks = struct {
+        fn requestBlockByRootFn(_: *anyopaque, _: [32]u8, _: []const u8) void {}
+
+        fn importBlockFn(ptr: *anyopaque, prepared: PreparedBlockInput) anyerror!void {
+            const should_fail_child: *bool = @ptrCast(@alignCast(ptr));
+            const slot = prepared.slot();
+            var owned = prepared;
+            defer owned.deinit(std.testing.allocator);
+
+            if (slot == 42 and should_fail_child.*) return error.InvalidBlock;
+        }
+
+        fn hasBlockFn(_: *anyopaque, _: [32]u8) bool {
+            return false;
+        }
+
+        fn getConnectedPeersFn(_: *anyopaque) []const []const u8 {
+            return &.{};
+        }
+
+        fn callbacks(self: *bool) UnknownBlockCallbacks {
+            return .{
+                .ptr = self,
+                .requestBlockByRootFn = &requestBlockByRootFn,
+                .importBlockFn = &importBlockFn,
+                .hasBlockFn = &hasBlockFn,
+                .getConnectedPeersFn = &getConnectedPeersFn,
+            };
+        }
+    };
+
+    const alloc = std.testing.allocator;
+    var sync = UnknownBlockSync.init(alloc);
+    defer sync.deinit();
+
+    var fail_child = true;
+    sync.setCallbacks(TestCallbacks.callbacks(&fail_child));
+
+    const parent_root = [_]u8{0x20} ** 32;
+    const child_root = [_]u8{0x21} ** 32;
+    const grandchild_root = [_]u8{0x22} ** 32;
+
+    _ = try sync.addPendingBlock(try makeTestPreparedBlock(alloc, 42, parent_root, child_root));
+    _ = try sync.addPendingBlock(try makeTestPreparedBlock(alloc, 43, child_root, grandchild_root));
+
+    try sync.onParentFetched(parent_root, try makeTestPreparedBlock(alloc, 41, [_]u8{0x23} ** 32, parent_root));
+
+    try std.testing.expectEqual(@as(usize, 0), sync.pendingCount());
+    try std.testing.expectEqual(@as(usize, 0), sync.parents_needed.count());
 }
 
 test "UnknownBlockSync: tick imports pending child when parent is already known" {

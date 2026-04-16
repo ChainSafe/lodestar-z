@@ -186,6 +186,8 @@ pub const RegenRuntimeFixture = struct {
         self.allocator.destroy(self.shared_state_graph.pool);
 
         self.allocator.destroy(self.shared_state_graph);
+
+        state_transition.deinitStateTransition();
     }
 
     pub fn clonePublishedState(self: *RegenRuntimeFixture) !*CachedBeaconState {

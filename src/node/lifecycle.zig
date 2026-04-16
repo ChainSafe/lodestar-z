@@ -449,6 +449,10 @@ pub fn deinit(self: *BeaconNode) void {
 
     self.flushPendingGossipBlsBatch();
     self.pending_gossip_bls_batches.deinit(allocator);
+    for (self.waiting_planned_block_imports.items) |*waiting| {
+        waiting.deinit(allocator);
+    }
+    self.waiting_planned_block_imports.deinit(allocator);
     self.queued_state_work_owners.deinit(allocator);
     self.completed_block_ingresses.deinit(allocator);
     for (self.waiting_execution_payloads.items) |*pending| {

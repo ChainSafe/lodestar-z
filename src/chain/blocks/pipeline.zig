@@ -438,6 +438,15 @@ pub fn finishPreparedBlockImport(
     prepared: *PreparedBlockImport,
     exec_status: ExecutionStatus,
 ) BlockImportError!ImportResult {
+    return finishPreparedBlockImportWithFn(import_block.importVerifiedBlock, ctx.toImportContext(), prepared, exec_status);
+}
+
+fn finishPreparedBlockImportWithFn(
+    comptime import_fn: anytype,
+    import_ctx: ImportContext,
+    prepared: *PreparedBlockImport,
+    exec_status: ExecutionStatus,
+) BlockImportError!ImportResult {
     var verified = VerifiedBlock{
         .block_input = prepared.block_input,
         .post_state = prepared.post_state,
@@ -449,10 +458,9 @@ pub fn finishPreparedBlockImport(
         .data_availability_status = prepared.data_availability_status,
         .proposer_balance_delta = prepared.proposer_balance_delta,
     };
+    defer prepared.owns_post_state = verified.owns_post_state;
 
-    const result = try import_block.importVerifiedBlock(ctx.toImportContext(), &verified, prepared.opts);
-    prepared.owns_post_state = verified.owns_post_state;
-    return result;
+    return import_fn(import_ctx, &verified, prepared.opts);
 }
 
 /// Process a batch of blocks through the pipeline (for range sync).
@@ -460,8 +468,9 @@ pub fn finishPreparedBlockImport(
 /// Blocks are processed sequentially — each block's post-state becomes
 /// the next block's pre-state context (via state cache).
 ///
-/// Individual block failures don't abort the batch. The caller receives
-/// a result per block and decides how to handle failures.
+/// Ignored blocks (`already known`, `would revert finalized`, `genesis`) may
+/// be skipped, but the first real failure aborts the rest of the linear
+/// segment to match Lodestar's chain-segment semantics.
 pub fn processBlockBatch(
     ctx: PipelineContext,
     block_inputs: []const BlockInput,
@@ -480,6 +489,10 @@ pub fn processBlockBatch(
     for (block_inputs, 0..) |block_input, i| {
         const plan_result = planBlockForImport(ctx, block_input, batch_opts) catch |err| {
             results[i] = classifyBatchError(err);
+            if (pipeline_types.shouldAbortLinearRangeSyncSegment(err)) {
+                fillRemainingFailedBatchResults(results, i + 1, err);
+                break;
+            }
             continue;
         };
 
@@ -492,6 +505,10 @@ pub fn processBlockBatch(
                 const pre_state = getPlannedBlockImportPreState(ctx, owned_planned) catch |err| {
                     owned_planned.deinit(ctx.allocator);
                     results[i] = classifyBatchError(err);
+                    if (pipeline_types.shouldAbortLinearRangeSyncSegment(err)) {
+                        fillRemainingFailedBatchResults(results, i + 1, err);
+                        break;
+                    }
                     continue;
                 };
                 var prepared = executePlannedBlockImport(
@@ -503,6 +520,10 @@ pub fn processBlockBatch(
                 ) catch |err| {
                     owned_planned.deinit(ctx.allocator);
                     results[i] = classifyBatchError(err);
+                    if (pipeline_types.shouldAbortLinearRangeSyncSegment(err)) {
+                        fillRemainingFailedBatchResults(results, i + 1, err);
+                        break;
+                    }
                     continue;
                 };
                 const exec_result = verify_exec.verifyExecutionPayloadDetailed(
@@ -513,6 +534,10 @@ pub fn processBlockBatch(
                 ) catch |err| {
                     prepared.deinit(ctx.allocator);
                     results[i] = classifyBatchError(err);
+                    if (pipeline_types.shouldAbortLinearRangeSyncSegment(err)) {
+                        fillRemainingFailedBatchResults(results, i + 1, err);
+                        break;
+                    }
                     continue;
                 };
 
@@ -526,12 +551,8 @@ pub fn processBlockBatch(
                         results[i] = batch_result;
                         switch (batch_result) {
                             .failed => |err| {
-                                if (err == BlockImportError.NotViableForHead) {
-                                    for (i + 1..block_inputs.len) |j| {
-                                        results[j] = .{ .failed = BlockImportError.NotViableForHead };
-                                    }
-                                    break;
-                                }
+                                fillRemainingFailedBatchResults(results, i + 1, err);
+                                break;
                             },
                             else => {},
                         }
@@ -543,10 +564,9 @@ pub fn processBlockBatch(
                             invalid.latest_valid_hash,
                             invalid.invalidate_from_parent_block_root,
                         );
-                        results[i] = .{ .failed = BlockImportError.ExecutionPayloadInvalid };
-                        for (i + 1..block_inputs.len) |j| {
-                            results[j] = .{ .failed = BlockImportError.ExecutionPayloadInvalid };
-                        }
+                        const err = BlockImportError.ExecutionPayloadInvalid;
+                        results[i] = .{ .failed = err };
+                        fillRemainingFailedBatchResults(results, i + 1, err);
                         break;
                     },
                 }
@@ -586,6 +606,12 @@ fn classifyBatchError(err: BlockImportError) BatchBlockResult {
         => .{ .skipped = err },
         else => .{ .failed = err },
     };
+}
+
+fn fillRemainingFailedBatchResults(results: []BatchBlockResult, start: usize, err: BlockImportError) void {
+    for (start..results.len) |j| {
+        results[j] = .{ .failed = err };
+    }
 }
 
 fn invalidateExecutionBranch(
@@ -717,6 +743,54 @@ test "StateTransitionJob executes with transient worker-owned pre-state" {
 
     try std.testing.expectEqual(target_slot, prepared.block_input.block.beaconBlock().slot());
     try std.testing.expectEqual(parent_slot, prepared.parent_slot);
+}
+
+test "finishPreparedBlockImport preserves ownership transfer on error" {
+    const dummy_import = struct {
+        fn run(
+            _: ImportContext,
+            verified: *VerifiedBlock,
+            _: ImportBlockOpts,
+        ) BlockImportError!ImportResult {
+            std.debug.assert(verified.owns_post_state);
+            verified.relinquishPostState();
+            return BlockImportError.NotViableForHead;
+        }
+    }.run;
+
+    var prepared = PreparedBlockImport{
+        .block_input = undefined,
+        .post_state = undefined,
+        .owns_post_state = true,
+        .block_root = [_]u8{0} ** 32,
+        .state_root = [_]u8{0} ** 32,
+        .parent_slot = 0,
+        .data_availability_status = .available,
+        .proposer_balance_delta = 0,
+        .opts = .{},
+    };
+
+    const import_ctx = ImportContext{
+        .allocator = std.testing.allocator,
+        .block_state_cache = undefined,
+        .queued_regen = undefined,
+        .fork_choice = undefined,
+        .db = undefined,
+        .head_tracker = undefined,
+        .block_to_state = undefined,
+        .seen_block_attesters = undefined,
+        .seen_block_proposers = undefined,
+        .notification_sink = null,
+        .reprocess_queue = null,
+        .on_finalized_ptr = null,
+        .on_finalized_fn = null,
+    };
+
+    try std.testing.expectError(
+        BlockImportError.NotViableForHead,
+        finishPreparedBlockImportWithFn(dummy_import, import_ctx, &prepared, .valid),
+    );
+    try std.testing.expect(!prepared.owns_post_state);
 }
 
 fn createTestSignedBlock(
