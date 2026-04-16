@@ -157,6 +157,8 @@ pub fn reqRespFailureAction(protocol_ctx: ReqRespProtocol, err: anyerror) ?PeerA
         error.ForkDigestMismatch,
         error.BlockOutsideRequestedRange,
         error.UnsortedBlockRangeResponse,
+        error.ParentRootMismatch,
+        error.ExtraBlocksByRangeResponse,
         error.UnexpectedBlobSidecar,
         error.UnexpectedBlobSlot,
         error.InvalidBlobIndex,
@@ -226,6 +228,8 @@ test "reqRespFailureAction maps explicit response codes and malformed data" {
     try testing.expectEqual(@as(?PeerAction, .mid_tolerance), reqRespFailureAction(.metadata, error.ServerErrorResponse));
     try testing.expectEqual(@as(?PeerAction, .high_tolerance), reqRespFailureAction(.beacon_blocks_by_root, error.ResourceUnavailableResponse));
     try testing.expectEqual(@as(?PeerAction, .low_tolerance), reqRespFailureAction(.beacon_blocks_by_range, error.MalformedBlockBytes));
+    try testing.expectEqual(@as(?PeerAction, .low_tolerance), reqRespFailureAction(.beacon_blocks_by_range, error.ParentRootMismatch));
+    try testing.expectEqual(@as(?PeerAction, .low_tolerance), reqRespFailureAction(.beacon_blocks_by_range, error.ExtraBlocksByRangeResponse));
 }
 
 test "reconnectionCoolDownMs matches goodbye severity" {

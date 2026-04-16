@@ -401,9 +401,11 @@ pub fn importVerifiedBlock(
                 }
             }
 
-            if (opts.from_range_sync and !fc.isDefaultBlockViableForHead(block_root)) {
-                return BlockImportError.NotViableForHead;
-            }
+            // Range sync imports historical descendants before fork choice can
+            // necessarily make them the head immediately. Lodestar continues
+            // importing those batches and relies on sequential validation plus
+            // fork choice, rather than treating non-head-advancing blocks as a
+            // hard failure.
         }
 
         // Check finality changes.

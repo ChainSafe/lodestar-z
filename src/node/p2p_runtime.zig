@@ -83,6 +83,11 @@ const SlotRange = struct {
     count: u64,
 };
 
+const ValidatedBlockRangeChunk = struct {
+    slot: u64,
+    block_root: [32]u8,
+};
+
 const DiscoveryPeerIdentity = struct {
     node_id: [32]u8,
     pubkey: [33]u8,
@@ -4554,7 +4559,7 @@ fn fetchRawBlocksByRange(
     };
     defer reader.deinit();
     var blocks_received: u64 = 0;
-    var previous_slot: ?u64 = null;
+    var previous_chunk: ?ValidatedBlockRangeChunk = null;
 
     while (blocks_received < count) {
         const decoded = reader.next(io, &outbound.stream) catch |err| {
@@ -4574,17 +4579,32 @@ fn fetchRawBlocksByRange(
             return responseCodeError(decoded.result);
         }
 
-        const slot = validateFetchedBlockRangeChunk(self, start_slot, count, previous_slot, decoded.context_bytes, decoded.ssz_bytes) catch |err| {
+        const chunk = validateFetchedBlockRangeChunk(self, start_slot, count, previous_chunk, decoded.context_bytes, decoded.ssz_bytes) catch |err| {
             self.allocator.free(decoded.ssz_bytes);
             return err;
         };
-        previous_slot = slot;
+        previous_chunk = chunk;
 
         try result.append(self.allocator, .{
-            .slot = slot,
+            .slot = chunk.slot,
             .block_bytes = decoded.ssz_bytes,
         });
         blocks_received += 1;
+    }
+
+    if (blocks_received == count) {
+        const extra = reader.next(io, &outbound.stream) catch |err| {
+            if (err == error.UnexpectedEof) return error.MalformedBlockBytes;
+            return err;
+        };
+        if (extra) |decoded| {
+            defer self.allocator.free(decoded.ssz_bytes);
+            if (decoded.result != .success) {
+                request_outcome = responseCodeOutcome(decoded.result);
+                return responseCodeError(decoded.result);
+            }
+            return error.ExtraBlocksByRangeResponse;
+        }
     }
 
     request_outcome = .success;
@@ -4595,22 +4615,45 @@ fn validateFetchedBlockRangeChunk(
     self: *const BeaconNode,
     start_slot: u64,
     count: u64,
-    previous_slot: ?u64,
+    previous_chunk: ?ValidatedBlockRangeChunk,
     context_bytes: ?[4]u8,
     ssz_bytes: []const u8,
-) !u64 {
+) !ValidatedBlockRangeChunk {
     const slot = readSignedBeaconBlockSlot(ssz_bytes) orelse return error.MalformedBlockBytes;
     if (slot < start_slot) return error.BlockOutsideRequestedRange;
     if (slot - start_slot >= count) return error.BlockOutsideRequestedRange;
-    if (previous_slot) |prev| {
-        if (slot <= prev) return error.UnsortedBlockRangeResponse;
+    if (previous_chunk) |prev| {
+        if (slot <= prev.slot) return error.UnsortedBlockRangeResponse;
+        const parent_root = readSignedBlockParentRootFromSsz(ssz_bytes) orelse return error.MalformedBlockBytes;
+        try validateFetchedBlockRangeLink(prev.block_root, parent_root);
     }
 
     const chunk_context = context_bytes orelse return error.MissingContextBytes;
     const expected_digest = self.config.networkingForkDigestAtSlot(slot, self.genesis_validators_root);
     if (!std.mem.eql(u8, &chunk_context, &expected_digest)) return error.ForkDigestMismatch;
 
-    return slot;
+    return .{
+        .slot = slot,
+        .block_root = try readSignedBeaconBlockRootFromSsz(self, slot, ssz_bytes),
+    };
+}
+
+fn validateFetchedBlockRangeLink(previous_block_root: [32]u8, parent_root: [32]u8) !void {
+    if (!std.mem.eql(u8, &previous_block_root, &parent_root)) return error.ParentRootMismatch;
+}
+
+fn readSignedBeaconBlockRootFromSsz(self: *const BeaconNode, slot: u64, block_bytes: []const u8) ![32]u8 {
+    var any_signed = try fork_types.AnySignedBeaconBlock.deserialize(
+        self.allocator,
+        .full,
+        self.config.forkSeq(slot),
+        block_bytes,
+    );
+    defer any_signed.deinit(self.allocator);
+
+    var block_root: [32]u8 = undefined;
+    try any_signed.beaconBlock().hashTreeRoot(self.allocator, &block_root);
+    return block_root;
 }
 
 fn sendStatus(
@@ -5265,3 +5308,15 @@ const BeaconNode = beacon_node_mod.BeaconNode;
 const DiscoveryDialCompletion = beacon_node_mod.DiscoveryDialCompletion;
 const PeerReqRespCompletion = beacon_node_mod.PeerReqRespCompletion;
 const SyncStatus = beacon_node_mod.SyncStatus;
+
+test "validateFetchedBlockRangeLink accepts matching parent root" {
+    const root = [_]u8{0xAB} ** 32;
+    try validateFetchedBlockRangeLink(root, root);
+}
+
+test "validateFetchedBlockRangeLink rejects mismatched parent root" {
+    try std.testing.expectError(
+        error.ParentRootMismatch,
+        validateFetchedBlockRangeLink([_]u8{0xAB} ** 32, [_]u8{0xCD} ** 32),
+    );
+}
