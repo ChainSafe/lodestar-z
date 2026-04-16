@@ -121,6 +121,27 @@ const DiscoveryDialJob = struct {
     }
 };
 
+const OutboundDialAttemptResult = union(enum) {
+    success: []const u8,
+    failure: anyerror,
+    canceled,
+};
+
+const OutboundDialEvent = union(enum) {
+    dial: OutboundDialAttemptResult,
+    timeout: TimeoutWaitResult,
+};
+
+fn freeOutboundDialEvent(allocator: std.mem.Allocator, event: OutboundDialEvent) void {
+    switch (event) {
+        .dial => |result| switch (result) {
+            .success => |peer_id| allocator.free(peer_id),
+            .failure, .canceled => {},
+        },
+        .timeout => {},
+    }
+}
+
 fn timestampNowNs(io: std.Io) u64 {
     const now_ns = std.Io.Timestamp.now(io, .awake).toNanoseconds();
     if (now_ns <= 0) return 0;
@@ -437,6 +458,48 @@ test "status req/resp policy tolerates status transport failures" {
     try std.testing.expect(!statusReqRespFollowUpPing(.full_handshake));
     try std.testing.expect(!statusReqRespFollowUpPing(.restatus));
     try std.testing.expect(!statusReqRespFollowUpPing(.{ .ping = .{ .known_metadata_seq = 0 } }));
+}
+
+fn successfulOutboundDialAttemptTask(allocator: std.mem.Allocator) OutboundDialAttemptResult {
+    const peer_id = allocator.dupe(u8, "test-peer-id") catch |err| return .{ .failure = err };
+    return .{ .success = peer_id };
+}
+
+fn sleepingOutboundDialAttemptTask(io: std.Io, delay_ms: u64) OutboundDialAttemptResult {
+    const sleep_timeout: std.Io.Timeout = .{ .duration = .{
+        .raw = std.Io.Duration.fromMilliseconds(@intCast(delay_ms)),
+        .clock = .awake,
+    } };
+    sleep_timeout.sleep(io) catch |err| switch (err) {
+        error.Canceled => return .canceled,
+    };
+    return .{ .failure = error.TestUnexpectedResult };
+}
+
+test "outbound dial helper returns successful dial before timeout" {
+    const peer_id = try awaitOutboundDialAttemptWithTimeout(
+        std.testing.allocator,
+        std.testing.io,
+        50,
+        successfulOutboundDialAttemptTask,
+        .{std.testing.allocator},
+    );
+    defer std.testing.allocator.free(peer_id);
+
+    try std.testing.expectEqualStrings("test-peer-id", peer_id);
+}
+
+test "outbound dial helper times out hung dial attempts" {
+    try std.testing.expectError(
+        error.Timeout,
+        awaitOutboundDialAttemptWithTimeout(
+            std.testing.allocator,
+            std.testing.io,
+            5,
+            sleepingOutboundDialAttemptTask,
+            .{ std.testing.io, 50 },
+        ),
+    );
 }
 
 test "peerNeedsMetadata distinguishes unknown metadata from seq zero" {
@@ -1078,14 +1141,17 @@ const peer_maintenance_interval_ns: u64 = 10 * std.time.ns_per_s;
 const metrics_sampling_interval_ns: u64 = std.time.ns_per_s;
 const peer_manager_heartbeat_interval_ns: u64 = networking.peer_manager.HEARTBEAT_INTERVAL_MS * std.time.ns_per_ms;
 const max_discovery_dials_per_tick: u32 = 4;
+// Match Lodestar's libp2p connectionManager.dialTimeout so all outbound dial
+// paths have the same bounded behavior.
+const outbound_dial_timeout_ms: u64 = 30_000;
 const optional_reqresp_timeout_ms: u64 = 3_000;
 
-const ReqRespTimerResult = enum {
+const TimeoutWaitResult = enum {
     fired,
     canceled,
 };
 
-fn waitReqRespTimeout(io: std.Io, timeout: std.Io.Timeout) ReqRespTimerResult {
+fn waitTimeout(io: std.Io, timeout: std.Io.Timeout) TimeoutWaitResult {
     timeout.sleep(io) catch |err| switch (err) {
         error.Canceled => return .canceled,
     };
@@ -2446,10 +2512,7 @@ fn dialBootnodeEnr(self: *BeaconNode, io: std.Io, svc: *networking.P2pService, e
 
     log.debug("Dialing bootnode at {s}", .{ma_str});
 
-    const peer_addr = try Multiaddr.fromString(self.allocator, ma_str);
-    defer peer_addr.deinit();
-
-    const peer_id = svc.dial(io, peer_addr) catch |err| return err;
+    const peer_id = try dialPeerWithTimeout(self, io, svc, ma_str, outbound_dial_timeout_ms);
     defer self.allocator.free(peer_id);
 
     log.debug("Connected to bootnode, peer_id: {s}", .{peer_id});
@@ -2470,10 +2533,7 @@ fn dialBootnodeEnr(self: *BeaconNode, io: std.Io, svc: *networking.P2pService, e
 fn dialDirectPeer(self: *BeaconNode, io: std.Io, svc: *networking.P2pService, addr_str: []const u8) !void {
     log.debug("Dialing direct peer at {s}", .{addr_str});
 
-    const peer_addr = try Multiaddr.fromString(self.allocator, addr_str);
-    defer peer_addr.deinit();
-
-    const peer_id = try svc.dial(io, peer_addr);
+    const peer_id = try dialPeerWithTimeout(self, io, svc, addr_str, outbound_dial_timeout_ms);
     defer self.allocator.free(peer_id);
 
     log.debug("Connected to direct peer {s} via {s}", .{ peer_id, addr_str });
@@ -2659,18 +2719,91 @@ fn discoveryDialTask(
     svc: *networking.P2pService,
     job: DiscoveryDialJob,
 ) void {
-    const peer_addr = Multiaddr.fromString(self.allocator, job.ma_str) catch |err| {
-        enqueueDiscoveryDialCompletion(self, io, job.toFailure(io, err));
-        return;
-    };
-    defer peer_addr.deinit();
-
-    const peer_id = svc.dial(io, peer_addr) catch |err| {
+    const peer_id = dialPeerWithTimeout(self, io, svc, job.ma_str, outbound_dial_timeout_ms) catch |err| {
         enqueueDiscoveryDialCompletion(self, io, job.toFailure(io, err));
         return;
     };
 
     enqueueDiscoveryDialCompletion(self, io, job.toSuccess(io, peer_id));
+}
+
+fn outboundDialAttemptTask(
+    self: *BeaconNode,
+    io: std.Io,
+    svc: *networking.P2pService,
+    ma_str: []const u8,
+) OutboundDialAttemptResult {
+    const peer_addr = Multiaddr.fromString(self.allocator, ma_str) catch |err| {
+        return .{ .failure = err };
+    };
+    defer peer_addr.deinit();
+
+    const peer_id = svc.dial(io, peer_addr) catch |err| switch (err) {
+        error.Canceled => return .canceled,
+        else => return .{ .failure = err },
+    };
+    return .{ .success = peer_id };
+}
+
+fn awaitOutboundDialAttemptWithTimeout(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    timeout_ms: u64,
+    comptime AttemptTask: anytype,
+    attempt_args: anytype,
+) ![]const u8 {
+    var events_buf: [2]OutboundDialEvent = undefined;
+    var select = std.Io.Select(OutboundDialEvent).init(io, &events_buf);
+    errdefer while (select.cancel()) |event| {
+        freeOutboundDialEvent(allocator, event);
+    };
+
+    try select.concurrent(.dial, AttemptTask, attempt_args);
+    select.async(.timeout, waitTimeout, .{ io, .{ .duration = .{
+        .raw = std.Io.Duration.fromMilliseconds(@intCast(timeout_ms)),
+        .clock = .awake,
+    } } });
+
+    while (true) {
+        const event = try select.await();
+        switch (event) {
+            .dial => |result| {
+                while (select.cancel()) |pending| {
+                    freeOutboundDialEvent(allocator, pending);
+                }
+                return switch (result) {
+                    .success => |peer_id| peer_id,
+                    .failure => |err| err,
+                    .canceled => error.Canceled,
+                };
+            },
+            .timeout => |result| switch (result) {
+                .fired => {
+                    while (select.cancel()) |pending| {
+                        freeOutboundDialEvent(allocator, pending);
+                    }
+                    return error.Timeout;
+                },
+                .canceled => {},
+            },
+        }
+    }
+}
+
+fn dialPeerWithTimeout(
+    self: *BeaconNode,
+    io: std.Io,
+    svc: *networking.P2pService,
+    ma_str: []const u8,
+    timeout_ms: u64,
+) ![]const u8 {
+    return awaitOutboundDialAttemptWithTimeout(
+        self.allocator,
+        io,
+        timeout_ms,
+        outboundDialAttemptTask,
+        .{ self, io, svc, ma_str },
+    );
 }
 
 fn drainCompletedDiscoveryDials(
@@ -4894,7 +5027,7 @@ const MetadataRequestResult = union(enum) {
 
 const MetadataRequestEvent = union(enum) {
     metadata: MetadataRequestResult,
-    timeout: ReqRespTimerResult,
+    timeout: TimeoutWaitResult,
 };
 
 fn requestPeerMetadataTask(
@@ -4922,7 +5055,7 @@ fn requestPeerMetadataWithTimeout(
     errdefer while (select.cancel()) |_| {};
 
     try select.concurrent(.metadata, requestPeerMetadataTask, .{ self, io, svc, peer_id });
-    select.async(.timeout, waitReqRespTimeout, .{ io, .{ .duration = .{
+    select.async(.timeout, waitTimeout, .{ io, .{ .duration = .{
         .raw = std.Io.Duration.fromMilliseconds(@intCast(timeout_ms)),
         .clock = .awake,
     } } });
