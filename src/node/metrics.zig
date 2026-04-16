@@ -131,6 +131,10 @@ const PeerRelevanceStatusLabels = struct {
     status: []const u8,
 };
 
+const PeerClientLabels = struct {
+    client: []const u8,
+};
+
 const PeerReportLabels = struct {
     source: []const u8,
     action: []const u8,
@@ -322,6 +326,7 @@ pub const BeaconMetrics = struct {
     peers_connected: Gauge(u64),
     connected_peer_direction_count: GaugeVec(u64, PeerDirectionLabels),
     peer_connection_state_count: GaugeVec(u64, PeerConnectionStateLabels),
+    peer_client_count: GaugeVec(u64, PeerClientLabels),
     peer_score_state_count: GaugeVec(u64, PeerScoreStateLabels),
     peer_relevance_count: GaugeVec(u64, PeerRelevanceStatusLabels),
     peer_connected_total: Counter(u64),
@@ -662,6 +667,12 @@ pub const BeaconMetrics = struct {
             .peer_connection_state_count = try GaugeVec(u64, PeerConnectionStateLabels).init(
                 allocator,
                 "p2p_peer_connection_state_count",
+                .{},
+                ro,
+            ),
+            .peer_client_count = try GaugeVec(u64, PeerClientLabels).init(
+                allocator,
+                "p2p_peer_client_count",
                 .{},
                 ro,
             ),
@@ -1378,6 +1389,7 @@ pub const BeaconMetrics = struct {
         self.block_import_results_total.deinit();
         self.connected_peer_direction_count.deinit();
         self.peer_connection_state_count.deinit();
+        self.peer_client_count.deinit();
         self.peer_score_state_count.deinit();
         self.peer_relevance_count.deinit();
         self.peer_reports_total.deinit();
@@ -1544,6 +1556,13 @@ pub const BeaconMetrics = struct {
             self.peer_connection_state_count.set(
                 .{ .state = connectionStateLabel(state) },
                 snapshot.connectionStateCount(state),
+            ) catch {};
+        }
+
+        inline for (networking.peer_manager.metric_client_kinds) |kind| {
+            self.peer_client_count.set(
+                .{ .client = clientKindLabel(kind) },
+                snapshot.clientKindCount(kind),
             ) catch {};
         }
 
@@ -2243,6 +2262,13 @@ fn connectionStateLabel(state: networking.ConnectionState) []const u8 {
     return @tagName(state);
 }
 
+fn clientKindLabel(kind: networking.ClientKind) []const u8 {
+    return switch (kind) {
+        .lodestar_z => "lodestar-z",
+        else => @tagName(kind),
+    };
+}
+
 fn scoreStateLabel(state: networking.ScoreState) []const u8 {
     return @tagName(state);
 }
@@ -2406,6 +2432,7 @@ test "BeaconMetrics: init fields are accessible" {
     try std.testing.expectEqual(@as(u64, 2), m.api_active_connections.impl.value);
     try std.testing.expectEqual(@as(u64, 4), m.req_resp_inbound_limiter_peers.impl.value);
     try std.testing.expectEqual(@as(u64, 2), m.req_resp_outbound_limiter_peers.impl.value);
+    try std.testing.expectEqual(@as(usize, networking.peer_manager.metric_client_kinds.len), m.peer_client_count.impl.values.count());
     try std.testing.expectEqual(@as(usize, 1), m.req_resp_maintenance_errors_total.impl.values.count());
     try std.testing.expectEqual(@as(usize, 1), m.req_resp_inbound_request_payload_bytes_total.impl.values.count());
     try std.testing.expectEqual(@as(usize, 1), m.req_resp_outbound_request_payload_bytes_total.impl.values.count());
@@ -2464,8 +2491,11 @@ test "BeaconMetrics: write produces live Prometheus output" {
     defer pm.deinit();
     _ = try pm.onPeerConnected("peer_a", .inbound, 1000);
     _ = try pm.onPeerConnected("peer_b", .outbound, 1000);
+    _ = try pm.onPeerConnected("peer_c", .outbound, 1000);
+    try pm.updateAgentVersion("peer_a", "Lighthouse/v4.5.0");
+    try pm.updateAgentVersion("peer_b", "lodestar-z/0.0.1");
     _ = pm.reportPeer("peer_a", .low_tolerance, .rpc, 1100);
-    pm.onPeerGoodbye("peer_b", .too_many_peers, 1200);
+    pm.onPeerGoodbye("peer_c", .too_many_peers, 1200);
     const peer_snapshot = pm.metricsSnapshot();
     m.incrBlockImportResult("gossip", "queued_unknown_parent", 1);
     m.setPeerManagerSnapshot(peer_snapshot);
@@ -2579,6 +2609,7 @@ test "BeaconMetrics: write produces live Prometheus output" {
     try std.testing.expect(std.mem.indexOf(u8, buf, "p2p_peer_count") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf, "p2p_connected_peer_direction_count") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf, "p2p_peer_connection_state_count") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf, "p2p_peer_client_count") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf, "p2p_peer_score_state_count") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf, "p2p_peer_relevance_count") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf, "p2p_peer_reports_total") != null);
@@ -2632,6 +2663,8 @@ test "BeaconMetrics: write produces live Prometheus output" {
     try std.testing.expect(std.mem.indexOf(u8, buf, "low_tolerance") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf, "too_many_peers") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf, "disconnecting") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf, "client=\"lighthouse\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf, "client=\"lodestar-z\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf, "beacon_sync_status") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf, "beacon_sync_mode_state") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf, "beacon_sync_optimistic") != null);

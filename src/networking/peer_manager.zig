@@ -19,6 +19,7 @@ const Allocator = std.mem.Allocator;
 const ForkSeq = @import("config").ForkSeq;
 const peer_info_mod = @import("peer_info.zig");
 const PeerInfo = peer_info_mod.PeerInfo;
+const ClientKind = peer_info_mod.ClientKind;
 const ConnectionState = peer_info_mod.ConnectionState;
 const ConnectionDirection = peer_info_mod.ConnectionDirection;
 const SyncInfo = peer_info_mod.SyncInfo;
@@ -186,6 +187,16 @@ pub const metric_connection_states = [_]ConnectionState{
     .disconnecting,
     .banned,
 };
+pub const metric_client_kinds = [_]ClientKind{
+    .lighthouse,
+    .lodestar,
+    .nimbus,
+    .prysm,
+    .teku,
+    .grandine,
+    .lodestar_z,
+    .unknown,
+};
 pub const metric_score_states = [_]ScoreState{ .healthy, .disconnected, .banned };
 pub const metric_relevance_states = [_]RelevanceStatus{ .unknown, .relevant, .irrelevant };
 pub const metric_report_sources = [_]ReportSource{ .gossipsub, .rpc, .processor, .sync, .peer_manager };
@@ -219,6 +230,7 @@ pub const MetricsSnapshot = struct {
     inbound_connected_peers: u64 = 0,
     outbound_connected_peers: u64 = 0,
     connection_state_counts: [metric_connection_states.len]u64 = [_]u64{0} ** metric_connection_states.len,
+    client_kind_counts: [metric_client_kinds.len]u64 = [_]u64{0} ** metric_client_kinds.len,
     score_state_counts: [metric_score_states.len]u64 = [_]u64{0} ** metric_score_states.len,
     relevance_counts: [metric_relevance_states.len]u64 = [_]u64{0} ** metric_relevance_states.len,
     peer_report_counts: [metric_report_sources.len][metric_peer_actions.len]u64 = [_][metric_peer_actions.len]u64{[_]u64{0} ** metric_peer_actions.len} ** metric_report_sources.len,
@@ -242,6 +254,21 @@ pub const MetricsSnapshot = struct {
                 .healthy => 0,
                 .disconnected => 1,
                 .banned => 2,
+            }
+        ];
+    }
+
+    pub fn clientKindCount(self: *const MetricsSnapshot, kind: ClientKind) u64 {
+        return self.client_kind_counts[
+            switch (kind) {
+                .lighthouse => 0,
+                .lodestar => 1,
+                .nimbus => 2,
+                .prysm => 3,
+                .teku => 4,
+                .grandine => 5,
+                .lodestar_z => 6,
+                .unknown => 7,
             }
         ];
     }
@@ -504,6 +531,9 @@ pub const PeerManager = struct {
         var it = self.db.peers.valueIterator();
         while (it.next()) |info| {
             snapshot.connection_state_counts[connectionStateIndex(info.connection_state)] += 1;
+            if (info.connection_state == .connected) {
+                snapshot.client_kind_counts[clientKindIndex(info.client_kind)] += 1;
+            }
             snapshot.score_state_counts[scoreStateIndex(info.scoreState())] += 1;
             snapshot.relevance_counts[relevanceStatusIndex(info.relevance)] += 1;
         }
@@ -1167,6 +1197,19 @@ pub const PeerManager = struct {
         };
     }
 
+    fn clientKindIndex(kind: ClientKind) usize {
+        return switch (kind) {
+            .lighthouse => 0,
+            .lodestar => 1,
+            .nimbus => 2,
+            .prysm => 3,
+            .teku => 4,
+            .grandine => 5,
+            .lodestar_z => 6,
+            .unknown => 7,
+        };
+    }
+
     fn scoreStateIndex(state: ScoreState) usize {
         return switch (state) {
             .healthy => 0,
@@ -1362,18 +1405,24 @@ test "PeerManager: metrics snapshot exposes peer states and events" {
 
     _ = try pm.onPeerConnected("peer_a", .inbound, 1000);
     _ = try pm.onPeerConnected("peer_b", .outbound, 1000);
+    _ = try pm.onPeerConnected("peer_c", .outbound, 1000);
+    try pm.updateAgentVersion("peer_a", "Lighthouse/v4.5.0");
+    try pm.updateAgentVersion("peer_b", "lodestar-z/0.0.1");
     _ = pm.reportPeer("peer_a", .low_tolerance, .rpc, 1100);
-    pm.onPeerGoodbye("peer_b", .too_many_peers, 1200);
+    pm.onPeerGoodbye("peer_c", .too_many_peers, 1200);
 
     const snapshot = pm.metricsSnapshot();
-    try std.testing.expectEqual(@as(u64, 2), snapshot.known_peers);
-    try std.testing.expectEqual(@as(u64, 1), snapshot.connected_peers);
+    try std.testing.expectEqual(@as(u64, 3), snapshot.known_peers);
+    try std.testing.expectEqual(@as(u64, 2), snapshot.connected_peers);
     try std.testing.expectEqual(@as(u64, 1), snapshot.inbound_connected_peers);
-    try std.testing.expectEqual(@as(u64, 0), snapshot.outbound_connected_peers);
-    try std.testing.expectEqual(@as(u64, 1), snapshot.connectionStateCount(.connected));
+    try std.testing.expectEqual(@as(u64, 1), snapshot.outbound_connected_peers);
+    try std.testing.expectEqual(@as(u64, 2), snapshot.connectionStateCount(.connected));
     try std.testing.expectEqual(@as(u64, 1), snapshot.connectionStateCount(.disconnecting));
-    try std.testing.expectEqual(@as(u64, 2), snapshot.scoreStateCount(.healthy));
-    try std.testing.expectEqual(@as(u64, 2), snapshot.relevanceCount(.unknown));
+    try std.testing.expectEqual(@as(u64, 1), snapshot.clientKindCount(.lighthouse));
+    try std.testing.expectEqual(@as(u64, 1), snapshot.clientKindCount(.lodestar_z));
+    try std.testing.expectEqual(@as(u64, 0), snapshot.clientKindCount(.unknown));
+    try std.testing.expectEqual(@as(u64, 3), snapshot.scoreStateCount(.healthy));
+    try std.testing.expectEqual(@as(u64, 3), snapshot.relevanceCount(.unknown));
     try std.testing.expectEqual(@as(u64, 1), snapshot.peerReportCount(.rpc, .low_tolerance));
     try std.testing.expectEqual(@as(u64, 1), snapshot.goodbyeReceivedCount(.too_many_peers));
 }
