@@ -120,6 +120,7 @@ pub const SyncCallbackCtx = struct {
             .ptr = @ptrCast(self),
             .requestBlockByRootFn = &syncRequestBlockByRootUnknownBlock,
             .importBlockFn = &syncImportPreparedBlock,
+            .hasBlockFn = &unknownBlockHasBlock,
             .getConnectedPeersFn = &syncGetConnectedPeers,
         };
     }
@@ -251,6 +252,11 @@ pub const SyncCallbackCtx = struct {
     fn syncRequestBlockByRootUnknownBlock(ptr: *anyopaque, root: [32]u8, peer_id: []const u8) void {
         const ctx: *SyncCallbackCtx = @ptrCast(@alignCast(ptr));
         ctx.enqueueByRootRequest(.unknown_block_parent, root, peer_id);
+    }
+
+    fn unknownBlockHasBlock(ptr: *anyopaque, root: [32]u8) bool {
+        const ctx: *SyncCallbackCtx = @ptrCast(@alignCast(ptr));
+        return ctx.node.chainQuery().isKnownBlockRoot(root);
     }
 
     fn unknownChainFetchBlockByRoot(ptr: *anyopaque, root: [32]u8, peer_id: []const u8) void {

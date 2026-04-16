@@ -174,6 +174,10 @@ pub const SyncServiceCallbacks = struct {
     }
 };
 
+fn unknownBlockHasBlockFalse(_: *anyopaque, _: [32]u8) bool {
+    return false;
+}
+
 /// Top-level sync service.
 pub const SyncService = struct {
     const KnownPeer = struct {
@@ -227,6 +231,7 @@ pub const SyncService = struct {
             .ptr = callbacks.ptr,
             .requestBlockByRootFn = callbacks.requestBlockByRootFn,
             .importBlockFn = callbacks.importPreparedBlockFn,
+            .hasBlockFn = callbacks.hasBlockFn orelse &unknownBlockHasBlockFalse,
             .getConnectedPeersFn = callbacks.getConnectedPeersFn,
         };
 
