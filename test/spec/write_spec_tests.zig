@@ -61,17 +61,6 @@ pub fn main() !void {
         const writer = out.writer().any();
         try writeTestRoot(&supported_test_runners, writer);
     }
-
-    // Generate per-runner root files for parallel CI execution.
-    // These must live at test/spec/ (not test/spec/test_case/) so that
-    // relative imports like "../runner/foo.zig" resolve correctly.
-    inline for (supported_test_runners) |kind| {
-        const runner_root_file = "test/spec/root_" ++ @tagName(kind) ++ ".zig";
-        const out = try std.fs.cwd().createFile(runner_root_file, .{});
-        defer out.close();
-        const writer = out.writer().any();
-        try writeTestRoot(&[_]RunnerKind{kind}, writer);
-    }
 }
 
 pub fn writeTestRoot(comptime kinds: []const RunnerKind, writer: std.io.AnyWriter) !void {
