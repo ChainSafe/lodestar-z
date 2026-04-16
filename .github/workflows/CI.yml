@@ -326,7 +326,7 @@ jobs:
           path: test/spec
       - name: Run spec tests - minimal (${{ matrix.runner }})
         run: |
-          zig build test:spec_tests_${{ matrix.runner }} -Dpreset=minimal
+          zig build test:spec_tests -Dpreset=minimal -Dspec_tests.filters=${{ matrix.runner }}
 
   spec-test-mainnet:
     name: spec tests - mainnet (${{ matrix.runner }})
@@ -365,7 +365,7 @@ jobs:
           path: test/spec
       - name: Run spec tests - mainnet (${{ matrix.runner }})
         run: |
-          zig build test:spec_tests_${{ matrix.runner }} -Dpreset=mainnet -Doptimize=ReleaseSafe
+          zig build test:spec_tests -Dpreset=mainnet -Doptimize=ReleaseSafe -Dspec_tests.filters=${{ matrix.runner }}
 
   build-fuzz:
     name: build fuzz harnesses
