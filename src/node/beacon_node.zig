@@ -2535,24 +2535,9 @@ pub const BeaconNode = struct {
             try self.queued_state_work_owners.ensureUnusedCapacity(self.allocator, 1);
             var owned_planned = planned;
             const queue_result = self.chainService().tryQueuePlannedReadyBlockImport(owned_planned) catch |err| {
-                node_log.warn(
-                    "range sync queue fallback to synchronous import slot={d} chain_id={d} batch_id={d} generation={d} index={d}: {}",
-                    .{
-                        block.slot,
-                        segment.key.chain_id,
-                        segment.key.batch_id,
-                        segment.key.generation,
-                        segment.next_index,
-                        err,
-                    },
-                );
-                segment.in_flight = true;
-                const completed = self.chainService().executePlannedReadyBlockImportSync(owned_planned);
-                switch (completed) {
-                    .failure => self.finishSyncSegmentQueuedBlockImport(segment.key, completed),
-                    .success => |prepared| self.queuePreparedBlockImportExecution(.{ .sync_segment = segment.key }, prepared),
-                }
-                return true;
+                self.chainService().deinitPlannedReadyBlockImport(&owned_planned);
+                self.recordRangeSyncSegmentFailure(segment.sync_type, .queue, err);
+                return err;
             };
             switch (queue_result) {
                 .queued => {
@@ -2571,20 +2556,13 @@ pub const BeaconNode = struct {
                 .not_queued => |returned_planned| {
                     owned_planned = returned_planned;
                     self.incrRangeSyncSegmentQueueBusy(segment.sync_type);
-                    node_log.debug("state work queue busy for range sync slot={d} chain_id={d} batch_id={d} generation={d} index={d}; falling back to synchronous import", .{
+                    node_log.debug("state work queue busy for range sync slot={d} chain_id={d} batch_id={d} generation={d} index={d}", .{
                         block.slot,
                         segment.key.chain_id,
                         segment.key.batch_id,
                         segment.key.generation,
                         segment.next_index,
                     });
-                    segment.in_flight = true;
-                    const completed = self.chainService().executePlannedReadyBlockImportSync(owned_planned);
-                    switch (completed) {
-                        .failure => self.finishSyncSegmentQueuedBlockImport(segment.key, completed),
-                        .success => |prepared| self.queuePreparedBlockImportExecution(.{ .sync_segment = segment.key }, prepared),
-                    }
-                    return true;
                 },
             }
 
