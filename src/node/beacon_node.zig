@@ -407,6 +407,7 @@ pub const PeerReqRespCompletion = union(enum) {
         peer_id: []const u8,
         protocol: networking.ReqRespScoringProtocol,
         err: anyerror,
+        disconnect_peer: bool = true,
     },
 
     pub fn peerId(self: *const PeerReqRespCompletion) []const u8 {

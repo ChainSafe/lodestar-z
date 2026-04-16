@@ -2104,6 +2104,11 @@ pub const ProtoArray = struct {
         allocator: Allocator,
         finalized_root: Root,
     ) (Allocator.Error || ProtoArrayError)![]ProtoBlock {
+        const CollapsedRoot = struct {
+            root: Root,
+            index: u32,
+        };
+
         const entry = self.indices.get(finalized_root) orelse
             return error.FinalizedNodeUnknown;
 
@@ -2124,10 +2129,6 @@ pub const ProtoArray = struct {
         for (0..finalized_index) |i| {
             const node = &self.nodes.items[i];
             pruned_blocks[i] = node.toBlock();
-            // Remove from indices and PTC votes. Gloas variants may share a
-            // block_root across multiple nodes; duplicate removes are no-ops.
-            _ = self.indices.remove(node.block_root);
-            _ = self.ptc_votes.remove(node.block_root);
         }
 
         // Shift remaining nodes to the front.
@@ -2141,25 +2142,67 @@ pub const ProtoArray = struct {
         }
         self.nodes.items.len = remaining;
 
-        // Adjust all indices in the map (subtract finalized_index).
+        var roots_to_remove: std.ArrayListUnmanaged(Root) = .empty;
+        defer roots_to_remove.deinit(allocator);
+        var roots_to_collapse: std.ArrayListUnmanaged(CollapsedRoot) = .empty;
+        defer roots_to_collapse.deinit(allocator);
+
+        // Adjust surviving indices in-place and collect roots that are either fully
+        // pruned or need to collapse to a single surviving FULL variant.
         var iter = self.indices.iterator();
         while (iter.next()) |map_entry| {
             switch (map_entry.value_ptr.*) {
                 .pre_gloas => |*idx| {
-                    assert(idx.* >= finalized_index);
-                    idx.* -= finalized_index;
+                    if (idx.* < finalized_index) {
+                        try roots_to_remove.append(allocator, map_entry.key_ptr.*);
+                    } else {
+                        idx.* -= finalized_index;
+                    }
                 },
                 .gloas => |*g| {
-                    assert(g.pending >= finalized_index);
-                    g.pending -= finalized_index;
-                    assert(g.empty >= finalized_index);
-                    g.empty -= finalized_index;
-                    if (g.full) |*f| {
-                        assert(f.* >= finalized_index);
-                        f.* -= finalized_index;
+                    const pending_survives = g.pending >= finalized_index;
+                    const empty_survives = g.empty >= finalized_index;
+                    const full_survives = if (g.full) |f| f >= finalized_index else false;
+
+                    if (pending_survives) {
+                        g.pending -= finalized_index;
+                        assert(g.empty >= finalized_index);
+                        g.empty -= finalized_index;
+                        if (g.full) |*f| {
+                            if (f.* >= finalized_index) {
+                                f.* -= finalized_index;
+                            } else {
+                                g.full = null;
+                            }
+                        }
+                        continue;
+                    }
+
+                    // Gloas nodes are inserted as PENDING -> EMPTY, so pruning on a
+                    // canonical boundary cannot leave EMPTY without PENDING. The
+                    // late FULL variant can survive independently, though.
+                    assert(!empty_survives);
+
+                    if (full_survives) {
+                        try roots_to_collapse.append(allocator, .{
+                            .root = map_entry.key_ptr.*,
+                            .index = g.full.? - finalized_index,
+                        });
+                    } else {
+                        try roots_to_remove.append(allocator, map_entry.key_ptr.*);
                     }
                 },
             }
+        }
+
+        for (roots_to_remove.items) |root| {
+            _ = self.indices.remove(root);
+            _ = self.ptc_votes.remove(root);
+        }
+
+        for (roots_to_collapse.items) |collapse| {
+            const vi = self.indices.getPtr(collapse.root) orelse continue;
+            vi.* = .{ .pre_gloas = collapse.index };
         }
 
         // Adjust parent, best_child, best_descendant in remaining nodes.
@@ -5031,6 +5074,66 @@ test "Prune PTC votes cleanup removes pruned entries" {
     const c_votes = pa.ptc_votes.get(root_c).?;
     try testing.expect(c_votes.isSet(0));
     try testing.expect(c_votes.isSet(1));
+}
+
+// Tree before prune:
+//   genesis(0, pre-Gloas)
+//     |
+//   A(slot=1, Gloas: PENDING + EMPTY, later FULL arrives)
+//    / \
+//   B   C
+//
+// B is inserted before A's payload arrives, so it extends A's EMPTY branch.
+// After A's FULL arrives, C extends A's FULL branch. Pruning to B must not drop
+// A entirely because A.FULL and C remain in the proto-array.
+test "Prune preserves surviving late full variant roots" {
+    var pa: ProtoArray = undefined;
+    pa.init(0, ZERO_HASH, 0, ZERO_HASH, 0);
+    defer pa.deinit(testing.allocator);
+
+    const root_a = makeRoot(0x0A);
+    const root_b = makeRoot(0x0B);
+    const root_c = makeRoot(0x0C);
+    const a_parent_bh = makeRoot(0xA0);
+    const a_exec_bh = makeRoot(0xA1);
+
+    try pa.onBlock(testing.allocator, TestBlock.genesis(), 0, null);
+    try pa.onBlock(testing.allocator, TestBlock.asGloasWithParentBlockHash(
+        TestBlock.withParent(TestBlock.withSlotAndRoot(1, root_a), ZERO_HASH),
+        a_parent_bh,
+    ), 3, null);
+    try pa.onBlock(testing.allocator, TestBlock.asGloasWithParentBlockHash(
+        TestBlock.withParent(TestBlock.withSlotAndRoot(2, root_b), root_a),
+        a_parent_bh,
+    ), 3, null);
+
+    try pa.onExecutionPayload(testing.allocator, root_a, 3, a_exec_bh, 1, ZERO_HASH, null, .valid);
+
+    try pa.onBlock(testing.allocator, TestBlock.asGloasWithParentBlockHash(
+        TestBlock.withParent(TestBlock.withSlotAndRoot(3, root_c), root_a),
+        a_exec_bh,
+    ), 3, null);
+
+    const zero_deltas = try testing.allocator.alloc(i64, pa.nodes.items.len);
+    defer testing.allocator.free(zero_deltas);
+    @memset(zero_deltas, 0);
+    try pa.applyScoreChanges(zero_deltas, null, 0, ZERO_HASH, 0, ZERO_HASH, 3);
+
+    const pruned = try pa.maybePrune(testing.allocator, root_b);
+    defer testing.allocator.free(pruned);
+    try testing.expect(pruned.len > 0);
+
+    const a_vi = pa.indices.get(root_a) orelse return error.TestUnexpectedResult;
+    try testing.expect(a_vi == .pre_gloas);
+    try testing.expectEqual(@as(u32, 2), a_vi.pre_gloas);
+    try testing.expectEqual(PayloadStatus.full, pa.getDefaultVariant(root_a).?);
+    try testing.expectEqual(@as(?u32, 2), pa.getDefaultNodeIndex(root_a));
+    try testing.expectEqual(@as(usize, 3), pa.length());
+    try testing.expectEqual(@as(usize, 5), pa.nodes.items.len);
+
+    const ancestor = try pa.getAncestor(root_c, 1);
+    try testing.expectEqual(root_a, ancestor.block_root);
+    try testing.expectEqual(PayloadStatus.full, ancestor.payload_status);
 }
 
 // Tree:

@@ -2611,11 +2611,17 @@ fn enqueuePeerReqRespCompletion(self: *BeaconNode, io: std.Io, completion: PeerR
     };
 }
 
-fn peerReqRespFailure(peer_id: []const u8, protocol: ReqRespMaintenanceProtocol, err: anyerror) PeerReqRespCompletion {
+fn peerReqRespFailure(
+    peer_id: []const u8,
+    protocol: ReqRespMaintenanceProtocol,
+    err: anyerror,
+    disconnect_peer: bool,
+) PeerReqRespCompletion {
     return .{ .failure = .{
         .peer_id = peer_id,
         .protocol = protocol,
         .err = err,
+        .disconnect_peer = disconnect_peer,
     } };
 }
 
@@ -2628,7 +2634,11 @@ fn peerReqRespTask(
     switch (job.kind) {
         .status_only, .full_handshake, .restatus => {
             const peer_status = sendStatus(self, io, svc, job.peer_id) catch |err| {
-                enqueuePeerReqRespCompletion(self, io, peerReqRespFailure(job.peer_id, .status, err));
+                const disconnect_peer = switch (job.kind) {
+                    .restatus => false,
+                    else => true,
+                };
+                enqueuePeerReqRespCompletion(self, io, peerReqRespFailure(job.peer_id, .status, err, disconnect_peer));
                 return;
             };
 
@@ -2654,7 +2664,7 @@ fn peerReqRespTask(
         },
         .ping => |ping| {
             const remote_seq = requestPeerPing(self, io, svc, job.peer_id) catch |err| {
-                enqueuePeerReqRespCompletion(self, io, peerReqRespFailure(job.peer_id, .ping, err));
+                enqueuePeerReqRespCompletion(self, io, peerReqRespFailure(job.peer_id, .ping, err, false));
                 return;
             };
 
@@ -2754,7 +2764,15 @@ fn drainCompletedPeerReqResp(
                 did_work = true;
             },
             .failure => |failure| {
-                handleReqRespMaintenanceFailure(self, io, svc, failure.peer_id, failure.protocol, failure.err);
+                handleReqRespMaintenanceFailure(
+                    self,
+                    io,
+                    svc,
+                    failure.peer_id,
+                    failure.protocol,
+                    failure.err,
+                    failure.disconnect_peer,
+                );
                 did_work = true;
             },
         }
@@ -3023,7 +3041,7 @@ fn bootstrapPeerStatusHandshake(
     peer_id: []const u8,
 ) bool {
     const peer_status = sendStatus(self, io, svc, peer_id) catch |err| {
-        handleReqRespMaintenanceFailure(self, io, svc, peer_id, .status, err);
+        handleReqRespMaintenanceFailure(self, io, svc, peer_id, .status, err, true);
         return false;
     };
 
@@ -4857,6 +4875,7 @@ fn handleReqRespMaintenanceFailure(
     peer_id: []const u8,
     protocol: ReqRespMaintenanceProtocol,
     err: anyerror,
+    disconnect_peer: bool,
 ) void {
     if (self.metrics) |metrics| {
         metrics.incrReqRespMaintenanceError(
@@ -4888,16 +4907,17 @@ fn handleReqRespMaintenanceFailure(
     }
 
     const pm = self.peer_manager orelse {
-        _ = svc.disconnectPeer(io, peer_id);
+        if (disconnect_peer) _ = svc.disconnectPeer(io, peer_id);
         return;
     };
 
     const now_ms = currentUnixTimeMs(io);
     const action = reqRespMaintenanceFailureAction(protocol, err) orelse {
-        _ = svc.disconnectPeer(io, peer_id);
+        if (disconnect_peer) _ = svc.disconnectPeer(io, peer_id);
         return;
     };
     const score_state = pm.reportPeer(peer_id, action, .rpc, now_ms);
+    if (!disconnect_peer) return;
 
     var reason: GoodbyeReason = .fault_error;
     if (score_state) |state| {
