@@ -2,6 +2,7 @@
 zig-out/
 test/spec/spec_tests/
 test/spec/test_case/
+test/spec/root_*.zig
 *.ssz
 test/spec/ssz/generic_tests.zig
 test/spec/ssz/static_tests.zig

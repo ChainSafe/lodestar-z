@@ -962,7 +962,7 @@ pub fn build(b: *std.Build) void {
     tls_run_test.dependOn(&run_test_spec_tests.step);
 
     const module_spec_tests_operations = b.createModule(.{
-        .root_source_file = b.path("test/spec/test_case/operations_tests.zig"),
+        .root_source_file = b.path("test/spec/root_operations.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -983,7 +983,7 @@ pub fn build(b: *std.Build) void {
     tls_run_test.dependOn(&run_test_spec_tests_operations.step);
 
     const module_spec_tests_epoch_processing = b.createModule(.{
-        .root_source_file = b.path("test/spec/test_case/epoch_processing_tests.zig"),
+        .root_source_file = b.path("test/spec/root_epoch_processing.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -1004,7 +1004,7 @@ pub fn build(b: *std.Build) void {
     tls_run_test.dependOn(&run_test_spec_tests_epoch_processing.step);
 
     const module_spec_tests_sanity = b.createModule(.{
-        .root_source_file = b.path("test/spec/test_case/sanity_tests.zig"),
+        .root_source_file = b.path("test/spec/root_sanity.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -1025,7 +1025,7 @@ pub fn build(b: *std.Build) void {
     tls_run_test.dependOn(&run_test_spec_tests_sanity.step);
 
     const module_spec_tests_rewards = b.createModule(.{
-        .root_source_file = b.path("test/spec/test_case/rewards_tests.zig"),
+        .root_source_file = b.path("test/spec/root_rewards.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -1046,7 +1046,7 @@ pub fn build(b: *std.Build) void {
     tls_run_test.dependOn(&run_test_spec_tests_rewards.step);
 
     const module_spec_tests_transition = b.createModule(.{
-        .root_source_file = b.path("test/spec/test_case/transition_tests.zig"),
+        .root_source_file = b.path("test/spec/root_transition.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -1067,7 +1067,7 @@ pub fn build(b: *std.Build) void {
     tls_run_test.dependOn(&run_test_spec_tests_transition.step);
 
     const module_spec_tests_random = b.createModule(.{
-        .root_source_file = b.path("test/spec/test_case/random_tests.zig"),
+        .root_source_file = b.path("test/spec/root_random.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -1088,7 +1088,7 @@ pub fn build(b: *std.Build) void {
     tls_run_test.dependOn(&run_test_spec_tests_random.step);
 
     const module_spec_tests_fork = b.createModule(.{
-        .root_source_file = b.path("test/spec/test_case/fork_tests.zig"),
+        .root_source_file = b.path("test/spec/root_fork.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -1109,7 +1109,7 @@ pub fn build(b: *std.Build) void {
     tls_run_test.dependOn(&run_test_spec_tests_fork.step);
 
     const module_spec_tests_finality = b.createModule(.{
-        .root_source_file = b.path("test/spec/test_case/finality_tests.zig"),
+        .root_source_file = b.path("test/spec/root_finality.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -1130,7 +1130,7 @@ pub fn build(b: *std.Build) void {
     tls_run_test.dependOn(&run_test_spec_tests_finality.step);
 
     const module_spec_tests_merkle_proof = b.createModule(.{
-        .root_source_file = b.path("test/spec/test_case/merkle_proof_tests.zig"),
+        .root_source_file = b.path("test/spec/root_merkle_proof.zig"),
         .target = target,
         .optimize = optimize,
     });

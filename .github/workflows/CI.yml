@@ -178,6 +178,7 @@ jobs:
         with:
           name: spec-test-generated
           path: |
+            test/spec/root*.zig
             test/spec/test_case/
             test/spec/ssz/generic_tests.zig
             test/spec/ssz/static_tests.zig
