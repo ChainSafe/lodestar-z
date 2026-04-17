@@ -19,7 +19,7 @@ pub const Checkpoint = ssz.FixedContainerType(struct {
     root: p.Root,
 });
 
-pub const Validator = ssz.FixedContainerType(struct {
+pub const Validator = ssz.StructContainerType(struct {
     pubkey: p.BLSPubkey,
     withdrawal_credentials: p.Root,
     effective_balance: p.Gwei,
