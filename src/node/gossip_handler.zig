@@ -1420,8 +1420,8 @@ pub const GossipHandler = struct {
             error.InvalidKzgProof,
             => {
                 scoped_log.debug("Gossip blob sidecar rejected: slot={d} proposer={d} index={d} err={}", .{
-                    full_blob.slot,
-                    full_blob.proposer_index,
+                    full_blob.signed_block_header.message.slot,
+                    full_blob.signed_block_header.message.proposer_index,
                     full_blob.index,
                     err,
                 });
