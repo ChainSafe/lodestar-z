@@ -47,6 +47,7 @@ const OwnedSszBytes = processor_mod.work_item.OwnedSszBytes;
 const ResolvedAggregate = processor_mod.work_item.ResolvedAggregate;
 const ResolvedAttestation = processor_mod.work_item.ResolvedAttestation;
 const GossipAction = chain_gossip.GossipAction;
+const AttestationGossipAction = chain_gossip.AttestationGossipAction;
 const ChainState = chain_gossip.ChainState;
 const GossipRejectReason = networking.peer_scoring.GossipRejectReason;
 const SignedVoluntaryExit = types.phase0.SignedVoluntaryExit.Type;
@@ -258,7 +259,7 @@ pub const GossipHandler = struct {
     getForkSeqForSlot: *const fn (ptr: *anyopaque, slot: u64) ForkSeq,
     getProposerIndex: *const fn (ptr: *anyopaque, slot: u64) ?u32,
     isKnownBlockRoot: *const fn (ptr: *anyopaque, root: [32]u8) bool,
-    getKnownBlockSlot: *const fn (ptr: *anyopaque, root: [32]u8) ?u64,
+    getKnownBlockInfo: *const fn (ptr: *anyopaque, root: [32]u8) ?chain_gossip.ChainState.KnownBlockInfo,
     getValidatorCount: *const fn (ptr: *anyopaque) u32,
 
     /// Optional metrics pointer — records gossip accept/reject/ignore counts.
@@ -279,7 +280,7 @@ pub const GossipHandler = struct {
         getForkSeqForSlot: *const fn (ptr: *anyopaque, slot: u64) ForkSeq,
         getProposerIndex: *const fn (ptr: *anyopaque, slot: u64) ?u32,
         isKnownBlockRoot: *const fn (ptr: *anyopaque, root: [32]u8) bool,
-        getKnownBlockSlot: *const fn (ptr: *anyopaque, root: [32]u8) ?u64,
+        getKnownBlockInfo: *const fn (ptr: *anyopaque, root: [32]u8) ?chain_gossip.ChainState.KnownBlockInfo,
         getValidatorCount: *const fn (ptr: *anyopaque) u32,
         resolveAttestationFn: *const fn (
             ptr: *anyopaque,
@@ -331,7 +332,7 @@ pub const GossipHandler = struct {
             .getForkSeqForSlot = getForkSeqForSlot,
             .getProposerIndex = getProposerIndex,
             .isKnownBlockRoot = isKnownBlockRoot,
-            .getKnownBlockSlot = getKnownBlockSlot,
+            .getKnownBlockInfo = getKnownBlockInfo,
             .getValidatorCount = getValidatorCount,
         };
         return self;
@@ -366,7 +367,7 @@ pub const GossipHandler = struct {
             .ptr = self.node,
             .getProposerIndex = self.getProposerIndex,
             .isKnownBlockRoot = self.isKnownBlockRoot,
-            .getKnownBlockSlot = self.getKnownBlockSlot,
+            .getKnownBlockInfo = self.getKnownBlockInfo,
             .getValidatorCount = self.getValidatorCount,
         };
     }
@@ -378,6 +379,15 @@ pub const GossipHandler = struct {
             .ignore => return GossipHandlerError.ValidationIgnored,
             .reject => return GossipHandlerError.ValidationRejected,
         }
+    }
+
+    fn classifyAttestationAction(action: AttestationGossipAction) GossipHandlerError!bool {
+        return switch (action) {
+            .accept => false,
+            .unknown_beacon_block => true,
+            .ignore => GossipHandlerError.ValidationIgnored,
+            .reject => GossipHandlerError.ValidationRejected,
+        };
     }
 
     fn resolveAttestation(
@@ -625,6 +635,7 @@ pub const GossipHandler = struct {
                 data.slot,
                 data.index,
                 data.target.epoch,
+                data.beacon_block_root,
                 data.target.root,
                 committee_index,
                 self.current_fork_seq.gte(.gloas),
@@ -635,10 +646,11 @@ pub const GossipHandler = struct {
                 data.slot,
                 committee_index,
                 data.target.epoch,
+                data.beacon_block_root,
                 data.target.root,
                 &chain_state,
             );
-        try checkAction(action);
+        const queue_unknown_block = try classifyAttestationAction(action);
 
         if (attestation.participantCount() != 1) {
             return GossipHandlerError.ValidationRejected;
@@ -659,6 +671,24 @@ pub const GossipHandler = struct {
             return GossipHandlerError.WrongSubnet;
         }
         if (resolved.already_seen) {
+            return GossipHandlerError.ValidationIgnored;
+        }
+
+        if (queue_unknown_block) {
+            if (self.queueUnknownBlockAttestationFn) |queueFn| {
+                attestation_owned = false;
+                const queued = try queueFn(self.node, data.beacon_block_root, .{
+                    .source = metadata.source,
+                    .message_id = metadata.message_id,
+                    .attestation = attestation,
+                    .attestation_data_root = attestation_data_root,
+                    .resolved = resolved,
+                    .subnet_id = @intCast(subnet_id),
+                    .seen_timestamp_ns = metadata.seen_timestamp_ns,
+                }, metadata.peer_id);
+                if (queued) return GossipHandlerError.ValidationIgnored;
+                attestation_owned = true;
+            }
             return GossipHandlerError.ValidationIgnored;
         }
 
@@ -751,6 +781,8 @@ pub const GossipHandler = struct {
                 signed_aggregate.aggregatorIndex(),
                 signed_aggregate.slot(),
                 signed_aggregate.targetEpoch(),
+                att_data.beacon_block_root,
+                att_data.target.root,
                 signed_aggregate.participantCount(),
                 &chain_state,
             ),
@@ -758,13 +790,15 @@ pub const GossipHandler = struct {
                 signed_aggregate.aggregatorIndex(),
                 signed_aggregate.slot(),
                 signed_aggregate.targetEpoch(),
+                att_data.beacon_block_root,
+                att_data.target.root,
                 signed_aggregate.dataIndex(),
                 signed_aggregate.committeeCount(),
                 signed_aggregate.participantCount(),
                 &chain_state,
             ),
         };
-        try checkAction(action);
+        const queue_unknown_block = try classifyAttestationAction(action);
 
         var resolved = self.resolveAggregate(&signed_aggregate, &attestation_data_root) catch |err| switch (err) {
             error.NoHeadState,
@@ -783,6 +817,25 @@ pub const GossipHandler = struct {
         };
         var resolved_owned = true;
         defer if (resolved_owned) resolved.deinit(self.allocator);
+
+        if (queue_unknown_block) {
+            if (self.queueUnknownBlockAggregateFn) |queueFn| {
+                aggregate_owned = false;
+                resolved_owned = false;
+                const queued = try queueFn(self.node, att_data.beacon_block_root, .{
+                    .source = metadata.source,
+                    .message_id = metadata.message_id,
+                    .aggregate = signed_aggregate,
+                    .attestation_data_root = attestation_data_root,
+                    .resolved = resolved,
+                    .seen_timestamp_ns = metadata.seen_timestamp_ns,
+                }, metadata.peer_id);
+                if (queued) return GossipHandlerError.ValidationIgnored;
+                aggregate_owned = true;
+                resolved_owned = true;
+            }
+            return GossipHandlerError.ValidationIgnored;
+        }
 
         if (!chain_state.isKnownBlockRoot(chain_state.ptr, att_data.beacon_block_root)) {
             if (self.queueUnknownBlockAggregateFn) |queueFn| {

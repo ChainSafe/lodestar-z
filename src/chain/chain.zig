@@ -1008,7 +1008,7 @@ pub const Chain = struct {
             data.target.epoch,
         ) catch |err| {
             log.warn("FC onAttestation failed validator_index={d} slot={d}: {}", .{ validator_index, data.slot, err });
-            // Non-fatal — still insert into pool for block packing.
+            return err;
         };
 
         // Insert into attestation pool for block production.
@@ -1056,6 +1056,7 @@ pub const Chain = struct {
 
         self.applyIndexedAttestationVote(indexed_attestation, attestation_data_root) catch |err| {
             log.warn("FC onAttestation failed validator_index={d} slot={d}: {}", .{ validator_index, data.slot, err });
+            return err;
         };
 
         try self.op_pool.attestation_pool.addAny(attestation);

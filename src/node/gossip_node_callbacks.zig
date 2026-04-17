@@ -137,10 +137,14 @@ pub fn isKnownBlockRoot(ptr: *anyopaque, root: [32]u8) bool {
     return node.chainQuery().isKnownBlockRoot(root);
 }
 
-/// Returns the slot for `root` when it is known in fork choice.
-pub fn getKnownBlockSlot(ptr: *anyopaque, root: [32]u8) ?u64 {
+/// Returns fork-choice block metadata for `root` when it is known.
+pub fn getKnownBlockInfo(ptr: *anyopaque, root: [32]u8) ?chain_mod.gossip_validation.ChainState.KnownBlockInfo {
     const node: *BeaconNode = @ptrCast(@alignCast(ptr));
-    return node.chainQuery().getKnownBlockSlot(root);
+    const block = node.chain.forkChoice().getBlockDefaultStatus(root) orelse return null;
+    return .{
+        .slot = block.slot,
+        .target_root = block.target_root,
+    };
 }
 
 /// Returns the total validator count.

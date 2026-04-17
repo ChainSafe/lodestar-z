@@ -97,9 +97,13 @@ fn stubIsKnownBlockRootFalse(_: *anyopaque, _: [32]u8) bool {
     return false;
 }
 
-fn stubGetKnownBlockSlot(_: *anyopaque, root: [32]u8) ?u64 {
+fn stubGetKnownBlockInfo(_: *anyopaque, root: [32]u8) ?chain_mod.gossip_validation.ChainState.KnownBlockInfo {
     if (std.mem.eql(u8, &root, &([_]u8{0} ** 32))) return null;
-    return 95;
+    if (root[0] == 0xBC or root[0] == 0xCD) return null;
+    return .{
+        .slot = 95,
+        .target_root = [_]u8{0xAA} ** 32,
+    };
 }
 
 fn stubGetValidatorCount(_: *anyopaque) u32 {
@@ -157,7 +161,7 @@ fn makeTestHandler(allocator: Allocator) !*GossipHandler {
         &stubGetForkSeqForSlot,
         &stubGetProposerIndex,
         &stubIsKnownBlockRoot,
-        &stubGetKnownBlockSlot,
+        &stubGetKnownBlockInfo,
         &stubGetValidatorCount,
         &stubResolveAttestation,
         &stubResolveAggregate,
@@ -300,7 +304,7 @@ test "GossipHandler: onAttestation decodes and validates" {
     att.data.slot = 96;
     att.data.target.epoch = 3;
     att.data.target.root = [_]u8{0xAA} ** 32; // known root (mock returns true)
-    att.data.beacon_block_root = [_]u8{0xBB} ** 32;
+    att.data.beacon_block_root = [_]u8{0xAA} ** 32;
 
     var ssz_buf: [consensus_types.electra.SingleAttestation.fixed_size]u8 = undefined;
     _ = consensus_types.electra.SingleAttestation.serializeIntoBytes(&att, &ssz_buf);
@@ -391,7 +395,7 @@ test "GossipHandler: onAttestation rejects pre-electra aggregated attestations" 
     att.data.index = 0;
     att.data.target.epoch = 3;
     att.data.target.root = [_]u8{0xAA} ** 32;
-    att.data.beacon_block_root = [_]u8{0xBB} ** 32;
+    att.data.beacon_block_root = [_]u8{0xAA} ** 32;
 
     const ssz_size = consensus_types.phase0.Attestation.serializedSize(&att);
     const ssz_buf = try alloc.alloc(u8, ssz_size);
@@ -418,7 +422,7 @@ test "GossipHandler: process result classifies wrong subnet" {
     att.data.slot = 96;
     att.data.target.epoch = 3;
     att.data.target.root = [_]u8{0xAA} ** 32;
-    att.data.beacon_block_root = [_]u8{0xBB} ** 32;
+    att.data.beacon_block_root = [_]u8{0xAA} ** 32;
 
     var ssz_buf: [consensus_types.electra.SingleAttestation.fixed_size]u8 = undefined;
     _ = consensus_types.electra.SingleAttestation.serializeIntoBytes(&att, &ssz_buf);
@@ -447,7 +451,7 @@ test "GossipHandler: onAttestation rejects wrong subnet" {
     att.data.slot = 96;
     att.data.target.epoch = 3;
     att.data.target.root = [_]u8{0xAA} ** 32;
-    att.data.beacon_block_root = [_]u8{0xBB} ** 32;
+    att.data.beacon_block_root = [_]u8{0xAA} ** 32;
 
     var ssz_buf: [consensus_types.electra.SingleAttestation.fixed_size]u8 = undefined;
     _ = consensus_types.electra.SingleAttestation.serializeIntoBytes(&att, &ssz_buf);
@@ -554,6 +558,8 @@ test "GossipHandler: onAggregateAndProof validates and accepts" {
     signed_agg.message.aggregator_index = 5;
     signed_agg.message.aggregate.data.slot = 96;
     signed_agg.message.aggregate.data.target.epoch = 3;
+    signed_agg.message.aggregate.data.target.root = [_]u8{0xAA} ** 32;
+    signed_agg.message.aggregate.data.beacon_block_root = [_]u8{0xAA} ** 32;
     // Need at least 1 set bit for aggregation_bits.
     // Default aggregation_bits is empty — allocate a single byte with bit 0 set.
     try signed_agg.message.aggregate.aggregation_bits.data.append(alloc, 0x01);
@@ -625,6 +631,8 @@ test "GossipHandler: onAggregateAndProof validates electra aggregates" {
     signed_agg.message.aggregator_index = 5;
     signed_agg.message.aggregate.data.slot = 96;
     signed_agg.message.aggregate.data.target.epoch = 3;
+    signed_agg.message.aggregate.data.target.root = [_]u8{0xAA} ** 32;
+    signed_agg.message.aggregate.data.beacon_block_root = [_]u8{0xAA} ** 32;
     signed_agg.message.aggregate.data.index = 0;
     try signed_agg.message.aggregate.committee_bits.set(0, true);
     try signed_agg.message.aggregate.aggregation_bits.data.append(alloc, 0x01);
