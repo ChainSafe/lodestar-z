@@ -128,6 +128,7 @@ pub const Callbacks = struct {
 pub const Queue = struct {
     allocator: Allocator,
     pending_by_root: std.array_hash_map.Auto(Root, PendingRoot),
+    dropped_items: ReleasedItems = .empty,
     total_count: usize = 0,
     peer_index: usize = 0,
 
@@ -144,6 +145,8 @@ pub const Queue = struct {
             entry.value_ptr.deinit(self.allocator);
         }
         self.pending_by_root.deinit(self.allocator);
+        for (self.dropped_items.items) |*item| item.deinit(self.allocator);
+        self.dropped_items.deinit(self.allocator);
         self.* = undefined;
     }
 
@@ -174,8 +177,8 @@ pub const Queue = struct {
             var i: usize = 0;
             while (i < entry.value_ptr.items.items.len) {
                 if (entry.value_ptr.items.items[i].slot() < current_slot) {
-                    var removed = entry.value_ptr.items.swapRemove(i);
-                    removed.deinit(self.allocator);
+                    const removed = entry.value_ptr.items.swapRemove(i);
+                    self.queueDroppedItem(removed);
                     self.total_count -|= 1;
                 } else {
                     i += 1;
@@ -260,6 +263,14 @@ pub const Queue = struct {
         }
     }
 
+    pub fn takeDropped(self: *Queue, out: *ReleasedItems) !void {
+        try out.ensureUnusedCapacity(self.allocator, self.dropped_items.items.len);
+        for (self.dropped_items.items) |item| {
+            out.appendAssumeCapacity(item);
+        }
+        self.dropped_items.items.len = 0;
+    }
+
     pub fn pendingCount(self: *const Queue) usize {
         return self.total_count;
     }
@@ -295,7 +306,11 @@ pub const Queue = struct {
         if (self.pending_by_root.fetchSwapRemove(block_root)) |kv| {
             var pending = kv.value;
             self.total_count -|= pending.items.items.len;
-            pending.deinit(self.allocator);
+            for (pending.items.items) |item| {
+                self.queueDroppedItem(item);
+            }
+            pending.items.deinit(self.allocator);
+            pending.excluded_peers.deinit(self.allocator);
         }
     }
 
@@ -318,14 +333,21 @@ pub const Queue = struct {
 
         if (oldest_root) |root| {
             if (self.pending_by_root.getPtr(root)) |pending| {
-                var removed = pending.items.swapRemove(oldest_idx);
-                removed.deinit(self.allocator);
+                const removed = pending.items.swapRemove(oldest_idx);
+                self.queueDroppedItem(removed);
                 self.total_count -|= 1;
                 if (pending.items.items.len == 0) {
                     self.removeRoot(root);
                 }
             }
         }
+    }
+
+    fn queueDroppedItem(self: *Queue, item: PendingItem) void {
+        var owned = item;
+        self.dropped_items.append(self.allocator, owned) catch {
+            owned.deinit(self.allocator);
+        };
     }
 
     fn selectPeer(self: *Queue, pending: *PendingRoot, peers: []const []const u8) ?[]const u8 {
@@ -484,4 +506,50 @@ test "Queue retries a different peer after failure" {
     queue.tick(callbacks);
     try std.testing.expectEqual(root, ctx.requested_root.?);
     try std.testing.expectEqualStrings("peer-b", ctx.requested_peer.?);
+}
+
+test "Queue exposes expired items through takeDropped" {
+    var queue = Queue.init(std.testing.allocator);
+    defer queue.deinit();
+
+    var att = AttestationWork{
+        .source = .{},
+        .message_id = [_]u8{0xC3} ** 20,
+        .attestation = undefined,
+        .attestation_data_root = [_]u8{0} ** 32,
+        .resolved = .{
+            .validator_index = 1,
+            .validator_committee_index = 0,
+            .committee_size = 1,
+            .signing_root = [_]u8{0} ** 32,
+            .expected_subnet = 0,
+        },
+        .subnet_id = 0,
+        .seen_timestamp_ns = 0,
+    };
+    att.attestation = .{ .phase0 = .{
+        .aggregation_bits = .{ .bit_len = 1, .data = .empty },
+        .data = .{
+            .slot = 12,
+            .index = 0,
+            .beacon_block_root = [_]u8{0x33} ** 32,
+            .source = .{ .epoch = 0, .root = [_]u8{0} ** 32 },
+            .target = .{ .epoch = 0, .root = [_]u8{0} ** 32 },
+        },
+        .signature = [_]u8{0} ** 96,
+    } };
+
+    try std.testing.expect(try queue.addAttestation([_]u8{0x33} ** 32, "peer-a", att));
+
+    queue.onSlot(13);
+
+    var dropped: ReleasedItems = .empty;
+    defer {
+        for (dropped.items) |*item| item.deinit(std.testing.allocator);
+        dropped.deinit(std.testing.allocator);
+    }
+    try queue.takeDropped(&dropped);
+
+    try std.testing.expectEqual(@as(usize, 1), dropped.items.len);
+    try std.testing.expectEqual(@as(usize, 0), queue.pendingCount());
 }

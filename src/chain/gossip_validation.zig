@@ -804,27 +804,35 @@ test "gossip data column: reject proposer out of bounds" {
 /// Fast Phase 1 validation for a `BlobSidecar` on the `blob_sidecar_{subnet_id}` topic.
 ///
 /// Checks (spec reference: deneb/p2p-interface.md#blob_sidecar_subnet_id):
-/// 1. [REJECT]  blob.index must match the subnet_id.
+/// 1. [REJECT]  blob.index must map to the subnet_id.
 /// 2. [IGNORE]  Not from a future slot (with clock disparity tolerance).
 /// 3. [IGNORE]  Slot is greater than the finalized slot.
-/// 4. [REJECT]  Proposer index is within the known validator set.
-/// 5. [IGNORE]  Parent block root is known in our fork choice.
+/// 4. [IGNORE]  The block root is not already known in fork choice.
+/// 5. [REJECT]  Proposer index is within the known validator set.
+/// 6. [IGNORE]  Parent block root is known in our fork choice.
 pub fn validateGossipBlobSidecar(
     block_slot: u64,
     proposer_index: u64,
     blob_index: u64,
     subnet_id: u64,
+    blob_subnet_count: u64,
     parent_root: [32]u8,
+    block_root: [32]u8,
     state: *const ChainState,
 ) GossipAction {
-    // [REJECT] blob.index must match subnet_id.
-    if (blob_index != subnet_id) return .reject;
+    std.debug.assert(blob_subnet_count > 0);
+
+    // [REJECT] blob.index must map to subnet_id.
+    if (blob_index % blob_subnet_count != subnet_id) return .reject;
 
     // [IGNORE] Not from a future slot.
     if (block_slot > state.current_slot + MAX_FUTURE_SLOT_TOLERANCE) return .ignore;
 
     // [IGNORE] Not already finalized.
     if (block_slot <= state.finalized_slot) return .ignore;
+
+    // [IGNORE] Block already known.
+    if (state.isKnownBlockRoot(state.ptr, block_root)) return .ignore;
 
     // [REJECT] Proposer index within validator set bounds.
     const validator_count = state.getValidatorCount(state.ptr);
@@ -1002,7 +1010,7 @@ test "gossip blob sidecar: accept valid sidecar" {
     var cache = SeenCache.init(testing.allocator);
     defer cache.deinit();
     const state = makeMockChainState(&cache);
-    const result = validateGossipBlobSidecar(100, 5, 0, 0, [_]u8{0xAA} ** 32, &state);
+    const result = validateGossipBlobSidecar(100, 5, 0, 0, 6, [_]u8{0xAA} ** 32, [_]u8{0} ** 32, &state);
     try testing.expectEqual(GossipAction.accept, result);
 }
 
@@ -1010,7 +1018,7 @@ test "gossip blob sidecar: reject wrong subnet" {
     var cache = SeenCache.init(testing.allocator);
     defer cache.deinit();
     const state = makeMockChainState(&cache);
-    const result = validateGossipBlobSidecar(100, 5, 2, 3, [_]u8{0xAA} ** 32, &state);
+    const result = validateGossipBlobSidecar(100, 5, 2, 3, 6, [_]u8{0xAA} ** 32, [_]u8{0} ** 32, &state);
     try testing.expectEqual(GossipAction.reject, result);
 }
 
@@ -1018,7 +1026,23 @@ test "gossip blob sidecar: ignore future slot" {
     var cache = SeenCache.init(testing.allocator);
     defer cache.deinit();
     const state = makeMockChainState(&cache);
-    const result = validateGossipBlobSidecar(102, 5, 0, 0, [_]u8{0xAA} ** 32, &state);
+    const result = validateGossipBlobSidecar(102, 5, 0, 0, 6, [_]u8{0xAA} ** 32, [_]u8{0} ** 32, &state);
+    try testing.expectEqual(GossipAction.ignore, result);
+}
+
+test "gossip blob sidecar: electra subnet mapping uses modulo" {
+    var cache = SeenCache.init(testing.allocator);
+    defer cache.deinit();
+    const state = makeMockChainState(&cache);
+    const result = validateGossipBlobSidecar(100, 5, 10, 1, 9, [_]u8{0xAA} ** 32, [_]u8{0} ** 32, &state);
+    try testing.expectEqual(GossipAction.accept, result);
+}
+
+test "gossip blob sidecar: ignore already known block root" {
+    var cache = SeenCache.init(testing.allocator);
+    defer cache.deinit();
+    const state = makeMockChainState(&cache);
+    const result = validateGossipBlobSidecar(100, 5, 0, 0, 6, [_]u8{0xAA} ** 32, [_]u8{0xAA} ** 32, &state);
     try testing.expectEqual(GossipAction.ignore, result);
 }
 

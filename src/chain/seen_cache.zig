@@ -9,16 +9,43 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 
 const types = @import("consensus_types");
+const constants = @import("constants");
 const preset = @import("preset").preset;
 
+const Root = types.primitive.Root.Type;
 const Slot = types.primitive.Slot.Type;
 const Epoch = types.primitive.Epoch.Type;
 const ValidatorIndex = types.primitive.ValidatorIndex.Type;
+const ContributionAndProof = types.altair.ContributionAndProof.Type;
+const SyncCommitteeContribution = types.altair.SyncCommitteeContribution.Type;
+
+const SYNC_SUBCOMMITTEE_BYTES: usize = @divExact(
+    preset.SYNC_COMMITTEE_SIZE / constants.SYNC_COMMITTEE_SUBNET_COUNT,
+    8,
+);
+const MAX_SYNC_CONTRIBUTION_SLOTS: Slot = 8;
 
 /// Key for data column sidecar deduplication: (block_root, column_index).
 pub const DataColumnKey = struct {
     block_root: [32]u8,
     column_index: u64,
+};
+
+pub const SyncContributionAggregatorKey = struct {
+    slot: Slot,
+    subcommittee_index: u64,
+    aggregator_index: ValidatorIndex,
+};
+
+pub const SyncContributionDataKey = struct {
+    slot: Slot,
+    beacon_block_root: Root,
+    subcommittee_index: u64,
+};
+
+const SyncContributionAggregationInfo = struct {
+    aggregation_bits: [SYNC_SUBCOMMITTEE_BYTES]u8,
+    true_bit_count: u32,
 };
 
 /// Caches for messages already seen on the gossip network.
@@ -51,6 +78,12 @@ pub const SeenCache = struct {
     /// Used for PeerDAS / Fulu deduplication.
     seen_data_columns: std.AutoHashMap(DataColumnKey, void),
 
+    /// Seen sync committee contribution aggregators, keyed by (slot, subnet, aggregator).
+    seen_sync_contribution_aggregators: std.AutoHashMap(SyncContributionAggregatorKey, void),
+
+    /// Seen sync committee contribution participant sets, keyed by (slot, root, subnet).
+    seen_sync_contributions: std.AutoHashMap(SyncContributionDataKey, std.ArrayListUnmanaged(SyncContributionAggregationInfo)),
+
     pub fn init(allocator: Allocator) SeenCache {
         return .{
             .allocator = allocator,
@@ -61,6 +94,8 @@ pub const SeenCache = struct {
             .seen_attester_slashings = std.AutoHashMap([32]u8, void).init(allocator),
             .seen_bls_changes = std.AutoHashMap(ValidatorIndex, void).init(allocator),
             .seen_data_columns = std.AutoHashMap(DataColumnKey, void).init(allocator),
+            .seen_sync_contribution_aggregators = std.AutoHashMap(SyncContributionAggregatorKey, void).init(allocator),
+            .seen_sync_contributions = std.AutoHashMap(SyncContributionDataKey, std.ArrayListUnmanaged(SyncContributionAggregationInfo)).init(allocator),
         };
     }
 
@@ -72,6 +107,9 @@ pub const SeenCache = struct {
         self.seen_attester_slashings.deinit();
         self.seen_bls_changes.deinit();
         self.seen_data_columns.deinit();
+        self.seen_sync_contribution_aggregators.deinit();
+        self.deinitSyncContributionLists();
+        self.seen_sync_contributions.deinit();
     }
 
     // -- Blocks ---------------------------------------------------------------
@@ -189,6 +227,129 @@ pub const SeenCache = struct {
         }
     }
 
+    // -- Sync committee contributions ----------------------------------------
+
+    fn syncContributionAggregatorKey(
+        slot: Slot,
+        subcommittee_index: u64,
+        aggregator_index: ValidatorIndex,
+    ) SyncContributionAggregatorKey {
+        return .{
+            .slot = slot,
+            .subcommittee_index = subcommittee_index,
+            .aggregator_index = aggregator_index,
+        };
+    }
+
+    fn syncContributionDataKey(contribution: *const SyncCommitteeContribution) SyncContributionDataKey {
+        return .{
+            .slot = contribution.slot,
+            .beacon_block_root = contribution.beacon_block_root,
+            .subcommittee_index = contribution.subcommittee_index,
+        };
+    }
+
+    fn isBitSupersetOrEqual(superset: []const u8, subset: []const u8) bool {
+        std.debug.assert(superset.len == subset.len);
+        for (superset, subset) |lhs, rhs| {
+            if ((rhs & ~lhs) != 0) return false;
+        }
+        return true;
+    }
+
+    pub fn isSyncContributionAggregatorKnown(
+        self: *const SeenCache,
+        slot: Slot,
+        subcommittee_index: u64,
+        aggregator_index: ValidatorIndex,
+    ) bool {
+        return self.seen_sync_contribution_aggregators.contains(
+            syncContributionAggregatorKey(slot, subcommittee_index, aggregator_index),
+        );
+    }
+
+    pub fn syncContributionParticipantsKnown(
+        self: *const SeenCache,
+        contribution: *const SyncCommitteeContribution,
+    ) bool {
+        const seen = self.seen_sync_contributions.get(syncContributionDataKey(contribution)) orelse return false;
+        const aggregation_bits = contribution.aggregation_bits.data[0..];
+
+        for (seen.items) |entry| {
+            if (isBitSupersetOrEqual(entry.aggregation_bits[0..], aggregation_bits)) return true;
+        }
+
+        return false;
+    }
+
+    pub fn markSyncContributionSeen(
+        self: *SeenCache,
+        contribution_and_proof: *const ContributionAndProof,
+        true_bit_count: u32,
+    ) !void {
+        const contribution = &contribution_and_proof.contribution;
+        try self.seen_sync_contribution_aggregators.put(
+            syncContributionAggregatorKey(
+                contribution.slot,
+                contribution.subcommittee_index,
+                contribution_and_proof.aggregator_index,
+            ),
+            {},
+        );
+
+        const gop = try self.seen_sync_contributions.getOrPut(syncContributionDataKey(contribution));
+        if (!gop.found_existing) {
+            gop.value_ptr.* = .empty;
+        }
+
+        const entry: SyncContributionAggregationInfo = .{
+            .aggregation_bits = contribution.aggregation_bits.data,
+            .true_bit_count = true_bit_count,
+        };
+
+        var insert_index: usize = 0;
+        while (insert_index < gop.value_ptr.items.len) : (insert_index += 1) {
+            if (true_bit_count > gop.value_ptr.items[insert_index].true_bit_count) break;
+        }
+        try gop.value_ptr.insert(self.allocator, insert_index, entry);
+    }
+
+    pub fn pruneSyncContributions(self: *SeenCache, head_slot: Slot) void {
+        const cutoff = if (head_slot > MAX_SYNC_CONTRIBUTION_SLOTS)
+            head_slot - MAX_SYNC_CONTRIBUTION_SLOTS
+        else
+            0;
+
+        var aggregator_keys: std.ArrayListUnmanaged(SyncContributionAggregatorKey) = .empty;
+        defer aggregator_keys.deinit(self.allocator);
+
+        var aggregator_it = self.seen_sync_contribution_aggregators.iterator();
+        while (aggregator_it.next()) |entry| {
+            if (entry.key_ptr.slot < cutoff) {
+                aggregator_keys.append(self.allocator, entry.key_ptr.*) catch continue;
+            }
+        }
+        for (aggregator_keys.items) |key| {
+            _ = self.seen_sync_contribution_aggregators.remove(key);
+        }
+
+        var contribution_keys: std.ArrayListUnmanaged(SyncContributionDataKey) = .empty;
+        defer contribution_keys.deinit(self.allocator);
+
+        var contribution_it = self.seen_sync_contributions.iterator();
+        while (contribution_it.next()) |entry| {
+            if (entry.key_ptr.slot < cutoff) {
+                contribution_keys.append(self.allocator, entry.key_ptr.*) catch continue;
+            }
+        }
+        for (contribution_keys.items) |key| {
+            if (self.seen_sync_contributions.fetchRemove(key)) |kv| {
+                var infos = kv.value;
+                infos.deinit(self.allocator);
+            }
+        }
+    }
+
     // -- Bulk prune -----------------------------------------------------------
 
     /// Prune operation dedup caches on finalization.
@@ -221,6 +382,23 @@ pub const SeenCache = struct {
         self.seen_attester_slashings.clearRetainingCapacity();
         self.seen_bls_changes.clearRetainingCapacity();
         self.seen_data_columns.clearRetainingCapacity();
+        self.seen_sync_contribution_aggregators.clearRetainingCapacity();
+        self.clearSyncContributionListsRetainingCapacity();
+        self.seen_sync_contributions.clearRetainingCapacity();
+    }
+
+    fn deinitSyncContributionLists(self: *SeenCache) void {
+        var it = self.seen_sync_contributions.iterator();
+        while (it.next()) |entry| {
+            entry.value_ptr.deinit(self.allocator);
+        }
+    }
+
+    fn clearSyncContributionListsRetainingCapacity(self: *SeenCache) void {
+        var it = self.seen_sync_contributions.iterator();
+        while (it.next()) |entry| {
+            entry.value_ptr.deinit(self.allocator);
+        }
     }
 };
 
@@ -349,4 +527,70 @@ test "SeenCache: prune data columns by root" {
     try std.testing.expect(!cache.hasSeenDataColumn(root1, 0));
     try std.testing.expect(!cache.hasSeenDataColumn(root1, 5));
     try std.testing.expect(cache.hasSeenDataColumn(root2, 3));
+}
+
+test "SeenCache: sync contribution aggregator dedup" {
+    const allocator = std.testing.allocator;
+    var cache = SeenCache.init(allocator);
+    defer cache.deinit();
+
+    var contribution_and_proof = types.altair.ContributionAndProof.default_value;
+    contribution_and_proof.aggregator_index = 100;
+    contribution_and_proof.contribution.slot = 10;
+    contribution_and_proof.contribution.subcommittee_index = 2;
+
+    try std.testing.expect(!cache.isSyncContributionAggregatorKnown(10, 2, 100));
+    try cache.markSyncContributionSeen(&contribution_and_proof, 0);
+    try std.testing.expect(cache.isSyncContributionAggregatorKnown(10, 2, 100));
+    try std.testing.expect(!cache.isSyncContributionAggregatorKnown(11, 2, 100));
+    try std.testing.expect(!cache.isSyncContributionAggregatorKnown(10, 3, 100));
+    try std.testing.expect(!cache.isSyncContributionAggregatorKnown(10, 2, 101));
+}
+
+test "SeenCache: sync contribution participants known if seen superset exists" {
+    const allocator = std.testing.allocator;
+    var cache = SeenCache.init(allocator);
+    defer cache.deinit();
+
+    var contribution_and_proof = types.altair.ContributionAndProof.default_value;
+    contribution_and_proof.aggregator_index = 100;
+    contribution_and_proof.contribution.slot = 10;
+    contribution_and_proof.contribution.subcommittee_index = 2;
+    contribution_and_proof.contribution.aggregation_bits.data[0] = 0b11110001;
+    try cache.markSyncContributionSeen(&contribution_and_proof, 5);
+
+    var subset = contribution_and_proof.contribution;
+    subset.aggregation_bits.data[0] = 0b11010001;
+    try std.testing.expect(cache.syncContributionParticipantsKnown(&subset));
+
+    var not_subset = contribution_and_proof.contribution;
+    not_subset.aggregation_bits.data[0] = 0b11111110;
+    try std.testing.expect(!cache.syncContributionParticipantsKnown(&not_subset));
+}
+
+test "SeenCache: prune sync contributions by slot" {
+    const allocator = std.testing.allocator;
+    var cache = SeenCache.init(allocator);
+    defer cache.deinit();
+
+    var old = types.altair.ContributionAndProof.default_value;
+    old.aggregator_index = 1;
+    old.contribution.slot = 5;
+    old.contribution.subcommittee_index = 0;
+    old.contribution.aggregation_bits.data[0] = 0x01;
+    try cache.markSyncContributionSeen(&old, 1);
+
+    var current = types.altair.ContributionAndProof.default_value;
+    current.aggregator_index = 2;
+    current.contribution.slot = 20;
+    current.contribution.subcommittee_index = 0;
+    current.contribution.aggregation_bits.data[0] = 0x03;
+    try cache.markSyncContributionSeen(&current, 2);
+
+    cache.pruneSyncContributions(20);
+
+    try std.testing.expect(!cache.isSyncContributionAggregatorKnown(5, 0, 1));
+    try std.testing.expect(cache.isSyncContributionAggregatorKnown(20, 0, 2));
+    try std.testing.expect(!cache.syncContributionParticipantsKnown(&old.contribution));
+    try std.testing.expect(cache.syncContributionParticipantsKnown(&current.contribution));
 }

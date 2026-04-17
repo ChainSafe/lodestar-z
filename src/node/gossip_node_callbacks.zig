@@ -23,6 +23,7 @@ const AnyIndexedAttestation = fork_types.AnyIndexedAttestation;
 const AnySignedAggregateAndProof = fork_types.AnySignedAggregateAndProof;
 const AnySignedBeaconBlock = fork_types.AnySignedBeaconBlock;
 const preset = @import("preset").preset;
+const preset_root = @import("preset").root;
 const constants = @import("constants");
 const ssz = @import("ssz");
 const processor_mod = @import("processor");
@@ -32,6 +33,7 @@ const ResolvedAggregate = processor_mod.work_item.ResolvedAggregate;
 const ResolvedAttestation = processor_mod.work_item.ResolvedAttestation;
 const gossip_handler_mod = @import("gossip_handler.zig");
 const UnknownParentBlock = gossip_handler_mod.UnknownParentBlock;
+const verifyMerkleBranch = state_transition.verifyMerkleBranch;
 
 // Import BeaconNode lazily to avoid circular dependency.
 const beacon_node_mod = @import("beacon_node.zig");
@@ -153,6 +155,15 @@ pub fn getValidatorCount(ptr: *anyopaque) u32 {
     return node.chainQuery().getValidatorCount();
 }
 
+pub fn getBlobSidecarSubnetCountForSlot(ptr: *anyopaque, slot: u64) u64 {
+    const node: *BeaconNode = @ptrCast(@alignCast(ptr));
+    const fork_seq = node.config.forkSeq(slot);
+    return if (fork_seq.gte(.electra))
+        node.config.chain.BLOB_SIDECAR_SUBNET_COUNT_ELECTRA
+    else
+        node.config.chain.BLOB_SIDECAR_SUBNET_COUNT;
+}
+
 pub fn computeAttestationSubnet(ptr: *anyopaque, slot: u64, committee_index: u64) ?u8 {
     const node: *BeaconNode = @ptrCast(@alignCast(ptr));
     const cached = node.headState() orelse return null;
@@ -164,6 +175,180 @@ fn syncCommitteePositionsForValidator(node: *BeaconNode, slot: u64, validator_in
     const indexed = cached.epoch_cache.getIndexedSyncCommittee(slot) catch return null;
     const positions = indexed.getValidatorIndexMap().get(validator_index) orelse return null;
     return positions.items;
+}
+
+fn loadPreStateForGossipHeader(
+    node: *BeaconNode,
+    parent_root: [32]u8,
+    block_slot: u64,
+) !*state_transition.CachedBeaconState {
+    const parent = node.chain.forkChoice().getBlockDefaultStatus(parent_root) orelse
+        return error.ParentUnknown;
+    if (parent.slot >= block_slot) return error.NotLaterThanParent;
+
+    const parent_state_root = (try node.chainQuery().stateRootByBlockRoot(parent_root)) orelse
+        return error.ParentStateUnavailable;
+
+    return node.chain.queued_regen.getPreState(
+        parent_root,
+        parent_state_root,
+        parent.slot,
+        block_slot,
+        .fork_choice,
+    ) catch |err| switch (err) {
+        error.NoPreStateAvailable => error.NoPreStateAvailable,
+        else => err,
+    };
+}
+
+fn verifyExpectedProposer(
+    pre_state: *const state_transition.CachedBeaconState,
+    slot: u64,
+    proposer_index: u64,
+) !void {
+    const expected_proposer = try pre_state.getBeaconProposer(slot);
+    if (expected_proposer != proposer_index) return error.InvalidProposer;
+}
+
+fn verifyBlockHeaderProposerSignature(
+    node: *BeaconNode,
+    pre_state: *const state_transition.CachedBeaconState,
+    signed_block_header: *const types.phase0.SignedBeaconBlockHeader.Type,
+) !void {
+    const proposer_index = signed_block_header.message.proposer_index;
+    if (proposer_index >= pre_state.epoch_cache.index_to_pubkey.items.len) {
+        return error.InvalidProposer;
+    }
+
+    const domain = try node.config.getDomain(
+        pre_state.epoch_cache.epoch,
+        constants.DOMAIN_BEACON_PROPOSER,
+        signed_block_header.message.slot,
+    );
+    var signing_root: [32]u8 = undefined;
+    try state_transition.computeSigningRoot(
+        types.phase0.BeaconBlockHeader,
+        &signed_block_header.message,
+        domain,
+        &signing_root,
+    );
+
+    const valid = state_transition.signature_sets.verifySingleSignatureSet(&.{
+        .pubkey = pre_state.epoch_cache.index_to_pubkey.items[proposer_index],
+        .signing_root = signing_root,
+        .signature = signed_block_header.signature,
+    }) catch return error.InvalidSignature;
+    if (!valid) return error.InvalidSignature;
+}
+
+fn verifyBlobSidecarInclusionProof(sidecar: *const types.deneb.BlobSidecar.Type) !void {
+    var leaf: [32]u8 = undefined;
+    try types.primitive.KZGCommitment.hashTreeRoot(&sidecar.kzg_commitment, &leaf);
+
+    var proof: [33][32]u8 = [_][32]u8{[_]u8{0} ** 32} ** 33;
+    for (sidecar.kzg_commitment_inclusion_proof, 0..) |proof_node, i| {
+        proof[i] = proof_node;
+    }
+
+    if (!verifyMerkleBranch(
+        leaf,
+        &proof,
+        preset.KZG_COMMITMENT_INCLUSION_PROOF_DEPTH,
+        preset_root.KZG_COMMITMENT_SUBTREE_INDEX0 + sidecar.index,
+        sidecar.signed_block_header.message.body_root,
+    )) {
+        return error.InvalidInclusionProof;
+    }
+}
+
+fn verifyDataColumnSidecarInclusionProof(sidecar: *const types.fulu.DataColumnSidecar.Type) !void {
+    var leaf: [32]u8 = undefined;
+    try types.deneb.BlobKzgCommitments.hashTreeRoot(&sidecar.kzg_commitments, &leaf);
+
+    var proof: [33][32]u8 = [_][32]u8{[_]u8{0} ** 32} ** 33;
+    for (sidecar.kzg_commitments_inclusion_proof, 0..) |proof_node, i| {
+        proof[i] = proof_node;
+    }
+
+    if (!verifyMerkleBranch(
+        leaf,
+        &proof,
+        preset.KZG_COMMITMENTS_INCLUSION_PROOF_DEPTH,
+        preset_root.KZG_COMMITMENTS_SUBTREE_INDEX,
+        sidecar.signed_block_header.message.body_root,
+    )) {
+        return error.InvalidInclusionProof;
+    }
+}
+
+fn syncContributionParticipantIndices(
+    allocator: std.mem.Allocator,
+    cached: *const state_transition.CachedBeaconState,
+    contribution: *const types.altair.SyncCommitteeContribution.Type,
+) !std.array_list.AlignedManaged(ValidatorIndex, null) {
+    const subcommittee_size: usize = preset.SYNC_COMMITTEE_SIZE / constants.SYNC_COMMITTEE_SUBNET_COUNT;
+    if (contribution.subcommittee_index >= constants.SYNC_COMMITTEE_SUBNET_COUNT) {
+        return error.InvalidSubcommitteeIndex;
+    }
+
+    const indexed = try cached.epoch_cache.getIndexedSyncCommittee(contribution.slot);
+    const validator_indices = indexed.getValidatorIndices();
+    const start_index = contribution.subcommittee_index * subcommittee_size;
+    if (start_index + subcommittee_size > validator_indices.len) {
+        return error.InvalidSubcommitteeIndex;
+    }
+
+    return contribution.aggregation_bits.intersectValues(
+        ValidatorIndex,
+        allocator,
+        validator_indices[start_index .. start_index + subcommittee_size],
+    );
+}
+
+fn verifySingleValidatorSignature(
+    pubkey: bls_mod.PublicKey,
+    signing_root: [32]u8,
+    signature: types.primitive.BLSSignature.Type,
+) !void {
+    const valid = state_transition.signature_sets.verifySingleSignatureSet(&.{
+        .pubkey = pubkey,
+        .signing_root = signing_root,
+        .signature = signature,
+    }) catch return error.InvalidSignature;
+    if (!valid) return error.InvalidSignature;
+}
+
+fn verifySyncContributionAggregateSignature(
+    allocator: std.mem.Allocator,
+    cached: *const state_transition.CachedBeaconState,
+    domain: *const [32]u8,
+    contribution: *const types.altair.SyncCommitteeContribution.Type,
+    participant_indices: []const ValidatorIndex,
+) !void {
+    const pubkeys = try allocator.alloc(bls_mod.PublicKey, participant_indices.len);
+    defer allocator.free(pubkeys);
+
+    for (participant_indices, 0..) |validator_index, i| {
+        if (validator_index >= cached.epoch_cache.index_to_pubkey.items.len) {
+            return error.ValidatorNotFound;
+        }
+        pubkeys[i] = cached.epoch_cache.index_to_pubkey.items[validator_index];
+    }
+
+    var signing_root: [32]u8 = undefined;
+    try state_transition.computeSigningRoot(
+        types.primitive.Root,
+        &contribution.beacon_block_root,
+        domain,
+        &signing_root,
+    );
+
+    const valid = state_transition.signature_sets.verifyAggregatedSignatureSet(&.{
+        .pubkeys = pubkeys,
+        .signing_root = signing_root,
+        .signature = contribution.signature,
+    }) catch return error.InvalidSignature;
+    if (!valid) return error.InvalidSignature;
 }
 
 pub fn isValidSyncCommitteeSubnet(ptr: *anyopaque, slot: u64, validator_index: u64, subnet: u64) bool {
@@ -1092,4 +1277,173 @@ pub fn verifySyncCommitteeMessage(
         .signing_root = owned_set.set.signing_root,
         .signature = owned_set.set.signature,
     }) catch false;
+}
+
+pub fn verifySyncContributionSignature(
+    ptr: *anyopaque,
+    signed_contribution: *const types.altair.SignedContributionAndProof.Type,
+) anyerror!u32 {
+    const node: *BeaconNode = @ptrCast(@alignCast(ptr));
+    const cached = node.headState().?;
+
+    const contribution_and_proof = &signed_contribution.message;
+    const contribution = &contribution_and_proof.contribution;
+    const aggregator_index = contribution_and_proof.aggregator_index;
+
+    const positions = syncCommitteePositionsForValidator(node, contribution.slot, aggregator_index) orelse
+        return error.ValidatorNotFound;
+    const subcommittee_size: u32 = @intCast(preset.SYNC_COMMITTEE_SIZE / constants.SYNC_COMMITTEE_SUBNET_COUNT);
+
+    var aggregator_in_subcommittee = false;
+    for (positions) |position| {
+        if (@divFloor(position, subcommittee_size) == contribution.subcommittee_index) {
+            aggregator_in_subcommittee = true;
+            break;
+        }
+    }
+    if (!aggregator_in_subcommittee) return error.ValidatorNotInSyncCommittee;
+
+    var participant_indices = try syncContributionParticipantIndices(node.allocator, cached, contribution);
+    defer participant_indices.deinit();
+    if (participant_indices.items.len == 0) return error.NoParticipant;
+
+    if (!state_transition.isSyncCommitteeAggregator(contribution_and_proof.selection_proof)) {
+        return error.InvalidSelectionProof;
+    }
+
+    if (aggregator_index >= cached.epoch_cache.index_to_pubkey.items.len) {
+        return error.ValidatorNotFound;
+    }
+    const aggregator_pubkey = cached.epoch_cache.index_to_pubkey.items[aggregator_index];
+
+    const selection_domain = try node.config.getDomain(
+        cached.epoch_cache.epoch,
+        constants.DOMAIN_SYNC_COMMITTEE_SELECTION_PROOF,
+        contribution.slot,
+    );
+    const selection_data = types.altair.SyncAggregatorSelectionData.Type{
+        .slot = contribution.slot,
+        .subcommittee_index = contribution.subcommittee_index,
+    };
+    var selection_signing_root: [32]u8 = undefined;
+    try state_transition.computeSigningRoot(
+        types.altair.SyncAggregatorSelectionData,
+        &selection_data,
+        selection_domain,
+        &selection_signing_root,
+    );
+    try verifySingleValidatorSignature(
+        aggregator_pubkey,
+        selection_signing_root,
+        contribution_and_proof.selection_proof,
+    );
+
+    const contribution_and_proof_domain = try node.config.getDomain(
+        cached.epoch_cache.epoch,
+        constants.DOMAIN_CONTRIBUTION_AND_PROOF,
+        contribution.slot,
+    );
+    var contribution_and_proof_signing_root: [32]u8 = undefined;
+    try state_transition.computeSigningRoot(
+        types.altair.ContributionAndProof,
+        contribution_and_proof,
+        contribution_and_proof_domain,
+        &contribution_and_proof_signing_root,
+    );
+    try verifySingleValidatorSignature(
+        aggregator_pubkey,
+        contribution_and_proof_signing_root,
+        signed_contribution.signature,
+    );
+
+    const contribution_domain = try node.config.getDomain(
+        cached.epoch_cache.epoch,
+        constants.DOMAIN_SYNC_COMMITTEE,
+        contribution.slot,
+    );
+    try verifySyncContributionAggregateSignature(
+        node.allocator,
+        cached,
+        contribution_domain,
+        contribution,
+        participant_indices.items,
+    );
+
+    return @intCast(participant_indices.items.len);
+}
+
+pub fn verifyBlobSidecar(
+    ptr: *anyopaque,
+    sidecar: *const types.deneb.BlobSidecar.Type,
+) anyerror!void {
+    const node: *BeaconNode = @ptrCast(@alignCast(ptr));
+    const block_slot = sidecar.signed_block_header.message.slot;
+    const max_blobs_per_block = node.config.getMaxBlobsPerBlock(
+        state_transition.computeEpochAtSlot(block_slot),
+    );
+    if (sidecar.index >= max_blobs_per_block) return error.InvalidBlobIndex;
+
+    const pre_state = try loadPreStateForGossipHeader(
+        node,
+        sidecar.signed_block_header.message.parent_root,
+        block_slot,
+    );
+    try verifyBlockHeaderProposerSignature(node, pre_state, &sidecar.signed_block_header);
+    try verifyExpectedProposer(pre_state, block_slot, sidecar.signed_block_header.message.proposer_index);
+    try verifyBlobSidecarInclusionProof(sidecar);
+
+    const blob_ptr: *const [chain_mod.blob_kzg_verification.BYTES_PER_BLOB]u8 = @ptrCast(&sidecar.blob);
+    node.chainService().verifyBlobSidecar(.{
+        .blob = blob_ptr,
+        .commitment = sidecar.kzg_commitment,
+        .proof = sidecar.kzg_proof,
+    }) catch |err| switch (err) {
+        error.InvalidKzgProof => return error.InvalidKzgProof,
+        else => return err,
+    };
+}
+
+pub fn verifyDataColumnSidecar(
+    ptr: *anyopaque,
+    sidecar: *const types.fulu.DataColumnSidecar.Type,
+) anyerror!void {
+    const node: *BeaconNode = @ptrCast(@alignCast(ptr));
+    const block_slot = sidecar.signed_block_header.message.slot;
+
+    if (sidecar.index >= preset_root.NUMBER_OF_COLUMNS) return error.InvalidColumnIndex;
+    if (sidecar.kzg_commitments.items.len == 0) return error.InvalidCommitmentCount;
+
+    const max_blobs_per_block = node.config.getMaxBlobsPerBlock(
+        state_transition.computeEpochAtSlot(block_slot),
+    );
+    if (sidecar.kzg_commitments.items.len > max_blobs_per_block) {
+        return error.InvalidCommitmentCount;
+    }
+    if (sidecar.column.items.len != sidecar.kzg_commitments.items.len) {
+        return error.InvalidColumnCount;
+    }
+    if (sidecar.kzg_proofs.items.len != sidecar.kzg_commitments.items.len) {
+        return error.InvalidProofCount;
+    }
+
+    const pre_state = try loadPreStateForGossipHeader(
+        node,
+        sidecar.signed_block_header.message.parent_root,
+        block_slot,
+    );
+    try verifyExpectedProposer(pre_state, block_slot, sidecar.signed_block_header.message.proposer_index);
+    try verifyBlockHeaderProposerSignature(node, pre_state, &sidecar.signed_block_header);
+    try verifyDataColumnSidecarInclusionProof(sidecar);
+
+    node.chainService().verifyDataColumnSidecar(
+        node.allocator,
+        sidecar.index,
+        sidecar.kzg_commitments.items,
+        sidecar.column.items,
+        sidecar.kzg_proofs.items,
+    ) catch |err| switch (err) {
+        error.InvalidCellKzgProof => return error.InvalidKzgProof,
+        error.LengthMismatch => return error.InvalidColumnCount,
+        else => return err,
+    };
 }

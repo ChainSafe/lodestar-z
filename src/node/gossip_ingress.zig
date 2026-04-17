@@ -14,6 +14,7 @@ const processor = @import("processor");
 
 const BeaconNode = @import("beacon_node.zig").BeaconNode;
 const GossipIngressMetadata = @import("gossip_handler.zig").GossipIngressMetadata;
+const MessageId = processor.work_item.MessageId;
 
 pub fn processEvents(self: *BeaconNode, io: std.Io, p2p: *networking.P2pService) usize {
     const events = p2p.drainGossipEvents(io) catch |err| {
@@ -34,7 +35,7 @@ pub fn processEvents(self: *BeaconNode, io: std.Io, p2p: *networking.P2pService)
                 const peer = optionalPeerId(msg.peer_id);
                 const metadata = GossipIngressMetadata{
                     .source = processor.work_item.GossipSource.fromOpaqueBytes(0x70656572, peer),
-                    .message_id = networking.computeGossipMessageId(self.allocator, msg.data) catch std.mem.zeroes(networking.GossipMessageId),
+                    .message_id = gossipMessageIdFromBytes(msg.msg_id),
                     .seen_timestamp_ns = currentUnixTimeNs(io),
                     .peer_id = peer,
                 };
@@ -81,12 +82,17 @@ fn processValidatedMessage(
         .accepted => {
             _ = p2p.reportGossipValidationResult(io, msg_id, .accept);
         },
+        .deferred => {
+            self.beginPendingGossipValidation(metadata.message_id, peer, topic) catch |err| {
+                _ = p2p.reportGossipValidationResult(io, msg_id, .ignore);
+                scoped_log.warn("failed to track deferred gossip validation: {}", .{err});
+            };
+        },
         .ignored => {
             _ = p2p.reportGossipValidationResult(io, msg_id, .ignore);
         },
         .rejected => |reason| {
-            recordInvalidMessage(io, p2p, peer, topic);
-            applyGossipPenalty(self, io, p2p, peer, reason);
+            self.handleGossipReject(io, p2p, peer, topic, reason);
             _ = p2p.reportGossipValidationResult(io, msg_id, .reject);
             scoped_log.debug(
                 "Gossip {s} rejected ({s}) fork_seq={s} subnet={?d} topic={s} payload_len={d}",
@@ -110,6 +116,17 @@ fn processValidatedMessage(
     }
 }
 
+fn gossipMessageIdFromBytes(bytes: []const u8) MessageId {
+    var out = std.mem.zeroes(MessageId);
+    const len = @min(out.len, bytes.len);
+    @memcpy(out[0..len], bytes[0..len]);
+    return out;
+}
+
+fn recordInvalidMessage(io: std.Io, p2p: *networking.P2pService, peer: ?[]const u8, topic: []const u8) void {
+    if (peer) |peer_id| p2p.recordInvalidGossipMessage(io, peer_id, topic);
+}
+
 fn resolveForkSeq(self: *BeaconNode, io: std.Io, parsed: networking.GossipTopic) ?config_mod.ForkSeq {
     const slot = currentNetworkSlot(self, io);
     const epoch = computeEpochAtSlot(slot);
@@ -120,39 +137,11 @@ fn optionalPeerId(peer_id: []const u8) ?[]const u8 {
     return if (peer_id.len == 0) null else peer_id;
 }
 
-fn recordInvalidMessage(io: std.Io, p2p: *networking.P2pService, peer: ?[]const u8, topic: []const u8) void {
-    if (peer) |peer_id| p2p.recordInvalidGossipMessage(io, peer_id, topic);
-}
-
-fn applyGossipPenalty(
-    self: *BeaconNode,
-    io: std.Io,
-    p2p: *networking.P2pService,
-    peer: ?[]const u8,
-    reason: networking.peer_scoring.GossipRejectReason,
-) void {
-    const peer_id = peer orelse return;
-    const pm = self.peer_manager orelse return;
-    const action = networking.peer_scoring.gossipFailureAction(reason);
-    const state = pm.reportPeer(peer_id, action, .gossipsub, currentUnixTimeMs(io)) orelse return;
-    switch (state) {
-        .healthy => {},
-        .disconnected, .banned => {
-            _ = p2p.disconnectPeer(io, peer_id);
-        },
-    }
-}
-
 fn currentNetworkSlot(self: *BeaconNode, io: std.Io) u64 {
     if (self.clock) |clock| {
         if (clock.currentSlot(io)) |slot| return slot;
     }
     return self.currentHeadSlot();
-}
-
-fn currentUnixTimeMs(io: std.Io) u64 {
-    const ms = std.Io.Timestamp.now(io, .real).toMilliseconds();
-    return if (ms < 0) 0 else @intCast(ms);
 }
 
 fn currentUnixTimeNs(io: std.Io) i64 {

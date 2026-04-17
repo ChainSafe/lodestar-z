@@ -119,10 +119,12 @@ const WorkItem = processor_mod.WorkItem;
 const WorkQueues = processor_mod.WorkQueues;
 const AttestationWork = processor_mod.work_item.AttestationWork;
 const AggregateWork = processor_mod.work_item.AggregateWork;
+const MessageId = processor_mod.work_item.MessageId;
 const ResolvedAggregate = processor_mod.work_item.ResolvedAggregate;
 const ResolvedAttestation = processor_mod.work_item.ResolvedAttestation;
 const PendingUnknownBlockGossipQueue = pending_unknown_block_gossip_mod.Queue;
 const PendingUnknownBlockGossipItem = pending_unknown_block_gossip_mod.PendingItem;
+const GossipRejectReason = networking.peer_scoring.GossipRejectReason;
 // Chain import/result types come from chain_mod (src/chain).
 const SyncCallbackCtx = sync_bridge_mod.SyncCallbackCtx;
 
@@ -136,6 +138,36 @@ pub const SyncStatus = struct {
     is_syncing: bool,
     is_optimistic: bool,
     el_offline: bool,
+};
+
+const PendingGossipValidation = struct {
+    peer_id: ?[]u8 = null,
+    topic: []u8,
+
+    fn deinit(self: *PendingGossipValidation, allocator: Allocator) void {
+        if (self.peer_id) |peer_id| allocator.free(peer_id);
+        allocator.free(self.topic);
+        self.* = undefined;
+    }
+};
+
+const QueuedGossipValidationOutcome = union(enum) {
+    accept,
+    ignore,
+    reject: GossipRejectReason,
+};
+
+const CompletedGossipValidation = struct {
+    msg_id: MessageId,
+    peer_id: ?[]u8 = null,
+    topic: []u8,
+    outcome: QueuedGossipValidationOutcome,
+
+    fn deinit(self: *CompletedGossipValidation, allocator: Allocator) void {
+        if (self.peer_id) |peer_id| allocator.free(peer_id);
+        allocator.free(self.topic);
+        self.* = undefined;
+    }
 };
 
 const SyncStatusInputs = struct {
@@ -725,6 +757,8 @@ pub const BeaconNode = struct {
     /// BLS thread pool reserved for gossip attestation/aggregate verification.
     gossip_bls_thread_pool: *BlsThreadPool,
     pending_gossip_bls_batches: std.ArrayListUnmanaged(PendingGossipBlsBatch) = .empty,
+    pending_gossip_validations: std.AutoHashMap(MessageId, PendingGossipValidation),
+    completed_gossip_validations: std.ArrayListUnmanaged(CompletedGossipValidation) = .empty,
 
     // Node identity — secp256k1 keypair loaded/generated during init().
     node_identity: NodeIdentity,
@@ -760,6 +794,93 @@ pub const BeaconNode = struct {
     pub fn requestShutdown(self: *BeaconNode) void {
         self.shutdown_requested.store(true, .release);
         if (self.http_server) |*srv| srv.shutdown(self.io);
+    }
+
+    pub fn beginPendingGossipValidation(
+        self: *BeaconNode,
+        msg_id: MessageId,
+        peer_id: ?[]const u8,
+        topic: []const u8,
+    ) !void {
+        const entry = try self.pending_gossip_validations.getOrPut(msg_id);
+        if (entry.found_existing) {
+            entry.value_ptr.deinit(self.allocator);
+        }
+        entry.value_ptr.* = .{
+            .peer_id = if (peer_id) |id| try self.allocator.dupe(u8, id) else null,
+            .topic = try self.allocator.dupe(u8, topic),
+        };
+    }
+
+    pub fn finishPendingGossipValidation(
+        self: *BeaconNode,
+        msg_id: MessageId,
+        outcome: QueuedGossipValidationOutcome,
+    ) void {
+        const removed = self.pending_gossip_validations.fetchRemove(msg_id) orelse return;
+        self.completed_gossip_validations.append(self.allocator, .{
+            .msg_id = removed.key,
+            .peer_id = removed.value.peer_id,
+            .topic = removed.value.topic,
+            .outcome = outcome,
+        }) catch |err| {
+            var pending = removed.value;
+            pending.deinit(self.allocator);
+            node_log.warn("failed to queue completed gossip validation result: {}", .{err});
+        };
+    }
+
+    pub fn handleGossipReject(
+        self: *BeaconNode,
+        io: std.Io,
+        p2p: *P2pService,
+        peer_id: ?[]const u8,
+        topic: ?[]const u8,
+        reason: GossipRejectReason,
+    ) void {
+        const peer = peer_id orelse return;
+        if (topic) |topic_name| {
+            p2p.recordInvalidGossipMessage(io, peer, topic_name);
+        }
+        const pm = self.peer_manager orelse return;
+        const action = networking.peer_scoring.gossipFailureAction(reason);
+        const state = pm.reportPeer(peer, action, .gossipsub, currentUnixTimeMs(io)) orelse return;
+        switch (state) {
+            .healthy => {},
+            .disconnected, .banned => {
+                _ = p2p.disconnectPeer(io, peer);
+            },
+        }
+    }
+
+    pub fn drainCompletedGossipValidations(
+        self: *BeaconNode,
+        io: std.Io,
+        p2p: *P2pService,
+    ) bool {
+        var did_work = false;
+
+        while (self.completed_gossip_validations.items.len > 0) {
+            var completion = self.completed_gossip_validations.orderedRemove(0);
+            defer completion.deinit(self.allocator);
+
+            switch (completion.outcome) {
+                .accept => {
+                    _ = p2p.reportGossipValidationResult(io, &completion.msg_id, .accept);
+                },
+                .ignore => {
+                    _ = p2p.reportGossipValidationResult(io, &completion.msg_id, .ignore);
+                },
+                .reject => |reason| {
+                    self.handleGossipReject(io, p2p, completion.peer_id, completion.topic, reason);
+                    _ = p2p.reportGossipValidationResult(io, &completion.msg_id, .reject);
+                },
+            }
+
+            did_work = true;
+        }
+
+        return did_work;
     }
 
     /// Keep the experimental header-only unknown-chain path disabled in the
@@ -2658,6 +2779,7 @@ pub const BeaconNode = struct {
         peer_id: ?[]const u8,
     ) !bool {
         const added = try self.pending_unknown_block_gossip.addAttestation(block_root, peer_id, work);
+        self.drainDroppedPendingUnknownBlockGossip();
         if (!added) return false;
         self.recordBlockImportResult(.gossip, "queued_unknown_parent", 1);
         return true;
@@ -2670,6 +2792,7 @@ pub const BeaconNode = struct {
         peer_id: ?[]const u8,
     ) !bool {
         const added = try self.pending_unknown_block_gossip.addAggregate(block_root, peer_id, work);
+        self.drainDroppedPendingUnknownBlockGossip();
         if (!added) return false;
         self.recordBlockImportResult(.gossip, "queued_unknown_parent", 1);
         return true;
@@ -2681,10 +2804,12 @@ pub const BeaconNode = struct {
 
     pub fn onPendingUnknownBlockFetchFailed(self: *BeaconNode, block_root: [32]u8, peer_id: ?[]const u8) void {
         self.pending_unknown_block_gossip.onFetchFailed(block_root, peer_id);
+        self.drainDroppedPendingUnknownBlockGossip();
     }
 
     pub fn dropPendingUnknownBlock(self: *BeaconNode, block_root: [32]u8) void {
         self.pending_unknown_block_gossip.dropRoot(block_root);
+        self.drainDroppedPendingUnknownBlockGossip();
     }
 
     pub fn drivePendingUnknownBlockGossip(self: *BeaconNode) void {
@@ -2694,6 +2819,7 @@ pub const BeaconNode = struct {
             .requestBlockByRootFn = &sync_bridge_mod.SyncCallbackCtx.enqueueUnknownBlockGossipRequestFn,
             .getConnectedPeersFn = &sync_bridge_mod.SyncCallbackCtx.connectedPeerIdsFn,
         });
+        self.drainDroppedPendingUnknownBlockGossip();
     }
 
     fn releasePendingUnknownBlockGossip(self: *BeaconNode, block_root: [32]u8) void {
@@ -2723,6 +2849,23 @@ pub const BeaconNode = struct {
         switch (item) {
             .attestation => |work| handleQueuedAttestation(self, work),
             .aggregate => |work| handleQueuedAggregate(self, work),
+        }
+    }
+
+    pub fn drainDroppedPendingUnknownBlockGossip(self: *BeaconNode) void {
+        var dropped = pending_unknown_block_gossip_mod.ReleasedItems.empty;
+        defer {
+            for (dropped.items) |*item| item.deinit(self.allocator);
+            dropped.deinit(self.allocator);
+        }
+
+        self.pending_unknown_block_gossip.takeDropped(&dropped) catch |err| {
+            node_log.warn("failed to drain dropped pending unknown-block gossip: {}", .{err});
+            return;
+        };
+
+        for (dropped.items) |item| {
+            finishQueuedGossipIgnore(self, item.messageId());
         }
     }
 
@@ -3694,6 +3837,23 @@ fn verifySyncMessageBatchSync(
     return batch_verifier.verifyAll() catch false;
 }
 
+fn finishQueuedGossipAccept(node: *BeaconNode, msg_id: MessageId) void {
+    node.finishPendingGossipValidation(msg_id, .accept);
+}
+
+fn finishQueuedGossipIgnore(node: *BeaconNode, msg_id: MessageId) void {
+    node.finishPendingGossipValidation(msg_id, .ignore);
+}
+
+fn finishQueuedGossipReject(node: *BeaconNode, msg_id: MessageId, reason: GossipRejectReason) void {
+    node.finishPendingGossipValidation(msg_id, .{ .reject = reason });
+}
+
+fn currentUnixTimeMs(io: std.Io) u64 {
+    const ms = std.Io.Timestamp.now(io, .real).toMilliseconds();
+    return if (ms < 0) 0 else @intCast(ms);
+}
+
 fn importAttestationBatchItems(node: *BeaconNode, items: []AttestationWork, batch_valid: bool) void {
     for (items) |item| {
         var attestation = item.attestation;
@@ -3704,20 +3864,30 @@ fn importAttestationBatchItems(node: *BeaconNode, items: []AttestationWork, batc
                 if (gh.verifyAttestationSignatureFn) |verifyFn| {
                     if (!verifyFn(gh.node, &attestation, &item.resolved)) {
                         node_log.debug("attestation BLS failed in batch fallback at slot {d}", .{attestation.slot()});
+                        finishQueuedGossipReject(node, item.message_id, .invalid_signature);
                         continue;
                     }
                 }
             }
         }
 
-        const gh = node.gossip_handler orelse continue;
-        const importFn = gh.importResolvedAttestationFn orelse continue;
+        const gh = node.gossip_handler orelse {
+            finishQueuedGossipIgnore(node, item.message_id);
+            continue;
+        };
+        const importFn = gh.importResolvedAttestationFn orelse {
+            finishQueuedGossipIgnore(node, item.message_id);
+            continue;
+        };
 
         importFn(gh.node, &attestation, &item.attestation_data_root, &item.resolved) catch |err| {
             node_log.debug("processor attestation import failed for slot {d}: {}", .{
                 attestation.slot(), err,
             });
+            finishQueuedGossipIgnore(node, item.message_id);
+            continue;
         };
+        finishQueuedGossipAccept(node, item.message_id);
     }
 }
 
@@ -3734,22 +3904,31 @@ fn importAggregateBatchItems(node: *BeaconNode, items: []AggregateWork, batch_va
                         node_log.debug("aggregate BLS failed in batch fallback at slot {d}", .{
                             aggregate.attestation().slot(),
                         });
+                        finishQueuedGossipReject(node, item.message_id, .invalid_signature);
                         continue;
                     }
                 }
             }
         }
 
-        if (node.gossip_handler) |gh| {
-            if (gh.importResolvedAggregateFn) |importFn| {
-                importFn(gh.node, &aggregate, &item.attestation_data_root, &item.resolved) catch |err| {
-                    node_log.debug("processor aggregate import failed at slot {d}: {}", .{
-                        aggregate.attestation().slot(),
-                        err,
-                    });
-                };
-            }
-        }
+        const gh = node.gossip_handler orelse {
+            finishQueuedGossipIgnore(node, item.message_id);
+            continue;
+        };
+        const importFn = gh.importResolvedAggregateFn orelse {
+            finishQueuedGossipIgnore(node, item.message_id);
+            continue;
+        };
+
+        importFn(gh.node, &aggregate, &item.attestation_data_root, &item.resolved) catch |err| {
+            node_log.debug("processor aggregate import failed at slot {d}: {}", .{
+                aggregate.attestation().slot(),
+                err,
+            });
+            finishQueuedGossipIgnore(node, item.message_id);
+            continue;
+        };
+        finishQueuedGossipAccept(node, item.message_id);
     }
 }
 
@@ -3766,6 +3945,7 @@ fn importSyncMessageBatchItems(
                     node_log.debug("sync committee message BLS failed in batch fallback at slot {d}", .{
                         item.message.slot,
                     });
+                    finishQueuedGossipReject(node, item.message_id, .invalid_signature);
                     continue;
                 }
             }
@@ -4149,6 +4329,7 @@ pub fn processorHandlerCallback(item: WorkItem, context: *anyopaque) void {
                     );
                     if (!signature_valid) {
                         node_log.debug("single aggregate BLS failed for aggregator {d}", .{work.aggregate.aggregatorIndex()});
+                        finishQueuedGossipReject(node, work.message_id, .invalid_signature);
                         work.resolved.deinit(node.allocator);
                         var aggregate = work.aggregate;
                         aggregate.deinit(node.allocator);
@@ -4219,6 +4400,7 @@ pub fn processorHandlerCallback(item: WorkItem, context: *anyopaque) void {
                             work.message.validator_index,
                             work.message.slot,
                         });
+                        finishQueuedGossipReject(node, work.message_id, .invalid_signature);
                         return;
                     }
                 }
@@ -4237,42 +4419,55 @@ fn handleQueuedAttestation(node: *BeaconNode, work: processor_mod.work_item.Atte
     var attestation = work.attestation;
     defer attestation.deinit(node.allocator);
 
-    if (node.gossip_handler) |gh| {
-        if (gh.verifyAttestationSignatureFn) |verifyFn| {
-            const verify_started_ns = wallNowNs(node.io);
-            const signature_valid = verifyFn(gh.node, &attestation, &work.resolved);
-            recordGossipBlsVerificationMetrics(
-                node,
-                .attestation,
-                .single,
-                if (signature_valid) .success else .failure,
-                1,
-                null,
-                elapsedNsBetween(verify_started_ns, wallNowNs(node.io)),
-            );
-            if (!signature_valid) {
-                node_log.debug("single attestation BLS failed at slot {d}", .{attestation.slot()});
-                return;
-            }
+    const gh = node.gossip_handler orelse {
+        finishQueuedGossipIgnore(node, work.message_id);
+        return;
+    };
+
+    if (gh.verifyAttestationSignatureFn) |verifyFn| {
+        const verify_started_ns = wallNowNs(node.io);
+        const signature_valid = verifyFn(gh.node, &attestation, &work.resolved);
+        recordGossipBlsVerificationMetrics(
+            node,
+            .attestation,
+            .single,
+            if (signature_valid) .success else .failure,
+            1,
+            null,
+            elapsedNsBetween(verify_started_ns, wallNowNs(node.io)),
+        );
+        if (!signature_valid) {
+            node_log.debug("single attestation BLS failed at slot {d}", .{attestation.slot()});
+            finishQueuedGossipReject(node, work.message_id, .invalid_signature);
+            return;
         }
-        const importFn = gh.importResolvedAttestationFn orelse return;
-        importFn(gh.node, &attestation, &work.attestation_data_root, &work.resolved) catch |err| {
-            node_log.debug("processor attestation import failed for slot {d}: {}", .{
-                attestation.slot(),
-                err,
-            });
-        };
     }
+
+    const importFn = gh.importResolvedAttestationFn orelse {
+        finishQueuedGossipIgnore(node, work.message_id);
+        return;
+    };
+    importFn(gh.node, &attestation, &work.attestation_data_root, &work.resolved) catch |err| {
+        node_log.debug("processor attestation import failed for slot {d}: {}", .{
+            attestation.slot(),
+            err,
+        });
+        finishQueuedGossipIgnore(node, work.message_id);
+        return;
+    };
+    finishQueuedGossipAccept(node, work.message_id);
 }
 
 fn handleQueuedAggregate(node: *BeaconNode, work: processor_mod.work_item.AggregateWork) void {
     const gh = node.gossip_handler orelse {
+        finishQueuedGossipIgnore(node, work.message_id);
         work.resolved.deinit(node.allocator);
         var aggregate = work.aggregate;
         aggregate.deinit(node.allocator);
         return;
     };
     const importFn = gh.importResolvedAggregateFn orelse {
+        finishQueuedGossipIgnore(node, work.message_id);
         work.resolved.deinit(node.allocator);
         var aggregate = work.aggregate;
         aggregate.deinit(node.allocator);
@@ -4287,7 +4482,10 @@ fn handleQueuedAggregate(node: *BeaconNode, work: processor_mod.work_item.Aggreg
         node_log.debug("processor aggregate import failed for aggregator {d}: {}", .{
             aggregate.aggregatorIndex(), err,
         });
+        finishQueuedGossipIgnore(node, work.message_id);
+        return;
     };
+    finishQueuedGossipAccept(node, work.message_id);
 }
 
 fn handleQueuedVoluntaryExit(node: *BeaconNode, work: processor_mod.work_item.VoluntaryExitWork) void {
@@ -4369,11 +4567,8 @@ fn handleQueuedSyncContribution(
     const gh = node.gossip_handler orelse {
         return;
     };
-    const importFn = gh.importSyncContributionFn orelse {
-        return;
-    };
 
-    importFn(gh.node, &work.signed_contribution) catch |err| {
+    gh.importSyncContributionFn(gh.node, &work.signed_contribution) catch |err| {
         node_log.debug("processor sync contribution import failed: {}", .{err});
     };
 }
@@ -4386,16 +4581,12 @@ fn handleQueuedBlobSidecar(
         work.data.deinit();
         return;
     };
-    const importFn = gh.importBlobSidecarFn orelse {
-        work.data.deinit();
-        return;
-    };
 
     const QueuedSszBytes = gossip_handler_mod.QueuedSszBytes;
     const queued = work.data.cast(QueuedSszBytes);
     defer work.data.deinit();
 
-    importFn(gh.node, queued.ssz_bytes) catch |err| {
+    gh.importBlobSidecarFn(gh.node, queued.ssz_bytes) catch |err| {
         node_log.debug("processor blob sidecar import failed: {}", .{err});
     };
 }
@@ -4408,16 +4599,12 @@ fn handleQueuedDataColumnSidecar(
         work.data.deinit();
         return;
     };
-    const importFn = gh.importDataColumnSidecarFn orelse {
-        work.data.deinit();
-        return;
-    };
 
     const QueuedSszBytes = gossip_handler_mod.QueuedSszBytes;
     const queued = work.data.cast(QueuedSszBytes);
     defer work.data.deinit();
 
-    importFn(gh.node, queued.ssz_bytes) catch |err| {
+    gh.importDataColumnSidecarFn(gh.node, queued.ssz_bytes) catch |err| {
         node_log.debug("processor data column sidecar import failed: {}", .{err});
     };
 }
@@ -4427,15 +4614,20 @@ fn handleQueuedSyncMessage(
     work: processor_mod.work_item.SyncMessageWork,
 ) void {
     const gh = node.gossip_handler orelse {
+        finishQueuedGossipIgnore(node, work.message_id);
         return;
     };
     const importFn = gh.importSyncCommitteeMessageFn orelse {
+        finishQueuedGossipIgnore(node, work.message_id);
         return;
     };
 
     importFn(gh.node, &work.message, work.subnet_id) catch |err| {
         node_log.debug("processor sync committee message import failed: {}", .{err});
+        finishQueuedGossipIgnore(node, work.message_id);
+        return;
     };
+    finishQueuedGossipAccept(node, work.message_id);
 }
 
 // Gossip callbacks are defined in gossip_node_callbacks.zig.

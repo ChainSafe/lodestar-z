@@ -22,6 +22,7 @@ const networking = @import("networking");
 const config_mod = @import("config");
 const ForkSeq = config_mod.ForkSeq;
 const preset = @import("preset").preset;
+const preset_root = @import("preset").root;
 const fork_types = @import("fork_types");
 const AnyAttesterSlashing = fork_types.AnyAttesterSlashing;
 const AnyGossipAttestation = fork_types.AnyGossipAttestation;
@@ -61,6 +62,8 @@ const slow_gossip_phase1_log_ns: u64 = 100 * std.time.ns_per_ms;
 pub const GossipHandlerError = error{
     /// Gossip validation returned Ignore — message silently dropped.
     ValidationIgnored,
+    /// Gossip validation was accepted into an asynchronous validator path.
+    ValidationDeferred,
     /// Gossip validation returned Reject — peer should be penalized.
     ValidationRejected,
     /// Gossip message was validly parsed but routed to the wrong subnet.
@@ -73,6 +76,7 @@ pub const GossipHandlerError = error{
 
 pub const GossipProcessResult = union(enum) {
     accepted,
+    deferred,
     ignored,
     rejected: GossipRejectReason,
     failed: anyerror,
@@ -173,10 +177,10 @@ pub const GossipHandler = struct {
     importBlsChangeFn: ?*const fn (ptr: *anyopaque, change: *const SignedBLSToExecutionChange) anyerror!void,
 
     /// Called to import a validated blob sidecar into the chain DA ingress.
-    importBlobSidecarFn: ?*const fn (ptr: *anyopaque, ssz_bytes: []const u8) anyerror!void,
+    importBlobSidecarFn: *const fn (ptr: *anyopaque, ssz_bytes: []const u8) anyerror!void,
 
     /// Called to import a validated data column sidecar into the chain DA ingress.
-    importDataColumnSidecarFn: ?*const fn (ptr: *anyopaque, ssz_bytes: []const u8) anyerror!void,
+    importDataColumnSidecarFn: *const fn (ptr: *anyopaque, ssz_bytes: []const u8) anyerror!void,
 
     // ── BLS signature verification callbacks ────────────────────────────
     // These are called between Phase 1 (cheap checks) and Phase 2 (import).
@@ -234,12 +238,28 @@ pub const GossipHandler = struct {
     /// Verify sync committee message BLS signature. Returns true if valid.
     verifySyncCommitteeSignatureFn: ?*const fn (ptr: *anyopaque, ssz_bytes: []const u8) bool,
 
+    /// Verify sync committee contribution selection proof, aggregator signature,
+    /// and contribution signature. Returns an error so callers can distinguish
+    /// between IGNORE and REJECT outcomes.
+    verifySyncContributionSignatureFn: *const fn (ptr: *anyopaque, signed_contribution: *const SignedContributionAndProof) anyerror!u32,
+
+    /// Verify blob sidecar proposer signature, inclusion proof, and KZG proof.
+    /// Returns an error so callers can distinguish between IGNORE and REJECT outcomes.
+    verifyBlobSidecarFn: *const fn (ptr: *anyopaque, sidecar: *const types.deneb.BlobSidecar.Type) anyerror!void,
+
+    /// Verify data column sidecar proposer signature, inclusion proof, and KZG proofs.
+    /// Returns an error so callers can distinguish between IGNORE and REJECT outcomes.
+    verifyDataColumnSidecarFn: *const fn (ptr: *anyopaque, sidecar: *const types.fulu.DataColumnSidecar.Type) anyerror!void,
+
     /// Returns true if the validator is a member of the sync committee subnet
     /// for the given slot.
     isValidSyncCommitteeSubnetFn: *const fn (ptr: *anyopaque, slot: u64, validator_index: u64, subnet: u64) bool,
 
+    /// Returns the blob sidecar subnet count for the given slot.
+    getBlobSidecarSubnetCountFn: *const fn (ptr: *anyopaque, slot: u64) u64,
+
     /// Called to import a validated sync committee contribution into the pool.
-    importSyncContributionFn: ?*const fn (ptr: *anyopaque, signed_contribution: *const SignedContributionAndProof) anyerror!void,
+    importSyncContributionFn: *const fn (ptr: *anyopaque, signed_contribution: *const SignedContributionAndProof) anyerror!void,
 
     /// Called to import a validated sync committee message into the pool.
     importSyncCommitteeMessageFn: ?*const fn (ptr: *anyopaque, message: *const SyncCommitteeMessage, subnet: u64) anyerror!void,
@@ -271,6 +291,16 @@ pub const GossipHandler = struct {
     /// When null, falls back to inline processing (tests, early init).
     beacon_processor: ?*BeaconProcessor = null,
 
+    pub const RequiredPhase2Fns = struct {
+        importSyncContributionFn: *const fn (ptr: *anyopaque, signed_contribution: *const SignedContributionAndProof) anyerror!void,
+        importBlobSidecarFn: *const fn (ptr: *anyopaque, ssz_bytes: []const u8) anyerror!void,
+        importDataColumnSidecarFn: *const fn (ptr: *anyopaque, ssz_bytes: []const u8) anyerror!void,
+        verifySyncContributionSignatureFn: *const fn (ptr: *anyopaque, signed_contribution: *const SignedContributionAndProof) anyerror!u32,
+        verifyBlobSidecarFn: *const fn (ptr: *anyopaque, sidecar: *const types.deneb.BlobSidecar.Type) anyerror!void,
+        verifyDataColumnSidecarFn: *const fn (ptr: *anyopaque, sidecar: *const types.fulu.DataColumnSidecar.Type) anyerror!void,
+        getBlobSidecarSubnetCountFn: *const fn (ptr: *anyopaque, slot: u64) u64,
+    };
+
     /// Allocate a GossipHandler on the heap and initialise owned SeenCache.
     pub fn create(
         allocator: Allocator,
@@ -293,6 +323,7 @@ pub const GossipHandler = struct {
             attestation_data_root: *const [32]u8,
         ) anyerror!ResolvedAggregate,
         isValidSyncCommitteeSubnetFn: *const fn (ptr: *anyopaque, slot: u64, validator_index: u64, subnet: u64) bool,
+        required_phase2: RequiredPhase2Fns,
     ) !*GossipHandler {
         const self = try allocator.create(GossipHandler);
         self.* = .{
@@ -309,8 +340,8 @@ pub const GossipHandler = struct {
             .importProposerSlashingFn = null,
             .importAttesterSlashingFn = null,
             .importBlsChangeFn = null,
-            .importBlobSidecarFn = null,
-            .importDataColumnSidecarFn = null,
+            .importBlobSidecarFn = required_phase2.importBlobSidecarFn,
+            .importDataColumnSidecarFn = required_phase2.importDataColumnSidecarFn,
             .verifyBlockSignatureFn = null,
             .verifyVoluntaryExitSignatureFn = null,
             .verifyProposerSlashingSignatureFn = null,
@@ -321,8 +352,12 @@ pub const GossipHandler = struct {
             .importResolvedAggregateFn = null,
             .queueUnknownBlockAggregateFn = null,
             .verifySyncCommitteeSignatureFn = null,
+            .verifySyncContributionSignatureFn = required_phase2.verifySyncContributionSignatureFn,
+            .verifyBlobSidecarFn = required_phase2.verifyBlobSidecarFn,
+            .verifyDataColumnSidecarFn = required_phase2.verifyDataColumnSidecarFn,
             .isValidSyncCommitteeSubnetFn = isValidSyncCommitteeSubnetFn,
-            .importSyncContributionFn = null,
+            .getBlobSidecarSubnetCountFn = required_phase2.getBlobSidecarSubnetCountFn,
+            .importSyncContributionFn = required_phase2.importSyncContributionFn,
             .importSyncCommitteeMessageFn = null,
             .seen_cache = SeenCache.init(allocator),
             .current_slot = 0,
@@ -349,6 +384,7 @@ pub const GossipHandler = struct {
         self.current_slot = slot;
         self.current_epoch = epoch;
         self.finalized_slot = finalized_slot;
+        self.seen_cache.pruneSyncContributions(slot);
     }
 
     /// Update the active fork sequence for fork-aware deserialization.
@@ -686,7 +722,7 @@ pub const GossipHandler = struct {
                     .subnet_id = @intCast(subnet_id),
                     .seen_timestamp_ns = metadata.seen_timestamp_ns,
                 }, metadata.peer_id);
-                if (queued) return GossipHandlerError.ValidationIgnored;
+                if (queued) return GossipHandlerError.ValidationDeferred;
                 attestation_owned = true;
             }
             return GossipHandlerError.ValidationIgnored;
@@ -704,9 +740,10 @@ pub const GossipHandler = struct {
                     .subnet_id = @intCast(subnet_id),
                     .seen_timestamp_ns = metadata.seen_timestamp_ns,
                 }, metadata.peer_id);
-                if (queued) return GossipHandlerError.ValidationIgnored;
+                if (queued) return GossipHandlerError.ValidationDeferred;
                 attestation_owned = true;
             }
+            return GossipHandlerError.ValidationIgnored;
         }
 
         // Phase 2: Import to fork choice + attestation pool.
@@ -723,7 +760,7 @@ pub const GossipHandler = struct {
                 .subnet_id = @intCast(subnet_id),
                 .seen_timestamp_ns = metadata.seen_timestamp_ns,
             } });
-            return;
+            return GossipHandlerError.ValidationDeferred;
         }
 
         // Phase 1c: BLS signature verification (only for inline processing path).
@@ -830,7 +867,7 @@ pub const GossipHandler = struct {
                     .resolved = resolved,
                     .seen_timestamp_ns = metadata.seen_timestamp_ns,
                 }, metadata.peer_id);
-                if (queued) return GossipHandlerError.ValidationIgnored;
+                if (queued) return GossipHandlerError.ValidationDeferred;
                 aggregate_owned = true;
                 resolved_owned = true;
             }
@@ -849,10 +886,11 @@ pub const GossipHandler = struct {
                     .resolved = resolved,
                     .seen_timestamp_ns = metadata.seen_timestamp_ns,
                 }, metadata.peer_id);
-                if (queued) return GossipHandlerError.ValidationIgnored;
+                if (queued) return GossipHandlerError.ValidationDeferred;
                 aggregate_owned = true;
                 resolved_owned = true;
             }
+            return GossipHandlerError.ValidationIgnored;
         }
 
         // Phase 2: Import aggregate to fork choice + attestation pool.
@@ -869,7 +907,7 @@ pub const GossipHandler = struct {
                 .resolved = resolved,
                 .seen_timestamp_ns = metadata.seen_timestamp_ns,
             } });
-            return;
+            return GossipHandlerError.ValidationDeferred;
         }
 
         // Phase 1c: BLS signature verification.
@@ -1194,8 +1232,40 @@ pub const GossipHandler = struct {
         );
         try checkAction(action_sc);
 
-        // Phase 2: import to sync contribution pool.
+        // Lodestar ignores duplicate aggregators and duplicate participant
+        // supersets before signature verification.
         const signed_contribution = parseSignedContributionAndProof(ssz_bytes) orelse return GossipHandlerError.DecodeFailed;
+        if (self.seen_cache.syncContributionParticipantsKnown(&signed_contribution.message.contribution)) {
+            return GossipHandlerError.ValidationIgnored;
+        }
+        if (self.seen_cache.isSyncContributionAggregatorKnown(
+            signed_contribution.message.contribution.slot,
+            signed_contribution.message.contribution.subcommittee_index,
+            @intCast(signed_contribution.message.aggregator_index),
+        )) {
+            return GossipHandlerError.ValidationIgnored;
+        }
+
+        const participant_count = self.verifySyncContributionSignatureFn(self.node, &signed_contribution) catch |err| switch (err) {
+            error.ValidatorNotFound,
+            error.InvalidSubcommitteeIndex,
+            error.ValidatorNotInSyncCommittee,
+            error.NoParticipant,
+            error.InvalidSelectionProof,
+            error.InvalidSignature,
+            => {
+                scoped_log.debug("Gossip sync contribution rejected: aggregator={d} slot={d} err={}", .{
+                    contrib.aggregator_index,
+                    contrib.contribution_slot,
+                    err,
+                });
+                return GossipHandlerError.ValidationRejected;
+            },
+            else => return err,
+        };
+        self.seen_cache.markSyncContributionSeen(&signed_contribution.message, participant_count) catch
+            return GossipHandlerError.ValidationIgnored;
+
         if (self.beacon_processor) |bp| {
             bp.ingest(.{ .sync_contribution = .{
                 .source = metadata.source,
@@ -1207,11 +1277,9 @@ pub const GossipHandler = struct {
         }
 
         // Fallback: inline processing.
-        if (self.importSyncContributionFn) |importFn| {
-            importFn(self.node, &signed_contribution) catch |err| {
-                scoped_log.debug("sync contribution import failed: {}", .{err});
-            };
-        }
+        self.importSyncContributionFn(self.node, &signed_contribution) catch |err| {
+            scoped_log.debug("sync contribution import failed: {}", .{err});
+        };
 
         scoped_log.debug("Accepted sync_committee_contribution_and_proof: aggregator={d} slot={d} subcommittee={d}", .{
             contrib.aggregator_index,
@@ -1268,7 +1336,7 @@ pub const GossipHandler = struct {
                 .subnet_id = @intCast(subnet_id),
                 .seen_timestamp_ns = metadata.seen_timestamp_ns,
             } });
-            return;
+            return GossipHandlerError.ValidationDeferred;
         }
 
         // Phase 1c: BLS signature verification.
@@ -1320,6 +1388,9 @@ pub const GossipHandler = struct {
         const decoded = gossip_decoding.decodeFromSszBytes(self.allocator, .blob_sidecar, ssz_bytes, self.current_fork_seq) catch
             return GossipHandlerError.DecodeFailed;
         const blob = decoded.blob_sidecar;
+        var block_root: [32]u8 = undefined;
+        types.phase0.BeaconBlockHeader.hashTreeRoot(&blob.signed_block_header.message, &block_root) catch
+            return GossipHandlerError.DecodeFailed;
 
         // Phase 1: fast validation via chain gossip validation layer.
         var chain_state_blob = self.makeChainState();
@@ -1328,10 +1399,35 @@ pub const GossipHandler = struct {
             blob.proposer_index,
             blob.index,
             subnet_id,
+            self.getBlobSidecarSubnetCountFn(self.node, blob.slot),
             blob.block_parent_root,
+            block_root,
             &chain_state_blob,
         );
         try checkAction(action_blob);
+
+        self.verifyBlobSidecarFn(self.node, &blob) catch |err| switch (err) {
+            error.ParentUnknown,
+            error.ParentStateUnavailable,
+            error.NoPreStateAvailable,
+            error.NotLaterThanParent,
+            => return GossipHandlerError.ValidationIgnored,
+            error.InvalidBlobIndex,
+            error.InvalidProposer,
+            error.InvalidSignature,
+            error.InvalidInclusionProof,
+            error.InvalidKzgProof,
+            => {
+                scoped_log.debug("Gossip blob sidecar rejected: slot={d} proposer={d} index={d} err={}", .{
+                    blob.slot,
+                    blob.proposer_index,
+                    blob.index,
+                    err,
+                });
+                return GossipHandlerError.ValidationRejected;
+            },
+            else => return err,
+        };
 
         if (self.beacon_processor) |bp| {
             const queued = self.dupeQueuedSszBytes(ssz_bytes) orelse return;
@@ -1345,11 +1441,9 @@ pub const GossipHandler = struct {
         }
 
         // Phase 2: hand off to chain DA ingress.
-        if (self.importBlobSidecarFn) |importFn| {
-            importFn(self.node, ssz_bytes) catch |err| {
-                scoped_log.debug("blob sidecar import failed: {}", .{err});
-            };
-        }
+        self.importBlobSidecarFn(self.node, ssz_bytes) catch |err| {
+            scoped_log.debug("blob sidecar import failed: {}", .{err});
+        };
 
         scoped_log.debug("Accepted blob_sidecar: index={d} slot={d} proposer={d} ({d} bytes)", .{
             blob.index,
@@ -1359,12 +1453,13 @@ pub const GossipHandler = struct {
         });
     }
 
-    pub fn onDataColumnSidecar(self: *GossipHandler, message_data: []const u8) !void {
-        return self.onDataColumnSidecarWithMetadata(message_data, .{}) catch |err| return normalizeTopicError(err);
+    pub fn onDataColumnSidecar(self: *GossipHandler, subnet_id: u64, message_data: []const u8) !void {
+        return self.onDataColumnSidecarWithMetadata(subnet_id, message_data, .{}) catch |err| return normalizeTopicError(err);
     }
 
     fn onDataColumnSidecarWithMetadata(
         self: *GossipHandler,
+        subnet_id: u64,
         message_data: []const u8,
         metadata: GossipIngressMetadata,
     ) !void {
@@ -1387,6 +1482,37 @@ pub const GossipHandler = struct {
         );
         try checkAction(action);
 
+        if (sidecar.index % preset_root.DATA_COLUMN_SIDECAR_SUBNET_COUNT != subnet_id) {
+            return GossipHandlerError.WrongSubnet;
+        }
+
+        self.verifyDataColumnSidecarFn(self.node, &sidecar) catch |err| switch (err) {
+            error.ParentUnknown,
+            error.ParentStateUnavailable,
+            error.NoPreStateAvailable,
+            => return GossipHandlerError.ValidationIgnored,
+            error.NotLaterThanParent,
+            => return GossipHandlerError.ValidationRejected,
+            error.InvalidColumnIndex,
+            error.InvalidCommitmentCount,
+            error.InvalidProofCount,
+            error.InvalidColumnCount,
+            error.InvalidProposer,
+            error.InvalidSignature,
+            error.InvalidInclusionProof,
+            error.InvalidKzgProof,
+            => {
+                scoped_log.debug("Gossip data column sidecar rejected: slot={d} proposer={d} index={d} err={}", .{
+                    sidecar.slot,
+                    sidecar.proposer_index,
+                    sidecar.index,
+                    err,
+                });
+                return GossipHandlerError.ValidationRejected;
+            },
+            else => return err,
+        };
+
         if (self.beacon_processor) |bp| {
             const queued = self.dupeQueuedSszBytes(ssz_bytes) orelse return;
             bp.ingest(.{ .gossip_data_column = .{
@@ -1398,11 +1524,9 @@ pub const GossipHandler = struct {
             return;
         }
 
-        if (self.importDataColumnSidecarFn) |importFn| {
-            importFn(self.node, ssz_bytes) catch |err| {
-                scoped_log.debug("data column sidecar import failed: {}", .{err});
-            };
-        }
+        self.importDataColumnSidecarFn(self.node, ssz_bytes) catch |err| {
+            scoped_log.debug("data column sidecar import failed: {}", .{err});
+        };
 
         scoped_log.debug("Accepted data_column_sidecar: index={d} slot={d} proposer={d}", .{
             sidecar.index,
@@ -1449,6 +1573,13 @@ pub const GossipHandler = struct {
                 }
                 maybeLogSlowPhase1(topic, "accepted", elapsed_ns, payload_bytes);
             },
+            .deferred => {
+                if (self.metrics) |m| {
+                    m.observeGossipResult(topic, .accepted);
+                    m.observeGossipPhase1(topic, .accepted, elapsed_seconds);
+                }
+                maybeLogSlowPhase1(topic, "deferred", elapsed_ns, payload_bytes);
+            },
             .ignored => {
                 if (self.metrics) |m| {
                     m.observeGossipResult(topic, .ignored);
@@ -1482,6 +1613,7 @@ pub const GossipHandler = struct {
     fn processResultError(result: GossipProcessResult) anyerror!void {
         switch (result) {
             .accepted => {},
+            .deferred => {},
             .ignored => return GossipHandlerError.ValidationIgnored,
             .rejected => |reason| switch (reason) {
                 .decode_failed => return GossipHandlerError.DecodeFailed,
@@ -1516,6 +1648,7 @@ pub const GossipHandler = struct {
 
         self.onGossipMessageWithSubnetAndMetadata(topic, subnet_id, data, metadata) catch |err| {
             return self.recordProcessResult(topic, switch (err) {
+                GossipHandlerError.ValidationDeferred => .deferred,
                 GossipHandlerError.ValidationIgnored => .ignored,
                 GossipHandlerError.WrongSubnet => .{ .rejected = .wrong_subnet },
                 GossipHandlerError.InvalidSignature => .{ .rejected = .invalid_signature },
@@ -1556,7 +1689,7 @@ pub const GossipHandler = struct {
             .sync_committee_contribution_and_proof => try self.onSyncCommitteeContributionWithMetadata(data, metadata),
             .sync_committee => try self.onSyncCommitteeMessageWithMetadata(@as(u64, subnet_id orelse 0), data, metadata),
             .blob_sidecar => try self.onBlobSidecarWithMetadata(@as(u64, subnet_id orelse 0), data, metadata),
-            .data_column_sidecar => try self.onDataColumnSidecarWithMetadata(data, metadata),
+            .data_column_sidecar => try self.onDataColumnSidecarWithMetadata(@as(u64, subnet_id orelse 0), data, metadata),
         }
     }
 };

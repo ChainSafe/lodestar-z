@@ -182,6 +182,7 @@ pub fn init(allocator: Allocator, io: std.Io, beacon_config: *const BeaconConfig
         .unknown_block_sync = UnknownBlockSync.init(allocator),
         .pending_unknown_block_gossip = PendingUnknownBlockGossipQueue.init(allocator),
         .unknown_chain_sync = UnknownChainSync.init(allocator),
+        .pending_gossip_validations = .init(allocator),
     };
     owned_pubkey_cache_path = null;
 
@@ -389,6 +390,7 @@ fn finishBuilder(
         .unknown_block_sync = UnknownBlockSync.init(allocator),
         .pending_unknown_block_gossip = PendingUnknownBlockGossipQueue.init(allocator),
         .unknown_chain_sync = UnknownChainSync.init(allocator),
+        .pending_gossip_validations = .init(allocator),
     };
 
     errdefer deinit(node);
@@ -496,6 +498,13 @@ pub fn deinit(self: *BeaconNode) void {
     self.unknown_block_sync.deinit();
     self.pending_unknown_block_gossip.deinit();
     self.unknown_chain_sync.deinit();
+    var pending_gossip_it = self.pending_gossip_validations.valueIterator();
+    while (pending_gossip_it.next()) |pending| pending.deinit(allocator);
+    self.pending_gossip_validations.deinit();
+    for (self.completed_gossip_validations.items) |*completion| {
+        completion.deinit(allocator);
+    }
+    self.completed_gossip_validations.deinit(allocator);
 
     self.gossip_bls_thread_pool.deinit();
     self.block_bls_thread_pool.deinit();

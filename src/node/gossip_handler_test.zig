@@ -151,6 +151,27 @@ fn stubVerifySyncCommitteeSignatureFalse(_: *anyopaque, _: []const u8) bool {
     return false;
 }
 
+fn stubImportSyncContribution(_: *anyopaque, _: *const consensus_types.altair.SignedContributionAndProof.Type) anyerror!void {}
+
+fn stubImportBlobSidecar(_: *anyopaque, _: []const u8) anyerror!void {}
+
+fn stubImportDataColumnSidecar(_: *anyopaque, _: []const u8) anyerror!void {}
+
+fn stubVerifySyncContributionSignature(
+    _: *anyopaque,
+    _: *const consensus_types.altair.SignedContributionAndProof.Type,
+) anyerror!u32 {
+    return 1;
+}
+
+fn stubVerifyBlobSidecar(_: *anyopaque, _: *const consensus_types.deneb.BlobSidecar.Type) anyerror!void {}
+
+fn stubVerifyDataColumnSidecar(_: *anyopaque, _: *const consensus_types.fulu.DataColumnSidecar.Type) anyerror!void {}
+
+fn stubGetBlobSidecarSubnetCountForSlot(_: *anyopaque, slot: u64) u64 {
+    return if (slot >= 1_000_000) 9 else 6;
+}
+
 fn makeTestHandler(allocator: Allocator) !*GossipHandler {
     var dummy_node: u8 = 0;
     return GossipHandler.create(
@@ -166,6 +187,15 @@ fn makeTestHandler(allocator: Allocator) !*GossipHandler {
         &stubResolveAttestation,
         &stubResolveAggregate,
         &stubIsValidSyncCommitteeSubnet,
+        .{
+            .importSyncContributionFn = &stubImportSyncContribution,
+            .importBlobSidecarFn = &stubImportBlobSidecar,
+            .importDataColumnSidecarFn = &stubImportDataColumnSidecar,
+            .verifySyncContributionSignatureFn = &stubVerifySyncContributionSignature,
+            .verifyBlobSidecarFn = &stubVerifyBlobSidecar,
+            .verifyDataColumnSidecarFn = &stubVerifyDataColumnSidecar,
+            .getBlobSidecarSubnetCountFn = &stubGetBlobSidecarSubnetCountForSlot,
+        },
     );
 }
 
@@ -346,7 +376,7 @@ test "GossipHandler: onAttestation queues unknown beacon_block_root for replay" 
         .peer_id = "peer-att",
     });
     switch (result) {
-        .ignored => {},
+        .deferred => {},
         else => return error.TestUnexpectedResult,
     }
 
@@ -546,6 +576,32 @@ test "GossipHandler: decode failures are returned as errors" {
     try testing.expectError(GossipHandlerError.DecodeFailed, handler.onGossipMessageWithSubnet(.sync_committee_contribution_and_proof, null, &dummy));
 }
 
+test "GossipHandler: sync contribution ignores seen aggregator and participant superset" {
+    const alloc = testing.allocator;
+    const handler = try makeTestHandler(alloc);
+    defer handler.deinit();
+
+    handler.updateClock(100, 3, 64);
+
+    var signed_contribution = consensus_types.altair.SignedContributionAndProof.default_value;
+    signed_contribution.message.aggregator_index = 5;
+    signed_contribution.message.contribution.slot = 100;
+    signed_contribution.message.contribution.subcommittee_index = 0;
+    signed_contribution.message.contribution.beacon_block_root = [_]u8{0xAA} ** 32;
+    signed_contribution.message.contribution.aggregation_bits.data[0] = 0x01;
+
+    const ssz_size = consensus_types.altair.SignedContributionAndProof.serializedSize(&signed_contribution);
+    const ssz_buf = try alloc.alloc(u8, ssz_size);
+    defer alloc.free(ssz_buf);
+    _ = consensus_types.altair.SignedContributionAndProof.serializeIntoBytes(&signed_contribution, ssz_buf);
+
+    const compressed = try compressSnappyBlock(alloc, ssz_buf);
+    defer alloc.free(compressed);
+
+    try handler.onSyncCommitteeContribution(compressed);
+    try testing.expectError(GossipHandlerError.ValidationIgnored, handler.onSyncCommitteeContribution(compressed));
+}
+
 test "GossipHandler: onAggregateAndProof validates and accepts" {
     const alloc = testing.allocator;
     const handler = try makeTestHandler(alloc);
@@ -610,7 +666,7 @@ test "GossipHandler: onAggregateAndProof queues unknown beacon_block_root for re
         .peer_id = "peer-agg",
     });
     switch (result) {
-        .ignored => {},
+        .deferred => {},
         else => return error.TestUnexpectedResult,
     }
 
@@ -648,4 +704,34 @@ test "GossipHandler: onAggregateAndProof validates electra aggregates" {
     defer alloc.free(compressed);
 
     try handler.onAggregateAndProof(compressed);
+}
+
+test "GossipHandler: data column sidecar rejects wrong subnet" {
+    const alloc = testing.allocator;
+    const handler = try makeTestHandler(alloc);
+    defer handler.deinit();
+
+    handler.updateClock(100, 3, 64);
+    handler.updateForkSeq(.fulu);
+
+    var sidecar = consensus_types.fulu.DataColumnSidecar.default_value;
+    defer consensus_types.fulu.DataColumnSidecar.deinit(alloc, &sidecar);
+    sidecar.index = 0;
+    sidecar.signed_block_header.message.slot = 100;
+    sidecar.signed_block_header.message.proposer_index = 5;
+    sidecar.signed_block_header.message.parent_root = [_]u8{0xAA} ** 32;
+
+    const ssz_size = consensus_types.fulu.DataColumnSidecar.serializedSize(&sidecar);
+    const ssz_buf = try alloc.alloc(u8, ssz_size);
+    defer alloc.free(ssz_buf);
+    _ = consensus_types.fulu.DataColumnSidecar.serializeIntoBytes(&sidecar, ssz_buf);
+
+    const compressed = try compressSnappyBlock(alloc, ssz_buf);
+    defer alloc.free(compressed);
+
+    const result = handler.processGossipMessageWithSubnetAndMetadata(.data_column_sidecar, 1, compressed, .{});
+    switch (result) {
+        .rejected => |reason| try testing.expectEqual(networking.peer_scoring.GossipRejectReason.wrong_subnet, reason),
+        else => return error.TestUnexpectedResult,
+    }
 }

@@ -1600,6 +1600,8 @@ fn runRealtimeP2pTick(self: *BeaconNode, io: std.Io, svc: *networking.P2pService
         }
     }
 
+    did_work = self.drainCompletedGossipValidations(io, svc) or did_work;
+
     if (self.sync_service_inst) |sync_svc| {
         if (currentNetworkSlot(self, io)) |slot| sync_svc.onClockSlot(slot);
         sync_svc.tick() catch |err| {
@@ -2543,6 +2545,7 @@ fn advanceChainClock(self: *BeaconNode, io: std.Io) void {
 
     self.chainService().onSlot(current_slot);
     self.pending_unknown_block_gossip.onSlot(current_slot);
+    self.drainDroppedPendingUnknownBlockGossip();
     self.last_slot_tick = current_slot;
     self.noteHeadCatchupSlotsStarted(first_tracked_slot, current_slot);
     self.observeHeadCatchup(self.getHead().slot);
@@ -5474,6 +5477,15 @@ fn initGossipHandler(self: *BeaconNode) void {
         &callbacks.resolveAttestation,
         &callbacks.resolveAggregate,
         &callbacks.isValidSyncCommitteeSubnet,
+        .{
+            .importSyncContributionFn = &callbacks.importSyncContribution,
+            .importBlobSidecarFn = &callbacks.importBlobSidecar,
+            .importDataColumnSidecarFn = &callbacks.importDataColumnSidecar,
+            .verifySyncContributionSignatureFn = &callbacks.verifySyncContributionSignature,
+            .verifyBlobSidecarFn = &callbacks.verifyBlobSidecar,
+            .verifyDataColumnSidecarFn = &callbacks.verifyDataColumnSidecar,
+            .getBlobSidecarSubnetCountFn = &callbacks.getBlobSidecarSubnetCountForSlot,
+        },
     ) catch |err| {
         log.warn("Failed to create GossipHandler: {}", .{err});
         return;
@@ -5489,8 +5501,6 @@ fn initGossipHandler(self: *BeaconNode) void {
         gh.importProposerSlashingFn = &callbacks.importProposerSlashing;
         gh.importAttesterSlashingFn = &callbacks.importAttesterSlashing;
         gh.importBlsChangeFn = &callbacks.importBlsChange;
-        gh.importBlobSidecarFn = &callbacks.importBlobSidecar;
-        gh.importDataColumnSidecarFn = &callbacks.importDataColumnSidecar;
 
         gh.verifyBlockSignatureFn = &callbacks.verifyBlockSignature;
         gh.verifyVoluntaryExitSignatureFn = &callbacks.verifyVoluntaryExitSignature;
@@ -5500,8 +5510,6 @@ fn initGossipHandler(self: *BeaconNode) void {
         gh.verifyAttestationSignatureFn = &callbacks.verifyAttestationSignature;
         gh.verifyAggregateSignatureFn = &callbacks.verifyResolvedAggregateSignature;
         gh.verifySyncCommitteeSignatureFn = &callbacks.verifySyncCommitteeSignature;
-
-        gh.importSyncContributionFn = &callbacks.importSyncContribution;
         gh.importSyncCommitteeMessageFn = &callbacks.importSyncCommitteeMessage;
 
         gh.updateForkSeq(initial_fork_seq);
