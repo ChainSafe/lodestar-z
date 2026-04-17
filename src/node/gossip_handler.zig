@@ -1509,8 +1509,8 @@ pub const GossipHandler = struct {
             error.InvalidKzgProof,
             => {
                 scoped_log.debug("Gossip data column sidecar rejected: slot={d} proposer={d} index={d} err={}", .{
-                    full_sidecar.slot,
-                    full_sidecar.proposer_index,
+                    full_sidecar.signed_block_header.message.slot,
+                    full_sidecar.signed_block_header.message.proposer_index,
                     full_sidecar.index,
                     err,
                 });
