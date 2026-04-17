@@ -125,6 +125,13 @@
             .root_source_file = "src/bls/root.zig",
             .link_libraries = .{"blst"},
         },
+        .ring_buffer = .{
+            .root_source_file = "src/ring_buffer.zig",
+        },
+        .log = .{
+            .root_source_file = "src/log/root.zig",
+            .imports = .{.ring_buffer},
+        },
         .state_transition = .{
             .root_source_file = "src/state_transition/root.zig",
             .imports = .{
@@ -161,7 +168,14 @@
                     .config,
                     .preset,
                     .httpz,
+                    .log,
                 },
+            },
+        },
+        .log_smoke = .{
+            .root_module = .{
+                .root_source_file = "examples/log_smoke.zig",
+                .imports = .{.log},
             },
         },
         .download_spec_tests = .{
