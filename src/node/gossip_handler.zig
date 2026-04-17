@@ -1406,7 +1406,6 @@ pub const GossipHandler = struct {
         var full_blob = types.deneb.BlobSidecar.default_value;
         types.deneb.BlobSidecar.deserializeFromBytes(ssz_bytes, &full_blob) catch
             return GossipHandlerError.DecodeFailed;
-        defer types.deneb.BlobSidecar.deinit(self.allocator, &full_blob);
 
         self.verifyBlobSidecarFn(self.node, &full_blob) catch |err| switch (err) {
             error.ParentUnknown,
