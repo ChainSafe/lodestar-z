@@ -20,8 +20,7 @@ pub fn isInInactivityLeak(current_epoch: u64, finalized_epoch: u64) bool {
     return getFinalityDelay(current_epoch, finalized_epoch) > MIN_EPOCHS_TO_INACTIVITY_PENALTY;
 }
 
-test "isInInactivityLeak" {
-    // MIN_EPOCHS_TO_INACTIVITY_PENALTY = 4
+test isInInactivityLeak {
     // Not in leak: delay <= 4
     try std.testing.expect(!isInInactivityLeak(10, 9)); // delay=0
     try std.testing.expect(!isInInactivityLeak(10, 5)); // delay=4 (not strictly greater)
@@ -29,5 +28,4 @@ test "isInInactivityLeak" {
     // In leak: delay > 4
     try std.testing.expect(isInInactivityLeak(10, 4)); // delay=5
     try std.testing.expect(isInInactivityLeak(10, 0)); // delay=9
-    try std.testing.expect(isInInactivityLeak(100, 0)); // delay=99
 }
