@@ -20,6 +20,7 @@ const PeerIdHandle = work_item_mod.PeerIdHandle;
 const consensus_types = @import("consensus_types");
 const fork_types = @import("fork_types");
 const GossipBlockWork = work_item_mod.GossipBlockWork;
+const RawGossipWork = work_item_mod.RawGossipWork;
 const GossipBlobWork = work_item_mod.GossipBlobWork;
 const GossipColumnWork = work_item_mod.GossipColumnWork;
 const GossipPayloadWork = work_item_mod.GossipPayloadWork;
@@ -29,7 +30,6 @@ const AttestationWork = work_item_mod.AttestationWork;
 const AttestationBatchWork = work_item_mod.AttestationBatchWork;
 const AggregateWork = work_item_mod.AggregateWork;
 const AggregateBatchWork = work_item_mod.AggregateBatchWork;
-const ReprocessWork = work_item_mod.ReprocessWork;
 const SyncMessageWork = work_item_mod.SyncMessageWork;
 const SyncContributionWork = work_item_mod.SyncContributionWork;
 const VoluntaryExitWork = work_item_mod.VoluntaryExitWork;
@@ -68,6 +68,12 @@ pub const QueueConfig = struct {
     rpc_block: u32,
     rpc_blob: u32,
     rpc_custody_column: u32,
+    raw_gossip_fast: u32,
+    raw_gossip_attestation: u32,
+    raw_gossip_aggregate: u32,
+    raw_gossip_sync_contribution: u32,
+    raw_gossip_sync_message: u32,
+    raw_gossip_pool_object: u32,
     delayed_block: u32,
     gossip_block: u32,
     gossip_execution_payload: u32,
@@ -80,8 +86,6 @@ pub const QueueConfig = struct {
     gossip_payload_attestation: u32,
     sync_contribution: u32,
     sync_message: u32,
-    unknown_block_aggregate: u32,
-    unknown_block_attestation: u32,
     gossip_execution_payload_bid: u32,
     gossip_proposer_preferences: u32,
     status: u32,
@@ -115,14 +119,17 @@ pub const QueueConfig = struct {
         const raw_att = active_validators / slots_per_epoch;
         const att_queue = @max(raw_att + raw_att / 10, 128);
 
-        // Unknown block queues match attestation sizing.
-        const unknown_att_queue = att_queue;
-
         return .{
             .chain_segment = 64,
             .rpc_block = 1024,
             .rpc_blob = 1024,
             .rpc_custody_column = 64,
+            .raw_gossip_fast = 1024 + 4096 + 4096,
+            .raw_gossip_attestation = att_queue,
+            .raw_gossip_aggregate = 4096,
+            .raw_gossip_sync_contribution = 1024,
+            .raw_gossip_sync_message = 2048,
+            .raw_gossip_pool_object = 4096 + 4096 + 4096 + 16384,
             .delayed_block = 1024,
             .gossip_block = 1024,
             .gossip_execution_payload = 1024,
@@ -135,8 +142,6 @@ pub const QueueConfig = struct {
             .gossip_payload_attestation = 1536,
             .sync_contribution = 1024,
             .sync_message = 2048,
-            .unknown_block_aggregate = 1024,
-            .unknown_block_attestation = unknown_att_queue,
             .gossip_execution_payload_bid = 1024,
             .gossip_proposer_preferences = 1024,
             .status = 1024,
@@ -199,6 +204,7 @@ pub const WorkQueues = struct {
     rpc_block: FifoQueue(RpcBlockWork),
     rpc_blob: FifoQueue(RpcBlobWork),
     rpc_custody_column: FifoQueue(RpcColumnWork),
+    raw_gossip_fast: FifoQueue(RawGossipWork),
     delayed_block: FifoQueue(DelayedBlockWork),
     gossip_block: FifoQueue(GossipBlockWork),
     gossip_execution_payload: FifoQueue(GossipPayloadWork),
@@ -225,13 +231,16 @@ pub const WorkQueues = struct {
     lc_finality_update: FifoQueue(LightClientWork),
     lc_optimistic_update: FifoQueue(LightClientWork),
     lc_updates_by_range: FifoQueue(LightClientWork),
+    raw_gossip_pool_object: FifoQueue(RawGossipWork),
 
     // ── LIFO queues ──
+    raw_gossip_attestation: LifoQueue(RawGossipWork),
+    raw_gossip_aggregate: LifoQueue(RawGossipWork),
+    raw_gossip_sync_contribution: LifoQueue(RawGossipWork),
+    raw_gossip_sync_message: LifoQueue(RawGossipWork),
     aggregate: LifoQueue(AggregateWork),
     attestation: LifoQueue(AttestationWork),
     attestation_group_counts: std.AutoHashMap([32]u8, u32),
-    unknown_block_aggregate: LifoQueue(ReprocessWork),
-    unknown_block_attestation: LifoQueue(ReprocessWork),
     sync_contribution: LifoQueue(SyncContributionWork),
     sync_message: LifoQueue(SyncMessageWork),
     column_reconstruction: LifoQueue(ColumnReconstructionWork),
@@ -275,6 +284,9 @@ pub const WorkQueues = struct {
             ),
             .rpc_custody_column = FifoQueue(RpcColumnWork).init(
                 try allocator.alloc(RpcColumnWork, config.rpc_custody_column),
+            ),
+            .raw_gossip_fast = FifoQueue(RawGossipWork).init(
+                try allocator.alloc(RawGossipWork, config.raw_gossip_fast),
             ),
             .delayed_block = FifoQueue(DelayedBlockWork).init(
                 try allocator.alloc(DelayedBlockWork, config.delayed_block),
@@ -354,8 +366,23 @@ pub const WorkQueues = struct {
             .lc_updates_by_range = FifoQueue(LightClientWork).init(
                 try allocator.alloc(LightClientWork, config.lc_updates_by_range),
             ),
+            .raw_gossip_pool_object = FifoQueue(RawGossipWork).init(
+                try allocator.alloc(RawGossipWork, config.raw_gossip_pool_object),
+            ),
 
             // LIFO queues.
+            .raw_gossip_attestation = LifoQueue(RawGossipWork).init(
+                try allocator.alloc(RawGossipWork, config.raw_gossip_attestation),
+            ),
+            .raw_gossip_aggregate = LifoQueue(RawGossipWork).init(
+                try allocator.alloc(RawGossipWork, config.raw_gossip_aggregate),
+            ),
+            .raw_gossip_sync_contribution = LifoQueue(RawGossipWork).init(
+                try allocator.alloc(RawGossipWork, config.raw_gossip_sync_contribution),
+            ),
+            .raw_gossip_sync_message = LifoQueue(RawGossipWork).init(
+                try allocator.alloc(RawGossipWork, config.raw_gossip_sync_message),
+            ),
             .aggregate = LifoQueue(AggregateWork).init(
                 try allocator.alloc(AggregateWork, config.aggregate),
             ),
@@ -363,12 +390,6 @@ pub const WorkQueues = struct {
                 try allocator.alloc(AttestationWork, config.attestation),
             ),
             .attestation_group_counts = attestation_group_counts,
-            .unknown_block_aggregate = LifoQueue(ReprocessWork).init(
-                try allocator.alloc(ReprocessWork, config.unknown_block_aggregate),
-            ),
-            .unknown_block_attestation = LifoQueue(ReprocessWork).init(
-                try allocator.alloc(ReprocessWork, config.unknown_block_attestation),
-            ),
             .sync_contribution = LifoQueue(SyncContributionWork).init(
                 try allocator.alloc(SyncContributionWork, config.sync_contribution),
             ),
@@ -424,6 +445,7 @@ pub const WorkQueues = struct {
         self.cleanupQueue(.rpc_block, &self.rpc_block);
         self.cleanupQueue(.rpc_blob, &self.rpc_blob);
         self.cleanupQueue(.rpc_custody_column, &self.rpc_custody_column);
+        self.cleanupQueue(.raw_gossip_fast, &self.raw_gossip_fast);
         self.cleanupQueue(.delayed_block, &self.delayed_block);
         self.cleanupQueue(.gossip_block, &self.gossip_block);
         self.cleanupQueue(.gossip_execution_payload, &self.gossip_execution_payload);
@@ -436,8 +458,6 @@ pub const WorkQueues = struct {
         self.cleanupQueue(.gossip_payload_attestation, &self.gossip_payload_attestation);
         self.cleanupQueue(.sync_contribution, &self.sync_contribution);
         self.cleanupQueue(.sync_message, &self.sync_message);
-        self.cleanupQueue(.unknown_block_aggregate, &self.unknown_block_aggregate);
-        self.cleanupQueue(.unknown_block_attestation, &self.unknown_block_attestation);
         self.cleanupQueue(.gossip_execution_payload_bid, &self.gossip_execution_payload_bid);
         self.cleanupQueue(.gossip_proposer_preferences, &self.gossip_proposer_preferences);
         self.cleanupQueue(.status, &self.status);
@@ -457,6 +477,11 @@ pub const WorkQueues = struct {
         self.cleanupQueue(.lc_finality_update, &self.lc_finality_update);
         self.cleanupQueue(.lc_optimistic_update, &self.lc_optimistic_update);
         self.cleanupQueue(.lc_updates_by_range, &self.lc_updates_by_range);
+        self.cleanupQueue(.raw_gossip_pool_object, &self.raw_gossip_pool_object);
+        self.cleanupQueue(.raw_gossip_attestation, &self.raw_gossip_attestation);
+        self.cleanupQueue(.raw_gossip_aggregate, &self.raw_gossip_aggregate);
+        self.cleanupQueue(.raw_gossip_sync_contribution, &self.raw_gossip_sync_contribution);
+        self.cleanupQueue(.raw_gossip_sync_message, &self.raw_gossip_sync_message);
     }
 
     fn freeQueueBuffers(self: *WorkQueues) void {
@@ -464,6 +489,7 @@ pub const WorkQueues = struct {
         self.allocator.free(self.rpc_block.buffer);
         self.allocator.free(self.rpc_blob.buffer);
         self.allocator.free(self.rpc_custody_column.buffer);
+        self.allocator.free(self.raw_gossip_fast.buffer);
         self.allocator.free(self.delayed_block.buffer);
         self.allocator.free(self.gossip_block.buffer);
         self.allocator.free(self.gossip_execution_payload.buffer);
@@ -490,10 +516,13 @@ pub const WorkQueues = struct {
         self.allocator.free(self.lc_finality_update.buffer);
         self.allocator.free(self.lc_optimistic_update.buffer);
         self.allocator.free(self.lc_updates_by_range.buffer);
+        self.allocator.free(self.raw_gossip_pool_object.buffer);
+        self.allocator.free(self.raw_gossip_attestation.buffer);
+        self.allocator.free(self.raw_gossip_aggregate.buffer);
+        self.allocator.free(self.raw_gossip_sync_contribution.buffer);
+        self.allocator.free(self.raw_gossip_sync_message.buffer);
         self.allocator.free(self.aggregate.buffer);
         self.allocator.free(self.attestation.buffer);
-        self.allocator.free(self.unknown_block_aggregate.buffer);
-        self.allocator.free(self.unknown_block_attestation.buffer);
         self.allocator.free(self.sync_contribution.buffer);
         self.allocator.free(self.sync_message.buffer);
         self.allocator.free(self.column_reconstruction.buffer);
@@ -528,7 +557,7 @@ pub const WorkQueues = struct {
 
         switch (item) {
             // ── FIFO queues ──
-            inline .chain_segment, .rpc_block, .rpc_blob, .rpc_custody_column, .delayed_block, .gossip_block, .gossip_execution_payload, .gossip_blob, .gossip_data_column, .api_request_p0, .gossip_payload_attestation, .gossip_execution_payload_bid, .gossip_proposer_preferences, .status, .blocks_by_range, .blocks_by_root, .blobs_by_range, .blobs_by_root, .columns_by_range, .columns_by_root, .gossip_attester_slashing, .gossip_proposer_slashing, .gossip_voluntary_exit, .gossip_bls_to_exec, .api_request_p1, .backfill_segment, .lc_bootstrap, .lc_finality_update, .lc_optimistic_update, .lc_updates_by_range => |w, tag| {
+            inline .chain_segment, .rpc_block, .rpc_blob, .rpc_custody_column, .raw_gossip_fast, .delayed_block, .gossip_block, .gossip_execution_payload, .gossip_blob, .gossip_data_column, .api_request_p0, .gossip_payload_attestation, .gossip_execution_payload_bid, .gossip_proposer_preferences, .status, .blocks_by_range, .blocks_by_root, .blobs_by_range, .blobs_by_root, .columns_by_range, .columns_by_root, .gossip_attester_slashing, .gossip_proposer_slashing, .gossip_voluntary_exit, .gossip_bls_to_exec, .api_request_p1, .backfill_segment, .lc_bootstrap, .lc_finality_update, .lc_optimistic_update, .lc_updates_by_range, .raw_gossip_pool_object => |w, tag| {
                 pushFifo(self, &@field(self, @tagName(tag)), w, @unionInit(WorkItem, @tagName(tag), w));
             },
 
@@ -537,7 +566,7 @@ pub const WorkQueues = struct {
                 self.pushAttestationWork(w);
             },
 
-            inline .aggregate, .unknown_block_aggregate, .unknown_block_attestation, .sync_contribution, .sync_message, .column_reconstruction => |w, tag| {
+            inline .raw_gossip_attestation, .raw_gossip_aggregate, .raw_gossip_sync_contribution, .raw_gossip_sync_message, .aggregate, .sync_contribution, .sync_message, .column_reconstruction => |w, tag| {
                 if (@field(self, @tagName(tag)).push(w)) |dropped| {
                     self.items_dropped_full += 1;
                     self.cleanupItem(@unionInit(WorkItem, @tagName(tag), dropped));
@@ -573,20 +602,27 @@ pub const WorkQueues = struct {
         if (self.rpc_blob.pop()) |w| return .{ .rpc_blob = w };
         if (self.rpc_custody_column.pop()) |w| return .{ .rpc_custody_column = w };
 
-        // Priority 5-9: Gossip blocks + DA.
+        // Priority 5-10: raw fast-lane gossip admission.
+        if (self.raw_gossip_fast.pop()) |w| return .{ .raw_gossip_fast = w };
+
+        // Priority 11-16: Gossip blocks + DA.
         if (self.delayed_block.pop()) |w| return .{ .delayed_block = w };
         if (self.gossip_block.pop()) |w| return .{ .gossip_block = w };
         if (self.gossip_execution_payload.pop()) |w| return .{ .gossip_execution_payload = w };
         if (self.gossip_blob.pop()) |w| return .{ .gossip_blob = w };
         if (self.gossip_data_column.pop()) |w| return .{ .gossip_data_column = w };
 
-        // Priority 10: Column reconstruction.
+        // Priority 17: Column reconstruction.
         if (self.column_reconstruction.pop()) |w| return .{ .column_reconstruction = w };
 
-        // Priority 11: High-priority API.
+        // Priority 18: High-priority API.
         if (self.api_request_p0.pop()) |w| return .{ .api_request_p0 = w };
 
-        // Priority 12-13: Attestations — form batches for BLS batch verify.
+        // Priority 19-22: raw attestation/aggregate admission.
+        if (self.raw_gossip_aggregate.pop()) |w| return .{ .raw_gossip_aggregate = w };
+        if (self.raw_gossip_attestation.pop()) |w| return .{ .raw_gossip_attestation = w };
+
+        // Priority 23-26: Attestations — form batches for BLS batch verify.
         if (self.aggregate_dispatch_enabled and self.aggregate.len > 0 and self.aggregateBatchReady(now_ns)) {
             return self.formAggregateBatch();
         }
@@ -594,10 +630,14 @@ pub const WorkQueues = struct {
             return self.formAttestationBatch();
         }
 
-        // Priority 14: Payload attestation (Gloas).
+        // Priority 27: Payload attestation (Gloas).
         if (self.gossip_payload_attestation.pop()) |w| return .{ .gossip_payload_attestation = w };
 
-        // Priority 15-16: Sync committee.
+        // Priority 28-31: raw sync admission.
+        if (self.raw_gossip_sync_contribution.pop()) |w| return .{ .raw_gossip_sync_contribution = w };
+        if (self.raw_gossip_sync_message.pop()) |w| return .{ .raw_gossip_sync_message = w };
+
+        // Priority 32-34: Sync committee.
         if (self.sync_contribution.pop()) |w| return .{ .sync_contribution = w };
         if (self.sync_message_dispatch_enabled and self.sync_message.len > 0) {
             if (self.syncMessageBatchReady(now_ns)) {
@@ -607,15 +647,14 @@ pub const WorkQueues = struct {
             return .{ .sync_message = w };
         }
 
-        // Priority 17-18: Unknown block reprocessing.
-        if (self.unknown_block_aggregate.pop()) |w| return .{ .unknown_block_aggregate = w };
-        if (self.unknown_block_attestation.pop()) |w| return .{ .unknown_block_attestation = w };
-
-        // Priority 19-20: Gloas.
+        // Priority 35-36: Gloas.
         if (self.gossip_execution_payload_bid.pop()) |w| return .{ .gossip_execution_payload_bid = w };
         if (self.gossip_proposer_preferences.pop()) |w| return .{ .gossip_proposer_preferences = w };
 
-        // Priority 21-27: Peer serving.
+        // Priority 37: raw pool-object admission.
+        if (self.raw_gossip_pool_object.pop()) |w| return .{ .raw_gossip_pool_object = w };
+
+        // Priority 38-44: Peer serving.
         if (self.status.pop()) |w| return .{ .status = w };
         if (self.blocks_by_range.pop()) |w| return .{ .blocks_by_range = w };
         if (self.blocks_by_root.pop()) |w| return .{ .blocks_by_root = w };
@@ -624,19 +663,19 @@ pub const WorkQueues = struct {
         if (self.columns_by_range.pop()) |w| return .{ .columns_by_range = w };
         if (self.columns_by_root.pop()) |w| return .{ .columns_by_root = w };
 
-        // Priority 28-31: Pool objects.
+        // Priority 45-48: Pool objects.
         if (self.gossip_attester_slashing.pop()) |w| return .{ .gossip_attester_slashing = w };
         if (self.gossip_proposer_slashing.pop()) |w| return .{ .gossip_proposer_slashing = w };
         if (self.gossip_voluntary_exit.pop()) |w| return .{ .gossip_voluntary_exit = w };
         if (self.gossip_bls_to_exec.pop()) |w| return .{ .gossip_bls_to_exec = w };
 
-        // Priority 32: Low-priority API.
+        // Priority 49: Low-priority API.
         if (self.api_request_p1.pop()) |w| return .{ .api_request_p1 = w };
 
-        // Priority 33: Backfill (dead last).
+        // Priority 50: Backfill (dead last).
         if (self.backfill_segment.pop()) |w| return .{ .backfill_segment = w };
 
-        // Priority 34-37: Light client.
+        // Priority 51-54: Light client.
         if (self.lc_bootstrap.pop()) |w| return .{ .lc_bootstrap = w };
         if (self.lc_finality_update.pop()) |w| return .{ .lc_finality_update = w };
         if (self.lc_optimistic_update.pop()) |w| return .{ .lc_optimistic_update = w };
@@ -665,6 +704,7 @@ pub const WorkQueues = struct {
         total += self.rpc_block.len;
         total += self.rpc_blob.len;
         total += self.rpc_custody_column.len;
+        total += self.raw_gossip_fast.len;
         total += self.delayed_block.len;
         total += self.gossip_block.len;
         total += self.gossip_execution_payload.len;
@@ -691,12 +731,15 @@ pub const WorkQueues = struct {
         total += self.lc_finality_update.len;
         total += self.lc_optimistic_update.len;
         total += self.lc_updates_by_range.len;
+        total += self.raw_gossip_pool_object.len;
 
         // LIFO queues.
+        total += self.raw_gossip_attestation.len;
+        total += self.raw_gossip_aggregate.len;
+        total += self.raw_gossip_sync_contribution.len;
+        total += self.raw_gossip_sync_message.len;
         total += self.aggregate.len;
         total += self.attestation.len;
-        total += self.unknown_block_aggregate.len;
-        total += self.unknown_block_attestation.len;
         total += self.sync_contribution.len;
         total += self.sync_message.len;
         total += self.column_reconstruction.len;
@@ -1214,6 +1257,12 @@ fn testQueueConfig() QueueConfig {
         .rpc_block = 4,
         .rpc_blob = 4,
         .rpc_custody_column = 4,
+        .raw_gossip_fast = 4,
+        .raw_gossip_attestation = 4,
+        .raw_gossip_aggregate = 4,
+        .raw_gossip_sync_contribution = 4,
+        .raw_gossip_sync_message = 4,
+        .raw_gossip_pool_object = 4,
         .delayed_block = 4,
         .gossip_block = 4,
         .gossip_execution_payload = 4,
@@ -1226,8 +1275,6 @@ fn testQueueConfig() QueueConfig {
         .gossip_payload_attestation = 4,
         .sync_contribution = 4,
         .sync_message = 4,
-        .unknown_block_aggregate = 4,
-        .unknown_block_attestation = 4,
         .gossip_execution_payload_bid = 4,
         .gossip_proposer_preferences = 4,
         .status = 4,

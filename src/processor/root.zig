@@ -1,8 +1,9 @@
 //! BeaconProcessor module.
 //!
-//! Central priority scheduler that receives all inbound work (gossip, reqresp,
-//! API, clock ticks) and dispatches it to workers in priority order. This is
-//! the beating heart of the beacon node's real-time scheduling system.
+//! Central priority scheduler for the work we currently route through the
+//! processor. The active ingress boundary is gossip: raw gossip admission,
+//! replay, deferred validation completion, and async gossip verification all
+//! live here now.
 
 const std = @import("std");
 const testing = std.testing;
@@ -22,6 +23,8 @@ pub const work_queues = @import("work_queues.zig");
 pub const WorkQueues = work_queues.WorkQueues;
 pub const QueueConfig = work_queues.QueueConfig;
 pub const SyncState = work_queues.SyncState;
+
+pub const pending_unknown_block_gossip = @import("pending_unknown_block_gossip.zig");
 
 pub const processor = @import("processor.zig");
 pub const BeaconProcessor = processor.BeaconProcessor;

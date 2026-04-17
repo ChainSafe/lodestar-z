@@ -21,7 +21,6 @@ const sync_mod = @import("sync");
 const SyncService = sync_mod.SyncService;
 const UnknownBlockSync = sync_mod.UnknownBlockSync;
 const UnknownChainSync = sync_mod.UnknownChainSync;
-const PendingUnknownBlockGossipQueue = @import("pending_unknown_block_gossip.zig").Queue;
 const processor_mod = @import("processor");
 const BeaconProcessor = processor_mod.BeaconProcessor;
 const QueueConfig = processor_mod.QueueConfig;
@@ -180,9 +179,7 @@ pub fn init(allocator: Allocator, io: std.Io, beacon_config: *const BeaconConfig
         .metrics = init_config.metrics,
         .published_proposals = std.AutoHashMap(BeaconNode.PublishedProposalKey, [32]u8).init(allocator),
         .unknown_block_sync = UnknownBlockSync.init(allocator),
-        .pending_unknown_block_gossip = PendingUnknownBlockGossipQueue.init(allocator),
         .unknown_chain_sync = UnknownChainSync.init(allocator),
-        .pending_gossip_validations = .init(allocator),
     };
     owned_pubkey_cache_path = null;
 
@@ -388,9 +385,7 @@ fn finishBuilder(
         .metrics = self.metrics,
         .published_proposals = std.AutoHashMap(BeaconNode.PublishedProposalKey, [32]u8).init(allocator),
         .unknown_block_sync = UnknownBlockSync.init(allocator),
-        .pending_unknown_block_gossip = PendingUnknownBlockGossipQueue.init(allocator),
         .unknown_chain_sync = UnknownChainSync.init(allocator),
-        .pending_gossip_validations = .init(allocator),
     };
 
     errdefer deinit(node);
@@ -455,7 +450,6 @@ pub fn deinit(self: *BeaconNode) void {
     self.execution_runtime.deinit();
 
     self.flushPendingGossipBlsBatch();
-    self.pending_gossip_bls_batches.deinit(allocator);
     for (self.waiting_planned_block_imports.items) |*waiting| {
         waiting.deinit(allocator);
     }
@@ -496,15 +490,7 @@ pub fn deinit(self: *BeaconNode) void {
 
     self.published_proposals.deinit();
     self.unknown_block_sync.deinit();
-    self.pending_unknown_block_gossip.deinit();
     self.unknown_chain_sync.deinit();
-    var pending_gossip_it = self.pending_gossip_validations.valueIterator();
-    while (pending_gossip_it.next()) |pending| pending.deinit(allocator);
-    self.pending_gossip_validations.deinit();
-    for (self.completed_gossip_validations.items) |*completion| {
-        completion.deinit(allocator);
-    }
-    self.completed_gossip_validations.deinit(allocator);
 
     self.gossip_bls_thread_pool.deinit();
     self.block_bls_thread_pool.deinit();

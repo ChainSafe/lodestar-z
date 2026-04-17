@@ -2544,8 +2544,7 @@ fn advanceChainClock(self: *BeaconNode, io: std.Io) void {
     }
 
     self.chainService().onSlot(current_slot);
-    self.pending_unknown_block_gossip.onSlot(current_slot);
-    self.drainDroppedPendingUnknownBlockGossip();
+    self.onPendingUnknownBlockSlot(current_slot);
     self.last_slot_tick = current_slot;
     self.noteHeadCatchupSlotsStarted(first_tracked_slot, current_slot);
     self.observeHeadCatchup(self.getHead().slot);

@@ -108,7 +108,6 @@ const p2p_runtime_mod = @import("p2p_runtime.zig");
 const sync_bridge_mod = @import("sync_bridge.zig");
 const reqresp_callbacks_mod = @import("reqresp_callbacks.zig");
 const gossip_node_callbacks_mod = @import("gossip_node_callbacks.zig");
-const pending_unknown_block_gossip_mod = @import("pending_unknown_block_gossip.zig");
 
 // BeaconProcessor — central priority scheduling loop.
 const processor_mod = @import("processor");
@@ -122,8 +121,9 @@ const AggregateWork = processor_mod.work_item.AggregateWork;
 const MessageId = processor_mod.work_item.MessageId;
 const ResolvedAggregate = processor_mod.work_item.ResolvedAggregate;
 const ResolvedAttestation = processor_mod.work_item.ResolvedAttestation;
-const PendingUnknownBlockGossipQueue = pending_unknown_block_gossip_mod.Queue;
-const PendingUnknownBlockGossipItem = pending_unknown_block_gossip_mod.PendingItem;
+const GossipValidationContext = processor_mod.processor.GossipValidationContext;
+const QueuedGossipValidationOutcome = processor_mod.processor.GossipValidationOutcome;
+const CompletedGossipValidation = processor_mod.processor.CompletedGossipValidation;
 const GossipRejectReason = networking.peer_scoring.GossipRejectReason;
 // Chain import/result types come from chain_mod (src/chain).
 const SyncCallbackCtx = sync_bridge_mod.SyncCallbackCtx;
@@ -138,36 +138,6 @@ pub const SyncStatus = struct {
     is_syncing: bool,
     is_optimistic: bool,
     el_offline: bool,
-};
-
-const PendingGossipValidation = struct {
-    peer_id: ?[]u8 = null,
-    topic: []u8,
-
-    pub fn deinit(self: *PendingGossipValidation, allocator: Allocator) void {
-        if (self.peer_id) |peer_id| allocator.free(peer_id);
-        allocator.free(self.topic);
-        self.* = undefined;
-    }
-};
-
-const QueuedGossipValidationOutcome = union(enum) {
-    accept,
-    ignore,
-    reject: GossipRejectReason,
-};
-
-const CompletedGossipValidation = struct {
-    msg_id: MessageId,
-    peer_id: ?[]u8 = null,
-    topic: []u8,
-    outcome: QueuedGossipValidationOutcome,
-
-    pub fn deinit(self: *CompletedGossipValidation, allocator: Allocator) void {
-        if (self.peer_id) |peer_id| allocator.free(peer_id);
-        allocator.free(self.topic);
-        self.* = undefined;
-    }
 };
 
 const SyncStatusInputs = struct {
@@ -298,14 +268,7 @@ const PendingHeadCatchupSlot = struct {
     started_at_ns: i64 = 0,
 };
 
-const GossipBlsPendingSnapshot = struct {
-    attestation_batches: u64 = 0,
-    attestation_items: u64 = 0,
-    aggregate_batches: u64 = 0,
-    aggregate_items: u64 = 0,
-    sync_message_batches: u64 = 0,
-    sync_message_items: u64 = 0,
-};
+const GossipBlsPendingSnapshot = processor_mod.processor.GossipBlsPendingSnapshot;
 
 fn wallNowNs(io: std.Io) i64 {
     const now_ns = std.Io.Timestamp.now(io, .real).toNanoseconds();
@@ -727,10 +690,6 @@ pub const BeaconNode = struct {
     // Initialized eagerly in init(); used by the gossip block import path.
     unknown_block_sync: UnknownBlockSync,
 
-    /// Gossip attestations and aggregates parked behind an unknown
-    /// `beacon_block_root` until that block is imported.
-    pending_unknown_block_gossip: PendingUnknownBlockGossipQueue,
-
     // Unknown chain sync — backwards header chain sync for blocks/roots
     // not in fork choice. Tracks multiple chains of headers backwards
     // until they link to our known chain, then hands off to forward sync.
@@ -756,9 +715,6 @@ pub const BeaconNode = struct {
     block_bls_thread_pool: *BlsThreadPool,
     /// BLS thread pool reserved for gossip attestation/aggregate verification.
     gossip_bls_thread_pool: *BlsThreadPool,
-    pending_gossip_bls_batches: std.ArrayListUnmanaged(PendingGossipBlsBatch) = .empty,
-    pending_gossip_validations: std.AutoHashMap(MessageId, PendingGossipValidation),
-    completed_gossip_validations: std.ArrayListUnmanaged(CompletedGossipValidation) = .empty,
 
     // Node identity — secp256k1 keypair loaded/generated during init().
     node_identity: NodeIdentity,
@@ -796,38 +752,13 @@ pub const BeaconNode = struct {
         if (self.http_server) |*srv| srv.shutdown(self.io);
     }
 
-    pub fn beginPendingGossipValidation(
-        self: *BeaconNode,
-        msg_id: MessageId,
-        peer_id: ?[]const u8,
-        topic: []const u8,
-    ) !void {
-        const entry = try self.pending_gossip_validations.getOrPut(msg_id);
-        if (entry.found_existing) {
-            entry.value_ptr.deinit(self.allocator);
-        }
-        entry.value_ptr.* = .{
-            .peer_id = if (peer_id) |id| try self.allocator.dupe(u8, id) else null,
-            .topic = try self.allocator.dupe(u8, topic),
-        };
-    }
-
     pub fn finishPendingGossipValidation(
         self: *BeaconNode,
         msg_id: MessageId,
         outcome: QueuedGossipValidationOutcome,
     ) void {
-        const removed = self.pending_gossip_validations.fetchRemove(msg_id) orelse return;
-        self.completed_gossip_validations.append(self.allocator, .{
-            .msg_id = removed.key,
-            .peer_id = removed.value.peer_id,
-            .topic = removed.value.topic,
-            .outcome = outcome,
-        }) catch |err| {
-            var pending = removed.value;
-            pending.deinit(self.allocator);
-            node_log.warn("failed to queue completed gossip validation result: {}", .{err});
-        };
+        const bp = self.beacon_processor orelse return;
+        bp.finishDeferredGossipValidation(msg_id, outcome);
     }
 
     pub fn handleGossipReject(
@@ -858,22 +789,32 @@ pub const BeaconNode = struct {
         io: std.Io,
         p2p: *P2pService,
     ) bool {
+        const bp = self.beacon_processor orelse return false;
         var did_work = false;
 
-        while (self.completed_gossip_validations.items.len > 0) {
-            var completion = self.completed_gossip_validations.orderedRemove(0);
-            defer completion.deinit(self.allocator);
+        while (bp.popGossipValidationResult()) |completion| {
+            var owned_completion = completion;
+            defer owned_completion.deinit();
 
-            switch (completion.outcome) {
+            var topic_buf: [networking.gossip_topics.MAX_TOPIC_LENGTH]u8 = undefined;
+            const topic = networking.gossip_topics.formatTopic(
+                &topic_buf,
+                owned_completion.context.fork_digest,
+                toNetworkingGossipTopicType(owned_completion.context.topic_type),
+                owned_completion.context.subnet_id,
+            );
+            const peer_id = owned_completion.context.peer_id.bytes();
+
+            switch (owned_completion.outcome) {
                 .accept => {
-                    _ = p2p.reportGossipValidationResult(io, &completion.msg_id, .accept);
+                    _ = p2p.reportGossipValidationResult(io, &owned_completion.msg_id, .accept);
                 },
                 .ignore => {
-                    _ = p2p.reportGossipValidationResult(io, &completion.msg_id, .ignore);
+                    _ = p2p.reportGossipValidationResult(io, &owned_completion.msg_id, .ignore);
                 },
                 .reject => |reason| {
-                    self.handleGossipReject(io, p2p, completion.peer_id, completion.topic, reason);
-                    _ = p2p.reportGossipValidationResult(io, &completion.msg_id, .reject);
+                    self.handleGossipReject(io, p2p, peer_id, topic, toNetworkingGossipRejectReason(reason));
+                    _ = p2p.reportGossipValidationResult(io, &owned_completion.msg_id, .reject);
                 },
             }
 
@@ -2468,24 +2409,8 @@ pub const BeaconNode = struct {
     }
 
     pub fn gossipBlsPendingSnapshot(self: *const BeaconNode) GossipBlsPendingSnapshot {
-        var snapshot: GossipBlsPendingSnapshot = .{};
-        for (self.pending_gossip_bls_batches.items) |pending| {
-            switch (pending) {
-                .attestation => |batch| {
-                    snapshot.attestation_batches += 1;
-                    snapshot.attestation_items += @intCast(batch.items.len);
-                },
-                .aggregate => |batch| {
-                    snapshot.aggregate_batches += 1;
-                    snapshot.aggregate_items += @intCast(batch.items.len);
-                },
-                .sync_message => |batch| {
-                    snapshot.sync_message_batches += 1;
-                    snapshot.sync_message_items += @intCast(batch.items.len);
-                },
-            }
-        }
-        return snapshot;
+        const bp = self.beacon_processor orelse return .{};
+        return bp.gossipBlsPendingSnapshot();
     }
 
     pub fn headCatchupPendingCount(self: *const BeaconNode) u64 {
@@ -2769,7 +2694,9 @@ pub const BeaconNode = struct {
     pub fn processPendingChildren(self: *BeaconNode, parent_root: [32]u8) void {
         // Notify unknown block sync — handles recursive resolution internally.
         self.unknown_block_sync.notifyBlockImported(parent_root) catch {};
-        self.releasePendingUnknownBlockGossip(parent_root);
+        if (self.beacon_processor) |bp| {
+            bp.releasePendingUnknownBlockGossip(parent_root);
+        }
     }
 
     pub fn queueUnknownBlockAttestation(
@@ -2778,8 +2705,8 @@ pub const BeaconNode = struct {
         work: AttestationWork,
         peer_id: ?[]const u8,
     ) !bool {
-        const added = try self.pending_unknown_block_gossip.addAttestation(block_root, peer_id, work);
-        self.drainDroppedPendingUnknownBlockGossip();
+        const bp = self.beacon_processor orelse @panic("queueUnknownBlockAttestation requires BeaconProcessor");
+        const added = try bp.queueUnknownBlockAttestation(block_root, work, peer_id);
         if (!added) return false;
         self.recordBlockImportResult(.gossip, "queued_unknown_parent", 1);
         return true;
@@ -2791,82 +2718,45 @@ pub const BeaconNode = struct {
         work: AggregateWork,
         peer_id: ?[]const u8,
     ) !bool {
-        const added = try self.pending_unknown_block_gossip.addAggregate(block_root, peer_id, work);
-        self.drainDroppedPendingUnknownBlockGossip();
+        const bp = self.beacon_processor orelse @panic("queueUnknownBlockAggregate requires BeaconProcessor");
+        const added = try bp.queueUnknownBlockAggregate(block_root, work, peer_id);
         if (!added) return false;
         self.recordBlockImportResult(.gossip, "queued_unknown_parent", 1);
         return true;
     }
 
     pub fn onPendingUnknownBlockFetchAccepted(self: *BeaconNode, block_root: [32]u8) void {
-        self.pending_unknown_block_gossip.onFetchAccepted(block_root);
+        if (self.beacon_processor) |bp| {
+            bp.onPendingUnknownBlockFetchAccepted(block_root);
+        }
     }
 
     pub fn onPendingUnknownBlockFetchFailed(self: *BeaconNode, block_root: [32]u8, peer_id: ?[]const u8) void {
-        self.pending_unknown_block_gossip.onFetchFailed(block_root, peer_id);
-        self.drainDroppedPendingUnknownBlockGossip();
+        if (self.beacon_processor) |bp| {
+            bp.onPendingUnknownBlockFetchFailed(block_root, peer_id);
+        }
     }
 
     pub fn dropPendingUnknownBlock(self: *BeaconNode, block_root: [32]u8) void {
-        self.pending_unknown_block_gossip.dropRoot(block_root);
-        self.drainDroppedPendingUnknownBlockGossip();
+        if (self.beacon_processor) |bp| {
+            bp.dropPendingUnknownBlock(block_root);
+        }
+    }
+
+    pub fn onPendingUnknownBlockSlot(self: *BeaconNode, current_slot: types.Slot) void {
+        if (self.beacon_processor) |bp| {
+            bp.onPendingUnknownBlockSlot(current_slot);
+        }
     }
 
     pub fn drivePendingUnknownBlockGossip(self: *BeaconNode) void {
+        const bp = self.beacon_processor orelse return;
         const cb_ctx = self.sync_callback_ctx orelse return;
-        self.pending_unknown_block_gossip.tick(.{
+        bp.drivePendingUnknownBlockGossip(.{
             .ptr = @ptrCast(cb_ctx),
             .requestBlockByRootFn = &sync_bridge_mod.SyncCallbackCtx.enqueueUnknownBlockGossipRequestFn,
             .getConnectedPeersFn = &sync_bridge_mod.SyncCallbackCtx.connectedPeerIdsFn,
         });
-        self.drainDroppedPendingUnknownBlockGossip();
-    }
-
-    fn releasePendingUnknownBlockGossip(self: *BeaconNode, block_root: [32]u8) void {
-        var released = pending_unknown_block_gossip_mod.ReleasedItems.empty;
-        defer {
-            for (released.items) |*item| item.deinit(self.allocator);
-            released.deinit(self.allocator);
-        }
-
-        self.pending_unknown_block_gossip.releaseImported(block_root, &released) catch return;
-        for (released.items) |*item| {
-            self.requeuePendingUnknownBlockGossipItem(item.*);
-            item.* = undefined;
-        }
-        released.items.len = 0;
-    }
-
-    fn requeuePendingUnknownBlockGossipItem(self: *BeaconNode, item: PendingUnknownBlockGossipItem) void {
-        if (self.beacon_processor) |bp| {
-            switch (item) {
-                .attestation => |work| bp.ingest(.{ .attestation = work }),
-                .aggregate => |work| bp.ingest(.{ .aggregate = work }),
-            }
-            return;
-        }
-
-        switch (item) {
-            .attestation => |work| handleQueuedAttestation(self, work),
-            .aggregate => |work| handleQueuedAggregate(self, work),
-        }
-    }
-
-    pub fn drainDroppedPendingUnknownBlockGossip(self: *BeaconNode) void {
-        var dropped = pending_unknown_block_gossip_mod.ReleasedItems.empty;
-        defer {
-            for (dropped.items) |*item| item.deinit(self.allocator);
-            dropped.deinit(self.allocator);
-        }
-
-        self.pending_unknown_block_gossip.takeDropped(&dropped) catch |err| {
-            node_log.warn("failed to drain dropped pending unknown-block gossip: {}", .{err});
-            return;
-        };
-
-        for (dropped.items) |item| {
-            finishQueuedGossipIgnore(self, item.messageId());
-        }
     }
 
     fn findPendingSyncSegmentIndex(self: *BeaconNode, key: SyncSegmentKey) ?usize {
@@ -3289,11 +3179,15 @@ pub const BeaconNode = struct {
     }
 
     pub fn processPendingGossipBlsBatch(self: *BeaconNode) bool {
-        return processPendingGossipBlsBatchImpl(self);
+        defer setGossipBlsBatchDispatchState(self);
+        const bp = self.beacon_processor orelse return false;
+        return bp.processPendingGossipBatches();
     }
 
     pub fn flushPendingGossipBlsBatch(self: *BeaconNode) void {
-        flushPendingGossipBlsBatchImpl(self);
+        defer setGossipBlsBatchDispatchState(self);
+        const bp = self.beacon_processor orelse return;
+        bp.flushPendingGossipBatches();
     }
 };
 
@@ -3405,124 +3299,122 @@ const PendingSyncMessageBlsBatch = struct {
     }
 };
 
-const PendingGossipBlsBatch = union(enum) {
-    attestation: PendingAttestationBlsBatch,
-    aggregate: PendingAggregateBlsBatch,
-    sync_message: PendingSyncMessageBlsBatch,
+fn pendingAttestationBatchIsStarted(ptr: *anyopaque) bool {
+    const batch: *PendingAttestationBlsBatch = @ptrCast(@alignCast(ptr));
+    return batch.future.started.isSet();
+}
 
-    fn priority(self: *const PendingGossipBlsBatch) bls_mod.ThreadPool.VerifySetsPriority {
-        return switch (self.*) {
-            .attestation => .high,
-            .aggregate => .normal,
-            .sync_message => .normal,
-        };
-    }
+fn pendingAttestationBatchIsReady(ptr: *anyopaque) bool {
+    const batch: *PendingAttestationBlsBatch = @ptrCast(@alignCast(ptr));
+    return batch.isReady();
+}
 
-    fn isStarted(self: *const PendingGossipBlsBatch) bool {
-        return switch (self.*) {
-            .attestation => |batch| batch.future.started.isSet(),
-            .aggregate => |batch| batch.future.started.isSet(),
-            .sync_message => |batch| batch.future.started.isSet(),
-        };
-    }
+fn pendingAttestationBatchMarkStarted(ptr: *anyopaque, now_ns: i64) void {
+    const batch: *PendingAttestationBlsBatch = @ptrCast(@alignCast(ptr));
+    batch.markStarted(now_ns);
+}
 
-    fn isReady(self: *const PendingGossipBlsBatch) bool {
-        return switch (self.*) {
-            .attestation => |batch| batch.isReady(),
-            .aggregate => |batch| batch.isReady(),
-            .sync_message => |batch| batch.isReady(),
-        };
-    }
+fn pendingAttestationBatchDrain(ptr: *anyopaque, context: *anyopaque, finished_at_ns: i64) void {
+    const batch: *PendingAttestationBlsBatch = @ptrCast(@alignCast(ptr));
+    const node: *BeaconNode = @ptrCast(@alignCast(context));
+    batch.finish(node, finished_at_ns);
+    node.allocator.destroy(batch);
+}
 
-    fn itemCount(self: *const PendingGossipBlsBatch) usize {
-        return switch (self.*) {
-            .attestation => |batch| batch.items.len,
-            .aggregate => |batch| batch.items.len,
-            .sync_message => |batch| batch.items.len,
-        };
-    }
+fn pendingAttestationBatchHandle(
+    batch: *PendingAttestationBlsBatch,
+) processor_mod.processor.PendingGossipBatchHandle {
+    return .{
+        .ptr = batch,
+        .kind = .attestation,
+        .item_count = @intCast(batch.items.len),
+        .priority = .high,
+        .is_started_fn = &pendingAttestationBatchIsStarted,
+        .is_ready_fn = &pendingAttestationBatchIsReady,
+        .mark_started_fn = &pendingAttestationBatchMarkStarted,
+        .drain_fn = &pendingAttestationBatchDrain,
+    };
+}
 
-    fn markStarted(self: *PendingGossipBlsBatch, now_ns: i64) void {
-        switch (self.*) {
-            .attestation => |*batch| batch.markStarted(now_ns),
-            .aggregate => |*batch| batch.markStarted(now_ns),
-            .sync_message => |*batch| batch.markStarted(now_ns),
-        }
-    }
+fn pendingAggregateBatchIsStarted(ptr: *anyopaque) bool {
+    const batch: *PendingAggregateBlsBatch = @ptrCast(@alignCast(ptr));
+    return batch.future.started.isSet();
+}
 
-    fn finish(self: *PendingGossipBlsBatch, node: *BeaconNode, finished_at_ns: i64) void {
-        switch (self.*) {
-            .attestation => |*batch| batch.finish(node, finished_at_ns),
-            .aggregate => |*batch| batch.finish(node, finished_at_ns),
-            .sync_message => |*batch| batch.finish(node, finished_at_ns),
-        }
-    }
-};
+fn pendingAggregateBatchIsReady(ptr: *anyopaque) bool {
+    const batch: *PendingAggregateBlsBatch = @ptrCast(@alignCast(ptr));
+    return batch.isReady();
+}
+
+fn pendingAggregateBatchMarkStarted(ptr: *anyopaque, now_ns: i64) void {
+    const batch: *PendingAggregateBlsBatch = @ptrCast(@alignCast(ptr));
+    batch.markStarted(now_ns);
+}
+
+fn pendingAggregateBatchDrain(ptr: *anyopaque, context: *anyopaque, finished_at_ns: i64) void {
+    const batch: *PendingAggregateBlsBatch = @ptrCast(@alignCast(ptr));
+    const node: *BeaconNode = @ptrCast(@alignCast(context));
+    batch.finish(node, finished_at_ns);
+    node.allocator.destroy(batch);
+}
+
+fn pendingAggregateBatchHandle(
+    batch: *PendingAggregateBlsBatch,
+) processor_mod.processor.PendingGossipBatchHandle {
+    return .{
+        .ptr = batch,
+        .kind = .aggregate,
+        .item_count = @intCast(batch.items.len),
+        .priority = .normal,
+        .is_started_fn = &pendingAggregateBatchIsStarted,
+        .is_ready_fn = &pendingAggregateBatchIsReady,
+        .mark_started_fn = &pendingAggregateBatchMarkStarted,
+        .drain_fn = &pendingAggregateBatchDrain,
+    };
+}
+
+fn pendingSyncMessageBatchIsStarted(ptr: *anyopaque) bool {
+    const batch: *PendingSyncMessageBlsBatch = @ptrCast(@alignCast(ptr));
+    return batch.future.started.isSet();
+}
+
+fn pendingSyncMessageBatchIsReady(ptr: *anyopaque) bool {
+    const batch: *PendingSyncMessageBlsBatch = @ptrCast(@alignCast(ptr));
+    return batch.isReady();
+}
+
+fn pendingSyncMessageBatchMarkStarted(ptr: *anyopaque, now_ns: i64) void {
+    const batch: *PendingSyncMessageBlsBatch = @ptrCast(@alignCast(ptr));
+    batch.markStarted(now_ns);
+}
+
+fn pendingSyncMessageBatchDrain(ptr: *anyopaque, context: *anyopaque, finished_at_ns: i64) void {
+    const batch: *PendingSyncMessageBlsBatch = @ptrCast(@alignCast(ptr));
+    const node: *BeaconNode = @ptrCast(@alignCast(context));
+    batch.finish(node, finished_at_ns);
+    node.allocator.destroy(batch);
+}
+
+fn pendingSyncMessageBatchHandle(
+    batch: *PendingSyncMessageBlsBatch,
+) processor_mod.processor.PendingGossipBatchHandle {
+    return .{
+        .ptr = batch,
+        .kind = .sync_message,
+        .item_count = @intCast(batch.items.len),
+        .priority = .normal,
+        .is_started_fn = &pendingSyncMessageBatchIsStarted,
+        .is_ready_fn = &pendingSyncMessageBatchIsReady,
+        .mark_started_fn = &pendingSyncMessageBatchMarkStarted,
+        .drain_fn = &pendingSyncMessageBatchDrain,
+    };
+}
 
 fn setGossipBlsBatchDispatchState(node: *BeaconNode) void {
     if (node.beacon_processor) |bp| {
         const enabled = node.gossip_bls_thread_pool.canAcceptWork();
         bp.setGossipBlsBatchDispatchEnabled(enabled);
     }
-}
-
-fn processPendingGossipBlsBatchImpl(node: *BeaconNode) bool {
-    defer setGossipBlsBatchDispatchState(node);
-
-    const now_ns = wallNowNs(node.io);
-    for (node.pending_gossip_bls_batches.items) |*pending| {
-        pending.markStarted(now_ns);
-    }
-
-    var did_work = false;
-    while (findReadyPendingGossipBlsBatch(node)) |ready_index| {
-        const finished_at_ns = wallNowNs(node.io);
-        var ready = node.pending_gossip_bls_batches.orderedRemove(ready_index);
-        ready.markStarted(finished_at_ns);
-        ready.finish(node, finished_at_ns);
-        did_work = true;
-    }
-
-    return did_work or node.pending_gossip_bls_batches.items.len > 0;
-}
-
-fn flushPendingGossipBlsBatchImpl(node: *BeaconNode) void {
-    defer setGossipBlsBatchDispatchState(node);
-
-    while (node.pending_gossip_bls_batches.items.len > 0) {
-        const active_index = findStartedPendingGossipBlsBatch(node) orelse 0;
-        const finished_at_ns = wallNowNs(node.io);
-        var pending = node.pending_gossip_bls_batches.orderedRemove(active_index);
-        pending.markStarted(finished_at_ns);
-        pending.finish(node, finished_at_ns);
-    }
-}
-
-fn findReadyPendingGossipBlsBatch(node: *const BeaconNode) ?usize {
-    for (node.pending_gossip_bls_batches.items, 0..) |pending, i| {
-        if (pending.isReady()) return i;
-    }
-    return null;
-}
-
-fn findStartedPendingGossipBlsBatch(node: *const BeaconNode) ?usize {
-    for (node.pending_gossip_bls_batches.items, 0..) |pending, i| {
-        if (pending.isStarted()) return i;
-    }
-    return null;
-}
-
-fn appendPendingGossipBlsBatch(node: *BeaconNode, pending: PendingGossipBlsBatch) void {
-    const items = node.pending_gossip_bls_batches.items;
-    var insert_at = items.len;
-    if (pending.priority() == .high) {
-        insert_at = 0;
-        while (insert_at < items.len) : (insert_at += 1) {
-            if (items[insert_at].priority() != .high) break;
-        }
-    }
-
-    node.pending_gossip_bls_batches.insertAssumeCapacity(insert_at, pending);
 }
 
 fn cloneAttestationBatchItems(allocator: Allocator, items: []const AttestationWork) ![]AttestationWork {
@@ -3846,7 +3738,87 @@ fn finishQueuedGossipIgnore(node: *BeaconNode, msg_id: MessageId) void {
 }
 
 fn finishQueuedGossipReject(node: *BeaconNode, msg_id: MessageId, reason: GossipRejectReason) void {
-    node.finishPendingGossipValidation(msg_id, .{ .reject = reason });
+    node.finishPendingGossipValidation(msg_id, .{ .reject = toProcessorGossipRejectReason(reason) });
+}
+
+fn takeValidationContextFromRawWork(work: *processor_mod.work_item.RawGossipWork) GossipValidationContext {
+    const peer_id = work.peer_id;
+    work.peer_id = .none;
+    return .{
+        .peer_id = peer_id,
+        .fork_digest = work.fork_digest,
+        .topic_type = work.topic_type,
+        .subnet_id = work.subnet_id,
+    };
+}
+
+fn queueImmediateGossipValidation(
+    node: *BeaconNode,
+    work: *processor_mod.work_item.RawGossipWork,
+    outcome: QueuedGossipValidationOutcome,
+) void {
+    const bp = node.beacon_processor orelse return;
+    bp.queueGossipValidationResult(
+        work.message_id,
+        takeValidationContextFromRawWork(work),
+        outcome,
+    );
+}
+
+fn toProcessorGossipRejectReason(reason: GossipRejectReason) processor_mod.processor.GossipRejectReason {
+    return switch (reason) {
+        .decode_failed => .decode_failed,
+        .invalid_signature => .invalid_signature,
+        .wrong_subnet => .wrong_subnet,
+        .invalid_block => .invalid_block,
+        .invalid_attestation => .invalid_attestation,
+        .invalid_aggregate => .invalid_aggregate,
+        .invalid_voluntary_exit => .invalid_voluntary_exit,
+        .invalid_proposer_slashing => .invalid_proposer_slashing,
+        .invalid_attester_slashing => .invalid_attester_slashing,
+        .invalid_bls_to_execution_change => .invalid_bls_to_execution_change,
+        .invalid_sync_contribution => .invalid_sync_contribution,
+        .invalid_sync_committee_message => .invalid_sync_committee_message,
+        .invalid_blob_sidecar => .invalid_blob_sidecar,
+        .invalid_data_column_sidecar => .invalid_data_column_sidecar,
+    };
+}
+
+fn toNetworkingGossipRejectReason(reason: processor_mod.processor.GossipRejectReason) GossipRejectReason {
+    return switch (reason) {
+        .decode_failed => .decode_failed,
+        .invalid_signature => .invalid_signature,
+        .wrong_subnet => .wrong_subnet,
+        .invalid_block => .invalid_block,
+        .invalid_attestation => .invalid_attestation,
+        .invalid_aggregate => .invalid_aggregate,
+        .invalid_voluntary_exit => .invalid_voluntary_exit,
+        .invalid_proposer_slashing => .invalid_proposer_slashing,
+        .invalid_attester_slashing => .invalid_attester_slashing,
+        .invalid_bls_to_execution_change => .invalid_bls_to_execution_change,
+        .invalid_sync_contribution => .invalid_sync_contribution,
+        .invalid_sync_committee_message => .invalid_sync_committee_message,
+        .invalid_blob_sidecar => .invalid_blob_sidecar,
+        .invalid_data_column_sidecar => .invalid_data_column_sidecar,
+    };
+}
+
+fn toNetworkingGossipTopicType(
+    topic_type: processor_mod.work_item.GossipTopicType,
+) networking.gossip_topics.GossipTopicType {
+    return switch (topic_type) {
+        .beacon_block => .beacon_block,
+        .beacon_aggregate_and_proof => .beacon_aggregate_and_proof,
+        .beacon_attestation => .beacon_attestation,
+        .voluntary_exit => .voluntary_exit,
+        .proposer_slashing => .proposer_slashing,
+        .attester_slashing => .attester_slashing,
+        .bls_to_execution_change => .bls_to_execution_change,
+        .blob_sidecar => .blob_sidecar,
+        .sync_committee_contribution_and_proof => .sync_committee_contribution_and_proof,
+        .sync_committee => .sync_committee,
+        .data_column_sidecar => .data_column_sidecar,
+    };
 }
 
 fn currentUnixTimeMs(io: std.Io) u64 {
@@ -3957,9 +3929,10 @@ fn importSyncMessageBatchItems(
 
 fn tryStartPendingAttestationBatch(node: *BeaconNode, items: []AttestationWork) bool {
     const gh = node.gossip_handler orelse return false;
+    const bp = node.beacon_processor orelse return false;
     if (gh.verifyAttestationSignatureFn == null) return false;
     if (!node.gossip_bls_thread_pool.canAcceptWork()) return false;
-    node.pending_gossip_bls_batches.ensureUnusedCapacity(node.allocator, 1) catch return false;
+    bp.ensurePendingGossipBatchCapacity(1) catch return false;
     const same_message = attestationBatchSharesDataRoot(items);
 
     const owned_sets = node.allocator.alloc(bls_mod.OwnedSignatureSet, items.len) catch return false;
@@ -3992,6 +3965,16 @@ fn tryStartPendingAttestationBatch(node: *BeaconNode, items: []AttestationWork) 
     }
 
     const sets = signature_sets[0..items.len];
+    const pending_batch = node.allocator.create(PendingAttestationBlsBatch) catch {
+        while (owned_count > 0) {
+            owned_count -= 1;
+            owned_sets[owned_count].deinit();
+        }
+        node.allocator.free(owned_sets);
+        return false;
+    };
+    errdefer node.allocator.destroy(pending_batch);
+
     const future = (if (same_message)
         node.gossip_bls_thread_pool.startVerifySignatureSetsSameMessage(
             node.allocator,
@@ -4014,21 +3997,23 @@ fn tryStartPendingAttestationBatch(node: *BeaconNode, items: []AttestationWork) 
         return false;
     };
 
-    appendPendingGossipBlsBatch(node, .{ .attestation = .{
+    pending_batch.* = .{
         .items = items,
         .owned_sets = owned_sets,
         .future = future,
         .enqueued_at_ns = wallNowNs(node.io),
-    } });
+    };
+    bp.enqueuePendingGossipBatch(pendingAttestationBatchHandle(pending_batch));
     setGossipBlsBatchDispatchState(node);
     return true;
 }
 
 fn tryStartPendingAggregateBatch(node: *BeaconNode, items: []AggregateWork) bool {
     const gh = node.gossip_handler orelse return false;
+    const bp = node.beacon_processor orelse return false;
     if (gh.verifyAggregateSignatureFn == null) return false;
     if (!node.gossip_bls_thread_pool.canAcceptWork()) return false;
-    node.pending_gossip_bls_batches.ensureUnusedCapacity(node.allocator, 1) catch return false;
+    bp.ensurePendingGossipBatchCapacity(1) catch return false;
 
     const owned_sets = node.allocator.alloc(bls_mod.OwnedSignatureSet, items.len * 3) catch return false;
     var owned_count: usize = 0;
@@ -4058,6 +4043,16 @@ fn tryStartPendingAggregateBatch(node: *BeaconNode, items: []AggregateWork) bool
         }
     }
 
+    const pending_batch = node.allocator.create(PendingAggregateBlsBatch) catch {
+        while (owned_count > 0) {
+            owned_count -= 1;
+            owned_sets[owned_count].deinit();
+        }
+        node.allocator.free(owned_sets);
+        return false;
+    };
+    errdefer node.allocator.destroy(pending_batch);
+
     const future = node.gossip_bls_thread_pool.startVerifySignatureSets(
         node.allocator,
         signature_sets[0..owned_count],
@@ -4072,12 +4067,13 @@ fn tryStartPendingAggregateBatch(node: *BeaconNode, items: []AggregateWork) bool
         return false;
     };
 
-    appendPendingGossipBlsBatch(node, .{ .aggregate = .{
+    pending_batch.* = .{
         .items = items,
         .owned_sets = owned_sets,
         .future = future,
         .enqueued_at_ns = wallNowNs(node.io),
-    } });
+    };
+    bp.enqueuePendingGossipBatch(pendingAggregateBatchHandle(pending_batch));
     setGossipBlsBatchDispatchState(node);
     return true;
 }
@@ -4087,9 +4083,10 @@ fn tryStartPendingSyncMessageBatch(
     items: []processor_mod.work_item.SyncMessageWork,
 ) bool {
     const gh = node.gossip_handler orelse return false;
+    const bp = node.beacon_processor orelse return false;
     if (gh.verifySyncCommitteeSignatureFn == null) return false;
     if (!node.gossip_bls_thread_pool.canAcceptWork()) return false;
-    node.pending_gossip_bls_batches.ensureUnusedCapacity(node.allocator, 1) catch return false;
+    bp.ensurePendingGossipBatchCapacity(1) catch return false;
     const same_message = syncMessageBatchSharesSigningRoot(items);
 
     const owned_sets = node.allocator.alloc(bls_mod.OwnedSignatureSet, items.len) catch return false;
@@ -4115,6 +4112,16 @@ fn tryStartPendingSyncMessageBatch(
     }
 
     const sets = signature_sets[0..items.len];
+    const pending_batch = node.allocator.create(PendingSyncMessageBlsBatch) catch {
+        while (owned_count > 0) {
+            owned_count -= 1;
+            owned_sets[owned_count].deinit();
+        }
+        node.allocator.free(owned_sets);
+        return false;
+    };
+    errdefer node.allocator.destroy(pending_batch);
+
     const future = (if (same_message)
         node.gossip_bls_thread_pool.startVerifySignatureSetsSameMessage(
             node.allocator,
@@ -4137,12 +4144,13 @@ fn tryStartPendingSyncMessageBatch(
         return false;
     };
 
-    appendPendingGossipBlsBatch(node, .{ .sync_message = .{
+    pending_batch.* = .{
         .items = items,
         .owned_sets = owned_sets,
         .future = future,
         .enqueued_at_ns = wallNowNs(node.io),
-    } });
+    };
+    bp.enqueuePendingGossipBatch(pendingSyncMessageBatchHandle(pending_batch));
     setGossipBlsBatchDispatchState(node);
     return true;
 }
@@ -4164,6 +4172,87 @@ pub fn processorHandlerCallback(item: WorkItem, context: *anyopaque) void {
     const wtype = item.workType();
 
     switch (item) {
+        .raw_gossip_fast,
+        .raw_gossip_attestation,
+        .raw_gossip_aggregate,
+        .raw_gossip_sync_contribution,
+        .raw_gossip_sync_message,
+        .raw_gossip_pool_object,
+        => |work| {
+            var raw_work = work;
+            defer raw_work.data.deinit();
+
+            const gh = node.gossip_handler orelse {
+                queueImmediateGossipValidation(node, &raw_work, .ignore);
+                return;
+            };
+
+            const slot = if (node.clock) |clock|
+                clock.currentSlot(node.io) orelse node.currentHeadSlot()
+            else
+                node.currentHeadSlot();
+            gh.updateClock(slot, state_transition.computeEpochAtSlot(slot), node.currentFinalizedSlot());
+            gh.updateForkSeq(raw_work.fork_seq);
+
+            const data = raw_work.data.cast(processor_mod.work_item.OwnedSszBytes).ssz_bytes;
+            const metadata: gossip_handler_mod.GossipIngressMetadata = .{
+                .source = raw_work.source,
+                .message_id = raw_work.message_id,
+                .seen_timestamp_ns = raw_work.seen_timestamp_ns,
+                .peer_id = raw_work.peer_id.bytes(),
+            };
+
+            switch (gh.processGossipMessageWithSubnetAndMetadata(
+                raw_work.topic_type,
+                raw_work.subnet_id,
+                data,
+                metadata,
+            )) {
+                .accepted => queueImmediateGossipValidation(node, &raw_work, .accept),
+                .deferred => {
+                    const bp = node.beacon_processor orelse return;
+                    const validation_context = takeValidationContextFromRawWork(&raw_work);
+                    bp.trackDeferredGossipValidation(
+                        raw_work.message_id,
+                        validation_context,
+                    ) catch |err| {
+                        node_log.warn("failed to track deferred gossip validation: {}", .{err});
+                        bp.queueGossipValidationResult(raw_work.message_id, validation_context, .ignore);
+                    };
+                },
+                .ignored => queueImmediateGossipValidation(node, &raw_work, .ignore),
+                .rejected => |reason| {
+                    node_log.debug(
+                        "Gossip {s} rejected ({s}) fork_seq={s} subnet={?d} payload_len={d}",
+                        .{
+                            raw_work.topic_type.topicName(),
+                            @tagName(reason),
+                            @tagName(raw_work.fork_seq),
+                            raw_work.subnet_id,
+                            data.len,
+                        },
+                    );
+                    queueImmediateGossipValidation(
+                        node,
+                        &raw_work,
+                        .{ .reject = toProcessorGossipRejectReason(reason) },
+                    );
+                },
+                .failed => |err| {
+                    node_log.debug(
+                        "gossip {s} error: {} fork_seq={s} subnet={?d} payload_len={d}",
+                        .{
+                            raw_work.topic_type.topicName(),
+                            err,
+                            @tagName(raw_work.fork_seq),
+                            raw_work.subnet_id,
+                            data.len,
+                        },
+                    );
+                    queueImmediateGossipValidation(node, &raw_work, .ignore);
+                },
+            }
+        },
         .gossip_block => |work| {
             const started_at_ns = wallNowNs(node.io);
             defer observeGossipProcessorWork(node, .block, work.seen_timestamp_ns, started_at_ns);
@@ -4906,21 +4995,28 @@ test "processorHandlerCallback imports queued attestations" {
     try std.testing.expectEqual(@as(?u64, 19), ctx.validator_index);
 }
 
-test "releasePendingUnknownBlockGossip transfers queued attestations without double cleanup" {
+test "processor-owned unknown-block gossip release requeues queued attestations without double cleanup" {
     const allocator = std.testing.allocator;
 
     var ctx = ProcessorImportTestContext{};
     var node: BeaconNode = undefined;
     node.allocator = allocator;
-    node.beacon_processor = null;
-    node.pending_unknown_block_gossip = PendingUnknownBlockGossipQueue.init(allocator);
-    defer node.pending_unknown_block_gossip.deinit();
 
     var gh: GossipHandler = undefined;
     gh.node = @ptrCast(&ctx);
     gh.importResolvedAttestationFn = &ProcessorImportTestContext.importAttestation;
     gh.verifyAttestationSignatureFn = null;
     node.gossip_handler = &gh;
+
+    var bp = try BeaconProcessor.init(
+        std.testing.io,
+        allocator,
+        QueueConfig.default,
+        &processorHandlerCallback,
+        @ptrCast(&node),
+    );
+    defer bp.deinit();
+    node.beacon_processor = &bp;
 
     const root = [_]u8{0x44} ** 32;
     const added = try node.queueUnknownBlockAttestation(root, .{
@@ -4950,12 +5046,13 @@ test "releasePendingUnknownBlockGossip transfers queued attestations without dou
     }, "peer-a");
     try std.testing.expect(added);
 
-    node.releasePendingUnknownBlockGossip(root);
+    bp.releasePendingUnknownBlockGossip(root);
+    try std.testing.expectEqual(@as(u64, 1), bp.drainAll());
 
     try std.testing.expectEqual(@as(?u64, 333), ctx.attestation_slot);
     try std.testing.expectEqual(@as(?u64, 9), ctx.attestation_committee_index);
     try std.testing.expectEqual(@as(?u64, 27), ctx.validator_index);
-    try std.testing.expectEqual(@as(usize, 0), node.pending_unknown_block_gossip.pendingCount());
+    try std.testing.expectEqual(@as(usize, 0), bp.pendingUnknownBlockGossipCount());
 }
 
 test "processorHandlerCallback imports queued sync committee messages" {

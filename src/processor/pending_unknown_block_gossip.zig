@@ -4,27 +4,64 @@
 //! yet known locally. Unlike orphan blocks, we only have the gossip object and
 //! must fetch the voted block by root before replaying the object through the
 //! normal processor/import path.
-//!
-//! This mirrors the production Lodestar shape more closely than the removed
-//! header-only unknown-chain path:
-//! - park gossip objects by missing block root
-//! - trigger a by-root search with peer rotation
-//! - replay the parked objects once the block is actually imported
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
-const processor_mod = @import("processor");
-const sync_mod = @import("sync");
-const AttestationWork = processor_mod.work_item.AttestationWork;
-const AggregateWork = processor_mod.work_item.AggregateWork;
-const MessageId = processor_mod.work_item.MessageId;
-const PeerSet = sync_mod.unknown_chain.PeerSet;
+const work_item_mod = @import("work_item.zig");
+const AttestationWork = work_item_mod.AttestationWork;
+const AggregateWork = work_item_mod.AggregateWork;
+const MessageId = work_item_mod.MessageId;
 const Root = @import("consensus_types").primitive.Root.Type;
 const Slot = @import("consensus_types").primitive.Slot.Type;
 
 pub const MAX_PENDING_UNKNOWN_BLOCK_GOSSIP_OBJECTS: usize = 16_384;
 pub const MAX_UNKNOWN_BLOCK_GOSSIP_FETCH_ATTEMPTS: u8 = 5;
+
+const StoredPeerId = struct {
+    buf: [128]u8 = undefined,
+    len: u8 = 0,
+
+    fn init(peer_id: []const u8) StoredPeerId {
+        var stored: StoredPeerId = .{};
+        stored.len = @intCast(@min(peer_id.len, stored.buf.len));
+        @memcpy(stored.buf[0..stored.len], peer_id[0..stored.len]);
+        return stored;
+    }
+
+    fn bytes(self: *const StoredPeerId) []const u8 {
+        return self.buf[0..self.len];
+    }
+};
+
+const ExcludedPeerSet = struct {
+    peers: std.ArrayListUnmanaged(StoredPeerId) = .empty,
+
+    fn deinit(self: *ExcludedPeerSet, allocator: Allocator) void {
+        self.peers.deinit(allocator);
+        self.* = .{};
+    }
+
+    fn clear(self: *ExcludedPeerSet, allocator: Allocator) void {
+        self.deinit(allocator);
+    }
+
+    fn isEmpty(self: *const ExcludedPeerSet) bool {
+        return self.peers.items.len == 0;
+    }
+
+    fn contains(self: *const ExcludedPeerSet, peer_id: []const u8) bool {
+        for (self.peers.items) |*entry| {
+            if (std.mem.eql(u8, entry.bytes(), peer_id)) return true;
+        }
+        return false;
+    }
+
+    fn add(self: *ExcludedPeerSet, allocator: Allocator, peer_id: []const u8) !void {
+        if (self.contains(peer_id)) return;
+        try self.peers.append(allocator, StoredPeerId.init(peer_id));
+    }
+};
 
 pub const PendingKind = enum {
     attestation,
@@ -51,9 +88,7 @@ pub const PendingItem = union(PendingKind) {
 
     pub fn deinit(self: *PendingItem, allocator: Allocator) void {
         switch (self.*) {
-            .attestation => |*work| {
-                work.attestation.deinit(allocator);
-            },
+            .attestation => |*work| work.attestation.deinit(allocator),
             .aggregate => |*work| {
                 work.resolved.deinit(allocator);
                 work.aggregate.deinit(allocator);
@@ -75,7 +110,7 @@ const PendingRoot = struct {
     items: std.ArrayListUnmanaged(PendingItem) = .empty,
     preferred_peer_id_buf: [128]u8 = undefined,
     preferred_peer_id_len: u8 = 0,
-    excluded_peers: PeerSet = .empty,
+    excluded_peers: ExcludedPeerSet = .{},
     attempts: u8 = 0,
     status: FetchStatus = .pending,
 
@@ -98,8 +133,7 @@ const PendingRoot = struct {
     }
 
     fn clearExcludedPeers(self: *PendingRoot, allocator: Allocator) void {
-        self.excluded_peers.deinit(allocator);
-        self.excluded_peers = .empty;
+        self.excluded_peers.clear(allocator);
     }
 
     fn containsMessageId(self: *const PendingRoot, message_id: MessageId) bool {
@@ -239,11 +273,7 @@ pub const Queue = struct {
         self.removeRoot(block_root);
     }
 
-    pub fn releaseImported(
-        self: *Queue,
-        block_root: Root,
-        out: *ReleasedItems,
-    ) !void {
+    pub fn releaseImported(self: *Queue, block_root: Root, out: *ReleasedItems) !void {
         const pending_len = blk: {
             const pending = self.pending_by_root.getPtr(block_root) orelse return;
             break :blk pending.items.items.len;
@@ -259,8 +289,9 @@ pub const Queue = struct {
 
         for (pending.items.items) |item| {
             out.appendAssumeCapacity(item);
-            self.total_count -|= 1;
         }
+        self.total_count -|= pending.items.items.len;
+        pending.items.items.len = 0;
     }
 
     pub fn takeDropped(self: *Queue, out: *ReleasedItems) !void {
@@ -275,12 +306,7 @@ pub const Queue = struct {
         return self.total_count;
     }
 
-    fn addItem(
-        self: *Queue,
-        block_root: Root,
-        peer_id: ?[]const u8,
-        item: PendingItem,
-    ) !bool {
+    fn addItem(self: *Queue, block_root: Root, peer_id: ?[]const u8, item: PendingItem) !bool {
         var owned = item;
         errdefer owned.deinit(self.allocator);
 
@@ -386,10 +412,24 @@ pub const Queue = struct {
 };
 
 fn isPeerExcluded(pending: *const PendingRoot, peer_id: []const u8) bool {
-    for (pending.excluded_peers.peers.items) |*entry| {
-        if (std.mem.eql(u8, entry.id(), peer_id)) return true;
-    }
-    return false;
+    return pending.excluded_peers.contains(peer_id);
+}
+
+const TestCallbacksCtx = struct {
+    connected: []const []const u8,
+    requested_root: ?Root = null,
+    requested_peer: ?[]const u8 = null,
+};
+
+fn testRequestBlockByRoot(ptr: *anyopaque, root: Root, peer_id: []const u8) void {
+    const ctx: *TestCallbacksCtx = @ptrCast(@alignCast(ptr));
+    ctx.requested_root = root;
+    ctx.requested_peer = peer_id;
+}
+
+fn testGetConnectedPeers(ptr: *anyopaque) []const []const u8 {
+    const ctx: *TestCallbacksCtx = @ptrCast(@alignCast(ptr));
+    return ctx.connected;
 }
 
 test "Queue releases imported root items" {
@@ -434,23 +474,6 @@ test "Queue releases imported root items" {
 
     try std.testing.expectEqual(@as(usize, 1), released.items.len);
     try std.testing.expectEqual(@as(usize, 0), queue.pendingCount());
-}
-
-const TestCallbacksCtx = struct {
-    connected: []const []const u8,
-    requested_root: ?Root = null,
-    requested_peer: ?[]const u8 = null,
-};
-
-fn testRequestBlockByRoot(ptr: *anyopaque, root: Root, peer_id: []const u8) void {
-    const ctx: *TestCallbacksCtx = @ptrCast(@alignCast(ptr));
-    ctx.requested_root = root;
-    ctx.requested_peer = peer_id;
-}
-
-fn testGetConnectedPeers(ptr: *anyopaque) []const []const u8 {
-    const ctx: *TestCallbacksCtx = @ptrCast(@alignCast(ptr));
-    return ctx.connected;
 }
 
 test "Queue retries a different peer after failure" {

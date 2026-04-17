@@ -7,6 +7,7 @@
 const std = @import("std");
 const consensus_types = @import("consensus_types");
 const fork_types = @import("fork_types");
+const config_mod = @import("config");
 
 // Re-export primitive types used in payloads.
 const Slot = consensus_types.primitive.Slot.Type;
@@ -21,6 +22,37 @@ const ProposerSlashing = consensus_types.phase0.ProposerSlashing.Type;
 const SignedBLSToExecutionChange = consensus_types.capella.SignedBLSToExecutionChange.Type;
 const SyncCommitteeMessage = consensus_types.altair.SyncCommitteeMessage.Type;
 const SignedContributionAndProof = consensus_types.altair.SignedContributionAndProof.Type;
+const ForkSeq = config_mod.ForkSeq;
+
+pub const GossipTopicType = enum {
+    beacon_block,
+    beacon_aggregate_and_proof,
+    beacon_attestation,
+    voluntary_exit,
+    proposer_slashing,
+    attester_slashing,
+    bls_to_execution_change,
+    blob_sidecar,
+    sync_committee_contribution_and_proof,
+    sync_committee,
+    data_column_sidecar,
+
+    pub fn topicName(self: GossipTopicType) []const u8 {
+        return switch (self) {
+            .beacon_block => "beacon_block",
+            .beacon_aggregate_and_proof => "beacon_aggregate_and_proof",
+            .beacon_attestation => "beacon_attestation",
+            .voluntary_exit => "voluntary_exit",
+            .proposer_slashing => "proposer_slashing",
+            .attester_slashing => "attester_slashing",
+            .bls_to_execution_change => "bls_to_execution_change",
+            .blob_sidecar => "blob_sidecar",
+            .sync_committee_contribution_and_proof => "sync_committee_contribution_and_proof",
+            .sync_committee => "sync_committee",
+            .data_column_sidecar => "data_column_sidecar",
+        };
+    }
+};
 
 /// Maximum number of attestations in a single batch for BLS batch verification.
 pub const max_attestation_batch_size: u32 = 64;
@@ -164,6 +196,19 @@ pub const OwnedSszBytes = struct {
     pub fn deinit(self: *OwnedSszBytes) void {
         self.allocator.free(self.ssz_bytes);
     }
+};
+
+/// Raw inbound gossip admitted into the processor before topic-specific decode.
+pub const RawGossipWork = struct {
+    source: GossipSource,
+    message_id: MessageId,
+    peer_id: PeerIdHandle = .none,
+    topic_type: GossipTopicType,
+    subnet_id: ?u8 = null,
+    fork_digest: [4]u8,
+    fork_seq: ForkSeq,
+    data: GossipDataHandle,
+    seen_timestamp_ns: i64,
 };
 
 // ---------------------------------------------------------------------------
@@ -434,70 +479,74 @@ pub const WorkType = enum(u8) {
     rpc_blob = 3,
     rpc_custody_column = 4,
 
+    // -- Raw gossip admission --
+    raw_gossip_fast = 5,
+    raw_gossip_attestation = 6,
+    raw_gossip_aggregate = 7,
+    raw_gossip_sync_contribution = 8,
+    raw_gossip_sync_message = 9,
+    raw_gossip_pool_object = 10,
+
     // -- Gossip: blocks + DA --
-    delayed_block = 5,
-    gossip_block = 6,
-    gossip_execution_payload = 7,
-    gossip_blob = 8,
-    gossip_data_column = 9,
-    column_reconstruction = 10,
+    delayed_block = 11,
+    gossip_block = 12,
+    gossip_execution_payload = 13,
+    gossip_blob = 14,
+    gossip_data_column = 15,
+    column_reconstruction = 16,
 
     // -- API high priority --
-    api_request_p0 = 11,
+    api_request_p0 = 17,
 
     // -- Attestations (batch-formed) --
-    aggregate = 12,
-    attestation = 13,
-    aggregate_batch = 14,
-    attestation_batch = 15,
+    aggregate = 18,
+    attestation = 19,
+    aggregate_batch = 20,
+    attestation_batch = 21,
 
     // -- Gloas: payload attestation --
-    gossip_payload_attestation = 16,
+    gossip_payload_attestation = 22,
 
     // -- Sync committee --
-    sync_contribution = 17,
-    sync_message = 18,
-    sync_message_batch = 19,
-
-    // -- Reprocessing --
-    unknown_block_aggregate = 20,
-    unknown_block_attestation = 21,
+    sync_contribution = 23,
+    sync_message = 24,
+    sync_message_batch = 25,
 
     // -- Gloas --
-    gossip_execution_payload_bid = 22,
-    gossip_proposer_preferences = 23,
+    gossip_execution_payload_bid = 26,
+    gossip_proposer_preferences = 27,
 
     // -- Peer serving --
-    status = 24,
-    blocks_by_range = 25,
-    blocks_by_root = 26,
-    blobs_by_range = 27,
-    blobs_by_root = 28,
-    columns_by_range = 29,
-    columns_by_root = 30,
+    status = 28,
+    blocks_by_range = 29,
+    blocks_by_root = 30,
+    blobs_by_range = 31,
+    blobs_by_root = 32,
+    columns_by_range = 33,
+    columns_by_root = 34,
 
     // -- Pool objects --
-    gossip_attester_slashing = 31,
-    gossip_proposer_slashing = 32,
-    gossip_voluntary_exit = 33,
-    gossip_bls_to_exec = 34,
+    gossip_attester_slashing = 35,
+    gossip_proposer_slashing = 36,
+    gossip_voluntary_exit = 37,
+    gossip_bls_to_exec = 38,
 
     // -- Low priority --
-    api_request_p1 = 35,
-    backfill_segment = 36,
+    api_request_p1 = 39,
+    backfill_segment = 40,
 
     // -- Light client --
-    lc_bootstrap = 37,
-    lc_finality_update = 38,
-    lc_optimistic_update = 39,
-    lc_updates_by_range = 40,
+    lc_bootstrap = 41,
+    lc_finality_update = 42,
+    lc_optimistic_update = 43,
+    lc_updates_by_range = 44,
 
     // -- Internal --
-    slot_tick = 41,
-    reprocess = 42,
+    slot_tick = 45,
+    reprocess = 46,
 
     /// Total number of work types. Useful for sizing per-type metric arrays.
-    pub const count: u32 = 43;
+    pub const count: u32 = 47;
 
     /// Returns true if this work type should be dropped during initial sync.
     pub fn dropDuringSync(self: WorkType) bool {
@@ -506,8 +555,6 @@ pub const WorkType = enum(u8) {
             .aggregate,
             .attestation_batch,
             .aggregate_batch,
-            .unknown_block_attestation,
-            .unknown_block_aggregate,
             .sync_message,
             .sync_message_batch,
             .sync_contribution,
@@ -516,6 +563,10 @@ pub const WorkType = enum(u8) {
             .lc_finality_update,
             .lc_optimistic_update,
             .lc_updates_by_range,
+            .raw_gossip_attestation,
+            .raw_gossip_aggregate,
+            .raw_gossip_sync_contribution,
+            .raw_gossip_sync_message,
             => true,
             else => false,
         };
@@ -533,6 +584,14 @@ pub const WorkItem = union(WorkType) {
     rpc_block: RpcBlockWork,
     rpc_blob: RpcBlobWork,
     rpc_custody_column: RpcColumnWork,
+
+    // -- Raw gossip admission --
+    raw_gossip_fast: RawGossipWork,
+    raw_gossip_attestation: RawGossipWork,
+    raw_gossip_aggregate: RawGossipWork,
+    raw_gossip_sync_contribution: RawGossipWork,
+    raw_gossip_sync_message: RawGossipWork,
+    raw_gossip_pool_object: RawGossipWork,
 
     // -- Gossip: blocks + DA --
     delayed_block: DelayedBlockWork,
@@ -558,10 +617,6 @@ pub const WorkItem = union(WorkType) {
     sync_contribution: SyncContributionWork,
     sync_message: SyncMessageWork,
     sync_message_batch: SyncMessageBatchWork,
-
-    // -- Reprocessing --
-    unknown_block_aggregate: ReprocessWork,
-    unknown_block_attestation: ReprocessWork,
 
     // -- Gloas --
     gossip_execution_payload_bid: GloasWork,
@@ -608,6 +663,16 @@ pub const WorkItem = union(WorkType) {
 
     pub fn deinit(self: WorkItem, allocator: std.mem.Allocator) void {
         switch (self) {
+            .raw_gossip_fast,
+            .raw_gossip_attestation,
+            .raw_gossip_aggregate,
+            .raw_gossip_sync_contribution,
+            .raw_gossip_sync_message,
+            .raw_gossip_pool_object,
+            => |work| {
+                work.peer_id.deinit();
+                work.data.deinit();
+            },
             .delayed_block => |work| work.block.deinit(allocator),
             .gossip_block => |work| {
                 work.block.deinit(allocator);
@@ -628,8 +693,6 @@ pub const WorkItem = union(WorkType) {
                 var aggregate = work.aggregate;
                 aggregate.deinit(allocator);
             },
-            .unknown_block_aggregate => |work| work.data.deinit(),
-            .unknown_block_attestation => |work| work.data.deinit(),
             .sync_contribution => {},
             .sync_message => {},
             .sync_message_batch => {},
