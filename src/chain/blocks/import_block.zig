@@ -27,6 +27,7 @@ const fork_types = @import("fork_types");
 const state_transition = @import("state_transition");
 const regen_mod = @import("../regen/root.zig");
 const CachedBeaconState = state_transition.CachedBeaconState;
+const StateGraphGate = regen_mod.StateGraphGate;
 const computeEpochAtSlot = state_transition.computeEpochAtSlot;
 const computeStartSlotAtEpoch = state_transition.computeStartSlotAtEpoch;
 const HeadResult = fork_choice_mod.HeadResult;
@@ -78,6 +79,7 @@ pub const ImportContext = struct {
     // -- State management --
     block_state_cache: *regen_mod.BlockStateCache,
     queued_regen: *QueuedStateRegen,
+    state_graph_gate: *StateGraphGate,
 
     // -- Fork choice --
     fork_choice: *ForkChoice,
@@ -192,18 +194,26 @@ pub fn importVerifiedBlock(
             else => 5, // late — no proposer boost (threshold is >4s)
         };
         const beacon_block = verified.block_input.block.beaconBlock();
-        const fc_block_ok = if (fc.onBlockWithStateRoot(
-            ctx.allocator,
-            &beacon_block,
-            post_state,
-            state_root,
-            block_delay_sec,
-            fc.getTime(),
-            fc_exec_status,
-            fc_da_status,
-        )) |_| true else |err| blk: {
-            scoped_log.warn("fork choice onBlock failed for slot {d}: {}", .{ block_slot, err });
-            break :blk false;
+        const fc_block_ok = blk: {
+            // Fork choice computes unrealized checkpoints by mutating a shallow
+            // clone of post_state. Serialize that PMT mutation with the worker-side
+            // state transition path.
+            var state_graph_lease = ctx.state_graph_gate.acquire();
+            defer state_graph_lease.release();
+
+            break :blk if (fc.onBlockWithStateRoot(
+                ctx.allocator,
+                &beacon_block,
+                post_state,
+                state_root,
+                block_delay_sec,
+                fc.getTime(),
+                fc_exec_status,
+                fc_da_status,
+            )) |_| true else |err| blk_err: {
+                scoped_log.warn("fork choice onBlock failed for slot {d}: {}", .{ block_slot, err });
+                break :blk_err false;
+            };
         };
 
         // 3a. Wire attestations from the imported block into fork choice.
@@ -300,8 +310,12 @@ pub fn importVerifiedBlock(
 
     // 3. Cache checkpoint state at epoch boundaries.
     if (is_epoch_transition) {
-        const cp_state = post_state.clone(ctx.allocator, .{ .transfer_cache = false }) catch
-            return BlockImportError.InternalError;
+        const cp_state = blk: {
+            var state_graph_lease = ctx.state_graph_gate.acquire();
+            defer state_graph_lease.release();
+            break :blk post_state.clone(ctx.allocator, .{ .transfer_cache = false }) catch
+                return BlockImportError.InternalError;
+        };
         errdefer {
             cp_state.deinit();
             ctx.allocator.destroy(cp_state);

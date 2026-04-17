@@ -1475,30 +1475,39 @@ pub const Chain = struct {
     /// blocks at the current slot as "future" if onSlot was called but advanceSlot was
     /// not (or vice versa).
     pub fn advanceSlot(self: *Chain, target_slot: u64) !void {
-        const cloned = blk: {
+        const advanced = blk: {
             var state_graph_lease = self.state_graph_gate.acquire();
             defer state_graph_lease.release();
 
+            const head_root = self.headRoot();
             const head_state_root = self.headStateRoot();
             const pre_state = self.block_state_cache.get(head_state_root) orelse
                 return error.NoHeadState;
 
+            const post_state = try pre_state.clone(self.allocator, .{ .transfer_cache = false });
+            errdefer {
+                post_state.deinit();
+                self.allocator.destroy(post_state);
+            }
+
+            try state_transition.processSlots(self.allocator, post_state, target_slot, .{});
+            try post_state.state.commit();
+
             break :blk .{
-                .head_root = self.headRoot(),
-                .post_state = try pre_state.clone(self.allocator, .{ .transfer_cache = false }),
+                .head_root = head_root,
+                .post_state = post_state,
             };
         };
-        const head_root = cloned.head_root;
-        const post_state = cloned.post_state;
-        errdefer {
+        const head_root = advanced.head_root;
+        const post_state = advanced.post_state;
+        var owns_post_state = true;
+        errdefer if (owns_post_state) {
             post_state.deinit();
             self.allocator.destroy(post_state);
-        }
-
-        try state_transition.processSlots(self.allocator, post_state, target_slot, .{});
-        try post_state.state.commit();
+        };
 
         const new_state_root = try self.queued_regen.onNewBlock(post_state, true);
+        owns_post_state = false;
 
         // Store the advanced state root for this block root. Note: this records the
         // "latest known" state root for the head root (i.e. the post-slot-processing

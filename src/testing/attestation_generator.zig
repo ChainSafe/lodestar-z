@@ -28,6 +28,7 @@ const EpochCache = state_transition.EpochCache;
 const computeEpochAtSlot = state_transition.computeEpochAtSlot;
 const computeStartSlotAtEpoch = state_transition.computeStartSlotAtEpoch;
 const getBlockRootAtSlot = state_transition.getBlockRootAtSlot;
+const validateAttestation = state_transition.validateAttestation;
 
 const Slot = types.primitive.Slot.Type;
 const Epoch = types.primitive.Epoch.Type;
@@ -355,4 +356,60 @@ test "attestation_generator: deterministic — same slot same attestations" {
     }
 
     try testing.expectEqual(counts[0], counts[1]);
+}
+
+test "attestation_generator: electra validation rejects aggregation bits longer than maximum" {
+    const allocator = testing.allocator;
+    var pool = try Node.Pool.init(allocator, 500_000);
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 64);
+    defer test_state.deinit();
+
+    var justified_checkpoint: Checkpoint = undefined;
+    const state_slot = try test_state.cached_state.state.slot();
+    const attestation_slot = state_slot - preset.MIN_ATTESTATION_INCLUSION_DELAY;
+    const attestation_epoch = computeEpochAtSlot(attestation_slot);
+    if (attestation_epoch == test_state.cached_state.epoch_cache.epoch) {
+        try test_state.cached_state.state.currentJustifiedCheckpoint(&justified_checkpoint);
+    } else {
+        try test_state.cached_state.state.previousJustifiedCheckpoint(&justified_checkpoint);
+    }
+
+    const committee = try test_state.cached_state.epoch_cache.getBeaconCommittee(attestation_slot, 0);
+    try testing.expect(committee.len > 0);
+
+    var committee_bits = CommitteeBits.Type.empty;
+    try committee_bits.set(0, true);
+
+    var aggregation_bits = try AggregationBits.Type.fromBitLen(allocator, committee.len);
+    defer aggregation_bits.deinit(allocator);
+    try aggregation_bits.set(allocator, 0, true);
+
+    var malformed = ElectraAttestation{
+        .aggregation_bits = aggregation_bits,
+        .data = .{
+            .slot = attestation_slot,
+            .index = 0,
+            .beacon_block_root = [_]u8{0} ** 32,
+            .source = justified_checkpoint,
+            .target = .{
+                .epoch = attestation_epoch,
+                .root = [_]u8{0} ** 32,
+            },
+        },
+        .signature = types.primitive.BLSSignature.default_value,
+        .committee_bits = committee_bits,
+    };
+    malformed.aggregation_bits.bit_len = preset.MAX_VALIDATORS_PER_COMMITTEE * preset.MAX_COMMITTEES_PER_SLOT + 1;
+
+    try testing.expectError(
+        error.InvalidAttestationCommitteeAggregationBitsLengthMismatch,
+        validateAttestation(
+            .electra,
+            test_state.cached_state.epoch_cache,
+            test_state.cached_state.state.castToFork(.electra),
+            &malformed,
+        ),
+    );
 }

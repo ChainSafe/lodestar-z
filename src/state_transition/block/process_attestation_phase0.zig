@@ -139,6 +139,9 @@ pub fn validateAttestation(
         }
 
         var aggregation_bits_buffer: [preset.MAX_VALIDATORS_PER_COMMITTEE * preset.MAX_COMMITTEES_PER_SLOT]bool = undefined;
+        if (attestation.aggregation_bits.bit_len > aggregation_bits_buffer.len) {
+            return error.InvalidAttestationCommitteeAggregationBitsLengthMismatch;
+        }
         var aggregation_bits_slice = aggregation_bits_buffer[0..attestation.aggregation_bits.bit_len];
         try attestation.aggregation_bits.toBoolSlice(&aggregation_bits_slice);
         const aggregation_bits_array = aggregation_bits_slice;
