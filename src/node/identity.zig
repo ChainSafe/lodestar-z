@@ -176,12 +176,19 @@ fn initBuilderForOptions(
     if (try advertisedIp4(opts)) |ip4| {
         builder.ip = ip4;
         builder.udp = opts.enr_udp orelse opts.discovery_port orelse opts.p2p_port;
+        // Temporary compatibility shim: a QUIC-only ENR gets treated as low-value
+        // by too many peers today. Keep advertising tcp alongside quic until the
+        // node has a real TCP transport and we can tighten ENR transport policy.
+        builder.tcp = opts.enr_tcp orelse opts.p2p_port;
         builder.quic = opts.enr_tcp orelse opts.p2p_port;
     }
 
     if (try advertisedIp6(opts)) |ip6| {
         builder.ip6 = ip6;
         builder.udp6 = opts.enr_udp6 orelse opts.discovery_port6 orelse opts.discovery_port orelse opts.p2p_port6 orelse opts.p2p_port;
+        // See the IPv4 note above: tcp6 stays advertised for compatibility even
+        // though the live transport is still QUIC-only.
+        builder.tcp6 = opts.enr_tcp6 orelse opts.p2p_port6 orelse opts.p2p_port;
         builder.quic6 = opts.enr_tcp6 orelse opts.p2p_port6 orelse opts.p2p_port;
     }
 
@@ -316,7 +323,7 @@ fn decodeEnrText(allocator: Allocator, enr_text: []const u8) ![]u8 {
     return raw;
 }
 
-test "initBuilderForOptions only advertises QUIC transport" {
+test "initBuilderForOptions temporarily advertises tcp alongside quic" {
     var builder = try initBuilderForOptions(
         std.testing.allocator,
         [_]u8{1} ** 32,
@@ -330,8 +337,8 @@ test "initBuilderForOptions only advertises QUIC transport" {
     );
     defer builder.deinit();
 
-    try std.testing.expectEqual(@as(?u16, null), builder.tcp);
+    try std.testing.expectEqual(@as(?u16, 9000), builder.tcp);
     try std.testing.expectEqual(@as(?u16, 9000), builder.quic);
-    try std.testing.expectEqual(@as(?u16, null), builder.tcp6);
+    try std.testing.expectEqual(@as(?u16, 9001), builder.tcp6);
     try std.testing.expectEqual(@as(?u16, 9001), builder.quic6);
 }

@@ -52,7 +52,9 @@ pub const DiscoveryConfig = struct {
     local_ip6: ?[16]u8 = null,
     enr_ip: ?[4]u8 = null,
     enr_ip6: ?[16]u8 = null,
+    enr_tcp: ?u16 = null,
     enr_udp: ?u16 = null,
+    enr_tcp6: ?u16 = null,
     enr_udp6: ?u16 = null,
     p2p_port: u16 = 9000,
     p2p_port6: ?u16 = null,
@@ -178,14 +180,17 @@ pub const DiscoveryService = struct {
             if (advertisedIp4(&config, &service)) |ip4| {
                 builder.ip = ip4;
                 builder.udp = config.enr_udp orelse service.boundPort(.ip4) orelse return error.MissingBindAddress;
-                builder.tcp = config.p2p_port;
-                builder.quic = config.p2p_port;
+                // Temporary compatibility shim: keep advertising tcp alongside
+                // quic until the node grows a real TCP transport. QUIC-only ENRs
+                // are still deprioritized by enough peers to hurt connectivity.
+                builder.tcp = config.enr_tcp orelse config.p2p_port;
+                builder.quic = config.enr_tcp orelse config.p2p_port;
             }
             if (advertisedIp6(&config, &service)) |ip6| {
                 builder.ip6 = ip6;
                 builder.udp6 = config.enr_udp6 orelse service.boundPort(.ip6) orelse return error.MissingBindAddress;
-                builder.tcp6 = config.p2p_port6 orelse config.p2p_port;
-                builder.quic6 = config.p2p_port6 orelse config.p2p_port;
+                builder.tcp6 = config.enr_tcp6 orelse config.p2p_port6 orelse config.p2p_port;
+                builder.quic6 = config.enr_tcp6 orelse config.p2p_port6 orelse config.p2p_port;
             }
             builder.setEth2(config.fork_digest, config.next_fork_version, config.next_fork_epoch);
             builder.attnets = [_]u8{0} ** 8;
@@ -663,8 +668,8 @@ pub const DiscoveryService = struct {
     fn rebuildLocalEnrWithForkDigest(self: *DiscoveryService) !void {
         const next_seq = self.service.localEnrSeq() + 1;
         var builder = EnrBuilder.init(self.allocator, self.config.secret_key, next_seq);
-        builder.tcp = self.config.p2p_port;
-        builder.quic = self.config.p2p_port;
+        builder.tcp = self.config.enr_tcp orelse self.config.p2p_port;
+        builder.quic = self.config.enr_tcp orelse self.config.p2p_port;
         builder.setEth2(self.current_fork_digest, self.config.next_fork_version, self.config.next_fork_epoch);
         builder.attnets = [_]u8{0} ** 8;
         builder.syncnets = [_]u8{0} ** 1;
@@ -689,12 +694,14 @@ pub const DiscoveryService = struct {
             if (advertisedIp4(&self.config, &self.service)) |ip4| {
                 builder.ip = ip4;
                 builder.udp = self.config.enr_udp orelse self.service.boundPort(.ip4) orelse return error.MissingBindAddress;
+                builder.tcp = self.config.enr_tcp orelse self.config.p2p_port;
+                builder.quic = self.config.enr_tcp orelse self.config.p2p_port;
             }
             if (advertisedIp6(&self.config, &self.service)) |ip6| {
                 builder.ip6 = ip6;
                 builder.udp6 = self.config.enr_udp6 orelse self.service.boundPort(.ip6) orelse return error.MissingBindAddress;
-                builder.tcp6 = self.config.p2p_port6 orelse self.config.p2p_port;
-                builder.quic6 = self.config.p2p_port6 orelse self.config.p2p_port;
+                builder.tcp6 = self.config.enr_tcp6 orelse self.config.p2p_port6 orelse self.config.p2p_port;
+                builder.quic6 = self.config.enr_tcp6 orelse self.config.p2p_port6 orelse self.config.p2p_port;
             }
         }
 
@@ -1281,6 +1288,8 @@ test "DiscoveryService: buildLocalEnr produces valid ENR" {
     try std.testing.expect(parsed.pubkey != null);
     try std.testing.expectEqual([4]u8{ 127, 0, 0, 1 }, parsed.ip.?);
     try std.testing.expectEqual(svc.service.boundPort(.ip4), parsed.udp);
+    try std.testing.expectEqual(@as(?u16, 9000), parsed.tcp);
+    try std.testing.expectEqual(@as(?u16, 9000), parsed.quic);
     try std.testing.expect(parsed.eth2_fork_digest != null);
     try std.testing.expectEqual(@as(?u64, 4), parsed.custody_group_count);
 }
@@ -1311,6 +1320,30 @@ test "DiscoveryService: buildLocalEnr supports ipv6-only" {
     try std.testing.expectEqual(@as(?u16, null), svc.service.boundPort(.ip4));
     try std.testing.expectEqual(svc.service.boundPort(.ip6), parsed.udp6);
     try std.testing.expectEqual(@as(?u16, 9001), parsed.tcp6);
+    try std.testing.expectEqual(@as(?u16, 9001), parsed.quic6);
+}
+
+test "DiscoveryService: buildLocalEnr honors ENR tcp overrides" {
+    const hex_mod = discv5.hex;
+    const secret_key = hex_mod.hexToBytesComptime(32, "66fb62bfbd66b9177a138c1e5cddbe4f7c30c343e94e68df8769459cb14571f7");
+
+    var svc = try DiscoveryService.init(std.testing.io, std.testing.allocator, .{
+        .secret_key = secret_key,
+        .local_ip = [4]u8{ 127, 0, 0, 1 },
+        .listen_port = 0,
+        .p2p_port = 9000,
+        .enr_tcp = 9100,
+        .fork_digest = [4]u8{ 0x6a, 0x95, 0xa1, 0xb0 },
+    });
+    defer svc.deinit();
+
+    const enr_bytes = try svc.buildLocalEnr();
+    defer svc.allocator.free(enr_bytes);
+
+    var parsed = try enr_mod.decode(svc.allocator, enr_bytes);
+    defer parsed.deinit();
+    try std.testing.expectEqual(@as(?u16, 9100), parsed.tcp);
+    try std.testing.expectEqual(@as(?u16, 9100), parsed.quic);
 }
 
 test "resolveListenPort6 chooses distinct port for dual-stack defaults" {
