@@ -607,11 +607,11 @@ pub fn start(self: *BeaconNode, io: std.Io, listen_addr: []const u8, port: u16) 
     try initSubnetService(self);
     subscribeInitialSubnets(self, io, svc);
 
-    initDiscoveryService(self) catch |err| {
-        log.warn("Failed to initialize discovery service: {}", .{err});
-    };
     initPeerManager(self) catch |err| {
         log.warn("Failed to initialize peer manager: {}", .{err});
+    };
+    initDiscoveryService(self) catch |err| {
+        log.warn("Failed to initialize discovery service: {}", .{err});
     };
 
     initGossipHandler(self);
@@ -1209,17 +1209,14 @@ fn shouldDriveUnknownChainSync(self: *const BeaconNode) bool {
 }
 
 fn runDiscoveryMaintenance(self: *BeaconNode) bool {
-    if (self.discovery_service) |ds| {
-        if (self.peer_manager) |pm| {
-            ds.setConnectedPeers(pm.peerCount());
-        }
-        ds.discoverPeers();
-        if (self.metrics) |metrics| {
-            metrics.discovery_peers_known.set(@intCast(ds.knownPeerCount()));
-        }
-        return true;
+    const ds = self.discovery_service orelse return false;
+    const pm = self.peer_manager orelse return false;
+    ds.setConnectedPeers(pm.peerCount());
+    ds.discoverPeers(pm);
+    if (self.metrics) |metrics| {
+        metrics.discovery_peers_known.set(@intCast(ds.knownPeerCount()));
     }
-    return false;
+    return true;
 }
 
 fn runConnectivityMaintenance(self: *BeaconNode, io: std.Io, svc: *networking.P2pService) bool {
@@ -1487,7 +1484,7 @@ fn runPeerManagerHeartbeat(self: *BeaconNode, io: std.Io, svc: *networking.P2pSe
                 ds.requestMorePeers(prioritization.peers_to_discover);
                 did_work = true;
             }
-            ds.discoverPeers();
+            ds.discoverPeers(pm);
             did_work = true;
         }
 
@@ -1528,7 +1525,7 @@ fn runPeerManagerHeartbeat(self: *BeaconNode, io: std.Io, svc: *networking.P2pSe
             ds.requestMorePeers(actions.peers_to_discover);
             did_work = true;
         }
-        ds.discoverPeers();
+        ds.discoverPeers(pm);
         did_work = true;
     }
 
@@ -3211,14 +3208,15 @@ fn dialDiscoveredPeers(
     const dial_budget = discoveryDialBudget(self);
     if (dial_budget == 0) return false;
 
-    const discovered_peers = ds.takeDiscoveredPeers(dial_budget);
+    const discovery_peer_manager = self.peer_manager orelse return false;
+    const discovered_peers = ds.takeDiscoveredPeers(discovery_peer_manager, dial_budget);
     defer if (discovered_peers.len > 0) self.allocator.free(discovered_peers);
     if (discovered_peers.len > 0) {
         log.debug("dialDiscoveredPeers: evaluating {d} discovered peers", .{discovered_peers.len});
     }
 
     var did_work = false;
-    const pm = self.peer_manager;
+    const pm = discovery_peer_manager;
     const now_ms = currentUnixTimeMs(io);
     for (discovered_peers) |peer| {
         if (!peer.has_quic) {
@@ -3250,15 +3248,13 @@ fn dialDiscoveredPeers(
             continue;
         }
 
-        if (pm) |peer_manager| {
-            if (peer_manager.getPeer(predicted_peer_id)) |existing| {
-                switch (existing.connection_state) {
-                    .banned, .dialing, .connected, .disconnecting => {
-                        self.allocator.free(predicted_peer_id);
-                        continue;
-                    },
-                    .disconnected => {},
-                }
+        if (pm.getPeer(predicted_peer_id)) |existing| {
+            switch (existing.connection_state) {
+                .banned, .dialing, .connected, .disconnecting => {
+                    self.allocator.free(predicted_peer_id);
+                    continue;
+                },
+                .disconnected => {},
             }
         }
 
@@ -3272,15 +3268,14 @@ fn dialDiscoveredPeers(
             continue;
         };
 
-        if (pm) |peer_manager| {
-            peer_manager.onDialing(predicted_peer_id, now_ms) catch |err| {
-                log.debug("Failed to mark discovered peer {s} as dialing: {}", .{ predicted_peer_id_text, err });
-                self.allocator.free(owned_ma_str);
-                self.allocator.free(predicted_peer_id);
-                continue;
-            };
-        }
+        pm.onDialing(predicted_peer_id, now_ms) catch |err| {
+            log.debug("Failed to mark discovered peer {s} as dialing: {}", .{ predicted_peer_id_text, err });
+            self.allocator.free(owned_ma_str);
+            self.allocator.free(predicted_peer_id);
+            continue;
+        };
 
+        ds.noteDialAttempt(&peer);
         incrementPendingDiscoveryDials(self, io);
         svc.spawnBackground(io, discoveryDialTask, .{ self, io, svc, DiscoveryDialJob{
             .ma_str = owned_ma_str,

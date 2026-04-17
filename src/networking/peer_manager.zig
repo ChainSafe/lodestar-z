@@ -446,6 +446,17 @@ pub const PeerManager = struct {
         try self.db.dialingPeer(peer_id, now_ms);
     }
 
+    /// Whether a peer is currently eligible for an outbound dial attempt.
+    ///
+    /// Mirrors Lodestar's discovery-side filtering so cached/discovered peers
+    /// that are already connected, already dialing, or in reconnect cool-down
+    /// do not count as viable dial supply.
+    pub fn canInitiateDial(self: *const PeerManager, peer_id: []const u8, now_ms: u64) bool {
+        const peer = self.getPeer(peer_id) orelse return true;
+        if (peer.peer_score.isCoolingDown(now_ms)) return false;
+        return peer.connection_state == .disconnected;
+    }
+
     // ── Status / metadata updates ───────────────────────────────────
 
     /// Update peer sync status from a Status handshake.
