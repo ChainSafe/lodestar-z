@@ -2708,6 +2708,7 @@ pub const BeaconNode = struct {
             self.requeuePendingUnknownBlockGossipItem(item.*);
             item.* = undefined;
         }
+        released.items.len = 0;
     }
 
     fn requeuePendingUnknownBlockGossipItem(self: *BeaconNode, item: PendingUnknownBlockGossipItem) void {
@@ -4711,6 +4712,58 @@ test "processorHandlerCallback imports queued attestations" {
     try std.testing.expectEqual(@as(?u64, 7), ctx.attestation_committee_index);
     try std.testing.expect(ctx.attestation_is_electra_single);
     try std.testing.expectEqual(@as(?u64, 19), ctx.validator_index);
+}
+
+test "releasePendingUnknownBlockGossip transfers queued attestations without double cleanup" {
+    const allocator = std.testing.allocator;
+
+    var ctx = ProcessorImportTestContext{};
+    var node: BeaconNode = undefined;
+    node.allocator = allocator;
+    node.beacon_processor = null;
+    node.pending_unknown_block_gossip = PendingUnknownBlockGossipQueue.init(allocator);
+    defer node.pending_unknown_block_gossip.deinit();
+
+    var gh: GossipHandler = undefined;
+    gh.node = @ptrCast(&ctx);
+    gh.importResolvedAttestationFn = &ProcessorImportTestContext.importAttestation;
+    gh.verifyAttestationSignatureFn = null;
+    node.gossip_handler = &gh;
+
+    const root = [_]u8{0x44} ** 32;
+    const added = try node.queueUnknownBlockAttestation(root, .{
+        .source = .{ .key = 1 },
+        .message_id = std.mem.zeroes(processor_mod.work_item.MessageId),
+        .attestation = .{ .phase0 = .{
+            .aggregation_bits = .{ .bit_len = 1, .data = .empty },
+            .data = .{
+                .slot = 333,
+                .index = 9,
+                .beacon_block_root = root,
+                .source = .{ .epoch = 0, .root = [_]u8{0} ** 32 },
+                .target = .{ .epoch = 0, .root = [_]u8{0} ** 32 },
+            },
+            .signature = [_]u8{0} ** 96,
+        } },
+        .attestation_data_root = [_]u8{0} ** 32,
+        .resolved = .{
+            .validator_index = 27,
+            .validator_committee_index = 0,
+            .committee_size = 1,
+            .signing_root = [_]u8{0x55} ** 32,
+            .expected_subnet = 0,
+        },
+        .subnet_id = 0,
+        .seen_timestamp_ns = 0,
+    }, "peer-a");
+    try std.testing.expect(added);
+
+    node.releasePendingUnknownBlockGossip(root);
+
+    try std.testing.expectEqual(@as(?u64, 333), ctx.attestation_slot);
+    try std.testing.expectEqual(@as(?u64, 9), ctx.attestation_committee_index);
+    try std.testing.expectEqual(@as(?u64, 27), ctx.validator_index);
+    try std.testing.expectEqual(@as(usize, 0), node.pending_unknown_block_gossip.pendingCount());
 }
 
 test "processorHandlerCallback imports queued sync committee messages" {

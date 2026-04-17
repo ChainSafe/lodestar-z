@@ -241,16 +241,23 @@ pub const Queue = struct {
         block_root: Root,
         out: *ReleasedItems,
     ) !void {
+        const pending_len = blk: {
+            const pending = self.pending_by_root.getPtr(block_root) orelse return;
+            break :blk pending.items.items.len;
+        };
+        try out.ensureUnusedCapacity(self.allocator, pending_len);
+
         const removed = self.pending_by_root.fetchSwapRemove(block_root) orelse return;
         var pending = removed.value;
-        defer pending.excluded_peers.deinit(self.allocator);
+        defer {
+            pending.items.deinit(self.allocator);
+            pending.excluded_peers.deinit(self.allocator);
+        }
 
-        try out.ensureUnusedCapacity(self.allocator, pending.items.items.len);
         for (pending.items.items) |item| {
             out.appendAssumeCapacity(item);
             self.total_count -|= 1;
         }
-        pending.items = .empty;
     }
 
     pub fn pendingCount(self: *const Queue) usize {
