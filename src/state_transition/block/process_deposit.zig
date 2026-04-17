@@ -226,3 +226,14 @@ pub fn validateDepositSignature(
     try signature.validate(true);
     try verify(&signing_root, &public_key, &signature, null, null);
 }
+
+pub fn isValidDepositSignature(
+    config: *const BeaconConfig,
+    pubkey: *const BLSPubkey,
+    withdrawal_credentials: *const WithdrawalCredentials,
+    amount: u64,
+    signature: BLSSignature,
+) bool {
+    validateDepositSignature(config, pubkey, withdrawal_credentials, amount, signature) catch return false;
+    return true;
+}

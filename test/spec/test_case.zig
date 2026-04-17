@@ -18,6 +18,7 @@ const capella = types.capella;
 const deneb = types.deneb;
 const electra = types.electra;
 const fulu = types.fulu;
+const gloas = types.gloas;
 
 pub const BlsSetting = enum {
     default,
@@ -43,6 +44,7 @@ pub fn TestCaseUtils(comptime fork: ForkSeq) type {
                 .deneb => .capella,
                 .electra => .deneb,
                 .fulu => .electra,
+                .gloas => .fulu,
                 else => unreachable,
             };
         }
@@ -192,6 +194,14 @@ pub fn loadSignedBeaconBlock(allocator: std.mem.Allocator, fork: ForkSeq, dir: s
                 .full_fulu = out,
             };
         },
+        .gloas => blk: {
+            const out = try allocator.create(gloas.SignedBeaconBlock.Type);
+            out.* = gloas.SignedBeaconBlock.default_value;
+            try loadSszSnappyValue(types.gloas.SignedBeaconBlock, allocator, dir, file_name, out);
+            break :blk AnySignedBeaconBlock{
+                .full_gloas = out,
+            };
+        },
     };
 }
 
@@ -244,6 +254,10 @@ pub fn deinitSignedBeaconBlock(signed_block: AnySignedBeaconBlock, allocator: st
         },
         .blinded_fulu => |b| {
             fulu.SignedBlindedBeaconBlock.deinit(allocator, @constCast(b));
+            allocator.destroy(b);
+        },
+        .full_gloas => |b| {
+            gloas.SignedBeaconBlock.deinit(allocator, @constCast(b));
             allocator.destroy(b);
         },
     }
@@ -308,6 +322,7 @@ pub fn expectEqualBeaconStates(expected: *AnyBeaconState, actual: *AnyBeaconStat
             .deneb => try Debug.printDiff(types.deneb.BeaconState, .deneb, expected, actual),
             .electra => try Debug.printDiff(types.electra.BeaconState, .electra, expected, actual),
             .fulu => try Debug.printDiff(types.fulu.BeaconState, .fulu, expected, actual),
+            .gloas => try Debug.printDiff(types.gloas.BeaconState, .gloas, expected, actual),
         }
         return error.NotEqual;
     }

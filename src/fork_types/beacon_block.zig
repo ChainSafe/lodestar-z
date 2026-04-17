@@ -12,7 +12,7 @@ pub fn SignedBeaconBlock(comptime bt: BlockType, comptime f: ForkSeq) type {
 
         inner: switch (bt) {
             .full => ForkTypes(f).SignedBeaconBlock.Type,
-            .blinded => ForkTypes(f).SignedBlindedBeaconBlock.Type,
+            .blinded => if (f == .gloas) @compileError("gloas doesn't have blinded blocks") else ForkTypes(f).SignedBlindedBeaconBlock.Type,
         },
 
         pub const block_type = bt;
@@ -30,7 +30,7 @@ pub fn BeaconBlock(comptime bt: BlockType, comptime f: ForkSeq) type {
 
         inner: switch (bt) {
             .full => ForkTypes(f).BeaconBlock.Type,
-            .blinded => ForkTypes(f).BlindedBeaconBlock.Type,
+            .blinded => if (f == .gloas) ForkTypes(f).BeaconBlock.Type else ForkTypes(f).BlindedBeaconBlock.Type,
         },
 
         pub const block_type = bt;
@@ -60,7 +60,7 @@ pub fn BeaconBlockBody(comptime bt: BlockType, comptime f: ForkSeq) type {
 
         inner: switch (bt) {
             .full => ForkTypes(f).BeaconBlockBody.Type,
-            .blinded => ForkTypes(f).BlindedBeaconBlockBody.Type,
+            .blinded => if (f == .gloas) ForkTypes(f).BeaconBlockBody.Type else ForkTypes(f).BlindedBeaconBlockBody.Type,
         },
 
         pub const block_type = bt;
@@ -81,6 +81,9 @@ pub fn BeaconBlockBody(comptime bt: BlockType, comptime f: ForkSeq) type {
             if (bt != .full) {
                 @compileError("executionPayload is only available for full blocks");
             }
+            if (comptime f == .gloas) {
+                @compileError("gloas blocks don't have execution_payload");
+            }
 
             return @ptrCast(&self.inner.execution_payload);
         }
@@ -88,6 +91,9 @@ pub fn BeaconBlockBody(comptime bt: BlockType, comptime f: ForkSeq) type {
         pub inline fn executionPayloadHeader(self: *const Self) *const ExecutionPayloadHeader(f) {
             if (bt != .blinded) {
                 @compileError("executionPayloadHeader is only available for blinded blocks");
+            }
+            if (comptime f == .gloas) {
+                @compileError("gloas blocks don't have execution_payload_header");
             }
 
             return @ptrCast(&self.inner.execution_payload_header);

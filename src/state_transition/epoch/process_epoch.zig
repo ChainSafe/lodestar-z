@@ -24,7 +24,9 @@ const processHistoricalRootsUpdate = @import("./process_historical_roots_update.
 const processParticipationRecordUpdates = @import("./process_participation_record_updates.zig").processParticipationRecordUpdates;
 const processParticipationFlagUpdates = @import("./process_participation_flag_updates.zig").processParticipationFlagUpdates;
 const processSyncCommitteeUpdates = @import("./process_sync_committee_updates.zig").processSyncCommitteeUpdates;
+const processBuilderPendingPayments = @import("./process_builder_pending_payments.zig").processBuilderPendingPayments;
 const processProposerLookahead = @import("./process_proposer_lookahead.zig").processProposerLookahead;
+const processPtcWindow = @import("./process_ptc_window.zig").processPtcWindow;
 const Node = @import("persistent_merkle_tree").Node;
 
 pub fn processEpoch(
@@ -69,6 +71,12 @@ pub fn processEpoch(
         try observeEpochTransitionStep(.{ .step = .process_pending_consolidations }, timer.read());
     }
 
+    if (comptime fork.gte(.gloas)) {
+        timer = try Timer.start();
+        try processBuilderPendingPayments(allocator, state, epoch_cache);
+        try observeEpochTransitionStep(.{ .step = .process_builder_pending_payments }, timer.read());
+    }
+
     // const numUpdate = processEffectiveBalanceUpdates(fork, state, cache);
     timer = try Timer.start();
     _ = try processEffectiveBalanceUpdates(fork, allocator, epoch_cache, state, cache);
@@ -101,6 +109,13 @@ pub fn processEpoch(
         timer = try Timer.start();
         try processProposerLookahead(fork, allocator, epoch_cache, state, cache);
         try observeEpochTransitionStep(.{ .step = .process_proposer_lookahead }, timer.read());
+    }
+
+    // [New in Gloas:EIP7732]
+    if (comptime fork.gte(.gloas)) {
+        timer = try Timer.start();
+        try processPtcWindow(allocator, epoch_cache, state);
+        try observeEpochTransitionStep(.{ .step = .process_ptc_window }, timer.read());
     }
 }
 

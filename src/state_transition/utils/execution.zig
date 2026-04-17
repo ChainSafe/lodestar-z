@@ -10,6 +10,7 @@ const ZERO_HASH = @import("constants").ZERO_HASH;
 
 pub fn isExecutionEnabled(comptime fork: ForkSeq, state: *BeaconState(fork), comptime block_type: BlockType, block: *const BeaconBlock(block_type, fork)) bool {
     if (comptime fork.lt(.bellatrix)) return false;
+    if (comptime fork == .gloas) return true;
     if (isMergeTransitionComplete(fork, state)) return true;
 
     switch (block_type) {

@@ -132,6 +132,14 @@ pub fn init(chain_config: ChainConfig, genesis_validator_root: Root) BeaconConfi
         .prev_fork_seq = ForkSeq.electra,
     };
 
+    const gloas = ForkInfo{
+        .fork_seq = ForkSeq.gloas,
+        .epoch = chain_config.GLOAS_FORK_EPOCH,
+        .version = chain_config.GLOAS_FORK_VERSION,
+        .prev_version = chain_config.FULU_FORK_VERSION,
+        .prev_fork_seq = ForkSeq.fulu,
+    };
+
     const forks_ascending_epoch_order = [ForkSeq.count]ForkInfo{
         phase0,
         altair,
@@ -140,8 +148,10 @@ pub fn init(chain_config: ChainConfig, genesis_validator_root: Root) BeaconConfi
         deneb,
         electra,
         fulu,
+        gloas,
     };
     const forks_descending_epoch_order = [ForkSeq.count]ForkInfo{
+        gloas,
         fulu,
         electra,
         deneb,
@@ -213,7 +223,7 @@ pub fn getMaxBlobsPerBlock(self: *const BeaconConfig, epoch: Epoch) u64 {
     return switch (fork) {
         .deneb => self.chain.MAX_BLOBS_PER_BLOCK,
         .electra => self.chain.MAX_BLOBS_PER_BLOCK_ELECTRA,
-        .fulu => {
+        .fulu, .gloas => {
             for (0..self.chain.BLOB_SCHEDULE.len) |i| {
                 const schedule = self.chain.BLOB_SCHEDULE[self.chain.BLOB_SCHEDULE.len - i - 1];
                 if (epoch >= schedule.EPOCH) return schedule.MAX_BLOBS_PER_BLOCK;

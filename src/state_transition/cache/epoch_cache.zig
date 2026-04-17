@@ -30,6 +30,7 @@ const getTotalSlashingsByIncrement = @import("../epoch/process_slashings.zig").g
 const computeEpochShuffling = @import("../utils/epoch_shuffling.zig").computeEpochShuffling;
 const getSeed = @import("../utils/seed.zig").getSeed;
 const computeProposers = @import("../utils/seed.zig").computeProposers;
+const computePayloadTimelinessCommitteesForEpoch = @import("../utils/seed.zig").computePayloadTimelinessCommitteesForEpoch;
 const SyncCommitteeCacheRc = @import("./sync_committee_cache.zig").SyncCommitteeCacheRc;
 const SyncCommitteeCacheAllForks = @import("./sync_committee_cache.zig").SyncCommitteeCache;
 const computeSyncParticipantReward = @import("../utils/sync_committee.zig").computeSyncParticipantReward;
@@ -135,6 +136,12 @@ pub const EpochCache = struct {
     sync_period: SyncPeriod,
 
     epoch: Epoch,
+
+    /// PTC for current epoch, computed eagerly at epoch transition.
+    payload_timeliness_committees: ?[preset.SLOTS_PER_EPOCH][preset.PTC_SIZE]ValidatorIndex,
+
+    /// PTC for previous epoch, required for slot N block validating slot N-1 attestations.
+    previous_payload_timeliness_committees: ?[preset.SLOTS_PER_EPOCH][preset.PTC_SIZE]ValidatorIndex,
 
     fn initEffectiveBalanceIncrementsRc(allocator: Allocator, validator_count: usize) !*EffectiveBalanceIncrementsRc {
         var effective_balance_increments = try effectiveBalanceIncrementsInit(allocator, validator_count);
@@ -439,7 +446,22 @@ pub const EpochCache = struct {
             .next_sync_committee_indexed = next_sync_committee_indexed,
             .sync_period = computeSyncPeriodAtEpoch(current_epoch),
             .epoch = current_epoch,
+            .payload_timeliness_committees = null,
+            .previous_payload_timeliness_committees = null,
         };
+
+        // Compute PTC for all slots in the prev/current epoch
+        if (current_epoch >= config.chain.GLOAS_FORK_EPOCH) {
+            epoch_cache_ptr.payload_timeliness_committees = switch (state.forkSeq()) {
+                inline else => |f| try computePayloadTimelinessCommitteesForEpoch(f, allocator, state.castToFork(f), current_epoch, epoch_cache_ptr),
+            };
+
+            if (!is_genesis and previous_epoch >= config.chain.GLOAS_FORK_EPOCH) {
+                epoch_cache_ptr.previous_payload_timeliness_committees = switch (state.forkSeq()) {
+                    inline else => |f| try computePayloadTimelinessCommitteesForEpoch(f, allocator, state.castToFork(f), previous_epoch, epoch_cache_ptr),
+                };
+            }
+        }
 
         return epoch_cache_ptr;
     }
@@ -498,6 +520,8 @@ pub const EpochCache = struct {
             .next_sync_committee_indexed = self.next_sync_committee_indexed.ref(),
             .sync_period = self.sync_period,
             .epoch = self.epoch,
+            .payload_timeliness_committees = self.payload_timeliness_committees,
+            .previous_payload_timeliness_committees = self.previous_payload_timeliness_committees,
         };
 
         const epoch_cache_ptr = try allocator.create(EpochCache);
@@ -577,6 +601,21 @@ pub const EpochCache = struct {
     /// At fork boundary, this runs post-fork logic and after `upgradeState*`.
     pub fn finalProcessEpoch(self: *EpochCache, state: *AnyBeaconState) !void {
         self.proposers_prev_epoch = self.proposers;
+
+        // Shift and compute current epoch PTC eagerly for all slots
+        if (self.epoch >= self.config.chain.GLOAS_FORK_EPOCH) {
+            self.previous_payload_timeliness_committees = self.payload_timeliness_committees;
+            self.payload_timeliness_committees = switch (state.forkSeq()) {
+                inline else => |f| try computePayloadTimelinessCommitteesForEpoch(
+                    f,
+                    self.allocator,
+                    state.castToFork(f),
+                    self.epoch,
+                    self,
+                ),
+            };
+        }
+
         switch (state.forkSeq()) {
             inline else => |fork| {
                 const fork_state = state.castToFork(fork);
@@ -878,5 +917,59 @@ pub const EpochCache = struct {
 
     pub fn isPostElectra(self: *const EpochCache) bool {
         return self.epoch >= self.config.chain.ELECTRA_FORK_EPOCH;
+    }
+
+    /// Convert a PayloadAttestation into an IndexedPayloadAttestation by resolving
+    /// aggregation bits against the Payload Timeliness Committee for the attestation's slot.
+    /// Spec: get_ptc — Read PTC from state.ptc_window
+    pub fn getPayloadTimelinessCommittee(self: *const EpochCache, state: *BeaconState(.gloas), slot: Slot) ![preset.PTC_SIZE]ValidatorIndex {
+        _ = self;
+        const epoch = computeEpochAtSlot(slot);
+        const state_epoch = computeEpochAtSlot(try state.slot());
+
+        var ptc_window = try state.inner.get("ptc_window");
+
+        const index = if (epoch < state_epoch) blk: {
+            break :blk slot % preset.SLOTS_PER_EPOCH;
+        } else blk: {
+            const offset = (epoch - state_epoch + 1) * preset.SLOTS_PER_EPOCH;
+            break :blk offset + slot % preset.SLOTS_PER_EPOCH;
+        };
+
+        var ptc_entry: [preset.PTC_SIZE]ValidatorIndex = undefined;
+        try ptc_window.getValue(undefined, index, &ptc_entry);
+        return ptc_entry;
+    }
+
+    pub fn getIndexedPayloadAttestation(
+        self: *const EpochCache,
+        allocator: Allocator,
+        state: *BeaconState(.gloas),
+        slot: Slot,
+        payload_attestation: *const types.gloas.PayloadAttestation.Type,
+    ) !types.gloas.IndexedPayloadAttestation.Type {
+        const payload_timeliness_committee = try self.getPayloadTimelinessCommittee(state, slot);
+
+        var attesting_indices = std.ArrayList(ValidatorIndex).init(allocator);
+        errdefer attesting_indices.deinit();
+
+        for (0..payload_timeliness_committee.len) |i| {
+            if (try payload_attestation.aggregation_bits.get(i)) {
+                try attesting_indices.append(payload_timeliness_committee[i]);
+            }
+        }
+
+        const sortFn = struct {
+            pub fn sort(_: void, a: ValidatorIndex, b: ValidatorIndex) bool {
+                return a < b;
+            }
+        }.sort;
+        std.mem.sort(ValidatorIndex, attesting_indices.items, {}, sortFn);
+
+        return .{
+            .attesting_indices = attesting_indices.moveToUnmanaged(),
+            .data = payload_attestation.data,
+            .signature = payload_attestation.signature,
+        };
     }
 };

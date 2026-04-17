@@ -21,6 +21,7 @@ const processVoluntaryExit = @import("./process_voluntary_exit.zig").processVolu
 const processWithdrawalRequest = @import("./process_withdrawal_request.zig").processWithdrawalRequest;
 const Node = @import("persistent_merkle_tree").Node;
 const ProcessBlockOpts = @import("./process_block.zig").ProcessBlockOpts;
+const processPayloadAttestation = @import("./process_payload_attestation.zig").processPayloadAttestation;
 
 pub fn processOperations(
     comptime fork: ForkSeq,
@@ -66,7 +67,7 @@ pub fn processOperations(
     }
 
     for (body.inner.voluntary_exits.items) |*voluntary_exit| {
-        try processVoluntaryExit(fork, config, epoch_cache, state, voluntary_exit, opts.verify_signature);
+        try processVoluntaryExit(fork, allocator, config, epoch_cache, state, voluntary_exit, opts.verify_signature);
     }
 
     if (comptime fork.gte(.capella)) {
@@ -75,10 +76,10 @@ pub fn processOperations(
         }
     }
 
-    if (comptime fork.gte(.electra)) {
+    if (comptime fork.gte(.electra) and fork.lt(.gloas)) {
         const execution_requests = &body.inner.execution_requests;
         for (execution_requests.deposits.items) |*deposit_request| {
-            try processDepositRequest(fork, state, deposit_request);
+            try processDepositRequest(fork, allocator, config, epoch_cache, state, deposit_request);
         }
 
         for (execution_requests.withdrawals.items) |*withdrawal_request| {
@@ -87,6 +88,12 @@ pub fn processOperations(
 
         for (execution_requests.consolidations.items) |*consolidation_request| {
             try processConsolidationRequest(fork, config, epoch_cache, state, consolidation_request);
+        }
+    }
+
+    if (comptime fork.gte(.gloas)) {
+        for (body.inner.payload_attestations.items) |*payload_attestation| {
+            try processPayloadAttestation(allocator, config, epoch_cache, state, payload_attestation);
         }
     }
 }

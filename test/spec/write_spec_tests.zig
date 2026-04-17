@@ -11,6 +11,7 @@ const supported_forks = [_]ForkSeq{
     .deneb,
     .electra,
     .fulu,
+    .gloas,
 };
 
 const supported_test_runners = [_]RunnerKind{

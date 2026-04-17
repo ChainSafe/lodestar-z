@@ -24,6 +24,7 @@ const processRandao = @import("./process_randao.zig").processRandao;
 const processSyncAggregate = @import("./process_sync_committee.zig").processSyncAggregate;
 const processWithdrawals = @import("./process_withdrawals.zig").processWithdrawals;
 const getExpectedWithdrawals = @import("./process_withdrawals.zig").getExpectedWithdrawals;
+const processExecutionPayloadBid = @import("./process_execution_payload_bid.zig").processExecutionPayloadBid;
 const isExecutionEnabled = @import("../utils/execution.zig").isExecutionEnabled;
 // TODO: proposer reward api
 // const ProposerRewardType = @import("../types/proposer_reward.zig").ProposerRewardType;
@@ -54,44 +55,49 @@ pub fn processBlock(
     const body = block.body();
     const current_epoch = epoch_cache.epoch;
 
-    // The call to the process_execution_payload must happen before the call to the process_randao as the former depends
-    // on the randao_mix computed with the reveal of the previous block.
-    if (comptime fork.gte(.bellatrix)) {
+    // TODO Deneb: Allow to disable withdrawals for interop testing
+    // https://github.com/ethereum/consensus-specs/blob/b62c9e877990242d63aa17a2a59a49bc649a2f2e/specs/eip4844/beacon-chain.md#disabling-withdrawals
+    if (comptime fork.gte(.capella)) {
+        // TODO: given max withdrawals of MAX_WITHDRAWALS_PER_PAYLOAD, can use fixed size array instead of heap alloc
+        var withdrawals_result = WithdrawalsResult{ .withdrawals = try Withdrawals.initCapacity(
+            allocator,
+            preset.MAX_WITHDRAWALS_PER_PAYLOAD,
+        ) };
+        var withdrawal_balances = std.AutoHashMap(ValidatorIndex, usize).init(allocator);
+        defer withdrawal_balances.deinit();
+
+        try getExpectedWithdrawals(
+            fork,
+            allocator,
+            epoch_cache,
+            state,
+            &withdrawals_result,
+            &withdrawal_balances,
+        );
+        defer withdrawals_result.withdrawals.deinit(allocator);
+
+        if (comptime fork.gte(.gloas)) {
+            // After EIP-7732, processWithdrawals does not take a payload parameter
+            // Withdrawals are verified later in processExecutionPayloadEnvelope
+            const empty_root: Root = .{0} ** 32;
+            try processWithdrawals(fork, allocator, state, withdrawals_result, empty_root);
+        } else {
+            const payload_withdrawals_root = switch (block_type) {
+                .full => blk: {
+                    const actual_withdrawals = block.body().executionPayload().inner.withdrawals;
+                    std.debug.assert(withdrawals_result.withdrawals.items.len == actual_withdrawals.items.len);
+                    var root: Root = undefined;
+                    try types.capella.Withdrawals.hashTreeRoot(allocator, &actual_withdrawals, &root);
+                    break :blk root;
+                },
+                .blinded => block.body().executionPayloadHeader().inner.withdrawals_root,
+            };
+            try processWithdrawals(fork, allocator, state, withdrawals_result, payload_withdrawals_root);
+        }
+    }
+
+    if (comptime fork.gte(.bellatrix) and fork.lt(.gloas)) {
         if (isExecutionEnabled(fork, state, block_type, block)) {
-            // TODO Deneb: Allow to disable withdrawals for interop testing
-            // https://github.com/ethereum/consensus-specs/blob/b62c9e877990242d63aa17a2a59a49bc649a2f2e/specs/eip4844/beacon-chain.md#disabling-withdrawals
-            if (comptime fork.gte(.capella)) {
-                // TODO: given max withdrawals of MAX_WITHDRAWALS_PER_PAYLOAD, can use fixed size array instead of heap alloc
-                var withdrawals_result = WithdrawalsResult{ .withdrawals = try Withdrawals.initCapacity(
-                    allocator,
-                    preset.MAX_WITHDRAWALS_PER_PAYLOAD,
-                ) };
-                var withdrawal_balances = std.AutoHashMap(ValidatorIndex, usize).init(allocator);
-                defer withdrawal_balances.deinit();
-
-                try getExpectedWithdrawals(
-                    fork,
-                    allocator,
-                    epoch_cache,
-                    state,
-                    &withdrawals_result,
-                    &withdrawal_balances,
-                );
-                defer withdrawals_result.withdrawals.deinit(allocator);
-
-                const payload_withdrawals_root = switch (block_type) {
-                    .full => blk: {
-                        const actual_withdrawals = block.body().executionPayload().inner.withdrawals;
-                        std.debug.assert(withdrawals_result.withdrawals.items.len == actual_withdrawals.items.len);
-                        var root: Root = undefined;
-                        try types.capella.Withdrawals.hashTreeRoot(allocator, &actual_withdrawals, &root);
-                        break :blk root;
-                    },
-                    .blinded => block.body().executionPayloadHeader().inner.withdrawals_root,
-                };
-                try processWithdrawals(fork, allocator, state, withdrawals_result, payload_withdrawals_root);
-            }
-
             try processExecutionPayload(
                 fork,
                 allocator,
@@ -103,6 +109,11 @@ pub fn processBlock(
                 external_data,
             );
         }
+    }
+
+    //  process_execution_payload_bid replaces process_execution_payload
+    if (comptime fork.gte(.gloas)) {
+        try processExecutionPayloadBid(allocator, config, state, block);
     }
 
     try processRandao(fork, config, epoch_cache, state, block_type, body, block.proposerIndex(), opts.verify_signature);

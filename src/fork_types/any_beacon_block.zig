@@ -34,6 +34,7 @@ pub const AnySignedBeaconBlock = union(enum) {
     blinded_electra: *ct.electra.SignedBlindedBeaconBlock.Type,
     full_fulu: *ct.fulu.SignedBeaconBlock.Type,
     blinded_fulu: *ct.fulu.SignedBlindedBeaconBlock.Type,
+    full_gloas: *ct.gloas.SignedBeaconBlock.Type,
 
     pub fn deserialize(allocator: std.mem.Allocator, block_type: BlockType, fork_seq: ForkSeq, bytes: []const u8) !AnySignedBeaconBlock {
         switch (fork_seq) {
@@ -128,6 +129,14 @@ pub const AnySignedBeaconBlock = union(enum) {
                     return .{ .blinded_fulu = signed_block };
                 }
             },
+            .gloas => {
+                if (block_type != .full) return error.InvalidBlockTypeForFork;
+                const signed_block = try allocator.create(ct.gloas.SignedBeaconBlock.Type);
+                errdefer allocator.destroy(signed_block);
+                signed_block.* = ct.gloas.SignedBeaconBlock.default_value;
+                try ct.gloas.SignedBeaconBlock.deserializeFromBytes(allocator, bytes, signed_block);
+                return .{ .full_gloas = signed_block };
+            },
         }
     }
 
@@ -179,6 +188,10 @@ pub const AnySignedBeaconBlock = union(enum) {
             },
             .blinded_fulu => |signed_block| {
                 ct.fulu.SignedBlindedBeaconBlock.deinit(allocator, signed_block);
+                allocator.destroy(signed_block);
+            },
+            .full_gloas => |signed_block| {
+                ct.gloas.SignedBeaconBlock.deinit(allocator, signed_block);
                 allocator.destroy(signed_block);
             },
         }
@@ -258,12 +271,18 @@ pub const AnySignedBeaconBlock = union(enum) {
                 _ = ct.fulu.SignedBlindedBeaconBlock.serializeIntoBytes(signed_block, out);
                 return out;
             },
+            .full_gloas => |signed_block| {
+                const out = try allocator.alloc(u8, ct.gloas.SignedBeaconBlock.serializedSize(signed_block));
+                errdefer allocator.free(out);
+                _ = ct.gloas.SignedBeaconBlock.serializeIntoBytes(signed_block, out);
+                return out;
+            },
         }
     }
 
     pub fn blockType(self: *const AnySignedBeaconBlock) BlockType {
         return switch (self.*) {
-            .phase0, .altair, .full_bellatrix, .full_capella, .full_deneb, .full_electra, .full_fulu => .full,
+            .phase0, .altair, .full_bellatrix, .full_capella, .full_deneb, .full_electra, .full_fulu, .full_gloas => .full,
             .blinded_bellatrix, .blinded_capella, .blinded_deneb, .blinded_electra, .blinded_fulu => .blinded,
         };
     }
@@ -277,6 +296,7 @@ pub const AnySignedBeaconBlock = union(enum) {
             .full_deneb, .blinded_deneb => .deneb,
             .full_electra, .blinded_electra => .electra,
             .full_fulu, .blinded_fulu => .fulu,
+            .full_gloas => .gloas,
         };
     }
 
@@ -312,10 +332,11 @@ pub const AnyBeaconBlock = union(enum) {
     blinded_electra: *ct.electra.BlindedBeaconBlock.Type,
     full_fulu: *ct.fulu.BeaconBlock.Type,
     blinded_fulu: *ct.fulu.BlindedBeaconBlock.Type,
+    full_gloas: *ct.gloas.BeaconBlock.Type,
 
     pub fn blockType(self: *const AnyBeaconBlock) BlockType {
         return switch (self.*) {
-            .phase0, .altair, .full_bellatrix, .full_capella, .full_deneb, .full_electra, .full_fulu => .full,
+            .phase0, .altair, .full_bellatrix, .full_capella, .full_deneb, .full_electra, .full_fulu, .full_gloas => .full,
             .blinded_bellatrix, .blinded_capella, .blinded_deneb, .blinded_electra, .blinded_fulu => .blinded,
         };
     }
@@ -329,6 +350,7 @@ pub const AnyBeaconBlock = union(enum) {
             .full_deneb, .blinded_deneb => .deneb,
             .full_electra, .blinded_electra => .electra,
             .full_fulu, .blinded_fulu => .fulu,
+            .full_gloas => .gloas,
         };
     }
 
@@ -366,6 +388,7 @@ pub const AnyBeaconBlock = union(enum) {
                 @ptrCast(self.full_fulu)
             else
                 @ptrCast(self.blinded_fulu),
+            .gloas => @ptrCast(self.full_gloas),
         };
     }
 
@@ -383,6 +406,7 @@ pub const AnyBeaconBlock = union(enum) {
             .blinded_electra => |block| try ct.electra.BlindedBeaconBlock.hashTreeRoot(allocator, block, out),
             .full_fulu => |block| try ct.fulu.BeaconBlock.hashTreeRoot(allocator, block, out),
             .blinded_fulu => |block| try ct.fulu.BlindedBeaconBlock.hashTreeRoot(allocator, block, out),
+            .full_gloas => |block| try ct.gloas.BeaconBlock.hashTreeRoot(allocator, block, out),
         }
     }
 
@@ -436,10 +460,11 @@ pub const AnyBeaconBlockBody = union(enum) {
     blinded_electra: *ct.electra.BlindedBeaconBlockBody.Type,
     full_fulu: *ct.fulu.BeaconBlockBody.Type,
     blinded_fulu: *ct.fulu.BlindedBeaconBlockBody.Type,
+    full_gloas: *ct.gloas.BeaconBlockBody.Type,
 
     pub fn blockType(self: *const AnyBeaconBlockBody) BlockType {
         return switch (self.*) {
-            .phase0, .altair, .full_bellatrix, .full_capella, .full_deneb, .full_electra, .full_fulu => .full,
+            .phase0, .altair, .full_bellatrix, .full_capella, .full_deneb, .full_electra, .full_fulu, .full_gloas => .full,
             .blinded_bellatrix, .blinded_capella, .blinded_deneb, .blinded_electra, .blinded_fulu => .blinded,
         };
     }
@@ -453,6 +478,7 @@ pub const AnyBeaconBlockBody = union(enum) {
             .full_deneb, .blinded_deneb => .deneb,
             .full_electra, .blinded_electra => .electra,
             .full_fulu, .blinded_fulu => .fulu,
+            .full_gloas => .gloas,
         };
     }
 
@@ -484,6 +510,7 @@ pub const AnyBeaconBlockBody = union(enum) {
                 @ptrCast(self.full_fulu)
             else
                 @ptrCast(self.blinded_fulu),
+            .gloas => @ptrCast(self.full_gloas),
         };
     }
 
@@ -501,6 +528,7 @@ pub const AnyBeaconBlockBody = union(enum) {
             .blinded_electra => |body| try ct.electra.BlindedBeaconBlockBody.hashTreeRoot(allocator, body, out),
             .full_fulu => |body| try ct.fulu.BeaconBlockBody.hashTreeRoot(allocator, body, out),
             .blinded_fulu => |body| try ct.fulu.BlindedBeaconBlockBody.hashTreeRoot(allocator, body, out),
+            .full_gloas => |body| try ct.gloas.BeaconBlockBody.hashTreeRoot(allocator, body, out),
         };
     }
 
@@ -607,7 +635,7 @@ pub const AnyBeaconBlockBody = union(enum) {
     // deneb fields
     pub fn blobKzgCommitments(self: *const AnyBeaconBlockBody) !*const ct.deneb.BlobKzgCommitments.Type {
         return switch (self.*) {
-            .phase0, .altair, .full_bellatrix, .blinded_bellatrix, .full_capella, .blinded_capella => error.InvalidFork,
+            .phase0, .altair, .full_bellatrix, .blinded_bellatrix, .full_capella, .blinded_capella, .full_gloas => error.InvalidFork,
             inline else => |body| &body.blob_kzg_commitments,
         };
     }
@@ -615,28 +643,28 @@ pub const AnyBeaconBlockBody = union(enum) {
     // electra fields
     pub fn executionRequests(self: *const AnyBeaconBlockBody) !*const ct.electra.ExecutionRequests.Type {
         return switch (self.*) {
-            .phase0, .altair, .full_bellatrix, .blinded_bellatrix, .full_capella, .blinded_capella, .full_deneb, .blinded_deneb => error.InvalidFork,
+            .phase0, .altair, .full_bellatrix, .blinded_bellatrix, .full_capella, .blinded_capella, .full_deneb, .blinded_deneb, .full_gloas => error.InvalidFork,
             inline else => |body| &body.execution_requests,
         };
     }
 
     pub fn depositRequests(self: *const AnyBeaconBlockBody) ![]DepositRequest {
         return switch (self.*) {
-            .phase0, .altair, .full_bellatrix, .blinded_bellatrix, .full_capella, .blinded_capella, .full_deneb, .blinded_deneb => error.InvalidFork,
+            .phase0, .altair, .full_bellatrix, .blinded_bellatrix, .full_capella, .blinded_capella, .full_deneb, .blinded_deneb, .full_gloas => error.InvalidFork,
             inline else => |body| body.execution_requests.deposits.items,
         };
     }
 
     pub fn withdrawalRequests(self: *const AnyBeaconBlockBody) ![]WithdrawalRequest {
         return switch (self.*) {
-            .phase0, .altair, .full_bellatrix, .blinded_bellatrix, .full_capella, .blinded_capella, .full_deneb, .blinded_deneb => error.InvalidFork,
+            .phase0, .altair, .full_bellatrix, .blinded_bellatrix, .full_capella, .blinded_capella, .full_deneb, .blinded_deneb, .full_gloas => error.InvalidFork,
             inline else => |body| body.execution_requests.withdrawals.items,
         };
     }
 
     pub fn consolidationRequests(self: *const AnyBeaconBlockBody) ![]ConsolidationRequest {
         return switch (self.*) {
-            .phase0, .altair, .full_bellatrix, .blinded_bellatrix, .full_capella, .blinded_capella, .full_deneb, .blinded_deneb => error.InvalidFork,
+            .phase0, .altair, .full_bellatrix, .blinded_bellatrix, .full_capella, .blinded_capella, .full_deneb, .blinded_deneb, .full_gloas => error.InvalidFork,
             inline else => |body| body.execution_requests.consolidations.items,
         };
     }

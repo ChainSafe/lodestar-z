@@ -35,11 +35,14 @@ pub const chain_config = ChainConfig{
     .ELECTRA_FORK_EPOCH = std.math.maxInt(u64),
     .FULU_FORK_VERSION = b(4, "0x06000001"),
     .FULU_FORK_EPOCH = std.math.maxInt(u64),
+    .GLOAS_FORK_VERSION = b(4, "0x07000001"),
+    .GLOAS_FORK_EPOCH = std.math.maxInt(u64),
 
     // Time parameters
     .SECONDS_PER_SLOT = 6,
     .SECONDS_PER_ETH1_BLOCK = 14,
     .MIN_VALIDATOR_WITHDRAWABILITY_DELAY = 256,
+    .MIN_BUILDER_WITHDRAWABILITY_DELAY = 2,
     .SHARD_COMMITTEE_PERIOD = 64,
     .ETH1_FOLLOW_DISTANCE = 16,
 

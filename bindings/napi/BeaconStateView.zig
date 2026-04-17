@@ -677,6 +677,7 @@ pub fn BeaconStateView_getVoluntaryExitValidity(env: napi.Env, cb: napi.Callback
     const result = switch (cached_state.state.forkSeq()) {
         inline else => |f| st.getVoluntaryExitValidity(
             f,
+            allocator,
             cached_state.config,
             cached_state.epoch_cache,
             cached_state.state.castToFork(f),
@@ -708,6 +709,7 @@ pub fn BeaconStateView_isValidVoluntaryExit(env: napi.Env, cb: napi.CallbackInfo
     const result = switch (cached_state.state.forkSeq()) {
         inline else => |f| st.isValidVoluntaryExit(
             f,
+            allocator,
             cached_state.config,
             cached_state.epoch_cache,
             cached_state.state.castToFork(f),

@@ -92,8 +92,14 @@ pub fn validateAttestation(
     }
 
     if (fork.gte(.electra)) {
-        if (data.index != 0) {
-            return error.InvalidAttestationNonZeroDataIndex;
+        if (fork.gte(.gloas)) {
+            if (data.index >= 2) {
+                return error.InvalidAttestationDataIndexOutOfRange;
+            }
+        } else {
+            if (data.index != 0) {
+                return error.InvalidAttestationNonZeroDataIndex;
+            }
         }
         var committee_indices_buffer: [preset.MAX_COMMITTEES_PER_SLOT]usize = undefined;
         const committee_indices_len = try attestation.committee_bits.getTrueBitIndexes(committee_indices_buffer[0..]);
