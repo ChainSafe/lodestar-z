@@ -142,6 +142,24 @@ fn freeOutboundDialEvent(allocator: std.mem.Allocator, event: OutboundDialEvent)
     }
 }
 
+fn completeReadyIngressAfterDataAvailability(
+    ctx: *anyopaque,
+    ready: chain_mod.ReadyBlockInput,
+) anyerror!void {
+    const self: *BeaconNode = @ptrCast(@alignCast(ctx));
+    _ = try self.completeReadyIngress(ready, null);
+}
+
+fn handleDataAvailabilityReadyBlock(
+    maybe_ready: ?chain_mod.ReadyBlockInput,
+    ctx: *anyopaque,
+    complete_fn: *const fn (ctx: *anyopaque, ready: chain_mod.ReadyBlockInput) anyerror!void,
+) !void {
+    if (maybe_ready) |ready| {
+        try complete_fn(ctx, ready);
+    }
+}
+
 fn timestampNowNs(io: std.Io) u64 {
     const now_ns = std.Io.Timestamp.now(io, .awake).toNanoseconds();
     if (now_ns <= 0) return 0;
@@ -3793,10 +3811,11 @@ fn fetchBlobSidecarsByRangeForMetas(
         defer self.allocator.free(blob_indices);
         for (blob_indices, 0..) |*blob_index, blob_i| blob_index.* = @intCast(blob_i);
 
-        if (try self.chainService().ingestBlobSidecars(meta.block_root, meta.slot, aggregate, blob_indices)) |ready| {
-            var owned_ready = ready;
-            owned_ready.deinit(self.allocator);
-        }
+        try handleDataAvailabilityReadyBlock(
+            try self.chainService().ingestBlobSidecars(meta.block_root, meta.slot, aggregate, blob_indices),
+            self,
+            completeReadyIngressAfterDataAvailability,
+        );
     }
 
     var last_err: ?anyerror = null;
@@ -3915,10 +3934,11 @@ fn fetchBlobSidecarsByRootForMeta(
     defer self.allocator.free(blob_indices);
     for (blob_indices, 0..) |*blob_index, i| blob_index.* = @intCast(i);
 
-    if (try self.chainService().ingestBlobSidecars(meta.block_root, meta.slot, aggregate, blob_indices)) |ready| {
-        var owned_ready = ready;
-        owned_ready.deinit(self.allocator);
-    }
+    try handleDataAvailabilityReadyBlock(
+        try self.chainService().ingestBlobSidecars(meta.block_root, meta.slot, aggregate, blob_indices),
+        self,
+        completeReadyIngressAfterDataAvailability,
+    );
 
     if (self.chainService().dataAvailabilityStatusForBlock(meta.block_root, meta.any_signed) == .pending) {
         return error.MissingBlobSidecar;
@@ -4096,10 +4116,11 @@ fn fetchDataColumnsByRangeOnce(
             sidecar.kzg_proofs.items,
         );
 
-        if (try self.chainService().ingestDataColumnSidecar(block_root, sidecar.index, slot, decoded.ssz_bytes)) |ready| {
-            var owned_ready = ready;
-            owned_ready.deinit(self.allocator);
-        }
+        try handleDataAvailabilityReadyBlock(
+            try self.chainService().ingestDataColumnSidecar(block_root, sidecar.index, slot, decoded.ssz_bytes),
+            self,
+            completeReadyIngressAfterDataAvailability,
+        );
     }
 
     request_outcome = .success;
@@ -4369,10 +4390,11 @@ fn fetchDataColumnsByRootOnceForMetas(
             sidecar.kzg_proofs.items,
         );
 
-        if (try self.chainService().ingestDataColumnSidecar(block_root, sidecar.index, slot, decoded.ssz_bytes)) |ready| {
-            var owned_ready = ready;
-            owned_ready.deinit(self.allocator);
-        }
+        try handleDataAvailabilityReadyBlock(
+            try self.chainService().ingestDataColumnSidecar(block_root, sidecar.index, slot, decoded.ssz_bytes),
+            self,
+            completeReadyIngressAfterDataAvailability,
+        );
     }
 
     request_outcome = .success;
@@ -4472,10 +4494,11 @@ fn fetchDataColumnsByRootOnce(
             sidecar.kzg_proofs.items,
         );
 
-        if (try self.chainService().ingestDataColumnSidecar(block_root, sidecar.index, sidecar.signed_block_header.message.slot, decoded.ssz_bytes)) |ready| {
-            var owned_ready = ready;
-            owned_ready.deinit(self.allocator);
-        }
+        try handleDataAvailabilityReadyBlock(
+            try self.chainService().ingestDataColumnSidecar(block_root, sidecar.index, sidecar.signed_block_header.message.slot, decoded.ssz_bytes),
+            self,
+            completeReadyIngressAfterDataAvailability,
+        );
     }
 
     request_outcome = .success;
@@ -5525,4 +5548,59 @@ test "validateFetchedBlockRangeLink rejects mismatched parent root" {
         error.ParentRootMismatch,
         validateFetchedBlockRangeLink([_]u8{0xAB} ** 32, [_]u8{0xCD} ** 32),
     );
+}
+
+test "handleDataAvailabilityReadyBlock forwards ready block into import callback" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    const TestCtx = struct {
+        allocator: std.mem.Allocator,
+        called: usize = 0,
+
+        fn complete(ptr: *anyopaque, ready: chain_mod.ReadyBlockInput) anyerror!void {
+            const ctx: *@This() = @ptrCast(@alignCast(ptr));
+            ctx.called += 1;
+            var owned_ready = ready;
+            owned_ready.deinit(ctx.allocator);
+        }
+    };
+
+    const signed_block = try allocator.create(types.phase0.SignedBeaconBlock.Type);
+    errdefer allocator.destroy(signed_block);
+    signed_block.* = types.phase0.SignedBeaconBlock.default_value;
+
+    const ready: chain_mod.ReadyBlockInput = .{
+        .block = .{ .phase0 = signed_block },
+        .source = .gossip,
+        .block_root = [_]u8{0xAB} ** 32,
+        .slot = 123,
+        .da_status = .available,
+        .block_data_plan = .none,
+        .seen_timestamp_sec = 0,
+        .peer = .{},
+    };
+
+    var ctx = TestCtx{ .allocator = allocator };
+    try handleDataAvailabilityReadyBlock(ready, &ctx, TestCtx.complete);
+    try testing.expectEqual(@as(usize, 1), ctx.called);
+}
+
+test "handleDataAvailabilityReadyBlock ignores null ready block" {
+    const testing = std.testing;
+
+    const TestCtx = struct {
+        called: usize = 0,
+
+        fn complete(ptr: *anyopaque, ready: chain_mod.ReadyBlockInput) anyerror!void {
+            const ctx: *@This() = @ptrCast(@alignCast(ptr));
+            var owned_ready = ready;
+            _ = &owned_ready;
+            ctx.called += 1;
+        }
+    };
+
+    var ctx = TestCtx{};
+    try handleDataAvailabilityReadyBlock(null, &ctx, TestCtx.complete);
+    try testing.expectEqual(@as(usize, 0), ctx.called);
 }
