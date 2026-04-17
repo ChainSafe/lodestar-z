@@ -263,6 +263,11 @@ pub const SyncChain = struct {
         return self.peers.count();
     }
 
+    /// Borrow the current peer IDs on this chain.
+    pub fn peerIds(self: *const SyncChain) []const []const u8 {
+        return self.peers.keys();
+    }
+
     /// Whether this chain is actively syncing.
     pub fn isSyncing(self: *const SyncChain) bool {
         return self.status == .syncing;

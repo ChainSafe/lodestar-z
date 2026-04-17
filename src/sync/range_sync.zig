@@ -61,6 +61,7 @@ pub const RangeSyncCallbacks = struct {
     reportPeerFn: *const fn (ptr: *anyopaque, peer_id: []const u8, reason: SyncPeerReportReason) void,
 
     hasBlockFn: ?*const fn (ptr: *anyopaque, root: [32]u8) bool = null,
+    reStatusPeersFn: ?*const fn (ptr: *anyopaque, peer_ids: []const []const u8) void = null,
 
     peerCanServeRangeFn: ?*const fn (
         ptr: *anyopaque,
@@ -83,6 +84,10 @@ pub const RangeSyncCallbacks = struct {
     fn hasBlock(self: RangeSyncCallbacks, root: [32]u8) bool {
         if (self.hasBlockFn) |f| return f(self.ptr, root);
         return false;
+    }
+
+    fn reStatusPeers(self: RangeSyncCallbacks, peer_ids: []const []const u8) void {
+        if (self.reStatusPeersFn) |f| f(self.ptr, peer_ids);
     }
 };
 
@@ -307,6 +312,7 @@ pub const RangeSync = struct {
             if (fc.isSyncing()) {
                 const done = fc.tick() catch false;
                 if (done or fc.status == .done) {
+                    self.reStatusCompletedChainPeers(fc);
                     self.foldCompletedChainMetrics(fc.sync_type, fc.cumulativeMetricsSnapshot());
                     fc.deinit();
                     self.finalized_chain = null;
@@ -323,6 +329,7 @@ pub const RangeSync = struct {
             if (self.head_chains.items[i].isSyncing()) {
                 const done = self.head_chains.items[i].tick() catch false;
                 if (done or self.head_chains.items[i].status == .done) {
+                    self.reStatusCompletedChainPeers(&self.head_chains.items[i]);
                     self.foldCompletedChainMetrics(
                         self.head_chains.items[i].sync_type,
                         self.head_chains.items[i].cumulativeMetricsSnapshot(),
@@ -488,12 +495,14 @@ pub const RangeSync = struct {
         var removed = false;
 
         if (self.finalized_chain) |*fc| {
+            const should_restatus = fc.status != .err and fc.peerCount() > 0;
             if (fc.status == .err or
                 fc.status == .done or
                 (fc.peerCount() == 0 and !fc.hasInFlightWork()) or
                 fc.target.slot < local_finalized_slot or
                 self.callbacks.hasBlock(fc.target.root))
             {
+                if (should_restatus) self.callbacks.reStatusPeers(fc.peerIds());
                 self.foldCompletedChainMetrics(fc.sync_type, fc.cumulativeMetricsSnapshot());
                 fc.deinit();
                 self.finalized_chain = null;
@@ -503,12 +512,14 @@ pub const RangeSync = struct {
 
         var i: usize = 0;
         while (i < self.head_chains.items.len) {
+            const should_restatus = self.head_chains.items[i].status != .err and self.head_chains.items[i].peerCount() > 0;
             if (self.head_chains.items[i].status == .err or
                 self.head_chains.items[i].status == .done or
                 (self.head_chains.items[i].peerCount() == 0 and !self.head_chains.items[i].hasInFlightWork()) or
                 self.head_chains.items[i].target.slot < local_finalized_slot or
                 self.callbacks.hasBlock(self.head_chains.items[i].target.root))
             {
+                if (should_restatus) self.callbacks.reStatusPeers(self.head_chains.items[i].peerIds());
                 self.foldCompletedChainMetrics(
                     self.head_chains.items[i].sync_type,
                     self.head_chains.items[i].cumulativeMetricsSnapshot(),
@@ -556,6 +567,11 @@ pub const RangeSync = struct {
             .head => SyncChain.accumulateCumulativeMetrics(&self.completed_head_metrics, metrics),
         }
     }
+
+    fn reStatusCompletedChainPeers(self: *RangeSync, chain: *const SyncChain) void {
+        if (chain.status == .err or chain.peerCount() == 0) return;
+        self.callbacks.reStatusPeers(chain.peerIds());
+    }
 };
 
 fn accumulateTypeMetrics(dst: *TypeMetricsSnapshot, src: SyncChainMetricsSnapshot) void {
@@ -590,6 +606,7 @@ const TestCallbacks = struct {
     processed: u32 = 0,
     downloaded: u32 = 0,
     reported: u32 = 0,
+    restatused: u32 = 0,
     known_root: ?[32]u8 = null,
 
     fn importBlockFn(_: *anyopaque, _: []const u8) anyerror!void {}
@@ -615,6 +632,11 @@ const TestCallbacks = struct {
         return std.mem.eql(u8, &known_root, &root);
     }
 
+    fn reStatusPeersFn(ptr: *anyopaque, peer_ids: []const []const u8) void {
+        const self: *TestCallbacks = @ptrCast(@alignCast(ptr));
+        self.restatused += @intCast(peer_ids.len);
+    }
+
     fn rangeSyncCallbacks(self: *TestCallbacks) RangeSyncCallbacks {
         return .{
             .ptr = self,
@@ -623,6 +645,7 @@ const TestCallbacks = struct {
             .downloadByRangeFn = &downloadByRangeFn,
             .reportPeerFn = &reportPeerFn,
             .hasBlockFn = &hasBlockFn,
+            .reStatusPeersFn = &reStatusPeersFn,
         };
     }
 };
@@ -742,6 +765,21 @@ test "RangeSync: known remote finalized root creates head chain" {
     try std.testing.expect(rs.finalized_chain == null);
     try std.testing.expectEqual(@as(usize, 1), rs.head_chains.items.len);
     try std.testing.expectEqual(RangeSyncType.head, rs.head_chains.items[0].sync_type);
+}
+
+test "RangeSync: completed head chain requests peer restatus" {
+    const allocator = std.testing.allocator;
+    var tc = TestCallbacks{};
+    var rs = RangeSync.init(allocator, std.testing.io, tc.rangeSyncCallbacks());
+    defer rs.deinit();
+
+    try rs.addPeer("p1", 5, 5, [_]u8{0} ** 32, 200, [_]u8{0xCC} ** 32, null);
+    rs.head_chains.items[0].status = .done;
+
+    try rs.tick();
+
+    try std.testing.expectEqual(@as(u32, 1), tc.restatused);
+    try std.testing.expectEqual(@as(usize, 0), rs.head_chains.items.len);
 }
 
 test "RangeSync: idle when no chains" {

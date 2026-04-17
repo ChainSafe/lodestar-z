@@ -478,18 +478,6 @@ test "status req/resp policy tolerates status transport failures" {
     try std.testing.expect(!statusReqRespFollowUpPing(.{ .ping = .{ .known_metadata_seq = 0 } }));
 }
 
-test "peer maintenance config uses default cadence near tip" {
-    const config = peerMaintenanceConfigForHeadLag(sync_mod.sync_types.STALLED_HEAD_RECOVERY_SLOTS - 1);
-    try std.testing.expectEqual(networking.peer_manager.STATUS_REFRESH_INTERVAL_MS, config.status_refresh_interval_ms);
-    try std.testing.expectEqual(@as(u32, 2), config.max_status_requests);
-}
-
-test "peer maintenance config forces restatus on stalled head" {
-    const config = peerMaintenanceConfigForHeadLag(sync_mod.sync_types.STALLED_HEAD_RECOVERY_SLOTS);
-    try std.testing.expectEqual(@as(u64, 0), config.status_refresh_interval_ms);
-    try std.testing.expectEqual(stalled_head_status_refresh_max_requests, config.max_status_requests);
-}
-
 fn successfulOutboundDialAttemptTask(allocator: std.mem.Allocator) OutboundDialAttemptResult {
     const peer_id = allocator.dupe(u8, "test-peer-id") catch |err| return .{ .failure = err };
     return .{ .success = peer_id };
@@ -1203,7 +1191,6 @@ const max_discovery_dials_per_tick: u32 = 4;
 // paths have the same bounded behavior.
 const outbound_dial_timeout_ms: u64 = 30_000;
 const optional_reqresp_timeout_ms: u64 = 3_000;
-const stalled_head_status_refresh_max_requests: u32 = 4;
 
 const TimeoutWaitResult = enum {
     fired,
@@ -1557,10 +1544,7 @@ fn runPeerManagerMaintenance(self: *BeaconNode, io: std.Io, svc: *networking.P2p
     const pm = self.peer_manager orelse return false;
 
     const now_ms = currentUnixTimeMs(io);
-    const network_slot = currentNetworkSlot(self, io) orelse self.currentHeadSlot();
-    const head_lag_slots = network_slot -| self.currentHeadSlot();
-    const maintenance_config = peerMaintenanceConfigForHeadLag(head_lag_slots);
-    var actions = pm.maintenance(now_ms, maintenance_config) catch |err| {
+    var actions = pm.maintenance(now_ms, .{}) catch |err| {
         log.warn("PeerManager maintenance selection failed: {}", .{err});
         return false;
     };
@@ -1571,9 +1555,6 @@ fn runPeerManagerMaintenance(self: *BeaconNode, io: std.Io, svc: *networking.P2p
             actions.peers_to_restatus.len,
             actions.peers_to_ping.len,
         });
-        if (maintenance_config.status_refresh_interval_ms == 0) {
-            log.debug("Peer maintenance forcing status refresh due to stalled head: head_lag_slots={d}", .{head_lag_slots});
-        }
     }
 
     var did_work = false;
@@ -1596,15 +1577,6 @@ fn runPeerManagerMaintenance(self: *BeaconNode, io: std.Io, svc: *networking.P2p
     }
 
     return did_work;
-}
-
-fn peerMaintenanceConfigForHeadLag(head_lag_slots: u64) networking.peer_manager.MaintenanceConfig {
-    var config: networking.peer_manager.MaintenanceConfig = .{};
-    if (head_lag_slots >= sync_mod.sync_types.STALLED_HEAD_RECOVERY_SLOTS) {
-        config.status_refresh_interval_ms = 0;
-        config.max_status_requests = stalled_head_status_refresh_max_requests;
-    }
-    return config;
 }
 
 fn runRealtimeP2pTick(self: *BeaconNode, io: std.Io, svc: *networking.P2pService) bool {
@@ -1637,6 +1609,7 @@ fn runRealtimeP2pTick(self: *BeaconNode, io: std.Io, svc: *networking.P2pService
             log.warn("SyncService.tick failed: {}", .{err});
         };
     }
+    did_work = processPendingSyncStatusRefreshes(self, io, svc) or did_work;
     self.unknown_block_sync.tick();
     self.drivePendingUnknownBlockGossip();
     if (shouldDriveUnknownChainSync(self)) self.unknown_chain_sync.tick();
@@ -1657,6 +1630,31 @@ fn runRealtimeP2pTick(self: *BeaconNode, io: std.Io, svc: *networking.P2pService
     maybePrepareProposerPayload(self, io);
     pruneSyncCommitteePools(self);
     advanceChainClock(self, io);
+
+    return did_work;
+}
+
+fn processPendingSyncStatusRefreshes(
+    self: *BeaconNode,
+    io: std.Io,
+    svc: *networking.P2pService,
+) bool {
+    const cb_ctx = self.sync_callback_ctx orelse return false;
+
+    var did_work = false;
+    while (cb_ctx.popPendingReStatus()) |pending| {
+        const peer_id = pending.peerId();
+        if (self.peer_manager) |pm| {
+            if (pm.getPeer(peer_id)) |peer| {
+                if (peer.last_status_exchange_ms == 0 or peerNeedsMetadata(peer)) {
+                    did_work = schedulePeerReqResp(self, io, svc, peer_id, .full_handshake) or did_work;
+                    continue;
+                }
+            }
+        }
+
+        did_work = schedulePeerReqResp(self, io, svc, peer_id, .restatus) or did_work;
+    }
 
     return did_work;
 }

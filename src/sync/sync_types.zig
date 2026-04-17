@@ -15,10 +15,6 @@ const preset = @import("preset").preset;
 /// ourselves synced. One full epoch gives headroom for fork-choice oscillation.
 pub const SYNC_DISTANCE_THRESHOLD: u64 = 32;
 
-/// If our wall-clock head lag reaches this point, stop waiting purely on gossip
-/// and proactively refresh peer status / allow head-sync recovery.
-pub const STALLED_HEAD_RECOVERY_SLOTS: u64 = 4;
-
 /// Minimum number of connected peers before we begin syncing.
 ///
 /// Keep this at one so range sync can keep retrying across rotating peers;

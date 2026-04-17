@@ -50,6 +50,15 @@ pub const PendingByRootRequest = struct {
     }
 };
 
+pub const PendingPeerStatusRefresh = struct {
+    peer_id_buf: [128]u8,
+    peer_id_len: u8,
+
+    pub fn peerId(self: *const PendingPeerStatusRefresh) []const u8 {
+        return self.peer_id_buf[0..self.peer_id_len];
+    }
+};
+
 pub const PendingLinkedChainImport = struct {
     linking_root: [32]u8,
     headers: []MinimalHeader,
@@ -92,6 +101,11 @@ pub const SyncCallbackCtx = struct {
     pending_linked_chains: [16]PendingLinkedChainImport = undefined,
     pending_linked_head: u8 = 0,
     pending_linked_count: u8 = 0,
+
+    /// Pending targeted STATUS refreshes requested by sync.
+    pending_restatus: [64]PendingPeerStatusRefresh = undefined,
+    pending_restatus_head: u8 = 0,
+    pending_restatus_count: u8 = 0,
 
     /// Pending sync-driven gossip-core subscription state change.
     pending_gossip_enabled: ?bool = null,
@@ -158,6 +172,7 @@ pub const SyncCallbackCtx = struct {
             .hasBlockFn = &syncHasBlock,
             .peerCanServeRangeFn = &syncPeerCanServeRange,
             .getConnectedPeersFn = &syncGetConnectedPeers,
+            .reStatusPeersFn = &syncReStatusPeers,
             .setGossipEnabledFn = &syncSetGossipEnabled,
         };
     }
@@ -369,6 +384,14 @@ pub const SyncCallbackCtx = struct {
         return pending;
     }
 
+    pub fn popPendingReStatus(self: *SyncCallbackCtx) ?PendingPeerStatusRefresh {
+        if (self.pending_restatus_count == 0) return null;
+        const pending = self.pending_restatus[self.pending_restatus_head];
+        self.pending_restatus_head = @intCast((self.pending_restatus_head + 1) % self.pending_restatus.len);
+        self.pending_restatus_count -= 1;
+        return pending;
+    }
+
     pub fn connectedPeerIds(self: *SyncCallbackCtx) []const []const u8 {
         return syncGetConnectedPeers(@ptrCast(self));
     }
@@ -457,10 +480,40 @@ pub const SyncCallbackCtx = struct {
         return false;
     }
 
+    fn syncReStatusPeers(ptr: *anyopaque, peer_ids: []const []const u8) void {
+        const ctx: *SyncCallbackCtx = @ptrCast(@alignCast(ptr));
+        for (peer_ids) |peer_id| {
+            ctx.enqueuePeerStatusRefresh(peer_id);
+        }
+    }
+
     fn syncSetGossipEnabled(ptr: *anyopaque, enabled: bool) void {
         const ctx: *SyncCallbackCtx = @ptrCast(@alignCast(ptr));
         ctx.pending_gossip_enabled = enabled;
         scoped_log.info("gossip {s}", .{if (enabled) "enabled" else "disabled"});
+    }
+
+    fn enqueuePeerStatusRefresh(self: *SyncCallbackCtx, peer_id: []const u8) void {
+        for (0..@as(usize, self.pending_restatus_count)) |offset| {
+            const index = (@as(usize, self.pending_restatus_head) + offset) % self.pending_restatus.len;
+            if (std.mem.eql(u8, self.pending_restatus[index].peerId(), peer_id)) return;
+        }
+
+        if (self.pending_restatus_count >= self.pending_restatus.len) {
+            scoped_log.warn("sync callback restatus queue full, dropping peer {s}", .{peer_id});
+            return;
+        }
+
+        var pending = PendingPeerStatusRefresh{
+            .peer_id_buf = undefined,
+            .peer_id_len = @intCast(@min(peer_id.len, 128)),
+        };
+        @memcpy(pending.peer_id_buf[0..pending.peer_id_len], peer_id[0..pending.peer_id_len]);
+
+        const write_index = (@as(usize, self.pending_restatus_head) + @as(usize, self.pending_restatus_count)) % self.pending_restatus.len;
+        self.pending_restatus[write_index] = pending;
+        self.pending_restatus_count += 1;
+        scoped_log.debug("SyncCallbackCtx: queued peer STATUS refresh for {s}", .{peer_id});
     }
 };
 
