@@ -1441,12 +1441,7 @@ pub const ForkChoice = struct {
         next_root: Root,
         next_payload_status: PayloadStatus,
     ) !void {
-        // Votes are keyed by block root first. For Gloas blocks, attestation
-        // data may indicate FULL/EMPTY before that concrete variant exists in
-        // the proto-array. In that case, fall back to the root's canonical
-        // default node (PENDING) rather than dropping the vote.
         const next_index = self.proto_array.getNodeIndexByRootAndStatus(next_root, next_payload_status) orelse
-            self.proto_array.getDefaultNodeIndex(next_root) orelse
             return error.MissingProtoArrayBlock;
 
         try self.votes.ensureValidatorCount(allocator, @intCast(validator_index + 1));
@@ -1578,19 +1573,13 @@ pub const ForkChoice = struct {
                     var vote_iter = block_entry.value_ptr.iterator();
                     while (vote_iter.next()) |vote_entry| {
                         slot_vote_count += 1;
-                        self.addLatestMessage(
+                        try self.addLatestMessage(
                             allocator,
                             vote_entry.key_ptr.*,
                             att_slot,
                             block_root,
                             vote_entry.value_ptr.*,
-                        ) catch |err| switch (err) {
-                            // A queued attestation whose block is no longer present in the
-                            // proto-array cannot affect fork choice anymore. Drop it rather
-                            // than poisoning the whole slot-tick path.
-                            error.MissingProtoArrayBlock => continue,
-                            else => return err,
-                        };
+                        );
                     }
                 }
                 if (att_slot == current_slot - 1) {
@@ -4102,7 +4091,7 @@ test "onAttestation: valid attestation applies vote (past slot)" {
     try testing.expectEqual(block_root, fc.head.block_root);
 }
 
-test "onAttestation: Gloas payload-present vote falls back to pending when full is absent" {
+test "onAttestation: Gloas payload-present vote errors when full variant is absent" {
     const allocator = testing.allocator;
     const genesis_root = hashFromByte(0x01);
     const a_root = hashFromByte(0x0A);
@@ -4125,11 +4114,10 @@ test "onAttestation: Gloas payload-present vote falls back to pending when full 
     var att = makeTestIndexedAttestation(&indices, 2, a_root, 0, a_root, 0, genesis_root, 1);
     const any_att = AnyIndexedAttestation{ .phase0 = &att };
 
-    try fc.onAttestation(allocator, &any_att, hashFromByte(0xC1), false);
-
-    const fields = fc.votes.fields();
-    try testing.expectEqual(fc.proto_array.getDefaultNodeIndex(a_root).?, @as(u32, @intCast(fields.next_indices[0])));
-    try testing.expectEqual(@as(Slot, 2), fields.next_slots[0]);
+    try testing.expectError(
+        error.MissingProtoArrayBlock,
+        fc.onAttestation(allocator, &any_att, hashFromByte(0xC1), false),
+    );
 }
 
 test "onAttestation: valid attestation queued (same slot)" {
@@ -4163,7 +4151,7 @@ test "onAttestation: valid attestation queued (same slot)" {
     try testing.expect(fc.queued_attestations.count() > 0);
 }
 
-test "updateTime drops queued votes for missing proto-array blocks without corrupting queue state" {
+test "updateTime errors on queued votes for missing proto-array blocks without corrupting queue state" {
     const allocator = testing.allocator;
     const genesis_root = hashFromByte(0x01);
     const block_root = hashFromByte(0x02);
@@ -4187,17 +4175,14 @@ test "updateTime drops queued votes for missing proto-array blocks without corru
     try fc.onSingleVote(allocator, 1, 3, missing_root, 0);
     try testing.expectEqual(@as(usize, 1), fc.queued_attestations.count());
 
-    try fc.updateTime(allocator, 4);
-    try testing.expectEqual(@as(usize, 0), fc.queued_attestations.count());
-    try testing.expectEqual(@as(u32, 2), fc.queued_attestations_previous_slot);
+    try testing.expectError(error.MissingProtoArrayBlock, fc.updateTime(allocator, 4));
+    try testing.expectEqual(@as(Slot, 4), fc.getTime());
+    try testing.expectEqual(@as(usize, 1), fc.queued_attestations.count());
 
-    const fields = fc.votes.fields();
-    try testing.expectEqual(@as(usize, 1), fields.next_slots.len);
-    try testing.expectEqual(@as(Slot, 3), fields.next_slots[0]);
-
-    // A second tick should not revisit freed inner maps.
-    try fc.updateTime(allocator, 5);
-    try testing.expectEqual(@as(usize, 0), fc.queued_attestations.count());
+    // A second tick should revisit the intact queue rather than a freed map.
+    try testing.expectError(error.MissingProtoArrayBlock, fc.updateTime(allocator, 5));
+    try testing.expectEqual(@as(Slot, 5), fc.getTime());
+    try testing.expectEqual(@as(usize, 1), fc.queued_attestations.count());
 }
 
 test "onAttestation: zero hash beacon_block_root is silently ignored" {
