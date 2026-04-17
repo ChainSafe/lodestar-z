@@ -144,7 +144,7 @@ const PendingGossipValidation = struct {
     peer_id: ?[]u8 = null,
     topic: []u8,
 
-    fn deinit(self: *PendingGossipValidation, allocator: Allocator) void {
+    pub fn deinit(self: *PendingGossipValidation, allocator: Allocator) void {
         if (self.peer_id) |peer_id| allocator.free(peer_id);
         allocator.free(self.topic);
         self.* = undefined;
@@ -163,7 +163,7 @@ const CompletedGossipValidation = struct {
     topic: []u8,
     outcome: QueuedGossipValidationOutcome,
 
-    fn deinit(self: *CompletedGossipValidation, allocator: Allocator) void {
+    pub fn deinit(self: *CompletedGossipValidation, allocator: Allocator) void {
         if (self.peer_id) |peer_id| allocator.free(peer_id);
         allocator.free(self.topic);
         self.* = undefined;

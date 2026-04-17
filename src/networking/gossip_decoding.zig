@@ -158,6 +158,7 @@ pub const DecodedBlobSidecar = struct {
     slot: u64,
     proposer_index: u64,
     block_parent_root: [32]u8,
+    block_root: [32]u8,
 };
 
 /// Result of decoding a data_column_sidecar gossip message.
@@ -550,6 +551,8 @@ pub fn decodeFromSszBytes(
             const slot_offset = signed_block_header_offset; // slot is first field of BeaconBlockHeader
             const proposer_index_offset = slot_offset + 8;
             const parent_root_offset = proposer_index_offset + 8;
+            const state_root_offset = parent_root_offset + 32;
+            const body_root_offset = state_root_offset + 32;
 
             // Compile-time assertion: verify our computed offsets match what we hardcoded.
             comptime {
@@ -557,20 +560,37 @@ pub fn decodeFromSszBytes(
                 std.debug.assert(slot_offset == 131176);
                 std.debug.assert(proposer_index_offset == 131184);
                 std.debug.assert(parent_root_offset == 131192);
+                std.debug.assert(state_root_offset == 131224);
+                std.debug.assert(body_root_offset == 131256);
             }
 
-            const min_size = parent_root_offset + 32; // need through parent_root
+            const min_size = body_root_offset + 32; // need through body_root
             if (ssz_bytes.len < min_size) return error.SszDeserializationFailed;
             const index = std.mem.readInt(u64, ssz_bytes[0..8], .little);
             const slot = std.mem.readInt(u64, ssz_bytes[slot_offset..][0..8], .little);
             const proposer_index = std.mem.readInt(u64, ssz_bytes[proposer_index_offset..][0..8], .little);
             var parent_root: [32]u8 = undefined;
             @memcpy(&parent_root, ssz_bytes[parent_root_offset..][0..32]);
+            var state_root: [32]u8 = undefined;
+            @memcpy(&state_root, ssz_bytes[state_root_offset..][0..32]);
+            var body_root: [32]u8 = undefined;
+            @memcpy(&body_root, ssz_bytes[body_root_offset..][0..32]);
+            const header = phase0.BeaconBlockHeader.Type{
+                .slot = slot,
+                .proposer_index = proposer_index,
+                .parent_root = parent_root,
+                .state_root = state_root,
+                .body_root = body_root,
+            };
+            var block_root: [32]u8 = undefined;
+            phase0.BeaconBlockHeader.hashTreeRoot(&header, &block_root) catch
+                return error.SszDeserializationFailed;
             return .{ .blob_sidecar = .{
                 .index = index,
                 .slot = slot,
                 .proposer_index = proposer_index,
                 .block_parent_root = parent_root,
+                .block_root = block_root,
             } };
         },
         .data_column_sidecar => {

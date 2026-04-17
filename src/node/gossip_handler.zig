@@ -22,7 +22,7 @@ const networking = @import("networking");
 const config_mod = @import("config");
 const ForkSeq = config_mod.ForkSeq;
 const preset = @import("preset").preset;
-const preset_root = @import("preset").root;
+const preset_root = @import("preset");
 const fork_types = @import("fork_types");
 const AnyAttesterSlashing = fork_types.AnyAttesterSlashing;
 const AnyGossipAttestation = fork_types.AnyGossipAttestation;
@@ -1388,9 +1388,6 @@ pub const GossipHandler = struct {
         const decoded = gossip_decoding.decodeFromSszBytes(self.allocator, .blob_sidecar, ssz_bytes, self.current_fork_seq) catch
             return GossipHandlerError.DecodeFailed;
         const blob = decoded.blob_sidecar;
-        var block_root: [32]u8 = undefined;
-        types.phase0.BeaconBlockHeader.hashTreeRoot(&blob.signed_block_header.message, &block_root) catch
-            return GossipHandlerError.DecodeFailed;
 
         // Phase 1: fast validation via chain gossip validation layer.
         var chain_state_blob = self.makeChainState();
@@ -1401,12 +1398,17 @@ pub const GossipHandler = struct {
             subnet_id,
             self.getBlobSidecarSubnetCountFn(self.node, blob.slot),
             blob.block_parent_root,
-            block_root,
+            blob.block_root,
             &chain_state_blob,
         );
         try checkAction(action_blob);
 
-        self.verifyBlobSidecarFn(self.node, &blob) catch |err| switch (err) {
+        var full_blob = types.deneb.BlobSidecar.default_value;
+        types.deneb.BlobSidecar.deserializeFromBytes(self.allocator, ssz_bytes, &full_blob) catch
+            return GossipHandlerError.DecodeFailed;
+        defer types.deneb.BlobSidecar.deinit(self.allocator, &full_blob);
+
+        self.verifyBlobSidecarFn(self.node, &full_blob) catch |err| switch (err) {
             error.ParentUnknown,
             error.ParentStateUnavailable,
             error.NoPreStateAvailable,
@@ -1419,9 +1421,9 @@ pub const GossipHandler = struct {
             error.InvalidKzgProof,
             => {
                 scoped_log.debug("Gossip blob sidecar rejected: slot={d} proposer={d} index={d} err={}", .{
-                    blob.slot,
-                    blob.proposer_index,
-                    blob.index,
+                    full_blob.slot,
+                    full_blob.proposer_index,
+                    full_blob.index,
                     err,
                 });
                 return GossipHandlerError.ValidationRejected;
@@ -1486,7 +1488,12 @@ pub const GossipHandler = struct {
             return GossipHandlerError.WrongSubnet;
         }
 
-        self.verifyDataColumnSidecarFn(self.node, &sidecar) catch |err| switch (err) {
+        var full_sidecar = types.fulu.DataColumnSidecar.default_value;
+        types.fulu.DataColumnSidecar.deserializeFromBytes(self.allocator, ssz_bytes, &full_sidecar) catch
+            return GossipHandlerError.DecodeFailed;
+        defer types.fulu.DataColumnSidecar.deinit(self.allocator, &full_sidecar);
+
+        self.verifyDataColumnSidecarFn(self.node, &full_sidecar) catch |err| switch (err) {
             error.ParentUnknown,
             error.ParentStateUnavailable,
             error.NoPreStateAvailable,
@@ -1503,9 +1510,9 @@ pub const GossipHandler = struct {
             error.InvalidKzgProof,
             => {
                 scoped_log.debug("Gossip data column sidecar rejected: slot={d} proposer={d} index={d} err={}", .{
-                    sidecar.slot,
-                    sidecar.proposer_index,
-                    sidecar.index,
+                    full_sidecar.slot,
+                    full_sidecar.proposer_index,
+                    full_sidecar.index,
                     err,
                 });
                 return GossipHandlerError.ValidationRejected;

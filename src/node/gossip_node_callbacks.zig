@@ -23,7 +23,7 @@ const AnyIndexedAttestation = fork_types.AnyIndexedAttestation;
 const AnySignedAggregateAndProof = fork_types.AnySignedAggregateAndProof;
 const AnySignedBeaconBlock = fork_types.AnySignedBeaconBlock;
 const preset = @import("preset").preset;
-const preset_root = @import("preset").root;
+const preset_root = @import("preset");
 const constants = @import("constants");
 const ssz = @import("ssz");
 const processor_mod = @import("processor");
@@ -298,10 +298,20 @@ fn syncContributionParticipantIndices(
         return error.InvalidSubcommitteeIndex;
     }
 
+    const all_validator_indices = @as(
+        *const [preset.SYNC_COMMITTEE_SIZE]ValidatorIndex,
+        @ptrCast(validator_indices.ptr),
+    );
+    var subcommittee_validator_indices: [subcommittee_size]ValidatorIndex = undefined;
+    @memcpy(
+        subcommittee_validator_indices[0..],
+        all_validator_indices[start_index..][0..subcommittee_size],
+    );
+
     return contribution.aggregation_bits.intersectValues(
         ValidatorIndex,
         allocator,
-        validator_indices[start_index .. start_index + subcommittee_size],
+        &subcommittee_validator_indices,
     );
 }
 
