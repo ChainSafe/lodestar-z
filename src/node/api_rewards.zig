@@ -75,6 +75,7 @@ pub fn computeBlockRewards(
 
     const stf_result = try chain_mod.blocks.executeStateTransition(
         allocator,
+        query.chain.state_graph_gate.io,
         .{
             .block = loaded.any_signed,
             .source = .api,

@@ -86,6 +86,7 @@ const Slot = consensus_types.primitive.Slot.Type;
 /// full PipelineContext.
 pub const PipelineContext = struct {
     allocator: Allocator,
+    io: std.Io,
 
     // -- State management --
     block_state_cache: *regen_mod.BlockStateCache,
@@ -248,6 +249,7 @@ pub fn processBlock(
             const pre_state = try getPlannedBlockImportPreState(ctx, owned_planned);
             var prepared = try executePlannedBlockImport(
                 ctx.allocator,
+                ctx.io,
                 ctx.state_graph_gate,
                 ctx.block_bls_thread_pool,
                 &owned_planned,
@@ -354,6 +356,7 @@ pub fn getPlannedBlockImportPreState(
 
 pub fn executePlannedBlockImport(
     allocator: Allocator,
+    io: std.Io,
     state_graph_gate: *StateGraphGate,
     block_bls_thread_pool: ?*BlsThreadPool,
     planned: *PlannedBlockImport,
@@ -361,6 +364,7 @@ pub fn executePlannedBlockImport(
 ) BlockImportError!PreparedBlockImport {
     const stf_result = try execute_stf.executeStateTransition(
         allocator,
+        io,
         planned.block_input,
         pre_state,
         planned.data_availability_status,
@@ -414,6 +418,7 @@ pub fn captureStateTransitionJob(
 
 pub fn executeStateTransitionJob(
     allocator: Allocator,
+    io: std.Io,
     state_regen: *StateRegen,
     state_graph_gate: *StateGraphGate,
     block_bls_thread_pool: ?*BlsThreadPool,
@@ -427,6 +432,7 @@ pub fn executeStateTransitionJob(
 
     return executePlannedBlockImport(
         allocator,
+        io,
         state_graph_gate,
         block_bls_thread_pool,
         &job.planned,
@@ -514,6 +520,7 @@ pub fn processBlockBatch(
                 };
                 var prepared = executePlannedBlockImport(
                     ctx.allocator,
+                    ctx.io,
                     ctx.state_graph_gate,
                     ctx.block_bls_thread_pool,
                     &owned_planned,
@@ -735,6 +742,7 @@ test "StateTransitionJob executes with transient worker-owned pre-state" {
 
     var prepared = try executeStateTransitionJob(
         allocator,
+        std.testing.io,
         fixture.regen,
         fixture.shared_state_graph.gate,
         null,

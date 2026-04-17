@@ -861,6 +861,7 @@ pub const Chain = struct {
         };
         const prepared = blocks_mod.executePlannedBlockImport(
             self.allocator,
+            self.state_graph_gate.io,
             self.state_graph_gate,
             self.block_bls_thread_pool,
             &owned_planned,
@@ -958,6 +959,7 @@ pub const Chain = struct {
         const current_slot = self.currentSlot();
         return .{
             .allocator = self.allocator,
+            .io = self.state_graph_gate.io,
             .block_state_cache = self.block_state_cache,
             .state_regen = self.state_regen,
             .queued_regen = self.queued_regen,

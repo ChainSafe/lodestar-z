@@ -49,6 +49,8 @@ const fast_verify = @import("fast_verify.zig");
 pub const MAX_SETS_PER_BLOCK: usize = 256;
 
 pub const BatchVerifier = struct {
+    /// Active I/O context for entropy and timing-sensitive helpers.
+    io: std.Io,
     /// Collected signature sets, stack-allocated.
     sets: [MAX_SETS_PER_BLOCK]SignatureSet = undefined,
     /// Number of sets currently buffered.
@@ -57,8 +59,8 @@ pub const BatchVerifier = struct {
     thread_pool: ?*ThreadPool = null,
 
     /// Create a batch verifier, optionally backed by a thread pool.
-    pub fn init(thread_pool: ?*ThreadPool) BatchVerifier {
-        return .{ .thread_pool = thread_pool };
+    pub fn init(io: std.Io, thread_pool: ?*ThreadPool) BatchVerifier {
+        return .{ .io = io, .thread_pool = thread_pool };
     }
 
     /// Queue a signature set for later batch verification.
@@ -97,7 +99,7 @@ pub const BatchVerifier = struct {
 
         // Generate random scalars for fast verification
         var rands: [MAX_SETS_PER_BLOCK][32]u8 = undefined;
-        fillRandomScalars(rands[0..n]);
+        bls.fillRandomScalars(self.io, rands[0..n]);
 
         // Dispatch to thread pool if available, otherwise single-threaded
         if (self.thread_pool) |pool| {
@@ -123,20 +125,12 @@ pub const BatchVerifier = struct {
     }
 };
 
-/// Fill random scalars for batch verification.
-/// Prefers OS-secure entropy and falls back to the process RNG only if secure
-/// entropy is temporarily unavailable.
-fn fillRandomScalars(rands: [][32]u8) void {
-    const bytes = std.mem.sliceAsBytes(rands);
-    std.Options.debug_io.randomSecure(bytes) catch std.Options.debug_io.random(bytes);
-}
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
 test "batch verifier: empty batch returns true" {
-    var bv = BatchVerifier.init(null);
+    var bv = BatchVerifier.init(std.testing.io, null);
     try std.testing.expect(try bv.verifyAll());
 }
 
@@ -154,7 +148,7 @@ test "batch verifier: single valid signature" {
     const sig = sk.sign(&msg, bls.DST, null);
     const sig_bytes = sig.compress();
 
-    var bv = BatchVerifier.init(null);
+    var bv = BatchVerifier.init(std.testing.io, null);
     try bv.addSingle(pk, msg, sig_bytes);
     try std.testing.expect(try bv.verifyAll());
 }
@@ -174,7 +168,7 @@ test "batch verifier: single invalid signature" {
     const sig = sk.sign(&wrong_msg, bls.DST, null); // Sign wrong message
     const sig_bytes = sig.compress();
 
-    var bv = BatchVerifier.init(null);
+    var bv = BatchVerifier.init(std.testing.io, null);
     try bv.addSingle(pk, msg, sig_bytes);
     try std.testing.expect(!try bv.verifyAll());
 }
@@ -188,7 +182,7 @@ test "batch verifier: multiple valid signatures" {
         0x48, 0x99,
     };
 
-    var bv = BatchVerifier.init(null);
+    var bv = BatchVerifier.init(std.testing.io, null);
     const num_sigs = 8;
 
     var pks: [num_sigs]PublicKey = undefined;
@@ -219,7 +213,7 @@ test "batch verifier: mixed single + aggregate sets" {
         0x48, 0x99,
     };
 
-    var bv = BatchVerifier.init(null);
+    var bv = BatchVerifier.init(std.testing.io, null);
 
     // Add a single signature set
     const sk0 = try SecretKey.keyGen(&base_ikm, null);
@@ -258,7 +252,7 @@ test "batch verifier: same-message attestations" {
         0x48, 0x99,
     };
 
-    var bv = BatchVerifier.init(null);
+    var bv = BatchVerifier.init(std.testing.io, null);
 
     // All attestations share the same signing root
     const shared_msg = [_]u8{0xFF} ** 32;
@@ -300,7 +294,7 @@ test "batch verifier: one bad sig in batch fails all" {
         0x48, 0x99,
     };
 
-    var bv = BatchVerifier.init(null);
+    var bv = BatchVerifier.init(std.testing.io, null);
 
     // Add 3 valid signatures
     for (0..3) |i| {
@@ -337,7 +331,7 @@ test "batch verifier: reset and reuse" {
         0x48, 0x99,
     };
 
-    var bv = BatchVerifier.init(null);
+    var bv = BatchVerifier.init(std.testing.io, null);
     const sk = try SecretKey.keyGen(&ikm, null);
     const pk = sk.toPublicKey();
     const msg = [_]u8{0x01} ** 32;
@@ -364,7 +358,7 @@ test "batch verifier: with thread pool" {
         0x48, 0x99,
     };
 
-    var bv = BatchVerifier.init(pool);
+    var bv = BatchVerifier.init(std.testing.io, pool);
     const num_sigs = 16;
 
     var pks: [num_sigs]PublicKey = undefined;

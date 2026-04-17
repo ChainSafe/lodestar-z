@@ -28,6 +28,12 @@ pub const MAX_AGGREGATE_PER_JOB: usize = 128;
 /// Source: https://github.com/ethereum/consensus-specs/blob/v1.4.0/specs/phase0/beacon-chain.md#bls-signatures
 pub const DST = "BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_POP_";
 
+/// Fill batch-verification random scalars using the caller's active I/O context.
+pub fn fillRandomScalars(io: std.Io, rands: [][32]u8) void {
+    const bytes = std.mem.sliceAsBytes(rands);
+    io.randomSecure(bytes) catch io.random(bytes);
+}
+
 test {
     testing.refAllDecls(@This());
     testing.refAllDecls(Pairing);

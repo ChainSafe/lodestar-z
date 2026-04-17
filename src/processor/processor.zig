@@ -105,6 +105,7 @@ pub const MetricsSnapshot = struct {
 /// `drainInbound` + `dispatchOne` in a loop) rather than owning the event
 /// loop, so it composes cleanly with std.Io fibers.
 pub const BeaconProcessor = struct {
+    io: std.Io,
     queues: WorkQueues,
     handler: HandlerFn,
     handler_context: *anyopaque,
@@ -117,12 +118,14 @@ pub const BeaconProcessor = struct {
     /// `handler`: callback invoked for each dispatched work item.
     /// `handler_context`: opaque pointer passed to the handler.
     pub fn init(
+        io: std.Io,
         allocator: std.mem.Allocator,
         config: QueueConfig,
         handler: HandlerFn,
         handler_context: *anyopaque,
     ) !BeaconProcessor {
         return .{
+            .io = io,
             .queues = try WorkQueues.init(allocator, config),
             .handler = handler,
             .handler_context = handler_context,
@@ -143,7 +146,7 @@ pub const BeaconProcessor = struct {
     /// Dispatch the highest-priority queued item to the handler.
     /// Returns true if an item was dispatched, false if all queues empty.
     pub fn dispatchOne(self: *BeaconProcessor) bool {
-        const now_ns = std.Io.Timestamp.now(std.Options.debug_io, .real).toNanoseconds();
+        const now_ns = std.Io.Timestamp.now(self.io, .real).toNanoseconds();
         const item = self.queues.popHighestPriorityAt(if (now_ns > std.math.maxInt(i64))
             std.math.maxInt(i64)
         else
@@ -156,9 +159,9 @@ pub const BeaconProcessor = struct {
     fn dispatchItem(self: *BeaconProcessor, item: WorkItem) void {
         const wtype = item.workType();
 
-        const t0 = std.Io.Timestamp.now(std.Options.debug_io, .real).toNanoseconds();
+        const t0 = std.Io.Timestamp.now(self.io, .real).toNanoseconds();
         self.handler(item, self.handler_context);
-        const t1 = std.Io.Timestamp.now(std.Options.debug_io, .real).toNanoseconds();
+        const t1 = std.Io.Timestamp.now(self.io, .real).toNanoseconds();
         const elapsed: u64 = if (t1 > t0) @intCast(t1 - t0) else 0;
         self.metrics.recordProcessed(wtype, elapsed);
         self.metrics.items_dispatched += 1;
@@ -359,6 +362,7 @@ test "BeaconProcessor: ingest and dispatch priority order" {
     const config = testConfig();
 
     var proc = try BeaconProcessor.init(
+        std.testing.io,
         allocator,
         config,
         &TestContext.handler,
@@ -396,6 +400,7 @@ test "BeaconProcessor: drainAll" {
     const config = testConfig();
 
     var proc = try BeaconProcessor.init(
+        std.testing.io,
         allocator,
         config,
         &TestContext.handler,
@@ -433,6 +438,7 @@ test "BeaconProcessor: metrics tracking" {
     const config = testConfig();
 
     var proc = try BeaconProcessor.init(
+        std.testing.io,
         allocator,
         config,
         &TestContext.handler,
@@ -460,6 +466,7 @@ test "BeaconProcessor: sync state affects dropping" {
     const config = testConfig();
 
     var proc = try BeaconProcessor.init(
+        std.testing.io,
         allocator,
         config,
         &TestContext.handler,
@@ -536,6 +543,7 @@ test "BeaconProcessor: tick processes limited items" {
     const config = testConfig();
 
     var proc = try BeaconProcessor.init(
+        std.testing.io,
         allocator,
         config,
         &TestContext.handler,
@@ -576,6 +584,7 @@ test "BeaconProcessor: getQueueDepths" {
     const config = testConfig();
 
     var proc = try BeaconProcessor.init(
+        std.testing.io,
         allocator,
         config,
         &TestContext.handler,
@@ -617,6 +626,7 @@ test "BeaconProcessor: attestation batching" {
     const config = testConfig();
 
     var proc = try BeaconProcessor.init(
+        std.testing.io,
         allocator,
         config,
         &TestContext.handler,
@@ -653,6 +663,7 @@ test "BeaconProcessor: single attestation not batched" {
     const config = testConfig();
 
     var proc = try BeaconProcessor.init(
+        std.testing.io,
         allocator,
         config,
         &TestContext.handler,
@@ -682,6 +693,7 @@ test "BeaconProcessor: blocks dispatched before attestations" {
     const config = testConfig();
 
     var proc = try BeaconProcessor.init(
+        std.testing.io,
         allocator,
         config,
         &TestContext.handler,

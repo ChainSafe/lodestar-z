@@ -451,7 +451,7 @@ pub fn startVerifySignatureSets(
 
     const owned_rands = try allocator.alloc([32]u8, sets.len);
     errdefer allocator.free(owned_rands);
-    fillRandomScalars(owned_rands);
+    blst.fillRandomScalars(pool.io, owned_rands);
 
     const owned_dst = try allocator.dupe(u8, dst);
     errdefer allocator.free(owned_dst);
@@ -511,7 +511,7 @@ pub fn startVerifySignatureSetsSameMessage(
 
     const owned_rands = try allocator.alloc([32]u8, sets.len);
     errdefer allocator.free(owned_rands);
-    fillRandomScalars(owned_rands);
+    blst.fillRandomScalars(pool.io, owned_rands);
 
     const owned_dst = try allocator.dupe(u8, dst);
     errdefer allocator.free(owned_dst);
@@ -709,11 +709,6 @@ pub fn verifySignatureSets(
     if (job.err_flag.load(.acquire)) return BlstError.VerifyFail;
 
     return mergeAndVerify(pool, n_active, null);
-}
-
-fn fillRandomScalars(rands: [][32]u8) void {
-    const bytes = std.mem.sliceAsBytes(rands);
-    std.Options.debug_io.randomSecure(bytes) catch std.Options.debug_io.random(bytes);
 }
 
 const AggVerifyJob = struct {

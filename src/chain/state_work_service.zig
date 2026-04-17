@@ -214,6 +214,7 @@ pub const StateWorkService = struct {
             const completed: CompletedBlockImport = blk: {
                 const prepared = blocks.pipeline.executeStateTransitionJob(
                     self.allocator,
+                    self.io,
                     self.state_regen,
                     self.state_graph_gate,
                     self.block_bls_thread_pool,

@@ -198,6 +198,7 @@ pub fn init(allocator: Allocator, io: std.Io, beacon_config: *const BeaconConfig
 
     const beacon_processor = try allocator.create(BeaconProcessor);
     beacon_processor.* = try BeaconProcessor.init(
+        io,
         allocator,
         QueueConfig.default,
         &beacon_node_mod.processorHandlerCallback,
@@ -400,6 +401,7 @@ fn finishBuilder(
     const beacon_processor = try allocator.create(BeaconProcessor);
     errdefer allocator.destroy(beacon_processor);
     beacon_processor.* = try BeaconProcessor.init(
+        self.io,
         allocator,
         QueueConfig.default,
         &beacon_node_mod.processorHandlerCallback,

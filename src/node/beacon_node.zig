@@ -3579,8 +3579,7 @@ fn verifyAttestationBatchSync(node: *BeaconNode, items: []const AttestationWork)
     const sets = signature_sets[0..owned_count];
     if (same_message) {
         var rands: [processor_mod.work_item.max_attestation_batch_size][32]u8 = undefined;
-        std.Options.debug_io.randomSecure(std.mem.sliceAsBytes(rands[0..owned_count])) catch
-            std.Options.debug_io.random(std.mem.sliceAsBytes(rands[0..owned_count]));
+        bls_mod.fillRandomScalars(node.io, rands[0..owned_count]);
         var pairing_buf: [bls_mod.Pairing.sizeOf()]u8 align(bls_mod.Pairing.buf_align) = undefined;
         return bls_mod.verifySignatureSetsSameMessage(
             &pairing_buf,
@@ -3590,7 +3589,7 @@ fn verifyAttestationBatchSync(node: *BeaconNode, items: []const AttestationWork)
         ) catch false;
     }
 
-    var batch_verifier = bls_mod.BatchVerifier.init(node.gossip_bls_thread_pool);
+    var batch_verifier = bls_mod.BatchVerifier.init(node.io, node.gossip_bls_thread_pool);
     for (sets) |set| {
         batch_verifier.addSet(set) catch return false;
     }
@@ -3602,7 +3601,7 @@ fn verifyAggregateBatchSync(node: *BeaconNode, items: []const AggregateWork) boo
     const gh = node.gossip_handler orelse return true;
     if (gh.verifyAggregateSignatureFn == null) return true;
 
-    var batch_verifier = bls_mod.BatchVerifier.init(node.gossip_bls_thread_pool);
+    var batch_verifier = bls_mod.BatchVerifier.init(node.io, node.gossip_bls_thread_pool);
     var owned_sets: [processor_mod.work_item.max_aggregate_batch_size * 3]bls_mod.OwnedSignatureSet = undefined;
     var owned_count: usize = 0;
     defer {
@@ -3677,8 +3676,7 @@ fn verifySyncMessageBatchSync(
     const sets = signature_sets[0..owned_count];
     if (same_message) {
         var rands: [processor_mod.work_item.max_sync_message_batch_size][32]u8 = undefined;
-        std.Options.debug_io.randomSecure(std.mem.sliceAsBytes(rands[0..owned_count])) catch
-            std.Options.debug_io.random(std.mem.sliceAsBytes(rands[0..owned_count]));
+        bls_mod.fillRandomScalars(node.io, rands[0..owned_count]);
         var pairing_buf: [bls_mod.Pairing.sizeOf()]u8 align(bls_mod.Pairing.buf_align) = undefined;
         return bls_mod.verifySignatureSetsSameMessage(
             &pairing_buf,
@@ -3688,7 +3686,7 @@ fn verifySyncMessageBatchSync(
         ) catch false;
     }
 
-    var batch_verifier = bls_mod.BatchVerifier.init(node.gossip_bls_thread_pool);
+    var batch_verifier = bls_mod.BatchVerifier.init(node.io, node.gossip_bls_thread_pool);
     for (sets) |set| {
         batch_verifier.addSet(set) catch return false;
     }

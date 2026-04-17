@@ -70,6 +70,7 @@ pub const StfResult = struct {
 /// This is the most expensive stage — it modifies 200KB+ of state.
 pub fn executeStateTransition(
     allocator: Allocator,
+    io: std.Io,
     block_input: BlockInput,
     pre_state: *CachedBeaconState,
     da_status: DataAvailabilityStatus,
@@ -102,7 +103,7 @@ pub fn executeStateTransition(
     const verify_signatures = sig_status == .verified;
 
     // Set up batch verifier if signatures are being verified.
-    var batch = verify_sigs.createBlockBatchVerifier(block_bls_thread_pool);
+    var batch = verify_sigs.createBlockBatchVerifier(io, block_bls_thread_pool);
 
     // Map pipeline DA status to the state_transition's BlockExternalData DA status.
     // Use @FieldType to get the anonymous enum type of the data_availability_status field.

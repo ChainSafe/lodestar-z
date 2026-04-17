@@ -113,9 +113,10 @@ pub fn verifyProposerSignature(
 /// ProcessBlockOpts.batch_verifier. After processBlock returns,
 /// call verifier.verifyAll() to batch-verify all collected signatures.
 pub fn createBlockBatchVerifier(
+    io: std.Io,
     thread_pool: ?*bls_mod.ThreadPool,
 ) BatchVerifier {
-    return BatchVerifier.init(thread_pool);
+    return BatchVerifier.init(io, thread_pool);
 }
 
 /// Verify all signatures collected in a batch verifier.
@@ -171,7 +172,7 @@ test "shouldVerifySignatures: verify for api" {
 }
 
 test "createBlockBatchVerifier: creates with no pool" {
-    var verifier = createBlockBatchVerifier(null);
+    var verifier = createBlockBatchVerifier(std.testing.io, null);
     try std.testing.expectEqual(@as(usize, 0), verifier.len());
 }
 
@@ -179,6 +180,6 @@ test "createBlockBatchVerifier: keeps provided pool" {
     const pool = try bls_mod.ThreadPool.init(std.testing.allocator, std.testing.io, .{ .n_workers = 2 });
     defer pool.deinit();
 
-    const verifier = createBlockBatchVerifier(pool);
+    const verifier = createBlockBatchVerifier(std.testing.io, pool);
     try std.testing.expect(verifier.thread_pool == pool);
 }
