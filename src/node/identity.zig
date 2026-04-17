@@ -176,14 +176,12 @@ fn initBuilderForOptions(
     if (try advertisedIp4(opts)) |ip4| {
         builder.ip = ip4;
         builder.udp = opts.enr_udp orelse opts.discovery_port orelse opts.p2p_port;
-        builder.tcp = opts.enr_tcp orelse opts.p2p_port;
         builder.quic = opts.enr_tcp orelse opts.p2p_port;
     }
 
     if (try advertisedIp6(opts)) |ip6| {
         builder.ip6 = ip6;
         builder.udp6 = opts.enr_udp6 orelse opts.discovery_port6 orelse opts.discovery_port orelse opts.p2p_port6 orelse opts.p2p_port;
-        builder.tcp6 = opts.enr_tcp6 orelse opts.p2p_port6 orelse opts.p2p_port;
         builder.quic6 = opts.enr_tcp6 orelse opts.p2p_port6 orelse opts.p2p_port;
     }
 
@@ -316,4 +314,24 @@ fn decodeEnrText(allocator: Allocator, enr_text: []const u8) ![]u8 {
     errdefer allocator.free(raw);
     std.base64.url_safe_no_pad.Decoder.decode(raw, trimmed) catch return error.InvalidEnr;
     return raw;
+}
+
+test "initBuilderForOptions only advertises QUIC transport" {
+    var builder = try initBuilderForOptions(
+        std.testing.allocator,
+        [_]u8{1} ** 32,
+        1,
+        .{
+            .enr_ip = "127.0.0.1",
+            .enr_ip6 = "2001:db8::1",
+            .p2p_port = 9000,
+            .p2p_port6 = 9001,
+        },
+    );
+    defer builder.deinit();
+
+    try std.testing.expectEqual(@as(?u16, null), builder.tcp);
+    try std.testing.expectEqual(@as(?u16, 9000), builder.quic);
+    try std.testing.expectEqual(@as(?u16, null), builder.tcp6);
+    try std.testing.expectEqual(@as(?u16, 9001), builder.quic6);
 }

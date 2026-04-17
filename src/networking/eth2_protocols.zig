@@ -173,6 +173,8 @@ fn makeProtocolHandler(
                 started_ns,
                 if (response_writer_ctx.first_result) |result|
                     protocol.ReqRespRequestOutcome.fromResponseCode(result)
+                else if (!method.expectsResponse())
+                    .success
                 else
                     .internal_error,
                 @intCast(request_bytes.len),

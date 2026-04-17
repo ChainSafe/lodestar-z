@@ -172,6 +172,17 @@ pub const Method = enum {
         };
     }
 
+    /// Returns true if this method expects at least one response chunk.
+    ///
+    /// Goodbye is fire-and-forget and succeeds with a clean stream close and
+    /// no response body.
+    pub fn expectsResponse(self: Method) bool {
+        return switch (self) {
+            .goodbye => false,
+            else => true,
+        };
+    }
+
     /// Returns true if an inbound request may be encoded as a bare stream close
     /// with no SSZ-Snappy frame at all.
     ///
@@ -345,4 +356,10 @@ test "formatProtocolId" {
     const id = try formatProtocolId(testing.allocator, .status);
     defer testing.allocator.free(id);
     try testing.expectEqualStrings("/eth2/beacon_chain/req/status/1/ssz_snappy", id);
+}
+
+test "Method.expectsResponse handles goodbye specially" {
+    try testing.expect(!Method.goodbye.expectsResponse());
+    try testing.expect(Method.status.expectsResponse());
+    try testing.expect(Method.ping.expectsResponse());
 }

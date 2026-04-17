@@ -648,10 +648,6 @@ fn appendAdvertisedAddress(
         .ip4 => "ip4",
         .ip6 => "ip6",
     };
-    const transport = switch (kind) {
-        .p2p => "tcp",
-        .discovery => "udp",
-    };
     const port = switch (kind) {
         .p2p => switch (family) {
             .ip4 => opts.enr_tcp orelse opts.p2p_port,
@@ -663,14 +659,51 @@ fn appendAdvertisedAddress(
         },
     };
 
-    const address = try std.fmt.allocPrint(allocator, "/{s}/{s}/{s}/{d}/p2p/{s}", .{
-        proto,
-        ip,
-        transport,
-        port,
-        peer_id,
-    });
+    const address = switch (kind) {
+        .p2p => try std.fmt.allocPrint(
+            allocator,
+            "/{s}/{s}/udp/{d}/quic-v1/p2p/{s}",
+            .{ proto, ip, port, peer_id },
+        ),
+        .discovery => try std.fmt.allocPrint(
+            allocator,
+            "/{s}/{s}/udp/{d}/p2p/{s}",
+            .{ proto, ip, port, peer_id },
+        ),
+    };
     try addresses.append(allocator, address);
+}
+
+test "buildAdvertisedAddresses uses quic multiaddr for p2p addresses" {
+    const addresses = try buildAdvertisedAddresses(
+        std.testing.allocator,
+        .{
+            .enr_ip = "127.0.0.1",
+            .p2p_port = 9000,
+        },
+        "peer-id",
+        .p2p,
+    );
+    defer freeAddressList(std.testing.allocator, addresses);
+
+    try std.testing.expectEqual(@as(usize, 1), addresses.len);
+    try std.testing.expectEqualStrings("/ip4/127.0.0.1/udp/9000/quic-v1/p2p/peer-id", addresses[0]);
+}
+
+test "buildAdvertisedAddresses keeps udp multiaddr for discovery addresses" {
+    const addresses = try buildAdvertisedAddresses(
+        std.testing.allocator,
+        .{
+            .enr_ip = "127.0.0.1",
+            .p2p_port = 9000,
+        },
+        "peer-id",
+        .discovery,
+    );
+    defer freeAddressList(std.testing.allocator, addresses);
+
+    try std.testing.expectEqual(@as(usize, 1), addresses.len);
+    try std.testing.expectEqualStrings("/ip4/127.0.0.1/udp/9000/p2p/peer-id", addresses[0]);
 }
 
 fn freeAddressList(allocator: Allocator, addresses: []const []const u8) void {
