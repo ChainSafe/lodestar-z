@@ -2743,7 +2743,7 @@ pub const BeaconNode = struct {
         }
     }
 
-    pub fn onPendingUnknownBlockSlot(self: *BeaconNode, current_slot: types.Slot) void {
+    pub fn onPendingUnknownBlockSlot(self: *BeaconNode, current_slot: types.primitive.Slot.Type) void {
         if (self.beacon_processor) |bp| {
             bp.onPendingUnknownBlockSlot(current_slot);
         }
@@ -4203,7 +4203,7 @@ pub fn processorHandlerCallback(item: WorkItem, context: *anyopaque) void {
             };
 
             switch (gh.processGossipMessageWithSubnetAndMetadata(
-                raw_work.topic_type,
+                toNetworkingGossipTopicType(raw_work.topic_type),
                 raw_work.subnet_id,
                 data,
                 metadata,
