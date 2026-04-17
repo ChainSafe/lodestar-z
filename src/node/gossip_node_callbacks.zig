@@ -261,9 +261,12 @@ fn verifyBlobSidecarInclusionProof(sidecar: *const types.deneb.BlobSidecar.Type)
     }
 }
 
-fn verifyDataColumnSidecarInclusionProof(sidecar: *const types.fulu.DataColumnSidecar.Type) !void {
+fn verifyDataColumnSidecarInclusionProof(
+    allocator: std.mem.Allocator,
+    sidecar: *const types.fulu.DataColumnSidecar.Type,
+) !void {
     var leaf: [32]u8 = undefined;
-    try types.deneb.BlobKzgCommitments.hashTreeRoot(&sidecar.kzg_commitments, &leaf);
+    try types.deneb.BlobKzgCommitments.hashTreeRoot(allocator, &sidecar.kzg_commitments, &leaf);
 
     var proof: [33][32]u8 = [_][32]u8{[_]u8{0} ** 32} ** 33;
     for (sidecar.kzg_commitments_inclusion_proof, 0..) |proof_node, i| {
@@ -1443,7 +1446,7 @@ pub fn verifyDataColumnSidecar(
     );
     try verifyExpectedProposer(pre_state, block_slot, sidecar.signed_block_header.message.proposer_index);
     try verifyBlockHeaderProposerSignature(node, pre_state, &sidecar.signed_block_header);
-    try verifyDataColumnSidecarInclusionProof(sidecar);
+    try verifyDataColumnSidecarInclusionProof(node.allocator, sidecar);
 
     node.chainService().verifyDataColumnSidecar(
         node.allocator,
