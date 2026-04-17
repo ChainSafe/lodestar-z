@@ -126,14 +126,71 @@ pub fn main() !void {
 }
 ```
 
-## Developer Usage
-- `git clone https://github.com/ChainSafe/lodestar-z.git`
-- `zig build run:download_spec_tests`
-- `zig build run:write_spec_tests`
-- `zig build test:int`
-- `zig build test:generic_spec_tests`
-- `zig build test:static_spec_tests -Dpreset=mainnet`
-- `zig build test:static_spec_tests -Dpreset=minimal`
+## Developer usage
+
+Clone the repository:
+
+```bash
+git clone https://github.com/ChainSafe/lodestar-z.git
+```
+
+After cloning:
+
+```bash
+# Build and install artifacts (library, executables, bindings)
+zig build
+```
+
+### Testing
+
+Run tests for a single area with `zig build test:<name>`. Examples:
+
+```bash
+zig build test:hashing
+zig build test:ssz
+zig build test:consensus_types
+zig build test:state_transition
+```
+
+Run `zig build --help` and look under **Steps** for every `test:*` target.
+
+**`zig build test`** runs all Zig test targets defined in `build.zig` in one go. After a fresh clone it often **fails** until prerequisites are in place:
+
+1. **Generated spec code** — Some files under `test/spec/` are produced by the download/write scripts and are not in git. Complete the [Ethereum consensus spec tests](#ethereum-consensus-spec-tests) setup first if you want spec-related tests (including the full `zig build test`) to pass.
+2. **NAPI bindings** — The Zig `test:bindings` target does not link against Node’s NAPI runtime, so it does not exercise the addon the same way a Node process does. Build the library and run **`pnpm test`** as described under [JS/TS bindings](#js-ts-bindings).
+
+### JS/TS bindings
+
+From the repo root (after [pnpm](https://pnpm.io) install):
+
+```bash
+pnpm install
+zig build build-lib:bindings -Doptimize=ReleaseSafe
+pnpm test
+```
+
+To run Ethereum consensus spec tests (recommended for contributors):
+
+1. Download and generate spec test vectors (one-time or when updating spec version):
+   ```bash
+   zig build run:download_spec_tests
+   zig build run:write_spec_tests
+   zig build run:write_ssz_generic_spec_tests
+   zig build run:write_ssz_static_spec_tests
+   ```
+2. Run spec tests (use `-Dpreset=minimal` for faster runs):
+   ```bash
+   zig build test:int
+   zig build test:spec_tests -Dpreset=minimal
+   zig build test:ssz_generic_spec_tests -Dpreset=minimal
+   zig build test:ssz_static_spec_tests -Dpreset=minimal
+   ```
+   For mainnet preset: replace `-Dpreset=minimal` with `-Dpreset=mainnet`.
+
+## Contributing
+
+- **Style:** Follow [.gemini/styleguide.md](.gemini/styleguide.md) (TigerStyle-based).
+- **Testing:** Run the relevant `zig build test:*` steps for what you changed; use [JS/TS bindings](#js-ts-bindings) when touching NAPI. For consensus or SSZ behavior, run the [spec tests](#ethereum-consensus-spec-tests) after downloading and generating vectors. See [Testing](#testing) for limitations of `zig build test` on a fresh clone.
 
 # License
 
