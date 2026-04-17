@@ -233,7 +233,7 @@ fn buildIndexedAttestationFromSingle(
     attestation: *const AnyGossipAttestation,
     resolved: *const ResolvedAttestation,
 ) !OwnedIndexedAttestation {
-    const attesting_indices = try dupAttestingIndices(allocator, &.{resolved.validator_index});
+    var attesting_indices = try dupAttestingIndices(allocator, &.{resolved.validator_index});
     errdefer attesting_indices.deinit(allocator);
 
     return switch (attestation.*) {
@@ -259,7 +259,7 @@ fn buildIndexedAttestationFromAggregate(
     aggregate: *const AnySignedAggregateAndProof,
     resolved: *const ResolvedAggregate,
 ) !OwnedIndexedAttestation {
-    const attesting_indices = try dupAttestingIndices(allocator, resolved.attesting_indices);
+    var attesting_indices = try dupAttestingIndices(allocator, resolved.attesting_indices);
     errdefer attesting_indices.deinit(allocator);
 
     return switch (aggregate.attestation()) {

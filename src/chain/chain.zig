@@ -1381,6 +1381,11 @@ pub const Chain = struct {
                 const self_: *const Chain = @ptrCast(@alignCast(_ptr));
                 return self_.hasCanonicalBlock(root) or self_.block_to_state.contains(root);
             }
+            fn getKnownBlockSlot(_ptr: *anyopaque, root: [32]u8) ?u64 {
+                const self_: *const Chain = @ptrCast(@alignCast(_ptr));
+                const block = self_.forkChoice().getBlockDefaultStatus(root) orelse return null;
+                return block.slot;
+            }
             /// Returns the total validator count from the head state's epoch cache.
             /// Returns 0 if head state is unavailable (gossip validator skips bounds check).
             fn getValidatorCount(_ptr: *anyopaque) u32 {
@@ -1399,6 +1404,7 @@ pub const Chain = struct {
             .seen_cache = self.seen_cache,
             .getProposerIndex = Callbacks.getProposerIndex,
             .isKnownBlockRoot = Callbacks.isKnownBlockRoot,
+            .getKnownBlockSlot = Callbacks.getKnownBlockSlot,
             .getValidatorCount = Callbacks.getValidatorCount,
         };
     }
