@@ -54,6 +54,7 @@ const EthGossipAdapter = eth_gossip.EthGossipAdapter;
 pub const GossipTopicType = eth_gossip.GossipTopicType;
 pub const ActiveGossipFork = eth_gossip.EthGossipAdapter.ActiveFork;
 pub const GossipEvent = gossipsub_mod.config.Event;
+pub const GossipValidationResult = gossipsub_mod.ValidationResult;
 pub const QuicStream = quic_mod.Stream;
 const ReqRespContext = req_resp_handler.ReqRespContext;
 const TopicTypeCount = std.meta.fields(gossip_topics.GossipTopicType).len;
@@ -779,6 +780,16 @@ pub const P2pService = struct {
     /// Drain pending gossipsub events. Caller owns the returned slice.
     pub fn drainGossipEvents(self: *Self, io: Io) ![]GossipEvent {
         return self.gossipsub.drainEvents(io);
+    }
+
+    /// Report the final validation result for an inbound gossip message.
+    pub fn reportGossipValidationResult(
+        self: *Self,
+        io: Io,
+        msg_id: []const u8,
+        result: GossipValidationResult,
+    ) bool {
+        return self.gossipsub.reportValidationResult(io, msg_id, result);
     }
 
     /// Report an invalid inbound gossip message to gossipsub's mesh scorer.

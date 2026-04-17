@@ -579,6 +579,7 @@ pub fn start(self: *BeaconNode, io: std.Io, listen_addr: []const u8, port: u16) 
             .signature_policy = .strict_no_sign,
             .publish_policy = .anonymous,
             .msg_id_fn = &networking.gossipMessageIdFn,
+            .validation_mode = .manual,
         },
     });
     defer deinitService(self, io);
