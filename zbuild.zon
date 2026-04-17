@@ -321,4 +321,7 @@
             .filters = .{},
         },
     },
+    .runs = .{
+        .bench_ssz = "zig build run:bench_ssz_attestation run:bench_ssz_block run:bench_ssz_state",
+    },
 }

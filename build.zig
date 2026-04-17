@@ -1029,6 +1029,10 @@ pub fn build(b: *std.Build) void {
     tls_run_test_bls_spec_tests.dependOn(&run_test_bls_spec_tests.step);
     tls_run_test.dependOn(&run_test_bls_spec_tests.step);
 
+    const run_bench_ssz = b.addSystemCommand(&.{ "zig", "build", "run:bench_ssz_attestation", "run:bench_ssz_block", "run:bench_ssz_state" });
+    const tls_run_bench_ssz = b.step("run:bench_ssz", "Run the bench_ssz run");
+    tls_run_bench_ssz.dependOn(&run_bench_ssz.step);
+
     module_config.addImport("build_options", options_module_build_options);
     module_config.addImport("preset", module_preset);
     module_config.addImport("consensus_types", module_consensus_types);
