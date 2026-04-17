@@ -1441,8 +1441,12 @@ pub const ForkChoice = struct {
         next_root: Root,
         next_payload_status: PayloadStatus,
     ) !void {
-        // Get the node index for the voted block.
+        // Votes are keyed by block root first. For Gloas blocks, attestation
+        // data may indicate FULL/EMPTY before that concrete variant exists in
+        // the proto-array. In that case, fall back to the root's canonical
+        // default node (PENDING) rather than dropping the vote.
         const next_index = self.proto_array.getNodeIndexByRootAndStatus(next_root, next_payload_status) orelse
+            self.proto_array.getDefaultNodeIndex(next_root) orelse
             return error.MissingProtoArrayBlock;
 
         try self.votes.ensureValidatorCount(allocator, @intCast(validator_index + 1));
@@ -4096,6 +4100,36 @@ test "onAttestation: valid attestation applies vote (past slot)" {
     // Validator 0 should now have a vote. Head should be block_root.
     try fc.updateHead(allocator);
     try testing.expectEqual(block_root, fc.head.block_root);
+}
+
+test "onAttestation: Gloas payload-present vote falls back to pending when full is absent" {
+    const allocator = testing.allocator;
+    const genesis_root = hashFromByte(0x01);
+    const a_root = hashFromByte(0x0A);
+    const a_parent_bh = hashFromByte(0xA0);
+
+    var fc = try initTestForkChoice(
+        allocator,
+        makeTestBlock(0, genesis_root, ZERO_HASH),
+        3,
+        makeTestCheckpoint(0, genesis_root),
+        makeTestCheckpoint(0, genesis_root),
+        &.{100},
+    );
+    defer deinitTestForkChoice(allocator, fc);
+
+    try onBlockFromProto(fc, allocator, makeGloasTestBlock(1, a_root, genesis_root, a_parent_bh), 3);
+    try testing.expect(fc.proto_array.getNodeIndexByRootAndStatus(a_root, .full) == null);
+
+    const indices = [_]ValidatorIndex{0};
+    var att = makeTestIndexedAttestation(&indices, 2, a_root, 0, a_root, 0, genesis_root, 1);
+    const any_att = AnyIndexedAttestation{ .phase0 = &att };
+
+    try fc.onAttestation(allocator, &any_att, hashFromByte(0xC1), false);
+
+    const fields = fc.votes.fields();
+    try testing.expectEqual(fc.proto_array.getDefaultNodeIndex(a_root).?, @as(u32, @intCast(fields.next_indices[0])));
+    try testing.expectEqual(@as(Slot, 2), fields.next_slots[0]);
 }
 
 test "onAttestation: valid attestation queued (same slot)" {
