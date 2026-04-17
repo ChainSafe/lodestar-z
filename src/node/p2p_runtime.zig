@@ -786,6 +786,7 @@ pub fn processSyncByRootRequests(self: *BeaconNode, io: std.Io, svc: *networking
             });
             switch (req.kind) {
                 .unknown_block_parent => self.unknown_block_sync.onFetchFailed(root, peer_id),
+                .unknown_block_gossip => self.onPendingUnknownBlockFetchFailed(root, peer_id),
                 .unknown_chain_header => {},
             }
             continue;
@@ -813,6 +814,44 @@ pub fn processSyncByRootRequests(self: *BeaconNode, io: std.Io, svc: *networking
                 self.unknown_block_sync.onParentFetched(root, prepared) catch |err| {
                     log.warn("processSyncByRoot: onParentFetched error: {}", .{err});
                 };
+            },
+            .unknown_block_gossip => {
+                ensureByRootDataAvailability(self, io, svc, peer_id, block_ssz) catch |err| {
+                    log.debug("processSyncByRoot: unknown-block-gossip DA prefetch failed for root {x:0>2}{x:0>2}{x:0>2}{x:0>2}...: {}", .{
+                        root[0], root[1], root[2], root[3], err,
+                    });
+                    self.onPendingUnknownBlockFetchFailed(root, peer_id);
+                    continue;
+                };
+
+                const prepared = self.chainService().prepareRawPreparedBlockInput(block_ssz, .unknown_block_sync) catch |err| {
+                    log.warn("processSyncByRoot: unknown-block-gossip block preparation failed for root {x:0>2}{x:0>2}{x:0>2}{x:0>2}...: {}", .{
+                        root[0], root[1], root[2], root[3], err,
+                    });
+                    self.onPendingUnknownBlockFetchFailed(root, peer_id);
+                    continue;
+                };
+
+                self.onPendingUnknownBlockFetchAccepted(root);
+                const import_result = self.importPreparedBlock(prepared) catch |err| {
+                    log.warn("processSyncByRoot: unknown-block-gossip import failed for root {x:0>2}{x:0>2}{x:0>2}{x:0>2}...: {}", .{
+                        root[0], root[1], root[2], root[3], err,
+                    });
+                    self.onPendingUnknownBlockFetchFailed(root, null);
+                    continue;
+                };
+
+                switch (import_result) {
+                    .pending => {},
+                    .imported => {},
+                    .ignored => {
+                        if (self.chainQuery().isKnownBlockRoot(root)) {
+                            self.processPendingChildren(root);
+                        } else {
+                            self.dropPendingUnknownBlock(root);
+                        }
+                    },
+                }
             },
             .unknown_chain_header => {
                 log.debug("dropping unknown-chain by-root response while unknown-chain sync is disabled root={x:0>2}{x:0>2}{x:0>2}{x:0>2}...", .{
@@ -1551,6 +1590,7 @@ fn runRealtimeP2pTick(self: *BeaconNode, io: std.Io, svc: *networking.P2pService
         };
     }
     self.unknown_block_sync.tick();
+    self.drivePendingUnknownBlockGossip();
     if (shouldDriveUnknownChainSync(self)) self.unknown_chain_sync.tick();
     did_work = self.drivePendingSyncSegments() or did_work;
 
@@ -2459,6 +2499,7 @@ fn advanceChainClock(self: *BeaconNode, io: std.Io) void {
     }
 
     self.chainService().onSlot(current_slot);
+    self.pending_unknown_block_gossip.onSlot(current_slot);
     self.last_slot_tick = current_slot;
     self.noteHeadCatchupSlotsStarted(first_tracked_slot, current_slot);
     self.observeHeadCatchup(self.getHead().slot);
@@ -5391,6 +5432,8 @@ fn initGossipHandler(self: *BeaconNode) void {
 
     if (self.gossip_handler) |gh| {
         gh.queueUnknownBlockFn = &callbacks.queueUnknownBlockFromGossip;
+        gh.queueUnknownBlockAttestationFn = &callbacks.queueUnknownBlockAttestationFromGossip;
+        gh.queueUnknownBlockAggregateFn = &callbacks.queueUnknownBlockAggregateFromGossip;
         gh.importResolvedAttestationFn = &callbacks.importResolvedAttestation;
         gh.importResolvedAggregateFn = &callbacks.importResolvedAggregate;
         gh.importVoluntaryExitFn = &callbacks.importVoluntaryExit;

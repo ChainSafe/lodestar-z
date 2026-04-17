@@ -21,6 +21,7 @@ const PeerEntry = PeerSet.PeerEntry;
 
 pub const PendingByRootRequestKind = enum {
     unknown_block_parent,
+    unknown_block_gossip,
     unknown_chain_header,
 };
 
@@ -258,6 +259,11 @@ pub const SyncCallbackCtx = struct {
         ctx.enqueueByRootRequest(.unknown_block_parent, root, peer_id);
     }
 
+    pub fn enqueueUnknownBlockGossipRequestFn(ptr: *anyopaque, root: [32]u8, peer_id: []const u8) void {
+        const ctx: *SyncCallbackCtx = @ptrCast(@alignCast(ptr));
+        ctx.enqueueByRootRequest(.unknown_block_gossip, root, peer_id);
+    }
+
     fn unknownBlockHasBlock(ptr: *anyopaque, root: [32]u8) bool {
         const ctx: *SyncCallbackCtx = @ptrCast(@alignCast(ptr));
         return ctx.node.chainQuery().isKnownBlockRoot(root);
@@ -361,6 +367,15 @@ pub const SyncCallbackCtx = struct {
         self.pending_linked_head = @intCast((self.pending_linked_head + 1) % self.pending_linked_chains.len);
         self.pending_linked_count -= 1;
         return pending;
+    }
+
+    pub fn connectedPeerIds(self: *SyncCallbackCtx) []const []const u8 {
+        return syncGetConnectedPeers(@ptrCast(self));
+    }
+
+    pub fn connectedPeerIdsFn(ptr: *anyopaque) []const []const u8 {
+        const ctx: *SyncCallbackCtx = @ptrCast(@alignCast(ptr));
+        return ctx.connectedPeerIds();
     }
 
     pub fn takePendingGossipEnabled(self: *SyncCallbackCtx) ?bool {

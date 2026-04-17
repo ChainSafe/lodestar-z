@@ -150,6 +150,14 @@ pub const GossipHandler = struct {
         resolved: *const ResolvedAttestation,
     ) anyerror!void,
 
+    /// Called when a gossip attestation votes for an unknown beacon_block_root.
+    queueUnknownBlockAttestationFn: ?*const fn (
+        ptr: *anyopaque,
+        block_root: [32]u8,
+        work: processor_mod.work_item.AttestationWork,
+        peer_id: ?[]const u8,
+    ) anyerror!bool = null,
+
     /// Called to import a validated voluntary exit into the op pool.
     importVoluntaryExitFn: ?*const fn (ptr: *anyopaque, exit: *const SignedVoluntaryExit) anyerror!void,
 
@@ -211,6 +219,14 @@ pub const GossipHandler = struct {
         aggregate: *const AnySignedAggregateAndProof,
         resolved: *const ResolvedAggregate,
     ) anyerror!void,
+
+    /// Called when a gossip aggregate votes for an unknown beacon_block_root.
+    queueUnknownBlockAggregateFn: ?*const fn (
+        ptr: *anyopaque,
+        block_root: [32]u8,
+        work: processor_mod.work_item.AggregateWork,
+        peer_id: ?[]const u8,
+    ) anyerror!bool = null,
 
     /// Verify sync committee message BLS signature. Returns true if valid.
     verifySyncCommitteeSignatureFn: ?*const fn (ptr: *anyopaque, ssz_bytes: []const u8) bool,
@@ -283,6 +299,7 @@ pub const GossipHandler = struct {
             .resolveAttestationFn = resolveAttestationFn,
             .resolveAggregateFn = resolveAggregateFn,
             .importResolvedAttestationFn = null,
+            .queueUnknownBlockAttestationFn = null,
             .importVoluntaryExitFn = null,
             .importProposerSlashingFn = null,
             .importAttesterSlashingFn = null,
@@ -297,6 +314,7 @@ pub const GossipHandler = struct {
             .verifyAttestationSignatureFn = null,
             .verifyAggregateSignatureFn = null,
             .importResolvedAggregateFn = null,
+            .queueUnknownBlockAggregateFn = null,
             .verifySyncCommitteeSignatureFn = null,
             .isValidSyncCommitteeSubnetFn = isValidSyncCommitteeSubnetFn,
             .importSyncContributionFn = null,
@@ -637,6 +655,23 @@ pub const GossipHandler = struct {
             return GossipHandlerError.ValidationIgnored;
         }
 
+        if (!chain_state.isKnownBlockRoot(chain_state.ptr, data.beacon_block_root)) {
+            if (self.queueUnknownBlockAttestationFn) |queueFn| {
+                attestation_owned = false;
+                const queued = try queueFn(self.node, data.beacon_block_root, .{
+                    .source = metadata.source,
+                    .message_id = metadata.message_id,
+                    .attestation = attestation,
+                    .attestation_data_root = attestation_data_root,
+                    .resolved = resolved,
+                    .subnet_id = @intCast(subnet_id),
+                    .seen_timestamp_ns = metadata.seen_timestamp_ns,
+                }, metadata.peer_id);
+                if (queued) return GossipHandlerError.ValidationIgnored;
+                attestation_owned = true;
+            }
+        }
+
         // Phase 2: Import to fork choice + attestation pool.
         // When processor is available, defer BLS to batch verification.
         // Attestations are LIFO-queued and batched for efficient BLS verification.
@@ -741,6 +776,24 @@ pub const GossipHandler = struct {
         };
         var resolved_owned = true;
         defer if (resolved_owned) resolved.deinit(self.allocator);
+
+        if (!chain_state.isKnownBlockRoot(chain_state.ptr, att_data.beacon_block_root)) {
+            if (self.queueUnknownBlockAggregateFn) |queueFn| {
+                aggregate_owned = false;
+                resolved_owned = false;
+                const queued = try queueFn(self.node, att_data.beacon_block_root, .{
+                    .source = metadata.source,
+                    .message_id = metadata.message_id,
+                    .aggregate = signed_aggregate,
+                    .attestation_data_root = attestation_data_root,
+                    .resolved = resolved,
+                    .seen_timestamp_ns = metadata.seen_timestamp_ns,
+                }, metadata.peer_id);
+                if (queued) return GossipHandlerError.ValidationIgnored;
+                aggregate_owned = true;
+                resolved_owned = true;
+            }
+        }
 
         // Phase 2: Import aggregate to fork choice + attestation pool.
         // When processor is available, defer the expensive BLS checks to

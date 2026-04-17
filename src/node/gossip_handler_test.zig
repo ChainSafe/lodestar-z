@@ -30,8 +30,11 @@ const phase0 = consensus_types.phase0;
 
 var g_imported_count: u32 = 0;
 var g_queued_unknown_block_count: u32 = 0;
+var g_queued_unknown_block_attestation_count: u32 = 0;
+var g_queued_unknown_block_aggregate_count: u32 = 0;
 var g_last_unknown_slot: ?u64 = null;
 var g_last_unknown_peer: ?[]const u8 = null;
+var g_last_unknown_root: ?[32]u8 = null;
 
 fn stubImportBlock(_: *anyopaque, prepared: chain_mod.PreparedBlockInput) anyerror!void {
     var owned = prepared;
@@ -45,6 +48,37 @@ fn stubQueueUnknownBlock(_: *anyopaque, block: UnknownParentBlock) anyerror!void
     g_last_unknown_slot = owned.block.beaconBlock().slot();
     g_last_unknown_peer = owned.peer_id;
     owned.block.deinit(testing.allocator);
+}
+
+fn stubQueueUnknownBlockAttestation(
+    _: *anyopaque,
+    block_root: [32]u8,
+    work: processor_mod.work_item.AttestationWork,
+    peer_id: ?[]const u8,
+) anyerror!bool {
+    var owned = work;
+    defer owned.attestation.deinit(testing.allocator);
+    g_queued_unknown_block_attestation_count += 1;
+    g_last_unknown_root = block_root;
+    g_last_unknown_peer = peer_id;
+    return true;
+}
+
+fn stubQueueUnknownBlockAggregate(
+    _: *anyopaque,
+    block_root: [32]u8,
+    work: processor_mod.work_item.AggregateWork,
+    peer_id: ?[]const u8,
+) anyerror!bool {
+    var owned = work;
+    defer {
+        owned.resolved.deinit(testing.allocator);
+        owned.aggregate.deinit(testing.allocator);
+    }
+    g_queued_unknown_block_aggregate_count += 1;
+    g_last_unknown_root = block_root;
+    g_last_unknown_peer = peer_id;
+    return true;
 }
 
 fn stubGetProposerIndex(_: *anyopaque, slot: u64) ?u32 {
@@ -272,6 +306,45 @@ test "GossipHandler: onAttestation decodes and validates" {
     try handler.onAttestation(0, compressed);
 }
 
+test "GossipHandler: onAttestation queues unknown beacon_block_root for replay" {
+    const alloc = testing.allocator;
+    const handler = try makeTestHandler(alloc);
+    defer handler.deinit();
+
+    handler.updateClock(100, 3, 64);
+    handler.updateForkSeq(.electra);
+    handler.queueUnknownBlockAttestationFn = &stubQueueUnknownBlockAttestation;
+    g_queued_unknown_block_attestation_count = 0;
+    g_last_unknown_root = null;
+    g_last_unknown_peer = null;
+
+    var att: consensus_types.electra.SingleAttestation.Type = consensus_types.electra.SingleAttestation.default_value;
+    att.committee_index = 0;
+    att.attester_index = 5;
+    att.data.slot = 96;
+    att.data.target.epoch = 3;
+    att.data.target.root = [_]u8{0xAA} ** 32;
+    att.data.beacon_block_root = [_]u8{0xBC} ** 32;
+
+    var ssz_buf: [consensus_types.electra.SingleAttestation.fixed_size]u8 = undefined;
+    _ = consensus_types.electra.SingleAttestation.serializeIntoBytes(&att, &ssz_buf);
+
+    const compressed = try compressSnappyBlock(alloc, &ssz_buf);
+    defer alloc.free(compressed);
+
+    const result = handler.processGossipMessageWithSubnetAndMetadata(.beacon_attestation, 0, compressed, .{
+        .peer_id = "peer-att",
+    });
+    switch (result) {
+        .ignored => {},
+        else => return error.TestUnexpectedResult,
+    }
+
+    try testing.expectEqual(@as(u32, 1), g_queued_unknown_block_attestation_count);
+    try testing.expectEqual([_]u8{0xBC} ** 32, g_last_unknown_root.?);
+    try testing.expectEqualStrings("peer-att", g_last_unknown_peer.?);
+}
+
 test "GossipHandler: onAttestation rejects stale epoch" {
     const alloc = testing.allocator;
     const handler = try makeTestHandler(alloc);
@@ -490,6 +563,48 @@ test "GossipHandler: onAggregateAndProof validates and accepts" {
     defer alloc.free(compressed);
 
     try handler.onAggregateAndProof(compressed);
+}
+
+test "GossipHandler: onAggregateAndProof queues unknown beacon_block_root for replay" {
+    const alloc = testing.allocator;
+    const handler = try makeTestHandler(alloc);
+    defer handler.deinit();
+
+    handler.updateClock(100, 3, 64);
+    handler.queueUnknownBlockAggregateFn = &stubQueueUnknownBlockAggregate;
+    g_queued_unknown_block_aggregate_count = 0;
+    g_last_unknown_root = null;
+    g_last_unknown_peer = null;
+
+    var signed_agg: phase0.SignedAggregateAndProof.Type = phase0.SignedAggregateAndProof.default_value;
+    signed_agg.message.aggregator_index = 5;
+    signed_agg.message.aggregate.data.slot = 96;
+    signed_agg.message.aggregate.data.target.epoch = 3;
+    signed_agg.message.aggregate.data.target.root = [_]u8{0xAA} ** 32;
+    signed_agg.message.aggregate.data.beacon_block_root = [_]u8{0xCD} ** 32;
+    try signed_agg.message.aggregate.aggregation_bits.data.append(alloc, 0x01);
+    signed_agg.message.aggregate.aggregation_bits.bit_len = 1;
+    defer signed_agg.message.aggregate.aggregation_bits.data.deinit(alloc);
+
+    const ssz_size = phase0.SignedAggregateAndProof.serializedSize(&signed_agg);
+    const ssz_buf = try alloc.alloc(u8, ssz_size);
+    defer alloc.free(ssz_buf);
+    _ = phase0.SignedAggregateAndProof.serializeIntoBytes(&signed_agg, ssz_buf);
+
+    const compressed = try compressSnappyBlock(alloc, ssz_buf);
+    defer alloc.free(compressed);
+
+    const result = handler.processGossipMessageWithSubnetAndMetadata(.beacon_aggregate_and_proof, null, compressed, .{
+        .peer_id = "peer-agg",
+    });
+    switch (result) {
+        .ignored => {},
+        else => return error.TestUnexpectedResult,
+    }
+
+    try testing.expectEqual(@as(u32, 1), g_queued_unknown_block_aggregate_count);
+    try testing.expectEqual([_]u8{0xCD} ** 32, g_last_unknown_root.?);
+    try testing.expectEqualStrings("peer-agg", g_last_unknown_peer.?);
 }
 
 test "GossipHandler: onAggregateAndProof validates electra aggregates" {

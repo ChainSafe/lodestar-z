@@ -108,6 +108,7 @@ const p2p_runtime_mod = @import("p2p_runtime.zig");
 const sync_bridge_mod = @import("sync_bridge.zig");
 const reqresp_callbacks_mod = @import("reqresp_callbacks.zig");
 const gossip_node_callbacks_mod = @import("gossip_node_callbacks.zig");
+const pending_unknown_block_gossip_mod = @import("pending_unknown_block_gossip.zig");
 
 // BeaconProcessor — central priority scheduling loop.
 const processor_mod = @import("processor");
@@ -120,6 +121,8 @@ const AttestationWork = processor_mod.work_item.AttestationWork;
 const AggregateWork = processor_mod.work_item.AggregateWork;
 const ResolvedAggregate = processor_mod.work_item.ResolvedAggregate;
 const ResolvedAttestation = processor_mod.work_item.ResolvedAttestation;
+const PendingUnknownBlockGossipQueue = pending_unknown_block_gossip_mod.Queue;
+const PendingUnknownBlockGossipItem = pending_unknown_block_gossip_mod.PendingItem;
 // Chain import/result types come from chain_mod (src/chain).
 const SyncCallbackCtx = sync_bridge_mod.SyncCallbackCtx;
 
@@ -691,6 +694,10 @@ pub const BeaconNode = struct {
     // Unknown block sync — queues blocks whose parent is not yet known.
     // Initialized eagerly in init(); used by the gossip block import path.
     unknown_block_sync: UnknownBlockSync,
+
+    /// Gossip attestations and aggregates parked behind an unknown
+    /// `beacon_block_root` until that block is imported.
+    pending_unknown_block_gossip: PendingUnknownBlockGossipQueue,
 
     // Unknown chain sync — backwards header chain sync for blocks/roots
     // not in fork choice. Tracks multiple chains of headers backwards
@@ -2641,6 +2648,81 @@ pub const BeaconNode = struct {
     pub fn processPendingChildren(self: *BeaconNode, parent_root: [32]u8) void {
         // Notify unknown block sync — handles recursive resolution internally.
         self.unknown_block_sync.notifyBlockImported(parent_root) catch {};
+        self.releasePendingUnknownBlockGossip(parent_root);
+    }
+
+    pub fn queueUnknownBlockAttestation(
+        self: *BeaconNode,
+        block_root: [32]u8,
+        work: AttestationWork,
+        peer_id: ?[]const u8,
+    ) !bool {
+        const added = try self.pending_unknown_block_gossip.addAttestation(block_root, peer_id, work);
+        if (!added) return false;
+        self.recordBlockImportResult(.gossip, "queued_unknown_parent", 1);
+        return true;
+    }
+
+    pub fn queueUnknownBlockAggregate(
+        self: *BeaconNode,
+        block_root: [32]u8,
+        work: AggregateWork,
+        peer_id: ?[]const u8,
+    ) !bool {
+        const added = try self.pending_unknown_block_gossip.addAggregate(block_root, peer_id, work);
+        if (!added) return false;
+        self.recordBlockImportResult(.gossip, "queued_unknown_parent", 1);
+        return true;
+    }
+
+    pub fn onPendingUnknownBlockFetchAccepted(self: *BeaconNode, block_root: [32]u8) void {
+        self.pending_unknown_block_gossip.onFetchAccepted(block_root);
+    }
+
+    pub fn onPendingUnknownBlockFetchFailed(self: *BeaconNode, block_root: [32]u8, peer_id: ?[]const u8) void {
+        self.pending_unknown_block_gossip.onFetchFailed(block_root, peer_id);
+    }
+
+    pub fn dropPendingUnknownBlock(self: *BeaconNode, block_root: [32]u8) void {
+        self.pending_unknown_block_gossip.dropRoot(block_root);
+    }
+
+    pub fn drivePendingUnknownBlockGossip(self: *BeaconNode) void {
+        const cb_ctx = self.sync_callback_ctx orelse return;
+        self.pending_unknown_block_gossip.tick(.{
+            .ptr = @ptrCast(cb_ctx),
+            .requestBlockByRootFn = &sync_bridge_mod.SyncCallbackCtx.enqueueUnknownBlockGossipRequestFn,
+            .getConnectedPeersFn = &sync_bridge_mod.SyncCallbackCtx.connectedPeerIdsFn,
+        });
+    }
+
+    fn releasePendingUnknownBlockGossip(self: *BeaconNode, block_root: [32]u8) void {
+        var released = pending_unknown_block_gossip_mod.ReleasedItems.empty;
+        defer {
+            for (released.items) |*item| item.deinit(self.allocator);
+            released.deinit(self.allocator);
+        }
+
+        self.pending_unknown_block_gossip.releaseImported(block_root, &released) catch return;
+        for (released.items) |*item| {
+            self.requeuePendingUnknownBlockGossipItem(item.*);
+            item.* = undefined;
+        }
+    }
+
+    fn requeuePendingUnknownBlockGossipItem(self: *BeaconNode, item: PendingUnknownBlockGossipItem) void {
+        if (self.beacon_processor) |bp| {
+            switch (item) {
+                .attestation => |work| bp.ingest(.{ .attestation = work }),
+                .aggregate => |work| bp.ingest(.{ .aggregate = work }),
+            }
+            return;
+        }
+
+        switch (item) {
+            .attestation => |work| handleQueuedAttestation(self, work),
+            .aggregate => |work| handleQueuedAggregate(self, work),
+        }
     }
 
     fn findPendingSyncSegmentIndex(self: *BeaconNode, key: SyncSegmentKey) ?usize {
@@ -4080,37 +4162,7 @@ pub fn processorHandlerCallback(item: WorkItem, context: *anyopaque) void {
         .attestation => |att_work| {
             const started_at_ns = wallNowNs(node.io);
             defer observeGossipProcessorWork(node, .attestation, att_work.seen_timestamp_ns, started_at_ns);
-            // Single attestation (not batched).
-            // BLS verify and import to fork choice.
-            var attestation = att_work.attestation;
-            defer attestation.deinit(node.allocator);
-
-            // BLS signature verification.
-            if (node.gossip_handler) |gh| {
-                if (gh.verifyAttestationSignatureFn) |verifyFn| {
-                    const verify_started_ns = wallNowNs(node.io);
-                    const signature_valid = verifyFn(gh.node, &attestation, &att_work.resolved);
-                    recordGossipBlsVerificationMetrics(
-                        node,
-                        .attestation,
-                        .single,
-                        if (signature_valid) .success else .failure,
-                        1,
-                        null,
-                        elapsedNsBetween(verify_started_ns, wallNowNs(node.io)),
-                    );
-                    if (!signature_valid) {
-                        node_log.debug("single attestation BLS failed at slot {d}", .{attestation.slot()});
-                        return;
-                    }
-                }
-                const importFn = gh.importResolvedAttestationFn orelse return;
-                importFn(gh.node, &attestation, &att_work.resolved) catch |err| {
-                    node_log.debug("processor attestation import failed for slot {d}: {}", .{
-                        attestation.slot(), err,
-                    });
-                };
-            }
+            handleQueuedAttestation(node, att_work);
         },
         .gossip_voluntary_exit => |work| {
             const started_at_ns = wallNowNs(node.io);
@@ -4179,6 +4231,38 @@ pub fn processorHandlerCallback(item: WorkItem, context: *anyopaque) void {
             // Full handler wiring per work type is progressive — add as needed.
             node_log.debug("Processor: dispatched {s}", .{@tagName(wtype)});
         },
+    }
+}
+
+fn handleQueuedAttestation(node: *BeaconNode, work: processor_mod.work_item.AttestationWork) void {
+    var attestation = work.attestation;
+    defer attestation.deinit(node.allocator);
+
+    if (node.gossip_handler) |gh| {
+        if (gh.verifyAttestationSignatureFn) |verifyFn| {
+            const verify_started_ns = wallNowNs(node.io);
+            const signature_valid = verifyFn(gh.node, &attestation, &work.resolved);
+            recordGossipBlsVerificationMetrics(
+                node,
+                .attestation,
+                .single,
+                if (signature_valid) .success else .failure,
+                1,
+                null,
+                elapsedNsBetween(verify_started_ns, wallNowNs(node.io)),
+            );
+            if (!signature_valid) {
+                node_log.debug("single attestation BLS failed at slot {d}", .{attestation.slot()});
+                return;
+            }
+        }
+        const importFn = gh.importResolvedAttestationFn orelse return;
+        importFn(gh.node, &attestation, &work.resolved) catch |err| {
+            node_log.debug("processor attestation import failed for slot {d}: {}", .{
+                attestation.slot(),
+                err,
+            });
+        };
     }
 }
 

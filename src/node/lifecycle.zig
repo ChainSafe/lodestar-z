@@ -21,6 +21,7 @@ const sync_mod = @import("sync");
 const SyncService = sync_mod.SyncService;
 const UnknownBlockSync = sync_mod.UnknownBlockSync;
 const UnknownChainSync = sync_mod.UnknownChainSync;
+const PendingUnknownBlockGossipQueue = @import("pending_unknown_block_gossip.zig").Queue;
 const processor_mod = @import("processor");
 const BeaconProcessor = processor_mod.BeaconProcessor;
 const QueueConfig = processor_mod.QueueConfig;
@@ -179,6 +180,7 @@ pub fn init(allocator: Allocator, io: std.Io, beacon_config: *const BeaconConfig
         .metrics = init_config.metrics,
         .published_proposals = std.AutoHashMap(BeaconNode.PublishedProposalKey, [32]u8).init(allocator),
         .unknown_block_sync = UnknownBlockSync.init(allocator),
+        .pending_unknown_block_gossip = PendingUnknownBlockGossipQueue.init(allocator),
         .unknown_chain_sync = UnknownChainSync.init(allocator),
     };
     owned_pubkey_cache_path = null;
@@ -384,6 +386,7 @@ fn finishBuilder(
         .metrics = self.metrics,
         .published_proposals = std.AutoHashMap(BeaconNode.PublishedProposalKey, [32]u8).init(allocator),
         .unknown_block_sync = UnknownBlockSync.init(allocator),
+        .pending_unknown_block_gossip = PendingUnknownBlockGossipQueue.init(allocator),
         .unknown_chain_sync = UnknownChainSync.init(allocator),
     };
 
@@ -489,6 +492,7 @@ pub fn deinit(self: *BeaconNode) void {
 
     self.published_proposals.deinit();
     self.unknown_block_sync.deinit();
+    self.pending_unknown_block_gossip.deinit();
     self.unknown_chain_sync.deinit();
 
     self.gossip_bls_thread_pool.deinit();

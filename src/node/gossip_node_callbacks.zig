@@ -25,6 +25,8 @@ const preset = @import("preset").preset;
 const constants = @import("constants");
 const ssz = @import("ssz");
 const processor_mod = @import("processor");
+const AggregateWork = processor_mod.work_item.AggregateWork;
+const AttestationWork = processor_mod.work_item.AttestationWork;
 const ResolvedAggregate = processor_mod.work_item.ResolvedAggregate;
 const ResolvedAttestation = processor_mod.work_item.ResolvedAttestation;
 const gossip_handler_mod = @import("gossip_handler.zig");
@@ -70,6 +72,26 @@ pub fn queueUnknownBlockFromGossip(ptr: *anyopaque, block: UnknownParentBlock) a
     };
     prepared.setPeerId(block.peer_id);
     _ = try node.queueOrphanPreparedBlock(prepared, block.peer_id);
+}
+
+pub fn queueUnknownBlockAttestationFromGossip(
+    ptr: *anyopaque,
+    block_root: [32]u8,
+    work: AttestationWork,
+    peer_id: ?[]const u8,
+) anyerror!bool {
+    const node: *BeaconNode = @ptrCast(@alignCast(ptr));
+    return node.queueUnknownBlockAttestation(block_root, work, peer_id);
+}
+
+pub fn queueUnknownBlockAggregateFromGossip(
+    ptr: *anyopaque,
+    block_root: [32]u8,
+    work: AggregateWork,
+    peer_id: ?[]const u8,
+) anyerror!bool {
+    const node: *BeaconNode = @ptrCast(@alignCast(ptr));
+    return node.queueUnknownBlockAggregate(block_root, work, peer_id);
 }
 
 // ---------------------------------------------------------------------------
