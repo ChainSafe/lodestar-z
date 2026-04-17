@@ -13,7 +13,6 @@ const Node = @import("persistent_merkle_tree").Node;
 
 pub fn processSlashings(
     comptime fork: ForkSeq,
-    allocator: std.mem.Allocator,
     epoch_cache: *const EpochCache,
     state: *BeaconState(fork),
     cache: *const EpochTransitionCache,
@@ -44,17 +43,19 @@ pub fn processSlashings(
 
     const penalty_per_effective_balance_increment = @divFloor((adjusted_total_slashing_balance_by_increment * increment), total_balance_by_increment);
 
-    var penalties_by_effective_balance_increment = std.AutoHashMap(u64, u64).init(allocator);
-    defer penalties_by_effective_balance_increment.deinit();
+    // effective_balance_increment is bounded by max effective balance (32 pre-Electra, 2048 post-Electra).
+    const max_effective = comptime if (fork.gte(.electra)) preset.MAX_EFFECTIVE_BALANCE_ELECTRA else preset.MAX_EFFECTIVE_BALANCE;
+    const max_increment = comptime max_effective / EFFECTIVE_BALANCE_INCREMENT + 1;
+    var penalties_by_effective_balance_increment: [max_increment]?u64 = .{null} ** max_increment;
 
     for (cache.indices_to_slash.items) |index| {
         const effective_balance_increment = effective_balance_increments[index];
-        const penalty: u64 = if (penalties_by_effective_balance_increment.get(effective_balance_increment)) |penalty| penalty else blk: {
+        const penalty: u64 = if (penalties_by_effective_balance_increment[effective_balance_increment]) |penalty| penalty else blk: {
             const p = if (comptime fork.gte(.electra))
                 penalty_per_effective_balance_increment * effective_balance_increment
             else
                 @divFloor(effective_balance_increment * adjusted_total_slashing_balance_by_increment, total_balance_by_increment) * increment;
-            try penalties_by_effective_balance_increment.put(effective_balance_increment, p);
+            penalties_by_effective_balance_increment[effective_balance_increment] = p;
             break :blk p;
         };
         if (update_balance) {
@@ -95,7 +96,6 @@ test "processSlashings - sanity" {
 
     _ = try processSlashings(
         .electra,
-        allocator,
         test_state.cached_state.epoch_cache,
         test_state.cached_state.state.castToFork(.electra),
         test_state.epoch_transition_cache,
