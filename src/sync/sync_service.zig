@@ -200,6 +200,8 @@ pub const SyncService = struct {
 
     /// Our local head slot.
     local_head_slot: u64,
+    /// Latest wall-clock slot observed by the runtime.
+    current_slot: u64,
     /// Our local finalized epoch.
     local_finalized_epoch: u64,
     /// Peers that are not behind our current finalized/head view.
@@ -245,6 +247,7 @@ pub const SyncService = struct {
             .unknown_block_sync = UnknownBlockSync.init(allocator),
             .callbacks = callbacks,
             .local_head_slot = local_head_slot,
+            .current_slot = local_head_slot,
             .local_finalized_epoch = local_finalized_epoch,
             .known_peers = std.StringHashMap(KnownPeer).init(allocator),
             .peer_count = 0,
@@ -277,8 +280,14 @@ pub const SyncService = struct {
             self.callbacks.hasBlock(status.head_root),
             status.finalized_epoch,
         );
+        const forced_head_sync_recovery = peer_sync_type == .fully_synced and
+            self.shouldForceHeadSyncRecovery(status.head_slot);
+        const effective_peer_sync_type: PeerSyncType = if (forced_head_sync_recovery)
+            .advanced
+        else
+            peer_sync_type;
 
-        switch (peer_sync_type) {
+        switch (effective_peer_sync_type) {
             .behind => {
                 if (self.known_peers.fetchRemove(peer_id)) |kv| {
                     self.allocator.free(kv.key);
@@ -289,18 +298,18 @@ pub const SyncService = struct {
                 if (self.known_peers.getPtr(peer_id)) |peer_ptr| {
                     peer_ptr.* = .{
                         .head_slot = status.head_slot,
-                        .sync_type = peer_sync_type,
+                        .sync_type = effective_peer_sync_type,
                     };
                 } else {
                     const owned_key = try self.allocator.dupe(u8, peer_id);
                     errdefer self.allocator.free(owned_key);
                     try self.known_peers.put(owned_key, .{
                         .head_slot = status.head_slot,
-                        .sync_type = peer_sync_type,
+                        .sync_type = effective_peer_sync_type,
                     });
                 }
 
-                if (peer_sync_type != .advanced) {
+                if (effective_peer_sync_type != .advanced) {
                     self.range_sync.removePeer(peer_id);
                 }
             },
@@ -322,12 +331,23 @@ pub const SyncService = struct {
                 status.finalized_epoch,
                 earliest_available_slot,
                 sync_distance,
-                @tagName(peer_sync_type),
+                @tagName(effective_peer_sync_type),
                 self.peer_count,
             },
         );
+        if (forced_head_sync_recovery) {
+            scoped_log.debug(
+                "SyncService forcing head-sync recovery: peer={s} local_head={d} peer_head={d} wall_lag={d}",
+                .{
+                    peer_id,
+                    self.local_head_slot,
+                    status.head_slot,
+                    self.stalledHeadSlots(),
+                },
+            );
+        }
 
-        if (peer_sync_type == .advanced) {
+        if (effective_peer_sync_type == .advanced) {
             // Peer is sufficiently ahead — add to range sync.
             scoped_log.debug("SyncService adding peer to range sync: peer={s} distance={d}", .{ peer_id, sync_distance });
             try self.range_sync.addPeer(
@@ -354,9 +374,17 @@ pub const SyncService = struct {
         self.updateMode();
     }
 
+    /// Called on each runtime tick with the latest wall-clock slot.
+    pub fn onClockSlot(self: *SyncService, current_slot: u64) void {
+        if (current_slot <= self.current_slot) return;
+        self.current_slot = current_slot;
+        self.updateMode();
+    }
+
     /// Called when local head advances (block imported).
     pub fn onHeadUpdate(self: *SyncService, head_slot: u64) void {
         self.local_head_slot = head_slot;
+        if (head_slot > self.current_slot) self.current_slot = head_slot;
         self.updateMode();
     }
 
@@ -576,6 +604,12 @@ pub const SyncService = struct {
             return;
         }
 
+        const rs = self.range_sync.getState();
+        if (rs.status != .idle) {
+            self.setMode(.range_sync);
+            return;
+        }
+
         const sync_distance = if (self.best_peer_slot > self.local_head_slot)
             self.best_peer_slot - self.local_head_slot
         else
@@ -586,15 +620,10 @@ pub const SyncService = struct {
             return;
         }
 
-        const rs = self.range_sync.getState();
-        if (rs.status != .idle) {
-            self.setMode(.range_sync);
-        } else {
-            // We still have peers ahead but currently lack an active sync
-            // chain. Treat this as an awaiting-peers / retry state rather than
-            // claiming sync success.
-            self.setMode(.idle);
-        }
+        // We still have peers ahead but currently lack an active sync chain.
+        // Treat this as an awaiting-peers / retry state rather than claiming
+        // sync success.
+        self.setMode(.idle);
     }
 
     fn setMode(self: *SyncService, new_mode: SyncMode) void {
@@ -628,6 +657,15 @@ pub const SyncService = struct {
             scoped_log.info("gossip subscriptions {s}", .{@tagName(new_gossip)});
             self.callbacks.setGossipEnabled(new_gossip == .enabled);
         }
+    }
+
+    fn stalledHeadSlots(self: *const SyncService) u64 {
+        return self.current_slot -| self.local_head_slot;
+    }
+
+    fn shouldForceHeadSyncRecovery(self: *const SyncService, peer_head_slot: u64) bool {
+        return peer_head_slot > self.local_head_slot and
+            self.stalledHeadSlots() >= sync_types.STALLED_HEAD_RECOVERY_SLOTS;
     }
 };
 
@@ -902,4 +940,26 @@ test "SyncService: known remote head is fully synced, not advanced" {
     try std.testing.expectEqual(@as(u64, 0), svc.best_peer_slot);
     try std.testing.expectEqual(SyncMode.synced, svc.mode);
     try std.testing.expectEqual(RangeSyncStatus.idle, svc.range_sync.getState().status);
+}
+
+test "SyncService: stalled head forces recovery sync for modestly ahead peer" {
+    const allocator = std.testing.allocator;
+    var tc = TestSyncServiceCallbacks{};
+    var svc = SyncService.init(allocator, std.testing.io, tc.callbacks(), 100, 10);
+    defer svc.deinit();
+
+    svc.onClockSlot(104);
+
+    try svc.onPeerStatus("p1", .{
+        .fork_digest = .{ 0, 0, 0, 0 },
+        .finalized_root = [_]u8{0} ** 32,
+        .finalized_epoch = 11,
+        .head_root = [_]u8{0xBC} ** 32,
+        .head_slot = 105,
+    }, null);
+
+    try std.testing.expectEqual(@as(usize, 1), svc.peer_count);
+    try std.testing.expectEqual(@as(u64, 105), svc.best_peer_slot);
+    try std.testing.expectEqual(SyncMode.range_sync, svc.mode);
+    try std.testing.expectEqual(RangeSyncStatus.head, svc.range_sync.getState().status);
 }
