@@ -755,6 +755,13 @@ pub const BeaconNode = struct {
         if (self.http_server) |*srv| srv.shutdown(self.io);
     }
 
+    /// Keep the experimental header-only unknown-chain path disabled in the
+    /// live node until it proves more robust than the Lodestar-style orphan
+    /// recovery path that already exists through UnknownBlockSync.
+    pub fn unknownChainSyncEnabled(_: *const BeaconNode) bool {
+        return false;
+    }
+
     /// Low-level unbootstrapped constructor used by tests and bring-up code.
     ///
     /// Production callers should prefer `BeaconNode.Builder`, which only yields
@@ -919,7 +926,10 @@ pub const BeaconNode = struct {
         if (prepared.source == .gossip) {
             const accepted = try self.chainService().acceptPreparedGossipBlock(prepared);
             return switch (accepted) {
-                .pending_block_data => .pending,
+                .pending_block_data => {
+                    self.recordBlockImportResult(.gossip, "pending_block_data", 1);
+                    return .pending;
+                },
                 .ready => |ready| switch (try self.completeReadyIngressDetailed(ready, null, .untracked)) {
                     .ignored => .ignored,
                     .pending, .queued => .pending,
@@ -947,7 +957,6 @@ pub const BeaconNode = struct {
         const planned = self.chainService().planReadyBlockImport(&owned_ready) catch |err| {
             switch (err) {
                 error.ParentUnknown => {
-                    self.recordBlockImportResult(owned_ready.source, "queued_unknown_parent", 1);
                     _ = raw_block_bytes;
                     const peer_id = owned_ready.peerId();
                     const prepared = owned_ready.intoPrepared(self.allocator);
@@ -2067,8 +2076,10 @@ pub const BeaconNode = struct {
         self.observeHeadCatchup(outcome.snapshot.head.slot);
 
         if (result.epoch_transition) {
-            if (outcome.effects.finalized_checkpoint) |finalized| {
-                self.unknown_chain_sync.onFinalized(finalized.slot);
+            if (self.unknownChainSyncEnabled()) {
+                if (outcome.effects.finalized_checkpoint) |finalized| {
+                    self.unknown_chain_sync.onFinalized(finalized.slot);
+                }
             }
             chain_log.info("epoch transition slot={d} finalized_epoch={d} justified_epoch={d}", .{
                 result.slot,
@@ -2124,8 +2135,10 @@ pub const BeaconNode = struct {
         self.updateSyncProgress(outcome.snapshot);
         self.observeHeadCatchup(outcome.snapshot.head.slot);
 
-        if (outcome.effects.finalized_checkpoint) |finalized| {
-            self.unknown_chain_sync.onFinalized(finalized.slot);
+        if (self.unknownChainSyncEnabled()) {
+            if (outcome.effects.finalized_checkpoint) |finalized| {
+                self.unknown_chain_sync.onFinalized(finalized.slot);
+            }
         }
 
         if (log_ctx) |ctx| {
@@ -2576,8 +2589,7 @@ pub const BeaconNode = struct {
 
     /// Queue an orphan block whose parent is not yet known.
     ///
-    /// Stores the parsed block plus canonical metadata in UnknownBlockSync and
-    /// seeds UnknownChainSync with the same root/peer provenance.
+    /// Stores the parsed block plus canonical metadata in UnknownBlockSync.
     pub fn queueOrphanPreparedBlock(
         self: *BeaconNode,
         prepared: chain_mod.PreparedBlockInput,
@@ -2586,32 +2598,24 @@ pub const BeaconNode = struct {
         const effective_peer_id = prepared.peerId() orelse peer_id;
         const slot = prepared.slot();
         const parent_root = prepared.block.beaconBlock().parentRoot().*;
-        const block_root = prepared.block_root;
 
         const added = try self.unknown_block_sync.addPendingBlockWithPeer(prepared, effective_peer_id);
 
         if (added) {
+            self.recordBlockImportResult(switch (prepared.source) {
+                .gossip => .gossip,
+                .range_sync => .range_sync,
+                .unknown_block_sync => .unknown_block_sync,
+                .api => .api,
+                .checkpoint_sync => .checkpoint_sync,
+                .regen => .regen,
+            }, "queued_unknown_parent", 1);
             node_log.debug("Queued orphan block slot={d} parent={s}... ({d} pending)", .{
                 slot,
                 &std.fmt.bytesToHex(parent_root[0..4], .lower),
                 self.unknown_block_sync.pendingCount(),
             });
         }
-
-        // Also feed the unknown chain sync — it tracks the parent root as
-        // an unknown chain and builds backwards to our fork choice.
-        self.unknown_chain_sync.onUnknownBlockInput(
-            slot,
-            block_root,
-            parent_root,
-            effective_peer_id,
-        ) catch {};
-
-        // If the parent root is truly unknown, start a chain for it.
-        self.unknown_chain_sync.onUnknownBlockRoot(
-            parent_root,
-            effective_peer_id,
-        ) catch {};
 
         return added;
     }
@@ -2633,11 +2637,8 @@ pub const BeaconNode = struct {
     }
 
     /// After a block is successfully imported, check if any orphan children
-    /// were waiting on it and try to import them. Also notifies the unknown
-    /// chain sync so it can link any backwards chains.
+    /// were waiting on it and try to import them.
     pub fn processPendingChildren(self: *BeaconNode, parent_root: [32]u8) void {
-        // Notify backwards chain sync — may link a chain.
-        self.unknown_chain_sync.onBlockImported(parent_root);
         // Notify unknown block sync — handles recursive resolution internally.
         self.unknown_block_sync.notifyBlockImported(parent_root) catch {};
     }

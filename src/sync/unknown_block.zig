@@ -12,6 +12,11 @@
 //!
 //! ## Split with unknown_chain/
 //!
+//! The header-only unknown-chain mechanism still exists as an experiment, but
+//! the live beacon node currently disables it and relies on this module for
+//! orphan gossip recovery. That matches Lodestar's current production path
+//! more closely while the experimental header-only flow is re-evaluated.
+//!
 //! There are TWO mechanisms for handling unknown block roots. They serve
 //! distinct use cases and should not be merged:
 //!

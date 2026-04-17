@@ -696,8 +696,10 @@ fn wireBootstrappedNode(self: *BeaconNode) !void {
         break :blk created;
     };
     self.unknown_block_sync.setCallbacks(cb_ctx.unknownBlockCallbacks());
-    self.unknown_chain_sync.setCallbacks(cb_ctx.unknownChainCallbacks());
-    self.unknown_chain_sync.setForkChoice(cb_ctx.unknownChainForkChoiceQuery());
+    if (self.unknownChainSyncEnabled()) {
+        self.unknown_chain_sync.setCallbacks(cb_ctx.unknownChainCallbacks());
+        self.unknown_chain_sync.setForkChoice(cb_ctx.unknownChainForkChoiceQuery());
+    }
 
     const finalized_epoch = self.chainQuery().finalizedCheckpoint().epoch;
 

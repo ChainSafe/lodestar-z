@@ -815,21 +815,9 @@ pub fn processSyncByRootRequests(self: *BeaconNode, io: std.Io, svc: *networking
                 };
             },
             .unknown_chain_header => {
-                const slot = readSignedBlockSlotFromSsz(block_ssz) orelse {
-                    log.warn("processSyncByRoot: failed to read slot for unknown-chain root {x:0>2}{x:0>2}{x:0>2}{x:0>2}...", .{
-                        root[0], root[1], root[2], root[3],
-                    });
-                    continue;
-                };
-                const parent_root = readSignedBlockParentRootFromSsz(block_ssz) orelse {
-                    log.warn("processSyncByRoot: failed to read parent root for unknown-chain root {x:0>2}{x:0>2}{x:0>2}{x:0>2}...", .{
-                        root[0], root[1], root[2], root[3],
-                    });
-                    continue;
-                };
-                self.unknown_chain_sync.onUnknownBlockInput(slot, root, parent_root, peer_id) catch |err| {
-                    log.warn("processSyncByRoot: unknown-chain advance failed: {}", .{err});
-                };
+                log.debug("dropping unknown-chain by-root response while unknown-chain sync is disabled root={x:0>2}{x:0>2}{x:0>2}{x:0>2}...", .{
+                    root[0], root[1], root[2], root[3],
+                });
             },
         }
     }
@@ -1159,8 +1147,7 @@ fn waitTimeout(io: std.Io, timeout: std.Io.Timeout) TimeoutWaitResult {
 }
 
 fn shouldDriveUnknownChainSync(self: *const BeaconNode) bool {
-    if (self.sync_service_inst) |sync_svc| return sync_svc.isSynced();
-    return !self.getSyncStatus().is_syncing;
+    return self.unknownChainSyncEnabled();
 }
 
 fn runDiscoveryMaintenance(self: *BeaconNode) bool {
@@ -1573,7 +1560,7 @@ fn runRealtimeP2pTick(self: *BeaconNode, io: std.Io, svc: *networking.P2pService
     processSyncBatches(self, io, svc);
     processSyncByRootRequests(self, io, svc);
     if (shouldDriveUnknownChainSync(self)) self.unknown_chain_sync.tick();
-    processPendingLinkedChainImports(self, io, svc);
+    if (self.unknownChainSyncEnabled()) processPendingLinkedChainImports(self, io, svc);
 
     // Sync must not wait behind gossip ingress. During range sync gossip is
     // gated anyway, and once synced the next tick still drains gossip promptly.
@@ -3491,7 +3478,7 @@ fn notePeerDisconnected(self: *BeaconNode, pm: *PeerManager, peer_id: []const u8
     pm.onPeerDisconnected(peer_id, now_ms);
     if (self.sync_callback_ctx) |cb_ctx| cb_ctx.notePeerDisconnected(peer_id);
     if (self.sync_service_inst) |sync_svc| sync_svc.onPeerDisconnect(peer_id);
-    self.unknown_chain_sync.onPeerDisconnected(peer_id);
+    if (self.unknownChainSyncEnabled()) self.unknown_chain_sync.onPeerDisconnected(peer_id);
 }
 
 fn containsPeerId(peer_ids: []const []const u8, needle: []const u8) bool {
@@ -3532,8 +3519,10 @@ fn initSyncPipeline(self: *BeaconNode) !void {
         break :blk created;
     };
     self.unknown_block_sync.setCallbacks(cb_ctx.unknownBlockCallbacks());
-    self.unknown_chain_sync.setCallbacks(cb_ctx.unknownChainCallbacks());
-    self.unknown_chain_sync.setForkChoice(cb_ctx.unknownChainForkChoiceQuery());
+    if (self.unknownChainSyncEnabled()) {
+        self.unknown_chain_sync.setCallbacks(cb_ctx.unknownChainCallbacks());
+        self.unknown_chain_sync.setForkChoice(cb_ctx.unknownChainForkChoiceQuery());
+    }
 
     const finalized_epoch = self.chainQuery().finalizedCheckpoint().epoch;
     if (self.sync_service_inst) |sync_svc| {

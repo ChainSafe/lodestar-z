@@ -279,7 +279,7 @@ pub const SimNodeHarness = struct {
             sync_svc.onPeerDisconnect(peer_id);
         }
         if (self.node.sync_callback_ctx) |cb_ctx| cb_ctx.notePeerDisconnected(peer_id);
-        self.node.unknown_chain_sync.onPeerDisconnected(peer_id);
+        if (self.node.unknownChainSyncEnabled()) self.node.unknown_chain_sync.onPeerDisconnected(peer_id);
     }
 
     pub fn driveSyncWithPeers(self: *SimNodeHarness, peers: []const SyncPeer) !bool {
@@ -303,11 +303,13 @@ pub const SimNodeHarness = struct {
             if (self.node.sync_service_inst) |sync_svc| {
                 try sync_svc.tick();
                 self.node.unknown_block_sync.tick();
-                self.node.unknown_chain_sync.tick();
+                if (self.node.unknownChainSyncEnabled()) self.node.unknown_chain_sync.tick();
                 did_work = try self.processPendingSyncRequests(peers, sync_svc) or did_work;
                 did_work = self.node.drivePendingSyncSegments() or did_work;
-                self.node.unknown_chain_sync.tick();
-                did_work = try self.processPendingLinkedChainImports(peers) or did_work;
+                if (self.node.unknownChainSyncEnabled()) self.node.unknown_chain_sync.tick();
+                if (self.node.unknownChainSyncEnabled()) {
+                    did_work = try self.processPendingLinkedChainImports(peers) or did_work;
+                }
             }
 
             if (did_work) {
@@ -388,6 +390,7 @@ pub const SimNodeHarness = struct {
                     };
                 },
                 .unknown_chain_header => {
+                    if (!self.node.unknownChainSyncEnabled()) continue;
                     const slot = readSignedBlockSlotFromSsz(block_bytes) orelse continue;
                     const parent_root = readSignedBlockParentRootFromSsz(block_bytes) orelse continue;
                     self.node.unknown_chain_sync.onUnknownBlockInput(slot, req.root, parent_root, req.peerId()) catch {};

@@ -356,7 +356,9 @@ pub fn handlePeerStatusAtTime(
         };
         break :blk sync_svc.isSynced();
     } else !node.getSyncStatus().is_syncing;
-    if (is_synced) node.unknown_chain_sync.onPeerConnected(peer_id, status.head_root) catch {};
+    if (is_synced and node.unknownChainSyncEnabled()) {
+        node.unknown_chain_sync.onPeerConnected(peer_id, status.head_root) catch {};
+    }
 
     return irrelevance;
 }
