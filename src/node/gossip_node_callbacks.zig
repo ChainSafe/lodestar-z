@@ -19,6 +19,7 @@ const fork_types = @import("fork_types");
 const AnyAttestation = fork_types.AnyAttestation;
 const AnyAttesterSlashing = fork_types.AnyAttesterSlashing;
 const AnyGossipAttestation = fork_types.AnyGossipAttestation;
+const AnyIndexedAttestation = fork_types.AnyIndexedAttestation;
 const AnySignedAggregateAndProof = fork_types.AnySignedAggregateAndProof;
 const AnySignedBeaconBlock = fork_types.AnySignedBeaconBlock;
 const preset = @import("preset").preset;
@@ -42,6 +43,25 @@ const ResolvedAttestationData = struct {
     committee_validator_indices: []const ValidatorIndex,
     signing_root: [32]u8,
     expected_subnet: u8,
+};
+
+const OwnedIndexedAttestation = union(enum) {
+    phase0: types.phase0.IndexedAttestation.Type,
+    electra: types.electra.IndexedAttestation.Type,
+
+    fn asAny(self: *OwnedIndexedAttestation) AnyIndexedAttestation {
+        return switch (self.*) {
+            .phase0 => |*att| .{ .phase0 = att },
+            .electra => |*att| .{ .electra = att },
+        };
+    }
+
+    fn deinit(self: *OwnedIndexedAttestation, allocator: std.mem.Allocator) void {
+        switch (self.*) {
+            .phase0 => |*att| att.attesting_indices.deinit(allocator),
+            .electra => |*att| att.attesting_indices.deinit(allocator),
+        }
+    }
 };
 
 // ---------------------------------------------------------------------------
@@ -117,6 +137,12 @@ pub fn isKnownBlockRoot(ptr: *anyopaque, root: [32]u8) bool {
     return node.chainQuery().isKnownBlockRoot(root);
 }
 
+/// Returns the slot for `root` when it is known in fork choice.
+pub fn getKnownBlockSlot(ptr: *anyopaque, root: [32]u8) ?u64 {
+    const node: *BeaconNode = @ptrCast(@alignCast(ptr));
+    return node.chainQuery().getKnownBlockSlot(root);
+}
+
 /// Returns the total validator count.
 pub fn getValidatorCount(ptr: *anyopaque) u32 {
     const node: *BeaconNode = @ptrCast(@alignCast(ptr));
@@ -190,6 +216,67 @@ fn convertSingleAttestationResolved(
         .data = data,
         .signature = single.signature,
         .committee_bits = committee_bits,
+    };
+}
+
+fn dupAttestingIndices(
+    allocator: std.mem.Allocator,
+    attesting_indices: []const ValidatorIndex,
+) !std.ArrayListUnmanaged(ValidatorIndex) {
+    var indices = try std.ArrayListUnmanaged(ValidatorIndex).initCapacity(allocator, attesting_indices.len);
+    indices.appendSliceAssumeCapacity(attesting_indices);
+    return indices;
+}
+
+fn buildIndexedAttestationFromSingle(
+    allocator: std.mem.Allocator,
+    attestation: *const AnyGossipAttestation,
+    resolved: *const ResolvedAttestation,
+) !OwnedIndexedAttestation {
+    const attesting_indices = try dupAttestingIndices(allocator, &.{resolved.validator_index});
+    errdefer attesting_indices.deinit(allocator);
+
+    return switch (attestation.*) {
+        .phase0 => |att| .{
+            .phase0 = .{
+                .attesting_indices = attesting_indices,
+                .data = att.data,
+                .signature = att.signature,
+            },
+        },
+        .electra_single => |single| .{
+            .electra = .{
+                .attesting_indices = attesting_indices,
+                .data = single.data,
+                .signature = single.signature,
+            },
+        },
+    };
+}
+
+fn buildIndexedAttestationFromAggregate(
+    allocator: std.mem.Allocator,
+    aggregate: *const AnySignedAggregateAndProof,
+    resolved: *const ResolvedAggregate,
+) !OwnedIndexedAttestation {
+    const attesting_indices = try dupAttestingIndices(allocator, resolved.attesting_indices);
+    errdefer attesting_indices.deinit(allocator);
+
+    return switch (aggregate.attestation()) {
+        .phase0 => |att| .{
+            .phase0 = .{
+                .attesting_indices = attesting_indices,
+                .data = att.data,
+                .signature = att.signature,
+            },
+        },
+        .electra => |att| .{
+            .electra = .{
+                .attesting_indices = attesting_indices,
+                .data = att.data,
+                .signature = att.signature,
+            },
+        },
     };
 }
 
@@ -341,14 +428,21 @@ pub fn resolveAttestation(
 pub fn importResolvedAttestation(
     ptr: *anyopaque,
     attestation: *const AnyGossipAttestation,
+    attestation_data_root: *const [32]u8,
     resolved: *const ResolvedAttestation,
 ) anyerror!void {
     const node: *BeaconNode = @ptrCast(@alignCast(ptr));
+    var indexed = try buildIndexedAttestationFromSingle(node.allocator, attestation, resolved);
+    defer indexed.deinit(node.allocator);
+    var any_indexed = indexed.asAny();
+
     switch (attestation.*) {
         .phase0 => |att| {
-            try node.chainService().importAttestation(
+            try node.chainService().importIndexedAttestation(
                 resolved.validator_index,
                 .{ .phase0 = att },
+                &any_indexed,
+                attestation_data_root.*,
             );
         },
         .electra_single => |single| {
@@ -360,9 +454,11 @@ pub fn importResolvedAttestation(
             );
             defer full_att.aggregation_bits.data.deinit(node.allocator);
 
-            try node.chainService().importAttestation(
+            try node.chainService().importIndexedAttestation(
                 resolved.validator_index,
                 .{ .electra = full_att },
+                &any_indexed,
+                attestation_data_root.*,
             );
         },
     }
@@ -375,7 +471,7 @@ pub fn importAttestation(
     var attestation_data_root: [32]u8 = undefined;
     try types.phase0.AttestationData.hashTreeRoot(&attestation.data(), &attestation_data_root);
     const resolved = try resolveAttestation(ptr, attestation, &attestation_data_root);
-    try importResolvedAttestation(ptr, attestation, &resolved);
+    try importResolvedAttestation(ptr, attestation, &attestation_data_root, &resolved);
 }
 
 fn getAttestingIndicesForAnyAttestation(
@@ -508,10 +604,18 @@ pub fn resolveAggregate(
 pub fn importResolvedAggregate(
     ptr: *anyopaque,
     aggregate: *const AnySignedAggregateAndProof,
+    attestation_data_root: *const [32]u8,
     resolved: *const ResolvedAggregate,
 ) anyerror!void {
     const node: *BeaconNode = @ptrCast(@alignCast(ptr));
-    try node.chainService().importAggregate(aggregate.attestation(), resolved.attesting_indices);
+    var indexed = try buildIndexedAttestationFromAggregate(node.allocator, aggregate, resolved);
+    defer indexed.deinit(node.allocator);
+    var any_indexed = indexed.asAny();
+    try node.chainService().importIndexedAggregate(
+        aggregate.attestation(),
+        &any_indexed,
+        attestation_data_root.*,
+    );
 }
 
 pub fn importAggregate(ptr: *anyopaque, aggregate: *const AnySignedAggregateAndProof) anyerror!void {
@@ -520,7 +624,7 @@ pub fn importAggregate(ptr: *anyopaque, aggregate: *const AnySignedAggregateAndP
     try types.phase0.AttestationData.hashTreeRoot(&aggregate.attestation().data(), &attestation_data_root);
     const resolved = try resolveAggregate(ptr, aggregate, &attestation_data_root);
     defer resolved.deinit(node.allocator);
-    try importResolvedAggregate(ptr, aggregate, &resolved);
+    try importResolvedAggregate(ptr, aggregate, &attestation_data_root, &resolved);
 }
 
 pub fn importVoluntaryExit(ptr: *anyopaque, exit: *const types.phase0.SignedVoluntaryExit.Type) anyerror!void {

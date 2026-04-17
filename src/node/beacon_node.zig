@@ -3715,7 +3715,7 @@ fn importAttestationBatchItems(node: *BeaconNode, items: []AttestationWork, batc
         const gh = node.gossip_handler orelse continue;
         const importFn = gh.importResolvedAttestationFn orelse continue;
 
-        importFn(gh.node, &attestation, &item.resolved) catch |err| {
+        importFn(gh.node, &attestation, &item.attestation_data_root, &item.resolved) catch |err| {
             node_log.debug("processor attestation import failed for slot {d}: {}", .{
                 attestation.slot(), err,
             });
@@ -3744,7 +3744,7 @@ fn importAggregateBatchItems(node: *BeaconNode, items: []AggregateWork, batch_va
 
         if (node.gossip_handler) |gh| {
             if (gh.importResolvedAggregateFn) |importFn| {
-                importFn(gh.node, &aggregate, &item.resolved) catch |err| {
+                importFn(gh.node, &aggregate, &item.attestation_data_root, &item.resolved) catch |err| {
                     node_log.debug("processor aggregate import failed at slot {d}: {}", .{
                         aggregate.attestation().slot(),
                         err,
@@ -4258,7 +4258,7 @@ fn handleQueuedAttestation(node: *BeaconNode, work: processor_mod.work_item.Atte
             }
         }
         const importFn = gh.importResolvedAttestationFn orelse return;
-        importFn(gh.node, &attestation, &work.resolved) catch |err| {
+        importFn(gh.node, &attestation, &work.attestation_data_root, &work.resolved) catch |err| {
             node_log.debug("processor attestation import failed for slot {d}: {}", .{
                 attestation.slot(),
                 err,
@@ -4285,7 +4285,7 @@ fn handleQueuedAggregate(node: *BeaconNode, work: processor_mod.work_item.Aggreg
     defer aggregate.deinit(node.allocator);
     defer work.resolved.deinit(node.allocator);
 
-    importFn(gh.node, &aggregate, &work.resolved) catch |err| {
+    importFn(gh.node, &aggregate, &work.attestation_data_root, &work.resolved) catch |err| {
         node_log.debug("processor aggregate import failed for aggregator {d}: {}", .{
             aggregate.aggregatorIndex(), err,
         });
@@ -4472,6 +4472,7 @@ const ProcessorImportTestContext = struct {
     fn importAggregate(
         ptr: *anyopaque,
         aggregate: *const fork_types.AnySignedAggregateAndProof,
+        _: *const [32]u8,
         resolved: *const ResolvedAggregate,
     ) anyerror!void {
         _ = resolved;
@@ -4487,6 +4488,7 @@ const ProcessorImportTestContext = struct {
     fn importAttestation(
         ptr: *anyopaque,
         attestation: *const fork_types.AnyGossipAttestation,
+        _: *const [32]u8,
         resolved: *const ResolvedAttestation,
     ) anyerror!void {
         const ctx: *ProcessorImportTestContext = @ptrCast(@alignCast(ptr));

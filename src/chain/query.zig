@@ -389,6 +389,11 @@ pub const Query = struct {
         return self.chain.hasCanonicalBlock(root);
     }
 
+    pub fn getKnownBlockSlot(self: Query, root: Root) ?Slot {
+        const block = self.chain.forkChoice().getBlockDefaultStatus(root) orelse return null;
+        return block.slot;
+    }
+
     fn checkpointSlot(epoch: Epoch) Slot {
         return epoch * preset.SLOTS_PER_EPOCH;
     }

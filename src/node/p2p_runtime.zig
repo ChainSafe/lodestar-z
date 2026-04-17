@@ -5422,6 +5422,7 @@ fn initGossipHandler(self: *BeaconNode) void {
         &callbacks.getForkSeqForSlot,
         &callbacks.getProposerIndex,
         &callbacks.isKnownBlockRoot,
+        &callbacks.getKnownBlockSlot,
         &callbacks.getValidatorCount,
         &callbacks.resolveAttestation,
         &callbacks.resolveAggregate,

@@ -39,6 +39,7 @@ const KZGCommitment = consensus_types.primitive.KZGCommitment.Type;
 const SignedVoluntaryExit = consensus_types.phase0.SignedVoluntaryExit.Type;
 const ProposerSlashing = consensus_types.phase0.ProposerSlashing.Type;
 const AnyAttesterSlashing = fork_types.AnyAttesterSlashing;
+const AnyIndexedAttestation = fork_types.AnyIndexedAttestation;
 const SignedBLSToExecutionChange = consensus_types.capella.SignedBLSToExecutionChange.Type;
 const SyncCommitteeContribution = consensus_types.altair.SyncCommitteeContribution.Type;
 const Eth1Data = consensus_types.phase0.Eth1Data;
@@ -563,6 +564,21 @@ pub const Service = struct {
         );
     }
 
+    pub fn importIndexedAttestation(
+        self: Service,
+        validator_index: ValidatorIndex,
+        attestation: fork_types.AnyAttestation,
+        indexed_attestation: *const AnyIndexedAttestation,
+        attestation_data_root: Root,
+    ) !void {
+        try self.chain.importIndexedAttestation(
+            validator_index,
+            attestation,
+            indexed_attestation,
+            attestation_data_root,
+        );
+    }
+
     pub fn importAggregate(
         self: Service,
         attestation: fork_types.AnyAttestation,
@@ -584,6 +600,19 @@ pub const Service = struct {
         }
 
         _ = try self.chain.op_pool.agg_attestation_pool.addAny(attestation);
+    }
+
+    pub fn importIndexedAggregate(
+        self: Service,
+        attestation: fork_types.AnyAttestation,
+        indexed_attestation: *const AnyIndexedAttestation,
+        attestation_data_root: Root,
+    ) !void {
+        try self.chain.importIndexedAggregate(
+            attestation,
+            indexed_attestation,
+            attestation_data_root,
+        );
     }
 
     pub fn applyAttestationVote(

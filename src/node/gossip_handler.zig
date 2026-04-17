@@ -147,6 +147,7 @@ pub const GossipHandler = struct {
     importResolvedAttestationFn: ?*const fn (
         ptr: *anyopaque,
         attestation: *const AnyGossipAttestation,
+        attestation_data_root: *const [32]u8,
         resolved: *const ResolvedAttestation,
     ) anyerror!void,
 
@@ -217,6 +218,7 @@ pub const GossipHandler = struct {
     importResolvedAggregateFn: ?*const fn (
         ptr: *anyopaque,
         aggregate: *const AnySignedAggregateAndProof,
+        attestation_data_root: *const [32]u8,
         resolved: *const ResolvedAggregate,
     ) anyerror!void,
 
@@ -256,6 +258,7 @@ pub const GossipHandler = struct {
     getForkSeqForSlot: *const fn (ptr: *anyopaque, slot: u64) ForkSeq,
     getProposerIndex: *const fn (ptr: *anyopaque, slot: u64) ?u32,
     isKnownBlockRoot: *const fn (ptr: *anyopaque, root: [32]u8) bool,
+    getKnownBlockSlot: *const fn (ptr: *anyopaque, root: [32]u8) ?u64,
     getValidatorCount: *const fn (ptr: *anyopaque) u32,
 
     /// Optional metrics pointer — records gossip accept/reject/ignore counts.
@@ -276,6 +279,7 @@ pub const GossipHandler = struct {
         getForkSeqForSlot: *const fn (ptr: *anyopaque, slot: u64) ForkSeq,
         getProposerIndex: *const fn (ptr: *anyopaque, slot: u64) ?u32,
         isKnownBlockRoot: *const fn (ptr: *anyopaque, root: [32]u8) bool,
+        getKnownBlockSlot: *const fn (ptr: *anyopaque, root: [32]u8) ?u64,
         getValidatorCount: *const fn (ptr: *anyopaque) u32,
         resolveAttestationFn: *const fn (
             ptr: *anyopaque,
@@ -327,6 +331,7 @@ pub const GossipHandler = struct {
             .getForkSeqForSlot = getForkSeqForSlot,
             .getProposerIndex = getProposerIndex,
             .isKnownBlockRoot = isKnownBlockRoot,
+            .getKnownBlockSlot = getKnownBlockSlot,
             .getValidatorCount = getValidatorCount,
         };
         return self;
@@ -361,6 +366,7 @@ pub const GossipHandler = struct {
             .ptr = self.node,
             .getProposerIndex = self.getProposerIndex,
             .isKnownBlockRoot = self.isKnownBlockRoot,
+            .getKnownBlockSlot = self.getKnownBlockSlot,
             .getValidatorCount = self.getValidatorCount,
         };
     }
@@ -621,6 +627,7 @@ pub const GossipHandler = struct {
                 data.target.epoch,
                 data.target.root,
                 committee_index,
+                self.current_fork_seq.gte(.gloas),
                 &chain_state,
             )
         else
@@ -700,7 +707,7 @@ pub const GossipHandler = struct {
 
         // Fallback: inline processing.
         if (self.importResolvedAttestationFn) |importFn| {
-            importFn(self.node, &attestation, &resolved) catch |err| {
+            importFn(self.node, &attestation, &attestation_data_root, &resolved) catch |err| {
                 scoped_log.debug("attestation import failed for slot {d}: {}", .{ data.slot, err });
             };
         }
@@ -823,7 +830,7 @@ pub const GossipHandler = struct {
 
         // Fallback: inline processing.
         if (self.importResolvedAggregateFn) |importFn| {
-            importFn(self.node, &signed_aggregate, &resolved) catch |err| {
+            importFn(self.node, &signed_aggregate, &attestation_data_root, &resolved) catch |err| {
                 scoped_log.debug("aggregate import failed for aggregator {d}: {}", .{ signed_aggregate.aggregatorIndex(), err });
             };
             return;

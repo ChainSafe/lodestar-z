@@ -22,6 +22,7 @@ const log = std.log.scoped(.chain);
 const consensus_types = @import("consensus_types");
 const preset = @import("preset").preset;
 const fork_types = @import("fork_types");
+const AnyIndexedAttestation = fork_types.AnyIndexedAttestation;
 const config_mod = @import("config");
 const BeaconConfig = config_mod.BeaconConfig;
 const state_transition = @import("state_transition");
@@ -459,6 +460,19 @@ pub const Chain = struct {
             attestation_slot,
             beacon_block_root,
             target_epoch,
+        );
+    }
+
+    pub fn applyIndexedAttestationVote(
+        self: *Chain,
+        indexed_attestation: *const AnyIndexedAttestation,
+        attestation_data_root: [32]u8,
+    ) !void {
+        try self.forkChoice().onAttestation(
+            self.allocator,
+            indexed_attestation,
+            attestation_data_root,
+            false,
         );
     }
 
@@ -1026,6 +1040,65 @@ pub const Chain = struct {
                 },
             });
         }
+    }
+
+    pub fn importIndexedAttestation(
+        self: *Chain,
+        validator_index: u64,
+        attestation: fork_types.AnyAttestation,
+        indexed_attestation: *const AnyIndexedAttestation,
+        attestation_data_root: [32]u8,
+    ) !void {
+        const data = attestation.data();
+        if (self.seen_attesters.isKnown(data.target.epoch, validator_index)) {
+            return error.AttestationAlreadyKnown;
+        }
+
+        self.applyIndexedAttestationVote(indexed_attestation, attestation_data_root) catch |err| {
+            log.warn("FC onAttestation failed validator_index={d} slot={d}: {}", .{ validator_index, data.slot, err });
+        };
+
+        try self.op_pool.attestation_pool.addAny(attestation);
+        self.seen_attesters.add(data.target.epoch, validator_index) catch |err| switch (err) {
+            error.EpochTooLow => {},
+            else => return err,
+        };
+
+        if (self.notification_sink) |sink| {
+            var aggregation_bits = [_]u8{0} ** 8;
+            const aggregation_bits_bytes = attestation.aggregationBitsBytes();
+            const copy_len = @min(aggregation_bits.len, aggregation_bits_bytes.len);
+            @memcpy(aggregation_bits[0..copy_len], aggregation_bits_bytes[0..copy_len]);
+
+            sink.publish(.{
+                .attestation = .{
+                    .aggregation_bits = aggregation_bits,
+                    .slot = data.slot,
+                    .committee_index = attestation.committeeIndex(),
+                    .beacon_block_root = data.beacon_block_root,
+                    .source_epoch = data.source.epoch,
+                    .source_root = data.source.root,
+                    .target_epoch = data.target.epoch,
+                    .target_root = data.target.root,
+                    .signature = attestation.signature(),
+                },
+            });
+        }
+    }
+
+    pub fn importIndexedAggregate(
+        self: *Chain,
+        attestation: fork_types.AnyAttestation,
+        indexed_attestation: *const AnyIndexedAttestation,
+        attestation_data_root: [32]u8,
+    ) !void {
+        const data = attestation.data();
+
+        self.applyIndexedAttestationVote(indexed_attestation, attestation_data_root) catch |err| {
+            log.debug("FC onAggregate failed slot={d}: {}", .{ data.slot, err });
+        };
+
+        _ = try self.op_pool.agg_attestation_pool.addAny(attestation);
     }
 
     // -----------------------------------------------------------------------

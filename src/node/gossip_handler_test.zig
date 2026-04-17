@@ -97,6 +97,11 @@ fn stubIsKnownBlockRootFalse(_: *anyopaque, _: [32]u8) bool {
     return false;
 }
 
+fn stubGetKnownBlockSlot(_: *anyopaque, root: [32]u8) ?u64 {
+    if (std.mem.eql(u8, &root, &([_]u8{0} ** 32))) return null;
+    return 95;
+}
+
 fn stubGetValidatorCount(_: *anyopaque) u32 {
     return 1000;
 }
@@ -152,6 +157,7 @@ fn makeTestHandler(allocator: Allocator) !*GossipHandler {
         &stubGetForkSeqForSlot,
         &stubGetProposerIndex,
         &stubIsKnownBlockRoot,
+        &stubGetKnownBlockSlot,
         &stubGetValidatorCount,
         &stubResolveAttestation,
         &stubResolveAggregate,

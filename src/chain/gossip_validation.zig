@@ -67,6 +67,8 @@ pub const ChainState = struct {
     getProposerIndex: *const fn (ptr: *anyopaque, slot: u64) ?u32,
     /// Returns true if `root` is a known block in our fork choice.
     isKnownBlockRoot: *const fn (ptr: *anyopaque, root: [32]u8) bool,
+    /// Returns the slot for `root` if it is known in fork choice.
+    getKnownBlockSlot: *const fn (ptr: *anyopaque, root: [32]u8) ?u64,
     /// Returns the total validator count for bounds checking.
     getValidatorCount: *const fn (ptr: *anyopaque) u32,
 };
@@ -186,9 +188,11 @@ pub fn validateGossipAttestation(
 /// Checks (spec reference: electra/p2p-interface.md#beacon_attestation_subnet_id):
 /// 1. [IGNORE] Attestation slot is within propagation range (current/previous epoch).
 /// 2. [REJECT] Attestation epoch matches the target epoch.
-/// 3. [REJECT] `attestation.data.index == 0`.
-/// 4. [REJECT] `attestation.committee_index` is in bounds.
-/// 5. [IGNORE] Target block root is known.
+/// 3. [REJECT] Pre-Gloas: `attestation.data.index == 0`.
+/// 4. [REJECT] Post-Gloas: `attestation.data.index < 2`, and
+///    `attestation.data.index == 0` if `block.slot == attestation.slot`.
+/// 5. [REJECT] `attestation.committee_index` is in bounds.
+/// 6. [IGNORE] Target block root is known.
 ///
 /// Membership of `attester_index` in the resolved committee is checked later,
 /// once committee data has been loaded from the epoch cache.
@@ -198,6 +202,7 @@ pub fn validateGossipElectraAttestation(
     target_epoch: u64,
     target_root: [32]u8,
     committee_index: u64,
+    is_post_gloas: bool,
     state: *const ChainState,
 ) GossipAction {
     const attestation_epoch = attestation_slot / preset.SLOTS_PER_EPOCH;
@@ -210,14 +215,22 @@ pub fn validateGossipElectraAttestation(
     // [REJECT] Attestation epoch must match the target epoch.
     if (attestation_epoch != target_epoch) return .reject;
 
-    // [REJECT] data.index must be 0 in Electra.
-    if (data_index != 0) return .reject;
+    if (is_post_gloas) {
+        // [REJECT] Post-Gloas data.index must encode EMPTY or FULL only.
+        if (data_index >= 2) return .reject;
+    } else {
+        // [REJECT] Pre-Gloas data.index must always be 0.
+        if (data_index != 0) return .reject;
+    }
 
     // [REJECT] Committee index must be in bounds.
     if (committee_index >= preset.MAX_COMMITTEES_PER_SLOT) return .reject;
 
-    // [IGNORE] Target block root must be known.
-    if (!state.isKnownBlockRoot(state.ptr, target_root)) return .ignore;
+    const block_slot = state.getKnownBlockSlot(state.ptr, target_root) orelse return .ignore;
+
+    if (is_post_gloas and block_slot == attestation_slot and data_index != 0) {
+        return .reject;
+    }
 
     return .accept;
 }
@@ -280,6 +293,11 @@ fn mockIsKnownBlockRoot(_: *anyopaque, root: [32]u8) bool {
     return !std.mem.eql(u8, &root, &([_]u8{0} ** 32));
 }
 
+fn mockGetKnownBlockSlot(_: *anyopaque, root: [32]u8) ?u64 {
+    if (std.mem.eql(u8, &root, &([_]u8{0} ** 32))) return null;
+    return if (root[0] == 0xBB) 96 else 95;
+}
+
 fn mockGetValidatorCount(_: *anyopaque) u32 {
     return 1000;
 }
@@ -293,6 +311,7 @@ fn makeMockChainState(seen_cache: *SeenCache) ChainState {
         .ptr = &mock_dummy_ctx,
         .getProposerIndex = &mockGetProposerIndex,
         .isKnownBlockRoot = &mockIsKnownBlockRoot,
+        .getKnownBlockSlot = &mockGetKnownBlockSlot,
         .getValidatorCount = &mockGetValidatorCount,
     };
 }
@@ -1076,7 +1095,7 @@ test "gossip electra attestation: accept valid attestation" {
     defer cache.deinit();
     const state = makeMockChainState(&cache);
     // Slot 96 = epoch 3 (current), data.index=0, committee_index=2
-    const result = validateGossipElectraAttestation(96, 0, 3, [_]u8{0xAA} ** 32, 2, &state);
+    const result = validateGossipElectraAttestation(96, 0, 3, [_]u8{0xAA} ** 32, 2, false, &state);
     try testing.expectEqual(GossipAction.accept, result);
 }
 
@@ -1084,7 +1103,7 @@ test "gossip electra attestation: reject nonzero data.index" {
     var cache = SeenCache.init(testing.allocator);
     defer cache.deinit();
     const state = makeMockChainState(&cache);
-    const result = validateGossipElectraAttestation(96, 1, 3, [_]u8{0xAA} ** 32, 0, &state);
+    const result = validateGossipElectraAttestation(96, 1, 3, [_]u8{0xAA} ** 32, 0, false, &state);
     try testing.expectEqual(GossipAction.reject, result);
 }
 
@@ -1092,7 +1111,7 @@ test "gossip electra attestation: reject committee index out of bounds" {
     var cache = SeenCache.init(testing.allocator);
     defer cache.deinit();
     const state = makeMockChainState(&cache);
-    const result = validateGossipElectraAttestation(96, 0, 3, [_]u8{0xAA} ** 32, preset.MAX_COMMITTEES_PER_SLOT, &state);
+    const result = validateGossipElectraAttestation(96, 0, 3, [_]u8{0xAA} ** 32, preset.MAX_COMMITTEES_PER_SLOT, false, &state);
     try testing.expectEqual(GossipAction.reject, result);
 }
 
@@ -1100,8 +1119,32 @@ test "gossip electra attestation: ignore unknown target root" {
     var cache = SeenCache.init(testing.allocator);
     defer cache.deinit();
     const state = makeMockChainState(&cache);
-    const result = validateGossipElectraAttestation(96, 0, 3, [_]u8{0} ** 32, 0, &state);
+    const result = validateGossipElectraAttestation(96, 0, 3, [_]u8{0} ** 32, 0, false, &state);
     try testing.expectEqual(GossipAction.ignore, result);
+}
+
+test "gossip gloas attestation: accept payload-present vote for prior-slot block" {
+    var cache = SeenCache.init(testing.allocator);
+    defer cache.deinit();
+    const state = makeMockChainState(&cache);
+    const result = validateGossipElectraAttestation(96, 1, 3, [_]u8{0xAA} ** 32, 2, true, &state);
+    try testing.expectEqual(GossipAction.accept, result);
+}
+
+test "gossip gloas attestation: reject premature payload-present vote for same-slot block" {
+    var cache = SeenCache.init(testing.allocator);
+    defer cache.deinit();
+    const state = makeMockChainState(&cache);
+    const result = validateGossipElectraAttestation(96, 1, 3, [_]u8{0xBB} ** 32, 2, true, &state);
+    try testing.expectEqual(GossipAction.reject, result);
+}
+
+test "gossip gloas attestation: reject payload status values above full" {
+    var cache = SeenCache.init(testing.allocator);
+    defer cache.deinit();
+    const state = makeMockChainState(&cache);
+    const result = validateGossipElectraAttestation(96, 2, 3, [_]u8{0xAA} ** 32, 2, true, &state);
+    try testing.expectEqual(GossipAction.reject, result);
 }
 
 test "gossip electra aggregate: accept valid aggregate" {
