@@ -1382,10 +1382,13 @@ pub const Chain = struct {
                 const self_: *const Chain = @ptrCast(@alignCast(_ptr));
                 return self_.hasCanonicalBlock(root) or self_.block_to_state.contains(root);
             }
-            fn getKnownBlockSlot(_ptr: *anyopaque, root: [32]u8) ?u64 {
+            fn getKnownBlockInfo(_ptr: *anyopaque, root: [32]u8) ?gossip_validation_mod.ChainState.KnownBlockInfo {
                 const self_: *const Chain = @ptrCast(@alignCast(_ptr));
                 const block = self_.forkChoice().getBlockDefaultStatus(root) orelse return null;
-                return block.slot;
+                return .{
+                    .slot = block.slot,
+                    .target_root = block.target_root,
+                };
             }
             /// Returns the total validator count from the head state's epoch cache.
             /// Returns 0 if head state is unavailable (gossip validator skips bounds check).
@@ -1405,7 +1408,7 @@ pub const Chain = struct {
             .seen_cache = self.seen_cache,
             .getProposerIndex = Callbacks.getProposerIndex,
             .isKnownBlockRoot = Callbacks.isKnownBlockRoot,
-            .getKnownBlockSlot = Callbacks.getKnownBlockSlot,
+            .getKnownBlockInfo = Callbacks.getKnownBlockInfo,
             .getValidatorCount = Callbacks.getValidatorCount,
         };
     }
