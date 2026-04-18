@@ -173,7 +173,6 @@ fn elapsedSince(io: std.Io, started_at_ns: u64) u64 {
 
 const PeerReqRespJobKind = union(enum) {
     status_only,
-    full_handshake,
     restatus,
     ping: struct {
         known_metadata_seq: u64,
@@ -191,24 +190,17 @@ const OutboundHandshakeMode = enum {
 };
 
 const StatusReqRespPolicy = struct {
-    request_metadata: bool,
     disconnect_peer_on_failure: bool,
 };
 
 fn statusReqRespPolicy(kind: PeerReqRespJobKind) StatusReqRespPolicy {
     return switch (kind) {
         .status_only => .{
-            .request_metadata = false,
             // Align with Lodestar's peer manager: a failed outbound STATUS
             // request is not, by itself, grounds to evict the peer.
             .disconnect_peer_on_failure = false,
         },
-        .full_handshake => .{
-            .request_metadata = true,
-            .disconnect_peer_on_failure = false,
-        },
         .restatus => .{
-            .request_metadata = false,
             .disconnect_peer_on_failure = false,
         },
         .ping => unreachable,
@@ -221,7 +213,6 @@ fn statusReqRespFollowUpPing(kind: PeerReqRespJobKind) bool {
         // We preserve our single in-flight req/resp invariant by issuing the
         // initial PING as soon as the first STATUS response proves the peer is usable.
         .status_only => true,
-        .full_handshake,
         .restatus,
         .ping,
         => false,
@@ -461,19 +452,12 @@ test "discovery peer id helpers derive node id from inline secp256k1 peer id" {
 
 test "status req/resp policy tolerates status transport failures" {
     const status_only = statusReqRespPolicy(.status_only);
-    try std.testing.expect(!status_only.request_metadata);
     try std.testing.expect(!status_only.disconnect_peer_on_failure);
 
-    const full_handshake = statusReqRespPolicy(.full_handshake);
-    try std.testing.expect(full_handshake.request_metadata);
-    try std.testing.expect(!full_handshake.disconnect_peer_on_failure);
-
     const restatus = statusReqRespPolicy(.restatus);
-    try std.testing.expect(!restatus.request_metadata);
     try std.testing.expect(!restatus.disconnect_peer_on_failure);
 
     try std.testing.expect(statusReqRespFollowUpPing(.status_only));
-    try std.testing.expect(!statusReqRespFollowUpPing(.full_handshake));
     try std.testing.expect(!statusReqRespFollowUpPing(.restatus));
     try std.testing.expect(!statusReqRespFollowUpPing(.{ .ping = .{ .known_metadata_seq = 0 } }));
 }
@@ -1558,8 +1542,8 @@ fn runPeerManagerMaintenance(self: *BeaconNode, io: std.Io, svc: *networking.P2p
 
     for (actions.peers_to_restatus) |peer_id| {
         const peer = pm.getPeer(peer_id) orelse continue;
-        if (peer.last_status_exchange_ms == 0 or peerNeedsMetadata(peer)) {
-            did_work = schedulePeerReqResp(self, io, svc, peer_id, .full_handshake) or did_work;
+        if (peer.last_status_exchange_ms == 0) {
+            did_work = schedulePeerReqResp(self, io, svc, peer_id, .status_only) or did_work;
             continue;
         }
 
@@ -1645,8 +1629,8 @@ fn processPendingSyncStatusRefreshes(
         const peer_id = pending.peerId();
         if (self.peer_manager) |pm| {
             if (pm.getPeer(peer_id)) |peer| {
-                if (peer.last_status_exchange_ms == 0 or peerNeedsMetadata(peer)) {
-                    did_work = schedulePeerReqResp(self, io, svc, peer_id, .full_handshake) or did_work;
+                if (peer.last_status_exchange_ms == 0) {
+                    did_work = schedulePeerReqResp(self, io, svc, peer_id, .status_only) or did_work;
                     continue;
                 }
             }
@@ -3031,7 +3015,7 @@ fn peerReqRespTask(
     job: PeerReqRespJob,
 ) void {
     switch (job.kind) {
-        .status_only, .full_handshake, .restatus => {
+        .status_only, .restatus => {
             const policy = statusReqRespPolicy(job.kind);
             const peer_status = sendStatus(self, io, svc, job.peer_id) catch |err| {
                 enqueuePeerReqRespCompletion(
@@ -3042,20 +3026,11 @@ fn peerReqRespTask(
                 return;
             };
 
-            var metadata: ?beacon_node_mod.PeerReqRespMetadata = null;
-            if (policy.request_metadata) {
-                if (requestPeerMetadataWithTimeout(self, io, svc, job.peer_id, optional_reqresp_timeout_ms)) |peer_metadata| {
-                    metadata = peerReqRespMetadataCompletion(peer_metadata);
-                } else |err| {
-                    log.debug("Peer metadata unavailable for {s}: {}; continuing handshake", .{ job.peer_id, err });
-                }
-            }
-
             enqueuePeerReqRespCompletion(self, io, .{ .status = .{
                 .peer_id = job.peer_id,
                 .status = peer_status.status,
                 .earliest_available_slot = peer_status.earliest_available_slot,
-                .metadata = metadata,
+                .metadata = null,
                 .follow_up_ping = statusReqRespFollowUpPing(job.kind),
             } });
         },
@@ -3112,7 +3087,7 @@ fn schedulePeerReqResp(
     };
 
     if (self.peer_manager) |pm| switch (kind) {
-        .status_only, .full_handshake, .restatus => pm.markStatusAttempt(peer_id, currentUnixTimeMs(io)),
+        .status_only, .restatus => pm.markStatusAttempt(peer_id, currentUnixTimeMs(io)),
         .ping => {},
     };
 

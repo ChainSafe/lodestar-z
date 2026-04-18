@@ -23,6 +23,7 @@ const Allocator = std.mem.Allocator;
 const consensus_types = @import("consensus_types");
 const fork_types = @import("fork_types");
 const config_mod = @import("config");
+const ssz = @import("ssz");
 const ForkSeq = config_mod.ForkSeq;
 const state_transition = @import("state_transition");
 const regen_mod = @import("../regen/root.zig");
@@ -122,6 +123,7 @@ pub fn executeStateTransition(
 
     // Run processBlock — the core of the consensus state transition.
     // This is fork-polymorphic: dispatches based on the state's fork.
+    var process_block_timer = post_state.metrics.startTimer();
     switch (post_state.state.forkSeq()) {
         inline else => |f| {
             switch (block.blockType()) {
@@ -153,6 +155,7 @@ pub fn executeStateTransition(
             }
         },
     }
+    post_state.metrics.process_block.observe(process_block_timer.readSeconds());
 
     // Batch-verify all collected signatures.
     if (verify_signatures and batch.len() > 0) {
@@ -161,8 +164,10 @@ pub fn executeStateTransition(
 
     // Commit state changes and compute state root.
     post_state.state.commit() catch return BlockImportError.StateTransitionFailed;
+    var hash_tree_root_timer = post_state.metrics.startTimer();
     const state_root = (post_state.state.hashTreeRoot() catch
         return BlockImportError.StateTransitionFailed).*;
+    post_state.metrics.state_hash_tree_root.observe(.{ .source = .block_transition }, hash_tree_root_timer.readSeconds()) catch {};
 
     // Verify state root matches block's commitment.
     // Skip verification if:
@@ -234,4 +239,132 @@ test "StfResult struct layout" {
         .proposer_balance_delta = 0,
     };
     try std.testing.expectEqual(@as(i64, 0), result.proposer_balance_delta);
+}
+
+const RegenRuntimeFixture = @import("../regen/test_fixture.zig").RegenRuntimeFixture;
+const preset = @import("preset").active_preset;
+const Slot = consensus_types.primitive.Slot.Type;
+
+fn createTestSignedBlock(
+    allocator: Allocator,
+    cached_state: *CachedBeaconState,
+    target_slot: Slot,
+) !*consensus_types.electra.SignedBeaconBlock.Type {
+    const state = cached_state.state;
+    const epoch_cache = cached_state.epoch_cache;
+
+    const proposer_index = epoch_cache.getBeaconProposer(target_slot) catch 0;
+    var latest_header = try state.latestBlockHeader();
+    const parent_root = try latest_header.hashTreeRoot();
+
+    const genesis_time = try state.genesisTime();
+    const seconds_per_slot = cached_state.config.chain.SECONDS_PER_SLOT;
+    const expected_timestamp = genesis_time + target_slot * seconds_per_slot;
+
+    var execution_payload = consensus_types.electra.ExecutionPayload.default_value;
+    execution_payload.timestamp = expected_timestamp;
+    const latest_block_hash = state.latestExecutionPayloadHeaderBlockHash() catch &([_]u8{0} ** 32);
+    execution_payload.parent_hash = latest_block_hash.*;
+
+    const current_epoch = state_transition.computeEpochAtSlot(target_slot);
+    const randao_mix = try state_transition.getRandaoMix(
+        .electra,
+        state.castToFork(.electra),
+        current_epoch,
+    );
+    execution_payload.prev_randao = randao_mix.*;
+
+    const signed_block = try allocator.create(consensus_types.electra.SignedBeaconBlock.Type);
+    errdefer allocator.destroy(signed_block);
+
+    signed_block.* = .{
+        .message = .{
+            .slot = target_slot,
+            .proposer_index = proposer_index,
+            .parent_root = parent_root.*,
+            .state_root = [_]u8{0} ** 32,
+            .body = .{
+                .randao_reveal = [_]u8{0} ** 96,
+                .eth1_data = consensus_types.phase0.Eth1Data.default_value,
+                .graffiti = [_]u8{0} ** 32,
+                .proposer_slashings = consensus_types.phase0.ProposerSlashings.default_value,
+                .attester_slashings = consensus_types.phase0.AttesterSlashings.default_value,
+                .attestations = consensus_types.electra.Attestations.default_value,
+                .deposits = consensus_types.phase0.Deposits.default_value,
+                .voluntary_exits = consensus_types.phase0.VoluntaryExits.default_value,
+                .sync_aggregate = .{
+                    .sync_committee_bits = ssz.BitVectorType(preset.SYNC_COMMITTEE_SIZE).default_value,
+                    .sync_committee_signature = consensus_types.primitive.BLSSignature.default_value,
+                },
+                .execution_payload = execution_payload,
+                .bls_to_execution_changes = consensus_types.capella.SignedBLSToExecutionChanges.default_value,
+                .blob_kzg_commitments = consensus_types.electra.BlobKzgCommitments.default_value,
+                .execution_requests = consensus_types.electra.ExecutionRequests.default_value,
+            },
+        },
+        .signature = consensus_types.primitive.BLSSignature.default_value,
+    };
+
+    return signed_block;
+}
+
+test "executeStateTransition records process block and post-state root metrics" {
+    const allocator = std.testing.allocator;
+    defer state_transition.deinitStateTransition();
+
+    var fixture = try RegenRuntimeFixture.init(allocator, 64);
+    defer fixture.deinit();
+
+    var st_metrics = try state_transition.metrics.StateTransitionMetrics.init(allocator, std.testing.io, .{});
+    defer st_metrics.deinit();
+
+    fixture.published_state.metrics = &st_metrics;
+    fixture.shared_state_graph.state_transition_metrics = &st_metrics;
+
+    const parent_state_root = try fixture.seedHeadState();
+    const pre_state = fixture.block_cache.get(parent_state_root).?;
+
+    const parent_slot = try fixture.published_state.state.slot();
+    const target_slot = parent_slot + 1;
+
+    var generation_state = try fixture.clonePublishedState();
+    defer {
+        generation_state.deinit();
+        allocator.destroy(generation_state);
+    }
+    generation_state.metrics = &st_metrics;
+    try state_transition.processSlots(allocator, generation_state, target_slot, .{});
+
+    const signed_block = try createTestSignedBlock(allocator, generation_state, target_slot);
+    defer allocator.destroy(signed_block);
+
+    const stf_result = try executeStateTransition(
+        allocator,
+        std.testing.io,
+        .{
+            .block = .{ .full_electra = signed_block },
+            .source = .gossip,
+            .da_status = .available,
+        },
+        pre_state,
+        .available,
+        .{
+            .skip_future_slot = true,
+            .skip_signatures = true,
+        },
+        null,
+        fixture.shared_state_graph.gate,
+        null,
+    );
+    defer {
+        stf_result.post_state.deinit();
+        allocator.destroy(stf_result.post_state);
+    }
+
+    var buf = std.ArrayList(u8).init(allocator);
+    defer buf.deinit();
+    try st_metrics.write(buf.writer());
+
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "lodestar_stfn_process_block_seconds_count 1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "lodestar_stfn_hash_tree_root_seconds_sum{source=\"block_transition\"}") != null);
 }

@@ -143,6 +143,13 @@ pub fn gossipFailureAction(reason: GossipRejectReason) PeerAction {
 /// warrant a further score penalty. Unsupported protocol negotiation should
 /// be treated differently from generic I/O failure.
 pub fn reqRespFailureAction(protocol_ctx: ReqRespProtocol, err: anyerror) ?PeerAction {
+    switch (protocol_ctx) {
+        // Match Lodestar's current peer-manager behavior: outbound maintenance
+        // failures on these protocols are best-effort noise, not score input.
+        .ping, .status, .metadata => return null,
+        else => {},
+    }
+
     return switch (err) {
         error.PeerNotConnected,
         error.RequestSelfRateLimited,
@@ -217,15 +224,15 @@ test "ReqRespProtocol timeoutSeverity follows maintenance severity policy" {
 }
 
 test "reqRespFailureAction distinguishes unsupported protocol and disconnected peer" {
-    try testing.expectEqual(@as(?PeerAction, .fatal), reqRespFailureAction(.ping, error.NoSupportedProtocols));
+    try testing.expectEqual(@as(?PeerAction, null), reqRespFailureAction(.ping, error.NoSupportedProtocols));
     try testing.expectEqual(@as(?PeerAction, null), reqRespFailureAction(.ping, error.PeerNotConnected));
     try testing.expectEqual(@as(?PeerAction, null), reqRespFailureAction(.ping, error.RequestSelfRateLimited));
     try testing.expectEqual(@as(?PeerAction, .mid_tolerance), reqRespFailureAction(.beacon_blocks_by_root, error.ConnectionResetByPeer));
 }
 
 test "reqRespFailureAction maps explicit response codes and malformed data" {
-    try testing.expectEqual(@as(?PeerAction, .low_tolerance), reqRespFailureAction(.status, error.InvalidRequestResponse));
-    try testing.expectEqual(@as(?PeerAction, .mid_tolerance), reqRespFailureAction(.metadata, error.ServerErrorResponse));
+    try testing.expectEqual(@as(?PeerAction, null), reqRespFailureAction(.status, error.InvalidRequestResponse));
+    try testing.expectEqual(@as(?PeerAction, null), reqRespFailureAction(.metadata, error.ServerErrorResponse));
     try testing.expectEqual(@as(?PeerAction, .high_tolerance), reqRespFailureAction(.beacon_blocks_by_root, error.ResourceUnavailableResponse));
     try testing.expectEqual(@as(?PeerAction, .low_tolerance), reqRespFailureAction(.beacon_blocks_by_range, error.MalformedBlockBytes));
     try testing.expectEqual(@as(?PeerAction, .low_tolerance), reqRespFailureAction(.beacon_blocks_by_range, error.ParentRootMismatch));
