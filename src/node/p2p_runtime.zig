@@ -2023,15 +2023,40 @@ fn updateProcessorMetrics(self: *BeaconNode) void {
     const previous = self.last_processor_metrics_snapshot;
 
     metrics.processor_queue_depth.set(.{ .queue = "total" }, snapshot.queue_depths.total) catch {};
+    metrics.processor_queue_depth.set(.{ .queue = "gossip_block_ingress" }, snapshot.queue_depths.gossip_block_ingress) catch {};
+    metrics.processor_queue_depth.set(.{ .queue = "gossip_blob_ingress" }, snapshot.queue_depths.gossip_blob_ingress) catch {};
+    metrics.processor_queue_depth.set(.{ .queue = "gossip_data_column_ingress" }, snapshot.queue_depths.gossip_data_column_ingress) catch {};
+    metrics.processor_queue_depth.set(.{ .queue = "gossip_attestation_ingress" }, snapshot.queue_depths.gossip_attestation_ingress) catch {};
+    metrics.processor_queue_depth.set(.{ .queue = "gossip_aggregate_ingress" }, snapshot.queue_depths.gossip_aggregate_ingress) catch {};
+    metrics.processor_queue_depth.set(.{ .queue = "gossip_sync_message_ingress" }, snapshot.queue_depths.gossip_sync_message_ingress) catch {};
+    metrics.processor_queue_depth.set(.{ .queue = "gossip_sync_contribution_ingress" }, snapshot.queue_depths.gossip_sync_contribution_ingress) catch {};
+    metrics.processor_queue_depth.set(.{ .queue = "gossip_voluntary_exit_ingress" }, snapshot.queue_depths.gossip_voluntary_exit_ingress) catch {};
+    metrics.processor_queue_depth.set(.{ .queue = "gossip_proposer_slashing_ingress" }, snapshot.queue_depths.gossip_proposer_slashing_ingress) catch {};
+    metrics.processor_queue_depth.set(.{ .queue = "gossip_attester_slashing_ingress" }, snapshot.queue_depths.gossip_attester_slashing_ingress) catch {};
+    metrics.processor_queue_depth.set(.{ .queue = "gossip_bls_to_exec_ingress" }, snapshot.queue_depths.gossip_bls_to_exec_ingress) catch {};
     metrics.processor_queue_depth.set(.{ .queue = "gossip_blocks" }, snapshot.queue_depths.gossip_blocks) catch {};
+    metrics.processor_queue_depth.set(.{ .queue = "blob_sidecars" }, snapshot.queue_depths.blob_sidecars) catch {};
+    metrics.processor_queue_depth.set(.{ .queue = "data_column_sidecars" }, snapshot.queue_depths.data_column_sidecars) catch {};
     metrics.processor_queue_depth.set(.{ .queue = "attestations" }, snapshot.queue_depths.attestations) catch {};
     metrics.processor_queue_depth.set(.{ .queue = "aggregates" }, snapshot.queue_depths.aggregates) catch {};
     metrics.processor_queue_depth.set(.{ .queue = "sync_messages" }, snapshot.queue_depths.sync_messages) catch {};
+    metrics.processor_queue_depth.set(.{ .queue = "sync_contributions" }, snapshot.queue_depths.sync_contributions) catch {};
+    metrics.processor_queue_depth.set(.{ .queue = "voluntary_exits" }, snapshot.queue_depths.voluntary_exits) catch {};
+    metrics.processor_queue_depth.set(.{ .queue = "proposer_slashings" }, snapshot.queue_depths.proposer_slashings) catch {};
+    metrics.processor_queue_depth.set(.{ .queue = "attester_slashings" }, snapshot.queue_depths.attester_slashings) catch {};
+    metrics.processor_queue_depth.set(.{ .queue = "bls_to_execution_changes" }, snapshot.queue_depths.bls_to_execution_changes) catch {};
     metrics.processor_queue_depth.set(.{ .queue = "pool_objects" }, snapshot.queue_depths.pool_objects) catch {};
     metrics.setGossipProcessorQueueDepth(.block, snapshot.queue_depths.gossip_blocks);
+    metrics.setGossipProcessorQueueDepth(.blob_sidecar, snapshot.queue_depths.blob_sidecars);
+    metrics.setGossipProcessorQueueDepth(.data_column_sidecar, snapshot.queue_depths.data_column_sidecars);
     metrics.setGossipProcessorQueueDepth(.attestation, snapshot.queue_depths.attestations);
     metrics.setGossipProcessorQueueDepth(.aggregate, snapshot.queue_depths.aggregates);
     metrics.setGossipProcessorQueueDepth(.sync_message, snapshot.queue_depths.sync_messages);
+    metrics.setGossipProcessorQueueDepth(.sync_contribution, snapshot.queue_depths.sync_contributions);
+    metrics.setGossipProcessorQueueDepth(.voluntary_exit, snapshot.queue_depths.voluntary_exits);
+    metrics.setGossipProcessorQueueDepth(.proposer_slashing, snapshot.queue_depths.proposer_slashings);
+    metrics.setGossipProcessorQueueDepth(.attester_slashing, snapshot.queue_depths.attester_slashings);
+    metrics.setGossipProcessorQueueDepth(.bls_to_execution_change, snapshot.queue_depths.bls_to_execution_changes);
     metrics.setGossipProcessorQueueDepth(.pool_object, snapshot.queue_depths.pool_objects);
 
     metrics.processor_loop_iterations_total.incrBy(monotonicDelta(

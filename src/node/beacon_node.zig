@@ -3741,26 +3741,30 @@ fn finishQueuedGossipReject(node: *BeaconNode, msg_id: MessageId, reason: Gossip
     node.finishPendingGossipValidation(msg_id, .{ .reject = toProcessorGossipRejectReason(reason) });
 }
 
-fn takeValidationContextFromRawWork(work: *processor_mod.work_item.RawGossipWork) GossipValidationContext {
+fn takeValidationContextFromGossipWork(
+    topic_type: processor_mod.work_item.GossipTopicType,
+    work: *processor_mod.work_item.GossipWork,
+) GossipValidationContext {
     const peer_id = work.peer_id;
     work.peer_id = .none;
     return .{
         .peer_id = peer_id,
         .fork_digest = work.fork_digest,
-        .topic_type = work.topic_type,
+        .topic_type = topic_type,
         .subnet_id = work.subnet_id,
     };
 }
 
 fn queueImmediateGossipValidation(
     node: *BeaconNode,
-    work: *processor_mod.work_item.RawGossipWork,
+    topic_type: processor_mod.work_item.GossipTopicType,
+    work: *processor_mod.work_item.GossipWork,
     outcome: QueuedGossipValidationOutcome,
 ) void {
     const bp = node.beacon_processor orelse return;
     bp.queueGossipValidationResult(
         work.message_id,
-        takeValidationContextFromRawWork(work),
+        takeValidationContextFromGossipWork(topic_type, work),
         outcome,
     );
 }
@@ -4172,18 +4176,24 @@ pub fn processorHandlerCallback(item: WorkItem, context: *anyopaque) void {
     const wtype = item.workType();
 
     switch (item) {
-        .raw_gossip_fast,
-        .raw_gossip_attestation,
-        .raw_gossip_aggregate,
-        .raw_gossip_sync_contribution,
-        .raw_gossip_sync_message,
-        .raw_gossip_pool_object,
+        .gossip_block_ingress,
+        .gossip_blob_ingress,
+        .gossip_data_column_ingress,
+        .gossip_aggregate_ingress,
+        .gossip_sync_contribution_ingress,
+        .gossip_sync_message_ingress,
+        .gossip_voluntary_exit_ingress,
+        .gossip_proposer_slashing_ingress,
+        .gossip_attester_slashing_ingress,
+        .gossip_bls_to_exec_ingress,
+        .gossip_attestation_ingress,
         => |work| {
-            var raw_work = work;
-            defer raw_work.data.deinit();
+            const topic_type = wtype.gossipIngressTopicType().?;
+            var gossip_work = work;
+            defer gossip_work.data.deinit();
 
             const gh = node.gossip_handler orelse {
-                queueImmediateGossipValidation(node, &raw_work, .ignore);
+                queueImmediateGossipValidation(node, topic_type, &gossip_work, .ignore);
                 return;
             };
 
@@ -4192,49 +4202,50 @@ pub fn processorHandlerCallback(item: WorkItem, context: *anyopaque) void {
             else
                 node.currentHeadSlot();
             gh.updateClock(slot, state_transition.computeEpochAtSlot(slot), node.currentFinalizedSlot());
-            gh.updateForkSeq(raw_work.fork_seq);
+            gh.updateForkSeq(gossip_work.fork_seq);
 
-            const data = raw_work.data.cast(processor_mod.work_item.OwnedSszBytes).ssz_bytes;
+            const data = gossip_work.data.cast(processor_mod.work_item.OwnedSszBytes).ssz_bytes;
             const metadata: gossip_handler_mod.GossipIngressMetadata = .{
-                .source = raw_work.source,
-                .message_id = raw_work.message_id,
-                .seen_timestamp_ns = raw_work.seen_timestamp_ns,
-                .peer_id = raw_work.peer_id.bytes(),
+                .source = gossip_work.source,
+                .message_id = gossip_work.message_id,
+                .seen_timestamp_ns = gossip_work.seen_timestamp_ns,
+                .peer_id = gossip_work.peer_id.bytes(),
             };
 
             switch (gh.processGossipMessageWithSubnetAndMetadata(
-                toNetworkingGossipTopicType(raw_work.topic_type),
-                raw_work.subnet_id,
+                toNetworkingGossipTopicType(topic_type),
+                gossip_work.subnet_id,
                 data,
                 metadata,
             )) {
-                .accepted => queueImmediateGossipValidation(node, &raw_work, .accept),
+                .accepted => queueImmediateGossipValidation(node, topic_type, &gossip_work, .accept),
                 .deferred => {
                     const bp = node.beacon_processor orelse return;
-                    const validation_context = takeValidationContextFromRawWork(&raw_work);
+                    const validation_context = takeValidationContextFromGossipWork(topic_type, &gossip_work);
                     bp.trackDeferredGossipValidation(
-                        raw_work.message_id,
+                        gossip_work.message_id,
                         validation_context,
                     ) catch |err| {
                         node_log.warn("failed to track deferred gossip validation: {}", .{err});
-                        bp.queueGossipValidationResult(raw_work.message_id, validation_context, .ignore);
+                        bp.queueGossipValidationResult(gossip_work.message_id, validation_context, .ignore);
                     };
                 },
-                .ignored => queueImmediateGossipValidation(node, &raw_work, .ignore),
+                .ignored => queueImmediateGossipValidation(node, topic_type, &gossip_work, .ignore),
                 .rejected => |reason| {
                     node_log.debug(
                         "Gossip {s} rejected ({s}) fork_seq={s} subnet={?d} payload_len={d}",
                         .{
-                            raw_work.topic_type.topicName(),
+                            topic_type.topicName(),
                             @tagName(reason),
-                            @tagName(raw_work.fork_seq),
-                            raw_work.subnet_id,
+                            @tagName(gossip_work.fork_seq),
+                            gossip_work.subnet_id,
                             data.len,
                         },
                     );
                     queueImmediateGossipValidation(
                         node,
-                        &raw_work,
+                        topic_type,
+                        &gossip_work,
                         .{ .reject = toProcessorGossipRejectReason(reason) },
                     );
                 },
@@ -4242,14 +4253,14 @@ pub fn processorHandlerCallback(item: WorkItem, context: *anyopaque) void {
                     node_log.debug(
                         "gossip {s} error: {} fork_seq={s} subnet={?d} payload_len={d}",
                         .{
-                            raw_work.topic_type.topicName(),
+                            topic_type.topicName(),
                             err,
-                            @tagName(raw_work.fork_seq),
-                            raw_work.subnet_id,
+                            @tagName(gossip_work.fork_seq),
+                            gossip_work.subnet_id,
                             data.len,
                         },
                     );
-                    queueImmediateGossipValidation(node, &raw_work, .ignore);
+                    queueImmediateGossipValidation(node, topic_type, &gossip_work, .ignore);
                 },
             }
         },
@@ -4823,6 +4834,9 @@ test "processorHandlerCallback imports queued voluntary exits" {
     var ctx = ProcessorImportTestContext{};
     var node: BeaconNode = undefined;
     node.allocator = allocator;
+    node.io = std.testing.io;
+    node.metrics = null;
+    node.beacon_processor = null;
 
     var gh: GossipHandler = undefined;
     gh.node = @ptrCast(&ctx);
@@ -4858,6 +4872,9 @@ test "processorHandlerCallback imports queued aggregates" {
     var ctx = ProcessorImportTestContext{};
     var node: BeaconNode = undefined;
     node.allocator = allocator;
+    node.io = std.testing.io;
+    node.metrics = null;
+    node.beacon_processor = null;
 
     var gh: GossipHandler = undefined;
     gh.node = @ptrCast(&ctx);
@@ -4896,6 +4913,9 @@ test "processorHandlerCallback imports queued aggregate batches" {
     var ctx = ProcessorImportTestContext{};
     var node: BeaconNode = undefined;
     node.allocator = allocator;
+    node.io = std.testing.io;
+    node.metrics = null;
+    node.beacon_processor = null;
 
     var gh: GossipHandler = undefined;
     gh.node = @ptrCast(&ctx);
@@ -4959,6 +4979,9 @@ test "processorHandlerCallback imports queued attestations" {
     var ctx = ProcessorImportTestContext{};
     var node: BeaconNode = undefined;
     node.allocator = allocator;
+    node.io = std.testing.io;
+    node.metrics = null;
+    node.beacon_processor = null;
 
     var gh: GossipHandler = undefined;
     gh.node = @ptrCast(&ctx);
@@ -5001,6 +5024,9 @@ test "processor-owned unknown-block gossip release requeues queued attestations 
     var ctx = ProcessorImportTestContext{};
     var node: BeaconNode = undefined;
     node.allocator = allocator;
+    node.io = std.testing.io;
+    node.metrics = null;
+    node.beacon_processor = null;
 
     var gh: GossipHandler = undefined;
     gh.node = @ptrCast(&ctx);
@@ -5061,6 +5087,9 @@ test "processorHandlerCallback imports queued sync committee messages" {
     var ctx = ProcessorImportTestContext{};
     var node: BeaconNode = undefined;
     node.allocator = allocator;
+    node.io = std.testing.io;
+    node.metrics = null;
+    node.beacon_processor = null;
 
     var gh: GossipHandler = undefined;
     gh.node = @ptrCast(&ctx);
@@ -5098,6 +5127,9 @@ test "processorHandlerCallback imports queued blob sidecars" {
     var ctx = ProcessorImportTestContext{};
     var node: BeaconNode = undefined;
     node.allocator = allocator;
+    node.io = std.testing.io;
+    node.metrics = null;
+    node.beacon_processor = null;
 
     var gh: GossipHandler = undefined;
     gh.node = @ptrCast(&ctx);
@@ -5123,6 +5155,9 @@ test "processorHandlerCallback imports queued data column sidecars" {
     var ctx = ProcessorImportTestContext{};
     var node: BeaconNode = undefined;
     node.allocator = allocator;
+    node.io = std.testing.io;
+    node.metrics = null;
+    node.beacon_processor = null;
 
     var gh: GossipHandler = undefined;
     gh.node = @ptrCast(&ctx);

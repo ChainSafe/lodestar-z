@@ -198,12 +198,13 @@ pub const OwnedSszBytes = struct {
     }
 };
 
-/// Raw inbound gossip admitted into the processor before topic-specific decode.
-pub const RawGossipWork = struct {
+/// Typed inbound gossip admitted into the processor before topic-specific decode.
+///
+/// The payload bytes may remain raw SSZ, but the queue tag is already topic-specific.
+pub const GossipWork = struct {
     source: GossipSource,
     message_id: MessageId,
     peer_id: PeerIdHandle = .none,
-    topic_type: GossipTopicType,
     subnet_id: ?u8 = null,
     fork_digest: [4]u8,
     fork_seq: ForkSeq,
@@ -475,78 +476,87 @@ pub const LightClientWork = struct {
 pub const WorkType = enum(u8) {
     // -- Sync (highest priority) --
     chain_segment = 0,
-    rpc_block = 2,
-    rpc_blob = 3,
-    rpc_custody_column = 4,
+    rpc_block = 1,
+    rpc_blob = 2,
+    rpc_custody_column = 3,
 
-    // -- Raw gossip admission --
-    raw_gossip_fast = 5,
-    raw_gossip_attestation = 6,
-    raw_gossip_aggregate = 7,
-    raw_gossip_sync_contribution = 8,
-    raw_gossip_sync_message = 9,
-    raw_gossip_pool_object = 10,
+    // -- Typed fast-lane gossip ingress --
+    gossip_block_ingress = 4,
+    gossip_blob_ingress = 5,
+    gossip_data_column_ingress = 6,
 
-    // -- Gossip: blocks + DA --
-    delayed_block = 11,
-    gossip_block = 12,
-    gossip_execution_payload = 13,
-    gossip_blob = 14,
-    gossip_data_column = 15,
-    column_reconstruction = 16,
+    // -- Prepared fast-lane gossip --
+    delayed_block = 7,
+    gossip_block = 8,
+    gossip_execution_payload = 9,
+    gossip_blob = 10,
+    gossip_data_column = 11,
+    column_reconstruction = 12,
 
     // -- API high priority --
-    api_request_p0 = 17,
+    api_request_p0 = 13,
+
+    // -- Typed control gossip ingress --
+    gossip_aggregate_ingress = 14,
+    gossip_sync_contribution_ingress = 15,
+    gossip_sync_message_ingress = 16,
+    gossip_voluntary_exit_ingress = 17,
+    gossip_proposer_slashing_ingress = 18,
+    gossip_attester_slashing_ingress = 19,
+    gossip_bls_to_exec_ingress = 20,
+
+    // -- Typed overload gossip ingress --
+    gossip_attestation_ingress = 21,
 
     // -- Attestations (batch-formed) --
-    aggregate = 18,
-    attestation = 19,
-    aggregate_batch = 20,
-    attestation_batch = 21,
+    aggregate = 22,
+    aggregate_batch = 23,
+    attestation = 24,
+    attestation_batch = 25,
 
     // -- Gloas: payload attestation --
-    gossip_payload_attestation = 22,
+    gossip_payload_attestation = 26,
 
     // -- Sync committee --
-    sync_contribution = 23,
-    sync_message = 24,
-    sync_message_batch = 25,
+    sync_contribution = 27,
+    sync_message = 28,
+    sync_message_batch = 29,
 
     // -- Gloas --
-    gossip_execution_payload_bid = 26,
-    gossip_proposer_preferences = 27,
+    gossip_execution_payload_bid = 30,
+    gossip_proposer_preferences = 31,
 
     // -- Peer serving --
-    status = 28,
-    blocks_by_range = 29,
-    blocks_by_root = 30,
-    blobs_by_range = 31,
-    blobs_by_root = 32,
-    columns_by_range = 33,
-    columns_by_root = 34,
+    status = 32,
+    blocks_by_range = 33,
+    blocks_by_root = 34,
+    blobs_by_range = 35,
+    blobs_by_root = 36,
+    columns_by_range = 37,
+    columns_by_root = 38,
 
     // -- Pool objects --
-    gossip_attester_slashing = 35,
-    gossip_proposer_slashing = 36,
-    gossip_voluntary_exit = 37,
-    gossip_bls_to_exec = 38,
+    gossip_attester_slashing = 39,
+    gossip_proposer_slashing = 40,
+    gossip_voluntary_exit = 41,
+    gossip_bls_to_exec = 42,
 
     // -- Low priority --
-    api_request_p1 = 39,
-    backfill_segment = 40,
+    api_request_p1 = 43,
+    backfill_segment = 44,
 
     // -- Light client --
-    lc_bootstrap = 41,
-    lc_finality_update = 42,
-    lc_optimistic_update = 43,
-    lc_updates_by_range = 44,
+    lc_bootstrap = 45,
+    lc_finality_update = 46,
+    lc_optimistic_update = 47,
+    lc_updates_by_range = 48,
 
     // -- Internal --
-    slot_tick = 45,
-    reprocess = 46,
+    slot_tick = 49,
+    reprocess = 50,
 
     /// Total number of work types. Useful for sizing per-type metric arrays.
-    pub const count: u32 = 47;
+    pub const count: u32 = 51;
 
     /// Returns true if this work type should be dropped during initial sync.
     pub fn dropDuringSync(self: WorkType) bool {
@@ -563,12 +573,29 @@ pub const WorkType = enum(u8) {
             .lc_finality_update,
             .lc_optimistic_update,
             .lc_updates_by_range,
-            .raw_gossip_attestation,
-            .raw_gossip_aggregate,
-            .raw_gossip_sync_contribution,
-            .raw_gossip_sync_message,
+            .gossip_attestation_ingress,
+            .gossip_aggregate_ingress,
+            .gossip_sync_contribution_ingress,
+            .gossip_sync_message_ingress,
             => true,
             else => false,
+        };
+    }
+
+    pub fn gossipIngressTopicType(self: WorkType) ?GossipTopicType {
+        return switch (self) {
+            .gossip_block_ingress => .beacon_block,
+            .gossip_blob_ingress => .blob_sidecar,
+            .gossip_data_column_ingress => .data_column_sidecar,
+            .gossip_attestation_ingress => .beacon_attestation,
+            .gossip_aggregate_ingress => .beacon_aggregate_and_proof,
+            .gossip_sync_contribution_ingress => .sync_committee_contribution_and_proof,
+            .gossip_sync_message_ingress => .sync_committee,
+            .gossip_voluntary_exit_ingress => .voluntary_exit,
+            .gossip_proposer_slashing_ingress => .proposer_slashing,
+            .gossip_attester_slashing_ingress => .attester_slashing,
+            .gossip_bls_to_exec_ingress => .bls_to_execution_change,
+            else => null,
         };
     }
 };
@@ -585,13 +612,10 @@ pub const WorkItem = union(WorkType) {
     rpc_blob: RpcBlobWork,
     rpc_custody_column: RpcColumnWork,
 
-    // -- Raw gossip admission --
-    raw_gossip_fast: RawGossipWork,
-    raw_gossip_attestation: RawGossipWork,
-    raw_gossip_aggregate: RawGossipWork,
-    raw_gossip_sync_contribution: RawGossipWork,
-    raw_gossip_sync_message: RawGossipWork,
-    raw_gossip_pool_object: RawGossipWork,
+    // -- Typed gossip ingress --
+    gossip_block_ingress: GossipWork,
+    gossip_blob_ingress: GossipWork,
+    gossip_data_column_ingress: GossipWork,
 
     // -- Gossip: blocks + DA --
     delayed_block: DelayedBlockWork,
@@ -604,10 +628,22 @@ pub const WorkItem = union(WorkType) {
     // -- API high priority --
     api_request_p0: ApiWork,
 
+    // -- Typed control gossip ingress --
+    gossip_aggregate_ingress: GossipWork,
+    gossip_sync_contribution_ingress: GossipWork,
+    gossip_sync_message_ingress: GossipWork,
+    gossip_voluntary_exit_ingress: GossipWork,
+    gossip_proposer_slashing_ingress: GossipWork,
+    gossip_attester_slashing_ingress: GossipWork,
+    gossip_bls_to_exec_ingress: GossipWork,
+
+    // -- Typed overload gossip ingress --
+    gossip_attestation_ingress: GossipWork,
+
     // -- Attestations --
     aggregate: AggregateWork,
-    attestation: AttestationWork,
     aggregate_batch: AggregateBatchWork,
+    attestation: AttestationWork,
     attestation_batch: AttestationBatchWork,
 
     // -- Gloas --
@@ -663,12 +699,17 @@ pub const WorkItem = union(WorkType) {
 
     pub fn deinit(self: WorkItem, allocator: std.mem.Allocator) void {
         switch (self) {
-            .raw_gossip_fast,
-            .raw_gossip_attestation,
-            .raw_gossip_aggregate,
-            .raw_gossip_sync_contribution,
-            .raw_gossip_sync_message,
-            .raw_gossip_pool_object,
+            .gossip_block_ingress,
+            .gossip_blob_ingress,
+            .gossip_data_column_ingress,
+            .gossip_aggregate_ingress,
+            .gossip_sync_contribution_ingress,
+            .gossip_sync_message_ingress,
+            .gossip_voluntary_exit_ingress,
+            .gossip_proposer_slashing_ingress,
+            .gossip_attester_slashing_ingress,
+            .gossip_bls_to_exec_ingress,
+            .gossip_attestation_ingress,
             => |work| {
                 work.peer_id.deinit();
                 work.data.deinit();

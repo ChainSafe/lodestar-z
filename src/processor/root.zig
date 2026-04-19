@@ -1,7 +1,7 @@
 //! BeaconProcessor module.
 //!
 //! Central priority scheduler for the work we currently route through the
-//! processor. The active ingress boundary is gossip: raw gossip admission,
+//! processor. The active ingress boundary is gossip: typed gossip ingress,
 //! replay, deferred validation completion, and async gossip verification all
 //! live here now.
 

@@ -590,12 +590,10 @@ test "GossipHandler: sync contribution ignores seen aggregator and participant s
     signed_contribution.message.contribution.beacon_block_root = [_]u8{0xAA} ** 32;
     signed_contribution.message.contribution.aggregation_bits.data[0] = 0x01;
 
-    const ssz_size = consensus_types.altair.SignedContributionAndProof.serializedSize(&signed_contribution);
-    const ssz_buf = try alloc.alloc(u8, ssz_size);
-    defer alloc.free(ssz_buf);
-    _ = consensus_types.altair.SignedContributionAndProof.serializeIntoBytes(&signed_contribution, ssz_buf);
+    var ssz_buf: [consensus_types.altair.SignedContributionAndProof.fixed_size]u8 = undefined;
+    _ = consensus_types.altair.SignedContributionAndProof.serializeIntoBytes(&signed_contribution, ssz_buf[0..]);
 
-    const compressed = try compressSnappyBlock(alloc, ssz_buf);
+    const compressed = try compressSnappyBlock(alloc, &ssz_buf);
     defer alloc.free(compressed);
 
     try handler.onSyncCommitteeContribution(compressed);

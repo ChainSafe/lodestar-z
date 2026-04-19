@@ -511,12 +511,12 @@ pub fn deinit(self: *BeaconNode) void {
         }
         allocator.free(path);
     }
-    self.chain_runtime.deinit();
-
     if (self.api_bindings) |bindings| {
         bindings.deinit(allocator, self);
         allocator.destroy(bindings);
     }
+
+    self.chain_runtime.deinit();
 
     deinitApiNodeIdentity(allocator, self.api_node_identity);
     self.node_identity.deinit();

@@ -15,9 +15,8 @@ const processor = @import("processor");
 const BeaconNode = @import("beacon_node.zig").BeaconNode;
 const GossipIngressMetadata = @import("gossip_handler.zig").GossipIngressMetadata;
 const MessageId = processor.work_item.MessageId;
-const ProcessorGossipTopicType = processor.work_item.GossipTopicType;
 const WorkItem = processor.WorkItem;
-const RawGossipWork = processor.work_item.RawGossipWork;
+const GossipWork = processor.work_item.GossipWork;
 const OwnedSszBytes = processor.work_item.OwnedSszBytes;
 const GossipDataHandle = processor.work_item.GossipDataHandle;
 const PeerIdHandle = processor.PeerIdHandle;
@@ -78,22 +77,22 @@ fn enqueueValidatedMessage(
         _ = p2p.reportGossipValidationResult(io, &metadata.message_id, .ignore);
         return;
     };
-    const raw_work = makeRawGossipWork(self, peer, parsed, fork_seq, data, metadata) catch |err| {
+    const gossip_work = makeGossipWork(self, peer, parsed, fork_seq, data, metadata) catch |err| {
         _ = p2p.reportGossipValidationResult(io, &metadata.message_id, .ignore);
-        scoped_log.warn("failed to queue raw gossip {s}: {}", .{ parsed.topic_type.topicName(), err });
+        scoped_log.warn("failed to queue gossip work {s}: {}", .{ parsed.topic_type.topicName(), err });
         return;
     };
-    bp.ingest(rawWorkItem(parsed.topic_type, raw_work));
+    bp.ingestGossipWork(gossipWorkItem(parsed.topic_type, gossip_work));
 }
 
-fn makeRawGossipWork(
+fn makeGossipWork(
     self: *BeaconNode,
     peer: ?[]const u8,
     parsed: networking.GossipTopic,
     fork_seq: config_mod.ForkSeq,
     data: []const u8,
     metadata: GossipIngressMetadata,
-) !RawGossipWork {
+) !GossipWork {
     const peer_id = if (peer) |peer_id_bytes|
         try PeerIdHandle.initOwned(self.allocator, peer_id_bytes)
     else
@@ -112,7 +111,6 @@ fn makeRawGossipWork(
         .source = metadata.source,
         .message_id = metadata.message_id,
         .peer_id = peer_id,
-        .topic_type = toProcessorGossipTopicType(parsed.topic_type),
         .subnet_id = parsed.subnet_id,
         .fork_digest = parsed.fork_digest,
         .fork_seq = fork_seq,
@@ -121,37 +119,19 @@ fn makeRawGossipWork(
     };
 }
 
-fn rawWorkItem(topic_type: networking.GossipTopicType, work: RawGossipWork) WorkItem {
+fn gossipWorkItem(topic_type: networking.GossipTopicType, work: GossipWork) WorkItem {
     return switch (topic_type) {
-        .beacon_block,
-        .blob_sidecar,
-        .data_column_sidecar,
-        => .{ .raw_gossip_fast = work },
-        .beacon_attestation => .{ .raw_gossip_attestation = work },
-        .beacon_aggregate_and_proof => .{ .raw_gossip_aggregate = work },
-        .sync_committee_contribution_and_proof => .{ .raw_gossip_sync_contribution = work },
-        .sync_committee => .{ .raw_gossip_sync_message = work },
-        .voluntary_exit,
-        .proposer_slashing,
-        .attester_slashing,
-        .bls_to_execution_change,
-        => .{ .raw_gossip_pool_object = work },
-    };
-}
-
-fn toProcessorGossipTopicType(topic_type: networking.GossipTopicType) ProcessorGossipTopicType {
-    return switch (topic_type) {
-        .beacon_block => .beacon_block,
-        .beacon_aggregate_and_proof => .beacon_aggregate_and_proof,
-        .beacon_attestation => .beacon_attestation,
-        .voluntary_exit => .voluntary_exit,
-        .proposer_slashing => .proposer_slashing,
-        .attester_slashing => .attester_slashing,
-        .bls_to_execution_change => .bls_to_execution_change,
-        .blob_sidecar => .blob_sidecar,
-        .sync_committee_contribution_and_proof => .sync_committee_contribution_and_proof,
-        .sync_committee => .sync_committee,
-        .data_column_sidecar => .data_column_sidecar,
+        .beacon_block => .{ .gossip_block_ingress = work },
+        .blob_sidecar => .{ .gossip_blob_ingress = work },
+        .data_column_sidecar => .{ .gossip_data_column_ingress = work },
+        .beacon_attestation => .{ .gossip_attestation_ingress = work },
+        .beacon_aggregate_and_proof => .{ .gossip_aggregate_ingress = work },
+        .sync_committee_contribution_and_proof => .{ .gossip_sync_contribution_ingress = work },
+        .sync_committee => .{ .gossip_sync_message_ingress = work },
+        .voluntary_exit => .{ .gossip_voluntary_exit_ingress = work },
+        .proposer_slashing => .{ .gossip_proposer_slashing_ingress = work },
+        .attester_slashing => .{ .gossip_attester_slashing_ingress = work },
+        .bls_to_execution_change => .{ .gossip_bls_to_exec_ingress = work },
     };
 }
 

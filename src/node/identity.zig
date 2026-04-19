@@ -324,7 +324,7 @@ fn decodeEnrText(allocator: Allocator, enr_text: []const u8) ![]u8 {
 }
 
 test "initBuilderForOptions temporarily advertises tcp alongside quic" {
-    var builder = try initBuilderForOptions(
+    const builder = try initBuilderForOptions(
         std.testing.allocator,
         [_]u8{1} ** 32,
         1,
@@ -335,8 +335,6 @@ test "initBuilderForOptions temporarily advertises tcp alongside quic" {
             .p2p_port6 = 9001,
         },
     );
-    defer builder.deinit();
-
     try std.testing.expectEqual(@as(?u16, 9000), builder.tcp);
     try std.testing.expectEqual(@as(?u16, 9000), builder.quic);
     try std.testing.expectEqual(@as(?u16, 9001), builder.tcp6);

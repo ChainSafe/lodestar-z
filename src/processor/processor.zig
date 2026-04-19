@@ -1,6 +1,6 @@
 //! BeaconProcessor — the central scheduling loop.
 //!
-//! The active boundary here is gossip. Raw gossip admission, unknown-parent
+//! The active boundary here is gossip. Typed gossip ingress, unknown-parent
 //! parking, deferred validation completion, and async gossip verification all
 //! live under this processor now. Handlers still execute inline on the main
 //! owner thread.
@@ -267,6 +267,14 @@ pub const BeaconProcessor = struct {
     pub fn ingest(self: *BeaconProcessor, item: WorkItem) void {
         self.metrics.items_received += 1;
         self.queues.routeToQueue(item);
+    }
+
+    /// Ingest a topic-specific gossip work item into the processor.
+    ///
+    /// The work item must already be one of the typed gossip ingress variants.
+    pub fn ingestGossipWork(self: *BeaconProcessor, item: WorkItem) void {
+        assert(item.workType().gossipIngressTopicType() != null);
+        self.ingest(item);
     }
 
     /// Dispatch the highest-priority queued item to the handler.
@@ -541,21 +549,74 @@ pub const BeaconProcessor = struct {
     /// Returns a summary of queue depths for monitoring.
     pub const QueueDepths = struct {
         total: u64,
+        gossip_block_ingress: u32,
+        gossip_blob_ingress: u32,
+        gossip_data_column_ingress: u32,
+        gossip_attestation_ingress: u32,
+        gossip_aggregate_ingress: u32,
+        gossip_sync_message_ingress: u32,
+        gossip_sync_contribution_ingress: u32,
+        gossip_voluntary_exit_ingress: u32,
+        gossip_proposer_slashing_ingress: u32,
+        gossip_attester_slashing_ingress: u32,
+        gossip_bls_to_exec_ingress: u32,
         gossip_blocks: u32,
+        blob_sidecars: u32,
+        data_column_sidecars: u32,
         attestations: u32,
         aggregates: u32,
         sync_messages: u32,
+        sync_contributions: u32,
+        voluntary_exits: u32,
+        proposer_slashings: u32,
+        attester_slashings: u32,
+        bls_to_execution_changes: u32,
         pool_objects: u64,
     };
 
     pub fn getQueueDepths(self: *const BeaconProcessor) QueueDepths {
         return .{
             .total = self.queues.totalQueued(),
-            .gossip_blocks = self.queues.gossip_block.len,
-            .attestations = self.queues.attestation.len,
-            .aggregates = self.queues.aggregate.len,
-            .sync_messages = self.queues.sync_message.len,
-            .pool_objects = self.queues.gossip_voluntary_exit.len +
+            .gossip_block_ingress = self.queues.gossip_block_ingress.len,
+            .gossip_blob_ingress = self.queues.gossip_blob_ingress.len,
+            .gossip_data_column_ingress = self.queues.gossip_data_column_ingress.len,
+            .gossip_attestation_ingress = self.queues.gossip_attestation_ingress.len,
+            .gossip_aggregate_ingress = self.queues.gossip_aggregate_ingress.len,
+            .gossip_sync_message_ingress = self.queues.gossip_sync_message_ingress.len,
+            .gossip_sync_contribution_ingress = self.queues.gossip_sync_contribution_ingress.len,
+            .gossip_voluntary_exit_ingress = self.queues.gossip_voluntary_exit_ingress.len,
+            .gossip_proposer_slashing_ingress = self.queues.gossip_proposer_slashing_ingress.len,
+            .gossip_attester_slashing_ingress = self.queues.gossip_attester_slashing_ingress.len,
+            .gossip_bls_to_exec_ingress = self.queues.gossip_bls_to_exec_ingress.len,
+            .gossip_blocks = self.queues.gossip_block_ingress.len +
+                self.queues.delayed_block.len +
+                self.queues.gossip_block.len,
+            .blob_sidecars = self.queues.gossip_blob_ingress.len +
+                self.queues.gossip_blob.len,
+            .data_column_sidecars = self.queues.gossip_data_column_ingress.len +
+                self.queues.gossip_data_column.len +
+                self.queues.column_reconstruction.len,
+            .attestations = self.queues.gossip_attestation_ingress.len +
+                self.queues.attestation.len,
+            .aggregates = self.queues.gossip_aggregate_ingress.len +
+                self.queues.aggregate.len,
+            .sync_messages = self.queues.gossip_sync_message_ingress.len +
+                self.queues.sync_message.len,
+            .sync_contributions = self.queues.gossip_sync_contribution_ingress.len +
+                self.queues.sync_contribution.len,
+            .voluntary_exits = self.queues.gossip_voluntary_exit_ingress.len +
+                self.queues.gossip_voluntary_exit.len,
+            .proposer_slashings = self.queues.gossip_proposer_slashing_ingress.len +
+                self.queues.gossip_proposer_slashing.len,
+            .attester_slashings = self.queues.gossip_attester_slashing_ingress.len +
+                self.queues.gossip_attester_slashing.len,
+            .bls_to_execution_changes = self.queues.gossip_bls_to_exec_ingress.len +
+                self.queues.gossip_bls_to_exec.len,
+            .pool_objects = self.queues.gossip_voluntary_exit_ingress.len +
+                self.queues.gossip_proposer_slashing_ingress.len +
+                self.queues.gossip_attester_slashing_ingress.len +
+                self.queues.gossip_bls_to_exec_ingress.len +
+                self.queues.gossip_voluntary_exit.len +
                 self.queues.gossip_proposer_slashing.len +
                 self.queues.gossip_attester_slashing.len +
                 self.queues.gossip_bls_to_exec.len,
@@ -852,12 +913,17 @@ fn testConfig() QueueConfig {
         .rpc_block = 4,
         .rpc_blob = 4,
         .rpc_custody_column = 4,
-        .raw_gossip_fast = 4,
-        .raw_gossip_attestation = 4,
-        .raw_gossip_aggregate = 4,
-        .raw_gossip_sync_contribution = 4,
-        .raw_gossip_sync_message = 4,
-        .raw_gossip_pool_object = 4,
+        .gossip_block_ingress = 4,
+        .gossip_blob_ingress = 4,
+        .gossip_data_column_ingress = 4,
+        .gossip_attestation_ingress = 4,
+        .gossip_aggregate_ingress = 4,
+        .gossip_sync_contribution_ingress = 4,
+        .gossip_sync_message_ingress = 4,
+        .gossip_voluntary_exit_ingress = 4,
+        .gossip_proposer_slashing_ingress = 4,
+        .gossip_attester_slashing_ingress = 4,
+        .gossip_bls_to_exec_ingress = 4,
         .delayed_block = 4,
         .gossip_block = 4,
         .gossip_execution_payload = 4,
