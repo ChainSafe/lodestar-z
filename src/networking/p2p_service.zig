@@ -377,6 +377,9 @@ pub const P2pService = struct {
     gossip_adapter: EthGossipAdapter,
     host_identity: ?*identity_mod.KeyPair,
     req_resp_self_limiter: SelfRateLimiter,
+    lifecycle_mutex: std.Io.Mutex = .init,
+    stopped: bool = false,
+    deinitialized: bool = false,
 
     pub const GossipsubMetricsSnapshot = struct {
         outbound_streams: u64 = 0,
@@ -799,12 +802,24 @@ pub const P2pService = struct {
 
     /// Gracefully shut down (cancel background fibers, close QUIC engines).
     pub fn stop(self: *Self, io: Io) void {
-        self.network.close(io);
-        log.info("p2p service stopped", .{});
+        self.lifecycle_mutex.lockUncancelable(io);
+        defer self.lifecycle_mutex.unlock(io);
+
+        if (self.deinitialized) return;
+        self.stopLocked(io);
     }
 
     /// Release all owned resources.
     pub fn deinit(self: *Self, io: Io) void {
+        self.lifecycle_mutex.lockUncancelable(io);
+        if (self.deinitialized) {
+            self.lifecycle_mutex.unlock(io);
+            return;
+        }
+        self.stopLocked(io);
+        self.deinitialized = true;
+        self.lifecycle_mutex.unlock(io);
+
         self.gossip_adapter.deinit();
         // Req/resp permits complete during network shutdown, so the limiter must
         // outlive the network teardown path that returns those permits.
@@ -815,6 +830,13 @@ pub const P2pService = struct {
             host_identity.deinit();
             self.allocator.destroy(host_identity);
         }
+    }
+
+    fn stopLocked(self: *Self, io: Io) void {
+        if (self.stopped) return;
+        self.network.close(io);
+        self.stopped = true;
+        log.info("p2p service stopped", .{});
     }
 
     /// Schedule work on the switch background group. Use this for network work

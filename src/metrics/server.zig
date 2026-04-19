@@ -1,10 +1,12 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const http = std.http;
 const net = std.Io.net;
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
 
 const log = std.log.scoped(.metrics_server);
+const recv_timeout_sec = 5;
 
 const Route = enum {
     metrics,
@@ -127,16 +129,34 @@ pub fn Server(comptime SurfaceType: type, comptime server_label: []const u8) typ
                 copy.close(io);
             }
 
+            if (comptime builtin.os.tag != .wasi) {
+                const tv = std.posix.timeval{
+                    .sec = recv_timeout_sec,
+                    .usec = 0,
+                };
+                std.posix.setsockopt(
+                    stream.socket.handle,
+                    std.posix.SOL.SOCKET,
+                    std.posix.SO.RCVTIMEO,
+                    std.mem.asBytes(&tv),
+                ) catch |err| {
+                    log.warn("setsockopt SO_RCVTIMEO failed: {s}", .{@errorName(err)});
+                };
+            }
+
             var send_buf: [65536]u8 = undefined;
             var recv_buf: [4096]u8 = undefined;
             var conn_reader = stream.reader(io, &recv_buf);
             var conn_writer = stream.writer(io, &send_buf);
             var server: http.Server = .init(&conn_reader.interface, &conn_writer.interface);
 
-            while (true) {
+            while (!self.shutdown_requested.load(.acquire)) {
                 var request = server.receiveHead() catch |err| switch (err) {
                     error.HttpConnectionClosing => return,
-                    else => return err,
+                    else => {
+                        if (self.shutdown_requested.load(.acquire)) return;
+                        return err;
+                    },
                 };
                 try self.handleHttpRequest(&request);
             }

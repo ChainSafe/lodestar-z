@@ -748,8 +748,9 @@ pub const BeaconNode = struct {
 
     /// Signal all loops to stop.
     pub fn requestShutdown(self: *BeaconNode) void {
-        self.shutdown_requested.store(true, .release);
+        if (self.shutdown_requested.swap(true, .acq_rel)) return;
         if (self.http_server) |*srv| srv.shutdown(self.io);
+        if (self.p2p_service) |*svc| svc.stop(self.io);
     }
 
     pub fn finishPendingGossipValidation(
