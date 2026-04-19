@@ -370,11 +370,6 @@ pub const ReqRespRequestPermit = struct {
 
 pub const P2pService = struct {
     const Self = @This();
-    const TopicDigestSummary = struct {
-        digest: [4]u8 = [_]u8{0} ** 4,
-        topic_count: u64 = 0,
-        peer_count: u64 = 0,
-    };
 
     allocator: Allocator,
     network: Network,
@@ -386,6 +381,7 @@ pub const P2pService = struct {
     pub const GossipsubMetricsSnapshot = struct {
         outbound_streams: u64 = 0,
         tracked_subscriptions: u64 = 0,
+        router_subscriptions: u64 = 0,
         known_topics: u64 = 0,
         mesh_topics: u64 = 0,
         mesh_peers: u64 = 0,
@@ -397,6 +393,10 @@ pub const P2pService = struct {
         pending_sends: u64 = 0,
         pending_send_bytes: u64 = 0,
     };
+
+    pub fn hasSubscriptionTrackingDrift(snapshot: GossipsubMetricsSnapshot) bool {
+        return snapshot.tracked_subscriptions != snapshot.router_subscriptions;
+    }
 
     pub fn init(io: Io, allocator: Allocator, config: P2pConfig) !Self {
         const gossipsub = try GossipsubService.init(allocator, config.gossipsub_config);
@@ -517,6 +517,7 @@ pub const P2pService = struct {
         var snapshot: GossipsubMetricsSnapshot = .{
             .outbound_streams = @intCast(self.gossipsub.outbound_streams.count()),
             .tracked_subscriptions = @intCast(self.gossipsub.tracked_subscriptions.count()),
+            .router_subscriptions = @intCast(self.gossipsub.router.subscriptions.count()),
             .known_topics = @intCast(self.gossipsub.router.topics.count()),
             .mesh_topics = @intCast(self.gossipsub.router.mesh.count()),
             .pending_events = @intCast(self.gossipsub.router.events.items.len),
@@ -542,14 +543,9 @@ pub const P2pService = struct {
         return snapshot;
     }
 
-    pub fn logGossipsubTopicDiagnostics(self: *Self, io: Io) void {
-        const max_digest_summaries = 4;
-        var tracked_digests: [max_digest_summaries]TopicDigestSummary = [_]TopicDigestSummary{.{}} ** max_digest_summaries;
-        var tracked_digest_count: usize = 0;
-        var known_digests: [max_digest_summaries]TopicDigestSummary = [_]TopicDigestSummary{.{}} ** max_digest_summaries;
-        var known_digest_count: usize = 0;
+    pub fn logGossipsubSubscriptionDiagnostics(self: *Self, io: Io) void {
         var tracked_sample: ?[]const u8 = null;
-        var known_sample: ?[]const u8 = null;
+        var router_sample: ?[]const u8 = null;
 
         self.gossipsub.state_mu.lockUncancelable(io);
         defer self.gossipsub.state_mu.unlock(io);
@@ -557,83 +553,22 @@ pub const P2pService = struct {
         var tracked_iter = self.gossipsub.tracked_subscriptions.keyIterator();
         while (tracked_iter.next()) |topic_key| {
             if (tracked_sample == null) tracked_sample = topic_key.*;
-            const parsed = gossip_topics.parseTopic(topic_key.*) orelse continue;
-            addDigestSummary(&tracked_digests, &tracked_digest_count, parsed.fork_digest, 1, 0);
         }
 
-        var known_iter = self.gossipsub.router.topics.iterator();
-        while (known_iter.next()) |entry| {
-            if (known_sample == null) known_sample = entry.key_ptr.*;
-            const parsed = gossip_topics.parseTopic(entry.key_ptr.*) orelse continue;
-            addDigestSummary(
-                &known_digests,
-                &known_digest_count,
-                parsed.fork_digest,
-                1,
-                @intCast(entry.value_ptr.count()),
-            );
+        var router_iter = self.gossipsub.router.subscriptions.keyIterator();
+        while (router_iter.next()) |topic_key| {
+            if (router_sample == null) router_sample = topic_key.*;
         }
 
         log.warn(
-            "gossipsub topic mismatch: tracked_subscriptions={d} known_topics={d} topic_peers={d} tracked_sample={s} known_sample={s}",
+            "gossipsub subscription tracking drift: tracked_subscriptions={d} router_subscriptions={d} tracked_sample={s} router_sample={s}",
             .{
                 self.gossipsub.tracked_subscriptions.count(),
-                self.gossipsub.router.topics.count(),
-                countTopicPeerRefs(self),
+                self.gossipsub.router.subscriptions.count(),
                 tracked_sample orelse "<none>",
-                known_sample orelse "<none>",
+                router_sample orelse "<none>",
             },
         );
-
-        for (tracked_digests[0..tracked_digest_count]) |summary| {
-            const digest_hex = std.fmt.bytesToHex(&summary.digest, .lower);
-            log.warn("gossipsub tracked digest {s}: topics={d}", .{
-                &digest_hex,
-                summary.topic_count,
-            });
-        }
-
-        for (known_digests[0..known_digest_count]) |summary| {
-            const digest_hex = std.fmt.bytesToHex(&summary.digest, .lower);
-            log.warn("gossipsub known digest {s}: topics={d} peer_refs={d}", .{
-                &digest_hex,
-                summary.topic_count,
-                summary.peer_count,
-            });
-        }
-    }
-
-    fn addDigestSummary(
-        summaries: *[4]TopicDigestSummary,
-        summary_count: *usize,
-        digest: [4]u8,
-        topic_count: u64,
-        peer_count: u64,
-    ) void {
-        for (summaries[0..summary_count.*]) |*summary| {
-            if (std.mem.eql(u8, &summary.digest, &digest)) {
-                summary.topic_count +%= topic_count;
-                summary.peer_count +%= peer_count;
-                return;
-            }
-        }
-
-        if (summary_count.* >= summaries.len) return;
-        summaries[summary_count.*] = .{
-            .digest = digest,
-            .topic_count = topic_count,
-            .peer_count = peer_count,
-        };
-        summary_count.* += 1;
-    }
-
-    fn countTopicPeerRefs(self: *Self) u64 {
-        var total: u64 = 0;
-        var iter = self.gossipsub.router.topics.iterator();
-        while (iter.next()) |entry| {
-            total +%= @intCast(entry.value_ptr.count());
-        }
-        return total;
     }
 
     /// Dial a remote peer by QUIC multiaddr. Caller owns the returned peer ID.
@@ -1004,6 +939,26 @@ test "P2pService: gossipsub unique peer stats ignore empty tracked topics" {
     try std.testing.expectEqual(@as(u64, 0), stats.mesh_peers);
     try std.testing.expectEqual(@as(u64, 0), stats.tracked_topics_with_peers);
     try std.testing.expectEqual(@as(u64, 0), stats.tracked_topic_peers);
+}
+
+test "P2pService: subscription tracking drift only checks local subscription state" {
+    const clean: P2pService.GossipsubMetricsSnapshot = .{
+        .tracked_subscriptions = 2,
+        .router_subscriptions = 2,
+        .known_topics = 19,
+        .topic_peers = 19,
+        .tracked_topics_with_peers = 0,
+    };
+    try std.testing.expect(!P2pService.hasSubscriptionTrackingDrift(clean));
+
+    const drift: P2pService.GossipsubMetricsSnapshot = .{
+        .tracked_subscriptions = 2,
+        .router_subscriptions = 3,
+        .known_topics = 19,
+        .topic_peers = 19,
+        .tracked_topics_with_peers = 0,
+    };
+    try std.testing.expect(P2pService.hasSubscriptionTrackingDrift(drift));
 }
 
 test "P2pService: Eth2SwitchWithoutLightClient compiles with 14 protocols" {

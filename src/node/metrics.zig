@@ -1127,7 +1127,7 @@ pub const BeaconMetrics = struct {
             ),
             .gossipsub_known_topics = Gauge(u64).init(
                 "beacon_gossipsub_known_topics",
-                .{ .help = "Current number of known gossipsub topics." },
+                .{ .help = "Current number of peer-advertised gossipsub topics tracked by the router." },
                 ro,
             ),
             .gossipsub_mesh_topics = Gauge(u64).init(

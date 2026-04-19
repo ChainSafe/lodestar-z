@@ -655,7 +655,7 @@ pub const BeaconNode = struct {
     // Last known active fork digest — used to detect fork transitions
     // so we can resubscribe gossip topics under the new fork digest.
     last_active_fork_digest: [4]u8 = [4]u8{ 0, 0, 0, 0 },
-    last_gossipsub_topic_mismatch_log_ns: u64 = 0,
+    last_gossipsub_subscription_drift_log_ns: u64 = 0,
 
     // Last slot for which chain.onSlot() was applied.
     last_slot_tick: ?u64 = null,

@@ -2176,11 +2176,11 @@ fn updateP2pServiceMetrics(self: *BeaconNode, io: std.Io) void {
     const metrics = self.metrics orelse return;
     const snapshot: networking.P2pGossipsubMetricsSnapshot = if (self.p2p_service) |*svc| blk: {
         const current = svc.gossipsubMetricsSnapshot(io);
-        if (current.tracked_subscriptions > 0 and current.topic_peers > 0 and current.tracked_topics_with_peers == 0) {
+        if (networking.P2pService.hasSubscriptionTrackingDrift(current)) {
             const now_ns = timestampNowNs(io);
-            if (now_ns -| self.last_gossipsub_topic_mismatch_log_ns >= 30 * std.time.ns_per_s) {
-                self.last_gossipsub_topic_mismatch_log_ns = now_ns;
-                svc.logGossipsubTopicDiagnostics(io);
+            if (now_ns -| self.last_gossipsub_subscription_drift_log_ns >= 30 * std.time.ns_per_s) {
+                self.last_gossipsub_subscription_drift_log_ns = now_ns;
+                svc.logGossipsubSubscriptionDiagnostics(io);
             }
         }
         break :blk current;
