@@ -11,7 +11,16 @@ pub fn build(b: *std.Build) void {
     // via `b.dependency(..., .{ .optimize = optimize })` and keeps the
     // fuzz-specific tooling invariant at the fuzz-subproject boundary
     // rather than leaking into per-dep overrides.
-    const optimize = b.standardOptimizeOption(.{ .preferred_optimize_mode = .ReleaseFast });
+    //
+    // NOTE: `standardOptimizeOption(.{ .preferred_optimize_mode = .ReleaseFast })`
+    // does NOT set the default — it only takes effect when `-Drelease` is
+    // also passed; plain `zig build` would still fall back to Debug. Use
+    // `b.option` directly so the fallback is actually `ReleaseFast`.
+    const optimize = b.option(
+        std.builtin.OptimizeMode,
+        "optimize",
+        "Prioritize performance, safety, or binary size (default: ReleaseFast)",
+    ) orelse .ReleaseFast;
 
     const lodestar_z = b.dependency("lodestar_z", .{
         .target = target,
