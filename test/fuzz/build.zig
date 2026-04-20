@@ -3,7 +3,15 @@ const afl = @import("afl");
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
-    const optimize = b.standardOptimizeOption(.{});
+    // Default to `ReleaseFast`: fuzzers want throughput, and Zig 0.16's
+    // Debug default `sanitize_c = .full` emits `__ubsan_handle_*` calls
+    // into C deps (e.g. blst) that `afl-cc` can't resolve because it
+    // links the LLVM bitcode without `libubsan`. Release modes default
+    // `sanitize_c` to `.off`, so this cascades to every dep automatically
+    // via `b.dependency(..., .{ .optimize = optimize })` and keeps the
+    // fuzz-specific tooling invariant at the fuzz-subproject boundary
+    // rather than leaking into per-dep overrides.
+    const optimize = b.standardOptimizeOption(.{ .preferred_optimize_mode = .ReleaseFast });
 
     const lodestar_z = b.dependency("lodestar_z", .{
         .target = target,
