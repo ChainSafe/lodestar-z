@@ -23,8 +23,22 @@ pub fn RefCount(comptime T: type) type {
         /// the last remaining reference counted instance of T.
         ///
         /// Consumer should call unref() instead.
+        ///
+        /// Dispatches to either `T.deinit(self)` or `T.deinit(self, allocator)`
+        /// depending on the wrapped type's signature. This is needed because
+        /// 0.16 unmanaged ArrayList uses the 2-arg form while many project
+        /// types still expose the 1-arg form.
         fn deinit(self: *@This()) void {
-            self.instance.deinit();
+            const BaseT = switch (@typeInfo(T)) {
+                .pointer => |p| p.child,
+                else => T,
+            };
+            const deinit_params = @typeInfo(@TypeOf(BaseT.deinit)).@"fn".params;
+            if (comptime deinit_params.len > 1) {
+                self.instance.deinit(self.allocator);
+            } else {
+                self.instance.deinit();
+            }
             self.allocator.destroy(self);
         }
 
