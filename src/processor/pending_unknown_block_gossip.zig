@@ -147,11 +147,12 @@ const PendingRoot = struct {
 
 pub const Callbacks = struct {
     ptr: *anyopaque,
-    requestBlockByRootFn: *const fn (ptr: *anyopaque, root: Root, peer_id: []const u8) void,
+    /// Returns true only if the by-root request was accepted into the bridge / request queue.
+    requestBlockByRootFn: *const fn (ptr: *anyopaque, root: Root, peer_id: []const u8) bool,
     getConnectedPeersFn: *const fn (ptr: *anyopaque) []const []const u8,
 
-    pub fn requestBlockByRoot(self: Callbacks, root: Root, peer_id: []const u8) void {
-        self.requestBlockByRootFn(self.ptr, root, peer_id);
+    pub fn requestBlockByRoot(self: Callbacks, root: Root, peer_id: []const u8) bool {
+        return self.requestBlockByRootFn(self.ptr, root, peer_id);
     }
 
     pub fn getConnectedPeers(self: Callbacks) []const []const u8 {
@@ -245,9 +246,14 @@ pub const Queue = struct {
             }
 
             const peer = self.selectPeer(pending, peers) orelse continue;
+            if (!callbacks.requestBlockByRoot(root, peer)) {
+                // The shared by-root bridge queue is full. Stop scheduling more
+                // roots this tick and retry on a later pass after the bridge
+                // drains.
+                break;
+            }
             pending.status = .fetching;
             pending.attempts += 1;
-            callbacks.requestBlockByRoot(root, peer);
         }
     }
 
@@ -421,10 +427,11 @@ const TestCallbacksCtx = struct {
     requested_peer: ?[]const u8 = null,
 };
 
-fn testRequestBlockByRoot(ptr: *anyopaque, root: Root, peer_id: []const u8) void {
+fn testRequestBlockByRoot(ptr: *anyopaque, root: Root, peer_id: []const u8) bool {
     const ctx: *TestCallbacksCtx = @ptrCast(@alignCast(ptr));
     ctx.requested_root = root;
     ctx.requested_peer = peer_id;
+    return true;
 }
 
 fn testGetConnectedPeers(ptr: *anyopaque) []const []const u8 {
@@ -474,6 +481,164 @@ test "Queue releases imported root items" {
 
     try std.testing.expectEqual(@as(usize, 1), released.items.len);
     try std.testing.expectEqual(@as(usize, 0), queue.pendingCount());
+}
+
+test "Queue enqueue failure leaves root pending for retry" {
+    var queue = Queue.init(std.testing.allocator);
+    defer queue.deinit();
+
+    var att = AttestationWork{
+        .source = .{},
+        .message_id = [_]u8{0xD4} ** 20,
+        .attestation = undefined,
+        .attestation_data_root = [_]u8{0} ** 32,
+        .resolved = .{
+            .validator_index = 1,
+            .validator_committee_index = 0,
+            .committee_size = 1,
+            .signing_root = [_]u8{0} ** 32,
+            .expected_subnet = 0,
+        },
+        .subnet_id = 0,
+        .seen_timestamp_ns = 0,
+    };
+    att.attestation = .{ .phase0 = .{
+        .aggregation_bits = .{ .bit_len = 1, .data = .empty },
+        .data = .{
+            .slot = 12,
+            .index = 0,
+            .beacon_block_root = [_]u8{0x44} ** 32,
+            .source = .{ .epoch = 0, .root = [_]u8{0} ** 32 },
+            .target = .{ .epoch = 0, .root = [_]u8{0} ** 32 },
+        },
+        .signature = [_]u8{0} ** 96,
+    } };
+
+    const root = [_]u8{0x44} ** 32;
+    try std.testing.expect(try queue.addAttestation(root, "peer-a", att));
+
+    const TestCallbacks = struct {
+        request_calls: usize = 0,
+        allow_enqueue: bool = false,
+
+        fn requestBlockByRoot(ptr: *anyopaque, _: Root, _: []const u8) bool {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            self.request_calls += 1;
+            return self.allow_enqueue;
+        }
+
+        fn getConnectedPeers(_: *anyopaque) []const []const u8 {
+            return &.{"peer-a"};
+        }
+    };
+
+    var ctx = TestCallbacks{};
+    const callbacks = Callbacks{
+        .ptr = @ptrCast(&ctx),
+        .requestBlockByRootFn = &TestCallbacks.requestBlockByRoot,
+        .getConnectedPeersFn = &TestCallbacks.getConnectedPeers,
+    };
+
+    queue.tick(callbacks);
+
+    try std.testing.expectEqual(@as(usize, 1), ctx.request_calls);
+    const pending = queue.pending_by_root.getPtr(root).?;
+    try std.testing.expectEqual(FetchStatus.pending, pending.status);
+    try std.testing.expectEqual(@as(u8, 0), pending.attempts);
+
+    ctx.allow_enqueue = true;
+    queue.tick(callbacks);
+
+    try std.testing.expectEqual(@as(usize, 2), ctx.request_calls);
+    try std.testing.expectEqual(FetchStatus.fetching, pending.status);
+    try std.testing.expectEqual(@as(u8, 1), pending.attempts);
+}
+
+test "Queue by-root queue backpressure stops further scheduling this tick" {
+    var queue = Queue.init(std.testing.allocator);
+    defer queue.deinit();
+
+    var att_a = AttestationWork{
+        .source = .{},
+        .message_id = [_]u8{0xE1} ** 20,
+        .attestation = undefined,
+        .attestation_data_root = [_]u8{0} ** 32,
+        .resolved = .{
+            .validator_index = 1,
+            .validator_committee_index = 0,
+            .committee_size = 1,
+            .signing_root = [_]u8{0} ** 32,
+            .expected_subnet = 0,
+        },
+        .subnet_id = 0,
+        .seen_timestamp_ns = 0,
+    };
+    att_a.attestation = .{ .phase0 = .{
+        .aggregation_bits = .{ .bit_len = 1, .data = .empty },
+        .data = .{
+            .slot = 12,
+            .index = 0,
+            .beacon_block_root = [_]u8{0x51} ** 32,
+            .source = .{ .epoch = 0, .root = [_]u8{0} ** 32 },
+            .target = .{ .epoch = 0, .root = [_]u8{0} ** 32 },
+        },
+        .signature = [_]u8{0} ** 96,
+    } };
+
+    var att_b = AttestationWork{
+        .source = .{},
+        .message_id = [_]u8{0xE2} ** 20,
+        .attestation = undefined,
+        .attestation_data_root = [_]u8{0} ** 32,
+        .resolved = .{
+            .validator_index = 2,
+            .validator_committee_index = 0,
+            .committee_size = 1,
+            .signing_root = [_]u8{0} ** 32,
+            .expected_subnet = 0,
+        },
+        .subnet_id = 0,
+        .seen_timestamp_ns = 0,
+    };
+    att_b.attestation = .{ .phase0 = .{
+        .aggregation_bits = .{ .bit_len = 1, .data = .empty },
+        .data = .{
+            .slot = 12,
+            .index = 0,
+            .beacon_block_root = [_]u8{0x52} ** 32,
+            .source = .{ .epoch = 0, .root = [_]u8{0} ** 32 },
+            .target = .{ .epoch = 0, .root = [_]u8{0} ** 32 },
+        },
+        .signature = [_]u8{0} ** 96,
+    } };
+
+    try std.testing.expect(try queue.addAttestation([_]u8{0x51} ** 32, "peer-a", att_a));
+    try std.testing.expect(try queue.addAttestation([_]u8{0x52} ** 32, "peer-b", att_b));
+
+    const TestCallbacks = struct {
+        request_calls: usize = 0,
+
+        fn requestBlockByRoot(ptr: *anyopaque, _: Root, _: []const u8) bool {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            self.request_calls += 1;
+            return false;
+        }
+
+        fn getConnectedPeers(_: *anyopaque) []const []const u8 {
+            return &.{ "peer-a", "peer-b" };
+        }
+    };
+
+    var ctx = TestCallbacks{};
+    const callbacks = Callbacks{
+        .ptr = @ptrCast(&ctx),
+        .requestBlockByRootFn = &TestCallbacks.requestBlockByRoot,
+        .getConnectedPeersFn = &TestCallbacks.getConnectedPeers,
+    };
+
+    queue.tick(callbacks);
+
+    try std.testing.expectEqual(@as(usize, 1), ctx.request_calls);
 }
 
 test "Queue retries a different peer after failure" {

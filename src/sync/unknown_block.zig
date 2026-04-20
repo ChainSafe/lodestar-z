@@ -121,11 +121,12 @@ pub const UnknownBlockCallbacks = struct {
     ptr: *anyopaque,
 
     /// Request a block by root from a peer.
+    /// Returns true only if the request was accepted into the bridge / request queue.
     requestBlockByRootFn: *const fn (
         ptr: *anyopaque,
         root: [32]u8,
         peer_id: []const u8,
-    ) void,
+    ) bool,
 
     /// Import a block. Returns error on failure.
     importBlockFn: *const fn (
@@ -144,8 +145,8 @@ pub const UnknownBlockCallbacks = struct {
         ptr: *anyopaque,
     ) []const []const u8,
 
-    pub fn requestBlockByRoot(self: UnknownBlockCallbacks, root: [32]u8, peer_id: []const u8) void {
-        self.requestBlockByRootFn(self.ptr, root, peer_id);
+    pub fn requestBlockByRoot(self: UnknownBlockCallbacks, root: [32]u8, peer_id: []const u8) bool {
+        return self.requestBlockByRootFn(self.ptr, root, peer_id);
     }
 
     pub fn importBlock(self: UnknownBlockCallbacks, prepared: PreparedBlockInput) !void {
@@ -310,7 +311,16 @@ pub const UnknownBlockSync = struct {
 
             const peer = self.selectPeerForParent(waiters, peers) orelse continue;
 
-            // Mark children as fetching and bump attempt count.
+            if (!cbs.requestBlockByRoot(parent_root, peer)) {
+                // The shared by-root bridge queue is full. Treat this as
+                // per-tick backpressure instead of repeatedly attempting the
+                // remaining parents and spamming warnings. Retry on a later
+                // pass once the bridge drains.
+                break;
+            }
+
+            // Mark children as fetching and bump attempt count only after the
+            // by-root request is actually admitted to the bridge queue.
             for (waiters.child_roots.items) |child_root| {
                 if (self.pending.getPtr(child_root)) |pb| {
                     if (pb.status == .pending) {
@@ -320,7 +330,6 @@ pub const UnknownBlockSync = struct {
                 }
             }
 
-            cbs.requestBlockByRoot(parent_root, peer);
             self.in_flight += 1;
         }
     }
@@ -702,9 +711,10 @@ test "UnknownBlockSync: prefers gossip peer for parent fetch" {
     const TestCallbacks = struct {
         requested_peer: ?[]const u8 = null,
 
-        fn requestBlockByRootFn(ptr: *anyopaque, _: [32]u8, peer_id: []const u8) void {
+        fn requestBlockByRootFn(ptr: *anyopaque, _: [32]u8, peer_id: []const u8) bool {
             const self: *@This() = @ptrCast(@alignCast(ptr));
             self.requested_peer = peer_id;
+            return true;
         }
 
         fn importBlockFn(_: *anyopaque, prepared: PreparedBlockInput) anyerror!void {
@@ -746,13 +756,127 @@ test "UnknownBlockSync: prefers gossip peer for parent fetch" {
     try std.testing.expectEqualStrings("peer-b", callbacks.requested_peer.?);
 }
 
+test "UnknownBlockSync: enqueue failure leaves child pending for retry" {
+    const TestCallbacks = struct {
+        request_calls: usize = 0,
+        allow_enqueue: bool = false,
+
+        fn requestBlockByRootFn(ptr: *anyopaque, _: [32]u8, _: []const u8) bool {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            self.request_calls += 1;
+            return self.allow_enqueue;
+        }
+
+        fn importBlockFn(_: *anyopaque, prepared: PreparedBlockInput) anyerror!void {
+            var owned = prepared;
+            owned.deinit(std.testing.allocator);
+        }
+
+        fn hasBlockFn(_: *anyopaque, _: [32]u8) bool {
+            return false;
+        }
+
+        fn getConnectedPeersFn(_: *anyopaque) []const []const u8 {
+            return &.{"peer-a"};
+        }
+
+        fn callbacks(self: *@This()) UnknownBlockCallbacks {
+            return .{
+                .ptr = self,
+                .requestBlockByRootFn = &requestBlockByRootFn,
+                .importBlockFn = &importBlockFn,
+                .hasBlockFn = &hasBlockFn,
+                .getConnectedPeersFn = &getConnectedPeersFn,
+            };
+        }
+    };
+
+    const alloc = std.testing.allocator;
+    var sync = UnknownBlockSync.init(alloc);
+    defer sync.deinit();
+
+    var callbacks = TestCallbacks{};
+    sync.setCallbacks(callbacks.callbacks());
+
+    const parent_root = [_]u8{0x91} ** 32;
+    const child_root = [_]u8{0x92} ** 32;
+    _ = try sync.addPendingBlock(try makeTestPreparedBlock(alloc, 42, parent_root, child_root));
+
+    sync.tick();
+
+    try std.testing.expectEqual(@as(usize, 1), callbacks.request_calls);
+    try std.testing.expectEqual(@as(usize, 1), sync.pendingCount());
+    try std.testing.expectEqual(@as(usize, 0), sync.in_flight);
+    const pending = sync.pending.getPtr(child_root).?;
+    try std.testing.expectEqual(PendingStatus.pending, pending.status);
+    try std.testing.expectEqual(@as(u8, 0), pending.attempts);
+
+    callbacks.allow_enqueue = true;
+    sync.tick();
+
+    try std.testing.expectEqual(@as(usize, 2), callbacks.request_calls);
+    try std.testing.expectEqual(@as(usize, 1), sync.in_flight);
+    try std.testing.expectEqual(PendingStatus.fetching, pending.status);
+    try std.testing.expectEqual(@as(u8, 1), pending.attempts);
+}
+
+test "UnknownBlockSync: by-root queue backpressure stops further scheduling this tick" {
+    const TestCallbacks = struct {
+        request_calls: usize = 0,
+
+        fn requestBlockByRootFn(ptr: *anyopaque, _: [32]u8, _: []const u8) bool {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            self.request_calls += 1;
+            return false;
+        }
+
+        fn importBlockFn(_: *anyopaque, prepared: PreparedBlockInput) anyerror!void {
+            var owned = prepared;
+            owned.deinit(std.testing.allocator);
+        }
+
+        fn hasBlockFn(_: *anyopaque, _: [32]u8) bool {
+            return false;
+        }
+
+        fn getConnectedPeersFn(_: *anyopaque) []const []const u8 {
+            return &.{ "peer-a", "peer-b" };
+        }
+
+        fn callbacks(self: *@This()) UnknownBlockCallbacks {
+            return .{
+                .ptr = self,
+                .requestBlockByRootFn = &requestBlockByRootFn,
+                .importBlockFn = &importBlockFn,
+                .hasBlockFn = &hasBlockFn,
+                .getConnectedPeersFn = &getConnectedPeersFn,
+            };
+        }
+    };
+
+    const alloc = std.testing.allocator;
+    var sync = UnknownBlockSync.init(alloc);
+    defer sync.deinit();
+
+    var callbacks = TestCallbacks{};
+    sync.setCallbacks(callbacks.callbacks());
+
+    _ = try sync.addPendingBlock(try makeTestPreparedBlock(alloc, 42, [_]u8{0xA1} ** 32, [_]u8{0xB1} ** 32));
+    _ = try sync.addPendingBlock(try makeTestPreparedBlock(alloc, 43, [_]u8{0xA2} ** 32, [_]u8{0xB2} ** 32));
+
+    sync.tick();
+
+    try std.testing.expectEqual(@as(usize, 1), callbacks.request_calls);
+}
+
 test "UnknownBlockSync: fetch failure excludes failed peer for current parent session" {
     const TestCallbacks = struct {
         requested_peer: ?[]const u8 = null,
 
-        fn requestBlockByRootFn(ptr: *anyopaque, _: [32]u8, peer_id: []const u8) void {
+        fn requestBlockByRootFn(ptr: *anyopaque, _: [32]u8, peer_id: []const u8) bool {
             const self: *@This() = @ptrCast(@alignCast(ptr));
             self.requested_peer = peer_id;
+            return true;
         }
 
         fn importBlockFn(_: *anyopaque, prepared: PreparedBlockInput) anyerror!void {
@@ -803,9 +927,10 @@ test "UnknownBlockSync: exhausted peer session resets exclusions and starts new 
     const TestCallbacks = struct {
         requested_peer: ?[]const u8 = null,
 
-        fn requestBlockByRootFn(ptr: *anyopaque, _: [32]u8, peer_id: []const u8) void {
+        fn requestBlockByRootFn(ptr: *anyopaque, _: [32]u8, peer_id: []const u8) bool {
             const self: *@This() = @ptrCast(@alignCast(ptr));
             self.requested_peer = peer_id;
+            return true;
         }
 
         fn importBlockFn(_: *anyopaque, prepared: PreparedBlockInput) anyerror!void {
@@ -862,7 +987,9 @@ test "UnknownBlockSync: import pending defers child resolution until notify" {
         import_pending: bool = true,
         import_calls: usize = 0,
 
-        fn requestBlockByRootFn(_: *anyopaque, _: [32]u8, _: []const u8) void {}
+        fn requestBlockByRootFn(_: *anyopaque, _: [32]u8, _: []const u8) bool {
+            return true;
+        }
 
         fn importBlockFn(ptr: *anyopaque, prepared: PreparedBlockInput) anyerror!void {
             const self: *@This() = @ptrCast(@alignCast(ptr));
@@ -918,7 +1045,9 @@ test "UnknownBlockSync: import pending defers child resolution until notify" {
 
 test "UnknownBlockSync: exhausted fetch drops pending subtree" {
     const TestCallbacks = struct {
-        fn requestBlockByRootFn(_: *anyopaque, _: [32]u8, _: []const u8) void {}
+        fn requestBlockByRootFn(_: *anyopaque, _: [32]u8, _: []const u8) bool {
+            return true;
+        }
 
         fn importBlockFn(_: *anyopaque, prepared: PreparedBlockInput) anyerror!void {
             var owned = prepared;
@@ -970,7 +1099,9 @@ test "UnknownBlockSync: exhausted fetch drops pending subtree" {
 
 test "UnknownBlockSync: failed child import drops descendants" {
     const TestCallbacks = struct {
-        fn requestBlockByRootFn(_: *anyopaque, _: [32]u8, _: []const u8) void {}
+        fn requestBlockByRootFn(_: *anyopaque, _: [32]u8, _: []const u8) bool {
+            return true;
+        }
 
         fn importBlockFn(ptr: *anyopaque, prepared: PreparedBlockInput) anyerror!void {
             const should_fail_child: *bool = @ptrCast(@alignCast(ptr));
@@ -1026,9 +1157,10 @@ test "UnknownBlockSync: tick imports pending child when parent is already known"
         requested: usize = 0,
         known_parent: [32]u8,
 
-        fn requestBlockByRootFn(ptr: *anyopaque, _: [32]u8, _: []const u8) void {
+        fn requestBlockByRootFn(ptr: *anyopaque, _: [32]u8, _: []const u8) bool {
             const self: *@This() = @ptrCast(@alignCast(ptr));
             self.requested += 1;
+            return true;
         }
 
         fn importBlockFn(ptr: *anyopaque, prepared: PreparedBlockInput) anyerror!void {

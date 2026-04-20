@@ -167,7 +167,7 @@ pub const SyncCallbackCtx = struct {
             .importPreparedBlockFn = &syncImportPreparedBlock,
             .processChainSegmentFn = &syncProcessChainSegment,
             .requestBlocksByRangeFn = &syncRequestBlocksByRange,
-            .requestBlockByRootFn = &syncRequestBlockByRootUnknownBlock,
+            .requestBlockByRootFn = &syncRequestBlockByRootSyncService,
             .reportPeerFn = &syncReportPeer,
             .hasBlockFn = &syncHasBlock,
             .peerCanServeRangeFn = &syncPeerCanServeRange,
@@ -269,14 +269,19 @@ pub const SyncCallbackCtx = struct {
         });
     }
 
-    fn syncRequestBlockByRootUnknownBlock(ptr: *anyopaque, root: [32]u8, peer_id: []const u8) void {
+    fn syncRequestBlockByRootUnknownBlock(ptr: *anyopaque, root: [32]u8, peer_id: []const u8) bool {
         const ctx: *SyncCallbackCtx = @ptrCast(@alignCast(ptr));
-        ctx.enqueueByRootRequest(.unknown_block_parent, root, peer_id);
+        return ctx.enqueueByRootRequest(.unknown_block_parent, root, peer_id);
     }
 
-    pub fn enqueueUnknownBlockGossipRequestFn(ptr: *anyopaque, root: [32]u8, peer_id: []const u8) void {
+    fn syncRequestBlockByRootSyncService(ptr: *anyopaque, root: [32]u8, peer_id: []const u8) bool {
         const ctx: *SyncCallbackCtx = @ptrCast(@alignCast(ptr));
-        ctx.enqueueByRootRequest(.unknown_block_gossip, root, peer_id);
+        return ctx.enqueueByRootRequest(.unknown_block_parent, root, peer_id);
+    }
+
+    pub fn enqueueUnknownBlockGossipRequestFn(ptr: *anyopaque, root: [32]u8, peer_id: []const u8) bool {
+        const ctx: *SyncCallbackCtx = @ptrCast(@alignCast(ptr));
+        return ctx.enqueueByRootRequest(.unknown_block_gossip, root, peer_id);
     }
 
     fn unknownBlockHasBlock(ptr: *anyopaque, root: [32]u8) bool {
@@ -286,7 +291,7 @@ pub const SyncCallbackCtx = struct {
 
     fn unknownChainFetchBlockByRoot(ptr: *anyopaque, root: [32]u8, peer_id: []const u8) void {
         const ctx: *SyncCallbackCtx = @ptrCast(@alignCast(ptr));
-        ctx.enqueueByRootRequest(.unknown_chain_header, root, peer_id);
+        _ = ctx.enqueueByRootRequest(.unknown_chain_header, root, peer_id);
     }
 
     fn unknownChainProcessLinkedChain(
@@ -338,12 +343,12 @@ pub const SyncCallbackCtx = struct {
         kind: PendingByRootRequestKind,
         root: [32]u8,
         peer_id: []const u8,
-    ) void {
+    ) bool {
         if (self.pending_by_root_count >= self.pending_by_root_requests.len) {
-            scoped_log.warn("sync callback by-root queue full, dropping root {x:0>2}{x:0>2}{x:0>2}{x:0>2}...", .{
+            scoped_log.warn("sync callback by-root queue full, rejecting enqueue for root {x:0>2}{x:0>2}{x:0>2}{x:0>2}...", .{
                 root[0], root[1], root[2], root[3],
             });
-            return;
+            return false;
         }
         var req = PendingByRootRequest{
             .kind = kind,
@@ -358,6 +363,7 @@ pub const SyncCallbackCtx = struct {
         scoped_log.debug("SyncCallbackCtx: queued {s} by-root {x:0>2}{x:0>2}{x:0>2}{x:0>2}... for peer {s}", .{
             @tagName(kind), root[0], root[1], root[2], root[3], peer_id,
         });
+        return true;
     }
 
     pub fn popPendingRequest(self: *SyncCallbackCtx) ?PendingBatchRequest {
@@ -519,3 +525,38 @@ pub const SyncCallbackCtx = struct {
 
 const beacon_node_mod = @import("beacon_node.zig");
 const BeaconNode = beacon_node_mod.BeaconNode;
+
+test "SyncCallbackCtx: sync service by-root callback returns admission result" {
+    var ctx: SyncCallbackCtx = .{
+        .node = undefined,
+        .connected_peers = .empty,
+    };
+
+    const callbacks = ctx.syncServiceCallbacks();
+    const root = [_]u8{0xAB} ** 32;
+
+    try std.testing.expect(callbacks.requestBlockByRoot(root, "peer-sync"));
+    try std.testing.expectEqual(@as(u8, 1), ctx.pending_by_root_count);
+
+    const pending = ctx.popPendingByRootRequest().?;
+    try std.testing.expectEqual(PendingByRootRequestKind.unknown_block_parent, pending.kind);
+    try std.testing.expectEqual(root, pending.root);
+    try std.testing.expectEqualStrings("peer-sync", pending.peerId());
+}
+
+test "SyncCallbackCtx: by-root callbacks surface queue backpressure to callers" {
+    var ctx: SyncCallbackCtx = .{
+        .node = undefined,
+        .connected_peers = .empty,
+    };
+    ctx.pending_by_root_count = ctx.pending_by_root_requests.len;
+
+    const unknown_block = ctx.unknownBlockCallbacks();
+    const sync_service = ctx.syncServiceCallbacks();
+    const root = [_]u8{0xCD} ** 32;
+
+    try std.testing.expect(!unknown_block.requestBlockByRoot(root, "peer-unknown"));
+    try std.testing.expect(!sync_service.requestBlockByRoot(root, "peer-sync"));
+    try std.testing.expect(!SyncCallbackCtx.enqueueUnknownBlockGossipRequestFn(@ptrCast(&ctx), root, "peer-gossip"));
+    try std.testing.expectEqual(@as(u8, ctx.pending_by_root_requests.len), ctx.pending_by_root_count);
+}

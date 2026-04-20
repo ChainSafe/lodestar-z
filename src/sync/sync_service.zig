@@ -103,11 +103,12 @@ pub const SyncServiceCallbacks = struct {
     ) void,
 
     /// Request a block by root from a peer.
+    /// Returns true only if the request was accepted into the bridge / request queue.
     requestBlockByRootFn: *const fn (
         ptr: *anyopaque,
         root: [32]u8,
         peer_id: []const u8,
-    ) void,
+    ) bool,
 
     /// Report a peer for bad behavior. The reason is kept sync-local so the
     /// bridge can map it onto the production networking scoring policy.
@@ -163,6 +164,10 @@ pub const SyncServiceCallbacks = struct {
         count: u64,
     ) void {
         self.requestBlocksByRangeFn(self.ptr, chain_id, batch_id, generation, peer_id, start_slot, count);
+    }
+
+    pub fn requestBlockByRoot(self: SyncServiceCallbacks, root: [32]u8, peer_id: []const u8) bool {
+        return self.requestBlockByRootFn(self.ptr, root, peer_id);
     }
 
     pub fn reportPeer(self: SyncServiceCallbacks, peer_id: []const u8, reason: SyncPeerReportReason) void {
@@ -674,7 +679,9 @@ const TestSyncServiceCallbacks = struct {
         self.requested_count += 1;
     }
 
-    fn requestBlockByRootFn(_: *anyopaque, _: [32]u8, _: []const u8) void {}
+    fn requestBlockByRootFn(_: *anyopaque, _: [32]u8, _: []const u8) bool {
+        return true;
+    }
 
     fn reportPeerFn(ptr: *anyopaque, _: []const u8, _: SyncPeerReportReason) void {
         const self: *TestSyncServiceCallbacks = @ptrCast(@alignCast(ptr));
