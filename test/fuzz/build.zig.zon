@@ -2,17 +2,17 @@
     .name = .lodestar_z_fuzz,
     .version = "0.1.0",
     .fingerprint = 0xa5f5892cc2169277,
-    .minimum_zig_version = "0.14.1",
+    .minimum_zig_version = "0.16.0",
     .dependencies = .{
         .blst = .{
-            .url = "git+https://github.com/ChainSafe/blst.zig#98868a621ea921ec7dd7c1a4057bc2947586ed3c",
-            .hash = "blst_zig-0.0.0-cnAxzu0IAABK3ChhGISQMEe6PaX6x8Z8yOtYsp63xh54",
+            .url = "git+https://github.com/lodekeeper-z/blst.zig?ref=chore/zig-master#a647da8dcb90f0ed85f5721abc381fb8ab54ff56",
+            .hash = "blst_zig-0.0.0-cnAxzg4LAAAj7C2e_M9QgfMS0OZsqyHHWjf_lnfN3G-B",
         },
         .lodestar_z = .{ .path = "../../" },
         .afl = .{ .path = "../../pkg/afl++" },
         .snappy = .{
-            .url = "git+https://github.com/chainsafe/snappy.zig#206a3019ed9f5cb1e382bddca9a51d7c3e7d8cd3",
-            .hash = "snappy-0.1.0-n4Aaqtw4AAA1bcVRSEh4ERJs4_Tjzph4cXEMPdYtQbeA",
+            .url = "git+https://github.com/lodekeeper-z/snappy.zig?ref=chore/zig-master#bb296b57e5e88e0959d602c302648d15f643942b",
+            .hash = "snappy-0.1.0-n4AaquQ4AADQScvw9-i6SJvZTTagvxmGgGKnat4T_a4e",
         },
     },
     .paths = .{ "build.zig", "build.zig.zon", "src", "tools" },

@@ -71,80 +71,88 @@ pub fn build(b: *std.Build) void {
         .target = target,
     });
 
-    const dep_httpz = b.dependency("httpz", .{
-        .optimize = optimize,
-        .target = target,
-    });
+    // TODO: Re-enable once karlseguin/http.zig supports Zig 0.16.0
+    // const dep_httpz = b.dependency("httpz", .{
+    //     .optimize = optimize,
+    //     .target = target,
+    // });
 
     const module_constants = b.createModule(.{
         .root_source_file = b.path("src/constants/root.zig"),
         .target = target,
         .optimize = optimize,
     });
-    b.modules.put(b.dupe("constants"), module_constants) catch @panic("OOM");
+    b.modules.put(b.allocator, b.dupe("constants"), module_constants) catch @panic("OOM");
 
     const module_config = b.createModule(.{
         .root_source_file = b.path("src/config/root.zig"),
         .target = target,
         .optimize = optimize,
     });
-    b.modules.put(b.dupe("config"), module_config) catch @panic("OOM");
+    b.modules.put(b.allocator, b.dupe("config"), module_config) catch @panic("OOM");
 
     const module_consensus_types = b.createModule(.{
         .root_source_file = b.path("src/consensus_types/root.zig"),
         .target = target,
         .optimize = optimize,
     });
-    b.modules.put(b.dupe("consensus_types"), module_consensus_types) catch @panic("OOM");
+    b.modules.put(b.allocator, b.dupe("consensus_types"), module_consensus_types) catch @panic("OOM");
 
     const module_era = b.createModule(.{
         .root_source_file = b.path("src/era/root.zig"),
         .target = target,
         .optimize = optimize,
     });
-    b.modules.put(b.dupe("era"), module_era) catch @panic("OOM");
+    b.modules.put(b.allocator, b.dupe("era"), module_era) catch @panic("OOM");
 
     const module_hashing = b.createModule(.{
         .root_source_file = b.path("src/hashing/root.zig"),
         .target = target,
         .optimize = optimize,
     });
-    b.modules.put(b.dupe("hashing"), module_hashing) catch @panic("OOM");
+    b.modules.put(b.allocator, b.dupe("hashing"), module_hashing) catch @panic("OOM");
 
     const module_hex = b.createModule(.{
         .root_source_file = b.path("src/hex.zig"),
         .target = target,
         .optimize = optimize,
     });
-    b.modules.put(b.dupe("hex"), module_hex) catch @panic("OOM");
+    b.modules.put(b.allocator, b.dupe("hex"), module_hex) catch @panic("OOM");
+
+    const module_time = b.createModule(.{
+        .root_source_file = b.path("src/time.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    b.modules.put(b.allocator, b.dupe("time"), module_time) catch @panic("OOM");
 
     const module_fork_types = b.createModule(.{
         .root_source_file = b.path("src/fork_types/root.zig"),
         .target = target,
         .optimize = optimize,
     });
-    b.modules.put(b.dupe("fork_types"), module_fork_types) catch @panic("OOM");
+    b.modules.put(b.allocator, b.dupe("fork_types"), module_fork_types) catch @panic("OOM");
 
     const module_persistent_merkle_tree = b.createModule(.{
         .root_source_file = b.path("src/persistent_merkle_tree/root.zig"),
         .target = target,
         .optimize = optimize,
     });
-    b.modules.put(b.dupe("persistent_merkle_tree"), module_persistent_merkle_tree) catch @panic("OOM");
+    b.modules.put(b.allocator, b.dupe("persistent_merkle_tree"), module_persistent_merkle_tree) catch @panic("OOM");
 
     const module_preset = b.createModule(.{
         .root_source_file = b.path("src/preset/root.zig"),
         .target = target,
         .optimize = optimize,
     });
-    b.modules.put(b.dupe("preset"), module_preset) catch @panic("OOM");
+    b.modules.put(b.allocator, b.dupe("preset"), module_preset) catch @panic("OOM");
 
     const module_ssz = b.createModule(.{
         .root_source_file = b.path("src/ssz/root.zig"),
         .target = target,
         .optimize = optimize,
     });
-    b.modules.put(b.dupe("ssz"), module_ssz) catch @panic("OOM");
+    b.modules.put(b.allocator, b.dupe("ssz"), module_ssz) catch @panic("OOM");
 
     const module_bls = b.createModule(.{
         .root_source_file = b.path("src/bls/root.zig"),
@@ -152,21 +160,21 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     module_bls.linkLibrary(dep_blst.artifact("blst"));
-    b.modules.put(b.dupe("bls"), module_bls) catch @panic("OOM");
+    b.modules.put(b.allocator, b.dupe("bls"), module_bls) catch @panic("OOM");
 
     const module_state_transition = b.createModule(.{
         .root_source_file = b.path("src/state_transition/root.zig"),
         .target = target,
         .optimize = optimize,
     });
-    b.modules.put(b.dupe("state_transition"), module_state_transition) catch @panic("OOM");
+    b.modules.put(b.allocator, b.dupe("state_transition"), module_state_transition) catch @panic("OOM");
 
     const module_download_era_files = b.createModule(.{
         .root_source_file = b.path("scripts/download_era_files.zig"),
         .target = target,
         .optimize = optimize,
     });
-    b.modules.put(b.dupe("download_era_files"), module_download_era_files) catch @panic("OOM");
+    b.modules.put(b.allocator, b.dupe("download_era_files"), module_download_era_files) catch @panic("OOM");
 
     const exe_download_era_files = b.addExecutable(.{
         .name = "download_era_files",
@@ -189,7 +197,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    b.modules.put(b.dupe("metrics_stf"), module_metrics_stf) catch @panic("OOM");
+    b.modules.put(b.allocator, b.dupe("metrics_stf"), module_metrics_stf) catch @panic("OOM");
 
     const exe_metrics_stf = b.addExecutable(.{
         .name = "metrics_stf",
@@ -200,7 +208,8 @@ pub fn build(b: *std.Build) void {
 
     const tls_install_exe_metrics_stf = b.step("build-exe:metrics_stf", "Install the metrics_stf executable");
     tls_install_exe_metrics_stf.dependOn(&install_exe_metrics_stf.step);
-    b.getInstallStep().dependOn(&install_exe_metrics_stf.step);
+    // httpz dependency is currently disabled, so skip metrics_stf from default build
+    // b.getInstallStep().dependOn(&install_exe_metrics_stf.step);
 
     const run_exe_metrics_stf = b.addRunArtifact(exe_metrics_stf);
     if (b.args) |args| run_exe_metrics_stf.addArgs(args);
@@ -212,7 +221,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    b.modules.put(b.dupe("download_spec_tests"), module_download_spec_tests) catch @panic("OOM");
+    b.modules.put(b.allocator, b.dupe("download_spec_tests"), module_download_spec_tests) catch @panic("OOM");
 
     const exe_download_spec_tests = b.addExecutable(.{
         .name = "download_spec_tests",
@@ -235,7 +244,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    b.modules.put(b.dupe("write_spec_tests"), module_write_spec_tests) catch @panic("OOM");
+    b.modules.put(b.allocator, b.dupe("write_spec_tests"), module_write_spec_tests) catch @panic("OOM");
 
     const exe_write_spec_tests = b.addExecutable(.{
         .name = "write_spec_tests",
@@ -258,7 +267,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    b.modules.put(b.dupe("write_ssz_generic_spec_tests"), module_write_ssz_generic_spec_tests) catch @panic("OOM");
+    b.modules.put(b.allocator, b.dupe("write_ssz_generic_spec_tests"), module_write_ssz_generic_spec_tests) catch @panic("OOM");
 
     const exe_write_ssz_generic_spec_tests = b.addExecutable(.{
         .name = "write_ssz_generic_spec_tests",
@@ -281,7 +290,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    b.modules.put(b.dupe("write_ssz_static_spec_tests"), module_write_ssz_static_spec_tests) catch @panic("OOM");
+    b.modules.put(b.allocator, b.dupe("write_ssz_static_spec_tests"), module_write_ssz_static_spec_tests) catch @panic("OOM");
 
     const exe_write_ssz_static_spec_tests = b.addExecutable(.{
         .name = "write_ssz_static_spec_tests",
@@ -304,7 +313,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    b.modules.put(b.dupe("write_bls_spec_tests"), module_write_bls_spec_tests) catch @panic("OOM");
+    b.modules.put(b.allocator, b.dupe("write_bls_spec_tests"), module_write_bls_spec_tests) catch @panic("OOM");
 
     const exe_write_bls_spec_tests = b.addExecutable(.{
         .name = "write_bls_spec_tests",
@@ -327,7 +336,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    b.modules.put(b.dupe("bench_ssz_attestation"), module_bench_ssz_attestation) catch @panic("OOM");
+    b.modules.put(b.allocator, b.dupe("bench_ssz_attestation"), module_bench_ssz_attestation) catch @panic("OOM");
 
     const exe_bench_ssz_attestation = b.addExecutable(.{
         .name = "bench_ssz_attestation",
@@ -350,7 +359,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    b.modules.put(b.dupe("bench_ssz_block"), module_bench_ssz_block) catch @panic("OOM");
+    b.modules.put(b.allocator, b.dupe("bench_ssz_block"), module_bench_ssz_block) catch @panic("OOM");
 
     const exe_bench_ssz_block = b.addExecutable(.{
         .name = "bench_ssz_block",
@@ -373,7 +382,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    b.modules.put(b.dupe("bench_ssz_state"), module_bench_ssz_state) catch @panic("OOM");
+    b.modules.put(b.allocator, b.dupe("bench_ssz_state"), module_bench_ssz_state) catch @panic("OOM");
 
     const exe_bench_ssz_state = b.addExecutable(.{
         .name = "bench_ssz_state",
@@ -396,7 +405,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    b.modules.put(b.dupe("bench_merkle_gindex"), module_bench_merkle_gindex) catch @panic("OOM");
+    b.modules.put(b.allocator, b.dupe("bench_merkle_gindex"), module_bench_merkle_gindex) catch @panic("OOM");
 
     const exe_bench_merkle_gindex = b.addExecutable(.{
         .name = "bench_merkle_gindex",
@@ -419,7 +428,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    b.modules.put(b.dupe("bench_merkle_node"), module_bench_merkle_node) catch @panic("OOM");
+    b.modules.put(b.allocator, b.dupe("bench_merkle_node"), module_bench_merkle_node) catch @panic("OOM");
 
     const exe_bench_merkle_node = b.addExecutable(.{
         .name = "bench_merkle_node",
@@ -442,7 +451,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    b.modules.put(b.dupe("bench_hashing"), module_bench_hashing) catch @panic("OOM");
+    b.modules.put(b.allocator, b.dupe("bench_hashing"), module_bench_hashing) catch @panic("OOM");
 
     const exe_bench_hashing = b.addExecutable(.{
         .name = "bench_hashing",
@@ -467,7 +476,7 @@ pub fn build(b: *std.Build) void {
         .strip = false,
         .omit_frame_pointer = false,
     });
-    b.modules.put(b.dupe("bench_process_block"), module_bench_process_block) catch @panic("OOM");
+    b.modules.put(b.allocator, b.dupe("bench_process_block"), module_bench_process_block) catch @panic("OOM");
 
     const exe_bench_process_block = b.addExecutable(.{
         .name = "bench_process_block",
@@ -490,7 +499,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    b.modules.put(b.dupe("bench_process_epoch"), module_bench_process_epoch) catch @panic("OOM");
+    b.modules.put(b.allocator, b.dupe("bench_process_epoch"), module_bench_process_epoch) catch @panic("OOM");
 
     const exe_bench_process_epoch = b.addExecutable(.{
         .name = "bench_process_epoch",
@@ -513,7 +522,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    b.modules.put(b.dupe("bindings"), module_bindings) catch @panic("OOM");
+    b.modules.put(b.allocator, b.dupe("bindings"), module_bindings) catch @panic("OOM");
 
     const lib_bindings = b.addLibrary(.{
         .name = "bindings",
@@ -726,7 +735,8 @@ pub fn build(b: *std.Build) void {
     const run_test_metrics_stf = b.addRunArtifact(test_metrics_stf);
     const tls_run_test_metrics_stf = b.step("test:metrics_stf", "Run the metrics_stf test");
     tls_run_test_metrics_stf.dependOn(&run_test_metrics_stf.step);
-    tls_run_test.dependOn(&run_test_metrics_stf.step);
+    // httpz dependency is currently disabled, so skip metrics_stf from default test
+    // tls_run_test.dependOn(&run_test_metrics_stf.step);
 
     const test_download_spec_tests = b.addTest(.{
         .name = "download_spec_tests",
@@ -929,7 +939,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    b.modules.put(b.dupe("int"), module_int) catch @panic("OOM");
+    b.modules.put(b.allocator, b.dupe("int"), module_int) catch @panic("OOM");
 
     const test_int = b.addTest(.{
         .name = "int",
@@ -950,7 +960,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    b.modules.put(b.dupe("spec_tests"), module_spec_tests) catch @panic("OOM");
+    b.modules.put(b.allocator, b.dupe("spec_tests"), module_spec_tests) catch @panic("OOM");
 
     const test_spec_tests = b.addTest(.{
         .name = "spec_tests",
@@ -971,7 +981,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    b.modules.put(b.dupe("ssz_generic_spec_tests"), module_ssz_generic_spec_tests) catch @panic("OOM");
+    b.modules.put(b.allocator, b.dupe("ssz_generic_spec_tests"), module_ssz_generic_spec_tests) catch @panic("OOM");
 
     const test_ssz_generic_spec_tests = b.addTest(.{
         .name = "ssz_generic_spec_tests",
@@ -992,7 +1002,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    b.modules.put(b.dupe("ssz_static_spec_tests"), module_ssz_static_spec_tests) catch @panic("OOM");
+    b.modules.put(b.allocator, b.dupe("ssz_static_spec_tests"), module_ssz_static_spec_tests) catch @panic("OOM");
 
     const test_ssz_static_spec_tests = b.addTest(.{
         .name = "ssz_static_spec_tests",
@@ -1013,7 +1023,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    b.modules.put(b.dupe("bls_spec_tests"), module_bls_spec_tests) catch @panic("OOM");
+    b.modules.put(b.allocator, b.dupe("bls_spec_tests"), module_bls_spec_tests) catch @panic("OOM");
 
     const test_bls_spec_tests = b.addTest(.{
         .name = "bls_spec_tests",
@@ -1080,6 +1090,7 @@ pub fn build(b: *std.Build) void {
     module_state_transition.addImport("preset", module_preset);
     module_state_transition.addImport("constants", module_constants);
     module_state_transition.addImport("hex", module_hex);
+    module_state_transition.addImport("time", module_time);
     module_state_transition.addImport("persistent_merkle_tree", module_persistent_merkle_tree);
     module_state_transition.addImport("metrics", dep_metrics.module("metrics"));
 
@@ -1092,7 +1103,8 @@ pub fn build(b: *std.Build) void {
     module_metrics_stf.addImport("era", module_era);
     module_metrics_stf.addImport("config", module_config);
     module_metrics_stf.addImport("preset", module_preset);
-    module_metrics_stf.addImport("httpz", dep_httpz.module("httpz"));
+    // TODO: Re-enable once karlseguin/http.zig supports Zig 0.16.0
+    // module_metrics_stf.addImport("httpz", dep_httpz.module("httpz"));
 
     module_download_spec_tests.addImport("spec_test_options", options_module_spec_test_options);
 
@@ -1140,6 +1152,7 @@ pub fn build(b: *std.Build) void {
     module_bench_hashing.addImport("zbench", dep_zbench.module("zbench"));
 
     module_bench_process_block.addImport("state_transition", module_state_transition);
+    module_bench_process_block.addImport("time", module_time);
     module_bench_process_block.addImport("fork_types", module_fork_types);
     module_bench_process_block.addImport("consensus_types", module_consensus_types);
     module_bench_process_block.addImport("config", module_config);
@@ -1149,6 +1162,7 @@ pub fn build(b: *std.Build) void {
     module_bench_process_block.addImport("era", module_era);
 
     module_bench_process_epoch.addImport("state_transition", module_state_transition);
+    module_bench_process_epoch.addImport("time", module_time);
     module_bench_process_epoch.addImport("fork_types", module_fork_types);
     module_bench_process_epoch.addImport("consensus_types", module_consensus_types);
     module_bench_process_epoch.addImport("config", module_config);

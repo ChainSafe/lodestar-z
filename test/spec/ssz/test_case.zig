@@ -125,19 +125,19 @@ pub fn parseYamlToJson(allocator: Allocator, y: yaml.Yaml.Value, writer: anytype
     }
 }
 
-pub fn validTestCase(comptime ST: type, gpa: Allocator, path: std.fs.Dir, meta_file_name: []const u8) !void {
+pub fn validTestCase(comptime ST: type, gpa: Allocator, path: std.Io.Dir, meta_file_name: []const u8) !void {
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
     const allocator = arena.allocator();
+    const io = std.testing.io;
 
     // read expected root
 
-    const meta_file = try path.openFile(meta_file_name, .{});
-    defer meta_file.close();
+    const meta_bytes = try path.readFileAlloc(io, meta_file_name, allocator, .unlimited);
+
     const Meta = struct {
         root: []const u8,
     };
-    const meta_bytes = try meta_file.readToEndAlloc(allocator, 1_000);
 
     var meta_yaml = yaml.Yaml{ .source = meta_bytes };
     try meta_yaml.load(allocator);
@@ -147,24 +147,24 @@ pub fn validTestCase(comptime ST: type, gpa: Allocator, path: std.fs.Dir, meta_f
 
     // read yaml
 
-    const value_file = try path.openFile("value.yaml", .{});
-    defer value_file.close();
-    const value_bytes = try value_file.readToEndAlloc(allocator, 100_000_000);
+    const value_bytes = try path.readFileAlloc(io, "value.yaml", allocator, .unlimited);
 
     var value_yaml = yaml.Yaml{ .source = value_bytes };
     value_yaml.load(allocator) catch |e| {
-        value_yaml.parse_errors.renderToStdErr(.{ .ttyconf = .no_color });
+        value_yaml.parse_errors.renderToStderr(std.testing.io, .{}, .off) catch {};
         return e;
     };
 
     // read expected json
 
-    var expected_json = std.ArrayList(u8).init(allocator);
-    defer expected_json.deinit();
-    var write_stream = std.json.writeStream(expected_json.writer(), .{});
-    defer write_stream.deinit();
+    var expected_json_aw: std.Io.Writer.Allocating = .init(allocator);
+    defer expected_json_aw.deinit();
+    var write_stream: std.json.Stringify = .{ .writer = &expected_json_aw.writer };
 
     try parseYamlToJson(allocator, value_yaml.docs.items[0], &write_stream);
+
+    const expected_json = try expected_json_aw.toOwnedSlice();
+    defer allocator.free(expected_json);
 
     // read expected value
 
@@ -174,9 +174,7 @@ pub fn validTestCase(comptime ST: type, gpa: Allocator, path: std.fs.Dir, meta_f
 
     // read expected serialized
 
-    const serialized_file = try path.openFile("serialized.ssz_snappy", .{});
-    defer serialized_file.close();
-    const serialized_snappy_bytes = try serialized_file.readToEndAlloc(allocator, 100_000_000);
+    const serialized_snappy_bytes = try path.readFileAlloc(io, "serialized.ssz_snappy", allocator, .unlimited);
 
     const serialized_buf = try allocator.alloc(u8, try snappy.uncompressedLength(serialized_snappy_bytes));
     const serialized_len = try snappy.uncompress(serialized_snappy_bytes, serialized_buf);
@@ -213,10 +211,9 @@ pub fn validTestCase(comptime ST: type, gpa: Allocator, path: std.fs.Dir, meta_f
     // test serialization - value to json
 
     {
-        var serialized_actual = std.ArrayList(u8).init(allocator);
-        defer serialized_actual.deinit();
-        var write_stream_actual = std.json.writeStream(serialized_actual.writer(), .{});
-        defer write_stream_actual.deinit();
+        var aw_actual: std.Io.Writer.Allocating = .init(allocator);
+        defer aw_actual.deinit();
+        var write_stream_actual: std.json.Stringify = .{ .writer = &aw_actual.writer };
 
         if (comptime ssz.isFixedType(ST)) {
             try ST.serializeIntoJson(&write_stream_actual, value_expected);
@@ -224,7 +221,10 @@ pub fn validTestCase(comptime ST: type, gpa: Allocator, path: std.fs.Dir, meta_f
             try ST.serializeIntoJson(allocator, &write_stream_actual, value_expected);
         }
 
-        try std.testing.expectEqualSlices(u8, expected_json.items, serialized_actual.items);
+        const serialized_json_actual = try aw_actual.toOwnedSlice();
+        defer allocator.free(serialized_json_actual);
+
+        try std.testing.expectEqualSlices(u8, expected_json, serialized_json_actual);
     }
 
     // test deserialization - json to value
@@ -232,7 +232,7 @@ pub fn validTestCase(comptime ST: type, gpa: Allocator, path: std.fs.Dir, meta_f
         const value_actual = try allocator.create(ST.Type);
         value_actual.* = ST.default_value;
 
-        var scanner = std.json.Scanner.initCompleteInput(allocator, expected_json.items);
+        var scanner = std.json.Scanner.initCompleteInput(allocator, expected_json);
         defer scanner.deinit();
 
         if (comptime ssz.isFixedType(ST)) {
@@ -304,16 +304,15 @@ pub fn validTestCase(comptime ST: type, gpa: Allocator, path: std.fs.Dir, meta_f
     }
 }
 
-pub fn invalidTestCase(comptime ST: type, gpa: Allocator, path: std.fs.Dir) !void {
+pub fn invalidTestCase(comptime ST: type, gpa: Allocator, path: std.Io.Dir) !void {
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
     const allocator = arena.allocator();
+    const io = std.testing.io;
 
     // read expected serialized
 
-    const serialized_file = try path.openFile("serialized.ssz_snappy", .{});
-    defer serialized_file.close();
-    const serialized_snappy_bytes = try serialized_file.readToEndAlloc(allocator, 1_000_000);
+    const serialized_snappy_bytes = try path.readFileAlloc(io, "serialized.ssz_snappy", allocator, .unlimited);
 
     const serialized_buf = try allocator.alloc(u8, try snappy.uncompressedLength(serialized_snappy_bytes));
     const serialized_len = try snappy.uncompress(serialized_snappy_bytes, serialized_buf);

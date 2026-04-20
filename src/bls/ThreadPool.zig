@@ -12,9 +12,7 @@ const ThreadPool = @This();
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const c = @cImport({
-    @cInclude("blst.h");
-});
+const c = @import("root.zig").c;
 const Pairing = @import("Pairing.zig");
 const blst = @import("root.zig");
 const PublicKey = blst.PublicKey;
@@ -55,8 +53,8 @@ queue: JobQueue,
 /// Thread-safe FIFO work queue. Workers wait on `cond` for new items
 /// and pop them in submission order.
 const JobQueue = struct {
-    mutex: std.Thread.Mutex = .{},
-    cond: std.Thread.Condition = .{},
+    mutex: std.Io.Mutex = std.Io.Mutex.init,
+    cond: std.Io.Condition = std.Io.Condition.init,
     head: ?*WorkItem = null,
     tail: ?*WorkItem = null,
 
@@ -64,9 +62,9 @@ const JobQueue = struct {
     ///
     /// Returns false if the pool has signalled that it is shutting down and does
     /// not push any work.
-    fn pushBatch(self: *JobQueue, pool: *ThreadPool, items: []*WorkItem) bool {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+    fn pushBatch(self: *JobQueue, io: std.Io, pool: *ThreadPool, items: []*WorkItem) std.Io.Cancelable!bool {
+        try self.mutex.lock(io);
+        defer self.mutex.unlock(io);
 
         if (pool.shutting_down.load(.acquire)) return false;
 
@@ -79,7 +77,7 @@ const JobQueue = struct {
             }
             self.tail = item;
         }
-        self.cond.broadcast();
+        self.cond.broadcast(io);
         return true;
     }
 
@@ -98,13 +96,13 @@ const JobQueue = struct {
 /// executes the work function, then signals `done`.
 const WorkItem = struct {
     exec_fn: *const fn (*WorkItem) void,
-    done: std.Thread.ResetEvent = .{},
+    done: std.Io.Event = .unset,
     next: ?*WorkItem = null,
 };
 
 /// Creates a thread pool with the specified number of workers.
 /// The caller owns the returned pool and must call `deinit` when done.
-pub fn init(allocator_: Allocator, opts: Opts) (Allocator.Error || std.Thread.SpawnError)!*ThreadPool {
+pub fn init(allocator_: Allocator, io: std.Io, opts: Opts) (Allocator.Error || std.Thread.SpawnError)!*ThreadPool {
     std.debug.assert(opts.n_workers >= 1);
     std.debug.assert(opts.n_workers <= MAX_WORKERS);
 
@@ -115,7 +113,7 @@ pub fn init(allocator_: Allocator, opts: Opts) (Allocator.Error || std.Thread.Sp
         .queue = .{},
     };
     for (0..pool.n_workers) |i| {
-        pool.threads[i] = try std.Thread.spawn(.{}, workerLoop, .{pool});
+        pool.threads[i] = try std.Thread.spawn(.{}, workerLoop, .{ pool, io });
     }
     return pool;
 }
@@ -128,15 +126,15 @@ pub fn init(allocator_: Allocator, opts: Opts) (Allocator.Error || std.Thread.Sp
 ///   3) wait for workers to finish draining then cleanup
 ///
 /// The pool pointer is invalid after this call.
-pub fn deinit(pool: *ThreadPool) void {
+pub fn deinit(pool: *ThreadPool, io: std.Io) void {
     // Phase 1: stop accepting new work
-    pool.queue.mutex.lock();
+    pool.queue.mutex.lockUncancelable(io);
     pool.shutting_down.store(true, .release);
 
     // Phase 2: tell workers to drain queue then exit
     pool.shutdown.store(true, .release);
-    pool.queue.cond.broadcast();
-    pool.queue.mutex.unlock();
+    pool.queue.cond.broadcast(io);
+    pool.queue.mutex.unlock(io);
 
     // Phase 3: wait for workers to finish draining and cleanup
     for (pool.threads[0..pool.n_workers]) |t| t.join();
@@ -151,29 +149,31 @@ pub fn deinit(pool: *ThreadPool) void {
 /// Safety: it is safe to pop work first since we stop accepting work
 /// in `pushBatch` by checking for the `shutting_down` signal; no new
 /// work can be accepted at the point of entry into this loop.
-fn workerLoop(pool: *ThreadPool) void {
+fn workerLoop(pool: *ThreadPool, io: std.Io) void {
     while (true) {
         const item: *WorkItem = blk: {
-            pool.queue.mutex.lock();
-            defer pool.queue.mutex.unlock();
+            pool.queue.mutex.lockUncancelable(io);
+            defer pool.queue.mutex.unlock(io);
 
             while (true) {
                 if (pool.queue.pop()) |wi| break :blk wi;
                 if (pool.shutdown.load(.acquire)) return;
-                pool.queue.cond.wait(&pool.queue.mutex);
+                pool.queue.cond.waitUncancelable(io, &pool.queue.mutex);
             }
         };
 
         item.exec_fn(item);
-        item.done.set();
+        item.done.set(io);
     }
 }
 
 /// Submit work items to the pool and wait for all to complete.
-fn submitAndWait(pool: *ThreadPool, items: []*WorkItem) PoolError!void {
-    if (!pool.queue.pushBatch(pool, items)) return PoolError.ShuttingDown;
+fn submitAndWait(pool: *ThreadPool, io: std.Io, items: []*WorkItem) (PoolError || std.Io.Cancelable)!void {
+    if (!try pool.queue.pushBatch(io, pool, items)) return PoolError.ShuttingDown;
+    // NOTE: must be uncancelable — work items live on the caller's stack, so a
+    // cancel here would let workers write into freed frames.
     for (items) |item| {
-        item.done.wait();
+        item.done.waitUncancelable(io);
     }
 }
 
@@ -243,6 +243,7 @@ const VerifyMultiWorkItem = struct {
 /// pairing buffers and job state, workers pull from a shared queue.
 pub fn verifyMultipleAggregateSignatures(
     pool: *ThreadPool,
+    io: std.Io,
     n_elems: usize,
     msgs: []const [32]u8,
     dst: []const u8,
@@ -251,7 +252,7 @@ pub fn verifyMultipleAggregateSignatures(
     sigs: []const *Signature,
     sigs_groupcheck: bool,
     rands: []const [32]u8,
-) (BlstError || PoolError)!bool {
+) (BlstError || PoolError || std.Io.Cancelable)!bool {
     if (n_elems == 0 or
         pks.len != n_elems or
         sigs.len != n_elems or
@@ -305,7 +306,7 @@ pub fn verifyMultipleAggregateSignatures(
         item_ptrs[i] = &work_items[i].base;
     }
 
-    try pool.submitAndWait(item_ptrs[0..n_active]);
+    try pool.submitAndWait(io, item_ptrs[0..n_active]);
 
     if (job.err_flag.load(.acquire)) return BlstError.VerifyFail;
 
@@ -374,13 +375,14 @@ const AggVerifyWorkItem = struct {
 /// This is the multi-threaded version of `Signature.aggregateVerify`.
 pub fn aggregateVerify(
     pool: *ThreadPool,
+    io: std.Io,
     sig: *const Signature,
     sig_groupcheck: bool,
     msgs: []const [32]u8,
     dst: []const u8,
     pks: []const *PublicKey,
     pks_validate: bool,
-) (BlstError || PoolError)!bool {
+) (BlstError || PoolError || std.Io.Cancelable)!bool {
     const n_elems = pks.len;
     if (n_elems == 0 or msgs.len != n_elems) return BlstError.VerifyFail;
 
@@ -426,7 +428,7 @@ pub fn aggregateVerify(
         item_ptrs[i] = &work_items[i].base;
     }
 
-    try pool.submitAndWait(item_ptrs[0..n_active]);
+    try pool.submitAndWait(io, item_ptrs[0..n_active]);
 
     if (job.err_flag.load(.acquire)) return false;
 
@@ -458,8 +460,8 @@ fn mergeAndVerify(
 }
 
 test "verifyMultipleAggregateSignatures multi-threaded" {
-    const pool = try ThreadPool.init(std.testing.allocator, .{ .n_workers = 4 });
-    defer pool.deinit();
+    const pool = try ThreadPool.init(std.testing.allocator, std.testing.io, .{ .n_workers = 4 });
+    defer pool.deinit(std.testing.io);
 
     const ikm: [32]u8 = .{
         0x93, 0xad, 0x7e, 0x65, 0xde, 0xad, 0x05, 0x2a, 0x08, 0x3a,
@@ -478,7 +480,7 @@ test "verifyMultipleAggregateSignatures multi-threaded" {
 
     var prng = std.Random.DefaultPrng.init(blk: {
         var seed: u64 = undefined;
-        std.posix.getrandom(std.mem.asBytes(&seed)) catch unreachable;
+        std.testing.io.random(std.mem.asBytes(&seed));
         break :blk seed;
     });
     const rand = prng.random();
@@ -498,6 +500,7 @@ test "verifyMultipleAggregateSignatures multi-threaded" {
     for (&rands) |*r| std.Random.bytes(rand, r);
 
     const result = try pool.verifyMultipleAggregateSignatures(
+        std.testing.io,
         num_sigs,
         &msgs,
         blst.DST,
@@ -512,8 +515,8 @@ test "verifyMultipleAggregateSignatures multi-threaded" {
 }
 
 test "aggregateVerify multi-threaded" {
-    const pool = try ThreadPool.init(std.testing.allocator, .{ .n_workers = 4 });
-    defer pool.deinit();
+    const pool = try ThreadPool.init(std.testing.allocator, std.testing.io, .{ .n_workers = 4 });
+    defer pool.deinit(std.testing.io);
 
     const AggregateSignature = blst.AggregateSignature;
 
@@ -533,7 +536,7 @@ test "aggregateVerify multi-threaded" {
 
     var prng = std.Random.DefaultPrng.init(blk: {
         var seed: u64 = undefined;
-        std.posix.getrandom(std.mem.asBytes(&seed)) catch unreachable;
+        std.testing.io.random(std.mem.asBytes(&seed));
         break :blk seed;
     });
     const rand = prng.random();
@@ -552,6 +555,7 @@ test "aggregateVerify multi-threaded" {
     const final_sig = agg_sig.toSignature();
 
     try std.testing.expect(try pool.aggregateVerify(
+        std.testing.io,
         &final_sig,
         false,
         &msgs,

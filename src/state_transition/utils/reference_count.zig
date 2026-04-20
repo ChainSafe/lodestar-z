@@ -22,7 +22,16 @@ pub fn ReferenceCount(comptime T: type) type {
         }
 
         pub fn deinit(self: *@This()) void {
-            self.instance.deinit();
+            const BaseT = switch (@typeInfo(T)) {
+                .pointer => |p| p.child,
+                else => T,
+            };
+            const deinit_params = @typeInfo(@TypeOf(BaseT.deinit)).@"fn".params;
+            if (comptime deinit_params.len > 1) {
+                self.instance.deinit(self.allocator);
+            } else {
+                self.instance.deinit();
+            }
             self.allocator.destroy(self);
         }
 
@@ -53,9 +62,9 @@ test "ReferenceCount - *std.ArrayList(u32)" {
     const allocator = std.testing.allocator;
     const WrappedArrayList = ReferenceCount(*std.ArrayList(u32));
 
-    var array_list = std.ArrayList(u32).init(allocator);
-    try array_list.append(1);
-    try array_list.append(2);
+    var array_list: std.ArrayList(u32) = .empty;
+    try array_list.append(allocator, 1);
+    try array_list.append(allocator, 2);
 
     // ref_count = 1
     var wrapped_array_list = try WrappedArrayList.init(allocator, &array_list);
@@ -75,7 +84,7 @@ test "ReferenceCount - std.ArrayList(u32)" {
     const WrappedArrayList = ReferenceCount(std.ArrayList(u32));
 
     // ref_count = 1
-    var wrapped_array_list = try WrappedArrayList.init(allocator, std.ArrayList(u32).init(allocator));
+    var wrapped_array_list = try WrappedArrayList.init(allocator, .empty);
     // ref_count = 2
     _ = wrapped_array_list.acquire();
 
