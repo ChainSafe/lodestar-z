@@ -108,7 +108,7 @@ const ResolvedRunInputs = struct {
 };
 
 const PreparedHandles = struct {
-    file_transport: ?log_mod.FileTransport,
+    file_transport: ?*log_mod.FileTransport,
     direct_peers: []const []const u8,
     beacon_metrics: *BeaconMetrics,
     state_transition_metrics: *StateTransitionMetrics,
@@ -127,7 +127,10 @@ const PreparedHandles = struct {
         allocator.destroy(self.state_transition_metrics);
         allocator.destroy(self.metrics_surface);
         if (self.direct_peers.len > 0) allocator.free(self.direct_peers);
-        if (self.file_transport) |*ft| ft.close();
+        if (self.file_transport) |ft| {
+            ft.close();
+            allocator.destroy(ft);
+        }
     }
 };
 
@@ -738,7 +741,7 @@ fn prepareRunContextImpl(io: Io, allocator: Allocator, inputs: *const ResolvedRu
 }
 
 const StartupPrep = struct {
-    file_transport: ?log_mod.FileTransport = null,
+    file_transport: ?*log_mod.FileTransport = null,
     direct_peers: []const []const u8 = &.{},
     p2p_bind_host: []const u8 = "0.0.0.0",
     p2p_bind_port: u16 = 0,
@@ -750,7 +753,10 @@ const StartupPrep = struct {
             allocator.destroy(prepared_runtime);
         }
         if (self.direct_peers.len > 0) allocator.free(self.direct_peers);
-        if (self.file_transport) |*ft| ft.close();
+        if (self.file_transport) |ft| {
+            ft.close();
+            allocator.destroy(ft);
+        }
     }
 };
 
@@ -783,7 +789,7 @@ const NodeReadyContext = struct {
 fn prepareRunContextStartup(io: Io, allocator: Allocator, inputs: *const ResolvedRunInputs, startup: *StartupPrep) !void {
     log_mod.configure(inputs.log_level.toLogLevel(), inputs.log_format);
     if (inputs.log_file != null) {
-        prepareStartupFileTransport(io, inputs, startup);
+        try prepareStartupFileTransport(io, allocator, inputs, startup);
     }
     logStartupConfig(inputs);
 
@@ -839,25 +845,28 @@ fn prepareStartupPeers(allocator: Allocator, inputs: *const ResolvedRunInputs, s
         inputs.p2p_port6 orelse inputs.p2p_port;
 }
 
-fn prepareStartupFileTransport(io: Io, inputs: *const ResolvedRunInputs, startup: *StartupPrep) void {
+fn prepareStartupFileTransport(io: Io, allocator: Allocator, inputs: *const ResolvedRunInputs, startup: *StartupPrep) !void {
     const log_file_path = inputs.log_file orelse return;
     const file_level = inputs.log_file_level.toLogLevel();
 
-    startup.file_transport = log_mod.FileTransport.init(io, log_file_path, file_level, .{
+    const ft = try allocator.create(log_mod.FileTransport);
+    errdefer allocator.destroy(ft);
+    ft.* = log_mod.FileTransport.init(io, log_file_path, file_level, .{
         .max_size_bytes = 100 * 1024 * 1024,
         .max_files = inputs.log_file_daily_rotate,
         .daily = inputs.log_file_daily_rotate > 0,
     });
+    startup.file_transport = ft;
 
-    if (startup.file_transport) |*ft| {
-        if (log_mod.setFileTransport(ft)) |_| {
-            scoped_log.info("File logging enabled: {s} (level={s})", .{
-                log_file_path, file_level.asText(),
-            });
-        } else |err| {
-            scoped_log.err("Failed to start log file transport '{s}': {}", .{ log_file_path, err });
-            startup.file_transport = null;
-        }
+    if (log_mod.setFileTransport(ft)) |_| {
+        scoped_log.info("File logging enabled: {s} (level={s})", .{
+            log_file_path, file_level.asText(),
+        });
+    } else |err| {
+        scoped_log.err("Failed to start log file transport '{s}': {}", .{ log_file_path, err });
+        startup.file_transport = null;
+        ft.close();
+        allocator.destroy(ft);
     }
 }
 
