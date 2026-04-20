@@ -191,6 +191,20 @@ pub const CustodyQuery = struct {
     min_peers: u32 = 1,
 };
 
+const DemandReservation = struct {
+    generic: bool = false,
+    attnets: [8]u8 = [_]u8{0} ** 8,
+    syncnets: [1]u8 = [_]u8{0} ** 1,
+    custody_columns: CustodyColumnsBitfield = CustodyColumnsBitfield.initEmpty(),
+
+    fn isEmpty(self: DemandReservation) bool {
+        return !self.generic and
+            std.mem.eql(u8, &self.attnets, &([_]u8{0} ** 8)) and
+            std.mem.eql(u8, &self.syncnets, &([_]u8{0} ** 1)) and
+            self.custody_columns.count() == 0;
+    }
+};
+
 // ── Discovery Service ───────────────────────────────────────────────────────
 
 /// ENR cache entry for subnet-targeted queries.
@@ -219,6 +233,10 @@ pub const DiscoveryService = struct {
     active_attestation_queries: std.AutoHashMap(u8, u32),
     active_sync_queries: std.AutoHashMap(u8, u32),
     active_custody_queries: std.AutoHashMap(u64, u32),
+    reserved_attestation_queries: std.AutoHashMap(u8, u32),
+    reserved_sync_queries: std.AutoHashMap(u8, u32),
+    reserved_custody_queries: std.AutoHashMap(u64, u32),
+    dial_reservations: std.AutoHashMap(NodeId, DemandReservation),
     lookup_sources: std.AutoHashMap(u32, DiscoverySource),
     /// ENR cache for subnet-targeted queries.
     /// Stores parsed ENR records indexed by node ID (hex string ownership).
@@ -226,6 +244,7 @@ pub const DiscoveryService = struct {
     connected_peers: u32,
     bootnode_session_wait_cycles: u8,
     generic_peers_to_discover: u32,
+    reserved_generic_peers_to_discover: u32,
     total_lookups: u64,
     total_discovered: u64,
     total_filtered_out: u64,
@@ -300,11 +319,16 @@ pub const DiscoveryService = struct {
             .active_attestation_queries = std.AutoHashMap(u8, u32).init(allocator),
             .active_sync_queries = std.AutoHashMap(u8, u32).init(allocator),
             .active_custody_queries = std.AutoHashMap(u64, u32).init(allocator),
+            .reserved_attestation_queries = std.AutoHashMap(u8, u32).init(allocator),
+            .reserved_sync_queries = std.AutoHashMap(u8, u32).init(allocator),
+            .reserved_custody_queries = std.AutoHashMap(u64, u32).init(allocator),
+            .dial_reservations = std.AutoHashMap(NodeId, DemandReservation).init(allocator),
             .lookup_sources = std.AutoHashMap(u32, DiscoverySource).init(allocator),
             .enr_cache = std.StringHashMap(CachedEnr).init(allocator),
             .connected_peers = 0,
             .bootnode_session_wait_cycles = 0,
             .generic_peers_to_discover = 0,
+            .reserved_generic_peers_to_discover = 0,
             .total_lookups = 0,
             .total_discovered = 0,
             .total_filtered_out = 0,
@@ -322,6 +346,10 @@ pub const DiscoveryService = struct {
         self.active_attestation_queries.deinit();
         self.active_sync_queries.deinit();
         self.active_custody_queries.deinit();
+        self.reserved_attestation_queries.deinit();
+        self.reserved_sync_queries.deinit();
+        self.reserved_custody_queries.deinit();
+        self.dial_reservations.deinit();
         self.lookup_sources.deinit();
         // Free ENR cache (keys are owned string copies).
         var iter = self.enr_cache.iterator();
@@ -443,7 +471,6 @@ pub const DiscoveryService = struct {
             self.generic_peers_to_discover = self.config.target_peers - self.connected_peers;
         }
 
-        self.refreshActiveQueries();
         const has_unfulfilled_requests = self.queueCachedCandidates(peer_manager);
         if (has_unfulfilled_requests) {
             self.startRandomLookup(.random_lookup);
@@ -455,17 +482,30 @@ pub const DiscoveryService = struct {
     /// peer count. Used when peer-quality or custody coverage demand more
     /// candidates rather than just a higher raw peer count.
     pub fn requestMorePeers(self: *DiscoveryService, count: u32) void {
-        if (count == 0) return;
-        self.generic_peers_to_discover = @max(self.generic_peers_to_discover, count);
+        self.generic_peers_to_discover = count;
     }
 
     pub fn noteDialAttempt(self: *DiscoveryService, peer: *const DiscoveredPeer) void {
-        if (self.generic_peers_to_discover > 0) self.generic_peers_to_discover -= 1;
+        if (self.dial_reservations.contains(peer.node_id)) return;
 
         const key_hex = std.fmt.bytesToHex(peer.node_id, .lower);
         const cached = self.enr_cache.get(key_hex[0..]) orelse return;
-        self.consumeMatchingSubnetQueries(&cached);
-        self.consumeMatchingCustodyQueries(&cached);
+        const reservation = self.reserveMatchingDemand(&cached);
+        if (reservation.isEmpty()) return;
+        self.dial_reservations.put(peer.node_id, reservation) catch {
+            self.releaseReservedDemand(reservation);
+        };
+    }
+
+    pub fn noteDialFailed(self: *DiscoveryService, node_id: NodeId) void {
+        const removed = self.dial_reservations.fetchRemove(node_id) orelse return;
+        self.releaseReservedDemand(removed.value);
+    }
+
+    pub fn notePeerConnected(self: *DiscoveryService, node_id: NodeId) void {
+        const removed = self.dial_reservations.fetchRemove(node_id) orelse return;
+        self.releaseReservedDemand(removed.value);
+        self.consumeReservedDemand(removed.value);
     }
 
     fn startRandomLookup(self: *DiscoveryService, source: DiscoverySource) void {
@@ -567,8 +607,6 @@ pub const DiscoveryService = struct {
 
                     if (!self.filterEnr(&parsed)) continue;
                     self.recordEnr(discovered.node_id, &parsed);
-                    const queued_source = self.sourceForDiscoveredNode(discovered.node_id, self.sourceForLookup(discovered.lookup_id)) orelse continue;
-                    _ = self.evaluateEnrCandidate(discovered.node_id, &parsed, queued_source);
                 },
                 .lookup_finished => |lookup_finished| {
                     _ = self.lookup_sources.remove(lookup_finished.lookup_id);
@@ -668,22 +706,34 @@ pub const DiscoveryService = struct {
     // ── Subnet Queries ──────────────────────────────────────────────────
 
     pub fn requestSubnetPeers(self: *DiscoveryService, kind: SubnetKind, subnet_id: u6, min_peers: u32) void {
-        self.pending_subnet_queries.append(self.allocator, .{
-            .kind = kind,
-            .subnet_id = subnet_id,
-            .min_peers = min_peers,
-        }) catch {
-            log.debug("failed to queue {s} subnet query for subnet {d}", .{ @tagName(kind), subnet_id });
+        const map = switch (kind) {
+            .attestation => &self.active_attestation_queries,
+            .sync_committee => &self.active_sync_queries,
         };
+        const result = map.getOrPut(@intCast(subnet_id)) catch {
+            log.debug("failed to track {s} subnet query for subnet {d}", .{ @tagName(kind), subnet_id });
+            return;
+        };
+        if (!result.found_existing or result.value_ptr.* < min_peers) {
+            result.value_ptr.* = min_peers;
+        }
     }
 
     pub fn requestCustodyColumnPeers(self: *DiscoveryService, column_index: u64, min_peers: u32) void {
-        self.pending_custody_queries.append(self.allocator, .{
-            .column_index = column_index,
-            .min_peers = min_peers,
-        }) catch {
-            log.debug("failed to queue custody query for column {d}", .{column_index});
+        const result = self.active_custody_queries.getOrPut(column_index) catch {
+            log.debug("failed to track custody query for column {d}", .{column_index});
+            return;
         };
+        if (!result.found_existing or result.value_ptr.* < min_peers) {
+            result.value_ptr.* = min_peers;
+        }
+    }
+
+    pub fn resetRequestedPeerDemand(self: *DiscoveryService) void {
+        self.generic_peers_to_discover = 0;
+        self.active_attestation_queries.clearRetainingCapacity();
+        self.active_sync_queries.clearRetainingCapacity();
+        self.active_custody_queries.clearRetainingCapacity();
     }
 
     // ── Peer Queue ──────────────────────────────────────────────────────
@@ -760,7 +810,7 @@ pub const DiscoveryService = struct {
             .total_discovered = self.total_discovered,
             .total_filtered_out = self.total_filtered_out,
             .queued_peers = self.discovered_peers.items.len,
-            .pending_subnet_queries = self.pending_subnet_queries.items.len,
+            .pending_subnet_queries = @intCast(attnets_requested + syncnets_requested + custody_groups_to_connect),
             .peers_to_connect = self.generic_peers_to_discover,
             .subnets_to_connect = [_]u64{ attnets_requested, syncnets_requested, custody_groups_to_connect },
             .subnet_peers_to_connect = [_]u64{ attnets_to_connect, syncnets_to_connect, custody_group_peers_to_connect },
@@ -955,34 +1005,34 @@ pub const DiscoveryService = struct {
         return false;
     }
 
-    fn consumeMatchingSubnetQueries(self: *DiscoveryService, cached: *const CachedEnr) void {
-        var att_iter = self.active_attestation_queries.iterator();
-        while (att_iter.next()) |entry| {
-            if (entry.value_ptr.* == 0) continue;
-            if (enr_mod.isSubnetSet(cached.attnets, @intCast(entry.key_ptr.*))) {
-                entry.value_ptr.* -|= 1;
-            }
+    fn consumeReservedDemand(self: *DiscoveryService, reservation: DemandReservation) void {
+        if (reservation.generic and self.generic_peers_to_discover > 0) {
+            self.generic_peers_to_discover -= 1;
         }
-
-        var sync_iter = self.active_sync_queries.iterator();
-        while (sync_iter.next()) |entry| {
-            if (entry.value_ptr.* == 0) continue;
-            if (syncSubnetSet(cached.syncnets, @intCast(entry.key_ptr.*))) {
-                entry.value_ptr.* -|= 1;
-            }
-        }
+        consumeReservedSubnetQueries(&self.active_attestation_queries, reservation.attnets, enr_mod.isSubnetSet);
+        consumeReservedSubnetQueries(&self.active_sync_queries, reservation.syncnets, syncSubnetSet);
+        consumeReservedCustodyQueries(&self.active_custody_queries, reservation.custody_columns);
     }
 
-    fn consumeMatchingCustodyQueries(self: *DiscoveryService, cached: *const CachedEnr) void {
-        var iter = self.active_custody_queries.iterator();
-        while (iter.next()) |entry| {
-            if (entry.value_ptr.* == 0) continue;
-            const column_index = entry.key_ptr.*;
-            if (column_index >= custody.NUMBER_OF_COLUMNS) continue;
-            if (cached.custody_columns.isSet(@intCast(column_index))) {
-                entry.value_ptr.* -|= 1;
-            }
+    fn reserveMatchingDemand(self: *DiscoveryService, cached: *const CachedEnr) DemandReservation {
+        var reservation = DemandReservation{};
+        if (self.reserved_generic_peers_to_discover < self.generic_peers_to_discover) {
+            self.reserved_generic_peers_to_discover += 1;
+            reservation.generic = true;
         }
+        reservation.attnets = reserveMatchingSubnetQueries(&self.active_attestation_queries, &self.reserved_attestation_queries, cached.attnets, enr_mod.isSubnetSet);
+        reservation.syncnets = reserveMatchingSubnetQueries(&self.active_sync_queries, &self.reserved_sync_queries, cached.syncnets, syncSubnetSet);
+        reservation.custody_columns = reserveMatchingCustodyQueries(&self.active_custody_queries, &self.reserved_custody_queries, cached.custody_columns);
+        return reservation;
+    }
+
+    fn releaseReservedDemand(self: *DiscoveryService, reservation: DemandReservation) void {
+        if (reservation.generic and self.reserved_generic_peers_to_discover > 0) {
+            self.reserved_generic_peers_to_discover -= 1;
+        }
+        releaseReservedSubnetQueries(&self.reserved_attestation_queries, reservation.attnets, enr_mod.isSubnetSet);
+        releaseReservedSubnetQueries(&self.reserved_sync_queries, reservation.syncnets, syncSubnetSet);
+        releaseReservedCustodyQueries(&self.reserved_custody_queries, reservation.custody_columns);
     }
 
     fn hasOutstandingRequests(self: *const DiscoveryService) bool {
@@ -1037,16 +1087,16 @@ const PendingDiscoveryDemand = struct {
 
     fn init(allocator: Allocator, svc: *const DiscoveryService) !PendingDiscoveryDemand {
         var pending = PendingDiscoveryDemand{
-            .generic_remaining = svc.generic_peers_to_discover,
+            .generic_remaining = svc.generic_peers_to_discover -| svc.reserved_generic_peers_to_discover,
             .attestation_queries = std.AutoHashMap(u8, u32).init(allocator),
             .sync_queries = std.AutoHashMap(u8, u32).init(allocator),
             .custody_queries = std.AutoHashMap(u64, u32).init(allocator),
         };
         errdefer pending.deinit();
 
-        try cloneDemandMap(u8, &pending.attestation_queries, &svc.active_attestation_queries);
-        try cloneDemandMap(u8, &pending.sync_queries, &svc.active_sync_queries);
-        try cloneDemandMap(u64, &pending.custody_queries, &svc.active_custody_queries);
+        try cloneRemainingDemandMap(u8, &pending.attestation_queries, &svc.active_attestation_queries, &svc.reserved_attestation_queries);
+        try cloneRemainingDemandMap(u8, &pending.sync_queries, &svc.active_sync_queries, &svc.reserved_sync_queries);
+        try cloneRemainingDemandMap(u64, &pending.custody_queries, &svc.active_custody_queries, &svc.reserved_custody_queries);
         return pending;
     }
 
@@ -1153,6 +1203,123 @@ fn cloneDemandMap(comptime K: type, dst: *std.AutoHashMap(K, u32), src: *const s
     while (iter.next()) |entry| {
         try dst.put(entry.key_ptr.*, entry.value_ptr.*);
     }
+}
+
+fn cloneRemainingDemandMap(
+    comptime K: type,
+    dst: *std.AutoHashMap(K, u32),
+    active: *const std.AutoHashMap(K, u32),
+    reserved: *const std.AutoHashMap(K, u32),
+) !void {
+    var iter = active.iterator();
+    while (iter.next()) |entry| {
+        const remaining = entry.value_ptr.* -| (reserved.get(entry.key_ptr.*) orelse 0);
+        if (remaining == 0) continue;
+        try dst.put(entry.key_ptr.*, remaining);
+    }
+}
+
+fn reserveMatchingSubnetQueries(
+    active: *const std.AutoHashMap(u8, u32),
+    reserved: *std.AutoHashMap(u8, u32),
+    bits: anytype,
+    comptime matcher: anytype,
+) @TypeOf(bits) {
+    var reserved_bits = std.mem.zeroes(@TypeOf(bits));
+    var iter = active.iterator();
+    while (iter.next()) |entry| {
+        if (entry.value_ptr.* == 0) continue;
+        if (!matcher(bits, @intCast(entry.key_ptr.*))) continue;
+        const result = reserved.getOrPut(entry.key_ptr.*) catch continue;
+        if (!result.found_existing) result.value_ptr.* = 0;
+        if (result.value_ptr.* < entry.value_ptr.*) {
+            result.value_ptr.* += 1;
+            setSubnetBit(@TypeOf(bits), &reserved_bits, entry.key_ptr.*);
+        }
+    }
+    return reserved_bits;
+}
+
+fn releaseReservedSubnetQueries(
+    reserved: *std.AutoHashMap(u8, u32),
+    reserved_bits: anytype,
+    comptime matcher: anytype,
+) void {
+    var iter = reserved.iterator();
+    while (iter.next()) |entry| {
+        if (entry.value_ptr.* == 0) continue;
+        if (!matcher(reserved_bits, @intCast(entry.key_ptr.*))) continue;
+        entry.value_ptr.* -|= 1;
+    }
+}
+
+fn consumeReservedSubnetQueries(
+    active: *std.AutoHashMap(u8, u32),
+    reserved_bits: anytype,
+    comptime matcher: anytype,
+) void {
+    var iter = active.iterator();
+    while (iter.next()) |entry| {
+        if (entry.value_ptr.* == 0) continue;
+        if (!matcher(reserved_bits, @intCast(entry.key_ptr.*))) continue;
+        entry.value_ptr.* -|= 1;
+    }
+}
+
+fn reserveMatchingCustodyQueries(
+    active: *const std.AutoHashMap(u64, u32),
+    reserved: *std.AutoHashMap(u64, u32),
+    custody_columns: CustodyColumnsBitfield,
+) CustodyColumnsBitfield {
+    var reserved_columns = CustodyColumnsBitfield.initEmpty();
+    var iter = active.iterator();
+    while (iter.next()) |entry| {
+        if (entry.value_ptr.* == 0) continue;
+        const column_index = entry.key_ptr.*;
+        if (column_index >= custody.NUMBER_OF_COLUMNS) continue;
+        if (!custody_columns.isSet(@intCast(column_index))) continue;
+        const result = reserved.getOrPut(column_index) catch continue;
+        if (!result.found_existing) result.value_ptr.* = 0;
+        if (result.value_ptr.* < entry.value_ptr.*) {
+            result.value_ptr.* += 1;
+            reserved_columns.set(@intCast(column_index));
+        }
+    }
+    return reserved_columns;
+}
+
+fn releaseReservedCustodyQueries(
+    reserved: *std.AutoHashMap(u64, u32),
+    reserved_columns: CustodyColumnsBitfield,
+) void {
+    var iter = reserved.iterator();
+    while (iter.next()) |entry| {
+        if (entry.value_ptr.* == 0) continue;
+        const column_index = entry.key_ptr.*;
+        if (column_index >= custody.NUMBER_OF_COLUMNS) continue;
+        if (!reserved_columns.isSet(@intCast(column_index))) continue;
+        entry.value_ptr.* -|= 1;
+    }
+}
+
+fn consumeReservedCustodyQueries(
+    active: *std.AutoHashMap(u64, u32),
+    reserved_columns: CustodyColumnsBitfield,
+) void {
+    var iter = active.iterator();
+    while (iter.next()) |entry| {
+        if (entry.value_ptr.* == 0) continue;
+        const column_index = entry.key_ptr.*;
+        if (column_index >= custody.NUMBER_OF_COLUMNS) continue;
+        if (!reserved_columns.isSet(@intCast(column_index))) continue;
+        entry.value_ptr.* -|= 1;
+    }
+}
+
+fn setSubnetBit(comptime Bits: type, bits: *Bits, subnet_id: u8) void {
+    const byte_index: usize = @intCast(subnet_id / 8);
+    const bit_offset: u3 = @intCast(subnet_id % 8);
+    bits[byte_index] |= @as(u8, 1) << bit_offset;
 }
 
 fn peerIdBytesFromPubkey(allocator: Allocator, pubkey: [33]u8) ![]u8 {
@@ -1442,6 +1609,46 @@ fn initTestPeerManager(target_peers: u32) PeerManager {
     });
 }
 
+fn subnetBitsFor(subnet_id: u6) [8]u8 {
+    inline for (0..8) |byte_index| {
+        inline for (0..8) |bit_index| {
+            var bits = [_]u8{0} ** 8;
+            bits[byte_index] = @as(u8, 1) << @intCast(bit_index);
+            if (enr_mod.isSubnetSet(bits, subnet_id)) return bits;
+        }
+    }
+    unreachable;
+}
+
+fn makeTestEnr(
+    raw: []u8,
+    pubkey: [33]u8,
+    attnets: ?[8]u8,
+    syncnets: ?[1]u8,
+    custody_group_count: ?u64,
+    fork_digest: [4]u8,
+) Enr {
+    return .{
+        .seq = 1,
+        .pubkey = pubkey,
+        .ip = [4]u8{ 1, 2, 3, 4 },
+        .udp = 9000,
+        .tcp = null,
+        .ip6 = null,
+        .udp6 = null,
+        .tcp6 = null,
+        .quic = 9001,
+        .quic6 = null,
+        .eth2_fork_digest = fork_digest,
+        .eth2_raw = null,
+        .attnets = attnets,
+        .syncnets = syncnets,
+        .custody_group_count = custody_group_count,
+        .raw = raw,
+        .alloc = std.testing.allocator,
+    };
+}
+
 test "DiscoveryService: init and deinit" {
     var svc = try DiscoveryService.init(std.testing.io, std.testing.allocator, .{ .listen_port = 0 });
     defer svc.deinit();
@@ -1633,22 +1840,20 @@ test "DiscoveryService: cooling-down cached peer does not satisfy generic demand
     try std.testing.expectEqual(@as(u64, 1), svc.total_lookups);
 }
 
-test "DiscoveryService: requestSubnetPeers queues a query" {
+test "DiscoveryService: requestSubnetPeers tracks persistent demand" {
     var svc = try DiscoveryService.init(std.testing.io, std.testing.allocator, .{ .listen_port = 0 });
     defer svc.deinit();
     svc.requestSubnetPeers(.attestation, 5, 2);
-    try std.testing.expectEqual(@as(usize, 1), svc.pending_subnet_queries.items.len);
-    try std.testing.expectEqual(.attestation, svc.pending_subnet_queries.items[0].kind);
-    try std.testing.expectEqual(@as(u6, 5), svc.pending_subnet_queries.items[0].subnet_id);
+    try std.testing.expectEqual(@as(usize, 1), svc.active_attestation_queries.count());
+    try std.testing.expectEqual(@as(?u32, 2), svc.active_attestation_queries.get(5));
 }
 
-test "DiscoveryService: requestCustodyColumnPeers queues a query" {
+test "DiscoveryService: requestCustodyColumnPeers tracks persistent demand" {
     var svc = try DiscoveryService.init(std.testing.io, std.testing.allocator, .{ .listen_port = 0 });
     defer svc.deinit();
     svc.requestCustodyColumnPeers(7, 2);
-    try std.testing.expectEqual(@as(usize, 1), svc.pending_custody_queries.items.len);
-    try std.testing.expectEqual(@as(u64, 7), svc.pending_custody_queries.items[0].column_index);
-    try std.testing.expectEqual(@as(u32, 2), svc.pending_custody_queries.items[0].min_peers);
+    try std.testing.expectEqual(@as(usize, 1), svc.active_custody_queries.count());
+    try std.testing.expectEqual(@as(?u32, 2), svc.active_custody_queries.get(7));
 }
 
 test "DiscoveryService: custody query queues matching cached peer" {
@@ -1971,6 +2176,201 @@ test "DiscoveryService: getStats exposes demand and skip counters" {
     try std.testing.expectEqual(@as(u64, 1), stats.notDialReasonCount(.already_connected));
     try std.testing.expectEqual(@as(u64, 1), stats.discoveredStatusCount(.attempt_dial));
     try std.testing.expectEqual(@as(u64, 1), stats.discoveredStatusCount(.already_connected));
+}
+
+test "DiscoveryService: subnet demand persists across discovery passes until satisfied" {
+    var svc = try DiscoveryService.init(std.testing.io, std.testing.allocator, .{ .listen_port = 0, .target_peers = 5 });
+    defer svc.deinit();
+    var pm = initTestPeerManager(5);
+    defer pm.deinit();
+
+    svc.connected_peers = svc.config.target_peers;
+    svc.requestSubnetPeers(.attestation, 5, 1);
+
+    svc.discoverPeers(&pm);
+    svc.discoverPeers(&pm);
+
+    const stats = svc.getStats();
+    try std.testing.expectEqual(@as(u64, 1), stats.subnetCount(.attnets));
+    try std.testing.expectEqual(@as(u64, 1), stats.subnetPeersToConnect(.attnets));
+}
+
+test "DiscoveryService: custody demand persists across discovery passes until satisfied" {
+    var svc = try DiscoveryService.init(std.testing.io, std.testing.allocator, .{ .listen_port = 0, .target_peers = 5 });
+    defer svc.deinit();
+    var pm = initTestPeerManager(5);
+    defer pm.deinit();
+
+    svc.connected_peers = svc.config.target_peers;
+    svc.requestCustodyColumnPeers(7, 1);
+
+    svc.discoverPeers(&pm);
+    svc.discoverPeers(&pm);
+
+    const stats = svc.getStats();
+    try std.testing.expectEqual(@as(u64, 1), stats.subnetCount(.column));
+    try std.testing.expectEqual(@as(u64, 1), stats.subnetPeersToConnect(.column));
+}
+
+test "DiscoveryService: noteDialAttempt does not consume unmet demand" {
+    const fork_digest = [4]u8{ 0x6a, 0x95, 0xa1, 0xb0 };
+    var svc = try DiscoveryService.init(std.testing.io, std.testing.allocator, .{
+        .listen_port = 0,
+        .target_peers = 5,
+        .fork_digest = fork_digest,
+    });
+    defer svc.deinit();
+    var pm = initTestPeerManager(5);
+    defer pm.deinit();
+
+    svc.connected_peers = svc.config.target_peers;
+    svc.requestMorePeers(2);
+    svc.requestSubnetPeers(.attestation, 5, 1);
+    svc.discoverPeers(&pm);
+
+    const node_id = [_]u8{0x44} ** 32;
+    var enr_data = [_]u8{0} ** 4;
+    const attnets = subnetBitsFor(5);
+    var enr = makeTestEnr(enr_data[0..], [_]u8{0x24} ** 33, attnets, null, null, fork_digest);
+    svc.recordEnr(node_id, &enr);
+
+    const peer = DiscoveredPeer{
+        .node_id = node_id,
+        .addr_ip4 = .{ .ip4 = .{ .bytes = .{ 1, 2, 3, 4 }, .port = 9000 } },
+        .addr_ip6 = null,
+        .pubkey = enr.pubkey.?,
+        .has_quic = true,
+        .attnets = attnets,
+        .fork_digest = fork_digest,
+        .source = .subnet_query,
+    };
+
+    svc.noteDialAttempt(&peer);
+
+    const stats = svc.getStats();
+    try std.testing.expectEqual(@as(u32, 2), stats.peers_to_connect);
+    try std.testing.expectEqual(@as(u64, 1), stats.subnetCount(.attnets));
+    try std.testing.expectEqual(@as(u64, 1), stats.subnetPeersToConnect(.attnets));
+}
+
+test "DiscoveryService: notePeerConnected consumes generic and targeted demand for a discovered peer" {
+    const fork_digest = [4]u8{ 0x6a, 0x95, 0xa1, 0xb0 };
+    var svc = try DiscoveryService.init(std.testing.io, std.testing.allocator, .{
+        .listen_port = 0,
+        .target_peers = 5,
+        .fork_digest = fork_digest,
+    });
+    defer svc.deinit();
+
+    svc.connected_peers = svc.config.target_peers;
+    svc.requestMorePeers(2);
+    svc.requestSubnetPeers(.attestation, 5, 1);
+
+    const node_id = [_]u8{0x45} ** 32;
+    const custody_columns = try custody.getCustodyColumns(std.testing.allocator, node_id, 4);
+    defer std.testing.allocator.free(custody_columns);
+    svc.requestCustodyColumnPeers(custody_columns[0], 1);
+
+    var enr_data = [_]u8{0} ** 4;
+    const attnets = subnetBitsFor(5);
+    var enr = makeTestEnr(enr_data[0..], [_]u8{0x34} ** 33, attnets, null, 4, fork_digest);
+    svc.recordEnr(node_id, &enr);
+
+    const peer = DiscoveredPeer{
+        .node_id = node_id,
+        .addr_ip4 = .{ .ip4 = .{ .bytes = .{ 1, 2, 3, 4 }, .port = 9000 } },
+        .addr_ip6 = null,
+        .pubkey = enr.pubkey.?,
+        .has_quic = true,
+        .attnets = attnets,
+        .fork_digest = fork_digest,
+        .source = .subnet_query,
+    };
+
+    svc.noteDialAttempt(&peer);
+    svc.notePeerConnected(node_id);
+
+    const stats = svc.getStats();
+    try std.testing.expectEqual(@as(u32, 1), stats.peers_to_connect);
+    try std.testing.expectEqual(@as(u64, 0), stats.subnetCount(.attnets));
+    try std.testing.expectEqual(@as(u64, 0), stats.subnetCount(.column));
+}
+
+test "DiscoveryService: in-flight discovery dial suppresses redundant lookup churn until it fails" {
+    const fork_digest = [4]u8{ 0x6a, 0x95, 0xa1, 0xb0 };
+    var svc = try DiscoveryService.init(std.testing.io, std.testing.allocator, .{
+        .listen_port = 0,
+        .target_peers = 5,
+        .fork_digest = fork_digest,
+    });
+    defer svc.deinit();
+    var pm = initTestPeerManager(5);
+    defer pm.deinit();
+
+    svc.connected_peers = svc.config.target_peers;
+    svc.requestSubnetPeers(.attestation, 5, 1);
+
+    const node_id = [_]u8{0x46} ** 32;
+    var enr_data = [_]u8{0} ** 4;
+    const attnets = subnetBitsFor(5);
+    var enr = makeTestEnr(enr_data[0..], [_]u8{0x44} ** 33, attnets, null, null, fork_digest);
+    svc.recordEnr(node_id, &enr);
+
+    svc.discoverPeers(&pm);
+    const selected = svc.takeDiscoveredPeers(&pm, 1);
+    defer if (selected.len > 0) svc.allocator.free(selected);
+    try std.testing.expectEqual(@as(usize, 1), selected.len);
+
+    const peer_id = try peerIdBytesFromPubkey(std.testing.allocator, selected[0].pubkey);
+    defer std.testing.allocator.free(peer_id);
+    const now_ms = currentUnixTimeMs(std.testing.io);
+    try pm.onDialing(peer_id, now_ms);
+    svc.noteDialAttempt(&selected[0]);
+
+    const key_hex = std.fmt.bytesToHex(node_id, .lower);
+    if (svc.enr_cache.fetchRemove(key_hex[0..])) |removed| {
+        svc.allocator.free(removed.key);
+    }
+
+    svc.discoverPeers(&pm);
+    try std.testing.expectEqual(@as(u64, 0), svc.total_lookups);
+
+    svc.noteDialFailed(node_id);
+    pm.onPeerDisconnected(peer_id, now_ms + 1);
+
+    svc.discoverPeers(&pm);
+    try std.testing.expectEqual(@as(u64, 1), svc.total_lookups);
+}
+
+test "DiscoveryService: late ENR is surfaced on a later discovery pass while demand remains" {
+    const fork_digest = [4]u8{ 0x6a, 0x95, 0xa1, 0xb0 };
+    var svc = try DiscoveryService.init(std.testing.io, std.testing.allocator, .{
+        .listen_port = 0,
+        .target_peers = 5,
+        .fork_digest = fork_digest,
+    });
+    defer svc.deinit();
+    var pm = initTestPeerManager(5);
+    defer pm.deinit();
+
+    svc.connected_peers = svc.config.target_peers;
+    svc.requestSubnetPeers(.attestation, 5, 1);
+    svc.discoverPeers(&pm);
+
+    const node_id = [_]u8{0x55} ** 32;
+    var enr_data = [_]u8{0} ** 4;
+    const attnets = subnetBitsFor(5);
+    var enr = makeTestEnr(enr_data[0..], [_]u8{0x25} ** 33, attnets, null, null, fork_digest);
+    svc.recordEnr(node_id, &enr);
+
+    svc.discoverPeers(&pm);
+
+    const peers = svc.drainDiscoveredPeers(&pm);
+    defer if (peers.len > 0) svc.allocator.free(peers);
+
+    try std.testing.expectEqual(@as(usize, 1), peers.len);
+    try std.testing.expectEqualSlices(u8, &node_id, &peers[0].node_id);
+    try std.testing.expectEqual(DiscoverySource.subnet_query, peers[0].source);
 }
 
 test "DiscoveredPeer struct layout" {

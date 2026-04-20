@@ -115,6 +115,7 @@ const DiscoveryDialJob = struct {
         return .{ .failure = .{
             .predicted_peer_id = self.predicted_peer_id,
             .ma_str = self.ma_str,
+            .node_id = self.node_id,
             .err = err,
             .elapsed_ns = elapsedSince(io, self.started_at_ns),
         } };
@@ -1462,6 +1463,7 @@ fn runPeerManagerHeartbeat(self: *BeaconNode, io: std.Io, svc: *networking.P2pSe
         }
 
         if (self.discovery_service) |ds| {
+            ds.resetRequestedPeerDemand();
             for (prioritization.subnets_needing_peers) |query| {
                 ds.requestSubnetPeers(switch (query.kind) {
                     .attestation => .attestation,
@@ -1473,8 +1475,8 @@ fn runPeerManagerHeartbeat(self: *BeaconNode, io: std.Io, svc: *networking.P2pSe
                 ds.requestCustodyColumnPeers(query.column_index, @max(query.peers_needed, 1));
                 did_work = true;
             }
+            ds.requestMorePeers(prioritization.peers_to_discover);
             if (prioritization.peers_to_discover > 0) {
-                ds.requestMorePeers(prioritization.peers_to_discover);
                 did_work = true;
             }
             ds.discoverPeers(pm);
@@ -1514,12 +1516,13 @@ fn runPeerManagerHeartbeat(self: *BeaconNode, io: std.Io, svc: *networking.P2pSe
     }
 
     if (self.discovery_service) |ds| {
+        ds.resetRequestedPeerDemand();
         for (actions.subnets_needing_peers) |subnet_id| {
             ds.requestSubnetPeers(.attestation, @intCast(subnet_id), 1);
             did_work = true;
         }
+        ds.requestMorePeers(actions.peers_to_discover);
         if (actions.peers_to_discover > 0) {
-            ds.requestMorePeers(actions.peers_to_discover);
             did_work = true;
         }
         ds.discoverPeers(pm);
@@ -3003,6 +3006,9 @@ fn drainCompletedDiscoveryDials(
                 ) or did_work;
             },
             .failure => |failure| {
+                if (self.discovery_service) |ds| {
+                    ds.noteDialFailed(failure.node_id);
+                }
                 if (self.peer_manager) |peer_manager| {
                     notePeerDisconnected(self, peer_manager, failure.predicted_peer_id, now_ms);
                 }
@@ -3487,6 +3493,14 @@ fn registerConnectedPeer(
         };
     }
     recordPeerNodeIdFromPeerId(pm, peer_id);
+
+    if (!was_connected) {
+        if (discovery_identity) |identity| {
+            if (self.discovery_service) |ds| {
+                ds.notePeerConnected(identity.node_id);
+            }
+        }
+    }
 
     var did_work = !was_connected;
     if (!was_connected) {

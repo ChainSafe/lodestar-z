@@ -433,6 +433,7 @@ pub const DiscoveryDialCompletion = union(enum) {
     failure: struct {
         predicted_peer_id: []const u8,
         ma_str: []const u8,
+        node_id: [32]u8,
         err: anyerror,
         elapsed_ns: u64,
     },
