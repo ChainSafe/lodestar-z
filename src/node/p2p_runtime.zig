@@ -171,6 +171,10 @@ fn elapsedSince(io: std.Io, started_at_ns: u64) u64 {
     return now -| started_at_ns;
 }
 
+fn nsToSeconds(ns: u64) f64 {
+    return @as(f64, @floatFromInt(ns)) / std.time.ns_per_s;
+}
+
 const PeerReqRespJobKind = union(enum) {
     status_only,
     restatus,
@@ -1425,6 +1429,7 @@ fn syncSubnetState(self: *BeaconNode, io: std.Io, svc: *networking.P2pService) b
 fn runPeerManagerHeartbeat(self: *BeaconNode, io: std.Io, svc: *networking.P2pService) bool {
     const pm = self.peer_manager orelse return false;
     const now_ms = currentUnixTimeMs(io);
+    const heartbeat_started_ns = timestampNowNs(io);
 
     if (self.subnet_service) |subnet_service| {
         var did_work = false;
@@ -1451,6 +1456,10 @@ fn runPeerManagerHeartbeat(self: *BeaconNode, io: std.Io, svc: *networking.P2pSe
             return false;
         };
         defer prioritization.deinit(self.allocator);
+        pm.notePrioritizationMetrics(housekeeping.peers_to_disconnect.len, &prioritization);
+        if (self.metrics) |metrics| {
+            metrics.observePeerManagerHeartbeatDuration(nsToSeconds(timestampNowNs(io) - heartbeat_started_ns));
+        }
 
         if (self.discovery_service) |ds| {
             for (prioritization.subnets_needing_peers) |query| {
@@ -1499,6 +1508,10 @@ fn runPeerManagerHeartbeat(self: *BeaconNode, io: std.Io, svc: *networking.P2pSe
         return false;
     };
     defer actions.deinit(self.allocator);
+    pm.noteHeartbeatMetrics(&actions);
+    if (self.metrics) |metrics| {
+        metrics.observePeerManagerHeartbeatDuration(nsToSeconds(timestampNowNs(io) - heartbeat_started_ns));
+    }
 
     if (self.discovery_service) |ds| {
         for (actions.subnets_needing_peers) |subnet_id| {
@@ -2144,8 +2157,14 @@ fn updateDiscoveryMetrics(self: *BeaconNode, io: std.Io) void {
             .total_filtered_out = 0,
             .queued_peers = 0,
             .pending_subnet_queries = 0,
+            .peers_to_connect = 0,
+            .subnets_to_connect = [_]u64{0} ** networking.discovery_service.metric_requested_subnet_demand_kinds.len,
+            .subnet_peers_to_connect = [_]u64{0} ** networking.discovery_service.metric_requested_subnet_demand_kinds.len,
             .enr_cache_size = 0,
             .enr_seq = 0,
+            .lookup_request_counts = [_]u64{0} ** networking.discovery_service.metric_lookup_sources.len,
+            .discovered_status_counts = [_]u64{0} ** networking.discovery_service.metric_discovered_statuses.len,
+            .not_dial_reason_counts = [_]u64{0} ** networking.discovery_service.metric_not_dial_reasons.len,
         };
     const previous = self.last_discovery_stats;
 
@@ -2153,9 +2172,21 @@ fn updateDiscoveryMetrics(self: *BeaconNode, io: std.Io) void {
     metrics.discovery_connected_peers.set(snapshot.connected_peers);
     metrics.discovery_queued_peers.set(@intCast(snapshot.queued_peers));
     metrics.discovery_pending_subnet_queries.set(@intCast(snapshot.pending_subnet_queries));
+    metrics.discovery_peers_to_connect.set(snapshot.peers_to_connect);
+    metrics.discovery_custody_group_peers_to_connect.set(snapshot.subnetPeersToConnect(.column));
+    metrics.discovery_custody_groups_to_connect.set(snapshot.subnetCount(.column));
     metrics.discovery_enr_cache_size.set(@intCast(snapshot.enr_cache_size));
     metrics.discovery_enr_seq.set(snapshot.enr_seq);
     metrics.discovery_pending_dials.set(@intCast(currentPendingDiscoveryDials(self, io)));
+    inline for (networking.discovery_service.metric_requested_subnet_demand_kinds) |kind| {
+        const label = switch (kind) {
+            .attnets => "attnets",
+            .syncnets => "syncnets",
+            .column => "column",
+        };
+        metrics.discovery_subnets_to_connect.set(.{ .type = label }, snapshot.subnetCount(kind)) catch {};
+        metrics.discovery_subnet_peers_to_connect.set(.{ .type = label }, snapshot.subnetPeersToConnect(kind)) catch {};
+    }
     metrics.discovery_lookups_total.incrBy(monotonicDelta(
         snapshot.total_lookups,
         if (previous) |prev| prev.total_lookups else null,
@@ -2168,6 +2199,33 @@ fn updateDiscoveryMetrics(self: *BeaconNode, io: std.Io) void {
         snapshot.total_filtered_out,
         if (previous) |prev| prev.total_filtered_out else null,
     ));
+    inline for (networking.discovery_service.metric_lookup_sources) |source| {
+        const delta = monotonicDelta(
+            snapshot.lookupRequestCount(source),
+            if (previous) |prev| prev.lookupRequestCount(source) else null,
+        );
+        if (delta > 0) {
+            metrics.discovery_find_node_query_requests_total.incrBy(.{ .action = @tagName(source) }, delta) catch {};
+        }
+    }
+    inline for (networking.discovery_service.metric_discovered_statuses) |status| {
+        const delta = monotonicDelta(
+            snapshot.discoveredStatusCount(status),
+            if (previous) |prev| prev.discoveredStatusCount(status) else null,
+        );
+        if (delta > 0) {
+            metrics.discovery_discovered_status_total_count.incrBy(.{ .status = @tagName(status) }, delta) catch {};
+        }
+    }
+    inline for (networking.discovery_service.metric_not_dial_reasons) |reason| {
+        const delta = monotonicDelta(
+            snapshot.notDialReasonCount(reason),
+            if (previous) |prev| prev.notDialReasonCount(reason) else null,
+        );
+        if (delta > 0) {
+            metrics.discovery_not_dial_reason_total_count.incrBy(.{ .reason = @tagName(reason) }, delta) catch {};
+        }
+    }
 
     self.last_discovery_stats = snapshot;
 }
@@ -2951,6 +3009,7 @@ fn drainCompletedDiscoveryDials(
                 if (self.metrics) |metrics| {
                     metrics.discovery_dials_total.incr(.{ .outcome = "failure" }) catch {};
                     metrics.discovery_dial_time_ns_total.incrBy(.{ .outcome = "failure" }, failure.elapsed_ns) catch {};
+                    metrics.discovery_dial_error_total_count.incr(.{ .reason = @errorName(failure.err) }) catch {};
                 }
                 log.debug("Discovered peer dial failed via {s}: {} elapsed_ms={d}", .{
                     failure.ma_str,
@@ -3223,6 +3282,7 @@ fn dialDiscoveredPeers(
     for (discovered_peers) |peer| {
         if (!peer.has_quic) {
             log.debug("dialDiscoveredPeers: skipping discovered peer without quic", .{});
+            ds.noteNotDialReason(.transport_incompatible);
             continue;
         }
         const dial_addr = preferredDiscoveredDialAddress(self, &peer) orelse continue;
@@ -3230,22 +3290,26 @@ fn dialDiscoveredPeers(
         const identity = DiscoveryPeerIdentity{ .node_id = peer.node_id, .pubkey = peer.pubkey };
         if (!discoveryIdentityKnown(identity)) {
             log.debug("dialDiscoveredPeers: skipping discovered peer without secp256k1 identity", .{});
+            ds.noteNotDialReason(.no_secp256k1_pubkey);
             continue;
         }
 
         const predicted_peer_id = discoveryPeerIdBytesFromPubkey(self.allocator, peer.pubkey) catch |err| {
             log.debug("Failed to derive peer ID from discovered ENR: {}", .{err});
+            ds.noteNotDialReason(.no_secp256k1_pubkey);
             continue;
         };
 
         const predicted_peer_id_text = discoveryPeerIdTextFromPubkey(self.allocator, peer.pubkey) catch |err| {
             log.debug("Failed to derive peer ID text from discovered ENR: {}", .{err});
+            ds.noteNotDialReason(.no_secp256k1_pubkey);
             self.allocator.free(predicted_peer_id);
             continue;
         };
         defer self.allocator.free(predicted_peer_id_text);
 
         if (svc.isPeerConnected(io, predicted_peer_id)) {
+            ds.noteNotDialReason(.already_connected);
             self.allocator.free(predicted_peer_id);
             continue;
         }
@@ -3253,6 +3317,13 @@ fn dialDiscoveredPeers(
         if (pm.getPeer(predicted_peer_id)) |existing| {
             switch (existing.connection_state) {
                 .banned, .dialing, .connected, .disconnecting => {
+                    ds.noteNotDialReason(switch (existing.connection_state) {
+                        .banned => .banned,
+                        .dialing => .already_dialing,
+                        .connected => .already_connected,
+                        .disconnecting => .disconnecting,
+                        else => unreachable,
+                    });
                     self.allocator.free(predicted_peer_id);
                     continue;
                 },
@@ -3272,12 +3343,17 @@ fn dialDiscoveredPeers(
 
         pm.onDialing(predicted_peer_id, now_ms) catch |err| {
             log.debug("Failed to mark discovered peer {s} as dialing: {}", .{ predicted_peer_id_text, err });
+            ds.noteNotDialReason(.already_dialing);
             self.allocator.free(owned_ma_str);
             self.allocator.free(predicted_peer_id);
             continue;
         };
 
         ds.noteDialAttempt(&peer);
+        ds.noteDialScheduled();
+        if (self.metrics) |metrics| {
+            metrics.discovery_total_dial_attempts.incr();
+        }
         incrementPendingDiscoveryDials(self, io);
         svc.spawnBackground(io, discoveryDialTask, .{ self, io, svc, DiscoveryDialJob{
             .ma_str = owned_ma_str,

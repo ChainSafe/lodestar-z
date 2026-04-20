@@ -224,11 +224,41 @@ pub const metric_goodbye_reasons = [_]GoodbyeMetricReason{
     .other,
 };
 
+pub const RequestedDisconnectMetricReason = peer_prioritization.DisconnectReason;
+pub const metric_requested_disconnect_reasons = [_]RequestedDisconnectMetricReason{
+    .low_score,
+    .no_long_lived_subnet,
+    .too_grouped_subnet,
+    .find_better_peers,
+};
+
+pub const RequestedSubnetMetricType = enum {
+    attnets,
+    syncnets,
+    column,
+};
+
+pub const metric_requested_subnet_types = [_]RequestedSubnetMetricType{
+    .attnets,
+    .syncnets,
+    .column,
+};
+
+pub const DialEligibility = enum {
+    eligible,
+    peer_cooling_down,
+    already_connected,
+    already_dialing,
+    disconnecting,
+    banned,
+};
+
 pub const MetricsSnapshot = struct {
     known_peers: u64 = 0,
     connected_peers: u64 = 0,
     inbound_connected_peers: u64 = 0,
     outbound_connected_peers: u64 = 0,
+    requested_peers_to_connect: u64 = 0,
     connection_state_counts: [metric_connection_states.len]u64 = [_]u64{0} ** metric_connection_states.len,
     client_kind_counts: [metric_client_kinds.len]u64 = [_]u64{0} ** metric_client_kinds.len,
     score_state_counts: [metric_score_states.len]u64 = [_]u64{0} ** metric_score_states.len,
@@ -237,6 +267,9 @@ pub const MetricsSnapshot = struct {
     known_relevance_counts: [metric_relevance_states.len]u64 = [_]u64{0} ** metric_relevance_states.len,
     peer_report_counts: [metric_report_sources.len][metric_peer_actions.len]u64 = [_][metric_peer_actions.len]u64{[_]u64{0} ** metric_peer_actions.len} ** metric_report_sources.len,
     goodbye_received_counts: [metric_goodbye_reasons.len]u64 = [_]u64{0} ** metric_goodbye_reasons.len,
+    requested_disconnect_counts: [metric_requested_disconnect_reasons.len]u64 = [_]u64{0} ** metric_requested_disconnect_reasons.len,
+    requested_subnet_counts: [metric_requested_subnet_types.len]u64 = [_]u64{0} ** metric_requested_subnet_types.len,
+    requested_subnet_peer_counts: [metric_requested_subnet_types.len]u64 = [_]u64{0} ** metric_requested_subnet_types.len,
 
     pub fn connectionStateCount(self: *const MetricsSnapshot, state: ConnectionState) u64 {
         return self.connection_state_counts[
@@ -338,6 +371,37 @@ pub const MetricsSnapshot = struct {
             }
         ];
     }
+
+    pub fn requestedDisconnectCount(self: *const MetricsSnapshot, reason: RequestedDisconnectMetricReason) u64 {
+        return self.requested_disconnect_counts[
+            switch (reason) {
+                .low_score => 0,
+                .no_long_lived_subnet => 1,
+                .too_grouped_subnet => 2,
+                .find_better_peers => 3,
+            }
+        ];
+    }
+
+    pub fn requestedSubnetCount(self: *const MetricsSnapshot, kind: RequestedSubnetMetricType) u64 {
+        return self.requested_subnet_counts[
+            switch (kind) {
+                .attnets => 0,
+                .syncnets => 1,
+                .column => 2,
+            }
+        ];
+    }
+
+    pub fn requestedSubnetPeerCount(self: *const MetricsSnapshot, kind: RequestedSubnetMetricType) u64 {
+        return self.requested_subnet_peer_counts[
+            switch (kind) {
+                .attnets => 0,
+                .syncnets => 1,
+                .column => 2,
+            }
+        ];
+    }
 };
 
 // ── PeerManager ─────────────────────────────────────────────────────────────
@@ -353,6 +417,10 @@ pub const PeerManager = struct {
     connected_count_atomic: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
     peer_report_counts: [metric_report_sources.len][metric_peer_actions.len]u64 = [_][metric_peer_actions.len]u64{[_]u64{0} ** metric_peer_actions.len} ** metric_report_sources.len,
     goodbye_received_counts: [metric_goodbye_reasons.len]u64 = [_]u64{0} ** metric_goodbye_reasons.len,
+    requested_peers_to_connect: u64 = 0,
+    requested_disconnect_counts: [metric_requested_disconnect_reasons.len]u64 = [_]u64{0} ** metric_requested_disconnect_reasons.len,
+    requested_subnet_counts: [metric_requested_subnet_types.len]u64 = [_]u64{0} ** metric_requested_subnet_types.len,
+    requested_subnet_peer_counts: [metric_requested_subnet_types.len]u64 = [_]u64{0} ** metric_requested_subnet_types.len,
 
     pub fn init(allocator: Allocator, config: PeerManagerConfig) PeerManager {
         return .{
@@ -452,9 +520,19 @@ pub const PeerManager = struct {
     /// that are already connected, already dialing, or in reconnect cool-down
     /// do not count as viable dial supply.
     pub fn canInitiateDial(self: *const PeerManager, peer_id: []const u8, now_ms: u64) bool {
-        const peer = self.getPeer(peer_id) orelse return true;
-        if (peer.peer_score.isCoolingDown(now_ms)) return false;
-        return peer.connection_state == .disconnected;
+        return self.dialEligibility(peer_id, now_ms) == .eligible;
+    }
+
+    pub fn dialEligibility(self: *const PeerManager, peer_id: []const u8, now_ms: u64) DialEligibility {
+        const peer = self.getPeer(peer_id) orelse return .eligible;
+        if (peer.peer_score.isCoolingDown(now_ms)) return .peer_cooling_down;
+        return switch (peer.connection_state) {
+            .disconnected => .eligible,
+            .dialing => .already_dialing,
+            .connected => .already_connected,
+            .disconnecting => .disconnecting,
+            .banned => .banned,
+        };
     }
 
     // ── Status / metadata updates ───────────────────────────────────
@@ -557,8 +635,12 @@ pub const PeerManager = struct {
             .connected_peers = @intCast(self.db.connected_count),
             .inbound_connected_peers = @intCast(self.db.inbound_count),
             .outbound_connected_peers = @intCast(self.db.outbound_count),
+            .requested_peers_to_connect = self.requested_peers_to_connect,
             .peer_report_counts = self.peer_report_counts,
             .goodbye_received_counts = self.goodbye_received_counts,
+            .requested_disconnect_counts = self.requested_disconnect_counts,
+            .requested_subnet_counts = self.requested_subnet_counts,
+            .requested_subnet_peer_counts = self.requested_subnet_peer_counts,
         };
 
         var it = self.db.peers.valueIterator();
@@ -574,6 +656,45 @@ pub const PeerManager = struct {
         }
 
         return snapshot;
+    }
+
+    pub fn notePrioritizationMetrics(
+        self: *PeerManager,
+        housekeeping_disconnects: usize,
+        prioritization: *const PrioritizationResult,
+    ) void {
+        self.requested_peers_to_connect = prioritization.peers_to_discover;
+        self.requested_disconnect_counts = [_]u64{0} ** metric_requested_disconnect_reasons.len;
+        self.requested_subnet_counts = [_]u64{0} ** metric_requested_subnet_types.len;
+        self.requested_subnet_peer_counts = [_]u64{0} ** metric_requested_subnet_types.len;
+
+        self.requested_disconnect_counts[requestedDisconnectReasonIndex(.low_score)] += @intCast(housekeeping_disconnects);
+        for (prioritization.peers_to_disconnect) |disconnect| {
+            self.requested_disconnect_counts[requestedDisconnectReasonIndex(disconnect.reason)] += 1;
+        }
+        for (prioritization.subnets_needing_peers) |query| {
+            const kind: RequestedSubnetMetricType = switch (query.kind) {
+                .attestation => .attnets,
+                .sync_committee => .syncnets,
+            };
+            self.requested_subnet_counts[requestedSubnetMetricTypeIndex(kind)] += 1;
+            self.requested_subnet_peer_counts[requestedSubnetMetricTypeIndex(kind)] += query.peers_needed;
+        }
+        for (prioritization.custody_columns_needing_peers) |query| {
+            self.requested_subnet_counts[requestedSubnetMetricTypeIndex(.column)] += 1;
+            self.requested_subnet_peer_counts[requestedSubnetMetricTypeIndex(.column)] += query.peers_needed;
+        }
+    }
+
+    pub fn noteHeartbeatMetrics(self: *PeerManager, actions: *const HeartbeatActions) void {
+        self.requested_peers_to_connect = actions.peers_to_discover;
+        self.requested_disconnect_counts = [_]u64{0} ** metric_requested_disconnect_reasons.len;
+        self.requested_subnet_counts = [_]u64{0} ** metric_requested_subnet_types.len;
+        self.requested_subnet_peer_counts = [_]u64{0} ** metric_requested_subnet_types.len;
+
+        self.requested_disconnect_counts[requestedDisconnectReasonIndex(.low_score)] = @intCast(actions.peers_to_disconnect.len);
+        self.requested_subnet_counts[requestedSubnetMetricTypeIndex(.attnets)] = @intCast(actions.subnets_needing_peers.len);
+        self.requested_subnet_peer_counts[requestedSubnetMetricTypeIndex(.attnets)] = @intCast(actions.subnets_needing_peers.len);
     }
 
     // ── Peer actions ────────────────────────────────────────────────
@@ -1306,6 +1427,23 @@ pub const PeerManager = struct {
         };
     }
 
+    fn requestedDisconnectReasonIndex(reason: RequestedDisconnectMetricReason) usize {
+        return switch (reason) {
+            .low_score => 0,
+            .no_long_lived_subnet => 1,
+            .too_grouped_subnet => 2,
+            .find_better_peers => 3,
+        };
+    }
+
+    fn requestedSubnetMetricTypeIndex(kind: RequestedSubnetMetricType) usize {
+        return switch (kind) {
+            .attnets => 0,
+            .syncnets => 1,
+            .column => 2,
+        };
+    }
+
     fn maxCustodyCoverageDeficit(self: *PeerManager) !u32 {
         if (self.config.local_custody_columns.len == 0) return 0;
 
@@ -1773,4 +1911,40 @@ test "PeerManager: selectDataColumnPeer ignores stale status range for by-root f
     defer allocator.free(selected);
 
     try std.testing.expectEqualStrings("custody_peer", selected);
+}
+
+test "PeerManager: metricsSnapshot exposes requested discovery and disconnect demand" {
+    var pm = PeerManager.init(std.testing.allocator, .{});
+    defer pm.deinit();
+
+    var disconnects = [_]PeerDisconnect{
+        .{ .peer_id = "peer_a", .reason = .low_score },
+        .{ .peer_id = "peer_b", .reason = .find_better_peers },
+    };
+    var subnet_queries = [_]SubnetQuery{
+        .{ .subnet_id = 1, .kind = .attestation, .peers_needed = 2 },
+        .{ .subnet_id = 2, .kind = .sync_committee, .peers_needed = 3 },
+    };
+    var custody_queries = [_]peer_prioritization.CustodyQuery{
+        .{ .column_index = 7, .peers_needed = 4 },
+    };
+    var prioritization = PrioritizationResult{
+        .peers_to_disconnect = disconnects[0..],
+        .peers_to_discover = 9,
+        .subnets_needing_peers = subnet_queries[0..],
+        .custody_columns_needing_peers = custody_queries[0..],
+    };
+
+    pm.notePrioritizationMetrics(1, &prioritization);
+    const snapshot = pm.metricsSnapshot();
+
+    try std.testing.expectEqual(@as(u64, 9), snapshot.requested_peers_to_connect);
+    try std.testing.expectEqual(@as(u64, 2), snapshot.requestedDisconnectCount(.low_score));
+    try std.testing.expectEqual(@as(u64, 1), snapshot.requestedDisconnectCount(.find_better_peers));
+    try std.testing.expectEqual(@as(u64, 1), snapshot.requestedSubnetCount(.attnets));
+    try std.testing.expectEqual(@as(u64, 2), snapshot.requestedSubnetPeerCount(.attnets));
+    try std.testing.expectEqual(@as(u64, 1), snapshot.requestedSubnetCount(.syncnets));
+    try std.testing.expectEqual(@as(u64, 3), snapshot.requestedSubnetPeerCount(.syncnets));
+    try std.testing.expectEqual(@as(u64, 1), snapshot.requestedSubnetCount(.column));
+    try std.testing.expectEqual(@as(u64, 4), snapshot.requestedSubnetPeerCount(.column));
 }

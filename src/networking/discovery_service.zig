@@ -108,6 +108,78 @@ pub const DiscoverySource = enum {
     direct,
 };
 
+pub const DiscoveredPeerStatusMetric = enum {
+    queued,
+    duplicate,
+    dropped_queue_full,
+    filtered_self,
+    no_multiaddrs,
+    no_secp256k1_pubkey,
+    transport_incompatible,
+    peer_cooling_down,
+    already_connected,
+    already_dialing,
+    disconnecting,
+    banned,
+    attempt_dial,
+};
+
+pub const metric_discovered_statuses = [_]DiscoveredPeerStatusMetric{
+    .queued,
+    .duplicate,
+    .dropped_queue_full,
+    .filtered_self,
+    .no_multiaddrs,
+    .no_secp256k1_pubkey,
+    .transport_incompatible,
+    .peer_cooling_down,
+    .already_connected,
+    .already_dialing,
+    .disconnecting,
+    .banned,
+    .attempt_dial,
+};
+
+pub const NotDialReasonMetric = enum {
+    transport_incompatible,
+    no_secp256k1_pubkey,
+    peer_cooling_down,
+    already_connected,
+    already_dialing,
+    disconnecting,
+    banned,
+};
+
+pub const metric_not_dial_reasons = [_]NotDialReasonMetric{
+    .transport_incompatible,
+    .no_secp256k1_pubkey,
+    .peer_cooling_down,
+    .already_connected,
+    .already_dialing,
+    .disconnecting,
+    .banned,
+};
+
+pub const metric_lookup_sources = [_]DiscoverySource{
+    .random_lookup,
+    .subnet_query,
+    .custody_query,
+    .bootnode,
+    .direct,
+};
+
+pub const RequestedSubnetDemandKind = enum {
+    attnets,
+    syncnets,
+    column,
+};
+
+pub const metric_requested_subnet_demand_kinds = [_]RequestedSubnetDemandKind{
+    .attnets,
+    .syncnets,
+    .column,
+};
+
 pub const SubnetQuery = struct {
     kind: SubnetKind = .attestation,
     subnet_id: u6,
@@ -157,6 +229,9 @@ pub const DiscoveryService = struct {
     total_lookups: u64,
     total_discovered: u64,
     total_filtered_out: u64,
+    lookup_request_counts: [metric_lookup_sources.len]u64,
+    discovered_status_counts: [metric_discovered_statuses.len]u64,
+    not_dial_reason_counts: [metric_not_dial_reasons.len]u64,
     local_enr_changed: bool,
 
     pub fn init(io: Io, allocator: Allocator, config: DiscoveryConfig) !DiscoveryService {
@@ -233,6 +308,9 @@ pub const DiscoveryService = struct {
             .total_lookups = 0,
             .total_discovered = 0,
             .total_filtered_out = 0,
+            .lookup_request_counts = [_]u64{0} ** metric_lookup_sources.len,
+            .discovered_status_counts = [_]u64{0} ** metric_discovered_statuses.len,
+            .not_dial_reason_counts = [_]u64{0} ** metric_not_dial_reasons.len,
             .local_enr_changed = false,
         };
     }
@@ -393,6 +471,7 @@ pub const DiscoveryService = struct {
     fn startRandomLookup(self: *DiscoveryService, source: DiscoverySource) void {
         const lookup_id = self.service.startRandomLookup() catch return;
         self.total_lookups += 1;
+        self.lookup_request_counts[lookupSourceIndex(source)] += 1;
         self.lookup_sources.put(lookup_id, source) catch {};
     }
 
@@ -517,8 +596,14 @@ pub const DiscoveryService = struct {
         fork_digest: ?[4]u8,
         source: DiscoverySource,
     ) bool {
-        if (std.mem.eql(u8, &node_id, &self.service.protocol.config.local_node_id)) return false;
-        if (addr_ip4 == null and addr_ip6 == null) return false;
+        if (std.mem.eql(u8, &node_id, &self.service.protocol.config.local_node_id)) {
+            self.recordDiscoveredStatus(.filtered_self);
+            return false;
+        }
+        if (addr_ip4 == null and addr_ip6 == null) {
+            self.recordDiscoveredStatus(.no_multiaddrs);
+            return false;
+        }
 
         for (self.discovered_peers.items) |*existing| {
             if (!std.mem.eql(u8, &existing.node_id, &node_id)) continue;
@@ -529,10 +614,12 @@ pub const DiscoveryService = struct {
             if (fork_digest) |fd| existing.fork_digest = fd;
             existing.has_quic = existing.has_quic or has_quic;
             existing.source = source;
+            self.recordDiscoveredStatus(.duplicate);
             return false;
         }
         if (self.discovered_peers.items.len >= MAX_DISCOVERED_QUEUE) {
             self.total_filtered_out += 1;
+            self.recordDiscoveredStatus(.dropped_queue_full);
             return false;
         }
 
@@ -553,6 +640,7 @@ pub const DiscoveryService = struct {
             addr_ip6,
         });
         self.total_discovered += 1;
+        self.recordDiscoveredStatus(.queued);
         return true;
     }
 
@@ -608,8 +696,16 @@ pub const DiscoveryService = struct {
         while (peers.items.len < max_count and self.discovered_peers.items.len > 0) {
             const best_index = self.bestDiscoveredPeerIndex();
             const peer = self.discovered_peers.orderedRemove(best_index);
-            if (!peer.has_quic or !self.candidateEligibleForDial(peer_manager, peer.pubkey)) {
+            if (!peer.has_quic) {
                 self.total_filtered_out += 1;
+                self.recordNotDialReason(.transport_incompatible);
+                self.recordDiscoveredStatus(.transport_incompatible);
+                continue;
+            }
+            if (self.candidateNotDialReason(peer_manager, peer.pubkey)) |reason| {
+                self.total_filtered_out += 1;
+                self.recordNotDialReason(reason);
+                self.recordDiscoveredStatus(discoveredStatusForNotDialReason(reason));
                 continue;
             }
             peers.append(self.allocator, peer) catch {
@@ -651,6 +747,12 @@ pub const DiscoveryService = struct {
     }
 
     pub fn getStats(self: *const DiscoveryService) DiscoveryStats {
+        const attnets_requested = countActiveDemand(u8, self.active_attestation_queries) + countPendingSubnetDemand(self.pending_subnet_queries.items, .attestation);
+        const syncnets_requested = countActiveDemand(u8, self.active_sync_queries) + countPendingSubnetDemand(self.pending_subnet_queries.items, .sync_committee);
+        const attnets_to_connect = sumActiveDemand(u8, self.active_attestation_queries) + sumPendingSubnetDemand(self.pending_subnet_queries.items, .attestation);
+        const syncnets_to_connect = sumActiveDemand(u8, self.active_sync_queries) + sumPendingSubnetDemand(self.pending_subnet_queries.items, .sync_committee);
+        const custody_groups_to_connect = countActiveDemand(u64, self.active_custody_queries) + countPendingCustodyDemand(self.pending_custody_queries.items);
+        const custody_group_peers_to_connect = sumActiveDemand(u64, self.active_custody_queries) + sumPendingCustodyDemand(self.pending_custody_queries.items);
         return .{
             .known_peers = self.knownPeerCount(),
             .connected_peers = self.connected_peers,
@@ -659,9 +761,24 @@ pub const DiscoveryService = struct {
             .total_filtered_out = self.total_filtered_out,
             .queued_peers = self.discovered_peers.items.len,
             .pending_subnet_queries = self.pending_subnet_queries.items.len,
+            .peers_to_connect = self.generic_peers_to_discover,
+            .subnets_to_connect = [_]u64{ attnets_requested, syncnets_requested, custody_groups_to_connect },
+            .subnet_peers_to_connect = [_]u64{ attnets_to_connect, syncnets_to_connect, custody_group_peers_to_connect },
             .enr_cache_size = self.enr_cache.count(),
             .enr_seq = self.service.localEnrSeq(),
+            .lookup_request_counts = self.lookup_request_counts,
+            .discovered_status_counts = self.discovered_status_counts,
+            .not_dial_reason_counts = self.not_dial_reason_counts,
         };
+    }
+
+    pub fn noteDialScheduled(self: *DiscoveryService) void {
+        self.recordDiscoveredStatus(.attempt_dial);
+    }
+
+    pub fn noteNotDialReason(self: *DiscoveryService, reason: NotDialReasonMetric) void {
+        self.recordNotDialReason(reason);
+        self.recordDiscoveredStatus(discoveredStatusForNotDialReason(reason));
     }
 
     fn bestDiscoveredPeerIndex(self: *const DiscoveryService) usize {
@@ -777,7 +894,11 @@ pub const DiscoveryService = struct {
 
     fn maybeQueueCachedEnr(self: *DiscoveryService, peer_manager: *const PeerManager, cached: *const CachedEnr, pending: *PendingDiscoveryDemand) void {
         const queued_source = pending.sourceForCachedEnr(self.current_fork_digest, cached, null) orelse return;
-        if (!self.candidateEligibleForDial(peer_manager, cached.pubkey)) return;
+        if (self.candidateNotDialReason(peer_manager, cached.pubkey)) |reason| {
+            self.recordNotDialReason(reason);
+            self.recordDiscoveredStatus(discoveredStatusForNotDialReason(reason));
+            return;
+        }
         const queued = self.evaluateCandidate(
             cached.node_id,
             cached.addr_ip4,
@@ -885,11 +1006,26 @@ pub const DiscoveryService = struct {
         return false;
     }
 
-    fn candidateEligibleForDial(self: *const DiscoveryService, peer_manager: *const PeerManager, pubkey: ?[33]u8) bool {
-        const candidate_pubkey = pubkey orelse return false;
-        const peer_id = peerIdBytesFromPubkey(self.allocator, candidate_pubkey) catch return false;
+    fn candidateNotDialReason(self: *const DiscoveryService, peer_manager: *const PeerManager, pubkey: ?[33]u8) ?NotDialReasonMetric {
+        const candidate_pubkey = pubkey orelse return .no_secp256k1_pubkey;
+        const peer_id = peerIdBytesFromPubkey(self.allocator, candidate_pubkey) catch return .no_secp256k1_pubkey;
         defer self.allocator.free(peer_id);
-        return peer_manager.canInitiateDial(peer_id, currentUnixTimeMs(self.io));
+        return switch (peer_manager.dialEligibility(peer_id, currentUnixTimeMs(self.io))) {
+            .eligible => null,
+            .peer_cooling_down => .peer_cooling_down,
+            .already_connected => .already_connected,
+            .already_dialing => .already_dialing,
+            .disconnecting => .disconnecting,
+            .banned => .banned,
+        };
+    }
+
+    fn recordDiscoveredStatus(self: *DiscoveryService, status: DiscoveredPeerStatusMetric) void {
+        self.discovered_status_counts[discoveredStatusIndex(status)] += 1;
+    }
+
+    fn recordNotDialReason(self: *DiscoveryService, reason: NotDialReasonMetric) void {
+        self.not_dial_reason_counts[notDialReasonIndex(reason)] += 1;
     }
 };
 
@@ -1148,6 +1284,116 @@ fn discoverySourcePriority(source: DiscoverySource) u8 {
     };
 }
 
+fn discoveredStatusForNotDialReason(reason: NotDialReasonMetric) DiscoveredPeerStatusMetric {
+    return switch (reason) {
+        .transport_incompatible => .transport_incompatible,
+        .no_secp256k1_pubkey => .no_secp256k1_pubkey,
+        .peer_cooling_down => .peer_cooling_down,
+        .already_connected => .already_connected,
+        .already_dialing => .already_dialing,
+        .disconnecting => .disconnecting,
+        .banned => .banned,
+    };
+}
+
+fn discoveredStatusIndex(status: DiscoveredPeerStatusMetric) usize {
+    return switch (status) {
+        .queued => 0,
+        .duplicate => 1,
+        .dropped_queue_full => 2,
+        .filtered_self => 3,
+        .no_multiaddrs => 4,
+        .no_secp256k1_pubkey => 5,
+        .transport_incompatible => 6,
+        .peer_cooling_down => 7,
+        .already_connected => 8,
+        .already_dialing => 9,
+        .disconnecting => 10,
+        .banned => 11,
+        .attempt_dial => 12,
+    };
+}
+
+fn notDialReasonIndex(reason: NotDialReasonMetric) usize {
+    return switch (reason) {
+        .transport_incompatible => 0,
+        .no_secp256k1_pubkey => 1,
+        .peer_cooling_down => 2,
+        .already_connected => 3,
+        .already_dialing => 4,
+        .disconnecting => 5,
+        .banned => 6,
+    };
+}
+
+fn lookupSourceIndex(source: DiscoverySource) usize {
+    return switch (source) {
+        .random_lookup => 0,
+        .subnet_query => 1,
+        .custody_query => 2,
+        .bootnode => 3,
+        .direct => 4,
+    };
+}
+
+fn requestedSubnetDemandKindIndex(kind: RequestedSubnetDemandKind) usize {
+    return switch (kind) {
+        .attnets => 0,
+        .syncnets => 1,
+        .column => 2,
+    };
+}
+
+fn sumActiveDemand(comptime K: type, map: std.AutoHashMap(K, u32)) u64 {
+    var total: u64 = 0;
+    var iter = map.valueIterator();
+    while (iter.next()) |count| total += count.*;
+    return total;
+}
+
+fn sumPendingSubnetDemand(pending: []const SubnetQuery, kind: SubnetKind) u64 {
+    var total: u64 = 0;
+    for (pending) |query| {
+        if (query.kind != kind) continue;
+        total += query.min_peers;
+    }
+    return total;
+}
+
+fn sumPendingCustodyDemand(pending: []const CustodyQuery) u64 {
+    var total: u64 = 0;
+    for (pending) |query| total += query.min_peers;
+    return total;
+}
+
+fn countActiveDemand(comptime K: type, map: std.AutoHashMap(K, u32)) u64 {
+    var total: u64 = 0;
+    var iter = map.valueIterator();
+    while (iter.next()) |count| {
+        if (count.* == 0) continue;
+        total += 1;
+    }
+    return total;
+}
+
+fn countPendingSubnetDemand(pending: []const SubnetQuery, kind: SubnetKind) u64 {
+    var total: u64 = 0;
+    for (pending) |query| {
+        if (query.kind != kind or query.min_peers == 0) continue;
+        total += 1;
+    }
+    return total;
+}
+
+fn countPendingCustodyDemand(pending: []const CustodyQuery) u64 {
+    var total: u64 = 0;
+    for (pending) |query| {
+        if (query.min_peers == 0) continue;
+        total += 1;
+    }
+    return total;
+}
+
 pub const DiscoveryStats = struct {
     known_peers: usize,
     connected_peers: u32,
@@ -1156,9 +1402,35 @@ pub const DiscoveryStats = struct {
     total_filtered_out: u64,
     queued_peers: usize,
     pending_subnet_queries: usize,
+    peers_to_connect: u32,
+    subnets_to_connect: [metric_requested_subnet_demand_kinds.len]u64,
+    subnet_peers_to_connect: [metric_requested_subnet_demand_kinds.len]u64,
     /// Number of ENRs cached for subnet-targeted queries.
     enr_cache_size: usize,
     enr_seq: u64,
+    lookup_request_counts: [metric_lookup_sources.len]u64,
+    discovered_status_counts: [metric_discovered_statuses.len]u64,
+    not_dial_reason_counts: [metric_not_dial_reasons.len]u64,
+
+    pub fn subnetCount(self: *const DiscoveryStats, kind: RequestedSubnetDemandKind) u64 {
+        return self.subnets_to_connect[requestedSubnetDemandKindIndex(kind)];
+    }
+
+    pub fn subnetPeersToConnect(self: *const DiscoveryStats, kind: RequestedSubnetDemandKind) u64 {
+        return self.subnet_peers_to_connect[requestedSubnetDemandKindIndex(kind)];
+    }
+
+    pub fn lookupRequestCount(self: *const DiscoveryStats, source: DiscoverySource) u64 {
+        return self.lookup_request_counts[lookupSourceIndex(source)];
+    }
+
+    pub fn discoveredStatusCount(self: *const DiscoveryStats, status: DiscoveredPeerStatusMetric) u64 {
+        return self.discovered_status_counts[discoveredStatusIndex(status)];
+    }
+
+    pub fn notDialReasonCount(self: *const DiscoveryStats, reason: NotDialReasonMetric) u64 {
+        return self.not_dial_reason_counts[notDialReasonIndex(reason)];
+    }
 };
 
 // ── Tests ───────────────────────────────────────────────────────────────────
@@ -1672,6 +1944,33 @@ test "DiscoveryService: getStats returns valid state" {
     try std.testing.expectEqual(@as(u64, 0), stats.total_lookups);
     try std.testing.expectEqual(@as(u32, 0), stats.connected_peers);
     try std.testing.expectEqual(@as(u64, 0), stats.enr_seq);
+    try std.testing.expectEqual(@as(u32, 0), stats.peers_to_connect);
+    try std.testing.expectEqual(@as(u64, 0), stats.subnetCount(.attnets));
+    try std.testing.expectEqual(@as(u64, 0), stats.subnetPeersToConnect(.column));
+}
+
+test "DiscoveryService: getStats exposes demand and skip counters" {
+    var svc = try DiscoveryService.init(std.testing.io, std.testing.allocator, .{ .listen_port = 0 });
+    defer svc.deinit();
+
+    svc.requestMorePeers(5);
+    svc.requestSubnetPeers(.attestation, 3, 2);
+    svc.requestSubnetPeers(.sync_committee, 1, 4);
+    svc.requestCustodyColumnPeers(12, 6);
+    svc.noteNotDialReason(.already_connected);
+    svc.noteDialScheduled();
+
+    const stats = svc.getStats();
+    try std.testing.expectEqual(@as(u32, 5), stats.peers_to_connect);
+    try std.testing.expectEqual(@as(u64, 1), stats.subnetCount(.attnets));
+    try std.testing.expectEqual(@as(u64, 2), stats.subnetPeersToConnect(.attnets));
+    try std.testing.expectEqual(@as(u64, 1), stats.subnetCount(.syncnets));
+    try std.testing.expectEqual(@as(u64, 4), stats.subnetPeersToConnect(.syncnets));
+    try std.testing.expectEqual(@as(u64, 1), stats.subnetCount(.column));
+    try std.testing.expectEqual(@as(u64, 6), stats.subnetPeersToConnect(.column));
+    try std.testing.expectEqual(@as(u64, 1), stats.notDialReasonCount(.already_connected));
+    try std.testing.expectEqual(@as(u64, 1), stats.discoveredStatusCount(.attempt_dial));
+    try std.testing.expectEqual(@as(u64, 1), stats.discoveredStatusCount(.already_connected));
 }
 
 test "DiscoveredPeer struct layout" {

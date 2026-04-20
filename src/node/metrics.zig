@@ -144,6 +144,14 @@ const PeerGoodbyeLabels = struct {
     reason: []const u8,
 };
 
+const RequestedDisconnectReasonLabels = struct {
+    reason: []const u8,
+};
+
+const RequestedSubnetTypeLabels = struct {
+    type: []const u8,
+};
+
 const DatabaseLabels = struct {
     database: []const u8,
 };
@@ -181,6 +189,22 @@ const GossipBlsVerificationLabels = struct {
 
 const DiscoveryDialOutcomeLabels = struct {
     outcome: []const u8,
+};
+
+const DiscoveryLookupActionLabels = struct {
+    action: []const u8,
+};
+
+const DiscoveryDiscoveredStatusLabels = struct {
+    status: []const u8,
+};
+
+const DiscoveryNotDialReasonLabels = struct {
+    reason: []const u8,
+};
+
+const DiscoveryDialErrorLabels = struct {
+    reason: []const u8,
 };
 
 const SyncTypeLabels = struct {
@@ -271,6 +295,7 @@ const req_resp_payload_bytes_buckets = [_]f64{
     1073741824.0,
 };
 const req_resp_response_chunk_buckets = [_]f64{ 1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0, 1024.0, 4096.0, 16384.0 };
+const peer_manager_heartbeat_buckets = [_]f64{ 0.0005, 0.001, 0.005, 0.01, 0.05, 0.1, 0.25, 0.5, 1.0 };
 
 pub fn rootMetricValue(root: [32]u8) i64 {
     return std.mem.readInt(i64, root[24..32], .little);
@@ -335,6 +360,11 @@ pub const BeaconMetrics = struct {
     peer_disconnected_total: Counter(u64),
     peer_reports_total: CounterVec(u64, PeerReportLabels),
     peer_goodbye_received_total: CounterVec(u64, PeerGoodbyeLabels),
+    peers_requested_to_connect: Gauge(u64),
+    peers_requested_to_disconnect: GaugeVec(u64, RequestedDisconnectReasonLabels),
+    peers_requested_subnets_to_query: GaugeVec(u64, RequestedSubnetTypeLabels),
+    peers_requested_subnets_peer_count: GaugeVec(u64, RequestedSubnetTypeLabels),
+    peer_manager_heartbeat_duration_seconds: Histogram(f64, &peer_manager_heartbeat_buckets),
     api_active_connections: Gauge(u64),
     api_requests_total: CounterVec(u64, ApiOperationLabels),
     api_errors_total: CounterVec(u64, ApiOperationLabels),
@@ -407,8 +437,18 @@ pub const BeaconMetrics = struct {
     discovery_lookups_total: Counter(u64),
     discovery_discovered_total: Counter(u64),
     discovery_filtered_total: Counter(u64),
+    discovery_peers_to_connect: Gauge(u64),
+    discovery_subnet_peers_to_connect: GaugeVec(u64, RequestedSubnetTypeLabels),
+    discovery_custody_group_peers_to_connect: Gauge(u64),
+    discovery_subnets_to_connect: GaugeVec(u64, RequestedSubnetTypeLabels),
+    discovery_custody_groups_to_connect: Gauge(u64),
+    discovery_find_node_query_requests_total: CounterVec(u64, DiscoveryLookupActionLabels),
+    discovery_discovered_status_total_count: CounterVec(u64, DiscoveryDiscoveredStatusLabels),
+    discovery_not_dial_reason_total_count: CounterVec(u64, DiscoveryNotDialReasonLabels),
+    discovery_total_dial_attempts: Counter(u64),
     discovery_dials_total: CounterVec(u64, DiscoveryDialOutcomeLabels),
     discovery_dial_time_ns_total: CounterVec(u64, DiscoveryDialOutcomeLabels),
+    discovery_dial_error_total_count: CounterVec(u64, DiscoveryDialErrorLabels),
     sync_status: Gauge(u64),
     sync_distance: Gauge(u64),
     sync_state: Gauge(u64),
@@ -852,6 +892,34 @@ pub const BeaconMetrics = struct {
                 .{ .help = "Total Goodbye messages received by reason." },
                 ro,
             ),
+            .peers_requested_to_connect = Gauge(u64).init(
+                "lodestar_peers_requested_total_to_connect",
+                .{ .help = "Peer-manager requested peers to connect from the most recent heartbeat/prioritization pass." },
+                ro,
+            ),
+            .peers_requested_to_disconnect = try GaugeVec(u64, RequestedDisconnectReasonLabels).init(
+                allocator,
+                "lodestar_peers_requested_total_to_disconnect",
+                .{ .help = "Peer-manager requested peers to disconnect from the most recent heartbeat/prioritization pass, by reason." },
+                ro,
+            ),
+            .peers_requested_subnets_to_query = try GaugeVec(u64, RequestedSubnetTypeLabels).init(
+                allocator,
+                "lodestar_peers_requested_total_subnets_to_query",
+                .{ .help = "Peer-manager requested subnet or custody-group queries from the most recent prioritization pass." },
+                ro,
+            ),
+            .peers_requested_subnets_peer_count = try GaugeVec(u64, RequestedSubnetTypeLabels).init(
+                allocator,
+                "lodestar_peers_requested_total_subnets_peers_count",
+                .{ .help = "Peer-manager requested peers across subnet or custody-group queries from the most recent prioritization pass." },
+                ro,
+            ),
+            .peer_manager_heartbeat_duration_seconds = Histogram(f64, &peer_manager_heartbeat_buckets).init(
+                "lodestar_peer_manager_heartbeat_duration_seconds",
+                .{ .help = "Distribution of peer-manager heartbeat/prioritization durations in seconds." },
+                ro,
+            ),
             .api_active_connections = Gauge(u64).init(
                 "beacon_api_active_connections",
                 .{ .help = "Current number of active beacon HTTP API connections." },
@@ -1239,6 +1307,56 @@ pub const BeaconMetrics = struct {
                 .{ .help = "Total discovered peers filtered out before dialing." },
                 ro,
             ),
+            .discovery_peers_to_connect = Gauge(u64).init(
+                "lodestar_discovery_peers_to_connect",
+                .{ .help = "Current generic peers-to-connect demand tracked by discovery." },
+                ro,
+            ),
+            .discovery_subnet_peers_to_connect = try GaugeVec(u64, RequestedSubnetTypeLabels).init(
+                allocator,
+                "lodestar_discovery_subnet_peers_to_connect",
+                .{ .help = "Current peers-to-connect demand tracked by discovery for attnets, syncnets, and custody groups." },
+                ro,
+            ),
+            .discovery_custody_group_peers_to_connect = Gauge(u64).init(
+                "lodestar_discovery_custody_group_peers_to_connect",
+                .{ .help = "Current PeerDAS custody-group peers-to-connect demand tracked by discovery." },
+                ro,
+            ),
+            .discovery_subnets_to_connect = try GaugeVec(u64, RequestedSubnetTypeLabels).init(
+                allocator,
+                "lodestar_discovery_subnets_to_connect",
+                .{ .help = "Current attnet, syncnet, and custody-group demand counts tracked by discovery." },
+                ro,
+            ),
+            .discovery_custody_groups_to_connect = Gauge(u64).init(
+                "lodestar_discovery_custody_groups_to_connect",
+                .{ .help = "Current custody-group demand count tracked by discovery." },
+                ro,
+            ),
+            .discovery_find_node_query_requests_total = try CounterVec(u64, DiscoveryLookupActionLabels).init(
+                allocator,
+                "lodestar_discovery_find_node_query_requests_total",
+                .{ .help = "Total discovery find-node style lookup requests started by source/action." },
+                ro,
+            ),
+            .discovery_discovered_status_total_count = try CounterVec(u64, DiscoveryDiscoveredStatusLabels).init(
+                allocator,
+                "lodestar_discovery_discovered_status_total_count",
+                .{ .help = "Total discovery candidate status outcomes." },
+                ro,
+            ),
+            .discovery_not_dial_reason_total_count = try CounterVec(u64, DiscoveryNotDialReasonLabels).init(
+                allocator,
+                "lodestar_discovery_not_dial_reason_total_count",
+                .{ .help = "Total discovery not-dial reasons." },
+                ro,
+            ),
+            .discovery_total_dial_attempts = Counter(u64).init(
+                "lodestar_discovery_total_dial_attempts",
+                .{ .help = "Total discovery dial attempts." },
+                ro,
+            ),
             .discovery_dials_total = try CounterVec(u64, DiscoveryDialOutcomeLabels).init(
                 allocator,
                 "beacon_discovery_dials_total",
@@ -1249,6 +1367,12 @@ pub const BeaconMetrics = struct {
                 allocator,
                 "beacon_discovery_dial_time_ns_total",
                 .{ .help = "Cumulative discovery dial time in nanoseconds by outcome." },
+                ro,
+            ),
+            .discovery_dial_error_total_count = try CounterVec(u64, DiscoveryDialErrorLabels).init(
+                allocator,
+                "lodestar_discovery_dial_error_total_count",
+                .{ .help = "Total discovery dial failures by error kind." },
                 ro,
             ),
             .sync_status = Gauge(u64).init(
@@ -2210,6 +2334,9 @@ pub const BeaconMetrics = struct {
         self.known_peer_relevance_count.deinit();
         self.peer_reports_total.deinit();
         self.peer_goodbye_received_total.deinit();
+        self.peers_requested_to_disconnect.deinit();
+        self.peers_requested_subnets_to_query.deinit();
+        self.peers_requested_subnets_peer_count.deinit();
         self.db_entries.deinit();
         self.db_operation_total.deinit();
         self.db_operation_time_ns_total.deinit();
@@ -2249,8 +2376,14 @@ pub const BeaconMetrics = struct {
         self.gossipsub_mesh_peers_per_main_topic.deinit();
         self.gossipsub_mesh_peer_counts.deinit();
         self.gossipsub_topic_msg_sent_bytes.deinit();
+        self.discovery_subnet_peers_to_connect.deinit();
+        self.discovery_subnets_to_connect.deinit();
+        self.discovery_find_node_query_requests_total.deinit();
+        self.discovery_discovered_status_total_count.deinit();
+        self.discovery_not_dial_reason_total_count.deinit();
         self.discovery_dials_total.deinit();
         self.discovery_dial_time_ns_total.deinit();
+        self.discovery_dial_error_total_count.deinit();
         self.sync_mode_state.deinit();
         self.range_sync_active_chains.deinit();
         self.range_sync_peers.deinit();
@@ -2365,6 +2498,7 @@ pub const BeaconMetrics = struct {
         self.libp2p_peers.set(snapshot.connected_peers);
         self.known_peers.set(snapshot.known_peers);
         self.peers_connected.set(snapshot.connected_peers);
+        self.peers_requested_to_connect.set(snapshot.requested_peers_to_connect);
         self.connected_peer_direction_count.set(.{ .direction = peerDirectionLabel(.inbound) }, snapshot.inbound_connected_peers) catch {};
         self.connected_peer_direction_count.set(.{ .direction = peerDirectionLabel(.outbound) }, snapshot.outbound_connected_peers) catch {};
 
@@ -2403,6 +2537,28 @@ pub const BeaconMetrics = struct {
                 snapshot.knownRelevanceCount(status),
             ) catch {};
         }
+
+        inline for (networking.peer_manager.metric_requested_disconnect_reasons) |reason| {
+            self.peers_requested_to_disconnect.set(
+                .{ .reason = requestedDisconnectReasonLabel(reason) },
+                snapshot.requestedDisconnectCount(reason),
+            ) catch {};
+        }
+
+        inline for (networking.peer_manager.metric_requested_subnet_types) |kind| {
+            self.peers_requested_subnets_to_query.set(
+                .{ .type = requestedSubnetTypeLabel(kind) },
+                snapshot.requestedSubnetCount(kind),
+            ) catch {};
+            self.peers_requested_subnets_peer_count.set(
+                .{ .type = requestedSubnetTypeLabel(kind) },
+                snapshot.requestedSubnetPeerCount(kind),
+            ) catch {};
+        }
+    }
+
+    pub fn observePeerManagerHeartbeatDuration(self: *BeaconMetrics, duration_seconds: f64) void {
+        self.peer_manager_heartbeat_duration_seconds.observe(duration_seconds);
     }
 
     pub fn setForkChoiceSnapshot(
@@ -3111,6 +3267,14 @@ fn peerActionLabel(action: networking.PeerAction) []const u8 {
 
 fn peerGoodbyeReasonLabel(reason: networking.PeerGoodbyeMetricReason) []const u8 {
     return @tagName(reason);
+}
+
+fn requestedDisconnectReasonLabel(reason: networking.peer_manager.RequestedDisconnectMetricReason) []const u8 {
+    return @tagName(reason);
+}
+
+fn requestedSubnetTypeLabel(kind: networking.peer_manager.RequestedSubnetMetricType) []const u8 {
+    return @tagName(kind);
 }
 
 fn reqRespMethodLabel(method: networking.Method) []const u8 {
