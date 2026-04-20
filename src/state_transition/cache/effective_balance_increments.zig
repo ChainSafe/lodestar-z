@@ -2,10 +2,10 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const preset = @import("preset").preset;
 const AnyBeaconState = @import("fork_types").AnyBeaconState;
-const ReferenceCount = @import("../utils/reference_count.zig").ReferenceCount;
+const RefCount = @import("../utils/ref_count.zig").RefCount;
 
 pub const EffectiveBalanceIncrements = std.ArrayList(u16);
-pub const EffectiveBalanceIncrementsRc = ReferenceCount(EffectiveBalanceIncrements);
+pub const EffectiveBalanceIncrementsRc = RefCount(EffectiveBalanceIncrements);
 
 /// Allocates `EffectiveBalanceIncrements` with capacity slightly larger than `validator_count`.
 ///
