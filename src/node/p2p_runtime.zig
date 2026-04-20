@@ -1946,11 +1946,15 @@ fn validatorMonitorEpochLag(
 fn updateExecutionRuntimeMetrics(self: *BeaconNode) void {
     const metrics = self.metrics orelse return;
     const snapshot = self.execution_runtime.metricsSnapshot();
-
+    const queue_snapshot = self.executionQueueSnapshot();
     metrics.execution_pending_forkchoice_updates.set(snapshot.pending_forkchoice_updates);
     metrics.execution_pending_payload_verifications.set(snapshot.pending_payload_verifications);
     metrics.execution_completed_forkchoice_updates.set(snapshot.completed_forkchoice_updates);
     metrics.execution_completed_payload_verifications.set(snapshot.completed_payload_verifications);
+    metrics.execution_waiting_import_payloads.set(queue_snapshot.waiting_imports);
+    metrics.execution_waiting_revalidation_payloads.set(queue_snapshot.waiting_revalidations);
+    metrics.execution_pending_import_payloads.set(queue_snapshot.pending_imports);
+    metrics.execution_pending_revalidation_payloads.set(queue_snapshot.pending_revalidations);
     metrics.execution_failed_payload_preparations.set(snapshot.failed_payload_preparations);
     metrics.execution_cached_payload.set(if (snapshot.has_cached_payload) 1 else 0);
     metrics.execution_offline.set(if (snapshot.el_offline) 1 else 0);

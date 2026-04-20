@@ -631,6 +631,10 @@ pub const BeaconMetrics = struct {
     execution_pending_payload_verifications: Gauge(u64),
     execution_completed_forkchoice_updates: Gauge(u64),
     execution_completed_payload_verifications: Gauge(u64),
+    execution_waiting_import_payloads: Gauge(u64),
+    execution_waiting_revalidation_payloads: Gauge(u64),
+    execution_pending_import_payloads: Gauge(u64),
+    execution_pending_revalidation_payloads: Gauge(u64),
     execution_failed_payload_preparations: Gauge(u64),
     execution_cached_payload: Gauge(u64),
     execution_offline: Gauge(u64),
@@ -2298,6 +2302,26 @@ pub const BeaconMetrics = struct {
                 .{ .help = "Current number of completed payload verifications awaiting node consumption." },
                 ro,
             ),
+            .execution_waiting_import_payloads = Gauge(u64).init(
+                "execution_waiting_import_payloads",
+                .{ .help = "Current number of block-import execution work items waiting to be dispatched through the execution stage." },
+                ro,
+            ),
+            .execution_waiting_revalidation_payloads = Gauge(u64).init(
+                "execution_waiting_revalidation_payloads",
+                .{ .help = "Current number of optimistic-head revalidation work items waiting to be dispatched through the execution stage." },
+                ro,
+            ),
+            .execution_pending_import_payloads = Gauge(u64).init(
+                "execution_pending_import_payloads",
+                .{ .help = "Current number of execution import verifications already submitted to the worker and awaiting completion." },
+                ro,
+            ),
+            .execution_pending_revalidation_payloads = Gauge(u64).init(
+                "execution_pending_revalidation_payloads",
+                .{ .help = "Current number of optimistic-head revalidations already submitted to the worker and awaiting completion." },
+                ro,
+            ),
             .execution_failed_payload_preparations = Gauge(u64).init(
                 "execution_failed_payload_preparations",
                 .{ .help = "Current number of failed payload-preparation tickets awaiting node consumption." },
@@ -3376,6 +3400,10 @@ test "BeaconMetrics: init fields are accessible" {
     m.state_work_failure_total.incrBy(1);
     m.state_work_execution_time_ns_total.incrBy(200);
     m.state_work_last_execution_time_ns.set(50);
+    m.execution_waiting_import_payloads.set(2);
+    m.execution_waiting_revalidation_payloads.set(1);
+    m.execution_pending_import_payloads.set(3);
+    m.execution_pending_revalidation_payloads.set(4);
     m.execution_new_payload_seconds.observe(0.1);
     m.peer_connected_total.incr();
     try std.testing.expectEqual(@as(u64, 42), m.head_slot.impl.value);
@@ -3447,6 +3475,10 @@ test "BeaconMetrics: init fields are accessible" {
     try std.testing.expectEqual(@as(u64, 2), m.state_work_pending_jobs.impl.value);
     try std.testing.expectEqual(@as(u64, 4), m.state_work_submitted_total.impl.count);
     try std.testing.expectEqual(@as(u64, 50), m.state_work_last_execution_time_ns.impl.value);
+    try std.testing.expectEqual(@as(u64, 2), m.execution_waiting_import_payloads.impl.value);
+    try std.testing.expectEqual(@as(u64, 1), m.execution_waiting_revalidation_payloads.impl.value);
+    try std.testing.expectEqual(@as(u64, 3), m.execution_pending_import_payloads.impl.value);
+    try std.testing.expectEqual(@as(u64, 4), m.execution_pending_revalidation_payloads.impl.value);
     try std.testing.expectEqual(@as(u64, 1), m.peer_connected_total.impl.count);
 }
 
@@ -3693,6 +3725,10 @@ test "BeaconMetrics: write produces live Prometheus output" {
     try std.testing.expect(std.mem.indexOf(u8, buf, "beacon_state_regen_cache_hits_total") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf, "execution_new_payload_seconds") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf, "execution_forkchoice_updated_seconds") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf, "execution_waiting_import_payloads") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf, "execution_waiting_revalidation_payloads") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf, "execution_pending_import_payloads") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf, "execution_pending_revalidation_payloads") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf, "execution_cached_payload") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf, "p2p_peer_connected_total") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf, "beacon_state_cache_hit_total") == null);

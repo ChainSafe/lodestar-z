@@ -421,6 +421,55 @@ const PendingExecutionPayload = struct {
     }
 };
 
+pub const ExecutionQueueSnapshot = struct {
+    waiting_imports: u64 = 0,
+    waiting_revalidations: u64 = 0,
+    pending_imports: u64 = 0,
+    pending_revalidations: u64 = 0,
+};
+
+fn snapshotExecutionQueues(
+    waiting_payloads: []const WaitingExecutionPayload,
+    pending_payloads: []const PendingExecutionPayload,
+) ExecutionQueueSnapshot {
+    var snapshot: ExecutionQueueSnapshot = .{};
+
+    for (waiting_payloads) |waiting| {
+        switch (waiting) {
+            .import => snapshot.waiting_imports += 1,
+            .revalidation => snapshot.waiting_revalidations += 1,
+        }
+    }
+
+    for (pending_payloads) |pending| {
+        switch (pending.work) {
+            .import => snapshot.pending_imports += 1,
+            .revalidation => snapshot.pending_revalidations += 1,
+        }
+    }
+
+    return snapshot;
+}
+
+test "snapshotExecutionQueues counts imports and revalidations separately" {
+    const waiting = [_]WaitingExecutionPayload{
+        .{ .import = .{ .owner = .{ .generic = null }, .prepared = undefined } },
+        .{ .revalidation = undefined },
+        .{ .import = .{ .owner = .{ .generic = 7 }, .prepared = undefined } },
+    };
+    const pending = [_]PendingExecutionPayload{
+        .{ .ticket = 1, .work = .{ .import = .{ .owner = .{ .generic = null }, .prepared = undefined } } },
+        .{ .ticket = 2, .work = .{ .revalidation = undefined } },
+        .{ .ticket = 3, .work = .{ .import = .{ .owner = .{ .sync_segment = .{ .chain_id = 1, .batch_id = 2, .generation = 3 } }, .prepared = undefined } } },
+    };
+
+    const snapshot = snapshotExecutionQueues(waiting[0..], pending[0..]);
+    try std.testing.expectEqual(@as(u64, 2), snapshot.waiting_imports);
+    try std.testing.expectEqual(@as(u64, 1), snapshot.waiting_revalidations);
+    try std.testing.expectEqual(@as(u64, 2), snapshot.pending_imports);
+    try std.testing.expectEqual(@as(u64, 1), snapshot.pending_revalidations);
+}
+
 pub const DiscoveryDialCompletion = union(enum) {
     success: struct {
         peer_id: []const u8,
@@ -1290,7 +1339,7 @@ pub const BeaconNode = struct {
         return false;
     }
 
-    fn hasTrackedExecutionPayload(self: *BeaconNode, ticket: BlockIngressTicket) bool {
+    fn hasTrackedExecutionPayload(self: *const BeaconNode, ticket: BlockIngressTicket) bool {
         for (self.waiting_execution_payloads.items) |waiting| {
             switch (waiting) {
                 .import => |import_work| switch (import_work.owner) {
@@ -1312,6 +1361,10 @@ pub const BeaconNode = struct {
         }
 
         return false;
+    }
+
+    pub fn executionQueueSnapshot(self: *const BeaconNode) ExecutionQueueSnapshot {
+        return snapshotExecutionQueues(self.waiting_execution_payloads.items, self.pending_execution_payloads.items);
     }
 
     pub fn processPendingBlockStateWork(self: *BeaconNode) bool {
