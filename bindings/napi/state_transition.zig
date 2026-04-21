@@ -15,25 +15,25 @@ else
     std.heap.c_allocator;
 
 fn parseOptions(options: ?js.Value) !st.TransitionOpt {
-    var opts: st.TransitionOpt = .{};
+    var transit_options: st.TransitionOpt = .{};
     if (options) |value| {
         const raw = value.toValue();
         if (try raw.typeof() == .object) {
             if (try raw.hasNamedProperty("verifyStateRoot")) {
-                opts.verify_state_root = try (try raw.getNamedProperty("verifyStateRoot")).getValueBool();
+                transit_options.verify_state_root = try (try raw.getNamedProperty("verifyStateRoot")).getValueBool();
             }
             if (try raw.hasNamedProperty("verifyProposer")) {
-                opts.verify_proposer = try (try raw.getNamedProperty("verifyProposer")).getValueBool();
+                transit_options.verify_proposer = try (try raw.getNamedProperty("verifyProposer")).getValueBool();
             }
             if (try raw.hasNamedProperty("verifySignatures")) {
-                opts.verify_signatures = try (try raw.getNamedProperty("verifySignatures")).getValueBool();
+                transit_options.verify_signatures = try (try raw.getNamedProperty("verifySignatures")).getValueBool();
             }
             if (try raw.hasNamedProperty("transferCache")) {
-                opts.transfer_cache = try (try raw.getNamedProperty("transferCache")).getValueBool();
+                transit_options.transfer_cache = try (try raw.getNamedProperty("transferCache")).getValueBool();
             }
         }
     }
-    return opts;
+    return transit_options;
 }
 
 pub fn stateTransition(

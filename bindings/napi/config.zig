@@ -43,13 +43,13 @@ pub const State = struct {
 pub var state: State = .{};
 
 /// JS: config.set(chainConfigObj, genesisValidatorsRoot)
-pub fn set(obj: js.Value, genesis_root: js.Uint8Array) !void {
+pub fn set(object: js.Value, genesis_root: js.Uint8Array) !void {
     if (!state.initialized) {
         return error.ConfigNotInitialized;
     }
 
-    // Drop to low-level for the complex object parsing
-    const chain_config = try chainConfigFromObject(js.env(), try obj.toValue().coerceToObject());
+    // Drop to low-level for the complex object parsing.
+    const chain_config = try chainConfigFromObject(js.env(), try object.toValue().coerceToObject());
 
     const root_slice = try genesis_root.toSlice();
     if (root_slice.len != 32) {
