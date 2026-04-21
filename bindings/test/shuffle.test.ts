@@ -43,7 +43,7 @@ describe("innerShuffleList", () => {
     const forwards = false;
     expect(() => {
       innerShuffleList(invalidInput as any, seed, rounds, forwards);
-    }).toThrow("InvalidArg");
+    }).toThrow("Argument 1 must be a Uint32Array");
   });
 
   it("should fail with invalid rounds", async () => {

@@ -29,7 +29,7 @@ describe("pubkeys", () => {
     for (const {index, pubkeyBytes} of keypairs) {
       pubkeyCache.set(index, pubkeyBytes);
     }
-    expect(pubkeyCache.size()).toBe(keypairs.length);
+    expect(pubkeyCache.size).toBe(keypairs.length);
 
     for (const {index, pubkeyBytes} of keypairs) {
       expect(pubkeyCache.get(index)).toBeDefined();
@@ -66,7 +66,7 @@ describe("pubkeys", () => {
     pubkeyCache.save(tempPkixPath);
     pubkeyCache.load(tempPkixPath);
 
-    expect(pubkeyCache.size()).toBe(keypairs.length);
+    expect(pubkeyCache.size).toBe(keypairs.length);
     for (const {index, pubkeyBytes} of keypairs) {
       expect(pubkeyCache.getIndex(pubkeyBytes)).toBe(index);
       expect(pubkeyCache.get(index)).toBeDefined();

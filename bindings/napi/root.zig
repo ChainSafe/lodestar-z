@@ -1,14 +1,17 @@
 const std = @import("std");
 const zapi = @import("zapi");
 const js = zapi.js;
+const napi = zapi.napi;
 pub const pool = @import("./pool.zig");
 pub const shuffle = @import("./shuffle.zig");
 pub const config = @import("./config.zig");
-pub const pubkeys = @import("./pubkeys.zig");
+
 pub const metrics = @import("./metrics.zig");
-pub const blst = @import("./blst.zig");
-pub const BeaconStateView = @import("./BeaconStateView.zig").BeaconStateView;
 pub const stateTransition = @import("./state_transition.zig");
+
+const pubkeys = @import("./pubkeys.zig");
+const blst = @import("./blst.zig");
+const BeaconStateView = @import("./BeaconStateView.zig");
 
 fn init(old_ref_count: u32) !void {
     if (old_ref_count == 0) {
@@ -29,9 +32,12 @@ fn cleanup(new_ref_count: u32) void {
     }
 }
 
+fn setup(env: napi.Env, exports: napi.Value) !void {
+    try blst.register(env, exports);
+    try BeaconStateView.register(env, exports);
+    try pubkeys.register(env, exports);
+}
+
 comptime {
-    js.exportModule(@This(), .{
-        .init = init,
-        .cleanup = cleanup,
-    });
+    js.exportModule(@This(), .{ .init = init, .cleanup = cleanup, .register = setup });
 }
