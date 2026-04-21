@@ -1,5 +1,5 @@
 const std = @import("std");
-const napi = @import("zapi:zapi");
+const napi = @import("zapi").napi;
 const Node = @import("persistent_merkle_tree").Node;
 
 /// Pool uses page allocator for internal allocations.

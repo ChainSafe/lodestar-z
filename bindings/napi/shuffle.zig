@@ -1,5 +1,5 @@
 const std = @import("std");
-const napi = @import("zapi:zapi");
+const napi = @import("zapi").napi;
 const innerShuffleList = @import("state_transition").shuffle.innerShuffleList;
 
 pub fn Shuffle_shuffleList(env: napi.Env, cb: napi.CallbackInfo(4)) !napi.Value {

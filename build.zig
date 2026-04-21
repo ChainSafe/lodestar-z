@@ -1167,7 +1167,7 @@ pub fn build(b: *std.Build) void {
     module_bindings.addImport("config", module_config);
     module_bindings.addImport("fork_types", module_fork_types);
     module_bindings.addImport("state_transition", module_state_transition);
-    module_bindings.addImport("zapi:zapi", dep_zapi.module("zapi"));
+    module_bindings.addImport("zapi", dep_zapi.module("zapi"));
 
     module_int.addImport("config", module_config);
     module_int.addImport("download_era_options", options_module_download_era_options);

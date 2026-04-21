@@ -1,5 +1,5 @@
 const std = @import("std");
-const napi = @import("zapi:zapi");
+const napi = @import("zapi").napi;
 const builtin = @import("builtin");
 const fork_types = @import("fork_types");
 const state_transition = @import("state_transition");
