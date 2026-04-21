@@ -38,6 +38,14 @@ pub const Config = struct {
     ping_interval_ms: u64 = 30_000,
     enr_update: bool = true,
     addr_votes_to_update_enr: usize = 10,
+    socket_recv_buffer_bytes: ?u32 = 4 * 1024 * 1024,
+    socket_send_buffer_bytes: ?u32 = 256 * 1024,
+    ingress_queue_capacity: usize = 1024,
+    max_packets_per_poll: usize = 64,
+    ingress_worker_timeout_ms: u64 = 50,
+    ingress_filter_enabled: bool = true,
+    ingress_total_packets_per_second: u32 = 256,
+    ingress_packets_per_ip_per_second: u32 = 64,
 };
 
 const MAX_ADDR_VOTES: usize = 200;
@@ -356,11 +364,16 @@ pub const DiscoveredEnrEvent = struct {
     source_peer_addr: Address,
     lookup_id: ?u32,
     node_id: NodeId,
-    enr: []u8,
+    addr_ip4: ?Address,
+    addr_ip6: ?Address,
+    pubkey: ?[33]u8,
+    has_quic: bool,
+    attnets: [8]u8,
+    syncnets: [1]u8,
+    custody_group_count: ?u64,
+    fork_digest: ?[4]u8,
 
-    fn deinit(self: *DiscoveredEnrEvent, alloc: Allocator) void {
-        alloc.free(self.enr);
-    }
+    fn deinit(_: *DiscoveredEnrEvent, _: Allocator) void {}
 };
 
 pub const LocalEnrUpdatedEvent = struct {
@@ -419,6 +432,181 @@ pub const Event = union(enum) {
     }
 };
 
+const IngressFilterAddressKey = struct {
+    family: Address.Family,
+    bytes: [16]u8,
+
+    fn fromAddress(addr: Address) IngressFilterAddressKey {
+        return switch (addr) {
+            .ip4 => |ip4| blk: {
+                var bytes = [_]u8{0} ** 16;
+                @memcpy(bytes[0..4], &ip4.bytes);
+                break :blk .{ .family = .ip4, .bytes = bytes };
+            },
+            .ip6 => |ip6| .{ .family = .ip6, .bytes = ip6.bytes },
+        };
+    }
+};
+
+const IngressPacket = struct {
+    from: Address,
+    len: usize,
+    data: [protocol_mod.MAX_PACKET_SIZE]u8,
+};
+
+pub const IngressStatsSnapshot = struct {
+    received_total: u64 = 0,
+    filtered_total: u64 = 0,
+    dropped_queue_full_total: u64 = 0,
+    processed_total: u64 = 0,
+    budget_exhausted_total: u64 = 0,
+    queue_depth: usize = 0,
+    max_queue_depth: usize = 0,
+    recv_buffer_bytes_ip4: u32 = 0,
+    recv_buffer_bytes_ip6: u32 = 0,
+    send_buffer_bytes_ip4: u32 = 0,
+    send_buffer_bytes_ip6: u32 = 0,
+};
+
+const IngressQueue = struct {
+    allocator: Allocator,
+    packets: []IngressPacket,
+    head: usize = 0,
+    len: usize = 0,
+    filter_window_started_ms: u64 = 0,
+    filter_total: u32 = 0,
+    filter_by_ip: std.AutoHashMap(IngressFilterAddressKey, u32),
+    mutex: std.atomic.Mutex = .unlocked,
+    stats: IngressStatsSnapshot = .{},
+
+    fn acquire(self: *IngressQueue) void {
+        while (!self.mutex.tryLock()) {
+            std.atomic.spinLoopHint();
+        }
+    }
+
+    fn init(allocator: Allocator, capacity: usize) !IngressQueue {
+        std.debug.assert(capacity > 0);
+        return .{
+            .allocator = allocator,
+            .packets = try allocator.alloc(IngressPacket, capacity),
+            .filter_by_ip = std.AutoHashMap(IngressFilterAddressKey, u32).init(allocator),
+        };
+    }
+
+    fn deinit(self: *IngressQueue) void {
+        self.filter_by_ip.deinit();
+        self.allocator.free(self.packets);
+    }
+
+    fn snapshot(self: *IngressQueue) IngressStatsSnapshot {
+        self.acquire();
+        defer self.mutex.unlock();
+        return self.stats;
+    }
+
+    fn queuedLen(self: *IngressQueue) usize {
+        self.acquire();
+        defer self.mutex.unlock();
+        return self.len;
+    }
+
+    fn setSocketBuffers(self: *IngressQueue, family: Address.Family, recv_buffer_bytes: u32, send_buffer_bytes: u32) void {
+        self.acquire();
+        defer self.mutex.unlock();
+        switch (family) {
+            .ip4 => {
+                self.stats.recv_buffer_bytes_ip4 = recv_buffer_bytes;
+                self.stats.send_buffer_bytes_ip4 = send_buffer_bytes;
+            },
+            .ip6 => {
+                self.stats.recv_buffer_bytes_ip6 = recv_buffer_bytes;
+                self.stats.send_buffer_bytes_ip6 = send_buffer_bytes;
+            },
+        }
+    }
+
+    fn enqueueReceived(self: *IngressQueue, from: Address, data: []const u8, config: *const Config, now_ms: u64) bool {
+        self.acquire();
+        defer self.mutex.unlock();
+
+        self.stats.received_total += 1;
+        if (config.ingress_filter_enabled) {
+            if (self.filter_windowStartedExpired(now_ms)) {
+                self.filter_window_started_ms = now_ms;
+                self.filter_total = 0;
+                self.filter_by_ip.clearRetainingCapacity();
+            }
+
+            if (self.filter_total >= config.ingress_total_packets_per_second) {
+                self.stats.filtered_total += 1;
+                return false;
+            }
+
+            const key = IngressFilterAddressKey.fromAddress(from);
+            const entry = self.filter_by_ip.getOrPut(key) catch {
+                self.stats.filtered_total += 1;
+                return false;
+            };
+            if (!entry.found_existing) entry.value_ptr.* = 0;
+            if (entry.value_ptr.* >= config.ingress_packets_per_ip_per_second) {
+                self.stats.filtered_total += 1;
+                return false;
+            }
+            entry.value_ptr.* += 1;
+            self.filter_total += 1;
+        }
+
+        return self.enqueueUnlocked(from, data);
+    }
+
+    fn enqueueForTest(self: *IngressQueue, from: Address, data: []const u8) bool {
+        self.acquire();
+        defer self.mutex.unlock();
+        return self.enqueueUnlocked(from, data);
+    }
+
+    fn enqueueUnlocked(self: *IngressQueue, from: Address, data: []const u8) bool {
+        if (self.len >= self.packets.len) {
+            self.stats.dropped_queue_full_total += 1;
+            return false;
+        }
+
+        const index = (self.head + self.len) % self.packets.len;
+        self.packets[index].from = from;
+        self.packets[index].len = data.len;
+        @memcpy(self.packets[index].data[0..data.len], data);
+        self.len += 1;
+        self.stats.queue_depth = self.len;
+        if (self.len > self.stats.max_queue_depth) self.stats.max_queue_depth = self.len;
+        return true;
+    }
+
+    fn pop(self: *IngressQueue) ?IngressPacket {
+        self.acquire();
+        defer self.mutex.unlock();
+        if (self.len == 0) return null;
+
+        const packet = self.packets[self.head];
+        self.head = (self.head + 1) % self.packets.len;
+        self.len -= 1;
+        self.stats.queue_depth = self.len;
+        return packet;
+    }
+
+    fn noteProcessed(self: *IngressQueue, processed: usize, budget_exhausted: bool) void {
+        if (processed == 0 and !budget_exhausted) return;
+        self.acquire();
+        defer self.mutex.unlock();
+        self.stats.processed_total += processed;
+        if (budget_exhausted) self.stats.budget_exhausted_total += 1;
+    }
+
+    fn filter_windowStartedExpired(self: *const IngressQueue, now_ms: u64) bool {
+        return self.filter_window_started_ms == 0 or now_ms - self.filter_window_started_ms >= 1_000;
+    }
+};
+
 pub const SetLocalEnrError = Allocator.Error || enr_mod.Error || error{
     WrongNodeId,
     StaleEnrSeq,
@@ -439,6 +627,13 @@ pub const Service = struct {
     addr_votes_ip4: AddrVotes,
     addr_votes_ip6: AddrVotes,
     completed_events: std.ArrayListUnmanaged(Event) = .empty,
+    completed_events_head: usize = 0,
+    ingress_queue: IngressQueue,
+    ingress_shutdown_requested: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    ingress_thread_ip4: ?std.Thread = null,
+    ingress_thread_ip6: ?std.Thread = null,
+    ingress_workers_started: bool = false,
+    next_socket_poll_family: Address.Family = .ip4,
 
     pub fn init(io: Io, allocator: Allocator, config: Config) !Service {
         var service_config = config;
@@ -462,15 +657,23 @@ pub const Service = struct {
         errdefer if (socket_ip4) |*socket| socket.close();
         if (config.bind_addresses.ip4) |addr| {
             socket_ip4 = try udp_socket.Socket.bind(io, addr);
+            socket_ip4.?.configureBuffers(.{
+                .recv_buffer_bytes = service_config.socket_recv_buffer_bytes,
+                .send_buffer_bytes = service_config.socket_send_buffer_bytes,
+            });
         }
 
         var socket_ip6: ?udp_socket.Socket = null;
         errdefer if (socket_ip6) |*socket| socket.close();
         if (config.bind_addresses.ip6) |addr| {
             socket_ip6 = try udp_socket.Socket.bind(io, addr);
+            socket_ip6.?.configureBuffers(.{
+                .recv_buffer_bytes = service_config.socket_recv_buffer_bytes,
+                .send_buffer_bytes = service_config.socket_send_buffer_bytes,
+            });
         }
 
-        return .{
+        var service = Service{
             .allocator = allocator,
             .io = io,
             .config = service_config,
@@ -483,10 +686,20 @@ pub const Service = struct {
             .owned_local_enr = owned_local_enr,
             .addr_votes_ip4 = AddrVotes.init(allocator, service_config.addr_votes_to_update_enr),
             .addr_votes_ip6 = AddrVotes.init(allocator, service_config.addr_votes_to_update_enr),
+            .ingress_queue = try IngressQueue.init(allocator, service_config.ingress_queue_capacity),
         };
+        errdefer service.ingress_queue.deinit();
+        if (service.socket_ip4) |socket| {
+            service.ingress_queue.setSocketBuffers(.ip4, socket.recv_buffer_bytes, socket.send_buffer_bytes);
+        }
+        if (service.socket_ip6) |socket| {
+            service.ingress_queue.setSocketBuffers(.ip6, socket.recv_buffer_bytes, socket.send_buffer_bytes);
+        }
+        return service;
     }
 
     pub fn deinit(self: *Service) void {
+        self.stopIngressWorkers();
         var lookups = self.active_lookups.iterator();
         while (lookups.next()) |entry| entry.value_ptr.deinit(self.allocator);
         self.active_lookups.deinit();
@@ -494,8 +707,9 @@ pub const Service = struct {
         self.connected_peers.deinit();
         self.addr_votes_ip4.deinit();
         self.addr_votes_ip6.deinit();
-        for (self.completed_events.items) |*event| event.deinit(self.allocator);
+        for (self.completed_events.items[self.completed_events_head..]) |*event| event.deinit(self.allocator);
         self.completed_events.deinit(self.allocator);
+        self.ingress_queue.deinit();
         if (self.owned_local_enr) |local_enr| self.allocator.free(local_enr);
         self.protocol.deinit();
         if (self.socket_ip4) |*socket| socket.close();
@@ -572,8 +786,35 @@ pub const Service = struct {
     }
 
     pub fn popEvent(self: *Service) ?Event {
-        if (self.completed_events.items.len == 0) return null;
-        return self.completed_events.orderedRemove(0);
+        if (self.completed_events_head >= self.completed_events.items.len) {
+            self.completed_events.clearRetainingCapacity();
+            self.completed_events_head = 0;
+            return null;
+        }
+
+        const event = self.completed_events.items[self.completed_events_head];
+        self.completed_events_head += 1;
+        self.compactCompletedEvents();
+        return event;
+    }
+
+    fn compactCompletedEvents(self: *Service) void {
+        if (self.completed_events_head == 0) return;
+        const remaining = self.completed_events.items.len - self.completed_events_head;
+        if (remaining == 0) {
+            self.completed_events.clearRetainingCapacity();
+            self.completed_events_head = 0;
+            return;
+        }
+        if (self.completed_events_head < 64 and self.completed_events_head * 2 < self.completed_events.items.len) return;
+
+        std.mem.copyForwards(
+            Event,
+            self.completed_events.items[0..remaining],
+            self.completed_events.items[self.completed_events_head..],
+        );
+        self.completed_events.items.len = remaining;
+        self.completed_events_head = 0;
     }
 
     pub fn knownPeerCount(self: *const Service) usize {
@@ -584,13 +825,75 @@ pub const Service = struct {
         return self.connected_peers.count();
     }
 
-    pub fn poll(self: *Service) void {
-        self.drainIncomingPackets();
-        self.protocol.pruneExpiredState();
+    pub fn startIngressWorkers(self: *Service) !void {
+        if (self.ingress_workers_started) return;
+        self.ingress_shutdown_requested.store(false, .release);
+        errdefer self.stopIngressWorkers();
+        if (self.socket_ip4 != null) {
+            self.ingress_thread_ip4 = try std.Thread.spawn(.{}, ingressWorkerMain, .{ self, Address.Family.ip4 });
+        }
+        if (self.socket_ip6 != null) {
+            self.ingress_thread_ip6 = try std.Thread.spawn(.{}, ingressWorkerMain, .{ self, Address.Family.ip6 });
+        }
+        self.ingress_workers_started = true;
+    }
+
+    pub fn stopIngressWorkers(self: *Service) void {
+        self.ingress_shutdown_requested.store(true, .release);
+        if (self.ingress_thread_ip4) |thread| {
+            thread.join();
+            self.ingress_thread_ip4 = null;
+        }
+        if (self.ingress_thread_ip6) |thread| {
+            thread.join();
+            self.ingress_thread_ip6 = null;
+        }
+        self.ingress_workers_started = false;
+    }
+
+    pub fn ingressStatsSnapshot(self: *const Service) IngressStatsSnapshot {
+        return @constCast(&self.ingress_queue).snapshot();
+    }
+
+    pub fn queuedIngressPackets(self: *Service) usize {
+        return self.ingress_queue.queuedLen();
+    }
+
+    pub fn queueInboundPacketForTest(self: *Service, from: Address, data: []const u8) !void {
+        if (!self.ingress_queue.enqueueForTest(from, data)) return error.QueueFull;
+    }
+
+    pub fn processQueuedPackets(self: *Service, max_packets: usize) usize {
+        var processed: usize = 0;
+        while (processed < max_packets) {
+            const packet = self.ingress_queue.pop() orelse break;
+            const socket = self.socketForAddress(packet.from) orelse continue;
+            self.protocol.handlePacket(packet.data[0..packet.len], packet.from, socket) catch |err| {
+                scoped_log.debug("discv5: handlePacket failed for queued packet from {any}: {}", .{ packet.from, err });
+            };
+            processed += 1;
+        }
+        const budget_exhausted = processed == max_packets and self.queuedIngressPackets() > 0;
+        self.ingress_queue.noteProcessed(processed, budget_exhausted);
+        return processed;
+    }
+
+    pub fn pollIngress(self: *Service) usize {
+        const processed = if (self.ingress_workers_started)
+            self.processQueuedPackets(self.config.max_packets_per_poll)
+        else
+            self.pollSocketIngressBudgeted(self.config.max_packets_per_poll);
         self.drainProtocolEvents();
+        return processed;
+    }
+
+    pub fn poll(self: *Service) void {
+        _ = self.pollIngress();
+        self.protocol.pruneExpiredState();
         self.pruneTimedOutLookups();
         self.syncConnectedPeers();
         self.pingDueConnectedPeers();
+        self.drainProtocolEvents();
     }
 
     pub fn sendPing(self: *Service, node_id: *const NodeId, pubkey: *const [33]u8, addr: Address, enr_seq: u64) !messages.ReqId {
@@ -737,10 +1040,76 @@ pub const Service = struct {
         return self.startLookup(&target);
     }
 
-    fn drainIncomingPackets(self: *Service) void {
+    fn ingressWorkerMain(self: *Service, family: Address.Family) void {
         var recv_buf: [protocol_mod.MAX_PACKET_SIZE]u8 = undefined;
-        if (self.socket_ip4) |*socket| self.drainIncomingPacketsFrom(socket, &recv_buf);
-        if (self.socket_ip6) |*socket| self.drainIncomingPacketsFrom(socket, &recv_buf);
+        while (!self.ingress_shutdown_requested.load(.acquire)) {
+            const socket = switch (family) {
+                .ip4 => if (self.socket_ip4) |*bound| bound else return,
+                .ip6 => if (self.socket_ip6) |*bound| bound else return,
+            };
+            const result = socket.receiveTimeout(&recv_buf, .{
+                .duration = .{
+                    .raw = Io.Duration.fromMilliseconds(@intCast(self.config.ingress_worker_timeout_ms)),
+                    .clock = .awake,
+                },
+            }) catch |err| switch (err) {
+                error.Timeout => continue,
+                else => {
+                    scoped_log.warn("discv5 ingress worker receive failed for {s}: {}", .{ @tagName(family), err });
+                    std.Io.sleep(self.io, std.Io.Duration.fromMilliseconds(10), .awake) catch {};
+                    continue;
+                },
+            };
+            _ = self.ingress_queue.enqueueReceived(result.from, result.data, &self.config, currentUnixTimeMs(self.io));
+        }
+    }
+
+    fn pollSocketIngressBudgeted(self: *Service, max_packets: usize) usize {
+        if (max_packets == 0) return 0;
+
+        var recv_buf: [protocol_mod.MAX_PACKET_SIZE]u8 = undefined;
+        const first_family = self.next_socket_poll_family;
+        self.next_socket_poll_family = switch (self.next_socket_poll_family) {
+            .ip4 => .ip6,
+            .ip6 => .ip4,
+        };
+
+        var processed = self.pollSocketIngressFamily(first_family, max_packets, &recv_buf);
+        if (processed < max_packets) {
+            const second_family: Address.Family = switch (first_family) {
+                .ip4 => .ip6,
+                .ip6 => .ip4,
+            };
+            processed += self.pollSocketIngressFamily(second_family, max_packets - processed, &recv_buf);
+        }
+        return processed;
+    }
+
+    fn pollSocketIngressFamily(self: *Service, family: Address.Family, max_packets: usize, recv_buf: []u8) usize {
+        if (max_packets == 0) return 0;
+        const socket = switch (family) {
+            .ip4 => if (self.socket_ip4) |*bound| bound else return 0,
+            .ip6 => if (self.socket_ip6) |*bound| bound else return 0,
+        };
+
+        var processed: usize = 0;
+        while (processed < max_packets) {
+            const result = socket.receiveTimeout(recv_buf, .{
+                .duration = .{
+                    .raw = Io.Duration.fromMilliseconds(@intCast(self.receiveTimeoutPerSocketMs())),
+                    .clock = .awake,
+                },
+            }) catch |err| switch (err) {
+                error.Timeout => break,
+                else => break,
+            };
+
+            self.protocol.handlePacket(result.data, result.from, socket) catch |err| {
+                scoped_log.debug("discv5: handlePacket failed for {any}: {}", .{ result.from, err });
+            };
+            processed += 1;
+        }
+        return processed;
     }
 
     fn drainProtocolEvents(self: *Service) void {
@@ -754,8 +1123,10 @@ pub const Service = struct {
                 .nodes => |nodes| {
                     self.notePeerResponsive(nodes.peer_id, nodes.peer_addr);
                     const lookup_id = self.lookupIdForNodes(&nodes);
-                    self.emitDiscoveredEnrs(&nodes, lookup_id);
-                    self.handleLookupNodes(&nodes, lookup_id);
+                    var parsed_nodes = self.collectDiscoveredNodes(&nodes);
+                    defer parsed_nodes.deinit(self.allocator);
+                    self.emitDiscoveredEnrs(&nodes, lookup_id, parsed_nodes.items);
+                    self.handleLookupNodes(&nodes, lookup_id, parsed_nodes.items);
                     self.completed_events.append(self.allocator, .{ .nodes = nodes }) catch {
                         var owned = Event{ .nodes = nodes };
                         owned.deinit(self.allocator);
@@ -788,12 +1159,20 @@ pub const Service = struct {
         return self.request_lookup_ids.get(LookupRequestKey.from(nodes.peer_id, nodes.req_id));
     }
 
-    fn emitDiscoveredEnrs(self: *Service, nodes: *const protocol_mod.NodesEvent, lookup_id: ?u32) void {
-        scoped_log.debug("discv5 service: emitting {d} ENRs from {any} (lookup_id={any})", .{
-            nodes.enrs.len,
-            nodes.peer_addr,
-            lookup_id,
-        });
+    const ParsedDiscoveredNode = struct {
+        node_id: NodeId,
+        addr_ip4: ?Address,
+        addr_ip6: ?Address,
+        pubkey: ?[33]u8,
+        has_quic: bool,
+        attnets: [8]u8,
+        syncnets: [1]u8,
+        custody_group_count: ?u64,
+        fork_digest: ?[4]u8,
+    };
+
+    fn collectDiscoveredNodes(self: *Service, nodes: *const protocol_mod.NodesEvent) std.ArrayListUnmanaged(ParsedDiscoveredNode) {
+        var parsed_nodes: std.ArrayListUnmanaged(ParsedDiscoveredNode) = .empty;
         for (nodes.enrs) |raw_enr| {
             var parsed = enr_mod.decode(self.allocator, raw_enr) catch continue;
             defer parsed.deinit();
@@ -801,20 +1180,64 @@ pub const Service = struct {
             const node_id = parsed.nodeId() orelse continue;
             if (std.mem.eql(u8, &node_id, &self.protocol.config.local_node_id)) continue;
 
-            const owned_enr = self.allocator.dupe(u8, raw_enr) catch continue;
+            const addr_ip4 = if (parsed.ip) |ip|
+                if (parsed.quic orelse parsed.udp orelse parsed.tcp) |port|
+                    Address{ .ip4 = .{ .bytes = ip, .port = port } }
+                else
+                    null
+            else
+                null;
+            const addr_ip6 = if (parsed.ip6) |ip6|
+                if (parsed.quic6 orelse parsed.udp6 orelse parsed.tcp6) |port|
+                    Address{ .ip6 = .{ .bytes = ip6, .port = port } }
+                else
+                    null
+            else
+                null;
+            if (addr_ip4 == null and addr_ip6 == null) continue;
+
+            parsed_nodes.append(self.allocator, .{
+                .node_id = node_id,
+                .addr_ip4 = addr_ip4,
+                .addr_ip6 = addr_ip6,
+                .pubkey = parsed.pubkey,
+                .has_quic = parsed.quic != null or parsed.quic6 != null,
+                .attnets = parsed.attnets orelse [_]u8{0} ** 8,
+                .syncnets = parsed.syncnets orelse [_]u8{0} ** 1,
+                .custody_group_count = parsed.custody_group_count,
+                .fork_digest = parsed.eth2_fork_digest,
+            }) catch continue;
+        }
+        return parsed_nodes;
+    }
+
+    fn emitDiscoveredEnrs(self: *Service, nodes: *const protocol_mod.NodesEvent, lookup_id: ?u32, parsed_nodes: []const ParsedDiscoveredNode) void {
+        scoped_log.debug("discv5 service: emitting {d} ENRs from {any} (lookup_id={any})", .{
+            parsed_nodes.len,
+            nodes.peer_addr,
+            lookup_id,
+        });
+        for (parsed_nodes) |parsed| {
             self.completed_events.append(self.allocator, .{
                 .discovered_enr = .{
                     .source_peer_id = nodes.peer_id,
                     .source_peer_addr = nodes.peer_addr,
                     .lookup_id = lookup_id,
-                    .node_id = node_id,
-                    .enr = owned_enr,
+                    .node_id = parsed.node_id,
+                    .addr_ip4 = parsed.addr_ip4,
+                    .addr_ip6 = parsed.addr_ip6,
+                    .pubkey = parsed.pubkey,
+                    .has_quic = parsed.has_quic,
+                    .attnets = parsed.attnets,
+                    .syncnets = parsed.syncnets,
+                    .custody_group_count = parsed.custody_group_count,
+                    .fork_digest = parsed.fork_digest,
                 },
-            }) catch self.allocator.free(owned_enr);
+            }) catch {};
         }
     }
 
-    fn handleLookupNodes(self: *Service, nodes: *const protocol_mod.NodesEvent, lookup_id: ?u32) void {
+    fn handleLookupNodes(self: *Service, nodes: *const protocol_mod.NodesEvent, lookup_id: ?u32, parsed_nodes: []const ParsedDiscoveredNode) void {
         const actual_lookup_id = lookup_id orelse return;
         const key = LookupRequestKey.from(nodes.peer_id, nodes.req_id);
         const removed = self.request_lookup_ids.fetchRemove(key) orelse return;
@@ -824,11 +1247,8 @@ pub const Service = struct {
 
         var closer_peers: std.ArrayListUnmanaged(NodeId) = .empty;
         defer closer_peers.deinit(self.allocator);
-        for (nodes.enrs) |raw_enr| {
-            var parsed = enr_mod.decode(self.allocator, raw_enr) catch continue;
-            defer parsed.deinit();
-            const node_id = parsed.nodeId() orelse continue;
-            closer_peers.append(self.allocator, node_id) catch continue;
+        for (parsed_nodes) |parsed| {
+            closer_peers.append(self.allocator, parsed.node_id) catch continue;
         }
 
         lookup.onSuccess(self.allocator, &nodes.peer_id, closer_peers.items, &self.config) catch {};
@@ -1170,6 +1590,11 @@ pub const Service = struct {
 
 fn currentTimestampNs(io: Io) i64 {
     return @intCast(Io.Timestamp.now(io, .real).toNanoseconds());
+}
+
+fn currentUnixTimeMs(io: Io) u64 {
+    const ms = Io.Timestamp.now(io, .real).toMilliseconds();
+    return if (ms < 0) 0 else @intCast(ms);
 }
 
 fn appendUniqueDistance(out: []u16, len: *usize, distance: u16) void {
@@ -1733,6 +2158,70 @@ test "discv5 service: addEnr prefers available bind family" {
     }
 }
 
+test "discv5 service: discovered nodes preserve QUIC-preferred dial ports" {
+    const alloc = std.testing.allocator;
+    const io = std.Options.debug_io;
+    const hex = @import("hex.zig");
+    const secp = @import("secp256k1.zig");
+
+    const local_sk = hex.hexToBytesComptime(32, "eef77acb6c6a6eebc5b363a475ac583ec7eccdb42b6481424c60f59aa326547f");
+    const local_pk = try secp.pubkeyFromSecret(&local_sk);
+    const local_node_id = enr_mod.nodeIdFromCompressedPubkey(&local_pk);
+    const source_sk = hex.hexToBytesComptime(32, "66fb62bfbd66b9177a138c1e5cddbe4f7c30c343e94e68df8769459cb14571f7");
+    const source_pk = try secp.pubkeyFromSecret(&source_sk);
+    const source_node_id = enr_mod.nodeIdFromCompressedPubkey(&source_pk);
+
+    const loopback6 = [_]u8{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 };
+
+    var service = try Service.init(io, alloc, .{
+        .bind_addresses = .{
+            .ip4 = .{ .ip4 = .{ .bytes = .{ 127, 0, 0, 1 }, .port = 0 } },
+            .ip6 = .{ .ip6 = .{ .bytes = loopback6, .port = 0 } },
+        },
+        .protocol_config = .{
+            .local_secret_key = local_sk,
+            .local_node_id = local_node_id,
+        },
+    });
+    defer service.deinit();
+
+    var peer_builder = enr_mod.Builder.init(alloc, source_sk, 1);
+    peer_builder.ip = .{ 127, 0, 0, 1 };
+    peer_builder.udp = 30303;
+    peer_builder.tcp = 30304;
+    peer_builder.quic = 30305;
+    peer_builder.ip6 = loopback6;
+    peer_builder.udp6 = 30403;
+    peer_builder.tcp6 = 30404;
+    peer_builder.quic6 = 30405;
+    const peer_enr = try peer_builder.encode();
+    defer alloc.free(peer_enr);
+
+    var owned_enrs = try alloc.alloc([]u8, 1);
+    defer {
+        for (owned_enrs) |enr| alloc.free(enr);
+        alloc.free(owned_enrs);
+    }
+    owned_enrs[0] = try alloc.dupe(u8, peer_enr);
+
+    const source_addr = Address{ .ip4 = .{ .bytes = .{ 127, 0, 0, 1 }, .port = 9000 } };
+    var nodes = protocol_mod.NodesEvent{
+        .peer_id = source_node_id,
+        .peer_addr = source_addr,
+        .req_id = .{ .bytes = [8]u8{ 0, 0, 0, 1, 0, 0, 0, 0 }, .len = 4 },
+        .enrs = owned_enrs,
+    };
+
+    var parsed_nodes = service.collectDiscoveredNodes(&nodes);
+    defer parsed_nodes.deinit(alloc);
+
+    try std.testing.expectEqual(@as(usize, 1), parsed_nodes.items.len);
+    const parsed = parsed_nodes.items[0];
+    try std.testing.expect(parsed.has_quic);
+    try std.testing.expectEqual(@as(u16, 30305), parsed.addr_ip4.?.ip4.port);
+    try std.testing.expectEqual(@as(u16, 30405), parsed.addr_ip6.?.ip6.port);
+}
+
 test "discv5 service: addr votes update local ENR" {
     const alloc = std.testing.allocator;
     const io = std.Options.debug_io;
@@ -1972,4 +2461,23 @@ test "discv5 service: live TALKREQ TALKRESP round-trip" {
 
     try std.testing.expect(saw_request);
     try std.testing.expect(saw_response);
+}
+
+test "discv5 service: queued ingress respects processing budget" {
+    const alloc = std.testing.allocator;
+    const io = std.Options.debug_io;
+    const hex = @import("hex.zig");
+
+    const sk = hex.hexToBytesComptime(32, "eef77acb6c6a6eebc5b363a475ac583ec7eccdb42b6481424c60f59aa326547f");
+    var node = try TestService.init(alloc, io, sk);
+    defer node.deinit();
+
+    try node.service.queueInboundPacketForTest(node.addr(), &[_]u8{0x00});
+    try node.service.queueInboundPacketForTest(node.addr(), &[_]u8{0x01});
+
+    try std.testing.expectEqual(@as(usize, 2), node.service.queuedIngressPackets());
+    try std.testing.expectEqual(@as(usize, 1), node.service.processQueuedPackets(1));
+    try std.testing.expectEqual(@as(usize, 1), node.service.queuedIngressPackets());
+    try std.testing.expectEqual(@as(usize, 1), node.service.processQueuedPackets(8));
+    try std.testing.expectEqual(@as(usize, 0), node.service.queuedIngressPackets());
 }

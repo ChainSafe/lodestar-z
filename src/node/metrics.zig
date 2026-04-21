@@ -22,6 +22,10 @@ pub const GaugeVec = metrics_lib.GaugeVec;
 pub const Histogram = metrics_lib.Histogram;
 pub const HistogramVec = metrics_lib.HistogramVec;
 
+const GaugeU64 = Gauge(u64);
+const GaugeI64 = Gauge(i64);
+const CounterU64 = Counter(u64);
+
 pub const ScrapeCollector = struct {
     ctx: *anyopaque,
     collectFn: *const fn (*anyopaque) void,
@@ -302,35 +306,39 @@ pub fn rootMetricValue(root: [32]u8) i64 {
 }
 
 pub const BeaconMetrics = struct {
+    comptime {
+        @setEvalBranchQuota(20_000);
+    }
+
     // Bootstrap / startup.
     bootstrap_source: GaugeVec(u64, BootstrapSourceLabels),
-    bootstrap_state_slot: Gauge(u64),
-    bootstrap_state_bytes: Gauge(u64),
+    bootstrap_state_slot: GaugeU64,
+    bootstrap_state_bytes: GaugeU64,
     bootstrap_phase_seconds: HistogramVec(f64, BootstrapPhaseLabels, &bootstrap_phase_buckets),
 
     // Chain state.
-    head_slot: Gauge(u64),
+    head_slot: GaugeU64,
     head_root: Gauge(i64),
-    finalized_epoch: Gauge(u64),
-    justified_epoch: Gauge(u64),
-    current_justified_epoch: Gauge(u64),
-    previous_justified_epoch: Gauge(u64),
-    current_active_validators: Gauge(u64),
-    processed_deposits_total: Gauge(u64),
+    finalized_epoch: GaugeU64,
+    justified_epoch: GaugeU64,
+    current_justified_epoch: GaugeU64,
+    previous_justified_epoch: GaugeU64,
+    current_active_validators: GaugeU64,
+    processed_deposits_total: GaugeU64,
     previous_justified_root: Gauge(i64),
     head_state_root: Gauge(i64),
     head_state_finalized_root: Gauge(i64),
-    current_validators: Gauge(u64),
-    previous_validators: Gauge(u64),
-    current_live_validators: Gauge(u64),
-    previous_live_validators: Gauge(u64),
-    pending_deposits: Gauge(u64),
-    pending_partial_withdrawals: Gauge(u64),
-    pending_consolidations: Gauge(u64),
-    pending_exits: Gauge(u64),
-    previous_epoch_orphaned_blocks: Gauge(u64),
-    custody_groups: Gauge(u64),
-    custody_groups_backfilled: Gauge(u64),
+    current_validators: GaugeU64,
+    previous_validators: GaugeU64,
+    current_live_validators: GaugeU64,
+    previous_live_validators: GaugeU64,
+    pending_deposits: GaugeU64,
+    pending_partial_withdrawals: GaugeU64,
+    pending_consolidations: GaugeU64,
+    pending_exits: GaugeU64,
+    previous_epoch_orphaned_blocks: GaugeU64,
+    custody_groups: GaugeU64,
+    custody_groups_backfilled: GaugeU64,
 
     // Block import.
     blocks_imported_total: Counter(u64),
@@ -342,13 +350,13 @@ pub const BeaconMetrics = struct {
     chain_reorgs_total: Counter(u64),
     reorgs_total: Counter(u64),
     chain_reorg_depth_slots_total: Counter(u64),
-    chain_reorg_last_depth: Gauge(u64),
-    processor_gossip_block_imported_total: Gauge(u64),
+    chain_reorg_last_depth: GaugeU64,
+    processor_gossip_block_imported_total: GaugeU64,
 
     // Network / P2P.
-    libp2p_peers: Gauge(u64),
-    known_peers: Gauge(u64),
-    peers_connected: Gauge(u64),
+    libp2p_peers: GaugeU64,
+    known_peers: GaugeU64,
+    peers_connected: GaugeU64,
     connected_peer_direction_count: GaugeVec(u64, PeerDirectionLabels),
     peer_connection_state_count: GaugeVec(u64, PeerConnectionStateLabels),
     peer_client_count: GaugeVec(u64, PeerClientLabels),
@@ -360,20 +368,20 @@ pub const BeaconMetrics = struct {
     peer_disconnected_total: Counter(u64),
     peer_reports_total: CounterVec(u64, PeerReportLabels),
     peer_goodbye_received_total: CounterVec(u64, PeerGoodbyeLabels),
-    peers_requested_to_connect: Gauge(u64),
+    peers_requested_to_connect: GaugeU64,
     peers_requested_to_disconnect: GaugeVec(u64, RequestedDisconnectReasonLabels),
     peers_requested_subnets_to_query: GaugeVec(u64, RequestedSubnetTypeLabels),
     peers_requested_subnets_peer_count: GaugeVec(u64, RequestedSubnetTypeLabels),
     peer_manager_heartbeat_duration_seconds: Histogram(f64, &peer_manager_heartbeat_buckets),
-    api_active_connections: Gauge(u64),
+    api_active_connections: GaugeU64,
     api_requests_total: CounterVec(u64, ApiOperationLabels),
     api_errors_total: CounterVec(u64, ApiOperationLabels),
     api_request_seconds: HistogramVec(f64, ApiOperationLabels, &api_request_buckets),
     api_stream_seconds: HistogramVec(f64, ApiOperationLabels, &api_stream_buckets),
-    http_api_requests_total: Gauge(u64),
-    http_api_successes_total: Gauge(u64),
-    req_resp_inbound_limiter_peers: Gauge(u64),
-    req_resp_outbound_limiter_peers: Gauge(u64),
+    http_api_requests_total: GaugeU64,
+    http_api_successes_total: GaugeU64,
+    req_resp_inbound_limiter_peers: GaugeU64,
+    req_resp_outbound_limiter_peers: GaugeU64,
     req_resp_inbound_requests_total: CounterVec(u64, ReqRespMethodOutcomeLabels),
     req_resp_outbound_requests_total: CounterVec(u64, ReqRespMethodOutcomeLabels),
     req_resp_maintenance_errors_total: CounterVec(u64, ReqRespMethodErrorLabels),
@@ -393,10 +401,10 @@ pub const BeaconMetrics = struct {
     gossip_messages_validated: Counter(u64),
     gossip_messages_rejected: Counter(u64),
     gossip_messages_ignored: Counter(u64),
-    attestations_received_total: Gauge(u64),
-    aggregates_received_total: Gauge(u64),
-    attestor_slashing_received_total: Gauge(u64),
-    pubsub_validation_failure_total: Gauge(u64),
+    attestations_received_total: GaugeU64,
+    aggregates_received_total: GaugeU64,
+    attestor_slashing_received_total: GaugeU64,
+    pubsub_validation_failure_total: GaugeU64,
     gossip_messages_received_by_topic_total: CounterVec(u64, GossipTopicLabels),
     gossip_messages_result_total: CounterVec(u64, GossipTopicOutcomeLabels),
     gossip_phase1_seconds: HistogramVec(f64, GossipTopicOutcomeLabels, &gossip_phase1_buckets),
@@ -411,37 +419,47 @@ pub const BeaconMetrics = struct {
     gossip_bls_batch_size: HistogramVec(f64, GossipBlsPathLabels, &gossip_bls_batch_size_buckets),
     gossip_bls_queue_seconds: HistogramVec(f64, GossipBlsKindLabels, &gossip_processor_seconds_buckets),
     gossip_bls_verify_seconds: HistogramVec(f64, GossipBlsPathLabels, &gossip_processor_seconds_buckets),
-    gossipsub_outbound_streams: Gauge(u64),
-    gossipsub_tracked_subscriptions: Gauge(u64),
-    gossipsub_known_topics: Gauge(u64),
-    gossipsub_mesh_topics: Gauge(u64),
-    gossipsub_mesh_peers: Gauge(u64),
-    gossipsub_topic_peers: Gauge(u64),
+    gossipsub_outbound_streams: GaugeU64,
+    gossipsub_tracked_subscriptions: GaugeU64,
+    gossipsub_known_topics: GaugeU64,
+    gossipsub_mesh_topics: GaugeU64,
+    gossipsub_mesh_peers: GaugeU64,
+    gossipsub_topic_peers: GaugeU64,
     gossipsub_mesh_peers_per_main_topic: GaugeVec(u64, GossipTopicLabels),
     gossipsub_mesh_peer_counts: GaugeVec(u64, GossipsubMeshPeerCountLabels),
     gossipsub_topic_msg_sent_bytes: CounterVec(u64, GossipTopicSentBytesLabels),
-    gossipsub_tracked_topics_with_peers: Gauge(u64),
-    gossipsub_tracked_topic_peers: Gauge(u64),
-    gossipsub_pending_events: Gauge(u64),
-    gossipsub_pending_sends: Gauge(u64),
-    gossipsub_pending_send_bytes: Gauge(u64),
+    gossipsub_tracked_topics_with_peers: GaugeU64,
+    gossipsub_tracked_topic_peers: GaugeU64,
+    gossipsub_pending_events: GaugeU64,
+    gossipsub_pending_sends: GaugeU64,
+    gossipsub_pending_send_bytes: GaugeU64,
 
     // Discovery / sync.
-    discovery_peers_known: Gauge(u64),
-    discovery_connected_peers: Gauge(u64),
-    discovery_queued_peers: Gauge(u64),
-    discovery_pending_subnet_queries: Gauge(u64),
-    discovery_enr_cache_size: Gauge(u64),
-    discovery_enr_seq: Gauge(u64),
-    discovery_pending_dials: Gauge(u64),
+    discovery_peers_known: GaugeU64,
+    discovery_connected_peers: GaugeU64,
+    discovery_queued_peers: GaugeU64,
+    discovery_pending_subnet_queries: GaugeU64,
+    discovery_enr_cache_size: GaugeU64,
+    discovery_enr_seq: GaugeU64,
+    discovery_pending_dials: GaugeU64,
+    discovery_ingress_queue_depth: GaugeU64,
+    discovery_socket_recv_buffer_bytes_ip4: GaugeU64,
+    discovery_socket_recv_buffer_bytes_ip6: GaugeU64,
+    discovery_socket_send_buffer_bytes_ip4: GaugeU64,
+    discovery_socket_send_buffer_bytes_ip6: GaugeU64,
     discovery_lookups_total: Counter(u64),
     discovery_discovered_total: Counter(u64),
     discovery_filtered_total: Counter(u64),
-    discovery_peers_to_connect: Gauge(u64),
+    discovery_ingress_received_total: Counter(u64),
+    discovery_ingress_filtered_total: Counter(u64),
+    discovery_ingress_dropped_queue_full_total: Counter(u64),
+    discovery_ingress_processed_total: Counter(u64),
+    discovery_ingress_budget_exhausted_total: Counter(u64),
+    discovery_peers_to_connect: GaugeU64,
     discovery_subnet_peers_to_connect: GaugeVec(u64, RequestedSubnetTypeLabels),
-    discovery_custody_group_peers_to_connect: Gauge(u64),
+    discovery_custody_group_peers_to_connect: GaugeU64,
     discovery_subnets_to_connect: GaugeVec(u64, RequestedSubnetTypeLabels),
-    discovery_custody_groups_to_connect: Gauge(u64),
+    discovery_custody_groups_to_connect: GaugeU64,
     discovery_find_node_query_requests_total: CounterVec(u64, DiscoveryLookupActionLabels),
     discovery_discovered_status_total_count: CounterVec(u64, DiscoveryDiscoveredStatusLabels),
     discovery_not_dial_reason_total_count: CounterVec(u64, DiscoveryNotDialReasonLabels),
@@ -449,32 +467,32 @@ pub const BeaconMetrics = struct {
     discovery_dials_total: CounterVec(u64, DiscoveryDialOutcomeLabels),
     discovery_dial_time_ns_total: CounterVec(u64, DiscoveryDialOutcomeLabels),
     discovery_dial_error_total_count: CounterVec(u64, DiscoveryDialErrorLabels),
-    sync_status: Gauge(u64),
-    sync_distance: Gauge(u64),
-    sync_state: Gauge(u64),
-    sync_optimistic: Gauge(u64),
-    sync_el_offline: Gauge(u64),
-    head_lag_slots: Gauge(u64),
-    head_catchup_pending_slots: Gauge(u64),
-    time_to_head_last_ms: Gauge(u64),
-    time_to_head_current_ms: Gauge(u64),
+    sync_status: GaugeU64,
+    sync_distance: GaugeU64,
+    sync_state: GaugeU64,
+    sync_optimistic: GaugeU64,
+    sync_el_offline: GaugeU64,
+    head_lag_slots: GaugeU64,
+    head_catchup_pending_slots: GaugeU64,
+    time_to_head_last_ms: GaugeU64,
+    time_to_head_current_ms: GaugeU64,
     time_to_head_seconds: Histogram(f64, &time_to_head_seconds_buckets),
-    sync_mode: Gauge(u64),
+    sync_mode: GaugeU64,
     sync_mode_state: GaugeVec(u64, SyncModeLabels),
-    sync_gossip_enabled: Gauge(u64),
-    sync_peer_count: Gauge(u64),
-    sync_best_peer_slot: Gauge(u64),
-    sync_local_head_slot: Gauge(u64),
-    sync_peer_distance: Gauge(u64),
-    sync_local_finalized_epoch: Gauge(u64),
-    sync_unknown_block_pending: Gauge(u64),
-    sync_unknown_block_fetching: Gauge(u64),
-    sync_unknown_block_parents_needed: Gauge(u64),
-    sync_unknown_block_in_flight: Gauge(u64),
-    sync_unknown_block_bad_roots: Gauge(u64),
-    sync_unknown_block_exhausted: Gauge(u64),
+    sync_gossip_enabled: GaugeU64,
+    sync_peer_count: GaugeU64,
+    sync_best_peer_slot: GaugeU64,
+    sync_local_head_slot: GaugeU64,
+    sync_peer_distance: GaugeU64,
+    sync_local_finalized_epoch: GaugeU64,
+    sync_unknown_block_pending: GaugeU64,
+    sync_unknown_block_fetching: GaugeU64,
+    sync_unknown_block_parents_needed: GaugeU64,
+    sync_unknown_block_in_flight: GaugeU64,
+    sync_unknown_block_bad_roots: GaugeU64,
+    sync_unknown_block_exhausted: GaugeU64,
     process_cpu_seconds_total: Gauge(f64),
-    process_max_fds: Gauge(u64),
+    process_max_fds: GaugeU64,
     range_sync_active_chains: GaugeVec(u64, SyncTypeLabels),
     range_sync_peers: GaugeVec(u64, SyncTypeLabels),
     range_sync_target_slot: GaugeVec(u64, SyncTypeLabels),
@@ -501,86 +519,86 @@ pub const BeaconMetrics = struct {
     range_sync_segment_blocks: HistogramVec(f64, SyncTypeLabels, &range_sync_segment_blocks_buckets),
 
     // Chain runtime / caches / pools.
-    block_state_cache_entries: Gauge(u64),
-    checkpoint_state_cache_entries: Gauge(u64),
-    checkpoint_state_datastore_entries: Gauge(u64),
+    block_state_cache_entries: GaugeU64,
+    checkpoint_state_cache_entries: GaugeU64,
+    checkpoint_state_datastore_entries: GaugeU64,
     state_regen_cache_hits_total: Counter(u64),
-    store_beacon_block_cache_hit_total: Gauge(u64),
-    state_data_cache_misses_total: Gauge(u64),
+    store_beacon_block_cache_hit_total: GaugeU64,
+    state_data_cache_misses_total: GaugeU64,
     state_regen_queue_hits_total: Counter(u64),
     state_regen_dropped_total: Counter(u64),
-    state_regen_queue_length: Gauge(u64),
-    state_work_pending_jobs: Gauge(u64),
-    state_work_completed_jobs: Gauge(u64),
-    state_work_active_jobs: Gauge(u64),
+    state_regen_queue_length: GaugeU64,
+    state_work_pending_jobs: GaugeU64,
+    state_work_completed_jobs: GaugeU64,
+    state_work_active_jobs: GaugeU64,
     state_work_submitted_total: Counter(u64),
     state_work_rejected_total: Counter(u64),
     state_work_success_total: Counter(u64),
     state_work_failure_total: Counter(u64),
     state_work_execution_time_ns_total: Counter(u64),
-    state_work_last_execution_time_ns: Gauge(u64),
-    forkchoice_nodes: Gauge(u64),
-    forkchoice_block_roots: Gauge(u64),
-    forkchoice_votes: Gauge(u64),
-    forkchoice_queued_attestation_slots: Gauge(u64),
-    forkchoice_queued_attestations_previous_slot: Gauge(u64),
-    forkchoice_validated_attestation_data_roots: Gauge(u64),
-    forkchoice_equivocating_validators: Gauge(u64),
-    forkchoice_proposer_boost_active: Gauge(u64),
-    archive_last_finalized_slot: Gauge(u64),
-    archive_last_archived_state_epoch: Gauge(u64),
-    archive_finalized_slot_lag: Gauge(u64),
+    state_work_last_execution_time_ns: GaugeU64,
+    forkchoice_nodes: GaugeU64,
+    forkchoice_block_roots: GaugeU64,
+    forkchoice_votes: GaugeU64,
+    forkchoice_queued_attestation_slots: GaugeU64,
+    forkchoice_queued_attestations_previous_slot: GaugeU64,
+    forkchoice_validated_attestation_data_roots: GaugeU64,
+    forkchoice_equivocating_validators: GaugeU64,
+    forkchoice_proposer_boost_active: GaugeU64,
+    archive_last_finalized_slot: GaugeU64,
+    archive_last_archived_state_epoch: GaugeU64,
+    archive_finalized_slot_lag: GaugeU64,
     archive_runs_total: Counter(u64),
     archive_failures_total: Counter(u64),
     archive_finalized_slots_advanced_total: Counter(u64),
     archive_state_epochs_archived_total: Counter(u64),
     archive_run_milliseconds_total: Counter(u64),
-    archive_last_slots_advanced: Gauge(u64),
-    archive_last_batch_ops: Gauge(u64),
-    archive_last_run_milliseconds: Gauge(u64),
-    validator_monitor_monitored_validators: Gauge(u64),
-    validator_monitor_last_processed_epoch: Gauge(u64),
-    validator_monitor_epoch_lag: Gauge(u64),
-    db_total_entries: Gauge(u64),
+    archive_last_slots_advanced: GaugeU64,
+    archive_last_batch_ops: GaugeU64,
+    archive_last_run_milliseconds: GaugeU64,
+    validator_monitor_monitored_validators: GaugeU64,
+    validator_monitor_last_processed_epoch: GaugeU64,
+    validator_monitor_epoch_lag: GaugeU64,
+    db_total_entries: GaugeU64,
     db_entries: GaugeVec(u64, DatabaseLabels),
-    db_lmdb_map_size_bytes: Gauge(u64),
-    db_lmdb_data_size_bytes: Gauge(u64),
-    db_lmdb_page_size_bytes: Gauge(u64),
-    db_lmdb_last_page_number: Gauge(u64),
-    db_lmdb_last_txnid: Gauge(u64),
-    db_lmdb_readers_used: Gauge(u64),
-    db_lmdb_readers_max: Gauge(u64),
+    db_lmdb_map_size_bytes: GaugeU64,
+    db_lmdb_data_size_bytes: GaugeU64,
+    db_lmdb_page_size_bytes: GaugeU64,
+    db_lmdb_last_page_number: GaugeU64,
+    db_lmdb_last_txnid: GaugeU64,
+    db_lmdb_readers_used: GaugeU64,
+    db_lmdb_readers_max: GaugeU64,
     db_operation_total: CounterVec(u64, DbOperationLabels),
     db_operation_time_ns_total: CounterVec(u64, DbOperationLabels),
-    attestation_pool_groups: Gauge(u64),
-    aggregate_attestation_pool_groups: Gauge(u64),
-    aggregate_attestation_pool_entries: Gauge(u64),
-    voluntary_exit_pool_size: Gauge(u64),
-    proposer_slashing_pool_size: Gauge(u64),
-    attester_slashing_pool_size: Gauge(u64),
-    bls_to_execution_change_pool_size: Gauge(u64),
-    sync_committee_message_pool_size: Gauge(u64),
-    sync_contribution_pool_size: Gauge(u64),
-    proposer_cache_entries: Gauge(u64),
-    pending_block_ingress_size: Gauge(u64),
+    attestation_pool_groups: GaugeU64,
+    aggregate_attestation_pool_groups: GaugeU64,
+    aggregate_attestation_pool_entries: GaugeU64,
+    voluntary_exit_pool_size: GaugeU64,
+    proposer_slashing_pool_size: GaugeU64,
+    attester_slashing_pool_size: GaugeU64,
+    bls_to_execution_change_pool_size: GaugeU64,
+    sync_committee_message_pool_size: GaugeU64,
+    sync_contribution_pool_size: GaugeU64,
+    proposer_cache_entries: GaugeU64,
+    pending_block_ingress_size: GaugeU64,
     pending_block_ingress_added_total: Counter(u64),
     pending_block_ingress_replaced_total: Counter(u64),
     pending_block_ingress_resolved_total: Counter(u64),
     pending_block_ingress_removed_total: Counter(u64),
     pending_block_ingress_pruned_total: Counter(u64),
-    pending_payload_envelope_ingress_size: Gauge(u64),
+    pending_payload_envelope_ingress_size: GaugeU64,
     pending_payload_envelope_ingress_added_total: Counter(u64),
     pending_payload_envelope_ingress_replaced_total: Counter(u64),
     pending_payload_envelope_ingress_removed_total: Counter(u64),
     pending_payload_envelope_ingress_pruned_total: Counter(u64),
-    reprocess_queue_size: Gauge(u64),
+    reprocess_queue_size: GaugeU64,
     reprocess_queued_total: Counter(u64),
     reprocess_released_total: Counter(u64),
     reprocess_dropped_total: Counter(u64),
     reprocess_pruned_total: Counter(u64),
-    da_blob_tracker_entries: Gauge(u64),
-    da_column_tracker_entries: Gauge(u64),
-    da_pending_blocks: Gauge(u64),
+    da_blob_tracker_entries: GaugeU64,
+    da_column_tracker_entries: GaugeU64,
+    da_pending_blocks: GaugeU64,
     data_column_sidecar_processing_requests_total: Counter(u64),
     data_column_sidecar_processing_successes_total: Counter(u64),
     data_column_sidecar_gossip_verification_seconds: Histogram(f64, &gossip_phase1_buckets),
@@ -600,7 +618,7 @@ pub const BeaconMetrics = struct {
     engine_get_blobs_v3_complete_responses_total: Counter(u64),
     engine_get_blobs_v3_partial_responses_total: Counter(u64),
     engine_get_blobs_v3_request_duration_seconds: Histogram(f64, &el_request_buckets),
-    attestor_slashing_created_total: Gauge(u64),
+    attestor_slashing_created_total: GaugeU64,
     da_pending_marked_total: Counter(u64),
     da_pending_resolved_total: Counter(u64),
     da_pending_pruned_total: Counter(u64),
@@ -627,17 +645,17 @@ pub const BeaconMetrics = struct {
     execution_payload_invalid_total: Counter(u64),
     execution_payload_syncing_total: Counter(u64),
     execution_errors_total: Counter(u64),
-    execution_pending_forkchoice_updates: Gauge(u64),
-    execution_pending_payload_verifications: Gauge(u64),
-    execution_completed_forkchoice_updates: Gauge(u64),
-    execution_completed_payload_verifications: Gauge(u64),
-    execution_waiting_import_payloads: Gauge(u64),
-    execution_waiting_revalidation_payloads: Gauge(u64),
-    execution_pending_import_payloads: Gauge(u64),
-    execution_pending_revalidation_payloads: Gauge(u64),
-    execution_failed_payload_preparations: Gauge(u64),
-    execution_cached_payload: Gauge(u64),
-    execution_offline: Gauge(u64),
+    execution_pending_forkchoice_updates: GaugeU64,
+    execution_pending_payload_verifications: GaugeU64,
+    execution_completed_forkchoice_updates: GaugeU64,
+    execution_completed_payload_verifications: GaugeU64,
+    execution_waiting_import_payloads: GaugeU64,
+    execution_waiting_revalidation_payloads: GaugeU64,
+    execution_pending_import_payloads: GaugeU64,
+    execution_pending_revalidation_payloads: GaugeU64,
+    execution_failed_payload_preparations: GaugeU64,
+    execution_cached_payload: GaugeU64,
+    execution_offline: GaugeU64,
 
     pub fn init(allocator: std.mem.Allocator) !BeaconMetrics {
         const ro: metrics_lib.RegistryOpts = .{};
@@ -648,12 +666,12 @@ pub const BeaconMetrics = struct {
                 .{ .help = "One-hot gauge for the active bootstrap source." },
                 ro,
             ),
-            .bootstrap_state_slot = Gauge(u64).init(
+            .bootstrap_state_slot = GaugeU64.init(
                 "beacon_bootstrap_state_slot",
                 .{ .help = "Slot of the bootstrap state loaded into the beacon node." },
                 ro,
             ),
-            .bootstrap_state_bytes = Gauge(u64).init(
+            .bootstrap_state_bytes = GaugeU64.init(
                 "beacon_bootstrap_state_bytes",
                 .{ .help = "Size in bytes of the bootstrap state loaded into the beacon node." },
                 ro,
@@ -664,30 +682,30 @@ pub const BeaconMetrics = struct {
                 .{ .help = "Distribution of bootstrap phase durations in seconds by source and phase." },
                 ro,
             ),
-            .head_slot = Gauge(u64).init("beacon_head_slot", .{ .help = "Current head slot." }, ro),
+            .head_slot = GaugeU64.init("beacon_head_slot", .{ .help = "Current head slot." }, ro),
             .head_root = Gauge(i64).init(
                 "beacon_head_root",
                 .{ .help = "Low 64 bits of the head block root for Prometheus compatibility." },
                 ro,
             ),
-            .finalized_epoch = Gauge(u64).init("beacon_finalized_epoch", .{ .help = "Current finalized epoch." }, ro),
-            .justified_epoch = Gauge(u64).init("beacon_justified_epoch", .{ .help = "Current justified epoch." }, ro),
-            .current_justified_epoch = Gauge(u64).init(
+            .finalized_epoch = GaugeU64.init("beacon_finalized_epoch", .{ .help = "Current finalized epoch." }, ro),
+            .justified_epoch = GaugeU64.init("beacon_justified_epoch", .{ .help = "Current justified epoch." }, ro),
+            .current_justified_epoch = GaugeU64.init(
                 "beacon_current_justified_epoch",
                 .{ .help = "Current justified checkpoint epoch from the head state." },
                 ro,
             ),
-            .previous_justified_epoch = Gauge(u64).init(
+            .previous_justified_epoch = GaugeU64.init(
                 "beacon_previous_justified_epoch",
                 .{ .help = "Previous justified checkpoint epoch from the head state." },
                 ro,
             ),
-            .current_active_validators = Gauge(u64).init(
+            .current_active_validators = GaugeU64.init(
                 "beacon_current_active_validators",
                 .{ .help = "Current number of active validators in the head state." },
                 ro,
             ),
-            .processed_deposits_total = Gauge(u64).init(
+            .processed_deposits_total = GaugeU64.init(
                 "beacon_processed_deposits_total",
                 .{ .help = "Current processed deposit count from the head state." },
                 ro,
@@ -707,57 +725,57 @@ pub const BeaconMetrics = struct {
                 .{ .help = "Low 64 bits of the finalized checkpoint root from the head state for Prometheus compatibility." },
                 ro,
             ),
-            .current_validators = Gauge(u64).init(
+            .current_validators = GaugeU64.init(
                 "beacon_current_validators",
                 .{ .help = "Current number of validators in the head state." },
                 ro,
             ),
-            .previous_validators = Gauge(u64).init(
+            .previous_validators = GaugeU64.init(
                 "beacon_previous_validators",
                 .{ .help = "Compatibility gauge currently mirroring the validator count in the head state." },
                 ro,
             ),
-            .current_live_validators = Gauge(u64).init(
+            .current_live_validators = GaugeU64.init(
                 "beacon_current_live_validators",
                 .{ .help = "Current number of live validators in the current epoch." },
                 ro,
             ),
-            .previous_live_validators = Gauge(u64).init(
+            .previous_live_validators = GaugeU64.init(
                 "beacon_previous_live_validators",
                 .{ .help = "Current number of live validators recorded for the previous epoch." },
                 ro,
             ),
-            .pending_deposits = Gauge(u64).init(
+            .pending_deposits = GaugeU64.init(
                 "beacon_pending_deposits",
                 .{ .help = "Current number of pending deposits in the head state." },
                 ro,
             ),
-            .pending_partial_withdrawals = Gauge(u64).init(
+            .pending_partial_withdrawals = GaugeU64.init(
                 "beacon_pending_partial_withdrawals",
                 .{ .help = "Current number of pending partial withdrawals in the head state." },
                 ro,
             ),
-            .pending_consolidations = Gauge(u64).init(
+            .pending_consolidations = GaugeU64.init(
                 "beacon_pending_consolidations",
                 .{ .help = "Current number of pending consolidations in the head state." },
                 ro,
             ),
-            .pending_exits = Gauge(u64).init(
+            .pending_exits = GaugeU64.init(
                 "beacon_pending_exits",
                 .{ .help = "Current number of pending validator exits in the head state." },
                 ro,
             ),
-            .previous_epoch_orphaned_blocks = Gauge(u64).init(
+            .previous_epoch_orphaned_blocks = GaugeU64.init(
                 "beacon_previous_epoch_orphaned_blocks",
                 .{ .help = "Number of orphaned blocks observed in the previous epoch." },
                 ro,
             ),
-            .custody_groups = Gauge(u64).init(
+            .custody_groups = GaugeU64.init(
                 "beacon_custody_groups",
                 .{ .help = "Current number of custody groups assigned to this node." },
                 ro,
             ),
-            .custody_groups_backfilled = Gauge(u64).init(
+            .custody_groups_backfilled = GaugeU64.init(
                 "beacon_custody_groups_backfilled",
                 .{ .help = "Current number of assigned custody groups that have been backfilled." },
                 ro,
@@ -810,24 +828,24 @@ pub const BeaconMetrics = struct {
                 .{ .help = "Cumulative chain reorg depth in slots." },
                 ro,
             ),
-            .chain_reorg_last_depth = Gauge(u64).init(
+            .chain_reorg_last_depth = GaugeU64.init(
                 "beacon_chain_reorg_last_depth",
                 .{ .help = "Depth in slots of the most recent chain reorg." },
                 ro,
             ),
-            .processor_gossip_block_imported_total = Gauge(u64).init(
+            .processor_gossip_block_imported_total = GaugeU64.init(
                 "beacon_processor_gossip_block_imported_total",
                 .{ .help = "Compatibility gauge tracking total gossip blocks imported by the processor." },
                 ro,
             ),
 
-            .libp2p_peers = Gauge(u64).init("libp2p_peers", .{ .help = "Current number of connected libp2p peers." }, ro),
-            .known_peers = Gauge(u64).init(
+            .libp2p_peers = GaugeU64.init("libp2p_peers", .{ .help = "Current number of connected libp2p peers." }, ro),
+            .known_peers = GaugeU64.init(
                 "p2p_known_peer_count",
                 .{ .help = "Current number of peers tracked in the peer database." },
                 ro,
             ),
-            .peers_connected = Gauge(u64).init(
+            .peers_connected = GaugeU64.init(
                 "p2p_peer_count",
                 .{ .help = "Compatibility gauge for the current number of connected peers." },
                 ro,
@@ -896,7 +914,7 @@ pub const BeaconMetrics = struct {
                 .{ .help = "Total Goodbye messages received by reason." },
                 ro,
             ),
-            .peers_requested_to_connect = Gauge(u64).init(
+            .peers_requested_to_connect = GaugeU64.init(
                 "lodestar_peers_requested_total_to_connect",
                 .{ .help = "Peer-manager requested peers to connect from the most recent heartbeat/prioritization pass." },
                 ro,
@@ -924,7 +942,7 @@ pub const BeaconMetrics = struct {
                 .{ .help = "Distribution of peer-manager heartbeat/prioritization durations in seconds." },
                 ro,
             ),
-            .api_active_connections = Gauge(u64).init(
+            .api_active_connections = GaugeU64.init(
                 "beacon_api_active_connections",
                 .{ .help = "Current number of active beacon HTTP API connections." },
                 ro,
@@ -953,22 +971,22 @@ pub const BeaconMetrics = struct {
                 .{ .help = "Distribution of beacon HTTP API stream durations in seconds by operation." },
                 ro,
             ),
-            .http_api_requests_total = Gauge(u64).init(
+            .http_api_requests_total = GaugeU64.init(
                 "beacon_http_api_requests_total",
                 .{ .help = "Compatibility gauge tracking total completed beacon HTTP API requests." },
                 ro,
             ),
-            .http_api_successes_total = Gauge(u64).init(
+            .http_api_successes_total = GaugeU64.init(
                 "beacon_http_api_successes_total",
                 .{ .help = "Compatibility gauge tracking total successful beacon HTTP API requests." },
                 ro,
             ),
-            .req_resp_inbound_limiter_peers = Gauge(u64).init(
+            .req_resp_inbound_limiter_peers = GaugeU64.init(
                 "beacon_reqresp_inbound_limiter_peers",
                 .{ .help = "Current number of peers tracked by the inbound req/resp limiter." },
                 ro,
             ),
-            .req_resp_outbound_limiter_peers = Gauge(u64).init(
+            .req_resp_outbound_limiter_peers = GaugeU64.init(
                 "beacon_reqresp_outbound_limiter_peers",
                 .{ .help = "Current number of peers tracked by the outbound req/resp limiter." },
                 ro,
@@ -1083,22 +1101,22 @@ pub const BeaconMetrics = struct {
                 .{ .help = "Total gossip messages ignored without validation failure." },
                 ro,
             ),
-            .attestations_received_total = Gauge(u64).init(
+            .attestations_received_total = GaugeU64.init(
                 "beacon_attestations_received_total",
                 .{ .help = "Compatibility gauge tracking total attestation gossip messages received." },
                 ro,
             ),
-            .aggregates_received_total = Gauge(u64).init(
+            .aggregates_received_total = GaugeU64.init(
                 "beacon_aggregates_received_total",
                 .{ .help = "Compatibility gauge tracking total aggregate gossip messages received." },
                 ro,
             ),
-            .attestor_slashing_received_total = Gauge(u64).init(
+            .attestor_slashing_received_total = GaugeU64.init(
                 "beacon_attestor_slashing_received_total",
                 .{ .help = "Compatibility gauge tracking total attester slashing gossip messages received." },
                 ro,
             ),
-            .pubsub_validation_failure_total = Gauge(u64).init(
+            .pubsub_validation_failure_total = GaugeU64.init(
                 "libp2p_pubsub_validation_failure_total",
                 .{ .help = "Compatibility gauge tracking total libp2p pubsub validation failures." },
                 ro,
@@ -1187,32 +1205,32 @@ pub const BeaconMetrics = struct {
                 .{ .help = "Distribution of gossip BLS verification times in seconds by kind and path." },
                 ro,
             ),
-            .gossipsub_outbound_streams = Gauge(u64).init(
+            .gossipsub_outbound_streams = GaugeU64.init(
                 "beacon_gossipsub_outbound_streams",
                 .{ .help = "Current number of outbound gossipsub streams." },
                 ro,
             ),
-            .gossipsub_tracked_subscriptions = Gauge(u64).init(
+            .gossipsub_tracked_subscriptions = GaugeU64.init(
                 "beacon_gossipsub_tracked_subscriptions",
                 .{ .help = "Current number of tracked gossipsub subscriptions." },
                 ro,
             ),
-            .gossipsub_known_topics = Gauge(u64).init(
+            .gossipsub_known_topics = GaugeU64.init(
                 "beacon_gossipsub_known_topics",
                 .{ .help = "Current number of peer-advertised gossipsub topics tracked by the router." },
                 ro,
             ),
-            .gossipsub_mesh_topics = Gauge(u64).init(
+            .gossipsub_mesh_topics = GaugeU64.init(
                 "beacon_gossipsub_mesh_topics",
                 .{ .help = "Current number of gossipsub topics with an active mesh." },
                 ro,
             ),
-            .gossipsub_mesh_peers = Gauge(u64).init(
+            .gossipsub_mesh_peers = GaugeU64.init(
                 "beacon_gossipsub_mesh_peers",
                 .{ .help = "Current number of unique peers across all gossipsub meshes." },
                 ro,
             ),
-            .gossipsub_topic_peers = Gauge(u64).init(
+            .gossipsub_topic_peers = GaugeU64.init(
                 "beacon_gossipsub_topic_peers",
                 .{ .help = "Current number of unique peers across all gossipsub topic peer sets." },
                 ro,
@@ -1235,65 +1253,90 @@ pub const BeaconMetrics = struct {
                 .{ .help = "Total gossipsub message bytes sent by topic and partial flag." },
                 ro,
             ),
-            .gossipsub_tracked_topics_with_peers = Gauge(u64).init(
+            .gossipsub_tracked_topics_with_peers = GaugeU64.init(
                 "beacon_gossipsub_tracked_topics_with_peers",
                 .{ .help = "Current number of tracked gossipsub topics that have at least one peer." },
                 ro,
             ),
-            .gossipsub_tracked_topic_peers = Gauge(u64).init(
+            .gossipsub_tracked_topic_peers = GaugeU64.init(
                 "beacon_gossipsub_tracked_topic_peers",
                 .{ .help = "Current number of unique peers across tracked gossipsub topics." },
                 ro,
             ),
-            .gossipsub_pending_events = Gauge(u64).init(
+            .gossipsub_pending_events = GaugeU64.init(
                 "beacon_gossipsub_pending_events",
                 .{ .help = "Current number of pending gossipsub events." },
                 ro,
             ),
-            .gossipsub_pending_sends = Gauge(u64).init(
+            .gossipsub_pending_sends = GaugeU64.init(
                 "beacon_gossipsub_pending_sends",
                 .{ .help = "Current number of pending gossipsub sends." },
                 ro,
             ),
-            .gossipsub_pending_send_bytes = Gauge(u64).init(
+            .gossipsub_pending_send_bytes = GaugeU64.init(
                 "beacon_gossipsub_pending_send_bytes",
                 .{ .help = "Current number of pending gossipsub send bytes." },
                 ro,
             ),
 
-            .discovery_peers_known = Gauge(u64).init(
+            .discovery_peers_known = GaugeU64.init(
                 "beacon_discovery_peers_known",
                 .{ .help = "Current number of peers known to discovery." },
                 ro,
             ),
-            .discovery_connected_peers = Gauge(u64).init(
+            .discovery_connected_peers = GaugeU64.init(
                 "beacon_discovery_connected_peers",
                 .{ .help = "Current number of discovery-known peers that are connected." },
                 ro,
             ),
-            .discovery_queued_peers = Gauge(u64).init(
+            .discovery_queued_peers = GaugeU64.init(
                 "beacon_discovery_queued_peers",
                 .{ .help = "Current number of peers queued by discovery for dialing or scoring." },
                 ro,
             ),
-            .discovery_pending_subnet_queries = Gauge(u64).init(
+            .discovery_pending_subnet_queries = GaugeU64.init(
                 "beacon_discovery_pending_subnet_queries",
                 .{ .help = "Current number of pending discovery subnet queries." },
                 ro,
             ),
-            .discovery_enr_cache_size = Gauge(u64).init(
+            .discovery_enr_cache_size = GaugeU64.init(
                 "beacon_discovery_enr_cache_size",
                 .{ .help = "Current size of the discovery ENR cache." },
                 ro,
             ),
-            .discovery_enr_seq = Gauge(u64).init(
+            .discovery_enr_seq = GaugeU64.init(
                 "beacon_discovery_enr_seq",
                 .{ .help = "Current local discovery ENR sequence number." },
                 ro,
             ),
-            .discovery_pending_dials = Gauge(u64).init(
+            .discovery_pending_dials = GaugeU64.init(
                 "beacon_discovery_pending_dials",
                 .{ .help = "Current number of pending discovery dial attempts." },
+                ro,
+            ),
+            .discovery_ingress_queue_depth = GaugeU64.init(
+                "beacon_discovery_ingress_queue_depth",
+                .{ .help = "Current number of queued discovery ingress packets awaiting processing." },
+                ro,
+            ),
+            .discovery_socket_recv_buffer_bytes_ip4 = GaugeU64.init(
+                "beacon_discovery_socket_recv_buffer_bytes_ip4",
+                .{ .help = "Effective IPv4 discovery socket receive buffer size in bytes." },
+                ro,
+            ),
+            .discovery_socket_recv_buffer_bytes_ip6 = GaugeU64.init(
+                "beacon_discovery_socket_recv_buffer_bytes_ip6",
+                .{ .help = "Effective IPv6 discovery socket receive buffer size in bytes." },
+                ro,
+            ),
+            .discovery_socket_send_buffer_bytes_ip4 = GaugeU64.init(
+                "beacon_discovery_socket_send_buffer_bytes_ip4",
+                .{ .help = "Effective IPv4 discovery socket send buffer size in bytes." },
+                ro,
+            ),
+            .discovery_socket_send_buffer_bytes_ip6 = GaugeU64.init(
+                "beacon_discovery_socket_send_buffer_bytes_ip6",
+                .{ .help = "Effective IPv6 discovery socket send buffer size in bytes." },
                 ro,
             ),
             .discovery_lookups_total = Counter(u64).init(
@@ -1311,7 +1354,32 @@ pub const BeaconMetrics = struct {
                 .{ .help = "Total discovered peers filtered out before dialing." },
                 ro,
             ),
-            .discovery_peers_to_connect = Gauge(u64).init(
+            .discovery_ingress_received_total = Counter(u64).init(
+                "beacon_discovery_ingress_received_total",
+                .{ .help = "Total discovery ingress packets received before filtering and queue admission." },
+                ro,
+            ),
+            .discovery_ingress_filtered_total = Counter(u64).init(
+                "beacon_discovery_ingress_filtered_total",
+                .{ .help = "Total discovery ingress packets filtered before queue admission." },
+                ro,
+            ),
+            .discovery_ingress_dropped_queue_full_total = Counter(u64).init(
+                "beacon_discovery_ingress_dropped_queue_full_total",
+                .{ .help = "Total discovery ingress packets dropped because the bounded ingress queue was full." },
+                ro,
+            ),
+            .discovery_ingress_processed_total = Counter(u64).init(
+                "beacon_discovery_ingress_processed_total",
+                .{ .help = "Total discovery ingress packets processed by the service." },
+                ro,
+            ),
+            .discovery_ingress_budget_exhausted_total = Counter(u64).init(
+                "beacon_discovery_ingress_budget_exhausted_total",
+                .{ .help = "Total discovery poll passes that exhausted the ingress packet processing budget." },
+                ro,
+            ),
+            .discovery_peers_to_connect = GaugeU64.init(
                 "lodestar_discovery_peers_to_connect",
                 .{ .help = "Current generic peers-to-connect demand tracked by discovery." },
                 ro,
@@ -1322,7 +1390,7 @@ pub const BeaconMetrics = struct {
                 .{ .help = "Current peers-to-connect demand tracked by discovery for attnets, syncnets, and custody groups." },
                 ro,
             ),
-            .discovery_custody_group_peers_to_connect = Gauge(u64).init(
+            .discovery_custody_group_peers_to_connect = GaugeU64.init(
                 "lodestar_discovery_custody_group_peers_to_connect",
                 .{ .help = "Current PeerDAS custody-group peers-to-connect demand tracked by discovery." },
                 ro,
@@ -1333,7 +1401,7 @@ pub const BeaconMetrics = struct {
                 .{ .help = "Current attnet, syncnet, and custody-group demand counts tracked by discovery." },
                 ro,
             ),
-            .discovery_custody_groups_to_connect = Gauge(u64).init(
+            .discovery_custody_groups_to_connect = GaugeU64.init(
                 "lodestar_discovery_custody_groups_to_connect",
                 .{ .help = "Current custody-group demand count tracked by discovery." },
                 ro,
@@ -1379,47 +1447,47 @@ pub const BeaconMetrics = struct {
                 .{ .help = "Total discovery dial failures by error kind." },
                 ro,
             ),
-            .sync_status = Gauge(u64).init(
+            .sync_status = GaugeU64.init(
                 "beacon_sync_status",
                 .{ .help = "Compatibility gauge indicating whether the node is syncing: syncing=1, synced=0." },
                 ro,
             ),
-            .sync_distance = Gauge(u64).init(
+            .sync_distance = GaugeU64.init(
                 "beacon_sync_distance",
                 .{ .help = "Current sync distance in slots." },
                 ro,
             ),
-            .sync_state = Gauge(u64).init(
+            .sync_state = GaugeU64.init(
                 "beacon_sync_state",
                 .{ .help = "Compatibility sync state gauge: searching=0, synced=1, syncing=2." },
                 ro,
             ),
-            .sync_optimistic = Gauge(u64).init(
+            .sync_optimistic = GaugeU64.init(
                 "beacon_sync_optimistic",
                 .{ .help = "Compatibility gauge indicating whether the node is currently optimistic." },
                 ro,
             ),
-            .sync_el_offline = Gauge(u64).init(
+            .sync_el_offline = GaugeU64.init(
                 "beacon_sync_el_offline",
                 .{ .help = "Compatibility gauge indicating whether the execution layer is offline." },
                 ro,
             ),
-            .head_lag_slots = Gauge(u64).init(
+            .head_lag_slots = GaugeU64.init(
                 "beacon_head_lag_slots",
                 .{ .help = "Current head lag in slots." },
                 ro,
             ),
-            .head_catchup_pending_slots = Gauge(u64).init(
+            .head_catchup_pending_slots = GaugeU64.init(
                 "beacon_head_catchup_pending_slots",
                 .{ .help = "Current number of catch-up slots still pending before the head is current." },
                 ro,
             ),
-            .time_to_head_last_ms = Gauge(u64).init(
+            .time_to_head_last_ms = GaugeU64.init(
                 "beacon_time_to_head_last_ms",
                 .{ .help = "Last measured time to head in milliseconds." },
                 ro,
             ),
-            .time_to_head_current_ms = Gauge(u64).init(
+            .time_to_head_current_ms = GaugeU64.init(
                 "beacon_time_to_head_current_ms",
                 .{ .help = "Current rolling time-to-head estimate in milliseconds." },
                 ro,
@@ -1429,7 +1497,7 @@ pub const BeaconMetrics = struct {
                 .{ .help = "Distribution of time-to-head observations in seconds." },
                 ro,
             ),
-            .sync_mode = Gauge(u64).init(
+            .sync_mode = GaugeU64.init(
                 "beacon_sync_mode",
                 .{ .help = "Current sync mode as an enum: idle=0, checkpoint_sync=1, range_sync=2, synced=3." },
                 ro,
@@ -1440,62 +1508,62 @@ pub const BeaconMetrics = struct {
                 .{ .help = "One-hot gauge for the current sync mode by label." },
                 ro,
             ),
-            .sync_gossip_enabled = Gauge(u64).init(
+            .sync_gossip_enabled = GaugeU64.init(
                 "beacon_sync_gossip_enabled",
                 .{ .help = "Compatibility gauge indicating whether gossip processing is enabled." },
                 ro,
             ),
-            .sync_peer_count = Gauge(u64).init(
+            .sync_peer_count = GaugeU64.init(
                 "beacon_sync_peer_count",
                 .{ .help = "Current number of peers participating in sync." },
                 ro,
             ),
-            .sync_best_peer_slot = Gauge(u64).init(
+            .sync_best_peer_slot = GaugeU64.init(
                 "beacon_sync_best_peer_slot",
                 .{ .help = "Current best peer slot used for sync status." },
                 ro,
             ),
-            .sync_local_head_slot = Gauge(u64).init(
+            .sync_local_head_slot = GaugeU64.init(
                 "beacon_sync_local_head_slot",
                 .{ .help = "Current local head slot used for sync status." },
                 ro,
             ),
-            .sync_peer_distance = Gauge(u64).init(
+            .sync_peer_distance = GaugeU64.init(
                 "beacon_sync_peer_distance",
                 .{ .help = "Current slot distance between the best sync peer and the local head." },
                 ro,
             ),
-            .sync_local_finalized_epoch = Gauge(u64).init(
+            .sync_local_finalized_epoch = GaugeU64.init(
                 "beacon_sync_local_finalized_epoch",
                 .{ .help = "Current local finalized epoch used for sync status." },
                 ro,
             ),
-            .sync_unknown_block_pending = Gauge(u64).init(
+            .sync_unknown_block_pending = GaugeU64.init(
                 "beacon_sync_unknown_block_pending",
                 .{ .help = "Current number of pending unknown-block sync entries." },
                 ro,
             ),
-            .sync_unknown_block_fetching = Gauge(u64).init(
+            .sync_unknown_block_fetching = GaugeU64.init(
                 "beacon_sync_unknown_block_fetching",
                 .{ .help = "Current number of unknown-block sync entries waiting on fetches." },
                 ro,
             ),
-            .sync_unknown_block_parents_needed = Gauge(u64).init(
+            .sync_unknown_block_parents_needed = GaugeU64.init(
                 "beacon_sync_unknown_block_parents_needed",
                 .{ .help = "Current number of unknown-block sync entries that still need parent blocks." },
                 ro,
             ),
-            .sync_unknown_block_in_flight = Gauge(u64).init(
+            .sync_unknown_block_in_flight = GaugeU64.init(
                 "beacon_sync_unknown_block_in_flight",
                 .{ .help = "Current number of in-flight unknown-block sync requests." },
                 ro,
             ),
-            .sync_unknown_block_bad_roots = Gauge(u64).init(
+            .sync_unknown_block_bad_roots = GaugeU64.init(
                 "beacon_sync_unknown_block_bad_roots",
                 .{ .help = "Current number of unknown-block roots marked bad." },
                 ro,
             ),
-            .sync_unknown_block_exhausted = Gauge(u64).init(
+            .sync_unknown_block_exhausted = GaugeU64.init(
                 "beacon_sync_unknown_block_exhausted",
                 .{ .help = "Current number of unknown-block entries that exhausted parent fetch attempts." },
                 ro,
@@ -1505,7 +1573,7 @@ pub const BeaconMetrics = struct {
                 .{ .help = "Total CPU time consumed by the process in seconds." },
                 ro,
             ),
-            .process_max_fds = Gauge(u64).init(
+            .process_max_fds = GaugeU64.init(
                 "process_max_fds",
                 .{ .help = "Maximum number of file descriptors available to the process." },
                 ro,
@@ -1655,17 +1723,17 @@ pub const BeaconMetrics = struct {
                 ro,
             ),
 
-            .block_state_cache_entries = Gauge(u64).init(
+            .block_state_cache_entries = GaugeU64.init(
                 "beacon_block_state_cache_entries",
                 .{ .help = "Current number of in-memory block-state cache entries." },
                 ro,
             ),
-            .checkpoint_state_cache_entries = Gauge(u64).init(
+            .checkpoint_state_cache_entries = GaugeU64.init(
                 "beacon_checkpoint_state_cache_entries",
                 .{ .help = "Current number of in-memory checkpoint-state cache entries." },
                 ro,
             ),
-            .checkpoint_state_datastore_entries = Gauge(u64).init(
+            .checkpoint_state_datastore_entries = GaugeU64.init(
                 "beacon_checkpoint_state_datastore_entries",
                 .{ .help = "Current number of persisted checkpoint-state datastore entries." },
                 ro,
@@ -1675,12 +1743,12 @@ pub const BeaconMetrics = struct {
                 .{ .help = "Total state regeneration requests served from the fast-path cache." },
                 ro,
             ),
-            .store_beacon_block_cache_hit_total = Gauge(u64).init(
+            .store_beacon_block_cache_hit_total = GaugeU64.init(
                 "store_beacon_block_cache_hit_total",
                 .{ .help = "Compatibility gauge tracking total beacon block cache hits." },
                 ro,
             ),
-            .state_data_cache_misses_total = Gauge(u64).init(
+            .state_data_cache_misses_total = GaugeU64.init(
                 "beacon_state_data_cache_misses_total",
                 .{ .help = "Compatibility gauge tracking total state data cache misses." },
                 ro,
@@ -1695,22 +1763,22 @@ pub const BeaconMetrics = struct {
                 .{ .help = "Total state regeneration requests dropped under pressure." },
                 ro,
             ),
-            .state_regen_queue_length = Gauge(u64).init(
+            .state_regen_queue_length = GaugeU64.init(
                 "beacon_state_regen_queue_length",
                 .{ .help = "Current queued state regeneration backlog." },
                 ro,
             ),
-            .state_work_pending_jobs = Gauge(u64).init(
+            .state_work_pending_jobs = GaugeU64.init(
                 "beacon_state_work_pending_jobs",
                 .{ .help = "Current number of pending state work jobs." },
                 ro,
             ),
-            .state_work_completed_jobs = Gauge(u64).init(
+            .state_work_completed_jobs = GaugeU64.init(
                 "beacon_state_work_completed_jobs",
                 .{ .help = "Current number of retained completed state work jobs." },
                 ro,
             ),
-            .state_work_active_jobs = Gauge(u64).init(
+            .state_work_active_jobs = GaugeU64.init(
                 "beacon_state_work_active_jobs",
                 .{ .help = "Current number of active state work jobs." },
                 ro,
@@ -1740,62 +1808,62 @@ pub const BeaconMetrics = struct {
                 .{ .help = "Cumulative state work execution time in nanoseconds." },
                 ro,
             ),
-            .state_work_last_execution_time_ns = Gauge(u64).init(
+            .state_work_last_execution_time_ns = GaugeU64.init(
                 "beacon_state_work_last_execution_time_ns",
                 .{ .help = "Execution time in nanoseconds of the most recently completed state work job." },
                 ro,
             ),
-            .forkchoice_nodes = Gauge(u64).init(
+            .forkchoice_nodes = GaugeU64.init(
                 "beacon_forkchoice_nodes",
                 .{ .help = "Current number of nodes in the fork-choice DAG." },
                 ro,
             ),
-            .forkchoice_block_roots = Gauge(u64).init(
+            .forkchoice_block_roots = GaugeU64.init(
                 "beacon_forkchoice_block_roots",
                 .{ .help = "Current number of block roots tracked by fork choice." },
                 ro,
             ),
-            .forkchoice_votes = Gauge(u64).init(
+            .forkchoice_votes = GaugeU64.init(
                 "beacon_forkchoice_votes",
                 .{ .help = "Current number of votes tracked by fork choice." },
                 ro,
             ),
-            .forkchoice_queued_attestation_slots = Gauge(u64).init(
+            .forkchoice_queued_attestation_slots = GaugeU64.init(
                 "beacon_forkchoice_queued_attestation_slots",
                 .{ .help = "Current number of slots with queued fork-choice attestations." },
                 ro,
             ),
-            .forkchoice_queued_attestations_previous_slot = Gauge(u64).init(
+            .forkchoice_queued_attestations_previous_slot = GaugeU64.init(
                 "beacon_forkchoice_queued_attestations_previous_slot",
                 .{ .help = "Current number of queued fork-choice attestations carried over from the previous slot." },
                 ro,
             ),
-            .forkchoice_validated_attestation_data_roots = Gauge(u64).init(
+            .forkchoice_validated_attestation_data_roots = GaugeU64.init(
                 "beacon_forkchoice_validated_attestation_data_roots",
                 .{ .help = "Current number of validated attestation data roots cached by fork choice." },
                 ro,
             ),
-            .forkchoice_equivocating_validators = Gauge(u64).init(
+            .forkchoice_equivocating_validators = GaugeU64.init(
                 "beacon_forkchoice_equivocating_validators",
                 .{ .help = "Current number of validators marked equivocating by fork choice." },
                 ro,
             ),
-            .forkchoice_proposer_boost_active = Gauge(u64).init(
+            .forkchoice_proposer_boost_active = GaugeU64.init(
                 "beacon_forkchoice_proposer_boost_active",
                 .{ .help = "Gauge indicating whether proposer boost is currently active: active=1, inactive=0." },
                 ro,
             ),
-            .archive_last_finalized_slot = Gauge(u64).init(
+            .archive_last_finalized_slot = GaugeU64.init(
                 "beacon_archive_last_finalized_slot",
                 .{ .help = "Most recent finalized slot processed by the archive store." },
                 ro,
             ),
-            .archive_last_archived_state_epoch = Gauge(u64).init(
+            .archive_last_archived_state_epoch = GaugeU64.init(
                 "beacon_archive_last_archived_state_epoch",
                 .{ .help = "Most recent state epoch archived by the archive store." },
                 ro,
             ),
-            .archive_finalized_slot_lag = Gauge(u64).init(
+            .archive_finalized_slot_lag = GaugeU64.init(
                 "beacon_archive_finalized_slot_lag",
                 .{ .help = "Current number of finalized slots still waiting on archival." },
                 ro,
@@ -1825,37 +1893,37 @@ pub const BeaconMetrics = struct {
                 .{ .help = "Cumulative archive catch-up runtime in milliseconds." },
                 ro,
             ),
-            .archive_last_slots_advanced = Gauge(u64).init(
+            .archive_last_slots_advanced = GaugeU64.init(
                 "beacon_archive_last_slots_advanced",
                 .{ .help = "Finalized slots advanced by the most recent archive run." },
                 ro,
             ),
-            .archive_last_batch_ops = Gauge(u64).init(
+            .archive_last_batch_ops = GaugeU64.init(
                 "beacon_archive_last_batch_ops",
                 .{ .help = "Batch operations executed by the most recent archive run." },
                 ro,
             ),
-            .archive_last_run_milliseconds = Gauge(u64).init(
+            .archive_last_run_milliseconds = GaugeU64.init(
                 "beacon_archive_last_run_milliseconds",
                 .{ .help = "Runtime in milliseconds of the most recent archive run." },
                 ro,
             ),
-            .validator_monitor_monitored_validators = Gauge(u64).init(
+            .validator_monitor_monitored_validators = GaugeU64.init(
                 "beacon_validator_monitor_monitored_validators",
                 .{ .help = "Current number of validators monitored by the validator monitor." },
                 ro,
             ),
-            .validator_monitor_last_processed_epoch = Gauge(u64).init(
+            .validator_monitor_last_processed_epoch = GaugeU64.init(
                 "beacon_validator_monitor_last_processed_epoch",
                 .{ .help = "Most recent epoch processed by the validator monitor." },
                 ro,
             ),
-            .validator_monitor_epoch_lag = Gauge(u64).init(
+            .validator_monitor_epoch_lag = GaugeU64.init(
                 "beacon_validator_monitor_epoch_lag",
                 .{ .help = "Current validator monitor lag in epochs." },
                 ro,
             ),
-            .db_total_entries = Gauge(u64).init(
+            .db_total_entries = GaugeU64.init(
                 "beacon_db_total_entries",
                 .{ .help = "Current total number of database entries across all named databases." },
                 ro,
@@ -1866,37 +1934,37 @@ pub const BeaconMetrics = struct {
                 .{ .help = "Current number of database entries by named database." },
                 ro,
             ),
-            .db_lmdb_map_size_bytes = Gauge(u64).init(
+            .db_lmdb_map_size_bytes = GaugeU64.init(
                 "beacon_db_lmdb_map_size_bytes",
                 .{ .help = "Current LMDB map size in bytes." },
                 ro,
             ),
-            .db_lmdb_data_size_bytes = Gauge(u64).init(
+            .db_lmdb_data_size_bytes = GaugeU64.init(
                 "beacon_db_lmdb_data_size_bytes",
                 .{ .help = "Current LMDB data size in bytes." },
                 ro,
             ),
-            .db_lmdb_page_size_bytes = Gauge(u64).init(
+            .db_lmdb_page_size_bytes = GaugeU64.init(
                 "beacon_db_lmdb_page_size_bytes",
                 .{ .help = "Current LMDB page size in bytes." },
                 ro,
             ),
-            .db_lmdb_last_page_number = Gauge(u64).init(
+            .db_lmdb_last_page_number = GaugeU64.init(
                 "beacon_db_lmdb_last_page_number",
                 .{ .help = "Current LMDB last page number." },
                 ro,
             ),
-            .db_lmdb_last_txnid = Gauge(u64).init(
+            .db_lmdb_last_txnid = GaugeU64.init(
                 "beacon_db_lmdb_last_txnid",
                 .{ .help = "Current LMDB last transaction ID." },
                 ro,
             ),
-            .db_lmdb_readers_used = Gauge(u64).init(
+            .db_lmdb_readers_used = GaugeU64.init(
                 "beacon_db_lmdb_readers_used",
                 .{ .help = "Current number of LMDB reader slots in use." },
                 ro,
             ),
-            .db_lmdb_readers_max = Gauge(u64).init(
+            .db_lmdb_readers_max = GaugeU64.init(
                 "beacon_db_lmdb_readers_max",
                 .{ .help = "Maximum number of LMDB reader slots available." },
                 ro,
@@ -1913,57 +1981,57 @@ pub const BeaconMetrics = struct {
                 .{ .help = "Cumulative database operation time in nanoseconds by operation type." },
                 ro,
             ),
-            .attestation_pool_groups = Gauge(u64).init(
+            .attestation_pool_groups = GaugeU64.init(
                 "beacon_attestation_pool_groups",
                 .{ .help = "Current number of attestation pool groups." },
                 ro,
             ),
-            .aggregate_attestation_pool_groups = Gauge(u64).init(
+            .aggregate_attestation_pool_groups = GaugeU64.init(
                 "beacon_aggregate_attestation_pool_groups",
                 .{ .help = "Current number of aggregate attestation pool groups." },
                 ro,
             ),
-            .aggregate_attestation_pool_entries = Gauge(u64).init(
+            .aggregate_attestation_pool_entries = GaugeU64.init(
                 "beacon_aggregate_attestation_pool_entries",
                 .{ .help = "Current number of aggregate attestation pool entries." },
                 ro,
             ),
-            .voluntary_exit_pool_size = Gauge(u64).init(
+            .voluntary_exit_pool_size = GaugeU64.init(
                 "beacon_voluntary_exit_pool_size",
                 .{ .help = "Current number of voluntary exits in the pool." },
                 ro,
             ),
-            .proposer_slashing_pool_size = Gauge(u64).init(
+            .proposer_slashing_pool_size = GaugeU64.init(
                 "beacon_proposer_slashing_pool_size",
                 .{ .help = "Current number of proposer slashings in the pool." },
                 ro,
             ),
-            .attester_slashing_pool_size = Gauge(u64).init(
+            .attester_slashing_pool_size = GaugeU64.init(
                 "beacon_attester_slashing_pool_size",
                 .{ .help = "Current number of attester slashings in the pool." },
                 ro,
             ),
-            .bls_to_execution_change_pool_size = Gauge(u64).init(
+            .bls_to_execution_change_pool_size = GaugeU64.init(
                 "beacon_bls_to_execution_change_pool_size",
                 .{ .help = "Current number of BLS-to-execution changes in the pool." },
                 ro,
             ),
-            .sync_committee_message_pool_size = Gauge(u64).init(
+            .sync_committee_message_pool_size = GaugeU64.init(
                 "beacon_sync_committee_message_pool_size",
                 .{ .help = "Current number of sync committee messages in the pool." },
                 ro,
             ),
-            .sync_contribution_pool_size = Gauge(u64).init(
+            .sync_contribution_pool_size = GaugeU64.init(
                 "beacon_sync_contribution_pool_size",
                 .{ .help = "Current number of sync committee contributions in the pool." },
                 ro,
             ),
-            .proposer_cache_entries = Gauge(u64).init(
+            .proposer_cache_entries = GaugeU64.init(
                 "beacon_proposer_cache_entries",
                 .{ .help = "Current number of proposer-preparation cache entries." },
                 ro,
             ),
-            .pending_block_ingress_size = Gauge(u64).init(
+            .pending_block_ingress_size = GaugeU64.init(
                 "beacon_pending_block_ingress_size",
                 .{ .help = "Current number of pending beacon blocks awaiting attachments." },
                 ro,
@@ -1993,7 +2061,7 @@ pub const BeaconMetrics = struct {
                 .{ .help = "Total pending beacon block ingress entries pruned." },
                 ro,
             ),
-            .pending_payload_envelope_ingress_size = Gauge(u64).init(
+            .pending_payload_envelope_ingress_size = GaugeU64.init(
                 "beacon_pending_payload_envelope_ingress_size",
                 .{ .help = "Current number of pending separated payload envelopes." },
                 ro,
@@ -2018,7 +2086,7 @@ pub const BeaconMetrics = struct {
                 .{ .help = "Total pending payload-envelope ingress entries pruned." },
                 ro,
             ),
-            .reprocess_queue_size = Gauge(u64).init(
+            .reprocess_queue_size = GaugeU64.init(
                 "beacon_reprocess_queue_size",
                 .{ .help = "Current number of queued blocks awaiting parent-driven reprocessing." },
                 ro,
@@ -2043,17 +2111,17 @@ pub const BeaconMetrics = struct {
                 .{ .help = "Total queued blocks pruned from reprocessing." },
                 ro,
             ),
-            .da_blob_tracker_entries = Gauge(u64).init(
+            .da_blob_tracker_entries = GaugeU64.init(
                 "beacon_da_blob_tracker_entries",
                 .{ .help = "Current number of tracked blob-availability entries." },
                 ro,
             ),
-            .da_column_tracker_entries = Gauge(u64).init(
+            .da_column_tracker_entries = GaugeU64.init(
                 "beacon_da_column_tracker_entries",
                 .{ .help = "Current number of tracked custody-column entries." },
                 ro,
             ),
-            .da_pending_blocks = Gauge(u64).init(
+            .da_pending_blocks = GaugeU64.init(
                 "beacon_da_pending_blocks",
                 .{ .help = "Current number of blocks still waiting on data availability completion." },
                 ro,
@@ -2157,7 +2225,7 @@ pub const BeaconMetrics = struct {
                 .{ .help = "Distribution of engine_getBlobsV3 request durations in seconds." },
                 ro,
             ),
-            .attestor_slashing_created_total = Gauge(u64).init(
+            .attestor_slashing_created_total = GaugeU64.init(
                 "beacon_attestor_slashing_created_total",
                 .{ .help = "Compatibility gauge tracking total attester slashings created." },
                 ro,
@@ -2282,57 +2350,57 @@ pub const BeaconMetrics = struct {
                 .{ .help = "Total execution transport or request errors." },
                 ro,
             ),
-            .execution_pending_forkchoice_updates = Gauge(u64).init(
+            .execution_pending_forkchoice_updates = GaugeU64.init(
                 "execution_pending_forkchoice_updates",
                 .{ .help = "Current number of queued forkchoice updates waiting on the execution worker." },
                 ro,
             ),
-            .execution_pending_payload_verifications = Gauge(u64).init(
+            .execution_pending_payload_verifications = GaugeU64.init(
                 "execution_pending_payload_verifications",
                 .{ .help = "Current number of queued payload verifications waiting on the execution worker." },
                 ro,
             ),
-            .execution_completed_forkchoice_updates = Gauge(u64).init(
+            .execution_completed_forkchoice_updates = GaugeU64.init(
                 "execution_completed_forkchoice_updates",
                 .{ .help = "Current number of completed forkchoice updates awaiting node consumption." },
                 ro,
             ),
-            .execution_completed_payload_verifications = Gauge(u64).init(
+            .execution_completed_payload_verifications = GaugeU64.init(
                 "execution_completed_payload_verifications",
                 .{ .help = "Current number of completed payload verifications awaiting node consumption." },
                 ro,
             ),
-            .execution_waiting_import_payloads = Gauge(u64).init(
+            .execution_waiting_import_payloads = GaugeU64.init(
                 "execution_waiting_import_payloads",
                 .{ .help = "Current number of block-import execution work items waiting to be dispatched through the execution stage." },
                 ro,
             ),
-            .execution_waiting_revalidation_payloads = Gauge(u64).init(
+            .execution_waiting_revalidation_payloads = GaugeU64.init(
                 "execution_waiting_revalidation_payloads",
                 .{ .help = "Current number of optimistic-head revalidation work items waiting to be dispatched through the execution stage." },
                 ro,
             ),
-            .execution_pending_import_payloads = Gauge(u64).init(
+            .execution_pending_import_payloads = GaugeU64.init(
                 "execution_pending_import_payloads",
                 .{ .help = "Current number of execution import verifications already submitted to the worker and awaiting completion." },
                 ro,
             ),
-            .execution_pending_revalidation_payloads = Gauge(u64).init(
+            .execution_pending_revalidation_payloads = GaugeU64.init(
                 "execution_pending_revalidation_payloads",
                 .{ .help = "Current number of optimistic-head revalidations already submitted to the worker and awaiting completion." },
                 ro,
             ),
-            .execution_failed_payload_preparations = Gauge(u64).init(
+            .execution_failed_payload_preparations = GaugeU64.init(
                 "execution_failed_payload_preparations",
                 .{ .help = "Current number of failed payload-preparation tickets awaiting node consumption." },
                 ro,
             ),
-            .execution_cached_payload = Gauge(u64).init(
+            .execution_cached_payload = GaugeU64.init(
                 "execution_cached_payload",
                 .{ .help = "Gauge indicating whether a cached payload ID is currently live: yes=1, no=0." },
                 ro,
             ),
-            .execution_offline = Gauge(u64).init(
+            .execution_offline = GaugeU64.init(
                 "execution_offline",
                 .{ .help = "Gauge indicating whether the execution layer is currently considered offline: yes=1, no=0." },
                 ro,
@@ -3400,6 +3468,16 @@ test "BeaconMetrics: init fields are accessible" {
     m.state_work_failure_total.incrBy(1);
     m.state_work_execution_time_ns_total.incrBy(200);
     m.state_work_last_execution_time_ns.set(50);
+    m.discovery_ingress_queue_depth.set(11);
+    m.discovery_socket_recv_buffer_bytes_ip4.set(4_194_304);
+    m.discovery_socket_recv_buffer_bytes_ip6.set(4_194_304);
+    m.discovery_socket_send_buffer_bytes_ip4.set(262_144);
+    m.discovery_socket_send_buffer_bytes_ip6.set(262_144);
+    m.discovery_ingress_received_total.incrBy(21);
+    m.discovery_ingress_filtered_total.incrBy(3);
+    m.discovery_ingress_dropped_queue_full_total.incrBy(2);
+    m.discovery_ingress_processed_total.incrBy(16);
+    m.discovery_ingress_budget_exhausted_total.incrBy(4);
     m.execution_waiting_import_payloads.set(2);
     m.execution_waiting_revalidation_payloads.set(1);
     m.execution_pending_import_payloads.set(3);
@@ -3475,6 +3553,16 @@ test "BeaconMetrics: init fields are accessible" {
     try std.testing.expectEqual(@as(u64, 2), m.state_work_pending_jobs.impl.value);
     try std.testing.expectEqual(@as(u64, 4), m.state_work_submitted_total.impl.count);
     try std.testing.expectEqual(@as(u64, 50), m.state_work_last_execution_time_ns.impl.value);
+    try std.testing.expectEqual(@as(u64, 11), m.discovery_ingress_queue_depth.impl.value);
+    try std.testing.expectEqual(@as(u64, 4_194_304), m.discovery_socket_recv_buffer_bytes_ip4.impl.value);
+    try std.testing.expectEqual(@as(u64, 4_194_304), m.discovery_socket_recv_buffer_bytes_ip6.impl.value);
+    try std.testing.expectEqual(@as(u64, 262_144), m.discovery_socket_send_buffer_bytes_ip4.impl.value);
+    try std.testing.expectEqual(@as(u64, 262_144), m.discovery_socket_send_buffer_bytes_ip6.impl.value);
+    try std.testing.expectEqual(@as(u64, 21), m.discovery_ingress_received_total.impl.count);
+    try std.testing.expectEqual(@as(u64, 3), m.discovery_ingress_filtered_total.impl.count);
+    try std.testing.expectEqual(@as(u64, 2), m.discovery_ingress_dropped_queue_full_total.impl.count);
+    try std.testing.expectEqual(@as(u64, 16), m.discovery_ingress_processed_total.impl.count);
+    try std.testing.expectEqual(@as(u64, 4), m.discovery_ingress_budget_exhausted_total.impl.count);
     try std.testing.expectEqual(@as(u64, 2), m.execution_waiting_import_payloads.impl.value);
     try std.testing.expectEqual(@as(u64, 1), m.execution_waiting_revalidation_payloads.impl.value);
     try std.testing.expectEqual(@as(u64, 3), m.execution_pending_import_payloads.impl.value);
@@ -3725,6 +3813,16 @@ test "BeaconMetrics: write produces live Prometheus output" {
     try std.testing.expect(std.mem.indexOf(u8, buf, "beacon_state_regen_cache_hits_total") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf, "execution_new_payload_seconds") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf, "execution_forkchoice_updated_seconds") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf, "beacon_discovery_ingress_queue_depth") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf, "beacon_discovery_socket_recv_buffer_bytes_ip4") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf, "beacon_discovery_socket_recv_buffer_bytes_ip6") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf, "beacon_discovery_socket_send_buffer_bytes_ip4") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf, "beacon_discovery_socket_send_buffer_bytes_ip6") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf, "beacon_discovery_ingress_received_total") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf, "beacon_discovery_ingress_filtered_total") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf, "beacon_discovery_ingress_dropped_queue_full_total") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf, "beacon_discovery_ingress_processed_total") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf, "beacon_discovery_ingress_budget_exhausted_total") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf, "execution_waiting_import_payloads") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf, "execution_waiting_revalidation_payloads") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf, "execution_pending_import_payloads") != null);

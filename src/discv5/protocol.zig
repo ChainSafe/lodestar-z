@@ -305,6 +305,7 @@ pub const Protocol = struct {
     node_records: std.AutoHashMap(NodeId, NodeRecord),
     active_requests: std.AutoHashMap(RequestKey, ActiveRequest),
     completed_events: std.ArrayListUnmanaged(Event),
+    completed_events_head: usize,
 
     pub fn init(io: Io, alloc: Allocator, config: Config) !Protocol {
         var seed_bytes: [8]u8 = undefined;
@@ -323,6 +324,7 @@ pub const Protocol = struct {
             .node_records = std.AutoHashMap(NodeId, NodeRecord).init(alloc),
             .active_requests = std.AutoHashMap(RequestKey, ActiveRequest).init(alloc),
             .completed_events = .empty,
+            .completed_events_head = 0,
         };
     }
 
@@ -339,7 +341,7 @@ pub const Protocol = struct {
         var active_it = self.active_requests.iterator();
         while (active_it.next()) |entry| entry.value_ptr.deinit(self.alloc);
         self.active_requests.deinit();
-        for (self.completed_events.items) |*event| event.deinit(self.alloc);
+        for (self.completed_events.items[self.completed_events_head..]) |*event| event.deinit(self.alloc);
         self.completed_events.deinit(self.alloc);
     }
 
@@ -381,8 +383,35 @@ pub const Protocol = struct {
     }
 
     pub fn popEvent(self: *Protocol) ?Event {
-        if (self.completed_events.items.len == 0) return null;
-        return self.completed_events.orderedRemove(0);
+        if (self.completed_events_head >= self.completed_events.items.len) {
+            self.completed_events.clearRetainingCapacity();
+            self.completed_events_head = 0;
+            return null;
+        }
+
+        const event = self.completed_events.items[self.completed_events_head];
+        self.completed_events_head += 1;
+        self.compactCompletedEvents();
+        return event;
+    }
+
+    fn compactCompletedEvents(self: *Protocol) void {
+        if (self.completed_events_head == 0) return;
+        const remaining = self.completed_events.items.len - self.completed_events_head;
+        if (remaining == 0) {
+            self.completed_events.clearRetainingCapacity();
+            self.completed_events_head = 0;
+            return;
+        }
+        if (self.completed_events_head < 64 and self.completed_events_head * 2 < self.completed_events.items.len) return;
+
+        std.mem.copyForwards(
+            Event,
+            self.completed_events.items[0..remaining],
+            self.completed_events.items[self.completed_events_head..],
+        );
+        self.completed_events.items.len = remaining;
+        self.completed_events_head = 0;
     }
 
     pub const KnownNode = struct {
@@ -639,7 +668,6 @@ pub const Protocol = struct {
         from: Address,
         socket: *const UdpSocket,
     ) !void {
-        self.pruneExpiredState();
         // Drop oversized packets before any decoding work (CL-2020-06, spec max = IPv6 min MTU).
         if (raw.len > MAX_PACKET_SIZE) return;
 
@@ -2127,4 +2155,38 @@ test "discv5 protocol: unsolicited WHOAREYOU is ignored" {
             .clock = .awake,
         },
     }));
+}
+
+test "discv5 protocol: handlePacket does not prune expired state" {
+    const alloc = std.testing.allocator;
+    const io = std.Options.debug_io;
+    const hex = @import("hex.zig");
+
+    const sk = hex.hexToBytesComptime(32, "eef77acb6c6a6eebc5b363a475ac583ec7eccdb42b6481424c60f59aa326547f");
+    const pk = try secp.pubkeyFromSecret(&sk);
+    const node_id = enr_mod.nodeIdFromCompressedPubkey(&pk);
+
+    var proto = try Protocol.init(io, alloc, .{
+        .local_secret_key = sk,
+        .local_node_id = node_id,
+    });
+    defer proto.deinit();
+
+    var socket = try UdpSocket.bind(io, .{ .ip4 = .{ .bytes = .{ 127, 0, 0, 1 }, .port = 0 } });
+    defer socket.close();
+
+    const peer_id = [_]u8{0x55} ** 32;
+    const req_id = try messages.ReqId.fromSlice(&[_]u8{ 0x01, 0x02, 0x03, 0x04 });
+    try proto.active_requests.put(.{
+        .peer_id = peer_id,
+        .req_id = ReqIdKey.fromReqId(req_id),
+    }, .{
+        .started_at_ns = 0,
+        .kind = .{ .ping = {} },
+    });
+
+    try proto.handlePacket(&[_]u8{0x00}, socket.address, &socket);
+
+    try std.testing.expectEqual(@as(usize, 1), proto.active_requests.count());
+    try std.testing.expectEqual(@as(usize, 0), proto.completed_events.items.len);
 }

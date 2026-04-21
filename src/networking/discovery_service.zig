@@ -52,6 +52,8 @@ pub const DiscoveryConfig = struct {
     bootnodes: []const []const u8 = &.{},
     target_peers: u32 = 50,
     lookup_interval_ms: u64 = DEFAULT_LOOKUP_INTERVAL_MS,
+    socket_recv_buffer_bytes: ?u32 = 4 * 1024 * 1024,
+    socket_send_buffer_bytes: ?u32 = 256 * 1024,
     secret_key: [32]u8 = [_]u8{0} ** 32,
     local_ip: ?[4]u8 = null,
     local_ip6: ?[16]u8 = null,
@@ -238,6 +240,8 @@ pub const DiscoveryService = struct {
     reserved_custody_queries: std.AutoHashMap(u64, u32),
     dial_reservations: std.AutoHashMap(NodeId, DemandReservation),
     lookup_sources: std.AutoHashMap(u32, DiscoverySource),
+    active_random_lookup: ?u32,
+    last_random_lookup_started_ms: u64,
     /// ENR cache for subnet-targeted queries.
     /// Stores parsed ENR records indexed by node ID (hex string ownership).
     enr_cache: std.StringHashMap(CachedEnr),
@@ -270,6 +274,8 @@ pub const DiscoveryService = struct {
                 .local_secret_key = config.secret_key,
             },
             .lookup_parallelism = LOOKUP_PARALLELISM,
+            .socket_recv_buffer_bytes = config.socket_recv_buffer_bytes,
+            .socket_send_buffer_bytes = config.socket_send_buffer_bytes,
         });
         errdefer service.deinit();
 
@@ -324,6 +330,8 @@ pub const DiscoveryService = struct {
             .reserved_custody_queries = std.AutoHashMap(u64, u32).init(allocator),
             .dial_reservations = std.AutoHashMap(NodeId, DemandReservation).init(allocator),
             .lookup_sources = std.AutoHashMap(u32, DiscoverySource).init(allocator),
+            .active_random_lookup = null,
+            .last_random_lookup_started_ms = 0,
             .enr_cache = std.StringHashMap(CachedEnr).init(allocator),
             .connected_peers = 0,
             .bootnode_session_wait_cycles = 0,
@@ -337,6 +345,10 @@ pub const DiscoveryService = struct {
             .not_dial_reason_counts = [_]u64{0} ** metric_not_dial_reasons.len,
             .local_enr_changed = false,
         };
+    }
+
+    pub fn start(self: *DiscoveryService) !void {
+        try self.service.startIngressWorkers();
     }
 
     pub fn deinit(self: *DiscoveryService) void {
@@ -509,10 +521,20 @@ pub const DiscoveryService = struct {
     }
 
     fn startRandomLookup(self: *DiscoveryService, source: DiscoverySource) void {
+        const now_ms = currentUnixTimeMs(self.io);
+        if (source == .random_lookup) {
+            if (self.active_random_lookup != null) return;
+            if (self.last_random_lookup_started_ms != 0 and now_ms - self.last_random_lookup_started_ms < self.config.lookup_interval_ms) return;
+        }
+
         const lookup_id = self.service.startRandomLookup() catch return;
         self.total_lookups += 1;
         self.lookup_request_counts[lookupSourceIndex(source)] += 1;
         self.lookup_sources.put(lookup_id, source) catch {};
+        if (source == .random_lookup) {
+            self.active_random_lookup = lookup_id;
+            self.last_random_lookup_started_ms = now_ms;
+        }
     }
 
     fn refreshActiveQueries(self: *DiscoveryService) void {
@@ -588,6 +610,12 @@ pub const DiscoveryService = struct {
         self.pollNetwork();
     }
 
+    pub fn pollIngress(self: *DiscoveryService) bool {
+        const processed = self.service.pollIngress();
+        self.drainServiceEvents();
+        return processed > 0;
+    }
+
     fn pollNetwork(self: *DiscoveryService) void {
         self.service.poll();
         self.drainServiceEvents();
@@ -602,14 +630,14 @@ pub const DiscoveryService = struct {
                 .pong => {},
                 .nodes => {},
                 .discovered_enr => |discovered| {
-                    var parsed = enr_mod.decode(self.allocator, discovered.enr) catch continue;
-                    defer parsed.deinit();
-
-                    if (!self.filterEnr(&parsed)) continue;
-                    self.recordEnr(discovered.node_id, &parsed);
+                    if (!self.filterDiscoveredEvent(&discovered)) continue;
+                    self.recordDiscoveredEvent(discovered);
                 },
                 .lookup_finished => |lookup_finished| {
                     _ = self.lookup_sources.remove(lookup_finished.lookup_id);
+                    if (self.active_random_lookup) |lookup_id| {
+                        if (lookup_id == lookup_finished.lookup_id) self.active_random_lookup = null;
+                    }
                 },
                 .talkreq => {},
                 .talkresp => {},
@@ -701,6 +729,41 @@ pub const DiscoveryService = struct {
             if (!std.mem.eql(u8, &fd, &self.current_fork_digest)) return false;
         }
         return true;
+    }
+
+    fn filterDiscoveredEvent(self: *const DiscoveryService, discovered: *const discv5.service.DiscoveredEnrEvent) bool {
+        if (discovered.addr_ip4 == null and discovered.addr_ip6 == null) return false;
+        if (discovered.fork_digest) |fd| {
+            if (!std.mem.eql(u8, &fd, &self.current_fork_digest)) return false;
+        }
+        return true;
+    }
+
+    fn recordDiscoveredEvent(self: *DiscoveryService, discovered: discv5.service.DiscoveredEnrEvent) void {
+        const fd = discovered.fork_digest orelse return;
+        const effective_custody_group_count = discovered.custody_group_count orelse self.config.default_custody_group_count;
+        const key_hex = std.fmt.bytesToHex(discovered.node_id, .lower);
+        const key = self.allocator.dupe(u8, &key_hex) catch return;
+
+        const gop = self.enr_cache.getOrPut(key) catch {
+            self.allocator.free(key);
+            return;
+        };
+        if (gop.found_existing) {
+            self.allocator.free(key);
+        }
+        gop.value_ptr.* = .{
+            .node_id = discovered.node_id,
+            .addr_ip4 = discovered.addr_ip4,
+            .addr_ip6 = discovered.addr_ip6,
+            .pubkey = discovered.pubkey,
+            .has_quic = discovered.has_quic,
+            .attnets = discovered.attnets,
+            .syncnets = discovered.syncnets,
+            .custody_group_count = effective_custody_group_count,
+            .custody_columns = deriveCustodyColumnsBitfield(self.allocator, discovered.node_id, effective_custody_group_count),
+            .fork_digest = fd,
+        };
     }
 
     // ── Subnet Queries ──────────────────────────────────────────────────
@@ -803,6 +866,7 @@ pub const DiscoveryService = struct {
         const syncnets_to_connect = sumActiveDemand(u8, self.active_sync_queries) + sumPendingSubnetDemand(self.pending_subnet_queries.items, .sync_committee);
         const custody_groups_to_connect = countActiveDemand(u64, self.active_custody_queries) + countPendingCustodyDemand(self.pending_custody_queries.items);
         const custody_group_peers_to_connect = sumActiveDemand(u64, self.active_custody_queries) + sumPendingCustodyDemand(self.pending_custody_queries.items);
+        const ingress = self.service.ingressStatsSnapshot();
         return .{
             .known_peers = self.knownPeerCount(),
             .connected_peers = self.connected_peers,
@@ -816,6 +880,17 @@ pub const DiscoveryService = struct {
             .subnet_peers_to_connect = [_]u64{ attnets_to_connect, syncnets_to_connect, custody_group_peers_to_connect },
             .enr_cache_size = self.enr_cache.count(),
             .enr_seq = self.service.localEnrSeq(),
+            .ingress_received_total = ingress.received_total,
+            .ingress_filtered_total = ingress.filtered_total,
+            .ingress_dropped_queue_full_total = ingress.dropped_queue_full_total,
+            .ingress_processed_total = ingress.processed_total,
+            .ingress_budget_exhausted_total = ingress.budget_exhausted_total,
+            .ingress_queue_depth = ingress.queue_depth,
+            .ingress_max_queue_depth = ingress.max_queue_depth,
+            .recv_buffer_bytes_ip4 = ingress.recv_buffer_bytes_ip4,
+            .recv_buffer_bytes_ip6 = ingress.recv_buffer_bytes_ip6,
+            .send_buffer_bytes_ip4 = ingress.send_buffer_bytes_ip4,
+            .send_buffer_bytes_ip6 = ingress.send_buffer_bytes_ip6,
             .lookup_request_counts = self.lookup_request_counts,
             .discovered_status_counts = self.discovered_status_counts,
             .not_dial_reason_counts = self.not_dial_reason_counts,
@@ -1575,6 +1650,17 @@ pub const DiscoveryStats = struct {
     /// Number of ENRs cached for subnet-targeted queries.
     enr_cache_size: usize,
     enr_seq: u64,
+    ingress_received_total: u64,
+    ingress_filtered_total: u64,
+    ingress_dropped_queue_full_total: u64,
+    ingress_processed_total: u64,
+    ingress_budget_exhausted_total: u64,
+    ingress_queue_depth: usize,
+    ingress_max_queue_depth: usize,
+    recv_buffer_bytes_ip4: u32,
+    recv_buffer_bytes_ip6: u32,
+    send_buffer_bytes_ip4: u32,
+    send_buffer_bytes_ip6: u32,
     lookup_request_counts: [metric_lookup_sources.len]u64,
     discovered_status_counts: [metric_discovered_statuses.len]u64,
     not_dial_reason_counts: [metric_not_dial_reasons.len]u64,
@@ -2386,4 +2472,32 @@ test "DiscoveredPeer struct layout" {
     try std.testing.expect(peer.addr_ip4 != null);
     try std.testing.expect(peer.addr_ip6 == null);
     try std.testing.expect(peer.has_quic);
+}
+
+test "DiscoveryService: random lookup does not overlap and honors lookup interval" {
+    var svc = try DiscoveryService.init(std.testing.io, std.testing.allocator, .{
+        .listen_port = 0,
+        .target_peers = 5,
+        .lookup_interval_ms = 30_000,
+    });
+    defer svc.deinit();
+    var pm = initTestPeerManager(5);
+    defer pm.deinit();
+
+    svc.connected_peers = svc.config.target_peers;
+    svc.requestMorePeers(1);
+    svc.discoverPeers(&pm);
+    try std.testing.expectEqual(@as(u64, 1), svc.total_lookups);
+
+    svc.discoverPeers(&pm);
+    try std.testing.expectEqual(@as(u64, 1), svc.total_lookups);
+
+    svc.active_random_lookup = null;
+    svc.last_random_lookup_started_ms = currentUnixTimeMs(std.testing.io);
+    svc.discoverPeers(&pm);
+    try std.testing.expectEqual(@as(u64, 1), svc.total_lookups);
+
+    svc.last_random_lookup_started_ms = currentUnixTimeMs(std.testing.io) - svc.config.lookup_interval_ms;
+    svc.discoverPeers(&pm);
+    try std.testing.expectEqual(@as(u64, 2), svc.total_lookups);
 }

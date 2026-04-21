@@ -46,6 +46,12 @@ pub const NodeOptions = struct {
     /// UDP port for discv5 IPv6.
     /// Defaults to a distinct UDP port when dual-stack discovery is enabled.
     discovery_port6: ?u16 = null,
+    /// Minimum interval between random discovery lookups while generic demand remains.
+    discovery_lookup_interval_ms: u64 = 30_000,
+    /// Requested UDP receive buffer size for discovery sockets.
+    discovery_socket_recv_buffer_bytes: ?u32 = 4 * 1024 * 1024,
+    /// Requested UDP send buffer size for discovery sockets.
+    discovery_socket_send_buffer_bytes: ?u32 = 256 * 1024,
     /// Direct peers to always connect to (multiaddr strings from --direct-peers).
     direct_peers: []const []const u8 = &.{},
     /// Enable mDNS local discovery.

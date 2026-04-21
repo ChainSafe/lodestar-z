@@ -211,6 +211,21 @@ pub const spec = cli.command(.{
             .description = "IPv6 UDP port for discv5 discovery (defaults to a distinct dual-stack port)",
             .group = "network",
         }, null),
+        .discoveryLookupIntervalMs = cli.option(?u64, .{
+            .long = "discovery-lookup-interval-ms",
+            .description = "Minimum interval between random discovery lookups while demand remains",
+            .group = "network",
+        }, null),
+        .discoverySocketRecvBufferBytes = cli.option(?u32, .{
+            .long = "discovery-socket-recv-buffer-bytes",
+            .description = "Requested UDP receive buffer size for discovery sockets",
+            .group = "network",
+        }, null),
+        .discoverySocketSendBufferBytes = cli.option(?u32, .{
+            .long = "discovery-socket-send-buffer-bytes",
+            .description = "Requested UDP send buffer size for discovery sockets",
+            .group = "network",
+        }, null),
         .bootnodes = cli.option(?[]const u8, .{
             .long = "bootnodes",
             .description = "Comma-separated list of bootnode ENRs",

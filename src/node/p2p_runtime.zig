@@ -1579,6 +1579,10 @@ fn runPeerManagerMaintenance(self: *BeaconNode, io: std.Io, svc: *networking.P2p
 fn runRealtimeP2pTick(self: *BeaconNode, io: std.Io, svc: *networking.P2pService) bool {
     var did_work = false;
 
+    if (self.discovery_service) |ds| {
+        did_work = ds.pollIngress() or did_work;
+    }
+
     did_work = drainCompletedDiscoveryDials(self, io, svc) or did_work;
     did_work = drainCompletedPeerReqResp(self, io, svc) or did_work;
     did_work = self.processPendingExecutionForkchoiceUpdates() or did_work;
@@ -2171,6 +2175,17 @@ fn updateDiscoveryMetrics(self: *BeaconNode, io: std.Io) void {
             .subnet_peers_to_connect = [_]u64{0} ** networking.discovery_service.metric_requested_subnet_demand_kinds.len,
             .enr_cache_size = 0,
             .enr_seq = 0,
+            .ingress_received_total = 0,
+            .ingress_filtered_total = 0,
+            .ingress_dropped_queue_full_total = 0,
+            .ingress_processed_total = 0,
+            .ingress_budget_exhausted_total = 0,
+            .ingress_queue_depth = 0,
+            .ingress_max_queue_depth = 0,
+            .recv_buffer_bytes_ip4 = 0,
+            .recv_buffer_bytes_ip6 = 0,
+            .send_buffer_bytes_ip4 = 0,
+            .send_buffer_bytes_ip6 = 0,
             .lookup_request_counts = [_]u64{0} ** networking.discovery_service.metric_lookup_sources.len,
             .discovered_status_counts = [_]u64{0} ** networking.discovery_service.metric_discovered_statuses.len,
             .not_dial_reason_counts = [_]u64{0} ** networking.discovery_service.metric_not_dial_reasons.len,
@@ -2187,6 +2202,11 @@ fn updateDiscoveryMetrics(self: *BeaconNode, io: std.Io) void {
     metrics.discovery_enr_cache_size.set(@intCast(snapshot.enr_cache_size));
     metrics.discovery_enr_seq.set(snapshot.enr_seq);
     metrics.discovery_pending_dials.set(@intCast(currentPendingDiscoveryDials(self, io)));
+    metrics.discovery_ingress_queue_depth.set(@intCast(snapshot.ingress_queue_depth));
+    metrics.discovery_socket_recv_buffer_bytes_ip4.set(snapshot.recv_buffer_bytes_ip4);
+    metrics.discovery_socket_recv_buffer_bytes_ip6.set(snapshot.recv_buffer_bytes_ip6);
+    metrics.discovery_socket_send_buffer_bytes_ip4.set(snapshot.send_buffer_bytes_ip4);
+    metrics.discovery_socket_send_buffer_bytes_ip6.set(snapshot.send_buffer_bytes_ip6);
     inline for (networking.discovery_service.metric_requested_subnet_demand_kinds) |kind| {
         const label = switch (kind) {
             .attnets => "attnets",
@@ -2207,6 +2227,26 @@ fn updateDiscoveryMetrics(self: *BeaconNode, io: std.Io) void {
     metrics.discovery_filtered_total.incrBy(monotonicDelta(
         snapshot.total_filtered_out,
         if (previous) |prev| prev.total_filtered_out else null,
+    ));
+    metrics.discovery_ingress_received_total.incrBy(monotonicDelta(
+        snapshot.ingress_received_total,
+        if (previous) |prev| prev.ingress_received_total else null,
+    ));
+    metrics.discovery_ingress_filtered_total.incrBy(monotonicDelta(
+        snapshot.ingress_filtered_total,
+        if (previous) |prev| prev.ingress_filtered_total else null,
+    ));
+    metrics.discovery_ingress_dropped_queue_full_total.incrBy(monotonicDelta(
+        snapshot.ingress_dropped_queue_full_total,
+        if (previous) |prev| prev.ingress_dropped_queue_full_total else null,
+    ));
+    metrics.discovery_ingress_processed_total.incrBy(monotonicDelta(
+        snapshot.ingress_processed_total,
+        if (previous) |prev| prev.ingress_processed_total else null,
+    ));
+    metrics.discovery_ingress_budget_exhausted_total.incrBy(monotonicDelta(
+        snapshot.ingress_budget_exhausted_total,
+        if (previous) |prev| prev.ingress_budget_exhausted_total else null,
     ));
     inline for (networking.discovery_service.metric_lookup_sources) |source| {
         const delta = monotonicDelta(
@@ -2736,8 +2776,13 @@ fn initDiscoveryService(self: *BeaconNode) !void {
         .default_custody_group_count = self.config.chain.CUSTODY_REQUIREMENT,
         .fork_digest = fork_digest,
         .target_peers = self.node_options.target_peers,
+        .lookup_interval_ms = self.node_options.discovery_lookup_interval_ms,
+        .socket_recv_buffer_bytes = self.node_options.discovery_socket_recv_buffer_bytes,
+        .socket_send_buffer_bytes = self.node_options.discovery_socket_send_buffer_bytes,
         .bootnodes = self.discovery_bootnodes,
     });
+    errdefer ds.deinit();
+    try ds.start();
 
     ds.seedBootnodes();
     self.discovery_service = ds;

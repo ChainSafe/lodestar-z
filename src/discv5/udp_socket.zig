@@ -5,9 +5,15 @@ const std = @import("std");
 const Io = std.Io;
 const net = Io.net;
 const posix = std.posix;
+const linux = std.os.linux;
 const ThreadedIo = Io.Threaded;
 
 pub const Address = net.IpAddress;
+
+pub const BufferConfig = struct {
+    recv_buffer_bytes: ?u32 = null,
+    send_buffer_bytes: ?u32 = null,
+};
 
 pub const RecvResult = struct {
     data: []u8,
@@ -18,6 +24,8 @@ pub const Socket = struct {
     io: Io,
     socket: net.Socket,
     address: Address,
+    recv_buffer_bytes: u32 = 0,
+    send_buffer_bytes: u32 = 0,
 
     pub fn bind(io: Io, address: Address) !Socket {
         const bound = try net.IpAddress.bind(&address, io, .{
@@ -34,6 +42,28 @@ pub const Socket = struct {
             .socket = bound,
             .address = normalizeAddress(bound.address),
         };
+    }
+
+    pub fn configureBuffers(self: *Socket, config: BufferConfig) void {
+        if (builtin.os.tag == .windows or builtin.os.tag == .wasi) return;
+        if (config.recv_buffer_bytes) |recv_buffer_bytes| {
+            posix.setsockopt(
+                self.socket.handle,
+                posix.SOL.SOCKET,
+                posix.SO.RCVBUF,
+                std.mem.asBytes(&recv_buffer_bytes),
+            ) catch {};
+        }
+        if (config.send_buffer_bytes) |send_buffer_bytes| {
+            posix.setsockopt(
+                self.socket.handle,
+                posix.SOL.SOCKET,
+                posix.SO.SNDBUF,
+                std.mem.asBytes(&send_buffer_bytes),
+            ) catch {};
+        }
+        self.recv_buffer_bytes = querySocketBuffer(self.socket.handle, posix.SO.RCVBUF);
+        self.send_buffer_bytes = querySocketBuffer(self.socket.handle, posix.SO.SNDBUF);
     }
 
     pub fn close(self: *const Socket) void {
@@ -70,6 +100,22 @@ fn normalizeAddress(address: Address) Address {
         .ip4 => address,
         .ip6 => |ip6| net.IpAddress.fromIp6(ip6),
     };
+}
+
+fn querySocketBuffer(handle: net.Socket.Handle, optname: u32) u32 {
+    if (builtin.os.tag != .linux) return 0;
+
+    var value: i32 = 0;
+    var opt_len: linux.socklen_t = @sizeOf(i32);
+    const rc = linux.getsockopt(
+        @intCast(handle),
+        posix.SOL.SOCKET,
+        optname,
+        std.mem.asBytes(&value).ptr,
+        &opt_len,
+    );
+    if (linux.errno(rc) != .SUCCESS) return 0;
+    return if (value < 0) 0 else @intCast(value);
 }
 
 fn sendDatagramPosix(handle: net.Socket.Handle, dest: Address, data: []const u8) net.Socket.SendError!void {

@@ -62,6 +62,9 @@ const ResolvedRunInputs = struct {
     p2p_port6: ?u16,
     discovery_port: ?u16,
     discovery_port6: ?u16,
+    discovery_lookup_interval_ms: u64,
+    discovery_socket_recv_buffer_bytes: ?u32,
+    discovery_socket_send_buffer_bytes: ?u32,
     bootnodes_file: ?[]const u8,
     cli_bootnodes: ?[]const u8,
     enr_ip: ?[]const u8,
@@ -465,12 +468,16 @@ fn resolveRunInputs(io: Io, allocator: Allocator, opts: anytype) ResolvedRunInpu
     const p2p_host6 = opts.listenAddress6 orelse opts.p2p_host6;
     const p2p_port = opts.port orelse opts.p2p_port;
     const p2p_port6 = opts.port6 orelse parseOptionalPort(opts.p2p_port6);
+    const node_option_defaults = node_mod.NodeOptions{};
     const discovery_port: ?u16 = if (opts.discoveryPort) |port| blk: {
         break :blk port;
     } else if (opts.discovery_port) |port_str| blk: {
         break :blk std.fmt.parseInt(u16, port_str, 10) catch null;
     } else null;
     const discovery_port6 = opts.discoveryPort6;
+    const discovery_lookup_interval_ms = opts.discoveryLookupIntervalMs orelse node_option_defaults.discovery_lookup_interval_ms;
+    const discovery_socket_recv_buffer_bytes = opts.discoverySocketRecvBufferBytes orelse node_option_defaults.discovery_socket_recv_buffer_bytes;
+    const discovery_socket_send_buffer_bytes = opts.discoverySocketSendBufferBytes orelse node_option_defaults.discovery_socket_send_buffer_bytes;
     const bootnodes_file = opts.bootnodesFile;
     const cli_bootnodes = opts.bootnodes;
     const enr_ip = opts.@"enr.ip";
@@ -644,6 +651,9 @@ fn resolveRunInputs(io: Io, allocator: Allocator, opts: anytype) ResolvedRunInpu
         .p2p_port6 = p2p_port6,
         .discovery_port = discovery_port,
         .discovery_port6 = discovery_port6,
+        .discovery_lookup_interval_ms = discovery_lookup_interval_ms,
+        .discovery_socket_recv_buffer_bytes = discovery_socket_recv_buffer_bytes,
+        .discovery_socket_send_buffer_bytes = discovery_socket_send_buffer_bytes,
         .bootnodes_file = bootnodes_file,
         .cli_bootnodes = cli_bootnodes,
         .enr_ip = enr_ip,
@@ -898,6 +908,9 @@ fn prepareStartupRuntime(io: Io, allocator: Allocator, inputs: *const ResolvedRu
         .enable_discv5 = inputs.enable_discv5,
         .discovery_port = inputs.discovery_port,
         .discovery_port6 = inputs.discovery_port6,
+        .discovery_lookup_interval_ms = inputs.discovery_lookup_interval_ms,
+        .discovery_socket_recv_buffer_bytes = inputs.discovery_socket_recv_buffer_bytes,
+        .discovery_socket_send_buffer_bytes = inputs.discovery_socket_send_buffer_bytes,
         .direct_peers = startup.direct_peers,
         .enable_mdns = inputs.enable_mdns,
         .subscribe_all_subnets = inputs.subscribe_all_subnets,
