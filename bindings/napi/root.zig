@@ -16,7 +16,7 @@ const BeaconStateView = @import("./BeaconStateView.zig");
 fn init(old_ref_count: u32) !void {
     if (old_ref_count == 0) {
         // First environment — initialize shared state in your threadpool init.
-        var cpu_count: u32 = options.thread_count;
+        var cpu_count: u64 = options.thread_count;
         if (options.thread_count == 0) {
             std.debug.print("Note: no -Dthread-count set, will use runtime CPU count minus 1: {}\n", .{cpu_count});
             cpu_count = @max((try std.Thread.getCpuCount()) - 1, 1);
