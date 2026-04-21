@@ -9,8 +9,8 @@ importers:
   .:
     dependencies:
       '@chainsafe/zapi':
-        specifier: 0.1.1
-        version: 0.1.1
+        specifier: 1.0.1
+        version: 1.0.1
     devDependencies:
       '@biomejs/biome':
         specifier: ^2.3.11
@@ -308,8 +308,8 @@ packages:
     resolution: {integrity: sha512-H8YdEoXXv2Hw17gDWGOJEya4LHlBbpChJP3jDQRfIk9hhwr0c/zbBemBRmjADowZhArL+ymkO+j5hGaYySjdpw==}
     engines: {node: '>= 18'}
 
-  '@chainsafe/zapi@0.1.1':
-    resolution: {integrity: sha512-HpjNyRaXODjXMqVTpq75jaY6TfeBk3icPWYUAbkqrQFpFfYCbPUdWPJ4FCYrejxYGUbaJGFKp8IHHEmMYp2MBw==}
+  '@chainsafe/zapi@1.0.1':
+    resolution: {integrity: sha512-AskwfpFdNfFIxXfHNesH2zfBkCHYGMNfFm27o+JJosm3gwv90EjE5KpX7m03PQB2lBjxbmTs9HCgPMFWEVVBnA==}
     hasBin: true
 
   '@emnapi/core@1.8.1':
@@ -1547,7 +1547,7 @@ snapshots:
       '@chainsafe/swap-or-not-shuffle-win32-arm64-msvc': 1.2.1
       '@chainsafe/swap-or-not-shuffle-win32-x64-msvc': 1.2.1
 
-  '@chainsafe/zapi@0.1.1': {}
+  '@chainsafe/zapi@1.0.1': {}
 
   '@emnapi/core@1.8.1':
     dependencies:

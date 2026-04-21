@@ -22,7 +22,7 @@
             .url = "git+https://github.com/chainsafe/zig-yaml#e0e5962579e990a66c21424416c7ac092b20b772",
         },
         .zapi = .{
-            .url = "git+https://github.com/chainsafe/zapi#390d398955fd6c7568fc2edeaedd15e1a98e0638",
+            .url = "git+https://github.com/chainsafe/zapi#zapi-v1.0.1",
         },
         .zbench = .{
             .url = "git+https://github.com/hendriknielaender/zBench#d8c7dd485306b88b757d52005614ebcb0a336942",
