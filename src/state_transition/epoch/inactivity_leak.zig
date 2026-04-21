@@ -2,7 +2,7 @@
 const std = @import("std");
 const preset = @import("preset").preset;
 const MIN_EPOCHS_TO_INACTIVITY_PENALTY = preset.MIN_EPOCHS_TO_INACTIVITY_PENALTY;
-const computePreviousEpoch = @import("../utils/epoch.zig").computePreviousEpoch;
+const computePreviousEpoch = @import("../epoch.zig").computePreviousEpoch;
 
 pub fn getFinalityDelay(current_epoch: u64, finalized_epoch: u64) u64 {
     const previous_epoch = computePreviousEpoch(current_epoch);

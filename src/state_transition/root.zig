@@ -8,7 +8,7 @@ pub const TransitionOpt = @import("state_transition.zig").TransitionOpt;
 pub const metrics = @import("metrics.zig");
 
 pub const computeSigningRoot = @import("./utils/signing_root.zig").computeSigningRoot;
-pub const computeEpochAtSlot = @import("./utils/epoch.zig").computeEpochAtSlot;
+pub const computeEpochAtSlot = @import("./epoch.zig").computeEpochAtSlot;
 pub const CachedBeaconState = @import("./cache/state_cache.zig").CachedBeaconState;
 pub const EffectiveBalanceIncrements = @import("./cache/effective_balance_increments.zig").EffectiveBalanceIncrements;
 pub const buildSlashingsCacheFromStateIfNeeded = @import("./cache/slashings_cache.zig").buildFromStateIfNeeded;
@@ -82,7 +82,7 @@ pub const validator_status = @import("./utils/validator_status.zig");
 pub const ValidatorStatus = validator_status.ValidatorStatus;
 pub const getValidatorStatus = validator_status.getValidatorStatus;
 pub const getBlockRootAtSlot = @import("./utils/block_root.zig").getBlockRootAtSlot;
-pub const computeStartSlotAtEpoch = @import("./utils/epoch.zig").computeStartSlotAtEpoch;
+pub const computeStartSlotAtEpoch = @import("./epoch.zig").computeStartSlotAtEpoch;
 pub const deinitStateTransition = @import("./state_transition.zig").deinitStateTransition;
 pub const isExecutionEnabled = @import("./utils/execution.zig").isExecutionEnabled;
 pub const isMergeTransitionComplete = @import("./utils/execution.zig").isMergeTransitionComplete;

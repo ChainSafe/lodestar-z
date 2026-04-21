@@ -6,7 +6,7 @@ const AnyBeaconBlock = @import("fork_types").AnyBeaconBlock;
 const ForkTypes = @import("fork_types").ForkTypes;
 const c = @import("constants");
 const ZERO_HASH = c.ZERO_HASH;
-const computeCheckpointEpochAtStateSlot = @import("./epoch.zig").computeCheckpointEpochAtStateSlot;
+const computeCheckpointEpochAtStateSlot = @import("../epoch.zig").computeCheckpointEpochAtStateSlot;
 
 pub const AnchorCheckpoint = struct {
     checkpoint: types.phase0.Checkpoint.Type,

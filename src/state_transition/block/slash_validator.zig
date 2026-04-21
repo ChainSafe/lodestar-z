@@ -10,7 +10,7 @@ const SlashingsCache = @import("../cache/slashings_cache.zig").SlashingsCache;
 const decreaseBalance = @import("../utils/balance.zig").decreaseBalance;
 const increaseBalance = @import("../utils/balance.zig").increaseBalance;
 const initiateValidatorExit = @import("./initiate_validator_exit.zig").initiateValidatorExit;
-const computePreviousEpoch = @import("../utils/epoch.zig").computePreviousEpoch;
+const computePreviousEpoch = @import("../epoch.zig").computePreviousEpoch;
 const isActiveValidatorView = @import("../utils/validator.zig").isActiveValidatorView;
 const getBeaconProposer = @import("../cache/get_beacon_proposer.zig").getBeaconProposer;
 

@@ -12,11 +12,11 @@ const EPOCHS_PER_HISTORICAL_VECTOR = preset.EPOCHS_PER_HISTORICAL_VECTOR;
 const MIN_SEED_LOOKAHEAD = preset.MIN_SEED_LOOKAHEAD;
 const ValidatorIndex = types.primitive.ValidatorIndex.Type;
 const EffectiveBalanceIncrements = @import("../cache/effective_balance_increments.zig").EffectiveBalanceIncrements;
-const computeStartSlotAtEpoch = @import("./epoch.zig").computeStartSlotAtEpoch;
+const computeStartSlotAtEpoch = @import("../epoch.zig").computeStartSlotAtEpoch;
 const ComputeIndexUtils = @import("./committee_indices.zig");
 const computeProposerIndex = ComputeIndexUtils.computeProposerIndex;
 const computeSyncCommitteeIndices = ComputeIndexUtils.computeSyncCommitteeIndices;
-const computeEpochAtSlot = @import("./epoch.zig").computeEpochAtSlot;
+const computeEpochAtSlot = @import("../epoch.zig").computeEpochAtSlot;
 const ByteCount = @import("./committee_indices.zig").ByteCount;
 
 pub fn computeProposers(
