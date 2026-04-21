@@ -11,7 +11,7 @@ const buildSlashingsCacheIfNeeded = @import("../cache/slashings_cache.zig").buil
 const isSlashableAttestationData = @import("../utils/attestation.zig").isSlashableAttestationData;
 const findAttesterSlashableIndices = @import("../utils/attestation.zig").findAttesterSlashableIndices;
 const isValidIndexedAttestation = @import("./is_valid_indexed_attestation.zig").isValidIndexedAttestation;
-const isSlashableValidator = @import("../utils/validator.zig").isSlashableValidator;
+const isSlashableValidator = @import("../validator.zig").isSlashableValidator;
 const slashValidator = @import("./slash_validator.zig").slashValidator;
 
 /// AS is the AttesterSlashing type

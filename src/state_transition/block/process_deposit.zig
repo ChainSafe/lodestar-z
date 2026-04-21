@@ -19,7 +19,7 @@ const computeDomain = @import("../utils/domain.zig").computeDomain;
 const computeSigningRoot = @import("../utils/signing_root.zig").computeSigningRoot;
 const bls = @import("bls");
 const verify = @import("../utils/bls.zig").verify;
-const getMaxEffectiveBalance = @import("../utils/validator.zig").getMaxEffectiveBalance;
+const getMaxEffectiveBalance = @import("../validator.zig").getMaxEffectiveBalance;
 const increaseBalance = @import("../utils/balance.zig").increaseBalance;
 const verifyMerkleBranch = @import("../utils/verify_merkle_branch.zig").verifyMerkleBranch;
 
