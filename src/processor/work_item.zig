@@ -496,67 +496,73 @@ pub const WorkType = enum(u8) {
     // -- API high priority --
     api_request_p0 = 13,
 
+    // -- Recovered unknown-root fast lanes --
+    recovered_unknown_block_aggregate = 14,
+    recovered_unknown_block_aggregate_batch = 15,
+    recovered_unknown_block_attestation = 16,
+    recovered_unknown_block_attestation_batch = 17,
+
     // -- Typed control gossip ingress --
-    gossip_aggregate_ingress = 14,
-    gossip_sync_contribution_ingress = 15,
-    gossip_sync_message_ingress = 16,
-    gossip_voluntary_exit_ingress = 17,
-    gossip_proposer_slashing_ingress = 18,
-    gossip_attester_slashing_ingress = 19,
-    gossip_bls_to_exec_ingress = 20,
+    gossip_aggregate_ingress = 18,
+    gossip_sync_contribution_ingress = 19,
+    gossip_sync_message_ingress = 20,
+    gossip_voluntary_exit_ingress = 21,
+    gossip_proposer_slashing_ingress = 22,
+    gossip_attester_slashing_ingress = 23,
+    gossip_bls_to_exec_ingress = 24,
 
     // -- Typed overload gossip ingress --
-    gossip_attestation_ingress = 21,
+    gossip_attestation_ingress = 25,
 
     // -- Attestations (batch-formed) --
-    aggregate = 22,
-    aggregate_batch = 23,
-    attestation = 24,
-    attestation_batch = 25,
+    aggregate = 26,
+    aggregate_batch = 27,
+    attestation = 28,
+    attestation_batch = 29,
 
     // -- Gloas: payload attestation --
-    gossip_payload_attestation = 26,
+    gossip_payload_attestation = 30,
 
     // -- Sync committee --
-    sync_contribution = 27,
-    sync_message = 28,
-    sync_message_batch = 29,
+    sync_contribution = 31,
+    sync_message = 32,
+    sync_message_batch = 33,
 
     // -- Gloas --
-    gossip_execution_payload_bid = 30,
-    gossip_proposer_preferences = 31,
+    gossip_execution_payload_bid = 34,
+    gossip_proposer_preferences = 35,
 
     // -- Peer serving --
-    status = 32,
-    blocks_by_range = 33,
-    blocks_by_root = 34,
-    blobs_by_range = 35,
-    blobs_by_root = 36,
-    columns_by_range = 37,
-    columns_by_root = 38,
+    status = 36,
+    blocks_by_range = 37,
+    blocks_by_root = 38,
+    blobs_by_range = 39,
+    blobs_by_root = 40,
+    columns_by_range = 41,
+    columns_by_root = 42,
 
     // -- Pool objects --
-    gossip_attester_slashing = 39,
-    gossip_proposer_slashing = 40,
-    gossip_voluntary_exit = 41,
-    gossip_bls_to_exec = 42,
+    gossip_attester_slashing = 43,
+    gossip_proposer_slashing = 44,
+    gossip_voluntary_exit = 45,
+    gossip_bls_to_exec = 46,
 
     // -- Low priority --
-    api_request_p1 = 43,
-    backfill_segment = 44,
+    api_request_p1 = 47,
+    backfill_segment = 48,
 
     // -- Light client --
-    lc_bootstrap = 45,
-    lc_finality_update = 46,
-    lc_optimistic_update = 47,
-    lc_updates_by_range = 48,
+    lc_bootstrap = 49,
+    lc_finality_update = 50,
+    lc_optimistic_update = 51,
+    lc_updates_by_range = 52,
 
     // -- Internal --
-    slot_tick = 49,
-    reprocess = 50,
+    slot_tick = 53,
+    reprocess = 54,
 
     /// Total number of work types. Useful for sizing per-type metric arrays.
-    pub const count: u32 = 51;
+    pub const count: u32 = 55;
 
     /// Returns true if this work type should be dropped during initial sync.
     pub fn dropDuringSync(self: WorkType) bool {
@@ -627,6 +633,12 @@ pub const WorkItem = union(WorkType) {
 
     // -- API high priority --
     api_request_p0: ApiWork,
+
+    // -- Recovered unknown-root fast lanes --
+    recovered_unknown_block_aggregate: AggregateWork,
+    recovered_unknown_block_aggregate_batch: AggregateBatchWork,
+    recovered_unknown_block_attestation: AttestationWork,
+    recovered_unknown_block_attestation_batch: AttestationBatchWork,
 
     // -- Typed control gossip ingress --
     gossip_aggregate_ingress: GossipWork,
@@ -725,11 +737,15 @@ pub const WorkItem = union(WorkType) {
             .rpc_block => |work| work.block.deinit(allocator),
             .rpc_blob => |work| work.blob.deinit(),
             .rpc_custody_column => |work| work.column.deinit(),
-            .attestation => |work| {
+            .attestation,
+            .recovered_unknown_block_attestation,
+            => |work| {
                 var attestation = work.attestation;
                 attestation.deinit(allocator);
             },
-            .aggregate => |work| {
+            .aggregate,
+            .recovered_unknown_block_aggregate,
+            => |work| {
                 work.resolved.deinit(allocator);
                 var aggregate = work.aggregate;
                 aggregate.deinit(allocator);
@@ -801,11 +817,13 @@ pub const WorkItem = union(WorkType) {
 test "WorkType: priority ordering" {
     const chain = @intFromEnum(WorkType.chain_segment);
     const gossip = @intFromEnum(WorkType.gossip_block);
+    const recovered = @intFromEnum(WorkType.recovered_unknown_block_attestation);
     const attest = @intFromEnum(WorkType.attestation);
     const backfill = @intFromEnum(WorkType.backfill_segment);
 
     try std.testing.expect(chain < gossip);
-    try std.testing.expect(gossip < attest);
+    try std.testing.expect(gossip < recovered);
+    try std.testing.expect(recovered < attest);
     try std.testing.expect(attest < backfill);
 }
 

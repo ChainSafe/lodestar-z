@@ -242,7 +242,7 @@ test "StfResult struct layout" {
 }
 
 const RegenRuntimeFixture = @import("../regen/test_fixture.zig").RegenRuntimeFixture;
-const preset = @import("preset").active_preset;
+const preset = @import("preset").preset;
 const Slot = consensus_types.primitive.Slot.Type;
 
 fn createTestSignedBlock(
@@ -361,10 +361,10 @@ test "executeStateTransition records process block and post-state root metrics" 
         allocator.destroy(stf_result.post_state);
     }
 
-    var buf = std.ArrayList(u8).init(allocator);
-    defer buf.deinit();
-    try st_metrics.write(buf.writer());
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+    try st_metrics.write(&aw.writer);
 
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "lodestar_stfn_process_block_seconds_count 1") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "lodestar_stfn_hash_tree_root_seconds_sum{source=\"block_transition\"}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, aw.written(), "lodestar_stfn_process_block_seconds_count 1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, aw.written(), "lodestar_stfn_hash_tree_root_seconds_sum{source=\"block_transition\"}") != null);
 }

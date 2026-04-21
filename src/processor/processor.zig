@@ -24,6 +24,7 @@ const GossipSource = work_item_mod.GossipSource;
 const GossipTopicType = work_item_mod.GossipTopicType;
 const AttestationWork = work_item_mod.AttestationWork;
 const AggregateWork = work_item_mod.AggregateWork;
+const GossipWork = work_item_mod.GossipWork;
 const MessageId = work_item_mod.MessageId;
 const OpaqueHandle = work_item_mod.OpaqueHandle;
 const PeerIdHandle = work_item_mod.PeerIdHandle;
@@ -563,6 +564,8 @@ pub const BeaconProcessor = struct {
         gossip_blocks: u32,
         blob_sidecars: u32,
         data_column_sidecars: u32,
+        recovered_unknown_block_attestations: u32,
+        recovered_unknown_block_aggregates: u32,
         attestations: u32,
         aggregates: u32,
         sync_messages: u32,
@@ -596,9 +599,13 @@ pub const BeaconProcessor = struct {
             .data_column_sidecars = self.queues.gossip_data_column_ingress.len +
                 self.queues.gossip_data_column.len +
                 self.queues.column_reconstruction.len,
+            .recovered_unknown_block_attestations = self.queues.recovered_unknown_block_attestation.len,
+            .recovered_unknown_block_aggregates = self.queues.recovered_unknown_block_aggregate.len,
             .attestations = self.queues.gossip_attestation_ingress.len +
+                self.queues.recovered_unknown_block_attestation.len +
                 self.queues.attestation.len,
             .aggregates = self.queues.gossip_aggregate_ingress.len +
+                self.queues.recovered_unknown_block_aggregate.len +
                 self.queues.aggregate.len,
             .sync_messages = self.queues.gossip_sync_message_ingress.len +
                 self.queues.sync_message.len,
@@ -638,8 +645,24 @@ pub const BeaconProcessor = struct {
 
     fn requeuePendingUnknownBlockGossipItem(self: *BeaconProcessor, item: PendingUnknownBlockGossipItem) void {
         switch (item) {
-            .attestation => |work| self.ingest(.{ .attestation = work }),
-            .aggregate => |work| self.ingest(.{ .aggregate = work }),
+            .attestation => |work| {
+                self.queues.items_routed += 1;
+                if (!self.queues.recovered_unknown_block_attestation.push(work)) {
+                    self.queues.items_dropped_full += 1;
+                    self.finishDeferredGossipValidation(work.message_id, .ignore);
+                    var dropped: WorkItem = .{ .recovered_unknown_block_attestation = work };
+                    dropped.deinit(self.allocator);
+                }
+            },
+            .aggregate => |work| {
+                self.queues.items_routed += 1;
+                if (!self.queues.recovered_unknown_block_aggregate.push(work)) {
+                    self.queues.items_dropped_full += 1;
+                    self.finishDeferredGossipValidation(work.message_id, .ignore);
+                    var dropped: WorkItem = .{ .recovered_unknown_block_aggregate = work };
+                    dropped.deinit(self.allocator);
+                }
+            },
         }
     }
 
@@ -764,6 +787,40 @@ fn testAttestationWork(tag: u64, subnet_id: u8, seen_timestamp_ns: i64) work_ite
             .expected_subnet = subnet_id,
         },
         .subnet_id = subnet_id,
+        .seen_timestamp_ns = seen_timestamp_ns,
+    };
+}
+
+fn testAggregateWork(tag: u64, seen_timestamp_ns: i64) AggregateWork {
+    var signed_agg = consensus_types.phase0.SignedAggregateAndProof.default_value;
+    signed_agg.message.aggregator_index = tag;
+    signed_agg.message.aggregate.data.slot = 100 + tag;
+    signed_agg.message.aggregate.data.target.epoch = 4;
+
+    return .{
+        .source = testSource(tag),
+        .message_id = testMessageId(@intCast(tag & 0xff)),
+        .aggregate = .{ .phase0 = signed_agg },
+        .attestation_data_root = [_]u8{@intCast(tag % 251)} ** 32,
+        .resolved = .{
+            .attestation_signing_root = [_]u8{0} ** 32,
+            .selection_signing_root = [_]u8{1} ** 32,
+            .aggregate_signing_root = [_]u8{2} ** 32,
+            .attesting_indices = &.{},
+        },
+        .seen_timestamp_ns = seen_timestamp_ns,
+    };
+}
+
+fn testGossipIngressWork(tag: u64, seen_timestamp_ns: i64) GossipWork {
+    return .{
+        .source = testSource(tag),
+        .message_id = testMessageId(@intCast(tag & 0xff)),
+        .peer_id = testPeerId(1),
+        .subnet_id = null,
+        .fork_digest = .{ 0, 0, 0, 0 },
+        .fork_seq = .phase0,
+        .data = OpaqueHandle.initBorrowed(@ptrFromInt(0x4000 + tag)),
         .seen_timestamp_ns = seen_timestamp_ns,
     };
 }
@@ -931,6 +988,8 @@ fn testConfig() QueueConfig {
         .gossip_data_column = 4,
         .column_reconstruction = 4,
         .api_request_p0 = 4,
+        .recovered_unknown_block_aggregate = 4,
+        .recovered_unknown_block_attestation = 4,
         .aggregate = 4,
         .attestation = 4,
         .gossip_payload_attestation = 4,
@@ -1072,6 +1131,127 @@ test "BeaconProcessor: getQueueDepths" {
     try testing.expectEqual(@as(u64, 3), depths.total);
     try testing.expectEqual(@as(u32, 1), depths.attestations);
     try testing.expectEqual(@as(u64, 1), depths.pool_objects);
+}
+
+test "BeaconProcessor: queue depths include recovered unknown-root fast lanes" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var ctx = TestContext.init();
+    const config = testConfig();
+
+    var proc = try BeaconProcessor.init(
+        std.testing.io,
+        allocator,
+        config,
+        &TestContext.handler,
+        @ptrCast(&ctx),
+    );
+
+    proc.ingest(.{ .recovered_unknown_block_attestation = testAttestationWork(1, 0, 100) });
+    proc.ingest(.{ .recovered_unknown_block_aggregate = testAggregateWork(2, 200) });
+
+    const depths = proc.getQueueDepths();
+    try testing.expectEqual(@as(u32, 1), depths.recovered_unknown_block_attestations);
+    try testing.expectEqual(@as(u32, 1), depths.recovered_unknown_block_aggregates);
+    try testing.expectEqual(@as(u32, 1), depths.attestations);
+    try testing.expectEqual(@as(u32, 1), depths.aggregates);
+}
+
+test "BeaconProcessor: released unknown-root gossip uses recovered fast lanes before generic ingress" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var ctx = TestContext.init();
+    const config = testConfig();
+
+    var proc = try BeaconProcessor.init(
+        std.testing.io,
+        allocator,
+        config,
+        &TestContext.handler,
+        @ptrCast(&ctx),
+    );
+
+    const att_root = [_]u8{0xA1} ** 32;
+    const agg_root = [_]u8{0xB2} ** 32;
+    try testing.expect(try proc.queueUnknownBlockAttestation(att_root, testAttestationWork(1, 0, 100), "peer-a"));
+    try testing.expect(try proc.queueUnknownBlockAggregate(agg_root, testAggregateWork(2, 200), "peer-b"));
+
+    proc.releasePendingUnknownBlockGossip(att_root);
+    proc.releasePendingUnknownBlockGossip(agg_root);
+
+    const depths = proc.getQueueDepths();
+    try testing.expectEqual(@as(u32, 1), depths.recovered_unknown_block_attestations);
+    try testing.expectEqual(@as(u32, 1), depths.recovered_unknown_block_aggregates);
+
+    proc.ingest(.{ .gossip_attestation_ingress = testGossipIngressWork(3, 300) });
+    proc.ingest(.{ .gossip_aggregate_ingress = testGossipIngressWork(4, 400) });
+    proc.ingest(.{ .rpc_block = .{
+        .block = .{ .phase0 = undefined },
+        .block_root = [_]u8{0xCC} ** 32,
+        .seen_timestamp_ns = 500,
+    } });
+
+    try testing.expect(proc.dispatchOne());
+    try testing.expectEqual(WorkType.rpc_block, ctx.processed_types[0]);
+    try testing.expect(proc.dispatchOne());
+    try testing.expectEqual(WorkType.recovered_unknown_block_aggregate, ctx.processed_types[1]);
+    try testing.expect(proc.dispatchOne());
+    try testing.expectEqual(WorkType.recovered_unknown_block_attestation, ctx.processed_types[2]);
+}
+
+test "BeaconProcessor: recovered queue overflow resolves deferred gossip validation" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var ctx = TestContext.init();
+    var config = testConfig();
+    config.recovered_unknown_block_attestation = 1;
+
+    var proc = try BeaconProcessor.init(
+        std.testing.io,
+        allocator,
+        config,
+        &TestContext.handler,
+        @ptrCast(&ctx),
+    );
+
+    const first_msg = testMessageId(1);
+    const second_msg = testMessageId(2);
+    try proc.trackDeferredGossipValidation(first_msg, .{
+        .peer_id = testPeerId(1),
+        .fork_digest = .{ 0, 0, 0, 0 },
+        .topic_type = .beacon_attestation,
+        .subnet_id = 0,
+    });
+    try proc.trackDeferredGossipValidation(second_msg, .{
+        .peer_id = testPeerId(2),
+        .fork_digest = .{ 0, 0, 0, 0 },
+        .topic_type = .beacon_attestation,
+        .subnet_id = 1,
+    });
+
+    const first_root = [_]u8{0xD1} ** 32;
+    const second_root = [_]u8{0xD2} ** 32;
+    var first_work = testAttestationWork(10, 0, 100);
+    first_work.message_id = first_msg;
+    var second_work = testAttestationWork(11, 1, 200);
+    second_work.message_id = second_msg;
+
+    try testing.expect(try proc.queueUnknownBlockAttestation(first_root, first_work, "peer-a"));
+    try testing.expect(try proc.queueUnknownBlockAttestation(second_root, second_work, "peer-b"));
+
+    proc.releasePendingUnknownBlockGossip(first_root);
+    proc.releasePendingUnknownBlockGossip(second_root);
+
+    var completed = proc.popGossipValidationResult().?;
+    defer completed.deinit();
+    try testing.expectEqual(second_msg, completed.msg_id);
+    try testing.expectEqual(GossipValidationOutcome.ignore, completed.outcome);
 }
 
 test "BeaconProcessor: attestation batching" {

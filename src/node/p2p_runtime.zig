@@ -2057,6 +2057,8 @@ fn updateProcessorMetrics(self: *BeaconNode) void {
     metrics.processor_queue_depth.set(.{ .queue = "gossip_blocks" }, snapshot.queue_depths.gossip_blocks) catch {};
     metrics.processor_queue_depth.set(.{ .queue = "blob_sidecars" }, snapshot.queue_depths.blob_sidecars) catch {};
     metrics.processor_queue_depth.set(.{ .queue = "data_column_sidecars" }, snapshot.queue_depths.data_column_sidecars) catch {};
+    metrics.processor_queue_depth.set(.{ .queue = "recovered_unknown_block_attestations" }, snapshot.queue_depths.recovered_unknown_block_attestations) catch {};
+    metrics.processor_queue_depth.set(.{ .queue = "recovered_unknown_block_aggregates" }, snapshot.queue_depths.recovered_unknown_block_aggregates) catch {};
     metrics.processor_queue_depth.set(.{ .queue = "attestations" }, snapshot.queue_depths.attestations) catch {};
     metrics.processor_queue_depth.set(.{ .queue = "aggregates" }, snapshot.queue_depths.aggregates) catch {};
     metrics.processor_queue_depth.set(.{ .queue = "sync_messages" }, snapshot.queue_depths.sync_messages) catch {};

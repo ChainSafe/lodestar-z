@@ -86,6 +86,8 @@ pub const QueueConfig = struct {
     gossip_data_column: u32,
     column_reconstruction: u32,
     api_request_p0: u32,
+    recovered_unknown_block_aggregate: u32,
+    recovered_unknown_block_attestation: u32,
     aggregate: u32,
     attestation: u32,
     gossip_payload_attestation: u32,
@@ -147,6 +149,8 @@ pub const QueueConfig = struct {
             .gossip_data_column = 4096,
             .column_reconstruction = 1,
             .api_request_p0 = 1024,
+            .recovered_unknown_block_aggregate = 4096,
+            .recovered_unknown_block_attestation = att_queue,
             .aggregate = 4096,
             .attestation = att_queue,
             .gossip_payload_attestation = 1536,
@@ -223,6 +227,8 @@ pub const WorkQueues = struct {
     gossip_blob: FifoQueue(GossipBlobWork),
     gossip_data_column: FifoQueue(GossipColumnWork),
     api_request_p0: FifoQueue(ApiWork),
+    recovered_unknown_block_aggregate: FifoQueue(AggregateWork),
+    recovered_unknown_block_attestation: FifoQueue(AttestationWork),
     gossip_payload_attestation: FifoQueue(GloasWork),
     gossip_execution_payload_bid: FifoQueue(GloasWork),
     gossip_proposer_preferences: FifoQueue(GloasWork),
@@ -326,6 +332,12 @@ pub const WorkQueues = struct {
             ),
             .api_request_p0 = FifoQueue(ApiWork).init(
                 try allocator.alloc(ApiWork, config.api_request_p0),
+            ),
+            .recovered_unknown_block_aggregate = FifoQueue(AggregateWork).init(
+                try allocator.alloc(AggregateWork, config.recovered_unknown_block_aggregate),
+            ),
+            .recovered_unknown_block_attestation = FifoQueue(AttestationWork).init(
+                try allocator.alloc(AttestationWork, config.recovered_unknown_block_attestation),
             ),
             .gossip_payload_attestation = FifoQueue(GloasWork).init(
                 try allocator.alloc(GloasWork, config.gossip_payload_attestation),
@@ -485,6 +497,8 @@ pub const WorkQueues = struct {
         self.cleanupQueue(.gossip_data_column, &self.gossip_data_column);
         self.cleanupQueue(.column_reconstruction, &self.column_reconstruction);
         self.cleanupQueue(.api_request_p0, &self.api_request_p0);
+        self.cleanupQueue(.recovered_unknown_block_aggregate, &self.recovered_unknown_block_aggregate);
+        self.cleanupQueue(.recovered_unknown_block_attestation, &self.recovered_unknown_block_attestation);
         self.cleanupQueue(.aggregate, &self.aggregate);
         self.cleanupQueue(.attestation, &self.attestation);
         self.cleanupQueue(.gossip_payload_attestation, &self.gossip_payload_attestation);
@@ -533,6 +547,8 @@ pub const WorkQueues = struct {
         self.allocator.free(self.gossip_blob.buffer);
         self.allocator.free(self.gossip_data_column.buffer);
         self.allocator.free(self.api_request_p0.buffer);
+        self.allocator.free(self.recovered_unknown_block_aggregate.buffer);
+        self.allocator.free(self.recovered_unknown_block_attestation.buffer);
         self.allocator.free(self.gossip_payload_attestation.buffer);
         self.allocator.free(self.gossip_execution_payload_bid.buffer);
         self.allocator.free(self.gossip_proposer_preferences.buffer);
@@ -597,7 +613,7 @@ pub const WorkQueues = struct {
 
         switch (item) {
             // ── FIFO queues ──
-            inline .chain_segment, .rpc_block, .rpc_blob, .rpc_custody_column, .gossip_block_ingress, .gossip_blob_ingress, .gossip_data_column_ingress, .delayed_block, .gossip_block, .gossip_execution_payload, .gossip_blob, .gossip_data_column, .api_request_p0, .gossip_payload_attestation, .gossip_execution_payload_bid, .gossip_proposer_preferences, .status, .blocks_by_range, .blocks_by_root, .blobs_by_range, .blobs_by_root, .columns_by_range, .columns_by_root, .gossip_attester_slashing, .gossip_proposer_slashing, .gossip_voluntary_exit, .gossip_bls_to_exec, .api_request_p1, .backfill_segment, .lc_bootstrap, .lc_finality_update, .lc_optimistic_update, .lc_updates_by_range, .gossip_voluntary_exit_ingress, .gossip_proposer_slashing_ingress, .gossip_attester_slashing_ingress, .gossip_bls_to_exec_ingress => |w, tag| {
+            inline .chain_segment, .rpc_block, .rpc_blob, .rpc_custody_column, .gossip_block_ingress, .gossip_blob_ingress, .gossip_data_column_ingress, .delayed_block, .gossip_block, .gossip_execution_payload, .gossip_blob, .gossip_data_column, .api_request_p0, .recovered_unknown_block_aggregate, .recovered_unknown_block_attestation, .gossip_payload_attestation, .gossip_execution_payload_bid, .gossip_proposer_preferences, .status, .blocks_by_range, .blocks_by_root, .blobs_by_range, .blobs_by_root, .columns_by_range, .columns_by_root, .gossip_attester_slashing, .gossip_proposer_slashing, .gossip_voluntary_exit, .gossip_bls_to_exec, .api_request_p1, .backfill_segment, .lc_bootstrap, .lc_finality_update, .lc_optimistic_update, .lc_updates_by_range, .gossip_voluntary_exit_ingress, .gossip_proposer_slashing_ingress, .gossip_attester_slashing_ingress, .gossip_bls_to_exec_ingress => |w, tag| {
                 pushFifo(self, &@field(self, @tagName(tag)), w, @unionInit(WorkItem, @tagName(tag), w));
             },
 
@@ -614,7 +630,7 @@ pub const WorkQueues = struct {
             },
 
             // ── Batch items are produced internally, not routed from inbound ──
-            .attestation_batch, .aggregate_batch, .sync_message_batch => unreachable,
+            .attestation_batch, .aggregate_batch, .sync_message_batch, .recovered_unknown_block_aggregate_batch, .recovered_unknown_block_attestation_batch => unreachable,
 
             // ── Internal items: handled directly by the processor loop ──
             .slot_tick, .reprocess => {},
@@ -660,7 +676,15 @@ pub const WorkQueues = struct {
         // Priority 14: High-priority API.
         if (self.api_request_p0.pop()) |w| return .{ .api_request_p0 = w };
 
-        // Priority 15-21: typed control gossip ingress.
+        // Priority 15-18: recovered unknown-root fast lanes.
+        if (self.recovered_unknown_block_aggregate.len > 0 and self.recoveredUnknownBlockAggregateBatchReady(now_ns)) {
+            return self.formRecoveredUnknownBlockAggregateBatch();
+        }
+        if (self.recovered_unknown_block_attestation.len > 0 and self.recoveredUnknownBlockAttestationBatchReady(now_ns)) {
+            return self.formRecoveredUnknownBlockAttestationBatch();
+        }
+
+        // Priority 19-25: typed control gossip ingress.
         if (self.gossip_aggregate_ingress.pop()) |w| return .{ .gossip_aggregate_ingress = w };
         if (self.gossip_sync_contribution_ingress.pop()) |w| return .{ .gossip_sync_contribution_ingress = w };
         if (self.gossip_sync_message_ingress.pop()) |w| return .{ .gossip_sync_message_ingress = w };
@@ -669,7 +693,7 @@ pub const WorkQueues = struct {
         if (self.gossip_attester_slashing_ingress.pop()) |w| return .{ .gossip_attester_slashing_ingress = w };
         if (self.gossip_bls_to_exec_ingress.pop()) |w| return .{ .gossip_bls_to_exec_ingress = w };
 
-        // Priority 22-25: Attestations — ingress overload then prepared batches.
+        // Priority 26-29: Attestations — ingress overload then prepared batches.
         if (self.gossip_attestation_ingress.pop()) |w| return .{ .gossip_attestation_ingress = w };
         if (self.aggregate_dispatch_enabled and self.aggregate.len > 0 and self.aggregateBatchReady(now_ns)) {
             return self.formAggregateBatch();
@@ -678,10 +702,10 @@ pub const WorkQueues = struct {
             return self.formAttestationBatch();
         }
 
-        // Priority 26: Payload attestation (Gloas).
+        // Priority 30: Payload attestation (Gloas).
         if (self.gossip_payload_attestation.pop()) |w| return .{ .gossip_payload_attestation = w };
 
-        // Priority 27-29: Sync committee.
+        // Priority 31-33: Sync committee.
         if (self.sync_contribution.pop()) |w| return .{ .sync_contribution = w };
         if (self.sync_message_dispatch_enabled and self.sync_message.len > 0) {
             if (self.syncMessageBatchReady(now_ns)) {
@@ -691,11 +715,11 @@ pub const WorkQueues = struct {
             return .{ .sync_message = w };
         }
 
-        // Priority 30-31: Gloas.
+        // Priority 34-35: Gloas.
         if (self.gossip_execution_payload_bid.pop()) |w| return .{ .gossip_execution_payload_bid = w };
         if (self.gossip_proposer_preferences.pop()) |w| return .{ .gossip_proposer_preferences = w };
 
-        // Priority 32-38: Peer serving.
+        // Priority 36-42: Peer serving.
         if (self.status.pop()) |w| return .{ .status = w };
         if (self.blocks_by_range.pop()) |w| return .{ .blocks_by_range = w };
         if (self.blocks_by_root.pop()) |w| return .{ .blocks_by_root = w };
@@ -704,19 +728,19 @@ pub const WorkQueues = struct {
         if (self.columns_by_range.pop()) |w| return .{ .columns_by_range = w };
         if (self.columns_by_root.pop()) |w| return .{ .columns_by_root = w };
 
-        // Priority 39-42: Pool objects.
+        // Priority 43-46: Pool objects.
         if (self.gossip_attester_slashing.pop()) |w| return .{ .gossip_attester_slashing = w };
         if (self.gossip_proposer_slashing.pop()) |w| return .{ .gossip_proposer_slashing = w };
         if (self.gossip_voluntary_exit.pop()) |w| return .{ .gossip_voluntary_exit = w };
         if (self.gossip_bls_to_exec.pop()) |w| return .{ .gossip_bls_to_exec = w };
 
-        // Priority 43: Low-priority API.
+        // Priority 47: Low-priority API.
         if (self.api_request_p1.pop()) |w| return .{ .api_request_p1 = w };
 
-        // Priority 44: Backfill (dead last).
+        // Priority 48: Backfill (dead last).
         if (self.backfill_segment.pop()) |w| return .{ .backfill_segment = w };
 
-        // Priority 45-48: Light client.
+        // Priority 49-52: Light client.
         if (self.lc_bootstrap.pop()) |w| return .{ .lc_bootstrap = w };
         if (self.lc_finality_update.pop()) |w| return .{ .lc_finality_update = w };
         if (self.lc_optimistic_update.pop()) |w| return .{ .lc_optimistic_update = w };
@@ -754,6 +778,8 @@ pub const WorkQueues = struct {
         total += self.gossip_blob.len;
         total += self.gossip_data_column.len;
         total += self.api_request_p0.len;
+        total += self.recovered_unknown_block_aggregate.len;
+        total += self.recovered_unknown_block_attestation.len;
         total += self.gossip_payload_attestation.len;
         total += self.gossip_execution_payload_bid.len;
         total += self.gossip_proposer_preferences.len;
@@ -795,6 +821,26 @@ pub const WorkQueues = struct {
 
     // ── Batch formation ──
 
+    fn recoveredUnknownBlockAggregateBatchReady(self: *const WorkQueues, now_ns: i64) bool {
+        return batchReady(
+            AggregateWork,
+            self.recovered_unknown_block_aggregate.len,
+            self.recovered_unknown_block_aggregate.peekOldest(),
+            now_ns,
+            aggregate_batch_target_size,
+        );
+    }
+
+    fn recoveredUnknownBlockAttestationBatchReady(self: *const WorkQueues, now_ns: i64) bool {
+        return batchReady(
+            AttestationWork,
+            self.recovered_unknown_block_attestation.len,
+            self.recovered_unknown_block_attestation.peekOldest(),
+            now_ns,
+            attestation_batch_target_size,
+        );
+    }
+
     fn aggregateBatchReady(self: *const WorkQueues, now_ns: i64) bool {
         return batchReady(
             AggregateWork,
@@ -823,6 +869,54 @@ pub const WorkQueues = struct {
             now_ns,
             sync_message_batch_target_size,
         );
+    }
+
+    /// Form a batch from the recovered unknown-root aggregate FIFO queue.
+    /// If only 1 item, returns a single recovered aggregate work item.
+    /// If 2+, pops up to max_aggregate_batch_size oldest items into a batch.
+    fn formRecoveredUnknownBlockAggregateBatch(self: *WorkQueues) WorkItem {
+        assert(self.recovered_unknown_block_aggregate.len > 0);
+        if (self.recovered_unknown_block_aggregate.len < 2) {
+            return .{ .recovered_unknown_block_aggregate = self.recovered_unknown_block_aggregate.pop().? };
+        }
+
+        const batch_size = @min(
+            self.recovered_unknown_block_aggregate.len,
+            work_item_mod.max_aggregate_batch_size,
+        );
+        var count: u32 = 0;
+        while (count < batch_size) : (count += 1) {
+            self.aggregate_batch_buf[count] = self.recovered_unknown_block_aggregate.pop().?;
+        }
+        assert(count > 0);
+        return .{ .recovered_unknown_block_aggregate_batch = .{
+            .items = self.aggregate_batch_buf.ptr,
+            .count = count,
+        } };
+    }
+
+    /// Form a batch from the recovered unknown-root attestation FIFO queue.
+    /// If only 1 item, returns a single recovered attestation work item.
+    /// If 2+, pops up to max_attestation_batch_size oldest items into a batch.
+    fn formRecoveredUnknownBlockAttestationBatch(self: *WorkQueues) WorkItem {
+        assert(self.recovered_unknown_block_attestation.len > 0);
+        if (self.recovered_unknown_block_attestation.len < 2) {
+            return .{ .recovered_unknown_block_attestation = self.recovered_unknown_block_attestation.pop().? };
+        }
+
+        const batch_size = @min(
+            self.recovered_unknown_block_attestation.len,
+            work_item_mod.max_attestation_batch_size,
+        );
+        var count: u32 = 0;
+        while (count < batch_size) : (count += 1) {
+            self.attestation_batch_buf[count] = self.recovered_unknown_block_attestation.pop().?;
+        }
+        assert(count > 0);
+        return .{ .recovered_unknown_block_attestation_batch = .{
+            .items = self.attestation_batch_buf.ptr,
+            .count = count,
+        } };
     }
 
     /// Form a batch from the aggregate LIFO queue.
@@ -1053,6 +1147,43 @@ test "WorkQueues: route and pop priority order" {
     // Should be empty now.
     try testing.expect(wq.popHighestPriority() == null);
     try testing.expect(wq.allQueuesEmpty());
+}
+
+test "WorkQueues: recovered unknown-root fast lanes outrank generic attestation ingress but not block or sync" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const config = testQueueConfig();
+    var wq = try WorkQueues.init(allocator, config);
+
+    wq.routeToQueue(.{ .gossip_attestation_ingress = testGossipIngressWork(1, 1_000) });
+    wq.routeToQueue(.{ .recovered_unknown_block_attestation = testAttestationWork(2, 0, 900) });
+
+    const first = wq.popHighestPriorityAt(1_000 + gossip_batch_holdback_ns + 1).?;
+    try testing.expectEqual(WorkType.recovered_unknown_block_attestation, first.workType());
+
+    wq.routeToQueue(.{ .gossip_aggregate_ingress = testGossipIngressWork(6, 1_050) });
+    wq.routeToQueue(.{ .recovered_unknown_block_aggregate = testAggregateWork(7, 950) });
+
+    const recovered_aggregate = wq.popHighestPriorityAt(1_050 + gossip_batch_holdback_ns + 1).?;
+    try testing.expectEqual(WorkType.recovered_unknown_block_aggregate, recovered_aggregate.workType());
+
+    wq.routeToQueue(.{ .gossip_block_ingress = testGossipIngressWork(3, 1_100) });
+    wq.routeToQueue(.{ .recovered_unknown_block_attestation = testAttestationWork(4, 0, 1_000) });
+
+    const second = wq.popHighestPriorityAt(1_100 + gossip_batch_holdback_ns + 1).?;
+    try testing.expectEqual(WorkType.gossip_block_ingress, second.workType());
+
+    wq.routeToQueue(.{ .rpc_block = .{
+        .block = .{ .phase0 = undefined },
+        .block_root = [_]u8{0xEE} ** 32,
+        .seen_timestamp_ns = 1_200,
+    } });
+    wq.routeToQueue(.{ .recovered_unknown_block_aggregate = testAggregateWork(5, 1_100) });
+
+    const third = wq.popHighestPriorityAt(1_200 + gossip_batch_holdback_ns + 1).?;
+    try testing.expectEqual(WorkType.rpc_block, third.workType());
 }
 
 test "WorkQueues: attestation batching holds briefly for a fuller batch" {
@@ -1321,6 +1452,8 @@ fn testQueueConfig() QueueConfig {
         .gossip_data_column = 4,
         .column_reconstruction = 4,
         .api_request_p0 = 4,
+        .recovered_unknown_block_aggregate = 4,
+        .recovered_unknown_block_attestation = 4,
         .aggregate = 4,
         .attestation = 4,
         .gossip_payload_attestation = 4,
@@ -1368,6 +1501,40 @@ fn testMessageId(tag: u8) MessageId {
     var out = std.mem.zeroes(MessageId);
     out[0] = tag;
     return out;
+}
+
+fn testGossipIngressWork(tag: u64, seen_timestamp_ns: i64) GossipWork {
+    return .{
+        .source = testSource(tag),
+        .message_id = testMessageId(@intCast(tag & 0xff)),
+        .peer_id = testPeerId(@intCast(@as(u8, 1))),
+        .subnet_id = null,
+        .fork_digest = .{ 0, 0, 0, 0 },
+        .fork_seq = .phase0,
+        .data = testOpaqueHandle(@intCast(100 + tag)),
+        .seen_timestamp_ns = seen_timestamp_ns,
+    };
+}
+
+fn testAggregateWork(tag: u64, seen_timestamp_ns: i64) AggregateWork {
+    var signed_agg = consensus_types.phase0.SignedAggregateAndProof.default_value;
+    signed_agg.message.aggregator_index = tag;
+    signed_agg.message.aggregate.data.slot = 100 + tag;
+    signed_agg.message.aggregate.data.target.epoch = 4;
+
+    return .{
+        .source = testSource(tag),
+        .message_id = testMessageId(@intCast(tag & 0xff)),
+        .aggregate = .{ .phase0 = signed_agg },
+        .attestation_data_root = [_]u8{@intCast(tag % 251)} ** 32,
+        .resolved = .{
+            .attestation_signing_root = [_]u8{0} ** 32,
+            .selection_signing_root = [_]u8{1} ** 32,
+            .aggregate_signing_root = [_]u8{2} ** 32,
+            .attesting_indices = &.{},
+        },
+        .seen_timestamp_ns = seen_timestamp_ns,
+    };
 }
 
 const DropCounterHandle = struct {

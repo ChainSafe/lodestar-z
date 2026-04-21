@@ -61,6 +61,12 @@ pub fn FifoQueue(comptime T: type) type {
             return item;
         }
 
+        /// Returns the oldest item without removing it.
+        pub fn peekOldest(self: *const Self) ?*const T {
+            if (self.len == 0) return null;
+            return &self.buffer[self.head];
+        }
+
         /// Returns true if the queue is empty.
         pub fn isEmpty(self: *const Self) bool {
             return self.len == 0;

@@ -743,6 +743,7 @@ test "SyncService: transitions to range_sync on advanced peer" {
     var tc = TestSyncServiceCallbacks{};
     var svc = SyncService.init(allocator, std.testing.io, tc.callbacks(), 0, 0);
     defer svc.deinit();
+    svc.onClockSlot(500);
 
     try svc.onPeerStatus("p1", .{
         .fork_digest = .{ 0, 0, 0, 0 },
@@ -802,6 +803,7 @@ test "SyncService: tick prunes peers no longer connected" {
 
     var svc = SyncService.init(allocator, std.testing.io, tc.callbacks(), 0, 0);
     defer svc.deinit();
+    svc.onClockSlot(500);
 
     try svc.onPeerStatus("p1", .{
         .fork_digest = .{ 0, 0, 0, 0 },
@@ -832,6 +834,7 @@ test "SyncService: gossip gating" {
 
     // Initially idle — gossip should be enabled (we're not range syncing).
     try std.testing.expect(svc.shouldEnableGossip());
+    svc.onClockSlot(5000);
 
     // Add far peer — triggers range sync → gossip disabled.
     try svc.onPeerStatus("p1", .{
@@ -852,6 +855,7 @@ test "SyncService: getSyncStatus reports correct state" {
     var tc = TestSyncServiceCallbacks{};
     var svc = SyncService.init(allocator, std.testing.io, tc.callbacks(), 100, 3);
     defer svc.deinit();
+    svc.onClockSlot(700);
 
     try svc.onPeerStatus("p1", .{
         .fork_digest = .{ 0, 0, 0, 0 },

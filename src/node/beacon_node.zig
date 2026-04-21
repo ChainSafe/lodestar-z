@@ -451,6 +451,19 @@ fn snapshotExecutionQueues(
     return snapshot;
 }
 
+fn nextWaitingExecutionPayloadIndex(waiting_payloads: []const WaitingExecutionPayload) ?usize {
+    var first_revalidation: ?usize = null;
+    for (waiting_payloads, 0..) |waiting, i| {
+        switch (waiting) {
+            .import => return i,
+            .revalidation => {
+                if (first_revalidation == null) first_revalidation = i;
+            },
+        }
+    }
+    return first_revalidation;
+}
+
 test "snapshotExecutionQueues counts imports and revalidations separately" {
     const waiting = [_]WaitingExecutionPayload{
         .{ .import = .{ .owner = .{ .generic = null }, .prepared = undefined } },
@@ -468,6 +481,27 @@ test "snapshotExecutionQueues counts imports and revalidations separately" {
     try std.testing.expectEqual(@as(u64, 1), snapshot.waiting_revalidations);
     try std.testing.expectEqual(@as(u64, 2), snapshot.pending_imports);
     try std.testing.expectEqual(@as(u64, 1), snapshot.pending_revalidations);
+}
+
+test "nextWaitingExecutionPayloadIndex prioritizes imports over revalidations" {
+    const waiting = [_]WaitingExecutionPayload{
+        .{ .revalidation = undefined },
+        .{ .import = .{ .owner = .{ .generic = 11 }, .prepared = undefined } },
+        .{ .revalidation = undefined },
+        .{ .import = .{ .owner = .{ .generic = 12 }, .prepared = undefined } },
+    };
+
+    try std.testing.expectEqual(@as(?usize, 1), nextWaitingExecutionPayloadIndex(waiting[0..]));
+}
+
+test "nextWaitingExecutionPayloadIndex falls back to oldest revalidation when no imports wait" {
+    const waiting = [_]WaitingExecutionPayload{
+        .{ .revalidation = undefined },
+        .{ .revalidation = undefined },
+    };
+
+    try std.testing.expectEqual(@as(?usize, 0), nextWaitingExecutionPayloadIndex(waiting[0..]));
+    try std.testing.expectEqual(@as(?usize, null), nextWaitingExecutionPayloadIndex(&.{}));
 }
 
 pub const DiscoveryDialCompletion = union(enum) {
@@ -1553,7 +1587,8 @@ pub const BeaconNode = struct {
         while (self.pending_execution_payloads.items.len == 0 and self.waiting_execution_payloads.items.len > 0) {
             if (!self.execution_runtime.canAcceptPayloadVerification()) break;
 
-            var waiting = self.waiting_execution_payloads.orderedRemove(0);
+            const waiting_index = nextWaitingExecutionPayloadIndex(self.waiting_execution_payloads.items) orelse break;
+            var waiting = self.waiting_execution_payloads.orderedRemove(waiting_index);
             self.pending_execution_payloads.ensureUnusedCapacity(self.allocator, 1) catch |err| {
                 waiting.deinit(self.allocator);
                 node_log.warn("failed to allocate pending execution payload slot: {}", .{err});
@@ -4352,7 +4387,9 @@ pub fn processorHandlerCallback(item: WorkItem, context: *anyopaque) void {
                 },
             }
         },
-        .attestation_batch => |batch| {
+        .attestation_batch,
+        .recovered_unknown_block_attestation_batch,
+        => |batch| {
             const batch_items = batch.items[0..batch.count];
             const started_at_ns = wallNowNs(node.io);
             defer observeGossipProcessorAttestationBatch(node, batch_items, started_at_ns);
@@ -4390,7 +4427,9 @@ pub fn processorHandlerCallback(item: WorkItem, context: *anyopaque) void {
                 importAttestationBatchItems(node, batch_items, batch_valid);
             }
         },
-        .aggregate_batch => |batch| {
+        .aggregate_batch,
+        .recovered_unknown_block_aggregate_batch,
+        => |batch| {
             const batch_items = batch.items[0..batch.count];
             const started_at_ns = wallNowNs(node.io);
             defer observeGossipProcessorAggregateBatch(node, batch_items, started_at_ns);
@@ -4466,7 +4505,9 @@ pub fn processorHandlerCallback(item: WorkItem, context: *anyopaque) void {
                 importSyncMessageBatchItems(node, batch_items, batch_valid);
             }
         },
-        .aggregate => |work| {
+        .aggregate,
+        .recovered_unknown_block_aggregate,
+        => |work| {
             const started_at_ns = wallNowNs(node.io);
             defer observeGossipProcessorWork(node, .aggregate, work.seen_timestamp_ns, started_at_ns);
             if (node.gossip_handler) |gh| {
@@ -4494,7 +4535,9 @@ pub fn processorHandlerCallback(item: WorkItem, context: *anyopaque) void {
             }
             handleQueuedAggregate(node, work);
         },
-        .attestation => |att_work| {
+        .attestation,
+        .recovered_unknown_block_attestation,
+        => |att_work| {
             const started_at_ns = wallNowNs(node.io);
             defer observeGossipProcessorWork(node, .attestation, att_work.seen_timestamp_ns, started_at_ns);
             handleQueuedAttestation(node, att_work);
@@ -5028,6 +5071,72 @@ test "processorHandlerCallback imports queued aggregate batches" {
     try std.testing.expectEqual(@as(?u64, 5), ctx.aggregate_target_epoch);
 }
 
+test "processorHandlerCallback imports recovered unknown-root aggregate batches" {
+    const allocator = std.testing.allocator;
+
+    var ctx = ProcessorImportTestContext{};
+    var node: BeaconNode = undefined;
+    node.allocator = allocator;
+    node.io = std.testing.io;
+    node.metrics = null;
+    node.beacon_processor = null;
+
+    var gh: GossipHandler = undefined;
+    gh.node = @ptrCast(&ctx);
+    gh.importResolvedAggregateFn = &ProcessorImportTestContext.importAggregate;
+    gh.verifyAggregateSignatureFn = null;
+    node.gossip_handler = &gh;
+
+    var signed_agg_1 = types.phase0.SignedAggregateAndProof.default_value;
+    signed_agg_1.message.aggregator_index = 31;
+    signed_agg_1.message.aggregate.data.slot = 223;
+    signed_agg_1.message.aggregate.data.target.epoch = 6;
+
+    var signed_agg_2 = types.phase0.SignedAggregateAndProof.default_value;
+    signed_agg_2.message.aggregator_index = 32;
+    signed_agg_2.message.aggregate.data.slot = 224;
+    signed_agg_2.message.aggregate.data.target.epoch = 7;
+
+    var batch_items = [_]processor_mod.work_item.AggregateWork{
+        .{
+            .source = .{ .key = 1 },
+            .message_id = std.mem.zeroes(processor_mod.work_item.MessageId),
+            .aggregate = .{ .phase0 = signed_agg_1 },
+            .attestation_data_root = [_]u8{0} ** 32,
+            .resolved = .{
+                .attestation_signing_root = [_]u8{0} ** 32,
+                .selection_signing_root = [_]u8{0} ** 32,
+                .aggregate_signing_root = [_]u8{0} ** 32,
+                .attesting_indices = &.{},
+            },
+            .seen_timestamp_ns = 0,
+        },
+        .{
+            .source = .{ .key = 2 },
+            .message_id = std.mem.zeroes(processor_mod.work_item.MessageId),
+            .aggregate = .{ .phase0 = signed_agg_2 },
+            .attestation_data_root = [_]u8{0} ** 32,
+            .resolved = .{
+                .attestation_signing_root = [_]u8{0} ** 32,
+                .selection_signing_root = [_]u8{0} ** 32,
+                .aggregate_signing_root = [_]u8{0} ** 32,
+                .attesting_indices = &.{},
+            },
+            .seen_timestamp_ns = 0,
+        },
+    };
+
+    processorHandlerCallback(.{ .recovered_unknown_block_aggregate_batch = .{
+        .items = &batch_items,
+        .count = batch_items.len,
+    } }, @ptrCast(&node));
+
+    try std.testing.expectEqual(@as(usize, 2), ctx.aggregate_import_count);
+    try std.testing.expectEqual(@as(?u64, 32), ctx.aggregate_aggregator_index);
+    try std.testing.expectEqual(@as(?u64, 224), ctx.aggregate_slot);
+    try std.testing.expectEqual(@as(?u64, 7), ctx.aggregate_target_epoch);
+}
+
 test "processorHandlerCallback imports queued attestations" {
     const allocator = std.testing.allocator;
 
@@ -5071,6 +5180,80 @@ test "processorHandlerCallback imports queued attestations" {
     try std.testing.expectEqual(@as(?u64, 7), ctx.attestation_committee_index);
     try std.testing.expect(ctx.attestation_is_electra_single);
     try std.testing.expectEqual(@as(?u64, 19), ctx.validator_index);
+}
+
+test "processorHandlerCallback imports recovered unknown-root attestation batches" {
+    const allocator = std.testing.allocator;
+
+    var ctx = ProcessorImportTestContext{};
+    var node: BeaconNode = undefined;
+    node.allocator = allocator;
+    node.io = std.testing.io;
+    node.metrics = null;
+    node.beacon_processor = null;
+
+    var gh: GossipHandler = undefined;
+    gh.node = @ptrCast(&ctx);
+    gh.importResolvedAttestationFn = &ProcessorImportTestContext.importAttestation;
+    gh.verifyAttestationSignatureFn = null;
+    node.gossip_handler = &gh;
+
+    var attestation_1 = types.electra.SingleAttestation.default_value;
+    attestation_1.committee_index = 11;
+    attestation_1.attester_index = 41;
+    attestation_1.data.slot = 322;
+    var attestation_data_root_1: [32]u8 = undefined;
+    try types.phase0.AttestationData.hashTreeRoot(&attestation_1.data, &attestation_data_root_1);
+
+    var attestation_2 = types.electra.SingleAttestation.default_value;
+    attestation_2.committee_index = 12;
+    attestation_2.attester_index = 42;
+    attestation_2.data.slot = 323;
+    var attestation_data_root_2: [32]u8 = undefined;
+    try types.phase0.AttestationData.hashTreeRoot(&attestation_2.data, &attestation_data_root_2);
+
+    var batch_items = [_]processor_mod.work_item.AttestationWork{
+        .{
+            .source = .{ .key = 1 },
+            .message_id = std.mem.zeroes(processor_mod.work_item.MessageId),
+            .attestation = .{ .electra_single = attestation_1 },
+            .attestation_data_root = attestation_data_root_1,
+            .resolved = .{
+                .validator_index = 41,
+                .validator_committee_index = 0,
+                .committee_size = 1,
+                .signing_root = [_]u8{0x33} ** 32,
+                .expected_subnet = 0,
+            },
+            .subnet_id = 0,
+            .seen_timestamp_ns = 0,
+        },
+        .{
+            .source = .{ .key = 2 },
+            .message_id = std.mem.zeroes(processor_mod.work_item.MessageId),
+            .attestation = .{ .electra_single = attestation_2 },
+            .attestation_data_root = attestation_data_root_2,
+            .resolved = .{
+                .validator_index = 42,
+                .validator_committee_index = 0,
+                .committee_size = 1,
+                .signing_root = [_]u8{0x44} ** 32,
+                .expected_subnet = 0,
+            },
+            .subnet_id = 0,
+            .seen_timestamp_ns = 0,
+        },
+    };
+
+    processorHandlerCallback(.{ .recovered_unknown_block_attestation_batch = .{
+        .items = &batch_items,
+        .count = batch_items.len,
+    } }, @ptrCast(&node));
+
+    try std.testing.expectEqual(@as(?u64, 323), ctx.attestation_slot);
+    try std.testing.expectEqual(@as(?u64, 12), ctx.attestation_committee_index);
+    try std.testing.expect(ctx.attestation_is_electra_single);
+    try std.testing.expectEqual(@as(?u64, 42), ctx.validator_index);
 }
 
 test "processor-owned unknown-block gossip release requeues queued attestations without double cleanup" {
