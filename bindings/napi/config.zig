@@ -1,5 +1,6 @@
 const std = @import("std");
 const napi = @import("zapi").napi;
+const js = @import("zapi").js;
 const active_preset = @import("preset").active_preset;
 const c = @import("config");
 const BeaconConfig = @import("config").BeaconConfig;
@@ -41,26 +42,26 @@ pub const State = struct {
 
 pub var state: State = .{};
 
-pub fn Config_set(env: napi.Env, cb: napi.CallbackInfo(2)) !napi.Value {
+/// JS: config.set(chainConfigObj, genesisValidatorsRoot)
+pub fn set(obj: js.Value, genesis_root: js.Uint8Array) !void {
     if (!state.initialized) {
         return error.ConfigNotInitialized;
     }
 
-    const obj = try cb.arg(0).coerceToObject();
-    const chain_config = try chainConfigFromObject(env, obj);
-    const genesis_validators_root_info = try cb.arg(1).getTypedarrayInfo();
-    if (genesis_validators_root_info.data.len != 32) {
+    // Drop to low-level for the complex object parsing
+    const chain_config = try chainConfigFromObject(js.env(), try obj.toValue().coerceToObject());
+
+    const root_slice = try genesis_root.toSlice();
+    if (root_slice.len != 32) {
         return error.InvalidGenesisValidatorsRootLength;
     }
 
     state.config = BeaconConfig.init(
         chain_config,
-        genesis_validators_root_info.data[0..32].*,
+        root_slice[0..32].*,
     );
 
     state.initialized = true;
-
-    return env.getUndefined();
 }
 
 pub fn chainConfigFromObject(env: napi.Env, obj: napi.Value) !ChainConfig {
@@ -142,16 +143,4 @@ pub fn chainConfigFromObject(env: napi.Env, obj: napi.Value) !ChainConfig {
         }
     }
     return chain_config;
-}
-
-pub fn register(env: napi.Env, exports: napi.Value) !void {
-    const config_obj = try env.createObject();
-    try config_obj.setNamedProperty("set", try env.createFunction(
-        "set",
-        2,
-        Config_set,
-        null,
-    ));
-
-    try exports.setNamedProperty("config", config_obj);
 }
