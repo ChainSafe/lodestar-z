@@ -11,7 +11,7 @@ const decreaseBalance = @import("../utils/balance.zig").decreaseBalance;
 const increaseBalance = @import("../utils/balance.zig").increaseBalance;
 const initiateValidatorExit = @import("./initiate_validator_exit.zig").initiateValidatorExit;
 const computePreviousEpoch = @import("../utils/epoch.zig").computePreviousEpoch;
-const isActiveValidatorView = @import("../utils/validator.zig").isActiveValidatorView;
+const isActiveValidatorView = @import("../validator.zig").isActiveValidatorView;
 const getBeaconProposer = @import("../cache/get_beacon_proposer.zig").getBeaconProposer;
 
 /// Same to https://github.com/ethereum/eth2.0-specs/blob/v1.1.0-alpha.5/specs/altair/beacon-chain.md#has_flag

@@ -7,8 +7,8 @@ const ct = @import("consensus_types");
 const ValidatorIndex = ct.primitive.ValidatorIndex.Type;
 const constants = @import("constants");
 const computeActivationExitEpoch = @import("../utils/epoch.zig").computeActivationExitEpoch;
-const getActivationExitChurnLimit = @import("../utils/validator.zig").getActivationExitChurnLimit;
-const getConsolidationChurnLimit = @import("../utils/validator.zig").getConsolidationChurnLimit;
+const getActivationExitChurnLimit = @import("../validator.zig").getActivationExitChurnLimit;
+const getConsolidationChurnLimit = @import("../validator.zig").getConsolidationChurnLimit;
 const hasCompoundingWithdrawalCredential = @import("../utils/electra.zig").hasCompoundingWithdrawalCredential;
 const queueExcessActiveBalance = @import("../utils/electra.zig").queueExcessActiveBalance;
 

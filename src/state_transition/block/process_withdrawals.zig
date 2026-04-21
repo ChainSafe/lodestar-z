@@ -12,7 +12,7 @@ const ValidatorIndex = types.primitive.ValidatorIndex.Type;
 const ExecutionAddress = types.primitive.ExecutionAddress.Type;
 const hasExecutionWithdrawalCredential = @import("../utils/electra.zig").hasExecutionWithdrawalCredential;
 const hasEth1WithdrawalCredential = @import("../utils/capella.zig").hasEth1WithdrawalCredential;
-const getMaxEffectiveBalance = @import("../utils/validator.zig").getMaxEffectiveBalance;
+const getMaxEffectiveBalance = @import("../validator.zig").getMaxEffectiveBalance;
 const decreaseBalance = @import("../utils/balance.zig").decreaseBalance;
 const Node = @import("persistent_merkle_tree").Node;
 
