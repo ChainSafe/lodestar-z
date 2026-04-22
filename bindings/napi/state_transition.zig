@@ -44,7 +44,7 @@ pub fn stateTransition(
     const env = js.env();
     const pre_state = pre_state_value.toValue();
     const cached_state = try env.unwrap(CachedBeaconState, pre_state);
-    const bytes = try signed_block_bytes.toSlice();
+    const signed_block_bytes_slice = try signed_block_bytes.toSlice();
 
     const current_epoch = st.computeEpochAtSlot(try cached_state.state.slot());
     const fork = cached_state.config.forkSeqAtEpoch(current_epoch);
@@ -52,7 +52,7 @@ pub fn stateTransition(
         allocator,
         .full,
         fork,
-        bytes,
+        signed_block_bytes_slice,
     );
     defer signed_block.deinit(allocator);
 
