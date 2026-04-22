@@ -11,6 +11,7 @@
 //! worker thread (BLS thread pool), not the main thread.
 const std = @import("std");
 const napi = @import("zapi").napi;
+const js_types = @import("./js_types.zig");
 const bls = @import("bls");
 const builtin = @import("builtin");
 const getter = @import("napi_property_descriptor.zig").getter;
@@ -218,18 +219,10 @@ pub fn PublicKey_toBytes(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
 
     if (compress) {
         const bytes = pk.compress();
-
-        var arraybuffer_bytes: [*]u8 = undefined;
-        const arraybuffer = try env.createArrayBuffer(PublicKey.COMPRESS_SIZE, &arraybuffer_bytes);
-        @memcpy(arraybuffer_bytes[0..PublicKey.COMPRESS_SIZE], &bytes);
-        return try env.createTypedarray(.uint8, PublicKey.COMPRESS_SIZE, arraybuffer, 0);
+        return (try js_types.uint8ArrayFromBytes(&bytes)).toValue();
     } else {
         const bytes = pk.serialize();
-
-        var arraybuffer_bytes: [*]u8 = undefined;
-        const arraybuffer = try env.createArrayBuffer(PublicKey.SERIALIZE_SIZE, &arraybuffer_bytes);
-        @memcpy(arraybuffer_bytes[0..PublicKey.SERIALIZE_SIZE], &bytes);
-        return try env.createTypedarray(.uint8, PublicKey.SERIALIZE_SIZE, arraybuffer, 0);
+        return (try js_types.uint8ArrayFromBytes(&bytes)).toValue();
     }
 }
 
@@ -335,18 +328,10 @@ pub fn Signature_toBytes(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
 
     if (compress) {
         const bytes = sig.compress();
-
-        var arraybuffer_bytes: [*]u8 = undefined;
-        const arraybuffer = try env.createArrayBuffer(Signature.COMPRESS_SIZE, &arraybuffer_bytes);
-        @memcpy(arraybuffer_bytes[0..Signature.COMPRESS_SIZE], &bytes);
-        return try env.createTypedarray(.uint8, Signature.COMPRESS_SIZE, arraybuffer, 0);
+        return (try js_types.uint8ArrayFromBytes(&bytes)).toValue();
     } else {
         const bytes = sig.serialize();
-
-        var arraybuffer_bytes: [*]u8 = undefined;
-        const arraybuffer = try env.createArrayBuffer(Signature.SERIALIZE_SIZE, &arraybuffer_bytes);
-        @memcpy(arraybuffer_bytes[0..Signature.SERIALIZE_SIZE], &bytes);
-        return try env.createTypedarray(.uint8, Signature.SERIALIZE_SIZE, arraybuffer, 0);
+        return (try js_types.uint8ArrayFromBytes(&bytes)).toValue();
     }
 }
 
@@ -483,11 +468,7 @@ pub fn SecretKey_toPublicKey(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Valu
 pub fn SecretKey_toBytes(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
     const sk = try env.unwrap(SecretKey, cb.this());
     const bytes = sk.serialize();
-
-    var arraybuffer_bytes: [*]u8 = undefined;
-    const arraybuffer = try env.createArrayBuffer(SecretKey.serialize_size, &arraybuffer_bytes);
-    @memcpy(arraybuffer_bytes[0..SecretKey.serialize_size], &bytes);
-    return try env.createTypedarray(.uint8, SecretKey.serialize_size, arraybuffer, 0);
+    return (try js_types.uint8ArrayFromBytes(&bytes)).toValue();
 }
 
 /// Aggregates multiple Signature objects into one.

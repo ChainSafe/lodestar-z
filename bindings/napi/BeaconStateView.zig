@@ -187,29 +187,23 @@ pub fn finalizedCheckpoint(self: *const Self) !js_types.Checkpoint {
 }
 
 pub fn previousEpochParticipation(self: *const Self) !js.Uint8Array {
-    const env = js.env();
     const cached_state = try self.requireState();
     var view = try cached_state.state.previousEpochParticipation();
 
     const size = try view.serializedSize();
-    var bytes: [*]u8 = undefined;
-    const buf = try env.createArrayBuffer(size, &bytes);
-    _ = try view.serializeIntoBytes(bytes[0..size]);
-
-    return .{ .val = try env.createTypedarray(.uint8, size, buf, 0) };
+    const result = try js_types.createUint8ArrayBuffer(size);
+    _ = try view.serializeIntoBytes(result.bytes);
+    return result.array;
 }
 
 pub fn currentEpochParticipation(self: *const Self) !js.Uint8Array {
-    const env = js.env();
     const cached_state = try self.requireState();
     var view = try cached_state.state.currentEpochParticipation();
 
     const size = try view.serializedSize();
-    var bytes: [*]u8 = undefined;
-    const buf = try env.createArrayBuffer(size, &bytes);
-    _ = try view.serializeIntoBytes(bytes[0..size]);
-
-    return .{ .val = try env.createTypedarray(.uint8, size, buf, 0) };
+    const result = try js_types.createUint8ArrayBuffer(size);
+    _ = try view.serializeIntoBytes(result.bytes);
+    return result.array;
 }
 
 pub fn latestExecutionPayloadHeader(self: *const Self) !js.Value {
@@ -281,7 +275,6 @@ pub fn historicalSummaries(self: *const Self) !js.Array {
 /// Get the pending deposits from the state (Electra+).
 /// Returns: Uint8Array of SSZ serialized PendingDeposits list
 pub fn pendingDeposits(self: *const Self) !js.Uint8Array {
-    const env = js.env();
     const cached_state = try self.requireState();
 
     var pending_deposits = cached_state.state.pendingDeposits() catch {
@@ -292,13 +285,12 @@ pub fn pendingDeposits(self: *const Self) !js.Uint8Array {
         return throwNullAs(js.Uint8Array, "STATE_ERROR", "Failed to get pendingDeposits size");
     };
 
-    var bytes: [*]u8 = undefined;
-    const buf = try env.createArrayBuffer(size, &bytes);
-    _ = pending_deposits.serializeIntoBytes(bytes[0..size]) catch {
+    const result = try js_types.createUint8ArrayBuffer(size);
+    _ = pending_deposits.serializeIntoBytes(result.bytes) catch {
         return throwNullAs(js.Uint8Array, "STATE_ERROR", "Failed to serialize pendingDeposits");
     };
 
-    return .{ .val = try env.createTypedarray(.uint8, size, buf, 0) };
+    return result.array;
 }
 
 pub fn pendingDepositsCount(self: *const Self) !js.Number {
@@ -310,7 +302,6 @@ pub fn pendingDepositsCount(self: *const Self) !js.Number {
 /// Get the pending partial withdrawals from the state (Electra+).
 /// Returns: Uint8Array of SSZ serialized PendingPartialWithdrawals list
 pub fn pendingPartialWithdrawals(self: *const Self) !js.Uint8Array {
-    const env = js.env();
     const cached_state = try self.requireState();
 
     var pending_partial_withdrawals = cached_state.state.pendingPartialWithdrawals() catch {
@@ -320,12 +311,11 @@ pub fn pendingPartialWithdrawals(self: *const Self) !js.Uint8Array {
         return throwNullAs(js.Uint8Array, "STATE_ERROR", "Failed to get pendingPartialWithdrawals size");
     };
 
-    var bytes: [*]u8 = undefined;
-    const buf = try env.createArrayBuffer(size, &bytes);
-    _ = pending_partial_withdrawals.serializeIntoBytes(bytes[0..size]) catch {
+    const result = try js_types.createUint8ArrayBuffer(size);
+    _ = pending_partial_withdrawals.serializeIntoBytes(result.bytes) catch {
         return throwNullAs(js.Uint8Array, "STATE_ERROR", "Failed to serialize pendingPartialWithdrawals");
     };
-    return .{ .val = try env.createTypedarray(.uint8, size, buf, 0) };
+    return result.array;
 }
 
 pub fn pendingPartialWithdrawalsCount(self: *const Self) !js.Number {
@@ -336,7 +326,6 @@ pub fn pendingPartialWithdrawalsCount(self: *const Self) !js.Number {
 
 /// Get the pending consolidations from the state
 pub fn pendingConsolidations(self: *const Self) !js.Uint8Array {
-    const env = js.env();
     const cached_state = try self.requireState();
 
     var pending_consolidations = cached_state.state.pendingConsolidations() catch {
@@ -346,13 +335,12 @@ pub fn pendingConsolidations(self: *const Self) !js.Uint8Array {
         return throwNullAs(js.Uint8Array, "STATE_ERROR", "Failed to get pendingConsolidations size");
     };
 
-    var bytes: [*]u8 = undefined;
-    const buf = try env.createArrayBuffer(size, &bytes);
-    _ = pending_consolidations.serializeIntoBytes(bytes[0..size]) catch {
+    const result = try js_types.createUint8ArrayBuffer(size);
+    _ = pending_consolidations.serializeIntoBytes(result.bytes) catch {
         return throwNullAs(js.Uint8Array, "STATE_ERROR", "Failed to serialize pendingConsolidations");
     };
 
-    return .{ .val = try env.createTypedarray(.uint8, size, buf, 0) };
+    return result.array;
 }
 
 pub fn pendingConsolidationsCount(self: *const Self) !js.Number {
@@ -763,10 +751,7 @@ pub fn getSingleProof(self: *const Self, gindex_arg: js.Number) !js.Array {
 
     const result = try env.createArray();
     for (proof.witnesses, 0..) |witness, i| {
-        var witness_bytes: [*]u8 = undefined;
-        const witness_buf = try env.createArrayBuffer(32, &witness_bytes);
-        @memcpy(witness_bytes[0..32], &witness);
-        try result.setElement(@intCast(i), try env.createTypedarray(.uint8, 32, witness_buf, 0));
+        try result.setElement(@intCast(i), (try js_types.uint8ArrayFromBytes(&witness)).toValue());
     }
 
     return .{ .val = result };
@@ -811,19 +796,13 @@ pub fn createMultiProof(self: *const Self, descriptor: js.Uint8Array) !js_types.
         .compactMulti => |compact| {
             const leaves_array = try env.createArray();
             for (compact.leaves, 0..) |leaf, i| {
-                var leaf_bytes: [*]u8 = undefined;
-                const leaf_buf = try env.createArrayBuffer(32, &leaf_bytes);
-                @memcpy(leaf_bytes[0..32], &leaf);
-                try leaves_array.setElement(@intCast(i), try env.createTypedarray(.uint8, 32, leaf_buf, 0));
+                try leaves_array.setElement(@intCast(i), (try js_types.uint8ArrayFromBytes(&leaf)).toValue());
             }
             try result.setNamedProperty("leaves", leaves_array);
 
-            var descriptor_buf_bytes: [*]u8 = undefined;
-            const descriptor_buf = try env.createArrayBuffer(compact.descriptor.len, &descriptor_buf_bytes);
-            @memcpy(descriptor_buf_bytes[0..compact.descriptor.len], compact.descriptor);
             try result.setNamedProperty(
                 "descriptor",
-                try env.createTypedarray(.uint8, compact.descriptor.len, descriptor_buf, 0),
+                (try js_types.uint8ArrayFromBytes(compact.descriptor)).toValue(),
             );
         },
         else => return throwNullAs(js_types.MultiProof, "STATE_ERROR", "Unexpected proof type"),
@@ -900,15 +879,13 @@ pub fn serializeToBytes(self: *const Self, output: js.Uint8Array, offset: js.Num
 }
 
 pub fn serializeValidators(self: *const Self) !js.Uint8Array {
-    const env = js.env();
     const cached_state = try self.requireState();
     var validators_view = try cached_state.state.validators();
 
     const size = try validators_view.serializedSize();
-    var arraybuffer_bytes: [*]u8 = undefined;
-    const arraybuffer = try env.createArrayBuffer(size, &arraybuffer_bytes);
-    _ = try validators_view.serializeIntoBytes(arraybuffer_bytes[0..size]);
-    return .{ .val = try env.createTypedarray(.uint8, size, arraybuffer, 0) };
+    const result = try js_types.createUint8ArrayBuffer(size);
+    _ = try validators_view.serializeIntoBytes(result.bytes);
+    return result.array;
 }
 
 pub fn serializedValidatorsSize(self: *const Self) !js.Number {

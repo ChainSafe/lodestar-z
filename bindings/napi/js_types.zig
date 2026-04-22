@@ -6,6 +6,30 @@ pub fn wrap(comptime T: type, value: napi.Value) T {
     return .{ .val = value };
 }
 
+pub const Uint8ArrayBuffer = struct {
+    array: js.Uint8Array,
+    bytes: []u8,
+};
+
+// TODO(nazar): Replace this local stopgap helper when zapi exposes native DSL support
+// for allocating/filling TypedArrays ergonomically. Tracking issue:
+// https://github.com/ChainSafe/zapi/issues/19
+pub fn createUint8ArrayBuffer(len: usize) !Uint8ArrayBuffer {
+    const env = js.env();
+    var bytes_ptr: [*]u8 = undefined;
+    const arraybuffer = try env.createArrayBuffer(len, &bytes_ptr);
+    return .{
+        .array = .{ .val = try env.createTypedarray(.uint8, len, arraybuffer, 0) },
+        .bytes = bytes_ptr[0..len],
+    };
+}
+
+pub fn uint8ArrayFromBytes(bytes: []const u8) !js.Uint8Array {
+    const result = try createUint8ArrayBuffer(bytes.len);
+    @memcpy(result.bytes, bytes);
+    return result.array;
+}
+
 pub const Fork = js.Object(struct {
     previousVersion: js.Uint8Array,
     currentVersion: js.Uint8Array,
