@@ -219,10 +219,10 @@ pub fn PublicKey_toBytes(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
 
     if (compress) {
         const bytes = pk.compress();
-        return (try js_types.uint8ArrayFromBytes(&bytes)).toValue();
+        return (try js_types.uint8ArrayFromBytes(env, &bytes)).toValue();
     } else {
         const bytes = pk.serialize();
-        return (try js_types.uint8ArrayFromBytes(&bytes)).toValue();
+        return (try js_types.uint8ArrayFromBytes(env, &bytes)).toValue();
     }
 }
 
@@ -328,10 +328,10 @@ pub fn Signature_toBytes(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
 
     if (compress) {
         const bytes = sig.compress();
-        return (try js_types.uint8ArrayFromBytes(&bytes)).toValue();
+        return (try js_types.uint8ArrayFromBytes(env, &bytes)).toValue();
     } else {
         const bytes = sig.serialize();
-        return (try js_types.uint8ArrayFromBytes(&bytes)).toValue();
+        return (try js_types.uint8ArrayFromBytes(env, &bytes)).toValue();
     }
 }
 
@@ -468,7 +468,7 @@ pub fn SecretKey_toPublicKey(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Valu
 pub fn SecretKey_toBytes(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
     const sk = try env.unwrap(SecretKey, cb.this());
     const bytes = sk.serialize();
-    return (try js_types.uint8ArrayFromBytes(&bytes)).toValue();
+    return (try js_types.uint8ArrayFromBytes(env, &bytes)).toValue();
 }
 
 /// Aggregates multiple Signature objects into one.

@@ -187,21 +187,23 @@ pub fn finalizedCheckpoint(self: *const Self) !js_types.Checkpoint {
 }
 
 pub fn previousEpochParticipation(self: *const Self) !js.Uint8Array {
+    const env = js.env();
     const cached_state = try self.requireState();
     var view = try cached_state.state.previousEpochParticipation();
 
     const size = try view.serializedSize();
-    const result = try js_types.createUint8ArrayBuffer(size);
+    const result = try js_types.createUint8ArrayBuffer(env, size);
     _ = try view.serializeIntoBytes(result.bytes);
     return result.array;
 }
 
 pub fn currentEpochParticipation(self: *const Self) !js.Uint8Array {
+    const env = js.env();
     const cached_state = try self.requireState();
     var view = try cached_state.state.currentEpochParticipation();
 
     const size = try view.serializedSize();
-    const result = try js_types.createUint8ArrayBuffer(size);
+    const result = try js_types.createUint8ArrayBuffer(env, size);
     _ = try view.serializeIntoBytes(result.bytes);
     return result.array;
 }
@@ -275,6 +277,7 @@ pub fn historicalSummaries(self: *const Self) !js.Array {
 /// Get the pending deposits from the state (Electra+).
 /// Returns: Uint8Array of SSZ serialized PendingDeposits list
 pub fn pendingDeposits(self: *const Self) !js.Uint8Array {
+    const env = js.env();
     const cached_state = try self.requireState();
 
     var pending_deposits = cached_state.state.pendingDeposits() catch {
@@ -285,7 +288,7 @@ pub fn pendingDeposits(self: *const Self) !js.Uint8Array {
         return throwNullAs(js.Uint8Array, "STATE_ERROR", "Failed to get pendingDeposits size");
     };
 
-    const result = try js_types.createUint8ArrayBuffer(size);
+    const result = try js_types.createUint8ArrayBuffer(env, size);
     _ = pending_deposits.serializeIntoBytes(result.bytes) catch {
         return throwNullAs(js.Uint8Array, "STATE_ERROR", "Failed to serialize pendingDeposits");
     };
@@ -302,6 +305,7 @@ pub fn pendingDepositsCount(self: *const Self) !js.Number {
 /// Get the pending partial withdrawals from the state (Electra+).
 /// Returns: Uint8Array of SSZ serialized PendingPartialWithdrawals list
 pub fn pendingPartialWithdrawals(self: *const Self) !js.Uint8Array {
+    const env = js.env();
     const cached_state = try self.requireState();
 
     var pending_partial_withdrawals = cached_state.state.pendingPartialWithdrawals() catch {
@@ -311,7 +315,7 @@ pub fn pendingPartialWithdrawals(self: *const Self) !js.Uint8Array {
         return throwNullAs(js.Uint8Array, "STATE_ERROR", "Failed to get pendingPartialWithdrawals size");
     };
 
-    const result = try js_types.createUint8ArrayBuffer(size);
+    const result = try js_types.createUint8ArrayBuffer(env, size);
     _ = pending_partial_withdrawals.serializeIntoBytes(result.bytes) catch {
         return throwNullAs(js.Uint8Array, "STATE_ERROR", "Failed to serialize pendingPartialWithdrawals");
     };
@@ -326,6 +330,7 @@ pub fn pendingPartialWithdrawalsCount(self: *const Self) !js.Number {
 
 /// Get the pending consolidations from the state
 pub fn pendingConsolidations(self: *const Self) !js.Uint8Array {
+    const env = js.env();
     const cached_state = try self.requireState();
 
     var pending_consolidations = cached_state.state.pendingConsolidations() catch {
@@ -335,7 +340,7 @@ pub fn pendingConsolidations(self: *const Self) !js.Uint8Array {
         return throwNullAs(js.Uint8Array, "STATE_ERROR", "Failed to get pendingConsolidations size");
     };
 
-    const result = try js_types.createUint8ArrayBuffer(size);
+    const result = try js_types.createUint8ArrayBuffer(env, size);
     _ = pending_consolidations.serializeIntoBytes(result.bytes) catch {
         return throwNullAs(js.Uint8Array, "STATE_ERROR", "Failed to serialize pendingConsolidations");
     };
@@ -468,8 +473,8 @@ pub fn currentSyncCommitteeIndexed(self: *const Self) !js_types.IndexedSyncCommi
         "validatorIndices",
         try numberSliceToNapiValue(
             env,
-            u32,
-            @as([]const u32, @ptrCast(validator_indices)),
+            u64,
+            validator_indices,
             .{ .typed_array = .uint32 },
         ),
     );
@@ -488,7 +493,7 @@ pub fn currentSyncCommitteeIndexed(self: *const Self) !js_types.IndexedSyncCommi
         const positions_napi = try numberSliceToNapiValue(
             env,
             u32,
-            @as([]const u32, @ptrCast(positions.items)),
+            positions.items,
             .{ .typed_array = .uint32 },
         );
 
@@ -751,7 +756,7 @@ pub fn getSingleProof(self: *const Self, gindex_arg: js.Number) !js.Array {
 
     const result = try env.createArray();
     for (proof.witnesses, 0..) |witness, i| {
-        try result.setElement(@intCast(i), (try js_types.uint8ArrayFromBytes(&witness)).toValue());
+        try result.setElement(@intCast(i), (try js_types.uint8ArrayFromBytes(env, &witness)).toValue());
     }
 
     return .{ .val = result };
@@ -796,13 +801,13 @@ pub fn createMultiProof(self: *const Self, descriptor: js.Uint8Array) !js_types.
         .compactMulti => |compact| {
             const leaves_array = try env.createArray();
             for (compact.leaves, 0..) |leaf, i| {
-                try leaves_array.setElement(@intCast(i), (try js_types.uint8ArrayFromBytes(&leaf)).toValue());
+                try leaves_array.setElement(@intCast(i), (try js_types.uint8ArrayFromBytes(env, &leaf)).toValue());
             }
             try result.setNamedProperty("leaves", leaves_array);
 
             try result.setNamedProperty(
                 "descriptor",
-                (try js_types.uint8ArrayFromBytes(compact.descriptor)).toValue(),
+                (try js_types.uint8ArrayFromBytes(env, compact.descriptor)).toValue(),
             );
         },
         else => return throwNullAs(js_types.MultiProof, "STATE_ERROR", "Unexpected proof type"),
@@ -879,11 +884,12 @@ pub fn serializeToBytes(self: *const Self, output: js.Uint8Array, offset: js.Num
 }
 
 pub fn serializeValidators(self: *const Self) !js.Uint8Array {
+    const env = js.env();
     const cached_state = try self.requireState();
     var validators_view = try cached_state.state.validators();
 
     const size = try validators_view.serializedSize();
-    const result = try js_types.createUint8ArrayBuffer(size);
+    const result = try js_types.createUint8ArrayBuffer(env, size);
     _ = try validators_view.serializeIntoBytes(result.bytes);
     return result.array;
 }
@@ -965,8 +971,10 @@ fn throwNullAs(comptime T: type, code: [:0]const u8, message: [:0]const u8) !T {
 fn optionalBool(options: ?js.Value, name: [:0]const u8, default_value: bool) !bool {
     if (options) |value| {
         const raw = value.toValue();
-        if (try raw.typeof() == .object and try raw.hasNamedProperty(name)) {
-            return try (try raw.getNamedProperty(name)).getValueBool();
+        if (try raw.typeof() == .object) {
+            if (try raw.hasNamedProperty(name)) {
+                return try (try raw.getNamedProperty(name)).getValueBool();
+            }
         }
     }
     return default_value;
