@@ -158,3 +158,290 @@ fn isValidSwitchToCompoundRequest(
 
     return true;
 }
+
+// ─── Tests ──────────────────────────────────────────────────────────────────
+
+const testing = std.testing;
+const Node = @import("persistent_merkle_tree").Node;
+const TestCachedBeaconState = @import("../test_utils/generate_state.zig").TestCachedBeaconState;
+
+fn makeConsolidationRequest(
+    source_pubkey: [48]u8,
+    target_pubkey: [48]u8,
+    source_address: [20]u8,
+) ConsolidationRequest {
+    return ConsolidationRequest{
+        .source_address = source_address,
+        .source_pubkey = source_pubkey,
+        .target_pubkey = target_pubkey,
+    };
+}
+
+fn getValidatorPubkey(state: anytype, index: u64) ![48]u8 {
+    var validators = try state.validators();
+    var validator = try validators.get(index);
+    var pubkey_view = try validator.get("pubkey");
+    var pubkey: [48]u8 = undefined;
+    _ = try pubkey_view.getAllInto(&pubkey);
+    return pubkey;
+}
+
+fn setExecutionCredentials(state: anytype, index: u64, address: [20]u8) !void {
+    var validators = try state.validators();
+    var validator = try validators.get(index);
+    var wc: [32]u8 = [_]u8{0} ** 32;
+    wc[0] = 1; // ETH1_ADDRESS_WITHDRAWAL_PREFIX
+    @memcpy(wc[12..32], &address);
+    try validator.setValue("withdrawal_credentials", &wc);
+}
+
+fn setCompoundingCredentials(state: anytype, index: u64) !void {
+    var validators = try state.validators();
+    var validator = try validators.get(index);
+    var wc: [32]u8 = [_]u8{0} ** 32;
+    wc[0] = 2; // COMPOUNDING_WITHDRAWAL_PREFIX
+    try validator.setValue("withdrawal_credentials", &wc);
+}
+
+test "consolidation request - unknown source pubkey" {
+    const allocator = testing.allocator;
+    var pool = try Node.Pool.init(allocator, 256 * 5);
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
+    defer test_state.deinit();
+
+    var state = test_state.cached_state.state.castToFork(.electra);
+    const target_pubkey = try getValidatorPubkey(state, 1);
+    const unknown_pubkey: [48]u8 = [_]u8{0xFF} ** 48;
+    const source_address: [20]u8 = [_]u8{0xAA} ** 20;
+
+    const request = makeConsolidationRequest(unknown_pubkey, target_pubkey, source_address);
+    try processConsolidationRequest(.electra, test_state.config, test_state.cached_state.epoch_cache, state, &request);
+
+    // No-op: pending consolidations should remain empty
+    var pending = try state.pendingConsolidations();
+    try testing.expectEqual(@as(u64, 0), try pending.length());
+}
+
+test "consolidation request - unknown target pubkey" {
+    const allocator = testing.allocator;
+    var pool = try Node.Pool.init(allocator, 256 * 5);
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
+    defer test_state.deinit();
+
+    var state = test_state.cached_state.state.castToFork(.electra);
+    const source_pubkey = try getValidatorPubkey(state, 0);
+    const unknown_pubkey: [48]u8 = [_]u8{0xFF} ** 48;
+    const source_address: [20]u8 = [_]u8{0xAA} ** 20;
+
+    try setExecutionCredentials(state, 0, source_address);
+
+    const request = makeConsolidationRequest(source_pubkey, unknown_pubkey, source_address);
+    try processConsolidationRequest(.electra, test_state.config, test_state.cached_state.epoch_cache, state, &request);
+
+    var pending = try state.pendingConsolidations();
+    try testing.expectEqual(@as(u64, 0), try pending.length());
+}
+
+test "consolidation request - valid switch to compounding" {
+    const allocator = testing.allocator;
+    var pool = try Node.Pool.init(allocator, 256 * 5);
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
+    defer test_state.deinit();
+
+    var state = test_state.cached_state.state.castToFork(.electra);
+    const source_pubkey = try getValidatorPubkey(state, 0);
+    const source_address: [20]u8 = [_]u8{0xAA} ** 20;
+
+    // Set ETH1 credentials with matching address (source == target triggers switch-to-compounding)
+    try setExecutionCredentials(state, 0, source_address);
+
+    const request = makeConsolidationRequest(source_pubkey, source_pubkey, source_address);
+    try processConsolidationRequest(.electra, test_state.config, test_state.cached_state.epoch_cache, state, &request);
+
+    // Should have switched to compounding credentials (0x02 prefix)
+    var validators = try state.validators();
+    var validator = try validators.get(0);
+    const wc = try validator.getFieldRoot("withdrawal_credentials");
+    try testing.expectEqual(@as(u8, 2), wc[0]);
+
+    // No pending consolidation added (early return after switch)
+    var pending = try state.pendingConsolidations();
+    try testing.expectEqual(@as(u64, 0), try pending.length());
+}
+
+test "consolidation request - source equals target without eth1 credentials" {
+    const allocator = testing.allocator;
+    var pool = try Node.Pool.init(allocator, 256 * 5);
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
+    defer test_state.deinit();
+
+    var state = test_state.cached_state.state.castToFork(.electra);
+    const source_pubkey = try getValidatorPubkey(state, 0);
+    const source_address: [20]u8 = [_]u8{0xAA} ** 20;
+
+    // Default credentials are BLS (0x00) — isValidSwitchToCompoundRequest will fail,
+    // then source_index == target_index check causes return
+    const request = makeConsolidationRequest(source_pubkey, source_pubkey, source_address);
+    try processConsolidationRequest(.electra, test_state.config, test_state.cached_state.epoch_cache, state, &request);
+
+    // No-op
+    var pending = try state.pendingConsolidations();
+    try testing.expectEqual(@as(u64, 0), try pending.length());
+}
+
+test "consolidation request - incorrect source address" {
+    const allocator = testing.allocator;
+    var pool = try Node.Pool.init(allocator, 256 * 5);
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
+    defer test_state.deinit();
+
+    var state = test_state.cached_state.state.castToFork(.electra);
+    const source_pubkey = try getValidatorPubkey(state, 0);
+    const target_pubkey = try getValidatorPubkey(state, 1);
+    const correct_address: [20]u8 = [_]u8{0xAA} ** 20;
+    const wrong_address: [20]u8 = [_]u8{0xBB} ** 20;
+
+    try setExecutionCredentials(state, 0, correct_address);
+    try setCompoundingCredentials(state, 1);
+
+    // Request uses wrong_address
+    const request = makeConsolidationRequest(source_pubkey, target_pubkey, wrong_address);
+    try processConsolidationRequest(.electra, test_state.config, test_state.cached_state.epoch_cache, state, &request);
+
+    var pending = try state.pendingConsolidations();
+    try testing.expectEqual(@as(u64, 0), try pending.length());
+}
+
+test "consolidation request - target without compounding credentials" {
+    const allocator = testing.allocator;
+    var pool = try Node.Pool.init(allocator, 256 * 5);
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
+    defer test_state.deinit();
+
+    var state = test_state.cached_state.state.castToFork(.electra);
+    const source_pubkey = try getValidatorPubkey(state, 0);
+    const target_pubkey = try getValidatorPubkey(state, 1);
+    const source_address: [20]u8 = [_]u8{0xAA} ** 20;
+
+    try setExecutionCredentials(state, 0, source_address);
+    // Target has ETH1 (0x01) instead of compounding (0x02)
+    try setExecutionCredentials(state, 1, [_]u8{0xBB} ** 20);
+
+    const request = makeConsolidationRequest(source_pubkey, target_pubkey, source_address);
+    try processConsolidationRequest(.electra, test_state.config, test_state.cached_state.epoch_cache, state, &request);
+
+    var pending = try state.pendingConsolidations();
+    try testing.expectEqual(@as(u64, 0), try pending.length());
+}
+
+test "consolidation request - source already exited" {
+    const allocator = testing.allocator;
+    var pool = try Node.Pool.init(allocator, 256 * 5);
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
+    defer test_state.deinit();
+
+    var state = test_state.cached_state.state.castToFork(.electra);
+    const source_pubkey = try getValidatorPubkey(state, 0);
+    const target_pubkey = try getValidatorPubkey(state, 1);
+    const source_address: [20]u8 = [_]u8{0xAA} ** 20;
+
+    try setExecutionCredentials(state, 0, source_address);
+    try setCompoundingCredentials(state, 1);
+
+    // Set source exit_epoch to non-FAR_FUTURE
+    var validators = try state.validators();
+    var source_validator = try validators.get(0);
+    const current_epoch = test_state.cached_state.epoch_cache.epoch;
+    try source_validator.set("exit_epoch", current_epoch + 100);
+
+    const request = makeConsolidationRequest(source_pubkey, target_pubkey, source_address);
+    try processConsolidationRequest(.electra, test_state.config, test_state.cached_state.epoch_cache, state, &request);
+
+    var pending = try state.pendingConsolidations();
+    try testing.expectEqual(@as(u64, 0), try pending.length());
+}
+
+test "consolidation request - source not active long enough" {
+    const allocator = testing.allocator;
+    var pool = try Node.Pool.init(allocator, 256 * 5);
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
+    defer test_state.deinit();
+
+    var state = test_state.cached_state.state.castToFork(.electra);
+    const source_pubkey = try getValidatorPubkey(state, 0);
+    const target_pubkey = try getValidatorPubkey(state, 1);
+    const source_address: [20]u8 = [_]u8{0xAA} ** 20;
+
+    try setExecutionCredentials(state, 0, source_address);
+    try setCompoundingCredentials(state, 1);
+
+    // Set source activation_epoch to current_epoch so SHARD_COMMITTEE_PERIOD not met
+    var validators = try state.validators();
+    var source_validator = try validators.get(0);
+    const current_epoch = test_state.cached_state.epoch_cache.epoch;
+    try source_validator.set("activation_epoch", current_epoch);
+
+    const request = makeConsolidationRequest(source_pubkey, target_pubkey, source_address);
+    try processConsolidationRequest(.electra, test_state.config, test_state.cached_state.epoch_cache, state, &request);
+
+    var pending = try state.pendingConsolidations();
+    try testing.expectEqual(@as(u64, 0), try pending.length());
+}
+
+test "consolidation request - valid consolidation" {
+    const allocator = testing.allocator;
+    var pool = try Node.Pool.init(allocator, 256 * 5);
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
+    defer test_state.deinit();
+
+    var state = test_state.cached_state.state.castToFork(.electra);
+    const source_pubkey = try getValidatorPubkey(state, 0);
+    const target_pubkey = try getValidatorPubkey(state, 1);
+    const source_address: [20]u8 = [_]u8{0xAA} ** 20;
+
+    // Source: execution credentials with matching address
+    try setExecutionCredentials(state, 0, source_address);
+    // Target: compounding credentials
+    try setCompoundingCredentials(state, 1);
+
+    // Override total_active_balance_increments so consolidation churn limit > MIN_ACTIVATION_BALANCE.
+    // With mainnet preset and only 256 validators, the churn limit is 0 (not enough stake).
+    // In production this requires ~500k+ validators; for tests we fake the balance.
+    test_state.cached_state.epoch_cache.total_active_balance_increments = 20_000_000;
+
+    const request = makeConsolidationRequest(source_pubkey, target_pubkey, source_address);
+    try processConsolidationRequest(.electra, test_state.config, test_state.cached_state.epoch_cache, state, &request);
+
+    // Source should have exit_epoch set (no longer FAR_FUTURE)
+    var validators = try state.validators();
+    var source_validator = try validators.get(0);
+    const exit_epoch = try source_validator.get("exit_epoch");
+    try testing.expect(exit_epoch != FAR_FUTURE_EPOCH);
+
+    // Pending consolidation should be added
+    var pending = try state.pendingConsolidations();
+    try testing.expectEqual(@as(u64, 1), try pending.length());
+
+    // Verify the pending consolidation has correct source/target
+    var consolidation = try pending.get(0);
+    try testing.expectEqual(@as(u64, 0), try consolidation.get("source_index"));
+    try testing.expectEqual(@as(u64, 1), try consolidation.get("target_index"));
+}
