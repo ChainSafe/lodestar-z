@@ -36,6 +36,17 @@ fn parseOptions(options: ?js.Value) !st.TransitionOpt {
     return transit_options;
 }
 
+/// Perform a state transition given a signed beacon block.
+///
+/// Arguments:
+/// - arg 0: BeaconStateView instance (the pre-state)
+/// - arg 1: signed block bytes (Uint8Array)
+/// - arg 2: options object (optional) with:
+///   - verifyStateRoot: bool (default true)
+///   - verifyProposer: bool (default true)
+///   - verifySignatures: bool (default false)
+///   - transferCache: bool (default true)
+/// Returns: BeaconStateView (the post-state)
 pub fn stateTransition(
     pre_state_value: js.Value,
     signed_block_bytes: js.Uint8Array,
