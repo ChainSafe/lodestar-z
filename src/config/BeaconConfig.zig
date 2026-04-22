@@ -189,6 +189,13 @@ pub fn init(chain_config: ChainConfig, genesis_validator_root: Root) BeaconConfi
     };
 }
 
+pub fn withGenesisValidatorRoot(self: *const BeaconConfig, genesis_validator_root: Root) BeaconConfig {
+    var updated = self.*;
+    updated.genesis_validator_root = genesis_validator_root;
+    updated.domain_cache = DomainCache.init(updated.forks_ascending_epoch_order, genesis_validator_root);
+    return updated;
+}
+
 /// Return the active `ForkInfo` for the given slot.
 pub fn forkInfo(self: *const BeaconConfig, slot: Slot) *const ForkInfo {
     const epoch = @divFloor(slot, preset.SLOTS_PER_EPOCH);
@@ -416,10 +423,14 @@ pub fn forkSeqForGossipDigestAtEpoch(
     genesis_validators_root: [32]u8,
 ) ?ForkSeq {
     const active = self.activeGossipForksAtEpoch(epoch, genesis_validators_root);
+    var resolved: ?ForkSeq = null;
     for (active.asSlice()) |fork| {
-        if (std.mem.eql(u8, &fork.digest, &digest)) return fork.fork_seq;
+        if (!std.mem.eql(u8, &fork.digest, &digest)) continue;
+        if (resolved == null or @intFromEnum(fork.fork_seq) > @intFromEnum(resolved.?)) {
+            resolved = fork.fork_seq;
+        }
     }
-    return null;
+    return resolved;
 }
 
 fn forkDigestForForkInfo(
@@ -647,4 +658,56 @@ test "forkSeqForGossipDigestAtEpoch resolves blob schedule boundary digest" {
     const resolved = cfg.forkSeqForGossipDigestAtEpoch(blob_epoch, digest, mainnet_gvr);
 
     try std.testing.expectEqual(ForkSeq.fulu, resolved.?);
+}
+
+test "forkSeqForGossipDigestAtEpoch prefers the highest active fork when multiple epoch-0 forks share a digest" {
+    var chain = @import("./networks/mainnet.zig").chain_config;
+    chain.ALTAIR_FORK_EPOCH = 0;
+    chain.BELLATRIX_FORK_EPOCH = 0;
+    chain.CAPELLA_FORK_EPOCH = 0;
+    chain.DENEB_FORK_EPOCH = 0;
+    chain.ELECTRA_FORK_EPOCH = 0;
+    chain.FULU_FORK_EPOCH = std.math.maxInt(Epoch);
+    chain.GLOAS_FORK_EPOCH = std.math.maxInt(Epoch);
+
+    const gvr = [_]u8{0} ** 32;
+    const cfg = BeaconConfig.init(chain, gvr);
+    const digest = cfg.forkDigestAtSlot(0, gvr);
+    const resolved = cfg.forkSeqForGossipDigestAtEpoch(0, digest, gvr);
+
+    try std.testing.expectEqual(ForkSeq.electra, resolved.?);
+}
+
+test "withGenesisValidatorRoot rebuilds domain cache for custom networks" {
+    var chain = @import("./networks/mainnet.zig").chain_config;
+    chain.GENESIS_FORK_VERSION = .{ 0x10, 0x00, 0x00, 0x38 };
+    chain.ALTAIR_FORK_VERSION = .{ 0x20, 0x00, 0x00, 0x38 };
+    chain.BELLATRIX_FORK_VERSION = .{ 0x30, 0x00, 0x00, 0x38 };
+    chain.CAPELLA_FORK_VERSION = .{ 0x40, 0x00, 0x00, 0x38 };
+    chain.DENEB_FORK_VERSION = .{ 0x50, 0x00, 0x00, 0x38 };
+    chain.ELECTRA_FORK_VERSION = .{ 0x60, 0x00, 0x00, 0x38 };
+    chain.FULU_FORK_VERSION = .{ 0x70, 0x00, 0x00, 0x38 };
+    chain.ALTAIR_FORK_EPOCH = 0;
+    chain.BELLATRIX_FORK_EPOCH = 0;
+    chain.CAPELLA_FORK_EPOCH = 0;
+    chain.DENEB_FORK_EPOCH = 0;
+    chain.ELECTRA_FORK_EPOCH = 0;
+    chain.FULU_FORK_EPOCH = std.math.maxInt(Epoch);
+    chain.GLOAS_FORK_EPOCH = std.math.maxInt(Epoch);
+
+    const zero_gvr = [_]u8{0} ** 32;
+    const actual_gvr = [_]u8{ 0xd6, 0x1e, 0xa4, 0x84, 0xfe, 0xba, 0xcf, 0xae, 0x52, 0x98, 0xd5, 0x2a, 0x2b, 0x58, 0x1f, 0x3e, 0x30, 0x5a, 0x51, 0xf3, 0x11, 0x2a, 0x92, 0x41, 0xb9, 0x68, 0xdc, 0xcf, 0x01, 0x9f, 0x7b, 0x11 };
+
+    const stale = BeaconConfig.init(chain, zero_gvr);
+    const refreshed = stale.withGenesisValidatorRoot(actual_gvr);
+    const fresh = BeaconConfig.init(chain, actual_gvr);
+
+    const slot: u64 = 11737;
+    const stale_domain = try stale.domain_cache.get(stale.forkSeq(slot), c.DOMAIN_SYNC_COMMITTEE_SELECTION_PROOF);
+    const refreshed_domain = try refreshed.domain_cache.get(refreshed.forkSeq(slot), c.DOMAIN_SYNC_COMMITTEE_SELECTION_PROOF);
+    const fresh_domain = try fresh.domain_cache.get(fresh.forkSeq(slot), c.DOMAIN_SYNC_COMMITTEE_SELECTION_PROOF);
+
+    try std.testing.expect(!std.mem.eql(u8, stale_domain, refreshed_domain));
+    try std.testing.expectEqualSlices(u8, fresh_domain, refreshed_domain);
+    try std.testing.expectEqualSlices(u8, &actual_gvr, &refreshed.genesis_validator_root);
 }

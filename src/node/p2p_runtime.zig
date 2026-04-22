@@ -21,6 +21,7 @@ const kzg_mod = @import("kzg");
 const networking = @import("networking");
 const DiscoveryService = networking.DiscoveryService;
 const PeerManager = networking.PeerManager;
+const DialEligibility = networking.peer_manager.DialEligibility;
 const SubnetService = networking.SubnetService;
 const SubnetId = networking.SubnetId;
 const ReqRespContext = networking.ReqRespContext;
@@ -91,6 +92,19 @@ const ValidatedBlockRangeChunk = struct {
 const DiscoveryPeerIdentity = struct {
     node_id: [32]u8,
     pubkey: [33]u8,
+};
+
+pub const DirectPeerState = struct {
+    addr_str: []const u8,
+    known_peer_id: ?[]const u8 = null,
+    dialing: bool = false,
+    consecutive_failures: u32 = 0,
+    next_attempt_ms: u64 = 0,
+
+    fn deinit(self: *DirectPeerState, allocator: std.mem.Allocator) void {
+        if (self.known_peer_id) |peer_id| allocator.free(peer_id);
+        self.* = undefined;
+    }
 };
 
 const DiscoveryDialJob = struct {
@@ -467,6 +481,42 @@ test "status req/resp policy tolerates status transport failures" {
     try std.testing.expect(!statusReqRespFollowUpPing(.{ .ping = .{ .known_metadata_seq = 0 } }));
 }
 
+test "direct peer backoff grows exponentially and caps" {
+    try std.testing.expectEqual(@as(u64, 0), directPeerBackoffMs(0));
+    try std.testing.expectEqual(direct_peer_redial_initial_backoff_ms, directPeerBackoffMs(1));
+    try std.testing.expectEqual(direct_peer_redial_initial_backoff_ms * 2, directPeerBackoffMs(2));
+    try std.testing.expectEqual(direct_peer_redial_initial_backoff_ms * 4, directPeerBackoffMs(3));
+    try std.testing.expectEqual(direct_peer_redial_max_backoff_ms, directPeerBackoffMs(32));
+}
+
+test "direct peer can attempt only when disconnected eligible and past backoff" {
+    var state = DirectPeerState{ .addr_str = "peer-a" };
+    try std.testing.expect(directPeerCanAttempt(&state, 1000, false, .eligible));
+
+    state.dialing = true;
+    try std.testing.expect(!directPeerCanAttempt(&state, 1000, false, .eligible));
+    state.dialing = false;
+
+    state.next_attempt_ms = 1500;
+    try std.testing.expect(!directPeerCanAttempt(&state, 1000, false, .eligible));
+    state.next_attempt_ms = 0;
+
+    try std.testing.expect(!directPeerCanAttempt(&state, 1000, true, .eligible));
+    try std.testing.expect(!directPeerCanAttempt(&state, 1000, false, .already_dialing));
+    try std.testing.expect(!directPeerCanAttempt(&state, 1000, false, .peer_cooling_down));
+}
+
+test "direct peer parser extracts peer id from multiaddr" {
+    const allocator = std.testing.allocator;
+    const parsed = (try parseDirectPeerExpectedPeerId(
+        allocator,
+        "/ip4/127.0.0.1/udp/9000/quic-v1/p2p/16Uiu2HAmExamplePeer",
+    )).?;
+    defer allocator.free(parsed);
+    try std.testing.expectEqualStrings("16Uiu2HAmExamplePeer", parsed);
+    try std.testing.expectEqual(@as(?[]u8, null), try parseDirectPeerExpectedPeerId(allocator, "/ip4/127.0.0.1/udp/9000/quic-v1"));
+}
+
 fn successfulOutboundDialAttemptTask(allocator: std.mem.Allocator) OutboundDialAttemptResult {
     const peer_id = allocator.dupe(u8, "test-peer-id") catch |err| return .{ .failure = err };
     return .{ .success = peer_id };
@@ -621,6 +671,13 @@ pub fn deinitService(self: *BeaconNode, io: std.Io) void {
 }
 
 pub fn deinitOwnedState(self: *BeaconNode) void {
+    if (self.direct_peer_states.len > 0) {
+        for (self.direct_peer_states) |*state| state.deinit(self.allocator);
+        self.allocator.free(self.direct_peer_states);
+        self.direct_peer_states = &.{};
+        self.next_direct_peer_rr_index = 0;
+    }
+
     if (self.discovery_service) |ds| {
         ds.deinit();
         self.allocator.destroy(ds);
@@ -1002,6 +1059,7 @@ fn setSyncGossipCoreTopicsEnabled(
             return;
         };
         setInitialSubnetSubscriptionsEnabled(self, io, svc, true);
+        svc.announceTrackedSubscriptionsToConnectedPeers(io);
     } else {
         svc.unsubscribeEthTopics(io) catch |err| {
             log.warn("Failed to unsubscribe gossip core topics: {}", .{err});
@@ -1160,9 +1218,21 @@ fn bootstrapDirectPeers(self: *BeaconNode, io: std.Io, svc: *networking.P2pServi
     _ = svc;
     const direct_peers = self.node_options.direct_peers;
     if (direct_peers.len == 0) return;
+    if (self.direct_peer_states.len != 0) return;
 
-    self.next_direct_peer_index = 0;
-    log.info("queuing {d} direct peer(s) for runtime bootstrap", .{direct_peers.len});
+    self.direct_peer_states = self.allocator.alloc(DirectPeerState, direct_peers.len) catch |err| {
+        log.warn("failed to allocate direct peer state for {d} peer(s): {}", .{ direct_peers.len, err });
+        return;
+    };
+    for (direct_peers, 0..) |addr_str, i| {
+        const known_peer_id = parseDirectPeerExpectedPeerId(self.allocator, addr_str) catch |err| blk: {
+            log.warn("failed to parse direct peer identity from {s}: {}", .{ addr_str, err });
+            break :blk null;
+        };
+        self.direct_peer_states[i] = .{ .addr_str = addr_str, .known_peer_id = known_peer_id };
+    }
+    self.next_direct_peer_rr_index = 0;
+    log.info("tracking {d} direct peer(s) for runtime maintenance", .{direct_peers.len});
 }
 
 const active_p2p_tick_ns: u64 = std.time.ns_per_ms;
@@ -1176,6 +1246,9 @@ const peer_maintenance_interval_ns: u64 = 10 * std.time.ns_per_s;
 const metrics_sampling_interval_ns: u64 = std.time.ns_per_s;
 const peer_manager_heartbeat_interval_ns: u64 = networking.peer_manager.HEARTBEAT_INTERVAL_MS * std.time.ns_per_ms;
 const max_discovery_dials_per_tick: u32 = 4;
+const max_direct_peer_dials_per_tick: u32 = 1;
+const direct_peer_redial_initial_backoff_ms: u64 = 1_000;
+const direct_peer_redial_max_backoff_ms: u64 = 30_000;
 // Match Lodestar's libp2p connectionManager.dialTimeout so all outbound dial
 // paths have the same bounded behavior.
 const outbound_dial_timeout_ms: u64 = 30_000;
@@ -1191,6 +1264,32 @@ fn waitTimeout(io: std.Io, timeout: std.Io.Timeout) TimeoutWaitResult {
         error.Canceled => return .canceled,
     };
     return .fired;
+}
+
+fn directPeerBackoffMs(consecutive_failures: u32) u64 {
+    if (consecutive_failures == 0) return 0;
+
+    var backoff = direct_peer_redial_initial_backoff_ms;
+    var remaining = consecutive_failures - 1;
+    while (remaining > 0 and backoff < direct_peer_redial_max_backoff_ms) : (remaining -= 1) {
+        backoff = @min(backoff * 2, direct_peer_redial_max_backoff_ms);
+    }
+    return backoff;
+}
+
+fn directPeerCanAttempt(
+    state: *const DirectPeerState,
+    now_ms: u64,
+    is_connected: bool,
+    eligibility: ?DialEligibility,
+) bool {
+    if (is_connected) return false;
+    if (state.dialing) return false;
+    if (state.next_attempt_ms > now_ms) return false;
+    if (eligibility) |value| {
+        if (value != .eligible) return false;
+    }
+    return true;
 }
 
 fn shouldDriveUnknownChainSync(self: *const BeaconNode) bool {
@@ -1211,8 +1310,6 @@ fn runDiscoveryMaintenance(self: *BeaconNode) bool {
 fn runConnectivityMaintenance(self: *BeaconNode, io: std.Io, svc: *networking.P2pService) bool {
     var did_work = syncSubnetState(self, io, svc);
 
-    did_work = bootstrapNextDirectPeer(self, io, svc) or did_work;
-
     if (self.discovery_service) |ds| {
         ds.poll();
         if (ds.takeLocalEnrChanged()) {
@@ -1224,36 +1321,121 @@ fn runConnectivityMaintenance(self: *BeaconNode, io: std.Io, svc: *networking.P2
         did_work = dialDiscoveredPeers(self, io, svc, ds) or did_work;
     }
 
-    return reconcilePeerConnections(self, io, svc) or did_work;
+    did_work = reconcilePeerConnections(self, io, svc) or did_work;
+    return maintainDirectPeers(self, io, svc) or did_work;
 }
 
-fn bootstrapNextDirectPeer(self: *BeaconNode, io: std.Io, svc: *networking.P2pService) bool {
-    const direct_peers = self.node_options.direct_peers;
-    if (self.next_direct_peer_index >= direct_peers.len) return false;
+fn directPeerStateByAddr(self: *BeaconNode, addr_str: []const u8) ?*DirectPeerState {
+    for (self.direct_peer_states) |*state| {
+        if (std.mem.eql(u8, state.addr_str, addr_str)) return state;
+    }
+    return null;
+}
 
+fn parseDirectPeerExpectedPeerId(allocator: std.mem.Allocator, addr_str: []const u8) !?[]const u8 {
+    var ma = try Multiaddr.fromString(allocator, addr_str);
+    defer ma.deinit();
+
+    var iter = ma.iterator();
+    while (try iter.next()) |proto| {
+        switch (proto) {
+            .P2P => |peer_id| {
+                var buf: [128]u8 = undefined;
+                const raw_peer_id = peer_id.toBytes(&buf) catch return error.PeerIdEncodeFailed;
+                return try allocator.dupe(u8, raw_peer_id);
+            },
+            else => {},
+        }
+    }
+    return null;
+}
+
+fn directPeerStateByPeerId(self: *BeaconNode, peer_id: []const u8) ?*DirectPeerState {
+    for (self.direct_peer_states) |*state| {
+        if (state.known_peer_id) |known_peer_id| {
+            if (std.mem.eql(u8, known_peer_id, peer_id)) return state;
+        }
+    }
+    return null;
+}
+
+fn noteDirectPeerDialFailure(
+    self: *BeaconNode,
+    state: *DirectPeerState,
+    now_ms: u64,
+    peer_id: ?[]const u8,
+) void {
+    state.dialing = false;
+    state.consecutive_failures += 1;
+    state.next_attempt_ms = now_ms + directPeerBackoffMs(state.consecutive_failures);
+
+    if (peer_id) |known_peer_id| {
+        if (self.peer_manager) |pm| {
+            pm.onPeerDisconnected(known_peer_id, now_ms);
+        }
+    }
+}
+
+fn noteDirectPeerConnected(self: *BeaconNode, addr_str: []const u8, peer_id: []const u8) void {
+    const state = directPeerStateByAddr(self, addr_str) orelse return;
+    if (state.known_peer_id) |known_peer_id| {
+        if (!std.mem.eql(u8, known_peer_id, peer_id)) {
+            self.allocator.free(known_peer_id);
+            state.known_peer_id = self.allocator.dupe(u8, peer_id) catch null;
+        }
+    } else {
+        state.known_peer_id = self.allocator.dupe(u8, peer_id) catch null;
+    }
+    state.dialing = false;
+    state.consecutive_failures = 0;
+    state.next_attempt_ms = 0;
+}
+
+fn noteDirectPeerDisconnected(self: *BeaconNode, peer_id: []const u8, now_ms: u64) void {
+    const state = directPeerStateByPeerId(self, peer_id) orelse return;
+    state.dialing = false;
+    state.consecutive_failures += 1;
+    state.next_attempt_ms = now_ms + directPeerBackoffMs(state.consecutive_failures);
+}
+
+fn maintainDirectPeers(self: *BeaconNode, io: std.Io, svc: *networking.P2pService) bool {
+    if (self.direct_peer_states.len == 0) return false;
     const pm = self.peer_manager orelse return false;
-    // Keep dialing curated direct peers until startup has a small set of
-    // connected or in-flight peers. A single transient peer is usually not
-    // enough to cover PeerDAS column fetches after checkpoint sync.
-    const connected_peers = pm.peerCount();
-    const dialing_peers = pm.dialingPeerCount();
-    const desired_startup_peers = sync_mod.sync_types.MIN_PEERS_TO_SYNC;
-    if (connected_peers >= desired_startup_peers) return false;
-    if (connected_peers + dialing_peers >= desired_startup_peers) return false;
+    const now_ms = currentUnixTimeMs(io);
 
-    const addr_str = direct_peers[self.next_direct_peer_index];
-    self.next_direct_peer_index += 1;
+    var dial_attempts: u32 = 0;
+    var inspected: usize = 0;
+    while (inspected < self.direct_peer_states.len and dial_attempts < max_direct_peer_dials_per_tick) : (inspected += 1) {
+        const idx = (self.next_direct_peer_rr_index + inspected) % self.direct_peer_states.len;
+        const state = &self.direct_peer_states[idx];
+        const is_connected = if (state.known_peer_id) |peer_id|
+            svc.isPeerConnected(io, peer_id)
+        else
+            false;
+        const eligibility = if (state.known_peer_id) |peer_id|
+            pm.dialEligibility(peer_id, now_ms)
+        else
+            null;
+        if (!directPeerCanAttempt(state, now_ms, is_connected, eligibility)) continue;
 
-    log.debug("runtime direct peer bootstrap {d}/{d}: {s}", .{
-        self.next_direct_peer_index,
-        direct_peers.len,
-        addr_str,
-    });
+        if (state.known_peer_id) |peer_id| {
+            pm.onDialing(peer_id, now_ms) catch |err| {
+                log.debug("failed to mark direct peer {f} as dialing: {}", .{ networking.fmtPeerId(peer_id), err });
+                continue;
+            };
+        }
+        state.dialing = true;
+        self.next_direct_peer_rr_index = (idx + 1) % self.direct_peer_states.len;
+        dial_attempts += 1;
 
-    dialDirectPeer(self, io, svc, addr_str) catch |err| {
-        log.warn("failed to dial direct peer {s}: {}", .{ addr_str, err });
-    };
-    return true;
+        dialDirectPeer(self, io, svc, state.addr_str) catch |err| {
+            noteDirectPeerDialFailure(self, state, now_ms, state.known_peer_id);
+            log.warn("failed to dial direct peer {s}: {}", .{ state.addr_str, err });
+        };
+        return true;
+    }
+
+    return false;
 }
 
 fn currentNetworkSlot(self: *BeaconNode, io: std.Io) ?u64 {
@@ -2725,8 +2907,13 @@ fn dialDirectPeer(self: *BeaconNode, io: std.Io, svc: *networking.P2pService, ad
     const peer_id = try dialPeerWithTimeout(self, io, svc, addr_str, outbound_dial_timeout_ms);
     defer self.allocator.free(peer_id);
 
+    noteDirectPeerConnected(self, addr_str, peer_id);
+
     log.debug("Connected to direct peer {s} via {s}", .{ peer_id, addr_str });
     _ = registerConnectedPeer(self, io, svc, peer_id, .outbound, null, .status_only);
+    if (self.peer_manager) |pm| {
+        pm.markTrustedPeer(peer_id);
+    }
 }
 
 fn initDiscoveryService(self: *BeaconNode) !void {
@@ -3544,6 +3731,12 @@ fn registerConnectedPeer(
         };
     }
     recordPeerNodeIdFromPeerId(pm, peer_id);
+    if (directPeerStateByPeerId(self, peer_id)) |state| {
+        state.dialing = false;
+        state.consecutive_failures = 0;
+        state.next_attempt_ms = 0;
+        pm.markTrustedPeer(peer_id);
+    }
 
     if (!was_connected) {
         if (discovery_identity) |identity| {
@@ -3703,6 +3896,7 @@ fn heartbeatDisconnectReason(maybe_peer: ?*const networking.PeerInfo) GoodbyeRea
 
 fn notePeerDisconnected(self: *BeaconNode, pm: *PeerManager, peer_id: []const u8, now_ms: u64) void {
     pm.onPeerDisconnected(peer_id, now_ms);
+    noteDirectPeerDisconnected(self, peer_id, now_ms);
     if (self.sync_callback_ctx) |cb_ctx| cb_ctx.notePeerDisconnected(peer_id);
     if (self.sync_service_inst) |sync_svc| sync_svc.onPeerDisconnect(peer_id);
     if (self.unknownChainSyncEnabled()) self.unknown_chain_sync.onPeerDisconnected(peer_id);

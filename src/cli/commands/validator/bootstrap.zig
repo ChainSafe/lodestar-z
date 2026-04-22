@@ -289,7 +289,7 @@ pub fn prepareRuntime(io: Io, allocator: Allocator, opts: anytype) !PreparedRunt
     const genesis = try waitForGenesis(io, &beacon_api, primary_beacon_url);
 
     if (params_file != null) {
-        custom_beacon_config.genesis_validator_root = genesis.genesis_validators_root;
+        custom_beacon_config = custom_beacon_config.withGenesisValidatorRoot(genesis.genesis_validators_root);
     }
 
     try ensureGenesisForkVersionMatches(beacon_config, genesis);

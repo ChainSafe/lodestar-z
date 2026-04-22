@@ -514,6 +514,10 @@ pub const PeerManager = struct {
         try self.db.dialingPeer(peer_id, now_ms);
     }
 
+    pub fn markTrustedPeer(self: *PeerManager, peer_id: []const u8) void {
+        self.db.setTrusted(peer_id);
+    }
+
     /// Whether a peer is currently eligible for an outbound dial attempt.
     ///
     /// Mirrors Lodestar's discovery-side filtering so cached/discovered peers

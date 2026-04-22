@@ -32,6 +32,8 @@ const gossipsub_mod = libp2p.gossipsub;
 const GossipsubHandler = gossipsub_mod.Handler;
 const GossipsubService = gossipsub_mod.Service;
 const GossipsubConfig = gossipsub_mod.Config;
+const GossipsubFrameDecoder = gossipsub_mod.FrameDecoder;
+const GossipsubRpc = libp2p.protobuf.rpc;
 const swarm_mod = libp2p.swarm;
 const identify_mod = libp2p.identify;
 const IdentifyHandler = identify_mod.Handler;
@@ -158,6 +160,40 @@ fn computeUniqueGossipsubPeerStats(
         stats.mesh_peers_by_topic[idx] = unique_by_topic.count();
     }
     return stats;
+}
+
+fn buildTrackedSubscriptionAnnouncementFrame(
+    allocator: Allocator,
+    tracked_subscriptions: *const std.StringHashMap(void),
+) !?[]const u8 {
+    if (tracked_subscriptions.count() == 0) return null;
+
+    var encoded: std.ArrayList(u8) = .empty;
+    errdefer encoded.deinit(allocator);
+
+    var chunk: [64]?GossipsubRpc.RPC.SubOpts = undefined;
+    var chunk_len: usize = 0;
+    var iter = tracked_subscriptions.keyIterator();
+    while (iter.next()) |key| {
+        chunk[chunk_len] = .{ .subscribe = true, .topicid = key.* };
+        chunk_len += 1;
+        if (chunk_len == chunk.len) {
+            var rpc_msg = GossipsubRpc.RPC{ .subscriptions = chunk[0..chunk_len] };
+            const frame = try gossipsub_mod.encodeRpc(allocator, &rpc_msg);
+            defer allocator.free(frame);
+            try encoded.appendSlice(allocator, frame);
+            chunk_len = 0;
+        }
+    }
+
+    if (chunk_len != 0) {
+        var rpc_msg = GossipsubRpc.RPC{ .subscriptions = chunk[0..chunk_len] };
+        const frame = try gossipsub_mod.encodeRpc(allocator, &rpc_msg);
+        defer allocator.free(frame);
+        try encoded.appendSlice(allocator, frame);
+    }
+
+    return try encoded.toOwnedSlice(allocator);
 }
 
 const identify_supported_protocols_without_light_client = &.{
@@ -511,6 +547,33 @@ pub const P2pService = struct {
 
     pub fn unsubscribeEthTopics(self: *Self, io: Io) !void {
         try self.gossip_adapter.unsubscribeEthTopics(io);
+    }
+
+    pub fn announceTrackedSubscriptionsToConnectedPeers(self: *Self, io: Io) void {
+        self.gossipsub.state_mu.lockUncancelable(io);
+        defer self.gossipsub.state_mu.unlock(io);
+
+        if (self.gossipsub.outbound_streams.count() == 0) return;
+
+        const frame = buildTrackedSubscriptionAnnouncementFrame(
+            self.allocator,
+            &self.gossipsub.tracked_subscriptions,
+        ) catch |err| {
+            log.warn("failed to encode tracked gossipsub subscription announcement: {}", .{err});
+            return;
+        } orelse return;
+        defer self.allocator.free(frame);
+
+        std.debug.assert(self.gossipsub.active_io == null);
+        self.gossipsub.active_io = io;
+        defer self.gossipsub.active_io = null;
+
+        var peer_iter = self.gossipsub.outbound_streams.keyIterator();
+        while (peer_iter.next()) |peer_key| {
+            if (!self.gossipsub.sendRpc(peer_key.*, frame)) {
+                log.warn("failed to announce tracked gossipsub subscriptions to peer {s}", .{peer_key.*});
+            }
+        }
     }
 
     pub fn gossipsubMetricsSnapshot(self: *Self, io: Io) GossipsubMetricsSnapshot {
@@ -883,6 +946,82 @@ pub const P2pService = struct {
 };
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
+
+test "P2pService: tracked subscription announcement frame is null when there are no topics" {
+    var tracked = std.StringHashMap(void).init(std.testing.allocator);
+    defer tracked.deinit();
+
+    const frame = try buildTrackedSubscriptionAnnouncementFrame(std.testing.allocator, &tracked);
+    try std.testing.expect(frame == null);
+}
+
+test "P2pService: tracked subscription announcement frame encodes tracked topics" {
+    var tracked = std.StringHashMap(void).init(std.testing.allocator);
+    defer tracked.deinit();
+    try tracked.put("/eth2/00000000/beacon_block/ssz_snappy", {});
+    try tracked.put("/eth2/00000000/beacon_attestation_1/ssz_snappy", {});
+
+    const frame = (try buildTrackedSubscriptionAnnouncementFrame(std.testing.allocator, &tracked)).?;
+    defer std.testing.allocator.free(frame);
+
+    var decoder = GossipsubFrameDecoder.init(std.testing.allocator);
+    defer decoder.deinit();
+    try decoder.feed(frame);
+
+    const payload = (try decoder.next()) orelse return error.ExpectedFrame;
+    defer std.testing.allocator.free(payload);
+
+    var reader = try GossipsubRpc.RPCReader.init(payload);
+    var saw_block = false;
+    var saw_attestation = false;
+    var count: usize = 0;
+    while (reader.subscriptionsNext()) |sub| {
+        try std.testing.expect(sub.getSubscribe());
+        const topic = sub.getTopicid();
+        if (std.mem.eql(u8, topic, "/eth2/00000000/beacon_block/ssz_snappy")) saw_block = true;
+        if (std.mem.eql(u8, topic, "/eth2/00000000/beacon_attestation_1/ssz_snappy")) saw_attestation = true;
+        count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 2), count);
+    try std.testing.expect(saw_block);
+    try std.testing.expect(saw_attestation);
+    try std.testing.expect((try decoder.next()) == null);
+}
+
+test "P2pService: tracked subscription announcement frame chunks snapshots larger than 64 topics" {
+    var tracked = std.StringHashMap(void).init(std.testing.allocator);
+    defer {
+        var iter = tracked.keyIterator();
+        while (iter.next()) |topic| std.testing.allocator.free(topic.*);
+        tracked.deinit();
+    }
+
+    for (0..65) |i| {
+        const topic = try std.fmt.allocPrint(std.testing.allocator, "/eth2/00000000/beacon_attestation_{d}/ssz_snappy", .{i});
+        try tracked.put(topic, {});
+    }
+
+    const frame = (try buildTrackedSubscriptionAnnouncementFrame(std.testing.allocator, &tracked)).?;
+    defer std.testing.allocator.free(frame);
+
+    var decoder = GossipsubFrameDecoder.init(std.testing.allocator);
+    defer decoder.deinit();
+    try decoder.feed(frame);
+
+    var frame_count: usize = 0;
+    var topic_count: usize = 0;
+    while (try decoder.next()) |payload| {
+        defer std.testing.allocator.free(payload);
+        frame_count += 1;
+        var reader = try GossipsubRpc.RPCReader.init(payload);
+        while (reader.subscriptionsNext()) |sub| {
+            try std.testing.expect(sub.getSubscribe());
+            topic_count += 1;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 2), frame_count);
+    try std.testing.expectEqual(@as(usize, 65), topic_count);
+}
 
 test "P2pService: gossipsub unique peer stats deduplicate topic memberships" {
     const allocator = std.testing.allocator;

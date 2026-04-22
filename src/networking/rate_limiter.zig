@@ -252,40 +252,48 @@ pub const ProtocolRateConfig = struct {
     burst: u32,
 };
 
-/// Default rate limits derived from the Ethereum consensus spec.
+/// Default rate limits aligned with production client behavior.
 ///
-/// Source: https://github.com/ethereum/consensus-specs/blob/dev/specs/phase0/p2p-interface.md#rate-limiting
+/// These match Lighthouse's default inbound RPC limiter quotas:
+/// - ping: 2 / 10s
+/// - metadata: 2 / 5s
+/// - status: 5 / 15s
+/// - goodbye: 1 / 10s
+/// - blocks-by-range: 1024 / 10s
+/// - blocks-by-root: 128 / 10s
+/// - blobs-by-range: 768 / 10s
+/// - blobs-by-root: 128 / 10s
 pub const DEFAULT_RATE_CONFIGS = blk: {
     var configs: [Protocol.COUNT]ProtocolRateConfig = undefined;
 
-    // Status: 5 requests/minute, burst 5
-    configs[@intFromEnum(Protocol.status)] = .{ .rate_per_second = 5.0 / 60.0, .burst = 5 };
+    // Status: 5 requests / 15 seconds, burst 5
+    configs[@intFromEnum(Protocol.status)] = .{ .rate_per_second = 5.0 / 15.0, .burst = 5 };
 
-    // Goodbye: 1 request/minute, burst 1
-    configs[@intFromEnum(Protocol.goodbye)] = .{ .rate_per_second = 1.0 / 60.0, .burst = 1 };
+    // Goodbye: 1 request / 10 seconds, burst 1
+    configs[@intFromEnum(Protocol.goodbye)] = .{ .rate_per_second = 1.0 / 10.0, .burst = 1 };
 
-    // Ping: 2 requests/minute, burst 2
-    configs[@intFromEnum(Protocol.ping)] = .{ .rate_per_second = 2.0 / 60.0, .burst = 2 };
+    // Ping: 2 requests / 10 seconds, burst 2
+    configs[@intFromEnum(Protocol.ping)] = .{ .rate_per_second = 2.0 / 10.0, .burst = 2 };
 
-    // Metadata: 2 requests/minute, burst 2
-    configs[@intFromEnum(Protocol.metadata)] = .{ .rate_per_second = 2.0 / 60.0, .burst = 2 };
+    // Metadata: 2 requests / 5 seconds, burst 2
+    configs[@intFromEnum(Protocol.metadata)] = .{ .rate_per_second = 2.0 / 5.0, .burst = 2 };
 
-    // BeaconBlocksByRange: 10 requests/minute, burst 10
-    configs[@intFromEnum(Protocol.beacon_blocks_by_range)] = .{ .rate_per_second = 10.0 / 60.0, .burst = 10 };
+    // BeaconBlocksByRange: 1024 response items / 10 seconds, burst 1024
+    configs[@intFromEnum(Protocol.beacon_blocks_by_range)] = .{ .rate_per_second = 1024.0 / 10.0, .burst = 1024 };
 
-    // BeaconBlocksByRoot: 128 requests/minute, burst 128
-    configs[@intFromEnum(Protocol.beacon_blocks_by_root)] = .{ .rate_per_second = 128.0 / 60.0, .burst = 128 };
+    // BeaconBlocksByRoot: 128 response items / 10 seconds, burst 128
+    configs[@intFromEnum(Protocol.beacon_blocks_by_root)] = .{ .rate_per_second = 128.0 / 10.0, .burst = 128 };
 
-    // BlobSidecarsByRange: 10 requests/minute, burst 10
-    configs[@intFromEnum(Protocol.blob_sidecars_by_range)] = .{ .rate_per_second = 10.0 / 60.0, .burst = 10 };
+    // BlobSidecarsByRange: 768 response items / 10 seconds, burst 768
+    configs[@intFromEnum(Protocol.blob_sidecars_by_range)] = .{ .rate_per_second = 768.0 / 10.0, .burst = 768 };
 
-    // BlobSidecarsByRoot: 128 requests/minute, burst 128
-    configs[@intFromEnum(Protocol.blob_sidecars_by_root)] = .{ .rate_per_second = 128.0 / 60.0, .burst = 128 };
+    // BlobSidecarsByRoot: 128 response items / 10 seconds, burst 128
+    configs[@intFromEnum(Protocol.blob_sidecars_by_root)] = .{ .rate_per_second = 128.0 / 10.0, .burst = 128 };
 
-    // DataColumnSidecarsByRange: 10 requests/minute, burst 10
+    // DataColumnSidecarsByRange: keep conservative request-count gating for now.
     configs[@intFromEnum(Protocol.data_column_sidecars_by_range)] = .{ .rate_per_second = 10.0 / 60.0, .burst = 10 };
 
-    // DataColumnSidecarsByRoot: 128 requests/minute, burst 128
+    // DataColumnSidecarsByRoot: keep conservative request-count gating for now.
     configs[@intFromEnum(Protocol.data_column_sidecars_by_root)] = .{ .rate_per_second = 128.0 / 60.0, .burst = 128 };
 
     break :blk configs;
@@ -834,8 +842,20 @@ test "RateLimiter: replenishment over time" {
     _ = try limiter.allowRequest("peer-1", .ping, 0);
     try testing.expect(!(try limiter.allowRequest("peer-1", .ping, 0)));
 
-    const two_minutes_ns: i128 = 2 * 60 * std.time.ns_per_s;
-    try testing.expect(try limiter.allowRequest("peer-1", .ping, two_minutes_ns));
+    const five_seconds_ns: i128 = 5 * std.time.ns_per_s;
+    try testing.expect(try limiter.allowRequest("peer-1", .ping, five_seconds_ns));
+}
+
+test "RateLimiter: default ping quota matches Lighthouse-compatible 2 requests per 10 seconds" {
+    var limiter = RateLimiter.init(testing.allocator);
+    defer limiter.deinit();
+
+    _ = try limiter.allowRequest("peer-1", .ping, 0);
+    _ = try limiter.allowRequest("peer-1", .ping, 0);
+    try testing.expect(!(try limiter.allowRequest("peer-1", .ping, 0)));
+
+    const five_seconds_ns: i128 = 5 * std.time.ns_per_s;
+    try testing.expect(try limiter.allowRequest("peer-1", .ping, five_seconds_ns));
 }
 
 test "RateLimiter: global rate limit" {
@@ -880,18 +900,22 @@ test "RateLimiter: backpressure provides wait time" {
 }
 
 test "RateLimiter: multi-token consumption for range requests" {
-    var limiter = RateLimiter.init(testing.allocator);
+    var limiter = RateLimiter.initWithConfigs(
+        testing.allocator,
+        &DEFAULT_RATE_CONFIGS,
+        .{ .rate_per_second = 10_000.0, .burst = 10_000 },
+    );
     defer limiter.deinit();
 
-    // beacon_blocks_by_range has burst=10.
-    // Consume 8 tokens at once.
-    try testing.expect((try limiter.allowRequestN("peer-1", .beacon_blocks_by_range, 8, 0)).isAllowed());
+    // beacon_blocks_by_range defaults to the Lighthouse-compatible 1024-item burst.
+    // Use a high global limit so this test isolates per-peer range-token behavior.
+    try testing.expect((try limiter.allowRequestN("peer-1", .beacon_blocks_by_range, 800, 0)).isAllowed());
 
-    // Only 2 tokens left — requesting 5 should fail.
-    try testing.expect(!(try limiter.allowRequestN("peer-1", .beacon_blocks_by_range, 5, 0)).isAllowed());
+    // Only 224 per-peer tokens remain — requesting 300 should fail.
+    try testing.expect(!(try limiter.allowRequestN("peer-1", .beacon_blocks_by_range, 300, 0)).isAllowed());
 
-    // But 2 should still work.
-    try testing.expect((try limiter.allowRequestN("peer-1", .beacon_blocks_by_range, 2, 0)).isAllowed());
+    // But consuming the remaining 224 should still work.
+    try testing.expect((try limiter.allowRequestN("peer-1", .beacon_blocks_by_range, 224, 0)).isAllowed());
 }
 
 test "RateLimiter: global token count" {

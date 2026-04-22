@@ -579,6 +579,10 @@ pub const DiscoveryService = struct {
         const addr_ip4 = addressFromEnr(enr, .ip4);
         const addr_ip6 = addressFromEnr(enr, .ip6);
         if (addr_ip4 == null and addr_ip6 == null) return;
+        if (self.isSelfDiscoveryCandidate(node_id, addr_ip4, addr_ip6)) {
+            self.recordDiscoveredStatus(.filtered_self);
+            return;
+        }
 
         // Generate a string key from node_id (hex).
         const key_hex = std.fmt.bytesToHex(node_id, .lower);
@@ -651,6 +655,32 @@ pub const DiscoveryService = struct {
         }
     }
 
+    fn isSelfDiscoveryCandidate(self: *const DiscoveryService, node_id: NodeId, addr_ip4: ?Address, addr_ip6: ?Address) bool {
+        if (std.mem.eql(u8, &node_id, &self.service.protocol.config.local_node_id)) return true;
+        if (addr_ip4) |addr| {
+            if (self.matchesAdvertisedSelfAddress(addr)) return true;
+        }
+        if (addr_ip6) |addr| {
+            if (self.matchesAdvertisedSelfAddress(addr)) return true;
+        }
+        return false;
+    }
+
+    fn matchesAdvertisedSelfAddress(self: *const DiscoveryService, addr: Address) bool {
+        return switch (addr) {
+            .ip4 => |ip4| blk: {
+                const self_ip = advertisedIp4(&self.config, &self.service) orelse break :blk false;
+                const self_port = self.config.enr_tcp orelse self.config.p2p_port;
+                break :blk std.mem.eql(u8, &ip4.bytes, &self_ip) and ip4.port == self_port;
+            },
+            .ip6 => |ip6| blk: {
+                const self_ip = advertisedIp6(&self.config, &self.service) orelse break :blk false;
+                const self_port = self.config.enr_tcp6 orelse self.config.p2p_port6 orelse self.config.p2p_port;
+                break :blk std.mem.eql(u8, &ip6.bytes, &self_ip) and ip6.port == self_port;
+            },
+        };
+    }
+
     fn evaluateCandidate(
         self: *DiscoveryService,
         node_id: NodeId,
@@ -662,7 +692,7 @@ pub const DiscoveryService = struct {
         fork_digest: ?[4]u8,
         source: DiscoverySource,
     ) bool {
-        if (std.mem.eql(u8, &node_id, &self.service.protocol.config.local_node_id)) {
+        if (self.isSelfDiscoveryCandidate(node_id, addr_ip4, addr_ip6)) {
             self.recordDiscoveredStatus(.filtered_self);
             return false;
         }
@@ -731,8 +761,12 @@ pub const DiscoveryService = struct {
         return true;
     }
 
-    fn filterDiscoveredEvent(self: *const DiscoveryService, discovered: *const discv5.service.DiscoveredEnrEvent) bool {
+    fn filterDiscoveredEvent(self: *DiscoveryService, discovered: *const discv5.service.DiscoveredEnrEvent) bool {
         if (discovered.addr_ip4 == null and discovered.addr_ip6 == null) return false;
+        if (self.isSelfDiscoveryCandidate(discovered.node_id, discovered.addr_ip4, discovered.addr_ip6)) {
+            self.recordDiscoveredStatus(.filtered_self);
+            return false;
+        }
         if (discovered.fork_digest) |fd| {
             if (!std.mem.eql(u8, &fd, &self.current_fork_digest)) return false;
         }
@@ -740,6 +774,7 @@ pub const DiscoveryService = struct {
     }
 
     fn recordDiscoveredEvent(self: *DiscoveryService, discovered: discv5.service.DiscoveredEnrEvent) void {
+        if (self.isSelfDiscoveryCandidate(discovered.node_id, discovered.addr_ip4, discovered.addr_ip6)) return;
         const fd = discovered.fork_digest orelse return;
         const effective_custody_group_count = discovered.custody_group_count orelse self.config.default_custody_group_count;
         const key_hex = std.fmt.bytesToHex(discovered.node_id, .lower);
@@ -2457,6 +2492,79 @@ test "DiscoveryService: late ENR is surfaced on a later discovery pass while dem
     try std.testing.expectEqual(@as(usize, 1), peers.len);
     try std.testing.expectEqualSlices(u8, &node_id, &peers[0].node_id);
     try std.testing.expectEqual(DiscoverySource.subnet_query, peers[0].source);
+}
+
+test "DiscoveryService: discovered event with local advertised dial address is filtered as self" {
+    const fork_digest = [4]u8{ 0x6a, 0x95, 0xa1, 0xb0 };
+    const secret_key = discv5.hex.hexToBytesComptime(32, "b71c71a67e1177ad4e901695e1b4b9ee17ae16c6668d313eac2f96dbcda3f291");
+    var svc = try DiscoveryService.init(std.testing.io, std.testing.allocator, .{
+        .listen_port = 0,
+        .secret_key = secret_key,
+        .enr_ip = .{ 172, 16, 8, 20 },
+        .p2p_port = 9000,
+        .fork_digest = fork_digest,
+    });
+    defer svc.deinit();
+
+    const event = discv5.service.DiscoveredEnrEvent{
+        .source_peer_id = [_]u8{0x10} ** 32,
+        .source_peer_addr = .{ .ip4 = .{ .bytes = .{ 1, 1, 1, 1 }, .port = 9001 } },
+        .lookup_id = 1,
+        .node_id = [_]u8{0x22} ** 32,
+        .addr_ip4 = .{ .ip4 = .{ .bytes = .{ 172, 16, 8, 20 }, .port = 9000 } },
+        .addr_ip6 = null,
+        .pubkey = [_]u8{0x33} ** 33,
+        .has_quic = true,
+        .attnets = [_]u8{0} ** 8,
+        .syncnets = [_]u8{0} ** 1,
+        .custody_group_count = null,
+        .fork_digest = fork_digest,
+    };
+
+    try std.testing.expect(!svc.filterDiscoveredEvent(&event));
+    try std.testing.expectEqual(@as(usize, 0), svc.enr_cache.count());
+    try std.testing.expectEqual(@as(u64, 1), svc.discovered_status_counts[discoveredStatusIndex(.filtered_self)]);
+}
+
+test "DiscoveryService: stale cached ENR for local advertised dial address is never surfaced" {
+    const fork_digest = [4]u8{ 0x6a, 0x95, 0xa1, 0xb0 };
+    const secret_key = discv5.hex.hexToBytesComptime(32, "b71c71a67e1177ad4e901695e1b4b9ee17ae16c6668d313eac2f96dbcda3f291");
+    var svc = try DiscoveryService.init(std.testing.io, std.testing.allocator, .{
+        .listen_port = 0,
+        .target_peers = 5,
+        .secret_key = secret_key,
+        .enr_ip = .{ 172, 16, 8, 20 },
+        .p2p_port = 9000,
+        .fork_digest = fork_digest,
+    });
+    defer svc.deinit();
+    var pm = initTestPeerManager(5);
+    defer pm.deinit();
+
+    const stale_node_id = [_]u8{0x44} ** 32;
+    const key_hex = std.fmt.bytesToHex(stale_node_id, .lower);
+    const key = try svc.allocator.dupe(u8, &key_hex);
+    try svc.enr_cache.put(key, .{
+        .node_id = stale_node_id,
+        .addr_ip4 = .{ .ip4 = .{ .bytes = .{ 172, 16, 8, 20 }, .port = 9000 } },
+        .addr_ip6 = null,
+        .pubkey = [_]u8{0x55} ** 33,
+        .has_quic = true,
+        .attnets = [_]u8{0} ** 8,
+        .syncnets = [_]u8{0} ** 1,
+        .custody_group_count = null,
+        .custody_columns = CustodyColumnsBitfield.initEmpty(),
+        .fork_digest = fork_digest,
+    });
+
+    svc.requestMorePeers(1);
+    svc.discoverPeers(&pm);
+
+    const peers = svc.drainDiscoveredPeers(&pm);
+    defer if (peers.len > 0) svc.allocator.free(peers);
+
+    try std.testing.expectEqual(@as(usize, 0), peers.len);
+    try std.testing.expectEqual(@as(u64, 1), svc.discovered_status_counts[discoveredStatusIndex(.filtered_self)]);
 }
 
 test "DiscoveredPeer struct layout" {

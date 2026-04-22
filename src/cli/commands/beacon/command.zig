@@ -1236,7 +1236,7 @@ fn runFromPrepared(io: Io, allocator: Allocator, inputs: *const ResolvedRunInput
         const finish_ms = elapsedMs(io, finish_started_ns);
         observeBootstrapMs(handles.beacon_metrics, bootstrap_source, .finish, finish_ms);
         defer node.deinit();
-        if (inputs.custom_beacon_config) |cfg| cfg.genesis_validator_root = node.genesis_validators_root;
+        if (inputs.custom_beacon_config) |cfg| cfg.* = cfg.withGenesisValidatorRoot(node.genesis_validators_root);
         const total_ms = elapsedMs(io, total_started_ns);
         observeBootstrapMs(handles.beacon_metrics, bootstrap_source, .total, total_ms);
         scoped_log.info("Initialized from checkpoint sync URL at slot {d} (finish_ms={d})", .{ cp_slot, finish_ms });
@@ -1295,7 +1295,7 @@ fn runFromPrepared(io: Io, allocator: Allocator, inputs: *const ResolvedRunInput
         const finish_ms = elapsedMs(io, finish_started_ns);
         observeBootstrapMs(handles.beacon_metrics, bootstrap_source, .finish, finish_ms);
         defer node.deinit();
-        if (inputs.custom_beacon_config) |cfg| cfg.genesis_validator_root = node.genesis_validators_root;
+        if (inputs.custom_beacon_config) |cfg| cfg.* = cfg.withGenesisValidatorRoot(node.genesis_validators_root);
         const total_ms = elapsedMs(io, total_started_ns);
         observeBootstrapMs(handles.beacon_metrics, bootstrap_source, .total, total_ms);
         scoped_log.info("Initialized from checkpoint file at slot {d} (finish_ms={d})", .{ cp_slot, finish_ms });
@@ -1355,7 +1355,7 @@ fn runFromPrepared(io: Io, allocator: Allocator, inputs: *const ResolvedRunInput
         const finish_ms = elapsedMs(io, finish_started_ns);
         observeBootstrapMs(handles.beacon_metrics, bootstrap_source, .finish, finish_ms);
         defer node.deinit();
-        if (inputs.custom_beacon_config) |cfg| cfg.genesis_validator_root = node.genesis_validators_root;
+        if (inputs.custom_beacon_config) |cfg| cfg.* = cfg.withGenesisValidatorRoot(node.genesis_validators_root);
         const total_ms = elapsedMs(io, total_started_ns);
         observeBootstrapMs(handles.beacon_metrics, bootstrap_source, .total, total_ms);
         scoped_log.info("Resumed from DB state at slot {d} (finish_ms={d})", .{ db_slot, finish_ms });
@@ -1393,7 +1393,7 @@ fn runFromPrepared(io: Io, allocator: Allocator, inputs: *const ResolvedRunInput
         const finish_ms = elapsedMs(io, finish_started_ns);
         observeBootstrapMs(handles.beacon_metrics, bootstrap_source, .finish, finish_ms);
         defer node.deinit();
-        if (inputs.custom_beacon_config) |cfg| cfg.genesis_validator_root = node.genesis_validators_root;
+        if (inputs.custom_beacon_config) |cfg| cfg.* = cfg.withGenesisValidatorRoot(node.genesis_validators_root);
         const total_ms = elapsedMs(io, total_started_ns);
         observeBootstrapMs(handles.beacon_metrics, bootstrap_source, .total, total_ms);
         scoped_log.info("Initialized from minimal genesis state", .{});

@@ -20,6 +20,8 @@ pub const GossipTopicType = gossip_topics.GossipTopicType;
 const snappy = @import("snappy").raw;
 const libp2p = @import("zig-libp2p");
 const GossipsubService = libp2p.gossipsub.Service;
+const FrameDecoder = libp2p.gossipsub.FrameDecoder;
+const encodeGossipsubRpc = libp2p.gossipsub.encodeRpc;
 const rpc = libp2p.protobuf.rpc;
 
 const log = std.log.scoped(.eth_gossip);
@@ -56,6 +58,41 @@ fn uncompressSnappyBlock(allocator: Allocator, compressed_data: []const u8) ?[]u
     }
 
     return uncompressed;
+}
+
+fn announceSubscriptionDeltaToConnectedPeers(
+    allocator: Allocator,
+    gossipsub: *GossipsubService,
+    io: Io,
+    topic: []const u8,
+    subscribe: bool,
+) void {
+    gossipsub.state_mu.lockUncancelable(io);
+    defer gossipsub.state_mu.unlock(io);
+
+    if (gossipsub.outbound_streams.count() == 0) return;
+
+    var sub_opts = [_]?rpc.RPC.SubOpts{.{ .subscribe = subscribe, .topicid = topic }};
+    var rpc_msg = rpc.RPC{ .subscriptions = &sub_opts };
+    const frame = encodeGossipsubRpc(allocator, &rpc_msg) catch |err| {
+        log.warn("failed to encode gossipsub subscription delta for topic {s}: {}", .{ topic, err });
+        return;
+    };
+    defer allocator.free(frame);
+
+    std.debug.assert(gossipsub.active_io == null);
+    gossipsub.active_io = io;
+    defer gossipsub.active_io = null;
+
+    var peer_iter = gossipsub.outbound_streams.keyIterator();
+    while (peer_iter.next()) |peer_key| {
+        if (!gossipsub.sendRpc(peer_key.*, frame)) {
+            log.warn(
+                "failed to broadcast gossipsub subscription delta topic={s} subscribe={} peer={s}",
+                .{ topic, subscribe, peer_key.* },
+            );
+        }
+    }
 }
 
 pub fn computeMessageId(allocator: Allocator, compressed_data: []const u8) !MessageId {
@@ -283,6 +320,7 @@ pub const EthGossipAdapter = struct {
         errdefer _ = self.subscribed_topics.remove(topic_str);
 
         try self.gossipsub.subscribe(io, topic_str);
+        announceSubscriptionDeltaToConnectedPeers(self.allocator, self.gossipsub, io, topic_str, true);
     }
 
     fn unsubscribeTopicTypeForDigest(
@@ -297,6 +335,7 @@ pub const EthGossipAdapter = struct {
 
         const owned_topic = self.subscribed_topics.getKey(topic_slice) orelse return;
         try self.gossipsub.unsubscribe(io, owned_topic);
+        announceSubscriptionDeltaToConnectedPeers(self.allocator, self.gossipsub, io, owned_topic, false);
         _ = self.subscribed_topics.remove(owned_topic);
         self.allocator.free(owned_topic);
     }
@@ -313,6 +352,7 @@ pub const EthGossipAdapter = struct {
         var iter = self.subscribed_topics.iterator();
         while (iter.next()) |entry| {
             try self.gossipsub.unsubscribe(io, entry.key_ptr.*);
+            announceSubscriptionDeltaToConnectedPeers(self.allocator, self.gossipsub, io, entry.key_ptr.*, false);
             self.allocator.free(entry.key_ptr.*);
         }
         self.subscribed_topics.clearRetainingCapacity();
@@ -390,6 +430,171 @@ const TestAdapter = struct {
         allocator.destroy(self);
     }
 };
+
+fn expectSubscriptionDeltaWrites(
+    allocator: Allocator,
+    bytes: []const u8,
+    expected_topics: []const []const u8,
+    want_subscribe: bool,
+) !void {
+    var decoder = FrameDecoder.init(allocator);
+    defer decoder.deinit();
+    try decoder.feed(bytes);
+
+    var seen_count: usize = 0;
+    while (try decoder.next()) |frame| {
+        defer allocator.free(frame);
+        var reader = try rpc.RPCReader.init(frame);
+        const sub = reader.subscriptionsNext() orelse return error.ExpectedSubscription;
+        try testing.expectEqual(want_subscribe, sub.getSubscribe());
+        try testing.expect(reader.subscriptionsNext() == null);
+
+        const topic = sub.getTopicid();
+        var matched = false;
+        for (expected_topics) |expected_topic| {
+            if (std.mem.eql(u8, topic, expected_topic)) {
+                matched = true;
+                break;
+            }
+        }
+        try testing.expect(matched);
+        seen_count += 1;
+    }
+
+    try testing.expectEqual(expected_topics.len, seen_count);
+}
+
+fn expectSubscriptionSnapshotWrites(
+    allocator: Allocator,
+    bytes: []const u8,
+    expected_topics: *const std.StringHashMapUnmanaged(void),
+) !void {
+    var decoder = FrameDecoder.init(allocator);
+    defer decoder.deinit();
+    try decoder.feed(bytes);
+
+    var seen_topics = std.StringHashMapUnmanaged(void).empty;
+    defer {
+        var iter = seen_topics.keyIterator();
+        while (iter.next()) |topic| allocator.free(topic.*);
+        seen_topics.deinit(allocator);
+    }
+
+    while (try decoder.next()) |frame| {
+        defer allocator.free(frame);
+        var reader = try rpc.RPCReader.init(frame);
+        while (reader.subscriptionsNext()) |sub| {
+            try testing.expect(sub.getSubscribe());
+            const topic = sub.getTopicid();
+            try testing.expect(expected_topics.contains(topic));
+            const owned_topic = try allocator.dupe(u8, topic);
+            errdefer allocator.free(owned_topic);
+            const gop = try seen_topics.getOrPut(allocator, owned_topic);
+            if (gop.found_existing) {
+                allocator.free(owned_topic);
+            }
+        }
+    }
+
+    try testing.expectEqual(expected_topics.count(), seen_topics.count());
+}
+
+test "EthGossipAdapter: subscribeEthTopics broadcasts live subscription updates to connected peers" {
+    const allocator = testing.allocator;
+    const t = try TestAdapter.create(allocator);
+    defer t.destroy(allocator);
+
+    const TestStream = struct {
+        const Self = @This();
+
+        writes: *std.ArrayList(u8),
+
+        pub fn read(_: *Self, _: Io, _: []u8) !usize {
+            return 0;
+        }
+
+        pub fn write(self: *Self, _: Io, data: []const u8) !usize {
+            try self.writes.appendSlice(testing.allocator, data);
+            return data.len;
+        }
+
+        pub fn closeRead(_: *Self, _: Io) void {}
+        pub fn closeWrite(_: *Self, _: Io) void {}
+        pub fn close(_: *Self, _: Io) void {}
+        pub fn deinit(_: *Self) void {}
+
+        pub fn detachOwnedStream(self: *Self) Self {
+            return self.*;
+        }
+    };
+
+    var writes: std.ArrayList(u8) = .empty;
+    defer writes.deinit(allocator);
+    var stream = TestStream{ .writes = &writes };
+    try t.gossipsub.handleOutbound(std.testing.io, &stream, .{ .peer_id = @as(?[]const u8, "peer-1") });
+
+    try t.adapter.subscribeEthTopics(std.testing.io);
+
+    var expected_topics: [global_topic_types.len][]const u8 = undefined;
+    for (global_topic_types, 0..) |topic_type, i| {
+        var buf: [gossip_topics.MAX_TOPIC_LENGTH]u8 = undefined;
+        const topic = gossip_topics.formatTopic(&buf, .{ 0xab, 0xcd, 0xef, 0x01 }, topic_type, null);
+        expected_topics[i] = try allocator.dupe(u8, topic);
+    }
+    defer for (expected_topics) |topic| allocator.free(topic);
+
+    try expectSubscriptionDeltaWrites(allocator, writes.items, &expected_topics, true);
+}
+
+test "EthGossipAdapter: unsubscribeEthTopics broadcasts live unsubscription updates to connected peers" {
+    const allocator = testing.allocator;
+    const t = try TestAdapter.create(allocator);
+    defer t.destroy(allocator);
+
+    const TestStream = struct {
+        const Self = @This();
+
+        writes: *std.ArrayList(u8),
+
+        pub fn read(_: *Self, _: Io, _: []u8) !usize {
+            return 0;
+        }
+
+        pub fn write(self: *Self, _: Io, data: []const u8) !usize {
+            try self.writes.appendSlice(testing.allocator, data);
+            return data.len;
+        }
+
+        pub fn closeRead(_: *Self, _: Io) void {}
+        pub fn closeWrite(_: *Self, _: Io) void {}
+        pub fn close(_: *Self, _: Io) void {}
+        pub fn deinit(_: *Self) void {}
+
+        pub fn detachOwnedStream(self: *Self) Self {
+            return self.*;
+        }
+    };
+
+    var writes: std.ArrayList(u8) = .empty;
+    defer writes.deinit(allocator);
+    var stream = TestStream{ .writes = &writes };
+    try t.gossipsub.handleOutbound(std.testing.io, &stream, .{ .peer_id = @as(?[]const u8, "peer-1") });
+
+    try t.adapter.subscribeEthTopics(std.testing.io);
+    writes.clearRetainingCapacity();
+
+    try t.adapter.unsubscribeEthTopics(std.testing.io);
+
+    var expected_topics: [global_topic_types.len][]const u8 = undefined;
+    for (global_topic_types, 0..) |topic_type, i| {
+        var buf: [gossip_topics.MAX_TOPIC_LENGTH]u8 = undefined;
+        const topic = gossip_topics.formatTopic(&buf, .{ 0xab, 0xcd, 0xef, 0x01 }, topic_type, null);
+        expected_topics[i] = try allocator.dupe(u8, topic);
+    }
+    defer for (expected_topics) |topic| allocator.free(topic);
+
+    try expectSubscriptionDeltaWrites(allocator, writes.items, &expected_topics, false);
+}
 
 test "EthGossipAdapter: subscribeEthTopics formats correct topic strings" {
     const allocator = testing.allocator;

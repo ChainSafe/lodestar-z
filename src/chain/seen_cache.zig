@@ -43,8 +43,19 @@ pub const SyncContributionDataKey = struct {
     subcommittee_index: u64,
 };
 
+pub const AggregatedAttestationKey = struct {
+    epoch: Epoch,
+    committee_index: u64,
+    attestation_data_root: Root,
+};
+
 const SyncContributionAggregationInfo = struct {
     aggregation_bits: [SYNC_SUBCOMMITTEE_BYTES]u8,
+    true_bit_count: u32,
+};
+
+const AggregatedAttestationInfo = struct {
+    aggregation_bits: []u8,
     true_bit_count: u32,
 };
 
@@ -61,6 +72,9 @@ pub const SeenCache = struct {
     /// Seen aggregate attestation selection proofs.
     /// Key: { index: u64, epoch: u64 } — struct avoids truncation for index > 2^32.
     seen_aggregators: std.AutoHashMap(AggregatorKey, void),
+
+    /// Seen aggregate attestation participant supersets keyed by epoch + committee + attestation data root.
+    seen_aggregated_attestations: std.AutoHashMap(AggregatedAttestationKey, std.ArrayListUnmanaged(AggregatedAttestationInfo)),
 
     /// Seen voluntary exits, keyed by validator index.
     seen_exits: std.AutoHashMap(ValidatorIndex, void),
@@ -89,6 +103,7 @@ pub const SeenCache = struct {
             .allocator = allocator,
             .seen_blocks = std.AutoHashMap([32]u8, Slot).init(allocator),
             .seen_aggregators = std.AutoHashMap(AggregatorKey, void).init(allocator),
+            .seen_aggregated_attestations = std.AutoHashMap(AggregatedAttestationKey, std.ArrayListUnmanaged(AggregatedAttestationInfo)).init(allocator),
             .seen_exits = std.AutoHashMap(ValidatorIndex, void).init(allocator),
             .seen_proposer_slashings = std.AutoHashMap(ValidatorIndex, void).init(allocator),
             .seen_attester_slashings = std.AutoHashMap([32]u8, void).init(allocator),
@@ -102,6 +117,8 @@ pub const SeenCache = struct {
     pub fn deinit(self: *SeenCache) void {
         self.seen_blocks.deinit();
         self.seen_aggregators.deinit();
+        self.deinitAggregatedAttestationLists();
+        self.seen_aggregated_attestations.deinit();
         self.seen_exits.deinit();
         self.seen_proposer_slashings.deinit();
         self.seen_attester_slashings.deinit();
@@ -155,6 +172,67 @@ pub const SeenCache = struct {
 
     pub fn markAggregatorSeen(self: *SeenCache, aggregator_index: ValidatorIndex, epoch: Epoch) !void {
         try self.seen_aggregators.put(aggregatorKey(aggregator_index, epoch), {});
+    }
+
+    fn aggregatedAttestationKey(
+        epoch: Epoch,
+        committee_index: u64,
+        attestation_data_root: Root,
+    ) AggregatedAttestationKey {
+        return .{
+            .epoch = epoch,
+            .committee_index = committee_index,
+            .attestation_data_root = attestation_data_root,
+        };
+    }
+
+    pub fn aggregatedAttestationParticipantsKnown(
+        self: *const SeenCache,
+        epoch: Epoch,
+        committee_index: u64,
+        attestation_data_root: Root,
+        aggregation_bits: []const u8,
+    ) bool {
+        const seen = self.seen_aggregated_attestations.get(
+            aggregatedAttestationKey(epoch, committee_index, attestation_data_root),
+        ) orelse return false;
+
+        for (seen.items) |entry| {
+            if (entry.aggregation_bits.len != aggregation_bits.len) continue;
+            if (isBitSupersetOrEqual(entry.aggregation_bits, aggregation_bits)) return true;
+        }
+
+        return false;
+    }
+
+    pub fn markAggregatedAttestationSeen(
+        self: *SeenCache,
+        epoch: Epoch,
+        committee_index: u64,
+        attestation_data_root: Root,
+        aggregation_bits: []const u8,
+        true_bit_count: u32,
+    ) !void {
+        const gop = try self.seen_aggregated_attestations.getOrPut(
+            aggregatedAttestationKey(epoch, committee_index, attestation_data_root),
+        );
+        if (!gop.found_existing) {
+            gop.value_ptr.* = .empty;
+        }
+
+        const owned_bits = try self.allocator.dupe(u8, aggregation_bits);
+        errdefer self.allocator.free(owned_bits);
+
+        const entry: AggregatedAttestationInfo = .{
+            .aggregation_bits = owned_bits,
+            .true_bit_count = true_bit_count,
+        };
+
+        var insert_index: usize = 0;
+        while (insert_index < gop.value_ptr.items.len) : (insert_index += 1) {
+            if (true_bit_count > gop.value_ptr.items[insert_index].true_bit_count) break;
+        }
+        try gop.value_ptr.insert(self.allocator, insert_index, entry);
     }
 
     // -- Voluntary exits ------------------------------------------------------
@@ -368,15 +446,19 @@ pub const SeenCache = struct {
         self.seen_attester_slashings.clearRetainingCapacity();
     }
 
-    /// Clear all aggregator entries (call at epoch boundaries).
+    /// Clear all aggregate-related dedup state at epoch boundaries.
     pub fn pruneAggregators(self: *SeenCache) void {
         self.seen_aggregators.clearRetainingCapacity();
+        self.clearAggregatedAttestationListsRetainingCapacity();
+        self.seen_aggregated_attestations.clearRetainingCapacity();
     }
 
     /// Clear the entire cache (useful in tests).
     pub fn reset(self: *SeenCache) void {
         self.seen_blocks.clearRetainingCapacity();
         self.seen_aggregators.clearRetainingCapacity();
+        self.clearAggregatedAttestationListsRetainingCapacity();
+        self.seen_aggregated_attestations.clearRetainingCapacity();
         self.seen_exits.clearRetainingCapacity();
         self.seen_proposer_slashings.clearRetainingCapacity();
         self.seen_attester_slashings.clearRetainingCapacity();
@@ -385,6 +467,26 @@ pub const SeenCache = struct {
         self.seen_sync_contribution_aggregators.clearRetainingCapacity();
         self.clearSyncContributionListsRetainingCapacity();
         self.seen_sync_contributions.clearRetainingCapacity();
+    }
+
+    fn deinitAggregatedAttestationLists(self: *SeenCache) void {
+        var it = self.seen_aggregated_attestations.iterator();
+        while (it.next()) |entry| {
+            for (entry.value_ptr.items) |info| {
+                self.allocator.free(info.aggregation_bits);
+            }
+            entry.value_ptr.deinit(self.allocator);
+        }
+    }
+
+    fn clearAggregatedAttestationListsRetainingCapacity(self: *SeenCache) void {
+        var it = self.seen_aggregated_attestations.iterator();
+        while (it.next()) |entry| {
+            for (entry.value_ptr.items) |info| {
+                self.allocator.free(info.aggregation_bits);
+            }
+            entry.value_ptr.deinit(self.allocator);
+        }
     }
 
     fn deinitSyncContributionLists(self: *SeenCache) void {
@@ -433,6 +535,39 @@ test "SeenCache: aggregator dedup" {
 
     // Same validator, different epoch → not seen.
     try std.testing.expect(!cache.hasSeenAggregator(5, 11));
+}
+
+test "SeenCache: aggregate participant superset dedup" {
+    const allocator = std.testing.allocator;
+    var cache = SeenCache.init(allocator);
+    defer cache.deinit();
+
+    const epoch: Epoch = 10;
+    const committee_index: u64 = 2;
+    const attestation_data_root = [_]u8{0xAB} ** 32;
+
+    try std.testing.expect(!cache.aggregatedAttestationParticipantsKnown(epoch, committee_index, attestation_data_root, &[_]u8{0x01}));
+    try cache.markAggregatedAttestationSeen(epoch, committee_index, attestation_data_root, &[_]u8{0x03}, 2);
+    try std.testing.expect(cache.aggregatedAttestationParticipantsKnown(epoch, committee_index, attestation_data_root, &[_]u8{0x01}));
+    try std.testing.expect(cache.aggregatedAttestationParticipantsKnown(epoch, committee_index, attestation_data_root, &[_]u8{0x03}));
+    try std.testing.expect(!cache.aggregatedAttestationParticipantsKnown(epoch, committee_index, attestation_data_root, &[_]u8{0x04}));
+}
+
+test "SeenCache: pruneAggregators clears aggregate superset dedup" {
+    const allocator = std.testing.allocator;
+    var cache = SeenCache.init(allocator);
+    defer cache.deinit();
+
+    const epoch: Epoch = 10;
+    const committee_index: u64 = 2;
+    const attestation_data_root = [_]u8{0xCD} ** 32;
+
+    try cache.markAggregatorSeen(5, epoch);
+    try cache.markAggregatedAttestationSeen(epoch, committee_index, attestation_data_root, &[_]u8{0x03}, 2);
+    cache.pruneAggregators();
+
+    try std.testing.expect(!cache.hasSeenAggregator(5, epoch));
+    try std.testing.expect(!cache.aggregatedAttestationParticipantsKnown(epoch, committee_index, attestation_data_root, &[_]u8{0x01}));
 }
 
 test "SeenCache: exit dedup" {

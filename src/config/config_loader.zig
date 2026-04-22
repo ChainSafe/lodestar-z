@@ -56,7 +56,8 @@ pub fn loadConfigFromYaml(
         var in_blob_schedule = false;
         var current_epoch: ?u64 = null;
         while (line_iter.next()) |line| {
-            const trimmed = std.mem.trim(u8, line, " \t\r");
+            const sanitized_line = stripInlineComment(line);
+            const trimmed = std.mem.trim(u8, sanitized_line, " \t\r");
             if (std.mem.startsWith(u8, trimmed, "BLOB_SCHEDULE:")) {
                 in_blob_schedule = true;
                 continue;
@@ -303,10 +304,11 @@ fn filterComplexYamlValues(alloc: Allocator, yaml_bytes: []const u8) ![]const u8
     var lines = std.mem.splitScalar(u8, yaml_bytes, '\n');
     var first = true;
     while (lines.next()) |line| {
+        const sanitized_line = stripInlineComment(line);
         // Check if the value part (after first ':') starts with '[' after trimming.
         const skip = blk: {
-            if (std.mem.indexOfScalar(u8, line, ':')) |colon_idx| {
-                const after_colon = line[colon_idx + 1 ..];
+            if (std.mem.indexOfScalar(u8, sanitized_line, ':')) |colon_idx| {
+                const after_colon = sanitized_line[colon_idx + 1 ..];
                 var val_start: usize = 0;
                 while (val_start < after_colon.len and (after_colon[val_start] == ' ' or after_colon[val_start] == '\t')) {
                     val_start += 1;
@@ -317,10 +319,41 @@ fn filterComplexYamlValues(alloc: Allocator, yaml_bytes: []const u8) ![]const u8
         };
         if (skip) continue;
         if (!first) try out.append(alloc, '\n');
-        try out.appendSlice(alloc, line);
+        try out.appendSlice(alloc, sanitized_line);
         first = false;
     }
     return out.items;
+}
+
+fn stripInlineComment(line: []const u8) []const u8 {
+    var in_single_quote = false;
+    var in_double_quote = false;
+    var saw_non_whitespace = false;
+
+    for (line, 0..) |ch, idx| {
+        switch (ch) {
+            '\'' => {
+                if (!in_double_quote) in_single_quote = !in_single_quote;
+            },
+            '"' => {
+                if (!in_single_quote) in_double_quote = !in_double_quote;
+            },
+            '#' => {
+                const preceded_by_whitespace = idx > 0 and std.ascii.isWhitespace(line[idx - 1]);
+                if (!in_single_quote and !in_double_quote and saw_non_whitespace and preceded_by_whitespace) {
+                    var end = idx;
+                    while (end > 0 and (line[end - 1] == ' ' or line[end - 1] == '\t')) {
+                        end -= 1;
+                    }
+                    return line[0..end];
+                }
+            },
+            else => {},
+        }
+        if (!std.ascii.isWhitespace(ch)) saw_non_whitespace = true;
+    }
+
+    return line;
 }
 
 // ---------------------------------------------------------------------------
@@ -408,4 +441,38 @@ test "loadConfigFromYaml kurtosis" {
     try testing.expectEqual(@as(u64, 6), result.SECONDS_PER_SLOT);
     // Fields not in YAML preserve the base config value.
     try testing.expectEqual(base.DEPOSIT_CHAIN_ID, result.DEPOSIT_CHAIN_ID);
+}
+
+test "loadConfigFromYaml tolerates inline comments in scalar values" {
+    const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const yaml_bytes =
+        \\PRESET_BASE: mainnet
+        \\CONFIG_NAME: testnet # needs to exist because of Prysm. Otherwise it conflicts with mainnet genesis
+        \\MIN_GENESIS_ACTIVE_VALIDATOR_COUNT: 96 # validator count
+        \\MIN_GENESIS_TIME: 1776796730
+        \\GENESIS_FORK_VERSION: 0x10000038 # electra devnet
+        \\ALTAIR_FORK_VERSION: 0x20000038
+        \\ALTAIR_FORK_EPOCH: 0
+        \\BELLATRIX_FORK_VERSION: 0x30000038
+        \\BELLATRIX_FORK_EPOCH: 0
+        \\CAPELLA_FORK_VERSION: 0x40000038
+        \\CAPELLA_FORK_EPOCH: 0
+        \\DENEB_FORK_VERSION: 0x50000038
+        \\DENEB_FORK_EPOCH: 0
+        \\ELECTRA_FORK_VERSION: 0x60000038
+        \\ELECTRA_FORK_EPOCH: 0
+        \\SECONDS_PER_SLOT: 6 # short slots
+    ;
+
+    const base = &@import("./networks/mainnet.zig").chain_config;
+    const result = try loadConfigFromYaml(allocator, yaml_bytes, base);
+
+    try testing.expectEqualStrings("testnet", result.CONFIG_NAME);
+    try testing.expectEqual(@as(u64, 96), result.MIN_GENESIS_ACTIVE_VALIDATOR_COUNT);
+    try testing.expectEqual(@as(u64, 1776796730), result.MIN_GENESIS_TIME);
+    try testing.expectEqual(@as(u64, 6), result.SECONDS_PER_SLOT);
 }

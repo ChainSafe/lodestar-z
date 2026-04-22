@@ -1,0 +1,40 @@
+# Reference-only Kurtosis devnet for bilateral peer tracing.
+# Run with:
+#   kurtosis run github.com/ethpandaops/ethereum-package@5.0.1 \
+#     --enclave lodestar-z-peer-trace-ref \
+#     --args-file kurtosis-peer-trace-reference.yaml \
+#     --image-download missing
+#
+# We intentionally do NOT ask ethereum-package to launch Lodestar-Z directly here.
+# The package's Lodestar launcher assumes a TCP discovery port is live, while
+# Lodestar-Z is currently QUIC-only. Instead, boot the reference clients here
+# and attach a separate Lodestar-Z sidecar container to the enclave network.
+
+participants:
+  - cl_type: lodestar
+    el_type: reth
+    count: 1
+    validator_count: 32
+    supernode: true
+
+  - cl_type: lighthouse
+    el_type: geth
+    count: 1
+    validator_count: 32
+    supernode: true
+
+network_params:
+  electra_fork_epoch: 0
+  seconds_per_slot: 6
+  genesis_delay: 30
+  num_validator_keys_per_node: 32
+
+global_log_level: "debug"
+
+port_publisher:
+  cl:
+    enabled: true
+    public_port_start: 33000
+  el:
+    enabled: true
+    public_port_start: 32000

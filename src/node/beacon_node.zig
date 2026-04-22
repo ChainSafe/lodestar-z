@@ -821,8 +821,9 @@ pub const BeaconNode = struct {
     // Discovery seed ENRs prepared by the launcher.
     discovery_bootnodes: []const []const u8 = &.{},
 
-    // Runtime bootstrap cursor for `--direct-peers` dialing.
-    next_direct_peer_index: usize = 0,
+    // Runtime-maintained state for `--direct-peers` dialing/reconnects.
+    direct_peer_states: []p2p_runtime_mod.DirectPeerState = &.{},
+    next_direct_peer_rr_index: usize = 0,
 
     // Identify agent version exposed on libp2p identify. Null hides it.
     identify_agent_version: ?[]const u8 = null,
@@ -3831,6 +3832,44 @@ fn finishQueuedGossipReject(node: *BeaconNode, msg_id: MessageId, reason: Gossip
     node.finishPendingGossipValidation(msg_id, .{ .reject = toProcessorGossipRejectReason(reason) });
 }
 
+fn queuedAggregateCommitteeIndex(aggregate: *const fork_types.AnySignedAggregateAndProof) ?u64 {
+    const attestation = aggregate.attestation();
+    return switch (attestation) {
+        .phase0 => |phase0_att| phase0_att.data.index,
+        .electra => |electra_att| electra_att.committee_bits.getSingleTrueBit(),
+    };
+}
+
+fn queuedAggregateParticipantsKnown(
+    gh: *gossip_handler_mod.GossipHandler,
+    aggregate: *const fork_types.AnySignedAggregateAndProof,
+    attestation_data_root: [32]u8,
+) bool {
+    const committee_index = queuedAggregateCommitteeIndex(aggregate) orelse return false;
+    return gh.seen_cache.aggregatedAttestationParticipantsKnown(
+        aggregate.targetEpoch(),
+        committee_index,
+        attestation_data_root,
+        aggregate.attestation().aggregationBitsBytes(),
+    );
+}
+
+fn markQueuedAggregateSeen(
+    gh: *gossip_handler_mod.GossipHandler,
+    aggregate: *const fork_types.AnySignedAggregateAndProof,
+    attestation_data_root: [32]u8,
+) !void {
+    const committee_index = queuedAggregateCommitteeIndex(aggregate) orelse return error.InvalidGossipAttestation;
+    try gh.seen_cache.markAggregatorSeen(@intCast(aggregate.aggregatorIndex()), aggregate.targetEpoch());
+    try gh.seen_cache.markAggregatedAttestationSeen(
+        aggregate.targetEpoch(),
+        committee_index,
+        attestation_data_root,
+        aggregate.attestation().aggregationBitsBytes(),
+        aggregate.participantCount(),
+    );
+}
+
 fn takeValidationContextFromGossipWork(
     topic_type: processor_mod.work_item.GossipTopicType,
     work: *processor_mod.work_item.GossipWork,
@@ -3981,6 +4020,12 @@ fn importAggregateBatchItems(node: *BeaconNode, items: []AggregateWork, batch_va
             finishQueuedGossipIgnore(node, item.message_id);
             continue;
         };
+        if (queuedAggregateParticipantsKnown(gh, &aggregate, item.attestation_data_root) or
+            gh.seen_cache.hasSeenAggregator(@intCast(aggregate.aggregatorIndex()), aggregate.targetEpoch()))
+        {
+            finishQueuedGossipIgnore(node, item.message_id);
+            continue;
+        }
         const importFn = gh.importResolvedAggregateFn orelse {
             finishQueuedGossipIgnore(node, item.message_id);
             continue;
@@ -3991,6 +4036,10 @@ fn importAggregateBatchItems(node: *BeaconNode, items: []AggregateWork, batch_va
                 aggregate.attestation().slot(),
                 err,
             });
+            finishQueuedGossipIgnore(node, item.message_id);
+            continue;
+        };
+        markQueuedAggregateSeen(gh, &aggregate, item.attestation_data_root) catch {
             finishQueuedGossipIgnore(node, item.message_id);
             continue;
         };
@@ -4664,6 +4713,15 @@ fn handleQueuedAggregate(node: *BeaconNode, work: processor_mod.work_item.Aggreg
         aggregate.deinit(node.allocator);
         return;
     };
+    if (queuedAggregateParticipantsKnown(gh, &work.aggregate, work.attestation_data_root) or
+        gh.seen_cache.hasSeenAggregator(@intCast(work.aggregate.aggregatorIndex()), work.aggregate.targetEpoch()))
+    {
+        finishQueuedGossipIgnore(node, work.message_id);
+        work.resolved.deinit(node.allocator);
+        var aggregate = work.aggregate;
+        aggregate.deinit(node.allocator);
+        return;
+    }
     const importFn = gh.importResolvedAggregateFn orelse {
         finishQueuedGossipIgnore(node, work.message_id);
         work.resolved.deinit(node.allocator);
@@ -4680,6 +4738,10 @@ fn handleQueuedAggregate(node: *BeaconNode, work: processor_mod.work_item.Aggreg
         node_log.debug("processor aggregate import failed for aggregator {d}: {}", .{
             aggregate.aggregatorIndex(), err,
         });
+        finishQueuedGossipIgnore(node, work.message_id);
+        return;
+    };
+    markQueuedAggregateSeen(gh, &aggregate, work.attestation_data_root) catch {
         finishQueuedGossipIgnore(node, work.message_id);
         return;
     };
@@ -4978,6 +5040,8 @@ test "processorHandlerCallback imports queued aggregates" {
     gh.node = @ptrCast(&ctx);
     gh.importResolvedAggregateFn = &ProcessorImportTestContext.importAggregate;
     gh.verifyAggregateSignatureFn = null;
+    gh.seen_cache = chain_mod.SeenCache.init(allocator);
+    defer gh.seen_cache.deinit();
     node.gossip_handler = &gh;
 
     var signed_agg = types.phase0.SignedAggregateAndProof.default_value;
@@ -5005,6 +5069,72 @@ test "processorHandlerCallback imports queued aggregates" {
     try std.testing.expectEqual(@as(?u64, 4), ctx.aggregate_target_epoch);
 }
 
+test "processorHandlerCallback ignores duplicate queued aggregate after successful import" {
+    const allocator = std.testing.allocator;
+
+    var ctx = ProcessorImportTestContext{};
+    var node: BeaconNode = undefined;
+    node.allocator = allocator;
+    node.io = std.testing.io;
+    node.metrics = null;
+    node.beacon_processor = null;
+
+    var gh: GossipHandler = undefined;
+    gh.node = @ptrCast(&ctx);
+    gh.importResolvedAggregateFn = &ProcessorImportTestContext.importAggregate;
+    gh.verifyAggregateSignatureFn = null;
+    gh.seen_cache = chain_mod.SeenCache.init(allocator);
+    defer gh.seen_cache.deinit();
+    node.gossip_handler = &gh;
+
+    var signed_agg = types.phase0.SignedAggregateAndProof.default_value;
+    signed_agg.message.aggregator_index = 21;
+    signed_agg.message.aggregate.data.slot = 123;
+    signed_agg.message.aggregate.data.target.epoch = 4;
+    try signed_agg.message.aggregate.aggregation_bits.data.append(allocator, 0x01);
+    signed_agg.message.aggregate.aggregation_bits.bit_len = 1;
+
+    const msg_id = std.mem.zeroes(processor_mod.work_item.MessageId);
+    processorHandlerCallback(.{ .aggregate = .{
+        .source = .{ .key = 1 },
+        .message_id = msg_id,
+        .aggregate = .{ .phase0 = signed_agg },
+        .attestation_data_root = [_]u8{0x11} ** 32,
+        .resolved = .{
+            .attestation_signing_root = [_]u8{0} ** 32,
+            .selection_signing_root = [_]u8{0} ** 32,
+            .aggregate_signing_root = [_]u8{0} ** 32,
+            .attesting_indices = &.{},
+        },
+        .seen_timestamp_ns = 0,
+    } }, @ptrCast(&node));
+
+    try std.testing.expectEqual(@as(usize, 1), ctx.aggregate_import_count);
+
+    var duplicate = types.phase0.SignedAggregateAndProof.default_value;
+    duplicate.message.aggregator_index = 21;
+    duplicate.message.aggregate.data.slot = 123;
+    duplicate.message.aggregate.data.target.epoch = 4;
+    try duplicate.message.aggregate.aggregation_bits.data.append(allocator, 0x01);
+    duplicate.message.aggregate.aggregation_bits.bit_len = 1;
+
+    processorHandlerCallback(.{ .aggregate = .{
+        .source = .{ .key = 2 },
+        .message_id = msg_id,
+        .aggregate = .{ .phase0 = duplicate },
+        .attestation_data_root = [_]u8{0x11} ** 32,
+        .resolved = .{
+            .attestation_signing_root = [_]u8{0} ** 32,
+            .selection_signing_root = [_]u8{0} ** 32,
+            .aggregate_signing_root = [_]u8{0} ** 32,
+            .attesting_indices = &.{},
+        },
+        .seen_timestamp_ns = 0,
+    } }, @ptrCast(&node));
+
+    try std.testing.expectEqual(@as(usize, 1), ctx.aggregate_import_count);
+}
+
 test "processorHandlerCallback imports queued aggregate batches" {
     const allocator = std.testing.allocator;
 
@@ -5019,6 +5149,8 @@ test "processorHandlerCallback imports queued aggregate batches" {
     gh.node = @ptrCast(&ctx);
     gh.importResolvedAggregateFn = &ProcessorImportTestContext.importAggregate;
     gh.verifyAggregateSignatureFn = null;
+    gh.seen_cache = chain_mod.SeenCache.init(allocator);
+    defer gh.seen_cache.deinit();
     node.gossip_handler = &gh;
 
     var signed_agg_1 = types.phase0.SignedAggregateAndProof.default_value;
@@ -5085,6 +5217,8 @@ test "processorHandlerCallback imports recovered unknown-root aggregate batches"
     gh.node = @ptrCast(&ctx);
     gh.importResolvedAggregateFn = &ProcessorImportTestContext.importAggregate;
     gh.verifyAggregateSignatureFn = null;
+    gh.seen_cache = chain_mod.SeenCache.init(allocator);
+    defer gh.seen_cache.deinit();
     node.gossip_handler = &gh;
 
     var signed_agg_1 = types.phase0.SignedAggregateAndProof.default_value;

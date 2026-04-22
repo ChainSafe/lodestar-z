@@ -311,10 +311,10 @@ pub fn validateGossipAggregate(
 
     const attestation_epoch = attestation_slot / preset.SLOTS_PER_EPOCH;
 
-    // [REJECT] Attestation slot is within propagation window.
+    // [IGNORE] Attestation slot is within propagation window.
     const in_current = attestation_epoch == state.current_epoch;
     const in_previous = state.current_epoch > 0 and attestation_epoch == state.current_epoch - 1;
-    if (!in_current and !in_previous) return .reject;
+    if (!in_current and !in_previous) return .ignore;
 
     // [REJECT] Attestation epoch matches target epoch.
     if (attestation_epoch != target_epoch) return .reject;
@@ -332,7 +332,6 @@ pub fn validateGossipAggregate(
 
     // [IGNORE] Deduplicate by (aggregator_index, epoch).
     if (state.seen_cache.hasSeenAggregator(@intCast(aggregator_index), attestation_epoch)) return .ignore;
-    state.seen_cache.markAggregatorSeen(@intCast(aggregator_index), attestation_epoch) catch return .ignore;
 
     return .accept;
 }
@@ -577,18 +576,19 @@ test "gossip aggregate: ignore duplicate aggregator" {
     const r1 = validateGossipAggregate(5, 96, 3, [_]u8{0xAA} ** 32, [_]u8{0xAA} ** 32, 10, &state);
     try testing.expectEqual(AttestationGossipAction.accept, r1);
 
+    try cache.markAggregatorSeen(5, 3);
     const r2 = validateGossipAggregate(5, 96, 3, [_]u8{0xAA} ** 32, [_]u8{0xAA} ** 32, 10, &state);
     try testing.expectEqual(AttestationGossipAction.ignore, r2);
 }
 
-test "gossip aggregate: reject stale epoch" {
+test "gossip aggregate: ignore stale epoch" {
     var cache = SeenCache.init(testing.allocator);
     defer cache.deinit();
 
     const state = makeMockChainState(&cache);
     // Slot 32 = epoch 1, not in current (3) or previous (2).
     const result = validateGossipAggregate(5, 32, 1, [_]u8{0xAA} ** 32, [_]u8{0xAA} ** 32, 10, &state);
-    try testing.expectEqual(AttestationGossipAction.reject, result);
+    try testing.expectEqual(AttestationGossipAction.ignore, result);
 }
 
 test "gossip aggregate: reject mismatched target epoch" {
@@ -645,10 +645,10 @@ pub fn validateGossipElectraAggregate(
 
     const attestation_epoch = attestation_slot / preset.SLOTS_PER_EPOCH;
 
-    // [REJECT] Attestation slot is within propagation window.
+    // [IGNORE] Attestation slot is within propagation window.
     const in_current = attestation_epoch == state.current_epoch;
     const in_previous = state.current_epoch > 0 and attestation_epoch == state.current_epoch - 1;
-    if (!in_current and !in_previous) return .reject;
+    if (!in_current and !in_previous) return .ignore;
 
     // [REJECT] Attestation epoch matches target epoch.
     if (attestation_epoch != target_epoch) return .reject;
@@ -672,7 +672,6 @@ pub fn validateGossipElectraAggregate(
 
     // [IGNORE] Deduplicate by (aggregator_index, epoch).
     if (state.seen_cache.hasSeenAggregator(@intCast(aggregator_index), attestation_epoch)) return .ignore;
-    state.seen_cache.markAggregatorSeen(@intCast(aggregator_index), attestation_epoch) catch return .ignore;
 
     return .accept;
 }
@@ -995,7 +994,11 @@ pub fn validateGossipSyncContributionAndProof(
     const validator_count = state.getValidatorCount(state.ptr);
     if (aggregator_index >= validator_count) return .reject;
 
-    // [IGNORE] Not from a future slot.
+    // [IGNORE] Sync contribution gossip is for the current slot only.
+    // We keep the existing coarse +1 future tolerance to approximate
+    // MAXIMUM_GOSSIP_CLOCK_DISPARITY without wall-clock sub-slot timing, but
+    // do not accept prior-slot contributions here.
+    if (contribution_slot < state.current_slot) return .ignore;
     if (contribution_slot > state.current_slot + MAX_FUTURE_SLOT_TOLERANCE) return .ignore;
 
     // [IGNORE] Not already finalized.
@@ -1218,6 +1221,14 @@ test "gossip sync contribution: ignore future slot" {
     try testing.expectEqual(GossipAction.ignore, result);
 }
 
+test "gossip sync contribution: ignore stale prior slot" {
+    var cache = SeenCache.init(testing.allocator);
+    defer cache.deinit();
+    const state = makeMockChainState(&cache);
+    const result = validateGossipSyncContributionAndProof(5, 99, &state);
+    try testing.expectEqual(GossipAction.ignore, result);
+}
+
 // ── Electra attestation tests ───────────────────────────────────────────────
 
 test "gossip electra attestation: accept valid attestation" {
@@ -1324,8 +1335,17 @@ test "gossip electra aggregate: ignore duplicate aggregator" {
     const state = makeMockChainState(&cache);
     const r1 = validateGossipElectraAggregate(5, 96, 3, [_]u8{0xAA} ** 32, [_]u8{0xAA} ** 32, 0, 1, 10, &state);
     try testing.expectEqual(AttestationGossipAction.accept, r1);
+    try cache.markAggregatorSeen(5, 3);
     const r2 = validateGossipElectraAggregate(5, 96, 3, [_]u8{0xAA} ** 32, [_]u8{0xAA} ** 32, 0, 1, 10, &state);
     try testing.expectEqual(AttestationGossipAction.ignore, r2);
+}
+
+test "gossip electra aggregate: ignore stale epoch" {
+    var cache = SeenCache.init(testing.allocator);
+    defer cache.deinit();
+    const state = makeMockChainState(&cache);
+    const result = validateGossipElectraAggregate(5, 32, 1, [_]u8{0xAA} ** 32, [_]u8{0xAA} ** 32, 0, 1, 10, &state);
+    try testing.expectEqual(AttestationGossipAction.ignore, result);
 }
 
 test "gossip electra aggregate: unknown beacon block root is surfaced for retry" {

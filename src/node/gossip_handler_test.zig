@@ -29,6 +29,8 @@ const phase0 = consensus_types.phase0;
 // --- Test stubs ---
 
 var g_imported_count: u32 = 0;
+var g_imported_aggregate_count: u32 = 0;
+var g_verify_aggregate_failures_remaining: u32 = 0;
 var g_queued_unknown_block_count: u32 = 0;
 var g_queued_unknown_block_attestation_count: u32 = 0;
 var g_queued_unknown_block_aggregate_count: u32 = 0;
@@ -140,6 +142,27 @@ fn stubResolveAggregate(
         .aggregate_signing_root = [_]u8{0} ** 32,
         .attesting_indices = &.{},
     };
+}
+
+fn stubVerifyAggregateSignature(
+    _: *anyopaque,
+    _: *const AnySignedAggregateAndProof,
+    _: *const ResolvedAggregate,
+) bool {
+    if (g_verify_aggregate_failures_remaining > 0) {
+        g_verify_aggregate_failures_remaining -= 1;
+        return false;
+    }
+    return true;
+}
+
+fn stubImportResolvedAggregate(
+    _: *anyopaque,
+    _: *const AnySignedAggregateAndProof,
+    _: *const [32]u8,
+    _: *const ResolvedAggregate,
+) anyerror!void {
+    g_imported_aggregate_count += 1;
 }
 
 fn stubIsValidSyncCommitteeSubnet(_: *anyopaque, _: u64, validator_index: u64, subnet: u64) bool {
@@ -631,6 +654,125 @@ test "GossipHandler: onAggregateAndProof validates and accepts" {
     try handler.onAggregateAndProof(compressed);
 }
 
+test "GossipHandler: aggregate invalid signature does not poison later valid aggregate and success marks seen" {
+    const alloc = testing.allocator;
+    const handler = try makeTestHandler(alloc);
+    defer handler.deinit();
+
+    handler.updateClock(100, 3, 64);
+    handler.verifyAggregateSignatureFn = &stubVerifyAggregateSignature;
+    handler.importResolvedAggregateFn = &stubImportResolvedAggregate;
+    g_verify_aggregate_failures_remaining = 1;
+    g_imported_aggregate_count = 0;
+
+    var signed_agg: phase0.SignedAggregateAndProof.Type = phase0.SignedAggregateAndProof.default_value;
+    signed_agg.message.aggregator_index = 5;
+    signed_agg.message.aggregate.data.slot = 96;
+    signed_agg.message.aggregate.data.target.epoch = 3;
+    signed_agg.message.aggregate.data.target.root = [_]u8{0xAA} ** 32;
+    signed_agg.message.aggregate.data.beacon_block_root = [_]u8{0xAA} ** 32;
+    try signed_agg.message.aggregate.aggregation_bits.data.append(alloc, 0x01);
+    signed_agg.message.aggregate.aggregation_bits.bit_len = 1;
+    defer signed_agg.message.aggregate.aggregation_bits.data.deinit(alloc);
+
+    const ssz_size = phase0.SignedAggregateAndProof.serializedSize(&signed_agg);
+    const ssz_buf = try alloc.alloc(u8, ssz_size);
+    defer alloc.free(ssz_buf);
+    _ = phase0.SignedAggregateAndProof.serializeIntoBytes(&signed_agg, ssz_buf);
+
+    const compressed = try compressSnappyBlock(alloc, ssz_buf);
+    defer alloc.free(compressed);
+
+    try testing.expectError(GossipHandlerError.ValidationRejected, handler.onAggregateAndProof(compressed));
+    try testing.expectEqual(@as(u32, 0), g_imported_aggregate_count);
+
+    try handler.onAggregateAndProof(compressed);
+    try testing.expectEqual(@as(u32, 1), g_imported_aggregate_count);
+
+    try testing.expectError(GossipHandlerError.ValidationIgnored, handler.onAggregateAndProof(compressed));
+    try testing.expectEqual(@as(u32, 1), g_imported_aggregate_count);
+}
+
+test "GossipHandler: aggregate participant subset is ignored after valid superset" {
+    const alloc = testing.allocator;
+    const handler = try makeTestHandler(alloc);
+    defer handler.deinit();
+
+    handler.updateClock(100, 3, 64);
+    handler.verifyAggregateSignatureFn = &stubVerifyAggregateSignature;
+    handler.importResolvedAggregateFn = &stubImportResolvedAggregate;
+    g_verify_aggregate_failures_remaining = 0;
+    g_imported_aggregate_count = 0;
+
+    var superset: phase0.SignedAggregateAndProof.Type = phase0.SignedAggregateAndProof.default_value;
+    superset.message.aggregator_index = 5;
+    superset.message.aggregate.data.slot = 96;
+    superset.message.aggregate.data.target.epoch = 3;
+    superset.message.aggregate.data.target.root = [_]u8{0xAA} ** 32;
+    superset.message.aggregate.data.beacon_block_root = [_]u8{0xAA} ** 32;
+    try superset.message.aggregate.aggregation_bits.data.append(alloc, 0x03);
+    superset.message.aggregate.aggregation_bits.bit_len = 2;
+    defer superset.message.aggregate.aggregation_bits.data.deinit(alloc);
+
+    const superset_size = phase0.SignedAggregateAndProof.serializedSize(&superset);
+    const superset_buf = try alloc.alloc(u8, superset_size);
+    defer alloc.free(superset_buf);
+    _ = phase0.SignedAggregateAndProof.serializeIntoBytes(&superset, superset_buf);
+    const superset_compressed = try compressSnappyBlock(alloc, superset_buf);
+    defer alloc.free(superset_compressed);
+
+    try handler.onAggregateAndProof(superset_compressed);
+    try testing.expectEqual(@as(u32, 1), g_imported_aggregate_count);
+
+    var subset: phase0.SignedAggregateAndProof.Type = phase0.SignedAggregateAndProof.default_value;
+    subset.message.aggregator_index = 6;
+    subset.message.aggregate.data.slot = 96;
+    subset.message.aggregate.data.target.epoch = 3;
+    subset.message.aggregate.data.target.root = [_]u8{0xAA} ** 32;
+    subset.message.aggregate.data.beacon_block_root = [_]u8{0xAA} ** 32;
+    try subset.message.aggregate.aggregation_bits.data.append(alloc, 0x01);
+    subset.message.aggregate.aggregation_bits.bit_len = 2;
+    defer subset.message.aggregate.aggregation_bits.data.deinit(alloc);
+
+    const subset_size = phase0.SignedAggregateAndProof.serializedSize(&subset);
+    const subset_buf = try alloc.alloc(u8, subset_size);
+    defer alloc.free(subset_buf);
+    _ = phase0.SignedAggregateAndProof.serializeIntoBytes(&subset, subset_buf);
+    const subset_compressed = try compressSnappyBlock(alloc, subset_buf);
+    defer alloc.free(subset_compressed);
+
+    try testing.expectError(GossipHandlerError.ValidationIgnored, handler.onAggregateAndProof(subset_compressed));
+    try testing.expectEqual(@as(u32, 1), g_imported_aggregate_count);
+}
+
+test "GossipHandler: onAggregateAndProof ignores stale pre-electra aggregate" {
+    const alloc = testing.allocator;
+    const handler = try makeTestHandler(alloc);
+    defer handler.deinit();
+
+    handler.updateClock(100, 3, 64);
+
+    var signed_agg: phase0.SignedAggregateAndProof.Type = phase0.SignedAggregateAndProof.default_value;
+    signed_agg.message.aggregator_index = 5;
+    signed_agg.message.aggregate.data.slot = 32;
+    signed_agg.message.aggregate.data.target.epoch = 1;
+    signed_agg.message.aggregate.data.target.root = [_]u8{0xAA} ** 32;
+    signed_agg.message.aggregate.data.beacon_block_root = [_]u8{0xAA} ** 32;
+    try signed_agg.message.aggregate.aggregation_bits.data.append(alloc, 0x01);
+    signed_agg.message.aggregate.aggregation_bits.bit_len = 1;
+    defer signed_agg.message.aggregate.aggregation_bits.data.deinit(alloc);
+
+    const ssz_size = phase0.SignedAggregateAndProof.serializedSize(&signed_agg);
+    const ssz_buf = try alloc.alloc(u8, ssz_size);
+    defer alloc.free(ssz_buf);
+    _ = phase0.SignedAggregateAndProof.serializeIntoBytes(&signed_agg, ssz_buf);
+
+    const compressed = try compressSnappyBlock(alloc, ssz_buf);
+    defer alloc.free(compressed);
+
+    try testing.expectError(GossipHandlerError.ValidationIgnored, handler.onAggregateAndProof(compressed));
+}
+
 test "GossipHandler: onAggregateAndProof queues unknown beacon_block_root for replay" {
     const alloc = testing.allocator;
     const handler = try makeTestHandler(alloc);
@@ -702,6 +844,37 @@ test "GossipHandler: onAggregateAndProof validates electra aggregates" {
     defer alloc.free(compressed);
 
     try handler.onAggregateAndProof(compressed);
+}
+
+test "GossipHandler: onAggregateAndProof ignores stale electra aggregate" {
+    const alloc = testing.allocator;
+    const handler = try makeTestHandler(alloc);
+    defer handler.deinit();
+
+    handler.updateClock(100, 3, 64);
+    handler.updateForkSeq(.electra);
+
+    var signed_agg: consensus_types.electra.SignedAggregateAndProof.Type = consensus_types.electra.SignedAggregateAndProof.default_value;
+    signed_agg.message.aggregator_index = 5;
+    signed_agg.message.aggregate.data.slot = 32;
+    signed_agg.message.aggregate.data.target.epoch = 1;
+    signed_agg.message.aggregate.data.target.root = [_]u8{0xAA} ** 32;
+    signed_agg.message.aggregate.data.beacon_block_root = [_]u8{0xAA} ** 32;
+    signed_agg.message.aggregate.data.index = 0;
+    try signed_agg.message.aggregate.committee_bits.set(0, true);
+    try signed_agg.message.aggregate.aggregation_bits.data.append(alloc, 0x01);
+    signed_agg.message.aggregate.aggregation_bits.bit_len = 1;
+    defer signed_agg.message.aggregate.aggregation_bits.data.deinit(alloc);
+
+    const ssz_size = consensus_types.electra.SignedAggregateAndProof.serializedSize(&signed_agg);
+    const ssz_buf = try alloc.alloc(u8, ssz_size);
+    defer alloc.free(ssz_buf);
+    _ = consensus_types.electra.SignedAggregateAndProof.serializeIntoBytes(&signed_agg, ssz_buf);
+
+    const compressed = try compressSnappyBlock(alloc, ssz_buf);
+    defer alloc.free(compressed);
+
+    try testing.expectError(GossipHandlerError.ValidationIgnored, handler.onAggregateAndProof(compressed));
 }
 
 test "GossipHandler: data column sidecar rejects wrong subnet" {

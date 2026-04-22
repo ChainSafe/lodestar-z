@@ -77,6 +77,29 @@ fn createPublishedState(
     );
 }
 
+fn canonicalGenesisBlockRootForState(cached_state: *state_transition.CachedBeaconState) ![32]u8 {
+    const state_root = (try cached_state.state.hashTreeRoot()).*;
+    var latest_header = try cached_state.state.latestBlockHeader();
+    const slot = try latest_header.get("slot");
+    const proposer_index = try latest_header.get("proposer_index");
+    const parent_root = (try latest_header.getFieldRoot("parent_root")).*;
+    const body_root = (try latest_header.getFieldRoot("body_root")).*;
+    var header_state_root = (try latest_header.getFieldRoot("state_root")).*;
+    if (std.mem.eql(u8, &header_state_root, &([_]u8{0} ** 32))) {
+        header_state_root = state_root;
+    }
+    const header_val = ct.phase0.BeaconBlockHeader.Type{
+        .slot = slot,
+        .proposer_index = proposer_index,
+        .parent_root = parent_root,
+        .state_root = header_state_root,
+        .body_root = body_root,
+    };
+    var root: [32]u8 = undefined;
+    try ct.phase0.BeaconBlockHeader.hashTreeRoot(&header_val, &root);
+    return root;
+}
+
 fn onReqRespVersioned(
     node: *BeaconNode,
     method: networking.Method,
@@ -221,6 +244,23 @@ test "BeaconNode: initFromGenesis sets head at slot 0" {
     _ = head.finalized_epoch;
     _ = head.justified_epoch;
     try std.testing.expect(ctx.node.clock != null);
+}
+
+test "BeaconNode: initFromGenesis uses canonical genesis block root when latest header state_root is zero" {
+    var ctx = try TestContext.initUnbootstrapped(.{});
+    defer ctx.deinit();
+
+    const genesis_state = try ctx.makePublishedState();
+    try genesis_state.state.setSlot(0);
+    var latest_header = try genesis_state.state.latestBlockHeader();
+    const zero_root = [_]u8{0} ** 32;
+    try latest_header.setValue("state_root", &zero_root);
+    const expected_root = try canonicalGenesisBlockRootForState(genesis_state);
+
+    try ctx.node.initFromGenesis(genesis_state);
+
+    const head = ctx.node.getHead();
+    try std.testing.expectEqualSlices(u8, &expected_root, &head.root);
 }
 
 test "BeaconNode: getHead returns initial state" {

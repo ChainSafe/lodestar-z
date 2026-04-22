@@ -34,6 +34,9 @@ const ResolvedAttestation = processor_mod.work_item.ResolvedAttestation;
 const gossip_handler_mod = @import("gossip_handler.zig");
 const UnknownParentBlock = gossip_handler_mod.UnknownParentBlock;
 const verifyMerkleBranch = state_transition.verifyMerkleBranch;
+const aggregate_signature_sets = state_transition.signature_sets.aggregate_and_proof;
+const sync_contribution_signature_sets = state_transition.signature_sets.sync_contribution_and_proof;
+const gossip_domains = state_transition.signature_sets.gossip_domains;
 
 // Import BeaconNode lazily to avoid circular dependency.
 const beacon_node_mod = @import("beacon_node.zig");
@@ -333,34 +336,21 @@ fn verifySingleValidatorSignature(
 
 fn verifySyncContributionAggregateSignature(
     allocator: std.mem.Allocator,
+    config: *const config_mod.BeaconConfig,
     cached: *const state_transition.CachedBeaconState,
-    domain: *const [32]u8,
     contribution: *const types.altair.SyncCommitteeContribution.Type,
     participant_indices: []const ValidatorIndex,
 ) !void {
-    const pubkeys = try allocator.alloc(bls_mod.PublicKey, participant_indices.len);
-    defer allocator.free(pubkeys);
-
-    for (participant_indices, 0..) |validator_index, i| {
-        if (validator_index >= cached.epoch_cache.index_to_pubkey.items.len) {
-            return error.ValidatorNotFound;
-        }
-        pubkeys[i] = cached.epoch_cache.index_to_pubkey.items[validator_index];
-    }
-
-    var signing_root: [32]u8 = undefined;
-    try state_transition.computeSigningRoot(
-        types.primitive.Root,
-        &contribution.beacon_block_root,
-        domain,
-        &signing_root,
+    const sig_set = try sync_contribution_signature_sets.getSyncCommitteeContributionSignatureSet(
+        allocator,
+        config,
+        cached.epoch_cache,
+        contribution,
+        participant_indices,
     );
+    defer allocator.free(sig_set.pubkeys);
 
-    const valid = state_transition.signature_sets.verifyAggregatedSignatureSet(&.{
-        .pubkeys = pubkeys,
-        .signing_root = signing_root,
-        .signature = contribution.signature,
-    }) catch return error.InvalidSignature;
+    const valid = state_transition.signature_sets.verifyAggregatedSignatureSet(&sig_set) catch return error.InvalidSignature;
     if (!valid) return error.InvalidSignature;
 }
 
@@ -484,30 +474,78 @@ fn buildIndexedAttestationFromAggregate(
 
 fn getAttestationSigningRootFromEpochCache(
     node: *const BeaconNode,
-    epoch_cache: *const state_transition.EpochCache,
+    _: *const state_transition.EpochCache,
     attestation: *const AnyGossipAttestation,
     out: *[32]u8,
 ) !void {
-    try state_transition.signature_sets.indexed_attestation.getAttestationDataSigningRoot(
-        node.config,
-        epoch_cache.epoch,
-        &attestation.data(),
-        out,
-    );
+    try gossipAttestationDataSigningRoot(node.config, &attestation.data(), out);
 }
 
 fn getAttestationSigningRootFromAnyAttestation(
     node: *const BeaconNode,
-    epoch_cache: *const state_transition.EpochCache,
+    _: *const state_transition.EpochCache,
     attestation: *const AnyAttestation,
     out: *[32]u8,
 ) !void {
-    try state_transition.signature_sets.indexed_attestation.getAttestationDataSigningRoot(
-        node.config,
-        epoch_cache.epoch,
-        &attestation.data(),
-        out,
-    );
+    try gossipAttestationDataSigningRoot(node.config, &attestation.data(), out);
+}
+
+fn gossipDomainAtSlot(
+    config: *const config_mod.BeaconConfig,
+    slot: u64,
+    domain_type: types.primitive.DomainType.Type,
+) !*const [32]u8 {
+    return gossip_domains.getDomainAtSlot(config, slot, domain_type);
+}
+
+fn gossipAttestationDataSigningRoot(
+    config: *const config_mod.BeaconConfig,
+    data: *const types.phase0.AttestationData.Type,
+    out: *[32]u8,
+) !void {
+    try state_transition.signature_sets.indexed_attestation.getAttestationDataSigningRoot(config, 0, data, out);
+}
+
+fn gossipSelectionProofSigningRoot(
+    config: *const config_mod.BeaconConfig,
+    slot: u64,
+    out: *[32]u8,
+) !void {
+    try aggregate_signature_sets.getSelectionProofSigningRoot(config, slot, out);
+}
+
+fn gossipAggregateAndProofSigningRoot(
+    allocator: std.mem.Allocator,
+    config: *const config_mod.BeaconConfig,
+    aggregate: *const AnySignedAggregateAndProof,
+    epoch: types.primitive.Epoch.Type,
+    out: *[32]u8,
+) !void {
+    try aggregate_signature_sets.getAggregateAndProofSigningRoot(allocator, config, epoch, aggregate, out);
+}
+
+fn gossipSyncSelectionProofSigningRoot(
+    config: *const config_mod.BeaconConfig,
+    selection_data: *const types.altair.SyncAggregatorSelectionData.Type,
+    out: *[32]u8,
+) !void {
+    try sync_contribution_signature_sets.getSyncCommitteeSelectionProofSigningRoot(config, selection_data, out);
+}
+
+fn gossipContributionAndProofSigningRoot(
+    config: *const config_mod.BeaconConfig,
+    contribution_and_proof: *const types.altair.ContributionAndProof.Type,
+    out: *[32]u8,
+) !void {
+    try sync_contribution_signature_sets.getContributionAndProofSigningRoot(config, contribution_and_proof, out);
+}
+
+fn gossipSyncContributionSigningRoot(
+    config: *const config_mod.BeaconConfig,
+    contribution: *const types.altair.SyncCommitteeContribution.Type,
+    out: *[32]u8,
+) !void {
+    try sync_contribution_signature_sets.getSyncContributionSigningRoot(config, contribution, out);
 }
 
 fn resolveCachedAttestationData(
@@ -731,10 +769,14 @@ pub fn resolveAggregate(
     if (aggregator_index >= epoch_cache.index_to_pubkey.items.len) return error.InvalidAggregatorIndex;
 
     const attestation = aggregate.attestation();
+    const committee_index = switch (attestation) {
+        .phase0 => |phase0_att| phase0_att.data.index,
+        .electra => |electra_att| electra_att.committee_bits.getSingleTrueBit() orelse return error.InvalidGossipAttestation,
+    };
     const cached_data = try resolveCachedAttestationData(
         node,
         attestation.slot(),
-        attestation.committeeIndex(),
+        committee_index,
         attestation_data_root,
         AnyAttestation,
         &attestation,
@@ -763,37 +805,19 @@ pub fn resolveAggregate(
     errdefer node.allocator.free(attesting_indices);
     if (attesting_indices.len == 0) return error.EmptyAggregateAttestation;
 
-    const epoch = epoch_cache.epoch;
     const att_slot = attestation.slot();
 
-    const selection_domain = try node.config.getDomain(epoch, constants.DOMAIN_SELECTION_PROOF, att_slot);
     var selection_signing_root: [32]u8 = undefined;
-    try state_transition.computeSigningRoot(
-        types.primitive.Slot,
-        &att_slot,
-        selection_domain,
-        &selection_signing_root,
-    );
+    try gossipSelectionProofSigningRoot(node.config, att_slot, &selection_signing_root);
 
-    const target_epoch_start_slot = state_transition.computeStartSlotAtEpoch(attestation.data().target.epoch);
-    const agg_domain = try node.config.getDomain(epoch, constants.DOMAIN_AGGREGATE_AND_PROOF, target_epoch_start_slot);
     var aggregate_signing_root: [32]u8 = undefined;
-    switch (aggregate.*) {
-        .phase0 => |signed_agg| try state_transition.computeSigningRootAlloc(
-            types.phase0.AggregateAndProof,
-            node.allocator,
-            &signed_agg.message,
-            agg_domain,
-            &aggregate_signing_root,
-        ),
-        .electra => |signed_agg| try state_transition.computeSigningRootAlloc(
-            types.electra.AggregateAndProof,
-            node.allocator,
-            &signed_agg.message,
-            agg_domain,
-            &aggregate_signing_root,
-        ),
-    }
+    try gossipAggregateAndProofSigningRoot(
+        node.allocator,
+        node.config,
+        aggregate,
+        attestation.data().target.epoch,
+        &aggregate_signing_root,
+    );
 
     return ResolvedAggregate.initOwned(
         attesting_indices,
@@ -1216,6 +1240,7 @@ pub fn verifyResolvedAggregateSignature(
     const cached = node.headState() orelse return true;
     const epoch_cache = cached.epoch_cache;
     const aggregator_index = aggregate.aggregatorIndex();
+    const slot = aggregate.slot();
     if (aggregator_index >= epoch_cache.index_to_pubkey.items.len) return false;
 
     const aggregator_pubkey = epoch_cache.index_to_pubkey.items[aggregator_index];
@@ -1224,16 +1249,34 @@ pub fn verifyResolvedAggregateSignature(
         .signing_root = resolved.selection_signing_root,
         .signature = aggregate.selectionProof(),
     };
-    const selection_valid = state_transition.signature_sets.verifySingleSignatureSet(&selection_sig_set) catch return false;
-    if (!selection_valid) return false;
+    const selection_valid = state_transition.signature_sets.verifySingleSignatureSet(&selection_sig_set) catch {
+        scoped_log.debug("aggregate selection proof verification errored: aggregator={d} slot={d}", .{ aggregator_index, slot });
+        return false;
+    };
+    if (!selection_valid) {
+        const pubkey_hex = std.fmt.bytesToHex(&aggregator_pubkey.compress(), .lower);
+        const root_hex = std.fmt.bytesToHex(&resolved.selection_signing_root, .lower);
+        const sig_hex = std.fmt.bytesToHex(&aggregate.selectionProof(), .lower);
+        scoped_log.debug(
+            "aggregate selection proof invalid: aggregator={d} slot={d} pubkey=0x{s} root=0x{s} sig=0x{s}",
+            .{ aggregator_index, slot, &pubkey_hex, &root_hex, &sig_hex },
+        );
+        return false;
+    }
 
     const agg_sig_set = state_transition.signature_sets.SingleSignatureSet{
         .pubkey = aggregator_pubkey,
         .signing_root = resolved.aggregate_signing_root,
         .signature = aggregate.signature(),
     };
-    const agg_valid = state_transition.signature_sets.verifySingleSignatureSet(&agg_sig_set) catch return false;
-    if (!agg_valid) return false;
+    const agg_valid = state_transition.signature_sets.verifySingleSignatureSet(&agg_sig_set) catch {
+        scoped_log.debug("aggregate-and-proof wrapper verification errored: aggregator={d} slot={d}", .{ aggregator_index, slot });
+        return false;
+    };
+    if (!agg_valid) {
+        scoped_log.debug("aggregate-and-proof wrapper signature invalid: aggregator={d} slot={d}", .{ aggregator_index, slot });
+        return false;
+    }
 
     var pubkeys = node.allocator.alloc(bls_mod.PublicKey, resolved.attesting_indices.len) catch return false;
     defer node.allocator.free(pubkeys);
@@ -1242,11 +1285,19 @@ pub fn verifyResolvedAggregateSignature(
         pubkeys[i] = epoch_cache.index_to_pubkey.items[validator_index];
     }
 
-    return state_transition.signature_sets.verifyAggregatedSignatureSet(&.{
+    const attestation_valid = state_transition.signature_sets.verifyAggregatedSignatureSet(&.{
         .pubkeys = pubkeys,
         .signing_root = resolved.attestation_signing_root,
         .signature = aggregate.attestation().signature(),
-    }) catch false;
+    }) catch {
+        scoped_log.debug("aggregate attestation signature verification errored: aggregator={d} slot={d} participants={d}", .{ aggregator_index, slot, resolved.attesting_indices.len });
+        return false;
+    };
+    if (!attestation_valid) {
+        scoped_log.debug("aggregate attestation signature invalid: aggregator={d} slot={d} participants={d}", .{ aggregator_index, slot, resolved.attesting_indices.len });
+        return false;
+    }
+    return true;
 }
 
 pub fn verifySyncCommitteeSignature(ptr: *anyopaque, ssz_bytes: []const u8) bool {
@@ -1324,63 +1375,53 @@ pub fn verifySyncContributionSignature(
         return error.InvalidSelectionProof;
     }
 
-    if (aggregator_index >= cached.epoch_cache.index_to_pubkey.items.len) {
-        return error.ValidatorNotFound;
-    }
-    const aggregator_pubkey = cached.epoch_cache.index_to_pubkey.items[aggregator_index];
-
-    const selection_domain = try node.config.getDomain(
-        cached.epoch_cache.epoch,
-        constants.DOMAIN_SYNC_COMMITTEE_SELECTION_PROOF,
-        contribution.slot,
+    const selection_sig_set = try sync_contribution_signature_sets.getSyncCommitteeSelectionProofSignatureSet(
+        node.config,
+        cached.epoch_cache,
+        signed_contribution,
     );
-    const selection_data = types.altair.SyncAggregatorSelectionData.Type{
-        .slot = contribution.slot,
-        .subcommittee_index = contribution.subcommittee_index,
+    const selection_valid = state_transition.signature_sets.verifySingleSignatureSet(&selection_sig_set) catch {
+        scoped_log.debug("sync contribution selection proof verification errored: aggregator={d} slot={d} subcommittee={d}", .{ aggregator_index, contribution.slot, contribution.subcommittee_index });
+        return error.InvalidSignature;
     };
-    var selection_signing_root: [32]u8 = undefined;
-    try state_transition.computeSigningRoot(
-        types.altair.SyncAggregatorSelectionData,
-        &selection_data,
-        selection_domain,
-        &selection_signing_root,
-    );
-    try verifySingleValidatorSignature(
-        aggregator_pubkey,
-        selection_signing_root,
-        contribution_and_proof.selection_proof,
-    );
+    if (!selection_valid) {
+        const pubkey_hex = std.fmt.bytesToHex(&selection_sig_set.pubkey.compress(), .lower);
+        const root_hex = std.fmt.bytesToHex(&selection_sig_set.signing_root, .lower);
+        const sig_hex = std.fmt.bytesToHex(&selection_sig_set.signature, .lower);
+        scoped_log.debug(
+            "sync contribution selection proof invalid: aggregator={d} slot={d} subcommittee={d} pubkey=0x{s} root=0x{s} sig=0x{s}",
+            .{ aggregator_index, contribution.slot, contribution.subcommittee_index, &pubkey_hex, &root_hex, &sig_hex },
+        );
+        return error.InvalidSignature;
+    }
 
-    const contribution_and_proof_domain = try node.config.getDomain(
-        cached.epoch_cache.epoch,
-        constants.DOMAIN_CONTRIBUTION_AND_PROOF,
-        contribution.slot,
+    const contribution_and_proof_sig_set = try sync_contribution_signature_sets.getContributionAndProofSignatureSet(
+        node.config,
+        cached.epoch_cache,
+        signed_contribution,
     );
-    var contribution_and_proof_signing_root: [32]u8 = undefined;
-    try state_transition.computeSigningRoot(
-        types.altair.ContributionAndProof,
-        contribution_and_proof,
-        contribution_and_proof_domain,
-        &contribution_and_proof_signing_root,
-    );
-    try verifySingleValidatorSignature(
-        aggregator_pubkey,
-        contribution_and_proof_signing_root,
-        signed_contribution.signature,
-    );
+    const contribution_and_proof_valid = state_transition.signature_sets.verifySingleSignatureSet(&contribution_and_proof_sig_set) catch {
+        scoped_log.debug("sync contribution wrapper verification errored: aggregator={d} slot={d} subcommittee={d}", .{ aggregator_index, contribution.slot, contribution.subcommittee_index });
+        return error.InvalidSignature;
+    };
+    if (!contribution_and_proof_valid) {
+        scoped_log.debug("sync contribution wrapper signature invalid: aggregator={d} slot={d} subcommittee={d}", .{ aggregator_index, contribution.slot, contribution.subcommittee_index });
+        return error.InvalidSignature;
+    }
 
-    const contribution_domain = try node.config.getDomain(
-        cached.epoch_cache.epoch,
-        constants.DOMAIN_SYNC_COMMITTEE,
-        contribution.slot,
-    );
-    try verifySyncContributionAggregateSignature(
+    verifySyncContributionAggregateSignature(
         node.allocator,
+        node.config,
         cached,
-        contribution_domain,
         contribution,
         participant_indices.items,
-    );
+    ) catch |err| switch (err) {
+        error.InvalidSignature => {
+            scoped_log.debug("sync contribution aggregate signature invalid: aggregator={d} slot={d} subcommittee={d} participants={d}", .{ aggregator_index, contribution.slot, contribution.subcommittee_index, participant_indices.items.len });
+            return err;
+        },
+        else => return err,
+    };
 
     return @intCast(participant_indices.items.len);
 }
@@ -1459,4 +1500,287 @@ pub fn verifyDataColumnSidecar(
         error.LengthMismatch => return error.InvalidColumnCount,
         else => return err,
     };
+}
+
+test "gossipDomainAtSlot uses the message slot fork rather than state-epoch fallback" {
+    var chain = config_mod.minimal.chain_config;
+    chain.ALTAIR_FORK_EPOCH = 1;
+    chain.BELLATRIX_FORK_EPOCH = 2;
+    chain.CAPELLA_FORK_EPOCH = 3;
+    chain.DENEB_FORK_EPOCH = 4;
+    chain.ELECTRA_FORK_EPOCH = 5;
+    chain.FULU_FORK_EPOCH = std.math.maxInt(types.primitive.Epoch.Type);
+    chain.GLOAS_FORK_EPOCH = std.math.maxInt(types.primitive.Epoch.Type);
+
+    const gvr = [_]u8{0} ** 32;
+    const cfg = config_mod.BeaconConfig.init(chain, gvr);
+    const message_slot = @as(u64, 0);
+    const state_epoch = @as(types.primitive.Epoch.Type, 5);
+
+    const legacy = try cfg.getDomain(state_epoch, constants.DOMAIN_SELECTION_PROOF, message_slot);
+    const gossip = try gossipDomainAtSlot(&cfg, message_slot, constants.DOMAIN_SELECTION_PROOF);
+    const expected = try cfg.domain_cache.get(cfg.forkSeq(message_slot), constants.DOMAIN_SELECTION_PROOF);
+
+    try std.testing.expectEqual(expected.*, gossip.*);
+    try std.testing.expect(!std.mem.eql(u8, legacy, gossip));
+}
+
+test "gossip attestation signing root uses target epoch fork" {
+    var chain = config_mod.minimal.chain_config;
+    chain.ALTAIR_FORK_EPOCH = 1;
+    chain.BELLATRIX_FORK_EPOCH = 2;
+    chain.CAPELLA_FORK_EPOCH = 3;
+    chain.DENEB_FORK_EPOCH = 4;
+    chain.ELECTRA_FORK_EPOCH = 5;
+    chain.FULU_FORK_EPOCH = std.math.maxInt(types.primitive.Epoch.Type);
+    chain.GLOAS_FORK_EPOCH = std.math.maxInt(types.primitive.Epoch.Type);
+
+    const gvr = [_]u8{0} ** 32;
+    const cfg = config_mod.BeaconConfig.init(chain, gvr);
+
+    var data = types.phase0.AttestationData.default_value;
+    data.slot = 0;
+    data.target.epoch = 0;
+
+    var gossip_root: [32]u8 = undefined;
+    try gossipAttestationDataSigningRoot(&cfg, &data, &gossip_root);
+
+    const slot = state_transition.computeStartSlotAtEpoch(data.target.epoch);
+    const expected_domain = try cfg.domain_cache.get(cfg.forkSeq(slot), constants.DOMAIN_BEACON_ATTESTER);
+    var expected_root: [32]u8 = undefined;
+    try state_transition.computeSigningRoot(types.phase0.AttestationData, &data, expected_domain, &expected_root);
+
+    try std.testing.expectEqual(expected_root, gossip_root);
+}
+
+test "gossip sync contribution roots use contribution slot fork rather than legacy state epoch helper" {
+    var chain = config_mod.minimal.chain_config;
+    chain.ALTAIR_FORK_EPOCH = 1;
+    chain.BELLATRIX_FORK_EPOCH = 2;
+    chain.CAPELLA_FORK_EPOCH = 3;
+    chain.DENEB_FORK_EPOCH = 4;
+    chain.ELECTRA_FORK_EPOCH = 5;
+    chain.FULU_FORK_EPOCH = std.math.maxInt(types.primitive.Epoch.Type);
+    chain.GLOAS_FORK_EPOCH = std.math.maxInt(types.primitive.Epoch.Type);
+
+    const gvr = [_]u8{0} ** 32;
+    const cfg = config_mod.BeaconConfig.init(chain, gvr);
+
+    var signed_contribution = types.altair.SignedContributionAndProof.default_value;
+    signed_contribution.message.aggregator_index = 1;
+    signed_contribution.message.contribution.slot = preset.SLOTS_PER_EPOCH;
+    signed_contribution.message.contribution.subcommittee_index = 0;
+
+    const contribution = &signed_contribution.message.contribution;
+    const selection_data = types.altair.SyncAggregatorSelectionData.Type{
+        .slot = contribution.slot,
+        .subcommittee_index = contribution.subcommittee_index,
+    };
+
+    const legacy_selection_domain = try cfg.getDomain(5, constants.DOMAIN_SYNC_COMMITTEE_SELECTION_PROOF, contribution.slot);
+    var legacy_selection_root: [32]u8 = undefined;
+    try state_transition.computeSigningRoot(
+        types.altair.SyncAggregatorSelectionData,
+        &selection_data,
+        legacy_selection_domain,
+        &legacy_selection_root,
+    );
+
+    var gossip_selection_root: [32]u8 = undefined;
+    try gossipSyncSelectionProofSigningRoot(&cfg, &selection_data, &gossip_selection_root);
+
+    const legacy_contribution_domain = try cfg.getDomain(5, constants.DOMAIN_SYNC_COMMITTEE, contribution.slot);
+    var legacy_contribution_root: [32]u8 = undefined;
+    try state_transition.computeSigningRoot(
+        types.primitive.Root,
+        &contribution.beacon_block_root,
+        legacy_contribution_domain,
+        &legacy_contribution_root,
+    );
+
+    var gossip_contribution_root: [32]u8 = undefined;
+    try gossipSyncContributionSigningRoot(&cfg, contribution, &gossip_contribution_root);
+
+    const expected_selection_domain = try cfg.domain_cache.get(cfg.forkSeq(contribution.slot), constants.DOMAIN_SYNC_COMMITTEE_SELECTION_PROOF);
+    var expected_selection_root: [32]u8 = undefined;
+    try state_transition.computeSigningRoot(
+        types.altair.SyncAggregatorSelectionData,
+        &selection_data,
+        expected_selection_domain,
+        &expected_selection_root,
+    );
+
+    const expected_contribution_domain = try cfg.domain_cache.get(cfg.forkSeq(contribution.slot), constants.DOMAIN_SYNC_COMMITTEE);
+    var expected_contribution_root: [32]u8 = undefined;
+    try state_transition.computeSigningRoot(
+        types.primitive.Root,
+        &contribution.beacon_block_root,
+        expected_contribution_domain,
+        &expected_contribution_root,
+    );
+
+    try std.testing.expectEqual(expected_selection_root, gossip_selection_root);
+    try std.testing.expectEqual(expected_contribution_root, gossip_contribution_root);
+    try std.testing.expect(!std.mem.eql(u8, &legacy_selection_root, &gossip_selection_root));
+    try std.testing.expect(!std.mem.eql(u8, &legacy_contribution_root, &gossip_contribution_root));
+}
+
+test "gossip selection proof helpers verify Lodestar TS electra vectors" {
+    var chain = config_mod.mainnet.chain_config;
+    chain.ALTAIR_FORK_EPOCH = 0;
+    chain.BELLATRIX_FORK_EPOCH = 0;
+    chain.CAPELLA_FORK_EPOCH = 0;
+    chain.DENEB_FORK_EPOCH = 0;
+    chain.ELECTRA_FORK_EPOCH = 0;
+    chain.FULU_FORK_EPOCH = std.math.maxInt(types.primitive.Epoch.Type);
+    chain.GLOAS_FORK_EPOCH = std.math.maxInt(types.primitive.Epoch.Type);
+
+    const gvr = [_]u8{0} ** 32;
+    const cfg = config_mod.BeaconConfig.init(chain, gvr);
+
+    const pubkey_hex = "a8d4c7c27795a725961317ef5953a7032ed6d83739db8b0e8a72353d1b8b4439427f7efa2c89caa03cc9f28f8cbab8ac";
+    const aggregate_root_hex = "fc6679fc11b6c9310dea0fe6b36fe5944c9e5488a73a01acb13fed4fbbb23c1f";
+    const aggregate_sig_hex = "a5ebf86b71e5aa9ce85a0fd1725122fef21e31f355c01067e3d99db521a98679fd1c63512d25dded740ac6320d96e68a0fe44f98ee89ff34a36d677f52bf4b8e647980061e12689f03a92a42565840a55ce1c8a278ad8f8a61cb451b0bdbc40f";
+    const aggregate_bytes_hex = "6400000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000007000000000000006c000000a5ebf86b71e5aa9ce85a0fd1725122fef21e31f355c01067e3d99db521a98679fd1c63512d25dded740ac6320d96e68a0fe44f98ee89ff34a36d677f52bf4b8e647980061e12689f03a92a42565840a55ce1c8a278ad8f8a61cb451b0bdbc40fec0000002100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000010000000000000001";
+    const sync_root_hex = "c27315e3be76213ef904a07424a3465940ae94d57e2261889f31af50e2137b8b";
+    const sync_sig_hex = "8011cee60caa6576de8caf4fc427b7973b4874acb30537192d4a3c46c95a5c9bd7cd8cb11d0fa31f0e5bd35e5d851d5a024e9b598e0fe4e8ecb8d6a7405b5804d1b573d058a3c2e83686cdaf95cbc633649100efc68811783dbeff323987fdb1";
+    const sync_bytes_hex = "0700000000000000210000000000000000000000000000000000000000000000000000000000000000000000000000000700000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000008011cee60caa6576de8caf4fc427b7973b4874acb30537192d4a3c46c95a5c9bd7cd8cb11d0fa31f0e5bd35e5d851d5a024e9b598e0fe4e8ecb8d6a7405b5804d1b573d058a3c2e83686cdaf95cbc633649100efc68811783dbeff323987fdb1000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
+
+    var pubkey_bytes: [48]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&pubkey_bytes, pubkey_hex);
+    const pubkey = try bls_mod.PublicKey.uncompress(&pubkey_bytes);
+
+    var aggregate_root_expected: [32]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&aggregate_root_expected, aggregate_root_hex);
+    var aggregate_sig: [96]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&aggregate_sig, aggregate_sig_hex);
+
+    const aggregate_bytes_len = aggregate_bytes_hex.len / 2;
+    const aggregate_storage = try std.testing.allocator.alloc(u8, aggregate_bytes_len);
+    defer std.testing.allocator.free(aggregate_storage);
+    _ = try std.fmt.hexToBytes(aggregate_storage, aggregate_bytes_hex);
+
+    var signed_aggregate: types.electra.SignedAggregateAndProof.Type = undefined;
+    try types.electra.SignedAggregateAndProof.deserializeFromBytes(std.testing.allocator, aggregate_storage, &signed_aggregate);
+
+    var aggregate_root: [32]u8 = undefined;
+    try gossipSelectionProofSigningRoot(&cfg, signed_aggregate.message.aggregate.data.slot, &aggregate_root);
+    try std.testing.expectEqual(aggregate_root_expected, aggregate_root);
+    try std.testing.expect(try state_transition.signature_sets.verifySingleSignatureSet(&.{
+        .pubkey = pubkey,
+        .signing_root = aggregate_root,
+        .signature = aggregate_sig,
+    }));
+
+    var sync_root_expected: [32]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&sync_root_expected, sync_root_hex);
+    var sync_sig: [96]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&sync_sig, sync_sig_hex);
+    const sync_bytes_len = sync_bytes_hex.len / 2;
+    const sync_storage = try std.testing.allocator.alloc(u8, sync_bytes_len);
+    defer std.testing.allocator.free(sync_storage);
+    _ = try std.fmt.hexToBytes(sync_storage, sync_bytes_hex);
+
+    var signed_contribution: types.altair.SignedContributionAndProof.Type = undefined;
+    try types.altair.SignedContributionAndProof.deserializeFromBytes(sync_storage, &signed_contribution);
+
+    const selection_data = types.altair.SyncAggregatorSelectionData.Type{
+        .slot = signed_contribution.message.contribution.slot,
+        .subcommittee_index = signed_contribution.message.contribution.subcommittee_index,
+    };
+    var sync_root: [32]u8 = undefined;
+    try gossipSyncSelectionProofSigningRoot(&cfg, &selection_data, &sync_root);
+    try std.testing.expectEqual(sync_root_expected, sync_root);
+    try std.testing.expect(try state_transition.signature_sets.verifySingleSignatureSet(&.{
+        .pubkey = pubkey,
+        .signing_root = sync_root,
+        .signature = sync_sig,
+    }));
+}
+
+test "gossip selection proof helpers match live kurtosis config roots" {
+    var chain = config_mod.mainnet.chain_config;
+    chain.GENESIS_FORK_VERSION = .{ 0x10, 0x00, 0x00, 0x38 };
+    chain.ALTAIR_FORK_VERSION = .{ 0x20, 0x00, 0x00, 0x38 };
+    chain.BELLATRIX_FORK_VERSION = .{ 0x30, 0x00, 0x00, 0x38 };
+    chain.CAPELLA_FORK_VERSION = .{ 0x40, 0x00, 0x00, 0x38 };
+    chain.DENEB_FORK_VERSION = .{ 0x50, 0x00, 0x00, 0x38 };
+    chain.ELECTRA_FORK_VERSION = .{ 0x60, 0x00, 0x00, 0x38 };
+    chain.FULU_FORK_VERSION = .{ 0x70, 0x00, 0x00, 0x38 };
+    chain.ALTAIR_FORK_EPOCH = 0;
+    chain.BELLATRIX_FORK_EPOCH = 0;
+    chain.CAPELLA_FORK_EPOCH = 0;
+    chain.DENEB_FORK_EPOCH = 0;
+    chain.ELECTRA_FORK_EPOCH = 0;
+    chain.FULU_FORK_EPOCH = std.math.maxInt(types.primitive.Epoch.Type);
+    chain.GLOAS_FORK_EPOCH = std.math.maxInt(types.primitive.Epoch.Type);
+
+    const gvr = [_]u8{ 0xd6, 0x1e, 0xa4, 0x84, 0xfe, 0xba, 0xcf, 0xae, 0x52, 0x98, 0xd5, 0x2a, 0x2b, 0x58, 0x1f, 0x3e, 0x30, 0x5a, 0x51, 0xf3, 0x11, 0x2a, 0x92, 0x41, 0xb9, 0x68, 0xdc, 0xcf, 0x01, 0x9f, 0x7b, 0x11 };
+    const cfg = config_mod.BeaconConfig.init(chain, gvr);
+
+    const aggregate_root_hex = "0c6a5bee4931d8eb94e79d64e0040c8bff87956a88cb4343060eb9fb37540107";
+    const sync_root_hex = "2f2f03bcf43d5bb6b22df78dbf1141b987d0b21b97377d6b710122827b472e81";
+
+    var expected_aggregate_root: [32]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&expected_aggregate_root, aggregate_root_hex);
+    var expected_sync_root: [32]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&expected_sync_root, sync_root_hex);
+
+    var aggregate_root: [32]u8 = undefined;
+    try gossipSelectionProofSigningRoot(&cfg, 11463, &aggregate_root);
+    try std.testing.expectEqual(expected_aggregate_root, aggregate_root);
+
+    const selection_data = types.altair.SyncAggregatorSelectionData.Type{
+        .slot = 11463,
+        .subcommittee_index = 2,
+    };
+    var sync_root: [32]u8 = undefined;
+    try gossipSyncSelectionProofSigningRoot(&cfg, &selection_data, &sync_root);
+    try std.testing.expectEqual(expected_sync_root, sync_root);
+}
+
+test "gossip selection proof helpers match live kurtosis config roots at higher slot" {
+    var chain = config_mod.mainnet.chain_config;
+    chain.GENESIS_FORK_VERSION = .{ 0x10, 0x00, 0x00, 0x38 };
+    chain.ALTAIR_FORK_VERSION = .{ 0x20, 0x00, 0x00, 0x38 };
+    chain.BELLATRIX_FORK_VERSION = .{ 0x30, 0x00, 0x00, 0x38 };
+    chain.CAPELLA_FORK_VERSION = .{ 0x40, 0x00, 0x00, 0x38 };
+    chain.DENEB_FORK_VERSION = .{ 0x50, 0x00, 0x00, 0x38 };
+    chain.ELECTRA_FORK_VERSION = .{ 0x60, 0x00, 0x00, 0x38 };
+    chain.FULU_FORK_VERSION = .{ 0x70, 0x00, 0x00, 0x38 };
+    chain.ALTAIR_FORK_EPOCH = 0;
+    chain.BELLATRIX_FORK_EPOCH = 0;
+    chain.CAPELLA_FORK_EPOCH = 0;
+    chain.DENEB_FORK_EPOCH = 0;
+    chain.ELECTRA_FORK_EPOCH = 0;
+    chain.FULU_FORK_EPOCH = std.math.maxInt(types.primitive.Epoch.Type);
+    chain.GLOAS_FORK_EPOCH = std.math.maxInt(types.primitive.Epoch.Type);
+
+    const gvr = [_]u8{ 0xd6, 0x1e, 0xa4, 0x84, 0xfe, 0xba, 0xcf, 0xae, 0x52, 0x98, 0xd5, 0x2a, 0x2b, 0x58, 0x1f, 0x3e, 0x30, 0x5a, 0x51, 0xf3, 0x11, 0x2a, 0x92, 0x41, 0xb9, 0x68, 0xdc, 0xcf, 0x01, 0x9f, 0x7b, 0x11 };
+    const cfg = config_mod.BeaconConfig.init(chain, gvr);
+
+    const aggregate_root_hex = "81254c9a3297cd034d2a0656493882e828a2e7b78fbfa1e0ffd919df4bb43aff";
+    const sync0_root_hex = "92d0613d72d93484a115269f301c78d2d2eb3a1264aa46d107cc3c48a7fe963e";
+    const sync1_root_hex = "d2311472966a79eaac072c0b68b576afcc3d191b7111225b245a03e69bd5d6a4";
+    const sync2_root_hex = "32c70f5edfdabbaf6ec53db00bbd07caf5a9b73606c708128d85574488a773e3";
+    const sync3_root_hex = "ce4ea4878fa9b9e7e48ad4de520c1e98ef6a3835b0f9042b7ef340ec2e4cb58f";
+
+    var expected_aggregate_root: [32]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&expected_aggregate_root, aggregate_root_hex);
+    var aggregate_root: [32]u8 = undefined;
+    try gossipSelectionProofSigningRoot(&cfg, 11737, &aggregate_root);
+    try std.testing.expectEqual(expected_aggregate_root, aggregate_root);
+
+    const expected_sync_hexes = [_][]const u8{ sync0_root_hex, sync1_root_hex, sync2_root_hex, sync3_root_hex };
+    for (expected_sync_hexes, 0..) |expected_hex, subcommittee_index| {
+        var expected_root: [32]u8 = undefined;
+        _ = try std.fmt.hexToBytes(&expected_root, expected_hex);
+        const selection_data = types.altair.SyncAggregatorSelectionData.Type{
+            .slot = 11737,
+            .subcommittee_index = @intCast(subcommittee_index),
+        };
+        var actual_root: [32]u8 = undefined;
+        try gossipSyncSelectionProofSigningRoot(&cfg, &selection_data, &actual_root);
+        try std.testing.expectEqual(expected_root, actual_root);
+    }
 }

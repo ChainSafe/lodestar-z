@@ -513,8 +513,25 @@ pub const Chain = struct {
     pub fn bootstrapFromGenesis(self: *Chain, genesis_state: *CachedBeaconState) !BootstrapResult {
         try genesis_state.state.commit();
 
+        const state_root = (try genesis_state.state.hashTreeRoot()).*;
         var genesis_header = try genesis_state.state.latestBlockHeader();
-        const genesis_block_root = (try genesis_header.hashTreeRoot()).*;
+        const header_slot = try genesis_header.get("slot");
+        const header_proposer = try genesis_header.get("proposer_index");
+        const header_parent = (try genesis_header.getFieldRoot("parent_root")).*;
+        const header_body = (try genesis_header.getFieldRoot("body_root")).*;
+        var header_state_root = (try genesis_header.getFieldRoot("state_root")).*;
+        if (std.mem.eql(u8, &header_state_root, &([_]u8{0} ** 32))) {
+            header_state_root = state_root;
+        }
+        const genesis_header_val = consensus_types.phase0.BeaconBlockHeader.Type{
+            .slot = header_slot,
+            .proposer_index = header_proposer,
+            .parent_root = header_parent,
+            .state_root = header_state_root,
+            .body_root = header_body,
+        };
+        var genesis_block_root: [32]u8 = undefined;
+        try consensus_types.phase0.BeaconBlockHeader.hashTreeRoot(&genesis_header_val, &genesis_block_root);
         const genesis_slot = try genesis_state.state.slot();
         const genesis_epoch = @divFloor(genesis_slot, preset.SLOTS_PER_EPOCH);
 

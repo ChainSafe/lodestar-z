@@ -113,6 +113,9 @@ pub const signature_sets = struct {
     pub const voluntary_exits = @import("signature_sets/voluntary_exits.zig");
     pub const proposer_slashings = @import("signature_sets/proposer_slashings.zig");
     pub const indexed_attestation = @import("signature_sets/indexed_attestation.zig");
+    pub const gossip_domains = @import("signature_sets/gossip_domains.zig");
+    pub const aggregate_and_proof = @import("signature_sets/aggregate_and_proof.zig");
+    pub const sync_contribution_and_proof = @import("signature_sets/sync_contribution_and_proof.zig");
     pub const bls_to_execution_change = @import("signature_sets/bls_to_execution_change.zig");
 
     pub const SingleSignatureSet = @import("utils/signature_sets.zig").SingleSignatureSet;

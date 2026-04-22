@@ -384,6 +384,9 @@ pub const GossipHandler = struct {
         self.current_slot = slot;
         self.current_epoch = epoch;
         self.finalized_slot = finalized_slot;
+        if (slot > 0 and slot % preset.SLOTS_PER_EPOCH == 0) {
+            self.seen_cache.pruneAggregators();
+        }
         self.seen_cache.pruneSyncContributions(slot);
     }
 
@@ -424,6 +427,44 @@ pub const GossipHandler = struct {
             .ignore => GossipHandlerError.ValidationIgnored,
             .reject => GossipHandlerError.ValidationRejected,
         };
+    }
+
+    fn aggregateCommitteeIndex(aggregate: *const AnySignedAggregateAndProof) !u64 {
+        const attestation = aggregate.attestation();
+        return switch (attestation) {
+            .phase0 => |phase0_att| phase0_att.data.index,
+            .electra => |electra_att| electra_att.committee_bits.getSingleTrueBit() orelse error.InvalidGossipAttestation,
+        };
+    }
+
+    fn aggregateParticipantsKnown(
+        self: *GossipHandler,
+        aggregate: *const AnySignedAggregateAndProof,
+        attestation_data_root: *const [32]u8,
+    ) !bool {
+        const committee_index = try aggregateCommitteeIndex(aggregate);
+        return self.seen_cache.aggregatedAttestationParticipantsKnown(
+            aggregate.targetEpoch(),
+            committee_index,
+            attestation_data_root.*,
+            aggregate.attestation().aggregationBitsBytes(),
+        );
+    }
+
+    fn markAggregateSeen(
+        self: *GossipHandler,
+        aggregate: *const AnySignedAggregateAndProof,
+        attestation_data_root: *const [32]u8,
+    ) !void {
+        const committee_index = try aggregateCommitteeIndex(aggregate);
+        try self.seen_cache.markAggregatorSeen(@intCast(aggregate.aggregatorIndex()), aggregate.targetEpoch());
+        try self.seen_cache.markAggregatedAttestationSeen(
+            aggregate.targetEpoch(),
+            committee_index,
+            attestation_data_root.*,
+            aggregate.attestation().aggregationBitsBytes(),
+            aggregate.participantCount(),
+        );
     }
 
     fn resolveAttestation(
@@ -893,6 +934,16 @@ pub const GossipHandler = struct {
             return GossipHandlerError.ValidationIgnored;
         }
 
+        if (try self.aggregateParticipantsKnown(&signed_aggregate, &attestation_data_root)) {
+            return GossipHandlerError.ValidationIgnored;
+        }
+        if (self.seen_cache.hasSeenAggregator(
+            @intCast(signed_aggregate.aggregatorIndex()),
+            signed_aggregate.targetEpoch(),
+        )) {
+            return GossipHandlerError.ValidationIgnored;
+        }
+
         // Phase 2: Import aggregate to fork choice + attestation pool.
         // When processor is available, defer the expensive BLS checks to
         // processor-side batch verification.
@@ -919,11 +970,23 @@ pub const GossipHandler = struct {
             }
         }
 
+        if (try self.aggregateParticipantsKnown(&signed_aggregate, &attestation_data_root)) {
+            return GossipHandlerError.ValidationIgnored;
+        }
+        if (self.seen_cache.hasSeenAggregator(
+            @intCast(signed_aggregate.aggregatorIndex()),
+            signed_aggregate.targetEpoch(),
+        )) {
+            return GossipHandlerError.ValidationIgnored;
+        }
+
         // Fallback: inline processing.
         if (self.importResolvedAggregateFn) |importFn| {
             importFn(self.node, &signed_aggregate, &attestation_data_root, &resolved) catch |err| {
                 scoped_log.debug("aggregate import failed for aggregator {d}: {}", .{ signed_aggregate.aggregatorIndex(), err });
+                return GossipHandlerError.ValidationIgnored;
             };
+            self.markAggregateSeen(&signed_aggregate, &attestation_data_root) catch return GossipHandlerError.ValidationIgnored;
             return;
         }
     }

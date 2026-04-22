@@ -18,10 +18,11 @@ const computeSigningRoot = @import("../utils/signing_root.zig").computeSigningRo
 const computeStartSlotAtEpoch = @import("../utils/epoch.zig").computeStartSlotAtEpoch;
 const AggregatedSignatureSet = @import("../utils/signature_sets.zig").AggregatedSignatureSet;
 const createAggregateSignatureSetFromComponents = @import("../utils/signature_sets.zig").createAggregateSignatureSetFromComponents;
+const gossip_domains = @import("gossip_domains.zig");
 
-pub fn getAttestationDataSigningRoot(config: *const BeaconConfig, state_epoch: Epoch, data: *const AttestationData, out: *[32]u8) !void {
+pub fn getAttestationDataSigningRoot(config: *const BeaconConfig, _: Epoch, data: *const AttestationData, out: *[32]u8) !void {
     const slot = computeStartSlotAtEpoch(data.target.epoch);
-    const domain = try config.getDomain(state_epoch, c.DOMAIN_BEACON_ATTESTER, slot);
+    const domain = try gossip_domains.getDomainAtSlot(config, slot, c.DOMAIN_BEACON_ATTESTER);
 
     try computeSigningRoot(types.phase0.AttestationData, data, domain, out);
 }
