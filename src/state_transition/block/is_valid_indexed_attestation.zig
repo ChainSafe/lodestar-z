@@ -72,3 +72,64 @@ pub fn isValidIndexedAttestationIndices(
 
     return true;
 }
+
+test "isValidIndexedAttestationIndices - valid sorted unique indices" {
+    const indices = [_]ValidatorIndex{ 0, 1, 5, 10, 100 };
+    const result = try isValidIndexedAttestationIndices(.phase0, 200, &indices);
+    try std.testing.expect(result);
+}
+
+test "isValidIndexedAttestationIndices - empty indices returns false" {
+    const indices = [_]ValidatorIndex{};
+    const result = try isValidIndexedAttestationIndices(.phase0, 200, &indices);
+    try std.testing.expect(!result);
+}
+
+test "isValidIndexedAttestationIndices - single index valid" {
+    const indices = [_]ValidatorIndex{42};
+    const result = try isValidIndexedAttestationIndices(.phase0, 100, &indices);
+    try std.testing.expect(result);
+}
+
+test "isValidIndexedAttestationIndices - duplicate indices returns false" {
+    const indices = [_]ValidatorIndex{ 1, 1 };
+    const result = try isValidIndexedAttestationIndices(.phase0, 200, &indices);
+    try std.testing.expect(!result);
+}
+
+test "isValidIndexedAttestationIndices - unsorted indices returns false" {
+    const indices = [_]ValidatorIndex{ 5, 3, 10 };
+    const result = try isValidIndexedAttestationIndices(.phase0, 200, &indices);
+    try std.testing.expect(!result);
+}
+
+test "isValidIndexedAttestationIndices - index out of bounds returns false" {
+    const indices = [_]ValidatorIndex{ 0, 1, 200 };
+    const result = try isValidIndexedAttestationIndices(.phase0, 200, &indices);
+    try std.testing.expect(!result);
+}
+
+test "isValidIndexedAttestationIndices - index at boundary valid" {
+    const indices = [_]ValidatorIndex{199};
+    const result = try isValidIndexedAttestationIndices(.phase0, 200, &indices);
+    try std.testing.expect(result);
+}
+
+test "isValidIndexedAttestationIndices - index at validators_count returns false" {
+    const indices = [_]ValidatorIndex{200};
+    const result = try isValidIndexedAttestationIndices(.phase0, 200, &indices);
+    try std.testing.expect(!result);
+}
+
+test "isValidIndexedAttestationIndices - electra allows more indices" {
+    // Phase0 max = MAX_VALIDATORS_PER_COMMITTEE (2048)
+    // Electra max = MAX_VALIDATORS_PER_COMMITTEE * MAX_COMMITTEES_PER_SLOT
+    var indices: [2049]ValidatorIndex = undefined;
+    for (&indices, 0..) |*v, i| v.* = @intCast(i);
+
+    const result_phase0 = try isValidIndexedAttestationIndices(.phase0, 10000, &indices);
+    try std.testing.expect(!result_phase0);
+
+    const result_electra = try isValidIndexedAttestationIndices(.electra, 10000, &indices);
+    try std.testing.expect(result_electra);
+}
