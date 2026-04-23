@@ -16,8 +16,8 @@
     .description = "Zig consensus modules for Lodestar (Ethereum beacon chain client)",
     .dependencies = .{
         .zbuild = .{
-            .url = "git+https://github.com/ChainSafe/zbuild?ref=refactor/comptime-library-rewrite#67bfe25f964ef75bf268ad25251c7a556dc95c6a",
-            .hash = "zbuild-0.4.0-XJFav5xTAgAD0xcWxfcx5nQt7Dt7Gx5S2-pXC947uYqZ",
+            .url = "git+https://github.com/ChainSafe/zbuild?ref=refactor/comptime-library-rewrite#17c389be7e258dea422f43d5dad996f0f847bd66",
+            .hash = "zbuild-0.4.0-XJFavw5XAgBJ_8U6DHY0D8xHGUAx4Ak4r8pKe2-o_X8Q",
         },
         .blst = .{
             .url = "git+https://github.com/ChainSafe/blst.zig#6ad139afc26a518d06cef1379b17cbd1d883af5c",
