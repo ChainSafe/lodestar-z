@@ -112,6 +112,17 @@
             },
         },
     },
+    // Preset bundles let CI keep using `-Dpreset=mainnet` / `-Dpreset=minimal`.
+    // Under new zbuild the raw flag maps to an options_module field via
+    // `-Dbuild_options.preset=...`; presets wrap that so shorter CLI still works.
+    .presets = .{
+        .mainnet = .{
+            .build_options = .{ .preset = "mainnet" },
+        },
+        .minimal = .{
+            .build_options = .{ .preset = "minimal" },
+        },
+    },
     .modules = .{
         .constants = .{
             .root_source_file = "src/constants/root.zig",
