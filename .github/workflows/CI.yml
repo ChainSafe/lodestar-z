@@ -17,36 +17,6 @@ env:
   NODE_VERSION: "24"
 
 jobs:
-  # zbuild upstream does not yet support Zig 0.16; re-enable once
-  # ChainSafe/zbuild is updated.
-  # zbuild:
-  #   runs-on: ubuntu-latest
-  #
-  #   steps:
-  #     - name: Checkout Repository
-  #       uses: actions/checkout@v4
-  #
-  #     - name: Setup Zig
-  #       uses: mlugg/setup-zig@v2
-  #       with:
-  #         version: ${{ env.ZIG_VERSION }}
-  #         cache-key: ubuntu-latest-${{ env.ZIG_VERSION }}
-  #
-  #     - name: Install zbuild
-  #       run: |
-  #         git clone https://github.com/ChainSafe/zbuild.git
-  #         cd zbuild
-  #         zig build -Doptimize=ReleaseFast
-  #         sudo cp zig-out/bin/zbuild /usr/local/bin/zbuild
-  #
-  #     - name: Verify zbuild
-  #       run: zbuild version
-  #
-  #     - name: Check if build.zig is sync'ed with zbuild.zon
-  #       run: |
-  #         zbuild sync
-  #         git diff --exit-code
-
   build-test:
     name: build & test (${{ matrix.os }})
     strategy:
