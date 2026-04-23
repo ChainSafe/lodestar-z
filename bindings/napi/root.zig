@@ -33,11 +33,11 @@ fn init(old_ref_count: u32) !void {
 fn cleanup(new_ref_count: u32) void {
     if (new_ref_count == 0) {
         // Last environment — tear down shared state.
+        blst.deinitThreadPool();
         config.state.deinit();
         pubkeys.state.deinit();
         pool.state.deinit();
         metrics.deinit();
-        blst.deinitThreadPool();
     }
 }
 
