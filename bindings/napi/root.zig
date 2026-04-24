@@ -9,6 +9,7 @@ const metrics = @import("./metrics.zig");
 const BeaconStateView = @import("./BeaconStateView.zig");
 const blst = @import("./blst.zig");
 const state_transition = @import("./state_transition.zig");
+const napi_io = @import("./io.zig");
 
 comptime {
     napi.module.register(register);
@@ -22,12 +23,13 @@ var env_refcount: std.atomic.Value(u32) = std.atomic.Value(u32).init(0);
 const EnvCleanup = struct {
     fn hook(_: *EnvCleanup) void {
         if (env_refcount.fetchSub(1, .acq_rel) == 1) {
-            // Last environment — tear down shared state.
+            // Last environment — tear down shared state in reverse init order.
             blst.deinitThreadPool();
             config.state.deinit();
             pubkeys.state.deinit();
             pool.state.deinit();
             metrics.deinit();
+            napi_io.deinit();
         }
     }
 };
@@ -37,7 +39,10 @@ var env_cleanup: EnvCleanup = .{};
 fn register(env: napi.Env, exports: napi.Value) !void {
     if (env_refcount.fetchAdd(1, .monotonic) == 0) {
         // First environment — initialize shared state.
-        // in your threadpool init
+        // `io` must come first — downstream shared state may take it as input.
+        try napi_io.init();
+        errdefer napi_io.deinit();
+
         var cpu_count: usize = options.thread_count;
         if (options.thread_count == 0) {
             std.debug.print("Note: no -Dthread-count set, will use runtime CPU count minus 1: {}\n", .{cpu_count});

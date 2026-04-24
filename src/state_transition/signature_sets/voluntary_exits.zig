@@ -42,6 +42,7 @@ pub fn getVoluntaryExitSignatureSet(
 }
 
 pub fn voluntaryExitsSignatureSets(
+    allocator: std.mem.Allocator,
     config: *const BeaconConfig,
     epoch_cache: *const EpochCache,
     voluntary_exits: []types.phase0.SignedVoluntaryExit.Type,
@@ -53,6 +54,6 @@ pub fn voluntaryExitsSignatureSets(
             epoch_cache,
             signed_voluntary_exit,
         );
-        try out.append(signature_set);
+        try out.append(allocator, signature_set);
     }
 }

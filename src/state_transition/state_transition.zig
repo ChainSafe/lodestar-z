@@ -4,8 +4,7 @@ const ForkSeq = @import("config").ForkSeq;
 const metrics = @import("metrics.zig");
 const observeEpochTransitionStep = metrics.observeEpochTransitionStep;
 const observeEpochTransition = metrics.observeEpochTransition;
-const readSeconds = metrics.readSeconds;
-const Timer = std.time.Timer;
+const time = @import("time");
 
 const types = @import("consensus_types");
 const preset = @import("preset").preset;
@@ -48,6 +47,7 @@ pub const BlockExternalData = struct {
 
 pub fn processSlots(
     allocator: std.mem.Allocator,
+    io: std.Io,
     cached_state: *CachedBeaconState,
     slot: Slot,
     _: EpochTransitionCacheOpts,
@@ -63,23 +63,25 @@ pub fn processSlots(
 
         const next_slot = try state.slot() + 1;
         if (next_slot % preset.SLOTS_PER_EPOCH == 0) {
-            var epoch_transition_timer = try Timer.start();
+            const epoch_transition_timer = time.timestampNow(io);
 
-            var timer = try Timer.start();
+            var timer = time.timestampNow(io);
             var epoch_transition_cache = try EpochTransitionCache.init(
                 allocator,
+                io,
                 config,
                 epoch_cache,
                 state,
             );
-            defer epoch_transition_cache.deinit();
-            try observeEpochTransitionStep(.{ .step = .before_process_epoch }, timer.read());
+            defer epoch_transition_cache.deinit(allocator);
+            try observeEpochTransitionStep(.{ .step = .before_process_epoch }, @as(u64, @intCast(time.since(io, timer).nanoseconds)));
 
             switch (state.forkSeq()) {
                 inline else => |f| {
                     try processEpoch(
                         f,
                         allocator,
+                        io,
                         config,
                         epoch_cache,
                         state.castToFork(f),
@@ -91,63 +93,46 @@ pub fn processSlots(
 
             try state.setSlot(next_slot);
 
-            timer = try Timer.start();
+            timer = time.timestampNow(io);
             try epoch_cache.afterProcessEpoch(state, &epoch_transition_cache);
-            try observeEpochTransitionStep(.{ .step = .after_process_epoch }, timer.read());
+            try observeEpochTransitionStep(.{ .step = .after_process_epoch }, @as(u64, @intCast(time.since(io, timer).nanoseconds)));
             // state.commit
 
             const state_epoch = computeEpochAtSlot(next_slot);
 
             if (state_epoch == config.chain.ALTAIR_FORK_EPOCH) {
-                state.* = .{ .altair = (try upgradeStateToAltair(
-                    allocator,
-                    config,
-                    epoch_cache,
-                    try state.tryCastToFork(.phase0),
-                )).inner };
+                const phase0_state = try state.tryCastToFork(.phase0);
+                const upgraded = try upgradeStateToAltair(allocator, config, epoch_cache, phase0_state);
+                state.* = .{ .altair = upgraded.inner };
             }
             if (state_epoch == config.chain.BELLATRIX_FORK_EPOCH) {
-                state.* = .{ .bellatrix = (try upgradeStateToBellatrix(
-                    config,
-                    epoch_cache,
-                    try state.tryCastToFork(.altair),
-                )).inner };
+                const altair_state = try state.tryCastToFork(.altair);
+                const upgraded = try upgradeStateToBellatrix(config, epoch_cache, altair_state);
+                state.* = .{ .bellatrix = upgraded.inner };
             }
             if (state_epoch == config.chain.CAPELLA_FORK_EPOCH) {
-                state.* = .{ .capella = (try upgradeStateToCapella(
-                    allocator,
-                    config,
-                    epoch_cache,
-                    try state.tryCastToFork(.bellatrix),
-                )).inner };
+                const bellatrix_state = try state.tryCastToFork(.bellatrix);
+                const upgraded = try upgradeStateToCapella(allocator, config, epoch_cache, bellatrix_state);
+                state.* = .{ .capella = upgraded.inner };
             }
             if (state_epoch == config.chain.DENEB_FORK_EPOCH) {
-                state.* = .{ .deneb = (try upgradeStateToDeneb(
-                    allocator,
-                    config,
-                    epoch_cache,
-                    try state.tryCastToFork(.capella),
-                )).inner };
+                const capella_state = try state.tryCastToFork(.capella);
+                const upgraded = try upgradeStateToDeneb(allocator, config, epoch_cache, capella_state);
+                state.* = .{ .deneb = upgraded.inner };
             }
             if (state_epoch == config.chain.ELECTRA_FORK_EPOCH) {
-                state.* = .{ .electra = (try upgradeStateToElectra(
-                    allocator,
-                    config,
-                    epoch_cache,
-                    try state.tryCastToFork(.deneb),
-                )).inner };
+                const deneb_state = try state.tryCastToFork(.deneb);
+                const upgraded = try upgradeStateToElectra(allocator, config, epoch_cache, deneb_state);
+                state.* = .{ .electra = upgraded.inner };
             }
             if (state_epoch == config.chain.FULU_FORK_EPOCH) {
-                state.* = .{ .fulu = (try upgradeStateToFulu(
-                    allocator,
-                    config,
-                    epoch_cache,
-                    try state.tryCastToFork(.electra),
-                )).inner };
+                const electra_state = try state.tryCastToFork(.electra);
+                const upgraded = try upgradeStateToFulu(allocator, config, epoch_cache, electra_state);
+                state.* = .{ .fulu = upgraded.inner };
             }
 
             try epoch_cache.finalProcessEpoch(state);
-            metrics.state_transition.epoch_transition.observe(readSeconds(&epoch_transition_timer));
+            metrics.state_transition.epoch_transition.observe(time.durationSeconds(time.since(io, epoch_transition_timer)));
         } else {
             try state.setSlot(next_slot);
         }
@@ -174,6 +159,7 @@ pub const StateTransitionResult = struct {
 
 pub fn stateTransition(
     allocator: std.mem.Allocator,
+    io: std.Io,
     cached_state: *CachedBeaconState,
     signed_block: AnySignedBeaconBlock,
     opts: TransitionOpt,
@@ -194,6 +180,7 @@ pub fn stateTransition(
 
     try processSlots(
         allocator,
+        io,
         post_cached_state,
         block_slot,
         .{},
@@ -217,7 +204,7 @@ pub fn stateTransition(
         return error.InvalidBlockForkForState;
     }
     // Note: time only on success
-    var timer = try Timer.start();
+    var timer = time.timestampNow(io);
     switch (post_state.forkSeq()) {
         inline else => |f| {
             switch (block.blockType()) {
@@ -244,7 +231,7 @@ pub fn stateTransition(
             }
         },
     }
-    metrics.state_transition.process_block.observe(readSeconds(&timer));
+    metrics.state_transition.process_block.observe(time.durationSeconds(time.since(io, timer)));
 
     //
     // TODO(bing): commit
@@ -256,9 +243,9 @@ pub fn stateTransition(
 
     // Verify state root
     if (opts.verify_state_root) {
-        timer = try Timer.start();
+        timer = time.timestampNow(io);
         const post_state_root = try post_state.hashTreeRoot();
-        try metrics.state_transition.state_hash_tree_root.observe(.{ .source = .block_transition }, readSeconds(&timer));
+        try metrics.state_transition.state_hash_tree_root.observe(.{ .source = .block_transition }, time.durationSeconds(time.since(io, timer)));
 
         const block_state_root = block.stateRoot();
         if (!std.mem.eql(u8, post_state_root, block_state_root)) {
@@ -272,8 +259,8 @@ pub fn stateTransition(
     return post_cached_state;
 }
 
-pub fn deinitStateTransition() void {
-    deinitReusedEpochTransitionCache();
+pub fn deinitStateTransition(io: std.Io) void {
+    deinitReusedEpochTransitionCache(io);
 }
 
 const TestCase = struct {
@@ -315,6 +302,7 @@ test "state transition - electra block" {
         // testing.expectError(blst.c.BLST_BAD_ENCODING, stateTransition(allocator, test_state.cached_state, signed_block, .{ .verify_signatures = true }));
         const res = stateTransition(
             allocator,
+            std.testing.io,
             test_state.cached_state,
             signed_beacon_block,
             tc.transition_opt,
@@ -335,5 +323,5 @@ test "state transition - electra block" {
         }
     }
 
-    defer deinitStateTransition();
+    defer deinitStateTransition(std.testing.io);
 }

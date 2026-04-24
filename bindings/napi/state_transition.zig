@@ -5,6 +5,7 @@ const fork_types = @import("fork_types");
 const state_transition = @import("state_transition");
 const CachedBeaconState = state_transition.CachedBeaconState;
 const AnySignedBeaconBlock = fork_types.AnySignedBeaconBlock;
+const napi_io = @import("./io.zig");
 
 var gpa: std.heap.DebugAllocator(.{}) = .init;
 const allocator = if (builtin.mode == .Debug)
@@ -66,6 +67,7 @@ pub fn stateTransition(
 
     const post_state = try state_transition.stateTransition(
         allocator,
+        napi_io.get(),
         cached_state,
         signed_block,
         opts,

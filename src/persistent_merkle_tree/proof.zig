@@ -304,12 +304,12 @@ pub fn computeDescriptor(allocator: Allocator, gindices: []const Gindex) ![]u8 {
     }
 
     // Sort bitstrings lexicographically
-    var sorted_list = std.ArrayList([]const u8).init(allocator);
-    defer sorted_list.deinit();
+    var sorted_list: std.ArrayList([]const u8) = .empty;
+    defer sorted_list.deinit(allocator);
 
     var proof_iter = proof_bitstrings.keyIterator();
     while (proof_iter.next()) |key| {
-        try sorted_list.append(key.*);
+        try sorted_list.append(allocator, key.*);
     }
 
     const bitstringLessThan = struct {
@@ -321,8 +321,8 @@ pub fn computeDescriptor(allocator: Allocator, gindices: []const Gindex) ![]u8 {
     std.sort.pdq([]const u8, sorted_list.items, {}, bitstringLessThan);
 
     // Convert gindex bitstrings into descriptor bitstring
-    var descriptor_bitstring = std.ArrayList(u8).init(allocator);
-    defer descriptor_bitstring.deinit();
+    var descriptor_bitstring: std.ArrayList(u8) = .empty;
+    defer descriptor_bitstring.deinit(allocator);
 
     for (sorted_list.items) |gindex_bitstring| {
         // Find the rightmost '1' bit
@@ -331,9 +331,9 @@ pub fn computeDescriptor(allocator: Allocator, gindices: []const Gindex) ![]u8 {
             const rev_idx = gindex_bitstring.len - 1 - i;
             if (gindex_bitstring[rev_idx] == '1') {
                 for (0..i) |_| {
-                    try descriptor_bitstring.append('0');
+                    try descriptor_bitstring.append(allocator, '0');
                 }
-                try descriptor_bitstring.append('1');
+                try descriptor_bitstring.append(allocator, '1');
                 break;
             }
         }
@@ -344,7 +344,7 @@ pub fn computeDescriptor(allocator: Allocator, gindices: []const Gindex) ![]u8 {
     if (remainder != 0) {
         const padding = 8 - remainder;
         for (0..padding) |_| {
-            try descriptor_bitstring.append('0');
+            try descriptor_bitstring.append(allocator, '0');
         }
     }
 
@@ -377,8 +377,8 @@ fn getBit(bitlist: []const u8, bit_index: usize) bool {
 
 /// Convert descriptor bytes to bitlist
 pub fn descriptorToBitlist(allocator: Allocator, descriptor: []const u8) ![]bool {
-    var bools = std.ArrayList(bool).init(allocator);
-    errdefer bools.deinit();
+    var bools: std.ArrayList(bool) = .empty;
+    errdefer bools.deinit(allocator);
 
     const max_bit_length = descriptor.len * 8;
     var count0: usize = 0;
@@ -387,7 +387,7 @@ pub fn descriptorToBitlist(allocator: Allocator, descriptor: []const u8) ![]bool
     var i: usize = 0;
     while (i < max_bit_length) : (i += 1) {
         const bit = getBit(descriptor, i);
-        try bools.append(bit);
+        try bools.append(allocator, bit);
 
         if (bit) {
             count1 += 1;
@@ -406,7 +406,7 @@ pub fn descriptorToBitlist(allocator: Allocator, descriptor: []const u8) ![]bool
                     return error.InvalidWitnessLength;
                 }
             }
-            return bools.toOwnedSlice();
+            return bools.toOwnedSlice(allocator);
         }
     }
 

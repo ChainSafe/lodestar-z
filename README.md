@@ -14,7 +14,7 @@ This project provides several modules:
 
 ### Spec Tests
 
-`lodestar-z` is compliant against the spec tests version specified in `zbuild.zon` under `spec_test_options`.
+`lodestar-z` is compliant against the spec tests version specified in `build.zig.zon` under `options_modules.spec_test_options`.
 
 To run all tests:
 
