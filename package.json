@@ -19,6 +19,10 @@
     "./pubkeys": {
       "import": "./bindings/src/pubkeys.js",
       "types": "./bindings/src/pubkeys.d.ts"
+    },
+    "./state-transition": {
+      "import": "./bindings/src/state-transition.js",
+      "types": "./bindings/src/state-transition.d.ts"
     }
   },
   "scripts": {

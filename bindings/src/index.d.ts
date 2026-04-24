@@ -1,4 +1,4 @@
-interface BeaconBlockHeader {
+export interface BeaconBlockHeader {
   slot: number;
   proposerIndex: number;
   parentRoot: Uint8Array;
@@ -6,18 +6,18 @@ interface BeaconBlockHeader {
   bodyRoot: Uint8Array;
 }
 
-interface Checkpoint {
+export interface Checkpoint {
   epoch: number;
   root: Uint8Array;
 }
 
-interface Eth1Data {
+export interface Eth1Data {
   depositRoot: Uint8Array;
   depositCount: number;
   blockHash: Uint8Array;
 }
 
-interface ExecutionPayloadHeader {
+export interface ExecutionPayloadHeader {
   parentHash: Uint8Array;
   feeRecipient: Uint8Array;
   stateRoot: Uint8Array;
@@ -37,29 +37,29 @@ interface ExecutionPayloadHeader {
   excessBlobGas?: number; // deneb+
 }
 
-interface Fork {
+export interface Fork {
   previousVersion: Uint8Array;
   currentVersion: Uint8Array;
   epoch: number;
 }
 
-interface SyncCommittee {
+export interface SyncCommittee {
   pubkeys: Uint8Array;
   aggregatePubkey: Uint8Array;
 }
 
-interface ProcessSlotsOpts {
+export interface ProcessSlotsOpts {
   transferCache?: boolean;
 }
 
-interface CompactMultiProof {
+export interface CompactMultiProof {
   type: "compactMulti";
   leaves: Uint8Array[];
   descriptor: Uint8Array;
 }
 
 /** Options to control how state transition is run */
-interface TransitionOpts {
+export interface TransitionOpts {
   /** Verify the post-state root matches the block's state root. Default: true. */
   verifyStateRoot?: boolean;
   /** Verify the proposer signature on the signed block. Default: true. */
@@ -70,27 +70,27 @@ interface TransitionOpts {
   transferCache?: boolean;
 }
 
-interface ProposerRewards {
+export interface ProposerRewards {
   attestations: bigint;
   syncAggregate: bigint;
   slashing: bigint;
 }
 
-interface SyncCommitteeCache {
+export interface SyncCommitteeCache {
   validatorIndices: number[];
 }
 
-interface HistoricalSummary {
+export interface HistoricalSummary {
   blockSummaryRoot: Uint8Array;
   stateSummaryRoot: Uint8Array;
 }
 
-interface PendingConsolidation {
+export interface PendingConsolidation {
   sourceIndex: number;
   targetIndex: number;
 }
 
-interface Validator {
+export interface Validator {
   pubkey: Uint8Array;
   withdrawalCredentials: Uint8Array;
   effectiveBalance: number;
@@ -101,7 +101,7 @@ interface Validator {
   withdrawableEpoch: number;
 }
 
-type ValidatorStatus =
+export type ValidatorStatus =
   | "pending_initialized"
   | "pending_queued"
   | "active_ongoing"
@@ -112,7 +112,7 @@ type ValidatorStatus =
   | "withdrawal_possible"
   | "withdrawal_done";
 
-type VoluntaryExitValidity =
+export type VoluntaryExitValidity =
   | "valid"
   | "inactive"
   | "already_exited"
@@ -121,7 +121,7 @@ type VoluntaryExitValidity =
   | "pending_withdrawals"
   | "invalid_signature";
 
-declare class BeaconStateView {
+export declare class BeaconStateView {
   static createFromBytes(bytes: Uint8Array): BeaconStateView;
 
   slot: number;
