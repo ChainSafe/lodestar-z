@@ -20,12 +20,12 @@
             .hash = "zbuild-0.4.0-XJFavw5XAgBJ_8U6DHY0D8xHGUAx4Ak4r8pKe2-o_X8Q",
         },
         .blst = .{
-            .url = "git+https://github.com/ChainSafe/blst.zig#6ad139afc26a518d06cef1379b17cbd1d883af5c",
-            .hash = "blst_zig-0.0.0-cnAxzg4LAAAj7C2e_M9QgfMS0OZsqyHHWjf_lnfN3G-B",
+            .url = "git+https://github.com/ChainSafe/blst.zig.git#5d9543be8a7a1a9942c62a097644286751f95dc7",
+            .hash = "blst_zig-0.0.0-cnAxzisLAADc_A14MqXu_f_rLBRS6m6ki8zHrUjLXYoo",
         },
         .hashtree = .{
-            .url = "git+https://github.com/ChainSafe/hashtree-z#56e406ffff6c8db2b30769ba4d17befcde6748fa",
-            .hash = "hashtree-0.1.0-sBOovvQTAAAtcb6H7zvfWifUj_hQzTH2EzURIhHxjkft",
+            .url = "git+https://github.com/ChainSafe/hashtree-z.git#81b7303f72e202e966f71eedf4be1d8d33e2fcaa",
+            .hash = "hashtree-0.1.0-sBOoviYWAAA1HcTLhxWt0TtrLFXvYM5gOvxpu_Rreiiw",
         },
         .snappy = .{
             .url = "git+https://github.com/ChainSafe/snappy.zig#713942410426051da6107a955b29f3f152815622",
