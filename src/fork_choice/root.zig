@@ -47,7 +47,6 @@ pub const RootSet = fork_choice.RootSet;
 
 pub const ForkChoiceStore = store.ForkChoiceStore;
 pub const Checkpoint = store.Checkpoint;
-pub const CheckpointWithPayloadStatus = store.CheckpointWithPayloadStatus;
 pub const EffectiveBalanceIncrementsRc = store.JustifiedBalancesRc;
 pub const JustifiedBalances = store.JustifiedBalances;
 pub const JustifiedBalancesGetter = store.JustifiedBalancesGetter;
@@ -64,8 +63,8 @@ pub const ForkChoiceOpts = fork_choice.ForkChoiceOpts;
 pub const UpdateHeadOpt = fork_choice.UpdateHeadOpt;
 pub const UpdateAndGetHeadOpt = fork_choice.UpdateAndGetHeadOpt;
 pub const UpdateAndGetHeadResult = fork_choice.UpdateAndGetHeadResult;
-pub const CheckpointWithPayloadAndBalance = fork_choice.CheckpointWithPayloadAndBalance;
-pub const CheckpointWithPayloadAndTotalBalance = fork_choice.CheckpointWithPayloadAndTotalBalance;
+pub const CheckpointWithBalance = fork_choice.CheckpointWithBalance;
+pub const CheckpointWithTotalBalance = fork_choice.CheckpointWithTotalBalance;
 pub const onBlockFromProto = fork_choice.onBlockFromProto;
 
 test {

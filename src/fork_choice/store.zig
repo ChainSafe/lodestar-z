@@ -7,9 +7,6 @@ const state_transition = @import("state_transition");
 
 const CachedBeaconState = state_transition.CachedBeaconState;
 
-const proto_array_mod = @import("proto_array.zig");
-const PayloadStatus = proto_array_mod.PayloadStatus;
-
 const Slot = primitives.Slot.Type;
 const Epoch = primitives.Epoch.Type;
 const Root = primitives.Root.Type;
@@ -26,24 +23,6 @@ pub const Checkpoint = struct {
     pub fn eql(a: Checkpoint, b: Checkpoint) bool {
         return a.epoch == b.epoch and
             std.mem.eql(u8, &a.root, &b.root);
-    }
-};
-
-/// Checkpoint extended with Gloas payload status.
-///
-/// Pre-Gloas: payload_status is always .full.
-/// Gloas: determined by state.execution_payload_availability.
-pub const CheckpointWithPayloadStatus = struct {
-    epoch: Epoch,
-    root: Root,
-    payload_status: PayloadStatus = .full,
-
-    pub fn fromCheckpoint(cp: Checkpoint, payload_status: PayloadStatus) CheckpointWithPayloadStatus {
-        return .{
-            .epoch = cp.epoch,
-            .root = cp.root,
-            .payload_status = payload_status,
-        };
     }
 };
 
@@ -67,9 +46,9 @@ pub fn computeTotalBalance(balances: []const u16) u64 {
 /// or approximate from a close state.
 pub const JustifiedBalancesGetter = struct {
     context: ?*anyopaque = null,
-    getFn: *const fn (context: ?*anyopaque, checkpoint: CheckpointWithPayloadStatus, state: *CachedBeaconState) JustifiedBalances,
+    getFn: *const fn (context: ?*anyopaque, checkpoint: Checkpoint, state: *CachedBeaconState) JustifiedBalances,
 
-    pub fn get(self: JustifiedBalancesGetter, checkpoint: CheckpointWithPayloadStatus, state: *CachedBeaconState) JustifiedBalances {
+    pub fn get(self: JustifiedBalancesGetter, checkpoint: Checkpoint, state: *CachedBeaconState) JustifiedBalances {
         return self.getFn(self.context, checkpoint, state);
     }
 };
@@ -77,9 +56,9 @@ pub const JustifiedBalancesGetter = struct {
 /// Event callback: context + fn pointer pair.
 pub const EventCallback = struct {
     context: ?*anyopaque = null,
-    callFn: *const fn (context: ?*anyopaque, cp: CheckpointWithPayloadStatus) void,
+    callFn: *const fn (context: ?*anyopaque, cp: Checkpoint) void,
 
-    pub fn call(self: EventCallback, cp: CheckpointWithPayloadStatus) void {
+    pub fn call(self: EventCallback, cp: Checkpoint) void {
         self.callFn(self.context, cp);
     }
 };
@@ -107,9 +86,9 @@ pub const ForkChoiceStore = struct {
     /// Unrealized justified checkpoint with balances from pull-up FFG.
     unrealized_justified: JustifiedState,
     /// Realized finalized checkpoint.
-    finalized_checkpoint: CheckpointWithPayloadStatus,
+    finalized_checkpoint: Checkpoint,
     /// Unrealized finalized checkpoint from pull-up FFG.
-    unrealized_finalized_checkpoint: CheckpointWithPayloadStatus,
+    unrealized_finalized_checkpoint: Checkpoint,
 
     /// Set of equivocating validator indices (from attester slashings).
     equivocating_indices: EquivocatingIndices,
@@ -123,7 +102,7 @@ pub const ForkChoiceStore = struct {
     /// Justified checkpoint + balances + totalBalance bundled together.
     /// Balances are reference-counted: justified and unrealized_justified may share
     pub const JustifiedState = struct {
-        checkpoint: CheckpointWithPayloadStatus,
+        checkpoint: Checkpoint,
         balances: *JustifiedBalancesRc,
         total_balance: u64,
     };
@@ -132,8 +111,8 @@ pub const ForkChoiceStore = struct {
         self: *ForkChoiceStore,
         allocator: Allocator,
         current_slot: Slot,
-        justified_checkpoint: CheckpointWithPayloadStatus,
-        finalized_checkpoint: CheckpointWithPayloadStatus,
+        justified_checkpoint: Checkpoint,
+        finalized_checkpoint: Checkpoint,
         justified_balances: []const u16,
         justified_balances_getter: JustifiedBalancesGetter,
         events: ForkChoiceStoreEvents,
@@ -174,7 +153,7 @@ pub const ForkChoiceStore = struct {
     /// Set the justified checkpoint and balances, recomputing totalBalance.
     /// Receives raw balances slice, internally creates a new Rc (matching state_transition pattern).
     /// Fires onJustified event if configured.
-    pub fn setJustified(self: *ForkChoiceStore, allocator: Allocator, checkpoint: CheckpointWithPayloadStatus, balances: []const u16) !void {
+    pub fn setJustified(self: *ForkChoiceStore, allocator: Allocator, checkpoint: Checkpoint, balances: []const u16) !void {
         var balances_list = JustifiedBalances.init(allocator);
         errdefer balances_list.deinit();
 
@@ -193,7 +172,7 @@ pub const ForkChoiceStore = struct {
 
     /// Set the finalized checkpoint.
     /// Fires onFinalized event if configured.
-    pub fn setFinalizedCheckpoint(self: *ForkChoiceStore, checkpoint: CheckpointWithPayloadStatus) void {
+    pub fn setFinalizedCheckpoint(self: *ForkChoiceStore, checkpoint: Checkpoint) void {
         self.finalized_checkpoint = checkpoint;
         if (self.events.on_finalized) |cb| cb.call(checkpoint);
     }
@@ -217,11 +196,11 @@ fn hashFromByte(byte: u8) Root {
     return root;
 }
 
-fn makeCheckpoint(epoch: Epoch, root: Root) CheckpointWithPayloadStatus {
+fn makeCheckpoint(epoch: Epoch, root: Root) Checkpoint {
     return .{ .epoch = epoch, .root = root };
 }
 
-fn dummyBalancesGetter(_: ?*anyopaque, _: CheckpointWithPayloadStatus, _: *CachedBeaconState) JustifiedBalances {
+fn dummyBalancesGetter(_: ?*anyopaque, _: Checkpoint, _: *CachedBeaconState) JustifiedBalances {
     return JustifiedBalances.init(testing.allocator);
 }
 
@@ -262,15 +241,6 @@ test "Checkpoint.eql" {
     try testing.expect(!cp_a.eql(cp_d));
 }
 
-test "CheckpointWithPayloadStatus.fromCheckpoint" {
-    const cp: Checkpoint = .{ .epoch = 5, .root = hashFromByte(0xAA) };
-    const cwp = CheckpointWithPayloadStatus.fromCheckpoint(cp, .empty);
-
-    try testing.expectEqual(@as(Epoch, 5), cwp.epoch);
-    try testing.expectEqual(cp.root, cwp.root);
-    try testing.expectEqual(PayloadStatus.empty, cwp.payload_status);
-}
-
 test "init shares Rc between justified and unrealized_justified" {
     var store = try initTestStore(&.{ 10, 20, 30 });
     defer store.deinit(testing.allocator);
@@ -308,7 +278,7 @@ test "setFinalizedCheckpoint updates and fires event" {
         called: bool = false,
         last_epoch: Epoch = 0,
 
-        fn onFinalized(ctx: ?*anyopaque, cp: CheckpointWithPayloadStatus) void {
+        fn onFinalized(ctx: ?*anyopaque, cp: Checkpoint) void {
             const self: *@This() = @ptrCast(@alignCast(ctx.?));
             self.called = true;
             self.last_epoch = cp.epoch;
@@ -341,7 +311,7 @@ test "setJustified fires onJustified event" {
         called: bool = false,
         last_epoch: Epoch = 0,
 
-        fn onJustified(ctx: ?*anyopaque, cp: CheckpointWithPayloadStatus) void {
+        fn onJustified(ctx: ?*anyopaque, cp: Checkpoint) void {
             const self: *@This() = @ptrCast(@alignCast(ctx.?));
             self.called = true;
             self.last_epoch = cp.epoch;

@@ -12,7 +12,7 @@ const ForkChoice = fork_choice.ForkChoice;
 const ProtoArray = fork_choice.ProtoArray;
 const ProtoBlock = fork_choice.ProtoBlock;
 const ForkChoiceStore = fork_choice.ForkChoiceStore;
-const CheckpointWithPayloadStatus = fork_choice.CheckpointWithPayloadStatus;
+const Checkpoint = fork_choice.Checkpoint;
 const JustifiedBalances = fork_choice.JustifiedBalances;
 const JustifiedBalancesGetter = fork_choice.JustifiedBalancesGetter;
 const onBlockFromProto = fork_choice.onBlockFromProto;
@@ -39,7 +39,7 @@ pub const Opts = struct {
 /// Benchmarks never trigger a justified checkpoint change that would
 /// call through to the getter, so returning an empty list is safe.
 /// Uses page_allocator as a safe fallback allocator.
-fn dummyBalancesGetter(_: ?*anyopaque, _: CheckpointWithPayloadStatus, _: *CachedBeaconState) JustifiedBalances {
+fn dummyBalancesGetter(_: ?*anyopaque, _: Checkpoint, _: *CachedBeaconState) JustifiedBalances {
     return JustifiedBalances.init(std.heap.page_allocator);
 }
 
@@ -84,7 +84,7 @@ pub fn initializeForkChoice(allocator: Allocator, opts: Opts) !*ForkChoice {
     @memset(balances, 32);
 
     // -- Genesis checkpoint (epoch 0, ZERO_HASH root) --
-    const genesis_cp: CheckpointWithPayloadStatus = .{
+    const genesis_cp: Checkpoint = .{
         .epoch = 0,
         .root = ZERO_HASH,
     };

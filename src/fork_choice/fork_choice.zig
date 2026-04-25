@@ -45,7 +45,6 @@ const DeltasCache = compute_deltas.DeltasCache;
 const store = @import("store.zig");
 pub const ForkChoiceStore = store.ForkChoiceStore;
 pub const Checkpoint = store.Checkpoint;
-pub const CheckpointWithPayloadStatus = store.CheckpointWithPayloadStatus;
 pub const JustifiedBalances = store.JustifiedBalances;
 const EffectiveBalanceIncrementsRc = store.JustifiedBalancesRc;
 const JustifiedBalancesGetter = store.JustifiedBalancesGetter;
@@ -201,14 +200,14 @@ pub const UpdateAndGetHeadResult = struct {
 /// Unlike `ForkChoiceStore.JustifiedState` which uses reference-counted balances,
 /// this is a simple value type for passing checkpoint + balance data across
 /// function boundaries.
-pub const CheckpointWithPayloadAndBalance = struct {
-    checkpoint: CheckpointWithPayloadStatus,
+pub const CheckpointWithBalance = struct {
+    checkpoint: Checkpoint,
     balances: []const u16,
 };
 
 /// Checkpoint with balances and precomputed total balance.
-pub const CheckpointWithPayloadAndTotalBalance = struct {
-    checkpoint: CheckpointWithPayloadStatus,
+pub const CheckpointWithTotalBalance = struct {
+    checkpoint: Checkpoint,
     balances: []const u16,
     total_balance: u64,
 };
@@ -459,10 +458,7 @@ pub const ForkChoice = struct {
         // 4. Check block is a descendant of the finalized block at checkpoint finalized slot.
         const block_ancestor_node = try self.proto_array.getAncestor(parent_root, finalized_slot);
         const fc_store_finalized = self.fc_store.finalized_checkpoint;
-        if (!std.mem.eql(u8, &block_ancestor_node.block_root, &fc_store_finalized.root) or
-            // Gloas (ePBS): finalized checkpoints carry payload status (empty/full) that must also match.
-            block_ancestor_node.payload_status != fc_store_finalized.payload_status)
-        {
+        if (!std.mem.eql(u8, &block_ancestor_node.block_root, &fc_store_finalized.root)) {
             return error.InvalidBlockNotFinalizedDescendant;
         }
 
@@ -481,21 +477,19 @@ pub const ForkChoice = struct {
 
         const block_epoch = computeEpochAtSlot(slot);
 
-        // 7. Extract checkpoints from state with payload status.
+        // 7. Extract checkpoints from state.
         var justified_ssz: consensus_types.phase0.Checkpoint.Type = undefined;
         try state.state.currentJustifiedCheckpoint(&justified_ssz);
-        const justified_checkpoint: CheckpointWithPayloadStatus = .{
+        const justified_checkpoint: Checkpoint = .{
             .epoch = justified_ssz.epoch,
             .root = justified_ssz.root,
-            .payload_status = getCheckpointPayloadStatus(state, justified_ssz.epoch),
         };
 
         var finalized_ssz: consensus_types.phase0.Checkpoint.Type = undefined;
         try state.state.finalizedCheckpoint(&finalized_ssz);
-        const finalized_checkpoint: CheckpointWithPayloadStatus = .{
+        const finalized_checkpoint: Checkpoint = .{
             .epoch = finalized_ssz.epoch,
             .root = finalized_ssz.root,
-            .payload_status = getCheckpointPayloadStatus(state, finalized_ssz.epoch),
         };
 
         // 8. Update realized checkpoints.
@@ -518,8 +512,8 @@ pub const ForkChoice = struct {
         //   3. A block in epoch N cannot contain attestations which would finalize an epoch higher than N - 1.
         // This is an optimization. It should reduce the amount of times we run
         // computeUnrealizedCheckpoints by approximately 1/3rd when the chain is performing optimally.
-        var unrealized_justified_checkpoint: CheckpointWithPayloadStatus = undefined;
-        var unrealized_finalized_checkpoint: CheckpointWithPayloadStatus = undefined;
+        var unrealized_justified_checkpoint: Checkpoint = undefined;
+        var unrealized_finalized_checkpoint: Checkpoint = undefined;
 
         if (self.opts.compute_unrealized) {
             if (parent_node.unrealized_justified_epoch == block_epoch and
@@ -529,12 +523,10 @@ pub const ForkChoice = struct {
                 unrealized_justified_checkpoint = .{
                     .epoch = parent_node.unrealized_justified_epoch,
                     .root = parent_node.unrealized_justified_root,
-                    .payload_status = getCheckpointPayloadStatus(state, parent_node.unrealized_justified_epoch),
                 };
                 unrealized_finalized_checkpoint = .{
                     .epoch = parent_node.unrealized_finalized_epoch,
                     .root = parent_node.unrealized_finalized_root,
-                    .payload_status = getCheckpointPayloadStatus(state, parent_node.unrealized_finalized_epoch),
                 };
             } else {
                 // Compute new, happens ~2/3 first blocks of epoch as monitored in mainnet.
@@ -542,12 +534,10 @@ pub const ForkChoice = struct {
                 unrealized_justified_checkpoint = .{
                     .epoch = unrealized.justified_checkpoint.epoch,
                     .root = unrealized.justified_checkpoint.root,
-                    .payload_status = getCheckpointPayloadStatus(state, unrealized.justified_checkpoint.epoch),
                 };
                 unrealized_finalized_checkpoint = .{
                     .epoch = unrealized.finalized_checkpoint.epoch,
                     .root = unrealized.finalized_checkpoint.root,
-                    .payload_status = getCheckpointPayloadStatus(state, unrealized.finalized_checkpoint.epoch),
                 };
             }
         } else {
@@ -1300,11 +1290,11 @@ pub const ForkChoice = struct {
     /// getter calls a cache fn.
     ///
     /// **onTick**: May need the justified balances of unrealizedJustified. Already available
-    /// in `CheckpointWithPayloadAndBalance`, so the getter is direct without cache interaction.
+    /// in `CheckpointWithBalance`, so the getter is direct without cache interaction.
     fn updateCheckpoints(
         self: *ForkChoice,
-        justified_checkpoint: CheckpointWithPayloadStatus,
-        finalized_checkpoint: CheckpointWithPayloadStatus,
+        justified_checkpoint: Checkpoint,
+        finalized_checkpoint: Checkpoint,
         getJustifiedBalances: GetJustifiedBalancesFn,
     ) !void {
         // Update justified if epoch advances.
@@ -1345,7 +1335,7 @@ pub const ForkChoice = struct {
     /// Closure context for `onBlock` path: calls `getter.get(checkpoint, state)` → wraps in RC.
     const OnBlockBalancesCtx = struct {
         getter: store.JustifiedBalancesGetter,
-        checkpoint: CheckpointWithPayloadStatus,
+        checkpoint: Checkpoint,
         state: *CachedBeaconState,
 
         fn call(ctx: ?*anyopaque) error{OutOfMemory}!*EffectiveBalanceIncrementsRc {
@@ -1370,8 +1360,8 @@ pub const ForkChoice = struct {
     /// Update unrealized checkpoints in store if necessary.
     fn updateUnrealizedCheckpoints(
         self: *ForkChoice,
-        unrealized_justified_checkpoint: CheckpointWithPayloadStatus,
-        unrealized_finalized_checkpoint: CheckpointWithPayloadStatus,
+        unrealized_justified_checkpoint: Checkpoint,
+        unrealized_finalized_checkpoint: Checkpoint,
         getJustifiedBalances: GetJustifiedBalancesFn,
     ) !void {
         if (unrealized_justified_checkpoint.epoch > self.fc_store.unrealized_justified.checkpoint.epoch) {
@@ -1504,11 +1494,11 @@ pub const ForkChoice = struct {
 
     // ── Public checkpoint getters ──
 
-    pub fn getJustifiedCheckpoint(self: *const ForkChoice) CheckpointWithPayloadStatus {
+    pub fn getJustifiedCheckpoint(self: *const ForkChoice) Checkpoint {
         return self.fc_store.justified.checkpoint;
     }
 
-    pub fn getFinalizedCheckpoint(self: *const ForkChoice) CheckpointWithPayloadStatus {
+    pub fn getFinalizedCheckpoint(self: *const ForkChoice) Checkpoint {
         return self.fc_store.finalized_checkpoint;
     }
 
@@ -1611,16 +1601,16 @@ pub const ForkChoice = struct {
         return self.proto_array.getBlockAndBlockHash(block_root, block_hash);
     }
 
-    /// Get the justified block from proto array.
+    /// Get the justified block from proto array (canonical variant).
     pub fn getJustifiedBlock(self: *const ForkChoice) !ProtoBlock {
         const cp = self.fc_store.justified.checkpoint;
-        return self.getBlock(cp.root, cp.payload_status) orelse return error.MissingProtoArrayBlock;
+        return self.getBlockDefaultStatus(cp.root) orelse return error.MissingProtoArrayBlock;
     }
 
-    /// Get the finalized block from proto array.
+    /// Get the finalized block from proto array (canonical variant).
     pub fn getFinalizedBlock(self: *const ForkChoice) !ProtoBlock {
         const cp = self.fc_store.finalized_checkpoint;
-        return self.getBlock(cp.root, cp.payload_status) orelse return error.MissingProtoArrayBlock;
+        return self.getBlockDefaultStatus(cp.root) orelse return error.MissingProtoArrayBlock;
     }
 
     /// Returns the root of the safe beacon block.
@@ -1753,8 +1743,9 @@ pub const ForkChoice = struct {
     }
 
     /// Returns both ancestor and non-ancestor blocks in a single traversal.
-    /// The last ancestor block is the previous finalized one, it's there to check onBlock
-    /// finalized checkpoint only — exclude it.
+    ///
+    /// `ancestors` is the raw walk and includes the previous finalized block as its last
+    /// element — callers that don't want the boundary should slice it off themselves.
     pub fn getAllAncestorAndNonAncestorBlocks(
         self: *const ForkChoice,
         allocator: Allocator,
@@ -1762,13 +1753,23 @@ pub const ForkChoice = struct {
         status: PayloadStatus,
     ) !AncestorAndNonAncestorBlocks {
         var pa_result = try self.proto_array.getAllAncestorAndNonAncestorNodes(allocator, block_root, status);
-        // The last ancestor block is the previous finalized one, exclude it.
-        if (pa_result.ancestors.items.len > 0) _ = pa_result.ancestors.pop();
 
         return .{
             .ancestors = try pa_result.ancestors.toOwnedSlice(pa_result.allocator),
             .non_ancestors = try pa_result.non_ancestors.toOwnedSlice(pa_result.allocator),
         };
+    }
+
+    /// Same as `getAllAncestorAndNonAncestorBlocks` but resolves the default payload-status
+    /// variant (FULL pre-Gloas, PENDING for Gloas) for the given root. Use when the caller
+    /// holds a `Checkpoint` / finalized root without a specific payload-status variant in mind.
+    pub fn getAllAncestorAndNonAncestorBlocksDefaultStatus(
+        self: *const ForkChoice,
+        allocator: Allocator,
+        block_root: Root,
+    ) !AncestorAndNonAncestorBlocks {
+        const default_status = self.proto_array.getDefaultVariant(block_root) orelse return error.MissingProtoArrayBlock;
+        return self.getAllAncestorAndNonAncestorBlocks(allocator, block_root, default_status);
     }
 
     /// Get common ancestor depth between two blocks.
@@ -1844,6 +1845,13 @@ pub const ForkChoice = struct {
 
     pub fn getProposerBoostRoot(self: *const ForkChoice) Root {
         return self.proposer_boost_root orelse ZERO_HASH;
+    }
+
+    /// Decide whether to extend an available payload from the previous slot for a given
+    /// beacon block root. Thin wrapper over `ProtoArray.shouldExtendPayload` that supplies
+    /// the fork-choice-owned proposer-boost root.
+    pub fn shouldExtendPayload(self: *const ForkChoice, block_root: Root) ProtoArrayError!bool {
+        return self.proto_array.shouldExtendPayload(block_root, self.proposer_boost_root);
     }
 
     /// Set the prune threshold.
@@ -1935,6 +1943,18 @@ pub const ForkChoice = struct {
         };
     }
 
+    /// Same as `forwardIterateDescendants` but resolves the default payload-status variant
+    /// (FULL pre-Gloas, PENDING for Gloas). Use when the caller holds a `Checkpoint` /
+    /// finalized root without a specific payload-status variant in mind.
+    pub fn forwardIterateDescendantsDefaultStatus(
+        self: *const ForkChoice,
+        allocator: Allocator,
+        block_root: Root,
+    ) (Allocator.Error || ForkChoiceError)!DescendantIterator {
+        const default_status = self.proto_array.getDefaultVariant(block_root) orelse return error.MissingProtoArrayBlock;
+        return self.forwardIterateDescendants(allocator, block_root, default_status);
+    }
+
     /// Get block summaries by parent root.
     pub fn getBlockSummariesByParentRoot(
         self: *const ForkChoice,
@@ -1980,7 +2000,6 @@ pub const ForkChoice = struct {
         block_root: Root,
         execution_payload_block_hash: Root,
         execution_payload_number: u64,
-        execution_payload_state_root: Root,
         execution_status: ExecutionStatus,
     ) (Allocator.Error || ForkChoiceError)!void {
         try self.proto_array.onExecutionPayload(
@@ -1989,7 +2008,6 @@ pub const ForkChoice = struct {
             self.fc_store.current_slot,
             execution_payload_block_hash,
             execution_payload_number,
-            execution_payload_state_root,
             self.proposer_boost_root,
             execution_status,
         );
@@ -2018,27 +2036,6 @@ fn getCommitteeFraction(total_active_balance_by_increment: u64, slots_per_epoch:
     return (committee_weight * committee_percent) / 100;
 }
 
-/// Get the payload status for a checkpoint.
-///
-/// Pre-Gloas: always FULL (payload embedded in block).
-/// Gloas: determined by state.execution_payload_availability bitvector.
-///   - For non-skipped slots at checkpoint: returns false (EMPTY) since payload hasn't arrived yet.
-///   - For skipped slots at checkpoint: returns the actual availability status from state.
-fn getCheckpointPayloadStatus(state: *CachedBeaconState, checkpoint_epoch: Epoch) PayloadStatus {
-    const checkpoint_slot = computeStartSlotAtEpoch(checkpoint_epoch);
-    const fork = state.config.forkSeq(checkpoint_slot);
-
-    // Pre-Gloas: always FULL.
-    if (fork.lt(.gloas)) return .full;
-
-    // For Gloas, check state.execution_payload_availability.
-    const payload_available = state.state.executionPayloadAvailability(
-        checkpoint_slot % preset.SLOTS_PER_HISTORICAL_ROOT,
-    ) catch unreachable; // fork already verified as Gloas+, index always in range
-
-    return if (payload_available) .full else .empty;
-}
-
 // ── Test/bench helpers ──
 
 /// Simplified onBlock that takes a pre-constructed ProtoBlock directly (bypasses block/state
@@ -2063,7 +2060,7 @@ pub fn onBlockFromProto(
 
 // ── Tests ──
 
-fn makeTestCheckpoint(epoch: Epoch, root: Root) CheckpointWithPayloadStatus {
+fn makeTestCheckpoint(epoch: Epoch, root: Root) Checkpoint {
     return .{ .epoch = epoch, .root = root };
 }
 
@@ -2117,7 +2114,7 @@ fn makeTestAttesterSlashing(
     };
 }
 
-fn dummyBalancesGetter(_: ?*anyopaque, _: CheckpointWithPayloadStatus, _: *CachedBeaconState) JustifiedBalances {
+fn dummyBalancesGetter(_: ?*anyopaque, _: Checkpoint, _: *CachedBeaconState) JustifiedBalances {
     return JustifiedBalances.init(testing.allocator);
 }
 
@@ -2133,8 +2130,8 @@ fn initTestForkChoice(
     allocator: Allocator,
     anchor_block: ProtoBlock,
     current_slot: Slot,
-    justified_checkpoint: CheckpointWithPayloadStatus,
-    finalized_checkpoint: CheckpointWithPayloadStatus,
+    justified_checkpoint: Checkpoint,
+    finalized_checkpoint: Checkpoint,
     justified_balances: []const u16,
 ) !*ForkChoice {
     const proto_arr = try allocator.create(ProtoArray);
@@ -2185,8 +2182,8 @@ fn initTestForkChoiceWithOpts(
     allocator: Allocator,
     anchor_block: ProtoBlock,
     current_slot: Slot,
-    justified_checkpoint: CheckpointWithPayloadStatus,
-    finalized_checkpoint: CheckpointWithPayloadStatus,
+    justified_checkpoint: Checkpoint,
+    finalized_checkpoint: Checkpoint,
     justified_balances: []const u16,
     opts: ForkChoiceOpts,
 ) !*ForkChoice {
@@ -2616,8 +2613,8 @@ test "getAllAncestorAndNonAncestorBlocks equals getAllAncestorBlocks + getAllNon
     defer testing.allocator.free(canonical_combined.ancestors);
     defer testing.allocator.free(canonical_combined.non_ancestors);
 
-    try testing.expectEqual(canonical_ancestors.len, canonical_combined.ancestors.len);
-    for (canonical_ancestors, canonical_combined.ancestors) |expected, actual| {
+    try testing.expectEqual(canonical_ancestors.len + 1, canonical_combined.ancestors.len);
+    for (canonical_ancestors, canonical_combined.ancestors[0..canonical_ancestors.len]) |expected, actual| {
         try testing.expectEqual(expected.block_root, actual.block_root);
     }
     try testing.expectEqual(canonical_non_ancestors.len, canonical_combined.non_ancestors.len);
@@ -2634,8 +2631,8 @@ test "getAllAncestorAndNonAncestorBlocks equals getAllAncestorBlocks + getAllNon
     defer testing.allocator.free(fork_combined.ancestors);
     defer testing.allocator.free(fork_combined.non_ancestors);
 
-    try testing.expectEqual(fork_ancestors.len, fork_combined.ancestors.len);
-    for (fork_ancestors, fork_combined.ancestors) |expected, actual| {
+    try testing.expectEqual(fork_ancestors.len + 1, fork_combined.ancestors.len);
+    for (fork_ancestors, fork_combined.ancestors[0..fork_ancestors.len]) |expected, actual| {
         try testing.expectEqual(expected.block_root, actual.block_root);
     }
     try testing.expectEqual(fork_non_ancestors.len, fork_combined.non_ancestors.len);
@@ -3446,7 +3443,7 @@ test "Gloas head integration: EMPTY vs FULL tiebreaker via PTC" {
     try testing.expect(fc.proto_array.getNodeIndexByRootAndStatus(a_root, .full) == null);
 
     // Phase 2: Execution payload arrives for A → creates FULL node.
-    try fc.onExecutionPayload(allocator, a_root, a_exec_bh, 1, ZERO_HASH, .valid);
+    try fc.onExecutionPayload(allocator, a_root, a_exec_bh, 1, .valid);
     try testing.expect(fc.proto_array.getNodeIndexByRootAndStatus(a_root, .full) != null);
 
     // Phase 3: Insert B (child of A's EMPTY) and C (child of A's FULL).
@@ -4218,6 +4215,36 @@ test "onAttestation: reject full vote when FULL variant missing" {
     );
 }
 
+// Upstream lodestar #9209: ForkChoice.shouldExtendPayload is a thin wrapper that
+// supplies the fork-choice-owned proposer-boost root to the underlying ProtoArray
+// check, and inherits the new hasPayload gate.
+test "ForkChoice.shouldExtendPayload uses own proposer_boost_root and hasPayload gate" {
+    const allocator = testing.allocator;
+    const genesis_root = hashFromByte(0x01);
+    const block_root = hashFromByte(0x02);
+    const genesis_block = makeTestBlock(0, genesis_root, ZERO_HASH);
+    const balances = [_]u16{100} ** 2;
+
+    var fc = try initTestForkChoice(
+        allocator,
+        genesis_block,
+        10,
+        makeTestCheckpoint(0, genesis_root),
+        makeTestCheckpoint(0, genesis_root),
+        &balances,
+    );
+    defer deinitTestForkChoice(allocator, fc);
+
+    // Gloas block, no FULL variant yet → gate closes.
+    try onBlockFromProto(fc, allocator, makeGloasTestBlock(1, block_root, genesis_root, ZERO_HASH), 10);
+    try testing.expect(!try fc.shouldExtendPayload(block_root));
+
+    // FULL arrives, no proposer boost set → condition 2 passes.
+    try fc.onExecutionPayload(allocator, block_root, hashFromByte(0xEE), 1, .valid);
+    try testing.expect(fc.proposer_boost_root == null);
+    try testing.expect(try fc.shouldExtendPayload(block_root));
+}
+
 test "hasPayloadUnsafe reflects onExecutionPayload" {
     const allocator = testing.allocator;
     const genesis_root = hashFromByte(0x01);
@@ -4243,7 +4270,7 @@ test "hasPayloadUnsafe reflects onExecutionPayload" {
     try testing.expect(!fc.hasPayloadUnsafe(block_root));
 
     // After execution payload arrives, FULL exists.
-    try fc.onExecutionPayload(allocator, block_root, hashFromByte(0xEE), 1, ZERO_HASH, .valid);
+    try fc.onExecutionPayload(allocator, block_root, hashFromByte(0xEE), 1, .valid);
     try testing.expect(fc.hasPayloadUnsafe(block_root));
 }
 
