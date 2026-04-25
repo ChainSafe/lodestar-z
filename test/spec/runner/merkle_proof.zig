@@ -41,14 +41,14 @@ pub fn TestCase(comptime fork: ForkSeq) type {
 
         const Self = @This();
 
-        pub fn execute(allocator: std.mem.Allocator, dir: std.fs.Dir) !void {
+        pub fn execute(allocator: std.mem.Allocator, dir: std.Io.Dir) !void {
             var tc = try Self.init(allocator, dir);
             defer tc.deinit();
 
             try tc.runTest();
         }
 
-        fn init(allocator: std.mem.Allocator, dir: std.fs.Dir) !Self {
+        fn init(allocator: std.mem.Allocator, dir: std.Io.Dir) !Self {
             var body = BeaconBlockBody.default_value;
             errdefer {
                 if (comptime @hasDecl(BeaconBlockBody, "deinit")) {
@@ -138,11 +138,8 @@ pub fn TestCase(comptime fork: ForkSeq) type {
             }
         }
 
-        fn loadProof(allocator: std.mem.Allocator, dir: std.fs.Dir, out: *MerkleProof) !void {
-            var file = try dir.openFile("proof.yaml", .{});
-            defer file.close();
-
-            const contents = try file.readToEndAlloc(allocator, 4096);
+        fn loadProof(allocator: std.mem.Allocator, dir: std.Io.Dir, out: *MerkleProof) !void {
+            const contents = try dir.readFileAlloc(std.testing.io, "proof.yaml", allocator, .unlimited);
             defer allocator.free(contents);
 
             out.* = try parseProofYaml(allocator, contents);

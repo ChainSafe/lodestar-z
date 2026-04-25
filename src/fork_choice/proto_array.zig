@@ -453,18 +453,24 @@ pub const VariantIndices = union(enum) {
         };
     }
 
-    /// Get all valid indices as a bounded array (1 for pre-Gloas, 2-3 for Gloas).
-    pub fn allIndices(self: VariantIndices) std.BoundedArray(u32, 3) {
-        var result = std.BoundedArray(u32, 3){};
+    /// Fill `buf` with all valid indices and return the populated prefix.
+    /// 1 element for pre-Gloas, 2-3 for Gloas (PENDING + EMPTY + optional FULL).
+    pub fn allIndices(self: VariantIndices, buf: *[3]u32) []const u32 {
         switch (self) {
-            .pre_gloas => |idx| result.appendAssumeCapacity(idx),
+            .pre_gloas => |idx| {
+                buf[0] = idx;
+                return buf[0..1];
+            },
             .gloas => |g| {
-                result.appendAssumeCapacity(g.pending);
-                result.appendAssumeCapacity(g.empty);
-                if (g.full) |f| result.appendAssumeCapacity(f);
+                buf[0] = g.pending;
+                buf[1] = g.empty;
+                if (g.full) |f| {
+                    buf[2] = f;
+                    return buf[0..3];
+                }
+                return buf[0..2];
             },
         }
-        return result;
     }
 };
 
@@ -2642,17 +2648,19 @@ test "VariantIndices getByPayloadStatus" {
 
 // VariantIndices: pre_gloas → [1], gloas(no full) → [2], gloas(with full) → [3]
 test "VariantIndices allIndices" {
+    var buf: [3]u32 = undefined;
+
     const pre_gloas = VariantIndices{ .pre_gloas = 5 };
-    const pre_gloas_all = pre_gloas.allIndices();
+    const pre_gloas_all = pre_gloas.allIndices(&buf);
     try testing.expectEqual(@as(usize, 1), pre_gloas_all.len);
-    try testing.expectEqual(@as(u32, 5), pre_gloas_all.get(0));
+    try testing.expectEqual(@as(u32, 5), pre_gloas_all[0]);
 
     const gloas_no_full = VariantIndices{ .gloas = .{ .pending = 10, .empty = 11 } };
-    const gloas_all = gloas_no_full.allIndices();
+    const gloas_all = gloas_no_full.allIndices(&buf);
     try testing.expectEqual(@as(usize, 2), gloas_all.len);
 
     const gloas_with_full = VariantIndices{ .gloas = .{ .pending = 10, .empty = 11, .full = 12 } };
-    const gloas_all_3 = gloas_with_full.allIndices();
+    const gloas_all_3 = gloas_with_full.allIndices(&buf);
     try testing.expectEqual(@as(usize, 3), gloas_all_3.len);
 }
 

@@ -49,7 +49,7 @@ pub fn TestCaseUtils(comptime fork: ForkSeq) type {
             };
         }
 
-        pub fn loadPreStatePreFork(allocator: Allocator, pool: *Node.Pool, dir: std.fs.Dir, fork_epoch: Epoch) !TestCachedBeaconState {
+        pub fn loadPreStatePreFork(allocator: Allocator, pool: *Node.Pool, dir: std.Io.Dir, fork_epoch: Epoch) !TestCachedBeaconState {
             const fork_pre = comptime getForkPre();
             const ForkPreTypes = @field(types, fork_pre.name());
             var pre_state = ForkPreTypes.BeaconState.default_value;
@@ -69,7 +69,7 @@ pub fn TestCaseUtils(comptime fork: ForkSeq) type {
             return try TestCachedBeaconState.initFromState(allocator, pool, pre_state_all_forks, fork, fork_epoch);
         }
 
-        pub fn loadPreState(allocator: Allocator, pool: *Node.Pool, dir: std.fs.Dir) !TestCachedBeaconState {
+        pub fn loadPreState(allocator: Allocator, pool: *Node.Pool, dir: std.Io.Dir) !TestCachedBeaconState {
             var pre_state = ForkTypes.BeaconState.default_value;
             try loadSszSnappyValue(ForkTypes.BeaconState, allocator, dir, "pre.ssz_snappy", &pre_state);
             defer ForkTypes.BeaconState.deinit(allocator, &pre_state);
@@ -90,37 +90,30 @@ pub fn TestCaseUtils(comptime fork: ForkSeq) type {
         }
 
         /// consumer should deinit the returned state and destroy the pointer
-        pub fn loadPostState(allocator: Allocator, pool: *Node.Pool, dir: std.fs.Dir) !?*AnyBeaconState {
-            if (dir.statFile("post.ssz_snappy")) |_| {
-                var post_state = ForkTypes.BeaconState.default_value;
-                try loadSszSnappyValue(ForkTypes.BeaconState, allocator, dir, "post.ssz_snappy", &post_state);
-                defer ForkTypes.BeaconState.deinit(allocator, &post_state);
+        pub fn loadPostState(allocator: Allocator, pool: *Node.Pool, dir: std.Io.Dir) !?*AnyBeaconState {
+            var post_state = ForkTypes.BeaconState.default_value;
+            loadSszSnappyValue(ForkTypes.BeaconState, allocator, dir, "post.ssz_snappy", &post_state) catch |err| switch (err) {
+                error.FileNotFound => return null,
+                else => return err,
+            };
+            defer ForkTypes.BeaconState.deinit(allocator, &post_state);
 
-                const post_state_all_forks = try allocator.create(AnyBeaconState);
-                errdefer allocator.destroy(post_state_all_forks);
+            const post_state_all_forks = try allocator.create(AnyBeaconState);
+            errdefer allocator.destroy(post_state_all_forks);
 
-                post_state_all_forks.* = @unionInit(
-                    AnyBeaconState,
-                    fork.name(),
-                    try ForkTypes.BeaconState.TreeView.fromValue(allocator, pool, &post_state),
-                );
-                return post_state_all_forks;
-            } else |err| {
-                if (err == error.FileNotFound) {
-                    return null;
-                } else {
-                    return err;
-                }
-            }
+            post_state_all_forks.* = @unionInit(
+                AnyBeaconState,
+                fork.name(),
+                try ForkTypes.BeaconState.TreeView.fromValue(allocator, pool, &post_state),
+            );
+            return post_state_all_forks;
         }
     };
 }
 
-pub fn loadBlsSetting(allocator: std.mem.Allocator, dir: std.fs.Dir) BlsSetting {
-    var file = dir.openFile("meta.yaml", .{}) catch return .default;
-    defer file.close();
-
-    const contents = file.readToEndAlloc(allocator, 100) catch return .default;
+pub fn loadBlsSetting(allocator: std.mem.Allocator, dir: std.Io.Dir) BlsSetting {
+    const io = std.testing.io;
+    const contents = dir.readFileAlloc(io, "meta.yaml", allocator, .unlimited) catch return .default;
     defer allocator.free(contents);
 
     if (std.mem.indexOf(u8, contents, "bls_setting: 0") != null) {
@@ -136,7 +129,7 @@ pub fn loadBlsSetting(allocator: std.mem.Allocator, dir: std.fs.Dir) BlsSetting 
 
 /// load SignedBeaconBlock from file using runtime fork
 /// consumer should deinit the returned block and destroy the pointer
-pub fn loadSignedBeaconBlock(allocator: std.mem.Allocator, fork: ForkSeq, dir: std.fs.Dir, file_name: []const u8) !AnySignedBeaconBlock {
+pub fn loadSignedBeaconBlock(allocator: std.mem.Allocator, fork: ForkSeq, dir: std.Io.Dir, file_name: []const u8) !AnySignedBeaconBlock {
     return switch (fork) {
         .phase0 => blk: {
             const out = try allocator.create(phase0.SignedBeaconBlock.Type);
@@ -263,11 +256,9 @@ pub fn deinitSignedBeaconBlock(signed_block: AnySignedBeaconBlock, allocator: st
     }
 }
 
-pub fn loadSszSnappyValue(comptime ST: type, allocator: std.mem.Allocator, dir: std.fs.Dir, file_name: []const u8, out: *ST.Type) !void {
-    var object_file = try dir.openFile(file_name, .{});
-    defer object_file.close();
-
-    const value_bytes = try object_file.readToEndAlloc(allocator, 100_000_000);
+pub fn loadSszSnappyValue(comptime ST: type, allocator: std.mem.Allocator, dir: std.Io.Dir, file_name: []const u8, out: *ST.Type) !void {
+    const io = std.testing.io;
+    const value_bytes = try dir.readFileAlloc(io, file_name, allocator, .unlimited);
     defer allocator.free(value_bytes);
 
     const serialized_buf = try allocator.alloc(u8, try snappy.uncompressedLength(value_bytes));
@@ -300,15 +291,13 @@ pub fn expectEqualBeaconStates(expected: *AnyBeaconState, actual: *AnyBeaconStat
                     const actual_field_root = try actual_view.getFieldRoot(field.name);
                     if (!std.mem.eql(u8, expected_field_root, actual_field_root)) {
                         std.debug.print(
-                            "field: {s}\n  expected_root: {s}\n  actual_root:   {s}\n",
+                            "field: {s}\n  expected_root: {x}\n  actual_root:   {x}\n",
                             .{
                                 field.name,
-                                std.fmt.fmtSliceHexLower(expected_field_root),
-                                std.fmt.fmtSliceHexLower(actual_field_root),
+                                expected_field_root,
+                                actual_field_root,
                             },
                         );
-
-                        // Value-level diff printing omitted to avoid crashes in toValue path
                     }
                 }
             }

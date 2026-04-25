@@ -1,6 +1,4 @@
-const c = @cImport({
-    @cInclude("blst.h");
-});
+const c = @import("root.zig").c;
 
 pub const BlstError = error{
     BadEncoding,

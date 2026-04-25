@@ -109,7 +109,7 @@ pub fn deriveChildEip2333(self: *const Self, child_index: u32) BlstError!Self {
 /// Derive the `PublicKey` from this `SecretKey`.
 pub fn toPublicKey(self: *const Self) PublicKey {
     var pk = PublicKey{};
-    c.blst_sk_to_pk2_in_g1(null, &pk.point, &self.value);
+    c.blst_sk_to_pk2_in_g1(null, @ptrCast(&pk.point), &self.value);
     return pk;
 }
 
@@ -118,7 +118,7 @@ pub fn sign(self: *const Self, msg: []const u8, dst: []const u8, aug: ?[]const u
     var sig = Signature{};
     var q = @import("AggregateSignature.zig"){};
     c.blst_hash_to_g2(
-        &q.point,
+        @ptrCast(&q.point),
         msg.ptr,
         msg.len,
         dst.ptr,
@@ -156,6 +156,4 @@ const blst = @import("root.zig");
 const PublicKey = blst.PublicKey;
 const Signature = blst.Signature;
 
-const c = @cImport({
-    @cInclude("blst.h");
-});
+const c = @import("root.zig").c;

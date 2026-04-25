@@ -336,7 +336,7 @@ pub const ForkChoice = struct {
             .head = undefined,
             .proposer_boost_root = null,
             .justified_proposer_boost_score = null,
-            .balances = fc_store.justified.balances.acquire(),
+            .balances = fc_store.justified.balances.ref(),
             .queued_attestations = .empty,
             .queued_attestations_previous_slot = 0,
             .validated_attestation_datas = .empty,
@@ -369,7 +369,7 @@ pub const ForkChoice = struct {
 
         // Release init-allocated resources in reverse order.
         self.votes.deinit(allocator);
-        self.balances.release();
+        self.balances.unref();
 
         self.* = undefined;
     }
@@ -954,8 +954,8 @@ pub const ForkChoice = struct {
             &self.fc_store.equivocating_indices,
         );
 
-        self.balances.release();
-        self.balances = self.fc_store.justified.balances.acquire();
+        self.balances.unref();
+        self.balances = self.fc_store.justified.balances.ref();
 
         // Compute proposer boost: {root, score} | null
         const update_opts = self.opts;
@@ -1302,7 +1302,7 @@ pub const ForkChoice = struct {
             const new_rc = try getJustifiedBalances.call();
             const new_total = store.computeTotalBalance(new_rc.instance.items);
 
-            self.fc_store.justified.balances.release();
+            self.fc_store.justified.balances.unref();
             self.fc_store.justified = .{
                 .checkpoint = justified_checkpoint,
                 .balances = new_rc,
@@ -1351,7 +1351,7 @@ pub const ForkChoice = struct {
 
         fn call(ctx: ?*anyopaque) error{OutOfMemory}!*EffectiveBalanceIncrementsRc {
             const self: *OnTickBalancesCtx = @ptrCast(@alignCast(ctx.?));
-            return self.balances.acquire();
+            return self.balances.ref();
         }
     };
 
@@ -1368,7 +1368,7 @@ pub const ForkChoice = struct {
             const new_rc = try getJustifiedBalances.call();
             const new_total = store.computeTotalBalance(new_rc.instance.items);
 
-            self.fc_store.unrealized_justified.balances.release();
+            self.fc_store.unrealized_justified.balances.unref();
             self.fc_store.unrealized_justified = .{
                 .checkpoint = unrealized_justified_checkpoint,
                 .balances = new_rc,
@@ -1863,15 +1863,15 @@ pub const ForkChoice = struct {
 
     /// Get all leaf nodes (heads of chains).
     pub fn getHeads(self: *const ForkChoice, allocator: Allocator) ![]ProtoBlock {
-        var result = std.ArrayList(ProtoBlock).init(allocator);
-        errdefer result.deinit();
+        var result: std.ArrayList(ProtoBlock) = .empty;
+        errdefer result.deinit(allocator);
 
         for (self.proto_array.nodes.items) |node| {
             if (node.best_child == null) {
-                try result.append(node.toBlock());
+                try result.append(allocator, node.toBlock());
             }
         }
-        return result.toOwnedSlice();
+        return result.toOwnedSlice(allocator);
     }
 
     /// Get all nodes in the DAG.
@@ -1961,15 +1961,15 @@ pub const ForkChoice = struct {
         allocator: Allocator,
         parent_root: Root,
     ) ![]ProtoBlock {
-        var result = std.ArrayList(ProtoBlock).init(allocator);
-        errdefer result.deinit();
+        var result: std.ArrayList(ProtoBlock) = .empty;
+        errdefer result.deinit(allocator);
 
         for (self.proto_array.nodes.items) |node| {
             if (std.mem.eql(u8, &node.parent_root, &parent_root)) {
-                try result.append(node.toBlock());
+                try result.append(allocator, node.toBlock());
             }
         }
-        return result.toOwnedSlice();
+        return result.toOwnedSlice(allocator);
     }
 
     /// Get block summaries at a specific slot.
@@ -1978,15 +1978,15 @@ pub const ForkChoice = struct {
         allocator: Allocator,
         slot: Slot,
     ) ![]ProtoBlock {
-        var result = std.ArrayList(ProtoBlock).init(allocator);
-        errdefer result.deinit();
+        var result: std.ArrayList(ProtoBlock) = .empty;
+        errdefer result.deinit(allocator);
 
         for (self.proto_array.nodes.items) |node| {
             if (node.slot == slot) {
-                try result.append(node.toBlock());
+                try result.append(allocator, node.toBlock());
             }
         }
-        return result.toOwnedSlice();
+        return result.toOwnedSlice(allocator);
     }
 
     // ── Gloas (ePBS) ──
@@ -2115,7 +2115,7 @@ fn makeTestAttesterSlashing(
 }
 
 fn dummyBalancesGetter(_: ?*anyopaque, _: Checkpoint, _: *CachedBeaconState) JustifiedBalances {
-    return JustifiedBalances.init(testing.allocator);
+    return .empty;
 }
 
 fn getTestConfig() *const BeaconConfig {
@@ -2950,10 +2950,10 @@ test "balance negative change: existing balances decrease" {
 
     // Now update to lower balances.
     {
-        var new_list = store.JustifiedBalances.init(allocator);
-        try new_list.appendSlice(&new_balances);
+        var new_list: store.JustifiedBalances = .empty;
+        try new_list.appendSlice(allocator, &new_balances);
         const new_rc = try store.JustifiedBalancesRc.init(allocator, new_list);
-        fc.fc_store.justified.balances.release();
+        fc.fc_store.justified.balances.unref();
         fc.fc_store.justified.balances = new_rc;
     }
     try fc.updateHead(allocator);
@@ -3007,10 +3007,10 @@ test "balance same slot change: balance update without vote movement" {
 
     // Update balances without changing votes.
     {
-        var new_list = store.JustifiedBalances.init(allocator);
-        try new_list.appendSlice(&new_balances);
+        var new_list: store.JustifiedBalances = .empty;
+        try new_list.appendSlice(allocator, &new_balances);
         const new_rc = try store.JustifiedBalancesRc.init(allocator, new_list);
-        fc.fc_store.justified.balances.release();
+        fc.fc_store.justified.balances.unref();
         fc.fc_store.justified.balances = new_rc;
     }
     try fc.updateHead(allocator);
@@ -3068,10 +3068,10 @@ test "balance underflow clamping: old > new does not wrap unsigned" {
 
     // Now update justified balances to new_balances (lower). Weight should decrease, not wrap.
     {
-        var new_list = store.JustifiedBalances.init(allocator);
-        try new_list.appendSlice(&new_balances);
+        var new_list: store.JustifiedBalances = .empty;
+        try new_list.appendSlice(allocator, &new_balances);
         const new_rc = try store.JustifiedBalancesRc.init(allocator, new_list);
-        fc.fc_store.justified.balances.release();
+        fc.fc_store.justified.balances.unref();
         fc.fc_store.justified.balances = new_rc;
     }
     try fc.updateHead(allocator);

@@ -7,6 +7,7 @@ const std = @import("std");
 const zbench = @import("zbench");
 const Node = @import("persistent_merkle_tree").Node;
 const state_transition = @import("state_transition");
+const time = @import("time");
 const types = @import("consensus_types");
 const config = @import("config");
 const fork_types = @import("fork_types");
@@ -22,6 +23,7 @@ const ValidatorIndex = types.primitive.ValidatorIndex.Type;
 const Withdrawals = types.capella.Withdrawals.Type;
 const WithdrawalsResult = state_transition.WithdrawalsResult;
 const BlockExternalData = state_transition.BlockExternalData;
+const Index2PubkeyCache = state_transition.Index2PubkeyCache;
 const slotFromStateBytes = @import("utils.zig").slotFromStateBytes;
 const loadState = @import("utils.zig").loadState;
 const loadBlock = @import("utils.zig").loadBlock;
@@ -35,7 +37,7 @@ fn ProcessBlockHeaderBench(comptime fork: ForkSeq) type {
         cached_state: *CachedBeaconState,
         block: *const BeaconBlock(.full, fork),
 
-        pub fn run(self: @This(), allocator: std.mem.Allocator) void {
+        pub fn run(self: *@This(), allocator: std.mem.Allocator) void {
             const cloned = self.cached_state.clone(allocator, .{}) catch unreachable;
             defer {
                 cloned.deinit();
@@ -59,7 +61,7 @@ fn ProcessWithdrawalsBench(comptime fork: ForkSeq) type {
         cached_state: *CachedBeaconState,
         body: *const BeaconBlockBody(.full, fork),
 
-        pub fn run(self: @This(), allocator: std.mem.Allocator) void {
+        pub fn run(self: *@This(), allocator: std.mem.Allocator) void {
             const cloned = self.cached_state.clone(allocator, .{}) catch unreachable;
             defer {
                 cloned.deinit();
@@ -104,7 +106,7 @@ fn ProcessExecutionPayloadBench(comptime fork: ForkSeq) type {
         cached_state: *CachedBeaconState,
         body: *const BeaconBlockBody(.full, fork),
 
-        pub fn run(self: @This(), allocator: std.mem.Allocator) void {
+        pub fn run(self: *@This(), allocator: std.mem.Allocator) void {
             const cloned = self.cached_state.clone(allocator, .{}) catch unreachable;
             defer {
                 cloned.deinit();
@@ -132,7 +134,7 @@ fn ProcessRandaoBench(comptime fork: ForkSeq, comptime opts: BenchOpts) type {
         block: *const BeaconBlock(.full, fork),
         body: *const BeaconBlockBody(.full, fork),
 
-        pub fn run(self: @This(), allocator: std.mem.Allocator) void {
+        pub fn run(self: *@This(), allocator: std.mem.Allocator) void {
             const cloned = self.cached_state.clone(allocator, .{}) catch unreachable;
             defer {
                 cloned.deinit();
@@ -158,7 +160,7 @@ fn ProcessEth1DataBench(comptime fork: ForkSeq) type {
         cached_state: *CachedBeaconState,
         body: *const BeaconBlockBody(.full, fork),
 
-        pub fn run(self: @This(), allocator: std.mem.Allocator) void {
+        pub fn run(self: *@This(), allocator: std.mem.Allocator) void {
             const cloned = self.cached_state.clone(allocator, .{}) catch unreachable;
             defer {
                 cloned.deinit();
@@ -179,7 +181,7 @@ fn ProcessOperationsBench(comptime fork: ForkSeq, comptime opts: BenchOpts) type
         cached_state: *CachedBeaconState,
         body: *const BeaconBlockBody(.full, fork),
 
-        pub fn run(self: @This(), allocator: std.mem.Allocator) void {
+        pub fn run(self: *@This(), allocator: std.mem.Allocator) void {
             const cloned = self.cached_state.clone(allocator, .{}) catch unreachable;
             defer {
                 cloned.deinit();
@@ -206,7 +208,7 @@ fn ProcessSyncAggregateBench(comptime fork: ForkSeq, comptime opts: BenchOpts) t
         cached_state: *CachedBeaconState,
         body: *const BeaconBlockBody(.full, fork),
 
-        pub fn run(self: @This(), allocator: std.mem.Allocator) void {
+        pub fn run(self: *@This(), allocator: std.mem.Allocator) void {
             const cloned = self.cached_state.clone(allocator, .{}) catch unreachable;
             defer {
                 cloned.deinit();
@@ -231,7 +233,7 @@ fn ProcessBlockBench(comptime fork: ForkSeq, comptime opts: BenchOpts) type {
         cached_state: *CachedBeaconState,
         block: *const BeaconBlock(.full, fork),
 
-        pub fn run(self: @This(), allocator: std.mem.Allocator) void {
+        pub fn run(self: *@This(), allocator: std.mem.Allocator) void {
             const cloned = self.cached_state.clone(allocator, .{}) catch unreachable;
             defer {
                 cloned.deinit();
@@ -282,11 +284,7 @@ fn recordSegment(step: Step, duration_ns: u64) void {
     step_run_counts[idx] += 1;
 }
 
-fn elapsedSince(start: i128) u64 {
-    return @as(u64, @intCast(std.time.nanoTimestamp() - start));
-}
-
-fn printSegmentStats(stdout: anytype) !void {
+fn printSegmentStats(stdout: *std.Io.Writer) !void {
     try stdout.print("\nSegmented block breakdown :\n", .{});
     try stdout.print("{s:<22} {s:<8} {s:<14} {s:<23}\n", .{ "step", "runs", "total time", "time/run (avg)" });
     try stdout.print("{s:-<69}\n", .{""});
@@ -313,8 +311,10 @@ fn ProcessBlockSegmentedBench(comptime fork: ForkSeq) type {
         cached_state: *CachedBeaconState,
         block: *const BeaconBlock(.full, fork),
         body: *const BeaconBlockBody(.full, fork),
+        io: std.Io,
 
-        pub fn run(self: @This(), allocator: std.mem.Allocator) void {
+        pub fn run(self: *@This(), allocator: std.mem.Allocator) void {
+            const io = self.io;
             const cloned = self.cached_state.clone(allocator, .{}) catch unreachable;
             defer {
                 cloned.deinit();
@@ -324,9 +324,9 @@ fn ProcessBlockSegmentedBench(comptime fork: ForkSeq) type {
             const state = cloned.state.castToFork(fork);
             const epoch_cache = cloned.epoch_cache;
 
-            const block_start = std.time.nanoTimestamp();
+            const block_start = time.timestampNow(io);
 
-            const header_start = std.time.nanoTimestamp();
+            const header_start = time.timestampNow(io);
             state_transition.processBlockHeader(
                 fork,
                 allocator,
@@ -335,10 +335,10 @@ fn ProcessBlockSegmentedBench(comptime fork: ForkSeq) type {
                 .full,
                 self.block,
             ) catch unreachable;
-            recordSegment(.block_header, elapsedSince(header_start));
+            recordSegment(.block_header, @as(u64, @intCast(time.since(io, header_start).nanoseconds)));
 
             if (comptime fork.gte(.capella) and fork.lt(.gloas)) {
-                const withdrawals_start = std.time.nanoTimestamp();
+                const withdrawals_start = time.timestampNow(io);
                 var withdrawals_result = WithdrawalsResult{
                     .withdrawals = Withdrawals.initCapacity(allocator, preset.MAX_WITHDRAWALS_PER_PAYLOAD) catch unreachable,
                 };
@@ -363,11 +363,11 @@ fn ProcessBlockSegmentedBench(comptime fork: ForkSeq) type {
                     withdrawals_result,
                     payload_withdrawals_root,
                 ) catch unreachable;
-                recordSegment(.withdrawals, elapsedSince(withdrawals_start));
+                recordSegment(.withdrawals, @as(u64, @intCast(time.since(io, withdrawals_start).nanoseconds)));
             }
 
             if (comptime fork.gte(.bellatrix) and fork.lt(.gloas)) {
-                const exec_start = std.time.nanoTimestamp();
+                const exec_start = time.timestampNow(io);
                 const external_data = BlockExternalData{ .execution_payload_status = .valid, .data_availability_status = .available };
                 state_transition.processExecutionPayload(
                     fork,
@@ -379,10 +379,10 @@ fn ProcessBlockSegmentedBench(comptime fork: ForkSeq) type {
                     self.body,
                     external_data,
                 ) catch unreachable;
-                recordSegment(.execution_payload, elapsedSince(exec_start));
+                recordSegment(.execution_payload, @as(u64, @intCast(time.since(io, exec_start).nanoseconds)));
             }
 
-            const randao_start = std.time.nanoTimestamp();
+            const randao_start = time.timestampNow(io);
             state_transition.processRandao(
                 fork,
                 cloned.config,
@@ -393,17 +393,17 @@ fn ProcessBlockSegmentedBench(comptime fork: ForkSeq) type {
                 self.block.proposerIndex(),
                 true,
             ) catch unreachable;
-            recordSegment(.randao, elapsedSince(randao_start));
+            recordSegment(.randao, @as(u64, @intCast(time.since(io, randao_start).nanoseconds)));
 
-            const eth1_start = std.time.nanoTimestamp();
+            const eth1_start = time.timestampNow(io);
             state_transition.processEth1Data(
                 fork,
                 state,
                 self.body.eth1Data(),
             ) catch unreachable;
-            recordSegment(.eth1_data, elapsedSince(eth1_start));
+            recordSegment(.eth1_data, @as(u64, @intCast(time.since(io, eth1_start).nanoseconds)));
 
-            const ops_start = std.time.nanoTimestamp();
+            const ops_start = time.timestampNow(io);
             state_transition.processOperations(
                 fork,
                 allocator,
@@ -415,10 +415,10 @@ fn ProcessBlockSegmentedBench(comptime fork: ForkSeq) type {
                 self.body,
                 .{ .verify_signature = true },
             ) catch unreachable;
-            recordSegment(.operations, elapsedSince(ops_start));
+            recordSegment(.operations, @as(u64, @intCast(time.since(io, ops_start).nanoseconds)));
 
             if (comptime fork.gte(.altair)) {
-                const sync_start = std.time.nanoTimestamp();
+                const sync_start = time.timestampNow(io);
                 state_transition.processSyncAggregate(
                     fork,
                     allocator,
@@ -428,20 +428,23 @@ fn ProcessBlockSegmentedBench(comptime fork: ForkSeq) type {
                     self.body.syncAggregate(),
                     true,
                 ) catch unreachable;
-                recordSegment(.sync_aggregate, elapsedSince(sync_start));
+                recordSegment(.sync_aggregate, @as(u64, @intCast(time.since(io, sync_start).nanoseconds)));
             }
 
-            recordSegment(.block_total, elapsedSince(block_start));
+            recordSegment(.block_total, @as(u64, @intCast(time.since(io, block_start).nanoseconds)));
         }
     };
 }
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer std.debug.assert(gpa.deinit() == .ok);
 
     const allocator = gpa.allocator();
-    const stdout = std.io.getStdOut().writer();
+    const io = init.io;
+    var stdout_buf: [4096]u8 = undefined;
+    var stdout_file_writer = std.Io.File.stdout().writer(io, &stdout_buf);
+    var stdout = &stdout_file_writer.interface;
     var pool = try Node.Pool.init(allocator, 10_000_000);
     defer pool.deinit();
 
@@ -453,7 +456,7 @@ pub fn main() !void {
     );
     defer allocator.free(era_path_0);
 
-    var era_reader_0 = try era.Reader.open(allocator, config.mainnet.config, era_path_0);
+    var era_reader_0 = try era.Reader.open(allocator, io, config.mainnet.config, era_path_0);
     defer era_reader_0.close(allocator);
 
     const state_bytes = try era_reader_0.readSerializedState(allocator, null);
@@ -472,7 +475,7 @@ pub fn main() !void {
     );
     defer allocator.free(era_path_1);
 
-    var era_reader_1 = try era.Reader.open(allocator, config.mainnet.config, era_path_1);
+    var era_reader_1 = try era.Reader.open(allocator, io, config.mainnet.config, era_path_1);
     defer era_reader_1.close(allocator);
 
     const block_slot = try era.era.computeStartBlockSlotFromEraNumber(era_reader_1.era_number) + 1;
@@ -481,7 +484,7 @@ pub fn main() !void {
     defer allocator.free(block_bytes);
 
     inline for (comptime std.enums.values(ForkSeq)) |fork| {
-        if (detected_fork == fork) return runBenchmark(fork, allocator, &pool, stdout, state_bytes, block_bytes, chain_config);
+        if (detected_fork == fork) return runBenchmark(fork, allocator, &pool, io, stdout, state_bytes, block_bytes, chain_config);
     }
     return error.NoBenchmarkRan;
 }
@@ -490,7 +493,8 @@ fn runBenchmark(
     comptime fork: ForkSeq,
     allocator: std.mem.Allocator,
     pool: *Node.Pool,
-    stdout: anytype,
+    io: std.Io,
+    stdout: *std.Io.Writer,
     state_bytes: []const u8,
     block_bytes: []const u8,
     chain_config: config.ChainConfig,
@@ -516,16 +520,16 @@ fn runBenchmark(
     defer pubkey_index_map.deinit();
 
     const index_pubkey_cache = try allocator.create(state_transition.Index2PubkeyCache);
-    index_pubkey_cache.* = state_transition.Index2PubkeyCache.init(allocator);
+    index_pubkey_cache.* = Index2PubkeyCache.empty;
     defer {
-        index_pubkey_cache.deinit();
+        index_pubkey_cache.deinit(allocator);
         allocator.destroy(index_pubkey_cache);
     }
 
     const validators = try beacon_state.?.validatorsSlice(allocator);
     defer allocator.free(validators);
 
-    try state_transition.syncPubkeys(validators, &pubkey_index_map, index_pubkey_cache);
+    try state_transition.syncPubkeys(allocator, validators, &pubkey_index_map, index_pubkey_cache);
 
     const cached_state = try CachedBeaconState.createCachedBeaconState(allocator, beacon_state.?, .{
         .config = &beacon_config,
@@ -540,6 +544,7 @@ fn runBenchmark(
 
     try state_transition.state_transition.processSlots(
         allocator,
+        io,
         cached_state,
         block_slot,
         .{},
@@ -578,8 +583,9 @@ fn runBenchmark(
 
     // // Segmented benchmark (step-by-step timing)
     resetSegmentStats();
-    try bench.addParam("block(segments)", &ProcessBlockSegmentedBench(fork){ .cached_state = cached_state, .block = block, .body = body }, .{});
+    try bench.addParam("block(segments)", &ProcessBlockSegmentedBench(fork){ .cached_state = cached_state, .block = block, .body = body, .io = io }, .{});
 
-    try bench.run(stdout);
+    try bench.run(io, std.Io.File.stdout());
     try printSegmentStats(stdout);
+    try stdout.flush();
 }

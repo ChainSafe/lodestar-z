@@ -49,7 +49,7 @@ const OnAttestationBench = struct {
     phase0_atts: []Phase0IndexedAttestation,
     any_atts: []AnyIndexedAttestation,
 
-    pub fn run(self: OnAttestationBench, allocator: std.mem.Allocator) void {
+    pub fn run(self: *OnAttestationBench, allocator: std.mem.Allocator) void {
         // Clear validation cache to match TS behavior (fresh ForkChoice per iteration).
         self.fc.validated_attestation_datas.clearRetainingCapacity();
 
@@ -115,7 +115,7 @@ fn setupBench(allocator: std.mem.Allocator) !OnAttestationBench {
             const vi: u64 = @as(u64, c) * VALIDATORS_PER_COMMITTEE + @as(u64, v);
 
             phase0_atts[att_idx] = .{
-                .attesting_indices = .{},
+                .attesting_indices = .empty,
                 .data = .{
                     .slot = att_slot,
                     .index = @intCast(c),
@@ -141,7 +141,7 @@ fn setupBench(allocator: std.mem.Allocator) !OnAttestationBench {
                 @as(u64, a) * VALIDATORS_PER_COMMITTEE;
 
             phase0_atts[att_idx] = .{
-                .attesting_indices = .{},
+                .attesting_indices = .empty,
                 .data = .{
                     .slot = att_slot,
                     .index = @intCast(c),
@@ -178,13 +178,13 @@ fn deinitBench(allocator: std.mem.Allocator, b: OnAttestationBench) void {
     util.deinitForkChoice(allocator, b.fc);
 }
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
     var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
     const allocator = if (builtin.mode == .Debug) debug_allocator.allocator() else std.heap.c_allocator;
     defer if (builtin.mode == .Debug) {
         std.debug.assert(debug_allocator.deinit() == .ok);
     };
-    const stdout = std.io.getStdOut().writer();
+    const io = init.io;
 
     var bench = zbench.Benchmark.init(allocator, .{});
 
@@ -193,5 +193,5 @@ pub fn main() !void {
     try bench.addParam("onAttestation 1109 attestations (vc=600000 bc=64)", &b, .{});
 
     defer bench.deinit();
-    try bench.run(stdout);
+    try bench.run(io, std.Io.File.stdout());
 }

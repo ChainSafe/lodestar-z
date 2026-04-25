@@ -27,7 +27,7 @@ const ComputeDeltasBench = struct {
     /// so without reset, subsequent iterations hit the unchanged fast path (no-op).
     initial_current_indices: []const VoteIndex,
 
-    pub fn run(self: ComputeDeltasBench, allocator: std.mem.Allocator) void {
+    pub fn run(self: *ComputeDeltasBench, allocator: std.mem.Allocator) void {
         // Reset current_indices to initial state (matching TS beforeEach).
         @memcpy(self.current_indices, self.initial_current_indices);
 
@@ -107,13 +107,13 @@ fn setupBench(
     };
 }
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
     var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
     const allocator = if (builtin.mode == .Debug) debug_allocator.allocator() else std.heap.c_allocator;
     defer if (builtin.mode == .Debug) {
         std.debug.assert(debug_allocator.deinit() == .ok);
     };
-    const stdout = std.io.getStdOut().writer();
+    const io = init.io;
 
     var bench = zbench.Benchmark.init(allocator, .{});
 
@@ -163,5 +163,5 @@ pub fn main() !void {
     };
 
     defer bench.deinit();
-    try bench.run(stdout);
+    try bench.run(io, std.Io.File.stdout());
 }

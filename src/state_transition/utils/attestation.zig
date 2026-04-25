@@ -20,23 +20,18 @@ pub fn isSlashableAttestationData(data1: *const AttestationData, data2: *const A
     return false;
 }
 
-pub fn isValidAttestationSlot(attestation_slot: Slot, current_slot: Slot) bool {
-    return attestation_slot + preset.MIN_ATTESTATION_INCLUSION_DELAY <= current_slot and
-        current_slot <= attestation_slot + preset.SLOTS_PER_EPOCH;
-}
-
 /// Two-pointer sorted merge membership check for attesting indices to slash without auxiliary allocations.
 ///
 /// Pre-requisite: isValidIndexedAttestation already checks for attesting indices to be sorted and unique.
 /// Without that check, this would be incorrect.
-pub fn findAttesterSlashableIndices(attester_slashing: *const AttesterSlashing, indices: *std.ArrayList(ValidatorIndex)) !void {
+pub fn findAttesterSlashableIndices(allocator: Allocator, attester_slashing: *const AttesterSlashing, indices: *std.ArrayList(ValidatorIndex)) !void {
     const a = attester_slashing.attestation_1.attesting_indices.items;
     const b = attester_slashing.attestation_2.attesting_indices.items;
     var i: usize = 0;
     var j: usize = 0;
     while (i < a.len and j < b.len) {
         if (a[i] == b[j]) {
-            try indices.append(a[i]);
+            try indices.append(allocator, a[i]);
             i += 1;
             j += 1;
         } else if (a[i] < b[j]) {

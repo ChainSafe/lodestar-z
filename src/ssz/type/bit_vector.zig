@@ -383,7 +383,7 @@ test "BitVectorType - intersectValues" {
         for (0..tc.bit_len) |i| values[i] = @intCast(i);
 
         var actual = try b.intersectValues(u8, allocator, &values);
-        defer actual.deinit();
+        defer actual.deinit(allocator);
         try std.testing.expectEqualSlices(u8, tc.expected, actual.items);
     }
 }

@@ -2,6 +2,7 @@ const std = @import("std");
 const TypeKind = @import("type_kind.zig").TypeKind;
 const isBasicType = @import("type_kind.zig").isBasicType;
 const isFixedType = @import("type_kind.zig").isFixedType;
+const canMemcpySsz = @import("type_kind.zig").canMemcpySsz;
 const OffsetIterator = @import("offsets.zig").OffsetIterator;
 const merkleize = @import("hashing").merkleize;
 const mixInLength = @import("hashing").mixInLength;
@@ -109,6 +110,11 @@ pub fn FixedListType(comptime ST: type, comptime _limit: comptime_int) type {
         }
 
         pub fn serializeIntoBytes(value: *const Type, out: []u8) usize {
+            if (comptime canMemcpySsz(Element)) {
+                const bytes = std.mem.sliceAsBytes(value.items);
+                @memcpy(out[0..bytes.len], bytes);
+                return bytes.len;
+            }
             var i: usize = 0;
             for (value.items) |element| {
                 i += Element.serializeIntoBytes(&element, out[i..]);
@@ -123,6 +129,10 @@ pub fn FixedListType(comptime ST: type, comptime _limit: comptime_int) type {
             }
 
             try out.resize(allocator, len);
+            if (comptime canMemcpySsz(Element)) {
+                @memcpy(std.mem.sliceAsBytes(out.items[0..len]), data);
+                return;
+            }
             @memset(out.items[0..len], Element.default_value);
             for (0..len) |i| {
                 try Element.deserializeFromBytes(
@@ -1646,7 +1656,7 @@ test "VariableListType - tree.deserializeFromBytes (List<List<uint16>>)" {
 const TypeTestCase = @import("test_utils.zig").TypeTestCase;
 const testCases = [_]TypeTestCase{
     .{ .id = "empty", .serializedHex = "0x", .json = "[]", .rootHex = "0x52e2647abc3d0c9d3be0387f3f0d925422c7a4e98cf4489066f0f43281a899f3" },
-    .{ .id = "4 values", .serializedHex = "0xa086010000000000400d030000000000e093040000000000801a060000000000a086010000000000400d030000000000e093040000000000801a060000000000", .json = 
+    .{ .id = "4 values", .serializedHex = "0xa086010000000000400d030000000000e093040000000000801a060000000000a086010000000000400d030000000000e093040000000000801a060000000000", .json =
     \\["100000","200000","300000","400000","100000","200000","300000","400000"]
     , .rootHex = "0xb55b8592bcac475906631481bbc746bca7339d04ab1085e84884a700c03de4b1" },
     .{

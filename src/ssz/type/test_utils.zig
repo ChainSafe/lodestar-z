@@ -92,13 +92,14 @@ pub fn typeTest(comptime ST: type) type {
                 try ST.deserializeFromJson(&scanner, &json_value);
 
                 // serialize to json
-                var output_json = std.ArrayList(u8).init(allocator);
-                defer output_json.deinit();
-                var write_stream = std.json.writeStream(output_json.writer(), .{});
-                defer write_stream.deinit();
+                var aw: std.Io.Writer.Allocating = .init(allocator);
+                defer aw.deinit();
+                var write_stream: std.json.Stringify = .{ .writer = &aw.writer };
 
                 try ST.serializeIntoJson(&write_stream, &json_value);
-                try std.testing.expectEqualSlices(u8, tc.json, output_json.items);
+                const output = try aw.toOwnedSlice();
+                defer allocator.free(output);
+                try std.testing.expectEqualSlices(u8, tc.json, output);
             } else {
                 // deserialize
                 var value = ST.default_value;
@@ -130,15 +131,16 @@ pub fn typeTest(comptime ST: type) type {
                 try ST.deserializeFromJson(allocator, &scanner, &json_value);
 
                 // serialize to json
-                var output_json = std.ArrayList(u8).init(allocator);
-                defer output_json.deinit();
-                var write_stream = std.json.writeStream(output_json.writer(), .{});
-                defer write_stream.deinit();
+                var aw2: std.Io.Writer.Allocating = .init(allocator);
+                defer aw2.deinit();
+                var write_stream2: std.json.Stringify = .{ .writer = &aw2.writer };
 
-                try ST.serializeIntoJson(allocator, &write_stream, &json_value);
+                try ST.serializeIntoJson(allocator, &write_stream2, &json_value);
+                const output2 = try aw2.toOwnedSlice();
+                defer allocator.free(output2);
                 // sanity check first
-                try std.testing.expectEqual(tc.json.len, output_json.items.len);
-                try std.testing.expectEqualSlices(u8, tc.json, output_json.items);
+                try std.testing.expectEqual(tc.json.len, output2.len);
+                try std.testing.expectEqualSlices(u8, tc.json, output2);
             }
         }
     };

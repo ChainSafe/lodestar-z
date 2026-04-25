@@ -117,18 +117,18 @@ pub const ForkChoiceStore = struct {
         justified_balances_getter: JustifiedBalancesGetter,
         events: ForkChoiceStoreEvents,
     ) !void {
-        var balances_list = JustifiedBalances.init(allocator);
-        errdefer balances_list.deinit();
+        var balances_list: JustifiedBalances = .empty;
+        errdefer balances_list.deinit(allocator);
 
-        try balances_list.appendSlice(justified_balances);
+        try balances_list.appendSlice(allocator, justified_balances);
 
         const balances_rc = try JustifiedBalancesRc.init(allocator, balances_list);
-        errdefer balances_rc.release();
+        errdefer balances_rc.unref();
 
         const total = computeTotalBalance(justified_balances);
 
         // referenced by `unrealized_justified`
-        _ = balances_rc.acquire();
+        _ = balances_rc.ref();
 
         self.* = .{
             .current_slot = current_slot,
@@ -154,14 +154,14 @@ pub const ForkChoiceStore = struct {
     /// Receives raw balances slice, internally creates a new Rc (matching state_transition pattern).
     /// Fires onJustified event if configured.
     pub fn setJustified(self: *ForkChoiceStore, allocator: Allocator, checkpoint: Checkpoint, balances: []const u16) !void {
-        var balances_list = JustifiedBalances.init(allocator);
-        errdefer balances_list.deinit();
+        var balances_list: JustifiedBalances = .empty;
+        errdefer balances_list.deinit(allocator);
 
-        try balances_list.appendSlice(balances);
+        try balances_list.appendSlice(allocator, balances);
 
         const balances_rc = try JustifiedBalancesRc.init(allocator, balances_list);
 
-        self.justified.balances.release();
+        self.justified.balances.unref();
         self.justified = .{
             .checkpoint = checkpoint,
             .balances = balances_rc,
@@ -179,8 +179,8 @@ pub const ForkChoiceStore = struct {
 
     pub fn deinit(self: *ForkChoiceStore, allocator: Allocator) void {
         self.equivocating_indices.deinit(allocator);
-        self.justified.balances.release();
-        self.unrealized_justified.balances.release();
+        self.justified.balances.unref();
+        self.unrealized_justified.balances.unref();
     }
 };
 
@@ -201,7 +201,7 @@ fn makeCheckpoint(epoch: Epoch, root: Root) Checkpoint {
 }
 
 fn dummyBalancesGetter(_: ?*anyopaque, _: Checkpoint, _: *CachedBeaconState) JustifiedBalances {
-    return JustifiedBalances.init(testing.allocator);
+    return .empty;
 }
 
 const test_getter: JustifiedBalancesGetter = .{ .getFn = dummyBalancesGetter };

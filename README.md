@@ -12,6 +12,22 @@ This project provides several modules:
 - `ssz`
 - `consensus_types`
 
+### Spec Tests
+
+`lodestar-z` is compliant against the spec tests version specified in `build.zig.zon` under `options_modules.spec_test_options`.
+
+To run all tests:
+
+```sh
+zig build test:spec_tests
+```
+
+To run on a preset:
+
+```sh
+zig build test:spec_tests -Dpreset=minimal
+```
+
 ### Ssz
 
 A Zig implementation of Ethereum’s [SSZ (Simple Serialize)](https://github.com/ethereum/consensus-specs/tree/dev/ssz) serialization format, Merkleization, and consensus‐type definitions. Provides:
@@ -131,9 +147,6 @@ pub fn main() !void {
 - `zig build run:download_spec_tests`
 - `zig build run:write_spec_tests`
 - `zig build test:int`
-- `zig build test:generic_spec_tests`
-- `zig build test:static_spec_tests -Dpreset=mainnet`
-- `zig build test:static_spec_tests -Dpreset=minimal`
 
 # License
 

@@ -40,7 +40,7 @@ pub const Opts = struct {
 /// call through to the getter, so returning an empty list is safe.
 /// Uses page_allocator as a safe fallback allocator.
 fn dummyBalancesGetter(_: ?*anyopaque, _: Checkpoint, _: *CachedBeaconState) JustifiedBalances {
-    return JustifiedBalances.init(std.heap.page_allocator);
+    return .empty;
 }
 
 const dummy_getter: JustifiedBalancesGetter = .{ .getFn = &dummyBalancesGetter };

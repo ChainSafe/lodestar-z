@@ -1,11 +1,12 @@
 const std = @import("std");
-const napi = @import("zapi:napi");
+const napi = @import("zapi:zapi");
 const bls = @import("bls");
 const blst_bindings = @import("./blst.zig");
 const PubkeyIndexMap = @import("state_transition").PubkeyIndexMap;
 const Index2PubkeyCache = @import("state_transition").Index2PubkeyCache;
 const getter = @import("napi_property_descriptor.zig").getter;
 const method = @import("napi_property_descriptor.zig").method;
+const napi_io = @import("./io.zig");
 
 /// Uses page allocator for internal allocations.
 /// It's recommended to never reallocate the pubkey2index after initialization.
@@ -29,7 +30,7 @@ pub const State = struct {
     pub fn deinit(self: *State) void {
         if (!self.initialized) return;
         self.pubkey2index.deinit();
-        self.index2pubkey.deinit();
+        self.index2pubkey.deinit(allocator);
         self.initialized = false;
     }
 };
@@ -73,8 +74,9 @@ fn pubkey2indexWrittenSize() usize {
 pub fn pubkeys_save(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
     var file_path_buf: [1024]u8 = undefined;
     const file_path = try cb.arg(0).getValueStringUtf8(&file_path_buf);
-    var file = try std.fs.cwd().createFile(file_path, .{ .truncate = true });
-    defer file.close();
+    const io = napi_io.get();
+    const file = try std.Io.Dir.createFile(.cwd(), io, file_path, .{});
+    defer file.close(io);
 
     // Write header
     // Magic "PKIX" + len + capacity
@@ -82,16 +84,22 @@ pub fn pubkeys_save(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
     var header: [12]u8 = [_]u8{ 'P', 'K', 'I', 'X', 0, 0, 0, 0, 0, 0, 0, 0 };
     std.mem.writeInt(u32, header[4..8], @intCast(state.index2pubkey.items.len), .little);
     std.mem.writeInt(u32, header[8..12], @intCast(state.index2pubkey.capacity), .little);
-    try file.writeAll(header[0..12]);
+
+    var write_buf: [4096]u8 = undefined;
+    var file_writer = file.writer(io, &write_buf);
+    var writer = &file_writer.interface;
+    try writer.writeAll(header[0..12]);
 
     // Write pubkey2index entries
     const p2i_size = pubkey2indexWrittenSize();
     const ptr: [*]u8 = @ptrCast(state.pubkey2index.unmanaged.metadata.?);
     const slice = ptr[0..p2i_size];
-    try file.writeAll(slice);
+    try writer.writeAll(slice);
 
     // Write index2pubkey entries
-    try file.writeAll(std.mem.sliceAsBytes(state.index2pubkey.items));
+    try writer.writeAll(std.mem.sliceAsBytes(state.index2pubkey.items));
+
+    try file_writer.end();
 
     return env.getUndefined();
 }
@@ -99,18 +107,18 @@ pub fn pubkeys_save(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
 pub fn pubkeys_load(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
     var file_path_buf: [1024]u8 = undefined;
     const file_path = try cb.arg(0).getValueStringUtf8(&file_path_buf);
-    var file = try std.fs.cwd().openFile(file_path, .{});
-    defer file.close();
+    const io = napi_io.get();
+    const file = try std.Io.Dir.openFile(.cwd(), io, file_path, .{});
+    defer file.close(io);
 
     if (state.initialized) {
         state.deinit();
     }
 
-    var header: [12]u8 = undefined;
-    const header_len = try file.readAll(&header);
-    if (header_len != 12) {
-        return error.InvalidPubkeyIndexFile;
-    }
+    var read_buf: [4096]u8 = undefined;
+    var file_reader = file.reader(io, &read_buf);
+
+    const header = try file_reader.interface.takeArray(12);
 
     if (!std.mem.eql(u8, header[0..4], &[_]u8{ 'P', 'K', 'I', 'X' })) {
         return error.InvalidPubkeyIndexFile;
@@ -119,14 +127,14 @@ pub fn pubkeys_load(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
     const len = std.mem.readInt(u32, header[4..8], .little);
     const capacity = std.mem.readInt(u32, header[8..12], .little);
 
-    const file_size = try file.getEndPos();
+    const file_size = try file.length(io);
 
     state.pubkey2index = PubkeyIndexMap.init(allocator);
     try state.pubkey2index.ensureTotalCapacity(capacity);
     errdefer state.pubkey2index.deinit();
     state.index2pubkey = try Index2PubkeyCache.initCapacity(allocator, capacity);
-    errdefer state.index2pubkey.deinit();
-    state.index2pubkey.items.len = len;
+    errdefer state.index2pubkey.deinit(allocator);
+    try state.index2pubkey.resize(allocator, len);
 
     const p2i_size = pubkey2indexWrittenSize();
     const i2p_size = @sizeOf(bls.PublicKey) * len;
@@ -137,15 +145,15 @@ pub fn pubkeys_load(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
 
     // Read pubkey2index entries
     const ptr: [*]u8 = @ptrCast(state.pubkey2index.unmanaged.metadata.?);
-    const slice = ptr[0..p2i_size];
-    _ = try file.readAll(slice);
+    const p2i_slice = ptr[0..p2i_size];
+    try file_reader.interface.readSliceAll(p2i_slice);
 
     state.pubkey2index.unmanaged.size = len;
     state.pubkey2index.unmanaged.available = capacity - len;
 
     // Read index2pubkey entries
     const index2pubkey_bytes = std.mem.sliceAsBytes(state.index2pubkey.items);
-    _ = try file.readAll(index2pubkey_bytes);
+    try file_reader.interface.readSliceAll(index2pubkey_bytes);
 
     state.initialized = true;
     return env.getUndefined();
@@ -198,12 +206,12 @@ pub fn pubkeys_set(env: napi.Env, cb: napi.CallbackInfo(2)) !napi.Value {
     if (index >= state.index2pubkey.capacity) {
         const new_cap: u32 = @intCast(@max(index + 1, state.index2pubkey.capacity * 2));
         try state.pubkey2index.ensureTotalCapacity(new_cap);
-        try state.index2pubkey.ensureTotalCapacity(new_cap);
+        try state.index2pubkey.ensureTotalCapacity(allocator, new_cap);
     }
 
     // Extend length if needed
     if (index >= state.index2pubkey.items.len) {
-        state.index2pubkey.items.len = index + 1;
+        try state.index2pubkey.resize(allocator, index + 1);
     }
 
     // Set pubkey2index
@@ -234,7 +242,7 @@ pub fn pubkeys_ensureCapacity(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Val
         return env.getUndefined();
     }
     try state.pubkey2index.ensureTotalCapacity(new_size);
-    try state.index2pubkey.ensureTotalCapacity(new_size);
+    try state.index2pubkey.ensureTotalCapacity(allocator, new_size);
     return env.getUndefined();
 }
 

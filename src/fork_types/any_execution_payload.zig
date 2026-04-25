@@ -367,8 +367,8 @@ test "electra - sanity" {
         .extra_data = ct.bellatrix.ExtraData.default_value,
         .base_fee_per_gas = 0,
         .block_hash = ct.primitive.Root.default_value,
-        .transactions = ct.bellatrix.Transactions.Type{},
-        .withdrawals = ct.capella.Withdrawals.Type{},
+        .transactions = ct.bellatrix.Transactions.Type.empty,
+        .withdrawals = ct.capella.Withdrawals.Type.empty,
         .blob_gas_used = 0,
         .excess_blob_gas = 0,
     };

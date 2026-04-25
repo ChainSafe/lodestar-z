@@ -6,7 +6,7 @@ const Gindex = @import("persistent_merkle_tree").Gindex;
 
 const PathBits = struct {
     gindex: Gindex,
-    pub fn run(self: PathBits, allocator: std.mem.Allocator) void {
+    pub fn run(self: *PathBits, allocator: std.mem.Allocator) void {
         _ = allocator;
         var bits_buf: [max_depth]u1 = undefined;
         const bits = self.gindex.toPathBits(&bits_buf);
@@ -18,7 +18,7 @@ const PathBits = struct {
 
 const Path = struct {
     gindex: Gindex,
-    pub fn run(self: Path, allocator: std.mem.Allocator) void {
+    pub fn run(self: *Path, allocator: std.mem.Allocator) void {
         _ = allocator;
         var path = self.gindex.toPath();
         var path_len = self.gindex.pathLen();
@@ -30,9 +30,9 @@ const Path = struct {
     }
 };
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
     const allocator = std.heap.page_allocator;
-    const stdout = std.io.getStdOut().writer();
+    const io = init.io;
     var bench = zbench.Benchmark.init(allocator, .{});
     defer bench.deinit();
 
@@ -42,5 +42,5 @@ pub fn main() !void {
     const path = Path{ .gindex = gindex };
     try bench.addParam("gindex - path", &path, .{});
 
-    try bench.run(stdout);
+    try bench.run(io, std.Io.File.stdout());
 }

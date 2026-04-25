@@ -315,7 +315,7 @@ test "TreeView vector clone drops uncommitted changes" {
     try std.testing.expectEqual(@as(u16, 1), try dropped.get(0));
 }
 
-test "TreeView vector clone(true) does not transfer cache" {
+test "TreeView vector clone(false) does not transfer cache" {
     const allocator = std.testing.allocator;
     var pool = try Node.Pool.init(allocator, 1024);
     defer pool.deinit();
@@ -339,7 +339,7 @@ test "TreeView vector clone(true) does not transfer cache" {
     try std.testing.expectEqual(@as(usize, 0), cloned_no_cache.chunks.state.children_nodes.count());
 }
 
-test "TreeView vector clone(false) transfers cache and clears source" {
+test "TreeView vector clone(true) transfers cache and clears source" {
     const allocator = std.testing.allocator;
     var pool = try Node.Pool.init(allocator, 1024);
     defer pool.deinit();

@@ -133,24 +133,19 @@ fn Optional(comptime T: type) type {
         @compileError("Optional can only be used with struct types");
     }
     const t_fields = type_info.@"struct".fields;
-    var optional_fields: [t_fields.len]std.builtin.Type.StructField = undefined;
+    var names: [t_fields.len][:0]const u8 = undefined;
+    var types: [t_fields.len]type = undefined;
+    var attrs: [t_fields.len]std.builtin.Type.StructField.Attributes = undefined;
     inline for (t_fields, 0..) |field, i| {
-        const optional_type = @Type(.{ .optional = .{ .child = field.type } });
-        optional_fields[i] = .{
-            .name = field.name,
-            .type = optional_type,
+        const optional_type = ?field.type;
+        names[i] = field.name;
+        types[i] = optional_type;
+        attrs[i] = .{
             .default_value_ptr = &@as(optional_type, null),
-            .is_comptime = false,
-            .alignment = field.alignment,
         };
     }
 
-    return @Type(.{ .@"struct" = .{
-        .layout = .auto,
-        .fields = &optional_fields,
-        .decls = &[_]std.builtin.Type.Declaration{},
-        .is_tuple = false,
-    } });
+    return @Struct(.auto, null, &names, &types, &attrs);
 }
 
 test merge {

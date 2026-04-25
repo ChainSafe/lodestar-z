@@ -23,7 +23,7 @@ const UpdateHeadBench = struct {
     vote2: u32,
     flip: *bool,
 
-    pub fn run(self: UpdateHeadBench, allocator: std.mem.Allocator) void {
+    pub fn run(self: *UpdateHeadBench, allocator: std.mem.Allocator) void {
         const target = if (self.flip.*) self.vote2 else self.vote1;
         const vote_fields = self.fc.votes.fields();
         @memset(vote_fields.next_indices, target);
@@ -64,13 +64,13 @@ fn deinitBench(allocator: std.mem.Allocator, b: UpdateHeadBench) void {
     util.deinitForkChoice(allocator, b.fc);
 }
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
     var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
     const allocator = if (builtin.mode == .Debug) debug_allocator.allocator() else std.heap.c_allocator;
     defer if (builtin.mode == .Debug) {
         std.debug.assert(debug_allocator.deinit() == .ok);
     };
-    const stdout = std.io.getStdOut().writer();
+    const io = init.io;
     var bench = zbench.Benchmark.init(allocator, .{});
 
     // ── Validator count sweep (block_count=64, equivocated=0) ──
@@ -152,5 +152,5 @@ pub fn main() !void {
     try bench.addParam("updateHead vc=600000 bc=64 eq=300000", &eq_300k, .{});
 
     defer bench.deinit();
-    try bench.run(stdout);
+    try bench.run(io, std.Io.File.stdout());
 }

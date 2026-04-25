@@ -35,17 +35,17 @@ pub fn SlotsTestCase(comptime fork: ForkSeq) type {
 
         const Self = @This();
 
-        pub fn execute(allocator: std.mem.Allocator, pool: *Node.Pool, dir: std.fs.Dir) !void {
+        pub fn execute(allocator: std.mem.Allocator, pool: *Node.Pool, dir: std.Io.Dir) !void {
             var tc = try Self.init(allocator, pool, dir);
             defer {
                 tc.deinit();
-                state_transition.deinitStateTransition();
+                state_transition.deinitStateTransition(std.testing.io);
             }
 
             try tc.runTest();
         }
 
-        pub fn init(allocator: std.mem.Allocator, pool: *Node.Pool, dir: std.fs.Dir) !Self {
+        pub fn init(allocator: std.mem.Allocator, pool: *Node.Pool, dir: std.Io.Dir) !Self {
             var tc = Self{
                 .pre = undefined,
                 .post = undefined,
@@ -61,9 +61,7 @@ pub fn SlotsTestCase(comptime fork: ForkSeq) type {
                 return error.PostStateNotFound;
 
             // load slots
-            var slots_file = try dir.openFile("slots.yaml", .{});
-            defer slots_file.close();
-            const slots_content = try slots_file.readToEndAlloc(allocator, 1024);
+            const slots_content = try dir.readFileAlloc(std.testing.io, "slots.yaml", allocator, .unlimited);
             defer allocator.free(slots_content);
             // Parse YAML for slots (simplified; assume single value)
             tc.slots = std.fmt.parseInt(u64, std.mem.trim(u8, slots_content, "... \n"), 10) catch 0;
@@ -80,6 +78,7 @@ pub fn SlotsTestCase(comptime fork: ForkSeq) type {
         pub fn process(self: *Self) !void {
             try state_transition.state_transition.processSlots(
                 self.pre.allocator,
+                std.testing.io,
                 self.pre.cached_state,
                 try self.pre.cached_state.state.slot() + self.slots,
                 .{},
@@ -107,17 +106,17 @@ pub fn BlocksTestCase(comptime fork: ForkSeq) type {
 
         const Self = @This();
 
-        pub fn execute(allocator: std.mem.Allocator, pool: *Node.Pool, dir: std.fs.Dir) !void {
+        pub fn execute(allocator: std.mem.Allocator, pool: *Node.Pool, dir: std.Io.Dir) !void {
             var tc = try Self.init(allocator, pool, dir);
             defer {
                 tc.deinit();
-                state_transition.deinitStateTransition();
+                state_transition.deinitStateTransition(std.testing.io);
             }
 
             try tc.runTest();
         }
 
-        pub fn init(allocator: std.mem.Allocator, pool: *Node.Pool, dir: std.fs.Dir) !Self {
+        pub fn init(allocator: std.mem.Allocator, pool: *Node.Pool, dir: std.Io.Dir) !Self {
             var tc = Self{
                 .pre = undefined,
                 .post = undefined,
@@ -133,9 +132,7 @@ pub fn BlocksTestCase(comptime fork: ForkSeq) type {
             tc.post = try tc_utils.loadPostState(allocator, pool, dir);
 
             // Load meta.yaml for blocks_count
-            var meta_file = try dir.openFile("meta.yaml", .{});
-            defer meta_file.close();
-            const meta_content = try meta_file.readToEndAlloc(allocator, 1024);
+            const meta_content = try dir.readFileAlloc(std.testing.io, "meta.yaml", allocator, .unlimited);
             defer allocator.free(meta_content);
             // Parse YAML for blocks_count (simplified; assume "blocks_count: N")
             const blocks_count_str = std.mem.trim(u8, meta_content, " \n{}");
@@ -203,6 +200,7 @@ pub fn BlocksTestCase(comptime fork: ForkSeq) type {
                     }
                     const new_result = try state_transition.state_transition.stateTransition(
                         self.pre.allocator,
+                        std.testing.io,
                         input_cached_state,
                         signed_block,
                         .{
