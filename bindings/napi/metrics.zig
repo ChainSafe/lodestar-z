@@ -12,10 +12,11 @@ else
 var initialized: bool = false;
 
 pub fn Metrics_scrapeMetrics(env: napi.Env, _: napi.CallbackInfo(0)) !napi.Value {
-    var buf = std.ArrayList(u8).init(allocator);
-    defer buf.deinit();
-    try state_transition.metrics.write(buf.writer());
-    return env.createStringUtf8(buf.items);
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    try state_transition.metrics.write(&aw.writer);
+    var list = aw.toArrayList();
+    defer list.deinit(allocator);
+    return env.createStringUtf8(list.items);
 }
 
 pub fn deinit() void {

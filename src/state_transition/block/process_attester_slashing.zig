@@ -46,8 +46,8 @@ pub fn processAttesterSlashing(
             attester_slashing.attestation_2.attesting_indices.items.len,
         ),
     );
-    try findAttesterSlashableIndices(attester_slashing, &intersecting_indices);
-    defer intersecting_indices.deinit();
+    try findAttesterSlashableIndices(allocator, attester_slashing, &intersecting_indices);
+    defer intersecting_indices.deinit(allocator);
 
     var slashed_any: bool = false;
     var validators = try state.validators();

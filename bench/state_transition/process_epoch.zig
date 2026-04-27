@@ -7,6 +7,7 @@ const std = @import("std");
 const zbench = @import("zbench");
 const Node = @import("persistent_merkle_tree").Node;
 const state_transition = @import("state_transition");
+const time = @import("time");
 const types = @import("consensus_types");
 const config = @import("config");
 const download_era_options = @import("download_era_options");
@@ -15,6 +16,7 @@ const AnyBeaconState = @import("fork_types").AnyBeaconState;
 const ForkSeq = config.ForkSeq;
 const CachedBeaconState = state_transition.CachedBeaconState;
 const EpochTransitionCache = state_transition.EpochTransitionCache;
+const Index2PubkeyCache = state_transition.Index2PubkeyCache;
 const ValidatorIndex = types.primitive.ValidatorIndex.Type;
 const slotFromStateBytes = @import("utils.zig").slotFromStateBytes;
 const loadState = @import("utils.zig").loadState;
@@ -36,8 +38,9 @@ fn ProcessJustificationAndFinalizationBench(comptime fork: ForkSeq) type {
     return struct {
         epoch_transition_cache: *EpochTransitionCache,
 
-        pub fn run(self: @This(), allocator: std.mem.Allocator) void {
+        pub fn run(self: *@This(), allocator: std.mem.Allocator) void {
             _ = allocator;
+
             const cache = self.epoch_transition_cache;
 
             state_transition.processJustificationAndFinalization(
@@ -52,17 +55,20 @@ fn ProcessJustificationAndFinalizationBench(comptime fork: ForkSeq) type {
 fn ProcessBeforeProcessEpochBench(comptime fork: ForkSeq) type {
     comptime _ = fork;
     return struct {
-        pub fn run(self: @This(), allocator: std.mem.Allocator) void {
+        io: std.Io,
+
+        pub fn run(self: *@This(), allocator: std.mem.Allocator) void {
             _ = self;
             g_cached_state_instance.state.commit() catch unreachable;
 
             var epoch_transition_cache = EpochTransitionCache.init(
                 allocator,
+                self.io,
                 g_cached_state_instance.config,
                 g_cached_state_instance.epoch_cache,
                 g_cached_state_instance.state,
             ) catch unreachable;
-            defer epoch_transition_cache.deinit();
+            defer epoch_transition_cache.deinit(allocator);
         }
     };
 }
@@ -71,7 +77,7 @@ fn ProcessInactivityUpdatesBench(comptime fork: ForkSeq) type {
     return struct {
         epoch_transition_cache: *EpochTransitionCache,
 
-        pub fn run(self: @This(), allocator: std.mem.Allocator) void {
+        pub fn run(self: *@This(), allocator: std.mem.Allocator) void {
             const cache = self.epoch_transition_cache;
 
             state_transition.processInactivityUpdates(
@@ -89,11 +95,12 @@ fn ProcessInactivityUpdatesBench(comptime fork: ForkSeq) type {
 fn ProcessRewardsAndPenaltiesBench(comptime fork: ForkSeq) type {
     return struct {
         epoch_transition_cache: *EpochTransitionCache,
+        io: std.Io,
 
-        pub fn run(self: @This(), allocator: std.mem.Allocator) void {
+        pub fn run(self: *@This(), allocator: std.mem.Allocator) void {
             const cache = self.epoch_transition_cache;
             const validator_count = g_cached_state_instance.state.validatorsCount() catch unreachable;
-            cache.syncRewardPenaltyLengths(validator_count) catch unreachable;
+            cache.syncRewardPenaltyLengths(self.io, validator_count) catch unreachable;
 
             state_transition.processRewardsAndPenalties(
                 fork,
@@ -112,7 +119,7 @@ fn ProcessRegistryUpdatesBench(comptime fork: ForkSeq) type {
     return struct {
         epoch_transition_cache: *EpochTransitionCache,
 
-        pub fn run(self: @This(), allocator: std.mem.Allocator) void {
+        pub fn run(self: *@This(), allocator: std.mem.Allocator) void {
             _ = allocator;
             const cache = self.epoch_transition_cache;
 
@@ -131,7 +138,7 @@ fn ProcessSlashingsBench(comptime fork: ForkSeq) type {
     return struct {
         epoch_transition_cache: *EpochTransitionCache,
 
-        pub fn run(self: @This(), allocator: std.mem.Allocator) void {
+        pub fn run(self: *@This(), allocator: std.mem.Allocator) void {
             const cache = self.epoch_transition_cache;
 
             _ = state_transition.processSlashings(
@@ -150,7 +157,7 @@ fn ProcessEth1DataResetBench(comptime fork: ForkSeq) type {
     return struct {
         epoch_transition_cache: *EpochTransitionCache,
 
-        pub fn run(self: @This(), allocator: std.mem.Allocator) void {
+        pub fn run(self: *@This(), allocator: std.mem.Allocator) void {
             _ = allocator;
             const cache = self.epoch_transition_cache;
 
@@ -167,7 +174,7 @@ fn ProcessPendingDepositsBench(comptime fork: ForkSeq) type {
     return struct {
         epoch_transition_cache: *EpochTransitionCache,
 
-        pub fn run(self: @This(), allocator: std.mem.Allocator) void {
+        pub fn run(self: *@This(), allocator: std.mem.Allocator) void {
             const cache = self.epoch_transition_cache;
 
             state_transition.processPendingDeposits(
@@ -186,7 +193,7 @@ fn ProcessPendingConsolidationsBench(comptime fork: ForkSeq) type {
     return struct {
         epoch_transition_cache: *EpochTransitionCache,
 
-        pub fn run(self: @This(), allocator: std.mem.Allocator) void {
+        pub fn run(self: *@This(), allocator: std.mem.Allocator) void {
             _ = allocator;
             const cache = self.epoch_transition_cache;
 
@@ -204,7 +211,7 @@ fn ProcessEffectiveBalanceUpdatesBench(comptime fork: ForkSeq) type {
     return struct {
         epoch_transition_cache: *EpochTransitionCache,
 
-        pub fn run(self: @This(), allocator: std.mem.Allocator) void {
+        pub fn run(self: *@This(), allocator: std.mem.Allocator) void {
             const cache = self.epoch_transition_cache;
 
             _ = state_transition.processEffectiveBalanceUpdates(
@@ -222,7 +229,7 @@ fn ProcessSlashingsResetBench(comptime fork: ForkSeq) type {
     return struct {
         epoch_transition_cache: *EpochTransitionCache,
 
-        pub fn run(self: @This(), allocator: std.mem.Allocator) void {
+        pub fn run(self: *@This(), allocator: std.mem.Allocator) void {
             _ = allocator;
             const cache = self.epoch_transition_cache;
 
@@ -240,8 +247,9 @@ fn ProcessRandaoMixesResetBench(comptime fork: ForkSeq) type {
     return struct {
         epoch_transition_cache: *EpochTransitionCache,
 
-        pub fn run(self: @This(), allocator: std.mem.Allocator) void {
+        pub fn run(self: *@This(), allocator: std.mem.Allocator) void {
             _ = allocator;
+
             const cache = self.epoch_transition_cache;
 
             state_transition.processRandaoMixesReset(
@@ -257,8 +265,9 @@ fn ProcessHistoricalSummariesUpdateBench(comptime fork: ForkSeq) type {
     return struct {
         epoch_transition_cache: *EpochTransitionCache,
 
-        pub fn run(self: @This(), allocator: std.mem.Allocator) void {
+        pub fn run(self: *@This(), allocator: std.mem.Allocator) void {
             _ = allocator;
+
             const cache = self.epoch_transition_cache;
 
             state_transition.processHistoricalSummariesUpdate(
@@ -272,7 +281,7 @@ fn ProcessHistoricalSummariesUpdateBench(comptime fork: ForkSeq) type {
 
 fn ProcessParticipationFlagUpdatesBench(comptime fork: ForkSeq) type {
     return struct {
-        pub fn run(self: @This(), allocator: std.mem.Allocator) void {
+        pub fn run(self: *@This(), allocator: std.mem.Allocator) void {
             _ = self;
             _ = allocator;
 
@@ -286,7 +295,7 @@ fn ProcessParticipationFlagUpdatesBench(comptime fork: ForkSeq) type {
 
 fn ProcessSyncCommitteeUpdatesBench(comptime fork: ForkSeq) type {
     return struct {
-        pub fn run(self: @This(), allocator: std.mem.Allocator) void {
+        pub fn run(self: *@This(), allocator: std.mem.Allocator) void {
             _ = self;
 
             state_transition.processSyncCommitteeUpdates(
@@ -303,7 +312,7 @@ fn ProcessProposerLookaheadBench(comptime fork: ForkSeq) type {
     return struct {
         epoch_transition_cache: *EpochTransitionCache,
 
-        pub fn run(self: @This(), allocator: std.mem.Allocator) void {
+        pub fn run(self: *@This(), allocator: std.mem.Allocator) void {
             const cache = self.epoch_transition_cache;
 
             state_transition.processProposerLookahead(
@@ -354,11 +363,7 @@ fn recordSegment(step: Step, duration_ns: u64) void {
     step_run_counts[idx] += 1;
 }
 
-fn elapsedSince(start: i128) u64 {
-    return @as(u64, @intCast(std.time.nanoTimestamp() - start));
-}
-
-fn printSegmentStats(stdout: anytype) !void {
+fn printSegmentStats(stdout: *std.Io.Writer) !void {
     try stdout.print("\nSegmented epoch breakdown:\n", .{});
     try stdout.print("{s:<28} {s:<8} {s:<14} {s:<14}\n", .{ "step", "runs", "total time", "time/run (avg)" });
     try stdout.print("{s:-<66}\n", .{""});
@@ -382,22 +387,26 @@ fn printSegmentStats(stdout: anytype) !void {
 
 fn ProcessEpochBench(comptime fork: ForkSeq) type {
     return struct {
-        pub fn run(self: @This(), allocator: std.mem.Allocator) void {
+        io: std.Io,
+
+        pub fn run(self: *@This(), allocator: std.mem.Allocator) void {
             _ = self;
             var cache = EpochTransitionCache.init(
                 allocator,
+                self.io,
                 g_cached_state_instance.config,
                 g_cached_state_instance.epoch_cache,
                 g_cached_state_instance.state,
             ) catch unreachable;
-            defer cache.deinit();
+            defer cache.deinit(allocator);
 
             const validator_count = g_cached_state_instance.state.validatorsCount() catch unreachable;
-            cache.syncRewardPenaltyLengths(validator_count) catch unreachable;
+            cache.syncRewardPenaltyLengths(self.io, validator_count) catch unreachable;
 
             state_transition.processEpoch(
                 fork,
                 allocator,
+                self.io,
                 g_cached_state_instance.config,
                 g_cached_state_instance.epoch_cache,
                 g_cached_state_instance.state.castToFork(fork),
@@ -409,31 +418,34 @@ fn ProcessEpochBench(comptime fork: ForkSeq) type {
 
 fn ProcessEpochSegmentedBench(comptime fork: ForkSeq) type {
     return struct {
-        pub fn run(self: @This(), allocator: std.mem.Allocator) void {
-            _ = self;
-            const epoch_start = std.time.nanoTimestamp();
+        io: std.Io,
 
-            const before_start = std.time.nanoTimestamp();
+        pub fn run(self: *@This(), allocator: std.mem.Allocator) void {
+            const io = self.io;
+            const epoch_start = time.timestampNow(io);
+
+            const before_start = time.timestampNow(io);
             g_cached_state_instance.state.commit() catch unreachable;
             var cache_val = EpochTransitionCache.init(
                 allocator,
+                io,
                 g_cached_state_instance.config,
                 g_cached_state_instance.epoch_cache,
                 g_cached_state_instance.state,
             ) catch unreachable;
-            defer cache_val.deinit();
+            defer cache_val.deinit(allocator);
             const cache = &cache_val;
-            recordSegment(.before_process_epoch, elapsedSince(before_start));
+            recordSegment(.before_process_epoch, @as(u64, @intCast(time.since(io, before_start).nanoseconds)));
 
             const fork_state = g_cached_state_instance.state.castToFork(fork);
             const epoch_cache = g_cached_state_instance.epoch_cache;
 
-            const jf_start = std.time.nanoTimestamp();
+            const jf_start = time.timestampNow(io);
             state_transition.processJustificationAndFinalization(fork, fork_state, cache) catch unreachable;
-            recordSegment(.justification_finalization, elapsedSince(jf_start));
+            recordSegment(.justification_finalization, @as(u64, @intCast(time.since(io, jf_start).nanoseconds)));
 
             if (comptime fork.gte(.altair)) {
-                const inactivity_start = std.time.nanoTimestamp();
+                const inactivity_start = time.timestampNow(io);
                 state_transition.processInactivityUpdates(
                     fork,
                     allocator,
@@ -442,10 +454,10 @@ fn ProcessEpochSegmentedBench(comptime fork: ForkSeq) type {
                     fork_state,
                     cache,
                 ) catch unreachable;
-                recordSegment(.inactivity_updates, elapsedSince(inactivity_start));
+                recordSegment(.inactivity_updates, @as(u64, @intCast(time.since(io, inactivity_start).nanoseconds)));
             }
 
-            const registry_start = std.time.nanoTimestamp();
+            const registry_start = time.timestampNow(io);
             state_transition.processRegistryUpdates(
                 fork,
                 g_cached_state_instance.config,
@@ -453,9 +465,9 @@ fn ProcessEpochSegmentedBench(comptime fork: ForkSeq) type {
                 fork_state,
                 cache,
             ) catch unreachable;
-            recordSegment(.registry_updates, elapsedSince(registry_start));
+            recordSegment(.registry_updates, @as(u64, @intCast(time.since(io, registry_start).nanoseconds)));
 
-            const slashings_start = std.time.nanoTimestamp();
+            const slashings_start = time.timestampNow(io);
             const slashing_penalties = state_transition.processSlashings(
                 fork,
                 allocator,
@@ -464,9 +476,9 @@ fn ProcessEpochSegmentedBench(comptime fork: ForkSeq) type {
                 cache,
                 false,
             ) catch unreachable;
-            recordSegment(.slashings, elapsedSince(slashings_start));
+            recordSegment(.slashings, @as(u64, @intCast(time.since(io, slashings_start).nanoseconds)));
 
-            const rewards_start = std.time.nanoTimestamp();
+            const rewards_start = time.timestampNow(io);
             state_transition.processRewardsAndPenalties(
                 fork,
                 allocator,
@@ -476,14 +488,14 @@ fn ProcessEpochSegmentedBench(comptime fork: ForkSeq) type {
                 cache,
                 slashing_penalties,
             ) catch unreachable;
-            recordSegment(.rewards_and_penalties, elapsedSince(rewards_start));
+            recordSegment(.rewards_and_penalties, @as(u64, @intCast(time.since(io, rewards_start).nanoseconds)));
 
-            const eth1_start = std.time.nanoTimestamp();
+            const eth1_start = time.timestampNow(io);
             state_transition.processEth1DataReset(fork, fork_state, cache) catch unreachable;
-            recordSegment(.eth1_data_reset, elapsedSince(eth1_start));
+            recordSegment(.eth1_data_reset, @as(u64, @intCast(time.since(io, eth1_start).nanoseconds)));
 
             if (comptime fork.gte(.electra)) {
-                const pending_deposits_start = std.time.nanoTimestamp();
+                const pending_deposits_start = time.timestampNow(io);
                 state_transition.processPendingDeposits(
                     fork,
                     allocator,
@@ -492,19 +504,19 @@ fn ProcessEpochSegmentedBench(comptime fork: ForkSeq) type {
                     fork_state,
                     cache,
                 ) catch unreachable;
-                recordSegment(.pending_deposits, elapsedSince(pending_deposits_start));
+                recordSegment(.pending_deposits, @as(u64, @intCast(time.since(io, pending_deposits_start).nanoseconds)));
 
-                const pending_consolidations_start = std.time.nanoTimestamp();
+                const pending_consolidations_start = time.timestampNow(io);
                 state_transition.processPendingConsolidations(
                     fork,
                     epoch_cache,
                     fork_state,
                     cache,
                 ) catch unreachable;
-                recordSegment(.pending_consolidations, elapsedSince(pending_consolidations_start));
+                recordSegment(.pending_consolidations, @as(u64, @intCast(time.since(io, pending_consolidations_start).nanoseconds)));
             }
 
-            const eb_start = std.time.nanoTimestamp();
+            const eb_start = time.timestampNow(io);
             _ = state_transition.processEffectiveBalanceUpdates(
                 fork,
                 allocator,
@@ -512,54 +524,54 @@ fn ProcessEpochSegmentedBench(comptime fork: ForkSeq) type {
                 fork_state,
                 cache,
             ) catch unreachable;
-            recordSegment(.effective_balance_updates, elapsedSince(eb_start));
+            recordSegment(.effective_balance_updates, @as(u64, @intCast(time.since(io, eb_start).nanoseconds)));
 
-            const slashings_reset_start = std.time.nanoTimestamp();
+            const slashings_reset_start = time.timestampNow(io);
             state_transition.processSlashingsReset(
                 fork,
                 epoch_cache,
                 fork_state,
                 cache,
             ) catch unreachable;
-            recordSegment(.slashings_reset, elapsedSince(slashings_reset_start));
+            recordSegment(.slashings_reset, @as(u64, @intCast(time.since(io, slashings_reset_start).nanoseconds)));
 
-            const randao_reset_start = std.time.nanoTimestamp();
+            const randao_reset_start = time.timestampNow(io);
             state_transition.processRandaoMixesReset(fork, fork_state, cache) catch unreachable;
-            recordSegment(.randao_mixes_reset, elapsedSince(randao_reset_start));
+            recordSegment(.randao_mixes_reset, @as(u64, @intCast(time.since(io, randao_reset_start).nanoseconds)));
 
             if (comptime fork.gte(.capella)) {
-                const historical_summaries_start = std.time.nanoTimestamp();
+                const historical_summaries_start = time.timestampNow(io);
                 state_transition.processHistoricalSummariesUpdate(fork, fork_state, cache) catch unreachable;
-                recordSegment(.historical_summaries, elapsedSince(historical_summaries_start));
+                recordSegment(.historical_summaries, @as(u64, @intCast(time.since(io, historical_summaries_start).nanoseconds)));
             } else {
-                const historical_roots_start = std.time.nanoTimestamp();
+                const historical_roots_start = time.timestampNow(io);
                 state_transition.processHistoricalRootsUpdate(fork, fork_state, cache) catch unreachable;
-                recordSegment(.historical_roots, elapsedSince(historical_roots_start));
+                recordSegment(.historical_roots, @as(u64, @intCast(time.since(io, historical_roots_start).nanoseconds)));
             }
 
             if (comptime fork == .phase0) {
-                const participation_record_start = std.time.nanoTimestamp();
+                const participation_record_start = time.timestampNow(io);
                 state_transition.processParticipationRecordUpdates(fork, fork_state) catch unreachable;
-                recordSegment(.participation_record, elapsedSince(participation_record_start));
+                recordSegment(.participation_record, @as(u64, @intCast(time.since(io, participation_record_start).nanoseconds)));
             } else {
-                const participation_flag_start = std.time.nanoTimestamp();
+                const participation_flag_start = time.timestampNow(io);
                 state_transition.processParticipationFlagUpdates(fork, fork_state) catch unreachable;
-                recordSegment(.participation_flags, elapsedSince(participation_flag_start));
+                recordSegment(.participation_flags, @as(u64, @intCast(time.since(io, participation_flag_start).nanoseconds)));
             }
 
             if (comptime fork.gte(.altair)) {
-                const sync_updates_start = std.time.nanoTimestamp();
+                const sync_updates_start = time.timestampNow(io);
                 state_transition.processSyncCommitteeUpdates(
                     fork,
                     allocator,
                     epoch_cache,
                     fork_state,
                 ) catch unreachable;
-                recordSegment(.sync_committee_updates, elapsedSince(sync_updates_start));
+                recordSegment(.sync_committee_updates, @as(u64, @intCast(time.since(io, sync_updates_start).nanoseconds)));
             }
 
             if (comptime fork == .fulu) {
-                const lookahead_start = std.time.nanoTimestamp();
+                const lookahead_start = time.timestampNow(io);
                 state_transition.processProposerLookahead(
                     fork,
                     allocator,
@@ -567,15 +579,15 @@ fn ProcessEpochSegmentedBench(comptime fork: ForkSeq) type {
                     fork_state,
                     cache,
                 ) catch unreachable;
-                recordSegment(.proposer_lookahead, elapsedSince(lookahead_start));
+                recordSegment(.proposer_lookahead, @as(u64, @intCast(time.since(io, lookahead_start).nanoseconds)));
             }
 
-            recordSegment(.epoch_total, elapsedSince(epoch_start));
+            recordSegment(.epoch_total, @as(u64, @intCast(time.since(io, epoch_start).nanoseconds)));
         }
     };
 }
 
-fn loadStateBytesFromConfiguredEraFiles(allocator: std.mem.Allocator, stdout: anytype) ![]const u8 {
+fn loadStateBytesFromConfiguredEraFiles(allocator: std.mem.Allocator, io: std.Io, stdout: *std.Io.Writer) ![]const u8 {
     if (download_era_options.era_files.len == 0) return error.NoEraFilesConfigured;
 
     var last_err: ?anyerror = null;
@@ -587,7 +599,7 @@ fn loadStateBytesFromConfiguredEraFiles(allocator: std.mem.Allocator, stdout: an
         );
         defer allocator.free(era_path);
 
-        var era_reader = era.Reader.open(allocator, config.mainnet.config, era_path) catch |err| {
+        var era_reader = era.Reader.open(allocator, io, config.mainnet.config, era_path) catch |err| {
             last_err = err;
             try stdout.print("Skipping ERA file {s}: {s}\n", .{ era_path, @errorName(err) });
             continue;
@@ -608,17 +620,20 @@ fn loadStateBytesFromConfiguredEraFiles(allocator: std.mem.Allocator, stdout: an
     return error.NoUsableEraStateFound;
 }
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer std.debug.assert(gpa.deinit() == .ok);
 
     const allocator = gpa.allocator();
     g_allocator = allocator;
-    const stdout = std.io.getStdOut().writer();
+    const io = init.io;
+    var stdout_buf: [4096]u8 = undefined;
+    var stdout_file_writer = std.Io.File.stdout().writer(io, &stdout_buf);
+    var stdout = &stdout_file_writer.interface;
     var pool = try Node.Pool.init(allocator, 10_000_000);
     defer pool.deinit();
 
-    const state_bytes = try loadStateBytesFromConfiguredEraFiles(allocator, stdout);
+    const state_bytes = try loadStateBytesFromConfiguredEraFiles(allocator, io, stdout);
     defer allocator.free(state_bytes);
 
     // Detect fork from state SSZ bytes
@@ -630,7 +645,7 @@ pub fn main() !void {
     // Dispatch to fork-specific loading
     inline for (comptime std.enums.values(ForkSeq)) |fork| {
         if (detected_fork == fork) {
-            return runBenchmark(fork, allocator, &pool, stdout, state_bytes, chain_config);
+            return runBenchmark(fork, allocator, &pool, io, stdout, state_bytes, chain_config);
         }
     }
     return error.NoBenchmarkRan;
@@ -640,11 +655,12 @@ fn runBenchmark(
     comptime fork: ForkSeq,
     allocator: std.mem.Allocator,
     pool: *Node.Pool,
-    stdout: anytype,
+    io: std.Io,
+    stdout: *std.Io.Writer,
     state_bytes: []const u8,
     chain_config: config.ChainConfig,
 ) !void {
-    defer state_transition.deinitStateTransition();
+    defer state_transition.deinitStateTransition(io);
 
     var beacon_state: ?*AnyBeaconState = try loadState(fork, allocator, pool, state_bytes);
     defer if (beacon_state) |state| {
@@ -663,16 +679,16 @@ fn runBenchmark(
     defer pubkey_index_map.deinit();
 
     const index_pubkey_cache = try allocator.create(state_transition.Index2PubkeyCache);
-    index_pubkey_cache.* = state_transition.Index2PubkeyCache.init(allocator);
+    index_pubkey_cache.* = Index2PubkeyCache.empty;
     defer {
-        index_pubkey_cache.deinit();
+        index_pubkey_cache.deinit(allocator);
         allocator.destroy(index_pubkey_cache);
     }
 
     const validators = try beacon_state.?.validatorsSlice(allocator);
     defer allocator.free(validators);
 
-    try state_transition.syncPubkeys(validators, &pubkey_index_map, index_pubkey_cache);
+    try state_transition.syncPubkeys(allocator, validators, &pubkey_index_map, index_pubkey_cache);
 
     const immutable_data = state_transition.EpochCacheImmutableData{
         .config = &beacon_config,
@@ -693,11 +709,12 @@ fn runBenchmark(
 
     var epoch_transition_cache = try EpochTransitionCache.init(
         allocator,
+        io,
         cached_state.config,
         cached_state.epoch_cache,
         cached_state.state,
     );
-    defer epoch_transition_cache.deinit();
+    defer epoch_transition_cache.deinit(allocator);
 
     try stdout.print("Cached state created at slot {}\n", .{try cached_state.state.slot()});
     try stdout.print("\nStarting process_epoch benchmarks for {s} fork...\n\n", .{@tagName(fork)});
@@ -707,7 +724,7 @@ fn runBenchmark(
     var bench = zbench.Benchmark.init(allocator, .{ .iterations = 50 });
     defer bench.deinit();
 
-    try bench.addParam("before_process_epoch", &ProcessBeforeProcessEpochBench(fork){}, .{ .hooks = hooks });
+    try bench.addParam("before_process_epoch", &ProcessBeforeProcessEpochBench(fork){ .io = io }, .{ .hooks = hooks });
 
     try bench.addParam("justification_finalization", &ProcessJustificationAndFinalizationBench(fork){
         .epoch_transition_cache = &epoch_transition_cache,
@@ -721,6 +738,7 @@ fn runBenchmark(
 
     try bench.addParam("rewards_and_penalties", &ProcessRewardsAndPenaltiesBench(fork){
         .epoch_transition_cache = &epoch_transition_cache,
+        .io = io,
     }, .{ .hooks = hooks });
 
     try bench.addParam("registry_updates", &ProcessRegistryUpdatesBench(fork){
@@ -776,12 +794,13 @@ fn runBenchmark(
     }
 
     // Non-segmented
-    try bench.addParam("epoch(non-segmented)", &ProcessEpochBench(fork){}, .{ .hooks = hooks });
+    try bench.addParam("epoch(non-segmented)", &ProcessEpochBench(fork){ .io = io }, .{ .hooks = hooks });
 
     // Segmented (step-by-step timing)
     resetSegmentStats();
-    try bench.addParam("epoch(segmented)", &ProcessEpochSegmentedBench(fork){}, .{ .hooks = hooks });
+    try bench.addParam("epoch(segmented)", &ProcessEpochSegmentedBench(fork){ .io = io }, .{ .hooks = hooks });
 
-    try bench.run(stdout);
+    try bench.run(io, std.Io.File.stdout());
     try printSegmentStats(stdout);
+    try stdout.flush();
 }

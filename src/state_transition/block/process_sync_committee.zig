@@ -37,12 +37,12 @@ pub fn processSyncAggregate(
 
     // different from the spec but not sure how to get through signature verification for default/empty SyncAggregate in the spec test
     if (verify_signatures) {
-        const participant_indices = try sync_committee_bits.intersectValues(
+        var participant_indices = try sync_committee_bits.intersectValues(
             ValidatorIndex,
             allocator,
             committee_indices,
         );
-        defer participant_indices.deinit();
+        defer participant_indices.deinit(allocator);
 
         // When there's no participation we cons ider the signature valid and just ignore it
         if (participant_indices.items.len > 0) {

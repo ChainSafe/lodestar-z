@@ -31,7 +31,7 @@ const config = @import("config");
 
 const SerializeAttestation = struct {
     attestation: *Attestation.Type,
-    pub fn run(self: SerializeAttestation, allocator: std.mem.Allocator) void {
+    pub fn run(self: *SerializeAttestation, allocator: std.mem.Allocator) void {
         const out = allocator.alloc(u8, Attestation.serializedSize(self.attestation)) catch unreachable;
         _ = Attestation.serializeIntoBytes(self.attestation, out);
     }
@@ -40,7 +40,7 @@ const SerializeAttestation = struct {
 const SerializeAttestationNoAlloc = struct {
     attestation: *Attestation.Type,
     out: []u8,
-    pub fn run(self: SerializeAttestationNoAlloc, allocator: std.mem.Allocator) void {
+    pub fn run(self: *SerializeAttestationNoAlloc, allocator: std.mem.Allocator) void {
         _ = allocator;
         _ = Attestation.serializeIntoBytes(self.attestation, self.out);
     }
@@ -48,7 +48,7 @@ const SerializeAttestationNoAlloc = struct {
 
 const DeserializeAttestation = struct {
     bytes: []const u8,
-    pub fn run(self: DeserializeAttestation, allocator: std.mem.Allocator) void {
+    pub fn run(self: *DeserializeAttestation, allocator: std.mem.Allocator) void {
         const out = allocator.create(Attestation.Type) catch unreachable;
         out.* = Attestation.default_value;
         Attestation.deserializeFromBytes(allocator, self.bytes, out) catch unreachable;
@@ -58,14 +58,14 @@ const DeserializeAttestation = struct {
 const DeserializeAttestationNoAlloc = struct {
     bytes: []const u8,
     out: *Attestation.Type,
-    pub fn run(self: DeserializeAttestationNoAlloc, allocator: std.mem.Allocator) void {
+    pub fn run(self: *DeserializeAttestationNoAlloc, allocator: std.mem.Allocator) void {
         Attestation.deserializeFromBytes(allocator, self.bytes, self.out) catch unreachable;
     }
 };
 
 const ValidateAttestation = struct {
     bytes: []const u8,
-    pub fn run(self: ValidateAttestation, allocator: std.mem.Allocator) void {
+    pub fn run(self: *ValidateAttestation, allocator: std.mem.Allocator) void {
         _ = allocator;
         Attestation.serialized.validate(self.bytes) catch unreachable;
     }
@@ -73,7 +73,7 @@ const ValidateAttestation = struct {
 
 const HashAttestation = struct {
     attestation: *Attestation.Type,
-    pub fn run(self: HashAttestation, allocator: std.mem.Allocator) void {
+    pub fn run(self: *HashAttestation, allocator: std.mem.Allocator) void {
         var scratch = ssz.Hasher(Attestation).init(allocator) catch unreachable;
         var out: [32]u8 = undefined;
         ssz.Hasher(Attestation).hash(&scratch, self.attestation, &out) catch unreachable;
@@ -83,7 +83,7 @@ const HashAttestation = struct {
 const HashAttestationNoAlloc = struct {
     attestation: *Attestation.Type,
     scratch: *ssz.HasherData,
-    pub fn run(self: HashAttestationNoAlloc, allocator: std.mem.Allocator) void {
+    pub fn run(self: *HashAttestationNoAlloc, allocator: std.mem.Allocator) void {
         _ = allocator;
         var out: [32]u8 = undefined;
         ssz.Hasher(Attestation).hash(self.scratch, self.attestation, &out) catch unreachable;
@@ -92,7 +92,7 @@ const HashAttestationNoAlloc = struct {
 
 const HashAttestationOneshot = struct {
     attestation: *Attestation.Type,
-    pub fn run(self: HashAttestationOneshot, allocator: std.mem.Allocator) void {
+    pub fn run(self: *HashAttestationOneshot, allocator: std.mem.Allocator) void {
         var out: [32]u8 = undefined;
         Attestation.hashTreeRoot(allocator, self.attestation, &out) catch unreachable;
     }
@@ -100,7 +100,7 @@ const HashAttestationOneshot = struct {
 
 const HashAttestationSerialized = struct {
     bytes: []const u8,
-    pub fn run(self: HashAttestationSerialized, allocator: std.mem.Allocator) void {
+    pub fn run(self: *HashAttestationSerialized, allocator: std.mem.Allocator) void {
         var out: [32]u8 = undefined;
         Attestation.serialized.hashTreeRoot(allocator, self.bytes, &out) catch unreachable;
     }
@@ -109,14 +109,14 @@ const HashAttestationSerialized = struct {
 const EqualsAttestation = struct {
     a: *Attestation.Type,
     b: *Attestation.Type,
-    pub fn run(self: EqualsAttestation, _: std.mem.Allocator) void {
+    pub fn run(self: *EqualsAttestation, _: std.mem.Allocator) void {
         _ = Attestation.equals(self.a, self.b);
     }
 };
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
     const allocator = std.heap.page_allocator;
-    const stdout = std.io.getStdOut().writer();
+    const io = init.io;
     var bench = zbench.Benchmark.init(allocator, .{});
     defer bench.deinit();
 
@@ -126,7 +126,7 @@ pub fn main() !void {
     );
     defer allocator.free(era_path);
 
-    var era_reader = try era.Reader.open(allocator, config.mainnet.config, era_path);
+    var era_reader = try era.Reader.open(allocator, io, config.mainnet.config, era_path);
     defer era_reader.close(allocator);
 
     const block_slot = try era.era.computeStartBlockSlotFromEraNumber(era_reader.era_number) + 1;
@@ -177,5 +177,5 @@ pub fn main() !void {
     const equals_attestation = EqualsAttestation{ .a = attestation, .b = attestation };
     try bench.addParam("equals attestation", &equals_attestation, .{});
 
-    try bench.run(stdout);
+    try bench.run(io, std.Io.File.stdout());
 }

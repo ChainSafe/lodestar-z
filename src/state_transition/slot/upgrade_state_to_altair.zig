@@ -109,8 +109,8 @@ fn translateParticipation(
         const data = &attestation.data;
         const attestation_flag = try getAttestationParticipationStatus(.phase0, data, attestation.inclusion_delay, epoch_cache.epoch, root_cache);
         const committee_indices = try epoch_cache.getBeaconCommittee(data.slot, data.index);
-        const attesting_indices = try attestation.aggregation_bits.intersectValues(ValidatorIndex, allocator, committee_indices);
-        defer attesting_indices.deinit();
+        var attesting_indices = try attestation.aggregation_bits.intersectValues(ValidatorIndex, allocator, committee_indices);
+        defer attesting_indices.deinit(allocator);
         for (attesting_indices.items) |validator_index| {
             epoch_participation.items[validator_index] |= attestation_flag;
         }

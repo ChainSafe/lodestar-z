@@ -32,7 +32,7 @@ pub fn getEffectiveBalanceIncrementsZeroInactive(allocator: Allocator, cached_st
     const effective_balance_increments = cached_state.epoch_cache.getEffectiveBalanceIncrements();
     // Slice up to `validatorCount` since it won't be mutated, nor accessed beyond `validatorCount`
     var effective_balance_increments_zero_inactive = try EffectiveBalanceIncrements.initCapacity(allocator, validator_count);
-    try effective_balance_increments_zero_inactive.appendSlice(effective_balance_increments.items[0..validator_count]);
+    effective_balance_increments_zero_inactive.appendSliceAssumeCapacity(effective_balance_increments.items[0..validator_count]);
 
     var j: usize = 0;
     for (validators, 0..) |validator, i| {

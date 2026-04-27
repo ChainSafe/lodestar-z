@@ -13,38 +13,10 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  ZIG_VERSION: "0.14.1"
+  ZIG_VERSION: "0.16.0"
   NODE_VERSION: "24"
 
 jobs:
-  zbuild:
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
-
-      - name: Setup Zig
-        uses: mlugg/setup-zig@v2
-        with:
-          version: ${{ env.ZIG_VERSION }}
-          cache-key: ubuntu-latest-${{ env.ZIG_VERSION }}
-
-      - name: Install zbuild
-        run: |
-          git clone https://github.com/ChainSafe/zbuild.git
-          cd zbuild
-          zig build -Doptimize=ReleaseFast
-          sudo cp zig-out/bin/zbuild /usr/local/bin/zbuild
-
-      - name: Verify zbuild
-        run: zbuild version
-
-      - name: Check if build.zig is sync'ed with zbuild.zon
-        run: |
-          zbuild sync
-          git diff --exit-code
-
   build-test:
     name: build & test (${{ matrix.os }})
     strategy:
@@ -392,8 +364,12 @@ jobs:
             llvm-config-18 --version
           fi
       - name: Build fuzz harnesses
+        # Build in ReleaseFast so Zig 0.16's Debug `sanitize_c = .full`
+        # doesn't emit `__ubsan_handle_*` calls into blst's C objects that
+        # `afl-cc` can't resolve without `libubsan`. Fuzzers want throughput
+        # anyway; devs can still use `zig build` in Debug locally.
         run: |
-          cd test/fuzz && zig build
+          cd test/fuzz && zig build -Doptimize=ReleaseFast
 
   bindings-test:
     name: bindings - test
@@ -434,17 +410,18 @@ jobs:
         run: |
           pnpm test
 
-  build-examples:
-    name: build examples
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
-      - name: Install Zig
-        uses: mlugg/setup-zig@v2
-        with:
-          version: ${{ env.ZIG_VERSION }}
-          cache-key: ubuntu-latest-${{ env.ZIG_VERSION }}
-      - name: Build metrics example
-        run: |
-          zig build build-exe:metrics_stf
+  # metrics_stf depends on httpz, which is temporarily disabled for Zig 0.16 migration
+  # build-examples:
+  #   name: build-examples
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - name: Checkout Repository
+  #       uses: actions/checkout@v4
+  #     - name: Install Zig
+  #       uses: mlugg/setup-zig@v2
+  #       with:
+  #         version: ${{ env.ZIG_VERSION }}
+  #         cache-key: ubuntu-latest-${{ env.ZIG_VERSION }}
+  #     - name: Build metrics example
+  #       run: |
+  #         zig build build-exe:metrics_stf

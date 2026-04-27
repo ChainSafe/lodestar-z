@@ -65,18 +65,19 @@ fn getMetrics(_: *MetricsHandler, _: *httpz.Request, res: *httpz.Response) !void
     try state_transition.metrics.write(writer);
 }
 
-fn eraReader(allocator: std.mem.Allocator, era_path: []const u8) !era.Reader {
+fn eraReader(allocator: std.mem.Allocator, io: std.Io, era_path: []const u8) !era.Reader {
     std.debug.print("Reading era file at {s}\n", .{era_path});
-    return try era.Reader.open(allocator, c.mainnet.config, era_path);
+    return try era.Reader.open(allocator, io, c.mainnet.config, era_path);
 }
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+pub fn main(init: std.process.Init) !void {
+    var gpa: std.heap.DebugAllocator(.{}) = .{ .backing_allocator = std.heap.smp_allocator };
     const allocator = gpa.allocator();
+    const io = init.io;
 
     _ = try std.Thread.spawn(.{}, serveMetrics, .{ allocator, 8008 });
 
-    try state_transition.metrics.init(allocator, .{});
+    try state_transition.metrics.init(allocator, io, .{});
     defer state_transition.metrics.state_transition.deinit();
 
     const era_path_state = try std.fs.path.join(
@@ -90,9 +91,9 @@ pub fn main() !void {
     );
     defer allocator.free(era_path_blocks);
 
-    var reader_state = try eraReader(allocator, era_path_state);
+    var reader_state = try eraReader(allocator, io, era_path_state);
     defer reader_state.close(allocator);
-    var reader_blocks = try eraReader(allocator, era_path_blocks);
+    var reader_blocks = try eraReader(allocator, io, era_path_blocks);
     defer reader_blocks.close(allocator);
 
     std.debug.print("Reading state\n", .{});
@@ -102,10 +103,10 @@ pub fn main() !void {
     const blocks_index = reader_blocks.group_indices[0].blocks_index orelse return error.NoBlockIndex;
     const index_pubkey_cache = try allocator.create(Index2PubkeyCache);
     errdefer {
-        index_pubkey_cache.deinit();
+        index_pubkey_cache.deinit(allocator);
         allocator.destroy(index_pubkey_cache);
     }
-    index_pubkey_cache.* = Index2PubkeyCache.init(allocator);
+    index_pubkey_cache.* = Index2PubkeyCache.empty;
     var pubkey_index_map = PubkeyIndexMap.init(allocator);
     errdefer pubkey_index_map.deinit();
 
@@ -142,6 +143,7 @@ pub fn main() !void {
 
         const next = try state_transition.stateTransition(
             allocator,
+            io,
             cached_state,
             block,
             .{
