@@ -1,6 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
-const js = @import("zapi").js;
+const js = @import("zapi:zapi").js;
 const state_transition = @import("state_transition");
 
 var gpa: std.heap.DebugAllocator(.{}) = .init;
@@ -13,10 +13,11 @@ var initialized: bool = false;
 
 /// JS: metrics.scrapeMetrics() → string
 pub fn scrapeMetrics() !js.String {
-    var buf = std.ArrayList(u8).init(allocator);
-    defer buf.deinit();
-    try state_transition.metrics.write(buf.writer());
-    return js.String.from(buf.items);
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    try state_transition.metrics.write(&aw.writer);
+    var list = aw.toArrayList();
+    defer list.deinit(allocator);
+    return js.String.from(list.items);
 }
 
 pub fn deinit() void {

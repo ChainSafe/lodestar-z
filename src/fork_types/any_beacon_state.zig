@@ -133,7 +133,7 @@ pub const AnyBeaconState = union(ForkSeq) {
     pub fn format(
         self: AnyBeaconState,
         comptime fmt: []const u8,
-        options: std.fmt.FormatOptions,
+        options: std.fmt.Options,
         writer: anytype,
     ) !void {
         _ = fmt;
@@ -608,23 +608,23 @@ pub const AnyBeaconState = union(ForkSeq) {
         return switch (self.*) {
             .phase0, .altair => error.InvalidAtFork,
             .bellatrix => |state| {
-                out.* = .{ .bellatrix = undefined };
+                out.* = .{ .bellatrix = ct.bellatrix.ExecutionPayloadHeader.default_value };
                 try state.getValue(allocator, "latest_execution_payload_header", &out.bellatrix);
             },
             .capella => |state| {
-                out.* = .{ .capella = undefined };
+                out.* = .{ .capella = ct.capella.ExecutionPayloadHeader.default_value };
                 try state.getValue(allocator, "latest_execution_payload_header", &out.capella);
             },
             .deneb => |state| {
-                out.* = .{ .deneb = undefined };
+                out.* = .{ .deneb = ct.deneb.ExecutionPayloadHeader.default_value };
                 try state.getValue(allocator, "latest_execution_payload_header", &out.deneb);
             },
             .electra => |state| {
-                out.* = .{ .deneb = undefined };
+                out.* = .{ .deneb = ct.deneb.ExecutionPayloadHeader.default_value };
                 try state.getValue(allocator, "latest_execution_payload_header", &out.deneb);
             },
             .fulu => |state| {
-                out.* = .{ .deneb = undefined };
+                out.* = .{ .deneb = ct.deneb.ExecutionPayloadHeader.default_value };
                 try state.getValue(allocator, "latest_execution_payload_header", &out.deneb);
             },
         };

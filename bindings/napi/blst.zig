@@ -10,11 +10,12 @@
 //! rely on the native `thread_pool`. In lodestar, this is called from a Node.js
 //! worker thread (BLS thread pool), not the main thread.
 const std = @import("std");
-const napi = @import("zapi").napi;
+const napi = @import("zapi:zapi").napi;
 const bls = @import("bls");
 const builtin = @import("builtin");
 const getter = @import("napi_property_descriptor.zig").getter;
 const method = @import("napi_property_descriptor.zig").method;
+const napi_io = @import("./io.zig");
 
 const PublicKey = bls.PublicKey;
 const Signature = bls.Signature;
@@ -31,7 +32,7 @@ var thread_pool: ?*ThreadPool = null;
 
 pub fn initThreadPool(n_workers: u16) !void {
     if (thread_pool != null) return error.PoolExists;
-    thread_pool = try ThreadPool.init(std.heap.page_allocator, .{ .n_workers = n_workers });
+    thread_pool = try ThreadPool.init(std.heap.page_allocator, napi_io.get(), .{ .n_workers = n_workers });
 }
 
 /// Closes the `ThreadPool` used for blst operations.
@@ -44,7 +45,7 @@ pub fn initThreadPool(n_workers: u16) !void {
 /// Same goes for any other long-lived processes.
 pub fn deinitThreadPool() void {
     if (thread_pool) |p| {
-        p.deinit();
+        p.deinit(napi_io.get());
         thread_pool = null;
     }
 }
@@ -74,7 +75,7 @@ const InstanceData = struct {
         return self;
     }
 
-    fn finalize(env: napi.c.napi_env, data: ?*anyopaque, _: ?*anyopaque) callconv(.C) void {
+    fn finalize(env: napi.c.napi_env, data: ?*anyopaque, _: ?*anyopaque) callconv(.c) void {
         const self: *InstanceData = @ptrCast(@alignCast(data orelse return));
         self.clearRefs(env);
         allocator.destroy(self);
@@ -240,14 +241,14 @@ pub fn PublicKey_toHex(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
     if (compress) {
         const bytes = pk.compress();
 
-        const hex = try std.fmt.allocPrint(allocator, "0x{x}", .{std.fmt.fmtSliceHexLower(&bytes)});
+        const hex = try std.fmt.allocPrint(allocator, "0x{x}", .{bytes});
         defer allocator.free(hex);
 
         return try env.createStringUtf8(hex);
     } else {
         const bytes = pk.serialize();
 
-        const hex = try std.fmt.allocPrint(allocator, "0x{x}", .{std.fmt.fmtSliceHexLower(&bytes)});
+        const hex = try std.fmt.allocPrint(allocator, "0x{x}", .{bytes});
         defer allocator.free(hex);
 
         return try env.createStringUtf8(hex);
@@ -357,14 +358,14 @@ pub fn Signature_toHex(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
     if (compress) {
         const bytes = sig.compress();
 
-        const hex = try std.fmt.allocPrint(allocator, "0x{x}", .{std.fmt.fmtSliceHexLower(&bytes)});
+        const hex = try std.fmt.allocPrint(allocator, "0x{x}", .{bytes});
         defer allocator.free(hex);
 
         return try env.createStringUtf8(hex);
     } else {
         const bytes = sig.serialize();
 
-        const hex = try std.fmt.allocPrint(allocator, "0x{x}", .{std.fmt.fmtSliceHexLower(&bytes)});
+        const hex = try std.fmt.allocPrint(allocator, "0x{x}", .{bytes});
         defer allocator.free(hex);
 
         return try env.createStringUtf8(hex);
@@ -426,7 +427,7 @@ pub fn SecretKey_toHex(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
     const sk = try env.unwrap(SecretKey, cb.this());
     const bytes = sk.serialize();
 
-    const hex = try std.fmt.allocPrint(allocator, "0x{x}", .{std.fmt.fmtSliceHexLower(&bytes)});
+    const hex = try std.fmt.allocPrint(allocator, "0x{x}", .{bytes});
     defer allocator.free(hex);
 
     return try env.createStringUtf8(hex);
@@ -605,7 +606,7 @@ pub fn blst_aggregateVerify(
     }
 
     const pool = thread_pool orelse @panic("ThreadPool not initialized; call initThreadPool first");
-    const result = pool.aggregateVerify(sig, sig_groupcheck, msgs, DST, pk_ptrs, pks_validate) catch {
+    const result = pool.aggregateVerify(napi_io.get(), sig, sig_groupcheck, msgs, DST, pk_ptrs, pks_validate) catch {
         return try env.getBoolean(false);
     };
 
@@ -691,7 +692,10 @@ pub fn blst_verifyMultipleAggregateSignatures(env: napi.Env, cb: napi.CallbackIn
     const rands = try allocator.alloc([32]u8, n_elems);
     defer allocator.free(rands);
 
-    var prng = std.Random.DefaultPrng.init(std.crypto.random.int(u64));
+    var seed_bytes2: [8]u8 = undefined;
+    const io2 = napi_io.get();
+    io2.random(&seed_bytes2);
+    var prng = std.Random.DefaultPrng.init(std.mem.readInt(u64, &seed_bytes2, .little));
     const rand = prng.random();
 
     for (0..n_elems) |i| {
@@ -718,6 +722,7 @@ pub fn blst_verifyMultipleAggregateSignatures(env: napi.Env, cb: napi.CallbackIn
 
     const pool = thread_pool orelse @panic("ThreadPool not initialized; call initThreadPool first");
     const result = pool.verifyMultipleAggregateSignatures(
+        napi_io.get(),
         n_elems,
         msgs,
         DST,
@@ -873,7 +878,10 @@ pub fn blst_aggregateWithRandomness(env: napi.Env, cb: napi.CallbackInfo(1)) !na
     var sig_ptrs: [MAX_AGGREGATE_PER_JOB]*const Signature = undefined;
 
     // Generate 8-byte scalars (64 bits each) using a fast PRNG seeded from OS entropy
-    var prng = std.Random.DefaultPrng.init(std.crypto.random.int(u64));
+    var seed_bytes: [8]u8 = undefined;
+    const io = napi_io.get();
+    io.random(&seed_bytes);
+    var prng = std.Random.DefaultPrng.init(std.mem.readInt(u64, &seed_bytes, .little));
     const rand = prng.random();
     var scalars: [8 * MAX_AGGREGATE_PER_JOB]u8 = undefined;
     var sca_ptrs: [MAX_AGGREGATE_PER_JOB]*const u8 = undefined;

@@ -1,11 +1,12 @@
 const std = @import("std");
-const zapi = @import("zapi");
+const zapi = @import("zapi:zapi");
 const js = zapi.js;
 const napi = zapi.napi;
 const builtin = @import("builtin");
 const fork_types = @import("fork_types");
 const st = @import("state_transition");
 const CachedBeaconState = st.CachedBeaconState;
+const napi_io = @import("./io.zig");
 const AnySignedBeaconBlock = fork_types.AnySignedBeaconBlock;
 
 var gpa: std.heap.DebugAllocator(.{}) = .init;
@@ -69,6 +70,7 @@ pub fn stateTransition(
 
     const post_state = try st.stateTransition(
         allocator,
+        napi_io.get(),
         cached_state,
         signed_block,
         try parseOptions(options),

@@ -1,5 +1,5 @@
 const std = @import("std");
-const napi = @import("zapi").napi;
+const napi = @import("zapi:zapi").napi;
 
 /// Extracts a function name, without prefix, from a napi binding function.
 ///

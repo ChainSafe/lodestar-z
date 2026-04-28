@@ -1,4 +1,4 @@
-const js = @import("zapi").js;
+const js = @import("zapi:zapi").js;
 const stInnerShuffleList = @import("state_transition").shuffle.innerShuffleList;
 
 pub fn innerShuffleList(list: js.Uint32Array, seed: js.Uint8Array, rounds: js.Number, forwards: js.Boolean) !void {

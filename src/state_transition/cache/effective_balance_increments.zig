@@ -14,7 +14,7 @@ pub const EffectiveBalanceIncrementsRc = RefCount(EffectiveBalanceIncrements);
 pub fn effectiveBalanceIncrementsInit(allocator: Allocator, validator_count: usize) !EffectiveBalanceIncrements {
     const capacity = 1024 * @divFloor(validator_count + 1024, 1024);
     var increments = try EffectiveBalanceIncrements.initCapacity(allocator, capacity);
-    try increments.resize(validator_count);
+    try increments.resize(allocator, validator_count);
     @memset(increments.items[0..validator_count], 0);
     return increments;
 }
@@ -22,7 +22,7 @@ pub fn effectiveBalanceIncrementsInit(allocator: Allocator, validator_count: usi
 test "effectiveBalanceIncrementsInit basic allocation" {
     const allocator = std.testing.allocator;
     var increments = try effectiveBalanceIncrementsInit(allocator, 100);
-    defer increments.deinit();
+    defer increments.deinit(allocator);
 
     try std.testing.expectEqual(@as(usize, 100), increments.items.len);
     // Capacity should be rounded up to next 1024 boundary
@@ -39,7 +39,7 @@ test "effectiveBalanceIncrementsInit capacity rounding" {
     // Exactly 1024 validators
     {
         var increments = try effectiveBalanceIncrementsInit(allocator, 1024);
-        defer increments.deinit();
+        defer increments.deinit(allocator);
         try std.testing.expectEqual(@as(usize, 1024), increments.items.len);
         try std.testing.expectEqual(@as(usize, 2048), increments.capacity);
     }
@@ -47,7 +47,7 @@ test "effectiveBalanceIncrementsInit capacity rounding" {
     // Just over 1024 boundary
     {
         var increments = try effectiveBalanceIncrementsInit(allocator, 1025);
-        defer increments.deinit();
+        defer increments.deinit(allocator);
         try std.testing.expectEqual(@as(usize, 1025), increments.items.len);
         try std.testing.expectEqual(@as(usize, 2048), increments.capacity);
     }
@@ -55,7 +55,7 @@ test "effectiveBalanceIncrementsInit capacity rounding" {
     // Zero validators
     {
         var increments = try effectiveBalanceIncrementsInit(allocator, 0);
-        defer increments.deinit();
+        defer increments.deinit(allocator);
         try std.testing.expectEqual(@as(usize, 0), increments.items.len);
     }
 }

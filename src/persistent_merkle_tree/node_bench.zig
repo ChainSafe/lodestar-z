@@ -33,7 +33,7 @@ const GetNodeRandomly = struct {
         };
     }
 
-    pub fn run(self: GetNodeRandomly, allocator: std.mem.Allocator) void {
+    pub fn run(self: *GetNodeRandomly, allocator: std.mem.Allocator) void {
         _ = allocator;
         for (0..self.num_iterations) |_| {
             const index = self.random.uintLessThanBiased(usize, self.length);
@@ -69,7 +69,7 @@ const SetNodeRandomly = struct {
         };
     }
 
-    pub fn run(self: SetNodeRandomly, allocator: std.mem.Allocator) void {
+    pub fn run(self: *SetNodeRandomly, allocator: std.mem.Allocator) void {
         _ = allocator;
         for (0..self.num_iterations) |_| {
             const index = self.random.uintLessThanBiased(usize, self.length);
@@ -82,8 +82,8 @@ const SetNodeRandomly = struct {
     }
 };
 
-pub fn main() !void {
-    const stdout = std.io.getStdOut().writer();
+pub fn main(init: std.process.Init) !void {
+    const io = init.io;
     const allocator = global_allocator;
     var bench = zbench.Benchmark.init(allocator, .{});
     defer bench.deinit();
@@ -105,7 +105,7 @@ pub fn main() !void {
     const set_nodes_randomly = try SetNodeRandomly.init(depth, length, pct, &node_root, 0);
     try bench.addParam("set_nodes_randomly", &set_nodes_randomly, .{});
 
-    try bench.run(stdout);
+    try bench.run(io, std.Io.File.stdout());
 }
 
 fn createTree(allocator: std.mem.Allocator, depth: u6, length: usize) !Node.Id {

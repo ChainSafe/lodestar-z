@@ -1,5 +1,5 @@
 const std = @import("std");
-const zapi = @import("zapi");
+const zapi = @import("zapi:zapi");
 const js = zapi.js;
 const napi = zapi.napi;
 pub const pool = @import("./pool.zig");
@@ -12,10 +12,14 @@ const pubkeys = @import("./pubkeys.zig");
 const blst = @import("./blst.zig");
 const options = @import("bls_options");
 const BeaconStateView = @import("./BeaconStateView.zig");
+const napi_io = @import("./io.zig");
 
 fn init(old_ref_count: u32) !void {
     if (old_ref_count == 0) {
         // First environment — initialize shared state in your threadpool init.
+        try napi_io.init();
+        errdefer napi_io.deinit();
+
         var cpu_count: u64 = options.thread_count;
         if (options.thread_count == 0) {
             std.debug.print("Note: no -Dthread-count set, will use runtime CPU count minus 1: {}\n", .{cpu_count});
@@ -38,6 +42,7 @@ fn cleanup(new_ref_count: u32) void {
         pool.state.deinit();
         metrics.deinit();
         blst.deinitThreadPool();
+        napi_io.deinit();
     }
 }
 

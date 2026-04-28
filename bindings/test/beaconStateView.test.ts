@@ -53,7 +53,11 @@ describe("BeaconStateView", () => {
 
   beforeAll(async () => {
     const reader = await era.era.EraReader.open(config, getFirstEraFilePath());
-    stateBytes = await reader.readSerializedState();
+    try {
+      stateBytes = await reader.readSerializedState();
+    } finally {
+      await reader.close();
+    }
 
     // Phase 1: Build lodestar tree view and extract reference values.
     // The tree uses ~3-4GB for mainnet, so we extract what we need and free it

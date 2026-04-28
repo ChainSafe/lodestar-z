@@ -1,5 +1,5 @@
 const std = @import("std");
-const napi = @import("zapi").napi;
+const napi = @import("zapi:zapi").napi;
 const c = @import("config");
 const fork_types = @import("fork_types");
 const st = @import("state_transition");
@@ -10,6 +10,7 @@ const AnySignedBeaconBlock = fork_types.AnySignedBeaconBlock;
 const preset = @import("preset").preset;
 const ct = @import("consensus_types");
 const pool = @import("./pool.zig");
+const napi_io = @import("./io.zig");
 const config = @import("./config.zig");
 const pubkey = @import("./pubkeys.zig");
 const sszValueToNapiValue = @import("./to_napi_value.zig").sszValueToNapiValue;
@@ -23,6 +24,13 @@ var gpa: std.heap.DebugAllocator(.{}) = .init;
 const allocator = gpa.allocator();
 
 pub fn BeaconStateView_finalize(_: napi.Env, cached_state: *CachedBeaconState, _: ?*anyopaque) void {
+    // NAPI cleanup ordering is not guaranteed between env cleanup hooks and
+    // wrapped-object finalizers. The EnvCleanup hook tears down the shared
+    // Pool (pool.state.deinit) which frees the Node backing storage. If that
+    // runs before this finalizer, unref'ing nodes would access freed memory.
+    // When pool is already torn down, skip deinit; the OS reclaims per-state
+    // allocations at process exit.
+    if (!pool.state.initialized) return;
     cached_state.deinit();
     allocator.destroy(cached_state);
 }
@@ -516,7 +524,7 @@ pub fn BeaconStateView_getEffectiveBalanceIncrementsZeroInactive(env: napi.Env, 
     const cached_state = try env.unwrap(CachedBeaconState, cb.this());
 
     var result = try st.getEffectiveBalanceIncrementsZeroInactive(allocator, cached_state);
-    defer result.deinit();
+    defer result.deinit(allocator);
 
     return try numberSliceToNapiValue(env, u16, result.items, .{ .typed_array = .uint16 });
 }
@@ -837,7 +845,7 @@ pub fn BeaconStateView_createMultiProof(env: napi.Env, cb: napi.CallbackInfo(1))
 
 pub fn BeaconStateView_computeUnrealizedCheckpoints(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
     const cached_state = try env.unwrap(CachedBeaconState, cb.this());
-    const result = try st.computeUnrealizedCheckpoints(cached_state, allocator);
+    const result = try st.computeUnrealizedCheckpoints(allocator, napi_io.get(), cached_state);
 
     const obj = try env.createObject();
     try obj.setNamedProperty(
@@ -980,7 +988,7 @@ pub fn BeaconStateView_processSlots(env: napi.Env, cb: napi.CallbackInfo(2)) !na
         allocator.destroy(post_state);
     }
 
-    try st.processSlots(allocator, post_state, slot, .{});
+    try st.processSlots(allocator, napi_io.get(), post_state, slot, .{});
 
     const ctor = try cb.this().getNamedProperty("constructor");
     const new_state_value = try env.newInstance(ctor, .{});
