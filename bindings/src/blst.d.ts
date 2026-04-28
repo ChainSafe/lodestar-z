@@ -1,4 +1,8 @@
 export class PublicKey {
+  /** Size of a compressed public key in bytes (48). */
+  static readonly COMPRESS_SIZE: number;
+  /** Size of an uncompressed public key in bytes (96). */
+  static readonly SERIALIZE_SIZE: number;
   /**
    * Deserialize a public key from a byte array.
    *
@@ -40,6 +44,10 @@ export class SecretKey {
 }
 
 export class Signature {
+  /** Size of a compressed signature in bytes (96). */
+  static readonly COMPRESS_SIZE: number;
+  /** Size of an uncompressed signature in bytes (192). */
+  static readonly SERIALIZE_SIZE: number;
   /**
    * Deserialize a signature from a byte array.
    *
