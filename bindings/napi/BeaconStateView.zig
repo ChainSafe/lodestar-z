@@ -752,7 +752,7 @@ pub fn getSingleProof(self: *const Self, gindex_arg: js.Number) !js.Array {
 
     const result = try env.createArray();
     for (proof.witnesses, 0..) |witness, i| {
-      try result.setElement(@intCast(i), js.Uint8Array.from(&witness).toValue());
+        try result.setElement(@intCast(i), js.Uint8Array.from(&witness).toValue());
     }
 
     return .{ .val = result };
