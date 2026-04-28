@@ -67,7 +67,6 @@ fn ProcessWithdrawalsBench(comptime fork: ForkSeq) type {
         body: *const BeaconBlockBody(.full, fork),
 
         pub fn run(self: *@This(), allocator: std.mem.Allocator) void {
-
             var withdrawals_result = WithdrawalsResult{
                 .withdrawals = Withdrawals.initCapacity(allocator, preset.MAX_WITHDRAWALS_PER_PAYLOAD) catch unreachable,
             };
@@ -106,7 +105,6 @@ fn ProcessExecutionPayloadBench(comptime fork: ForkSeq) type {
         body: *const BeaconBlockBody(.full, fork),
 
         pub fn run(self: *@This(), allocator: std.mem.Allocator) void {
-
             const external_data = BlockExternalData{ .execution_payload_status = .valid, .data_availability_status = .available };
             state_transition.processExecutionPayload(
                 fork,
@@ -165,7 +163,6 @@ fn ProcessOperationsBench(comptime fork: ForkSeq, comptime opts: BenchOpts) type
         body: *const BeaconBlockBody(.full, fork),
 
         pub fn run(self: *@This(), allocator: std.mem.Allocator) void {
-
             state_transition.processOperations(
                 fork,
                 allocator,
@@ -186,7 +183,6 @@ fn ProcessSyncAggregateBench(comptime fork: ForkSeq, comptime opts: BenchOpts) t
         body: *const BeaconBlockBody(.full, fork),
 
         pub fn run(self: *@This(), allocator: std.mem.Allocator) void {
-
             state_transition.processSyncAggregate(
                 fork,
                 allocator,
@@ -280,7 +276,7 @@ fn ProcessBlockSegmentedBench(comptime fork: ForkSeq) type {
         pub fn run(self: *@This(), allocator: std.mem.Allocator) void {
             const io = self.io;
             const state = g_cached_state_instance.state.castToFork(fork);
-
+            const epoch_cache = g_cached_state_instance.epoch_cache;
             const block_start = time.timestampNow(io);
 
             const header_start = time.timestampNow(io);
