@@ -53,11 +53,7 @@ describe("BeaconStateView", () => {
 
   beforeAll(async () => {
     const reader = await era.era.EraReader.open(config, getFirstEraFilePath());
-    try {
-      stateBytes = await reader.readSerializedState();
-    } finally {
-      await reader.close();
-    }
+    stateBytes = await reader.readSerializedState();
 
     // Phase 1: Build lodestar tree view and extract reference values.
     // The tree uses ~3-4GB for mainnet, so we extract what we need and free it
@@ -412,13 +408,13 @@ describe("BeaconStateView", () => {
   describe("sync committee cache", () => {
     it("currentSyncCommitteeIndexed should have validatorIndices", () => {
       const indexed = state.currentSyncCommitteeIndexed;
-      expect(Array.isArray(indexed.validatorIndices)).toBe(true);
+      expect(indexed.validatorIndices).toBeInstanceOf(Uint32Array);
       expect(indexed.validatorIndices.length).toBeGreaterThan(0);
     });
 
     it("getIndexedSyncCommitteeAtEpoch should return cache", () => {
       const indexed = state.getIndexedSyncCommitteeAtEpoch(state.epoch);
-      expect(Array.isArray(indexed.validatorIndices)).toBe(true);
+      expect(indexed.validatorIndices).toBeInstanceOf(Uint32Array);
     });
 
     it("syncProposerReward should be a non-negative number", () => {
