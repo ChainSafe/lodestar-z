@@ -9,8 +9,8 @@ importers:
   .:
     dependencies:
       '@chainsafe/zapi':
-        specifier: 0.1.1
-        version: 0.1.1
+        specifier: 2.0.0
+        version: 2.0.0
     devDependencies:
       '@biomejs/biome':
         specifier: ^2.3.11
@@ -401,8 +401,8 @@ packages:
     resolution: {integrity: sha512-H8YdEoXXv2Hw17gDWGOJEya4LHlBbpChJP3jDQRfIk9hhwr0c/zbBemBRmjADowZhArL+ymkO+j5hGaYySjdpw==}
     engines: {node: '>= 18'}
 
-  '@chainsafe/zapi@0.1.1':
-    resolution: {integrity: sha512-HpjNyRaXODjXMqVTpq75jaY6TfeBk3icPWYUAbkqrQFpFfYCbPUdWPJ4FCYrejxYGUbaJGFKp8IHHEmMYp2MBw==}
+  '@chainsafe/zapi@2.0.0':
+    resolution: {integrity: sha512-5HXO76Ep4tYU5NngsBSgE5t/xMQQZnap+Q9PKDXOa1Oe3VaP0hU2+visNlaxW7RrVK1plF0cGMIamLubpNdefw==}
     hasBin: true
 
   '@colors/colors@1.5.0':
@@ -2442,7 +2442,7 @@ snapshots:
       '@chainsafe/swap-or-not-shuffle-win32-arm64-msvc': 1.2.1
       '@chainsafe/swap-or-not-shuffle-win32-x64-msvc': 1.2.1
 
-  '@chainsafe/zapi@0.1.1': {}
+  '@chainsafe/zapi@2.0.0': {}
 
   '@colors/colors@1.5.0':
     optional: true

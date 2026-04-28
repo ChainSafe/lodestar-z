@@ -35,10 +35,9 @@
             .url = "git+https://github.com/ChainSafe/zig-yaml#b74f4e8113bee6d307c4f1fd0f190767c8196fc8",
             .hash = "zig_yaml-0.1.0-C1161kFWAwDxjKAFmklKwWVDvz2mmq0Q__bDhGGjeyd3",
         },
-        // TODO: Switch to ChainSafe/zapi once #9 merges.
         .zapi = .{
-            .url = "git+https://github.com/lodekeeper-z/zapi?ref=chore/zig-master#fefb88ebf5c9bb6ea640239758d4c9d2eb0ca351",
-            .hash = "zapi-0.1.0-rIqzUfBKBABm1D8uvOCIuvsJDxWQHsiD_OevWEjmozuK",
+            .url = "git+https://github.com/chainsafe/zapi?ref=zapi-v2.0.0#f9fa8b0237352326e9f970b62588b6af01e3e384",
+            .hash = "zapi-2.0.0-rIqzUcc3BABKRuJlzpYNtiMVCOFybuVSGOLmk0KOCeel",
         },
         .zbench = .{
             .url = "git+https://github.com/hendriknielaender/zBench#b2b89c475e3ef1bb2bd71255c80478a82d3e0ca8",

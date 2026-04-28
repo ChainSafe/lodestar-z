@@ -10,7 +10,7 @@
 //! rely on the native `thread_pool`. In lodestar, this is called from a Node.js
 //! worker thread (BLS thread pool), not the main thread.
 const std = @import("std");
-const napi = @import("zapi:zapi");
+const napi = @import("zapi:zapi").napi;
 const bls = @import("bls");
 const builtin = @import("builtin");
 const getter = @import("napi_property_descriptor.zig").getter;

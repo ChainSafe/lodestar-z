@@ -1,5 +1,5 @@
 const std = @import("std");
-const napi = @import("zapi:zapi");
+const napi = @import("zapi:zapi").napi;
 const bls = @import("bls");
 const blst_bindings = @import("./blst.zig");
 const PubkeyIndexMap = @import("state_transition").PubkeyIndexMap;

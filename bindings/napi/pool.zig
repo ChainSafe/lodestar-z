@@ -1,5 +1,5 @@
 const std = @import("std");
-const napi = @import("zapi:zapi");
+const js = @import("zapi:zapi").js;
 const Node = @import("persistent_merkle_tree").Node;
 
 /// Pool uses page allocator for internal allocations.
@@ -27,27 +27,16 @@ pub const State = struct {
 
 pub var state: State = .{};
 
-pub fn Pool_ensureCapacity(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
+/// JS: pool.ensureCapacity(newSize)
+pub fn ensureCapacity(new_size: js.Number) !void {
     if (!state.initialized) {
         return error.PoolNotInitialized;
     }
 
+    const requested = new_size.assertU32();
     const old_size = state.pool.nodes.capacity;
-    const new_size = try cb.arg(0).getValueUint32();
-    if (new_size <= old_size) {
-        return env.getUndefined();
+    if (requested <= old_size) {
+        return;
     }
-    try state.pool.preheat(@intCast(new_size - state.pool.nodes.capacity));
-    return env.getUndefined();
-}
-
-pub fn register(env: napi.Env, exports: napi.Value) !void {
-    const pool_obj = try env.createObject();
-    try pool_obj.setNamedProperty("ensureCapacity", try env.createFunction(
-        "ensureCapacity",
-        1,
-        Pool_ensureCapacity,
-        null,
-    ));
-    try exports.setNamedProperty("pool", pool_obj);
+    try state.pool.preheat(@intCast(requested - state.pool.nodes.capacity));
 }
