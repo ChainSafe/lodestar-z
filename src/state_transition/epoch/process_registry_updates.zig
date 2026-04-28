@@ -3,7 +3,7 @@ const BeaconConfig = @import("config").BeaconConfig;
 const BeaconState = @import("fork_types").BeaconState;
 const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
 const EpochTransitionCache = @import("../cache/epoch_transition_cache.zig").EpochTransitionCache;
-const computeActivationExitEpoch = @import("../utils/epoch.zig").computeActivationExitEpoch;
+const computeActivationExitEpoch = @import("../epoch.zig").computeActivationExitEpoch;
 const initiateValidatorExit = @import("../block/initiate_validator_exit.zig").initiateValidatorExit;
 const Node = @import("persistent_merkle_tree").Node;
 

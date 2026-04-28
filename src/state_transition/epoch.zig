@@ -7,9 +7,9 @@ const SyncPeriod = types.primitive.SyncPeriod.Type;
 const Gwei = types.primitive.Gwei.Type;
 const ForkSeq = @import("config").ForkSeq;
 const BeaconState = @import("fork_types").BeaconState;
-const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
-const getActivationExitChurnLimit = @import("../utils/validator.zig").getActivationExitChurnLimit;
-const getConsolidationChurnLimit = @import("../utils/validator.zig").getConsolidationChurnLimit;
+const EpochCache = @import("./cache/epoch_cache.zig").EpochCache;
+const getActivationExitChurnLimit = @import("./utils/validator.zig").getActivationExitChurnLimit;
+const getConsolidationChurnLimit = @import("./utils/validator.zig").getConsolidationChurnLimit;
 
 pub fn computeEpochAtSlot(slot: Slot) Epoch {
     return @divFloor(slot, preset.SLOTS_PER_EPOCH);

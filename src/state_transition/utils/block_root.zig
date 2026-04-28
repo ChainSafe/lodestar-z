@@ -5,7 +5,7 @@ const Epoch = types.primitive.Epoch.Type;
 const ForkSeq = @import("config").ForkSeq;
 const BeaconState = @import("fork_types").BeaconState;
 const SLOTS_PER_HISTORICAL_ROOT = preset.SLOTS_PER_HISTORICAL_ROOT;
-const computeStartSlotAtEpoch = @import("./epoch.zig").computeStartSlotAtEpoch;
+const computeStartSlotAtEpoch = @import("../epoch.zig").computeStartSlotAtEpoch;
 
 pub fn getBlockRootAtSlot(comptime fork: ForkSeq, state: *BeaconState(fork), slot: Slot) !*const [32]u8 {
     const state_slot = try state.slot();
