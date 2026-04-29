@@ -67,6 +67,9 @@ pub const CheckpointWithBalance = fork_choice.CheckpointWithBalance;
 pub const CheckpointWithTotalBalance = fork_choice.CheckpointWithTotalBalance;
 pub const onBlockFromProto = fork_choice.onBlockFromProto;
 
+pub const fast_confirmation = @import("fast_confirmation/root.zig");
+pub const FastConfirmation = fast_confirmation.FastConfirmation;
+
 test {
     testing.refAllDecls(@This());
 }
