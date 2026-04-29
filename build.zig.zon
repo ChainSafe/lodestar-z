@@ -188,7 +188,7 @@
         },
         .fork_choice = .{
             .root_source_file = "src/fork_choice/root.zig",
-            .imports = .{ .consensus_types, .config, .preset, .state_transition, .fork_types, .hex, .constants },
+            .imports = .{ .consensus_types, .config, .preset, .state_transition, .fork_types, .hex, .constants, .persistent_merkle_tree },
         },
     },
     .executables = .{
