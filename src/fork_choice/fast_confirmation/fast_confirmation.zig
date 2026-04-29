@@ -1659,14 +1659,26 @@ fn getLatestConfirmed(
     }
 
     // ---- Step 2: restart from observed-justified at epoch start when conditions match ----
+    // Spec lines 989-1012:
+    //   1) it is the start of the current epoch,
+    //   2) epoch of fcr_store.current_epoch_observed_justified_checkpoint.root
+    //      equals the previous epoch (NB: spec computes this from the BLOCK's
+    //      slot, not the checkpoint's `epoch` field — these can differ when
+    //      the checkpoint root is an empty-slot block from an earlier epoch),
+    //   3) fcr_store.current_epoch_observed_justified_checkpoint equals
+    //      `store.unrealized_justifications[head]`,
+    //   4) confirmed block is older than the block of
+    //      fcr_store.current_epoch_observed_justified_checkpoint.
     const observed = self.current_epoch_observed_justified_checkpoint;
-    if (is_epoch_start and observed.epoch + 1 == current_epoch) {
+    if (is_epoch_start) {
         // Slot of the observed-justified block; if unknown we cannot restart.
         const observed_slot_opt: ?Slot = getBlockSlot(proto_array, observed.root) catch |err| switch (err) {
             error.StateMissing => null,
             else => return err,
         };
         if (observed_slot_opt) |observed_slot| {
+            // Per spec: gate on the BLOCK's slot's epoch (not the checkpoint's
+            // `epoch` field).
             const observed_block_epoch = computeEpochAtSlot(observed_slot);
             const observed_epoch_ok = observed_block_epoch + 1 == current_epoch;
             const head_uj_match = observed.eql(head_unrealized_justified.*);
