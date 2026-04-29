@@ -584,9 +584,9 @@ describe("BeaconStateView", () => {
       expect(newState.slot).toBe(originalSlot + 1);
     });
 
-    it("processSlots with transferCache option should work", () => {
+    it("processSlots with dontTransferCache: false should still transfer cache", () => {
       const originalSlot = state.slot;
-      const newState = state.processSlots(originalSlot + 1, {transferCache: true});
+      const newState = state.processSlots(originalSlot + 1, {dontTransferCache: false});
 
       expect(newState.slot).toBe(originalSlot + 1);
       expect(newState.createdWithTransferCache).toBe(true);
