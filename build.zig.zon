@@ -371,6 +371,7 @@
                     .consensus_types,
                     .config,
                     .fork_types,
+                    .fork_choice,
                     .preset,
                     .snappy,
                     .state_transition,

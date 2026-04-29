@@ -14,30 +14,32 @@ const supported_forks = [_]ForkSeq{
 };
 
 const supported_test_runners = [_]RunnerKind{
-    .merkle_proof,
-    .operations,
-    .rewards,
-    .sanity,
     .epoch_processing,
+    .fast_confirmation,
+    .finality,
     .fork,
     .fork_choice,
-    .transition,
+    .merkle_proof,
+    .operations,
     .random,
-    .finality,
+    .rewards,
+    .sanity,
+    .transition,
 };
 
 fn TestWriter(comptime kind: RunnerKind) type {
     return switch (kind) {
-        .merkle_proof => @import("./writer/merkle_proof.zig"),
-        .operations => @import("./writer/operations.zig"),
-        .rewards => @import("./writer/rewards.zig"),
-        .sanity => @import("./writer/sanity.zig"),
         .epoch_processing => @import("./writer/epoch_processing.zig"),
+        .fast_confirmation => @import("./writer/fast_confirmation.zig"),
+        .finality => @import("./writer/finality.zig"),
         .fork => @import("./writer/fork.zig"),
         .fork_choice => @import("./writer/fork_choice.zig"),
-        .transition => @import("./writer/transition.zig"),
+        .merkle_proof => @import("./writer/merkle_proof.zig"),
+        .operations => @import("./writer/operations.zig"),
         .random => @import("./writer/random.zig"),
-        .finality => @import("./writer/finality.zig"),
+        .rewards => @import("./writer/rewards.zig"),
+        .sanity => @import("./writer/sanity.zig"),
+        .transition => @import("./writer/transition.zig"),
         else => @compileError("Unsupported test runner"),
     };
 }
