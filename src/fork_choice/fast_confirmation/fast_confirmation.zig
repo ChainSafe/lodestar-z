@@ -152,6 +152,14 @@ pub const BalanceSourceData = struct {
     ///
     /// Short-circuit: if the cached checkpoint matches `cp` and we already have data,
     /// return without recomputing.
+    ///
+    /// **Caller invariant:** `state` MUST be the checkpoint state for `cp` —
+    /// i.e., `computeEpochAtSlot(state.slot()) == cp.epoch`. The active /
+    /// slashed predicates are evaluated at `cp.epoch`; passing a state from a
+    /// different epoch produces incorrect zeroing. The spec's
+    /// `get_balance_source` resolves the checkpoint state explicitly; Phase E
+    /// drivers must replicate that contract. Not asserted here because
+    /// `state.slot()` is errorable and called on a hot path.
     pub fn rebuild(
         self: *BalanceSourceData,
         allocator: Allocator,
@@ -1673,7 +1681,10 @@ test "FastConfirmation.getEquivocationScore — slashed validator in committee c
 }
 
 // C5: computeAdversarialWeight — saturates to zero when equivocation > max adversarial.
-test "FastConfirmation.computeAdversarialWeight — basic saturation behavior" {
+test "FastConfirmation.computeAdversarialWeight — empty equivocating set returns positive max" {
+    // Verifies the no-equivocation branch: result equals the unmodified
+    // max_adversarial_weight. Saturation-to-zero (equivocation > max_adv)
+    // requires committee-aware setup that is out of scope for this unit test.
     const allocator = testing.allocator;
 
     var pool = try Node.Pool.init(allocator, 500_000);
@@ -1692,8 +1703,6 @@ test "FastConfirmation.computeAdversarialWeight — basic saturation behavior" {
     defer eq.deinit(allocator);
 
     const slot = try test_state.cached_state.state.slot();
-    // Empty equivocating set → returns max_adversarial_weight which is non-zero
-    // for a non-empty range.
     const w = try computeAdversarialWeight(allocator, &fcr, test_state.cached_state, &bsd, &eq, slot, slot);
     // Should not exceed total active balance (sanity).
     try testing.expect(w <= getTotalActiveBalance(&bsd));
@@ -1928,7 +1937,13 @@ test "FastConfirmation.getSupportDiscount — delegates to computeEmptySlotSuppo
     try testing.expectEqual(b, a);
 }
 
-test "FastConfirmation.computeSafetyThreshold — underflow guard saturates to 0" {
+test "FastConfirmation.computeSafetyThreshold — degenerate zero inputs return zero breakdown" {
+    // Verifies the all-zero baseline: with empty balance source and empty
+    // equivocating set, every breakdown field is 0. Does NOT exercise the
+    // underflow-saturation branch (`support_discount > numerator`), which
+    // requires a chain with empty slots between parent and block plus enough
+    // parent support to overshoot adversarial+proposer+max — out of scope
+    // for this unit test.
     const allocator = testing.allocator;
     const fixture = try initLinearForkChoice(allocator);
     defer deinitForkChoiceFixture(allocator, fixture);
@@ -1944,7 +1959,7 @@ test "FastConfirmation.computeSafetyThreshold — underflow guard saturates to 0
     // Empty balance source ⇒ total_active_balance = 0 ⇒ proposer_score = 0,
     // maximum_support = 0. With empty equivocating set, adversarial = 0 and
     // discount = 0 ⇒ threshold = 0 (numerator and discount both 0; the
-    // underflow guard takes the else branch with floor(0 / 2) = 0).
+    // else branch takes floor(0 / 2) = 0).
     var bsd = BalanceSourceData.init();
     defer bsd.deinit(allocator);
 
