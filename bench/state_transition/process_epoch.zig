@@ -20,22 +20,20 @@ const Index2PubkeyCache = state_transition.Index2PubkeyCache;
 const ValidatorIndex = types.primitive.ValidatorIndex.Type;
 const slotFromStateBytes = @import("utils.zig").slotFromStateBytes;
 const loadState = @import("utils.zig").loadState;
+const BenchState = @import("utils.zig").BenchState;
 
 fn ProcessJustificationAndFinalizationBench(comptime fork: ForkSeq) type {
     return struct {
-        cached_state: *CachedBeaconState,
         epoch_transition_cache: *EpochTransitionCache,
 
         pub fn run(self: *@This(), allocator: std.mem.Allocator) void {
-            const cloned = self.cached_state.clone(allocator, .{}) catch unreachable;
-            defer {
-                cloned.deinit();
-                allocator.destroy(cloned);
-            }
+            _ = allocator;
+
             const cache = self.epoch_transition_cache;
+
             state_transition.processJustificationAndFinalization(
                 fork,
-                cloned.state.castToFork(fork),
+                BenchState.cloned_cached_state.state.castToFork(fork),
                 cache,
             ) catch unreachable;
         }
@@ -45,23 +43,17 @@ fn ProcessJustificationAndFinalizationBench(comptime fork: ForkSeq) type {
 fn ProcessBeforeProcessEpochBench(comptime fork: ForkSeq) type {
     comptime _ = fork;
     return struct {
-        cached_state: *CachedBeaconState,
         io: std.Io,
 
         pub fn run(self: *@This(), allocator: std.mem.Allocator) void {
-            const cloned = self.cached_state.clone(allocator, .{}) catch unreachable;
-            defer {
-                cloned.deinit();
-                allocator.destroy(cloned);
-            }
-            cloned.state.commit() catch unreachable;
+            BenchState.cloned_cached_state.state.commit() catch unreachable;
 
             var epoch_transition_cache = EpochTransitionCache.init(
                 allocator,
                 self.io,
-                cloned.config,
-                cloned.epoch_cache,
-                cloned.state,
+                BenchState.cloned_cached_state.config,
+                BenchState.cloned_cached_state.epoch_cache,
+                BenchState.cloned_cached_state.state,
             ) catch unreachable;
             defer epoch_transition_cache.deinit(allocator);
         }
@@ -70,22 +62,17 @@ fn ProcessBeforeProcessEpochBench(comptime fork: ForkSeq) type {
 
 fn ProcessInactivityUpdatesBench(comptime fork: ForkSeq) type {
     return struct {
-        cached_state: *CachedBeaconState,
         epoch_transition_cache: *EpochTransitionCache,
 
         pub fn run(self: *@This(), allocator: std.mem.Allocator) void {
-            const cloned = self.cached_state.clone(allocator, .{}) catch unreachable;
-            defer {
-                cloned.deinit();
-                allocator.destroy(cloned);
-            }
             const cache = self.epoch_transition_cache;
+
             state_transition.processInactivityUpdates(
                 fork,
                 allocator,
-                cloned.config,
-                cloned.epoch_cache,
-                cloned.state.castToFork(fork),
+                BenchState.cloned_cached_state.config,
+                BenchState.cloned_cached_state.epoch_cache,
+                BenchState.cloned_cached_state.state.castToFork(fork),
                 cache,
             ) catch unreachable;
         }
@@ -94,25 +81,20 @@ fn ProcessInactivityUpdatesBench(comptime fork: ForkSeq) type {
 
 fn ProcessRewardsAndPenaltiesBench(comptime fork: ForkSeq) type {
     return struct {
-        cached_state: *CachedBeaconState,
         epoch_transition_cache: *EpochTransitionCache,
         io: std.Io,
 
         pub fn run(self: *@This(), allocator: std.mem.Allocator) void {
-            const cloned = self.cached_state.clone(allocator, .{}) catch unreachable;
-            defer {
-                cloned.deinit();
-                allocator.destroy(cloned);
-            }
             const cache = self.epoch_transition_cache;
-            const validator_count = cloned.state.validatorsCount() catch unreachable;
+            const validator_count = BenchState.cloned_cached_state.state.validatorsCount() catch unreachable;
             cache.syncRewardPenaltyLengths(self.io, validator_count) catch unreachable;
+
             state_transition.processRewardsAndPenalties(
                 fork,
                 allocator,
-                cloned.config,
-                cloned.epoch_cache,
-                cloned.state.castToFork(fork),
+                BenchState.cloned_cached_state.config,
+                BenchState.cloned_cached_state.epoch_cache,
+                BenchState.cloned_cached_state.state.castToFork(fork),
                 cache,
                 null,
             ) catch unreachable;
@@ -122,21 +104,17 @@ fn ProcessRewardsAndPenaltiesBench(comptime fork: ForkSeq) type {
 
 fn ProcessRegistryUpdatesBench(comptime fork: ForkSeq) type {
     return struct {
-        cached_state: *CachedBeaconState,
         epoch_transition_cache: *EpochTransitionCache,
 
         pub fn run(self: *@This(), allocator: std.mem.Allocator) void {
-            const cloned = self.cached_state.clone(allocator, .{}) catch unreachable;
-            defer {
-                cloned.deinit();
-                allocator.destroy(cloned);
-            }
+            _ = allocator;
             const cache = self.epoch_transition_cache;
+
             state_transition.processRegistryUpdates(
                 fork,
-                cloned.config,
-                cloned.epoch_cache,
-                cloned.state.castToFork(fork),
+                BenchState.cloned_cached_state.config,
+                BenchState.cloned_cached_state.epoch_cache,
+                BenchState.cloned_cached_state.state.castToFork(fork),
                 cache,
             ) catch unreachable;
         }
@@ -145,21 +123,16 @@ fn ProcessRegistryUpdatesBench(comptime fork: ForkSeq) type {
 
 fn ProcessSlashingsBench(comptime fork: ForkSeq) type {
     return struct {
-        cached_state: *CachedBeaconState,
         epoch_transition_cache: *EpochTransitionCache,
 
         pub fn run(self: *@This(), allocator: std.mem.Allocator) void {
-            const cloned = self.cached_state.clone(allocator, .{}) catch unreachable;
-            defer {
-                cloned.deinit();
-                allocator.destroy(cloned);
-            }
             const cache = self.epoch_transition_cache;
+
             _ = state_transition.processSlashings(
                 fork,
                 allocator,
-                cloned.epoch_cache,
-                cloned.state.castToFork(fork),
+                BenchState.cloned_cached_state.epoch_cache,
+                BenchState.cloned_cached_state.state.castToFork(fork),
                 cache,
                 true,
             ) catch unreachable;
@@ -169,20 +142,15 @@ fn ProcessSlashingsBench(comptime fork: ForkSeq) type {
 
 fn ProcessEth1DataResetBench(comptime fork: ForkSeq) type {
     return struct {
-        cached_state: *CachedBeaconState,
         epoch_transition_cache: *EpochTransitionCache,
 
         pub fn run(self: *@This(), allocator: std.mem.Allocator) void {
-            const cloned = self.cached_state.clone(allocator, .{}) catch unreachable;
-            defer {
-                cloned.deinit();
-                allocator.destroy(cloned);
-            }
+            _ = allocator;
             const cache = self.epoch_transition_cache;
 
             state_transition.processEth1DataReset(
                 fork,
-                cloned.state.castToFork(fork),
+                BenchState.cloned_cached_state.state.castToFork(fork),
                 cache,
             ) catch unreachable;
         }
@@ -191,23 +159,17 @@ fn ProcessEth1DataResetBench(comptime fork: ForkSeq) type {
 
 fn ProcessPendingDepositsBench(comptime fork: ForkSeq) type {
     return struct {
-        cached_state: *CachedBeaconState,
         epoch_transition_cache: *EpochTransitionCache,
 
         pub fn run(self: *@This(), allocator: std.mem.Allocator) void {
-            const cloned = self.cached_state.clone(allocator, .{}) catch unreachable;
-            defer {
-                cloned.deinit();
-                allocator.destroy(cloned);
-            }
             const cache = self.epoch_transition_cache;
 
             state_transition.processPendingDeposits(
                 fork,
                 allocator,
-                cloned.config,
-                cloned.epoch_cache,
-                cloned.state.castToFork(fork),
+                BenchState.cloned_cached_state.config,
+                BenchState.cloned_cached_state.epoch_cache,
+                BenchState.cloned_cached_state.state.castToFork(fork),
                 cache,
             ) catch unreachable;
         }
@@ -216,21 +178,16 @@ fn ProcessPendingDepositsBench(comptime fork: ForkSeq) type {
 
 fn ProcessPendingConsolidationsBench(comptime fork: ForkSeq) type {
     return struct {
-        cached_state: *CachedBeaconState,
         epoch_transition_cache: *EpochTransitionCache,
 
         pub fn run(self: *@This(), allocator: std.mem.Allocator) void {
-            const cloned = self.cached_state.clone(allocator, .{}) catch unreachable;
-            defer {
-                cloned.deinit();
-                allocator.destroy(cloned);
-            }
+            _ = allocator;
             const cache = self.epoch_transition_cache;
 
             state_transition.processPendingConsolidations(
                 fork,
-                cloned.epoch_cache,
-                cloned.state.castToFork(fork),
+                BenchState.cloned_cached_state.epoch_cache,
+                BenchState.cloned_cached_state.state.castToFork(fork),
                 cache,
             ) catch unreachable;
         }
@@ -239,22 +196,16 @@ fn ProcessPendingConsolidationsBench(comptime fork: ForkSeq) type {
 
 fn ProcessEffectiveBalanceUpdatesBench(comptime fork: ForkSeq) type {
     return struct {
-        cached_state: *CachedBeaconState,
         epoch_transition_cache: *EpochTransitionCache,
 
         pub fn run(self: *@This(), allocator: std.mem.Allocator) void {
-            const cloned = self.cached_state.clone(allocator, .{}) catch unreachable;
-            defer {
-                cloned.deinit();
-                allocator.destroy(cloned);
-            }
             const cache = self.epoch_transition_cache;
 
             _ = state_transition.processEffectiveBalanceUpdates(
                 fork,
                 allocator,
-                cloned.epoch_cache,
-                cloned.state.castToFork(fork),
+                BenchState.cloned_cached_state.epoch_cache,
+                BenchState.cloned_cached_state.state.castToFork(fork),
                 cache,
             ) catch unreachable;
         }
@@ -263,21 +214,16 @@ fn ProcessEffectiveBalanceUpdatesBench(comptime fork: ForkSeq) type {
 
 fn ProcessSlashingsResetBench(comptime fork: ForkSeq) type {
     return struct {
-        cached_state: *CachedBeaconState,
         epoch_transition_cache: *EpochTransitionCache,
 
         pub fn run(self: *@This(), allocator: std.mem.Allocator) void {
-            const cloned = self.cached_state.clone(allocator, .{}) catch unreachable;
-            defer {
-                cloned.deinit();
-                allocator.destroy(cloned);
-            }
+            _ = allocator;
             const cache = self.epoch_transition_cache;
 
             state_transition.processSlashingsReset(
                 fork,
-                cloned.epoch_cache,
-                cloned.state.castToFork(fork),
+                BenchState.cloned_cached_state.epoch_cache,
+                BenchState.cloned_cached_state.state.castToFork(fork),
                 cache,
             ) catch unreachable;
         }
@@ -286,20 +232,16 @@ fn ProcessSlashingsResetBench(comptime fork: ForkSeq) type {
 
 fn ProcessRandaoMixesResetBench(comptime fork: ForkSeq) type {
     return struct {
-        cached_state: *CachedBeaconState,
         epoch_transition_cache: *EpochTransitionCache,
 
         pub fn run(self: *@This(), allocator: std.mem.Allocator) void {
-            const cloned = self.cached_state.clone(allocator, .{}) catch unreachable;
-            defer {
-                cloned.deinit();
-                allocator.destroy(cloned);
-            }
+            _ = allocator;
+
             const cache = self.epoch_transition_cache;
 
             state_transition.processRandaoMixesReset(
                 fork,
-                cloned.state.castToFork(fork),
+                BenchState.cloned_cached_state.state.castToFork(fork),
                 cache,
             ) catch unreachable;
         }
@@ -308,20 +250,16 @@ fn ProcessRandaoMixesResetBench(comptime fork: ForkSeq) type {
 
 fn ProcessHistoricalSummariesUpdateBench(comptime fork: ForkSeq) type {
     return struct {
-        cached_state: *CachedBeaconState,
         epoch_transition_cache: *EpochTransitionCache,
 
         pub fn run(self: *@This(), allocator: std.mem.Allocator) void {
-            const cloned = self.cached_state.clone(allocator, .{}) catch unreachable;
-            defer {
-                cloned.deinit();
-                allocator.destroy(cloned);
-            }
+            _ = allocator;
+
             const cache = self.epoch_transition_cache;
 
             state_transition.processHistoricalSummariesUpdate(
                 fork,
-                cloned.state.castToFork(fork),
+                BenchState.cloned_cached_state.state.castToFork(fork),
                 cache,
             ) catch unreachable;
         }
@@ -330,18 +268,13 @@ fn ProcessHistoricalSummariesUpdateBench(comptime fork: ForkSeq) type {
 
 fn ProcessParticipationFlagUpdatesBench(comptime fork: ForkSeq) type {
     return struct {
-        cached_state: *CachedBeaconState,
-
         pub fn run(self: *@This(), allocator: std.mem.Allocator) void {
-            const cloned = self.cached_state.clone(allocator, .{}) catch unreachable;
-            defer {
-                cloned.deinit();
-                allocator.destroy(cloned);
-            }
+            _ = self;
+            _ = allocator;
 
             state_transition.processParticipationFlagUpdates(
                 fork,
-                cloned.state.castToFork(fork),
+                BenchState.cloned_cached_state.state.castToFork(fork),
             ) catch unreachable;
         }
     };
@@ -349,21 +282,14 @@ fn ProcessParticipationFlagUpdatesBench(comptime fork: ForkSeq) type {
 
 fn ProcessSyncCommitteeUpdatesBench(comptime fork: ForkSeq) type {
     return struct {
-        cached_state: *CachedBeaconState,
-        epoch_transition_cache: *EpochTransitionCache,
-
         pub fn run(self: *@This(), allocator: std.mem.Allocator) void {
-            const cloned = self.cached_state.clone(allocator, .{}) catch unreachable;
-            defer {
-                cloned.deinit();
-                allocator.destroy(cloned);
-            }
+            _ = self;
 
             state_transition.processSyncCommitteeUpdates(
                 fork,
                 allocator,
-                cloned.epoch_cache,
-                cloned.state.castToFork(fork),
+                BenchState.cloned_cached_state.epoch_cache,
+                BenchState.cloned_cached_state.state.castToFork(fork),
             ) catch unreachable;
         }
     };
@@ -371,22 +297,16 @@ fn ProcessSyncCommitteeUpdatesBench(comptime fork: ForkSeq) type {
 
 fn ProcessProposerLookaheadBench(comptime fork: ForkSeq) type {
     return struct {
-        cached_state: *CachedBeaconState,
         epoch_transition_cache: *EpochTransitionCache,
 
         pub fn run(self: *@This(), allocator: std.mem.Allocator) void {
-            const cloned = self.cached_state.clone(allocator, .{}) catch unreachable;
-            defer {
-                cloned.deinit();
-                allocator.destroy(cloned);
-            }
             const cache = self.epoch_transition_cache;
 
             state_transition.processProposerLookahead(
                 fork,
                 allocator,
-                cloned.epoch_cache,
-                cloned.state.castToFork(fork),
+                BenchState.cloned_cached_state.epoch_cache,
+                BenchState.cloned_cached_state.state.castToFork(fork),
                 cache,
             ) catch unreachable;
         }
@@ -454,34 +374,28 @@ fn printSegmentStats(stdout: *std.Io.Writer) !void {
 
 fn ProcessEpochBench(comptime fork: ForkSeq) type {
     return struct {
-        cached_state: *CachedBeaconState,
         io: std.Io,
 
         pub fn run(self: *@This(), allocator: std.mem.Allocator) void {
-            const cloned = self.cached_state.clone(allocator, .{}) catch unreachable;
-            defer {
-                cloned.deinit();
-                allocator.destroy(cloned);
-            }
             var cache = EpochTransitionCache.init(
                 allocator,
                 self.io,
-                cloned.config,
-                cloned.epoch_cache,
-                cloned.state,
+                BenchState.cloned_cached_state.config,
+                BenchState.cloned_cached_state.epoch_cache,
+                BenchState.cloned_cached_state.state,
             ) catch unreachable;
             defer cache.deinit(allocator);
 
-            const validator_count = cloned.state.validatorsCount() catch unreachable;
+            const validator_count = BenchState.cloned_cached_state.state.validatorsCount() catch unreachable;
             cache.syncRewardPenaltyLengths(self.io, validator_count) catch unreachable;
 
             state_transition.processEpoch(
                 fork,
                 allocator,
                 self.io,
-                cloned.config,
-                cloned.epoch_cache,
-                cloned.state.castToFork(fork),
+                BenchState.cloned_cached_state.config,
+                BenchState.cloned_cached_state.epoch_cache,
+                BenchState.cloned_cached_state.state.castToFork(fork),
                 &cache,
             ) catch unreachable;
         }
@@ -490,33 +404,27 @@ fn ProcessEpochBench(comptime fork: ForkSeq) type {
 
 fn ProcessEpochSegmentedBench(comptime fork: ForkSeq) type {
     return struct {
-        cached_state: *CachedBeaconState,
         io: std.Io,
 
         pub fn run(self: *@This(), allocator: std.mem.Allocator) void {
             const io = self.io;
-            const cloned = self.cached_state.clone(allocator, .{}) catch unreachable;
-            defer {
-                cloned.deinit();
-                allocator.destroy(cloned);
-            }
             const epoch_start = time.timestampNow(io);
 
             const before_start = time.timestampNow(io);
-            cloned.state.commit() catch unreachable;
+            BenchState.cloned_cached_state.state.commit() catch unreachable;
             var cache_val = EpochTransitionCache.init(
                 allocator,
                 io,
-                cloned.config,
-                cloned.epoch_cache,
-                cloned.state,
+                BenchState.cloned_cached_state.config,
+                BenchState.cloned_cached_state.epoch_cache,
+                BenchState.cloned_cached_state.state,
             ) catch unreachable;
             defer cache_val.deinit(allocator);
             const cache = &cache_val;
             recordSegment(.before_process_epoch, @as(u64, @intCast(time.since(io, before_start).nanoseconds)));
 
-            const fork_state = cloned.state.castToFork(fork);
-            const epoch_cache = cloned.epoch_cache;
+            const fork_state = BenchState.cloned_cached_state.state.castToFork(fork);
+            const epoch_cache = BenchState.cloned_cached_state.epoch_cache;
 
             const jf_start = time.timestampNow(io);
             state_transition.processJustificationAndFinalization(fork, fork_state, cache) catch unreachable;
@@ -527,7 +435,7 @@ fn ProcessEpochSegmentedBench(comptime fork: ForkSeq) type {
                 state_transition.processInactivityUpdates(
                     fork,
                     allocator,
-                    cloned.config,
+                    BenchState.cloned_cached_state.config,
                     epoch_cache,
                     fork_state,
                     cache,
@@ -538,7 +446,7 @@ fn ProcessEpochSegmentedBench(comptime fork: ForkSeq) type {
             const registry_start = time.timestampNow(io);
             state_transition.processRegistryUpdates(
                 fork,
-                cloned.config,
+                BenchState.cloned_cached_state.config,
                 epoch_cache,
                 fork_state,
                 cache,
@@ -560,7 +468,7 @@ fn ProcessEpochSegmentedBench(comptime fork: ForkSeq) type {
             state_transition.processRewardsAndPenalties(
                 fork,
                 allocator,
-                cloned.config,
+                BenchState.cloned_cached_state.config,
                 epoch_cache,
                 fork_state,
                 cache,
@@ -577,7 +485,7 @@ fn ProcessEpochSegmentedBench(comptime fork: ForkSeq) type {
                 state_transition.processPendingDeposits(
                     fork,
                     allocator,
-                    cloned.config,
+                    BenchState.cloned_cached_state.config,
                     epoch_cache,
                     fork_state,
                     cache,
@@ -777,6 +685,7 @@ fn runBenchmark(
         .skip_sync_committee_cache = !comptime fork.gte(.altair),
         .skip_sync_pubkeys = false,
     });
+    BenchState.init(allocator, cached_state);
     beacon_state = null;
     defer {
         cached_state.deinit();
@@ -795,111 +704,86 @@ fn runBenchmark(
     try stdout.print("Cached state created at slot {}\n", .{try cached_state.state.slot()});
     try stdout.print("\nStarting process_epoch benchmarks for {s} fork...\n\n", .{@tagName(fork)});
 
+    const hooks: zbench.Hooks = .{ .before_each = BenchState.beforeEach, .after_each = BenchState.afterEach };
+
     var bench = zbench.Benchmark.init(allocator, .{ .iterations = 50 });
     defer bench.deinit();
 
-    try bench.addParam("before_process_epoch", &ProcessBeforeProcessEpochBench(fork){
-        .cached_state = cached_state,
-        .io = io,
-    }, .{});
+    try bench.addParam("before_process_epoch", &ProcessBeforeProcessEpochBench(fork){ .io = io }, .{ .hooks = hooks });
 
     try bench.addParam("justification_finalization", &ProcessJustificationAndFinalizationBench(fork){
-        .cached_state = cached_state,
         .epoch_transition_cache = &epoch_transition_cache,
-    }, .{});
+    }, .{ .hooks = hooks });
 
     if (comptime fork.gte(.altair)) {
         try bench.addParam("inactivity_updates", &ProcessInactivityUpdatesBench(fork){
-            .cached_state = cached_state,
             .epoch_transition_cache = &epoch_transition_cache,
-        }, .{});
+        }, .{ .hooks = hooks });
     }
 
     try bench.addParam("rewards_and_penalties", &ProcessRewardsAndPenaltiesBench(fork){
-        .cached_state = cached_state,
         .epoch_transition_cache = &epoch_transition_cache,
         .io = io,
-    }, .{});
+    }, .{ .hooks = hooks });
 
     try bench.addParam("registry_updates", &ProcessRegistryUpdatesBench(fork){
-        .cached_state = cached_state,
         .epoch_transition_cache = &epoch_transition_cache,
-    }, .{});
+    }, .{ .hooks = hooks });
 
     try bench.addParam("slashings", &ProcessSlashingsBench(fork){
-        .cached_state = cached_state,
         .epoch_transition_cache = &epoch_transition_cache,
-    }, .{});
+    }, .{ .hooks = hooks });
 
     try bench.addParam("eth1_data_reset", &ProcessEth1DataResetBench(fork){
-        .cached_state = cached_state,
         .epoch_transition_cache = &epoch_transition_cache,
-    }, .{});
+    }, .{ .hooks = hooks });
 
     if (comptime fork.gte(.electra)) {
         try bench.addParam("pending_deposits", &ProcessPendingDepositsBench(fork){
-            .cached_state = cached_state,
             .epoch_transition_cache = &epoch_transition_cache,
-        }, .{});
+        }, .{ .hooks = hooks });
 
         try bench.addParam("pending_consolidations", &ProcessPendingConsolidationsBench(fork){
-            .cached_state = cached_state,
             .epoch_transition_cache = &epoch_transition_cache,
-        }, .{});
+        }, .{ .hooks = hooks });
     }
 
     try bench.addParam("effective_balance_updates", &ProcessEffectiveBalanceUpdatesBench(fork){
-        .cached_state = cached_state,
         .epoch_transition_cache = &epoch_transition_cache,
-    }, .{});
+    }, .{ .hooks = hooks });
 
     try bench.addParam("slashings_reset", &ProcessSlashingsResetBench(fork){
-        .cached_state = cached_state,
         .epoch_transition_cache = &epoch_transition_cache,
-    }, .{});
+    }, .{ .hooks = hooks });
 
     try bench.addParam("randao_mixes_reset", &ProcessRandaoMixesResetBench(fork){
-        .cached_state = cached_state,
         .epoch_transition_cache = &epoch_transition_cache,
-    }, .{});
+    }, .{ .hooks = hooks });
 
     if (comptime fork.gte(.capella)) {
         try bench.addParam("historical_summaries", &ProcessHistoricalSummariesUpdateBench(fork){
-            .cached_state = cached_state,
             .epoch_transition_cache = &epoch_transition_cache,
-        }, .{});
+        }, .{ .hooks = hooks });
     }
 
     if (comptime fork.gte(.altair)) {
-        try bench.addParam("participation_flags", &ProcessParticipationFlagUpdatesBench(fork){
-            .cached_state = cached_state,
-        }, .{});
+        try bench.addParam("participation_flags", &ProcessParticipationFlagUpdatesBench(fork){}, .{ .hooks = hooks });
 
-        try bench.addParam("sync_committee_updates", &ProcessSyncCommitteeUpdatesBench(fork){
-            .cached_state = cached_state,
-            .epoch_transition_cache = &epoch_transition_cache,
-        }, .{});
+        try bench.addParam("sync_committee_updates", &ProcessSyncCommitteeUpdatesBench(fork){}, .{ .hooks = hooks });
     }
 
     if (comptime fork.gte(.fulu)) {
         try bench.addParam("proposer_lookahead", &ProcessProposerLookaheadBench(fork){
-            .cached_state = cached_state,
             .epoch_transition_cache = &epoch_transition_cache,
-        }, .{});
+        }, .{ .hooks = hooks });
     }
 
     // Non-segmented
-    try bench.addParam("epoch(non-segmented)", &ProcessEpochBench(fork){
-        .cached_state = cached_state,
-        .io = io,
-    }, .{});
+    try bench.addParam("epoch(non-segmented)", &ProcessEpochBench(fork){ .io = io }, .{ .hooks = hooks });
 
     // Segmented (step-by-step timing)
     resetSegmentStats();
-    try bench.addParam("epoch(segmented)", &ProcessEpochSegmentedBench(fork){
-        .cached_state = cached_state,
-        .io = io,
-    }, .{});
+    try bench.addParam("epoch(segmented)", &ProcessEpochSegmentedBench(fork){ .io = io }, .{ .hooks = hooks });
 
     try bench.run(io, std.Io.File.stdout());
     try printSegmentStats(stdout);
