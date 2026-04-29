@@ -75,7 +75,8 @@ pub fn blockToHeader(allocator: Allocator, signed_block: AnySignedBeaconBlock, o
     out.proposer_index = block.proposerIndex();
     out.parent_root = block.parentRoot().*;
     out.state_root = block.stateRoot().*;
-    try block.hashTreeRoot(allocator, &out.body_root);
+    const body = block.beaconBlockBody();
+    try body.hashTreeRoot(allocator, &out.body_root);
 }
 
 const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
