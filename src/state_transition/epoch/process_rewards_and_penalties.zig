@@ -31,14 +31,20 @@ pub fn processRewardsAndPenalties(
     const balances = try state.balancesSlice(allocator);
     defer allocator.free(balances);
 
+    // Use saturating arithmetic for performance. Saturating operations are branchless, which
+    // enables SIMD auto-vectorization of the balance update loop. This is safe because a
+    // balance overflow is mathematically impossible: the maximum total ETH supply (~1.2e17 Gwei)
+    // is more than 150x smaller than the max u64 value (~1.8e19 Gwei).
     if (slashing_penalties) |slashings| {
         for (rewards, penalties, balances, 0..) |reward, penalty, *balance, i| {
             const slashing: u64 = if (i < slashings.len) slashings[i] else 0;
-            balance.* = (try std.math.add(u64, balance.*, reward)) -| penalty -| slashing;
+            std.debug.assert(balance.* <= std.math.maxInt(u64) - reward);
+            balance.* = ((balance.* +| reward) -| penalty) -| slashing;
         }
     } else {
         for (rewards, penalties, balances) |reward, penalty, *balance| {
-            balance.* = (try std.math.add(u64, balance.*, reward)) -| penalty;
+            std.debug.assert(balance.* <= std.math.maxInt(u64) - reward);
+            balance.* = (balance.* +| reward) -| penalty;
         }
     }
 
