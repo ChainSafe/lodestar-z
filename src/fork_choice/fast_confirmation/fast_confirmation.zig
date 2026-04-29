@@ -1072,6 +1072,272 @@ pub fn isConfirmedChainSafe(
 }
 
 // =========================================================================
+// 7. Spec helpers — FFG (Phase D)
+// =========================================================================
+
+/// Compound key used to group voters by their latest message's
+/// `(root, epoch)` pair. Voters in the same group all resolve to the same
+/// `getCheckpointForBlock` result, so we only need to call the lookup once
+/// per group. On mainnet ~1M validators vote for ~50 unique pairs.
+const VoteGroupKey = struct {
+    root: Root,
+    epoch: Epoch,
+};
+
+const VoteGroupContext = struct {
+    pub fn hash(_: VoteGroupContext, key: VoteGroupKey) u64 {
+        var hasher = std.hash.Wyhash.init(0);
+        hasher.update(&key.root);
+        hasher.update(std.mem.asBytes(&key.epoch));
+        return hasher.final();
+    }
+
+    pub fn eql(_: VoteGroupContext, a: VoteGroupKey, b: VoteGroupKey) bool {
+        return a.epoch == b.epoch and std.mem.eql(u8, &a.root, &b.root);
+    }
+};
+
+const VoteGroupMap = std.HashMapUnmanaged(
+    VoteGroupKey,
+    u64,
+    VoteGroupContext,
+    std.hash_map.default_max_load_percentage,
+);
+
+// --- D1: getCurrentTargetScore ---
+
+/// Spec: `get_current_target_score(store)`.
+///
+/// Estimate the FFG support of the current epoch's target by inspecting each
+/// active validator's latest LMD-GHOST vote: if the checkpoint reachable from
+/// the vote root at the current epoch matches the current target, that
+/// validator's effective balance counts toward the target's score.
+///
+/// Optimization: rather than calling `getCheckpointForBlock` per validator,
+/// group voters by their `(voteRoot, voteEpoch)` pair, then resolve each
+/// unique group's checkpoint once. On mainnet this turns ~1M lookups into ~50.
+///
+/// `head_balance_source` (the spec's "pulled-up head state") supplies the
+/// effective balances; slashed/inactive validators are already zeroed by
+/// `BalanceSourceData.rebuild`, so the spec's "active and unslashed" filter
+/// is implicit.
+pub fn getCurrentTargetScore(
+    allocator: Allocator,
+    fc: *const ForkChoice,
+    fcr: *const FastConfirmation,
+    state: *const CachedBeaconState,
+    votes: *Votes,
+    equivocating_indices: *const EquivocatingIndices,
+    head_root: Root,
+    current_slot: Slot,
+) Error!u64 {
+    // `state` reserved for future spec evolution (e.g. shuffling-aware filter).
+    // FCR's pulled-up head balance source already encodes active/slashed.
+    _ = state;
+
+    const target = try getCurrentTarget(fc, head_root, current_slot);
+
+    const balances = fcr.head_balance_source.effective_balances.items;
+    const fields = votes.fields();
+    const validator_count = @min(balances.len, fields.next_indices.len);
+
+    // Group validators by (voteRoot, voteEpoch). Map values accumulate
+    // total effective balance for that group.
+    var vote_groups: VoteGroupMap = .empty;
+    defer vote_groups.deinit(allocator);
+
+    var i: usize = 0;
+    while (i < validator_count) : (i += 1) {
+        const bal = balances[i];
+        if (bal == 0) continue; // slashed / inactive already zeroed.
+        if (equivocating_indices.contains(@intCast(i))) continue;
+        const vote_root = latestVoteRoot(votes, fc.proto_array, i) orelse continue;
+        const vote_epoch = computeEpochAtSlot(fields.next_slots[i]);
+
+        const key: VoteGroupKey = .{ .root = vote_root, .epoch = vote_epoch };
+        const gop = try vote_groups.getOrPut(allocator, key);
+        if (!gop.found_existing) {
+            gop.value_ptr.* = 0;
+        }
+        gop.value_ptr.* += bal;
+    }
+
+    // For each unique group, resolve the checkpoint at the current epoch from
+    // the vote root and accumulate the group's weight if the checkpoint
+    // matches the target.
+    var score: u64 = 0;
+    var it = vote_groups.iterator();
+    while (it.next()) |entry| {
+        const key = entry.key_ptr.*;
+        const weight = entry.value_ptr.*;
+        // Spec: `get_checkpoint_for_block(store, root, get_latest_message_epoch(msg))`.
+        // Map "block unknown / ancestor missing" → not counted (matches TS swallow).
+        const cp = getCheckpointForBlock(fc, key.root, key.epoch) catch |err| switch (err) {
+            error.StateMissing => continue,
+            else => return err,
+        };
+        if (cp.eql(target)) {
+            score += weight;
+        }
+    }
+    return score;
+}
+
+// --- D2: computeHonestFfgSupportForCurrentTarget ---
+
+/// Spec: `compute_honest_ffg_support_for_current_target(store)`.
+///
+/// Combines the FFG support already received with a worst-case estimate of
+/// the remaining honest FFG weight, assuming `byzantine_threshold` of the
+/// remaining and till-now committees are adversarial.
+///
+/// Returns `min_honest_ffg_support + remaining_honest_ffg_weight` where:
+/// ```
+/// remaining_ffg_weight        = total_active_balance - ffg_weight_till_now
+/// remaining_honest_ffg_weight = floor(remaining_ffg_weight * (100 - byzantine_threshold) / 100)
+/// min_honest_ffg_support      = ffg_support
+///                              - min(floor(ffg_weight_till_now * byzantine_threshold / 100), ffg_support)
+/// ```
+///
+/// The `min(..., ffg_support)` saturation is critical to avoid underflow when
+/// the projected adversarial weight exceeds the support already accumulated.
+pub fn computeHonestFfgSupportForCurrentTarget(
+    allocator: Allocator,
+    fc: *const ForkChoice,
+    fcr: *const FastConfirmation,
+    state: *const CachedBeaconState,
+    votes: *Votes,
+    equivocating_indices: *const EquivocatingIndices,
+    head_root: Root,
+    current_slot: Slot,
+) Error!u64 {
+    if (current_slot == 0) return 0;
+
+    const total_active_balance = getTotalActiveBalance(&fcr.head_balance_source);
+
+    const ffg_support = try getCurrentTargetScore(
+        allocator,
+        fc,
+        fcr,
+        state,
+        votes,
+        equivocating_indices,
+        head_root,
+        current_slot,
+    );
+
+    const current_epoch = computeEpochAtSlot(current_slot);
+    const epoch_start_slot = computeStartSlotAtEpoch(current_epoch);
+    // current_slot >= 1 (early-return above), so current_slot - 1 is safe.
+    const ffg_weight_till_now = estimateCommitteeWeightBetweenSlots(
+        &fcr.head_balance_source,
+        epoch_start_slot,
+        current_slot - 1,
+    );
+
+    // total_active_balance - ffg_weight_till_now: clamp to 0 in case rounding
+    // in `estimate_committee_weight_between_slots` produces a value slightly
+    // above `total_active_balance` (the "ensure safety" adjustment can over-
+    // estimate). Defensive — TigerStyle says no silent corruption.
+    const remaining_ffg_weight: u64 = if (total_active_balance > ffg_weight_till_now)
+        total_active_balance - ffg_weight_till_now
+    else
+        0;
+
+    const byzantine_threshold = fcr.byzantine_threshold;
+    // byzantine_threshold ∈ [0, 25] ⇒ (100 - byzantine_threshold) ∈ [75, 100].
+    assert(byzantine_threshold <= 100);
+    const remaining_honest_ffg_weight: u64 =
+        @divFloor(remaining_ffg_weight * (100 - byzantine_threshold), 100);
+
+    const adversarial_till_now: u64 = @divFloor(ffg_weight_till_now * byzantine_threshold, 100);
+    const subtract: u64 = @min(adversarial_till_now, ffg_support);
+    const min_honest_ffg_support: u64 = ffg_support - subtract;
+
+    return min_honest_ffg_support + remaining_honest_ffg_weight;
+}
+
+// --- D3: willNoConflictingCheckpointBeJustified ---
+
+/// Spec: `will_no_conflicting_checkpoint_be_justified(store)`.
+///
+/// Returns `true` iff no checkpoint conflicting with the current target can
+/// ever be justified. Two cases:
+///
+/// 1. The current target is already the head's unrealized-justified
+///    checkpoint → trivially safe.
+/// 2. Otherwise, check whether `3 * honest_ffg_support > total_active_balance`,
+///    i.e., the honest FFG support of the current target alone exceeds 1/3
+///    of all active balance, leaving no room for a conflicting 2/3 majority.
+///
+/// `head_unrealized_justified` is supplied by the caller — Phase E will
+/// derive it from `fc_store` / FCR state. Phase D uses synthetic checkpoints
+/// in tests.
+pub fn willNoConflictingCheckpointBeJustified(
+    allocator: Allocator,
+    fc: *const ForkChoice,
+    fcr: *const FastConfirmation,
+    state: *const CachedBeaconState,
+    votes: *Votes,
+    equivocating_indices: *const EquivocatingIndices,
+    head_root: Root,
+    current_slot: Slot,
+    head_unrealized_justified: *const Checkpoint,
+) Error!bool {
+    const target = try getCurrentTarget(fc, head_root, current_slot);
+    if (target.eql(head_unrealized_justified.*)) return true;
+
+    const total_active_balance = getTotalActiveBalance(&fcr.head_balance_source);
+    const honest_support = try computeHonestFfgSupportForCurrentTarget(
+        allocator,
+        fc,
+        fcr,
+        state,
+        votes,
+        equivocating_indices,
+        head_root,
+        current_slot,
+    );
+    return 3 * honest_support > total_active_balance;
+}
+
+// --- D4: willCurrentTargetBeJustified ---
+
+/// Spec: `will_current_target_be_justified(store)`.
+///
+/// Returns `true` iff `3 * honest_ffg_support >= 2 * total_active_balance`,
+/// i.e., the honest FFG support of the current target meets the 2/3
+/// supermajority threshold needed for justification.
+///
+/// Edge case: when `total_active_balance == 0`, `0 >= 0` evaluates to `true`.
+/// This matches the spec's `>=` semantics exactly. In production this never
+/// occurs because the validator set is non-empty; a defensive caller can
+/// short-circuit at the call site if desired.
+pub fn willCurrentTargetBeJustified(
+    allocator: Allocator,
+    fc: *const ForkChoice,
+    fcr: *const FastConfirmation,
+    state: *const CachedBeaconState,
+    votes: *Votes,
+    equivocating_indices: *const EquivocatingIndices,
+    head_root: Root,
+    current_slot: Slot,
+) Error!bool {
+    const total_active_balance = getTotalActiveBalance(&fcr.head_balance_source);
+    const honest_support = try computeHonestFfgSupportForCurrentTarget(
+        allocator,
+        fc,
+        fcr,
+        state,
+        votes,
+        equivocating_indices,
+        head_root,
+        current_slot,
+    );
+    return 3 * honest_support >= 2 * total_active_balance;
+}
+
+// =========================================================================
 // Tests
 // =========================================================================
 
@@ -2222,4 +2488,454 @@ test "FastConfirmation.isConfirmedChainSafe — empty chain (confirmed == start)
         allocator,
     );
     try testing.expect(ok);
+}
+
+// --- Phase D: FFG helper tests ---
+
+// D1: getCurrentTargetScore — empty votes (no validators have voted) yields 0.
+test "FastConfirmation.getCurrentTargetScore — empty votes returns 0" {
+    const allocator = testing.allocator;
+    const fixture = try initLinearForkChoice(allocator);
+    defer deinitForkChoiceFixture(allocator, fixture);
+
+    var pool = try Node.Pool.init(allocator, 500_000);
+    defer pool.deinit();
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 32);
+    defer test_state.deinit();
+
+    var fcr = FastConfirmation.init(.{ .epoch = 0, .root = ZERO_ROOT }, 0, 0);
+    defer fcr.deinit(allocator);
+    // Populate head balance source so the call doesn't trivially short-circuit.
+    try fcr.head_balance_source.effective_balances.resize(allocator, 32);
+    @memset(fcr.head_balance_source.effective_balances.items, 32);
+
+    var votes: Votes = .{};
+    defer votes.deinit(allocator);
+    try votes.ensureValidatorCount(allocator, 32);
+
+    var eq: EquivocatingIndices = .empty;
+    defer eq.deinit(allocator);
+
+    const score = try getCurrentTargetScore(
+        allocator,
+        fixture.fc,
+        &fcr,
+        test_state.cached_state,
+        &votes,
+        &eq,
+        fixture.b_root,
+        preset.SLOTS_PER_EPOCH,
+    );
+    try testing.expectEqual(@as(u64, 0), score);
+}
+
+// D1: single validator voting for the current target — score equals their balance.
+test "FastConfirmation.getCurrentTargetScore — single voter for current target counts" {
+    const allocator = testing.allocator;
+    const fixture = try initLinearForkChoice(allocator);
+    defer deinitForkChoiceFixture(allocator, fixture);
+
+    var pool = try Node.Pool.init(allocator, 500_000);
+    defer pool.deinit();
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 32);
+    defer test_state.deinit();
+
+    var fcr = FastConfirmation.init(.{ .epoch = 0, .root = ZERO_ROOT }, 0, 0);
+    defer fcr.deinit(allocator);
+    try fcr.head_balance_source.effective_balances.resize(allocator, 32);
+    @memset(fcr.head_balance_source.effective_balances.items, 0);
+    fcr.head_balance_source.effective_balances.items[0] = 32;
+
+    // current_slot = SLOTS_PER_EPOCH (epoch 1 boundary). The current target on
+    // b_root's chain at epoch 1 is b_root itself. Validator 0 votes for b_root.
+    const b_node_index = fixture.fc.proto_array.getDefaultNodeIndex(fixture.b_root) orelse
+        return error.TestUnexpectedResult;
+
+    var votes: Votes = .{};
+    defer votes.deinit(allocator);
+    try votes.ensureValidatorCount(allocator, 32);
+    {
+        const v = votes.fields();
+        v.next_indices[0] = b_node_index;
+        // Vote slot in epoch 1, so getCheckpointForBlock(b_root, epoch=1) = (1, b_root) = target.
+        v.next_slots[0] = preset.SLOTS_PER_EPOCH;
+    }
+
+    var eq: EquivocatingIndices = .empty;
+    defer eq.deinit(allocator);
+
+    const score = try getCurrentTargetScore(
+        allocator,
+        fixture.fc,
+        &fcr,
+        test_state.cached_state,
+        &votes,
+        &eq,
+        fixture.b_root,
+        preset.SLOTS_PER_EPOCH,
+    );
+    try testing.expectEqual(@as(u64, 32), score);
+}
+
+// D1: voter for a different chain → score 0 (checkpoint mismatch).
+test "FastConfirmation.getCurrentTargetScore — vote for different target counts 0" {
+    const allocator = testing.allocator;
+    const fixture = try initLinearForkChoice(allocator);
+    defer deinitForkChoiceFixture(allocator, fixture);
+
+    var pool = try Node.Pool.init(allocator, 500_000);
+    defer pool.deinit();
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 32);
+    defer test_state.deinit();
+
+    var fcr = FastConfirmation.init(.{ .epoch = 0, .root = ZERO_ROOT }, 0, 0);
+    defer fcr.deinit(allocator);
+    try fcr.head_balance_source.effective_balances.resize(allocator, 32);
+    @memset(fcr.head_balance_source.effective_balances.items, 0);
+    fcr.head_balance_source.effective_balances.items[0] = 32;
+
+    // Validator votes for the genesis chain at epoch 0, but head is b_root at
+    // epoch 1 → target is b_root, which differs from the genesis-chain
+    // checkpoint, so the score for the b_root target is 0.
+    const genesis_node_index = fixture.fc.proto_array.getDefaultNodeIndex(fixture.genesis_root) orelse
+        return error.TestUnexpectedResult;
+
+    var votes: Votes = .{};
+    defer votes.deinit(allocator);
+    try votes.ensureValidatorCount(allocator, 32);
+    {
+        const v = votes.fields();
+        v.next_indices[0] = genesis_node_index;
+        v.next_slots[0] = 0; // epoch 0 vote, won't match epoch-1 b_root target.
+    }
+
+    var eq: EquivocatingIndices = .empty;
+    defer eq.deinit(allocator);
+
+    const score = try getCurrentTargetScore(
+        allocator,
+        fixture.fc,
+        &fcr,
+        test_state.cached_state,
+        &votes,
+        &eq,
+        fixture.b_root,
+        preset.SLOTS_PER_EPOCH,
+    );
+    try testing.expectEqual(@as(u64, 0), score);
+}
+
+// D2: all-zero balances → 0.
+test "FastConfirmation.computeHonestFfgSupportForCurrentTarget — zero balances yields 0" {
+    const allocator = testing.allocator;
+    const fixture = try initLinearForkChoice(allocator);
+    defer deinitForkChoiceFixture(allocator, fixture);
+
+    var pool = try Node.Pool.init(allocator, 500_000);
+    defer pool.deinit();
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 32);
+    defer test_state.deinit();
+
+    var fcr = FastConfirmation.init(.{ .epoch = 0, .root = ZERO_ROOT }, 25, 0);
+    defer fcr.deinit(allocator);
+    // Balance source remains empty ⇒ total_active_balance = 0.
+
+    var votes: Votes = .{};
+    defer votes.deinit(allocator);
+
+    var eq: EquivocatingIndices = .empty;
+    defer eq.deinit(allocator);
+
+    const got = try computeHonestFfgSupportForCurrentTarget(
+        allocator,
+        fixture.fc,
+        &fcr,
+        test_state.cached_state,
+        &votes,
+        &eq,
+        fixture.b_root,
+        preset.SLOTS_PER_EPOCH,
+    );
+    try testing.expectEqual(@as(u64, 0), got);
+}
+
+// D2: sanity — output bounded above by total active balance.
+test "FastConfirmation.computeHonestFfgSupportForCurrentTarget — bounded by total active balance" {
+    const allocator = testing.allocator;
+    const fixture = try initLinearForkChoice(allocator);
+    defer deinitForkChoiceFixture(allocator, fixture);
+
+    var pool = try Node.Pool.init(allocator, 500_000);
+    defer pool.deinit();
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 32);
+    defer test_state.deinit();
+
+    var fcr = FastConfirmation.init(.{ .epoch = 0, .root = ZERO_ROOT }, 0, 0);
+    defer fcr.deinit(allocator);
+    // Balance per validator = 32; 32 validators → total = 1024.
+    try fcr.head_balance_source.effective_balances.resize(allocator, 32);
+    @memset(fcr.head_balance_source.effective_balances.items, 32);
+    const total_active_balance: u64 = 32 * 32;
+
+    var votes: Votes = .{};
+    defer votes.deinit(allocator);
+    try votes.ensureValidatorCount(allocator, 32);
+
+    var eq: EquivocatingIndices = .empty;
+    defer eq.deinit(allocator);
+
+    const got = try computeHonestFfgSupportForCurrentTarget(
+        allocator,
+        fixture.fc,
+        &fcr,
+        test_state.cached_state,
+        &votes,
+        &eq,
+        fixture.b_root,
+        preset.SLOTS_PER_EPOCH,
+    );
+    // With byzantine_threshold = 0, the formula collapses to:
+    //   honest = ffg_support + (total - ffg_weight_till_now).
+    // The `+ remaining` term can exceed total only if ffg_support exceeds
+    // ffg_weight_till_now (impossible here since no votes); so result ≤ total.
+    try testing.expect(got <= total_active_balance);
+}
+
+// D3: equal-checkpoint shortcut returns true without consulting balances.
+test "FastConfirmation.willNoConflictingCheckpointBeJustified — equal-checkpoint shortcut returns true" {
+    const allocator = testing.allocator;
+    const fixture = try initLinearForkChoice(allocator);
+    defer deinitForkChoiceFixture(allocator, fixture);
+
+    var pool = try Node.Pool.init(allocator, 500_000);
+    defer pool.deinit();
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 32);
+    defer test_state.deinit();
+
+    var fcr = FastConfirmation.init(.{ .epoch = 0, .root = ZERO_ROOT }, 0, 0);
+    defer fcr.deinit(allocator);
+
+    var votes: Votes = .{};
+    defer votes.deinit(allocator);
+
+    var eq: EquivocatingIndices = .empty;
+    defer eq.deinit(allocator);
+
+    // Current target at slot SLOTS_PER_EPOCH on b_root's chain = (epoch 1, b_root).
+    // Provide head_unrealized_justified equal to that to trigger the shortcut.
+    const head_unrealized_justified: Checkpoint = .{ .epoch = 1, .root = fixture.b_root };
+
+    const ok = try willNoConflictingCheckpointBeJustified(
+        allocator,
+        fixture.fc,
+        &fcr,
+        test_state.cached_state,
+        &votes,
+        &eq,
+        fixture.b_root,
+        preset.SLOTS_PER_EPOCH,
+        &head_unrealized_justified,
+    );
+    try testing.expect(ok);
+}
+
+// D3: 3 * honest_support > total_active_balance ⇒ true.
+test "FastConfirmation.willNoConflictingCheckpointBeJustified — supermajority honest yields true" {
+    const allocator = testing.allocator;
+    const fixture = try initLinearForkChoice(allocator);
+    defer deinitForkChoiceFixture(allocator, fixture);
+
+    var pool = try Node.Pool.init(allocator, 500_000);
+    defer pool.deinit();
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 32);
+    defer test_state.deinit();
+
+    var fcr = FastConfirmation.init(.{ .epoch = 0, .root = ZERO_ROOT }, 0, 0);
+    defer fcr.deinit(allocator);
+    // Single active validator with effective balance 1 ⇒ total = 1.
+    // With byzantine_threshold = 0 and a vote for the target, ffg_support = 1.
+    // remaining_ffg_weight = total - ffg_weight_till_now = 1 - 0 = 1.
+    // remaining_honest = floor(1 * 100 / 100) = 1. min_honest = 1 - 0 = 1.
+    // honest = 2; 3 * 2 > 1 ⇒ true.
+    try fcr.head_balance_source.effective_balances.resize(allocator, 32);
+    @memset(fcr.head_balance_source.effective_balances.items, 0);
+    fcr.head_balance_source.effective_balances.items[0] = 1;
+
+    const b_node_index = fixture.fc.proto_array.getDefaultNodeIndex(fixture.b_root) orelse
+        return error.TestUnexpectedResult;
+
+    var votes: Votes = .{};
+    defer votes.deinit(allocator);
+    try votes.ensureValidatorCount(allocator, 32);
+    {
+        const v = votes.fields();
+        v.next_indices[0] = b_node_index;
+        v.next_slots[0] = preset.SLOTS_PER_EPOCH;
+    }
+
+    var eq: EquivocatingIndices = .empty;
+    defer eq.deinit(allocator);
+
+    // Distinct checkpoint forces the supermajority branch.
+    const head_unrealized_justified: Checkpoint = .{ .epoch = 0, .root = fixture.genesis_root };
+
+    const ok = try willNoConflictingCheckpointBeJustified(
+        allocator,
+        fixture.fc,
+        &fcr,
+        test_state.cached_state,
+        &votes,
+        &eq,
+        fixture.b_root,
+        preset.SLOTS_PER_EPOCH,
+        &head_unrealized_justified,
+    );
+    try testing.expect(ok);
+}
+
+// D3: 3 * honest_support <= total_active_balance ⇒ false.
+test "FastConfirmation.willNoConflictingCheckpointBeJustified — insufficient honest yields false" {
+    const allocator = testing.allocator;
+    const fixture = try initLinearForkChoice(allocator);
+    defer deinitForkChoiceFixture(allocator, fixture);
+
+    var pool = try Node.Pool.init(allocator, 500_000);
+    defer pool.deinit();
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 32);
+    defer test_state.deinit();
+
+    // byzantine_threshold = 25 ⇒ remaining_honest = 75% of remaining.
+    // total = 1024, ffg_support = 0, ffg_weight_till_now = 0.
+    // remaining_ffg_weight = 1024, remaining_honest = floor(1024 * 75 / 100) = 768.
+    // min_honest = 0 - 0 = 0. honest = 768.
+    // 3 * 768 = 2304 > 1024 ⇒ true. We need a config where 3*honest <= total.
+    //
+    // Use byzantine_threshold = 25 and add ffg_weight_till_now so that:
+    //   remaining_ffg_weight = 0, remaining_honest = 0, min_honest = 0.
+    // Achieve by making current_slot deep enough into the epoch that
+    // estimateCommitteeWeightBetweenSlots returns total_active_balance
+    // (full epoch covered). end_slot = current_slot - 1 must yield a full
+    // epoch. Use current_slot = 2 * SLOTS_PER_EPOCH (epoch 2) ⇒ end_slot
+    // = 2*EPOCH - 1, start_slot = 2*EPOCH (start of epoch 2). start > end
+    // ⇒ ffg_weight_till_now = 0; that branch doesn't help.
+    //
+    // Alternative: use total = 0 and current_slot > 0 → all formula terms
+    // are 0, honest = 0, total = 0 ⇒ 3*0 > 0 is false.
+    var fcr = FastConfirmation.init(.{ .epoch = 0, .root = ZERO_ROOT }, 25, 0);
+    defer fcr.deinit(allocator);
+    // empty balance source ⇒ total = 0.
+
+    var votes: Votes = .{};
+    defer votes.deinit(allocator);
+
+    var eq: EquivocatingIndices = .empty;
+    defer eq.deinit(allocator);
+
+    const head_unrealized_justified: Checkpoint = .{ .epoch = 0, .root = fixture.genesis_root };
+
+    const ok = try willNoConflictingCheckpointBeJustified(
+        allocator,
+        fixture.fc,
+        &fcr,
+        test_state.cached_state,
+        &votes,
+        &eq,
+        fixture.b_root,
+        preset.SLOTS_PER_EPOCH,
+        &head_unrealized_justified,
+    );
+    // 3 * 0 > 0 is false.
+    try testing.expect(!ok);
+}
+
+// D4: with empty balance source (total = 0) the `>=` branch yields true (0 >= 0).
+test "FastConfirmation.willCurrentTargetBeJustified — zero total balance yields true via >=" {
+    const allocator = testing.allocator;
+    const fixture = try initLinearForkChoice(allocator);
+    defer deinitForkChoiceFixture(allocator, fixture);
+
+    var pool = try Node.Pool.init(allocator, 500_000);
+    defer pool.deinit();
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 32);
+    defer test_state.deinit();
+
+    // Empty balance source ⇒ total = 0. computeHonestFfgSupportForCurrentTarget
+    // returns 0. 3 * 0 >= 2 * 0 ⇒ true. Documents the >= boundary explicitly.
+    var fcr = FastConfirmation.init(.{ .epoch = 0, .root = ZERO_ROOT }, 25, 0);
+    defer fcr.deinit(allocator);
+
+    var votes: Votes = .{};
+    defer votes.deinit(allocator);
+
+    var eq: EquivocatingIndices = .empty;
+    defer eq.deinit(allocator);
+
+    const ok = try willCurrentTargetBeJustified(
+        allocator,
+        fixture.fc,
+        &fcr,
+        test_state.cached_state,
+        &votes,
+        &eq,
+        fixture.b_root,
+        preset.SLOTS_PER_EPOCH,
+    );
+    try testing.expect(ok);
+}
+
+// D4: when total is positive but honest support is well below 2/3, returns false.
+test "FastConfirmation.willCurrentTargetBeJustified — honest below 2/3 yields false" {
+    const allocator = testing.allocator;
+    const fixture = try initLinearForkChoice(allocator);
+    defer deinitForkChoiceFixture(allocator, fixture);
+
+    var pool = try Node.Pool.init(allocator, 500_000);
+    defer pool.deinit();
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 32);
+    defer test_state.deinit();
+
+    // byzantine_threshold = 25; total_active_balance = 100, ffg_support = 0,
+    // ffg_weight_till_now = 0 ⇒ remaining_ffg_weight = 100,
+    // remaining_honest = floor(100 * 75 / 100) = 75, honest = 75.
+    // 3 * 75 = 225 >= 2 * 100 = 200 ⇒ true. Need a setup where 3*honest < 2*total.
+    //
+    // With byzantine_threshold = 25 and no votes, honest = 0.75 * total which
+    // always satisfies 3*0.75 = 2.25 >= 2 ⇒ true. To force false we need a
+    // larger byzantine_threshold OR a positive ffg_weight_till_now eating the
+    // honest term. Use clamped maximum (25) with ffg_weight_till_now ≈ total:
+    // make current_slot at end of epoch and total just one validator with
+    // balance 1 — but estimateCommitteeWeightBetweenSlots(start_of_epoch,
+    // current_slot - 1) is tricky; easier: use byzantine_threshold = 25 and
+    // a head_balance_source where total_active_balance is very small, then
+    // use a current_slot that yields ffg_weight_till_now = total via the full-
+    // epoch branch by setting current_slot = SLOTS_PER_EPOCH (so end_slot =
+    // SLOTS_PER_EPOCH-1, range [0, SLOTS_PER_EPOCH-1] = full epoch ⇒
+    // estimate = total). Then remaining = 0, min_honest = 0 - 0 = 0,
+    // honest = 0; 3*0 >= 2*total ⇒ false.
+    var fcr = FastConfirmation.init(.{ .epoch = 0, .root = ZERO_ROOT }, 25, 0);
+    defer fcr.deinit(allocator);
+    try fcr.head_balance_source.effective_balances.resize(allocator, 1);
+    fcr.head_balance_source.effective_balances.items[0] = 1;
+
+    var votes: Votes = .{};
+    defer votes.deinit(allocator);
+
+    var eq: EquivocatingIndices = .empty;
+    defer eq.deinit(allocator);
+
+    // current_slot = SLOTS_PER_EPOCH ⇒ current_epoch = 1, start = SLOTS_PER_EPOCH,
+    // end = SLOTS_PER_EPOCH - 1, range [start..end] is empty (start > end) ⇒
+    // ffg_weight_till_now = 0, remaining = 1, remaining_honest = floor(1*75/100) = 0.
+    // honest = 0 ⇒ 3*0 = 0 >= 2 ⇒ false.
+    const ok = try willCurrentTargetBeJustified(
+        allocator,
+        fixture.fc,
+        &fcr,
+        test_state.cached_state,
+        &votes,
+        &eq,
+        fixture.b_root,
+        preset.SLOTS_PER_EPOCH,
+    );
+    try testing.expect(!ok);
 }
