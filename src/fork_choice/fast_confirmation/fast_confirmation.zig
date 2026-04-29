@@ -5,9 +5,7 @@ const testing = std.testing;
 const consensus_types = @import("consensus_types");
 const primitives = consensus_types.primitive;
 const Slot = primitives.Slot.Type;
-const Epoch = primitives.Epoch.Type;
 const Root = primitives.Root.Type;
-const ValidatorIndex = primitives.ValidatorIndex.Type;
 
 const store_mod = @import("../store.zig");
 const Checkpoint = store_mod.Checkpoint;
@@ -18,7 +16,6 @@ const Checkpoint = store_mod.Checkpoint;
 
 pub const Error = error{
     StateMissing,
-    InvalidByzantineThreshold,
 } || Allocator.Error;
 
 // =========================================================================
@@ -71,8 +68,10 @@ pub const FastConfirmation = struct {
 
     head_assignments: SlotAssignments,
 
-    byzantine_threshold: u8,
-    proposer_score_boost: u8,
+    /// Spec range [0, 25]; types match `ChainConfig.CONFIRMATION_BYZANTINE_THRESHOLD` (u64)
+    /// and Lighthouse's `byzantine_threshold: u64` to avoid narrowing at every call site.
+    byzantine_threshold: u64,
+    proposer_score_boost: u64,
 
     last_update_slot: ?Slot = null,
     spec_test_mode: bool = false,
@@ -81,10 +80,10 @@ pub const FastConfirmation = struct {
     /// `byzantine_threshold` is clamped to [0, 25] per spec.
     pub fn init(
         finalized_cp: Checkpoint,
-        byzantine_threshold: u8,
-        proposer_score_boost: u8,
+        byzantine_threshold: u64,
+        proposer_score_boost: u64,
     ) FastConfirmation {
-        const clamped: u8 = @min(byzantine_threshold, 25);
+        const clamped: u64 = @min(byzantine_threshold, 25);
         return .{
             .confirmed_root = finalized_cp.root,
             .previous_epoch_observed_justified_checkpoint = finalized_cp,
@@ -135,8 +134,8 @@ test "FastConfirmation init/deinit smoke" {
     defer fcr.deinit(testing.allocator);
 
     try testing.expectEqual(rootFromByte(0xAA), fcr.confirmed_root);
-    try testing.expectEqual(@as(u8, 25), fcr.byzantine_threshold);
-    try testing.expectEqual(@as(u8, 40), fcr.proposer_score_boost);
+    try testing.expectEqual(@as(u64, 25), fcr.byzantine_threshold);
+    try testing.expectEqual(@as(u64, 40), fcr.proposer_score_boost);
     try testing.expect(!fcr.spec_test_mode);
 }
 
@@ -144,7 +143,7 @@ test "FastConfirmation byzantine_threshold clamps to 25" {
     const cp: Checkpoint = .{ .epoch = 0, .root = ZERO_ROOT };
     var fcr = FastConfirmation.init(cp, 99, 40);
     defer fcr.deinit(testing.allocator);
-    try testing.expectEqual(@as(u8, 25), fcr.byzantine_threshold);
+    try testing.expectEqual(@as(u64, 25), fcr.byzantine_threshold);
 }
 
 test "FastConfirmation setSpecTestMode" {
