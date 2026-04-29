@@ -481,7 +481,8 @@ pub fn BeaconState(comptime f: ForkSeq) type {
             .capella => .deneb,
             .deneb => .electra,
             .electra => .fulu,
-            .fulu => .fulu,
+            .fulu => .gloas,
+            .gloas => .gloas,
         }) {
             const cur = self.inner;
             const allocator = cur.allocator;
@@ -494,7 +495,8 @@ pub fn BeaconState(comptime f: ForkSeq) type {
                 .capella => .{ .inner = try populateFields(ForkTypes(.capella).BeaconState, ForkTypes(.deneb).BeaconState, allocator, pool, cur) },
                 .deneb => .{ .inner = try populateFields(ForkTypes(.deneb).BeaconState, ForkTypes(.electra).BeaconState, allocator, pool, cur) },
                 .electra => .{ .inner = try populateFields(ForkTypes(.electra).BeaconState, ForkTypes(.fulu).BeaconState, allocator, pool, cur) },
-                .fulu => return error.InvalidAtFork,
+                .fulu => .{ .inner = try populateFields(ForkTypes(.fulu).BeaconState, ForkTypes(.gloas).BeaconState, allocator, pool, cur) },
+                .gloas => return error.InvalidAtFork,
             };
         }
     };

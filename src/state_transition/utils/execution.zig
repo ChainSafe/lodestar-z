@@ -5,11 +5,12 @@ const BeaconState = @import("fork_types").BeaconState;
 const BeaconBlock = @import("fork_types").BeaconBlock;
 const BeaconBlockBody = @import("fork_types").BeaconBlockBody;
 const BlockType = @import("fork_types").BlockType;
-// const ExecutionPayloadHeader
 const ZERO_HASH = @import("constants").ZERO_HASH;
 
 pub fn isExecutionEnabled(comptime fork: ForkSeq, state: *BeaconState(fork), comptime block_type: BlockType, block: *const BeaconBlock(block_type, fork)) bool {
     if (comptime fork.lt(.bellatrix)) return false;
+    // Gloas (ePBS): execution is always enabled, payload is decoupled from the block
+    if (comptime fork.gte(.gloas)) return true;
     if (isMergeTransitionComplete(fork, state)) return true;
 
     switch (block_type) {
@@ -51,6 +52,10 @@ pub fn isMergeTransitionBlock(
 pub fn isMergeTransitionComplete(comptime fork: ForkSeq, state: *BeaconState(fork)) bool {
     if (comptime fork.lt(.bellatrix)) {
         return false;
+    }
+    // Gloas (ePBS): merge is always complete, no latestExecutionPayloadHeader in state
+    if (comptime fork.gte(.gloas)) {
+        return true;
     }
     const block_hash = state.latestExecutionPayloadHeaderBlockHash() catch return false;
     return !std.mem.eql(u8, block_hash[0..], ZERO_HASH[0..]);

@@ -185,6 +185,10 @@
             .root_source_file = "src/era/root.zig",
             .imports = .{ .consensus_types, .config, .fork_types, .preset, .state_transition, .snappy, .persistent_merkle_tree },
         },
+        .fork_choice = .{
+            .root_source_file = "src/fork_choice/root.zig",
+            .imports = .{ .consensus_types, .config, .preset, .state_transition, .fork_types, .hex, .constants },
+        },
     },
     .executables = .{
         .download_era_files = .{
@@ -290,6 +294,24 @@
                 .imports = .{ .state_transition, .fork_types, .consensus_types, .config, .zbench, .persistent_merkle_tree, .download_era_options, .era, .time },
             },
         },
+        .bench_fork_choice_compute_deltas = .{
+            .root_module = .{
+                .root_source_file = "bench/fork_choice/compute_deltas.zig",
+                .imports = .{ .fork_choice, .state_transition, .config, .constants, .zbench },
+            },
+        },
+        .bench_fork_choice_on_attestation = .{
+            .root_module = .{
+                .root_source_file = "bench/fork_choice/on_attestation.zig",
+                .imports = .{ .fork_choice, .fork_types, .consensus_types, .state_transition, .config, .constants, .zbench },
+            },
+        },
+        .bench_fork_choice_update_head = .{
+            .root_module = .{
+                .root_source_file = "bench/fork_choice/update_head.zig",
+                .imports = .{ .fork_choice, .state_transition, .config, .constants, .zbench },
+            },
+        },
     },
     .libraries = .{
         .bindings = .{
@@ -328,6 +350,7 @@
         .bls = .{ .root_module = .bls },
         .state_transition = .{ .root_module = .state_transition },
         .era = .{ .root_module = .era },
+        .fork_choice = .{ .root_module = .fork_choice },
 
         .int = .{
             .root_module = .{

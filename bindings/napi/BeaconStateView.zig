@@ -615,7 +615,7 @@ pub fn BeaconStateView_isExecutionEnabled(env: napi.Env, cb: napi.CallbackInfo(2
     }
     const result = switch (cached_state.state.forkSeq()) {
         inline else => |f| switch (signed_block.blockType()) {
-            inline else => |bt| if (comptime bt == .blinded and f.lt(.bellatrix)) {
+            inline else => |bt| if (comptime (bt == .blinded and f.lt(.bellatrix)) or (bt == .blinded and f.gte(.gloas))) {
                 return error.InvalidBlockTypeForFork;
             } else st.isExecutionEnabled(
                 f,
