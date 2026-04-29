@@ -412,13 +412,13 @@ describe("BeaconStateView", () => {
   describe("sync committee cache", () => {
     it("currentSyncCommitteeIndexed should have validatorIndices", () => {
       const indexed = state.currentSyncCommitteeIndexed;
-      expect(Array.isArray(indexed.validatorIndices)).toBe(true);
+      expect(indexed.validatorIndices).toBeInstanceOf(Uint32Array);
       expect(indexed.validatorIndices.length).toBeGreaterThan(0);
     });
 
     it("getIndexedSyncCommitteeAtEpoch should return cache", () => {
       const indexed = state.getIndexedSyncCommitteeAtEpoch(state.epoch);
-      expect(Array.isArray(indexed.validatorIndices)).toBe(true);
+      expect(indexed.validatorIndices).toBeInstanceOf(Uint32Array);
     });
 
     it("syncProposerReward should be a non-negative number", () => {
