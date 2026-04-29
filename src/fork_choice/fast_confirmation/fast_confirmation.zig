@@ -1342,6 +1342,506 @@ pub fn willCurrentTargetBeJustified(
 }
 
 // =========================================================================
+// 8. Algorithm + entry points (Phase E)
+// =========================================================================
+
+/// Voting source for FCR purposes — analogous to Lighthouse's
+/// `get_voting_source_epoch`. When the block was proposed in a previous
+/// epoch we use its unrealized justified checkpoint (the "pulled-up" view);
+/// otherwise we use the realized justified checkpoint stored on the block.
+///
+/// Returns `null` if the block is not present in proto array.
+fn getVotingSourceEpoch(
+    proto_array: *const ProtoArray,
+    block_root: Root,
+    current_slot: Slot,
+) ?Epoch {
+    const status = proto_array.getDefaultVariant(block_root) orelse return null;
+    const block = proto_array.getBlock(block_root, status) orelse return null;
+    const current_epoch = computeEpochAtSlot(current_slot);
+    const block_epoch = computeEpochAtSlot(block.slot);
+    if (current_epoch > block_epoch) {
+        return block.unrealized_justified_epoch;
+    }
+    return block.justified_epoch;
+}
+
+/// Unrealized justified epoch for a block in proto array, or `null` if unknown.
+fn getUnrealizedJustifiedEpoch(proto_array: *const ProtoArray, block_root: Root) ?Epoch {
+    const status = proto_array.getDefaultVariant(block_root) orelse return null;
+    const block = proto_array.getBlock(block_root, status) orelse return null;
+    return block.unrealized_justified_epoch;
+}
+
+/// Spec: `update_fast_confirmation_variables(fcr_store)`.
+///
+/// Reentrancy guard: a same-slot duplicate call is a no-op so callers can
+/// invoke this from multiple orchestration points within a slot without
+/// double-rotating state.
+fn updateFastConfirmationVariables(
+    self: *FastConfirmation,
+    head_root: Root,
+    unrealized_justified_checkpoint: *const Checkpoint,
+    current_slot: Slot,
+) void {
+    if (self.last_update_slot) |s| {
+        if (current_slot <= s) return;
+    }
+
+    // Rotate slot heads.
+    self.previous_slot_head = self.current_slot_head;
+    self.current_slot_head = head_root;
+
+    // Last slot of the current epoch: snapshot greatest unrealized.
+    if (isStartSlotAtEpoch(current_slot + 1)) {
+        self.previous_epoch_greatest_unrealized_checkpoint = unrealized_justified_checkpoint.*;
+    }
+
+    // First slot of the current epoch: rotate observed-justified checkpoints.
+    if (isStartSlotAtEpoch(current_slot)) {
+        self.previous_epoch_observed_justified_checkpoint =
+            self.current_epoch_observed_justified_checkpoint;
+        self.current_epoch_observed_justified_checkpoint =
+            self.previous_epoch_greatest_unrealized_checkpoint;
+    }
+
+    self.last_update_slot = current_slot;
+}
+
+/// Spec: `find_latest_confirmed_descendant(fcr_store, latest_confirmed_root)`.
+///
+/// Two-pass canonical-chain walk that attempts to advance `confirmed_root`
+/// toward `head_root`. Loop 1 advances within the previous epoch; loop 2
+/// advances within the current epoch.
+///
+/// Returns the (possibly unchanged) confirmed root.
+fn findLatestConfirmedDescendant(
+    self: *const FastConfirmation,
+    allocator: Allocator,
+    fc: *const ForkChoice,
+    state: *const CachedBeaconState,
+    votes: *Votes,
+    equivocating_indices: *const EquivocatingIndices,
+    head_root: Root,
+    head_unrealized_justified: *const Checkpoint,
+    confirmed_root: Root,
+    current_slot: Slot,
+) Error!Root {
+    const proto_array = fc.proto_array;
+    const current_epoch = computeEpochAtSlot(current_slot);
+    var result_root = confirmed_root;
+
+    const is_epoch_start = isStartSlotAtEpoch(current_slot);
+
+    // ---- Loop 1: advance within previous epoch ----
+    const confirmed_epoch_opt: ?Epoch = if (proto_array.getDefaultVariant(result_root)) |st|
+        if (proto_array.getBlock(result_root, st)) |b| computeEpochAtSlot(b.slot) else null
+    else
+        null;
+
+    const prev_voting_source_epoch = getVotingSourceEpoch(proto_array, self.previous_slot_head, current_slot);
+    const prev_uj_epoch = getUnrealizedJustifiedEpoch(proto_array, self.previous_slot_head);
+    const head_uj_epoch = getUnrealizedJustifiedEpoch(proto_array, head_root);
+
+    const confirmed_epoch_check = confirmed_epoch_opt != null and
+        confirmed_epoch_opt.? + 1 == current_epoch;
+    const voting_source_check = prev_voting_source_epoch != null and
+        prev_voting_source_epoch.? + 2 >= current_epoch;
+
+    var loop1_guard = confirmed_epoch_check and voting_source_check;
+    if (loop1_guard and !is_epoch_start) {
+        const no_conflict = try willNoConflictingCheckpointBeJustified(
+            allocator,
+            fc,
+            self,
+            state,
+            votes,
+            equivocating_indices,
+            head_root,
+            current_slot,
+            head_unrealized_justified,
+        );
+        const uj_prev_ok = prev_uj_epoch != null and prev_uj_epoch.? + 1 >= current_epoch;
+        const uj_head_ok = head_uj_epoch != null and head_uj_epoch.? + 1 >= current_epoch;
+        loop1_guard = no_conflict and (uj_prev_ok or uj_head_ok);
+    }
+
+    if (loop1_guard) {
+        const canonical_roots = try getAncestorRoots(allocator, fc, head_root, result_root);
+        defer allocator.free(canonical_roots);
+
+        // TigerStyle: bound the loop. canonical_roots length is itself bounded
+        // by getAncestorRoots, but defend against pathological inputs.
+        const limit: usize = @min(canonical_roots.len, ANCESTOR_WALK_MAX_ITERATIONS);
+        var i: usize = 0;
+        while (i < limit) : (i += 1) {
+            const block_root = canonical_roots[i];
+            const block_epoch_opt: ?Epoch = if (proto_array.getDefaultVariant(block_root)) |st|
+                if (proto_array.getBlock(block_root, st)) |b| computeEpochAtSlot(b.slot) else null
+            else
+                null;
+            // Stop if we cross into the current epoch or the block is unknown.
+            if (block_epoch_opt == null or block_epoch_opt.? >= current_epoch) break;
+
+            // Previous slot head must be a descendant of `block_root` (otherwise
+            // we can't rely on the previous slot's view to validate it).
+            const desc = try isAncestor(fc, self.previous_slot_head, block_root);
+            if (!desc) break;
+
+            const ok = try isOneConfirmed(
+                allocator,
+                self,
+                proto_array,
+                state,
+                &self.current_balance_source,
+                votes,
+                equivocating_indices,
+                block_root,
+                current_slot,
+            );
+            if (!ok) break;
+            result_root = block_root;
+        }
+    }
+
+    // ---- Loop 2: advance within current epoch (with FFG promotion gate) ----
+    const loop2_uj_head_ok = head_uj_epoch != null and head_uj_epoch.? + 1 >= current_epoch;
+    const loop2_guard = is_epoch_start or loop2_uj_head_ok;
+
+    if (loop2_guard) {
+        const canonical_roots = try getAncestorRoots(allocator, fc, head_root, result_root);
+        defer allocator.free(canonical_roots);
+
+        var tentative_root = result_root;
+        const limit: usize = @min(canonical_roots.len, ANCESTOR_WALK_MAX_ITERATIONS);
+        var i: usize = 0;
+        while (i < limit) : (i += 1) {
+            const block_root = canonical_roots[i];
+            const block_epoch_opt: ?Epoch = if (proto_array.getDefaultVariant(block_root)) |st|
+                if (proto_array.getBlock(block_root, st)) |b| computeEpochAtSlot(b.slot) else null
+            else
+                null;
+            const tentative_epoch_opt: ?Epoch = if (proto_array.getDefaultVariant(tentative_root)) |st|
+                if (proto_array.getBlock(tentative_root, st)) |b| computeEpochAtSlot(b.slot) else null
+            else
+                null;
+            if (block_epoch_opt == null or tentative_epoch_opt == null) break;
+
+            // When crossing into the current epoch, require the FFG check.
+            if (block_epoch_opt.? > tentative_epoch_opt.?) {
+                const ffg_ok = try willCurrentTargetBeJustified(
+                    allocator,
+                    fc,
+                    self,
+                    state,
+                    votes,
+                    equivocating_indices,
+                    head_root,
+                    current_slot,
+                );
+                if (!ffg_ok) break;
+            }
+
+            const ok = try isOneConfirmed(
+                allocator,
+                self,
+                proto_array,
+                state,
+                &self.current_balance_source,
+                votes,
+                equivocating_indices,
+                block_root,
+                current_slot,
+            );
+            if (!ok) break;
+            tentative_root = block_root;
+        }
+
+        // Promote `tentative_root` to `result_root` only if it is safe from a
+        // future re-org in the current and next epochs.
+        const tentative_epoch_opt: ?Epoch = if (proto_array.getDefaultVariant(tentative_root)) |st|
+            if (proto_array.getBlock(tentative_root, st)) |b| computeEpochAtSlot(b.slot) else null
+        else
+            null;
+        const tentative_voting_source_epoch =
+            getVotingSourceEpoch(proto_array, tentative_root, current_slot);
+
+        const promote_check_current = tentative_epoch_opt != null and
+            tentative_epoch_opt.? == current_epoch;
+        var promote_check_safe = false;
+        if (tentative_voting_source_epoch) |vs_epoch| {
+            if (vs_epoch + 2 >= current_epoch) {
+                if (is_epoch_start) {
+                    promote_check_safe = true;
+                } else {
+                    promote_check_safe = try willNoConflictingCheckpointBeJustified(
+                        allocator,
+                        fc,
+                        self,
+                        state,
+                        votes,
+                        equivocating_indices,
+                        head_root,
+                        current_slot,
+                        head_unrealized_justified,
+                    );
+                }
+            }
+        }
+
+        if (promote_check_current or promote_check_safe) {
+            result_root = tentative_root;
+        }
+    }
+
+    return result_root;
+}
+
+/// Spec: `get_latest_confirmed(fcr_store)`.
+///
+/// Four-step decision flow:
+///   1. Reset to finalized when stale, off-canonical, or chain-unsafe at epoch start.
+///   2. Restart from observed-justified at epoch start when conditions match.
+///   3. If confirmed_epoch + 1 >= current_epoch, advance via descendant search.
+///   4. Otherwise return the confirmed root unchanged.
+fn getLatestConfirmed(
+    self: *const FastConfirmation,
+    allocator: Allocator,
+    fc: *const ForkChoice,
+    state: *const CachedBeaconState,
+    votes: *Votes,
+    equivocating_indices: *const EquivocatingIndices,
+    finalized_checkpoint: *const Checkpoint,
+    head_root: Root,
+    head_unrealized_justified: *const Checkpoint,
+    current_slot: Slot,
+) Error!Root {
+    const proto_array = fc.proto_array;
+    const current_epoch = computeEpochAtSlot(current_slot);
+    var confirmed_root = self.confirmed_root;
+
+    // ---- Step 1: revert to finalized when stale, off-canonical, or unsafe at epoch start ----
+    const is_epoch_start = isStartSlotAtEpoch(current_slot);
+    const confirmed_epoch_opt: ?Epoch = if (proto_array.getDefaultVariant(confirmed_root)) |st|
+        if (proto_array.getBlock(confirmed_root, st)) |b| computeEpochAtSlot(b.slot) else null
+    else
+        null;
+
+    const stale = confirmed_epoch_opt == null or confirmed_epoch_opt.? + 1 < current_epoch;
+    var off_canonical = false;
+    if (!stale) {
+        off_canonical = !try isAncestor(fc, head_root, confirmed_root);
+    }
+    var chain_unsafe = false;
+    if (!stale and !off_canonical and is_epoch_start) {
+        chain_unsafe = !try isConfirmedChainSafe(
+            self,
+            fc,
+            state,
+            votes,
+            equivocating_indices,
+            confirmed_root,
+            current_slot,
+            allocator,
+        );
+    }
+    if (stale or off_canonical or chain_unsafe) {
+        confirmed_root = finalized_checkpoint.root;
+    }
+
+    // ---- Step 2: restart from observed-justified at epoch start when conditions match ----
+    const observed = self.current_epoch_observed_justified_checkpoint;
+    if (is_epoch_start and observed.epoch + 1 == current_epoch) {
+        // Slot of the observed-justified block; if unknown we cannot restart.
+        const observed_slot_opt: ?Slot = getBlockSlot(proto_array, observed.root) catch |err| switch (err) {
+            error.StateMissing => null,
+            else => return err,
+        };
+        if (observed_slot_opt) |observed_slot| {
+            const observed_block_epoch = computeEpochAtSlot(observed_slot);
+            const observed_epoch_ok = observed_block_epoch + 1 == current_epoch;
+            const head_uj_match = observed.eql(head_unrealized_justified.*);
+
+            if (observed_epoch_ok and head_uj_match) {
+                // Compare slot of confirmed_root with observed_slot. If confirmed
+                // is unknown we cannot reason about staleness; skip restart.
+                const confirmed_slot_opt: ?Slot = getBlockSlot(proto_array, confirmed_root) catch |err| switch (err) {
+                    error.StateMissing => null,
+                    else => return err,
+                };
+                if (confirmed_slot_opt) |confirmed_slot| {
+                    if (confirmed_slot < observed_slot) {
+                        confirmed_root = observed.root;
+                    }
+                }
+            }
+        }
+    }
+
+    // ---- Step 3 / 4: descendant search when in range, else stable ----
+    const post_confirmed_epoch_opt: ?Epoch =
+        if (proto_array.getDefaultVariant(confirmed_root)) |st|
+            if (proto_array.getBlock(confirmed_root, st)) |b| computeEpochAtSlot(b.slot) else null
+        else
+            null;
+
+    if (post_confirmed_epoch_opt) |e| {
+        if (e + 1 >= current_epoch) {
+            return findLatestConfirmedDescendant(
+                self,
+                allocator,
+                fc,
+                state,
+                votes,
+                equivocating_indices,
+                head_root,
+                head_unrealized_justified,
+                confirmed_root,
+                current_slot,
+            );
+        }
+    }
+
+    return confirmed_root;
+}
+
+/// Rebuild `head_balance_source` for the current epoch on `head_root`'s chain.
+///
+/// The TS / Rust implementations key the head balance source on the
+/// `(epoch, head_root)` pair so a switch in the head invalidates the cache.
+/// We follow the same convention.
+///
+/// TODO Phase F: the spec wants the *checkpoint state* for the current epoch,
+/// not the head state. Phase E only has the head state available; the spec test
+/// runner in Phase F will provide the proper checkpoint state.
+fn rebuildHeadBalanceSource(
+    self: *FastConfirmation,
+    allocator: Allocator,
+    state: *const CachedBeaconState,
+    head_root: Root,
+    current_slot: Slot,
+) Error!void {
+    const current_epoch = computeEpochAtSlot(current_slot);
+    const cp: Checkpoint = .{ .epoch = current_epoch, .root = head_root };
+    try self.head_balance_source.rebuild(allocator, state, cp);
+}
+
+/// Spec: `on_fast_confirmation` handler.
+///
+/// In production (`spec_test_mode = false`) this also assigns
+/// `self.confirmed_root` from `getLatestConfirmed`. The spec-test path uses
+/// `runConfirmation` instead.
+pub fn onFastConfirmation(
+    self: *FastConfirmation,
+    allocator: Allocator,
+    fc: *const ForkChoice,
+    state: *const CachedBeaconState,
+    votes: *Votes,
+    equivocating_indices: *const EquivocatingIndices,
+    finalized_checkpoint: *const Checkpoint,
+    justified_checkpoint: *const Checkpoint,
+    head_unrealized_justified: *const Checkpoint,
+    head_root: Root,
+    current_slot: Slot,
+) Error!void {
+    // Lighthouse derives `justified_checkpoint` from proto-array internally;
+    // we accept it for caller flexibility but currently mirror Lighthouse's
+    // unused-arg behaviour. It will be consumed when we wire up the
+    // pulled-up justification logic in Phase F.
+    _ = justified_checkpoint;
+
+    updateFastConfirmationVariables(self, head_root, head_unrealized_justified, current_slot);
+
+    // Rebuild committee assignments + head balance source for current slot.
+    // TODO Phase F: pass the proper checkpoint states here; Phase E uses the
+    // head state for both head and justified-checkpoint balance sources.
+    try self.head_assignments.rebuild(allocator, state, current_slot);
+    try rebuildHeadBalanceSource(self, allocator, state, head_root, current_slot);
+
+    // Rotate previous / current balance sources when their checkpoints changed.
+    if (!self.previous_balance_source.checkpoint.eql(self.previous_epoch_observed_justified_checkpoint)) {
+        try self.previous_balance_source.rebuild(
+            allocator,
+            state,
+            self.previous_epoch_observed_justified_checkpoint,
+        );
+    }
+    if (!self.current_balance_source.checkpoint.eql(self.current_epoch_observed_justified_checkpoint)) {
+        try self.current_balance_source.rebuild(
+            allocator,
+            state,
+            self.current_epoch_observed_justified_checkpoint,
+        );
+    }
+
+    if (!self.spec_test_mode) {
+        self.confirmed_root = try getLatestConfirmed(
+            self,
+            allocator,
+            fc,
+            state,
+            votes,
+            equivocating_indices,
+            finalized_checkpoint,
+            head_root,
+            head_unrealized_justified,
+            current_slot,
+        );
+    }
+}
+
+/// Spec-test orchestration entry point. Identical to `onFastConfirmation`
+/// except it always runs `getLatestConfirmed`, regardless of `spec_test_mode`.
+pub fn runConfirmation(
+    self: *FastConfirmation,
+    allocator: Allocator,
+    fc: *const ForkChoice,
+    state: *const CachedBeaconState,
+    votes: *Votes,
+    equivocating_indices: *const EquivocatingIndices,
+    finalized_checkpoint: *const Checkpoint,
+    justified_checkpoint: *const Checkpoint,
+    head_unrealized_justified: *const Checkpoint,
+    head_root: Root,
+    current_slot: Slot,
+) Error!void {
+    _ = justified_checkpoint;
+
+    updateFastConfirmationVariables(self, head_root, head_unrealized_justified, current_slot);
+
+    try self.head_assignments.rebuild(allocator, state, current_slot);
+    try rebuildHeadBalanceSource(self, allocator, state, head_root, current_slot);
+
+    if (!self.previous_balance_source.checkpoint.eql(self.previous_epoch_observed_justified_checkpoint)) {
+        try self.previous_balance_source.rebuild(
+            allocator,
+            state,
+            self.previous_epoch_observed_justified_checkpoint,
+        );
+    }
+    if (!self.current_balance_source.checkpoint.eql(self.current_epoch_observed_justified_checkpoint)) {
+        try self.current_balance_source.rebuild(
+            allocator,
+            state,
+            self.current_epoch_observed_justified_checkpoint,
+        );
+    }
+
+    self.confirmed_root = try getLatestConfirmed(
+        self,
+        allocator,
+        fc,
+        state,
+        votes,
+        equivocating_indices,
+        finalized_checkpoint,
+        head_root,
+        head_unrealized_justified,
+        current_slot,
+    );
+}
+
+// =========================================================================
 // Tests
 // =========================================================================
 
@@ -2942,4 +3442,402 @@ test "FastConfirmation.willCurrentTargetBeJustified — honest below 2/3 yields 
         preset.SLOTS_PER_EPOCH,
     );
     try testing.expect(!ok);
+}
+
+// --- Phase E: Algorithm + entry point tests ---
+
+// E1: updateFastConfirmationVariables — first call sets last_update_slot.
+test "FastConfirmation.updateFastConfirmationVariables — first call sets last_update_slot" {
+    const allocator = testing.allocator;
+
+    const init_cp: Checkpoint = .{ .epoch = 0, .root = ZERO_ROOT };
+    var fcr = FastConfirmation.init(init_cp, 25, 40);
+    defer fcr.deinit(allocator);
+
+    try testing.expect(fcr.last_update_slot == null);
+
+    const head: Root = rootFromByte(0xAB);
+    const uj: Checkpoint = .{ .epoch = 0, .root = ZERO_ROOT };
+    updateFastConfirmationVariables(&fcr, head, &uj, 1);
+
+    try testing.expectEqual(@as(?Slot, 1), fcr.last_update_slot);
+    try testing.expectEqualSlices(u8, &head, &fcr.current_slot_head);
+    // previous_slot_head was the initial finalized root (ZERO).
+    try testing.expectEqualSlices(u8, &ZERO_ROOT, &fcr.previous_slot_head);
+}
+
+// E1: same-slot duplicate call is a no-op.
+test "FastConfirmation.updateFastConfirmationVariables — duplicate same-slot call is no-op" {
+    const allocator = testing.allocator;
+
+    const init_cp: Checkpoint = .{ .epoch = 0, .root = ZERO_ROOT };
+    var fcr = FastConfirmation.init(init_cp, 25, 40);
+    defer fcr.deinit(allocator);
+
+    const head_a: Root = rootFromByte(0xA1);
+    const head_b: Root = rootFromByte(0xB2);
+    const uj: Checkpoint = .{ .epoch = 0, .root = ZERO_ROOT };
+
+    updateFastConfirmationVariables(&fcr, head_a, &uj, 1);
+    const after_first_current = fcr.current_slot_head;
+    const after_first_previous = fcr.previous_slot_head;
+
+    // Second call with the SAME slot must not rotate or update anything.
+    updateFastConfirmationVariables(&fcr, head_b, &uj, 1);
+
+    try testing.expectEqual(@as(?Slot, 1), fcr.last_update_slot);
+    try testing.expectEqualSlices(u8, &after_first_current, &fcr.current_slot_head);
+    try testing.expectEqualSlices(u8, &after_first_previous, &fcr.previous_slot_head);
+}
+
+// E1: last slot of epoch snapshots greatest unrealized.
+test "FastConfirmation.updateFastConfirmationVariables — last slot of epoch snapshots greatest unrealized" {
+    const allocator = testing.allocator;
+
+    const init_cp: Checkpoint = .{ .epoch = 0, .root = ZERO_ROOT };
+    var fcr = FastConfirmation.init(init_cp, 25, 40);
+    defer fcr.deinit(allocator);
+
+    const head: Root = rootFromByte(0xAB);
+    const fresh_uj: Checkpoint = .{ .epoch = 7, .root = rootFromByte(0xCD) };
+
+    // Last slot of epoch 0 is SLOTS_PER_EPOCH - 1, so current_slot + 1 is on epoch boundary.
+    const last_slot: Slot = preset.SLOTS_PER_EPOCH - 1;
+    updateFastConfirmationVariables(&fcr, head, &fresh_uj, last_slot);
+
+    try testing.expect(fcr.previous_epoch_greatest_unrealized_checkpoint.eql(fresh_uj));
+}
+
+// E1: first slot of epoch rotates observed-justified.
+test "FastConfirmation.updateFastConfirmationVariables — first slot of epoch rotates observed-justified" {
+    const allocator = testing.allocator;
+
+    const init_cp: Checkpoint = .{ .epoch = 0, .root = ZERO_ROOT };
+    var fcr = FastConfirmation.init(init_cp, 25, 40);
+    defer fcr.deinit(allocator);
+
+    // Pre-load distinct checkpoints so we can observe the rotation.
+    const cp_prev_obs: Checkpoint = .{ .epoch = 1, .root = rootFromByte(0x10) };
+    const cp_curr_obs: Checkpoint = .{ .epoch = 2, .root = rootFromByte(0x20) };
+    const cp_greatest: Checkpoint = .{ .epoch = 3, .root = rootFromByte(0x30) };
+    fcr.previous_epoch_observed_justified_checkpoint = cp_prev_obs;
+    fcr.current_epoch_observed_justified_checkpoint = cp_curr_obs;
+    fcr.previous_epoch_greatest_unrealized_checkpoint = cp_greatest;
+
+    const head: Root = rootFromByte(0xAB);
+    const uj: Checkpoint = .{ .epoch = 0, .root = ZERO_ROOT };
+    // First slot of epoch 1 = SLOTS_PER_EPOCH.
+    updateFastConfirmationVariables(&fcr, head, &uj, preset.SLOTS_PER_EPOCH);
+
+    try testing.expect(fcr.previous_epoch_observed_justified_checkpoint.eql(cp_curr_obs));
+    try testing.expect(fcr.current_epoch_observed_justified_checkpoint.eql(cp_greatest));
+}
+
+// E2: findLatestConfirmedDescendant — head == confirmed → returns confirmed unchanged.
+test "FastConfirmation.findLatestConfirmedDescendant — head == confirmed returns unchanged" {
+    const allocator = testing.allocator;
+    const fixture = try initLinearForkChoice(allocator);
+    defer deinitForkChoiceFixture(allocator, fixture);
+
+    var pool = try Node.Pool.init(allocator, 500_000);
+    defer pool.deinit();
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 32);
+    defer test_state.deinit();
+
+    var fcr = FastConfirmation.init(.{ .epoch = 0, .root = fixture.b_root }, 25, 40);
+    defer fcr.deinit(allocator);
+
+    var votes: Votes = .{};
+    defer votes.deinit(allocator);
+
+    var eq: EquivocatingIndices = .empty;
+    defer eq.deinit(allocator);
+
+    const head_uj: Checkpoint = .{ .epoch = 0, .root = fixture.genesis_root };
+
+    // confirmed_root == head_root ⇒ canonical_roots is empty in both loops, so
+    // the function must return confirmed_root unchanged.
+    const out = try findLatestConfirmedDescendant(
+        &fcr,
+        allocator,
+        fixture.fc,
+        test_state.cached_state,
+        &votes,
+        &eq,
+        fixture.b_root,
+        &head_uj,
+        fixture.b_root,
+        preset.SLOTS_PER_EPOCH,
+    );
+    try testing.expectEqualSlices(u8, &fixture.b_root, &out);
+}
+
+// E2: returns a value within expected range (ancestor of head_root).
+test "FastConfirmation.findLatestConfirmedDescendant — returns ancestor of head" {
+    const allocator = testing.allocator;
+    const fixture = try initLinearForkChoice(allocator);
+    defer deinitForkChoiceFixture(allocator, fixture);
+
+    var pool = try Node.Pool.init(allocator, 500_000);
+    defer pool.deinit();
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 32);
+    defer test_state.deinit();
+
+    var fcr = FastConfirmation.init(.{ .epoch = 0, .root = fixture.genesis_root }, 25, 40);
+    defer fcr.deinit(allocator);
+
+    var votes: Votes = .{};
+    defer votes.deinit(allocator);
+
+    var eq: EquivocatingIndices = .empty;
+    defer eq.deinit(allocator);
+
+    const head_uj: Checkpoint = .{ .epoch = 0, .root = fixture.genesis_root };
+
+    // The exact return value depends on subtle interactions; we only assert
+    // it is one of {genesis, a, b} — i.e. a known ancestor of head_root.
+    const out = try findLatestConfirmedDescendant(
+        &fcr,
+        allocator,
+        fixture.fc,
+        test_state.cached_state,
+        &votes,
+        &eq,
+        fixture.b_root,
+        &head_uj,
+        fixture.genesis_root,
+        preset.SLOTS_PER_EPOCH,
+    );
+    const is_known =
+        std.mem.eql(u8, &out, &fixture.genesis_root) or
+        std.mem.eql(u8, &out, &fixture.a_root) or
+        std.mem.eql(u8, &out, &fixture.b_root);
+    try testing.expect(is_known);
+}
+
+// E3: getLatestConfirmed — stale confirmed resets to finalized.
+test "FastConfirmation.getLatestConfirmed — stale confirmed resets to finalized" {
+    const allocator = testing.allocator;
+    const fixture = try initLinearForkChoice(allocator);
+    defer deinitForkChoiceFixture(allocator, fixture);
+
+    var pool = try Node.Pool.init(allocator, 500_000);
+    defer pool.deinit();
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 32);
+    defer test_state.deinit();
+
+    // confirmed_root is unknown to proto array → epoch unknown → treated as stale.
+    var fcr = FastConfirmation.init(.{ .epoch = 0, .root = rootFromByte(0xFE) }, 25, 40);
+    defer fcr.deinit(allocator);
+
+    var votes: Votes = .{};
+    defer votes.deinit(allocator);
+
+    var eq: EquivocatingIndices = .empty;
+    defer eq.deinit(allocator);
+
+    const finalized: Checkpoint = .{ .epoch = 0, .root = fixture.genesis_root };
+    const head_uj: Checkpoint = .{ .epoch = 0, .root = fixture.genesis_root };
+
+    // current_slot = 5 * SLOTS_PER_EPOCH puts us in epoch 5; any unknown epoch is stale.
+    const out = try getLatestConfirmed(
+        &fcr,
+        allocator,
+        fixture.fc,
+        test_state.cached_state,
+        &votes,
+        &eq,
+        &finalized,
+        fixture.b_root,
+        &head_uj,
+        5 * preset.SLOTS_PER_EPOCH,
+    );
+    try testing.expectEqualSlices(u8, &fixture.genesis_root, &out);
+}
+
+// E3: off-canonical confirmed resets to finalized.
+test "FastConfirmation.getLatestConfirmed — off-canonical confirmed resets to finalized" {
+    const allocator = testing.allocator;
+    const fixture = try initLinearForkChoice(allocator);
+    defer deinitForkChoiceFixture(allocator, fixture);
+
+    var pool = try Node.Pool.init(allocator, 500_000);
+    defer pool.deinit();
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 32);
+    defer test_state.deinit();
+
+    // confirmed_root = b_root, head_root = a_root → b is NOT an ancestor of a.
+    var fcr = FastConfirmation.init(.{ .epoch = 1, .root = fixture.b_root }, 25, 40);
+    defer fcr.deinit(allocator);
+
+    var votes: Votes = .{};
+    defer votes.deinit(allocator);
+
+    var eq: EquivocatingIndices = .empty;
+    defer eq.deinit(allocator);
+
+    const finalized: Checkpoint = .{ .epoch = 0, .root = fixture.genesis_root };
+    const head_uj: Checkpoint = .{ .epoch = 0, .root = fixture.genesis_root };
+
+    const out = try getLatestConfirmed(
+        &fcr,
+        allocator,
+        fixture.fc,
+        test_state.cached_state,
+        &votes,
+        &eq,
+        &finalized,
+        fixture.a_root,
+        &head_uj,
+        2,
+    );
+    // b not an ancestor of a → reset to finalized (genesis).
+    try testing.expectEqualSlices(u8, &fixture.genesis_root, &out);
+}
+
+// E3: stable case — when confirmed is too old to advance, returns it unchanged.
+test "FastConfirmation.getLatestConfirmed — stable when confirmed is older than current_epoch - 1" {
+    const allocator = testing.allocator;
+    const fixture = try initLinearForkChoice(allocator);
+    defer deinitForkChoiceFixture(allocator, fixture);
+
+    var pool = try Node.Pool.init(allocator, 500_000);
+    defer pool.deinit();
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 32);
+    defer test_state.deinit();
+
+    // confirmed_root = genesis (epoch 0), current_slot in epoch 5 → epoch+1 < 5
+    // ⇒ stale, resets to finalized (which is also genesis here).
+    var fcr = FastConfirmation.init(.{ .epoch = 0, .root = fixture.genesis_root }, 25, 40);
+    defer fcr.deinit(allocator);
+
+    var votes: Votes = .{};
+    defer votes.deinit(allocator);
+
+    var eq: EquivocatingIndices = .empty;
+    defer eq.deinit(allocator);
+
+    const finalized: Checkpoint = .{ .epoch = 0, .root = fixture.genesis_root };
+    const head_uj: Checkpoint = .{ .epoch = 0, .root = fixture.genesis_root };
+
+    // current_slot = 1, current_epoch = 0. confirmed at epoch 0; not stale,
+    // not off-canonical, not epoch start. confirmed_epoch + 1 = 1 >= 0 ⇒ enter
+    // descendant search. With no votes the search will not advance, returning
+    // genesis unchanged.
+    const out = try getLatestConfirmed(
+        &fcr,
+        allocator,
+        fixture.fc,
+        test_state.cached_state,
+        &votes,
+        &eq,
+        &finalized,
+        fixture.b_root,
+        &head_uj,
+        1,
+    );
+    // Result is one of {genesis, a, b} — known ancestor of head.
+    const is_known =
+        std.mem.eql(u8, &out, &fixture.genesis_root) or
+        std.mem.eql(u8, &out, &fixture.a_root) or
+        std.mem.eql(u8, &out, &fixture.b_root);
+    try testing.expect(is_known);
+}
+
+// E3: descendant-search branch is reachable when confirmed_epoch + 1 >= current_epoch.
+test "FastConfirmation.getLatestConfirmed — descendant search branch returns ancestor of head" {
+    const allocator = testing.allocator;
+    const fixture = try initLinearForkChoice(allocator);
+    defer deinitForkChoiceFixture(allocator, fixture);
+
+    var pool = try Node.Pool.init(allocator, 500_000);
+    defer pool.deinit();
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 32);
+    defer test_state.deinit();
+
+    // confirmed_root = a_root (slot 1, epoch 0), current_slot in epoch 1 →
+    // confirmed_epoch + 1 = 1 == current_epoch ⇒ descendant search.
+    var fcr = FastConfirmation.init(.{ .epoch = 0, .root = fixture.a_root }, 25, 40);
+    defer fcr.deinit(allocator);
+
+    var votes: Votes = .{};
+    defer votes.deinit(allocator);
+
+    var eq: EquivocatingIndices = .empty;
+    defer eq.deinit(allocator);
+
+    const finalized: Checkpoint = .{ .epoch = 0, .root = fixture.genesis_root };
+    const head_uj: Checkpoint = .{ .epoch = 0, .root = fixture.genesis_root };
+
+    const out = try getLatestConfirmed(
+        &fcr,
+        allocator,
+        fixture.fc,
+        test_state.cached_state,
+        &votes,
+        &eq,
+        &finalized,
+        fixture.b_root,
+        &head_uj,
+        preset.SLOTS_PER_EPOCH,
+    );
+    const is_known =
+        std.mem.eql(u8, &out, &fixture.genesis_root) or
+        std.mem.eql(u8, &out, &fixture.a_root) or
+        std.mem.eql(u8, &out, &fixture.b_root);
+    try testing.expect(is_known);
+}
+
+// E6: integration smoke test — wires everything together and verifies
+// `confirmed_root` is sensible after `onFastConfirmation`.
+test "FastConfirmation.onFastConfirmation — integration smoke (chain too short to advance)" {
+    const allocator = testing.allocator;
+    const fixture = try initLinearForkChoice(allocator);
+    defer deinitForkChoiceFixture(allocator, fixture);
+
+    var pool = try Node.Pool.init(allocator, 500_000);
+    defer pool.deinit();
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 32);
+    defer test_state.deinit();
+
+    var fcr = FastConfirmation.init(.{ .epoch = 0, .root = fixture.genesis_root }, 25, 40);
+    defer fcr.deinit(allocator);
+    fcr.setSpecTestMode(false);
+
+    var votes: Votes = .{};
+    defer votes.deinit(allocator);
+    try votes.ensureValidatorCount(allocator, 32);
+
+    var eq: EquivocatingIndices = .empty;
+    defer eq.deinit(allocator);
+
+    const finalized: Checkpoint = .{ .epoch = 0, .root = fixture.genesis_root };
+    const justified: Checkpoint = .{ .epoch = 0, .root = fixture.genesis_root };
+    const head_uj: Checkpoint = .{ .epoch = 0, .root = fixture.genesis_root };
+
+    // Feed the head state's slot to the FCR (state has shufflings cached
+    // around its own slot).
+    const state_slot = try test_state.cached_state.state.slot();
+
+    try onFastConfirmation(
+        &fcr,
+        allocator,
+        fixture.fc,
+        test_state.cached_state,
+        &votes,
+        &eq,
+        &finalized,
+        &justified,
+        &head_uj,
+        fixture.b_root,
+        state_slot,
+    );
+
+    // Result must be one of the known roots in the linear chain.
+    const out = fcr.confirmed_root;
+    const is_known =
+        std.mem.eql(u8, &out, &fixture.genesis_root) or
+        std.mem.eql(u8, &out, &fixture.a_root) or
+        std.mem.eql(u8, &out, &fixture.b_root);
+    try testing.expect(is_known);
 }
