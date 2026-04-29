@@ -49,7 +49,8 @@ interface SyncCommittee {
 }
 
 interface ProcessSlotsOpts {
-  transferCache?: boolean;
+  /** Default: false (cache is transferred). Set to true to opt out of cache transfer. */
+  dontTransferCache?: boolean;
 }
 
 interface CompactMultiProof {
@@ -58,7 +59,12 @@ interface CompactMultiProof {
   descriptor: Uint8Array;
 }
 
-/** Options to control how state transition is run */
+/**
+ * Options to control how state transition is run.
+ *
+ * Note: Fields used by TS `StateTransitionOpts` but ignored by the Zig binding (e.g.
+ * `executionPayloadStatus`) are silently dropped - they are declared here to pass type checks.
+ */
 interface TransitionOpts {
   /** Verify the post-state root matches the block's state root. Default: true. */
   verifyStateRoot?: boolean;
@@ -66,8 +72,10 @@ interface TransitionOpts {
   verifyProposer?: boolean;
   /** Verify BLS signatures during block processing. Default: true. */
   verifySignatures?: boolean;
-  /** Clone the state with transfer cache for memory efficiency. Default: true. */
-  transferCache?: boolean;
+  /** Default: false (cache is transferred). Set to true to opt out of cache transfer. */
+  dontTransferCache?: boolean;
+  /** Other fields (executionPayloadStatus, dataAvailabilityStatus, metrics, validatorMonitor, …) */
+  [extra: string]: unknown;
 }
 
 interface ProposerRewards {
