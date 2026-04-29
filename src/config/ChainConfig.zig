@@ -63,6 +63,10 @@ MIN_PER_EPOCH_CHURN_LIMIT_ELECTRA: u64,
 
 // Fork choice
 PROPOSER_SCORE_BOOST: u64,
+/// Spec: specs/phase0/fast-confirmation.md
+/// Assumed maximum percentage of Byzantine validators among the validator set.
+/// Spec range: [0, 25]; mainnet/minimal default: 25.
+CONFIRMATION_BYZANTINE_THRESHOLD: u64,
 REORG_HEAD_WEIGHT_THRESHOLD: u64,
 REORG_PARENT_WEIGHT_THRESHOLD: u64,
 REORG_MAX_EPOCHS_SINCE_FINALIZATION: u64,
