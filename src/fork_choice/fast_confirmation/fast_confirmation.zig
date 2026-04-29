@@ -1378,10 +1378,17 @@ fn getUnrealizedJustifiedEpoch(proto_array: *const ProtoArray, block_root: Root)
 /// Reentrancy guard: a same-slot duplicate call is a no-op so callers can
 /// invoke this from multiple orchestration points within a slot without
 /// double-rotating state.
+///
+/// Spec line 814-816: `previous_epoch_greatest_unrealized_checkpoint` reads
+/// from `store.unrealized_justified_checkpoint` — the GLOBAL fork-choice
+/// store's unrealized_justified, NOT the head's per-block unrealized field.
+/// The runner had been passing head's per-block value, stomping the FCR
+/// state to ZERO_HASH at anchor blocks. We source it from `fc.fc_store`
+/// directly so the contract matches the spec.
 fn updateFastConfirmationVariables(
     self: *FastConfirmation,
+    fc: *const ForkChoice,
     head_root: Root,
-    unrealized_justified_checkpoint: *const Checkpoint,
     current_slot: Slot,
 ) void {
     if (self.last_update_slot) |s| {
@@ -1392,9 +1399,11 @@ fn updateFastConfirmationVariables(
     self.previous_slot_head = self.current_slot_head;
     self.current_slot_head = head_root;
 
-    // Last slot of the current epoch: snapshot greatest unrealized.
+    // Last slot of the current epoch: snapshot the global unrealized justified
+    // checkpoint per spec `update_fast_confirmation_variables`.
     if (isStartSlotAtEpoch(current_slot + 1)) {
-        self.previous_epoch_greatest_unrealized_checkpoint = unrealized_justified_checkpoint.*;
+        self.previous_epoch_greatest_unrealized_checkpoint =
+            fc.fc_store.unrealized_justified.checkpoint;
     }
 
     // First slot of the current epoch: rotate observed-justified checkpoints.
@@ -1750,7 +1759,7 @@ pub fn onFastConfirmation(
     // pulled-up justification logic in Phase F.
     _ = justified_checkpoint;
 
-    updateFastConfirmationVariables(self, head_root, head_unrealized_justified, current_slot);
+    updateFastConfirmationVariables(self, fc, head_root, current_slot);
 
     // Rebuild committee assignments + head balance source for current slot.
     // TODO Phase F: pass the proper checkpoint states here; Phase E uses the
@@ -1807,7 +1816,7 @@ pub fn runConfirmation(
 ) Error!void {
     _ = justified_checkpoint;
 
-    updateFastConfirmationVariables(self, head_root, head_unrealized_justified, current_slot);
+    updateFastConfirmationVariables(self, fc, head_root, current_slot);
 
     try self.head_assignments.rebuild(allocator, state, current_slot);
     try rebuildHeadBalanceSource(self, allocator, state, head_root, current_slot);
@@ -3449,6 +3458,8 @@ test "FastConfirmation.willCurrentTargetBeJustified — honest below 2/3 yields 
 // E1: updateFastConfirmationVariables — first call sets last_update_slot.
 test "FastConfirmation.updateFastConfirmationVariables — first call sets last_update_slot" {
     const allocator = testing.allocator;
+    const fixture = try initLinearForkChoice(allocator);
+    defer deinitForkChoiceFixture(allocator, fixture);
 
     const init_cp: Checkpoint = .{ .epoch = 0, .root = ZERO_ROOT };
     var fcr = FastConfirmation.init(init_cp, 25, 40);
@@ -3457,8 +3468,7 @@ test "FastConfirmation.updateFastConfirmationVariables — first call sets last_
     try testing.expect(fcr.last_update_slot == null);
 
     const head: Root = rootFromByte(0xAB);
-    const uj: Checkpoint = .{ .epoch = 0, .root = ZERO_ROOT };
-    updateFastConfirmationVariables(&fcr, head, &uj, 1);
+    updateFastConfirmationVariables(&fcr, fixture.fc, head, 1);
 
     try testing.expectEqual(@as(?Slot, 1), fcr.last_update_slot);
     try testing.expectEqualSlices(u8, &head, &fcr.current_slot_head);
@@ -3469,6 +3479,8 @@ test "FastConfirmation.updateFastConfirmationVariables — first call sets last_
 // E1: same-slot duplicate call is a no-op.
 test "FastConfirmation.updateFastConfirmationVariables — duplicate same-slot call is no-op" {
     const allocator = testing.allocator;
+    const fixture = try initLinearForkChoice(allocator);
+    defer deinitForkChoiceFixture(allocator, fixture);
 
     const init_cp: Checkpoint = .{ .epoch = 0, .root = ZERO_ROOT };
     var fcr = FastConfirmation.init(init_cp, 25, 40);
@@ -3476,34 +3488,39 @@ test "FastConfirmation.updateFastConfirmationVariables — duplicate same-slot c
 
     const head_a: Root = rootFromByte(0xA1);
     const head_b: Root = rootFromByte(0xB2);
-    const uj: Checkpoint = .{ .epoch = 0, .root = ZERO_ROOT };
 
-    updateFastConfirmationVariables(&fcr, head_a, &uj, 1);
+    updateFastConfirmationVariables(&fcr, fixture.fc, head_a, 1);
     const after_first_current = fcr.current_slot_head;
     const after_first_previous = fcr.previous_slot_head;
 
     // Second call with the SAME slot must not rotate or update anything.
-    updateFastConfirmationVariables(&fcr, head_b, &uj, 1);
+    updateFastConfirmationVariables(&fcr, fixture.fc, head_b, 1);
 
     try testing.expectEqual(@as(?Slot, 1), fcr.last_update_slot);
     try testing.expectEqualSlices(u8, &after_first_current, &fcr.current_slot_head);
     try testing.expectEqualSlices(u8, &after_first_previous, &fcr.previous_slot_head);
 }
 
-// E1: last slot of epoch snapshots greatest unrealized.
+// E1: last slot of epoch snapshots the GLOBAL store's unrealized justified
+// (spec line 814-816), NOT the head's per-block unrealized.
 test "FastConfirmation.updateFastConfirmationVariables — last slot of epoch snapshots greatest unrealized" {
     const allocator = testing.allocator;
+    const fixture = try initLinearForkChoice(allocator);
+    defer deinitForkChoiceFixture(allocator, fixture);
 
     const init_cp: Checkpoint = .{ .epoch = 0, .root = ZERO_ROOT };
     var fcr = FastConfirmation.init(init_cp, 25, 40);
     defer fcr.deinit(allocator);
 
-    const head: Root = rootFromByte(0xAB);
+    // Override the fork-choice store's global unrealized_justified so the
+    // test sees a distinguishable value get snapshotted.
     const fresh_uj: Checkpoint = .{ .epoch = 7, .root = rootFromByte(0xCD) };
+    fixture.fc.fc_store.unrealized_justified.checkpoint = fresh_uj;
 
+    const head: Root = rootFromByte(0xAB);
     // Last slot of epoch 0 is SLOTS_PER_EPOCH - 1, so current_slot + 1 is on epoch boundary.
     const last_slot: Slot = preset.SLOTS_PER_EPOCH - 1;
-    updateFastConfirmationVariables(&fcr, head, &fresh_uj, last_slot);
+    updateFastConfirmationVariables(&fcr, fixture.fc, head, last_slot);
 
     try testing.expect(fcr.previous_epoch_greatest_unrealized_checkpoint.eql(fresh_uj));
 }
@@ -3511,6 +3528,8 @@ test "FastConfirmation.updateFastConfirmationVariables — last slot of epoch sn
 // E1: first slot of epoch rotates observed-justified.
 test "FastConfirmation.updateFastConfirmationVariables — first slot of epoch rotates observed-justified" {
     const allocator = testing.allocator;
+    const fixture = try initLinearForkChoice(allocator);
+    defer deinitForkChoiceFixture(allocator, fixture);
 
     const init_cp: Checkpoint = .{ .epoch = 0, .root = ZERO_ROOT };
     var fcr = FastConfirmation.init(init_cp, 25, 40);
@@ -3525,9 +3544,8 @@ test "FastConfirmation.updateFastConfirmationVariables — first slot of epoch r
     fcr.previous_epoch_greatest_unrealized_checkpoint = cp_greatest;
 
     const head: Root = rootFromByte(0xAB);
-    const uj: Checkpoint = .{ .epoch = 0, .root = ZERO_ROOT };
     // First slot of epoch 1 = SLOTS_PER_EPOCH.
-    updateFastConfirmationVariables(&fcr, head, &uj, preset.SLOTS_PER_EPOCH);
+    updateFastConfirmationVariables(&fcr, fixture.fc, head, preset.SLOTS_PER_EPOCH);
 
     try testing.expect(fcr.previous_epoch_observed_justified_checkpoint.eql(cp_curr_obs));
     try testing.expect(fcr.current_epoch_observed_justified_checkpoint.eql(cp_greatest));
