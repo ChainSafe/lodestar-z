@@ -25,6 +25,7 @@ const ProtoArray = proto_array_mod.ProtoArray;
 
 const fork_choice_mod = @import("../fork_choice.zig");
 const ForkChoice = fork_choice_mod.ForkChoice;
+const ForkChoiceError = fork_choice_mod.ForkChoiceError;
 
 const store_mod = @import("../store.zig");
 const Checkpoint = store_mod.Checkpoint;
@@ -33,12 +34,20 @@ const Checkpoint = store_mod.Checkpoint;
 // 1. Errors
 // =========================================================================
 
-pub const Error = error{
+/// FCR's error surface unions ForkChoiceError so corruption signals
+/// (`BeaconStateErr`, `InvalidParentIndex`, etc.) propagate to callers
+/// instead of being collapsed into "block not found". `StateMissing` is the
+/// FCR-specific marker for any "data we needed wasn't there" case — block
+/// absent from proto array, shuffling missing, committee oob, or unreadable
+/// state. We map subsystem errors (epoch_cache, SSZ tree views) to
+/// `StateMissing` so callers see one consistent signal; `OutOfMemory`
+/// propagates so callers can distinguish allocation failure.
+pub const Error = ForkChoiceError || error{
     StateMissing,
 } || Allocator.Error;
 
 // =========================================================================
-// 2. SlotAssignments — placeholder (rebuild added in Phase B)
+// 2. SlotAssignments
 // =========================================================================
 
 pub const SlotAssignments = struct {
@@ -68,7 +77,7 @@ pub const SlotAssignments = struct {
         allocator: Allocator,
         state: *const CachedBeaconState,
         current_slot: Slot,
-    ) !void {
+    ) Error!void {
         // Clear existing entries (free per-validator lists, then keep the outer
         // map allocation for reuse).
         var clear_it = self.by_validator.valueIterator();
@@ -88,8 +97,10 @@ pub const SlotAssignments = struct {
         assert(next_epoch_start >= 1);
         const end_slot = next_epoch_start - 1;
 
-        // Sanity: max range is 3 epochs.
+        // TigerStyle: range is non-empty (≥1 epoch worth of slots) and bounded
+        // above by 3 * SLOTS_PER_EPOCH (current + 2 previous).
         assert(end_slot >= start_slot);
+        assert(end_slot - start_slot < 3 * preset.SLOTS_PER_EPOCH);
 
         var slot: Slot = start_slot;
         while (slot <= end_slot) : (slot += 1) {
@@ -114,7 +125,7 @@ pub const SlotAssignments = struct {
 };
 
 // =========================================================================
-// 3. BalanceSourceData — placeholder (rebuild added in Phase B)
+// 3. BalanceSourceData
 // =========================================================================
 
 pub const BalanceSourceData = struct {
@@ -138,14 +149,18 @@ pub const BalanceSourceData = struct {
         allocator: Allocator,
         state: *const CachedBeaconState,
         cp: Checkpoint,
-    ) !void {
+    ) Error!void {
         if (self.checkpoint.eql(cp) and self.effective_balances.items.len > 0) {
             return;
         }
 
-        const validators = try state.state.validatorsSlice(allocator);
+        const validators = state.state.validatorsSlice(allocator) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.StateMissing,
+        };
         defer allocator.free(validators);
-        // TigerStyle: assert non-genesis-edge silent return.
+        // TigerStyle: FCR requires a non-empty validator set; degenerate states
+        // are not valid input. Caller must guarantee this.
         assert(validators.len > 0);
 
         const source_increments = state.epoch_cache.getEffectiveBalanceIncrements();
@@ -279,19 +294,30 @@ pub fn getCheckpointForBlock(
     epoch: Epoch,
 ) Error!Checkpoint {
     const epoch_start_slot = computeStartSlotAtEpoch(epoch);
-    const ancestor = fc.getAncestor(block_root, epoch_start_slot) catch return error.StateMissing;
+    const ancestor = fc.getAncestor(block_root, epoch_start_slot) catch |err| switch (err) {
+        // Block / ancestor truly absent → the FCR-specific marker.
+        error.MissingProtoArrayBlock, error.UnknownAncestor => return error.StateMissing,
+        // Corruption / state errors propagate as-is.
+        else => return err,
+    };
     return .{ .epoch = epoch, .root = ancestor.block_root };
 }
 
-/// Spec: `is_ancestor(store, block_root, ancestor_root)`. Returns false on any
-/// lookup error.
+/// Spec: `is_ancestor(store, block_root, ancestor_root)`. Returns `false` for
+/// expected "block not found" cases, propagates corruption / state errors.
 pub fn isAncestor(
     fc: *const ForkChoice,
     block_root: Root,
     ancestor_root: Root,
-) bool {
-    const ancestor_slot = getBlockSlot(fc.proto_array, ancestor_root) catch return false;
-    const ancestor = fc.getAncestor(block_root, ancestor_slot) catch return false;
+) Error!bool {
+    const ancestor_slot = getBlockSlot(fc.proto_array, ancestor_root) catch |err| switch (err) {
+        error.StateMissing => return false,
+        else => return err,
+    };
+    const ancestor = fc.getAncestor(block_root, ancestor_slot) catch |err| switch (err) {
+        error.MissingProtoArrayBlock, error.UnknownAncestor => return false,
+        else => return err,
+    };
     return std.mem.eql(u8, &ancestor.block_root, &ancestor_root);
 }
 
@@ -643,13 +669,13 @@ test "FastConfirmation.isAncestor identifies direct lineage" {
     defer deinitForkChoiceFixture(testing.allocator, fixture);
 
     // genesis is an ancestor of block_b.
-    try testing.expect(isAncestor(fixture.fc, fixture.b_root, fixture.genesis_root));
+    try testing.expect(try isAncestor(fixture.fc, fixture.b_root, fixture.genesis_root));
     // block_a is an ancestor of block_b.
-    try testing.expect(isAncestor(fixture.fc, fixture.b_root, fixture.a_root));
+    try testing.expect(try isAncestor(fixture.fc, fixture.b_root, fixture.a_root));
     // A block is its own ancestor.
-    try testing.expect(isAncestor(fixture.fc, fixture.a_root, fixture.a_root));
+    try testing.expect(try isAncestor(fixture.fc, fixture.a_root, fixture.a_root));
     // block_b is NOT an ancestor of block_a (other direction).
-    try testing.expect(!isAncestor(fixture.fc, fixture.a_root, fixture.b_root));
+    try testing.expect(!try isAncestor(fixture.fc, fixture.a_root, fixture.b_root));
 }
 
 test "FastConfirmation.isAncestor returns false for unknown root" {
@@ -657,8 +683,8 @@ test "FastConfirmation.isAncestor returns false for unknown root" {
     defer deinitForkChoiceFixture(testing.allocator, fixture);
 
     const unknown = rootFromByte(0xFE);
-    try testing.expect(!isAncestor(fixture.fc, fixture.b_root, unknown));
-    try testing.expect(!isAncestor(fixture.fc, unknown, fixture.genesis_root));
+    try testing.expect(!try isAncestor(fixture.fc, fixture.b_root, unknown));
+    try testing.expect(!try isAncestor(fixture.fc, unknown, fixture.genesis_root));
 }
 
 test "FastConfirmation.getAncestorRoots returns oldest-to-newest exclusive of terminal" {
