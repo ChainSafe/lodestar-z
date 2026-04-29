@@ -640,6 +640,16 @@ pub const AnyBeaconState = union(ForkSeq) {
         };
     }
 
+    pub fn latestExecutionPayloadHeaderBlockNumber(self: *AnyBeaconState) !u64 {
+        return switch (self.*) {
+            .phase0, .altair => error.InvalidAtFork,
+            inline else => |state| {
+                var header = try state.get("latest_execution_payload_header");
+                return try header.get("block_number");
+            },
+        };
+    }
+
     pub fn setLatestExecutionPayloadHeader(self: *AnyBeaconState, header: *const AnyExecutionPayloadHeader) !void {
         switch (self.*) {
             .bellatrix => |state| try state.setValue("latest_execution_payload_header", &header.bellatrix),
