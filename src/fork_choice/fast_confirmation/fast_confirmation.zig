@@ -1287,6 +1287,10 @@ pub fn willNoConflictingCheckpointBeJustified(
     const target = try getCurrentTarget(fc, head_root, current_slot);
     if (target.eql(head_unrealized_justified.*)) return true;
 
+    // Phase E TODO: `getTotalActiveBalance` is also called inside
+    // `computeHonestFfgSupportForCurrentTarget`. At mainnet scale (~1M
+    // u16 entries) this is O(N) twice per call. Consider memoizing the sum
+    // on `BalanceSourceData` after `rebuild` and dropping the redundant scan.
     const total_active_balance = getTotalActiveBalance(&fcr.head_balance_source);
     const honest_support = try computeHonestFfgSupportForCurrentTarget(
         allocator,
@@ -2660,7 +2664,7 @@ test "FastConfirmation.computeHonestFfgSupportForCurrentTarget — zero balances
 }
 
 // D2: sanity — output bounded above by total active balance.
-test "FastConfirmation.computeHonestFfgSupportForCurrentTarget — bounded by total active balance" {
+test "FastConfirmation.computeHonestFfgSupportForCurrentTarget — zero-vote upper bound" {
     const allocator = testing.allocator;
     const fixture = try initLinearForkChoice(allocator);
     defer deinitForkChoiceFixture(allocator, fixture);
@@ -2794,7 +2798,7 @@ test "FastConfirmation.willNoConflictingCheckpointBeJustified — supermajority 
 }
 
 // D3: 3 * honest_support <= total_active_balance ⇒ false.
-test "FastConfirmation.willNoConflictingCheckpointBeJustified — insufficient honest yields false" {
+test "FastConfirmation.willNoConflictingCheckpointBeJustified — zero-balance degenerate case yields false" {
     const allocator = testing.allocator;
     const fixture = try initLinearForkChoice(allocator);
     defer deinitForkChoiceFixture(allocator, fixture);
