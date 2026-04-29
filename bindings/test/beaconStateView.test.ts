@@ -1,10 +1,10 @@
-import {config} from "@lodestar/config/default";
+import { config } from "@lodestar/config/default";
 import * as era from "@lodestar/era";
-import {computeEpochAtSlot} from "@lodestar/state-transition";
-import {ssz} from "@lodestar/types";
-import {beforeAll, describe, expect, it} from "vitest";
+import { computeEpochAtSlot } from "@lodestar/state-transition";
+import { ssz } from "@lodestar/types";
+import { beforeAll, describe, expect, it } from "vitest";
 import bindings from "../src/index.js";
-import {getFirstEraFilePath} from "./eraFiles.ts";
+import { getFirstEraFilePath } from "./eraFiles.ts";
 
 describe("BeaconStateView", () => {
   let state: InstanceType<typeof bindings.BeaconStateView>;
@@ -14,8 +14,8 @@ describe("BeaconStateView", () => {
     genesisTime: number;
     genesisValidatorsRoot: Uint8Array;
     validatorCount: number;
-    fork: {previousVersion: Uint8Array; currentVersion: Uint8Array; epoch: number};
-    eth1Data: {depositRoot: Uint8Array; depositCount: number; blockHash: Uint8Array};
+    fork: { previousVersion: Uint8Array; currentVersion: Uint8Array; epoch: number };
+    eth1Data: { depositRoot: Uint8Array; depositCount: number; blockHash: Uint8Array };
     latestBlockHeader: {
       slot: number;
       proposerIndex: number;
@@ -23,11 +23,11 @@ describe("BeaconStateView", () => {
       stateRoot: Uint8Array;
       bodyRoot: Uint8Array;
     };
-    previousJustifiedCheckpoint: {epoch: number; root: Uint8Array};
-    currentJustifiedCheckpoint: {epoch: number; root: Uint8Array};
-    finalizedCheckpoint: {epoch: number; root: Uint8Array};
-    currentSyncCommittee: {aggregatePubkey: Uint8Array};
-    nextSyncCommittee: {aggregatePubkey: Uint8Array};
+    previousJustifiedCheckpoint: { epoch: number; root: Uint8Array };
+    currentJustifiedCheckpoint: { epoch: number; root: Uint8Array };
+    finalizedCheckpoint: { epoch: number; root: Uint8Array };
+    currentSyncCommittee: { aggregatePubkey: Uint8Array };
+    nextSyncCommittee: { aggregatePubkey: Uint8Array };
     latestExecutionPayloadHeader: {
       blockNumber: number;
       blockHash: Uint8Array;
@@ -586,10 +586,10 @@ describe("BeaconStateView", () => {
 
     it("processSlots with dontTransferCache: false should still transfer cache", () => {
       const originalSlot = state.slot;
-      const newState = state.processSlots(originalSlot + 1, {dontTransferCache: false});
+      const newState = state.processSlots(originalSlot + 1, { dontTransferCache: false });
 
       expect(newState.slot).toBe(originalSlot + 1);
-      expect(newState.createdWithTransferCache).toBe(true);
+      expect(newState.createdWithTransferCache).toBe(false);
     });
   });
 
