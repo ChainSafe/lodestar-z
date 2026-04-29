@@ -34,15 +34,15 @@ const BenchOpts = struct {
 
 var g_allocator: std.mem.Allocator = undefined;
 var g_cached_state: *CachedBeaconState = undefined;
-var g_cached_state_instance: *CachedBeaconState = undefined;
+var g_cloned_cached_state: *CachedBeaconState = undefined;
 
 fn beforeEach() void {
-    g_cached_state_instance = g_cached_state.clone(g_allocator, .{}) catch unreachable;
+    g_cloned_cached_state = g_cached_state.clone(g_allocator, .{}) catch unreachable;
 }
 
 fn afterEach() void {
-    g_cached_state_instance.deinit();
-    g_allocator.destroy(g_cached_state_instance);
+    g_cloned_cached_state.deinit();
+    g_allocator.destroy(g_cloned_cached_state);
 }
 
 fn ProcessBlockHeaderBench(comptime fork: ForkSeq) type {
@@ -53,8 +53,8 @@ fn ProcessBlockHeaderBench(comptime fork: ForkSeq) type {
             state_transition.processBlockHeader(
                 fork,
                 allocator,
-                g_cached_state_instance.epoch_cache,
-                g_cached_state_instance.state.castToFork(fork),
+                g_cloned_cached_state.epoch_cache,
+                g_cloned_cached_state.state.castToFork(fork),
                 .full,
                 self.block,
             ) catch unreachable;
@@ -75,11 +75,11 @@ fn ProcessWithdrawalsBench(comptime fork: ForkSeq) type {
             var withdrawal_balances = std.AutoHashMap(ValidatorIndex, usize).init(allocator);
             defer withdrawal_balances.deinit();
 
-            const state = g_cached_state_instance.state.castToFork(fork);
+            const state = g_cloned_cached_state.state.castToFork(fork);
             state_transition.getExpectedWithdrawals(
                 fork,
                 allocator,
-                g_cached_state_instance.epoch_cache,
+                g_cloned_cached_state.epoch_cache,
                 state,
                 &withdrawals_result,
                 &withdrawal_balances,
@@ -109,9 +109,9 @@ fn ProcessExecutionPayloadBench(comptime fork: ForkSeq) type {
             state_transition.processExecutionPayload(
                 fork,
                 allocator,
-                g_cached_state_instance.config,
-                g_cached_state_instance.state.castToFork(fork),
-                g_cached_state_instance.epoch_cache.epoch,
+                g_cloned_cached_state.config,
+                g_cloned_cached_state.state.castToFork(fork),
+                g_cloned_cached_state.epoch_cache.epoch,
                 .full,
                 self.body,
                 external_data,
@@ -130,9 +130,9 @@ fn ProcessRandaoBench(comptime fork: ForkSeq, comptime opts: BenchOpts) type {
 
             state_transition.processRandao(
                 fork,
-                g_cached_state_instance.config,
-                g_cached_state_instance.epoch_cache,
-                g_cached_state_instance.state.castToFork(fork),
+                g_cloned_cached_state.config,
+                g_cloned_cached_state.epoch_cache,
+                g_cloned_cached_state.state.castToFork(fork),
                 .full,
                 self.body,
                 self.block.proposerIndex(),
@@ -151,7 +151,7 @@ fn ProcessEth1DataBench(comptime fork: ForkSeq) type {
 
             state_transition.processEth1Data(
                 fork,
-                g_cached_state_instance.state.castToFork(fork),
+                g_cloned_cached_state.state.castToFork(fork),
                 self.body.eth1Data(),
             ) catch unreachable;
         }
@@ -166,10 +166,10 @@ fn ProcessOperationsBench(comptime fork: ForkSeq, comptime opts: BenchOpts) type
             state_transition.processOperations(
                 fork,
                 allocator,
-                g_cached_state_instance.config,
-                g_cached_state_instance.epoch_cache,
-                g_cached_state_instance.state.castToFork(fork),
-                &g_cached_state_instance.slashings_cache,
+                g_cloned_cached_state.config,
+                g_cloned_cached_state.epoch_cache,
+                g_cloned_cached_state.state.castToFork(fork),
+                &g_cloned_cached_state.slashings_cache,
                 .full,
                 self.body,
                 .{ .verify_signature = opts.verify_signature },
@@ -186,9 +186,9 @@ fn ProcessSyncAggregateBench(comptime fork: ForkSeq, comptime opts: BenchOpts) t
             state_transition.processSyncAggregate(
                 fork,
                 allocator,
-                g_cached_state_instance.config,
-                g_cached_state_instance.epoch_cache,
-                g_cached_state_instance.state.castToFork(fork),
+                g_cloned_cached_state.config,
+                g_cloned_cached_state.epoch_cache,
+                g_cloned_cached_state.state.castToFork(fork),
                 self.body.syncAggregate(),
                 opts.verify_signature,
             ) catch unreachable;
@@ -205,10 +205,10 @@ fn ProcessBlockBench(comptime fork: ForkSeq, comptime opts: BenchOpts) type {
             state_transition.processBlock(
                 fork,
                 allocator,
-                g_cached_state_instance.config,
-                g_cached_state_instance.epoch_cache,
-                g_cached_state_instance.state.castToFork(fork),
-                &g_cached_state_instance.slashings_cache,
+                g_cloned_cached_state.config,
+                g_cloned_cached_state.epoch_cache,
+                g_cloned_cached_state.state.castToFork(fork),
+                &g_cloned_cached_state.slashings_cache,
                 .full,
                 self.block,
                 external_data,
@@ -275,8 +275,8 @@ fn ProcessBlockSegmentedBench(comptime fork: ForkSeq) type {
 
         pub fn run(self: *@This(), allocator: std.mem.Allocator) void {
             const io = self.io;
-            const state = g_cached_state_instance.state.castToFork(fork);
-            const epoch_cache = g_cached_state_instance.epoch_cache;
+            const state = g_cloned_cached_state.state.castToFork(fork);
+            const epoch_cache = g_cloned_cached_state.epoch_cache;
             const block_start = time.timestampNow(io);
 
             const header_start = time.timestampNow(io);
@@ -325,7 +325,7 @@ fn ProcessBlockSegmentedBench(comptime fork: ForkSeq) type {
                 state_transition.processExecutionPayload(
                     fork,
                     allocator,
-                    g_cached_state_instance.config,
+                    g_cloned_cached_state.config,
                     state,
                     epoch_cache.epoch,
                     .full,
@@ -338,7 +338,7 @@ fn ProcessBlockSegmentedBench(comptime fork: ForkSeq) type {
             const randao_start = time.timestampNow(io);
             state_transition.processRandao(
                 fork,
-                g_cached_state_instance.config,
+                g_cloned_cached_state.config,
                 epoch_cache,
                 state,
                 .full,
@@ -360,10 +360,10 @@ fn ProcessBlockSegmentedBench(comptime fork: ForkSeq) type {
             state_transition.processOperations(
                 fork,
                 allocator,
-                g_cached_state_instance.config,
+                g_cloned_cached_state.config,
                 epoch_cache,
                 state,
-                &g_cached_state_instance.slashings_cache,
+                &g_cloned_cached_state.slashings_cache,
                 .full,
                 self.body,
                 .{ .verify_signature = true },
@@ -375,7 +375,7 @@ fn ProcessBlockSegmentedBench(comptime fork: ForkSeq) type {
                 state_transition.processSyncAggregate(
                     fork,
                     allocator,
-                    g_cached_state_instance.config,
+                    g_cloned_cached_state.config,
                     epoch_cache,
                     state,
                     self.body.syncAggregate(),
