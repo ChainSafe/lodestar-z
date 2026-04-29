@@ -219,7 +219,7 @@ pub fn latestExecutionPayloadHeader(self: *const Self) !js.Value {
         .capella => |*h| try sszValueToNapiValue(env, ct.capella.ExecutionPayloadHeader, h),
         .deneb => |*h| try sszValueToNapiValue(env, ct.deneb.ExecutionPayloadHeader, h),
     };
-    return asJsValue(value);
+    return js_types.wrap(js.Value, value);
 }
 
 // -------------------------
@@ -939,12 +939,8 @@ fn requireState(self: *const Self) !*CachedBeaconState {
     return self.cached_state orelse error.InvalidState;
 }
 
-fn asJsValue(value: napi.Value) js.Value {
-    return .{ .val = value };
-}
-
 fn jsNull() !js.Value {
-    return asJsValue(try js.env().getNull());
+    return js_types.wrap(js.Value, try js.env().getNull());
 }
 
 fn jsNullAs(comptime T: type) !T {
