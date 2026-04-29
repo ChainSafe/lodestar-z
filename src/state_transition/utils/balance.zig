@@ -26,6 +26,8 @@ pub fn decreaseBalance(comptime fork: ForkSeq, state: *BeaconState(fork), index:
 pub fn getEffectiveBalanceIncrementsZeroInactive(allocator: Allocator, cached_state: *CachedBeaconState) !EffectiveBalanceIncrements {
     const active_indices = cached_state.epoch_cache.getCurrentShuffling().active_indices;
     // 5x faster than reading from state.validators, with validator Nodes as values
+
+    try cached_state.state.commit();
     const validators = try cached_state.state.validatorsSlice(allocator);
     defer allocator.free(validators);
     const validator_count = validators.len;
