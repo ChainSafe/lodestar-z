@@ -4,14 +4,15 @@
 const testing = @import("std").testing;
 
 comptime {
-    testing.refAllDecls(@import("./test_case/merkle_proof_tests.zig"));
-    testing.refAllDecls(@import("./test_case/operations_tests.zig"));
-    testing.refAllDecls(@import("./test_case/rewards_tests.zig"));
-    testing.refAllDecls(@import("./test_case/sanity_tests.zig"));
     testing.refAllDecls(@import("./test_case/epoch_processing_tests.zig"));
+    testing.refAllDecls(@import("./test_case/fast_confirmation_tests.zig"));
+    testing.refAllDecls(@import("./test_case/finality_tests.zig"));
     testing.refAllDecls(@import("./test_case/fork_tests.zig"));
     testing.refAllDecls(@import("./test_case/fork_choice_tests.zig"));
-    testing.refAllDecls(@import("./test_case/transition_tests.zig"));
+    testing.refAllDecls(@import("./test_case/merkle_proof_tests.zig"));
+    testing.refAllDecls(@import("./test_case/operations_tests.zig"));
     testing.refAllDecls(@import("./test_case/random_tests.zig"));
-    testing.refAllDecls(@import("./test_case/finality_tests.zig"));
+    testing.refAllDecls(@import("./test_case/rewards_tests.zig"));
+    testing.refAllDecls(@import("./test_case/sanity_tests.zig"));
+    testing.refAllDecls(@import("./test_case/transition_tests.zig"));
 }
