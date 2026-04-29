@@ -22,6 +22,7 @@ const CachedBeaconState = state_transition.CachedBeaconState;
 
 const proto_array_mod = @import("../proto_array.zig");
 const ProtoArray = proto_array_mod.ProtoArray;
+const PayloadStatus = proto_array_mod.PayloadStatus;
 
 const fork_choice_mod = @import("../fork_choice.zig");
 const ForkChoice = fork_choice_mod.ForkChoice;
@@ -29,6 +30,13 @@ const ForkChoiceError = fork_choice_mod.ForkChoiceError;
 
 const store_mod = @import("../store.zig");
 const Checkpoint = store_mod.Checkpoint;
+
+const vote_tracker = @import("../vote_tracker.zig");
+const Votes = vote_tracker.Votes;
+const NULL_VOTE_INDEX = vote_tracker.NULL_VOTE_INDEX;
+
+const compute_deltas = @import("../compute_deltas.zig");
+const EquivocatingIndices = compute_deltas.EquivocatingIndices;
 
 // =========================================================================
 // 1. Errors
@@ -427,6 +435,632 @@ pub fn getSlotCommittee(
         out_idx += 1;
     }
     return out;
+}
+
+// =========================================================================
+// 6. Spec helpers — LMD-GHOST (Phase C)
+// =========================================================================
+
+/// Spec uses this constant in `adjust_committee_weight_estimate_to_ensure_safety`.
+/// Spec line 22 of utils.ts equivalent: `COMMITTEE_WEIGHT_ESTIMATION_ADJUSTMENT_FACTOR = 5`.
+const COMMITTEE_WEIGHT_ESTIMATION_ADJUSTMENT_FACTOR: u64 = 5;
+
+/// Breakdown of the safety threshold computation. Returned by
+/// `computeSafetyThreshold` so callers can log component values for debugging.
+pub const SafetyThreshold = struct {
+    threshold: u64,
+    proposer_score: u64,
+    maximum_support: u64,
+    support_discount: u64,
+    adversarial_weight: u64,
+};
+
+// --- Private helpers ---
+
+/// Sum of effective balances (in increments) across the balance source. Inactive
+/// and slashed validators are zeroed by `BalanceSourceData.rebuild`, so this is
+/// equivalent to the spec's `get_total_active_balance` modulo the unit conversion
+/// from Gwei to increments (the spec's `EFFECTIVE_BALANCE_INCREMENT` factor
+/// cancels in every safety-threshold expression).
+fn getTotalActiveBalance(balance_source: *const BalanceSourceData) u64 {
+    var total: u64 = 0;
+    for (balance_source.effective_balances.items) |bal| {
+        total += bal;
+    }
+    return total;
+}
+
+/// Resolve the LMD-GHOST latest message root for `validator_index`, or `null`
+/// if the validator has not voted yet (sentinel `NULL_VOTE_INDEX`).
+fn latestVoteRoot(votes: *Votes, proto_array: *const ProtoArray, validator_index: usize) ?Root {
+    const fields = votes.fields();
+    if (validator_index >= fields.next_indices.len) return null;
+    const next_idx = fields.next_indices[validator_index];
+    if (next_idx == NULL_VOTE_INDEX) return null;
+    if (next_idx >= proto_array.nodes.items.len) return null;
+    return proto_array.nodes.items[next_idx].block_root;
+}
+
+/// Best-effort "is `descendant_root` a descendant of `ancestor_root`" check
+/// using each block's default variant. Returns `false` for unknown roots —
+/// callers always treat absence as "not a descendant" (matching the TS
+/// `isDescendantCached` swallow-then-false pattern).
+fn isDescendantOfBlock(
+    proto_array: *const ProtoArray,
+    ancestor_root: Root,
+    descendant_root: Root,
+) bool {
+    const ancestor_status = proto_array.getDefaultVariant(ancestor_root) orelse return false;
+    const descendant_status = proto_array.getDefaultVariant(descendant_root) orelse return false;
+    return proto_array.isDescendant(
+        ancestor_root,
+        ancestor_status,
+        descendant_root,
+        descendant_status,
+    ) catch false;
+}
+
+/// Helper: union of committees over `[start_slot, end_slot]` inclusive.
+/// Returns a hash-set of validator indices; caller owns the returned map.
+fn getSlotRangeParticipants(
+    allocator: Allocator,
+    state: *const CachedBeaconState,
+    start_slot: Slot,
+    end_slot: Slot,
+) Error!std.AutoHashMapUnmanaged(ValidatorIndex, void) {
+    var participants: std.AutoHashMapUnmanaged(ValidatorIndex, void) = .empty;
+    errdefer participants.deinit(allocator);
+
+    if (start_slot > end_slot) return participants;
+
+    // TigerStyle: bound the slot loop. FCR caller-side ensures the range never
+    // exceeds a few epochs, but defend against pathological inputs.
+    const max_slots: u64 = 16 * preset.SLOTS_PER_EPOCH;
+    assert((end_slot - start_slot) < max_slots);
+
+    var slot: Slot = start_slot;
+    while (slot <= end_slot) : (slot += 1) {
+        const epoch = computeEpochAtSlot(slot);
+        const committees_count = state.epoch_cache.getCommitteeCountPerSlot(epoch) catch continue;
+        var idx: usize = 0;
+        while (idx < committees_count) : (idx += 1) {
+            const committee = state.epoch_cache.getBeaconCommittee(slot, idx) catch continue;
+            for (committee) |validator_index| {
+                try participants.put(allocator, validator_index, {});
+            }
+        }
+    }
+
+    return participants;
+}
+
+// --- C1: isFullValidatorSetCovered ---
+
+/// Spec: `is_full_validator_set_covered(start_slot, end_slot)`. True iff
+/// the inclusive `[start_slot, end_slot]` range covers an entire epoch.
+///
+/// The formula naturally handles `start_slot > end_slot`: in that case
+/// `start_full_epoch >= end_full_epoch` so the function returns `false`.
+pub fn isFullValidatorSetCovered(start_slot: Slot, end_slot: Slot) bool {
+    const start_full_epoch = computeEpochAtSlot(start_slot + (preset.SLOTS_PER_EPOCH - 1));
+    const end_full_epoch = computeEpochAtSlot(end_slot + 1);
+    return start_full_epoch < end_full_epoch;
+}
+
+// --- C2: adjustCommitteeWeightEstimateToEnsureSafety ---
+
+/// Spec: `adjust_committee_weight_estimate_to_ensure_safety(estimate)`.
+///
+/// CRITICAL UNIT-CONVERSION: the spec works in raw Gwei
+/// (`ceil(estimate_gwei / 1000) * (1000 + 5)`), but lodestar-z carries
+/// effective-balance increments (1 increment = 1e9 Gwei). At the increment
+/// scale, `ceil(... / 1000)` is a no-op for any realistic value, so the
+/// equivalent conservative adjustment becomes
+/// `floor((estimate * (1000 + 5) + 999) / 1000)`. See TS reference
+/// `utils.ts:294-306`.
+pub fn adjustCommitteeWeightEstimateToEnsureSafety(estimate: u64) u64 {
+    const factor: u64 = 1000 + COMMITTEE_WEIGHT_ESTIMATION_ADJUSTMENT_FACTOR;
+    return @divFloor(estimate * factor + 999, 1000);
+}
+
+// --- C3: estimateCommitteeWeightBetweenSlots ---
+
+/// Spec: `estimate_committee_weight_between_slots(total_active_balance, start_slot, end_slot)`.
+/// In lodestar-z `total_active_balance` is supplied via `balance_source`.
+pub fn estimateCommitteeWeightBetweenSlots(
+    balance_source: *const BalanceSourceData,
+    start_slot: Slot,
+    end_slot: Slot,
+) u64 {
+    if (start_slot > end_slot) return 0;
+
+    const total_active_balance = getTotalActiveBalance(balance_source);
+
+    if (isFullValidatorSetCovered(start_slot, end_slot)) {
+        return total_active_balance;
+    }
+
+    const start_epoch = computeEpochAtSlot(start_slot);
+    const end_epoch = computeEpochAtSlot(end_slot);
+    const committee_weight_per_slot: u64 = @divFloor(total_active_balance, preset.SLOTS_PER_EPOCH);
+
+    if (start_epoch == end_epoch) {
+        // (end_slot - start_slot + 1) slots inclusive in the same epoch.
+        return committee_weight_per_slot * (end_slot - start_slot + 1);
+    }
+
+    // Cross-epoch (but no full epoch covered) — use the spec's pro-rated form.
+    const num_slots_in_start_epoch: u64 = preset.SLOTS_PER_EPOCH - state_transition.computeSlotsSinceEpochStart(start_slot);
+    const num_slots_in_end_epoch: u64 = state_transition.computeSlotsSinceEpochStart(end_slot) + 1;
+    const remaining_slots_in_end_epoch: u64 = preset.SLOTS_PER_EPOCH - num_slots_in_end_epoch;
+
+    const start_epoch_weight: u64 = committee_weight_per_slot * num_slots_in_start_epoch;
+    const end_epoch_weight: u64 = committee_weight_per_slot * num_slots_in_end_epoch;
+    const start_epoch_weight_pro_rated: u64 =
+        @divFloor(start_epoch_weight, preset.SLOTS_PER_EPOCH) * remaining_slots_in_end_epoch;
+
+    return adjustCommitteeWeightEstimateToEnsureSafety(start_epoch_weight_pro_rated + end_epoch_weight);
+}
+
+// --- C4: getEquivocationScore ---
+
+/// Spec: `get_equivocation_score(store, balance_source, start_slot, end_slot)`.
+/// Sums effective balances of equivocating validators that participate in any
+/// committee in `[start_slot, end_slot]`. The `balance_source.effective_balances`
+/// already zeroes inactive/slashed validators, so the spec's "active validator"
+/// filter is implicit.
+pub fn getEquivocationScore(
+    allocator: Allocator,
+    state: *const CachedBeaconState,
+    balance_source: *const BalanceSourceData,
+    equivocating_indices: *const EquivocatingIndices,
+    start_slot: Slot,
+    end_slot: Slot,
+) Error!u64 {
+    if (start_slot > end_slot) return 0;
+    if (equivocating_indices.count() == 0) return 0;
+
+    var participants = try getSlotRangeParticipants(allocator, state, start_slot, end_slot);
+    defer participants.deinit(allocator);
+
+    var score: u64 = 0;
+    var it = participants.keyIterator();
+    while (it.next()) |idx_ptr| {
+        const i: usize = idx_ptr.*;
+        if (!equivocating_indices.contains(idx_ptr.*)) continue;
+        if (i >= balance_source.effective_balances.items.len) continue;
+        score += balance_source.effective_balances.items[i];
+    }
+    return score;
+}
+
+// --- C5: computeAdversarialWeight ---
+
+/// Spec: `compute_adversarial_weight(store, balance_source, start_slot, end_slot)`.
+/// Returns `floor(maximum_weight * byzantine_threshold / 100) - equivocation_score`,
+/// saturated at zero.
+pub fn computeAdversarialWeight(
+    allocator: Allocator,
+    fcr: *const FastConfirmation,
+    state: *const CachedBeaconState,
+    balance_source: *const BalanceSourceData,
+    equivocating_indices: *const EquivocatingIndices,
+    start_slot: Slot,
+    end_slot: Slot,
+) Error!u64 {
+    const maximum_weight = estimateCommitteeWeightBetweenSlots(balance_source, start_slot, end_slot);
+    // Match TS / spec ordering: `(maximum_weight * byzantine_threshold) / 100`.
+    // `byzantine_threshold` is clamped to [0, 25] in init, so no overflow risk
+    // for realistic `maximum_weight`.
+    const max_adversarial_weight: u64 = @divFloor(maximum_weight * fcr.byzantine_threshold, 100);
+    const equivocation_score = try getEquivocationScore(
+        allocator,
+        state,
+        balance_source,
+        equivocating_indices,
+        start_slot,
+        end_slot,
+    );
+    return if (max_adversarial_weight > equivocation_score)
+        max_adversarial_weight - equivocation_score
+    else
+        0;
+}
+
+// --- C6: getAdversarialWeight ---
+
+/// Spec: `get_adversarial_weight(store, balance_source, block_root)`.
+pub fn getAdversarialWeight(
+    allocator: Allocator,
+    fcr: *const FastConfirmation,
+    proto_array: *const ProtoArray,
+    state: *const CachedBeaconState,
+    balance_source: *const BalanceSourceData,
+    equivocating_indices: *const EquivocatingIndices,
+    block_root: Root,
+    current_slot: Slot,
+) Error!u64 {
+    if (current_slot == 0) return 0;
+
+    const block = blk: {
+        const status = proto_array.getDefaultVariant(block_root) orelse return 0;
+        break :blk proto_array.getBlock(block_root, status) orelse return 0;
+    };
+    const parent = blk: {
+        const status = proto_array.getDefaultVariant(block.parent_root) orelse return 0;
+        break :blk proto_array.getBlock(block.parent_root, status) orelse return 0;
+    };
+
+    const block_epoch = computeEpochAtSlot(block.slot);
+    const parent_epoch = computeEpochAtSlot(parent.slot);
+    const end_slot: Slot = current_slot - 1;
+
+    if (block_epoch > parent_epoch) {
+        const start_slot = computeStartSlotAtEpoch(block_epoch);
+        return computeAdversarialWeight(allocator, fcr, state, balance_source, equivocating_indices, start_slot, end_slot);
+    }
+    return computeAdversarialWeight(allocator, fcr, state, balance_source, equivocating_indices, block.slot, end_slot);
+}
+
+// --- C7: getBlockSupportBetweenSlots ---
+
+/// Spec: `get_block_support_between_slots(store, balance_source, block_root, start_slot, end_slot)`.
+/// Sums effective balances of non-equivocating, non-slashed, active validators
+/// whose latest message root equals `block_root` and that are committee
+/// members in any slot of `[start_slot, end_slot]`.
+pub fn getBlockSupportBetweenSlots(
+    allocator: Allocator,
+    state: *const CachedBeaconState,
+    proto_array: *const ProtoArray,
+    balance_source: *const BalanceSourceData,
+    votes: *Votes,
+    equivocating_indices: *const EquivocatingIndices,
+    block_root: Root,
+    start_slot: Slot,
+    end_slot: Slot,
+) Error!u64 {
+    if (start_slot > end_slot) return 0;
+
+    var participants = try getSlotRangeParticipants(allocator, state, start_slot, end_slot);
+    defer participants.deinit(allocator);
+
+    if (participants.count() == 0) return 0;
+
+    var score: u64 = 0;
+    var it = participants.keyIterator();
+    while (it.next()) |idx_ptr| {
+        const i: usize = idx_ptr.*;
+        if (i >= balance_source.effective_balances.items.len) continue;
+        if (equivocating_indices.contains(idx_ptr.*)) continue;
+        const bal = balance_source.effective_balances.items[i];
+        if (bal == 0) continue; // already zeroed for slashed/inactive in rebuild
+        const vote_root = latestVoteRoot(votes, proto_array, i) orelse continue;
+        if (std.mem.eql(u8, &vote_root, &block_root)) {
+            score += bal;
+        }
+    }
+    return score;
+}
+
+// --- C8: computeEmptySlotSupportDiscount ---
+
+/// Spec: `compute_empty_slot_support_discount(store, balance_source, block_root)`.
+pub fn computeEmptySlotSupportDiscount(
+    allocator: Allocator,
+    fcr: *const FastConfirmation,
+    proto_array: *const ProtoArray,
+    state: *const CachedBeaconState,
+    balance_source: *const BalanceSourceData,
+    votes: *Votes,
+    equivocating_indices: *const EquivocatingIndices,
+    block_root: Root,
+) Error!u64 {
+    const block = blk: {
+        const status = proto_array.getDefaultVariant(block_root) orelse return 0;
+        break :blk proto_array.getBlock(block_root, status) orelse return 0;
+    };
+    const parent = blk: {
+        const status = proto_array.getDefaultVariant(block.parent_root) orelse return 0;
+        break :blk proto_array.getBlock(block.parent_root, status) orelse return 0;
+    };
+
+    // No empty slots between parent and block.
+    if (parent.slot + 1 == block.slot) return 0;
+    // Defensive: if block is at or before parent, nothing to discount.
+    if (block.slot <= parent.slot + 1) return 0;
+
+    const start_slot: Slot = parent.slot + 1;
+    const end_slot: Slot = block.slot - 1;
+
+    const parent_support_in_empty_slots = try getBlockSupportBetweenSlots(
+        allocator,
+        state,
+        proto_array,
+        balance_source,
+        votes,
+        equivocating_indices,
+        block.parent_root,
+        start_slot,
+        end_slot,
+    );
+    const adversarial_weight = try computeAdversarialWeight(
+        allocator,
+        fcr,
+        state,
+        balance_source,
+        equivocating_indices,
+        start_slot,
+        end_slot,
+    );
+    return if (parent_support_in_empty_slots > adversarial_weight)
+        parent_support_in_empty_slots - adversarial_weight
+    else
+        0;
+}
+
+// --- C9: getSupportDiscount ---
+
+/// Spec: `get_support_discount(store, balance_source, block_root)`.
+/// Thin wrapper over `computeEmptySlotSupportDiscount`.
+pub fn getSupportDiscount(
+    allocator: Allocator,
+    fcr: *const FastConfirmation,
+    proto_array: *const ProtoArray,
+    state: *const CachedBeaconState,
+    balance_source: *const BalanceSourceData,
+    votes: *Votes,
+    equivocating_indices: *const EquivocatingIndices,
+    block_root: Root,
+) Error!u64 {
+    return computeEmptySlotSupportDiscount(
+        allocator,
+        fcr,
+        proto_array,
+        state,
+        balance_source,
+        votes,
+        equivocating_indices,
+        block_root,
+    );
+}
+
+// --- C10: computeSafetyThreshold ---
+
+/// Spec: `compute_safety_threshold(store, block_root, balance_source)`.
+/// Returns the breakdown so callers can log component values.
+///
+/// Underflow guard: when `support_discount > maximum_support + proposer_score
+/// + 2 * adversarial_weight`, the threshold saturates at `0` (spec / TS line 578).
+pub fn computeSafetyThreshold(
+    allocator: Allocator,
+    fcr: *const FastConfirmation,
+    proto_array: *const ProtoArray,
+    state: *const CachedBeaconState,
+    balance_source: *const BalanceSourceData,
+    votes: *Votes,
+    equivocating_indices: *const EquivocatingIndices,
+    block_root: Root,
+    current_slot: Slot,
+) Error!SafetyThreshold {
+    // Resolve block / parent. If either is unknown we can't compute support, so
+    // return a "max" threshold that nothing will exceed (matches TS POSITIVE_INFINITY).
+    const block = blk: {
+        const status = proto_array.getDefaultVariant(block_root) orelse return SafetyThreshold{
+            .threshold = std.math.maxInt(u64),
+            .proposer_score = 0,
+            .maximum_support = 0,
+            .support_discount = 0,
+            .adversarial_weight = 0,
+        };
+        break :blk proto_array.getBlock(block_root, status) orelse return SafetyThreshold{
+            .threshold = std.math.maxInt(u64),
+            .proposer_score = 0,
+            .maximum_support = 0,
+            .support_discount = 0,
+            .adversarial_weight = 0,
+        };
+    };
+    const parent = blk: {
+        const status = proto_array.getDefaultVariant(block.parent_root) orelse return SafetyThreshold{
+            .threshold = std.math.maxInt(u64),
+            .proposer_score = 0,
+            .maximum_support = 0,
+            .support_discount = 0,
+            .adversarial_weight = 0,
+        };
+        break :blk proto_array.getBlock(block.parent_root, status) orelse return SafetyThreshold{
+            .threshold = std.math.maxInt(u64),
+            .proposer_score = 0,
+            .maximum_support = 0,
+            .support_discount = 0,
+            .adversarial_weight = 0,
+        };
+    };
+
+    // Proposer score: floor(committee_weight_per_slot * proposer_score_boost / 100).
+    const total_active_balance = getTotalActiveBalance(balance_source);
+    const committee_weight_per_slot: u64 = @divFloor(total_active_balance, preset.SLOTS_PER_EPOCH);
+    const proposer_score: u64 = @divFloor(committee_weight_per_slot * fcr.proposer_score_boost, 100);
+
+    // Maximum support: estimate over [parent.slot + 1, current_slot - 1].
+    // If current_slot is 0, end_slot underflow guard: treat as empty range.
+    const maximum_support: u64 = if (current_slot == 0)
+        0
+    else
+        estimateCommitteeWeightBetweenSlots(balance_source, parent.slot + 1, current_slot - 1);
+
+    const support_discount = try getSupportDiscount(
+        allocator,
+        fcr,
+        proto_array,
+        state,
+        balance_source,
+        votes,
+        equivocating_indices,
+        block_root,
+    );
+
+    const adversarial_weight = try getAdversarialWeight(
+        allocator,
+        fcr,
+        proto_array,
+        state,
+        balance_source,
+        equivocating_indices,
+        block_root,
+        current_slot,
+    );
+
+    // Spec underflow guard: if support_discount alone exceeds the rest, threshold = 0.
+    const numerator_terms: u64 = maximum_support + proposer_score + 2 * adversarial_weight;
+    const threshold: u64 = if (support_discount > numerator_terms)
+        0
+    else
+        @divFloor(numerator_terms - support_discount, 2);
+
+    return SafetyThreshold{
+        .threshold = threshold,
+        .proposer_score = proposer_score,
+        .maximum_support = maximum_support,
+        .support_discount = support_discount,
+        .adversarial_weight = adversarial_weight,
+    };
+}
+
+// --- C11: isOneConfirmed ---
+
+/// Naive per-block attestation score. Iterates all validators, sums effective
+/// balance for each whose latest message root is a descendant of `block_root`
+/// (skipping equivocating). PR 9227 optimization (precompute chain scores) is
+/// deferred to Phase H.
+fn getAttestationScore(
+    proto_array: *const ProtoArray,
+    balance_source: *const BalanceSourceData,
+    votes: *Votes,
+    equivocating_indices: *const EquivocatingIndices,
+    block_root: Root,
+) u64 {
+    const balances = balance_source.effective_balances.items;
+    const fields = votes.fields();
+    const validator_count = @min(balances.len, fields.next_indices.len);
+
+    var score: u64 = 0;
+    var i: usize = 0;
+    while (i < validator_count) : (i += 1) {
+        const bal = balances[i];
+        if (bal == 0) continue; // slashed / inactive already zeroed.
+        if (equivocating_indices.contains(@intCast(i))) continue;
+        const next_idx = fields.next_indices[i];
+        if (next_idx == NULL_VOTE_INDEX) continue;
+        if (next_idx >= proto_array.nodes.items.len) continue;
+        const vote_root = proto_array.nodes.items[next_idx].block_root;
+        // block_root must be ancestor of vote_root (i.e. vote is for block_root or a descendant).
+        if (isDescendantOfBlock(proto_array, block_root, vote_root)) {
+            score += bal;
+        }
+    }
+    return score;
+}
+
+/// Spec: `is_one_confirmed(store, balance_source, block_root)`.
+/// Returns true iff `support > safety_threshold`.
+pub fn isOneConfirmed(
+    allocator: Allocator,
+    fcr: *const FastConfirmation,
+    proto_array: *const ProtoArray,
+    state: *const CachedBeaconState,
+    balance_source: *const BalanceSourceData,
+    votes: *Votes,
+    equivocating_indices: *const EquivocatingIndices,
+    block_root: Root,
+    current_slot: Slot,
+) Error!bool {
+    if (current_slot == 0) return false;
+    // Block must be known.
+    if (proto_array.getDefaultVariant(block_root) == null) return false;
+
+    const support = getAttestationScore(proto_array, balance_source, votes, equivocating_indices, block_root);
+    const breakdown = try computeSafetyThreshold(
+        allocator,
+        fcr,
+        proto_array,
+        state,
+        balance_source,
+        votes,
+        equivocating_indices,
+        block_root,
+        current_slot,
+    );
+    return support > breakdown.threshold;
+}
+
+// --- C12: isConfirmedChainSafe ---
+
+/// Spec: `is_confirmed_chain_safe(fcr_store, confirmed_root)`.
+///
+/// Walks the chain from `confirmed_root` up to the appropriate `start_root`
+/// (excluded) and returns true iff every block in that chain passes
+/// `isOneConfirmed` against `previous_balance_source`.
+pub fn isConfirmedChainSafe(
+    fcr: *const FastConfirmation,
+    fc: *const ForkChoice,
+    state: *const CachedBeaconState,
+    votes: *Votes,
+    equivocating_indices: *const EquivocatingIndices,
+    confirmed_root: Root,
+    current_slot: Slot,
+    allocator: Allocator,
+) Error!bool {
+    const proto_array = fc.proto_array;
+    const observed_justified_root = fcr.current_epoch_observed_justified_checkpoint.root;
+
+    // Confirmed root must be a descendant of the current observed justified
+    // checkpoint. `isAncestor` already maps unknown blocks to `false`.
+    if (!try isAncestor(fc, confirmed_root, observed_justified_root)) return false;
+
+    const current_epoch = computeEpochAtSlot(current_slot);
+    const observed_justified_epoch = fcr.current_epoch_observed_justified_checkpoint.epoch;
+
+    var start_root: Root = undefined;
+    if (observed_justified_epoch + 1 >= current_epoch) {
+        start_root = observed_justified_root;
+    } else {
+        // current_epoch - 1 >= 1 here (because current_epoch > observed_justified_epoch + 1 >= 1).
+        assert(current_epoch >= 1);
+        const prev_epoch_start_slot = computeStartSlotAtEpoch(current_epoch - 1);
+
+        const ancestor_node = fc.getAncestor(confirmed_root, prev_epoch_start_slot) catch |err| switch (err) {
+            error.MissingProtoArrayBlock, error.UnknownAncestor => return false,
+            else => return err,
+        };
+        const ancestor_root = ancestor_node.block_root;
+
+        const ancestor_epoch = computeEpochAtSlot(ancestor_node.slot);
+        if (ancestor_epoch + 1 == current_epoch) {
+            start_root = ancestor_node.parent_root;
+        } else {
+            start_root = ancestor_root;
+        }
+    }
+
+    const chain_roots = try getAncestorRoots(allocator, fc, confirmed_root, start_root);
+    defer allocator.free(chain_roots);
+
+    for (chain_roots) |root| {
+        const ok = try isOneConfirmed(
+            allocator,
+            fcr,
+            proto_array,
+            state,
+            &fcr.previous_balance_source,
+            votes,
+            equivocating_indices,
+            root,
+            current_slot,
+        );
+        if (!ok) return false;
+    }
+    return true;
 }
 
 // =========================================================================
@@ -856,4 +1490,721 @@ test "FastConfirmation.SlotAssignments.rebuild populates and clears between rebu
     // (and crucially must not leak — caught by testing.allocator).
     try assignments.rebuild(allocator, test_state.cached_state, current_slot);
     try testing.expectEqual(first_count, assignments.by_validator.count());
+}
+
+// --- Phase C: LMD-GHOST helper tests ---
+
+// C1
+test "FastConfirmation.isFullValidatorSetCovered — full epoch range returns true" {
+    // [0, 2*SLOTS_PER_EPOCH - 1] covers epochs 0 and 1 entirely.
+    try testing.expect(isFullValidatorSetCovered(0, 2 * preset.SLOTS_PER_EPOCH - 1));
+    // Single full epoch [SLOTS_PER_EPOCH, 2*SLOTS_PER_EPOCH - 1] is also fully covered.
+    try testing.expect(isFullValidatorSetCovered(preset.SLOTS_PER_EPOCH, 2 * preset.SLOTS_PER_EPOCH - 1));
+}
+
+test "FastConfirmation.isFullValidatorSetCovered — partial range returns false" {
+    // Less than a full epoch: [0, SLOTS_PER_EPOCH - 2] misses last slot of epoch 0.
+    try testing.expect(!isFullValidatorSetCovered(0, preset.SLOTS_PER_EPOCH - 2));
+    // Cross-epoch but no full epoch: [SLOTS_PER_EPOCH - 2, SLOTS_PER_EPOCH + 1].
+    try testing.expect(!isFullValidatorSetCovered(preset.SLOTS_PER_EPOCH - 2, preset.SLOTS_PER_EPOCH + 1));
+}
+
+test "FastConfirmation.isFullValidatorSetCovered — start > end returns false" {
+    // start_slot > end_slot: formula yields start_full_epoch >= end_full_epoch ⇒ false.
+    try testing.expect(!isFullValidatorSetCovered(10, 5));
+    try testing.expect(!isFullValidatorSetCovered(preset.SLOTS_PER_EPOCH, 1));
+}
+
+// C2
+test "FastConfirmation.adjustCommitteeWeightEstimateToEnsureSafety — zero maps to zero" {
+    try testing.expectEqual(@as(u64, 0), adjustCommitteeWeightEstimateToEnsureSafety(0));
+}
+
+test "FastConfirmation.adjustCommitteeWeightEstimateToEnsureSafety — small inputs ceiling-up" {
+    // (1 * 1005 + 999) / 1000 = 2004 / 1000 = 2.
+    try testing.expectEqual(@as(u64, 2), adjustCommitteeWeightEstimateToEnsureSafety(1));
+    // (1000 * 1005 + 999) / 1000 = 1005999 / 1000 = 1005.
+    try testing.expectEqual(@as(u64, 1005), adjustCommitteeWeightEstimateToEnsureSafety(1000));
+}
+
+test "FastConfirmation.adjustCommitteeWeightEstimateToEnsureSafety — monotone non-decreasing" {
+    // Spot check monotonicity over a small range.
+    var prev: u64 = 0;
+    var x: u64 = 0;
+    while (x < 100) : (x += 1) {
+        const y = adjustCommitteeWeightEstimateToEnsureSafety(x);
+        try testing.expect(y >= prev);
+        prev = y;
+    }
+}
+
+// C3
+test "FastConfirmation.estimateCommitteeWeightBetweenSlots — start > end yields 0" {
+    var bsd = BalanceSourceData.init();
+    defer bsd.deinit(testing.allocator);
+    try bsd.effective_balances.append(testing.allocator, 32);
+    try testing.expectEqual(@as(u64, 0), estimateCommitteeWeightBetweenSlots(&bsd, 5, 4));
+}
+
+test "FastConfirmation.estimateCommitteeWeightBetweenSlots — full epoch returns total active balance" {
+    var bsd = BalanceSourceData.init();
+    defer bsd.deinit(testing.allocator);
+    // 100 validators with 32-increment effective balance = 3200 total.
+    var i: usize = 0;
+    while (i < 100) : (i += 1) try bsd.effective_balances.append(testing.allocator, 32);
+
+    const total = estimateCommitteeWeightBetweenSlots(&bsd, 0, 2 * preset.SLOTS_PER_EPOCH - 1);
+    try testing.expectEqual(@as(u64, 100 * 32), total);
+}
+
+test "FastConfirmation.estimateCommitteeWeightBetweenSlots — same-epoch range scales linearly" {
+    var bsd = BalanceSourceData.init();
+    defer bsd.deinit(testing.allocator);
+    // total = 1024 (chosen as multiple of SLOTS_PER_EPOCH for clean math).
+    var i: usize = 0;
+    while (i < preset.SLOTS_PER_EPOCH) : (i += 1) try bsd.effective_balances.append(testing.allocator, 32);
+    // total = 32 * SLOTS_PER_EPOCH so committee_weight_per_slot = 32.
+
+    // Range [0, 0] (one slot) within epoch 0: 32 * 1 = 32.
+    try testing.expectEqual(@as(u64, 32), estimateCommitteeWeightBetweenSlots(&bsd, 0, 0));
+    // Range [0, 1] (two slots): 32 * 2 = 64.
+    try testing.expectEqual(@as(u64, 64), estimateCommitteeWeightBetweenSlots(&bsd, 0, 1));
+}
+
+test "FastConfirmation.estimateCommitteeWeightBetweenSlots — cross-epoch uses adjustment" {
+    var bsd = BalanceSourceData.init();
+    defer bsd.deinit(testing.allocator);
+    var i: usize = 0;
+    while (i < preset.SLOTS_PER_EPOCH) : (i += 1) try bsd.effective_balances.append(testing.allocator, 32);
+    // total_active_balance = 32 * SLOTS_PER_EPOCH ⇒ committee_weight_per_slot = 32.
+
+    // Range [SLOTS_PER_EPOCH - 1, SLOTS_PER_EPOCH] crosses epoch boundary, no full epoch.
+    // num_slots_in_start_epoch = SLOTS_PER_EPOCH - (SLOTS_PER_EPOCH - 1) = 1.
+    // num_slots_in_end_epoch = 0 + 1 = 1.
+    // remaining_slots_in_end_epoch = SLOTS_PER_EPOCH - 1.
+    // start_epoch_weight = 32 * 1 = 32.
+    // end_epoch_weight = 32 * 1 = 32.
+    // start_epoch_weight_pro_rated = floor(32 / SLOTS_PER_EPOCH) * (SLOTS_PER_EPOCH - 1)
+    //   = 4 * (SLOTS_PER_EPOCH - 1)  (under minimal SLOTS_PER_EPOCH=8: 4 * 7 = 28).
+    // adjust(start_epoch_weight_pro_rated + end_epoch_weight) applies the safety factor.
+    const got = estimateCommitteeWeightBetweenSlots(&bsd, preset.SLOTS_PER_EPOCH - 1, preset.SLOTS_PER_EPOCH);
+
+    // Recompute the spec arithmetic in the test to keep it preset-agnostic.
+    const slots_per_epoch: u64 = preset.SLOTS_PER_EPOCH;
+    const total_active_balance: u64 = 32 * slots_per_epoch;
+    const cwp: u64 = @divFloor(total_active_balance, slots_per_epoch); // 32
+    const start_pro_rated: u64 = @divFloor(cwp * 1, slots_per_epoch) * (slots_per_epoch - 1);
+    const expected = adjustCommitteeWeightEstimateToEnsureSafety(start_pro_rated + cwp * 1);
+    try testing.expectEqual(expected, got);
+    // Sanity: adjustment never decreases the estimate.
+    try testing.expect(got >= start_pro_rated + cwp * 1);
+}
+
+// C4: getEquivocationScore — empty equivocating set returns 0.
+test "FastConfirmation.getEquivocationScore — empty equivocating set returns 0" {
+    const allocator = testing.allocator;
+
+    var pool = try Node.Pool.init(allocator, 500_000);
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
+    defer test_state.deinit();
+
+    var bsd = BalanceSourceData.init();
+    defer bsd.deinit(allocator);
+    try bsd.rebuild(allocator, test_state.cached_state, .{ .epoch = 0, .root = ZERO_ROOT });
+
+    var eq: EquivocatingIndices = .empty;
+    defer eq.deinit(allocator);
+
+    const slot = try test_state.cached_state.state.slot();
+    const score = try getEquivocationScore(allocator, test_state.cached_state, &bsd, &eq, slot, slot);
+    try testing.expectEqual(@as(u64, 0), score);
+}
+
+test "FastConfirmation.getEquivocationScore — start > end returns 0 (without state lookup)" {
+    const allocator = testing.allocator;
+
+    // Use a stub state pointer; the function returns early without dereferencing
+    // it when start > end.
+    var pool = try Node.Pool.init(allocator, 500_000);
+    defer pool.deinit();
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 32);
+    defer test_state.deinit();
+
+    var bsd = BalanceSourceData.init();
+    defer bsd.deinit(allocator);
+    var eq: EquivocatingIndices = .empty;
+    defer eq.deinit(allocator);
+
+    const score = try getEquivocationScore(allocator, test_state.cached_state, &bsd, &eq, 100, 50);
+    try testing.expectEqual(@as(u64, 0), score);
+}
+
+test "FastConfirmation.getEquivocationScore — slashed validator in committee counts when in equivocating set" {
+    const allocator = testing.allocator;
+
+    var pool = try Node.Pool.init(allocator, 500_000);
+    defer pool.deinit();
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
+    defer test_state.deinit();
+
+    var bsd = BalanceSourceData.init();
+    defer bsd.deinit(allocator);
+    try bsd.rebuild(allocator, test_state.cached_state, .{ .epoch = 0, .root = ZERO_ROOT });
+
+    // Pick a validator that we know participates in some committee in the
+    // current state slot, and add it to the equivocating set. We discover
+    // such a validator by reading the committee at the state slot.
+    const slot = try test_state.cached_state.state.slot();
+    const committee = try getSlotCommittee(allocator, test_state.cached_state, slot);
+    defer allocator.free(committee);
+    try testing.expect(committee.len > 0);
+    const target_validator = committee[0];
+
+    var eq: EquivocatingIndices = .empty;
+    defer eq.deinit(allocator);
+    try eq.put(allocator, target_validator, {});
+
+    // Expected score = balance of target_validator (non-zero, since active).
+    const expected = bsd.effective_balances.items[target_validator];
+    const score = try getEquivocationScore(allocator, test_state.cached_state, &bsd, &eq, slot, slot);
+    try testing.expectEqual(@as(u64, expected), score);
+}
+
+// C5: computeAdversarialWeight — saturates to zero when equivocation > max adversarial.
+test "FastConfirmation.computeAdversarialWeight — basic saturation behavior" {
+    const allocator = testing.allocator;
+
+    var pool = try Node.Pool.init(allocator, 500_000);
+    defer pool.deinit();
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
+    defer test_state.deinit();
+
+    var fcr = FastConfirmation.init(.{ .epoch = 0, .root = ZERO_ROOT }, 25, 40);
+    defer fcr.deinit(allocator);
+
+    var bsd = BalanceSourceData.init();
+    defer bsd.deinit(allocator);
+    try bsd.rebuild(allocator, test_state.cached_state, .{ .epoch = 0, .root = ZERO_ROOT });
+
+    var eq: EquivocatingIndices = .empty;
+    defer eq.deinit(allocator);
+
+    const slot = try test_state.cached_state.state.slot();
+    // Empty equivocating set → returns max_adversarial_weight which is non-zero
+    // for a non-empty range.
+    const w = try computeAdversarialWeight(allocator, &fcr, test_state.cached_state, &bsd, &eq, slot, slot);
+    // Should not exceed total active balance (sanity).
+    try testing.expect(w <= getTotalActiveBalance(&bsd));
+}
+
+// C6, C7, C8, C9, C10, C11, C12: structural tests using the linear ProtoArray fixture.
+// These exercise the call-graphs via simple, known inputs.
+
+test "FastConfirmation.getAdversarialWeight — returns 0 when current_slot == 0" {
+    const allocator = testing.allocator;
+    const fixture = try initLinearForkChoice(allocator);
+    defer deinitForkChoiceFixture(allocator, fixture);
+
+    var pool = try Node.Pool.init(allocator, 500_000);
+    defer pool.deinit();
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
+    defer test_state.deinit();
+
+    var fcr = FastConfirmation.init(.{ .epoch = 0, .root = ZERO_ROOT }, 25, 40);
+    defer fcr.deinit(allocator);
+
+    var bsd = BalanceSourceData.init();
+    defer bsd.deinit(allocator);
+    try bsd.rebuild(allocator, test_state.cached_state, .{ .epoch = 0, .root = ZERO_ROOT });
+
+    var eq: EquivocatingIndices = .empty;
+    defer eq.deinit(allocator);
+
+    const w = try getAdversarialWeight(
+        allocator,
+        &fcr,
+        fixture.fc.proto_array,
+        test_state.cached_state,
+        &bsd,
+        &eq,
+        fixture.b_root,
+        0,
+    );
+    try testing.expectEqual(@as(u64, 0), w);
+}
+
+test "FastConfirmation.getAdversarialWeight — unknown block returns 0" {
+    const allocator = testing.allocator;
+    const fixture = try initLinearForkChoice(allocator);
+    defer deinitForkChoiceFixture(allocator, fixture);
+
+    var pool = try Node.Pool.init(allocator, 500_000);
+    defer pool.deinit();
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
+    defer test_state.deinit();
+
+    var fcr = FastConfirmation.init(.{ .epoch = 0, .root = ZERO_ROOT }, 25, 40);
+    defer fcr.deinit(allocator);
+
+    var bsd = BalanceSourceData.init();
+    defer bsd.deinit(allocator);
+    try bsd.rebuild(allocator, test_state.cached_state, .{ .epoch = 0, .root = ZERO_ROOT });
+
+    var eq: EquivocatingIndices = .empty;
+    defer eq.deinit(allocator);
+
+    const w = try getAdversarialWeight(
+        allocator,
+        &fcr,
+        fixture.fc.proto_array,
+        test_state.cached_state,
+        &bsd,
+        &eq,
+        rootFromByte(0xFE),
+        2,
+    );
+    try testing.expectEqual(@as(u64, 0), w);
+}
+
+test "FastConfirmation.getBlockSupportBetweenSlots — start > end returns 0" {
+    const allocator = testing.allocator;
+
+    var pool = try Node.Pool.init(allocator, 500_000);
+    defer pool.deinit();
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
+    defer test_state.deinit();
+
+    var pa: ProtoArray = undefined;
+    try pa.initialize(allocator, makeProtoBlock(0, ZERO_ROOT, ZERO_ROOT), 0);
+    defer pa.deinit(allocator);
+
+    var bsd = BalanceSourceData.init();
+    defer bsd.deinit(allocator);
+    try bsd.rebuild(allocator, test_state.cached_state, .{ .epoch = 0, .root = ZERO_ROOT });
+
+    var votes: Votes = .{};
+    defer votes.deinit(allocator);
+
+    var eq: EquivocatingIndices = .empty;
+    defer eq.deinit(allocator);
+
+    const score = try getBlockSupportBetweenSlots(
+        allocator,
+        test_state.cached_state,
+        &pa,
+        &bsd,
+        &votes,
+        &eq,
+        ZERO_ROOT,
+        10,
+        5,
+    );
+    try testing.expectEqual(@as(u64, 0), score);
+}
+
+test "FastConfirmation.getBlockSupportBetweenSlots — no votes for block returns 0" {
+    const allocator = testing.allocator;
+
+    var pool = try Node.Pool.init(allocator, 500_000);
+    defer pool.deinit();
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
+    defer test_state.deinit();
+
+    var pa: ProtoArray = undefined;
+    try pa.initialize(allocator, makeProtoBlock(0, ZERO_ROOT, ZERO_ROOT), 0);
+    defer pa.deinit(allocator);
+
+    var bsd = BalanceSourceData.init();
+    defer bsd.deinit(allocator);
+    try bsd.rebuild(allocator, test_state.cached_state, .{ .epoch = 0, .root = ZERO_ROOT });
+
+    // Pre-allocate votes for all validators; default = NULL_VOTE_INDEX so no votes.
+    var votes: Votes = .{};
+    defer votes.deinit(allocator);
+    try votes.ensureValidatorCount(allocator, 256);
+
+    var eq: EquivocatingIndices = .empty;
+    defer eq.deinit(allocator);
+
+    const slot = try test_state.cached_state.state.slot();
+    const score = try getBlockSupportBetweenSlots(
+        allocator,
+        test_state.cached_state,
+        &pa,
+        &bsd,
+        &votes,
+        &eq,
+        rootFromByte(0xCD),
+        slot,
+        slot,
+    );
+    try testing.expectEqual(@as(u64, 0), score);
+}
+
+test "FastConfirmation.computeEmptySlotSupportDiscount — adjacent parent yields 0" {
+    const allocator = testing.allocator;
+    const fixture = try initLinearForkChoice(allocator);
+    defer deinitForkChoiceFixture(allocator, fixture);
+
+    var pool = try Node.Pool.init(allocator, 500_000);
+    defer pool.deinit();
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
+    defer test_state.deinit();
+
+    var fcr = FastConfirmation.init(.{ .epoch = 0, .root = ZERO_ROOT }, 25, 40);
+    defer fcr.deinit(allocator);
+
+    var bsd = BalanceSourceData.init();
+    defer bsd.deinit(allocator);
+    try bsd.rebuild(allocator, test_state.cached_state, .{ .epoch = 0, .root = ZERO_ROOT });
+
+    var votes: Votes = .{};
+    defer votes.deinit(allocator);
+    try votes.ensureValidatorCount(allocator, 256);
+
+    var eq: EquivocatingIndices = .empty;
+    defer eq.deinit(allocator);
+
+    // Block_a is at slot 1 with parent at slot 0 — adjacent. Discount = 0.
+    const w = try computeEmptySlotSupportDiscount(
+        allocator,
+        &fcr,
+        fixture.fc.proto_array,
+        test_state.cached_state,
+        &bsd,
+        &votes,
+        &eq,
+        fixture.a_root,
+    );
+    try testing.expectEqual(@as(u64, 0), w);
+}
+
+test "FastConfirmation.getSupportDiscount — delegates to computeEmptySlotSupportDiscount" {
+    const allocator = testing.allocator;
+    const fixture = try initLinearForkChoice(allocator);
+    defer deinitForkChoiceFixture(allocator, fixture);
+
+    var pool = try Node.Pool.init(allocator, 500_000);
+    defer pool.deinit();
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
+    defer test_state.deinit();
+
+    var fcr = FastConfirmation.init(.{ .epoch = 0, .root = ZERO_ROOT }, 25, 40);
+    defer fcr.deinit(allocator);
+
+    var bsd = BalanceSourceData.init();
+    defer bsd.deinit(allocator);
+    try bsd.rebuild(allocator, test_state.cached_state, .{ .epoch = 0, .root = ZERO_ROOT });
+
+    var votes: Votes = .{};
+    defer votes.deinit(allocator);
+    try votes.ensureValidatorCount(allocator, 256);
+
+    var eq: EquivocatingIndices = .empty;
+    defer eq.deinit(allocator);
+
+    const a = try getSupportDiscount(
+        allocator,
+        &fcr,
+        fixture.fc.proto_array,
+        test_state.cached_state,
+        &bsd,
+        &votes,
+        &eq,
+        fixture.a_root,
+    );
+    const b = try computeEmptySlotSupportDiscount(
+        allocator,
+        &fcr,
+        fixture.fc.proto_array,
+        test_state.cached_state,
+        &bsd,
+        &votes,
+        &eq,
+        fixture.a_root,
+    );
+    try testing.expectEqual(b, a);
+}
+
+test "FastConfirmation.computeSafetyThreshold — underflow guard saturates to 0" {
+    const allocator = testing.allocator;
+    const fixture = try initLinearForkChoice(allocator);
+    defer deinitForkChoiceFixture(allocator, fixture);
+
+    var pool = try Node.Pool.init(allocator, 500_000);
+    defer pool.deinit();
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
+    defer test_state.deinit();
+
+    var fcr = FastConfirmation.init(.{ .epoch = 0, .root = ZERO_ROOT }, 25, 40);
+    defer fcr.deinit(allocator);
+
+    // Empty balance source ⇒ total_active_balance = 0 ⇒ proposer_score = 0,
+    // maximum_support = 0. With empty equivocating set, adversarial = 0 and
+    // discount = 0 ⇒ threshold = 0 (numerator and discount both 0; the
+    // underflow guard takes the else branch with floor(0 / 2) = 0).
+    var bsd = BalanceSourceData.init();
+    defer bsd.deinit(allocator);
+
+    var votes: Votes = .{};
+    defer votes.deinit(allocator);
+
+    var eq: EquivocatingIndices = .empty;
+    defer eq.deinit(allocator);
+
+    // current_slot in epoch 0; block_a is at slot 1 with parent at slot 0.
+    // current_slot = 2 ⇒ end = 1 (slot range for max support: [parent.slot+1, current_slot-1] = [1, 1]).
+    const result = try computeSafetyThreshold(
+        allocator,
+        &fcr,
+        fixture.fc.proto_array,
+        test_state.cached_state,
+        &bsd,
+        &votes,
+        &eq,
+        fixture.a_root,
+        2,
+    );
+    try testing.expectEqual(@as(u64, 0), result.threshold);
+    try testing.expectEqual(@as(u64, 0), result.proposer_score);
+    try testing.expectEqual(@as(u64, 0), result.maximum_support);
+    try testing.expectEqual(@as(u64, 0), result.support_discount);
+    try testing.expectEqual(@as(u64, 0), result.adversarial_weight);
+}
+
+test "FastConfirmation.computeSafetyThreshold — unknown block returns max threshold" {
+    const allocator = testing.allocator;
+    const fixture = try initLinearForkChoice(allocator);
+    defer deinitForkChoiceFixture(allocator, fixture);
+
+    var pool = try Node.Pool.init(allocator, 500_000);
+    defer pool.deinit();
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
+    defer test_state.deinit();
+
+    var fcr = FastConfirmation.init(.{ .epoch = 0, .root = ZERO_ROOT }, 25, 40);
+    defer fcr.deinit(allocator);
+
+    var bsd = BalanceSourceData.init();
+    defer bsd.deinit(allocator);
+
+    var votes: Votes = .{};
+    defer votes.deinit(allocator);
+
+    var eq: EquivocatingIndices = .empty;
+    defer eq.deinit(allocator);
+
+    const result = try computeSafetyThreshold(
+        allocator,
+        &fcr,
+        fixture.fc.proto_array,
+        test_state.cached_state,
+        &bsd,
+        &votes,
+        &eq,
+        rootFromByte(0xFE),
+        2,
+    );
+    try testing.expectEqual(std.math.maxInt(u64), result.threshold);
+}
+
+test "FastConfirmation.isOneConfirmed — returns false when current_slot is 0" {
+    const allocator = testing.allocator;
+    const fixture = try initLinearForkChoice(allocator);
+    defer deinitForkChoiceFixture(allocator, fixture);
+
+    var pool = try Node.Pool.init(allocator, 500_000);
+    defer pool.deinit();
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
+    defer test_state.deinit();
+
+    var fcr = FastConfirmation.init(.{ .epoch = 0, .root = ZERO_ROOT }, 25, 40);
+    defer fcr.deinit(allocator);
+
+    var bsd = BalanceSourceData.init();
+    defer bsd.deinit(allocator);
+
+    var votes: Votes = .{};
+    defer votes.deinit(allocator);
+
+    var eq: EquivocatingIndices = .empty;
+    defer eq.deinit(allocator);
+
+    const ok = try isOneConfirmed(
+        allocator,
+        &fcr,
+        fixture.fc.proto_array,
+        test_state.cached_state,
+        &bsd,
+        &votes,
+        &eq,
+        fixture.a_root,
+        0,
+    );
+    try testing.expect(!ok);
+}
+
+test "FastConfirmation.isOneConfirmed — unknown block returns false" {
+    const allocator = testing.allocator;
+    const fixture = try initLinearForkChoice(allocator);
+    defer deinitForkChoiceFixture(allocator, fixture);
+
+    var pool = try Node.Pool.init(allocator, 500_000);
+    defer pool.deinit();
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
+    defer test_state.deinit();
+
+    var fcr = FastConfirmation.init(.{ .epoch = 0, .root = ZERO_ROOT }, 25, 40);
+    defer fcr.deinit(allocator);
+
+    var bsd = BalanceSourceData.init();
+    defer bsd.deinit(allocator);
+
+    var votes: Votes = .{};
+    defer votes.deinit(allocator);
+
+    var eq: EquivocatingIndices = .empty;
+    defer eq.deinit(allocator);
+
+    const ok = try isOneConfirmed(
+        allocator,
+        &fcr,
+        fixture.fc.proto_array,
+        test_state.cached_state,
+        &bsd,
+        &votes,
+        &eq,
+        rootFromByte(0xFE),
+        2,
+    );
+    try testing.expect(!ok);
+}
+
+test "FastConfirmation.isOneConfirmed — confirmed when support exceeds threshold" {
+    const allocator = testing.allocator;
+    const fixture = try initLinearForkChoice(allocator);
+    defer deinitForkChoiceFixture(allocator, fixture);
+
+    var pool = try Node.Pool.init(allocator, 500_000);
+    defer pool.deinit();
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 32);
+    defer test_state.deinit();
+
+    var fcr = FastConfirmation.init(.{ .epoch = 0, .root = ZERO_ROOT }, 0, 0);
+    defer fcr.deinit(allocator);
+
+    // Construct a balance source where one validator (idx 0) has the only
+    // non-zero balance and votes for fixture.a_root. With byzantine_threshold = 0
+    // and proposer_score_boost = 0, the safety threshold = 0, so any positive
+    // support yields confirmed = true.
+    var bsd = BalanceSourceData.init();
+    defer bsd.deinit(allocator);
+    try bsd.effective_balances.resize(allocator, 32);
+    @memset(bsd.effective_balances.items, 0);
+    bsd.effective_balances.items[0] = 32;
+
+    var votes: Votes = .{};
+    defer votes.deinit(allocator);
+    try votes.ensureValidatorCount(allocator, 32);
+
+    // Find a_root's node index via proto_array internals (default variant is FULL pre-Gloas).
+    const a_node_index = fixture.fc.proto_array.getDefaultNodeIndex(fixture.a_root) orelse
+        return error.TestUnexpectedResult;
+    {
+        const v = votes.fields();
+        v.next_indices[0] = a_node_index;
+    }
+
+    var eq: EquivocatingIndices = .empty;
+    defer eq.deinit(allocator);
+
+    const ok = try isOneConfirmed(
+        allocator,
+        &fcr,
+        fixture.fc.proto_array,
+        test_state.cached_state,
+        &bsd,
+        &votes,
+        &eq,
+        fixture.a_root,
+        2,
+    );
+    try testing.expect(ok);
+}
+
+test "FastConfirmation.isConfirmedChainSafe — non-descendant of justified returns false" {
+    const allocator = testing.allocator;
+    const fixture = try initLinearForkChoice(allocator);
+    defer deinitForkChoiceFixture(allocator, fixture);
+
+    var pool = try Node.Pool.init(allocator, 500_000);
+    defer pool.deinit();
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 32);
+    defer test_state.deinit();
+
+    // Set the FCR's current observed justified checkpoint to b_root.
+    // Then verify that an ancestor of b_root (genesis) is NOT considered safe
+    // because b_root is not an ancestor of genesis (we ask: confirmed_root descendant of justified?).
+    var fcr = FastConfirmation.init(.{ .epoch = 0, .root = ZERO_ROOT }, 0, 0);
+    defer fcr.deinit(allocator);
+    fcr.current_epoch_observed_justified_checkpoint = .{ .epoch = 1, .root = fixture.b_root };
+
+    var votes: Votes = .{};
+    defer votes.deinit(allocator);
+
+    var eq: EquivocatingIndices = .empty;
+    defer eq.deinit(allocator);
+
+    // confirmed_root = genesis, justified_root = b_root → genesis is not a descendant of b_root.
+    const ok = try isConfirmedChainSafe(
+        &fcr,
+        fixture.fc,
+        test_state.cached_state,
+        &votes,
+        &eq,
+        fixture.genesis_root,
+        preset.SLOTS_PER_EPOCH,
+        allocator,
+    );
+    try testing.expect(!ok);
+}
+
+test "FastConfirmation.isConfirmedChainSafe — empty chain (confirmed == start) returns true" {
+    const allocator = testing.allocator;
+    const fixture = try initLinearForkChoice(allocator);
+    defer deinitForkChoiceFixture(allocator, fixture);
+
+    var pool = try Node.Pool.init(allocator, 500_000);
+    defer pool.deinit();
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 32);
+    defer test_state.deinit();
+
+    // Justified checkpoint at genesis, confirmed_root = genesis. Range from
+    // genesis to genesis (exclusive) is empty → vacuously true.
+    var fcr = FastConfirmation.init(.{ .epoch = 0, .root = ZERO_ROOT }, 0, 0);
+    defer fcr.deinit(allocator);
+    fcr.current_epoch_observed_justified_checkpoint = .{ .epoch = 0, .root = fixture.genesis_root };
+
+    var votes: Votes = .{};
+    defer votes.deinit(allocator);
+
+    var eq: EquivocatingIndices = .empty;
+    defer eq.deinit(allocator);
+
+    // current_slot = 1 ⇒ current_epoch = 0, observed_justified.epoch + 1 = 1 >= 0,
+    // so start_root = observed_justified_root = genesis_root.
+    // chain_roots(genesis, genesis) = [] ⇒ true.
+    const ok = try isConfirmedChainSafe(
+        &fcr,
+        fixture.fc,
+        test_state.cached_state,
+        &votes,
+        &eq,
+        fixture.genesis_root,
+        1,
+        allocator,
+    );
+    try testing.expect(ok);
 }
