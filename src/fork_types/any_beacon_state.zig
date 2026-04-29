@@ -376,6 +376,7 @@ pub const AnyBeaconState = union(ForkSeq) {
         return switch (self.*) {
             inline else => |state| {
                 var validators_view = try state.getReadonly("validators");
+                try validators_view.commit();
                 return validators_view.getAllReadonlyValues(allocator);
             },
         };
