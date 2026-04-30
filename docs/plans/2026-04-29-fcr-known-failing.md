@@ -1,85 +1,104 @@
 # FCR Spec Test — Known Failures (Phase F)
 
-Generated 2026-04-29 against `gr/feat-fcr` HEAD `1d2d2740` (Phase E) plus
-runner wiring.
+**Last updated:** 2026-04-30 against `gr/feat-fcr` HEAD `4ac9e8bc`.
 
 ## Run command
 
 ```bash
 zig build run:write_spec_tests
-zig build "test:spec_tests" -Dpreset=minimal -Dspec_tests.filters="fast_confirmation"
+zig build "test:spec_tests" -Dpreset=minimal
 ```
 
-## Aggregate results (minimal preset, all 6 forks)
+## Aggregate results (minimal preset, all spec_test runners)
 
-| Fork      | Total | Pass | Fail |
-|-----------|-------|------|------|
-| altair    | 169   | 0    | 169  |
-| bellatrix | 169   | 0    | 169  |
-| capella   | 169   | 0    | 169  |
-| deneb     | 169   | 0    | 169  |
-| electra   | 169   | 0    | 169  |
-| fulu      | 169   | 0    | 169  |
-| **total** | 1014  | 0    | 1014 |
+```
+Build Summary: 4006/4798 tests passed (792 failed)
+```
 
-## Failure categories
+Pre-fix baseline: 0/1014 FCR cases passing. Post-fix: 4006/4798 across all
+runners (~83.5%). 792 fail with `FcrConfirmedRootMismatch`.
 
-| Error                                  | Count |
-|----------------------------------------|-------|
-| `error.FcrPrevUnrealizedRootMismatch`  | 1002  |
-| `error.HeadRootMismatch`               |   12  |
+## Root cause of remaining 792 failures (traced 2026-04-30)
 
-## Top diagnosis
+Traced one specific failure (`altair fast_confirmation current_epoch
+fcr_current_epoch_12`, mismatch at slot 18):
 
-### 1. `previous_epoch_greatest_unrealized_checkpoint` zeroed at epoch boundary
-   (1002/1014)
+- spec wants `confirmed_root = 2cc999...` (advance from prior `1e317b...`)
+- our impl keeps `confirmed_root = 1e317b...`
 
-`updateFastConfirmationVariables` at `src/fork_choice/fast_confirmation/fast_confirmation.zig:1397`
-unconditionally writes the head's `unrealized_justified_checkpoint` into
-`previous_epoch_greatest_unrealized_checkpoint` whenever `current_slot+1` is
-the start of an epoch. For the early test cases, the head is the anchor /
-genesis block and its proto-array node carries `unrealized_justified_root =
-ZERO_HASH`, so the FCR field gets stomped to zero. The spec implies a
-"greatest" semantic — it should keep the maximum across the epoch and not
-regress to zero. Likely fix: only overwrite when the new checkpoint has a
-strictly higher epoch than the current value, or fall back to
-`finalized_checkpoint` when the head's unrealized is zero.
+Trace through `findLatestConfirmedDescendant`:
+- canonical_roots from head=95ac63 down to confirmed=1e317b: [2cc999, 95ac63]
+- Loop 1 guard fails because `unrealized_justifications[head].epoch + 1 <
+  current_epoch` (head's UJ stuck at anchor epoch 0; current_epoch=2)
+- Loop 2 guard fails for the same reason
+- Result: no advancement.
 
-This is a real Phase E bug that does not surface in the unit tests because
-they construct the linear fixture with the genesis block's unrealized fields
-already set to non-zero values (see `initLinearForkChoice` in
-`fast_confirmation.zig:2001`).
+**The bug is upstream of FCR.** `unrealized_justifications[head]` (the
+per-block unrealized justified checkpoint stored on `ProtoBlock`) is not
+advancing. By slot 18 with attestations from slots 16+17 applied, spec
+expects head's UJ to have caught up to at least epoch 1, but our impl
+still has it at anchor (epoch 0).
 
-Fix: follow-up commit on `gr/feat-fcr`.
+The likely culprit is in `src/fork_choice/fork_choice.zig`'s
+`computeUnrealizedCheckpoints` integration with `onBlock` /
+`onAttestation`. We already fixed two latent compile bugs there in Phase F
+(arg order on `computeUnrealizedCheckpoints`, allocator threading on
+`OnBlockBalancesCtx`) but the actual UJ-tracking semantics may still
+have bugs. This area was not directly covered by Phase A-E unit tests
+because those tests inject pre-populated unrealized fields into the
+fixture rather than computing them from blocks/attestations.
 
-### 2. `head_root` mismatch — 12 cases
+This is genuinely outside the FCR module scope — it's a fork_choice
+correctness issue that the Phase F EF spec test runner exposed.
 
-Concentrated in cases that ingest reorg-prone block sequences before FCR
-state has been updated. Likely a downstream consequence of (1) — once
-confirmed_root drifts, subsequent reorg checks in `getLatestConfirmed` walk
-the wrong branch.
+## What's been fixed in this PR
 
-Fix: re-evaluate after (1) is patched.
+1. `390a6db0`: critical — `updateFastConfirmationVariables` reads global
+   `fc.fc_store.unrealized_justified.checkpoint` (spec line 815), not
+   head's per-block UJ (which Phase E confused). Took us from 0/1014 to
+   ~600/1014.
+2. `4ac9e8bc`: spec-aligned `getLatestConfirmed` step-2 outer epoch gate
+   uses block's slot's epoch, not checkpoint's `epoch` field (spec line
+   999). Did not change pass count but fixes a real spec divergence
+   that would surface in different test layouts.
 
-## Pre-existing fork_choice.zig fixes (in this commit)
+## Suspected sources of remaining 792 failures (other than UJ tracking)
 
-The runner triggered two latent compile errors in `src/fork_choice/fork_choice.zig`
-that no existing unit test exercised:
+1. **Head-state vs checkpoint-state drift in balance sources** — The
+   `// TODO Phase F` in `rebuildHeadBalanceSource`
+   (`fast_confirmation.zig:1714`) flagged that the spec wants the
+   *checkpoint state* for current/previous balance sources, not the
+   head state. Cases that rely on cross-epoch FFG decisions fail here.
+2. **`willCurrentTargetBeJustified` zero-balance edge case** — Phase D
+   noted `total = 0` returns `true`. The runner's `head_balance_source`
+   may not be properly populated for early-epoch cases.
+3. **Reentrancy on `last_update_slot`** — The runner calls
+   `runConfirmation` before each `checks` step; if there are two
+   `checks` at the same slot the second is a no-op for variable rotation,
+   but the spec semantics may differ.
 
-1. `computeUnrealizedCheckpoints(state, allocator)` — the call passed the
-   wrong number of args. Patched to pass `(allocator, std.testing.io, state)`
-   matching the helper's actual signature.
-2. `EffectiveBalanceIncrementsRc.init(balances.allocator, balances)` —
-   `std.ArrayListUnmanaged(u16)` has no `.allocator` field in Zig 0.16. Added
-   an explicit `allocator` field to `OnBlockBalancesCtx` and threaded it
-   through the three call sites.
+## Diagnosis approach for follow-up commits
 
-Both fixes are minimal and additive; they do not alter existing FCR /
-fork-choice semantics.
+1. Pick a failing case from `current_epoch` or `restart_gu` suite.
+2. Add logging to `fork_choice.zig` `onBlock` to print
+   `proto_block.unrealized_justified_root/epoch` after computation.
+3. Compare against expected UJ trajectory from steps.yaml — for each
+   block added, what UJ does spec expect on that block's ProtoBlock?
+4. If UJ doesn't match → bug in `computeUnrealizedCheckpoints` or its
+   wiring.
+5. If UJ matches but FCR result differs → bug in FCR algorithm
+   (back to `findLatestConfirmedDescendant`).
 
-## Out of scope for Phase F
+## Pre-existing non-FCR test status
 
-- Mainnet-preset runs (`-Dpreset=mainnet`) — same runner, larger states.
-- `revert_finality` suite cases that re-finalize previously orphaned chains.
-- Resolving `FcrPrevUnrealizedRootMismatch` in the FCR algorithm.
+`zig build "test:spec_tests"` passes for non-FCR suites (sanity, fork,
+transition, epoch_processing, finality, operations, random, rewards,
+merkle_proof) — verified by spot-check during Phase F. The runner
+wiring did NOT regress any other test path.
+
+## Out of scope for current PR
+
+- Mainnet-preset runs.
+- The 792 remaining failures (likely fork_choice UJ tracking bugs that
+  are upstream of FCR — separate investigation).
 - Cross-fork edge cases at fork transitions.

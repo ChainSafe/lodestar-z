@@ -512,7 +512,7 @@ pub fn TestCase(comptime fork: ForkSeq) type {
                 fc_store,
                 proto_arr,
                 @intCast(validators.len),
-                .{ .proposer_boost = true },
+                .{ .proposer_boost = true, .compute_unrealized_without_pull_up = true },
             );
             defer fc.deinit(allocator);
 
@@ -859,21 +859,6 @@ pub fn TestCase(comptime fork: ForkSeq) type {
             }
             if (checks.confirmed_root) |expected| {
                 if (!std.mem.eql(u8, &expected, &fcr.confirmed_root)) {
-                    std.log.scoped(.fcr_runner).warn(
-                        "FcrConfirmedRootMismatch: expected={x} actual={x} prev_obs_just=(e={d},r={x}) curr_obs_just=(e={d},r={x}) prev_gu=(e={d},r={x}) prev_head={x} curr_head={x}",
-                        .{
-                            expected,
-                            fcr.confirmed_root,
-                            fcr.previous_epoch_observed_justified_checkpoint.epoch,
-                            fcr.previous_epoch_observed_justified_checkpoint.root,
-                            fcr.current_epoch_observed_justified_checkpoint.epoch,
-                            fcr.current_epoch_observed_justified_checkpoint.root,
-                            fcr.previous_epoch_greatest_unrealized_checkpoint.epoch,
-                            fcr.previous_epoch_greatest_unrealized_checkpoint.root,
-                            fcr.previous_slot_head,
-                            fcr.current_slot_head,
-                        },
-                    );
                     return error.FcrConfirmedRootMismatch;
                 }
             }
