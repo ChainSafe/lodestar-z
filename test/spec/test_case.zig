@@ -90,7 +90,7 @@ pub fn TestCaseUtils(comptime fork: ForkSeq) type {
             return try TestCachedBeaconState.initFromState(allocator, pool, pre_state_all_forks, fork, fork_epoch);
         }
 
-        pub fn loadPreStateFromFile(allocator: Allocator, pool: *Node.Pool, dir: std.fs.Dir, file_name: []const u8) !TestCachedBeaconState {
+        pub fn loadPreStateFromFile(allocator: Allocator, pool: *Node.Pool, dir: std.Io.Dir, file_name: []const u8) !TestCachedBeaconState {
             var pre_state = ForkTypes.BeaconState.default_value;
             try loadSszSnappyValue(ForkTypes.BeaconState, allocator, dir, file_name, &pre_state);
             defer ForkTypes.BeaconState.deinit(allocator, &pre_state);
@@ -280,6 +280,20 @@ pub fn deinitSignedBeaconBlock(signed_block: AnySignedBeaconBlock, allocator: st
 pub fn loadSszSnappyValue(comptime ST: type, allocator: std.mem.Allocator, dir: std.Io.Dir, file_name: []const u8, out: *ST.Type) !void {
     const io = std.testing.io;
     const value_bytes = try dir.readFileAlloc(io, file_name, allocator, .unlimited);
+    defer allocator.free(value_bytes);
+
+    const serialized_buf = try allocator.alloc(u8, try snappy.uncompressedLength(value_bytes));
+    defer allocator.free(serialized_buf);
+    const serialized_len = try snappy.uncompress(value_bytes, serialized_buf);
+    const serialized = serialized_buf[0..serialized_len];
+
+    if (comptime isFixedType(ST)) {
+        try ST.deserializeFromBytes(serialized, out);
+    } else {
+        try ST.deserializeFromBytes(allocator, serialized, out);
+    }
+}
+
 /// load BeaconBlock (unsigned) from file using runtime fork
 /// consumer should deinit the returned block and destroy the pointer
 pub fn loadBeaconBlock(allocator: std.mem.Allocator, fork: ForkSeq, dir: std.Io.Dir, file_name: []const u8) !AnyBeaconBlock {
@@ -415,20 +429,6 @@ pub fn getSszSnappyDecompressedSize(allocator: std.mem.Allocator, dir: std.Io.Di
     defer allocator.free(value_bytes);
 
     return snappy.uncompressedLength(value_bytes);
-}
-
-    defer allocator.free(value_bytes);
-
-    const serialized_buf = try allocator.alloc(u8, try snappy.uncompressedLength(value_bytes));
-    defer allocator.free(serialized_buf);
-    const serialized_len = try snappy.uncompress(value_bytes, serialized_buf);
-    const serialized = serialized_buf[0..serialized_len];
-
-    if (comptime isFixedType(ST)) {
-        try ST.deserializeFromBytes(serialized, out);
-    } else {
-        try ST.deserializeFromBytes(allocator, serialized, out);
-    }
 }
 
 pub fn expectEqualBeaconStates(expected: *AnyBeaconState, actual: *AnyBeaconState) !void {

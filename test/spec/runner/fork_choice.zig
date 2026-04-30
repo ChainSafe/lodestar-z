@@ -6,7 +6,6 @@ const primitives = ssz.primitive;
 const Slot = primitives.Slot.Type;
 const Epoch = primitives.Epoch.Type;
 const Root = primitives.Root.Type;
-const Checkpoint = ssz.phase0.Checkpoint.Type;
 
 const config_mod = @import("config");
 const ForkSeq = config_mod.ForkSeq;
@@ -23,7 +22,8 @@ const ProtoArray = fork_choice_mod.ProtoArray;
 const ProtoBlock = fork_choice_mod.ProtoBlock;
 const ExecutionStatus = fork_choice_mod.ExecutionStatus;
 const DataAvailabilityStatus = fork_choice_mod.DataAvailabilityStatus;
-const CheckpointWithPayloadStatus = fork_choice_mod.CheckpointWithPayloadStatus;
+const Checkpoint = fork_choice_mod.Checkpoint;
+const SszCheckpoint = ssz.phase0.Checkpoint.Type;
 const ForkChoiceOpts = fork_choice_mod.ForkChoiceOpts;
 const JustifiedBalancesGetter = fork_choice_mod.JustifiedBalancesGetter;
 const JustifiedBalances = fork_choice_mod.JustifiedBalances;
@@ -181,9 +181,9 @@ pub fn TestCase(comptime fork: ForkSeq) type {
             // ProtoArray stores the actual block hash. Following the Lodestar TS pattern:
             // use the computed block_root as the checkpoint root (matching computeAnchorCheckpoint).
             const anchor_cached = anchor_state.cached_state;
-            var justified_cp_val: Checkpoint = undefined;
+            var justified_cp_val: SszCheckpoint = undefined;
             try anchor_cached.state.currentJustifiedCheckpoint(&justified_cp_val);
-            var finalized_cp_val: Checkpoint = undefined;
+            var finalized_cp_val: SszCheckpoint = undefined;
             try anchor_cached.state.finalizedCheckpoint(&finalized_cp_val);
 
             // Override checkpoint roots with the anchor block root
@@ -191,11 +191,11 @@ pub fn TestCase(comptime fork: ForkSeq) type {
             justified_cp_val.root = block_root;
             finalized_cp_val.root = block_root;
 
-            const justified_cp = CheckpointWithPayloadStatus{
+            const justified_cp = Checkpoint{
                 .epoch = justified_cp_val.epoch,
                 .root = justified_cp_val.root,
             };
-            const finalized_cp = CheckpointWithPayloadStatus{
+            const finalized_cp = Checkpoint{
                 .epoch = finalized_cp_val.epoch,
                 .root = finalized_cp_val.root,
             };
@@ -228,7 +228,7 @@ pub fn TestCase(comptime fork: ForkSeq) type {
 
             // 6. Compute justified balances
             var justified_balances = try state_transition.getEffectiveBalanceIncrementsZeroInactive(allocator, anchor_cached);
-            defer justified_balances.deinit();
+            defer justified_balances.deinit(allocator);
 
             // 7. Initialize ForkChoiceStore
             const fc_store = try allocator.create(ForkChoiceStore);
@@ -361,6 +361,7 @@ pub fn TestCase(comptime fork: ForkSeq) type {
             // Run state_transition to get post-state
             const post_state_result = state_transition.stateTransition(
                 self.allocator,
+                std.testing.io,
                 input_state,
                 signed_block,
                 .{
@@ -409,6 +410,7 @@ pub fn TestCase(comptime fork: ForkSeq) type {
                 // Call fork choice onBlock
                 _ = try self.fc.onBlock(
                     self.allocator,
+                    std.testing.io,
                     &beacon_block,
                     post_state,
                     block_delay,
@@ -459,6 +461,7 @@ pub fn TestCase(comptime fork: ForkSeq) type {
 
                     _ = self.fc.onBlock(
                         self.allocator,
+                        std.testing.io,
                         &beacon_block,
                         post_state,
                         0,
@@ -799,46 +802,44 @@ pub fn TestCase(comptime fork: ForkSeq) type {
 
 // ── Justified Balances Getter for Spec Tests ──
 
-fn specTestBalancesGetter(_: ?*anyopaque, _: CheckpointWithPayloadStatus, state: *CachedBeaconState) JustifiedBalances {
+fn specTestBalancesGetter(_: ?*anyopaque, _: Checkpoint, state: *CachedBeaconState) JustifiedBalances {
     // In spec tests, we always use the post-state's balances
     const allocator = std.testing.allocator;
     return state_transition.getEffectiveBalanceIncrementsZeroInactive(allocator, state) catch
-        return JustifiedBalances.init(allocator);
+        return JustifiedBalances.empty;
 }
 
 // ── YAML Parser ──
 
 fn parseSteps(allocator: Allocator, dir: std.Io.Dir) ![]Step {
-    var file = try dir.openFile("steps.yaml", .{});
-    defer file.close();
-
-    const content = try file.readToEndAlloc(allocator, 10_000_000);
+    const io = std.testing.io;
+    const content = try dir.readFileAlloc(io, "steps.yaml", allocator, .unlimited);
     defer allocator.free(content);
 
-    var steps = std.ArrayList(Step).init(allocator);
+    var steps: std.ArrayList(Step) = .empty;
     errdefer {
         for (steps.items) |*step| {
             freeStep(allocator, step);
         }
-        steps.deinit();
+        steps.deinit(allocator);
     }
 
     var lines = std.mem.splitScalar(u8, content, '\n');
-    var current_step_lines = std.ArrayList([]const u8).init(allocator);
-    defer current_step_lines.deinit();
+    var current_step_lines: std.ArrayList([]const u8) = .empty;
+    defer current_step_lines.deinit(allocator);
 
     while (lines.next()) |line| {
         if (line.len >= 2 and line[0] == '-' and line[1] == ' ') {
             // New step starts
             if (current_step_lines.items.len > 0) {
                 const step = try parseStep(allocator, current_step_lines.items);
-                try steps.append(step);
+                try steps.append(allocator, step);
                 current_step_lines.clearRetainingCapacity();
             }
-            try current_step_lines.append(line[2..]); // strip "- "
+            try current_step_lines.append(allocator, line[2..]); // strip "- "
         } else if (line.len > 0 and (line[0] == ' ' or line[0] == '\t')) {
             // Continuation of current step
-            try current_step_lines.append(line);
+            try current_step_lines.append(allocator, line);
         }
         // Empty lines are ignored
     }
@@ -846,10 +847,10 @@ fn parseSteps(allocator: Allocator, dir: std.Io.Dir) ![]Step {
     // Parse last step
     if (current_step_lines.items.len > 0) {
         const step = try parseStep(allocator, current_step_lines.items);
-        try steps.append(step);
+        try steps.append(allocator, step);
     }
 
-    return steps.toOwnedSlice();
+    return steps.toOwnedSlice(allocator);
 }
 
 fn parseStep(allocator: Allocator, lines: []const []const u8) !Step {
@@ -862,11 +863,11 @@ fn parseStep(allocator: Allocator, lines: []const []const u8) !Step {
     if (first_line.len > 0 and first_line[0] == '{') {
         // Join all lines to handle multi-line flow mappings
         if (lines.len > 1) {
-            var joined = std.ArrayList(u8).init(allocator);
-            defer joined.deinit();
+            var joined: std.ArrayList(u8) = .empty;
+            defer joined.deinit(allocator);
             for (lines) |line| {
-                try joined.appendSlice(std.mem.trim(u8, line, " \t\r"));
-                try joined.append(' ');
+                try joined.appendSlice(allocator, std.mem.trim(u8, line, " \t\r"));
+                try joined.append(allocator, ' ');
             }
             return parseFlowStep(allocator, joined.items);
         }

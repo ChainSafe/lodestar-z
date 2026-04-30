@@ -46,7 +46,7 @@ const test_template =
     \\        @tagName(active_preset) ++ "/tests/" ++ @tagName(active_preset) ++ "/{s}/fork_choice/{s}/pyspec_tests/{s}",
     \\    }});
     \\    defer allocator.free(test_dir_name);
-    \\    const test_dir = std.fs.cwd().openDir(test_dir_name, .{{}}) catch return error.SkipZigTest;
+    \\    const test_dir = std.Io.Dir.openDir(.cwd(), std.testing.io, test_dir_name, .{{}}) catch return error.SkipZigTest;
     \\
     \\    try ForkChoiceRunner.TestCase(.{s}).execute(allocator, &pool, test_dir);
     \\}}
