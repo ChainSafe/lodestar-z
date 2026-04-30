@@ -147,6 +147,8 @@ declare class BeaconStateView {
   previousEpochParticipation: number[];
   currentEpochParticipation: number[];
   latestExecutionPayloadHeader: ExecutionPayloadHeader;
+  latestBlockHash: Uint8Array;
+  payloadBlockNumber: number;
   historicalSummaries: HistoricalSummary[];
   pendingDeposits: Uint8Array;
   pendingDepositsCount: number;
