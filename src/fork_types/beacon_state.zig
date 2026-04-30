@@ -140,6 +140,7 @@ pub fn BeaconState(comptime f: ForkSeq) type {
 
         pub fn validatorsSlice(self: *Self, allocator: std.mem.Allocator) ![]ForkTypes(f).Validator.Type {
             var validators_view = try self.inner.getReadonly("validators");
+            try validators_view.commit();
             return validators_view.getAllReadonlyValues(allocator);
         }
 

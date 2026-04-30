@@ -412,13 +412,13 @@ describe("BeaconStateView", () => {
   describe("sync committee cache", () => {
     it("currentSyncCommitteeIndexed should have validatorIndices", () => {
       const indexed = state.currentSyncCommitteeIndexed;
-      expect(Array.isArray(indexed.validatorIndices)).toBe(true);
+      expect(indexed.validatorIndices).toBeInstanceOf(Uint32Array);
       expect(indexed.validatorIndices.length).toBeGreaterThan(0);
     });
 
     it("getIndexedSyncCommitteeAtEpoch should return cache", () => {
       const indexed = state.getIndexedSyncCommitteeAtEpoch(state.epoch);
-      expect(Array.isArray(indexed.validatorIndices)).toBe(true);
+      expect(indexed.validatorIndices).toBeInstanceOf(Uint32Array);
     });
 
     it("syncProposerReward should be a non-negative number", () => {
@@ -584,12 +584,12 @@ describe("BeaconStateView", () => {
       expect(newState.slot).toBe(originalSlot + 1);
     });
 
-    it("processSlots with transferCache option should work", () => {
+    it("processSlots with dontTransferCache: false should still transfer cache", () => {
       const originalSlot = state.slot;
-      const newState = state.processSlots(originalSlot + 1, {transferCache: true});
+      const newState = state.processSlots(originalSlot + 1, {dontTransferCache: false});
 
       expect(newState.slot).toBe(originalSlot + 1);
-      expect(newState.createdWithTransferCache).toBe(true);
+      expect(newState.createdWithTransferCache).toBe(false);
     });
   });
 

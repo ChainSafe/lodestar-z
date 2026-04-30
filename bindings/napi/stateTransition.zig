@@ -15,6 +15,15 @@ const allocator = if (builtin.mode == .Debug)
 else
     std.heap.c_allocator;
 
+/// Parse a JS options object into Zig's TransitionOpt.
+///
+/// Recognized fields:
+/// - verifyStateRoot, verifyProposer, verifySignatures: bool
+/// - dontTransferCache: bool (negated to set transfer_cache)
+///
+/// This is the double negative version to conform with production lodestar.
+/// TODO(bing): Eventually rename this to `transferCache` to avoid double negation because its confusing naming.
+/// TODO(bing): Other fields (executionPayloadStatus, ..).
 fn parseOptions(options: ?js.Value) !st.TransitionOpt {
     var transit_options: st.TransitionOpt = .{};
     if (options) |value| {
@@ -29,8 +38,8 @@ fn parseOptions(options: ?js.Value) !st.TransitionOpt {
             if (try raw.hasNamedProperty("verifySignatures")) {
                 transit_options.verify_signatures = try (try raw.getNamedProperty("verifySignatures")).getValueBool();
             }
-            if (try raw.hasNamedProperty("transferCache")) {
-                transit_options.transfer_cache = try (try raw.getNamedProperty("transferCache")).getValueBool();
+            if (try raw.hasNamedProperty("dontTransferCache")) {
+                transit_options.transfer_cache = !(try (try raw.getNamedProperty("dontTransferCache")).getValueBool());
             }
         }
     }
