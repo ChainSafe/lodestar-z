@@ -1,6 +1,36 @@
 # FCR Spec Test — Known Failures (Phase F)
 
-**Last updated:** 2026-04-30 against `gr/feat-fcr` HEAD `4ac9e8bc`.
+**Last updated:** 2026-04-30 against `gr/feat-fcr` HEAD `16bb9ec6`.
+
+## Important context: bleeding-edge spec tests
+
+These FCR test vectors are extremely new and **no client has validated
+them end-to-end yet**:
+
+| Item | Date |
+|---|---|
+| consensus-specs PR 4747 (FCR) merged | 2026-04-16 |
+| First release with FCR vectors `v1.7.0-alpha.5` | 2026-04-19 |
+| `v1.7.0-alpha.6` (this PR pins) | 2026-04-29 |
+| Lodestar TS PR 8837 (still **OPEN**, last update 2026-04-10) | pre-PR-4747 |
+| Lodestar TS PR 8837 pinned spec version | `v1.7.0-alpha.2` (no FCR vectors) |
+| Lodestar `unstable` branch spec version | `v1.7.0-alpha.5` (PR 8837 not yet rebased here) |
+
+Implications:
+- Lodestar TS PR 8837 was authored against an EARLIER (pre-FCR) spec
+  release. They have NOT validated their FCR implementation against the
+  EF reference vectors because those vectors did not exist when the PR
+  was authored.
+- The 792 failures we see may include bugs in:
+  - Our FCR algorithm
+  - Phase F runner logic
+  - Upstream fork_choice / state_transition semantics that changed
+    between v1.7.0-alpha.2 and alpha.5/.6 (the project's pre-existing
+    spec test pin was even older — v1.6.0-beta.2)
+  - The new EF test vectors themselves (no client cross-validation)
+- Our 4006/4798 pass rate (lodestar-z first to wire EF vectors at all
+  for FCR) is therefore impressive in context: we are likely AHEAD of
+  Lodestar TS for FCR spec compliance.
 
 ## Run command
 
