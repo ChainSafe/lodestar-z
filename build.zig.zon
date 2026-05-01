@@ -298,6 +298,7 @@
                 .imports = .{
                     .bls,
                     .bls_options,
+                    .hex,
                     .persistent_merkle_tree,
                     .ssz,
                     .consensus_types,

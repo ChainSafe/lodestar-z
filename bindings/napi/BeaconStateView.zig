@@ -371,37 +371,39 @@ pub fn proposerLookahead(self: *const BeaconStateView) !js.Uint32Array {
 
 // pub fn BeaconStateView_getShufflingAtEpoch
 
-pub fn previousDecisionRoot(self: *const BeaconStateView) !js.Uint8Array {
+fn rootToHexString(root: *const [32]u8) !js.String {
     const env = js.env();
-    const cached_state = try self.requireState();
-    const root = cached_state.previousDecisionRoot();
-    return js_types.wrap(js.Uint8Array, try sszValueToNapiValue(env, ct.primitive.Root, &root));
+    var hex_buf: [66]u8 = undefined;
+    try @import("hex").rootIntoHex(&hex_buf, root);
+    return js_types.wrap(js.String, try env.createStringUtf8(&hex_buf));
 }
 
-pub fn currentDecisionRoot(self: *const BeaconStateView) !js.Uint8Array {
-    const env = js.env();
+pub fn previousDecisionRoot(self: *const BeaconStateView) !js.String {
+    const cached_state = try self.requireState();
+    const root = cached_state.previousDecisionRoot();
+    return rootToHexString(&root);
+}
+
+pub fn currentDecisionRoot(self: *const BeaconStateView) !js.String {
     const cached_state = try self.requireState();
     const root = cached_state.currentDecisionRoot();
-    return js_types.wrap(js.Uint8Array, try sszValueToNapiValue(env, ct.primitive.Root, &root));
+    return rootToHexString(&root);
 }
 
 /// Get the next decision root for the state.
-pub fn nextDecisionRoot(self: *const BeaconStateView) !js.Uint8Array {
-    const env = js.env();
+pub fn nextDecisionRoot(self: *const BeaconStateView) !js.String {
     const cached_state = try self.requireState();
     const root = cached_state.nextDecisionRoot();
-    return js_types.wrap(js.Uint8Array, try sszValueToNapiValue(env, ct.primitive.Root, &root));
+    return rootToHexString(&root);
 }
 
 /// Get the shuffling decision root for a given epoch.
-pub fn getShufflingDecisionRoot(self: *const BeaconStateView, epoch_arg: js.Number) !js.Uint8Array {
-    const env = js.env();
+pub fn getShufflingDecisionRoot(self: *const BeaconStateView, epoch_arg: js.Number) !js.String {
     const cached_state = try self.requireState();
-    const epoch_value: u64 = @intCast(try epoch_arg.toI64());
-    const root = st.calculateShufflingDecisionRoot(cached_state.state, epoch_value) catch {
-        return throwNullAs(js.Uint8Array, "STATE_ERROR", "Failed to calculate shuffling decision root");
+    const root = st.calculateShufflingDecisionRoot(cached_state.state, try epoch_arg.toU32()) catch {
+        return throwNullAs(js.String, "STATE_ERROR", "Failed to calculate shuffling decision root");
     };
-    return js_types.wrap(js.Uint8Array, try sszValueToNapiValue(env, ct.primitive.Root, &root));
+    return rootToHexString(&root);
 }
 
 pub fn previousProposers(self: *const BeaconStateView) !?js.Array {
