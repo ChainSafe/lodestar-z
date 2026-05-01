@@ -1,3 +1,7 @@
+//! Fast Confirmation Rule.
+//!
+//! Spec: https://github.com/ethereum/consensus-specs/blob/v1.7.0-alpha.5/specs/phase0/fast-confirmation.md
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const testing = std.testing;
@@ -38,9 +42,6 @@ const NULL_VOTE_INDEX = vote_tracker.NULL_VOTE_INDEX;
 const compute_deltas = @import("../compute_deltas.zig");
 const EquivocatingIndices = compute_deltas.EquivocatingIndices;
 
-// =========================================================================
-// 1. Errors
-// =========================================================================
 
 /// FCR's error surface unions ForkChoiceError so corruption signals
 /// (`BeaconStateErr`, `InvalidParentIndex`, etc.) propagate to callers
@@ -54,9 +55,6 @@ pub const Error = ForkChoiceError || error{
     StateMissing,
 } || Allocator.Error;
 
-// =========================================================================
-// 2. SlotAssignments
-// =========================================================================
 
 pub const SlotAssignments = struct {
     /// validator_index -> sorted slots they participated in (last 3 epochs).
@@ -76,10 +74,8 @@ pub const SlotAssignments = struct {
 
     /// Rebuild the assignments for the last 3 epochs (current + 2 previous).
     /// Maps each validator index to the set of slots in that range where they have
-    /// a committee assignment.
-    ///
-    /// TigerStyle: validator slot range is bounded; outer loop iterates at most
-    /// `3 * preset.SLOTS_PER_EPOCH` slots.
+    /// a committee assignment. The slot loop is bounded at
+    /// `3 * preset.SLOTS_PER_EPOCH` iterations.
     pub fn rebuild(
         self: *SlotAssignments,
         allocator: Allocator,
@@ -105,8 +101,8 @@ pub const SlotAssignments = struct {
         assert(next_epoch_start >= 1);
         const end_slot = next_epoch_start - 1;
 
-        // TigerStyle: range is non-empty (≥1 epoch worth of slots) and bounded
-        // above by 3 * SLOTS_PER_EPOCH (current + 2 previous).
+        // Range is non-empty (≥1 epoch worth of slots) and bounded above by
+        // 3 * SLOTS_PER_EPOCH (current + 2 previous).
         assert(end_slot >= start_slot);
         assert(end_slot - start_slot < 3 * preset.SLOTS_PER_EPOCH);
 
@@ -132,9 +128,6 @@ pub const SlotAssignments = struct {
     }
 };
 
-// =========================================================================
-// 3. BalanceSourceData
-// =========================================================================
 
 pub const BalanceSourceData = struct {
     checkpoint: Checkpoint,
@@ -157,9 +150,9 @@ pub const BalanceSourceData = struct {
     /// i.e., `computeEpochAtSlot(state.slot()) == cp.epoch`. The active /
     /// slashed predicates are evaluated at `cp.epoch`; passing a state from a
     /// different epoch produces incorrect zeroing. The spec's
-    /// `get_balance_source` resolves the checkpoint state explicitly; Phase E
-    /// drivers must replicate that contract. Not asserted here because
-    /// `state.slot()` is errorable and called on a hot path.
+    /// `get_balance_source` resolves the checkpoint state explicitly; callers
+    /// must replicate that contract. Not asserted here because `state.slot()`
+    /// is errorable and called on a hot path.
     pub fn rebuild(
         self: *BalanceSourceData,
         allocator: Allocator,
@@ -175,8 +168,8 @@ pub const BalanceSourceData = struct {
             else => return error.StateMissing,
         };
         defer allocator.free(validators);
-        // TigerStyle: FCR requires a non-empty validator set; degenerate states
-        // are not valid input. Caller must guarantee this.
+        // FCR requires a non-empty validator set; degenerate states are not
+        // valid input. Caller must guarantee this.
         assert(validators.len > 0);
 
         const source_increments = state.epoch_cache.getEffectiveBalanceIncrements();
@@ -204,9 +197,6 @@ fn isActiveValidatorImpl(validator: *const consensus_types.phase0.Validator.Type
     return validator.activation_epoch <= epoch and epoch < validator.exit_epoch;
 }
 
-// =========================================================================
-// 4. FastConfirmation struct
-// =========================================================================
 
 pub const FastConfirmation = struct {
     confirmed_root: Root,
@@ -223,8 +213,9 @@ pub const FastConfirmation = struct {
 
     head_assignments: SlotAssignments,
 
-    /// Spec range [0, 25]; types match `ChainConfig.CONFIRMATION_BYZANTINE_THRESHOLD` (u64)
-    /// and Lighthouse's `byzantine_threshold: u64` to avoid narrowing at every call site.
+    /// Spec range [0, 25]; widened to u64 to match
+    /// `ChainConfig.CONFIRMATION_BYZANTINE_THRESHOLD` and avoid narrowing at
+    /// every call site.
     byzantine_threshold: u64,
     proposer_score_boost: u64,
 
@@ -271,11 +262,6 @@ pub const FastConfirmation = struct {
     }
 };
 
-// =========================================================================
-// 5. Spec helpers — Misc + State (Phase B)
-// =========================================================================
-
-// --- Misc helpers ---
 
 /// Spec: `is_start_slot_at_epoch(slot)` — true iff `slot` lies on an epoch boundary.
 pub fn isStartSlotAtEpoch(slot: Slot) bool {
@@ -302,8 +288,8 @@ pub fn getBlockEpoch(proto_array: *const ProtoArray, block_root: Root) Error!Epo
 /// returns the checkpoint at `compute_start_slot_at_epoch(epoch)` of the
 /// chain containing `block_root`.
 ///
-/// NOTE: We accept `*const ForkChoice` (Option (a) in plan §B4) so we can
-/// reuse `proto_array.getAncestor` without exposing extra accessors.
+/// Accepts `*const ForkChoice` so we can reuse `proto_array.getAncestor`
+/// without exposing extra accessors.
 pub fn getCheckpointForBlock(
     fc: *const ForkChoice,
     block_root: Root,
@@ -337,8 +323,8 @@ pub fn isAncestor(
     return std.mem.eql(u8, &ancestor.block_root, &ancestor_root);
 }
 
-/// Maximum iterations when walking ancestors. TigerStyle limit to fail fast on
-/// a corrupted DAG instead of spinning forever.
+/// Maximum iterations when walking ancestors. Bounds the loop so a corrupted
+/// DAG fails fast instead of spinning forever.
 const ANCESTOR_WALK_MAX_ITERATIONS: usize = 1_000_000;
 
 /// Spec: `get_ancestor_roots(store, block_root, terminal_root)` — returns the
@@ -411,7 +397,6 @@ pub fn getCurrentTarget(
     return getCheckpointForBlock(fc, head_root, computeEpochAtSlot(current_slot));
 }
 
-// --- State helpers ---
 
 /// Spec: `get_slot_committee(store, slot)` — union of all committees at `slot`.
 /// Caller owns the returned slice.
@@ -445,12 +430,9 @@ pub fn getSlotCommittee(
     return out;
 }
 
-// =========================================================================
-// 6. Spec helpers — LMD-GHOST (Phase C)
-// =========================================================================
 
-/// Spec uses this constant in `adjust_committee_weight_estimate_to_ensure_safety`.
-/// Spec line 22 of utils.ts equivalent: `COMMITTEE_WEIGHT_ESTIMATION_ADJUSTMENT_FACTOR = 5`.
+/// `COMMITTEE_WEIGHT_ESTIMATION_ADJUSTMENT_FACTOR` from the spec, used in
+/// `adjust_committee_weight_estimate_to_ensure_safety`.
 const COMMITTEE_WEIGHT_ESTIMATION_ADJUSTMENT_FACTOR: u64 = 5;
 
 /// Breakdown of the safety threshold computation. Returned by
@@ -463,7 +445,6 @@ pub const SafetyThreshold = struct {
     adversarial_weight: u64,
 };
 
-// --- Private helpers ---
 
 /// Sum of effective balances (in increments) across the balance source. Inactive
 /// and slashed validators are zeroed by `BalanceSourceData.rebuild`, so this is
@@ -521,8 +502,8 @@ fn getSlotRangeParticipants(
 
     if (start_slot > end_slot) return participants;
 
-    // TigerStyle: bound the slot loop. FCR caller-side ensures the range never
-    // exceeds a few epochs, but defend against pathological inputs.
+    // Bound the slot loop. FCR callers limit the range to a few epochs; this
+    // assert defends against pathological inputs.
     const max_slots: u64 = 16 * preset.SLOTS_PER_EPOCH;
     assert((end_slot - start_slot) < max_slots);
 
@@ -542,7 +523,6 @@ fn getSlotRangeParticipants(
     return participants;
 }
 
-// --- C1: isFullValidatorSetCovered ---
 
 /// Spec: `is_full_validator_set_covered(start_slot, end_slot)`. True iff
 /// the inclusive `[start_slot, end_slot]` range covers an entire epoch.
@@ -555,7 +535,6 @@ pub fn isFullValidatorSetCovered(start_slot: Slot, end_slot: Slot) bool {
     return start_full_epoch < end_full_epoch;
 }
 
-// --- C2: adjustCommitteeWeightEstimateToEnsureSafety ---
 
 /// Spec: `adjust_committee_weight_estimate_to_ensure_safety(estimate)`.
 ///
@@ -564,14 +543,12 @@ pub fn isFullValidatorSetCovered(start_slot: Slot, end_slot: Slot) bool {
 /// effective-balance increments (1 increment = 1e9 Gwei). At the increment
 /// scale, `ceil(... / 1000)` is a no-op for any realistic value, so the
 /// equivalent conservative adjustment becomes
-/// `floor((estimate * (1000 + 5) + 999) / 1000)`. See TS reference
-/// `utils.ts:294-306`.
+/// `floor((estimate * (1000 + 5) + 999) / 1000)`.
 pub fn adjustCommitteeWeightEstimateToEnsureSafety(estimate: u64) u64 {
     const factor: u64 = 1000 + COMMITTEE_WEIGHT_ESTIMATION_ADJUSTMENT_FACTOR;
     return @divFloor(estimate * factor + 999, 1000);
 }
 
-// --- C3: estimateCommitteeWeightBetweenSlots ---
 
 /// Spec: `estimate_committee_weight_between_slots(total_active_balance, start_slot, end_slot)`.
 /// In lodestar-z `total_active_balance` is supplied via `balance_source`.
@@ -610,7 +587,6 @@ pub fn estimateCommitteeWeightBetweenSlots(
     return adjustCommitteeWeightEstimateToEnsureSafety(start_epoch_weight_pro_rated + end_epoch_weight);
 }
 
-// --- C4: getEquivocationScore ---
 
 /// Spec: `get_equivocation_score(store, balance_source, start_slot, end_slot)`.
 /// Sums effective balances of equivocating validators that participate in any
@@ -642,7 +618,6 @@ pub fn getEquivocationScore(
     return score;
 }
 
-// --- C5: computeAdversarialWeight ---
 
 /// Spec: `compute_adversarial_weight(store, balance_source, start_slot, end_slot)`.
 /// Returns `floor(maximum_weight * byzantine_threshold / 100) - equivocation_score`,
@@ -675,7 +650,6 @@ pub fn computeAdversarialWeight(
         0;
 }
 
-// --- C6: getAdversarialWeight ---
 
 /// Spec: `get_adversarial_weight(store, balance_source, block_root)`.
 pub fn getAdversarialWeight(
@@ -710,7 +684,6 @@ pub fn getAdversarialWeight(
     return computeAdversarialWeight(allocator, fcr, state, balance_source, equivocating_indices, block.slot, end_slot);
 }
 
-// --- C7: getBlockSupportBetweenSlots ---
 
 /// Spec: `get_block_support_between_slots(store, balance_source, block_root, start_slot, end_slot)`.
 /// Sums effective balances of non-equivocating, non-slashed, active validators
@@ -750,7 +723,6 @@ pub fn getBlockSupportBetweenSlots(
     return score;
 }
 
-// --- C8: computeEmptySlotSupportDiscount ---
 
 /// Spec: `compute_empty_slot_support_discount(store, balance_source, block_root)`.
 pub fn computeEmptySlotSupportDiscount(
@@ -806,7 +778,6 @@ pub fn computeEmptySlotSupportDiscount(
         0;
 }
 
-// --- C9: getSupportDiscount ---
 
 /// Spec: `get_support_discount(store, balance_source, block_root)`.
 /// Thin wrapper over `computeEmptySlotSupportDiscount`.
@@ -832,7 +803,6 @@ pub fn getSupportDiscount(
     );
 }
 
-// --- C10: computeSafetyThreshold ---
 
 /// Spec: `compute_safety_threshold(store, block_root, balance_source)`.
 /// Returns the breakdown so callers can log component values.
@@ -935,12 +905,11 @@ pub fn computeSafetyThreshold(
     };
 }
 
-// --- C11: isOneConfirmed ---
 
 /// Naive per-block attestation score. Iterates all validators, sums effective
 /// balance for each whose latest message root is a descendant of `block_root`
-/// (skipping equivocating). PR 9227 optimization (precompute chain scores) is
-/// deferred to Phase H.
+/// (skipping equivocating). Precomputing per-chain scores is a possible
+/// optimization but not implemented here.
 fn getAttestationScore(
     proto_array: *const ProtoArray,
     balance_source: *const BalanceSourceData,
@@ -1002,7 +971,6 @@ pub fn isOneConfirmed(
     return support > breakdown.threshold;
 }
 
-// --- C12: isConfirmedChainSafe ---
 
 /// Spec: `is_confirmed_chain_safe(fcr_store, confirmed_root)`.
 ///
@@ -1071,9 +1039,6 @@ pub fn isConfirmedChainSafe(
     return true;
 }
 
-// =========================================================================
-// 7. Spec helpers — FFG (Phase D)
-// =========================================================================
 
 /// Compound key used to group voters by their latest message's
 /// `(root, epoch)` pair. Voters in the same group all resolve to the same
@@ -1104,7 +1069,6 @@ const VoteGroupMap = std.HashMapUnmanaged(
     std.hash_map.default_max_load_percentage,
 );
 
-// --- D1: getCurrentTargetScore ---
 
 /// Spec: `get_current_target_score(store)`.
 ///
@@ -1183,7 +1147,6 @@ pub fn getCurrentTargetScore(
     return score;
 }
 
-// --- D2: computeHonestFfgSupportForCurrentTarget ---
 
 /// Spec: `compute_honest_ffg_support_for_current_target(store)`.
 ///
@@ -1237,8 +1200,8 @@ pub fn computeHonestFfgSupportForCurrentTarget(
 
     // total_active_balance - ffg_weight_till_now: clamp to 0 in case rounding
     // in `estimate_committee_weight_between_slots` produces a value slightly
-    // above `total_active_balance` (the "ensure safety" adjustment can over-
-    // estimate). Defensive — TigerStyle says no silent corruption.
+    // above `total_active_balance` (the "ensure safety" adjustment can
+    // over-estimate). Better to under-count remaining weight than to wrap.
     const remaining_ffg_weight: u64 = if (total_active_balance > ffg_weight_till_now)
         total_active_balance - ffg_weight_till_now
     else
@@ -1257,7 +1220,6 @@ pub fn computeHonestFfgSupportForCurrentTarget(
     return min_honest_ffg_support + remaining_honest_ffg_weight;
 }
 
-// --- D3: willNoConflictingCheckpointBeJustified ---
 
 /// Spec: `will_no_conflicting_checkpoint_be_justified(store)`.
 ///
@@ -1270,9 +1232,8 @@ pub fn computeHonestFfgSupportForCurrentTarget(
 ///    i.e., the honest FFG support of the current target alone exceeds 1/3
 ///    of all active balance, leaving no room for a conflicting 2/3 majority.
 ///
-/// `head_unrealized_justified` is supplied by the caller — Phase E will
-/// derive it from `fc_store` / FCR state. Phase D uses synthetic checkpoints
-/// in tests.
+/// `head_unrealized_justified` is supplied by the caller (typically derived
+/// from `fc_store` or FCR state); unit tests pass synthetic checkpoints.
 pub fn willNoConflictingCheckpointBeJustified(
     allocator: Allocator,
     fc: *const ForkChoice,
@@ -1287,10 +1248,10 @@ pub fn willNoConflictingCheckpointBeJustified(
     const target = try getCurrentTarget(fc, head_root, current_slot);
     if (target.eql(head_unrealized_justified.*)) return true;
 
-    // Phase E TODO: `getTotalActiveBalance` is also called inside
+    // `getTotalActiveBalance` is also called inside
     // `computeHonestFfgSupportForCurrentTarget`. At mainnet scale (~1M
-    // u16 entries) this is O(N) twice per call. Consider memoizing the sum
-    // on `BalanceSourceData` after `rebuild` and dropping the redundant scan.
+    // u16 entries) this is O(N) twice per call; memoizing the sum on
+    // `BalanceSourceData` after `rebuild` would drop the redundant scan.
     const total_active_balance = getTotalActiveBalance(&fcr.head_balance_source);
     const honest_support = try computeHonestFfgSupportForCurrentTarget(
         allocator,
@@ -1305,7 +1266,6 @@ pub fn willNoConflictingCheckpointBeJustified(
     return 3 * honest_support > total_active_balance;
 }
 
-// --- D4: willCurrentTargetBeJustified ---
 
 /// Spec: `will_current_target_be_justified(store)`.
 ///
@@ -1341,14 +1301,11 @@ pub fn willCurrentTargetBeJustified(
     return 3 * honest_support >= 2 * total_active_balance;
 }
 
-// =========================================================================
-// 8. Algorithm + entry points (Phase E)
-// =========================================================================
 
-/// Voting source for FCR purposes — analogous to Lighthouse's
-/// `get_voting_source_epoch`. When the block was proposed in a previous
-/// epoch we use its unrealized justified checkpoint (the "pulled-up" view);
-/// otherwise we use the realized justified checkpoint stored on the block.
+/// Voting source epoch for FCR purposes. When the block was proposed in a
+/// previous epoch we use its unrealized justified checkpoint (the "pulled-up"
+/// view); otherwise we use the realized justified checkpoint stored on the
+/// block.
 ///
 /// Returns `null` if the block is not present in proto array.
 fn getVotingSourceEpoch(
@@ -1479,8 +1436,8 @@ fn findLatestConfirmedDescendant(
         const canonical_roots = try getAncestorRoots(allocator, fc, head_root, result_root);
         defer allocator.free(canonical_roots);
 
-        // TigerStyle: bound the loop. canonical_roots length is itself bounded
-        // by getAncestorRoots, but defend against pathological inputs.
+        // Bound the loop. canonical_roots length is itself bounded by
+        // getAncestorRoots; this clamp defends against pathological inputs.
         const limit: usize = @min(canonical_roots.len, ANCESTOR_WALK_MAX_ITERATIONS);
         var i: usize = 0;
         while (i < limit) : (i += 1) {
@@ -1732,9 +1689,10 @@ fn getLatestConfirmed(
 /// `(epoch, head_root)` pair so a switch in the head invalidates the cache.
 /// We follow the same convention.
 ///
-/// TODO Phase F: the spec wants the *checkpoint state* for the current epoch,
-/// not the head state. Phase E only has the head state available; the spec test
-/// runner in Phase F will provide the proper checkpoint state.
+/// TODO: the spec wants the *checkpoint state* for the current epoch, not the
+/// head state. We currently pass the head state because the production hook
+/// site only has that available; once a caller threads a checkpoint state
+/// through, replace `state` here with it.
 fn rebuildHeadBalanceSource(
     self: *FastConfirmation,
     allocator: Allocator,
@@ -1765,17 +1723,16 @@ pub fn onFastConfirmation(
     head_root: Root,
     current_slot: Slot,
 ) Error!void {
-    // Lighthouse derives `justified_checkpoint` from proto-array internally;
-    // we accept it for caller flexibility but currently mirror Lighthouse's
-    // unused-arg behaviour. It will be consumed when we wire up the
-    // pulled-up justification logic in Phase F.
+    // `justified_checkpoint` is currently unused — proto-array carries the
+    // same information. Kept on the signature for caller flexibility; will be
+    // consumed when the pulled-up justification logic is wired up.
     _ = justified_checkpoint;
 
     updateFastConfirmationVariables(self, fc, head_root, current_slot);
 
     // Rebuild committee assignments + head balance source for current slot.
-    // TODO Phase F: pass the proper checkpoint states here; Phase E uses the
-    // head state for both head and justified-checkpoint balance sources.
+    // TODO: pass the proper checkpoint states here; for now we reuse the head
+    // state for both head and justified-checkpoint balance sources.
     try self.head_assignments.rebuild(allocator, state, current_slot);
     try rebuildHeadBalanceSource(self, allocator, state, head_root, current_slot);
 
@@ -1862,9 +1819,7 @@ pub fn runConfirmation(
     );
 }
 
-// =========================================================================
 // Tests
-// =========================================================================
 
 const ZERO_ROOT: Root = [_]u8{0} ** 32;
 
@@ -1874,7 +1829,6 @@ fn rootFromByte(b: u8) Root {
     return r;
 }
 
-// --- Phase A bootstrap tests ---
 
 test "FastConfirmation init/deinit smoke" {
     const cp: Checkpoint = .{ .epoch = 0, .root = rootFromByte(0xAA) };
@@ -1902,7 +1856,6 @@ test "FastConfirmation setSpecTestMode" {
     try testing.expect(fcr.spec_test_mode);
 }
 
-// --- Misc helper tests ---
 
 test "FastConfirmation.isStartSlotAtEpoch — slot 0 and epoch boundaries" {
     try testing.expect(isStartSlotAtEpoch(0));
@@ -1995,7 +1948,6 @@ test "FastConfirmation.getBlockEpoch derives epoch from slot" {
     try testing.expectError(error.StateMissing, getBlockEpoch(&chain.pa_inst, unknown));
 }
 
-// --- ForkChoice-backed fixture for ancestor walks ---
 
 const test_balances_getter: store_mod.JustifiedBalancesGetter = .{ .getFn = dummyBalancesGetter };
 
@@ -2163,7 +2115,6 @@ test "FastConfirmation.getCurrentTarget delegates to getCheckpointForBlock" {
     try testing.expectEqualSlices(u8, &fixture.b_root, &target.root);
 }
 
-// --- State helpers tests ---
 
 const TestCachedBeaconState = state_transition.test_utils.TestCachedBeaconState;
 const Node = @import("persistent_merkle_tree").Node;
@@ -2291,7 +2242,6 @@ test "FastConfirmation.SlotAssignments.rebuild populates and clears between rebu
     try testing.expectEqual(first_count, assignments.by_validator.count());
 }
 
-// --- Phase C: LMD-GHOST helper tests ---
 
 // C1
 test "FastConfirmation.isFullValidatorSetCovered — full epoch range returns true" {
@@ -3015,7 +2965,6 @@ test "FastConfirmation.isConfirmedChainSafe — empty chain (confirmed == start)
     try testing.expect(ok);
 }
 
-// --- Phase D: FFG helper tests ---
 
 // D1: getCurrentTargetScore — empty votes (no validators have voted) yields 0.
 test "FastConfirmation.getCurrentTargetScore — empty votes returns 0" {
@@ -3465,7 +3414,6 @@ test "FastConfirmation.willCurrentTargetBeJustified — honest below 2/3 yields 
     try testing.expect(!ok);
 }
 
-// --- Phase E: Algorithm + entry point tests ---
 
 // E1: updateFastConfirmationVariables — first call sets last_update_slot.
 test "FastConfirmation.updateFastConfirmationVariables — first call sets last_update_slot" {
