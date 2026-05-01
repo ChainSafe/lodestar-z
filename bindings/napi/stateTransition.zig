@@ -22,10 +22,10 @@ else
 /// - dontTransferCache: bool (negated to set transfer_cache)
 ///
 /// This is the double negative version to conform with production lodestar.
-/// TODO(bing): Eventually rename this to `transferCache` to avoid double negation because its confusing naming.
-/// TODO(bing): Other fields (executionPayloadStatus, ..).
-fn parseOptions(options: ?js.Value) !st.TransitionOpt {
-    var transition_opts: st.TransitionOpt = .{};
+/// TODO(bing): Eventually rename `dontTransferCache` to `transferCache` to avoid double negation because its confusing naming.
+fn parseOptions(options: ?js.Value) !st.TransitionOpts {
+    var transition_opts: st.TransitionOpts = .{};
+
     if (options) |value| {
         const raw = value.toValue();
         if (try raw.typeof() == .object) {
