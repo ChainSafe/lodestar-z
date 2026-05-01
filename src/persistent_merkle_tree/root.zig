@@ -15,4 +15,5 @@ test {
     testing.refAllDecls(@import("node_test.zig"));
     testing.refAllDecls(@import("proof_test.zig"));
     testing.refAllDecls(@import("view_test.zig"));
+    testing.refAllDecls(@import("slab_test.zig"));
 }

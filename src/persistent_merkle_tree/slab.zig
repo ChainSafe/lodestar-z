@@ -16,8 +16,16 @@ comptime {
 }
 
 pub const Storage = struct {
+    /// Slab chunks, cache-line aligned. Chunks at indices `>= len` MUST be
+    /// zero-bytes; this invariant is the caller's responsibility (allocZero
+    /// establishes it; subsequent slab CoW writes preserve it).
     chunks: [K][32]u8 align(64),
+    /// Number of valid chunks in this slab. The last slab in a list/vector
+    /// may be partial (`len < K`); all earlier slabs satisfy `len == K`.
     len: u16,
+    /// Per-chunk modification flag tracking writes since the last slab-root
+    /// recompute. Cleared by the slab-root cache layer (Node-side) once the
+    /// cached root in the owning slab Node is refreshed.
     dirty: std.StaticBitSet(K),
 };
 
@@ -36,29 +44,28 @@ pub fn destroy(allocator: Allocator, s: *Storage) void {
 
 /// Compute the slab subtree root: K-leaf perfect binary tree, no padding.
 ///
-/// Two-buffer pingpong: read K leaves into buf_a, hash pairs into buf_b
-/// (now K/2 hashes). Subsequent halvings happen in-place on buf_b's first
-/// `width` slots until width hits 1.
+/// Single working buffer of K/2 hashes. The first reduction reads pairs
+/// directly from `slab.chunks` (no 32 KB stack copy); subsequent halvings
+/// happen in-place on `buf`'s first `width` slots until width hits 1.
 pub fn computeRoot(slab: *const Storage, out: *[32]u8) void {
     comptime std.debug.assert(@popCount(K) == 1);
 
-    var buf_a: [K][32]u8 align(64) = slab.chunks;
-    var buf_b: [K / 2][32]u8 align(64) = undefined;
+    var buf: [K / 2][32]u8 align(64) = undefined;
 
-    // First reduction: K leaves -> K/2 hashes.
+    // First reduction: read directly from slab.chunks, no 32 KB stack copy.
     var i: usize = 0;
     while (i < K) : (i += 2) {
-        hashOne(&buf_b[i / 2], &buf_a[i], &buf_a[i + 1]);
+        hashOne(&buf[i / 2], &slab.chunks[i], &slab.chunks[i + 1]);
     }
 
-    // Subsequent reductions in-place on buf_b.
+    // Subsequent reductions in-place.
     var width: usize = K / 2;
     while (width > 1) : (width /= 2) {
         var j: usize = 0;
         while (j < width) : (j += 2) {
-            hashOne(&buf_b[j / 2], &buf_b[j], &buf_b[j + 1]);
+            hashOne(&buf[j / 2], &buf[j], &buf[j + 1]);
         }
     }
 
-    out.* = buf_b[0];
+    out.* = buf[0];
 }
