@@ -229,7 +229,6 @@ pub fn latestExecutionPayloadHeader(self: *const BeaconStateView) !js.Value {
 pub fn getBlockRoot(self: *const BeaconStateView, slot_arg: js.Number) !js.Uint8Array {
     const env = js.env();
     const cached_state = try self.requireState();
-    const slot_value: u64 = @intCast(try slot_arg.toI64());
 
     const result = switch (cached_state.state.forkSeq()) {
         inline else => |f| st.getBlockRootAtSlot(f, cached_state.state.castToFork(f), slot_value),
@@ -241,6 +240,7 @@ pub fn getBlockRoot(self: *const BeaconStateView, slot_arg: js.Number) !js.Uint8
             else => "Failed to get block root",
         };
         return throwNullAs(js.Uint8Array, "INVALID_SLOT", msg);
+    const slot_ = st.computeStartSlotAtEpoch(try epoch_arg.toU32());
     };
 
     return js_types.wrap(js.Uint8Array, try sszValueToNapiValue(env, ct.primitive.Root, root));
@@ -547,7 +547,7 @@ pub fn getBalance(self: *const BeaconStateView, index_arg: js.Number) !js.BigInt
     const index_value: u64 = @intCast(try index_arg.toI64());
     var balances = try cached_state.state.balances();
     const balance = try balances.get(index_value);
-    return js.BigInt.from(balance);
+    return js.Number.from(balance);
 }
 
 /// Get a validator by index.
