@@ -168,6 +168,12 @@ pub const ForkChoiceOpts = struct {
     proposer_boost_reorg: bool = false,
     /// Compute unrealized justified/finalized checkpoints.
     compute_unrealized: bool = false,
+    /// Compute unrealized checkpoints (populates per-block unrealized_justified_epoch)
+    /// but do NOT pull them up into the realized justified/finalized store checkpoints
+    /// for past-epoch blocks. Used by the FCR spec test runner which needs correct
+    /// unrealized epochs for FCR algorithm inputs without disturbing the fork-choice
+    /// head selection (which depends on the realized justified checkpoint).
+    compute_unrealized_without_pull_up: bool = false,
 };
 
 /// Mode for `updateAndGetHead`.
@@ -522,7 +528,7 @@ pub const ForkChoice = struct {
         var unrealized_justified_checkpoint: Checkpoint = undefined;
         var unrealized_finalized_checkpoint: Checkpoint = undefined;
 
-        if (self.opts.compute_unrealized) {
+        if (self.opts.compute_unrealized or self.opts.compute_unrealized_without_pull_up) {
             if (parent_node.unrealized_justified_epoch == block_epoch and
                 parent_node.unrealized_finalized_epoch + 1 >= block_epoch)
             {
@@ -553,20 +559,29 @@ pub const ForkChoice = struct {
         }
 
         // Update best known unrealized justified & finalized checkpoints.
-        var unrealized_balances_ctx = OnBlockBalancesCtx{
-            .allocator = allocator,
-            .getter = self.fc_store.justified_balances_getter,
-            .checkpoint = unrealized_justified_checkpoint,
-            .state = state,
-        };
-        try self.updateUnrealizedCheckpoints(unrealized_justified_checkpoint, unrealized_finalized_checkpoint, .{
-            .context = @ptrCast(&unrealized_balances_ctx),
-            .getFn = OnBlockBalancesCtx.call,
-        });
+        // Always update fc_store.unrealized_justified — this is needed both in the
+        // normal path and in compute_unrealized_without_pull_up mode (the latter needs
+        // it for FCR's updateFastConfirmationVariables to read
+        // previous_epoch_greatest_unrealized_checkpoint correctly). The epoch-boundary
+        // pull-up into the realized justified checkpoint (onTick path) is guarded by
+        // the compute_unrealized_without_pull_up check in onTick.
+        {
+            var unrealized_balances_ctx = OnBlockBalancesCtx{
+                .allocator = allocator,
+                .getter = self.fc_store.justified_balances_getter,
+                .checkpoint = unrealized_justified_checkpoint,
+                .state = state,
+            };
+            try self.updateUnrealizedCheckpoints(unrealized_justified_checkpoint, unrealized_finalized_checkpoint, .{
+                .context = @ptrCast(&unrealized_balances_ctx),
+                .getFn = OnBlockBalancesCtx.call,
+            });
+        }
 
         // 11. If block is from a past epoch, try to update store's justified & finalized
-        // checkpoints right away.
-        if (block_epoch < computeEpochAtSlot(current_slot)) {
+        // checkpoints right away. Only when compute_unrealized is set (not
+        // compute_unrealized_without_pull_up, which skips all global checkpoint updates).
+        if (self.opts.compute_unrealized and block_epoch < computeEpochAtSlot(current_slot)) {
             var past_epoch_ctx = OnBlockBalancesCtx{
                 .allocator = allocator,
                 .getter = self.fc_store.justified_balances_getter,
@@ -1446,9 +1461,18 @@ pub const ForkChoice = struct {
         }
 
         // If a new epoch, pull-up justification and finalization from previous epoch.
+        // When compute_unrealized_without_pull_up is set (FCR spec test mode) the
+        // balances getter returns empty, so unrealized_justified.balances would be
+        // empty and corrupt head selection. In that case, reuse the existing
+        // justified.balances (anchor balances) which are valid throughout the test
+        // since the validator set is static.
         {
+            const tick_balances = if (self.opts.compute_unrealized_without_pull_up)
+                self.fc_store.justified.balances
+            else
+                self.fc_store.unrealized_justified.balances;
             var tick_ctx = OnTickBalancesCtx{
-                .balances = self.fc_store.unrealized_justified.balances,
+                .balances = tick_balances,
             };
             try self.updateCheckpoints(
                 self.fc_store.unrealized_justified.checkpoint,

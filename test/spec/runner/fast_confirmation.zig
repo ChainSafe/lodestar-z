@@ -710,6 +710,7 @@ pub fn TestCase(comptime fork: ForkSeq) type {
 
             _ = fc.onBlock(
                 allocator,
+                std.testing.io,
                 &beacon_block,
                 new_state,
                 0,
