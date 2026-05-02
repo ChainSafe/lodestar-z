@@ -93,28 +93,49 @@ pub fn BasicPackedChunks(
                 const gindex = Gindex.fromDepth(slab_depth, slab_idx);
 
                 const existing_id = try self.state.getChildNode(gindex);
-                const existing_variant = self.state.pool.nodes.items(.node)[@intFromEnum(existing_id)];
+                const node_col = self.state.pool.nodes.items(.node);
+                const existing_variant = node_col[@intFromEnum(existing_id)];
 
-                // If navigation landed on a zero sentinel (tree was built empty
-                // or the slab slot was never materialized), promote it to a
-                // real zero-filled slab before applying the write. This is the
-                // CoW boundary for sparse slab trees.
-                const slab_id = if (existing_variant == .zero) blk: {
+                // Path 1: navigation landed on a zero sentinel (sparse tree).
+                // Materialize a fresh zero-filled slab and mutate it in place
+                // (rc=0 ⇒ exclusively owned by us). Then setChildNode publishes
+                // it to the cache and `changed` set.
+                if (existing_variant == .zero) {
                     var zero_buf: [Slab.K][32]u8 align(64) = [_][32]u8{[_]u8{0} ** 32} ** Slab.K;
-                    break :blk try self.state.pool.createSlab(&zero_buf, 0);
-                } else existing_id;
+                    const fresh_id = try self.state.pool.createSlab(&zero_buf, 0);
+                    const fresh_node = &node_col[@intFromEnum(fresh_id)];
+                    ST.Element.tree.fromValuePackedIntoChunk(&fresh_node.slab.chunks[intra_chunk], index, &value);
+                    fresh_node.slab.dirty.set(intra_chunk);
+                    fresh_node.slab.root = null;
+                    try self.state.setChildNode(gindex, fresh_id);
+                    return;
+                }
 
-                const chunks_ptr = try slab_id.getSlabChunks(self.state.pool);
+                // Path 2: existing slab is `transient` — exclusively owned by
+                // this TreeView (rc==0, only the children_nodes cache holds it).
+                // This is the steady state after the first write produces a
+                // CoW slab. Mutate in place: byte-write into the heap chunks,
+                // accumulate dirty bits, invalidate the cached slab root.
+                // The gindex was already added to `changed` by the prior
+                // setChildNode call that produced this transient slab, so we
+                // do NOT call setChildNode again (which would unref-then-store
+                // the same Id and free our slab).
+                const ref_counts = self.state.pool.nodes.items(.ref_count);
+                if (ref_counts[@intFromEnum(existing_id)] == 0) {
+                    const node_ptr = &node_col[@intFromEnum(existing_id)];
+                    ST.Element.tree.fromValuePackedIntoChunk(&node_ptr.slab.chunks[intra_chunk], index, &value);
+                    node_ptr.slab.dirty.set(intra_chunk);
+                    node_ptr.slab.root = null;
+                    return;
+                }
+
+                // Path 3: shared slab (rc >= 1 — owned by the persistent tree).
+                // Must CoW: produce a fresh slab via setSlabChunk and publish
+                // it. From this point onward subsequent writes hit Path 2.
+                const chunks_ptr = existing_variant.slab.chunks;
                 var new_chunk: [32]u8 = chunks_ptr[intra_chunk];
                 ST.Element.tree.fromValuePackedIntoChunk(&new_chunk, index, &value);
-
-                const new_slab_id = try slab_id.setSlabChunk(self.state.pool, intra_chunk_u16, &new_chunk);
-                // If we materialized a fresh slab above, drop it now — setSlabChunk
-                // cloned its storage into a new slab. The intermediate zero-filled
-                // slab is no longer referenced.
-                if (existing_variant == .zero) {
-                    self.state.pool.unref(slab_id);
-                }
+                const new_slab_id = try existing_id.setSlabChunk(self.state.pool, intra_chunk_u16, &new_chunk);
                 try self.state.setChildNode(gindex, new_slab_id);
             } else {
                 const gindex = Gindex.fromDepth(chunk_depth, index / items_per_chunk);
