@@ -190,6 +190,92 @@ pub const Id = enum(u32) {
         };
     }
 
+    /// Returns a new slab `Id` with `chunk` at `intra_index`; the receiver slab
+    /// is unchanged. Heap Storage is cloned. The returned slab has dirty[intra_index]
+    /// set and `root: null` (lazy). Returns `Error.InvalidNode` if the receiver
+    /// is not a slab variant.
+    pub fn setSlabChunk(node_id: Id, pool: *Pool, intra_index: u16, chunk: *const [32]u8) Error!Id {
+        std.debug.assert(intra_index < Slab.K);
+
+        const old_chunks_ptr = blk: {
+            const node = pool.nodes.items(.node)[@intFromEnum(node_id)];
+            break :blk switch (node) {
+                .slab => |s| s.chunks,
+                else => return Error.InvalidNode,
+            };
+        };
+        const old_len = pool.nodes.items(.node)[@intFromEnum(node_id)].slab.len;
+
+        const new_storage = try Slab.allocZero(pool.allocator);
+        errdefer Slab.destroy(pool.allocator, new_storage);
+
+        // Copy old chunks via the same offset-0 reconstruction used in getRoot/unref.
+        const old_storage: *const Slab.Storage = @ptrCast(@alignCast(old_chunks_ptr));
+        new_storage.chunks = old_storage.chunks;
+        new_storage.chunks[intra_index] = chunk.*;
+
+        var dirty = std.StaticBitSet(Slab.K).initEmpty();
+        dirty.set(intra_index);
+
+        const new_id = try pool.create();
+        // Re-fetch the node column after pool.create() — preheat may have
+        // realloc'd and invalidated any earlier slice we held.
+        pool.nodes.items(.node)[@intFromEnum(new_id)] = .{ .slab = .{
+            .chunks = @ptrCast(&new_storage.chunks),
+            .len = old_len,
+            .dirty = dirty,
+            .root = null,
+        } };
+        pool.nodes.items(.ref_count)[@intFromEnum(new_id)] = 0;
+        return new_id;
+    }
+
+    /// Returns a new slab `Id` with each `intra_indices[i]` chunk replaced by
+    /// `new_chunks[i]`. Heap Storage cloned once; all updates applied in-place
+    /// in the new Storage; dirty bitset reflects every update. Returns
+    /// `Error.InvalidNode` if the receiver is not a slab variant. `intra_indices`
+    /// and `new_chunks` must have equal length.
+    pub fn setSlabChunks(
+        node_id: Id,
+        pool: *Pool,
+        intra_indices: []const u16,
+        new_chunks: []const *const [32]u8,
+    ) Error!Id {
+        std.debug.assert(intra_indices.len == new_chunks.len);
+
+        const old_chunks_ptr = blk: {
+            const node = pool.nodes.items(.node)[@intFromEnum(node_id)];
+            break :blk switch (node) {
+                .slab => |s| s.chunks,
+                else => return Error.InvalidNode,
+            };
+        };
+        const old_len = pool.nodes.items(.node)[@intFromEnum(node_id)].slab.len;
+
+        const new_storage = try Slab.allocZero(pool.allocator);
+        errdefer Slab.destroy(pool.allocator, new_storage);
+
+        const old_storage: *const Slab.Storage = @ptrCast(@alignCast(old_chunks_ptr));
+        new_storage.chunks = old_storage.chunks;
+
+        var dirty = std.StaticBitSet(Slab.K).initEmpty();
+        for (intra_indices, new_chunks) |idx, ptr| {
+            std.debug.assert(idx < Slab.K);
+            new_storage.chunks[idx] = ptr.*;
+            dirty.set(idx);
+        }
+
+        const new_id = try pool.create();
+        pool.nodes.items(.node)[@intFromEnum(new_id)] = .{ .slab = .{
+            .chunks = @ptrCast(&new_storage.chunks),
+            .len = old_len,
+            .dirty = dirty,
+            .root = null,
+        } };
+        pool.nodes.items(.ref_count)[@intFromEnum(new_id)] = 0;
+        return new_id;
+    }
+
     /// Lightweight read-only view over a slot's tag and ref count.
     /// Preserves the legacy `state.isFoo()` predicate API.
     pub fn getState(node_id: Id, pool: *Pool) StateView {

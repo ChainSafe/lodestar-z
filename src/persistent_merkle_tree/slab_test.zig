@@ -109,3 +109,111 @@ test "Id.getRoot: Pool-created slab returns merkleized root and caches it" {
     const root_second = slab_id.getRoot(&pool);
     try std.testing.expectEqualSlices(u8, root_first, root_second);
 }
+
+test "Id.setSlabChunk: CoW one chunk; original unchanged; root differs" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(allocator, 32);
+    defer pool.deinit();
+
+    var src: [Slab.K][32]u8 align(64) = [_][32]u8{[_]u8{0} ** 32} ** Slab.K;
+    src[42][0] = 0x11;
+    const a = try pool.createSlab(&src, Slab.K);
+    defer pool.unref(a);
+
+    var new_chunk: [32]u8 = [_]u8{0} ** 32;
+    new_chunk[0] = 0x22;
+    const b = try a.setSlabChunk(&pool, 42, &new_chunk);
+    defer pool.unref(b);
+
+    try std.testing.expect(a != b);
+
+    const a_chunks = try a.getSlabChunks(&pool);
+    const b_chunks = try b.getSlabChunks(&pool);
+    try std.testing.expectEqual(@as(u8, 0x11), a_chunks[42][0]);
+    try std.testing.expectEqual(@as(u8, 0x22), b_chunks[42][0]);
+
+    // Other chunks identical between a and b (verify a few).
+    try std.testing.expectEqualSlices(u8, &a_chunks[0], &b_chunks[0]);
+    try std.testing.expectEqualSlices(u8, &a_chunks[Slab.K - 1], &b_chunks[Slab.K - 1]);
+
+    // Roots differ.
+    try std.testing.expect(!std.mem.eql(u8, a.getRoot(&pool), b.getRoot(&pool)));
+}
+
+test "Id.setSlabChunk: preserves len" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(allocator, 16);
+    defer pool.deinit();
+
+    const src: [Slab.K][32]u8 align(64) = [_][32]u8{[_]u8{0} ** 32} ** Slab.K;
+    const a = try pool.createSlab(&src, 100); // partial slab (len = 100)
+    defer pool.unref(a);
+
+    var new_chunk: [32]u8 = [_]u8{0xFF} ** 32;
+    const b = try a.setSlabChunk(&pool, 50, &new_chunk);
+    defer pool.unref(b);
+
+    try std.testing.expectEqual(@as(u16, 100), try b.getSlabLen(&pool));
+}
+
+test "Id.setSlabChunks: batch CoW with multiple updates" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(allocator, 32);
+    defer pool.deinit();
+
+    const src: [Slab.K][32]u8 align(64) = [_][32]u8{[_]u8{0} ** 32} ** Slab.K;
+    const a = try pool.createSlab(&src, Slab.K);
+    defer pool.unref(a);
+
+    const idxs = [_]u16{ 0, 7, 100, 999 };
+    const c0 = [_]u8{0xAA} ** 32;
+    const c1 = [_]u8{0xBB} ** 32;
+    const c2 = [_]u8{0xCC} ** 32;
+    const c3 = [_]u8{0xDD} ** 32;
+    const ptrs = [_]*const [32]u8{ &c0, &c1, &c2, &c3 };
+
+    const b = try a.setSlabChunks(&pool, &idxs, &ptrs);
+    defer pool.unref(b);
+
+    const got = try b.getSlabChunks(&pool);
+    try std.testing.expectEqual(@as(u8, 0xAA), got[0][0]);
+    try std.testing.expectEqual(@as(u8, 0xBB), got[7][0]);
+    try std.testing.expectEqual(@as(u8, 0xCC), got[100][0]);
+    try std.testing.expectEqual(@as(u8, 0xDD), got[999][0]);
+
+    // Original unchanged.
+    const a_chunks = try a.getSlabChunks(&pool);
+    try std.testing.expectEqualSlices(u8, &([_]u8{0} ** 32), &a_chunks[0]);
+}
+
+test "Id.setSlabChunks: empty batch produces a clone with empty dirty" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(allocator, 16);
+    defer pool.deinit();
+
+    const src: [Slab.K][32]u8 align(64) = [_][32]u8{[_]u8{0} ** 32} ** Slab.K;
+    const a = try pool.createSlab(&src, Slab.K);
+    defer pool.unref(a);
+
+    const idxs: []const u16 = &.{};
+    const ptrs: []const *const [32]u8 = &.{};
+    const b = try a.setSlabChunks(&pool, idxs, ptrs);
+    defer pool.unref(b);
+
+    try std.testing.expect(a != b);
+    // Roots equal — no chunks changed.
+    try std.testing.expectEqualSlices(u8, a.getRoot(&pool), b.getRoot(&pool));
+}
+
+test "Id.setSlabChunk: non-slab Id returns Error.InvalidNode" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(allocator, 16);
+    defer pool.deinit();
+
+    // Use a leaf node — clearly not a slab.
+    const leaf_id = try pool.createLeaf(&([_]u8{0xEE} ** 32));
+    defer pool.unref(leaf_id);
+
+    var new_chunk: [32]u8 = [_]u8{0xFF} ** 32;
+    try std.testing.expectError(error.InvalidNode, leaf_id.setSlabChunk(&pool, 0, &new_chunk));
+}
