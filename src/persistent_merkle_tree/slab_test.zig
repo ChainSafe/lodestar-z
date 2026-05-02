@@ -254,3 +254,76 @@ test "tree of slabs: build via FillWithContentsIterator; root matches per-leaf t
     // The two trees must produce the same root.
     try std.testing.expectEqualSlices(u8, slab_root_id.getRoot(&pool), leaf_root_id.getRoot(&pool));
 }
+
+test "FillWithContentsIterator: initWithOffset enables slab leaves with correct zero filler" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(allocator, 1 << 14);
+    defer pool.deinit();
+
+    // Build a 4-slab tree at iterator depth 2 with leaf_offset = Slab.k_log2.
+    // Expected: the result is a depth-(Slab.k_log2 + 2) tree whose root equals
+    // the same chunks built per-leaf at depth Slab.k_log2 + 2.
+    var raw: [4][Slab.K][32]u8 align(64) = undefined;
+    @memset(std.mem.asBytes(&raw), 0);
+    for (0..4) |s| for (0..Slab.K) |i| {
+        std.mem.writeInt(u256, &raw[s][i], @as(u256, @intCast(s * Slab.K + i + 1)), .little);
+    };
+
+    // Path A: slab iterator with offset.
+    var slab_it = Node.FillWithContentsIterator.initWithOffset(&pool, 2, Slab.k_log2);
+    errdefer slab_it.deinit();
+    for (0..4) |s| {
+        const sid = try pool.createSlab(&raw[s], Slab.K);
+        try slab_it.append(sid);
+    }
+    const slab_root_id = try slab_it.finish();
+    defer pool.unref(slab_root_id);
+
+    // Path B: per-chunk leaves (default offset = 0).
+    var leaf_it = Node.FillWithContentsIterator.init(&pool, Slab.k_log2 + 2);
+    errdefer leaf_it.deinit();
+    for (0..4) |s| for (0..Slab.K) |i| {
+        var c = raw[s][i];
+        try leaf_it.append(try pool.createLeaf(&c));
+    };
+    const leaf_root_id = try leaf_it.finish();
+    defer pool.unref(leaf_root_id);
+
+    try std.testing.expectEqualSlices(u8, slab_root_id.getRoot(&pool), leaf_root_id.getRoot(&pool));
+}
+
+test "FillWithContentsIterator: initWithOffset with partial fill (zero-padded slabs)" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(allocator, 1 << 14);
+    defer pool.deinit();
+
+    // Build a 3-slab tree at iterator depth 2 (capacity 4). Final slot must
+    // be zero-filled at absolute depth (Slab.k_log2 + 1), not depth 1.
+    var raw: [3][Slab.K][32]u8 align(64) = undefined;
+    @memset(std.mem.asBytes(&raw), 0);
+    for (0..3) |s| for (0..Slab.K) |i| {
+        std.mem.writeInt(u256, &raw[s][i], @as(u256, @intCast(s * Slab.K + i + 1)), .little);
+    };
+
+    var slab_it = Node.FillWithContentsIterator.initWithOffset(&pool, 2, Slab.k_log2);
+    errdefer slab_it.deinit();
+    for (0..3) |s| {
+        const sid = try pool.createSlab(&raw[s], Slab.K);
+        try slab_it.append(sid);
+    }
+    const slab_root_id = try slab_it.finish();
+    defer pool.unref(slab_root_id);
+
+    // Reference: per-leaf path with 3*K real chunks and 1*K zero chunks.
+    var leaf_it = Node.FillWithContentsIterator.init(&pool, Slab.k_log2 + 2);
+    errdefer leaf_it.deinit();
+    for (0..3) |s| for (0..Slab.K) |i| {
+        var c = raw[s][i];
+        try leaf_it.append(try pool.createLeaf(&c));
+    };
+    // The 4th slab worth of leaves are zero (omitted = filled by finish()).
+    const leaf_root_id = try leaf_it.finish();
+    defer pool.unref(leaf_root_id);
+
+    try std.testing.expectEqualSlices(u8, slab_root_id.getRoot(&pool), leaf_root_id.getRoot(&pool));
+}

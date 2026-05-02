@@ -1430,13 +1430,30 @@ pub const DepthIterator = struct {
 pub const FillWithContentsIterator = struct {
     pool: *Pool,
     depth: Depth,
+    /// Absolute depth, in chunks, of each appended Id. For depth-0 leaves
+    /// (chunks) this is 0. For slab Ids it is `Slab.k_log2`. Zero fillers
+    /// emitted by `finish()` for missing right siblings at iterator level L
+    /// must therefore be at absolute depth `L + leaf_offset`.
+    leaf_offset: Depth,
     // At each level i, holds either null or the unpaired left node at that level.
     lefts: [max_depth]?Id,
 
+    /// Initialize an iterator where each appended Id is a depth-0 leaf
+    /// (a chunk). Equivalent to `initWithOffset(pool, depth, 0)`.
     pub fn init(pool: *Pool, depth: Depth) FillWithContentsIterator {
+        return initWithOffset(pool, depth, 0);
+    }
+
+    /// Initialize an iterator where each appended Id is a depth-`leaf_offset`
+    /// subtree (e.g. a slab Id is a depth-`Slab.k_log2` subtree of K chunks).
+    /// Zero fillers in `finish()` use `@enumFromInt(level + leaf_offset)`
+    /// so the resulting tree's root is correct under standard SSZ
+    /// merkleization at absolute depth `depth + leaf_offset`.
+    pub fn initWithOffset(pool: *Pool, depth: Depth, leaf_offset: Depth) FillWithContentsIterator {
         return .{
             .pool = pool,
             .depth = depth,
+            .leaf_offset = leaf_offset,
             .lefts = [_]?Id{null} ** max_depth,
         };
     }
@@ -1479,25 +1496,29 @@ pub const FillWithContentsIterator = struct {
             return root;
         }
 
-        var carry: Id = @enumFromInt(self.depth);
+        // Initial carry = zero subtree at absolute depth `depth + leaf_offset`.
+        var carry: Id = @enumFromInt(@as(u32, self.depth) + @as(u32, self.leaf_offset));
         var start_level: usize = self.depth;
 
-        // Find the lowest non-null as starting carry.
+        // Find the lowest non-null as starting carry. Its absolute depth is
+        // `level + leaf_offset` because each appended Id sits at depth `leaf_offset`.
         for (0..self.depth) |level| {
             if (self.lefts[level] != null) {
-                carry = @enumFromInt(@as(u32, @intCast(level)));
+                carry = @enumFromInt(@as(u32, @intCast(level)) + @as(u32, self.leaf_offset));
                 start_level = level;
                 break;
             }
         }
 
         // Starting from the lowest non-null, build upwards with zero-nodes.
+        // A missing right sibling at iterator level `level` is a zero subtree
+        // at absolute depth `level + leaf_offset`.
         for (start_level..self.depth) |level| {
             if (self.lefts[level]) |left| {
                 self.lefts[level] = null;
                 carry = try self.pool.createBranch(left, carry);
             } else {
-                carry = try self.pool.createBranch(carry, @enumFromInt(@as(u32, @intCast(level))));
+                carry = try self.pool.createBranch(carry, @enumFromInt(@as(u32, @intCast(level)) + @as(u32, self.leaf_offset)));
             }
         }
         return carry;
