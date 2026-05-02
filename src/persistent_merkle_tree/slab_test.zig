@@ -217,3 +217,40 @@ test "Id.setSlabChunk: non-slab Id returns Error.InvalidNode" {
     var new_chunk: [32]u8 = [_]u8{0xFF} ** 32;
     try std.testing.expectError(error.InvalidNode, leaf_id.setSlabChunk(&pool, 0, &new_chunk));
 }
+
+test "tree of slabs: build via FillWithContentsIterator; root matches per-leaf tree" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(allocator, 1 << 14);
+    defer pool.deinit();
+
+    // Deterministic chunk data: chunks[s][i] = u256(s * K + i + 1).
+    var raw: [4][Slab.K][32]u8 align(64) = undefined;
+    @memset(std.mem.asBytes(&raw), 0);
+    for (0..4) |s| for (0..Slab.K) |i| {
+        std.mem.writeInt(u256, &raw[s][i], @as(u256, @intCast(s * Slab.K + i + 1)), .little);
+    };
+
+    // Build path 1: 4 slabs appended at iterator depth 2.
+    var slab_it = Node.FillWithContentsIterator.init(&pool, 2);
+    errdefer slab_it.deinit();
+    for (0..4) |s| {
+        const sid = try pool.createSlab(&raw[s], Slab.K);
+        try slab_it.append(sid);
+    }
+    const slab_root_id = try slab_it.finish();
+    defer pool.unref(slab_root_id);
+
+    // Build path 2: same 4*K=4096 chunks appended as per-chunk leaves at
+    // iterator depth Slab.k_log2 + 2 = 12.
+    var leaf_it = Node.FillWithContentsIterator.init(&pool, Slab.k_log2 + 2);
+    errdefer leaf_it.deinit();
+    for (0..4) |s| for (0..Slab.K) |i| {
+        var c = raw[s][i];
+        try leaf_it.append(try pool.createLeaf(&c));
+    };
+    const leaf_root_id = try leaf_it.finish();
+    defer pool.unref(leaf_root_id);
+
+    // The two trees must produce the same root.
+    try std.testing.expectEqualSlices(u8, slab_root_id.getRoot(&pool), leaf_root_id.getRoot(&pool));
+}
