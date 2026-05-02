@@ -67,6 +67,14 @@ pub fn BasicPackedChunks(
                 const slab_idx = chunk_idx / Slab.K;
                 const intra_chunk = chunk_idx % Slab.K;
                 const slab_id = try self.state.getChildNode(Gindex.fromDepth(slab_depth, slab_idx));
+                // Navigation may land on a zero sentinel when the tree was built
+                // empty or sparsely (early-return path in tree.fromValue, or
+                // slab_idx beyond filled slabs). A zero subtree at the slab
+                // boundary is semantically an all-zero slab; the decoded value
+                // is therefore the element's zero value.
+                if (self.state.pool.nodes.items(.node)[@intFromEnum(slab_id)] == .zero) {
+                    return std.mem.zeroes(Element);
+                }
                 const chunks = try slab_id.getSlabChunks(self.state.pool);
                 ST.Element.tree.toValuePackedFromBytes(&chunks[intra_chunk], index, &value);
             } else {
@@ -84,12 +92,29 @@ pub fn BasicPackedChunks(
                 const intra_chunk_u16: u16 = @intCast(intra_chunk);
                 const gindex = Gindex.fromDepth(slab_depth, slab_idx);
 
-                const slab_id = try self.state.getChildNode(gindex);
+                const existing_id = try self.state.getChildNode(gindex);
+                const existing_variant = self.state.pool.nodes.items(.node)[@intFromEnum(existing_id)];
+
+                // If navigation landed on a zero sentinel (tree was built empty
+                // or the slab slot was never materialized), promote it to a
+                // real zero-filled slab before applying the write. This is the
+                // CoW boundary for sparse slab trees.
+                const slab_id = if (existing_variant == .zero) blk: {
+                    var zero_buf: [Slab.K][32]u8 align(64) = [_][32]u8{[_]u8{0} ** 32} ** Slab.K;
+                    break :blk try self.state.pool.createSlab(&zero_buf, 0);
+                } else existing_id;
+
                 const chunks_ptr = try slab_id.getSlabChunks(self.state.pool);
                 var new_chunk: [32]u8 = chunks_ptr[intra_chunk];
                 ST.Element.tree.fromValuePackedIntoChunk(&new_chunk, index, &value);
 
                 const new_slab_id = try slab_id.setSlabChunk(self.state.pool, intra_chunk_u16, &new_chunk);
+                // If we materialized a fresh slab above, drop it now — setSlabChunk
+                // cloned its storage into a new slab. The intermediate zero-filled
+                // slab is no longer referenced.
+                if (existing_variant == .zero) {
+                    self.state.pool.unref(slab_id);
+                }
                 try self.state.setChildNode(gindex, new_slab_id);
             } else {
                 const gindex = Gindex.fromDepth(chunk_depth, index / items_per_chunk);
@@ -126,6 +151,18 @@ pub fn BasicPackedChunks(
 
                 var item_idx: usize = 0;
                 outer: for (slab_ids) |sid| {
+                    // Slab boundary may be a zero sentinel for sparsely-filled
+                    // trees (e.g. an empty list grown via push, or slab slots
+                    // beyond the materialized range). A zero subtree is
+                    // semantically all-zero chunks; emit zero values without
+                    // touching the (non-existent) slab payload.
+                    if (self.state.pool.nodes.items(.node)[@intFromEnum(sid)] == .zero) {
+                        const items_in_slab = @min(Slab.K * items_per_chunk, len - item_idx);
+                        @memset(values[item_idx..][0..items_in_slab], std.mem.zeroes(Element));
+                        item_idx += items_in_slab;
+                        if (item_idx >= len) break :outer;
+                        continue;
+                    }
                     const chunks_ptr = try sid.getSlabChunks(self.state.pool);
                     for (0..Slab.K) |intra_chunk| {
                         if (item_idx >= len) break :outer;

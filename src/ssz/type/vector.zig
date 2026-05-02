@@ -212,8 +212,19 @@ pub fn FixedVectorType(comptime ST: type, comptime _length: comptime_int, compti
                     var slab_ids: [slab_count]Node.Id = undefined;
                     try node.getNodesAtDepth(pool, slab_depth, 0, &slab_ids);
 
+                    const node_col = pool.nodes.items(.node);
                     var item_idx: usize = 0;
                     outer: for (slab_ids) |sid| {
+                        // Zero subtree at slab boundary == all-zero values.
+                        if (node_col[@intFromEnum(sid)] == .zero) {
+                            const items_in_slab = @min(Slab.K * items_per_chunk, length - item_idx);
+                            for (0..items_in_slab) |i| {
+                                out[item_idx + i] = std.mem.zeroes(Element.Type);
+                            }
+                            item_idx += items_in_slab;
+                            if (item_idx >= length) break :outer;
+                            continue;
+                        }
                         const chunks = try sid.getSlabChunks(pool);
                         for (0..Slab.K) |intra_chunk| {
                             if (item_idx >= length) break :outer;
@@ -311,8 +322,18 @@ pub fn FixedVectorType(comptime ST: type, comptime _length: comptime_int, compti
                     var slab_ids: [slab_count]Node.Id = undefined;
                     try node.getNodesAtDepth(pool, slab_depth, 0, &slab_ids);
 
+                    const node_col = pool.nodes.items(.node);
                     var byte_idx: usize = 0;
                     outer: for (slab_ids) |sid| {
+                        // Zero subtree at slab boundary == all-zero output bytes.
+                        if (node_col[@intFromEnum(sid)] == .zero) {
+                            const remaining = fixed_size - byte_idx;
+                            const zero_bytes = @min(Slab.K * 32, remaining);
+                            @memset(out[byte_idx..][0..zero_bytes], 0);
+                            byte_idx += zero_bytes;
+                            if (byte_idx >= fixed_size) break :outer;
+                            continue;
+                        }
                         const chunks = try sid.getSlabChunks(pool);
                         for (0..Slab.K) |intra_chunk| {
                             if (byte_idx >= fixed_size) break :outer;

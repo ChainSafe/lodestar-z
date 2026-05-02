@@ -378,8 +378,19 @@ pub fn FixedListType(comptime ST: type, comptime _limit: comptime_int, comptime 
                     defer allocator.free(slab_ids);
                     try content_root.getNodesAtDepth(pool, slab_depth, 0, slab_ids);
 
+                    const node_col = pool.nodes.items(.node);
                     var item_idx: usize = 0;
                     outer: for (slab_ids) |sid| {
+                        // A zero subtree at slab boundary is semantically an
+                        // all-zero slab — out.items already initialised to
+                        // Element.default_value via the @memset above, so
+                        // skip the slab payload read entirely.
+                        if (node_col[@intFromEnum(sid)] == .zero) {
+                            const items_in_slab = @min(Slab.K * items_per_chunk, len - item_idx);
+                            item_idx += items_in_slab;
+                            if (item_idx >= len) break :outer;
+                            continue;
+                        }
                         const chunks = try sid.getSlabChunks(pool);
                         for (0..Slab.K) |intra_chunk| {
                             if (item_idx >= len) break :outer;
@@ -520,8 +531,18 @@ pub fn FixedListType(comptime ST: type, comptime _limit: comptime_int, comptime 
                     defer pool.allocator.free(slab_ids_buf);
                     try content_root.getNodesAtDepth(pool, slab_depth, 0, slab_ids_buf);
 
+                    const node_col = pool.nodes.items(.node);
                     var byte_idx: usize = 0;
                     outer: for (slab_ids_buf) |sid| {
+                        // Zero subtree at slab boundary == all-zero output.
+                        if (node_col[@intFromEnum(sid)] == .zero) {
+                            const remaining = serialized_size - byte_idx;
+                            const zero_bytes = @min(Slab.K * 32, remaining);
+                            @memset(out[byte_idx..][0..zero_bytes], 0);
+                            byte_idx += zero_bytes;
+                            if (byte_idx >= serialized_size) break :outer;
+                            continue;
+                        }
                         const chunks = try sid.getSlabChunks(pool);
                         for (0..Slab.K) |intra_chunk| {
                             if (byte_idx >= serialized_size) break :outer;
