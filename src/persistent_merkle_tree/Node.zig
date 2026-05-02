@@ -170,6 +170,26 @@ pub const Id = enum(u32) {
         return childrenOf(node_id, node).right;
     }
 
+    /// Returns a read-only pointer to the slab's K-chunk array. Returns
+    /// `Error.InvalidNode` if the node is not a slab variant.
+    pub fn getSlabChunks(node_id: Id, pool: *Pool) Error!*align(64) const [Slab.K][32]u8 {
+        const node = pool.nodes.items(.node)[@intFromEnum(node_id)];
+        return switch (node) {
+            .slab => |s| @ptrCast(s.chunks),
+            else => Error.InvalidNode,
+        };
+    }
+
+    /// Returns the slab's `len` (number of valid chunks, `<= K`). Returns
+    /// `Error.InvalidNode` if the node is not a slab variant.
+    pub fn getSlabLen(node_id: Id, pool: *Pool) Error!u16 {
+        const node = pool.nodes.items(.node)[@intFromEnum(node_id)];
+        return switch (node) {
+            .slab => |s| s.len,
+            else => Error.InvalidNode,
+        };
+    }
+
     /// Lightweight read-only view over a slot's tag and ref count.
     /// Preserves the legacy `state.isFoo()` predicate API.
     pub fn getState(node_id: Id, pool: *Pool) StateView {
@@ -962,22 +982,6 @@ pub const Pool = struct {
         } };
         self.nodes.items(.ref_count)[@intFromEnum(node_id)] = 0;
         return node_id;
-    }
-
-    /// Returns a read-only pointer to the slab's K-chunk array. Asserts the
-    /// node is a slab variant. The returned pointer is valid until the slab
-    /// Node is mutated or freed.
-    pub fn getSlabChunks(self: *Pool, slab_id: Id) *align(64) const [Slab.K][32]u8 {
-        const node = self.nodes.items(.node)[@intFromEnum(slab_id)];
-        std.debug.assert(node == .slab);
-        return @ptrCast(node.slab.chunks);
-    }
-
-    /// Returns the slab's `len` field — the number of valid chunks (`<= K`).
-    pub fn getSlabLen(self: *Pool, slab_id: Id) u16 {
-        const node = self.nodes.items(.node)[@intFromEnum(slab_id)];
-        std.debug.assert(node == .slab);
-        return node.slab.len;
     }
 
     /// Allocates nodes into the pool.

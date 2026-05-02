@@ -61,10 +61,10 @@ test "Pool.createSlab: round-trips chunks via getSlabChunks/getSlabLen" {
     const slab_id = try pool.createSlab(&src, Slab.K);
     defer pool.unref(slab_id);
 
-    const got = pool.getSlabChunks(slab_id);
+    const got = try slab_id.getSlabChunks(&pool);
     try std.testing.expectEqual(@as(u8, 0xAB), got[0][0]);
     try std.testing.expectEqual(@as(u8, 0xCD), got[Slab.K - 1][31]);
-    try std.testing.expectEqual(@as(u16, Slab.K), pool.getSlabLen(slab_id));
+    try std.testing.expectEqual(@as(u16, Slab.K), try slab_id.getSlabLen(&pool));
 }
 
 test "Pool.unref: slab payload heap is freed (no leak under test allocator)" {
