@@ -17,6 +17,7 @@ const getZeroHash = @import("hashing").getZeroHash;
 const max_depth = @import("hashing").max_depth;
 const Depth = @import("hashing").Depth;
 const Gindex = @import("gindex.zig").Gindex;
+const Slab = @import("slab.zig");
 
 pub const Error = error{
     /// Attempt to access a child of a node that is not a branch node.
@@ -46,6 +47,17 @@ pub const Node = union(enum) {
     /// Internal branch with two children. `root == null` means lazy
     /// (uncomputed); `root == some` means cached.
     branch: struct { left: Id, right: Id, root: ?[32]u8 },
+    /// Chunked-leaf slab carrying K=1024 chunks heap-allocated as
+    /// `Slab.Storage`. `chunks` is a many-pointer to that storage; `len`
+    /// (number of valid chunks; trailing chunks zero), `dirty` (per-chunk
+    /// modification flags since last root recompute), and `root` (cached
+    /// merkleized slab root; null = lazy) live inline.
+    slab: struct {
+        chunks: [*]align(64) [32]u8,
+        len: u16,
+        dirty: std.StaticBitSet(Slab.K),
+        root: ?[32]u8,
+    },
 };
 
 /// Parallel-array element holding a node alongside its reference count.
@@ -77,6 +89,8 @@ inline fn childrenOf(node_id: Id, n: Node) Children {
         },
         // `noChild` guards prevent reaching here for these variants.
         .leaf, .free => unreachable,
+        // Slabs are terminal — they have no Id-children.
+        .slab => unreachable,
     };
 }
 
@@ -98,6 +112,8 @@ pub const Id = enum(u32) {
             .branch => @intFromEnum(node_id) == 0,
             // Free slots are not user-visible nodes.
             .free => true,
+            // Slabs are terminal: their chunks are not Id-children.
+            .slab => true,
         };
     }
 
@@ -125,6 +141,19 @@ pub const Id = enum(u32) {
                 hashOne(&hash, left_root, right_root);
                 node_ptr.branch.root = hash;
                 return &node_ptr.branch.root.?;
+            },
+            .slab => {
+                if (node_ptr.slab.root != null) {
+                    return &node_ptr.slab.root.?;
+                }
+                // `chunks` is a many-pointer to a heap-allocated
+                // `Slab.Storage`. Storage is `struct { chunks: [K][32]u8 align(64) }`,
+                // so the storage's address coincides with the chunks pointer.
+                const storage: *const Slab.Storage = @ptrCast(@alignCast(node_ptr.slab.chunks));
+                var hash: [32]u8 = undefined;
+                Slab.computeRoot(storage, &hash);
+                node_ptr.slab.root = hash;
+                return &node_ptr.slab.root.?;
             },
         }
     }
@@ -760,6 +789,9 @@ pub const StateView = struct {
     pub fn isBranch(s: StateView) bool {
         return s.pool.nodes.items(.node)[@intFromEnum(s.id)] == .branch;
     }
+    pub fn isSlab(s: StateView) bool {
+        return s.pool.nodes.items(.node)[@intFromEnum(s.id)] == .slab;
+    }
     pub fn isBranchLazy(s: StateView) bool {
         return switch (s.pool.nodes.items(.node)[@intFromEnum(s.id)]) {
             .branch => |b| b.root == null,
@@ -1051,6 +1083,7 @@ pub const Pool = struct {
                     sp += 1;
                     current = b.left;
                 },
+                // TODO(B3): when Pool.createSlab lands, free node_ptr.slab.chunks heap storage here.
                 else => {
                     current = null;
                 },
