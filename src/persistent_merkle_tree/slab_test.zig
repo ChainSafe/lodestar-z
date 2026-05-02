@@ -49,42 +49,63 @@ test "slab: computeRoot for non-zero pattern matches std merkleize" {
     try std.testing.expectEqualSlices(u8, &ref_root, &slab_root);
 }
 
-test "Node.slab: variant constructible and getRoot via direct pool slot" {
+test "Pool.createSlab: round-trips chunks via getSlabChunks/getSlabLen" {
     const allocator = std.testing.allocator;
-
-    // Prepare slab storage with deterministic content.
-    const storage = try Slab.allocZero(allocator);
-    defer Slab.destroy(allocator, storage);
-    for (0..Slab.K) |i| {
-        std.mem.writeInt(u256, &storage.chunks[i], @as(u256, @intCast(i + 1)), .little);
-    }
-
-    // Build Pool, manually plant a slab Node into a known slot for getRoot test.
     var pool = try Node.Pool.init(allocator, 16);
     defer pool.deinit();
 
-    // Reserve a slot via a sentinel branch, then overwrite it with slab.
-    // Two zero-leaf branches give us a real Node.Id we control.
-    const tmp_id = try pool.createBranch(@enumFromInt(0), @enumFromInt(0));
-    defer pool.unref(tmp_id);
+    var src: [Slab.K][32]u8 align(64) = [_][32]u8{[_]u8{0} ** 32} ** Slab.K;
+    src[0][0] = 0xAB;
+    src[Slab.K - 1][31] = 0xCD;
 
-    pool.nodes.items(.node)[@intFromEnum(tmp_id)] = .{ .slab = .{
-        .chunks = @ptrCast(&storage.chunks),
-        .len = Slab.K,
-        .dirty = std.StaticBitSet(Slab.K).initEmpty(),
-        .root = null,
-    } };
+    const slab_id = try pool.createSlab(&src, Slab.K);
+    defer pool.unref(slab_id);
 
-    // getRoot must compute slab merkleization and cache it.
-    const root_first = tmp_id.getRoot(&pool);
-    try std.testing.expect(pool.nodes.items(.node)[@intFromEnum(tmp_id)].slab.root != null);
+    const got = pool.getSlabChunks(slab_id);
+    try std.testing.expectEqual(@as(u8, 0xAB), got[0][0]);
+    try std.testing.expectEqual(@as(u8, 0xCD), got[Slab.K - 1][31]);
+    try std.testing.expectEqual(@as(u16, Slab.K), pool.getSlabLen(slab_id));
+}
 
-    // Reference root via Slab.computeRoot directly.
+test "Pool.unref: slab payload heap is freed (no leak under test allocator)" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(allocator, 16);
+    defer pool.deinit();
+
+    const src: [Slab.K][32]u8 align(64) = [_][32]u8{[_]u8{0} ** 32} ** Slab.K;
+    const slab_id = try pool.createSlab(&src, Slab.K);
+    pool.unref(slab_id);
+    // No external destroy — Pool.unref must release the heap Storage,
+    // and std.testing.allocator will fail this test on any leak.
+}
+
+test "Id.getRoot: Pool-created slab returns merkleized root and caches it" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(allocator, 16);
+    defer pool.deinit();
+
+    var src: [Slab.K][32]u8 align(64) = [_][32]u8{[_]u8{0} ** 32} ** Slab.K;
+    for (0..Slab.K) |i| {
+        std.mem.writeInt(u256, &src[i], @as(u256, @intCast(i + 1)), .little);
+    }
+
+    const slab_id = try pool.createSlab(&src, Slab.K);
+    defer pool.unref(slab_id);
+
+    const root_first = slab_id.getRoot(&pool);
+
+    // Reference: build same merkleization via std hashing.
     var ref: [32]u8 = undefined;
-    Slab.computeRoot(storage, &ref);
+    var pairs = try allocator.alloc([2][32]u8, Slab.K / 2);
+    defer allocator.free(pairs);
+    for (0..Slab.K / 2) |i| {
+        pairs[i][0] = src[2 * i];
+        pairs[i][1] = src[2 * i + 1];
+    }
+    try @import("hashing").merkleize(pairs, Slab.k_log2, &ref);
     try std.testing.expectEqualSlices(u8, &ref, root_first);
 
-    // Second call returns the cached root (same pointer or same value).
-    const root_second = tmp_id.getRoot(&pool);
+    // Second call returns the same root (cached).
+    const root_second = slab_id.getRoot(&pool);
     try std.testing.expectEqualSlices(u8, root_first, root_second);
 }

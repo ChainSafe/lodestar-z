@@ -941,6 +941,45 @@ pub const Pool = struct {
         return node_id;
     }
 
+    /// Creates a slab Node owning a heap-allocated `Slab.Storage` initialized
+    /// from `chunks`. `len` is the count of valid chunks (`<= K`); the caller
+    /// is responsible for ensuring chunks at indices `>= len` are zero-bytes
+    /// (the Storage invariant). The returned Node has `root: null` (lazy);
+    /// `Id.getRoot` will compute and cache it on first access.
+    pub fn createSlab(self: *Pool, chunks: *align(64) const [Slab.K][32]u8, len: u16) Error!Id {
+        std.debug.assert(len <= Slab.K);
+        const storage = try Slab.allocZero(self.allocator);
+        errdefer Slab.destroy(self.allocator, storage);
+
+        storage.chunks = chunks.*;
+
+        const node_id = try self.create();
+        self.nodes.items(.node)[@intFromEnum(node_id)] = .{ .slab = .{
+            .chunks = @ptrCast(&storage.chunks),
+            .len = len,
+            .dirty = std.StaticBitSet(Slab.K).initEmpty(),
+            .root = null,
+        } };
+        self.nodes.items(.ref_count)[@intFromEnum(node_id)] = 0;
+        return node_id;
+    }
+
+    /// Returns a read-only pointer to the slab's K-chunk array. Asserts the
+    /// node is a slab variant. The returned pointer is valid until the slab
+    /// Node is mutated or freed.
+    pub fn getSlabChunks(self: *Pool, slab_id: Id) *align(64) const [Slab.K][32]u8 {
+        const node = self.nodes.items(.node)[@intFromEnum(slab_id)];
+        std.debug.assert(node == .slab);
+        return @ptrCast(node.slab.chunks);
+    }
+
+    /// Returns the slab's `len` field — the number of valid chunks (`<= K`).
+    pub fn getSlabLen(self: *Pool, slab_id: Id) u16 {
+        const node = self.nodes.items(.node)[@intFromEnum(slab_id)];
+        std.debug.assert(node == .slab);
+        return node.slab.len;
+    }
+
     /// Allocates nodes into the pool.
     ///
     /// All nodes are allocated with refcount=0.
@@ -1083,7 +1122,13 @@ pub const Pool = struct {
                     sp += 1;
                     current = b.left;
                 },
-                // TODO(B3): when Pool.createSlab lands, free node_ptr.slab.chunks heap storage here.
+                .slab => |s| {
+                    // Reconstruct *Slab.Storage from the chunks many-pointer (Storage is
+                    // a single-field struct with chunks at offset 0). Free the heap.
+                    const storage: *Slab.Storage = @ptrCast(@alignCast(s.chunks));
+                    Slab.destroy(self.allocator, storage);
+                    current = null;
+                },
                 else => {
                     current = null;
                 },
