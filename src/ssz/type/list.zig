@@ -9,7 +9,6 @@ const mixInLength = @import("hashing").mixInLength;
 const maxChunksToDepth = @import("hashing").maxChunksToDepth;
 const getZeroHash = @import("hashing").getZeroHash;
 const Node = @import("persistent_merkle_tree").Node;
-const Slab = @import("persistent_merkle_tree").Slab;
 const tree_view = @import("../tree_view/root.zig");
 const ListBasicTreeView = tree_view.ListBasicTreeView;
 const ListCompositeTreeView = tree_view.ListCompositeTreeView;
@@ -363,127 +362,37 @@ pub fn FixedListType(comptime ST: type, comptime _limit: comptime_int) type {
                     );
                 }
 
-                const use_slab = comptime isBasicType(Element) and max_chunk_count >= 2 * Slab.K;
+                var it = Node.FillWithContentsIterator.init(pool, chunk_depth);
+                errdefer it.deinit();
 
-                const content_root = if (comptime use_slab) blk: {
-                    // Slab path: build the upper tree manually with zero fillers offset
-                    // by Slab.k_log2 (an empty slot at iterator-level L is a zero subtree
-                    // of 2^(L + k_log2) chunks, NOT 2^L). FillWithContentsIterator's
-                    // zero-filler always uses @enumFromInt(L) so we cannot reuse it here.
+                if (comptime isBasicType(Element)) {
                     const items_per_chunk = 32 / Element.fixed_size;
-                    const items_per_slab: usize = items_per_chunk * Slab.K;
-                    const upper_depth: u8 = chunk_depth - Slab.k_log2;
+                    var next: usize = 0; // index in value.items
 
-                    var lefts: [chunk_depth + 1]?Node.Id = [_]?Node.Id{null} ** (chunk_depth + 1);
-                    errdefer {
-                        for (&lefts) |*maybe| {
-                            if (maybe.*) |id| pool.unref(id);
+                    for (0..chunk_count) |_| {
+                        var leaf_buf = [_]u8{0} ** 32;
+
+                        // how many items still remain to be packed into this chunk?
+                        const remaining = len - next;
+                        const to_write = @min(remaining, items_per_chunk);
+
+                        // serialise exactly to_write elements into the 32‑byte buffer
+                        for (0..to_write) |j| {
+                            const dst_off = j * Element.fixed_size;
+                            const dst_slice = leaf_buf[dst_off .. dst_off + Element.fixed_size];
+                            _ = Element.serializeIntoBytes(&value.items[next + j], dst_slice);
                         }
+                        next += to_write;
+
+                        try it.append(try pool.createLeaf(&leaf_buf));
                     }
-
-                    var item_idx: usize = 0;
-                    while (item_idx < len) {
-                        var slab_buf: [Slab.K][32]u8 align(64) = [_][32]u8{[_]u8{0} ** 32} ** Slab.K;
-                        const remaining = len - item_idx;
-                        const items_in_slab = @min(remaining, items_per_slab);
-
-                        for (0..items_in_slab) |k| {
-                            const slab_chunk_idx = k / items_per_chunk;
-                            const intra_chunk = k % items_per_chunk;
-                            const dst_off = intra_chunk * Element.fixed_size;
-                            const dst_slice = slab_buf[slab_chunk_idx][dst_off .. dst_off + Element.fixed_size];
-                            _ = Element.serializeIntoBytes(&value.items[item_idx + k], dst_slice);
-                        }
-
-                        const valid_chunks: u16 = @intCast((items_in_slab + items_per_chunk - 1) / items_per_chunk);
-                        var carry: Node.Id = try pool.createSlab(&slab_buf, valid_chunks);
-
-                        // Mirror FillWithContentsIterator.append.
-                        var stored = false;
-                        var level: usize = 0;
-                        while (level < upper_depth) : (level += 1) {
-                            if (lefts[level]) |left| {
-                                lefts[level] = null;
-                                carry = try pool.createBranch(left, carry);
-                            } else {
-                                lefts[level] = carry;
-                                stored = true;
-                                break;
-                            }
-                        }
-                        if (!stored) lefts[upper_depth] = carry;
-
-                        item_idx += items_in_slab;
+                } else {
+                    for (0..chunk_count) |i| {
+                        try it.append(try Element.tree.fromValue(pool, &value.items[i]));
                     }
+                }
 
-                    // Finalize with offset zero fillers.
-                    // If the upper tree is exactly full, lefts[upper_depth] holds the root.
-                    const finalized: Node.Id = blk2: {
-                        if (lefts[upper_depth]) |root| {
-                            lefts[upper_depth] = null;
-                            break :blk2 root;
-                        }
-
-                        // Find lowest non-null carry. We always have at least one slab
-                        // (chunk_count > 0 was handled above).
-                        var start_level: usize = upper_depth;
-                        for (0..upper_depth) |lvl| {
-                            if (lefts[lvl] != null) {
-                                start_level = lvl;
-                                break;
-                            }
-                        }
-                        std.debug.assert(start_level < upper_depth);
-
-                        // Initial carry = zero subtree at absolute depth start_level + k_log2.
-                        var c: Node.Id = @enumFromInt(@as(u32, @intCast(start_level)) + Slab.k_log2);
-                        var l = start_level;
-                        while (l < upper_depth) : (l += 1) {
-                            if (lefts[l]) |left| {
-                                lefts[l] = null;
-                                c = try pool.createBranch(left, c);
-                            } else {
-                                const zero_at_abs: Node.Id = @enumFromInt(@as(u32, @intCast(l)) + Slab.k_log2);
-                                c = try pool.createBranch(c, zero_at_abs);
-                            }
-                        }
-                        break :blk2 c;
-                    };
-                    break :blk finalized;
-                } else blk: {
-                    var it = Node.FillWithContentsIterator.init(pool, chunk_depth);
-                    errdefer it.deinit();
-
-                    if (comptime isBasicType(Element)) {
-                        const items_per_chunk = 32 / Element.fixed_size;
-                        var next: usize = 0; // index in value.items
-
-                        for (0..chunk_count) |_| {
-                            var leaf_buf = [_]u8{0} ** 32;
-
-                            // how many items still remain to be packed into this chunk?
-                            const remaining = len - next;
-                            const to_write = @min(remaining, items_per_chunk);
-
-                            // serialise exactly to_write elements into the 32‑byte buffer
-                            for (0..to_write) |j| {
-                                const dst_off = j * Element.fixed_size;
-                                const dst_slice = leaf_buf[dst_off .. dst_off + Element.fixed_size];
-                                _ = Element.serializeIntoBytes(&value.items[next + j], dst_slice);
-                            }
-                            next += to_write;
-
-                            try it.append(try pool.createLeaf(&leaf_buf));
-                        }
-                    } else {
-                        for (0..chunk_count) |i| {
-                            try it.append(try Element.tree.fromValue(pool, &value.items[i]));
-                        }
-                    }
-
-                    break :blk try it.finish();
-                };
-
+                const content_root = try it.finish();
                 errdefer pool.unref(content_root);
                 const len_mixin = try pool.createLeafFromUint(len);
                 errdefer pool.unref(len_mixin);
@@ -1962,66 +1871,4 @@ test "VariableListType - tree.zeros" {
 
         try std.testing.expectEqualSlices(u8, &expected_root, tree_node.getRoot(&pool));
     }
-}
-
-test "FixedListType: large packed u64 list builds slab tree with matching root" {
-    const allocator = std.testing.allocator;
-    const ListT = FixedListType(UintType(64), 1 << 20);
-
-    var pool = try Node.Pool.init(allocator, 4096);
-    defer pool.deinit();
-
-    var value = ListT.Type.empty;
-    defer value.deinit(allocator);
-    const item_count = 2 * Slab.K * 4; // 4 u64s per chunk * 2K chunks = 2 slabs
-    try value.ensureTotalCapacity(allocator, item_count);
-    for (0..item_count) |i| {
-        try value.append(allocator, @as(u64, @intCast(i)));
-    }
-
-    const tree_id = try ListT.tree.fromValue(&pool, &value);
-    defer pool.unref(tree_id);
-
-    var ref_root: [32]u8 = undefined;
-    try ListT.hashTreeRoot(allocator, &value, &ref_root);
-    try std.testing.expectEqualSlices(u8, &ref_root, tree_id.getRoot(&pool));
-
-    // Confirm slabs are actually used at the slab-boundary depth.
-    const content_root = try tree_id.getLeft(&pool);
-    const slab_boundary_depth: u8 = ListT.chunk_depth - Slab.k_log2;
-    const node_count = @as(usize, 1) << @intCast(slab_boundary_depth);
-    const nodes_at_boundary = try allocator.alloc(Node.Id, node_count);
-    defer allocator.free(nodes_at_boundary);
-    try content_root.getNodesAtDepth(&pool, slab_boundary_depth, 0, nodes_at_boundary);
-
-    var any_slab = false;
-    for (nodes_at_boundary) |nid| {
-        if (nid.getState(&pool).isSlab()) {
-            any_slab = true;
-            break;
-        }
-    }
-    try std.testing.expect(any_slab);
-}
-
-test "FixedListType: small packed u64 list under threshold uses leaf tree (regression)" {
-    const allocator = std.testing.allocator;
-    // limit = 1024 items × 8 bytes = 8 KB → 256 chunks → max_chunk_count = 256.
-    // 256 < 2*K = 2048, so use_slab is false at compile time.
-    const ListT = FixedListType(UintType(64), 1024);
-
-    var pool = try Node.Pool.init(allocator, 256);
-    defer pool.deinit();
-
-    var value = ListT.Type.empty;
-    defer value.deinit(allocator);
-    try value.ensureTotalCapacity(allocator, 100);
-    for (0..100) |i| try value.append(allocator, @as(u64, @intCast(i)));
-
-    const tree_id = try ListT.tree.fromValue(&pool, &value);
-    defer pool.unref(tree_id);
-
-    var ref_root: [32]u8 = undefined;
-    try ListT.hashTreeRoot(allocator, &value, &ref_root);
-    try std.testing.expectEqualSlices(u8, &ref_root, tree_id.getRoot(&pool));
 }
