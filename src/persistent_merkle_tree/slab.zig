@@ -1,11 +1,9 @@
 //! Chunked-leaf slab payload.
 //!
-//! `Storage` is the heap-allocated 32 KB chunk array shared by a slab Node.
-//! Per-slab metadata (`len`, `dirty`, cached `root`) lives inline in the
-//! Node.slab union variant, NOT in Storage — keeping the two in sync would
-//! be error-prone and wasteful. Storage is therefore minimal and immutable
-//! in shape (always `[K][32]u8`); per-chunk mutation is per-element write
-//! into `chunks[i]`.
+//! `Storage` is the heap-allocated chunk array + length owned by a slab Node.
+//! The slab Node variant holds a single `*Storage` pointer plus a cached root,
+//! mirroring Lighthouse's `Arc<PackedLeaf>` shape — Storage is fully self-
+//! contained, ref-counted via the Pool's slab-Node ref count, and CoW on write.
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const hashOne = @import("hashing").hashOne;
@@ -18,17 +16,21 @@ comptime {
 }
 
 pub const Storage = struct {
-    /// Slab chunks, cache-line aligned. The slab Node's inline `len` field
-    /// (B2 onward) decides which chunks are valid; chunks at indices `>= len`
-    /// MUST hold zero-bytes — `allocZero` establishes this invariant and
-    /// subsequent CoW writes preserve it.
+    /// Slab chunks, cache-line aligned. Chunks at indices `>= len` MUST hold
+    /// zero-bytes — `allocZero` establishes this invariant and subsequent
+    /// CoW writes preserve it. `chunks` is at offset 0 within Storage.
     chunks: [K][32]u8 align(64),
+    /// Number of valid chunks in this slab. The last slab in a list/vector
+    /// may be partial (`len < K`); all earlier slabs satisfy `len == K`.
+    len: u16,
 };
 
-/// Allocates a zero-initialized Storage block. Caller owns; pair with destroy().
+/// Allocates a zero-initialized Storage block with `len = 0`. Caller owns;
+/// pair with destroy().
 pub fn allocZero(allocator: Allocator) Allocator.Error!*Storage {
     const s = try allocator.create(Storage);
     @memset(std.mem.asBytes(&s.chunks), 0);
+    s.len = 0;
     return s;
 }
 

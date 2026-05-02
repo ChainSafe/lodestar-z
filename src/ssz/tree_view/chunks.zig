@@ -104,8 +104,7 @@ pub fn BasicPackedChunks(
                     var zero_buf: [Slab.K][32]u8 align(64) = [_][32]u8{[_]u8{0} ** 32} ** Slab.K;
                     const fresh_id = try self.state.pool.createSlab(&zero_buf, 0);
                     const fresh_node = &node_col[@intFromEnum(fresh_id)];
-                    ST.Element.tree.fromValuePackedIntoChunk(&fresh_node.slab.chunks[intra_chunk], index, &value);
-                    fresh_node.slab.dirty.set(intra_chunk);
+                    ST.Element.tree.fromValuePackedIntoChunk(&fresh_node.slab.storage.chunks[intra_chunk], index, &value);
                     fresh_node.slab.root = null;
                     try self.state.setChildNode(gindex, fresh_id);
                     return;
@@ -123,8 +122,7 @@ pub fn BasicPackedChunks(
                 const ref_counts = self.state.pool.nodes.items(.ref_count);
                 if (ref_counts[@intFromEnum(existing_id)] == 0) {
                     const node_ptr = &node_col[@intFromEnum(existing_id)];
-                    ST.Element.tree.fromValuePackedIntoChunk(&node_ptr.slab.chunks[intra_chunk], index, &value);
-                    node_ptr.slab.dirty.set(intra_chunk);
+                    ST.Element.tree.fromValuePackedIntoChunk(&node_ptr.slab.storage.chunks[intra_chunk], index, &value);
                     node_ptr.slab.root = null;
                     return;
                 }
@@ -132,8 +130,7 @@ pub fn BasicPackedChunks(
                 // Path 3: shared slab (rc >= 1 — owned by the persistent tree).
                 // Must CoW: produce a fresh slab via setSlabChunk and publish
                 // it. From this point onward subsequent writes hit Path 2.
-                const chunks_ptr = existing_variant.slab.chunks;
-                var new_chunk: [32]u8 = chunks_ptr[intra_chunk];
+                var new_chunk: [32]u8 = existing_variant.slab.storage.chunks[intra_chunk];
                 ST.Element.tree.fromValuePackedIntoChunk(&new_chunk, index, &value);
                 const new_slab_id = try existing_id.setSlabChunk(self.state.pool, intra_chunk_u16, &new_chunk);
                 try self.state.setChildNode(gindex, new_slab_id);
