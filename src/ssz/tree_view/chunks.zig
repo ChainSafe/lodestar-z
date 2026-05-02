@@ -14,10 +14,18 @@ const TreeViewState = @import("utils/tree_view_state.zig").TreeViewState;
 const CloneOpts = @import("utils/clone_opts.zig").CloneOpts;
 
 /// Shared helpers for basic element types packed into chunks.
+///
+/// `use_slab` selects between two leaf layouts:
+///   * false (default) — one chunk per leaf, navigated by Node.Id.
+///   * true — slab-leaf navigation: the bottom `Slab.k_log2` levels of the
+///     tree are folded into a single Slab Node, addressed at `slab_depth =
+///     chunk_depth - Slab.k_log2`. get/set/getAllInto read and CoW-write
+///     chunk bytes through `Id.getSlabChunks` / `Id.setSlabChunk`.
 pub fn BasicPackedChunks(
     comptime ST: type,
     comptime chunk_depth: Depth,
     comptime items_per_chunk: usize,
+    comptime use_slab: bool,
 ) type {
     return struct {
         state: TreeViewState,
@@ -25,6 +33,12 @@ pub fn BasicPackedChunks(
         pub const Element = ST.Element.Type;
 
         const Self = @This();
+
+        // Slab-related comptime constants. Only meaningful when `use_slab = true`.
+        // The `else` placeholders keep the symbols valid in non-slab instantiations
+        // without referencing the Slab module.
+        const Slab = if (use_slab) @import("persistent_merkle_tree").Slab else struct {};
+        const slab_depth: Depth = if (use_slab) chunk_depth - Slab.k_log2 else 0;
 
         pub fn init(self: *Self, allocator: Allocator, pool: *Node.Pool, root: Node.Id) !void {
             try self.state.init(allocator, pool, root);
@@ -48,16 +62,41 @@ pub fn BasicPackedChunks(
 
         pub fn get(self: *Self, index: usize) !Element {
             var value: Element = undefined;
-            const child_node = try self.state.getChildNode(Gindex.fromDepth(chunk_depth, index / items_per_chunk));
-            try ST.Element.tree.toValuePacked(child_node, self.state.pool, index, &value);
+            if (comptime use_slab) {
+                const chunk_idx = index / items_per_chunk;
+                const slab_idx = chunk_idx / Slab.K;
+                const intra_chunk = chunk_idx % Slab.K;
+                const slab_id = try self.state.getChildNode(Gindex.fromDepth(slab_depth, slab_idx));
+                const chunks = try slab_id.getSlabChunks(self.state.pool);
+                ST.Element.tree.toValuePackedFromBytes(&chunks[intra_chunk], index, &value);
+            } else {
+                const child_node = try self.state.getChildNode(Gindex.fromDepth(chunk_depth, index / items_per_chunk));
+                try ST.Element.tree.toValuePacked(child_node, self.state.pool, index, &value);
+            }
             return value;
         }
 
         pub fn set(self: *Self, index: usize, value: Element) !void {
-            const gindex = Gindex.fromDepth(chunk_depth, index / items_per_chunk);
-            const child_node = try self.state.getChildNode(gindex);
-            const new_node = try ST.Element.tree.fromValuePacked(child_node, self.state.pool, index, &value);
-            try self.state.setChildNode(gindex, new_node);
+            if (comptime use_slab) {
+                const chunk_idx = index / items_per_chunk;
+                const slab_idx = chunk_idx / Slab.K;
+                const intra_chunk = chunk_idx % Slab.K;
+                const intra_chunk_u16: u16 = @intCast(intra_chunk);
+                const gindex = Gindex.fromDepth(slab_depth, slab_idx);
+
+                const slab_id = try self.state.getChildNode(gindex);
+                const chunks_ptr = try slab_id.getSlabChunks(self.state.pool);
+                var new_chunk: [32]u8 = chunks_ptr[intra_chunk];
+                ST.Element.tree.fromValuePackedIntoChunk(&new_chunk, index, &value);
+
+                const new_slab_id = try slab_id.setSlabChunk(self.state.pool, intra_chunk_u16, &new_chunk);
+                try self.state.setChildNode(gindex, new_slab_id);
+            } else {
+                const gindex = Gindex.fromDepth(chunk_depth, index / items_per_chunk);
+                const child_node = try self.state.getChildNode(gindex);
+                const new_node = try ST.Element.tree.fromValuePacked(child_node, self.state.pool, index, &value);
+                try self.state.setChildNode(gindex, new_node);
+            }
         }
 
         pub fn getAll(
@@ -77,6 +116,32 @@ pub fn BasicPackedChunks(
         ) ![]Element {
             if (values.len != len) return error.InvalidSize;
             if (len == 0) return values;
+
+            if (comptime use_slab) {
+                const chunk_count = (len + items_per_chunk - 1) / items_per_chunk;
+                const slab_count = (chunk_count + Slab.K - 1) / Slab.K;
+                const slab_ids = try self.state.allocator.alloc(Node.Id, slab_count);
+                defer self.state.allocator.free(slab_ids);
+                try self.state.root.getNodesAtDepth(self.state.pool, slab_depth, 0, slab_ids);
+
+                var item_idx: usize = 0;
+                outer: for (slab_ids) |sid| {
+                    const chunks_ptr = try sid.getSlabChunks(self.state.pool);
+                    for (0..Slab.K) |intra_chunk| {
+                        if (item_idx >= len) break :outer;
+                        const items_in_chunk = @min(items_per_chunk, len - item_idx);
+                        for (0..items_in_chunk) |i| {
+                            ST.Element.tree.toValuePackedFromBytes(
+                                &chunks_ptr[intra_chunk],
+                                item_idx + i,
+                                &values[item_idx + i],
+                            );
+                        }
+                        item_idx += items_in_chunk;
+                    }
+                }
+                return values;
+            }
 
             const len_full_chunks = len / items_per_chunk;
             const remainder = len % items_per_chunk;
@@ -112,6 +177,10 @@ pub fn BasicPackedChunks(
         }
 
         fn populateAllNodes(self: *Self, chunk_count: usize) !void {
+            // Slab path doesn't pre-populate per-chunk Ids; getAllInto walks slabs
+            // directly. No-op to keep external API stable.
+            if (comptime use_slab) return;
+
             if (chunk_count == 0) return;
 
             const nodes = try self.state.allocator.alloc(Node.Id, chunk_count);

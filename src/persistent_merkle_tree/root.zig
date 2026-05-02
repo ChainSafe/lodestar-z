@@ -9,6 +9,7 @@ pub const Gindex = @import("gindex.zig").Gindex;
 pub const Node = @import("Node.zig");
 pub const View = @import("View.zig");
 pub const proof = @import("proof.zig");
+pub const Slab = @import("slab.zig");
 
 test {
     testing.refAllDecls(@This());
