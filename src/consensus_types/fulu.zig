@@ -132,7 +132,7 @@ pub const BeaconState = ssz.VariableContainerType(struct {
     eth1_data_votes: phase0.Eth1DataVotes,
     eth1_deposit_index: p.Uint64,
     validators: ssz.FixedListType(Validator, preset.VALIDATOR_REGISTRY_LIMIT, .{}),
-    balances: ssz.FixedListType(p.Gwei, preset.VALIDATOR_REGISTRY_LIMIT, .{}),
+    balances: phase0.Balances,
     randao_mixes: ssz.FixedVectorType(p.Bytes32, preset.EPOCHS_PER_HISTORICAL_VECTOR, .{}),
     slashings: ssz.FixedVectorType(p.Gwei, preset.EPOCHS_PER_SLASHINGS_VECTOR, .{}),
     previous_epoch_participation: ssz.FixedListType(p.Uint8, preset.VALIDATOR_REGISTRY_LIMIT, .{}),
