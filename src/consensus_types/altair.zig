@@ -71,8 +71,8 @@ pub const BeaconBlock = ssz.VariableContainerType(struct {
     body: BeaconBlockBody,
 });
 
-pub const InactivityScores = ssz.FixedListType(p.Uint64, preset.VALIDATOR_REGISTRY_LIMIT, .{});
-pub const EpochParticipation = ssz.FixedListType(p.Uint8, preset.VALIDATOR_REGISTRY_LIMIT, .{});
+pub const InactivityScores = ssz.FixedListType(p.Uint64, preset.VALIDATOR_REGISTRY_LIMIT, .{ .slab = true });
+pub const EpochParticipation = ssz.FixedListType(p.Uint8, preset.VALIDATOR_REGISTRY_LIMIT, .{ .slab = true });
 
 pub const BeaconState = ssz.VariableContainerType(struct {
     genesis_time: p.Uint64,
