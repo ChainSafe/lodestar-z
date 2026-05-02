@@ -30,7 +30,7 @@ pub const Validator = ssz.FixedContainerType(struct {
     withdrawable_epoch: p.Epoch,
 });
 
-pub const Validators = ssz.FixedListType(Validator, preset.VALIDATOR_REGISTRY_LIMIT);
+pub const Validators = ssz.FixedListType(Validator, preset.VALIDATOR_REGISTRY_LIMIT, .{});
 
 pub const AttestationData = ssz.FixedContainerType(struct {
     slot: p.Slot,
@@ -41,7 +41,7 @@ pub const AttestationData = ssz.FixedContainerType(struct {
 });
 
 pub const IndexedAttestation = ssz.VariableContainerType(struct {
-    attesting_indices: ssz.FixedListType(p.ValidatorIndex, preset.MAX_VALIDATORS_PER_COMMITTEE),
+    attesting_indices: ssz.FixedListType(p.ValidatorIndex, preset.MAX_VALIDATORS_PER_COMMITTEE, .{}),
     data: AttestationData,
     signature: p.BLSSignature,
 });
@@ -59,11 +59,11 @@ pub const Eth1Data = ssz.FixedContainerType(struct {
     block_hash: p.Bytes32,
 });
 
-pub const Eth1DataVotes = ssz.FixedListType(Eth1Data, preset.EPOCHS_PER_ETH1_VOTING_PERIOD * preset.SLOTS_PER_EPOCH);
+pub const Eth1DataVotes = ssz.FixedListType(Eth1Data, preset.EPOCHS_PER_ETH1_VOTING_PERIOD * preset.SLOTS_PER_EPOCH, .{});
 
 pub const JustificationBits = ssz.BitVectorType(c.JUSTIFICATION_BITS_LENGTH);
-pub const HistoricalBlockRoots = ssz.FixedVectorType(p.Root, preset.SLOTS_PER_HISTORICAL_ROOT);
-pub const HistoricalStateRoots = ssz.FixedVectorType(p.Root, preset.SLOTS_PER_HISTORICAL_ROOT);
+pub const HistoricalBlockRoots = ssz.FixedVectorType(p.Root, preset.SLOTS_PER_HISTORICAL_ROOT, .{});
+pub const HistoricalStateRoots = ssz.FixedVectorType(p.Root, preset.SLOTS_PER_HISTORICAL_ROOT, .{});
 
 pub const HistoricalBatch = ssz.FixedContainerType(struct {
     block_roots: HistoricalBlockRoots,
@@ -120,7 +120,7 @@ pub const Attestation = ssz.VariableContainerType(struct {
 });
 
 pub const Deposit = ssz.FixedContainerType(struct {
-    proof: ssz.FixedVectorType(p.Bytes32, c.DEPOSIT_CONTRACT_TREE_DEPTH + 1),
+    proof: ssz.FixedVectorType(p.Bytes32, c.DEPOSIT_CONTRACT_TREE_DEPTH + 1, .{}),
     data: DepositData,
 });
 
@@ -129,15 +129,15 @@ pub const VoluntaryExit = ssz.FixedContainerType(struct {
     validator_index: p.ValidatorIndex,
 });
 
-pub const ProposerSlashings = ssz.FixedListType(ProposerSlashing, preset.MAX_PROPOSER_SLASHINGS);
+pub const ProposerSlashings = ssz.FixedListType(ProposerSlashing, preset.MAX_PROPOSER_SLASHINGS, .{});
 
 pub const AttesterSlashings = ssz.VariableListType(AttesterSlashing, preset.MAX_ATTESTER_SLASHINGS);
 
 pub const Attestations = ssz.VariableListType(Attestation, preset.MAX_ATTESTATIONS);
 
-pub const Deposits = ssz.FixedListType(Deposit, preset.MAX_DEPOSITS);
+pub const Deposits = ssz.FixedListType(Deposit, preset.MAX_DEPOSITS, .{});
 
-pub const VoluntaryExits = ssz.FixedListType(SignedVoluntaryExit, preset.MAX_VOLUNTARY_EXITS);
+pub const VoluntaryExits = ssz.FixedListType(SignedVoluntaryExit, preset.MAX_VOLUNTARY_EXITS, .{});
 
 pub const BeaconBlockBody = ssz.VariableContainerType(struct {
     randao_reveal: p.BLSSignature,
@@ -165,13 +165,13 @@ pub const SignedBeaconBlockHeader = ssz.FixedContainerType(struct {
 
 pub const EpochAttestations = ssz.VariableListType(PendingAttestation, preset.MAX_ATTESTATIONS * preset.SLOTS_PER_EPOCH);
 
-pub const Balances = ssz.FixedListType(p.Gwei, preset.VALIDATOR_REGISTRY_LIMIT);
+pub const Balances = ssz.FixedListType(p.Gwei, preset.VALIDATOR_REGISTRY_LIMIT, .{});
 
-pub const RandaoMixes = ssz.FixedVectorType(p.Bytes32, preset.EPOCHS_PER_HISTORICAL_VECTOR);
+pub const RandaoMixes = ssz.FixedVectorType(p.Bytes32, preset.EPOCHS_PER_HISTORICAL_VECTOR, .{});
 
-pub const Slashings = ssz.FixedVectorType(p.Gwei, preset.EPOCHS_PER_SLASHINGS_VECTOR);
+pub const Slashings = ssz.FixedVectorType(p.Gwei, preset.EPOCHS_PER_SLASHINGS_VECTOR, .{});
 
-pub const HistoricalRoots = ssz.FixedListType(p.Root, preset.HISTORICAL_ROOTS_LIMIT);
+pub const HistoricalRoots = ssz.FixedListType(p.Root, preset.HISTORICAL_ROOTS_LIMIT, .{});
 
 pub const BeaconState = ssz.VariableContainerType(struct {
     genesis_time: p.Uint64,

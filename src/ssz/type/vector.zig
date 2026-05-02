@@ -12,7 +12,9 @@ const tree_view = @import("../tree_view/root.zig");
 const ArrayBasicTreeView = tree_view.ArrayBasicTreeView;
 const ArrayCompositeTreeView = tree_view.ArrayCompositeTreeView;
 
-pub fn FixedVectorType(comptime ST: type, comptime _length: comptime_int) type {
+pub const TypeOpts = @import("list.zig").TypeOpts;
+
+pub fn FixedVectorType(comptime ST: type, comptime _length: comptime_int, comptime _opts: TypeOpts) type {
     comptime {
         if (!isFixedType(ST)) {
             @compileError("ST must be fixed type");
@@ -20,11 +22,15 @@ pub fn FixedVectorType(comptime ST: type, comptime _length: comptime_int) type {
         if (_length <= 0) {
             @compileError("length must be greater than 0");
         }
+        if (_opts.slab and !isBasicType(ST)) {
+            @compileError("FixedVectorType: opts.slab=true requires isBasicType(Element)");
+        }
     }
     return struct {
         pub const kind = TypeKind.vector;
         pub const Element: type = ST;
         pub const length: usize = _length;
+        pub const opts: TypeOpts = _opts;
         pub const Type: type = [length]Element.Type;
         pub const TreeView: type = if (isBasicType(Element))
             ArrayBasicTreeView(@This())
@@ -33,6 +39,9 @@ pub fn FixedVectorType(comptime ST: type, comptime _length: comptime_int) type {
         pub const fixed_size: usize = Element.fixed_size * length;
         pub const chunk_count: usize = if (isBasicType(Element)) std.math.divCeil(usize, fixed_size, 32) catch unreachable else length;
         pub const chunk_depth: u8 = maxChunksToDepth(chunk_count);
+        pub const use_slab: bool = _opts.slab;
+        const Slab = if (use_slab) @import("persistent_merkle_tree").Slab else struct {};
+        const slab_depth: u8 = if (use_slab) chunk_depth - Slab.k_log2 else 0;
 
         pub const default_value: Type = [_]Element.Type{Element.default_value} ** length;
 
@@ -155,6 +164,26 @@ pub fn FixedVectorType(comptime ST: type, comptime _length: comptime_int) type {
                     return error.InvalidSize;
                 }
 
+                if (comptime use_slab) {
+                    var it = Node.FillWithContentsIterator.initWithOffset(pool, slab_depth, Slab.k_log2);
+                    errdefer it.deinit();
+
+                    const bytes_per_slab: usize = Slab.K * 32;
+                    var byte_idx: usize = 0;
+
+                    while (byte_idx < data.len) {
+                        var slab_buf: [Slab.K][32]u8 align(64) = [_][32]u8{[_]u8{0} ** 32} ** Slab.K;
+                        const remaining = data.len - byte_idx;
+                        const slab_bytes = @min(remaining, bytes_per_slab);
+                        @memcpy(@as([*]u8, @ptrCast(&slab_buf))[0..slab_bytes], data[byte_idx..][0..slab_bytes]);
+                        const valid_chunks: u16 = @intCast((slab_bytes + 31) / 32);
+                        try it.append(try pool.createSlab(&slab_buf, valid_chunks));
+                        byte_idx += slab_bytes;
+                    }
+
+                    return try it.finish();
+                }
+
                 var nodes: [chunk_count]Node.Id = undefined;
                 errdefer pool.free(&nodes);
 
@@ -177,6 +206,27 @@ pub fn FixedVectorType(comptime ST: type, comptime _length: comptime_int) type {
             }
 
             pub fn toValue(node: Node.Id, pool: *Node.Pool, out: *Type) !void {
+                if (comptime use_slab) {
+                    const items_per_chunk = 32 / Element.fixed_size;
+                    const slab_count = (chunk_count + Slab.K - 1) / Slab.K;
+                    var slab_ids: [slab_count]Node.Id = undefined;
+                    try node.getNodesAtDepth(pool, slab_depth, 0, &slab_ids);
+
+                    var item_idx: usize = 0;
+                    outer: for (slab_ids) |sid| {
+                        const chunks = try sid.getSlabChunks(pool);
+                        for (0..Slab.K) |intra_chunk| {
+                            if (item_idx >= length) break :outer;
+                            const items_in_chunk = @min(items_per_chunk, length - item_idx);
+                            for (0..items_in_chunk) |i| {
+                                Element.tree.toValuePackedFromBytes(&chunks[intra_chunk], item_idx + i, &out[item_idx + i]);
+                            }
+                            item_idx += items_in_chunk;
+                        }
+                    }
+                    return;
+                }
+
                 var nodes: [chunk_count]Node.Id = undefined;
 
                 try node.getNodesAtDepth(pool, chunk_depth, 0, &nodes);
@@ -203,6 +253,35 @@ pub fn FixedVectorType(comptime ST: type, comptime _length: comptime_int) type {
             }
 
             pub fn fromValue(pool: *Node.Pool, value: *const Type) !Node.Id {
+                if (comptime use_slab) {
+                    var it = Node.FillWithContentsIterator.initWithOffset(pool, slab_depth, Slab.k_log2);
+                    errdefer it.deinit();
+
+                    const items_per_chunk = 32 / Element.fixed_size;
+                    const items_per_slab: usize = items_per_chunk * Slab.K;
+                    var item_idx: usize = 0;
+
+                    while (item_idx < length) {
+                        var slab_buf: [Slab.K][32]u8 align(64) = [_][32]u8{[_]u8{0} ** 32} ** Slab.K;
+                        const remaining = length - item_idx;
+                        const items_in_slab = @min(remaining, items_per_slab);
+
+                        for (0..items_in_slab) |k| {
+                            const slab_chunk_idx = k / items_per_chunk;
+                            const intra_chunk = k % items_per_chunk;
+                            const dst_off = intra_chunk * Element.fixed_size;
+                            const dst_slice = slab_buf[slab_chunk_idx][dst_off .. dst_off + Element.fixed_size];
+                            _ = Element.serializeIntoBytes(&value[item_idx + k], dst_slice);
+                        }
+
+                        const valid_chunks: u16 = @intCast((items_in_slab + items_per_chunk - 1) / items_per_chunk);
+                        try it.append(try pool.createSlab(&slab_buf, valid_chunks));
+                        item_idx += items_in_slab;
+                    }
+
+                    return try it.finish();
+                }
+
                 var nodes: [chunk_count]Node.Id = undefined;
                 errdefer pool.free(&nodes);
 
@@ -227,6 +306,25 @@ pub fn FixedVectorType(comptime ST: type, comptime _length: comptime_int) type {
             }
 
             pub fn serializeIntoBytes(node: Node.Id, pool: *Node.Pool, out: []u8) !usize {
+                if (comptime use_slab) {
+                    const slab_count = (chunk_count + Slab.K - 1) / Slab.K;
+                    var slab_ids: [slab_count]Node.Id = undefined;
+                    try node.getNodesAtDepth(pool, slab_depth, 0, &slab_ids);
+
+                    var byte_idx: usize = 0;
+                    outer: for (slab_ids) |sid| {
+                        const chunks = try sid.getSlabChunks(pool);
+                        for (0..Slab.K) |intra_chunk| {
+                            if (byte_idx >= fixed_size) break :outer;
+                            const remaining = fixed_size - byte_idx;
+                            const bytes_to_copy = @min(remaining, 32);
+                            @memcpy(out[byte_idx..][0..bytes_to_copy], chunks[intra_chunk][0..bytes_to_copy]);
+                            byte_idx += bytes_to_copy;
+                        }
+                    }
+                    return fixed_size;
+                }
+
                 var nodes: [chunk_count]Node.Id = undefined;
                 try node.getNodesAtDepth(pool, chunk_depth, 0, &nodes);
 
@@ -527,7 +625,7 @@ const VariableContainerType = @import("container.zig").VariableContainerType;
 
 test "vector - sanity" {
     // create a fixed vector type and instance and round-trip serialize
-    const Bytes32 = FixedVectorType(UintType(8), 32);
+    const Bytes32 = FixedVectorType(UintType(8), 32, .{});
 
     var b0: Bytes32.Type = undefined;
     var b0_buf: [Bytes32.fixed_size]u8 = undefined;
@@ -540,7 +638,7 @@ test "clone FixedVectorType" {
         epoch: UintType(8),
         root: ByteVectorType(32),
     });
-    const CheckpointVector = FixedVectorType(Checkpoint, 4);
+    const CheckpointVector = FixedVectorType(Checkpoint, 4, .{});
     var vector: CheckpointVector.Type = CheckpointVector.default_value;
     vector[0].epoch = 42;
 
@@ -555,7 +653,7 @@ test "clone FixedVectorType" {
         root: ByteVectorType(32),
         root_hex: ByteVectorType(64),
     });
-    const CheckpointHexVector = FixedVectorType(CheckpointHex, 4);
+    const CheckpointHexVector = FixedVectorType(CheckpointHex, 4, .{});
     var cloned2: CheckpointHexVector.Type = undefined;
     try CheckpointVector.clone(&vector, &cloned2);
     try std.testing.expect(cloned2[0].epoch == 42);
@@ -563,7 +661,7 @@ test "clone FixedVectorType" {
 
 test "clone VariableVectorType" {
     const allocator = std.testing.allocator;
-    const FieldA = FixedListType(UintType(8), 32);
+    const FieldA = FixedListType(UintType(8), 32, .{});
     const Foo = VariableContainerType(struct {
         a: FieldA,
     });
@@ -596,7 +694,7 @@ test "clone VariableVectorType" {
 // Refer to https://github.com/ChainSafe/ssz/blob/f5ed0b457333749b5c3f49fa5eafa096a725f033/packages/ssz/test/unit/byType/vector/valid.test.ts#L15-L85
 test "FixedVectorType - serializeIntoBytes (VectorBasic uint64 - 4 values)" {
     const allocator = std.testing.allocator;
-    const VectorU64 = FixedVectorType(UintType(64), 4);
+    const VectorU64 = FixedVectorType(UintType(64), 4, .{});
 
     const value: VectorU64.Type = [_]u64{ 100000, 200000, 300000, 400000 };
 
@@ -629,7 +727,7 @@ test "FixedVectorType - serializeIntoBytes (VectorBasic uint64 - 4 values)" {
 test "FixedVectorType - serializeIntoBytes (VectorComposite ByteVector32 - 4 roots)" {
     const allocator = std.testing.allocator;
     const ByteVector32 = ByteVectorType(32);
-    const VectorBV32 = FixedVectorType(ByteVector32, 4);
+    const VectorBV32 = FixedVectorType(ByteVector32, 4, .{});
 
     const value: VectorBV32.Type = [_][32]u8{
         [_]u8{0xbb} ** 32,
@@ -664,7 +762,7 @@ test "FixedVectorType - serializeIntoBytes (VectorComposite Container - 4 arrays
         a: UintType(64),
         b: UintType(64),
     });
-    const VectorContainer = FixedVectorType(Container, 4);
+    const VectorContainer = FixedVectorType(Container, 4, .{});
 
     const value: VectorContainer.Type = [_]Container.Type{
         .{ .a = 0, .b = 0 },
@@ -705,7 +803,7 @@ test "FixedVectorType - serializeIntoBytes (VectorComposite Container - 4 arrays
 
 test "VariableVectorType - serializeIntoBytes (VectorComposite ListBasic - [[1,2],[5,6]])" {
     const allocator = std.testing.allocator;
-    const ListU64 = FixedListType(UintType(64), 8);
+    const ListU64 = FixedListType(UintType(64), 8, .{});
     const VectorList = VariableVectorType(ListU64, 2);
 
     var value: VectorList.Type = VectorList.default_value;
@@ -750,7 +848,7 @@ test "VariableVectorType - serializeIntoBytes (VectorComposite ListBasic - [[1,2
 
 test "FixedVectorType - tree.deserializeFromBytes (VectorBasic uint64)" {
     const allocator = std.testing.allocator;
-    const VectorU64 = FixedVectorType(UintType(64), 4);
+    const VectorU64 = FixedVectorType(UintType(64), 4, .{});
 
     // 0xa086010000000000400d030000000000e093040000000000801a060000000000
     const serialized = [_]u8{
@@ -784,7 +882,7 @@ test "FixedVectorType - tree.deserializeFromBytes (VectorBasic uint64)" {
 test "FixedVectorType - tree.deserializeFromBytes (VectorComposite ByteVector32)" {
     const allocator = std.testing.allocator;
     const ByteVector32 = ByteVectorType(32);
-    const VectorBV32 = FixedVectorType(ByteVector32, 4);
+    const VectorBV32 = FixedVectorType(ByteVector32, 4, .{});
 
     // 0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
     const serialized = [_]u8{0xbb} ** 32 ++ [_]u8{0xcc} ** 32 ++ [_]u8{0xdd} ** 32 ++ [_]u8{0xee} ** 32;
@@ -824,7 +922,7 @@ test "FixedVectorType - tree.deserializeFromBytes (VectorComposite Container)" {
         a: UintType(64),
         b: UintType(64),
     });
-    const VectorContainer = FixedVectorType(Container, 4);
+    const VectorContainer = FixedVectorType(Container, 4, .{});
 
     // 0x0000000000000000000000000000000040e2010000000000f1fb0900000000004794030000000000f8ad0b00000000004e46050000000000ff5f0d0000000000
     const serialized = [_]u8{
@@ -870,7 +968,7 @@ test "FixedVectorType - tree.deserializeFromBytes (VectorComposite Container)" {
 
 test "VariableVectorType - tree.deserializeFromBytes (VectorComposite ListBasic)" {
     const allocator = std.testing.allocator;
-    const ListU64 = FixedListType(UintType(64), 8);
+    const ListU64 = FixedListType(UintType(64), 8, .{});
     const VectorList = VariableVectorType(ListU64, 2);
 
     // 0x08000000180000000100000000000000020000000000000005000000000000000600000000000000
@@ -931,7 +1029,7 @@ test "valid test for VectorBasicType" {
 
     // uint of 8 bytes = u64
     const Uint = UintType(64);
-    const Vector = FixedVectorType(Uint, 4);
+    const Vector = FixedVectorType(Uint, 4, .{});
 
     const TypeTest = @import("test_utils.zig").typeTest(Vector);
 
@@ -941,7 +1039,7 @@ test "valid test for VectorBasicType" {
 }
 
 test "FixedVectorType equals" {
-    const Vec = FixedVectorType(UintType(8), 4);
+    const Vec = FixedVectorType(UintType(8), 4, .{});
 
     var a: Vec.Type = [_]u8{ 1, 2, 3, 4 };
     var b: Vec.Type = [_]u8{ 1, 2, 3, 4 };
@@ -964,7 +1062,7 @@ test "VectorCompositeType of Root" {
 
     const allocator = std.testing.allocator;
     const ByteVector = ByteVectorType(32);
-    const Vector = FixedVectorType(ByteVector, 4);
+    const Vector = FixedVectorType(ByteVector, 4, .{});
 
     const TypeTest = @import("test_utils.zig").typeTest(Vector);
 
@@ -991,7 +1089,7 @@ test "VectorCompositeType of Container" {
         a: Uint,
         b: Uint,
     });
-    const Vector = FixedVectorType(Container, 4);
+    const Vector = FixedVectorType(Container, 4, .{});
 
     const TypeTest = @import("test_utils.zig").typeTest(Vector);
 
@@ -1001,7 +1099,7 @@ test "VectorCompositeType of Container" {
 }
 
 test "FixedVectorType - default_root" {
-    const VectorU64 = FixedVectorType(UintType(64), 4);
+    const VectorU64 = FixedVectorType(UintType(64), 4, .{});
     var expected_root: [32]u8 = undefined;
 
     try VectorU64.hashTreeRoot(&VectorU64.default_value, &expected_root);
@@ -1015,7 +1113,7 @@ test "FixedVectorType - default_root" {
 }
 
 test "VariableVectorType - default_root" {
-    const ListU64 = FixedListType(UintType(64), 8);
+    const ListU64 = FixedListType(UintType(64), 8, .{});
     const VectorList = VariableVectorType(ListU64, 2);
     var expected_root: [32]u8 = undefined;
 
@@ -1027,4 +1125,55 @@ test "VariableVectorType - default_root" {
 
     const node = try VectorList.tree.default(&pool);
     try std.testing.expectEqualSlices(u8, &expected_root, node.getRoot(&pool));
+}
+
+test "FixedVectorType opts.slab=true: round-trip fromValue -> tree -> toValue" {
+    const allocator = std.testing.allocator;
+    const Slab = @import("persistent_merkle_tree").Slab;
+    const length: usize = 2 * @as(usize, Slab.K) * 4 + 7;
+    const VecT = FixedVectorType(UintType(64), length, .{ .slab = true });
+
+    var pool = try Node.Pool.init(allocator, 4096);
+    defer pool.deinit();
+
+    var src: VecT.Type = undefined;
+    for (0..length) |i| src[i] = @as(u64, @intCast(i * 31 + 1));
+
+    const tree_id = try VecT.tree.fromValue(&pool, &src);
+    defer pool.unref(tree_id);
+
+    var dst: VecT.Type = undefined;
+    try VecT.tree.toValue(tree_id, &pool, &dst);
+    for (src, dst) |a, b| try std.testing.expectEqual(a, b);
+
+    // Hash matches the leaf-path (non-slab) reference root.
+    const VecLeafT = FixedVectorType(UintType(64), length, .{});
+    const leaf_tree_id = try VecLeafT.tree.fromValue(&pool, &src);
+    defer pool.unref(leaf_tree_id);
+    try std.testing.expectEqualSlices(u8, leaf_tree_id.getRoot(&pool), tree_id.getRoot(&pool));
+}
+
+test "FixedVectorType opts.slab=true: serialize -> deserialize round-trip" {
+    const allocator = std.testing.allocator;
+    const Slab = @import("persistent_merkle_tree").Slab;
+    const length: usize = 2 * @as(usize, Slab.K) * 4;
+    const VecT = FixedVectorType(UintType(64), length, .{ .slab = true });
+
+    var pool = try Node.Pool.init(allocator, 4096);
+    defer pool.deinit();
+
+    var src: VecT.Type = undefined;
+    for (0..length) |i| src[i] = @as(u64, @intCast(i));
+
+    const tree_id = try VecT.tree.fromValue(&pool, &src);
+    defer pool.unref(tree_id);
+
+    const buf = try allocator.alloc(u8, length * @sizeOf(u64));
+    defer allocator.free(buf);
+    const written = try VecT.tree.serializeIntoBytes(tree_id, &pool, buf);
+    try std.testing.expectEqual(length * @sizeOf(u64), written);
+
+    const round_id = try VecT.tree.deserializeFromBytes(&pool, buf);
+    defer pool.unref(round_id);
+    try std.testing.expectEqualSlices(u8, tree_id.getRoot(&pool), round_id.getRoot(&pool));
 }

@@ -183,7 +183,7 @@ test "TreeView vector composite element set/get/commit" {
         a: Uint32,
         b: ByteVectorType(4),
     });
-    const VectorType = FixedVectorType(Inner, 2);
+    const VectorType = FixedVectorType(Inner, 2, .{});
 
     const v0: Inner.Type = .{ .a = 1, .b = [_]u8{ 1, 1, 1, 1 } };
     const v1: Inner.Type = .{ .a = 2, .b = [_]u8{ 2, 2, 2, 2 } };
@@ -229,7 +229,7 @@ test "TreeView vector composite index bounds" {
     defer pool.deinit();
 
     const Inner = FixedContainerType(struct { x: UintType(64) });
-    const VectorType = FixedVectorType(Inner, 2);
+    const VectorType = FixedVectorType(Inner, 2, .{});
     const original: VectorType.Type = .{ .{ .x = 1 }, .{ .x = 2 } };
 
     const root_node = try VectorType.tree.fromValue(&pool, &original);
@@ -251,12 +251,12 @@ test "TreeView vector composite clearCache does not break subsequent commits" {
     defer pool.deinit();
 
     const Uint32 = UintType(32);
-    const InnerVec = FixedVectorType(Uint32, 2);
+    const InnerVec = FixedVectorType(Uint32, 2, .{});
     const Inner = FixedContainerType(struct {
         id: Uint32,
         vec: InnerVec,
     });
-    const VectorType = FixedVectorType(Inner, 2);
+    const VectorType = FixedVectorType(Inner, 2, .{});
 
     const v0: Inner.Type = .{ .id = 1, .vec = [_]u32{ 0, 1 } };
     const v1: Inner.Type = .{ .id = 2, .vec = [_]u32{ 2, 3 } };
@@ -291,7 +291,7 @@ test "TreeView vector composite clone isolates updates" {
 
     const Uint32 = UintType(32);
     const Inner = FixedContainerType(struct { a: Uint32 });
-    const VectorType = FixedVectorType(Inner, 2);
+    const VectorType = FixedVectorType(Inner, 2, .{});
 
     const original: VectorType.Type = .{ .{ .a = 1 }, .{ .a = 2 } };
     const root = try VectorType.tree.fromValue(&pool, &original);
@@ -330,7 +330,7 @@ test "TreeView vector composite clone reads committed state" {
 
     const Uint32 = UintType(32);
     const Inner = FixedContainerType(struct { a: Uint32 });
-    const VectorType = FixedVectorType(Inner, 2);
+    const VectorType = FixedVectorType(Inner, 2, .{});
 
     const original: VectorType.Type = .{ .{ .a = 1 }, .{ .a = 2 } };
     const root = try VectorType.tree.fromValue(&pool, &original);
@@ -363,7 +363,7 @@ test "TreeView vector composite clone drops uncommitted changes" {
 
     const Uint32 = UintType(32);
     const Inner = FixedContainerType(struct { a: Uint32 });
-    const VectorType = FixedVectorType(Inner, 2);
+    const VectorType = FixedVectorType(Inner, 2, .{});
 
     const original: VectorType.Type = .{ .{ .a = 1 }, .{ .a = 2 } };
     const root = try VectorType.tree.fromValue(&pool, &original);
@@ -407,7 +407,7 @@ test "TreeView vector composite clone(false) does not transfer cache" {
     const Inner = FixedContainerType(struct {
         a: Uint32,
     });
-    const VectorType = FixedVectorType(Inner, 2);
+    const VectorType = FixedVectorType(Inner, 2, .{});
 
     const original: VectorType.Type = .{ .{ .a = 1 }, .{ .a = 2 } };
     const root_node = try VectorType.tree.fromValue(&pool, &original);
@@ -435,7 +435,7 @@ test "TreeView vector composite clone(true) transfers cache and clears source" {
     const Inner = FixedContainerType(struct {
         a: Uint32,
     });
-    const VectorType = FixedVectorType(Inner, 2);
+    const VectorType = FixedVectorType(Inner, 2, .{});
 
     const original: VectorType.Type = .{ .{ .a = 1 }, .{ .a = 2 } };
     const root_node = try VectorType.tree.fromValue(&pool, &original);
@@ -459,7 +459,7 @@ test "ArrayCompositeTreeView - serialize (ByteVector32 vector)" {
     const allocator = std.testing.allocator;
 
     const Root32 = ByteVectorType(32);
-    const VecRootsType = FixedVectorType(Root32, 4);
+    const VecRootsType = FixedVectorType(Root32, 4, .{});
 
     var pool = try Node.Pool.init(allocator, 1024);
     defer pool.deinit();
@@ -502,7 +502,7 @@ test "ArrayCompositeTreeView - serialize (Container vector)" {
         b: UintType(64),
     });
     _ = Uint64;
-    const VecContainerType = FixedVectorType(TestContainer, 4);
+    const VecContainerType = FixedVectorType(TestContainer, 4, .{});
 
     var pool = try Node.Pool.init(allocator, 1024);
     defer pool.deinit();
@@ -547,7 +547,7 @@ test "ArrayCompositeTreeView - get and set" {
     const allocator = std.testing.allocator;
 
     const Root32 = ByteVectorType(32);
-    const VecRootsType = FixedVectorType(Root32, 4);
+    const VecRootsType = FixedVectorType(Root32, 4, .{});
 
     var pool = try Node.Pool.init(allocator, 1024);
     defer pool.deinit();

@@ -25,7 +25,7 @@ pub const Handler = enum {
 };
 
 pub fn TestCase(comptime fork: ForkSeq) type {
-    const Balances = ssz.FixedListType(ct.primitive.Gwei, preset.VALIDATOR_REGISTRY_LIMIT);
+    const Balances = ssz.FixedListType(ct.primitive.Gwei, preset.VALIDATOR_REGISTRY_LIMIT, .{});
     const DeltasType = ssz.VariableVectorType(Balances, 2);
     const tc_utils = TestCaseUtils(fork);
 

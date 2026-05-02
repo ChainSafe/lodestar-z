@@ -27,6 +27,7 @@ pub fn ByteVectorType(comptime _length: comptime_int) type {
         pub const kind = TypeKind.vector;
         pub const Element: type = UintType(8);
         pub const length: usize = _length;
+        pub const opts: @import("list.zig").TypeOpts = .{};
         pub const Type: type = [length]Element.Type;
         pub const TreeView: type = ArrayBasicTreeView(@This());
         pub const fixed_size: usize = Element.fixed_size * length;

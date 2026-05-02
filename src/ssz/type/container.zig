@@ -764,9 +764,9 @@ test "ContainerType - sanity" {
     // create a variable container type and instance and round-trip serialize
     const allocator = std.testing.allocator;
     const Foo = VariableContainerType(struct {
-        a: FixedListType(UintType(8), 32),
-        b: FixedListType(UintType(8), 32),
-        c: FixedListType(UintType(8), 32),
+        a: FixedListType(UintType(8), 32, .{}),
+        b: FixedListType(UintType(8), 32, .{}),
+        c: FixedListType(UintType(8), 32, .{}),
     });
     var f: Foo.Type = undefined;
     f.a = try std.ArrayListUnmanaged(u8).initCapacity(allocator, 10);
@@ -814,8 +814,8 @@ test "clone FixedContainerType" {
 
 test "clone VariableContainerType" {
     const allocator = std.testing.allocator;
-    const FieldA = FixedListType(UintType(8), 32);
-    const FieldB = FixedListType(UintType(8), 32);
+    const FieldA = FixedListType(UintType(8), 32, .{});
+    const FieldB = FixedListType(UintType(8), 32, .{});
     const Foo = VariableContainerType(struct {
         a: FieldA,
         b: FieldB,
@@ -834,7 +834,7 @@ test "clone VariableContainerType" {
     try std.testing.expect(Foo.equals(&cloned_f, &f));
 
     // clone into a larger container
-    const FieldC = FixedListType(UintType(8), 32);
+    const FieldC = FixedListType(UintType(8), 32, .{});
     const Foo2 = VariableContainerType(struct {
         a: FieldA,
         b: FieldB,
@@ -973,7 +973,7 @@ test "FixedContainerType - serializeIntoBytes (uint64 + ByteVector32)" {
 test "VariableContainerType - serializeIntoBytes (zero)" {
     const allocator = std.testing.allocator;
     const Container = VariableContainerType(struct {
-        a: FixedListType(UintType(64), 128),
+        a: FixedListType(UintType(64), 128, .{}),
         b: UintType(64),
     });
 
@@ -1010,7 +1010,7 @@ test "VariableContainerType - serializeIntoBytes (zero)" {
 test "VariableContainerType - serializeIntoBytes (some value)" {
     const allocator = std.testing.allocator;
     const Container = VariableContainerType(struct {
-        a: FixedListType(UintType(64), 128),
+        a: FixedListType(UintType(64), 128, .{}),
         b: UintType(64),
     });
 
@@ -1059,7 +1059,7 @@ test "VariableContainerType - serializeIntoBytes (some value)" {
 test "VariableContainerType - tree.deserializeFromBytes" {
     const allocator = std.testing.allocator;
     const Container = VariableContainerType(struct {
-        a: FixedListType(UintType(64), 128),
+        a: FixedListType(UintType(64), 128, .{}),
         b: UintType(64),
     });
 
@@ -1125,11 +1125,11 @@ test "ContainerType" {
     }
 }
 
-test "ContainerType with FixedListType(uint64, 128) and uint64" {
+test "ContainerType with FixedListType(uint64, 128, .{}) and uint64" {
     const allocator = std.testing.allocator;
 
     const Container = VariableContainerType(struct {
-        a: FixedListType(UintType(64), 128),
+        a: FixedListType(UintType(64), 128, .{}),
         b: UintType(64),
     });
 
@@ -1191,8 +1191,8 @@ test "FixedContainerType equals" {
 test "VariableContainerType equals" {
     const allocator = std.testing.allocator;
     const Container = VariableContainerType(struct {
-        list1: FixedListType(UintType(8), 32),
-        list2: FixedListType(UintType(8), 32),
+        list1: FixedListType(UintType(8), 32, .{}),
+        list2: FixedListType(UintType(8), 32, .{}),
         value: UintType(64),
     });
 
@@ -1200,16 +1200,16 @@ test "VariableContainerType equals" {
     var b: Container.Type = undefined;
     var c: Container.Type = undefined;
 
-    a.list1 = FixedListType(UintType(8), 32).Type.empty;
-    a.list2 = FixedListType(UintType(8), 32).Type.empty;
+    a.list1 = FixedListType(UintType(8), 32, .{}).Type.empty;
+    a.list2 = FixedListType(UintType(8), 32, .{}).Type.empty;
     a.value = 100;
 
-    b.list1 = FixedListType(UintType(8), 32).Type.empty;
-    b.list2 = FixedListType(UintType(8), 32).Type.empty;
+    b.list1 = FixedListType(UintType(8), 32, .{}).Type.empty;
+    b.list2 = FixedListType(UintType(8), 32, .{}).Type.empty;
     b.value = 100;
 
-    c.list1 = FixedListType(UintType(8), 32).Type.empty;
-    c.list2 = FixedListType(UintType(8), 32).Type.empty;
+    c.list1 = FixedListType(UintType(8), 32, .{}).Type.empty;
+    c.list2 = FixedListType(UintType(8), 32, .{}).Type.empty;
     c.value = 101; // Different value
 
     defer a.list1.deinit(allocator);
@@ -1253,7 +1253,7 @@ test "FixedContainerType - default_root" {
 test "VariableContainerType - default_root" {
     var expected_root: [32]u8 = undefined;
     const Container = VariableContainerType(struct {
-        a: FixedListType(UintType(64), 128),
+        a: FixedListType(UintType(64), 128, .{}),
         b: UintType(64),
     });
 

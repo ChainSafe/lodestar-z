@@ -13,7 +13,19 @@ const tree_view = @import("../tree_view/root.zig");
 const ListBasicTreeView = tree_view.ListBasicTreeView;
 const ListCompositeTreeView = tree_view.ListCompositeTreeView;
 
-pub fn FixedListType(comptime ST: type, comptime _limit: comptime_int) type {
+/// Per-type opt-in flags for SSZ list/vector types.
+pub const TypeOpts = struct {
+    /// When true, the basic-element packed tree is built from slab leaves
+    /// (Pool.createSlab) instead of per-chunk leaves. Slab leaves pack K=1024
+    /// chunks contiguously; the upper tree is depth `chunk_depth - k_log2`.
+    /// Trade-off: faster bulk operations on large lists; tradeoff explored
+    /// in B6/D1 benchmarks. ListBasicTreeView features that traverse at
+    /// chunk depth (sliceTo, ReadonlyIterator) compile-error on slab-enabled
+    /// types — use get/set/getAll/serialize/deserialize/hashTreeRoot instead.
+    slab: bool = false,
+};
+
+pub fn FixedListType(comptime ST: type, comptime _limit: comptime_int, comptime _opts: TypeOpts) type {
     comptime {
         if (!isFixedType(ST)) {
             @compileError("ST must be fixed type");
@@ -21,11 +33,15 @@ pub fn FixedListType(comptime ST: type, comptime _limit: comptime_int) type {
         if (_limit <= 0) {
             @compileError("limit must be greater than 0");
         }
+        if (_opts.slab and !isBasicType(ST)) {
+            @compileError("FixedListType: opts.slab=true requires isBasicType(Element)");
+        }
     }
     return struct {
         pub const kind = TypeKind.list;
         pub const Element: type = ST;
         pub const limit: usize = _limit;
+        pub const opts: TypeOpts = _opts;
         pub const Type: type = std.ArrayListUnmanaged(Element.Type);
         pub const TreeView: type = if (isBasicType(Element))
             ListBasicTreeView(@This())
@@ -35,6 +51,9 @@ pub fn FixedListType(comptime ST: type, comptime _limit: comptime_int) type {
         pub const max_size: usize = Element.fixed_size * limit;
         pub const max_chunk_count: usize = if (isBasicType(Element)) std.math.divCeil(usize, max_size, 32) catch unreachable else limit;
         pub const chunk_depth: u8 = maxChunksToDepth(max_chunk_count);
+        pub const use_slab: bool = _opts.slab;
+        const Slab = if (use_slab) @import("persistent_merkle_tree").Slab else struct {};
+        const slab_depth: u8 = if (use_slab) chunk_depth - Slab.k_log2 else 0;
 
         pub const default_value: Type = Type.empty;
 
@@ -274,6 +293,30 @@ pub fn FixedListType(comptime ST: type, comptime _limit: comptime_int) type {
                     );
                 }
 
+                if (comptime use_slab) {
+                    var it = Node.FillWithContentsIterator.initWithOffset(pool, slab_depth, Slab.k_log2);
+                    errdefer it.deinit();
+
+                    const bytes_per_slab: usize = Slab.K * 32;
+                    var byte_idx: usize = 0;
+
+                    while (byte_idx < data.len) {
+                        var slab_buf: [Slab.K][32]u8 align(64) = [_][32]u8{[_]u8{0} ** 32} ** Slab.K;
+                        const remaining = data.len - byte_idx;
+                        const slab_bytes = @min(remaining, bytes_per_slab);
+                        @memcpy(@as([*]u8, @ptrCast(&slab_buf))[0..slab_bytes], data[byte_idx..][0..slab_bytes]);
+                        const valid_chunks: u16 = @intCast((slab_bytes + 31) / 32);
+                        try it.append(try pool.createSlab(&slab_buf, valid_chunks));
+                        byte_idx += slab_bytes;
+                    }
+
+                    const content_root = try it.finish();
+                    errdefer pool.unref(content_root);
+                    const len_mixin = try pool.createLeafFromUint(len);
+                    errdefer pool.unref(len_mixin);
+                    return try pool.createBranch(content_root, len_mixin);
+                }
+
                 var it = Node.FillWithContentsIterator.init(pool, chunk_depth);
                 errdefer it.deinit();
 
@@ -324,13 +367,37 @@ pub fn FixedListType(comptime ST: type, comptime _limit: comptime_int) type {
                     return;
                 }
 
+                try out.resize(allocator, len);
+                @memset(out.items, Element.default_value);
+
+                if (comptime use_slab) {
+                    const content_root = try node.getLeft(pool);
+                    const items_per_chunk = 32 / Element.fixed_size;
+                    const slab_count = (chunk_count + Slab.K - 1) / Slab.K;
+                    const slab_ids = try allocator.alloc(Node.Id, slab_count);
+                    defer allocator.free(slab_ids);
+                    try content_root.getNodesAtDepth(pool, slab_depth, 0, slab_ids);
+
+                    var item_idx: usize = 0;
+                    outer: for (slab_ids) |sid| {
+                        const chunks = try sid.getSlabChunks(pool);
+                        for (0..Slab.K) |intra_chunk| {
+                            if (item_idx >= len) break :outer;
+                            const items_in_chunk = @min(items_per_chunk, len - item_idx);
+                            for (0..items_in_chunk) |i| {
+                                Element.tree.toValuePackedFromBytes(&chunks[intra_chunk], item_idx + i, &out.items[item_idx + i]);
+                            }
+                            item_idx += items_in_chunk;
+                        }
+                    }
+                    return;
+                }
+
                 const nodes = try allocator.alloc(Node.Id, chunk_count);
                 defer allocator.free(nodes);
 
                 try node.getNodesAtDepth(pool, chunk_depth + 1, 0, nodes);
 
-                try out.resize(allocator, len);
-                @memset(out.items, Element.default_value);
                 if (comptime isBasicType(Element)) {
                     // tightly packed list
                     for (0..len) |i| {
@@ -360,6 +427,39 @@ pub fn FixedListType(comptime ST: type, comptime _limit: comptime_int) type {
                         @enumFromInt(chunk_depth),
                         @enumFromInt(0),
                     );
+                }
+
+                if (comptime use_slab) {
+                    var it = Node.FillWithContentsIterator.initWithOffset(pool, slab_depth, Slab.k_log2);
+                    errdefer it.deinit();
+
+                    const items_per_chunk = 32 / Element.fixed_size;
+                    const items_per_slab: usize = items_per_chunk * Slab.K;
+                    var item_idx: usize = 0;
+
+                    while (item_idx < len) {
+                        var slab_buf: [Slab.K][32]u8 align(64) = [_][32]u8{[_]u8{0} ** 32} ** Slab.K;
+                        const remaining = len - item_idx;
+                        const items_in_slab = @min(remaining, items_per_slab);
+
+                        for (0..items_in_slab) |k| {
+                            const slab_chunk_idx = k / items_per_chunk;
+                            const intra_chunk = k % items_per_chunk;
+                            const dst_off = intra_chunk * Element.fixed_size;
+                            const dst_slice = slab_buf[slab_chunk_idx][dst_off .. dst_off + Element.fixed_size];
+                            _ = Element.serializeIntoBytes(&value.items[item_idx + k], dst_slice);
+                        }
+
+                        const valid_chunks: u16 = @intCast((items_in_slab + items_per_chunk - 1) / items_per_chunk);
+                        try it.append(try pool.createSlab(&slab_buf, valid_chunks));
+                        item_idx += items_in_slab;
+                    }
+
+                    const content_root = try it.finish();
+                    errdefer pool.unref(content_root);
+                    const len_mixin = try pool.createLeafFromUint(len);
+                    errdefer pool.unref(len_mixin);
+                    return try pool.createBranch(content_root, len_mixin);
                 }
 
                 var it = Node.FillWithContentsIterator.init(pool, chunk_depth);
@@ -410,6 +510,29 @@ pub fn FixedListType(comptime ST: type, comptime _limit: comptime_int) type {
                     (Element.fixed_size * len + 31) / 32
                 else
                     len;
+
+                if (comptime use_slab) {
+                    const serialized_size = len * Element.fixed_size;
+                    const content_root = try node.getLeft(pool);
+                    const slab_count = (chunk_count + Slab.K - 1) / Slab.K;
+
+                    const slab_ids_buf = try pool.allocator.alloc(Node.Id, slab_count);
+                    defer pool.allocator.free(slab_ids_buf);
+                    try content_root.getNodesAtDepth(pool, slab_depth, 0, slab_ids_buf);
+
+                    var byte_idx: usize = 0;
+                    outer: for (slab_ids_buf) |sid| {
+                        const chunks = try sid.getSlabChunks(pool);
+                        for (0..Slab.K) |intra_chunk| {
+                            if (byte_idx >= serialized_size) break :outer;
+                            const remaining = serialized_size - byte_idx;
+                            const bytes_to_copy = @min(remaining, 32);
+                            @memcpy(out[byte_idx..][0..bytes_to_copy], chunks[intra_chunk][0..bytes_to_copy]);
+                            byte_idx += bytes_to_copy;
+                        }
+                    }
+                    return serialized_size;
+                }
 
                 var it = Node.DepthIterator.init(pool, node, chunk_depth + 1, 0);
 
@@ -830,7 +953,7 @@ test "ListType - sanity" {
     const allocator = std.testing.allocator;
 
     // create a fixed list type and instance and round-trip serialize
-    const Bytes = FixedListType(UintType(8), 32);
+    const Bytes = FixedListType(UintType(8), 32, .{});
 
     var b: Bytes.Type = Bytes.default_value;
     defer b.deinit(allocator);
@@ -862,7 +985,7 @@ test "clone FixedListType" {
         epoch: UintType(8),
         root: ByteVectorType(32),
     });
-    const CheckpointList = FixedListType(Checkpoint, 8);
+    const CheckpointList = FixedListType(Checkpoint, 8, .{});
     var list: CheckpointList.Type = CheckpointList.default_value;
     defer CheckpointList.deinit(allocator, &list);
     const cp: Checkpoint.Type = .{
@@ -882,7 +1005,7 @@ test "clone FixedListType" {
         root: ByteVectorType(32),
         root_hex: ByteVectorType(64),
     });
-    const CheckpointHexList = FixedListType(CheckpointHex, 8);
+    const CheckpointHexList = FixedListType(CheckpointHex, 8, .{});
     var list_hex: CheckpointHexList.Type = CheckpointHexList.default_value;
     defer list_hex.deinit(allocator);
     try CheckpointList.clone(allocator, &list, &list_hex);
@@ -893,7 +1016,7 @@ test "clone FixedListType" {
 
 test "clone VariableListType" {
     const allocator = std.testing.allocator;
-    const FieldA = FixedListType(UintType(8), 32);
+    const FieldA = FixedListType(UintType(8), 32, .{});
     const Foo = VariableContainerType(struct {
         a: FieldA,
     });
@@ -928,7 +1051,7 @@ test "clone VariableListType" {
 test "FixedListType - tree roundtrip (ListBasic uint8)" {
     const allocator = std.testing.allocator;
 
-    const ListU8 = FixedListType(UintType(8), 128);
+    const ListU8 = FixedListType(UintType(8), 128, .{});
 
     const TestCase = struct {
         id: []const u8,
@@ -991,7 +1114,7 @@ test "FixedListType - tree roundtrip (ListBasic uint8)" {
 test "FixedListType - tree roundtrip (ListBasic uint64)" {
     const allocator = std.testing.allocator;
 
-    const ListU64 = FixedListType(UintType(64), 128);
+    const ListU64 = FixedListType(UintType(64), 128, .{});
 
     const TestCase = struct {
         id: []const u8,
@@ -1058,7 +1181,7 @@ test "FixedListType - tree roundtrip (ListBasic uint64)" {
 test "FixedListType - serializeIntoBytes (ListComposite ByteVector32 - empty)" {
     const allocator = std.testing.allocator;
     const ByteVector32 = ByteVectorType(32);
-    const ListBV32 = FixedListType(ByteVector32, 128);
+    const ListBV32 = FixedListType(ByteVector32, 128, .{});
 
     var value: ListBV32.Type = ListBV32.default_value;
 
@@ -1091,7 +1214,7 @@ test "FixedListType - serializeIntoBytes (ListComposite ByteVector32 - empty)" {
 test "FixedListType - serializeIntoBytes (ListComposite ByteVector32 - 2 roots)" {
     const allocator = std.testing.allocator;
     const ByteVector32 = ByteVectorType(32);
-    const ListBV32 = FixedListType(ByteVector32, 128);
+    const ListBV32 = FixedListType(ByteVector32, 128, .{});
 
     var value: ListBV32.Type = ListBV32.default_value;
     defer value.deinit(allocator);
@@ -1132,7 +1255,7 @@ test "FixedListType - serializeIntoBytes (ListComposite Container - empty)" {
         a: UintType(64),
         b: UintType(64),
     });
-    const ListContainer = FixedListType(Container, 128);
+    const ListContainer = FixedListType(Container, 128, .{});
 
     var value: ListContainer.Type = ListContainer.default_value;
 
@@ -1168,7 +1291,7 @@ test "FixedListType - serializeIntoBytes (ListComposite Container - 2 values)" {
         a: UintType(64),
         b: UintType(64),
     });
-    const ListContainer = FixedListType(Container, 128);
+    const ListContainer = FixedListType(Container, 128, .{});
 
     var value: ListContainer.Type = ListContainer.default_value;
     defer value.deinit(allocator);
@@ -1210,7 +1333,7 @@ test "FixedListType - serializeIntoBytes (ListComposite Container - 2 values)" {
 
 test "VariableListType - serializeIntoBytes (List<List<uint16>> - empty)" {
     const allocator = std.testing.allocator;
-    const InnerList = FixedListType(UintType(16), 2);
+    const InnerList = FixedListType(UintType(16), 2, .{});
     const OuterList = VariableListType(InnerList, 2);
 
     var value: OuterList.Type = OuterList.default_value;
@@ -1244,7 +1367,7 @@ test "VariableListType - serializeIntoBytes (List<List<uint16>> - empty)" {
 
 test "VariableListType - serializeIntoBytes (List<List<uint16>> - 2 full values)" {
     const allocator = std.testing.allocator;
-    const InnerList = FixedListType(UintType(16), 2);
+    const InnerList = FixedListType(UintType(16), 2, .{});
     const OuterList = VariableListType(InnerList, 2);
 
     var value: OuterList.Type = OuterList.default_value;
@@ -1293,7 +1416,7 @@ test "VariableListType - serializeIntoBytes (List<List<uint16>> - 2 full values)
 
 test "VariableListType - serializeIntoBytes (List<List<uint16>> - 2 empty values)" {
     const allocator = std.testing.allocator;
-    const InnerList = FixedListType(UintType(16), 2);
+    const InnerList = FixedListType(UintType(16), 2, .{});
     const OuterList = VariableListType(InnerList, 2);
 
     var value: OuterList.Type = OuterList.default_value;
@@ -1337,7 +1460,7 @@ test "VariableListType - serializeIntoBytes (List<List<uint16>> - 2 empty values
 test "FixedListType - tree.deserializeFromBytes (ListBasic uint8)" {
     const allocator = std.testing.allocator;
 
-    const ListU8 = FixedListType(UintType(8), 128);
+    const ListU8 = FixedListType(UintType(8), 128, .{});
 
     const TestCase = struct {
         id: []const u8,
@@ -1389,7 +1512,7 @@ test "FixedListType - tree.deserializeFromBytes (ListBasic uint8)" {
 test "FixedListType - tree.deserializeFromBytes (ListBasic uint64)" {
     const allocator = std.testing.allocator;
 
-    const ListU64 = FixedListType(UintType(64), 128);
+    const ListU64 = FixedListType(UintType(64), 128, .{});
 
     const TestCase = struct {
         id: []const u8,
@@ -1467,7 +1590,7 @@ test "FixedListType - tree.deserializeFromBytes (ListBasic uint64)" {
 test "FixedListType - tree.deserializeFromBytes (ListComposite ByteVector32)" {
     const allocator = std.testing.allocator;
     const ByteVector32 = ByteVectorType(32);
-    const ListBV32 = FixedListType(ByteVector32, 128);
+    const ListBV32 = FixedListType(ByteVector32, 128, .{});
 
     const TestCase = struct {
         id: []const u8,
@@ -1522,7 +1645,7 @@ test "FixedListType - tree.deserializeFromBytes (ListComposite Container)" {
         a: UintType(64),
         b: UintType(64),
     });
-    const ListContainer = FixedListType(Container, 128);
+    const ListContainer = FixedListType(Container, 128, .{});
 
     const TestCase = struct {
         id: []const u8,
@@ -1588,7 +1711,7 @@ test "FixedListType - tree.deserializeFromBytes (ListComposite Container)" {
 
 test "VariableListType - tree.deserializeFromBytes (List<List<uint16>>)" {
     const allocator = std.testing.allocator;
-    const InnerList = FixedListType(UintType(16), 2);
+    const InnerList = FixedListType(UintType(16), 2, .{});
     const OuterList = VariableListType(InnerList, 2);
 
     const TestCase = struct {
@@ -1674,7 +1797,7 @@ test "valid test for ListBasicType" {
 
     // uint of 8 bytes = u64
     const Uint = UintType(64);
-    const List = FixedListType(Uint, 128);
+    const List = FixedListType(Uint, 128, .{});
 
     const TypeTest = @import("test_utils.zig").typeTest(List);
 
@@ -1685,7 +1808,7 @@ test "valid test for ListBasicType" {
 
 test "FixedListType equals" {
     const allocator = std.testing.allocator;
-    const List = FixedListType(UintType(8), 32);
+    const List = FixedListType(UintType(8), 32, .{});
 
     var a: List.Type = List.Type.empty;
     var b: List.Type = List.Type.empty;
@@ -1718,7 +1841,7 @@ test "ListCompositeType of Root" {
 
     const allocator = std.testing.allocator;
     const ByteVector = ByteVectorType(32);
-    const List = FixedListType(ByteVector, 128);
+    const List = FixedListType(ByteVector, 128, .{});
 
     const TypeTest = @import("test_utils.zig").typeTest(List);
 
@@ -1746,7 +1869,7 @@ test "ListCompositeType of Container" {
         a: Uint,
         b: Uint,
     });
-    const List = FixedListType(Container, 128);
+    const List = FixedListType(Container, 128, .{});
 
     const TypeTest = @import("test_utils.zig").typeTest(List);
 
@@ -1785,7 +1908,7 @@ test "VariableListType of FixedList" {
     };
 
     const allocator = std.testing.allocator;
-    const FixedList = FixedListType(UintType(16), 2);
+    const FixedList = FixedListType(UintType(16), 2, .{});
     const List = VariableListType(FixedList, 2);
 
     const TypeTest = @import("test_utils.zig").typeTest(List);
@@ -1796,7 +1919,7 @@ test "VariableListType of FixedList" {
 }
 
 test "FixedListType - default_root" {
-    const ListU32 = FixedListType(UintType(32), 16);
+    const ListU32 = FixedListType(UintType(32), 16, .{});
     var expected_root: [32]u8 = undefined;
 
     try ListU32.hashTreeRoot(std.testing.allocator, &ListU32.default_value, &expected_root);
@@ -1810,7 +1933,7 @@ test "FixedListType - default_root" {
 }
 
 test "VariableListType - default_root" {
-    const ListU32 = FixedListType(UintType(32), 16);
+    const ListU32 = FixedListType(UintType(32), 16, .{});
     const ListListU32 = VariableListType(ListU32, 16);
     var expected_root: [32]u8 = undefined;
 
@@ -1827,7 +1950,7 @@ test "VariableListType - default_root" {
 test "FixedListType - tree.zeros" {
     const allocator = std.testing.allocator;
 
-    const ListU16 = FixedListType(UintType(16), 8);
+    const ListU16 = FixedListType(UintType(16), 8, .{});
 
     var pool = try Node.Pool.init(allocator, 1024);
     defer pool.deinit();
@@ -1851,7 +1974,7 @@ test "FixedListType - tree.zeros" {
 test "VariableListType - tree.zeros" {
     const allocator = std.testing.allocator;
 
-    const ListU32 = FixedListType(UintType(32), 16);
+    const ListU32 = FixedListType(UintType(32), 16, .{});
     const ListListU32 = VariableListType(ListU32, 16);
 
     var pool = try Node.Pool.init(allocator, 1024);
@@ -1871,4 +1994,61 @@ test "VariableListType - tree.zeros" {
 
         try std.testing.expectEqualSlices(u8, &expected_root, tree_node.getRoot(&pool));
     }
+}
+
+test "FixedListType opts.slab=true: round-trip fromValue -> tree -> toValue" {
+    const allocator = std.testing.allocator;
+    const Slab = @import("persistent_merkle_tree").Slab;
+    const ListT = FixedListType(UintType(64), 1 << 20, .{ .slab = true });
+
+    var pool = try Node.Pool.init(allocator, 4096);
+    defer pool.deinit();
+
+    var src = ListT.Type.empty;
+    defer src.deinit(allocator);
+    const item_count: usize = 2 * @as(usize, Slab.K) * 4 + 7; // odd tail to stress partial slab
+    try src.ensureTotalCapacity(allocator, item_count);
+    for (0..item_count) |i| try src.append(allocator, @as(u64, @intCast(i * 31 + 1)));
+
+    const tree_id = try ListT.tree.fromValue(&pool, &src);
+    defer pool.unref(tree_id);
+
+    var dst = ListT.Type.empty;
+    defer dst.deinit(allocator);
+    try ListT.tree.toValue(allocator, tree_id, &pool, &dst);
+    try std.testing.expectEqual(src.items.len, dst.items.len);
+    for (src.items, dst.items) |a, b| try std.testing.expectEqual(a, b);
+
+    // Hash matches the leaf-path (non-slab) reference root.
+    const ListLeafT = FixedListType(UintType(64), 1 << 20, .{});
+    const leaf_tree_id = try ListLeafT.tree.fromValue(&pool, &src);
+    defer pool.unref(leaf_tree_id);
+    try std.testing.expectEqualSlices(u8, leaf_tree_id.getRoot(&pool), tree_id.getRoot(&pool));
+}
+
+test "FixedListType opts.slab=true: serialize -> deserialize round-trip" {
+    const allocator = std.testing.allocator;
+    const Slab = @import("persistent_merkle_tree").Slab;
+    const ListT = FixedListType(UintType(64), 1 << 20, .{ .slab = true });
+
+    var pool = try Node.Pool.init(allocator, 4096);
+    defer pool.deinit();
+
+    var src = ListT.Type.empty;
+    defer src.deinit(allocator);
+    const item_count: usize = 2 * @as(usize, Slab.K) * 4;
+    try src.ensureTotalCapacity(allocator, item_count);
+    for (0..item_count) |i| try src.append(allocator, @as(u64, @intCast(i)));
+
+    const tree_id = try ListT.tree.fromValue(&pool, &src);
+    defer pool.unref(tree_id);
+
+    const buf = try allocator.alloc(u8, item_count * @sizeOf(u64));
+    defer allocator.free(buf);
+    const written = try ListT.tree.serializeIntoBytes(tree_id, &pool, buf);
+    try std.testing.expectEqual(item_count * @sizeOf(u64), written);
+
+    const round_id = try ListT.tree.deserializeFromBytes(&pool, buf);
+    defer pool.unref(round_id);
+    try std.testing.expectEqualSlices(u8, tree_id.getRoot(&pool), round_id.getRoot(&pool));
 }

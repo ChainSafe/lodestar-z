@@ -42,7 +42,7 @@ pub fn ListBasicTreeView(comptime ST: type) type {
         const base_chunk_depth: Depth = @intCast(ST.chunk_depth);
         const chunk_depth: Depth = chunkDepth(Depth, base_chunk_depth, ST);
         const items_per_chunk: usize = itemsPerChunk(ST.Element);
-        const Chunks = BasicPackedChunks(ST, chunk_depth, items_per_chunk, false);
+        const Chunks = BasicPackedChunks(ST, chunk_depth, items_per_chunk, ST.opts.slab);
 
         pub fn init(allocator: Allocator, pool: *Node.Pool, root: Node.Id) !*Self {
             const ptr = try allocator.create(Self);
@@ -107,6 +107,7 @@ pub fn ListBasicTreeView(comptime ST: type) type {
         }
 
         pub fn iteratorReadonly(self: *const Self, start_index: usize) ReadonlyIterator {
+            if (comptime ST.opts.slab) @compileError("iteratorReadonly is not supported when ST.opts.slab is true; use getAllInto or getAll");
             return ReadonlyIterator.init(self, start_index);
         }
 
@@ -190,6 +191,7 @@ pub fn ListBasicTreeView(comptime ST: type) type {
         /// Return a new view containing all elements up to and including `index`.
         /// Caller must call `deinit()` on the returned view to avoid memory leaks.
         pub fn sliceTo(self: *Self, index: usize) !*Self {
+            if (comptime ST.opts.slab) @compileError("sliceTo is not supported when ST.opts.slab is true");
             try self.commit();
 
             const list_length = try self.length();
@@ -274,7 +276,7 @@ test "TreeView list element roundtrip" {
     defer pool.deinit();
 
     const Uint32 = UintType(32);
-    const ListType = FixedListType(Uint32, 16);
+    const ListType = FixedListType(Uint32, 16, .{});
 
     const base_values = [_]u32{ 5, 15, 25, 35, 45 };
 
@@ -322,7 +324,7 @@ test "TreeView list push updates cached length" {
     defer pool.deinit();
 
     const Uint32 = UintType(32);
-    const ListType = FixedListType(Uint32, 16);
+    const ListType = FixedListType(Uint32, 16, .{});
 
     var list: ListType.Type = .empty;
     defer list.deinit(allocator);
@@ -362,7 +364,7 @@ test "TreeView list getAllAlloc handles zero length" {
     defer pool.deinit();
 
     const Uint8 = UintType(8);
-    const ListType = FixedListType(Uint8, 4);
+    const ListType = FixedListType(Uint8, 4, .{});
 
     var list: ListType.Type = .empty;
     defer list.deinit(allocator);
@@ -383,7 +385,7 @@ test "TreeView list getAllAlloc spans multiple chunks" {
     defer pool.deinit();
 
     const Uint16 = UintType(16);
-    const ListType = FixedListType(Uint16, 64);
+    const ListType = FixedListType(Uint16, 64, .{});
 
     var list: ListType.Type = .empty;
     defer list.deinit(allocator);
@@ -410,7 +412,7 @@ test "TreeView list push batches before commit" {
     defer pool.deinit();
 
     const Uint32 = UintType(32);
-    const ListType = FixedListType(Uint32, 16);
+    const ListType = FixedListType(Uint32, 16, .{});
 
     var list: ListType.Type = .empty;
     defer list.deinit(allocator);
@@ -451,7 +453,7 @@ test "TreeView list push across chunk boundary resets prefetch" {
     defer pool.deinit();
 
     const Uint32 = UintType(32);
-    const ListType = FixedListType(Uint32, 32);
+    const ListType = FixedListType(Uint32, 32, .{});
 
     var list: ListType.Type = .empty;
     defer list.deinit(allocator);
@@ -483,7 +485,7 @@ test "TreeView list push enforces limit" {
     defer pool.deinit();
 
     const Uint32 = UintType(32);
-    const ListType = FixedListType(Uint32, 2);
+    const ListType = FixedListType(Uint32, 2, .{});
 
     var list: ListType.Type = .empty;
     defer list.deinit(allocator);
@@ -503,7 +505,7 @@ test "TreeView list basic clone isolates updates" {
     defer pool.deinit();
 
     const Uint32 = UintType(32);
-    const ListType = FixedListType(Uint32, 16);
+    const ListType = FixedListType(Uint32, 16, .{});
 
     var list: ListType.Type = .empty;
     defer list.deinit(allocator);
@@ -529,7 +531,7 @@ test "TreeView list basic clone reads committed state" {
     defer pool.deinit();
 
     const Uint32 = UintType(32);
-    const ListType = FixedListType(Uint32, 16);
+    const ListType = FixedListType(Uint32, 16, .{});
 
     var list: ListType.Type = .empty;
     defer list.deinit(allocator);
@@ -554,7 +556,7 @@ test "TreeView list basic clone drops uncommitted changes" {
     defer pool.deinit();
 
     const Uint32 = UintType(32);
-    const ListType = FixedListType(Uint32, 16);
+    const ListType = FixedListType(Uint32, 16, .{});
 
     var list: ListType.Type = .empty;
     defer list.deinit(allocator);
@@ -580,7 +582,7 @@ test "TreeView list basic clone(false) does not transfer cache" {
     defer pool.deinit();
 
     const Uint32 = UintType(32);
-    const ListType = FixedListType(Uint32, 16);
+    const ListType = FixedListType(Uint32, 16, .{});
 
     var list: ListType.Type = .empty;
     defer list.deinit(allocator);
@@ -606,7 +608,7 @@ test "TreeView list basic clone(true) transfers cache and clears source" {
     defer pool.deinit();
 
     const Uint32 = UintType(32);
-    const ListType = FixedListType(Uint32, 16);
+    const ListType = FixedListType(Uint32, 16, .{});
 
     var list: ListType.Type = .empty;
     defer list.deinit(allocator);
@@ -634,7 +636,7 @@ test "TreeView basic list getAll reflects pushes" {
 
     const list_limit = 32;
     const Uint64 = UintType(64);
-    const ListType = FixedListType(Uint64, list_limit);
+    const ListType = FixedListType(Uint64, list_limit, .{});
 
     var list: ListType.Type = .empty;
     defer list.deinit(allocator);
@@ -670,7 +672,7 @@ test "TreeView list sliceTo returns original when truncation unnecessary" {
     defer pool.deinit();
 
     const Uint32 = UintType(32);
-    const ListType = FixedListType(Uint32, 16);
+    const ListType = FixedListType(Uint32, 16, .{});
 
     var list: ListType.Type = .empty;
     defer list.deinit(allocator);
@@ -703,7 +705,7 @@ test "TreeView basic list sliceTo matches incremental snapshots" {
     defer pool.deinit();
 
     const Uint64 = UintType(64);
-    const ListType = FixedListType(Uint64, 1024);
+    const ListType = FixedListType(Uint64, 1024, .{});
     const total_values: usize = 16;
 
     var base_values: [total_values]u64 = undefined;
@@ -766,7 +768,7 @@ test "TreeView list sliceTo truncates tail elements" {
     defer pool.deinit();
 
     const Uint32 = UintType(32);
-    const ListType = FixedListType(Uint32, 32);
+    const ListType = FixedListType(Uint32, 32, .{});
 
     var list: ListType.Type = .empty;
     defer list.deinit(allocator);
@@ -808,7 +810,7 @@ test "ListBasicTreeView - serialize (uint8 list)" {
     const allocator = std.testing.allocator;
 
     const Uint8 = UintType(8);
-    const ListU8Type = FixedListType(Uint8, 128);
+    const ListU8Type = FixedListType(Uint8, 128, .{});
 
     var pool = try Node.Pool.init(allocator, 1024);
     defer pool.deinit();
@@ -871,7 +873,7 @@ test "ListBasicTreeView - serialize (uint64 list)" {
     const allocator = std.testing.allocator;
 
     const Uint64 = UintType(64);
-    const ListU64Type = FixedListType(Uint64, 128);
+    const ListU64Type = FixedListType(Uint64, 128, .{});
 
     var pool = try Node.Pool.init(allocator, 1024);
     defer pool.deinit();
@@ -935,7 +937,7 @@ test "ListBasicTreeView - push and serialize" {
     const allocator = std.testing.allocator;
 
     const Uint8 = UintType(8);
-    const ListU8Type = FixedListType(Uint8, 128);
+    const ListU8Type = FixedListType(Uint8, 128, .{});
 
     var pool = try Node.Pool.init(allocator, 1024);
     defer pool.deinit();
@@ -973,7 +975,7 @@ test "ListBasicTreeView - sliceTo and serialize" {
     const allocator = std.testing.allocator;
 
     const Uint8 = UintType(8);
-    const ListU8Type = FixedListType(Uint8, 128);
+    const ListU8Type = FixedListType(Uint8, 128, .{});
 
     var pool = try Node.Pool.init(allocator, 1024);
     defer pool.deinit();

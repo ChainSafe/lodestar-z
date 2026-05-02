@@ -38,7 +38,7 @@ pub fn ArrayBasicTreeView(comptime ST: type) type {
         const base_chunk_depth: Depth = @intCast(ST.chunk_depth);
         const chunk_depth: Depth = chunkDepth(Depth, base_chunk_depth, ST);
         const items_per_chunk: usize = itemsPerChunk(ST.Element);
-        const Chunks = BasicPackedChunks(ST, chunk_depth, items_per_chunk, false);
+        const Chunks = BasicPackedChunks(ST, chunk_depth, items_per_chunk, ST.opts.slab);
 
         pub fn init(allocator: Allocator, pool: *Node.Pool, root: Node.Id) !*Self {
             const ptr = try allocator.create(Self);
@@ -141,7 +141,7 @@ test "TreeView vector element roundtrip" {
     defer pool.deinit();
 
     const Uint64 = UintType(64);
-    const VectorType = FixedVectorType(Uint64, 4);
+    const VectorType = FixedVectorType(Uint64, 4, .{});
 
     const original: VectorType.Type = [_]u64{ 11, 22, 33, 44 };
 
@@ -180,7 +180,7 @@ test "TreeView vector getAll fills provided buffer" {
     defer pool.deinit();
 
     const Uint32 = UintType(32);
-    const VectorType = FixedVectorType(Uint32, 8);
+    const VectorType = FixedVectorType(Uint32, 8, .{});
 
     const values = [_]u32{ 9, 8, 7, 6, 5, 4, 3, 2 };
     const root_node = try VectorType.tree.fromValue(&pool, &values);
@@ -206,7 +206,7 @@ test "TreeView vector getAllAlloc roundtrip" {
     defer pool.deinit();
 
     const Uint16 = UintType(16);
-    const VectorType = FixedVectorType(Uint16, 5);
+    const VectorType = FixedVectorType(Uint16, 5, .{});
     const values = [_]u16{ 3, 1, 4, 1, 5 };
 
     const root_node = try VectorType.tree.fromValue(&pool, &values);
@@ -225,7 +225,7 @@ test "TreeView vector getAllAlloc repeat reflects updates" {
     defer pool.deinit();
 
     const Uint32 = UintType(32);
-    const VectorType = FixedVectorType(Uint32, 6);
+    const VectorType = FixedVectorType(Uint32, 6, .{});
     var values = [_]u32{ 10, 20, 30, 40, 50, 60 };
 
     const root_node = try VectorType.tree.fromValue(&pool, &values);
@@ -250,7 +250,7 @@ test "TreeView vector clone isolates subsequent updates" {
     defer pool.deinit();
 
     const Uint16 = UintType(16);
-    const Vec4 = FixedVectorType(Uint16, 4);
+    const Vec4 = FixedVectorType(Uint16, 4, .{});
 
     const value: Vec4.Type = [_]u16{ 0, 0, 0, 0 };
     const root = try Vec4.tree.fromValue(&pool, &value);
@@ -274,7 +274,7 @@ test "TreeView vector clone reads committed state" {
     defer pool.deinit();
 
     const Uint16 = UintType(16);
-    const Vec4 = FixedVectorType(Uint16, 4);
+    const Vec4 = FixedVectorType(Uint16, 4, .{});
 
     const value: Vec4.Type = [_]u16{ 0, 0, 0, 0 };
     const root = try Vec4.tree.fromValue(&pool, &value);
@@ -297,7 +297,7 @@ test "TreeView vector clone drops uncommitted changes" {
     defer pool.deinit();
 
     const Uint16 = UintType(16);
-    const Vec4 = FixedVectorType(Uint16, 4);
+    const Vec4 = FixedVectorType(Uint16, 4, .{});
 
     const value: Vec4.Type = [_]u16{ 1, 2, 3, 4 };
     const root = try Vec4.tree.fromValue(&pool, &value);
@@ -321,7 +321,7 @@ test "TreeView vector clone(false) does not transfer cache" {
     defer pool.deinit();
 
     const Uint16 = UintType(16);
-    const Vec4 = FixedVectorType(Uint16, 4);
+    const Vec4 = FixedVectorType(Uint16, 4, .{});
 
     const value: Vec4.Type = [_]u16{ 1, 2, 3, 4 };
     const root = try Vec4.tree.fromValue(&pool, &value);
@@ -345,7 +345,7 @@ test "TreeView vector clone(true) transfers cache and clears source" {
     defer pool.deinit();
 
     const Uint16 = UintType(16);
-    const Vec4 = FixedVectorType(Uint16, 4);
+    const Vec4 = FixedVectorType(Uint16, 4, .{});
 
     const value: Vec4.Type = [_]u16{ 1, 2, 3, 4 };
     const root = try Vec4.tree.fromValue(&pool, &value);
@@ -368,7 +368,7 @@ test "ArrayBasicTreeView - serialize (uint64 vector)" {
     const allocator = std.testing.allocator;
 
     const Uint64 = UintType(64);
-    const VecU64Type = FixedVectorType(Uint64, 4);
+    const VecU64Type = FixedVectorType(Uint64, 4, .{});
 
     var pool = try Node.Pool.init(allocator, 1024);
     defer pool.deinit();
@@ -421,7 +421,7 @@ test "ArrayBasicTreeView - serialize (uint8 vector)" {
     const allocator = std.testing.allocator;
 
     const Uint8 = UintType(8);
-    const VecU8Type = FixedVectorType(Uint8, 8);
+    const VecU8Type = FixedVectorType(Uint8, 8, .{});
 
     var pool = try Node.Pool.init(allocator, 1024);
     defer pool.deinit();
@@ -449,7 +449,7 @@ test "ArrayBasicTreeView - get and set" {
     const allocator = std.testing.allocator;
 
     const Uint64 = UintType(64);
-    const VecU64Type = FixedVectorType(Uint64, 4);
+    const VecU64Type = FixedVectorType(Uint64, 4, .{});
 
     var pool = try Node.Pool.init(allocator, 1024);
     defer pool.deinit();

@@ -560,13 +560,13 @@ test "TreeView container nested types set/get/commit" {
     const Uint64 = UintType(64);
 
     const Bytes = ByteListType(16);
-    const BasicVec = FixedVectorType(Uint16, 4);
+    const BasicVec = FixedVectorType(Uint16, 4, .{});
 
     const InnerFixed = FixedContainerType(struct {
         a: Uint32,
         b: ByteVectorType(4),
     });
-    const CompVec = FixedVectorType(InnerFixed, 2);
+    const CompVec = FixedVectorType(InnerFixed, 2, .{});
 
     const InnerVar = VariableContainerType(struct {
         id: Uint32,
@@ -911,9 +911,9 @@ test "ContainerTreeView - serialize (with nested list)" {
     const allocator = std.testing.allocator;
 
     const Uint64 = UintType(64);
-    const ListU64 = FixedListType(Uint64, 128);
+    const ListU64 = FixedListType(Uint64, 128, .{});
     const TestContainer = VariableContainerType(struct {
-        a: FixedListType(UintType(64), 128),
+        a: FixedListType(UintType(64), 128, .{}),
         b: UintType(64),
     });
     _ = ListU64;
@@ -922,7 +922,7 @@ test "ContainerTreeView - serialize (with nested list)" {
     defer pool.deinit();
 
     var value: TestContainer.Type = .{
-        .a = FixedListType(UintType(64), 128).default_value,
+        .a = FixedListType(UintType(64), 128, .{}).default_value,
         .b = 0,
     };
     defer TestContainer.deinit(allocator, &value);
