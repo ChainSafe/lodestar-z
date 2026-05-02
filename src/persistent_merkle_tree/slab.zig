@@ -1,9 +1,11 @@
-//! Chunked-leaf slab payload for Phase B of the chunked-leaf design.
+//! Chunked-leaf slab payload.
 //!
-//! A `Storage` block holds K=1024 contiguous 32-byte chunks plus a per-chunk
-//! dirty bitset and a length counter. Slab nodes in the Pool point at one of
-//! these heap-allocated blocks. Slab merkleization is a fixed-shape K-leaf
-//! perfect binary tree whose root we cache on the Node side.
+//! `Storage` is the heap-allocated 32 KB chunk array shared by a slab Node.
+//! Per-slab metadata (`len`, `dirty`, cached `root`) lives inline in the
+//! Node.slab union variant, NOT in Storage — keeping the two in sync would
+//! be error-prone and wasteful. Storage is therefore minimal and immutable
+//! in shape (always `[K][32]u8`); per-chunk mutation is per-element write
+//! into `chunks[i]`.
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const hashOne = @import("hashing").hashOne;
@@ -16,25 +18,17 @@ comptime {
 }
 
 pub const Storage = struct {
-    /// Slab chunks, cache-line aligned. Chunks at indices `>= len` MUST be
-    /// zero-bytes; this invariant is the caller's responsibility (allocZero
-    /// establishes it; subsequent slab CoW writes preserve it).
+    /// Slab chunks, cache-line aligned. The slab Node's inline `len` field
+    /// (B2 onward) decides which chunks are valid; chunks at indices `>= len`
+    /// MUST hold zero-bytes — `allocZero` establishes this invariant and
+    /// subsequent CoW writes preserve it.
     chunks: [K][32]u8 align(64),
-    /// Number of valid chunks in this slab. The last slab in a list/vector
-    /// may be partial (`len < K`); all earlier slabs satisfy `len == K`.
-    len: u16,
-    /// Per-chunk modification flag tracking writes since the last slab-root
-    /// recompute. Cleared by the slab-root cache layer (Node-side) once the
-    /// cached root in the owning slab Node is refreshed.
-    dirty: std.StaticBitSet(K),
 };
 
 /// Allocates a zero-initialized Storage block. Caller owns; pair with destroy().
 pub fn allocZero(allocator: Allocator) Allocator.Error!*Storage {
     const s = try allocator.create(Storage);
     @memset(std.mem.asBytes(&s.chunks), 0);
-    s.len = 0;
-    s.dirty = std.StaticBitSet(K).initEmpty();
     return s;
 }
 
@@ -44,21 +38,20 @@ pub fn destroy(allocator: Allocator, s: *Storage) void {
 
 /// Compute the slab subtree root: K-leaf perfect binary tree, no padding.
 ///
-/// Single working buffer of K/2 hashes. The first reduction reads pairs
-/// directly from `slab.chunks` (no 32 KB stack copy); subsequent halvings
-/// happen in-place on `buf`'s first `width` slots until width hits 1.
+/// Single-buffer layout: read first reduction directly from `slab.chunks`
+/// (no 32 KB stack copy), then halve in-place on `buf` (K/2 chunks).
 pub fn computeRoot(slab: *const Storage, out: *[32]u8) void {
     comptime std.debug.assert(@popCount(K) == 1);
 
     var buf: [K / 2][32]u8 align(64) = undefined;
 
-    // First reduction: read directly from slab.chunks, no 32 KB stack copy.
+    // First reduction: K leaves -> K/2 hashes, reading slab.chunks directly.
     var i: usize = 0;
     while (i < K) : (i += 2) {
         hashOne(&buf[i / 2], &slab.chunks[i], &slab.chunks[i + 1]);
     }
 
-    // Subsequent reductions in-place.
+    // Subsequent reductions in-place on buf.
     var width: usize = K / 2;
     while (width > 1) : (width /= 2) {
         var j: usize = 0;

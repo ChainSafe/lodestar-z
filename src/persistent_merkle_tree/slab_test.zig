@@ -2,14 +2,12 @@ const std = @import("std");
 
 const Slab = @import("slab.zig");
 
-test "slab: zero-init produces zero chunks and empty dirty bitset" {
+test "slab: allocZero produces zero chunks" {
     const allocator = std.testing.allocator;
     const slab = try Slab.allocZero(allocator);
     defer Slab.destroy(allocator, slab);
 
-    try std.testing.expectEqual(@as(u16, 0), slab.len);
-    try std.testing.expectEqual(@as(usize, 0), slab.dirty.count());
-    for (slab.chunks[0..Slab.K]) |chunk| {
+    for (slab.chunks) |chunk| {
         try std.testing.expectEqualSlices(u8, &([_]u8{0} ** 32), &chunk);
     }
 }
@@ -34,7 +32,6 @@ test "slab: computeRoot for non-zero pattern matches std merkleize" {
     for (0..Slab.K) |i| {
         std.mem.writeInt(u256, &slab.chunks[i], @as(u256, @intCast(i + 1)), .little);
     }
-    slab.len = Slab.K;
 
     var slab_root: [32]u8 = undefined;
     Slab.computeRoot(slab, &slab_root);
