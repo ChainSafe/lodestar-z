@@ -593,6 +593,29 @@ describe("BeaconStateView", () => {
     });
   });
 
+  describe("stateTransition parseOptions", () => {
+    const dummyBlockBytes = new Uint8Array(0);
+
+    it("rejects invalid opts", () => {
+      const invalid_opts = [
+        {executionPayloadStatus: "syncing"},
+        {dataAvailabilityStatus: "Whatever"},
+        {executionPayloadStatus: "Valid"}, // TS enum value is "valid"
+        {dataAvailabilityStatus: "available"}, // TS enum value is "Available"
+      ];
+      for (const opts of invalid_opts) {
+        expect(() => bindings.stateTransition.stateTransition(state, dummyBlockBytes, opts)).toThrow();
+      }
+    });
+
+    // TODO: remove once Zig models DataAvailabilityStatus.NotRequired
+    it("rejects gloas-only NotRequired", () => {
+      expect(() =>
+        bindings.stateTransition.stateTransition(state, dummyBlockBytes, {dataAvailabilityStatus: "NotRequired"})
+      ).toThrow();
+    });
+  });
+
   describe("effective balance increments", () => {
     it("getEffectiveBalanceIncrementsZeroInactive should return Uint16Array", () => {
       const increments = state.getEffectiveBalanceIncrementsZeroInactive();

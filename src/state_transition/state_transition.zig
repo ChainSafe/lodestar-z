@@ -36,13 +36,15 @@ pub const ExecutionPayloadStatus = enum(u8) {
     valid,
 };
 
+pub const DataAvailabilityStatus = enum(u8) {
+    pre_data,
+    out_of_range,
+    available,
+};
+
 pub const BlockExternalData = struct {
-    execution_payload_status: ExecutionPayloadStatus,
-    data_availability_status: enum(u8) {
-        pre_data,
-        out_of_range,
-        available,
-    },
+    execution_payload_status: ExecutionPayloadStatus = .valid,
+    data_availability_status: DataAvailabilityStatus = .available,
 };
 
 pub fn processSlots(
@@ -139,12 +141,13 @@ pub fn processSlots(
     }
 }
 
-pub const TransitionOpt = struct {
+pub const TransitionOpts = struct {
     verify_state_root: bool = true,
     verify_proposer: bool = true,
     /// NOTE: verifying BLS signatures is expensive - make sure to turn this off for tests.
     verify_signatures: bool = true,
     transfer_cache: bool = true,
+    block_external_data: BlockExternalData = .{},
 };
 
 pub const StateTransitionResult = struct {
@@ -162,7 +165,7 @@ pub fn stateTransition(
     io: std.Io,
     cached_state: *CachedBeaconState,
     signed_block: AnySignedBeaconBlock,
-    opts: TransitionOpt,
+    opts: TransitionOpts,
 ) !*CachedBeaconState {
     const block = signed_block.beaconBlock();
     const block_slot = block.slot();
@@ -221,10 +224,7 @@ pub fn stateTransition(
                         &post_cached_state.slashings_cache,
                         bt,
                         block.castToFork(bt, f),
-                        BlockExternalData{
-                            .execution_payload_status = .valid,
-                            .data_availability_status = .available,
-                        },
+                        opts.block_external_data,
                         .{ .verify_signature = opts.verify_signatures },
                     );
                 },
@@ -264,7 +264,7 @@ pub fn deinitStateTransition(io: std.Io) void {
 }
 
 const TestCase = struct {
-    transition_opt: TransitionOpt,
+    transition_opt: TransitionOpts,
     expect_error: bool,
 };
 
