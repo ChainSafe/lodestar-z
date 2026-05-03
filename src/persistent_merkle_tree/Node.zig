@@ -125,7 +125,13 @@ pub const Id = enum(u32) {
         switch (node_ptr.*) {
             .zero => return &node_ptr.zero.root,
             .leaf => return &node_ptr.leaf.root,
-            .free => unreachable,
+            // Defense-in-depth: `unreachable` would be UB-eliminated under
+            // ReleaseFast; if a stale Id reaches here, the switch dispatch
+            // would silently misroute to another arm and read the slot's
+            // bytes (next_free Id + stale payload) as a valid variant —
+            // typically manifesting as a SEGV deep inside the .slab arm.
+            // A `@panic` cannot be elided and surfaces the UAF directly.
+            .free => @panic("getRoot called on .free slot — use-after-free"),
             .branch => {
                 if (node_ptr.branch.root != null) {
                     return &node_ptr.branch.root.?;
@@ -452,8 +458,11 @@ pub const Id = enum(u32) {
 
         var path_parents_buf: [max_depth]Id = undefined;
         // at each level, there is at most 1 unfinalized parent per traversal
-        // "unfinalized" means it may or may not be part of the new tree
-        var unfinalized_parents_buf: [max_depth]?Id = undefined;
+        // "unfinalized" means it may or may not be part of the new tree.
+        // MUST start as all-null so iteration 0's post-rebind unref loop
+        // does not read garbage Optional bytes and call `pool.unref` on
+        // an arbitrary Id (use-after-free).
+        var unfinalized_parents_buf: [max_depth]?Id = [_]?Id{null} ** max_depth;
         var path_lefts_buf: [max_depth]Id = undefined;
         var path_rights_buf: [max_depth]Id = undefined;
         // right_move means it's part of the new tree, it happens when we traverse right
@@ -687,8 +696,11 @@ pub const Id = enum(u32) {
 
         var path_parents_buf: [max_depth]Id = undefined;
         // at each level, there is at most 1 unfinalized parent per traversal
-        // "unfinalized" means it may or may not be part of the new tree
-        var unfinalized_parents_buf: [max_depth]?Id = undefined;
+        // "unfinalized" means it may or may not be part of the new tree.
+        // MUST start as all-null so iteration 0's post-rebind unref loop
+        // does not read garbage Optional bytes and call `pool.unref` on
+        // an arbitrary Id (use-after-free).
+        var unfinalized_parents_buf: [max_depth]?Id = [_]?Id{null} ** max_depth;
         var path_lefts_buf: [max_depth]Id = undefined;
         var path_rights_buf: [max_depth]Id = undefined;
         // right_move means it's part of the new tree, it happens when we traverse right
