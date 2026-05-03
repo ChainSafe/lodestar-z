@@ -105,7 +105,7 @@ pub fn BasicPackedChunks(
                     const fresh_id = try self.state.pool.createSlab(&zero_buf, 0);
                     const fresh_node = &node_col[@intFromEnum(fresh_id)];
                     ST.Element.tree.fromValuePackedIntoChunk(&fresh_node.slab.storage.chunks[intra_chunk], index, &value);
-                    fresh_node.slab.root = null;
+                    fresh_node.slab.root = Node.lazy_sentinel;
                     try self.state.setChildNode(gindex, fresh_id);
                     return;
                 }
@@ -123,7 +123,7 @@ pub fn BasicPackedChunks(
                 if (ref_counts[@intFromEnum(existing_id)] == 0) {
                     const node_ptr = &node_col[@intFromEnum(existing_id)];
                     ST.Element.tree.fromValuePackedIntoChunk(&node_ptr.slab.storage.chunks[intra_chunk], index, &value);
-                    node_ptr.slab.root = null;
+                    node_ptr.slab.root = Node.lazy_sentinel;
                     return;
                 }
 

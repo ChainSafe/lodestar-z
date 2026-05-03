@@ -44,18 +44,26 @@ pub const Node = union(enum) {
     zero: struct { root: [32]u8 },
     /// Leaf containing a 32-byte hash payload.
     leaf: struct { root: [32]u8 },
-    /// Internal branch with two children. `root == null` means lazy
-    /// (uncomputed); `root == some` means cached.
-    branch: struct { left: Id, right: Id, root: ?[32]u8 },
+    /// Internal branch with two children. `root == lazy_sentinel` means
+    /// lazy (uncomputed); any other value means cached.
+    branch: struct { left: Id, right: Id, root: [32]u8 },
     /// Chunked-leaf slab. `storage` points to a heap-allocated
     /// `Slab.Storage` (chunks + len, ref-counted through the Pool's
     /// slab-Node ref count, mirroring Lighthouse's `Arc<PackedLeaf>`).
-    /// `root` is the cached merkleized slab subtree root; `null` = lazy.
+    /// `root` is the cached merkleized slab subtree root; `lazy_sentinel`
+    /// means lazy.
     slab: struct {
         storage: *Slab.Storage,
-        root: ?[32]u8,
+        root: [32]u8,
     },
 };
+
+/// Sentinel value for a lazy (uncomputed) `root` field on `branch` and
+/// `slab` variants. We use all-`0xFF` because cryptographic SHA-256 outputs
+/// are extremely unlikely to equal this value (~1 in 2^256), avoiding the
+/// 1-byte tag overhead an `?[32]u8` Optional would add and the resulting
+/// padding that inflates the union to 48 bytes.
+pub const lazy_sentinel: [32]u8 = [_]u8{0xFF} ** 32;
 
 /// Parallel-array element holding a node alongside its reference count.
 ///
@@ -133,8 +141,8 @@ pub const Id = enum(u32) {
             // A `@panic` cannot be elided and surfaces the UAF directly.
             .free => @panic("getRoot called on .free slot — use-after-free"),
             .branch => {
-                if (node_ptr.branch.root != null) {
-                    return &node_ptr.branch.root.?;
+                if (!std.mem.eql(u8, &node_ptr.branch.root, &lazy_sentinel)) {
+                    return &node_ptr.branch.root;
                 }
                 const left_id = node_ptr.branch.left;
                 const right_id = node_ptr.branch.right;
@@ -143,16 +151,16 @@ pub const Id = enum(u32) {
                 var hash: [32]u8 = undefined;
                 hashOne(&hash, left_root, right_root);
                 node_ptr.branch.root = hash;
-                return &node_ptr.branch.root.?;
+                return &node_ptr.branch.root;
             },
             .slab => {
-                if (node_ptr.slab.root != null) {
-                    return &node_ptr.slab.root.?;
+                if (!std.mem.eql(u8, &node_ptr.slab.root, &lazy_sentinel)) {
+                    return &node_ptr.slab.root;
                 }
                 var hash: [32]u8 = undefined;
                 Slab.computeRoot(node_ptr.slab.storage, &hash);
                 node_ptr.slab.root = hash;
-                return &node_ptr.slab.root.?;
+                return &node_ptr.slab.root;
             },
         }
     }
@@ -215,7 +223,7 @@ pub const Id = enum(u32) {
         // realloc'd and invalidated any earlier slice we held.
         pool.nodes.items(.node)[@intFromEnum(new_id)] = .{ .slab = .{
             .storage = new_storage,
-            .root = null,
+            .root = lazy_sentinel,
         } };
         pool.nodes.items(.ref_count)[@intFromEnum(new_id)] = 0;
         return new_id;
@@ -255,7 +263,7 @@ pub const Id = enum(u32) {
         const new_id = try pool.create();
         pool.nodes.items(.node)[@intFromEnum(new_id)] = .{ .slab = .{
             .storage = new_storage,
-            .root = null,
+            .root = lazy_sentinel,
         } };
         pool.nodes.items(.ref_count)[@intFromEnum(new_id)] = 0;
         return new_id;
@@ -891,13 +899,13 @@ pub const StateView = struct {
     }
     pub fn isBranchLazy(s: StateView) bool {
         return switch (s.pool.nodes.items(.node)[@intFromEnum(s.id)]) {
-            .branch => |b| b.root == null,
+            .branch => |b| std.mem.eql(u8, &b.root, &lazy_sentinel),
             else => false,
         };
     }
     pub fn isBranchComputed(s: StateView) bool {
         return switch (s.pool.nodes.items(.node)[@intFromEnum(s.id)]) {
-            .branch => |b| b.root != null,
+            .branch => |b| !std.mem.eql(u8, &b.root, &lazy_sentinel),
             else => false,
         };
     }
@@ -1030,7 +1038,7 @@ pub const Pool = struct {
         node_col[@intFromEnum(node_id)] = .{ .branch = .{
             .left = left_id,
             .right = right_id,
-            .root = null,
+            .root = lazy_sentinel,
         } };
         self.nodes.items(.ref_count)[@intFromEnum(node_id)] = 0;
         try self.refUnsafe(left_id);
@@ -1054,7 +1062,7 @@ pub const Pool = struct {
         const node_id = try self.create();
         self.nodes.items(.node)[@intFromEnum(node_id)] = .{ .slab = .{
             .storage = storage,
-            .root = null,
+            .root = lazy_sentinel,
         } };
         self.nodes.items(.ref_count)[@intFromEnum(node_id)] = 0;
         return node_id;
@@ -1082,7 +1090,7 @@ pub const Pool = struct {
             self.nodes.items(.node)[@intFromEnum(out[i])] = .{ .branch = .{
                 .left = @enumFromInt(0),
                 .right = @enumFromInt(0),
-                .root = null,
+                .root = lazy_sentinel,
             } };
             self.nodes.items(.ref_count)[@intFromEnum(out[i])] = 0;
         }
@@ -1111,7 +1119,7 @@ pub const Pool = struct {
             node_col[@intFromEnum(out[i])] = .{ .branch = .{
                 .left = left_ids[i],
                 .right = right_ids[i],
-                .root = null,
+                .root = lazy_sentinel,
             } };
 
             try self.refUnsafe(left_ids[i]);
