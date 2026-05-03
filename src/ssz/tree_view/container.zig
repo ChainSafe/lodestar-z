@@ -425,6 +425,10 @@ pub fn StructContainerTreeView(comptime ST: type) type {
         value: T,
         /// Bit per field; tracks whether `value` diverges from `root`.
         changed: std.StaticBitSet(ST.chunk_count),
+        /// Stable backing store for `getFieldRoot` return pointers. The hash
+        /// is computed in place here so we can return `*const [32]u8` without
+        /// allocating a temporary PMT slot per call (which previously leaked).
+        field_root_cache: [ST.chunk_count][32]u8,
 
         pub const SszType = ST;
 
@@ -443,6 +447,7 @@ pub fn StructContainerTreeView(comptime ST: type) type {
             ptr.pool = pool;
             ptr.root = root;
             ptr.changed = std.StaticBitSet(ST.chunk_count).initEmpty();
+            ptr.field_root_cache = undefined;
             return ptr;
         }
 
@@ -500,9 +505,16 @@ pub fn StructContainerTreeView(comptime ST: type) type {
 
         pub fn getFieldRoot(self: *Self, comptime field_name: []const u8) !*const [32]u8 {
             const ChildST = ST.getFieldType(field_name);
+            const field_index = comptime ST.getFieldIndex(field_name);
             const field_value = try self.get(field_name);
+            // Materialize a temporary PMT subtree just to compute the cached
+            // root, then unref it immediately. The hash bytes are copied into
+            // `field_root_cache` so the returned pointer remains valid for the
+            // view's lifetime — without leaking a Pool slot per call.
             const node = try ChildST.tree.fromValue(self.pool, &field_value);
-            return node.getRoot(self.pool);
+            defer self.pool.unref(node);
+            self.field_root_cache[field_index] = node.getRoot(self.pool).*;
+            return &self.field_root_cache[field_index];
         }
 
         pub fn deserialize(allocator: Allocator, pool: *Node.Pool, bytes: []const u8) !*Self {

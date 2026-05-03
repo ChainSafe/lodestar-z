@@ -1103,6 +1103,28 @@ pub const Pool = struct {
     }
 
     pub fn deinit(self: *Pool) void {
+        // Release heap payloads owned by `.slab` and `.branch_struct` slots.
+        // The MultiArrayList only owns its own column buffers; cache pointers
+        // are heap-allocated separately and become unreachable when callers
+        // tear down the pool without first unref'ing every root. Walk all
+        // slots and free the cache payload for any kind that owns one.
+        const kinds = self.nodes.items(.kind);
+        const caches = self.nodes.items(.cache);
+        for (kinds, caches) |kind, cache_opt| {
+            const ptr = cache_opt orelse continue;
+            switch (kind) {
+                .slab => Slab.destroy(
+                    self.allocator,
+                    @as(*Slab.Storage, @ptrCast(@alignCast(ptr))),
+                ),
+                .branch_struct => {
+                    const struct_ref: *BranchStructRef = @ptrCast(@alignCast(ptr));
+                    struct_ref.deinit(struct_ref.ptr, self.allocator);
+                    self.allocator.destroy(struct_ref);
+                },
+                else => {},
+            }
+        }
         var list = self.nodes.toMultiArrayList();
         list.deinit(self.allocator);
         self.* = undefined;
