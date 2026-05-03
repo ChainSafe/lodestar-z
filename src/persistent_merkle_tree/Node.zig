@@ -56,6 +56,26 @@ pub const NodeKind = enum(u8) {
     leaf,
     branch,
     slab,
+    /// Opaque "deserialized struct" node.
+    ///
+    /// `cache` holds a `*BranchStructRef` (vtable + struct pointer) heap-allocated
+    /// and owned by the Pool. `root` caches the merkle root (`lazy_sentinel`
+    /// = uncomputed). `left`/`right` are unused and must read as `Id(0)` for
+    /// safety (the slot is terminal — `noChildKind` returns true).
+    branch_struct,
+};
+
+/// Vtable + struct pointer that backs every `.branch_struct` Node.
+///
+/// The Pool owns this allocation. `ptr` is an opaque-typed pointer to a
+/// caller-supplied wrapped struct that implements the required methods:
+///   - `init(allocator, *const T) Error!*const T` — clone the struct into the pool
+///   - `deinit(allocator) void` — free the cloned struct
+///   - `getRoot(out: *[32]u8) void` — compute the merkle root from cached fields
+pub const BranchStructRef = struct {
+    ptr: *anyopaque,
+    get_root: *const fn (ptr: *const anyopaque, out: *[32]u8) void,
+    deinit: *const fn (ptr: *anyopaque, allocator: Allocator) void,
 };
 
 /// Sentinel value for a lazy (uncomputed) `root` field on `branch` and
@@ -83,6 +103,10 @@ pub const lazy_sentinel: [32]u8 = [_]u8{0xFF} ** 32;
 ///              `*anyopaque` to keep the column an 8-byte plain pointer
 ///              aligned the same as a `?*anyopaque`). `root` is the cached
 ///              slab subtree root (or `lazy_sentinel`). `left`/`right` unused.
+///   - branch_struct: `cache` is a non-null `*BranchStructRef` (vtable +
+///              struct pointer; cast through `*anyopaque` like slab).
+///              `root` is the cached struct merkle root (`lazy_sentinel` when
+///              uncomputed). `left`/`right` unused (set to `Id(0)`).
 pub const NodeWithMeta = struct {
     /// branch.left or free.next_free; unused for leaf/zero/slab.
     left: Id,
@@ -127,6 +151,8 @@ inline fn childrenOf(
         .leaf, .free => unreachable,
         // Slabs are terminal — they have no Id-children.
         .slab => unreachable,
+        // Branch-struct nodes are terminal — they have no Id-children.
+        .branch_struct => unreachable,
     };
 }
 
@@ -142,11 +168,20 @@ inline fn noChildKind(node_id: Id, kind: NodeKind) bool {
         .free => true,
         // Slabs are terminal: their chunks are not Id-children.
         .slab => true,
+        // Branch-struct nodes are terminal: their fields live inside the
+        // wrapped struct, not as separate Id-children.
+        .branch_struct => true,
     };
 }
 
 /// Read the slab Storage pointer for a slot known to be `.slab`.
 inline fn slabStorage(cache_col: []const ?*anyopaque, idx: u32) *Slab.Storage {
+    const raw = cache_col[idx].?;
+    return @ptrCast(@alignCast(raw));
+}
+
+/// Read the BranchStructRef for a slot known to be `.branch_struct`.
+inline fn branchStructRef(cache_col: []const ?*anyopaque, idx: u32) *BranchStructRef {
     const raw = cache_col[idx].?;
     return @ptrCast(@alignCast(raw));
 }
@@ -203,6 +238,17 @@ pub const Id = enum(u32) {
                 const storage = slabStorage(cache_col, idx);
                 var hash: [32]u8 = undefined;
                 Slab.computeRoot(storage, &hash);
+                roots[idx] = hash;
+                return &roots[idx];
+            },
+            .branch_struct => {
+                if (!std.mem.eql(u8, &roots[idx], &lazy_sentinel)) {
+                    return &roots[idx];
+                }
+                const cache_col = pool.nodes.items(.cache);
+                const ref_ptr = branchStructRef(cache_col, idx);
+                var hash: [32]u8 = undefined;
+                ref_ptr.get_root(ref_ptr.ptr, &hash);
                 roots[idx] = hash;
                 return &roots[idx];
             },
@@ -980,6 +1026,9 @@ pub const StateView = struct {
     pub fn isSlab(s: StateView) bool {
         return s.kind() == .slab;
     }
+    pub fn isBranchStruct(s: StateView) bool {
+        return s.kind() == .branch_struct;
+    }
     pub fn isBranchLazy(s: StateView) bool {
         if (s.kind() != .branch) return false;
         return std.mem.eql(u8, &s.pool.nodes.items(.root)[@intFromEnum(s.id)], &lazy_sentinel);
@@ -1170,6 +1219,65 @@ pub const Pool = struct {
         return node_id;
     }
 
+    /// Create a `.branch_struct` Node holding a cloned `T` instance.
+    ///
+    /// `T` must implement:
+    ///   - `pub fn init(allocator: Allocator, *const T) Error!*const T`
+    ///   - `pub fn deinit(*T, allocator: Allocator) void`
+    ///   - `pub fn getRoot(*const T, out: *[32]u8) void`
+    ///
+    /// The Pool clones `ptr` (so the caller retains ownership of its copy) and
+    /// owns the resulting `BranchStructRef`. The returned Node has a lazy root;
+    /// `Id.getRoot` computes and caches it on first access.
+    pub fn createBranchStruct(self: *Pool, comptime T: type, ptr: *const T) Error!Id {
+        // Clone the struct into the Pool's allocator.
+        const cloned = try T.init(self.allocator, ptr);
+        errdefer @constCast(cloned).deinit(self.allocator);
+
+        const ref_ptr = try self.allocator.create(BranchStructRef);
+        errdefer self.allocator.destroy(ref_ptr);
+
+        ref_ptr.* = .{
+            .ptr = @ptrCast(@constCast(cloned)),
+            .get_root = struct {
+                fn call(erased: *const anyopaque, out: *[32]u8) void {
+                    const typed: *const T = @ptrCast(@alignCast(erased));
+                    T.getRoot(typed, out);
+                }
+            }.call,
+            .deinit = struct {
+                fn call(erased: *anyopaque, allocator: Allocator) void {
+                    const typed: *T = @ptrCast(@alignCast(erased));
+                    T.deinit(typed, allocator);
+                }
+            }.call,
+        };
+
+        const node_id = try self.create();
+        const idx = @intFromEnum(node_id);
+        self.nodes.items(.kind)[idx] = .branch_struct;
+        // `left`/`right` unused — set to Id(0) for safety (a benign bit pattern
+        // matching `noChild` semantics).
+        self.nodes.items(.left)[idx] = @enumFromInt(0);
+        self.nodes.items(.right)[idx] = @enumFromInt(0);
+        self.nodes.items(.cache)[idx] = @ptrCast(ref_ptr);
+        self.nodes.items(.root)[idx] = lazy_sentinel;
+        self.nodes.items(.ref_count)[idx] = 0;
+        return node_id;
+    }
+
+    /// Returns a read-only pointer to the wrapped struct held by a
+    /// `.branch_struct` Node. Returns `Error.InvalidNode` if the slot is not
+    /// a branch-struct variant.
+    pub fn getStructPtr(self: *Pool, node_id: Id, comptime T: type) Error!*const T {
+        const idx = @intFromEnum(node_id);
+        if (self.nodes.items(.kind)[idx] != .branch_struct) {
+            return Error.InvalidNode;
+        }
+        const ref_ptr = branchStructRef(self.nodes.items(.cache), idx);
+        return @ptrCast(@alignCast(ref_ptr.ptr));
+    }
+
     /// Allocates nodes into the pool.
     ///
     /// All nodes are allocated with refcount=0.
@@ -1322,6 +1430,15 @@ pub const Pool = struct {
                     // Free the heap-allocated Storage owned by this slab Node.
                     const storage = slabStorage(self.nodes.items(.cache), @intFromEnum(id));
                     Slab.destroy(self.allocator, storage);
+                    self.nodes.items(.cache)[@intFromEnum(id)] = null;
+                    current = null;
+                },
+                .branch_struct => {
+                    // Free the wrapped struct + the BranchStructRef heap-allocation
+                    // owned by this slot.
+                    const ref_ptr = branchStructRef(self.nodes.items(.cache), @intFromEnum(id));
+                    ref_ptr.deinit(ref_ptr.ptr, self.allocator);
+                    self.allocator.destroy(ref_ptr);
                     self.nodes.items(.cache)[@intFromEnum(id)] = null;
                     current = null;
                 },
