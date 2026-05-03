@@ -72,7 +72,7 @@ pub fn BasicPackedChunks(
                 // slab_idx beyond filled slabs). A zero subtree at the slab
                 // boundary is semantically an all-zero slab; the decoded value
                 // is therefore the element's zero value.
-                if (self.state.pool.nodes.items(.node)[@intFromEnum(slab_id)] == .zero) {
+                if (self.state.pool.nodes.items(.kind)[@intFromEnum(slab_id)] == .zero) {
                     return std.mem.zeroes(Element);
                 }
                 const chunks = try slab_id.getSlabChunks(self.state.pool);
@@ -93,19 +93,23 @@ pub fn BasicPackedChunks(
                 const gindex = Gindex.fromDepth(slab_depth, slab_idx);
 
                 const existing_id = try self.state.getChildNode(gindex);
-                const node_col = self.state.pool.nodes.items(.node);
-                const existing_variant = node_col[@intFromEnum(existing_id)];
+                const kind_col = self.state.pool.nodes.items(.kind);
+                const existing_kind = kind_col[@intFromEnum(existing_id)];
 
                 // Path 1: navigation landed on a zero sentinel (sparse tree).
                 // Materialize a fresh zero-filled slab and mutate it in place
                 // (rc=0 ⇒ exclusively owned by us). Then setChildNode publishes
                 // it to the cache and `changed` set.
-                if (existing_variant == .zero) {
+                if (existing_kind == .zero) {
                     var zero_buf: [Slab.K][32]u8 align(64) = [_][32]u8{[_]u8{0} ** 32} ** Slab.K;
                     const fresh_id = try self.state.pool.createSlab(&zero_buf, 0);
-                    const fresh_node = &node_col[@intFromEnum(fresh_id)];
-                    ST.Element.tree.fromValuePackedIntoChunk(&fresh_node.slab.storage.chunks[intra_chunk], index, &value);
-                    fresh_node.slab.root = Node.lazy_sentinel;
+                    // Re-fetch column slices: createSlab may have grown the MAL.
+                    const cache_col = self.state.pool.nodes.items(.cache);
+                    const root_col = self.state.pool.nodes.items(.root);
+                    const fresh_idx = @intFromEnum(fresh_id);
+                    const fresh_storage: *Slab.Storage = @ptrCast(@alignCast(cache_col[fresh_idx].?));
+                    ST.Element.tree.fromValuePackedIntoChunk(&fresh_storage.chunks[intra_chunk], index, &value);
+                    root_col[fresh_idx] = Node.lazy_sentinel;
                     try self.state.setChildNode(gindex, fresh_id);
                     return;
                 }
@@ -121,16 +125,21 @@ pub fn BasicPackedChunks(
                 // the same Id and free our slab).
                 const ref_counts = self.state.pool.nodes.items(.ref_count);
                 if (ref_counts[@intFromEnum(existing_id)] == 0) {
-                    const node_ptr = &node_col[@intFromEnum(existing_id)];
-                    ST.Element.tree.fromValuePackedIntoChunk(&node_ptr.slab.storage.chunks[intra_chunk], index, &value);
-                    node_ptr.slab.root = Node.lazy_sentinel;
+                    const cache_col = self.state.pool.nodes.items(.cache);
+                    const root_col = self.state.pool.nodes.items(.root);
+                    const existing_idx = @intFromEnum(existing_id);
+                    const storage: *Slab.Storage = @ptrCast(@alignCast(cache_col[existing_idx].?));
+                    ST.Element.tree.fromValuePackedIntoChunk(&storage.chunks[intra_chunk], index, &value);
+                    root_col[existing_idx] = Node.lazy_sentinel;
                     return;
                 }
 
                 // Path 3: shared slab (rc >= 1 — owned by the persistent tree).
                 // Must CoW: produce a fresh slab via setSlabChunk and publish
                 // it. From this point onward subsequent writes hit Path 2.
-                var new_chunk: [32]u8 = existing_variant.slab.storage.chunks[intra_chunk];
+                const cache_col = self.state.pool.nodes.items(.cache);
+                const existing_storage: *Slab.Storage = @ptrCast(@alignCast(cache_col[@intFromEnum(existing_id)].?));
+                var new_chunk: [32]u8 = existing_storage.chunks[intra_chunk];
                 ST.Element.tree.fromValuePackedIntoChunk(&new_chunk, index, &value);
                 const new_slab_id = try existing_id.setSlabChunk(self.state.pool, intra_chunk_u16, &new_chunk);
                 try self.state.setChildNode(gindex, new_slab_id);
@@ -174,7 +183,7 @@ pub fn BasicPackedChunks(
                     // beyond the materialized range). A zero subtree is
                     // semantically all-zero chunks; emit zero values without
                     // touching the (non-existent) slab payload.
-                    if (self.state.pool.nodes.items(.node)[@intFromEnum(sid)] == .zero) {
+                    if (self.state.pool.nodes.items(.kind)[@intFromEnum(sid)] == .zero) {
                         const items_in_slab = @min(Slab.K * items_per_chunk, len - item_idx);
                         @memset(values[item_idx..][0..items_in_slab], std.mem.zeroes(Element));
                         item_idx += items_in_slab;
