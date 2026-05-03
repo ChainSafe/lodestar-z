@@ -44,29 +44,29 @@ fn parseOptions(options: ?js.Value) !st.TransitionOpts {
             }
             if (try raw.hasNamedProperty("executionPayloadStatus")) {
                 var buf: [16]u8 = undefined;
-                const s = try (try raw.getNamedProperty("executionPayloadStatus")).getValueStringUtf8(&buf);
+                const execution_payload_status = try (try raw.getNamedProperty("executionPayloadStatus")).getValueStringUtf8(&buf);
                 transition_opts.block_external_data.execution_payload_status =
-                    if (std.mem.eql(u8, s, "valid"))
+                    if (std.mem.eql(u8, execution_payload_status, "valid"))
                         .valid
-                    else if (std.mem.eql(u8, s, "invalid"))
+                    else if (std.mem.eql(u8, execution_payload_status, "invalid"))
                         .invalid
-                    else if (std.mem.eql(u8, s, "preMerge"))
+                    else if (std.mem.eql(u8, execution_payload_status, "preMerge"))
                         .pre_merge
                     else
                         return error.InvalidExecutionPayloadStatus;
             }
             if (try raw.hasNamedProperty("dataAvailabilityStatus")) {
                 var buf: [16]u8 = undefined;
-                const s = try (try raw.getNamedProperty("dataAvailabilityStatus")).getValueStringUtf8(&buf);
+                const da_status = try (try raw.getNamedProperty("dataAvailabilityStatus")).getValueStringUtf8(&buf);
                 transition_opts.block_external_data.data_availability_status =
-                    if (std.mem.eql(u8, s, "Available"))
+                    if (std.mem.eql(u8, da_status, "Available"))
                         .available
-                    else if (std.mem.eql(u8, s, "PreData"))
+                    else if (std.mem.eql(u8, da_status, "PreData"))
                         .pre_data
-                    else if (std.mem.eql(u8, s, "OutOfRange"))
+                    else if (std.mem.eql(u8, da_status, "OutOfRange"))
                         .out_of_range
                         // TODO(bing): uncomment once gloas support is in
-                        // else if (std.mem.eql(u8, s, "NotRequired")) .not_required;
+                        // else if (std.mem.eql(u8, da_status, "NotRequired")) .not_required;
                     else
                         return error.InvalidDataAvailabilityStatus;
             }
