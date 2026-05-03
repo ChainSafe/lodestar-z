@@ -597,13 +597,13 @@ describe("BeaconStateView", () => {
     const dummyBlockBytes = new Uint8Array(0);
 
     it("rejects invalid opts", () => {
-      const invalid_opts = [
+      const invalidOpts = [
         {executionPayloadStatus: "syncing"},
         {dataAvailabilityStatus: "Whatever"},
         {executionPayloadStatus: "Valid"}, // TS enum value is "valid"
         {dataAvailabilityStatus: "available"}, // TS enum value is "Available"
       ];
-      for (const opts of invalid_opts) {
+      for (const opts of invalidOpts) {
         expect(() => bindings.stateTransition.stateTransition(state, dummyBlockBytes, opts)).toThrow();
       }
     });
