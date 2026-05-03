@@ -25,6 +25,15 @@ const supported_test_runners = [_]RunnerKind{
     .finality,
 };
 
+// EF ships asymmetric vector packs — for example ~97 case dirs only exist
+// under mainnet (e.g. `*/operations/sync_aggregate/random_*_with_duplicates`)
+// while hundreds only exist under minimal. Walking just one preset silently
+// drops the others; the union is dedup'd by the case key the writer expects.
+const presets = [_][]const u8{
+    "minimal/tests/minimal",
+    "mainnet/tests/mainnet",
+};
+
 fn TestWriter(comptime kind: RunnerKind) type {
     return switch (kind) {
         .merkle_proof => @import("./writer/merkle_proof.zig"),
@@ -42,6 +51,10 @@ fn TestWriter(comptime kind: RunnerKind) type {
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    defer std.debug.assert(gpa.deinit() == .ok);
+    const allocator = gpa.allocator();
+
     const test_case_dir = "test/spec/test_case/";
     try std.Io.Dir.createDirPath(.cwd(), io, test_case_dir);
 
@@ -52,7 +65,7 @@ pub fn main(init: std.process.Init) !void {
 
         var write_buf: [8 * 1024]u8 = undefined;
         var writer = out.writer(io, &write_buf);
-        try writeTests(io, &supported_forks, kind, &writer.interface);
+        try writeTests(io, allocator, &supported_forks, kind, &writer.interface);
         try writer.flush();
     }
 
@@ -92,55 +105,110 @@ pub fn writeTestRoot(comptime kinds: []const RunnerKind, writer: *std.Io.Writer)
 
 pub fn writeTests(
     io: std.Io,
+    allocator: std.mem.Allocator,
     comptime forks: []const ForkSeq,
     comptime kind: RunnerKind,
     writer: *std.Io.Writer,
 ) !void {
+    @setEvalBranchQuota(8000);
     try TestWriter(kind).writeHeader(writer);
 
     var root_dir = try std.Io.Dir.openDir(.cwd(), io, spec_test_options.spec_test_out_dir ++ "/" ++ spec_test_options.spec_test_version, .{});
     defer root_dir.close(io);
 
-    // minimal preset includes many more testcases and is a superset of mainnet testcases
-    var preset_dir = try root_dir.openDir(io, "minimal/tests/minimal", .{});
-    defer preset_dir.close(io);
-
     inline for (forks) |fork| {
         const fork_path = @tagName(fork) ++ "/" ++ @tagName(kind);
-        const maybe_fork_dir = preset_dir.openDir(io, fork_path, .{ .iterate = true }) catch |err| switch (err) {
-            error.FileNotFound => null,
-            else => return err,
-        };
 
-        if (maybe_fork_dir) |dir| {
-            var fork_dir = dir;
-            defer fork_dir.close(io);
+        inline for (TestWriter(kind).handlers) |handler| {
+            // Key shape: "<case>" for flat handlers, "<suite>/<case>" for
+            // hasSuiteCase. Sort keys before emitting so regenerations don't
+            // churn line order on every run.
+            var cases: std.StringHashMapUnmanaged(void) = .empty;
+            defer {
+                var it = cases.keyIterator();
+                while (it.next()) |k| allocator.free(k.*);
+                cases.deinit(allocator);
+            }
 
-            inline for (TestWriter(kind).handlers) |handler| handler_loop: {
-                var suite_dir = fork_dir.openDir(io, comptime handler.suiteName(), .{ .iterate = true }) catch |err| switch (err) {
-                    error.FileNotFound => break :handler_loop,
-                    else => return err,
-                };
-                defer suite_dir.close(io);
+            for (presets) |preset| {
+                try collectCases(io, allocator, root_dir, preset, fork_path, comptime handler.suiteName(), comptime kind.hasSuiteCase(), &cases);
+            }
 
-                var suite_iter = suite_dir.iterate();
-                while (try suite_iter.next(io)) |suite_entry| {
-                    if (suite_entry.kind != .directory) continue;
+            var ordered = try std.ArrayListUnmanaged([]const u8).initCapacity(allocator, cases.size);
+            defer ordered.deinit(allocator);
+            var it = cases.keyIterator();
+            while (it.next()) |k| ordered.appendAssumeCapacity(k.*);
+            std.mem.sort([]const u8, ordered.items, {}, struct {
+                fn lt(_: void, a: []const u8, b: []const u8) bool {
+                    return std.mem.lessThan(u8, a, b);
+                }
+            }.lt);
 
-                    if (comptime kind.hasSuiteCase()) {
-                        var case_dir = suite_dir.openDir(io, suite_entry.name, .{ .iterate = true }) catch continue;
-                        defer case_dir.close(io);
-
-                        var case_iter = case_dir.iterate();
-                        while (try case_iter.next(io)) |case_entry| {
-                            if (case_entry.kind != .directory) continue;
-                            try TestWriter(kind).writeTest(writer, fork, handler, suite_entry.name, case_entry.name);
-                        }
-                    } else {
-                        try TestWriter(kind).writeTest(writer, fork, handler, suite_entry.name);
-                    }
+            for (ordered.items) |key| {
+                if (comptime kind.hasSuiteCase()) {
+                    const slash = std.mem.indexOfScalar(u8, key, '/').?;
+                    try TestWriter(kind).writeTest(writer, fork, handler, key[0..slash], key[slash + 1 ..]);
+                } else {
+                    try TestWriter(kind).writeTest(writer, fork, handler, key);
                 }
             }
+        }
+    }
+}
+
+fn collectCases(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    root: std.Io.Dir,
+    preset: []const u8,
+    fork_path: []const u8,
+    suite_name: []const u8,
+    has_suite_case: bool,
+    out: *std.StringHashMapUnmanaged(void),
+) !void {
+    // Asymmetric pack means a preset/fork/handler may legitimately not
+    // ship a given dir. Only swallow FileNotFound; surface real IO errors
+    // (perm denied, NotDir, etc.) so a corrupt checkout fails loudly
+    // instead of silently dropping cases.
+    var preset_dir = root.openDir(io, preset, .{}) catch |err| switch (err) {
+        error.FileNotFound => return,
+        else => |e| return e,
+    };
+    defer preset_dir.close(io);
+    var fork_dir = preset_dir.openDir(io, fork_path, .{ .iterate = true }) catch |err| switch (err) {
+        error.FileNotFound => return,
+        else => |e| return e,
+    };
+    defer fork_dir.close(io);
+    var handler_dir = fork_dir.openDir(io, suite_name, .{ .iterate = true }) catch |err| switch (err) {
+        error.FileNotFound => return,
+        else => |e| return e,
+    };
+    defer handler_dir.close(io);
+
+    var iter = handler_dir.iterate();
+    while (try iter.next(io)) |entry| {
+        if (entry.kind != .directory) continue;
+        if (has_suite_case) {
+            // entry.kind already filtered to .directory; FileNotFound here
+            // can only be a TOCTOU (the entry was removed mid-iteration),
+            // which we tolerate. Any other error indicates real trouble.
+            var suite_dir = handler_dir.openDir(io, entry.name, .{ .iterate = true }) catch |err| switch (err) {
+                error.FileNotFound => continue,
+                else => |e| return e,
+            };
+            defer suite_dir.close(io);
+            var case_iter = suite_dir.iterate();
+            while (try case_iter.next(io)) |case_entry| {
+                if (case_entry.kind != .directory) continue;
+                const key = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ entry.name, case_entry.name });
+                const gop = try out.getOrPut(allocator, key);
+                if (gop.found_existing) allocator.free(key) else gop.key_ptr.* = key;
+            }
+        } else {
+            const key = try allocator.dupe(u8, entry.name);
+            const gop = try out.getOrPut(allocator, key);
+            if (gop.found_existing) allocator.free(key) else gop.key_ptr.* = key;
         }
     }
 }
