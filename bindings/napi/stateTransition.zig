@@ -15,18 +15,17 @@ const allocator = if (builtin.mode == .Debug)
 else
     std.heap.c_allocator;
 
-/// Parse a JS options object into Zig's TransitionOpts.
+/// Parse a JS options object into Zig's TransitionOpt.
 ///
 /// Recognized fields:
 /// - verifyStateRoot, verifyProposer, verifySignatures: bool
 /// - dontTransferCache: bool (negated to set transfer_cache)
-/// - executionPayloadStatus: "valid" | "invalid" | "preMerge"
-/// - dataAvailabilityStatus: "Available" | "PreData" | "OutOfRange"
 ///
 /// This is the double negative version to conform with production lodestar.
 /// TODO(bing): Eventually rename this to `transferCache` to avoid double negation because its confusing naming.
-fn parseOptions(options: ?js.Value) !st.TransitionOpts {
-    var transition_opts: st.TransitionOpts = .{};
+/// TODO(bing): Other fields (executionPayloadStatus, ..).
+fn parseOptions(options: ?js.Value) !st.TransitionOpt {
+    var transition_opts: st.TransitionOpt = .{};
     if (options) |value| {
         const raw = value.toValue();
         if (try raw.typeof() == .object) {
@@ -94,7 +93,6 @@ pub fn stateTransition(
     const env = js.env();
     const pre_state = pre_state_value.toValue();
     const cached_state = try env.unwrap(CachedBeaconState, pre_state);
-    const transition_opts = try parseOptions(options);
     const signed_block_bytes_slice = try signed_block_bytes.toSlice();
 
     const current_epoch = st.computeEpochAtSlot(try cached_state.state.slot());
@@ -112,7 +110,7 @@ pub fn stateTransition(
         napi_io.get(),
         cached_state,
         signed_block,
-        transition_opts,
+        try parseOptions(options),
     );
     errdefer {
         post_state.deinit();
