@@ -335,6 +335,14 @@ pub fn StructContainerType(comptime ST: type) type {
                 FixedCT.hashTreeRoot(&self.value, out) catch unreachable;
             }
 
+            /// Materialize a temporary navigable PMT subtree representing this
+            /// container's full hash-tree. Used by proof traversal — see
+            /// `Pool.materializeBranchStruct`. The returned Id has refcount=0;
+            /// the caller is responsible for `unref`'ing it.
+            pub fn toTree(self: *const WrappedT, pool: *Node.Pool) !Node.Id {
+                return try FixedCT.tree.fromValue(pool, &self.value);
+            }
+
             pub fn init(allocator: std.mem.Allocator, wrapped: *const WrappedT) !*const WrappedT {
                 const ptr = try allocator.create(WrappedT);
                 errdefer allocator.destroy(ptr);

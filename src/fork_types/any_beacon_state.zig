@@ -1055,3 +1055,93 @@ test "upgrade state - sanity" {
     defer fulu_state.deinit();
     try expect(fulu_state.forkSeq() == .fulu);
 }
+
+// ---- Proof regression tests ----
+//
+// `AnyBeaconState.getSingleProof` walks generalized indices through the SSZ
+// tree, calling `Node.Id.getLeft`/`getRight` per descent step. Two recent
+// optimizations turned terminal nodes into opaque payloads with no Id
+// children:
+//   * `Validator` is stored as `branch_struct` (a single Node holding a
+//     deserialized struct). Descending into a validator sub-field returns
+//     `Error.InvalidNode`.
+//   * `Balances` is stored as `slab` (a single Node holding K=1024 packed
+//     chunks). Descending into a specific balance index returns
+//     `Error.InvalidNode`.
+//
+// EF spec tests do not exercise these paths (the `merkle_proof` shard only
+// covers `BeaconBlockBody.blob_kzg_commitment_merkle_proof`), so these two
+// regressions slipped through. The tests below are expected to FAIL today
+// and pass after `branch_struct`/`slab` learn to materialize a temporary
+// PMT subtree on demand for proof generation (see PR #232's `to_tree`
+// vtable design).
+
+test "single proof: validators[0].withdrawal_credentials" {
+    const allocator = std.testing.allocator;
+    const ssz = @import("ssz");
+    var pool = try Node.Pool.init(allocator, 500_000);
+    defer pool.deinit();
+
+    var beacon_state = try AnyBeaconState.fromValue(
+        allocator,
+        &pool,
+        .electra,
+        &ct.electra.BeaconState.default_value,
+    );
+    defer beacon_state.deinit();
+
+    // Bootstrap one validator so `validators[0]` exists.
+    var validators_view = try beacon_state.validators();
+    const validator_value = ct.electra.Validator.Type{
+        .pubkey = [_]u8{1} ** 48,
+        .withdrawal_credentials = [_]u8{0xab} ** 32,
+        .effective_balance = 32_000_000_000,
+        .slashed = false,
+        .activation_eligibility_epoch = 0,
+        .activation_epoch = 0,
+        .exit_epoch = std.math.maxInt(u64),
+        .withdrawable_epoch = std.math.maxInt(u64),
+    };
+    try validators_view.pushValue(&validator_value);
+    try beacon_state.commit();
+
+    const gindex = ssz.getPathGindex(ct.electra.BeaconState, "validators.0.withdrawal_credentials");
+    var proof = try beacon_state.getSingleProof(allocator, @intFromEnum(gindex));
+    defer proof.deinit(allocator);
+
+    // The proof should be non-empty and the leaf should match the value
+    // we set above. (We do not yet verify witness chain correctness — just
+    // that proof generation does not error out with InvalidNode.)
+    try std.testing.expect(proof.witnesses.len > 0);
+    try std.testing.expectEqualSlices(u8, &[_]u8{0xab} ** 32, &proof.leaf);
+}
+
+test "single proof: balances[0]" {
+    const allocator = std.testing.allocator;
+    const ssz = @import("ssz");
+    var pool = try Node.Pool.init(allocator, 500_000);
+    defer pool.deinit();
+
+    var beacon_state = try AnyBeaconState.fromValue(
+        allocator,
+        &pool,
+        .electra,
+        &ct.electra.BeaconState.default_value,
+    );
+    defer beacon_state.deinit();
+
+    var balances_view = try beacon_state.balances();
+    try balances_view.push(31_000_000_000);
+    try beacon_state.commit();
+
+    const gindex = ssz.getPathGindex(ct.electra.BeaconState, "balances.0");
+    var proof = try beacon_state.getSingleProof(allocator, @intFromEnum(gindex));
+    defer proof.deinit(allocator);
+
+    try std.testing.expect(proof.witnesses.len > 0);
+    // balances[0] is a packed u64; only the low 8 bytes of the leaf carry
+    // the value (LE-encoded), the rest of the chunk is zero-padded.
+    var expected_leaf: [32]u8 = [_]u8{0} ** 32;
+    std.mem.writeInt(u64, expected_leaf[0..8], 31_000_000_000, .little);
+    try std.testing.expectEqualSlices(u8, &expected_leaf, &proof.leaf);
+}

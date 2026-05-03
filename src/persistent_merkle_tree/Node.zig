@@ -72,9 +72,15 @@ pub const NodeKind = enum(u8) {
 ///   - `init(allocator, *const T) Error!*const T` — clone the struct into the pool
 ///   - `deinit(allocator) void` — free the cloned struct
 ///   - `getRoot(out: *[32]u8) void` — compute the merkle root from cached fields
+///   - `toTree(pool: *Pool) Error!Id` — materialize a temporary, fully-navigable
+///     PMT subtree from the cached struct so that proof traversal can walk
+///     into the container's interior. The returned Id is owned by the caller
+///     (typically created with refcount=0 by the underlying field-tree
+///     constructors); the proof code wraps it with `pool.unref` on cleanup.
 pub const BranchStructRef = struct {
     ptr: *anyopaque,
     get_root: *const fn (ptr: *const anyopaque, out: *[32]u8) void,
+    to_tree: *const fn (ptr: *const anyopaque, pool: *Pool) Error!Id,
     deinit: *const fn (ptr: *anyopaque, allocator: Allocator) void,
 };
 
@@ -1267,6 +1273,12 @@ pub const Pool = struct {
                     T.getRoot(typed, out);
                 }
             }.call,
+            .to_tree = struct {
+                fn call(erased: *const anyopaque, p: *Pool) Error!Id {
+                    const typed: *const T = @ptrCast(@alignCast(erased));
+                    return try T.toTree(typed, p);
+                }
+            }.call,
             .deinit = struct {
                 fn call(erased: *anyopaque, allocator: Allocator) void {
                     const typed: *T = @ptrCast(@alignCast(erased));
@@ -1298,6 +1310,47 @@ pub const Pool = struct {
         }
         const ref_ptr = branchStructRef(self.nodes.items(.cache), idx);
         return @ptrCast(@alignCast(ref_ptr.ptr));
+    }
+
+    /// Materializes a temporary, fully-navigable PMT subtree from a
+    /// `.branch_struct` slot's wrapped struct. The returned Id has refcount
+    /// matching the underlying field-tree constructors (typically 0 — caller
+    /// is responsible for `unref`'ing it once the temporary tree is no longer
+    /// needed). Returns `Error.InvalidNode` if the slot is not a branch-struct
+    /// variant.
+    pub fn materializeBranchStruct(self: *Pool, node_id: Id) Error!Id {
+        const idx = @intFromEnum(node_id);
+        if (self.nodes.items(.kind)[idx] != .branch_struct) {
+            return Error.InvalidNode;
+        }
+        const ref_ptr = branchStructRef(self.nodes.items(.cache), idx);
+        return try ref_ptr.to_tree(ref_ptr.ptr, self);
+    }
+
+    /// Materializes a temporary, fully-navigable PMT subtree from a `.slab`
+    /// slot's K packed chunks. The slab represents a depth-`Slab.k_log2`
+    /// subtree of leaves; this builds it explicitly so that proof traversal
+    /// can walk into individual chunks. Trailing zero subtrees fill the slab
+    /// to full K. The returned Id has refcount=0; caller is responsible for
+    /// `unref`'ing it. Returns `Error.InvalidNode` if the slot is not a slab.
+    pub fn materializeSlab(self: *Pool, node_id: Id) Error!Id {
+        const idx = @intFromEnum(node_id);
+        if (self.nodes.items(.kind)[idx] != .slab) {
+            return Error.InvalidNode;
+        }
+        const storage = slabStorage(self.nodes.items(.cache), idx);
+
+        // Build a depth-k_log2 perfect tree spanning all K chunks. We always
+        // emit K leaves (even those at indices >= storage.len, which are
+        // guaranteed to be zero-bytes by the Storage invariant) so that the
+        // resulting subtree's root matches the slab's `computeRoot` exactly.
+        var it = FillWithContentsIterator.init(self, Slab.k_log2);
+        errdefer it.deinit();
+        for (0..Slab.K) |i| {
+            const leaf = try self.createLeaf(&storage.chunks[i]);
+            try it.append(leaf);
+        }
+        return try it.finish();
     }
 
     /// Allocates nodes into the pool.

@@ -14,6 +14,10 @@ pub const Error = error{
     InvalidGindex,
     /// Witness list length does not match the gindex path length.
     InvalidWitnessLength,
+    /// Single-proof traversal encountered a second opaque (branch_struct or
+    /// slab) node after already materializing one. Opaque nodes are leaf-level
+    /// in our tree model and must not nest along a single proof path.
+    NestedOpaque,
 };
 
 pub const ProofType = enum {
@@ -53,6 +57,46 @@ pub const SingleProof = struct {
     }
 };
 
+/// Returns true if the node is "opaque" — terminal in our PMT model but
+/// represents a navigable subtree underneath (branch_struct = deserialized
+/// container struct; slab = K packed chunks). Proof traversal must
+/// materialize a temporary explicit subtree before walking inside.
+inline fn isOpaqueNode(pool: *Node.Pool, node_id: Node.Id) bool {
+    const kind = pool.nodes.items(.kind)[@intFromEnum(node_id)];
+    return kind == .branch_struct or kind == .slab;
+}
+
+/// Materializes a temporary navigable subtree for an opaque node. Caller is
+/// responsible for `unref`'ing the returned Id once the temporary tree is no
+/// longer needed (typically via the deferred-unref ArrayList in compact-multi
+/// proof, or the single optional in single-proof).
+inline fn materializeOpaque(pool: *Node.Pool, node_id: Node.Id) Node.Error!Node.Id {
+    const kind = pool.nodes.items(.kind)[@intFromEnum(node_id)];
+    return switch (kind) {
+        .branch_struct => try pool.materializeBranchStruct(node_id),
+        .slab => try pool.materializeSlab(node_id),
+        else => unreachable,
+    };
+}
+
+/// Proof traversal needs real left/right child nodes. For an opaque node
+/// (branch_struct or slab), materialize a temporary plain tree and append it
+/// to the deferred-unref list so it stays alive until proof creation finishes.
+fn materializeIfOpaque(
+    allocator: Allocator,
+    pool: *Node.Pool,
+    node_id: Node.Id,
+    temporary_roots: *std.ArrayListUnmanaged(Node.Id),
+) (Node.Error || Error)!Node.Id {
+    if (!isOpaqueNode(pool, node_id)) {
+        return node_id;
+    }
+    const materialized = try materializeOpaque(pool, node_id);
+    errdefer pool.unref(materialized);
+    temporary_roots.append(allocator, materialized) catch return error.OutOfMemory;
+    return materialized;
+}
+
 /// Produces a single Merkle proof for the node at `gindex`.
 pub fn createSingleProof(
     allocator: Allocator,
@@ -68,6 +112,13 @@ pub fn createSingleProof(
     var witnesses = try allocator.alloc([32]u8, path_len);
     errdefer allocator.free(witnesses);
 
+    // A single proof path crosses at most one opaque (branch_struct/slab)
+    // boundary in well-formed SSZ trees — opaque nodes are leaf-level and the
+    // gindex must descend into one container/list. Track at most one
+    // materialized root and free it on exit.
+    var materialized_root: ?Node.Id = null;
+    defer if (materialized_root) |temp_root| pool.unref(temp_root);
+
     if (path_len == 0) {
         return SingleProof{
             .leaf = root.getRoot(pool).*,
@@ -80,6 +131,14 @@ pub fn createSingleProof(
 
     for (0..path_len) |depth_idx| {
         const witness_index = path_len - 1 - depth_idx;
+
+        if (isOpaqueNode(pool, node_id)) {
+            if (materialized_root) |_| {
+                return error.NestedOpaque;
+            }
+            materialized_root = try materializeOpaque(pool, node_id);
+            node_id = materialized_root.?;
+        }
 
         if (path.left()) {
             const right_id = try node_id.getRight(pool);
@@ -420,6 +479,7 @@ fn nodeToCompactMultiProof(
     node_id: Node.Id,
     bitlist: []const bool,
     bit_index: usize,
+    temporary_roots: *std.ArrayListUnmanaged(Node.Id),
 ) (Node.Error || Error)![][32]u8 {
     // If bit is 1, this node is a leaf in the proof
     if (bitlist[bit_index]) {
@@ -428,13 +488,18 @@ fn nodeToCompactMultiProof(
         return leaves;
     }
 
+    // Materialize opaque (branch_struct/slab) nodes lazily so we can navigate
+    // into their children. The temporary root is owned by `temporary_roots`
+    // and unref'd when the outer caller exits.
+    const current = try materializeIfOpaque(allocator, pool, node_id, temporary_roots);
+
     // Otherwise, recurse into children
-    const left_id = try node_id.getLeft(pool);
-    const left = try nodeToCompactMultiProof(allocator, pool, left_id, bitlist, bit_index + 1);
+    const left_id = try current.getLeft(pool);
+    const left = try nodeToCompactMultiProof(allocator, pool, left_id, bitlist, bit_index + 1, temporary_roots);
     defer allocator.free(left);
 
-    const right_id = try node_id.getRight(pool);
-    const right = try nodeToCompactMultiProof(allocator, pool, right_id, bitlist, bit_index + left.len * 2);
+    const right_id = try current.getRight(pool);
+    const right = try nodeToCompactMultiProof(allocator, pool, right_id, bitlist, bit_index + left.len * 2, temporary_roots);
     defer allocator.free(right);
 
     const result = try allocator.alloc([32]u8, left.len + right.len);
@@ -453,7 +518,15 @@ pub fn createCompactMultiProof(
     const bitlist = try descriptorToBitlist(allocator, descriptor);
     defer allocator.free(bitlist);
 
-    return nodeToCompactMultiProof(allocator, pool, root, bitlist, 0);
+    var temporary_roots: std.ArrayListUnmanaged(Node.Id) = .empty;
+    defer {
+        for (temporary_roots.items) |temp_root| {
+            pool.unref(temp_root);
+        }
+        temporary_roots.deinit(allocator);
+    }
+
+    return nodeToCompactMultiProof(allocator, pool, root, bitlist, 0, &temporary_roots);
 }
 
 /// Pointer to track position in bitlist and leaves during reconstruction
