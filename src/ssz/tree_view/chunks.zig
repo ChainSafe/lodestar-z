@@ -103,13 +103,9 @@ pub fn BasicPackedChunks(
                 if (existing_kind == .zero) {
                     var zero_buf: [Slab.K][32]u8 align(64) = [_][32]u8{[_]u8{0} ** 32} ** Slab.K;
                     const fresh_id = try self.state.pool.createSlab(&zero_buf, 0);
-                    // Re-fetch column slices: createSlab may have grown the MAL.
-                    const cache_col = self.state.pool.nodes.items(.cache);
-                    const root_col = self.state.pool.nodes.items(.root);
-                    const fresh_idx = @intFromEnum(fresh_id);
-                    const fresh_storage: *Slab.Storage = @ptrCast(@alignCast(cache_col[fresh_idx].?));
+                    const fresh_storage = try fresh_id.getSlabStorageMut(self.state.pool);
                     ST.Element.tree.fromValuePackedIntoChunk(&fresh_storage.chunks[intra_chunk], index, &value);
-                    root_col[fresh_idx] = Node.lazy_sentinel;
+                    self.state.pool.nodes.items(.root)[@intFromEnum(fresh_id)] = Node.lazy_sentinel;
                     try self.state.setChildNode(gindex, fresh_id);
                     return;
                 }
@@ -123,22 +119,17 @@ pub fn BasicPackedChunks(
                 // setChildNode call that produced this transient slab, so we
                 // do NOT call setChildNode again (which would unref-then-store
                 // the same Id and free our slab).
-                const ref_counts = self.state.pool.nodes.items(.state);
-                if (ref_counts[@intFromEnum(existing_id)].refCount() == 0) {
-                    const cache_col = self.state.pool.nodes.items(.cache);
-                    const root_col = self.state.pool.nodes.items(.root);
-                    const existing_idx = @intFromEnum(existing_id);
-                    const storage: *Slab.Storage = @ptrCast(@alignCast(cache_col[existing_idx].?));
+                if (state_col[@intFromEnum(existing_id)].refCount() == 0) {
+                    const storage = try existing_id.getSlabStorageMut(self.state.pool);
                     ST.Element.tree.fromValuePackedIntoChunk(&storage.chunks[intra_chunk], index, &value);
-                    root_col[existing_idx] = Node.lazy_sentinel;
+                    self.state.pool.nodes.items(.root)[@intFromEnum(existing_id)] = Node.lazy_sentinel;
                     return;
                 }
 
                 // Path 3: shared slab (rc >= 1 — owned by the persistent tree).
                 // Must CoW: produce a fresh slab via setSlabChunk and publish
                 // it. From this point onward subsequent writes hit Path 2.
-                const cache_col = self.state.pool.nodes.items(.cache);
-                const existing_storage: *Slab.Storage = @ptrCast(@alignCast(cache_col[@intFromEnum(existing_id)].?));
+                const existing_storage = try existing_id.getSlabStorageMut(self.state.pool);
                 var new_chunk: [32]u8 = existing_storage.chunks[intra_chunk];
                 ST.Element.tree.fromValuePackedIntoChunk(&new_chunk, index, &value);
                 const new_slab_id = try existing_id.setSlabChunk(self.state.pool, intra_chunk_u16, &new_chunk);

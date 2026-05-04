@@ -1,27 +1,22 @@
 //! Merkle node backed by a memory pool.
 //!
-//! Nodes are stored as a flat struct of independent fields (no tagged union)
-//! so that `MultiArrayList` splits each field into its own dense SoA column.
-//! Variants are distinguished by `kind`:
-//!   - `free`: an entry on the free list. `left` carries the next free `Id`.
-//!   - `zero`: a precomputed zero-hash sentinel. `root` holds the precomputed
-//!     hash. Children are synthesised from the slot index (depth-1 zero).
-//!   - `leaf`: a 32-byte leaf hash held in `root`.
-//!   - `branch`: parent with two children (`left`, `right`) and a cached root
-//!     in `root` (`lazy_sentinel` = uncomputed; any other value = computed).
-//!   - `slab`: chunked-leaf payload. `cache` is a `*Slab.Storage` pointer cast
-//!     to `*anyopaque`; `root` caches the slab subtree root (`lazy_sentinel`
-//!     means lazy).
+//! This file IS the node: top-level fields become per-node SoA columns via
+//! `MultiArrayList(@This())`. Variants are distinguished by `state.kind()`.
 //!
-//! Why flat fields? `getNodesAtDepth` is the dominant navigation hotspot. The
-//! union layout forced every visit to touch the full 48 B payload (1.3 nodes /
-//! cache-line). With flat columns the navigation loop reads only `kind` (1 B)
-//! and one child Id (4 B) per visit — recovering ~16 nodes / cache-line on the
-//! hot path while leaving payload columns untouched.
+//! Layout (3 columns total):
+//!   - `payload`: u64, overloaded by kind
+//!       branch        : low 32 = left Id,  high 32 = right Id
+//!       slab          : full 64-bit `*Slab.Storage` pointer
+//!       branch_struct : full 64-bit `*BranchStructRef` pointer
+//!       free          : low 32 = next-free Id (high 32 unused)
+//!       zero/leaf     : unused (zero/leaf root lives in `root`)
+//!   - `root`:  [32]u8 — leaf bytes, zero hash, or cached subtree root
+//!     (`lazy_sentinel` = uncomputed for branch/slab/branch_struct)
+//!   - `state`: State (packed u32 — see `State` doc)
 //!
-//! Reference counts live in their own column (`ref_count`). `unref` scans
-//! `ref_count` and `kind` without touching `root`/`cache` until the slot
-//! actually drops to zero.
+//! Maximum compactness: kind+ref_count packed into one u32 (`State`), and
+//! `left`+`right`+`cache` collapse into one u64 (`payload`). Branch
+//! navigation reads exactly two columns per visit (state + payload).
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
@@ -32,16 +27,9 @@ const Depth = @import("hashing").Depth;
 const Gindex = @import("gindex.zig").Gindex;
 const Slab = @import("slab.zig");
 
-// Flat node fields (file-as-struct). Each field becomes a dedicated SoA
-// column inside `MultiArrayList(@This())`.
-//
-// `kind` + `ref_count` are packed into a single `state: State` u32:
-//   - bit 31 set   → free slot;  bits 0..30 = next-free Id
-//   - bit 31 clear → in-use;     bits 28..30 = kind, bits 0..27 = ref_count
-left: Id,
-right: Id,
+// Flat node fields (file-as-struct). Order doesn't affect SoA layout.
+payload: u64,
 root: [32]u8,
-cache: ?*anyopaque,
 state: State,
 
 const Node = @This();
@@ -64,9 +52,9 @@ pub const Error = error{
 pub const max_ref_count: u32 = State.rc_mask;
 
 /// Variant tag exposed to callers. The encoded form lives inside `State`'s
-/// 3-bit kind field; `.free` is encoded as `state.isFree()` (the high bit)
-/// rather than as a 3-bit value, so the in-use kinds occupy values 1..5
-/// and the 3-bit slot stores `tag - 1`.
+/// 3-bit kind field; `.free` is special — encoded as `state.isFree()` (the
+/// high bit) rather than as a 3-bit value, so the in-use kinds occupy
+/// values 1..5 and the 3-bit slot stores `tag - 1`.
 pub const NodeKind = enum(u8) {
     free = 0,
     zero = 1,
@@ -171,23 +159,47 @@ pub const BranchStructRef = struct {
 /// 1-byte tag overhead an `?[32]u8` Optional would add.
 pub const lazy_sentinel: [32]u8 = [_]u8{0xFF} ** 32;
 
+/// Pack a `(left, right)` Id pair into the u64 `payload` field.
+/// Convention: `left` low 32 bits, `right` high 32 bits.
+inline fn packChildren(left: Id, right: Id) u64 {
+    return @as(u64, @intFromEnum(left)) | (@as(u64, @intFromEnum(right)) << 32);
+}
+
+/// Decode the left child Id from a packed `payload`.
+inline fn unpackLeft(p: u64) Id {
+    return @enumFromInt(@as(u32, @truncate(p)));
+}
+
+/// Decode the right child Id from a packed `payload`.
+inline fn unpackRight(p: u64) Id {
+    return @enumFromInt(@as(u32, @intCast(p >> 32)));
+}
+
+/// Reinterpret a `payload` as a heap pointer (slab / branch_struct).
+inline fn payloadAsPtr(p: u64) *anyopaque {
+    return @ptrFromInt(p);
+}
+
+/// Encode a heap pointer as a `payload` value.
+inline fn ptrAsPayload(ptr: *anyopaque) u64 {
+    return @intFromPtr(ptr);
+}
+
 /// Pair of child Ids. Always defined when `noChild` is false.
 const Children = struct { left: Id, right: Id };
 
 /// Resolve the (left, right) child Ids for a navigable node.
-///
-/// For branch nodes the children come directly from the `left`/`right`
-/// columns. For zero nodes (depth >= 1) the children are synthesised:
-/// `zero(d).left = zero(d).right = zero(d-1)`.
 inline fn childrenOf(
     node_id: Id,
     kind: NodeKind,
-    lefts: []const Id,
-    rights: []const Id,
+    payloads: []const u64,
 ) Children {
     const idx = @intFromEnum(node_id);
     return switch (kind) {
-        .branch => .{ .left = lefts[idx], .right = rights[idx] },
+        .branch => blk: {
+            const p = payloads[idx];
+            break :blk .{ .left = unpackLeft(p), .right = unpackRight(p) };
+        },
         .zero => blk: {
             std.debug.assert(idx >= 1);
             const prev: Id = @enumFromInt(idx - 1);
@@ -195,9 +207,7 @@ inline fn childrenOf(
         },
         // `noChild` guards prevent reaching here for these variants.
         .leaf, .free => unreachable,
-        // Slabs are terminal — they have no Id-children.
         .slab => unreachable,
-        // Branch-struct nodes are terminal — they have no Id-children.
         .branch_struct => unreachable,
     };
 }
@@ -206,30 +216,22 @@ inline fn childrenOf(
 inline fn noChildKind(node_id: Id, kind: NodeKind) bool {
     return switch (kind) {
         .leaf => true,
-        // `Id(0)` is the depth-0 zero sentinel: nothing below it.
         .zero => @intFromEnum(node_id) == 0,
-        // Branches always have children, except the synthetic `Id(0)` slot.
         .branch => @intFromEnum(node_id) == 0,
-        // Free slots are not user-visible nodes.
         .free => true,
-        // Slabs are terminal: their chunks are not Id-children.
         .slab => true,
-        // Branch-struct nodes are terminal: their fields live inside the
-        // wrapped struct, not as separate Id-children.
         .branch_struct => true,
     };
 }
 
 /// Read the slab Storage pointer for a slot known to be `.slab`.
-inline fn slabStorage(cache_col: []const ?*anyopaque, idx: u32) *Slab.Storage {
-    const raw = cache_col[idx].?;
-    return @ptrCast(@alignCast(raw));
+inline fn slabStorage(payloads: []const u64, idx: u32) *Slab.Storage {
+    return @ptrCast(@alignCast(payloadAsPtr(payloads[idx])));
 }
 
 /// Read the BranchStructRef for a slot known to be `.branch_struct`.
-inline fn branchStructRef(cache_col: []const ?*anyopaque, idx: u32) *BranchStructRef {
-    const raw = cache_col[idx].?;
-    return @ptrCast(@alignCast(raw));
+inline fn branchStructRef(payloads: []const u64, idx: u32) *BranchStructRef {
+    return @ptrCast(@alignCast(payloadAsPtr(payloads[idx])));
 }
 
 /// A handle which uniquely identifies the node within a `Pool`.
@@ -265,12 +267,9 @@ pub const Id = enum(u32) {
                 if (!std.mem.eql(u8, &roots[idx], &lazy_sentinel)) {
                     return &roots[idx];
                 }
-                const lefts = pool.nodes.items(.left);
-                const rights = pool.nodes.items(.right);
-                const left_id = lefts[idx];
-                const right_id = rights[idx];
-                const left_root = left_id.getRoot(pool);
-                const right_root = right_id.getRoot(pool);
+                const c = pool.nodes.items(.payload)[idx];
+                const left_root = unpackLeft(c).getRoot(pool);
+                const right_root = unpackRight(c).getRoot(pool);
                 var hash: [32]u8 = undefined;
                 hashOne(&hash, left_root, right_root);
                 roots[idx] = hash;
@@ -280,8 +279,7 @@ pub const Id = enum(u32) {
                 if (!std.mem.eql(u8, &roots[idx], &lazy_sentinel)) {
                     return &roots[idx];
                 }
-                const cache_col = pool.nodes.items(.cache);
-                const storage = slabStorage(cache_col, idx);
+                const storage = slabStorage(pool.nodes.items(.payload), idx);
                 var hash: [32]u8 = undefined;
                 Slab.computeRoot(storage, &hash);
                 roots[idx] = hash;
@@ -291,8 +289,7 @@ pub const Id = enum(u32) {
                 if (!std.mem.eql(u8, &roots[idx], &lazy_sentinel)) {
                     return &roots[idx];
                 }
-                const cache_col = pool.nodes.items(.cache);
-                const ref_ptr = branchStructRef(cache_col, idx);
+                const ref_ptr = branchStructRef(pool.nodes.items(.payload), idx);
                 var hash: [32]u8 = undefined;
                 ref_ptr.get_root(ref_ptr.ptr, &hash);
                 roots[idx] = hash;
@@ -305,51 +302,40 @@ pub const Id = enum(u32) {
         const idx = @intFromEnum(node_id);
         const kind = pool.nodes.items(.state)[idx].kind();
         if (noChildKind(node_id, kind)) return Error.InvalidNode;
-        return childrenOf(
-            node_id,
-            kind,
-            pool.nodes.items(.left),
-            pool.nodes.items(.right),
-        ).left;
+        return childrenOf(node_id, kind, pool.nodes.items(.payload)).left;
     }
 
     pub fn getRight(node_id: Id, pool: *Pool) Error!Id {
         const idx = @intFromEnum(node_id);
         const kind = pool.nodes.items(.state)[idx].kind();
         if (noChildKind(node_id, kind)) return Error.InvalidNode;
-        return childrenOf(
-            node_id,
-            kind,
-            pool.nodes.items(.left),
-            pool.nodes.items(.right),
-        ).right;
+        return childrenOf(node_id, kind, pool.nodes.items(.payload)).right;
     }
 
-    /// Returns a read-only pointer to the slab's K-chunk array. Returns
-    /// `Error.InvalidNode` if the node is not a slab variant.
     pub fn getSlabChunks(node_id: Id, pool: *Pool) Error!*align(64) const [Slab.K][32]u8 {
         const idx = @intFromEnum(node_id);
         if (pool.nodes.items(.state)[idx].kind() != .slab) return Error.InvalidNode;
-        return &slabStorage(pool.nodes.items(.cache), idx).chunks;
+        return &slabStorage(pool.nodes.items(.payload), idx).chunks;
     }
 
-    /// Returns the slab's `len` (number of valid chunks, `<= K`). Returns
-    /// `Error.InvalidNode` if the node is not a slab variant.
     pub fn getSlabLen(node_id: Id, pool: *Pool) Error!u16 {
         const idx = @intFromEnum(node_id);
         if (pool.nodes.items(.state)[idx].kind() != .slab) return Error.InvalidNode;
-        return slabStorage(pool.nodes.items(.cache), idx).len;
+        return slabStorage(pool.nodes.items(.payload), idx).len;
     }
 
-    /// Returns a new slab `Id` with `chunk` at `intra_index`; the receiver slab
-    /// is unchanged. Heap Storage is cloned. The returned slab has a lazy root.
-    /// Returns `Error.InvalidNode` if the receiver is not a slab variant.
+    pub fn getSlabStorageMut(node_id: Id, pool: *Pool) Error!*Slab.Storage {
+        const idx = @intFromEnum(node_id);
+        if (pool.nodes.items(.state)[idx].kind() != .slab) return Error.InvalidNode;
+        return slabStorage(pool.nodes.items(.payload), idx);
+    }
+
     pub fn setSlabChunk(node_id: Id, pool: *Pool, intra_index: u16, chunk: *const [32]u8) Error!Id {
         std.debug.assert(intra_index < Slab.K);
 
         const idx = @intFromEnum(node_id);
         if (pool.nodes.items(.state)[idx].kind() != .slab) return Error.InvalidNode;
-        const old_storage = slabStorage(pool.nodes.items(.cache), idx);
+        const old_storage = slabStorage(pool.nodes.items(.payload), idx);
 
         const new_storage = try Slab.allocZero(pool.allocator);
         errdefer Slab.destroy(pool.allocator, new_storage);
@@ -359,11 +345,9 @@ pub const Id = enum(u32) {
         new_storage.chunks[intra_index] = chunk.*;
 
         const new_id = try pool.create();
-        // Re-fetch column slices after pool.create() — preheat may have
-        // realloc'd and invalidated any earlier slice we held.
         const new_idx = @intFromEnum(new_id);
         pool.nodes.items(.state)[new_idx] = State.initInUse(.slab, 0);
-        pool.nodes.items(.cache)[new_idx] = @ptrCast(new_storage);
+        pool.nodes.items(.payload)[new_idx] = ptrAsPayload(@ptrCast(new_storage));
         pool.nodes.items(.root)[new_idx] = lazy_sentinel;
         return new_id;
     }
@@ -382,7 +366,7 @@ pub const Id = enum(u32) {
 
         const idx = @intFromEnum(node_id);
         if (pool.nodes.items(.state)[idx].kind() != .slab) return Error.InvalidNode;
-        const old_storage = slabStorage(pool.nodes.items(.cache), idx);
+        const old_storage = slabStorage(pool.nodes.items(.payload), idx);
 
         const new_storage = try Slab.allocZero(pool.allocator);
         errdefer Slab.destroy(pool.allocator, new_storage);
@@ -398,7 +382,7 @@ pub const Id = enum(u32) {
         const new_id = try pool.create();
         const new_idx = @intFromEnum(new_id);
         pool.nodes.items(.state)[new_idx] = State.initInUse(.slab, 0);
-        pool.nodes.items(.cache)[new_idx] = @ptrCast(new_storage);
+        pool.nodes.items(.payload)[new_idx] = ptrAsPayload(@ptrCast(new_storage));
         pool.nodes.items(.root)[new_idx] = lazy_sentinel;
         return new_id;
     }
@@ -418,8 +402,7 @@ pub const Id = enum(u32) {
         var path = gindex.toPath();
 
         const states = pool.nodes.items(.state);
-        const lefts = pool.nodes.items(.left);
-        const rights = pool.nodes.items(.right);
+        const payloads = pool.nodes.items(.payload);
 
         var node_id: Id = root_node;
         for (0..path_len) |_| {
@@ -428,7 +411,7 @@ pub const Id = enum(u32) {
             if (noChildKind(node_id, k)) {
                 return Error.InvalidNode;
             }
-            const c = childrenOf(node_id, k, lefts, rights);
+            const c = childrenOf(node_id, k, payloads);
             if (path.left()) {
                 node_id = c.left;
             } else {
@@ -467,8 +450,7 @@ pub const Id = enum(u32) {
         errdefer pool.free(path_parents);
 
         const states = pool.nodes.items(.state);
-        const lefts = pool.nodes.items(.left);
-        const rights = pool.nodes.items(.right);
+        const payloads = pool.nodes.items(.payload);
 
         var id = root_node;
 
@@ -478,7 +460,7 @@ pub const Id = enum(u32) {
             if (noChildKind(id, k)) {
                 return Error.InvalidNode;
             }
-            const c = childrenOf(id, k, lefts, rights);
+            const c = childrenOf(id, k, payloads);
             if (path.left()) {
                 path_lefts[i] = path_parents[i + 1];
                 path_rights[i] = c.right;
@@ -498,7 +480,7 @@ pub const Id = enum(u32) {
             if (noChildKind(id, k)) {
                 return Error.InvalidNode;
             }
-            const c = childrenOf(id, k, lefts, rights);
+            const c = childrenOf(id, k, payloads);
             if (path.left()) {
                 path_lefts[path_len - 1] = node_id;
                 path_rights[path_len - 1] = c.right;
@@ -548,8 +530,7 @@ pub const Id = enum(u32) {
         // `lefts`/`rights` (4 B/visit). Bind once outside the index loop —
         // no allocations occur inside.
         const states = pool.nodes.items(.state);
-        const lefts = pool.nodes.items(.left);
-        const rights = pool.nodes.items(.right);
+        const payloads = pool.nodes.items(.payload);
 
         // For each index specified
         for (0..out.len) |i| {
@@ -568,7 +549,7 @@ pub const Id = enum(u32) {
                 if (noChildKind(node_id, k)) {
                     return Error.InvalidNode;
                 }
-                const c = childrenOf(node_id, k, lefts, rights);
+                const c = childrenOf(node_id, k, payloads);
                 parents_buf[bit_i] = node_id;
                 if (path.left()) {
                     node_id = c.left;
@@ -643,8 +624,7 @@ pub const Id = enum(u32) {
         // Bind navigation columns once. Refresh after any allocation that
         // could grow the underlying MAL (alloc/rebind/unref-driven preheat).
         var states = pool.nodes.items(.state);
-        var lefts = pool.nodes.items(.left);
-        var rights = pool.nodes.items(.right);
+        var payloads = pool.nodes.items(.payload);
 
         // For each index specified, maintain/update path_lefts and path_rights from root (depth 0) all the way to path_len
         // but only allocate and update path_parents from the next shared depth to path_len
@@ -661,8 +641,7 @@ pub const Id = enum(u32) {
                 path_len - @as(Depth, @intCast(@bitSizeOf(usize) - @clz(index ^ indices[i + 1])));
             if (try pool.alloc(path_parents[next_d_offset..path_len])) {
                 states = pool.nodes.items(.state);
-                lefts = pool.nodes.items(.left);
-                rights = pool.nodes.items(.right);
+                payloads = pool.nodes.items(.payload);
             }
 
             var path = gindex.toPath();
@@ -702,7 +681,7 @@ pub const Id = enum(u32) {
                 if (noChildKind(node_id, k)) {
                     return Error.InvalidNode;
                 }
-                const c = childrenOf(node_id, k, lefts, rights);
+                const c = childrenOf(node_id, k, payloads);
 
                 if (path.left()) {
                     path_lefts[bit_i] = path_parents[bit_i + 1];
@@ -725,7 +704,7 @@ pub const Id = enum(u32) {
                 if (noChildKind(node_id, k)) {
                     return Error.InvalidNode;
                 }
-                const c = childrenOf(node_id, k, lefts, rights);
+                const c = childrenOf(node_id, k, payloads);
                 if (path.left()) {
                     path_lefts[path_len - 1] = nodes_in[i];
                     path_rights[path_len - 1] = c.right;
@@ -759,8 +738,7 @@ pub const Id = enum(u32) {
             // node_id we read above is preserved by value, but the column slices
             // may be stale if any allocation happened. Refresh defensively.
             states = pool.nodes.items(.state);
-            lefts = pool.nodes.items(.left);
-            rights = pool.nodes.items(.right);
+            payloads = pool.nodes.items(.payload);
         }
 
         return node_id;
@@ -794,8 +772,7 @@ pub const Id = enum(u32) {
         errdefer pool.free(path_parents);
 
         const states = pool.nodes.items(.state);
-        const lefts = pool.nodes.items(.left);
-        const rights = pool.nodes.items(.right);
+        const payloads = pool.nodes.items(.payload);
 
         var node_id = root_node;
 
@@ -805,7 +782,7 @@ pub const Id = enum(u32) {
             if (noChildKind(node_id, k)) {
                 return Error.InvalidNode;
             }
-            const c = childrenOf(node_id, k, lefts, rights);
+            const c = childrenOf(node_id, k, payloads);
 
             const depthi = path_len - i - 1;
             const go_left = isLeftIndex(depthi, index);
@@ -827,7 +804,7 @@ pub const Id = enum(u32) {
             if (noChildKind(node_id, k)) {
                 return Error.InvalidNode;
             }
-            const c = childrenOf(node_id, k, lefts, rights);
+            const c = childrenOf(node_id, k, payloads);
 
             const go_left_last = isLeftIndex(0, index);
             if (go_left_last) {
@@ -889,8 +866,7 @@ pub const Id = enum(u32) {
         var d_offset: Depth = 0;
 
         var states = pool.nodes.items(.state);
-        var lefts = pool.nodes.items(.left);
-        var rights = pool.nodes.items(.right);
+        var payloads = pool.nodes.items(.payload);
 
         // For each index specified, maintain/update path_lefts and path_rights from root (depth 0) all the way to path_len
         // but only allocate and update path_parents from the next shared depth to path_len
@@ -907,8 +883,7 @@ pub const Id = enum(u32) {
 
             if (try pool.alloc(path_parents_buf[next_d_offset..path_len])) {
                 states = pool.nodes.items(.state);
-                lefts = pool.nodes.items(.left);
-                rights = pool.nodes.items(.right);
+                payloads = pool.nodes.items(.payload);
             }
 
             var path = gindex.toPath();
@@ -948,7 +923,7 @@ pub const Id = enum(u32) {
                 if (noChildKind(node_id, k)) {
                     return Error.InvalidNode;
                 }
-                const c = childrenOf(node_id, k, lefts, rights);
+                const c = childrenOf(node_id, k, payloads);
 
                 if (path.left()) {
                     path_lefts_buf[bit_i] = path_parents_buf[bit_i + 1];
@@ -971,7 +946,7 @@ pub const Id = enum(u32) {
                 if (noChildKind(node_id, k)) {
                     return Error.InvalidNode;
                 }
-                const c = childrenOf(node_id, k, lefts, rights);
+                const c = childrenOf(node_id, k, payloads);
                 if (path.left()) {
                     path_lefts_buf[path_len - 1] = nodes_in[i];
                     path_rights_buf[path_len - 1] = c.right;
@@ -1003,8 +978,7 @@ pub const Id = enum(u32) {
             d_offset = next_d_offset;
             // Refresh slices after potential pool growth via rebind/unref paths.
             states = pool.nodes.items(.state);
-            lefts = pool.nodes.items(.left);
-            rights = pool.nodes.items(.right);
+            payloads = pool.nodes.items(.payload);
         }
 
         return node_id;
@@ -1111,27 +1085,21 @@ pub const Pool = struct {
         pool.nodes = list.slice();
 
         // Pre-populate zero-hash sentinels at indices 0..max_depth-1.
-        // These are never freed and never ref-counted.
         for (0..max_depth) |i| {
             pool.nodes.set(@intCast(i), .{
-                .left = @enumFromInt(0),
-                .right = @enumFromInt(0),
+                .payload = 0,
                 .root = getZeroHash(@intCast(i)).*,
-                .cache = null,
                 .state = State.initInUse(.zero, 0),
             });
         }
 
         // Initialize the free list across the user slots. `state` carries
-        // kind=free + next_free link in the low 31 bits; `cache` must be
-        // null so no future path dereferences a stale pointer; other fields
-        // can stay undefined.
+        // kind=free + next_free link in the low 31 bits; `payload`/`root`
+        // are unused for free slots.
         const state_col = pool.nodes.items(.state);
-        const cache_col = pool.nodes.items(.cache);
         for (max_depth..pool.nodes.len) |i| {
             const next: Id = @enumFromInt(@as(u32, @intCast(i + 1)));
             state_col[i] = State.initFree(next);
-            cache_col[i] = null;
         }
 
         return pool;
@@ -1139,21 +1107,19 @@ pub const Pool = struct {
 
     pub fn deinit(self: *Pool) void {
         // Release heap payloads owned by `.slab` and `.branch_struct` slots.
-        // The MultiArrayList only owns its own column buffers; cache pointers
-        // are heap-allocated separately and become unreachable when callers
-        // tear down the pool without first unref'ing every root.
+        // The MultiArrayList only owns its own column buffers; payload
+        // pointers are heap-allocated separately and become unreachable
+        // when callers tear down the pool without first unref'ing every
+        // root.
         const states = self.nodes.items(.state);
-        const caches = self.nodes.items(.cache);
-        for (states, caches) |s, cache_opt| {
-            const ptr = cache_opt orelse continue;
+        const payloads = self.nodes.items(.payload);
+        for (states, 0..) |s, i| {
             if (s.isFree()) continue;
+            const idx: u32 = @intCast(i);
             switch (s.kind()) {
-                .slab => Slab.destroy(
-                    self.allocator,
-                    @as(*Slab.Storage, @ptrCast(@alignCast(ptr))),
-                ),
+                .slab => Slab.destroy(self.allocator, slabStorage(payloads, idx)),
                 .branch_struct => {
-                    const struct_ref: *BranchStructRef = @ptrCast(@alignCast(ptr));
+                    const struct_ref = branchStructRef(payloads, idx);
                     struct_ref.deinit(struct_ref.ptr, self.allocator);
                     self.allocator.destroy(struct_ref);
                 },
@@ -1176,11 +1142,9 @@ pub const Pool = struct {
         self.nodes = list.slice();
 
         const state_col = self.nodes.items(.state);
-        const cache_col = self.nodes.items(.cache);
         for (size..new_size) |i| {
             const next: Id = @enumFromInt(@as(u32, @intCast(i + 1)));
             state_col[i] = State.initFree(next);
-            cache_col[i] = null;
         }
     }
 
@@ -1193,8 +1157,8 @@ pub const Pool = struct {
         return count;
     }
 
-    /// Pop the next free slot from the free list. Caller must initialise the
-    /// returned slot.
+    /// Pop the next free slot from the free list. Caller must initialise
+    /// the returned slot.
     inline fn createUnsafe(self: *Pool) Id {
         const n: Id = self.next_free_node;
         const idx = @intFromEnum(n);
@@ -1215,9 +1179,8 @@ pub const Pool = struct {
     pub fn createLeaf(self: *Pool, hash: *const [32]u8) Allocator.Error!Id {
         const node_id = try self.create();
         const idx = @intFromEnum(node_id);
-        self.nodes.items(.state)[idx] = State.initInUse(.leaf, 0);
         self.nodes.items(.root)[idx] = hash.*;
-        self.nodes.items(.cache)[idx] = null;
+        self.nodes.items(.state)[idx] = State.initInUse(.leaf, 0);
         return node_id;
     }
 
@@ -1237,10 +1200,8 @@ pub const Pool = struct {
         std.debug.assert(!states[@intFromEnum(left_id)].isFree());
         std.debug.assert(!states[@intFromEnum(right_id)].isFree());
         states[idx] = State.initInUse(.branch, 0);
-        self.nodes.items(.left)[idx] = left_id;
-        self.nodes.items(.right)[idx] = right_id;
+        self.nodes.items(.payload)[idx] = packChildren(left_id, right_id);
         self.nodes.items(.root)[idx] = lazy_sentinel;
-        self.nodes.items(.cache)[idx] = null;
         try self.refUnsafe(left_id);
         try self.refUnsafe(right_id);
         return node_id;
@@ -1261,9 +1222,9 @@ pub const Pool = struct {
 
         const node_id = try self.create();
         const idx = @intFromEnum(node_id);
-        self.nodes.items(.state)[idx] = State.initInUse(.slab, 0);
-        self.nodes.items(.cache)[idx] = @ptrCast(storage);
+        self.nodes.items(.payload)[idx] = ptrAsPayload(@ptrCast(storage));
         self.nodes.items(.root)[idx] = lazy_sentinel;
+        self.nodes.items(.state)[idx] = State.initInUse(.slab, 0);
         return node_id;
     }
 
@@ -1309,13 +1270,11 @@ pub const Pool = struct {
 
         const node_id = try self.create();
         const idx = @intFromEnum(node_id);
-        self.nodes.items(.state)[idx] = State.initInUse(.branch_struct, 0);
-        // `left`/`right` unused — set to Id(0) for safety (a benign bit pattern
-        // matching `noChild` semantics).
-        self.nodes.items(.left)[idx] = @enumFromInt(0);
-        self.nodes.items(.right)[idx] = @enumFromInt(0);
-        self.nodes.items(.cache)[idx] = @ptrCast(ref_ptr);
+        // `payload` carries the encoded `*BranchStructRef`; this slot has
+        // no Id-children (`noChild` returns true for branch_struct).
+        self.nodes.items(.payload)[idx] = ptrAsPayload(@ptrCast(ref_ptr));
         self.nodes.items(.root)[idx] = lazy_sentinel;
+        self.nodes.items(.state)[idx] = State.initInUse(.branch_struct, 0);
         return node_id;
     }
 
@@ -1327,7 +1286,7 @@ pub const Pool = struct {
         if (self.nodes.items(.state)[idx].kind() != .branch_struct) {
             return Error.InvalidNode;
         }
-        const ref_ptr = branchStructRef(self.nodes.items(.cache), idx);
+        const ref_ptr = branchStructRef(self.nodes.items(.payload), idx);
         return @ptrCast(@alignCast(ref_ptr.ptr));
     }
 
@@ -1342,7 +1301,7 @@ pub const Pool = struct {
         if (self.nodes.items(.state)[idx].kind() != .branch_struct) {
             return Error.InvalidNode;
         }
-        const ref_ptr = branchStructRef(self.nodes.items(.cache), idx);
+        const ref_ptr = branchStructRef(self.nodes.items(.payload), idx);
         return try ref_ptr.to_tree(ref_ptr.ptr, self);
     }
 
@@ -1357,7 +1316,7 @@ pub const Pool = struct {
         if (self.nodes.items(.state)[idx].kind() != .slab) {
             return Error.InvalidNode;
         }
-        const storage = slabStorage(self.nodes.items(.cache), idx);
+        const storage = slabStorage(self.nodes.items(.payload), idx);
 
         // Build a depth-k_log2 perfect tree spanning all K chunks. We always
         // emit K leaves (even those at indices >= storage.len, which are
@@ -1392,11 +1351,9 @@ pub const Pool = struct {
             // errdefer-driven cleanup walks safely. Caller is expected to
             // overwrite via `rebind`.
             const idx = @intFromEnum(out[i]);
-            self.nodes.items(.state)[idx] = State.initInUse(.branch, 0);
-            self.nodes.items(.left)[idx] = @enumFromInt(0);
-            self.nodes.items(.right)[idx] = @enumFromInt(0);
+            self.nodes.items(.payload)[idx] = 0;
             self.nodes.items(.root)[idx] = lazy_sentinel;
-            self.nodes.items(.cache)[idx] = null;
+            self.nodes.items(.state)[idx] = State.initInUse(.branch, 0);
         }
         return allocated;
     }
@@ -1416,22 +1373,20 @@ pub const Pool = struct {
         std.debug.assert(out.len == right_ids.len);
 
         const state_col = self.nodes.items(.state);
-        const left_col = self.nodes.items(.left);
-        const right_col = self.nodes.items(.right);
+        const payload_col = self.nodes.items(.payload);
         const root_col = self.nodes.items(.root);
-        const cache_col = self.nodes.items(.cache);
 
         for (0..out.len) |i| {
             const idx = @intFromEnum(out[i]);
             std.debug.assert(idx < self.nodes.len);
 
-            // Preserve existing ref count: a previous iteration in this
-            // same rebind() call may have already ref'd this slot.
+            // Preserve the existing ref count: an earlier iteration in this
+            // same rebind() call may have already ref'd this slot (when
+            // out[i] is the parent of an earlier out[j]), and resetting rc
+            // here would orphan that reference.
             state_col[idx].setKind(.branch);
-            left_col[idx] = left_ids[i];
-            right_col[idx] = right_ids[i];
+            payload_col[idx] = packChildren(left_ids[i], right_ids[i]);
             root_col[idx] = lazy_sentinel;
-            cache_col[idx] = null;
 
             try self.refUnsafe(left_ids[i]);
             try self.refUnsafe(right_ids[i]);
@@ -1439,21 +1394,14 @@ pub const Pool = struct {
     }
 
     pub fn ref(self: *Pool, node_id: Id) Error!void {
-        // Out of bounds: silently no-op (matches legacy behavior).
-        if (@intFromEnum(node_id) >= self.nodes.len) {
-            return;
-        }
-        // Free slot: silently no-op (matches legacy behavior).
-        if (self.nodes.items(.state)[@intFromEnum(node_id)].kind() == .free) {
-            return;
-        }
+        if (@intFromEnum(node_id) >= self.nodes.len) return;
+        if (self.nodes.items(.state)[@intFromEnum(node_id)].isFree()) return;
         try self.refUnsafe(node_id);
     }
 
     /// Increment the reference count. Assumes `node_id` is in bounds and not free.
     fn refUnsafe(self: *Pool, node_id: Id) Error!void {
         const s = &self.nodes.items(.state)[@intFromEnum(node_id)];
-        // Zero nodes are sentinels and not ref counted.
         if (s.kind() == .zero) return;
         _ = try s.incRefCount();
     }
@@ -1495,7 +1443,7 @@ pub const Pool = struct {
 
             // Decrement the reference count, saturating at zero. A node at
             // rc==0 (freshly created and never additionally ref'd) still
-            // gets freed on unref (legacy semantics preserved by decRefCount).
+            // gets freed on unref (legacy semantics).
             const new_rc = states[@intFromEnum(id)].decRefCount();
 
             if (new_rc != 0) {
@@ -1506,24 +1454,22 @@ pub const Pool = struct {
             // Reached zero: traverse children before freeing the slot.
             switch (k) {
                 .branch => {
-                    stack[sp] = self.nodes.items(.right)[@intFromEnum(id)];
+                    const c = self.nodes.items(.payload)[@intFromEnum(id)];
+                    stack[sp] = unpackRight(c);
                     sp += 1;
-                    current = self.nodes.items(.left)[@intFromEnum(id)];
+                    current = unpackLeft(c);
                 },
                 .slab => {
                     // Free the heap-allocated Storage owned by this slab Node.
-                    const storage = slabStorage(self.nodes.items(.cache), @intFromEnum(id));
+                    const storage = slabStorage(self.nodes.items(.payload), @intFromEnum(id));
                     Slab.destroy(self.allocator, storage);
-                    self.nodes.items(.cache)[@intFromEnum(id)] = null;
                     current = null;
                 },
                 .branch_struct => {
-                    // Free the wrapped struct + the BranchStructRef heap-allocation
-                    // owned by this slot.
-                    const ref_ptr = branchStructRef(self.nodes.items(.cache), @intFromEnum(id));
+                    // Free the wrapped struct + the BranchStructRef heap-allocation.
+                    const ref_ptr = branchStructRef(self.nodes.items(.payload), @intFromEnum(id));
                     ref_ptr.deinit(ref_ptr.ptr, self.allocator);
                     self.allocator.destroy(ref_ptr);
-                    self.nodes.items(.cache)[@intFromEnum(id)] = null;
                     current = null;
                 },
                 else => {
@@ -1533,7 +1479,6 @@ pub const Pool = struct {
             // Return the node to the free list. Free-list link is encoded
             // in `state` (the State.initFree representation).
             states[@intFromEnum(id)] = State.initFree(self.next_free_node);
-            self.nodes.items(.cache)[@intFromEnum(id)] = null;
             self.next_free_node = id;
         }
     }
@@ -1579,8 +1524,7 @@ pub fn fillToLength(pool: *Pool, leaf: Id, depth: Depth, length: usize) Error!Id
     const path_rights = rights_buf[0..path_len];
 
     const states = pool.nodes.items(.state);
-    const lefts = pool.nodes.items(.left);
-    const rights = pool.nodes.items(.right);
+    const payloads = pool.nodes.items(.payload);
 
     for (0..path_len - 1) |i| {
         const idx = @intFromEnum(node_id);
@@ -1588,7 +1532,7 @@ pub fn fillToLength(pool: *Pool, leaf: Id, depth: Depth, length: usize) Error!Id
         if (noChildKind(node_id, k)) {
             return Error.InvalidNode;
         }
-        const c = childrenOf(node_id, k, lefts, rights);
+        const c = childrenOf(node_id, k, payloads);
         if (path.left()) {
             path_lefts[i] = path_parents[i + 1];
             path_rights[i] = c.right;
@@ -1606,7 +1550,7 @@ pub fn fillToLength(pool: *Pool, leaf: Id, depth: Depth, length: usize) Error!Id
         const idx = @intFromEnum(node_id);
         const k = states[idx].kind();
         if (noChildKind(node_id, k)) return Error.InvalidNode;
-        const c = childrenOf(node_id, k, lefts, rights);
+        const c = childrenOf(node_id, k, payloads);
         if (path.left()) {
             path_lefts[path_len - 1] = @enumFromInt(0);
             path_rights[path_len - 1] = c.right;
@@ -1694,8 +1638,7 @@ pub const DepthIterator = struct {
         if (self.index >= max_length) return Error.InvalidLength;
 
         const states = self.pool.nodes.items(.state);
-        const lefts = self.pool.nodes.items(.left);
-        const rights = self.pool.nodes.items(.right);
+        const payloads = self.pool.nodes.items(.payload);
 
         // Compute gindex for current index at the requested depth.
         const gindex = Gindex.fromUint(@intCast(@intFromEnum(self.base_gindex) | self.index));
@@ -1715,7 +1658,7 @@ pub const DepthIterator = struct {
             if (noChildKind(node_id, k)) {
                 return Error.InvalidNode;
             }
-            const c = childrenOf(node_id, k, lefts, rights);
+            const c = childrenOf(node_id, k, payloads);
             self.parents_buf[bit_i] = node_id;
             node_id = if (path.left()) c.left else c.right;
             path.next();
