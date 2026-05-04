@@ -15,7 +15,7 @@ pub const Error = error{
     /// Witness list length does not match the gindex path length.
     InvalidWitnessLength,
     /// Single-proof traversal encountered a second opaque (branch_struct or
-    /// slab) node after already materializing one. Opaque nodes are leaf-level
+    /// chunked_leaf) node after already materializing one. Opaque nodes are leaf-level
     /// in our tree model and must not nest along a single proof path.
     NestedOpaque,
 };
@@ -59,11 +59,11 @@ pub const SingleProof = struct {
 
 /// Returns true if the node is "opaque" — terminal in our PMT model but
 /// represents a navigable subtree underneath (branch_struct = deserialized
-/// container struct; slab = K packed chunks). Proof traversal must
+/// container struct; chunked_leaf = K packed chunks). Proof traversal must
 /// materialize a temporary explicit subtree before walking inside.
 inline fn isOpaqueNode(pool: *Node.Pool, node_id: Node.Id) bool {
     const kind = pool.nodes.items(.state)[@intFromEnum(node_id)].kind();
-    return kind == .branch_struct or kind == .slab;
+    return kind == .branch_struct or kind == .chunked_leaf;
 }
 
 /// Materializes a temporary navigable subtree for an opaque node. Caller is
@@ -74,13 +74,13 @@ inline fn materializeOpaque(pool: *Node.Pool, node_id: Node.Id) Node.Error!Node.
     const kind = pool.nodes.items(.state)[@intFromEnum(node_id)].kind();
     return switch (kind) {
         .branch_struct => try pool.materializeBranchStruct(node_id),
-        .slab => try pool.materializeSlab(node_id),
+        .chunked_leaf => try pool.materializeChunkedLeaf(node_id),
         else => unreachable,
     };
 }
 
 /// Proof traversal needs real left/right child nodes. For an opaque node
-/// (branch_struct or slab), materialize a temporary plain tree and append it
+/// (branch_struct or chunked_leaf), materialize a temporary plain tree and append it
 /// to the deferred-unref list so it stays alive until proof creation finishes.
 fn materializeIfOpaque(
     allocator: Allocator,
@@ -112,7 +112,7 @@ pub fn createSingleProof(
     var witnesses = try allocator.alloc([32]u8, path_len);
     errdefer allocator.free(witnesses);
 
-    // A single proof path crosses at most one opaque (branch_struct/slab)
+    // A single proof path crosses at most one opaque (branch_struct/chunked_leaf)
     // boundary in well-formed SSZ trees — opaque nodes are leaf-level and the
     // gindex must descend into one container/list. Track at most one
     // materialized root and free it on exit.
@@ -488,7 +488,7 @@ fn nodeToCompactMultiProof(
         return leaves;
     }
 
-    // Materialize opaque (branch_struct/slab) nodes lazily so we can navigate
+    // Materialize opaque (branch_struct/chunked_leaf) nodes lazily so we can navigate
     // into their children. The temporary root is owned by `temporary_roots`
     // and unref'd when the outer caller exits.
     const current = try materializeIfOpaque(allocator, pool, node_id, temporary_roots);

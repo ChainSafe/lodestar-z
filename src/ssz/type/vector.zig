@@ -22,8 +22,8 @@ pub fn FixedVectorType(comptime ST: type, comptime _length: comptime_int, compti
         if (_length <= 0) {
             @compileError("length must be greater than 0");
         }
-        if (_opts.slab and !isBasicType(ST)) {
-            @compileError("FixedVectorType: opts.slab=true requires isBasicType(Element)");
+        if (_opts.chunked_leaf and !isBasicType(ST)) {
+            @compileError("FixedVectorType: opts.chunked_leaf=true requires isBasicType(Element)");
         }
     }
     return struct {
@@ -39,9 +39,9 @@ pub fn FixedVectorType(comptime ST: type, comptime _length: comptime_int, compti
         pub const fixed_size: usize = Element.fixed_size * length;
         pub const chunk_count: usize = if (isBasicType(Element)) std.math.divCeil(usize, fixed_size, 32) catch unreachable else length;
         pub const chunk_depth: u8 = maxChunksToDepth(chunk_count);
-        pub const use_slab: bool = _opts.slab;
-        const Slab = if (use_slab) @import("persistent_merkle_tree").Slab else struct {};
-        const slab_depth: u8 = if (use_slab) chunk_depth - Slab.k_log2 else 0;
+        pub const use_chunked_leaf: bool = _opts.chunked_leaf;
+        const ChunkedLeaf = if (use_chunked_leaf) @import("persistent_merkle_tree").ChunkedLeaf else struct {};
+        const chunked_leaf_depth: u8 = if (use_chunked_leaf) chunk_depth - ChunkedLeaf.k_log2 else 0;
 
         pub const default_value: Type = [_]Element.Type{Element.default_value} ** length;
 
@@ -164,21 +164,21 @@ pub fn FixedVectorType(comptime ST: type, comptime _length: comptime_int, compti
                     return error.InvalidSize;
                 }
 
-                if (comptime use_slab) {
-                    var it = Node.FillWithContentsIterator.initWithOffset(pool, slab_depth, Slab.k_log2);
+                if (comptime use_chunked_leaf) {
+                    var it = Node.FillWithContentsIterator.initWithOffset(pool, chunked_leaf_depth, ChunkedLeaf.k_log2);
                     errdefer it.deinit();
 
-                    const bytes_per_slab: usize = Slab.K * 32;
+                    const bytes_per_chunked_leaf: usize = ChunkedLeaf.K * 32;
                     var byte_idx: usize = 0;
 
                     while (byte_idx < data.len) {
-                        var slab_buf: [Slab.K][32]u8 align(64) = [_][32]u8{[_]u8{0} ** 32} ** Slab.K;
+                        var chunked_leaf_buf: [ChunkedLeaf.K][32]u8 align(64) = [_][32]u8{[_]u8{0} ** 32} ** ChunkedLeaf.K;
                         const remaining = data.len - byte_idx;
-                        const slab_bytes = @min(remaining, bytes_per_slab);
-                        @memcpy(@as([*]u8, @ptrCast(&slab_buf))[0..slab_bytes], data[byte_idx..][0..slab_bytes]);
-                        const valid_chunks: u16 = @intCast((slab_bytes + 31) / 32);
-                        try it.append(try pool.createSlab(&slab_buf, valid_chunks));
-                        byte_idx += slab_bytes;
+                        const chunked_leaf_bytes = @min(remaining, bytes_per_chunked_leaf);
+                        @memcpy(@as([*]u8, @ptrCast(&chunked_leaf_buf))[0..chunked_leaf_bytes], data[byte_idx..][0..chunked_leaf_bytes]);
+                        const valid_chunks: u16 = @intCast((chunked_leaf_bytes + 31) / 32);
+                        try it.append(try pool.createChunkedLeaf(&chunked_leaf_buf, valid_chunks));
+                        byte_idx += chunked_leaf_bytes;
                     }
 
                     return try it.finish();
@@ -206,27 +206,27 @@ pub fn FixedVectorType(comptime ST: type, comptime _length: comptime_int, compti
             }
 
             pub fn toValue(node: Node.Id, pool: *Node.Pool, out: *Type) !void {
-                if (comptime use_slab) {
+                if (comptime use_chunked_leaf) {
                     const items_per_chunk = 32 / Element.fixed_size;
-                    const slab_count = (chunk_count + Slab.K - 1) / Slab.K;
-                    var slab_ids: [slab_count]Node.Id = undefined;
-                    try node.getNodesAtDepth(pool, slab_depth, 0, &slab_ids);
+                    const chunked_leaf_count = (chunk_count + ChunkedLeaf.K - 1) / ChunkedLeaf.K;
+                    var chunked_leaf_ids: [chunked_leaf_count]Node.Id = undefined;
+                    try node.getNodesAtDepth(pool, chunked_leaf_depth, 0, &chunked_leaf_ids);
 
                     const state_col = pool.nodes.items(.state);
                     var item_idx: usize = 0;
-                    outer: for (slab_ids) |sid| {
-                        // Zero subtree at slab boundary == all-zero values.
+                    outer: for (chunked_leaf_ids) |sid| {
+                        // Zero subtree at chunked_leaf boundary == all-zero values.
                         if (state_col[@intFromEnum(sid)].kind() == .zero) {
-                            const items_in_slab = @min(Slab.K * items_per_chunk, length - item_idx);
-                            for (0..items_in_slab) |i| {
+                            const items_in_chunked_leaf = @min(ChunkedLeaf.K * items_per_chunk, length - item_idx);
+                            for (0..items_in_chunked_leaf) |i| {
                                 out[item_idx + i] = std.mem.zeroes(Element.Type);
                             }
-                            item_idx += items_in_slab;
+                            item_idx += items_in_chunked_leaf;
                             if (item_idx >= length) break :outer;
                             continue;
                         }
-                        const chunks = try sid.getSlabChunks(pool);
-                        for (0..Slab.K) |intra_chunk| {
+                        const chunks = try sid.getChunkedLeafChunks(pool);
+                        for (0..ChunkedLeaf.K) |intra_chunk| {
                             if (item_idx >= length) break :outer;
                             const items_in_chunk = @min(items_per_chunk, length - item_idx);
                             for (0..items_in_chunk) |i| {
@@ -264,30 +264,30 @@ pub fn FixedVectorType(comptime ST: type, comptime _length: comptime_int, compti
             }
 
             pub fn fromValue(pool: *Node.Pool, value: *const Type) !Node.Id {
-                if (comptime use_slab) {
-                    var it = Node.FillWithContentsIterator.initWithOffset(pool, slab_depth, Slab.k_log2);
+                if (comptime use_chunked_leaf) {
+                    var it = Node.FillWithContentsIterator.initWithOffset(pool, chunked_leaf_depth, ChunkedLeaf.k_log2);
                     errdefer it.deinit();
 
                     const items_per_chunk = 32 / Element.fixed_size;
-                    const items_per_slab: usize = items_per_chunk * Slab.K;
+                    const items_per_chunked_leaf: usize = items_per_chunk * ChunkedLeaf.K;
                     var item_idx: usize = 0;
 
                     while (item_idx < length) {
-                        var slab_buf: [Slab.K][32]u8 align(64) = [_][32]u8{[_]u8{0} ** 32} ** Slab.K;
+                        var chunked_leaf_buf: [ChunkedLeaf.K][32]u8 align(64) = [_][32]u8{[_]u8{0} ** 32} ** ChunkedLeaf.K;
                         const remaining = length - item_idx;
-                        const items_in_slab = @min(remaining, items_per_slab);
+                        const items_in_chunked_leaf = @min(remaining, items_per_chunked_leaf);
 
-                        for (0..items_in_slab) |k| {
-                            const slab_chunk_idx = k / items_per_chunk;
+                        for (0..items_in_chunked_leaf) |k| {
+                            const chunked_leaf_chunk_idx = k / items_per_chunk;
                             const intra_chunk = k % items_per_chunk;
                             const dst_off = intra_chunk * Element.fixed_size;
-                            const dst_slice = slab_buf[slab_chunk_idx][dst_off .. dst_off + Element.fixed_size];
+                            const dst_slice = chunked_leaf_buf[chunked_leaf_chunk_idx][dst_off .. dst_off + Element.fixed_size];
                             _ = Element.serializeIntoBytes(&value[item_idx + k], dst_slice);
                         }
 
-                        const valid_chunks: u16 = @intCast((items_in_slab + items_per_chunk - 1) / items_per_chunk);
-                        try it.append(try pool.createSlab(&slab_buf, valid_chunks));
-                        item_idx += items_in_slab;
+                        const valid_chunks: u16 = @intCast((items_in_chunked_leaf + items_per_chunk - 1) / items_per_chunk);
+                        try it.append(try pool.createChunkedLeaf(&chunked_leaf_buf, valid_chunks));
+                        item_idx += items_in_chunked_leaf;
                     }
 
                     return try it.finish();
@@ -317,25 +317,25 @@ pub fn FixedVectorType(comptime ST: type, comptime _length: comptime_int, compti
             }
 
             pub fn serializeIntoBytes(node: Node.Id, pool: *Node.Pool, out: []u8) !usize {
-                if (comptime use_slab) {
-                    const slab_count = (chunk_count + Slab.K - 1) / Slab.K;
-                    var slab_ids: [slab_count]Node.Id = undefined;
-                    try node.getNodesAtDepth(pool, slab_depth, 0, &slab_ids);
+                if (comptime use_chunked_leaf) {
+                    const chunked_leaf_count = (chunk_count + ChunkedLeaf.K - 1) / ChunkedLeaf.K;
+                    var chunked_leaf_ids: [chunked_leaf_count]Node.Id = undefined;
+                    try node.getNodesAtDepth(pool, chunked_leaf_depth, 0, &chunked_leaf_ids);
 
                     const state_col = pool.nodes.items(.state);
                     var byte_idx: usize = 0;
-                    outer: for (slab_ids) |sid| {
-                        // Zero subtree at slab boundary == all-zero output bytes.
+                    outer: for (chunked_leaf_ids) |sid| {
+                        // Zero subtree at chunked_leaf boundary == all-zero output bytes.
                         if (state_col[@intFromEnum(sid)].kind() == .zero) {
                             const remaining = fixed_size - byte_idx;
-                            const zero_bytes = @min(Slab.K * 32, remaining);
+                            const zero_bytes = @min(ChunkedLeaf.K * 32, remaining);
                             @memset(out[byte_idx..][0..zero_bytes], 0);
                             byte_idx += zero_bytes;
                             if (byte_idx >= fixed_size) break :outer;
                             continue;
                         }
-                        const chunks = try sid.getSlabChunks(pool);
-                        for (0..Slab.K) |intra_chunk| {
+                        const chunks = try sid.getChunkedLeafChunks(pool);
+                        for (0..ChunkedLeaf.K) |intra_chunk| {
                             if (byte_idx >= fixed_size) break :outer;
                             const remaining = fixed_size - byte_idx;
                             const bytes_to_copy = @min(remaining, 32);
@@ -1148,11 +1148,11 @@ test "VariableVectorType - default_root" {
     try std.testing.expectEqualSlices(u8, &expected_root, node.getRoot(&pool));
 }
 
-test "FixedVectorType opts.slab=true: round-trip fromValue -> tree -> toValue" {
+test "FixedVectorType opts.chunked_leaf=true: round-trip fromValue -> tree -> toValue" {
     const allocator = std.testing.allocator;
-    const Slab = @import("persistent_merkle_tree").Slab;
-    const length: usize = 2 * @as(usize, Slab.K) * 4 + 7;
-    const VecT = FixedVectorType(UintType(64), length, .{ .slab = true });
+    const ChunkedLeaf = @import("persistent_merkle_tree").ChunkedLeaf;
+    const length: usize = 2 * @as(usize, ChunkedLeaf.K) * 4 + 7;
+    const VecT = FixedVectorType(UintType(64), length, .{ .chunked_leaf = true });
 
     var pool = try Node.Pool.init(allocator, 4096);
     defer pool.deinit();
@@ -1167,18 +1167,18 @@ test "FixedVectorType opts.slab=true: round-trip fromValue -> tree -> toValue" {
     try VecT.tree.toValue(tree_id, &pool, &dst);
     for (src, dst) |a, b| try std.testing.expectEqual(a, b);
 
-    // Hash matches the leaf-path (non-slab) reference root.
+    // Hash matches the leaf-path (non-chunked_leaf) reference root.
     const VecLeafT = FixedVectorType(UintType(64), length, .{});
     const leaf_tree_id = try VecLeafT.tree.fromValue(&pool, &src);
     defer pool.unref(leaf_tree_id);
     try std.testing.expectEqualSlices(u8, leaf_tree_id.getRoot(&pool), tree_id.getRoot(&pool));
 }
 
-test "FixedVectorType opts.slab=true: serialize -> deserialize round-trip" {
+test "FixedVectorType opts.chunked_leaf=true: serialize -> deserialize round-trip" {
     const allocator = std.testing.allocator;
-    const Slab = @import("persistent_merkle_tree").Slab;
-    const length: usize = 2 * @as(usize, Slab.K) * 4;
-    const VecT = FixedVectorType(UintType(64), length, .{ .slab = true });
+    const ChunkedLeaf = @import("persistent_merkle_tree").ChunkedLeaf;
+    const length: usize = 2 * @as(usize, ChunkedLeaf.K) * 4;
+    const VecT = FixedVectorType(UintType(64), length, .{ .chunked_leaf = true });
 
     var pool = try Node.Pool.init(allocator, 4096);
     defer pool.deinit();

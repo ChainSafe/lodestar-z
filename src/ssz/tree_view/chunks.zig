@@ -15,17 +15,17 @@ const CloneOpts = @import("utils/clone_opts.zig").CloneOpts;
 
 /// Shared helpers for basic element types packed into chunks.
 ///
-/// `use_slab` selects between two leaf layouts:
+/// `use_chunked_leaf` selects between two leaf layouts:
 ///   * false (default) — one chunk per leaf, navigated by Node.Id.
-///   * true — slab-leaf navigation: the bottom `Slab.k_log2` levels of the
-///     tree are folded into a single Slab Node, addressed at `slab_depth =
-///     chunk_depth - Slab.k_log2`. get/set/getAllInto read and CoW-write
-///     chunk bytes through `Id.getSlabChunks` / `Id.setSlabChunk`.
+///   * true — chunked_leaf-leaf navigation: the bottom `ChunkedLeaf.k_log2` levels of the
+///     tree are folded into a single ChunkedLeaf Node, addressed at `chunked_leaf_depth =
+///     chunk_depth - ChunkedLeaf.k_log2`. get/set/getAllInto read and CoW-write
+///     chunk bytes through `Id.getChunkedLeafChunks` / `Id.setChunkedLeafChunk`.
 pub fn BasicPackedChunks(
     comptime ST: type,
     comptime chunk_depth: Depth,
     comptime items_per_chunk: usize,
-    comptime use_slab: bool,
+    comptime use_chunked_leaf: bool,
 ) type {
     return struct {
         state: TreeViewState,
@@ -34,11 +34,11 @@ pub fn BasicPackedChunks(
 
         const Self = @This();
 
-        // Slab-related comptime constants. Only meaningful when `use_slab = true`.
-        // The `else` placeholders keep the symbols valid in non-slab instantiations
-        // without referencing the Slab module.
-        const Slab = if (use_slab) @import("persistent_merkle_tree").Slab else struct {};
-        const slab_depth: Depth = if (use_slab) chunk_depth - Slab.k_log2 else 0;
+        // ChunkedLeaf-related comptime constants. Only meaningful when `use_chunked_leaf = true`.
+        // The `else` placeholders keep the symbols valid in non-chunked_leaf instantiations
+        // without referencing the ChunkedLeaf module.
+        const ChunkedLeaf = if (use_chunked_leaf) @import("persistent_merkle_tree").ChunkedLeaf else struct {};
+        const chunked_leaf_depth: Depth = if (use_chunked_leaf) chunk_depth - ChunkedLeaf.k_log2 else 0;
 
         pub fn init(self: *Self, allocator: Allocator, pool: *Node.Pool, root: Node.Id) !void {
             try self.state.init(allocator, pool, root);
@@ -62,20 +62,20 @@ pub fn BasicPackedChunks(
 
         pub fn get(self: *Self, index: usize) !Element {
             var value: Element = undefined;
-            if (comptime use_slab) {
+            if (comptime use_chunked_leaf) {
                 const chunk_idx = index / items_per_chunk;
-                const slab_idx = chunk_idx / Slab.K;
-                const intra_chunk = chunk_idx % Slab.K;
-                const slab_id = try self.state.getChildNode(Gindex.fromDepth(slab_depth, slab_idx));
+                const chunked_leaf_idx = chunk_idx / ChunkedLeaf.K;
+                const intra_chunk = chunk_idx % ChunkedLeaf.K;
+                const chunked_leaf_id = try self.state.getChildNode(Gindex.fromDepth(chunked_leaf_depth, chunked_leaf_idx));
                 // Navigation may land on a zero sentinel when the tree was built
                 // empty or sparsely (early-return path in tree.fromValue, or
-                // slab_idx beyond filled slabs). A zero subtree at the slab
-                // boundary is semantically an all-zero slab; the decoded value
+                // chunked_leaf_idx beyond filled chunked leaves). A zero subtree at the chunked_leaf
+                // boundary is semantically an all-zero chunked_leaf; the decoded value
                 // is therefore the element's zero value.
-                if (self.state.pool.nodes.items(.state)[@intFromEnum(slab_id)].kind() == .zero) {
+                if (self.state.pool.nodes.items(.state)[@intFromEnum(chunked_leaf_id)].kind() == .zero) {
                     return std.mem.zeroes(Element);
                 }
-                const chunks = try slab_id.getSlabChunks(self.state.pool);
+                const chunks = try chunked_leaf_id.getChunkedLeafChunks(self.state.pool);
                 ST.Element.tree.toValuePackedFromBytes(&chunks[intra_chunk], index, &value);
             } else {
                 const child_node = try self.state.getChildNode(Gindex.fromDepth(chunk_depth, index / items_per_chunk));
@@ -85,55 +85,55 @@ pub fn BasicPackedChunks(
         }
 
         pub fn set(self: *Self, index: usize, value: Element) !void {
-            if (comptime use_slab) {
+            if (comptime use_chunked_leaf) {
                 const chunk_idx = index / items_per_chunk;
-                const slab_idx = chunk_idx / Slab.K;
-                const intra_chunk = chunk_idx % Slab.K;
+                const chunked_leaf_idx = chunk_idx / ChunkedLeaf.K;
+                const intra_chunk = chunk_idx % ChunkedLeaf.K;
                 const intra_chunk_u16: u16 = @intCast(intra_chunk);
-                const gindex = Gindex.fromDepth(slab_depth, slab_idx);
+                const gindex = Gindex.fromDepth(chunked_leaf_depth, chunked_leaf_idx);
 
                 const existing_id = try self.state.getChildNode(gindex);
                 const state_col = self.state.pool.nodes.items(.state);
                 const existing_kind = state_col[@intFromEnum(existing_id)].kind();
 
                 // Path 1: navigation landed on a zero sentinel (sparse tree).
-                // Materialize a fresh zero-filled slab and mutate it in place
+                // Materialize a fresh zero-filled chunked_leaf and mutate it in place
                 // (rc=0 ⇒ exclusively owned by us). Then setChildNode publishes
                 // it to the cache and `changed` set.
                 if (existing_kind == .zero) {
-                    var zero_buf: [Slab.K][32]u8 align(64) = [_][32]u8{[_]u8{0} ** 32} ** Slab.K;
-                    const fresh_id = try self.state.pool.createSlab(&zero_buf, 0);
-                    const fresh_storage = try fresh_id.getSlabStorageMut(self.state.pool);
+                    var zero_buf: [ChunkedLeaf.K][32]u8 align(64) = [_][32]u8{[_]u8{0} ** 32} ** ChunkedLeaf.K;
+                    const fresh_id = try self.state.pool.createChunkedLeaf(&zero_buf, 0);
+                    const fresh_storage = try fresh_id.getChunkedLeafStorageMut(self.state.pool);
                     ST.Element.tree.fromValuePackedIntoChunk(&fresh_storage.chunks[intra_chunk], index, &value);
                     self.state.pool.nodes.items(.root)[@intFromEnum(fresh_id)] = Node.lazy_sentinel;
                     try self.state.setChildNode(gindex, fresh_id);
                     return;
                 }
 
-                // Path 2: existing slab is `transient` — exclusively owned by
+                // Path 2: existing chunked_leaf is `transient` — exclusively owned by
                 // this TreeView (rc==0, only the children_nodes cache holds it).
                 // This is the steady state after the first write produces a
-                // CoW slab. Mutate in place: byte-write into the heap chunks,
-                // accumulate dirty bits, invalidate the cached slab root.
+                // CoW chunked_leaf. Mutate in place: byte-write into the heap chunks,
+                // accumulate dirty bits, invalidate the cached chunked_leaf root.
                 // The gindex was already added to `changed` by the prior
-                // setChildNode call that produced this transient slab, so we
+                // setChildNode call that produced this transient chunked_leaf, so we
                 // do NOT call setChildNode again (which would unref-then-store
-                // the same Id and free our slab).
+                // the same Id and free our chunked_leaf).
                 if (state_col[@intFromEnum(existing_id)].refCount() == 0) {
-                    const storage = try existing_id.getSlabStorageMut(self.state.pool);
+                    const storage = try existing_id.getChunkedLeafStorageMut(self.state.pool);
                     ST.Element.tree.fromValuePackedIntoChunk(&storage.chunks[intra_chunk], index, &value);
                     self.state.pool.nodes.items(.root)[@intFromEnum(existing_id)] = Node.lazy_sentinel;
                     return;
                 }
 
-                // Path 3: shared slab (rc >= 1 — owned by the persistent tree).
-                // Must CoW: produce a fresh slab via setSlabChunk and publish
+                // Path 3: shared chunked_leaf (rc >= 1 — owned by the persistent tree).
+                // Must CoW: produce a fresh chunked_leaf via setChunkedLeafChunk and publish
                 // it. From this point onward subsequent writes hit Path 2.
-                const existing_storage = try existing_id.getSlabStorageMut(self.state.pool);
+                const existing_storage = try existing_id.getChunkedLeafStorageMut(self.state.pool);
                 var new_chunk: [32]u8 = existing_storage.chunks[intra_chunk];
                 ST.Element.tree.fromValuePackedIntoChunk(&new_chunk, index, &value);
-                const new_slab_id = try existing_id.setSlabChunk(self.state.pool, intra_chunk_u16, &new_chunk);
-                try self.state.setChildNode(gindex, new_slab_id);
+                const new_chunked_leaf_id = try existing_id.setChunkedLeafChunk(self.state.pool, intra_chunk_u16, &new_chunk);
+                try self.state.setChildNode(gindex, new_chunked_leaf_id);
             } else {
                 const gindex = Gindex.fromDepth(chunk_depth, index / items_per_chunk);
                 const child_node = try self.state.getChildNode(gindex);
@@ -160,29 +160,29 @@ pub fn BasicPackedChunks(
             if (values.len != len) return error.InvalidSize;
             if (len == 0) return values;
 
-            if (comptime use_slab) {
+            if (comptime use_chunked_leaf) {
                 const chunk_count = (len + items_per_chunk - 1) / items_per_chunk;
-                const slab_count = (chunk_count + Slab.K - 1) / Slab.K;
-                const slab_ids = try self.state.allocator.alloc(Node.Id, slab_count);
-                defer self.state.allocator.free(slab_ids);
-                try self.state.root.getNodesAtDepth(self.state.pool, slab_depth, 0, slab_ids);
+                const chunked_leaf_count = (chunk_count + ChunkedLeaf.K - 1) / ChunkedLeaf.K;
+                const chunked_leaf_ids = try self.state.allocator.alloc(Node.Id, chunked_leaf_count);
+                defer self.state.allocator.free(chunked_leaf_ids);
+                try self.state.root.getNodesAtDepth(self.state.pool, chunked_leaf_depth, 0, chunked_leaf_ids);
 
                 var item_idx: usize = 0;
-                outer: for (slab_ids) |sid| {
-                    // Slab boundary may be a zero sentinel for sparsely-filled
-                    // trees (e.g. an empty list grown via push, or slab slots
+                outer: for (chunked_leaf_ids) |sid| {
+                    // ChunkedLeaf boundary may be a zero sentinel for sparsely-filled
+                    // trees (e.g. an empty list grown via push, or chunked_leaf slots
                     // beyond the materialized range). A zero subtree is
                     // semantically all-zero chunks; emit zero values without
-                    // touching the (non-existent) slab payload.
+                    // touching the (non-existent) chunked_leaf payload.
                     if (self.state.pool.nodes.items(.state)[@intFromEnum(sid)].kind() == .zero) {
-                        const items_in_slab = @min(Slab.K * items_per_chunk, len - item_idx);
-                        @memset(values[item_idx..][0..items_in_slab], std.mem.zeroes(Element));
-                        item_idx += items_in_slab;
+                        const items_in_chunked_leaf = @min(ChunkedLeaf.K * items_per_chunk, len - item_idx);
+                        @memset(values[item_idx..][0..items_in_chunked_leaf], std.mem.zeroes(Element));
+                        item_idx += items_in_chunked_leaf;
                         if (item_idx >= len) break :outer;
                         continue;
                     }
-                    const chunks_ptr = try sid.getSlabChunks(self.state.pool);
-                    for (0..Slab.K) |intra_chunk| {
+                    const chunks_ptr = try sid.getChunkedLeafChunks(self.state.pool);
+                    for (0..ChunkedLeaf.K) |intra_chunk| {
                         if (item_idx >= len) break :outer;
                         const items_in_chunk = @min(items_per_chunk, len - item_idx);
                         for (0..items_in_chunk) |i| {
@@ -232,9 +232,9 @@ pub fn BasicPackedChunks(
         }
 
         fn populateAllNodes(self: *Self, chunk_count: usize) !void {
-            // Slab path doesn't pre-populate per-chunk Ids; getAllInto walks slabs
+            // ChunkedLeaf path doesn't pre-populate per-chunk Ids; getAllInto walks chunked leaves
             // directly. No-op to keep external API stable.
-            if (comptime use_slab) return;
+            if (comptime use_chunked_leaf) return;
 
             if (chunk_count == 0) return;
 

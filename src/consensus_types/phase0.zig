@@ -165,7 +165,7 @@ pub const SignedBeaconBlockHeader = ssz.FixedContainerType(struct {
 
 pub const EpochAttestations = ssz.VariableListType(PendingAttestation, preset.MAX_ATTESTATIONS * preset.SLOTS_PER_EPOCH);
 
-pub const Balances = ssz.FixedListType(p.Gwei, preset.VALIDATOR_REGISTRY_LIMIT, .{ .slab = true });
+pub const Balances = ssz.FixedListType(p.Gwei, preset.VALIDATOR_REGISTRY_LIMIT, .{ .chunked_leaf = true });
 
 pub const RandaoMixes = ssz.FixedVectorType(p.Bytes32, preset.EPOCHS_PER_HISTORICAL_VECTOR, .{});
 

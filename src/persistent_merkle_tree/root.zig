@@ -9,12 +9,12 @@ pub const Gindex = @import("gindex.zig").Gindex;
 pub const Node = @import("Node.zig");
 pub const View = @import("View.zig");
 pub const proof = @import("proof.zig");
-pub const Slab = @import("slab.zig");
+pub const ChunkedLeaf = @import("chunked_leaf.zig");
 
 test {
     testing.refAllDecls(@This());
     testing.refAllDecls(@import("node_test.zig"));
     testing.refAllDecls(@import("proof_test.zig"));
     testing.refAllDecls(@import("view_test.zig"));
-    testing.refAllDecls(@import("slab_test.zig"));
+    testing.refAllDecls(@import("chunked_leaf_test.zig"));
 }

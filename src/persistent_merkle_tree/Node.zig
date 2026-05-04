@@ -6,12 +6,12 @@
 //! Layout (3 columns total):
 //!   - `payload`: u64, overloaded by kind
 //!       branch        : low 32 = left Id,  high 32 = right Id
-//!       slab          : full 64-bit `*Slab.Storage` pointer
+//!       chunked_leaf          : full 64-bit `*ChunkedLeaf.Storage` pointer
 //!       branch_struct : full 64-bit `*BranchStructRef` pointer
 //!       free          : low 32 = next-free Id (high 32 unused)
 //!       zero/leaf     : unused (zero/leaf root lives in `root`)
 //!   - `root`:  [32]u8 — leaf bytes, zero hash, or cached subtree root
-//!     (`lazy_sentinel` = uncomputed for branch/slab/branch_struct)
+//!     (`lazy_sentinel` = uncomputed for branch/chunked_leaf/branch_struct)
 //!   - `state`: State (packed u32 — see `State` doc)
 //!
 //! Maximum compactness: kind+ref_count packed into one u32 (`State`), and
@@ -25,7 +25,7 @@ const getZeroHash = @import("hashing").getZeroHash;
 const max_depth = @import("hashing").max_depth;
 const Depth = @import("hashing").Depth;
 const Gindex = @import("gindex.zig").Gindex;
-const Slab = @import("slab.zig");
+const ChunkedLeaf = @import("chunked_leaf.zig");
 
 // Flat node fields (file-as-struct). Order doesn't affect SoA layout.
 payload: u64,
@@ -60,7 +60,7 @@ pub const NodeKind = enum(u8) {
     zero = 1,
     leaf = 2,
     branch = 3,
-    slab = 4,
+    chunked_leaf = 4,
     branch_struct = 5,
 };
 
@@ -87,8 +87,8 @@ pub const State = enum(u32) {
     pub inline fn isBranch(s: State) bool {
         return s.kind() == .branch;
     }
-    pub inline fn isSlab(s: State) bool {
-        return s.kind() == .slab;
+    pub inline fn isChunkedLeaf(s: State) bool {
+        return s.kind() == .chunked_leaf;
     }
     pub inline fn isBranchStruct(s: State) bool {
         return s.kind() == .branch_struct;
@@ -169,7 +169,7 @@ pub const BranchStructRef = struct {
 };
 
 /// Sentinel value for a lazy (uncomputed) `root` field on `branch` and
-/// `slab` variants. We use all-`0xFF` because cryptographic SHA-256 outputs
+/// `chunked_leaf` variants. We use all-`0xFF` because cryptographic SHA-256 outputs
 /// are extremely unlikely to equal this value (~1 in 2^256), avoiding the
 /// 1-byte tag overhead an `?[32]u8` Optional would add.
 pub const lazy_sentinel: [32]u8 = [_]u8{0xFF} ** 32;
@@ -190,7 +190,7 @@ inline fn unpackRight(p: u64) Id {
     return @enumFromInt(@as(u32, @intCast(p >> 32)));
 }
 
-/// Reinterpret a `payload` as a heap pointer (slab / branch_struct).
+/// Reinterpret a `payload` as a heap pointer (chunked_leaf / branch_struct).
 inline fn payloadAsPtr(p: u64) *anyopaque {
     return @ptrFromInt(p);
 }
@@ -222,7 +222,7 @@ inline fn childrenOf(
         },
         // `noChild` guards prevent reaching here for these variants.
         .leaf, .free => unreachable,
-        .slab => unreachable,
+        .chunked_leaf => unreachable,
         .branch_struct => unreachable,
     };
 }
@@ -234,13 +234,13 @@ inline fn noChildKind(node_id: Id, kind: NodeKind) bool {
         .zero => @intFromEnum(node_id) == 0,
         .branch => @intFromEnum(node_id) == 0,
         .free => true,
-        .slab => true,
+        .chunked_leaf => true,
         .branch_struct => true,
     };
 }
 
-/// Read the slab Storage pointer for a slot known to be `.slab`.
-inline fn slabStorage(payloads: []const u64, idx: u32) *Slab.Storage {
+/// Read the chunked_leaf Storage pointer for a slot known to be `.chunked_leaf`.
+inline fn chunkedLeafStorage(payloads: []const u64, idx: u32) *ChunkedLeaf.Storage {
     return @ptrCast(@alignCast(payloadAsPtr(payloads[idx])));
 }
 
@@ -275,7 +275,7 @@ pub const Id = enum(u32) {
             // ReleaseFast; if a stale Id reaches here, the switch dispatch
             // would silently misroute to another arm and read the slot's
             // bytes as a valid variant — typically manifesting as a SEGV deep
-            // inside the .slab arm. A `@panic` cannot be elided and surfaces
+            // inside the .chunked_leaf arm. A `@panic` cannot be elided and surfaces
             // the UAF directly.
             .free => @panic("getRoot called on .free slot — use-after-free"),
             .branch => {
@@ -290,13 +290,13 @@ pub const Id = enum(u32) {
                 roots[idx] = hash;
                 return &roots[idx];
             },
-            .slab => {
+            .chunked_leaf => {
                 if (!std.mem.eql(u8, &roots[idx], &lazy_sentinel)) {
                     return &roots[idx];
                 }
-                const storage = slabStorage(pool.nodes.items(.payload), idx);
+                const storage = chunkedLeafStorage(pool.nodes.items(.payload), idx);
                 var hash: [32]u8 = undefined;
-                Slab.computeRoot(storage, &hash);
+                ChunkedLeaf.computeRoot(storage, &hash);
                 roots[idx] = hash;
                 return &roots[idx];
             },
@@ -327,33 +327,33 @@ pub const Id = enum(u32) {
         return childrenOf(node_id, kind, pool.nodes.items(.payload)).right;
     }
 
-    pub fn getSlabChunks(node_id: Id, pool: *Pool) Error!*align(64) const [Slab.K][32]u8 {
+    pub fn getChunkedLeafChunks(node_id: Id, pool: *Pool) Error!*align(64) const [ChunkedLeaf.K][32]u8 {
         const idx = @intFromEnum(node_id);
-        if (pool.nodes.items(.state)[idx].kind() != .slab) return Error.InvalidNode;
-        return &slabStorage(pool.nodes.items(.payload), idx).chunks;
+        if (pool.nodes.items(.state)[idx].kind() != .chunked_leaf) return Error.InvalidNode;
+        return &chunkedLeafStorage(pool.nodes.items(.payload), idx).chunks;
     }
 
-    pub fn getSlabLen(node_id: Id, pool: *Pool) Error!u16 {
+    pub fn getChunkedLeafLen(node_id: Id, pool: *Pool) Error!u16 {
         const idx = @intFromEnum(node_id);
-        if (pool.nodes.items(.state)[idx].kind() != .slab) return Error.InvalidNode;
-        return slabStorage(pool.nodes.items(.payload), idx).len;
+        if (pool.nodes.items(.state)[idx].kind() != .chunked_leaf) return Error.InvalidNode;
+        return chunkedLeafStorage(pool.nodes.items(.payload), idx).len;
     }
 
-    pub fn getSlabStorageMut(node_id: Id, pool: *Pool) Error!*Slab.Storage {
+    pub fn getChunkedLeafStorageMut(node_id: Id, pool: *Pool) Error!*ChunkedLeaf.Storage {
         const idx = @intFromEnum(node_id);
-        if (pool.nodes.items(.state)[idx].kind() != .slab) return Error.InvalidNode;
-        return slabStorage(pool.nodes.items(.payload), idx);
+        if (pool.nodes.items(.state)[idx].kind() != .chunked_leaf) return Error.InvalidNode;
+        return chunkedLeafStorage(pool.nodes.items(.payload), idx);
     }
 
-    pub fn setSlabChunk(node_id: Id, pool: *Pool, intra_index: u16, chunk: *const [32]u8) Error!Id {
-        std.debug.assert(intra_index < Slab.K);
+    pub fn setChunkedLeafChunk(node_id: Id, pool: *Pool, intra_index: u16, chunk: *const [32]u8) Error!Id {
+        std.debug.assert(intra_index < ChunkedLeaf.K);
 
         const idx = @intFromEnum(node_id);
-        if (pool.nodes.items(.state)[idx].kind() != .slab) return Error.InvalidNode;
-        const old_storage = slabStorage(pool.nodes.items(.payload), idx);
+        if (pool.nodes.items(.state)[idx].kind() != .chunked_leaf) return Error.InvalidNode;
+        const old_storage = chunkedLeafStorage(pool.nodes.items(.payload), idx);
 
-        const new_storage = try Slab.allocZero(pool.allocator);
-        errdefer Slab.destroy(pool.allocator, new_storage);
+        const new_storage = try ChunkedLeaf.allocZero(pool.allocator);
+        errdefer ChunkedLeaf.destroy(pool.allocator, new_storage);
 
         new_storage.chunks = old_storage.chunks;
         new_storage.len = old_storage.len;
@@ -361,17 +361,17 @@ pub const Id = enum(u32) {
 
         const new_id = try pool.create();
         const new_idx = @intFromEnum(new_id);
-        pool.nodes.items(.state)[new_idx] = State.initInUse(.slab, 0);
+        pool.nodes.items(.state)[new_idx] = State.initInUse(.chunked_leaf, 0);
         pool.nodes.items(.payload)[new_idx] = ptrAsPayload(@ptrCast(new_storage));
         pool.nodes.items(.root)[new_idx] = lazy_sentinel;
         return new_id;
     }
 
-    /// Returns a new slab `Id` with each `intra_indices[i]` chunk replaced by
+    /// Returns a new chunked_leaf `Id` with each `intra_indices[i]` chunk replaced by
     /// `new_chunks[i]`. Heap Storage cloned once; all updates applied in-place
     /// in the new Storage. Returns `Error.InvalidNode` if the receiver is not
-    /// a slab variant. `intra_indices` and `new_chunks` must have equal length.
-    pub fn setSlabChunks(
+    /// a chunked_leaf variant. `intra_indices` and `new_chunks` must have equal length.
+    pub fn setChunkedLeafChunks(
         node_id: Id,
         pool: *Pool,
         intra_indices: []const u16,
@@ -380,23 +380,23 @@ pub const Id = enum(u32) {
         std.debug.assert(intra_indices.len == new_chunks.len);
 
         const idx = @intFromEnum(node_id);
-        if (pool.nodes.items(.state)[idx].kind() != .slab) return Error.InvalidNode;
-        const old_storage = slabStorage(pool.nodes.items(.payload), idx);
+        if (pool.nodes.items(.state)[idx].kind() != .chunked_leaf) return Error.InvalidNode;
+        const old_storage = chunkedLeafStorage(pool.nodes.items(.payload), idx);
 
-        const new_storage = try Slab.allocZero(pool.allocator);
-        errdefer Slab.destroy(pool.allocator, new_storage);
+        const new_storage = try ChunkedLeaf.allocZero(pool.allocator);
+        errdefer ChunkedLeaf.destroy(pool.allocator, new_storage);
 
         new_storage.chunks = old_storage.chunks;
         new_storage.len = old_storage.len;
 
         for (intra_indices, new_chunks) |i, ptr| {
-            std.debug.assert(i < Slab.K);
+            std.debug.assert(i < ChunkedLeaf.K);
             new_storage.chunks[i] = ptr.*;
         }
 
         const new_id = try pool.create();
         const new_idx = @intFromEnum(new_id);
-        pool.nodes.items(.state)[new_idx] = State.initInUse(.slab, 0);
+        pool.nodes.items(.state)[new_idx] = State.initInUse(.chunked_leaf, 0);
         pool.nodes.items(.payload)[new_idx] = ptrAsPayload(@ptrCast(new_storage));
         pool.nodes.items(.root)[new_idx] = lazy_sentinel;
         return new_id;
@@ -1086,7 +1086,7 @@ pub const Pool = struct {
     }
 
     pub fn deinit(self: *Pool) void {
-        // Release heap payloads owned by `.slab` and `.branch_struct` slots.
+        // Release heap payloads owned by `.chunked_leaf` and `.branch_struct` slots.
         // The MultiArrayList only owns its own column buffers; payload
         // pointers are heap-allocated separately and become unreachable
         // when callers tear down the pool without first unref'ing every
@@ -1097,7 +1097,7 @@ pub const Pool = struct {
             if (s.isFree()) continue;
             const idx: u32 = @intCast(i);
             switch (s.kind()) {
-                .slab => Slab.destroy(self.allocator, slabStorage(payloads, idx)),
+                .chunked_leaf => ChunkedLeaf.destroy(self.allocator, chunkedLeafStorage(payloads, idx)),
                 .branch_struct => {
                     const struct_ref = branchStructRef(payloads, idx);
                     struct_ref.deinit(struct_ref.ptr, self.allocator);
@@ -1187,15 +1187,15 @@ pub const Pool = struct {
         return node_id;
     }
 
-    /// Creates a slab Node owning a heap-allocated `Slab.Storage` initialized
+    /// Creates a chunked_leaf Node owning a heap-allocated `ChunkedLeaf.Storage` initialized
     /// from `chunks`. `len` is the count of valid chunks (`<= K`); the caller
     /// is responsible for ensuring chunks at indices `>= len` are zero-bytes
     /// (the Storage invariant). The returned Node has a lazy root;
     /// `Id.getRoot` will compute and cache it on first access.
-    pub fn createSlab(self: *Pool, chunks: *align(64) const [Slab.K][32]u8, len: u16) Error!Id {
-        std.debug.assert(len <= Slab.K);
-        const storage = try Slab.allocZero(self.allocator);
-        errdefer Slab.destroy(self.allocator, storage);
+    pub fn createChunkedLeaf(self: *Pool, chunks: *align(64) const [ChunkedLeaf.K][32]u8, len: u16) Error!Id {
+        std.debug.assert(len <= ChunkedLeaf.K);
+        const storage = try ChunkedLeaf.allocZero(self.allocator);
+        errdefer ChunkedLeaf.destroy(self.allocator, storage);
 
         storage.chunks = chunks.*;
         storage.len = len;
@@ -1204,7 +1204,7 @@ pub const Pool = struct {
         const idx = @intFromEnum(node_id);
         self.nodes.items(.payload)[idx] = ptrAsPayload(@ptrCast(storage));
         self.nodes.items(.root)[idx] = lazy_sentinel;
-        self.nodes.items(.state)[idx] = State.initInUse(.slab, 0);
+        self.nodes.items(.state)[idx] = State.initInUse(.chunked_leaf, 0);
         return node_id;
     }
 
@@ -1285,26 +1285,26 @@ pub const Pool = struct {
         return try ref_ptr.to_tree(ref_ptr.ptr, self);
     }
 
-    /// Materializes a temporary, fully-navigable PMT subtree from a `.slab`
-    /// slot's K packed chunks. The slab represents a depth-`Slab.k_log2`
+    /// Materializes a temporary, fully-navigable PMT subtree from a `.chunked_leaf`
+    /// slot's K packed chunks. The chunked_leaf represents a depth-`ChunkedLeaf.k_log2`
     /// subtree of leaves; this builds it explicitly so that proof traversal
-    /// can walk into individual chunks. Trailing zero subtrees fill the slab
+    /// can walk into individual chunks. Trailing zero subtrees fill the chunked_leaf
     /// to full K. The returned Id has refcount=0; caller is responsible for
-    /// `unref`'ing it. Returns `Error.InvalidNode` if the slot is not a slab.
-    pub fn materializeSlab(self: *Pool, node_id: Id) Error!Id {
+    /// `unref`'ing it. Returns `Error.InvalidNode` if the slot is not a chunked_leaf.
+    pub fn materializeChunkedLeaf(self: *Pool, node_id: Id) Error!Id {
         const idx = @intFromEnum(node_id);
-        if (self.nodes.items(.state)[idx].kind() != .slab) {
+        if (self.nodes.items(.state)[idx].kind() != .chunked_leaf) {
             return Error.InvalidNode;
         }
-        const storage = slabStorage(self.nodes.items(.payload), idx);
+        const storage = chunkedLeafStorage(self.nodes.items(.payload), idx);
 
         // Build a depth-k_log2 perfect tree spanning all K chunks. We always
         // emit K leaves (even those at indices >= storage.len, which are
         // guaranteed to be zero-bytes by the Storage invariant) so that the
-        // resulting subtree's root matches the slab's `computeRoot` exactly.
-        var it = FillWithContentsIterator.init(self, Slab.k_log2);
+        // resulting subtree's root matches the chunked_leaf's `computeRoot` exactly.
+        var it = FillWithContentsIterator.init(self, ChunkedLeaf.k_log2);
         errdefer it.deinit();
-        for (0..Slab.K) |i| {
+        for (0..ChunkedLeaf.K) |i| {
             const leaf = try self.createLeaf(&storage.chunks[i]);
             try it.append(leaf);
         }
@@ -1439,10 +1439,10 @@ pub const Pool = struct {
                     sp += 1;
                     current = unpackLeft(c);
                 },
-                .slab => {
-                    // Free the heap-allocated Storage owned by this slab Node.
-                    const storage = slabStorage(self.nodes.items(.payload), @intFromEnum(id));
-                    Slab.destroy(self.allocator, storage);
+                .chunked_leaf => {
+                    // Free the heap-allocated Storage owned by this chunked_leaf Node.
+                    const storage = chunkedLeafStorage(self.nodes.items(.payload), @intFromEnum(id));
+                    ChunkedLeaf.destroy(self.allocator, storage);
                     current = null;
                 },
                 .branch_struct => {
@@ -1670,7 +1670,7 @@ pub const FillWithContentsIterator = struct {
     pool: *Pool,
     depth: Depth,
     /// Absolute depth, in chunks, of each appended Id. For depth-0 leaves
-    /// (chunks) this is 0. For slab Ids it is `Slab.k_log2`. Zero fillers
+    /// (chunks) this is 0. For chunked_leaf Ids it is `ChunkedLeaf.k_log2`. Zero fillers
     /// emitted by `finish()` for missing right siblings at iterator level L
     /// must therefore be at absolute depth `L + leaf_offset`.
     leaf_offset: Depth,
@@ -1684,7 +1684,7 @@ pub const FillWithContentsIterator = struct {
     }
 
     /// Initialize an iterator where each appended Id is a depth-`leaf_offset`
-    /// subtree (e.g. a slab Id is a depth-`Slab.k_log2` subtree of K chunks).
+    /// subtree (e.g. a chunked_leaf Id is a depth-`ChunkedLeaf.k_log2` subtree of K chunks).
     /// Zero fillers in `finish()` use `@enumFromInt(level + leaf_offset)`
     /// so the resulting tree's root is correct under standard SSZ
     /// merkleization at absolute depth `depth + leaf_offset`.

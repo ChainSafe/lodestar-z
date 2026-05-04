@@ -1,8 +1,8 @@
-//! Bench comparing FixedListType(Uint64, 2^20) leaf-default vs opts.slab=true
+//! Bench comparing FixedListType(Uint64, 2^20) leaf-default vs opts.chunked_leaf=true
 //! on representative balances-scale workloads.
 //!
 //! Run with:
-//!   zig build run:bench_list_slab -Doptimize=ReleaseFast
+//!   zig build run:bench_list_chunked_leaf -Doptimize=ReleaseFast
 //!
 //! Workloads (1M u64 items unless noted):
 //!  - fromValue:        build tree from a populated value
@@ -14,7 +14,7 @@ const std = @import("std");
 const zbench = @import("zbench");
 
 const Node = @import("persistent_merkle_tree").Node;
-const Slab = @import("persistent_merkle_tree").Slab;
+const ChunkedLeaf = @import("persistent_merkle_tree").ChunkedLeaf;
 
 const ssz = @import("ssz");
 const FixedListType = ssz.FixedListType;
@@ -24,7 +24,7 @@ const Limit: comptime_int = 1 << 20;
 const ItemCount: usize = 1 << 20;
 
 const ListLeaf = FixedListType(UintType(64), Limit, .{});
-const ListSlab = FixedListType(UintType(64), Limit, .{ .slab = true });
+const ListChunkedLeaf = FixedListType(UintType(64), Limit, .{ .chunked_leaf = true });
 
 const global_allocator = std.heap.page_allocator;
 
@@ -49,11 +49,11 @@ const FromValueLeaf = struct {
     }
 };
 
-const FromValueSlab = struct {
+const FromValueChunkedLeaf = struct {
     pool: *Node.Pool,
-    pub fn run(self: *FromValueSlab, allocator: std.mem.Allocator) void {
+    pub fn run(self: *FromValueChunkedLeaf, allocator: std.mem.Allocator) void {
         _ = allocator;
-        const id = ListSlab.tree.fromValue(self.pool, &input_value) catch unreachable;
+        const id = ListChunkedLeaf.tree.fromValue(self.pool, &input_value) catch unreachable;
         self.pool.unref(id);
     }
 };
@@ -71,11 +71,11 @@ const GetRootLeaf = struct {
     }
 };
 
-const GetRootSlab = struct {
+const GetRootChunkedLeaf = struct {
     pool: *Node.Pool,
-    pub fn run(self: *GetRootSlab, allocator: std.mem.Allocator) void {
+    pub fn run(self: *GetRootChunkedLeaf, allocator: std.mem.Allocator) void {
         _ = allocator;
-        const id = ListSlab.tree.fromValue(self.pool, &input_value) catch unreachable;
+        const id = ListChunkedLeaf.tree.fromValue(self.pool, &input_value) catch unreachable;
         const root = id.getRoot(self.pool);
         std.mem.doNotOptimizeAway(root);
         self.pool.unref(id);
@@ -95,13 +95,13 @@ const ToValueLeaf = struct {
     }
 };
 
-const ToValueSlab = struct {
+const ToValueChunkedLeaf = struct {
     pool: *Node.Pool,
     tree_id: Node.Id,
-    pub fn run(self: *ToValueSlab, allocator: std.mem.Allocator) void {
-        var dst = ListSlab.Type.empty;
+    pub fn run(self: *ToValueChunkedLeaf, allocator: std.mem.Allocator) void {
+        var dst = ListChunkedLeaf.Type.empty;
         defer dst.deinit(allocator);
-        ListSlab.tree.toValue(allocator, self.tree_id, self.pool, &dst) catch unreachable;
+        ListChunkedLeaf.tree.toValue(allocator, self.tree_id, self.pool, &dst) catch unreachable;
         std.mem.doNotOptimizeAway(dst.items[0]);
     }
 };
@@ -121,12 +121,12 @@ const BulkSetAndRootLeaf = struct {
     }
 };
 
-const BulkSetAndRootSlab = struct {
+const BulkSetAndRootChunkedLeaf = struct {
     pool: *Node.Pool,
-    mutated: *ListSlab.Type,
-    pub fn run(self: *BulkSetAndRootSlab, allocator: std.mem.Allocator) void {
+    mutated: *ListChunkedLeaf.Type,
+    pub fn run(self: *BulkSetAndRootChunkedLeaf, allocator: std.mem.Allocator) void {
         _ = allocator;
-        const id = ListSlab.tree.fromValue(self.pool, self.mutated) catch unreachable;
+        const id = ListChunkedLeaf.tree.fromValue(self.pool, self.mutated) catch unreachable;
         const root = id.getRoot(self.pool);
         std.mem.doNotOptimizeAway(root);
         self.pool.unref(id);
@@ -140,7 +140,7 @@ pub fn main(init: std.process.Init) !void {
     defer bench.deinit();
 
     // Single shared pool. Sized for ~1M chunks worth of node IDs across both
-    // leaf and slab scenarios; preheats keep allocator overhead off the hot path.
+    // leaf and chunked_leaf scenarios; preheats keep allocator overhead off the hot path.
     var pool = try Node.Pool.init(allocator, 8_000_000);
     defer pool.deinit();
 
@@ -152,9 +152,9 @@ pub fn main(init: std.process.Init) !void {
     defer pool.unref(tree_leaf);
     _ = tree_leaf.getRoot(&pool); // warm
 
-    const tree_slab = try ListSlab.tree.fromValue(&pool, &input_value);
-    defer pool.unref(tree_slab);
-    _ = tree_slab.getRoot(&pool); // warm
+    const tree_chunked_leaf = try ListChunkedLeaf.tree.fromValue(&pool, &input_value);
+    defer pool.unref(tree_chunked_leaf);
+    _ = tree_chunked_leaf.getRoot(&pool); // warm
 
     // bulkSet input: each iteration rebuilds tree.fromValue on this value;
     // matches the shape of "epoch rewards rewrite all balances + recompute root".
@@ -165,34 +165,34 @@ pub fn main(init: std.process.Init) !void {
         try mutated_leaf.append(allocator, @as(u64, @intCast(i * 17 + 3)));
     }
 
-    var mutated_slab: ListSlab.Type = ListSlab.Type.empty;
-    defer mutated_slab.deinit(allocator);
-    try mutated_slab.ensureTotalCapacity(allocator, ItemCount);
+    var mutated_chunked_leaf: ListChunkedLeaf.Type = ListChunkedLeaf.Type.empty;
+    defer mutated_chunked_leaf.deinit(allocator);
+    try mutated_chunked_leaf.ensureTotalCapacity(allocator, ItemCount);
     for (0..ItemCount) |i| {
-        try mutated_slab.append(allocator, @as(u64, @intCast(i * 17 + 3)));
+        try mutated_chunked_leaf.append(allocator, @as(u64, @intCast(i * 17 + 3)));
     }
 
     const fv_leaf = FromValueLeaf{ .pool = &pool };
-    const fv_slab = FromValueSlab{ .pool = &pool };
+    const fv_chunked_leaf = FromValueChunkedLeaf{ .pool = &pool };
     try bench.addParam("fromValue 1M leaf", &fv_leaf, .{});
-    try bench.addParam("fromValue 1M slab", &fv_slab, .{});
+    try bench.addParam("fromValue 1M chunked_leaf", &fv_chunked_leaf, .{});
 
     const gr_leaf = GetRootLeaf{ .pool = &pool };
-    const gr_slab = GetRootSlab{ .pool = &pool };
+    const gr_chunked_leaf = GetRootChunkedLeaf{ .pool = &pool };
     try bench.addParam("fromValue+getRoot 1M leaf", &gr_leaf, .{});
-    try bench.addParam("fromValue+getRoot 1M slab", &gr_slab, .{});
+    try bench.addParam("fromValue+getRoot 1M chunked_leaf", &gr_chunked_leaf, .{});
 
     const tv_leaf = ToValueLeaf{ .pool = &pool, .tree_id = tree_leaf };
-    const tv_slab = ToValueSlab{ .pool = &pool, .tree_id = tree_slab };
+    const tv_chunked_leaf = ToValueChunkedLeaf{ .pool = &pool, .tree_id = tree_chunked_leaf };
     try bench.addParam("toValue 1M leaf", &tv_leaf, .{});
-    try bench.addParam("toValue 1M slab", &tv_slab, .{});
+    try bench.addParam("toValue 1M chunked_leaf", &tv_chunked_leaf, .{});
 
     const bs_leaf = BulkSetAndRootLeaf{ .pool = &pool, .mutated = &mutated_leaf };
-    const bs_slab = BulkSetAndRootSlab{ .pool = &pool, .mutated = &mutated_slab };
+    const bs_chunked_leaf = BulkSetAndRootChunkedLeaf{ .pool = &pool, .mutated = &mutated_chunked_leaf };
     try bench.addParam("bulkSet+getRoot 1M leaf", &bs_leaf, .{});
-    try bench.addParam("bulkSet+getRoot 1M slab", &bs_slab, .{});
+    try bench.addParam("bulkSet+getRoot 1M chunked_leaf", &bs_chunked_leaf, .{});
 
     try bench.run(io, std.Io.File.stdout());
 
-    _ = Slab; // silence unused if slab code path proves unreachable in some build mode
+    _ = ChunkedLeaf; // silence unused if chunked_leaf code path proves unreachable in some build mode
 }

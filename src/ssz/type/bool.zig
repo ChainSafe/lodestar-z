@@ -94,7 +94,7 @@ pub fn BoolType() type {
                 return try pool.createLeaf(&new_leaf);
             }
 
-            /// Decode a packed item directly from chunk bytes. Used by slab-backed
+            /// Decode a packed item directly from chunk bytes. Used by chunked_leaf-backed
             /// containers where the chunk is already in hand and a Node.Id is unavailable.
             pub fn toValuePackedFromBytes(chunk: *const [32]u8, index: usize, out: *Type) void {
                 const offset = index % 32;
@@ -102,7 +102,7 @@ pub fn BoolType() type {
             }
 
             /// Encode a packed item directly into chunk bytes (mutates `chunk` in place).
-            /// Used by slab-backed containers; the caller is responsible for any CoW
+            /// Used by chunked_leaf-backed containers; the caller is responsible for any CoW
             /// of the chunk before calling.
             pub fn fromValuePackedIntoChunk(chunk: *[32]u8, index: usize, value: *const Type) void {
                 const offset = index % 32;

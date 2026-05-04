@@ -1,9 +1,9 @@
-//! Chunked-leaf slab payload.
+//! Chunked-leaf payload.
 //!
-//! `Storage` is the heap-allocated chunk array + length owned by a slab Node.
-//! The slab Node variant holds a single `*Storage` pointer plus a cached root,
-//! mirroring Lighthouse's `Arc<PackedLeaf>` shape — Storage is fully self-
-//! contained, ref-counted via the Pool's slab-Node ref count, and CoW on write.
+//! Replaces K=1024 individual leaf Nodes with a single `Storage` heap blob
+//! (chunk array + length) referenced by one `.chunked_leaf` Node. Storage
+//! is self-contained, ref-counted via the Pool's Node ref count, and
+//! copy-on-write on mutation.
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const hashOne = @import("hashing").hashOne;
@@ -16,12 +16,14 @@ comptime {
 }
 
 pub const Storage = struct {
-    /// Slab chunks, cache-line aligned. Chunks at indices `>= len` MUST hold
-    /// zero-bytes — `allocZero` establishes this invariant and subsequent
-    /// CoW writes preserve it. `chunks` is at offset 0 within Storage.
+    /// Chunk bytes, 64-byte aligned for cache-line locality. Chunks at
+    /// indices `>= len` MUST hold zero-bytes — `allocZero` establishes
+    /// this invariant and subsequent CoW writes preserve it. `chunks` is
+    /// at offset 0 within Storage.
     chunks: [K][32]u8 align(64),
-    /// Number of valid chunks in this slab. The last slab in a list/vector
-    /// may be partial (`len < K`); all earlier slabs satisfy `len == K`.
+    /// Number of valid chunks in this payload. The last chunked-leaf in a
+    /// list/vector may be partial (`len < K`); all earlier ones satisfy
+    /// `len == K`.
     len: u16,
 };
 
@@ -38,19 +40,19 @@ pub fn destroy(allocator: Allocator, s: *Storage) void {
     allocator.destroy(s);
 }
 
-/// Compute the slab subtree root: K-leaf perfect binary tree, no padding.
+/// Compute the chunked_leaf subtree root: K-leaf perfect binary tree, no padding.
 ///
-/// Single-buffer layout: read first reduction directly from `slab.chunks`
+/// Single-buffer layout: read first reduction directly from `chunked_leaf.chunks`
 /// (no 32 KB stack copy), then halve in-place on `buf` (K/2 chunks).
-pub fn computeRoot(slab: *const Storage, out: *[32]u8) void {
+pub fn computeRoot(chunked_leaf: *const Storage, out: *[32]u8) void {
     comptime std.debug.assert(@popCount(K) == 1);
 
     var buf: [K / 2][32]u8 align(64) = undefined;
 
-    // First reduction: K leaves -> K/2 hashes, reading slab.chunks directly.
+    // First reduction: K leaves -> K/2 hashes, reading chunked_leaf.chunks directly.
     var i: usize = 0;
     while (i < K) : (i += 2) {
-        hashOne(&buf[i / 2], &slab.chunks[i], &slab.chunks[i + 1]);
+        hashOne(&buf[i / 2], &chunked_leaf.chunks[i], &chunked_leaf.chunks[i + 1]);
     }
 
     // Subsequent reductions in-place on buf.

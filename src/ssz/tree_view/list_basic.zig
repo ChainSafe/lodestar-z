@@ -42,7 +42,7 @@ pub fn ListBasicTreeView(comptime ST: type) type {
         const base_chunk_depth: Depth = @intCast(ST.chunk_depth);
         const chunk_depth: Depth = chunkDepth(Depth, base_chunk_depth, ST);
         const items_per_chunk: usize = itemsPerChunk(ST.Element);
-        const Chunks = BasicPackedChunks(ST, chunk_depth, items_per_chunk, ST.opts.slab);
+        const Chunks = BasicPackedChunks(ST, chunk_depth, items_per_chunk, ST.opts.chunked_leaf);
 
         pub fn init(allocator: Allocator, pool: *Node.Pool, root: Node.Id) !*Self {
             const ptr = try allocator.create(Self);
@@ -107,7 +107,7 @@ pub fn ListBasicTreeView(comptime ST: type) type {
         }
 
         pub fn iteratorReadonly(self: *const Self, start_index: usize) ReadonlyIterator {
-            if (comptime ST.opts.slab) @compileError("iteratorReadonly is not supported when ST.opts.slab is true; use getAllInto or getAll");
+            if (comptime ST.opts.chunked_leaf) @compileError("iteratorReadonly is not supported when ST.opts.chunked_leaf is true; use getAllInto or getAll");
             return ReadonlyIterator.init(self, start_index);
         }
 
@@ -191,7 +191,7 @@ pub fn ListBasicTreeView(comptime ST: type) type {
         /// Return a new view containing all elements up to and including `index`.
         /// Caller must call `deinit()` on the returned view to avoid memory leaks.
         pub fn sliceTo(self: *Self, index: usize) !*Self {
-            if (comptime ST.opts.slab) @compileError("sliceTo is not supported when ST.opts.slab is true");
+            if (comptime ST.opts.chunked_leaf) @compileError("sliceTo is not supported when ST.opts.chunked_leaf is true");
             try self.commit();
 
             const list_length = try self.length();
