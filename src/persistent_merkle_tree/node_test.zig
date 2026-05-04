@@ -6,10 +6,9 @@ const Depth = @import("hashing").Depth;
 const Node = @import("Node.zig");
 const Gindex = @import("gindex.zig").Gindex;
 
-test "Node.StateView predicates" {
-    // The legacy `State` enum was replaced by a tagged union plus a parallel
-    // ref_count column. This test exercises the same predicates through the
-    // `StateView` shim using real pool slots, since `State` no longer exists.
+test "Node.State predicates" {
+    // Exercises State predicates via `id.getState(pool)` over each variant:
+    // zero sentinel, leaf, lazy/computed branch, free slot.
     const allocator = std.testing.allocator;
     var pool = try Node.Pool.init(allocator, 4);
     defer pool.deinit();
@@ -21,8 +20,8 @@ test "Node.StateView predicates" {
     try std.testing.expect(zero_state.isZero());
     try std.testing.expect(!zero_state.isLeaf());
     try std.testing.expect(!zero_state.isBranch());
-    try std.testing.expect(!zero_state.isBranchLazy());
-    try std.testing.expect(!zero_state.isBranchComputed());
+    try std.testing.expect(!zero0.isBranchLazy(p));
+    try std.testing.expect(!zero0.isBranchComputed(p));
     try std.testing.expect(!zero_state.isFree());
 
     // Leaf
@@ -32,29 +31,27 @@ test "Node.StateView predicates" {
     try std.testing.expect(leaf_state.isLeaf());
     try std.testing.expect(!leaf_state.isZero());
     try std.testing.expect(!leaf_state.isBranch());
-    try std.testing.expect(!leaf_state.isBranchLazy());
-    try std.testing.expect(!leaf_state.isBranchComputed());
+    try std.testing.expect(!leaf.isBranchLazy(p));
+    try std.testing.expect(!leaf.isBranchComputed(p));
     try std.testing.expect(!leaf_state.isFree());
 
     // Lazy branch (root not yet computed)
     const branch = try pool.createBranch(leaf, leaf);
     defer pool.unref(branch);
-    const branch_lazy = branch.getState(p);
-    try std.testing.expect(branch_lazy.isBranch());
-    try std.testing.expect(branch_lazy.isBranchLazy());
-    try std.testing.expect(!branch_lazy.isBranchComputed());
-    try std.testing.expect(!branch_lazy.isZero());
-    try std.testing.expect(!branch_lazy.isLeaf());
-    try std.testing.expect(!branch_lazy.isFree());
+    try std.testing.expect(branch.getState(p).isBranch());
+    try std.testing.expect(branch.isBranchLazy(p));
+    try std.testing.expect(!branch.isBranchComputed(p));
+    try std.testing.expect(!branch.getState(p).isZero());
+    try std.testing.expect(!branch.getState(p).isLeaf());
+    try std.testing.expect(!branch.getState(p).isFree());
 
     // After computing the root the same slot reports computed.
     _ = branch.getRoot(p);
-    const branch_computed = branch.getState(p);
-    try std.testing.expect(branch_computed.isBranch());
-    try std.testing.expect(branch_computed.isBranchComputed());
-    try std.testing.expect(!branch_computed.isBranchLazy());
-    try std.testing.expect(!branch_computed.isZero());
-    try std.testing.expect(!branch_computed.isLeaf());
+    try std.testing.expect(branch.getState(p).isBranch());
+    try std.testing.expect(branch.isBranchComputed(p));
+    try std.testing.expect(!branch.isBranchLazy(p));
+    try std.testing.expect(!branch.getState(p).isZero());
+    try std.testing.expect(!branch.getState(p).isLeaf());
 
     // Free slot: allocate, then unref so the slot is back on the free list.
     const transient = try pool.createLeafFromUint(7);
@@ -64,9 +61,8 @@ test "Node.StateView predicates" {
     try std.testing.expect(!free_state.isLeaf());
     try std.testing.expect(!free_state.isZero());
     try std.testing.expect(!free_state.isBranch());
-    // The free-list shim still exposes the next-free pointer for callers that
-    // walked the legacy free list via `state.getNextFree()`.
-    _ = free_state.getNextFree();
+    // Free slots expose the next-free link via `state.nextFree()`.
+    _ = free_state.nextFree();
 }
 
 test "Pool" {
@@ -101,10 +97,10 @@ test "Pool" {
     // check if the free list is correct
     const next_free: Node.Id = pool.next_free_node;
     try std.testing.expectEqual(leaf2_id, next_free);
-    try std.testing.expectEqual(branch3_id, next_free.getState(p).getNextFree());
-    try std.testing.expectEqual(leaf1_id, next_free.getState(p).getNextFree().getState(p).getNextFree());
-    try std.testing.expectEqual(branch1_id, next_free.getState(p).getNextFree().getState(p).getNextFree().getState(p).getNextFree());
-    try std.testing.expectEqual(branch2_id, next_free.getState(p).getNextFree().getState(p).getNextFree().getState(p).getNextFree().getState(p).getNextFree());
+    try std.testing.expectEqual(branch3_id, next_free.getState(p).nextFree());
+    try std.testing.expectEqual(leaf1_id, next_free.getState(p).nextFree().getState(p).nextFree());
+    try std.testing.expectEqual(branch1_id, next_free.getState(p).nextFree().getState(p).nextFree().getState(p).nextFree());
+    try std.testing.expectEqual(branch2_id, next_free.getState(p).nextFree().getState(p).nextFree().getState(p).nextFree().getState(p).nextFree());
 }
 
 test "Pool - automatic capacity growth beyond pre-heat" {
@@ -621,4 +617,3 @@ test "FillWithContentsIterator matches fillWithContents" {
     const empty_root_iter = try empty_it.finish();
     try std.testing.expectEqual(@as(Node.Id, @enumFromInt(depth)), empty_root_iter);
 }
-

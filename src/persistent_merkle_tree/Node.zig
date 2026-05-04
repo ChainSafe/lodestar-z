@@ -78,6 +78,21 @@ pub const State = enum(u32) {
     pub inline fn isFree(s: State) bool {
         return @intFromEnum(s) & free_bit != 0;
     }
+    pub inline fn isZero(s: State) bool {
+        return s.kind() == .zero;
+    }
+    pub inline fn isLeaf(s: State) bool {
+        return s.kind() == .leaf;
+    }
+    pub inline fn isBranch(s: State) bool {
+        return s.kind() == .branch;
+    }
+    pub inline fn isSlab(s: State) bool {
+        return s.kind() == .slab;
+    }
+    pub inline fn isBranchStruct(s: State) bool {
+        return s.kind() == .branch_struct;
+    }
 
     /// Branch-free decode: free → NodeKind(0)=.free, in-use → NodeKind(enc+1).
     pub inline fn kind(s: State) NodeKind {
@@ -387,10 +402,24 @@ pub const Id = enum(u32) {
         return new_id;
     }
 
-    /// Lightweight read-only view over a slot's tag and ref count.
-    /// Preserves the legacy `state.isFoo()` predicate API.
-    pub fn getState(node_id: Id, pool: *Pool) StateView {
-        return .{ .pool = pool, .id = node_id };
+    /// Returns the slot's packed `State`. Call methods on the result
+    /// (`isFree()`, `kind()`, `refCount()`, `nextFree()`).
+    pub inline fn getState(node_id: Id, pool: *Pool) State {
+        return pool.nodes.items(.state)[@intFromEnum(node_id)];
+    }
+
+    /// Returns true iff this is a `.branch` slot whose root is still the
+    /// lazy sentinel. Lives on `Id` (not `State`) because it needs the
+    /// `root` column too.
+    pub inline fn isBranchLazy(node_id: Id, pool: *Pool) bool {
+        if (node_id.getState(pool).kind() != .branch) return false;
+        return std.mem.eql(u8, &pool.nodes.items(.root)[@intFromEnum(node_id)], &lazy_sentinel);
+    }
+
+    /// Returns true iff this is a `.branch` slot with a cached (non-lazy) root.
+    pub inline fn isBranchComputed(node_id: Id, pool: *Pool) bool {
+        if (node_id.getState(pool).kind() != .branch) return false;
+        return !std.mem.eql(u8, &pool.nodes.items(.root)[@intFromEnum(node_id)], &lazy_sentinel);
     }
 
     pub fn getNode(root_node: Id, pool: *Pool, gindex: Gindex) Error!Id {
@@ -1011,55 +1040,6 @@ pub const Id = enum(u32) {
         }
 
         return node_id;
-    }
-};
-
-/// Read-only adapter that mimics the legacy `State` predicate API.
-///
-/// The previous bit-packed `State` enum exposed `isFree`, `isLeaf`, etc. so
-/// callers could write `id.getState(p).isLeaf()`. With the flat-column refactor
-/// the variant tag lives in the `kind` column (and ref count in its own
-/// column); `StateView` keeps the old surface working by reading those columns
-/// directly.
-pub const StateView = struct {
-    pool: *Pool,
-    id: Id,
-
-    inline fn kind(s: StateView) NodeKind {
-        return s.pool.nodes.items(.state)[@intFromEnum(s.id)].kind();
-    }
-
-    pub fn isFree(s: StateView) bool {
-        return s.kind() == .free;
-    }
-    pub fn isZero(s: StateView) bool {
-        return s.kind() == .zero;
-    }
-    pub fn isLeaf(s: StateView) bool {
-        return s.kind() == .leaf;
-    }
-    pub fn isBranch(s: StateView) bool {
-        return s.kind() == .branch;
-    }
-    pub fn isSlab(s: StateView) bool {
-        return s.kind() == .slab;
-    }
-    pub fn isBranchStruct(s: StateView) bool {
-        return s.kind() == .branch_struct;
-    }
-    pub fn isBranchLazy(s: StateView) bool {
-        if (s.kind() != .branch) return false;
-        return std.mem.eql(u8, &s.pool.nodes.items(.root)[@intFromEnum(s.id)], &lazy_sentinel);
-    }
-    pub fn isBranchComputed(s: StateView) bool {
-        if (s.kind() != .branch) return false;
-        return !std.mem.eql(u8, &s.pool.nodes.items(.root)[@intFromEnum(s.id)], &lazy_sentinel);
-    }
-    pub fn getRefCount(s: StateView) u32 {
-        return s.pool.nodes.items(.state)[@intFromEnum(s.id)].refCount();
-    }
-    pub fn getNextFree(s: StateView) Id {
-        return s.pool.nodes.items(.state)[@intFromEnum(s.id)].nextFree();
     }
 };
 
