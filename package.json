@@ -29,6 +29,10 @@
   "keywords": [],
   "author": "ChainSafe Systems",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ChainSafe/lodestar-z.git"
+  },
   "packageManager": "pnpm@10.24.0",
   "zapi": {
     "binaryName": "bindings",
