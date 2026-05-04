@@ -19,6 +19,9 @@ jobs:
     # [incompatibility]: https://github.com/ChainSafe/lodestar/actions/runs/24988157940/job/73166634073?pr=8900
     # [security support until May 2027]: https://ubuntu.com/about/release-cycle
     runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -28,6 +31,7 @@ jobs:
         uses: actions/setup-node@v6
         with:
           node-version: ${{ env.NODE_VERSION }}
+          registry-url: "https://registry.npmjs.org"
           cache: pnpm
       - name: Install Zig
         uses: mlugg/setup-zig@v2
@@ -44,5 +48,5 @@ jobs:
         run: |
           pnpm zapi build-artifacts --optimize ReleaseSafe
           pnpm zapi prepublish
-          pnpm zapi publish --access public
+          pnpm zapi publish --access public -- --provenance
 
