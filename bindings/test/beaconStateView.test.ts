@@ -397,15 +397,15 @@ describe("BeaconStateView", () => {
       expect(proposer).toBeLessThan(state.validatorCount);
     });
 
-    it("decision roots should be 32 bytes each", () => {
-      expect(state.previousDecisionRoot.length).toBe(32);
-      expect(state.currentDecisionRoot.length).toBe(32);
-      expect(state.nextDecisionRoot.length).toBe(32);
+    it("decision roots should be 66 bytes each", () => {
+      expect(state.previousDecisionRoot.length).toBe(66);
+      expect(state.currentDecisionRoot.length).toBe(66);
+      expect(state.nextDecisionRoot.length).toBe(66);
     });
 
-    it("getShufflingDecisionRoot should return 32 bytes", () => {
+    it("getShufflingDecisionRoot should return 66 bytes", () => {
       const decisionRoot = state.getShufflingDecisionRoot(state.epoch);
-      expect(decisionRoot.length).toBe(32);
+      expect(decisionRoot.length).toBe(66);
     });
   });
 
