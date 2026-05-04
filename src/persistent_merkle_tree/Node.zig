@@ -32,6 +32,17 @@ const Depth = @import("hashing").Depth;
 const Gindex = @import("gindex.zig").Gindex;
 const Slab = @import("slab.zig");
 
+// Flat node fields (file-as-struct). Each field becomes a dedicated SoA
+// column inside `MultiArrayList(@This())`.
+left: Id,
+right: Id,
+root: [32]u8,
+cache: ?*anyopaque,
+kind: NodeKind,
+ref_count: u32,
+
+const Node = @This();
+
 pub const Error = error{
     /// Attempt to access a child of a node that is not a branch node.
     InvalidNode,
@@ -89,47 +100,6 @@ pub const BranchStructRef = struct {
 /// are extremely unlikely to equal this value (~1 in 2^256), avoiding the
 /// 1-byte tag overhead an `?[32]u8` Optional would add.
 pub const lazy_sentinel: [32]u8 = [_]u8{0xFF} ** 32;
-
-/// Flat parallel-array element. Each field becomes a dedicated SoA column
-/// inside `MultiArrayList(NodeWithMeta)`, so navigation reads only the
-/// columns it needs (typically `kind` + one of `left`/`right`).
-///
-/// Field semantics by `kind`:
-///   - free   : `left` = next free Id (free-list link). `right`/`root`/`cache`
-///              are unused (must be valid bit patterns; `cache` is null and
-///              `root` is undefined-but-never-read).
-///   - zero   : `root` holds the precomputed zero hash for this depth. Children
-///              are synthesised from the slot index (no `left`/`right` stored).
-///              `cache` is null.
-///   - leaf   : `root` holds the leaf bytes. `left`/`right` unused. `cache`
-///              null.
-///   - branch : `left`/`right` are child Ids, `root` is the cached subtree root
-///              (or `lazy_sentinel`). `cache` null.
-///   - slab   : `cache` is a non-null `*Slab.Storage` (cast through
-///              `*anyopaque` to keep the column an 8-byte plain pointer
-///              aligned the same as a `?*anyopaque`). `root` is the cached
-///              slab subtree root (or `lazy_sentinel`). `left`/`right` unused.
-///   - branch_struct: `cache` is a non-null `*BranchStructRef` (vtable +
-///              struct pointer; cast through `*anyopaque` like slab).
-///              `root` is the cached struct merkle root (`lazy_sentinel` when
-///              uncomputed). `left`/`right` unused (set to `Id(0)`).
-pub const NodeWithMeta = struct {
-    /// branch.left or free.next_free; unused for leaf/zero/slab.
-    left: Id,
-    /// branch.right; unused for free/leaf/zero/slab.
-    right: Id,
-    /// branch/slab cached root (lazy_sentinel = uncomputed). Leaf/zero hash.
-    /// Unused for `free` (initial bytes do not need to be zeroed).
-    root: [32]u8,
-    /// slab → `*Slab.Storage` (cast). Null for branch/leaf/zero/free.
-    /// Stored as `?*anyopaque` so the column is a plain optional pointer
-    /// without extra discriminant bytes.
-    cache: ?*anyopaque,
-    /// Variant tag — its own dense `u8` column.
-    kind: NodeKind,
-    /// Reference count (parallel column for cache-friendly unref scans).
-    ref_count: u32,
-};
 
 /// Pair of child Ids. Always defined when `noChild` is false.
 const Children = struct { left: Id, right: Id };
@@ -1056,7 +1026,7 @@ pub const StateView = struct {
 /// Stores nodes in a memory pool, with reference counting and a free list.
 pub const Pool = struct {
     allocator: Allocator,
-    nodes: std.MultiArrayList(NodeWithMeta).Slice,
+    nodes: std.MultiArrayList(Node).Slice,
     next_free_node: Id,
 
     /// Initializes the memory pool with `pool_size` + `max_depth` slots. The
@@ -1069,7 +1039,7 @@ pub const Pool = struct {
             .next_free_node = @enumFromInt(max_depth),
         };
 
-        var list = std.MultiArrayList(NodeWithMeta).empty;
+        var list = std.MultiArrayList(Node).empty;
         try list.resize(allocator, pool_size + max_depth);
         list.len = pool_size + max_depth;
         pool.nodes = list.slice();
