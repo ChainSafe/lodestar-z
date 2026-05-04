@@ -212,11 +212,11 @@ pub fn FixedVectorType(comptime ST: type, comptime _length: comptime_int, compti
                     var slab_ids: [slab_count]Node.Id = undefined;
                     try node.getNodesAtDepth(pool, slab_depth, 0, &slab_ids);
 
-                    const kind_col = pool.nodes.items(.kind);
+                    const state_col = pool.nodes.items(.state);
                     var item_idx: usize = 0;
                     outer: for (slab_ids) |sid| {
                         // Zero subtree at slab boundary == all-zero values.
-                        if (kind_col[@intFromEnum(sid)] == .zero) {
+                        if (state_col[@intFromEnum(sid)].kind() == .zero) {
                             const items_in_slab = @min(Slab.K * items_per_chunk, length - item_idx);
                             for (0..items_in_slab) |i| {
                                 out[item_idx + i] = std.mem.zeroes(Element.Type);
@@ -322,11 +322,11 @@ pub fn FixedVectorType(comptime ST: type, comptime _length: comptime_int, compti
                     var slab_ids: [slab_count]Node.Id = undefined;
                     try node.getNodesAtDepth(pool, slab_depth, 0, &slab_ids);
 
-                    const kind_col = pool.nodes.items(.kind);
+                    const state_col = pool.nodes.items(.state);
                     var byte_idx: usize = 0;
                     outer: for (slab_ids) |sid| {
                         // Zero subtree at slab boundary == all-zero output bytes.
-                        if (kind_col[@intFromEnum(sid)] == .zero) {
+                        if (state_col[@intFromEnum(sid)].kind() == .zero) {
                             const remaining = fixed_size - byte_idx;
                             const zero_bytes = @min(Slab.K * 32, remaining);
                             @memset(out[byte_idx..][0..zero_bytes], 0);

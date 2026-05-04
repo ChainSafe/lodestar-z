@@ -378,14 +378,14 @@ pub fn FixedListType(comptime ST: type, comptime _limit: comptime_int, comptime 
                     defer allocator.free(slab_ids);
                     try content_root.getNodesAtDepth(pool, slab_depth, 0, slab_ids);
 
-                    const kind_col = pool.nodes.items(.kind);
+                    const state_col = pool.nodes.items(.state);
                     var item_idx: usize = 0;
                     outer: for (slab_ids) |sid| {
                         // A zero subtree at slab boundary is semantically an
                         // all-zero slab — out.items already initialised to
                         // Element.default_value via the @memset above, so
                         // skip the slab payload read entirely.
-                        if (kind_col[@intFromEnum(sid)] == .zero) {
+                        if (state_col[@intFromEnum(sid)].kind() == .zero) {
                             const items_in_slab = @min(Slab.K * items_per_chunk, len - item_idx);
                             item_idx += items_in_slab;
                             if (item_idx >= len) break :outer;
@@ -531,11 +531,11 @@ pub fn FixedListType(comptime ST: type, comptime _limit: comptime_int, comptime 
                     defer pool.allocator.free(slab_ids_buf);
                     try content_root.getNodesAtDepth(pool, slab_depth, 0, slab_ids_buf);
 
-                    const kind_col = pool.nodes.items(.kind);
+                    const state_col = pool.nodes.items(.state);
                     var byte_idx: usize = 0;
                     outer: for (slab_ids_buf) |sid| {
                         // Zero subtree at slab boundary == all-zero output.
-                        if (kind_col[@intFromEnum(sid)] == .zero) {
+                        if (state_col[@intFromEnum(sid)].kind() == .zero) {
                             const remaining = serialized_size - byte_idx;
                             const zero_bytes = @min(Slab.K * 32, remaining);
                             @memset(out[byte_idx..][0..zero_bytes], 0);

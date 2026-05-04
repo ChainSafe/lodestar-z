@@ -72,7 +72,7 @@ pub fn BasicPackedChunks(
                 // slab_idx beyond filled slabs). A zero subtree at the slab
                 // boundary is semantically an all-zero slab; the decoded value
                 // is therefore the element's zero value.
-                if (self.state.pool.nodes.items(.kind)[@intFromEnum(slab_id)] == .zero) {
+                if (self.state.pool.nodes.items(.state)[@intFromEnum(slab_id)].kind() == .zero) {
                     return std.mem.zeroes(Element);
                 }
                 const chunks = try slab_id.getSlabChunks(self.state.pool);
@@ -93,8 +93,8 @@ pub fn BasicPackedChunks(
                 const gindex = Gindex.fromDepth(slab_depth, slab_idx);
 
                 const existing_id = try self.state.getChildNode(gindex);
-                const kind_col = self.state.pool.nodes.items(.kind);
-                const existing_kind = kind_col[@intFromEnum(existing_id)];
+                const state_col = self.state.pool.nodes.items(.state);
+                const existing_kind = state_col[@intFromEnum(existing_id)].kind();
 
                 // Path 1: navigation landed on a zero sentinel (sparse tree).
                 // Materialize a fresh zero-filled slab and mutate it in place
@@ -123,8 +123,8 @@ pub fn BasicPackedChunks(
                 // setChildNode call that produced this transient slab, so we
                 // do NOT call setChildNode again (which would unref-then-store
                 // the same Id and free our slab).
-                const ref_counts = self.state.pool.nodes.items(.ref_count);
-                if (ref_counts[@intFromEnum(existing_id)] == 0) {
+                const ref_counts = self.state.pool.nodes.items(.state);
+                if (ref_counts[@intFromEnum(existing_id)].refCount() == 0) {
                     const cache_col = self.state.pool.nodes.items(.cache);
                     const root_col = self.state.pool.nodes.items(.root);
                     const existing_idx = @intFromEnum(existing_id);
@@ -183,7 +183,7 @@ pub fn BasicPackedChunks(
                     // beyond the materialized range). A zero subtree is
                     // semantically all-zero chunks; emit zero values without
                     // touching the (non-existent) slab payload.
-                    if (self.state.pool.nodes.items(.kind)[@intFromEnum(sid)] == .zero) {
+                    if (self.state.pool.nodes.items(.state)[@intFromEnum(sid)].kind() == .zero) {
                         const items_in_slab = @min(Slab.K * items_per_chunk, len - item_idx);
                         @memset(values[item_idx..][0..items_in_slab], std.mem.zeroes(Element));
                         item_idx += items_in_slab;

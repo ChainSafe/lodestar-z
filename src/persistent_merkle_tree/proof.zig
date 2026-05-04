@@ -62,7 +62,7 @@ pub const SingleProof = struct {
 /// container struct; slab = K packed chunks). Proof traversal must
 /// materialize a temporary explicit subtree before walking inside.
 inline fn isOpaqueNode(pool: *Node.Pool, node_id: Node.Id) bool {
-    const kind = pool.nodes.items(.kind)[@intFromEnum(node_id)];
+    const kind = pool.nodes.items(.state)[@intFromEnum(node_id)].kind();
     return kind == .branch_struct or kind == .slab;
 }
 
@@ -71,7 +71,7 @@ inline fn isOpaqueNode(pool: *Node.Pool, node_id: Node.Id) bool {
 /// longer needed (typically via the deferred-unref ArrayList in compact-multi
 /// proof, or the single optional in single-proof).
 inline fn materializeOpaque(pool: *Node.Pool, node_id: Node.Id) Node.Error!Node.Id {
-    const kind = pool.nodes.items(.kind)[@intFromEnum(node_id)];
+    const kind = pool.nodes.items(.state)[@intFromEnum(node_id)].kind();
     return switch (kind) {
         .branch_struct => try pool.materializeBranchStruct(node_id),
         .slab => try pool.materializeSlab(node_id),
