@@ -82,18 +82,20 @@ pub fn processWithdrawals(
     }
 }
 
-// Consumer should deinit WithdrawalsResult with .deinit() after use
+/// Called by the block proposer to find a list of withdrawals to include in the block.
+///
+/// This list is assumed to be bounded by `preset.MAX_WITHDRAWALS_PER_PAYLOAD`.
+///
+/// Caller should deinit `withdrawal_balances` with .deinit() after use.
 pub fn getExpectedWithdrawals(
     comptime fork: ForkSeq,
-    allocator: Allocator,
     epoch_cache: *const EpochCache,
     state: *BeaconState(fork),
     withdrawals_result: *WithdrawalsResult,
     withdrawal_balances: *std.AutoHashMap(ValidatorIndex, usize),
 ) !void {
-    if (comptime fork.lt(.capella)) {
-        return error.InvalidForkSequence;
-    }
+    std.debug.assert(withdrawals_result.withdrawals.capacity == preset.MAX_WITHDRAWALS_PER_PAYLOAD);
+    if (comptime fork.lt(.capella)) return error.InvalidForkSequence;
 
     const epoch = epoch_cache.epoch;
     var withdrawal_index = try state.nextWithdrawalIndex();
@@ -134,7 +136,7 @@ pub fn getExpectedWithdrawals(
                 const withdrawable_balance = if (balance_over_min_activation_balance < withdrawal.amount) balance_over_min_activation_balance else withdrawal.amount;
                 var execution_address: ExecutionAddress = undefined;
                 @memcpy(&execution_address, validator.withdrawal_credentials[12..]);
-                try withdrawals_result.withdrawals.append(allocator, .{
+                withdrawals_result.withdrawals.appendAssumeCapacity(.{
                     .index = withdrawal_index,
                     .validator_index = withdrawal.validator_index,
                     .address = execution_address,
@@ -179,7 +181,7 @@ pub fn getExpectedWithdrawals(
         if (withdrawable_epoch <= epoch) {
             var execution_address: ExecutionAddress = undefined;
             @memcpy(&execution_address, withdrawal_credentials[12..]);
-            try withdrawals_result.withdrawals.append(allocator, .{
+            withdrawals_result.withdrawals.appendAssumeCapacity(.{
                 .index = withdrawal_index,
                 .validator_index = validator_index,
                 .address = execution_address,
@@ -195,7 +197,7 @@ pub fn getExpectedWithdrawals(
             const partial_amount = balance - effective_balance;
             var execution_address: ExecutionAddress = undefined;
             @memcpy(&execution_address, withdrawal_credentials[12..]);
-            try withdrawals_result.withdrawals.append(allocator, .{
+            withdrawals_result.withdrawals.appendAssumeCapacity(.{
                 .index = withdrawal_index,
                 .validator_index = validator_index,
                 .address = execution_address,
@@ -242,7 +244,6 @@ test "process withdrawals - sanity" {
 
     try getExpectedWithdrawals(
         .electra,
-        allocator,
         test_state.cached_state.epoch_cache,
         test_state.cached_state.state.castToFork(.electra),
         &withdrawals_result,

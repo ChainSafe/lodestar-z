@@ -279,7 +279,6 @@ pub fn TestCase(comptime fork: ForkSeq, comptime operation: Operation) type {
 
                     try state_transition.getExpectedWithdrawals(
                         fork,
-                        allocator,
                         epoch_cache,
                         state,
                         &withdrawals_result,

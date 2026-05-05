@@ -61,17 +61,13 @@ pub fn processBlock(
             // TODO Deneb: Allow to disable withdrawals for interop testing
             // https://github.com/ethereum/consensus-specs/blob/b62c9e877990242d63aa17a2a59a49bc649a2f2e/specs/eip4844/beacon-chain.md#disabling-withdrawals
             if (comptime fork.gte(.capella)) {
-                // TODO: given max withdrawals of MAX_WITHDRAWALS_PER_PAYLOAD, can use fixed size array instead of heap alloc
-                var withdrawals_result = WithdrawalsResult{ .withdrawals = try Withdrawals.initCapacity(
-                    allocator,
-                    preset.MAX_WITHDRAWALS_PER_PAYLOAD,
-                ) };
+                var withdrawals_buf: [preset.MAX_WITHDRAWALS_PER_PAYLOAD]types.capella.Withdrawal.Type = undefined;
+                var withdrawals_result = WithdrawalsResult{ .withdrawals = Withdrawals.initBuffer(&withdrawals_buf) };
                 var withdrawal_balances = std.AutoHashMap(ValidatorIndex, usize).init(allocator);
                 defer withdrawal_balances.deinit();
 
                 try getExpectedWithdrawals(
                     fork,
-                    allocator,
                     epoch_cache,
                     state,
                     &withdrawals_result,
