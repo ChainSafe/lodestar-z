@@ -307,12 +307,12 @@ declare class BeaconStateView {
   serializeToBytes(output: {uint8Array: Uint8Array; dataView: DataView}, offset: number): number;
   serializeValidators(): Uint8Array;
   serializedValidatorsSize(): number;
-  /** Same shape as `serializeToBytes`. */
   serializeValidatorsToBytes(output: {uint8Array: Uint8Array; dataView: DataView}, offset: number): number;
   hashTreeRoot(): Uint8Array;
   createMultiProof(descriptor: Uint8Array): CompactMultiProof;
 
-  // biome-ignore lint/suspicious/noExplicitAny: signed block bytes are passed as Uint8Array at runtime; signature is loosened so it satisfies `IBeaconStateView.stateTransition(block, opts, modules)` structurally.
+  // biome-ignore lint/suspicious/noExplicitAny: Note that signed block bytes are passed as Uint8Array at runtime; signature is loosened so it satisfies `IBeaconStateView.stateTransition(block, opts, modules)` structurally.
+  // TODO(bing): fix types
   stateTransition(signedBlock: any, options?: any, modules?: any): BeaconStateView;
   processSlots(slot: number, options?: ProcessSlotsOpts): BeaconStateView;
 }
