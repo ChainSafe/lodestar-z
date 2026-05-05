@@ -243,9 +243,15 @@ declare class BeaconStateView {
    * Spec: `is_execution_enabled(state, body) = is_merge_transition_complete(state) or is_merge_transition_block(state, body)`.
    * Fast path for post-merge states (no SSZ work); deserializes only on the rare pre-merge bellatrix path.
    */
-  isExecutionEnabled(signedBlockBytes: Uint8Array): boolean;
+  /**
+   * Check whether execution is enabled for the given block at this state.
+   *
+   * Check if 1) merge transition is complete, or 2) is a merge transition block
+   * Note that this does not call native `isExecutionEnabled` directly because we can save on deserializing
+   * `signed_block` if 1) holds. We only deserialize in the event that it's a pre-merge bellatrix block
+   */
 
-  // getExpectedWithdrawals(): ExpectedWithdrawals;
+  isExecutionEnabled(signedBlockBytes: Uint8Array): boolean;
 
   proposerRewards: ProposerRewards;
   // biome-ignore lint/suspicious/noExplicitAny: stub
