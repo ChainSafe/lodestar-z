@@ -1284,8 +1284,56 @@ pub fn getSyncCommitteesWitness(_: *const BeaconStateView) !js.Value {
     return throwNotImpl(js.Value, "getSyncCommitteesWitness not implemented");
 }
 
-pub fn getExpectedWithdrawals(_: *const BeaconStateView) !js.Value {
-    return throwNotImpl(js.Value, "getExpectedWithdrawals not implemented");
+/// Compute expected withdrawals for the next payload (capella+).
+/// Returns: { expectedWithdrawals: Withdrawal[], processedPartialWithdrawalsCount, processedValidatorSweepCount,
+///           processedBuilderWithdrawalsCount, processedBuildersSweepCount }
+/// The latter two are Gloas-only — always 0 here since Zig STF doesn't process Gloas yet.
+pub fn getExpectedWithdrawals(self: *const BeaconStateView) !js.Value {
+    const env = js.env();
+    const cached_state = try self.requireState();
+    const fork_seq = cached_state.state.forkSeq();
+
+    // We also check this within the native fn itself but this lets us avoid allocating an `AutoHashMap` early.
+    if (fork_seq.lt(.capella)) {
+        return throwNullAs(js.Value, "INVALID_FORK", "getExpectedWithdrawals only supported capella+");
+    }
+
+    var withdrawals_buf: [preset.MAX_WITHDRAWALS_PER_PAYLOAD]ct.capella.Withdrawal.Type = undefined;
+    var withdrawals_result = st.WithdrawalsResult{
+        .withdrawals = ct.capella.Withdrawals.Type.initBuffer(&withdrawals_buf),
+    };
+
+    var withdrawal_balances = std.AutoHashMap(ct.primitive.ValidatorIndex.Type, usize).init(allocator);
+    defer withdrawal_balances.deinit();
+
+    switch (fork_seq) {
+        inline .capella, .deneb, .electra, .fulu => |f| {
+            try st.getExpectedWithdrawals(
+                f,
+                cached_state.epoch_cache,
+                cached_state.state.castToFork(f),
+                &withdrawals_result,
+                &withdrawal_balances,
+            );
+        },
+        else => unreachable,
+    }
+
+    const obj = try env.createObject();
+
+    const withdrawals_arr = try env.createArray();
+    for (withdrawals_result.withdrawals.items, 0..) |*w, i| {
+        const w_value = try sszValueToNapiValue(env, ct.capella.Withdrawal, w);
+        try withdrawals_arr.setElement(@intCast(i), w_value);
+    }
+    try obj.setNamedProperty("expectedWithdrawals", withdrawals_arr);
+    try obj.setNamedProperty("processedPartialWithdrawalsCount", try env.createUint32(@intCast(withdrawals_result.processed_partial_withdrawals_count)));
+    try obj.setNamedProperty("processedValidatorSweepCount", try env.createUint32(@intCast(withdrawals_result.sampled_validators)));
+    // TODO(bing): Implement when we support Gloas.
+    try obj.setNamedProperty("processedBuilderWithdrawalsCount", try env.createUint32(0));
+    try obj.setNamedProperty("processedBuildersSweepCount", try env.createUint32(0));
+
+    return js_types.wrap(js.Value, obj);
 }
 
 fn requireState(self: *const BeaconStateView) !*CachedBeaconState {
