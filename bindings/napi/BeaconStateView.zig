@@ -219,7 +219,7 @@ pub fn currentEpochParticipation(self: *const BeaconStateView) !js.Uint8Array {
 
 pub fn getPreviousEpochParticipation(self: *const BeaconStateView, index_arg: js.Number) !js.Number {
     const cached_state = try self.requireState();
-    const index_value = try index_arg.toU32();
+    const index_value: usize = @intCast(try index_arg.toI64());
     var view = try cached_state.state.previousEpochParticipation();
     const flag = view.get(index_value) catch {
         return throwNullAs(js.Number, "INVALID_INDEX", "Failed to get previous epoch participation");
@@ -229,7 +229,7 @@ pub fn getPreviousEpochParticipation(self: *const BeaconStateView, index_arg: js
 
 pub fn getCurrentEpochParticipation(self: *const BeaconStateView, index_arg: js.Number) !js.Number {
     const cached_state = try self.requireState();
-    const index_value: u64 = try index_arg.toU32();
+    const index_value: usize = @intCast(try index_arg.toI64());
     var view = try cached_state.state.currentEpochParticipation();
     const flag = view.get(index_value) catch {
         return throwNullAs(js.Number, "INVALID_INDEX", "Failed to get current epoch participation");
@@ -273,8 +273,9 @@ pub fn payloadBlockNumber(self: *const BeaconStateView) !js.Number {
 pub fn getBlockRoot(self: *const BeaconStateView, epoch_arg: js.Number) !js.Uint8Array {
     const env = js.env();
     const cached_state = try self.requireState();
+    const epoch_value: u64 = @intCast(try epoch_arg.toI64());
 
-    const slot_ = st.computeStartSlotAtEpoch(try epoch_arg.toU32());
+    const slot_ = st.computeStartSlotAtEpoch(epoch_value);
 
     const result = switch (cached_state.state.forkSeq()) {
         inline else => |f| st.getBlockRootAtSlot(f, cached_state.state.castToFork(f), slot_),
@@ -314,7 +315,8 @@ pub fn getBlockRootAtSlot(self: *const BeaconStateView, slot_arg: js.Number) !js
 pub fn getBlockRootAtEpoch(self: *const BeaconStateView, epoch_arg: js.Number) !js.Uint8Array {
     const env = js.env();
     const cached_state = try self.requireState();
-    const slot_ = st.computeStartSlotAtEpoch(try epoch_arg.toU32());
+    const epoch_value: u64 = @intCast(try epoch_arg.toI64());
+    const slot_ = st.computeStartSlotAtEpoch(epoch_value);
 
     const result = switch (cached_state.state.forkSeq()) {
         inline else => |f| st.getBlockRootAtSlot(f, cached_state.state.castToFork(f), slot_),
@@ -353,7 +355,8 @@ pub fn getStateRootAtSlot(self: *const BeaconStateView, slot_arg: js.Number) !js
     var state_roots_view = cached_state.state.stateRoots() catch {
         return throwNullAs(js.Uint8Array, "STATE_ERROR", "Failed to get stateRoots");
     };
-    const root = state_roots_view.getFieldRoot(try slot_arg.toU32() % preset.SLOTS_PER_HISTORICAL_ROOT) catch {
+    const slot_: usize = @intCast(try slot_arg.toI64());
+    const root = state_roots_view.getFieldRoot(slot_ % preset.SLOTS_PER_HISTORICAL_ROOT) catch {
         return throwNullAs(js.Uint8Array, "INVALID_SLOT", "Failed to get state root at slot");
     };
     return js_types.wrap(js.Uint8Array, try sszValueToNapiValue(env, ct.primitive.Root, root));
@@ -494,7 +497,8 @@ pub fn nextDecisionRoot(self: *const BeaconStateView) !js.String {
 /// Get the shuffling decision root for a given epoch.
 pub fn getShufflingDecisionRoot(self: *const BeaconStateView, epoch_arg: js.Number) !js.String {
     const cached_state = try self.requireState();
-    const root = st.calculateShufflingDecisionRoot(cached_state.state, try epoch_arg.toU32()) catch {
+    const epoch_value: u64 = @intCast(try epoch_arg.toI64());
+    const root = st.calculateShufflingDecisionRoot(cached_state.state, epoch_value) catch {
         return throwNullAs(js.String, "STATE_ERROR", "Failed to calculate shuffling decision root");
     };
     return rootToHexString(&root);
@@ -625,7 +629,7 @@ pub fn getIndexedSyncCommitteeAtEpoch(self: *const BeaconStateView, epoch_arg: j
 pub fn getIndexedSyncCommittee(self: *const BeaconStateView, slot_arg: js.Number) !js_types.IndexedSyncCommittee {
     const env = js.env();
     const cached_state = try self.requireState();
-    const slot_value: u64 = try slot_arg.toU32();
+    const slot_value: u64 = @intCast(try slot_arg.toI64());
 
     const sync_committee = cached_state.epoch_cache.getIndexedSyncCommittee(slot_value) catch {
         return throwNullAs(js_types.IndexedSyncCommittee, "NO_SYNC_COMMITTEE", "Sync committee not available for requested slot");
@@ -726,7 +730,7 @@ pub fn getAllBalances(self: *const BeaconStateView) !js.Array {
 pub fn getValidatorsByStatus(self: *const BeaconStateView, statuses_set: js.Value, current_epoch_arg: js.Number) !js.Array {
     const env = js.env();
     const cached_state = try self.requireState();
-    const current_epoch: u64 = try current_epoch_arg.toU32();
+    const current_epoch: u64 = @intCast(try current_epoch_arg.toI64());
 
     const set_value = statuses_set.toValue();
     const has_fn = try set_value.getNamedProperty("has");
@@ -1026,7 +1030,7 @@ fn byteViewsToSlice(output: js.Value) ![]u8 {
 /// Returns the number of bytes written.
 pub fn serializeToBytes(self: *const BeaconStateView, output: js.Value, offset: js.Number) !js.Number {
     const output_slice = try byteViewsToSlice(output);
-    const off = try offset.toU32();
+    const off: usize = @intCast(try offset.toI64());
     if (off > output_slice.len) return error.InvalidOffset;
 
     const cached_state = try self.requireState();
@@ -1060,7 +1064,7 @@ pub fn serializedValidatorsSize(self: *const BeaconStateView) !js.Number {
 /// Returns the number of bytes written.
 pub fn serializeValidatorsToBytes(self: *const BeaconStateView, output: js.Value, offset: js.Number) !js.Number {
     const output_slice = try byteViewsToSlice(output);
-    const off = try offset.toU32();
+    const off: usize = @intCast(try offset.toI64());
     if (off > output_slice.len) return error.InvalidOffset;
 
     const cached_state = try self.requireState();
@@ -1187,7 +1191,7 @@ pub fn getNextShuffling(self: *const BeaconStateView) !js.Value {
 
 pub fn getShufflingAtEpoch(self: *const BeaconStateView, epoch_arg: js.Number) !js.Value {
     const cached_state = try self.requireState();
-    const epoch_value: u64 = try epoch_arg.toU32();
+    const epoch_value: u64 = @intCast(try epoch_arg.toI64());
 
     const shuffling = cached_state.epoch_cache.getShufflingAtEpochOrNull(epoch_value) orelse {
         return throwNullAs(js.Value, "NO_SHUFFLING", "Shuffling not available for requested epoch");
