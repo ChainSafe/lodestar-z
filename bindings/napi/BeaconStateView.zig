@@ -294,9 +294,10 @@ pub fn getBlockRoot(self: *const BeaconStateView, epoch_arg: js.Number) !js.Uint
 pub fn getBlockRootAtSlot(self: *const BeaconStateView, slot_arg: js.Number) !js.Uint8Array {
     const env = js.env();
     const cached_state = try self.requireState();
+    const slot_value: u64 = @intCast(try slot_arg.toI64());
 
     const result = switch (cached_state.state.forkSeq()) {
-        inline else => |f| st.getBlockRootAtSlot(f, cached_state.state.castToFork(f), try slot_arg.toU32()),
+        inline else => |f| st.getBlockRootAtSlot(f, cached_state.state.castToFork(f), slot_value),
     };
     const root = result catch |err| {
         const msg = switch (err) {
