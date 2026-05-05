@@ -7,11 +7,11 @@
 //!   - `payload`: u64, overloaded by kind
 //!       branch        : low 32 = left Id,  high 32 = right Id
 //!       chunked_leaf          : full 64-bit `*ChunkedLeaf` pointer
-//!       branch_struct : full 64-bit `*BranchStructRef` pointer
+//!       container_struct : full 64-bit `*ContainerStructRef` pointer
 //!       free          : low 32 = next-free Id (high 32 unused)
 //!       zero/leaf     : unused (zero/leaf root lives in `root`)
 //!   - `root`:  [32]u8 — leaf bytes, zero hash, or cached subtree root
-//!     (`lazy_sentinel` = uncomputed for branch/chunked_leaf/branch_struct)
+//!     (`lazy_sentinel` = uncomputed for branch/chunked_leaf/container_struct)
 //!   - `state`: State (packed u32 — see `State` doc)
 //!
 //! Maximum compactness: kind+ref_count packed into one u32 (`State`), and
@@ -61,7 +61,7 @@ pub const NodeKind = enum(u8) {
     leaf = 2,
     branch = 3,
     chunked_leaf = 4,
-    branch_struct = 5,
+    container_struct = 5,
 };
 
 /// Packed `[ free_bit | kind:3 | ref_count:28 ]` (in-use) or
@@ -90,8 +90,8 @@ pub const State = enum(u32) {
     pub inline fn isChunkedLeaf(s: State) bool {
         return s.kind() == .chunked_leaf;
     }
-    pub inline fn isBranchStruct(s: State) bool {
-        return s.kind() == .branch_struct;
+    pub inline fn isContainerStruct(s: State) bool {
+        return s.kind() == .container_struct;
     }
 
     /// Branch-free decode: free → NodeKind(0)=.free, in-use → NodeKind(enc+1).
@@ -149,7 +149,7 @@ pub const State = enum(u32) {
     }
 };
 
-/// Vtable + struct pointer that backs every `.branch_struct` Node.
+/// Vtable + struct pointer that backs every `.container_struct` Node.
 ///
 /// The Pool owns this allocation. `ptr` is an opaque-typed pointer to a
 /// caller-supplied wrapped struct that implements the required methods:
@@ -161,17 +161,25 @@ pub const State = enum(u32) {
 ///     into the container's interior. The returned Id is owned by the caller
 ///     (typically created with refcount=0 by the underlying field-tree
 ///     constructors); the proof code wraps it with `pool.unref` on cleanup.
-pub const BranchStructRef = struct {
+pub const ContainerStructRef = struct {
     ptr: *anyopaque,
     get_root: *const fn (ptr: *const anyopaque, out: *[32]u8) void,
     to_tree: *const fn (ptr: *const anyopaque, pool: *Pool) Error!Id,
     deinit: *const fn (ptr: *anyopaque, allocator: Allocator) void,
 };
 
-/// Sentinel value for a lazy (uncomputed) `root` field on `branch` and
-/// `chunked_leaf` variants. We use all-`0xFF` because cryptographic SHA-256 outputs
-/// are extremely unlikely to equal this value (~1 in 2^256), avoiding the
-/// 1-byte tag overhead an `?[32]u8` Optional would add.
+/// Sentinel value marking an uncomputed root cache on `branch`,
+/// `chunked_leaf`, and `container_struct` slots. Equality with this value
+/// means "lazy — recompute on next getRoot"; any other 32-byte value
+/// is treated as the cached merkle root.
+///
+/// All-`0xFF` is safe because cryptographic SHA-256 outputs collide
+/// with this value at probability ~1/2^256.
+///
+/// Living in the root column (not in `State.kind`) keeps cache
+/// validity orthogonal to structural type: each new kind costs one
+/// slot in `kind`, and `getRoot` toggles laziness by writing only the
+/// root column (no State write, separate cache line).
 pub const lazy_sentinel: [32]u8 = [_]u8{0xFF} ** 32;
 
 /// Pack a `(left, right)` Id pair into the u64 `payload` field.
@@ -190,7 +198,7 @@ inline fn unpackRight(p: u64) Id {
     return @enumFromInt(@as(u32, @intCast(p >> 32)));
 }
 
-/// Reinterpret a `payload` as a heap pointer (chunked_leaf / branch_struct).
+/// Reinterpret a `payload` as a heap pointer (chunked_leaf / container_struct).
 inline fn payloadAsPtr(p: u64) *anyopaque {
     return @ptrFromInt(p);
 }
@@ -223,7 +231,7 @@ inline fn childrenOf(
         // `noChild` guards prevent reaching here for these variants.
         .leaf, .free => unreachable,
         .chunked_leaf => unreachable,
-        .branch_struct => unreachable,
+        .container_struct => unreachable,
     };
 }
 
@@ -235,7 +243,7 @@ inline fn noChildKind(node_id: Id, kind: NodeKind) bool {
         .branch => @intFromEnum(node_id) == 0,
         .free => true,
         .chunked_leaf => true,
-        .branch_struct => true,
+        .container_struct => true,
     };
 }
 
@@ -244,8 +252,8 @@ inline fn chunkedLeafStorage(payloads: []const u64, idx: u32) *ChunkedLeaf {
     return @ptrCast(@alignCast(payloadAsPtr(payloads[idx])));
 }
 
-/// Read the BranchStructRef for a slot known to be `.branch_struct`.
-inline fn branchStructRef(payloads: []const u64, idx: u32) *BranchStructRef {
+/// Read the ContainerStructRef for a slot known to be `.container_struct`.
+inline fn containerStructRef(payloads: []const u64, idx: u32) *ContainerStructRef {
     return @ptrCast(@alignCast(payloadAsPtr(payloads[idx])));
 }
 
@@ -300,11 +308,11 @@ pub const Id = enum(u32) {
                 roots[idx] = hash;
                 return &roots[idx];
             },
-            .branch_struct => {
+            .container_struct => {
                 if (!std.mem.eql(u8, &roots[idx], &lazy_sentinel)) {
                     return &roots[idx];
                 }
-                const ref_ptr = branchStructRef(pool.nodes.items(.payload), idx);
+                const ref_ptr = containerStructRef(pool.nodes.items(.payload), idx);
                 var hash: [32]u8 = undefined;
                 ref_ptr.get_root(ref_ptr.ptr, &hash);
                 roots[idx] = hash;
@@ -1099,7 +1107,7 @@ pub const Pool = struct {
     }
 
     pub fn deinit(self: *Pool) void {
-        // Release heap payloads owned by `.chunked_leaf` and `.branch_struct` slots.
+        // Release heap payloads owned by `.chunked_leaf` and `.container_struct` slots.
         // The MultiArrayList only owns its own column buffers; payload
         // pointers are heap-allocated separately and become unreachable
         // when callers tear down the pool without first unref'ing every
@@ -1111,8 +1119,8 @@ pub const Pool = struct {
             const idx: u32 = @intCast(i);
             switch (s.kind()) {
                 .chunked_leaf => self.allocator.destroy(chunkedLeafStorage(payloads, idx)),
-                .branch_struct => {
-                    const struct_ref = branchStructRef(payloads, idx);
+                .container_struct => {
+                    const struct_ref = containerStructRef(payloads, idx);
                     struct_ref.deinit(struct_ref.ptr, self.allocator);
                     self.allocator.destroy(struct_ref);
                 },
@@ -1221,7 +1229,7 @@ pub const Pool = struct {
         return node_id;
     }
 
-    /// Create a `.branch_struct` Node holding a cloned `T` instance.
+    /// Create a `.container_struct` Node holding a cloned `T` instance.
     ///
     /// `T` must implement:
     ///   - `pub fn init(allocator: Allocator, *const T) Error!*const T`
@@ -1229,14 +1237,14 @@ pub const Pool = struct {
     ///   - `pub fn getRoot(*const T, out: *[32]u8) void`
     ///
     /// The Pool clones `ptr` (so the caller retains ownership of its copy) and
-    /// owns the resulting `BranchStructRef`. The returned Node has a lazy root;
+    /// owns the resulting `ContainerStructRef`. The returned Node has a lazy root;
     /// `Id.getRoot` computes and caches it on first access.
-    pub fn createBranchStruct(self: *Pool, comptime T: type, ptr: *const T) Error!Id {
+    pub fn createContainerStruct(self: *Pool, comptime T: type, ptr: *const T) Error!Id {
         // Clone the struct into the Pool's allocator.
         const cloned = try T.init(self.allocator, ptr);
         errdefer @constCast(cloned).deinit(self.allocator);
 
-        const ref_ptr = try self.allocator.create(BranchStructRef);
+        const ref_ptr = try self.allocator.create(ContainerStructRef);
         errdefer self.allocator.destroy(ref_ptr);
 
         ref_ptr.* = .{
@@ -1263,38 +1271,38 @@ pub const Pool = struct {
 
         const node_id = try self.create();
         const idx = @intFromEnum(node_id);
-        // `payload` carries the encoded `*BranchStructRef`; this slot has
-        // no Id-children (`noChild` returns true for branch_struct).
+        // `payload` carries the encoded `*ContainerStructRef`; this slot has
+        // no Id-children (`noChild` returns true for container_struct).
         self.nodes.items(.payload)[idx] = ptrAsPayload(@ptrCast(ref_ptr));
         self.nodes.items(.root)[idx] = lazy_sentinel;
-        self.nodes.items(.state)[idx] = State.initInUse(.branch_struct, 0);
+        self.nodes.items(.state)[idx] = State.initInUse(.container_struct, 0);
         return node_id;
     }
 
     /// Returns a read-only pointer to the wrapped struct held by a
-    /// `.branch_struct` Node. Returns `Error.InvalidNode` if the slot is not
+    /// `.container_struct` Node. Returns `Error.InvalidNode` if the slot is not
     /// a branch-struct variant.
     pub fn getStructPtr(self: *Pool, node_id: Id, comptime T: type) Error!*const T {
         const idx = @intFromEnum(node_id);
-        if (self.nodes.items(.state)[idx].kind() != .branch_struct) {
+        if (self.nodes.items(.state)[idx].kind() != .container_struct) {
             return Error.InvalidNode;
         }
-        const ref_ptr = branchStructRef(self.nodes.items(.payload), idx);
+        const ref_ptr = containerStructRef(self.nodes.items(.payload), idx);
         return @ptrCast(@alignCast(ref_ptr.ptr));
     }
 
     /// Materializes a temporary, fully-navigable PMT subtree from a
-    /// `.branch_struct` slot's wrapped struct. The returned Id has refcount
+    /// `.container_struct` slot's wrapped struct. The returned Id has refcount
     /// matching the underlying field-tree constructors (typically 0 — caller
     /// is responsible for `unref`'ing it once the temporary tree is no longer
     /// needed). Returns `Error.InvalidNode` if the slot is not a branch-struct
     /// variant.
-    pub fn materializeBranchStruct(self: *Pool, node_id: Id) Error!Id {
+    pub fn materializeContainerStruct(self: *Pool, node_id: Id) Error!Id {
         const idx = @intFromEnum(node_id);
-        if (self.nodes.items(.state)[idx].kind() != .branch_struct) {
+        if (self.nodes.items(.state)[idx].kind() != .container_struct) {
             return Error.InvalidNode;
         }
-        const ref_ptr = branchStructRef(self.nodes.items(.payload), idx);
+        const ref_ptr = containerStructRef(self.nodes.items(.payload), idx);
         return try ref_ptr.to_tree(ref_ptr.ptr, self);
     }
 
@@ -1457,9 +1465,9 @@ pub const Pool = struct {
                     self.allocator.destroy(storage);
                     current = null;
                 },
-                .branch_struct => {
-                    // Free the wrapped struct + the BranchStructRef heap-allocation.
-                    const ref_ptr = branchStructRef(self.nodes.items(.payload), @intFromEnum(id));
+                .container_struct => {
+                    // Free the wrapped struct + the ContainerStructRef heap-allocation.
+                    const ref_ptr = containerStructRef(self.nodes.items(.payload), @intFromEnum(id));
                     ref_ptr.deinit(ref_ptr.ptr, self.allocator);
                     self.allocator.destroy(ref_ptr);
                     current = null;

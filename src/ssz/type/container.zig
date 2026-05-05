@@ -293,7 +293,7 @@ pub fn FixedContainerType(comptime ST: type) type {
 }
 
 /// A fixed-size container whose tree representation is a single
-/// `.branch_struct` Node (vtable + cached deserialized struct), instead of a
+/// `.container_struct` Node (vtable + cached deserialized struct), instead of a
 /// merkleized subtree of leaf chunks.
 ///
 /// This trades a ~50% reduction in struct-decode work (no per-field tree
@@ -304,7 +304,7 @@ pub fn FixedContainerType(comptime ST: type) type {
 /// Wraps an underlying `FixedContainerType(ST)` and re-exports its
 /// merkleization, serialization, JSON, and field metadata. The differences
 /// live entirely in the `tree` namespace, which routes through
-/// `Pool.createBranchStruct` / `Pool.getStructPtr`.
+/// `Pool.createContainerStruct` / `Pool.getStructPtr`.
 pub fn StructContainerType(comptime ST: type) type {
     const FixedCT = FixedContainerType(ST);
 
@@ -323,7 +323,7 @@ pub fn StructContainerType(comptime ST: type) type {
         pub const serialized = FixedCT.serialized;
         const Self = @This();
 
-        /// Wrapper that satisfies the BranchStructRef vtable contract.
+        /// Wrapper that satisfies the ContainerStructRef vtable contract.
         ///
         /// `value` is the full deserialized struct (cached at the leaf-Node
         /// level). The Pool clones via `init` and frees via `deinit`. Root
@@ -337,7 +337,7 @@ pub fn StructContainerType(comptime ST: type) type {
 
             /// Materialize a temporary navigable PMT subtree representing this
             /// container's full hash-tree. Used by proof traversal — see
-            /// `Pool.materializeBranchStruct`. The returned Id has refcount=0;
+            /// `Pool.materializeContainerStruct`. The returned Id has refcount=0;
             /// the caller is responsible for `unref`'ing it.
             pub fn toTree(self: *const WrappedT, pool: *Node.Pool) !Node.Id {
                 return try FixedCT.tree.fromValue(pool, &self.value);
@@ -378,7 +378,7 @@ pub fn StructContainerType(comptime ST: type) type {
         pub const tree = struct {
             pub fn default(pool: *Node.Pool) !Node.Id {
                 const wrapped = WrappedT{ .value = default_value };
-                return try pool.createBranchStruct(WrappedT, &wrapped);
+                return try pool.createContainerStruct(WrappedT, &wrapped);
             }
 
             pub fn deserializeFromBytes(pool: *Node.Pool, data: []const u8) !Node.Id {
@@ -387,7 +387,7 @@ pub fn StructContainerType(comptime ST: type) type {
                 }
                 var wrapped: WrappedT = undefined;
                 try Self.deserializeFromBytes(data, &wrapped.value);
-                return try pool.createBranchStruct(WrappedT, &wrapped);
+                return try pool.createContainerStruct(WrappedT, &wrapped);
             }
 
             pub fn toValue(node: Node.Id, pool: *Node.Pool, out: *Type) !void {
@@ -397,7 +397,7 @@ pub fn StructContainerType(comptime ST: type) type {
 
             pub fn fromValue(pool: *Node.Pool, value: *const Type) !Node.Id {
                 const wrapped = WrappedT{ .value = value.* };
-                return try pool.createBranchStruct(WrappedT, &wrapped);
+                return try pool.createContainerStruct(WrappedT, &wrapped);
             }
 
             pub fn serializeIntoBytes(node: Node.Id, pool: *Node.Pool, out: []u8) !usize {

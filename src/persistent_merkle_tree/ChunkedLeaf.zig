@@ -24,8 +24,17 @@ len: u16,
 
 /// Compute the chunked_leaf subtree root: K-leaf perfect binary tree, no
 /// padding. Each reduction is one batched `hash()` call so hashtree's
-/// SIMD lanes stay saturated. First round reads `chunks` directly (no
-/// 32 KB stack copy); later rounds halve in-place on `buf`.
+/// SIMD lanes stay saturated.
+///
+/// `chunks` is `*const` (the heap blob is shared across CoW siblings),
+/// so we cannot use `hashing.merkleize` directly — that function halves
+/// in-place on a mutable input. Instead we allocate a K/2 (= 16 KB)
+/// scratch `buf` and:
+///   - First round: read `chunks` directly (zero-copy slice header) and
+///     write K/2 hashes into `buf`. The 32 KB const data stays in its
+///     heap home; we never duplicate it onto the stack.
+///   - Later rounds: halve in-place on `buf` (output is the prefix of
+///     input — `hashtree.hash` supports this overlap).
 pub fn computeRoot(self: *const ChunkedLeaf, out: *[32]u8) void {
     var buf: [K / 2][32]u8 align(64) = undefined;
 

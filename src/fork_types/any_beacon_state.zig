@@ -1062,7 +1062,7 @@ test "upgrade state - sanity" {
 // tree, calling `Node.Id.getLeft`/`getRight` per descent step. Two recent
 // optimizations turned terminal nodes into opaque payloads with no Id
 // children:
-//   * `Validator` is stored as `branch_struct` (a single Node holding a
+//   * `Validator` is stored as `container_struct` (a single Node holding a
 //     deserialized struct). Descending into a validator sub-field returns
 //     `Error.InvalidNode`.
 //   * `Balances` is stored as `chunked_leaf` (a single Node holding K=1024 packed
@@ -1072,7 +1072,7 @@ test "upgrade state - sanity" {
 // EF spec tests do not exercise these paths (the `merkle_proof` shard only
 // covers `BeaconBlockBody.blob_kzg_commitment_merkle_proof`), so these two
 // regressions slipped through. The tests below are expected to FAIL today
-// and pass after `branch_struct`/`chunked_leaf` learn to materialize a temporary
+// and pass after `container_struct`/`chunked_leaf` learn to materialize a temporary
 // PMT subtree on demand for proof generation (see PR #232's `to_tree`
 // vtable design).
 

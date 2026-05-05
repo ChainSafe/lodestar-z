@@ -408,9 +408,9 @@ pub fn ContainerTreeView(comptime ST: type) type {
 
 /// TreeView companion to `StructContainerType`.
 ///
-/// The backing Node is a single `.branch_struct` slot whose payload is the
+/// The backing Node is a single `.container_struct` slot whose payload is the
 /// fully-decoded struct value. This view caches a copy of that value and
-/// re-creates a new branch_struct Node on `commit` if any field was mutated.
+/// re-creates a new container_struct Node on `commit` if any field was mutated.
 ///
 /// Field reads/writes are O(1) (direct struct access) — there is no per-field
 /// child TreeView and no per-field merkle navigation.
