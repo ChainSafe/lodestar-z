@@ -273,8 +273,7 @@ declare class BeaconStateView {
   getSyncCommitteesWitness(): any;
   // biome-ignore lint/suspicious/noExplicitAny: stub
   getExpectedWithdrawals(): any;
-  // biome-ignore lint/suspicious/noExplicitAny: native takes number, IBeaconStateView declares bigint
-  getSingleProof(gindex: any): Uint8Array[];
+  getSingleProof(gindex: bigint): Uint8Array[];
   // createMultiProof(descriptor: Uint8Array): CompactMultiProof;
 
   computeUnrealizedCheckpoints(): {
