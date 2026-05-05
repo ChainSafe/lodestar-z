@@ -240,17 +240,12 @@ declare class BeaconStateView {
   /** True iff state is pre-merge AND the given block carries a non-default execution payload. Bellatrix-only. */
   isMergeTransitionBlock(signedBlockBytes: Uint8Array): boolean;
   /**
-   * Spec: `is_execution_enabled(state, body) = is_merge_transition_complete(state) or is_merge_transition_block(state, body)`.
-   * Fast path for post-merge states (no SSZ work); deserializes only on the rare pre-merge bellatrix path.
-   */
-  /**
    * Check whether execution is enabled for the given block at this state.
    *
    * Check if 1) merge transition is complete, or 2) is a merge transition block
    * Note that this does not call native `isExecutionEnabled` directly because we can save on deserializing
    * `signed_block` if 1) holds. We only deserialize in the event that it's a pre-merge bellatrix block
    */
-
   isExecutionEnabled(signedBlockBytes: Uint8Array): boolean;
 
   proposerRewards: ProposerRewards;
