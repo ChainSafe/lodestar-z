@@ -292,6 +292,7 @@ declare class BeaconStateView {
     opts?: {preloadValidatorsAndBalances?: boolean}
   ): any;
   // biome-ignore lint/suspicious/noExplicitAny: stub
+  // TODO(bing): Only one real use case in lodestar and it's in debugging; impl when useful
   toValue(): any;
   serialize(): Uint8Array;
   serializedSize(): number;
