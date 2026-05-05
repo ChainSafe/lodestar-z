@@ -1100,30 +1100,17 @@ pub fn processSlots(self: *const BeaconStateView, slot_arg: js.Number, options: 
 ///
 /// Arguments:
 /// - arg 0: signed block bytes (Uint8Array)
-/// - arg 1: options (optional): { verifyStateRoot?, verifyProposer?, verifySignatures?, transferCache? }
+/// - arg 1: options (optional): parse `TransitionOpts`
 pub fn stateTransition(self: *const BeaconStateView, signed_block_bytes: js.Uint8Array, options: ?js.Value) !BeaconStateView {
     const cached_state = try self.requireState();
+
+    const opts = try @import("./transition_opts.zig").parseOptions(options);
 
     const current_epoch = st.computeEpochAtSlot(try cached_state.state.slot());
     const fork_seq = cached_state.config.forkSeqAtEpoch(current_epoch);
     const bytes = try signed_block_bytes.toSlice();
     const signed_block = try AnySignedBeaconBlock.deserialize(allocator, .full, fork_seq, bytes);
     defer signed_block.deinit(allocator);
-
-    var opts: st.TransitionOpts = .{};
-    if (options) |opt_val| {
-        const raw = opt_val.toValue();
-        if (try raw.typeof() == .object) {
-            if (try raw.hasNamedProperty("verifyStateRoot"))
-                opts.verify_state_root = try (try raw.getNamedProperty("verifyStateRoot")).getValueBool();
-            if (try raw.hasNamedProperty("verifyProposer"))
-                opts.verify_proposer = try (try raw.getNamedProperty("verifyProposer")).getValueBool();
-            if (try raw.hasNamedProperty("verifySignatures"))
-                opts.verify_signatures = try (try raw.getNamedProperty("verifySignatures")).getValueBool();
-            if (try raw.hasNamedProperty("transferCache"))
-                opts.transfer_cache = try (try raw.getNamedProperty("transferCache")).getValueBool();
-        }
-    }
 
     const post_state = try st.stateTransition(allocator, napi_io.get(), cached_state, signed_block, opts);
     return .{ .cached_state = post_state };
