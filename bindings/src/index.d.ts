@@ -287,12 +287,17 @@ declare class BeaconStateView {
   createdWithTransferCache: boolean;
   isStateValidatorsNodesPopulated(): boolean;
 
-  // biome-ignore lint/suspicious/noExplicitAny: stub
+  /**
+   * Simple impl: ignores `seedValidatorsBytes` and `preloadValidatorsAndBalances` —
+   * just deserializes `stateBytes` into a fresh BeaconStateView. Loses the
+   * validators-tree-reuse optimization the TS impl provides for checkpoint reload.
+   * TODO(bing): port `loadState` tree-reuse logic from TS to recover the perf win.
+   */
   loadOtherState(
     stateBytes: Uint8Array,
     seedValidatorsBytes?: Uint8Array,
     opts?: {preloadValidatorsAndBalances?: boolean}
-  ): any;
+  ): BeaconStateView;
   // biome-ignore lint/suspicious/noExplicitAny: stub
   // TODO(bing): Only one real use case in lodestar and it's in debugging; impl when useful
   toValue(): any;

@@ -1266,8 +1266,10 @@ pub fn isStateValidatorsNodesPopulated(_: *const BeaconStateView) !js.Boolean {
     return js.Boolean.from(true);
 }
 
-pub fn loadOtherState(_: *const BeaconStateView, _: js.Uint8Array, _: ?js.Uint8Array, _: ?js.Value) !js.Value {
-    return throwNotImpl(js.Value, "loadOtherState not implemented");
+/// TODO(bing): This is the naive version; port real `loadState` (deserializeContainerIgnoreFields + loadValidators
+/// byte-diff/tree-reuse) from TS to Zig SSZ to get the ~500ms-per-reload optimization.
+pub fn loadOtherState(_: *const BeaconStateView, state_bytes: js.Uint8Array, _: ?js.Uint8Array, _: ?js.Value) !BeaconStateView {
+    return createFromBytes(state_bytes);
 }
 
 pub fn toValue(_: *const BeaconStateView) !js.Value {
