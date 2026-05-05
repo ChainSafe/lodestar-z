@@ -1071,8 +1071,9 @@ pub const Id = enum(u32) {
         // This is initialized as 0 since the first index has no previous index
         var d_offset: Depth = 0;
 
-        // Bind navigation columns once. Refresh after any allocation that
-        // could grow the underlying MAL (alloc/rebind/unref-driven preheat).
+        // Bind navigation columns once. Refresh only when `pool.alloc`
+        // returns true (the only path that grows the underlying MAL via
+        // `preheat` and invalidates these slices).
         var states = pool.nodes.items(.state);
         var payloads = pool.nodes.items(.payload);
 
@@ -1184,11 +1185,6 @@ pub const Id = enum(u32) {
             }
             node_id = path_parents[next_d_offset];
             d_offset = next_d_offset;
-            // unref may have grown the pool indirectly via subsequent calls; the
-            // node_id we read above is preserved by value, but the column slices
-            // may be stale if any allocation happened. Refresh defensively.
-            states = pool.nodes.items(.state);
-            payloads = pool.nodes.items(.payload);
         }
 
         return node_id;
@@ -1439,9 +1435,6 @@ pub const Id = enum(u32) {
 
             node_id = path_parents_buf[next_d_offset];
             d_offset = next_d_offset;
-            // Refresh slices after potential pool growth via rebind/unref paths.
-            states = pool.nodes.items(.state);
-            payloads = pool.nodes.items(.payload);
         }
 
         return node_id;
