@@ -4,6 +4,7 @@
 //! array + length) referenced by one `.chunked_leaf` Node. Self-contained,
 //! ref-counted via the Pool's Node ref count, copy-on-write on mutation.
 const std = @import("std");
+const Allocator = std.mem.Allocator;
 const hashing = @import("hashing");
 const hash = hashing.hash;
 
@@ -26,26 +27,29 @@ len: u16,
 /// padding. Each reduction is one batched `hash()` call so hashtree's
 /// SIMD lanes stay saturated.
 ///
-/// `chunks` is `*const` (the heap blob is shared across CoW siblings),
-/// so we cannot use `hashing.merkleize` directly — that function halves
-/// in-place on a mutable input. Instead we allocate a K/2 (= 16 KB)
-/// scratch `buf` and:
-///   - First round: read `chunks` directly (zero-copy slice header) and
-///     write K/2 hashes into `buf`. The 32 KB const data stays in its
-///     heap home; we never duplicate it onto the stack.
-///   - Later rounds: halve in-place on `buf` (output is the prefix of
-///     input — `hashtree.hash` supports this overlap).
-pub fn computeRoot(self: *const ChunkedLeaf, out: *[32]u8) void {
-    var buf: [K / 2][32]u8 align(64) = undefined;
-
-    hash(buf[0..], self.chunks[0..]) catch unreachable;
+/// `scratch` is a caller-supplied K/2-element buffer. `computeRootAllocating`
+/// wraps this with a per-call `allocator.alignedAlloc` + free.
+///
+/// First round reads `chunks` directly into `scratch` (avoids the
+/// in-place mutation that `hashing.merkleize` would require on `*const
+/// chunks`). Later rounds halve in-place on `scratch`.
+pub fn computeRoot(self: *const ChunkedLeaf, scratch: *align(64) [K / 2][32]u8, out: *[32]u8) void {
+    hash(scratch[0..], self.chunks[0..]) catch unreachable;
 
     var width: usize = K / 2;
     while (width > 1) : (width /= 2) {
-        hash(buf[0 .. width / 2], buf[0..width]) catch unreachable;
+        hash(scratch[0 .. width / 2], scratch[0..width]) catch unreachable;
     }
 
-    out.* = buf[0];
+    out.* = scratch[0];
+}
+
+/// `computeRoot` wrapper that owns the scratch via `allocator`.
+pub fn computeRootAllocating(self: *const ChunkedLeaf, allocator: Allocator, out: *[32]u8) void {
+    const scratch_slice = allocator.alignedAlloc([32]u8, .@"64", K / 2) catch @panic("OOM");
+    defer allocator.free(scratch_slice);
+    const scratch_arr: *align(64) [K / 2][32]u8 = @ptrCast(scratch_slice.ptr);
+    self.computeRoot(scratch_arr, out);
 }
 
 const Node = @import("Node.zig");
@@ -56,8 +60,12 @@ test "computeRoot for all-zero chunked_leaf equals getZeroHash(k_log2)" {
     defer allocator.destroy(chunked_leaf);
     chunked_leaf.* = std.mem.zeroes(ChunkedLeaf);
 
+    const scratch_slice = try allocator.alignedAlloc([32]u8, .@"64", K / 2);
+    defer allocator.free(scratch_slice);
+    const scratch: *align(64) [K / 2][32]u8 = @ptrCast(scratch_slice.ptr);
+
     var chunked_leaf_root: [32]u8 = undefined;
-    chunked_leaf.computeRoot(&chunked_leaf_root);
+    chunked_leaf.computeRoot(scratch, &chunked_leaf_root);
 
     const expected = hashing.getZeroHash(k_log2);
     try std.testing.expectEqualSlices(u8, expected, &chunked_leaf_root);
@@ -73,8 +81,12 @@ test "computeRoot for non-zero pattern matches std merkleize" {
         std.mem.writeInt(u256, &chunked_leaf.chunks[i], @as(u256, @intCast(i + 1)), .little);
     }
 
+    const scratch_slice = try allocator.alignedAlloc([32]u8, .@"64", K / 2);
+    defer allocator.free(scratch_slice);
+    const scratch: *align(64) [K / 2][32]u8 = @ptrCast(scratch_slice.ptr);
+
     var chunked_leaf_root: [32]u8 = undefined;
-    chunked_leaf.computeRoot(&chunked_leaf_root);
+    chunked_leaf.computeRoot(scratch, &chunked_leaf_root);
 
     var pairs = try allocator.alloc([2][32]u8, K / 2);
     defer allocator.free(pairs);

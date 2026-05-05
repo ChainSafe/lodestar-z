@@ -388,17 +388,25 @@ pub const Pool = struct {
     pub fn createBranch(self: *Pool, left_id: Id, right_id: Id) Error!Id {
         std.debug.assert(@intFromEnum(left_id) < self.nodes.len);
         std.debug.assert(@intFromEnum(right_id) < self.nodes.len);
+        std.debug.assert(!self.nodes.items(.state)[@intFromEnum(left_id)].isFree());
+        std.debug.assert(!self.nodes.items(.state)[@intFromEnum(right_id)].isFree());
 
+        // Acquire both child refs BEFORE writing parent metadata. If
+        // `refUnsafe(right)` fails we mustn't leave the parent slot in
+        // `.branch` pointing at a child whose rc was never incremented;
+        // a later `unref(parent)` would then recursively dec the
+        // un-ref'd child.
+        try self.refUnsafe(left_id);
+        errdefer self.unref(left_id);
+        try self.refUnsafe(right_id);
+        errdefer self.unref(right_id);
+
+        // `self.create()` may grow the pool — bind column slices AFTER it.
         const node_id = try self.create();
         const idx = @intFromEnum(node_id);
-        const states = self.nodes.items(.state);
-        std.debug.assert(!states[@intFromEnum(left_id)].isFree());
-        std.debug.assert(!states[@intFromEnum(right_id)].isFree());
-        states[idx] = State.initInUse(.branch, 0);
+        self.nodes.items(.state)[idx] = State.initInUse(.branch, 0);
         self.nodes.items(.payload)[idx] = packChildren(left_id, right_id);
         self.nodes.items(.root)[idx] = lazy_sentinel;
-        try self.refUnsafe(left_id);
-        try self.refUnsafe(right_id);
         return node_id;
     }
 
@@ -413,6 +421,24 @@ pub const Pool = struct {
         errdefer self.allocator.destroy(storage);
 
         storage.chunks = chunks.*;
+        storage.len = len;
+
+        const node_id = try self.create();
+        const idx = @intFromEnum(node_id);
+        self.nodes.items(.payload)[idx] = ptrAsPayload(@ptrCast(storage));
+        self.nodes.items(.root)[idx] = lazy_sentinel;
+        self.nodes.items(.state)[idx] = State.initInUse(.chunked_leaf, 0);
+        return node_id;
+    }
+
+    /// Creates a chunked_leaf Node owning a freshly-zeroed heap-allocated
+    /// `ChunkedLeaf`. Caller fills via `Id.getChunkedLeafPtr`.
+    pub fn createChunkedLeafEmpty(self: *Pool, len: u16) Error!Id {
+        std.debug.assert(len <= ChunkedLeaf.K);
+        const storage = try self.allocator.create(ChunkedLeaf);
+        errdefer self.allocator.destroy(storage);
+
+        @memset(std.mem.asBytes(&storage.chunks), 0);
         storage.len = len;
 
         const node_id = try self.create();
@@ -576,16 +602,21 @@ pub const Pool = struct {
             const idx = @intFromEnum(out[i]);
             std.debug.assert(idx < self.nodes.len);
 
-            // Preserve the existing ref count: an earlier iteration in this
-            // same rebind() call may have already ref'd this slot (when
-            // out[i] is the parent of an earlier out[j]), and resetting rc
-            // here would orphan that reference.
+            // Acquire both child refs BEFORE writing parent metadata. If
+            // `refUnsafe(right)` fails we mustn't leave the parent slot in
+            // `.branch` pointing at a child whose rc was never incremented;
+            // a later `unref(parent)` would then recursively dec the
+            // un-ref'd child. Note: parent's own rc is preserved — an
+            // earlier iteration may have already ref'd this slot (when
+            // out[i] is the child of an earlier out[j]).
+            try self.refUnsafe(left_ids[i]);
+            errdefer self.unref(left_ids[i]);
+            try self.refUnsafe(right_ids[i]);
+            errdefer self.unref(right_ids[i]);
+
             state_col[idx].setKind(.branch);
             payload_col[idx] = packChildren(left_ids[i], right_ids[i]);
             root_col[idx] = lazy_sentinel;
-
-            try self.refUnsafe(left_ids[i]);
-            try self.refUnsafe(right_ids[i]);
         }
     }
 
@@ -626,10 +657,8 @@ pub const Pool = struct {
             const states = self.nodes.items(.state);
             const k = states[@intFromEnum(id)].kind();
 
-            // Already-freed node: bug in ref counting. Match legacy: just continue.
             if (k == .free) {
-                current = null;
-                continue;
+                @panic("unref called on .free slot — use-after-free");
             }
             // Zero nodes are not ref counted; nothing to do.
             if (k == .zero) {
@@ -719,7 +748,7 @@ pub const Id = enum(u32) {
                 }
                 const storage = chunkedLeafPtr(pool.nodes.items(.payload), idx);
                 var hash: [32]u8 = undefined;
-                storage.computeRoot(&hash);
+                storage.computeRootAllocating(pool.allocator, &hash);
                 roots[idx] = hash;
                 return &roots[idx];
             },

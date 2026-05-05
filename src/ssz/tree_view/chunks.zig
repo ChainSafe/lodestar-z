@@ -101,12 +101,14 @@ pub fn BasicPackedChunks(
                 // (rc=0 ⇒ exclusively owned by us). Then setChildNode publishes
                 // it to the cache and `changed` set.
                 if (existing_kind == .zero) {
-                    var zero_buf: [ChunkedLeaf.K][32]u8 align(64) = [_][32]u8{[_]u8{0} ** 32} ** ChunkedLeaf.K;
-                    const fresh_id = try self.state.pool.createChunkedLeaf(&zero_buf, 0);
+                    var fresh_id_opt: ?Node.Id = try self.state.pool.createChunkedLeafEmpty(intra_chunk_u16 + 1);
+                    errdefer if (fresh_id_opt) |id| self.state.pool.unref(id);
+                    const fresh_id = fresh_id_opt.?;
                     const fresh_storage = try fresh_id.getChunkedLeafPtr(self.state.pool);
                     ST.Element.tree.fromValuePackedIntoChunk(&fresh_storage.chunks[intra_chunk], index, &value);
                     self.state.pool.nodes.items(.root)[@intFromEnum(fresh_id)] = Node.lazy_sentinel;
                     try self.state.setChildNode(gindex, fresh_id);
+                    fresh_id_opt = null;
                     return;
                 }
 

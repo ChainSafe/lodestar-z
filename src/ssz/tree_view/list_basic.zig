@@ -311,21 +311,16 @@ pub fn ListBasicTreeView(comptime ST: type) type {
                         return error.InvalidNode;
                     }
 
-                    const old_chunks = try boundary_id.getChunkedLeafChunks(pool);
-                    // 32 KB stack scratch — same precedent as `chunks.zig`'s
-                    // sparse-write path.
-                    var tmp: [ChunkedLeaf.K][32]u8 align(64) = undefined;
-                    tmp = old_chunks.*;
-
-                    if (keep_bytes < BYTES_PER_CHUNK) {
-                        @memset(tmp[intra_chunk][keep_bytes..], 0);
-                    }
-                    if (intra_chunk + 1 < ChunkedLeaf.K) {
-                        @memset(std.mem.sliceAsBytes(tmp[intra_chunk + 1 ..]), 0);
-                    }
-
-                    var trimmed_chunked_leaf: ?Node.Id = try pool.createChunkedLeaf(&tmp, intra_chunk + 1);
+                    var trimmed_chunked_leaf: ?Node.Id = try pool.createChunkedLeafEmpty(intra_chunk + 1);
                     defer if (trimmed_chunked_leaf) |id| pool.unref(id);
+                    {
+                        const old_chunks = try boundary_id.getChunkedLeafChunks(pool);
+                        const new_storage = try trimmed_chunked_leaf.?.getChunkedLeafPtr(pool);
+                        @memcpy(new_storage.chunks[0 .. intra_chunk + 1], old_chunks[0 .. intra_chunk + 1]);
+                        if (keep_bytes < BYTES_PER_CHUNK) {
+                            @memset(new_storage.chunks[intra_chunk][keep_bytes..], 0);
+                        }
+                    }
 
                     const updated = try Node.Id.setNodeAtDepth(
                         self.chunks.state.root,

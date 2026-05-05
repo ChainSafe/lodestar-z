@@ -26,7 +26,6 @@ test "Node.State predicates" {
 
     // Leaf
     const leaf = try pool.createLeafFromUint(42);
-    defer pool.unref(leaf);
     const leaf_state = leaf.getState(p);
     try std.testing.expect(leaf_state.isLeaf());
     try std.testing.expect(!leaf_state.isZero());
