@@ -821,34 +821,15 @@ pub fn proposerRewards(self: *const BeaconStateView) !js_types.ProposerRewards {
     return .{ .val = obj };
 }
 
-/// Walk a JS `phase0.SignedVoluntaryExit` object and assemble the Zig SSZ value.
-/// Field shape: `{message: {epoch, validatorIndex}, signature: Uint8Array(96)}`.
-fn parseSignedVoluntaryExit(signed_exit_value: js.Value) !ct.phase0.SignedVoluntaryExit.Type {
-    var result: ct.phase0.SignedVoluntaryExit.Type = ct.phase0.SignedVoluntaryExit.default_value;
-    const exit_obj = signed_exit_value.toValue();
-
-    const message = try exit_obj.getNamedProperty("message");
-    result.message.epoch = try (try message.getNamedProperty("epoch")).getValueUint32();
-    result.message.validator_index = try (try message.getNamedProperty("validatorIndex")).getValueUint32();
-
-    const sig_val = try exit_obj.getNamedProperty("signature");
-    const sig_info = try sig_val.getTypedarrayInfo();
-    if (sig_info.array_type != .uint8 or sig_info.data.len != 96) {
-        return error.InvalidSignature;
-    }
-    @memcpy(&result.signature, sig_info.data);
-    return result;
-}
-
-/// Get the validity status of a signed voluntary exit.
-/// Caller passes a JS `phase0.SignedVoluntaryExit` object (matches IBeaconStateView).
-pub fn getVoluntaryExitValidity(self: *const BeaconStateView, signed_exit_value: js.Value, verify_signature_value: js.Boolean) !js.String {
+pub fn getVoluntaryExitValidity(self: *const BeaconStateView, signed_exit_bytes: js.Uint8Array, verify_signature_value: js.Boolean) !js.String {
     const env = js.env();
     const cached_state = try self.requireState();
     const verify_signature = verify_signature_value.assertBool();
+    const bytes = try signed_exit_bytes.toSlice();
 
-    var signed_voluntary_exit = parseSignedVoluntaryExit(signed_exit_value) catch {
-        return throwNullAs(js.String, "PARSE_ERROR", "Failed to parse SignedVoluntaryExit");
+    var signed_voluntary_exit: ct.phase0.SignedVoluntaryExit.Type = ct.phase0.SignedVoluntaryExit.default_value;
+    ct.phase0.SignedVoluntaryExit.deserializeFromBytes(bytes, &signed_voluntary_exit) catch {
+        return throwNullAs(js.String, "DESERIALIZE_ERROR", "Failed to deserialize SignedVoluntaryExit");
     };
 
     const result = switch (cached_state.state.forkSeq()) {
@@ -868,14 +849,14 @@ pub fn getVoluntaryExitValidity(self: *const BeaconStateView, signed_exit_value:
     return .{ .val = try env.createStringUtf8(@tagName(validity)) };
 }
 
-/// Check if a signed voluntary exit is valid.
-/// Caller passes a JS `phase0.SignedVoluntaryExit` object (matches IBeaconStateView).
-pub fn isValidVoluntaryExit(self: *const BeaconStateView, signed_exit_value: js.Value, verify_signature_value: js.Boolean) !js.Boolean {
+pub fn isValidVoluntaryExit(self: *const BeaconStateView, signed_exit_bytes: js.Uint8Array, verify_signature_value: js.Boolean) !js.Boolean {
     const cached_state = try self.requireState();
     const verify_signature = verify_signature_value.assertBool();
+    const bytes = try signed_exit_bytes.toSlice();
 
-    var signed_voluntary_exit = parseSignedVoluntaryExit(signed_exit_value) catch {
-        return throwNullAs(js.Boolean, "PARSE_ERROR", "Failed to parse SignedVoluntaryExit");
+    var signed_voluntary_exit: ct.phase0.SignedVoluntaryExit.Type = ct.phase0.SignedVoluntaryExit.default_value;
+    ct.phase0.SignedVoluntaryExit.deserializeFromBytes(bytes, &signed_voluntary_exit) catch {
+        return throwNullAs(js.Boolean, "DESERIALIZE_ERROR", "Failed to deserialize SignedVoluntaryExit");
     };
 
     const result = switch (cached_state.state.forkSeq()) {

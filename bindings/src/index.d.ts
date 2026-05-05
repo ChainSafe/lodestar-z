@@ -265,20 +265,8 @@ declare class BeaconStateView {
   computeSyncCommitteeRewards(block: any, validatorIds: (number | string)[]): Promise<any>;
   getLatestWeakSubjectivityCheckpointEpoch(): number;
 
-  /**
-   * Native walks the JS `phase0.SignedVoluntaryExit` shape directly.
-   * Return is the string union `VoluntaryExitValidity` at runtime, but lodestar's
-   * matching TS enum is nominally typed — `any` to satisfy structural conformance.
-   */
-  // biome-ignore lint/suspicious/noExplicitAny: TS-nominal-enum mismatch (runtime values match exactly)
-  getVoluntaryExitValidity(
-    signedVoluntaryExit: {message: {epoch: number; validatorIndex: number}; signature: Uint8Array},
-    verifySignature: boolean
-  ): any;
-  isValidVoluntaryExit(
-    signedVoluntaryExit: {message: {epoch: number; validatorIndex: number}; signature: Uint8Array},
-    verifySignature: boolean
-  ): boolean;
+  getVoluntaryExitValidity(signedVoluntaryExitBytes: Uint8Array, verifySignature: boolean): VoluntaryExitValidity;
+  isValidVoluntaryExit(signedVoluntaryExitBytes: Uint8Array, verifySignature: boolean): boolean;
 
   getFinalizedRootProof(): Uint8Array[];
   // biome-ignore lint/suspicious/noExplicitAny: stub
