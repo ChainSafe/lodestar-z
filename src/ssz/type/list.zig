@@ -19,9 +19,10 @@ pub const TypeOpts = struct {
     /// (Pool.createChunkedLeaf) instead of per-chunk leaves. ChunkedLeaf leaves pack K=1024
     /// chunks contiguously; the upper tree is depth `chunk_depth - k_log2`.
     /// Trade-off: faster bulk operations on large lists; tradeoff explored
-    /// in B6/D1 benchmarks. ListBasicTreeView features that traverse at
-    /// chunk depth (sliceTo, ReadonlyIterator) compile-error on chunked_leaf-enabled
-    /// types — use get/set/getAll/serialize/deserialize/hashTreeRoot instead.
+    /// in B6/D1 benchmarks. ListBasicTreeView's `iteratorReadonly` and
+    /// `sliceTo` support chunked_leaf-enabled types via two-level
+    /// (chunked_leaf_idx, intra_chunk) navigation. Requires `limit >= K *
+    /// items_per_chunk` so `chunk_depth >= k_log2`.
     chunked_leaf: bool = false,
 };
 
@@ -35,6 +36,17 @@ pub fn FixedListType(comptime ST: type, comptime _limit: comptime_int, comptime 
         }
         if (_opts.chunked_leaf and !isBasicType(ST)) {
             @compileError("FixedListType: opts.chunked_leaf=true requires isBasicType(Element)");
+        }
+        if (_opts.chunked_leaf) {
+            const ChunkedLeaf = @import("persistent_merkle_tree").ChunkedLeaf;
+            const items_per_chunk_local = if (isBasicType(ST)) (32 / ST.fixed_size) else 1;
+            const min_limit = ChunkedLeaf.K * items_per_chunk_local;
+            if (_limit < min_limit) {
+                @compileError(std.fmt.comptimePrint(
+                    "FixedListType: opts.chunked_leaf=true requires limit >= K * items_per_chunk = {d} (chunk_depth must be >= ChunkedLeaf.k_log2)",
+                    .{min_limit},
+                ));
+            }
         }
     }
     return struct {

@@ -6,7 +6,7 @@
 //! Layout (3 columns total):
 //!   - `payload`: u64, overloaded by kind
 //!       branch        : low 32 = left Id,  high 32 = right Id
-//!       chunked_leaf          : full 64-bit `*ChunkedLeaf.Storage` pointer
+//!       chunked_leaf          : full 64-bit `*ChunkedLeaf` pointer
 //!       branch_struct : full 64-bit `*BranchStructRef` pointer
 //!       free          : low 32 = next-free Id (high 32 unused)
 //!       zero/leaf     : unused (zero/leaf root lives in `root`)
@@ -25,7 +25,7 @@ const getZeroHash = @import("hashing").getZeroHash;
 const max_depth = @import("hashing").max_depth;
 const Depth = @import("hashing").Depth;
 const Gindex = @import("gindex.zig").Gindex;
-const ChunkedLeaf = @import("chunked_leaf.zig");
+const ChunkedLeaf = @import("ChunkedLeaf.zig");
 
 // Flat node fields (file-as-struct). Order doesn't affect SoA layout.
 payload: u64,
@@ -240,7 +240,7 @@ inline fn noChildKind(node_id: Id, kind: NodeKind) bool {
 }
 
 /// Read the chunked_leaf Storage pointer for a slot known to be `.chunked_leaf`.
-inline fn chunkedLeafStorage(payloads: []const u64, idx: u32) *ChunkedLeaf.Storage {
+inline fn chunkedLeafStorage(payloads: []const u64, idx: u32) *ChunkedLeaf {
     return @ptrCast(@alignCast(payloadAsPtr(payloads[idx])));
 }
 
@@ -296,7 +296,7 @@ pub const Id = enum(u32) {
                 }
                 const storage = chunkedLeafStorage(pool.nodes.items(.payload), idx);
                 var hash: [32]u8 = undefined;
-                ChunkedLeaf.computeRoot(storage, &hash);
+                storage.computeRoot(&hash);
                 roots[idx] = hash;
                 return &roots[idx];
             },
@@ -339,7 +339,7 @@ pub const Id = enum(u32) {
         return chunkedLeafStorage(pool.nodes.items(.payload), idx).len;
     }
 
-    pub fn getChunkedLeafStorageMut(node_id: Id, pool: *Pool) Error!*ChunkedLeaf.Storage {
+    pub fn getChunkedLeafStorageMut(node_id: Id, pool: *Pool) Error!*ChunkedLeaf {
         const idx = @intFromEnum(node_id);
         if (pool.nodes.items(.state)[idx].kind() != .chunked_leaf) return Error.InvalidNode;
         return chunkedLeafStorage(pool.nodes.items(.payload), idx);
@@ -352,8 +352,8 @@ pub const Id = enum(u32) {
         if (pool.nodes.items(.state)[idx].kind() != .chunked_leaf) return Error.InvalidNode;
         const old_storage = chunkedLeafStorage(pool.nodes.items(.payload), idx);
 
-        const new_storage = try ChunkedLeaf.allocZero(pool.allocator);
-        errdefer ChunkedLeaf.destroy(pool.allocator, new_storage);
+        const new_storage = try pool.allocator.create(ChunkedLeaf);
+        errdefer pool.allocator.destroy(new_storage);
 
         new_storage.chunks = old_storage.chunks;
         new_storage.len = old_storage.len;
@@ -383,8 +383,8 @@ pub const Id = enum(u32) {
         if (pool.nodes.items(.state)[idx].kind() != .chunked_leaf) return Error.InvalidNode;
         const old_storage = chunkedLeafStorage(pool.nodes.items(.payload), idx);
 
-        const new_storage = try ChunkedLeaf.allocZero(pool.allocator);
-        errdefer ChunkedLeaf.destroy(pool.allocator, new_storage);
+        const new_storage = try pool.allocator.create(ChunkedLeaf);
+        errdefer pool.allocator.destroy(new_storage);
 
         new_storage.chunks = old_storage.chunks;
         new_storage.len = old_storage.len;
@@ -775,6 +775,19 @@ pub const Id = enum(u32) {
 
     /// Zeroes every node strictly to the right of `index` at the provided `depth`.
     pub fn truncateAfterIndex(root_node: Id, pool: *Pool, depth: Depth, index: usize) Error!Id {
+        return truncateAfterIndexWithLeafOffset(root_node, pool, depth, index, 0);
+    }
+
+    /// Like `truncateAfterIndex`, but `leaf_offset` declares how many extra
+    /// levels each "leaf" at `depth` represents underneath. ChunkedLeaf-mode
+    /// trees pass `leaf_offset = ChunkedLeaf.k_log2` so zeroed positions use
+    /// `ZeroHash[depthi + leaf_offset]` instead of `ZeroHash[depthi]`.
+    ///
+    /// Pool's ZeroHash sentinels live at Node.Id `0..max_depth-1`, so
+    /// `depth + leaf_offset` MUST stay within that range or
+    /// `@enumFromInt(zero_depth)` aliases an unrelated slot.
+    pub fn truncateAfterIndexWithLeafOffset(root_node: Id, pool: *Pool, depth: Depth, index: usize, leaf_offset: Depth) Error!Id {
+        std.debug.assert(@as(usize, depth) + @as(usize, leaf_offset) <= max_depth);
         if (depth == 0) {
             return root_node;
         }
@@ -817,7 +830,7 @@ pub const Id = enum(u32) {
             const go_left = isLeftIndex(depthi, index);
             if (go_left) {
                 path_lefts[i] = path_parents[i + 1];
-                const zero_depth: Depth = @intCast(depthi);
+                const zero_depth: Depth = @intCast(depthi + @as(usize, leaf_offset));
                 path_rights[i] = @enumFromInt(zero_depth);
                 node_id = c.left;
             } else {
@@ -838,7 +851,7 @@ pub const Id = enum(u32) {
             const go_left_last = isLeftIndex(0, index);
             if (go_left_last) {
                 path_lefts[path_len - 1] = c.left;
-                path_rights[path_len - 1] = @enumFromInt(0);
+                path_rights[path_len - 1] = @enumFromInt(leaf_offset);
             } else {
                 path_lefts[path_len - 1] = c.left;
                 path_rights[path_len - 1] = c.right;
@@ -1097,7 +1110,7 @@ pub const Pool = struct {
             if (s.isFree()) continue;
             const idx: u32 = @intCast(i);
             switch (s.kind()) {
-                .chunked_leaf => ChunkedLeaf.destroy(self.allocator, chunkedLeafStorage(payloads, idx)),
+                .chunked_leaf => self.allocator.destroy(chunkedLeafStorage(payloads, idx)),
                 .branch_struct => {
                     const struct_ref = branchStructRef(payloads, idx);
                     struct_ref.deinit(struct_ref.ptr, self.allocator);
@@ -1187,15 +1200,15 @@ pub const Pool = struct {
         return node_id;
     }
 
-    /// Creates a chunked_leaf Node owning a heap-allocated `ChunkedLeaf.Storage` initialized
+    /// Creates a chunked_leaf Node owning a heap-allocated `ChunkedLeaf` initialized
     /// from `chunks`. `len` is the count of valid chunks (`<= K`); the caller
     /// is responsible for ensuring chunks at indices `>= len` are zero-bytes
     /// (the Storage invariant). The returned Node has a lazy root;
     /// `Id.getRoot` will compute and cache it on first access.
     pub fn createChunkedLeaf(self: *Pool, chunks: *align(64) const [ChunkedLeaf.K][32]u8, len: u16) Error!Id {
         std.debug.assert(len <= ChunkedLeaf.K);
-        const storage = try ChunkedLeaf.allocZero(self.allocator);
-        errdefer ChunkedLeaf.destroy(self.allocator, storage);
+        const storage = try self.allocator.create(ChunkedLeaf);
+        errdefer self.allocator.destroy(storage);
 
         storage.chunks = chunks.*;
         storage.len = len;
@@ -1440,9 +1453,8 @@ pub const Pool = struct {
                     current = unpackLeft(c);
                 },
                 .chunked_leaf => {
-                    // Free the heap-allocated Storage owned by this chunked_leaf Node.
                     const storage = chunkedLeafStorage(self.nodes.items(.payload), @intFromEnum(id));
-                    ChunkedLeaf.destroy(self.allocator, storage);
+                    self.allocator.destroy(storage);
                     current = null;
                 },
                 .branch_struct => {

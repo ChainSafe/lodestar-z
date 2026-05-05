@@ -25,6 +25,17 @@ pub fn FixedVectorType(comptime ST: type, comptime _length: comptime_int, compti
         if (_opts.chunked_leaf and !isBasicType(ST)) {
             @compileError("FixedVectorType: opts.chunked_leaf=true requires isBasicType(Element)");
         }
+        if (_opts.chunked_leaf) {
+            const ChunkedLeaf = @import("persistent_merkle_tree").ChunkedLeaf;
+            const items_per_chunk_local = if (isBasicType(ST)) (32 / ST.fixed_size) else 1;
+            const min_length = ChunkedLeaf.K * items_per_chunk_local;
+            if (_length < min_length) {
+                @compileError(std.fmt.comptimePrint(
+                    "FixedVectorType: opts.chunked_leaf=true requires length >= K * items_per_chunk = {d} (chunk_depth must be >= ChunkedLeaf.k_log2)",
+                    .{min_length},
+                ));
+            }
+        }
     }
     return struct {
         pub const kind = TypeKind.vector;

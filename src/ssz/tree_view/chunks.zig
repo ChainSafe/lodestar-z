@@ -129,8 +129,8 @@ pub fn BasicPackedChunks(
                 // Path 3: shared chunked_leaf (rc >= 1 — owned by the persistent tree).
                 // Must CoW: produce a fresh chunked_leaf via setChunkedLeafChunk and publish
                 // it. From this point onward subsequent writes hit Path 2.
-                const existing_storage = try existing_id.getChunkedLeafStorageMut(self.state.pool);
-                var new_chunk: [32]u8 = existing_storage.chunks[intra_chunk];
+                const existing_chunks = try existing_id.getChunkedLeafChunks(self.state.pool);
+                var new_chunk: [32]u8 = existing_chunks[intra_chunk];
                 ST.Element.tree.fromValuePackedIntoChunk(&new_chunk, index, &value);
                 const new_chunked_leaf_id = try existing_id.setChunkedLeafChunk(self.state.pool, intra_chunk_u16, &new_chunk);
                 try self.state.setChildNode(gindex, new_chunked_leaf_id);
