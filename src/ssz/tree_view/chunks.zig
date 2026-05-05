@@ -103,7 +103,7 @@ pub fn BasicPackedChunks(
                 if (existing_kind == .zero) {
                     var zero_buf: [ChunkedLeaf.K][32]u8 align(64) = [_][32]u8{[_]u8{0} ** 32} ** ChunkedLeaf.K;
                     const fresh_id = try self.state.pool.createChunkedLeaf(&zero_buf, 0);
-                    const fresh_storage = try fresh_id.getChunkedLeafStorageMut(self.state.pool);
+                    const fresh_storage = try fresh_id.getChunkedLeafPtr(self.state.pool);
                     ST.Element.tree.fromValuePackedIntoChunk(&fresh_storage.chunks[intra_chunk], index, &value);
                     self.state.pool.nodes.items(.root)[@intFromEnum(fresh_id)] = Node.lazy_sentinel;
                     try self.state.setChildNode(gindex, fresh_id);
@@ -120,7 +120,7 @@ pub fn BasicPackedChunks(
                 // do NOT call setChildNode again (which would unref-then-store
                 // the same Id and free our chunked_leaf).
                 if (state_col[@intFromEnum(existing_id)].refCount() == 0) {
-                    const storage = try existing_id.getChunkedLeafStorageMut(self.state.pool);
+                    const storage = try existing_id.getChunkedLeafPtr(self.state.pool);
                     ST.Element.tree.fromValuePackedIntoChunk(&storage.chunks[intra_chunk], index, &value);
                     self.state.pool.nodes.items(.root)[@intFromEnum(existing_id)] = Node.lazy_sentinel;
                     return;
