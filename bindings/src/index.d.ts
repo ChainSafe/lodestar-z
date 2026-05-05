@@ -65,7 +65,9 @@ interface ProcessSlotsOpts {
 }
 
 interface CompactMultiProof {
-  // biome-ignore lint/suspicious/noExplicitAny: native returns string literal "compactMulti", IBeaconStateView uses @chainsafe/persistent-merkle-tree's ProofType enum nominally
+  // biome-ignore lint/suspicious/noExplicitAny:
+  // native returns string literal "compactMulti", IBeaconStateView uses @chainsafe/persistent-merkle-tree's ProofType
+  // TODO(bing): align types?
   type: any;
   leaves: Uint8Array[];
   descriptor: Uint8Array;
