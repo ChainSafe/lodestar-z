@@ -395,6 +395,16 @@ pub fn StructContainerType(comptime ST: type) type {
                 try Self.clone(&wrapped.value, out);
             }
 
+            /// Returns a read-only pointer to the value stored in a
+            /// `.container_struct` node, with no copy. The pointer is valid
+            /// as long as the node's refcount is held and the value isn't
+            /// replaced via CoW. Caller must not retain the pointer past
+            /// any mutation of the same validator slot.
+            pub fn getValuePtr(node: Node.Id, pool: *Node.Pool) !*const Type {
+                const wrapped = try pool.getStructPtr(node, WrappedT);
+                return &wrapped.value;
+            }
+
             pub fn fromValue(pool: *Node.Pool, value: *const Type) !Node.Id {
                 const wrapped = WrappedT{ .value = value.* };
                 return try pool.createContainerStruct(WrappedT, &wrapped);

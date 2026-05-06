@@ -239,6 +239,23 @@ pub fn ListCompositeTreeView(comptime ST: type) type {
                 }
                 return value;
             }
+
+            /// Read-only pointer to the next element's value without copying.
+            /// Only available when `ST.Element` is a `StructContainerType` —
+            /// the underlying `container_struct` node already holds the value
+            /// inline, so we can hand back a `*const T` directly.
+            ///
+            /// The pointer is valid as long as the iterator's pool retains
+            /// the node (CoW mutation invalidates it). Use only for
+            /// transient read passes that don't mutate the list.
+            pub fn nextValuePtr(self: *ReadonlyIterator) !*const ST.Element.Type {
+                if (comptime !@hasDecl(ST.Element.tree, "getValuePtr")) {
+                    @compileError("nextValuePtr requires ST.Element to be a StructContainerType");
+                }
+                const node = try self.depth_iterator.next();
+                self.elem_index += 1;
+                return ST.Element.tree.getValuePtr(node, self.tree_view.chunks.state.pool);
+            }
         };
 
         /// Return a new view containing all elements up to and including `index`.

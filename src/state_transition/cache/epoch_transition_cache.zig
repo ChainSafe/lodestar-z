@@ -238,9 +238,10 @@ pub const EpochTransitionCache = struct {
         var indices_to_eject: std.ArrayList(ValidatorIndex) = .empty;
 
         var total_active_stake_by_increment: u64 = 0;
-        const validators = try state.validatorsSlice(allocator);
-        defer allocator.free(validators);
-        const validator_count = validators.len;
+        var validators_view = try state.validators();
+        try validators_view.commit();
+        const validator_count = try validators_view.length();
+        var validators_it = validators_view.iteratorReadonly(0);
 
         // Clone before being mutated in processEffectiveBalanceUpdates
         try epoch_cache.beforeEpochTransition();
@@ -250,7 +251,8 @@ pub const EpochTransitionCache = struct {
         var next_epoch_shuffling_active_indices_length: usize = 0;
 
         var reused_cache = try getReusedEpochTransitionCache(allocator, io, validator_count);
-        for (validators, 0..) |validator, i| {
+        for (0..validator_count) |i| {
+            const validator = try validators_it.nextValuePtr();
             var flag: u8 = 0;
 
             if (validator.slashed) {
