@@ -267,11 +267,10 @@ pub fn TestCase(comptime fork: ForkSeq, comptime operation: Operation) type {
                 },
                 .withdrawals => {
                     const epoch_cache = cached_state.epoch_cache;
+
+                    var withdrawals_buf: [preset.MAX_WITHDRAWALS_PER_PAYLOAD]Withdrawals = undefined;
                     var withdrawals_result = WithdrawalsResult{
-                        .withdrawals = try Withdrawals.initCapacity(
-                            allocator,
-                            preset.MAX_WITHDRAWALS_PER_PAYLOAD,
-                        ),
+                        .withdrawals = Withdrawals.initBuffer(&withdrawals_buf),
                     };
 
                     var withdrawal_balances = std.AutoHashMap(u64, usize).init(allocator);
@@ -284,7 +283,6 @@ pub fn TestCase(comptime fork: ForkSeq, comptime operation: Operation) type {
                         &withdrawals_result,
                         &withdrawal_balances,
                     );
-                    defer withdrawals_result.withdrawals.deinit(allocator);
 
                     var payload_withdrawals_root: Root = undefined;
                     // self.op is ExecutionPayload in this case

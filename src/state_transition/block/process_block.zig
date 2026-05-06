@@ -73,7 +73,6 @@ pub fn processBlock(
                     &withdrawals_result,
                     &withdrawal_balances,
                 );
-                defer withdrawals_result.withdrawals.deinit(allocator);
 
                 const payload_withdrawals_root = switch (block_type) {
                     .full => blk: {

@@ -229,13 +229,10 @@ test "process withdrawals - sanity" {
     var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
     defer test_state.deinit();
 
+    var withdrawals_buf: [preset.MAX_WITHDRAWALS_PER_PAYLOAD]types.capella.Withdrawal.Type = undefined;
     var withdrawals_result = WithdrawalsResult{
-        .withdrawals = try Withdrawals.initCapacity(
-            allocator,
-            preset.MAX_WITHDRAWALS_PER_PAYLOAD,
-        ),
+        .withdrawals = Withdrawals.initBuffer(&withdrawals_buf),
     };
-    defer withdrawals_result.withdrawals.deinit(allocator);
     var withdrawal_balances = std.AutoHashMap(ValidatorIndex, usize).init(allocator);
     defer withdrawal_balances.deinit();
 
