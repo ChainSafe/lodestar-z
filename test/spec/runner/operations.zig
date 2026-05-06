@@ -268,7 +268,7 @@ pub fn TestCase(comptime fork: ForkSeq, comptime operation: Operation) type {
                 .withdrawals => {
                     const epoch_cache = cached_state.epoch_cache;
 
-                    var withdrawals_buf: [preset.MAX_WITHDRAWALS_PER_PAYLOAD]Withdrawals = undefined;
+                    var withdrawals_buf: [preset.MAX_WITHDRAWALS_PER_PAYLOAD]ssz.capella.Withdrawal.Type = undefined;
                     var withdrawals_result = WithdrawalsResult{
                         .withdrawals = Withdrawals.initBuffer(&withdrawals_buf),
                     };
