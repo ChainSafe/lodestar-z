@@ -68,10 +68,10 @@ fn ProcessWithdrawalsBench(comptime fork: ForkSeq) type {
                 allocator.destroy(cloned);
             }
 
+            var withdrawals_buf: [preset.MAX_WITHDRAWALS_PER_PAYLOAD]types.capella.Withdrawal.Type = undefined;
             var withdrawals_result = WithdrawalsResult{
-                .withdrawals = Withdrawals.initCapacity(allocator, preset.MAX_WITHDRAWALS_PER_PAYLOAD) catch unreachable,
+                .withdrawals = Withdrawals.initBuffer(&withdrawals_buf),
             };
-            defer withdrawals_result.withdrawals.deinit(allocator);
 
             var withdrawal_balances = std.AutoHashMap(ValidatorIndex, usize).init(allocator);
             defer withdrawal_balances.deinit();
@@ -79,7 +79,6 @@ fn ProcessWithdrawalsBench(comptime fork: ForkSeq) type {
             const state = cloned.state.castToFork(fork);
             state_transition.getExpectedWithdrawals(
                 fork,
-                allocator,
                 cloned.epoch_cache,
                 state,
                 &withdrawals_result,
@@ -339,15 +338,15 @@ fn ProcessBlockSegmentedBench(comptime fork: ForkSeq) type {
 
             if (comptime fork.gte(.capella) and fork.lt(.gloas)) {
                 const withdrawals_start = time.timestampNow(io);
+
+                var withdrawals_buf: [preset.MAX_WITHDRAWALS_PER_PAYLOAD]types.capella.Withdrawal.Type = undefined;
                 var withdrawals_result = WithdrawalsResult{
-                    .withdrawals = Withdrawals.initCapacity(allocator, preset.MAX_WITHDRAWALS_PER_PAYLOAD) catch unreachable,
+                    .withdrawals = Withdrawals.initBuffer(&withdrawals_buf),
                 };
-                defer withdrawals_result.withdrawals.deinit(allocator);
                 var withdrawal_balances = std.AutoHashMap(ValidatorIndex, usize).init(allocator);
                 defer withdrawal_balances.deinit();
                 state_transition.getExpectedWithdrawals(
                     fork,
-                    allocator,
                     epoch_cache,
                     state,
                     &withdrawals_result,

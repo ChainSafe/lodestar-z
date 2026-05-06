@@ -3,7 +3,7 @@ const testing = std.testing;
 
 pub const stateTransition = @import("state_transition.zig").stateTransition;
 pub const processSlots = @import("state_transition.zig").processSlots;
-pub const TransitionOpt = @import("state_transition.zig").TransitionOpt;
+pub const TransitionOpts = @import("state_transition.zig").TransitionOpts;
 
 pub const metrics = @import("metrics.zig");
 
@@ -85,6 +85,7 @@ pub const getValidatorStatus = validator_status.getValidatorStatus;
 pub const getBlockRootAtSlot = @import("./utils/block_root.zig").getBlockRootAtSlot;
 pub const computeSlotsSinceEpochStart = @import("./utils/epoch.zig").computeSlotsSinceEpochStart;
 pub const computeStartSlotAtEpoch = @import("./utils/epoch.zig").computeStartSlotAtEpoch;
+pub const AnchorCheckpoint = @import("./AnchorCheckpoint.zig");
 pub const deinitStateTransition = @import("./state_transition.zig").deinitStateTransition;
 pub const isExecutionEnabled = @import("./utils/execution.zig").isExecutionEnabled;
 pub const isMergeTransitionComplete = @import("./utils/execution.zig").isMergeTransitionComplete;
@@ -99,6 +100,8 @@ pub const bls = @import("utils/bls.zig");
 const seed = @import("./utils/seed.zig");
 pub const state_transition = @import("./state_transition.zig");
 pub const BlockExternalData = state_transition.BlockExternalData;
+pub const ExecutionPayloadStatus = state_transition.ExecutionPayloadStatus;
+pub const DataAvailabilityStatus = state_transition.DataAvailabilityStatus;
 pub const preset = @import("preset").preset;
 const EpochShuffling = @import("./utils/epoch_shuffling.zig");
 pub const calculateShufflingDecisionRoot = EpochShuffling.calculateShufflingDecisionRoot;

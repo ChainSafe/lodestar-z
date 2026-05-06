@@ -10,7 +10,7 @@
 //! rely on the native `thread_pool`. In lodestar, this is called from a Node.js
 //! worker thread (BLS thread pool), not the main thread.
 const std = @import("std");
-const napi = @import("zapi:zapi");
+const napi = @import("zapi:zapi").napi;
 const bls = @import("bls");
 const builtin = @import("builtin");
 const getter = @import("napi_property_descriptor.zig").getter;
@@ -990,6 +990,8 @@ pub fn register(env: napi.Env, exports: napi.Value) !void {
         method(2, PublicKey_fromBytes),
         method(2, PublicKey_fromHex),
     });
+    try pk_ctor.setNamedProperty("COMPRESS_SIZE", try env.createUint32(@intCast(PublicKey.COMPRESS_SIZE)));
+    try pk_ctor.setNamedProperty("SERIALIZE_SIZE", try env.createUint32(@intCast(PublicKey.SERIALIZE_SIZE)));
 
     const sig_ctor = try env.defineClass(
         "Signature",
@@ -1007,6 +1009,8 @@ pub fn register(env: napi.Env, exports: napi.Value) !void {
         method(3, Signature_fromHex),
         method(2, Signature_aggregate),
     });
+    try sig_ctor.setNamedProperty("COMPRESS_SIZE", try env.createUint32(@intCast(Signature.COMPRESS_SIZE)));
+    try sig_ctor.setNamedProperty("SERIALIZE_SIZE", try env.createUint32(@intCast(Signature.SERIALIZE_SIZE)));
 
     const state = try InstanceData.init(env);
     try setRef(env, pk_ctor, &state.public_key_ctor_ref);

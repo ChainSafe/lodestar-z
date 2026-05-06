@@ -1,6 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
-const napi = @import("zapi:zapi");
+const js = @import("zapi:zapi").js;
 const state_transition = @import("state_transition");
 
 var gpa: std.heap.DebugAllocator(.{}) = .init;
@@ -11,28 +11,17 @@ else
 
 var initialized: bool = false;
 
-pub fn Metrics_scrapeMetrics(env: napi.Env, _: napi.CallbackInfo(0)) !napi.Value {
+/// JS: metrics.scrapeMetrics() → string
+pub fn scrapeMetrics() !js.String {
     var aw: std.Io.Writer.Allocating = .init(allocator);
     try state_transition.metrics.write(&aw.writer);
     var list = aw.toArrayList();
     defer list.deinit(allocator);
-    return env.createStringUtf8(list.items);
+    return js.String.from(list.items);
 }
 
 pub fn deinit() void {
     if (!initialized) return;
     state_transition.metrics.state_transition.deinit();
     initialized = false;
-}
-
-pub fn register(env: napi.Env, exports: napi.Value) !void {
-    const metrics_obj = try env.createObject();
-
-    try metrics_obj.setNamedProperty("scrapeMetrics", try env.createFunction(
-        "scrapeMetrics",
-        0,
-        Metrics_scrapeMetrics,
-        null,
-    ));
-    try exports.setNamedProperty("metrics", metrics_obj);
 }

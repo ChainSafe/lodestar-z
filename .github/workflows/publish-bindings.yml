@@ -9,7 +9,19 @@ env:
 jobs:
   publish-bindings:
     name: publish bindings
-    runs-on: ubuntu-latest
+    # [Lodestar CI] still runs on Ubuntu 22.04, which ships an incompatible GLIBC version
+    # compared to ubuntu-latest runners.
+    # This [incompatibility] causes DLOPEN to fail when loading bindings on those runners.
+    #
+    # Given that Ubuntu 22.04 has [security support until May 2027], this should be a good version to pin to until then.
+    #
+    # [Lodestar CI]: https://github.com/search?q=repo%3AChainSafe%2Flodestar+warp-ubuntu-2204&type=code
+    # [incompatibility]: https://github.com/ChainSafe/lodestar/actions/runs/24988157940/job/73166634073?pr=8900
+    # [security support until May 2027]: https://ubuntu.com/about/release-cycle
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -19,6 +31,7 @@ jobs:
         uses: actions/setup-node@v6
         with:
           node-version: ${{ env.NODE_VERSION }}
+          registry-url: "https://registry.npmjs.org"
           cache: pnpm
       - name: Install Zig
         uses: mlugg/setup-zig@v2
@@ -35,5 +48,5 @@ jobs:
         run: |
           pnpm zapi build-artifacts --optimize ReleaseSafe
           pnpm zapi prepublish
-          pnpm zapi publish --access public
+          pnpm zapi publish --access public -- --provenance
 

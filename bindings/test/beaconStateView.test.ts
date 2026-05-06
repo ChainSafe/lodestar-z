@@ -397,28 +397,28 @@ describe("BeaconStateView", () => {
       expect(proposer).toBeLessThan(state.validatorCount);
     });
 
-    it("decision roots should be 32 bytes each", () => {
-      expect(state.previousDecisionRoot.length).toBe(32);
-      expect(state.currentDecisionRoot.length).toBe(32);
-      expect(state.nextDecisionRoot.length).toBe(32);
+    it("decision roots should be 66 bytes each", () => {
+      expect(state.previousDecisionRoot.length).toBe(66);
+      expect(state.currentDecisionRoot.length).toBe(66);
+      expect(state.nextDecisionRoot.length).toBe(66);
     });
 
-    it("getShufflingDecisionRoot should return 32 bytes", () => {
+    it("getShufflingDecisionRoot should return 66 bytes", () => {
       const decisionRoot = state.getShufflingDecisionRoot(state.epoch);
-      expect(decisionRoot.length).toBe(32);
+      expect(decisionRoot.length).toBe(66);
     });
   });
 
   describe("sync committee cache", () => {
     it("currentSyncCommitteeIndexed should have validatorIndices", () => {
       const indexed = state.currentSyncCommitteeIndexed;
-      expect(Array.isArray(indexed.validatorIndices)).toBe(true);
+      expect(indexed.validatorIndices).toBeInstanceOf(Uint32Array);
       expect(indexed.validatorIndices.length).toBeGreaterThan(0);
     });
 
     it("getIndexedSyncCommitteeAtEpoch should return cache", () => {
       const indexed = state.getIndexedSyncCommitteeAtEpoch(state.epoch);
-      expect(Array.isArray(indexed.validatorIndices)).toBe(true);
+      expect(indexed.validatorIndices).toBeInstanceOf(Uint32Array);
     });
 
     it("syncProposerReward should be a non-negative number", () => {
@@ -584,12 +584,35 @@ describe("BeaconStateView", () => {
       expect(newState.slot).toBe(originalSlot + 1);
     });
 
-    it("processSlots with transferCache option should work", () => {
+    it("processSlots with dontTransferCache: false should still transfer cache", () => {
       const originalSlot = state.slot;
-      const newState = state.processSlots(originalSlot + 1, {transferCache: true});
+      const newState = state.processSlots(originalSlot + 1, {dontTransferCache: false});
 
       expect(newState.slot).toBe(originalSlot + 1);
-      expect(newState.createdWithTransferCache).toBe(true);
+      expect(newState.createdWithTransferCache).toBe(false);
+    });
+  });
+
+  describe("stateTransition parseOptions", () => {
+    const dummyBlockBytes = new Uint8Array(0);
+
+    it("rejects invalid opts", () => {
+      const invalidOpts = [
+        {executionPayloadStatus: "syncing"},
+        {dataAvailabilityStatus: "Whatever"},
+        {executionPayloadStatus: "Valid"}, // TS enum value is "valid"
+        {dataAvailabilityStatus: "available"}, // TS enum value is "Available"
+      ];
+      for (const opts of invalidOpts) {
+        expect(() => bindings.stateTransition.stateTransition(state, dummyBlockBytes, opts)).toThrow();
+      }
+    });
+
+    // TODO: remove once Zig models DataAvailabilityStatus.NotRequired
+    it("rejects gloas-only NotRequired", () => {
+      expect(() =>
+        bindings.stateTransition.stateTransition(state, dummyBlockBytes, {dataAvailabilityStatus: "NotRequired"})
+      ).toThrow();
     });
   });
 

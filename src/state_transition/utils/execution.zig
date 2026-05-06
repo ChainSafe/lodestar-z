@@ -27,7 +27,7 @@ pub fn isMergeTransitionBlock(
     comptime fork: ForkSeq,
     state: *BeaconState(fork),
     comptime block_type: BlockType,
-    body: *const BeaconBlockBody(fork, block_type),
+    body: *const BeaconBlockBody(block_type, fork),
 ) bool {
     if (comptime fork != .bellatrix) {
         return false;
