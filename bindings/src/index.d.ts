@@ -225,6 +225,12 @@ declare class BeaconStateView {
     seedValidatorsBytes?: Uint8Array,
     opts?: {preloadValidatorsAndBalances?: boolean}
   ): BeaconStateView;
+  /**
+   * Bench-only: runs the SSZ tree-rebuild from `loadOtherState` and discards the result.
+   * No CachedBeaconState wrap, no EpochCache build — for apples-to-apples comparison
+   * against `@lodestar/state-transition`'s `loadState`.
+   */
+  loadOtherStateBench(stateBytes: Uint8Array, seedValidatorsBytes?: Uint8Array): void;
   serialize(): Uint8Array;
   serializedSize(): number;
   serializeToBytes(output: Uint8Array, offset: number): number;

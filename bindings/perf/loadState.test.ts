@@ -26,7 +26,7 @@ const tsSeedState = ssz.fulu.BeaconState.deserializeToViewDU(stateBytes);
 describe("loadState: native vs TS (mainnet)", () => {
   bench({
     fn: () => {
-      seedState.loadOtherState(stateBytes);
+      seedState.loadOtherStateBench(stateBytes);
     },
     id: "native (internal serialize seed)",
   });
@@ -40,7 +40,7 @@ describe("loadState: native vs TS (mainnet)", () => {
 
   bench({
     fn: () => {
-      seedState.loadOtherState(stateBytes, seedValidatorsBytes);
+      seedState.loadOtherStateBench(stateBytes, seedValidatorsBytes);
     },
     id: "native (prebuilt seedValidatorsBytes)",
   });

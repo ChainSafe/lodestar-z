@@ -981,6 +981,32 @@ pub fn loadOtherState(
     return .{ .cached_state = new_cached_state };
 }
 
+/// Bench-only: run `st.loadState` and immediately tear down the result. Mirrors what
+/// TS `loadState` measures (no CachedBeaconState wrap, no EpochCache build) so that
+/// native vs TS comparisons isolate the SSZ tree-rebuild cost.
+pub fn loadOtherStateBench(
+    self: *const BeaconStateView,
+    state_bytes: js.Uint8Array,
+    seed_validators_bytes: ?js.Uint8Array,
+) !void {
+    const cached_state = try self.requireState();
+    const state_bytes_slice = try state_bytes.toSlice();
+    const seed_validators_bytes_slice: ?[]const u8 =
+        if (seed_validators_bytes) |b| try b.toSlice() else null;
+
+    var result = try st.loadState(
+        allocator,
+        &pool.state.pool,
+        cached_state.config,
+        cached_state.state,
+        state_bytes_slice,
+        seed_validators_bytes_slice,
+    );
+    result.modified_validators.deinit(allocator);
+    result.state.deinit();
+    allocator.destroy(result.state);
+}
+
 fn requireState(self: *const BeaconStateView) !*CachedBeaconState {
     return self.cached_state orelse error.InvalidState;
 }
