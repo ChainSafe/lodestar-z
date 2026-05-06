@@ -1,8 +1,8 @@
+import {bench, describe} from "@chainsafe/benchmark";
 import {config} from "@lodestar/config/default";
 import * as era from "@lodestar/era";
 import {loadState as loadStateTS} from "@lodestar/state-transition";
 import {ssz} from "@lodestar/types";
-import {bench, describe} from "@chainsafe/benchmark";
 import bindings from "../src/index.js";
 import {getFirstEraFilePath} from "../test/eraFiles.ts";
 
