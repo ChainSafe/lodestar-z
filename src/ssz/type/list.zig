@@ -546,8 +546,8 @@ pub fn FixedListType(comptime ST: type, comptime _limit: comptime_int, comptime 
                     const content_root = try node.getLeft(pool);
                     const chunked_leaf_count = (chunk_count + ChunkedLeaf.K - 1) / ChunkedLeaf.K;
 
-                    const chunked_leaf_ids_buf = try pool.allocator.alloc(Node.Id, chunked_leaf_count);
-                    defer pool.allocator.free(chunked_leaf_ids_buf);
+                    const chunked_leaf_ids_buf = try pool.page_allocator.alloc(Node.Id, chunked_leaf_count);
+                    defer pool.page_allocator.free(chunked_leaf_ids_buf);
                     try content_root.getNodesAtDepth(pool, chunked_leaf_depth, 0, chunked_leaf_ids_buf);
 
                     const state_col = pool.nodes.items(.state);
@@ -1114,7 +1114,7 @@ test "FixedListType - tree roundtrip (ListBasic uint8)" {
         },
     };
 
-    var pool = try Node.Pool.init(allocator, 1024);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 1024 });
     defer pool.deinit();
 
     for (test_cases) |tc| {
@@ -1183,7 +1183,7 @@ test "FixedListType - tree roundtrip (ListBasic uint64)" {
         },
     };
 
-    var pool = try Node.Pool.init(allocator, 1024);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 1024 });
     defer pool.deinit();
 
     for (test_cases) |tc| {
@@ -1240,7 +1240,7 @@ test "FixedListType - serializeIntoBytes (ListComposite ByteVector32 - empty)" {
     try ListBV32.hashTreeRoot(allocator, &value, &root);
     try std.testing.expectEqualSlices(u8, &expected_root, &root);
 
-    var pool = try Node.Pool.init(allocator, 1024);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 1024 });
     defer pool.deinit();
     const node = try ListBV32.tree.fromValue(&pool, &value);
     const tree_size = try ListBV32.tree.serializedSize(node, &pool);
@@ -1278,7 +1278,7 @@ test "FixedListType - serializeIntoBytes (ListComposite ByteVector32 - 2 roots)"
     try ListBV32.hashTreeRoot(allocator, &value, &root);
     try std.testing.expectEqualSlices(u8, &expected_root, &root);
 
-    var pool = try Node.Pool.init(allocator, 1024);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 1024 });
     defer pool.deinit();
     const node = try ListBV32.tree.fromValue(&pool, &value);
     const tree_size = try ListBV32.tree.serializedSize(node, &pool);
@@ -1314,7 +1314,7 @@ test "FixedListType - serializeIntoBytes (ListComposite Container - empty)" {
     try ListContainer.hashTreeRoot(allocator, &value, &root);
     try std.testing.expectEqualSlices(u8, &expected_root, &root);
 
-    var pool = try Node.Pool.init(allocator, 1024);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 1024 });
     defer pool.deinit();
     const node = try ListContainer.tree.fromValue(&pool, &value);
     const tree_size = try ListContainer.tree.serializedSize(node, &pool);
@@ -1360,7 +1360,7 @@ test "FixedListType - serializeIntoBytes (ListComposite Container - 2 values)" {
     try ListContainer.hashTreeRoot(allocator, &value, &root);
     try std.testing.expectEqualSlices(u8, &expected_root, &root);
 
-    var pool = try Node.Pool.init(allocator, 1024);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 1024 });
     defer pool.deinit();
     const node = try ListContainer.tree.fromValue(&pool, &value);
     const tree_size = try ListContainer.tree.serializedSize(node, &pool);
@@ -1394,7 +1394,7 @@ test "VariableListType - serializeIntoBytes (List<List<uint16>> - empty)" {
     try OuterList.hashTreeRoot(allocator, &value, &root);
     try std.testing.expectEqualSlices(u8, &expected_root, &root);
 
-    var pool = try Node.Pool.init(allocator, 1024);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 1024 });
     defer pool.deinit();
     const node = try OuterList.tree.fromValue(&pool, &value);
     const tree_size = try OuterList.tree.serializedSize(node, &pool);
@@ -1443,7 +1443,7 @@ test "VariableListType - serializeIntoBytes (List<List<uint16>> - 2 full values)
     try OuterList.hashTreeRoot(allocator, &value, &root);
     try std.testing.expectEqualSlices(u8, &expected_root, &root);
 
-    var pool = try Node.Pool.init(allocator, 1024);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 1024 });
     defer pool.deinit();
     const node = try OuterList.tree.fromValue(&pool, &value);
     const tree_size = try OuterList.tree.serializedSize(node, &pool);
@@ -1486,7 +1486,7 @@ test "VariableListType - serializeIntoBytes (List<List<uint16>> - 2 empty values
     try OuterList.hashTreeRoot(allocator, &value, &root);
     try std.testing.expectEqualSlices(u8, &expected_root, &root);
 
-    var pool = try Node.Pool.init(allocator, 1024);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 1024 });
     defer pool.deinit();
     const node = try OuterList.tree.fromValue(&pool, &value);
     const tree_size = try OuterList.tree.serializedSize(node, &pool);
@@ -1523,7 +1523,7 @@ test "FixedListType - tree.deserializeFromBytes (ListBasic uint8)" {
         },
     };
 
-    var pool = try Node.Pool.init(allocator, 1024);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 1024 });
     defer pool.deinit();
 
     for (test_cases) |tc| {
@@ -1601,7 +1601,7 @@ test "FixedListType - tree.deserializeFromBytes (ListBasic uint64)" {
         },
     };
 
-    var pool = try Node.Pool.init(allocator, 1024);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 1024 });
     defer pool.deinit();
 
     for (test_cases) |tc| {
@@ -1654,7 +1654,7 @@ test "FixedListType - tree.deserializeFromBytes (ListComposite ByteVector32)" {
         },
     };
 
-    var pool = try Node.Pool.init(allocator, 1024);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 1024 });
     defer pool.deinit();
 
     for (test_cases) |tc| {
@@ -1720,7 +1720,7 @@ test "FixedListType - tree.deserializeFromBytes (ListComposite Container)" {
         },
     };
 
-    var pool = try Node.Pool.init(allocator, 1024);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 1024 });
     defer pool.deinit();
 
     for (test_cases) |tc| {
@@ -1793,7 +1793,7 @@ test "VariableListType - tree.deserializeFromBytes (List<List<uint16>>)" {
         },
     };
 
-    var pool = try Node.Pool.init(allocator, 1024);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 1024 });
     defer pool.deinit();
 
     for (test_cases) |tc| {
@@ -1965,7 +1965,7 @@ test "FixedListType - default_root" {
     try ListU32.hashTreeRoot(std.testing.allocator, &ListU32.default_value, &expected_root);
     try std.testing.expectEqualSlices(u8, &expected_root, &ListU32.default_root);
 
-    var pool = try Node.Pool.init(std.testing.allocator, 1024);
+    var pool = try Node.Pool.init(.{ .page_allocator = std.testing.allocator, .allocator = std.testing.allocator, .pool_size = 1024 });
     defer pool.deinit();
 
     const node = try ListU32.tree.default(&pool);
@@ -1980,7 +1980,7 @@ test "VariableListType - default_root" {
     try ListListU32.hashTreeRoot(std.testing.allocator, &ListListU32.default_value, &expected_root);
     try std.testing.expectEqualSlices(u8, &expected_root, &ListListU32.default_root);
 
-    var pool = try Node.Pool.init(std.testing.allocator, 1024);
+    var pool = try Node.Pool.init(.{ .page_allocator = std.testing.allocator, .allocator = std.testing.allocator, .pool_size = 1024 });
     defer pool.deinit();
 
     const node = try ListListU32.tree.default(&pool);
@@ -1992,7 +1992,7 @@ test "FixedListType - tree.zeros" {
 
     const ListU16 = FixedListType(UintType(16), 8, .{});
 
-    var pool = try Node.Pool.init(allocator, 1024);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 1024 });
     defer pool.deinit();
 
     for (0..ListU16.limit) |len| {
@@ -2017,7 +2017,7 @@ test "VariableListType - tree.zeros" {
     const ListU32 = FixedListType(UintType(32), 16, .{});
     const ListListU32 = VariableListType(ListU32, 16);
 
-    var pool = try Node.Pool.init(allocator, 1024);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 1024 });
     defer pool.deinit();
 
     for (0..ListListU32.limit) |len| {
@@ -2041,7 +2041,7 @@ test "FixedListType opts.chunked_leaf=true: round-trip fromValue -> tree -> toVa
     const ChunkedLeaf = @import("persistent_merkle_tree").ChunkedLeaf;
     const ListT = FixedListType(UintType(64), 1 << 20, .{ .chunked_leaf = true });
 
-    var pool = try Node.Pool.init(allocator, 4096);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 4096 });
     defer pool.deinit();
 
     var src = ListT.Type.empty;
@@ -2071,7 +2071,7 @@ test "FixedListType opts.chunked_leaf=true: serialize -> deserialize round-trip"
     const ChunkedLeaf = @import("persistent_merkle_tree").ChunkedLeaf;
     const ListT = FixedListType(UintType(64), 1 << 20, .{ .chunked_leaf = true });
 
-    var pool = try Node.Pool.init(allocator, 4096);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 4096 });
     defer pool.deinit();
 
     var src = ListT.Type.empty;

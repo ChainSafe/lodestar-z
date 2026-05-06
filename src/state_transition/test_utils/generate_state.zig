@@ -294,7 +294,7 @@ pub fn getConfig(config: ChainConfig, fork: ForkSeq, fork_epoch: Epoch) ChainCon
 
 test TestCachedBeaconState {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 500_000);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 500_000 });
     defer pool.deinit();
 
     var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);

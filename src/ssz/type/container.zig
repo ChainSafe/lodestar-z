@@ -1011,7 +1011,7 @@ test "FixedContainerType - serializeIntoBytes (zero)" {
     try Container.hashTreeRoot(&value, &root);
     try std.testing.expectEqualSlices(u8, &expected_root, &root);
 
-    var pool = try Node.Pool.init(allocator, 64);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 64 });
     defer pool.deinit();
     const node = try Container.tree.fromValue(&pool, &value);
     var tree_serialized: [Container.fixed_size]u8 = undefined;
@@ -1042,7 +1042,7 @@ test "FixedContainerType - serializeIntoBytes (some value)" {
     try Container.hashTreeRoot(&value, &root);
     try std.testing.expectEqualSlices(u8, &expected_root, &root);
 
-    var pool = try Node.Pool.init(allocator, 64);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 64 });
     defer pool.deinit();
     const node = try Container.tree.fromValue(&pool, &value);
     var tree_serialized: [Container.fixed_size]u8 = undefined;
@@ -1063,7 +1063,7 @@ test "FixedContainerType - tree.deserializeFromBytes" {
     const expected_serialized = [_]u8{ 0x40, 0xe2, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0xf1, 0xfb, 0x09, 0x00, 0x00, 0x00, 0x00, 0x00 };
     const expected_root = [_]u8{ 0x53, 0xb3, 0x8a, 0xff, 0x7b, 0xf2, 0xdd, 0x1a, 0x49, 0x90, 0x3d, 0x07, 0xa3, 0x35, 0x09, 0xb9, 0x80, 0xc6, 0xac, 0xc9, 0xf2, 0x23, 0x5a, 0x45, 0xaa, 0xc3, 0x42, 0xb0, 0xa9, 0x52, 0x8c, 0x22 };
 
-    var pool = try Node.Pool.init(allocator, 64);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 64 });
     defer pool.deinit();
 
     const node = try Container.tree.deserializeFromBytes(&pool, &expected_serialized);
@@ -1101,7 +1101,7 @@ test "FixedContainerType - serializeIntoBytes (uint64 + ByteVector32)" {
     try Container.hashTreeRoot(&value, &root);
     try std.testing.expectEqualSlices(u8, &expected_root, &root);
 
-    var pool = try Node.Pool.init(allocator, 64);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 64 });
     defer pool.deinit();
     const node = try Container.tree.fromValue(&pool, &value);
     var tree_serialized: [Container.fixed_size]u8 = undefined;
@@ -1136,7 +1136,7 @@ test "VariableContainerType - serializeIntoBytes (zero)" {
     try Container.hashTreeRoot(allocator, &value, &root);
     try std.testing.expectEqualSlices(u8, &expected_root, &root);
 
-    var pool = try Node.Pool.init(allocator, 64);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 64 });
     defer pool.deinit();
     const node = try Container.tree.fromValue(&pool, &value);
     const tree_size = try Container.tree.serializedSize(node, &pool);
@@ -1185,7 +1185,7 @@ test "VariableContainerType - serializeIntoBytes (some value)" {
     try Container.hashTreeRoot(allocator, &value, &root);
     try std.testing.expectEqualSlices(u8, &expected_root, &root);
 
-    var pool = try Node.Pool.init(allocator, 128);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 128 });
     defer pool.deinit();
     const node = try Container.tree.fromValue(&pool, &value);
     const tree_size = try Container.tree.serializedSize(node, &pool);
@@ -1215,7 +1215,7 @@ test "VariableContainerType - tree.deserializeFromBytes" {
     };
     const expected_root = [_]u8{ 0x5f, 0xf1, 0xb9, 0x2b, 0x2f, 0xa5, 0x5e, 0xea, 0x1a, 0x14, 0xb2, 0x65, 0x47, 0x03, 0x5b, 0x2f, 0x54, 0x37, 0x81, 0x4b, 0x34, 0x36, 0x17, 0x22, 0x05, 0xfa, 0x7d, 0x6a, 0xf4, 0x09, 0x17, 0x48 };
 
-    var pool = try Node.Pool.init(allocator, 128);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 128 });
     defer pool.deinit();
 
     const node = try Container.tree.deserializeFromBytes(&pool, &serialized);
@@ -1384,7 +1384,7 @@ test "FixedContainerType - default_root" {
     try Container.hashTreeRoot(&Container.default_value, &expected_root);
     try std.testing.expectEqualSlices(u8, &expected_root, &Container.default_root);
 
-    var pool = try Node.Pool.init(std.testing.allocator, 1024);
+    var pool = try Node.Pool.init(.{ .page_allocator = std.testing.allocator, .allocator = std.testing.allocator, .pool_size = 1024 });
     defer pool.deinit();
 
     const node = try Container.tree.default(&pool);
@@ -1401,7 +1401,7 @@ test "VariableContainerType - default_root" {
     try Container.hashTreeRoot(std.testing.allocator, &Container.default_value, &expected_root);
     try std.testing.expectEqualSlices(u8, &expected_root, &Container.default_root);
 
-    var pool = try Node.Pool.init(std.testing.allocator, 1024);
+    var pool = try Node.Pool.init(.{ .page_allocator = std.testing.allocator, .allocator = std.testing.allocator, .pool_size = 1024 });
     defer pool.deinit();
 
     const node = try Container.tree.default(&pool);

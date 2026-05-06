@@ -755,7 +755,7 @@ test "FixedVectorType - serializeIntoBytes (VectorBasic uint64 - 4 values)" {
     try VectorU64.hashTreeRoot(&value, &root);
     try std.testing.expectEqualSlices(u8, &expected_root, &root);
 
-    var pool = try Node.Pool.init(allocator, 1024);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 1024 });
     defer pool.deinit();
     const node = try VectorU64.tree.fromValue(&pool, &value);
     var tree_serialized: [VectorU64.fixed_size]u8 = undefined;
@@ -787,7 +787,7 @@ test "FixedVectorType - serializeIntoBytes (VectorComposite ByteVector32 - 4 roo
     try VectorBV32.hashTreeRoot(&value, &root);
     try std.testing.expectEqualSlices(u8, &expected_root, &root);
 
-    var pool = try Node.Pool.init(allocator, 1024);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 1024 });
     defer pool.deinit();
     const node = try VectorBV32.tree.fromValue(&pool, &value);
     var tree_serialized: [VectorBV32.fixed_size]u8 = undefined;
@@ -832,7 +832,7 @@ test "FixedVectorType - serializeIntoBytes (VectorComposite Container - 4 arrays
     try VectorContainer.hashTreeRoot(&value, &root);
     try std.testing.expectEqualSlices(u8, &expected_root, &root);
 
-    var pool = try Node.Pool.init(allocator, 1024);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 1024 });
     defer pool.deinit();
     const node = try VectorContainer.tree.fromValue(&pool, &value);
     var tree_serialized: [VectorContainer.fixed_size]u8 = undefined;
@@ -874,7 +874,7 @@ test "VariableVectorType - serializeIntoBytes (VectorComposite ListBasic - [[1,2
     try VectorList.hashTreeRoot(allocator, &value, &root);
     try std.testing.expectEqualSlices(u8, &expected_root, &root);
 
-    var pool = try Node.Pool.init(allocator, 1024);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 1024 });
     defer pool.deinit();
     const node = try VectorList.tree.fromValue(&pool, &value);
     const tree_size = try VectorList.tree.serializedSize(node, &pool);
@@ -899,7 +899,7 @@ test "FixedVectorType - tree.deserializeFromBytes (VectorBasic uint64)" {
     const expected_values = [_]u64{ 100000, 200000, 300000, 400000 };
     const expected_root = serialized; // For VectorBasic with 4 uint64 values, root equals serialized
 
-    var pool = try Node.Pool.init(allocator, 1024);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 1024 });
     defer pool.deinit();
 
     const tree_node = try VectorU64.tree.deserializeFromBytes(&pool, &serialized);
@@ -934,7 +934,7 @@ test "FixedVectorType - tree.deserializeFromBytes (VectorComposite ByteVector32)
     // 0x56019bafbc63461b73e21c6eae0c62e8d5b8e05cb0ac065777dc238fcf9604e6
     const expected_root = [_]u8{ 0x56, 0x01, 0x9b, 0xaf, 0xbc, 0x63, 0x46, 0x1b, 0x73, 0xe2, 0x1c, 0x6e, 0xae, 0x0c, 0x62, 0xe8, 0xd5, 0xb8, 0xe0, 0x5c, 0xb0, 0xac, 0x06, 0x57, 0x77, 0xdc, 0x23, 0x8f, 0xcf, 0x96, 0x04, 0xe6 };
 
-    var pool = try Node.Pool.init(allocator, 1024);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 1024 });
     defer pool.deinit();
 
     const tree_node = try VectorBV32.tree.deserializeFromBytes(&pool, &serialized);
@@ -983,7 +983,7 @@ test "FixedVectorType - tree.deserializeFromBytes (VectorComposite Container)" {
     // 0xb1a797eb50654748ba239010edccea7b46b55bf740730b700684f48b0c478372
     const expected_root = [_]u8{ 0xb1, 0xa7, 0x97, 0xeb, 0x50, 0x65, 0x47, 0x48, 0xba, 0x23, 0x90, 0x10, 0xed, 0xcc, 0xea, 0x7b, 0x46, 0xb5, 0x5b, 0xf7, 0x40, 0x73, 0x0b, 0x70, 0x06, 0x84, 0xf4, 0x8b, 0x0c, 0x47, 0x83, 0x72 };
 
-    var pool = try Node.Pool.init(allocator, 1024);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 1024 });
     defer pool.deinit();
 
     const tree_node = try VectorContainer.tree.deserializeFromBytes(&pool, &serialized);
@@ -1022,7 +1022,7 @@ test "VariableVectorType - tree.deserializeFromBytes (VectorComposite ListBasic)
     // 0x0014c485ce39c8071f69631566b1d1ad51e2b0b5abc3c7a299a6fac1abce9e49
     const expected_root = [_]u8{ 0x00, 0x14, 0xc4, 0x85, 0xce, 0x39, 0xc8, 0x07, 0x1f, 0x69, 0x63, 0x15, 0x66, 0xb1, 0xd1, 0xad, 0x51, 0xe2, 0xb0, 0xb5, 0xab, 0xc3, 0xc7, 0xa2, 0x99, 0xa6, 0xfa, 0xc1, 0xab, 0xce, 0x9e, 0x49 };
 
-    var pool = try Node.Pool.init(allocator, 1024);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 1024 });
     defer pool.deinit();
 
     const tree_node = try VectorList.tree.deserializeFromBytes(&pool, &serialized);
@@ -1144,7 +1144,7 @@ test "FixedVectorType - default_root" {
     try VectorU64.hashTreeRoot(&VectorU64.default_value, &expected_root);
     try std.testing.expectEqualSlices(u8, &expected_root, &VectorU64.default_root);
 
-    var pool = try Node.Pool.init(std.testing.allocator, 1024);
+    var pool = try Node.Pool.init(.{ .page_allocator = std.testing.allocator, .allocator = std.testing.allocator, .pool_size = 1024 });
     defer pool.deinit();
 
     const node = try VectorU64.tree.default(&pool);
@@ -1159,7 +1159,7 @@ test "VariableVectorType - default_root" {
     try VectorList.hashTreeRoot(std.testing.allocator, &VectorList.default_value, &expected_root);
     try std.testing.expectEqualSlices(u8, &expected_root, &VectorList.default_root);
 
-    var pool = try Node.Pool.init(std.testing.allocator, 1024);
+    var pool = try Node.Pool.init(.{ .page_allocator = std.testing.allocator, .allocator = std.testing.allocator, .pool_size = 1024 });
     defer pool.deinit();
 
     const node = try VectorList.tree.default(&pool);
@@ -1172,7 +1172,7 @@ test "FixedVectorType opts.chunked_leaf=true: round-trip fromValue -> tree -> to
     const length: usize = 2 * @as(usize, ChunkedLeaf.K) * 4 + 7;
     const VecT = FixedVectorType(UintType(64), length, .{ .chunked_leaf = true });
 
-    var pool = try Node.Pool.init(allocator, 4096);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 4096 });
     defer pool.deinit();
 
     var src: VecT.Type = undefined;
@@ -1198,7 +1198,7 @@ test "FixedVectorType opts.chunked_leaf=true: serialize -> deserialize round-tri
     const length: usize = 2 * @as(usize, ChunkedLeaf.K) * 4;
     const VecT = FixedVectorType(UintType(64), length, .{ .chunked_leaf = true });
 
-    var pool = try Node.Pool.init(allocator, 4096);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 4096 });
     defer pool.deinit();
 
     var src: VecT.Type = undefined;

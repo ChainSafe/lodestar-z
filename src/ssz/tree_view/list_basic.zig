@@ -422,7 +422,7 @@ const UintType = @import("../type/uint.zig").UintType;
 const FixedListType = @import("../type/list.zig").FixedListType;
 test "TreeView list element roundtrip" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 256);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 256 });
     defer pool.deinit();
 
     const Uint32 = UintType(32);
@@ -470,7 +470,7 @@ test "TreeView list element roundtrip" {
 
 test "TreeView list push updates cached length" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 256);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 256 });
     defer pool.deinit();
 
     const Uint32 = UintType(32);
@@ -510,7 +510,7 @@ test "TreeView list push updates cached length" {
 
 test "TreeView list getAllAlloc handles zero length" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 64);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 64 });
     defer pool.deinit();
 
     const Uint8 = UintType(8);
@@ -531,7 +531,7 @@ test "TreeView list getAllAlloc handles zero length" {
 
 test "TreeView list getAllAlloc spans multiple chunks" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 512);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 512 });
     defer pool.deinit();
 
     const Uint16 = UintType(16);
@@ -558,7 +558,7 @@ test "TreeView list getAllAlloc spans multiple chunks" {
 
 test "TreeView list push batches before commit" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 256);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 256 });
     defer pool.deinit();
 
     const Uint32 = UintType(32);
@@ -599,7 +599,7 @@ test "TreeView list push batches before commit" {
 
 test "TreeView list push across chunk boundary resets prefetch" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 256);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 256 });
     defer pool.deinit();
 
     const Uint32 = UintType(32);
@@ -631,7 +631,7 @@ test "TreeView list push across chunk boundary resets prefetch" {
 
 test "TreeView list push enforces limit" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 256);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 256 });
     defer pool.deinit();
 
     const Uint32 = UintType(32);
@@ -651,7 +651,7 @@ test "TreeView list push enforces limit" {
 
 test "TreeView list basic clone isolates updates" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 1024);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 1024 });
     defer pool.deinit();
 
     const Uint32 = UintType(32);
@@ -677,7 +677,7 @@ test "TreeView list basic clone isolates updates" {
 
 test "TreeView list basic clone reads committed state" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 1024);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 1024 });
     defer pool.deinit();
 
     const Uint32 = UintType(32);
@@ -702,7 +702,7 @@ test "TreeView list basic clone reads committed state" {
 
 test "TreeView list basic clone drops uncommitted changes" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 1024);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 1024 });
     defer pool.deinit();
 
     const Uint32 = UintType(32);
@@ -728,7 +728,7 @@ test "TreeView list basic clone drops uncommitted changes" {
 
 test "TreeView list basic clone(false) does not transfer cache" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 256);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 256 });
     defer pool.deinit();
 
     const Uint32 = UintType(32);
@@ -754,7 +754,7 @@ test "TreeView list basic clone(false) does not transfer cache" {
 
 test "TreeView list basic clone(true) transfers cache and clears source" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 256);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 256 });
     defer pool.deinit();
 
     const Uint32 = UintType(32);
@@ -781,7 +781,7 @@ test "TreeView list basic clone(true) transfers cache and clears source" {
 // Refer to https://github.com/ChainSafe/ssz/blob/7f5580c2ea69f9307300ddb6010a8bc7ce2fc471/packages/ssz/test/unit/byType/listBasic/tree.test.ts#L180-L203
 test "TreeView basic list getAll reflects pushes" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 256);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 256 });
     defer pool.deinit();
 
     const list_limit = 32;
@@ -818,7 +818,7 @@ test "TreeView basic list getAll reflects pushes" {
 
 test "TreeView list sliceTo returns original when truncation unnecessary" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 256);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 256 });
     defer pool.deinit();
 
     const Uint32 = UintType(32);
@@ -851,7 +851,7 @@ test "TreeView list sliceTo returns original when truncation unnecessary" {
 // Refer to https://github.com/ChainSafe/ssz/blob/7f5580c2ea69f9307300ddb6010a8bc7ce2fc471/packages/ssz/test/unit/byType/listBasic/tree.test.ts#L219-L247
 test "TreeView basic list sliceTo matches incremental snapshots" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 2048);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 2048 });
     defer pool.deinit();
 
     const Uint64 = UintType(64);
@@ -914,7 +914,7 @@ test "TreeView basic list sliceTo matches incremental snapshots" {
 
 test "TreeView list sliceTo truncates tail elements" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 256);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 256 });
     defer pool.deinit();
 
     const Uint32 = UintType(32);
@@ -962,7 +962,7 @@ test "ListBasicTreeView - serialize (uint8 list)" {
     const Uint8 = UintType(8);
     const ListU8Type = FixedListType(Uint8, 128, .{});
 
-    var pool = try Node.Pool.init(allocator, 1024);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 1024 });
     defer pool.deinit();
 
     const TestCase = struct {
@@ -1025,7 +1025,7 @@ test "ListBasicTreeView - serialize (uint64 list)" {
     const Uint64 = UintType(64);
     const ListU64Type = FixedListType(Uint64, 128, .{});
 
-    var pool = try Node.Pool.init(allocator, 1024);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 1024 });
     defer pool.deinit();
 
     const TestCase = struct {
@@ -1089,7 +1089,7 @@ test "ListBasicTreeView - push and serialize" {
     const Uint8 = UintType(8);
     const ListU8Type = FixedListType(Uint8, 128, .{});
 
-    var pool = try Node.Pool.init(allocator, 1024);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 1024 });
     defer pool.deinit();
 
     var value: ListU8Type.Type = ListU8Type.default_value;
@@ -1127,7 +1127,7 @@ test "ListBasicTreeView - sliceTo and serialize" {
     const Uint8 = UintType(8);
     const ListU8Type = FixedListType(Uint8, 128, .{});
 
-    var pool = try Node.Pool.init(allocator, 1024);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 1024 });
     defer pool.deinit();
 
     var value: ListU8Type.Type = ListU8Type.default_value;
@@ -1165,7 +1165,7 @@ const ChunkedLeafType = @import("persistent_merkle_tree").ChunkedLeaf;
 
 test "ListBasicTreeView chunked_leaf: iteratorReadonly within first chunked_leaf" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 4096);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 4096 });
     defer pool.deinit();
 
     const ListT = FixedListType(UintType(64), 1 << 20, .{ .chunked_leaf = true });
@@ -1188,7 +1188,7 @@ test "ListBasicTreeView chunked_leaf: iteratorReadonly within first chunked_leaf
 
 test "ListBasicTreeView chunked_leaf: iteratorReadonly across chunked_leaf boundary" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 4096);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 4096 });
     defer pool.deinit();
 
     const ListT = FixedListType(UintType(64), 1 << 20, .{ .chunked_leaf = true });
@@ -1214,7 +1214,7 @@ test "ListBasicTreeView chunked_leaf: iteratorReadonly across chunked_leaf bound
 
 test "ListBasicTreeView chunked_leaf: iteratorReadonly with start_index mid-chunked_leaf" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 4096);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 4096 });
     defer pool.deinit();
 
     const ListT = FixedListType(UintType(64), 1 << 20, .{ .chunked_leaf = true });
@@ -1240,7 +1240,7 @@ test "ListBasicTreeView chunked_leaf: iteratorReadonly with start_index mid-chun
 
 test "ListBasicTreeView chunked_leaf: iteratorReadonly on sparsely grown list" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 4096);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 4096 });
     defer pool.deinit();
 
     const ListT = FixedListType(UintType(64), 1 << 20, .{ .chunked_leaf = true });
@@ -1269,7 +1269,7 @@ test "ListBasicTreeView chunked_leaf: iteratorReadonly on sparsely grown list" {
 
 test "ListBasicTreeView chunked_leaf: sliceTo within first chunked_leaf" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 4096);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 4096 });
     defer pool.deinit();
 
     const ListT = FixedListType(UintType(64), 1 << 20, .{ .chunked_leaf = true });
@@ -1310,7 +1310,7 @@ test "ListBasicTreeView chunked_leaf: sliceTo within first chunked_leaf" {
 
 test "ListBasicTreeView chunked_leaf: sliceTo at chunked_leaf boundary" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 4096);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 4096 });
     defer pool.deinit();
 
     const ListT = FixedListType(UintType(64), 1 << 20, .{ .chunked_leaf = true });
@@ -1347,7 +1347,7 @@ test "ListBasicTreeView chunked_leaf: sliceTo at chunked_leaf boundary" {
 
 test "ListBasicTreeView chunked_leaf: sliceTo across chunked_leaf boundary" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 4096);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 4096 });
     defer pool.deinit();
 
     const ListT = FixedListType(UintType(64), 1 << 20, .{ .chunked_leaf = true });
@@ -1390,7 +1390,7 @@ test "ListBasicTreeView chunked_leaf: sliceTo across chunked_leaf boundary" {
 
 test "ListBasicTreeView chunked_leaf: sliceTo returns clone when index >= length-1" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 4096);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 4096 });
     defer pool.deinit();
 
     const ListT = FixedListType(UintType(64), 1 << 20, .{ .chunked_leaf = true });
@@ -1444,7 +1444,7 @@ fn buildChunkedLeafListWithZeroBoundary(
 
 test "ListBasicTreeView chunked_leaf: iteratorReadonly handles zero-sentinel chunked_leaf" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 4096);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 4096 });
     defer pool.deinit();
 
     const ListT = FixedListType(UintType(64), 1 << 20, .{ .chunked_leaf = true });
@@ -1492,7 +1492,7 @@ test "ListBasicTreeView chunked_leaf: iteratorReadonly handles zero-sentinel chu
 
 test "ListBasicTreeView chunked_leaf: sliceTo handles zero-sentinel boundary" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 4096);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 4096 });
     defer pool.deinit();
 
     const ListT = FixedListType(UintType(64), 1 << 20, .{ .chunked_leaf = true });

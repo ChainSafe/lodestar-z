@@ -205,7 +205,7 @@ test "ByteVectorType(4) - serializeIntoBytes (zero)" {
     const expected_root = [_]u8{0x00} ** 32;
     try std.testing.expectEqualSlices(u8, &expected_root, &root);
 
-    var pool = try Node.Pool.init(allocator, 32);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 32 });
     defer pool.deinit();
     const tree_node = try ByteVector4.tree.fromValue(&pool, &value);
     var tree_serialized: [4]u8 = undefined;
@@ -231,7 +231,7 @@ test "ByteVectorType(4) - serializeIntoBytes (some value)" {
     const expected_root = [_]u8{ 0x0c, 0xb9, 0x47, 0x37 } ++ [_]u8{0x00} ** 28;
     try std.testing.expectEqualSlices(u8, &expected_root, &root);
 
-    var pool = try Node.Pool.init(allocator, 32);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 32 });
     defer pool.deinit();
     const tree_node = try ByteVector4.tree.fromValue(&pool, &value);
     var tree_serialized: [4]u8 = undefined;
@@ -256,7 +256,7 @@ test "ByteVectorType(32) - serializeIntoBytes (zero)" {
     const expected_root = [_]u8{0x00} ** 32;
     try std.testing.expectEqualSlices(u8, &expected_root, &root);
 
-    var pool = try Node.Pool.init(allocator, 32);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 32 });
     defer pool.deinit();
     const tree_node = try ByteVector32.tree.fromValue(&pool, &value);
     var tree_serialized: [32]u8 = undefined;
@@ -281,7 +281,7 @@ test "ByteVectorType(32) - serializeIntoBytes (some value)" {
     // root equals the value itself for 32-byte vector
     try std.testing.expectEqualSlices(u8, &value, &root);
 
-    var pool = try Node.Pool.init(allocator, 32);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 32 });
     defer pool.deinit();
     const tree_node = try ByteVector32.tree.fromValue(&pool, &value);
     var tree_serialized: [32]u8 = undefined;
@@ -306,7 +306,7 @@ test "ByteVectorType(96) - serializeIntoBytes (zero)" {
     const expected_root = [_]u8{ 0xdb, 0x56, 0x11, 0x4e, 0x00, 0xfd, 0xd4, 0xc1, 0xf8, 0x5c, 0x89, 0x2b, 0xf3, 0x5a, 0xc9, 0xa8, 0x92, 0x89, 0xaa, 0xec, 0xb1, 0xeb, 0xd0, 0xa9, 0x6c, 0xde, 0x60, 0x6a, 0x74, 0x8b, 0x5d, 0x71 };
     try std.testing.expectEqualSlices(u8, &expected_root, &root);
 
-    var pool = try Node.Pool.init(allocator, 64);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 64 });
     defer pool.deinit();
     const tree_node = try ByteVector96.tree.fromValue(&pool, &value);
     var tree_serialized: [96]u8 = undefined;
@@ -333,7 +333,7 @@ test "ByteVectorType(96) - serializeIntoBytes (some value)" {
     const expected_root = [_]u8{ 0x03, 0x2e, 0xec, 0xca, 0x63, 0x7b, 0x67, 0xfd, 0x92, 0x2e, 0x0e, 0x42, 0x1b, 0x4b, 0xe9, 0xc2, 0x29, 0x48, 0x71, 0x9b, 0xa0, 0x2c, 0x6d, 0x03, 0xeb, 0x2c, 0x61, 0xcf, 0xdc, 0x4c, 0xb3, 0xe3 };
     try std.testing.expectEqualSlices(u8, &expected_root, &root);
 
-    var pool = try Node.Pool.init(allocator, 64);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 64 });
     defer pool.deinit();
     const tree_node = try ByteVector96.tree.fromValue(&pool, &value);
     var tree_serialized: [96]u8 = undefined;
@@ -364,7 +364,7 @@ test "ByteVectorType(32) - tree.deserializeFromBytes" {
         },
     };
 
-    var pool = try Node.Pool.init(allocator, 64);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 64 });
     defer pool.deinit();
 
     for (test_cases) |tc| {
@@ -396,7 +396,7 @@ test "ByteVectorType(96) - tree.deserializeFromBytes" {
     // 0x032eecca637b67fd922e0e421b4be9c22948719ba02c6d03eb2c61cfdc4cb3e3
     const expected_root = [_]u8{ 0x03, 0x2e, 0xec, 0xca, 0x63, 0x7b, 0x67, 0xfd, 0x92, 0x2e, 0x0e, 0x42, 0x1b, 0x4b, 0xe9, 0xc2, 0x29, 0x48, 0x71, 0x9b, 0xa0, 0x2c, 0x6d, 0x03, 0xeb, 0x2c, 0x61, 0xcf, 0xdc, 0x4c, 0xb3, 0xe3 };
 
-    var pool = try Node.Pool.init(allocator, 64);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 64 });
     defer pool.deinit();
 
     const tree_node = try ByteVector96.tree.deserializeFromBytes(&pool, &serialized);
@@ -430,7 +430,7 @@ test "ByteVectorType - default_root" {
     try ByteVector96.hashTreeRoot(&ByteVector96.default_value, &expected_root);
     try std.testing.expectEqualSlices(u8, &expected_root, &ByteVector96.default_root);
 
-    var pool = try Node.Pool.init(std.testing.allocator, 1024);
+    var pool = try Node.Pool.init(.{ .page_allocator = std.testing.allocator, .allocator = std.testing.allocator, .pool_size = 1024 });
     defer pool.deinit();
 
     const node_4 = try ByteVector4.tree.default(&pool);

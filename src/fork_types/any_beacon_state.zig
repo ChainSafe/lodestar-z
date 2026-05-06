@@ -945,7 +945,7 @@ pub const AnyBeaconState = union(ForkSeq) {
 
 test "electra - sanity" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 500_000);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 500_000 });
     defer pool.deinit();
 
     var beacon_state = try AnyBeaconState.fromValue(allocator, &pool, .electra, &ct.electra.BeaconState.default_value);
@@ -967,7 +967,7 @@ test "electra - sanity" {
 
 test "clone - sanity" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 500_000);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 500_000 });
     defer pool.deinit();
 
     var beacon_state = try AnyBeaconState.fromValue(allocator, &pool, .electra, &ct.electra.BeaconState.default_value);
@@ -999,7 +999,7 @@ test "clone - cases" {
     };
 
     inline for (test_Case) |tc| {
-        var pool = try Node.Pool.init(allocator, 500_000);
+        var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 500_000 });
         defer pool.deinit();
 
         var beacon_state = try AnyBeaconState.fromValue(allocator, &pool, .electra, &ct.electra.BeaconState.default_value);
@@ -1025,7 +1025,7 @@ test "clone - cases" {
 
 test "upgrade state - sanity" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 500_000);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 500_000 });
     defer pool.deinit();
 
     var phase0_state = try AnyBeaconState.fromValue(allocator, &pool, .phase0, &ct.phase0.BeaconState.default_value);
@@ -1079,7 +1079,7 @@ test "upgrade state - sanity" {
 test "single proof: validators[0].withdrawal_credentials" {
     const allocator = std.testing.allocator;
     const ssz = @import("ssz");
-    var pool = try Node.Pool.init(allocator, 500_000);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 500_000 });
     defer pool.deinit();
 
     var beacon_state = try AnyBeaconState.fromValue(
@@ -1119,7 +1119,7 @@ test "single proof: validators[0].withdrawal_credentials" {
 test "single proof: balances[0]" {
     const allocator = std.testing.allocator;
     const ssz = @import("ssz");
-    var pool = try Node.Pool.init(allocator, 500_000);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 500_000 });
     defer pool.deinit();
 
     var beacon_state = try AnyBeaconState.fromValue(

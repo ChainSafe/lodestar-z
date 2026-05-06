@@ -102,7 +102,7 @@ test "computeRoot for non-zero pattern matches std merkleize" {
 
 test "Pool.createChunkedLeaf: round-trips chunks via getChunkedLeafChunks/getChunkedLeafLen" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 16);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 16 });
     defer pool.deinit();
 
     var src: [K][32]u8 align(64) = [_][32]u8{[_]u8{0} ** 32} ** K;
@@ -120,7 +120,7 @@ test "Pool.createChunkedLeaf: round-trips chunks via getChunkedLeafChunks/getChu
 
 test "Pool.unref: chunked_leaf payload heap is freed (no leak under test allocator)" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 16);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 16 });
     defer pool.deinit();
 
     const src: [K][32]u8 align(64) = [_][32]u8{[_]u8{0} ** 32} ** K;
@@ -130,7 +130,7 @@ test "Pool.unref: chunked_leaf payload heap is freed (no leak under test allocat
 
 test "Id.getRoot: Pool-created chunked_leaf returns merkleized root and caches it" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 16);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 16 });
     defer pool.deinit();
 
     var src: [K][32]u8 align(64) = [_][32]u8{[_]u8{0} ** 32} ** K;
@@ -159,7 +159,7 @@ test "Id.getRoot: Pool-created chunked_leaf returns merkleized root and caches i
 
 test "Id.setChunkedLeafChunk: CoW one chunk; original unchanged; root differs" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 32);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 32 });
     defer pool.deinit();
 
     var src: [K][32]u8 align(64) = [_][32]u8{[_]u8{0} ** 32} ** K;
@@ -187,7 +187,7 @@ test "Id.setChunkedLeafChunk: CoW one chunk; original unchanged; root differs" {
 
 test "Id.setChunkedLeafChunk: preserves len" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 16);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 16 });
     defer pool.deinit();
 
     const src: [K][32]u8 align(64) = [_][32]u8{[_]u8{0} ** 32} ** K;
@@ -203,7 +203,7 @@ test "Id.setChunkedLeafChunk: preserves len" {
 
 test "Id.setChunkedLeafChunks: batch CoW with multiple updates" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 32);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 32 });
     defer pool.deinit();
 
     const src: [K][32]u8 align(64) = [_][32]u8{[_]u8{0} ** 32} ** K;
@@ -232,7 +232,7 @@ test "Id.setChunkedLeafChunks: batch CoW with multiple updates" {
 
 test "Id.setChunkedLeafChunks: empty batch produces a clone with empty dirty" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 16);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 16 });
     defer pool.deinit();
 
     const src: [K][32]u8 align(64) = [_][32]u8{[_]u8{0} ** 32} ** K;
@@ -250,7 +250,7 @@ test "Id.setChunkedLeafChunks: empty batch produces a clone with empty dirty" {
 
 test "Id.setChunkedLeafChunk: non-chunked_leaf Id returns Error.InvalidNode" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 16);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 16 });
     defer pool.deinit();
 
     const leaf_id = try pool.createLeaf(&([_]u8{0xEE} ** 32));
@@ -262,7 +262,7 @@ test "Id.setChunkedLeafChunk: non-chunked_leaf Id returns Error.InvalidNode" {
 
 test "tree of chunked leaves: build via FillWithContentsIterator; root matches per-leaf tree" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 1 << 14);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 1 << 14 });
     defer pool.deinit();
 
     var raw: [4][K][32]u8 align(64) = undefined;
@@ -294,7 +294,7 @@ test "tree of chunked leaves: build via FillWithContentsIterator; root matches p
 
 test "FillWithContentsIterator: initWithOffset enables chunked_leaf leaves with correct zero filler" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 1 << 14);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 1 << 14 });
     defer pool.deinit();
 
     var raw: [4][K][32]u8 align(64) = undefined;
@@ -326,7 +326,7 @@ test "FillWithContentsIterator: initWithOffset enables chunked_leaf leaves with 
 
 test "FillWithContentsIterator: initWithOffset with partial fill (zero-padded chunked leaves)" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 1 << 14);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 1 << 14 });
     defer pool.deinit();
 
     var raw: [3][K][32]u8 align(64) = undefined;

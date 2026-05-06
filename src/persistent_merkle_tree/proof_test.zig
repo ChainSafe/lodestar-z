@@ -57,7 +57,7 @@ fn buildFullTree(pool: *Node.Pool, depth: usize, next_value: *u8) Node.Error!Nod
 
 // Verifies a proof for gindex 6 (depth 2, index 2) reconstructs the original root.
 test "single proof roundtrip" {
-    var pool = try Node.Pool.init(testing.allocator, 128);
+    var pool = try Node.Pool.init(.{ .page_allocator = testing.allocator, .allocator = testing.allocator, .pool_size = 128 });
     defer pool.deinit();
 
     const leaf_hashes = [_][32]u8{
@@ -87,7 +87,7 @@ test "single proof roundtrip" {
 
     const root_hash = root.getRoot(&pool).*;
 
-    var pool2 = try Node.Pool.init(testing.allocator, 128);
+    var pool2 = try Node.Pool.init(.{ .page_allocator = testing.allocator, .allocator = testing.allocator, .pool_size = 128 });
     defer pool2.deinit();
 
     const reconstructed = try proof.createNodeFromSingleProof(&pool2, gindex, single_proof.leaf, single_proof.witnesses);
@@ -102,7 +102,7 @@ test "single proof root matches across leaves" {
     const build_depth: usize = 4;
     const pool_capacity: u32 = @intCast((@as(usize, 1) << (build_depth + 1)));
 
-    var pool = try Node.Pool.init(testing.allocator, pool_capacity);
+    var pool = try Node.Pool.init(.{ .page_allocator = testing.allocator, .allocator = testing.allocator, .pool_size = pool_capacity });
     defer pool.deinit();
 
     var next_value: u8 = 1;
@@ -118,7 +118,7 @@ test "single proof root matches across leaves" {
         var single_proof = try proof.createSingleProof(testing.allocator, &pool, raw_root, gindex);
         defer single_proof.deinit(testing.allocator);
 
-        var temp_pool = try Node.Pool.init(testing.allocator, 64);
+        var temp_pool = try Node.Pool.init(.{ .page_allocator = testing.allocator, .allocator = testing.allocator, .pool_size = 64 });
         defer temp_pool.deinit();
 
         const rebuilt = try proof.createNodeFromSingleProof(&temp_pool, gindex, single_proof.leaf, single_proof.witnesses);
@@ -131,7 +131,7 @@ test "single proof root matches across leaves" {
 
 // Attempting to prove beyond the tree height should bubble up Node.InvalidNode.
 test "single proof invalid navigation" {
-    var pool = try Node.Pool.init(testing.allocator, 64);
+    var pool = try Node.Pool.init(.{ .page_allocator = testing.allocator, .allocator = testing.allocator, .pool_size = 64 });
     defer pool.deinit();
 
     const leaf_hash = makeLeaf(42);
@@ -144,7 +144,7 @@ test "single proof invalid navigation" {
 
 // Zero gindex must be rejected by both proof creation and reconstruction entry points.
 test "single proof invalid gindex" {
-    var pool = try Node.Pool.init(testing.allocator, 8);
+    var pool = try Node.Pool.init(.{ .page_allocator = testing.allocator, .allocator = testing.allocator, .pool_size = 8 });
     defer pool.deinit();
 
     const leaf_hash = makeLeaf(9);
@@ -186,7 +186,7 @@ test "compact multiproof - should roundtrip node -> proof -> node" {
     const build_depth: usize = 5;
     const pool_capacity: u32 = @intCast((@as(usize, 1) << (build_depth + 1)) * 2);
 
-    var pool = try Node.Pool.init(testing.allocator, pool_capacity);
+    var pool = try Node.Pool.init(.{ .page_allocator = testing.allocator, .allocator = testing.allocator, .pool_size = pool_capacity });
     defer pool.deinit();
 
     var next_value: u8 = 1;
@@ -197,7 +197,7 @@ test "compact multiproof - should roundtrip node -> proof -> node" {
         const leaves = try proof.createCompactMultiProof(testing.allocator, &pool, root, case.input);
         defer testing.allocator.free(leaves);
 
-        var pool2 = try Node.Pool.init(testing.allocator, pool_capacity);
+        var pool2 = try Node.Pool.init(.{ .page_allocator = testing.allocator, .allocator = testing.allocator, .pool_size = pool_capacity });
         defer pool2.deinit();
 
         const reconstructed = try proof.createNodeFromCompactMultiProof(&pool2, leaves, case.input);

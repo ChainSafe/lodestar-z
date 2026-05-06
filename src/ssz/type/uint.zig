@@ -185,7 +185,7 @@ fn testFixed(
     try ST.deserializeFromBytes(&serialized, &value_from_serialized);
     try std.testing.expectEqual(value, value_from_serialized);
 
-    var pool = try Node.Pool.init(allocator, 1024);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 1024 });
     defer pool.deinit();
 
     const tree_from_value = try ST.tree.fromValue(&pool, &value);

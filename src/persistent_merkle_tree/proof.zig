@@ -561,7 +561,7 @@ pub fn createNodeFromCompactMultiProof(
     leaves: [][32]u8,
     descriptor: []const u8,
 ) (Node.Error || Error)!Node.Id {
-    var arena = std.heap.ArenaAllocator.init(pool.allocator);
+    var arena = std.heap.ArenaAllocator.init(pool.page_allocator);
     defer arena.deinit();
     const temp_allocator = arena.allocator();
 

@@ -260,23 +260,28 @@ inline fn containerStructRef(payloads: []const u64, idx: u32) *ContainerStructRe
 
 /// Stores nodes in a memory pool, with reference counting and a free list.
 pub const Pool = struct {
+    page_allocator: Allocator,
     allocator: Allocator,
     nodes: std.MultiArrayList(Node).Slice,
     next_free_node: Id,
 
-    /// Initializes the memory pool with `pool_size` + `max_depth` slots. The
-    /// first `max_depth` slots are reserved for the precomputed zero-hash
-    /// sentinels; user allocations live in the remaining slots.
-    pub fn init(allocator: Allocator, pool_size: u32) Error!Pool {
+    pub const InitOptions = struct {
+        page_allocator: Allocator = std.heap.page_allocator,
+        allocator: Allocator = std.heap.c_allocator,
+        pool_size: u32 = 10_000_000,
+    };
+
+    pub fn init(opts: InitOptions) Error!Pool {
         var pool: Pool = .{
-            .allocator = allocator,
+            .page_allocator = opts.page_allocator,
+            .allocator = opts.allocator,
             .nodes = undefined,
             .next_free_node = @enumFromInt(max_depth),
         };
 
         var list = std.MultiArrayList(Node).empty;
-        try list.resize(allocator, pool_size + max_depth);
-        list.len = pool_size + max_depth;
+        try list.resize(opts.page_allocator, opts.pool_size + max_depth);
+        list.len = opts.pool_size + max_depth;
         pool.nodes = list.slice();
 
         // Pre-populate zero-hash sentinels at indices 0..max_depth-1.
@@ -312,7 +317,7 @@ pub const Pool = struct {
             if (s.isFree()) continue;
             const idx: u32 = @intCast(i);
             switch (s.kind()) {
-                .chunked_leaf => self.allocator.destroy(chunkedLeafPtr(payloads, idx)),
+                .chunked_leaf => self.page_allocator.destroy(chunkedLeafPtr(payloads, idx)),
                 .container_struct => {
                     const struct_ref = containerStructRef(payloads, idx);
                     struct_ref.deinit(struct_ref.ptr, self.allocator);
@@ -322,7 +327,7 @@ pub const Pool = struct {
             }
         }
         var list = self.nodes.toMultiArrayList();
-        list.deinit(self.allocator);
+        list.deinit(self.page_allocator);
         self.* = undefined;
     }
 
@@ -333,7 +338,7 @@ pub const Pool = struct {
         const new_size = size + additional_size;
 
         var list = self.nodes.toMultiArrayList();
-        try list.resize(self.allocator, new_size);
+        try list.resize(self.page_allocator, new_size);
         self.nodes = list.slice();
 
         const state_col = self.nodes.items(.state);
@@ -417,8 +422,8 @@ pub const Pool = struct {
     /// lazy root; `Id.getRoot` will compute and cache it on first access.
     pub fn createChunkedLeaf(self: *Pool, chunks: *align(64) const [ChunkedLeaf.K][32]u8, len: u16) Error!Id {
         std.debug.assert(len <= ChunkedLeaf.K);
-        const storage = try self.allocator.create(ChunkedLeaf);
-        errdefer self.allocator.destroy(storage);
+        const storage = try self.page_allocator.create(ChunkedLeaf);
+        errdefer self.page_allocator.destroy(storage);
 
         storage.chunks = chunks.*;
         storage.len = len;
@@ -435,8 +440,8 @@ pub const Pool = struct {
     /// `ChunkedLeaf`. Caller fills via `Id.getChunkedLeafPtr`.
     pub fn createChunkedLeafEmpty(self: *Pool, len: u16) Error!Id {
         std.debug.assert(len <= ChunkedLeaf.K);
-        const storage = try self.allocator.create(ChunkedLeaf);
-        errdefer self.allocator.destroy(storage);
+        const storage = try self.page_allocator.create(ChunkedLeaf);
+        errdefer self.page_allocator.destroy(storage);
 
         @memset(std.mem.asBytes(&storage.chunks), 0);
         storage.len = len;
@@ -460,7 +465,6 @@ pub const Pool = struct {
     /// owns the resulting `ContainerStructRef`. The returned Node has a lazy root;
     /// `Id.getRoot` computes and caches it on first access.
     pub fn createContainerStruct(self: *Pool, comptime T: type, ptr: *const T) Error!Id {
-        // Clone the struct into the Pool's allocator.
         const cloned = try T.init(self.allocator, ptr);
         errdefer @constCast(cloned).deinit(self.allocator);
 
@@ -686,7 +690,7 @@ pub const Pool = struct {
                 },
                 .chunked_leaf => {
                     const storage = chunkedLeafPtr(self.nodes.items(.payload), @intFromEnum(id));
-                    self.allocator.destroy(storage);
+                    self.page_allocator.destroy(storage);
                     current = null;
                 },
                 .container_struct => {
@@ -748,7 +752,7 @@ pub const Id = enum(u32) {
                 }
                 const storage = chunkedLeafPtr(pool.nodes.items(.payload), idx);
                 var hash: [32]u8 = undefined;
-                storage.computeRootAllocating(pool.allocator, &hash);
+                storage.computeRootAllocating(pool.page_allocator, &hash);
                 roots[idx] = hash;
                 return &roots[idx];
             },
@@ -804,8 +808,8 @@ pub const Id = enum(u32) {
         if (pool.nodes.items(.state)[idx].kind() != .chunked_leaf) return Error.InvalidNode;
         const old_storage = chunkedLeafPtr(pool.nodes.items(.payload), idx);
 
-        const new_storage = try pool.allocator.create(ChunkedLeaf);
-        errdefer pool.allocator.destroy(new_storage);
+        const new_storage = try pool.page_allocator.create(ChunkedLeaf);
+        errdefer pool.page_allocator.destroy(new_storage);
 
         new_storage.chunks = old_storage.chunks;
         new_storage.len = old_storage.len;
@@ -835,8 +839,8 @@ pub const Id = enum(u32) {
         if (pool.nodes.items(.state)[idx].kind() != .chunked_leaf) return Error.InvalidNode;
         const old_storage = chunkedLeafPtr(pool.nodes.items(.payload), idx);
 
-        const new_storage = try pool.allocator.create(ChunkedLeaf);
-        errdefer pool.allocator.destroy(new_storage);
+        const new_storage = try pool.page_allocator.create(ChunkedLeaf);
+        errdefer pool.page_allocator.destroy(new_storage);
 
         new_storage.chunks = old_storage.chunks;
         new_storage.len = old_storage.len;

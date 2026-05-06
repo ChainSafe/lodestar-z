@@ -10,7 +10,7 @@ test "Node.State predicates" {
     // Exercises State predicates via `id.getState(pool)` over each variant:
     // zero sentinel, leaf, lazy/computed branch, free slot.
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 4);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 4 });
     defer pool.deinit();
     const p = &pool;
 
@@ -66,7 +66,7 @@ test "Node.State predicates" {
 
 test "Pool" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 10);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 10 });
     defer pool.deinit();
     const p = &pool;
 
@@ -104,7 +104,7 @@ test "Pool" {
 
 test "Pool - automatic capacity growth beyond pre-heat" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 1); // intentionally tiny
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 1 }); // intentionally tiny
     defer pool.deinit();
     const p = &pool;
 
@@ -124,7 +124,7 @@ test "Pool - automatic capacity growth beyond pre-heat" {
 }
 
 test "All zero hashes (depth>0) point both children to the previous depth" {
-    var pool = try Node.Pool.init(std.testing.allocator, 1);
+    var pool = try Node.Pool.init(.{ .page_allocator = std.testing.allocator, .allocator = std.testing.allocator, .pool_size = 1 });
     defer pool.deinit();
     const p = &pool;
 
@@ -139,7 +139,7 @@ test "All zero hashes (depth>0) point both children to the previous depth" {
 }
 
 test "Node free-list re-uses the lowest recently-freed Id first" {
-    var pool = try Node.Pool.init(std.testing.allocator, 2);
+    var pool = try Node.Pool.init(.{ .page_allocator = std.testing.allocator, .allocator = std.testing.allocator, .pool_size = 2 });
     defer pool.deinit();
 
     const n1 = try pool.createLeafFromUint(1);
@@ -151,7 +151,7 @@ test "Node free-list re-uses the lowest recently-freed Id first" {
 
 test "Navigation - invalid node access is rejected" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 8);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 8 });
     defer pool.deinit();
     const p = &pool;
 
@@ -169,7 +169,7 @@ test "Navigation - invalid node access is rejected" {
 
 test "alloc returns a set of unique nodes" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 1);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 1 });
     defer pool.deinit();
     const p = &pool;
 
@@ -189,7 +189,7 @@ test "alloc returns a set of unique nodes" {
 
 test "get/setNode" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 1);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 1 });
     defer pool.deinit();
     const p = &pool;
 
@@ -205,7 +205,7 @@ test "get/setNode" {
 
 test "setNodes for checkpoint tree" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 10);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 10 });
     defer pool.deinit();
     const p = &pool;
 
@@ -231,7 +231,7 @@ test "setNodes for checkpoint tree" {
 
 test "Depth helpers - round-trip setNodesAtDepth / getNodesAtDepth" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 64);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 64 });
     defer pool.deinit();
     const p = &pool;
 
@@ -326,7 +326,7 @@ const test_cases = [_]TestCase{
 
 test "setNodesAtDepth, setNodes vs setNode multiple times" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 10);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 10 });
     defer pool.deinit();
     const p = &pool;
 
@@ -384,7 +384,7 @@ test "setNodesAtDepth, setNodes vs setNode multiple times" {
 
 test "truncateAfterIndex zeros nodes after index" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 128);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 128 });
     defer pool.deinit();
     const p = &pool;
 
@@ -427,7 +427,7 @@ test "truncateAfterIndex zeros nodes after index" {
 
 test "hashing sanity check" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 10);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 10 });
     defer pool.deinit();
     const p = &pool;
 
@@ -448,7 +448,7 @@ test "hashing sanity check" {
 // Refer to https://github.com/ChainSafe/ssz/blob/7f5580c2ea69f9307300ddb6010a8bc7ce2fc471/packages/persistent-merkle-tree/test/unit/tree/zeroAfterIndex.test.ts#L4-L39
 test "truncateAfterIndex matches zeroAfterIndex test suite" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 8192);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 8192 });
     defer pool.deinit();
     const p = &pool;
 
@@ -535,7 +535,7 @@ fn treeZeroAfterIndexNaive(
 
 test "DepthIterator matches getNodesAtDepth" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 64);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 64 });
     defer pool.deinit();
     const p = &pool;
 
@@ -573,7 +573,7 @@ test "DepthIterator matches getNodesAtDepth" {
 
 test "FillWithContentsIterator matches fillWithContents" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 128);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 128 });
     defer pool.deinit();
     const p = &pool;
 

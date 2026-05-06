@@ -179,7 +179,7 @@ test "BoolType - serializeIntoBytes (false)" {
     try std.testing.expectEqualSlices(u8, &expected_root, &root);
 
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 32);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 32 });
     defer pool.deinit();
     const tree_node = try Bool.tree.fromValue(&pool, &value);
     var tree_serialized: [1]u8 = undefined;
@@ -202,7 +202,7 @@ test "BoolType - serializeIntoBytes (true)" {
     try std.testing.expectEqualSlices(u8, &expected_root, &root);
 
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 32);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 32 });
     defer pool.deinit();
     const tree_node = try Bool.tree.fromValue(&pool, &value);
     var tree_serialized: [1]u8 = undefined;
@@ -226,7 +226,7 @@ test "BoolType - tree.deserializeFromBytes" {
         .{ .id = "true", .serialized = [_]u8{0x01}, .expected_value = true, .expected_root = [_]u8{0x01} ++ [_]u8{0x00} ** 31 },
     };
 
-    var pool = try Node.Pool.init(allocator, 32);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 32 });
     defer pool.deinit();
 
     for (test_cases) |tc| {

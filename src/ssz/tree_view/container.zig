@@ -595,7 +595,7 @@ test "StructContainerTreeView - basic get/set/commit/root" {
         withdrawable_epoch: UintType(64),
     });
 
-    var pool = try Node.Pool.init(allocator, 1024);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 1024 });
     defer pool.deinit();
 
     const v: StructValidator.Type = .{
@@ -646,7 +646,7 @@ test "ContainerTreeView" {
         b: UintType(64),
     });
 
-    var pool = try Node.Pool.init(std.testing.allocator, 1000);
+    var pool = try Node.Pool.init(.{ .page_allocator = std.testing.allocator, .allocator = std.testing.allocator, .pool_size = 1000 });
     defer pool.deinit();
 
     const foo_value: Foo.Type = .{
@@ -731,7 +731,7 @@ const Checkpoint = FixedContainerType(struct {
 });
 
 test "TreeView container field roundtrip" {
-    var pool = try Node.Pool.init(std.testing.allocator, 1000);
+    var pool = try Node.Pool.init(.{ .page_allocator = std.testing.allocator, .allocator = std.testing.allocator, .pool_size = 1000 });
     defer pool.deinit();
     const checkpoint: Checkpoint.Type = .{
         .epoch = 42,
@@ -788,7 +788,7 @@ test "TreeView container field roundtrip" {
 
 test "TreeView container nested types set/get/commit" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 2048);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 2048 });
     defer pool.deinit();
 
     const Uint16 = UintType(16);
@@ -938,7 +938,7 @@ test "TreeView container nested types set/get/commit" {
 
 test "TreeView container clone isolates updates" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 1024);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 1024 });
     defer pool.deinit();
 
     const Uint64 = UintType(64);
@@ -964,7 +964,7 @@ test "TreeView container clone isolates updates" {
 
 test "TreeView container clone drops uncommitted changes" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 1024);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 1024 });
     defer pool.deinit();
 
     const Uint64 = UintType(64);
@@ -990,7 +990,7 @@ test "TreeView container clone drops uncommitted changes" {
 
 test "TreeView container clone(false) does not transfer cache" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 1024);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 1024 });
     defer pool.deinit();
 
     const Uint64 = UintType(64);
@@ -1016,7 +1016,7 @@ test "TreeView container clone(false) does not transfer cache" {
 
 test "TreeView container clone(true) transfers cache and clears source" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 1024);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 1024 });
     defer pool.deinit();
 
     const Uint64 = UintType(64);
@@ -1051,7 +1051,7 @@ test "ContainerTreeView - serialize (basic fields)" {
     });
     _ = Uint64;
 
-    var pool = try Node.Pool.init(allocator, 1024);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 1024 });
     defer pool.deinit();
 
     const TestCase = struct {
@@ -1119,7 +1119,7 @@ test "ContainerTreeView - get and set basic fields" {
     });
     _ = Uint64;
 
-    var pool = try Node.Pool.init(allocator, 1024);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 1024 });
     defer pool.deinit();
 
     const value: TestContainer.Type = .{ .a = 100, .b = 200 };
@@ -1154,7 +1154,7 @@ test "ContainerTreeView - serialize (with nested list)" {
     });
     _ = ListU64;
 
-    var pool = try Node.Pool.init(allocator, 1024);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 1024 });
     defer pool.deinit();
 
     var value: TestContainer.Type = .{

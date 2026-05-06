@@ -4,6 +4,7 @@
 //! Run with: zig build run:bench_process_epoch -Doptimize=ReleaseFast
 
 const std = @import("std");
+const builtin = @import("builtin");
 const zbench = @import("zbench");
 const Node = @import("persistent_merkle_tree").Node;
 const state_transition = @import("state_transition");
@@ -698,16 +699,20 @@ fn loadStateBytesFromConfiguredEraFiles(allocator: std.mem.Allocator, io: std.Io
     return error.NoUsableEraStateFound;
 }
 
-pub fn main(init: std.process.Init) !void {
-    var gpa: std.heap.DebugAllocator(.{}) = .init;
-    defer std.debug.assert(gpa.deinit() == .ok);
+var gpa: std.heap.DebugAllocator(.{}) = .init;
 
-    const allocator = gpa.allocator();
+pub fn main(init: std.process.Init) !void {
+    defer if (builtin.mode == .Debug) std.debug.assert(gpa.deinit() == .ok);
+
+    const allocator = if (builtin.mode == .Debug)
+        gpa.allocator()
+    else
+        std.heap.c_allocator;
     const io = init.io;
     var stdout_buf: [4096]u8 = undefined;
     var stdout_file_writer = std.Io.File.stdout().writer(io, &stdout_buf);
     var stdout = &stdout_file_writer.interface;
-    var pool = try Node.Pool.init(allocator, 10_000_000);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator });
     defer pool.deinit();
 
     const state_bytes = try loadStateBytesFromConfiguredEraFiles(allocator, io, stdout);

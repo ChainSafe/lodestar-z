@@ -100,7 +100,7 @@ const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeacon
 test "process execution payload - sanity" {
     const allocator = std.testing.allocator;
     const pool_size = 256 * 5;
-    var pool = try Node.Pool.init(allocator, pool_size);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = pool_size });
     defer pool.deinit();
 
     var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
@@ -132,7 +132,7 @@ test "process execution payload - sanity" {
 test "process execution payload - blinded" {
     const allocator = std.testing.allocator;
     const pool_size = 256 * 5;
-    var pool = try Node.Pool.init(allocator, pool_size);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = pool_size });
     defer pool.deinit();
 
     var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);

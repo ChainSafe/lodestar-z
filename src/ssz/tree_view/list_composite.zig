@@ -349,7 +349,7 @@ const Checkpoint = FixedContainerType(struct {
 
 test "TreeView composite list sliceTo truncates elements" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 512);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 512 });
     defer pool.deinit();
 
     const ListType = FixedListType(Checkpoint, 16, .{});
@@ -385,7 +385,7 @@ test "TreeView composite list sliceTo truncates elements" {
 
 test "TreeView composite list sliceFrom returns suffix" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 512);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 512 });
     defer pool.deinit();
 
     const ListType = FixedListType(Checkpoint, 16, .{});
@@ -426,7 +426,7 @@ test "TreeView composite list sliceFrom returns suffix" {
 // Refer to https://github.com/ChainSafe/ssz/blob/7f5580c2ea69f9307300ddb6010a8bc7ce2fc471/packages/ssz/test/unit/byType/listComposite/tree.test.ts#L209-L229
 test "TreeView composite list sliceFrom handles boundary conditions" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 1024);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 1024 });
     defer pool.deinit();
 
     const ListType = FixedListType(Checkpoint, 1024, .{});
@@ -498,7 +498,7 @@ test "TreeView composite list sliceFrom handles boundary conditions" {
 
 test "TreeView composite list push appends element" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 512);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 512 });
     defer pool.deinit();
 
     const ListType = FixedListType(Checkpoint, 8, .{});
@@ -536,7 +536,7 @@ test "TreeView composite list push appends element" {
 
 test "TreeView composite list clone isolates updates" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 1024);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 1024 });
     defer pool.deinit();
 
     const ListType = FixedListType(Checkpoint, 16, .{});
@@ -574,7 +574,7 @@ test "TreeView composite list clone isolates updates" {
 
 test "TreeView composite list clone reads committed state" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 1024);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 1024 });
     defer pool.deinit();
 
     const ListType = FixedListType(Checkpoint, 16, .{});
@@ -607,7 +607,7 @@ test "TreeView composite list clone reads committed state" {
 
 test "TreeView composite list clone drops uncommitted changes" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 1024);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 1024 });
     defer pool.deinit();
 
     const ListType = FixedListType(Checkpoint, 16, .{});
@@ -649,7 +649,7 @@ test "TreeView composite list clone drops uncommitted changes" {
 
 test "TreeView composite list clone(false) does not transfer cache" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 512);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 512 });
     defer pool.deinit();
 
     const ListType = FixedListType(Checkpoint, 16, .{});
@@ -676,7 +676,7 @@ test "TreeView composite list clone(false) does not transfer cache" {
 
 test "TreeView composite list clone(true) transfers cache and clears source" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 512);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 512 });
     defer pool.deinit();
 
     const ListType = FixedListType(Checkpoint, 16, .{});
@@ -703,7 +703,7 @@ test "TreeView composite list clone(true) transfers cache and clears source" {
 
 test "TreeView list of list commits inner length updates" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 1024);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 1024 });
     defer pool.deinit();
 
     const Uint32 = UintType(32);
@@ -880,7 +880,7 @@ test "TreeView list of list commits inner length updates" {
 // Refer to https://github.com/ChainSafe/ssz/blob/7f5580c2ea69f9307300ddb6010a8bc7ce2fc471/packages/ssz/test/unit/byType/listComposite/tree.test.ts#L182-L207
 test "TreeView composite list sliceTo matches incremental snapshots" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 2048);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 2048 });
     defer pool.deinit();
 
     const ListType = FixedListType(Checkpoint, 1024, .{});
@@ -954,7 +954,7 @@ test "ListCompositeTreeView - serialize (ByteVector32 list)" {
     const Root32 = ByteVectorType(32);
     const ListRootsType = FixedListType(Root32, 128, .{});
 
-    var pool = try Node.Pool.init(allocator, 1024);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 1024 });
     defer pool.deinit();
 
     const TestCase = struct {
@@ -1022,7 +1022,7 @@ test "ListCompositeTreeView - serialize (Container list)" {
     _ = Uint64;
     const ListContainerType = FixedListType(TestContainer, 128, .{});
 
-    var pool = try Node.Pool.init(allocator, 1024);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 1024 });
     defer pool.deinit();
 
     const TestCase = struct {
@@ -1093,7 +1093,7 @@ test "ListCompositeTreeView - push and serialize" {
     const Root32 = ByteVectorType(32);
     const ListRootsType = FixedListType(Root32, 128, .{});
 
-    var pool = try Node.Pool.init(allocator, 1024);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 1024 });
     defer pool.deinit();
 
     var value: ListRootsType.Type = ListRootsType.default_value;

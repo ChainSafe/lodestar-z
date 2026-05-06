@@ -576,7 +576,7 @@ pub const EpochTransitionCache = struct {
 test "EpochTransitionCache - finalProcessEpoch" {
     const allocator = std.testing.allocator;
     const pool_size = 256 * 5;
-    var pool = try Node.Pool.init(allocator, pool_size);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = pool_size });
     defer pool.deinit();
 
     var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
@@ -600,7 +600,7 @@ test "EpochTransitionCache.beforeProcessEpoch" {
 
     inline for (validator_count_arr) |validator_count| {
         const pool_size = validator_count * 5;
-        var pool = try Node.Pool.init(allocator, pool_size);
+        var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = pool_size });
         defer pool.deinit();
 
         var test_state = try TestCachedBeaconState.init(allocator, &pool, validator_count);

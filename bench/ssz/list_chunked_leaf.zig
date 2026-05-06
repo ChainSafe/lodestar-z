@@ -141,7 +141,7 @@ pub fn main(init: std.process.Init) !void {
 
     // Single shared pool. Sized for ~1M chunks worth of node IDs across both
     // leaf and chunked_leaf scenarios; preheats keep allocator overhead off the hot path.
-    var pool = try Node.Pool.init(allocator, 8_000_000);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 8_000_000 });
     defer pool.deinit();
 
     try populateInput(allocator);
