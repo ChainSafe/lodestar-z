@@ -56,8 +56,8 @@ pub const EpochCacheImmutableData = struct {
 };
 
 pub const EpochCacheOpts = struct {
-    skip_sync_committee_cache: bool,
-    skip_sync_pubkeys: bool,
+    skip_sync_committee_cache: bool = false,
+    skip_sync_pubkeys: bool = false,
 };
 
 const proposer_weight: f64 = @floatFromInt(c.PROPOSER_WEIGHT);
