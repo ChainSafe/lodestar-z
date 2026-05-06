@@ -311,19 +311,21 @@ pub fn loadState(
             }
 
             // Inactivity scores (altair+)
-            if (comptime f.gte(.altair) and seed_fork.gte(.altair)) {
-                const i_idx = comptime ST.getFieldIndex("inactivity_scores");
-                const i_range = ranges[i_idx];
+            if (comptime f.gte(.altair)) {
+                if (seed_fork.gte(.altair)) {
+                    const i_idx = comptime ST.getFieldIndex("inactivity_scores");
+                    const i_range = ranges[i_idx];
 
-                const seed_scores = try seed_state.inactivityScores();
-                var new_scores_view = try loadInactivityScores(
-                    allocator,
-                    pool,
-                    seed_scores,
-                    state_bytes[i_range[0]..i_range[1]],
-                );
-                errdefer new_scores_view.deinit();
-                try migrated_inner.set("inactivity_scores", new_scores_view);
+                    const seed_scores = try seed_state.inactivityScores();
+                    var new_scores_view = try loadInactivityScores(
+                        allocator,
+                        pool,
+                        seed_scores,
+                        state_bytes[i_range[0]..i_range[1]],
+                    );
+                    errdefer new_scores_view.deinit();
+                    try migrated_inner.set("inactivity_scores", new_scores_view);
+                }
             }
 
             try migrated_inner.commit();
