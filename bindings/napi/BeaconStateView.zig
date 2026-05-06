@@ -848,8 +848,6 @@ pub fn createdWithTransferCache(self: *const BeaconStateView) !js.Boolean {
 
 // pub fn BeaconStateView_isStateValidatorsNodesPopulated
 
-// pub fn BeaconStateView_loadOtherState
-
 pub fn serialize(self: *const BeaconStateView) !js.Uint8Array {
     const env = js.env();
     const cached_state = try self.requireState();
@@ -935,6 +933,52 @@ pub fn processSlots(self: *const BeaconStateView, slot_arg: js.Number, options: 
 
     try st.processSlots(allocator, napi_io.get(), post_state, slot_value, .{});
     return .{ .cached_state = post_state };
+}
+
+/// Load another state by reusing this state's validators / inactivity_scores subtrees
+/// where the byte ranges are unchanged.
+pub fn loadOtherState(
+    self: *const BeaconStateView,
+    state_bytes: js.Uint8Array,
+    seed_validators_bytes: ?js.Uint8Array,
+    _: ?js.Value,
+) !BeaconStateView {
+    const cached_state = try self.requireState();
+    const state_bytes_slice = try state_bytes.toSlice();
+    const seed_validators_bytes_slice: ?[]const u8 =
+        if (seed_validators_bytes) |b| try b.toSlice() else null;
+
+    var result = try st.loadState(
+        allocator,
+        &pool.state.pool,
+        cached_state.config,
+        cached_state.state,
+        state_bytes_slice,
+        seed_validators_bytes_slice,
+    );
+
+    result.modified_validators.deinit(allocator);
+    errdefer {
+        result.state.deinit();
+        allocator.destroy(result.state);
+    }
+
+    const new_cached_state = try allocator.create(CachedBeaconState);
+    errdefer allocator.destroy(new_cached_state);
+
+    try new_cached_state.init(
+        allocator,
+        result.state,
+        .{
+            .config = cached_state.config,
+            .index_to_pubkey = cached_state.epoch_cache.index_to_pubkey,
+            .pubkey_to_index = cached_state.epoch_cache.pubkey_to_index,
+        },
+        // as of Feb 2026, it's not necessary to sync pubkey cache as it's shared across states in Lodestar
+        .{ .skip_sync_pubkeys = true },
+    );
+
+    return .{ .cached_state = new_cached_state };
 }
 
 fn requireState(self: *const BeaconStateView) !*CachedBeaconState {

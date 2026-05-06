@@ -92,6 +92,9 @@ pub const getEffectiveBalanceIncrementsZeroInactive = @import("./utils/balance.z
 
 pub const WithdrawalsResult = @import("./block/process_withdrawals.zig").WithdrawalsResult;
 
+pub const loadState = @import("./utils/load_state.zig").loadState;
+pub const LoadStateResult = @import("./utils/load_state.zig").LoadStateResult;
+
 pub const test_utils = @import("test_utils/root.zig");
 
 pub const bls = @import("utils/bls.zig");
@@ -109,5 +112,6 @@ test {
     testing.refAllDecls(@This());
     testing.refAllDecls(seed);
     testing.refAllDecls(state_transition);
+    testing.refAllDecls(@import("./utils/load_state.zig"));
     testing.refAllDecls(EpochShuffling);
 }

@@ -623,4 +623,25 @@ describe("BeaconStateView", () => {
       expect(increments.length).toBe(state.validatorCount);
     });
   });
+
+  describe("loadOtherState", () => {
+    it("hashTreeRoot matches createFromBytes", () => {
+      const reloaded = state.loadOtherState(stateBytes);
+      expect(reloaded.hashTreeRoot()).toEqual(state.hashTreeRoot());
+    });
+
+    it("serialized output round-trips", () => {
+      const reloaded = state.loadOtherState(stateBytes);
+      const reloadedBytes = reloaded.serialize();
+      expect(reloadedBytes.length).toBe(stateBytes.length);
+      expect(Buffer.from(reloadedBytes).equals(Buffer.from(stateBytes))).toBe(true);
+    });
+
+    it("seedValidatorsBytes path matches no-seed path", () => {
+      const seedValidatorsBytes = state.serializeValidators();
+      const a = state.loadOtherState(stateBytes);
+      const b = state.loadOtherState(stateBytes, seedValidatorsBytes);
+      expect(b.hashTreeRoot()).toEqual(a.hashTreeRoot());
+    });
+  });
 });

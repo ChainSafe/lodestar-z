@@ -213,7 +213,18 @@ declare class BeaconStateView {
   createdWithTransferCache: boolean;
   // isStateValidatorsNodesPopulated(): boolean;
 
-  // loadOtherState(stateBytes: Uint8Array, seedValidatorsBytes?: Uint8Array): void;
+  /**
+   * Tree-reuse optimized: builds a new state from `stateBytes` while sharing this
+   * state's validators / inactivity_scores subtree nodes for unchanged entries.
+   * Pass `seedValidatorsBytes` to skip the internal serialization of seed validators.
+   * Note: `preloadValidatorsAndBalances` is currently a no-op (native state is
+   * always populated).
+   */
+  loadOtherState(
+    stateBytes: Uint8Array,
+    seedValidatorsBytes?: Uint8Array,
+    opts?: {preloadValidatorsAndBalances?: boolean}
+  ): BeaconStateView;
   serialize(): Uint8Array;
   serializedSize(): number;
   serializeToBytes(output: Uint8Array, offset: number): number;
