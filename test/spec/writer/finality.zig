@@ -32,7 +32,7 @@ pub const header =
 
 const test_template =
     \\test "{s} finality {s} {s}" {{
-    \\    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = pool_size });
+    \\    var pool = try Node.Pool.init(.{{ .page_allocator = allocator, .allocator = allocator, .pool_size = pool_size }});
     \\    defer pool.deinit();
     \\    const test_dir_name = try std.fs.path.join(allocator, &[_][]const u8{{
     \\        spec_test_options.spec_test_out_dir,

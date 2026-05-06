@@ -88,7 +88,7 @@ pub fn main(init: std.process.Init) !void {
     var bench = zbench.Benchmark.init(allocator, .{});
     defer bench.deinit();
 
-    pool = try Pool.init(allocator, 50_000_000);
+    pool = try Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 50_000_000 });
     defer pool.deinit();
 
     const depth = 40;
