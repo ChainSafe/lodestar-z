@@ -33,15 +33,12 @@ const presets = [_][]const u8{
 const Key = struct {
     suite: []const u8,
     case: []const u8,
-};
 
-fn keyLessThan(_: void, x: Key, y: Key) bool {
-    return switch (std.mem.order(u8, x.suite, y.suite)) {
-        .lt => true,
-        .gt => false,
-        .eq => std.mem.lessThan(u8, x.case, y.case),
-    };
-}
+    fn lessThan(_: void, x: Key, y: Key) bool {
+        const o = std.mem.order(u8, x.suite, y.suite);
+        return if (o == .eq) std.mem.lessThan(u8, x.case, y.case) else o == .lt;
+    }
+};
 
 fn TestWriter(comptime kind: RunnerKind) type {
     return switch (kind) {
@@ -139,7 +136,7 @@ pub fn writeTests(
                 try collectCases(io, a, root_dir, preset, fork_path, comptime handler.suiteName(), comptime kind.hasSuiteCase(), &keys);
             }
 
-            std.mem.sortUnstable(Key, keys.items, {}, keyLessThan);
+            std.mem.sortUnstable(Key, keys.items, {}, Key.lessThan);
 
             var write_idx: usize = 0;
             for (keys.items) |k| {
