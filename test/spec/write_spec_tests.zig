@@ -143,17 +143,17 @@ pub fn writeTests(
 
             std.mem.sortUnstable(Key, keys.items, {}, keyLessThan);
 
-            var w: usize = 0;
+            var write_idx: usize = 0;
             for (keys.items) |k| {
-                if (w == 0 or
-                    !std.mem.eql(u8, keys.items[w - 1].suite, k.suite) or
-                    !std.mem.eql(u8, keys.items[w - 1].case, k.case))
+                if (write_idx == 0 or
+                    !std.mem.eql(u8, keys.items[write_idx - 1].suite, k.suite) or
+                    !std.mem.eql(u8, keys.items[write_idx - 1].case, k.case))
                 {
-                    keys.items[w] = k;
-                    w += 1;
+                    keys.items[write_idx] = k;
+                    write_idx += 1;
                 }
             }
-            keys.items.len = w;
+            keys.items.len = write_idx;
 
             for (keys.items) |k| {
                 if (comptime kind.hasSuiteCase()) {
