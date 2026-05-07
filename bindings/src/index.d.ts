@@ -214,6 +214,7 @@ declare class BeaconStateView {
   // isStateValidatorsNodesPopulated(): boolean;
 
   // loadOtherState(stateBytes: Uint8Array, seedValidatorsBytes?: Uint8Array): void;
+  loadOtherStateBench(stateBytes: Uint8Array, seedValidatorsBytes?: Uint8Array): void;
   serialize(): Uint8Array;
   serializedSize(): number;
   serializeToBytes(output: Uint8Array, offset: number): number;
