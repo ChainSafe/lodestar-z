@@ -6,15 +6,10 @@ import {describe, expect, it} from "vitest";
 describe("BeaconStateView teardown", () => {
   it("creates view at module scope and exits cleanly", () => {
     const projectRoot = join(import.meta.dirname, "../..");
-    // Fixture must live under the project root so Node resolves its
-    // node_modules from there (workspace packages like @lodestar/config).
+    // Fixture must live under the project root so Node resolves
+    // workspace packages like @lodestar/config from local node_modules.
     const fixturePath = join(projectRoot, `bindings/test/.tmp-teardown-${process.pid}.mjs`);
 
-    // Module-scope `const seedState = ...` mirrors how perf bench files
-    // hold native objects. Without the Pool refcount fix, NAPI env cleanup
-    // frees the pool before this view's finalizer runs, and the chained
-    // pool.unref calls panic with "incorrect alignment" on process exit
-    // (exit code 134 / SIGABRT).
     writeFileSync(
       fixturePath,
       `

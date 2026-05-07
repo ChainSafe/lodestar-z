@@ -66,10 +66,6 @@ pub const js_meta = js.class(.{ .properties = .{
 } });
 
 cached_state: ?*CachedBeaconState = null,
-/// Holds a strong reference to the shared `Node.Pool` for the lifetime of
-/// `cached_state`. Released in `deinit` AFTER `cached_state.deinit` finishes
-/// its `pool.unref` calls, so the pool stays alive even if the module's
-/// NAPI env cleanup hook fired before this view's JS finalizer.
 pool_rc: ?*pool.PoolRc = null,
 const BeaconStateView = @This();
 

@@ -11,12 +11,6 @@ const default_pool_size: u32 = 0;
 
 pub const PoolRc = RefCount(Node.Pool);
 
-/// Pool is wrapped in `RefCount` so that any `BeaconStateView` (or other
-/// binding object) holding pool references at process exit keeps the pool
-/// alive until its own JS finalizer runs. Without this, NAPI env cleanup
-/// can run before module-level JS holders are finalized, freeing the pool
-/// before the holder's `pool.unref()` calls — causing "incorrect alignment"
-/// panics during teardown.
 pub const State = struct {
     pool_rc: ?*PoolRc = null,
 
@@ -27,9 +21,6 @@ pub const State = struct {
         self.pool_rc = try PoolRc.init(allocator, pool_value);
     }
 
-    /// Drops the module's reference. Pool is actually destroyed when the
-    /// last live reference is released (could be here or in a later
-    /// BeaconStateView finalizer).
     pub fn deinit(self: *State) void {
         if (self.pool_rc) |rc| {
             rc.unref();
