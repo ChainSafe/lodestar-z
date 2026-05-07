@@ -632,6 +632,11 @@ test "loadValidatorWithSeedReuse: reuse vs rebuild" {
     try std.testing.expect(
         try seed_validator.root.getNodeAtDepth(seed_validator.pool, types.phase0.Validator.chunk_depth, withdrawal_i) != try new_validator.root.getNodeAtDepth(new_validator.pool, types.phase0.Validator.chunk_depth, withdrawal_i),
     );
+
+    const fresh_root = try types.phase0.Validator.tree.deserializeFromBytes(&pool, new_validator_bytes[0..]);
+    var fresh_validator = try types.phase0.Validator.TreeView.init(allocator, &pool, fresh_root);
+    defer fresh_validator.deinit();
+    try std.testing.expectEqualSlices(u8, try fresh_validator.hashTreeRoot(), try new_validator.hashTreeRoot());
 }
 
 test "loadState scenarios" {
@@ -806,6 +811,10 @@ test "loadState scenarios" {
             _ = try mv.serializeIntoBytes(&mv_bytes);
             try std.testing.expectEqualSlices(u8, mutated_bytes[base .. base + ssz_bytes.VALIDATOR_BYTES_SIZE], mv_bytes[0..]);
         }
+
+        var fresh_state = try AnyBeaconState.deserialize(allocator, &pool, .electra, mutated_bytes);
+        defer fresh_state.deinit();
+        try std.testing.expectEqualSlices(u8, try fresh_state.hashTreeRoot(), try out.state.hashTreeRoot());
     }
 }
 
