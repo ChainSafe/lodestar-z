@@ -144,8 +144,7 @@ pub fn writeTests(
 
             var write_idx: usize = 0;
             for (keys.items) |k| {
-                const is_dup = write_idx > 0 and keys.items[write_idx - 1].eql(k);
-                if (is_dup) continue;
+                if (write_idx > 0 and keys.items[write_idx - 1].eql(k)) continue;
                 keys.items[write_idx] = k;
                 write_idx += 1;
             }
