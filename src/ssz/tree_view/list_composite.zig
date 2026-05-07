@@ -187,7 +187,10 @@ pub fn ListCompositeTreeView(comptime ST: type) type {
             try self.push(child_view);
         }
 
+        /// Read-only iterator over committed elements. Pending `set`/`push`
+        /// writes are not visible — call `commit()` first if they matter.
         pub fn iteratorReadonly(self: *const Self, start_index: usize) ReadonlyIterator {
+            std.debug.assert(self.chunks.state.changed.count() == 0);
             return ReadonlyIterator.init(self, start_index);
         }
 

@@ -112,7 +112,10 @@ pub fn ListBasicTreeView(comptime ST: type) type {
             self._len = new_length;
         }
 
+        /// Read-only iterator over committed elements. Pending `set`/`push`
+        /// writes are not visible — call `commit()` first if they matter.
         pub fn iteratorReadonly(self: *const Self, start_index: usize) ReadonlyIterator {
+            std.debug.assert(self.chunks.state.changed.count() == 0);
             return ReadonlyIterator.init(self, start_index);
         }
 
