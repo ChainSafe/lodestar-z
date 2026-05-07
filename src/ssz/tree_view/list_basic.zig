@@ -1543,3 +1543,60 @@ test "ListBasicTreeView chunked_leaf: sliceTo handles zero-sentinel boundary" {
     try sliced.hashTreeRootInto(&actual_root);
     try std.testing.expectEqualSlices(u8, &expected_root, &actual_root);
 }
+
+test "ListBasicTreeView chunked_leaf: getAllInto sees uncommitted set" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 4096 });
+    defer pool.deinit();
+
+    const ListT = FixedListType(UintType(64), 1 << 20, .{ .chunked_leaf = true });
+    const item_count: usize = 5000;
+
+    var src: ListT.Type = .empty;
+    defer src.deinit(allocator);
+    try src.ensureTotalCapacity(allocator, item_count);
+    for (0..item_count) |i| try src.append(allocator, @as(u64, @intCast(i)));
+
+    const root_id = try ListT.tree.fromValue(&pool, &src);
+    var view = try ListT.TreeView.init(allocator, &pool, root_id);
+    defer view.deinit();
+
+    // Stage writes spanning two chunked_leaves (boundary at 4096 for u64).
+    try view.set(7, 9001);
+    try view.set(4500, 9002);
+
+    const out = try allocator.alloc(u64, item_count);
+    defer allocator.free(out);
+    _ = try view.getAllInto(out);
+
+    try std.testing.expectEqual(@as(u64, 9001), out[7]);
+    try std.testing.expectEqual(@as(u64, 9002), out[4500]);
+    try std.testing.expectEqual(@as(u64, 6), out[6]);
+    try std.testing.expectEqual(@as(u64, 4499), out[4499]);
+}
+
+test "ListBasicTreeView chunked_leaf: getAllInto sees uncommitted push" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 4096 });
+    defer pool.deinit();
+
+    const ListT = FixedListType(UintType(64), 1 << 20, .{ .chunked_leaf = true });
+
+    var src: ListT.Type = .empty;
+    defer src.deinit(allocator);
+    try src.append(allocator, 10);
+    try src.append(allocator, 20);
+
+    const root_id = try ListT.tree.fromValue(&pool, &src);
+    var view = try ListT.TreeView.init(allocator, &pool, root_id);
+    defer view.deinit();
+
+    try view.push(30);
+    try view.push(40);
+
+    const out = try allocator.alloc(u64, 4);
+    defer allocator.free(out);
+    _ = try view.getAllInto(out);
+
+    try std.testing.expectEqualSlices(u64, &.{ 10, 20, 30, 40 }, out);
+}

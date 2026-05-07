@@ -169,6 +169,16 @@ pub fn BasicPackedChunks(
                 defer self.state.allocator.free(chunked_leaf_ids);
                 try self.state.root.getNodesAtDepth(self.state.pool, chunked_leaf_depth, 0, chunked_leaf_ids);
 
+                // Override with staged children_nodes entries so uncommitted
+                // set/push are visible. The bulk root walk above sees only the
+                // committed root.
+                for (0..chunked_leaf_count) |i| {
+                    const gindex = Gindex.fromDepth(chunked_leaf_depth, i);
+                    if (self.state.children_nodes.get(gindex)) |staged| {
+                        chunked_leaf_ids[i] = staged;
+                    }
+                }
+
                 var item_idx: usize = 0;
                 outer: for (chunked_leaf_ids) |sid| {
                     // ChunkedLeaf boundary may be a zero sentinel for sparsely-filled
