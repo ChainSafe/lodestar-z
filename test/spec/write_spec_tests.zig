@@ -34,6 +34,20 @@ const presets = [_][]const u8{
     "mainnet/tests/mainnet",
 };
 
+const Key = struct {
+    /// Empty string for flat handlers (no suite layer).
+    suite: []const u8,
+    case: []const u8,
+};
+
+fn keyLessThan(_: void, x: Key, y: Key) bool {
+    return switch (std.mem.order(u8, x.suite, y.suite)) {
+        .lt => true,
+        .gt => false,
+        .eq => std.mem.lessThan(u8, x.case, y.case),
+    };
+}
+
 fn TestWriter(comptime kind: RunnerKind) type {
     return switch (kind) {
         .merkle_proof => @import("./writer/merkle_proof.zig"),
@@ -120,36 +134,38 @@ pub fn writeTests(
         const fork_path = @tagName(fork) ++ "/" ++ @tagName(kind);
 
         inline for (TestWriter(kind).handlers) |handler| {
-            // Key shape: "<case>" for flat handlers, "<suite>/<case>" for
-            // hasSuiteCase. Sort keys before emitting so regenerations don't
-            // churn line order on every run.
-            var cases: std.StringHashMapUnmanaged(void) = .empty;
-            defer {
-                var it = cases.keyIterator();
-                while (it.next()) |k| allocator.free(k.*);
-                cases.deinit(allocator);
-            }
+            // Per-handler arena: dup'd suite/case slices live until this
+            // handler's emission finishes, then released as one block.
+            var arena = std.heap.ArenaAllocator.init(allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+
+            var keys: std.ArrayListUnmanaged(Key) = .empty;
 
             for (presets) |preset| {
-                try collectCases(io, allocator, root_dir, preset, fork_path, comptime handler.suiteName(), comptime kind.hasSuiteCase(), &cases);
+                try collectCases(io, a, root_dir, preset, fork_path, comptime handler.suiteName(), comptime kind.hasSuiteCase(), &keys);
             }
 
-            var ordered = try std.ArrayListUnmanaged([]const u8).initCapacity(allocator, cases.size);
-            defer ordered.deinit(allocator);
-            var it = cases.keyIterator();
-            while (it.next()) |k| ordered.appendAssumeCapacity(k.*);
-            std.mem.sort([]const u8, ordered.items, {}, struct {
-                fn lt(_: void, a: []const u8, b: []const u8) bool {
-                    return std.mem.lessThan(u8, a, b);
-                }
-            }.lt);
+            std.mem.sortUnstable(Key, keys.items, {}, keyLessThan);
 
-            for (ordered.items) |key| {
+            // Dedup adjacent duplicates in-place (sorted -> equals are adjacent).
+            var w: usize = 0;
+            for (keys.items) |k| {
+                if (w == 0 or
+                    !std.mem.eql(u8, keys.items[w - 1].suite, k.suite) or
+                    !std.mem.eql(u8, keys.items[w - 1].case, k.case))
+                {
+                    keys.items[w] = k;
+                    w += 1;
+                }
+            }
+            keys.items.len = w;
+
+            for (keys.items) |k| {
                 if (comptime kind.hasSuiteCase()) {
-                    const slash = std.mem.indexOfScalar(u8, key, '/').?;
-                    try TestWriter(kind).writeTest(writer, fork, handler, key[0..slash], key[slash + 1 ..]);
+                    try TestWriter(kind).writeTest(writer, fork, handler, k.suite, k.case);
                 } else {
-                    try TestWriter(kind).writeTest(writer, fork, handler, key);
+                    try TestWriter(kind).writeTest(writer, fork, handler, k.case);
                 }
             }
         }
@@ -164,7 +180,7 @@ fn collectCases(
     fork_path: []const u8,
     suite_name: []const u8,
     has_suite_case: bool,
-    out: *std.StringHashMapUnmanaged(void),
+    out: *std.ArrayListUnmanaged(Key),
 ) !void {
     // Asymmetric pack means a preset/fork/handler may legitimately not
     // ship a given dir. Only swallow FileNotFound; surface real IO errors
@@ -198,17 +214,20 @@ fn collectCases(
                 else => |e| return e,
             };
             defer suite_dir.close(io);
+            const suite = try allocator.dupe(u8, entry.name);
             var case_iter = suite_dir.iterate();
             while (try case_iter.next(io)) |case_entry| {
                 if (case_entry.kind != .directory) continue;
-                const key = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ entry.name, case_entry.name });
-                const gop = try out.getOrPut(allocator, key);
-                if (gop.found_existing) allocator.free(key) else gop.key_ptr.* = key;
+                try out.append(allocator, .{
+                    .suite = suite,
+                    .case = try allocator.dupe(u8, case_entry.name),
+                });
             }
         } else {
-            const key = try allocator.dupe(u8, entry.name);
-            const gop = try out.getOrPut(allocator, key);
-            if (gop.found_existing) allocator.free(key) else gop.key_ptr.* = key;
+            try out.append(allocator, .{
+                .suite = "",
+                .case = try allocator.dupe(u8, entry.name),
+            });
         }
     }
 }
