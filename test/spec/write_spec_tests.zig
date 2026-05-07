@@ -174,8 +174,6 @@ fn collectCases(
     has_suite_case: bool,
     out: *std.ArrayListUnmanaged(Key),
 ) !void {
-    // Swallow only FileNotFound; surface real IO errors so a corrupt
-    // checkout fails loudly instead of silently dropping cases.
     var preset_dir = root.openDir(io, preset, .{}) catch |err| switch (err) {
         error.FileNotFound => return,
         else => |e| return e,
