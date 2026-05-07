@@ -43,7 +43,7 @@ pub fn loadState(
 ) !MigrateStateOutput {
     const fork = try ssz_bytes.getForkFromStateBytes(config, state_bytes);
     const seed_fork = config.forkSeq(try seed_state.slot());
-    const pool = seed_state.pool();
+    const pool = seed_state.nodePool();
 
     return switch (fork) {
         inline else => |f| try loadStateForFork(allocator, pool, f, seed_fork, seed_state, ForkTypes(f).BeaconState, state_bytes, seed_validators_bytes),
@@ -432,12 +432,12 @@ fn inactivityScoresNodeId(state: *AnyBeaconState) !Node.Id {
 
 fn validatorsViewOwned(allocator: Allocator, state: *AnyBeaconState) !*types.phase0.Validators.TreeView {
     const root = try validatorsNodeId(state);
-    return try types.phase0.Validators.TreeView.init(allocator, state.pool(), root);
+    return try types.phase0.Validators.TreeView.init(allocator, state.nodePool(), root);
 }
 
 fn inactivityScoresViewOwned(allocator: Allocator, state: *AnyBeaconState) !*types.altair.InactivityScores.TreeView {
     const root = try inactivityScoresNodeId(state);
-    return try types.altair.InactivityScores.TreeView.init(allocator, state.pool(), root);
+    return try types.altair.InactivityScores.TreeView.init(allocator, state.nodePool(), root);
 }
 
 fn loadValidatorWithSeedReuse(
