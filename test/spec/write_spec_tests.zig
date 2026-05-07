@@ -25,8 +25,6 @@ const supported_test_runners = [_]RunnerKind{
     .finality,
 };
 
-// EF ships asymmetric vector packs: ~97 case dirs only exist under mainnet,
-// hundreds only under minimal. Walk both, dedup the union.
 const presets = [_][]const u8{
     "minimal/tests/minimal",
     "mainnet/tests/mainnet",
