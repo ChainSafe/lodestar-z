@@ -155,6 +155,8 @@ fn loadInactivityScores(
     seed_scores_node: Node.Id,
     inactivity_scores_bytes: []const u8,
 ) !void {
+    if (inactivity_scores_bytes.len % INACTIVITY_SCORE_SIZE != 0) return error.InvalidSize;
+
     const seed_scores = try types.altair.InactivityScores.TreeView.init(allocator, pool, seed_scores_node);
     defer seed_scores.deinit();
 
@@ -192,6 +194,8 @@ fn loadValidators(
     new_validators_bytes: []const u8,
     seed_state_validators_bytes: ?[]const u8,
 ) ![]ValidatorIndex {
+    if (new_validators_bytes.len % ssz_bytes.VALIDATOR_BYTES_SIZE != 0) return error.InvalidSize;
+
     const seed_validators = try types.phase0.Validators.TreeView.init(allocator, pool, seed_validators_node);
     defer seed_validators.deinit();
 
@@ -891,4 +895,50 @@ test "diff helpers cases" {
             try std.testing.expectEqual(@as(ValidatorIndex, @intCast(e)), g);
         }
     }
+}
+
+test "loadValidators rejects non-multiple-of-VALIDATOR_BYTES_SIZE" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(allocator, 1024);
+    defer pool.deinit();
+
+    const gen = @import("test_utils/generate_state.zig");
+    const chain_config = gen.getConfig(@import("config").minimal.chain_config, .electra, 0);
+    const state_ptr = try gen.generateElectraState(allocator, &pool, chain_config, 8);
+    defer {
+        state_ptr.deinit();
+        allocator.destroy(state_ptr);
+    }
+
+    const StateST = types.electra.BeaconState;
+    const migrated_view = state_ptr.castToFork(.electra).inner;
+    const seed_validators_node = try validatorsNodeId(state_ptr);
+    const bad_bytes = [_]u8{0} ** (ssz_bytes.VALIDATOR_BYTES_SIZE + 1);
+    try std.testing.expectError(
+        error.InvalidSize,
+        loadValidators(allocator, StateST, migrated_view, &pool, seed_validators_node, bad_bytes[0..], null),
+    );
+}
+
+test "loadInactivityScores rejects non-multiple-of-INACTIVITY_SCORE_SIZE" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(allocator, 1024);
+    defer pool.deinit();
+
+    const gen = @import("test_utils/generate_state.zig");
+    const chain_config = gen.getConfig(@import("config").minimal.chain_config, .electra, 0);
+    const state_ptr = try gen.generateElectraState(allocator, &pool, chain_config, 8);
+    defer {
+        state_ptr.deinit();
+        allocator.destroy(state_ptr);
+    }
+
+    const StateST = types.electra.BeaconState;
+    const migrated_view = state_ptr.castToFork(.electra).inner;
+    const seed_scores_node = try inactivityScoresNodeId(state_ptr);
+    const bad_bytes = [_]u8{0} ** (INACTIVITY_SCORE_SIZE + 1);
+    try std.testing.expectError(
+        error.InvalidSize,
+        loadInactivityScores(allocator, StateST, migrated_view, &pool, seed_scores_node, bad_bytes[0..]),
+    );
 }
