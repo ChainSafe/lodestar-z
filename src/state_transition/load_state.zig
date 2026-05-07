@@ -7,6 +7,7 @@ const Gindex = @import("persistent_merkle_tree").Gindex;
 const ForkSeq = @import("config").ForkSeq;
 const BeaconConfig = @import("config").BeaconConfig;
 const AnyBeaconState = @import("fork_types").AnyBeaconState;
+const ForkTypes = @import("fork_types").ForkTypes;
 
 const ssz_bytes = @import("ssz_bytes.zig");
 const ssz_container = @import("ssz_container.zig");
@@ -47,13 +48,7 @@ pub fn loadState(
     };
 
     return switch (fork) {
-        .phase0 => try loadStateForFork(allocator, pool, .phase0, seed_fork, seed_state, types.phase0.BeaconState, state_bytes, seed_validators_bytes),
-        .altair => try loadStateForFork(allocator, pool, .altair, seed_fork, seed_state, types.altair.BeaconState, state_bytes, seed_validators_bytes),
-        .bellatrix => try loadStateForFork(allocator, pool, .bellatrix, seed_fork, seed_state, types.bellatrix.BeaconState, state_bytes, seed_validators_bytes),
-        .capella => try loadStateForFork(allocator, pool, .capella, seed_fork, seed_state, types.capella.BeaconState, state_bytes, seed_validators_bytes),
-        .deneb => try loadStateForFork(allocator, pool, .deneb, seed_fork, seed_state, types.deneb.BeaconState, state_bytes, seed_validators_bytes),
-        .electra => try loadStateForFork(allocator, pool, .electra, seed_fork, seed_state, types.electra.BeaconState, state_bytes, seed_validators_bytes),
-        .fulu => try loadStateForFork(allocator, pool, .fulu, seed_fork, seed_state, types.fulu.BeaconState, state_bytes, seed_validators_bytes),
+        inline else => |f| try loadStateForFork(allocator, pool, f, seed_fork, seed_state, ForkTypes(f).BeaconState, state_bytes, seed_validators_bytes),
     };
 }
 
@@ -150,15 +145,7 @@ fn loadStateForFork(
 
     try migrated_view.commit();
 
-    const migrated_state: AnyBeaconState = switch (out_fork) {
-        .phase0 => .{ .phase0 = migrated_view },
-        .altair => .{ .altair = migrated_view },
-        .bellatrix => .{ .bellatrix = migrated_view },
-        .capella => .{ .capella = migrated_view },
-        .deneb => .{ .deneb = migrated_view },
-        .electra => .{ .electra = migrated_view },
-        .fulu => .{ .fulu = migrated_view },
-    };
+    const migrated_state = @unionInit(AnyBeaconState, @tagName(out_fork), migrated_view);
     return .{ .state = migrated_state, .modified_validators = modified_validators };
 }
 
