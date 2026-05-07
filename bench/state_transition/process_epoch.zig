@@ -767,7 +767,7 @@ fn runBenchmark(
         allocator.destroy(index_pubkey_cache);
     }
 
-    const validators = try beacon_state.?.validatorsSlice(allocator);
+    const validators = try beacon_state.?.validatorsPtrSlice(allocator);
     defer allocator.free(validators);
 
     try state_transition.syncPubkeys(allocator, validators, &pubkey_index_map, index_pubkey_cache);
