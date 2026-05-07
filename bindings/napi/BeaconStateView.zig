@@ -66,6 +66,11 @@ pub const js_meta = js.class(.{ .properties = .{
 } });
 
 cached_state: ?*CachedBeaconState = null,
+/// Holds a strong reference to the shared `Node.Pool` for the lifetime of
+/// `cached_state`. Released in `deinit` AFTER `cached_state.deinit` finishes
+/// its `pool.unref` calls, so the pool stays alive even if the module's
+/// NAPI env cleanup hook fired before this view's JS finalizer.
+pool_rc: ?*pool.PoolRc = null,
 const BeaconStateView = @This();
 
 pub fn init() BeaconStateView {
@@ -77,6 +82,10 @@ pub fn deinit(self: *BeaconStateView) void {
         cached_state.deinit();
         allocator.destroy(cached_state);
         self.cached_state = null;
+    }
+    if (self.pool_rc) |rc| {
+        rc.unref();
+        self.pool_rc = null;
     }
 }
 
@@ -90,7 +99,7 @@ pub fn createFromBytes(bytes: js.Uint8Array) !BeaconStateView {
     const byte_slice = try bytes.toSlice();
     const slot_value = fork_types.readSlotFromAnyBeaconStateBytes(byte_slice);
     const fork_seq = config.state.config.forkSeq(slot_value);
-    state.* = try AnyBeaconState.deserialize(allocator, &pool.state.pool, fork_seq, byte_slice);
+    state.* = try AnyBeaconState.deserialize(allocator, pool.state.pool(), fork_seq, byte_slice);
     errdefer state.deinit();
 
     const cached_state = try allocator.create(CachedBeaconState);
@@ -107,7 +116,10 @@ pub fn createFromBytes(bytes: js.Uint8Array) !BeaconStateView {
         null,
     );
 
-    return .{ .cached_state = cached_state };
+    return .{
+        .cached_state = cached_state,
+        .pool_rc = pool.state.poolRc().ref(),
+    };
 }
 
 // -------------------------
@@ -781,7 +793,7 @@ pub fn createMultiProof(self: *const BeaconStateView, descriptor: js.Uint8Array)
 
     var proof = persistent_merkle_tree.proof.createProof(
         allocator,
-        &pool.state.pool,
+        pool.state.pool(),
         root_node,
         proof_input,
     ) catch {
@@ -934,7 +946,10 @@ pub fn processSlots(self: *const BeaconStateView, slot_arg: js.Number, options: 
     }
 
     try st.processSlots(allocator, napi_io.get(), post_state, slot_value, .{});
-    return .{ .cached_state = post_state };
+    return .{
+        .cached_state = post_state,
+        .pool_rc = pool.state.poolRc().ref(),
+    };
 }
 
 /// Compute expected withdrawals for the next payload (capella+).
