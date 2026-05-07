@@ -640,26 +640,38 @@ test "batchGetRoot matches getRoot for dirty branches at various depths" {
         const depth: Depth = @intCast(depth_usize);
         const max_length = @as(usize, 1) << @intCast(depth);
 
-        // Build a full tree, then modify some leaves to create dirty branches.
         var leaves = try allocator.alloc(Node.Id, max_length);
         defer allocator.free(leaves);
         for (0..max_length) |i| {
             leaves[i] = try pool.createLeafFromUint(@intCast(i + 1));
+            try pool.ref(leaves[i]);
         }
+        defer for (leaves) |leaf| pool.unref(leaf);
 
-        const root = try Node.fillWithContents(p, leaves, depth);
-        defer pool.unref(root);
+        // Build two identical dirty trees. `getRoot` mutates in-place, so the
+        // batch path must run on a separate tree to exercise dirty branches.
+        const leaves_for_get_root = try allocator.dupe(Node.Id, leaves);
+        defer allocator.free(leaves_for_get_root);
 
-        // Modify a few leaves to make branches dirty.
-        const new_leaf = try pool.createLeafFromUint(0xBEEF);
-        const dirty_root = try root.setNodeAtDepth(p, depth, 0, new_leaf);
-        defer pool.unref(dirty_root);
+        const leaves_for_batch = try allocator.dupe(Node.Id, leaves);
+        defer allocator.free(leaves_for_batch);
 
-        // Clone the tree for getRoot (since getRoot mutates state in-place).
-        // Both should produce the same hash.
-        const expected = dirty_root.getRoot(p);
-        // getRoot already computed the hashes, but batchGetRoot should return the same result.
-        const actual = try dirty_root.batchGetRoot(p, depth, allocator);
+        const root_get = try Node.fillWithContents(p, leaves_for_get_root, depth);
+        defer pool.unref(root_get);
+
+        const root_batch = try Node.fillWithContents(p, leaves_for_batch, depth);
+        defer pool.unref(root_batch);
+
+        const new_leaf_get = try pool.createLeafFromUint(0xBEEF);
+        const dirty_get = try root_get.setNodeAtDepth(p, depth, 0, new_leaf_get);
+        defer pool.unref(dirty_get);
+
+        const new_leaf_batch = try pool.createLeafFromUint(0xBEEF);
+        const dirty_batch = try root_batch.setNodeAtDepth(p, depth, 0, new_leaf_batch);
+        defer pool.unref(dirty_batch);
+
+        const expected = dirty_get.getRoot(p);
+        const actual = try dirty_batch.batchGetRoot(p, depth, allocator);
         try std.testing.expectEqualSlices(u8, expected, actual);
     }
 }
@@ -673,31 +685,47 @@ test "batchGetRoot matches getRoot with multiple dirty leaves" {
     const depth: Depth = 4;
     const max_length = @as(usize, 1) << depth;
 
-    // Build a full tree with all leaves set.
     var leaves = try allocator.alloc(Node.Id, max_length);
     defer allocator.free(leaves);
     for (0..max_length) |i| {
         leaves[i] = try pool.createLeafFromUint(@intCast(i + 1));
+        try pool.ref(leaves[i]);
     }
+    defer for (leaves) |leaf| pool.unref(leaf);
 
-    const root = try Node.fillWithContents(p, leaves, depth);
+    // Build two identical dirty trees. `getRoot` mutates in-place, so the
+    // batch path must run on a separate tree to exercise dirty branches.
+    const leaves_for_get_root = try allocator.dupe(Node.Id, leaves);
+    defer allocator.free(leaves_for_get_root);
 
-    // Modify multiple scattered leaves.
-    var modified = root;
+    const leaves_for_batch = try allocator.dupe(Node.Id, leaves);
+    defer allocator.free(leaves_for_batch);
+
+    const root_get = try Node.fillWithContents(p, leaves_for_get_root, depth);
+    defer pool.unref(root_get);
+    var modified_get = root_get;
+
+    const root_batch = try Node.fillWithContents(p, leaves_for_batch, depth);
+    defer pool.unref(root_batch);
+    var modified_batch = root_batch;
+
     const modify_indices = [_]usize{ 0, 3, 7, 12, 15 };
     for (modify_indices) |idx| {
-        const new_leaf = try pool.createLeafFromUint(@intCast(0xF000 + idx));
-        const old = modified;
-        modified = try modified.setNodeAtDepth(p, depth, idx, new_leaf);
-        if (old != root) pool.unref(old);
-    }
-    defer pool.unref(modified);
-    pool.unref(root);
+        const new_leaf_get = try pool.createLeafFromUint(@intCast(0xF000 + idx));
+        const old_get = modified_get;
+        modified_get = try modified_get.setNodeAtDepth(p, depth, idx, new_leaf_get);
+        if (old_get != root_get) pool.unref(old_get);
 
-    // Use getRoot on a copy-by-reference to get expected hash, then verify batchGetRoot matches.
-    // Since getRoot computes in-place, calling it first then batchGetRoot should still agree.
-    const expected = modified.getRoot(p);
-    const actual = try modified.batchGetRoot(p, depth, allocator);
+        const new_leaf_batch = try pool.createLeafFromUint(@intCast(0xF000 + idx));
+        const old_batch = modified_batch;
+        modified_batch = try modified_batch.setNodeAtDepth(p, depth, idx, new_leaf_batch);
+        if (old_batch != root_batch) pool.unref(old_batch);
+    }
+    defer pool.unref(modified_get);
+    defer pool.unref(modified_batch);
+
+    const expected = modified_get.getRoot(p);
+    const actual = try modified_batch.batchGetRoot(p, depth, allocator);
     try std.testing.expectEqualSlices(u8, expected, actual);
 }
 

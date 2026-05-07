@@ -419,6 +419,8 @@ pub const Id = enum(u32) {
     /// Collects dirty branches via BFS, then hashes them bottom-up in batches
     /// using SIMD-accelerated `hashBatch`. Produces identical results to `getRoot`
     /// but is ~2x faster on large trees with many dirty nodes.
+    ///
+    /// `depth` must be the full height of `node_id`'s tree.
     pub fn batchGetRoot(node_id: Id, pool: *Pool, depth: Depth, allocator: Allocator) Error!*const [32]u8 {
         const states = pool.nodes.items(.state);
         const hashes = pool.nodes.items(.hash);
@@ -427,11 +429,7 @@ pub const Id = enum(u32) {
         if (!states[@intFromEnum(node_id)].isBranchLazy()) {
             return &hashes[@intFromEnum(node_id)];
         }
-
-        // Fast path: depth 0 means the node is a leaf, just return its hash.
-        if (depth == 0) {
-            return &hashes[@intFromEnum(node_id)];
-        }
+        if (depth == 0) return Error.InvalidNode;
 
         const lefts = pool.nodes.items(.left);
         const rights = pool.nodes.items(.right);
@@ -439,9 +437,7 @@ pub const Id = enum(u32) {
         // Collect dirty branch nodes per level via BFS.
         // levels[i] holds dirty node IDs at depth i (0 = root level).
         var levels: [max_depth]std.ArrayListUnmanaged(Id) = undefined;
-        for (0..depth) |i| {
-            levels[i] = .empty;
-        }
+        @memset(levels[0..depth], .empty);
         defer for (0..depth) |i| {
             levels[i].deinit(allocator);
         };
@@ -466,16 +462,15 @@ pub const Id = enum(u32) {
         // Bottom-up batch hash: process from deepest level to root.
         var pairs = std.ArrayListUnmanaged([32]u8).empty;
         defer pairs.deinit(allocator);
+
         var outs = std.ArrayListUnmanaged([32]u8).empty;
         defer outs.deinit(allocator);
 
-        var level_i: usize = depth - 1;
-        while (true) : (level_i -= 1) {
+        var level_i: usize = depth;
+        while (level_i > 0) {
+            level_i -= 1;
             const dirty_nodes = levels[level_i].items;
-            if (dirty_nodes.len == 0) {
-                if (level_i == 0) break;
-                continue;
-            }
+            if (dirty_nodes.len == 0) continue;
 
             // Build input pairs: [left_hash, right_hash] for each dirty node.
             pairs.clearRetainingCapacity();
@@ -487,8 +482,7 @@ pub const Id = enum(u32) {
 
             // Batch hash
             outs.clearRetainingCapacity();
-            try outs.ensureTotalCapacity(allocator, dirty_nodes.len);
-            outs.items.len = dirty_nodes.len;
+            try outs.resize(allocator, dirty_nodes.len);
             hashBatch(outs.items, pairs.items) catch unreachable;
 
             // Write results back
@@ -496,8 +490,6 @@ pub const Id = enum(u32) {
                 hashes[@intFromEnum(id)] = outs.items[i];
                 states[@intFromEnum(id)].setBranchComputed();
             }
-
-            if (level_i == 0) break;
         }
 
         return &hashes[@intFromEnum(node_id)];
