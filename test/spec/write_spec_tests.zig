@@ -25,17 +25,14 @@ const supported_test_runners = [_]RunnerKind{
     .finality,
 };
 
-// EF ships asymmetric vector packs — for example ~97 case dirs only exist
-// under mainnet (e.g. `*/operations/sync_aggregate/random_*_with_duplicates`)
-// while hundreds only exist under minimal. Walking just one preset silently
-// drops the others; the union is dedup'd by the case key the writer expects.
+// EF ships asymmetric vector packs: ~97 case dirs only exist under mainnet,
+// hundreds only under minimal. Walk both, dedup the union.
 const presets = [_][]const u8{
     "minimal/tests/minimal",
     "mainnet/tests/mainnet",
 };
 
 const Key = struct {
-    /// Empty string for flat handlers (no suite layer).
     suite: []const u8,
     case: []const u8,
 };
@@ -134,8 +131,6 @@ pub fn writeTests(
         const fork_path = @tagName(fork) ++ "/" ++ @tagName(kind);
 
         inline for (TestWriter(kind).handlers) |handler| {
-            // Per-handler arena: dup'd suite/case slices live until this
-            // handler's emission finishes, then released as one block.
             var arena = std.heap.ArenaAllocator.init(allocator);
             defer arena.deinit();
             const a = arena.allocator();
@@ -148,7 +143,6 @@ pub fn writeTests(
 
             std.mem.sortUnstable(Key, keys.items, {}, keyLessThan);
 
-            // Dedup adjacent duplicates in-place (sorted -> equals are adjacent).
             var w: usize = 0;
             for (keys.items) |k| {
                 if (w == 0 or
@@ -182,10 +176,8 @@ fn collectCases(
     has_suite_case: bool,
     out: *std.ArrayListUnmanaged(Key),
 ) !void {
-    // Asymmetric pack means a preset/fork/handler may legitimately not
-    // ship a given dir. Only swallow FileNotFound; surface real IO errors
-    // (perm denied, NotDir, etc.) so a corrupt checkout fails loudly
-    // instead of silently dropping cases.
+    // Swallow only FileNotFound; surface real IO errors so a corrupt
+    // checkout fails loudly instead of silently dropping cases.
     var preset_dir = root.openDir(io, preset, .{}) catch |err| switch (err) {
         error.FileNotFound => return,
         else => |e| return e,
@@ -206,9 +198,6 @@ fn collectCases(
     while (try iter.next(io)) |entry| {
         if (entry.kind != .directory) continue;
         if (has_suite_case) {
-            // entry.kind already filtered to .directory; FileNotFound here
-            // can only be a TOCTOU (the entry was removed mid-iteration),
-            // which we tolerate. Any other error indicates real trouble.
             var suite_dir = handler_dir.openDir(io, entry.name, .{ .iterate = true }) catch |err| switch (err) {
                 error.FileNotFound => continue,
                 else => |e| return e,
