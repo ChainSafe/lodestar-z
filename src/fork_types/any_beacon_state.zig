@@ -30,54 +30,54 @@ pub const AnyBeaconState = union(ForkSeq) {
     electra: *ct.electra.BeaconState.TreeView,
     fulu: *ct.fulu.BeaconState.TreeView,
 
-    pub fn fromValue(allocator: Allocator, pool: *Node.Pool, comptime fork_seq: ForkSeq, value: anytype) !AnyBeaconState {
+    pub fn fromValue(allocator: Allocator, node_pool: *Node.Pool, comptime fork_seq: ForkSeq, value: anytype) !AnyBeaconState {
         return switch (fork_seq) {
             .phase0 => .{
-                .phase0 = try ct.phase0.BeaconState.TreeView.fromValue(allocator, pool, value),
+                .phase0 = try ct.phase0.BeaconState.TreeView.fromValue(allocator, node_pool, value),
             },
             .altair => .{
-                .altair = try ct.altair.BeaconState.TreeView.fromValue(allocator, pool, value),
+                .altair = try ct.altair.BeaconState.TreeView.fromValue(allocator, node_pool, value),
             },
             .bellatrix => .{
-                .bellatrix = try ct.bellatrix.BeaconState.TreeView.fromValue(allocator, pool, value),
+                .bellatrix = try ct.bellatrix.BeaconState.TreeView.fromValue(allocator, node_pool, value),
             },
             .capella => .{
-                .capella = try ct.capella.BeaconState.TreeView.fromValue(allocator, pool, value),
+                .capella = try ct.capella.BeaconState.TreeView.fromValue(allocator, node_pool, value),
             },
             .deneb => .{
-                .deneb = try ct.deneb.BeaconState.TreeView.fromValue(allocator, pool, value),
+                .deneb = try ct.deneb.BeaconState.TreeView.fromValue(allocator, node_pool, value),
             },
             .electra => .{
-                .electra = try ct.electra.BeaconState.TreeView.fromValue(allocator, pool, value),
+                .electra = try ct.electra.BeaconState.TreeView.fromValue(allocator, node_pool, value),
             },
             .fulu => .{
-                .fulu = try ct.fulu.BeaconState.TreeView.fromValue(allocator, pool, value),
+                .fulu = try ct.fulu.BeaconState.TreeView.fromValue(allocator, node_pool, value),
             },
         };
     }
 
-    pub fn deserialize(allocator: Allocator, pool: *Node.Pool, fork_seq: ForkSeq, bytes: []const u8) !AnyBeaconState {
+    pub fn deserialize(allocator: Allocator, node_pool: *Node.Pool, fork_seq: ForkSeq, bytes: []const u8) !AnyBeaconState {
         return switch (fork_seq) {
             .phase0 => .{
-                .phase0 = try ct.phase0.BeaconState.TreeView.deserialize(allocator, pool, bytes),
+                .phase0 = try ct.phase0.BeaconState.TreeView.deserialize(allocator, node_pool, bytes),
             },
             .altair => .{
-                .altair = try ct.altair.BeaconState.TreeView.deserialize(allocator, pool, bytes),
+                .altair = try ct.altair.BeaconState.TreeView.deserialize(allocator, node_pool, bytes),
             },
             .bellatrix => .{
-                .bellatrix = try ct.bellatrix.BeaconState.TreeView.deserialize(allocator, pool, bytes),
+                .bellatrix = try ct.bellatrix.BeaconState.TreeView.deserialize(allocator, node_pool, bytes),
             },
             .capella => .{
-                .capella = try ct.capella.BeaconState.TreeView.deserialize(allocator, pool, bytes),
+                .capella = try ct.capella.BeaconState.TreeView.deserialize(allocator, node_pool, bytes),
             },
             .deneb => .{
-                .deneb = try ct.deneb.BeaconState.TreeView.deserialize(allocator, pool, bytes),
+                .deneb = try ct.deneb.BeaconState.TreeView.deserialize(allocator, node_pool, bytes),
             },
             .electra => .{
-                .electra = try ct.electra.BeaconState.TreeView.deserialize(allocator, pool, bytes),
+                .electra = try ct.electra.BeaconState.TreeView.deserialize(allocator, node_pool, bytes),
             },
             .fulu => .{
-                .fulu = try ct.fulu.BeaconState.TreeView.deserialize(allocator, pool, bytes),
+                .fulu = try ct.fulu.BeaconState.TreeView.deserialize(allocator, node_pool, bytes),
             },
         };
     }
@@ -200,6 +200,13 @@ pub const AnyBeaconState = union(ForkSeq) {
 
     pub fn forkSeq(self: *AnyBeaconState) ForkSeq {
         return std.meta.activeTag(self.*);
+    }
+
+    /// Underlying persistent merkle tree pool, regardless of fork variant.
+    pub fn pool(self: *AnyBeaconState) *Node.Pool {
+        return switch (self.*) {
+            inline else => |state| state.pool,
+        };
     }
 
     // pub fn castFromFork(comptime f: ForkSeq, )
@@ -841,13 +848,13 @@ pub const AnyBeaconState = union(ForkSeq) {
         comptime F: type,
         comptime T: type,
         allocator: Allocator,
-        pool: *Node.Pool,
+        node_pool: *Node.Pool,
         state: *F.TreeView,
     ) !*T.TreeView {
         // first ensure that the source state is committed
         try state.commit();
 
-        var upgraded = try T.TreeView.fromValue(allocator, pool, &T.default_value);
+        var upgraded = try T.TreeView.fromValue(allocator, node_pool, &T.default_value);
         errdefer upgraded.deinit();
 
         inline for (F.fields) |f| {
