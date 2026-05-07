@@ -382,6 +382,27 @@ pub const AnyBeaconState = union(ForkSeq) {
         };
     }
 
+    /// Pointer-slice version of `validatorsSlice` that hands out
+    /// `*const Validator.Type` into the pool's container_struct payloads —
+    /// no clone. Pointers are valid only while the validators list is not
+    /// mutated; copy out values that must survive a `tree.set`.
+    pub fn validatorsPtrSlice(self: *AnyBeaconState, allocator: Allocator) ![]*const ct.phase0.Validator.Type {
+        return switch (self.*) {
+            inline else => |state| {
+                var validators_view = try state.getReadonly("validators");
+                try validators_view.commit();
+                const len = try validators_view.length();
+                const out = try allocator.alloc(*const ct.phase0.Validator.Type, len);
+                errdefer allocator.free(out);
+                var it = validators_view.iteratorReadonly(0);
+                for (0..len) |i| {
+                    out[i] = try it.nextValuePtr();
+                }
+                return out;
+            },
+        };
+    }
+
     pub fn balances(self: *AnyBeaconState) !*ct.phase0.Balances.TreeView {
         return switch (self.*) {
             inline else => |state| try state.get("balances"),

@@ -74,7 +74,7 @@ pub fn upgradeStateToAltair(
 
     const previous_epoch = computePreviousEpoch(epoch_cache.epoch);
     try altair_state.commit();
-    const validators = try altair_state.validatorsSlice(allocator);
+    const validators = try altair_state.validatorsPtrSlice(allocator);
     defer allocator.free(validators);
     epoch_cache.previous_target_unslashed_balance_increments = sumTargetUnslashedBalanceIncrements(previous_epoch_participation.items, previous_epoch, validators);
     epoch_cache.current_target_unslashed_balance_increments = sumTargetUnslashedBalanceIncrements(current_epoch_participation.items, epoch_cache.epoch, validators);
