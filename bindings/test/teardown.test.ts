@@ -1,13 +1,14 @@
 import {spawnSync} from "node:child_process";
 import {writeFileSync, unlinkSync} from "node:fs";
-import {tmpdir} from "node:os";
 import {join} from "node:path";
 import {describe, expect, it} from "vitest";
 
 describe("BeaconStateView teardown", () => {
   it("creates view at module scope and exits cleanly", () => {
     const projectRoot = join(import.meta.dirname, "../..");
-    const fixturePath = join(tmpdir(), `lodestar-z-teardown-${process.pid}.mjs`);
+    // Fixture must live under the project root so Node resolves its
+    // node_modules from there (workspace packages like @lodestar/config).
+    const fixturePath = join(projectRoot, `bindings/test/.tmp-teardown-${process.pid}.mjs`);
 
     // Module-scope `const seedState = ...` mirrors how perf bench files
     // hold native objects. Without the Pool refcount fix, NAPI env cleanup
@@ -19,8 +20,8 @@ describe("BeaconStateView teardown", () => {
       `
 import {config} from "@lodestar/config/default";
 import * as era from "@lodestar/era";
-import bindings from "${projectRoot}/bindings/src/index.js";
-import {getFirstEraFilePath} from "${projectRoot}/bindings/test/eraFiles.ts";
+import bindings from "../src/index.js";
+import {getFirstEraFilePath} from "./eraFiles.ts";
 
 const reader = await era.era.EraReader.open(config, getFirstEraFilePath());
 const stateBytes = await reader.readSerializedState();
