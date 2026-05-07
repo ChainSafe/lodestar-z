@@ -1,5 +1,5 @@
 import {spawnSync} from "node:child_process";
-import {writeFileSync, unlinkSync} from "node:fs";
+import {unlinkSync, writeFileSync} from "node:fs";
 import {join} from "node:path";
 import {describe, expect, it} from "vitest";
 
@@ -27,15 +27,15 @@ bindings.pubkeys.ensureCapacity(2_000_000);
 
 const seedState = bindings.BeaconStateView.createFromBytes(stateBytes);
 console.log("slot=" + seedState.slot);
-`,
+`
     );
 
     try {
-      const result = spawnSync(
-        process.execPath,
-        ["--experimental-strip-types", fixturePath],
-        {encoding: "utf-8", cwd: projectRoot, timeout: 60_000},
-      );
+      const result = spawnSync(process.execPath, ["--experimental-strip-types", fixturePath], {
+        cwd: projectRoot,
+        encoding: "utf-8",
+        timeout: 60_000,
+      });
       expect(result.status, `stdout=${result.stdout} stderr=${result.stderr}`).toBe(0);
       expect(result.stderr, "no panic on stderr").not.toContain("panic:");
     } finally {
