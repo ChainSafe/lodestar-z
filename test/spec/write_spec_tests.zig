@@ -34,6 +34,10 @@ const Key = struct {
     suite: []const u8,
     case: []const u8,
 
+    fn eql(x: Key, y: Key) bool {
+        return std.mem.eql(u8, x.suite, y.suite) and std.mem.eql(u8, x.case, y.case);
+    }
+
     fn lessThan(_: void, x: Key, y: Key) bool {
         const o = std.mem.order(u8, x.suite, y.suite);
         return if (o == .eq) std.mem.lessThan(u8, x.case, y.case) else o == .lt;
@@ -140,13 +144,10 @@ pub fn writeTests(
 
             var write_idx: usize = 0;
             for (keys.items) |k| {
-                if (write_idx == 0 or
-                    !std.mem.eql(u8, keys.items[write_idx - 1].suite, k.suite) or
-                    !std.mem.eql(u8, keys.items[write_idx - 1].case, k.case))
-                {
-                    keys.items[write_idx] = k;
-                    write_idx += 1;
-                }
+                const is_dup = write_idx > 0 and keys.items[write_idx - 1].eql(k);
+                if (is_dup) continue;
+                keys.items[write_idx] = k;
+                write_idx += 1;
             }
             keys.items.len = write_idx;
 
