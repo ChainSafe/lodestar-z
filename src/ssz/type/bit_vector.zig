@@ -40,13 +40,11 @@ pub fn BitVector(comptime _length: comptime_int) type {
             }
         }
 
-        fn maskedByte(self: *const @This(), i_byte: usize) u8 {
+        fn maskedFinalByte(self: *const @This()) u8 {
             const remainder_bits = length % 8;
-            if (remainder_bits == 0 or i_byte + 1 < byte_len) {
-                return self.data[i_byte];
-            }
+            std.debug.assert(remainder_bits != 0);
             const tail_mask: u8 = (@as(u8, 1) << @intCast(remainder_bits)) - 1;
-            return self.data[i_byte] & tail_mask;
+            return self.data[byte_len - 1] & tail_mask;
         }
 
         pub fn getTrueBitIndexes(self: *const @This(), out: []usize) !usize {
@@ -56,7 +54,12 @@ pub fn BitVector(comptime _length: comptime_int) type {
             var true_bit_count: usize = 0;
 
             for (0..byte_len) |i_byte| {
-                var b = self.maskedByte(i_byte);
+                var b = self.data[i_byte];
+                if (length % 8 != 0) {
+                    if (i_byte + 1 == byte_len) {
+                        b = self.maskedFinalByte();
+                    }
+                }
 
                 while (b != 0) {
                     const lsb: usize = @as(u8, @ctz(b));
@@ -74,7 +77,12 @@ pub fn BitVector(comptime _length: comptime_int) type {
             var found_index: ?usize = null;
 
             for (0..byte_len) |i_byte| {
-                var b = self.maskedByte(i_byte);
+                var b = self.data[i_byte];
+                if (length % 8 != 0) {
+                    if (i_byte + 1 == byte_len) {
+                        b = self.maskedFinalByte();
+                    }
+                }
 
                 while (b != 0) {
                     if (found_index != null) {
@@ -144,7 +152,12 @@ pub fn BitVector(comptime _length: comptime_int) type {
             var indices = try std.array_list.AlignedManaged(T, null).initCapacity(allocator, length);
 
             for (0..byte_len) |i_byte| {
-                var b = self.maskedByte(i_byte);
+                var b = self.data[i_byte];
+                if (length % 8 != 0) {
+                    if (i_byte + 1 == byte_len) {
+                        b = self.maskedFinalByte();
+                    }
+                }
                 // Kernighan's algorithm to count the set bits instead of going through 0..8 for every byte
                 while (b != 0) {
                     const lsb: usize = @as(u8, @ctz(b)); // Get the index of least significant bit
