@@ -455,9 +455,14 @@ fn loadValidatorWithSeedReuse(
     seed_validator_bytes: []const u8,
     new_validator_bytes: []const u8,
 ) !*types.phase0.Validator.TreeView {
-    // Pubkey: [0..48), withdrawal_credentials: [48..80)
-    const pubkey_same = std.mem.eql(u8, new_validator_bytes[0..48], seed_validator_bytes[0..48]);
-    const withdrawal_same = std.mem.eql(u8, new_validator_bytes[48..80], seed_validator_bytes[48..80]);
+    const Validator = types.phase0.Validator;
+    const PUBKEY_OFFSET = comptime Validator.field_offsets[Validator.getFieldIndex("pubkey")];
+    const PUBKEY_END = PUBKEY_OFFSET + comptime Validator.getFieldType("pubkey").fixed_size;
+    const WCRED_OFFSET = comptime Validator.field_offsets[Validator.getFieldIndex("withdrawal_credentials")];
+    const WCRED_END = WCRED_OFFSET + comptime Validator.getFieldType("withdrawal_credentials").fixed_size;
+
+    const pubkey_same = std.mem.eql(u8, new_validator_bytes[PUBKEY_OFFSET..PUBKEY_END], seed_validator_bytes[PUBKEY_OFFSET..PUBKEY_END]);
+    const withdrawal_same = std.mem.eql(u8, new_validator_bytes[WCRED_OFFSET..WCRED_END], seed_validator_bytes[WCRED_OFFSET..WCRED_END]);
 
     if (!pubkey_same) {
         if (!withdrawal_same) {
@@ -610,8 +615,11 @@ test "loadValidatorWithSeedReuse: reuse vs rebuild" {
     _ = try seed_validator.serializeIntoBytes(&seed_validator_bytes);
 
     var new_validator_bytes = seed_validator_bytes;
-    // Modify only withdrawal_credentials ([48..80))
-    @memset(new_validator_bytes[48..80], 0x11);
+    // Modify only withdrawal_credentials so the reuse path keeps pubkey but rebuilds wcred.
+    const Validator = types.phase0.Validator;
+    const WCRED_OFFSET = comptime Validator.field_offsets[Validator.getFieldIndex("withdrawal_credentials")];
+    const WCRED_END = WCRED_OFFSET + comptime Validator.getFieldType("withdrawal_credentials").fixed_size;
+    @memset(new_validator_bytes[WCRED_OFFSET..WCRED_END], 0x11);
 
     const new_validator = try loadValidatorWithSeedReuse(
         allocator,

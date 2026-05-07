@@ -21,21 +21,8 @@ const SLOT_BYTES_POSITION_IN_STATE: usize = 40;
 /// Slot is `uint64`.
 const SLOT_BYTE_COUNT: usize = 8;
 
-/// 48 + 32 + 8 + 1 + 8 + 8 + 8 + 8 = 121
-///
-/// ```
-/// class Validator(Container):
-///   pubkey: BLSPubkey [fixed - 48 bytes]
-///   withdrawal_credentials: Bytes32 [fixed - 32 bytes]
-///   effective_balance: Gwei [fixed - 8 bytes]
-///   slashed: boolean [fixed - 1 byte]
-///   # Status epochs
-///   activation_eligibility_epoch: Epoch [fixed - 8 bytes]
-///   activation_epoch: Epoch [fixed - 8 bytes]
-///   exit_epoch: Epoch [fixed - 8 bytes]
-///   withdrawable_epoch: Epoch [fixed - 8 bytes]
-/// ```
-pub const VALIDATOR_BYTES_SIZE: usize = 121;
+/// SSZ-serialized size of a phase0 Validator. Stable across forks.
+pub const VALIDATOR_BYTES_SIZE: usize = types.phase0.Validator.fixed_size;
 
 pub fn getStateSlotFromBytes(bytes: []const u8) !Slot {
     if (bytes.len < SLOT_BYTES_POSITION_IN_STATE + SLOT_BYTE_COUNT) return error.InvalidSize;
