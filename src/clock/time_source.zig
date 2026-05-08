@@ -30,8 +30,12 @@ pub const FakeTime = struct {
         self.ms += delta;
     }
 
+    /// Advance time by exactly one slot duration. Uses the duration that
+    /// applies at the slot containing the current time; pre-genesis falls
+    /// back to the genesis (pre-fork) duration.
     pub fn advanceSlot(self: *FakeTime, config: slot_math.Config) void {
-        self.ms += config.slotDurationMs() orelse return;
+        const slot = slot_math.slotAtMs(config, self.ms) orelse 0;
+        self.ms += config.slotDurationMsAt(slot);
     }
 };
 
@@ -46,3 +50,27 @@ pub const TimeSource = union(enum) {
         };
     }
 };
+
+const testing = std.testing;
+
+test "FakeTime.advanceSlot uses fork-aware duration" {
+    const cfg = slot_math.Config{
+        .genesis_time_sec = 1_000,
+        .slot_duration_ms = 12_000,
+        .duration_transitions = slot_math.forkTransitions(&.{
+            .{ .from_slot = 2, .new_duration_ms = 6_000 },
+        }),
+        .slots_per_epoch = 32,
+    };
+
+    var fake = FakeTime{ .ms = cfg.genesis_time_sec * 1000 };
+    // Slot 0 → uses 12_000 ms
+    fake.advanceSlot(cfg);
+    try testing.expectEqual(@as(slot_math.UnixMs, 1_012_000), fake.ms);
+    // Slot 1 → still 12_000 ms (transition is at slot 2)
+    fake.advanceSlot(cfg);
+    try testing.expectEqual(@as(slot_math.UnixMs, 1_024_000), fake.ms);
+    // Slot 2 → first post-fork slot, 6_000 ms
+    fake.advanceSlot(cfg);
+    try testing.expectEqual(@as(slot_math.UnixMs, 1_030_000), fake.ms);
+}

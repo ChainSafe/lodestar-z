@@ -188,7 +188,9 @@ pub fn msUntilNextSlot(config: Config, now_ms: UnixMs) ?u64 {
     const genesis_ms = secToMs(config.genesis_time_sec) orelse return null;
     if (now_ms < genesis_ms) return genesis_ms - now_ms;
     const slot = slotAtMs(config, now_ms) orelse return null;
-    const next_start = slotStartMs(config, slot + 1) orelse return null;
+    // Checked: at the maximum representable slot, `slot + 1` would wrap.
+    const next_slot = std.math.add(u64, slot, 1) catch return null;
+    const next_start = slotStartMs(config, next_slot) orelse return null;
     return next_start - now_ms;
 }
 
@@ -278,6 +280,15 @@ test "msUntilNextSlot" {
     try testing.expectEqual(@as(?u64, slot_ms), msUntilNextSlot(mainnet, genesis_ms + slot_ms));
     try testing.expectEqual(@as(?u64, 1_000), msUntilNextSlot(mainnet, genesis_ms - 1_000));
     try testing.expectEqual(@as(?u64, genesis_ms), msUntilNextSlot(mainnet, 0));
+
+    // Regression: at the maximum representable slot, `slot + 1` overflows.
+    // The function is documented to return null on overflow, not panic.
+    const tight = Config{
+        .genesis_time_sec = 0,
+        .slot_duration_ms = 1,
+        .slots_per_epoch = 32,
+    };
+    try testing.expectEqual(@as(?u64, null), msUntilNextSlot(tight, std.math.maxInt(u64)));
 }
 
 test "config validate" {
