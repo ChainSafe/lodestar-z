@@ -61,70 +61,70 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    b.modules.put(b.dupe("constants"), module_constants) catch @panic("OOM");
+    b.modules.put(b.allocator, b.dupe("constants"), module_constants) catch @panic("OOM");
 
     const module_config = b.createModule(.{
         .root_source_file = b.path("src/config/root.zig"),
         .target = target,
         .optimize = optimize,
     });
-    b.modules.put(b.dupe("config"), module_config) catch @panic("OOM");
+    b.modules.put(b.allocator, b.dupe("config"), module_config) catch @panic("OOM");
 
     const module_consensus_types = b.createModule(.{
         .root_source_file = b.path("src/consensus_types/root.zig"),
         .target = target,
         .optimize = optimize,
     });
-    b.modules.put(b.dupe("consensus_types"), module_consensus_types) catch @panic("OOM");
+    b.modules.put(b.allocator, b.dupe("consensus_types"), module_consensus_types) catch @panic("OOM");
 
     const module_era = b.createModule(.{
         .root_source_file = b.path("src/era/root.zig"),
         .target = target,
         .optimize = optimize,
     });
-    b.modules.put(b.dupe("era"), module_era) catch @panic("OOM");
+    b.modules.put(b.allocator, b.dupe("era"), module_era) catch @panic("OOM");
 
     const module_hashing = b.createModule(.{
         .root_source_file = b.path("src/hashing/root.zig"),
         .target = target,
         .optimize = optimize,
     });
-    b.modules.put(b.dupe("hashing"), module_hashing) catch @panic("OOM");
+    b.modules.put(b.allocator, b.dupe("hashing"), module_hashing) catch @panic("OOM");
 
     const module_hex = b.createModule(.{
         .root_source_file = b.path("src/hex.zig"),
         .target = target,
         .optimize = optimize,
     });
-    b.modules.put(b.dupe("hex"), module_hex) catch @panic("OOM");
+    b.modules.put(b.allocator, b.dupe("hex"), module_hex) catch @panic("OOM");
 
     const module_fork_types = b.createModule(.{
         .root_source_file = b.path("src/fork_types/root.zig"),
         .target = target,
         .optimize = optimize,
     });
-    b.modules.put(b.dupe("fork_types"), module_fork_types) catch @panic("OOM");
+    b.modules.put(b.allocator, b.dupe("fork_types"), module_fork_types) catch @panic("OOM");
 
     const module_persistent_merkle_tree = b.createModule(.{
         .root_source_file = b.path("src/persistent_merkle_tree/root.zig"),
         .target = target,
         .optimize = optimize,
     });
-    b.modules.put(b.dupe("persistent_merkle_tree"), module_persistent_merkle_tree) catch @panic("OOM");
+    b.modules.put(b.allocator, b.dupe("persistent_merkle_tree"), module_persistent_merkle_tree) catch @panic("OOM");
 
     const module_preset = b.createModule(.{
         .root_source_file = b.path("src/preset/root.zig"),
         .target = target,
         .optimize = optimize,
     });
-    b.modules.put(b.dupe("preset"), module_preset) catch @panic("OOM");
+    b.modules.put(b.allocator, b.dupe("preset"), module_preset) catch @panic("OOM");
 
     const module_ssz = b.createModule(.{
         .root_source_file = b.path("src/ssz/root.zig"),
         .target = target,
         .optimize = optimize,
     });
-    b.modules.put(b.dupe("ssz"), module_ssz) catch @panic("OOM");
+    b.modules.put(b.allocator, b.dupe("ssz"), module_ssz) catch @panic("OOM");
 
     const module_bls = b.createModule(.{
         .root_source_file = b.path("src/bls/root.zig"),
@@ -132,21 +132,21 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     module_bls.linkLibrary(dep_blst.artifact("blst"));
-    b.modules.put(b.dupe("bls"), module_bls) catch @panic("OOM");
+    b.modules.put(b.allocator, b.dupe("bls"), module_bls) catch @panic("OOM");
 
     const module_state_transition = b.createModule(.{
         .root_source_file = b.path("src/state_transition/root.zig"),
         .target = target,
         .optimize = optimize,
     });
-    b.modules.put(b.dupe("state_transition"), module_state_transition) catch @panic("OOM");
+    b.modules.put(b.allocator, b.dupe("state_transition"), module_state_transition) catch @panic("OOM");
 
     const module_clock = b.createModule(.{
         .root_source_file = b.path("src/clock/root.zig"),
         .target = target,
         .optimize = optimize,
     });
-    b.modules.put(b.dupe("clock"), module_clock) catch @panic("OOM");
+    b.modules.put(b.allocator, b.dupe("clock"), module_clock) catch @panic("OOM");
 
     // === Executables ===
     const module_download_era_files = b.createModule(.{
