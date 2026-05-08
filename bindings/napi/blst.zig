@@ -57,8 +57,8 @@ const allocator = if (builtin.mode == .Debug)
 else
     std.heap.c_allocator;
 
-fn boolOrDefault(value: ?js.Boolean, default: bool) bool {
-    return if (value) |v| v.assertBool() else default;
+fn boolOrDefault(value: ?js.Boolean, default: bool) !bool {
+    return if (value) |v| try v.toBool() else default;
 }
 
 fn hexFromString(hex_string: js.String, buf: []u8) ![]const u8 {
@@ -104,7 +104,7 @@ pub const PublicKey = struct {
     pub fn fromBytes(bytes: js.Uint8Array, pk_validate: ?js.Boolean) !PublicKey {
         const slice = try bytes.toSlice();
         var pk = try NativePublicKey.deserialize(slice);
-        if (boolOrDefault(pk_validate, false)) {
+        if (try boolOrDefault(pk_validate, false)) {
             try pk.validate();
         }
         return .{ .raw = pk };
@@ -121,7 +121,7 @@ pub const PublicKey = struct {
         const bytes = try std.fmt.hexToBytes(&bytes_buf, hex);
 
         var pk = try NativePublicKey.deserialize(bytes);
-        if (boolOrDefault(pk_validate, false)) {
+        if (try boolOrDefault(pk_validate, false)) {
             try pk.validate();
         }
         return .{ .raw = pk };
@@ -133,8 +133,8 @@ pub const PublicKey = struct {
     }
 
     /// Serializes this public key to bytes.
-    pub fn toBytes(self: *const PublicKey, compress: ?js.Boolean) js.Uint8Array {
-        if (boolOrDefault(compress, true)) {
+    pub fn toBytes(self: *const PublicKey, compress: ?js.Boolean) !js.Uint8Array {
+        if (try boolOrDefault(compress, true)) {
             const bytes = self.raw.compress();
             return js.Uint8Array.from(bytes[0..]);
         }
@@ -143,7 +143,7 @@ pub const PublicKey = struct {
     }
 
     pub fn toHex(self: *const PublicKey, compress: ?js.Boolean) !js.String {
-        if (boolOrDefault(compress, true)) {
+        if (try boolOrDefault(compress, true)) {
             const bytes = self.raw.compress();
             return formatHex(bytes[0..]);
         }
@@ -165,8 +165,8 @@ pub const Signature = struct {
     pub fn fromBytes(bytes: js.Uint8Array, sig_validate: ?js.Boolean, sig_infcheck: ?js.Boolean) !Signature {
         const slice = try bytes.toSlice();
         var sig = NativeSignature.deserialize(slice) catch return error.DeserializationFailed;
-        if (boolOrDefault(sig_validate, false)) {
-            try sig.validate(boolOrDefault(sig_infcheck, false));
+        if (try boolOrDefault(sig_validate, false)) {
+            try sig.validate(try boolOrDefault(sig_infcheck, false));
         }
         return .{ .raw = sig };
     }
@@ -183,8 +183,8 @@ pub const Signature = struct {
         const bytes = try std.fmt.hexToBytes(&bytes_buf, hex);
 
         var sig = NativeSignature.deserialize(bytes) catch return error.DeserializationFailed;
-        if (boolOrDefault(sig_validate, false)) {
-            try sig.validate(boolOrDefault(sig_infcheck, false));
+        if (try boolOrDefault(sig_validate, false)) {
+            try sig.validate(try boolOrDefault(sig_infcheck, false));
         }
         return .{ .raw = sig };
     }
@@ -204,15 +204,15 @@ pub const Signature = struct {
             sigs[i] = wrapped.raw;
         }
 
-        const agg_sig = AggregateSignature.aggregate(sigs, boolOrDefault(sigs_groupcheck, false)) catch
+        const agg_sig = AggregateSignature.aggregate(sigs, try boolOrDefault(sigs_groupcheck, false)) catch
             return error.AggregationFailed;
 
         return .{ .raw = agg_sig.toSignature() };
     }
 
     /// Serializes this signature to bytes.
-    pub fn toBytes(self: *const Signature, compress: ?js.Boolean) js.Uint8Array {
-        if (boolOrDefault(compress, true)) {
+    pub fn toBytes(self: *const Signature, compress: ?js.Boolean) !js.Uint8Array {
+        if (try boolOrDefault(compress, true)) {
             const bytes = self.raw.compress();
             return js.Uint8Array.from(bytes[0..]);
         }
@@ -221,7 +221,7 @@ pub const Signature = struct {
     }
 
     pub fn toHex(self: *const Signature, compress: ?js.Boolean) !js.String {
-        if (boolOrDefault(compress, true)) {
+        if (try boolOrDefault(compress, true)) {
             const bytes = self.raw.compress();
             return formatHex(bytes[0..]);
         }
@@ -232,7 +232,7 @@ pub const Signature = struct {
     /// Validates the signature.
     /// Throws an error if the signature is invalid.
     pub fn validate(self: *const Signature, sig_infcheck: js.Boolean) !void {
-        self.raw.validate(sig_infcheck.assertBool()) catch return error.InvalidSignature;
+        self.raw.validate(try sig_infcheck.toBool()) catch return error.InvalidSignature;
     }
 };
 
@@ -320,12 +320,12 @@ pub fn verify(msg: js.Uint8Array, pk: PublicKey, sig: Signature, pk_validate: ?j
     const msg_slice = try msg.toSlice();
 
     sig.raw.verify(
-        boolOrDefault(sig_groupcheck, false),
+        try boolOrDefault(sig_groupcheck, false),
         msg_slice,
         DST,
         null,
         &pk.raw,
-        boolOrDefault(pk_validate, false),
+        try boolOrDefault(pk_validate, false),
     ) catch return js.Boolean.from(false);
 
     return js.Boolean.from(true);
@@ -360,15 +360,15 @@ pub fn aggregateVerify(msgs: js.Array, pks: js.Array, sig: Signature, pks_valida
         pk_ptrs[i] = &wrapped_pk.raw;
     }
 
-    const pool = thread_pool orelse @panic("ThreadPool not initialized; call initThreadPool first");
+    const pool = thread_pool orelse return error.ThreadPoolNotInitialized;
     const result = pool.aggregateVerify(
         napi_io.get(),
         &sig.raw,
-        boolOrDefault(sig_groupcheck, false),
+        try boolOrDefault(sig_groupcheck, false),
         msg_bufs,
         DST,
         pk_ptrs,
-        boolOrDefault(pks_validate, false),
+        try boolOrDefault(pks_validate, false),
     ) catch return js.Boolean.from(false);
 
     return js.Boolean.from(result);
@@ -402,7 +402,7 @@ pub fn fastAggregateVerify(msg: js.Uint8Array, pks: js.Array, sig: Signature, si
     var pairing_buf: [Pairing.sizeOf()]u8 align(Pairing.buf_align) = undefined;
     // `pks_validate` is always false here since we assume proof of possession for public keys.
     const result = sig.raw.fastAggregateVerify(
-        boolOrDefault(sigs_groupcheck, false),
+        try boolOrDefault(sigs_groupcheck, false),
         &pairing_buf,
         msg_slice[0..32],
         DST,
@@ -466,16 +466,16 @@ pub fn verifyMultipleAggregateSignatures(sets: js.Array, pks_validate: ?js.Boole
         }
     }
 
-    const pool = thread_pool orelse @panic("ThreadPool not initialized; call initThreadPool first");
+    const pool = thread_pool orelse return error.ThreadPoolNotInitialized;
     const result = pool.verifyMultipleAggregateSignatures(
         napi_io.get(),
         n_elems,
         msgs,
         DST,
         pks,
-        boolOrDefault(pks_validate, false),
+        try boolOrDefault(pks_validate, false),
         sigs,
-        boolOrDefault(sigs_groupcheck, false),
+        try boolOrDefault(sigs_groupcheck, false),
         rands,
     ) catch return js.Boolean.from(false);
 
@@ -500,7 +500,7 @@ pub fn aggregateSignatures(signatures: js.Array, sigs_groupcheck: ?js.Boolean) !
         sigs[i] = wrapped.raw;
     }
 
-    const agg_sig = AggregateSignature.aggregate(sigs, boolOrDefault(sigs_groupcheck, false)) catch
+    const agg_sig = AggregateSignature.aggregate(sigs, try boolOrDefault(sigs_groupcheck, false)) catch
         return error.AggregationFailed;
 
     return .{ .raw = agg_sig.toSignature() };
@@ -523,7 +523,7 @@ pub fn aggregatePublicKeys(pks: js.Array, pks_validate: ?js.Boolean) !PublicKey 
         native_pks[i] = wrapped.raw;
     }
 
-    const agg_pk = AggregatePublicKey.aggregate(native_pks, boolOrDefault(pks_validate, false)) catch
+    const agg_pk = AggregatePublicKey.aggregate(native_pks, try boolOrDefault(pks_validate, false)) catch
         return error.AggregationFailed;
 
     return .{ .raw = agg_pk.toPublicKey() };
@@ -546,7 +546,7 @@ pub fn aggregateSerializedPublicKeys(serialized_public_keys: js.Array, pks_valid
         native_pks[i] = NativePublicKey.deserialize(bytes) catch return error.DeserializationFailed;
     }
 
-    const agg_pk = AggregatePublicKey.aggregate(native_pks, boolOrDefault(pks_validate, false)) catch
+    const agg_pk = AggregatePublicKey.aggregate(native_pks, try boolOrDefault(pks_validate, false)) catch
         return error.AggregationFailed;
 
     return .{ .raw = agg_pk.toPublicKey() };

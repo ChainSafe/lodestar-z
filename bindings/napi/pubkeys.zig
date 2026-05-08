@@ -169,7 +169,7 @@ pub fn getIndex(pubkey: js.Uint8Array) !js.Value {
 pub fn get(index: js.Number) !?blst_bindings.PublicKey {
     if (!state.initialized) return error.PubkeyIndexNotInitialized;
 
-    const idx = index.assertU32();
+    const idx = try index.toU32();
     if (idx >= state.index2pubkey.items.len) return null;
 
     return .{ .raw = state.index2pubkey.items[@intCast(idx)] };
@@ -179,7 +179,7 @@ pub fn get(index: js.Number) !?blst_bindings.PublicKey {
 pub fn set(index: js.Number, pubkey: js.Uint8Array) !void {
     if (!state.initialized) return error.PubkeyIndexNotInitialized;
 
-    const idx = index.assertU32();
+    const idx = try index.toU32();
     const pubkey_slice = try pubkey.toSlice();
     if (pubkey_slice.len != 48) return error.InvalidPubkeyLength;
 
@@ -215,7 +215,7 @@ pub fn size() !js.Number {
 pub fn ensureCapacity(new_size: js.Number) !void {
     if (!state.initialized) return error.PubkeyIndexNotInitialized;
 
-    const requested = new_size.assertU32();
+    const requested = try new_size.toU32();
     const old_size = state.index2pubkey.capacity;
     if (requested <= old_size) return;
 
