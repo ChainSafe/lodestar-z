@@ -23,6 +23,7 @@ pub const Error = error{
     OutOfMemory,
     ListenerLimitReached,
     Aborted,
+    Canceled,
 };
 
 const WaitState = struct {
@@ -150,7 +151,7 @@ pub fn onSlot(
     callback: *const fn (ctx: ?*anyopaque, slot: Slot) void,
     ctx: ?*anyopaque,
 ) Error!ListenerId {
-    self.mutex.lockUncancelable(self.io);
+    try self.mutex.lock(self.io);
     defer self.mutex.unlock(self.io);
     if (self.next_listener_id == std.math.maxInt(ListenerId)) return error.ListenerLimitReached;
     // Pre-allocate snapshot buffer BEFORE appending the listener, so that
@@ -170,8 +171,8 @@ pub fn onSlot(
 }
 
 /// Unregister a slot listener.  Returns `true` if found and removed.
-pub fn offSlot(self: *EventClock, id: ListenerId) bool {
-    self.mutex.lockUncancelable(self.io);
+pub fn offSlot(self: *EventClock, id: ListenerId) Error!bool {
+    try self.mutex.lock(self.io);
     defer self.mutex.unlock(self.io);
     for (self.slot_listeners.items, 0..) |listener, i| {
         if (listener.id == id) {
@@ -188,7 +189,7 @@ pub fn onEpoch(
     callback: *const fn (ctx: ?*anyopaque, epoch: Epoch) void,
     ctx: ?*anyopaque,
 ) Error!ListenerId {
-    self.mutex.lockUncancelable(self.io);
+    try self.mutex.lock(self.io);
     defer self.mutex.unlock(self.io);
     if (self.next_listener_id == std.math.maxInt(ListenerId)) return error.ListenerLimitReached;
     // Pre-allocate snapshot buffer BEFORE appending the listener, so that
@@ -208,8 +209,8 @@ pub fn onEpoch(
 }
 
 /// Unregister an epoch listener.  Returns `true` if found and removed.
-pub fn offEpoch(self: *EventClock, id: ListenerId) bool {
-    self.mutex.lockUncancelable(self.io);
+pub fn offEpoch(self: *EventClock, id: ListenerId) Error!bool {
+    try self.mutex.lock(self.io);
     defer self.mutex.unlock(self.io);
     for (self.epoch_listeners.items, 0..) |listener, i| {
         if (listener.id == id) {
@@ -351,7 +352,7 @@ pub fn waitForSlot(self: *EventClock, target: Slot) Error!WaitForSlotResult {
     // here — `advanceAndDispatch` takes it internally per state read.
     self.catchUp();
 
-    self.mutex.lockUncancelable(self.io);
+    try self.mutex.lock(self.io);
     if (self.clock.current_slot) |slot| {
         if (slot >= target) {
             self.mutex.unlock(self.io);
@@ -381,6 +382,8 @@ pub fn waitForSlot(self: *EventClock, target: Slot) Error!WaitForSlotResult {
         return error.OutOfMemory;
     };
     self.dispatchWaitersLocked(self.clock.current_slot);
+    // Release before spawning the async task — async spawn is quick but
+    // shouldn't be inside the EventClock mutex.
     self.mutex.unlock(self.io);
 
     return .{ .pending = .{
@@ -395,6 +398,11 @@ pub fn waitForSlot(self: *EventClock, target: Slot) Error!WaitForSlotResult {
 /// Ensure event-clock state is caught up to wall-clock time.
 /// Emits any intermediate slot/epoch events to listeners.
 /// No-op if already caught up or pre-genesis (currentSlot() returns null).
+///
+/// Uses `lockUncancelable` internally so read-only public APIs
+/// (`currentSlot`, `currentSlotOrGenesis`, …) keep a simple non-error
+/// signature. The lock contention window is bounded by the listener
+/// callback runtime, which is expected to be short.
 fn catchUp(self: *EventClock) void {
     if (self.clock.currentSlot()) |wall_slot| {
         self.advanceAndDispatch(wall_slot);
@@ -661,8 +669,8 @@ test "offSlot/offEpoch stop event delivery" {
     var trace = EventTraceState{};
     const slot_id = try clock.onSlot(EventTraceState.onSlot, &trace);
     const epoch_id = try clock.onEpoch(EventTraceState.onEpoch, &trace);
-    try testing.expect(clock.offSlot(slot_id));
-    try testing.expect(clock.offEpoch(epoch_id));
+    try testing.expect(try clock.offSlot(slot_id));
+    try testing.expect(try clock.offEpoch(epoch_id));
 
     clock.advanceAndDispatch(6);
     try testing.expectEqual(@as(usize, 0), trace.slot_len);
