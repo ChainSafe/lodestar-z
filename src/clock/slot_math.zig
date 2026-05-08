@@ -15,10 +15,34 @@ pub const UnixSec = u64;
 // ── Config ────────────────────────────────────────────────────────────
 
 /// One slot-duration override that takes effect from `from_slot` onwards.
+/// `from_slot == 0` is reserved as a sentinel for "unused entry" inside
+/// `Config.duration_transitions` (and rejected by `validate()` for any
+/// active entry).
 pub const DurationTransition = struct {
     from_slot: Slot,
     new_duration_ms: u64,
 };
+
+/// Upper bound on slot-duration transitions a chain may carry. Slot
+/// duration is a fundamental chain parameter that's expected to change
+/// rarely (Ethereum has had zero changes since beacon chain genesis;
+/// EIP-7782 anticipates one). 4 leaves slack for any far-future plans.
+pub const max_duration_transitions: usize = 4;
+
+const DurationTransitions = [max_duration_transitions]DurationTransition;
+
+/// Comptime-friendly builder for `Config.duration_transitions`. Pads
+/// trailing slots with the `from_slot = 0` sentinel.
+pub fn forkTransitions(
+    comptime list: []const DurationTransition,
+) DurationTransitions {
+    if (list.len > max_duration_transitions) {
+        @compileError("too many slot duration transitions");
+    }
+    var arr: DurationTransitions = @splat(.{ .from_slot = 0, .new_duration_ms = 0 });
+    inline for (list, 0..) |t, i| arr[i] = t;
+    return arr;
+}
 
 /// Mirrors lodestar TS `ChainConfig`:
 /// - `slot_duration_ms` corresponds to TS `SLOT_DURATION_MS` (the duration
@@ -26,13 +50,14 @@ pub const DurationTransition = struct {
 ///   no transition exists).
 /// - `duration_transitions` carries any later overrides; the first entry
 ///   maps to TS `(EIP7782_FORK_EPOCH * SLOTS_PER_EPOCH, SLOT_DURATION_MS_EIP7782)`.
-///   Default is empty — Ethereum mainnet today has no slot-duration change.
+///   Default is all-sentinel — Ethereum mainnet today has no slot-duration change.
 ///
-/// Entries must be sorted ascending by `from_slot` and have non-zero durations.
+/// Active entries must be sorted ascending by `from_slot`, have non-zero
+/// `new_duration_ms`, and have `from_slot != 0` (validated).
 pub const Config = struct {
     genesis_time_sec: UnixSec,
     slot_duration_ms: u64,
-    duration_transitions: []const DurationTransition = &.{},
+    duration_transitions: DurationTransitions = @splat(.{ .from_slot = 0, .new_duration_ms = 0 }),
     slots_per_epoch: u64,
     maximum_gossip_clock_disparity_ms: u64 = 500,
 
@@ -41,24 +66,41 @@ pub const Config = struct {
         if (self.slots_per_epoch == 0) return error.InvalidConfig;
         if (secToMs(self.genesis_time_sec) == null) return error.InvalidConfig;
         var prev_slot: Slot = 0;
-        for (self.duration_transitions, 0..) |t, i| {
+        var seen_sentinel = false;
+        for (self.duration_transitions) |t| {
+            if (t.from_slot == 0) {
+                // Sentinel ⇒ all later slots must also be sentinels.
+                if (t.new_duration_ms != 0) return error.InvalidConfig;
+                seen_sentinel = true;
+                continue;
+            }
+            if (seen_sentinel) return error.InvalidConfig;
             if (t.new_duration_ms == 0) return error.InvalidConfig;
-            if (t.from_slot == 0) return error.InvalidConfig;
-            if (i > 0 and t.from_slot <= prev_slot) return error.InvalidConfig;
+            if (t.from_slot <= prev_slot) return error.InvalidConfig;
             prev_slot = t.from_slot;
         }
     }
 
-    /// Slot duration in ms applicable at `slot`. Walks `duration_transitions`
+    /// Returns the active prefix of `duration_transitions` (slice up to
+    /// the first sentinel). Each call rescans the inline array; that's
+    /// O(max_duration_transitions) which is constant and tiny.
+    pub fn transitions(self: *const Config) []const DurationTransition {
+        var n: usize = 0;
+        while (n < max_duration_transitions and
+            self.duration_transitions[n].from_slot != 0) : (n += 1)
+        {}
+        return self.duration_transitions[0..n];
+    }
+
+    /// Slot duration in ms applicable at `slot`. Walks active transitions
     /// from latest to earliest; returns the active override, or
     /// `slot_duration_ms` if no transition has fired yet.
     pub fn slotDurationMsAt(self: Config, slot: Slot) u64 {
-        var i: usize = self.duration_transitions.len;
+        const active = self.transitions();
+        var i: usize = active.len;
         while (i > 0) {
             i -= 1;
-            if (self.duration_transitions[i].from_slot <= slot) {
-                return self.duration_transitions[i].new_duration_ms;
-            }
+            if (active[i].from_slot <= slot) return active[i].new_duration_ms;
         }
         return self.slot_duration_ms;
     }
@@ -76,7 +118,7 @@ pub fn slotAtMs(config: Config, now_ms: UnixMs) ?Slot {
     var seg_start_ms: UnixMs = genesis_ms;
     var seg_duration: u64 = config.slot_duration_ms;
 
-    for (config.duration_transitions) |t| {
+    for (config.transitions()) |t| {
         const seg_slots = t.from_slot - seg_start_slot;
         const seg_ms_total = std.math.mul(u64, seg_slots, seg_duration) catch {
             // Segment overflows ms — `now_ms` cannot exceed it.
@@ -116,7 +158,7 @@ pub fn slotStartMs(config: Config, slot: Slot) ?UnixMs {
     var seg_start_ms: UnixMs = genesis_ms;
     var seg_duration: u64 = config.slot_duration_ms;
 
-    for (config.duration_transitions) |t| {
+    for (config.transitions()) |t| {
         if (slot < t.from_slot) {
             const offset = std.math.mul(u64, slot - seg_start_slot, seg_duration) catch return null;
             return std.math.add(u64, seg_start_ms, offset) catch null;
@@ -265,15 +307,7 @@ test "config validate" {
     try testing.expectError(error.InvalidConfig, (Config{
         .genesis_time_sec = 0,
         .slot_duration_ms = 12_000,
-        .duration_transitions = &.{.{ .from_slot = 1024, .new_duration_ms = 0 }},
-        .slots_per_epoch = 32,
-    }).validate());
-
-    // from_slot = 0 is invalid (duplicates the primary slot_duration_ms segment)
-    try testing.expectError(error.InvalidConfig, (Config{
-        .genesis_time_sec = 0,
-        .slot_duration_ms = 12_000,
-        .duration_transitions = &.{.{ .from_slot = 0, .new_duration_ms = 6_000 }},
+        .duration_transitions = forkTransitions(&.{.{ .from_slot = 1024, .new_duration_ms = 0 }}),
         .slots_per_epoch = 32,
     }).validate());
 
@@ -281,10 +315,20 @@ test "config validate" {
     try testing.expectError(error.InvalidConfig, (Config{
         .genesis_time_sec = 0,
         .slot_duration_ms = 12_000,
-        .duration_transitions = &.{
+        .duration_transitions = forkTransitions(&.{
             .{ .from_slot = 2048, .new_duration_ms = 6_000 },
             .{ .from_slot = 1024, .new_duration_ms = 4_000 },
-        },
+        }),
+        .slots_per_epoch = 32,
+    }).validate());
+
+    // Active entry after a sentinel is invalid (gap in the inline array)
+    var bad_layout: DurationTransitions = @splat(.{ .from_slot = 0, .new_duration_ms = 0 });
+    bad_layout[1] = .{ .from_slot = 1024, .new_duration_ms = 6_000 };
+    try testing.expectError(error.InvalidConfig, (Config{
+        .genesis_time_sec = 0,
+        .slot_duration_ms = 12_000,
+        .duration_transitions = bad_layout,
         .slots_per_epoch = 32,
     }).validate());
 }
@@ -294,7 +338,7 @@ test "config validate" {
 const eip7782 = Config{
     .genesis_time_sec = 1_000_000,
     .slot_duration_ms = 12_000,
-    .duration_transitions = &.{.{ .from_slot = 1024, .new_duration_ms = 6_000 }},
+    .duration_transitions = forkTransitions(&.{.{ .from_slot = 1024, .new_duration_ms = 6_000 }}),
     .slots_per_epoch = 32,
 };
 
@@ -344,10 +388,10 @@ test "fork-aware: msUntilNextSlot across boundary" {
 const two_fork = Config{
     .genesis_time_sec = 1_000_000,
     .slot_duration_ms = 12_000,
-    .duration_transitions = &.{
+    .duration_transitions = forkTransitions(&.{
         .{ .from_slot = 1024, .new_duration_ms = 6_000 },
         .{ .from_slot = 8192, .new_duration_ms = 4_000 },
-    },
+    }),
     .slots_per_epoch = 32,
 };
 
