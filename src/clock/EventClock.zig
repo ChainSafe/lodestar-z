@@ -594,7 +594,7 @@ test "lifecycle: init -> register -> start -> receive events -> stop" {
     var clock: EventClock = undefined;
     try clock.init(testing.allocator, .{
         .genesis_time_sec = base_now,
-        .slot_durations = &.{.{ .start_slot = 0, .duration_ms = 1_000 }},
+        .slot_duration_ms = 1_000,
         .slots_per_epoch = 8,
     }, io_handle);
     defer clock.deinit();
@@ -622,7 +622,7 @@ test "waitForSlot resolves immediately when at target" {
     var clock: EventClock = undefined;
     try clock.init(testing.allocator, .{
         .genesis_time_sec = base_now,
-        .slot_durations = &.{.{ .start_slot = 0, .duration_ms = 1_000 }},
+        .slot_duration_ms = 1_000,
         .slots_per_epoch = 8,
     }, io_handle);
     defer clock.deinit();
@@ -642,7 +642,7 @@ test "waitForSlot returns aborted on stop" {
     var clock: EventClock = undefined;
     try clock.init(testing.allocator, .{
         .genesis_time_sec = nowSecAt(io_handle) + 2,
-        .slot_durations = &.{.{ .start_slot = 0, .duration_ms = 2_000 }},
+        .slot_duration_ms = 2_000,
         .slots_per_epoch = 8,
     }, io_handle);
     defer clock.deinit();
@@ -662,7 +662,7 @@ test "offSlot/offEpoch stop event delivery" {
     var clock: EventClock = undefined;
     try clock.init(testing.allocator, .{
         .genesis_time_sec = nowSecAt(io_handle) + 2,
-        .slot_durations = &.{.{ .start_slot = 0, .duration_ms = 1_000 }},
+        .slot_duration_ms = 1_000,
         .slots_per_epoch = 4,
     }, io_handle);
     defer clock.deinit();
@@ -687,7 +687,7 @@ test "stop/join are idempotent" {
     var clock: EventClock = undefined;
     try clock.init(testing.allocator, .{
         .genesis_time_sec = nowSecAt(io_handle) + 2,
-        .slot_durations = &.{.{ .start_slot = 0, .duration_ms = 2_000 }},
+        .slot_duration_ms = 2_000,
         .slots_per_epoch = 8,
     }, io_handle);
     defer clock.deinit();
@@ -707,7 +707,7 @@ test "epoch event is delivered when crossing epoch boundary" {
     var clock: EventClock = undefined;
     try clock.init(testing.allocator, .{
         .genesis_time_sec = nowSecAt(io_handle) + 2,
-        .slot_durations = &.{.{ .start_slot = 0, .duration_ms = 1_000 }},
+        .slot_duration_ms = 1_000,
         .slots_per_epoch = 4,
     }, io_handle);
     defer clock.deinit();
@@ -733,7 +733,7 @@ test "multiple waiters are dispatched in target-slot order" {
     var clock: EventClock = undefined;
     try clock.init(testing.allocator, .{
         .genesis_time_sec = nowSecAt(io_handle) + 10,
-        .slot_durations = &.{.{ .start_slot = 0, .duration_ms = 1_000 }},
+        .slot_duration_ms = 1_000,
         .slots_per_epoch = 8,
     }, io_handle);
     defer clock.deinit();
@@ -766,7 +766,7 @@ test "cancel releases WaitState without awaiting" {
     var clock: EventClock = undefined;
     try clock.init(testing.allocator, .{
         .genesis_time_sec = nowSecAt(io_handle) + 10,
-        .slot_durations = &.{.{ .start_slot = 0, .duration_ms = 1_000 }},
+        .slot_duration_ms = 1_000,
         .slots_per_epoch = 8,
     }, io_handle);
     defer clock.deinit();
@@ -790,7 +790,7 @@ test "real-time: no slot events emitted before genesis" {
     var clock: EventClock = undefined;
     try clock.init(testing.allocator, .{
         .genesis_time_sec = nowSecAt(io_handle) + 5, // genesis 5s in the future
-        .slot_durations = &.{.{ .start_slot = 0, .duration_ms = 1_000 }},
+        .slot_duration_ms = 1_000,
         .slots_per_epoch = 8,
     }, io_handle);
     defer clock.deinit();
@@ -817,7 +817,7 @@ test "real-time: slot events fire with correct timing" {
     var clock: EventClock = undefined;
     try clock.init(testing.allocator, .{
         .genesis_time_sec = base_now,
-        .slot_durations = &.{.{ .start_slot = 0, .duration_ms = 1_000 }},
+        .slot_duration_ms = 1_000,
         .slots_per_epoch = 8,
     }, io_handle);
     defer clock.deinit();
@@ -852,7 +852,7 @@ test "real-time: multi-slot advancement delivers ordered events" {
     var clock: EventClock = undefined;
     try clock.init(testing.allocator, .{
         .genesis_time_sec = base_now,
-        .slot_durations = &.{.{ .start_slot = 0, .duration_ms = 1_000 }},
+        .slot_duration_ms = 1_000,
         .slots_per_epoch = 8,
     }, io_handle);
     defer clock.deinit();
@@ -884,7 +884,7 @@ test "real-time: stop+join cancels promptly" {
     var clock: EventClock = undefined;
     try clock.init(testing.allocator, .{
         .genesis_time_sec = nowSecAt(io_handle) + 100, // far future
-        .slot_durations = &.{.{ .start_slot = 0, .duration_ms = 12_000 }}, // long slot like mainnet
+        .slot_duration_ms = 12_000, // long slot like mainnet
         .slots_per_epoch = 32,
     }, io_handle);
     defer clock.deinit();
@@ -914,7 +914,7 @@ test "real-time: epoch boundary event fires" {
     var clock: EventClock = undefined;
     try clock.init(testing.allocator, .{
         .genesis_time_sec = base_now,
-        .slot_durations = &.{.{ .start_slot = 0, .duration_ms = 1_000 }},
+        .slot_duration_ms = 1_000,
         .slots_per_epoch = 2, // epoch boundary every 2 slots
     }, io_handle);
     defer clock.deinit();
