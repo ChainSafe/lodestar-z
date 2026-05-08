@@ -464,10 +464,14 @@ fn advanceAndDispatch(self: *EventClock, target: Slot) std.Io.Cancelable!void {
         switch (event) {
             .slot => |s| {
                 self.snapshotSlotListenersLocked();
-                self.dispatchWaitersLocked(s);
+                // Invoke listeners BEFORE waking waiters: under
+                // `std.Io.Threaded`, an awoken `waitForSlot(...).await()`
+                // resumes on another thread and could read state that
+                // listeners haven't mutated yet.
                 for (self.slot_snapshot.items) |listener| {
                     listener.callback(listener.ctx, s);
                 }
+                self.dispatchWaitersLocked(s);
             },
             .epoch => |e| {
                 self.snapshotEpochListenersLocked();

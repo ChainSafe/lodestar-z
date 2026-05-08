@@ -104,7 +104,7 @@ pub fn currentSlotWithGossipDisparity(self: *const SlotClock) Slot {
     const now_ms = self.time.nowMs();
     const next_slot = current + 1;
     const next_slot_ms = slot_math.slotStartMs(self.config, next_slot) orelse return current;
-    if (next_slot_ms -| now_ms < self.config.maximum_gossip_clock_disparity_ms) {
+    if (next_slot_ms -| now_ms <= self.config.maximum_gossip_clock_disparity_ms) {
         return next_slot;
     }
     return current;
@@ -120,7 +120,7 @@ pub fn isCurrentSlotGivenGossipDisparity(self: *const SlotClock, slot: Slot) boo
     if (current != std.math.maxInt(Slot)) {
         const next_slot = current + 1;
         const next_slot_ms = slot_math.slotStartMs(self.config, next_slot) orelse return false;
-        if (next_slot_ms -| now_ms < self.config.maximum_gossip_clock_disparity_ms) {
+        if (next_slot_ms -| now_ms <= self.config.maximum_gossip_clock_disparity_ms) {
             return slot == next_slot;
         }
     }
@@ -128,7 +128,7 @@ pub fn isCurrentSlotGivenGossipDisparity(self: *const SlotClock, slot: Slot) boo
     // Check if just passed current slot boundary
     if (current > 0) {
         const current_slot_ms = slot_math.slotStartMs(self.config, current) orelse return false;
-        if (now_ms -| current_slot_ms < self.config.maximum_gossip_clock_disparity_ms) {
+        if (now_ms -| current_slot_ms <= self.config.maximum_gossip_clock_disparity_ms) {
             return slot == current - 1;
         }
     }
@@ -298,20 +298,20 @@ test "gossip disparity: just after slot boundary" {
     try testing.expect(clock.isCurrentSlotGivenGossipDisparity(0));
 }
 
-test "gossip disparity: exact threshold (500ms) does NOT apply" {
-    // next_slot_ms - now_ms == 500 → NOT < 500, so disparity doesn't apply
+test "gossip disparity: exact threshold (500ms) applies inclusively" {
+    // next_slot_ms - now_ms == 500 → 500 <= 500, so disparity applies (matches
+    // lodestar TS where the gossip future check accepts equality).
     // Slot 1 starts at 112_000ms. 500ms before = 111_500ms.
     var fake = time_source.FakeTime{ .ms = 111_500 };
     var clock = try SlotClock.init(test_cfg, .{ .fake = &fake });
-    // At exactly the threshold, disparity should NOT bump to next slot
-    try testing.expectEqual(@as(Slot, 0), clock.currentSlotWithGossipDisparity());
-    try testing.expect(!clock.isCurrentSlotGivenGossipDisparity(1));
-
-    // 1ms closer (111_501): 112_000 - 111_501 = 499 < 500, disparity applies
-    fake.setMs(111_501);
-    clock = try SlotClock.init(test_cfg, .{ .fake = &fake });
     try testing.expectEqual(@as(Slot, 1), clock.currentSlotWithGossipDisparity());
     try testing.expect(clock.isCurrentSlotGivenGossipDisparity(1));
+
+    // 1ms further out (111_499): 112_000 - 111_499 = 501 > 500, disparity does NOT apply.
+    fake.setMs(111_499);
+    clock = try SlotClock.init(test_cfg, .{ .fake = &fake });
+    try testing.expectEqual(@as(Slot, 0), clock.currentSlotWithGossipDisparity());
+    try testing.expect(!clock.isCurrentSlotGivenGossipDisparity(1));
 }
 
 test "tolerance helpers" {
