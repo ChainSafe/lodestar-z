@@ -178,7 +178,7 @@ const testing = std.testing;
 
 const test_cfg = Config{
     .genesis_time_sec = 100,
-    .seconds_per_slot = 12,
+    .slot_duration_ms = 12_000,
     .slots_per_epoch = 32,
     .maximum_gossip_clock_disparity_ms = 500,
 };

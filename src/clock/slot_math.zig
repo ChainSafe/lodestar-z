@@ -14,24 +14,27 @@ pub const UnixSec = u64;
 
 // ── Config ────────────────────────────────────────────────────────────
 
+/// Mirrors lodestar TS where `slot_duration_ms` is the canonical unit
+/// (`seconds_per_slot` is deprecated). Storing duration in ms also keeps
+/// h-fork-style sub-second-granularity slot durations representable.
 pub const Config = struct {
     genesis_time_sec: UnixSec,
-    seconds_per_slot: u64,
+    slot_duration_ms: u64,
     slots_per_epoch: u64,
     maximum_gossip_clock_disparity_ms: u64 = 500,
 
     /// Validates that the config is usable (no zero divisors, no sec→ms overflow).
     pub fn validate(self: Config) error{InvalidConfig}!void {
-        if (self.seconds_per_slot == 0) return error.InvalidConfig;
+        if (self.slot_duration_ms == 0) return error.InvalidConfig;
         if (self.slots_per_epoch == 0) return error.InvalidConfig;
-        // Ensure sec→ms conversions used by msUntilNextSlot won't overflow at runtime.
+        // genesis_time_sec is converted to ms by the math helpers; ensure it
+        // doesn't overflow at runtime.
         if (secToMs(self.genesis_time_sec) == null) return error.InvalidConfig;
-        if (secToMs(self.seconds_per_slot) == null) return error.InvalidConfig;
     }
 
-    /// Returns the slot duration in milliseconds, or null on overflow.
-    pub fn slotDurationMs(self: Config) ?u64 {
-        return secToMs(self.seconds_per_slot);
+    /// Returns the slot duration in milliseconds.
+    pub fn slotDurationMs(self: Config) u64 {
+        return self.slot_duration_ms;
     }
 };
 
@@ -40,17 +43,14 @@ pub const Config = struct {
 pub fn slotAtMs(config: Config, now_ms: UnixMs) ?Slot {
     const genesis_ms = secToMs(config.genesis_time_sec) orelse return null;
     if (now_ms < genesis_ms) return null;
-    const slot_ms = secToMs(config.seconds_per_slot) orelse return null;
-    if (slot_ms == 0) return null;
-    return @divFloor(now_ms - genesis_ms, slot_ms);
+    if (config.slot_duration_ms == 0) return null;
+    return @divFloor(now_ms - genesis_ms, config.slot_duration_ms);
 }
 
 /// Returns the slot at the given Unix-second timestamp,
-/// or null if pre-genesis.
+/// or null if pre-genesis or on overflow.
 pub fn slotAtSec(config: Config, now_sec: UnixSec) ?Slot {
-    if (now_sec < config.genesis_time_sec) return null;
-    if (config.seconds_per_slot == 0) return null;
-    return @divFloor(now_sec - config.genesis_time_sec, config.seconds_per_slot);
+    return slotAtMs(config, secToMs(now_sec) orelse return null);
 }
 
 /// Returns the epoch that contains `slot`, or null if slots_per_epoch is zero.
@@ -59,16 +59,18 @@ pub fn epochAtSlot(config: Config, slot: Slot) ?Epoch {
     return @divFloor(slot, config.slots_per_epoch);
 }
 
-/// Returns the Unix-second start time of `slot`, or null on overflow.
-pub fn slotStartSec(config: Config, slot: Slot) ?UnixSec {
-    const offset = std.math.mul(u64, slot, config.seconds_per_slot) catch return null;
-    return std.math.add(u64, config.genesis_time_sec, offset) catch return null;
-}
-
 /// Returns the Unix-millisecond start time of `slot`, or null on overflow.
 pub fn slotStartMs(config: Config, slot: Slot) ?UnixMs {
-    const sec = slotStartSec(config, slot) orelse return null;
-    return secToMs(sec);
+    const genesis_ms = secToMs(config.genesis_time_sec) orelse return null;
+    const offset_ms = std.math.mul(u64, slot, config.slot_duration_ms) catch return null;
+    return std.math.add(u64, genesis_ms, offset_ms) catch return null;
+}
+
+/// Returns the Unix-second start time of `slot`, or null on overflow.
+/// Sub-second slot durations truncate to the floor second.
+pub fn slotStartSec(config: Config, slot: Slot) ?UnixSec {
+    const ms = slotStartMs(config, slot) orelse return null;
+    return @divFloor(ms, 1000);
 }
 
 /// Milliseconds until the next slot boundary.
@@ -76,15 +78,14 @@ pub fn slotStartMs(config: Config, slot: Slot) ?UnixMs {
 /// Returns null only on arithmetic overflow.
 pub fn msUntilNextSlot(config: Config, now_ms: UnixMs) ?u64 {
     const genesis_ms = secToMs(config.genesis_time_sec) orelse return null;
-    const slot_ms = secToMs(config.seconds_per_slot) orelse return null;
-    if (slot_ms == 0) return null;
+    if (config.slot_duration_ms == 0) return null;
 
     if (now_ms < genesis_ms) return genesis_ms - now_ms;
 
     const delta = now_ms - genesis_ms;
-    const rem = delta % slot_ms;
-    if (rem == 0) return slot_ms;
-    return slot_ms - rem;
+    const rem = delta % config.slot_duration_ms;
+    if (rem == 0) return config.slot_duration_ms;
+    return config.slot_duration_ms - rem;
 }
 
 fn secToMs(sec: u64) ?u64 {
@@ -95,7 +96,7 @@ const testing = std.testing;
 
 const mainnet = Config{
     .genesis_time_sec = 1_606_824_023,
-    .seconds_per_slot = 12,
+    .slot_duration_ms = 12_000,
     .slots_per_epoch = 32,
 };
 
@@ -129,7 +130,7 @@ test "basic slot math" {
     try testing.expectEqual(@as(?UnixMs, (mainnet.genesis_time_sec + 12) * 1000), slotStartMs(mainnet, 1));
 
     // slotDurationMs
-    try testing.expectEqual(@as(?u64, 12_000), mainnet.slotDurationMs());
+    try testing.expectEqual(@as(u64, 12_000), mainnet.slotDurationMs());
 }
 
 test "within-slot timing" {
@@ -167,20 +168,12 @@ test "overflow safety" {
     // Config with maxInt genesis_time_sec: slotAtMs gets null from secToMs overflow
     const extreme = Config{
         .genesis_time_sec = std.math.maxInt(u64),
-        .seconds_per_slot = 12,
+        .slot_duration_ms = 12_000,
         .slots_per_epoch = 32,
     };
     try testing.expectEqual(@as(?Slot, null), slotAtMs(extreme, 0));
     try testing.expectEqual(@as(?UnixSec, null), slotStartSec(extreme, 1));
     try testing.expectEqual(@as(?UnixMs, null), slotStartMs(extreme, 0));
-
-    // slotDurationMs on extreme seconds_per_slot returns null
-    const big_slot = Config{
-        .genesis_time_sec = 0,
-        .seconds_per_slot = std.math.maxInt(u64),
-        .slots_per_epoch = 1,
-    };
-    try testing.expectEqual(@as(?u64, null), big_slot.slotDurationMs());
 
     // msUntilNextSlot returns null when genesis overflows ms conversion
     try testing.expectEqual(@as(?u64, null), msUntilNextSlot(extreme, 0));
@@ -214,24 +207,24 @@ test "config validate" {
     // Valid config passes
     try mainnet.validate();
 
-    // Zero seconds_per_slot is invalid
+    // Zero slot_duration_ms is invalid
     try testing.expectError(error.InvalidConfig, (Config{
         .genesis_time_sec = 0,
-        .seconds_per_slot = 0,
+        .slot_duration_ms = 0,
         .slots_per_epoch = 32,
     }).validate());
 
     // Zero slots_per_epoch is invalid
     try testing.expectError(error.InvalidConfig, (Config{
         .genesis_time_sec = 0,
-        .seconds_per_slot = 12,
+        .slot_duration_ms = 12_000,
         .slots_per_epoch = 0,
     }).validate());
 
     // Both zero is invalid
     try testing.expectError(error.InvalidConfig, (Config{
         .genesis_time_sec = 0,
-        .seconds_per_slot = 0,
+        .slot_duration_ms = 0,
         .slots_per_epoch = 0,
     }).validate());
 
@@ -241,14 +234,8 @@ test "config validate" {
     // genesis_time_sec that overflows sec→ms is invalid
     try testing.expectError(error.InvalidConfig, (Config{
         .genesis_time_sec = std.math.maxInt(u64),
-        .seconds_per_slot = 12,
+        .slot_duration_ms = 12_000,
         .slots_per_epoch = 32,
     }).validate());
 
-    // seconds_per_slot that overflows sec→ms is invalid
-    try testing.expectError(error.InvalidConfig, (Config{
-        .genesis_time_sec = 0,
-        .seconds_per_slot = std.math.maxInt(u64),
-        .slots_per_epoch = 32,
-    }).validate());
 }
