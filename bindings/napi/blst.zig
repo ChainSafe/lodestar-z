@@ -954,6 +954,195 @@ pub fn blst_aggregateWithRandomness(env: napi.Env, cb: napi.CallbackInfo(1)) !na
     return result;
 }
 
+/// Heap-allocated context shared between the JS thread (which kicks off the work),
+/// the libuv worker thread (which calls `ThreadPool.aggregateWithRandomness`), and
+/// the JS thread again (which resolves/rejects the Promise).
+///
+/// All input data should be copied into this struct so the worker thread doesn't depend on
+/// any JS-managed memory staying alive.
+const AsyncAggRandData = struct {
+    pks: []PublicKey,
+    sigs: []Signature,
+    pk_ptrs: []*const PublicKey,
+    sig_ptrs: []*const Signature,
+    randomness: []u8,
+    pk_out: PublicKey,
+    sig_out: Signature,
+    err: ?anyerror,
+    deferred: napi.Deferred,
+    work: napi.c.napi_async_work,
+
+    fn destroy(self: *AsyncAggRandData) void {
+        allocator.free(self.pks);
+        allocator.free(self.sigs);
+        allocator.free(self.pk_ptrs);
+        allocator.free(self.sig_ptrs);
+        allocator.free(self.randomness);
+        allocator.destroy(self);
+    }
+};
+
+/// Execute `aggregateWithRandomness` on a libuv worker thread.
+///
+/// Assumes that:
+/// 1) pubkeys are already validated,
+/// 2) signatures are not group-checked on JS thread
+///
+/// Note: MUST NOT call any napi APIs.
+fn asyncAggRand_execute(_: napi.Env, data: *AsyncAggRandData) void {
+    const pool = thread_pool orelse {
+        data.err = error.PoolNotInitialized;
+        return;
+    };
+    pool.aggregateWithRandomness(
+        napi_io.get(),
+        data.pk_ptrs,
+        data.sig_ptrs,
+        data.randomness,
+        false, // pks already validated implicitly by being deserialized PublicKey instances
+        true, // sigs were deserialized but not group-checked on the JS thread
+        &data.pk_out,
+        &data.sig_out,
+    ) catch |err| {
+        data.err = err;
+    };
+}
+
+/// Ran on the JS thread once the worker has finished. Always settles the
+/// promise — `settle` does the resolve/reject; if it errors we fall back to a
+/// bare reject so callers never see a dangling Promise.
+fn asyncAggRand_complete(env: napi.Env, status: napi.status.Status, data: *AsyncAggRandData) void {
+    defer {
+        napi.status.check(napi.c.napi_delete_async_work(env.env, data.work)) catch {};
+        data.destroy();
+    }
+
+    settle(env, status, data) catch {
+        // Catch all rejection: if we reach this point we might want
+        // better errors upstream
+        rejectWithError(env, data.deferred, "asyncAggregateWithRandomness", "InternalError") catch {};
+    };
+}
+
+fn settle(env: napi.Env, status: napi.status.Status, data: *AsyncAggRandData) !void {
+    if (status != .ok) {
+        // libuv's async work itself failed (e.g. cancelled), not crypto.
+        return rejectWithError(env, data.deferred, "asyncAggregateWithRandomness/asyncWork", @tagName(status));
+    }
+    if (data.err) |err| {
+        // Worker captured a Zig error — surface its name as the JS Error.code
+        // (e.g. "PointNotInGroup", "PoolNotInitialized", "OutOfMemory") so JS
+        // callers can branch on it.
+        return rejectWithError(env, data.deferred, "asyncAggregateWithRandomness", @errorName(err));
+    }
+
+    const pk_value = try newPublicKeyInstance(env);
+    const pk_unwrapped = try env.unwrap(PublicKey, pk_value);
+    pk_unwrapped.* = data.pk_out;
+
+    const sig_value = try newSignatureInstance(env);
+    const sig_unwrapped = try env.unwrap(Signature, sig_value);
+    sig_unwrapped.* = data.sig_out;
+
+    const result = try env.createObject();
+    try result.setNamedProperty("pk", pk_value);
+    try result.setNamedProperty("sig", sig_value);
+
+    try data.deferred.resolve(result);
+}
+
+/// Build a JS `Error` with `.code = code` and `.message = "<where>: <code>"`
+/// and reject `deferred` with it. JS callers see a real `Error` instance, not
+/// a bare string, so they can branch on `err.code` cleanly.
+fn rejectWithError(env: napi.Env, deferred: napi.Deferred, where: []const u8, code: []const u8) !void {
+    var msg_buf: [256]u8 = undefined;
+    const msg = std.fmt.bufPrint(&msg_buf, "{s}: {s}", .{ where, code }) catch code;
+
+    const code_val = try env.createStringUtf8(code);
+    const msg_val = try env.createStringUtf8(msg);
+    const err_val = try env.createError(code_val, msg_val);
+    try deferred.reject(err_val);
+}
+
+/// Asynchronously aggregates public keys and signatures with randomness using
+/// Pippenger multi-scalar multiplication. The PK and Sig multi-scalar mults
+/// run in parallel on the bls `ThreadPool`.
+///
+/// This call is non-blocking.
+///
+/// This is modeled after blst's rust pippenger implementation.
+///
+/// See: https://github.com/supranational/blst/blob/dece82ea537b422890888bacde4034ca5b5a44d8/bindings/rust/src/pippenger.rs
+///
+/// Arguments:
+/// 1) sets: Array of {pk: PublicKey, sig: Uint8Array}
+///
+/// Returns: Promise<{pk: PublicKey, sig: Signature}>
+pub fn blst_asyncAggregateWithRandomness(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
+    const sets = cb.arg(0);
+    const n = try sets.getArrayLength();
+
+    if (n == 0) return error.EmptyArray;
+    if (n > MAX_AGGREGATE_PER_JOB) return error.TooManySets;
+    if (thread_pool == null) return error.PoolNotInitialized;
+
+    const data = try allocator.create(AsyncAggRandData);
+    errdefer allocator.destroy(data);
+
+    data.pks = try allocator.alloc(PublicKey, n);
+    errdefer allocator.free(data.pks);
+    data.sigs = try allocator.alloc(Signature, n);
+    errdefer allocator.free(data.sigs);
+    data.pk_ptrs = try allocator.alloc(*const PublicKey, n);
+    errdefer allocator.free(data.pk_ptrs);
+    data.sig_ptrs = try allocator.alloc(*const Signature, n);
+    errdefer allocator.free(data.sig_ptrs);
+    data.randomness = try allocator.alloc(u8, n * 32);
+    errdefer allocator.free(data.randomness);
+
+    data.pk_out = .{};
+    data.sig_out = .{};
+    data.err = null;
+    data.deferred = undefined;
+    data.work = undefined;
+
+    var seed_bytes: [8]u8 = undefined;
+    napi_io.get().random(&seed_bytes);
+    var prng = std.Random.DefaultPrng.init(std.mem.readInt(u64, &seed_bytes, .little));
+    prng.random().bytes(data.randomness);
+
+    for (0..n) |i| {
+        const set_value = try sets.getElement(@intCast(i));
+
+        const pk_value = try set_value.getNamedProperty("pk");
+        const unwrapped_pk = try env.unwrap(PublicKey, pk_value);
+        data.pks[i] = unwrapped_pk.*;
+        data.pk_ptrs[i] = &data.pks[i];
+
+        const sig_value = try set_value.getNamedProperty("sig");
+        const sig_bytes = try sig_value.getTypedarrayInfo();
+        data.sigs[i] = Signature.deserialize(sig_bytes.data[0..]) catch return error.DeserializationFailed;
+        data.sig_ptrs[i] = &data.sigs[i];
+    }
+
+    data.deferred = try env.createPromise();
+
+    const resource_name = try env.createStringUtf8("asyncAggregateWithRandomness");
+    const work = try env.createAsyncWork(
+        AsyncAggRandData,
+        null,
+        resource_name,
+        asyncAggRand_execute,
+        asyncAggRand_complete,
+        data,
+    );
+    data.work = work.work;
+
+    try work.queue();
+
+    return data.deferred.getPromise();
+}
+
 pub fn register(env: napi.Env, exports: napi.Value) !void {
     const blst_obj = try env.createObject();
 
@@ -1028,6 +1217,7 @@ pub fn register(env: napi.Env, exports: napi.Value) !void {
     try blst_obj.setNamedProperty("aggregatePublicKeys", try env.createFunction("aggregatePublicKeys", 2, blst_aggregatePublicKeys, null));
     try blst_obj.setNamedProperty("aggregateSerializedPublicKeys", try env.createFunction("aggregateSerializedPublicKeys", 2, blst_aggregateSerializedPublicKeys, null));
     try blst_obj.setNamedProperty("aggregateWithRandomness", try env.createFunction("aggregateWithRandomness", 1, blst_aggregateWithRandomness, null));
+    try blst_obj.setNamedProperty("asyncAggregateWithRandomness", try env.createFunction("asyncAggregateWithRandomness", 1, blst_asyncAggregateWithRandomness, null));
 
     try exports.setNamedProperty("blst", blst_obj);
 }
