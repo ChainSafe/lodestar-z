@@ -132,6 +132,9 @@
         .time = .{
             .root_source_file = "src/time.zig",
         },
+        .clock = .{
+            .root_source_file = "src/clock/root.zig",
+        },
         .hashing = .{
             .root_source_file = "src/hashing/root.zig",
             .imports = .{ .build_options, .hex, .hashtree },
@@ -352,6 +355,7 @@
         .state_transition = .{ .root_module = .state_transition },
         .era = .{ .root_module = .era },
         .fork_choice = .{ .root_module = .fork_choice },
+        .clock = .{ .root_module = .clock },
 
         .int = .{
             .root_module = .{
