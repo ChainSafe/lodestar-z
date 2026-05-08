@@ -483,19 +483,18 @@ fn waitForSlotFutureAwait(state: *WaitState) Error!void {
 const testing = std.testing;
 
 const TestIo = struct {
-    evented: std.Io.Evented = undefined,
+    threaded: std.Io.Threaded = undefined,
 
     fn init(self: *TestIo) !void {
-        self.* = .{ .evented = undefined };
-        try self.evented.init(std.heap.page_allocator, .{});
+        self.threaded = std.Io.Threaded.init(std.heap.page_allocator, .{});
     }
 
     fn deinit(self: *TestIo) void {
-        self.evented.deinit();
+        self.threaded.deinit();
     }
 
     fn io(self: *TestIo) std.Io {
-        return self.evented.io();
+        return self.threaded.io();
     }
 };
 
