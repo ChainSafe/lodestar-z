@@ -22,8 +22,8 @@ pub const Config = struct {
 
     /// Validates that the config is usable (no zero divisors, no sec→ms overflow).
     pub fn validate(self: Config) error{InvalidConfig}!void {
-        if (self.seconds_per_slot == 0 or self.slots_per_epoch == 0)
-            return error.InvalidConfig;
+        if (self.seconds_per_slot == 0) return error.InvalidConfig;
+        if (self.slots_per_epoch == 0) return error.InvalidConfig;
         // Ensure sec→ms conversions used by msUntilNextSlot won't overflow at runtime.
         if (secToMs(self.genesis_time_sec) == null) return error.InvalidConfig;
         if (secToMs(self.seconds_per_slot) == null) return error.InvalidConfig;

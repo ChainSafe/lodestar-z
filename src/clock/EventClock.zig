@@ -139,8 +139,7 @@ pub fn onSlot(
     callback: *const fn (ctx: ?*anyopaque, slot: Slot) void,
     ctx: ?*anyopaque,
 ) Error!ListenerId {
-    if (self.next_listener_id == std.math.maxInt(ListenerId))
-        return error.ListenerLimitReached;
+    if (self.next_listener_id == std.math.maxInt(ListenerId)) return error.ListenerLimitReached;
     // Pre-allocate snapshot buffer BEFORE appending the listener, so that
     // if OOM occurs we haven't modified any state yet.
     self.slot_snapshot.ensureTotalCapacity(
@@ -174,8 +173,7 @@ pub fn onEpoch(
     callback: *const fn (ctx: ?*anyopaque, epoch: Epoch) void,
     ctx: ?*anyopaque,
 ) Error!ListenerId {
-    if (self.next_listener_id == std.math.maxInt(ListenerId))
-        return error.ListenerLimitReached;
+    if (self.next_listener_id == std.math.maxInt(ListenerId)) return error.ListenerLimitReached;
     // Pre-allocate snapshot buffer BEFORE appending the listener, so that
     // if OOM occurs we haven't modified any state yet.
     self.epoch_snapshot.ensureTotalCapacity(
@@ -348,7 +346,10 @@ pub fn waitForSlot(self: *EventClock, target: Slot) Error!WaitForSlotResult {
         self.allocator.destroy(state);
         return WaitForSlotResult.immediate(error.Aborted);
     }
-    self.waiters.push(self.allocator, .{ .target = target, .state = state }) catch return error.OutOfMemory;
+    self.waiters.push(self.allocator, .{
+        .target = target,
+        .state = state,
+    }) catch return error.OutOfMemory;
     self.dispatchWaiters(self.clock.current_slot);
 
     return .{

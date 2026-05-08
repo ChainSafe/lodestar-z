@@ -104,7 +104,10 @@ pub fn currentSlotWithGossipDisparity(self: *const SlotClock) Slot {
     const now_ms = self.time.nowMs();
     const next_slot = current + 1;
     const next_slot_ms = slot_math.slotStartMs(self.config, next_slot) orelse return current;
-    return if (next_slot_ms -| now_ms < self.config.maximum_gossip_clock_disparity_ms) next_slot else current;
+    if (next_slot_ms -| now_ms < self.config.maximum_gossip_clock_disparity_ms) {
+        return next_slot;
+    }
+    return current;
 }
 
 pub fn isCurrentSlotGivenGossipDisparity(self: *const SlotClock, slot: Slot) bool {
