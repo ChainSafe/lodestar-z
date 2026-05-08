@@ -19,6 +19,7 @@ pub const Error = EventClock.Error;
 
 test {
     _ = slot_math;
+    _ = time_source;
     _ = SlotClock;
     _ = EventClock;
 }
