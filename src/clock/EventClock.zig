@@ -228,33 +228,33 @@ pub fn offEpoch(self: *EventClock, id: ListenerId) Error!bool {
 // secFromSlot, etc.) do NOT catch up, matching TS which doesn't go through
 // `this.currentSlot` for those.
 
-pub fn currentSlot(self: *EventClock) ?Slot {
-    self.catchUp();
+pub fn currentSlot(self: *EventClock) std.Io.Cancelable!?Slot {
+    try self.catchUp();
     return self.clock.currentSlot();
 }
 
-pub fn currentEpoch(self: *EventClock) ?Epoch {
-    self.catchUp();
+pub fn currentEpoch(self: *EventClock) std.Io.Cancelable!?Epoch {
+    try self.catchUp();
     return self.clock.currentEpoch();
 }
 
-pub fn currentSlotOrGenesis(self: *EventClock) Slot {
-    self.catchUp();
+pub fn currentSlotOrGenesis(self: *EventClock) std.Io.Cancelable!Slot {
+    try self.catchUp();
     return self.clock.currentSlotOrGenesis();
 }
 
-pub fn currentEpochOrGenesis(self: *EventClock) Epoch {
-    self.catchUp();
+pub fn currentEpochOrGenesis(self: *EventClock) std.Io.Cancelable!Epoch {
+    try self.catchUp();
     return self.clock.currentEpochOrGenesis();
 }
 
-pub fn currentSlotWithGossipDisparity(self: *EventClock) Slot {
-    self.catchUp();
+pub fn currentSlotWithGossipDisparity(self: *EventClock) std.Io.Cancelable!Slot {
+    try self.catchUp();
     return self.clock.currentSlotWithGossipDisparity();
 }
 
-pub fn isCurrentSlotGivenGossipDisparity(self: *EventClock, slot: Slot) bool {
-    self.catchUp();
+pub fn isCurrentSlotGivenGossipDisparity(self: *EventClock, slot: Slot) std.Io.Cancelable!bool {
+    try self.catchUp();
     return self.clock.isCurrentSlotGivenGossipDisparity(slot);
 }
 
@@ -350,7 +350,7 @@ pub fn waitForSlot(self: *EventClock, target: Slot) Error!WaitForSlotResult {
     // Catch up events then check fast-path against advanced state.
     // catchUp invokes listener callbacks, so we must NOT hold the mutex
     // here — `advanceAndDispatch` takes it internally per state read.
-    self.catchUp();
+    try self.catchUp();
 
     try self.mutex.lock(self.io);
     if (self.clock.current_slot) |slot| {
@@ -398,14 +398,9 @@ pub fn waitForSlot(self: *EventClock, target: Slot) Error!WaitForSlotResult {
 /// Ensure event-clock state is caught up to wall-clock time.
 /// Emits any intermediate slot/epoch events to listeners.
 /// No-op if already caught up or pre-genesis (currentSlot() returns null).
-///
-/// Uses `lockUncancelable` internally so read-only public APIs
-/// (`currentSlot`, `currentSlotOrGenesis`, …) keep a simple non-error
-/// signature. The lock contention window is bounded by the listener
-/// callback runtime, which is expected to be short.
-fn catchUp(self: *EventClock) void {
+fn catchUp(self: *EventClock) std.Io.Cancelable!void {
     if (self.clock.currentSlot()) |wall_slot| {
-        self.advanceAndDispatch(wall_slot);
+        try self.advanceAndDispatch(wall_slot);
     }
 }
 
@@ -460,8 +455,8 @@ fn abortAllWaiters(self: *EventClock) void {
 /// preserve `iter` consistency across slots. Therefore listener callbacks
 /// MUST NOT call back into `EventClock` (no `onSlot`, `offSlot`, `onEpoch`,
 /// `offEpoch`, `waitForSlot`, `stop`, …) — doing so deadlocks.
-fn advanceAndDispatch(self: *EventClock, target: Slot) void {
-    self.mutex.lockUncancelable(self.io);
+fn advanceAndDispatch(self: *EventClock, target: Slot) std.Io.Cancelable!void {
+    try self.mutex.lock(self.io);
     defer self.mutex.unlock(self.io);
     var iter = self.clock.advanceTo(target);
     while (iter.next()) |event| {
@@ -517,7 +512,9 @@ fn runAutoLoop(self: *EventClock) void {
         // Only advance after genesis.  Before genesis currentSlot() returns
         // null — skipping here prevents emitting slot 0 prematurely.
         if (self.clock.currentSlot()) |slot| {
-            self.advanceAndDispatch(slot);
+            self.advanceAndDispatch(slot) catch |err| switch (err) {
+                error.Canceled => break,
+            };
         }
     }
 }
@@ -603,7 +600,7 @@ test "lifecycle: init -> register -> start -> receive events -> stop" {
 
     clock.start();
 
-    const start_slot = clock.currentSlotOrGenesis();
+    const start_slot = try clock.currentSlotOrGenesis();
     var fut = try clock.waitForSlot(start_slot + 1);
     errdefer fut.cancel();
     try fut.await();
@@ -626,7 +623,7 @@ test "waitForSlot resolves immediately when at target" {
     }, io_handle);
     defer clock.deinit();
 
-    const current = clock.currentSlotOrGenesis();
+    const current = try clock.currentSlotOrGenesis();
     var fut = try clock.waitForSlot(current);
     errdefer fut.cancel();
     try fut.await();
@@ -672,7 +669,7 @@ test "offSlot/offEpoch stop event delivery" {
     try testing.expect(try clock.offSlot(slot_id));
     try testing.expect(try clock.offEpoch(epoch_id));
 
-    clock.advanceAndDispatch(6);
+    try clock.advanceAndDispatch(6);
     try testing.expectEqual(@as(usize, 0), trace.slot_len);
     try testing.expectEqual(@as(usize, 0), trace.epoch_len);
 }
@@ -716,7 +713,7 @@ test "epoch event is delivered when crossing epoch boundary" {
     _ = try clock.onEpoch(EventTraceState.onEpoch, &trace);
 
     // Advance from null through epoch boundary at slot 4
-    clock.advanceAndDispatch(5);
+    try clock.advanceAndDispatch(5);
 
     try testing.expect(trace.slot_len > 0);
     try testing.expect(trace.epoch_len > 0);
@@ -746,7 +743,7 @@ test "multiple waiters are dispatched in target-slot order" {
     errdefer fut1.cancel();
 
     // Advance to slot 3 — should dispatch slot 1 and slot 3, NOT slot 5
-    clock.advanceAndDispatch(3);
+    try clock.advanceAndDispatch(3);
 
     try fut1.await();
     try fut3.await();
@@ -826,7 +823,7 @@ test "real-time: slot events fire with correct timing" {
 
     clock.start();
 
-    const start_slot = clock.currentSlotOrGenesis();
+    const start_slot = try clock.currentSlotOrGenesis();
     const before_ms = nowMsAt(io_handle);
     var fut = try clock.waitForSlot(start_slot + 1);
     errdefer fut.cancel();
@@ -861,7 +858,7 @@ test "real-time: multi-slot advancement delivers ordered events" {
 
     clock.start();
 
-    const start_slot = clock.currentSlotOrGenesis();
+    const start_slot = try clock.currentSlotOrGenesis();
     var fut = try clock.waitForSlot(start_slot + 2);
     errdefer fut.cancel();
     try fut.await();
@@ -924,7 +921,7 @@ test "real-time: epoch boundary event fires" {
 
     clock.start();
 
-    const start_slot = clock.currentSlotOrGenesis();
+    const start_slot = try clock.currentSlotOrGenesis();
     // Wait enough slots to guarantee crossing at least one epoch boundary.
     var fut = try clock.waitForSlot(start_slot + 3);
     errdefer fut.cancel();
