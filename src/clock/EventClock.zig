@@ -24,6 +24,7 @@ pub const Error = error{
     ListenerLimitReached,
     Aborted,
     Canceled,
+    ConcurrencyUnavailable,
 };
 
 const WaitState = struct {
@@ -382,12 +383,35 @@ pub fn waitForSlot(self: *EventClock, target: Slot) Error!WaitForSlotResult {
         return error.OutOfMemory;
     };
     self.dispatchWaitersLocked(self.clock.current_slot);
-    // Release before spawning the async task — async spawn is quick but
-    // shouldn't be inside the EventClock mutex.
+    // Release before spawning the task — `concurrent` must not be called
+    // inside the EventClock mutex.
     self.mutex.unlock(self.io);
 
+    // `concurrent` (vs `async`) guarantees the function runs on a fresh
+    // worker; otherwise it returns `error.ConcurrencyUnavailable`. Without
+    // this guarantee `std.Io.async` could legally invoke
+    // `waitForSlotFutureAwait` inline (single-threaded build, OOM, or
+    // `Threaded` busy_count >= async_limit), which would block the caller's
+    // thread inside `event.waitUncancelable` and never return the
+    // `WaitForSlotResult`.
+    const future = std.Io.concurrent(self.io, waitForSlotFutureAwait, .{state}) catch {
+        // Concurrent task couldn't be spawned. Undo our waiter registration
+        // and free `state`. Use the uncancelable lock variant — this is a
+        // cleanup path that must complete.
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        for (self.waiters.items, 0..) |entry, i| {
+            if (entry.state == state) {
+                _ = self.waiters.popIndex(i);
+                break;
+            }
+        }
+        self.allocator.destroy(state);
+        return error.ConcurrencyUnavailable;
+    };
+
     return .{ .pending = .{
-        .inner = std.Io.async(self.io, waitForSlotFutureAwait, .{state}),
+        .inner = future,
         .state = state,
         .clock = self,
     } };
