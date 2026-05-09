@@ -481,22 +481,6 @@ fn waitForSlotFutureAwait(state: *WaitState) Error!void {
 
 const testing = std.testing;
 
-const TestIo = struct {
-    threaded: std.Io.Threaded = undefined,
-
-    fn init(self: *TestIo) !void {
-        self.threaded = std.Io.Threaded.init(std.heap.page_allocator, .{});
-    }
-
-    fn deinit(self: *TestIo) void {
-        self.threaded.deinit();
-    }
-
-    fn io(self: *TestIo) std.Io {
-        return self.threaded.io();
-    }
-};
-
 fn nowSecAt(io_handle: std.Io) u64 {
     const sec = std.Io.Clock.real.now(io_handle).toSeconds();
     std.debug.assert(sec >= 0);
@@ -531,10 +515,7 @@ const EventTraceState = struct {
 };
 
 test "lifecycle: init -> register -> start -> receive events -> stop" {
-    var rt: TestIo = undefined;
-    try rt.init();
-    defer rt.deinit();
-    const io_handle = rt.io();
+    const io_handle = testing.io;
     const base_now = nowSecAt(io_handle);
 
     var clock: EventClock = undefined;
@@ -559,10 +540,7 @@ test "lifecycle: init -> register -> start -> receive events -> stop" {
 }
 
 test "waitForSlot resolves immediately when at target" {
-    var rt: TestIo = undefined;
-    try rt.init();
-    defer rt.deinit();
-    const io_handle = rt.io();
+    const io_handle = testing.io;
     const base_now = nowSecAt(io_handle);
 
     var clock: EventClock = undefined;
@@ -580,10 +558,7 @@ test "waitForSlot resolves immediately when at target" {
 }
 
 test "waitForSlot returns aborted on stop" {
-    var rt: TestIo = undefined;
-    try rt.init();
-    defer rt.deinit();
-    const io_handle = rt.io();
+    const io_handle = testing.io;
 
     var clock: EventClock = undefined;
     try clock.init(testing.allocator, .{
@@ -600,10 +575,7 @@ test "waitForSlot returns aborted on stop" {
 }
 
 test "offSlot/offEpoch stop event delivery" {
-    var rt: TestIo = undefined;
-    try rt.init();
-    defer rt.deinit();
-    const io_handle = rt.io();
+    const io_handle = testing.io;
 
     var clock: EventClock = undefined;
     try clock.init(testing.allocator, .{
@@ -625,10 +597,7 @@ test "offSlot/offEpoch stop event delivery" {
 }
 
 test "stop/join are idempotent" {
-    var rt: TestIo = undefined;
-    try rt.init();
-    defer rt.deinit();
-    const io_handle = rt.io();
+    const io_handle = testing.io;
 
     var clock: EventClock = undefined;
     try clock.init(testing.allocator, .{
@@ -645,10 +614,7 @@ test "stop/join are idempotent" {
 }
 
 test "epoch event is delivered when crossing epoch boundary" {
-    var rt: TestIo = undefined;
-    try rt.init();
-    defer rt.deinit();
-    const io_handle = rt.io();
+    const io_handle = testing.io;
 
     var clock: EventClock = undefined;
     try clock.init(testing.allocator, .{
@@ -671,10 +637,7 @@ test "epoch event is delivered when crossing epoch boundary" {
 }
 
 test "multiple waiters are dispatched in target-slot order" {
-    var rt: TestIo = undefined;
-    try rt.init();
-    defer rt.deinit();
-    const io_handle = rt.io();
+    const io_handle = testing.io;
 
     var clock: EventClock = undefined;
     try clock.init(testing.allocator, .{
@@ -704,10 +667,7 @@ test "multiple waiters are dispatched in target-slot order" {
 }
 
 test "cancel releases WaitState without awaiting" {
-    var rt: TestIo = undefined;
-    try rt.init();
-    defer rt.deinit();
-    const io_handle = rt.io();
+    const io_handle = testing.io;
 
     var clock: EventClock = undefined;
     try clock.init(testing.allocator, .{
@@ -728,10 +688,7 @@ test "cancel releases WaitState without awaiting" {
 // `clock.start()` and letting wall-clock time drive slot advancement.
 
 test "real-time: no slot events emitted before genesis" {
-    var rt: TestIo = undefined;
-    try rt.init();
-    defer rt.deinit();
-    const io_handle = rt.io();
+    const io_handle = testing.io;
 
     var clock: EventClock = undefined;
     try clock.init(testing.allocator, .{
@@ -754,10 +711,7 @@ test "real-time: no slot events emitted before genesis" {
 }
 
 test "real-time: slot events fire with correct timing" {
-    var rt: TestIo = undefined;
-    try rt.init();
-    defer rt.deinit();
-    const io_handle = rt.io();
+    const io_handle = testing.io;
     const base_now = nowSecAt(io_handle);
 
     var clock: EventClock = undefined;
@@ -789,10 +743,7 @@ test "real-time: slot events fire with correct timing" {
 }
 
 test "real-time: multi-slot advancement delivers ordered events" {
-    var rt: TestIo = undefined;
-    try rt.init();
-    defer rt.deinit();
-    const io_handle = rt.io();
+    const io_handle = testing.io;
     const base_now = nowSecAt(io_handle);
 
     var clock: EventClock = undefined;
@@ -822,10 +773,7 @@ test "real-time: multi-slot advancement delivers ordered events" {
 }
 
 test "real-time: stop+join cancels promptly" {
-    var rt: TestIo = undefined;
-    try rt.init();
-    defer rt.deinit();
-    const io_handle = rt.io();
+    const io_handle = testing.io;
 
     var clock: EventClock = undefined;
     try clock.init(testing.allocator, .{
@@ -851,10 +799,7 @@ test "real-time: stop+join cancels promptly" {
 }
 
 test "real-time: epoch boundary event fires" {
-    var rt: TestIo = undefined;
-    try rt.init();
-    defer rt.deinit();
-    const io_handle = rt.io();
+    const io_handle = testing.io;
     const base_now = nowSecAt(io_handle);
 
     var clock: EventClock = undefined;
