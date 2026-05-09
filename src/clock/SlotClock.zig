@@ -299,8 +299,7 @@ test "gossip disparity: just after slot boundary" {
 }
 
 test "gossip disparity: exact threshold (500ms) applies inclusively" {
-    // next_slot_ms - now_ms == 500 → 500 <= 500, so disparity applies (matches
-    // lodestar TS where the gossip future check accepts equality).
+    // next_slot_ms - now_ms == 500 → 500 <= 500, disparity applies.
     // Slot 1 starts at 112_000ms. 500ms before = 111_500ms.
     var fake = time_source.FakeTime{ .ms = 111_500 };
     var clock = try SlotClock.init(test_cfg, .{ .fake = &fake });

@@ -44,12 +44,9 @@ pub fn forkTransitions(
     return arr;
 }
 
-/// Mirrors lodestar TS `ChainConfig`:
-/// - `slot_duration_ms` corresponds to TS `SLOT_DURATION_MS` (the duration
-///   from genesis until the first transition, or for the entire chain if
-///   no transition exists).
-/// - `duration_transitions` carries any later overrides; the first entry
-///   maps to TS `(EIP7782_FORK_EPOCH * SLOTS_PER_EPOCH, SLOT_DURATION_MS_EIP7782)`.
+/// - `slot_duration_ms` is the duration from genesis until the first
+///   transition (or for the entire chain if none).
+/// - `duration_transitions` carries later overrides (e.g. EIP-7782 6s slots).
 ///   Default is all-sentinel — Ethereum mainnet today has no slot-duration change.
 ///
 /// Active entries must be sorted ascending by `from_slot`, have non-zero

@@ -129,10 +129,8 @@ pub fn deinit(self: *EventClock) void {
 
 // ── Listener API ──
 // Register listeners before calling `start()`. From inside a callback,
-// `offSlot` / `offEpoch` are safe (self-unsubscribe — matches the lodestar
-// TS `waitForSlot` pattern), but `onSlot` / `onEpoch` are NOT: they may
-// reallocate the snapshot buffer that `emitSlot` / `emitEpoch` is still
-// iterating, causing a use-after-free.
+// `offSlot` / `offEpoch` are safe; `onSlot` / `onEpoch` are not — they
+// may reallocate the snapshot buffer being iterated by the active emit.
 
 /// Register a slot listener.  Returns an ID for later removal via `offSlot`.
 pub fn onSlot(
@@ -205,11 +203,9 @@ pub fn offEpoch(self: *EventClock, id: ListenerId) bool {
 }
 
 // ── Delegated read APIs ──
-// Every public accessor that exposes "current" slot/epoch state calls catchUp()
-// first, matching the TS version where `get currentSlot()` triggers event
-// emission before returning.  Pure time-arithmetic helpers (slotWithFutureTolerance,
-// secFromSlot, etc.) do NOT catch up, matching TS which doesn't go through
-// `this.currentSlot` for those.
+// Public accessors that expose "current" slot/epoch state call catchUp()
+// first so reads emit any pending events before returning. Pure
+// time-arithmetic helpers (slotWithFutureTolerance, secFromSlot, …) do not.
 
 pub fn currentSlot(self: *EventClock) ?Slot {
     self.catchUp();
