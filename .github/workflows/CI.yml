@@ -88,6 +88,10 @@ jobs:
         run: |
           zig build test:fork_choice
       - name: Run clock tests
+        # Excluded from macOS: `std.Io.Threaded`'s `Future.cancel + await`
+        # path appears to hang on macOS in Zig 0.16.0 (clock tests run in
+        # ~7s on Linux; macOS sat past 8min before manual cancel).
+        if: matrix.os != 'macos-latest'
         run: |
           zig build test:clock
 
