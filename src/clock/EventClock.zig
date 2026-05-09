@@ -349,7 +349,6 @@ pub fn waitForSlot(self: *EventClock, target: Slot) Error!WaitForSlotResult {
                 break;
             }
         }
-        self.allocator.destroy(state);
         return error.ConcurrencyUnavailable;
     };
 
