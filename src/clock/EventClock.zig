@@ -450,34 +450,51 @@ pub fn advanceAndDispatch(self: *EventClock, target: Slot) void {
 
 fn runAutoLoop(self: *EventClock) void {
     while (!self.stopped) {
-        const now_ms = self.clock.time.nowMs();
-        // Config validation guarantees sec→ms won't overflow, so null here
-        // indicates a logic bug.  Break instead of spinning at 1ms.
-        const next_ms = slot_math.msUntilNextSlot(self.clock.config, now_ms) orelse {
-            std.log.err("EventClock: msUntilNextSlot returned null (config overflow?), stopping loop", .{});
+        // Dispatch FIRST so that if a previous iteration's callbacks ran
+        // longer than a slot, the slots that elapsed during them fire
+        // immediately rather than waiting for the next boundary.
+        // Pre-genesis currentSlot() returns null — skip dispatch and head
+        // straight to the sleep that times us to the genesis boundary.
+        if (self.clock.currentSlot()) |slot| {
+            self.advanceAndDispatch(slot);
+        }
+        if (self.stopped) break;
+
+        // Sleep against the NEXT undispatched slot's boundary (cached
+        // `current_slot + 1`), not against wall-clock now. If the wall
+        // crossed a boundary between dispatch and this read,
+        // `msUntilNextSlot(now_ms)` would return the time to the boundary
+        // AFTER the just-started slot, sleeping a full slot through it.
+        const next_slot_to_emit: Slot = if (self.clock.current_slot) |s| s + 1 else 0;
+        const next_boundary_ms = slot_math.slotStartMs(self.clock.config, next_slot_to_emit) orelse {
+            std.log.err("EventClock: slotStartMs overflow at slot {d}, stopping loop", .{next_slot_to_emit});
             self.stop();
             break;
         };
-        const sleep_ms = std.math.cast(i64, @max(@as(u64, 1), next_ms)) orelse std.math.maxInt(i64);
+        const now_ms = self.clock.time.nowMs();
+        if (next_boundary_ms <= now_ms) {
+            // Already past the next boundary (slow callback or wall jump).
+            // Loop back to dispatch immediately.
+            continue;
+        }
+        const sleep_ms = std.math.cast(i64, next_boundary_ms - now_ms) orelse std.math.maxInt(i64);
 
+        // Sleep on `.boot` (monotonic + counts suspend) so a host suspend
+        // doesn't leave us behind real chain time. `.awake` would freeze
+        // the sleep across suspend even though `now_ms`/slot_math run on
+        // wall-clock; resuming, we'd then wait the remaining pre-suspend
+        // duration before catching up.
         // Sleep failure: cancellation (from join()) exits the loop;
         // other errors re-check the stopped flag.
         std.Io.sleep(
             self.io,
             std.Io.Duration.fromMilliseconds(sleep_ms),
-            .awake,
+            .boot,
         ) catch |err| {
             if (err == error.Canceled) break;
             std.log.debug("EventClock: sleep failed ({s}), retrying", .{@errorName(err)});
             continue;
         };
-
-        if (self.stopped) break;
-        // Only advance after genesis.  Before genesis currentSlot() returns
-        // null — skipping here prevents emitting slot 0 prematurely.
-        if (self.clock.currentSlot()) |slot| {
-            self.advanceAndDispatch(slot);
-        }
     }
 }
 
@@ -494,18 +511,18 @@ fn waitForSlotFutureAwait(state: *WaitState) Error!void {
 const testing = std.testing;
 
 const TestIo = struct {
-    threaded: std.Io.Threaded = undefined,
+    evented: std.Io.Evented = undefined,
 
     fn init(self: *TestIo) !void {
-        self.threaded = std.Io.Threaded.init(std.heap.page_allocator, .{});
+        try self.evented.init(std.heap.page_allocator, .{});
     }
 
     fn deinit(self: *TestIo) void {
-        self.threaded.deinit();
+        self.evented.deinit();
     }
 
     fn io(self: *TestIo) std.Io {
-        return self.threaded.io();
+        return self.evented.io();
     }
 };
 
