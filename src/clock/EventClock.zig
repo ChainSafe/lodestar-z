@@ -375,10 +375,20 @@ pub fn waitForSlot(self: *EventClock, target: Slot) Error!WaitForSlotResult {
     try self.catchUp();
 
     try self.mutex.lock(self.io);
-    if (self.clock.current_slot) |slot| {
-        if (slot >= target) {
-            self.mutex.unlock(self.io);
-            return .{ .immediate = {} };
+    // Fast-path requires `dispatching == false`: when a dispatch is
+    // in-flight, `iter.next()` may have already advanced
+    // `clock.current_slot` to or past `target` while listener callbacks
+    // for that slot are still running outside the mutex. Returning
+    // immediate here would let the awaiter observe state the listeners
+    // have not yet written. When dispatching, queue a waiter instead —
+    // the dispatcher's per-slot `dispatchWaitersLocked` (which runs after
+    // the callback batch under the relock) will pick it up in order.
+    if (!self.dispatching.load(.acquire)) {
+        if (self.clock.current_slot) |slot| {
+            if (slot >= target) {
+                self.mutex.unlock(self.io);
+                return .{ .immediate = {} };
+            }
         }
     }
     if (self.stopped.load(.acquire)) {
@@ -604,15 +614,25 @@ fn runAutoLoop(self: *EventClock) void {
         }
         if (self.stopped.load(.acquire)) break;
 
-        const now_ms = self.clock.time.nowMs();
-        // Config validation guarantees sec→ms won't overflow, so null here
-        // indicates a logic bug.  Break instead of spinning at 1ms.
-        const next_ms = slot_math.msUntilNextSlot(self.clock.config, now_ms) orelse {
-            std.log.err("EventClock: msUntilNextSlot returned null (config overflow?), stopping loop", .{});
+        // Compute sleep against the NEXT undispatched slot's boundary
+        // (cached `current_slot + 1`), not against wall-clock now. If we
+        // used `msUntilNextSlot(now_ms)` and the wall just crossed a
+        // boundary between the dispatch above and this read, that helper
+        // would return the time to the boundary AFTER the just-started
+        // slot — sleeping a full slot and delaying that slot's events.
+        const next_slot_to_emit: Slot = if (self.clock.current_slot) |s| s + 1 else 0;
+        const next_boundary_ms = slot_math.slotStartMs(self.clock.config, next_slot_to_emit) orelse {
+            std.log.err("EventClock: slotStartMs overflow at slot {d}, stopping loop", .{next_slot_to_emit});
             self.stop();
             break;
         };
-        const sleep_ms = std.math.cast(i64, @max(@as(u64, 1), next_ms)) orelse std.math.maxInt(i64);
+        const now_ms = self.clock.time.nowMs();
+        if (next_boundary_ms <= now_ms) {
+            // Already past the next boundary (slow callback or wall jump).
+            // Loop back to dispatch immediately.
+            continue;
+        }
+        const sleep_ms = std.math.cast(i64, next_boundary_ms - now_ms) orelse std.math.maxInt(i64);
 
         // Sleep on `.boot` (monotonic + counts suspend) so a host suspend
         // doesn't leave us behind real chain time. `.awake` would freeze
