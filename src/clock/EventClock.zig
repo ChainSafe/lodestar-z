@@ -331,20 +331,30 @@ pub const WaitForSlotResult = union(enum) {
         switch (self.*) {
             .immediate => return,
             .pending => |*p| {
-                // Remove from waiter queue before freeing, so abortAllWaiters
-                // won't dereference the freed state pointer.
+                // Only write `state.aborted` if we actually own this waiter
+                // (still in the queue under our mutex). If the dispatcher or
+                // `abortAllWaiters` already popped it, they wrote the flag
+                // themselves under the same mutex; racing them outside the
+                // mutex would be a data race AND could turn a successfully
+                // reached slot into `error.Aborted`.
                 p.clock.mutex.lockUncancelable(p.clock.io);
+                var canceled_in_place = false;
                 for (p.clock.waiters.items, 0..) |entry, i| {
                     if (entry.state == p.state) {
                         _ = p.clock.waiters.popIndex(i);
+                        p.state.aborted = true;
+                        canceled_in_place = true;
                         break;
                     }
                 }
                 p.clock.mutex.unlock(p.clock.io);
-                p.state.aborted = true;
-                p.state.event.set(p.state.io);
+                if (canceled_in_place) {
+                    p.state.event.set(p.state.io);
+                }
                 // Must await the fiber so it finishes before we free its state.
-                // The fiber returns error.Aborted (expected) or {} (already dispatched).
+                // Returns `error.Aborted` if WE flagged it, `error.Aborted` if
+                // `abortAllWaiters` flagged it, or success if a slot dispatch
+                // beat us.
                 _ = p.inner.await(p.state.io) catch |err| {
                     std.debug.assert(err == error.Aborted);
                 };
@@ -604,12 +614,17 @@ fn runAutoLoop(self: *EventClock) void {
         };
         const sleep_ms = std.math.cast(i64, @max(@as(u64, 1), next_ms)) orelse std.math.maxInt(i64);
 
+        // Sleep on `.boot` (monotonic + counts suspend) so a host suspend
+        // doesn't leave us behind real chain time. `.awake` would freeze
+        // the sleep across suspend even though `now_ms`/slot_math run on
+        // wall-clock; resuming, we'd then wait the remaining pre-suspend
+        // duration before catching up.
         // Sleep failure: cancellation (from join()) exits the loop;
         // other errors re-check the stopped flag.
         std.Io.sleep(
             self.io,
             std.Io.Duration.fromMilliseconds(sleep_ms),
-            .awake,
+            .boot,
         ) catch |err| {
             if (err == error.Canceled) break;
             std.log.debug("EventClock: sleep failed ({s}), retrying", .{@errorName(err)});
