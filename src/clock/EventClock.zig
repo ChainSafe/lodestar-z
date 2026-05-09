@@ -77,9 +77,18 @@ clock: SlotClock,
 /// (`std.Io.Threaded`); cheap on a single-threaded fiber backend
 /// (`std.Io.Evented`) — uncontended fast path is one atomic CAS.
 ///
-/// Listener callbacks run WHILE this mutex is held (see
-/// `advanceAndDispatch`); they must not call back into `EventClock`.
+/// Listener callbacks run OUTSIDE this mutex (see `advanceAndDispatch` —
+/// each event snapshots the listener list under the mutex, then releases
+/// before invoking callbacks). Callbacks may freely re-enter public API
+/// methods such as `onSlot`, `offSlot`, `waitForSlot`, etc.
 mutex: std.Io.Mutex = .init,
+
+/// Serializes `advanceAndDispatch` callers so the shared snapshot buffers
+/// have a single owner across the unlock/relock boundary, and so callback-
+/// triggered re-entry into `advanceAndDispatch` (via `currentSlot` →
+/// `catchUp`) returns immediately instead of recursing. CAS to true on
+/// entry; first caller does the work, others observe true and return.
+dispatching: std.atomic.Value(bool) = .init(false),
 
 /// Read lock-free from `runAutoLoop` so the loop's sleep does not need
 /// to hold the mutex.
@@ -141,12 +150,16 @@ pub fn deinit(self: *EventClock) void {
 }
 
 // ── Listener API ──
-// NOTE: Listeners should be registered before calling `start()`.
-// Adding listeners from within a callback may silently skip the new listener
-// until the next slot, because snapshot buffers are pre-allocated at registration
-// time and the snapshot helpers only use pre-allocated capacity.
+// Listeners may be registered or removed at any time, including from within
+// a callback. A listener added during dispatch becomes visible on the next
+// event; one removed during dispatch may still receive the in-flight callback
+// because the snapshot was already taken.
 
 /// Register a slot listener.  Returns an ID for later removal via `offSlot`.
+///
+/// NOTE: snapshot buffer growth happens inside the dispatcher (see
+/// `snapshotSlotListenersLocked`). This keeps `onSlot` from reallocating
+/// `slot_snapshot` while the dispatcher iterates it outside the mutex.
 pub fn onSlot(
     self: *EventClock,
     callback: *const fn (ctx: ?*anyopaque, slot: Slot) void,
@@ -155,12 +168,6 @@ pub fn onSlot(
     try self.mutex.lock(self.io);
     defer self.mutex.unlock(self.io);
     if (self.next_listener_id == std.math.maxInt(ListenerId)) return error.ListenerLimitReached;
-    // Pre-allocate snapshot buffer BEFORE appending the listener, so that
-    // if OOM occurs we haven't modified any state yet.
-    self.slot_snapshot.ensureTotalCapacity(
-        self.allocator,
-        self.slot_listeners.items.len + 1,
-    ) catch return error.OutOfMemory;
     self.slot_listeners.append(self.allocator, .{
         .id = self.next_listener_id,
         .callback = callback,
@@ -185,6 +192,9 @@ pub fn offSlot(self: *EventClock, id: ListenerId) Error!bool {
 }
 
 /// Register an epoch listener.  Returns an ID for later removal via `offEpoch`.
+///
+/// See `onSlot` for the snapshot ownership rules — `epoch_snapshot` is
+/// resized exclusively by the dispatcher.
 pub fn onEpoch(
     self: *EventClock,
     callback: *const fn (ctx: ?*anyopaque, epoch: Epoch) void,
@@ -193,12 +203,6 @@ pub fn onEpoch(
     try self.mutex.lock(self.io);
     defer self.mutex.unlock(self.io);
     if (self.next_listener_id == std.math.maxInt(ListenerId)) return error.ListenerLimitReached;
-    // Pre-allocate snapshot buffer BEFORE appending the listener, so that
-    // if OOM occurs we haven't modified any state yet.
-    self.epoch_snapshot.ensureTotalCapacity(
-        self.allocator,
-        self.epoch_listeners.items.len + 1,
-    ) catch return error.OutOfMemory;
     self.epoch_listeners.append(self.allocator, .{
         .id = self.next_listener_id,
         .callback = callback,
@@ -229,32 +233,32 @@ pub fn offEpoch(self: *EventClock, id: ListenerId) Error!bool {
 // secFromSlot, etc.) do NOT catch up, matching TS which doesn't go through
 // `this.currentSlot` for those.
 
-pub fn currentSlot(self: *EventClock) std.Io.Cancelable!?Slot {
+pub fn currentSlot(self: *EventClock) Error!?Slot {
     try self.catchUp();
     return self.clock.currentSlot();
 }
 
-pub fn currentEpoch(self: *EventClock) std.Io.Cancelable!?Epoch {
+pub fn currentEpoch(self: *EventClock) Error!?Epoch {
     try self.catchUp();
     return self.clock.currentEpoch();
 }
 
-pub fn currentSlotOrGenesis(self: *EventClock) std.Io.Cancelable!Slot {
+pub fn currentSlotOrGenesis(self: *EventClock) Error!Slot {
     try self.catchUp();
     return self.clock.currentSlotOrGenesis();
 }
 
-pub fn currentEpochOrGenesis(self: *EventClock) std.Io.Cancelable!Epoch {
+pub fn currentEpochOrGenesis(self: *EventClock) Error!Epoch {
     try self.catchUp();
     return self.clock.currentEpochOrGenesis();
 }
 
-pub fn currentSlotWithGossipDisparity(self: *EventClock) std.Io.Cancelable!Slot {
+pub fn currentSlotWithGossipDisparity(self: *EventClock) Error!Slot {
     try self.catchUp();
     return self.clock.currentSlotWithGossipDisparity();
 }
 
-pub fn isCurrentSlotGivenGossipDisparity(self: *EventClock, slot: Slot) std.Io.Cancelable!bool {
+pub fn isCurrentSlotGivenGossipDisparity(self: *EventClock, slot: Slot) Error!bool {
     try self.catchUp();
     return self.clock.isCurrentSlotGivenGossipDisparity(slot);
 }
@@ -422,17 +426,19 @@ pub fn waitForSlot(self: *EventClock, target: Slot) Error!WaitForSlotResult {
 /// Ensure event-clock state is caught up to wall-clock time.
 /// Emits any intermediate slot/epoch events to listeners.
 /// No-op if already caught up or pre-genesis (currentSlot() returns null).
-fn catchUp(self: *EventClock) std.Io.Cancelable!void {
+fn catchUp(self: *EventClock) Error!void {
     if (self.clock.currentSlot()) |wall_slot| {
         try self.advanceAndDispatch(wall_slot);
     }
 }
 
-/// Caller must hold `self.mutex`.
-fn snapshotSlotListenersLocked(self: *EventClock) void {
+/// Caller must hold `self.mutex` and `self.dispatching` must be `true`
+/// (snapshot buffer has a single writer at a time, namely the dispatcher).
+fn snapshotSlotListenersLocked(self: *EventClock) error{OutOfMemory}!void {
     self.slot_snapshot.clearRetainingCapacity();
-    const limit = @min(self.slot_listeners.items.len, self.slot_snapshot.capacity);
-    for (self.slot_listeners.items[0..limit]) |listener| {
+    self.slot_snapshot.ensureTotalCapacity(self.allocator, self.slot_listeners.items.len) catch
+        return error.OutOfMemory;
+    for (self.slot_listeners.items) |listener| {
         self.slot_snapshot.appendAssumeCapacity(.{
             .callback = listener.callback,
             .ctx = listener.ctx,
@@ -440,11 +446,12 @@ fn snapshotSlotListenersLocked(self: *EventClock) void {
     }
 }
 
-/// Caller must hold `self.mutex`.
-fn snapshotEpochListenersLocked(self: *EventClock) void {
+/// Caller must hold `self.mutex` and `self.dispatching` must be `true`.
+fn snapshotEpochListenersLocked(self: *EventClock) error{OutOfMemory}!void {
     self.epoch_snapshot.clearRetainingCapacity();
-    const limit = @min(self.epoch_listeners.items.len, self.epoch_snapshot.capacity);
-    for (self.epoch_listeners.items[0..limit]) |listener| {
+    self.epoch_snapshot.ensureTotalCapacity(self.allocator, self.epoch_listeners.items.len) catch
+        return error.OutOfMemory;
+    for (self.epoch_listeners.items) |listener| {
         self.epoch_snapshot.appendAssumeCapacity(.{
             .callback = listener.callback,
             .ctx = listener.ctx,
@@ -475,33 +482,61 @@ fn abortAllWaiters(self: *EventClock) void {
 
 /// Advance the underlying clock to `target` and dispatch slot/epoch events.
 ///
-/// IMPORTANT: listener callbacks are invoked WHILE holding `self.mutex` to
-/// preserve `iter` consistency across slots. Therefore listener callbacks
-/// MUST NOT call back into `EventClock` (no `onSlot`, `offSlot`, `onEpoch`,
-/// `offEpoch`, `waitForSlot`, `stop`, …) — doing so deadlocks.
-fn advanceAndDispatch(self: *EventClock, target: Slot) std.Io.Cancelable!void {
+/// Per event we hold the mutex only long enough to (a) advance one step via
+/// `iter.next()`, (b) snapshot the listener list into the shared snapshot
+/// buffer, and (c) wake any matching waiters. We then RELEASE the mutex
+/// before invoking listener callbacks. This means callbacks may safely call
+/// back into public `EventClock` methods (`onSlot`, `offSlot`,
+/// `waitForSlot`, etc.) — those just take the mutex briefly and proceed.
+///
+/// Two concurrent dispatchers would race on the shared snapshot buffer
+/// across the unlock/relock boundary. The `dispatching` atomic CAS makes
+/// the second caller observe `true` and return immediately; the in-flight
+/// dispatcher catches everyone up. It also short-circuits callback-driven
+/// re-entry (callback → `currentSlot` → `catchUp` → here), preventing
+/// recursion-style double dispatch.
+fn advanceAndDispatch(self: *EventClock, target: Slot) Error!void {
+    if (self.dispatching.cmpxchgStrong(false, true, .acq_rel, .monotonic) != null) {
+        // Another fiber/thread is already advancing — its work subsumes ours.
+        return;
+    }
+    defer self.dispatching.store(false, .release);
+
     try self.mutex.lock(self.io);
-    defer self.mutex.unlock(self.io);
+    // `iter` carries `pending_epoch` state across `iter.next()` calls; it
+    // must outlive each unlock/relock cycle so an epoch event queued behind
+    // a slot event is not dropped.
     var iter = self.clock.advanceTo(target);
-    while (iter.next()) |event| {
+    while (true) {
         if (self.stopped.load(.acquire)) break;
+        const event = iter.next() orelse break;
         switch (event) {
             .slot => |s| {
-                self.snapshotSlotListenersLocked();
+                self.snapshotSlotListenersLocked() catch |err| {
+                    self.mutex.unlock(self.io);
+                    return err;
+                };
                 // Invoke listeners BEFORE waking waiters: under
                 // `std.Io.Threaded`, an awoken `waitForSlot(...).await()`
                 // resumes on another thread and could read state that
                 // listeners haven't mutated yet.
+                self.dispatchWaitersLocked(s);
+                self.mutex.unlock(self.io);
                 for (self.slot_snapshot.items) |listener| {
                     listener.callback(listener.ctx, s);
                 }
-                self.dispatchWaitersLocked(s);
+                try self.mutex.lock(self.io);
             },
             .epoch => |e| {
-                self.snapshotEpochListenersLocked();
+                self.snapshotEpochListenersLocked() catch |err| {
+                    self.mutex.unlock(self.io);
+                    return err;
+                };
+                self.mutex.unlock(self.io);
                 for (self.epoch_snapshot.items) |listener| {
                     listener.callback(listener.ctx, e);
                 }
+                try self.mutex.lock(self.io);
             },
         }
     }
@@ -510,6 +545,7 @@ fn advanceAndDispatch(self: *EventClock, target: Slot) std.Io.Cancelable!void {
     // In the normal case, this is a no-op because the last .slot event
     // already dispatched waiters at the same slot value.
     self.dispatchWaitersLocked(self.clock.current_slot);
+    self.mutex.unlock(self.io);
 }
 
 fn runAutoLoop(self: *EventClock) void {
@@ -542,6 +578,20 @@ fn runAutoLoop(self: *EventClock) void {
         if (self.clock.currentSlot()) |slot| {
             self.advanceAndDispatch(slot) catch |err| switch (err) {
                 error.Canceled => break,
+                // Snapshot grow OOM: log and retry on next tick. Listeners
+                // for the events we couldn't dispatch this tick will catch
+                // up implicitly when iter walks past them next round (they
+                // are derived from `clock.current_slot`, which advances
+                // monotonically).
+                error.OutOfMemory => {
+                    std.log.warn("EventClock: dispatch OOM, retrying next tick", .{});
+                    continue;
+                },
+                else => {
+                    std.log.err("EventClock: unexpected dispatch error {s}, stopping", .{@errorName(err)});
+                    self.stop();
+                    break;
+                },
             };
         }
     }
