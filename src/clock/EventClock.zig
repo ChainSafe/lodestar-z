@@ -93,12 +93,6 @@ pub fn init(self: *EventClock, allocator: Allocator, config: Config, io_handle: 
 }
 
 /// Start the auto-advance loop.  Idempotent; second call is a no-op.
-///
-/// Uses `std.Io.concurrent` (not `async`): when the backend's async pool
-/// is exhausted, `async` falls back to running the function inline on
-/// the caller, which would block `start()` inside `runAutoLoop`'s sleep.
-/// `concurrent` either spawns a fresh worker or returns
-/// `error.ConcurrencyUnavailable`.
 pub fn start(self: *EventClock) Error!void {
     if (self.loop_future != null) return;
     self.loop_future = std.Io.concurrent(self.io, EventClock.runAutoLoop, .{self}) catch
@@ -148,8 +142,7 @@ pub fn onSlot(
 ) Error!ListenerId {
     if (self.next_listener_id == std.math.maxInt(ListenerId))
         return error.ListenerLimitReached;
-    // Pre-allocate snapshot buffer BEFORE appending the listener, so that
-    // if OOM occurs we haven't modified any state yet.
+    // Reserve snapshot capacity before appending so an OOM here leaves no partial state.
     self.slot_snapshot.ensureTotalCapacity(
         self.allocator,
         self.slot_listeners.items.len + 1,
@@ -183,8 +176,7 @@ pub fn onEpoch(
 ) Error!ListenerId {
     if (self.next_listener_id == std.math.maxInt(ListenerId))
         return error.ListenerLimitReached;
-    // Pre-allocate snapshot buffer BEFORE appending the listener, so that
-    // if OOM occurs we haven't modified any state yet.
+    // Reserve snapshot capacity before appending so an OOM here leaves no partial state.
     self.epoch_snapshot.ensureTotalCapacity(
         self.allocator,
         self.epoch_listeners.items.len + 1,
@@ -297,11 +289,6 @@ pub const WaitForSlotResult = struct {
 
     /// Abort a pending wait and release its resources.  Idempotent — safe
     /// to call on an already-awaited, already-cancelled, or immediate result.
-    ///
-    /// Typical usage:
-    ///   var fut = try ec.waitForSlot(target);
-    ///   errdefer fut.cancel();
-    ///   try fut.await(io);
     pub fn cancel(self: *WaitForSlotResult) void {
         const state = self.state orelse return;
         // Remove from waiter queue before freeing, so abortAllWaiters
@@ -333,7 +320,6 @@ pub fn waitForSlot(self: *EventClock, target: Slot) Error!WaitForSlotResult {
     if (self.stopped) {
         return WaitForSlotResult.immediate(error.Aborted);
     }
-    // Catch up events then check fast-path against advanced state.
     self.catchUp();
     if (self.clock.current_slot) |slot| {
         if (slot >= target) {
@@ -356,11 +342,6 @@ pub fn waitForSlot(self: *EventClock, target: Slot) Error!WaitForSlotResult {
     self.waiters.push(self.allocator, .{ .target = target, .state = state }) catch return error.OutOfMemory;
     self.dispatchWaiters(self.clock.current_slot);
 
-    // `concurrent` (vs `async`) guarantees a fresh worker. Without it,
-    // when the backend's async pool is exhausted (e.g. `Threaded` with
-    // `async_limit` reached on a low-core CI runner), `async` runs
-    // `waitForSlotFutureAwait` inline on the caller's thread and blocks
-    // it inside `event.waitUncancelable` before this function returns.
     const inner = std.Io.concurrent(self.io, waitForSlotFutureAwait, .{state}) catch {
         for (self.waiters.items, 0..) |entry, i| {
             if (entry.state == state) {
@@ -384,8 +365,6 @@ pub fn waitForSlot(self: *EventClock, target: Slot) Error!WaitForSlotResult {
 /// Ensure event-clock state is caught up to wall-clock time.
 /// Emits any intermediate slot/epoch events to listeners.
 /// No-op if already caught up or pre-genesis (currentSlot() returns null).
-/// Safe to call from any fiber — cooperative scheduling guarantees no
-/// concurrent access (same model as TS's single-threaded event loop).
 fn catchUp(self: *EventClock) void {
     if (self.clock.currentSlot()) |wall_slot| {
         self.advanceAndDispatch(wall_slot);
