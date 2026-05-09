@@ -128,10 +128,11 @@ pub fn deinit(self: *EventClock) void {
 }
 
 // ── Listener API ──
-// NOTE: Listeners should be registered before calling `start()`.
-// Adding listeners from within a callback may silently skip the new listener
-// until the next slot, because snapshot buffers are pre-allocated at registration
-// time and emitSlot/emitEpoch only use pre-allocated capacity.
+// Register listeners before calling `start()`. From inside a callback,
+// `offSlot` / `offEpoch` are safe (self-unsubscribe — matches the lodestar
+// TS `waitForSlot` pattern), but `onSlot` / `onEpoch` are NOT: they may
+// reallocate the snapshot buffer that `emitSlot` / `emitEpoch` is still
+// iterating, causing a use-after-free.
 
 /// Register a slot listener.  Returns an ID for later removal via `offSlot`.
 pub fn onSlot(
