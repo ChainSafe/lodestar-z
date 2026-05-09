@@ -1,22 +1,8 @@
 //! Layer 2 – Event-driven beacon clock.
 //!
 //! Combines `SlotClock` with an async I/O loop to emit slot/epoch events
-//! and dispatch waiters.
-//!
-//! ## Threading model
-//!
-//! Targets `std.Io.Evented` (single OS thread, cooperative fibers).
-//! Public methods must be called from one execution flow — typically the
-//! main fiber that drives the application. The internal `runAutoLoop`
-//! runs as a separate fiber on the same thread; cooperative scheduling
-//! means it cannot interleave with public-method bodies between yield
-//! points, so no mutex is needed.
-//!
-//! Listener callbacks run synchronously on the dispatching fiber, while
-//! `runAutoLoop` is its own fiber. Callbacks should not call back into
-//! `EventClock` — re-entry semantics are not supported (matches the TS
-//! contract where `clock.currentSlot` listeners run inside the getter
-//! and re-entering it would recurse).
+//! and dispatch waiters.  All public methods are safe to call from the
+//! main thread; the internal loop runs as a single cooperative fiber.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -153,7 +139,8 @@ pub fn onSlot(
     callback: *const fn (ctx: ?*anyopaque, slot: Slot) void,
     ctx: ?*anyopaque,
 ) Error!ListenerId {
-    if (self.next_listener_id == std.math.maxInt(ListenerId)) return error.ListenerLimitReached;
+    if (self.next_listener_id == std.math.maxInt(ListenerId))
+        return error.ListenerLimitReached;
     // Pre-allocate snapshot buffer BEFORE appending the listener, so that
     // if OOM occurs we haven't modified any state yet.
     self.slot_snapshot.ensureTotalCapacity(
@@ -187,7 +174,10 @@ pub fn onEpoch(
     callback: *const fn (ctx: ?*anyopaque, epoch: Epoch) void,
     ctx: ?*anyopaque,
 ) Error!ListenerId {
-    if (self.next_listener_id == std.math.maxInt(ListenerId)) return error.ListenerLimitReached;
+    if (self.next_listener_id == std.math.maxInt(ListenerId))
+        return error.ListenerLimitReached;
+    // Pre-allocate snapshot buffer BEFORE appending the listener, so that
+    // if OOM occurs we haven't modified any state yet.
     self.epoch_snapshot.ensureTotalCapacity(
         self.allocator,
         self.epoch_listeners.items.len + 1,
@@ -278,69 +268,72 @@ pub fn msFromSlot(self: *EventClock, slot: Slot, to_ms: ?slot_math.UnixMs) ?i64 
 /// Idiomatic usage with `errdefer`:
 ///   var fut = try ec.waitForSlot(target);
 ///   errdefer fut.cancel();
-///   try fut.await();
-pub const WaitForSlotResult = union(enum) {
-    immediate: Error!void,
-    pending: Pending,
+///   try fut.await(io);
+pub const WaitForSlotResult = struct {
+    inner: std.Io.Future(Error!void),
+    state: ?*WaitState,
+    clock: ?*EventClock,
 
-    pub const Pending = struct {
-        inner: std.Io.Future(Error!void),
-        state: *WaitState,
-        clock: *EventClock,
-    };
+    /// Create an immediately-resolved result (no async work needed).
+    /// Relies on `std.Io.Future.await` returning `.result` when `.any_future == null`.
+    fn immediate(result: Error!void) WaitForSlotResult {
+        return .{ .inner = .{ .any_future = null, .result = result }, .state = null, .clock = null };
+    }
 
-    pub fn await(self: *WaitForSlotResult) Error!void {
-        switch (self.*) {
-            .immediate => |r| return r,
-            .pending => |*p| {
-                // Use the io that created the future to avoid io-mismatch bugs.
-                const result = p.inner.await(p.state.io);
-                // Free AFTER await returns — workaround for Zig futex
-                // use-after-free where GCD still holds a reference to the
-                // event address after wake.
-                p.state.allocator.destroy(p.state);
-                self.* = .{ .immediate = result };
-                return result;
-            },
-        }
+    pub fn await(self: *WaitForSlotResult, io: std.Io) Error!void {
+        const result = self.inner.await(io);
+        // Free AFTER await returns — workaround for Zig futex use-after-free
+        // where GCD still holds a reference to the event address after wake.
+        if (self.state) |s| s.allocator.destroy(s);
+        self.state = null;
+        self.clock = null;
+        return result;
     }
 
     /// Abort a pending wait and release its resources.  Idempotent — safe
     /// to call on an already-awaited, already-cancelled, or immediate result.
+    ///
+    /// Typical usage:
+    ///   var fut = try ec.waitForSlot(target);
+    ///   errdefer fut.cancel();
+    ///   try fut.await(io);
     pub fn cancel(self: *WaitForSlotResult) void {
-        switch (self.*) {
-            .immediate => return,
-            .pending => |*p| {
-                // Remove from waiter queue before freeing, so abortAllWaiters
-                // won't dereference the freed state pointer.
-                for (p.clock.waiters.items, 0..) |entry, i| {
-                    if (entry.state == p.state) {
-                        _ = p.clock.waiters.popIndex(i);
-                        break;
-                    }
+        const state = self.state orelse return;
+        // Remove from waiter queue before freeing, so abortAllWaiters
+        // won't dereference the freed state pointer.
+        if (self.clock) |clock| {
+            for (clock.waiters.items, 0..) |entry, i| {
+                if (entry.state == state) {
+                    _ = clock.waiters.popIndex(i);
+                    break;
                 }
-                p.state.aborted = true;
-                p.state.event.set(p.state.io);
-                // Must await the fiber so it finishes before we free its state.
-                // The fiber returns error.Aborted (expected) or {} (already dispatched).
-                _ = p.inner.await(p.state.io) catch |err| {
-                    std.debug.assert(err == error.Aborted);
-                };
-                p.state.allocator.destroy(p.state);
-                self.* = .{ .immediate = error.Aborted };
-            },
+            }
         }
+        state.aborted = true;
+        state.event.set(state.io);
+        // Must await the fiber so it finishes before we free its state.
+        // The fiber returns error.Aborted (expected) or {} (already dispatched).
+        _ = self.inner.await(state.io) catch |err| {
+            std.debug.assert(err == error.Aborted);
+        };
+        state.allocator.destroy(state);
+        self.state = null;
+        self.clock = null;
     }
 };
 
 /// Return a future that resolves when the clock reaches `target`.
 /// See `WaitForSlotResult` for the caller's obligations.
 pub fn waitForSlot(self: *EventClock, target: Slot) Error!WaitForSlotResult {
-    if (self.stopped) return .{ .immediate = error.Aborted };
+    if (self.stopped) {
+        return WaitForSlotResult.immediate(error.Aborted);
+    }
     // Catch up events then check fast-path against advanced state.
     self.catchUp();
     if (self.clock.current_slot) |slot| {
-        if (slot >= target) return .{ .immediate = {} };
+        if (slot >= target) {
+            return WaitForSlotResult.immediate({});
+        }
     }
 
     const state = self.allocator.create(WaitState) catch return error.OutOfMemory;
@@ -353,19 +346,16 @@ pub fn waitForSlot(self: *EventClock, target: Slot) Error!WaitForSlotResult {
 
     if (self.stopped) {
         self.allocator.destroy(state);
-        return .{ .immediate = error.Aborted };
+        return WaitForSlotResult.immediate(error.Aborted);
     }
-    self.waiters.push(self.allocator, .{
-        .target = target,
-        .state = state,
-    }) catch return error.OutOfMemory;
+    self.waiters.push(self.allocator, .{ .target = target, .state = state }) catch return error.OutOfMemory;
     self.dispatchWaiters(self.clock.current_slot);
 
-    return .{ .pending = .{
+    return .{
         .inner = std.Io.async(self.io, waitForSlotFutureAwait, .{state}),
         .state = state,
         .clock = self,
-    } };
+    };
 }
 
 // ── Private ──
@@ -373,6 +363,8 @@ pub fn waitForSlot(self: *EventClock, target: Slot) Error!WaitForSlotResult {
 /// Ensure event-clock state is caught up to wall-clock time.
 /// Emits any intermediate slot/epoch events to listeners.
 /// No-op if already caught up or pre-genesis (currentSlot() returns null).
+/// Safe to call from any fiber — cooperative scheduling guarantees no
+/// concurrent access (same model as TS's single-threaded event loop).
 fn catchUp(self: *EventClock) void {
     if (self.clock.currentSlot()) |wall_slot| {
         self.advanceAndDispatch(wall_slot);
@@ -397,6 +389,7 @@ fn emitSlot(self: *EventClock, slot: Slot) void {
 
 fn emitEpoch(self: *EventClock, epoch: Epoch) void {
     self.epoch_snapshot.clearRetainingCapacity();
+    // Use only pre-allocated capacity — no allocation in fiber context.
     const limit = @min(self.epoch_listeners.items.len, self.epoch_snapshot.capacity);
     for (self.epoch_listeners.items[0..limit]) |listener| {
         self.epoch_snapshot.appendAssumeCapacity(.{
@@ -427,9 +420,7 @@ fn abortAllWaiters(self: *EventClock) void {
     }
 }
 
-/// Advance the underlying clock to `target` and dispatch slot/epoch events.
-/// Listeners run synchronously on the calling fiber, matching TS semantics.
-pub fn advanceAndDispatch(self: *EventClock, target: Slot) void {
+fn advanceAndDispatch(self: *EventClock, target: Slot) void {
     var iter = self.clock.advanceTo(target);
     while (iter.next()) |event| {
         if (self.stopped) break;
@@ -450,51 +441,34 @@ pub fn advanceAndDispatch(self: *EventClock, target: Slot) void {
 
 fn runAutoLoop(self: *EventClock) void {
     while (!self.stopped) {
-        // Dispatch FIRST so that if a previous iteration's callbacks ran
-        // longer than a slot, the slots that elapsed during them fire
-        // immediately rather than waiting for the next boundary.
-        // Pre-genesis currentSlot() returns null — skip dispatch and head
-        // straight to the sleep that times us to the genesis boundary.
-        if (self.clock.currentSlot()) |slot| {
-            self.advanceAndDispatch(slot);
-        }
-        if (self.stopped) break;
-
-        // Sleep against the NEXT undispatched slot's boundary (cached
-        // `current_slot + 1`), not against wall-clock now. If the wall
-        // crossed a boundary between dispatch and this read,
-        // `msUntilNextSlot(now_ms)` would return the time to the boundary
-        // AFTER the just-started slot, sleeping a full slot through it.
-        const next_slot_to_emit: Slot = if (self.clock.current_slot) |s| s + 1 else 0;
-        const next_boundary_ms = slot_math.slotStartMs(self.clock.config, next_slot_to_emit) orelse {
-            std.log.err("EventClock: slotStartMs overflow at slot {d}, stopping loop", .{next_slot_to_emit});
+        const now_ms = self.clock.time.nowMs();
+        // Config validation guarantees sec→ms won't overflow, so null here
+        // indicates a logic bug.  Break instead of spinning at 1ms.
+        const next_ms = slot_math.msUntilNextSlot(self.clock.config, now_ms) orelse {
+            std.log.err("EventClock: msUntilNextSlot returned null (config overflow?), stopping loop", .{});
             self.stop();
             break;
         };
-        const now_ms = self.clock.time.nowMs();
-        if (next_boundary_ms <= now_ms) {
-            // Already past the next boundary (slow callback or wall jump).
-            // Loop back to dispatch immediately.
-            continue;
-        }
-        const sleep_ms = std.math.cast(i64, next_boundary_ms - now_ms) orelse std.math.maxInt(i64);
+        const sleep_ms = std.math.cast(i64, @max(@as(u64, 1), next_ms)) orelse std.math.maxInt(i64);
 
-        // Sleep on `.boot` (monotonic + counts suspend) so a host suspend
-        // doesn't leave us behind real chain time. `.awake` would freeze
-        // the sleep across suspend even though `now_ms`/slot_math run on
-        // wall-clock; resuming, we'd then wait the remaining pre-suspend
-        // duration before catching up.
         // Sleep failure: cancellation (from join()) exits the loop;
         // other errors re-check the stopped flag.
         std.Io.sleep(
             self.io,
             std.Io.Duration.fromMilliseconds(sleep_ms),
-            .boot,
+            .awake,
         ) catch |err| {
             if (err == error.Canceled) break;
             std.log.debug("EventClock: sleep failed ({s}), retrying", .{@errorName(err)});
             continue;
         };
+
+        if (self.stopped) break;
+        // Only advance after genesis.  Before genesis currentSlot() returns
+        // null — skipping here prevents emitting slot 0 prematurely.
+        if (self.clock.currentSlot()) |slot| {
+            self.advanceAndDispatch(slot);
+        }
     }
 }
 
@@ -514,6 +488,7 @@ const TestIo = struct {
     evented: std.Io.Evented = undefined,
 
     fn init(self: *TestIo) !void {
+        self.* = .{ .evented = undefined };
         try self.evented.init(std.heap.page_allocator, .{});
     }
 
@@ -582,7 +557,7 @@ test "lifecycle: init -> register -> start -> receive events -> stop" {
     const start_slot = clock.currentSlotOrGenesis();
     var fut = try clock.waitForSlot(start_slot + 1);
     errdefer fut.cancel();
-    try fut.await();
+    try fut.await(io_handle);
 
     try testing.expect(trace.slot_len > 0);
 }
@@ -605,7 +580,7 @@ test "waitForSlot resolves immediately when at target" {
     const current = clock.currentSlotOrGenesis();
     var fut = try clock.waitForSlot(current);
     errdefer fut.cancel();
-    try fut.await();
+    try fut.await(io_handle);
 }
 
 test "waitForSlot returns aborted on stop" {
@@ -625,7 +600,7 @@ test "waitForSlot returns aborted on stop" {
     var fut = try clock.waitForSlot(100);
     errdefer fut.cancel();
     clock.stop();
-    try testing.expectError(error.Aborted, fut.await());
+    try testing.expectError(error.Aborted, fut.await(io_handle));
 }
 
 test "offSlot/offEpoch stop event delivery" {
@@ -724,12 +699,12 @@ test "multiple waiters are dispatched in target-slot order" {
     // Advance to slot 3 — should dispatch slot 1 and slot 3, NOT slot 5
     clock.advanceAndDispatch(3);
 
-    try fut1.await();
-    try fut3.await();
+    try fut1.await(io_handle);
+    try fut3.await(io_handle);
 
     // fut5 should still be pending. Stop to abort it.
     clock.stop();
-    try testing.expectError(error.Aborted, fut5.await());
+    try testing.expectError(error.Aborted, fut5.await(io_handle));
 }
 
 test "cancel releases WaitState without awaiting" {
@@ -806,7 +781,7 @@ test "real-time: slot events fire with correct timing" {
     const before_ms = nowMsAt(io_handle);
     var fut = try clock.waitForSlot(start_slot + 1);
     errdefer fut.cancel();
-    try fut.await();
+    try fut.await(io_handle);
     const elapsed = nowMsAt(io_handle) - before_ms;
 
     // Should wait roughly 0-1s for the next slot boundary.
@@ -840,7 +815,7 @@ test "real-time: multi-slot advancement delivers ordered events" {
     const start_slot = clock.currentSlotOrGenesis();
     var fut = try clock.waitForSlot(start_slot + 2);
     errdefer fut.cancel();
-    try fut.await();
+    try fut.await(io_handle);
 
     // At least 2 slot events should have been emitted.
     try testing.expect(trace.slot_len >= 2);
@@ -904,7 +879,7 @@ test "real-time: epoch boundary event fires" {
     // Wait enough slots to guarantee crossing at least one epoch boundary.
     var fut = try clock.waitForSlot(start_slot + 3);
     errdefer fut.cancel();
-    try fut.await();
+    try fut.await(io_handle);
 
     try testing.expect(trace.slot_len >= 3);
     // Must have seen at least one epoch transition.
