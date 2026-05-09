@@ -23,6 +23,7 @@ pub const Error = error{
     OutOfMemory,
     ListenerLimitReached,
     Aborted,
+    ConcurrencyUnavailable,
 };
 
 const WaitState = struct {
@@ -92,9 +93,16 @@ pub fn init(self: *EventClock, allocator: Allocator, config: Config, io_handle: 
 }
 
 /// Start the auto-advance loop.  Idempotent; second call is a no-op.
-pub fn start(self: *EventClock) void {
+///
+/// Uses `std.Io.concurrent` (not `async`): when the backend's async pool
+/// is exhausted, `async` falls back to running the function inline on
+/// the caller, which would block `start()` inside `runAutoLoop`'s sleep.
+/// `concurrent` either spawns a fresh worker or returns
+/// `error.ConcurrencyUnavailable`.
+pub fn start(self: *EventClock) Error!void {
     if (self.loop_future != null) return;
-    self.loop_future = std.Io.async(self.io, EventClock.runAutoLoop, .{self});
+    self.loop_future = std.Io.concurrent(self.io, EventClock.runAutoLoop, .{self}) catch
+        return error.ConcurrencyUnavailable;
 }
 
 /// Signal the loop to stop and abort all pending waiters.  Idempotent.
@@ -348,8 +356,24 @@ pub fn waitForSlot(self: *EventClock, target: Slot) Error!WaitForSlotResult {
     self.waiters.push(self.allocator, .{ .target = target, .state = state }) catch return error.OutOfMemory;
     self.dispatchWaiters(self.clock.current_slot);
 
+    // `concurrent` (vs `async`) guarantees a fresh worker. Without it,
+    // when the backend's async pool is exhausted (e.g. `Threaded` with
+    // `async_limit` reached on a low-core CI runner), `async` runs
+    // `waitForSlotFutureAwait` inline on the caller's thread and blocks
+    // it inside `event.waitUncancelable` before this function returns.
+    const inner = std.Io.concurrent(self.io, waitForSlotFutureAwait, .{state}) catch {
+        for (self.waiters.items, 0..) |entry, i| {
+            if (entry.state == state) {
+                _ = self.waiters.popIndex(i);
+                break;
+            }
+        }
+        self.allocator.destroy(state);
+        return error.ConcurrencyUnavailable;
+    };
+
     return .{
-        .inner = std.Io.async(self.io, waitForSlotFutureAwait, .{state}),
+        .inner = inner,
         .state = state,
         .clock = self,
     };
@@ -529,7 +553,7 @@ test "lifecycle: init -> register -> start -> receive events -> stop" {
     var trace = EventTraceState{};
     _ = try clock.onSlot(EventTraceState.onSlot, &trace);
 
-    clock.start();
+    try clock.start();
 
     const start_slot = clock.currentSlotOrGenesis();
     var fut = try clock.waitForSlot(start_slot + 1);
@@ -701,7 +725,7 @@ test "real-time: no slot events emitted before genesis" {
     var trace = EventTraceState{};
     _ = try clock.onSlot(EventTraceState.onSlot, &trace);
 
-    clock.start();
+    try clock.start();
 
     // Sleep 1.5s — the loop will tick several times, all pre-genesis.
     std.Io.sleep(io_handle, std.Io.Duration.fromMilliseconds(1500), .awake) catch {};
@@ -725,7 +749,7 @@ test "real-time: slot events fire with correct timing" {
     var trace = EventTraceState{};
     _ = try clock.onSlot(EventTraceState.onSlot, &trace);
 
-    clock.start();
+    try clock.start();
 
     const start_slot = clock.currentSlotOrGenesis();
     const before_ms = nowMsAt(io_handle);
@@ -757,7 +781,7 @@ test "real-time: multi-slot advancement delivers ordered events" {
     var trace = EventTraceState{};
     _ = try clock.onSlot(EventTraceState.onSlot, &trace);
 
-    clock.start();
+    try clock.start();
 
     const start_slot = clock.currentSlotOrGenesis();
     var fut = try clock.waitForSlot(start_slot + 2);
@@ -783,7 +807,7 @@ test "real-time: stop+join cancels promptly" {
     }, io_handle);
     defer clock.deinit();
 
-    clock.start();
+    try clock.start();
 
     // Give the loop fiber time to enter its sleep.
     std.Io.sleep(io_handle, std.Io.Duration.fromMilliseconds(50), .awake) catch {};
@@ -814,7 +838,7 @@ test "real-time: epoch boundary event fires" {
     _ = try clock.onSlot(EventTraceState.onSlot, &trace);
     _ = try clock.onEpoch(EventTraceState.onEpoch, &trace);
 
-    clock.start();
+    try clock.start();
 
     const start_slot = clock.currentSlotOrGenesis();
     // Wait enough slots to guarantee crossing at least one epoch boundary.

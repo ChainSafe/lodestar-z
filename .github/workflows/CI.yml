@@ -88,33 +88,8 @@ jobs:
         run: |
           zig build test:fork_choice
       - name: Run clock tests
-        if: matrix.os != 'macos-latest'
         run: |
           zig build test:clock
-      - name: Run clock tests (macOS, per-test diagnostic)
-        # macOS hangs on some unknown clock test in CI (works fine locally).
-        # Run each test individually so the CI log identifies the culprit.
-        if: matrix.os == 'macos-latest'
-        run: |
-          for t in \
-            "lifecycle:" \
-            "waitForSlot resolves immediately" \
-            "waitForSlot returns aborted" \
-            "offSlot/offEpoch stop" \
-            "stop/join are idempotent" \
-            "epoch event is delivered" \
-            "multiple waiters are dispatched" \
-            "cancel releases WaitState" \
-            "real-time: no slot events" \
-            "real-time: slot events fire" \
-            "real-time: multi-slot advancement" \
-            "real-time: stop+join cancels" \
-            "real-time: epoch boundary event" \
-          ; do
-            echo "::group::clock test: $t"
-            zig build test:clock -Dclock.filters="$t"
-            echo "::endgroup::"
-          done
 
       - name: Build benchmarks
         run: |
