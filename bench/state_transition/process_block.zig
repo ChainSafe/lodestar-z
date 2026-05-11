@@ -449,7 +449,7 @@ pub fn main(init: std.process.Init) !void {
     var stdout_buf: [4096]u8 = undefined;
     var stdout_file_writer = std.Io.File.stdout().writer(io, &stdout_buf);
     var stdout = &stdout_file_writer.interface;
-    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator });
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 10_000_000 });
     defer pool.deinit();
 
     // Use download_era_options.era_files[0] for state

@@ -268,7 +268,10 @@ pub const Pool = struct {
     pub const InitOptions = struct {
         page_allocator: Allocator = std.heap.page_allocator,
         allocator: Allocator = std.heap.c_allocator,
-        pool_size: u32 = 10_000_000,
+        // Default 0 = lazy growth via preheat/ensureCapacity. Pre-PR NAPI
+        // bindings relied on this to avoid hundreds of MB upfront. Bench
+        // sites that want a pre-sized pool pass an explicit value.
+        pool_size: u32 = 0,
     };
 
     pub fn init(opts: InitOptions) Error!Pool {
