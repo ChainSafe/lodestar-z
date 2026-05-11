@@ -137,6 +137,41 @@ fn coerceToBool(boolish: napi.Value) napi.status.NapiError!bool {
     return b.getValueBool();
 }
 
+/// Wraps `bytes` as a JS `Uint8Array` backed by an *external* (native-heap) ArrayBuffer.
+///
+/// V8 holds the pointer to manage the buffer's lifetime, but the buffer must still
+/// be freed natively via a finalizer.
+///
+/// ## Details
+///
+/// Heap-allocation rate & GC frequency increases when using `napi_create_arraybuffer`
+/// since V8 owns both the pointer and the payload. We rely on external buffers here
+/// to lighten the pressure on V8's GC engine.
+fn createExternalUint8Array(env: napi.Env, bytes: []const u8) !napi.Value {
+    const buf = try allocator.alloc(u8, bytes.len);
+    @memcpy(buf, bytes);
+
+    const len_hint: ?*anyopaque = @ptrFromInt(bytes.len);
+    const arraybuffer = env.createExternalArrayBuffer(buf, externalUint8Finalize, len_hint) catch |err| {
+        allocator.free(buf);
+        return err;
+    };
+
+    _ = try env.adjustExternalMemory(@intCast(bytes.len));
+    return try env.createTypedarray(.uint8, bytes.len, arraybuffer, 0);
+}
+
+fn externalUint8Finalize(env: napi.c.napi_env, data: ?*anyopaque, hint: ?*anyopaque) callconv(.c) void {
+    const len: usize = @intFromPtr(hint);
+    if (data) |d| {
+        const ptr: [*]u8 = @ptrCast(d);
+        allocator.free(ptr[0..len]);
+    }
+    var result: i64 = undefined;
+
+    _ = napi.status.check(napi.c.napi_adjust_external_memory(env, -@as(i64, @intCast(len)), &result)) catch return {};
+}
+
 pub fn PublicKey_finalize(_: napi.Env, pk: *PublicKey, _: ?*anyopaque) void {
     allocator.destroy(pk);
 }
@@ -219,18 +254,10 @@ pub fn PublicKey_toBytes(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
 
     if (compress) {
         const bytes = pk.compress();
-
-        var arraybuffer_bytes: [*]u8 = undefined;
-        const arraybuffer = try env.createArrayBuffer(PublicKey.COMPRESS_SIZE, &arraybuffer_bytes);
-        @memcpy(arraybuffer_bytes[0..PublicKey.COMPRESS_SIZE], &bytes);
-        return try env.createTypedarray(.uint8, PublicKey.COMPRESS_SIZE, arraybuffer, 0);
+        return try createExternalUint8Array(env, &bytes);
     } else {
         const bytes = pk.serialize();
-
-        var arraybuffer_bytes: [*]u8 = undefined;
-        const arraybuffer = try env.createArrayBuffer(PublicKey.SERIALIZE_SIZE, &arraybuffer_bytes);
-        @memcpy(arraybuffer_bytes[0..PublicKey.SERIALIZE_SIZE], &bytes);
-        return try env.createTypedarray(.uint8, PublicKey.SERIALIZE_SIZE, arraybuffer, 0);
+        return try createExternalUint8Array(env, &bytes);
     }
 }
 
@@ -336,18 +363,10 @@ pub fn Signature_toBytes(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
 
     if (compress) {
         const bytes = sig.compress();
-
-        var arraybuffer_bytes: [*]u8 = undefined;
-        const arraybuffer = try env.createArrayBuffer(Signature.COMPRESS_SIZE, &arraybuffer_bytes);
-        @memcpy(arraybuffer_bytes[0..Signature.COMPRESS_SIZE], &bytes);
-        return try env.createTypedarray(.uint8, Signature.COMPRESS_SIZE, arraybuffer, 0);
+        return try createExternalUint8Array(env, &bytes);
     } else {
         const bytes = sig.serialize();
-
-        var arraybuffer_bytes: [*]u8 = undefined;
-        const arraybuffer = try env.createArrayBuffer(Signature.SERIALIZE_SIZE, &arraybuffer_bytes);
-        @memcpy(arraybuffer_bytes[0..Signature.SERIALIZE_SIZE], &bytes);
-        return try env.createTypedarray(.uint8, Signature.SERIALIZE_SIZE, arraybuffer, 0);
+        return try createExternalUint8Array(env, &bytes);
     }
 }
 
@@ -484,11 +503,7 @@ pub fn SecretKey_toPublicKey(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Valu
 pub fn SecretKey_toBytes(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
     const sk = try env.unwrap(SecretKey, cb.this());
     const bytes = sk.serialize();
-
-    var arraybuffer_bytes: [*]u8 = undefined;
-    const arraybuffer = try env.createArrayBuffer(SecretKey.serialize_size, &arraybuffer_bytes);
-    @memcpy(arraybuffer_bytes[0..SecretKey.serialize_size], &bytes);
-    return try env.createTypedarray(.uint8, SecretKey.serialize_size, arraybuffer, 0);
+    return try createExternalUint8Array(env, &bytes);
 }
 
 /// Aggregates multiple Signature objects into one.
