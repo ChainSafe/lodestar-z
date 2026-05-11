@@ -101,7 +101,7 @@
             },
             .spec_test_version = .{
                 .type = .string,
-                .default = "v1.6.0-beta.2",
+                .default = "v1.7.0-alpha.5",
                 .description = "Consensus spec tests version tag.",
             },
             .spec_test_out_dir = .{
@@ -378,6 +378,7 @@
                     .bls,
                     .persistent_merkle_tree,
                     .hex,
+                    .fork_choice,
                 },
             },
         },

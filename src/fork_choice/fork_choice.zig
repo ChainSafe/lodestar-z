@@ -390,6 +390,7 @@ pub const ForkChoice = struct {
     pub fn onBlock(
         self: *ForkChoice,
         allocator: Allocator,
+        io: std.Io,
         block: *const AnyBeaconBlock,
         state: *CachedBeaconState,
         block_delay_sec: u32,
@@ -403,6 +404,7 @@ pub const ForkChoice = struct {
             inline else => |fork| try self.onBlockInner(
                 fork,
                 allocator,
+                io,
                 block.castToFork(.full, fork),
                 state,
                 block_delay_sec,
@@ -424,6 +426,7 @@ pub const ForkChoice = struct {
         self: *ForkChoice,
         comptime fork: ForkSeq,
         allocator: Allocator,
+        io: std.Io,
         block: *const BeaconBlock(.full, fork),
         state: *CachedBeaconState,
         block_delay_sec: u32,
@@ -471,6 +474,9 @@ pub const ForkChoice = struct {
         // (before attesting interval = before 1st interval).
         const is_timely = self.isBlockTimely(slot, block_delay_sec);
         // Only boost the first block we see.
+        // TODO GLOAS: v1.7.0-alpha.1 added proposer index check in update_proposer_boost_root
+        // (block.proposer_index == get_beacon_proposer_index(head_state)).
+        // Not yet implemented — matches Lodestar TS unstable.
         if (self.opts.proposer_boost and is_timely and self.proposer_boost_root == null) {
             self.proposer_boost_root = block_root;
         }
@@ -494,6 +500,7 @@ pub const ForkChoice = struct {
 
         // 8. Update realized checkpoints.
         var realized_ctx = OnBlockBalancesCtx{
+            .allocator = allocator,
             .getter = self.fc_store.justified_balances_getter,
             .checkpoint = justified_checkpoint,
             .state = state,
@@ -530,7 +537,7 @@ pub const ForkChoice = struct {
                 };
             } else {
                 // Compute new, happens ~2/3 first blocks of epoch as monitored in mainnet.
-                const unrealized = try state_transition.computeUnrealizedCheckpoints(state, allocator);
+                const unrealized = try state_transition.computeUnrealizedCheckpoints(allocator, io, state);
                 unrealized_justified_checkpoint = .{
                     .epoch = unrealized.justified_checkpoint.epoch,
                     .root = unrealized.justified_checkpoint.root,
@@ -547,6 +554,7 @@ pub const ForkChoice = struct {
 
         // Update best known unrealized justified & finalized checkpoints.
         var unrealized_balances_ctx = OnBlockBalancesCtx{
+            .allocator = allocator,
             .getter = self.fc_store.justified_balances_getter,
             .checkpoint = unrealized_justified_checkpoint,
             .state = state,
@@ -560,6 +568,7 @@ pub const ForkChoice = struct {
         // checkpoints right away.
         if (block_epoch < computeEpochAtSlot(current_slot)) {
             var past_epoch_ctx = OnBlockBalancesCtx{
+                .allocator = allocator,
                 .getter = self.fc_store.justified_balances_getter,
                 .checkpoint = unrealized_justified_checkpoint,
                 .state = state,
@@ -1334,6 +1343,7 @@ pub const ForkChoice = struct {
 
     /// Closure context for `onBlock` path: calls `getter.get(checkpoint, state)` → wraps in RC.
     const OnBlockBalancesCtx = struct {
+        allocator: Allocator,
         getter: store.JustifiedBalancesGetter,
         checkpoint: Checkpoint,
         state: *CachedBeaconState,
@@ -1341,7 +1351,7 @@ pub const ForkChoice = struct {
         fn call(ctx: ?*anyopaque) error{OutOfMemory}!*EffectiveBalanceIncrementsRc {
             const self: *OnBlockBalancesCtx = @ptrCast(@alignCast(ctx.?));
             const balances = self.getter.get(self.checkpoint, self.state);
-            return EffectiveBalanceIncrementsRc.init(balances.allocator, balances);
+            return EffectiveBalanceIncrementsRc.init(self.allocator, balances);
         }
     };
 
