@@ -371,37 +371,39 @@ pub fn proposerLookahead(self: *const BeaconStateView) !js.Uint32Array {
 
 // pub fn BeaconStateView_getShufflingAtEpoch
 
-pub fn previousDecisionRoot(self: *const BeaconStateView) !js.Uint8Array {
+fn rootToHexString(root: *const [32]u8) !js.String {
     const env = js.env();
-    const cached_state = try self.requireState();
-    const root = cached_state.previousDecisionRoot();
-    return js_types.wrap(js.Uint8Array, try sszValueToNapiValue(env, ct.primitive.Root, &root));
+    var hex_buf: [66]u8 = undefined;
+    try @import("hex").rootIntoHex(&hex_buf, root);
+    return js_types.wrap(js.String, try env.createStringUtf8(&hex_buf));
 }
 
-pub fn currentDecisionRoot(self: *const BeaconStateView) !js.Uint8Array {
-    const env = js.env();
+pub fn previousDecisionRoot(self: *const BeaconStateView) !js.String {
+    const cached_state = try self.requireState();
+    const root = cached_state.previousDecisionRoot();
+    return rootToHexString(&root);
+}
+
+pub fn currentDecisionRoot(self: *const BeaconStateView) !js.String {
     const cached_state = try self.requireState();
     const root = cached_state.currentDecisionRoot();
-    return js_types.wrap(js.Uint8Array, try sszValueToNapiValue(env, ct.primitive.Root, &root));
+    return rootToHexString(&root);
 }
 
 /// Get the next decision root for the state.
-pub fn nextDecisionRoot(self: *const BeaconStateView) !js.Uint8Array {
-    const env = js.env();
+pub fn nextDecisionRoot(self: *const BeaconStateView) !js.String {
     const cached_state = try self.requireState();
     const root = cached_state.nextDecisionRoot();
-    return js_types.wrap(js.Uint8Array, try sszValueToNapiValue(env, ct.primitive.Root, &root));
+    return rootToHexString(&root);
 }
 
 /// Get the shuffling decision root for a given epoch.
-pub fn getShufflingDecisionRoot(self: *const BeaconStateView, epoch_arg: js.Number) !js.Uint8Array {
-    const env = js.env();
+pub fn getShufflingDecisionRoot(self: *const BeaconStateView, epoch_arg: js.Number) !js.String {
     const cached_state = try self.requireState();
-    const epoch_value: u64 = @intCast(try epoch_arg.toI64());
-    const root = st.calculateShufflingDecisionRoot(cached_state.state, epoch_value) catch {
-        return throwNullAs(js.Uint8Array, "STATE_ERROR", "Failed to calculate shuffling decision root");
+    const root = st.calculateShufflingDecisionRoot(cached_state.state, try epoch_arg.toU32()) catch {
+        return throwNullAs(js.String, "STATE_ERROR", "Failed to calculate shuffling decision root");
     };
-    return js_types.wrap(js.Uint8Array, try sszValueToNapiValue(env, ct.primitive.Root, &root));
+    return rootToHexString(&root);
 }
 
 pub fn previousProposers(self: *const BeaconStateView) !?js.Array {
@@ -621,7 +623,7 @@ pub fn isExecutionEnabled(self: *const BeaconStateView, fork_name_value: js.Stri
 
     const result = switch (cached_state.state.forkSeq()) {
         inline else => |f| switch (signed_block.blockType()) {
-            inline else => |bt| if (comptime bt == .blinded and f.lt(.bellatrix)) {
+            inline else => |bt| if (comptime (bt == .blinded and f.lt(.bellatrix)) or (bt == .blinded and f.gte(.gloas))) {
                 return error.InvalidBlockTypeForFork;
             } else st.isExecutionEnabled(
                 f,
@@ -933,6 +935,58 @@ pub fn processSlots(self: *const BeaconStateView, slot_arg: js.Number, options: 
 
     try st.processSlots(allocator, napi_io.get(), post_state, slot_value, .{});
     return .{ .cached_state = post_state };
+}
+
+/// Compute expected withdrawals for the next payload (capella+).
+/// Returns: { expectedWithdrawals: Withdrawal[], processedPartialWithdrawalsCount, processedValidatorSweepCount,
+///           processedBuilderWithdrawalsCount, processedBuildersSweepCount }
+/// The latter two are Gloas-only — always 0 here since Zig STF doesn't process Gloas yet.
+pub fn getExpectedWithdrawals(self: *const BeaconStateView) !js.Value {
+    const env = js.env();
+    const cached_state = try self.requireState();
+    const fork_seq = cached_state.state.forkSeq();
+
+    // We also check this within the native fn itself but this lets us avoid allocating an `AutoHashMap` early.
+    if (fork_seq.lt(.capella)) {
+        return throwNullAs(js.Value, "INVALID_FORK", "getExpectedWithdrawals only supported capella+");
+    }
+
+    var withdrawals_buf: [preset.MAX_WITHDRAWALS_PER_PAYLOAD]ct.capella.Withdrawal.Type = undefined;
+    var withdrawals_result = st.WithdrawalsResult{
+        .withdrawals = ct.capella.Withdrawals.Type.initBuffer(&withdrawals_buf),
+    };
+
+    var withdrawal_balances = std.AutoHashMap(ct.primitive.ValidatorIndex.Type, usize).init(allocator);
+    defer withdrawal_balances.deinit();
+
+    switch (fork_seq) {
+        inline .capella, .deneb, .electra, .fulu => |f| {
+            try st.getExpectedWithdrawals(
+                f,
+                cached_state.epoch_cache,
+                cached_state.state.castToFork(f),
+                &withdrawals_result,
+                &withdrawal_balances,
+            );
+        },
+        else => unreachable,
+    }
+
+    const obj = try env.createObject();
+
+    const withdrawals_arr = try env.createArray();
+    for (withdrawals_result.withdrawals.items, 0..) |*w, i| {
+        const w_value = try sszValueToNapiValue(env, ct.capella.Withdrawal, w);
+        try withdrawals_arr.setElement(@intCast(i), w_value);
+    }
+    try obj.setNamedProperty("expectedWithdrawals", withdrawals_arr);
+    try obj.setNamedProperty("processedPartialWithdrawalsCount", try env.createUint32(@intCast(withdrawals_result.processed_partial_withdrawals_count)));
+    try obj.setNamedProperty("processedValidatorSweepCount", try env.createUint32(@intCast(withdrawals_result.sampled_validators)));
+    // TODO(bing): Implement when we support Gloas.
+    try obj.setNamedProperty("processedBuilderWithdrawalsCount", try env.createUint32(0));
+    try obj.setNamedProperty("processedBuildersSweepCount", try env.createUint32(0));
+
+    return js_types.wrap(js.Value, obj);
 }
 
 fn requireState(self: *const BeaconStateView) !*CachedBeaconState {

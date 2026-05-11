@@ -1,6 +1,6 @@
 {
   "name": "@chainsafe/lodestar-z",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Lodestar-z NAPI bindings",
   "files": [
     "bindings/src/",
@@ -29,6 +29,10 @@
   "keywords": [],
   "author": "ChainSafe Systems",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ChainSafe/lodestar-z.git"
+  },
   "packageManager": "pnpm@10.24.0",
   "zapi": {
     "binaryName": "bindings",

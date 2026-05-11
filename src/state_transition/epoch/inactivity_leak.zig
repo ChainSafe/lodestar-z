@@ -4,7 +4,7 @@ const preset = @import("preset").preset;
 const MIN_EPOCHS_TO_INACTIVITY_PENALTY = preset.MIN_EPOCHS_TO_INACTIVITY_PENALTY;
 const computePreviousEpoch = @import("../utils/epoch.zig").computePreviousEpoch;
 
-pub fn getFinalityDelay(current_epoch: u64, finalized_epoch: u64) u64 {
+fn getFinalityDelay(current_epoch: u64, finalized_epoch: u64) u64 {
     const previous_epoch = computePreviousEpoch(current_epoch);
     std.debug.assert(previous_epoch >= finalized_epoch);
 
@@ -18,4 +18,14 @@ pub fn getFinalityDelay(current_epoch: u64, finalized_epoch: u64) u64 {
 /// it works.
 pub fn isInInactivityLeak(current_epoch: u64, finalized_epoch: u64) bool {
     return getFinalityDelay(current_epoch, finalized_epoch) > MIN_EPOCHS_TO_INACTIVITY_PENALTY;
+}
+
+test isInInactivityLeak {
+    // Not in leak: delay <= 4
+    try std.testing.expect(!isInInactivityLeak(10, 9)); // delay=0
+    try std.testing.expect(!isInInactivityLeak(10, 5)); // delay=4 (not strictly greater)
+
+    // In leak: delay > 4
+    try std.testing.expect(isInInactivityLeak(10, 4)); // delay=5
+    try std.testing.expect(isInInactivityLeak(10, 0)); // delay=9
 }

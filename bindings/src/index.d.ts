@@ -199,8 +199,25 @@ declare class BeaconStateView {
   isValidVoluntaryExit(signedVoluntaryExitBytes: Uint8Array, verifySignature: boolean): boolean;
 
   getFinalizedRootProof(): Uint8Array[];
-  // getSyncCommitteesWitness(): SyncCommitteeWitness;
-  getSingleProof(gindex: number): Uint8Array[];
+  // getSyncCommitteesWitness(): any;
+  /**
+   * Compute expected withdrawals for the next payload (capella+).
+   *
+   * processedBuilderWithdrawalsCount is withdrawals coming from builder payment since gloas (EIP-7732)
+   * processedPartialWithdrawalsCount is withdrawals coming from EL since electra (EIP-7002)
+   * processedBuildersSweepCount is withdrawals from builder sweep since gloas (EIP-7732)
+   * processedValidatorSweepCount is withdrawals coming from validator sweep
+
+   * TODO(bing): `processedBuilderWithdrawalsCount` and `processedBuildersSweepCount` are Gloas-only
+   * and always 0 here since Zig STF doesn't process Gloas yet.
+   */
+  getExpectedWithdrawals(): {
+    expectedWithdrawals: {index: number; validatorIndex: number; address: Uint8Array; amount: number}[];
+    processedBuilderWithdrawalsCount: number;
+    processedPartialWithdrawalsCount: number;
+    processedBuildersSweepCount: number;
+    processedValidatorSweepCount: number;
+  };
   // createMultiProof(descriptor: Uint8Array): CompactMultiProof;
 
   computeUnrealizedCheckpoints(): {

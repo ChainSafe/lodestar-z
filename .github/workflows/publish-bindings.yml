@@ -19,6 +19,9 @@ jobs:
     # [incompatibility]: https://github.com/ChainSafe/lodestar/actions/runs/24988157940/job/73166634073?pr=8900
     # [security support until May 2027]: https://ubuntu.com/about/release-cycle
     runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -28,6 +31,7 @@ jobs:
         uses: actions/setup-node@v6
         with:
           node-version: ${{ env.NODE_VERSION }}
+          registry-url: "https://registry.npmjs.org"
           cache: pnpm
       - name: Install Zig
         uses: mlugg/setup-zig@v2
@@ -40,9 +44,23 @@ jobs:
       - name: Run bindings formatter
         run: |
           pnpm biome ci
+      - name: Determine npm dist tag
+        id: detect_dist_tag 
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          if [[ "$VERSION" == *-* ]]; then
+            # Prerelease: derive tag from the prerelease identifier (e.g. 0.1.2-rc.0 -> rc)
+            TAG="${VERSION#*-}"
+            TAG="${TAG%%.*}"
+            echo "Prerelease version $VERSION.$TAG"
+            echo "tag_flag=--tag $TAG" >> "$GITHUB_OUTPUT"
+          else
+            echo "Stable version $VERSION -> npm default dist-tag"
+            echo "tag_flag=" >> "$GITHUB_OUTPUT"
+          fi
       - name: Build and publish to npm
         run: |
           pnpm zapi build-artifacts --optimize ReleaseSafe
           pnpm zapi prepublish
-          pnpm zapi publish --access public
+          pnpm zapi publish --access public -- --provenance ${{ steps.detect_dist_tag.outputs.tag_flag }}
 
