@@ -36,8 +36,8 @@
             .hash = "zig_yaml-0.1.0-C1161kFWAwDxjKAFmklKwWVDvz2mmq0Q__bDhGGjeyd3",
         },
         .zapi = .{
-            .url = "git+https://github.com/chainsafe/zapi?ref=zapi-v2.0.0#f9fa8b0237352326e9f970b62588b6af01e3e384",
-            .hash = "zapi-2.0.0-rIqzUcc3BABKRuJlzpYNtiMVCOFybuVSGOLmk0KOCeel",
+            .url = "git+https://github.com/chainsafe/zapi#40377b142304fe890ace0dc8978dc43f22efea9e",
+            .hash = "zapi-2.0.0-rIqzUUJNBABUXYIA67bxe5aDS5J2asn27TOHn3YTsHDL",
         },
         .zbench = .{
             .url = "git+https://github.com/hendriknielaender/zBench#b2b89c475e3ef1bb2bd71255c80478a82d3e0ca8",
