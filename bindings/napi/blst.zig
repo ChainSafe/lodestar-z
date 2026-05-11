@@ -305,7 +305,6 @@ pub const SecretKey = struct {
         return formatHex(bytes[0..]);
     }
 };
-
 /// Verifies a given `msg` against a `Signature` and a `PublicKey`.
 ///
 /// Returns `true` if signature is valid, `false` otherwise.
