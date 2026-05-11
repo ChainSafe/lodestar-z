@@ -122,6 +122,14 @@ pub fn BasicPackedChunks(
                 // do NOT call setChildNode again (which would unref-then-store
                 // the same Id and free our chunked_leaf).
                 if (state_col[@intFromEnum(existing_id)].refCount() == 0) {
+                    // rc==0 transient nodes only exist after Path 1 or Path 3 created
+                    // them in this commit cycle. Both call setChildNode which adds
+                    // gindex to `changed`. If this assertion fires, it means rc=0 is
+                    // being observed on a node that was never registered as a pending
+                    // write — likely a leaked free-list node, a stale cache entry, or
+                    // an external mutation of the rc state machine.
+                    std.debug.assert(existing_kind == .chunked_leaf);
+                    std.debug.assert(self.state.changed.contains(gindex));
                     const storage = try existing_id.getChunkedLeafPtr(self.state.pool);
                     ST.Element.tree.fromValuePackedIntoChunk(&storage.chunks[intra_chunk], index, &value);
                     self.state.pool.nodes.items(.root)[@intFromEnum(existing_id)] = Node.lazy_sentinel;
@@ -131,6 +139,7 @@ pub fn BasicPackedChunks(
                 // Path 3: shared chunked_leaf (rc >= 1 — owned by the persistent tree).
                 // Must CoW: produce a fresh chunked_leaf via setChunkedLeafChunk and publish
                 // it. From this point onward subsequent writes hit Path 2.
+                std.debug.assert(existing_kind == .chunked_leaf);
                 const existing_chunks = try existing_id.getChunkedLeafChunks(self.state.pool);
                 var new_chunk: [32]u8 = existing_chunks[intra_chunk];
                 ST.Element.tree.fromValuePackedIntoChunk(&new_chunk, index, &value);
