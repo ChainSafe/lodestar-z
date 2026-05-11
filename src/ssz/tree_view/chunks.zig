@@ -122,12 +122,10 @@ pub fn BasicPackedChunks(
                 // do NOT call setChildNode again (which would unref-then-store
                 // the same Id and free our chunked_leaf).
                 if (state_col[@intFromEnum(existing_id)].refCount() == 0) {
-                    // rc==0 transient nodes only exist after Path 1 or Path 3 created
-                    // them in this commit cycle. Both call setChildNode which adds
-                    // gindex to `changed`. If this assertion fires, it means rc=0 is
-                    // being observed on a node that was never registered as a pending
-                    // write — likely a leaked free-list node, a stale cache entry, or
-                    // an external mutation of the rc state machine.
+                    // Path 2 owner invariant: rc=0 transient was registered by
+                    // a prior Path 1/3 in this commit cycle (which added gindex
+                    // to `changed`). If this assertion fires, the rc state
+                    // machine has drifted.
                     std.debug.assert(existing_kind == .chunked_leaf);
                     std.debug.assert(self.state.changed.contains(gindex));
                     const storage = try existing_id.getChunkedLeafPtr(self.state.pool);
