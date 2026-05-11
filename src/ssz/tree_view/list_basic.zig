@@ -336,26 +336,25 @@ pub fn ListBasicTreeView(comptime ST: type) type {
                     break :blk updated;
                 };
                 // `truncate_input` is either `self.chunks.state.root` (no
-                // extra ref) or a new tree from `setNodeAtDepth` (rc=0
-                // owned by us). In both cases passing to truncate consumes
-                // logically — truncate produces `new_root` and the input
-                // is unref'd via the defer below if it was owned.
+                // extra ref) or a fresh tree from `setNodeAtDepth` (rc=0,
+                // owned by us). Pool-level setNode/truncate are
+                // pure-functional: they walk `root_node` without changing
+                // its rc, so we keep the deferred unref alive for the
+                // owned case to release the transient when sliceTo exits.
                 const owned_truncate_input = boundary_kind != .zero;
 
-                var truncate_input_handle: ?Node.Id = if (owned_truncate_input) truncate_input else null;
+                const truncate_input_handle: ?Node.Id = if (owned_truncate_input) truncate_input else null;
                 defer if (truncate_input_handle) |id| pool.unref(id);
 
-                var new_root: ?Node.Id = try Node.Id.truncateAfterIndexWithLeafOffset(truncate_input, pool, chunked_leaf_depth, chunked_leaf_idx, ChunkedLeaf.k_log2);
-                defer if (new_root) |id| pool.unref(id);
-                truncate_input_handle = null;
+                const new_root = try Node.Id.truncateAfterIndexWithLeafOffset(truncate_input, pool, chunked_leaf_depth, chunked_leaf_idx, ChunkedLeaf.k_log2);
+                defer pool.unref(new_root);
 
                 var length_node: ?Node.Id = try pool.createLeafFromUint(@intCast(new_length));
                 defer if (length_node) |id| pool.unref(id);
-                const root_with_length = try Node.Id.setNode(new_root.?, pool, @enumFromInt(3), length_node.?);
+                const root_with_length = try Node.Id.setNode(new_root, pool, @enumFromInt(3), length_node.?);
                 errdefer pool.unref(root_with_length);
 
                 length_node = null;
-                new_root = null;
 
                 return try Self.init(self.allocator, pool, root_with_length);
             }
@@ -369,27 +368,25 @@ pub fn ListBasicTreeView(comptime ST: type) type {
 
             var truncated_chunk_node: ?Node.Id = try pool.createLeaf(&chunk_bytes);
             defer if (truncated_chunk_node) |id| pool.unref(id);
-            var updated: ?Node.Id = try Node.Id.setNodeAtDepth(
+            const updated = try Node.Id.setNodeAtDepth(
                 self.chunks.state.root,
                 pool,
                 chunk_depth,
                 chunk_index,
                 truncated_chunk_node.?,
             );
-            defer if (updated) |id| pool.unref(id);
+            defer pool.unref(updated);
             truncated_chunk_node = null;
 
-            var new_root: ?Node.Id = try Node.Id.truncateAfterIndex(updated.?, pool, chunk_depth, chunk_index);
-            defer if (new_root) |id| pool.unref(id);
-            updated = null;
+            const new_root = try Node.Id.truncateAfterIndex(updated, pool, chunk_depth, chunk_index);
+            defer pool.unref(new_root);
 
             var length_node: ?Node.Id = try pool.createLeafFromUint(@intCast(new_length));
             defer if (length_node) |id| pool.unref(id);
-            const root_with_length = try Node.Id.setNode(new_root.?, pool, @enumFromInt(3), length_node.?);
+            const root_with_length = try Node.Id.setNode(new_root, pool, @enumFromInt(3), length_node.?);
             errdefer pool.unref(root_with_length);
 
             length_node = null;
-            new_root = null;
 
             return try Self.init(self.allocator, pool, root_with_length);
         }
@@ -1673,4 +1670,67 @@ test "ListBasicTreeView chunked_leaf: getAllInto sees uncommitted push" {
     _ = try view.getAllInto(out);
 
     try std.testing.expectEqualSlices(u64, &.{ 10, 20, 30, 40 }, out);
+}
+
+test "ListBasicTreeView chunked_leaf: sliceTo doesn't leak pool nodes" {
+    // sliceTo allocates transient roots via setNodeAtDepth / truncate /
+    // setNode. Those calls don't consume their input root_node, so the
+    // caller must unref the intermediates. The test asserts node count
+    // returns to baseline after repeated sliceTo+deinit.
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 4096 });
+    defer pool.deinit();
+
+    const ListT = FixedListType(UintType(64), 1 << 20, .{ .chunked_leaf = true });
+    var src: ListT.Type = .empty;
+    defer src.deinit(allocator);
+    for (0..100) |i| try src.append(allocator, @as(u64, @intCast(i)));
+
+    const root_id = try ListT.tree.fromValue(&pool, &src);
+    var view = try ListT.TreeView.init(allocator, &pool, root_id);
+    defer view.deinit();
+
+    // One warmup so any one-time lazy initialization isn't counted.
+    {
+        var w = try view.sliceTo(50);
+        w.deinit();
+    }
+
+    const before = pool.getNodesInUse();
+    for (0..50) |_| {
+        var s = try view.sliceTo(50);
+        s.deinit();
+    }
+    const after = pool.getNodesInUse();
+
+    try std.testing.expectEqual(before, after);
+}
+
+test "ListBasicTreeView non-chunked_leaf: sliceTo doesn't leak pool nodes" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 4096 });
+    defer pool.deinit();
+
+    const ListT = FixedListType(UintType(64), 1 << 20, .{});
+    var src: ListT.Type = .empty;
+    defer src.deinit(allocator);
+    for (0..100) |i| try src.append(allocator, @as(u64, @intCast(i)));
+
+    const root_id = try ListT.tree.fromValue(&pool, &src);
+    var view = try ListT.TreeView.init(allocator, &pool, root_id);
+    defer view.deinit();
+
+    {
+        var w = try view.sliceTo(50);
+        w.deinit();
+    }
+
+    const before = pool.getNodesInUse();
+    for (0..50) |_| {
+        var s = try view.sliceTo(50);
+        s.deinit();
+    }
+    const after = pool.getNodesInUse();
+
+    try std.testing.expectEqual(before, after);
 }

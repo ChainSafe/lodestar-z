@@ -276,15 +276,14 @@ pub fn ListCompositeTreeView(comptime ST: type) type {
                 return error.LengthOverLimit;
             }
 
-            var chunk_root: ?Node.Id = try Node.Id.truncateAfterIndex(self.chunks.state.root, self.chunks.state.pool, chunk_depth, index);
-            defer if (chunk_root) |id| self.chunks.state.pool.unref(id);
+            const chunk_root = try Node.Id.truncateAfterIndex(self.chunks.state.root, self.chunks.state.pool, chunk_depth, index);
+            defer self.chunks.state.pool.unref(chunk_root);
 
             var length_node: ?Node.Id = try self.chunks.state.pool.createLeafFromUint(@intCast(new_length));
             defer if (length_node) |id| self.chunks.state.pool.unref(id);
-            const root_with_length = try Node.Id.setNode(chunk_root.?, self.chunks.state.pool, @enumFromInt(3), length_node.?);
+            const root_with_length = try Node.Id.setNode(chunk_root, self.chunks.state.pool, @enumFromInt(3), length_node.?);
             errdefer self.chunks.state.pool.unref(root_with_length);
             length_node = null;
-            chunk_root = null;
 
             return try Self.init(self.allocator, self.chunks.state.pool, root_with_length);
         }
@@ -1150,4 +1149,33 @@ test "ListCompositeTreeView - push and serialize" {
     try view.hashTreeRootInto(&hash_root);
     const expected_root = [_]u8{ 0x0c, 0xb9, 0x47, 0x37, 0x7e, 0x17, 0x7f, 0x77, 0x47, 0x19, 0xea, 0xd8, 0xd2, 0x10, 0xaf, 0x9c, 0x64, 0x61, 0xf4, 0x1b, 0xaf, 0x5b, 0x40, 0x82, 0xf8, 0x6a, 0x39, 0x11, 0x45, 0x48, 0x31, 0xb8 };
     try std.testing.expectEqualSlices(u8, &expected_root, &hash_root);
+}
+
+test "TreeView composite list sliceTo doesn't leak pool nodes" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 1024 });
+    defer pool.deinit();
+
+    const ListType = FixedListType(Checkpoint, 1024, .{});
+    var list: ListType.Type = .empty;
+    defer list.deinit(allocator);
+    for (0..16) |i| try list.append(allocator, .{ .epoch = @intCast(i), .root = [_]u8{@intCast(i)} ** 32 });
+
+    const root_node = try ListType.tree.fromValue(&pool, &list);
+    var view = try ListType.TreeView.init(allocator, &pool, root_node);
+    defer view.deinit();
+
+    {
+        var w = try view.sliceTo(7);
+        w.deinit();
+    }
+
+    const before = pool.getNodesInUse();
+    for (0..50) |_| {
+        var s = try view.sliceTo(7);
+        s.deinit();
+    }
+    const after = pool.getNodesInUse();
+
+    try std.testing.expectEqual(before, after);
 }
