@@ -86,7 +86,6 @@ epoch_snapshot: std.ArrayListUnmanaged(EpochSnapshot) = .empty,
 
 waiters: WaiterQueue,
 
-/// Initialise in-place.
 pub fn init(self: *EventClock, allocator: Allocator, config: Config, io_handle: std.Io) Error!void {
     self.* = .{
         .allocator = allocator,
@@ -134,10 +133,8 @@ pub fn deinit(self: *EventClock) void {
     self.* = undefined;
 }
 
-// ── Listener API ──
-// Register listeners before calling `start()`. From inside a callback,
-// `offSlot` / `offEpoch` are safe; `onSlot` / `onEpoch` are not — they
-// may reallocate the snapshot buffer being iterated by the active emit.
+// Inside a callback, `offSlot` / `offEpoch` are safe; `onSlot` / `onEpoch`
+// are not — they may reallocate the snapshot buffer iterated by the active emit.
 
 /// Register a slot listener.  Returns an ID for later removal via `offSlot`.
 pub fn onSlot(
@@ -207,10 +204,9 @@ pub fn offEpoch(self: *EventClock, id: ListenerId) bool {
     return false;
 }
 
-// ── Delegated read APIs ──
-// Public accessors that expose "current" slot/epoch state call catchUp()
-// first so reads emit any pending events before returning. Pure
-// time-arithmetic helpers (slotWithFutureTolerance, secFromSlot, …) do not.
+// Accessors that expose "current" slot/epoch state call catchUp() first so
+// reads emit any pending events before returning.  Pure time-arithmetic
+// helpers (slotWithFutureTolerance, secFromSlot, …) do not.
 
 pub fn currentSlot(self: *EventClock) ?Slot {
     self.catchUp();
@@ -258,8 +254,6 @@ pub fn msFromSlot(self: *EventClock, slot: Slot, to_ms: ?slot_math.UnixMs) ?i64 
     return self.clock.msFromSlot(slot, to_ms);
 }
 
-// ── waitForSlot ──
-
 /// Return type from `waitForSlot`. The caller MUST either:
 ///   - call `await()` to wait for the target slot and release resources, OR
 ///   - call `cancel()` to abort and release resources, OR
@@ -284,8 +278,8 @@ pub const WaitForSlotResult = struct {
 
     pub fn await(self: *WaitForSlotResult, io: std.Io) Error!void {
         const result = self.inner.await(io);
-        // Free AFTER await returns — workaround for Zig futex use-after-free
-        // where GCD still holds a reference to the event address after wake.
+        // Free state only AFTER the fiber returns, so it can't observe a
+        // freed `state.aborted` between event-wake and its own return.
         if (self.state) |s| s.allocator.destroy(s);
         self.state = null;
         self.clock = null;
@@ -363,8 +357,6 @@ pub fn waitForSlot(self: *EventClock, target: Slot) Error!WaitForSlotResult {
         .clock = self,
     };
 }
-
-// ── Private ──
 
 /// Ensure event-clock state is caught up to wall-clock time.
 /// Emits any intermediate slot/epoch events to listeners.
@@ -480,14 +472,12 @@ fn runAutoLoop(self: *EventClock) void {
 }
 
 fn waitForSlotFutureAwait(state: *WaitState) Error!void {
-    // NOTE: Do NOT free state here. The caller (WaitForSlotResult.await) frees
-    // it AFTER this future completes — workaround for Zig futex use-after-free
-    // where GCD still holds a reference to the event address after wake.
+    // Do NOT free state here — `state.aborted` is read after the wake,
+    // and the caller (`WaitForSlotResult.await`) frees only once this fiber
+    // has fully returned.
     state.event.waitUncancelable(state.io);
     if (state.aborted) return error.Aborted;
 }
-
-// ── Tests ──
 
 const testing = std.testing;
 const zio = @import("zio");
@@ -713,10 +703,6 @@ test "cancel releases WaitState without awaiting" {
         }
     }.run);
 }
-
-// ── Real-time tests ──
-// These tests exercise `runAutoLoop` (the production code path) by calling
-// `clock.start()` and letting wall-clock time drive slot advancement.
 
 test "real-time: no slot events emitted before genesis" {
     try runInRuntime(struct {
