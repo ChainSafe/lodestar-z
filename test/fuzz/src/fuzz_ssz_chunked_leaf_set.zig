@@ -51,6 +51,19 @@ fn fuzzListOps(
     }) catch return;
     defer pool.deinit();
 
+    // Pool baseline = pre-populated zero sentinels (max_depth of them).
+    // Any future regression in set/commit/push/clone that fails to unref a
+    // transient Pool slot will accumulate over the op stream and trip this
+    // assert at function exit (after view.deinit releases the tree).
+    const baseline_in_use = pool.getNodesInUse();
+    var leak_check_armed = false;
+    defer {
+        if (leak_check_armed) {
+            const final_in_use = pool.getNodesInUse();
+            assert(final_in_use == baseline_in_use);
+        }
+    }
+
     var reference = std.ArrayList(Element).empty;
     defer reference.deinit(allocator);
     reference.ensureTotalCapacity(allocator, ItemCount) catch return;
@@ -64,6 +77,9 @@ fn fuzzListOps(
     const root_id = ListT.tree.fromValue(&pool, &src) catch return;
     var view = ListT.TreeView.init(allocator, &pool, root_id) catch return;
     defer view.deinit();
+
+    // Setup complete: arm the leak check so it fires at function exit.
+    leak_check_armed = true;
 
     var i: usize = 0;
     while (i + op_size <= data.len) : (i += op_size) {
