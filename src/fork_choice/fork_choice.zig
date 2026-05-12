@@ -40,6 +40,7 @@ const INIT_VOTE_SLOT = vote_tracker.INIT_VOTE_SLOT;
 
 const compute_deltas = @import("compute_deltas.zig");
 const computeDeltas = compute_deltas.computeDeltas;
+const ComputeDeltasResult = compute_deltas.ComputeDeltasResult;
 const DeltasCache = compute_deltas.DeltasCache;
 
 const metrics = @import("metrics.zig");
@@ -323,7 +324,6 @@ pub const ForkChoice = struct {
     pub fn init(
         self: *ForkChoice,
         allocator: Allocator,
-        io: std.Io,
         config: *const BeaconConfig,
         fc_store: *ForkChoiceStore,
         proto_array: *ProtoArray,
@@ -351,8 +351,9 @@ pub const ForkChoice = struct {
         // Pre-allocate votes for known validators, initialized to NULL_VOTE_INDEX.
         try self.votes.ensureValidatorCount(allocator, validator_count);
 
-        // Compute initial head.
-        try self.updateHead(allocator, io);
+        // Compute initial head. The startup `computeDeltas` call is one-shot and
+        // not metric-observed; observations happen in `updateAndGetHead`.
+        _ = try self.updateHead(allocator);
     }
 
     /// Release resources owned by ForkChoice (votes, caches, queued attestations).
@@ -941,12 +942,10 @@ pub const ForkChoice = struct {
     ///
     /// Equivalent to:
     /// https://github.com/ethereum/consensus-specs/blob/v1.1.10/specs/phase0/fork-choice.md#get_head
-    fn updateHead(self: *ForkChoice, allocator: Allocator, io: std.Io) !void {
+    fn updateHead(self: *ForkChoice, allocator: Allocator) !ComputeDeltasResult {
         // Check if scores need to be calculated/updated
         const old_balances = self.balances.get().items;
         const new_balances = self.fc_store.justified.balances.get().items;
-
-        const compute_deltas_timer = time.timestampNow(io);
 
         const vote_fields = self.votes.fields();
         const result = try computeDeltas(
@@ -959,21 +958,6 @@ pub const ForkChoice = struct {
             new_balances,
             &self.fc_store.equivocating_indices,
         );
-
-        metrics.fork_choice_metrics.compute_deltas_duration.observe(time.durationSeconds(time.since(io, compute_deltas_timer)));
-        metrics.fork_choice_metrics.compute_deltas_deltas_count.set(@intCast(result.deltas.len));
-        metrics.fork_choice_metrics.compute_deltas_equivocating_validators.set(result.equivocating_validators);
-        metrics.fork_choice_metrics.compute_deltas_old_inactive_validators.set(result.old_inactive_validators);
-        metrics.fork_choice_metrics.compute_deltas_new_inactive_validators.set(result.new_inactive_validators);
-        metrics.fork_choice_metrics.compute_deltas_unchanged_vote_validators.set(result.unchanged_vote_validators);
-        metrics.fork_choice_metrics.compute_deltas_new_vote_validators.set(result.new_vote_validators);
-
-        // Count zero deltas.
-        var zero_count: u64 = 0;
-        for (result.deltas) |d| {
-            if (d == 0) zero_count += 1;
-        }
-        metrics.fork_choice_metrics.compute_deltas_zero_deltas_count.set(zero_count);
 
         self.balances.unref();
         self.balances = self.fc_store.justified.balances.ref();
@@ -1007,6 +991,7 @@ pub const ForkChoice = struct {
         );
 
         self.head = head.toBlock();
+        return result;
     }
 
     /// Get the cached head (without recomputing).
@@ -1216,7 +1201,9 @@ pub const ForkChoice = struct {
         const canonical_head: ProtoBlock = switch (opt) {
             .get_predicted_proposer_head => self.head,
             else => blk: {
-                try self.updateHead(allocator, io);
+                const compute_deltas_timer = time.timestampNow(io);
+                const result = try self.updateHead(allocator);
+                observeComputeDeltasMetrics(io, compute_deltas_timer, result);
                 break :blk self.head;
             },
         };
@@ -1228,6 +1215,25 @@ pub const ForkChoice = struct {
                 .head = self.predictProposerHead(&canonical_head, params.sec_from_slot, params.slot),
             },
         };
+    }
+
+    /// Record `computeDeltas` timing and counter metrics. Pulled out of
+    /// `updateAndGetHead` so the public hot path stays readable.
+    fn observeComputeDeltasMetrics(io: std.Io, start: std.Io.Timestamp, result: ComputeDeltasResult) void {
+        const fm = &metrics.fork_choice_metrics;
+        fm.compute_deltas_duration.observe(time.durationSeconds(time.since(io, start)));
+        fm.compute_deltas_deltas_count.set(@intCast(result.deltas.len));
+        fm.compute_deltas_equivocating_validators.set(result.equivocating_validators);
+        fm.compute_deltas_old_inactive_validators.set(result.old_inactive_validators);
+        fm.compute_deltas_new_inactive_validators.set(result.new_inactive_validators);
+        fm.compute_deltas_unchanged_vote_validators.set(result.unchanged_vote_validators);
+        fm.compute_deltas_new_vote_validators.set(result.new_vote_validators);
+
+        var zero_count: u64 = 0;
+        for (result.deltas) |d| if (d == 0) {
+            zero_count += 1;
+        };
+        fm.compute_deltas_zero_deltas_count.set(zero_count);
     }
 
     // ── Equivocation ──
@@ -2183,7 +2189,7 @@ fn initTestForkChoice(
     const fc = try allocator.create(ForkChoice);
     errdefer allocator.destroy(fc);
 
-    try fc.init(allocator, std.testing.io, getTestConfig(), fc_store, proto_arr, 0, .{});
+    try fc.init(allocator, getTestConfig(), fc_store, proto_arr, 0, .{});
     return fc;
 }
 
@@ -2221,7 +2227,7 @@ fn initTestForkChoiceWithOpts(
 
     const fc = try allocator.create(ForkChoice);
     errdefer allocator.destroy(fc);
-    try fc.init(allocator, std.testing.io, getTestConfig(), fc_store, proto_arr, 0, opts);
+    try fc.init(allocator, getTestConfig(), fc_store, proto_arr, 0, opts);
     return fc;
 }
 
@@ -2580,7 +2586,7 @@ test "getAllAncestorBlocks returns non-finalized ancestors from blockRoot" {
 
     // Vote for block_b to make it head.
     try fc.addLatestMessage(testing.allocator, 0, 2, block_b_root, .full);
-    try fc.updateHead(testing.allocator, std.testing.io);
+    _ = try fc.updateHead(testing.allocator);
     try testing.expectEqual(block_b_root, fc.head.block_root);
 
     // Get ancestors starting from block_b — delegates to proto_array.
@@ -2701,19 +2707,19 @@ test "onAttesterSlashing affects head via computeDeltas" {
     try fc.addLatestMessage(testing.allocator, 3, 3, c_root, .full);
 
     // Head should be b (weight: b=200+200=400 > c=300).
-    try fc.updateHead(testing.allocator, std.testing.io);
+    _ = try fc.updateHead(testing.allocator);
     try testing.expectEqual(b_root, fc.head.block_root);
 
     // Slash validator 1 → b loses 200, now b=200 < c=300 → c becomes head.
     var slashing1 = makeTestAttesterSlashing(&[_]u64{1});
     try fc.onAttesterSlashing(testing.allocator, &.{ .phase0 = &slashing1 });
-    try fc.updateHead(testing.allocator, std.testing.io);
+    _ = try fc.updateHead(testing.allocator);
     try testing.expectEqual(c_root, fc.head.block_root);
 
     // Re-slash validator 1 → noop (already slashed). c remains head.
     var slashing2 = makeTestAttesterSlashing(&[_]u64{1});
     try fc.onAttesterSlashing(testing.allocator, &.{ .phase0 = &slashing2 });
-    try fc.updateHead(testing.allocator, std.testing.io);
+    _ = try fc.updateHead(testing.allocator);
     try testing.expectEqual(c_root, fc.head.block_root);
 }
 
@@ -2753,7 +2759,7 @@ test "multiple forks competing with votes" {
     try fc.addLatestMessage(testing.allocator, 3, 2, d_root, .full);
     try fc.addLatestMessage(testing.allocator, 4, 2, d_root, .full);
 
-    try fc.updateHead(testing.allocator, std.testing.io);
+    _ = try fc.updateHead(testing.allocator);
     try testing.expectEqual(d_root, fc.head.block_root);
 
     // Head chain: d → c → genesis.
@@ -2806,7 +2812,7 @@ test "deep chain head selection follows longest weighted branch" {
     // Vote for the deepest block.
     const tip_root = hashFromByte(9); // slot 8, root 0x09
     try fc.addLatestMessage(testing.allocator, 0, 8, tip_root, .full);
-    try fc.updateHead(testing.allocator, std.testing.io);
+    _ = try fc.updateHead(testing.allocator);
 
     try testing.expectEqual(tip_root, fc.head.block_root);
     try testing.expectEqual(@as(usize, 9), fc.proto_array.nodes.items.len); // genesis + 8 blocks
@@ -2917,7 +2923,7 @@ test "balance positive change: fresh votes with new balances" {
     try fc.addLatestMessage(allocator, 1, 2, root2, .full);
     try fc.addLatestMessage(allocator, 2, 3, root3, .full);
 
-    try fc.updateHead(allocator, std.testing.io);
+    _ = try fc.updateHead(allocator);
 
     // Verify weights (back-propagated): node3=30, node2=20+30=50, node1=10+50=60.
     const idx1 = fc.proto_array.getDefaultNodeIndex(root1) orelse return error.TestUnexpectedResult;
@@ -2968,7 +2974,7 @@ test "balance negative change: existing balances decrease" {
     try fc.addLatestMessage(allocator, 2, 3, root3, .full);
 
     // First updateHead establishes votes with old_balances=100.
-    try fc.updateHead(allocator, std.testing.io);
+    _ = try fc.updateHead(allocator);
 
     // Now update to lower balances.
     {
@@ -2978,7 +2984,7 @@ test "balance negative change: existing balances decrease" {
         fc.fc_store.justified.balances.unref();
         fc.fc_store.justified.balances = new_rc;
     }
-    try fc.updateHead(allocator, std.testing.io);
+    _ = try fc.updateHead(allocator);
 
     // After second updateHead, weights reflect the new lower balances.
     // node3: 30, node2: 20+30=50, node1: 10+50=60 (back-propagated).
@@ -3025,7 +3031,7 @@ test "balance same slot change: balance update without vote movement" {
     try fc.addLatestMessage(allocator, 1, 2, root2, .full);
 
     // First updateHead with old_balances.
-    try fc.updateHead(allocator, std.testing.io);
+    _ = try fc.updateHead(allocator);
 
     // Update balances without changing votes.
     {
@@ -3035,7 +3041,7 @@ test "balance same slot change: balance update without vote movement" {
         fc.fc_store.justified.balances.unref();
         fc.fc_store.justified.balances = new_rc;
     }
-    try fc.updateHead(allocator, std.testing.io);
+    _ = try fc.updateHead(allocator);
 
     // node2: 200, node1: 50+200=250 (back-propagated).
     const idx1 = fc.proto_array.getDefaultNodeIndex(root1) orelse return error.TestUnexpectedResult;
@@ -3086,7 +3092,7 @@ test "balance underflow clamping: old > new does not wrap unsigned" {
     try fc.addLatestMessage(allocator, 2, 3, root3, .full);
 
     // First updateHead with old_balances (125 each) establishes votes.
-    try fc.updateHead(allocator, std.testing.io);
+    _ = try fc.updateHead(allocator);
 
     // Now update justified balances to new_balances (lower). Weight should decrease, not wrap.
     {
@@ -3096,7 +3102,7 @@ test "balance underflow clamping: old > new does not wrap unsigned" {
         fc.fc_store.justified.balances.unref();
         fc.fc_store.justified.balances = new_rc;
     }
-    try fc.updateHead(allocator, std.testing.io);
+    _ = try fc.updateHead(allocator);
 
     // All node weights should be non-negative (no underflow wrap).
     const idx1 = fc.proto_array.getDefaultNodeIndex(root1) orelse return error.TestUnexpectedResult;
@@ -3186,7 +3192,7 @@ test "IsCanonical: default head follows longest chain" {
     try onBlockFromProto(fc, testing.allocator, makeTestBlock(6, root6, root5), 10);
 
     // Default head should be 6 (longest/heaviest chain).
-    try fc.updateHead(testing.allocator, std.testing.io);
+    _ = try fc.updateHead(testing.allocator);
 
     // Canonical chain: genesis → 2 → 4 → 5 → 6
     try testing.expect(try fc.getCanonicalBlockByRoot(genesis_root) != null); // genesis: YES
@@ -3351,7 +3357,7 @@ test "comprehensive multi-phase vote: 8-node tree with switching and slashing" {
     try onBlockFromProto(fc, allocator, makeTestBlock(3, g_root, d_root), 10);
 
     // Phase 1: No votes → head = highest leaf by root tiebreak.
-    try fc.updateHead(allocator, std.testing.io);
+    _ = try fc.updateHead(allocator);
     // g_root=0x10 > f_root=0x0F > e_root=0x0E → deepest leaves are f,g,e.
     // Weight ties at 0 → best-child chosen by root. The head depends on tree
     // back-propagation: genesis has children a(0x0A) and b(0x0B). b > a by root,
@@ -3362,7 +3368,7 @@ test "comprehensive multi-phase vote: 8-node tree with switching and slashing" {
     try fc.addLatestMessage(allocator, 0, 3, f_root, .full);
     try fc.addLatestMessage(allocator, 1, 3, f_root, .full);
     try fc.addLatestMessage(allocator, 2, 3, f_root, .full);
-    try fc.updateHead(allocator, std.testing.io);
+    _ = try fc.updateHead(allocator);
     // a-branch weight: a=300(propagated), c=300, f=300. b-branch: b=0, e=0.
     // a-branch wins → head = f.
     try testing.expectEqual(f_root, fc.head.block_root);
@@ -3372,7 +3378,7 @@ test "comprehensive multi-phase vote: 8-node tree with switching and slashing" {
     try fc.addLatestMessage(allocator, 4, 2, e_root, .full);
     try fc.addLatestMessage(allocator, 5, 2, e_root, .full);
     try fc.addLatestMessage(allocator, 6, 2, e_root, .full);
-    try fc.updateHead(allocator, std.testing.io);
+    _ = try fc.updateHead(allocator);
     // a-branch=300, b-branch=400 → head = e.
     try testing.expectEqual(e_root, fc.head.block_root);
 
@@ -3382,7 +3388,7 @@ test "comprehensive multi-phase vote: 8-node tree with switching and slashing" {
     const epoch1_slot = preset.SLOTS_PER_EPOCH;
     try fc.addLatestMessage(allocator, 3, epoch1_slot, g_root, .full);
     try fc.addLatestMessage(allocator, 4, epoch1_slot, g_root, .full);
-    try fc.updateHead(allocator, std.testing.io);
+    _ = try fc.updateHead(allocator);
     // a-branch: f=300, g=200, total through a = 500.
     // b-branch: e=200, total through b = 200.
     // a wins → head. Within a: c(300) vs d(200) → c wins → head = f.
@@ -3391,7 +3397,7 @@ test "comprehensive multi-phase vote: 8-node tree with switching and slashing" {
     // Phase 5: Slash V0 → f loses 100. f=200, g=200, e=200.
     var slashing = makeTestAttesterSlashing(&[_]u64{0});
     try fc.onAttesterSlashing(allocator, &.{ .phase0 = &slashing });
-    try fc.updateHead(allocator, std.testing.io);
+    _ = try fc.updateHead(allocator);
     // a-branch: f=200, g=200, total through a = 400.
     // b-branch: e=200, total through b = 200.
     // a still wins. Within a: c(200) vs d(200) → root tiebreak d(0x0D) > c(0x0C) → head = g.
@@ -3485,7 +3491,7 @@ test "Gloas head integration: EMPTY vs FULL tiebreaker via PTC" {
     // shouldExtendPayload: boost root = B, B's parent = A, B extends EMPTY → returns false.
     // EMPTY tiebreaker = 1, FULL tiebreaker = 0 (not timely, extends EMPTY) → EMPTY wins → head through B.
     fc.proposer_boost_root = b_root;
-    try fc.updateHead(allocator, std.testing.io);
+    _ = try fc.updateHead(allocator);
     try testing.expectEqual(b_root, fc.head.block_root);
     // Head is B's EMPTY node.
     try testing.expectEqual(PayloadStatus.empty, fc.head.payload_status);
@@ -3494,7 +3500,7 @@ test "Gloas head integration: EMPTY vs FULL tiebreaker via PTC" {
     // Set all PTC votes to true for block A.
     fc.proto_array.ptc_votes.getPtr(a_root).?.* = ProtoArray.PtcVotes.initFull();
 
-    try fc.updateHead(allocator, std.testing.io);
+    _ = try fc.updateHead(allocator);
     // FULL tiebreaker = 2, EMPTY tiebreaker = 1 → FULL wins → head follows C.
     try testing.expectEqual(c_root, fc.head.block_root);
     try testing.expectEqual(PayloadStatus.empty, fc.head.payload_status);
@@ -3563,7 +3569,7 @@ test "head moves to valid branch after mass invalidation" {
     try fc.addLatestMessage(allocator, 4, 2, d_root, .full);
     try fc.addLatestMessage(allocator, 5, 2, d_root, .full);
 
-    try fc.updateHead(allocator, std.testing.io);
+    _ = try fc.updateHead(allocator);
     try testing.expectEqual(c_root, fc.head.block_root);
 
     // Phase 2: Invalidate A's branch. LVH = genesis exec hash.
@@ -3576,7 +3582,7 @@ test "head moves to valid branch after mass invalidation" {
     }, 10);
 
     // Phase 3: updateHead → head should move to D (only viable branch).
-    try fc.updateHead(allocator, std.testing.io);
+    _ = try fc.updateHead(allocator);
     try testing.expectEqual(d_root, fc.head.block_root);
 }
 
@@ -3617,7 +3623,7 @@ test "Gloas forked branches attestation shift" {
     try fc.addLatestMessage(allocator, 0, 1, a_root, .pending);
     try fc.addLatestMessage(allocator, 1, 1, a_root, .pending);
     try fc.addLatestMessage(allocator, 2, 1, a_root, .pending);
-    try fc.updateHead(allocator, std.testing.io);
+    _ = try fc.updateHead(allocator);
     try testing.expectEqual(a_root, fc.head.block_root);
 
     // Phase 2: V3-V6 vote for B → head = B (4*100 > 3*100).
@@ -3625,14 +3631,14 @@ test "Gloas forked branches attestation shift" {
     try fc.addLatestMessage(allocator, 4, 1, b_root, .pending);
     try fc.addLatestMessage(allocator, 5, 1, b_root, .pending);
     try fc.addLatestMessage(allocator, 6, 1, b_root, .pending);
-    try fc.updateHead(allocator, std.testing.io);
+    _ = try fc.updateHead(allocator);
     try testing.expectEqual(b_root, fc.head.block_root);
 
     // Phase 3: V3-V4 switch from B to A at epoch 1 (needs slot >= SLOTS_PER_EPOCH).
     const epoch1_slot = preset.SLOTS_PER_EPOCH;
     try fc.addLatestMessage(allocator, 3, epoch1_slot, a_root, .pending);
     try fc.addLatestMessage(allocator, 4, epoch1_slot, a_root, .pending);
-    try fc.updateHead(allocator, std.testing.io);
+    _ = try fc.updateHead(allocator);
     // A now has 5 votes (V0,V1,V2,V3,V4), B has 2 (V5,V6). Head = A.
     try testing.expectEqual(a_root, fc.head.block_root);
 }
@@ -3928,7 +3934,7 @@ test "onAttestation: valid attestation applies vote (past slot)" {
     try fc.onAttestation(allocator, &any_att, hashFromByte(0xA1), false);
 
     // Validator 0 should now have a vote. Head should be block_root.
-    try fc.updateHead(allocator, std.testing.io);
+    _ = try fc.updateHead(allocator);
     try testing.expectEqual(block_root, fc.head.block_root);
 }
 
@@ -4019,7 +4025,7 @@ test "onAttestation: votes shift head between forks" {
         try fc.onAttestation(allocator, &any_att, hashFromByte(0xC1), false);
     }
 
-    try fc.updateHead(allocator, std.testing.io);
+    _ = try fc.updateHead(allocator);
     try testing.expectEqual(a_root, fc.head.block_root);
 
     // V3-V5 vote for B → B has 3 votes, A has 3 → tiebreaker. Let's add more so B wins.
@@ -4032,7 +4038,7 @@ test "onAttestation: votes shift head between forks" {
 
     // Tie: 3*100 vs 3*100. Winner decided by root comparison (higher root wins in tiebreaker).
     // Regardless of tiebreak, let's verify votes were applied by checking both branches have weight.
-    try fc.updateHead(allocator, std.testing.io);
+    _ = try fc.updateHead(allocator);
     // The tiebreaker selects based on root bytes — just verify head is one of them.
     try testing.expect(std.mem.eql(u8, &fc.head.block_root, &a_root) or std.mem.eql(u8, &fc.head.block_root, &b_root));
 }
@@ -4068,7 +4074,7 @@ test "onAttestation: epoch advancement allows vote update" {
         try fc.onAttestation(allocator, &any_att, hashFromByte(0xD1), false);
     }
 
-    try fc.updateHead(allocator, std.testing.io);
+    _ = try fc.updateHead(allocator);
     try testing.expectEqual(a_root, fc.head.block_root);
 
     // Validator 0 switches vote to B in epoch 1 (epoch advances).
@@ -4080,7 +4086,7 @@ test "onAttestation: epoch advancement allows vote update" {
         try fc.onAttestation(allocator, &any_att, hashFromByte(0xD2), false);
     }
 
-    try fc.updateHead(allocator, std.testing.io);
+    _ = try fc.updateHead(allocator);
     try testing.expectEqual(b_root, fc.head.block_root);
 }
 
@@ -4124,7 +4130,7 @@ test "onAttestation: proposer boost outweighs attestation votes" {
 
     // Head: A has 128 (1 vote). B has proposer_boost (51).
     // A should win with 128 > 51.
-    try fc.updateHead(allocator, std.testing.io);
+    _ = try fc.updateHead(allocator);
     try testing.expectEqual(a_root, fc.head.block_root);
 }
 
@@ -4172,7 +4178,7 @@ test "onAttestation: equivocating validator votes are not counted" {
     }
 
     // Head should be B since validator 0's vote was excluded.
-    try fc.updateHead(allocator, std.testing.io);
+    _ = try fc.updateHead(allocator);
     try testing.expectEqual(b_root, fc.head.block_root);
 }
 
@@ -4316,7 +4322,7 @@ test "getCanonicalBlockByRoot finds ancestor on canonical chain" {
 
     try onBlockFromProto(fc, allocator, makeTestBlock(1, a_root, genesis_root), 10);
     try onBlockFromProto(fc, allocator, makeTestBlock(2, b_root, a_root), 10);
-    try fc.updateHead(allocator, std.testing.io);
+    _ = try fc.updateHead(allocator);
 
     // Head should be B (longest chain).
     try testing.expectEqual(b_root, fc.head.block_root);

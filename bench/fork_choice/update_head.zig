@@ -36,7 +36,7 @@ const UpdateHeadBench = struct {
 
 /// Helper: set up one benchmark instance from the given parameters.
 fn setupBench(allocator: std.mem.Allocator, io: std.Io, opts: util.Opts) !UpdateHeadBench {
-    const fc = try util.initializeForkChoice(allocator, io, opts);
+    const fc = try util.initializeForkChoice(allocator, opts);
 
     const vote1 = fc.proto_array.getDefaultNodeIndex(fc.head.block_root).?;
     const vote2 = fc.proto_array.getDefaultNodeIndex(fc.head.parent_root).?;

@@ -78,7 +78,7 @@ const OnAttestationBench = struct {
 /// 3. Advance current_slot to 64 so attestations at slot 63 are past-slot.
 /// 4. Pre-build 405 unaggregated + 704 aggregated attestations with per-committee roots.
 fn setupBench(allocator: std.mem.Allocator, io: std.Io) !OnAttestationBench {
-    const fc = try util.initializeForkChoice(allocator, io, .{
+    const fc = try util.initializeForkChoice(allocator, .{
         .initial_block_count = 64,
         .initial_validator_count = 600_000,
         .initial_equivocated_count = 0,
