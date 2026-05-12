@@ -35,10 +35,9 @@
             .url = "git+https://github.com/ChainSafe/zig-yaml#b74f4e8113bee6d307c4f1fd0f190767c8196fc8",
             .hash = "zig_yaml-0.1.0-C1161kFWAwDxjKAFmklKwWVDvz2mmq0Q__bDhGGjeyd3",
         },
-        // TODO: Switch to ChainSafe/zapi once #9 merges.
         .zapi = .{
-            .url = "git+https://github.com/lodekeeper-z/zapi?ref=chore/zig-master#fefb88ebf5c9bb6ea640239758d4c9d2eb0ca351",
-            .hash = "zapi-0.1.0-rIqzUfBKBABm1D8uvOCIuvsJDxWQHsiD_OevWEjmozuK",
+            .url = "git+https://github.com/chainsafe/zapi?ref=zapi-v2.0.0#f9fa8b0237352326e9f970b62588b6af01e3e384",
+            .hash = "zapi-2.0.0-rIqzUcc3BABKRuJlzpYNtiMVCOFybuVSGOLmk0KOCeel",
         },
         .zbench = .{
             .url = "git+https://github.com/hendriknielaender/zBench#b2b89c475e3ef1bb2bd71255c80478a82d3e0ca8",
@@ -186,6 +185,10 @@
             .root_source_file = "src/era/root.zig",
             .imports = .{ .consensus_types, .config, .fork_types, .preset, .state_transition, .snappy, .persistent_merkle_tree },
         },
+        .fork_choice = .{
+            .root_source_file = "src/fork_choice/root.zig",
+            .imports = .{ .consensus_types, .config, .preset, .state_transition, .fork_types, .hex, .constants, .metrics, .time },
+        },
     },
     .executables = .{
         .download_era_files = .{
@@ -291,6 +294,24 @@
                 .imports = .{ .state_transition, .fork_types, .consensus_types, .config, .zbench, .persistent_merkle_tree, .download_era_options, .era, .time },
             },
         },
+        .bench_fork_choice_compute_deltas = .{
+            .root_module = .{
+                .root_source_file = "bench/fork_choice/compute_deltas.zig",
+                .imports = .{ .fork_choice, .state_transition, .config, .constants, .zbench },
+            },
+        },
+        .bench_fork_choice_on_attestation = .{
+            .root_module = .{
+                .root_source_file = "bench/fork_choice/on_attestation.zig",
+                .imports = .{ .fork_choice, .fork_types, .consensus_types, .state_transition, .config, .constants, .zbench },
+            },
+        },
+        .bench_fork_choice_update_head = .{
+            .root_module = .{
+                .root_source_file = "bench/fork_choice/update_head.zig",
+                .imports = .{ .fork_choice, .state_transition, .config, .constants, .zbench },
+            },
+        },
     },
     .libraries = .{
         .bindings = .{
@@ -299,6 +320,7 @@
                 .imports = .{
                     .bls,
                     .bls_options,
+                    .hex,
                     .persistent_merkle_tree,
                     .ssz,
                     .consensus_types,
@@ -329,6 +351,7 @@
         .bls = .{ .root_module = .bls },
         .state_transition = .{ .root_module = .state_transition },
         .era = .{ .root_module = .era },
+        .fork_choice = .{ .root_module = .fork_choice },
 
         .int = .{
             .root_module = .{

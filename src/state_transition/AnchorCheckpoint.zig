@@ -1,3 +1,5 @@
+const AnchorCheckpoint = @This();
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const types = @import("consensus_types");
@@ -6,16 +8,14 @@ const AnyBeaconBlock = @import("fork_types").AnyBeaconBlock;
 const ForkTypes = @import("fork_types").ForkTypes;
 const c = @import("constants");
 const ZERO_HASH = c.ZERO_HASH;
-const computeCheckpointEpochAtStateSlot = @import("./epoch.zig").computeCheckpointEpochAtStateSlot;
+const computeCheckpointEpochAtStateSlot = @import("utils/epoch.zig").computeCheckpointEpochAtStateSlot;
 
-pub const AnchorCheckpoint = struct {
-    checkpoint: types.phase0.Checkpoint.Type,
-    block_header: types.phase0.BeaconBlockHeader.Type,
-};
+checkpoint: types.phase0.Checkpoint.Type,
+block_header: types.phase0.BeaconBlockHeader.Type,
 
 /// Compute the anchor checkpoint for a given state.
 /// Returns both the checkpoint and block header.
-pub fn computeAnchorCheckpoint(state: *AnyBeaconState) !AnchorCheckpoint {
+pub fn fromState(state: *AnyBeaconState) !AnchorCheckpoint {
     const slot = try state.slot();
     var header = types.phase0.BeaconBlockHeader.default_value;
     var root: [32]u8 = undefined;

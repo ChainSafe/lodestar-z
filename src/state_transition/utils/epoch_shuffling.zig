@@ -10,7 +10,7 @@ const innerShuffleList = @import("./shuffle.zig").innerShuffleList;
 const Epoch = types.primitive.Epoch.Type;
 const computeStartSlotAtEpoch = @import("./epoch.zig").computeStartSlotAtEpoch;
 const getBlockRootAtSlot = @import("./block_root.zig").getBlockRootAtSlot;
-const computeAnchorCheckpoint = @import("./anchor_checkpoint.zig").computeAnchorCheckpoint;
+const AnchorCheckpoint = @import("../AnchorCheckpoint.zig");
 const RefCount = @import("./ref_count.zig").RefCount;
 
 pub const EpochShufflingRc = RefCount(*EpochShuffling);
@@ -158,6 +158,6 @@ pub fn calculateShufflingDecisionRoot(state: *AnyBeaconState, epoch: Epoch) ![32
         return try calculateDecisionRoot(state, epoch);
     }
 
-    const anchor = try computeAnchorCheckpoint(state);
+    const anchor = try AnchorCheckpoint.fromState(state);
     return anchor.checkpoint.root;
 }
