@@ -18,6 +18,21 @@ const time_source = @import("time_source.zig");
 
 const EventClock = @This();
 
+allocator: Allocator,
+io: std.Io,
+clock: SlotClock,
+
+stopped: bool = false,
+loop_future: ?std.Io.Future(void) = null,
+
+next_listener_id: ListenerId = 1,
+slot_listeners: bounded_array.BoundedArray(SlotListenerEntry, max_slot_listeners) = .{},
+epoch_listeners: bounded_array.BoundedArray(EpochListenerEntry, max_epoch_listeners) = .{},
+slot_snapshot: bounded_array.BoundedArray(SlotSnapshot, max_slot_listeners) = .{},
+epoch_snapshot: bounded_array.BoundedArray(EpochSnapshot, max_epoch_listeners) = .{},
+
+waiters: WaiterQueue,
+
 pub const Slot = slot_math.Slot;
 pub const Epoch = slot_math.Epoch;
 pub const Config = slot_math.Config;
@@ -76,21 +91,6 @@ const WaiterQueue = std.PriorityQueue(WaiterEntry, void, struct {
         return std.math.order(a.target, b.target);
     }
 }.compare);
-
-allocator: Allocator,
-io: std.Io,
-clock: SlotClock,
-
-stopped: bool = false,
-loop_future: ?std.Io.Future(void) = null,
-
-next_listener_id: ListenerId = 1,
-slot_listeners: bounded_array.BoundedArray(SlotListenerEntry, max_slot_listeners) = .{},
-epoch_listeners: bounded_array.BoundedArray(EpochListenerEntry, max_epoch_listeners) = .{},
-slot_snapshot: bounded_array.BoundedArray(SlotSnapshot, max_slot_listeners) = .{},
-epoch_snapshot: bounded_array.BoundedArray(EpochSnapshot, max_epoch_listeners) = .{},
-
-waiters: WaiterQueue,
 
 pub fn init(self: *EventClock, allocator: Allocator, config: Config, io_handle: std.Io) Error!void {
     self.* = .{

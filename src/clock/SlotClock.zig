@@ -9,6 +9,10 @@ const time_source = @import("time_source.zig");
 
 const SlotClock = @This();
 
+config: Config,
+time: TimeSource,
+current_slot: ?Slot = null,
+
 pub const Slot = slot_math.Slot;
 pub const Epoch = slot_math.Epoch;
 pub const Config = slot_math.Config;
@@ -55,10 +59,6 @@ pub const AdvanceIterator = struct {
         return .{ .slot = next_slot };
     }
 };
-
-config: Config,
-time: TimeSource,
-current_slot: ?Slot = null,
 
 pub fn init(config: Config, time: TimeSource) error{InvalidConfig}!SlotClock {
     try config.validate();
