@@ -798,11 +798,7 @@ pub fn asyncAggregateWithRandomness(env: napi.Env, cb: napi.CallbackInfo(1)) !na
     data.err = null;
     data.deferred = undefined;
     data.work = undefined;
-
-    var seed_bytes: [8]u8 = undefined;
-    napi_io.get().random(&seed_bytes);
-    var prng = std.Random.DefaultPrng.init(std.mem.readInt(u64, &seed_bytes, .little));
-    prng.random().bytes(data.randomness);
+    napi_io.get().random(data.randomness);
 
     for (0..n) |i| {
         const set_value = try sets.getElement(@intCast(i));
