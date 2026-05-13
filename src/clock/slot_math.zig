@@ -75,13 +75,12 @@ pub const Config = struct {
     /// Slot duration applicable at `slot`.  Falls back to `slot_duration_ms`
     /// if no transition has fired yet.
     pub fn slotDurationMsAt(self: Config, slot: Slot) u64 {
-        const active = self.transitions();
-        var i: usize = active.len;
-        while (i > 0) {
-            i -= 1;
-            if (active[i].from_slot <= slot) return active[i].new_duration_ms;
+        var duration = self.slot_duration_ms;
+        for (self.transitions()) |t| {
+            if (t.from_slot > slot) break;
+            duration = t.new_duration_ms;
         }
-        return self.slot_duration_ms;
+        return duration;
     }
 };
 
