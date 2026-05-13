@@ -66,10 +66,9 @@ pub const Config = struct {
 
     /// Returns the active prefix of `duration_transitions` (up to the first sentinel).
     pub fn transitions(self: *const Config) []const DurationTransition {
-        var n: usize = 0;
-        while (n < max_duration_transitions and
-            self.duration_transitions[n].from_slot != 0) : (n += 1)
-        {}
+        const n = for (self.duration_transitions, 0..) |t, i| {
+            if (t.from_slot == 0) break i;
+        } else max_duration_transitions;
         return self.duration_transitions[0..n];
     }
 
