@@ -133,17 +133,18 @@ test "BoolType - sanity" {
     try Bool.deserializeFromJson(&json, &b);
 
     // Serialize
-    var output_json = std.ArrayList(u8).init(allocator);
-    defer output_json.deinit();
-    var write_stream = std.json.writeStream(output_json.writer(), .{});
-    defer write_stream.deinit();
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+    var write_stream: std.json.Stringify = .{ .writer = &aw.writer };
     try Bool.serializeIntoJson(&write_stream, &b);
 
     var cloned: Bool.Type = undefined;
     try Bool.clone(&b, &cloned);
 
     try expectEqualRoots(Bool, b, cloned);
-    try std.testing.expectEqualSlices(u8, input_json, output_json.items);
+    const output = try aw.toOwnedSlice();
+    defer allocator.free(output);
+    try std.testing.expectEqualSlices(u8, input_json, output);
     try expectEqualSerialized(Bool, b, cloned);
 }
 

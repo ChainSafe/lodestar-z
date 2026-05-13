@@ -105,9 +105,10 @@ const Metrics = struct {
 /// Initializes all metrics for state transition. Requires an allocator for `GaugeVec` and `HistogramVec` metrics.
 ///
 /// Meant to be called once on application startup.
-pub fn init(allocator: Allocator, comptime opts: m.RegistryOpts) !void {
+pub fn init(allocator: Allocator, io: std.Io, comptime opts: m.RegistryOpts) !void {
     var epoch_transition_step = try Metrics.EpochTransitionStep.init(
         allocator,
+        io,
         "lodestar_stfn_epoch_transition_step_seconds",
         .{ .help = "Time to call each step of epoch transition in seconds" },
         opts,
@@ -115,6 +116,7 @@ pub fn init(allocator: Allocator, comptime opts: m.RegistryOpts) !void {
     errdefer epoch_transition_step.deinit();
     var state_hash_tree_root = try Metrics.StateHashTreeRoot.init(
         allocator,
+        io,
         "lodestar_stfn_hash_tree_root_seconds",
         .{ .help = "Time to compute the hash tree root of a post state in seconds" },
         opts,
@@ -122,6 +124,7 @@ pub fn init(allocator: Allocator, comptime opts: m.RegistryOpts) !void {
     errdefer state_hash_tree_root.deinit();
     var pre_state_balances_nodes_populated_miss = try Metrics.GaugeVecSource.init(
         allocator,
+        io,
         "lodestar_stfn_balances_nodes_populated_miss_total",
         .{ .help = "Total count state.balances nodesPopulated is false on stfn" },
         opts,
@@ -129,6 +132,7 @@ pub fn init(allocator: Allocator, comptime opts: m.RegistryOpts) !void {
     errdefer pre_state_balances_nodes_populated_miss.deinit();
     var pre_state_balances_nodes_populated_hit = try Metrics.GaugeVecSource.init(
         allocator,
+        io,
         "lodestar_stfn_balances_nodes_populated_hit_total",
         .{ .help = "Total count state.balances nodesPopulated is true on stfn" },
         opts,
@@ -136,6 +140,7 @@ pub fn init(allocator: Allocator, comptime opts: m.RegistryOpts) !void {
     errdefer pre_state_balances_nodes_populated_hit.deinit();
     var pre_state_validators_nodes_populated_miss = try Metrics.GaugeVecSource.init(
         allocator,
+        io,
         "lodestar_stfn_validators_nodes_populated_miss_total",
         .{ .help = "Total count state.validators nodesPopulated is false on stfn" },
         opts,
@@ -143,6 +148,7 @@ pub fn init(allocator: Allocator, comptime opts: m.RegistryOpts) !void {
     errdefer pre_state_validators_nodes_populated_miss.deinit();
     var pre_state_validators_nodes_populated_hit = try Metrics.GaugeVecSource.init(
         allocator,
+        io,
         "lodestar_stfn_validators_nodes_populated_hit_total",
         .{ .help = "Total count state.validators nodesPopulated is true on stfn" },
         opts,
@@ -150,6 +156,7 @@ pub fn init(allocator: Allocator, comptime opts: m.RegistryOpts) !void {
     errdefer pre_state_validators_nodes_populated_hit.deinit();
     var proposer_rewards = try Metrics.ProposerRewardsGauge.init(
         allocator,
+        io,
         "lodestar_stfn_proposer_rewards_total",
         .{ .help = "Proposer reward by type per block" },
         opts,
@@ -242,14 +249,6 @@ pub fn init(allocator: Allocator, comptime opts: m.RegistryOpts) !void {
     };
 }
 
-/// Useful for conversion to seconds during isolated uses of `observe` that requires timing.
-/// Prometheus recommends that time coding be in seconds.
-///
-/// See for example: https://prometheus.io/docs/instrumenting/writing_clientlibs/#gauge
-pub fn readSeconds(timer: *std.time.Timer) f64 {
-    return @as(f64, @floatFromInt(timer.read())) / std.time.ns_per_s;
-}
-
 /// Observe a value in ns for the `epoch_transition_step` labelled histogram.
 pub fn observeEpochTransitionStep(
     labels: EpochTransitionStepLabel,
@@ -262,6 +261,6 @@ pub fn observeEpochTransitionStep(
 }
 
 /// Writes all metrics to `writer`.
-pub fn write(writer: anytype) !void {
+pub fn write(writer: *std.Io.Writer) !void {
     try m.write(&state_transition, writer);
 }

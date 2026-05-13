@@ -35,9 +35,12 @@ pub const chain_config = ChainConfig{
     .ELECTRA_FORK_EPOCH = 1337856,
     .FULU_FORK_VERSION = b(4, "0x06000064"),
     .FULU_FORK_EPOCH = std.math.maxInt(u64),
+    .GLOAS_FORK_VERSION = b(4, "0x07000064"),
+    .GLOAS_FORK_EPOCH = std.math.maxInt(u64),
 
     // Time parameters
     .SECONDS_PER_SLOT = 5,
+    .SLOT_DURATION_MS = 5000,
     .SECONDS_PER_ETH1_BLOCK = 6,
     .MIN_VALIDATOR_WITHDRAWABILITY_DELAY = 256,
     .SHARD_COMMITTEE_PERIOD = 256,
@@ -56,6 +59,11 @@ pub const chain_config = ChainConfig{
     .REORG_HEAD_WEIGHT_THRESHOLD = 20,
     .REORG_PARENT_WEIGHT_THRESHOLD = 160,
     .REORG_MAX_EPOCHS_SINCE_FINALIZATION = 2,
+    .PROPOSER_REORG_CUTOFF_BPS = 1667,
+
+    // Timing (basis points)
+    .ATTESTATION_DUE_BPS = 3333,
+    .ATTESTATION_DUE_BPS_GLOAS = 2500,
 
     // Deposit contract
     .DEPOSIT_CHAIN_ID = 100,

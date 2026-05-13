@@ -36,15 +36,15 @@ pub fn upgradeStateToElectra(
     const current_epoch_pre = epoch_cache.epoch;
     var earliest_exit_epoch = computeActivationExitEpoch(current_epoch_pre);
     // [EIP-7251]: add validators that are not yet active to pending balance deposits
-    var pre_activation = std.ArrayList(ct.primitive.ValidatorIndex.Type).init(allocator);
-    defer pre_activation.deinit();
+    var pre_activation: std.ArrayList(ct.primitive.ValidatorIndex.Type) = .empty;
+    defer pre_activation.deinit(allocator);
     const validators_slice = try state.validatorsSlice(allocator);
     defer allocator.free(validators_slice);
     for (validators_slice, 0..) |validator, validator_index| {
         const activation_epoch = validator.activation_epoch;
         const exit_epoch = validator.exit_epoch;
         if (activation_epoch == constants.FAR_FUTURE_EPOCH) {
-            try pre_activation.append(validator_index);
+            try pre_activation.append(allocator, validator_index);
         }
         if (exit_epoch != constants.FAR_FUTURE_EPOCH and exit_epoch > earliest_exit_epoch) {
             earliest_exit_epoch = exit_epoch;

@@ -2,6 +2,7 @@ const std = @import("std");
 const TypeKind = @import("type_kind.zig").TypeKind;
 const isBasicType = @import("type_kind.zig").isBasicType;
 const isFixedType = @import("type_kind.zig").isFixedType;
+const canMemcpySsz = @import("type_kind.zig").canMemcpySsz;
 const OffsetIterator = @import("offsets.zig").OffsetIterator;
 const merkleize = @import("hashing").merkleize;
 const maxChunksToDepth = @import("hashing").maxChunksToDepth;
@@ -76,6 +77,11 @@ pub fn FixedVectorType(comptime ST: type, comptime _length: comptime_int) type {
         }
 
         pub fn serializeIntoBytes(value: *const Type, out: []u8) usize {
+            if (comptime canMemcpySsz(Element)) {
+                const bytes = std.mem.sliceAsBytes(value);
+                @memcpy(out[0..fixed_size], bytes);
+                return fixed_size;
+            }
             var i: usize = 0;
             for (value) |element| {
                 i += Element.serializeIntoBytes(&element, out[i..]);
@@ -88,6 +94,10 @@ pub fn FixedVectorType(comptime ST: type, comptime _length: comptime_int) type {
                 return error.InvalidSize;
             }
 
+            if (comptime canMemcpySsz(Element)) {
+                @memcpy(std.mem.sliceAsBytes(out), data[0..fixed_size]);
+                return;
+            }
             for (0..length) |i| {
                 try Element.deserializeFromBytes(
                     data[i * Element.fixed_size .. (i + 1) * Element.fixed_size],

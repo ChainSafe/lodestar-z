@@ -147,9 +147,7 @@ test "sizeOf Pairing" {
 }
 
 const std = @import("std");
-const c = @cImport({
-    @cInclude("blst.h");
-});
+const c = @import("root.zig").c;
 const BlstError = @import("error.zig").BlstError;
 const errorFromInt = @import("error.zig").errorFromInt;
 const blst = @import("root.zig");

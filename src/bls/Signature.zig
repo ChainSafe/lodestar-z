@@ -41,7 +41,7 @@ pub fn verify(
     }
 
     const chk = errorFromInt(c.blst_core_verify_pk_in_g1(
-        &pk.point,
+        @ptrCast(&pk.point),
         &self.point,
         true,
         msg.ptr,
@@ -211,9 +211,7 @@ pub fn isEqual(self: *const Self, other: *const Self) bool {
 }
 
 const std = @import("std");
-const c = @cImport({
-    @cInclude("blst.h");
-});
+const c = @import("root.zig").c;
 
 const BlstError = @import("error.zig").BlstError;
 const errorFromInt = @import("error.zig").errorFromInt;

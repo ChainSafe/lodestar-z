@@ -37,8 +37,8 @@ pub fn processPendingDeposits(
 
     var processed_amount: u64 = 0;
     var next_deposit_index: u64 = 0;
-    var deposits_to_postpone = std.ArrayList(PendingDeposit).init(allocator);
-    defer deposits_to_postpone.deinit();
+    var deposits_to_postpone: std.ArrayList(PendingDeposit) = .empty;
+    defer deposits_to_postpone.deinit(allocator);
     var is_churn_limit_reached = false;
 
     var pending_deposits = try state.pendingDeposits();
@@ -84,7 +84,7 @@ pub fn processPendingDeposits(
             try applyPendingDeposit(fork, allocator, config, epoch_cache, state, deposit, cache);
         } else if (is_validator_exited) {
             // Validator is exiting, postpone the deposit until after withdrawable epoch
-            try deposits_to_postpone.append(deposit);
+            try deposits_to_postpone.append(allocator, deposit);
         } else {
             // Check if deposit fits in the churn, otherwise, do no more deposit processing in this epoch.
             is_churn_limit_reached = processed_amount + deposit.amount > available_for_processing;
@@ -139,12 +139,12 @@ fn applyPendingDeposit(
         // Verify the deposit signature (proof of possession) which is not checked by the deposit contract
         if (validateDepositSignature(config, pubkey, withdrawal_credentials, amount, signature)) {
             try addValidatorToRegistry(fork, allocator, epoch_cache, state, pubkey, withdrawal_credentials, amount);
-            try cache.is_compounding_validator_arr.append(hasCompoundingWithdrawalCredential(withdrawal_credentials));
+            try cache.is_compounding_validator_arr.append(allocator, hasCompoundingWithdrawalCredential(withdrawal_credentials));
             // set balance, so that the next deposit of same pubkey will increase the balance correctly
             // this is to fix the double deposit issue found in mekong
             // see https://github.com/ChainSafe/lodestar/pull/7255
             if (cache.balances) |*balances| {
-                try balances.append(amount);
+                try balances.append(allocator, amount);
             }
         } else |_| {
             // invalid deposit signature, ignore the deposit

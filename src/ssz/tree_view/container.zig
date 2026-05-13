@@ -13,38 +13,17 @@ const CloneOpts = @import("utils/clone_opts.zig").CloneOpts;
 ///
 /// For basic-type fields, it returns or accepts values directly; for complex fields, it returns or accepts corresponding tree view references.
 pub fn ContainerTreeView(comptime ST: type) type {
-    comptime var opt_treeview_fields: [ST.fields.len]std.builtin.Type.StructField = undefined;
+    comptime var opt_treeview_types: [ST.fields.len]type = undefined;
     inline for (ST.fields, 0..) |field, i| {
-        opt_treeview_fields[i] = .{
-            .name = std.fmt.comptimePrint("{}", .{i}),
-            .type = if (isBasicType(field.type)) @Type(.{
-                .optional = .{
-                    .child = field.type.Type,
-                },
-            }) else blk: {
-                assertTreeViewType(field.type.TreeView);
-                break :blk @Type(.{
-                    .optional = .{
-                        .child = *field.type.TreeView,
-                    },
-                });
-            },
-            .default_value_ptr = null,
-            .is_comptime = false,
-            .alignment = if (isBasicType(field.type)) @alignOf(field.type.Type) else @alignOf(*field.type.TreeView),
+        opt_treeview_types[i] = if (isBasicType(field.type))
+            ?field.type.Type
+        else blk: {
+            assertTreeViewType(field.type.TreeView);
+            break :blk ?*field.type.TreeView;
         };
     }
 
-    const TreeViewData = @Type(.{
-        .@"struct" = .{
-            .layout = .auto,
-            .backing_integer = null,
-            .fields = opt_treeview_fields[0..],
-            // TODO: do we need to assign this value?
-            .decls = &[_]std.builtin.Type.Declaration{},
-            .is_tuple = true,
-        },
-    });
+    const TreeViewData = @Tuple(&opt_treeview_types);
 
     const TreeView = struct {
         allocator: Allocator,

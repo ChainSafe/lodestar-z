@@ -1,68 +1,56 @@
 const std = @import("std");
-const napi = @import("zapi:zapi");
-const pool = @import("./pool.zig");
-const pubkeys = @import("./pubkeys.zig");
-const config = @import("./config.zig");
-const shuffle = @import("./shuffle.zig");
-const metrics = @import("./metrics.zig");
-const BeaconStateView = @import("./BeaconStateView.zig");
-const blst = @import("./blst.zig");
-const state_transition = @import("./state_transition.zig");
+const js = @import("zapi:zapi").js;
+const napi = @import("zapi:zapi").napi;
+pub const pool = @import("./pool.zig");
+pub const shuffle = @import("./shuffle.zig");
+pub const config = @import("./config.zig");
+pub const metrics = @import("./metrics.zig");
+pub const stateTransition = @import("./stateTransition.zig");
+pub const BeaconStateView = @import("./BeaconStateView.zig");
 
-comptime {
-    napi.module.register(register);
+const pubkeys = @import("./pubkeys.zig");
+const blst = @import("./blst.zig");
+const options = @import("bls_options");
+const napi_io = @import("./io.zig");
+
+fn init(old_ref_count: u32) !void {
+    if (old_ref_count == 0) {
+        // First environment — initialize shared state in your threadpool init.
+        try napi_io.init();
+        errdefer napi_io.deinit();
+
+        var cpu_count: u64 = options.thread_count;
+        if (options.thread_count == 0) {
+            std.debug.print("Note: no -Dthread-count set, will use runtime CPU count minus 1: {}\n", .{cpu_count});
+            cpu_count = @max((try std.Thread.getCpuCount()) - 1, 1);
+        }
+
+        const n_workers = @min(cpu_count, @import("bls").ThreadPool.MAX_WORKERS);
+        try blst.initThreadPool(@intCast(n_workers));
+        try pool.state.init();
+        try pubkeys.state.init();
+        config.state.init();
+    }
 }
 
-/// Tracks how many NAPI environments reference the shared module state.
-/// Shared state (pool, pubkeys, config) is initialized on the first register
-/// and torn down only when the last environment exits.
-var env_refcount: std.atomic.Value(u32) = std.atomic.Value(u32).init(0);
-
-/// Guards shared state initialization so that concurrent `register` calls
-/// (e.g. from Node.js Worker threads) cannot observe partially-initialized state.
-var init_mutex: std.Thread.Mutex = .{};
-
-const EnvCleanup = struct {
-    fn hook(_: *EnvCleanup) void {
-        init_mutex.lock();
-        defer init_mutex.unlock();
-        if (env_refcount.fetchSub(1, .acq_rel) == 1) {
-            // Last environment — tear down shared state.
-            config.state.deinit();
-            pubkeys.state.deinit();
-            pool.state.deinit();
-            metrics.deinit();
-        }
+fn cleanup(new_ref_count: u32) void {
+    if (new_ref_count == 0) {
+        // Last environment — tear down shared state.
+        blst.deinitThreadPool();
+        config.state.deinit();
+        pubkeys.state.deinit();
+        pool.state.deinit();
+        metrics.deinit();
+        blst.deinitThreadPool();
+        napi_io.deinit();
     }
-};
-
-var env_cleanup: EnvCleanup = .{};
+}
 
 fn register(env: napi.Env, exports: napi.Value) !void {
-    {
-        init_mutex.lock();
-        defer init_mutex.unlock();
-        if (env_refcount.fetchAdd(1, .monotonic) == 0) {
-            // First environment — initialize shared state.
-            // On failure, roll back the refcount so the next caller retries.
-            errdefer {
-                const old = env_refcount.fetchSub(1, .monotonic);
-                std.debug.assert(old == 1);
-            }
-            try pool.state.init();
-            try pubkeys.state.init();
-            config.state.init();
-        }
-    }
-
-    try env.addEnvCleanupHook(EnvCleanup, &env_cleanup, EnvCleanup.hook);
-
-    try pool.register(env, exports);
-    try pubkeys.register(env, exports);
-    try config.register(env, exports);
-    try shuffle.register(env, exports);
-    try BeaconStateView.register(env, exports);
     try blst.register(env, exports);
-    try state_transition.register(env, exports);
-    try metrics.register(env, exports);
+    try pubkeys.register(env, exports);
+}
+
+comptime {
+    js.exportModule(@This(), .{ .init = init, .cleanup = cleanup, .register = register });
 }

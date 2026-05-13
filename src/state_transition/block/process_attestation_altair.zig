@@ -58,8 +58,8 @@ pub fn processAttestationsAltair(
         try validateAttestation(fork, epoch_cache, state, attestation);
 
         // Retrieve the validator indices from the attestation participation bitfield
-        const attesting_indices = try if (comptime fork.lt(.electra)) epoch_cache.getAttestingIndicesPhase0(attestation) else epoch_cache.getAttestingIndicesElectra(attestation);
-        defer attesting_indices.deinit();
+        var attesting_indices = try if (comptime fork.lt(.electra)) epoch_cache.getAttestingIndicesPhase0(attestation) else epoch_cache.getAttestingIndicesElectra(attestation);
+        defer attesting_indices.deinit(allocator);
 
         // this check is done last because its the most expensive (if signature verification is toggled on)
         // Unlike phase0 which calls isValidIndexedAttestation, altair+ only verifies the signature

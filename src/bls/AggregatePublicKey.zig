@@ -87,7 +87,7 @@ test aggregateWithRandomness {
 
     var prng = std.Random.DefaultPrng.init(blk: {
         var seed: u64 = undefined;
-        std.posix.getrandom(std.mem.asBytes(&seed)) catch unreachable;
+        std.testing.io.random(std.mem.asBytes(&seed));
         break :blk seed;
     });
     const rand = prng.random();
@@ -148,9 +148,7 @@ test aggregate {
 }
 
 const std = @import("std");
-const c = @cImport({
-    @cInclude("blst.h");
-});
+const c = @import("root.zig").c;
 
 const blst = @import("root.zig");
 const DST = blst.DST;

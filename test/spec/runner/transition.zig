@@ -21,7 +21,7 @@ pub fn Transition(comptime fork: ForkSeq) type {
 
         const Self = @This();
 
-        pub fn execute(allocator: std.mem.Allocator, dir: std.fs.Dir) !void {
+        pub fn execute(allocator: std.mem.Allocator, dir: std.Io.Dir) !void {
             const pool_size = if (active_preset == .mainnet) 10_000_000 else 1_000_000;
             var pool = try Node.Pool.init(allocator, pool_size);
             defer pool.deinit();
@@ -29,12 +29,12 @@ pub fn Transition(comptime fork: ForkSeq) type {
             var tc = try Self.init(allocator, &pool, dir);
             defer {
                 tc.deinit();
-                state_transition.deinitStateTransition();
+                state_transition.deinitStateTransition(std.testing.io);
             }
             try tc.runTest();
         }
 
-        pub fn init(allocator: std.mem.Allocator, pool: *Node.Pool, dir: std.fs.Dir) !Self {
+        pub fn init(allocator: std.mem.Allocator, pool: *Node.Pool, dir: std.Io.Dir) !Self {
             var tc = Self{
                 .pre = undefined,
                 .post = undefined,
@@ -42,9 +42,7 @@ pub fn Transition(comptime fork: ForkSeq) type {
             };
 
             // Load meta.yaml for blocks_count
-            var meta_file = try dir.openFile("meta.yaml", .{});
-            defer meta_file.close();
-            const meta_content = try meta_file.readToEndAlloc(allocator, 1024);
+            const meta_content = try dir.readFileAlloc(std.testing.io, "meta.yaml", allocator, .unlimited);
             defer allocator.free(meta_content);
             const meta_content_one_line = std.mem.trim(u8, meta_content, " \n");
             // sample content of meta.yaml: {post_fork: electra, fork_epoch: 2, blocks_count: 96, fork_block: 62}
@@ -127,6 +125,7 @@ pub fn Transition(comptime fork: ForkSeq) type {
                 }
                 const new_result = try state_transition.state_transition.stateTransition(
                     self.pre.allocator,
+                    std.testing.io,
                     input_cached_state,
                     beacon_block,
                     .{
