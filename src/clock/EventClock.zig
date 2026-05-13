@@ -11,6 +11,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const bounded_array = @import("bounded_array");
 const slot_math = @import("slot_math.zig");
 const SlotClock = @import("SlotClock.zig");
 const time_source = @import("time_source.zig");
@@ -23,10 +24,15 @@ pub const Config = slot_math.Config;
 pub const ListenerId = u64;
 pub const TimeSource = time_source.TimeSource;
 
+pub const max_slot_listeners: u32 = 16;
+pub const max_epoch_listeners: u32 = 16;
+pub const max_waiters: u32 = 1024;
+
 pub const Error = error{
     InvalidConfig,
     OutOfMemory,
     ListenerLimitReached,
+    WaiterLimitReached,
     Aborted,
     ConcurrencyUnavailable,
 };
@@ -79,10 +85,10 @@ stopped: bool = false,
 loop_future: ?std.Io.Future(void) = null,
 
 next_listener_id: ListenerId = 1,
-slot_listeners: std.ArrayListUnmanaged(SlotListenerEntry) = .empty,
-epoch_listeners: std.ArrayListUnmanaged(EpochListenerEntry) = .empty,
-slot_snapshot: std.ArrayListUnmanaged(SlotSnapshot) = .empty,
-epoch_snapshot: std.ArrayListUnmanaged(EpochSnapshot) = .empty,
+slot_listeners: bounded_array.BoundedArray(SlotListenerEntry, max_slot_listeners) = .{},
+epoch_listeners: bounded_array.BoundedArray(EpochListenerEntry, max_epoch_listeners) = .{},
+slot_snapshot: bounded_array.BoundedArray(SlotSnapshot, max_slot_listeners) = .{},
+epoch_snapshot: bounded_array.BoundedArray(EpochSnapshot, max_epoch_listeners) = .{},
 
 waiters: WaiterQueue,
 
@@ -125,16 +131,12 @@ pub fn join(self: *EventClock) void {
 pub fn deinit(self: *EventClock) void {
     self.stop();
     self.join();
-    self.slot_snapshot.deinit(self.allocator);
-    self.epoch_snapshot.deinit(self.allocator);
-    self.slot_listeners.deinit(self.allocator);
-    self.epoch_listeners.deinit(self.allocator);
     self.waiters.deinit(self.allocator);
     self.* = undefined;
 }
 
 // Inside a callback, `offSlot` / `offEpoch` are safe; `onSlot` / `onEpoch`
-// are not — they may reallocate the snapshot buffer iterated by the active emit.
+// are not — they may overwrite the snapshot iterated by the active emit.
 
 /// Register a slot listener.  Returns an ID for later removal via `offSlot`.
 pub fn onSlot(
@@ -142,18 +144,12 @@ pub fn onSlot(
     callback: *const fn (ctx: ?*anyopaque, slot: Slot) void,
     ctx: ?*anyopaque,
 ) Error!ListenerId {
-    if (self.next_listener_id == std.math.maxInt(ListenerId))
-        return error.ListenerLimitReached;
-    // Reserve snapshot capacity before appending so an OOM here leaves no partial state.
-    self.slot_snapshot.ensureTotalCapacity(
-        self.allocator,
-        self.slot_listeners.items.len + 1,
-    ) catch return error.OutOfMemory;
-    self.slot_listeners.append(self.allocator, .{
+    if (self.slot_listeners.full()) return error.ListenerLimitReached;
+    self.slot_listeners.push(.{
         .id = self.next_listener_id,
         .callback = callback,
         .ctx = ctx,
-    }) catch return error.OutOfMemory;
+    });
     const id = self.next_listener_id;
     self.next_listener_id += 1;
     return id;
@@ -161,9 +157,9 @@ pub fn onSlot(
 
 /// Unregister a slot listener.  Returns `true` if found and removed.
 pub fn offSlot(self: *EventClock, id: ListenerId) bool {
-    for (self.slot_listeners.items, 0..) |listener, i| {
+    for (self.slot_listeners.slice(), 0..) |listener, i| {
         if (listener.id == id) {
-            _ = self.slot_listeners.orderedRemove(i);
+            self.slot_listeners.orderedRemove(@intCast(i));
             return true;
         }
     }
@@ -176,18 +172,12 @@ pub fn onEpoch(
     callback: *const fn (ctx: ?*anyopaque, epoch: Epoch) void,
     ctx: ?*anyopaque,
 ) Error!ListenerId {
-    if (self.next_listener_id == std.math.maxInt(ListenerId))
-        return error.ListenerLimitReached;
-    // Reserve snapshot capacity before appending so an OOM here leaves no partial state.
-    self.epoch_snapshot.ensureTotalCapacity(
-        self.allocator,
-        self.epoch_listeners.items.len + 1,
-    ) catch return error.OutOfMemory;
-    self.epoch_listeners.append(self.allocator, .{
+    if (self.epoch_listeners.full()) return error.ListenerLimitReached;
+    self.epoch_listeners.push(.{
         .id = self.next_listener_id,
         .callback = callback,
         .ctx = ctx,
-    }) catch return error.OutOfMemory;
+    });
     const id = self.next_listener_id;
     self.next_listener_id += 1;
     return id;
@@ -195,9 +185,9 @@ pub fn onEpoch(
 
 /// Unregister an epoch listener.  Returns `true` if found and removed.
 pub fn offEpoch(self: *EventClock, id: ListenerId) bool {
-    for (self.epoch_listeners.items, 0..) |listener, i| {
+    for (self.epoch_listeners.slice(), 0..) |listener, i| {
         if (listener.id == id) {
-            _ = self.epoch_listeners.orderedRemove(i);
+            self.epoch_listeners.orderedRemove(@intCast(i));
             return true;
         }
     }
@@ -325,6 +315,9 @@ pub fn waitForSlot(self: *EventClock, target: Slot) Error!WaitForSlotResult {
             return WaitForSlotResult.immediate({});
         }
     }
+    if (self.waiters.count() >= max_waiters) {
+        return error.WaiterLimitReached;
+    }
 
     const state = self.allocator.create(WaitState) catch return error.OutOfMemory;
     errdefer self.allocator.destroy(state);
@@ -368,33 +361,27 @@ fn catchUp(self: *EventClock) void {
 }
 
 fn emitSlot(self: *EventClock, slot: Slot) void {
-    self.slot_snapshot.clearRetainingCapacity();
-    // Use only pre-allocated capacity — no allocation in fiber context.
-    const limit = @min(self.slot_listeners.items.len, self.slot_snapshot.capacity);
-    for (self.slot_listeners.items[0..limit]) |listener| {
-        self.slot_snapshot.appendAssumeCapacity(.{
+    self.slot_snapshot.clear();
+    for (self.slot_listeners.slice()) |listener| {
+        self.slot_snapshot.push(.{
             .callback = listener.callback,
             .ctx = listener.ctx,
         });
     }
-
-    for (self.slot_snapshot.items) |listener| {
+    for (self.slot_snapshot.slice()) |listener| {
         listener.callback(listener.ctx, slot);
     }
 }
 
 fn emitEpoch(self: *EventClock, epoch: Epoch) void {
-    self.epoch_snapshot.clearRetainingCapacity();
-    // Use only pre-allocated capacity — no allocation in fiber context.
-    const limit = @min(self.epoch_listeners.items.len, self.epoch_snapshot.capacity);
-    for (self.epoch_listeners.items[0..limit]) |listener| {
-        self.epoch_snapshot.appendAssumeCapacity(.{
+    self.epoch_snapshot.clear();
+    for (self.epoch_listeners.slice()) |listener| {
+        self.epoch_snapshot.push(.{
             .callback = listener.callback,
             .ctx = listener.ctx,
         });
     }
-
-    for (self.epoch_snapshot.items) |listener| {
+    for (self.epoch_snapshot.slice()) |listener| {
         listener.callback(listener.ctx, epoch);
     }
 }
@@ -469,6 +456,12 @@ fn runAutoLoop(self: *EventClock) void {
             self.advanceAndDispatch(slot);
         }
     }
+    // Non-terminating event loop: exits only when `self.stopped` is set.
+    //  - normal stop(): sets flag, next iteration's `!self.stopped` exits
+    //  - overflow path: in-body break after self.stop()
+    //  - join(): always calls stop() before cancelling the fiber, so the
+    //    `error.Canceled` break also satisfies stopped == true
+    std.debug.assert(self.stopped);
 }
 
 fn waitForSlotFutureAwait(state: *WaitState) Error!void {
@@ -929,7 +922,7 @@ test "reentrancy: callback can stop the clock; no further slots emitted" {
     }.run);
 }
 
-test "ListenerLimitReached: onSlot/onEpoch return error at next_listener_id == maxInt" {
+test "ListenerLimitReached: onSlot/onEpoch reject the (limit+1)th registration" {
     try runInRuntime(struct {
         fn run(io_handle: std.Io) !void {
             var clock: EventClock = undefined;
@@ -940,44 +933,34 @@ test "ListenerLimitReached: onSlot/onEpoch return error at next_listener_id == m
             }, io_handle);
             defer clock.deinit();
 
-            clock.next_listener_id = std.math.maxInt(ListenerId);
+            for (0..max_slot_listeners) |_| {
+                _ = try clock.onSlot(nopSlot, null);
+            }
             try testing.expectError(error.ListenerLimitReached, clock.onSlot(nopSlot, null));
+
+            for (0..max_epoch_listeners) |_| {
+                _ = try clock.onEpoch(nopEpoch, null);
+            }
             try testing.expectError(error.ListenerLimitReached, clock.onEpoch(nopEpoch, null));
         }
     }.run);
 }
 
-test "OOM rollback: onSlot leaves listener list unchanged on snapshot/append failure" {
+test "WaiterLimitReached: waitForSlot rejects the (limit+1)th waiter" {
     try runInRuntime(struct {
         fn run(io_handle: std.Io) !void {
-            {
-                var fa = std.testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
-                var clock: EventClock = undefined;
-                try clock.init(fa.allocator(), .{
-                    .genesis_time_sec = nowSecAt(io_handle) + 1_000_000,
-                    .slot_duration_ms = 1_000,
-                    .slots_per_epoch = 4,
-                }, io_handle);
-                defer clock.deinit();
+            var clock: EventClock = undefined;
+            try clock.init(testing.allocator, .{
+                .genesis_time_sec = nowSecAt(io_handle) + 1_000_000,
+                .slot_duration_ms = 1_000,
+                .slots_per_epoch = 4,
+            }, io_handle);
+            defer clock.deinit();
 
-                try testing.expectError(error.OutOfMemory, clock.onSlot(nopSlot, null));
-                try testing.expectEqual(@as(usize, 0), clock.slot_listeners.items.len);
-                try testing.expectEqual(@as(ListenerId, 1), clock.next_listener_id);
-            }
-            {
-                var fa = std.testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 1 });
-                var clock: EventClock = undefined;
-                try clock.init(fa.allocator(), .{
-                    .genesis_time_sec = nowSecAt(io_handle) + 1_000_000,
-                    .slot_duration_ms = 1_000,
-                    .slots_per_epoch = 4,
-                }, io_handle);
-                defer clock.deinit();
-
-                try testing.expectError(error.OutOfMemory, clock.onSlot(nopSlot, null));
-                try testing.expectEqual(@as(usize, 0), clock.slot_listeners.items.len);
-                try testing.expectEqual(@as(ListenerId, 1), clock.next_listener_id);
-            }
+            var futs: [max_waiters]WaitForSlotResult = undefined;
+            for (&futs) |*f| f.* = try clock.waitForSlot(999_999);
+            try testing.expectError(error.WaiterLimitReached, clock.waitForSlot(999_999));
+            for (&futs) |*f| f.cancel();
         }
     }.run);
 }

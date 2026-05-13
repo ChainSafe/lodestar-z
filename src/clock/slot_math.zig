@@ -5,42 +5,38 @@
 
 const std = @import("std");
 const ct = @import("consensus_types");
+const bounded_array = @import("bounded_array");
 
 pub const Slot = ct.primitive.Slot.Type;
 pub const Epoch = ct.primitive.Epoch.Type;
 
-/// `from_slot == 0` is a sentinel for "unused entry" in `Config.duration_transitions`.
 pub const DurationTransition = struct {
     from_slot: Slot,
     new_duration_ms: u64,
 };
 
-/// Upper bound on slot-duration transitions per chain (Ethereum: zero so far,
-/// EIP-7782 anticipates one).
-pub const max_duration_transitions: usize = 4;
+pub const max_duration_transitions: u32 = 4;
 
-const DurationTransitions = [max_duration_transitions]DurationTransition;
+pub const DurationTransitions = bounded_array.BoundedArray(DurationTransition, max_duration_transitions);
 
-/// Comptime builder for `Config.duration_transitions`; pads with sentinels.
+/// Comptime builder for `Config.duration_transitions`.
 pub fn forkTransitions(
     comptime list: []const DurationTransition,
 ) DurationTransitions {
     if (list.len > max_duration_transitions) {
         @compileError("too many slot duration transitions");
     }
-    var arr: DurationTransitions = @splat(.{ .from_slot = 0, .new_duration_ms = 0 });
-    inline for (list, 0..) |t, i| arr[i] = t;
+    var arr: DurationTransitions = .{};
+    inline for (list) |t| arr.push(t);
     return arr;
 }
 
-/// `slot_duration_ms` is the duration from genesis until the first transition.
-/// `duration_transitions` carries later overrides (e.g. EIP-7782 6s slots);
-/// active entries must be sorted ascending by `from_slot`, with non-zero
-/// `new_duration_ms` and `from_slot != 0` (validated).
+/// `duration_transitions` entries must be sorted strictly ascending by
+/// `from_slot`, with non-zero `new_duration_ms` and `from_slot != 0` (validated).
 pub const Config = struct {
     genesis_time_sec: u64,
     slot_duration_ms: u64,
-    duration_transitions: DurationTransitions = @splat(.{ .from_slot = 0, .new_duration_ms = 0 }),
+    duration_transitions: DurationTransitions = .{},
     slots_per_epoch: u64,
     maximum_gossip_clock_disparity_ms: u64 = 500,
 
@@ -49,27 +45,16 @@ pub const Config = struct {
         if (self.slots_per_epoch == 0) return error.InvalidConfig;
         if (secToMs(self.genesis_time_sec) == null) return error.InvalidConfig;
         var prev_slot: Slot = 0;
-        var seen_sentinel = false;
-        for (self.duration_transitions) |t| {
-            if (t.from_slot == 0) {
-                // Sentinel ⇒ all later slots must also be sentinels.
-                if (t.new_duration_ms != 0) return error.InvalidConfig;
-                seen_sentinel = true;
-                continue;
-            }
-            if (seen_sentinel) return error.InvalidConfig;
+        for (self.duration_transitions.constSlice()) |t| {
+            if (t.from_slot == 0) return error.InvalidConfig;
             if (t.new_duration_ms == 0) return error.InvalidConfig;
             if (t.from_slot <= prev_slot) return error.InvalidConfig;
             prev_slot = t.from_slot;
         }
     }
 
-    /// Returns the active prefix of `duration_transitions` (up to the first sentinel).
     pub fn transitions(self: *const Config) []const DurationTransition {
-        const n = for (self.duration_transitions, 0..) |t, i| {
-            if (t.from_slot == 0) break i;
-        } else max_duration_transitions;
-        return self.duration_transitions[0..n];
+        return self.duration_transitions.constSlice();
     }
 
     /// Slot duration applicable at `slot`.  Falls back to `slot_duration_ms`
@@ -309,18 +294,17 @@ test "config validate" {
         .slots_per_epoch = 32,
     }).validate());
 
-    // Active entry after a sentinel is invalid (gap in the inline array)
-    var bad_layout: DurationTransitions = @splat(.{ .from_slot = 0, .new_duration_ms = 0 });
-    bad_layout[1] = .{ .from_slot = 1024, .new_duration_ms = 6_000 };
+    // from_slot == 0 is invalid (a transition at genesis is redundant with slot_duration_ms).
+    var bad_zero: DurationTransitions = .{};
+    bad_zero.push(.{ .from_slot = 0, .new_duration_ms = 6_000 });
     try testing.expectError(error.InvalidConfig, (Config{
         .genesis_time_sec = 0,
         .slot_duration_ms = 12_000,
-        .duration_transitions = bad_layout,
+        .duration_transitions = bad_zero,
         .slots_per_epoch = 32,
     }).validate());
 }
 
-// EIP-7782 shape: 12s → 6s at slot 1024.
 const eip7782 = Config{
     .genesis_time_sec = 1_000_000,
     .slot_duration_ms = 12_000,
@@ -369,7 +353,6 @@ test "fork-aware: msUntilNextSlot across boundary" {
     try testing.expectEqual(@as(?u64, 3_000), msUntilNextSlot(eip7782, fork_ms + 3_000));
 }
 
-// Two transitions: 12s → 6s at slot 1024, 6s → 4s at slot 8192.
 const two_fork = Config{
     .genesis_time_sec = 1_000_000,
     .slot_duration_ms = 12_000,

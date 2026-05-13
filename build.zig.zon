@@ -136,9 +136,12 @@
         .time = .{
             .root_source_file = "src/time.zig",
         },
+        .bounded_array = .{
+            .root_source_file = "src/bounded_array.zig",
+        },
         .clock = .{
             .root_source_file = "src/clock/root.zig",
-            .imports = .{ .zio, .consensus_types },
+            .imports = .{ .zio, .consensus_types, .bounded_array },
         },
         .hashing = .{
             .root_source_file = "src/hashing/root.zig",
@@ -349,6 +352,7 @@
         // Per-module unit tests (mirror the old auto-generated `test:<module>` steps).
         .constants = .{ .root_module = .constants },
         .hex = .{ .root_module = .hex },
+        .bounded_array = .{ .root_module = .bounded_array },
         .hashing = .{ .root_module = .hashing },
         .preset = .{ .root_module = .preset },
         .persistent_merkle_tree = .{ .root_module = .persistent_merkle_tree },
