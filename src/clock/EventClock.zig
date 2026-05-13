@@ -485,6 +485,7 @@ const zio = @import("zio");
 fn runInRuntime(comptime body: anytype) !void {
     const rt = try zio.Runtime.init(testing.allocator, .{});
     defer rt.deinit();
+
     var handle = try rt.spawn(body, .{rt.io()});
     try handle.join();
 }
@@ -670,8 +671,10 @@ test "multiple waiters are dispatched in target-slot order" {
 
             var fut5 = try clock.waitForSlot(5);
             errdefer fut5.cancel();
+
             var fut3 = try clock.waitForSlot(3);
             errdefer fut3.cancel();
+
             var fut1 = try clock.waitForSlot(1);
             errdefer fut1.cancel();
 
@@ -1088,6 +1091,7 @@ const PropertyState = struct {
                     tracker.deinit();
                     a.destroy(tracker);
                 }
+
                 // Reserve before clock.onSlot so a subsequent append can't OOM
                 // and leave the clock pointing at a tracker we then free.
                 try self.slot_listener_ids.ensureUnusedCapacity(a, 1);
@@ -1106,6 +1110,7 @@ const PropertyState = struct {
                     tracker.deinit();
                     a.destroy(tracker);
                 }
+
                 try self.epoch_listener_ids.ensureUnusedCapacity(a, 1);
                 try self.epoch_trackers.ensureUnusedCapacity(a, 1);
                 try self.epoch_expected.ensureUnusedCapacity(a, 1);
