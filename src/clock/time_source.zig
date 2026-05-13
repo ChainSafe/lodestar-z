@@ -11,7 +11,7 @@ const slot_math = @import("slot_math.zig");
 pub const RealClock = struct {
     io: std.Io,
 
-    pub fn nowMs(self: RealClock) slot_math.UnixMs {
+    pub fn nowMs(self: RealClock) u64 {
         const ms = std.Io.Clock.real.now(self.io).toMilliseconds();
         std.debug.assert(ms >= 0);
         return @intCast(ms);
@@ -20,9 +20,9 @@ pub const RealClock = struct {
 
 /// Controllable time source for deterministic testing.
 pub const FakeTime = struct {
-    ms: slot_math.UnixMs = 0,
+    ms: u64 = 0,
 
-    pub fn setMs(self: *FakeTime, ms: slot_math.UnixMs) void {
+    pub fn setMs(self: *FakeTime, ms: u64) void {
         self.ms = ms;
     }
 
@@ -43,7 +43,7 @@ pub const TimeSource = union(enum) {
     real: RealClock,
     fake: *FakeTime,
 
-    pub fn nowMs(self: TimeSource) slot_math.UnixMs {
+    pub fn nowMs(self: TimeSource) u64 {
         return switch (self) {
             .real => |c| c.nowMs(),
             .fake => |f| f.ms,
@@ -66,11 +66,11 @@ test "FakeTime.advanceSlot uses fork-aware duration" {
     var fake = FakeTime{ .ms = cfg.genesis_time_sec * 1000 };
     // Slot 0 → uses 12_000 ms
     fake.advanceSlot(cfg);
-    try testing.expectEqual(@as(slot_math.UnixMs, 1_012_000), fake.ms);
+    try testing.expectEqual(@as(u64, 1_012_000), fake.ms);
     // Slot 1 → still 12_000 ms (transition is at slot 2)
     fake.advanceSlot(cfg);
-    try testing.expectEqual(@as(slot_math.UnixMs, 1_024_000), fake.ms);
+    try testing.expectEqual(@as(u64, 1_024_000), fake.ms);
     // Slot 2 → first post-fork slot, 6_000 ms
     fake.advanceSlot(cfg);
-    try testing.expectEqual(@as(slot_math.UnixMs, 1_030_000), fake.ms);
+    try testing.expectEqual(@as(u64, 1_030_000), fake.ms);
 }

@@ -28,15 +28,12 @@ pub const AdvanceIterator = struct {
     /// For each slot advancement: yields .slot first, then .epoch if an epoch boundary was crossed.
     /// Returns null when caught up to target.
     pub fn next(self: *AdvanceIterator) ?Event {
-        // If we have a pending epoch event from the previous step, emit it now
         if (self.pending_epoch) |epoch| {
             self.pending_epoch = null;
             return .{ .epoch = epoch };
         }
 
         const current = self.clock.current_slot;
-
-        // Genesis case: current_slot is null, advance to slot 0
         if (current == null) {
             self.clock.current_slot = 0;
             return .{ .slot = 0 };
@@ -49,7 +46,6 @@ pub const AdvanceIterator = struct {
         const next_slot = cur + 1;
         self.clock.current_slot = next_slot;
 
-        // Check epoch boundary — epochAtSlot returns ?Epoch
         const prev_epoch = slot_math.epochAtSlot(self.clock.config, cur);
         const new_epoch = slot_math.epochAtSlot(self.clock.config, next_slot);
         if (prev_epoch) |prev_ep| {
@@ -116,7 +112,6 @@ pub fn isCurrentSlotGivenGossipDisparity(self: *const SlotClock, slot: Slot) boo
 
     const now_ms = self.time.nowMs();
 
-    // Check if close to next slot
     if (current != std.math.maxInt(Slot)) {
         const next_slot = current + 1;
         const next_slot_ms = slot_math.slotStartMs(self.config, next_slot) orelse return false;
@@ -125,7 +120,6 @@ pub fn isCurrentSlotGivenGossipDisparity(self: *const SlotClock, slot: Slot) boo
         }
     }
 
-    // Check if just passed current slot boundary
     if (current > 0) {
         const current_slot_ms = slot_math.slotStartMs(self.config, current) orelse return false;
         if (now_ms -| current_slot_ms <= self.config.maximum_gossip_clock_disparity_ms) {
@@ -151,7 +145,7 @@ pub fn slotWithPastTolerance(self: *const SlotClock, tolerance_ms: u64) ?Slot {
     return slot_math.slotAtMs(self.config, shifted_ms) orelse 0;
 }
 
-pub fn secFromSlot(self: *const SlotClock, slot: Slot, to_sec: ?slot_math.UnixSec) ?i64 {
+pub fn secFromSlot(self: *const SlotClock, slot: Slot, to_sec: ?u64) ?i64 {
     const from_sec = slot_math.slotStartSec(self.config, slot) orelse return null;
     const end_sec = to_sec orelse @divFloor(self.time.nowMs(), 1000);
     const diff = @as(i128, @intCast(end_sec)) - @as(i128, @intCast(from_sec));
@@ -159,7 +153,7 @@ pub fn secFromSlot(self: *const SlotClock, slot: Slot, to_sec: ?slot_math.UnixSe
     return @intCast(diff);
 }
 
-pub fn msFromSlot(self: *const SlotClock, slot: Slot, to_ms: ?slot_math.UnixMs) ?i64 {
+pub fn msFromSlot(self: *const SlotClock, slot: Slot, to_ms: ?u64) ?i64 {
     const from_ms = slot_math.slotStartMs(self.config, slot) orelse return null;
     const end_ms = to_ms orelse self.time.nowMs();
     const diff = @as(i128, @intCast(end_ms)) - @as(i128, @intCast(from_ms));

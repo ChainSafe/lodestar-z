@@ -138,7 +138,7 @@
         },
         .clock = .{
             .root_source_file = "src/clock/root.zig",
-            .imports = .{.zio},
+            .imports = .{ .zio, .consensus_types },
         },
         .hashing = .{
             .root_source_file = "src/hashing/root.zig",

@@ -246,11 +246,11 @@ pub fn slotWithPastTolerance(self: *EventClock, tolerance_ms: u64) ?Slot {
     return self.clock.slotWithPastTolerance(tolerance_ms);
 }
 
-pub fn secFromSlot(self: *EventClock, slot: Slot, to_sec: ?slot_math.UnixSec) ?i64 {
+pub fn secFromSlot(self: *EventClock, slot: Slot, to_sec: ?u64) ?i64 {
     return self.clock.secFromSlot(slot, to_sec);
 }
 
-pub fn msFromSlot(self: *EventClock, slot: Slot, to_ms: ?slot_math.UnixMs) ?i64 {
+pub fn msFromSlot(self: *EventClock, slot: Slot, to_ms: ?u64) ?i64 {
     return self.clock.msFromSlot(slot, to_ms);
 }
 
