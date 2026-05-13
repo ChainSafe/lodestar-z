@@ -48,12 +48,8 @@ pub const AdvanceIterator = struct {
 
         const prev_epoch = slot_math.epochAtSlot(self.clock.config, cur);
         const new_epoch = slot_math.epochAtSlot(self.clock.config, next_slot);
-        if (prev_epoch) |prev_ep| {
-            if (new_epoch) |new_ep| {
-                if (prev_ep < new_ep) {
-                    self.pending_epoch = new_ep;
-                }
-            }
+        if (prev_epoch < new_epoch) {
+            self.pending_epoch = new_epoch;
         }
 
         return .{ .slot = next_slot };

@@ -86,7 +86,9 @@ pub const Config = struct {
 
 /// Returns the slot at the given Unix-millisecond timestamp,
 /// or null if pre-genesis or on overflow.
+/// Precondition: `validate()` accepted `config` — guarantees all durations > 0.
 pub fn slotAtMs(config: Config, now_ms: u64) ?Slot {
+    std.debug.assert(config.slot_duration_ms != 0);
     const genesis_ms = secToMs(config.genesis_time_sec) orelse return null;
     if (now_ms < genesis_ms) return null;
 
@@ -97,12 +99,10 @@ pub fn slotAtMs(config: Config, now_ms: u64) ?Slot {
     for (config.transitions()) |t| {
         const seg_slots = t.from_slot - seg_start_slot;
         const seg_ms_total = std.math.mul(u64, seg_slots, seg_duration) catch {
-            // Segment overflows ms — `now_ms` cannot exceed it.
-            if (seg_duration == 0) return null;
+            // Segment exceeds u64 ms — `now_ms` must lie inside it.
             return seg_start_slot + (now_ms - seg_start_ms) / seg_duration;
         };
         if (now_ms - seg_start_ms < seg_ms_total) {
-            if (seg_duration == 0) return null;
             return seg_start_slot + (now_ms - seg_start_ms) / seg_duration;
         }
         seg_start_ms = std.math.add(u64, seg_start_ms, seg_ms_total) catch return null;
@@ -110,19 +110,20 @@ pub fn slotAtMs(config: Config, now_ms: u64) ?Slot {
         seg_duration = t.new_duration_ms;
     }
 
-    if (seg_duration == 0) return null;
     return seg_start_slot + (now_ms - seg_start_ms) / seg_duration;
 }
 
 /// Returns the slot at the given Unix-second timestamp,
 /// or null if pre-genesis or on overflow.
 pub fn slotAtSec(config: Config, now_sec: u64) ?Slot {
-    return slotAtMs(config, secToMs(now_sec) orelse return null);
+    const now_ms = secToMs(now_sec) orelse return null;
+    return slotAtMs(config, now_ms);
 }
 
-/// Returns the epoch that contains `slot`, or null if slots_per_epoch is zero.
-pub fn epochAtSlot(config: Config, slot: Slot) ?Epoch {
-    if (config.slots_per_epoch == 0) return null;
+/// Returns the epoch that contains `slot`.
+/// Precondition: `validate()` accepted `config` — `slots_per_epoch > 0`.
+pub fn epochAtSlot(config: Config, slot: Slot) Epoch {
+    std.debug.assert(config.slots_per_epoch != 0);
     return @divFloor(slot, config.slots_per_epoch);
 }
 
@@ -192,11 +193,11 @@ test "basic slot math" {
     try testing.expectEqual(@as(?Slot, 0), slotAtMs(mainnet, genesis_ms));
     try testing.expectEqual(@as(?Slot, 1), slotAtMs(mainnet, genesis_ms + 12_000));
 
-    try testing.expectEqual(@as(?Epoch, 0), epochAtSlot(mainnet, 0));
-    try testing.expectEqual(@as(?Epoch, 0), epochAtSlot(mainnet, 31));
-    try testing.expectEqual(@as(?Epoch, 1), epochAtSlot(mainnet, 32));
-    try testing.expectEqual(@as(?Epoch, 1), epochAtSlot(mainnet, 63));
-    try testing.expectEqual(@as(?Epoch, 2), epochAtSlot(mainnet, 64));
+    try testing.expectEqual(@as(Epoch, 0), epochAtSlot(mainnet, 0));
+    try testing.expectEqual(@as(Epoch, 0), epochAtSlot(mainnet, 31));
+    try testing.expectEqual(@as(Epoch, 1), epochAtSlot(mainnet, 32));
+    try testing.expectEqual(@as(Epoch, 1), epochAtSlot(mainnet, 63));
+    try testing.expectEqual(@as(Epoch, 2), epochAtSlot(mainnet, 64));
 
     try testing.expectEqual(@as(?u64, mainnet.genesis_time_sec), slotStartSec(mainnet, 0));
     try testing.expectEqual(@as(?u64, mainnet.genesis_time_sec + 12), slotStartSec(mainnet, 1));
