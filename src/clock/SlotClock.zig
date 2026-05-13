@@ -90,35 +90,43 @@ pub fn currentEpochOrGenesis(self: *const SlotClock) Epoch {
     return self.currentEpoch() orelse 0;
 }
 
+/// Returns the slot the network may be advancing to, accounting for gossip
+/// clock disparity.
+///
+/// Per phase0/p2p-interface.md, gossip validation rejects future messages with
+/// strict `<` (`current_time + MAXIMUM_GOSSIP_CLOCK_DISPARITY < message_time`),
+/// so the boundary case (exactly equal) is accepted — hence `<=` here.
+///
 pub fn currentSlotWithGossipDisparity(self: *const SlotClock) Slot {
-    const current = self.currentSlotOrGenesis();
-    if (current == std.math.maxInt(Slot)) return current;
     const now_ms = self.time.nowMs();
+    const current = slot_math.slotAtMs(self.config, now_ms) orelse 0;
+    if (current == std.math.maxInt(Slot)) return current;
     const next_slot = current + 1;
     const next_slot_ms = slot_math.slotStartMs(self.config, next_slot) orelse return current;
-    if (next_slot_ms -| now_ms <= self.config.maximum_gossip_clock_disparity_ms) {
+    if (next_slot_ms - now_ms <= self.config.maximum_gossip_clock_disparity_ms) {
         return next_slot;
     }
     return current;
 }
 
+/// See `currentSlotWithGossipDisparity` for the `<=` rationale and the
+/// single-snapshot semantics — both apply here too.
 pub fn isCurrentSlotGivenGossipDisparity(self: *const SlotClock, slot: Slot) bool {
-    const current = self.currentSlotOrGenesis();
-    if (slot == current) return true;
-
     const now_ms = self.time.nowMs();
+    const current = slot_math.slotAtMs(self.config, now_ms) orelse 0;
+    if (slot == current) return true;
 
     if (current != std.math.maxInt(Slot)) {
         const next_slot = current + 1;
         const next_slot_ms = slot_math.slotStartMs(self.config, next_slot) orelse return false;
-        if (next_slot_ms -| now_ms <= self.config.maximum_gossip_clock_disparity_ms) {
+        if (next_slot_ms - now_ms <= self.config.maximum_gossip_clock_disparity_ms) {
             return slot == next_slot;
         }
     }
 
     if (current > 0) {
         const current_slot_ms = slot_math.slotStartMs(self.config, current) orelse return false;
-        if (now_ms -| current_slot_ms <= self.config.maximum_gossip_clock_disparity_ms) {
+        if (now_ms - current_slot_ms <= self.config.maximum_gossip_clock_disparity_ms) {
             return slot == current - 1;
         }
     }
@@ -128,9 +136,8 @@ pub fn isCurrentSlotGivenGossipDisparity(self: *const SlotClock, slot: Slot) boo
 
 pub fn slotWithFutureTolerance(self: *const SlotClock, tolerance_ms: u64) ?Slot {
     const now_ms = self.time.nowMs();
-    const shifted = @addWithOverflow(now_ms, tolerance_ms);
-    if (shifted[1] != 0) return null;
-    return slot_math.slotAtMs(self.config, shifted[0]);
+    const shifted_ms = std.math.add(u64, now_ms, tolerance_ms) catch return null;
+    return slot_math.slotAtMs(self.config, shifted_ms);
 }
 
 pub fn slotWithPastTolerance(self: *const SlotClock, tolerance_ms: u64) ?Slot {
@@ -145,16 +152,14 @@ pub fn secFromSlot(self: *const SlotClock, slot: Slot, to_sec: ?u64) ?i64 {
     const from_sec = slot_math.slotStartSec(self.config, slot) orelse return null;
     const end_sec = to_sec orelse @divFloor(self.time.nowMs(), 1000);
     const diff = @as(i128, @intCast(end_sec)) - @as(i128, @intCast(from_sec));
-    if (diff < std.math.minInt(i64) or diff > std.math.maxInt(i64)) return null;
-    return @intCast(diff);
+    return std.math.cast(i64, diff);
 }
 
 pub fn msFromSlot(self: *const SlotClock, slot: Slot, to_ms: ?u64) ?i64 {
     const from_ms = slot_math.slotStartMs(self.config, slot) orelse return null;
     const end_ms = to_ms orelse self.time.nowMs();
     const diff = @as(i128, @intCast(end_ms)) - @as(i128, @intCast(from_ms));
-    if (diff < std.math.minInt(i64) or diff > std.math.maxInt(i64)) return null;
-    return @intCast(diff);
+    return std.math.cast(i64, diff);
 }
 
 pub fn advanceTo(self: *SlotClock, target: Slot) AdvanceIterator {
