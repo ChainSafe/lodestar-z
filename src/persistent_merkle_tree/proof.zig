@@ -76,21 +76,26 @@ inline fn materializeOpaque(pool: *Node.Pool, node_id: Node.Id) Node.Error!Node.
 }
 
 /// Proof traversal needs real left/right child nodes. For an opaque node
-/// (container_struct or chunked_leaf), materialize a temporary plain tree and append it
-/// to the deferred-unref list so it stays alive until proof creation finishes.
+/// (container_struct or chunked_leaf), materialize a temporary plain tree
+/// and append it to the deferred-unref list so it stays alive until proof
+/// creation finishes. Materialization can hand back another opaque (a
+/// single-field StructContainerType whose only field is itself opaque
+/// collapses through `fillWithContents(_, depth=0)` to that field's root),
+/// so loop until the result is navigable.
 fn materializeIfOpaque(
     allocator: Allocator,
     pool: *Node.Pool,
     node_id: Node.Id,
     temporary_roots: *std.ArrayListUnmanaged(Node.Id),
 ) (Node.Error || Error)!Node.Id {
-    if (!isOpaqueNode(pool, node_id)) {
-        return node_id;
+    var current = node_id;
+    while (isOpaqueNode(pool, current)) {
+        const materialized = try materializeOpaque(pool, current);
+        errdefer pool.unref(materialized);
+        try temporary_roots.append(allocator, materialized);
+        current = materialized;
     }
-    const materialized = try materializeOpaque(pool, node_id);
-    errdefer pool.unref(materialized);
-    temporary_roots.append(allocator, materialized) catch return error.OutOfMemory;
-    return materialized;
+    return current;
 }
 
 /// Produces a single Merkle proof for the node at `gindex`.

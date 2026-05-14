@@ -1472,3 +1472,53 @@ test "createSingleProof through StructContainer with chunked_leaf vector field" 
     const rebuilt_root = rebuilt.getRoot(&pool2).*;
     try std.testing.expectEqualSlices(u8, &original, &rebuilt_root);
 }
+
+// A 1-field StructContainerType has `chunk_depth = 0`, so its `toTree`
+// returns the single field's tree directly with no enclosing branch.
+// When that field is a chunked_leaf vector, materializing the container
+// hands back another opaque node — `materializeIfOpaque` must keep
+// materializing until the result is navigable.
+test "createSingleProof through single-field StructContainer with chunked_leaf vector" {
+    const allocator = std.testing.allocator;
+    const Vec = FixedVectorType(UintType(64), 4096, .{ .chunked_leaf = true });
+    const Outer = StructContainerType(struct {
+        only: Vec,
+    });
+
+    var value: Outer.Type = .{ .only = Vec.default_value };
+    for (0..8) |i| value.only[i] = (@as(u64, @intCast(i)) +% 1) *% 0x7777_7777_7777_7777;
+
+    var pool = try Node.Pool.init(.{
+        .page_allocator = allocator,
+        .allocator = allocator,
+        .pool_size = 8192,
+    });
+    defer pool.deinit();
+
+    const root = try Outer.tree.fromValue(&pool, &value);
+    defer pool.unref(root);
+
+    // Logically the single field's tree IS the container's tree at gindex 1,
+    // so chunk 0 of the chunked_leaf vector lives at gindex 1<<k_log2 = 1024.
+    // Traversing this path forces two back-to-back opaque materializations
+    // (container_struct -> chunked_leaf, chunked_leaf -> depth-10 chunk tree)
+    // at the same loop iteration.
+    const gindex = Gindex.fromUint(1024);
+
+    var single_proof = try proof.createSingleProof(allocator, &pool, root, gindex);
+    defer single_proof.deinit(allocator);
+
+    var pool2 = try Node.Pool.init(.{
+        .page_allocator = allocator,
+        .allocator = allocator,
+        .pool_size = 256,
+    });
+    defer pool2.deinit();
+
+    const rebuilt = try proof.createNodeFromSingleProof(&pool2, gindex, single_proof.leaf, single_proof.witnesses);
+    defer pool2.unref(rebuilt);
+
+    const original = root.getRoot(&pool).*;
+    const rebuilt_root = rebuilt.getRoot(&pool2).*;
+    try std.testing.expectEqualSlices(u8, &original, &rebuilt_root);
+}
