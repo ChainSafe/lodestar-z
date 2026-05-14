@@ -21,11 +21,11 @@ pub const State = struct {
 
     pub fn init(self: *State) !void {
         if (self.pool_rc != null) return;
-        var pool_value = try Node.Pool.init(.{
-            .page_allocator = allocator,
-            .allocator = allocator,
-            .pool_size = default_pool_size,
-        });
+        // `Node.Pool.InitOptions` defaults: `page_allocator = page_allocator`,
+        // `allocator = c_allocator`. The latter is the small-object lane —
+        // forcing `page_allocator` there rounds every small alloc to 4 KB and
+        // blows out memory once the binding preheats 10M nodes.
+        var pool_value = try Node.Pool.init(.{ .pool_size = default_pool_size });
         errdefer pool_value.deinit();
         self.pool_rc = try PoolRc.init(allocator, pool_value);
     }
