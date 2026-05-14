@@ -25,6 +25,25 @@ const supported_test_runners = [_]RunnerKind{
     .finality,
 };
 
+const presets = [_][]const u8{
+    "minimal/tests/minimal",
+    "mainnet/tests/mainnet",
+};
+
+const Key = struct {
+    suite: []const u8,
+    case: []const u8,
+
+    fn eql(x: Key, y: Key) bool {
+        return std.mem.eql(u8, x.suite, y.suite) and std.mem.eql(u8, x.case, y.case);
+    }
+
+    fn lessThan(_: void, x: Key, y: Key) bool {
+        const o = std.mem.order(u8, x.suite, y.suite);
+        return if (o == .eq) std.mem.lessThan(u8, x.case, y.case) else o == .lt;
+    }
+};
+
 fn TestWriter(comptime kind: RunnerKind) type {
     return switch (kind) {
         .merkle_proof => @import("./writer/merkle_proof.zig"),
@@ -42,6 +61,10 @@ fn TestWriter(comptime kind: RunnerKind) type {
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    defer std.debug.assert(gpa.deinit() == .ok);
+    const allocator = gpa.allocator();
+
     const test_case_dir = "test/spec/test_case/";
     try std.Io.Dir.createDirPath(.cwd(), io, test_case_dir);
 
@@ -52,7 +75,7 @@ pub fn main(init: std.process.Init) !void {
 
         var write_buf: [8 * 1024]u8 = undefined;
         var writer = out.writer(io, &write_buf);
-        try writeTests(io, &supported_forks, kind, &writer.interface);
+        try writeTests(io, allocator, &supported_forks, kind, &writer.interface);
         try writer.flush();
     }
 
@@ -92,55 +115,101 @@ pub fn writeTestRoot(comptime kinds: []const RunnerKind, writer: *std.Io.Writer)
 
 pub fn writeTests(
     io: std.Io,
+    allocator: std.mem.Allocator,
     comptime forks: []const ForkSeq,
     comptime kind: RunnerKind,
     writer: *std.Io.Writer,
 ) !void {
+    @setEvalBranchQuota(8000);
     try TestWriter(kind).writeHeader(writer);
 
     var root_dir = try std.Io.Dir.openDir(.cwd(), io, spec_test_options.spec_test_out_dir ++ "/" ++ spec_test_options.spec_test_version, .{});
     defer root_dir.close(io);
 
-    // minimal preset includes many more testcases and is a superset of mainnet testcases
-    var preset_dir = try root_dir.openDir(io, "minimal/tests/minimal", .{});
-    defer preset_dir.close(io);
-
     inline for (forks) |fork| {
         const fork_path = @tagName(fork) ++ "/" ++ @tagName(kind);
-        const maybe_fork_dir = preset_dir.openDir(io, fork_path, .{ .iterate = true }) catch |err| switch (err) {
-            error.FileNotFound => null,
-            else => return err,
-        };
 
-        if (maybe_fork_dir) |dir| {
-            var fork_dir = dir;
-            defer fork_dir.close(io);
+        inline for (TestWriter(kind).handlers) |handler| {
+            var arena = std.heap.ArenaAllocator.init(allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
 
-            inline for (TestWriter(kind).handlers) |handler| handler_loop: {
-                var suite_dir = fork_dir.openDir(io, comptime handler.suiteName(), .{ .iterate = true }) catch |err| switch (err) {
-                    error.FileNotFound => break :handler_loop,
-                    else => return err,
-                };
-                defer suite_dir.close(io);
+            var keys: std.ArrayListUnmanaged(Key) = .empty;
 
-                var suite_iter = suite_dir.iterate();
-                while (try suite_iter.next(io)) |suite_entry| {
-                    if (suite_entry.kind != .directory) continue;
+            for (presets) |preset| {
+                try collectCases(io, a, root_dir, preset, fork_path, comptime handler.suiteName(), comptime kind.hasSuiteCase(), &keys);
+            }
 
-                    if (comptime kind.hasSuiteCase()) {
-                        var case_dir = suite_dir.openDir(io, suite_entry.name, .{ .iterate = true }) catch continue;
-                        defer case_dir.close(io);
+            std.mem.sortUnstable(Key, keys.items, {}, Key.lessThan);
 
-                        var case_iter = case_dir.iterate();
-                        while (try case_iter.next(io)) |case_entry| {
-                            if (case_entry.kind != .directory) continue;
-                            try TestWriter(kind).writeTest(writer, fork, handler, suite_entry.name, case_entry.name);
-                        }
-                    } else {
-                        try TestWriter(kind).writeTest(writer, fork, handler, suite_entry.name);
-                    }
+            var write_idx: usize = 0;
+            for (keys.items) |k| {
+                if (write_idx > 0 and keys.items[write_idx - 1].eql(k)) continue;
+                keys.items[write_idx] = k;
+                write_idx += 1;
+            }
+            keys.items.len = write_idx;
+
+            for (keys.items) |k| {
+                if (comptime kind.hasSuiteCase()) {
+                    try TestWriter(kind).writeTest(writer, fork, handler, k.suite, k.case);
+                } else {
+                    try TestWriter(kind).writeTest(writer, fork, handler, k.case);
                 }
             }
+        }
+    }
+}
+
+fn collectCases(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    root: std.Io.Dir,
+    preset: []const u8,
+    fork_path: []const u8,
+    suite_name: []const u8,
+    has_suite_case: bool,
+    out: *std.ArrayListUnmanaged(Key),
+) !void {
+    var preset_dir = root.openDir(io, preset, .{}) catch |err| switch (err) {
+        error.FileNotFound => return,
+        else => |e| return e,
+    };
+    defer preset_dir.close(io);
+    var fork_dir = preset_dir.openDir(io, fork_path, .{ .iterate = true }) catch |err| switch (err) {
+        error.FileNotFound => return,
+        else => |e| return e,
+    };
+    defer fork_dir.close(io);
+    var handler_dir = fork_dir.openDir(io, suite_name, .{ .iterate = true }) catch |err| switch (err) {
+        error.FileNotFound => return,
+        else => |e| return e,
+    };
+    defer handler_dir.close(io);
+
+    var iter = handler_dir.iterate();
+    while (try iter.next(io)) |entry| {
+        if (entry.kind != .directory) continue;
+        if (has_suite_case) {
+            var suite_dir = handler_dir.openDir(io, entry.name, .{ .iterate = true }) catch |err| switch (err) {
+                error.FileNotFound => continue,
+                else => |e| return e,
+            };
+            defer suite_dir.close(io);
+            const suite = try allocator.dupe(u8, entry.name);
+            var case_iter = suite_dir.iterate();
+            while (try case_iter.next(io)) |case_entry| {
+                if (case_entry.kind != .directory) continue;
+                try out.append(allocator, .{
+                    .suite = suite,
+                    .case = try allocator.dupe(u8, case_entry.name),
+                });
+            }
+        } else {
+            try out.append(allocator, .{
+                .suite = "",
+                .case = try allocator.dupe(u8, entry.name),
+            });
         }
     }
 }
