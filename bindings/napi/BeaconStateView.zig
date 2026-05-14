@@ -71,6 +71,7 @@ pub const js_meta = js.class(.{ .properties = .{
 } });
 
 cached_state: ?*CachedBeaconState = null,
+pool_rc: ?*pool.PoolRc = null,
 const BeaconStateView = @This();
 
 pub fn init() BeaconStateView {
@@ -82,6 +83,10 @@ pub fn deinit(self: *BeaconStateView) void {
         cached_state.deinit();
         allocator.destroy(cached_state);
         self.cached_state = null;
+    }
+    if (self.pool_rc) |rc| {
+        rc.unref();
+        self.pool_rc = null;
     }
 }
 
@@ -95,7 +100,7 @@ pub fn createFromBytes(bytes: js.Uint8Array) !BeaconStateView {
     const byte_slice = try bytes.toSlice();
     const slot_value = fork_types.readSlotFromAnyBeaconStateBytes(byte_slice);
     const fork_seq = config.state.config.forkSeq(slot_value);
-    state.* = try AnyBeaconState.deserialize(allocator, &pool.state.pool, fork_seq, byte_slice);
+    state.* = try AnyBeaconState.deserialize(allocator, pool.state.pool(), fork_seq, byte_slice);
     errdefer state.deinit();
 
     const cached_state = try allocator.create(CachedBeaconState);
@@ -112,7 +117,10 @@ pub fn createFromBytes(bytes: js.Uint8Array) !BeaconStateView {
         null,
     );
 
-    return .{ .cached_state = cached_state };
+    return .{
+        .cached_state = cached_state,
+        .pool_rc = pool.state.poolRc().ref(),
+    };
 }
 
 // -------------------------
@@ -813,6 +821,15 @@ pub fn isExecutionEnabled(self: *const BeaconStateView, signed_block_bytes: js.U
     return js.Boolean.from(is_merge_transition_block);
 }
 
+/// Check if the merge transition is complete.
+pub fn isMergeTransitionComplete(self: *const BeaconStateView) !js.Boolean {
+    const cached_state = try self.requireState();
+    const result = switch (cached_state.state.forkSeq()) {
+        inline else => |f| st.isMergeTransitionComplete(f, cached_state.state.castToFork(f)),
+    };
+    return js.Boolean.from(result);
+}
+
 /// Get the proposer rewards for the state.
 pub fn proposerRewards(self: *const BeaconStateView) !js_types.ProposerRewards {
     const env = js.env();
@@ -933,7 +950,7 @@ pub fn createMultiProof(self: *const BeaconStateView, descriptor: js.Uint8Array)
 
     var proof = persistent_merkle_tree.proof.createProof(
         allocator,
-        &pool.state.pool,
+        pool.state.pool(),
         root_node,
         proof_input,
     ) catch {
@@ -1096,7 +1113,10 @@ pub fn processSlots(self: *const BeaconStateView, slot_arg: js.Number, options: 
     }
 
     try st.processSlots(allocator, napi_io.get(), post_state, slot_value, .{});
-    return .{ .cached_state = post_state };
+    return .{
+        .cached_state = post_state,
+        .pool_rc = pool.state.poolRc().ref(),
+    };
 }
 
 /// Run the state transition on a SSZ-serialized SignedBeaconBlock, returning a new

@@ -20,8 +20,8 @@ pub fn computeUnrealizedCheckpoints(allocator: std.mem.Allocator, io: std.Io, ca
     if (cached_state.state.forkSeq() == .phase0) {
         // Clone state to mutate below         true = do not transfer cache
         const cloned_state = try cached_state.clone(allocator, .{ .transfer_cache = false });
-        defer cloned_state.deinit();
         defer allocator.destroy(cloned_state);
+        defer cloned_state.deinit();
 
         var epoch_transition_cache = try EpochTransitionCache.init(
             allocator,
@@ -72,8 +72,8 @@ pub fn computeUnrealizedCheckpoints(allocator: std.mem.Allocator, io: std.Io, ca
     // Clone state and use progressive balances
     // Clone state to mutate below         true = do not transfer cache
     const cloned_state = try cached_state.clone(allocator, .{ .transfer_cache = false });
-    defer cloned_state.deinit();
     defer allocator.destroy(cloned_state);
+    defer cloned_state.deinit();
 
     const total_active_balance = epoch_cache.total_active_balance_increments;
     // minimum of total progressive unslashed balance should be 1
