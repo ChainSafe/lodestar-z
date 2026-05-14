@@ -14,10 +14,6 @@ pub const Error = error{
     InvalidGindex,
     /// Witness list length does not match the gindex path length.
     InvalidWitnessLength,
-    /// Single-proof traversal encountered a second opaque (container_struct or
-    /// chunked_leaf) node after already materializing one. Opaque nodes are leaf-level
-    /// in our tree model and must not nest along a single proof path.
-    NestedOpaque,
 };
 
 pub const ProofType = enum {
@@ -68,8 +64,8 @@ inline fn isOpaqueNode(pool: *Node.Pool, node_id: Node.Id) bool {
 
 /// Materializes a temporary navigable subtree for an opaque node. Caller is
 /// responsible for `unref`'ing the returned Id once the temporary tree is no
-/// longer needed (typically via the deferred-unref ArrayList in compact-multi
-/// proof, or the single optional in single-proof).
+/// longer needed (single-proof and compact-multi-proof both park the Id in
+/// a deferred-unref ArrayList).
 inline fn materializeOpaque(pool: *Node.Pool, node_id: Node.Id) Node.Error!Node.Id {
     const kind = pool.nodes.items(.state)[@intFromEnum(node_id)].kind();
     return switch (kind) {
@@ -112,12 +108,17 @@ pub fn createSingleProof(
     var witnesses = try allocator.alloc([32]u8, path_len);
     errdefer allocator.free(witnesses);
 
-    // A single proof path crosses at most one opaque (container_struct/chunked_leaf)
-    // boundary in well-formed SSZ trees — opaque nodes are leaf-level and the
-    // gindex must descend into one container/list. Track at most one
-    // materialized root and free it on exit.
-    var materialized_root: ?Node.Id = null;
-    defer if (materialized_root) |temp_root| pool.unref(temp_root);
+    // Nested opaque (container_struct → chunked_leaf, or any future combination)
+    // is legal: e.g. StructContainerType holding a FixedVectorType with
+    // .chunked_leaf=true. Track every materialized temporary root and unref
+    // them on exit, matching createCompactMultiProof's pattern.
+    var temporary_roots: std.ArrayListUnmanaged(Node.Id) = .empty;
+    defer {
+        for (temporary_roots.items) |temp_root| {
+            pool.unref(temp_root);
+        }
+        temporary_roots.deinit(allocator);
+    }
 
     if (path_len == 0) {
         return SingleProof{
@@ -132,13 +133,7 @@ pub fn createSingleProof(
     for (0..path_len) |depth_idx| {
         const witness_index = path_len - 1 - depth_idx;
 
-        if (isOpaqueNode(pool, node_id)) {
-            if (materialized_root) |_| {
-                return error.NestedOpaque;
-            }
-            materialized_root = try materializeOpaque(pool, node_id);
-            node_id = materialized_root.?;
-        }
+        node_id = try materializeIfOpaque(allocator, pool, node_id, &temporary_roots);
 
         if (path.left()) {
             const right_id = try node_id.getRight(pool);

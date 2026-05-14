@@ -74,6 +74,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "ssz_containers" },
         .{ .name = "ssz_lists" },
         .{ .name = "ssz_chunked_leaf_set", .extra_libs = &.{dep_hashtree.artifact("hashtree")} },
+        .{ .name = "ssz_nested_opaque_proof", .extra_libs = &.{dep_hashtree.artifact("hashtree")} },
         .{ .name = "bls_public_key", .extra_libs = &.{dep_blst.artifact("blst")} },
         .{ .name = "bls_signature", .extra_libs = &.{dep_blst.artifact("blst")} },
         .{ .name = "bls_aggregate_pk", .extra_libs = &.{dep_blst.artifact("blst")} },

@@ -896,6 +896,8 @@ const UintType = @import("uint.zig").UintType;
 const BoolType = @import("bool.zig").BoolType;
 const ByteVectorType = @import("byte_vector.zig").ByteVectorType;
 const FixedListType = @import("list.zig").FixedListType;
+const FixedVectorType = @import("vector.zig").FixedVectorType;
+const proof = @import("persistent_merkle_tree").proof;
 
 const TypeTestCase = @import("test_utils.zig").TypeTestCase;
 
@@ -1416,4 +1418,57 @@ test "VariableContainerType - default_root" {
 
     const node = try Container.tree.default(&pool);
     try std.testing.expectEqualSlices(u8, &expected_root, node.getRoot(&pool));
+}
+
+// StructContainerType makes the root a `.container_struct` opaque, and
+// FixedVectorType(.{.chunked_leaf=true}) makes the field root a `.chunked_leaf`
+// opaque. A single-proof path that descends through the chunked vector must
+// cross both opaque layers — proof traversal needs to materialize each in turn.
+test "createSingleProof through StructContainer with chunked_leaf vector field" {
+    const allocator = std.testing.allocator;
+    const Vec = FixedVectorType(UintType(64), 4096, .{ .chunked_leaf = true });
+    const Outer = StructContainerType(struct {
+        vec: Vec,
+        tag: UintType(64),
+    });
+
+    var value: Outer.Type = .{
+        .vec = Vec.default_value,
+        .tag = 0x1234_5678_9abc_def0,
+    };
+    for (0..16) |i| value.vec[i] = (@as(u64, @intCast(i)) + 1) *% 0x0101_0101_0101_0101;
+
+    var pool = try Node.Pool.init(.{
+        .page_allocator = std.heap.page_allocator,
+        .allocator = allocator,
+        .pool_size = 8192,
+    });
+    defer pool.deinit();
+
+    const root = try Outer.tree.fromValue(&pool, &value);
+    defer pool.unref(root);
+
+    // gindex 2048 = outer.vec field (gindex 2 of the materialized container)
+    // → chunk 0 inside the chunked_leaf (relative gindex 1024 inside its
+    // depth-10 materialized subtree). Traversal hits container_struct at
+    // depth 0 and chunked_leaf at depth 1 — exactly the nested-opaque case
+    // that single-proof traversal must handle.
+    const gindex = Gindex.fromUint(2048);
+
+    var single_proof = try proof.createSingleProof(allocator, &pool, root, gindex);
+    defer single_proof.deinit(allocator);
+
+    var pool2 = try Node.Pool.init(.{
+        .page_allocator = std.heap.page_allocator,
+        .allocator = allocator,
+        .pool_size = 256,
+    });
+    defer pool2.deinit();
+
+    const rebuilt = try proof.createNodeFromSingleProof(&pool2, gindex, single_proof.leaf, single_proof.witnesses);
+    defer pool2.unref(rebuilt);
+
+    const original = root.getRoot(&pool).*;
+    const rebuilt_root = rebuilt.getRoot(&pool2).*;
+    try std.testing.expectEqualSlices(u8, &original, &rebuilt_root);
 }
