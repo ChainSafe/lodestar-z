@@ -1439,7 +1439,7 @@ test "createSingleProof through StructContainer with chunked_leaf vector field" 
     for (0..16) |i| value.vec[i] = (@as(u64, @intCast(i)) + 1) *% 0x0101_0101_0101_0101;
 
     var pool = try Node.Pool.init(.{
-        .page_allocator = std.heap.page_allocator,
+        .page_allocator = allocator,
         .allocator = allocator,
         .pool_size = 8192,
     });
@@ -1459,7 +1459,7 @@ test "createSingleProof through StructContainer with chunked_leaf vector field" 
     defer single_proof.deinit(allocator);
 
     var pool2 = try Node.Pool.init(.{
-        .page_allocator = std.heap.page_allocator,
+        .page_allocator = allocator,
         .allocator = allocator,
         .pool_size = 256,
     });

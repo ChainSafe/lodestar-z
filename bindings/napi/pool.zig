@@ -3,8 +3,10 @@ const js = @import("zapi:zapi").js;
 const Node = @import("persistent_merkle_tree").Node;
 const RefCount = @import("state_transition").RefCount;
 
-/// Pool uses page allocator for internal allocations.
-/// It's recommended to never reallocate the pool after initialization.
+/// Backs the `PoolRc` wrapper allocation only (one long-lived struct for the
+/// lifetime of the binding). The `Node.Pool` itself uses its own
+/// `InitOptions` defaults — `page_allocator` for large blobs, `c_allocator`
+/// for the small-object lane.
 const allocator = std.heap.page_allocator;
 
 const default_pool_size: u32 = 0;
