@@ -80,3 +80,164 @@ pub fn assertValidProposerSlashing(
         }
     }
 }
+
+const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
+const Node = @import("persistent_merkle_tree").Node;
+const ProposerSlashing = types.phase0.ProposerSlashing.Type;
+
+const TestEnvironment = struct {
+    allocator: std.mem.Allocator,
+    pool: Node.Pool,
+    test_state: TestCachedBeaconState,
+
+    fn init(self: *TestEnvironment, allocator: std.mem.Allocator, num_validators: u32) !void {
+        const pool_size = num_validators * 5;
+
+        self.allocator = allocator;
+        self.pool = try Node.Pool.init(allocator, pool_size);
+        errdefer self.pool.deinit();
+        self.test_state = try TestCachedBeaconState.init(allocator, &self.pool, num_validators);
+    }
+
+    fn deinit(self: *TestEnvironment) void {
+        self.test_state.deinit();
+        self.pool.deinit();
+    }
+};
+
+fn makeValidProposerSlashing(proposer_index: u64, slot: u64) ProposerSlashing {
+    var slashing = types.phase0.ProposerSlashing.default_value;
+    slashing.signed_header_1.message.slot = slot;
+    slashing.signed_header_1.message.proposer_index = proposer_index;
+    slashing.signed_header_1.message.body_root = [_]u8{0xaa} ** 32;
+    slashing.signed_header_2.message.slot = slot;
+    slashing.signed_header_2.message.proposer_index = proposer_index;
+    slashing.signed_header_2.message.body_root = [_]u8{0xbb} ** 32;
+    return slashing;
+}
+
+test "assertValidProposerSlashing - valid proposer slashing" {
+    var env: TestEnvironment = undefined;
+    try env.init(std.testing.allocator, 256);
+    defer env.deinit();
+
+    const slashing = makeValidProposerSlashing(0, 0);
+
+    try assertValidProposerSlashing(
+        .electra,
+        env.test_state.config,
+        env.test_state.cached_state.epoch_cache,
+        env.test_state.cached_state.state.castToFork(.electra),
+        &slashing,
+        false,
+    );
+}
+
+test "assertValidProposerSlashing - InvalidProposerSlashingSlotMismatch" {
+    var env: TestEnvironment = undefined;
+    try env.init(std.testing.allocator, 256);
+    defer env.deinit();
+
+    var slashing = makeValidProposerSlashing(0, 0);
+    slashing.signed_header_2.message.slot = 1;
+
+    try std.testing.expectError(
+        error.InvalidProposerSlashingSlotMismatch,
+        assertValidProposerSlashing(
+            .electra,
+            env.test_state.config,
+            env.test_state.cached_state.epoch_cache,
+            env.test_state.cached_state.state.castToFork(.electra),
+            &slashing,
+            false,
+        ),
+    );
+}
+
+test "assertValidProposerSlashing - InvalidProposerSlashingProposerIndexMismatch" {
+    var env: TestEnvironment = undefined;
+    try env.init(std.testing.allocator, 256);
+    defer env.deinit();
+
+    var slashing = makeValidProposerSlashing(0, 0);
+    slashing.signed_header_2.message.proposer_index = 1;
+
+    try std.testing.expectError(
+        error.InvalidProposerSlashingProposerIndexMismatch,
+        assertValidProposerSlashing(
+            .electra,
+            env.test_state.config,
+            env.test_state.cached_state.epoch_cache,
+            env.test_state.cached_state.state.castToFork(.electra),
+            &slashing,
+            false,
+        ),
+    );
+}
+
+test "assertValidProposerSlashing - InvalidProposerSlashingProposerIndexOutOfRange" {
+    var env: TestEnvironment = undefined;
+    try env.init(std.testing.allocator, 256);
+    defer env.deinit();
+
+    const slashing = makeValidProposerSlashing(999, 0);
+
+    try std.testing.expectError(
+        error.InvalidProposerSlashingProposerIndexOutOfRange,
+        assertValidProposerSlashing(
+            .electra,
+            env.test_state.config,
+            env.test_state.cached_state.epoch_cache,
+            env.test_state.cached_state.state.castToFork(.electra),
+            &slashing,
+            false,
+        ),
+    );
+}
+
+test "assertValidProposerSlashing - InvalidProposerSlashingHeadersEqual" {
+    var env: TestEnvironment = undefined;
+    try env.init(std.testing.allocator, 256);
+    defer env.deinit();
+
+    var slashing = makeValidProposerSlashing(0, 0);
+    // Make headers identical
+    slashing.signed_header_2.message.body_root = slashing.signed_header_1.message.body_root;
+
+    try std.testing.expectError(
+        error.InvalidProposerSlashingHeadersEqual,
+        assertValidProposerSlashing(
+            .electra,
+            env.test_state.config,
+            env.test_state.cached_state.epoch_cache,
+            env.test_state.cached_state.state.castToFork(.electra),
+            &slashing,
+            false,
+        ),
+    );
+}
+
+test "assertValidProposerSlashing - InvalidProposerSlashingProposerNotSlashable" {
+    var env: TestEnvironment = undefined;
+    try env.init(std.testing.allocator, 256);
+    defer env.deinit();
+
+    // Mark validator 0 as already slashed
+    var validators_view = try env.test_state.cached_state.state.castToFork(.electra).validators();
+    var validator_view = try validators_view.get(0);
+    try validator_view.set("slashed", true);
+
+    const slashing = makeValidProposerSlashing(0, 0);
+
+    try std.testing.expectError(
+        error.InvalidProposerSlashingProposerNotSlashable,
+        assertValidProposerSlashing(
+            .electra,
+            env.test_state.config,
+            env.test_state.cached_state.epoch_cache,
+            env.test_state.cached_state.state.castToFork(.electra),
+            &slashing,
+            false,
+        ),
+    );
+}
