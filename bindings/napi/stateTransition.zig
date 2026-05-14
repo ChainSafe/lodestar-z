@@ -20,7 +20,7 @@ else
 /// Recognized fields:
 /// - verifyStateRoot, verifyProposer, verifySignatures: bool
 /// - dontTransferCache: bool (negated to set transfer_cache)
-/// - executionPayloadStatus: "valid" | "invalid" | "preMerge"
+/// - executionPayloadStatus: "valid" | "invalid"
 /// - dataAvailabilityStatus: "Available" | "PreData" | "OutOfRange"
 ///
 /// This is the double negative version to conform with production lodestar.
@@ -50,8 +50,6 @@ fn parseOptions(options: ?js.Value) !st.TransitionOpts {
                         .valid
                     else if (std.mem.eql(u8, execution_payload_status, "invalid"))
                         .invalid
-                    else if (std.mem.eql(u8, execution_payload_status, "preMerge"))
-                        .pre_merge
                     else
                         return error.InvalidExecutionPayloadStatus;
             }
