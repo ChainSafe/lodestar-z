@@ -18,15 +18,13 @@ const Slot = types.primitive.Slot.Type;
 /// ```
 const SLOT_BYTES_POSITION_IN_STATE: usize = 40;
 
-/// Slot is `uint64`.
-const SLOT_BYTE_COUNT: usize = 8;
-
 /// SSZ-serialized size of a phase0 Validator. Stable across forks.
 pub const VALIDATOR_BYTES_SIZE: usize = types.phase0.Validator.fixed_size;
 
 pub fn getStateSlotFromBytes(bytes: []const u8) !Slot {
-    if (bytes.len < SLOT_BYTES_POSITION_IN_STATE + SLOT_BYTE_COUNT) return error.InvalidSize;
-    return @intCast(std.mem.readInt(u64, bytes[SLOT_BYTES_POSITION_IN_STATE .. SLOT_BYTES_POSITION_IN_STATE + SLOT_BYTE_COUNT], .little));
+    const slot_size = types.primitive.Slot.fixed_size;
+    if (bytes.len < SLOT_BYTES_POSITION_IN_STATE + slot_size) return error.InvalidSize;
+    return std.mem.readInt(u64, bytes[SLOT_BYTES_POSITION_IN_STATE .. SLOT_BYTES_POSITION_IN_STATE + slot_size], .little);
 }
 
 pub fn getForkFromStateBytes(config: *const BeaconConfig, bytes: []const u8) !ForkSeq {

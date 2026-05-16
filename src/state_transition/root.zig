@@ -105,14 +105,14 @@ const EpochShuffling = @import("./utils/epoch_shuffling.zig");
 pub const calculateShufflingDecisionRoot = EpochShuffling.calculateShufflingDecisionRoot;
 pub const processProposerLookahead = @import("./epoch/process_proposer_lookahead.zig").processProposerLookahead;
 
-const load_state_mod = @import("load_state.zig");
-pub const loadState = load_state_mod.loadState;
-pub const MigrateStateOutput = load_state_mod.MigrateStateOutput;
+const load_state = @import("load_state.zig");
+pub const loadState = load_state.loadState;
+pub const MigrateStateOutput = load_state.MigrateStateOutput;
 
 test {
     testing.refAllDecls(@This());
     testing.refAllDecls(seed);
     testing.refAllDecls(state_transition);
     testing.refAllDecls(EpochShuffling);
-    testing.refAllDecls(load_state_mod);
+    testing.refAllDecls(load_state);
 }

@@ -15,7 +15,7 @@ const ssz_container = @import("ssz_container.zig");
 const ValidatorIndex = types.primitive.ValidatorIndex.Type;
 
 /// Inactivity score is `uint64` (8 bytes).
-const INACTIVITY_SCORE_SIZE: usize = 8;
+const INACTIVITY_SCORE_SIZE: usize = types.primitive.Uint64.fixed_size;
 
 // BeaconState field indices are stable across forks.
 const BEACON_STATE_VALIDATORS_FIELD_INDEX: usize = types.phase0.BeaconState.getFieldIndex("validators");
@@ -147,6 +147,10 @@ fn loadStateForFork(
     return .{ .state = migrated_state, .modified_validators = modified_validators };
 }
 
+/// Migrate the `inactivity_scores` list onto `migrated_view`, reusing the seed's subtree.
+///
+/// Inactivity scores rarely change between two states (mostly 0 on mainnet), so reusing
+/// the seed's unchanged score subtrees saves ~500ms of state hashTreeRoot time.
 fn loadInactivityScores(
     allocator: Allocator,
     comptime StateST: type,
@@ -160,7 +164,7 @@ fn loadInactivityScores(
     const seed_scores = try types.altair.InactivityScores.TreeView.init(allocator, pool, seed_scores_node);
     defer seed_scores.deinit();
 
-    var migrated_scores = try seed_scores.clone(.{});
+    var migrated_scores = try seed_scores.clone(.{ .transfer_cache = false });
     errdefer migrated_scores.deinit();
 
     const diff_ctx = try buildScoresDiffContext(allocator, migrated_scores, inactivity_scores_bytes);
@@ -185,6 +189,10 @@ fn loadInactivityScores(
     try migrated_view.set("inactivity_scores", migrated_scores);
 }
 
+/// Migrate the `validators` list onto `migrated_view`, reusing the seed's subtree
+/// for unchanged validators and deserializing only the modified ones.
+///
+/// Returns the absolute indices of validators that differ from the seed (caller owns the slice).
 fn loadValidators(
     allocator: Allocator,
     comptime StateST: type,
@@ -206,16 +214,28 @@ fn loadValidators(
     const new_count = new_validators_bytes.len / ssz_bytes.VALIDATOR_BYTES_SIZE;
     const min_count = @min(seed_count, new_count);
 
-    var migrated_validators = try seed_validators.clone(.{});
+    var migrated_validators = try seed_validators.clone(.{ .transfer_cache = false });
     errdefer migrated_validators.deinit();
 
-    const seed_bytes = try getSeedValidatorsBytes(allocator, seed_validators, seed_state_validators_bytes);
-    defer if (seed_bytes.owned) allocator.free(seed_bytes.bytes);
+    // Only set when we serialize the seed ourselves; the cleanup frees exactly that case.
+    var serialized_seed: ?[]u8 = null;
+    defer if (serialized_seed) |bytes| allocator.free(bytes);
+
+    // 80% of validators serialization time comes from memory allocation.
+    // seed_state_validators_bytes is an optimization at the beacon-node side to avoid
+    // memory allocation here.
+    const seed_bytes: []const u8 = seed_state_validators_bytes orelse blk: {
+        const size = try seed_validators.serializedSize();
+        const out = try allocator.alloc(u8, size);
+        serialized_seed = out;
+        _ = try seed_validators.serializeIntoBytes(out);
+        break :blk out;
+    };
 
     var modified_validators: std.ArrayList(ValidatorIndex) = .empty;
     errdefer modified_validators.deinit(allocator);
 
-    const old_validators_slice = seed_bytes.bytes[0 .. min_count * ssz_bytes.VALIDATOR_BYTES_SIZE];
+    const old_validators_slice = seed_bytes[0 .. min_count * ssz_bytes.VALIDATOR_BYTES_SIZE];
     const new_validators_slice = new_validators_bytes[0 .. min_count * ssz_bytes.VALIDATOR_BYTES_SIZE];
     try findModifiedValidators(allocator, old_validators_slice, new_validators_slice, &modified_validators, 0);
 
@@ -223,7 +243,7 @@ fn loadValidators(
         allocator,
         seed_validators,
         migrated_validators,
-        seed_bytes.bytes,
+        seed_bytes,
         new_validators_bytes,
         modified_validators.items,
     );
@@ -252,6 +272,7 @@ const ScoresDiffContext = struct {
     new_validator_count: usize,
 };
 
+/// Snapshot the seed scores (serialized bytes plus counts) needed to diff against the new bytes.
 fn buildScoresDiffContext(
     allocator: Allocator,
     migrated_scores: *types.altair.InactivityScores.TreeView,
@@ -276,6 +297,7 @@ fn buildScoresDiffContext(
     };
 }
 
+/// Write each modified inactivity score into `migrated_scores` from `inactivity_scores_bytes`.
 fn applyScoreDiffs(
     migrated_scores: *types.altair.InactivityScores.TreeView,
     inactivity_scores_bytes: []const u8,
@@ -286,10 +308,12 @@ fn applyScoreDiffs(
         const start = i * INACTIVITY_SCORE_SIZE;
         const chunk: *const [INACTIVITY_SCORE_SIZE]u8 = @ptrCast(inactivity_scores_bytes[start .. start + INACTIVITY_SCORE_SIZE].ptr);
         const value = std.mem.readInt(u64, chunk, .little);
-        try migrated_scores.set(i, @intCast(value));
+        try migrated_scores.set(i, value);
     }
 }
 
+/// Resize `migrated_scores` to `new_validator_count`: append new scores when growing,
+/// or return a trimmed (or empty) view when shrinking. Returns the resulting view.
 fn syncScoresLength(
     allocator: Allocator,
     migrated_scores: *types.altair.InactivityScores.TreeView,
@@ -303,7 +327,7 @@ fn syncScoresLength(
             const start = idx * INACTIVITY_SCORE_SIZE;
             const chunk: *const [INACTIVITY_SCORE_SIZE]u8 = @ptrCast(inactivity_scores_bytes[start .. start + INACTIVITY_SCORE_SIZE].ptr);
             const value = std.mem.readInt(u64, chunk, .little);
-            try migrated_scores.push(@intCast(value));
+            try migrated_scores.push(value);
         }
         return migrated_scores;
     }
@@ -325,27 +349,8 @@ fn syncScoresLength(
     return trimmed;
 }
 
-const SeedBytes = struct {
-    bytes: []const u8,
-    owned: bool,
-};
-
-fn getSeedValidatorsBytes(
-    allocator: Allocator,
-    seed_validators: *types.phase0.Validators.TreeView,
-    seed_state_validators_bytes: ?[]const u8,
-) !SeedBytes {
-    if (seed_state_validators_bytes) |bytes| {
-        return .{ .bytes = bytes, .owned = false };
-    }
-
-    const size = try seed_validators.serializedSize();
-    const out = try allocator.alloc(u8, size);
-    errdefer allocator.free(out);
-    _ = try seed_validators.serializeIntoBytes(out);
-    return .{ .bytes = out, .owned = true };
-}
-
+/// Overwrite each modified validator in `migrated_validators` with a view rebuilt
+/// from `new_validators_bytes`, reusing the seed validator's pubkey/withdrawal subtrees.
 fn applyModifiedValidators(
     allocator: Allocator,
     seed_validators: *types.phase0.Validators.TreeView,
@@ -375,6 +380,8 @@ fn applyModifiedValidators(
     }
 }
 
+/// Deserialize and push validators at indices [start_index, end_index) from
+/// `new_validators_bytes`, recording each appended index in `modified_validators`.
 fn appendNewValidators(
     allocator: Allocator,
     migrated_validators: *types.phase0.Validators.TreeView,
@@ -402,6 +409,7 @@ fn appendNewValidators(
     }
 }
 
+/// Shrink `migrated_validators` to `new_count`, returning a trimmed (or empty) view.
 fn trimValidators(
     allocator: Allocator,
     migrated_validators: *types.phase0.Validators.TreeView,
@@ -437,16 +445,9 @@ fn inactivityScoresNodeId(state: *AnyBeaconState) !Node.Id {
     };
 }
 
-fn validatorsViewOwned(allocator: Allocator, state: *AnyBeaconState) !*types.phase0.Validators.TreeView {
-    const root = try validatorsNodeId(state);
-    return try types.phase0.Validators.TreeView.init(allocator, state.nodePool(), root);
-}
-
-fn inactivityScoresViewOwned(allocator: Allocator, state: *AnyBeaconState) !*types.altair.InactivityScores.TreeView {
-    const root = try inactivityScoresNodeId(state);
-    return try types.altair.InactivityScores.TreeView.init(allocator, state.nodePool(), root);
-}
-
+/// Load a validator from bytes given a seed validator.
+/// - Reuse pubkey and withdrawal credentials subtrees if they are unchanged, to save memory.
+/// - Otherwise deserialize the validator fresh.
 fn loadValidatorWithSeedReuse(
     allocator: Allocator,
     pool: *Node.Pool,
@@ -507,6 +508,8 @@ fn loadValidatorWithSeedReuse(
     return try types.phase0.Validator.TreeView.init(allocator, pool, root);
 }
 
+/// Append the absolute indices (offset by `validator_offset`) of validators that
+/// differ between the two equal-length, VALIDATOR_BYTES_SIZE-aligned slices.
 fn findModifiedValidators(
     allocator: Allocator,
     validators_bytes: []const u8,
@@ -544,6 +547,8 @@ fn findModifiedValidators(
     );
 }
 
+/// Append the absolute indices (offset by `validator_offset`) of inactivity scores
+/// that differ between the two equal-length, INACTIVITY_SCORE_SIZE-aligned slices.
 fn findModifiedInactivityScores(
     allocator: Allocator,
     inactivity_scores_bytes: []const u8,
@@ -603,7 +608,7 @@ test "loadValidatorWithSeedReuse: reuse vs rebuild" {
     var seed_state = try AnyBeaconState.deserialize(allocator, &pool, .electra, seed_state_bytes);
     defer seed_state.deinit();
 
-    var seed_validators = try validatorsViewOwned(allocator, &seed_state);
+    var seed_validators = try types.phase0.Validators.TreeView.init(allocator, seed_state.nodePool(), try validatorsNodeId(&seed_state));
     defer seed_validators.deinit();
 
     const target_index: usize = 3;
@@ -795,11 +800,11 @@ test "loadState scenarios" {
             try std.testing.expectEqual(e, got);
         }
 
-        var migrated_validators = try validatorsViewOwned(allocator, &out.state);
+        var migrated_validators = try types.phase0.Validators.TreeView.init(allocator, out.state.nodePool(), try validatorsNodeId(&out.state));
         defer migrated_validators.deinit();
         try std.testing.expectEqual(case.expect_validators_len, try migrated_validators.length());
 
-        var scores = try inactivityScoresViewOwned(allocator, &out.state);
+        var scores = try types.altair.InactivityScores.TreeView.init(allocator, out.state.nodePool(), try inactivityScoresNodeId(&out.state));
         defer scores.deinit();
         try std.testing.expectEqual(case.expect_scores_len, try scores.length());
 
@@ -900,7 +905,7 @@ test "diff helpers cases" {
     }
 }
 
-test "loadValidators rejects non-multiple-of-VALIDATOR_BYTES_SIZE" {
+test "loadValidators/loadInactivityScores: rejection scenarios" {
     const allocator = std.testing.allocator;
     var pool = try Node.Pool.init(allocator, 1024);
     defer pool.deinit();
@@ -915,57 +920,35 @@ test "loadValidators rejects non-multiple-of-VALIDATOR_BYTES_SIZE" {
 
     const StateST = types.electra.BeaconState;
     const migrated_view = state_ptr.castToFork(.electra).inner;
-    const seed_validators_node = try validatorsNodeId(state_ptr);
-    const bad_bytes = [_]u8{0} ** (ssz_bytes.VALIDATOR_BYTES_SIZE + 1);
-    try std.testing.expectError(
-        error.InvalidSize,
-        loadValidators(allocator, StateST, migrated_view, &pool, seed_validators_node, bad_bytes[0..], null),
-    );
-}
 
-test "loadValidators rejects malformed seed_state_validators_bytes" {
-    const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 1024);
-    defer pool.deinit();
-
-    const gen = @import("test_utils/generate_state.zig");
-    const chain_config = gen.getConfig(@import("config").minimal.chain_config, .electra, 0);
-    const state_ptr = try gen.generateElectraState(allocator, &pool, chain_config, 8);
-    defer {
-        state_ptr.deinit();
-        allocator.destroy(state_ptr);
+    {
+        // new validators bytes length is not a multiple of VALIDATOR_BYTES_SIZE
+        const seed_validators_node = try validatorsNodeId(state_ptr);
+        const bad_bytes = [_]u8{0} ** (ssz_bytes.VALIDATOR_BYTES_SIZE + 1);
+        try std.testing.expectError(
+            error.InvalidSize,
+            loadValidators(allocator, StateST, migrated_view, &pool, seed_validators_node, bad_bytes[0..], null),
+        );
     }
 
-    const StateST = types.electra.BeaconState;
-    const migrated_view = state_ptr.castToFork(.electra).inner;
-    const seed_validators_node = try validatorsNodeId(state_ptr);
-    const good_new_bytes = [_]u8{0} ** (ssz_bytes.VALIDATOR_BYTES_SIZE * 2);
-    const bad_seed_bytes = [_]u8{0} ** (ssz_bytes.VALIDATOR_BYTES_SIZE + 1);
-    try std.testing.expectError(
-        error.InvalidSize,
-        loadValidators(allocator, StateST, migrated_view, &pool, seed_validators_node, good_new_bytes[0..], bad_seed_bytes[0..]),
-    );
-}
-
-test "loadInactivityScores rejects non-multiple-of-INACTIVITY_SCORE_SIZE" {
-    const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 1024);
-    defer pool.deinit();
-
-    const gen = @import("test_utils/generate_state.zig");
-    const chain_config = gen.getConfig(@import("config").minimal.chain_config, .electra, 0);
-    const state_ptr = try gen.generateElectraState(allocator, &pool, chain_config, 8);
-    defer {
-        state_ptr.deinit();
-        allocator.destroy(state_ptr);
+    {
+        // seed_state_validators_bytes length is not a multiple of VALIDATOR_BYTES_SIZE
+        const seed_validators_node = try validatorsNodeId(state_ptr);
+        const good_new_bytes = [_]u8{0} ** (ssz_bytes.VALIDATOR_BYTES_SIZE * 2);
+        const bad_seed_bytes = [_]u8{0} ** (ssz_bytes.VALIDATOR_BYTES_SIZE + 1);
+        try std.testing.expectError(
+            error.InvalidSize,
+            loadValidators(allocator, StateST, migrated_view, &pool, seed_validators_node, good_new_bytes[0..], bad_seed_bytes[0..]),
+        );
     }
 
-    const StateST = types.electra.BeaconState;
-    const migrated_view = state_ptr.castToFork(.electra).inner;
-    const seed_scores_node = try inactivityScoresNodeId(state_ptr);
-    const bad_bytes = [_]u8{0} ** (INACTIVITY_SCORE_SIZE + 1);
-    try std.testing.expectError(
-        error.InvalidSize,
-        loadInactivityScores(allocator, StateST, migrated_view, &pool, seed_scores_node, bad_bytes[0..]),
-    );
+    {
+        // inactivity scores bytes length is not a multiple of INACTIVITY_SCORE_SIZE
+        const seed_scores_node = try inactivityScoresNodeId(state_ptr);
+        const bad_bytes = [_]u8{0} ** (INACTIVITY_SCORE_SIZE + 1);
+        try std.testing.expectError(
+            error.InvalidSize,
+            loadInactivityScores(allocator, StateST, migrated_view, &pool, seed_scores_node, bad_bytes[0..]),
+        );
+    }
 }
