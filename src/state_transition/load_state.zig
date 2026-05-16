@@ -509,7 +509,7 @@ fn loadValidatorWithSeedReuse(
 }
 
 /// Append the absolute indices (offset by `validator_offset`) of validators that
-/// differ between the two equal-length, validator-record-aligned slices.
+/// differ between the two equal-length, validator-fixed-size-aligned slices.
 fn findModifiedValidators(
     allocator: Allocator,
     validators_bytes: []const u8,
@@ -922,7 +922,7 @@ test "loadValidators/loadInactivityScores: rejection scenarios" {
     const migrated_view = state_ptr.castToFork(.electra).inner;
 
     {
-        // new validators bytes length is not a multiple of the validator record size
+        // new validators bytes length is not a multiple of the validator fixed size
         const seed_validators_node = try validatorsNodeId(state_ptr);
         const bad_bytes = [_]u8{0} ** (types.phase0.Validator.fixed_size + 1);
         try std.testing.expectError(
@@ -932,7 +932,7 @@ test "loadValidators/loadInactivityScores: rejection scenarios" {
     }
 
     {
-        // seed_state_validators_bytes length is not a multiple of the validator record size
+        // seed_state_validators_bytes length is not a multiple of the validator fixed size
         const seed_validators_node = try validatorsNodeId(state_ptr);
         const good_new_bytes = [_]u8{0} ** (types.phase0.Validator.fixed_size * 2);
         const bad_seed_bytes = [_]u8{0} ** (types.phase0.Validator.fixed_size + 1);
