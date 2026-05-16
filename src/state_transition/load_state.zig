@@ -74,6 +74,7 @@ fn deserializeBeaconStateTreeViewWithSeedOverrides(
         } else blk: {
             const node_id = try ScoresType.tree.deserializeFromBytes(pool, inactivity_scores_bytes);
             errdefer pool.unref(node_id);
+
             break :blk node_id;
         };
 
@@ -286,6 +287,7 @@ fn buildScoresDiffContext(
     const old_size = try migrated_scores.serializedSize();
     const old_bytes = try allocator.alloc(u8, old_size);
     errdefer allocator.free(old_bytes);
+
     _ = try migrated_scores.serializeIntoBytes(old_bytes);
 
     return .{
@@ -339,6 +341,7 @@ fn syncScoresLength(
             &types.altair.InactivityScores.default_value,
         );
         errdefer pool.unref(empty_root);
+
         const empty_scores = try types.altair.InactivityScores.TreeView.init(allocator, pool, empty_root);
         migrated_scores.deinit();
         return empty_scores;
@@ -376,6 +379,7 @@ fn applyModifiedValidators(
             new_bytes,
         );
         errdefer new_validator.deinit();
+
         try migrated_validators.set(i, new_validator);
     }
 }
@@ -399,6 +403,7 @@ fn appendNewValidators(
         var v: ?*types.phase0.Validator.TreeView = blk: {
             const root = try types.phase0.Validator.tree.deserializeFromBytes(pool, new_bytes);
             errdefer pool.unref(root);
+
             break :blk try types.phase0.Validator.TreeView.init(allocator, pool, root);
         };
         errdefer if (v) |vv| vv.deinit();
@@ -422,6 +427,7 @@ fn trimValidators(
             &types.phase0.Validators.default_value,
         );
         errdefer pool.unref(empty_root);
+
         const empty_validators = try types.phase0.Validators.TreeView.init(allocator, pool, empty_root);
         migrated_validators.deinit();
         return empty_validators;
@@ -468,6 +474,7 @@ fn loadValidatorWithSeedReuse(
         if (!withdrawal_same) {
             const root = try types.phase0.Validator.tree.deserializeFromBytes(pool, new_validator_bytes);
             errdefer pool.unref(root);
+
             return try types.phase0.Validator.TreeView.init(allocator, pool, root);
         }
     }
@@ -504,6 +511,7 @@ fn loadValidatorWithSeedReuse(
 
     const root = try Node.fillWithContents(pool, &nodes, types.phase0.Validator.chunk_depth);
     errdefer pool.unref(root);
+
     owned_len = 0;
     return try types.phase0.Validator.TreeView.init(allocator, pool, root);
 }
@@ -648,6 +656,7 @@ test "loadValidatorWithSeedReuse: reuse vs rebuild" {
     const fresh_root = try types.phase0.Validator.tree.deserializeFromBytes(&pool, new_validator_bytes[0..]);
     var fresh_validator = try types.phase0.Validator.TreeView.init(allocator, &pool, fresh_root);
     defer fresh_validator.deinit();
+
     try std.testing.expectEqualSlices(u8, try fresh_validator.hashTreeRoot(), try new_validator.hashTreeRoot());
 }
 
@@ -802,10 +811,12 @@ test "loadState scenarios" {
 
         var migrated_validators = try types.phase0.Validators.TreeView.init(allocator, out.state.nodePool(), try validatorsNodeId(&out.state));
         defer migrated_validators.deinit();
+
         try std.testing.expectEqual(case.expect_validators_len, try migrated_validators.length());
 
         var scores = try types.altair.InactivityScores.TreeView.init(allocator, out.state.nodePool(), try inactivityScoresNodeId(&out.state));
         defer scores.deinit();
+
         try std.testing.expectEqual(case.expect_scores_len, try scores.length());
 
         if (case.expect_score) |exp| {
@@ -826,6 +837,7 @@ test "loadState scenarios" {
 
         var fresh_state = try AnyBeaconState.deserialize(allocator, &pool, .electra, mutated_bytes);
         defer fresh_state.deinit();
+
         try std.testing.expectEqualSlices(u8, try fresh_state.hashTreeRoot(), try out.state.hashTreeRoot());
     }
 }
@@ -860,6 +872,7 @@ test "diff helpers cases" {
             const total = case.count * types.phase0.Validator.fixed_size;
             const old_bytes = try allocator.alloc(u8, total);
             defer allocator.free(old_bytes);
+
             const new_bytes = try allocator.alloc(u8, total);
             defer allocator.free(new_bytes);
 
@@ -881,6 +894,7 @@ test "diff helpers cases" {
             const total = case.count * INACTIVITY_SCORE_SIZE;
             const old_bytes = try allocator.alloc(u8, total);
             defer allocator.free(old_bytes);
+
             const new_bytes = try allocator.alloc(u8, total);
             defer allocator.free(new_bytes);
 
