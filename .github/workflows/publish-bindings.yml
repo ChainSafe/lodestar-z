@@ -62,5 +62,5 @@ jobs:
         run: |
           pnpm zapi build-artifacts --optimize ReleaseSafe
           pnpm zapi prepublish
-          pnpm zapi publish --access public -- --provenance ${{ steps.detect_dist_tag.outputs.tag_flag }}
+          pnpm zapi publish --access public -- --ignore-scripts --provenance ${{ steps.detect_dist_tag.outputs.tag_flag }}
 
