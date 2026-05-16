@@ -72,6 +72,7 @@ pub export fn zig_fuzz_test(buf: [*]const u8, len: usize) callconv(.c) void {
 
     const root = Outer.tree.fromValue(&pool, &value) catch return;
     defer pool.unref(root);
+
     const original_root = root.getRoot(&pool).*;
 
     leak_check_armed = true;

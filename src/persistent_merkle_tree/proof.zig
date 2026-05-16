@@ -92,6 +92,7 @@ fn materializeIfOpaque(
     while (isOpaqueNode(pool, current)) {
         const materialized = try materializeOpaque(pool, current);
         errdefer pool.unref(materialized);
+
         try temporary_roots.append(allocator, materialized);
         current = materialized;
     }
