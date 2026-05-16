@@ -202,16 +202,16 @@ fn loadValidators(
     new_validators_bytes: []const u8,
     seed_state_validators_bytes: ?[]const u8,
 ) ![]ValidatorIndex {
-    if (new_validators_bytes.len % ssz_bytes.VALIDATOR_BYTES_SIZE != 0) return error.InvalidSize;
+    if (new_validators_bytes.len % types.phase0.Validator.fixed_size != 0) return error.InvalidSize;
     if (seed_state_validators_bytes) |bytes| {
-        if (bytes.len % ssz_bytes.VALIDATOR_BYTES_SIZE != 0) return error.InvalidSize;
+        if (bytes.len % types.phase0.Validator.fixed_size != 0) return error.InvalidSize;
     }
 
     const seed_validators = try types.phase0.Validators.TreeView.init(allocator, pool, seed_validators_node);
     defer seed_validators.deinit();
 
     const seed_count = try seed_validators.length();
-    const new_count = new_validators_bytes.len / ssz_bytes.VALIDATOR_BYTES_SIZE;
+    const new_count = new_validators_bytes.len / types.phase0.Validator.fixed_size;
     const min_count = @min(seed_count, new_count);
 
     var migrated_validators = try seed_validators.clone(.{ .transfer_cache = false });
@@ -235,8 +235,8 @@ fn loadValidators(
     var modified_validators: std.ArrayList(ValidatorIndex) = .empty;
     errdefer modified_validators.deinit(allocator);
 
-    const old_validators_slice = seed_bytes[0 .. min_count * ssz_bytes.VALIDATOR_BYTES_SIZE];
-    const new_validators_slice = new_validators_bytes[0 .. min_count * ssz_bytes.VALIDATOR_BYTES_SIZE];
+    const old_validators_slice = seed_bytes[0 .. min_count * types.phase0.Validator.fixed_size];
+    const new_validators_slice = new_validators_bytes[0 .. min_count * types.phase0.Validator.fixed_size];
     try findModifiedValidators(allocator, old_validators_slice, new_validators_slice, &modified_validators, 0);
 
     try applyModifiedValidators(
@@ -361,9 +361,9 @@ fn applyModifiedValidators(
 ) !void {
     for (modified_validators) |validator_index| {
         const i: usize = @intCast(validator_index);
-        const start = i * ssz_bytes.VALIDATOR_BYTES_SIZE;
-        const new_bytes = new_validators_bytes[start .. start + ssz_bytes.VALIDATOR_BYTES_SIZE];
-        const seed_val_bytes = seed_bytes[start .. start + ssz_bytes.VALIDATOR_BYTES_SIZE];
+        const start = i * types.phase0.Validator.fixed_size;
+        const new_bytes = new_validators_bytes[start .. start + types.phase0.Validator.fixed_size];
+        const seed_val_bytes = seed_bytes[start .. start + types.phase0.Validator.fixed_size];
 
         const seed_validator = try seed_validators.get(i);
         // seed_validator is borrowed from seed_validators; do not deinit.
@@ -392,8 +392,8 @@ fn appendNewValidators(
 ) !void {
     var idx: usize = start_index;
     while (idx < end_index) : (idx += 1) {
-        const start = idx * ssz_bytes.VALIDATOR_BYTES_SIZE;
-        const new_bytes = new_validators_bytes[start .. start + ssz_bytes.VALIDATOR_BYTES_SIZE];
+        const start = idx * types.phase0.Validator.fixed_size;
+        const new_bytes = new_validators_bytes[start .. start + types.phase0.Validator.fixed_size];
 
         const pool = migrated_validators.chunks.state.pool;
         var v: ?*types.phase0.Validator.TreeView = blk: {
@@ -509,7 +509,7 @@ fn loadValidatorWithSeedReuse(
 }
 
 /// Append the absolute indices (offset by `validator_offset`) of validators that
-/// differ between the two equal-length, VALIDATOR_BYTES_SIZE-aligned slices.
+/// differ between the two equal-length, validator-record-aligned slices.
 fn findModifiedValidators(
     allocator: Allocator,
     validators_bytes: []const u8,
@@ -518,18 +518,18 @@ fn findModifiedValidators(
     validator_offset: usize,
 ) !void {
     std.debug.assert(validators_bytes.len == validators_bytes2.len);
-    std.debug.assert(validators_bytes.len % ssz_bytes.VALIDATOR_BYTES_SIZE == 0);
+    std.debug.assert(validators_bytes.len % types.phase0.Validator.fixed_size == 0);
 
     if (std.mem.eql(u8, validators_bytes, validators_bytes2)) return;
 
-    if (validators_bytes.len == ssz_bytes.VALIDATOR_BYTES_SIZE) {
+    if (validators_bytes.len == types.phase0.Validator.fixed_size) {
         try modified_validators.append(allocator, @intCast(validator_offset));
         return;
     }
 
-    const num_validator = validators_bytes.len / ssz_bytes.VALIDATOR_BYTES_SIZE;
+    const num_validator = validators_bytes.len / types.phase0.Validator.fixed_size;
     const half_validator = num_validator / 2;
-    const split = half_validator * ssz_bytes.VALIDATOR_BYTES_SIZE;
+    const split = half_validator * types.phase0.Validator.fixed_size;
 
     try findModifiedValidators(
         allocator,
@@ -615,7 +615,7 @@ test "loadValidatorWithSeedReuse: reuse vs rebuild" {
     var seed_validator = try seed_validators.get(target_index);
     // seed_validator is borrowed from seed_validators; do not deinit.
 
-    var seed_validator_bytes: [ssz_bytes.VALIDATOR_BYTES_SIZE]u8 = undefined;
+    var seed_validator_bytes: [types.phase0.Validator.fixed_size]u8 = undefined;
     _ = try seed_validator.serializeIntoBytes(&seed_validator_bytes);
 
     var new_validator_bytes = seed_validator_bytes;
@@ -717,7 +717,7 @@ test "loadState scenarios" {
                     const ranges = try types.electra.BeaconState.readFieldRanges(seed_bytes);
                     const validators_range = ranges[validators_field_index];
                     const out = try allocator.dupe(u8, seed_bytes);
-                    const base = validators_range[0] + m.index * ssz_bytes.VALIDATOR_BYTES_SIZE;
+                    const base = validators_range[0] + m.index * types.phase0.Validator.fixed_size;
                     @memset(out[base + 48 .. base + 80], m.fill);
                     break :blk out;
                 },
@@ -726,7 +726,7 @@ test "loadState scenarios" {
                     const ranges = try types.electra.BeaconState.readFieldRanges(seed_bytes);
                     const validators_range = ranges[validators_field_index];
                     const out = try allocator.dupe(u8, seed_bytes);
-                    const base = validators_range[0] + m.index * ssz_bytes.VALIDATOR_BYTES_SIZE;
+                    const base = validators_range[0] + m.index * types.phase0.Validator.fixed_size;
                     @memset(out[base + 0 .. base + 48], m.pub_fill);
                     @memset(out[base + 48 .. base + 80], m.wd_fill);
                     break :blk out;
@@ -816,12 +816,12 @@ test "loadState scenarios" {
             const validators_field_index = comptime types.electra.BeaconState.getFieldIndex("validators");
             const ranges = try types.electra.BeaconState.readFieldRanges(mutated_bytes);
             const validators_range = ranges[validators_field_index];
-            const base = validators_range[0] + exp.index * ssz_bytes.VALIDATOR_BYTES_SIZE;
+            const base = validators_range[0] + exp.index * types.phase0.Validator.fixed_size;
             var mv = try migrated_validators.get(exp.index);
             // mv is borrowed from migrated_validators; do not deinit.
-            var mv_bytes: [ssz_bytes.VALIDATOR_BYTES_SIZE]u8 = undefined;
+            var mv_bytes: [types.phase0.Validator.fixed_size]u8 = undefined;
             _ = try mv.serializeIntoBytes(&mv_bytes);
-            try std.testing.expectEqualSlices(u8, mutated_bytes[base .. base + ssz_bytes.VALIDATOR_BYTES_SIZE], mv_bytes[0..]);
+            try std.testing.expectEqualSlices(u8, mutated_bytes[base .. base + types.phase0.Validator.fixed_size], mv_bytes[0..]);
         }
 
         var fresh_state = try AnyBeaconState.deserialize(allocator, &pool, .electra, mutated_bytes);
@@ -857,22 +857,22 @@ test "diff helpers cases" {
         defer got.deinit(allocator);
 
         if (case.kind == .validators) {
-            const total = case.count * ssz_bytes.VALIDATOR_BYTES_SIZE;
+            const total = case.count * types.phase0.Validator.fixed_size;
             const old_bytes = try allocator.alloc(u8, total);
             defer allocator.free(old_bytes);
             const new_bytes = try allocator.alloc(u8, total);
             defer allocator.free(new_bytes);
 
             for (0..case.count) |i| {
-                const start = i * ssz_bytes.VALIDATOR_BYTES_SIZE;
-                for (0..ssz_bytes.VALIDATOR_BYTES_SIZE) |j| {
+                const start = i * types.phase0.Validator.fixed_size;
+                for (0..types.phase0.Validator.fixed_size) |j| {
                     old_bytes[start + j] = @intCast((i + 31 * j) & 0xff);
                 }
             }
             @memcpy(new_bytes, old_bytes);
 
             for (case.modified) |idx| {
-                const start = idx * ssz_bytes.VALIDATOR_BYTES_SIZE;
+                const start = idx * types.phase0.Validator.fixed_size;
                 new_bytes[start] ^= 0x5a;
             }
 
@@ -922,9 +922,9 @@ test "loadValidators/loadInactivityScores: rejection scenarios" {
     const migrated_view = state_ptr.castToFork(.electra).inner;
 
     {
-        // new validators bytes length is not a multiple of VALIDATOR_BYTES_SIZE
+        // new validators bytes length is not a multiple of the validator record size
         const seed_validators_node = try validatorsNodeId(state_ptr);
-        const bad_bytes = [_]u8{0} ** (ssz_bytes.VALIDATOR_BYTES_SIZE + 1);
+        const bad_bytes = [_]u8{0} ** (types.phase0.Validator.fixed_size + 1);
         try std.testing.expectError(
             error.InvalidSize,
             loadValidators(allocator, StateST, migrated_view, &pool, seed_validators_node, bad_bytes[0..], null),
@@ -932,10 +932,10 @@ test "loadValidators/loadInactivityScores: rejection scenarios" {
     }
 
     {
-        // seed_state_validators_bytes length is not a multiple of VALIDATOR_BYTES_SIZE
+        // seed_state_validators_bytes length is not a multiple of the validator record size
         const seed_validators_node = try validatorsNodeId(state_ptr);
-        const good_new_bytes = [_]u8{0} ** (ssz_bytes.VALIDATOR_BYTES_SIZE * 2);
-        const bad_seed_bytes = [_]u8{0} ** (ssz_bytes.VALIDATOR_BYTES_SIZE + 1);
+        const good_new_bytes = [_]u8{0} ** (types.phase0.Validator.fixed_size * 2);
+        const bad_seed_bytes = [_]u8{0} ** (types.phase0.Validator.fixed_size + 1);
         try std.testing.expectError(
             error.InvalidSize,
             loadValidators(allocator, StateST, migrated_view, &pool, seed_validators_node, good_new_bytes[0..], bad_seed_bytes[0..]),
