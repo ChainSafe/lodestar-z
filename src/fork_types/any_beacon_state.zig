@@ -216,6 +216,13 @@ pub const AnyBeaconState = union(ForkSeq) {
         return std.meta.activeTag(self.*);
     }
 
+    /// Underlying persistent merkle tree pool, regardless of fork variant.
+    pub fn nodePool(self: *AnyBeaconState) *Node.Pool {
+        return switch (self.*) {
+            inline else => |state| state.pool,
+        };
+    }
+
     // pub fn castFromFork(comptime f: ForkSeq, )
 
     pub fn castToFork(self: *AnyBeaconState, comptime f: ForkSeq) *BeaconState(f) {
