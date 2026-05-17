@@ -1015,6 +1015,30 @@ pub fn createdWithTransferCache(self: *const BeaconStateView) !js.Boolean {
     return js.Boolean.from(cached_state.created_with_transfer_cache);
 }
 
+/// Bench-only: run loadState end-to-end and tear down. Mirrors what TS's
+/// loadState measures (no CachedBeaconState wrap, no EpochCache build) so
+/// native vs TS comparisons isolate the SSZ tree-rebuild cost.
+pub fn loadOtherStateBench(
+    self: *const BeaconStateView,
+    state_bytes: js.Uint8Array,
+    seed_validators_bytes: ?js.Uint8Array,
+) !void {
+    const cached_state = try self.requireState();
+    const state_bytes_slice = try state_bytes.toSlice();
+    const seed_validators_bytes_slice: ?[]const u8 =
+        if (seed_validators_bytes) |b| try b.toSlice() else null;
+
+    var result = try st.loadState(
+        allocator,
+        cached_state.config,
+        cached_state.state,
+        state_bytes_slice,
+        seed_validators_bytes_slice,
+    );
+    allocator.free(result.modified_validators);
+    result.state.deinit();
+}
+
 pub fn serialize(self: *const BeaconStateView) !js.Uint8Array {
     const env = js.env();
     const cached_state = try self.requireState();
@@ -1290,10 +1314,61 @@ pub fn isStateValidatorsNodesPopulated(_: *const BeaconStateView) !js.Boolean {
     return js.Boolean.from(true);
 }
 
-/// TODO(bing): This is the naive version; port real `loadState` (deserializeContainerIgnoreFields + loadValidators
-/// byte-diff/tree-reuse) from TS to Zig SSZ to get the ~500ms-per-reload optimization.
-pub fn loadOtherState(_: *const BeaconStateView, state_bytes: js.Uint8Array, _: ?js.Uint8Array, _: ?js.Value) !BeaconStateView {
-    return createFromBytes(state_bytes);
+pub fn loadOtherState(
+    self: *const BeaconStateView,
+    state_bytes: js.Uint8Array,
+    seed_validators_bytes: ?js.Uint8Array,
+    opts: ?js.Value,
+) !BeaconStateView {
+    const old_cached_state = try self.requireState();
+    const state_bytes_slice = try state_bytes.toSlice();
+    const seed_validators_bytes_slice: ?[]const u8 =
+        if (seed_validators_bytes) |b| try b.toSlice() else null;
+
+    var loaded = try st.loadState(
+        allocator,
+        old_cached_state.config,
+        old_cached_state.state,
+        state_bytes_slice,
+        seed_validators_bytes_slice,
+    );
+    errdefer loaded.state.deinit();
+    defer allocator.free(loaded.modified_validators);
+
+    const new_cached_state = try allocator.create(CachedBeaconState);
+    errdefer allocator.destroy(new_cached_state);
+
+    try new_cached_state.init(
+        allocator,
+        &loaded.state,
+        .{
+            .config = &config.state.config,
+            .index_to_pubkey = &pubkey.state.index2pubkey,
+            .pubkey_to_index = &pubkey.state.pubkey2index,
+        },
+        null,
+    );
+
+    if (opts) |value| {
+        const raw = value.toValue();
+        if (try raw.hasNamedProperty("preloadValidatorsAndBalances") and
+            (try (try raw.getNamedProperty("preloadValidatorsAndBalances")).getValueBool()))
+        {
+            //TODO(bing): These unnecessarily allocate and return memory that we throw away.
+            // This doesn't matter for typescript lodestar because GC clears it anyway,
+            // but we're losing some savings here. Consider implementating something like
+            // a `prefetchAll` that only does `populateAllNodes` that returns void
+            var validators_view = try new_cached_state.state.validators();
+            _ = try validators_view.getAllReadonlyValues(allocator);
+            var balances_view = try new_cached_state.state.balances();
+            _ = try balances_view.getAll(allocator);
+        }
+    }
+
+    return .{
+        .cached_state = new_cached_state,
+        .pool_rc = pool.state.poolRc().ref(),
+    };
 }
 
 pub fn toValue(_: *const BeaconStateView) !js.Value {
