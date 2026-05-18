@@ -62,7 +62,7 @@ pub fn computeWeakSubjectivityPeriodFromConstituentsPhase0(
     const N: u128 = @intCast(active_validator_count);
     // NOTE: `total_balance_by_increment` is total balance measured in `EFFECTIVE_BALANCE_INCREMENT` units.
     // The formula needs t = (avg effective balance per validator) in ETH.
-    // That equals totalBalanceByIncrement / N only because
+    // That equals total_balance_by_increment / N only because
     // EFFECTIVE_BALANCE_INCREMENT == ETH_TO_GWEI (both 1e9 Gwei) in the spec.
     // If they ever diverge, this needs scaling.
     comptime std.debug.assert(preset.EFFECTIVE_BALANCE_INCREMENT == ETH_TO_GWEI);
