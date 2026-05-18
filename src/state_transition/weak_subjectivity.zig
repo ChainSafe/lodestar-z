@@ -5,9 +5,9 @@ const types = @import("consensus_types");
 
 const BeaconConfig = @import("config").BeaconConfig;
 const ForkSeq = @import("config").ForkSeq;
-const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
+const EpochCache = @import("cache/epoch_cache.zig").EpochCache;
 
-const validator = @import("validator.zig");
+const validator = @import("./utils/validator.zig");
 
 const Epoch = types.primitive.Epoch.Type;
 
