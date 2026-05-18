@@ -764,7 +764,8 @@ pub fn getSyncCommitteesWitness(self: *const BeaconStateView) !js_types.SyncComm
     const root_node = switch (cached_state.state.*) {
         inline else => |state| state.root,
     };
-    const witness_data = try st.getSyncCommitteesWitness(fork_seq, root_node, cached_state.state.nodePool());
+    var witness_data: st.SyncCommitteeWitness = undefined;
+    try st.getSyncCommitteesWitness(fork_seq, root_node, cached_state.state.nodePool(), &witness_data);
 
     const witness_arr = try env.createArrayWithLength(@intCast(witness_data.witness_len));
     for (witness_data.witness(), 0..) |*w, i| {

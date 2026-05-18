@@ -27,10 +27,13 @@ pub fn getSyncCommitteesWitness(
     fork: ForkSeq,
     root_node: Node.Id,
     pool: *Node.Pool,
-) !SyncCommitteeWitness {
+    out: *SyncCommitteeWitness,
+) !void {
     std.debug.assert(fork.gte(.altair));
     const n1 = root_node;
 
+    var current: Node.Id = undefined;
+    var next: Node.Id = undefined;
     // Layout from electra onward: sync committees sit deeper in the tree.
     if (fork.gte(.electra)) {
         const n2 = try Node.Id.getLeft(n1, pool);
@@ -39,8 +42,8 @@ pub fn getSyncCommitteesWitness(
         const n21 = try Node.Id.getRight(n10, pool);
         const n43 = try Node.Id.getRight(n21, pool);
 
-        const current = try Node.Id.getLeft(n43, pool); // n86
-        const next = try Node.Id.getRight(n43, pool); // n87
+        current = try Node.Id.getLeft(n43, pool); // n86
+        next = try Node.Id.getRight(n43, pool); // n87
 
         // Siblings on the path to the sync-committee subtree, descending gindex order.
         const w0 = try Node.Id.getLeft(n21, pool); // gindex 42
@@ -49,18 +52,14 @@ pub fn getSyncCommitteesWitness(
         const w3 = try Node.Id.getLeft(n2, pool); // gindex 4
         const w4 = try Node.Id.getRight(n1, pool); // gindex 3
 
-        return .{
-            .witness_buf = .{
-                w0.getRoot(pool).*,
-                w1.getRoot(pool).*,
-                w2.getRoot(pool).*,
-                w3.getRoot(pool).*,
-                w4.getRoot(pool).*,
-            },
-            .witness_len = 5,
-            .current_sync_committee_root = current.getRoot(pool).*,
-            .next_sync_committee_root = next.getRoot(pool).*,
+        out.witness_buf = .{
+            w0.getRoot(pool).*,
+            w1.getRoot(pool).*,
+            w2.getRoot(pool).*,
+            w3.getRoot(pool).*,
+            w4.getRoot(pool).*,
         };
+        out.witness_len = 5;
     }
     // Pre-electra layout (altair → deneb): sync committees at gindices 54, 55.
     else {
@@ -69,25 +68,24 @@ pub fn getSyncCommitteesWitness(
         const n13 = try Node.Id.getRight(n6, pool); // 10[1]10
         const n27 = try Node.Id.getRight(n13, pool); // 101[1]0
 
-        const current = try Node.Id.getLeft(n27, pool); // n54 — 1011[0]
-        const next = try Node.Id.getRight(n27, pool); // n55 — 1011[1]
+        current = try Node.Id.getLeft(n27, pool); // n54 — 1011[0]
+        next = try Node.Id.getRight(n27, pool); // n55 — 1011[1]
 
         const w0 = try Node.Id.getLeft(n13, pool); // gindex 26
         const w1 = try Node.Id.getLeft(n6, pool); // gindex 12
         const w2 = try Node.Id.getRight(n3, pool); // gindex 7
         const w3 = try Node.Id.getLeft(n1, pool); // gindex 2
 
-        return .{
-            .witness_buf = .{
-                w0.getRoot(pool).*,
-                w1.getRoot(pool).*,
-                w2.getRoot(pool).*,
-                w3.getRoot(pool).*,
-                std.mem.zeroes([32]u8),
-            },
-            .witness_len = 4,
-            .current_sync_committee_root = current.getRoot(pool).*,
-            .next_sync_committee_root = next.getRoot(pool).*,
+        out.witness_buf = .{
+            w0.getRoot(pool).*,
+            w1.getRoot(pool).*,
+            w2.getRoot(pool).*,
+            w3.getRoot(pool).*,
+            std.mem.zeroes([32]u8),
         };
+        out.witness_len = 4;
     }
+
+    out.current_sync_committee_root = current.getRoot(pool).*;
+    out.next_sync_committee_root = next.getRoot(pool).*;
 }
