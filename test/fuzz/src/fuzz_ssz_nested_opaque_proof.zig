@@ -2,10 +2,10 @@
 //   seed_byte: mixed into the vector's content so identical fuzz inputs
 //     materialize distinct chunked_leaf chunks
 //   op record (2 bytes): le u16 reduced to gindex in [1, 4095]; covers
-//     the container_struct root, both fields, the chunked_leaf field root,
-//     every internal node of the depth-10 chunked_leaf subtree, and every
-//     chunk leaf. Out-of-tree gindices fall in the same band and exercise
-//     the createSingleProof's InvalidNode/InvalidGindex paths.
+//     the container_struct root, both fields, and every internal/leaf node
+//     of the vec field's 1024-chunk subtree (including the chunked_leaf
+//     nodes it is built from). Out-of-tree gindices fall in the same band
+//     and exercise createSingleProof's InvalidNode/InvalidGindex paths.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -19,9 +19,8 @@ const fuzz_buffer_size: u32 = 64 * 1024 * 1024;
 var fuzz_buf: [fuzz_buffer_size]u8 = undefined;
 
 // StructContainerType makes the root a `.container_struct` opaque, and the
-// `vec` field's chunked_leaf list (length=4096, k_log2=10 ⇒ chunked_leaf_depth=0)
-// makes the field root a `.chunked_leaf` opaque. Any proof targeting nodes
-// inside the vector must traverse both opaque layers.
+// `vec` field's chunked_leaf list is built from `.chunked_leaf` nodes. Any
+// proof targeting nodes inside the vector must traverse both opaque kinds.
 const Vec = ssz.FixedVectorType(ssz.UintType(64), 4096, .{ .chunked_leaf = true });
 const Outer = ssz.StructContainerType(struct {
     vec: Vec,

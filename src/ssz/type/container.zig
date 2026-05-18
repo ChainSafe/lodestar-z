@@ -1421,9 +1421,9 @@ test "VariableContainerType - default_root" {
 }
 
 // StructContainerType makes the root a `.container_struct` opaque, and
-// FixedVectorType(.{.chunked_leaf=true}) makes the field root a `.chunked_leaf`
-// opaque. A single-proof path that descends through the chunked vector must
-// cross both opaque layers — proof traversal needs to materialize each in turn.
+// FixedVectorType(.{.chunked_leaf=true}) builds the field from `.chunked_leaf`
+// nodes. A single-proof path descending through the chunked vector crosses
+// both opaque kinds — proof traversal materializes each in turn.
 test "createSingleProof through StructContainer with chunked_leaf vector field" {
     const allocator = std.testing.allocator;
     const Vec = FixedVectorType(UintType(64), 4096, .{ .chunked_leaf = true });
@@ -1449,10 +1449,10 @@ test "createSingleProof through StructContainer with chunked_leaf vector field" 
     defer pool.unref(root);
 
     // gindex 2048 = outer.vec field (gindex 2 of the materialized container)
-    // → chunk 0 inside the chunked_leaf (relative gindex 1024 inside its
-    // depth-10 materialized subtree). Traversal hits container_struct at
-    // depth 0 and chunked_leaf at depth 1 — exactly the nested-opaque case
-    // that single-proof traversal must handle.
+    // → chunk 0 of the chunked vector (relative gindex 1024 in its 1024-chunk
+    // subtree). Traversal crosses the container_struct root and the
+    // chunked_leaf node(s) of the vec field — the nested-opaque case
+    // single-proof traversal must handle.
     const gindex = Gindex.fromUint(2048);
 
     var single_proof = try proof.createSingleProof(allocator, &pool, root, gindex);
@@ -1474,13 +1474,15 @@ test "createSingleProof through StructContainer with chunked_leaf vector field" 
 }
 
 // A 1-field StructContainerType has `chunk_depth = 0`, so its `toTree`
-// returns the single field's tree directly with no enclosing branch.
-// When that field is a chunked_leaf vector, materializing the container
-// hands back another opaque node — `materializeIfOpaque` must keep
-// materializing until the result is navigable.
+// returns the single field's tree directly with no enclosing branch. The
+// vector below is sized to exactly one chunked_leaf, so materializing the
+// container hands back another opaque node — `materializeIfOpaque` must
+// keep materializing until the result is navigable.
 test "createSingleProof through single-field StructContainer with chunked_leaf vector" {
     const allocator = std.testing.allocator;
-    const Vec = FixedVectorType(UintType(64), 4096, .{ .chunked_leaf = true });
+    const ChunkedLeaf = @import("persistent_merkle_tree").ChunkedLeaf;
+    // Exactly K chunks (4 u64 per chunk) → the vector is one chunked_leaf.
+    const Vec = FixedVectorType(UintType(64), ChunkedLeaf.K * 4, .{ .chunked_leaf = true });
     const Outer = StructContainerType(struct {
         only: Vec,
     });
@@ -1498,12 +1500,11 @@ test "createSingleProof through single-field StructContainer with chunked_leaf v
     const root = try Outer.tree.fromValue(&pool, &value);
     defer pool.unref(root);
 
-    // Logically the single field's tree IS the container's tree at gindex 1,
-    // so chunk 0 of the chunked_leaf vector lives at gindex 1<<k_log2 = 1024.
-    // Traversing this path forces two back-to-back opaque materializations
-    // (container_struct -> chunked_leaf, chunked_leaf -> depth-10 chunk tree)
-    // at the same loop iteration.
-    const gindex = Gindex.fromUint(1024);
+    // Single field → the container's tree at gindex 1 IS the field's tree;
+    // the K-chunk vector puts chunk 0 at gindex 1<<k_log2. Traversal crosses
+    // the container_struct, then the chunked_leaf, in back-to-back
+    // materializations.
+    const gindex = Gindex.fromDepth(ChunkedLeaf.k_log2, 0);
 
     var single_proof = try proof.createSingleProof(allocator, &pool, root, gindex);
     defer single_proof.deinit(allocator);

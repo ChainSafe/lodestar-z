@@ -16,7 +16,7 @@ const ListCompositeTreeView = tree_view.ListCompositeTreeView;
 /// Per-type opt-in flags for SSZ list/vector types.
 pub const TypeOpts = struct {
     /// When true, the basic-element packed tree is built from chunked_leaf leaves
-    /// (Pool.createChunkedLeaf) instead of per-chunk leaves. ChunkedLeaf leaves pack K=1024
+    /// (Pool.createChunkedLeaf) instead of per-chunk leaves. ChunkedLeaf leaves pack K
     /// chunks contiguously; the upper tree is depth `chunk_depth - k_log2`.
     /// Trade-off: faster bulk operations on large lists; tradeoff explored
     /// in B6/D1 benchmarks. ListBasicTreeView's `iteratorReadonly` and

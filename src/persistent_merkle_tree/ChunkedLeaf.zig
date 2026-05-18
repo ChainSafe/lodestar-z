@@ -1,6 +1,6 @@
 //! Chunked-leaf payload.
 //!
-//! Replaces K=1024 individual leaf Nodes with a single heap blob (chunk
+//! Replaces K individual leaf Nodes with a single heap blob (chunk
 //! array + length) referenced by one `.chunked_leaf` Node. Self-contained,
 //! ref-counted via the Pool's Node ref count, copy-on-write on mutation.
 const std = @import("std");

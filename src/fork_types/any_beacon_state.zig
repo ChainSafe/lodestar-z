@@ -1121,25 +1121,16 @@ test "upgrade state - sanity" {
     try expect(gloas_state.forkSeq() == .gloas);
 }
 
-// ---- Proof regression tests ----
+// ---- Proof through opaque nodes ----
 //
 // `AnyBeaconState.getSingleProof` walks generalized indices through the SSZ
-// tree, calling `Node.Id.getLeft`/`getRight` per descent step. Two recent
-// optimizations turned terminal nodes into opaque payloads with no Id
-// children:
-//   * `Validator` is stored as `container_struct` (a single Node holding a
-//     deserialized struct). Descending into a validator sub-field returns
-//     `Error.InvalidNode`.
-//   * `Balances` is stored as `chunked_leaf` (a single Node holding K=1024 packed
-//     chunks). Descending into a specific balance index returns
-//     `Error.InvalidNode`.
-//
-// EF spec tests do not exercise these paths (the `merkle_proof` shard only
-// covers `BeaconBlockBody.blob_kzg_commitment_merkle_proof`), so these two
-// regressions slipped through. The tests below are expected to FAIL today
-// and pass after `container_struct`/`chunked_leaf` learn to materialize a temporary
-// PMT subtree on demand for proof generation (see PR #232's `to_tree`
-// vtable design).
+// tree. Two representations make terminal nodes opaque with no Id children:
+//   * `Validator` is a `container_struct` — one Node holding a deserialized
+//     struct.
+//   * `Balances` is built from `chunked_leaf` nodes, each packing K chunks.
+// Plain descent into either returns `Error.InvalidNode`; proof generation
+// materializes a temporary PMT subtree on demand to traverse them. The tests
+// below cover proof generation across both.
 
 test "single proof: validators[0].withdrawal_credentials" {
     const allocator = std.testing.allocator;

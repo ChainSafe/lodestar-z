@@ -1192,8 +1192,8 @@ test "ListBasicTreeView chunked_leaf: iteratorReadonly across chunked_leaf bound
     defer pool.deinit();
 
     const ListT = FixedListType(UintType(64), 1 << 20, .{ .chunked_leaf = true });
-    // Cross 3 ChunkedLeaves: 2 full + 1 partial. items_per_chunk=4 for u64,
-    // K=1024 chunks/chunked_leaf -> 4096 items per ChunkedLeaf.
+    // Spans several ChunkedLeaves including a partial last one. items_per_chunk=4
+    // for u64; one ChunkedLeaf holds K * items_per_chunk items.
     const item_count: usize = 2 * 4096 + 17;
 
     var src: ListT.Type = .empty;
@@ -1583,7 +1583,7 @@ test "ListBasicTreeView chunked_leaf: property test cross-commit set sequences" 
     defer pool.deinit();
 
     const ListT = FixedListType(UintType(64), 1 << 20, .{ .chunked_leaf = true });
-    const item_count: usize = 8192; // spans 2 ChunkedLeaves (K=1024 * 4 items/chunk)
+    const item_count: usize = 8192; // spans several ChunkedLeaves (one holds K * 4 items)
 
     var prng = std.Random.DefaultPrng.init(0xCAFE_BEEF_DEAD_BABE);
     const rand = prng.random();
