@@ -327,8 +327,10 @@ pub fn FixedListType(comptime ST: type, comptime _limit: comptime_int, comptime 
 
                     const content_root = try it.finish();
                     errdefer pool.unref(content_root);
+
                     const len_mixin = try pool.createLeafFromUint(len);
                     errdefer pool.unref(len_mixin);
+
                     return try pool.createBranch(content_root, len_mixin);
                 }
 
@@ -487,8 +489,10 @@ pub fn FixedListType(comptime ST: type, comptime _limit: comptime_int, comptime 
 
                     const content_root = try it.finish();
                     errdefer pool.unref(content_root);
+
                     const len_mixin = try pool.createLeafFromUint(len);
                     errdefer pool.unref(len_mixin);
+
                     return try pool.createBranch(content_root, len_mixin);
                 }
 
