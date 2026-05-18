@@ -300,20 +300,19 @@ pub fn ListBasicTreeView(comptime ST: type) type {
 
                 const truncate_input: Node.Id = blk: {
                     if (boundary_kind == .zero) {
-                        // Boundary is already an all-zero subtree; the trimmed
-                        // slice's elements here are zero by construction, so the
-                        // zero sentinel already gives the right root — truncate
-                        // the tree as-is.
+                        // The boundary chunked_leaf is an all-zero subtree, so
+                        // the elements we keep from it are already zero. There
+                        // is nothing to trim; truncate the original tree.
                         break :blk self.chunks.state.root;
                     }
                     if (boundary_kind != .chunked_leaf) {
                         return error.InvalidNode;
                     }
 
-                    // Real chunked_leaf boundary: materialize a trimmed copy —
-                    // chunks before `intra_chunk` kept, chunk[intra_chunk]
-                    // byte-masked, chunks after zeroed — then install it before
-                    // truncating.
+                    // The boundary chunked_leaf straddles the cut. Build a
+                    // trimmed copy: copy chunks 0 through intra_chunk, zero the
+                    // unused tail bytes of chunk intra_chunk, and leave the
+                    // chunks after it zero. Install it, then truncate the rest.
                     var trimmed_chunked_leaf: ?Node.Id = try pool.createChunkedLeafEmpty(intra_chunk + 1);
                     defer if (trimmed_chunked_leaf) |id| pool.unref(id);
 
@@ -336,20 +335,19 @@ pub fn ListBasicTreeView(comptime ST: type) type {
                     trimmed_chunked_leaf = null;
                     break :blk updated;
                 };
-                // `truncate_input` is either `self.chunks.state.root` (no
-                // extra ref) or a fresh tree from `setNodeAtDepth` (rc=0,
-                // owned by us). Pool-level setNode/truncate are
-                // pure-functional: they walk `root_node` without changing
-                // its rc, so we keep the deferred unref alive for the
-                // owned case to release the transient when sliceTo exits.
+                // `truncate_input` is either the original root (boundary was
+                // zero, nothing allocated) or the fresh tree built above. The
+                // fresh tree has refcount 0 and belongs to us; truncate and
+                // setNode below do not take a ref, so hold onto it and unref
+                // it when sliceTo returns.
                 const owned_truncate_input = boundary_kind != .zero;
 
                 const truncate_input_handle: ?Node.Id = if (owned_truncate_input) truncate_input else null;
                 defer if (truncate_input_handle) |id| pool.unref(id);
 
-                // truncate zeroes every chunked_leaf past chunked_leaf_idx; the
-                // k_log2 leaf offset reflects that each chunked_leaf_depth node
-                // stands for a depth-k_log2 subtree.
+                // Zero every chunked_leaf after chunked_leaf_idx. A node at
+                // chunked_leaf_depth stands for a k_log2-deep subtree, so
+                // truncate needs the k_log2 offset to pick the right zero hash.
                 const new_root = try Node.Id.truncateAfterIndexWithLeafOffset(truncate_input, pool, chunked_leaf_depth, chunked_leaf_idx, ChunkedLeaf.k_log2);
                 defer pool.unref(new_root);
 
