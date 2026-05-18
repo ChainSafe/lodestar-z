@@ -858,6 +858,30 @@ pub fn createdWithTransferCache(self: *const BeaconStateView) !js.Boolean {
 
 // pub fn BeaconStateView_loadOtherState
 
+/// Bench-only: run loadState end-to-end and tear down. Mirrors what TS's
+/// loadState measures (no CachedBeaconState wrap, no EpochCache build) so
+/// native vs TS comparisons isolate the SSZ tree-rebuild cost.
+pub fn loadOtherStateBench(
+    self: *const BeaconStateView,
+    state_bytes: js.Uint8Array,
+    seed_validators_bytes: ?js.Uint8Array,
+) !void {
+    const cached_state = try self.requireState();
+    const state_bytes_slice = try state_bytes.toSlice();
+    const seed_validators_bytes_slice: ?[]const u8 =
+        if (seed_validators_bytes) |b| try b.toSlice() else null;
+
+    var result = try st.loadState(
+        allocator,
+        cached_state.config,
+        cached_state.state,
+        state_bytes_slice,
+        seed_validators_bytes_slice,
+    );
+    allocator.free(result.modified_validators);
+    result.state.deinit();
+}
+
 pub fn serialize(self: *const BeaconStateView) !js.Uint8Array {
     const env = js.env();
     const cached_state = try self.requireState();

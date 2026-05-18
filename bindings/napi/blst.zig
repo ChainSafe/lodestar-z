@@ -136,10 +136,10 @@ pub const PublicKey = struct {
     pub fn toBytes(self: *const PublicKey, compress: ?js.Boolean) !js.Uint8Array {
         if (try boolOrDefault(compress, true)) {
             const bytes = self.raw.compress();
-            return js.Uint8Array.from(bytes[0..]);
+            return js.Uint8Array.fromExternal(bytes[0..]);
         }
         const bytes = self.raw.serialize();
-        return js.Uint8Array.from(bytes[0..]);
+        return js.Uint8Array.fromExternal(bytes[0..]);
     }
 
     pub fn toHex(self: *const PublicKey, compress: ?js.Boolean) !js.String {
@@ -214,10 +214,10 @@ pub const Signature = struct {
     pub fn toBytes(self: *const Signature, compress: ?js.Boolean) !js.Uint8Array {
         if (try boolOrDefault(compress, true)) {
             const bytes = self.raw.compress();
-            return js.Uint8Array.from(bytes[0..]);
+            return js.Uint8Array.fromExternal(bytes[0..]);
         }
         const bytes = self.raw.serialize();
-        return js.Uint8Array.from(bytes[0..]);
+        return js.Uint8Array.fromExternal(bytes[0..]);
     }
 
     pub fn toHex(self: *const Signature, compress: ?js.Boolean) !js.String {
@@ -295,9 +295,9 @@ pub const SecretKey = struct {
     }
 
     /// Serializes the SecretKey to bytes (32 bytes).
-    pub fn toBytes(self: *const SecretKey) js.Uint8Array {
+    pub fn toBytes(self: *const SecretKey) !js.Uint8Array {
         const bytes = self.raw.serialize();
-        return js.Uint8Array.from(bytes[0..]);
+        return js.Uint8Array.fromExternal(bytes[0..]);
     }
 
     pub fn toHex(self: *const SecretKey) !js.String {
