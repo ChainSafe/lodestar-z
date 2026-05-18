@@ -1,3 +1,4 @@
+// biome-ignore-all lint/style/useNamingConvention: spec-canonical fork names in `ForkName`
 interface BeaconBlockHeader {
   slot: number;
   proposerIndex: number;
@@ -65,8 +66,7 @@ interface ProcessSlotsOpts {
 }
 
 interface CompactMultiProof {
-  // biome-ignore lint/suspicious/noExplicitAny:
-  // native returns string literal "compactMulti", IBeaconStateView uses @chainsafe/persistent-merkle-tree's ProofType
+  // biome-ignore lint/suspicious/noExplicitAny: native returns string literal "compactMulti", IBeaconStateView uses @chainsafe/persistent-merkle-tree's ProofType
   // TODO(bing): align types?
   type: any;
   leaves: Uint8Array[];
