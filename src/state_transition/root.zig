@@ -113,7 +113,7 @@ const load_state = @import("load_state.zig");
 pub const loadState = load_state.loadState;
 pub const MigrateStateOutput = load_state.MigrateStateOutput;
 
-const weak_subjectivity = @import("./utils/weak_subjectivity.zig");
+const weak_subjectivity = @import("./weak_subjectivity.zig");
 pub const getLatestWeakSubjectivityCheckpointEpoch = weak_subjectivity.getLatestWeakSubjectivityCheckpointEpoch;
 
 test {
