@@ -17,12 +17,10 @@ const SAFETY_DECAY: u64 = 10;
 /// Gwei per ETH (10^9).
 const ETH_TO_GWEI: u64 = 1_000_000_000;
 
-
-
 /// Returns the epoch of the latest weak subjectivity checkpoint for the given state.
 /// Default safety decay is 10% (0.1).
 pub fn getLatestWeakSubjectivityCheckpointEpoch(epoch_cache: *const EpochCache) Epoch {
-    return epoch_cache.epoch - computeWeakSubjectivityPeriodCachedState(epoch_cache);
+    return epoch_cache.epoch -| computeWeakSubjectivityPeriodCachedState(epoch_cache);
 }
 
 /// Returns the weak subjectivity period for the current state, using cached
