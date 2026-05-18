@@ -1374,8 +1374,18 @@ pub fn isStateValidatorsNodesPopulated(_: *const BeaconStateView) !js.Boolean {
     return js.Boolean.from(true);
 }
 
-pub fn toValue(_: *const BeaconStateView) !js.Value {
-    return throwNotImpl(js.Value, "toValue not implemented");
+pub fn toValue(self: *const BeaconStateView) !js.Value {
+    const env = js.env();
+    const cached_state = try self.requireState();
+    switch (cached_state.state.forkSeq()) {
+        inline else => |f| {
+            const ForkBeaconState = fork_types.ForkTypes(f).BeaconState;
+            var value: ForkBeaconState.Type = ForkBeaconState.default_value;
+            defer ForkBeaconState.deinit(allocator, &value);
+            try cached_state.state.castToFork(f).inner.toValue(allocator, &value);
+            return js_types.wrap(js.Value, try sszValueToNapiValue(env, ForkBeaconState, &value));
+        },
+    }
 }
 
 pub fn getSyncCommitteesWitness(_: *const BeaconStateView) !js.Value {

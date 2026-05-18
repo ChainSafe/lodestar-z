@@ -311,8 +311,8 @@ declare class BeaconStateView {
     opts?: {preloadValidatorsAndBalances?: boolean}
   ): BeaconStateView;
   loadOtherStateBench(stateBytes: Uint8Array, seedValidatorsBytes?: Uint8Array): void;
-  // biome-ignore lint/suspicious/noExplicitAny: stub
-  // TODO(bing): Only one real use case in lodestar and it's in debugging; impl when useful
+  // biome-ignore lint/suspicious/noExplicitAny: structurally a BeaconState (fork-narrowed),
+  // but typing the union here would duplicate types from @lodestar/types. Caller narrows by forkName.
   toValue(): any;
 
   serialize(): Uint8Array;
