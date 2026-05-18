@@ -295,31 +295,22 @@ pub fn ListBasicTreeView(comptime ST: type) type {
                 const boundary_id = try Node.Id.getNodeAtDepth(self.chunks.state.root, pool, chunked_leaf_depth, chunked_leaf_idx);
                 const boundary_kind = pool.nodes.items(.state)[@intFromEnum(boundary_id)].kind();
 
-                // The truncate step zeroes chunked_leaves > chunked_leaf_idx
-                // and uses ZeroHash[depthi + k_log2] sentinels (each "leaf"
-                // at chunked_leaf_depth represents a depth-`k_log2` subtree).
-                // The length leaf at gindex 3 ends up zeroed by the same
-                // call and is re-installed via setNode below.
-                //
-                // Two paths for the boundary itself:
-                //   1. `.chunked_leaf` — materialize a trimmed copy
-                //      (chunks before `intra_chunk` preserved, byte-mask in
-                //      chunk[intra_chunk], chunks after zeroed) and install
-                //      it via setNodeAtDepth before truncating.
-                //   2. `.zero` — boundary is already an all-zero subtree.
-                //      The trimmed slice's elements at this position are
-                //      all zero by construction (slice extends sparse list
-                //      with zeros), so leaving the existing zero sentinel
-                //      gives the same merkle root. Skip the materialization
-                //      and feed root straight into truncate.
                 const truncate_input: Node.Id = blk: {
                     if (boundary_kind == .zero) {
+                        // Boundary is already an all-zero subtree; the trimmed
+                        // slice's elements here are zero by construction, so the
+                        // zero sentinel already gives the right root — truncate
+                        // the tree as-is.
                         break :blk self.chunks.state.root;
                     }
                     if (boundary_kind != .chunked_leaf) {
                         return error.InvalidNode;
                     }
 
+                    // Real chunked_leaf boundary: materialize a trimmed copy —
+                    // chunks before `intra_chunk` kept, chunk[intra_chunk]
+                    // byte-masked, chunks after zeroed — then install it before
+                    // truncating.
                     var trimmed_chunked_leaf: ?Node.Id = try pool.createChunkedLeafEmpty(intra_chunk + 1);
                     defer if (trimmed_chunked_leaf) |id| pool.unref(id);
                     {
@@ -352,9 +343,13 @@ pub fn ListBasicTreeView(comptime ST: type) type {
                 const truncate_input_handle: ?Node.Id = if (owned_truncate_input) truncate_input else null;
                 defer if (truncate_input_handle) |id| pool.unref(id);
 
+                // truncate zeroes every chunked_leaf past chunked_leaf_idx; the
+                // k_log2 leaf offset reflects that each chunked_leaf_depth node
+                // stands for a depth-k_log2 subtree.
                 const new_root = try Node.Id.truncateAfterIndexWithLeafOffset(truncate_input, pool, chunked_leaf_depth, chunked_leaf_idx, ChunkedLeaf.k_log2);
                 defer pool.unref(new_root);
 
+                // truncate also zeroed the length leaf (gindex 3); reinstall it.
                 var length_node: ?Node.Id = try pool.createLeafFromUint(@intCast(new_length));
                 defer if (length_node) |id| pool.unref(id);
                 const root_with_length = try Node.Id.setNode(new_root, pool, @enumFromInt(3), length_node.?);
