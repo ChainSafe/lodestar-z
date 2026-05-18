@@ -4,17 +4,26 @@
 //! Run with:
 //!   zig build run:bench_list_chunked_leaf -Doptimize=ReleaseFast
 //!
+//! Every workload is registered as a pair — `... leaf` vs `... chunked_leaf` —
+//! so each line in the output is a direct A/B comparison of the two layouts.
+//!
 //! Workloads (1M u64 items unless noted):
 //!  - fromValue:        build tree from a populated value
 //!  - getRoot:          compute root hash from a freshly built tree
-//!  - toValue:          decode all items back from the tree
-//!  - sparseSet:        single-item set + getRoot (CoW path), 100 iterations
+//!  - toValue:          decode all items back from the tree (bulk read)
+//!  - get:              single-item reads at scattered indices (point read)
+//!  - sparseSet:        single-item set + commit + getRoot via TreeView (CoW
+//!                      path), repeated `SparseSetIters` times per run
 //!  - bulkSetAndRoot:   set every item then getRoot (epoch-rewards-shaped)
+//!  - proof:            single-chunk Merkle proof for a fixed gindex
 const std = @import("std");
 const zbench = @import("zbench");
 
-const Node = @import("persistent_merkle_tree").Node;
-const ChunkedLeaf = @import("persistent_merkle_tree").ChunkedLeaf;
+const pmt = @import("persistent_merkle_tree");
+const Node = pmt.Node;
+const ChunkedLeaf = pmt.ChunkedLeaf;
+const Gindex = pmt.Gindex;
+const proof = pmt.proof;
 
 const ssz = @import("ssz");
 const FixedListType = ssz.FixedListType;
@@ -27,6 +36,27 @@ const ListLeaf = FixedListType(UintType(64), Limit, .{});
 const ListChunkedLeaf = FixedListType(UintType(64), Limit, .{ .chunked_leaf = true });
 
 const global_allocator = std.heap.page_allocator;
+
+// ── point-read / sparse-write tuning ──
+// Number of scattered point reads per `get` run; large enough to lift the
+// measurement above timer noise.
+const ProbeCount: usize = 1024;
+// Number of single-item set+commit+getRoot cycles per `sparseSet` run.
+const SparseSetIters: usize = 100;
+// Coprime-with-ItemCount stride used to scatter both point reads and sparse
+// sets across the whole list. ItemCount / SparseSetIters ≈ 10485, so the 100
+// sparse sets spread evenly and each lands in a distinct chunked_leaf — the
+// worst case for `chunked_leaf` (every set copies a full K-chunk packed leaf).
+const ScatterStride: usize = 10487;
+
+fn scatterIndex(i: usize) usize {
+    return (i *% ScatterStride) % ItemCount;
+}
+
+// Merkle proof target: the chunk holding the item at ItemCount/2. The logical
+// tree shape is identical for both layouts, so one gindex serves both.
+const ProofChunkIndex: usize = (ItemCount / 2) / 4;
+const proof_gindex: Gindex = Gindex.fromDepth(ListLeaf.chunk_depth + 1, ProofChunkIndex);
 
 // Shared input value used by all build-side benches.
 var input_value: ListLeaf.Type = ListLeaf.Type.empty;
@@ -106,6 +136,70 @@ const ToValueChunkedLeaf = struct {
     }
 };
 
+// ──────── get: scattered single-item reads through a TreeView ────────
+
+const GetLeaf = struct {
+    view: *ListLeaf.TreeView,
+    pub fn run(self: *GetLeaf, allocator: std.mem.Allocator) void {
+        _ = allocator;
+        var sum: u64 = 0;
+        for (0..ProbeCount) |i| {
+            sum +%= self.view.get(scatterIndex(i)) catch unreachable;
+        }
+        std.mem.doNotOptimizeAway(sum);
+    }
+};
+
+const GetChunkedLeaf = struct {
+    view: *ListChunkedLeaf.TreeView,
+    pub fn run(self: *GetChunkedLeaf, allocator: std.mem.Allocator) void {
+        _ = allocator;
+        var sum: u64 = 0;
+        for (0..ProbeCount) |i| {
+            sum +%= self.view.get(scatterIndex(i)) catch unreachable;
+        }
+        std.mem.doNotOptimizeAway(sum);
+    }
+};
+
+// ──────── sparseSet: single-item set + commit + getRoot, CoW path ────────
+// Matches "one validator's balance changes, recompute root" — the workload
+// `chunked_leaf` must pay for, since each set copies a full K-chunk leaf.
+
+const SparseSetLeaf = struct {
+    pool: *Node.Pool,
+    base: Node.Id,
+    pub fn run(self: *SparseSetLeaf, allocator: std.mem.Allocator) void {
+        // `TreeView.init` consumes a ref; lend it one so `self.base` survives
+        // for the next run.
+        self.pool.ref(self.base) catch unreachable;
+        const view = ListLeaf.TreeView.init(allocator, self.pool, self.base) catch unreachable;
+        defer view.deinit();
+        for (0..SparseSetIters) |iter| {
+            view.set(scatterIndex(iter), @as(u64, @intCast(iter)) *% 0x9E3779B97F4A7C15) catch unreachable;
+            view.commit() catch unreachable;
+            std.mem.doNotOptimizeAway(view.getRoot().getRoot(self.pool));
+        }
+    }
+};
+
+const SparseSetChunkedLeaf = struct {
+    pool: *Node.Pool,
+    base: Node.Id,
+    pub fn run(self: *SparseSetChunkedLeaf, allocator: std.mem.Allocator) void {
+        // `TreeView.init` consumes a ref; lend it one so `self.base` survives
+        // for the next run.
+        self.pool.ref(self.base) catch unreachable;
+        const view = ListChunkedLeaf.TreeView.init(allocator, self.pool, self.base) catch unreachable;
+        defer view.deinit();
+        for (0..SparseSetIters) |iter| {
+            view.set(scatterIndex(iter), @as(u64, @intCast(iter)) *% 0x9E3779B97F4A7C15) catch unreachable;
+            view.commit() catch unreachable;
+            std.mem.doNotOptimizeAway(view.getRoot().getRoot(self.pool));
+        }
+    }
+};
+
 // ──────── bulkSetAndRoot: epoch-rewards-shaped — write every item via tree.fromValue
 // of a slightly mutated input, then getRoot ────────
 
@@ -133,6 +227,30 @@ const BulkSetAndRootChunkedLeaf = struct {
     }
 };
 
+// ──────── proof: single-chunk Merkle proof ────────
+// `chunked_leaf` stores the target chunk inside an opaque packed leaf, so
+// proof traversal must materialize that subtree — the cost this bench exposes.
+
+const ProofLeaf = struct {
+    pool: *Node.Pool,
+    root: Node.Id,
+    pub fn run(self: *ProofLeaf, allocator: std.mem.Allocator) void {
+        var single = proof.createSingleProof(allocator, self.pool, self.root, proof_gindex) catch unreachable;
+        defer single.deinit(allocator);
+        std.mem.doNotOptimizeAway(single.leaf[0]);
+    }
+};
+
+const ProofChunkedLeaf = struct {
+    pool: *Node.Pool,
+    root: Node.Id,
+    pub fn run(self: *ProofChunkedLeaf, allocator: std.mem.Allocator) void {
+        var single = proof.createSingleProof(allocator, self.pool, self.root, proof_gindex) catch unreachable;
+        defer single.deinit(allocator);
+        std.mem.doNotOptimizeAway(single.leaf[0]);
+    }
+};
+
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const allocator = global_allocator;
@@ -155,6 +273,17 @@ pub fn main(init: std.process.Init) !void {
     const tree_chunked_leaf = try ListChunkedLeaf.tree.fromValue(&pool, &input_value);
     defer pool.unref(tree_chunked_leaf);
     _ = tree_chunked_leaf.getRoot(&pool); // warm
+
+    // Long-lived read-only views for the `get` benches. `TreeView.init` takes
+    // ownership of the root ref, so hand it a fresh ref of its own — the
+    // `tree_*` ids stay independently owned for the other benches.
+    try pool.ref(tree_leaf);
+    const view_leaf = try ListLeaf.TreeView.init(allocator, &pool, tree_leaf);
+    defer view_leaf.deinit();
+
+    try pool.ref(tree_chunked_leaf);
+    const view_chunked_leaf = try ListChunkedLeaf.TreeView.init(allocator, &pool, tree_chunked_leaf);
+    defer view_chunked_leaf.deinit();
 
     // bulkSet input: each iteration rebuilds tree.fromValue on this value;
     // matches the shape of "epoch rewards rewrite all balances + recompute root".
@@ -187,10 +316,25 @@ pub fn main(init: std.process.Init) !void {
     try bench.addParam("toValue 1M leaf", &tv_leaf, .{});
     try bench.addParam("toValue 1M chunked_leaf", &tv_chunked_leaf, .{});
 
+    const get_leaf = GetLeaf{ .view = view_leaf };
+    const get_chunked_leaf = GetChunkedLeaf{ .view = view_chunked_leaf };
+    try bench.addParam("get 1K-scattered leaf", &get_leaf, .{});
+    try bench.addParam("get 1K-scattered chunked_leaf", &get_chunked_leaf, .{});
+
+    const ss_leaf = SparseSetLeaf{ .pool = &pool, .base = tree_leaf };
+    const ss_chunked_leaf = SparseSetChunkedLeaf{ .pool = &pool, .base = tree_chunked_leaf };
+    try bench.addParam("sparseSet 100x leaf", &ss_leaf, .{});
+    try bench.addParam("sparseSet 100x chunked_leaf", &ss_chunked_leaf, .{});
+
     const bs_leaf = BulkSetAndRootLeaf{ .pool = &pool, .mutated = &mutated_leaf };
     const bs_chunked_leaf = BulkSetAndRootChunkedLeaf{ .pool = &pool, .mutated = &mutated_chunked_leaf };
     try bench.addParam("bulkSet+getRoot 1M leaf", &bs_leaf, .{});
     try bench.addParam("bulkSet+getRoot 1M chunked_leaf", &bs_chunked_leaf, .{});
+
+    const proof_leaf = ProofLeaf{ .pool = &pool, .root = tree_leaf };
+    const proof_chunked_leaf = ProofChunkedLeaf{ .pool = &pool, .root = tree_chunked_leaf };
+    try bench.addParam("proof single-chunk leaf", &proof_leaf, .{});
+    try bench.addParam("proof single-chunk chunked_leaf", &proof_chunked_leaf, .{});
 
     try bench.run(io, std.Io.File.stdout());
 
