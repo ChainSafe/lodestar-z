@@ -183,6 +183,11 @@ pub fn ListBasicTreeView(comptime ST: type) type {
                     // Fetch ChunkedLeaf if first call or just crossed a
                     // chunked_leaf boundary.
                     if (self.last_chunked_leaf_idx == null or self.last_chunked_leaf_idx.? != chunked_leaf_idx) {
+                        // Each reload advances `depth_iterator` by exactly one
+                        // ChunkedLeaf, so forward iteration must cross at most
+                        // one boundary per step.
+                        std.debug.assert(self.last_chunked_leaf_idx == null or
+                            chunked_leaf_idx == self.last_chunked_leaf_idx.? + 1);
                         const sid = try self.depth_iterator.next();
                         if (pool.nodes.items(.state)[@intFromEnum(sid)].kind() == .zero) {
                             self.current_chunks = null;
