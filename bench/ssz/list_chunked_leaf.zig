@@ -40,28 +40,21 @@ const ListChunkedLeaf = FixedListType(UintType(64), Limit, .{ .chunked_leaf = tr
 
 const global_allocator = std.heap.page_allocator;
 
-// ── point-read / sparse-write tuning ──
-// Number of scattered point reads per `get` run; large enough to lift the
-// measurement above timer noise.
+// Scattered point reads per `get` run — enough to clear timer noise.
 const ProbeCount: usize = 1024;
-// Number of single-item set+commit+getRoot cycles per `sparseSet` run.
+// set+commit+getRoot cycles per `sparseSet` run.
 const SparseSetIters: usize = 100;
-// Scattered sets staged before a single commit in `batchedSparseSet`. Sized
-// to the sync-committee size — the dominant source of per-block balance
-// writes, which stage into the TreeView write cache and flush once.
+// Sparse sets per `batchedSparseSet` run — the per-block sync-committee count.
 const BatchedSparseCount: usize = 512;
-// Coprime-with-ItemCount stride used to scatter both point reads and sparse
-// sets across the whole list. ItemCount / SparseSetIters ≈ 10485, so the 100
-// sparse sets spread evenly and each lands in a distinct chunked_leaf — the
-// worst case for `chunked_leaf` (every set copies a full K-chunk packed leaf).
+// Coprime stride: scatters sets across the list, each in a distinct
+// chunked_leaf — worst case for `chunked_leaf`.
 const ScatterStride: usize = 10487;
 
 fn scatterIndex(i: usize) usize {
     return (i *% ScatterStride) % ItemCount;
 }
 
-// Merkle proof target: the chunk holding the item at ItemCount/2. The logical
-// tree shape is identical for both layouts, so one gindex serves both.
+// Proof target chunk. Tree shape is layout-independent, so one gindex serves both.
 const ProofChunkIndex: usize = (ItemCount / 2) / 4;
 const proof_gindex: Gindex = Gindex.fromDepth(ListLeaf.chunk_depth + 1, ProofChunkIndex);
 
@@ -170,8 +163,6 @@ const GetChunkedLeaf = struct {
 };
 
 // ──────── sparseSet: single-item set + commit + getRoot, CoW path ────────
-// Matches "one validator's balance changes, recompute root" — the workload
-// `chunked_leaf` must pay for, since each set copies a full K-chunk leaf.
 
 const SparseSetLeaf = struct {
     pool: *Node.Pool,
@@ -207,9 +198,7 @@ const SparseSetChunkedLeaf = struct {
     }
 };
 
-// ──────── batchedSparseSet: N scattered sets staged into the TreeView write
-// cache, then ONE commit + getRoot — the realistic per-block balances shape
-// (sync-committee rewards issue ~512 single-item sets, flushed once) ────────
+// ──────── batchedSparseSet: N scattered sets staged, then one commit + getRoot ────────
 
 const BatchedSparseSetLeaf = struct {
     pool: *Node.Pool,
@@ -269,8 +258,6 @@ const BulkSetAndRootChunkedLeaf = struct {
 };
 
 // ──────── proof: single-chunk Merkle proof ────────
-// `chunked_leaf` stores the target chunk inside an opaque packed leaf, so
-// proof traversal must materialize that subtree — the cost this bench exposes.
 
 const ProofLeaf = struct {
     pool: *Node.Pool,
@@ -298,9 +285,9 @@ pub fn main(init: std.process.Init) !void {
     var bench = zbench.Benchmark.init(allocator, .{});
     defer bench.deinit();
 
-    // Single shared pool. Sized for ~1M chunks worth of node IDs across both
-    // leaf and chunked_leaf scenarios; preheats keep allocator overhead off the hot path.
-    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 8_000_000 });
+    // Shared pool sized for ~1M chunks across both layouts; allocator lanes
+    // use the InitOptions defaults, same as the production bindings.
+    var pool = try Node.Pool.init(.{ .pool_size = 8_000_000 });
     defer pool.deinit();
 
     try populateInput(allocator);
@@ -315,9 +302,8 @@ pub fn main(init: std.process.Init) !void {
     defer pool.unref(tree_chunked_leaf);
     _ = tree_chunked_leaf.getRoot(&pool); // warm
 
-    // Long-lived read-only views for the `get` benches. `TreeView.init` takes
-    // ownership of the root ref, so hand it a fresh ref of its own — the
-    // `tree_*` ids stay independently owned for the other benches.
+    // Read-only views for `get`. `TreeView.init` takes the root ref, so lend
+    // it a fresh one — `tree_*` stay owned for the other benches.
     try pool.ref(tree_leaf);
     const view_leaf = try ListLeaf.TreeView.init(allocator, &pool, tree_leaf);
     defer view_leaf.deinit();

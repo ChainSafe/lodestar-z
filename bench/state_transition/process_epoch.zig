@@ -414,6 +414,7 @@ const Step = enum {
     participation_record,
     sync_committee_updates,
     proposer_lookahead,
+    state_root,
 };
 
 const step_count = std.enums.values(Step).len;
@@ -485,6 +486,9 @@ fn ProcessEpochBench(comptime fork: ForkSeq) type {
                 cloned.state.castToFork(fork),
                 &cache,
             ) catch unreachable;
+            // hashTreeRoot, not commit: the re-merkleization runs here — the
+            // real per-epoch cost (state_root is verified each epoch).
+            _ = cloned.state.hashTreeRoot() catch unreachable;
         }
     };
 }
@@ -660,6 +664,10 @@ fn ProcessEpochSegmentedBench(comptime fork: ForkSeq) type {
                 ) catch unreachable;
                 recordSegment(.proposer_lookahead, @as(u64, @intCast(time.since(io, lookahead_start).nanoseconds)));
             }
+
+            const state_root_start = time.timestampNow(io);
+            _ = cloned.state.hashTreeRoot() catch unreachable;
+            recordSegment(.state_root, @as(u64, @intCast(time.since(io, state_root_start).nanoseconds)));
 
             recordSegment(.epoch_total, @as(u64, @intCast(time.since(io, epoch_start).nanoseconds)));
         }

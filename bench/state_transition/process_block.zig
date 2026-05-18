@@ -257,6 +257,38 @@ fn ProcessBlockBench(comptime fork: ForkSeq, comptime opts: BenchOpts) type {
     };
 }
 
+/// processBlock + hashTreeRoot — the honest per-block cost: processBlock only
+/// stages writes, the chunked_leaf re-merkleization happens in hashTreeRoot.
+fn ProcessBlockRootBench(comptime fork: ForkSeq, comptime opts: BenchOpts) type {
+    return struct {
+        cached_state: *CachedBeaconState,
+        block: *const BeaconBlock(.full, fork),
+
+        pub fn run(self: *@This(), allocator: std.mem.Allocator) void {
+            const cloned = self.cached_state.clone(allocator, .{}) catch unreachable;
+            defer {
+                cloned.deinit();
+                allocator.destroy(cloned);
+            }
+
+            const external_data = BlockExternalData{ .execution_payload_status = .valid, .data_availability_status = .available };
+            state_transition.processBlock(
+                fork,
+                allocator,
+                cloned.config,
+                cloned.epoch_cache,
+                cloned.state.castToFork(fork),
+                &cloned.slashings_cache,
+                .full,
+                self.block,
+                external_data,
+                .{ .verify_signature = opts.verify_signature },
+            ) catch unreachable;
+            _ = cloned.state.hashTreeRoot() catch unreachable;
+        }
+    };
+}
+
 /// We segregate block processing into `Step`s for more insight into the perf of each part of the process.
 const Step = enum {
     block_total,
@@ -267,6 +299,8 @@ const Step = enum {
     eth1_data,
     operations,
     sync_aggregate,
+    commit,
+    state_root,
 };
 
 const step_count = std.enums.values(Step).len;
@@ -431,6 +465,14 @@ fn ProcessBlockSegmentedBench(comptime fork: ForkSeq) type {
                 recordSegment(.sync_aggregate, @as(u64, @intCast(time.since(io, sync_start).nanoseconds)));
             }
 
+            const commit_start = time.timestampNow(io);
+            cloned.state.commit() catch unreachable;
+            recordSegment(.commit, @as(u64, @intCast(time.since(io, commit_start).nanoseconds)));
+
+            const root_start = time.timestampNow(io);
+            _ = cloned.state.hashTreeRoot() catch unreachable;
+            recordSegment(.state_root, @as(u64, @intCast(time.since(io, root_start).nanoseconds)));
+
             recordSegment(.block_total, @as(u64, @intCast(time.since(io, block_start).nanoseconds)));
         }
     };
@@ -584,6 +626,9 @@ fn runBenchmark(
 
     try bench.addParam("process_block", &ProcessBlockBench(fork, .{ .verify_signature = true }){ .cached_state = cached_state, .block = block }, .{});
     try bench.addParam("process_block_no_sig", &ProcessBlockBench(fork, .{ .verify_signature = false }){ .cached_state = cached_state, .block = block }, .{});
+
+    try bench.addParam("process_block+root", &ProcessBlockRootBench(fork, .{ .verify_signature = true }){ .cached_state = cached_state, .block = block }, .{});
+    try bench.addParam("process_block+root_no_sig", &ProcessBlockRootBench(fork, .{ .verify_signature = false }){ .cached_state = cached_state, .block = block }, .{});
 
     // // Segmented benchmark (step-by-step timing)
     resetSegmentStats();
