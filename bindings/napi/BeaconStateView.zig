@@ -1241,10 +1241,6 @@ pub fn computeAnchorCheckpoint(self: *const BeaconStateView) !js.Value {
     return js_types.wrap(js.Value, obj);
 }
 
-// -------------------------
-// Shuffling
-// -------------------------
-
 fn shufflingToNapi(shuffling: anytype) !napi.Value {
     const env = js.env();
     const obj = try env.createObject();
