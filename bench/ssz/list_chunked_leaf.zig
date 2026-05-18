@@ -13,7 +13,10 @@
 //!  - toValue:          decode all items back from the tree (bulk read)
 //!  - get:              single-item reads at scattered indices (point read)
 //!  - sparseSet:        single-item set + commit + getRoot via TreeView (CoW
-//!                      path), repeated `SparseSetIters` times per run
+//!                      path), repeated `SparseSetIters` times per run —
+//!                      a pessimistic commit-per-set extreme
+//!  - batchedSparseSet: `BatchedSparseCount` scattered sets staged, then ONE
+//!                      commit + getRoot — matches per-block balance updates
 //!  - bulkSetAndRoot:   set every item then getRoot (epoch-rewards-shaped)
 //!  - proof:            single-chunk Merkle proof for a fixed gindex
 const std = @import("std");
@@ -43,6 +46,10 @@ const global_allocator = std.heap.page_allocator;
 const ProbeCount: usize = 1024;
 // Number of single-item set+commit+getRoot cycles per `sparseSet` run.
 const SparseSetIters: usize = 100;
+// Scattered sets staged before a single commit in `batchedSparseSet`. Sized
+// to the sync-committee size — the dominant source of per-block balance
+// writes, which stage into the TreeView write cache and flush once.
+const BatchedSparseCount: usize = 512;
 // Coprime-with-ItemCount stride used to scatter both point reads and sparse
 // sets across the whole list. ItemCount / SparseSetIters ≈ 10485, so the 100
 // sparse sets spread evenly and each lands in a distinct chunked_leaf — the
@@ -176,7 +183,7 @@ const SparseSetLeaf = struct {
         const view = ListLeaf.TreeView.init(allocator, self.pool, self.base) catch unreachable;
         defer view.deinit();
         for (0..SparseSetIters) |iter| {
-            view.set(scatterIndex(iter), @as(u64, @intCast(iter)) *% 0x9E3779B97F4A7C15) catch unreachable;
+            view.set(scatterIndex(iter), @as(u64, @intCast(iter))) catch unreachable;
             view.commit() catch unreachable;
             std.mem.doNotOptimizeAway(view.getRoot().getRoot(self.pool));
         }
@@ -193,10 +200,44 @@ const SparseSetChunkedLeaf = struct {
         const view = ListChunkedLeaf.TreeView.init(allocator, self.pool, self.base) catch unreachable;
         defer view.deinit();
         for (0..SparseSetIters) |iter| {
-            view.set(scatterIndex(iter), @as(u64, @intCast(iter)) *% 0x9E3779B97F4A7C15) catch unreachable;
+            view.set(scatterIndex(iter), @as(u64, @intCast(iter))) catch unreachable;
             view.commit() catch unreachable;
             std.mem.doNotOptimizeAway(view.getRoot().getRoot(self.pool));
         }
+    }
+};
+
+// ──────── batchedSparseSet: N scattered sets staged into the TreeView write
+// cache, then ONE commit + getRoot — the realistic per-block balances shape
+// (sync-committee rewards issue ~512 single-item sets, flushed once) ────────
+
+const BatchedSparseSetLeaf = struct {
+    pool: *Node.Pool,
+    base: Node.Id,
+    pub fn run(self: *BatchedSparseSetLeaf, allocator: std.mem.Allocator) void {
+        self.pool.ref(self.base) catch unreachable;
+        const view = ListLeaf.TreeView.init(allocator, self.pool, self.base) catch unreachable;
+        defer view.deinit();
+        for (0..BatchedSparseCount) |i| {
+            view.set(scatterIndex(i), @as(u64, @intCast(i))) catch unreachable;
+        }
+        view.commit() catch unreachable;
+        std.mem.doNotOptimizeAway(view.getRoot().getRoot(self.pool));
+    }
+};
+
+const BatchedSparseSetChunkedLeaf = struct {
+    pool: *Node.Pool,
+    base: Node.Id,
+    pub fn run(self: *BatchedSparseSetChunkedLeaf, allocator: std.mem.Allocator) void {
+        self.pool.ref(self.base) catch unreachable;
+        const view = ListChunkedLeaf.TreeView.init(allocator, self.pool, self.base) catch unreachable;
+        defer view.deinit();
+        for (0..BatchedSparseCount) |i| {
+            view.set(scatterIndex(i), @as(u64, @intCast(i))) catch unreachable;
+        }
+        view.commit() catch unreachable;
+        std.mem.doNotOptimizeAway(view.getRoot().getRoot(self.pool));
     }
 };
 
@@ -325,6 +366,11 @@ pub fn main(init: std.process.Init) !void {
     const ss_chunked_leaf = SparseSetChunkedLeaf{ .pool = &pool, .base = tree_chunked_leaf };
     try bench.addParam("sparseSet 100x leaf", &ss_leaf, .{});
     try bench.addParam("sparseSet 100x chunked_leaf", &ss_chunked_leaf, .{});
+
+    const bss_leaf = BatchedSparseSetLeaf{ .pool = &pool, .base = tree_leaf };
+    const bss_chunked_leaf = BatchedSparseSetChunkedLeaf{ .pool = &pool, .base = tree_chunked_leaf };
+    try bench.addParam("batchedSparseSet 512 leaf", &bss_leaf, .{});
+    try bench.addParam("batchedSparseSet 512 chunked_leaf", &bss_chunked_leaf, .{});
 
     const bs_leaf = BulkSetAndRootLeaf{ .pool = &pool, .mutated = &mutated_leaf };
     const bs_chunked_leaf = BulkSetAndRootChunkedLeaf{ .pool = &pool, .mutated = &mutated_chunked_leaf };
