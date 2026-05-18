@@ -8,7 +8,7 @@ const Allocator = std.mem.Allocator;
 const hashing = @import("hashing");
 const hash = hashing.hash;
 
-pub const k_log2: u8 = 10;
+pub const k_log2: u8 = 6;
 pub const K: u16 = 1 << k_log2;
 
 const ChunkedLeaf = @This();
@@ -191,14 +191,15 @@ test "Id.setChunkedLeafChunk: preserves len" {
     defer pool.deinit();
 
     const src: [K][32]u8 align(64) = [_][32]u8{[_]u8{0} ** 32} ** K;
-    const a = try pool.createChunkedLeaf(&src, 100);
+    const test_len: u16 = K - 1;
+    const a = try pool.createChunkedLeaf(&src, test_len);
     defer pool.unref(a);
 
     var new_chunk: [32]u8 = [_]u8{0xFF} ** 32;
-    const b = try a.setChunkedLeafChunk(&pool, 50, &new_chunk);
+    const b = try a.setChunkedLeafChunk(&pool, K / 4, &new_chunk);
     defer pool.unref(b);
 
-    try std.testing.expectEqual(@as(u16, 100), try b.getChunkedLeafLen(&pool));
+    try std.testing.expectEqual(test_len, try b.getChunkedLeafLen(&pool));
 }
 
 test "Id.setChunkedLeafChunks: batch CoW with multiple updates" {
@@ -210,7 +211,7 @@ test "Id.setChunkedLeafChunks: batch CoW with multiple updates" {
     const a = try pool.createChunkedLeaf(&src, K);
     defer pool.unref(a);
 
-    const idxs = [_]u16{ 0, 7, 100, 999 };
+    const idxs = [_]u16{ 0, 7, K / 2, K - 1 };
     const c0 = [_]u8{0xAA} ** 32;
     const c1 = [_]u8{0xBB} ** 32;
     const c2 = [_]u8{0xCC} ** 32;
@@ -221,10 +222,10 @@ test "Id.setChunkedLeafChunks: batch CoW with multiple updates" {
     defer pool.unref(b);
 
     const got = try b.getChunkedLeafChunks(&pool);
-    try std.testing.expectEqual(@as(u8, 0xAA), got[0][0]);
-    try std.testing.expectEqual(@as(u8, 0xBB), got[7][0]);
-    try std.testing.expectEqual(@as(u8, 0xCC), got[100][0]);
-    try std.testing.expectEqual(@as(u8, 0xDD), got[999][0]);
+    try std.testing.expectEqual(@as(u8, 0xAA), got[idxs[0]][0]);
+    try std.testing.expectEqual(@as(u8, 0xBB), got[idxs[1]][0]);
+    try std.testing.expectEqual(@as(u8, 0xCC), got[idxs[2]][0]);
+    try std.testing.expectEqual(@as(u8, 0xDD), got[idxs[3]][0]);
 
     const a_chunks = try a.getChunkedLeafChunks(&pool);
     try std.testing.expectEqualSlices(u8, &([_]u8{0} ** 32), &a_chunks[0]);
