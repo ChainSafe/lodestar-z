@@ -2,7 +2,8 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const hashing = @import("hashing");
 const Depth = hashing.Depth;
-const Node = @import("persistent_merkle_tree").Node;
+const pmt = @import("persistent_merkle_tree");
+const Node = pmt.Node;
 const isBasicType = @import("../type/type_kind.zig").isBasicType;
 
 const type_root = @import("../type/root.zig");
@@ -44,10 +45,10 @@ pub fn ListBasicTreeView(comptime ST: type) type {
         const items_per_chunk: usize = itemsPerChunk(ST.Element);
         const Chunks = BasicPackedChunks(ST, chunk_depth, items_per_chunk, ST.opts.chunked_leaf);
 
-        // Mirrors `chunks.zig`'s ChunkedLeaf bindings; only meaningful when
-        // `ST.opts.chunked_leaf = true`. The empty-struct placeholder keeps
-        // symbols valid in non-chunked_leaf instantiations.
-        const ChunkedLeaf = if (ST.opts.chunked_leaf) @import("persistent_merkle_tree").ChunkedLeaf else struct {};
+        // ChunkedLeaf binding — only meaningful when `ST.opts.chunked_leaf = true`;
+        // the empty-struct placeholder keeps symbols valid in non-chunked_leaf
+        // instantiations.
+        const ChunkedLeaf = if (ST.opts.chunked_leaf) pmt.ChunkedLeaf else struct {};
         const chunked_leaf_depth: Depth = if (ST.opts.chunked_leaf) chunk_depth - ChunkedLeaf.k_log2 else 0;
 
         pub fn init(allocator: Allocator, pool: *Node.Pool, root: Node.Id) !*Self {
@@ -1161,7 +1162,7 @@ test "ListBasicTreeView - sliceTo and serialize" {
 //
 // File-level alias so tests can reference `ChunkedLeafType.K` / `ChunkedLeafType.k_log2`
 // without colliding with the inner-struct binding in `ListBasicTreeView`.
-const ChunkedLeafType = @import("persistent_merkle_tree").ChunkedLeaf;
+const ChunkedLeafType = pmt.ChunkedLeaf;
 
 test "ListBasicTreeView chunked_leaf: iteratorReadonly within first chunked_leaf" {
     const allocator = std.testing.allocator;
