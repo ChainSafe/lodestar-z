@@ -320,7 +320,7 @@ pub const Pool = struct {
             if (s.isFree()) continue;
             const idx: u32 = @intCast(i);
             switch (s.kind()) {
-                .chunked_leaf => self.page_allocator.destroy(chunkedLeafPtr(payloads, idx)),
+                .chunked_leaf => self.allocator.destroy(chunkedLeafPtr(payloads, idx)),
                 .container_struct => {
                     const struct_ref = containerStructRef(payloads, idx);
                     struct_ref.deinit(struct_ref.ptr, self.allocator);
@@ -425,8 +425,8 @@ pub const Pool = struct {
     /// lazy root; `Id.getRoot` will compute and cache it on first access.
     pub fn createChunkedLeaf(self: *Pool, chunks: *align(64) const [ChunkedLeaf.K][32]u8, len: u16) Error!Id {
         std.debug.assert(len <= ChunkedLeaf.K);
-        const storage = try self.page_allocator.create(ChunkedLeaf);
-        errdefer self.page_allocator.destroy(storage);
+        const storage = try self.allocator.create(ChunkedLeaf);
+        errdefer self.allocator.destroy(storage);
 
         storage.chunks = chunks.*;
         storage.len = len;
@@ -443,8 +443,8 @@ pub const Pool = struct {
     /// `ChunkedLeaf`. Caller fills via `Id.getChunkedLeafPtr`.
     pub fn createChunkedLeafEmpty(self: *Pool, len: u16) Error!Id {
         std.debug.assert(len <= ChunkedLeaf.K);
-        const storage = try self.page_allocator.create(ChunkedLeaf);
-        errdefer self.page_allocator.destroy(storage);
+        const storage = try self.allocator.create(ChunkedLeaf);
+        errdefer self.allocator.destroy(storage);
 
         @memset(std.mem.asBytes(&storage.chunks), 0);
         storage.len = len;
@@ -693,7 +693,7 @@ pub const Pool = struct {
                 },
                 .chunked_leaf => {
                     const storage = chunkedLeafPtr(self.nodes.items(.payload), @intFromEnum(id));
-                    self.page_allocator.destroy(storage);
+                    self.allocator.destroy(storage);
                     current = null;
                 },
                 .container_struct => {
@@ -755,7 +755,7 @@ pub const Id = enum(u32) {
                 }
                 const storage = chunkedLeafPtr(pool.nodes.items(.payload), idx);
                 var hash: [32]u8 = undefined;
-                storage.computeRootAllocating(pool.page_allocator, &hash);
+                storage.computeRootAllocating(pool.allocator, &hash);
                 roots[idx] = hash;
                 return &roots[idx];
             },
@@ -811,8 +811,8 @@ pub const Id = enum(u32) {
         if (pool.nodes.items(.state)[idx].kind() != .chunked_leaf) return Error.InvalidNode;
         const old_storage = chunkedLeafPtr(pool.nodes.items(.payload), idx);
 
-        const new_storage = try pool.page_allocator.create(ChunkedLeaf);
-        errdefer pool.page_allocator.destroy(new_storage);
+        const new_storage = try pool.allocator.create(ChunkedLeaf);
+        errdefer pool.allocator.destroy(new_storage);
 
         new_storage.chunks = old_storage.chunks;
         new_storage.len = old_storage.len;
@@ -842,8 +842,8 @@ pub const Id = enum(u32) {
         if (pool.nodes.items(.state)[idx].kind() != .chunked_leaf) return Error.InvalidNode;
         const old_storage = chunkedLeafPtr(pool.nodes.items(.payload), idx);
 
-        const new_storage = try pool.page_allocator.create(ChunkedLeaf);
-        errdefer pool.page_allocator.destroy(new_storage);
+        const new_storage = try pool.allocator.create(ChunkedLeaf);
+        errdefer pool.allocator.destroy(new_storage);
 
         new_storage.chunks = old_storage.chunks;
         new_storage.len = old_storage.len;
