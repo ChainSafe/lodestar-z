@@ -290,7 +290,6 @@ declare class BeaconStateView {
     processedBuildersSweepCount: number;
     processedValidatorSweepCount: number;
   };
-  // createMultiProof(descriptor: Uint8Array): CompactMultiProof;
 
   computeUnrealizedCheckpoints(): {
     justifiedCheckpoint: Checkpoint;

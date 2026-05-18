@@ -266,12 +266,7 @@ pub fn payloadBlockNumber(self: *const BeaconStateView) !js.Number {
     try cached_state.state.latestExecutionPayloadHeader(allocator, &header);
     defer header.deinit(allocator);
 
-    const block_number: u64 = switch (header) {
-        .bellatrix => |*h| h.block_number,
-        .capella => |*h| h.block_number,
-        .deneb => |*h| h.block_number,
-    };
-    return js.Number.from(block_number);
+    return js.Number.from(header.blockNumber());
 }
 
 // -------------------------
@@ -1039,6 +1034,69 @@ pub fn loadOtherStateBench(
     result.state.deinit();
 }
 
+pub fn loadOtherState(
+    self: *const BeaconStateView,
+    state_bytes: js.Uint8Array,
+    seed_validators_bytes: ?js.Uint8Array,
+    opts: ?js.Value,
+) !BeaconStateView {
+    const old_cached_state = try self.requireState();
+    const state_bytes_slice = try state_bytes.toSlice();
+    const seed_validators_bytes_slice: ?[]const u8 =
+        if (seed_validators_bytes) |b| try b.toSlice() else null;
+
+    var loaded = try st.loadState(
+        allocator,
+        old_cached_state.config,
+        old_cached_state.state,
+        state_bytes_slice,
+        seed_validators_bytes_slice,
+    );
+    errdefer loaded.state.deinit();
+    defer allocator.free(loaded.modified_validators);
+
+    const new_cached_state = try allocator.create(CachedBeaconState);
+    errdefer allocator.destroy(new_cached_state);
+
+    try new_cached_state.init(
+        allocator,
+        &loaded.state,
+        .{
+            .config = &config.state.config,
+            .index_to_pubkey = &pubkey.state.index2pubkey,
+            .pubkey_to_index = &pubkey.state.pubkey2index,
+        },
+        null,
+    );
+
+    if (opts) |value| {
+        const raw = value.toValue();
+        if (try raw.hasNamedProperty("preloadValidatorsAndBalances") and
+            (try (try raw.getNamedProperty("preloadValidatorsAndBalances")).getValueBool()))
+        {
+            //TODO(bing): These unnecessarily allocate and return memory that we throw away.
+            // This doesn't matter for typescript lodestar because GC clears it anyway,
+            // but we're losing some savings here. Consider implementating something like
+            // a `prefetchAll` that only does `populateAllNodes` that returns void
+            var validators_view = try new_cached_state.state.validators();
+            _ = validators_view.getAllReadonlyValues(allocator) catch |err| {
+                try js.env().throwError("STATE_ERROR", "Failed to preload validators");
+                return err;
+            };
+            var balances_view = try new_cached_state.state.balances();
+            _ = balances_view.getAll(allocator) catch |err| {
+                try js.env().throwError("STATE_ERROR", "Failed to preload balances");
+                return err;
+            };
+        }
+    }
+
+    return .{
+        .cached_state = new_cached_state,
+        .pool_rc = pool.state.poolRc().ref(),
+    };
+}
+
 pub fn serialize(self: *const BeaconStateView) !js.Uint8Array {
     const env = js.env();
     const cached_state = try self.requireState();
@@ -1305,70 +1363,15 @@ pub fn computeSyncCommitteeRewards(_: *const BeaconStateView, _: js.Value, _: js
 
 // --- Misc not-yet-implemented ---
 
-pub fn getLatestWeakSubjectivityCheckpointEpoch(_: *const BeaconStateView) !js.Number {
-    return throwNotImpl(js.Number, "getLatestWeakSubjectivityCheckpointEpoch not implemented");
+pub fn getLatestWeakSubjectivityCheckpointEpoch(self: *const BeaconStateView) !js.Number {
+    const cached_state = try self.requireState();
+    const ws_epoch = st.getLatestWeakSubjectivityCheckpointEpoch(cached_state.epoch_cache);
+    return js.Number.from(ws_epoch);
 }
 
 pub fn isStateValidatorsNodesPopulated(_: *const BeaconStateView) !js.Boolean {
     // Native state is always fully populated — return true.
     return js.Boolean.from(true);
-}
-
-pub fn loadOtherState(
-    self: *const BeaconStateView,
-    state_bytes: js.Uint8Array,
-    seed_validators_bytes: ?js.Uint8Array,
-    opts: ?js.Value,
-) !BeaconStateView {
-    const old_cached_state = try self.requireState();
-    const state_bytes_slice = try state_bytes.toSlice();
-    const seed_validators_bytes_slice: ?[]const u8 =
-        if (seed_validators_bytes) |b| try b.toSlice() else null;
-
-    var loaded = try st.loadState(
-        allocator,
-        old_cached_state.config,
-        old_cached_state.state,
-        state_bytes_slice,
-        seed_validators_bytes_slice,
-    );
-    errdefer loaded.state.deinit();
-    defer allocator.free(loaded.modified_validators);
-
-    const new_cached_state = try allocator.create(CachedBeaconState);
-    errdefer allocator.destroy(new_cached_state);
-
-    try new_cached_state.init(
-        allocator,
-        &loaded.state,
-        .{
-            .config = &config.state.config,
-            .index_to_pubkey = &pubkey.state.index2pubkey,
-            .pubkey_to_index = &pubkey.state.pubkey2index,
-        },
-        null,
-    );
-
-    if (opts) |value| {
-        const raw = value.toValue();
-        if (try raw.hasNamedProperty("preloadValidatorsAndBalances") and
-            (try (try raw.getNamedProperty("preloadValidatorsAndBalances")).getValueBool()))
-        {
-            //TODO(bing): These unnecessarily allocate and return memory that we throw away.
-            // This doesn't matter for typescript lodestar because GC clears it anyway,
-            // but we're losing some savings here. Consider implementating something like
-            // a `prefetchAll` that only does `populateAllNodes` that returns void
-            var validators_view = try new_cached_state.state.validators();
-            _ = try validators_view.getAllReadonlyValues(allocator);
-            var balances_view = try new_cached_state.state.balances();
-            _ = try balances_view.getAll(allocator);
-        }
-    }
-
-    return .{
-        .cached_state = new_cached_state,
-        .pool_rc = pool.state.poolRc().ref(),
-    };
 }
 
 pub fn toValue(_: *const BeaconStateView) !js.Value {
