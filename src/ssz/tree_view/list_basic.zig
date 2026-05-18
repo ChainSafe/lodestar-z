@@ -287,10 +287,13 @@ pub fn ListBasicTreeView(comptime ST: type) type {
             const chunk_index = index / items_per_chunk;
             const chunk_offset = index % items_per_chunk;
             const keep_bytes = (chunk_offset + 1) * ST.Element.fixed_size;
+            std.debug.assert(keep_bytes > 0);
+            std.debug.assert(keep_bytes <= BYTES_PER_CHUNK);
 
             if (comptime ST.opts.chunked_leaf) {
                 const chunked_leaf_idx = chunk_index / ChunkedLeaf.K;
                 const intra_chunk: u16 = @intCast(chunk_index % ChunkedLeaf.K);
+                std.debug.assert(intra_chunk < ChunkedLeaf.K);
 
                 const boundary_id = try Node.Id.getNodeAtDepth(self.chunks.state.root, pool, chunked_leaf_depth, chunked_leaf_idx);
                 const boundary_kind = pool.nodes.items(.state)[@intFromEnum(boundary_id)].kind();
@@ -313,6 +316,7 @@ pub fn ListBasicTreeView(comptime ST: type) type {
                     // truncating.
                     var trimmed_chunked_leaf: ?Node.Id = try pool.createChunkedLeafEmpty(intra_chunk + 1);
                     defer if (trimmed_chunked_leaf) |id| pool.unref(id);
+
                     {
                         const old_chunks = try boundary_id.getChunkedLeafChunks(pool);
                         const new_storage = try trimmed_chunked_leaf.?.getChunkedLeafPtr(pool);
@@ -352,9 +356,9 @@ pub fn ListBasicTreeView(comptime ST: type) type {
                 // truncate also zeroed the length leaf (gindex 3); reinstall it.
                 var length_node: ?Node.Id = try pool.createLeafFromUint(@intCast(new_length));
                 defer if (length_node) |id| pool.unref(id);
+
                 const root_with_length = try Node.Id.setNode(new_root, pool, @enumFromInt(3), length_node.?);
                 errdefer pool.unref(root_with_length);
-
                 length_node = null;
 
                 return try Self.init(self.allocator, pool, root_with_length);
