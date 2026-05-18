@@ -112,10 +112,14 @@ const load_state = @import("load_state.zig");
 pub const loadState = load_state.loadState;
 pub const MigrateStateOutput = load_state.MigrateStateOutput;
 
+const weak_subjectivity = @import("weak_subjectivity.zig");
+pub const getLatestWeakSubjectivityCheckpointEpoch = weak_subjectivity.getLatestWeakSubjectivityCheckpointEpoch;
+
 test {
     testing.refAllDecls(@This());
     testing.refAllDecls(seed);
     testing.refAllDecls(state_transition);
     testing.refAllDecls(EpochShuffling);
     testing.refAllDecls(load_state);
+    testing.refAllDecls(weak_subjectivity);
 }
