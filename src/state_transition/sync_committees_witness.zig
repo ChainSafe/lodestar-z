@@ -28,6 +28,7 @@ pub fn getSyncCommitteesWitness(
     root_node: Node.Id,
     pool: *Node.Pool,
 ) !SyncCommitteeWitness {
+    std.debug.assert(fork.gte(.altair));
     const n1 = root_node;
 
     // Layout from electra onward: sync committees sit deeper in the tree.
