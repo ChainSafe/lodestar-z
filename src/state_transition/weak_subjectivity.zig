@@ -65,10 +65,7 @@ pub fn computeWeakSubjectivityPeriodFromConstituentsPhase0(
     // That equals totalBalanceByIncrement / N only because
     // EFFECTIVE_BALANCE_INCREMENT == ETH_TO_GWEI (both 1e9 Gwei) in the spec.
     // If they ever diverge, this needs scaling.
-    comptime {
-    if (preset.EFFECTIVE_BALANCE_INCREMENT != ETH_TO_GWEI) {
-        @compileError("weak_subjectivity: formula assumes EFFECTIVE_BALANCE_INCREMENT == ETH_TO_GWEI; preset has diverged — revisit t-scaling");
-    }
+    comptime std.debug.assert(preset.EFFECTIVE_BALANCE_INCREMENT == ETH_TO_GWEI);
     const t: u128 = @divFloor(@as(u128, total_balance_by_increment), N);
     const T: u128 = preset.MAX_EFFECTIVE_BALANCE / ETH_TO_GWEI;
     const delta: u128 = @intCast(churn_limit);
