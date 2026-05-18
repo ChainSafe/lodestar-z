@@ -116,6 +116,10 @@ pub const MigrateStateOutput = load_state.MigrateStateOutput;
 const weak_subjectivity = @import("./weak_subjectivity.zig");
 pub const getLatestWeakSubjectivityCheckpointEpoch = weak_subjectivity.getLatestWeakSubjectivityCheckpointEpoch;
 
+const sync_committees_witness = @import("./sync_committees_witness.zig");
+pub const getSyncCommitteesWitness = sync_committees_witness.getSyncCommitteesWitness;
+pub const SyncCommitteeWitness = sync_committees_witness.SyncCommitteeWitness;
+
 test {
     testing.refAllDecls(@This());
     testing.refAllDecls(seed);
@@ -123,4 +127,5 @@ test {
     testing.refAllDecls(EpochShuffling);
     testing.refAllDecls(load_state);
     testing.refAllDecls(weak_subjectivity);
+    testing.refAllDecls(sync_committees_witness);
 }

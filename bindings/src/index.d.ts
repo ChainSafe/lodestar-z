@@ -266,12 +266,14 @@ declare class BeaconStateView {
   isValidVoluntaryExit(signedVoluntaryExitBytes: Uint8Array, verifySignature: boolean): boolean;
 
   getFinalizedRootProof(): Uint8Array[];
-  // biome-ignore lint/suspicious/noExplicitAny: stub
-  getSyncCommitteesWitness(): any;
+  getSyncCommitteesWitness(): {
+    witness: Uint8Array[];
+    currentSyncCommitteeRoot: Uint8Array;
+    nextSyncCommitteeRoot: Uint8Array;
+  };
   // biome-ignore lint/suspicious/noExplicitAny: stub
   getExpectedWithdrawals(): any;
   getSingleProof(gindex: bigint): Uint8Array[];
-  // getSyncCommitteesWitness(): any;
   /**
    * Compute expected withdrawals for the next payload (capella+).
    *
