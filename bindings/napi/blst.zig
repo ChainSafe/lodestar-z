@@ -92,6 +92,9 @@ fn uint8SliceFromValue(value: js.Value) ![]u8 {
 pub const PublicKey = struct {
     pub const js_meta = js.class(.{});
 
+    pub const COMPRESS_SIZE = NativePublicKey.COMPRESS_SIZE;
+    pub const SERIALIZE_SIZE = NativePublicKey.SERIALIZE_SIZE;
+
     raw: NativePublicKey = .{},
 
     pub fn init() PublicKey {
@@ -154,6 +157,9 @@ pub const PublicKey = struct {
 
 pub const Signature = struct {
     pub const js_meta = js.class(.{});
+
+    pub const COMPRESS_SIZE = NativeSignature.COMPRESS_SIZE;
+    pub const SERIALIZE_SIZE = NativeSignature.SERIALIZE_SIZE;
 
     raw: NativeSignature = .{},
 
