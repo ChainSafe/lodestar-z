@@ -1121,17 +1121,6 @@ test "upgrade state - sanity" {
     try expect(gloas_state.forkSeq() == .gloas);
 }
 
-// ---- Proof through opaque nodes ----
-//
-// `AnyBeaconState.getSingleProof` walks generalized indices through the SSZ
-// tree. Two representations make terminal nodes opaque with no Id children:
-//   * `Validator` is a `container_struct` — one Node holding a deserialized
-//     struct.
-//   * `Balances` is built from `chunked_leaf` nodes, each packing K chunks.
-// Plain descent into either returns `Error.InvalidNode`; proof generation
-// materializes a temporary PMT subtree on demand to traverse them. The tests
-// below cover proof generation across both.
-
 test "single proof: validators[0].withdrawal_credentials" {
     const allocator = std.testing.allocator;
     const ssz = @import("ssz");

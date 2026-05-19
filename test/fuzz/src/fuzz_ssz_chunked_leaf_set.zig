@@ -9,12 +9,15 @@ const assert = std.debug.assert;
 const ssz = @import("ssz");
 const pmt = @import("persistent_merkle_tree");
 const Node = pmt.Node;
+const ChunkedLeaf = pmt.ChunkedLeaf;
 
 const fuzz_buffer_size: u32 = 64 * 1024 * 1024;
 var fuzz_buf: [fuzz_buffer_size]u8 = undefined;
 
 const Capacity: usize = 1 << 20;
-const ItemCount: usize = 4097; // one past CL0 so push hits Path 1 on CL1 boundary
+// One past chunked_leaf 0 for the u64 list (4 items per chunk) so `push`
+// crosses the CL0 -> CL1 boundary into the new-chunked_leaf path.
+const ItemCount: usize = ChunkedLeaf.K * 4 + 1;
 
 const op_size: usize = 4;
 const selector_count: u8 = 4;

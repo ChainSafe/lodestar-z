@@ -38,17 +38,17 @@ const ItemCount: usize = 1 << 20;
 const ListLeaf = FixedListType(UintType(64), Limit, .{});
 const ListChunkedLeaf = FixedListType(UintType(64), Limit, .{ .chunked_leaf = true });
 
-const global_allocator = std.heap.page_allocator;
-
 // Scattered point reads per `get` run — enough to clear timer noise.
 const ProbeCount: usize = 1024;
 // set+commit+getRoot cycles per `sparseSet` run.
 const SparseSetIters: usize = 100;
 // Sparse sets per `batchedSparseSet` run — the per-block sync-committee count.
 const BatchedSparseCount: usize = 512;
-// Coprime stride: scatters sets across the list, each in a distinct
-// chunked_leaf — worst case for `chunked_leaf`.
-const ScatterStride: usize = 10487;
+// Stride for scattered sets: 41 chunked_leaves apart (K * 4 u64 items each)
+// so each consecutive set lands in a distinct chunked_leaf — worst case for
+// the chunked_leaf CoW path. The +1 keeps it odd, hence coprime with the
+// 2^20 ItemCount.
+const ScatterStride: usize = ChunkedLeaf.K * 4 * 41 + 1;
 
 fn scatterIndex(i: usize) usize {
     return (i *% ScatterStride) % ItemCount;
@@ -281,7 +281,7 @@ const ProofChunkedLeaf = struct {
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
-    const allocator = global_allocator;
+    const allocator = std.heap.page_allocator;
     var bench = zbench.Benchmark.init(allocator, .{});
     defer bench.deinit();
 

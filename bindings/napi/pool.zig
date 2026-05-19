@@ -3,10 +3,8 @@ const js = @import("zapi:zapi").js;
 const Node = @import("persistent_merkle_tree").Node;
 const RefCount = @import("state_transition").RefCount;
 
-/// Backs the `PoolRc` wrapper allocation only (one long-lived struct for the
-/// lifetime of the binding). The `Node.Pool` itself uses its own
-/// `InitOptions` defaults — `page_allocator` for large blobs, `c_allocator`
-/// for the small-object lane.
+/// Backs the `PoolRc` wrapper allocation only — `Node.Pool` uses its own
+/// `InitOptions` allocators.
 const allocator = std.heap.page_allocator;
 
 const default_pool_size: u32 = 0;
