@@ -1,6 +1,7 @@
 // Input: [selector_byte][op records of 4 bytes each]
 //   selector % 4: 0/1 = u64 populated/empty, 2/3 = u32 populated/empty
-//   op % 5: 0=set, 1=commit+root check, 2=get, 3=push, 4=clone-deinit
+//   op % 7: 0=set, 1=commit+root check, 2=get, 3=push, 4=clone-deinit,
+//           5=sliceTo, 6=getAllInto
 //   record layout: [op, arg_lo, arg_hi, val_seed]
 
 const std = @import("std");
@@ -83,7 +84,7 @@ fn fuzzListOps(
 
     var i: usize = 0;
     while (i + op_size <= data.len) : (i += op_size) {
-        const op = data[i] % 5;
+        const op = data[i] % 7;
         const arg_lo = data[i + 1];
         const arg_hi = data[i + 2];
         const val_seed = data[i + 3];
@@ -128,6 +129,34 @@ fn fuzzListOps(
                 // drift `reference` ahead of `view`.
                 const clone = view.clone(.{ .transfer_cache = false }) catch return;
                 clone.deinit();
+            },
+            5 => {
+                if (reference.items.len == 0) continue;
+                const idx = (@as(usize, arg_hi) << 8 | @as(usize, arg_lo)) % reference.items.len;
+                const sliced = view.sliceTo(idx) catch return;
+                defer sliced.deinit();
+                const sliced_root = (sliced.hashTreeRoot() catch return).*;
+
+                // sliceTo(idx) keeps elements 0..=idx; idx is in [0, len-1].
+                const expected_len = idx + 1;
+                var ref_src: ListT.Type = .empty;
+                defer ref_src.deinit(allocator);
+                ref_src.ensureTotalCapacity(allocator, expected_len) catch return;
+                for (reference.items[0..expected_len]) |v| ref_src.append(allocator, v) catch return;
+
+                const ref_root_id = ListT.tree.fromValue(&pool, &ref_src) catch return;
+                defer pool.unref(ref_root_id);
+
+                assert(std.mem.eql(u8, ref_root_id.getRoot(&pool), &sliced_root));
+            },
+            6 => {
+                // getAllInto sees uncommitted set/push, so it must match the
+                // running reference without a commit.
+                const buf = allocator.alloc(Element, reference.items.len) catch return;
+                defer allocator.free(buf);
+                const filled = view.getAllInto(buf) catch return;
+                assert(filled.len == reference.items.len);
+                for (filled, reference.items) |a, b| assert(elementEql(Element, a, b));
             },
             else => unreachable,
         }
