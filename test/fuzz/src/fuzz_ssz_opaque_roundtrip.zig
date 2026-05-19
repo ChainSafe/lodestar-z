@@ -1,28 +1,30 @@
 // Round-trip fuzz for the opaque-node SSZ tree paths:
-//   chunked_leaf list — tree.deserializeFromBytes / serializeIntoBytes /
-//                       toValue / fromValue
-//   container_struct  — the same four, plus tree.getValuePtr
+//   chunked_leaf list/vector — tree.deserializeFromBytes / serializeIntoBytes /
+//                              toValue / fromValue
+//   container_struct         — the same four, plus tree.getValuePtr
 //
 // `fuzz_ssz_chunked_leaf_set` already covers the chunked_leaf TreeView ops
 // (set/get/push/clone/commit/sliceTo); this target covers the byte- and
 // value-level tree conversions that target never exercises.
 //
 // Input: [selector_byte][ssz_data...]
-//   selector % 3: 0 = chunked_leaf List(u64)
+//   selector % 4: 0 = chunked_leaf List(u64)
 //                 1 = chunked_leaf List(u32)
 //                 2 = StructContainerType (fixed 52-byte container)
+//                 3 = chunked_leaf Vector(u64)
 
 const std = @import("std");
 const assert = std.debug.assert;
 const ssz = @import("ssz");
 const pmt = @import("persistent_merkle_tree");
 const Node = pmt.Node;
+const ChunkedLeaf = pmt.ChunkedLeaf;
 
 const fuzz_buffer_size: u32 = 64 * 1024 * 1024;
 var fuzz_buf: [fuzz_buffer_size]u8 = undefined;
 
 const Capacity: usize = 1 << 20;
-const selector_count: u8 = 3;
+const selector_count: u8 = 4;
 
 // All-fixed fields with no bool, so every 52-byte input deserializes and the
 // whole round-trip past deserialize gets exercised.
@@ -32,6 +34,10 @@ const ContainerT = ssz.StructContainerType(struct {
     z: ssz.UintType(64),
     blob: ssz.ByteVectorType(32),
 });
+
+// Length 2*K*4 + 7: spans two chunked_leaves with an odd tail, so the last
+// chunked_leaf is partial.
+const VecChunkedLeaf = ssz.FixedVectorType(ssz.UintType(64), ChunkedLeaf.K * 4 * 2 + 7, .{ .chunked_leaf = true });
 
 pub export fn zig_fuzz_init() callconv(.c) void {}
 
@@ -46,6 +52,7 @@ pub export fn zig_fuzz_test(buf: [*]const u8, len: usize) callconv(.c) void {
         0 => fuzzListRoundtrip(ssz.FixedListType(ssz.UintType(64), Capacity, .{ .chunked_leaf = true }), allocator, data),
         1 => fuzzListRoundtrip(ssz.FixedListType(ssz.UintType(32), Capacity, .{ .chunked_leaf = true }), allocator, data),
         2 => fuzzContainerRoundtrip(allocator, data),
+        3 => fuzzVectorRoundtrip(VecChunkedLeaf, allocator, data),
         else => unreachable,
     }
 }
@@ -145,6 +152,50 @@ fn fuzzContainerRoundtrip(allocator: std.mem.Allocator, data: []const u8) void {
 
     // value -> tree rebuilds the same root.
     const rebuilt = ContainerT.tree.fromValue(&pool, &value) catch return;
+    defer pool.unref(rebuilt);
+    assert(std.mem.eql(u8, node.getRoot(&pool), rebuilt.getRoot(&pool)));
+}
+
+fn fuzzVectorRoundtrip(comptime VecT: type, allocator: std.mem.Allocator, raw: []const u8) void {
+    // A vector is fixed-size; take the leading fixed_size bytes.
+    if (raw.len < VecT.fixed_size) return;
+    const data = raw[0..VecT.fixed_size];
+
+    var pool = Node.Pool.init(.{
+        .page_allocator = allocator,
+        .allocator = allocator,
+        .pool_size = 4096,
+    }) catch return;
+    defer pool.deinit();
+
+    const baseline_in_use = pool.getNodesInUse();
+    var leak_check_armed = false;
+    defer {
+        if (leak_check_armed) {
+            assert(pool.getNodesInUse() == baseline_in_use);
+        }
+    }
+
+    const node = VecT.tree.deserializeFromBytes(&pool, data) catch return;
+    defer pool.unref(node);
+    leak_check_armed = true;
+
+    // tree -> bytes round-trips back to the input.
+    var out: [VecT.fixed_size]u8 = undefined;
+    const written = VecT.tree.serializeIntoBytes(node, &pool, &out) catch return;
+    assert(written == VecT.fixed_size);
+    assert(std.mem.eql(u8, &out, data));
+
+    // tree -> value -> bytes round-trips too.
+    var value: VecT.Type = undefined;
+    VecT.tree.toValue(node, &pool, &value) catch return;
+    var value_out: [VecT.fixed_size]u8 = undefined;
+    const value_written = VecT.serializeIntoBytes(&value, &value_out);
+    assert(value_written == VecT.fixed_size);
+    assert(std.mem.eql(u8, &value_out, data));
+
+    // value -> tree rebuilds the same root.
+    const rebuilt = VecT.tree.fromValue(&pool, &value) catch return;
     defer pool.unref(rebuilt);
     assert(std.mem.eql(u8, node.getRoot(&pool), rebuilt.getRoot(&pool)));
 }
