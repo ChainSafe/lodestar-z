@@ -71,3 +71,9 @@ pub const UnrealizedCheckpoints = js.Object(struct {
     justifiedCheckpoint: Checkpoint,
     finalizedCheckpoint: Checkpoint,
 });
+
+pub const SyncCommitteeWitness = js.Object(struct {
+    witness: js.Array,
+    currentSyncCommitteeRoot: js.Uint8Array,
+    nextSyncCommitteeRoot: js.Uint8Array,
+});

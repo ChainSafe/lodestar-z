@@ -112,10 +112,15 @@ const load_state = @import("load_state.zig");
 pub const loadState = load_state.loadState;
 pub const MigrateStateOutput = load_state.MigrateStateOutput;
 
+const sync_committees_witness = @import("./sync_committees_witness.zig");
+pub const getSyncCommitteesWitness = sync_committees_witness.getSyncCommitteesWitness;
+pub const SyncCommitteeWitness = sync_committees_witness.SyncCommitteeWitness;
+
 test {
     testing.refAllDecls(@This());
     testing.refAllDecls(seed);
     testing.refAllDecls(state_transition);
     testing.refAllDecls(EpochShuffling);
     testing.refAllDecls(load_state);
+    testing.refAllDecls(sync_committees_witness);
 }
