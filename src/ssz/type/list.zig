@@ -8,7 +8,8 @@ const merkleize = @import("hashing").merkleize;
 const mixInLength = @import("hashing").mixInLength;
 const maxChunksToDepth = @import("hashing").maxChunksToDepth;
 const getZeroHash = @import("hashing").getZeroHash;
-const Node = @import("persistent_merkle_tree").Node;
+const pmt = @import("persistent_merkle_tree");
+const Node = pmt.Node;
 const tree_view = @import("../tree_view/root.zig");
 const ListBasicTreeView = tree_view.ListBasicTreeView;
 const ListCompositeTreeView = tree_view.ListCompositeTreeView;
@@ -39,7 +40,7 @@ pub fn FixedListType(comptime ST: type, comptime _limit: comptime_int, comptime 
             @compileError("FixedListType: opts.chunked_leaf=true requires isBasicType(Element)");
         }
         if (_opts.chunked_leaf) {
-            const ChunkedLeaf = @import("persistent_merkle_tree").ChunkedLeaf;
+            const ChunkedLeaf = pmt.ChunkedLeaf;
             const items_per_chunk_local = if (isBasicType(ST)) (32 / ST.fixed_size) else 1;
             const min_limit = ChunkedLeaf.K * items_per_chunk_local;
             if (_limit < min_limit) {
@@ -65,7 +66,7 @@ pub fn FixedListType(comptime ST: type, comptime _limit: comptime_int, comptime 
         pub const max_chunk_count: usize = if (isBasicType(Element)) std.math.divCeil(usize, max_size, 32) catch unreachable else limit;
         pub const chunk_depth: u8 = maxChunksToDepth(max_chunk_count);
         pub const use_chunked_leaf: bool = _opts.chunked_leaf;
-        const ChunkedLeaf = if (use_chunked_leaf) @import("persistent_merkle_tree").ChunkedLeaf else struct {};
+        const ChunkedLeaf = if (use_chunked_leaf) pmt.ChunkedLeaf else struct {};
         const chunked_leaf_depth: u8 = if (use_chunked_leaf) chunk_depth - ChunkedLeaf.k_log2 else 0;
 
         pub const default_value: Type = Type.empty;
@@ -306,35 +307,45 @@ pub fn FixedListType(comptime ST: type, comptime _limit: comptime_int, comptime 
                     );
                 }
 
-                if (comptime use_chunked_leaf) {
-                    var it = Node.FillWithContentsIterator.initWithOffset(pool, chunked_leaf_depth, ChunkedLeaf.k_log2);
-                    errdefer it.deinit();
+                return if (comptime use_chunked_leaf)
+                    deserializeFromBytesChunkedLeaf(pool, data, len)
+                else
+                    deserializeFromBytesPlain(pool, data, len, chunk_count);
+            }
 
-                    const bytes_per_chunked_leaf: usize = ChunkedLeaf.K * 32;
-                    var byte_idx: usize = 0;
+            /// `deserializeFromBytes` for chunked_leaf layouts.
+            fn deserializeFromBytesChunkedLeaf(pool: *Node.Pool, data: []const u8, len: usize) !Node.Id {
+                var it = Node.FillWithContentsIterator.initWithOffset(pool, chunked_leaf_depth, ChunkedLeaf.k_log2);
+                errdefer it.deinit();
 
-                    while (byte_idx < data.len) {
-                        const remaining = data.len - byte_idx;
-                        const chunked_leaf_bytes = @min(remaining, bytes_per_chunked_leaf);
-                        const valid_chunks: u16 = @intCast((chunked_leaf_bytes + 31) / 32);
-                        var chunked_leaf_id_opt: ?Node.Id = try pool.createChunkedLeafEmpty(valid_chunks);
-                        errdefer if (chunked_leaf_id_opt) |id| pool.unref(id);
-                        const storage = try chunked_leaf_id_opt.?.getChunkedLeafPtr(pool);
-                        @memcpy(@as([*]u8, @ptrCast(&storage.chunks))[0..chunked_leaf_bytes], data[byte_idx..][0..chunked_leaf_bytes]);
-                        try it.append(chunked_leaf_id_opt.?);
-                        chunked_leaf_id_opt = null;
-                        byte_idx += chunked_leaf_bytes;
-                    }
+                const bytes_per_chunked_leaf: usize = ChunkedLeaf.K * 32;
+                var byte_idx: usize = 0;
 
-                    const content_root = try it.finish();
-                    errdefer pool.unref(content_root);
+                while (byte_idx < data.len) {
+                    const remaining = data.len - byte_idx;
+                    const chunked_leaf_bytes = @min(remaining, bytes_per_chunked_leaf);
+                    const valid_chunks: u16 = @intCast((chunked_leaf_bytes + 31) / 32);
+                    var chunked_leaf_id_opt: ?Node.Id = try pool.createChunkedLeafEmpty(valid_chunks);
+                    errdefer if (chunked_leaf_id_opt) |id| pool.unref(id);
 
-                    const len_mixin = try pool.createLeafFromUint(len);
-                    errdefer pool.unref(len_mixin);
-
-                    return try pool.createBranch(content_root, len_mixin);
+                    const storage = try chunked_leaf_id_opt.?.getChunkedLeafPtr(pool);
+                    @memcpy(@as([*]u8, @ptrCast(&storage.chunks))[0..chunked_leaf_bytes], data[byte_idx..][0..chunked_leaf_bytes]);
+                    try it.append(chunked_leaf_id_opt.?);
+                    chunked_leaf_id_opt = null;
+                    byte_idx += chunked_leaf_bytes;
                 }
 
+                const content_root = try it.finish();
+                errdefer pool.unref(content_root);
+
+                const len_mixin = try pool.createLeafFromUint(len);
+                errdefer pool.unref(len_mixin);
+
+                return try pool.createBranch(content_root, len_mixin);
+            }
+
+            /// `deserializeFromBytes` for non-chunked_leaf layouts.
+            fn deserializeFromBytesPlain(pool: *Node.Pool, data: []const u8, len: usize, chunk_count: usize) !Node.Id {
                 var it = Node.FillWithContentsIterator.init(pool, chunk_depth);
                 errdefer it.deinit();
 
@@ -361,6 +372,7 @@ pub fn FixedListType(comptime ST: type, comptime _limit: comptime_int, comptime 
 
                 const content_root = try it.finish();
                 errdefer pool.unref(content_root);
+
                 const len_mixin = try pool.createLeafFromUint(len);
                 errdefer pool.unref(len_mixin);
 
@@ -388,40 +400,50 @@ pub fn FixedListType(comptime ST: type, comptime _limit: comptime_int, comptime 
                 try out.resize(allocator, len);
                 @memset(out.items, Element.default_value);
 
-                if (comptime use_chunked_leaf) {
-                    const content_root = try node.getLeft(pool);
-                    const items_per_chunk = 32 / Element.fixed_size;
-                    const chunked_leaf_count = (chunk_count + ChunkedLeaf.K - 1) / ChunkedLeaf.K;
-                    const chunked_leaf_ids = try allocator.alloc(Node.Id, chunked_leaf_count);
-                    defer allocator.free(chunked_leaf_ids);
-                    try content_root.getNodesAtDepth(pool, chunked_leaf_depth, 0, chunked_leaf_ids);
+                return if (comptime use_chunked_leaf)
+                    toValueChunkedLeaf(allocator, node, pool, out, len, chunk_count)
+                else
+                    toValuePlain(allocator, node, pool, out, len, chunk_count);
+            }
 
-                    const state_col = pool.nodes.items(.state);
-                    var item_idx: usize = 0;
-                    outer: for (chunked_leaf_ids) |sid| {
-                        // A zero subtree at chunked_leaf boundary is semantically an
-                        // all-zero chunked_leaf — out.items already initialised to
-                        // Element.default_value via the @memset above, so
-                        // skip the chunked_leaf payload read entirely.
-                        if (state_col[@intFromEnum(sid)].kind() == .zero) {
-                            const items_in_chunked_leaf = @min(ChunkedLeaf.K * items_per_chunk, len - item_idx);
-                            item_idx += items_in_chunked_leaf;
-                            if (item_idx >= len) break :outer;
-                            continue;
-                        }
-                        const chunks = try sid.getChunkedLeafChunks(pool);
-                        for (0..ChunkedLeaf.K) |intra_chunk| {
-                            if (item_idx >= len) break :outer;
-                            const items_in_chunk = @min(items_per_chunk, len - item_idx);
-                            for (0..items_in_chunk) |i| {
-                                Element.tree.toValuePackedFromBytes(&chunks[intra_chunk], item_idx + i, &out.items[item_idx + i]);
-                            }
-                            item_idx += items_in_chunk;
-                        }
+            /// `toValue` for chunked_leaf layouts. `out.items` is pre-resized
+            /// to `len` and zero-initialised by the caller.
+            fn toValueChunkedLeaf(allocator: std.mem.Allocator, node: Node.Id, pool: *Node.Pool, out: *Type, len: usize, chunk_count: usize) !void {
+                const content_root = try node.getLeft(pool);
+                const items_per_chunk = 32 / Element.fixed_size;
+                const chunked_leaf_count = (chunk_count + ChunkedLeaf.K - 1) / ChunkedLeaf.K;
+                const chunked_leaf_ids = try allocator.alloc(Node.Id, chunked_leaf_count);
+                defer allocator.free(chunked_leaf_ids);
+                try content_root.getNodesAtDepth(pool, chunked_leaf_depth, 0, chunked_leaf_ids);
+
+                const state_col = pool.nodes.items(.state);
+                var item_idx: usize = 0;
+                outer: for (chunked_leaf_ids) |sid| {
+                    // A zero subtree at chunked_leaf boundary is semantically an
+                    // all-zero chunked_leaf — out.items already initialised to
+                    // Element.default_value via the @memset above, so
+                    // skip the chunked_leaf payload read entirely.
+                    if (state_col[@intFromEnum(sid)].kind() == .zero) {
+                        const items_in_chunked_leaf = @min(ChunkedLeaf.K * items_per_chunk, len - item_idx);
+                        item_idx += items_in_chunked_leaf;
+                        if (item_idx >= len) break :outer;
+                        continue;
                     }
-                    return;
+                    const chunks = try sid.getChunkedLeafChunks(pool);
+                    for (0..ChunkedLeaf.K) |intra_chunk| {
+                        if (item_idx >= len) break :outer;
+                        const items_in_chunk = @min(items_per_chunk, len - item_idx);
+                        for (0..items_in_chunk) |i| {
+                            Element.tree.toValuePackedFromBytes(&chunks[intra_chunk], item_idx + i, &out.items[item_idx + i]);
+                        }
+                        item_idx += items_in_chunk;
+                    }
                 }
+            }
 
+            /// `toValue` for non-chunked_leaf layouts. `out.items` is
+            /// pre-resized to `len` by the caller.
+            fn toValuePlain(allocator: std.mem.Allocator, node: Node.Id, pool: *Node.Pool, out: *Type, len: usize, chunk_count: usize) !void {
                 const nodes = try allocator.alloc(Node.Id, chunk_count);
                 defer allocator.free(nodes);
 
@@ -458,45 +480,55 @@ pub fn FixedListType(comptime ST: type, comptime _limit: comptime_int, comptime 
                     );
                 }
 
-                if (comptime use_chunked_leaf) {
-                    var it = Node.FillWithContentsIterator.initWithOffset(pool, chunked_leaf_depth, ChunkedLeaf.k_log2);
-                    errdefer it.deinit();
+                return if (comptime use_chunked_leaf)
+                    fromValueChunkedLeaf(pool, value, len)
+                else
+                    fromValuePlain(pool, value, len, chunk_count);
+            }
 
-                    const items_per_chunk = 32 / Element.fixed_size;
-                    const items_per_chunked_leaf: usize = items_per_chunk * ChunkedLeaf.K;
-                    var item_idx: usize = 0;
+            /// `fromValue` for chunked_leaf layouts.
+            fn fromValueChunkedLeaf(pool: *Node.Pool, value: *const Type, len: usize) !Node.Id {
+                var it = Node.FillWithContentsIterator.initWithOffset(pool, chunked_leaf_depth, ChunkedLeaf.k_log2);
+                errdefer it.deinit();
 
-                    while (item_idx < len) {
-                        const remaining = len - item_idx;
-                        const items_in_chunked_leaf = @min(remaining, items_per_chunked_leaf);
-                        const valid_chunks: u16 = @intCast((items_in_chunked_leaf + items_per_chunk - 1) / items_per_chunk);
+                const items_per_chunk = 32 / Element.fixed_size;
+                const items_per_chunked_leaf: usize = items_per_chunk * ChunkedLeaf.K;
+                var item_idx: usize = 0;
 
-                        var chunked_leaf_id_opt: ?Node.Id = try pool.createChunkedLeafEmpty(valid_chunks);
-                        errdefer if (chunked_leaf_id_opt) |id| pool.unref(id);
-                        const storage = try chunked_leaf_id_opt.?.getChunkedLeafPtr(pool);
+                while (item_idx < len) {
+                    const remaining = len - item_idx;
+                    const items_in_chunked_leaf = @min(remaining, items_per_chunked_leaf);
+                    const valid_chunks: u16 = @intCast((items_in_chunked_leaf + items_per_chunk - 1) / items_per_chunk);
 
-                        for (0..items_in_chunked_leaf) |k| {
-                            const chunked_leaf_chunk_idx = k / items_per_chunk;
-                            const intra_chunk = k % items_per_chunk;
-                            const dst_off = intra_chunk * Element.fixed_size;
-                            const dst_slice = storage.chunks[chunked_leaf_chunk_idx][dst_off .. dst_off + Element.fixed_size];
-                            _ = Element.serializeIntoBytes(&value.items[item_idx + k], dst_slice);
-                        }
+                    var chunked_leaf_id_opt: ?Node.Id = try pool.createChunkedLeafEmpty(valid_chunks);
+                    errdefer if (chunked_leaf_id_opt) |id| pool.unref(id);
 
-                        try it.append(chunked_leaf_id_opt.?);
-                        chunked_leaf_id_opt = null;
-                        item_idx += items_in_chunked_leaf;
+                    const storage = try chunked_leaf_id_opt.?.getChunkedLeafPtr(pool);
+
+                    for (0..items_in_chunked_leaf) |k| {
+                        const chunked_leaf_chunk_idx = k / items_per_chunk;
+                        const intra_chunk = k % items_per_chunk;
+                        const dst_off = intra_chunk * Element.fixed_size;
+                        const dst_slice = storage.chunks[chunked_leaf_chunk_idx][dst_off .. dst_off + Element.fixed_size];
+                        _ = Element.serializeIntoBytes(&value.items[item_idx + k], dst_slice);
                     }
 
-                    const content_root = try it.finish();
-                    errdefer pool.unref(content_root);
-
-                    const len_mixin = try pool.createLeafFromUint(len);
-                    errdefer pool.unref(len_mixin);
-
-                    return try pool.createBranch(content_root, len_mixin);
+                    try it.append(chunked_leaf_id_opt.?);
+                    chunked_leaf_id_opt = null;
+                    item_idx += items_in_chunked_leaf;
                 }
 
+                const content_root = try it.finish();
+                errdefer pool.unref(content_root);
+
+                const len_mixin = try pool.createLeafFromUint(len);
+                errdefer pool.unref(len_mixin);
+
+                return try pool.createBranch(content_root, len_mixin);
+            }
+
+            /// `fromValue` for non-chunked_leaf layouts.
+            fn fromValuePlain(pool: *Node.Pool, value: *const Type, len: usize, chunk_count: usize) !Node.Id {
                 var it = Node.FillWithContentsIterator.init(pool, chunk_depth);
                 errdefer it.deinit();
 
@@ -529,6 +561,7 @@ pub fn FixedListType(comptime ST: type, comptime _limit: comptime_int, comptime 
 
                 const content_root = try it.finish();
                 errdefer pool.unref(content_root);
+
                 const len_mixin = try pool.createLeafFromUint(len);
                 errdefer pool.unref(len_mixin);
 
@@ -546,39 +579,48 @@ pub fn FixedListType(comptime ST: type, comptime _limit: comptime_int, comptime 
                 else
                     len;
 
-                if (comptime use_chunked_leaf) {
-                    const serialized_size = len * Element.fixed_size;
-                    const content_root = try node.getLeft(pool);
-                    const chunked_leaf_count = (chunk_count + ChunkedLeaf.K - 1) / ChunkedLeaf.K;
+                return if (comptime use_chunked_leaf)
+                    serializeIntoBytesChunkedLeaf(node, pool, out, len, chunk_count)
+                else
+                    serializeIntoBytesPlain(node, pool, out, len, chunk_count);
+            }
 
-                    const chunked_leaf_ids_buf = try pool.page_allocator.alloc(Node.Id, chunked_leaf_count);
-                    defer pool.page_allocator.free(chunked_leaf_ids_buf);
-                    try content_root.getNodesAtDepth(pool, chunked_leaf_depth, 0, chunked_leaf_ids_buf);
+            /// `serializeIntoBytes` for chunked_leaf layouts.
+            fn serializeIntoBytesChunkedLeaf(node: Node.Id, pool: *Node.Pool, out: []u8, len: usize, chunk_count: usize) !usize {
+                const serialized_size = len * Element.fixed_size;
+                const content_root = try node.getLeft(pool);
+                const chunked_leaf_count = (chunk_count + ChunkedLeaf.K - 1) / ChunkedLeaf.K;
 
-                    const state_col = pool.nodes.items(.state);
-                    var byte_idx: usize = 0;
-                    outer: for (chunked_leaf_ids_buf) |sid| {
-                        // Zero subtree at chunked_leaf boundary == all-zero output.
-                        if (state_col[@intFromEnum(sid)].kind() == .zero) {
-                            const remaining = serialized_size - byte_idx;
-                            const zero_bytes = @min(ChunkedLeaf.K * 32, remaining);
-                            @memset(out[byte_idx..][0..zero_bytes], 0);
-                            byte_idx += zero_bytes;
-                            if (byte_idx >= serialized_size) break :outer;
-                            continue;
-                        }
-                        const chunks = try sid.getChunkedLeafChunks(pool);
-                        for (0..ChunkedLeaf.K) |intra_chunk| {
-                            if (byte_idx >= serialized_size) break :outer;
-                            const remaining = serialized_size - byte_idx;
-                            const bytes_to_copy = @min(remaining, 32);
-                            @memcpy(out[byte_idx..][0..bytes_to_copy], chunks[intra_chunk][0..bytes_to_copy]);
-                            byte_idx += bytes_to_copy;
-                        }
+                const chunked_leaf_ids_buf = try pool.page_allocator.alloc(Node.Id, chunked_leaf_count);
+                defer pool.page_allocator.free(chunked_leaf_ids_buf);
+                try content_root.getNodesAtDepth(pool, chunked_leaf_depth, 0, chunked_leaf_ids_buf);
+
+                const state_col = pool.nodes.items(.state);
+                var byte_idx: usize = 0;
+                outer: for (chunked_leaf_ids_buf) |sid| {
+                    // Zero subtree at chunked_leaf boundary == all-zero output.
+                    if (state_col[@intFromEnum(sid)].kind() == .zero) {
+                        const remaining = serialized_size - byte_idx;
+                        const zero_bytes = @min(ChunkedLeaf.K * 32, remaining);
+                        @memset(out[byte_idx..][0..zero_bytes], 0);
+                        byte_idx += zero_bytes;
+                        if (byte_idx >= serialized_size) break :outer;
+                        continue;
                     }
-                    return serialized_size;
+                    const chunks = try sid.getChunkedLeafChunks(pool);
+                    for (0..ChunkedLeaf.K) |intra_chunk| {
+                        if (byte_idx >= serialized_size) break :outer;
+                        const remaining = serialized_size - byte_idx;
+                        const bytes_to_copy = @min(remaining, 32);
+                        @memcpy(out[byte_idx..][0..bytes_to_copy], chunks[intra_chunk][0..bytes_to_copy]);
+                        byte_idx += bytes_to_copy;
+                    }
                 }
+                return serialized_size;
+            }
 
+            /// `serializeIntoBytes` for non-chunked_leaf layouts.
+            fn serializeIntoBytesPlain(node: Node.Id, pool: *Node.Pool, out: []u8, len: usize, chunk_count: usize) !usize {
                 var it = Node.DepthIterator.init(pool, node, chunk_depth + 1, 0);
 
                 if (comptime isBasicType(Element)) {
@@ -867,6 +909,7 @@ pub fn VariableListType(comptime ST: type, comptime _limit: comptime_int) type {
 
                 const content_root = try it.finish();
                 errdefer pool.unref(content_root);
+
                 const len_mixin = try pool.createLeafFromUint(len);
                 errdefer pool.unref(len_mixin);
 
@@ -923,6 +966,7 @@ pub fn VariableListType(comptime ST: type, comptime _limit: comptime_int) type {
 
                 const content_root = try it.finish();
                 errdefer pool.unref(content_root);
+
                 const len_mixin = try pool.createLeafFromUint(len);
                 errdefer pool.unref(len_mixin);
 
@@ -2043,7 +2087,7 @@ test "VariableListType - tree.zeros" {
 
 test "FixedListType opts.chunked_leaf=true: round-trip fromValue -> tree -> toValue" {
     const allocator = std.testing.allocator;
-    const ChunkedLeaf = @import("persistent_merkle_tree").ChunkedLeaf;
+    const ChunkedLeaf = pmt.ChunkedLeaf;
     const ListT = FixedListType(UintType(64), 1 << 20, .{ .chunked_leaf = true });
 
     var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 4096 });
@@ -2073,7 +2117,7 @@ test "FixedListType opts.chunked_leaf=true: round-trip fromValue -> tree -> toVa
 
 test "FixedListType opts.chunked_leaf=true: serialize -> deserialize round-trip" {
     const allocator = std.testing.allocator;
-    const ChunkedLeaf = @import("persistent_merkle_tree").ChunkedLeaf;
+    const ChunkedLeaf = pmt.ChunkedLeaf;
     const ListT = FixedListType(UintType(64), 1 << 20, .{ .chunked_leaf = true });
 
     var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 4096 });

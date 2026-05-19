@@ -4,8 +4,9 @@ const Allocator = std.mem.Allocator;
 const hashing = @import("hashing");
 const Depth = hashing.Depth;
 
-const Node = @import("persistent_merkle_tree").Node;
-const Gindex = @import("persistent_merkle_tree").Gindex;
+const pmt = @import("persistent_merkle_tree");
+const Node = pmt.Node;
+const Gindex = pmt.Gindex;
 
 const isFixedType = @import("../type/type_kind.zig").isFixedType;
 
@@ -37,7 +38,7 @@ pub fn BasicPackedChunks(
         // ChunkedLeaf-related comptime constants. Only meaningful when `use_chunked_leaf = true`.
         // The `else` placeholders keep the symbols valid in non-chunked_leaf instantiations
         // without referencing the ChunkedLeaf module.
-        const ChunkedLeaf = if (use_chunked_leaf) @import("persistent_merkle_tree").ChunkedLeaf else struct {};
+        const ChunkedLeaf = if (use_chunked_leaf) pmt.ChunkedLeaf else struct {};
         const chunked_leaf_depth: Depth = if (use_chunked_leaf) chunk_depth - ChunkedLeaf.k_log2 else 0;
 
         pub fn init(self: *Self, allocator: Allocator, pool: *Node.Pool, root: Node.Id) !void {
@@ -86,69 +87,75 @@ pub fn BasicPackedChunks(
 
         pub fn set(self: *Self, index: usize, value: Element) !void {
             if (comptime use_chunked_leaf) {
-                const chunk_idx = index / items_per_chunk;
-                const chunked_leaf_idx = chunk_idx / ChunkedLeaf.K;
-                const intra_chunk = chunk_idx % ChunkedLeaf.K;
-                const intra_chunk_u16: u16 = @intCast(intra_chunk);
-                const gindex = Gindex.fromDepth(chunked_leaf_depth, chunked_leaf_idx);
-
-                const existing_id = try self.state.getChildNode(gindex);
-                const state_col = self.state.pool.nodes.items(.state);
-                const existing_kind = state_col[@intFromEnum(existing_id)].kind();
-
-                // Path 1: navigation landed on a zero sentinel (sparse tree).
-                // Materialize a fresh zero-filled chunked_leaf and mutate it in place
-                // (rc=0 ⇒ exclusively owned by us). Then setChildNode publishes
-                // it to the cache and `changed` set.
-                if (existing_kind == .zero) {
-                    var fresh_id_opt: ?Node.Id = try self.state.pool.createChunkedLeafEmpty(intra_chunk_u16 + 1);
-                    errdefer if (fresh_id_opt) |id| self.state.pool.unref(id);
-                    const fresh_id = fresh_id_opt.?;
-                    const fresh_storage = try fresh_id.getChunkedLeafPtr(self.state.pool);
-                    ST.Element.tree.fromValuePackedIntoChunk(&fresh_storage.chunks[intra_chunk], index, &value);
-                    self.state.pool.nodes.items(.root)[@intFromEnum(fresh_id)] = Node.lazy_sentinel;
-                    try self.state.setChildNode(gindex, fresh_id);
-                    fresh_id_opt = null;
-                    return;
-                }
-
-                // Path 2: existing chunked_leaf is `transient` — exclusively owned by
-                // this TreeView (rc==0, only the children_nodes cache holds it).
-                // This is the steady state after the first write produces a
-                // CoW chunked_leaf. Mutate in place: byte-write into the heap chunks,
-                // accumulate dirty bits, invalidate the cached chunked_leaf root.
-                // The gindex was already added to `changed` by the prior
-                // setChildNode call that produced this transient chunked_leaf, so we
-                // do NOT call setChildNode again (which would unref-then-store
-                // the same Id and free our chunked_leaf).
-                if (state_col[@intFromEnum(existing_id)].refCount() == 0) {
-                    // Path 2 owner invariant: rc=0 transient was registered by
-                    // a prior Path 1/3 in this commit cycle (which added gindex
-                    // to `changed`). If this assertion fires, the rc state
-                    // machine has drifted.
-                    std.debug.assert(existing_kind == .chunked_leaf);
-                    std.debug.assert(self.state.changed.contains(gindex));
-                    const storage = try existing_id.getChunkedLeafPtr(self.state.pool);
-                    ST.Element.tree.fromValuePackedIntoChunk(&storage.chunks[intra_chunk], index, &value);
-                    self.state.pool.nodes.items(.root)[@intFromEnum(existing_id)] = Node.lazy_sentinel;
-                    return;
-                }
-
-                // Path 3: shared chunked_leaf (rc >= 1 — owned by the persistent tree).
-                // Must CoW: produce a fresh chunked_leaf via setChunkedLeafChunk and publish
-                // it. From this point onward subsequent writes hit Path 2.
-                std.debug.assert(existing_kind == .chunked_leaf);
-                const existing_chunks = try existing_id.getChunkedLeafChunks(self.state.pool);
-                var new_chunk: [32]u8 = existing_chunks[intra_chunk];
-                ST.Element.tree.fromValuePackedIntoChunk(&new_chunk, index, &value);
-                const new_chunked_leaf_id = try existing_id.setChunkedLeafChunk(self.state.pool, intra_chunk_u16, &new_chunk);
-                try self.state.setChildNode(gindex, new_chunked_leaf_id);
-            } else {
-                const gindex = Gindex.fromDepth(chunk_depth, index / items_per_chunk);
-                const child_node = try self.state.getChildNode(gindex);
-                const new_node = try ST.Element.tree.fromValuePacked(child_node, self.state.pool, index, &value);
-                try self.state.setChildNode(gindex, new_node);
+                return self.setChunkedLeaf(index, value);
             }
+            const gindex = Gindex.fromDepth(chunk_depth, index / items_per_chunk);
+            const child_node = try self.state.getChildNode(gindex);
+            const new_node = try ST.Element.tree.fromValuePacked(child_node, self.state.pool, index, &value);
+            try self.state.setChildNode(gindex, new_node);
+        }
+
+        /// `set` for chunked_leaf layouts. CoW-writes one element into the
+        /// boundary ChunkedLeaf via one of three ownership paths.
+        fn setChunkedLeaf(self: *Self, index: usize, value: Element) !void {
+            const chunk_idx = index / items_per_chunk;
+            const chunked_leaf_idx = chunk_idx / ChunkedLeaf.K;
+            const intra_chunk = chunk_idx % ChunkedLeaf.K;
+            const intra_chunk_u16: u16 = @intCast(intra_chunk);
+            const gindex = Gindex.fromDepth(chunked_leaf_depth, chunked_leaf_idx);
+
+            const existing_id = try self.state.getChildNode(gindex);
+            const state_col = self.state.pool.nodes.items(.state);
+            const existing_kind = state_col[@intFromEnum(existing_id)].kind();
+
+            // Path 1: navigation landed on a zero sentinel (sparse tree).
+            // Materialize a fresh zero-filled chunked_leaf and mutate it in place
+            // (rc=0 ⇒ exclusively owned by us). Then setChildNode publishes
+            // it to the cache and `changed` set.
+            if (existing_kind == .zero) {
+                var fresh_id_opt: ?Node.Id = try self.state.pool.createChunkedLeafEmpty(intra_chunk_u16 + 1);
+                errdefer if (fresh_id_opt) |id| self.state.pool.unref(id);
+
+                const fresh_id = fresh_id_opt.?;
+                const fresh_storage = try fresh_id.getChunkedLeafPtr(self.state.pool);
+                ST.Element.tree.fromValuePackedIntoChunk(&fresh_storage.chunks[intra_chunk], index, &value);
+                self.state.pool.nodes.items(.root)[@intFromEnum(fresh_id)] = Node.lazy_sentinel;
+                try self.state.setChildNode(gindex, fresh_id);
+                fresh_id_opt = null;
+                return;
+            }
+
+            // Path 2: existing chunked_leaf is `transient` — exclusively owned by
+            // this TreeView (rc==0, only the children_nodes cache holds it).
+            // This is the steady state after the first write produces a
+            // CoW chunked_leaf. Mutate in place: byte-write into the heap chunks,
+            // accumulate dirty bits, invalidate the cached chunked_leaf root.
+            // The gindex was already added to `changed` by the prior
+            // setChildNode call that produced this transient chunked_leaf, so we
+            // do NOT call setChildNode again (which would unref-then-store
+            // the same Id and free our chunked_leaf).
+            if (state_col[@intFromEnum(existing_id)].refCount() == 0) {
+                // Path 2 owner invariant: rc=0 transient was registered by
+                // a prior Path 1/3 in this commit cycle (which added gindex
+                // to `changed`). If this assertion fires, the rc state
+                // machine has drifted.
+                std.debug.assert(existing_kind == .chunked_leaf);
+                std.debug.assert(self.state.changed.contains(gindex));
+                const storage = try existing_id.getChunkedLeafPtr(self.state.pool);
+                ST.Element.tree.fromValuePackedIntoChunk(&storage.chunks[intra_chunk], index, &value);
+                self.state.pool.nodes.items(.root)[@intFromEnum(existing_id)] = Node.lazy_sentinel;
+                return;
+            }
+
+            // Path 3: shared chunked_leaf (rc >= 1 — owned by the persistent tree).
+            // Must CoW: produce a fresh chunked_leaf via setChunkedLeafChunk and publish
+            // it. From this point onward subsequent writes hit Path 2.
+            std.debug.assert(existing_kind == .chunked_leaf);
+            const existing_chunks = try existing_id.getChunkedLeafChunks(self.state.pool);
+            var new_chunk: [32]u8 = existing_chunks[intra_chunk];
+            ST.Element.tree.fromValuePackedIntoChunk(&new_chunk, index, &value);
+            const new_chunked_leaf_id = try existing_id.setChunkedLeafChunk(self.state.pool, intra_chunk_u16, &new_chunk);
+            try self.state.setChildNode(gindex, new_chunked_leaf_id);
         }
 
         pub fn getAll(
@@ -170,51 +177,7 @@ pub fn BasicPackedChunks(
             if (len == 0) return values;
 
             if (comptime use_chunked_leaf) {
-                const chunk_count = (len + items_per_chunk - 1) / items_per_chunk;
-                const chunked_leaf_count = (chunk_count + ChunkedLeaf.K - 1) / ChunkedLeaf.K;
-                const chunked_leaf_ids = try self.state.allocator.alloc(Node.Id, chunked_leaf_count);
-                defer self.state.allocator.free(chunked_leaf_ids);
-                try self.state.root.getNodesAtDepth(self.state.pool, chunked_leaf_depth, 0, chunked_leaf_ids);
-
-                // Override with staged children_nodes entries so uncommitted
-                // set/push are visible. The bulk root walk above sees only the
-                // committed root.
-                for (0..chunked_leaf_count) |i| {
-                    const gindex = Gindex.fromDepth(chunked_leaf_depth, i);
-                    if (self.state.children_nodes.get(gindex)) |staged| {
-                        chunked_leaf_ids[i] = staged;
-                    }
-                }
-
-                var item_idx: usize = 0;
-                outer: for (chunked_leaf_ids) |sid| {
-                    // ChunkedLeaf boundary may be a zero sentinel for sparsely-filled
-                    // trees (e.g. an empty list grown via push, or chunked_leaf slots
-                    // beyond the materialized range). A zero subtree is
-                    // semantically all-zero chunks; emit zero values without
-                    // touching the (non-existent) chunked_leaf payload.
-                    if (self.state.pool.nodes.items(.state)[@intFromEnum(sid)].kind() == .zero) {
-                        const items_in_chunked_leaf = @min(ChunkedLeaf.K * items_per_chunk, len - item_idx);
-                        @memset(values[item_idx..][0..items_in_chunked_leaf], std.mem.zeroes(Element));
-                        item_idx += items_in_chunked_leaf;
-                        if (item_idx >= len) break :outer;
-                        continue;
-                    }
-                    const chunks_ptr = try sid.getChunkedLeafChunks(self.state.pool);
-                    for (0..ChunkedLeaf.K) |intra_chunk| {
-                        if (item_idx >= len) break :outer;
-                        const items_in_chunk = @min(items_per_chunk, len - item_idx);
-                        for (0..items_in_chunk) |i| {
-                            ST.Element.tree.toValuePackedFromBytes(
-                                &chunks_ptr[intra_chunk],
-                                item_idx + i,
-                                &values[item_idx + i],
-                            );
-                        }
-                        item_idx += items_in_chunk;
-                    }
-                }
-                return values;
+                return self.getAllIntoChunkedLeaf(len, values);
             }
 
             const len_full_chunks = len / items_per_chunk;
@@ -247,6 +210,57 @@ pub fn BasicPackedChunks(
                 }
             }
 
+            return values;
+        }
+
+        /// `getAllInto` for chunked_leaf layouts. `values` is caller-validated
+        /// to be non-empty with `values.len == len`.
+        fn getAllIntoChunkedLeaf(self: *Self, len: usize, values: []Element) ![]Element {
+            const chunk_count = (len + items_per_chunk - 1) / items_per_chunk;
+            const chunked_leaf_count = (chunk_count + ChunkedLeaf.K - 1) / ChunkedLeaf.K;
+            const chunked_leaf_ids = try self.state.allocator.alloc(Node.Id, chunked_leaf_count);
+            defer self.state.allocator.free(chunked_leaf_ids);
+
+            try self.state.root.getNodesAtDepth(self.state.pool, chunked_leaf_depth, 0, chunked_leaf_ids);
+
+            // Override with staged children_nodes entries so uncommitted
+            // set/push are visible. The bulk root walk above sees only the
+            // committed root.
+            for (0..chunked_leaf_count) |i| {
+                const gindex = Gindex.fromDepth(chunked_leaf_depth, i);
+                if (self.state.children_nodes.get(gindex)) |staged| {
+                    chunked_leaf_ids[i] = staged;
+                }
+            }
+
+            var item_idx: usize = 0;
+            outer: for (chunked_leaf_ids) |sid| {
+                // ChunkedLeaf boundary may be a zero sentinel for sparsely-filled
+                // trees (e.g. an empty list grown via push, or chunked_leaf slots
+                // beyond the materialized range). A zero subtree is
+                // semantically all-zero chunks; emit zero values without
+                // touching the (non-existent) chunked_leaf payload.
+                if (self.state.pool.nodes.items(.state)[@intFromEnum(sid)].kind() == .zero) {
+                    const items_in_chunked_leaf = @min(ChunkedLeaf.K * items_per_chunk, len - item_idx);
+                    @memset(values[item_idx..][0..items_in_chunked_leaf], std.mem.zeroes(Element));
+                    item_idx += items_in_chunked_leaf;
+                    if (item_idx >= len) break :outer;
+                    continue;
+                }
+                const chunks_ptr = try sid.getChunkedLeafChunks(self.state.pool);
+                for (0..ChunkedLeaf.K) |intra_chunk| {
+                    if (item_idx >= len) break :outer;
+                    const items_in_chunk = @min(items_per_chunk, len - item_idx);
+                    for (0..items_in_chunk) |i| {
+                        ST.Element.tree.toValuePackedFromBytes(
+                            &chunks_ptr[intra_chunk],
+                            item_idx + i,
+                            &values[item_idx + i],
+                        );
+                    }
+                    item_idx += items_in_chunk;
+                }
+            }
             return values;
         }
 
@@ -439,6 +453,7 @@ pub fn CompositeChunks(
         pub fn setValue(self: *Self, index: usize, value: *const Value) !void {
             const root = try ST.Element.tree.fromValue(self.state.pool, value);
             errdefer self.state.pool.unref(root);
+
             const child_view = try Element.init(self.state.allocator, self.state.pool, root);
             errdefer child_view.deinit();
             try self.set(index, child_view);

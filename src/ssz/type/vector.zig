@@ -7,7 +7,8 @@ const OffsetIterator = @import("offsets.zig").OffsetIterator;
 const merkleize = @import("hashing").merkleize;
 const maxChunksToDepth = @import("hashing").maxChunksToDepth;
 const getZeroHash = @import("hashing").getZeroHash;
-const Node = @import("persistent_merkle_tree").Node;
+const pmt = @import("persistent_merkle_tree");
+const Node = pmt.Node;
 const tree_view = @import("../tree_view/root.zig");
 const ArrayBasicTreeView = tree_view.ArrayBasicTreeView;
 const ArrayCompositeTreeView = tree_view.ArrayCompositeTreeView;
@@ -26,7 +27,7 @@ pub fn FixedVectorType(comptime ST: type, comptime _length: comptime_int, compti
             @compileError("FixedVectorType: opts.chunked_leaf=true requires isBasicType(Element)");
         }
         if (_opts.chunked_leaf) {
-            const ChunkedLeaf = @import("persistent_merkle_tree").ChunkedLeaf;
+            const ChunkedLeaf = pmt.ChunkedLeaf;
             const items_per_chunk_local = if (isBasicType(ST)) (32 / ST.fixed_size) else 1;
             const min_length = ChunkedLeaf.K * items_per_chunk_local;
             if (_length < min_length) {
@@ -51,7 +52,7 @@ pub fn FixedVectorType(comptime ST: type, comptime _length: comptime_int, compti
         pub const chunk_count: usize = if (isBasicType(Element)) std.math.divCeil(usize, fixed_size, 32) catch unreachable else length;
         pub const chunk_depth: u8 = maxChunksToDepth(chunk_count);
         pub const use_chunked_leaf: bool = _opts.chunked_leaf;
-        const ChunkedLeaf = if (use_chunked_leaf) @import("persistent_merkle_tree").ChunkedLeaf else struct {};
+        const ChunkedLeaf = if (use_chunked_leaf) pmt.ChunkedLeaf else struct {};
         const chunked_leaf_depth: u8 = if (use_chunked_leaf) chunk_depth - ChunkedLeaf.k_log2 else 0;
 
         pub const default_value: Type = [_]Element.Type{Element.default_value} ** length;
@@ -1168,7 +1169,7 @@ test "VariableVectorType - default_root" {
 
 test "FixedVectorType opts.chunked_leaf=true: round-trip fromValue -> tree -> toValue" {
     const allocator = std.testing.allocator;
-    const ChunkedLeaf = @import("persistent_merkle_tree").ChunkedLeaf;
+    const ChunkedLeaf = pmt.ChunkedLeaf;
     const length: usize = 2 * @as(usize, ChunkedLeaf.K) * 4 + 7;
     const VecT = FixedVectorType(UintType(64), length, .{ .chunked_leaf = true });
 
@@ -1194,7 +1195,7 @@ test "FixedVectorType opts.chunked_leaf=true: round-trip fromValue -> tree -> to
 
 test "FixedVectorType opts.chunked_leaf=true: serialize -> deserialize round-trip" {
     const allocator = std.testing.allocator;
-    const ChunkedLeaf = @import("persistent_merkle_tree").ChunkedLeaf;
+    const ChunkedLeaf = pmt.ChunkedLeaf;
     const length: usize = 2 * @as(usize, ChunkedLeaf.K) * 4;
     const VecT = FixedVectorType(UintType(64), length, .{ .chunked_leaf = true });
 

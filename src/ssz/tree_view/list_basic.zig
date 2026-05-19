@@ -178,7 +178,7 @@ pub fn ListBasicTreeView(comptime ST: type) type {
                 if (comptime ST.opts.chunked_leaf) {
                     const chunk_idx = elem_index / items_per_chunk;
                     const chunked_leaf_idx = chunk_idx / ChunkedLeaf.K;
-                    const intra_chunk = chunk_idx % ChunkedLeaf.K;
+                    const chunked_leaf_offset = chunk_idx % ChunkedLeaf.K;
 
                     // Fetch ChunkedLeaf if first call or just crossed a
                     // chunked_leaf boundary.
@@ -204,7 +204,7 @@ pub fn ListBasicTreeView(comptime ST: type) type {
                         value = std.mem.zeroes(Element);
                     } else {
                         ST.Element.tree.toValuePackedFromBytes(
-                            &self.current_chunks.?[intra_chunk],
+                            &self.current_chunks.?[chunked_leaf_offset],
                             elem_index,
                             &value,
                         );
@@ -283,6 +283,15 @@ pub fn ListBasicTreeView(comptime ST: type) type {
                 return error.LengthOverLimit;
             }
 
+            return if (comptime ST.opts.chunked_leaf)
+                self.sliceToChunkedLeaf(index, new_length)
+            else
+                self.sliceToPlain(index, new_length);
+        }
+
+        /// `sliceTo` for chunked_leaf layouts. Trims the boundary chunked_leaf,
+        /// truncates the chunked_leaves after it, and reinstalls the length.
+        fn sliceToChunkedLeaf(self: *Self, index: usize, new_length: usize) !*Self {
             const pool = self.chunks.state.pool;
             const chunk_index = index / items_per_chunk;
             const chunk_offset = index % items_per_chunk;
@@ -290,105 +299,113 @@ pub fn ListBasicTreeView(comptime ST: type) type {
             std.debug.assert(keep_bytes > 0);
             std.debug.assert(keep_bytes <= BYTES_PER_CHUNK);
 
-            if (comptime ST.opts.chunked_leaf) {
-                const chunked_leaf_idx = chunk_index / ChunkedLeaf.K;
-                const intra_chunk: u16 = @intCast(chunk_index % ChunkedLeaf.K);
-                std.debug.assert(intra_chunk < ChunkedLeaf.K);
+            const chunked_leaf_idx = chunk_index / ChunkedLeaf.K;
+            const chunked_leaf_offset: u16 = @intCast(chunk_index % ChunkedLeaf.K);
+            std.debug.assert(chunked_leaf_offset < ChunkedLeaf.K);
 
-                const boundary_id = try Node.Id.getNodeAtDepth(self.chunks.state.root, pool, chunked_leaf_depth, chunked_leaf_idx);
-                const boundary_kind = pool.nodes.items(.state)[@intFromEnum(boundary_id)].kind();
+            const boundary = try Node.Id.getNodeAtDepth(self.chunks.state.root, pool, chunked_leaf_depth, chunked_leaf_idx);
+            const boundary_kind = pool.nodes.items(.state)[@intFromEnum(boundary)].kind();
 
-                const truncate_input: Node.Id = blk: {
-                    if (boundary_kind == .zero) {
-                        // The boundary chunked_leaf is an all-zero subtree, so
-                        // the elements we keep from it are already zero. There
-                        // is nothing to trim; truncate the original tree.
-                        break :blk self.chunks.state.root;
+            const truncate_input: Node.Id = blk: {
+                if (boundary_kind == .zero) {
+                    // The boundary chunked_leaf is an all-zero subtree, so
+                    // the elements we keep from it are already zero. There
+                    // is nothing to trim; truncate the original tree.
+                    break :blk self.chunks.state.root;
+                }
+                // At chunked_leaf_depth a correctly built tree only ever
+                // has chunked_leaf or zero nodes; anything else is corrupt.
+                std.debug.assert(boundary_kind == .chunked_leaf);
+
+                // The boundary chunked_leaf straddles the cut. Build a
+                // trimmed copy: copy chunks 0 through chunked_leaf_offset, zero the
+                // unused tail bytes of chunk chunked_leaf_offset, and leave the
+                // chunks after it zero. Install it, then truncate the rest.
+                var trimmed_boundary: ?Node.Id = try pool.createChunkedLeafEmpty(chunked_leaf_offset + 1);
+                defer if (trimmed_boundary) |id| pool.unref(id);
+
+                {
+                    const old_chunks = try boundary.getChunkedLeafChunks(pool);
+                    const new_leaf = try trimmed_boundary.?.getChunkedLeafPtr(pool);
+                    @memcpy(new_leaf.chunks[0 .. chunked_leaf_offset + 1], old_chunks[0 .. chunked_leaf_offset + 1]);
+                    if (keep_bytes < BYTES_PER_CHUNK) {
+                        @memset(new_leaf.chunks[chunked_leaf_offset][keep_bytes..], 0);
                     }
-                    if (boundary_kind != .chunked_leaf) {
-                        return error.InvalidNode;
-                    }
+                }
 
-                    // The boundary chunked_leaf straddles the cut. Build a
-                    // trimmed copy: copy chunks 0 through intra_chunk, zero the
-                    // unused tail bytes of chunk intra_chunk, and leave the
-                    // chunks after it zero. Install it, then truncate the rest.
-                    var trimmed_chunked_leaf: ?Node.Id = try pool.createChunkedLeafEmpty(intra_chunk + 1);
-                    defer if (trimmed_chunked_leaf) |id| pool.unref(id);
+                const updated = try Node.Id.setNodeAtDepth(
+                    self.chunks.state.root,
+                    pool,
+                    chunked_leaf_depth,
+                    chunked_leaf_idx,
+                    trimmed_boundary.?,
+                );
+                trimmed_boundary = null;
+                break :blk updated;
+            };
+            // `truncate_input` is either the original root (boundary was
+            // zero, nothing allocated) or the fresh tree built above. The
+            // fresh tree has refcount 0 and belongs to us; truncate and
+            // setNode below do not take a ref, so hold onto it and unref
+            // it when this function returns.
+            const truncate_input_handle: ?Node.Id = if (boundary_kind != .zero) truncate_input else null;
+            defer if (truncate_input_handle) |id| pool.unref(id);
 
-                    {
-                        const old_chunks = try boundary_id.getChunkedLeafChunks(pool);
-                        const new_storage = try trimmed_chunked_leaf.?.getChunkedLeafPtr(pool);
-                        @memcpy(new_storage.chunks[0 .. intra_chunk + 1], old_chunks[0 .. intra_chunk + 1]);
-                        if (keep_bytes < BYTES_PER_CHUNK) {
-                            @memset(new_storage.chunks[intra_chunk][keep_bytes..], 0);
-                        }
-                    }
+            // Zero every chunked_leaf after chunked_leaf_idx. A node at
+            // chunked_leaf_depth stands for a k_log2-deep subtree, so
+            // truncate needs the k_log2 offset to pick the right zero hash.
+            const new_root = try Node.Id.truncateAfterIndexWithLeafOffset(truncate_input, pool, chunked_leaf_depth, chunked_leaf_idx, ChunkedLeaf.k_log2);
+            defer pool.unref(new_root);
 
-                    const updated = try Node.Id.setNodeAtDepth(
-                        self.chunks.state.root,
-                        pool,
-                        chunked_leaf_depth,
-                        chunked_leaf_idx,
-                        trimmed_chunked_leaf.?,
-                    );
-                    trimmed_chunked_leaf = null;
-                    break :blk updated;
-                };
-                // `truncate_input` is either the original root (boundary was
-                // zero, nothing allocated) or the fresh tree built above. The
-                // fresh tree has refcount 0 and belongs to us; truncate and
-                // setNode below do not take a ref, so hold onto it and unref
-                // it when sliceTo returns.
-                const owned_truncate_input = boundary_kind != .zero;
+            // truncate also zeroed the length leaf (gindex 3); reinstall it.
+            var length_node: ?Node.Id = try pool.createLeafFromUint(@intCast(new_length));
+            defer if (length_node) |id| pool.unref(id);
 
-                const truncate_input_handle: ?Node.Id = if (owned_truncate_input) truncate_input else null;
-                defer if (truncate_input_handle) |id| pool.unref(id);
+            const root_with_length = try Node.Id.setNode(new_root, pool, @enumFromInt(3), length_node.?);
+            errdefer pool.unref(root_with_length);
+            length_node = null;
 
-                // Zero every chunked_leaf after chunked_leaf_idx. A node at
-                // chunked_leaf_depth stands for a k_log2-deep subtree, so
-                // truncate needs the k_log2 offset to pick the right zero hash.
-                const new_root = try Node.Id.truncateAfterIndexWithLeafOffset(truncate_input, pool, chunked_leaf_depth, chunked_leaf_idx, ChunkedLeaf.k_log2);
-                defer pool.unref(new_root);
+            return try Self.init(self.allocator, pool, root_with_length);
+        }
 
-                // truncate also zeroed the length leaf (gindex 3); reinstall it.
-                var length_node: ?Node.Id = try pool.createLeafFromUint(@intCast(new_length));
-                defer if (length_node) |id| pool.unref(id);
+        /// `sliceTo` for non-chunked_leaf layouts. Byte-masks the boundary
+        /// chunk, truncates the chunks after it, and reinstalls the length.
+        fn sliceToPlain(self: *Self, index: usize, new_length: usize) !*Self {
+            const pool = self.chunks.state.pool;
+            const chunk_index = index / items_per_chunk;
+            const chunk_offset = index % items_per_chunk;
+            const keep_bytes = (chunk_offset + 1) * ST.Element.fixed_size;
+            std.debug.assert(keep_bytes > 0);
+            std.debug.assert(keep_bytes <= BYTES_PER_CHUNK);
 
-                const root_with_length = try Node.Id.setNode(new_root, pool, @enumFromInt(3), length_node.?);
-                errdefer pool.unref(root_with_length);
-                length_node = null;
+            const boundary = try Node.Id.getNodeAtDepth(self.chunks.state.root, pool, chunk_depth, chunk_index);
 
-                return try Self.init(self.allocator, pool, root_with_length);
-            }
-
-            const chunk_node = try Node.Id.getNodeAtDepth(self.chunks.state.root, pool, chunk_depth, chunk_index);
-
-            var chunk_bytes = chunk_node.getRoot(pool).*;
+            var chunk_bytes = boundary.getRoot(pool).*;
             if (keep_bytes < BYTES_PER_CHUNK) {
                 @memset(chunk_bytes[keep_bytes..], 0);
             }
 
-            var truncated_chunk_node: ?Node.Id = try pool.createLeaf(&chunk_bytes);
-            defer if (truncated_chunk_node) |id| pool.unref(id);
+            var trimmed_boundary: ?Node.Id = try pool.createLeaf(&chunk_bytes);
+            defer if (trimmed_boundary) |id| pool.unref(id);
+
             const updated = try Node.Id.setNodeAtDepth(
                 self.chunks.state.root,
                 pool,
                 chunk_depth,
                 chunk_index,
-                truncated_chunk_node.?,
+                trimmed_boundary.?,
             );
             defer pool.unref(updated);
-            truncated_chunk_node = null;
+            trimmed_boundary = null;
 
             const new_root = try Node.Id.truncateAfterIndex(updated, pool, chunk_depth, chunk_index);
             defer pool.unref(new_root);
 
             var length_node: ?Node.Id = try pool.createLeafFromUint(@intCast(new_length));
             defer if (length_node) |id| pool.unref(id);
+
             const root_with_length = try Node.Id.setNode(new_root, pool, @enumFromInt(3), length_node.?);
             errdefer pool.unref(root_with_length);
-
             length_node = null;
 
             return try Self.init(self.allocator, pool, root_with_length);
@@ -1330,7 +1347,7 @@ test "ListBasicTreeView chunked_leaf: sliceTo at chunked_leaf boundary" {
     defer view.deinit();
 
     // Cut at the last index of the first ChunkedLeaf (4095). Boundary
-    // exercises intra_chunk = K-1 and all chunks past it are zeroed.
+    // exercises chunked_leaf_offset = K-1 and all chunks past it are zeroed.
     const cut: usize = 4095;
     var sliced = try view.sliceTo(cut);
     defer sliced.deinit();

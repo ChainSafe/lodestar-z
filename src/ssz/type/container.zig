@@ -9,9 +9,10 @@ const isBasicType = @import("type_kind.zig").isBasicType;
 const merkleize = @import("hashing").merkleize;
 const maxChunksToDepth = @import("hashing").maxChunksToDepth;
 
-const Node = @import("persistent_merkle_tree").Node;
-const Gindex = @import("persistent_merkle_tree").Gindex;
-const Depth = @import("persistent_merkle_tree").Depth;
+const pmt = @import("persistent_merkle_tree");
+const Node = pmt.Node;
+const Gindex = pmt.Gindex;
+const Depth = pmt.Depth;
 const ContainerTreeView = @import("../tree_view/root.zig").ContainerTreeView;
 const StructContainerTreeView = @import("../tree_view/root.zig").StructContainerTreeView;
 
@@ -897,7 +898,7 @@ const BoolType = @import("bool.zig").BoolType;
 const ByteVectorType = @import("byte_vector.zig").ByteVectorType;
 const FixedListType = @import("list.zig").FixedListType;
 const FixedVectorType = @import("vector.zig").FixedVectorType;
-const proof = @import("persistent_merkle_tree").proof;
+const proof = pmt.proof;
 
 const TypeTestCase = @import("test_utils.zig").TypeTestCase;
 
@@ -1480,7 +1481,7 @@ test "createSingleProof through StructContainer with chunked_leaf vector field" 
 // keep materializing until the result is navigable.
 test "createSingleProof through single-field StructContainer with chunked_leaf vector" {
     const allocator = std.testing.allocator;
-    const ChunkedLeaf = @import("persistent_merkle_tree").ChunkedLeaf;
+    const ChunkedLeaf = pmt.ChunkedLeaf;
     // Exactly K chunks (4 u64 per chunk) → the vector is one chunked_leaf.
     const Vec = FixedVectorType(UintType(64), ChunkedLeaf.K * 4, .{ .chunked_leaf = true });
     const Outer = StructContainerType(struct {
