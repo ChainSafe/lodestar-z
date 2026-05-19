@@ -68,8 +68,6 @@ fn populateInput(allocator: std.mem.Allocator) !void {
     }
 }
 
-// ──────── fromValue ────────
-
 const FromValueLeaf = struct {
     pool: *Node.Pool,
     pub fn run(self: *FromValueLeaf, allocator: std.mem.Allocator) void {
@@ -87,8 +85,6 @@ const FromValueChunkedLeaf = struct {
         self.pool.unref(id);
     }
 };
-
-// ──────── getRoot on a freshly built tree (cold lazy hashes) ────────
 
 const GetRootLeaf = struct {
     pool: *Node.Pool,
@@ -112,8 +108,6 @@ const GetRootChunkedLeaf = struct {
     }
 };
 
-// ──────── toValue (read all items back) ────────
-
 const ToValueLeaf = struct {
     pool: *Node.Pool,
     tree_id: Node.Id,
@@ -135,8 +129,6 @@ const ToValueChunkedLeaf = struct {
         std.mem.doNotOptimizeAway(dst.items[0]);
     }
 };
-
-// ──────── get: scattered single-item reads through a TreeView ────────
 
 const GetLeaf = struct {
     view: *ListLeaf.TreeView,
@@ -161,8 +153,6 @@ const GetChunkedLeaf = struct {
         std.mem.doNotOptimizeAway(sum);
     }
 };
-
-// ──────── sparseSet: single-item set + commit + getRoot, CoW path ────────
 
 const SparseSetLeaf = struct {
     pool: *Node.Pool,
@@ -198,8 +188,6 @@ const SparseSetChunkedLeaf = struct {
     }
 };
 
-// ──────── batchedSparseSet: N scattered sets staged, then one commit + getRoot ────────
-
 const BatchedSparseSetLeaf = struct {
     pool: *Node.Pool,
     base: Node.Id,
@@ -230,9 +218,6 @@ const BatchedSparseSetChunkedLeaf = struct {
     }
 };
 
-// ──────── bulkSetAndRoot: epoch-rewards-shaped — write every item via tree.fromValue
-// of a slightly mutated input, then getRoot ────────
-
 const BulkSetAndRootLeaf = struct {
     pool: *Node.Pool,
     mutated: *ListLeaf.Type,
@@ -256,8 +241,6 @@ const BulkSetAndRootChunkedLeaf = struct {
         self.pool.unref(id);
     }
 };
-
-// ──────── proof: single-chunk Merkle proof ────────
 
 const ProofLeaf = struct {
     pool: *Node.Pool,
