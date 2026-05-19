@@ -78,10 +78,12 @@ inline fn materializeOpaque(pool: *Node.Pool, node_id: Node.Id) Node.Error!Node.
 /// Proof traversal needs real left/right child nodes. For an opaque node
 /// (container_struct or chunked_leaf), materialize a temporary plain tree
 /// and append it to the deferred-unref list so it stays alive until proof
-/// creation finishes. Materialization can hand back another opaque (a
-/// single-field StructContainerType whose only field is itself opaque
-/// collapses through `fillWithContents(_, depth=0)` to that field's root),
-/// so loop until the result is navigable.
+/// creation finishes.
+///
+/// Materializing one opaque node can yield another. A single-field
+/// StructContainerType has no enclosing branch, so its tree IS its only
+/// field's tree; if that field is also opaque, the result is still opaque.
+/// Loop until the node is navigable.
 fn materializeIfOpaque(
     allocator: Allocator,
     pool: *Node.Pool,

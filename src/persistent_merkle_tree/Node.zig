@@ -176,10 +176,9 @@ pub const ContainerStructRef = struct {
 /// All-`0xFF` is safe because cryptographic SHA-256 outputs collide
 /// with this value at probability ~1/2^256.
 ///
-/// Living in the root column (not in `State.kind`) keeps cache
-/// validity orthogonal to structural type: each new kind costs one
-/// slot in `kind`, and `getRoot` toggles laziness by writing only the
-/// root column (no State write, separate cache line).
+/// Kept in the root column rather than in `State.kind` so the lazy/computed
+/// flag is independent of node kind. `getRoot` flips it by writing only the
+/// root column, leaving `state` untouched.
 pub const lazy_sentinel: [32]u8 = [_]u8{0xFF} ** 32;
 
 /// Pack a `(left, right)` Id pair into the u64 `payload` field.

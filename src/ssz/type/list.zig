@@ -15,14 +15,15 @@ const ListCompositeTreeView = tree_view.ListCompositeTreeView;
 
 /// Per-type opt-in flags for SSZ list/vector types.
 pub const TypeOpts = struct {
-    /// When true, the basic-element packed tree is built from chunked_leaf leaves
-    /// (Pool.createChunkedLeaf) instead of per-chunk leaves. ChunkedLeaf leaves pack K
-    /// chunks contiguously; the upper tree is depth `chunk_depth - k_log2`.
-    /// Trade-off: faster bulk operations on large lists; tradeoff explored
-    /// in B6/D1 benchmarks. ListBasicTreeView's `iteratorReadonly` and
-    /// `sliceTo` support chunked_leaf-enabled types via two-level
-    /// (chunked_leaf_idx, intra_chunk) navigation. Requires `limit >= K *
-    /// items_per_chunk` so `chunk_depth >= k_log2`.
+    /// When true, the basic-element packed tree is built from chunked_leaf
+    /// leaves (`Pool.createChunkedLeaf`) instead of per-chunk leaves. Each
+    /// chunked_leaf packs K chunks contiguously, so the upper tree is depth
+    /// `chunk_depth - k_log2`. This speeds up bulk operations on large lists.
+    ///
+    /// `ListBasicTreeView`'s `iteratorReadonly` and `sliceTo` handle
+    /// chunked_leaf types with two-level (chunked_leaf_idx, intra_chunk)
+    /// navigation. Requires `limit >= K * items_per_chunk` so that
+    /// `chunk_depth >= k_log2`.
     chunked_leaf: bool = false,
 };
 
