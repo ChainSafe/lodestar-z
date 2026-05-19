@@ -1231,9 +1231,10 @@ pub const Id = enum(u32) {
     /// trees pass `leaf_offset = ChunkedLeaf.k_log2` so zeroed positions use
     /// `ZeroHash[depthi + leaf_offset]` instead of `ZeroHash[depthi]`.
     ///
-    /// Pool's ZeroHash sentinels live at Node.Id `0..max_depth-1`, so
-    /// `depth + leaf_offset` MUST stay within that range or
-    /// `@enumFromInt(zero_depth)` aliases an unrelated slot.
+    /// Pool's ZeroHash sentinels live at Node.Id `0..max_depth-1`. `depthi`
+    /// tops out at `depth-1`, so the largest sentinel index used is
+    /// `depth-1 + leaf_offset`; `depth + leaf_offset <= max_depth` keeps every
+    /// `@enumFromInt(zero_depth)` within that range.
     pub fn truncateAfterIndexWithLeafOffset(root_node: Id, pool: *Pool, depth: Depth, index: usize, leaf_offset: Depth) Error!Id {
         std.debug.assert(@as(usize, depth) + @as(usize, leaf_offset) <= max_depth);
         if (depth == 0) {
