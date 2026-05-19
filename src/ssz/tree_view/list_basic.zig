@@ -1174,13 +1174,8 @@ test "ListBasicTreeView - sliceTo and serialize" {
     try std.testing.expectEqual(@as(usize, 2), try sliced.length());
 }
 
-// chunked_leaf-mode tests for iteratorReadonly and sliceTo. The non-chunked_leaf
-// path is covered by the tests above; here we cross ChunkedLeaf boundaries
-// and intra-chunk offsets, and verify the merkle root matches the leaf-path
-// equivalent.
-//
-// File-level alias so tests can reference `ChunkedLeafType.K` / `ChunkedLeafType.k_log2`
-// without colliding with the inner-struct binding in `ListBasicTreeView`.
+// Aliased rather than named `ChunkedLeaf` to avoid shadowing the same-named
+// binding inside `ListBasicTreeView`.
 const ChunkedLeafType = pmt.ChunkedLeaf;
 
 test "ListBasicTreeView chunked_leaf: iteratorReadonly within first chunked_leaf" {
