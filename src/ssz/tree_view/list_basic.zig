@@ -245,7 +245,7 @@ pub fn ListBasicTreeView(comptime ST: type) type {
         pub fn set(self: *Self, index: usize, value: Element) !void {
             const list_length = try self.length();
             if (index >= list_length) return error.IndexOutOfBounds;
-            try self.chunks.set(index, value);
+            try self.chunks.set(index, value, list_length);
         }
 
         /// Caller must free the returned slice with the same allocator.
@@ -1224,6 +1224,51 @@ test "ListBasicTreeView chunked_leaf: iteratorReadonly across chunked_leaf bound
     for (0..item_count) |i| {
         const got = try it.next();
         try std.testing.expectEqual(src.items[i], got);
+    }
+}
+
+// Pushing across chunk boundaries must keep each ChunkedLeaf's `len` (valid
+// chunk count) in sync. Root-equivalence checks cannot catch a stale `len` —
+// `ChunkedLeaf.computeRoot` hashes all K chunks and ignores `len` — so this
+// asserts `getChunkedLeafLen` and the trailing-zero invariant directly.
+test "ListBasicTreeView chunked_leaf: push keeps ChunkedLeaf.len in sync" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 4096 });
+    defer pool.deinit();
+
+    const ListT = FixedListType(UintType(64), 1 << 20, .{ .chunked_leaf = true });
+    const K: usize = ChunkedLeafType.K;
+    const items_per_chunk: usize = 4; // 32 / @sizeOf(u64)
+    // +1 for the list's length-mixin level above the data subtree.
+    const cl_depth: Depth = ListT.chunk_depth + 1 - ChunkedLeafType.k_log2;
+
+    // Fills ChunkedLeaf 0 completely (len must be K) and ChunkedLeaf 1
+    // partially (3 chunks).
+    const item_count: usize = K * items_per_chunk + 2 * items_per_chunk + 3;
+
+    var src: ListT.Type = .empty;
+    defer src.deinit(allocator);
+    const root0 = try ListT.tree.fromValue(&pool, &src);
+    var view = try ListT.TreeView.init(allocator, &pool, root0);
+    defer view.deinit();
+
+    for (0..item_count) |i| try view.push(@as(u64, @intCast(i + 1)));
+    try view.commit();
+
+    const total_chunks = (item_count + items_per_chunk - 1) / items_per_chunk;
+    const chunked_leaf_count = (total_chunks + K - 1) / K;
+    const zero_chunk = [_]u8{0} ** 32;
+
+    for (0..chunked_leaf_count) |cl_idx| {
+        const cl = try view.chunks.state.root.getNodeAtDepth(&pool, cl_depth, cl_idx);
+        const expected_len: usize = @min(K, total_chunks - cl_idx * K);
+        try std.testing.expectEqual(@as(u16, @intCast(expected_len)), try cl.getChunkedLeafLen(&pool));
+
+        // Trailing-zero invariant: chunks at indices >= len must be zero.
+        const chunks = try cl.getChunkedLeafChunks(&pool);
+        for (expected_len..K) |c| {
+            try std.testing.expectEqualSlices(u8, &zero_chunk, &chunks[c]);
+        }
     }
 }
 

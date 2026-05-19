@@ -85,9 +85,10 @@ pub fn BasicPackedChunks(
             return value;
         }
 
-        pub fn set(self: *Self, index: usize, value: Element) !void {
+        pub fn set(self: *Self, index: usize, value: Element, container_len: usize) !void {
+            std.debug.assert(index < container_len);
             if (comptime use_chunked_leaf) {
-                return self.setChunkedLeaf(index, value);
+                return self.setChunkedLeaf(index, value, container_len);
             }
             const gindex = Gindex.fromDepth(chunk_depth, index / items_per_chunk);
             const child_node = try self.state.getChildNode(gindex);
@@ -97,12 +98,21 @@ pub fn BasicPackedChunks(
 
         /// `set` for chunked_leaf layouts. CoW-writes one element into the
         /// boundary ChunkedLeaf via one of three ownership paths.
-        fn setChunkedLeaf(self: *Self, index: usize, value: Element) !void {
+        fn setChunkedLeaf(self: *Self, index: usize, value: Element, container_len: usize) !void {
             const chunk_idx = index / items_per_chunk;
             const chunked_leaf_idx = chunk_idx / ChunkedLeaf.K;
             const intra_chunk = chunk_idx % ChunkedLeaf.K;
             const intra_chunk_u16: u16 = @intCast(intra_chunk);
             const gindex = Gindex.fromDepth(chunked_leaf_depth, chunked_leaf_idx);
+
+            // Valid chunk count of the target ChunkedLeaf, derived from the
+            // container length — authoritative, not inferred from the write
+            // position. `index` is in range, so this is always >= intra_chunk + 1.
+            const total_chunks = (container_len + items_per_chunk - 1) / items_per_chunk;
+            const chunked_leaf_len: u16 = @intCast(@min(
+                @as(usize, ChunkedLeaf.K),
+                total_chunks - chunked_leaf_idx * @as(usize, ChunkedLeaf.K),
+            ));
 
             const existing_id = try self.state.getChildNode(gindex);
             const state_col = self.state.pool.nodes.items(.state);
@@ -113,7 +123,7 @@ pub fn BasicPackedChunks(
             // (rc=0 ⇒ exclusively owned by us). Then setChildNode publishes
             // it to the cache and `changed` set.
             if (existing_kind == .zero) {
-                var fresh_id_opt: ?Node.Id = try self.state.pool.createChunkedLeafEmpty(intra_chunk_u16 + 1);
+                var fresh_id_opt: ?Node.Id = try self.state.pool.createChunkedLeafEmpty(chunked_leaf_len);
                 errdefer if (fresh_id_opt) |id| self.state.pool.unref(id);
 
                 const fresh_id = fresh_id_opt.?;
@@ -143,6 +153,7 @@ pub fn BasicPackedChunks(
                 std.debug.assert(self.state.changed.contains(gindex));
                 const storage = try existing_id.getChunkedLeafPtr(self.state.pool);
                 ST.Element.tree.fromValuePackedIntoChunk(&storage.chunks[intra_chunk], index, &value);
+                storage.len = chunked_leaf_len;
                 self.state.pool.nodes.items(.root)[@intFromEnum(existing_id)] = Node.lazy_sentinel;
                 return;
             }
@@ -155,6 +166,7 @@ pub fn BasicPackedChunks(
             var new_chunk: [32]u8 = existing_chunks[intra_chunk];
             ST.Element.tree.fromValuePackedIntoChunk(&new_chunk, index, &value);
             const new_chunked_leaf_id = try existing_id.setChunkedLeafChunk(self.state.pool, intra_chunk_u16, &new_chunk);
+            (try new_chunked_leaf_id.getChunkedLeafPtr(self.state.pool)).len = chunked_leaf_len;
             try self.state.setChildNode(gindex, new_chunked_leaf_id);
         }
 

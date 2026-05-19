@@ -47,6 +47,10 @@ fn fuzzListOps(
     initial_count: usize,
 ) void {
     const Element = ListT.Element.Type;
+    const items_per_chunk: usize = 32 / ListT.Element.fixed_size;
+    const K: usize = ChunkedLeaf.K;
+    // +1 for the list length-mixin level above the data subtree.
+    const cl_depth = ListT.chunk_depth + 1 - ChunkedLeaf.k_log2;
 
     var pool = Node.Pool.init(.{
         .page_allocator = allocator,
@@ -113,6 +117,20 @@ fn fuzzListOps(
                 const ref_root = ref_root_id.getRoot(&pool).*;
 
                 assert(std.mem.eql(u8, &ref_root, &view_root));
+
+                // Each ChunkedLeaf's `len` must track the list length. The
+                // root check above can't catch a stale `len` — computeRoot
+                // hashes all K chunks and ignores `len`.
+                const len = reference.items.len;
+                if (len > 0) {
+                    const total_chunks = (len + items_per_chunk - 1) / items_per_chunk;
+                    const cl_count = (total_chunks + K - 1) / K;
+                    for (0..cl_count) |cl_idx| {
+                        const cl = view.chunks.state.root.getNodeAtDepth(&pool, cl_depth, cl_idx) catch return;
+                        const expected: u16 = @intCast(@min(K, total_chunks - cl_idx * K));
+                        assert((cl.getChunkedLeafLen(&pool) catch return) == expected);
+                    }
+                }
             },
             2 => {
                 if (reference.items.len == 0) continue;

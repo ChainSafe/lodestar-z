@@ -103,7 +103,7 @@ pub fn ArrayBasicTreeView(comptime ST: type) type {
 
         pub fn set(self: *Self, index: usize, value: Element) !void {
             if (index >= length) return error.IndexOutOfBounds;
-            try self.chunks.set(index, value);
+            try self.chunks.set(index, value, length);
         }
 
         /// Caller is responsible for freeing the returned slice using the same allocator.
