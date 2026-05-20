@@ -1381,6 +1381,11 @@ pub fn getExpectedWithdrawalsForFullParent(_: *const BeaconStateView, _: js.Valu
     return throwNotImpl(js.Array, "getExpectedWithdrawalsForFullParent is not available before Gloas");
 }
 
+pub fn withParentPayloadApplied(_: *const BeaconStateView, _: js.Value) !BeaconStateView {
+    try js.env().throwError("NOT_IMPLEMENTED", "withParentPayloadApplied is not available before Gloas");
+    return error.NotImplemented;
+}
+
 // --- API-only methods (used by beacon-node rewards endpoints) ---
 
 pub fn computeBlockRewards(_: *const BeaconStateView, _: js.Value, _: ?js.Value) !js.Value {

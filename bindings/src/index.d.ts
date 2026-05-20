@@ -205,6 +205,9 @@ declare class BeaconStateView {
   // TODO(bing): type this once we support gloas
   // biome-ignore lint/suspicious/noExplicitAny: gloas stub
   getExpectedWithdrawalsForFullParent(executionRequests: any): any[];
+  // TODO(bing): Implement when we support gloas
+  // biome-ignore lint/suspicious/noExplicitAny: gloas stub
+  withParentPayloadApplied(executionRequests: any): BeaconStateView;
 
   getShufflingAtEpoch(epoch: number): EpochShuffling;
   getPreviousShuffling(): EpochShuffling;
