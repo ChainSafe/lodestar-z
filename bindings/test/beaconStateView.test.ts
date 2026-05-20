@@ -363,7 +363,7 @@ describe("BeaconStateView", () => {
 
   describe("block and state roots", () => {
     it("getBlockRoot should return 32 bytes", () => {
-      const blockRoot = state.getBlockRoot(state.slot - 1);
+      const blockRoot = state.getBlockRoot(state.epoch - 1);
       expect(blockRoot.length).toBe(32);
     });
 
@@ -442,7 +442,8 @@ describe("BeaconStateView", () => {
     it("serializeToBytes should write correct bytes", () => {
       const size = state.serializedSize();
       const output = new Uint8Array(size);
-      const bytesWritten = state.serializeToBytes(output, 0);
+      const byteViews = {dataView: new DataView(output.buffer), uint8Array: output};
+      const bytesWritten = state.serializeToBytes(byteViews, 0);
 
       expect(bytesWritten).toBe(size);
       expect(Buffer.compare(output, stateBytes)).toBe(0);
@@ -462,7 +463,8 @@ describe("BeaconStateView", () => {
     it("serializeValidatorsToBytes should write correct bytes", () => {
       const size = state.serializedValidatorsSize();
       const output = new Uint8Array(size);
-      const bytesWritten = state.serializeValidatorsToBytes(output, 0);
+      const byteViews = {dataView: new DataView(output.buffer), uint8Array: output};
+      const bytesWritten = state.serializeValidatorsToBytes(byteViews, 0);
 
       expect(bytesWritten).toBe(size);
 
