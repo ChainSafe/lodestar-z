@@ -282,11 +282,11 @@ describe("BeaconStateView", () => {
 
   describe("validators and balances", () => {
     it("getBalance(0) should return first validator balance", () => {
-      expect(state.getBalance(0)).toBe(BigInt(expected.balance0));
+      expect(state.getBalance(0)).toBe(expected.balance0);
     });
 
     it("getBalance(100) should return validator 100 balance", () => {
-      expect(state.getBalance(100)).toBe(BigInt(expected.balance100));
+      expect(state.getBalance(100)).toBe(expected.balance100);
     });
 
     it("getValidator(0) should return first validator data", () => {
@@ -556,9 +556,9 @@ describe("BeaconStateView", () => {
     it("proposerRewards should have expected structure", () => {
       const rewards = state.proposerRewards;
 
-      expect(typeof rewards.attestations).toBe("bigint");
-      expect(typeof rewards.syncAggregate).toBe("bigint");
-      expect(typeof rewards.slashing).toBe("bigint");
+      expect(typeof rewards.attestations).toBe("number");
+      expect(typeof rewards.syncAggregate).toBe("number");
+      expect(typeof rewards.slashing).toBe("number");
     });
   });
 
