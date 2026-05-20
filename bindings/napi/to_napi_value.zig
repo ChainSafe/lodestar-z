@@ -64,6 +64,7 @@ pub fn sszValueToNapiValue(env: napi.Env, comptime ST: type, value: *const ST.Ty
 ///
 /// The napi value matches the shape of `ssz-ts` for interoperability.
 fn bitArrayToNapiValue(env: napi.Env, data: []const u8, bit_len: usize) !napi.Value {
+    std.debug.assert(data.len == (bit_len + 7) / 8);
     var bytes: [*]u8 = undefined;
     const buf = try env.createArrayBuffer(data.len, &bytes);
     @memcpy(bytes[0..data.len], data);
