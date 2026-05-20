@@ -272,7 +272,7 @@ describe("BeaconStateView", () => {
     });
 
     it("isMergeTransitionComplete should be true for fulu state", () => {
-      expect(state.isMergeTransitionComplete()).toBe(true);
+      expect(state.isMergeTransitionComplete).toBe(true);
     });
 
     it("isExecutionStateType should be true for fulu state", () => {

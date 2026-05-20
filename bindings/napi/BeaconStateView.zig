@@ -60,6 +60,7 @@ pub const js_meta = js.class(.{ .properties = .{
     .validatorCount = js.prop(.{ .get = true, .set = false }),
     .activeValidatorCount = js.prop(.{ .get = true, .set = false }),
     .isExecutionStateType = js.prop(.{ .get = true, .set = false }),
+    .isMergeTransitionComplete = js.prop(.{ .get = true, .set = false }),
     .proposerRewards = js.prop(.{ .get = true, .set = false }),
     .clonedCount = js.prop(.{ .get = true, .set = false }),
     .clonedCountWithTransferCache = js.prop(.{ .get = true, .set = false }),
