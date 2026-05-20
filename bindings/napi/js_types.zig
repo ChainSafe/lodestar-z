@@ -56,9 +56,9 @@ pub const Validator = js.Object(struct {
 });
 
 pub const ProposerRewards = js.Object(struct {
-    attestations: js.BigInt,
-    syncAggregate: js.BigInt,
-    slashing: js.BigInt,
+    attestations: js.Number,
+    syncAggregate: js.Number,
+    slashing: js.Number,
 });
 
 pub const MultiProof = js.Object(struct {
@@ -70,4 +70,10 @@ pub const MultiProof = js.Object(struct {
 pub const UnrealizedCheckpoints = js.Object(struct {
     justifiedCheckpoint: Checkpoint,
     finalizedCheckpoint: Checkpoint,
+});
+
+pub const SyncCommitteeWitness = js.Object(struct {
+    witness: js.Array,
+    currentSyncCommitteeRoot: js.Uint8Array,
+    nextSyncCommitteeRoot: js.Uint8Array,
 });

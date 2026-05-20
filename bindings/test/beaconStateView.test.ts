@@ -282,11 +282,11 @@ describe("BeaconStateView", () => {
 
   describe("validators and balances", () => {
     it("getBalance(0) should return first validator balance", () => {
-      expect(state.getBalance(0)).toBe(BigInt(expected.balance0));
+      expect(state.getBalance(0)).toBe(expected.balance0);
     });
 
     it("getBalance(100) should return validator 100 balance", () => {
-      expect(state.getBalance(100)).toBe(BigInt(expected.balance100));
+      expect(state.getBalance(100)).toBe(expected.balance100);
     });
 
     it("getValidator(0) should return first validator data", () => {
@@ -363,7 +363,7 @@ describe("BeaconStateView", () => {
 
   describe("block and state roots", () => {
     it("getBlockRoot should return 32 bytes", () => {
-      const blockRoot = state.getBlockRoot(state.slot - 1);
+      const blockRoot = state.getBlockRoot(state.epoch - 1);
       expect(blockRoot.length).toBe(32);
     });
 
@@ -442,7 +442,8 @@ describe("BeaconStateView", () => {
     it("serializeToBytes should write correct bytes", () => {
       const size = state.serializedSize();
       const output = new Uint8Array(size);
-      const bytesWritten = state.serializeToBytes(output, 0);
+      const byteViews = {dataView: new DataView(output.buffer), uint8Array: output};
+      const bytesWritten = state.serializeToBytes(byteViews, 0);
 
       expect(bytesWritten).toBe(size);
       expect(Buffer.compare(output, stateBytes)).toBe(0);
@@ -462,7 +463,8 @@ describe("BeaconStateView", () => {
     it("serializeValidatorsToBytes should write correct bytes", () => {
       const size = state.serializedValidatorsSize();
       const output = new Uint8Array(size);
-      const bytesWritten = state.serializeValidatorsToBytes(output, 0);
+      const byteViews = {dataView: new DataView(output.buffer), uint8Array: output};
+      const bytesWritten = state.serializeValidatorsToBytes(byteViews, 0);
 
       expect(bytesWritten).toBe(size);
 
@@ -556,9 +558,9 @@ describe("BeaconStateView", () => {
     it("proposerRewards should have expected structure", () => {
       const rewards = state.proposerRewards;
 
-      expect(typeof rewards.attestations).toBe("bigint");
-      expect(typeof rewards.syncAggregate).toBe("bigint");
-      expect(typeof rewards.slashing).toBe("bigint");
+      expect(typeof rewards.attestations).toBe("number");
+      expect(typeof rewards.syncAggregate).toBe("number");
+      expect(typeof rewards.slashing).toBe("number");
     });
   });
 
