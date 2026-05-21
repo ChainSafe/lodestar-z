@@ -36,7 +36,7 @@ export const pubkeyCache = {
   },
 
   get size() {
-    return native.size;
+    return native.size();
   },
 
   load(filepath) {
