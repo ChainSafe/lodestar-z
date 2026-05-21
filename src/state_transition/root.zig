@@ -7,7 +7,6 @@ pub const TransitionOpts = @import("state_transition.zig").TransitionOpts;
 
 pub const metrics = @import("metrics.zig");
 
-pub const RefCount = @import("./utils/ref_count.zig").RefCount;
 pub const computeSigningRoot = @import("./utils/signing_root.zig").computeSigningRoot;
 pub const computeEpochAtSlot = @import("./utils/epoch.zig").computeEpochAtSlot;
 pub const CachedBeaconState = @import("./cache/state_cache.zig").CachedBeaconState;
