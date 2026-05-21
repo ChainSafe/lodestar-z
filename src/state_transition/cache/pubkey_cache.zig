@@ -15,7 +15,7 @@ pub const Index2PubkeyCache = std.ArrayList(bls.PublicKey);
 /// worker pool, see `syncPubkeysParallel`.
 pub fn syncPubkeys(
     allocator: std.mem.Allocator,
-    validators: []const Validator,
+    validators: []const *const Validator,
     pubkey_to_index: *PubkeyIndexMap,
     index_to_pubkey: *Index2PubkeyCache,
 ) !void {
@@ -42,7 +42,7 @@ pub fn syncPubkeys(
 fn uncompressPubkeys(
     start_index: usize,
     end_index_exclusive: usize,
-    validators: []const Validator,
+    validators: []const *const Validator,
     index_to_pubkey: *Index2PubkeyCache,
     uncompress_error: *std.atomic.Value(bool),
 ) void {
@@ -67,7 +67,7 @@ fn uncompressPubkeys(
 pub fn syncPubkeysParallel(
     allocator: std.mem.Allocator,
     io: std.Io,
-    validators: []const Validator,
+    validators: []const *const Validator,
     pubkey_to_index: *PubkeyIndexMap,
     index_to_pubkey: *Index2PubkeyCache,
 ) !void {
@@ -127,9 +127,11 @@ test "syncPubkeys populates both caches" {
     try interop.interopPubkeysCached(count, &pubkeys);
 
     var validators: [count]Validator = undefined;
+    var validator_ptrs: [count]*const Validator = undefined;
     for (0..count) |i| {
         validators[i] = std.mem.zeroes(Validator);
         validators[i].pubkey = pubkeys[i];
+        validator_ptrs[i] = &validators[i];
     }
 
     var pubkey_to_index = PubkeyIndexMap.init(allocator);
@@ -137,12 +139,11 @@ test "syncPubkeys populates both caches" {
     var index_to_pubkey: Index2PubkeyCache = .empty;
     defer index_to_pubkey.deinit(allocator);
 
-    try syncPubkeys(allocator, &validators, &pubkey_to_index, &index_to_pubkey);
+    try syncPubkeys(allocator, &validator_ptrs, &pubkey_to_index, &index_to_pubkey);
 
     try testing.expectEqual(@as(usize, count), index_to_pubkey.items.len);
     try testing.expectEqual(@as(u32, count), pubkey_to_index.count());
 
-    // Verify each pubkey maps to the correct index
     for (0..count) |i| {
         const idx = pubkey_to_index.get(pubkeys[i]).?;
         try testing.expectEqual(@as(u64, i), idx);
@@ -158,9 +159,11 @@ test "syncPubkeys incremental sync adds only new validators" {
     try interop.interopPubkeysCached(total_count, &pubkeys);
 
     var validators: [total_count]Validator = undefined;
+    var validator_ptrs: [total_count]*const Validator = undefined;
     for (0..total_count) |i| {
         validators[i] = std.mem.zeroes(Validator);
         validators[i].pubkey = pubkeys[i];
+        validator_ptrs[i] = &validators[i];
     }
 
     var pubkey_to_index = PubkeyIndexMap.init(allocator);
@@ -168,16 +171,13 @@ test "syncPubkeys incremental sync adds only new validators" {
     var index_to_pubkey: Index2PubkeyCache = .empty;
     defer index_to_pubkey.deinit(allocator);
 
-    // Initial sync with first 2 validators
-    try syncPubkeys(allocator, validators[0..initial_count], &pubkey_to_index, &index_to_pubkey);
+    try syncPubkeys(allocator, validator_ptrs[0..initial_count], &pubkey_to_index, &index_to_pubkey);
     try testing.expectEqual(@as(usize, initial_count), index_to_pubkey.items.len);
 
-    // Incremental sync with all 4 validators
-    try syncPubkeys(allocator, &validators, &pubkey_to_index, &index_to_pubkey);
+    try syncPubkeys(allocator, &validator_ptrs, &pubkey_to_index, &index_to_pubkey);
     try testing.expectEqual(@as(usize, total_count), index_to_pubkey.items.len);
     try testing.expectEqual(@as(u32, total_count), pubkey_to_index.count());
 
-    // Verify all pubkeys are correctly mapped
     for (0..total_count) |i| {
         const idx = pubkey_to_index.get(pubkeys[i]).?;
         try testing.expectEqual(@as(u64, i), idx);
@@ -192,9 +192,11 @@ test "syncPubkeys no-op when already synced" {
     try interop.interopPubkeysCached(count, &pubkeys);
 
     var validators: [count]Validator = undefined;
+    var validator_ptrs: [count]*const Validator = undefined;
     for (0..count) |i| {
         validators[i] = std.mem.zeroes(Validator);
         validators[i].pubkey = pubkeys[i];
+        validator_ptrs[i] = &validators[i];
     }
 
     var pubkey_to_index = PubkeyIndexMap.init(allocator);
@@ -202,9 +204,8 @@ test "syncPubkeys no-op when already synced" {
     var index_to_pubkey: Index2PubkeyCache = .empty;
     defer index_to_pubkey.deinit(allocator);
 
-    try syncPubkeys(allocator, &validators, &pubkey_to_index, &index_to_pubkey);
-    // Second call should be no-op
-    try syncPubkeys(allocator, &validators, &pubkey_to_index, &index_to_pubkey);
+    try syncPubkeys(allocator, &validator_ptrs, &pubkey_to_index, &index_to_pubkey);
+    try syncPubkeys(allocator, &validator_ptrs, &pubkey_to_index, &index_to_pubkey);
     try testing.expectEqual(@as(usize, count), index_to_pubkey.items.len);
 }
 
@@ -216,12 +217,12 @@ test "syncPubkeys detects inconsistent cache" {
     var index_to_pubkey: Index2PubkeyCache = .empty;
     defer index_to_pubkey.deinit(allocator);
 
-    // Manually desync: add to pubkey_to_index but not index_to_pubkey
     const dummy_key = [_]u8{0} ** 48;
     try pubkey_to_index.put(dummy_key, 0);
 
     var validators: [1]Validator = undefined;
     validators[0] = std.mem.zeroes(Validator);
+    var validator_ptrs: [1]*const Validator = .{&validators[0]};
 
-    try testing.expectError(error.InconsistentCache, syncPubkeys(allocator, &validators, &pubkey_to_index, &index_to_pubkey));
+    try testing.expectError(error.InconsistentCache, syncPubkeys(allocator, &validator_ptrs, &pubkey_to_index, &index_to_pubkey));
 }

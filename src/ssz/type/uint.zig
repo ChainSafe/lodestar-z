@@ -98,6 +98,21 @@ pub fn UintType(comptime bits: comptime_int) type {
                 return try pool.createLeaf(&new_leaf);
             }
 
+            /// Decode a packed item directly from chunk bytes. Used by chunked_leaf-backed
+            /// containers where the chunk is already in hand and a Node.Id is unavailable.
+            pub fn toValuePackedFromBytes(chunk: *const [32]u8, index: usize, out: *Type) void {
+                const offset = index * fixed_size % 32;
+                out.* = std.mem.readInt(Type, chunk[offset..][0..fixed_size], .little);
+            }
+
+            /// Encode a packed item directly into chunk bytes (mutates `chunk` in place).
+            /// Used by chunked_leaf-backed containers; the caller is responsible for any CoW
+            /// of the chunk before calling.
+            pub fn fromValuePackedIntoChunk(chunk: *[32]u8, index: usize, value: *const Type) void {
+                const offset = (index * bytes) % 32;
+                std.mem.writeInt(Type, chunk[offset..][0..bytes], value.*, .little);
+            }
+
             pub fn serializeIntoBytes(node: Node.Id, pool: *Node.Pool, out: []u8) !usize {
                 const hash = node.getRoot(pool);
                 @memcpy(out[0..fixed_size], hash[0..fixed_size]);
@@ -170,7 +185,7 @@ fn testFixed(
     try ST.deserializeFromBytes(&serialized, &value_from_serialized);
     try std.testing.expectEqual(value, value_from_serialized);
 
-    var pool = try Node.Pool.init(allocator, 1024);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 1024 });
     defer pool.deinit();
 
     const tree_from_value = try ST.tree.fromValue(&pool, &value);

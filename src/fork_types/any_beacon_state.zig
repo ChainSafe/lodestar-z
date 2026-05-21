@@ -403,6 +403,27 @@ pub const AnyBeaconState = union(ForkSeq) {
         };
     }
 
+    /// Pointer-slice version of `validatorsSlice` that hands out
+    /// `*const Validator.Type` into the pool's container_struct payloads —
+    /// no clone. Pointers are valid only while the validators list is not
+    /// mutated; copy out values that must survive a `tree.set`.
+    pub fn validatorsPtrSlice(self: *AnyBeaconState, allocator: Allocator) ![]*const ct.phase0.Validator.Type {
+        return switch (self.*) {
+            inline else => |state| {
+                var validators_view = try state.getReadonly("validators");
+                try validators_view.commit();
+                const len = try validators_view.length();
+                const out = try allocator.alloc(*const ct.phase0.Validator.Type, len);
+                errdefer allocator.free(out);
+                var it = validators_view.iteratorReadonly(0);
+                for (0..len) |i| {
+                    out[i] = try it.nextValuePtr();
+                }
+                return out;
+            },
+        };
+    }
+
     pub fn balances(self: *AnyBeaconState) !*ct.phase0.Balances.TreeView {
         return switch (self.*) {
             inline else => |state| try state.get("balances"),
@@ -985,7 +1006,7 @@ pub const AnyBeaconState = union(ForkSeq) {
 
 test "electra - sanity" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 500_000);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 500_000 });
     defer pool.deinit();
 
     var beacon_state = try AnyBeaconState.fromValue(allocator, &pool, .electra, &ct.electra.BeaconState.default_value);
@@ -1007,7 +1028,7 @@ test "electra - sanity" {
 
 test "clone - sanity" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 500_000);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 500_000 });
     defer pool.deinit();
 
     var beacon_state = try AnyBeaconState.fromValue(allocator, &pool, .electra, &ct.electra.BeaconState.default_value);
@@ -1039,7 +1060,7 @@ test "clone - cases" {
     };
 
     inline for (test_Case) |tc| {
-        var pool = try Node.Pool.init(allocator, 500_000);
+        var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 500_000 });
         defer pool.deinit();
 
         var beacon_state = try AnyBeaconState.fromValue(allocator, &pool, .electra, &ct.electra.BeaconState.default_value);
@@ -1065,7 +1086,7 @@ test "clone - cases" {
 
 test "upgrade state - sanity" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 500_000);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 500_000 });
     defer pool.deinit();
 
     var phase0_state = try AnyBeaconState.fromValue(allocator, &pool, .phase0, &ct.phase0.BeaconState.default_value);
@@ -1098,4 +1119,74 @@ test "upgrade state - sanity" {
     var gloas_state = try fulu_state.upgradeUnsafe();
     defer gloas_state.deinit();
     try expect(gloas_state.forkSeq() == .gloas);
+}
+
+test "single proof: validators[0].withdrawal_credentials" {
+    const allocator = std.testing.allocator;
+    const ssz = @import("ssz");
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 500_000 });
+    defer pool.deinit();
+
+    var beacon_state = try AnyBeaconState.fromValue(
+        allocator,
+        &pool,
+        .electra,
+        &ct.electra.BeaconState.default_value,
+    );
+    defer beacon_state.deinit();
+
+    // Bootstrap one validator so `validators[0]` exists.
+    var validators_view = try beacon_state.validators();
+    const validator_value = ct.electra.Validator.Type{
+        .pubkey = [_]u8{1} ** 48,
+        .withdrawal_credentials = [_]u8{0xab} ** 32,
+        .effective_balance = 32_000_000_000,
+        .slashed = false,
+        .activation_eligibility_epoch = 0,
+        .activation_epoch = 0,
+        .exit_epoch = std.math.maxInt(u64),
+        .withdrawable_epoch = std.math.maxInt(u64),
+    };
+    try validators_view.pushValue(&validator_value);
+    try beacon_state.commit();
+
+    const gindex = ssz.getPathGindex(ct.electra.BeaconState, "validators.0.withdrawal_credentials");
+    var proof = try beacon_state.getSingleProof(allocator, @intFromEnum(gindex));
+    defer proof.deinit(allocator);
+
+    // The proof should be non-empty and the leaf should match the value
+    // we set above. (We do not yet verify witness chain correctness — just
+    // that proof generation does not error out with InvalidNode.)
+    try std.testing.expect(proof.witnesses.len > 0);
+    try std.testing.expectEqualSlices(u8, &[_]u8{0xab} ** 32, &proof.leaf);
+}
+
+test "single proof: balances[0]" {
+    const allocator = std.testing.allocator;
+    const ssz = @import("ssz");
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 500_000 });
+    defer pool.deinit();
+
+    var beacon_state = try AnyBeaconState.fromValue(
+        allocator,
+        &pool,
+        .electra,
+        &ct.electra.BeaconState.default_value,
+    );
+    defer beacon_state.deinit();
+
+    var balances_view = try beacon_state.balances();
+    try balances_view.push(31_000_000_000);
+    try beacon_state.commit();
+
+    const gindex = ssz.getPathGindex(ct.electra.BeaconState, "balances.0");
+    var proof = try beacon_state.getSingleProof(allocator, @intFromEnum(gindex));
+    defer proof.deinit(allocator);
+
+    try std.testing.expect(proof.witnesses.len > 0);
+    // balances[0] is a packed u64; only the low 8 bytes of the leaf carry
+    // the value (LE-encoded), the rest of the chunk is zero-padded.
+    var expected_leaf: [32]u8 = [_]u8{0} ** 32;
+    std.mem.writeInt(u64, expected_leaf[0..8], 31_000_000_000, .little);
+    try std.testing.expectEqualSlices(u8, &expected_leaf, &proof.leaf);
 }

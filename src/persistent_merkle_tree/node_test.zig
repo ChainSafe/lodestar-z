@@ -6,52 +6,67 @@ const Depth = @import("hashing").Depth;
 const Node = @import("Node.zig");
 const Gindex = @import("gindex.zig").Gindex;
 
-test "Node.State" {
-    const State = Node.State;
+test "Node.State predicates" {
+    // Exercises State predicates via `id.getState(pool)` over each variant:
+    // zero sentinel, leaf, lazy/computed branch, free slot.
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 4 });
+    defer pool.deinit();
+    const p = &pool;
 
-    var state: State = State.initNextFree(@enumFromInt(100));
-    try std.testing.expect(state.isFree());
-    try std.testing.expectEqual(@as(Node.Id, @enumFromInt(100)), state.getNextFree());
+    // Zero-node sentinel at index 0
+    const zero0: Node.Id = @enumFromInt(0);
+    const zero_state = zero0.getState(p);
+    try std.testing.expect(zero_state.isZero());
+    try std.testing.expect(!zero_state.isLeaf());
+    try std.testing.expect(!zero_state.isBranch());
+    try std.testing.expect(!zero0.isBranchLazy(p));
+    try std.testing.expect(!zero0.isBranchComputed(p));
+    try std.testing.expect(!zero_state.isFree());
 
-    state = State.branch_lazy;
-    try std.testing.expect(state.isBranch());
-    try std.testing.expect(state.isBranchLazy());
-    try std.testing.expect(!state.isZero());
-    try std.testing.expect(!state.isLeaf());
-    try std.testing.expect(!state.isBranchComputed());
+    // Leaf
+    const leaf = try pool.createLeafFromUint(42);
+    const leaf_state = leaf.getState(p);
+    try std.testing.expect(leaf_state.isLeaf());
+    try std.testing.expect(!leaf_state.isZero());
+    try std.testing.expect(!leaf_state.isBranch());
+    try std.testing.expect(!leaf.isBranchLazy(p));
+    try std.testing.expect(!leaf.isBranchComputed(p));
+    try std.testing.expect(!leaf_state.isFree());
 
-    _ = try state.incRefCount();
-    try std.testing.expect(state.isBranch());
-    try std.testing.expect(state.isBranchLazy());
-    try std.testing.expect(!state.isZero());
-    try std.testing.expect(!state.isLeaf());
-    try std.testing.expect(!state.isBranchComputed());
+    // Lazy branch (root not yet computed)
+    const branch = try pool.createBranch(leaf, leaf);
+    defer pool.unref(branch);
+    try std.testing.expect(branch.getState(p).isBranch());
+    try std.testing.expect(branch.isBranchLazy(p));
+    try std.testing.expect(!branch.isBranchComputed(p));
+    try std.testing.expect(!branch.getState(p).isZero());
+    try std.testing.expect(!branch.getState(p).isLeaf());
+    try std.testing.expect(!branch.getState(p).isFree());
 
-    state.setBranchComputed();
-    try std.testing.expect(state.isBranch());
-    try std.testing.expect(state.isBranchComputed());
-    try std.testing.expect(!state.isBranchLazy());
-    try std.testing.expect(!state.isZero());
-    try std.testing.expect(!state.isLeaf());
+    // After computing the root the same slot reports computed.
+    _ = branch.getRoot(p);
+    try std.testing.expect(branch.getState(p).isBranch());
+    try std.testing.expect(branch.isBranchComputed(p));
+    try std.testing.expect(!branch.isBranchLazy(p));
+    try std.testing.expect(!branch.getState(p).isZero());
+    try std.testing.expect(!branch.getState(p).isLeaf());
 
-    state = State.zero;
-    try std.testing.expect(state.isZero());
-    try std.testing.expect(!state.isLeaf());
-    try std.testing.expect(!state.isBranch());
-    try std.testing.expect(!state.isBranchLazy());
-    try std.testing.expect(!state.isBranchComputed());
-
-    state = State.leaf;
-    try std.testing.expect(state.isLeaf());
-    try std.testing.expect(!state.isZero());
-    try std.testing.expect(!state.isBranch());
-    try std.testing.expect(!state.isBranchLazy());
-    try std.testing.expect(!state.isBranchComputed());
+    // Free slot: allocate, then unref so the slot is back on the free list.
+    const transient = try pool.createLeafFromUint(7);
+    pool.unref(transient);
+    const free_state = transient.getState(p);
+    try std.testing.expect(free_state.isFree());
+    try std.testing.expect(!free_state.isLeaf());
+    try std.testing.expect(!free_state.isZero());
+    try std.testing.expect(!free_state.isBranch());
+    // Free slots expose the next-free link via `state.nextFree()`.
+    _ = free_state.nextFree();
 }
 
 test "Pool" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 10);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 10 });
     defer pool.deinit();
     const p = &pool;
 
@@ -81,15 +96,15 @@ test "Pool" {
     // check if the free list is correct
     const next_free: Node.Id = pool.next_free_node;
     try std.testing.expectEqual(leaf2_id, next_free);
-    try std.testing.expectEqual(branch3_id, next_free.getState(p).getNextFree());
-    try std.testing.expectEqual(leaf1_id, next_free.getState(p).getNextFree().getState(p).getNextFree());
-    try std.testing.expectEqual(branch1_id, next_free.getState(p).getNextFree().getState(p).getNextFree().getState(p).getNextFree());
-    try std.testing.expectEqual(branch2_id, next_free.getState(p).getNextFree().getState(p).getNextFree().getState(p).getNextFree().getState(p).getNextFree());
+    try std.testing.expectEqual(branch3_id, next_free.getState(p).nextFree());
+    try std.testing.expectEqual(leaf1_id, next_free.getState(p).nextFree().getState(p).nextFree());
+    try std.testing.expectEqual(branch1_id, next_free.getState(p).nextFree().getState(p).nextFree().getState(p).nextFree());
+    try std.testing.expectEqual(branch2_id, next_free.getState(p).nextFree().getState(p).nextFree().getState(p).nextFree().getState(p).nextFree());
 }
 
 test "Pool - automatic capacity growth beyond pre-heat" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 1); // intentionally tiny
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 1 }); // intentionally tiny
     defer pool.deinit();
     const p = &pool;
 
@@ -109,7 +124,7 @@ test "Pool - automatic capacity growth beyond pre-heat" {
 }
 
 test "All zero hashes (depth>0) point both children to the previous depth" {
-    var pool = try Node.Pool.init(std.testing.allocator, 1);
+    var pool = try Node.Pool.init(.{ .page_allocator = std.testing.allocator, .allocator = std.testing.allocator, .pool_size = 1 });
     defer pool.deinit();
     const p = &pool;
 
@@ -124,7 +139,7 @@ test "All zero hashes (depth>0) point both children to the previous depth" {
 }
 
 test "Node free-list re-uses the lowest recently-freed Id first" {
-    var pool = try Node.Pool.init(std.testing.allocator, 2);
+    var pool = try Node.Pool.init(.{ .page_allocator = std.testing.allocator, .allocator = std.testing.allocator, .pool_size = 2 });
     defer pool.deinit();
 
     const n1 = try pool.createLeafFromUint(1);
@@ -136,7 +151,7 @@ test "Node free-list re-uses the lowest recently-freed Id first" {
 
 test "Navigation - invalid node access is rejected" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 8);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 8 });
     defer pool.deinit();
     const p = &pool;
 
@@ -154,7 +169,7 @@ test "Navigation - invalid node access is rejected" {
 
 test "alloc returns a set of unique nodes" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 1);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 1 });
     defer pool.deinit();
     const p = &pool;
 
@@ -174,7 +189,7 @@ test "alloc returns a set of unique nodes" {
 
 test "get/setNode" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 1);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 1 });
     defer pool.deinit();
     const p = &pool;
 
@@ -190,7 +205,7 @@ test "get/setNode" {
 
 test "setNodes for checkpoint tree" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 10);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 10 });
     defer pool.deinit();
     const p = &pool;
 
@@ -216,7 +231,7 @@ test "setNodes for checkpoint tree" {
 
 test "Depth helpers - round-trip setNodesAtDepth / getNodesAtDepth" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 64);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 64 });
     defer pool.deinit();
     const p = &pool;
 
@@ -311,7 +326,7 @@ const test_cases = [_]TestCase{
 
 test "setNodesAtDepth, setNodes vs setNode multiple times" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 10);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 10 });
     defer pool.deinit();
     const p = &pool;
 
@@ -369,7 +384,7 @@ test "setNodesAtDepth, setNodes vs setNode multiple times" {
 
 test "truncateAfterIndex zeros nodes after index" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 128);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 128 });
     defer pool.deinit();
     const p = &pool;
 
@@ -412,7 +427,7 @@ test "truncateAfterIndex zeros nodes after index" {
 
 test "hashing sanity check" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 10);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 10 });
     defer pool.deinit();
     const p = &pool;
 
@@ -433,7 +448,7 @@ test "hashing sanity check" {
 // Refer to https://github.com/ChainSafe/ssz/blob/7f5580c2ea69f9307300ddb6010a8bc7ce2fc471/packages/persistent-merkle-tree/test/unit/tree/zeroAfterIndex.test.ts#L4-L39
 test "truncateAfterIndex matches zeroAfterIndex test suite" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 8192);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 8192 });
     defer pool.deinit();
     const p = &pool;
 
@@ -520,7 +535,7 @@ fn treeZeroAfterIndexNaive(
 
 test "DepthIterator matches getNodesAtDepth" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 64);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 64 });
     defer pool.deinit();
     const p = &pool;
 
@@ -558,7 +573,7 @@ test "DepthIterator matches getNodesAtDepth" {
 
 test "FillWithContentsIterator matches fillWithContents" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 128);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 128 });
     defer pool.deinit();
     const p = &pool;
 

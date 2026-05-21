@@ -2,7 +2,10 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const hashing = @import("hashing");
 const Depth = hashing.Depth;
-const Node = @import("persistent_merkle_tree").Node;
+const pmt = @import("persistent_merkle_tree");
+const Node = pmt.Node;
+const Gindex = pmt.Gindex;
+const proof = pmt.proof;
 const isBasicType = @import("../type/type_kind.zig").isBasicType;
 
 const type_root = @import("../type/root.zig");
@@ -42,7 +45,13 @@ pub fn ListBasicTreeView(comptime ST: type) type {
         const base_chunk_depth: Depth = @intCast(ST.chunk_depth);
         const chunk_depth: Depth = chunkDepth(Depth, base_chunk_depth, ST);
         const items_per_chunk: usize = itemsPerChunk(ST.Element);
-        const Chunks = BasicPackedChunks(ST, chunk_depth, items_per_chunk);
+        const Chunks = BasicPackedChunks(ST, chunk_depth, items_per_chunk, ST.opts.chunked_leaf);
+
+        // ChunkedLeaf binding — only meaningful when `ST.opts.chunked_leaf = true`;
+        // the empty-struct placeholder keeps symbols valid in non-chunked_leaf
+        // instantiations.
+        const ChunkedLeaf = if (ST.opts.chunked_leaf) pmt.ChunkedLeaf else struct {};
+        const chunked_leaf_depth: Depth = if (ST.opts.chunked_leaf) chunk_depth - ChunkedLeaf.k_log2 else 0;
 
         pub fn init(allocator: Allocator, pool: *Node.Pool, root: Node.Id) !*Self {
             const ptr = try allocator.create(Self);
@@ -106,7 +115,10 @@ pub fn ListBasicTreeView(comptime ST: type) type {
             self._len = new_length;
         }
 
+        /// Read-only iterator over committed elements. Pending `set`/`push`
+        /// writes are not visible — call `commit()` first if they matter.
         pub fn iteratorReadonly(self: *const Self, start_index: usize) ReadonlyIterator {
+            std.debug.assert(self.chunks.state.changed.count() == 0);
             return ReadonlyIterator.init(self, start_index);
         }
 
@@ -114,31 +126,102 @@ pub fn ListBasicTreeView(comptime ST: type) type {
             tree_view: *const Self,
             depth_iterator: Node.DepthIterator,
             elem_index: usize,
+            // Non-chunked_leaf state: cached current chunk Node.Id; cleared
+            // when we cross a chunk boundary so the next call fetches anew.
             elem_node: ?Node.Id,
+            // Chunked_leaf state: cached chunks pointer of the current
+            // ChunkedLeaf, plus a flag for the all-zero (sparse) case where
+            // no payload exists. Cleared when we cross a chunked_leaf
+            // boundary so the next call fetches the next ChunkedLeaf.
+            current_chunks: ?*align(64) const [if (ST.opts.chunked_leaf) ChunkedLeaf.K else 1][32]u8,
+            current_is_zero: bool,
+            last_chunked_leaf_idx: ?usize,
 
             pub fn init(tree_view: *const Self, start_index: usize) ReadonlyIterator {
-                return .{
-                    .tree_view = tree_view,
-                    .depth_iterator = Node.DepthIterator.init(
-                        tree_view.chunks.state.pool,
-                        tree_view.chunks.state.root,
-                        ST.chunk_depth + 1,
-                        ST.chunkIndex(start_index),
-                    ),
-                    .elem_index = start_index,
-                    .elem_node = null,
-                };
+                if (comptime ST.opts.chunked_leaf) {
+                    const start_chunk = start_index / items_per_chunk;
+                    const start_chunked_leaf = start_chunk / ChunkedLeaf.K;
+                    return .{
+                        .tree_view = tree_view,
+                        .depth_iterator = Node.DepthIterator.init(
+                            tree_view.chunks.state.pool,
+                            tree_view.chunks.state.root,
+                            chunked_leaf_depth,
+                            start_chunked_leaf,
+                        ),
+                        .elem_index = start_index,
+                        .elem_node = null,
+                        .current_chunks = null,
+                        .current_is_zero = false,
+                        .last_chunked_leaf_idx = null,
+                    };
+                } else {
+                    return .{
+                        .tree_view = tree_view,
+                        .depth_iterator = Node.DepthIterator.init(
+                            tree_view.chunks.state.pool,
+                            tree_view.chunks.state.root,
+                            ST.chunk_depth + 1,
+                            ST.chunkIndex(start_index),
+                        ),
+                        .elem_index = start_index,
+                        .elem_node = null,
+                        .current_chunks = null,
+                        .current_is_zero = false,
+                        .last_chunked_leaf_idx = null,
+                    };
+                }
             }
 
             pub fn next(self: *ReadonlyIterator) !Element {
                 const elem_index = self.elem_index;
+                const pool = self.tree_view.chunks.state.pool;
+
+                if (comptime ST.opts.chunked_leaf) {
+                    const chunk_idx = elem_index / items_per_chunk;
+                    const chunked_leaf_idx = chunk_idx / ChunkedLeaf.K;
+                    const chunked_leaf_offset = chunk_idx % ChunkedLeaf.K;
+
+                    // Fetch ChunkedLeaf if first call or just crossed a
+                    // chunked_leaf boundary.
+                    if (self.last_chunked_leaf_idx == null or self.last_chunked_leaf_idx.? != chunked_leaf_idx) {
+                        // Each reload advances `depth_iterator` by exactly one
+                        // ChunkedLeaf, so forward iteration must cross at most
+                        // one boundary per step.
+                        std.debug.assert(self.last_chunked_leaf_idx == null or
+                            chunked_leaf_idx == self.last_chunked_leaf_idx.? + 1);
+                        const sid = try self.depth_iterator.next();
+                        if (pool.nodes.items(.state)[@intFromEnum(sid)].kind() == .zero) {
+                            self.current_chunks = null;
+                            self.current_is_zero = true;
+                        } else {
+                            self.current_chunks = try sid.getChunkedLeafChunks(pool);
+                            self.current_is_zero = false;
+                        }
+                        self.last_chunked_leaf_idx = chunked_leaf_idx;
+                    }
+
+                    var value: Element = undefined;
+                    if (self.current_is_zero) {
+                        value = std.mem.zeroes(Element);
+                    } else {
+                        ST.Element.tree.toValuePackedFromBytes(
+                            &self.current_chunks.?[chunked_leaf_offset],
+                            elem_index,
+                            &value,
+                        );
+                    }
+                    self.elem_index += 1;
+                    return value;
+                }
+
                 const n = if (self.elem_node) |node|
                     node
                 else
                     try self.depth_iterator.next();
                 self.elem_node = n;
                 var value: Element = undefined;
-                try ST.Element.tree.toValuePacked(n, self.tree_view.chunks.state.pool, elem_index, &value);
+                try ST.Element.tree.toValuePacked(n, pool, elem_index, &value);
                 self.elem_index += 1;
                 if (self.elem_index % items_per_chunk == 0) {
                     self.elem_node = null;
@@ -164,7 +247,7 @@ pub fn ListBasicTreeView(comptime ST: type) type {
         pub fn set(self: *Self, index: usize, value: Element) !void {
             const list_length = try self.length();
             if (index >= list_length) return error.IndexOutOfBounds;
-            try self.chunks.set(index, value);
+            try self.chunks.set(index, value, list_length);
         }
 
         /// Caller must free the returned slice with the same allocator.
@@ -202,41 +285,132 @@ pub fn ListBasicTreeView(comptime ST: type) type {
                 return error.LengthOverLimit;
             }
 
+            return if (comptime ST.opts.chunked_leaf)
+                self.sliceToChunkedLeaf(index, new_length)
+            else
+                self.sliceToPlain(index, new_length);
+        }
+
+        /// `sliceTo` for chunked_leaf layouts. Trims the boundary chunked_leaf,
+        /// truncates the chunked_leaves after it, and reinstalls the length.
+        fn sliceToChunkedLeaf(self: *Self, index: usize, new_length: usize) !*Self {
+            const pool = self.chunks.state.pool;
             const chunk_index = index / items_per_chunk;
             const chunk_offset = index % items_per_chunk;
-            const chunk_node = try Node.Id.getNodeAtDepth(self.chunks.state.root, self.chunks.state.pool, chunk_depth, chunk_index);
-
-            var chunk_bytes = chunk_node.getRoot(self.chunks.state.pool).*;
             const keep_bytes = (chunk_offset + 1) * ST.Element.fixed_size;
+            std.debug.assert(keep_bytes > 0);
+            std.debug.assert(keep_bytes <= BYTES_PER_CHUNK);
+
+            const chunked_leaf_idx = chunk_index / ChunkedLeaf.K;
+            const chunked_leaf_offset: u16 = @intCast(chunk_index % ChunkedLeaf.K);
+            std.debug.assert(chunked_leaf_offset < ChunkedLeaf.K);
+
+            const boundary = try Node.Id.getNodeAtDepth(self.chunks.state.root, pool, chunked_leaf_depth, chunked_leaf_idx);
+            const boundary_kind = pool.nodes.items(.state)[@intFromEnum(boundary)].kind();
+
+            const truncate_input: Node.Id = blk: {
+                if (boundary_kind == .zero) {
+                    // The boundary chunked_leaf is an all-zero subtree, so
+                    // the elements we keep from it are already zero. There
+                    // is nothing to trim; truncate the original tree.
+                    break :blk self.chunks.state.root;
+                }
+                // At chunked_leaf_depth a correctly built tree only ever
+                // has chunked_leaf or zero nodes; anything else is corrupt.
+                std.debug.assert(boundary_kind == .chunked_leaf);
+
+                // The boundary chunked_leaf straddles the cut. Build a
+                // trimmed copy: copy chunks 0 through chunked_leaf_offset, zero the
+                // unused tail bytes of chunk chunked_leaf_offset, and leave the
+                // chunks after it zero. Install it, then truncate the rest.
+                var trimmed_boundary: ?Node.Id = try pool.createChunkedLeafEmpty(chunked_leaf_offset + 1);
+                defer if (trimmed_boundary) |id| pool.unref(id);
+
+                {
+                    const old_chunks = try boundary.getChunkedLeafChunks(pool);
+                    const new_leaf = try trimmed_boundary.?.getChunkedLeafPtr(pool);
+                    @memcpy(new_leaf.chunks[0 .. chunked_leaf_offset + 1], old_chunks[0 .. chunked_leaf_offset + 1]);
+                    if (keep_bytes < BYTES_PER_CHUNK) {
+                        @memset(new_leaf.chunks[chunked_leaf_offset][keep_bytes..], 0);
+                    }
+                }
+
+                const updated = try Node.Id.setNodeAtDepth(
+                    self.chunks.state.root,
+                    pool,
+                    chunked_leaf_depth,
+                    chunked_leaf_idx,
+                    trimmed_boundary.?,
+                );
+                trimmed_boundary = null;
+                break :blk updated;
+            };
+            // `truncate_input` is either the original root (boundary was
+            // zero, nothing allocated) or the fresh tree built above. The
+            // fresh tree has refcount 0 and belongs to us; truncate and
+            // setNode below do not take a ref, so hold onto it and unref
+            // it when this function returns.
+            const truncate_input_handle: ?Node.Id = if (boundary_kind != .zero) truncate_input else null;
+            defer if (truncate_input_handle) |id| pool.unref(id);
+
+            // Zero every chunked_leaf after chunked_leaf_idx. A node at
+            // chunked_leaf_depth stands for a k_log2-deep subtree, so
+            // truncate needs the k_log2 offset to pick the right zero hash.
+            const new_root = try Node.Id.truncateAfterIndexWithLeafOffset(truncate_input, pool, chunked_leaf_depth, chunked_leaf_idx, ChunkedLeaf.k_log2);
+            defer pool.unref(new_root);
+
+            // truncate also zeroed the length leaf (gindex 3); reinstall it.
+            var length_node: ?Node.Id = try pool.createLeafFromUint(@intCast(new_length));
+            defer if (length_node) |id| pool.unref(id);
+
+            const root_with_length = try Node.Id.setNode(new_root, pool, @enumFromInt(3), length_node.?);
+            errdefer pool.unref(root_with_length);
+            length_node = null;
+
+            return try Self.init(self.allocator, pool, root_with_length);
+        }
+
+        /// `sliceTo` for non-chunked_leaf layouts. Byte-masks the boundary
+        /// chunk, truncates the chunks after it, and reinstalls the length.
+        fn sliceToPlain(self: *Self, index: usize, new_length: usize) !*Self {
+            const pool = self.chunks.state.pool;
+            const chunk_index = index / items_per_chunk;
+            const chunk_offset = index % items_per_chunk;
+            const keep_bytes = (chunk_offset + 1) * ST.Element.fixed_size;
+            std.debug.assert(keep_bytes > 0);
+            std.debug.assert(keep_bytes <= BYTES_PER_CHUNK);
+
+            const boundary = try Node.Id.getNodeAtDepth(self.chunks.state.root, pool, chunk_depth, chunk_index);
+
+            var chunk_bytes = boundary.getRoot(pool).*;
             if (keep_bytes < BYTES_PER_CHUNK) {
                 @memset(chunk_bytes[keep_bytes..], 0);
             }
 
-            var truncated_chunk_node: ?Node.Id = try self.chunks.state.pool.createLeaf(&chunk_bytes);
-            defer if (truncated_chunk_node) |id| self.chunks.state.pool.unref(id);
-            var updated: ?Node.Id = try Node.Id.setNodeAtDepth(
+            var trimmed_boundary: ?Node.Id = try pool.createLeaf(&chunk_bytes);
+            defer if (trimmed_boundary) |id| pool.unref(id);
+
+            const updated = try Node.Id.setNodeAtDepth(
                 self.chunks.state.root,
-                self.chunks.state.pool,
+                pool,
                 chunk_depth,
                 chunk_index,
-                truncated_chunk_node.?,
+                trimmed_boundary.?,
             );
-            defer if (updated) |id| self.chunks.state.pool.unref(id);
-            truncated_chunk_node = null;
+            defer pool.unref(updated);
+            trimmed_boundary = null;
 
-            var new_root: ?Node.Id = try Node.Id.truncateAfterIndex(updated.?, self.chunks.state.pool, chunk_depth, chunk_index);
-            defer if (new_root) |id| self.chunks.state.pool.unref(id);
-            updated = null;
+            const new_root = try Node.Id.truncateAfterIndex(updated, pool, chunk_depth, chunk_index);
+            defer pool.unref(new_root);
 
-            var length_node: ?Node.Id = try self.chunks.state.pool.createLeafFromUint(@intCast(new_length));
-            defer if (length_node) |id| self.chunks.state.pool.unref(id);
-            const root_with_length = try Node.Id.setNode(new_root.?, self.chunks.state.pool, @enumFromInt(3), length_node.?);
-            errdefer self.chunks.state.pool.unref(root_with_length);
+            var length_node: ?Node.Id = try pool.createLeafFromUint(@intCast(new_length));
+            defer if (length_node) |id| pool.unref(id);
 
+            const root_with_length = try Node.Id.setNode(new_root, pool, @enumFromInt(3), length_node.?);
+            errdefer pool.unref(root_with_length);
             length_node = null;
-            new_root = null;
 
-            return try Self.init(self.allocator, self.chunks.state.pool, root_with_length);
+            return try Self.init(self.allocator, pool, root_with_length);
         }
 
         /// Serialize the tree view into a provided buffer.
@@ -270,11 +444,11 @@ const UintType = @import("../type/uint.zig").UintType;
 const FixedListType = @import("../type/list.zig").FixedListType;
 test "TreeView list element roundtrip" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 256);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 256 });
     defer pool.deinit();
 
     const Uint32 = UintType(32);
-    const ListType = FixedListType(Uint32, 16);
+    const ListType = FixedListType(Uint32, 16, .{});
 
     const base_values = [_]u32{ 5, 15, 25, 35, 45 };
 
@@ -318,11 +492,11 @@ test "TreeView list element roundtrip" {
 
 test "TreeView list push updates cached length" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 256);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 256 });
     defer pool.deinit();
 
     const Uint32 = UintType(32);
-    const ListType = FixedListType(Uint32, 16);
+    const ListType = FixedListType(Uint32, 16, .{});
 
     var list: ListType.Type = .empty;
     defer list.deinit(allocator);
@@ -358,11 +532,11 @@ test "TreeView list push updates cached length" {
 
 test "TreeView list getAllAlloc handles zero length" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 64);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 64 });
     defer pool.deinit();
 
     const Uint8 = UintType(8);
-    const ListType = FixedListType(Uint8, 4);
+    const ListType = FixedListType(Uint8, 4, .{});
 
     var list: ListType.Type = .empty;
     defer list.deinit(allocator);
@@ -379,11 +553,11 @@ test "TreeView list getAllAlloc handles zero length" {
 
 test "TreeView list getAllAlloc spans multiple chunks" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 512);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 512 });
     defer pool.deinit();
 
     const Uint16 = UintType(16);
-    const ListType = FixedListType(Uint16, 64);
+    const ListType = FixedListType(Uint16, 64, .{});
 
     var list: ListType.Type = .empty;
     defer list.deinit(allocator);
@@ -406,11 +580,11 @@ test "TreeView list getAllAlloc spans multiple chunks" {
 
 test "TreeView list push batches before commit" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 256);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 256 });
     defer pool.deinit();
 
     const Uint32 = UintType(32);
-    const ListType = FixedListType(Uint32, 16);
+    const ListType = FixedListType(Uint32, 16, .{});
 
     var list: ListType.Type = .empty;
     defer list.deinit(allocator);
@@ -447,11 +621,11 @@ test "TreeView list push batches before commit" {
 
 test "TreeView list push across chunk boundary resets prefetch" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 256);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 256 });
     defer pool.deinit();
 
     const Uint32 = UintType(32);
-    const ListType = FixedListType(Uint32, 32);
+    const ListType = FixedListType(Uint32, 32, .{});
 
     var list: ListType.Type = .empty;
     defer list.deinit(allocator);
@@ -479,11 +653,11 @@ test "TreeView list push across chunk boundary resets prefetch" {
 
 test "TreeView list push enforces limit" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 256);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 256 });
     defer pool.deinit();
 
     const Uint32 = UintType(32);
-    const ListType = FixedListType(Uint32, 2);
+    const ListType = FixedListType(Uint32, 2, .{});
 
     var list: ListType.Type = .empty;
     defer list.deinit(allocator);
@@ -499,11 +673,11 @@ test "TreeView list push enforces limit" {
 
 test "TreeView list basic clone isolates updates" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 1024);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 1024 });
     defer pool.deinit();
 
     const Uint32 = UintType(32);
-    const ListType = FixedListType(Uint32, 16);
+    const ListType = FixedListType(Uint32, 16, .{});
 
     var list: ListType.Type = .empty;
     defer list.deinit(allocator);
@@ -525,11 +699,11 @@ test "TreeView list basic clone isolates updates" {
 
 test "TreeView list basic clone reads committed state" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 1024);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 1024 });
     defer pool.deinit();
 
     const Uint32 = UintType(32);
-    const ListType = FixedListType(Uint32, 16);
+    const ListType = FixedListType(Uint32, 16, .{});
 
     var list: ListType.Type = .empty;
     defer list.deinit(allocator);
@@ -550,11 +724,11 @@ test "TreeView list basic clone reads committed state" {
 
 test "TreeView list basic clone drops uncommitted changes" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 1024);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 1024 });
     defer pool.deinit();
 
     const Uint32 = UintType(32);
-    const ListType = FixedListType(Uint32, 16);
+    const ListType = FixedListType(Uint32, 16, .{});
 
     var list: ListType.Type = .empty;
     defer list.deinit(allocator);
@@ -576,11 +750,11 @@ test "TreeView list basic clone drops uncommitted changes" {
 
 test "TreeView list basic clone(false) does not transfer cache" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 256);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 256 });
     defer pool.deinit();
 
     const Uint32 = UintType(32);
-    const ListType = FixedListType(Uint32, 16);
+    const ListType = FixedListType(Uint32, 16, .{});
 
     var list: ListType.Type = .empty;
     defer list.deinit(allocator);
@@ -602,11 +776,11 @@ test "TreeView list basic clone(false) does not transfer cache" {
 
 test "TreeView list basic clone(true) transfers cache and clears source" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 256);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 256 });
     defer pool.deinit();
 
     const Uint32 = UintType(32);
-    const ListType = FixedListType(Uint32, 16);
+    const ListType = FixedListType(Uint32, 16, .{});
 
     var list: ListType.Type = .empty;
     defer list.deinit(allocator);
@@ -629,12 +803,12 @@ test "TreeView list basic clone(true) transfers cache and clears source" {
 // Refer to https://github.com/ChainSafe/ssz/blob/7f5580c2ea69f9307300ddb6010a8bc7ce2fc471/packages/ssz/test/unit/byType/listBasic/tree.test.ts#L180-L203
 test "TreeView basic list getAll reflects pushes" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 256);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 256 });
     defer pool.deinit();
 
     const list_limit = 32;
     const Uint64 = UintType(64);
-    const ListType = FixedListType(Uint64, list_limit);
+    const ListType = FixedListType(Uint64, list_limit, .{});
 
     var list: ListType.Type = .empty;
     defer list.deinit(allocator);
@@ -666,11 +840,11 @@ test "TreeView basic list getAll reflects pushes" {
 
 test "TreeView list sliceTo returns original when truncation unnecessary" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 256);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 256 });
     defer pool.deinit();
 
     const Uint32 = UintType(32);
-    const ListType = FixedListType(Uint32, 16);
+    const ListType = FixedListType(Uint32, 16, .{});
 
     var list: ListType.Type = .empty;
     defer list.deinit(allocator);
@@ -699,11 +873,11 @@ test "TreeView list sliceTo returns original when truncation unnecessary" {
 // Refer to https://github.com/ChainSafe/ssz/blob/7f5580c2ea69f9307300ddb6010a8bc7ce2fc471/packages/ssz/test/unit/byType/listBasic/tree.test.ts#L219-L247
 test "TreeView basic list sliceTo matches incremental snapshots" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 2048);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 2048 });
     defer pool.deinit();
 
     const Uint64 = UintType(64);
-    const ListType = FixedListType(Uint64, 1024);
+    const ListType = FixedListType(Uint64, 1024, .{});
     const total_values: usize = 16;
 
     var base_values: [total_values]u64 = undefined;
@@ -762,11 +936,11 @@ test "TreeView basic list sliceTo matches incremental snapshots" {
 
 test "TreeView list sliceTo truncates tail elements" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 256);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 256 });
     defer pool.deinit();
 
     const Uint32 = UintType(32);
-    const ListType = FixedListType(Uint32, 32);
+    const ListType = FixedListType(Uint32, 32, .{});
 
     var list: ListType.Type = .empty;
     defer list.deinit(allocator);
@@ -808,9 +982,9 @@ test "ListBasicTreeView - serialize (uint8 list)" {
     const allocator = std.testing.allocator;
 
     const Uint8 = UintType(8);
-    const ListU8Type = FixedListType(Uint8, 128);
+    const ListU8Type = FixedListType(Uint8, 128, .{});
 
-    var pool = try Node.Pool.init(allocator, 1024);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 1024 });
     defer pool.deinit();
 
     const TestCase = struct {
@@ -871,9 +1045,9 @@ test "ListBasicTreeView - serialize (uint64 list)" {
     const allocator = std.testing.allocator;
 
     const Uint64 = UintType(64);
-    const ListU64Type = FixedListType(Uint64, 128);
+    const ListU64Type = FixedListType(Uint64, 128, .{});
 
-    var pool = try Node.Pool.init(allocator, 1024);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 1024 });
     defer pool.deinit();
 
     const TestCase = struct {
@@ -935,9 +1109,9 @@ test "ListBasicTreeView - push and serialize" {
     const allocator = std.testing.allocator;
 
     const Uint8 = UintType(8);
-    const ListU8Type = FixedListType(Uint8, 128);
+    const ListU8Type = FixedListType(Uint8, 128, .{});
 
-    var pool = try Node.Pool.init(allocator, 1024);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 1024 });
     defer pool.deinit();
 
     var value: ListU8Type.Type = ListU8Type.default_value;
@@ -973,9 +1147,9 @@ test "ListBasicTreeView - sliceTo and serialize" {
     const allocator = std.testing.allocator;
 
     const Uint8 = UintType(8);
-    const ListU8Type = FixedListType(Uint8, 128);
+    const ListU8Type = FixedListType(Uint8, 128, .{});
 
-    var pool = try Node.Pool.init(allocator, 1024);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 1024 });
     defer pool.deinit();
 
     var value: ListU8Type.Type = ListU8Type.default_value;
@@ -1000,4 +1174,652 @@ test "ListBasicTreeView - sliceTo and serialize" {
 
     try std.testing.expectEqualSlices(u8, &[_]u8{ 1, 2 }, serialized);
     try std.testing.expectEqual(@as(usize, 2), try sliced.length());
+}
+
+// Aliased rather than named `ChunkedLeaf` to avoid shadowing the same-named
+// binding inside `ListBasicTreeView`.
+const ChunkedLeafType = pmt.ChunkedLeaf;
+
+test "ListBasicTreeView chunked_leaf: iteratorReadonly within first chunked_leaf" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 4096 });
+    defer pool.deinit();
+
+    const ListT = FixedListType(UintType(64), 1 << 20, .{ .chunked_leaf = true });
+    const item_count: usize = 100;
+
+    var src: ListT.Type = .empty;
+    defer src.deinit(allocator);
+    for (0..item_count) |i| try src.append(allocator, @as(u64, @intCast(i * 7 + 3)));
+
+    const root_id = try ListT.tree.fromValue(&pool, &src);
+    var view = try ListT.TreeView.init(allocator, &pool, root_id);
+    defer view.deinit();
+
+    var it = view.iteratorReadonly(0);
+    for (0..item_count) |i| {
+        const got = try it.next();
+        try std.testing.expectEqual(src.items[i], got);
+    }
+}
+
+test "ListBasicTreeView chunked_leaf: iteratorReadonly across chunked_leaf boundary" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 4096 });
+    defer pool.deinit();
+
+    const ListT = FixedListType(UintType(64), 1 << 20, .{ .chunked_leaf = true });
+    // Spans several ChunkedLeaves including a partial last one. items_per_chunk=4
+    // for u64; one ChunkedLeaf holds K * items_per_chunk items.
+    const item_count: usize = 2 * 4096 + 17;
+
+    var src: ListT.Type = .empty;
+    defer src.deinit(allocator);
+    try src.ensureTotalCapacity(allocator, item_count);
+    for (0..item_count) |i| try src.append(allocator, @as(u64, @intCast(i * 31 + 1)));
+
+    const root_id = try ListT.tree.fromValue(&pool, &src);
+    var view = try ListT.TreeView.init(allocator, &pool, root_id);
+    defer view.deinit();
+
+    var it = view.iteratorReadonly(0);
+    for (0..item_count) |i| {
+        const got = try it.next();
+        try std.testing.expectEqual(src.items[i], got);
+    }
+}
+
+// Pushing across chunk boundaries must keep each ChunkedLeaf's `len` (valid
+// chunk count) in sync. Root-equivalence checks cannot catch a stale `len` —
+// `ChunkedLeaf.computeRoot` hashes all K chunks and ignores `len` — so this
+// asserts `getChunkedLeafLen` and the trailing-zero invariant directly.
+test "ListBasicTreeView chunked_leaf: push keeps ChunkedLeaf.len in sync" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 4096 });
+    defer pool.deinit();
+
+    const ListT = FixedListType(UintType(64), 1 << 20, .{ .chunked_leaf = true });
+    const K: usize = ChunkedLeafType.K;
+    const items_per_chunk: usize = 4; // 32 / @sizeOf(u64)
+    // +1 for the list's length-mixin level above the data subtree.
+    const cl_depth: Depth = ListT.chunk_depth + 1 - ChunkedLeafType.k_log2;
+
+    // Fills ChunkedLeaf 0 completely (len must be K) and ChunkedLeaf 1
+    // partially (3 chunks).
+    const item_count: usize = K * items_per_chunk + 2 * items_per_chunk + 3;
+
+    var src: ListT.Type = .empty;
+    defer src.deinit(allocator);
+    const root0 = try ListT.tree.fromValue(&pool, &src);
+    var view = try ListT.TreeView.init(allocator, &pool, root0);
+    defer view.deinit();
+
+    for (0..item_count) |i| try view.push(@as(u64, @intCast(i + 1)));
+    try view.commit();
+
+    const total_chunks = (item_count + items_per_chunk - 1) / items_per_chunk;
+    const chunked_leaf_count = (total_chunks + K - 1) / K;
+    const zero_chunk = [_]u8{0} ** 32;
+
+    for (0..chunked_leaf_count) |cl_idx| {
+        const cl = try view.chunks.state.root.getNodeAtDepth(&pool, cl_depth, cl_idx);
+        const expected_len: usize = @min(K, total_chunks - cl_idx * K);
+        try std.testing.expectEqual(@as(u16, @intCast(expected_len)), try cl.getChunkedLeafLen(&pool));
+
+        // Trailing-zero invariant: chunks at indices >= len must be zero.
+        const chunks = try cl.getChunkedLeafChunks(&pool);
+        for (expected_len..K) |c| {
+            try std.testing.expectEqualSlices(u8, &zero_chunk, &chunks[c]);
+        }
+    }
+}
+
+test "ListBasicTreeView chunked_leaf: iteratorReadonly with start_index mid-chunked_leaf" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 4096 });
+    defer pool.deinit();
+
+    const ListT = FixedListType(UintType(64), 1 << 20, .{ .chunked_leaf = true });
+    const item_count: usize = 5000;
+
+    var src: ListT.Type = .empty;
+    defer src.deinit(allocator);
+    try src.ensureTotalCapacity(allocator, item_count);
+    for (0..item_count) |i| try src.append(allocator, @as(u64, @intCast(i * 13 + 5)));
+
+    const root_id = try ListT.tree.fromValue(&pool, &src);
+    var view = try ListT.TreeView.init(allocator, &pool, root_id);
+    defer view.deinit();
+
+    // Start in the second ChunkedLeaf (index >= 4096) and at non-chunk boundary.
+    const start: usize = 4500;
+    var it = view.iteratorReadonly(start);
+    for (start..item_count) |i| {
+        const got = try it.next();
+        try std.testing.expectEqual(src.items[i], got);
+    }
+}
+
+test "ListBasicTreeView chunked_leaf: iteratorReadonly on sparsely grown list" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 4096 });
+    defer pool.deinit();
+
+    const ListT = FixedListType(UintType(64), 1 << 20, .{ .chunked_leaf = true });
+    // Grow from empty via push so initial chunked_leaves are zero sentinels
+    // until they get materialized. After pushing N elements, only the
+    // ChunkedLeaves up to ceil(N / (K * items_per_chunk)) are real.
+    const item_count: usize = 6000;
+
+    var empty: ListT.Type = .empty;
+    defer empty.deinit(allocator);
+    const root_id = try ListT.tree.fromValue(&pool, &empty);
+    var view = try ListT.TreeView.init(allocator, &pool, root_id);
+    defer view.deinit();
+
+    for (0..item_count) |i| {
+        try view.push(@as(u64, @intCast(i + 1)));
+    }
+    try view.commit();
+
+    var it = view.iteratorReadonly(0);
+    for (0..item_count) |i| {
+        const got = try it.next();
+        try std.testing.expectEqual(@as(u64, @intCast(i + 1)), got);
+    }
+}
+
+test "ListBasicTreeView chunked_leaf: sliceTo within first chunked_leaf" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 4096 });
+    defer pool.deinit();
+
+    const ListT = FixedListType(UintType(64), 1 << 20, .{ .chunked_leaf = true });
+    const ListTLeaf = FixedListType(UintType(64), 1 << 20, .{});
+
+    const item_count: usize = 50;
+
+    var src: ListT.Type = .empty;
+    defer src.deinit(allocator);
+    for (0..item_count) |i| try src.append(allocator, @as(u64, @intCast(i + 100)));
+
+    const root_id = try ListT.tree.fromValue(&pool, &src);
+    var view = try ListT.TreeView.init(allocator, &pool, root_id);
+    defer view.deinit();
+
+    const cut: usize = 17;
+    var sliced = try view.sliceTo(cut);
+    defer sliced.deinit();
+
+    try std.testing.expectEqual(@as(usize, cut + 1), try sliced.length());
+
+    // Element-level equality.
+    for (0..cut + 1) |i| {
+        try std.testing.expectEqual(src.items[i], try sliced.get(i));
+    }
+
+    // Root matches the non-chunked_leaf reference at the same length.
+    var ref: ListTLeaf.Type = .empty;
+    defer ref.deinit(allocator);
+    try ref.appendSlice(allocator, src.items[0 .. cut + 1]);
+    var expected_root: [32]u8 = undefined;
+    try ListTLeaf.hashTreeRoot(allocator, &ref, &expected_root);
+
+    var actual_root: [32]u8 = undefined;
+    try sliced.hashTreeRootInto(&actual_root);
+    try std.testing.expectEqualSlices(u8, &expected_root, &actual_root);
+}
+
+test "ListBasicTreeView chunked_leaf: sliceTo at chunked_leaf boundary" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 4096 });
+    defer pool.deinit();
+
+    const ListT = FixedListType(UintType(64), 1 << 20, .{ .chunked_leaf = true });
+    const ListTLeaf = FixedListType(UintType(64), 1 << 20, .{});
+    const item_count: usize = 2 * 4096 + 100;
+
+    var src: ListT.Type = .empty;
+    defer src.deinit(allocator);
+    try src.ensureTotalCapacity(allocator, item_count);
+    for (0..item_count) |i| try src.append(allocator, @as(u64, @intCast(i * 11 + 7)));
+
+    const root_id = try ListT.tree.fromValue(&pool, &src);
+    var view = try ListT.TreeView.init(allocator, &pool, root_id);
+    defer view.deinit();
+
+    // Cut at the last index of the first ChunkedLeaf (4095). Boundary
+    // exercises chunked_leaf_offset = K-1 and all chunks past it are zeroed.
+    const cut: usize = 4095;
+    var sliced = try view.sliceTo(cut);
+    defer sliced.deinit();
+
+    try std.testing.expectEqual(@as(usize, cut + 1), try sliced.length());
+
+    var ref: ListTLeaf.Type = .empty;
+    defer ref.deinit(allocator);
+    try ref.appendSlice(allocator, src.items[0 .. cut + 1]);
+
+    var expected_root: [32]u8 = undefined;
+    try ListTLeaf.hashTreeRoot(allocator, &ref, &expected_root);
+    var actual_root: [32]u8 = undefined;
+    try sliced.hashTreeRootInto(&actual_root);
+    try std.testing.expectEqualSlices(u8, &expected_root, &actual_root);
+}
+
+test "ListBasicTreeView chunked_leaf: sliceTo across chunked_leaf boundary" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 4096 });
+    defer pool.deinit();
+
+    const ListT = FixedListType(UintType(64), 1 << 20, .{ .chunked_leaf = true });
+    const ListTLeaf = FixedListType(UintType(64), 1 << 20, .{});
+    const item_count: usize = 3 * 4096 + 50;
+
+    var src: ListT.Type = .empty;
+    defer src.deinit(allocator);
+    try src.ensureTotalCapacity(allocator, item_count);
+    for (0..item_count) |i| try src.append(allocator, @as(u64, @intCast(i * 23 + 9)));
+
+    const root_id = try ListT.tree.fromValue(&pool, &src);
+    var view = try ListT.TreeView.init(allocator, &pool, root_id);
+    defer view.deinit();
+
+    // Cut in the middle of the second ChunkedLeaf.
+    const cut: usize = 4096 + 1234;
+    var sliced = try view.sliceTo(cut);
+    defer sliced.deinit();
+
+    try std.testing.expectEqual(@as(usize, cut + 1), try sliced.length());
+
+    // toValue round-trip.
+    var dst: ListT.Type = .empty;
+    defer dst.deinit(allocator);
+    try ListT.tree.toValue(allocator, sliced.getRoot(), &pool, &dst);
+    try std.testing.expectEqual(@as(usize, cut + 1), dst.items.len);
+    try std.testing.expectEqualSlices(u64, src.items[0 .. cut + 1], dst.items);
+
+    // Root matches reference.
+    var ref: ListTLeaf.Type = .empty;
+    defer ref.deinit(allocator);
+    try ref.appendSlice(allocator, src.items[0 .. cut + 1]);
+    var expected_root: [32]u8 = undefined;
+    try ListTLeaf.hashTreeRoot(allocator, &ref, &expected_root);
+    var actual_root: [32]u8 = undefined;
+    try sliced.hashTreeRootInto(&actual_root);
+    try std.testing.expectEqualSlices(u8, &expected_root, &actual_root);
+}
+
+test "ListBasicTreeView chunked_leaf: sliceTo returns clone when index >= length-1" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 4096 });
+    defer pool.deinit();
+
+    const ListT = FixedListType(UintType(64), 1 << 20, .{ .chunked_leaf = true });
+    const item_count: usize = 100;
+
+    var src: ListT.Type = .empty;
+    defer src.deinit(allocator);
+    for (0..item_count) |i| try src.append(allocator, @as(u64, @intCast(i)));
+
+    const root_id = try ListT.tree.fromValue(&pool, &src);
+    var view = try ListT.TreeView.init(allocator, &pool, root_id);
+    defer view.deinit();
+
+    var sliced = try view.sliceTo(item_count - 1);
+    defer sliced.deinit();
+
+    try std.testing.expectEqual(item_count, try sliced.length());
+    try std.testing.expectEqualSlices(u8, view.getRoot().getRoot(&pool), sliced.getRoot().getRoot(&pool));
+}
+
+// Build a list root manually with chunked_leaf 0 real and chunked_leaf 1 forced to a
+// zero sentinel; length spans into chunked_leaf 1. Used to exercise defensive
+// `.zero` branches in iteratorReadonly and sliceTo that aren't reachable via
+// `fromValue` / `push` (those materialize on first write).
+fn buildChunkedLeafListWithZeroBoundary(
+    pool: *Node.Pool,
+    cl0_chunks: *align(64) const [ChunkedLeafType.K][32]u8,
+    list_length: usize,
+    chunked_leaf_subtree_depth: Depth,
+) !Node.Id {
+    const cl0_id = try pool.createChunkedLeaf(cl0_chunks, ChunkedLeafType.K);
+
+    // Build chunks subtree: only append chunked_leaf 0; finish() pads remaining
+    // positions at chunked_leaf level with ZeroHash[k_log2] sentinels.
+    var fc_it = Node.FillWithContentsIterator.initWithOffset(pool, chunked_leaf_subtree_depth, ChunkedLeafType.k_log2);
+    errdefer fc_it.deinit();
+    try fc_it.append(cl0_id);
+    const chunks_root = try fc_it.finish();
+    errdefer pool.unref(chunks_root);
+
+    // Mix in length: list_root = hash(chunks_root, length_leaf).
+    const length_leaf = try pool.createLeafFromUint(@intCast(list_length));
+    errdefer pool.unref(length_leaf);
+
+    var list_it = Node.FillWithContentsIterator.init(pool, 1);
+    errdefer list_it.deinit();
+    try list_it.append(chunks_root);
+    try list_it.append(length_leaf);
+    return try list_it.finish();
+}
+
+test "ListBasicTreeView chunked_leaf: iteratorReadonly handles zero-sentinel chunked_leaf" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 4096 });
+    defer pool.deinit();
+
+    const ListT = FixedListType(UintType(64), 1 << 20, .{ .chunked_leaf = true });
+
+    // Fill chunked_leaf 0 with deterministic non-zero u64 data: chunk i has u256 = i + 1.
+    var raw: [ChunkedLeafType.K][32]u8 align(64) = undefined;
+    @memset(std.mem.asBytes(&raw), 0);
+    for (0..ChunkedLeafType.K) |i| {
+        std.mem.writeInt(u256, &raw[i], @as(u256, @intCast(i + 1)), .little);
+    }
+
+    // length spans into chunked_leaf 1 (zero sentinel) — last 100 items live in
+    // the sparse region where iteratorReadonly hits its `.zero` branch.
+    const items_in_cl0: usize = ChunkedLeafType.K * 4; // 4096 (items_per_chunk = 4 for u64)
+    const items_in_cl1: usize = 100;
+    const item_count = items_in_cl0 + items_in_cl1;
+    const chunked_leaf_subtree_depth: Depth = @intCast(ListT.chunk_depth - ChunkedLeafType.k_log2);
+
+    const list_root = try buildChunkedLeafListWithZeroBoundary(&pool, &raw, item_count, chunked_leaf_subtree_depth);
+    var view = try ListT.TreeView.init(allocator, &pool, list_root);
+    defer view.deinit();
+
+    try std.testing.expectEqual(item_count, try view.length());
+
+    var it = view.iteratorReadonly(0);
+
+    // First chunked_leaf: real data. Each chunk holds u256 (chunk_idx + 1) = 4
+    // little-endian u64s, so item j in chunk c has value = (c+1) >> (j%4 * 64).
+    for (0..items_in_cl0) |item_idx| {
+        const got = try it.next();
+        const chunk_idx = item_idx / 4;
+        const u64_idx = item_idx % 4;
+        const u256_val: u256 = @intCast(chunk_idx + 1);
+        const expected: u64 = @truncate(u256_val >> @intCast(u64_idx * 64));
+        try std.testing.expectEqual(expected, got);
+    }
+
+    // Crossed into chunked_leaf 1 — zero sentinel. Iterator's `.zero` branch
+    // should yield zero values without dereferencing payload.
+    for (0..items_in_cl1) |_| {
+        const got = try it.next();
+        try std.testing.expectEqual(@as(u64, 0), got);
+    }
+}
+
+test "ListBasicTreeView chunked_leaf: sliceTo handles zero-sentinel boundary" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 4096 });
+    defer pool.deinit();
+
+    const ListT = FixedListType(UintType(64), 1 << 20, .{ .chunked_leaf = true });
+    const ListTLeaf = FixedListType(UintType(64), 1 << 20, .{});
+
+    var raw: [ChunkedLeafType.K][32]u8 align(64) = undefined;
+    @memset(std.mem.asBytes(&raw), 0);
+    for (0..ChunkedLeafType.K) |i| {
+        std.mem.writeInt(u256, &raw[i], @as(u256, @intCast(i * 7 + 13)), .little);
+    }
+
+    const items_in_cl0: usize = ChunkedLeafType.K * 4;
+    const items_in_cl1: usize = 200;
+    const item_count = items_in_cl0 + items_in_cl1;
+    const chunked_leaf_subtree_depth: Depth = @intCast(ListT.chunk_depth - ChunkedLeafType.k_log2);
+
+    const list_root = try buildChunkedLeafListWithZeroBoundary(&pool, &raw, item_count, chunked_leaf_subtree_depth);
+    var view = try ListT.TreeView.init(allocator, &pool, list_root);
+    defer view.deinit();
+
+    // Cut at index 4150 — boundary chunked_leaf is the zero-sentinel chunked_leaf 1.
+    const cut: usize = items_in_cl0 + 50;
+    var sliced = try view.sliceTo(cut);
+    defer sliced.deinit();
+
+    try std.testing.expectEqual(@as(usize, cut + 1), try sliced.length());
+
+    // The first 4096 items come from chunked_leaf 0 (real data); items 4096..cut
+    // come from the zero sentinel (zeros).
+    var ref_items = try allocator.alloc(u64, cut + 1);
+    defer allocator.free(ref_items);
+    for (0..items_in_cl0) |item_idx| {
+        const chunk_idx = item_idx / 4;
+        const u64_idx = item_idx % 4;
+        const u256_val: u256 = @intCast(chunk_idx * 7 + 13);
+        ref_items[item_idx] = @truncate(u256_val >> @intCast(u64_idx * 64));
+    }
+    @memset(ref_items[items_in_cl0..], 0);
+
+    var ref: ListTLeaf.Type = .empty;
+    defer ref.deinit(allocator);
+    try ref.appendSlice(allocator, ref_items);
+
+    var expected_root: [32]u8 = undefined;
+    try ListTLeaf.hashTreeRoot(allocator, &ref, &expected_root);
+
+    var actual_root: [32]u8 = undefined;
+    try sliced.hashTreeRootInto(&actual_root);
+    try std.testing.expectEqualSlices(u8, &expected_root, &actual_root);
+}
+
+test "ListBasicTreeView chunked_leaf: getAllInto sees uncommitted set" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 4096 });
+    defer pool.deinit();
+
+    const ListT = FixedListType(UintType(64), 1 << 20, .{ .chunked_leaf = true });
+    const item_count: usize = 5000;
+
+    var src: ListT.Type = .empty;
+    defer src.deinit(allocator);
+    try src.ensureTotalCapacity(allocator, item_count);
+    for (0..item_count) |i| try src.append(allocator, @as(u64, @intCast(i)));
+
+    const root_id = try ListT.tree.fromValue(&pool, &src);
+    var view = try ListT.TreeView.init(allocator, &pool, root_id);
+    defer view.deinit();
+
+    // Stage writes spanning two chunked_leaves (boundary at 4096 for u64).
+    try view.set(7, 9001);
+    try view.set(4500, 9002);
+
+    const out = try allocator.alloc(u64, item_count);
+    defer allocator.free(out);
+    _ = try view.getAllInto(out);
+
+    try std.testing.expectEqual(@as(u64, 9001), out[7]);
+    try std.testing.expectEqual(@as(u64, 9002), out[4500]);
+    try std.testing.expectEqual(@as(u64, 6), out[6]);
+    try std.testing.expectEqual(@as(u64, 4499), out[4499]);
+}
+
+test "ListBasicTreeView chunked_leaf: property test cross-commit set + push sequences" {
+    // Randomized set/push/commit cycles exercising Path 1/2/3. Root
+    // equivalence is blind to ChunkedLeaf.len (computeRoot hashes all K
+    // chunks and ignores it), so this also asserts every ChunkedLeaf.len and
+    // the trailing-zero invariant after each commit — covering the push-grow
+    // path that drifts `len`.
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 16384 });
+    defer pool.deinit();
+
+    const ListT = FixedListType(UintType(64), 1 << 20, .{ .chunked_leaf = true });
+    const K: usize = ChunkedLeafType.K;
+    const items_per_chunk: usize = 4; // 32 / @sizeOf(u64)
+    // +1 for the list length-mixin level above the data subtree.
+    const cl_depth: Depth = ListT.chunk_depth + 1 - ChunkedLeafType.k_log2;
+    // Grows past several ChunkedLeaves, last one partial.
+    const cap: usize = 3 * K * items_per_chunk + 50;
+
+    var prng = std.Random.DefaultPrng.init(0xCAFE_BEEF_DEAD_BABE);
+    const rand = prng.random();
+
+    var reference: std.ArrayListUnmanaged(u64) = .empty;
+    defer reference.deinit(allocator);
+    for (0..K * items_per_chunk + 7) |i| try reference.append(allocator, @as(u64, @intCast(i * 31 + 7)));
+
+    var src: ListT.Type = .empty;
+    defer src.deinit(allocator);
+    for (reference.items) |v| try src.append(allocator, v);
+
+    const root_id = try ListT.tree.fromValue(&pool, &src);
+    var view = try ListT.TreeView.init(allocator, &pool, root_id);
+    defer view.deinit();
+
+    const zero_chunk = [_]u8{0} ** 32;
+
+    for (0..20) |_| {
+        const n_writes = rand.intRangeAtMost(usize, 5, 30);
+        for (0..n_writes) |_| {
+            if (reference.items.len < cap and rand.boolean()) {
+                const val = rand.int(u64);
+                try reference.append(allocator, val);
+                try view.push(val);
+            } else {
+                const idx = rand.intRangeLessThan(usize, 0, reference.items.len);
+                const val = rand.int(u64);
+                reference.items[idx] = val;
+                try view.set(idx, val);
+            }
+        }
+
+        // Root equivalence to a freshly built reference tree.
+        var ref_src: ListT.Type = .empty;
+        defer ref_src.deinit(allocator);
+        for (reference.items) |v| try ref_src.append(allocator, v);
+        const ref_root_id = try ListT.tree.fromValue(&pool, &ref_src);
+        defer pool.unref(ref_root_id);
+        const view_root = (try view.hashTreeRoot()).*;
+        try std.testing.expectEqualSlices(u8, ref_root_id.getRoot(&pool), &view_root);
+
+        // Every ChunkedLeaf.len tracks the list length; chunks >= len are zero.
+        const total_chunks = (reference.items.len + items_per_chunk - 1) / items_per_chunk;
+        const cl_count = (total_chunks + K - 1) / K;
+        for (0..cl_count) |cl_idx| {
+            const cl = try view.chunks.state.root.getNodeAtDepth(&pool, cl_depth, cl_idx);
+            const expected: usize = @min(K, total_chunks - cl_idx * K);
+            try std.testing.expectEqual(@as(u16, @intCast(expected)), try cl.getChunkedLeafLen(&pool));
+            const chunks = try cl.getChunkedLeafChunks(&pool);
+            for (expected..K) |c| try std.testing.expectEqualSlices(u8, &zero_chunk, &chunks[c]);
+        }
+
+        // A single proof on the grown/mutated chunked_leaf list rebuilds to
+        // the same root — exercises proof through a push-grown ChunkedLeaf.
+        {
+            const elem = rand.intRangeLessThan(usize, 0, reference.items.len);
+            const gindex = Gindex.fromDepth(ListT.chunk_depth + 1, elem / items_per_chunk);
+            var single = try proof.createSingleProof(allocator, &pool, view.chunks.state.root, gindex);
+            defer single.deinit(allocator);
+
+            var proof_pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 256 });
+            defer proof_pool.deinit();
+            const rebuilt = try proof.createNodeFromSingleProof(&proof_pool, gindex, single.leaf, single.witnesses);
+            defer proof_pool.unref(rebuilt);
+            try std.testing.expectEqualSlices(u8, &view_root, rebuilt.getRoot(&proof_pool));
+        }
+
+        // Point reads stay correct.
+        for (0..16) |_| {
+            const i = rand.intRangeLessThan(usize, 0, reference.items.len);
+            try std.testing.expectEqual(reference.items[i], try view.get(i));
+        }
+    }
+
+    const final = try allocator.alloc(u64, reference.items.len);
+    defer allocator.free(final);
+    _ = try view.getAllInto(final);
+    try std.testing.expectEqualSlices(u64, reference.items, final);
+}
+
+test "ListBasicTreeView chunked_leaf: getAllInto sees uncommitted push" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 4096 });
+    defer pool.deinit();
+
+    const ListT = FixedListType(UintType(64), 1 << 20, .{ .chunked_leaf = true });
+
+    var src: ListT.Type = .empty;
+    defer src.deinit(allocator);
+    try src.append(allocator, 10);
+    try src.append(allocator, 20);
+
+    const root_id = try ListT.tree.fromValue(&pool, &src);
+    var view = try ListT.TreeView.init(allocator, &pool, root_id);
+    defer view.deinit();
+
+    try view.push(30);
+    try view.push(40);
+
+    const out = try allocator.alloc(u64, 4);
+    defer allocator.free(out);
+    _ = try view.getAllInto(out);
+
+    try std.testing.expectEqualSlices(u64, &.{ 10, 20, 30, 40 }, out);
+}
+
+test "ListBasicTreeView chunked_leaf: sliceTo doesn't leak pool nodes" {
+    // sliceTo allocates transient roots via setNodeAtDepth / truncate /
+    // setNode. Those calls don't consume their input root_node, so the
+    // caller must unref the intermediates. The test asserts node count
+    // returns to baseline after repeated sliceTo+deinit.
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 4096 });
+    defer pool.deinit();
+
+    const ListT = FixedListType(UintType(64), 1 << 20, .{ .chunked_leaf = true });
+    var src: ListT.Type = .empty;
+    defer src.deinit(allocator);
+    for (0..100) |i| try src.append(allocator, @as(u64, @intCast(i)));
+
+    const root_id = try ListT.tree.fromValue(&pool, &src);
+    var view = try ListT.TreeView.init(allocator, &pool, root_id);
+    defer view.deinit();
+
+    // One warmup so any one-time lazy initialization isn't counted.
+    {
+        var w = try view.sliceTo(50);
+        w.deinit();
+    }
+
+    const before = pool.getNodesInUse();
+    for (0..50) |_| {
+        var s = try view.sliceTo(50);
+        s.deinit();
+    }
+    const after = pool.getNodesInUse();
+
+    try std.testing.expectEqual(before, after);
+}
+
+test "ListBasicTreeView non-chunked_leaf: sliceTo doesn't leak pool nodes" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 4096 });
+    defer pool.deinit();
+
+    const ListT = FixedListType(UintType(64), 1 << 20, .{});
+    var src: ListT.Type = .empty;
+    defer src.deinit(allocator);
+    for (0..100) |i| try src.append(allocator, @as(u64, @intCast(i)));
+
+    const root_id = try ListT.tree.fromValue(&pool, &src);
+    var view = try ListT.TreeView.init(allocator, &pool, root_id);
+    defer view.deinit();
+
+    {
+        var w = try view.sliceTo(50);
+        w.deinit();
+    }
+
+    const before = pool.getNodesInUse();
+    for (0..50) |_| {
+        var s = try view.sliceTo(50);
+        s.deinit();
+    }
+    const after = pool.getNodesInUse();
+
+    try std.testing.expectEqual(before, after);
 }

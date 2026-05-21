@@ -238,9 +238,10 @@ pub const EpochTransitionCache = struct {
         var indices_to_eject: std.ArrayList(ValidatorIndex) = .empty;
 
         var total_active_stake_by_increment: u64 = 0;
-        const validators = try state.validatorsSlice(allocator);
-        defer allocator.free(validators);
-        const validator_count = validators.len;
+        var validators_view = try state.validators();
+        try validators_view.commit();
+        const validator_count = try validators_view.length();
+        var validators_it = validators_view.iteratorReadonly(0);
 
         // Clone before being mutated in processEffectiveBalanceUpdates
         try epoch_cache.beforeEpochTransition();
@@ -250,7 +251,8 @@ pub const EpochTransitionCache = struct {
         var next_epoch_shuffling_active_indices_length: usize = 0;
 
         var reused_cache = try getReusedEpochTransitionCache(allocator, io, validator_count);
-        for (validators, 0..) |validator, i| {
+        for (0..validator_count) |i| {
+            const validator = try validators_it.nextValuePtr();
             var flag: u8 = 0;
 
             if (validator.slashed) {
@@ -576,7 +578,7 @@ pub const EpochTransitionCache = struct {
 test "EpochTransitionCache - finalProcessEpoch" {
     const allocator = std.testing.allocator;
     const pool_size = 256 * 5;
-    var pool = try Node.Pool.init(allocator, pool_size);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = pool_size });
     defer pool.deinit();
 
     var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
@@ -600,7 +602,7 @@ test "EpochTransitionCache.beforeProcessEpoch" {
 
     inline for (validator_count_arr) |validator_count| {
         const pool_size = validator_count * 5;
-        var pool = try Node.Pool.init(allocator, pool_size);
+        var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = pool_size });
         defer pool.deinit();
 
         var test_state = try TestCachedBeaconState.init(allocator, &pool, validator_count);

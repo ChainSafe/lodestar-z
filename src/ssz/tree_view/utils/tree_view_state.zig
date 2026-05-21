@@ -55,7 +55,7 @@ pub const TreeViewState = struct {
             node,
         );
         if (opt_old_node) |old_node| {
-            if (old_node.value.getState(self.pool).getRefCount() == 0) {
+            if (old_node.value.getState(self.pool).refCount() == 0) {
                 self.pool.unref(old_node.value);
             }
         }
@@ -92,7 +92,7 @@ pub const TreeViewState = struct {
         var value_iter = self.children_nodes.valueIterator();
         while (value_iter.next()) |node_id_ptr| {
             const node_id = node_id_ptr.*;
-            if (node_id.getState(self.pool).getRefCount() == 0) {
+            if (node_id.getState(self.pool).refCount() == 0) {
                 self.pool.unref(node_id);
             }
         }
