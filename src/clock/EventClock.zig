@@ -8,6 +8,18 @@
 //! `start()` and `waitForSlot()` use `std.Io.concurrent` so a backend
 //! that can't guarantee concurrent execution surfaces as
 //! `error.ConcurrencyUnavailable` rather than deadlocking.
+//!
+//! No mutex is used: under a single-fiber backend the only context switches
+//! are at `await`/`sleep` yield points, and every read-modify of shared state
+//! (listeners, waiter queue, `stopped`) completes synchronously between yields.
+//! Two invariants make this safe:
+//!   1. Listener callbacks must NOT yield (no `await`/`sleep`); they run to
+//!      completion inside an emit so the listener/waiter state can't be mutated
+//!      mid-emit. The snapshot copy further decouples iteration from `offSlot`.
+//!   2. `cancel()` removes its waiter from the queue *before* it yields, so a
+//!      concurrent `dispatchWaiters` can no longer observe it.
+//! A multi-executor backend (zio with `executors > 1`, or `std.Io.Threaded`)
+//! would break both and require real locking.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
