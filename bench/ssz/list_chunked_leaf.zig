@@ -268,9 +268,8 @@ pub fn main(init: std.process.Init) !void {
     var bench = zbench.Benchmark.init(allocator, .{});
     defer bench.deinit();
 
-    // Shared pool sized for ~1M chunks across both layouts; allocator lanes
-    // use the InitOptions defaults, same as the production bindings.
-    var pool = try Node.Pool.init(.{ .pool_size = 8_000_000 });
+    // Pin c_allocator for the small-object lane, like the production bindings.
+    var pool = try Node.Pool.init(.{ .allocator = std.heap.c_allocator, .pool_size = 8_000_000 });
     defer pool.deinit();
 
     try populateInput(allocator);
