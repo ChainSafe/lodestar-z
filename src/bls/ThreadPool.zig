@@ -489,7 +489,7 @@ pub fn aggregateWithRandomness(
     if (randomness.len < pks.len * 32) return BlstError.AggrTypeMismatch;
 
     if (pks_validate) for (pks) |pk| try pk.validate();
-    if (sigs_groupcheck) for (sigs) |sig| try sig.validate(false);
+    if (sigs_groupcheck) for (sigs) |sig| try sig.validate(true);
 
     var scalars_refs: [blst.MAX_AGGREGATE_PER_JOB]*const u8 = undefined;
     for (0..pks.len) |i| scalars_refs[i] = &randomness[i * 32];
