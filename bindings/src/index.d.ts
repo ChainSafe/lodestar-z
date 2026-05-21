@@ -11,6 +11,16 @@ interface Checkpoint {
   root: Uint8Array;
 }
 
+interface VoluntaryExit {
+  epoch: number;
+  validatorIndex: number;
+}
+
+interface SignedVoluntaryExit {
+  message: VoluntaryExit;
+  signature: Uint8Array;
+}
+
 interface Eth1Data {
   depositRoot: Uint8Array;
   depositCount: number;
@@ -195,8 +205,8 @@ declare class BeaconStateView {
   // computeSyncCommitteeRewards(block: BeaconBlock, validatorIds?: (number | string)[]): SyncCommitteeRewards;
   // getLatestWeakSubjectivityCheckpointEpoch(): number;
 
-  getVoluntaryExitValidity(signedVoluntaryExitBytes: Uint8Array, verifySignature: boolean): VoluntaryExitValidity;
-  isValidVoluntaryExit(signedVoluntaryExitBytes: Uint8Array, verifySignature: boolean): boolean;
+  getVoluntaryExitValidity(signedVoluntaryExit: SignedVoluntaryExit, verifySignature: boolean): VoluntaryExitValidity;
+  isValidVoluntaryExit(signedVoluntaryExit: SignedVoluntaryExit, verifySignature: boolean): boolean;
 
   getFinalizedRootProof(): Uint8Array[];
   // getSyncCommitteesWitness(): any;
