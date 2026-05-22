@@ -8,6 +8,7 @@ import {
   aggregateSerializedPublicKeys,
   aggregateVerify,
   aggregateWithRandomness,
+  asyncAggregateWithRandomness,
   fastAggregateVerify,
   verify,
   verifyMultipleAggregateSignatures,
@@ -355,6 +356,22 @@ describe("blst", () => {
       const input = sets.map((s) => ({pk: s.pk, sig: s.sig.toBytes()}));
       input[2].sig = new Uint8Array(96).fill(0xff);
       expect(() => aggregateWithRandomness(input)).toThrow();
+    });
+  });
+
+  describe("asyncAggregateWithRandomness", () => {
+    it("should be exported as a function", () => {
+      expect(typeof asyncAggregateWithRandomness).toBe("function");
+    });
+
+    it("should return a Promise that resolves with aggregated pk and sig", async () => {
+      const {sets} = getTestSetsSameMessage(8);
+      const input = sets.map((s) => ({pk: s.pk, sig: s.sig.toBytes()}));
+      const result = await asyncAggregateWithRandomness(input);
+      expect(result).toHaveProperty("pk");
+      expect(result).toHaveProperty("sig");
+      expect(result.pk).toBeInstanceOf(PublicKey);
+      expect(result.sig).toBeInstanceOf(Signature);
     });
   });
 });
