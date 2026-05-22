@@ -710,23 +710,23 @@ fn asyncAggRand_execute(_: napi.Env, data: *AsyncAggRandData) void {
 /// Ran on the JS thread once the worker has finished. Always settles the
 /// promise — `settle` does the resolve/reject; if it errors we fall back to a
 /// bare reject so callers never see a dangling Promise.
-fn asyncAggRand_complete(env: napi.Env, stat: napi.status.Status, data: *AsyncAggRandData) void {
+fn asyncAggRand_complete(env: napi.Env, status: napi.status.Status, data: *AsyncAggRandData) void {
     defer {
         napi.status.check(napi.c.napi_delete_async_work(env.env, data.work)) catch {};
         data.destroy();
     }
 
-    settle(env, stat, data) catch {
+    settle(env, status, data) catch {
         // Catch all rejection: if we reach this point we might want
         // better errors upstream
         rejectWithError(env, data.deferred, "asyncAggregateWithRandomness", "InternalError") catch {};
     };
 }
 
-fn settle(env: napi.Env, stat: napi.status.Status, data: *AsyncAggRandData) !void {
-    if (stat != .ok) {
+fn settle(env: napi.Env, status: napi.status.Status, data: *AsyncAggRandData) !void {
+    if (status != .ok) {
         // libuv's async work itself failed (e.g. cancelled), not crypto.
-        return rejectWithError(env, data.deferred, "asyncAggregateWithRandomness/asyncWork", @tagName(stat));
+        return rejectWithError(env, data.deferred, "asyncAggregateWithRandomness/asyncWork", @tagName(status));
     }
     if (data.err) |err| {
         // Worker captured a Zig error — surface its name as the JS Error.code
