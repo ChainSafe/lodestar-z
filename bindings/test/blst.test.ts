@@ -364,7 +364,15 @@ describe("blst", () => {
       expect(typeof asyncAggregateWithRandomness).toBe("function");
     });
 
-    it("should return a Promise that resolves with aggregated pk and sig", async () => {
+    it("should return a Promise", () => {
+      const {sets} = getTestSetsSameMessage(2);
+      const input = sets.map((s) => ({pk: s.pk, sig: s.sig.toBytes()}));
+      const result = asyncAggregateWithRandomness(input);
+      expect(result).toBeInstanceOf(Promise);
+      return result;
+    });
+
+    it("should resolve with aggregated pk and sig instances", async () => {
       const {sets} = getTestSetsSameMessage(8);
       const input = sets.map((s) => ({pk: s.pk, sig: s.sig.toBytes()}));
       const result = await asyncAggregateWithRandomness(input);
@@ -372,6 +380,63 @@ describe("blst", () => {
       expect(result).toHaveProperty("sig");
       expect(result.pk).toBeInstanceOf(PublicKey);
       expect(result.sig).toBeInstanceOf(Signature);
+    });
+
+    it("should produce a valid aggregated signature", async () => {
+      const {msg, sets} = getTestSetsSameMessage(8);
+      const input = sets.map((s) => ({pk: s.pk, sig: s.sig.toBytes()}));
+      const {pk, sig} = await asyncAggregateWithRandomness(input);
+      expect(verify(msg, pk, sig, false, false)).toBe(true);
+    });
+
+    it("should work with a single set", async () => {
+      const {msg, sets} = getTestSetsSameMessage(1);
+      const input = sets.map((s) => ({pk: s.pk, sig: s.sig.toBytes()}));
+      const {pk, sig} = await asyncAggregateWithRandomness(input);
+      expect(verify(msg, pk, sig, false, false)).toBe(true);
+    });
+
+    it("should fail verification against a different message", async () => {
+      const {sets} = getTestSetsSameMessage(4);
+      const input = sets.map((s) => ({pk: s.pk, sig: s.sig.toBytes()}));
+      const {pk, sig} = await asyncAggregateWithRandomness(input);
+      const wrongMessage = new Uint8Array(32).fill(0);
+      expect(verify(wrongMessage, pk, sig, false, false)).toBe(false);
+    });
+
+    it("should match the synchronous aggregateWithRandomness verification result", async () => {
+      const {msg, sets} = getTestSetsSameMessage(6);
+      const input = sets.map((s) => ({pk: s.pk, sig: s.sig.toBytes()}));
+      const syncResult = aggregateWithRandomness(input);
+      const asyncResult = await asyncAggregateWithRandomness(input);
+      // Randomness differs between calls so signatures aren't byte-equal,
+      // but both must verify against the shared message.
+      expect(verify(msg, syncResult.pk, syncResult.sig, false, false)).toBe(true);
+      expect(verify(msg, asyncResult.pk, asyncResult.sig, false, false)).toBe(true);
+    });
+
+    it("should reject on empty input", async () => {
+      await expect(Promise.resolve().then(() => asyncAggregateWithRandomness([]))).rejects.toThrow();
+    });
+
+    it("should reject on invalid signature bytes", async () => {
+      const {sets} = getTestSetsSameMessage(4);
+      const input = sets.map((s) => ({pk: s.pk, sig: s.sig.toBytes()}));
+      input[2].sig = new Uint8Array(96).fill(0xff);
+      await expect(Promise.resolve().then(() => asyncAggregateWithRandomness(input))).rejects.toThrow();
+    });
+
+    it("should resolve concurrent invocations correctly", async () => {
+      const {msg, sets} = getTestSetsSameMessage(8);
+      const input = sets.map((s) => ({pk: s.pk, sig: s.sig.toBytes()}));
+      const results = await Promise.all([
+        asyncAggregateWithRandomness(input),
+        asyncAggregateWithRandomness(input),
+        asyncAggregateWithRandomness(input),
+      ]);
+      for (const {pk, sig} of results) {
+        expect(verify(msg, pk, sig, false, false)).toBe(true);
+      }
     });
   });
 });
