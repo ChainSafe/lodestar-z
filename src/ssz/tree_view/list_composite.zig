@@ -59,7 +59,7 @@ pub fn ListCompositeTreeView(comptime ST: type) type {
 
         /// Clone this list view, optionally transferring its element-view cache to the clone.
         /// With `transfer_cache = true`, element pointers from earlier get()/getReadonly() are
-        /// INVALIDATED (cached `changed` elements are deinited; get() marks changed even on a read).
+        /// INVALIDATED (cached `changed` elements are deinited; get() marks changed on read).
         pub fn clone(self: *Self, opts: CloneOpts) !*Self {
             const ptr = try self.allocator.create(Self);
             errdefer self.allocator.destroy(ptr);
@@ -156,7 +156,8 @@ pub fn ListCompositeTreeView(comptime ST: type) type {
 
         /// On success takes ownership of `value` and deinits the element cached for `index`,
         /// INVALIDATING any earlier get()/getReadonly() of it. On error.IndexOutOfBounds `value`
-        /// is NOT consumed — the caller retains it (ownership transfers only once handed to chunks).
+        /// is NOT consumed — the caller retains it (ownership transfers only once handed
+        /// to chunks).
         pub fn set(self: *Self, index: usize, value: Element) !void {
             const list_length = try self.length();
             if (index >= list_length) return error.IndexOutOfBounds;
@@ -247,7 +248,8 @@ pub fn ListCompositeTreeView(comptime ST: type) type {
                     self.elem_index += 1;
                     return value;
                 } else {
-                    // variable-size: toValue reads `out` (resizes embedded ArrayLists), so init first
+                    // Variable-size: toValue reads `out` (resizes embedded ArrayLists), so
+                    // init it first.
                     var value: ST.Element.Type = if (comptime @hasDecl(ST.Element, "default_value"))
                         ST.Element.default_value
                     else
@@ -274,7 +276,8 @@ pub fn ListCompositeTreeView(comptime ST: type) type {
                 return error.LengthOverLimit;
             }
 
-            // truncateAfterIndex does not consume its input: `chunk_root` is a fresh orphan root to unref
+            // truncateAfterIndex does not consume its input: `chunk_root` is a fresh
+            // orphan root to unref.
             const chunk_root = try Node.Id.truncateAfterIndex(self.chunks.state.root, self.chunks.state.pool, chunk_depth, index);
             defer self.chunks.state.pool.unref(chunk_root);
 
@@ -402,7 +405,7 @@ test "TreeView composite list sliceTo truncates elements" {
     try std.testing.expectEqual(checkpoints[1].epoch, roundtrip.items[1].epoch);
 }
 
-// pool-slot leaks are invisible to std.testing.allocator, so assert getNodesInUse() baseline
+// Pool-slot leaks are invisible to std.testing.allocator, so assert getNodesInUse() baseline.
 test "TreeView composite list sliceTo does not leak pool nodes" {
     const allocator = std.testing.allocator;
     var pool = try Node.Pool.init(allocator, 512);
@@ -467,7 +470,7 @@ const OomDoubleFree = struct {
     }
 };
 
-// set takes ownership of the view, so setValue must not also deinit it; sweep OOM points
+// set takes ownership of the view, so setValue must not also deinit it; sweep OOM points.
 test "TreeView composite list setValue - OOM does not double-free the element view" {
     const ListType = FixedListType(Checkpoint, 16);
 
@@ -492,7 +495,7 @@ test "TreeView composite list setValue - OOM does not double-free the element vi
         };
         defer view.deinit();
 
-        // under test: no path double-frees (the OOM itself is fine)
+        // Under test: no path double-frees (the OOM itself is fine).
         view.setValue(0, &newval) catch {};
         try std.testing.expect(!oom.double_free);
     }

@@ -223,7 +223,7 @@ pub fn ListBasicTreeView(comptime ST: type) type {
                 chunk_index,
                 truncated_chunk_node.?,
             );
-            // setNodeAtDepth does not consume `updated`: a fresh orphan root to unref
+            // setNodeAtDepth does not consume `updated`: a fresh orphan root to unref.
             defer self.chunks.state.pool.unref(updated);
             truncated_chunk_node = null;
 
@@ -763,7 +763,7 @@ test "TreeView basic list sliceTo matches incremental snapshots" {
     }
 }
 
-// pool-slot leaks are invisible to std.testing.allocator, so assert getNodesInUse() baseline
+// Pool-slot leaks are invisible to std.testing.allocator, so assert getNodesInUse() baseline.
 test "TreeView basic list sliceTo does not leak pool nodes" {
     const allocator = std.testing.allocator;
     var pool = try Node.Pool.init(allocator, 2048);
@@ -785,7 +785,7 @@ test "TreeView basic list sliceTo does not leak pool nodes" {
     for (0..15) |idx| {
         var sliced = try view.sliceTo(idx);
         sliced.deinit();
-        // a leftover delta means an intermediate orphan root was never released
+        // A leftover delta means an intermediate orphan root was never released.
         try std.testing.expectEqual(baseline, pool.getNodesInUse());
     }
 }

@@ -241,13 +241,13 @@ pub const Pool = struct {
         self.nodes.items(.left)[@intFromEnum(node_id)] = left_id;
         self.nodes.items(.right)[@intFromEnum(node_id)] = right_id;
         states[@intFromEnum(node_id)] = State.branch_lazy.initRefCount();
-        // on ref overflow, free the half-built slot so it doesn't leak
+        // On ref overflow, free the half-built slot so it doesn't leak.
         errdefer {
             states[@intFromEnum(node_id)] = State.initNextFree(self.next_free_node);
             self.next_free_node = node_id;
         }
         try self.refUnsafe(left_id, states);
-        // mirror refUnsafe's zero-node guard: only non-zero nodes were incremented
+        // Mirror refUnsafe's zero-node guard: only non-zero nodes were incremented.
         errdefer if (!states[@intFromEnum(left_id)].isZero()) {
             _ = states[@intFromEnum(left_id)].decRefCount();
         };
@@ -268,8 +268,8 @@ pub const Pool = struct {
             if (@intFromEnum(self.next_free_node) == self.nodes.len) {
                 const remaining = out.len - i;
                 self.preheat(@intCast(remaining)) catch |err| {
-                    // push popped slots back on a preheat OOM; refcount 0 so push directly
-                    // rather than unref (which would underflow)
+                    // Push popped slots back on a preheat OOM; refcount 0 so push directly
+                    // rather than unref (which would underflow).
                     const states_now = self.nodes.items(.state);
                     for (out[0..i]) |id| {
                         states_now[@intFromEnum(id)] = State.initNextFree(self.next_free_node);
@@ -627,7 +627,7 @@ pub const Id = enum(u32) {
         if (indices.len == 0) {
             return root_node;
         }
-        // strictly-ascending is a precondition (unsorted/dup silently corrupts the tree); guard
+        // Strictly-ascending is a precondition (unsorted/dup silently corrupts the tree); guard
         // it in safe builds. Must run after the empty-check: `for (1..0)` panics in safe builds.
         if (std.debug.runtime_safety) {
             for (1..indices.len) |k| std.debug.assert(indices[k - 1] < indices[k]);
@@ -641,12 +641,13 @@ pub const Id = enum(u32) {
 
         const path_len = base_gindex.pathLen();
 
-        // zero ids so an early-iteration error's errdefer (pool.free) no-ops on the
-        // not-yet-alloc'd prefix instead of unref-ing a garbage Id (C1)
+        // Zero ids so an early-iteration error's errdefer (pool.free) no-ops on the
+        // not-yet-alloc'd prefix instead of unref-ing a garbage Id (C1).
         var path_parents_buf: [max_depth]Id = @splat(@as(Id, @enumFromInt(0)));
         // at each level, there is at most 1 unfinalized parent per traversal
         // "unfinalized" means it may or may not be part of the new tree.
-        // must start all-null: the unref loop reads unwritten right-move slots; undefined could unref a garbage Id (UAF)
+        // Must start all-null: the unref loop reads unwritten right-move slots; an
+        // undefined `?Id` could read non-null and unref a garbage Id (UAF).
         var unfinalized_parents_buf: [max_depth]?Id = @splat(null);
         var path_lefts_buf: [max_depth]Id = undefined;
         var path_rights_buf: [max_depth]Id = undefined;
@@ -869,12 +870,13 @@ pub const Id = enum(u32) {
 
         const path_len = base_gindex.pathLen();
 
-        // zero ids so an early-iteration error's errdefer (pool.free) no-ops on the
-        // not-yet-alloc'd prefix instead of unref-ing a garbage Id (C1)
+        // Zero ids so an early-iteration error's errdefer (pool.free) no-ops on the
+        // not-yet-alloc'd prefix instead of unref-ing a garbage Id (C1).
         var path_parents_buf: [max_depth]Id = @splat(@as(Id, @enumFromInt(0)));
         // at each level, there is at most 1 unfinalized parent per traversal
         // "unfinalized" means it may or may not be part of the new tree.
-        // must start all-null: the unref loop reads unwritten right-move slots; undefined could unref a garbage Id (UAF)
+        // Must start all-null: the unref loop reads unwritten right-move slots; an
+        // undefined `?Id` could read non-null and unref a garbage Id (UAF).
         var unfinalized_parents_buf: [max_depth]?Id = @splat(null);
         var path_lefts_buf: [max_depth]Id = undefined;
         var path_rights_buf: [max_depth]Id = undefined;
@@ -1264,8 +1266,8 @@ pub const FillWithContentsIterator = struct {
         var carry = node_id;
         for (0..self.depth) |level| {
             if (self.lefts[level]) |left| {
-                // build before dropping `left` so deinit still reclaims it on OOM; unref the orphaned
-                // `carry`, unless it aliases `left` (all-default pairs one zero node with itself)
+                // Build before dropping `left` so deinit still reclaims it on OOM; unref the orphaned
+                // `carry`, unless it aliases `left` (all-default pairs a zero node with itself).
                 const branch = self.pool.createBranch(left, carry) catch |err| {
                     if (carry != left) self.pool.unref(carry);
                     return err;
@@ -1302,8 +1304,8 @@ pub const FillWithContentsIterator = struct {
         // Starting from the lowest non-null, build upwards with zero-nodes.
         for (start_level..self.depth) |level| {
             if (self.lefts[level]) |left| {
-                // keep `left` until the branch is built; unref the in-progress `carry` on OOM
-                // (never aliases `left` here)
+                // Keep `left` until the branch is built; unref the in-progress `carry` on OOM
+                // (never aliases `left` here).
                 const branch = self.pool.createBranch(left, carry) catch |err| {
                     self.pool.unref(carry);
                     return err;

@@ -172,8 +172,8 @@ pub fn CompositeChunks(
         }
 
         /// Clone, optionally transferring the child-view cache to `out`.
-        /// With `transfer_cache = true`, child pointers from earlier get()/getReadonly() on this
-        /// view are INVALIDATED (cached `changed` children are deinited; get() marks changed even on a read).
+        /// With `transfer_cache = true`, pointers from earlier get()/getReadonly() on this view
+        /// are INVALIDATED (cached `changed` children are deinited; get() marks changed on read).
         pub fn clone(self: *Self, opts: CloneOpts, out: *Self) !void {
             if (!opts.transfer_cache) {
                 try self.state.clone(opts, &out.state);
@@ -212,8 +212,8 @@ pub fn CompositeChunks(
                 return;
             }
 
-            // reserve up front so recording each committed root is infallible: a getOrPut OOM
-            // after a child committed would strand a stale entry on its now-unref'd old root
+            // Reserve up front so recording each committed root is infallible: a getOrPut OOM
+            // after a child committed would strand a stale entry on its now-unref'd old root.
             try self.state.children_nodes.ensureUnusedCapacity(self.state.allocator, @intCast(self.state.changed.count()));
 
             // Flush child views into children_nodes so commitNodes can handle them uniformly.
@@ -255,8 +255,9 @@ pub fn CompositeChunks(
         /// index — set would deinit a view the cache still references (double-free).
         pub fn set(self: *Self, index: usize, value: ElementPtr) !void {
             const gindex = Gindex.fromDepth(chunk_depth, index);
-            // reserve before storing so the stores are infallible: an OOM mid-store would drop the
-            // owned `value` (caller won't deinit it) and could leave `changed` keyed without `children_data`
+            // Reserve before storing so the stores are infallible: an OOM mid-store would drop the
+            // owned `value` (caller won't deinit it) and could leave `changed` keyed without
+            // `children_data`.
             {
                 errdefer value.deinit();
                 try self.state.changed.ensureUnusedCapacity(self.state.allocator, 1);
@@ -311,8 +312,8 @@ pub fn CompositeChunks(
         /// Set a child from an SSZ value type.
         pub fn setValue(self: *Self, index: usize, value: *const Value) !void {
             const root = try ST.Element.tree.fromValue(self.state.pool, value);
-            // only free `root` on init failure; once init succeeds `set` owns `child_view` on all
-            // paths, so setValue must not also deinit it (would double-free on set's OOM)
+            // Only free `root` on init failure; once init succeeds `set` owns `child_view` on all
+            // paths, so setValue must not also deinit it (would double-free on set's OOM).
             const child_view = Element.init(self.state.allocator, self.state.pool, root) catch |err| {
                 self.state.pool.unref(root);
                 return err;

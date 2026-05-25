@@ -230,7 +230,7 @@ pub const EpochTransitionCache = struct {
 
         const slashings_epoch = current_epoch + @divFloor(preset.EPOCHS_PER_SLASHINGS_VECTOR, 2);
 
-        // moved into the returned cache on success; errdefer only fires before the return
+        // Moved into the returned cache on success; errdefer only fires before the return.
         var indices_to_slash: std.ArrayList(ValidatorIndex) = .empty;
         errdefer indices_to_slash.deinit(allocator);
         var indices_eligible_for_activation_queue: std.ArrayList(ValidatorIndex) = .empty;

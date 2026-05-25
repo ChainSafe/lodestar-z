@@ -534,12 +534,12 @@ pub const EpochCache = struct {
     pub fn afterProcessEpoch(self: *EpochCache, state: *AnyBeaconState, epoch_transition_cache: *const EpochTransitionCache) !void {
         const upcoming_epoch = self.epoch + 1;
         const epoch_after_upcoming = upcoming_epoch + 1;
-        // read before the rotation commit below: no fallible call may run after it, or the
-        // next_shuffling errdefer outlives the commit and double-frees the Rc-owned shuffling
+        // Read before the rotation commit below: no fallible call may run after it, or the
+        // next_shuffling errdefer outlives the commit and double-frees the Rc-owned shuffling.
         const slot = try state.slot();
 
-        // allocate before the rotation commit: a mid-rotation OOM would leave current/next
-        // aliasing one Rc → double-unref on deinit
+        // Allocate before the rotation commit: a mid-rotation OOM would leave current/next
+        // aliasing one Rc, double-unref on deinit.
         const next_shuffling_active_indices = try self.allocator.alloc(ValidatorIndex, epoch_transition_cache.next_shuffling_active_indices.len);
         std.mem.copyForwards(ValidatorIndex, next_shuffling_active_indices, epoch_transition_cache.next_shuffling_active_indices);
         const next_shuffling = try computeEpochShuffling(
@@ -551,7 +551,7 @@ pub const EpochCache = struct {
         errdefer next_shuffling.deinit();
         const next_shuffling_rc = try EpochShufflingRc.init(self.allocator, next_shuffling);
 
-        // infallible from here: moves + unref only
+        // Infallible from here: moves + unref only.
         self.previous_shuffling.unref();
         self.previous_shuffling = self.current_shuffling;
         self.current_shuffling = self.next_shuffling;
@@ -620,8 +620,8 @@ pub const EpochCache = struct {
     }
 
     pub fn beforeEpochTransition(self: *EpochCache) !void {
-        // build the new Rc before unref-ing the old: unref-first then OOM would leave the
-        // field pointing at a freed Rc → double-unref on deinit
+        // Build the new Rc before unref-ing the old: unref-first then OOM would leave the
+        // field pointing at a freed Rc, double-unref on deinit.
         var effective_balance_increments = try self.effective_balance_increments.get().clone(self.allocator);
         errdefer effective_balance_increments.deinit(self.allocator);
         const new_rc = try EffectiveBalanceIncrementsRc.init(self.allocator, effective_balance_increments);
@@ -782,17 +782,17 @@ pub const EpochCache = struct {
         std.debug.assert(index <= self.index_to_pubkey.items.len);
         const appending = index == self.index_to_pubkey.items.len;
 
-        // fallible work (decompress + reservations) before mutating either map: the two are
-        // shared across states and syncPubkeys asserts equal counts, so a mid-update OOM desyncs them
-        const pk = try bls.PublicKey.uncompress(pubkey);
+        // Fallible work (decompress + reservations) before mutating either map: the two are shared
+        // across states and syncPubkeys asserts equal counts, so a mid-update OOM desyncs them.
+        const public_key = try bls.PublicKey.uncompress(pubkey);
         try self.pubkey_to_index.ensureUnusedCapacity(1);
         if (appending) try self.index_to_pubkey.ensureUnusedCapacity(self.allocator, 1);
 
         self.pubkey_to_index.putAssumeCapacity(pubkey.*, index);
         if (appending) {
-            self.index_to_pubkey.appendAssumeCapacity(pk);
+            self.index_to_pubkey.appendAssumeCapacity(public_key);
         } else {
-            self.index_to_pubkey.items[index] = pk;
+            self.index_to_pubkey.items[index] = public_key;
         }
     }
 
@@ -884,8 +884,8 @@ pub const EpochCache = struct {
             @memcpy(new_increments.items[0..old.items.len], old.items);
             @memset(new_increments.items[old.items.len..new_len], 0);
 
-            // build the new Rc before unref-ing the old (shared with clones): unref-first then
-            // OOM would leave the field on a freed Rc → double-free from a discarded post-state
+            // Build the new Rc before unref-ing the old (shared with clones): unref-first then
+            // OOM would leave the field on a freed Rc, double-free from a discarded post-state.
             const new_rc = try EffectiveBalanceIncrementsRc.init(allocator, new_increments);
             self.effective_balance_increments.unref();
             self.effective_balance_increments = new_rc;
