@@ -28,7 +28,7 @@ pub fn getBlsToExecutionChangeSignatureSet(config: *const BeaconConfig, signed_b
     };
 }
 
-pub fn getBlsToExecutionChangeSignatureSets(allocator: std.mem.Allocator, config: *const BeaconConfig, signed_block: *const AnySignedBeaconBlock, out: std.ArrayList(SingleSignatureSet)) !void {
+pub fn getBlsToExecutionChangeSignatureSets(allocator: std.mem.Allocator, config: *const BeaconConfig, signed_block: *const AnySignedBeaconBlock, out: *std.ArrayList(SingleSignatureSet)) !void {
     const bls_to_execution_changes = signed_block.beaconBlock().beaconBlockBody().blsToExecutionChanges().items;
     for (bls_to_execution_changes) |signed_bls_to_execution_change| {
         const signature_set = try getBlsToExecutionChangeSignatureSet(config, signed_bls_to_execution_change);

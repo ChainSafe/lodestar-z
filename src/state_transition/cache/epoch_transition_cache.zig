@@ -230,12 +230,16 @@ pub const EpochTransitionCache = struct {
 
         const slashings_epoch = current_epoch + @divFloor(preset.EPOCHS_PER_SLASHINGS_VECTOR, 2);
 
+        // moved into the returned cache on success; errdefer only fires before the return
         var indices_to_slash: std.ArrayList(ValidatorIndex) = .empty;
+        errdefer indices_to_slash.deinit(allocator);
         var indices_eligible_for_activation_queue: std.ArrayList(ValidatorIndex) = .empty;
+        errdefer indices_eligible_for_activation_queue.deinit(allocator);
         // we will extract indices_eligible_for_activation from validator_activation_list later
         var validator_activation_list: ValidatorActivationList = .empty;
         defer validator_activation_list.deinit(allocator);
         var indices_to_eject: std.ArrayList(ValidatorIndex) = .empty;
+        errdefer indices_to_eject.deinit(allocator);
 
         var total_active_stake_by_increment: u64 = 0;
         const validators = try state.validatorsSlice(allocator);
@@ -506,6 +510,7 @@ pub const EpochTransitionCache = struct {
 
         // zig specific map function similar to "indicesEligibleForActivation.map(({validatorIndex}) => validatorIndex)"
         var indices_eligible_for_activation = try std.ArrayList(ValidatorIndex).initCapacity(allocator, validator_activation_list.items.len);
+        errdefer indices_eligible_for_activation.deinit(allocator);
         for (validator_activation_list.items) |activation| {
             try indices_eligible_for_activation.append(allocator, activation.validator_index);
         }

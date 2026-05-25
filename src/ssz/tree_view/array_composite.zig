@@ -133,6 +133,8 @@ pub fn ArrayCompositeTreeView(comptime ST: type) type {
             return elem.getRoot().getRoot(self.chunks.state.pool);
         }
 
+        /// On success, takes ownership of `value`. On the `error.IndexOutOfBounds` precondition
+        /// error, `value` is NOT consumed — the caller retains ownership and must deinit it.
         pub fn set(self: *Self, index: usize, value: Element) !void {
             if (index >= length) return error.IndexOutOfBounds;
             try self.chunks.set(index, value);

@@ -91,11 +91,15 @@ pub const Pool = struct {
         return n;
     }
 
+    /// Destroy a view, returning its slot to the free list. The view MUST have no live children
+    /// (destroy bottom-up): a survivor holds `parent.root_view == view_id` and would alias the
+    /// recycled slot's next view. The assert fails fast on that in safe builds.
     pub fn destroy(self: *Pool, view_id: View.Id) void {
         const view = &self.views.items[@intFromEnum(view_id)];
         // delink the view from its children and deinit the children hashmap
         if (self.parent_views.fetchRemove(view_id)) |kv| {
             var children = kv.value;
+            std.debug.assert(children.count() == 0);
             children.deinit(self.allocator);
         }
         // delink the view from its parent
@@ -106,6 +110,9 @@ pub const Pool = struct {
         }
         // unref the root node
         self.node_pool.unref(view.root_node);
+        // poison: a recycled slot must not be mistaken for a live view with a stale parent link
+        view.parent = null;
+        view.root_node = @enumFromInt(0);
         // push to the free list
         view.next_free = self.next_free;
         self.next_free = view_id;

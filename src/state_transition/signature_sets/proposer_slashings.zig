@@ -43,16 +43,17 @@ pub fn getProposerSlashingSignatureSets(
 
 pub fn proposerSlashingsSignatureSets(
     comptime fork: ForkSeq,
+    allocator: std.mem.Allocator,
     config: *const BeaconConfig,
     epoch_cache: *const EpochCache,
     state: *const BeaconState(fork),
     signed_block: *const ForkTypes(fork).SignedBeaconBlock.Type,
-    out: std.ArrayList(SingleSignatureSet),
+    out: *std.ArrayList(SingleSignatureSet),
 ) !void {
     const proposer_slashings = signed_block.message.body.proposer_slashings.items;
     for (proposer_slashings) |*proposer_slashing| {
         const signature_sets = try getProposerSlashingSignatureSets(fork, config, epoch_cache, state, proposer_slashing);
-        try out.append(signature_sets[0]);
-        try out.append(signature_sets[1]);
+        try out.append(allocator, signature_sets[0]);
+        try out.append(allocator, signature_sets[1]);
     }
 }
