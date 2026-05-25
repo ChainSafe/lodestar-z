@@ -132,3 +132,235 @@ pub fn getRewardsAndPenaltiesAltair(
         }
     }
 }
+
+const testing = std.testing;
+const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
+const Node = @import("persistent_merkle_tree").Node;
+const attester_status_mod = @import("../utils/attester_status.zig");
+
+test "getRewardsAndPenaltiesAltair - all validators participating" {
+    const allocator = testing.allocator;
+    var pool = try Node.Pool.init(allocator, 50_000);
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 64);
+    defer test_state.deinit();
+
+    const validator_count = 64;
+    var rewards: [validator_count]u64 = undefined;
+    var penalties: [validator_count]u64 = undefined;
+
+    try getRewardsAndPenaltiesAltair(
+        .electra,
+        allocator,
+        test_state.cached_state.config,
+        test_state.cached_state.epoch_cache,
+        test_state.cached_state.state.castToFork(.electra),
+        test_state.epoch_transition_cache,
+        &rewards,
+        &penalties,
+    );
+
+    // All validators are participating (flags have source+target+head+unslashed+eligible)
+    // So they should receive rewards and no penalties
+    for (0..validator_count) |i| {
+        try testing.expect(rewards[i] > 0);
+        try testing.expectEqual(@as(u64, 0), penalties[i]);
+    }
+
+    // All validators have same effective balance, so rewards should be equal
+    for (1..validator_count) |i| {
+        try testing.expectEqual(rewards[0], rewards[i]);
+    }
+}
+
+test "getRewardsAndPenaltiesAltair - non-participating validators get penalties" {
+    const allocator = testing.allocator;
+    var pool = try Node.Pool.init(allocator, 50_000);
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 64);
+    defer test_state.deinit();
+
+    const validator_count = 64;
+
+    // Modify flags for the first validator: eligible but not attesting (no source/target/head flags)
+    // The flags field is []const u8 borrowed from reused cache, but for testing we can cast
+    const flags_mut: []u8 = @constCast(test_state.epoch_transition_cache.flags);
+    // Clear participation flags for validator 0 but keep eligible + unslashed
+    flags_mut[0] = attester_status_mod.FLAG_ELIGIBLE_ATTESTER | attester_status_mod.FLAG_UNSLASHED;
+
+    var rewards: [validator_count]u64 = undefined;
+    var penalties: [validator_count]u64 = undefined;
+
+    try getRewardsAndPenaltiesAltair(
+        .electra,
+        allocator,
+        test_state.cached_state.config,
+        test_state.cached_state.epoch_cache,
+        test_state.cached_state.state.castToFork(.electra),
+        test_state.epoch_transition_cache,
+        &rewards,
+        &penalties,
+    );
+
+    // Validator 0: no participation flags → should get penalties, no rewards
+    try testing.expectEqual(@as(u64, 0), rewards[0]);
+    try testing.expect(penalties[0] > 0);
+
+    // Other validators still participating → should get rewards, no penalties
+    try testing.expect(rewards[1] > 0);
+    try testing.expectEqual(@as(u64, 0), penalties[1]);
+}
+
+test "getRewardsAndPenaltiesAltair - partial participation (source only)" {
+    const allocator = testing.allocator;
+    var pool = try Node.Pool.init(allocator, 50_000);
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 64);
+    defer test_state.deinit();
+
+    const validator_count = 64;
+
+    // Validator 0: only source attested (no target, no head)
+    const flags_mut: []u8 = @constCast(test_state.epoch_transition_cache.flags);
+    flags_mut[0] = attester_status_mod.FLAG_ELIGIBLE_ATTESTER |
+        attester_status_mod.FLAG_UNSLASHED |
+        attester_status_mod.FLAG_PREV_SOURCE_ATTESTER;
+
+    var rewards: [validator_count]u64 = undefined;
+    var penalties: [validator_count]u64 = undefined;
+
+    try getRewardsAndPenaltiesAltair(
+        .electra,
+        allocator,
+        test_state.cached_state.config,
+        test_state.cached_state.epoch_cache,
+        test_state.cached_state.state.castToFork(.electra),
+        test_state.epoch_transition_cache,
+        &rewards,
+        &penalties,
+    );
+
+    // Validator 0 should get source reward but target and head penalties
+    // Rewards should be positive (source reward)
+    try testing.expect(rewards[0] > 0);
+    // Penalties should be positive (target + head penalties + inactivity penalty for missing target)
+    try testing.expect(penalties[0] > 0);
+
+    // Fully participating validator should have higher rewards and no penalties
+    try testing.expect(rewards[1] > rewards[0]);
+    try testing.expectEqual(@as(u64, 0), penalties[1]);
+}
+
+test "getRewardsAndPenaltiesAltair - slashed validator gets no rewards" {
+    const allocator = testing.allocator;
+    var pool = try Node.Pool.init(allocator, 50_000);
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 64);
+    defer test_state.deinit();
+
+    const validator_count = 64;
+
+    // Validator 0: eligible but slashed (no UNSLASHED flag), with participation flags
+    const flags_mut: []u8 = @constCast(test_state.epoch_transition_cache.flags);
+    flags_mut[0] = attester_status_mod.FLAG_ELIGIBLE_ATTESTER |
+        attester_status_mod.FLAG_PREV_SOURCE_ATTESTER |
+        attester_status_mod.FLAG_PREV_TARGET_ATTESTER |
+        attester_status_mod.FLAG_PREV_HEAD_ATTESTER;
+    // Note: without FLAG_UNSLASHED, the participation flags don't count
+
+    var rewards: [validator_count]u64 = undefined;
+    var penalties: [validator_count]u64 = undefined;
+
+    try getRewardsAndPenaltiesAltair(
+        .electra,
+        allocator,
+        test_state.cached_state.config,
+        test_state.cached_state.epoch_cache,
+        test_state.cached_state.state.castToFork(.electra),
+        test_state.epoch_transition_cache,
+        &rewards,
+        &penalties,
+    );
+
+    // Slashed validator: participation flags ignored without UNSLASHED
+    // Should get penalties for source, target, head + inactivity penalty for missing target
+    try testing.expectEqual(@as(u64, 0), rewards[0]);
+    try testing.expect(penalties[0] > 0);
+}
+
+test "getRewardsAndPenaltiesAltair - non-eligible validator skipped" {
+    const allocator = testing.allocator;
+    var pool = try Node.Pool.init(allocator, 50_000);
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 64);
+    defer test_state.deinit();
+
+    const validator_count = 64;
+
+    // Validator 0: not eligible (e.g. not yet activated)
+    const flags_mut: []u8 = @constCast(test_state.epoch_transition_cache.flags);
+    flags_mut[0] = 0; // no flags at all
+
+    var rewards: [validator_count]u64 = undefined;
+    var penalties: [validator_count]u64 = undefined;
+
+    try getRewardsAndPenaltiesAltair(
+        .electra,
+        allocator,
+        test_state.cached_state.config,
+        test_state.cached_state.epoch_cache,
+        test_state.cached_state.state.castToFork(.electra),
+        test_state.epoch_transition_cache,
+        &rewards,
+        &penalties,
+    );
+
+    // Non-eligible: completely skipped, no rewards or penalties
+    try testing.expectEqual(@as(u64, 0), rewards[0]);
+    try testing.expectEqual(@as(u64, 0), penalties[0]);
+}
+
+test "getRewardsAndPenaltiesAltair - reward values match spec formula" {
+    const allocator = testing.allocator;
+    var pool = try Node.Pool.init(allocator, 50_000);
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 64);
+    defer test_state.deinit();
+
+    const validator_count = 64;
+    var rewards: [validator_count]u64 = undefined;
+    var penalties: [validator_count]u64 = undefined;
+
+    try getRewardsAndPenaltiesAltair(
+        .electra,
+        allocator,
+        test_state.cached_state.config,
+        test_state.cached_state.epoch_cache,
+        test_state.cached_state.state.castToFork(.electra),
+        test_state.epoch_transition_cache,
+        &rewards,
+        &penalties,
+    );
+
+    // Manually compute expected reward for a fully participating validator
+    const cache = test_state.epoch_transition_cache;
+    const effective_balance_increment: u64 = 32; // 32 ETH / EFFECTIVE_BALANCE_INCREMENT
+    const base_reward = effective_balance_increment * cache.base_reward_per_increment;
+    const active_increments = cache.total_active_stake_by_increment;
+
+    // Source weight=14, Target weight=26, Head weight=14, denominator=64
+    // All validators participating, so unslashed_stake == total_active_stake
+    const source_reward = @divFloor(base_reward * 14 * active_increments, active_increments * 64);
+    const target_reward = @divFloor(base_reward * 26 * active_increments, active_increments * 64);
+    const head_reward = @divFloor(base_reward * 14 * active_increments, active_increments * 64);
+    const expected_total = source_reward + target_reward + head_reward;
+
+    try testing.expectEqual(expected_total, rewards[0]);
+    try testing.expectEqual(@as(u64, 0), penalties[0]);
+}
