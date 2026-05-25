@@ -1,3 +1,4 @@
+import {SecretKey} from "@chainsafe/blst";
 import {config} from "@lodestar/config/default";
 import * as era from "@lodestar/era";
 import {computeEpochAtSlot} from "@lodestar/state-transition";
@@ -5,6 +6,45 @@ import {ssz} from "@lodestar/types";
 import {beforeAll, describe, expect, it} from "vitest";
 import bindings from "../src/index.js";
 import {getFirstEraFilePath} from "./eraFiles.ts";
+
+// TODO(bing): it's kinda annoying to have to do this, i guess we
+// expose the config somehow maybe?
+/* Mainnet preset constants the binding is compiled against. */
+const SLOTS_PER_EPOCH = 32;
+const SYNC_COMMITTEE_SIZE = 512;
+const BELLATRIX_FORK_EPOCH = 144896;
+const FAR_FUTURE_EPOCH = Number.MAX_SAFE_INTEGER;
+const MAX_EFFECTIVE_BALANCE = 32_000_000_000;
+
+const VALIDATOR_COUNT = 16;
+
+interface Validator {
+  pubkey: Uint8Array;
+  withdrawalCredentials: Uint8Array;
+  effectiveBalance: number;
+  slashed: boolean;
+  activationEligibilityEpoch: number;
+  activationEpoch: number;
+  exitEpoch: number;
+  withdrawableEpoch: number;
+}
+
+function makeValidators(count: number): Validator[] {
+  return Array.from({length: count}, (_, i) => {
+    const seed = new Uint8Array(32);
+    new DataView(seed.buffer).setUint32(0, i + 1);
+    return {
+      activationEligibilityEpoch: 0,
+      activationEpoch: 0,
+      effectiveBalance: MAX_EFFECTIVE_BALANCE,
+      exitEpoch: FAR_FUTURE_EPOCH,
+      pubkey: SecretKey.fromKeygen(seed).toPublicKey().toBytes(),
+      slashed: false,
+      withdrawableEpoch: FAR_FUTURE_EPOCH,
+      withdrawalCredentials: new Uint8Array(32),
+    };
+  });
+}
 
 describe("BeaconStateView", () => {
   let state: InstanceType<typeof bindings.BeaconStateView>;
@@ -277,6 +317,55 @@ describe("BeaconStateView", () => {
 
     it("isExecutionStateType should be true for fulu state", () => {
       expect(state.isExecutionStateType).toBe(true);
+    });
+  });
+
+  describe("isExecutionEnabled", () => {
+    const validators = makeValidators(VALIDATOR_COUNT);
+
+    // Each sync-committee pubkey must be in the global pubkey_to_index map or
+    // EpochCache.createFromState throws PubkeyNotFound. Round-robin our 16 validators
+    // across the 512 slots — repeated pubkeys are fine for the lookup.
+    const syncCommitteePubkeys = Array.from(
+      {length: SYNC_COMMITTEE_SIZE},
+      (_, i) => validators[i % VALIDATOR_COUNT].pubkey
+    );
+    const syncCommittee = {
+      aggregatePubkey: validators[0].pubkey,
+      pubkeys: syncCommitteePubkeys,
+    };
+
+    const phase0State = ssz.phase0.BeaconState.defaultValue();
+    const bellatrixState = ssz.bellatrix.BeaconState.defaultValue();
+    bellatrixState.slot = 144896 * 32; // BELLATRIX_FORK_EPOCH * SLOTS_PER_EPOCH (mainnet)
+    bellatrixState.validators = validators;
+    bellatrixState.currentSyncCommittee = syncCommittee;
+    bellatrixState.nextSyncCommittee = syncCommittee;
+
+    const phase0View = bindings.BeaconStateView.createFromBytes(ssz.phase0.BeaconState.serialize(phase0State));
+    const bellatrixView = bindings.BeaconStateView.createFromBytes(ssz.bellatrix.BeaconState.serialize(bellatrixState));
+
+    it("should true on post-merge state without reading the block", () => {
+      // body is empty — binding short-circuits before touching it.
+      expect(state.isExecutionEnabled({body: {}})).toBe(true);
+    });
+
+    it("returns false even when block carries a non-default executionPayload", () => {
+      const payload = ssz.bellatrix.ExecutionPayload.defaultValue();
+      payload.blockNumber = 1;
+      expect(phase0View.isExecutionEnabled({body: {executionPayload: payload}})).toBe(false);
+    });
+
+    it("returns true after walking block for non-default payload", () => {
+      const payload = ssz.bellatrix.ExecutionPayload.defaultValue();
+      payload.blockNumber = 1;
+      expect(bellatrixView.isExecutionEnabled({body: {executionPayload: payload}})).toBe(true);
+    });
+
+    it("returns false when block is blinded (body has executionPayloadHeader)", () => {
+      // Lodestar treats blinded pre-merge Bellatrix blocks as not-yet-merged because the
+      // state header is still default. The Zig short-circuits on the presence of the field.
+      expect(bellatrixView.isExecutionEnabled({body: {executionPayloadHeader: {}}})).toBe(false);
     });
   });
 
