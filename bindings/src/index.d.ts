@@ -12,12 +12,12 @@ interface Checkpoint {
   root: Uint8Array;
 }
 
-interface VoluntaryExit {
+export interface VoluntaryExit {
   epoch: number;
   validatorIndex: number;
 }
 
-interface SignedVoluntaryExit {
+export interface SignedVoluntaryExit {
   message: VoluntaryExit;
   signature: Uint8Array;
 }
@@ -54,7 +54,7 @@ interface Fork {
   epoch: number;
 }
 
-enum ForkName {
+export enum ForkName {
   phase0 = "phase0",
   altair = "altair",
   bellatrix = "bellatrix",
@@ -70,7 +70,7 @@ interface SyncCommittee {
   aggregatePubkey: Uint8Array;
 }
 
-interface ProcessSlotsOpts {
+export interface ProcessSlotsOpts {
   /** Default: false (cache is transferred). Set to true to opt out of cache transfer. */
   dontTransferCache?: boolean;
 }
@@ -89,7 +89,7 @@ interface CompactMultiProof {
  * Note: Fields used by TS `StateTransitionOpts` but ignored by the Zig binding (e.g.
  * `executionPayloadStatus`) are silently dropped - they are declared here to pass type checks.
  */
-interface TransitionOpts {
+export interface TransitionOpts {
   /** Verify the post-state root matches the block's state root. Default: true. */
   verifyStateRoot?: boolean;
   /** Verify the proposer signature on the signed block. Default: true. */
@@ -151,7 +151,7 @@ type ValidatorStatus =
   | "withdrawal_possible"
   | "withdrawal_done";
 
-type VoluntaryExitValidity =
+export type VoluntaryExitValidity =
   | "valid"
   | "inactive"
   | "already_exited"
@@ -160,7 +160,7 @@ type VoluntaryExitValidity =
   | "pending_withdrawals"
   | "invalid_signature";
 
-declare class BeaconStateView {
+export declare class BeaconStateView {
   static createFromBytes(bytes: Uint8Array): BeaconStateView;
 
   slot: number;
