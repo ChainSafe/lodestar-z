@@ -761,9 +761,7 @@ pub fn getSyncCommitteesWitness(self: *const BeaconStateView) !js_types.SyncComm
         );
     }
 
-    const root_node = switch (cached_state.state.*) {
-        inline else => |state| state.root,
-    };
+    const root_node = cached_state.state.root();
     var witness_data: st.SyncCommitteeWitness = undefined;
     try st.getSyncCommitteesWitness(fork_seq, root_node, cached_state.state.nodePool(), &witness_data);
 
@@ -815,9 +813,7 @@ pub fn createMultiProof(self: *const BeaconStateView, descriptor: js.Uint8Array)
     const descriptor_bytes = try descriptor.toSlice();
 
     try cached_state.state.commit();
-    const root_node = switch (cached_state.state.*) {
-        inline else => |state| state.root,
-    };
+    const root_node = cached_state.state.root();
 
     const proof_input = persistent_merkle_tree.proof.ProofInput{
         .compactMulti = .{ .descriptor = descriptor_bytes },
