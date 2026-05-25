@@ -1,5 +1,6 @@
 ///! Merkle node backed by a memory pool
 const std = @import("std");
+const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 
 const hashOne = @import("hashing").hashOne;
@@ -629,7 +630,7 @@ pub const Id = enum(u32) {
         }
         // Strictly-ascending is a precondition (unsorted/dup silently corrupts the tree); guard
         // it in safe builds. Must run after the empty-check: `for (1..0)` panics in safe builds.
-        if (std.debug.runtime_safety) {
+        if (builtin.mode == .Debug or builtin.mode == .ReleaseSafe) {
             for (1..indices.len) |k| std.debug.assert(indices[k - 1] < indices[k]);
         }
 
