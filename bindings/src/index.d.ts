@@ -48,6 +48,33 @@ interface ExecutionPayloadHeader {
   excessBlobGas?: number; // deneb+
 }
 
+/*
+ * We don't need *all* the fields to check if a block
+ * is a pre-merge or a merge transition block, so we just
+ * have a minimum interface that is like a `BeaconBlock`.
+ */
+interface BeaconBlockLike {
+  body: {
+    executionPayload?: {
+      parentHash: Uint8Array;
+      feeRecipient: Uint8Array;
+      stateRoot: Uint8Array;
+      receiptsRoot: Uint8Array;
+      logsBloom: Uint8Array;
+      prevRandao: Uint8Array;
+      blockNumber: number;
+      gasLimit: number;
+      gasUsed: number;
+      timestamp: number;
+      extraData: Uint8Array;
+      baseFeePerGas: bigint;
+      blockHash: Uint8Array;
+      transactions: Uint8Array[];
+    };
+    executionPayloadHeader?: ExecutionPayloadHeader;
+  };
+}
+
 interface Fork {
   previousVersion: Uint8Array;
   currentVersion: Uint8Array;
@@ -257,11 +284,12 @@ export declare class BeaconStateView {
   /**
    * Check whether execution is enabled for the given block at this state.
    *
-   * Check if 1) merge transition is complete, or 2) is a merge transition block
-   * Note that this does not call native `isExecutionEnabled` directly because we can save on deserializing
-   * `signed_block` if 1) holds. We only deserialize in the event that it's a pre-merge bellatrix block
+   * For normal post-merge operation this short-circuits from state alone and does
+   * not inspect `block`. The block object is only read for the historical pre-merge
+   * Bellatrix case, where execution is enabled iff the block carries the first
+   * non-default execution payload.
    */
-  isExecutionEnabled(signedBlockBytes: Uint8Array): boolean;
+  isExecutionEnabled(block: BeaconBlockLike): boolean;
 
   proposerRewards: ProposerRewards;
   // biome-ignore lint/suspicious/noExplicitAny: stub

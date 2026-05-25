@@ -1,3 +1,4 @@
+import {ssz} from "@lodestar/types";
 import {describe, expect, it} from "vitest";
 
 describe("sanity", () => {
