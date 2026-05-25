@@ -516,15 +516,19 @@ describe("BeaconStateView", () => {
 
   describe("voluntary exit validation", () => {
     it("isValidVoluntaryExit should return boolean", () => {
-      // Invalid voluntary exit bytes (all zeros)
-      const invalidExit = new Uint8Array(112);
+      const invalidExit = {
+        message: {epoch: 0, validatorIndex: 0},
+        signature: new Uint8Array(96),
+      };
       const result = state.isValidVoluntaryExit(invalidExit, false);
       expect(typeof result).toBe("boolean");
     });
 
     it("getVoluntaryExitValidity should return validity reason", () => {
-      // Invalid voluntary exit bytes (all zeros)
-      const invalidExit = new Uint8Array(112);
+      const invalidExit = {
+        message: {epoch: 0, validatorIndex: 0},
+        signature: new Uint8Array(96),
+      };
       const result = state.getVoluntaryExitValidity(invalidExit, false);
 
       const validReasons = [
