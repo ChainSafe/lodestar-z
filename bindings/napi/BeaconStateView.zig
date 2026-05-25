@@ -672,6 +672,7 @@ pub fn proposerRewards(self: *const BeaconStateView) !js_types.ProposerRewards {
 /// `{message: {epoch, validatorIndex}, signature: Uint8Array(96)}`. Matches `phase0.SignedVoluntaryExit`
 /// from `@lodestar/types`.
 fn signedVoluntaryExitFromJsValue(value: js.Value, out: *ct.phase0.SignedVoluntaryExit.Type) !void {
+    std.debug.assert(value.val != null);
     const raw = value.toValue();
     const message = try raw.getNamedProperty("message");
     out.message.epoch = @intCast(try (try message.getNamedProperty("epoch")).getValueInt64());
@@ -686,6 +687,7 @@ fn signedVoluntaryExitFromJsValue(value: js.Value, out: *ct.phase0.SignedVolunta
 }
 
 pub fn getVoluntaryExitValidity(self: *const BeaconStateView, signed_exit_value: js.Value, verify_signature_value: js.Boolean) !js.String {
+    std.debug.assert(self.cached_state != null);
     const env = js.env();
     const cached_state = try self.requireState();
     const verify_signature = verify_signature_value.assertBool();
@@ -713,6 +715,7 @@ pub fn getVoluntaryExitValidity(self: *const BeaconStateView, signed_exit_value:
 }
 
 pub fn isValidVoluntaryExit(self: *const BeaconStateView, signed_exit_value: js.Value, verify_signature_value: js.Boolean) !js.Boolean {
+    std.debug.assert(self.cached_state != null);
     const cached_state = try self.requireState();
     const verify_signature = verify_signature_value.assertBool();
 
