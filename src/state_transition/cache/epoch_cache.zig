@@ -622,8 +622,6 @@ pub const EpochCache = struct {
     }
 
     pub fn beforeEpochTransition(self: *EpochCache) !void {
-        // Build the new Rc before unref-ing the old: unref-first then OOM would leave the
-        // field pointing at a freed Rc, double-unref on deinit.
         var effective_balance_increments = try self.effective_balance_increments.get().clone(self.allocator);
         errdefer effective_balance_increments.deinit(self.allocator);
 
