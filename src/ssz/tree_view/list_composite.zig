@@ -590,6 +590,62 @@ test "TreeView composite list fromValue - OOM leaves no orphan pool nodes" {
     }
 }
 
+test "TreeView composite list deserializeFromBytes - OOM leaves no orphan pool nodes" {
+    const ListType = FixedListType(Checkpoint, 16);
+
+    var list: ListType.Type = .empty;
+    defer list.deinit(std.testing.allocator);
+    for (0..6) |i| try list.append(std.testing.allocator, .{ .epoch = @intCast(i), .root = [_]u8{@intCast(i)} ** 32 });
+
+    const bytes = try std.testing.allocator.alloc(u8, ListType.serializedSize(&list));
+    defer std.testing.allocator.free(bytes);
+    _ = ListType.serializeIntoBytes(&list, bytes);
+
+    var fail_at: usize = 0;
+    while (fail_at < 400) : (fail_at += 1) {
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_at, .resize_fail_index = 0 });
+        var pool = Node.Pool.init(failing.allocator(), 0) catch continue;
+        defer pool.deinit();
+
+        const baseline = pool.getNodesInUse();
+        const root = ListType.tree.deserializeFromBytes(&pool, bytes) catch {
+            // OOM mid-build: the error path must release every partial node.
+            try std.testing.expectEqual(baseline, pool.getNodesInUse());
+            continue;
+        };
+        pool.unref(root);
+        try std.testing.expectEqual(baseline, pool.getNodesInUse());
+    }
+}
+
+test "TreeView composite list deserializeFromBytes - malformed input errors without leaking" {
+    const ListType = FixedListType(Checkpoint, 16);
+
+    var list: ListType.Type = .empty;
+    defer list.deinit(std.testing.allocator);
+    for (0..6) |i| try list.append(std.testing.allocator, .{ .epoch = @intCast(i), .root = [_]u8{@intCast(i)} ** 32 });
+
+    const bytes = try std.testing.allocator.alloc(u8, ListType.serializedSize(&list));
+    defer std.testing.allocator.free(bytes);
+    _ = ListType.serializeIntoBytes(&list, bytes);
+
+    var pool = try Node.Pool.init(std.testing.allocator, 512);
+    defer pool.deinit();
+    const baseline = pool.getNodesInUse();
+
+    // Every truncated prefix must either parse cleanly (a shorter valid list) or error, and
+    // never leak pool nodes either way.
+    var len: usize = 0;
+    while (len <= bytes.len) : (len += 1) {
+        const root = ListType.tree.deserializeFromBytes(&pool, bytes[0..len]) catch {
+            try std.testing.expectEqual(baseline, pool.getNodesInUse());
+            continue;
+        };
+        pool.unref(root);
+        try std.testing.expectEqual(baseline, pool.getNodesInUse());
+    }
+}
+
 test "TreeView composite list sliceFrom returns suffix" {
     const allocator = std.testing.allocator;
     var pool = try Node.Pool.init(allocator, 512);
