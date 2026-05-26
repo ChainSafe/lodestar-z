@@ -6,33 +6,6 @@ const Depth = @import("hashing").Depth;
 const Node = @import("Node.zig");
 const Gindex = @import("gindex.zig").Gindex;
 
-// Fails `alloc` once `remaining` hits 0; resize/remap always fail so MultiArrayList growth is
-// forced through `alloc` (else in-place remap slips past the fail point). Drives createBranch OOM.
-const NthAllocFails = struct {
-    backing: std.mem.Allocator,
-    remaining: usize,
-
-    fn allocator(self: *NthAllocFails) std.mem.Allocator {
-        return .{ .ptr = self, .vtable = &.{ .alloc = allocFn, .resize = resizeFn, .remap = remapFn, .free = freeFn } };
-    }
-    fn allocFn(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ra: usize) ?[*]u8 {
-        const self: *NthAllocFails = @ptrCast(@alignCast(ctx));
-        if (self.remaining == 0) return null;
-        self.remaining -= 1;
-        return self.backing.rawAlloc(len, alignment, ra);
-    }
-    fn resizeFn(_: *anyopaque, _: []u8, _: std.mem.Alignment, _: usize, _: usize) bool {
-        return false;
-    }
-    fn remapFn(_: *anyopaque, _: []u8, _: std.mem.Alignment, _: usize, _: usize) ?[*]u8 {
-        return null;
-    }
-    fn freeFn(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ra: usize) void {
-        const self: *NthAllocFails = @ptrCast(@alignCast(ctx));
-        self.backing.rawFree(memory, alignment, ra);
-    }
-};
-
 // Fill the pool to capacity so the next allocation must grow (and fail). Returns filler nodes.
 fn drainPoolToFull(pool: *Node.Pool, out: *std.ArrayList(Node.Id)) !void {
     while (pool.createLeafFromUint(0)) |id| {
@@ -46,7 +19,7 @@ fn drainPoolToFull(pool: *Node.Pool, out: *std.ArrayList(Node.Id)) !void {
 // append's createBranch OOM must reclaim both `left` (kept in self.lefts) and `carry` (unref'd);
 // here they are distinct nodes.
 test "FillWithContentsIterator - createBranch OOM with distinct nodes does not leak" {
-    var failing = NthAllocFails{ .backing = std.testing.allocator, .remaining = std.math.maxInt(usize) };
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .resize_fail_index = 0 });
     var pool = try Node.Pool.init(failing.allocator(), 4);
     defer pool.deinit();
 
@@ -57,7 +30,7 @@ test "FillWithContentsIterator - createBranch OOM with distinct nodes does not l
 
     var drained: std.ArrayList(Node.Id) = .empty;
     defer drained.deinit(std.testing.allocator);
-    failing.remaining = 0; // no more growth allowed
+    failing.fail_index = failing.alloc_index; // next allocation (growth) fails
     try drainPoolToFull(&pool, &drained);
 
     var iter = Node.FillWithContentsIterator.init(&pool, 1);
@@ -72,7 +45,7 @@ test "FillWithContentsIterator - createBranch OOM with distinct nodes does not l
 // All-default pairs one shared node with itself (createBranch(X, X)); on OOM append must NOT
 // unref `carry` (aliases `left`, still tracked) or it dangles the slot — deinit reclaims it once.
 test "FillWithContentsIterator - createBranch OOM with aliased node does not double-free" {
-    var failing = NthAllocFails{ .backing = std.testing.allocator, .remaining = std.math.maxInt(usize) };
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .resize_fail_index = 0 });
     var pool = try Node.Pool.init(failing.allocator(), 4);
     defer pool.deinit();
 
@@ -82,7 +55,7 @@ test "FillWithContentsIterator - createBranch OOM with aliased node does not dou
 
     var drained: std.ArrayList(Node.Id) = .empty;
     defer drained.deinit(std.testing.allocator);
-    failing.remaining = 0;
+    failing.fail_index = failing.alloc_index; // next allocation (growth) fails
     try drainPoolToFull(&pool, &drained);
 
     var iter = Node.FillWithContentsIterator.init(&pool, 1);

@@ -432,16 +432,20 @@ test "TreeView composite list sliceTo does not leak pool nodes" {
     }
 }
 
-// Fails the Nth `alloc` (forces all grows through alloc) and flags double-frees instead of
-// panicking. Liveness is by raw address, so it's a narrow oracle for the setValue OOM test below.
+// Wraps std.testing.FailingAllocator for OOM injection (fails the Nth alloc; resize_fail_index = 0
+// forces all growth through alloc) and adds double-free detection: freeing a non-live address sets
+// a flag instead of forwarding to the GPA (which would panic). Liveness is by raw address, so it is
+// a narrow oracle for the setValue OOM sweep below.
 const OomDoubleFree = struct {
-    backing: std.mem.Allocator,
-    remaining: usize,
+    failing: std.testing.FailingAllocator,
     live: std.AutoHashMap(usize, void),
     double_free: bool = false,
 
     fn init(backing: std.mem.Allocator, fail_after: usize) OomDoubleFree {
-        return .{ .backing = backing, .remaining = fail_after, .live = std.AutoHashMap(usize, void).init(std.heap.page_allocator) };
+        return .{
+            .failing = std.testing.FailingAllocator.init(backing, .{ .fail_index = fail_after, .resize_fail_index = 0 }),
+            .live = std.AutoHashMap(usize, void).init(std.heap.page_allocator),
+        };
     }
     fn deinit(self: *OomDoubleFree) void {
         self.live.deinit();
@@ -451,22 +455,22 @@ const OomDoubleFree = struct {
     }
     fn allocFn(ctx: *anyopaque, len: usize, a: std.mem.Alignment, ra: usize) ?[*]u8 {
         const self: *OomDoubleFree = @ptrCast(@alignCast(ctx));
-        if (self.remaining == 0) return null;
-        self.remaining -= 1;
-        const p = self.backing.rawAlloc(len, a, ra) orelse return null;
+        const p = self.failing.allocator().rawAlloc(len, a, ra) orelse return null;
         self.live.put(@intFromPtr(p), {}) catch {};
         return p;
     }
-    fn resizeFn(_: *anyopaque, _: []u8, _: std.mem.Alignment, _: usize, _: usize) bool {
-        return false;
+    fn resizeFn(ctx: *anyopaque, memory: []u8, a: std.mem.Alignment, new_len: usize, ra: usize) bool {
+        const self: *OomDoubleFree = @ptrCast(@alignCast(ctx));
+        return self.failing.allocator().rawResize(memory, a, new_len, ra);
     }
-    fn remapFn(_: *anyopaque, _: []u8, _: std.mem.Alignment, _: usize, _: usize) ?[*]u8 {
-        return null;
+    fn remapFn(ctx: *anyopaque, memory: []u8, a: std.mem.Alignment, new_len: usize, ra: usize) ?[*]u8 {
+        const self: *OomDoubleFree = @ptrCast(@alignCast(ctx));
+        return self.failing.allocator().rawRemap(memory, a, new_len, ra);
     }
     fn freeFn(ctx: *anyopaque, memory: []u8, a: std.mem.Alignment, ra: usize) void {
         const self: *OomDoubleFree = @ptrCast(@alignCast(ctx));
         if (self.live.remove(@intFromPtr(memory.ptr))) {
-            self.backing.rawFree(memory, a, ra);
+            self.failing.allocator().rawFree(memory, a, ra);
         } else {
             self.double_free = true; // freeing memory that is not currently live
         }
