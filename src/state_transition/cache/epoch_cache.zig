@@ -884,8 +884,6 @@ pub const EpochCache = struct {
             @memcpy(new_increments.items[0..old.items.len], old.items);
             @memset(new_increments.items[old.items.len..new_len], 0);
 
-            // Build the new Rc before unref-ing the old (shared with clones): unref-first then
-            // OOM would leave the field on a freed Rc, double-free from a discarded post-state.
             const new_rc = try EffectiveBalanceIncrementsRc.init(allocator, new_increments);
             self.effective_balance_increments.unref();
             self.effective_balance_increments = new_rc;
