@@ -181,9 +181,8 @@ pub fn CompositeChunks(
                 return;
             }
 
-            // Drop uncommitted (changed) cached children from self's own map first, in place, so a
-            // failure in the fallible state clone below leaves self valid (just with fewer cached
-            // entries) instead of referencing a half-modified map.
+            // Trim self's own cache first (in place): if the state clone below fails, self stays
+            // valid instead of pointing at a half-modified map.
             {
                 const changed_keys = self.state.changed.keys();
                 for (changed_keys) |gindex| {
@@ -193,10 +192,10 @@ pub fn CompositeChunks(
                 }
             }
 
-            // Clone state (transfers children_nodes, clears self's state caches). Fallible.
+            // Clone the state — the only step here that can fail.
             try self.state.clone(opts, &out.state);
 
-            // Hand the trimmed cache to out and clear self (infallible).
+            // Now move the cache over to the clone and empty self.
             out.children_data = self.children_data;
             self.children_data = .empty;
         }
@@ -246,8 +245,8 @@ pub fn CompositeChunks(
             if (gop.found_existing) {
                 return gop.value_ptr.*;
             }
-            // getOrPut added an entry with an undefined value; drop it if we fail before filling
-            // it, otherwise a later deinit would deref the garbage pointer.
+            // getOrPut's new slot holds an undefined value until we fill it below; drop it on
+            // failure, or a later deinit would free a garbage pointer.
             errdefer _ = self.children_data.remove(gindex);
             const child_node = try self.state.getChildNode(gindex);
             const child_ptr = try Element.init(self.state.allocator, self.state.pool, child_node);

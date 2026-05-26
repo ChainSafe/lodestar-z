@@ -193,8 +193,8 @@ pub fn ListCompositeTreeView(comptime ST: type) type {
 
         /// Push an SSZ value type, creating a TreeView internally.
         pub fn pushValue(self: *Self, value: *const ST.Element.Type) !void {
-            // Check the limit before building, so once child_view exists push consumes it on every
-            // path. A cleanup errdefer here would double-free with set's own deinit on an OOM.
+            // Check the limit first. After this, push always takes the view (set frees it on its
+            // own OOM), so adding a cleanup errdefer here would double-free.
             if ((try self.length()) >= ST.limit) return error.LengthOverLimit;
 
             const root = try ST.Element.tree.fromValue(self.chunks.state.pool, value);
@@ -521,7 +521,7 @@ test "TreeView composite list clone(transfer_cache) - OOM does not double-free c
         };
         defer view.deinit();
 
-        // Cache a child so transfer_cache has something to move and deinit.
+        // Cache a child so the transfer_cache path has something to move.
         _ = view.get(0) catch {};
         const cloned = view.clone(.{ .transfer_cache = true }) catch {
             try std.testing.expect(!oom.double_free);
@@ -556,7 +556,7 @@ test "TreeView composite list commit - OOM does not double-free" {
         };
         defer view.deinit();
 
-        // Stage a change, then commit; the sweep also hits OOM points inside commit.
+        // Stage a change so commit has work; the sweep injects OOM inside commit too.
         view.setValue(0, &newval) catch {
             try std.testing.expect(!oom.double_free);
             continue;
