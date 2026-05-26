@@ -432,7 +432,7 @@ test "TreeView composite list sliceTo does not leak pool nodes" {
     }
 }
 
-const OomDoubleFree = @import("test_alloc").OomDoubleFree;
+const DoubleFreeDetectAllocator = @import("test_alloc").DoubleFreeDetectAllocator;
 
 // set takes ownership of the view, so setValue must not also deinit it; sweep OOM points.
 test "TreeView composite list setValue - OOM does not double-free the element view" {
@@ -445,7 +445,7 @@ test "TreeView composite list setValue - OOM does not double-free the element vi
 
     var fail_at: usize = 0;
     while (fail_at < 200) : (fail_at += 1) {
-        var oom = OomDoubleFree.init(std.testing.allocator, fail_at);
+        var oom = DoubleFreeDetectAllocator.init(std.testing.allocator, fail_at);
         defer oom.deinit();
         const alloc = oom.allocator();
 
