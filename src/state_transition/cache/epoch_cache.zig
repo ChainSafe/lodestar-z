@@ -785,8 +785,6 @@ pub const EpochCache = struct {
         std.debug.assert(index <= self.index_to_pubkey.items.len);
         const appending = index == self.index_to_pubkey.items.len;
 
-        // Fallible work (decompress + reservations) before mutating either map: the two are shared
-        // across states and syncPubkeys asserts equal counts, so a mid-update OOM desyncs them.
         const public_key = try bls.PublicKey.uncompress(pubkey);
         try self.pubkey_to_index.ensureUnusedCapacity(1);
         if (appending) try self.index_to_pubkey.ensureUnusedCapacity(self.allocator, 1);
