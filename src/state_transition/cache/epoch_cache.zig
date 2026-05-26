@@ -534,12 +534,8 @@ pub const EpochCache = struct {
     pub fn afterProcessEpoch(self: *EpochCache, state: *AnyBeaconState, epoch_transition_cache: *const EpochTransitionCache) !void {
         const upcoming_epoch = self.epoch + 1;
         const epoch_after_upcoming = upcoming_epoch + 1;
-        // Read before the rotation commit below: no fallible call may run after it, or the
-        // next_shuffling errdefer outlives the commit and double-frees the Rc-owned shuffling.
         const slot = try state.slot();
 
-        // Allocate before the rotation commit: a mid-rotation OOM would leave current/next
-        // aliasing one Rc, double-unref on deinit.
         const next_shuffling_active_indices = try self.allocator.alloc(ValidatorIndex, epoch_transition_cache.next_shuffling_active_indices.len);
         std.mem.copyForwards(ValidatorIndex, next_shuffling_active_indices, epoch_transition_cache.next_shuffling_active_indices);
 
@@ -553,7 +549,6 @@ pub const EpochCache = struct {
 
         const next_shuffling_rc = try EpochShufflingRc.init(self.allocator, next_shuffling);
 
-        // Infallible from here: moves + unref only.
         self.previous_shuffling.unref();
         self.previous_shuffling = self.current_shuffling;
         self.current_shuffling = self.next_shuffling;
