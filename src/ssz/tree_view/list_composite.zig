@@ -51,6 +51,7 @@ pub fn ListCompositeTreeView(comptime ST: type) type {
 
             try Chunks.init(&ptr.chunks, allocator, pool, root);
             errdefer ptr.chunks.deinit();
+
             ptr.allocator = allocator;
             ptr._orig_len = try ptr.chunks.getLength();
             ptr._len = ptr._orig_len;
@@ -187,6 +188,7 @@ pub fn ListCompositeTreeView(comptime ST: type) type {
 
             self._len += 1;
             errdefer self._len -= 1;
+
             try self.set(list_length, value);
         }
 
@@ -283,6 +285,7 @@ pub fn ListCompositeTreeView(comptime ST: type) type {
 
             var length_node: ?Node.Id = try self.chunks.state.pool.createLeafFromUint(@intCast(new_length));
             defer if (length_node) |id| self.chunks.state.pool.unref(id);
+
             // length_node IS consumed as a child by setNode, so it is nulled (not unref'd twice).
             const root_with_length = try Node.Id.setNode(chunk_root, self.chunks.state.pool, @enumFromInt(3), length_node.?);
             errdefer self.chunks.state.pool.unref(root_with_length);

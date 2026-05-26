@@ -232,11 +232,14 @@ pub const EpochTransitionCache = struct {
 
         var indices_to_slash: std.ArrayList(ValidatorIndex) = .empty;
         errdefer indices_to_slash.deinit(allocator);
+
         var indices_eligible_for_activation_queue: std.ArrayList(ValidatorIndex) = .empty;
         errdefer indices_eligible_for_activation_queue.deinit(allocator);
+
         // we will extract indices_eligible_for_activation from validator_activation_list later
         var validator_activation_list: ValidatorActivationList = .empty;
         defer validator_activation_list.deinit(allocator);
+
         var indices_to_eject: std.ArrayList(ValidatorIndex) = .empty;
         errdefer indices_to_eject.deinit(allocator);
 

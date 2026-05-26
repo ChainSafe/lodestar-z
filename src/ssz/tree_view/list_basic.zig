@@ -50,6 +50,7 @@ pub fn ListBasicTreeView(comptime ST: type) type {
 
             try Chunks.init(&ptr.chunks, allocator, pool, root);
             errdefer ptr.chunks.deinit();
+
             ptr.allocator = allocator;
             ptr._orig_len = try ptr.chunks.getLength();
             ptr._len = ptr._orig_len;
@@ -184,8 +185,10 @@ pub fn ListBasicTreeView(comptime ST: type) type {
             if (list_length >= ST.limit) {
                 return error.LengthOverLimit;
             }
+
             self._len += 1;
             errdefer self._len -= 1;
+
             try self.set(list_length, value);
         }
 
@@ -216,6 +219,7 @@ pub fn ListBasicTreeView(comptime ST: type) type {
 
             var truncated_chunk_node: ?Node.Id = try self.chunks.state.pool.createLeaf(&chunk_bytes);
             defer if (truncated_chunk_node) |id| self.chunks.state.pool.unref(id);
+
             const updated = try Node.Id.setNodeAtDepth(
                 self.chunks.state.root,
                 self.chunks.state.pool,
@@ -233,10 +237,10 @@ pub fn ListBasicTreeView(comptime ST: type) type {
 
             var length_node: ?Node.Id = try self.chunks.state.pool.createLeafFromUint(@intCast(new_length));
             defer if (length_node) |id| self.chunks.state.pool.unref(id);
+
             // length_node IS consumed as a child here, so it is nulled below (not unref'd twice).
             const root_with_length = try Node.Id.setNode(new_root, self.chunks.state.pool, @enumFromInt(3), length_node.?);
             errdefer self.chunks.state.pool.unref(root_with_length);
-
             length_node = null;
 
             return try Self.init(self.allocator, self.chunks.state.pool, root_with_length);

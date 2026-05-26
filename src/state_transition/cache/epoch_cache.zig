@@ -542,6 +542,7 @@ pub const EpochCache = struct {
         // aliasing one Rc, double-unref on deinit.
         const next_shuffling_active_indices = try self.allocator.alloc(ValidatorIndex, epoch_transition_cache.next_shuffling_active_indices.len);
         std.mem.copyForwards(ValidatorIndex, next_shuffling_active_indices, epoch_transition_cache.next_shuffling_active_indices);
+
         const next_shuffling = try computeEpochShuffling(
             self.allocator,
             state,
@@ -549,6 +550,7 @@ pub const EpochCache = struct {
             epoch_after_upcoming,
         );
         errdefer next_shuffling.deinit();
+
         const next_shuffling_rc = try EpochShufflingRc.init(self.allocator, next_shuffling);
 
         // Infallible from here: moves + unref only.
@@ -624,6 +626,7 @@ pub const EpochCache = struct {
         // field pointing at a freed Rc, double-unref on deinit.
         var effective_balance_increments = try self.effective_balance_increments.get().clone(self.allocator);
         errdefer effective_balance_increments.deinit(self.allocator);
+
         const new_rc = try EffectiveBalanceIncrementsRc.init(self.allocator, effective_balance_increments);
 
         self.effective_balance_increments.unref();
@@ -877,6 +880,7 @@ pub const EpochCache = struct {
             const old = self.effective_balance_increments.get();
             const new_len = index + 1;
             const capacity = 1024 * @divFloor(new_len + 1024, 1024);
+
             var new_increments = try EffectiveBalanceIncrements.initCapacity(allocator, capacity);
             errdefer new_increments.deinit(allocator);
 

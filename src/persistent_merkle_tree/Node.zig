@@ -247,11 +247,13 @@ pub const Pool = struct {
             states[@intFromEnum(node_id)] = State.initNextFree(self.next_free_node);
             self.next_free_node = node_id;
         }
+
         try self.refUnsafe(left_id, states);
         // Mirror refUnsafe's zero-node guard: only non-zero nodes were incremented.
         errdefer if (!states[@intFromEnum(left_id)].isZero()) {
             _ = states[@intFromEnum(left_id)].decRefCount();
         };
+
         try self.refUnsafe(right_id, states);
         return node_id;
     }
