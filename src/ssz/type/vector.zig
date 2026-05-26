@@ -155,7 +155,7 @@ pub fn FixedVectorType(comptime ST: type, comptime _length: comptime_int) type {
                     return error.InvalidSize;
                 }
 
-                // zero ids so a mid-build error's errdefer no-ops on the unbuilt tail
+                // Zero-filled so a mid-build error's errdefer is a no-op over the unfilled slots.
                 var nodes: [chunk_count]Node.Id = @splat(@as(Node.Id, @enumFromInt(0)));
                 errdefer pool.free(&nodes);
 
@@ -204,7 +204,7 @@ pub fn FixedVectorType(comptime ST: type, comptime _length: comptime_int) type {
             }
 
             pub fn fromValue(pool: *Node.Pool, value: *const Type) !Node.Id {
-                // zero ids so a mid-build error's errdefer no-ops on the unbuilt tail
+                // Zero-filled so a mid-build error's errdefer is a no-op over the unfilled slots.
                 var nodes: [chunk_count]Node.Id = @splat(@as(Node.Id, @enumFromInt(0)));
                 errdefer pool.free(&nodes);
 
@@ -430,7 +430,7 @@ pub fn VariableVectorType(comptime ST: type, comptime _length: comptime_int) typ
                 }
 
                 const offsets = try readVariableOffsets(data);
-                // zero ids so a mid-build error's errdefer no-ops on the unbuilt tail
+                // Zero-filled so a mid-build error's errdefer is a no-op over the unfilled slots.
                 var nodes: [chunk_count]Node.Id = @splat(@as(Node.Id, @enumFromInt(0)));
                 errdefer pool.free(&nodes);
 
@@ -458,7 +458,7 @@ pub fn VariableVectorType(comptime ST: type, comptime _length: comptime_int) typ
             }
 
             pub fn fromValue(pool: *Node.Pool, value: *const Type) !Node.Id {
-                // zero ids so a mid-build error's errdefer no-ops on the unbuilt tail
+                // Zero-filled so a mid-build error's errdefer is a no-op over the unfilled slots.
                 var nodes: [chunk_count]Node.Id = @splat(@as(Node.Id, @enumFromInt(0)));
                 errdefer pool.free(&nodes);
 

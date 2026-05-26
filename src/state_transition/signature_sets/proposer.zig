@@ -40,8 +40,8 @@ pub fn getBlockProposerSignatureSet(
 
     // Root.uncompressFromBytes(&signing_root_buf, &signing_root);
 
-    // Index isn't validated until processBlockHeader, so an untrusted block may be out of
-    // range here.
+    // The proposer index isn't validated until processBlockHeader, so a malicious block could
+    // put an out-of-range value here.
     const proposer_index = block.proposerIndex();
     if (proposer_index >= epoch_cache.index_to_pubkey.items.len) {
         return error.InvalidProposerIndex;

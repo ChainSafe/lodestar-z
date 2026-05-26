@@ -227,18 +227,19 @@ pub fn ListBasicTreeView(comptime ST: type) type {
                 chunk_index,
                 truncated_chunk_node.?,
             );
-            // setNodeAtDepth does not consume `updated`: a fresh orphan root to unref.
+            // `updated` is a fresh orphan root from setNodeAtDepth; we own it, so unref it.
             defer self.chunks.state.pool.unref(updated);
             truncated_chunk_node = null;
 
             const new_root = try Node.Id.truncateAfterIndex(updated, self.chunks.state.pool, chunk_depth, chunk_index);
-            // truncateAfterIndex likewise does not consume `new_root`; unref the orphan root.
+            // Likewise `new_root` is a fresh orphan from truncateAfterIndex; unref it.
             defer self.chunks.state.pool.unref(new_root);
 
             var length_node: ?Node.Id = try self.chunks.state.pool.createLeafFromUint(@intCast(new_length));
             defer if (length_node) |id| self.chunks.state.pool.unref(id);
 
-            // length_node IS consumed as a child here, so it is nulled below (not unref'd twice).
+            // setNode takes `length_node` into the tree, so null it below to keep the defer from
+            // unref-ing what the tree now owns.
             const root_with_length = try Node.Id.setNode(new_root, self.chunks.state.pool, @enumFromInt(3), length_node.?);
             errdefer self.chunks.state.pool.unref(root_with_length);
             length_node = null;
@@ -767,7 +768,7 @@ test "TreeView basic list sliceTo matches incremental snapshots" {
     }
 }
 
-// Pool-slot leaks are invisible to std.testing.allocator, so assert getNodesInUse() baseline.
+// std.testing.allocator can't see pool-slot leaks, so check getNodesInUse() against a baseline.
 test "TreeView basic list sliceTo does not leak pool nodes" {
     const allocator = std.testing.allocator;
     var pool = try Node.Pool.init(allocator, 2048);
@@ -789,7 +790,7 @@ test "TreeView basic list sliceTo does not leak pool nodes" {
     for (0..15) |idx| {
         var sliced = try view.sliceTo(idx);
         sliced.deinit();
-        // A leftover delta means an intermediate orphan root was never released.
+        // Any difference means an intermediate orphan root leaked.
         try std.testing.expectEqual(baseline, pool.getNodesInUse());
     }
 }

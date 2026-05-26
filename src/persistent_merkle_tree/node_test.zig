@@ -6,18 +6,18 @@ const Depth = @import("hashing").Depth;
 const Node = @import("Node.zig");
 const Gindex = @import("gindex.zig").Gindex;
 
-// Fill the pool to capacity so the next allocation must grow (and fail). Returns filler nodes.
+// Allocate until the pool is full, so the next request has to grow (and fail). Returns the filler.
 fn drainPoolToFull(pool: *Node.Pool, out: *std.ArrayList(Node.Id)) !void {
     while (pool.createLeafFromUint(0)) |id| {
         try out.append(std.testing.allocator, id);
     } else |err| switch (err) {
-        // Exhaustive: a future error variant should fail to compile, not silently end the drain.
+        // Match exhaustively so a new error variant breaks the build instead of ending the drain.
         error.OutOfMemory => {},
     }
 }
 
-// append's createBranch OOM must reclaim both `left` (kept in self.lefts) and `carry` (unref'd);
-// here they are distinct nodes.
+// When append's createBranch fails, both `left` (still in self.lefts) and `carry` must be
+// reclaimed. Here they are two different nodes.
 test "FillWithContentsIterator - createBranch OOM with distinct nodes does not leak" {
     var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .resize_fail_index = 0 });
     var pool = try Node.Pool.init(failing.allocator(), 4);
@@ -42,8 +42,8 @@ test "FillWithContentsIterator - createBranch OOM with distinct nodes does not l
     try std.testing.expectEqual(baseline, pool.getNodesInUse());
 }
 
-// All-default pairs one shared node with itself (createBranch(X, X)); on OOM append must NOT
-// unref `carry` (aliases `left`, still tracked) or it dangles the slot — deinit reclaims it once.
+// The all-default path pairs a node with itself (createBranch(X, X)). On failure append must not
+// unref `carry` — it's the same node as `left`, which deinit reclaims; doing both double-frees.
 test "FillWithContentsIterator - createBranch OOM with aliased node does not double-free" {
     var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .resize_fail_index = 0 });
     var pool = try Node.Pool.init(failing.allocator(), 4);
@@ -275,7 +275,7 @@ test "setNodes for checkpoint tree" {
     try std.testing.expectEqual(new_root_node, out[1]);
 }
 
-// Empty `indices` must be a no-op, not a panic: the ascending-assert `for (1..0)` would overflow.
+// Empty `indices` should return the root untouched, not panic on the `for (1..0)` assert.
 test "setNodesAtDepth - empty indices returns root unchanged" {
     const allocator = std.testing.allocator;
     var pool = try Node.Pool.init(allocator, 64);
@@ -323,16 +323,16 @@ test "Depth helpers - round-trip setNodesAtDepth / getNodesAtDepth" {
     for (0..4) |i| try std.testing.expectEqual(leaves[i], out[i]);
 }
 
-// An early-iteration error runs errdefer `pool.free(path_parents)` while the prefix is still
-// un-alloc'd; it must be zero-filled so the free no-ops there instead of unref-ing a garbage Id.
+// If an early iteration errors, the errdefer frees path_parents while its start is still unfilled;
+// the zero-fill makes those frees no-ops instead of unref-ing garbage.
 test "setNodesAtDepth - early-iteration error frees cleanly without leaking or corrupting" {
     const allocator = std.testing.allocator;
     var pool = try Node.Pool.init(allocator, 64);
     defer pool.deinit();
     const p = &pool;
 
-    // Leaf root → InvalidNode in iteration 0; indices {0,1} share a prefix so path_parents[0]
-    // is still un-alloc'd when the errdefer runs.
+    // A leaf root hits InvalidNode on the first index; {0,1} share a prefix, so path_parents[0]
+    // hasn't been filled yet when the errdefer runs.
     const root = try pool.createLeafFromUint(42);
     defer pool.unref(root);
 
@@ -345,10 +345,10 @@ test "setNodesAtDepth - early-iteration error frees cleanly without leaking or c
         root.setNodesAtDepth(p, 2, &indices, &leaves),
     );
 
-    // No unrelated node was unref'd: in-use count returns to baseline.
+    // Nothing extra was freed: the in-use count is back where it started.
     try std.testing.expectEqual(baseline, pool.getNodesInUse());
 
-    // Pool uncorrupted: a valid op still round-trips (would observe a garbage slot otherwise).
+    // The pool still works: a normal op round-trips (it would hit a freed slot if corrupted).
     const tree_root = try pool.createBranch(@enumFromInt(1), @enumFromInt(1));
     defer pool.unref(tree_root);
     const new_leaf = try pool.createLeafFromUint(7);

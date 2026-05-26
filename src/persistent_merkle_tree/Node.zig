@@ -242,14 +242,14 @@ pub const Pool = struct {
         self.nodes.items(.left)[@intFromEnum(node_id)] = left_id;
         self.nodes.items(.right)[@intFromEnum(node_id)] = right_id;
         states[@intFromEnum(node_id)] = State.branch_lazy.initRefCount();
-        // On ref overflow, free the half-built slot so it doesn't leak.
+        // If a ref below overflows, hand this half-built node's slot back to the free list.
         errdefer {
             states[@intFromEnum(node_id)] = State.initNextFree(self.next_free_node);
             self.next_free_node = node_id;
         }
 
         try self.refUnsafe(left_id, states);
-        // Mirror refUnsafe's zero-node guard: only non-zero nodes were incremented.
+        // refUnsafe skips zero nodes, so only undo the ref when left is non-zero.
         errdefer if (!states[@intFromEnum(left_id)].isZero()) {
             _ = states[@intFromEnum(left_id)].decRefCount();
         };
@@ -271,8 +271,8 @@ pub const Pool = struct {
             if (@intFromEnum(self.next_free_node) == self.nodes.len) {
                 const remaining = out.len - i;
                 self.preheat(@intCast(remaining)) catch |err| {
-                    // Push popped slots back on a preheat OOM; refcount 0 so push directly
-                    // rather than unref (which would underflow).
+                    // Preheat ran out of memory: put back the slots we already took. They're
+                    // unreferenced, so push them back onto the free list (unref would underflow).
                     const states_now = self.nodes.items(.state);
                     for (out[0..i]) |id| {
                         states_now[@intFromEnum(id)] = State.initNextFree(self.next_free_node);
@@ -630,8 +630,8 @@ pub const Id = enum(u32) {
         if (indices.len == 0) {
             return root_node;
         }
-        // Strictly-ascending is a precondition (unsorted/dup silently corrupts the tree); guard
-        // it in safe builds. Must run after the empty-check: `for (1..0)` panics in safe builds.
+        // Callers must pass strictly-ascending indices; unsorted or duplicate input silently
+        // corrupts the tree. Check it in safe builds, after the empty guard (`for (1..0)` panics).
         if (builtin.mode == .Debug or builtin.mode == .ReleaseSafe) {
             for (1..indices.len) |k| std.debug.assert(indices[k - 1] < indices[k]);
         }
@@ -644,13 +644,13 @@ pub const Id = enum(u32) {
 
         const path_len = base_gindex.pathLen();
 
-        // Zero ids so an early-iteration error's errdefer (pool.free) no-ops on the
-        // not-yet-alloc'd prefix instead of unref-ing a garbage Id (C1).
+        // Zero-filled so that if a later iteration errors, the errdefer's free skips the
+        // not-yet-filled slots (freeing a zero id is a no-op) instead of unref-ing garbage.
         var path_parents_buf: [max_depth]Id = @splat(@as(Id, @enumFromInt(0)));
         // at each level, there is at most 1 unfinalized parent per traversal
         // "unfinalized" means it may or may not be part of the new tree.
-        // Must start all-null: the unref loop reads unwritten right-move slots; an
-        // undefined `?Id` could read non-null and unref a garbage Id (UAF).
+        // Must start all-null: the cleanup loop reads slots for right-moves it never wrote this
+        // pass, and an undefined `?Id` could look non-null and unref a garbage Id.
         var unfinalized_parents_buf: [max_depth]?Id = @splat(null);
         var path_lefts_buf: [max_depth]Id = undefined;
         var path_rights_buf: [max_depth]Id = undefined;
@@ -873,13 +873,13 @@ pub const Id = enum(u32) {
 
         const path_len = base_gindex.pathLen();
 
-        // Zero ids so an early-iteration error's errdefer (pool.free) no-ops on the
-        // not-yet-alloc'd prefix instead of unref-ing a garbage Id (C1).
+        // Zero-filled so that if a later iteration errors, the errdefer's free skips the
+        // not-yet-filled slots (freeing a zero id is a no-op) instead of unref-ing garbage.
         var path_parents_buf: [max_depth]Id = @splat(@as(Id, @enumFromInt(0)));
         // at each level, there is at most 1 unfinalized parent per traversal
         // "unfinalized" means it may or may not be part of the new tree.
-        // Must start all-null: the unref loop reads unwritten right-move slots; an
-        // undefined `?Id` could read non-null and unref a garbage Id (UAF).
+        // Must start all-null: the cleanup loop reads slots for right-moves it never wrote this
+        // pass, and an undefined `?Id` could look non-null and unref a garbage Id.
         var unfinalized_parents_buf: [max_depth]?Id = @splat(null);
         var path_lefts_buf: [max_depth]Id = undefined;
         var path_rights_buf: [max_depth]Id = undefined;
@@ -1269,8 +1269,9 @@ pub const FillWithContentsIterator = struct {
         var carry = node_id;
         for (0..self.depth) |level| {
             if (self.lefts[level]) |left| {
-                // Build before dropping `left` so deinit still reclaims it on OOM; unref the orphaned
-                // `carry`, unless it aliases `left` (all-default pairs a zero node with itself).
+                // Build the branch before clearing `left`, so a failed createBranch leaves `left`
+                // reclaimable by deinit. Release the orphaned `carry` too — unless it's the same
+                // node as `left` (the all-default path pairs a node with itself).
                 const branch = self.pool.createBranch(left, carry) catch |err| {
                     if (carry != left) self.pool.unref(carry);
                     return err;
@@ -1307,8 +1308,8 @@ pub const FillWithContentsIterator = struct {
         // Starting from the lowest non-null, build upwards with zero-nodes.
         for (start_level..self.depth) |level| {
             if (self.lefts[level]) |left| {
-                // Keep `left` until the branch is built; unref the in-progress `carry` on OOM
-                // (never aliases `left` here).
+                // Same as above: keep `left` reclaimable and release `carry` on failure. Here
+                // `carry` is never the same node as `left`.
                 const branch = self.pool.createBranch(left, carry) catch |err| {
                     self.pool.unref(carry);
                     return err;

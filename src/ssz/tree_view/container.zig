@@ -56,10 +56,10 @@ pub fn ContainerTreeView(comptime ST: type) type {
             return ptr;
         }
 
-        /// Clone this view, optionally transferring its child-view cache to the clone.
-        /// With `transfer_cache = true`, pointers from earlier get()/getReadonly() on this view are
-        /// INVALIDATED (cached `changed` children are deinited; get() marks a field changed even on
-        /// a read). Re-fetch from whichever view you keep.
+        /// Clone this view, optionally moving its child-view cache to the clone.
+        /// `transfer_cache = true` invalidates any pointer from an earlier get()/getReadonly():
+        /// cached `changed` children get deinited (and get() counts as a change even on a read).
+        /// Re-fetch from whichever view you keep.
         pub fn clone(self: *Self, opts: CloneOpts) !*Self {
             const ptr = try init(self.allocator, self.pool, self.root);
             if (!opts.transfer_cache) {
@@ -203,9 +203,9 @@ pub fn ContainerTreeView(comptime ST: type) type {
         /// Get a field by name. If the field is a basic type, returns the value directly.
         /// Caller borrows a reference to child value so there is no need to deinit it.
         ///
-        /// A composite field returns a borrowed *TreeView owned by this parent, INVALIDATED by a
-        /// later set() on the field or clone(transfer_cache); re-get() instead. (Also sets the
-        /// field's changed bit.)
+        /// A composite field returns a borrowed *TreeView owned by this parent. A later set() on
+        /// the field or a clone(transfer_cache) invalidates it — re-get() instead. (This also
+        /// marks the field changed, even though it's a read.)
         pub fn get(self: *Self, comptime field_name: []const u8) !Field(field_name) {
             const field_index = comptime ST.getFieldIndex(field_name);
             const ChildST = ST.getFieldType(field_name);
@@ -239,8 +239,8 @@ pub fn ContainerTreeView(comptime ST: type) type {
         /// Set a field by name. If the field is a basic type, pass the value directly.
         /// If the field is a complex type, pass a TreeView of the corresponding type.
         /// The caller transfers ownership of the `value` TreeView to this parent view.
-        /// Deinits the existing TreeView, INVALIDATING any pointer from an earlier
-        /// get()/getReadonly() of this field; keep `value` or re-get() to use the new view.
+        /// Deinits the field's existing TreeView, so any earlier get()/getReadonly() of it is now
+        /// invalid. Keep `value`, or re-get() the field, to use the new view.
         pub fn set(self: *Self, comptime field_name: []const u8, value: Field(field_name)) !void {
             const field_index = comptime ST.getFieldIndex(field_name);
             const ChildST = ST.getFieldType(field_name);
@@ -348,9 +348,9 @@ pub fn ContainerTreeView(comptime ST: type) type {
             }
         }
 
-        /// Read-only get (does not track changes). A composite field returns a borrowed *TreeView
-        /// owned by this parent, INVALIDATED by later set() on the field or clone(transfer_cache);
-        /// don't deinit.
+        /// Like get() but doesn't mark the field changed. A composite field returns a borrowed
+        /// *TreeView owned by this parent; a later set() on the field or clone(transfer_cache)
+        /// invalidates it. Don't deinit it.
         pub fn getReadonly(self: *Self, comptime field_name: []const u8) !Field(field_name) {
             comptime {
                 @setEvalBranchQuota(20000);

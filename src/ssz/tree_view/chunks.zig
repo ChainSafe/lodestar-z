@@ -171,9 +171,9 @@ pub fn CompositeChunks(
             self.children_data = .empty;
         }
 
-        /// Clone, optionally transferring the child-view cache to `out`.
-        /// With `transfer_cache = true`, pointers from earlier get()/getReadonly() on this view
-        /// are INVALIDATED (cached `changed` children are deinited; get() marks changed on read).
+        /// Clone, optionally moving the child-view cache to `out`. With `transfer_cache = true`,
+        /// any pointer from an earlier get()/getReadonly() is invalidated — cached `changed`
+        /// children get deinited (and get() counts as a change even on a read).
         pub fn clone(self: *Self, opts: CloneOpts, out: *Self) !void {
             if (!opts.transfer_cache) {
                 try self.state.clone(opts, &out.state);
@@ -212,8 +212,8 @@ pub fn CompositeChunks(
                 return;
             }
 
-            // Reserve up front so recording each committed root is infallible: a getOrPut OOM
-            // after a child committed would strand a stale entry on its now-unref'd old root.
+            // Reserve first so storing each committed root can't fail. Otherwise a getOrPut OOM
+            // after a child already committed would leave a stale entry pointing at its freed root.
             try self.state.children_nodes.ensureUnusedCapacity(self.state.allocator, @intCast(self.state.changed.count()));
 
             // Flush child views into children_nodes so commitNodes can handle them uniformly.
@@ -232,8 +232,8 @@ pub fn CompositeChunks(
             self.clearChildrenDataCache();
         }
 
-        /// Borrowed child view: owned by this view, INVALIDATED by a later set() on this index or
-        /// clone(transfer_cache). Re-get() after such calls; don't deinit it.
+        /// Returns a borrowed child view owned by this cache. A later set() on the same index or a
+        /// clone(transfer_cache) invalidates it — re-get() after either, and don't deinit it.
         pub fn get(self: *Self, index: usize) !ElementPtr {
             const gindex = Gindex.fromDepth(chunk_depth, index);
             // Always mark as changed - the child may have been previously cached
@@ -249,15 +249,15 @@ pub fn CompositeChunks(
             return child_ptr;
         }
 
-        /// Takes ownership of `value` (deinits it on a reservation OOM) and deinits the child
-        /// previously cached for `index`, INVALIDATING any earlier get()/getReadonly() of it.
-        /// `value` must be caller-owned; never pass back a get()/getReadonly() pointer of THIS
-        /// index — set would deinit a view the cache still references (double-free).
+        /// Takes ownership of `value` (and deinits it if a reservation fails). Deinits whatever
+        /// child was cached for `index`, so any earlier get()/getReadonly() of it is now invalid.
+        /// Pass a view you own — never a get()/getReadonly() pointer for this same index, or a
+        /// failed set would deinit a view the cache still holds (double-free).
         pub fn set(self: *Self, index: usize, value: ElementPtr) !void {
             const gindex = Gindex.fromDepth(chunk_depth, index);
-            // Reserve before storing so the stores are infallible: an OOM mid-store would drop the
-            // owned `value` (caller won't deinit it) and could leave `changed` keyed without
-            // `children_data`.
+            // Reserve before storing so neither store can fail. A failure mid-store would drop
+            // `value` (we own it now, the caller won't free it) or leave `changed` and
+            // `children_data` out of sync.
             {
                 errdefer value.deinit();
                 try self.state.changed.ensureUnusedCapacity(self.state.allocator, 1);
@@ -273,8 +273,8 @@ pub fn CompositeChunks(
             }
         }
 
-        /// Read-only get (does not track changes). Same borrow rules as get(): owned by this
-        /// view, INVALIDATED by a later set() on this index or clone(transfer_cache); don't deinit.
+        /// Like get() but doesn't mark the index changed. Same borrow rules: a later set() on this
+        /// index or clone(transfer_cache) invalidates the pointer; don't deinit it.
         pub fn getReadonly(self: *Self, index: usize) !ElementPtr {
             const gindex = Gindex.fromDepth(chunk_depth, index);
             if (self.children_data.get(gindex)) |child_ptr| {
@@ -312,8 +312,8 @@ pub fn CompositeChunks(
         /// Set a child from an SSZ value type.
         pub fn setValue(self: *Self, index: usize, value: *const Value) !void {
             const root = try ST.Element.tree.fromValue(self.state.pool, value);
-            // Only free `root` on init failure; once init succeeds `set` owns `child_view` on all
-            // paths, so setValue must not also deinit it (would double-free on set's OOM).
+            // Free `root` only if init fails. Once init succeeds, `set` owns `child_view` on every
+            // path, so we must not deinit it here; that would double-free if set later fails.
             const child_view = Element.init(self.state.allocator, self.state.pool, root) catch |err| {
                 self.state.pool.unref(root);
                 return err;

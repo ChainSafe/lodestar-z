@@ -1,10 +1,11 @@
 //! Test-only allocators shared across module test suites.
 const std = @import("std");
 
-/// Wraps std.testing.FailingAllocator for OOM injection (fails the Nth alloc; resize_fail_index = 0
-/// forces all growth through alloc) and adds double-free detection: freeing a non-live address sets
-/// a flag instead of forwarding to the GPA (which would panic). Liveness is by raw address, so it is
-/// a narrow oracle — adequate for sweeping OOM points in a loop without aborting on the first free.
+/// A failing allocator (via std.testing.FailingAllocator) that also catches double-frees. It fails
+/// the Nth alloc to inject OOM, and resize_fail_index = 0 forces every growth through alloc so the
+/// failure actually lands. Freeing an address that isn't live flags `double_free` instead of
+/// forwarding to the GPA (which would panic), so a test can sweep OOM points in a loop without
+/// crashing on the first double-free. Liveness is tracked by raw address.
 pub const DoubleFreeDetectAllocator = struct {
     failing: std.testing.FailingAllocator,
     live: std.AutoHashMap(usize, void),
