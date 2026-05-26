@@ -132,6 +132,9 @@
         .time = .{
             .root_source_file = "src/time.zig",
         },
+        .test_alloc = .{
+            .root_source_file = "src/test_alloc.zig",
+        },
         .hashing = .{
             .root_source_file = "src/hashing/root.zig",
             .imports = .{ .build_options, .hex, .hashtree },
@@ -146,7 +149,7 @@
         },
         .ssz = .{
             .root_source_file = "src/ssz/root.zig",
-            .imports = .{ .build_options, .hex, .hashing, .persistent_merkle_tree },
+            .imports = .{ .build_options, .hex, .hashing, .persistent_merkle_tree, .test_alloc },
         },
         .consensus_types = .{
             .root_source_file = "src/consensus_types/root.zig",
