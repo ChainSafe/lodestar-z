@@ -436,7 +436,7 @@ test "TreeView composite list sliceTo does not leak pool nodes" {
     }
 }
 
-const DoubleFreeDetectAllocator = @import("test_alloc").DoubleFreeDetectAllocator;
+const DoubleFreeDetectAllocator = @import("testing_allocators").DoubleFreeDetectAllocator;
 
 // set takes ownership of the view, so setValue must not deinit it too. Sweep every OOM point.
 test "TreeView composite list setValue - OOM does not double-free the element view" {
