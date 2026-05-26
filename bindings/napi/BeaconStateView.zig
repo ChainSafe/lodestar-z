@@ -1110,25 +1110,14 @@ fn readByteArrayInto(parent: napi.Value, comptime field: [:0]const u8, out: []u8
     @memcpy(out, info.data);
 }
 
-/// Read a JS bigint into u256.
-///
-/// Throws on negative values; we never store signed u256 in consensus types.
+/// Read a JS bigint into u256. Consensus-types bigints are spec-defined unsigned, so we pass
+/// `null` for `sign_bit` and skip the sign check entirely.
 fn readBigintU256(value: napi.Value) !u256 {
-    var sign_bit: c_int = 0;
-    var word_count: usize = 4;
     var words: [4]u64 = .{ 0, 0, 0, 0 };
-    try napi.status.check(napi.c.napi_get_value_bigint_words(
-        value.env,
-        value.value,
-        &sign_bit,
-        &word_count,
-        &words,
-    ));
-    if (sign_bit != 0) return error.NegativeBigint;
+    const got = try value.getValueBigintWords(null, &words);
     var result: u256 = 0;
-    var i: usize = 0;
-    while (i < @min(word_count, 4)) : (i += 1) {
-        result |= @as(u256, words[i]) << @intCast(i * 64);
+    for (got, 0..) |word, i| {
+        result |= @as(u256, word) << @intCast(i * 64);
     }
     return result;
 }

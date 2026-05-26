@@ -337,7 +337,7 @@ describe("BeaconStateView", () => {
 
     const phase0State = ssz.phase0.BeaconState.defaultValue();
     const bellatrixState = ssz.bellatrix.BeaconState.defaultValue();
-    bellatrixState.slot = 144896 * 32; // BELLATRIX_FORK_EPOCH * SLOTS_PER_EPOCH (mainnet)
+    bellatrixState.slot = BELLATRIX_FORK_EPOCH * SLOTS_PER_EPOCH;
     bellatrixState.validators = validators;
     bellatrixState.currentSyncCommittee = syncCommittee;
     bellatrixState.nextSyncCommittee = syncCommittee;
