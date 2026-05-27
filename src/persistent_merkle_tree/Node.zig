@@ -1,6 +1,5 @@
 ///! Merkle node backed by a memory pool
 const std = @import("std");
-const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 
 const hashOne = @import("hashing").hashOne;
@@ -631,10 +630,9 @@ pub const Id = enum(u32) {
             return root_node;
         }
         // Callers must pass strictly-ascending indices; unsorted or duplicate input silently
-        // corrupts the tree. Check it in safe builds, after the empty guard (`for (1..0)` panics).
-        if (builtin.mode == .Debug or builtin.mode == .ReleaseSafe) {
-            for (1..indices.len) |k| std.debug.assert(indices[k - 1] < indices[k]);
-        }
+        // corrupts the tree. assert is a no-op in unsafe builds, so the loop is optimized away
+        // there; keep it after the empty guard, since `for (1..0)` would panic.
+        for (1..indices.len) |k| std.debug.assert(indices[k - 1] < indices[k]);
 
         const base_gindex = Gindex.fromDepth(depth, 0);
 
