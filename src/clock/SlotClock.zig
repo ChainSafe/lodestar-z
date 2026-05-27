@@ -9,13 +9,13 @@ const time_source = @import("time_source.zig");
 
 const SlotClock = @This();
 
-config: Config,
+config: ClockConfig,
 time: TimeSource,
 current_slot: ?Slot = null,
 
 pub const Slot = slot_math.Slot;
 pub const Epoch = slot_math.Epoch;
-pub const Config = slot_math.Config;
+pub const ClockConfig = slot_math.ClockConfig;
 pub const TimeSource = time_source.TimeSource;
 
 pub const Event = union(enum) {
@@ -60,7 +60,7 @@ pub const AdvanceIterator = struct {
     }
 };
 
-pub fn init(config: Config, time: TimeSource) error{InvalidConfig}!SlotClock {
+pub fn init(config: ClockConfig, time: TimeSource) error{InvalidConfig}!SlotClock {
     try config.validate();
     var self = SlotClock{
         .config = config,
@@ -134,13 +134,13 @@ pub fn isCurrentSlotGivenGossipDisparity(self: *const SlotClock, slot: Slot) boo
     return false;
 }
 
-pub fn slotWithFutureTolerance(self: *const SlotClock, tolerance_ms: u64) ?Slot {
+pub fn slotWithFutureToleranceMs(self: *const SlotClock, tolerance_ms: u64) ?Slot {
     const now_ms = self.time.nowMs();
     const shifted_ms = std.math.add(u64, now_ms, tolerance_ms) catch return null;
     return slot_math.slotAtMs(self.config, shifted_ms);
 }
 
-pub fn slotWithPastTolerance(self: *const SlotClock, tolerance_ms: u64) ?Slot {
+pub fn slotWithPastToleranceMs(self: *const SlotClock, tolerance_ms: u64) ?Slot {
     const now_ms = self.time.nowMs();
     // Checked sub: underflow (pre-UNIX-epoch) returns null.
     // Pre-genesis but valid timestamp returns 0.
@@ -162,6 +162,9 @@ pub fn msFromSlot(self: *const SlotClock, slot: Slot, to_ms: ?u64) ?i64 {
     return std.math.cast(i64, diff);
 }
 
+/// Advances the clock toward `target` one event at a time.  The caller may
+/// drop the iterator mid-walk; the clock is then left at the last slot the
+/// iterator returned (i.e. partial advancement is observable).
 pub fn advanceTo(self: *SlotClock, target: Slot) AdvanceIterator {
     return .{
         .clock = self,
@@ -171,7 +174,7 @@ pub fn advanceTo(self: *SlotClock, target: Slot) AdvanceIterator {
 
 const testing = std.testing;
 
-const test_cfg = Config{
+const test_cfg = ClockConfig{
     .genesis_time_sec = 100,
     .slot_duration_ms = 12_000,
     .slots_per_epoch = 32,
@@ -311,11 +314,11 @@ test "gossip disparity: exact threshold (500ms) applies inclusively" {
 test "tolerance helpers" {
     var fake = time_source.FakeTime{ .ms = 112_000 };
     var clock = try SlotClock.init(test_cfg, .{ .fake = &fake });
-    try testing.expectEqual(@as(?Slot, 2), clock.slotWithFutureTolerance(12_000));
-    try testing.expectEqual(@as(?Slot, 0), clock.slotWithPastTolerance(12_000));
-    try testing.expectEqual(@as(?Slot, null), clock.slotWithFutureTolerance(std.math.maxInt(u64)));
+    try testing.expectEqual(@as(?Slot, 2), clock.slotWithFutureToleranceMs(12_000));
+    try testing.expectEqual(@as(?Slot, 0), clock.slotWithPastToleranceMs(12_000));
+    try testing.expectEqual(@as(?Slot, null), clock.slotWithFutureToleranceMs(std.math.maxInt(u64)));
     // Underflow (tolerance > now_ms) returns null, not 0
-    try testing.expectEqual(@as(?Slot, null), clock.slotWithPastTolerance(112_001));
+    try testing.expectEqual(@as(?Slot, null), clock.slotWithPastToleranceMs(112_001));
 }
 
 test "secFromSlot and msFromSlot" {

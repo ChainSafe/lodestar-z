@@ -5,74 +5,18 @@
 
 const std = @import("std");
 const ct = @import("consensus_types");
-const bounded_array = @import("bounded_array");
 
 pub const Slot = ct.primitive.Slot.Type;
 pub const Epoch = ct.primitive.Epoch.Type;
-
-pub const DurationTransition = struct {
-    from_slot: Slot,
-    new_duration_ms: u64,
-};
-
-pub const max_duration_transitions: u32 = 4;
-
-pub const DurationTransitions = bounded_array.BoundedArray(DurationTransition, max_duration_transitions);
-
-/// Comptime builder for `Config.duration_transitions`.
-pub fn forkTransitions(
-    comptime list: []const DurationTransition,
-) DurationTransitions {
-    if (list.len > max_duration_transitions) {
-        @compileError("too many slot duration transitions");
-    }
-    var arr: DurationTransitions = .{};
-    inline for (list) |t| arr.push(t);
-    return arr;
-}
-
-/// `duration_transitions` entries must be sorted strictly ascending by
-/// `from_slot`, with non-zero `new_duration_ms` and `from_slot != 0` (validated).
-pub const Config = struct {
-    genesis_time_sec: u64,
-    slot_duration_ms: u64,
-    duration_transitions: DurationTransitions = .{},
-    slots_per_epoch: u64,
-    maximum_gossip_clock_disparity_ms: u64 = 500,
-
-    pub fn validate(self: Config) error{InvalidConfig}!void {
-        if (self.slot_duration_ms == 0) return error.InvalidConfig;
-        if (self.slots_per_epoch == 0) return error.InvalidConfig;
-        if (secToMs(self.genesis_time_sec) == null) return error.InvalidConfig;
-        var prev_slot: Slot = 0;
-        for (self.duration_transitions.constSlice()) |t| {
-            if (t.from_slot == 0) return error.InvalidConfig;
-            if (t.new_duration_ms == 0) return error.InvalidConfig;
-            if (t.from_slot <= prev_slot) return error.InvalidConfig;
-            prev_slot = t.from_slot;
-        }
-    }
-
-    pub fn transitions(self: *const Config) []const DurationTransition {
-        return self.duration_transitions.constSlice();
-    }
-
-    /// Slot duration applicable at `slot`.  Falls back to `slot_duration_ms`
-    /// if no transition has fired yet.
-    pub fn slotDurationMsAt(self: Config, slot: Slot) u64 {
-        var duration = self.slot_duration_ms;
-        for (self.transitions()) |t| {
-            if (t.from_slot > slot) break;
-            duration = t.new_duration_ms;
-        }
-        return duration;
-    }
-};
+pub const ClockConfig = @import("config.zig").ClockConfig;
+pub const DurationTransition = @import("config.zig").DurationTransition;
+pub const DurationTransitions = @import("config.zig").DurationTransitions;
+pub const forkTransitions = @import("config.zig").forkTransitions;
 
 /// Returns the slot at the given Unix-millisecond timestamp,
 /// or null if pre-genesis or on overflow.
 /// Precondition: `validate()` accepted `config` — guarantees all durations > 0.
-pub fn slotAtMs(config: Config, now_ms: u64) ?Slot {
+pub fn slotAtMs(config: ClockConfig, now_ms: u64) ?Slot {
     std.debug.assert(config.slot_duration_ms != 0);
     const genesis_ms = secToMs(config.genesis_time_sec) orelse return null;
     if (now_ms < genesis_ms) return null;
@@ -100,20 +44,20 @@ pub fn slotAtMs(config: Config, now_ms: u64) ?Slot {
 
 /// Returns the slot at the given Unix-second timestamp,
 /// or null if pre-genesis or on overflow.
-pub fn slotAtSec(config: Config, now_sec: u64) ?Slot {
+pub fn slotAtSec(config: ClockConfig, now_sec: u64) ?Slot {
     const now_ms = secToMs(now_sec) orelse return null;
     return slotAtMs(config, now_ms);
 }
 
 /// Returns the epoch that contains `slot`.
 /// Precondition: `validate()` accepted `config` — `slots_per_epoch > 0`.
-pub fn epochAtSlot(config: Config, slot: Slot) Epoch {
+pub fn epochAtSlot(config: ClockConfig, slot: Slot) Epoch {
     std.debug.assert(config.slots_per_epoch != 0);
     return @divFloor(slot, config.slots_per_epoch);
 }
 
 /// Returns the Unix-millisecond start time of `slot`, or null on overflow.
-pub fn slotStartMs(config: Config, slot: Slot) ?u64 {
+pub fn slotStartMs(config: ClockConfig, slot: Slot) ?u64 {
     const genesis_ms = secToMs(config.genesis_time_sec) orelse return null;
 
     var seg_start_slot: Slot = 0;
@@ -138,7 +82,7 @@ pub fn slotStartMs(config: Config, slot: Slot) ?u64 {
 
 /// Returns the Unix-second start time of `slot`, or null on overflow.
 /// Sub-second slot durations truncate to the floor second.
-pub fn slotStartSec(config: Config, slot: Slot) ?u64 {
+pub fn slotStartSec(config: ClockConfig, slot: Slot) ?u64 {
     const ms = slotStartMs(config, slot) orelse return null;
     return @divFloor(ms, 1000);
 }
@@ -146,7 +90,7 @@ pub fn slotStartSec(config: Config, slot: Slot) ?u64 {
 /// Milliseconds until the next slot boundary.
 /// Pre-genesis: returns the time until genesis.
 /// Returns null only on arithmetic overflow.
-pub fn msUntilNextSlot(config: Config, now_ms: u64) ?u64 {
+pub fn msUntilNextSlot(config: ClockConfig, now_ms: u64) ?u64 {
     const genesis_ms = secToMs(config.genesis_time_sec) orelse return null;
     if (now_ms < genesis_ms) return genesis_ms - now_ms;
     const slot = slotAtMs(config, now_ms) orelse return null;
@@ -162,7 +106,7 @@ fn secToMs(sec: u64) ?u64 {
 
 const testing = std.testing;
 
-const mainnet = Config{
+const mainnet = ClockConfig{
     .genesis_time_sec = 1_606_824_023,
     .slot_duration_ms = 12_000,
     .slots_per_epoch = 32,
@@ -219,7 +163,7 @@ test "overflow safety" {
     try testing.expectEqual(@as(?u64, null), slotStartSec(mainnet, std.math.maxInt(u64)));
     try testing.expectEqual(@as(?u64, null), slotStartMs(mainnet, std.math.maxInt(u64)));
 
-    const extreme = Config{
+    const extreme = ClockConfig{
         .genesis_time_sec = std.math.maxInt(u64),
         .slot_duration_ms = 12_000,
         .slots_per_epoch = 32,
@@ -244,7 +188,7 @@ test "msUntilNextSlot" {
     try testing.expectEqual(@as(?u64, genesis_ms), msUntilNextSlot(mainnet, 0));
 
     // Regression: `slot + 1` overflows at max slot — must return null, not panic.
-    const tight = Config{
+    const tight = ClockConfig{
         .genesis_time_sec = 0,
         .slot_duration_ms = 1,
         .slots_per_epoch = 32,
@@ -255,13 +199,13 @@ test "msUntilNextSlot" {
 test "config validate" {
     try mainnet.validate();
 
-    try testing.expectError(error.InvalidConfig, (Config{
+    try testing.expectError(error.InvalidConfig, (ClockConfig{
         .genesis_time_sec = 0,
         .slot_duration_ms = 0,
         .slots_per_epoch = 32,
     }).validate());
 
-    try testing.expectError(error.InvalidConfig, (Config{
+    try testing.expectError(error.InvalidConfig, (ClockConfig{
         .genesis_time_sec = 0,
         .slot_duration_ms = 12_000,
         .slots_per_epoch = 0,
@@ -269,14 +213,14 @@ test "config validate" {
 
     try testing.expectEqual(@as(u64, 500), mainnet.maximum_gossip_clock_disparity_ms);
 
-    try testing.expectError(error.InvalidConfig, (Config{
+    try testing.expectError(error.InvalidConfig, (ClockConfig{
         .genesis_time_sec = std.math.maxInt(u64),
         .slot_duration_ms = 12_000,
         .slots_per_epoch = 32,
     }).validate());
 
     // Zero new_duration_ms in any transition is invalid
-    try testing.expectError(error.InvalidConfig, (Config{
+    try testing.expectError(error.InvalidConfig, (ClockConfig{
         .genesis_time_sec = 0,
         .slot_duration_ms = 12_000,
         .duration_transitions = forkTransitions(&.{.{ .from_slot = 1024, .new_duration_ms = 0 }}),
@@ -284,7 +228,7 @@ test "config validate" {
     }).validate());
 
     // Transitions must be sorted strictly ascending
-    try testing.expectError(error.InvalidConfig, (Config{
+    try testing.expectError(error.InvalidConfig, (ClockConfig{
         .genesis_time_sec = 0,
         .slot_duration_ms = 12_000,
         .duration_transitions = forkTransitions(&.{
@@ -297,7 +241,7 @@ test "config validate" {
     // from_slot == 0 is invalid (a transition at genesis is redundant with slot_duration_ms).
     var bad_zero: DurationTransitions = .{};
     bad_zero.push(.{ .from_slot = 0, .new_duration_ms = 6_000 });
-    try testing.expectError(error.InvalidConfig, (Config{
+    try testing.expectError(error.InvalidConfig, (ClockConfig{
         .genesis_time_sec = 0,
         .slot_duration_ms = 12_000,
         .duration_transitions = bad_zero,
@@ -305,7 +249,7 @@ test "config validate" {
     }).validate());
 }
 
-const eip7782 = Config{
+const eip7782 = ClockConfig{
     .genesis_time_sec = 1_000_000,
     .slot_duration_ms = 12_000,
     .duration_transitions = forkTransitions(&.{.{ .from_slot = 1024, .new_duration_ms = 6_000 }}),
@@ -353,7 +297,7 @@ test "fork-aware: msUntilNextSlot across boundary" {
     try testing.expectEqual(@as(?u64, 3_000), msUntilNextSlot(eip7782, fork_ms + 3_000));
 }
 
-const two_fork = Config{
+const two_fork = ClockConfig{
     .genesis_time_sec = 1_000_000,
     .slot_duration_ms = 12_000,
     .duration_transitions = forkTransitions(&.{

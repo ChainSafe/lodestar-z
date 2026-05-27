@@ -47,7 +47,7 @@ waiters: WaiterQueue,
 
 pub const Slot = slot_math.Slot;
 pub const Epoch = slot_math.Epoch;
-pub const Config = slot_math.Config;
+pub const ClockConfig = slot_math.ClockConfig;
 pub const ListenerId = u64;
 pub const TimeSource = time_source.TimeSource;
 
@@ -104,14 +104,14 @@ const WaiterQueue = std.PriorityQueue(WaiterEntry, void, struct {
     }
 }.compare);
 
-pub fn init(self: *EventClock, allocator: Allocator, config: Config, io_handle: std.Io) Error!void {
+pub fn init(self: *EventClock, allocator: Allocator, config: ClockConfig, io_handle: std.Io) Error!void {
     self.* = .{
         .allocator = allocator,
         .io = io_handle,
         .clock = undefined,
         .waiters = WaiterQueue.initContext({}),
     };
-    self.clock = SlotClock.init(config, .{ .real = .{ .io = io_handle } }) catch return error.InvalidConfig;
+    self.clock = try SlotClock.init(config, .{ .real = .{ .io = io_handle } });
 }
 
 /// Start the auto-advance loop.  Idempotent; second call is a no-op.
@@ -208,7 +208,7 @@ pub fn offEpoch(self: *EventClock, id: ListenerId) bool {
 
 // Accessors that expose "current" slot/epoch state call catchUp() first so
 // reads emit any pending events before returning.  Pure time-arithmetic
-// helpers (slotWithFutureTolerance, secFromSlot, …) do not.
+// helpers (slotWithFutureToleranceMs, secFromSlot, …) do not.
 
 pub fn currentSlot(self: *EventClock) ?Slot {
     self.catchUp();
@@ -240,12 +240,12 @@ pub fn isCurrentSlotGivenGossipDisparity(self: *EventClock, slot: Slot) bool {
     return self.clock.isCurrentSlotGivenGossipDisparity(slot);
 }
 
-pub fn slotWithFutureTolerance(self: *EventClock, tolerance_ms: u64) ?Slot {
-    return self.clock.slotWithFutureTolerance(tolerance_ms);
+pub fn slotWithFutureToleranceMs(self: *EventClock, tolerance_ms: u64) ?Slot {
+    return self.clock.slotWithFutureToleranceMs(tolerance_ms);
 }
 
-pub fn slotWithPastTolerance(self: *EventClock, tolerance_ms: u64) ?Slot {
-    return self.clock.slotWithPastTolerance(tolerance_ms);
+pub fn slotWithPastToleranceMs(self: *EventClock, tolerance_ms: u64) ?Slot {
+    return self.clock.slotWithPastToleranceMs(tolerance_ms);
 }
 
 pub fn secFromSlot(self: *EventClock, slot: Slot, to_sec: ?u64) ?i64 {
