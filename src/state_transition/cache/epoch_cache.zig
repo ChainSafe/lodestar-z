@@ -534,25 +534,28 @@ pub const EpochCache = struct {
     pub fn afterProcessEpoch(self: *EpochCache, state: *AnyBeaconState, epoch_transition_cache: *const EpochTransitionCache) !void {
         const upcoming_epoch = self.epoch + 1;
         const epoch_after_upcoming = upcoming_epoch + 1;
+        const slot = try state.slot();
 
-        // move current to previous
-        self.previous_shuffling.unref();
-        // no need to release current_shuffling and next_shuffling
-        self.previous_shuffling = self.current_shuffling;
-        self.current_shuffling = self.next_shuffling;
-        // allocate next_shuffling_active_indices here and transfer owner ship to EpochShuffling
         const next_shuffling_active_indices = try self.allocator.alloc(ValidatorIndex, epoch_transition_cache.next_shuffling_active_indices.len);
         std.mem.copyForwards(ValidatorIndex, next_shuffling_active_indices, epoch_transition_cache.next_shuffling_active_indices);
+
         const next_shuffling = try computeEpochShuffling(
             self.allocator,
             state,
             next_shuffling_active_indices,
             epoch_after_upcoming,
         );
-        self.next_shuffling = try EpochShufflingRc.init(self.allocator, next_shuffling);
+        errdefer next_shuffling.deinit();
+
+        const next_shuffling_rc = try EpochShufflingRc.init(self.allocator, next_shuffling);
+
+        self.previous_shuffling.unref();
+        self.previous_shuffling = self.current_shuffling;
+        self.current_shuffling = self.next_shuffling;
+        self.next_shuffling = next_shuffling_rc;
 
         self.churn_limit = getChurnLimit(self.config, self.current_shuffling.get().active_indices.len);
-        self.activation_churn_limit = getActivationChurnLimit(self.config, self.config.forkSeq(try state.slot()), self.current_shuffling.get().active_indices.len);
+        self.activation_churn_limit = getActivationChurnLimit(self.config, self.config.forkSeq(slot), self.current_shuffling.get().active_indices.len);
 
         const exit_queue_epoch = computeActivationExitEpoch(upcoming_epoch);
         if (exit_queue_epoch > self.exit_queue_epoch) {
@@ -570,7 +573,7 @@ pub const EpochCache = struct {
 
         self.previous_target_unslashed_balance_increments = self.current_target_unslashed_balance_increments;
         self.current_target_unslashed_balance_increments = 0;
-        self.epoch = computeEpochAtSlot(try state.slot());
+        self.epoch = computeEpochAtSlot(slot);
         self.sync_period = computeSyncPeriodAtEpoch(self.epoch);
     }
 
@@ -614,10 +617,13 @@ pub const EpochCache = struct {
     }
 
     pub fn beforeEpochTransition(self: *EpochCache) !void {
-        // Clone (copy) before being mutated in processEffectiveBalanceUpdates
-        const effective_balance_increments = try self.effective_balance_increments.get().clone(self.allocator);
+        var effective_balance_increments = try self.effective_balance_increments.get().clone(self.allocator);
+        errdefer effective_balance_increments.deinit(self.allocator);
+
+        const new_rc = try EffectiveBalanceIncrementsRc.init(self.allocator, effective_balance_increments);
+
         self.effective_balance_increments.unref();
-        self.effective_balance_increments = try EffectiveBalanceIncrementsRc.init(self.allocator, effective_balance_increments);
+        self.effective_balance_increments = new_rc;
     }
 
     /// Consumer borrows the returned slice
@@ -770,14 +776,18 @@ pub const EpochCache = struct {
     /// Sets `index` at `PublicKey` within the index to pubkey map and allocates and puts a new `PublicKey` at `index` within the set of validators.
     pub fn addPubkey(self: *EpochCache, index: ValidatorIndex, pubkey: *const types.primitive.BLSPubkey.Type) !void {
         std.debug.assert(index <= self.index_to_pubkey.items.len);
-        try self.pubkey_to_index.put(pubkey.*, index);
-        // this is deinit() by application
-        const pk = try bls.PublicKey.uncompress(pubkey);
-        if (index == self.index_to_pubkey.items.len) {
-            try self.index_to_pubkey.append(self.allocator, pk);
-            return;
+        const appending = index == self.index_to_pubkey.items.len;
+
+        const public_key = try bls.PublicKey.uncompress(pubkey);
+        try self.pubkey_to_index.ensureUnusedCapacity(1);
+        if (appending) try self.index_to_pubkey.ensureUnusedCapacity(self.allocator, 1);
+
+        self.pubkey_to_index.putAssumeCapacity(pubkey.*, index);
+        if (appending) {
+            self.index_to_pubkey.appendAssumeCapacity(public_key);
+        } else {
+            self.index_to_pubkey.items[index] = public_key;
         }
-        self.index_to_pubkey.items[index] = pk;
     }
 
     // TODO: getBeaconCommittee
@@ -861,15 +871,17 @@ pub const EpochCache = struct {
             const old = self.effective_balance_increments.get();
             const new_len = index + 1;
             const capacity = 1024 * @divFloor(new_len + 1024, 1024);
-            var new_increments = try EffectiveBalanceIncrements.initCapacity(self.allocator, capacity);
-            errdefer new_increments.deinit(self.allocator);
 
-            try new_increments.resize(self.allocator, new_len);
+            var new_increments = try EffectiveBalanceIncrements.initCapacity(allocator, capacity);
+            errdefer new_increments.deinit(allocator);
+
+            try new_increments.resize(allocator, new_len);
             @memcpy(new_increments.items[0..old.items.len], old.items);
             @memset(new_increments.items[old.items.len..new_len], 0);
 
+            const new_rc = try EffectiveBalanceIncrementsRc.init(allocator, new_increments);
             self.effective_balance_increments.unref();
-            self.effective_balance_increments = try EffectiveBalanceIncrementsRc.init(allocator, new_increments);
+            self.effective_balance_increments = new_rc;
         }
         self.effective_balance_increments.get().items[index] = @intCast(@divFloor(effective_balance, preset.EFFECTIVE_BALANCE_INCREMENT));
     }

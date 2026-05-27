@@ -46,7 +46,7 @@ pub fn voluntaryExitsSignatureSets(
     config: *const BeaconConfig,
     epoch_cache: *const EpochCache,
     voluntary_exits: []types.phase0.SignedVoluntaryExit.Type,
-    out: std.ArrayList(SingleSignatureSet),
+    out: *std.ArrayList(SingleSignatureSet),
 ) !void {
     for (voluntary_exits) |*signed_voluntary_exit| {
         const signature_set = try getVoluntaryExitSignatureSet(

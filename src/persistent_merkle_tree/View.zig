@@ -91,11 +91,15 @@ pub const Pool = struct {
         return n;
     }
 
+    /// Destroy a view and return its slot to the free list. Destroy children before parents: a
+    /// surviving child still points at this view's id, so once the slot is reused it would drive
+    /// its writes into an unrelated view. The assert catches that early in safe builds.
     pub fn destroy(self: *Pool, view_id: View.Id) void {
         const view = &self.views.items[@intFromEnum(view_id)];
         // delink the view from its children and deinit the children hashmap
         if (self.parent_views.fetchRemove(view_id)) |kv| {
             var children = kv.value;
+            std.debug.assert(children.count() == 0);
             children.deinit(self.allocator);
         }
         // delink the view from its parent
@@ -106,6 +110,9 @@ pub const Pool = struct {
         }
         // unref the root node
         self.node_pool.unref(view.root_node);
+        // Poison the slot so a later reuse can't mistake these leftover fields for a live view.
+        view.parent = null;
+        view.root_node = @enumFromInt(0);
         // push to the free list
         view.next_free = self.next_free;
         self.next_free = view_id;

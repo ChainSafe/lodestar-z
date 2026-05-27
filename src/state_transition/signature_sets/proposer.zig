@@ -39,8 +39,16 @@ pub fn getBlockProposerSignatureSet(
     try computeBlockSigningRoot(allocator, block, domain, &signing_root_buf);
 
     // Root.uncompressFromBytes(&signing_root_buf, &signing_root);
+
+    // The proposer index isn't validated until processBlockHeader, so a malicious block could
+    // put an out-of-range value here.
+    const proposer_index = block.proposerIndex();
+    if (proposer_index >= epoch_cache.index_to_pubkey.items.len) {
+        return error.InvalidProposerIndex;
+    }
+
     return .{
-        .pubkey = epoch_cache.index_to_pubkey.items[block.proposerIndex()],
+        .pubkey = epoch_cache.index_to_pubkey.items[proposer_index],
         .signing_root = signing_root_buf,
         .signature = signed_block.signature().*,
     };
