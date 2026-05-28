@@ -80,7 +80,9 @@ const JobQueue = struct {
             }
             self.tail = item;
         }
-        self.cond.broadcast(io);
+        for (0..@min(items.len, pool.n_workers)) |_| {
+            self.cond.signal(io);
+        }
         return true;
     }
 
