@@ -203,7 +203,6 @@ const VerifyMultiWorkItem = struct {
         const self: *VerifyMultiWorkItem = @fieldParentPtr("base", base_item);
         const job = self.job;
 
-        // Each worker gets its own pairing buffer on the stack
         var buf: PairingBuf = .{};
         var pairing = Pairing.init(&buf.data, true, job.dst);
 
@@ -213,7 +212,7 @@ const VerifyMultiWorkItem = struct {
         while (true) {
             const i = job.counter.fetchAdd(1, .monotonic);
             if (i >= n_elems) break;
-            if (job.err_flag.load(.acquire)) break;
+            if (job.err_flag.load(.monotonic)) break;
 
             did_work = true;
 
@@ -347,7 +346,7 @@ const AggVerifyWorkItem = struct {
         while (true) {
             const i = job.counter.fetchAdd(1, .monotonic);
             if (i >= job.n_elems) break;
-            if (job.err_flag.load(.acquire)) break;
+            if (job.err_flag.load(.monotonic)) break;
 
             did_work = true;
 

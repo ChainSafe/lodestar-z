@@ -92,6 +92,9 @@ fn uint8SliceFromValue(value: js.Value) ![]u8 {
 pub const PublicKey = struct {
     pub const js_meta = js.class(.{});
 
+    pub const COMPRESS_SIZE = NativePublicKey.COMPRESS_SIZE;
+    pub const SERIALIZE_SIZE = NativePublicKey.SERIALIZE_SIZE;
+
     raw: NativePublicKey = .{},
 
     pub fn init() PublicKey {
@@ -154,6 +157,9 @@ pub const PublicKey = struct {
 
 pub const Signature = struct {
     pub const js_meta = js.class(.{});
+
+    pub const COMPRESS_SIZE = NativeSignature.COMPRESS_SIZE;
+    pub const SERIALIZE_SIZE = NativeSignature.SERIALIZE_SIZE;
 
     raw: NativeSignature = .{},
 
@@ -654,13 +660,13 @@ pub fn aggregateWithRandomness(sets: js.Array) !js.Value {
 /// All input data should be copied into this struct so the worker thread doesn't depend on
 /// any JS-managed memory staying alive.
 const AsyncAggRandData = struct {
-    pks: []PublicKey,
-    sigs: []Signature,
-    pk_ptrs: []*const PublicKey,
-    sig_ptrs: []*const Signature,
+    pks: []NativePublicKey,
+    sigs: []NativeSignature,
+    pk_ptrs: []*const NativePublicKey,
+    sig_ptrs: []*const NativeSignature,
     randomness: []u8,
-    pk_out: PublicKey,
-    sig_out: Signature,
+    pk_out: NativePublicKey,
+    sig_out: NativeSignature,
     err: ?anyerror,
     deferred: napi.Deferred,
     work: napi.c.napi_async_work,
@@ -729,13 +735,8 @@ fn settle(env: napi.Env, status: napi.status.Status, data: *AsyncAggRandData) !v
         return rejectWithError(env, data.deferred, "asyncAggregateWithRandomness", @errorName(err));
     }
 
-    const pk_value: NativePublicKey = .{};
-    const pk_unwrapped = try env.unwrap(PublicKey, pk_value);
-    pk_unwrapped.* = data.pk_out;
-
-    const sig_value: NativeSignature = .{};
-    const sig_unwrapped = try env.unwrap(Signature, sig_value);
-    sig_unwrapped.* = data.sig_out;
+    const pk_value = napi.Value{ .env = env.env, .value = js.convertReturn(PublicKey, .{ .raw = data.pk_out }, env.env) };
+    const sig_value = napi.Value{ .env = env.env, .value = js.convertReturn(Signature, .{ .raw = data.sig_out }, env.env) };
 
     const result = try env.createObject();
     try result.setNamedProperty("pk", pk_value);
@@ -771,24 +772,25 @@ fn rejectWithError(env: napi.Env, deferred: napi.Deferred, where: []const u8, co
 /// 1) sets: Array of {pk: PublicKey, sig: Uint8Array}
 ///
 /// Returns: Promise<{pk: PublicKey, sig: Signature}>
-pub fn asyncAggregateWithRandomness(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
-    const sets = cb.arg(0);
-    const n = try sets.getArrayLength();
+pub fn asyncAggregateWithRandomness(sets: js.Array) !js.Value {
+    const n = try sets.length();
 
     if (n == 0) return error.EmptyArray;
     if (n > MAX_AGGREGATE_PER_JOB) return error.TooManySets;
     if (thread_pool == null) return error.PoolNotInitialized;
 
+    const env = js.env();
+
     const data = try allocator.create(AsyncAggRandData);
     errdefer allocator.destroy(data);
 
-    data.pks = try allocator.alloc(PublicKey, n);
+    data.pks = try allocator.alloc(NativePublicKey, n);
     errdefer allocator.free(data.pks);
-    data.sigs = try allocator.alloc(Signature, n);
+    data.sigs = try allocator.alloc(NativeSignature, n);
     errdefer allocator.free(data.sigs);
-    data.pk_ptrs = try allocator.alloc(*const PublicKey, n);
+    data.pk_ptrs = try allocator.alloc(*const NativePublicKey, n);
     errdefer allocator.free(data.pk_ptrs);
-    data.sig_ptrs = try allocator.alloc(*const Signature, n);
+    data.sig_ptrs = try allocator.alloc(*const NativeSignature, n);
     errdefer allocator.free(data.sig_ptrs);
     data.randomness = try allocator.alloc(u8, n * 32);
     errdefer allocator.free(data.randomness);
@@ -801,16 +803,16 @@ pub fn asyncAggregateWithRandomness(env: napi.Env, cb: napi.CallbackInfo(1)) !na
     napi_io.get().random(data.randomness);
 
     for (0..n) |i| {
-        const set_value = try sets.getElement(@intCast(i));
+        const set = (try sets.get(@intCast(i))).toValue();
 
-        const pk_value = try set_value.getNamedProperty("pk");
-        const unwrapped_pk = try env.unwrap(PublicKey, pk_value);
-        data.pks[i] = unwrapped_pk.*;
+        const pk_napi = try set.getNamedProperty("pk");
+        const wrapped_pk = try env.unwrap(PublicKey, pk_napi);
+        data.pks[i] = wrapped_pk.raw;
         data.pk_ptrs[i] = &data.pks[i];
 
-        const sig_value = try set_value.getNamedProperty("sig");
-        const sig_bytes = try sig_value.getTypedarrayInfo();
-        data.sigs[i] = Signature.deserialize(sig_bytes.data[0..]) catch return error.DeserializationFailed;
+        const sig_napi = try set.getNamedProperty("sig");
+        const sig_bytes = try uint8SliceFromValue(.{ .val = sig_napi });
+        data.sigs[i] = NativeSignature.deserialize(sig_bytes[0..]) catch return error.DeserializationFailed;
         data.sig_ptrs[i] = &data.sigs[i];
     }
 
@@ -829,5 +831,5 @@ pub fn asyncAggregateWithRandomness(env: napi.Env, cb: napi.CallbackInfo(1)) !na
 
     try work.queue();
 
-    return data.deferred.getPromise();
+    return .{ .val = data.deferred.getPromise() };
 }

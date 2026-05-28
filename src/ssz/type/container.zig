@@ -150,7 +150,8 @@ pub fn FixedContainerType(comptime ST: type) type {
 
         pub const tree = struct {
             pub fn default(pool: *Node.Pool) !Node.Id {
-                var nodes: [chunk_count]Node.Id = undefined;
+                // Zero-filled so a mid-build error's errdefer is a no-op over the unfilled slots.
+                var nodes: [chunk_count]Node.Id = @splat(@as(Node.Id, @enumFromInt(0)));
                 errdefer pool.free(&nodes);
                 inline for (fields, 0..) |field, i| {
                     if (comptime isBasicType(field.type)) {
@@ -167,7 +168,8 @@ pub fn FixedContainerType(comptime ST: type) type {
                     return error.InvalidSize;
                 }
 
-                var nodes: [chunk_count]Node.Id = undefined;
+                // Zero-filled so a mid-build error's errdefer is a no-op over the unfilled slots.
+                var nodes: [chunk_count]Node.Id = @splat(@as(Node.Id, @enumFromInt(0)));
                 errdefer pool.free(&nodes);
                 var offset: usize = 0;
 
@@ -191,7 +193,8 @@ pub fn FixedContainerType(comptime ST: type) type {
             }
 
             pub fn fromValue(pool: *Node.Pool, value: *const Type) !Node.Id {
-                var nodes: [chunk_count]Node.Id = undefined;
+                // Zero-filled so a mid-build error's errdefer is a no-op over the unfilled slots.
+                var nodes: [chunk_count]Node.Id = @splat(@as(Node.Id, @enumFromInt(0)));
                 errdefer pool.free(&nodes);
 
                 inline for (fields, 0..) |field, i| {
@@ -749,7 +752,8 @@ pub fn VariableContainerType(comptime ST: type) type {
 
         pub const tree = struct {
             pub fn default(pool: *Node.Pool) !Node.Id {
-                var nodes: [chunk_count]Node.Id = undefined;
+                // Zero-filled so a mid-build error's errdefer is a no-op over the unfilled slots.
+                var nodes: [chunk_count]Node.Id = @splat(@as(Node.Id, @enumFromInt(0)));
                 errdefer pool.free(&nodes);
                 inline for (fields, 0..) |field, i| {
                     if (comptime isBasicType(field.type)) {
@@ -767,7 +771,8 @@ pub fn VariableContainerType(comptime ST: type) type {
                 }
 
                 const ranges = try readFieldRanges(data);
-                var nodes: [chunk_count]Node.Id = undefined;
+                // Zero-filled so a mid-build error's errdefer is a no-op over the unfilled slots.
+                var nodes: [chunk_count]Node.Id = @splat(@as(Node.Id, @enumFromInt(0)));
                 errdefer pool.free(&nodes);
 
                 inline for (fields, 0..) |field, i| {
@@ -795,7 +800,8 @@ pub fn VariableContainerType(comptime ST: type) type {
             }
 
             pub fn fromValue(pool: *Node.Pool, value: *const Type) !Node.Id {
-                var nodes: [chunk_count]Node.Id = undefined;
+                // Zero-filled so a mid-build error's errdefer is a no-op over the unfilled slots.
+                var nodes: [chunk_count]Node.Id = @splat(@as(Node.Id, @enumFromInt(0)));
                 errdefer pool.free(&nodes);
 
                 inline for (fields, 0..) |field, i| {

@@ -199,7 +199,8 @@ pub fn FixedVectorType(comptime ST: type, comptime _length: comptime_int, compti
                     return try it.finish();
                 }
 
-                var nodes: [chunk_count]Node.Id = undefined;
+                // Zero-filled so a mid-build error's errdefer is a no-op over the unfilled slots.
+                var nodes: [chunk_count]Node.Id = @splat(@as(Node.Id, @enumFromInt(0)));
                 errdefer pool.free(&nodes);
 
                 if (comptime isBasicType(Element)) {
@@ -312,7 +313,8 @@ pub fn FixedVectorType(comptime ST: type, comptime _length: comptime_int, compti
                     return try it.finish();
                 }
 
-                var nodes: [chunk_count]Node.Id = undefined;
+                // Zero-filled so a mid-build error's errdefer is a no-op over the unfilled slots.
+                var nodes: [chunk_count]Node.Id = @splat(@as(Node.Id, @enumFromInt(0)));
                 errdefer pool.free(&nodes);
 
                 if (comptime isBasicType(Element)) {
@@ -566,7 +568,8 @@ pub fn VariableVectorType(comptime ST: type, comptime _length: comptime_int) typ
                 }
 
                 const offsets = try readVariableOffsets(data);
-                var nodes: [chunk_count]Node.Id = undefined;
+                // Zero-filled so a mid-build error's errdefer is a no-op over the unfilled slots.
+                var nodes: [chunk_count]Node.Id = @splat(@as(Node.Id, @enumFromInt(0)));
                 errdefer pool.free(&nodes);
 
                 for (0..length) |i| {
@@ -593,7 +596,8 @@ pub fn VariableVectorType(comptime ST: type, comptime _length: comptime_int) typ
             }
 
             pub fn fromValue(pool: *Node.Pool, value: *const Type) !Node.Id {
-                var nodes: [chunk_count]Node.Id = undefined;
+                // Zero-filled so a mid-build error's errdefer is a no-op over the unfilled slots.
+                var nodes: [chunk_count]Node.Id = @splat(@as(Node.Id, @enumFromInt(0)));
                 errdefer pool.free(&nodes);
 
                 for (0..chunk_count) |i| {
