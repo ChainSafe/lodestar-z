@@ -20,8 +20,8 @@ fn init(old_ref_count: u32) !void {
 
         var cpu_count: u64 = options.thread_count;
         if (options.thread_count == 0) {
-            cpu_count = @max((try std.Thread.getCpuCount()) - 1, 1);
-            std.debug.print("Note: no -Dthread-count set, will use runtime CPU count minus 1: {}\n", .{cpu_count});
+            cpu_count = @max((try std.Thread.getCpuCount()) - 4, 1);
+            std.debug.print("Note: no -Dthread-count set, will use runtime CPU count minus 4: {}\n", .{cpu_count});
         }
 
         const n_workers = @min(cpu_count, @import("bls").ThreadPool.MAX_WORKERS);
