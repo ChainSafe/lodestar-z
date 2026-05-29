@@ -85,6 +85,10 @@ const JobQueue = struct {
             }
             self.tail = item;
         }
+        // Wake at most one sleeping worker per submitted item, and never more than
+        // are actually asleep. Running workers loop back to `pop()` after each item,
+        // so signals are only needed to bring sleeping workers back into the queue;
+        // extra signals only create scheduler churn.
         for (0..@min(items.len, self.sleeping_workers)) |_| {
             self.cond.signal(io);
         }
