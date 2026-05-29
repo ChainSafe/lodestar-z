@@ -1,0 +1,91 @@
+name: Release Please Bindings
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+  id-token: write
+
+concurrency:
+  group: release-please-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  ZIG_VERSION: "0.16.0"
+  NODE_VERSION: "24"
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    outputs:
+      releases_created: ${{ steps.release.outputs.releases_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+    steps:
+      - id: release
+        uses: googleapis/release-please-action@v4
+
+  publish-bindings:
+    name: publish bindings
+    needs: release-please
+    if: ${{ needs.release-please.outputs.releases_created == 'true' }}
+    # [Lodestar CI] still runs on Ubuntu 22.04, which ships an incompatible GLIBC version
+    # compared to ubuntu-latest runners.
+    # This [incompatibility] causes DLOPEN to fail when loading bindings on those runners.
+    #
+    # Given that Ubuntu 22.04 has [security support until May 2027], this should be a good version to pin to until then.
+    #
+    # [Lodestar CI]: https://github.com/search?q=repo%3AChainSafe%2Flodestar+warp-ubuntu-2204&type=code
+    # [incompatibility]: https://github.com/ChainSafe/lodestar/actions/runs/24988157940/job/73166634073?pr=8900
+    # [security support until May 2027]: https://ubuntu.com/about/release-cycle
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.release-please.outputs.tag_name }}
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          registry-url: "https://registry.npmjs.org"
+          cache: pnpm
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+          cache-key: ubuntu-22.04-${{ env.ZIG_VERSION }}
+      - name: Install dependencies
+        run: |
+          pnpm install
+      - name: Run bindings formatter
+        run: |
+          pnpm biome ci
+      - name: Determine npm dist tag
+        id: detect_dist_tag
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          if [[ "$VERSION" == *-* ]]; then
+            # Prerelease: derive tag from the prerelease identifier (e.g. 0.1.2-rc.0 -> rc)
+            TAG="${VERSION#*-}"
+            TAG="${TAG%%.*}"
+            echo "Prerelease version $VERSION.$TAG"
+            echo "tag_flag=--tag $TAG" >> "$GITHUB_OUTPUT"
+          else
+            echo "Stable version $VERSION -> npm default dist-tag"
+            echo "tag_flag=" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Build and publish to npm
+        run: |
+          pnpm zapi build-artifacts --optimize ReleaseSafe
+          pnpm zapi prepublish
+          rm -rf zig-out/lib
+          pnpm zapi publish --access public -- --ignore-scripts --provenance ${{ steps.detect_dist_tag.outputs.tag_flag }}
