@@ -60,6 +60,11 @@ const JobQueue = struct {
     cond: std.Io.Condition = std.Io.Condition.init,
     head: ?*WorkItem = null,
     tail: ?*WorkItem = null,
+    /// Count of workers currently blocked in `cond.wait`. Guarded by `mutex`
+    /// (read in `pushBatch`, maintained in `workerLoop`), so it is exact at
+    /// signal time. Lets `pushBatch` wake only as many workers as there is new
+    /// work for, instead of broadcasting to all of them.
+    sleeping_workers: usize = 0,
 
     /// Pushes a batch of `WorkItem`s to the `JobQueue`.
     ///
@@ -80,7 +85,13 @@ const JobQueue = struct {
             }
             self.tail = item;
         }
-        self.cond.broadcast(io);
+        // Wake at most one sleeping worker per submitted item, and never more than
+        // are actually asleep. Running workers loop back to `pop()` after each item,
+        // so signals are only needed to bring sleeping workers back into the queue;
+        // extra signals only create scheduler churn.
+        for (0..@min(items.len, self.sleeping_workers)) |_| {
+            self.cond.signal(io);
+        }
         return true;
     }
 
@@ -161,7 +172,9 @@ fn workerLoop(pool: *ThreadPool, io: std.Io) void {
             while (true) {
                 if (pool.queue.pop()) |wi| break :blk wi;
                 if (pool.shutdown.load(.acquire)) return;
+                pool.queue.sleeping_workers += 1;
                 pool.queue.cond.waitUncancelable(io, &pool.queue.mutex);
+                pool.queue.sleeping_workers -= 1;
             }
         };
 
