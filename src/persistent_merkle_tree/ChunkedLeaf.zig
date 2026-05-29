@@ -8,6 +8,9 @@ const Allocator = std.mem.Allocator;
 const hashing = @import("hashing");
 const hash = hashing.hash;
 
+// K = 2^k_log2 = 64 chunks (64 × 32 B = 2 KiB blob): balances pool-metadata savings
+// (larger ⇒ fewer Node.Ids for the folded subtree) against copy-on-write cost
+// (larger ⇒ a bigger blob memcpy per dirty leaf).
 pub const k_log2: u8 = 6;
 pub const K: u16 = 1 << k_log2;
 

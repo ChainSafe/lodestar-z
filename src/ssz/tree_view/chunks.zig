@@ -170,9 +170,15 @@ pub fn BasicPackedChunks(
             const existing_chunks = try existing_id.getChunkedLeafChunks(self.state.pool);
             var new_chunk: [32]u8 = existing_chunks[intra_chunk];
             ST.Element.tree.fromValuePackedIntoChunk(&new_chunk, index, &value);
-            const new_chunked_leaf_id = try existing_id.setChunkedLeafChunk(self.state.pool, intra_chunk_u16, &new_chunk);
+
+            // Owned by us (rc=0) until setChildNode publishes it; reclaim on OOM.
+            var new_id_opt: ?Node.Id = try existing_id.setChunkedLeafChunk(self.state.pool, intra_chunk_u16, &new_chunk);
+            errdefer if (new_id_opt) |id| self.state.pool.unref(id);
+
+            const new_chunked_leaf_id = new_id_opt.?;
             (try new_chunked_leaf_id.getChunkedLeafPtr(self.state.pool)).len = chunked_leaf_len;
             try self.state.setChildNode(gindex, new_chunked_leaf_id);
+            new_id_opt = null;
         }
 
         pub fn getAll(

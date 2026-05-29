@@ -1859,3 +1859,39 @@ test "ListBasicTreeView non-chunked_leaf: sliceTo doesn't leak pool nodes" {
 
     try std.testing.expectEqual(before, after);
 }
+
+const ArmOnSizeAllocator = @import("testing_allocators").ArmOnSizeAllocator;
+
+// Path 3 (shared chunked_leaf) CoWs a fresh node + 2KB blob; if setChildNode OOMs
+// it must be reclaimed. Leak shows as getNodesInUse (slot) + testing.allocator (blob).
+test "ListBasicTreeView chunked_leaf: set OOM in setChildNode reclaims the CoW chunked_leaf (no leak)" {
+    const allocator = std.testing.allocator;
+    var view_failing = std.testing.FailingAllocator.init(allocator, .{});
+    // Arm the view allocator to OOM on the CoW blob alloc → fails setChildNode's changed.put.
+    var armer = ArmOnSizeAllocator{ .backing = allocator, .target = &view_failing, .trigger_len = @sizeOf(ChunkedLeafType) };
+
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = armer.allocator(), .pool_size = 4096 });
+    defer pool.deinit();
+
+    const ListT = FixedListType(UintType(64), 1 << 20, .{ .chunked_leaf = true });
+
+    var src: ListT.Type = .empty;
+    defer src.deinit(allocator);
+
+    for (0..100) |i| try src.append(allocator, @as(u64, @intCast(i)));
+    const root_id = try ListT.tree.fromValue(&pool, &src);
+
+    var view = try ListT.TreeView.init(view_failing.allocator(), &pool, root_id);
+    defer view.deinit();
+
+    const baseline = pool.getNodesInUse();
+
+    // First set on the committed (shared, rc>=1) chunked_leaf takes Path 3.
+    armer.armed = true;
+    try std.testing.expectError(error.OutOfMemory, view.set(0, 999));
+    view_failing.fail_index = std.math.maxInt(usize); // disarm for cleanup
+    armer.armed = false;
+
+    // The freshly-CoW'd node + its 2KB blob were reclaimed, not leaked.
+    try std.testing.expectEqual(baseline, pool.getNodesInUse());
+}

@@ -374,6 +374,131 @@ test "setNodesAtDepth - early-iteration error frees cleanly without leaking or c
     try std.testing.expectEqual(new_leaf, try new_root.getNode(p, Gindex.fromDepth(1, 0)));
 }
 
+// A later-index OOM makes rollback double-unref the spine onto already-freed slots.
+test "setNodesAtDepth - later-iteration OOM rolls back without panicking on a freed slot" {
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .resize_fail_index = 0 });
+
+    var pool = try Node.Pool.init(.{ .page_allocator = failing.allocator(), .allocator = std.testing.allocator, .pool_size = 16 });
+    defer pool.deinit();
+
+    const p = &pool;
+
+    // Navigable depth-2 tree: branch(branch(la, lb), branch(lc, ld)).
+    const left = try pool.createBranch(try pool.createLeafFromUint(1), try pool.createLeafFromUint(2));
+    const right = try pool.createBranch(try pool.createLeafFromUint(3), try pool.createLeafFromUint(4));
+    const root = try pool.createBranch(left, right);
+    defer pool.unref(root);
+
+    const new0 = try pool.createLeafFromUint(100);
+    const new3 = try pool.createLeafFromUint(103);
+
+    // Fill to capacity, then free 2 (iteration 0's path_parents): iteration 1 then
+    // grows past capacity and hits the armed OOM. Within-capacity growth doesn't alloc.
+    failing.fail_index = failing.alloc_index;
+
+    var filler: std.ArrayList(Node.Id) = .empty;
+    defer filler.deinit(std.testing.allocator);
+
+    try drainPoolToFull(&pool, &filler);
+    pool.unref(filler.pop().?);
+    pool.unref(filler.pop().?);
+
+    const in_use_before = pool.getNodesInUse();
+
+    var nodes_in = [_]Node.Id{ new0, new3 };
+    const indices = [_]usize{ 0, 3 };
+    try std.testing.expectError(error.OutOfMemory, root.setNodesAtDepth(p, 2, &indices, &nodes_in));
+
+    failing.fail_index = std.math.maxInt(usize); // disarm
+
+    // Only the one already-inserted input leaf (new0) was reclaimed with the
+    // torn-down spine; the original tree is intact and nothing leaked.
+    try std.testing.expectEqual(in_use_before - 1, pool.getNodesInUse());
+
+    for (filler.items) |id| pool.unref(id);
+
+    // Free list is uncorrupted: a fresh batch set round-trips.
+    const ok_tree = try pool.createBranch(@enumFromInt(1), @enumFromInt(1));
+    defer pool.unref(ok_tree);
+
+    const fresh = try pool.createLeafFromUint(7);
+    var ok_leaves = [_]Node.Id{fresh};
+    const ok_indices = [_]usize{0};
+
+    const ok_root = try ok_tree.setNodesAtDepth(p, 1, &ok_indices, &ok_leaves);
+    defer pool.unref(ok_root);
+
+    try std.testing.expectEqual(fresh, try ok_root.getNode(p, Gindex.fromDepth(1, 0)));
+}
+
+// Same later-iteration OOM rollback as above, through `setNodes` (gindex API).
+test "setNodes - later-iteration OOM rolls back without panicking on a freed slot" {
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .resize_fail_index = 0 });
+
+    var pool = try Node.Pool.init(.{ .page_allocator = failing.allocator(), .allocator = std.testing.allocator, .pool_size = 16 });
+    defer pool.deinit();
+
+    const p = &pool;
+
+    const left = try pool.createBranch(try pool.createLeafFromUint(1), try pool.createLeafFromUint(2));
+    const right = try pool.createBranch(try pool.createLeafFromUint(3), try pool.createLeafFromUint(4));
+    const root = try pool.createBranch(left, right);
+    defer pool.unref(root);
+
+    const new0 = try pool.createLeafFromUint(100);
+    const new3 = try pool.createLeafFromUint(103);
+
+    // Same fill-to-capacity + free-2 setup as the setNodesAtDepth variant above.
+    failing.fail_index = failing.alloc_index;
+
+    var filler: std.ArrayList(Node.Id) = .empty;
+    defer filler.deinit(std.testing.allocator);
+
+    try drainPoolToFull(&pool, &filler);
+    pool.unref(filler.pop().?);
+    pool.unref(filler.pop().?);
+
+    const in_use_before = pool.getNodesInUse();
+
+    var nodes_in = [_]Node.Id{ new0, new3 };
+    const gindices = [_]Gindex{ Gindex.fromDepth(2, 0), Gindex.fromDepth(2, 3) };
+    try std.testing.expectError(error.OutOfMemory, root.setNodes(p, &gindices, &nodes_in));
+
+    failing.fail_index = std.math.maxInt(usize); // disarm
+    try std.testing.expectEqual(in_use_before - 1, pool.getNodesInUse());
+
+    for (filler.items) |id| pool.unref(id);
+
+    const ok_tree = try pool.createBranch(@enumFromInt(1), @enumFromInt(1));
+    defer pool.unref(ok_tree);
+
+    const fresh = try pool.createLeafFromUint(7);
+    var ok_leaves = [_]Node.Id{fresh};
+
+    const ok_root = try ok_tree.setNodes(p, &[_]Gindex{Gindex.fromDepth(1, 0)}, &ok_leaves);
+    defer pool.unref(ok_root);
+
+    try std.testing.expectEqual(fresh, try ok_root.getNode(p, Gindex.fromDepth(1, 0)));
+}
+
+test "Node.State - refcount overflow saturates at rc_mask without corrupting kind" {
+    var at_max = Node.State.initInUse(.leaf, Node.State.rc_mask);
+    try std.testing.expectError(Node.Error.RefCountOverflow, at_max.incRefCount());
+    try std.testing.expectEqual(Node.NodeKind.leaf, at_max.kind());
+    try std.testing.expectEqual(Node.State.rc_mask, at_max.refCount());
+
+    var near_max = Node.State.initInUse(.branch, Node.State.rc_mask - 1);
+    try std.testing.expectEqual(Node.State.rc_mask, try near_max.incRefCount());
+    try std.testing.expectEqual(Node.NodeKind.branch, near_max.kind());
+}
+
+test "Node.State - free-list link round-trips at the 31-bit boundary" {
+    const max_link: Node.Id = @enumFromInt(Node.State.next_free_mask);
+    const fs = Node.State.initFree(max_link);
+    try std.testing.expect(fs.isFree());
+    try std.testing.expectEqual(max_link, fs.nextFree());
+}
+
 const TestCase = struct {
     depth: u6,
     gindexes: []const usize,

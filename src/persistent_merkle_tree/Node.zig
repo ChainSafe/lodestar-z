@@ -228,21 +228,19 @@ inline fn childrenOf(
             break :blk .{ .left = prev, .right = prev };
         },
         // `noChild` guards prevent reaching here for these variants.
-        .leaf, .free => unreachable,
-        .chunked_leaf => unreachable,
-        .container_struct => unreachable,
+        .leaf, .free, .chunked_leaf, .container_struct => unreachable,
     };
 }
 
 /// Inline helper: returns true if navigation to a child is impossible.
 inline fn noChildKind(node_id: Id, kind: NodeKind) bool {
     return switch (kind) {
-        .leaf => true,
-        .zero => @intFromEnum(node_id) == 0,
-        .branch => @intFromEnum(node_id) == 0,
-        .free => true,
-        .chunked_leaf => true,
-        .container_struct => true,
+        .leaf,
+        .free,
+        .chunked_leaf,
+        .container_struct,
+        => true,
+        .zero, .branch => @intFromEnum(node_id) == 0,
     };
 }
 
@@ -684,8 +682,11 @@ pub const Pool = struct {
             const states = self.nodes.items(.state);
             const k = states[@intFromEnum(id)].kind();
 
+            // Rollback errdefers unref the same spine twice (via node_id and
+            // path_parents); tolerate the already-freed slot, don't panic.
             if (k == .free) {
-                @panic("unref called on .free slot — use-after-free");
+                current = null;
+                continue;
             }
             // Zero nodes are not ref counted; nothing to do.
             if (k == .zero) {
