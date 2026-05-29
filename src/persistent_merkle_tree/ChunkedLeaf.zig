@@ -8,9 +8,11 @@ const Allocator = std.mem.Allocator;
 const hashing = @import("hashing");
 const hash = hashing.hash;
 
-// K = 2^k_log2 = 64 chunks (64 × 32 B = 2 KiB blob): balances pool-metadata savings
-// (larger ⇒ fewer Node.Ids for the folded subtree) against copy-on-write cost
-// (larger ⇒ a bigger blob memcpy per dirty leaf).
+// K = 2^k_log2 = 64 chunks per blob (2 KiB). Larger K folds more of the subtree
+// (fewer Node.Ids, more SIMD lanes per root → faster bulk build/read) but copies the
+// whole K × 32 B blob on every CoW write. Tuned with bench/ssz/list_chunked_leaf.zig
+// plus the process_epoch/process_block benches: 64 wins the (bulk-read-bound, BLS-free)
+// epoch ~5% over 32 and ties the BLS-dominated block; 128+ regress the CoW paths.
 pub const k_log2: u8 = 6;
 pub const K: u16 = 1 << k_log2;
 
