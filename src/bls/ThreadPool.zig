@@ -60,6 +60,10 @@ const JobQueue = struct {
     cond: std.Io.Condition = std.Io.Condition.init,
     head: ?*WorkItem = null,
     tail: ?*WorkItem = null,
+    /// Count of workers currently blocked in `cond.wait`. Guarded by `mutex`
+    /// (read in `pushBatch`, maintained in `workerLoop`), so it is exact at
+    /// signal time. Lets `pushBatch` wake only as many workers as there is new
+    /// work for, instead of broadcasting to all of them.
     sleeping_workers: usize = 0,
 
     /// Pushes a batch of `WorkItem`s to the `JobQueue`.
