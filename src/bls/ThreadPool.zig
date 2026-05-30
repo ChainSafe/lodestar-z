@@ -17,10 +17,13 @@ const Pairing = @import("Pairing.zig");
 const blst = @import("root.zig");
 const PublicKey = blst.PublicKey;
 const Signature = blst.Signature;
+const AggregatePublicKey = blst.AggregatePublicKey;
+const AggregateSignature = blst.AggregateSignature;
 const BlstError = @import("error.zig").BlstError;
 const SecretKey = @import("SecretKey.zig");
+const pippenger = @import("pippenger.zig");
 
-const PoolError = error{
+pub const PoolError = error{
     /// Pool is currently shutting down.
     ShuttingDown,
 };
@@ -57,6 +60,11 @@ const JobQueue = struct {
     cond: std.Io.Condition = std.Io.Condition.init,
     head: ?*WorkItem = null,
     tail: ?*WorkItem = null,
+    /// Count of workers currently blocked in `cond.wait`. Guarded by `mutex`
+    /// (read in `pushBatch`, maintained in `workerLoop`), so it is exact at
+    /// signal time. Lets `pushBatch` wake only as many workers as there is new
+    /// work for, instead of broadcasting to all of them.
+    sleeping_workers: usize = 0,
 
     /// Pushes a batch of `WorkItem`s to the `JobQueue`.
     ///
@@ -77,7 +85,13 @@ const JobQueue = struct {
             }
             self.tail = item;
         }
-        self.cond.broadcast(io);
+        // Wake at most one sleeping worker per submitted item, and never more than
+        // are actually asleep. Running workers loop back to `pop()` after each item,
+        // so signals are only needed to bring sleeping workers back into the queue;
+        // extra signals only create scheduler churn.
+        for (0..@min(items.len, self.sleeping_workers)) |_| {
+            self.cond.signal(io);
+        }
         return true;
     }
 
@@ -94,7 +108,7 @@ const JobQueue = struct {
 
 /// A work item submitted to the queue. Each worker that picks one up
 /// executes the work function, then signals `done`.
-const WorkItem = struct {
+pub const WorkItem = struct {
     exec_fn: *const fn (*WorkItem) void,
     done: std.Io.Event = .unset,
     next: ?*WorkItem = null,
@@ -158,7 +172,9 @@ fn workerLoop(pool: *ThreadPool, io: std.Io) void {
             while (true) {
                 if (pool.queue.pop()) |wi| break :blk wi;
                 if (pool.shutdown.load(.acquire)) return;
+                pool.queue.sleeping_workers += 1;
                 pool.queue.cond.waitUncancelable(io, &pool.queue.mutex);
+                pool.queue.sleeping_workers -= 1;
             }
         };
 
@@ -168,7 +184,7 @@ fn workerLoop(pool: *ThreadPool, io: std.Io) void {
 }
 
 /// Submit work items to the pool and wait for all to complete.
-fn submitAndWait(pool: *ThreadPool, io: std.Io, items: []*WorkItem) (PoolError || std.Io.Cancelable)!void {
+pub fn submitAndWait(pool: *ThreadPool, io: std.Io, items: []*WorkItem) (PoolError || std.Io.Cancelable)!void {
     if (!try pool.queue.pushBatch(io, pool, items)) return PoolError.ShuttingDown;
     // NOTE: must be uncancelable — work items live on the caller's stack, so a
     // cancel here would let workers write into freed frames.
@@ -200,7 +216,6 @@ const VerifyMultiWorkItem = struct {
         const self: *VerifyMultiWorkItem = @fieldParentPtr("base", base_item);
         const job = self.job;
 
-        // Each worker gets its own pairing buffer on the stack
         var buf: PairingBuf = .{};
         var pairing = Pairing.init(&buf.data, true, job.dst);
 
@@ -210,7 +225,7 @@ const VerifyMultiWorkItem = struct {
         while (true) {
             const i = job.counter.fetchAdd(1, .monotonic);
             if (i >= n_elems) break;
-            if (job.err_flag.load(.acquire)) break;
+            if (job.err_flag.load(.monotonic)) break;
 
             did_work = true;
 
@@ -344,7 +359,7 @@ const AggVerifyWorkItem = struct {
         while (true) {
             const i = job.counter.fetchAdd(1, .monotonic);
             if (i >= job.n_elems) break;
-            if (job.err_flag.load(.acquire)) break;
+            if (job.err_flag.load(.monotonic)) break;
 
             did_work = true;
 
@@ -459,6 +474,47 @@ fn mergeAndVerify(
     return acc.finalVerify(gtsig);
 }
 
+/// Aggregates `pks` and `sigs` with multi-scalar multiplication using `randomness`.
+/// Each MSM (PK then Sig) is fully fanned out across the pool via tile Pippenger
+/// (see `pippenger.zig`).
+///
+///
+/// ## Invariants:
+/// - `pks` and `sigs` are paired by index.
+/// - `randomness` must contain at least `pks.len * 32` bytes;
+/// - only the first 8 bytes per 32-byte slot are read by
+///   the underlying 64-bit Pippenger, but the 32-byte stride matches the existing
+///   `AggregatePublicKey.aggregateWithRandomness` layout.
+pub fn aggregateWithRandomness(
+    pool: *ThreadPool,
+    io: std.Io,
+    pks: []*const PublicKey,
+    sigs: []*const Signature,
+    randomness: []const u8,
+    pks_validate: bool,
+    sigs_groupcheck: bool,
+    pk_out: *PublicKey,
+    sig_out: *Signature,
+) (BlstError || PoolError || std.Io.Cancelable || std.mem.Allocator.Error)!void {
+    if (pks.len == 0 or pks.len != sigs.len) return BlstError.AggrTypeMismatch;
+    if (pks.len > blst.MAX_AGGREGATE_PER_JOB) return BlstError.AggrTypeMismatch;
+    if (randomness.len < pks.len * 32) return BlstError.AggrTypeMismatch;
+
+    if (pks_validate) for (pks) |pk| try pk.validate();
+    if (sigs_groupcheck) for (sigs) |sig| try sig.validate(true);
+
+    var scalars_refs: [blst.MAX_AGGREGATE_PER_JOB]*const u8 = undefined;
+    for (0..pks.len) |i| scalars_refs[i] = &randomness[i * 32];
+
+    var pk_proj: c.blst_p1 = undefined;
+    try pippenger.parallelMSMG1(pool, io, pks, scalars_refs[0..pks.len], 64, &pk_proj);
+    c.blst_p1_to_affine(&pk_out.point, &pk_proj);
+
+    var sig_proj: c.blst_p2 = undefined;
+    try pippenger.parallelMSMG2(pool, io, sigs, scalars_refs[0..sigs.len], 64, &sig_proj);
+    c.blst_p2_to_affine(&sig_out.point, &sig_proj);
+}
+
 test "verifyMultipleAggregateSignatures multi-threaded" {
     const pool = try ThreadPool.init(std.testing.allocator, std.testing.io, .{ .n_workers = 4 });
     defer pool.deinit(std.testing.io);
@@ -518,8 +574,6 @@ test "aggregateVerify multi-threaded" {
     const pool = try ThreadPool.init(std.testing.allocator, std.testing.io, .{ .n_workers = 4 });
     defer pool.deinit(std.testing.io);
 
-    const AggregateSignature = blst.AggregateSignature;
-
     const ikm: [32]u8 = .{
         0x93, 0xad, 0x7e, 0x65, 0xde, 0xad, 0x05, 0x2a, 0x08, 0x3a,
         0x91, 0x0c, 0x8b, 0x72, 0x85, 0x91, 0x46, 0x4c, 0xca, 0x56,
@@ -551,7 +605,7 @@ test "aggregateVerify multi-threaded" {
         pk_ptrs[i] = &pks[i];
     }
 
-    const agg_sig = AggregateSignature.aggregate(&sigs, false) catch return error.AggregationFailed;
+    const agg_sig = blst.AggregateSignature.aggregate(&sigs, false) catch return error.AggregationFailed;
     const final_sig = agg_sig.toSignature();
 
     try std.testing.expect(try pool.aggregateVerify(
@@ -563,4 +617,61 @@ test "aggregateVerify multi-threaded" {
         &pk_ptrs,
         true,
     ));
+}
+
+test "aggregateWithRandomness multi-threaded" {
+    const pool = try ThreadPool.init(std.testing.allocator, std.testing.io, .{ .n_workers = 4 });
+    defer pool.deinit(std.testing.io);
+
+    const ikm: [32]u8 = .{
+        0x93, 0xad, 0x7e, 0x65, 0xde, 0xad, 0x05, 0x2a, 0x08, 0x3a,
+        0x91, 0x0c, 0x8b, 0x72, 0x85, 0x91, 0x46, 0x4c, 0xca, 0x56,
+        0x60, 0x5b, 0xb0, 0x56, 0xed, 0xfe, 0x2b, 0x60, 0xa6, 0x3c,
+        0x48, 0x99,
+    };
+
+    const num_sigs = blst.MAX_AGGREGATE_PER_JOB;
+
+    var msg: [32]u8 = undefined;
+    var pks: [num_sigs]PublicKey = undefined;
+    var sigs: [num_sigs]Signature = undefined;
+    var pk_ptrs: [num_sigs]*const PublicKey = undefined;
+    var sig_ptrs: [num_sigs]*const Signature = undefined;
+
+    var prng = std.Random.DefaultPrng.init(blk: {
+        var seed: u64 = undefined;
+        std.testing.io.random(std.mem.asBytes(&seed));
+        break :blk seed;
+    });
+    const rand = prng.random();
+    std.Random.bytes(rand, &msg);
+
+    for (0..num_sigs) |i| {
+        var ikm_i = ikm;
+        ikm_i[0] = @intCast(i & 0xff);
+        const sk = try SecretKey.keyGen(&ikm_i, null);
+        pks[i] = sk.toPublicKey();
+        sigs[i] = sk.sign(&msg, blst.DST, null);
+        pk_ptrs[i] = &pks[i];
+        sig_ptrs[i] = &sigs[i];
+    }
+
+    var randomness: [32 * num_sigs]u8 = undefined;
+    std.Random.bytes(rand, &randomness);
+
+    var agg_pk: PublicKey = .{};
+    var agg_sig: Signature = .{};
+
+    try pool.aggregateWithRandomness(
+        std.testing.io,
+        &pk_ptrs,
+        &sig_ptrs,
+        &randomness,
+        true,
+        true,
+        &agg_pk,
+        &agg_sig,
+    );
+
+    try agg_sig.verify(true, &msg, blst.DST, null, &agg_pk, true);
 }

@@ -7,6 +7,7 @@ pub const TransitionOpts = @import("state_transition.zig").TransitionOpts;
 
 pub const metrics = @import("metrics.zig");
 
+pub const RefCount = @import("./utils/ref_count.zig").RefCount;
 pub const computeSigningRoot = @import("./utils/signing_root.zig").computeSigningRoot;
 pub const computeEpochAtSlot = @import("./utils/epoch.zig").computeEpochAtSlot;
 pub const CachedBeaconState = @import("./cache/state_cache.zig").CachedBeaconState;
@@ -107,9 +108,18 @@ const EpochShuffling = @import("./utils/epoch_shuffling.zig");
 pub const calculateShufflingDecisionRoot = EpochShuffling.calculateShufflingDecisionRoot;
 pub const processProposerLookahead = @import("./epoch/process_proposer_lookahead.zig").processProposerLookahead;
 
+const load_state = @import("load_state.zig");
+pub const loadState = load_state.loadState;
+pub const MigrateStateOutput = load_state.MigrateStateOutput;
+
+const weak_subjectivity = @import("weak_subjectivity.zig");
+pub const getLatestWeakSubjectivityCheckpointEpoch = weak_subjectivity.getLatestWeakSubjectivityCheckpointEpoch;
+
 test {
     testing.refAllDecls(@This());
     testing.refAllDecls(seed);
     testing.refAllDecls(state_transition);
     testing.refAllDecls(EpochShuffling);
+    testing.refAllDecls(load_state);
+    testing.refAllDecls(weak_subjectivity);
 }

@@ -77,7 +77,7 @@ const OnAttestationBench = struct {
 /// 2. Compute head via updateAndGetHead.
 /// 3. Advance current_slot to 64 so attestations at slot 63 are past-slot.
 /// 4. Pre-build 405 unaggregated + 704 aggregated attestations with per-committee roots.
-fn setupBench(allocator: std.mem.Allocator) !OnAttestationBench {
+fn setupBench(allocator: std.mem.Allocator, io: std.Io) !OnAttestationBench {
     const fc = try util.initializeForkChoice(allocator, .{
         .initial_block_count = 64,
         .initial_validator_count = 600_000,
@@ -85,7 +85,7 @@ fn setupBench(allocator: std.mem.Allocator) !OnAttestationBench {
     });
 
     // Compute head so fc.head is populated.
-    _ = fc.updateAndGetHead(allocator, .{ .get_canonical_head = {} }) catch unreachable;
+    _ = fc.updateAndGetHead(allocator, io, .{ .get_canonical_head = {} }) catch unreachable;
 
     // Advance store time so attestations at slot 63 are past-slot (immediate apply).
     fc.fc_store.current_slot = 64;
@@ -188,7 +188,7 @@ pub fn main(init: std.process.Init) !void {
 
     var bench = zbench.Benchmark.init(allocator, .{});
 
-    const b = try setupBench(allocator);
+    const b = try setupBench(allocator, io);
     defer deinitBench(allocator, b);
     try bench.addParam("onAttestation 1109 attestations (vc=600000 bc=64)", &b, .{});
 

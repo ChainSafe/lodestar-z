@@ -326,3 +326,38 @@ test "state transition - electra block" {
 
     defer deinitStateTransition(std.testing.io);
 }
+
+test "state transition - a rejected block leaves the pre-state unchanged" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(allocator, 256 * 5);
+    defer pool.deinit();
+    defer deinitStateTransition(std.testing.io);
+
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
+    defer test_state.deinit();
+
+    var electra_block = types.electra.SignedBeaconBlock.default_value;
+    try generateElectraBlock(allocator, test_state.cached_state, &electra_block);
+    defer types.electra.SignedBeaconBlock.deinit(allocator, &electra_block);
+
+    const signed_beacon_block = AnySignedBeaconBlock{ .full_electra = &electra_block };
+
+    // Snapshot the pre-state just before the transition.
+    const before = (try test_state.cached_state.state.hashTreeRoot()).*;
+    const before_slot = try test_state.cached_state.state.slot();
+
+    // Full verification rejects this block (it isn't validly signed). stateTransition advances
+    // and mutates a clone, then discards it on error — so the original state must come out
+    // untouched: same root, same slot. (This is the invariant behind the "mutate then reject"
+    // findings; the mutations only ever land on the thrown-away clone.)
+    const res = stateTransition(allocator, std.testing.io, test_state.cached_state, signed_beacon_block, .{});
+    if (res) |post| {
+        post.deinit();
+        allocator.destroy(post);
+        try testing.expect(false); // expected the block to be rejected
+    } else |_| {}
+
+    const after = (try test_state.cached_state.state.hashTreeRoot()).*;
+    try testing.expectEqualSlices(u8, &before, &after);
+    try testing.expectEqual(before_slot, try test_state.cached_state.state.slot());
+}

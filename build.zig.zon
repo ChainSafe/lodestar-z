@@ -36,8 +36,8 @@
             .hash = "zig_yaml-0.1.0-C1161kFWAwDxjKAFmklKwWVDvz2mmq0Q__bDhGGjeyd3",
         },
         .zapi = .{
-            .url = "git+https://github.com/chainsafe/zapi?ref=zapi-v2.0.0#f9fa8b0237352326e9f970b62588b6af01e3e384",
-            .hash = "zapi-2.0.0-rIqzUcc3BABKRuJlzpYNtiMVCOFybuVSGOLmk0KOCeel",
+            .url = "https://github.com/ChainSafe/zapi/archive/refs/tags/zapi-v2.2.0.tar.gz",
+            .hash = "zapi-2.2.0-rIqzUXBaBADUsvvvB2N5kOBdLEO0rGPhowTqmIXe3qVh",
         },
         .zbench = .{
             .url = "git+https://github.com/hendriknielaender/zBench#b2b89c475e3ef1bb2bd71255c80478a82d3e0ca8",
@@ -143,6 +143,9 @@
             .root_source_file = "src/clock/root.zig",
             .imports = .{ .zio, .consensus_types, .bounded_array },
         },
+        .testing_allocators = .{
+            .root_source_file = "src/testing_allocators.zig",
+        },
         .hashing = .{
             .root_source_file = "src/hashing/root.zig",
             .imports = .{ .build_options, .hex, .hashtree },
@@ -157,7 +160,7 @@
         },
         .ssz = .{
             .root_source_file = "src/ssz/root.zig",
-            .imports = .{ .build_options, .hex, .hashing, .persistent_merkle_tree },
+            .imports = .{ .build_options, .hex, .hashing, .persistent_merkle_tree, .testing_allocators },
         },
         .consensus_types = .{
             .root_source_file = "src/consensus_types/root.zig",
@@ -198,7 +201,7 @@
         },
         .fork_choice = .{
             .root_source_file = "src/fork_choice/root.zig",
-            .imports = .{ .consensus_types, .config, .preset, .state_transition, .fork_types, .hex, .constants },
+            .imports = .{ .consensus_types, .config, .preset, .state_transition, .fork_types, .hex, .constants, .metrics, .time },
         },
     },
     .executables = .{

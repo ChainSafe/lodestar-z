@@ -49,6 +49,8 @@ pub fn ListBasicTreeView(comptime ST: type) type {
             errdefer allocator.destroy(ptr);
 
             try Chunks.init(&ptr.chunks, allocator, pool, root);
+            errdefer ptr.chunks.deinit();
+
             ptr.allocator = allocator;
             ptr._orig_len = try ptr.chunks.getLength();
             ptr._len = ptr._orig_len;
@@ -183,7 +185,10 @@ pub fn ListBasicTreeView(comptime ST: type) type {
             if (list_length >= ST.limit) {
                 return error.LengthOverLimit;
             }
+
             self._len += 1;
+            errdefer self._len -= 1;
+
             try self.set(list_length, value);
         }
 
@@ -214,27 +219,30 @@ pub fn ListBasicTreeView(comptime ST: type) type {
 
             var truncated_chunk_node: ?Node.Id = try self.chunks.state.pool.createLeaf(&chunk_bytes);
             defer if (truncated_chunk_node) |id| self.chunks.state.pool.unref(id);
-            var updated: ?Node.Id = try Node.Id.setNodeAtDepth(
+
+            const updated = try Node.Id.setNodeAtDepth(
                 self.chunks.state.root,
                 self.chunks.state.pool,
                 chunk_depth,
                 chunk_index,
                 truncated_chunk_node.?,
             );
-            defer if (updated) |id| self.chunks.state.pool.unref(id);
+            // `updated` is a fresh orphan root from setNodeAtDepth; we own it, so unref it.
+            defer self.chunks.state.pool.unref(updated);
             truncated_chunk_node = null;
 
-            var new_root: ?Node.Id = try Node.Id.truncateAfterIndex(updated.?, self.chunks.state.pool, chunk_depth, chunk_index);
-            defer if (new_root) |id| self.chunks.state.pool.unref(id);
-            updated = null;
+            const new_root = try Node.Id.truncateAfterIndex(updated, self.chunks.state.pool, chunk_depth, chunk_index);
+            // Likewise `new_root` is a fresh orphan from truncateAfterIndex; unref it.
+            defer self.chunks.state.pool.unref(new_root);
 
             var length_node: ?Node.Id = try self.chunks.state.pool.createLeafFromUint(@intCast(new_length));
             defer if (length_node) |id| self.chunks.state.pool.unref(id);
-            const root_with_length = try Node.Id.setNode(new_root.?, self.chunks.state.pool, @enumFromInt(3), length_node.?);
-            errdefer self.chunks.state.pool.unref(root_with_length);
 
+            // setNode takes `length_node` into the tree, so null it below to keep the defer from
+            // unref-ing what the tree now owns.
+            const root_with_length = try Node.Id.setNode(new_root, self.chunks.state.pool, @enumFromInt(3), length_node.?);
+            errdefer self.chunks.state.pool.unref(root_with_length);
             length_node = null;
-            new_root = null;
 
             return try Self.init(self.allocator, self.chunks.state.pool, root_with_length);
         }
@@ -757,6 +765,33 @@ test "TreeView basic list sliceTo matches incremental snapshots" {
         try sliced.hashTreeRootInto(&actual_root);
 
         try std.testing.expectEqualSlices(u8, &expected_root, &actual_root);
+    }
+}
+
+// std.testing.allocator can't see pool-slot leaks, so check getNodesInUse() against a baseline.
+test "TreeView basic list sliceTo does not leak pool nodes" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(allocator, 2048);
+    defer pool.deinit();
+
+    const Uint64 = UintType(64);
+    const ListType = FixedListType(Uint64, 1024);
+
+    var empty_list: ListType.Type = .empty;
+    defer empty_list.deinit(allocator);
+    const root_node = try ListType.tree.fromValue(&pool, &empty_list);
+    var view = try ListType.TreeView.init(allocator, &pool, root_node);
+    defer view.deinit();
+
+    for (0..16) |i| try view.push(@intCast(i));
+    try view.commit();
+
+    const baseline = pool.getNodesInUse();
+    for (0..15) |idx| {
+        var sliced = try view.sliceTo(idx);
+        sliced.deinit();
+        // Any difference means an intermediate orphan root leaked.
+        try std.testing.expectEqual(baseline, pool.getNodesInUse());
     }
 }
 
