@@ -37,6 +37,33 @@ interface ExecutionPayloadHeader {
   excessBlobGas?: number; // deneb+
 }
 
+/*
+ * We don't need *all* the fields to check if a block
+ * is a pre-merge or a merge transition block, so we just
+ * have a minimum interface that is like a `BeaconBlock`.
+ */
+interface BeaconBlockLike {
+  body: {
+    executionPayload?: {
+      parentHash: Uint8Array;
+      feeRecipient: Uint8Array;
+      stateRoot: Uint8Array;
+      receiptsRoot: Uint8Array;
+      logsBloom: Uint8Array;
+      prevRandao: Uint8Array;
+      blockNumber: number;
+      gasLimit: number;
+      gasUsed: number;
+      timestamp: number;
+      extraData: Uint8Array;
+      baseFeePerGas: bigint;
+      blockHash: Uint8Array;
+      transactions: Uint8Array[];
+    };
+    executionPayloadHeader?: ExecutionPayloadHeader;
+  };
+}
+
 interface Fork {
   previousVersion: Uint8Array;
   currentVersion: Uint8Array;
@@ -184,10 +211,17 @@ declare class BeaconStateView {
 
   isExecutionStateType: boolean;
   isMergeTransitionComplete: boolean;
-  // TODO remove
-  isExecutionEnabled(fork: string, signedBlockBytes: Uint8Array): boolean;
-
-  // getExpectedWithdrawals(): ExpectedWithdrawals;
+  /** True iff state is pre-merge AND the given block carries a non-default execution payload. Bellatrix-only. */
+  isMergeTransitionBlock(signedBlockBytes: Uint8Array): boolean;
+  /**
+   * Check whether execution is enabled for the given block at this state.
+   *
+   * For normal post-merge operation this short-circuits from state alone and does
+   * not inspect `block`. The block object is only read for the historical pre-merge
+   * Bellatrix case, where execution is enabled iff the block carries the first
+   * non-default execution payload.
+   */
+  isExecutionEnabled(block: BeaconBlockLike): boolean;
 
   proposerRewards: ProposerRewards;
   // computeBlockRewards(block: BeaconBlock, proposerRewards: RewardsCache): BlockRewards;

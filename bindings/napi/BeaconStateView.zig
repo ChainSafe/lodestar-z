@@ -608,40 +608,43 @@ pub fn isExecutionStateType(self: *const BeaconStateView) !js.Boolean {
     return js.Boolean.from(fork_seq.gte(.bellatrix));
 }
 
-/// Check if the merge transition is complete.
-pub fn isExecutionEnabled(self: *const BeaconStateView, fork_name_value: js.String, signed_block_bytes: js.Uint8Array) !js.Boolean {
+/// Check whether execution is enabled for the given Lodestar-shaped block object.
+///
+/// For normal post-merge operation this short-circuits from state alone and does
+/// not inspect `block`. The block object is only read for the historical pre-merge
+/// Bellatrix case, where execution is enabled iff the block carries the first
+/// non-default execution payload.
+pub fn isExecutionEnabled(self: *const BeaconStateView, block: js.Value) !js.Boolean {
     const cached_state = try self.requireState();
+    const fork_seq = cached_state.state.forkSeq();
+    if (fork_seq.lt(.bellatrix)) return js.Boolean.from(false);
 
-    var fork_name_buf: [16]u8 = undefined;
-    const fork_name = try fork_name_value.toSlice(&fork_name_buf);
-    const fork_seq = c.ForkSeq.fromName(fork_name);
-
-    const bytes = try signed_block_bytes.toSlice();
-    const signed_block = try AnySignedBeaconBlock.deserialize(
-        allocator,
-        .full,
-        fork_seq,
-        bytes,
-    );
-    defer signed_block.deinit(allocator);
-
-    if (signed_block.forkSeq() != cached_state.state.forkSeq()) {
-        return throwNullAs(js.Boolean, "FORK_MISMATCH", "Fork of signed block does not match state fork");
-    }
-
-    const result = switch (cached_state.state.forkSeq()) {
-        inline else => |f| switch (signed_block.blockType()) {
-            inline else => |bt| if (comptime (bt == .blinded and f.lt(.bellatrix)) or (bt == .blinded and f.gte(.gloas))) {
-                return error.InvalidBlockTypeForFork;
-            } else st.isExecutionEnabled(
-                f,
-                cached_state.state.castToFork(f),
-                bt,
-                signed_block.beaconBlock().castToFork(bt, f),
-            ),
-        },
+    const merge_complete: bool = switch (fork_seq) {
+        inline .bellatrix, .capella, .deneb, .electra, .fulu => |f| st.isMergeTransitionComplete(f, cached_state.state.castToFork(f)),
+        else => unreachable,
     };
-    return js.Boolean.from(result);
+    if (merge_complete) return js.Boolean.from(true);
+
+    if (fork_seq != .bellatrix) return js.Boolean.from(false);
+
+    // After the above check, we reach the slow path: pre-merge Bellatrix.
+    // Walk the JS block into a native ExecutionPayload to compare against `default_value`.
+    const block_raw = block.toValue();
+    if (try block_raw.typeof() != .object) return error.InvalidBlockObject;
+
+    const body = try (try block_raw.getNamedProperty("body")).coerceToObject();
+
+    // Lodestar treats blinded pre-merge Bellatrix blocks as not-yet-merged: the state's
+    // execution payload header is still default, so the block doesn't kick off the transition.
+    if (try body.hasNamedProperty("executionPayloadHeader")) return js.Boolean.from(false);
+
+    const payload_js = try (try body.getNamedProperty("executionPayload")).coerceToObject();
+    var payload: ct.bellatrix.ExecutionPayload.Type = ct.bellatrix.ExecutionPayload.default_value;
+    defer ct.bellatrix.ExecutionPayload.deinit(allocator, &payload);
+    try executionPayloadFromJs(payload_js, &payload);
+
+    const is_default = ct.bellatrix.ExecutionPayload.equals(&payload, &ct.bellatrix.ExecutionPayload.default_value);
+    return js.Boolean.from(!is_default);
 }
 
 /// Check if the merge transition is complete.
@@ -1058,4 +1061,63 @@ fn optionalBool(options: ?js.Value, name: [:0]const u8, default_value: bool) !bo
         }
     }
     return default_value;
+}
+
+/// Populate a native Bellatrix `ExecutionPayload.Type` from a JS object with the Lodestar
+/// shape. Caller must `ct.bellatrix.ExecutionPayload.deinit(allocator, out)` to free
+/// `extra_data` and `transactions`.
+fn executionPayloadFromJs(payload: napi.Value, out: *ct.bellatrix.ExecutionPayload.Type) !void {
+    try readByteArrayInto(payload, "parentHash", &out.parent_hash);
+    try readByteArrayInto(payload, "feeRecipient", &out.fee_recipient);
+    try readByteArrayInto(payload, "stateRoot", &out.state_root);
+    try readByteArrayInto(payload, "receiptsRoot", &out.receipts_root);
+    try readByteArrayInto(payload, "logsBloom", &out.logs_bloom);
+    try readByteArrayInto(payload, "prevRandao", &out.prev_randao);
+    try readByteArrayInto(payload, "blockHash", &out.block_hash);
+
+    out.block_number = @intCast(try (try payload.getNamedProperty("blockNumber")).getValueInt64());
+    out.gas_limit = @intCast(try (try payload.getNamedProperty("gasLimit")).getValueInt64());
+    out.gas_used = @intCast(try (try payload.getNamedProperty("gasUsed")).getValueInt64());
+    out.timestamp = @intCast(try (try payload.getNamedProperty("timestamp")).getValueInt64());
+
+    out.base_fee_per_gas = try readBigintU256(try payload.getNamedProperty("baseFeePerGas"));
+
+    const extra_data = try payload.getNamedProperty("extraData");
+    const extra_data_info = try extra_data.getTypedarrayInfo();
+    if (extra_data_info.array_type != .uint8) return error.InvalidExtraData;
+    try out.extra_data.appendSlice(allocator, extra_data_info.data);
+
+    const transactions = try payload.getNamedProperty("transactions");
+    const tx_count = try transactions.getArrayLength();
+    try out.transactions.ensureTotalCapacity(allocator, tx_count);
+    var i: u32 = 0;
+    while (i < tx_count) : (i += 1) {
+        const tx_value = try transactions.getElement(i);
+        const tx_info = try tx_value.getTypedarrayInfo();
+        if (tx_info.array_type != .uint8) return error.InvalidTransaction;
+        var tx: std.ArrayListUnmanaged(u8) = .empty;
+        errdefer tx.deinit(allocator);
+        try tx.appendSlice(allocator, tx_info.data);
+        out.transactions.appendAssumeCapacity(tx);
+    }
+}
+
+fn readByteArrayInto(parent: napi.Value, comptime field: [:0]const u8, out: []u8) !void {
+    const value = try parent.getNamedProperty(field);
+    const info = try value.getTypedarrayInfo();
+    if (info.array_type != .uint8) return error.InvalidByteArrayField;
+    if (info.data.len != out.len) return error.InvalidByteArrayLength;
+    @memcpy(out, info.data);
+}
+
+/// Read a JS bigint into u256. Consensus-types bigints are spec-defined unsigned, so we pass
+/// `null` for `sign_bit` and skip the sign check entirely.
+fn readBigintU256(value: napi.Value) !u256 {
+    var words: [4]u64 = .{ 0, 0, 0, 0 };
+    const got = try value.getValueBigintWords(null, &words);
+    var result: u256 = 0;
+    for (got, 0..) |word, i| {
+        result |= @as(u256, word) << @intCast(i * 64);
+    }
+    return result;
 }
