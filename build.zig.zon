@@ -20,8 +20,13 @@
             .hash = "zbuild-0.4.0-XJFavw5XAgBJ_8U6DHY0D8xHGUAx4Ak4r8pKe2-o_X8Q",
         },
         .blst = .{
+            // .path = "../zapi",
             .url = "git+https://github.com/ChainSafe/blst.zig.git#5d9543be8a7a1a9942c62a097644286751f95dc7",
             .hash = "blst_zig-0.0.0-cnAxzisLAADc_A14MqXu_f_rLBRS6m6ki8zHrUjLXYoo",
+            .args = .{
+                .optimize = .ReleaseSafe,
+                .portable = true,
+            },
         },
         .hashtree = .{
             .url = "git+https://github.com/ChainSafe/hashtree-z.git#81b7303f72e202e966f71eedf4be1d8d33e2fcaa",
