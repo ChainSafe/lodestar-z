@@ -12,7 +12,7 @@ const RAND_BITS = 8 * RAND_BYTES;
 pub fn verifyMultipleAggregateSignatures(
     pairing_buf: *align(Pairing.buf_align) [Pairing.sizeOf()]u8,
     n_elems: usize,
-    msgs: []const [32]u8,
+    msgs: []const []const u8,
     dst: []const u8,
     pks: []const *PublicKey,
     pks_validate: bool,
@@ -38,7 +38,7 @@ pub fn verifyMultipleAggregateSignatures(
             sigs_groupcheck,
             &rands[i],
             RAND_BITS,
-            &msgs[i],
+            msgs[i],
         );
     }
 
