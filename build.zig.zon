@@ -57,6 +57,10 @@
         //     .url = "git+https://github.com/karlseguin/http.zig.git#2924ead41db9e1986db3b4909a82185c576f6361",
         //     .hash = "httpz-0.0.0-PNVzrC7CBgDSMZNP7chgAczR3FyAz5Eum6Kb1_K9kmYR",
         // },
+        .blst_zig = .{
+            .url = "git+https://github.com/ChainSafe/blst.zig.git#3e605dca9fd3592d8aa020a166fe48742a411b54",
+            .hash = "blst_zig-0.0.0-cnAxzisLAACG-JvDABc3Zr0TskdeYQJkDjRI_DzY4EJs",
+        },
     },
     .options_modules = .{
         .build_options = .{
