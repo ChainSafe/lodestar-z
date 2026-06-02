@@ -172,7 +172,7 @@ pub const Signature = struct {
         const slice = try bytes.toSlice();
         var sig = NativeSignature.deserialize(slice) catch return error.DeserializationFailed;
         if (try boolOrDefault(sig_validate, false)) {
-            try sig.validate(try boolOrDefault(sig_infcheck, false));
+            try sig.validate(try boolOrDefault(sig_infcheck, true));
         }
         return .{ .raw = sig };
     }
