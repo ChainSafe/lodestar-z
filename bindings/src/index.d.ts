@@ -258,6 +258,7 @@ export declare class BeaconStateView {
   currentProposers: number[];
   nextProposers: number[];
   getBeaconProposer(slot: number): number;
+  getBeaconProposerOrNull(slot: number): number | null;
   currentSyncCommittee: SyncCommittee;
   nextSyncCommittee: SyncCommittee;
   currentSyncCommitteeIndexed: SyncCommitteeCache;
@@ -325,7 +326,7 @@ export declare class BeaconStateView {
    * and always 0 here since Zig STF doesn't process Gloas yet.
    */
   getExpectedWithdrawals(): {
-    expectedWithdrawals: {index: number; validatorIndex: number; address: Uint8Array; amount: number}[];
+    expectedWithdrawals: { index: number; validatorIndex: number; address: Uint8Array; amount: number }[];
     processedBuilderWithdrawalsCount: number;
     processedPartialWithdrawalsCount: number;
     processedBuildersSweepCount: number;
@@ -349,7 +350,7 @@ export declare class BeaconStateView {
   loadOtherState(
     stateBytes: Uint8Array,
     seedValidatorsBytes?: Uint8Array,
-    opts?: {preloadValidatorsAndBalances?: boolean}
+    opts?: { preloadValidatorsAndBalances?: boolean }
   ): BeaconStateView;
   loadOtherStateBench(stateBytes: Uint8Array, seedValidatorsBytes?: Uint8Array): void;
   // biome-ignore lint/suspicious/noExplicitAny: structurally a BeaconState (fork-narrowed),
@@ -359,10 +360,10 @@ export declare class BeaconStateView {
   serialize(): Uint8Array;
   serializedSize(): number;
   /** Takes a `@chainsafe/ssz` ByteViews `{uint8Array, dataView}`; native uses `uint8Array` only. */
-  serializeToBytes(output: {uint8Array: Uint8Array; dataView: DataView}, offset: number): number;
+  serializeToBytes(output: { uint8Array: Uint8Array; dataView: DataView }, offset: number): number;
   serializeValidators(): Uint8Array;
   serializedValidatorsSize(): number;
-  serializeValidatorsToBytes(output: {uint8Array: Uint8Array; dataView: DataView}, offset: number): number;
+  serializeValidatorsToBytes(output: { uint8Array: Uint8Array; dataView: DataView }, offset: number): number;
   hashTreeRoot(): Uint8Array;
   createMultiProof(descriptor: Uint8Array): CompactMultiProof;
 
