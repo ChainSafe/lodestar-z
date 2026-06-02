@@ -464,11 +464,10 @@ pub fn verifyMultipleAggregateSignatures(sets: js.Array, pks_validate: ?js.Boole
         const wrapped_sig = try e.unwrap(Signature, sig_napi);
         sigs[i] = &wrapped_sig.raw;
 
-        rand.bytes(&rands[i]);
-        // Ensure first 8 bytes (RAND_BITS=64) are non-zero
-        while (std.mem.allEqual(u8, rands[i][0..8], 0)) {
-            rand.bytes(rands[i][0..8]);
-        }
+        var scalar = rand.int(u64);
+        while (scalar == 0) scalar = rand.int(u64);
+        std.mem.writeInt(u64, rands[i][0..8], scalar, .little);
+        @memset(rands[i][8..], 0);
     }
 
     const pool = thread_pool orelse return error.ThreadPoolNotInitialized;
