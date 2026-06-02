@@ -27,6 +27,14 @@ const ThreadPool = bls.ThreadPool;
 const DST = bls.DST;
 const MAX_AGGREGATE_PER_JOB = bls.MAX_AGGREGATE_PER_JOB;
 
+/// In upstream lodestar we split batchable sets into chunks of minimum size 16.
+/// Cost savings after ~16 are not significant.
+/// In metrics, we can observe that sas fleet receives on average ~30 signature sets,
+/// so a safe bound is about 32.
+///
+/// See: packages/beacon-node/src/chain/bls/multithread/worker.ts
+const BATCH_VERIFY_SIZE = 32;
+
 /// Cached thread pool reference for parallel verification.
 /// Initialized lazily on first use, torn down via `deinitThreadPool`.
 var thread_pool: ?*ThreadPool = null;
@@ -429,17 +437,40 @@ pub fn verifyMultipleAggregateSignatures(sets: js.Array, pks_validate: ?js.Boole
     const n_elems = try sets.length();
     if (n_elems == 0) return js.Boolean.from(false);
 
-    const msgs = try allocator.alloc([32]u8, n_elems);
-    defer allocator.free(msgs);
+    var msgs_stack: [BATCH_VERIFY_SIZE][32]u8 = undefined;
+    var pks_stack: [BATCH_VERIFY_SIZE]*NativePublicKey = undefined;
+    var sigs_stack: [BATCH_VERIFY_SIZE]*NativeSignature = undefined;
+    var rands_stack: [BATCH_VERIFY_SIZE][32]u8 = undefined;
 
-    const pks = try allocator.alloc(*NativePublicKey, n_elems);
-    defer allocator.free(pks);
+    var msgs_heap: ?[][32]u8 = null;
+    defer if (msgs_heap) |buf| allocator.free(buf);
+    var pks_heap: ?[]*NativePublicKey = null;
+    defer if (pks_heap) |buf| allocator.free(buf);
+    var sigs_heap: ?[]*NativeSignature = null;
+    defer if (sigs_heap) |buf| allocator.free(buf);
+    var rands_heap: ?[][32]u8 = null;
+    defer if (rands_heap) |buf| allocator.free(buf);
 
-    const sigs = try allocator.alloc(*NativeSignature, n_elems);
-    defer allocator.free(sigs);
-
-    const rands = try allocator.alloc([32]u8, n_elems);
-    defer allocator.free(rands);
+    const msgs = if (n_elems <= BATCH_VERIFY_SIZE) msgs_stack[0..n_elems] else blk: {
+        const buf = try allocator.alloc([32]u8, n_elems);
+        msgs_heap = buf;
+        break :blk buf;
+    };
+    const pks = if (n_elems <= BATCH_VERIFY_SIZE) pks_stack[0..n_elems] else blk: {
+        const buf = try allocator.alloc(*NativePublicKey, n_elems);
+        pks_heap = buf;
+        break :blk buf;
+    };
+    const sigs = if (n_elems <= BATCH_VERIFY_SIZE) sigs_stack[0..n_elems] else blk: {
+        const buf = try allocator.alloc(*NativeSignature, n_elems);
+        sigs_heap = buf;
+        break :blk buf;
+    };
+    const rands = if (n_elems <= BATCH_VERIFY_SIZE) rands_stack[0..n_elems] else blk: {
+        const buf = try allocator.alloc([32]u8, n_elems);
+        rands_heap = buf;
+        break :blk buf;
+    };
 
     var seed_bytes: [8]u8 = undefined;
     const io = napi_io.get();
