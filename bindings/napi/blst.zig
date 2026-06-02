@@ -429,17 +429,40 @@ pub fn verifyMultipleAggregateSignatures(sets: js.Array, pks_validate: ?js.Boole
     const n_elems = try sets.length();
     if (n_elems == 0) return js.Boolean.from(false);
 
-    const msgs = try allocator.alloc([32]u8, n_elems);
-    defer allocator.free(msgs);
+    var msgs_stack: [MAX_AGGREGATE_PER_JOB][32]u8 = undefined;
+    var pks_stack: [MAX_AGGREGATE_PER_JOB]*NativePublicKey = undefined;
+    var sigs_stack: [MAX_AGGREGATE_PER_JOB]*NativeSignature = undefined;
+    var rands_stack: [MAX_AGGREGATE_PER_JOB][32]u8 = undefined;
 
-    const pks = try allocator.alloc(*NativePublicKey, n_elems);
-    defer allocator.free(pks);
+    var msgs_heap: ?[][32]u8 = null;
+    defer if (msgs_heap) |buf| allocator.free(buf);
+    var pks_heap: ?[]*NativePublicKey = null;
+    defer if (pks_heap) |buf| allocator.free(buf);
+    var sigs_heap: ?[]*NativeSignature = null;
+    defer if (sigs_heap) |buf| allocator.free(buf);
+    var rands_heap: ?[][32]u8 = null;
+    defer if (rands_heap) |buf| allocator.free(buf);
 
-    const sigs = try allocator.alloc(*NativeSignature, n_elems);
-    defer allocator.free(sigs);
-
-    const rands = try allocator.alloc([32]u8, n_elems);
-    defer allocator.free(rands);
+    const msgs = if (n_elems <= MAX_AGGREGATE_PER_JOB) msgs_stack[0..n_elems] else blk: {
+        const buf = try allocator.alloc([32]u8, n_elems);
+        msgs_heap = buf;
+        break :blk buf;
+    };
+    const pks = if (n_elems <= MAX_AGGREGATE_PER_JOB) pks_stack[0..n_elems] else blk: {
+        const buf = try allocator.alloc(*NativePublicKey, n_elems);
+        pks_heap = buf;
+        break :blk buf;
+    };
+    const sigs = if (n_elems <= MAX_AGGREGATE_PER_JOB) sigs_stack[0..n_elems] else blk: {
+        const buf = try allocator.alloc(*NativeSignature, n_elems);
+        sigs_heap = buf;
+        break :blk buf;
+    };
+    const rands = if (n_elems <= MAX_AGGREGATE_PER_JOB) rands_stack[0..n_elems] else blk: {
+        const buf = try allocator.alloc([32]u8, n_elems);
+        rands_heap = buf;
+        break :blk buf;
+    };
 
     var seed_bytes: [8]u8 = undefined;
     const io = napi_io.get();
