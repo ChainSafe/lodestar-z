@@ -429,12 +429,12 @@ pub fn verifyMultipleAggregateSignatures(sets: js.Array, pks_validate: ?js.Boole
     const n_elems = try sets.length();
     if (n_elems == 0) return js.Boolean.from(false);
 
-    var msgs_stack: [MAX_AGGREGATE_PER_JOB][32]u8 = undefined;
+    var msgs_stack: [MAX_AGGREGATE_PER_JOB][]const u8 = undefined;
     var pks_stack: [MAX_AGGREGATE_PER_JOB]*NativePublicKey = undefined;
     var sigs_stack: [MAX_AGGREGATE_PER_JOB]*NativeSignature = undefined;
     var rands_stack: [MAX_AGGREGATE_PER_JOB][32]u8 = undefined;
 
-    var msgs_heap: ?[][32]u8 = null;
+    var msgs_heap: ?[][]const u8 = null;
     defer if (msgs_heap) |buf| allocator.free(buf);
     var pks_heap: ?[]*NativePublicKey = null;
     defer if (pks_heap) |buf| allocator.free(buf);
@@ -444,7 +444,7 @@ pub fn verifyMultipleAggregateSignatures(sets: js.Array, pks_validate: ?js.Boole
     defer if (rands_heap) |buf| allocator.free(buf);
 
     const msgs = if (n_elems <= MAX_AGGREGATE_PER_JOB) msgs_stack[0..n_elems] else blk: {
-        const buf = try allocator.alloc([32]u8, n_elems);
+        const buf = try allocator.alloc([]const u8, n_elems);
         msgs_heap = buf;
         break :blk buf;
     };
@@ -477,7 +477,7 @@ pub fn verifyMultipleAggregateSignatures(sets: js.Array, pks_validate: ?js.Boole
         const msg_napi = try set.getNamedProperty("msg");
         const msg_bytes = try uint8SliceFromValue(.{ .val = msg_napi });
         if (msg_bytes.len != 32) return error.InvalidMessageLength;
-        @memcpy(&msgs[i], msg_bytes[0..32]);
+        msgs[i] = msg_bytes;
 
         const pk_napi = try set.getNamedProperty("pk");
         const wrapped_pk = try e.unwrap(PublicKey, pk_napi);
