@@ -382,8 +382,15 @@ describe("blst", () => {
       expect(result.sig).toBeInstanceOf(Signature);
     });
 
-    it("should produce a valid aggregated signature", async () => {
+    it("should produce a valid aggregated signature - small MSM", async () => {
       const {msg, sets} = getTestSetsSameMessage(8);
+      const input = sets.map((s) => ({pk: s.pk, sig: s.sig.toBytes()}));
+      const {pk, sig} = await asyncAggregateWithRandomness(input);
+      expect(verify(msg, pk, sig, false, false)).toBe(true);
+    });
+
+    it("should produce a valid aggregated signature - tiled MSM", async () => {
+      const {msg, sets} = getTestSetsSameMessage(33);
       const input = sets.map((s) => ({pk: s.pk, sig: s.sig.toBytes()}));
       const {pk, sig} = await asyncAggregateWithRandomness(input);
       expect(verify(msg, pk, sig, false, false)).toBe(true);
