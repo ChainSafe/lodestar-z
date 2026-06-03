@@ -275,23 +275,6 @@ pub fn verifyMultipleAggregateSignatures(
         rands.len != n_elems)
         return BlstError.VerifyFail;
 
-    // Single-threaded fallback for small inputs or single worker
-    if (n_elems <= 2 or pool.n_workers <= 1) {
-        var buf: PairingBuf = .{};
-        const fast_verify = @import("fast_verify.zig");
-        return fast_verify.verifyMultipleAggregateSignatures(
-            &buf.data,
-            n_elems,
-            msgs,
-            dst,
-            pks,
-            pks_validate,
-            sigs,
-            sigs_groupcheck,
-            rands,
-        );
-    }
-
     const n_active = @min(pool.n_workers, n_elems);
 
     var result_bufs: [MAX_WORKERS]PairingBuf = undefined;
