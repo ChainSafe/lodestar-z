@@ -20,6 +20,10 @@
 //! single-threaded `Curve.mult_pippenger` directly since the overhead is not
 //! worth it.
 //!
+//! For `2 <= npoints < 32` we match the Rust binding's small-MSM
+//! branch: workers perform per-point scalar multiplication and reduce partial
+//! projective results, avoiding tiled Pippenger setup for tiny batches.
+//!
 //! Note: This is a direct port of blst's Rust binding `MultiPoint::mult` (pippenger.rs).
 
 const std = @import("std");
@@ -48,6 +52,8 @@ const CurveDescriptor = struct {
     scratch_sizeof: *const fn (npoints: usize) callconv(.c) usize,
     mult_pippenger: *const anyopaque,
     tile_pippenger: *const anyopaque,
+    from_affine: *const anyopaque,
+    mult: *const anyopaque,
     add_or_double: *const anyopaque,
     double: *const anyopaque,
 };
@@ -58,6 +64,8 @@ const G1: CurveDescriptor = .{
     .scratch_sizeof = c.blst_p1s_mult_pippenger_scratch_sizeof,
     .mult_pippenger = @ptrCast(&c.blst_p1s_mult_pippenger),
     .tile_pippenger = @ptrCast(&c.blst_p1s_tile_pippenger),
+    .from_affine = @ptrCast(&c.blst_p1_from_affine),
+    .mult = @ptrCast(&c.blst_p1_mult),
     .add_or_double = @ptrCast(&c.blst_p1_add_or_double),
     .double = @ptrCast(&c.blst_p1_double),
 };
@@ -68,6 +76,8 @@ const G2: CurveDescriptor = .{
     .scratch_sizeof = c.blst_p2s_mult_pippenger_scratch_sizeof,
     .mult_pippenger = @ptrCast(&c.blst_p2s_mult_pippenger),
     .tile_pippenger = @ptrCast(&c.blst_p2s_tile_pippenger),
+    .from_affine = @ptrCast(&c.blst_p2_from_affine),
+    .mult = @ptrCast(&c.blst_p2_mult),
     .add_or_double = @ptrCast(&c.blst_p2_add_or_double),
     .double = @ptrCast(&c.blst_p2_double),
 };
@@ -193,6 +203,16 @@ fn MultPippengerFn(comptime Curve: CurveDescriptor) type {
     ) callconv(.c) void;
 }
 
+/// Typed function-pointer signature for `blst_p?_from_affine`.
+fn FromAffineFn(comptime Curve: CurveDescriptor) type {
+    return *const fn (*Curve.Projective, *const Curve.Wrapper) callconv(.c) void;
+}
+
+/// Typed function-pointer signature for `blst_p?_mult`.
+fn MultFn(comptime Curve: CurveDescriptor) type {
+    return *const fn (*Curve.Projective, *const Curve.Projective, [*c]const u8, usize) callconv(.c) void;
+}
+
 /// Typed function-pointer signature for `blst_p?_add_or_double`.
 fn AddOrDoubleFn(comptime Curve: CurveDescriptor) type {
     return *const fn (*Curve.Projective, *const Curve.Projective, *const Curve.Projective) callconv(.c) void;
@@ -201,6 +221,101 @@ fn AddOrDoubleFn(comptime Curve: CurveDescriptor) type {
 /// Typed function-pointer signature for `blst_p?_double`.
 fn DoubleFn(comptime Curve: CurveDescriptor) type {
     return *const fn (*Curve.Projective, *const Curve.Projective) callconv(.c) void;
+}
+
+fn SmallMsmJob(comptime Curve: CurveDescriptor) type {
+    return struct {
+        points: []*const Curve.Wrapper,
+        scalars_refs: []*const u8,
+        nbits: usize,
+        counter: std.atomic.Value(usize),
+    };
+}
+
+fn SmallMsmWorkItem(comptime Curve: CurveDescriptor) type {
+    return struct {
+        const Self = @This();
+
+        base: WorkItem,
+        job: *SmallMsmJob(Curve),
+        result: Curve.Projective = undefined,
+        did_work: bool = false,
+
+        fn exec(base_item: *WorkItem) void {
+            const self: *Self = @fieldParentPtr("base", base_item);
+            const job = self.job;
+            const from_affine: FromAffineFn(Curve) = @ptrCast(@alignCast(Curve.from_affine));
+            const mult: MultFn(Curve) = @ptrCast(@alignCast(Curve.mult));
+            const add_or_double: AddOrDoubleFn(Curve) = @ptrCast(@alignCast(Curve.add_or_double));
+
+            var acc: Curve.Projective = undefined;
+            var tmp: Curve.Projective = undefined;
+            var did_work = false;
+
+            while (true) {
+                const i = job.counter.fetchAdd(1, .monotonic);
+                if (i >= job.points.len) break;
+
+                from_affine(&tmp, job.points[i]);
+                if (!did_work) {
+                    mult(&acc, &tmp, @ptrCast(job.scalars_refs[i]), job.nbits);
+                    did_work = true;
+                } else {
+                    mult(&tmp, &tmp, @ptrCast(job.scalars_refs[i]), job.nbits);
+                    add_or_double(&acc, &acc, &tmp);
+                }
+            }
+
+            self.did_work = did_work;
+            if (did_work) self.result = acc;
+        }
+    };
+}
+
+fn smallMSM(
+    comptime Curve: CurveDescriptor,
+    pool: *ThreadPool,
+    io: std.Io,
+    points: []*const Curve.Wrapper,
+    scalars_refs: []*const u8,
+    nbits: usize,
+    out: *Curve.Projective,
+) (PoolError || std.Io.Cancelable)!void {
+    const n_active = @min(pool.n_workers, points.len);
+    const Job = SmallMsmJob(Curve);
+    const Item = SmallMsmWorkItem(Curve);
+
+    var job = Job{
+        .points = points,
+        .scalars_refs = scalars_refs,
+        .nbits = nbits,
+        .counter = std.atomic.Value(usize).init(0),
+    };
+
+    var work_items: [MAX_WORKERS]Item = undefined;
+    var item_ptrs: [MAX_WORKERS]*WorkItem = undefined;
+    for (0..n_active) |i| {
+        work_items[i] = .{
+            .base = .{ .exec_fn = Item.exec },
+            .job = &job,
+        };
+        item_ptrs[i] = &work_items[i].base;
+    }
+
+    try pool.submitAndWait(io, item_ptrs[0..n_active]);
+
+    const add_or_double: AddOrDoubleFn(Curve) = @ptrCast(@alignCast(Curve.add_or_double));
+    var have_result = false;
+    for (work_items[0..n_active]) |*item| {
+        if (!item.did_work) continue;
+        if (!have_result) {
+            out.* = item.result;
+            have_result = true;
+        } else {
+            add_or_double(out, out, &item.result);
+        }
+    }
+    std.debug.assert(have_result);
 }
 
 /// Shared state for a single `parallelMSM` invocation. Lives on the calling
@@ -310,6 +425,11 @@ fn parallelMSM(
             nbits,
             scratch.ptr,
         );
+        return;
+    }
+
+    if (ncpus >= 2 and npoints < 32) {
+        try smallMSM(Curve, pool, io, points, scalars_refs, nbits, out);
         return;
     }
 
