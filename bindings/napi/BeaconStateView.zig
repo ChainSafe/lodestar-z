@@ -668,24 +668,33 @@ pub fn proposerRewards(self: *const BeaconStateView) !js_types.ProposerRewards {
     return .{ .val = obj };
 }
 
-// pub fn BeaconStateView_computeBlockRewards
+/// Populate a `SignedVoluntaryExit.Type` from a JS object of shape
+/// `{message: {epoch, validatorIndex}, signature: Uint8Array(96)}`. Matches `phase0.SignedVoluntaryExit`
+/// from `@lodestar/types`.
+fn signedVoluntaryExitFromJsValue(value: js.Value, out: *ct.phase0.SignedVoluntaryExit.Type) !void {
+    std.debug.assert(value.val != null);
+    const raw = value.toValue();
+    const message = try raw.getNamedProperty("message");
+    out.message.epoch = @intCast(try (try message.getNamedProperty("epoch")).getValueInt64());
+    out.message.validator_index = @intCast(try (try message.getNamedProperty("validatorIndex")).getValueInt64());
 
-// pub fn BeaconStateView_computeAttestationRewards
+    const signature = try raw.getNamedProperty("signature");
+    if (!(try signature.isTypedarray())) return error.SignatureNotTypedArray;
+    const info = try signature.getTypedarrayInfo();
+    if (info.array_type != .uint8) return error.SignatureNotUint8Array;
+    if (info.data.len != out.signature.len) return error.InvalidSignatureLength;
+    @memcpy(&out.signature, info.data);
+}
 
-// pub fn BeaconStateView_computeSyncCommitteeRewards
-
-// pub fn BeaconStateView_getLatestWeakSubjectivityCheckpointEpoch
-
-/// Get the validity status of a signed voluntary exit.
-pub fn getVoluntaryExitValidity(self: *const BeaconStateView, signed_exit_bytes: js.Uint8Array, verify_signature_value: js.Boolean) !js.String {
+pub fn getVoluntaryExitValidity(self: *const BeaconStateView, signed_exit_value: js.Value, verify_signature_value: js.Boolean) !js.String {
+    std.debug.assert(self.cached_state != null);
     const env = js.env();
     const cached_state = try self.requireState();
     const verify_signature = verify_signature_value.assertBool();
-    const bytes = try signed_exit_bytes.toSlice();
 
     var signed_voluntary_exit: ct.phase0.SignedVoluntaryExit.Type = ct.phase0.SignedVoluntaryExit.default_value;
-    ct.phase0.SignedVoluntaryExit.deserializeFromBytes(bytes, &signed_voluntary_exit) catch {
-        return throwNullAs(js.String, "DESERIALIZE_ERROR", "Failed to deserialize SignedVoluntaryExit");
+    signedVoluntaryExitFromJsValue(signed_exit_value, &signed_voluntary_exit) catch {
+        return throwNullAs(js.String, "INVALID_ARG", "Failed to read SignedVoluntaryExit from JS object");
     };
 
     const result = switch (cached_state.state.forkSeq()) {
@@ -705,15 +714,14 @@ pub fn getVoluntaryExitValidity(self: *const BeaconStateView, signed_exit_bytes:
     return .{ .val = try env.createStringUtf8(@tagName(validity)) };
 }
 
-/// Check if a signed voluntary exit is valid.
-pub fn isValidVoluntaryExit(self: *const BeaconStateView, signed_exit_bytes: js.Uint8Array, verify_signature_value: js.Boolean) !js.Boolean {
+pub fn isValidVoluntaryExit(self: *const BeaconStateView, signed_exit_value: js.Value, verify_signature_value: js.Boolean) !js.Boolean {
+    std.debug.assert(self.cached_state != null);
     const cached_state = try self.requireState();
     const verify_signature = verify_signature_value.assertBool();
-    const bytes = try signed_exit_bytes.toSlice();
 
     var signed_voluntary_exit: ct.phase0.SignedVoluntaryExit.Type = ct.phase0.SignedVoluntaryExit.default_value;
-    ct.phase0.SignedVoluntaryExit.deserializeFromBytes(bytes, &signed_voluntary_exit) catch {
-        return throwNullAs(js.Boolean, "DESERIALIZE_ERROR", "Failed to deserialize SignedVoluntaryExit");
+    signedVoluntaryExitFromJsValue(signed_exit_value, &signed_voluntary_exit) catch {
+        return throwNullAs(js.Boolean, "INVALID_ARG", "Failed to read SignedVoluntaryExit from JS object");
     };
 
     const result = switch (cached_state.state.forkSeq()) {
