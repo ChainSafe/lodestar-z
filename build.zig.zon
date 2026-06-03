@@ -181,6 +181,7 @@
                 .hex,
                 .persistent_merkle_tree,
                 .metrics,
+                .hashing,
                 .time,
             },
         },

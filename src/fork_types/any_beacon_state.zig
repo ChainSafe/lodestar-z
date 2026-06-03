@@ -223,6 +223,13 @@ pub const AnyBeaconState = union(ForkSeq) {
         };
     }
 
+    /// Root node of the underlying tree view, regardless of fork variant.
+    pub fn root(self: *AnyBeaconState) Node.Id {
+        return switch (self.*) {
+            inline else => |state| state.root,
+        };
+    }
+
     // pub fn castFromFork(comptime f: ForkSeq, )
 
     pub fn castToFork(self: *AnyBeaconState, comptime f: ForkSeq) *BeaconState(f) {
