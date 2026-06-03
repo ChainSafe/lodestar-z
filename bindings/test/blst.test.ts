@@ -275,6 +275,15 @@ describe("blst", () => {
     });
   });
 
+  describe("aggregatePublicKeys", () => {
+    it("should return the same public key for a single-key aggregate", () => {
+      const {pk} = getTestSet(0);
+      const agg = aggregatePublicKeys([pk], false);
+      expect(agg).toBeInstanceOf(PublicKey);
+      expectEqualHex(agg.toBytes(), pk.toBytes());
+    });
+  });
+
   describe("aggregateSerializedPublicKeys", () => {
     it("should aggregate compressed (48-byte) public keys", () => {
       const sets = getTestSets(3);
