@@ -8,13 +8,10 @@ pub const stateTransition = @import("./stateTransition.zig");
 pub const BeaconStateView = @import("./BeaconStateView.zig");
 pub const blst = @import("./blst.zig");
 pub const pubkeys = @import("./pubkeys.zig");
+pub const blsBatch = @import("./bls_batch.zig");
 
 const options = @import("bls_options");
 const napi_io = @import("./io.zig");
-// blsBatch uses the low-level napi callback API rather than the zapi DSL, so it
-// is registered manually through the `.register` hook below instead of being
-// auto-exported as a `pub const` namespace.
-const bls_batch = @import("./bls_batch.zig");
 
 fn init(old_ref_count: u32) !void {
     if (old_ref_count == 0) {
@@ -39,7 +36,7 @@ fn init(old_ref_count: u32) !void {
 fn cleanup(new_ref_count: u32) void {
     if (new_ref_count == 0) {
         // Last environment — tear down shared state.
-        bls_batch.deinit();
+        blsBatch.deinit(.{});
         blst.deinitThreadPool();
         config.state.deinit();
         pubkeys.state.deinit();
@@ -54,6 +51,8 @@ comptime {
     js.exportModule(@This(), .{
         .init = init,
         .cleanup = cleanup,
-        .register = bls_batch.register,
+        // blsBatch's functions are auto-exported as a DSL namespace; this hook
+        // only adds its integer kind constants, which the DSL can't export.
+        .register = blsBatch.registerConstants,
     });
 }

@@ -26,6 +26,13 @@ export interface BlsBatch {
   readonly aggregate: 1;
   readonly single: 2;
 
+  /**
+   * Maximum number of sets accepted in a single verify/asyncVerify/asyncVerifySameMessage
+   * call. Larger jobs are rejected with a `TooManySets` error; callers must chunk to this
+   * size. Mirrors `MAX_AGGREGATE_PER_JOB` in the native library.
+   */
+  readonly maxSetsPerJob: number;
+
   verify(kind: 0, sets: IndexedSet[]): boolean;
   verify(kind: 1, sets: AggregateSet[]): boolean;
   verify(kind: 2, sets: SingleSet[]): boolean;
