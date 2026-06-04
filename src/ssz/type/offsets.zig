@@ -34,6 +34,9 @@ pub fn OffsetIterator(comptime ST: type) type {
         }
 
         pub fn firstOffset(self: Self) !u32 {
+            if (self.data.len < 4) {
+                return error.offsetOutOfRange;
+            }
             const first_offset = std.mem.readInt(u32, self.data[0..4], .little);
 
             if (first_offset == 0) {

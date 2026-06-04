@@ -1,7 +1,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const blst = @import("blst");
-const PublicKey = blst.PublicKey;
+const bls = @import("bls");
+const PublicKey = bls.PublicKey;
 const types = @import("consensus_types");
 const Epoch = types.primitive.Epoch.Type;
 const AttestationData = types.phase0.AttestationData.Type;
@@ -68,7 +68,7 @@ pub fn getIndexedAttestationSignatureSet(
 /// Appends to out all the AggregatedSignatureSet for each attestation in the signed_block
 /// Consumer need to free the pubkeys arrays in each AggregatedSignatureSet in out
 /// TODO: consume in https://github.com/ChainSafe/state-transition-z/issues/72
-pub fn attestationsSignatureSets(allocator: Allocator, cached_state: *const CachedBeaconState, signed_block: *const AnySignedBeaconBlock, out: std.ArrayList(AggregatedSignatureSet)) !void {
+pub fn attestationsSignatureSets(allocator: Allocator, cached_state: *const CachedBeaconState, signed_block: *const AnySignedBeaconBlock, out: *std.ArrayList(AggregatedSignatureSet)) !void {
     const epoch_cache = cached_state.epoch_cache;
     const attestation_items = signed_block.beaconBlock().beaconBlockBody().attestations().items();
 
@@ -79,7 +79,7 @@ pub fn attestationsSignatureSets(allocator: Allocator, cached_state: *const Cach
                 var attesting_indices = indexed_attestation.attesting_indices;
                 defer attesting_indices.deinit(allocator);
                 const signature_set = try getIndexedAttestationSignatureSet(allocator, cached_state, indexed_attestation);
-                try out.append(signature_set);
+                try out.append(allocator, signature_set);
             }
         },
         .electra => |electra_attestations| {
@@ -88,7 +88,7 @@ pub fn attestationsSignatureSets(allocator: Allocator, cached_state: *const Cach
                 var attesting_indices = indexed_attestation.attesting_indices;
                 defer attesting_indices.deinit(allocator);
                 const signature_set = try getIndexedAttestationSignatureSet(allocator, cached_state, indexed_attestation);
-                try out.append(signature_set);
+                try out.append(allocator, signature_set);
             }
         },
     }

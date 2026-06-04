@@ -1,9 +1,9 @@
 const std = @import("std");
-const blst = @import("blst");
+const bls = @import("bls");
 const types = @import("consensus_types");
 const bls_utils = @import("../utils/bls.zig");
 const BLSPubkey = types.primitive.BLSPubkey.Type;
-const Secretkey = blst.SecretKey;
+const Secretkey = bls.SecretKey;
 
 /// Generates a list of BLS public keys for interop testing.
 // TODO: store this to a file and cache there
@@ -23,7 +23,7 @@ pub fn interopPubkeysCached(validator_count: usize, out: []BLSPubkey) !void {
     }
 }
 
-pub fn interopSign(validator_index: usize, message: []const u8) !blst.Signature {
+pub fn interopSign(validator_index: usize, message: []const u8) !bls.Signature {
     var ikm = [_]u8{0} ** 32;
     const u64_slice = std.mem.bytesAsSlice(u64, ikm[0..8]);
     u64_slice[0] = @intCast(validator_index);

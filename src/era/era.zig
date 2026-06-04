@@ -46,8 +46,8 @@ pub const GroupIndex = struct {
 /// Read state and block SlotIndex entries from an era file and validate alignment.
 ///
 /// Ownership of the returned GroupIndex is transferred to the caller.
-pub fn readGroupIndex(allocator: std.mem.Allocator, file: std.fs.File, end: u64) !GroupIndex {
-    const state_index = try e2s.readSlotIndex(allocator, file, end);
+pub fn readGroupIndex(allocator: std.mem.Allocator, io: std.Io, file: std.Io.File, end: u64) !GroupIndex {
+    const state_index = try e2s.readSlotIndex(allocator, io, file, end);
     errdefer state_index.deinit(allocator);
 
     if (state_index.offsets.len != 1) {
@@ -57,7 +57,7 @@ pub fn readGroupIndex(allocator: std.mem.Allocator, file: std.fs.File, end: u64)
     // Read block index if not genesis era (era 0)
     var blocks_index: ?e2s.SlotIndex = null;
     if (state_index.start_slot != 0) {
-        blocks_index = try e2s.readSlotIndex(allocator, file, state_index.record_start);
+        blocks_index = try e2s.readSlotIndex(allocator, io, file, state_index.record_start);
         errdefer blocks_index.?.deinit(allocator);
 
         if (blocks_index.?.offsets.len != preset.SLOTS_PER_HISTORICAL_ROOT) {
@@ -80,33 +80,29 @@ pub fn readGroupIndex(allocator: std.mem.Allocator, file: std.fs.File, end: u64)
 /// Read all indices from an era file
 ///
 /// Ownership of the returned GroupIndex slice is transferred to the caller
-pub fn readAllGroupIndices(allocator: std.mem.Allocator, file: std.fs.File) ![]GroupIndex {
-    var end: i64 = @intCast(try file.getEndPos());
+pub fn readAllGroupIndices(allocator: std.mem.Allocator, io: std.Io, file: std.Io.File) ![]GroupIndex {
+    var end: i64 = @intCast(try file.length(io));
 
-    var group_indices = try std.ArrayList(GroupIndex).initCapacity(
-        allocator,
-        // Most era files have a single group, though the spec allows for multiple
-        1,
-    );
+    var group_indices = try std.ArrayList(GroupIndex).initCapacity(allocator, 1);
     errdefer {
         for (group_indices.items) |gi| {
             gi.deinit(allocator);
         }
-        group_indices.deinit();
+        group_indices.deinit(allocator);
     }
 
     while (end > e2s.header_size) {
-        const index = try readGroupIndex(allocator, file, @intCast(end));
+        const index = try readGroupIndex(allocator, io, file, @intCast(end));
         errdefer index.deinit(allocator);
 
-        try group_indices.append(index);
+        try group_indices.append(allocator, index);
         end = if (index.blocks_index) |bi|
             @as(i64, @intCast(bi.record_start)) + bi.offsets[0] - e2s.header_size
         else
             @as(i64, @intCast(index.state_index.record_start)) + index.state_index.offsets[0] - e2s.header_size;
     }
 
-    return group_indices.toOwnedSlice();
+    return group_indices.toOwnedSlice(allocator);
 }
 
 pub fn isValidEraBlockSlot(slot: u64, era_number: u64) bool {
@@ -146,6 +142,88 @@ pub fn getShortHistoricalRoot(state: fork_types.AnyBeaconState) ![8]u8 {
         try last.toValue(allocator, &historical_root);
     }
 
-    _ = try std.fmt.bufPrint(&short_historical_root, "{x}", .{std.fmt.fmtSliceHexLower(historical_root[0..4])});
+    _ = try std.fmt.bufPrint(&short_historical_root, "{x}", .{historical_root[0..4]});
     return short_historical_root;
+}
+
+// ── Unit tests ──────────────────────────────────────────────────────────
+
+test "EraFileName.parse - valid filename" {
+    const result = try EraFileName.parse("mainnet-00001-a1b2c3d4.era");
+    try std.testing.expectEqualStrings("mainnet", result.config_name);
+    try std.testing.expectEqual(@as(u64, 1), result.era_number);
+    try std.testing.expectEqualStrings("a1b2c3d4", &result.short_historical_root);
+}
+
+test "EraFileName.parse - large era number" {
+    const result = try EraFileName.parse("mainnet-99999-deadbeef.era");
+    try std.testing.expectEqual(@as(u64, 99999), result.era_number);
+    try std.testing.expectEqualStrings("deadbeef", &result.short_historical_root);
+}
+
+test "EraFileName.parse - different config names" {
+    const result = try EraFileName.parse("goerli-00042-12345678.era");
+    try std.testing.expectEqualStrings("goerli", result.config_name);
+    try std.testing.expectEqual(@as(u64, 42), result.era_number);
+}
+
+test "EraFileName.parse - invalid: no .era extension" {
+    try std.testing.expectError(error.InvalidEraFileName, EraFileName.parse("mainnet-00001-a1b2c3d4.bin"));
+}
+
+test "EraFileName.parse - invalid: wrong root length" {
+    try std.testing.expectError(error.InvalidEraFileName, EraFileName.parse("mainnet-00001-abc.era"));
+}
+
+test "EraFileName.parse - with directory path" {
+    const result = try EraFileName.parse("/data/era/mainnet-00100-aabbccdd.era");
+    try std.testing.expectEqualStrings("mainnet", result.config_name);
+    try std.testing.expectEqual(@as(u64, 100), result.era_number);
+}
+
+test "computeEraNumberFromBlockSlot" {
+    // Slot 0 → era 1 (genesis blocks are in era 1)
+    try std.testing.expectEqual(@as(u64, 1), computeEraNumberFromBlockSlot(0));
+    // Slot 8191 → era 1 (last slot of first era, with SLOTS_PER_HISTORICAL_ROOT=8192)
+    try std.testing.expectEqual(@as(u64, 1), computeEraNumberFromBlockSlot(preset.SLOTS_PER_HISTORICAL_ROOT - 1));
+    // Slot 8192 → era 2
+    try std.testing.expectEqual(@as(u64, 2), computeEraNumberFromBlockSlot(preset.SLOTS_PER_HISTORICAL_ROOT));
+}
+
+test "computeStartBlockSlotFromEraNumber" {
+    // Era 1 starts at slot 0
+    try std.testing.expectEqual(@as(u64, 0), try computeStartBlockSlotFromEraNumber(1));
+    // Era 2 starts at SLOTS_PER_HISTORICAL_ROOT
+    try std.testing.expectEqual(@as(u64, preset.SLOTS_PER_HISTORICAL_ROOT), try computeStartBlockSlotFromEraNumber(2));
+}
+
+test "computeStartBlockSlotFromEraNumber - era 0 underflows" {
+    try std.testing.expectError(error.Overflow, computeStartBlockSlotFromEraNumber(0));
+}
+
+test "isValidEraBlockSlot" {
+    // Slot 0 is valid for era 1
+    try std.testing.expect(isValidEraBlockSlot(0, 1));
+    // Slot 0 is NOT valid for era 2
+    try std.testing.expect(!isValidEraBlockSlot(0, 2));
+    // Slot SLOTS_PER_HISTORICAL_ROOT is valid for era 2
+    try std.testing.expect(isValidEraBlockSlot(preset.SLOTS_PER_HISTORICAL_ROOT, 2));
+}
+
+test "isValidEraStateSlot" {
+    // Slot 0 is valid state slot for era 0
+    try std.testing.expect(isValidEraStateSlot(0, 0));
+    // Slot SLOTS_PER_HISTORICAL_ROOT is valid state slot for era 1
+    try std.testing.expect(isValidEraStateSlot(preset.SLOTS_PER_HISTORICAL_ROOT, 1));
+    // Non-aligned slot is not valid
+    try std.testing.expect(!isValidEraStateSlot(1, 0));
+    try std.testing.expect(!isValidEraStateSlot(100, 0));
+}
+
+test "era number and block slot roundtrip" {
+    // For any era number > 0, the start block slot should map back to that era
+    for (1..10) |era_num| {
+        const start_slot = try computeStartBlockSlotFromEraNumber(era_num);
+        try std.testing.expectEqual(era_num, computeEraNumberFromBlockSlot(start_slot));
+    }
 }

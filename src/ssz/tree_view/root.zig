@@ -1,5 +1,5 @@
-pub const TreeViewData = @import("base.zig").TreeViewData;
-pub const BaseTreeView = @import("base.zig").BaseTreeView;
+const std = @import("std");
+
 pub const ContainerTreeView = @import("container.zig").ContainerTreeView;
 pub const ArrayBasicTreeView = @import("array_basic.zig").ArrayBasicTreeView;
 pub const ArrayCompositeTreeView = @import("array_composite.zig").ArrayCompositeTreeView;

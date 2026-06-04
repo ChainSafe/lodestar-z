@@ -1,8 +1,8 @@
 const std = @import("std");
-const blst = @import("blst");
-const PublicKey = blst.PublicKey;
-const Signature = blst.Signature;
-const SecretKey = blst.SecretKey;
+const bls = @import("bls");
+const PublicKey = bls.PublicKey;
+const Signature = bls.Signature;
+const SecretKey = bls.SecretKey;
 
 /// See https://github.com/ethereum/consensus-specs/blob/v1.4.0/specs/phase0/beacon-chain.md#bls-signatures
 const DST: []const u8 = "BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_POP_";
@@ -16,14 +16,14 @@ pub fn sign(secret_key: SecretKey, msg: []const u8) Signature {
 /// If `pk_validate` is `true`, the public key will be infinity and group checked.
 ///
 /// If `sig_groupcheck` is `true`, the signature will be group checked.
-pub fn verify(msg: []const u8, pk: *const PublicKey, sig: *const Signature, in_pk_validate: ?bool, in_sig_groupcheck: ?bool) blst.BlstError!void {
+pub fn verify(msg: []const u8, pk: *const PublicKey, sig: *const Signature, in_pk_validate: ?bool, in_sig_groupcheck: ?bool) bls.BlstError!void {
     const sig_groupcheck = in_sig_groupcheck orelse false;
     const pk_validate = in_pk_validate orelse false;
     try sig.verify(sig_groupcheck, msg, DST, null, pk, pk_validate);
 }
 
 pub fn fastAggregateVerify(msg: []const u8, pks: []const PublicKey, sig: *const Signature, in_pk_validate: ?bool, in_sigs_group_check: ?bool) !bool {
-    var pairing_buf: [blst.Pairing.sizeOf()]u8 = undefined;
+    var pairing_buf: [bls.Pairing.sizeOf()]u8 align(bls.Pairing.buf_align) = undefined;
 
     const sigs_groupcheck = in_sigs_group_check orelse false;
     const pks_validate = in_pk_validate orelse false;

@@ -1,7 +1,7 @@
 const types = @import("consensus_types");
-pub const blst = @import("blst");
-const PublicKey = blst.PublicKey;
-const Signature = blst.Signature;
+pub const bls = @import("bls");
+const PublicKey = bls.PublicKey;
+const Signature = bls.Signature;
 const Root = types.primitive.Root.Type;
 const BLSSignature = types.primitive.BLSSignature.Type;
 const verify = @import("./bls.zig").verify;

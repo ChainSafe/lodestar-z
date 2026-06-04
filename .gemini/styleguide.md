@@ -213,7 +213,7 @@ Beyond these rules:
   understand the domain. Take time to find the perfect name, to find nouns and verbs that work
   together, so that the whole is greater than the sum of its parts.
 
-- Use `camelCase` for function, and variable names. Use `snake_case` for file names. The underscore is the closest thing we
+- Use `camelCase` for function names. Use `snake_case` for file names and variable names. The underscore is the closest thing we
   have as programmers to a space, and helps to separate words and encourage descriptive names. We
   don't use Zig's `CamelCase.zig` style for "struct" files to keep the convention simple and
   consistent.

@@ -20,7 +20,9 @@ pub fn FixedContainerType(comptime ST: type) type {
         else => @compileError("Expected a struct type."),
     };
 
-    comptime var native_fields: [ssz_fields.len]std.builtin.Type.StructField = undefined;
+    comptime var native_names: [ssz_fields.len][:0]const u8 = undefined;
+    comptime var native_types: [ssz_fields.len]type = undefined;
+    comptime var native_attrs: [ssz_fields.len]std.builtin.Type.StructField.Attributes = undefined;
     comptime var _offsets: [ssz_fields.len]usize = undefined;
     comptime var _fixed_size: usize = 0;
     inline for (ssz_fields, 0..) |field, i| {
@@ -28,27 +30,14 @@ pub fn FixedContainerType(comptime ST: type) type {
             @compileError("FixedContainerType must only contain fixed fields");
         }
 
-        native_fields[i] = .{
-            .name = field.name,
-            .type = field.type.Type,
-            .default_value_ptr = null,
-            .is_comptime = false,
-            .alignment = @alignOf(field.type.Type),
-        };
+        native_names[i] = field.name;
+        native_types[i] = field.type.Type;
+        native_attrs[i] = .{};
         _offsets[i] = _fixed_size;
         _fixed_size += field.type.fixed_size;
     }
 
-    const T = @Type(.{
-        .@"struct" = .{
-            .layout = .auto,
-            .backing_integer = null,
-            .fields = native_fields[0..],
-            // TODO: do we need to assign this value?
-            .decls = &[_]std.builtin.Type.Declaration{},
-            .is_tuple = false,
-        },
-    });
+    const T = @Struct(.auto, null, &native_names, &native_types, &native_attrs);
 
     return struct {
         pub const kind = TypeKind.container;
@@ -159,7 +148,8 @@ pub fn FixedContainerType(comptime ST: type) type {
 
         pub const tree = struct {
             pub fn default(pool: *Node.Pool) !Node.Id {
-                var nodes: [chunk_count]Node.Id = undefined;
+                // Zero-filled so a mid-build error's errdefer is a no-op over the unfilled slots.
+                var nodes: [chunk_count]Node.Id = @splat(@as(Node.Id, @enumFromInt(0)));
                 errdefer pool.free(&nodes);
                 inline for (fields, 0..) |field, i| {
                     if (comptime isBasicType(field.type)) {
@@ -176,7 +166,8 @@ pub fn FixedContainerType(comptime ST: type) type {
                     return error.InvalidSize;
                 }
 
-                var nodes: [chunk_count]Node.Id = undefined;
+                // Zero-filled so a mid-build error's errdefer is a no-op over the unfilled slots.
+                var nodes: [chunk_count]Node.Id = @splat(@as(Node.Id, @enumFromInt(0)));
                 errdefer pool.free(&nodes);
                 var offset: usize = 0;
 
@@ -200,7 +191,8 @@ pub fn FixedContainerType(comptime ST: type) type {
             }
 
             pub fn fromValue(pool: *Node.Pool, value: *const Type) !Node.Id {
-                var nodes: [chunk_count]Node.Id = undefined;
+                // Zero-filled so a mid-build error's errdefer is a no-op over the unfilled slots.
+                var nodes: [chunk_count]Node.Id = @splat(@as(Node.Id, @enumFromInt(0)));
                 errdefer pool.free(&nodes);
 
                 inline for (fields, 0..) |field, i| {
@@ -308,7 +300,9 @@ pub fn VariableContainerType(comptime ST: type) type {
         else => @compileError("Expected a struct type."),
     };
 
-    comptime var native_fields: [ssz_fields.len]std.builtin.Type.StructField = undefined;
+    comptime var native_names: [ssz_fields.len][:0]const u8 = undefined;
+    comptime var native_types: [ssz_fields.len]type = undefined;
+    comptime var native_attrs: [ssz_fields.len]std.builtin.Type.StructField.Attributes = undefined;
     comptime var _offsets: [ssz_fields.len]usize = undefined;
     comptime var _min_size: usize = 0;
     comptime var _max_size: usize = 0;
@@ -327,13 +321,9 @@ pub fn VariableContainerType(comptime ST: type) type {
             _fixed_end += 4;
         }
 
-        native_fields[i] = .{
-            .name = field.name,
-            .type = field.type.Type,
-            .default_value_ptr = null,
-            .is_comptime = false,
-            .alignment = @alignOf(field.type.Type),
-        };
+        native_names[i] = field.name;
+        native_types[i] = field.type.Type;
+        native_attrs[i] = .{};
     }
 
     comptime {
@@ -344,16 +334,7 @@ pub fn VariableContainerType(comptime ST: type) type {
 
     const var_count = ssz_fields.len - _fixed_count;
 
-    const T = @Type(.{
-        .@"struct" = .{
-            .layout = .auto,
-            .backing_integer = null,
-            .fields = native_fields[0..],
-            // TODO: do we need to assign this value?
-            .decls = &[_]std.builtin.Type.Declaration{},
-            .is_tuple = false,
-        },
-    });
+    const T = @Struct(.auto, null, &native_names, &native_types, &native_attrs);
 
     return struct {
         pub const kind = TypeKind.container;
@@ -512,6 +493,7 @@ pub fn VariableContainerType(comptime ST: type) type {
         }
 
         pub fn getFieldType(comptime name: []const u8) type {
+            @setEvalBranchQuota(20000);
             inline for (fields) |field| {
                 if (std.mem.eql(u8, name, field.name)) {
                     return field.type;
@@ -618,7 +600,8 @@ pub fn VariableContainerType(comptime ST: type) type {
 
         pub const tree = struct {
             pub fn default(pool: *Node.Pool) !Node.Id {
-                var nodes: [chunk_count]Node.Id = undefined;
+                // Zero-filled so a mid-build error's errdefer is a no-op over the unfilled slots.
+                var nodes: [chunk_count]Node.Id = @splat(@as(Node.Id, @enumFromInt(0)));
                 errdefer pool.free(&nodes);
                 inline for (fields, 0..) |field, i| {
                     if (comptime isBasicType(field.type)) {
@@ -636,7 +619,8 @@ pub fn VariableContainerType(comptime ST: type) type {
                 }
 
                 const ranges = try readFieldRanges(data);
-                var nodes: [chunk_count]Node.Id = undefined;
+                // Zero-filled so a mid-build error's errdefer is a no-op over the unfilled slots.
+                var nodes: [chunk_count]Node.Id = @splat(@as(Node.Id, @enumFromInt(0)));
                 errdefer pool.free(&nodes);
 
                 inline for (fields, 0..) |field, i| {
@@ -664,7 +648,8 @@ pub fn VariableContainerType(comptime ST: type) type {
             }
 
             pub fn fromValue(pool: *Node.Pool, value: *const Type) !Node.Id {
-                var nodes: [chunk_count]Node.Id = undefined;
+                // Zero-filled so a mid-build error's errdefer is a no-op over the unfilled slots.
+                var nodes: [chunk_count]Node.Id = @splat(@as(Node.Id, @enumFromInt(0)));
                 errdefer pool.free(&nodes);
 
                 inline for (fields, 0..) |field, i| {

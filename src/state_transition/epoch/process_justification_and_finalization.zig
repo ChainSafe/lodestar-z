@@ -52,7 +52,8 @@ pub fn weighJustificationAndFinalization(
     // Process justifications
     try state.setPreviousJustifiedCheckpoint(&old_current_justified_checkpoint);
     var justification_bits = try state.justificationBits();
-    var bits = try justification_bits.toBoolArray();
+    var bits: [types.phase0.JustificationBits.length]bool = undefined;
+    try justification_bits.toBoolArrayInto(&bits);
 
     // Rotate bits
     var idx: usize = bits.len - 1;

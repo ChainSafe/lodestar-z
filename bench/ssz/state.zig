@@ -30,7 +30,7 @@ const config = @import("config");
 
 const SerializeState = struct {
     state: *BeaconState.Type,
-    pub fn run(self: SerializeState, allocator: std.mem.Allocator) void {
+    pub fn run(self: *SerializeState, allocator: std.mem.Allocator) void {
         const out = allocator.alloc(u8, BeaconState.serializedSize(self.state)) catch unreachable;
         _ = BeaconState.serializeIntoBytes(self.state, out);
     }
@@ -39,7 +39,7 @@ const SerializeState = struct {
 const SerializeStateNoAlloc = struct {
     state: *BeaconState.Type,
     out: []u8,
-    pub fn run(self: SerializeStateNoAlloc, allocator: std.mem.Allocator) void {
+    pub fn run(self: *SerializeStateNoAlloc, allocator: std.mem.Allocator) void {
         _ = allocator;
         _ = BeaconState.serializeIntoBytes(self.state, self.out);
     }
@@ -47,7 +47,7 @@ const SerializeStateNoAlloc = struct {
 
 const DeserializeState = struct {
     bytes: []const u8,
-    pub fn run(self: DeserializeState, allocator: std.mem.Allocator) void {
+    pub fn run(self: *DeserializeState, allocator: std.mem.Allocator) void {
         const out = allocator.create(BeaconState.Type) catch unreachable;
         out.* = BeaconState.default_value;
         BeaconState.deserializeFromBytes(allocator, self.bytes, out) catch unreachable;
@@ -57,14 +57,14 @@ const DeserializeState = struct {
 const DeserializeStateNoAlloc = struct {
     bytes: []const u8,
     out: *BeaconState.Type,
-    pub fn run(self: DeserializeStateNoAlloc, allocator: std.mem.Allocator) void {
+    pub fn run(self: *DeserializeStateNoAlloc, allocator: std.mem.Allocator) void {
         BeaconState.deserializeFromBytes(allocator, self.bytes, self.out) catch unreachable;
     }
 };
 
 const ValidateState = struct {
     bytes: []const u8,
-    pub fn run(self: ValidateState, allocator: std.mem.Allocator) void {
+    pub fn run(self: *ValidateState, allocator: std.mem.Allocator) void {
         _ = allocator;
         BeaconState.serialized.validate(self.bytes) catch unreachable;
     }
@@ -72,7 +72,7 @@ const ValidateState = struct {
 
 const HashState = struct {
     state: *BeaconState.Type,
-    pub fn run(self: HashState, allocator: std.mem.Allocator) void {
+    pub fn run(self: *HashState, allocator: std.mem.Allocator) void {
         var scratch = ssz.Hasher(BeaconState).init(allocator) catch unreachable;
         var out: [32]u8 = undefined;
         ssz.Hasher(BeaconState).hash(&scratch, self.state, &out) catch unreachable;
@@ -82,7 +82,7 @@ const HashState = struct {
 const HashStateNoAlloc = struct {
     state: *BeaconState.Type,
     scratch: *ssz.HasherData,
-    pub fn run(self: HashStateNoAlloc, allocator: std.mem.Allocator) void {
+    pub fn run(self: *HashStateNoAlloc, allocator: std.mem.Allocator) void {
         _ = allocator;
         var out: [32]u8 = undefined;
         ssz.Hasher(BeaconState).hash(self.scratch, self.state, &out) catch unreachable;
@@ -91,7 +91,7 @@ const HashStateNoAlloc = struct {
 
 const HashStateOneshot = struct {
     state: *BeaconState.Type,
-    pub fn run(self: HashStateOneshot, allocator: std.mem.Allocator) void {
+    pub fn run(self: *HashStateOneshot, allocator: std.mem.Allocator) void {
         var out: [32]u8 = undefined;
         BeaconState.hashTreeRoot(allocator, self.state, &out) catch unreachable;
     }
@@ -99,15 +99,15 @@ const HashStateOneshot = struct {
 
 const HashStateSerialized = struct {
     bytes: []const u8,
-    pub fn run(self: HashStateSerialized, allocator: std.mem.Allocator) void {
+    pub fn run(self: *HashStateSerialized, allocator: std.mem.Allocator) void {
         var out: [32]u8 = undefined;
         BeaconState.serialized.hashTreeRoot(allocator, self.bytes, &out) catch unreachable;
     }
 };
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
     const allocator = std.heap.page_allocator;
-    const stdout = std.io.getStdOut().writer();
+    const io = init.io;
     var bench = zbench.Benchmark.init(allocator, .{});
     defer bench.deinit();
 
@@ -116,7 +116,7 @@ pub fn main() !void {
         &[_][]const u8{ download_era_options.era_out_dir, download_era_options.era_files[0] },
     );
     defer allocator.free(era_path);
-    var era_reader = try era.Reader.open(allocator, config.mainnet.config, era_path);
+    var era_reader = try era.Reader.open(allocator, io, config.mainnet.config, era_path);
     defer era_reader.close(allocator);
 
     const state_bytes: []u8 = @constCast(try era_reader.readSerializedState(allocator, null));
@@ -157,5 +157,5 @@ pub fn main() !void {
     const hash_state_serialized = HashStateSerialized{ .bytes = state_bytes };
     try bench.addParam("hash state serialized", &hash_state_serialized, .{});
 
-    try bench.run(stdout);
+    try bench.run(io, std.Io.File.stdout());
 }

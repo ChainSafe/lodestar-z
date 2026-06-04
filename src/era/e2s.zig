@@ -31,17 +31,6 @@ pub const EntryType = enum(u16) {
     }
 };
 
-pub const ReadError = error{
-    UnknownEntryType,
-    UnexpectedEntryType,
-    UnexpectedEOF,
-    InvalidVersionHeader,
-    InvalidSlotIndexCount,
-    InvalidHeaderReservedBytes,
-    Overflow,
-    DataSizeTooLarge,
-} || std.fs.File.PReadError || std.mem.Allocator.Error;
-
 /// Parsed entry from an E2Store (.e2s) file.
 pub const Entry = struct {
     entry_type: EntryType,
@@ -90,10 +79,21 @@ pub const header_size = 8;
 
 /// Read an entry at a specific offset from an open file handle.
 /// Reads the header first to determine data length, then reads the complete entry.
-pub fn readEntry(allocator: std.mem.Allocator, file: std.fs.File, offset: u64) ReadError!Entry {
+pub const ReadError = error{
+    UnknownEntryType,
+    UnexpectedEOF,
+    InvalidHeaderReservedBytes,
+    InvalidVersionHeader,
+    DataSizeTooLarge,
+    UnexpectedEntryType,
+    InvalidSlotIndexCount,
+    Overflow,
+} || std.Io.File.ReadPositionalError || std.mem.Allocator.Error;
+
+pub fn readEntry(allocator: std.mem.Allocator, io: std.Io, file: std.Io.File, offset: u64) ReadError!Entry {
     // Read header
     var header: [8]u8 = undefined;
-    const header_read_size = try file.pread(&header, offset);
+    const header_read_size = try file.readPositionalAll(io, &header, offset);
     if (header_read_size != header_size) {
         return error.UnexpectedEOF;
     }
@@ -117,7 +117,7 @@ pub fn readEntry(allocator: std.mem.Allocator, file: std.fs.File, offset: u64) R
     const data = try allocator.alloc(u8, data_len);
     errdefer allocator.free(data);
 
-    const data_read_size = try file.pread(data, offset + header_size);
+    const data_read_size = try file.readPositionalAll(io, data, offset + header_size);
     if (data_read_size != data_len) {
         return error.UnexpectedEOF;
     }
@@ -128,9 +128,9 @@ pub fn readEntry(allocator: std.mem.Allocator, file: std.fs.File, offset: u64) R
     };
 }
 
-pub fn readVersion(file: std.fs.File, offset: u64) ReadError!void {
+pub fn readVersion(io: std.Io, file: std.Io.File, offset: u64) ReadError!void {
     var header: [8]u8 = undefined;
-    const header_read_size = try file.pread(&header, offset);
+    const header_read_size = try file.readPositionalAll(io, &header, offset);
     if (header_read_size != header_size) {
         return error.UnexpectedEOF;
     }
@@ -142,10 +142,10 @@ pub fn readVersion(file: std.fs.File, offset: u64) ReadError!void {
 /// Read a SlotIndex entry at a specific offset from an open file handle.
 ///
 /// Ownership of the returned SlotIndex is transferred to the caller.
-pub fn readSlotIndex(allocator: std.mem.Allocator, file: std.fs.File, offset: u64) ReadError!SlotIndex {
+pub fn readSlotIndex(allocator: std.mem.Allocator, io: std.Io, file: std.Io.File, offset: u64) ReadError!SlotIndex {
     const record_end = offset;
     var count_buffer: [8]u8 = undefined;
-    const count_read_size = try file.pread(&count_buffer, record_end - 8);
+    const count_read_size = try file.readPositionalAll(io, &count_buffer, record_end - 8);
     if (count_read_size != header_size) {
         return error.UnexpectedEOF;
     }
@@ -158,7 +158,7 @@ pub fn readSlotIndex(allocator: std.mem.Allocator, file: std.fs.File, offset: u6
     // Validate index position is within file bounds
     const record_start = try std.math.sub(u64, record_end, (8 * count + 24));
 
-    const entry = try readEntry(allocator, file, record_start);
+    const entry = try readEntry(allocator, io, file, record_start);
     defer allocator.free(entry.data);
 
     if (entry.entry_type != EntryType.SlotIndex) {
@@ -187,16 +187,89 @@ pub fn readSlotIndex(allocator: std.mem.Allocator, file: std.fs.File, offset: u6
     };
 }
 
-pub const WriteError = error{} || std.fs.File.PWriteError;
+pub const WriteError = error{} || std.Io.File.WritePositionalError;
 
-pub fn writeEntry(file: std.fs.File, offset: u64, entry_type: EntryType, payload: []const u8) WriteError!void {
+pub fn writeEntry(io: std.Io, file: std.Io.File, offset: u64, entry_type: EntryType, payload: []const u8) WriteError!void {
     var header: [8]u8 = [_]u8{0} ** 8;
     std.mem.writeInt(u16, header[0..2], entry_type.toU16(), .little);
     std.mem.writeInt(u32, header[2..6], @intCast(payload.len), .little);
-    try file.pwriteAll(&header, offset);
-    try file.pwriteAll(payload, offset + header_size);
+    try file.writePositionalAll(io, &header, offset);
+    try file.writePositionalAll(io, payload, offset + header_size);
 }
 
-pub fn writeVersion(file: std.fs.File, offset: u64) WriteError!void {
-    try file.pwriteAll(&version_record_bytes, offset);
+pub fn writeVersion(io: std.Io, file: std.Io.File, offset: u64) WriteError!void {
+    try file.writePositionalAll(io, &version_record_bytes, offset);
+}
+
+// ── Unit tests ──────────────────────────────────────────────────────────
+
+test "EntryType.fromU16 - known types" {
+    try std.testing.expectEqual(EntryType.Empty, try EntryType.fromU16(0));
+    try std.testing.expectEqual(EntryType.CompressedSignedBeaconBlock, try EntryType.fromU16(1));
+    try std.testing.expectEqual(EntryType.CompressedBeaconState, try EntryType.fromU16(2));
+    try std.testing.expectEqual(EntryType.Version, try EntryType.fromU16(0x3265));
+    try std.testing.expectEqual(EntryType.SlotIndex, try EntryType.fromU16(0x3269));
+}
+
+test "EntryType.fromU16 - unknown type returns error" {
+    try std.testing.expectError(error.UnknownEntryType, EntryType.fromU16(0xFFFF));
+    try std.testing.expectError(error.UnknownEntryType, EntryType.fromU16(3));
+    try std.testing.expectError(error.UnknownEntryType, EntryType.fromU16(42));
+}
+
+test "EntryType.toU16 - roundtrip" {
+    inline for (std.meta.fields(EntryType)) |field| {
+        const entry = @field(EntryType, field.name);
+        try std.testing.expectEqual(entry, try EntryType.fromU16(entry.toU16()));
+    }
+}
+
+test "EntryType - Version is 'e2' in ASCII" {
+    // 'e' = 0x65, '2' = 0x32, little-endian u16 = 0x3265
+    try std.testing.expectEqual(@as(u16, 0x3265), EntryType.Version.toU16());
+}
+
+test "EntryType - SlotIndex is 'i2' in ASCII" {
+    // 'i' = 0x69, '2' = 0x32, little-endian u16 = 0x3269
+    try std.testing.expectEqual(@as(u16, 0x3269), EntryType.SlotIndex.toU16());
+}
+
+test "SlotIndex.serialize - basic" {
+    const allocator = std.testing.allocator;
+    const offsets = try allocator.alloc(i64, 2);
+    defer allocator.free(offsets);
+    offsets[0] = 100;
+    offsets[1] = 200;
+
+    const index = SlotIndex{
+        .start_slot = 8192,
+        .offsets = offsets,
+        .record_start = 0,
+    };
+
+    const serialized = try index.serialize(allocator);
+    defer allocator.free(serialized);
+
+    // Size: 2 offsets * 8 + 16 = 32 bytes
+    try std.testing.expectEqual(@as(usize, 32), serialized.len);
+
+    // First 8 bytes: start_slot (8192 = 0x2000 LE)
+    try std.testing.expectEqual(@as(u64, 8192), std.mem.readInt(u64, serialized[0..8], .little));
+
+    // Middle 16 bytes: offsets
+    try std.testing.expectEqual(@as(i64, 100), std.mem.readInt(i64, serialized[8..16], .little));
+    try std.testing.expectEqual(@as(i64, 200), std.mem.readInt(i64, serialized[16..24], .little));
+
+    // Last 8 bytes: count (2)
+    try std.testing.expectEqual(@as(u64, 2), std.mem.readInt(u64, serialized[24..32], .little));
+}
+
+test "version_record_bytes" {
+    // Version record is: type=0x3265 ("e2"), length=0, reserved=0
+    try std.testing.expectEqual(@as(u8, 0x65), version_record_bytes[0]); // 'e'
+    try std.testing.expectEqual(@as(u8, 0x32), version_record_bytes[1]); // '2'
+    // Rest should be zeros (length=0, reserved=0)
+    for (version_record_bytes[2..]) |b| {
+        try std.testing.expectEqual(@as(u8, 0), b);
+    }
 }

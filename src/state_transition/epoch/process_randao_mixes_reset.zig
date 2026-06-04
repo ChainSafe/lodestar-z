@@ -15,7 +15,8 @@ pub fn processRandaoMixesReset(
     var old = try randao_mixes.get(current_epoch % preset.EPOCHS_PER_HISTORICAL_VECTOR);
     try randao_mixes.set(
         next_epoch % preset.EPOCHS_PER_HISTORICAL_VECTOR,
-        // TODO inspect why this clone was needed
+        // Clone needed: set() at a different gindex may CoW-rebranch the
+        // tree, invalidating the node reference returned by get().
         try old.clone(.{}),
     );
 }

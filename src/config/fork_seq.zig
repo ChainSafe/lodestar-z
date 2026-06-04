@@ -13,6 +13,7 @@ pub const ForkSeq = enum(u8) {
     deneb = 4,
     electra = 5,
     fulu = 6,
+    gloas = 7,
 
     /// Total number of fork variants.
     pub const count: u8 = @intCast(@typeInfo(ForkSeq).@"enum".fields.len);
@@ -66,6 +67,7 @@ test "fork - ForkSeq.name" {
     try std.testing.expectEqualSlices(u8, "deneb", ForkSeq.deneb.name());
     try std.testing.expectEqualSlices(u8, "electra", ForkSeq.electra.name());
     try std.testing.expectEqualSlices(u8, "fulu", ForkSeq.fulu.name());
+    try std.testing.expectEqualSlices(u8, "gloas", ForkSeq.gloas.name());
 }
 
 test "fork - ForkSeq.fromName" {
@@ -76,4 +78,5 @@ test "fork - ForkSeq.fromName" {
     try std.testing.expectEqual(ForkSeq.deneb, ForkSeq.fromName("deneb"));
     try std.testing.expectEqual(ForkSeq.electra, ForkSeq.fromName("electra"));
     try std.testing.expectEqual(ForkSeq.fulu, ForkSeq.fromName("fulu"));
+    try std.testing.expectEqual(ForkSeq.gloas, ForkSeq.fromName("gloas"));
 }

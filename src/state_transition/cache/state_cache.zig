@@ -8,7 +8,9 @@ const EpochCacheImmutableData = @import("./epoch_cache.zig").EpochCacheImmutable
 const EpochCacheOpts = @import("./epoch_cache.zig").EpochCacheOpts;
 const AnyBeaconState = @import("fork_types").AnyBeaconState;
 const ValidatorIndex = types.primitive.ValidatorIndex.Type;
-const CloneOpts = @import("ssz").BaseTreeView.CloneOpts;
+const PubkeyIndexMap = @import("pubkey_cache.zig").PubkeyIndexMap(ValidatorIndex);
+const Index2PubkeyCache = @import("pubkey_cache.zig").Index2PubkeyCache;
+const CloneOpts = @import("ssz").CloneOpts;
 const SlashingsCache = @import("./slashings_cache.zig").SlashingsCache;
 const Node = @import("persistent_merkle_tree").Node;
 

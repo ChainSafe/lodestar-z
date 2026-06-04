@@ -18,6 +18,7 @@ const capella = types.capella;
 const deneb = types.deneb;
 const electra = types.electra;
 const fulu = types.fulu;
+const gloas = types.gloas;
 
 pub const BlsSetting = enum {
     default,
@@ -43,11 +44,12 @@ pub fn TestCaseUtils(comptime fork: ForkSeq) type {
                 .deneb => .capella,
                 .electra => .deneb,
                 .fulu => .electra,
+                .gloas => .fulu,
                 else => unreachable,
             };
         }
 
-        pub fn loadPreStatePreFork(allocator: Allocator, pool: *Node.Pool, dir: std.fs.Dir, fork_epoch: Epoch) !TestCachedBeaconState {
+        pub fn loadPreStatePreFork(allocator: Allocator, pool: *Node.Pool, dir: std.Io.Dir, fork_epoch: Epoch) !TestCachedBeaconState {
             const fork_pre = comptime getForkPre();
             const ForkPreTypes = @field(types, fork_pre.name());
             var pre_state = ForkPreTypes.BeaconState.default_value;
@@ -67,7 +69,7 @@ pub fn TestCaseUtils(comptime fork: ForkSeq) type {
             return try TestCachedBeaconState.initFromState(allocator, pool, pre_state_all_forks, fork, fork_epoch);
         }
 
-        pub fn loadPreState(allocator: Allocator, pool: *Node.Pool, dir: std.fs.Dir) !TestCachedBeaconState {
+        pub fn loadPreState(allocator: Allocator, pool: *Node.Pool, dir: std.Io.Dir) !TestCachedBeaconState {
             var pre_state = ForkTypes.BeaconState.default_value;
             try loadSszSnappyValue(ForkTypes.BeaconState, allocator, dir, "pre.ssz_snappy", &pre_state);
             defer ForkTypes.BeaconState.deinit(allocator, &pre_state);
@@ -88,37 +90,30 @@ pub fn TestCaseUtils(comptime fork: ForkSeq) type {
         }
 
         /// consumer should deinit the returned state and destroy the pointer
-        pub fn loadPostState(allocator: Allocator, pool: *Node.Pool, dir: std.fs.Dir) !?*AnyBeaconState {
-            if (dir.statFile("post.ssz_snappy")) |_| {
-                var post_state = ForkTypes.BeaconState.default_value;
-                try loadSszSnappyValue(ForkTypes.BeaconState, allocator, dir, "post.ssz_snappy", &post_state);
-                defer ForkTypes.BeaconState.deinit(allocator, &post_state);
+        pub fn loadPostState(allocator: Allocator, pool: *Node.Pool, dir: std.Io.Dir) !?*AnyBeaconState {
+            var post_state = ForkTypes.BeaconState.default_value;
+            loadSszSnappyValue(ForkTypes.BeaconState, allocator, dir, "post.ssz_snappy", &post_state) catch |err| switch (err) {
+                error.FileNotFound => return null,
+                else => return err,
+            };
+            defer ForkTypes.BeaconState.deinit(allocator, &post_state);
 
-                const post_state_all_forks = try allocator.create(AnyBeaconState);
-                errdefer allocator.destroy(post_state_all_forks);
+            const post_state_all_forks = try allocator.create(AnyBeaconState);
+            errdefer allocator.destroy(post_state_all_forks);
 
-                post_state_all_forks.* = @unionInit(
-                    AnyBeaconState,
-                    fork.name(),
-                    try ForkTypes.BeaconState.TreeView.fromValue(allocator, pool, &post_state),
-                );
-                return post_state_all_forks;
-            } else |err| {
-                if (err == error.FileNotFound) {
-                    return null;
-                } else {
-                    return err;
-                }
-            }
+            post_state_all_forks.* = @unionInit(
+                AnyBeaconState,
+                fork.name(),
+                try ForkTypes.BeaconState.TreeView.fromValue(allocator, pool, &post_state),
+            );
+            return post_state_all_forks;
         }
     };
 }
 
-pub fn loadBlsSetting(allocator: std.mem.Allocator, dir: std.fs.Dir) BlsSetting {
-    var file = dir.openFile("meta.yaml", .{}) catch return .default;
-    defer file.close();
-
-    const contents = file.readToEndAlloc(allocator, 100) catch return .default;
+pub fn loadBlsSetting(allocator: std.mem.Allocator, dir: std.Io.Dir) BlsSetting {
+    const io = std.testing.io;
+    const contents = dir.readFileAlloc(io, "meta.yaml", allocator, .unlimited) catch return .default;
     defer allocator.free(contents);
 
     if (std.mem.indexOf(u8, contents, "bls_setting: 0") != null) {
@@ -134,7 +129,7 @@ pub fn loadBlsSetting(allocator: std.mem.Allocator, dir: std.fs.Dir) BlsSetting 
 
 /// load SignedBeaconBlock from file using runtime fork
 /// consumer should deinit the returned block and destroy the pointer
-pub fn loadSignedBeaconBlock(allocator: std.mem.Allocator, fork: ForkSeq, dir: std.fs.Dir, file_name: []const u8) !AnySignedBeaconBlock {
+pub fn loadSignedBeaconBlock(allocator: std.mem.Allocator, fork: ForkSeq, dir: std.Io.Dir, file_name: []const u8) !AnySignedBeaconBlock {
     return switch (fork) {
         .phase0 => blk: {
             const out = try allocator.create(phase0.SignedBeaconBlock.Type);
@@ -192,6 +187,14 @@ pub fn loadSignedBeaconBlock(allocator: std.mem.Allocator, fork: ForkSeq, dir: s
                 .full_fulu = out,
             };
         },
+        .gloas => blk: {
+            const out = try allocator.create(gloas.SignedBeaconBlock.Type);
+            out.* = gloas.SignedBeaconBlock.default_value;
+            try loadSszSnappyValue(types.gloas.SignedBeaconBlock, allocator, dir, file_name, out);
+            break :blk AnySignedBeaconBlock{
+                .full_gloas = out,
+            };
+        },
     };
 }
 
@@ -246,14 +249,16 @@ pub fn deinitSignedBeaconBlock(signed_block: AnySignedBeaconBlock, allocator: st
             fulu.SignedBlindedBeaconBlock.deinit(allocator, @constCast(b));
             allocator.destroy(b);
         },
+        .full_gloas => |b| {
+            gloas.SignedBeaconBlock.deinit(allocator, @constCast(b));
+            allocator.destroy(b);
+        },
     }
 }
 
-pub fn loadSszSnappyValue(comptime ST: type, allocator: std.mem.Allocator, dir: std.fs.Dir, file_name: []const u8, out: *ST.Type) !void {
-    var object_file = try dir.openFile(file_name, .{});
-    defer object_file.close();
-
-    const value_bytes = try object_file.readToEndAlloc(allocator, 100_000_000);
+pub fn loadSszSnappyValue(comptime ST: type, allocator: std.mem.Allocator, dir: std.Io.Dir, file_name: []const u8, out: *ST.Type) !void {
+    const io = std.testing.io;
+    const value_bytes = try dir.readFileAlloc(io, file_name, allocator, .unlimited);
     defer allocator.free(value_bytes);
 
     const serialized_buf = try allocator.alloc(u8, try snappy.uncompressedLength(value_bytes));
@@ -277,75 +282,36 @@ pub fn expectEqualBeaconStates(expected: *AnyBeaconState, actual: *AnyBeaconStat
         try actual.hashTreeRoot(),
     )) {
         const Debug = struct {
-            fn printDiff(comptime StateST: type, expected_state: *AnyBeaconState, actual_state: *AnyBeaconState) !void {
-                var expected_view = StateST.TreeView{ .base_view = expected_state.baseView() };
-                var actual_view = StateST.TreeView{ .base_view = actual_state.baseView() };
+            fn printDiff(comptime StateST: type, comptime fork: ForkSeq, expected_state: *AnyBeaconState, actual_state: *AnyBeaconState) !void {
+                const expected_view: *StateST.TreeView = expected_state.castToFork(fork).inner;
+                const actual_view: *StateST.TreeView = actual_state.castToFork(fork).inner;
 
                 inline for (StateST.fields) |field| {
-                    const expected_field_root = try expected_view.getRoot(field.name);
-                    const actual_field_root = try actual_view.getRoot(field.name);
+                    const expected_field_root = try expected_view.getFieldRoot(field.name);
+                    const actual_field_root = try actual_view.getFieldRoot(field.name);
                     if (!std.mem.eql(u8, expected_field_root, actual_field_root)) {
                         std.debug.print(
-                            "field: {s}\n  expected_root: {s}\n  actual_root:   {s}\n",
+                            "field: {s}\n  expected_root: {x}\n  actual_root:   {x}\n",
                             .{
                                 field.name,
-                                std.fmt.fmtSliceHexLower(expected_field_root),
-                                std.fmt.fmtSliceHexLower(actual_field_root),
+                                expected_field_root,
+                                actual_field_root,
                             },
                         );
-
-                        @setEvalBranchQuota(100000);
-                        const FieldST = StateST.getFieldType(field.name);
-                        const allocator = std.testing.allocator;
-                        {
-                            var expected_field_view = try expected_view.get(field.name);
-                            if (comptime @hasDecl(FieldST, "TreeView") and @hasDecl(FieldST.TreeView, "length") and @typeInfo(@TypeOf(FieldST.TreeView.length)) == .@"fn") {
-                                std.debug.print(
-                                    "  expected_value_length: {any}\n",
-                                    .{try expected_field_view.length()},
-                                );
-                            }
-                            var expected_field_value: FieldST.Type = undefined;
-                            try expected_view.getValue(allocator, field.name, &expected_field_value);
-                            defer if (@hasDecl(FieldST, "deinit"))
-                                FieldST.deinit(allocator, &expected_field_value);
-
-                            std.debug.print(
-                                "  expected_value: {any}\n",
-                                .{expected_field_value},
-                            );
-                        }
-                        {
-                            var actual_field_view = try actual_view.get(field.name);
-                            if (comptime @hasDecl(FieldST, "TreeView") and @hasDecl(FieldST.TreeView, "length") and @typeInfo(@TypeOf(FieldST.TreeView.length)) == .@"fn") {
-                                std.debug.print(
-                                    "  actual_value_length:   {any}\n",
-                                    .{try actual_field_view.length()},
-                                );
-                            }
-                            var actual_field_value: FieldST.Type = undefined;
-                            try actual_view.getValue(allocator, field.name, &actual_field_value);
-                            defer if (@hasDecl(FieldST, "deinit"))
-                                FieldST.deinit(allocator, &actual_field_value);
-
-                            std.debug.print(
-                                "  actual_value:   {any}\n",
-                                .{actual_field_value},
-                            );
-                        }
                     }
                 }
             }
         };
 
         switch (expected.forkSeq()) {
-            .phase0 => try Debug.printDiff(types.phase0.BeaconState, expected, actual),
-            .altair => try Debug.printDiff(types.altair.BeaconState, expected, actual),
-            .bellatrix => try Debug.printDiff(types.bellatrix.BeaconState, expected, actual),
-            .capella => try Debug.printDiff(types.capella.BeaconState, expected, actual),
-            .deneb => try Debug.printDiff(types.deneb.BeaconState, expected, actual),
-            .electra => try Debug.printDiff(types.electra.BeaconState, expected, actual),
-            .fulu => try Debug.printDiff(types.fulu.BeaconState, expected, actual),
+            .phase0 => try Debug.printDiff(types.phase0.BeaconState, .phase0, expected, actual),
+            .altair => try Debug.printDiff(types.altair.BeaconState, .altair, expected, actual),
+            .bellatrix => try Debug.printDiff(types.bellatrix.BeaconState, .bellatrix, expected, actual),
+            .capella => try Debug.printDiff(types.capella.BeaconState, .capella, expected, actual),
+            .deneb => try Debug.printDiff(types.deneb.BeaconState, .deneb, expected, actual),
+            .electra => try Debug.printDiff(types.electra.BeaconState, .electra, expected, actual),
+            .fulu => try Debug.printDiff(types.fulu.BeaconState, .fulu, expected, actual),
+            .gloas => try Debug.printDiff(types.gloas.BeaconState, .gloas, expected, actual),
         }
         return error.NotEqual;
     }

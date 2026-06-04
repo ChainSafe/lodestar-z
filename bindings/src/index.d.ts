@@ -49,7 +49,8 @@ interface SyncCommittee {
 }
 
 interface ProcessSlotsOpts {
-  transferCache?: boolean;
+  /** Default: false (cache is transferred). Set to true to opt out of cache transfer. */
+  dontTransferCache?: boolean;
 }
 
 interface CompactMultiProof {
@@ -58,7 +59,12 @@ interface CompactMultiProof {
   descriptor: Uint8Array;
 }
 
-/** Options to control how state transition is run */
+/**
+ * Options to control how state transition is run.
+ *
+ * Note: Fields used by TS `StateTransitionOpts` but ignored by the Zig binding (e.g.
+ * `executionPayloadStatus`) are silently dropped - they are declared here to pass type checks.
+ */
 interface TransitionOpts {
   /** Verify the post-state root matches the block's state root. Default: true. */
   verifyStateRoot?: boolean;
@@ -66,8 +72,10 @@ interface TransitionOpts {
   verifyProposer?: boolean;
   /** Verify BLS signatures during block processing. Default: true. */
   verifySignatures?: boolean;
-  /** Clone the state with transfer cache for memory efficiency. Default: true. */
-  transferCache?: boolean;
+  /** Default: false (cache is transferred). Set to true to opt out of cache transfer. */
+  dontTransferCache?: boolean;
+  /** Other fields (executionPayloadStatus, dataAvailabilityStatus, metrics, validatorMonitor, …) */
+  [extra: string]: unknown;
 }
 
 interface ProposerRewards {
@@ -191,8 +199,29 @@ declare class BeaconStateView {
   isValidVoluntaryExit(signedVoluntaryExitBytes: Uint8Array, verifySignature: boolean): boolean;
 
   getFinalizedRootProof(): Uint8Array[];
-  // getSyncCommitteesWitness(): SyncCommitteeWitness;
-  getSingleProof(gindex: number): Uint8Array[];
+  getSyncCommitteesWitness(): {
+    witness: Uint8Array[];
+    currentSyncCommitteeRoot: Uint8Array;
+    nextSyncCommitteeRoot: Uint8Array;
+  };
+  /**
+   * Compute expected withdrawals for the next payload (capella+).
+   *
+   * processedBuilderWithdrawalsCount is withdrawals coming from builder payment since gloas (EIP-7732)
+   * processedPartialWithdrawalsCount is withdrawals coming from EL since electra (EIP-7002)
+   * processedBuildersSweepCount is withdrawals from builder sweep since gloas (EIP-7732)
+   * processedValidatorSweepCount is withdrawals coming from validator sweep
+
+   * TODO(bing): `processedBuilderWithdrawalsCount` and `processedBuildersSweepCount` are Gloas-only
+   * and always 0 here since Zig STF doesn't process Gloas yet.
+   */
+  getExpectedWithdrawals(): {
+    expectedWithdrawals: {index: number; validatorIndex: number; address: Uint8Array; amount: number}[];
+    processedBuilderWithdrawalsCount: number;
+    processedPartialWithdrawalsCount: number;
+    processedBuildersSweepCount: number;
+    processedValidatorSweepCount: number;
+  };
   // createMultiProof(descriptor: Uint8Array): CompactMultiProof;
 
   computeUnrealizedCheckpoints(): {
@@ -206,6 +235,7 @@ declare class BeaconStateView {
   // isStateValidatorsNodesPopulated(): boolean;
 
   // loadOtherState(stateBytes: Uint8Array, seedValidatorsBytes?: Uint8Array): void;
+  loadOtherStateBench(stateBytes: Uint8Array, seedValidatorsBytes?: Uint8Array): void;
   serialize(): Uint8Array;
   serializedSize(): number;
   serializeToBytes(output: Uint8Array, offset: number): number;
@@ -235,6 +265,10 @@ declare const bindings: {
       signedBlockBytes: Uint8Array,
       options?: TransitionOpts
     ) => BeaconStateView;
+  };
+  metrics: {
+    init: () => void;
+    scrapeMetrics: () => string;
   };
   BeaconStateView: typeof BeaconStateView;
 };

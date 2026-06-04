@@ -1,10 +1,13 @@
 .zig-cache/
 zig-out/
+zig-pkg/
 test/spec/spec_tests/
 test/spec/test_case/
+test/fuzz/zig-pkg/
 *.ssz
 test/spec/ssz/generic_tests.zig
 test/spec/ssz/static_tests.zig
+test/spec/bls/spec_tests.zig
 *.era
 *.pkix
 
@@ -15,3 +18,7 @@ perf.data.old
 
 # js
 node_modules/
+
+# Claude Code local config
+.claude/settings.local.json
+.claude/plans/

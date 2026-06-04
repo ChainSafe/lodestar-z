@@ -42,11 +42,11 @@ pub fn processWithdrawalRequest(
 
     var validators = try state.validators();
     if (validator_index >= try validators.length()) return;
-    var validator = try validators.get(@intCast(validator_index));
+    const validator = try validators.get(@intCast(validator_index));
     if (!(try isValidatorEligibleForWithdrawOrExit(
         config,
         epoch_cache.epoch,
-        &validator,
+        validator,
         &withdrawal_request.source_address,
     ))) {
         return;
@@ -60,14 +60,14 @@ pub fn processWithdrawalRequest(
     if (is_full_exit_request) {
         // only exit validator if it has no pending withdrawals in the queue
         if (pending_balance_to_withdraw == 0) {
-            try initiateValidatorExit(fork, config, epoch_cache, state, &validator);
+            try initiateValidatorExit(fork, config, epoch_cache, state, validator);
         }
         return;
     }
 
     // partial withdrawal request
     const effective_balance = try validator.get("effective_balance");
-    const withdrawal_credentials = try validator.getRoot("withdrawal_credentials");
+    const withdrawal_credentials = try validator.getFieldRoot("withdrawal_credentials");
 
     const has_sufficient_effective_balance = effective_balance >= preset.MIN_ACTIVATION_BALANCE;
     const has_excess_balance = validator_balance > preset.MIN_ACTIVATION_BALANCE + pending_balance_to_withdraw;
@@ -96,7 +96,7 @@ fn isValidatorEligibleForWithdrawOrExit(
     validator: *types.phase0.Validator.TreeView,
     source_address: []const u8,
 ) !bool {
-    const withdrawal_credentials = try validator.getRoot("withdrawal_credentials");
+    const withdrawal_credentials = try validator.getFieldRoot("withdrawal_credentials");
     const address = withdrawal_credentials[12..];
 
     const activation_epoch = try validator.get("activation_epoch");

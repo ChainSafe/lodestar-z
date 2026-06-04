@@ -38,7 +38,7 @@ pub fn TestCase(comptime fork: ForkSeq) type {
 
         const Self = @This();
 
-        pub fn execute(allocator: std.mem.Allocator, dir: std.fs.Dir) !void {
+        pub fn execute(allocator: std.mem.Allocator, dir: std.Io.Dir) !void {
             const pool_size = if (active_preset == .mainnet) 10_000_000 else 1_000_000;
             var pool = try Node.Pool.init(allocator, pool_size);
             defer pool.deinit();
@@ -46,13 +46,13 @@ pub fn TestCase(comptime fork: ForkSeq) type {
             var tc = try Self.init(allocator, &pool, dir);
             defer {
                 tc.deinit();
-                state_transition.deinitStateTransition();
+                state_transition.deinitStateTransition(std.testing.io);
             }
 
             try tc.runTest();
         }
 
-        fn init(allocator: std.mem.Allocator, pool: *Node.Pool, dir: std.fs.Dir) !Self {
+        fn init(allocator: std.mem.Allocator, pool: *Node.Pool, dir: std.Io.Dir) !Self {
             var pre_state = try tc_utils.loadPreState(allocator, pool, dir);
             errdefer pre_state.deinit();
 
@@ -78,7 +78,7 @@ pub fn TestCase(comptime fork: ForkSeq) type {
 
         fn buildExpectedRewardsPenalties(
             allocator: std.mem.Allocator,
-            dir: std.fs.Dir,
+            dir: std.Io.Dir,
             validator_count: usize,
         ) !struct { rewards: []u64, penalties: []u64 } {
             const expected_rewards = try allocator.alloc(u64, validator_count);
@@ -102,7 +102,7 @@ pub fn TestCase(comptime fork: ForkSeq) type {
             expected_rewards: []u64,
             expected_penalties: []u64,
             allocator: std.mem.Allocator,
-            dir: std.fs.Dir,
+            dir: std.Io.Dir,
             comptime filename: []const u8,
         ) !void {
             var deltas = try Self.loadDeltas(allocator, dir, filename);
@@ -114,7 +114,7 @@ pub fn TestCase(comptime fork: ForkSeq) type {
             expected_rewards: []u64,
             expected_penalties: []u64,
             allocator: std.mem.Allocator,
-            dir: std.fs.Dir,
+            dir: std.Io.Dir,
             comptime filename: []const u8,
         ) !void {
             if (try Self.loadOptionalDeltas(allocator, dir, filename)) |deltas_value| {
@@ -126,7 +126,7 @@ pub fn TestCase(comptime fork: ForkSeq) type {
 
         fn loadDeltas(
             allocator: std.mem.Allocator,
-            dir: std.fs.Dir,
+            dir: std.Io.Dir,
             comptime filename: []const u8,
         ) !DeltasType.Type {
             var deltas = DeltasType.default_value;
@@ -141,7 +141,7 @@ pub fn TestCase(comptime fork: ForkSeq) type {
 
         fn loadOptionalDeltas(
             allocator: std.mem.Allocator,
-            dir: std.fs.Dir,
+            dir: std.Io.Dir,
             comptime filename: []const u8,
         ) !?DeltasType.Type {
             var deltas = DeltasType.default_value;
@@ -173,11 +173,12 @@ pub fn TestCase(comptime fork: ForkSeq) type {
 
             var epoch_transition_cache = try EpochTransitionCache.init(
                 allocator,
+                std.testing.io,
                 cloned_state.config,
                 cloned_state.epoch_cache,
                 cloned_state.state,
             );
-            defer epoch_transition_cache.deinit();
+            defer epoch_transition_cache.deinit(allocator);
 
             try getRewardsAndPenaltiesFn(
                 fork,

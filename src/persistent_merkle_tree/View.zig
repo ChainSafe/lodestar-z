@@ -23,25 +23,25 @@ pub const Pool = struct {
     next_free: Id,
 
     /// denormalized parent data: parent -> children
-    parent_views: std.AutoHashMap(Id, std.AutoArrayHashMap(Id, void)),
+    parent_views: std.AutoHashMap(Id, std.AutoArrayHashMapUnmanaged(Id, void)),
 
     pub fn init(allocator: Allocator, initial_capacity: usize, node_pool: *Node.Pool) Allocator.Error!Pool {
         var pool = Pool{
             .allocator = allocator,
             .node_pool = node_pool,
-            .views = std.ArrayList(View).init(allocator),
+            .views = std.ArrayList(View).empty,
             .next_free = @enumFromInt(0),
-            .parent_views = std.AutoHashMap(Id, std.AutoArrayHashMap(Id, void)).init(allocator),
+            .parent_views = std.AutoHashMap(Id, std.AutoArrayHashMapUnmanaged(Id, void)).init(allocator),
         };
         try pool.preheat(initial_capacity);
         return pool;
     }
 
     pub fn deinit(self: *Pool) void {
-        self.views.deinit();
+        self.views.deinit(self.allocator);
         var parents_iter = self.parent_views.valueIterator();
         while (parents_iter.next()) |children| {
-            children.deinit();
+            children.deinit(self.allocator);
         }
         self.parent_views.deinit();
         self.* = undefined;
@@ -51,7 +51,7 @@ pub const Pool = struct {
         const old_size = self.views.items.len;
         const new_size = old_size + additional_size;
 
-        try self.views.resize(new_size);
+        try self.views.resize(self.allocator, new_size);
 
         for (old_size..new_size) |i| {
             self.views.items[i] = View{
@@ -84,19 +84,23 @@ pub const Pool = struct {
         if (parent) |p| {
             const entry = try self.parent_views.getOrPut(p.root_view);
             if (!entry.found_existing) {
-                entry.value_ptr.* = std.AutoArrayHashMap(View.Id, void).init(self.allocator);
+                entry.value_ptr.* = std.AutoArrayHashMapUnmanaged(View.Id, void){};
             }
-            try entry.value_ptr.put(n, {});
+            try entry.value_ptr.put(self.allocator, n, {});
         }
         return n;
     }
 
+    /// Destroy a view and return its slot to the free list. Destroy children before parents: a
+    /// surviving child still points at this view's id, so once the slot is reused it would drive
+    /// its writes into an unrelated view. The assert catches that early in safe builds.
     pub fn destroy(self: *Pool, view_id: View.Id) void {
         const view = &self.views.items[@intFromEnum(view_id)];
         // delink the view from its children and deinit the children hashmap
         if (self.parent_views.fetchRemove(view_id)) |kv| {
             var children = kv.value;
-            children.deinit();
+            std.debug.assert(children.count() == 0);
+            children.deinit(self.allocator);
         }
         // delink the view from its parent
         if (view.parent) |parent| {
@@ -106,6 +110,9 @@ pub const Pool = struct {
         }
         // unref the root node
         self.node_pool.unref(view.root_node);
+        // Poison the slot so a later reuse can't mistake these leftover fields for a live view.
+        view.parent = null;
+        view.root_node = @enumFromInt(0);
         // push to the free list
         view.next_free = self.next_free;
         self.next_free = view_id;
@@ -150,7 +157,7 @@ pub const Id = enum(u32) {
     }
 
     /// Update linked children of the view affected by a change at gindex
-    fn updateChildrenUnsafe(pool: *Pool, root_node: Node.Id, children: std.AutoArrayHashMap(View.Id, void), gindex: Gindex) Node.Error!void {
+    fn updateChildrenUnsafe(pool: *Pool, root_node: Node.Id, children: std.AutoArrayHashMapUnmanaged(View.Id, void), gindex: Gindex) Node.Error!void {
         // update linked children that were affected
         for (children.keys()) |child_id| {
             // self + gindex

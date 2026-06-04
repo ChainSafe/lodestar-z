@@ -11,7 +11,7 @@ pub const View = @import("View.zig");
 pub const proof = @import("proof.zig");
 
 test {
-    testing.refAllDeclsRecursive(@This());
+    testing.refAllDecls(@This());
     testing.refAllDecls(@import("node_test.zig"));
     testing.refAllDecls(@import("proof_test.zig"));
     testing.refAllDecls(@import("view_test.zig"));

@@ -37,8 +37,7 @@ pub fn BitList(comptime limit: comptime_int) type {
             const byte_len = std.math.divCeil(usize, bit_len, 8) catch unreachable;
 
             var data = try std.ArrayListUnmanaged(u8).initCapacity(allocator, byte_len);
-            data.expandToCapacity();
-            @memset(data.items, 0);
+            data.appendNTimesAssumeCapacity(0, byte_len);
             return @This(){
                 .data = data,
                 .bit_len = bit_len,
@@ -689,11 +688,11 @@ test "BitListType - intersectValues" {
         for (tc.expected) |i| try b.setAssumeCapacity(i, true);
 
         var values = try std.ArrayList(u8).initCapacity(allocator, tc.bit_len);
-        defer values.deinit();
+        defer values.deinit(allocator);
         for (0..tc.bit_len) |i| values.appendAssumeCapacity(@intCast(i));
 
         var actual = try b.intersectValues(u8, allocator, values.items);
-        defer actual.deinit();
+        defer actual.deinit(allocator);
         try std.testing.expectEqualSlices(u8, tc.expected, actual.items);
     }
 }

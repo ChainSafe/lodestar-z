@@ -25,10 +25,11 @@
 //!   aggregate (1) — sets have {indices, message, signature}
 //!   single (2)    — sets have {publicKey, message, signature}
 const std = @import("std");
-const napi = @import("zapi:napi");
-const blst = @import("blst");
+const napi = @import("zapi:zapi").napi;
+const blst = @import("bls");
 const builtin = @import("builtin");
 const pubkeys = @import("./pubkeys.zig");
+const napi_io = @import("./io.zig");
 
 const PublicKey = blst.PublicKey;
 const Signature = blst.Signature;
@@ -95,7 +96,7 @@ fn batchVerify(
     std.debug.assert(pks.len == n and sigs.len == n and rands.len >= n);
     if (n == 0) return false;
 
-    for (0..n) |i| std.crypto.random.bytes(&rands[i]);
+    napi_io.get().random(std.mem.sliceAsBytes(rands[0..n]));
 
     var pairing_buf: [Pairing.sizeOf()]u8 align(32) = undefined;
     var pairing = Pairing.init(&pairing_buf, true, DST);
@@ -208,7 +209,7 @@ fn parseSets(kind: SetKind, sets: napi.Value, n: usize, msgs: [][32]u8, pks: []P
 // ---------------------------------------------------------------------------
 
 pub fn blsBatch_verify(env: napi.Env, cb: napi.CallbackInfo(2)) !napi.Value {
-    const kind = std.meta.intToEnum(SetKind, try cb.arg(0).getValueUint32()) catch
+    const kind = std.enums.fromInt(SetKind, try cb.arg(0).getValueUint32()) orelse
         return error.InvalidSetKind;
 
     const sets = cb.arg(1);
@@ -345,7 +346,7 @@ fn sameMessageExecute(data: *AsyncJobData) void {
     const n = data.n;
 
     var rands: [MAX_SETS_PER_JOB][32]u8 = undefined;
-    std.crypto.random.bytes(std.mem.sliceAsBytes(rands[0..n]));
+    napi_io.get().random(std.mem.sliceAsBytes(rands[0..n]));
 
     var pk_refs: [MAX_SETS_PER_JOB]*const PublicKey = undefined;
     var sig_refs: [MAX_SETS_PER_JOB]*const Signature = undefined;
@@ -455,7 +456,7 @@ fn queueJob(env: napi.Env, data: *AsyncJobData) !napi.Value {
 
 /// asyncVerify(kind, sets) — batch verify on a worker thread.
 pub fn blsBatch_asyncVerify(env: napi.Env, cb: napi.CallbackInfo(2)) !napi.Value {
-    const kind = std.meta.intToEnum(SetKind, try cb.arg(0).getValueUint32()) catch
+    const kind = std.enums.fromInt(SetKind, try cb.arg(0).getValueUint32()) orelse
         return error.InvalidSetKind;
 
     const sets = cb.arg(1);

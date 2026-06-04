@@ -2,6 +2,7 @@ const std = @import("std");
 const TypeKind = @import("type_kind.zig").TypeKind;
 const isBasicType = @import("type_kind.zig").isBasicType;
 const isFixedType = @import("type_kind.zig").isFixedType;
+const canMemcpySsz = @import("type_kind.zig").canMemcpySsz;
 const OffsetIterator = @import("offsets.zig").OffsetIterator;
 const merkleize = @import("hashing").merkleize;
 const maxChunksToDepth = @import("hashing").maxChunksToDepth;
@@ -76,6 +77,11 @@ pub fn FixedVectorType(comptime ST: type, comptime _length: comptime_int) type {
         }
 
         pub fn serializeIntoBytes(value: *const Type, out: []u8) usize {
+            if (comptime canMemcpySsz(Element)) {
+                const bytes = std.mem.sliceAsBytes(value);
+                @memcpy(out[0..fixed_size], bytes);
+                return fixed_size;
+            }
             var i: usize = 0;
             for (value) |element| {
                 i += Element.serializeIntoBytes(&element, out[i..]);
@@ -88,6 +94,10 @@ pub fn FixedVectorType(comptime ST: type, comptime _length: comptime_int) type {
                 return error.InvalidSize;
             }
 
+            if (comptime canMemcpySsz(Element)) {
+                @memcpy(std.mem.sliceAsBytes(out), data[0..fixed_size]);
+                return;
+            }
             for (0..length) |i| {
                 try Element.deserializeFromBytes(
                     data[i * Element.fixed_size .. (i + 1) * Element.fixed_size],
@@ -145,7 +155,8 @@ pub fn FixedVectorType(comptime ST: type, comptime _length: comptime_int) type {
                     return error.InvalidSize;
                 }
 
-                var nodes: [chunk_count]Node.Id = undefined;
+                // Zero-filled so a mid-build error's errdefer is a no-op over the unfilled slots.
+                var nodes: [chunk_count]Node.Id = @splat(@as(Node.Id, @enumFromInt(0)));
                 errdefer pool.free(&nodes);
 
                 if (comptime isBasicType(Element)) {
@@ -193,7 +204,8 @@ pub fn FixedVectorType(comptime ST: type, comptime _length: comptime_int) type {
             }
 
             pub fn fromValue(pool: *Node.Pool, value: *const Type) !Node.Id {
-                var nodes: [chunk_count]Node.Id = undefined;
+                // Zero-filled so a mid-build error's errdefer is a no-op over the unfilled slots.
+                var nodes: [chunk_count]Node.Id = @splat(@as(Node.Id, @enumFromInt(0)));
                 errdefer pool.free(&nodes);
 
                 if (comptime isBasicType(Element)) {
@@ -418,7 +430,8 @@ pub fn VariableVectorType(comptime ST: type, comptime _length: comptime_int) typ
                 }
 
                 const offsets = try readVariableOffsets(data);
-                var nodes: [chunk_count]Node.Id = undefined;
+                // Zero-filled so a mid-build error's errdefer is a no-op over the unfilled slots.
+                var nodes: [chunk_count]Node.Id = @splat(@as(Node.Id, @enumFromInt(0)));
                 errdefer pool.free(&nodes);
 
                 for (0..length) |i| {
@@ -445,7 +458,8 @@ pub fn VariableVectorType(comptime ST: type, comptime _length: comptime_int) typ
             }
 
             pub fn fromValue(pool: *Node.Pool, value: *const Type) !Node.Id {
-                var nodes: [chunk_count]Node.Id = undefined;
+                // Zero-filled so a mid-build error's errdefer is a no-op over the unfilled slots.
+                var nodes: [chunk_count]Node.Id = @splat(@as(Node.Id, @enumFromInt(0)));
                 errdefer pool.free(&nodes);
 
                 for (0..chunk_count) |i| {
