@@ -14,6 +14,8 @@ pub const Error = error{
     InvalidGindex,
     /// Witness list length does not match the gindex path length.
     InvalidWitnessLength,
+    /// Single-proof traversal encountered a branch-struct node after already materializing one.
+    NestedBranchStruct,
 };
 
 pub const ProofType = enum {
@@ -53,6 +55,24 @@ pub const SingleProof = struct {
     }
 };
 
+/// Proof traversal needs real left/right child nodes. For a branch-struct node,
+/// materialize a temporary plain tree and keep its root alive until proof creation finishes.
+fn materializeIfBranchStruct(
+    allocator: Allocator,
+    pool: *Node.Pool,
+    node_id: Node.Id,
+    temporary_roots: *std.ArrayListUnmanaged(Node.Id),
+) (Node.Error || Error)!Node.Id {
+    if (!node_id.getState(pool).isBranchStruct()) {
+        return node_id;
+    }
+
+    const materialized = try pool.materializeBranchStruct(node_id);
+    errdefer pool.unref(materialized);
+    temporary_roots.append(allocator, materialized) catch return error.OutOfMemory;
+    return materialized;
+}
+
 /// Produces a single Merkle proof for the node at `gindex`.
 pub fn createSingleProof(
     allocator: Allocator,
@@ -67,6 +87,9 @@ pub fn createSingleProof(
     const path_len = gindex.pathLen();
     var witnesses = try allocator.alloc([32]u8, path_len);
     errdefer allocator.free(witnesses);
+    // there should not be more than 1 branch-struct node on the path
+    var materialized_root: ?Node.Id = null;
+    defer if (materialized_root) |temp_root| pool.unref(temp_root);
 
     if (path_len == 0) {
         return SingleProof{
@@ -80,6 +103,15 @@ pub fn createSingleProof(
 
     for (0..path_len) |depth_idx| {
         const witness_index = path_len - 1 - depth_idx;
+        if (node_id.getState(pool).isBranchStruct()) {
+            if (materialized_root) |_| {
+                // Single proofs only support one branch-struct hop. If the
+                // materialized subtree would require another one, fail fast.
+                return error.NestedBranchStruct;
+            }
+            materialized_root = try pool.materializeBranchStruct(node_id);
+            node_id = materialized_root.?;
+        }
 
         if (path.left()) {
             const right_id = try node_id.getRight(pool);
@@ -420,6 +452,7 @@ fn nodeToCompactMultiProof(
     node_id: Node.Id,
     bitlist: []const bool,
     bit_index: usize,
+    temporary_roots: *std.ArrayListUnmanaged(Node.Id),
 ) (Node.Error || Error)![][32]u8 {
     // If bit is 1, this node is a leaf in the proof
     if (bitlist[bit_index]) {
@@ -428,13 +461,15 @@ fn nodeToCompactMultiProof(
         return leaves;
     }
 
+    const current = try materializeIfBranchStruct(allocator, pool, node_id, temporary_roots);
+
     // Otherwise, recurse into children
-    const left_id = try node_id.getLeft(pool);
-    const left = try nodeToCompactMultiProof(allocator, pool, left_id, bitlist, bit_index + 1);
+    const left_id = try current.getLeft(pool);
+    const left = try nodeToCompactMultiProof(allocator, pool, left_id, bitlist, bit_index + 1, temporary_roots);
     defer allocator.free(left);
 
-    const right_id = try node_id.getRight(pool);
-    const right = try nodeToCompactMultiProof(allocator, pool, right_id, bitlist, bit_index + left.len * 2);
+    const right_id = try current.getRight(pool);
+    const right = try nodeToCompactMultiProof(allocator, pool, right_id, bitlist, bit_index + left.len * 2, temporary_roots);
     defer allocator.free(right);
 
     const result = try allocator.alloc([32]u8, left.len + right.len);
@@ -452,8 +487,15 @@ pub fn createCompactMultiProof(
 ) (Node.Error || Error)![][32]u8 {
     const bitlist = try descriptorToBitlist(allocator, descriptor);
     defer allocator.free(bitlist);
+    var temporary_roots = std.ArrayListUnmanaged(Node.Id){};
+    defer {
+        for (temporary_roots.items) |temp_root| {
+            pool.unref(temp_root);
+        }
+        temporary_roots.deinit(allocator);
+    }
 
-    return nodeToCompactMultiProof(allocator, pool, root, bitlist, 0);
+    return nodeToCompactMultiProof(allocator, pool, root, bitlist, 0, &temporary_roots);
 }
 
 /// Pointer to track position in bitlist and leaves during reconstruction
