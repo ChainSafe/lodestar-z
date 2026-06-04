@@ -185,16 +185,24 @@ pub fn set(index: js.Number, pubkey: js.Uint8Array) !void {
 
     const pubkey_bytes = pubkey_slice[0..48];
 
+    // `idx + 1` overflows a u32 when idx == maxInt(u32) — a hard panic in
+    // ReleaseSafe builds. Reject such an out-of-range index with a clean error.
+    const required_len = std.math.add(u32, idx, 1) catch return error.PubkeyIndexOutOfRange;
+
     // Ensure capacity if needed
     if (idx >= state.index2pubkey.capacity) {
-        const new_cap: u32 = @intCast(@max(idx + 1, state.index2pubkey.capacity * 2));
+        const doubled: u32 = if (state.index2pubkey.capacity >= std.math.maxInt(u32) / 2)
+            std.math.maxInt(u32)
+        else
+            @intCast(state.index2pubkey.capacity * 2);
+        const new_cap = @max(required_len, doubled);
         try state.pubkey2index.ensureTotalCapacity(new_cap);
         try state.index2pubkey.ensureTotalCapacity(allocator, new_cap);
     }
 
     // Extend length if needed
     if (idx >= state.index2pubkey.items.len) {
-        try state.index2pubkey.resize(allocator, idx + 1);
+        try state.index2pubkey.resize(allocator, required_len);
     }
 
     // Set pubkey2index
