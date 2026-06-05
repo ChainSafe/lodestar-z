@@ -132,6 +132,9 @@
         .time = .{
             .root_source_file = "src/time.zig",
         },
+        .cpu_count = .{
+            .root_source_file = "src/cpu_count.zig",
+        },
         .testing_allocators = .{
             .root_source_file = "src/testing_allocators.zig",
         },
@@ -324,6 +327,7 @@
                 .imports = .{
                     .bls,
                     .bls_options,
+                    .cpu_count,
                     .hex,
                     .persistent_merkle_tree,
                     .ssz,
@@ -345,6 +349,7 @@
         // Per-module unit tests (mirror the old auto-generated `test:<module>` steps).
         .constants = .{ .root_module = .constants },
         .hex = .{ .root_module = .hex },
+        .cpu_count = .{ .root_module = .cpu_count },
         .hashing = .{ .root_module = .hashing },
         .preset = .{ .root_module = .preset },
         .persistent_merkle_tree = .{ .root_module = .persistent_merkle_tree },
