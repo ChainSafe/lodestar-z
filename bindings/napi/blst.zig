@@ -659,11 +659,12 @@ pub fn aggregateWithRandomness(sets: js.Array) !js.Value {
 /// All input data should be copied into this struct so the worker thread doesn't depend on
 /// any JS-managed memory staying alive.
 const AsyncAggRandData = struct {
-    pks: []NativePublicKey,
-    sigs: []NativeSignature,
-    pk_ptrs: []*const NativePublicKey,
-    sig_ptrs: []*const NativeSignature,
-    randomness: []u8,
+    n: usize,
+    pks: [MAX_AGGREGATE_PER_JOB]NativePublicKey,
+    sigs: [MAX_AGGREGATE_PER_JOB]NativeSignature,
+    pk_ptrs: [MAX_AGGREGATE_PER_JOB]*const NativePublicKey,
+    sig_ptrs: [MAX_AGGREGATE_PER_JOB]*const NativeSignature,
+    randomness: [MAX_AGGREGATE_PER_JOB * 32]u8,
     pk_out: NativePublicKey,
     sig_out: NativeSignature,
     err: ?anyerror,
@@ -671,11 +672,6 @@ const AsyncAggRandData = struct {
     work: napi.c.napi_async_work,
 
     fn destroy(self: *AsyncAggRandData) void {
-        allocator.free(self.pks);
-        allocator.free(self.sigs);
-        allocator.free(self.pk_ptrs);
-        allocator.free(self.sig_ptrs);
-        allocator.free(self.randomness);
         allocator.destroy(self);
     }
 };
@@ -694,9 +690,9 @@ fn asyncAggRand_execute(_: napi.Env, data: *AsyncAggRandData) void {
     };
     pool.aggregateWithRandomness(
         napi_io.get(),
-        data.pk_ptrs,
-        data.sig_ptrs,
-        data.randomness,
+        data.pk_ptrs[0..data.n],
+        data.sig_ptrs[0..data.n],
+        data.randomness[0 .. data.n * 32],
         false, // pks already validated implicitly by being deserialized PublicKey instances
         true, // sigs were deserialized but not group-checked on the JS thread
         &data.pk_out,
@@ -783,23 +779,13 @@ pub fn asyncAggregateWithRandomness(sets: js.Array) !js.Value {
     const data = try allocator.create(AsyncAggRandData);
     errdefer allocator.destroy(data);
 
-    data.pks = try allocator.alloc(NativePublicKey, n);
-    errdefer allocator.free(data.pks);
-    data.sigs = try allocator.alloc(NativeSignature, n);
-    errdefer allocator.free(data.sigs);
-    data.pk_ptrs = try allocator.alloc(*const NativePublicKey, n);
-    errdefer allocator.free(data.pk_ptrs);
-    data.sig_ptrs = try allocator.alloc(*const NativeSignature, n);
-    errdefer allocator.free(data.sig_ptrs);
-    data.randomness = try allocator.alloc(u8, n * 32);
-    errdefer allocator.free(data.randomness);
-
+    data.n = n;
     data.pk_out = .{};
     data.sig_out = .{};
     data.err = null;
     data.deferred = undefined;
     data.work = undefined;
-    napi_io.get().random(data.randomness);
+    napi_io.get().random(data.randomness[0 .. n * 32]);
 
     for (0..n) |i| {
         const set = (try sets.get(@intCast(i))).toValue();
