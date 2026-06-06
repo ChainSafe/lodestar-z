@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {afterAll, beforeAll, describe, expect, it} from "vitest";
-import {SecretKey} from "../src/blst.js";
+import {SecretKey, aggregatePublicKeys} from "../src/blst.js";
 import {pubkeyCache} from "../src/pubkeys.js";
 
 // Generate deterministic valid BLS keypairs for testing
@@ -41,6 +41,16 @@ describe("pubkeys", () => {
     const pk1 = pubkeyCache.get(0);
     const pk2 = pubkeyCache.get(0);
     expect(pk1).toBe(pk2);
+  });
+
+  it("aggregates cached pubkeys by index", () => {
+    const indices = [0, 1, 2];
+    const expected = aggregatePublicKeys(indices.map((index) => pubkeyCache.getOrThrow(index)));
+    expect(pubkeyCache.aggregate(indices).toBytes()).toEqual(expected.toBytes());
+  });
+
+  it("returns the cached pubkey for a single-key aggregate", () => {
+    expect(pubkeyCache.aggregate([1]).toBytes()).toEqual(pubkeyCache.getOrThrow(1).toBytes());
   });
 
   it("get returns undefined for out-of-range index", () => {
