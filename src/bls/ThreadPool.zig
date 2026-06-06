@@ -203,31 +203,26 @@ const VerifyMultiJob = struct {
     sigs_groupcheck: bool,
     counter: std.atomic.Value(usize),
     err_flag: std.atomic.Value(bool),
-    /// Workers write committed pairing results here. Indexed by result_count.
-    result_bufs: []PairingBuf,
-    result_count: std.atomic.Value(usize),
+    /// Workers write committed pairing results here, indexed by work item id.
+    result_bufs: *[MAX_WORKERS]PairingBuf,
 };
 
 const VerifyMultiWorkItem = struct {
     base: WorkItem,
     job: *VerifyMultiJob,
+    worker_id: usize,
 
     fn exec(base_item: *WorkItem) void {
         const self: *VerifyMultiWorkItem = @fieldParentPtr("base", base_item);
         const job = self.job;
 
-        var buf: PairingBuf = .{};
-        var pairing = Pairing.init(&buf.data, true, job.dst);
-
-        var did_work = false;
+        var pairing = Pairing.init(&job.result_bufs[self.worker_id].data, true, job.dst);
         const n_elems = job.pks.len;
 
         while (true) {
             const i = job.counter.fetchAdd(1, .monotonic);
             if (i >= n_elems) break;
             if (job.err_flag.load(.monotonic)) break;
-
-            did_work = true;
 
             pairing.mulAndAggregate(
                 job.pks[i],
@@ -243,11 +238,7 @@ const VerifyMultiWorkItem = struct {
             };
         }
 
-        if (did_work) {
-            pairing.commit();
-            const slot = job.result_count.fetchAdd(1, .acq_rel);
-            job.result_bufs[slot] = buf;
-        }
+        if (!job.err_flag.load(.monotonic)) pairing.commit();
     }
 };
 
@@ -290,7 +281,6 @@ pub fn verifyMultipleAggregateSignatures(
         .counter = std.atomic.Value(usize).init(0),
         .err_flag = std.atomic.Value(bool).init(false),
         .result_bufs = &result_bufs,
-        .result_count = std.atomic.Value(usize).init(0),
     };
 
     // Create work items on the stack — one per active worker
@@ -300,6 +290,7 @@ pub fn verifyMultipleAggregateSignatures(
         work_items[i] = .{
             .base = .{ .exec_fn = VerifyMultiWorkItem.exec },
             .job = &job,
+            .worker_id = i,
         };
         item_ptrs[i] = &work_items[i].base;
     }
@@ -308,10 +299,7 @@ pub fn verifyMultipleAggregateSignatures(
 
     if (job.err_flag.load(.acquire)) return BlstError.VerifyFail;
 
-    const n_results = job.result_count.load(.acquire);
-    if (n_results == 0) return BlstError.VerifyFail;
-
-    return mergeAndVerify(&result_bufs, n_results, null);
+    return mergeAndVerify(&result_bufs, n_active, null);
 }
 
 const AggVerifyJob = struct {
@@ -322,20 +310,19 @@ const AggVerifyJob = struct {
     n_elems: usize,
     counter: std.atomic.Value(usize),
     err_flag: std.atomic.Value(bool),
-    result_bufs: []PairingBuf,
-    result_count: std.atomic.Value(usize),
+    result_bufs: *[MAX_WORKERS]PairingBuf,
 };
 
 const AggVerifyWorkItem = struct {
     base: WorkItem,
     job: *AggVerifyJob,
+    worker_id: usize,
 
     fn exec(base_item: *WorkItem) void {
         const self: *AggVerifyWorkItem = @fieldParentPtr("base", base_item);
         const job = self.job;
 
-        var buf: PairingBuf = .{};
-        var pairing = Pairing.init(&buf.data, true, job.dst);
+        var pairing = Pairing.init(&job.result_bufs[self.worker_id].data, true, job.dst);
 
         var did_work = false;
 
@@ -359,11 +346,7 @@ const AggVerifyWorkItem = struct {
             };
         }
 
-        if (did_work) {
-            pairing.commit();
-            const slot = job.result_count.fetchAdd(1, .acq_rel);
-            job.result_bufs[slot] = buf;
-        }
+        if (!job.err_flag.load(.monotonic)) pairing.commit();
     }
 };
 
@@ -413,7 +396,6 @@ pub fn aggregateVerify(
         .counter = std.atomic.Value(usize).init(0),
         .err_flag = std.atomic.Value(bool).init(false),
         .result_bufs = &result_bufs,
-        .result_count = std.atomic.Value(usize).init(0),
     };
 
     var work_items: [MAX_WORKERS]AggVerifyWorkItem = undefined;
@@ -422,6 +404,7 @@ pub fn aggregateVerify(
         work_items[i] = .{
             .base = .{ .exec_fn = AggVerifyWorkItem.exec },
             .job = &job,
+            .worker_id = i,
         };
         item_ptrs[i] = &work_items[i].base;
     }
@@ -430,13 +413,10 @@ pub fn aggregateVerify(
 
     if (job.err_flag.load(.acquire)) return false;
 
-    const n_results = job.result_count.load(.acquire);
-    if (n_results == 0) return false;
-
     var gtsig = c.blst_fp12{};
     Pairing.aggregated(&gtsig, sig);
 
-    return mergeAndVerify(&result_bufs, n_results, &gtsig);
+    return mergeAndVerify(&result_bufs, n_active, &gtsig);
 }
 
 /// Merges the first `n_results` pairing buffers and executes `finalVerify`.
