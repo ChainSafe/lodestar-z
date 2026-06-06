@@ -429,13 +429,23 @@ pub fn currentProposers(self: *const BeaconStateView) !js.Array {
     return .{ .val = try numberSliceToNapiValue(env, u64, &cached_state.epoch_cache.proposers, .{}) };
 }
 
-pub fn nextProposers(self: *const BeaconStateView) !?js.Array {
+pub fn nextProposers(self: *const BeaconStateView) !js.Array {
     const env = js.env();
     const cached_state = try self.requireState();
     if (cached_state.epoch_cache.proposers_next_epoch) |*proposers| {
         return .{ .val = try numberSliceToNapiValue(env, u64, proposers, .{}) };
     }
-    return null;
+
+    if (cached_state.state.forkSeq().gte(.fulu)) {
+        var proposers: [preset.SLOTS_PER_EPOCH]u64 = undefined;
+        var proposer_lookahead = try cached_state.state.proposerLookahead();
+        for (0..preset.SLOTS_PER_EPOCH) |i| {
+            proposers[i] = try proposer_lookahead.get(preset.SLOTS_PER_EPOCH + i);
+        }
+        return .{ .val = try numberSliceToNapiValue(env, u64, &proposers, .{}) };
+    }
+
+    return .{ .val = try numberSliceToNapiValue(env, u64, &cached_state.epoch_cache.proposers, .{}) };
 }
 
 /// Get the beacon proposer for a given slot.

@@ -572,12 +572,16 @@ pub fn aggregateSerializedPublicKeys(serialized_public_keys: js.Array, pks_valid
     const pks_len = try serialized_public_keys.length();
     if (pks_len == 0) return error.EmptyPublicKeyArray;
 
+    const native_pks = try allocator.alloc(NativePublicKey, pks_len);
+    defer allocator.free(native_pks);
+
     const pk_ptrs = try allocator.alloc(*const NativePublicKey, pks_len);
     defer allocator.free(pk_ptrs);
 
     for (0..pks_len) |i| {
         const bytes = try uint8SliceFromValue(try serialized_public_keys.get(@intCast(i)));
-        pk_ptrs[i] = &(NativePublicKey.deserialize(bytes) catch return error.DeserializationFailed);
+        native_pks[i] = NativePublicKey.deserialize(bytes) catch return error.DeserializationFailed;
+        pk_ptrs[i] = &native_pks[i];
     }
 
     const agg_pk = AggregatePublicKey.aggregate(pk_ptrs, try boolOrDefault(pks_validate, false)) catch
