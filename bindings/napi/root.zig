@@ -24,7 +24,7 @@ fn init(old_ref_count: u32) !void {
 
         var cpu_count: u64 = options.thread_count;
         if (options.thread_count == 0) {
-            cpu_count = @max(@import("cpu_count").getNumCpus(allocator, napi_io.get()), 2) - 1;
+            cpu_count = @max(try @import("cpu_count").getNumCpus(allocator, napi_io.get()), 2) - 1;
             std.debug.print("Note: no -Dthread-count set, using cgroup-aware CPU count minus 1: {}\n", .{cpu_count});
         }
 
