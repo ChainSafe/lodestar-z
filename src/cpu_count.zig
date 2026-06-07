@@ -53,6 +53,8 @@ fn cgroupsNumCpus(gpa: Allocator, io: Io) !?usize {
     const cgroup = try readProcFile(gpa, io, cwd, "/proc/self/cgroup", .limited(1 << 20));
     defer gpa.free(cgroup);
 
+    // Generous ceiling, not a tight bound: mountinfo scales with the mount count
+    // and can reach several MB under thousands of container mounts.
     const mountinfo = try readProcFile(gpa, io, cwd, "/proc/self/mountinfo", .limited(8 << 20));
     defer gpa.free(mountinfo);
 
