@@ -203,7 +203,7 @@ test "getPathGindex" {
 
     try std.testing.expectEqual(@as(Gindex.Uint, 7), @intFromEnum(getPathGindex(BeaconState, "finalized_checkpoint.root")));
 
-    const Balances = types.FixedListType(types.UintType(64), 4);
+    const Balances = types.FixedListType(types.UintType(64), 4, .{});
     const SimpleState = types.VariableContainerType(struct {
         slot: types.UintType(64),
         balances: Balances,

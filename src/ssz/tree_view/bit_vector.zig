@@ -115,7 +115,7 @@ test "BitVectorTreeView get/set roundtrip" {
     const allocator = std.testing.allocator;
     const Bits = BitVectorType(44);
 
-    var pool = try Node.Pool.init(allocator, 2048);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 2048 });
     defer pool.deinit();
 
     var expected: Bits.Type = Bits.default_value;
@@ -151,7 +151,7 @@ test "BitVectorTreeView clone(false) does not transfer cache" {
     const allocator = std.testing.allocator;
     const Bits = BitVectorType(44);
 
-    var pool = try Node.Pool.init(allocator, 2048);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 2048 });
     defer pool.deinit();
 
     var value: Bits.Type = Bits.default_value;
@@ -177,7 +177,7 @@ test "BitVectorTreeView clone(true) transfers cache and clears source" {
     const allocator = std.testing.allocator;
     const Bits = BitVectorType(44);
 
-    var pool = try Node.Pool.init(allocator, 2048);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 2048 });
     defer pool.deinit();
 
     var value: Bits.Type = Bits.default_value;
@@ -203,7 +203,7 @@ test "BitVectorTreeView clone isolates updates" {
     const allocator = std.testing.allocator;
     const Bits = BitVectorType(44);
 
-    var pool = try Node.Pool.init(allocator, 2048);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 2048 });
     defer pool.deinit();
 
     const root = try Bits.tree.fromValue(&pool, &Bits.default_value);
@@ -224,7 +224,7 @@ test "BitVectorTreeView clone reads committed state" {
     const allocator = std.testing.allocator;
     const Bits = BitVectorType(44);
 
-    var pool = try Node.Pool.init(allocator, 2048);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 2048 });
     defer pool.deinit();
 
     const root = try Bits.tree.fromValue(&pool, &Bits.default_value);
@@ -244,7 +244,7 @@ test "BitVectorTreeView clone drops uncommitted changes" {
     const allocator = std.testing.allocator;
     const Bits = BitVectorType(44);
 
-    var pool = try Node.Pool.init(allocator, 2048);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 2048 });
     defer pool.deinit();
 
     const root = try Bits.tree.fromValue(&pool, &Bits.default_value);
@@ -265,7 +265,7 @@ test "BitVectorTreeView toBoolArray roundtrip" {
     const allocator = std.testing.allocator;
     const Bits = BitVectorType(16);
 
-    var pool = try Node.Pool.init(allocator, 1024);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 1024 });
     defer pool.deinit();
 
     const expected_bools = [_]bool{ true, false, true, true, false, true, false, true, true, false, true, true, false, false, true, false };
@@ -284,7 +284,7 @@ test "BitVectorTreeView toBoolArrayInto roundtrip" {
     const allocator = std.testing.allocator;
     const Bits = BitVectorType(12);
 
-    var pool = try Node.Pool.init(allocator, 1024);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 1024 });
     defer pool.deinit();
 
     const expected_bools = [_]bool{ true, false, true, true, false, true, false, true, true, false, true, true };
@@ -303,7 +303,7 @@ test "BitVectorTreeView set reflects in toBoolArray" {
     const allocator = std.testing.allocator;
     const Bits = BitVectorType(8);
 
-    var pool = try Node.Pool.init(allocator, 1024);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 1024 });
     defer pool.deinit();
 
     const initial_bools = [_]bool{ false, false, false, false, false, false, false, false };
@@ -328,7 +328,7 @@ test "BitVectorTreeView multi-chunk" {
     // 300 bits requires 2 chunks (256 bits per chunk)
     const Bits = BitVectorType(300);
 
-    var pool = try Node.Pool.init(allocator, 4096);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 4096 });
     defer pool.deinit();
 
     var value: Bits.Type = Bits.default_value;
@@ -376,7 +376,7 @@ test "BitVectorTreeView remainder edge cases (1 and 255)" {
     inline for ([_]usize{ 257, 511 }) |len| {
         const Bits = BitVectorType(len);
 
-        var pool = try Node.Pool.init(allocator, 4096);
+        var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 4096 });
         defer pool.deinit();
 
         var value: Bits.Type = Bits.default_value;
@@ -409,7 +409,7 @@ test "BitVectorTreeView full-chunk edge cases (remainder=0)" {
     inline for ([_]usize{ 256, 512 }) |len| {
         const Bits = BitVectorType(len);
 
-        var pool = try Node.Pool.init(allocator, 4096);
+        var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 4096 });
         defer pool.deinit();
 
         var value: Bits.Type = Bits.default_value;

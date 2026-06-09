@@ -142,8 +142,9 @@ pub fn generateElectraState(allocator: Allocator, pool: *Node.Pool, chain_config
     var validators = try beacon_state.validators();
     for (next_sync_committee_indices, 0..next_sync_committee_indices.len) |index, i| {
         var validator = try validators.get(@intCast(index));
-        var pubkey_view = try validator.get("pubkey");
-        _ = try pubkey_view.getAllInto(next_sync_committee_pubkeys[i][0..]);
+        // Validator is now a StructContainerType — `get("pubkey")` returns the
+        // value directly (a `[48]u8` array), not a child TreeView.
+        next_sync_committee_pubkeys[i] = try validator.get("pubkey");
         next_sync_committee_pubkeys_slices[i] = try bls.PublicKey.uncompress(&next_sync_committee_pubkeys[i]);
     }
 
@@ -200,7 +201,7 @@ pub const TestCachedBeaconState = struct {
         errdefer allocator.destroy(config);
         config.* = BeaconConfig.init(chain_config, (try state.genesisValidatorsRoot()).*);
 
-        const validators = try state.validatorsSlice(allocator);
+        const validators = try state.validatorsPtrSlice(allocator);
         defer allocator.free(validators);
 
         try syncPubkeys(allocator, validators, pubkey_index_map, index_pubkey_cache);
@@ -302,7 +303,7 @@ pub fn getConfig(config: ChainConfig, fork: ForkSeq, fork_epoch: Epoch) ChainCon
 
 test TestCachedBeaconState {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 500_000);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 500_000 });
     defer pool.deinit();
 
     var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);

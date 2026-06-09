@@ -145,7 +145,7 @@ const ProofFixture = struct {
 
     fn init(fork: ForkSeq) !ProofFixture {
         const allocator = std.testing.allocator;
-        var pool = try Node.Pool.init(allocator, 500_000);
+        var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 500_000 });
         errdefer pool.deinit();
 
         var state = switch (fork) {

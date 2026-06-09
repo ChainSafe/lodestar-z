@@ -55,11 +55,11 @@ pub fn deserializeContainerOverrideFieldsWithRanges(
 test "deserializeContainerOverrideFields... cleans up pool nodes on error" {
     const allocator = std.testing.allocator;
 
-    var pool = try Node.Pool.init(allocator, 64);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 64 });
     defer pool.deinit();
 
     const U64 = ssz.UintType(64);
-    const U64List = ssz.FixedListType(U64, 4);
+    const U64List = ssz.FixedListType(U64, 4, .{});
     const Fields = struct {
         a: U64,
         b: U64List,

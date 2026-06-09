@@ -9,6 +9,7 @@ pub const Gindex = @import("gindex.zig").Gindex;
 pub const Node = @import("Node.zig");
 pub const View = @import("View.zig");
 pub const proof = @import("proof.zig");
+pub const ChunkedLeaf = @import("ChunkedLeaf.zig");
 
 test {
     testing.refAllDecls(@This());

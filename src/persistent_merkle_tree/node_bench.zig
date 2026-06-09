@@ -5,7 +5,6 @@ const Depth = @import("hashing").Depth;
 const Node = @import("Node.zig");
 const Pool = Node.Pool;
 
-const global_allocator = std.heap.page_allocator;
 var pool: Pool = undefined;
 
 const GetNodeRandomly = struct {
@@ -84,11 +83,11 @@ const SetNodeRandomly = struct {
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
-    const allocator = global_allocator;
+    const allocator = std.heap.page_allocator;
     var bench = zbench.Benchmark.init(allocator, .{});
     defer bench.deinit();
 
-    pool = try Pool.init(allocator, 50_000_000);
+    pool = try Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 50_000_000 });
     defer pool.deinit();
 
     const depth = 40;

@@ -32,6 +32,7 @@ pub const FixedVectorType = types.FixedVectorType;
 pub const VariableVectorType = types.VariableVectorType;
 
 pub const FixedContainerType = types.FixedContainerType;
+pub const StructContainerType = types.StructContainerType;
 pub const VariableContainerType = types.VariableContainerType;
 
 pub const getPathGindex = types.getPathGindex;
@@ -42,6 +43,7 @@ pub const HasherData = hasher.HasherData;
 
 const tree_view = @import("tree_view/root.zig");
 pub const ContainerTreeView = tree_view.ContainerTreeView;
+pub const StructContainerTreeView = tree_view.StructContainerTreeView;
 pub const ArrayBasicTreeView = tree_view.ArrayBasicTreeView;
 pub const ArrayCompositeTreeView = tree_view.ArrayCompositeTreeView;
 pub const ListBasicTreeView = tree_view.ListBasicTreeView;

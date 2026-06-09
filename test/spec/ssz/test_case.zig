@@ -268,7 +268,7 @@ pub fn validTestCase(comptime ST: type, gpa: Allocator, path: std.Io.Dir, meta_f
     try Hasher.hash(&hash_scratch, value_expected, &root_actual);
     try std.testing.expectEqualSlices(u8, &root_expected, &root_actual);
 
-    var pool = try Node.Pool.init(gpa, 1_000_000);
+    var pool = try Node.Pool.init(.{ .page_allocator = gpa, .allocator = gpa, .pool_size = 1_000_000 });
     defer pool.deinit();
 
     // test conversion between tree and value

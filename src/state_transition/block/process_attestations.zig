@@ -52,7 +52,7 @@ pub fn processAttestations(
 test "process attestations - sanity" {
     const allocator = std.testing.allocator;
     const pool_size = 16 * 5;
-    var pool = try Node.Pool.init(allocator, pool_size);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = pool_size });
     defer pool.deinit();
 
     var test_state = try TestCachedBeaconState.init(allocator, &pool, 16);

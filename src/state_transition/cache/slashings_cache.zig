@@ -21,7 +21,7 @@ pub const SlashingsCache = struct {
     pub fn initFromValidators(
         allocator: Allocator,
         latest_block_slot: Slot,
-        validators: []const Validator,
+        validators: []const *const Validator,
     ) !SlashingsCache {
         var slashed_validators = try DynamicBitSet.initEmpty(allocator, validators.len);
         errdefer slashed_validators.deinit();
@@ -91,9 +91,7 @@ pub fn buildFromStateIfNeeded(
     const latest_block_slot = try latest_block_header.get("slot");
     if (slashings_cache.isInitialized(latest_block_slot)) return;
 
-    var validators_view = try state.validators();
-    try validators_view.commit();
-    const validators = try validators_view.getAllReadonlyValues(allocator);
+    const validators = try state.validatorsPtrSlice(allocator);
     defer allocator.free(validators);
     var new_cache = try SlashingsCache.initFromValidators(allocator, latest_block_slot, validators);
     errdefer new_cache.deinit();
@@ -120,7 +118,10 @@ test "SlashingsCache - initFromValidators populates slashed bits" {
     validators[1].slashed = true;
     validators[3].slashed = true;
 
-    var cache = try SlashingsCache.initFromValidators(allocator, 42, &validators);
+    var validator_ptrs: [5]*const Validator = undefined;
+    for (0..5) |i| validator_ptrs[i] = &validators[i];
+
+    var cache = try SlashingsCache.initFromValidators(allocator, 42, &validator_ptrs);
     defer cache.deinit();
 
     try std.testing.expectEqual(@as(?Slot, 42), cache.latest_block_slot);
@@ -180,7 +181,10 @@ test "SlashingsCache - clone creates independent copy" {
     @memset(std.mem.asBytes(&validators), 0);
     validators[1].slashed = true;
 
-    var original = try SlashingsCache.initFromValidators(allocator, 10, &validators);
+    var validator_ptrs: [3]*const Validator = undefined;
+    for (0..3) |i| validator_ptrs[i] = &validators[i];
+
+    var original = try SlashingsCache.initFromValidators(allocator, 10, &validator_ptrs);
     defer original.deinit();
 
     var cloned = try original.clone(allocator);

@@ -53,6 +53,54 @@ pub const SingleProof = struct {
     }
 };
 
+/// Returns true if the node is "opaque" — terminal in our PMT model but
+/// represents a navigable subtree underneath (container_struct = deserialized
+/// container struct; chunked_leaf = K packed chunks). Proof traversal must
+/// materialize a temporary explicit subtree before walking inside.
+inline fn isOpaqueNode(pool: *Node.Pool, node_id: Node.Id) bool {
+    const kind = pool.nodes.items(.state)[@intFromEnum(node_id)].kind();
+    return kind == .container_struct or kind == .chunked_leaf;
+}
+
+/// Materializes a temporary navigable subtree for an opaque node. Caller is
+/// responsible for `unref`'ing the returned Id once the temporary tree is no
+/// longer needed (single-proof and compact-multi-proof both park the Id in
+/// a deferred-unref ArrayList).
+inline fn materializeOpaque(pool: *Node.Pool, node_id: Node.Id) Node.Error!Node.Id {
+    const kind = pool.nodes.items(.state)[@intFromEnum(node_id)].kind();
+    return switch (kind) {
+        .container_struct => try pool.materializeContainerStruct(node_id),
+        .chunked_leaf => try pool.materializeChunkedLeaf(node_id),
+        else => unreachable,
+    };
+}
+
+/// Proof traversal needs real left/right child nodes. For an opaque node
+/// (container_struct or chunked_leaf), materialize a temporary plain tree
+/// and append it to the deferred-unref list so it stays alive until proof
+/// creation finishes.
+///
+/// Materializing one opaque node can yield another. A single-field
+/// StructContainerType has no enclosing branch, so its tree IS its only
+/// field's tree; if that field is also opaque, the result is still opaque.
+/// Loop until the node is navigable.
+fn materializeIfOpaque(
+    allocator: Allocator,
+    pool: *Node.Pool,
+    node_id: Node.Id,
+    temporary_roots: *std.ArrayListUnmanaged(Node.Id),
+) (Node.Error || Error)!Node.Id {
+    var current = node_id;
+    while (isOpaqueNode(pool, current)) {
+        const materialized = try materializeOpaque(pool, current);
+        errdefer pool.unref(materialized);
+
+        try temporary_roots.append(allocator, materialized);
+        current = materialized;
+    }
+    return current;
+}
+
 /// Produces a single Merkle proof for the node at `gindex`.
 pub fn createSingleProof(
     allocator: Allocator,
@@ -68,6 +116,18 @@ pub fn createSingleProof(
     var witnesses = try allocator.alloc([32]u8, path_len);
     errdefer allocator.free(witnesses);
 
+    // Nested opaque (container_struct → chunked_leaf, or any future combination)
+    // is legal: e.g. StructContainerType holding a FixedVectorType with
+    // .chunked_leaf=true. Track every materialized temporary root and unref
+    // them on exit, matching createCompactMultiProof's pattern.
+    var temporary_roots: std.ArrayListUnmanaged(Node.Id) = .empty;
+    defer {
+        for (temporary_roots.items) |temp_root| {
+            pool.unref(temp_root);
+        }
+        temporary_roots.deinit(allocator);
+    }
+
     if (path_len == 0) {
         return SingleProof{
             .leaf = root.getRoot(pool).*,
@@ -80,6 +140,8 @@ pub fn createSingleProof(
 
     for (0..path_len) |depth_idx| {
         const witness_index = path_len - 1 - depth_idx;
+
+        node_id = try materializeIfOpaque(allocator, pool, node_id, &temporary_roots);
 
         if (path.left()) {
             const right_id = try node_id.getRight(pool);
@@ -420,6 +482,7 @@ fn nodeToCompactMultiProof(
     node_id: Node.Id,
     bitlist: []const bool,
     bit_index: usize,
+    temporary_roots: *std.ArrayListUnmanaged(Node.Id),
 ) (Node.Error || Error)![][32]u8 {
     // If bit is 1, this node is a leaf in the proof
     if (bitlist[bit_index]) {
@@ -428,13 +491,18 @@ fn nodeToCompactMultiProof(
         return leaves;
     }
 
+    // Materialize opaque (container_struct/chunked_leaf) nodes lazily so we can navigate
+    // into their children. The temporary root is owned by `temporary_roots`
+    // and unref'd when the outer caller exits.
+    const current = try materializeIfOpaque(allocator, pool, node_id, temporary_roots);
+
     // Otherwise, recurse into children
-    const left_id = try node_id.getLeft(pool);
-    const left = try nodeToCompactMultiProof(allocator, pool, left_id, bitlist, bit_index + 1);
+    const left_id = try current.getLeft(pool);
+    const left = try nodeToCompactMultiProof(allocator, pool, left_id, bitlist, bit_index + 1, temporary_roots);
     defer allocator.free(left);
 
-    const right_id = try node_id.getRight(pool);
-    const right = try nodeToCompactMultiProof(allocator, pool, right_id, bitlist, bit_index + left.len * 2);
+    const right_id = try current.getRight(pool);
+    const right = try nodeToCompactMultiProof(allocator, pool, right_id, bitlist, bit_index + left.len * 2, temporary_roots);
     defer allocator.free(right);
 
     const result = try allocator.alloc([32]u8, left.len + right.len);
@@ -453,7 +521,15 @@ pub fn createCompactMultiProof(
     const bitlist = try descriptorToBitlist(allocator, descriptor);
     defer allocator.free(bitlist);
 
-    return nodeToCompactMultiProof(allocator, pool, root, bitlist, 0);
+    var temporary_roots: std.ArrayListUnmanaged(Node.Id) = .empty;
+    defer {
+        for (temporary_roots.items) |temp_root| {
+            pool.unref(temp_root);
+        }
+        temporary_roots.deinit(allocator);
+    }
+
+    return nodeToCompactMultiProof(allocator, pool, root, bitlist, 0, &temporary_roots);
 }
 
 /// Pointer to track position in bitlist and leaves during reconstruction
@@ -488,7 +564,7 @@ pub fn createNodeFromCompactMultiProof(
     leaves: [][32]u8,
     descriptor: []const u8,
 ) (Node.Error || Error)!Node.Id {
-    var arena = std.heap.ArenaAllocator.init(pool.allocator);
+    var arena = std.heap.ArenaAllocator.init(pool.page_allocator);
     defer arena.deinit();
     const temp_allocator = arena.allocator();
 
