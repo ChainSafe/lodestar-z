@@ -270,6 +270,12 @@
                 .imports = .{ .config, .consensus_types, .download_era_options, .era, .ssz, .zbench },
             },
         },
+        .bench_list_chunked_leaf = .{
+            .root_module = .{
+                .root_source_file = "bench/ssz/list_chunked_leaf.zig",
+                .imports = .{ .persistent_merkle_tree, .ssz, .zbench },
+            },
+        },
         .bench_merkle_gindex = .{
             .root_module = .{
                 .root_source_file = "bench/ssz/gindex.zig",

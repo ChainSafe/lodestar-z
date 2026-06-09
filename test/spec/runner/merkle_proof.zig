@@ -95,7 +95,7 @@ pub fn TestCase(comptime fork: ForkSeq) type {
                 try KzgCommitment.hashTreeRoot(&self.body.blob_kzg_commitments.items[0], &actual_leaf);
             }
 
-            var pool = try Node.Pool.init(self.allocator, 2048);
+            var pool = try Node.Pool.init(.{ .page_allocator = self.allocator, .allocator = self.allocator, .pool_size = 2048 });
             defer pool.deinit();
 
             const root_node = try BeaconBlockBody.tree.fromValue(&pool, &self.body);

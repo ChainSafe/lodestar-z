@@ -44,17 +44,17 @@ pub export fn zig_fuzz_test(
 
     switch (selector % selector_count) {
         0 => fuzzFixedList(
-            ssz.FixedListType(Uint64, 128),
+            ssz.FixedListType(Uint64, 128, .{}),
             allocator,
             data,
         ),
         1 => fuzzFixedList(
-            ssz.FixedListType(Uint32, 256),
+            ssz.FixedListType(Uint32, 256, .{}),
             allocator,
             data,
         ),
         2 => fuzzFixedList(
-            ssz.FixedListType(BoolT, 64),
+            ssz.FixedListType(BoolT, 64, .{}),
             allocator,
             data,
         ),

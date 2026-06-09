@@ -208,7 +208,7 @@ pub const EpochCache = struct {
         var exit_queue_epoch = computeActivationExitEpoch(current_epoch);
         var exit_queue_churn: u64 = 0;
 
-        const validators = try state.validatorsSlice(allocator);
+        const validators = try state.validatorsPtrSlice(allocator);
         defer allocator.free(validators);
 
         const validator_count = validators.len;
@@ -243,19 +243,18 @@ pub const EpochCache = struct {
         for (0..validator_count) |i| {
             const validator = validators[i];
 
-            // Note: Not usable for fork-choice balances since in-active validators are not zero'ed
             effective_balance_increments.items[i] = @intCast(@divFloor(validator.effective_balance, preset.EFFECTIVE_BALANCE_INCREMENT));
 
-            if (isActiveValidator(&validator, previous_epoch)) {
+            if (isActiveValidator(validator, previous_epoch)) {
                 try previous_active_indices_array_list.append(allocator, i);
             }
 
-            if (isActiveValidator(&validator, current_epoch)) {
+            if (isActiveValidator(validator, current_epoch)) {
                 try current_active_indices_array_list.append(allocator, i);
                 total_active_balance_increments += effective_balance_increments.items[i];
             }
 
-            if (isActiveValidator(&validator, next_epoch)) {
+            if (isActiveValidator(validator, next_epoch)) {
                 try next_active_indices_array_list.append(allocator, i);
             }
 
