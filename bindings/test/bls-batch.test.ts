@@ -220,8 +220,11 @@ describe("blsBatch", () => {
   // ── error handling for invalid inputs ────────────────────────
 
   describe("error handling for invalid inputs", () => {
-    it("asyncVerify throws for an invalid signature (bad bytes)", () => {
-      expect(() =>
+    it("asyncVerify rejects for an invalid signature (bad bytes)", async () => {
+      // Signature bytes are only length-checked at submission; the EC decompression
+      // (and its failure) happens on the worker, so the promise REJECTS (it does not
+      // throw synchronously, and it must not resolve `false`).
+      await expect(
         blsBatch.asyncVerify(blsBatch.single, [
           {
             message: makeMsg(80),
@@ -229,23 +232,36 @@ describe("blsBatch", () => {
             signature: new Uint8Array(96), // all zeros — fails deserialization
           },
         ])
-      ).toThrow();
+      ).rejects.toMatchObject({code: "DeserializationFailed"});
     });
 
-    it("thrown error is an Error instance with .code", () => {
-      try {
-        blsBatch.asyncVerify(blsBatch.single, [
+    it("rejection is an Error instance with .code; wrong length still throws synchronously", async () => {
+      const rejected = await blsBatch
+        .asyncVerify(blsBatch.single, [
           {
             message: makeMsg(81),
             publicKey: keypairs[0].pubkeyBytes,
             signature: new Uint8Array(96),
           },
-        ]);
-        expect.unreachable("should have thrown");
-      } catch (err) {
-        expect(err).toBeInstanceOf(Error);
-        expect((err as Error & {code: string}).code).toBe("DeserializationFailed");
-      }
+        ])
+        .then(
+          () => undefined,
+          (err: unknown) => err
+        );
+      expect(rejected).toBeInstanceOf(Error);
+      expect((rejected as Error & {code: string}).code).toBe("DeserializationFailed");
+
+      // A signature that is not a valid serialized length is rejected at submission
+      // time (cheap length check on the loop thread) — synchronous throw.
+      expect(() =>
+        blsBatch.asyncVerify(blsBatch.single, [
+          {
+            message: makeMsg(81),
+            publicKey: keypairs[0].pubkeyBytes,
+            signature: new Uint8Array(50),
+          },
+        ])
+      ).toThrow();
     });
 
     it("asyncVerify throws for an out-of-range pubkey index", () => {
@@ -314,6 +330,25 @@ describe("blsBatch", () => {
       }
 
       expect(blsBatch.canAcceptWork()).toBe(true);
+    });
+
+    it("accepts the priority flag and tracks work-based saturation (inflightSets)", async () => {
+      const idle = blsBatch.stats();
+      expect(idle.inflightSets).toBe(0);
+      // Advisory budget is workers × 256 (work-based, distinct from job slots).
+      expect(idle.maxInflightSets).toBe(idle.workers * 256);
+
+      const m = makeMsg(210);
+      const set = {index: 0, message: m, signature: keypairs[0].sk.sign(m).toBytes()};
+      // priority=true routes via the high lane; priority=false / omitted via low.
+      const jobs = [
+        blsBatch.asyncVerify(blsBatch.indexed, [set], true),
+        blsBatch.asyncVerify(blsBatch.indexed, [set], false),
+        blsBatch.asyncVerifySameMessage([{index: 0, signature: set.signature}], m, true),
+      ];
+      expect(blsBatch.stats().inflightSets).toBe(3);
+      expect((await Promise.all(jobs)).every((r) => r)).toBe(true);
+      expect(blsBatch.stats().inflightSets).toBe(0);
     });
 
     it("stats() reports real pool occupancy", async () => {

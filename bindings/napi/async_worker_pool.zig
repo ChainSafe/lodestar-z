@@ -20,6 +20,9 @@ pub const Task = struct {
     complete_fn: *const fn (napi.Env, *Task) void,
     /// Intrusive FIFO link; owned by the pool while queued.
     next: ?*Task = null,
+    /// High-priority tasks are drained before low-priority ones (latency-sensitive
+    /// gossip verification vs bulk block-import backlog). Set by the submitter.
+    priority: bool = false,
     /// Monotonic (CLOCK_MONOTONIC) timestamp captured at `submit`; used to measure
     /// queue residency. Always set before the task is popped.
     enqueue: std.Io.Clock.Timestamp = undefined,
@@ -44,7 +47,10 @@ pub const AsyncWorkerPool = struct {
 
     mutex: std.Io.Mutex = std.Io.Mutex.init,
     cond: std.Io.Condition = std.Io.Condition.init,
-    queue: Queue = .{},
+    /// Two-lane FIFO: workers drain `queue_high` before `queue_low`, so
+    /// latency-sensitive jobs are never stuck behind a bulk backlog.
+    queue_high: Queue = .{},
+    queue_low: Queue = .{},
     shutdown: bool = false,
 
     tsfn: Tsfn = undefined,
@@ -114,7 +120,8 @@ pub const AsyncWorkerPool = struct {
         self.max_inflight = max_queue_size;
         self.mutex = std.Io.Mutex.init;
         self.cond = std.Io.Condition.init;
-        self.queue = .{};
+        self.queue_high = .{};
+        self.queue_low = .{};
         self.shutdown = false;
         self.active_count = 0;
         self.queued_count = 0;
@@ -173,7 +180,11 @@ pub const AsyncWorkerPool = struct {
             try self.tsfn.ref(env);
         }
         self.active_count += 1;
-        self.queue.push(task);
+        if (task.priority) {
+            self.queue_high.push(task);
+        } else {
+            self.queue_low.push(task);
+        }
         self.queued_count += 1;
         self.mutex.unlock(self.io);
         self.cond.signal(self.io);
@@ -214,14 +225,14 @@ pub const AsyncWorkerPool = struct {
         const io = self.io;
         while (true) {
             self.mutex.lockUncancelable(io);
-            while (self.queue.isEmpty() and !self.shutdown) {
+            while (self.queue_high.isEmpty() and self.queue_low.isEmpty() and !self.shutdown) {
                 self.cond.waitUncancelable(io, &self.mutex);
             }
             if (self.shutdown) {
                 self.mutex.unlock(io);
                 return;
             }
-            const task = self.queue.pop().?;
+            const task = self.queue_high.pop() orelse self.queue_low.pop().?;
             self.queued_count -= 1;
             self.running_count += 1;
             self.mutex.unlock(io);

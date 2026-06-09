@@ -158,18 +158,64 @@ fn getPubkey(index: u32) !*const PublicKey {
     return &pubkeys.state.index2pubkey.items[index];
 }
 
-fn deserializeSig(sig_value: napi.Value) !Signature {
-    const bytes = try uint8SliceFromValue(.{ .val = sig_value });
-    // On-curve check only (preserves DeserializationFailed). The G2 subgroup check is
-    // relocated to the worker via the groupcheck flags in batchVerify/sameMessageExecute.
-    return Signature.deserialize(bytes) catch return error.DeserializationFailed;
+// Staged deserialization: at parse time (JS loop thread) only the raw serialized
+// bytes are copied into the slot that will later hold the deserialized point; the
+// EC decompression (~28us per signature — by far the most expensive part of
+// submission) runs on the worker thread via deserializeStaged*. The point structs
+// are exactly as large as their worst-case serialization, so the raw bytes are
+// staged in the same memory with no extra slot storage.
+comptime {
+    std.debug.assert(@sizeOf(Signature) == Signature.SERIALIZE_SIZE);
+    std.debug.assert(@sizeOf(PublicKey) == PublicKey.SERIALIZE_SIZE);
 }
 
-fn deserializePubkey(pk_value: napi.Value) !PublicKey {
+/// Copy a signature's raw serialized bytes over `out`, recording the staged length.
+/// Only the cheap length check runs here; curve checks happen at deserialization.
+fn stageSig(out: *Signature, len_out: *u8, sig_value: napi.Value) !void {
+    const bytes = try uint8SliceFromValue(.{ .val = sig_value });
+    if (bytes.len != Signature.COMPRESS_SIZE and bytes.len != Signature.SERIALIZE_SIZE) {
+        return error.DeserializationFailed;
+    }
+    @memcpy(std.mem.asBytes(out)[0..bytes.len], bytes);
+    len_out.* = @intCast(bytes.len);
+}
+
+/// Copy a pubkey's raw serialized bytes over `out` (single kind only).
+fn stagePubkey(out: *PublicKey, len_out: *u8, pk_value: napi.Value) !void {
     const bytes = try uint8SliceFromValue(.{ .val = pk_value });
-    // On-curve check only; the G1 subgroup check is relocated to the worker
-    // (mulAndAggregate pk_validate=true for the untrusted single-set pubkey).
-    return PublicKey.deserialize(bytes) catch return error.DeserializationFailed;
+    if (bytes.len != PublicKey.COMPRESS_SIZE and bytes.len != PublicKey.SERIALIZE_SIZE) {
+        return error.DeserializationFailed;
+    }
+    @memcpy(std.mem.asBytes(out)[0..bytes.len], bytes);
+    len_out.* = @intCast(bytes.len);
+}
+
+/// Deserialize staged signature bytes in place. Runs on the worker thread for async
+/// jobs (inline for the sync path). The stack copy is required because blst reads
+/// the serialized input while writing the decoded point to the same location.
+/// On-curve check only (preserves DeserializationFailed); the G2 subgroup check is
+/// relocated to batchVerify/sameMessageExecute via the groupcheck flags.
+fn deserializeStagedSigs(sigs: []Signature, lens: []const u8) !void {
+    std.debug.assert(sigs.len == lens.len);
+    var raw: [Signature.SERIALIZE_SIZE]u8 = undefined;
+    for (sigs, lens) |*sig, len| {
+        std.debug.assert(len == Signature.COMPRESS_SIZE or len == Signature.SERIALIZE_SIZE);
+        @memcpy(raw[0..len], std.mem.asBytes(sig)[0..len]);
+        sig.* = Signature.deserialize(raw[0..len]) catch return error.DeserializationFailed;
+    }
+}
+
+/// Deserialize staged pubkey bytes in place (single kind only). On-curve check only;
+/// the G1 subgroup check is relocated to the worker (mulAndAggregate pk_validate=true
+/// for the untrusted single-set pubkey).
+fn deserializeStagedPks(pks: []PublicKey, lens: []const u8) !void {
+    std.debug.assert(pks.len == lens.len);
+    var raw: [PublicKey.SERIALIZE_SIZE]u8 = undefined;
+    for (pks, lens) |*pk, len| {
+        std.debug.assert(len == PublicKey.COMPRESS_SIZE or len == PublicKey.SERIALIZE_SIZE);
+        @memcpy(raw[0..len], std.mem.asBytes(pk)[0..len]);
+        pk.* = PublicKey.deserialize(raw[0..len]) catch return error.DeserializationFailed;
+    }
 }
 
 /// Fill `rands` with cryptographically-seeded multipliers, guaranteeing the
@@ -227,7 +273,7 @@ fn batchVerify(
 // ---------------------------------------------------------------------------
 
 /// Parse {index, message, signature} sets.
-fn parseIndexedSets(sets: js.Array, n: usize, msgs: [][32]u8, pks: []PublicKey, sigs: []Signature) !void {
+fn parseIndexedSets(sets: js.Array, n: usize, msgs: [][32]u8, pks: []PublicKey, sigs: []Signature, sig_lens: []u8) !void {
     for (0..n) |i| {
         const set = (try sets.get(@intCast(i))).toValue();
 
@@ -238,12 +284,12 @@ fn parseIndexedSets(sets: js.Array, n: usize, msgs: [][32]u8, pks: []PublicKey, 
         const idx = try (try set.getNamedProperty("index")).getValueUint32();
         pks[i] = (try getPubkey(idx)).*;
 
-        sigs[i] = try deserializeSig(try set.getNamedProperty("signature"));
+        try stageSig(&sigs[i], &sig_lens[i], try set.getNamedProperty("signature"));
     }
 }
 
 /// Parse {indices, message, signature} sets, aggregating pubkeys per set.
-fn parseAggregateSets(sets: js.Array, n: usize, msgs: [][32]u8, pks: []PublicKey, sigs: []Signature, agg_ns: ?*u64) !void {
+fn parseAggregateSets(sets: js.Array, n: usize, msgs: [][32]u8, pks: []PublicKey, sigs: []Signature, sig_lens: []u8, agg_ns: ?*u64) !void {
     for (0..n) |i| {
         const set = (try sets.get(@intCast(i))).toValue();
 
@@ -275,12 +321,12 @@ fn parseAggregateSets(sets: js.Array, n: usize, msgs: [][32]u8, pks: []PublicKey
             };
         }
 
-        sigs[i] = try deserializeSig(try set.getNamedProperty("signature"));
+        try stageSig(&sigs[i], &sig_lens[i], try set.getNamedProperty("signature"));
     }
 }
 
 /// Parse {publicKey, message, signature} sets.
-fn parseSingleSets(sets: js.Array, n: usize, msgs: [][32]u8, pks: []PublicKey, sigs: []Signature) !void {
+fn parseSingleSets(sets: js.Array, n: usize, msgs: [][32]u8, pks: []PublicKey, sigs: []Signature, sig_lens: []u8, pk_lens: []u8) !void {
     for (0..n) |i| {
         const set = (try sets.get(@intCast(i))).toValue();
 
@@ -288,29 +334,31 @@ fn parseSingleSets(sets: js.Array, n: usize, msgs: [][32]u8, pks: []PublicKey, s
         if (msg_bytes.len != 32) return error.InvalidMessageLength;
         @memcpy(&msgs[i], msg_bytes[0..32]);
 
-        pks[i] = try deserializePubkey(try set.getNamedProperty("publicKey"));
+        try stagePubkey(&pks[i], &pk_lens[i], try set.getNamedProperty("publicKey"));
 
-        sigs[i] = try deserializeSig(try set.getNamedProperty("signature"));
+        try stageSig(&sigs[i], &sig_lens[i], try set.getNamedProperty("signature"));
     }
 }
 
 /// Parse {index, signature} sets (same-message path, no per-set message).
-fn parseSameMessageSets(sets: js.Array, n: usize, pks: []PublicKey, sigs: []Signature) !void {
+fn parseSameMessageSets(sets: js.Array, n: usize, pks: []PublicKey, sigs: []Signature, sig_lens: []u8) !void {
     for (0..n) |i| {
         const set = (try sets.get(@intCast(i))).toValue();
         const idx = try (try set.getNamedProperty("index")).getValueUint32();
         pks[i] = (try getPubkey(idx)).*;
-        sigs[i] = try deserializeSig(try set.getNamedProperty("signature"));
+        try stageSig(&sigs[i], &sig_lens[i], try set.getNamedProperty("signature"));
     }
 }
 
-/// Dispatch to the correct parser based on kind. `agg_ns`, when non-null, accumulates
-/// pubkey-aggregation time (ns) for the aggregate kind (async path metrics only).
-fn parseSets(kind: SetKind, sets: js.Array, n: usize, msgs: [][32]u8, pks: []PublicKey, sigs: []Signature, agg_ns: ?*u64) !void {
+/// Dispatch to the correct parser based on kind. Signatures (and single-kind pubkeys)
+/// are only STAGED here — the caller must run deserializeStaged* before verifying.
+/// `agg_ns`, when non-null, accumulates pubkey-aggregation time (ns) for the
+/// aggregate kind (async path metrics only).
+fn parseSets(kind: SetKind, sets: js.Array, n: usize, msgs: [][32]u8, pks: []PublicKey, sigs: []Signature, sig_lens: []u8, pk_lens: []u8, agg_ns: ?*u64) !void {
     switch (kind) {
-        .indexed => try parseIndexedSets(sets, n, msgs, pks, sigs),
-        .aggregate => try parseAggregateSets(sets, n, msgs, pks, sigs, agg_ns),
-        .single => try parseSingleSets(sets, n, msgs, pks, sigs),
+        .indexed => try parseIndexedSets(sets, n, msgs, pks, sigs, sig_lens),
+        .aggregate => try parseAggregateSets(sets, n, msgs, pks, sigs, sig_lens, agg_ns),
+        .single => try parseSingleSets(sets, n, msgs, pks, sigs, sig_lens, pk_lens),
     }
 }
 
@@ -329,9 +377,15 @@ pub fn verify(kind_num: js.Number, sets: js.Array) !js.Boolean {
     var msgs: [MAX_SETS_PER_JOB][32]u8 = undefined;
     var pks: [MAX_SETS_PER_JOB]PublicKey = undefined;
     var sigs: [MAX_SETS_PER_JOB]Signature = undefined;
+    var sig_lens: [MAX_SETS_PER_JOB]u8 = undefined;
+    var pk_lens: [MAX_SETS_PER_JOB]u8 = undefined;
     var rands: [MAX_SETS_PER_JOB][RAND_BYTES]u8 = undefined;
 
-    try parseSets(kind, sets, n, msgs[0..n], pks[0..n], sigs[0..n], null);
+    try parseSets(kind, sets, n, msgs[0..n], pks[0..n], sigs[0..n], sig_lens[0..n], pk_lens[0..n], null);
+    // Sync path: deserialize staged bytes inline (same thread, same total work as
+    // before staging was introduced for the async path).
+    try deserializeStagedSigs(sigs[0..n], sig_lens[0..n]);
+    if (kind == .single) try deserializeStagedPks(pks[0..n], pk_lens[0..n]);
 
     return js.Boolean.from(try batchVerify(msgs[0..n], pks[0..n], sigs[0..n], rands[0..n], kind == .single));
 }
@@ -348,6 +402,13 @@ const AsyncJobData = struct {
     msgs: [][32]u8 = &.{},
     pks: []PublicKey = &.{},
     sigs: []Signature = &.{},
+    /// Staged raw byte length per set (see stageSig/stagePubkey): at submission the
+    /// sigs (and, for the single kind, pks) entries hold raw serialized bytes; the
+    /// worker deserializes them in place at the top of runJob.
+    sig_lens: []u8 = &.{},
+    pk_lens: []u8 = &.{},
+    /// True when pks holds staged raw bytes (single kind) rather than cache copies.
+    pks_staged: bool = false,
 
     n: usize = 0,
     kind: JobKind = .batch,
@@ -403,6 +464,8 @@ const JobPool = struct {
             allocator.free(slot.msgs);
             allocator.free(slot.pks);
             allocator.free(slot.sigs);
+            allocator.free(slot.sig_lens);
+            allocator.free(slot.pk_lens);
         };
 
         for (self.slots, 0..) |*slot, i| {
@@ -412,6 +475,10 @@ const JobPool = struct {
             slot.pks = try allocator.alloc(PublicKey, MAX_SETS_PER_JOB);
             errdefer allocator.free(slot.pks);
             slot.sigs = try allocator.alloc(Signature, MAX_SETS_PER_JOB);
+            errdefer allocator.free(slot.sigs);
+            slot.sig_lens = try allocator.alloc(u8, MAX_SETS_PER_JOB);
+            errdefer allocator.free(slot.sig_lens);
+            slot.pk_lens = try allocator.alloc(u8, MAX_SETS_PER_JOB);
             self.stack[i] = slot;
             init_count += 1;
         }
@@ -440,6 +507,8 @@ const JobPool = struct {
             allocator.free(slot.msgs);
             allocator.free(slot.pks);
             allocator.free(slot.sigs);
+            allocator.free(slot.sig_lens);
+            allocator.free(slot.pk_lens);
         }
         allocator.free(self.slots);
         allocator.free(self.stack);
@@ -450,6 +519,18 @@ const JobPool = struct {
 var pool: JobPool = .{};
 var worker_pool: AsyncWorkerPool = .{};
 var cleanup_hook_registered: bool = false;
+
+/// Advisory backpressure budget per worker, in signature sets. A saturated worker
+/// drains ~1 set/ms, so 256 sets/worker ≈ 250ms of queued compute: canAcceptWork()
+/// turns false once the pool holds more than that, long before the job-slot pool
+/// (sized in jobs, not work) is exhausted. Hard admission is unchanged.
+const MAX_INFLIGHT_SETS_PER_WORKER = 256;
+
+/// Signature sets in flight (submitted, not yet completed). Loop-thread only:
+/// incremented after a successful submit, decremented in completeJob. Jobs abandoned
+/// at env shutdown never complete; deinit() resets the counter with the pool.
+var inflight_sets: usize = 0;
+var max_inflight_sets: usize = 0;
 
 pub const EnvShutdown = struct {};
 
@@ -472,6 +553,19 @@ fn registerEnvCleanupHook(env: napi.Env) !void {
 /// Runs on a worker thread (via AsyncWorkerPool). MUST NOT call any napi APIs.
 fn runJob(task: *Task) void {
     const data: *AsyncJobData = @fieldParentPtr("task", task);
+    // Deserialize staged bytes first: EC decompression runs here on the worker, off
+    // the JS loop thread. A failure rejects the promise with DeserializationFailed,
+    // exactly as the former parse-time (loop thread) deserialization did.
+    deserializeStagedSigs(data.sigs[0..data.n], data.sig_lens[0..data.n]) catch |err| {
+        data.err = err;
+        return;
+    };
+    if (data.pks_staged) {
+        deserializeStagedPks(data.pks[0..data.n], data.pk_lens[0..data.n]) catch |err| {
+            data.err = err;
+            return;
+        };
+    }
     switch (data.kind) {
         .batch => {
             var rands: [MAX_SETS_PER_JOB][RAND_BYTES]u8 = undefined;
@@ -557,6 +651,8 @@ fn fillNonZeroSameMessageRands(rands: [][32]u8) void {
 fn completeJob(env: napi.Env, task: *Task) void {
     const data: *AsyncJobData = @fieldParentPtr("task", task);
     defer pool.push(data);
+    std.debug.assert(inflight_sets >= data.n);
+    inflight_sets -= data.n;
     // Observe per-job latencies (loop thread only; cheap cumulative bucket math).
     // Every async job has a real queue residency (possibly ~0ns on an idle pool), so
     // it is always observed. agg_rand/pubkeys are 0 unless that work ran this job.
@@ -603,6 +699,7 @@ fn queueJob(env: napi.Env, data: *AsyncJobData) !js.Value {
     data.err = null;
     data.deferred = try env.createPromise();
     try worker_pool.submit(env, &data.task);
+    inflight_sets += data.n;
     return .{ .val = data.deferred.getPromise() };
 }
 
@@ -610,8 +707,10 @@ fn queueJob(env: napi.Env, data: *AsyncJobData) !js.Value {
 // Async entry points
 // ---------------------------------------------------------------------------
 
-/// JS: blsBatch.asyncVerify(kind, sets) → Promise<boolean>
-pub fn asyncVerify(kind_num: js.Number, sets: js.Array) !js.Value {
+/// JS: blsBatch.asyncVerify(kind, sets, priority?) → Promise<boolean>
+/// `priority` (default false) routes the job to the pool's high lane, ahead of any
+/// queued low-lane (bulk block-import) backlog.
+pub fn asyncVerify(kind_num: js.Number, sets: js.Array, priority: ?js.Boolean) !js.Value {
     const kind = std.enums.fromInt(SetKind, try kind_num.toU32()) orelse return error.InvalidSetKind;
 
     const n = try sets.length();
@@ -625,16 +724,18 @@ pub fn asyncVerify(kind_num: js.Number, sets: js.Array) !js.Value {
 
     data.kind = .batch;
     data.n = n;
+    data.task.priority = if (priority) |p| try p.toBool() else false;
     data.pk_validate = kind == .single;
+    data.pks_staged = kind == .single;
     data.agg_rand_ns = 0;
     data.pubkeys_agg_ns = 0;
-    try parseSets(kind, sets, n, data.msgs[0..n], data.pks[0..n], data.sigs[0..n], &data.pubkeys_agg_ns);
+    try parseSets(kind, sets, n, data.msgs[0..n], data.pks[0..n], data.sigs[0..n], data.sig_lens[0..n], data.pk_lens[0..n], &data.pubkeys_agg_ns);
 
     return try queueJob(env, data);
 }
 
-/// JS: blsBatch.asyncVerifySameMessage(sets, message) → Promise<boolean>
-pub fn asyncVerifySameMessage(sets: js.Array, message: js.Uint8Array) !js.Value {
+/// JS: blsBatch.asyncVerifySameMessage(sets, message, priority?) → Promise<boolean>
+pub fn asyncVerifySameMessage(sets: js.Array, message: js.Uint8Array, priority: ?js.Boolean) !js.Value {
     const n = try sets.length();
     const env = js.env();
     if (n == 0) return try resolveWithFalse(env);
@@ -650,9 +751,11 @@ pub fn asyncVerifySameMessage(sets: js.Array, message: js.Uint8Array) !js.Value 
     data.kind = .same_message;
     data.n = n;
     data.msg = msg_slice[0..32].*;
+    data.task.priority = if (priority) |p| try p.toBool() else false;
+    data.pks_staged = false;
     data.agg_rand_ns = 0;
     data.pubkeys_agg_ns = 0;
-    try parseSameMessageSets(sets, n, data.pks[0..n], data.sigs[0..n]);
+    try parseSameMessageSets(sets, n, data.pks[0..n], data.sigs[0..n], data.sig_lens[0..n]);
 
     return try queueJob(env, data);
 }
@@ -675,13 +778,21 @@ pub fn init(max_jobs: js.Number) !void {
     const worker_pool_was_initialized = worker_pool.initialized;
     try worker_pool.init(env, napi_io.get(), n_workers, n);
     errdefer if (!worker_pool_was_initialized) worker_pool.deinit();
+    // Derive from the pool's ACTUAL worker count: init is idempotent, so on a no-op
+    // re-init the local n_workers (computed from this call's maxJobs) could differ
+    // from the workers actually running, silently desyncing the advisory budget.
+    max_inflight_sets = worker_pool.n_workers * MAX_INFLIGHT_SETS_PER_WORKER;
     try registerEnvCleanupHook(env);
 }
 
-/// JS: blsBatch.canAcceptWork() → boolean — async backpressure signal.
+/// JS: blsBatch.canAcceptWork() → boolean — async backpressure signal. Trips when
+/// job slots run out OR when queued work exceeds the latency budget (inflight sets
+/// past `max_inflight_sets`), whichever comes first — slot count alone would stay
+/// true through a multi-second compute backlog.
 pub fn canAcceptWork() !js.Boolean {
     const env = js.env();
-    return js.Boolean.from(pool.initialized and pool.canAcceptWork() and worker_pool.isReadyForEnv(env));
+    return js.Boolean.from(pool.initialized and pool.canAcceptWork() and
+        worker_pool.isReadyForEnv(env) and inflight_sets < max_inflight_sets);
 }
 
 /// JS: blsBatch.stats() → object — real, point-in-time native pool occupancy for
@@ -719,8 +830,15 @@ pub fn stats() !js.Value {
     try obj.setNamedProperty("initialized", try env.getBoolean(initialized));
     try obj.setNamedProperty(
         "canAcceptWork",
-        try env.getBoolean(initialized and pool.canAcceptWork() and worker_pool.isReadyForEnv(env)),
+        try env.getBoolean(initialized and pool.canAcceptWork() and
+            worker_pool.isReadyForEnv(env) and inflight_sets < max_inflight_sets),
     );
+    // Work-based saturation (sets, not jobs): the advisory backpressure inputs.
+    // inflight_sets is loop-thread-only state; report 0 to non-owner envs instead of
+    // performing an unsynchronized cross-thread read of a counter the owner mutates.
+    const own_counters = worker_pool.isReadyForEnv(env);
+    try obj.setNamedProperty("inflightSets", try env.createDouble(@floatFromInt(if (own_counters) inflight_sets else 0)));
+    try obj.setNamedProperty("maxInflightSets", try env.createDouble(@floatFromInt(if (own_counters) max_inflight_sets else 0)));
 
     // Latency histograms are cumulative and valid regardless of init state.
     try putHistogram(env, obj, "queueWait", QueueWaitHist, &queue_wait_hist);
@@ -773,6 +891,9 @@ fn ensureAsyncReady(env: napi.Env) !void {
 pub fn deinit(_: EnvShutdown) void {
     worker_pool.deinit();
     pool.deinit();
+    // Abandoned jobs never reach completeJob; reset with the pool they belonged to.
+    inflight_sets = 0;
+    max_inflight_sets = 0;
     cleanup_hook_registered = false;
 }
 

@@ -49,13 +49,24 @@ export interface BlsBatch {
   verify(kind: 1, sets: AggregateSet[]): boolean;
   verify(kind: 2, sets: SingleSet[]): boolean;
 
-  asyncVerify(kind: 0, sets: IndexedSet[]): Promise<boolean>;
-  asyncVerify(kind: 1, sets: AggregateSet[]): Promise<boolean>;
-  asyncVerify(kind: 2, sets: SingleSet[]): Promise<boolean>;
+  /**
+   * `priority` (default false) routes the job to the worker pool's high lane, drained
+   * before any queued low-lane backlog — pass true for latency-sensitive (gossip)
+   * verification and false for bulk work (block import / range sync).
+   */
+  asyncVerify(kind: 0, sets: IndexedSet[], priority?: boolean): Promise<boolean>;
+  asyncVerify(kind: 1, sets: AggregateSet[], priority?: boolean): Promise<boolean>;
+  asyncVerify(kind: 2, sets: SingleSet[], priority?: boolean): Promise<boolean>;
 
-  asyncVerifySameMessage(sets: SameMessageSet[], message: Uint8Array): Promise<boolean>;
+  asyncVerifySameMessage(sets: SameMessageSet[], message: Uint8Array, priority?: boolean): Promise<boolean>;
 
   init(maxJobs: number): void;
+  /**
+   * Advisory backpressure: false when job slots are exhausted OR when in-flight work
+   * exceeds the latency budget (`inflightSets >= maxInflightSets`, ≈250ms of queued
+   * compute per worker) — work-based, so it trips long before the job-slot pool
+   * (sized in jobs, not sets) would.
+   */
   canAcceptWork(): boolean;
 
   /**
@@ -78,6 +89,10 @@ export interface BlsBatch {
     running: number;
     /** Unused job-pool slots. */
     freeSlots: number;
+    /** Signature sets in flight (submitted, not yet completed) — work-based saturation. */
+    inflightSets: number;
+    /** Advisory inflight-sets budget (workers × 256); canAcceptWork trips at this. */
+    maxInflightSets: number;
     /** Cumulative worker compute seconds (Σ run_fn). Legacy aggregate: time_seconds_sum. */
     workerTimeSeconds: number;
     /** Queue residency (submit → worker pickup), s. Legacy: queue_job_wait_time_seconds. */
