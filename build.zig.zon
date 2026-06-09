@@ -57,6 +57,10 @@
         //     .url = "git+https://github.com/karlseguin/http.zig.git#2924ead41db9e1986db3b4909a82185c576f6361",
         //     .hash = "httpz-0.0.0-PNVzrC7CBgDSMZNP7chgAczR3FyAz5Eum6Kb1_K9kmYR",
         // },
+        .zio = .{
+            .url = "git+https://github.com/lalinsky/zio?ref=v0.13.0#c0382d00beed1b44d2ab412fda23574252a31332",
+            .hash = "zio-0.13.0-xHbVVL0jHQB0ZCuiXhi5YiBl5lKIXwrCjcmWeQfy3Jsh",
+        },
     },
     .options_modules = .{
         .build_options = .{
@@ -135,6 +139,13 @@
         },
         .time = .{
             .root_source_file = "src/time.zig",
+        },
+        .bounded_array = .{
+            .root_source_file = "src/bounded_array.zig",
+        },
+        .clock = .{
+            .root_source_file = "src/clock/root.zig",
+            .imports = .{ .zio, .consensus_types, .bounded_array },
         },
         .testing_allocators = .{
             .root_source_file = "src/testing_allocators.zig",
@@ -355,6 +366,7 @@
         // Per-module unit tests (mirror the old auto-generated `test:<module>` steps).
         .constants = .{ .root_module = .constants },
         .hex = .{ .root_module = .hex },
+        .bounded_array = .{ .root_module = .bounded_array },
         .hashing = .{ .root_module = .hashing },
         .preset = .{ .root_module = .preset },
         .persistent_merkle_tree = .{ .root_module = .persistent_merkle_tree },
@@ -366,6 +378,7 @@
         .state_transition = .{ .root_module = .state_transition },
         .era = .{ .root_module = .era },
         .fork_choice = .{ .root_module = .fork_choice },
+        .clock = .{ .root_module = .clock },
 
         .int = .{
             .root_module = .{
