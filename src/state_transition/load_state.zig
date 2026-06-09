@@ -242,9 +242,7 @@ fn loadValidators(
 
     try applyModifiedValidators(
         allocator,
-        seed_validators,
         migrated_validators,
-        seed_bytes,
         new_validators_bytes,
         modified_validators.items,
     );
@@ -352,13 +350,11 @@ fn syncScoresLength(
     return trimmed;
 }
 
-/// Overwrite each modified validator in `migrated_validators` with a view rebuilt
-/// from `new_validators_bytes`, reusing the seed validator's pubkey/withdrawal subtrees.
+/// Overwrite each modified validator in `migrated_validators` with a view
+/// freshly deserialized from `new_validators_bytes`.
 fn applyModifiedValidators(
     allocator: Allocator,
-    seed_validators: *types.phase0.Validators.TreeView,
     migrated_validators: *types.phase0.Validators.TreeView,
-    seed_bytes: []const u8,
     new_validators_bytes: []const u8,
     modified_validators: []const ValidatorIndex,
 ) !void {
@@ -366,16 +362,10 @@ fn applyModifiedValidators(
         const i: usize = @intCast(validator_index);
         const start = i * types.phase0.Validator.fixed_size;
         const new_bytes = new_validators_bytes[start .. start + types.phase0.Validator.fixed_size];
-        const seed_val_bytes = seed_bytes[start .. start + types.phase0.Validator.fixed_size];
 
-        const seed_validator = try seed_validators.get(i);
-        // seed_validator is borrowed from seed_validators; do not deinit.
-
-        const new_validator = try loadValidatorWithSeedReuse(
+        const new_validator = try loadValidator(
             allocator,
             migrated_validators.chunks.state.pool,
-            seed_validator,
-            seed_val_bytes,
             new_bytes,
         );
         errdefer new_validator.deinit();
@@ -451,68 +441,17 @@ fn inactivityScoresNodeId(state: *AnyBeaconState) !Node.Id {
     };
 }
 
-/// Load a validator from bytes given a seed validator.
-/// - Reuse pubkey and withdrawal credentials subtrees if they are unchanged, to save memory.
-/// - Otherwise deserialize the validator fresh.
-fn loadValidatorWithSeedReuse(
+/// Deserialize a validator from `new_validator_bytes` into a fresh TreeView.
+/// No seed/field reuse: `Validator` is a `StructContainerType` (one opaque
+/// node, fields inline by value) — there are no per-field subtrees to share.
+fn loadValidator(
     allocator: Allocator,
     pool: *Node.Pool,
-    seed_validator: *types.phase0.Validator.TreeView,
-    seed_validator_bytes: []const u8,
     new_validator_bytes: []const u8,
 ) !*types.phase0.Validator.TreeView {
-    const Validator = types.phase0.Validator;
-    const PUBKEY_OFFSET = comptime Validator.field_offsets[Validator.getFieldIndex("pubkey")];
-    const PUBKEY_END = PUBKEY_OFFSET + comptime Validator.getFieldType("pubkey").fixed_size;
-    const WCRED_OFFSET = comptime Validator.field_offsets[Validator.getFieldIndex("withdrawal_credentials")];
-    const WCRED_END = WCRED_OFFSET + comptime Validator.getFieldType("withdrawal_credentials").fixed_size;
-
-    const pubkey_same = std.mem.eql(u8, new_validator_bytes[PUBKEY_OFFSET..PUBKEY_END], seed_validator_bytes[PUBKEY_OFFSET..PUBKEY_END]);
-    const withdrawal_same = std.mem.eql(u8, new_validator_bytes[WCRED_OFFSET..WCRED_END], seed_validator_bytes[WCRED_OFFSET..WCRED_END]);
-
-    if (!pubkey_same) {
-        if (!withdrawal_same) {
-            const root = try types.phase0.Validator.tree.deserializeFromBytes(pool, new_validator_bytes);
-            errdefer pool.unref(root);
-
-            return try types.phase0.Validator.TreeView.init(allocator, pool, root);
-        }
-    }
-
-    var nodes: [types.phase0.Validator.chunk_count]Node.Id = undefined;
-    var owned_nodes: [types.phase0.Validator.chunk_count]Node.Id = undefined;
-    var owned_len: usize = 0;
-    errdefer {
-        for (owned_nodes[0..owned_len]) |node_id| {
-            pool.unref(node_id);
-        }
-    }
-
-    inline for (types.phase0.Validator.fields, 0..) |field, i| {
-        const reuse = if (comptime std.mem.eql(u8, field.name, "pubkey"))
-            pubkey_same
-        else if (comptime std.mem.eql(u8, field.name, "withdrawal_credentials"))
-            withdrawal_same
-        else
-            false;
-
-        if (reuse) {
-            nodes[i] = try seed_validator.root.getNodeAtDepth(seed_validator.pool, types.phase0.Validator.chunk_depth, i);
-        } else {
-            const start = types.phase0.Validator.field_offsets[i];
-            const end = start + field.type.fixed_size;
-            const bytes = new_validator_bytes[start..end];
-            const node_id = try field.type.tree.deserializeFromBytes(pool, bytes);
-            owned_nodes[owned_len] = node_id;
-            owned_len += 1;
-            nodes[i] = node_id;
-        }
-    }
-
-    const root = try Node.fillWithContents(pool, &nodes, types.phase0.Validator.chunk_depth);
+    const root = try types.phase0.Validator.tree.deserializeFromBytes(pool, new_validator_bytes);
     errdefer pool.unref(root);
 
-    owned_len = 0;
     return try types.phase0.Validator.TreeView.init(allocator, pool, root);
 }
 
@@ -594,72 +533,6 @@ fn findModifiedInactivityScores(
     );
 }
 
-test "loadValidatorWithSeedReuse: reuse vs rebuild" {
-    const allocator = std.testing.allocator;
-
-    var pool = try Node.Pool.init(allocator, 1024);
-    defer pool.deinit();
-
-    const gen = @import("test_utils/generate_state.zig");
-    const chain_config = gen.getConfig(@import("config").minimal.chain_config, .electra, 0);
-
-    const state_ptr = try gen.generateElectraState(allocator, &pool, chain_config, 64);
-    defer {
-        state_ptr.deinit();
-        allocator.destroy(state_ptr);
-    }
-
-    // Build a seed BeaconState TreeView in this pool, then take a validator element as the seed.
-    const seed_state_bytes = try state_ptr.serialize(allocator);
-    defer allocator.free(seed_state_bytes);
-
-    var seed_state = try AnyBeaconState.deserialize(allocator, &pool, .electra, seed_state_bytes);
-    defer seed_state.deinit();
-
-    var seed_validators = try types.phase0.Validators.TreeView.init(allocator, seed_state.nodePool(), try validatorsNodeId(&seed_state));
-    defer seed_validators.deinit();
-
-    const target_index: usize = 3;
-    var seed_validator = try seed_validators.get(target_index);
-    // seed_validator is borrowed from seed_validators; do not deinit.
-
-    var seed_validator_bytes: [types.phase0.Validator.fixed_size]u8 = undefined;
-    _ = try seed_validator.serializeIntoBytes(&seed_validator_bytes);
-
-    var new_validator_bytes = seed_validator_bytes;
-    // Modify only withdrawal_credentials so the reuse path keeps pubkey but rebuilds wcred.
-    const Validator = types.phase0.Validator;
-    const WCRED_OFFSET = comptime Validator.field_offsets[Validator.getFieldIndex("withdrawal_credentials")];
-    const WCRED_END = WCRED_OFFSET + comptime Validator.getFieldType("withdrawal_credentials").fixed_size;
-    @memset(new_validator_bytes[WCRED_OFFSET..WCRED_END], 0x11);
-
-    const new_validator = try loadValidatorWithSeedReuse(
-        allocator,
-        &pool,
-        seed_validator,
-        seed_validator_bytes[0..],
-        new_validator_bytes[0..],
-    );
-    defer new_validator.deinit();
-
-    const pubkey_i = comptime types.phase0.Validator.getFieldIndex("pubkey");
-    const withdrawal_i = comptime types.phase0.Validator.getFieldIndex("withdrawal_credentials");
-
-    try std.testing.expectEqual(
-        try seed_validator.root.getNodeAtDepth(seed_validator.pool, types.phase0.Validator.chunk_depth, pubkey_i),
-        try new_validator.root.getNodeAtDepth(new_validator.pool, types.phase0.Validator.chunk_depth, pubkey_i),
-    );
-    try std.testing.expect(
-        try seed_validator.root.getNodeAtDepth(seed_validator.pool, types.phase0.Validator.chunk_depth, withdrawal_i) != try new_validator.root.getNodeAtDepth(new_validator.pool, types.phase0.Validator.chunk_depth, withdrawal_i),
-    );
-
-    const fresh_root = try types.phase0.Validator.tree.deserializeFromBytes(&pool, new_validator_bytes[0..]);
-    var fresh_validator = try types.phase0.Validator.TreeView.init(allocator, &pool, fresh_root);
-    defer fresh_validator.deinit();
-
-    try std.testing.expectEqualSlices(u8, try fresh_validator.hashTreeRoot(), try new_validator.hashTreeRoot());
-}
-
 test "loadState scenarios" {
     const allocator = std.testing.allocator;
     const gen = @import("test_utils/generate_state.zig");
@@ -700,7 +573,7 @@ test "loadState scenarios" {
     };
 
     inline for (cases) |case| {
-        var pool = try Node.Pool.init(allocator, 8192);
+        var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 8192 });
         defer pool.deinit();
 
         const state_ptr = try gen.generateElectraState(allocator, &pool, chain_config, 64);
@@ -921,7 +794,7 @@ test "diff helpers cases" {
 
 test "loadValidators/loadInactivityScores: rejection scenarios" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 1024);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 1024 });
     defer pool.deinit();
 
     const gen = @import("test_utils/generate_state.zig");

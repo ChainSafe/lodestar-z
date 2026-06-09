@@ -50,7 +50,7 @@ pub fn ListCompositeTreeView(comptime ST: type) type {
             errdefer allocator.destroy(ptr);
 
             try Chunks.init(&ptr.chunks, allocator, pool, root);
-            errdefer ptr.chunks.deinit();
+            errdefer ptr.chunks.deinitAfterInitFailure();
 
             ptr.allocator = allocator;
             ptr._orig_len = try ptr.chunks.getLength();
@@ -205,7 +205,10 @@ pub fn ListCompositeTreeView(comptime ST: type) type {
             try self.push(child_view);
         }
 
+        /// Read-only iterator over committed elements. Pending `set`/`push`
+        /// writes are not visible — call `commit()` first if they matter.
         pub fn iteratorReadonly(self: *const Self, start_index: usize) ReadonlyIterator {
+            std.debug.assert(self.chunks.state.changed.count() == 0);
             return ReadonlyIterator.init(self, start_index);
         }
 
@@ -264,6 +267,23 @@ pub fn ListCompositeTreeView(comptime ST: type) type {
                     self.elem_index += 1;
                     return value;
                 }
+            }
+
+            /// Read-only pointer to the next element's value without copying.
+            /// Only available when `ST.Element` is a `StructContainerType` —
+            /// the underlying `container_struct` node already holds the value
+            /// inline, so we can hand back a `*const T` directly.
+            ///
+            /// The pointer is valid as long as the iterator's pool retains
+            /// the node (CoW mutation invalidates it). Use only for
+            /// transient read passes that don't mutate the list.
+            pub fn nextValuePtr(self: *ReadonlyIterator) !*const ST.Element.Type {
+                if (comptime !@hasDecl(ST.Element.tree, "getValuePtr")) {
+                    @compileError("nextValuePtr requires ST.Element to be a StructContainerType");
+                }
+                const node = try self.depth_iterator.next();
+                self.elem_index += 1;
+                return ST.Element.tree.getValuePtr(node, self.tree_view.chunks.state.pool);
             }
         };
 
@@ -378,10 +398,10 @@ const Checkpoint = FixedContainerType(struct {
 
 test "TreeView composite list sliceTo truncates elements" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 512);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 512 });
     defer pool.deinit();
 
-    const ListType = FixedListType(Checkpoint, 16);
+    const ListType = FixedListType(Checkpoint, 16, .{});
 
     var list: ListType.Type = .empty;
     defer list.deinit(allocator);
@@ -415,10 +435,10 @@ test "TreeView composite list sliceTo truncates elements" {
 // std.testing.allocator can't see pool-slot leaks, so check getNodesInUse() against a baseline.
 test "TreeView composite list sliceTo does not leak pool nodes" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 512);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 512 });
     defer pool.deinit();
 
-    const ListType = FixedListType(Checkpoint, 16);
+    const ListType = FixedListType(Checkpoint, 16, .{});
 
     var list: ListType.Type = .empty;
     defer list.deinit(allocator);
@@ -440,7 +460,7 @@ const DoubleFreeDetectAllocator = @import("testing_allocators").DoubleFreeDetect
 
 // set takes ownership of the view, so setValue must not deinit it too. Sweep every OOM point.
 test "TreeView composite list setValue - OOM does not double-free the element view" {
-    const ListType = FixedListType(Checkpoint, 16);
+    const ListType = FixedListType(Checkpoint, 16, .{});
 
     var list: ListType.Type = .empty;
     defer list.deinit(std.testing.allocator);
@@ -453,7 +473,7 @@ test "TreeView composite list setValue - OOM does not double-free the element vi
         defer oom.deinit();
         const alloc = oom.allocator();
 
-        var pool = Node.Pool.init(alloc, 0) catch continue;
+        var pool = Node.Pool.init(.{ .page_allocator = alloc, .allocator = alloc, .pool_size = 0 }) catch continue;
         defer pool.deinit();
 
         const root = ListType.tree.fromValue(&pool, &list) catch continue;
@@ -470,7 +490,7 @@ test "TreeView composite list setValue - OOM does not double-free the element vi
 }
 
 test "TreeView composite list push - OOM does not double-free" {
-    const ListType = FixedListType(Checkpoint, 16);
+    const ListType = FixedListType(Checkpoint, 16, .{});
 
     var list: ListType.Type = .empty;
     defer list.deinit(std.testing.allocator);
@@ -483,7 +503,7 @@ test "TreeView composite list push - OOM does not double-free" {
         defer oom.deinit();
         const alloc = oom.allocator();
 
-        var pool = Node.Pool.init(alloc, 0) catch continue;
+        var pool = Node.Pool.init(.{ .page_allocator = alloc, .allocator = alloc, .pool_size = 0 }) catch continue;
         defer pool.deinit();
 
         const root = ListType.tree.fromValue(&pool, &list) catch continue;
@@ -499,7 +519,7 @@ test "TreeView composite list push - OOM does not double-free" {
 }
 
 test "TreeView composite list clone(transfer_cache) - OOM does not double-free cached children" {
-    const ListType = FixedListType(Checkpoint, 16);
+    const ListType = FixedListType(Checkpoint, 16, .{});
 
     var list: ListType.Type = .empty;
     defer list.deinit(std.testing.allocator);
@@ -511,7 +531,7 @@ test "TreeView composite list clone(transfer_cache) - OOM does not double-free c
         defer oom.deinit();
         const alloc = oom.allocator();
 
-        var pool = Node.Pool.init(alloc, 0) catch continue;
+        var pool = Node.Pool.init(.{ .page_allocator = alloc, .allocator = alloc, .pool_size = 0 }) catch continue;
         defer pool.deinit();
 
         const root = ListType.tree.fromValue(&pool, &list) catch continue;
@@ -533,7 +553,7 @@ test "TreeView composite list clone(transfer_cache) - OOM does not double-free c
 }
 
 test "TreeView composite list commit - OOM does not double-free" {
-    const ListType = FixedListType(Checkpoint, 16);
+    const ListType = FixedListType(Checkpoint, 16, .{});
 
     var list: ListType.Type = .empty;
     defer list.deinit(std.testing.allocator);
@@ -546,7 +566,7 @@ test "TreeView composite list commit - OOM does not double-free" {
         defer oom.deinit();
         const alloc = oom.allocator();
 
-        var pool = Node.Pool.init(alloc, 0) catch continue;
+        var pool = Node.Pool.init(.{ .page_allocator = alloc, .allocator = alloc, .pool_size = 0 }) catch continue;
         defer pool.deinit();
 
         const root = ListType.tree.fromValue(&pool, &list) catch continue;
@@ -567,7 +587,7 @@ test "TreeView composite list commit - OOM does not double-free" {
 }
 
 test "TreeView composite list fromValue - OOM leaves no orphan pool nodes" {
-    const ListType = FixedListType(Checkpoint, 16);
+    const ListType = FixedListType(Checkpoint, 16, .{});
 
     var list: ListType.Type = .empty;
     defer list.deinit(std.testing.allocator);
@@ -576,7 +596,7 @@ test "TreeView composite list fromValue - OOM leaves no orphan pool nodes" {
     var fail_at: usize = 0;
     while (fail_at < 400) : (fail_at += 1) {
         var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_at, .resize_fail_index = 0 });
-        var pool = Node.Pool.init(failing.allocator(), 0) catch continue;
+        var pool = Node.Pool.init(.{ .page_allocator = failing.allocator(), .allocator = failing.allocator(), .pool_size = 0 }) catch continue;
         defer pool.deinit();
 
         const baseline = pool.getNodesInUse();
@@ -591,7 +611,7 @@ test "TreeView composite list fromValue - OOM leaves no orphan pool nodes" {
 }
 
 test "TreeView composite list deserializeFromBytes - OOM leaves no orphan pool nodes" {
-    const ListType = FixedListType(Checkpoint, 16);
+    const ListType = FixedListType(Checkpoint, 16, .{});
 
     var list: ListType.Type = .empty;
     defer list.deinit(std.testing.allocator);
@@ -604,7 +624,7 @@ test "TreeView composite list deserializeFromBytes - OOM leaves no orphan pool n
     var fail_at: usize = 0;
     while (fail_at < 400) : (fail_at += 1) {
         var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_at, .resize_fail_index = 0 });
-        var pool = Node.Pool.init(failing.allocator(), 0) catch continue;
+        var pool = Node.Pool.init(.{ .page_allocator = failing.allocator(), .allocator = failing.allocator(), .pool_size = 0 }) catch continue;
         defer pool.deinit();
 
         const baseline = pool.getNodesInUse();
@@ -619,7 +639,7 @@ test "TreeView composite list deserializeFromBytes - OOM leaves no orphan pool n
 }
 
 test "TreeView composite list deserializeFromBytes - malformed input errors without leaking" {
-    const ListType = FixedListType(Checkpoint, 16);
+    const ListType = FixedListType(Checkpoint, 16, .{});
 
     var list: ListType.Type = .empty;
     defer list.deinit(std.testing.allocator);
@@ -629,7 +649,7 @@ test "TreeView composite list deserializeFromBytes - malformed input errors with
     defer std.testing.allocator.free(bytes);
     _ = ListType.serializeIntoBytes(&list, bytes);
 
-    var pool = try Node.Pool.init(std.testing.allocator, 512);
+    var pool = try Node.Pool.init(.{ .page_allocator = std.testing.allocator, .allocator = std.testing.allocator, .pool_size = 512 });
     defer pool.deinit();
     const baseline = pool.getNodesInUse();
 
@@ -648,10 +668,10 @@ test "TreeView composite list deserializeFromBytes - malformed input errors with
 
 test "TreeView composite list sliceFrom returns suffix" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 512);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 512 });
     defer pool.deinit();
 
-    const ListType = FixedListType(Checkpoint, 16);
+    const ListType = FixedListType(Checkpoint, 16, .{});
 
     var list: ListType.Type = .empty;
     defer list.deinit(allocator);
@@ -689,10 +709,10 @@ test "TreeView composite list sliceFrom returns suffix" {
 // Refer to https://github.com/ChainSafe/ssz/blob/7f5580c2ea69f9307300ddb6010a8bc7ce2fc471/packages/ssz/test/unit/byType/listComposite/tree.test.ts#L209-L229
 test "TreeView composite list sliceFrom handles boundary conditions" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 1024);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 1024 });
     defer pool.deinit();
 
-    const ListType = FixedListType(Checkpoint, 1024);
+    const ListType = FixedListType(Checkpoint, 1024, .{});
     const list_length = 16;
 
     var list: ListType.Type = .empty;
@@ -761,10 +781,10 @@ test "TreeView composite list sliceFrom handles boundary conditions" {
 
 test "TreeView composite list push appends element" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 512);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 512 });
     defer pool.deinit();
 
-    const ListType = FixedListType(Checkpoint, 8);
+    const ListType = FixedListType(Checkpoint, 8, .{});
 
     var list: ListType.Type = .empty;
     defer list.deinit(allocator);
@@ -799,10 +819,10 @@ test "TreeView composite list push appends element" {
 
 test "TreeView composite list clone isolates updates" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 1024);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 1024 });
     defer pool.deinit();
 
-    const ListType = FixedListType(Checkpoint, 16);
+    const ListType = FixedListType(Checkpoint, 16, .{});
 
     var list: ListType.Type = .empty;
     defer list.deinit(allocator);
@@ -837,10 +857,10 @@ test "TreeView composite list clone isolates updates" {
 
 test "TreeView composite list clone reads committed state" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 1024);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 1024 });
     defer pool.deinit();
 
-    const ListType = FixedListType(Checkpoint, 16);
+    const ListType = FixedListType(Checkpoint, 16, .{});
 
     var list: ListType.Type = .empty;
     defer list.deinit(allocator);
@@ -870,10 +890,10 @@ test "TreeView composite list clone reads committed state" {
 
 test "TreeView composite list clone drops uncommitted changes" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 1024);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 1024 });
     defer pool.deinit();
 
-    const ListType = FixedListType(Checkpoint, 16);
+    const ListType = FixedListType(Checkpoint, 16, .{});
 
     var list: ListType.Type = .empty;
     defer list.deinit(allocator);
@@ -912,10 +932,10 @@ test "TreeView composite list clone drops uncommitted changes" {
 
 test "TreeView composite list clone(false) does not transfer cache" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 512);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 512 });
     defer pool.deinit();
 
-    const ListType = FixedListType(Checkpoint, 16);
+    const ListType = FixedListType(Checkpoint, 16, .{});
 
     var list: ListType.Type = .empty;
     defer list.deinit(allocator);
@@ -939,10 +959,10 @@ test "TreeView composite list clone(false) does not transfer cache" {
 
 test "TreeView composite list clone(true) transfers cache and clears source" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 512);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 512 });
     defer pool.deinit();
 
-    const ListType = FixedListType(Checkpoint, 16);
+    const ListType = FixedListType(Checkpoint, 16, .{});
 
     var list: ListType.Type = .empty;
     defer list.deinit(allocator);
@@ -966,13 +986,13 @@ test "TreeView composite list clone(true) transfers cache and clears source" {
 
 test "TreeView list of list commits inner length updates" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 1024);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 1024 });
     defer pool.deinit();
 
     const Uint32 = UintType(32);
     const Bytes = ByteListType(32);
-    const Numbers = FixedListType(Uint32, 8);
-    const Vec2 = FixedVectorType(Uint32, 2);
+    const Numbers = FixedListType(Uint32, 8, .{});
+    const Vec2 = FixedVectorType(Uint32, 2, .{});
     const InnerElement = VariableContainerType(struct {
         id: Uint32,
         payload: Bytes,
@@ -1143,10 +1163,10 @@ test "TreeView list of list commits inner length updates" {
 // Refer to https://github.com/ChainSafe/ssz/blob/7f5580c2ea69f9307300ddb6010a8bc7ce2fc471/packages/ssz/test/unit/byType/listComposite/tree.test.ts#L182-L207
 test "TreeView composite list sliceTo matches incremental snapshots" {
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 2048);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 2048 });
     defer pool.deinit();
 
-    const ListType = FixedListType(Checkpoint, 1024);
+    const ListType = FixedListType(Checkpoint, 1024, .{});
     const total_values: usize = 16;
 
     var values: [total_values]Checkpoint.Type = undefined;
@@ -1215,9 +1235,9 @@ test "ListCompositeTreeView - serialize (ByteVector32 list)" {
     const allocator = std.testing.allocator;
 
     const Root32 = ByteVectorType(32);
-    const ListRootsType = FixedListType(Root32, 128);
+    const ListRootsType = FixedListType(Root32, 128, .{});
 
-    var pool = try Node.Pool.init(allocator, 1024);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 1024 });
     defer pool.deinit();
 
     const TestCase = struct {
@@ -1283,9 +1303,9 @@ test "ListCompositeTreeView - serialize (Container list)" {
         b: UintType(64),
     });
     _ = Uint64;
-    const ListContainerType = FixedListType(TestContainer, 128);
+    const ListContainerType = FixedListType(TestContainer, 128, .{});
 
-    var pool = try Node.Pool.init(allocator, 1024);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 1024 });
     defer pool.deinit();
 
     const TestCase = struct {
@@ -1354,9 +1374,9 @@ test "ListCompositeTreeView - push and serialize" {
     const allocator = std.testing.allocator;
 
     const Root32 = ByteVectorType(32);
-    const ListRootsType = FixedListType(Root32, 128);
+    const ListRootsType = FixedListType(Root32, 128, .{});
 
-    var pool = try Node.Pool.init(allocator, 1024);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 1024 });
     defer pool.deinit();
 
     var value: ListRootsType.Type = ListRootsType.default_value;
@@ -1393,4 +1413,33 @@ test "ListCompositeTreeView - push and serialize" {
     try view.hashTreeRootInto(&hash_root);
     const expected_root = [_]u8{ 0x0c, 0xb9, 0x47, 0x37, 0x7e, 0x17, 0x7f, 0x77, 0x47, 0x19, 0xea, 0xd8, 0xd2, 0x10, 0xaf, 0x9c, 0x64, 0x61, 0xf4, 0x1b, 0xaf, 0x5b, 0x40, 0x82, 0xf8, 0x6a, 0x39, 0x11, 0x45, 0x48, 0x31, 0xb8 };
     try std.testing.expectEqualSlices(u8, &expected_root, &hash_root);
+}
+
+test "TreeView composite list sliceTo doesn't leak pool nodes" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 1024 });
+    defer pool.deinit();
+
+    const ListType = FixedListType(Checkpoint, 1024, .{});
+    var list: ListType.Type = .empty;
+    defer list.deinit(allocator);
+    for (0..16) |i| try list.append(allocator, .{ .epoch = @intCast(i), .root = [_]u8{@intCast(i)} ** 32 });
+
+    const root_node = try ListType.tree.fromValue(&pool, &list);
+    var view = try ListType.TreeView.init(allocator, &pool, root_node);
+    defer view.deinit();
+
+    {
+        var w = try view.sliceTo(7);
+        w.deinit();
+    }
+
+    const before = pool.getNodesInUse();
+    for (0..50) |_| {
+        var s = try view.sliceTo(7);
+        s.deinit();
+    }
+    const after = pool.getNodesInUse();
+
+    try std.testing.expectEqual(before, after);
 }

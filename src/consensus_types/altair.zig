@@ -47,7 +47,7 @@ pub const SyncAggregate = ssz.FixedContainerType(struct {
 });
 
 pub const SyncCommittee = ssz.FixedContainerType(struct {
-    pubkeys: ssz.FixedVectorType(p.BLSPubkey, preset.SYNC_COMMITTEE_SIZE),
+    pubkeys: ssz.FixedVectorType(p.BLSPubkey, preset.SYNC_COMMITTEE_SIZE, .{}),
     aggregate_pubkey: p.BLSPubkey,
 });
 
@@ -71,8 +71,8 @@ pub const BeaconBlock = ssz.VariableContainerType(struct {
     body: BeaconBlockBody,
 });
 
-pub const InactivityScores = ssz.FixedListType(p.Uint64, preset.VALIDATOR_REGISTRY_LIMIT);
-pub const EpochParticipation = ssz.FixedListType(p.Uint8, preset.VALIDATOR_REGISTRY_LIMIT);
+pub const InactivityScores = ssz.FixedListType(p.Uint64, preset.VALIDATOR_REGISTRY_LIMIT, .{ .chunked_leaf = true });
+pub const EpochParticipation = ssz.FixedListType(p.Uint8, preset.VALIDATOR_REGISTRY_LIMIT, .{ .chunked_leaf = true });
 
 pub const BeaconState = ssz.VariableContainerType(struct {
     genesis_time: p.Uint64,
@@ -144,15 +144,15 @@ pub const LightClientHeader = ssz.FixedContainerType(struct {
 pub const LightClientBootstrap = ssz.FixedContainerType(struct {
     header: LightClientHeader,
     current_sync_committee: SyncCommittee,
-    current_sync_committee_branch: ssz.FixedVectorType(p.Bytes32, std.math.log2(c.CURRENT_SYNC_COMMITTEE_GINDEX)),
+    current_sync_committee_branch: ssz.FixedVectorType(p.Bytes32, std.math.log2(c.CURRENT_SYNC_COMMITTEE_GINDEX), .{}),
 });
 
 pub const LightClientUpdate = ssz.FixedContainerType(struct {
     attested_header: LightClientHeader,
     next_sync_committee: SyncCommittee,
-    next_sync_committee_branch: ssz.FixedVectorType(p.Bytes32, std.math.log2(c.NEXT_SYNC_COMMITTEE_GINDEX)),
+    next_sync_committee_branch: ssz.FixedVectorType(p.Bytes32, std.math.log2(c.NEXT_SYNC_COMMITTEE_GINDEX), .{}),
     finalized_header: LightClientHeader,
-    finality_branch: ssz.FixedVectorType(p.Bytes32, std.math.log2(c.FINALIZED_ROOT_GINDEX)),
+    finality_branch: ssz.FixedVectorType(p.Bytes32, std.math.log2(c.FINALIZED_ROOT_GINDEX), .{}),
     sync_aggregate: SyncAggregate,
     signature_slot: p.Slot,
 });
@@ -160,7 +160,7 @@ pub const LightClientUpdate = ssz.FixedContainerType(struct {
 pub const LightClientFinalityUpdate = ssz.FixedContainerType(struct {
     attested_header: LightClientHeader,
     finalized_header: LightClientHeader,
-    finality_branch: ssz.FixedVectorType(p.Bytes32, std.math.log2(c.FINALIZED_ROOT_GINDEX)),
+    finality_branch: ssz.FixedVectorType(p.Bytes32, std.math.log2(c.FINALIZED_ROOT_GINDEX), .{}),
     sync_aggregate: SyncAggregate,
     signature_slot: p.Slot,
 });
