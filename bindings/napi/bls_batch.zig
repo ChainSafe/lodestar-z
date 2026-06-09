@@ -122,6 +122,9 @@ var queue_wait_hist: QueueWaitHist = .{};
 var agg_rand_hist: AggRandHist = .{};
 var pubkey_agg_hist: PubkeyAggHist = .{};
 var worker_compute_hist: WorkerComputeHist = .{};
+// Cumulative worker compute time (sum of run_fn ns across all jobs). Aggregate analogue
+// of the legacy per-workerId time_seconds; surfaced as time_seconds_sum.
+var run_ns_total: u128 = 0;
 
 const ClockTs = std.Io.Clock.Timestamp;
 
@@ -561,6 +564,7 @@ fn completeJob(env: napi.Env, task: *Task) void {
     if (data.n > 0) worker_compute_hist.observe(task.run_ns / data.n);
     if (data.agg_rand_ns > 0) agg_rand_hist.observe(data.agg_rand_ns);
     if (data.pubkeys_agg_ns > 0) pubkey_agg_hist.observe(data.pubkeys_agg_ns);
+    run_ns_total += task.run_ns;
     settle(env, data) catch {
         rejectWithError(env, data.deferred, "blsBatch", "InternalError") catch {};
     };
@@ -723,6 +727,11 @@ pub fn stats() !js.Value {
     try putHistogram(env, obj, "workerComputePerSigSet", WorkerComputeHist, &worker_compute_hist);
     try putHistogram(env, obj, "aggregateWithRandomness", AggRandHist, &agg_rand_hist);
     try putHistogram(env, obj, "pubkeysAggregation", PubkeyAggHist, &pubkey_agg_hist);
+    // Cumulative worker compute seconds (aggregate analogue of legacy time_seconds_sum).
+    try obj.setNamedProperty(
+        "workerTimeSeconds",
+        try env.createDouble(@as(f64, @floatFromInt(run_ns_total)) * 1e-9),
+    );
 
     if (!initialized) {
         inline for (.{ "workers", "maxInflight", "active", "queued", "running", "freeSlots" }) |name| {

@@ -78,6 +78,8 @@ export interface BlsBatch {
     running: number;
     /** Unused job-pool slots. */
     freeSlots: number;
+    /** Cumulative worker compute seconds (Σ run_fn). Legacy aggregate: time_seconds_sum. */
+    workerTimeSeconds: number;
     /** Queue residency (submit → worker pickup), s. Legacy: queue_job_wait_time_seconds. */
     queueWait: NativeHistogram;
     /** Worker verify compute per sig set, s. Legacy: bls_worker_thread_time_per_sigset_seconds. */
