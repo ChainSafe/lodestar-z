@@ -50,10 +50,10 @@ pub fn processSyncAggregate(
             const root_signed = try getBlockRootAtSlot(fork, state, previous_slot);
             const domain = try config.getDomain(epoch_cache.epoch, c.DOMAIN_SYNC_COMMITTEE, previous_slot);
 
-            const pubkeys = try allocator.alloc(bls.PublicKey, participant_indices.items.len);
+            const pubkeys = try allocator.alloc(*const bls.PublicKey, participant_indices.items.len);
             defer allocator.free(pubkeys);
             for (0..participant_indices.items.len) |i| {
-                pubkeys[i] = epoch_cache.index_to_pubkey.items[participant_indices.items[i]];
+                pubkeys[i] = &epoch_cache.index_to_pubkey.items[participant_indices.items[i]];
             }
 
             var signing_root: Root = undefined;

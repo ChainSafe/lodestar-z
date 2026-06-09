@@ -108,7 +108,7 @@ pub fn fastAggregateVerify(
     buffer: *align(Pairing.buf_align) [Pairing.sizeOf()]u8,
     msg: *const [32]u8,
     dst: []const u8,
-    pks: []const PublicKey,
+    pks: []*const PublicKey,
     pks_validate: bool,
 ) BlstError!bool {
     const agg_pk = try AggregatePublicKey.aggregate(pks, pks_validate);

@@ -16,7 +16,7 @@ pub fn toPublicKey(self: *const Self) PublicKey {
 /// If pks_validate is true, validates each public key before aggregation.
 ///
 /// Returns an error if the slice is empty or if any public key validation fails.
-pub fn aggregate(pks: []const PublicKey, pks_validate: bool) BlstError!Self {
+pub fn aggregate(pks: []*const PublicKey, pks_validate: bool) BlstError!Self {
     if (pks.len == 0) return BlstError.AggrTypeMismatch;
     if (pks_validate) for (pks) |pk| try pk.validate();
 
@@ -132,6 +132,7 @@ test aggregate {
     var msgs: [num_sigs][32]u8 = undefined;
     var sks: [num_sigs]SecretKey = undefined;
     var pks: [num_sigs]PublicKey = undefined;
+    var pk_ptrs: [num_sigs]*const PublicKey = undefined;
     var sigs: [num_sigs]Signature = undefined;
 
     for (0..num_sigs) |i| {
@@ -141,10 +142,11 @@ test aggregate {
 
         sks[i] = sk;
         pks[i] = pk;
+        pk_ptrs[i] = &pks[i];
         sigs[i] = sig;
     }
 
-    _ = try aggregate(pks[0..], true);
+    _ = try aggregate(pk_ptrs[0..], true);
 }
 
 const std = @import("std");

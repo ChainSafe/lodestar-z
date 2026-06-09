@@ -396,12 +396,12 @@ pub fn fastAggregateVerify(msg: js.Uint8Array, pks: js.Array, sig: Signature, si
     const pks_len = try pks.length();
     if (pks_len == 0) return js.Boolean.from(false);
 
-    const native_pks = try allocator.alloc(NativePublicKey, pks_len);
-    defer allocator.free(native_pks);
+    const pk_ptrs = try allocator.alloc(*const NativePublicKey, pks_len);
+    defer allocator.free(pk_ptrs);
 
     for (0..pks_len) |i| {
         const wrapped_pk = try unwrapClass(PublicKey, try pks.get(@intCast(i)));
-        native_pks[i] = wrapped_pk.raw;
+        pk_ptrs[i] = &wrapped_pk.raw;
     }
 
     var pairing_buf: [Pairing.sizeOf()]u8 align(Pairing.buf_align) = undefined;
@@ -411,7 +411,7 @@ pub fn fastAggregateVerify(msg: js.Uint8Array, pks: js.Array, sig: Signature, si
         &pairing_buf,
         msg_slice[0..32],
         DST,
-        native_pks,
+        pk_ptrs,
         false,
     ) catch return js.Boolean.from(false);
 
@@ -519,16 +519,15 @@ pub fn aggregatePublicKeys(pks: js.Array, pks_validate: ?js.Boolean) !PublicKey 
     const pks_len = try pks.length();
     if (pks_len == 0) return error.EmptyPublicKeyArray;
 
-    const native_pks = try allocator.alloc(NativePublicKey, pks_len);
-    defer allocator.free(native_pks);
+    const pk_ptrs = try allocator.alloc(*const NativePublicKey, pks_len);
+    defer allocator.free(pk_ptrs);
 
     for (0..pks_len) |i| {
         const wrapped = try unwrapClass(PublicKey, try pks.get(@intCast(i)));
-        native_pks[i] = wrapped.raw;
+        pk_ptrs[i] = &wrapped.raw;
     }
 
-    const agg_pk = AggregatePublicKey.aggregate(native_pks, try boolOrDefault(pks_validate, false)) catch
-        return error.AggregationFailed;
+    const agg_pk = AggregatePublicKey.aggregate(pk_ptrs, try boolOrDefault(pks_validate, false)) catch return error.AggregationFailed;
 
     return .{ .raw = agg_pk.toPublicKey() };
 }
@@ -544,13 +543,16 @@ pub fn aggregateSerializedPublicKeys(serialized_public_keys: js.Array, pks_valid
 
     const native_pks = try allocator.alloc(NativePublicKey, pks_len);
     defer allocator.free(native_pks);
+    const pk_ptrs = try allocator.alloc(*const NativePublicKey, pks_len);
+    defer allocator.free(pk_ptrs);
 
     for (0..pks_len) |i| {
         const bytes = try uint8SliceFromValue(try serialized_public_keys.get(@intCast(i)));
         native_pks[i] = NativePublicKey.deserialize(bytes) catch return error.DeserializationFailed;
+        pk_ptrs[i] = &native_pks[i];
     }
 
-    const agg_pk = AggregatePublicKey.aggregate(native_pks, try boolOrDefault(pks_validate, false)) catch
+    const agg_pk = AggregatePublicKey.aggregate(pk_ptrs, try boolOrDefault(pks_validate, false)) catch
         return error.AggregationFailed;
 
     return .{ .raw = agg_pk.toPublicKey() };
