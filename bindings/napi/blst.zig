@@ -396,12 +396,12 @@ pub fn fastAggregateVerify(msg: js.Uint8Array, pks: js.Array, sig: Signature, si
     const pks_len = try pks.length();
     if (pks_len == 0) return js.Boolean.from(false);
 
-    const native_pks = try allocator.alloc(NativePublicKey, pks_len);
-    defer allocator.free(native_pks);
+    const pk_ptrs = try allocator.alloc(*const NativePublicKey, pks_len);
+    defer allocator.free(pk_ptrs);
 
     for (0..pks_len) |i| {
         const wrapped_pk = try unwrapClass(PublicKey, try pks.get(@intCast(i)));
-        native_pks[i] = wrapped_pk.raw;
+        pk_ptrs[i] = &wrapped_pk.raw;
     }
 
     var pairing_buf: [Pairing.sizeOf()]u8 align(Pairing.buf_align) = undefined;
@@ -411,7 +411,7 @@ pub fn fastAggregateVerify(msg: js.Uint8Array, pks: js.Array, sig: Signature, si
         &pairing_buf,
         msg_slice[0..32],
         DST,
-        native_pks,
+        pk_ptrs,
         false,
     ) catch return js.Boolean.from(false);
 
@@ -429,17 +429,40 @@ pub fn verifyMultipleAggregateSignatures(sets: js.Array, pks_validate: ?js.Boole
     const n_elems = try sets.length();
     if (n_elems == 0) return js.Boolean.from(false);
 
-    const msgs = try allocator.alloc([32]u8, n_elems);
-    defer allocator.free(msgs);
+    var msgs_stack: [MAX_AGGREGATE_PER_JOB][]const u8 = undefined;
+    var pks_stack: [MAX_AGGREGATE_PER_JOB]*NativePublicKey = undefined;
+    var sigs_stack: [MAX_AGGREGATE_PER_JOB]*NativeSignature = undefined;
+    var rands_stack: [MAX_AGGREGATE_PER_JOB][32]u8 = undefined;
 
-    const pks = try allocator.alloc(*NativePublicKey, n_elems);
-    defer allocator.free(pks);
+    var msgs_heap: ?[][]const u8 = null;
+    defer if (msgs_heap) |buf| allocator.free(buf);
+    var pks_heap: ?[]*NativePublicKey = null;
+    defer if (pks_heap) |buf| allocator.free(buf);
+    var sigs_heap: ?[]*NativeSignature = null;
+    defer if (sigs_heap) |buf| allocator.free(buf);
+    var rands_heap: ?[][32]u8 = null;
+    defer if (rands_heap) |buf| allocator.free(buf);
 
-    const sigs = try allocator.alloc(*NativeSignature, n_elems);
-    defer allocator.free(sigs);
-
-    const rands = try allocator.alloc([32]u8, n_elems);
-    defer allocator.free(rands);
+    const msgs = if (n_elems <= MAX_AGGREGATE_PER_JOB) msgs_stack[0..n_elems] else blk: {
+        const buf = try allocator.alloc([]const u8, n_elems);
+        msgs_heap = buf;
+        break :blk buf;
+    };
+    const pks = if (n_elems <= MAX_AGGREGATE_PER_JOB) pks_stack[0..n_elems] else blk: {
+        const buf = try allocator.alloc(*NativePublicKey, n_elems);
+        pks_heap = buf;
+        break :blk buf;
+    };
+    const sigs = if (n_elems <= MAX_AGGREGATE_PER_JOB) sigs_stack[0..n_elems] else blk: {
+        const buf = try allocator.alloc(*NativeSignature, n_elems);
+        sigs_heap = buf;
+        break :blk buf;
+    };
+    const rands = if (n_elems <= MAX_AGGREGATE_PER_JOB) rands_stack[0..n_elems] else blk: {
+        const buf = try allocator.alloc([32]u8, n_elems);
+        rands_heap = buf;
+        break :blk buf;
+    };
 
     var seed_bytes: [8]u8 = undefined;
     const io = napi_io.get();
@@ -454,7 +477,7 @@ pub fn verifyMultipleAggregateSignatures(sets: js.Array, pks_validate: ?js.Boole
         const msg_napi = try set.getNamedProperty("msg");
         const msg_bytes = try uint8SliceFromValue(.{ .val = msg_napi });
         if (msg_bytes.len != 32) return error.InvalidMessageLength;
-        @memcpy(&msgs[i], msg_bytes[0..32]);
+        msgs[i] = msg_bytes;
 
         const pk_napi = try set.getNamedProperty("pk");
         const wrapped_pk = try e.unwrap(PublicKey, pk_napi);
@@ -518,16 +541,23 @@ pub fn aggregateSignatures(signatures: js.Array, sigs_groupcheck: ?js.Boolean) !
 pub fn aggregatePublicKeys(pks: js.Array, pks_validate: ?js.Boolean) !PublicKey {
     const pks_len = try pks.length();
     if (pks_len == 0) return error.EmptyPublicKeyArray;
+    const validate = try boolOrDefault(pks_validate, false);
 
-    const native_pks = try allocator.alloc(NativePublicKey, pks_len);
-    defer allocator.free(native_pks);
+    if (pks_len == 1) {
+        const wrapped = try unwrapClass(PublicKey, try pks.get(0));
+        if (validate) wrapped.raw.validate() catch return error.AggregationFailed;
+        return .{ .raw = wrapped.raw };
+    }
+
+    var pk_ptrs = try allocator.alloc(*const NativePublicKey, pks_len);
+    defer allocator.free(pk_ptrs);
 
     for (0..pks_len) |i| {
         const wrapped = try unwrapClass(PublicKey, try pks.get(@intCast(i)));
-        native_pks[i] = wrapped.raw;
+        pk_ptrs[i] = &wrapped.raw;
     }
 
-    const agg_pk = AggregatePublicKey.aggregate(native_pks, try boolOrDefault(pks_validate, false)) catch
+    const agg_pk = AggregatePublicKey.aggregate(pk_ptrs, validate) catch
         return error.AggregationFailed;
 
     return .{ .raw = agg_pk.toPublicKey() };
@@ -545,12 +575,16 @@ pub fn aggregateSerializedPublicKeys(serialized_public_keys: js.Array, pks_valid
     const native_pks = try allocator.alloc(NativePublicKey, pks_len);
     defer allocator.free(native_pks);
 
+    const pk_ptrs = try allocator.alloc(*const NativePublicKey, pks_len);
+    defer allocator.free(pk_ptrs);
+
     for (0..pks_len) |i| {
         const bytes = try uint8SliceFromValue(try serialized_public_keys.get(@intCast(i)));
         native_pks[i] = NativePublicKey.deserialize(bytes) catch return error.DeserializationFailed;
+        pk_ptrs[i] = &native_pks[i];
     }
 
-    const agg_pk = AggregatePublicKey.aggregate(native_pks, try boolOrDefault(pks_validate, false)) catch
+    const agg_pk = AggregatePublicKey.aggregate(pk_ptrs, try boolOrDefault(pks_validate, false)) catch
         return error.AggregationFailed;
 
     return .{ .raw = agg_pk.toPublicKey() };

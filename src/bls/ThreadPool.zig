@@ -196,7 +196,7 @@ pub fn submitAndWait(pool: *ThreadPool, io: std.Io, items: []*WorkItem) (PoolErr
 const VerifyMultiJob = struct {
     pks: []const *PublicKey,
     sigs: []const *Signature,
-    msgs: []const [32]u8,
+    msgs: []const []const u8,
     rands: []const [32]u8,
     dst: []const u8,
     pks_validate: bool,
@@ -231,7 +231,7 @@ const VerifyMultiWorkItem = struct {
                 job.sigs_groupcheck,
                 &job.rands[i],
                 RAND_BITS,
-                &job.msgs[i],
+                job.msgs[i],
             ) catch {
                 job.err_flag.store(true, .release);
                 break;
@@ -251,7 +251,7 @@ pub fn verifyMultipleAggregateSignatures(
     pool: *ThreadPool,
     io: std.Io,
     n_elems: usize,
-    msgs: []const [32]u8,
+    msgs: []const []const u8,
     dst: []const u8,
     pks: []const *PublicKey,
     pks_validate: bool,
@@ -492,6 +492,7 @@ test "verifyMultipleAggregateSignatures multi-threaded" {
     const num_sigs = 16;
 
     var msgs: [num_sigs][32]u8 = undefined;
+    var msg_refs: [num_sigs][]const u8 = undefined;
     var pks: [num_sigs]PublicKey = undefined;
     var sigs: [num_sigs]Signature = undefined;
     var pk_ptrs: [num_sigs]*PublicKey = undefined;
@@ -511,6 +512,7 @@ test "verifyMultipleAggregateSignatures multi-threaded" {
         const sk = try SecretKey.keyGen(&ikm_i, null);
         pks[i] = sk.toPublicKey();
         sigs[i] = sk.sign(&msgs[i], blst.DST, null);
+        msg_refs[i] = &msgs[i];
         pk_ptrs[i] = &pks[i];
         sig_ptrs[i] = &sigs[i];
     }
@@ -521,7 +523,7 @@ test "verifyMultipleAggregateSignatures multi-threaded" {
     const result = try pool.verifyMultipleAggregateSignatures(
         std.testing.io,
         num_sigs,
-        &msgs,
+        &msg_refs,
         blst.DST,
         &pk_ptrs,
         true,

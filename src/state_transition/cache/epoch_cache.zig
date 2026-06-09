@@ -330,6 +330,23 @@ pub const EpochCache = struct {
                         }
                     },
                 }
+            } else if (next_shuffling_rc.get().active_indices.len > 0) {
+                var next_proposer_seed: [32]u8 = undefined;
+                switch (state.forkSeq()) {
+                    inline else => |f| try getSeed(f, state.castToFork(f), next_epoch, c.DOMAIN_BEACON_PROPOSER, &next_proposer_seed),
+                }
+                next_proposers = undefined;
+                switch (fork_seq) {
+                    inline else => |f| try computeProposers(
+                        f,
+                        allocator,
+                        next_proposer_seed,
+                        next_epoch,
+                        next_shuffling_rc.get().active_indices,
+                        effective_balance_increments,
+                        &next_proposers.?,
+                    ),
+                }
             }
         }
 

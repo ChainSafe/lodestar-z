@@ -1,6 +1,6 @@
 {
   "name": "@chainsafe/lodestar-z",
-  "version": "0.1.2-rc.6",
+  "version": "0.1.2-rc.7",
   "description": "Lodestar-z NAPI bindings",
   "files": [
     "bindings/src/",
@@ -22,7 +22,7 @@
     }
   },
   "scripts": {
-    "prepare": "zig build build-lib:bindings -Doptimize=ReleaseSafe",
+    "prepare": "zig build build-lib:bindings -Doptimize=ReleaseFast",
     "lint": "biome check",
     "test": "NODE_OPTIONS='--expose-gc' vitest run bindings/test/*.test.ts"
   },

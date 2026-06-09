@@ -12,18 +12,18 @@ pub fn toPublicKey(self: *const Self) PublicKey {
     return pk;
 }
 
-/// Aggregates multiple public keys into a single aggregate public key.
-/// If pks_validate is true, validates each public key before aggregation.
-///
-/// Returns an error if the slice is empty or if any public key validation fails.
-pub fn aggregate(pks: []const PublicKey, pks_validate: bool) BlstError!Self {
+/// Aggregates multiple public keys referenced by pointer.
+/// This is useful for bindings that already hold native `PublicKey` objects and
+/// should not copy each affine point into a temporary array before aggregation.
+pub fn aggregate(pks: []const *const PublicKey, pks_validate: bool) BlstError!Self {
     if (pks.len == 0) return BlstError.AggrTypeMismatch;
-    if (pks_validate) for (pks) |pk| try pk.validate();
+    if (pks_validate) try pks[0].validate();
 
     var agg_pk = Self{};
     c.blst_p1_from_affine(&agg_pk.point, &pks[0].point);
-    for (1..pks.len) |i| {
-        c.blst_p1_add_or_double_affine(&agg_pk.point, &agg_pk.point, &pks[i].point);
+    for (pks[1..]) |pk| {
+        if (pks_validate) try pk.validate();
+        c.blst_p1_add_or_double_affine(&agg_pk.point, &agg_pk.point, &pk.point);
     }
     return agg_pk;
 }
@@ -127,24 +127,18 @@ test aggregate {
         0x48, 0x99,
     };
 
-    const num_sigs = MAX_AGGREGATE_PER_JOB;
+    const num_sigs = 16;
 
-    var msgs: [num_sigs][32]u8 = undefined;
-    var sks: [num_sigs]SecretKey = undefined;
     var pks: [num_sigs]PublicKey = undefined;
-    var sigs: [num_sigs]Signature = undefined;
+    var pk_refs: [num_sigs]*const PublicKey = undefined;
 
     for (0..num_sigs) |i| {
         const sk = try SecretKey.keyGen(&ikm, null);
-        const pk = sk.toPublicKey();
-        const sig = sk.sign(&msgs[i], DST, null);
-
-        sks[i] = sk;
-        pks[i] = pk;
-        sigs[i] = sig;
+        pks[i] = sk.toPublicKey();
+        pk_refs[i] = &pks[i];
     }
 
-    _ = try aggregate(pks[0..], true);
+    _ = (try aggregate(pk_refs[0..], true)).toPublicKey();
 }
 
 const std = @import("std");

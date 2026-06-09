@@ -11,6 +11,7 @@ const napi_io = @import("./io.zig");
 const allocator = std.heap.page_allocator;
 
 const default_initial_capacity: u32 = 0;
+const max_stack_aggregate_pubkeys = 512;
 
 pub const State = struct {
     pubkey2index: PubkeyIndexMap = undefined,
@@ -173,6 +174,46 @@ pub fn get(index: js.Number) !?blst_bindings.PublicKey {
     if (idx >= state.index2pubkey.items.len) return null;
 
     return .{ .raw = state.index2pubkey.items[@intCast(idx)] };
+}
+
+/// Aggregate multiple `PublicKey`s by the given
+/// validator `indices` into one.
+///
+/// Validation is not required here since it is done upon
+/// processing validator deposits.
+///
+/// JS: pubkeys.aggregate(indices) → PublicKey
+pub fn aggregate(indices: js.Array) !blst_bindings.PublicKey {
+    if (!state.initialized) return error.PubkeyIndexNotInitialized;
+
+    const len = try indices.length();
+    if (len == 0) return error.EmptyPublicKeyArray;
+
+    if (len == 1) {
+        const idx = try (try indices.getNumber(0)).toU32();
+        if (idx >= state.index2pubkey.items.len) return error.PubkeyIndexNotFound;
+        return .{ .raw = state.index2pubkey.items[@intCast(idx)] };
+    }
+
+    var pk_ptrs_stack: [max_stack_aggregate_pubkeys]*const bls.PublicKey = undefined;
+    const pk_ptrs = if (len <= pk_ptrs_stack.len)
+        pk_ptrs_stack[0..len]
+    else blk: {
+        const buf = try allocator.alloc(*const bls.PublicKey, len);
+        break :blk buf;
+    };
+    defer if (len > pk_ptrs_stack.len) allocator.free(pk_ptrs);
+
+    for (0..len) |i| {
+        const idx = try (try indices.getNumber(@intCast(i))).toU32();
+        if (idx >= state.index2pubkey.items.len) return error.PubkeyIndexNotFound;
+        pk_ptrs[i] = &state.index2pubkey.items[@intCast(idx)];
+    }
+
+    const agg_pk = bls.AggregatePublicKey.aggregate(pk_ptrs, false) catch
+        return error.AggregationFailed;
+
+    return .{ .raw = agg_pk.toPublicKey() };
 }
 
 /// JS: pubkeys.set(index, pubkeyBytes)

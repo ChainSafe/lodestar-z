@@ -275,6 +275,15 @@ describe("blst", () => {
     });
   });
 
+  describe("aggregatePublicKeys", () => {
+    it("should return the same public key for a single-key aggregate", () => {
+      const {pk} = getTestSet(0);
+      const agg = aggregatePublicKeys([pk], false);
+      expect(agg).toBeInstanceOf(PublicKey);
+      expectEqualHex(agg.toBytes(), pk.toBytes());
+    });
+  });
+
   describe("aggregateSerializedPublicKeys", () => {
     it("should aggregate compressed (48-byte) public keys", () => {
       const sets = getTestSets(3);
@@ -382,8 +391,15 @@ describe("blst", () => {
       expect(result.sig).toBeInstanceOf(Signature);
     });
 
-    it("should produce a valid aggregated signature", async () => {
+    it("should produce a valid aggregated signature - small MSM", async () => {
       const {msg, sets} = getTestSetsSameMessage(8);
+      const input = sets.map((s) => ({pk: s.pk, sig: s.sig.toBytes()}));
+      const {pk, sig} = await asyncAggregateWithRandomness(input);
+      expect(verify(msg, pk, sig, false, false)).toBe(true);
+    });
+
+    it("should produce a valid aggregated signature - tiled MSM", async () => {
+      const {msg, sets} = getTestSetsSameMessage(33);
       const input = sets.map((s) => ({pk: s.pk, sig: s.sig.toBytes()}));
       const {pk, sig} = await asyncAggregateWithRandomness(input);
       expect(verify(msg, pk, sig, false, false)).toBe(true);
