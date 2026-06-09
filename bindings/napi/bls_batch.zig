@@ -79,6 +79,63 @@ const SetKind = enum(u32) {
 };
 
 // ---------------------------------------------------------------------------
+// Latency histograms
+//
+// Native-bucketed histograms for the three internal timings the JS layer cannot
+// observe directly (they happen on a worker thread, or before dispatch). Each
+// observation is just a cumulative bucket increment done on the loop thread (in
+// `completeJob`); the verify hot path only reads a monotonic clock and stamps a
+// nanosecond duration on the job slot. No locks. Bucket bounds mirror the legacy
+// lodestar_bls_thread_pool_* histograms so native and unstable overlay exactly.
+// ---------------------------------------------------------------------------
+
+fn LatencyHistogram(comptime bounds: []const f64) type {
+    return struct {
+        const Self = @This();
+        pub const le_bounds = bounds;
+        /// Cumulative bucket counts: counts[i] = observations with seconds ≤ bounds[i].
+        counts: [bounds.len]u64 = [_]u64{0} ** bounds.len,
+        total: u64 = 0,
+        sum_ns: u128 = 0,
+
+        fn observe(self: *Self, ns: u64) void {
+            self.total += 1;
+            self.sum_ns += ns;
+            const sec = @as(f64, @floatFromInt(ns)) * 1e-9;
+            inline for (bounds, 0..) |b, i| {
+                if (sec <= b) self.counts[i] += 1;
+            }
+        }
+    };
+}
+
+// Bounds copied verbatim (sorted) from the legacy histogram definitions.
+const QueueWaitHist = LatencyHistogram(&.{ 0.01, 0.02, 0.1, 0.3, 0.5, 1 });
+const AggRandHist = LatencyHistogram(&.{ 0.001, 0.005, 0.01, 0.1, 0.3 });
+const PubkeyAggHist = LatencyHistogram(&.{ 0.001, 0.005, 0.01, 0.1 });
+// Worker compute (run_fn) seconds per signature set — the honest equivalent of the
+// legacy worker_thread_time_per_sigset (verify compute only, excludes queue/dispatch).
+const WorkerComputeHist = LatencyHistogram(&.{ 0.5e-3, 0.75e-3, 1e-3, 1.5e-3, 2e-3, 5e-3 });
+
+// Loop-thread-only state: observed in completeJob, read in stats(). No lock.
+var queue_wait_hist: QueueWaitHist = .{};
+var agg_rand_hist: AggRandHist = .{};
+var pubkey_agg_hist: PubkeyAggHist = .{};
+var worker_compute_hist: WorkerComputeHist = .{};
+
+const ClockTs = std.Io.Clock.Timestamp;
+
+fn nowTs() ClockTs {
+    return ClockTs.now(napi_io.get(), .awake);
+}
+
+/// Monotonic (CLOCK_MONOTONIC) duration in ns from `start` to now (clamped ≥ 0).
+fn elapsedNs(start: ClockTs) u64 {
+    const ns = start.durationTo(nowTs()).raw.nanoseconds;
+    return if (ns > 0) @intCast(ns) else 0;
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -183,7 +240,7 @@ fn parseIndexedSets(sets: js.Array, n: usize, msgs: [][32]u8, pks: []PublicKey, 
 }
 
 /// Parse {indices, message, signature} sets, aggregating pubkeys per set.
-fn parseAggregateSets(sets: js.Array, n: usize, msgs: [][32]u8, pks: []PublicKey, sigs: []Signature) !void {
+fn parseAggregateSets(sets: js.Array, n: usize, msgs: [][32]u8, pks: []PublicKey, sigs: []Signature, agg_ns: ?*u64) !void {
     for (0..n) |i| {
         const set = (try sets.get(@intCast(i))).toValue();
 
@@ -202,6 +259,7 @@ fn parseAggregateSets(sets: js.Array, n: usize, msgs: [][32]u8, pks: []PublicKey
             // Incremental aggregation: accumulate in projective coords
             // one pubkey at a time from the cache — no temp buffer needed.
             // TODO add this to upstream blst-z?
+            const t0: ?ClockTs = if (agg_ns != null) nowTs() else null;
             var agg: blst.c.blst_p1 = undefined;
             blst.c.blst_p1_from_affine(&agg, &(try getPubkey(first_idx)).point);
             for (1..indices_len) |j| {
@@ -209,6 +267,9 @@ fn parseAggregateSets(sets: js.Array, n: usize, msgs: [][32]u8, pks: []PublicKey
                 blst.c.blst_p1_add_or_double_affine(&agg, &agg, &(try getPubkey(idx)).point);
             }
             blst.c.blst_p1_to_affine(&pks[i].point, &agg);
+            if (agg_ns) |out| if (t0) |t| {
+                out.* += elapsedNs(t);
+            };
         }
 
         sigs[i] = try deserializeSig(try set.getNamedProperty("signature"));
@@ -240,11 +301,12 @@ fn parseSameMessageSets(sets: js.Array, n: usize, pks: []PublicKey, sigs: []Sign
     }
 }
 
-/// Dispatch to the correct parser based on kind.
-fn parseSets(kind: SetKind, sets: js.Array, n: usize, msgs: [][32]u8, pks: []PublicKey, sigs: []Signature) !void {
+/// Dispatch to the correct parser based on kind. `agg_ns`, when non-null, accumulates
+/// pubkey-aggregation time (ns) for the aggregate kind (async path metrics only).
+fn parseSets(kind: SetKind, sets: js.Array, n: usize, msgs: [][32]u8, pks: []PublicKey, sigs: []Signature, agg_ns: ?*u64) !void {
     switch (kind) {
         .indexed => try parseIndexedSets(sets, n, msgs, pks, sigs),
-        .aggregate => try parseAggregateSets(sets, n, msgs, pks, sigs),
+        .aggregate => try parseAggregateSets(sets, n, msgs, pks, sigs, agg_ns),
         .single => try parseSingleSets(sets, n, msgs, pks, sigs),
     }
 }
@@ -266,7 +328,7 @@ pub fn verify(kind_num: js.Number, sets: js.Array) !js.Boolean {
     var sigs: [MAX_SETS_PER_JOB]Signature = undefined;
     var rands: [MAX_SETS_PER_JOB][RAND_BYTES]u8 = undefined;
 
-    try parseSets(kind, sets, n, msgs[0..n], pks[0..n], sigs[0..n]);
+    try parseSets(kind, sets, n, msgs[0..n], pks[0..n], sigs[0..n], null);
 
     return js.Boolean.from(try batchVerify(msgs[0..n], pks[0..n], sigs[0..n], rands[0..n], kind == .single));
 }
@@ -291,6 +353,12 @@ const AsyncJobData = struct {
 
     result: bool = false,
     err: ?anyerror = null,
+
+    /// Per-job timing in ns, stamped during the job and observed in completeJob.
+    /// `agg_rand_ns` = aggregateWithRandomness (worker, same-message path);
+    /// `pubkeys_agg_ns` = pubkey aggregation (loop thread, aggregate kind). 0 = none.
+    agg_rand_ns: u64 = 0,
+    pubkeys_agg_ns: u64 = 0,
 
     deferred: napi.Deferred = undefined,
 };
@@ -434,6 +502,7 @@ fn sameMessageExecute(data: *AsyncJobData) void {
 
     var scratch: [MAX_SCRATCH_SIZE]u64 = undefined;
 
+    const agg_start = nowTs();
     const agg_pk = AggregatePublicKey.aggregateWithRandomness(
         pk_refs[0..n],
         std.mem.sliceAsBytes(rands[0..n]),
@@ -453,6 +522,7 @@ fn sameMessageExecute(data: *AsyncJobData) void {
         data.err = err;
         return;
     };
+    data.agg_rand_ns = elapsedNs(agg_start);
 
     const pk = agg_pk.toPublicKey();
     const sig = agg_sig.toSignature();
@@ -484,6 +554,13 @@ fn fillNonZeroSameMessageRands(rands: [][32]u8) void {
 fn completeJob(env: napi.Env, task: *Task) void {
     const data: *AsyncJobData = @fieldParentPtr("task", task);
     defer pool.push(data);
+    // Observe per-job latencies (loop thread only; cheap cumulative bucket math).
+    // Every async job has a real queue residency (possibly ~0ns on an idle pool), so
+    // it is always observed. agg_rand/pubkeys are 0 unless that work ran this job.
+    queue_wait_hist.observe(task.queue_wait_ns);
+    if (data.n > 0) worker_compute_hist.observe(task.run_ns / data.n);
+    if (data.agg_rand_ns > 0) agg_rand_hist.observe(data.agg_rand_ns);
+    if (data.pubkeys_agg_ns > 0) pubkey_agg_hist.observe(data.pubkeys_agg_ns);
     settle(env, data) catch {
         rejectWithError(env, data.deferred, "blsBatch", "InternalError") catch {};
     };
@@ -545,7 +622,9 @@ pub fn asyncVerify(kind_num: js.Number, sets: js.Array) !js.Value {
     data.kind = .batch;
     data.n = n;
     data.pk_validate = kind == .single;
-    try parseSets(kind, sets, n, data.msgs[0..n], data.pks[0..n], data.sigs[0..n]);
+    data.agg_rand_ns = 0;
+    data.pubkeys_agg_ns = 0;
+    try parseSets(kind, sets, n, data.msgs[0..n], data.pks[0..n], data.sigs[0..n], &data.pubkeys_agg_ns);
 
     return try queueJob(env, data);
 }
@@ -567,6 +646,8 @@ pub fn asyncVerifySameMessage(sets: js.Array, message: js.Uint8Array) !js.Value 
     data.kind = .same_message;
     data.n = n;
     data.msg = msg_slice[0..32].*;
+    data.agg_rand_ns = 0;
+    data.pubkeys_agg_ns = 0;
     try parseSameMessageSets(sets, n, data.pks[0..n], data.sigs[0..n]);
 
     return try queueJob(env, data);
@@ -597,6 +678,67 @@ pub fn init(max_jobs: js.Number) !void {
 pub fn canAcceptWork() !js.Boolean {
     const env = js.env();
     return js.Boolean.from(pool.initialized and pool.canAcceptWork() and worker_pool.isReadyForEnv(env));
+}
+
+/// JS: blsBatch.stats() → object — real, point-in-time native pool occupancy for
+/// metrics/observability. Every field is a measured count (no derived/fake values):
+///   workers     — worker threads in the pool
+///   maxInflight — admission capacity (job-pool slot count)
+///   active      — jobs submitted but not yet completed (queued + running + settling)
+///   queued      — jobs admitted but not yet picked up by a worker
+///   running     — workers currently executing verification
+///   freeSlots   — unused job-pool slots
+/// Returns zeros (initialized=false) before init so the JS gauge wiring is always
+/// well-defined.
+/// Attach a histogram as `{bounds:[le...], counts:[cumulative...], sum, count}`.
+/// `bounds`/`counts` are parallel; the JS layer emits `_bucket{le}` / `_sum` / `_count`.
+fn putHistogram(env: napi.Env, obj: napi.Value, name: [:0]const u8, comptime H: type, hist: *const H) !void {
+    const h = try env.createObject();
+    const bounds_arr = try env.createArrayWithLength(H.le_bounds.len);
+    const counts_arr = try env.createArrayWithLength(H.le_bounds.len);
+    inline for (H.le_bounds, 0..) |b, i| {
+        try bounds_arr.setElement(@intCast(i), try env.createDouble(b));
+        try counts_arr.setElement(@intCast(i), try env.createDouble(@floatFromInt(hist.counts[i])));
+    }
+    try h.setNamedProperty("bounds", bounds_arr);
+    try h.setNamedProperty("counts", counts_arr);
+    try h.setNamedProperty("sum", try env.createDouble(@as(f64, @floatFromInt(hist.sum_ns)) * 1e-9));
+    try h.setNamedProperty("count", try env.createDouble(@floatFromInt(hist.total)));
+    try obj.setNamedProperty(name, h);
+}
+
+pub fn stats() !js.Value {
+    const env = js.env();
+    const obj = try env.createObject();
+
+    const initialized = pool.initialized and worker_pool.initialized;
+    try obj.setNamedProperty("initialized", try env.getBoolean(initialized));
+    try obj.setNamedProperty(
+        "canAcceptWork",
+        try env.getBoolean(initialized and pool.canAcceptWork() and worker_pool.isReadyForEnv(env)),
+    );
+
+    // Latency histograms are cumulative and valid regardless of init state.
+    try putHistogram(env, obj, "queueWait", QueueWaitHist, &queue_wait_hist);
+    try putHistogram(env, obj, "workerComputePerSigSet", WorkerComputeHist, &worker_compute_hist);
+    try putHistogram(env, obj, "aggregateWithRandomness", AggRandHist, &agg_rand_hist);
+    try putHistogram(env, obj, "pubkeysAggregation", PubkeyAggHist, &pubkey_agg_hist);
+
+    if (!initialized) {
+        inline for (.{ "workers", "maxInflight", "active", "queued", "running", "freeSlots" }) |name| {
+            try obj.setNamedProperty(name, try env.createUint32(0));
+        }
+        return .{ .val = obj };
+    }
+
+    const ws = worker_pool.stats();
+    try obj.setNamedProperty("workers", try env.createUint32(ws.workers));
+    try obj.setNamedProperty("maxInflight", try env.createUint32(@intCast(ws.max_inflight)));
+    try obj.setNamedProperty("active", try env.createUint32(@intCast(ws.active)));
+    try obj.setNamedProperty("queued", try env.createUint32(@intCast(ws.queued)));
+    try obj.setNamedProperty("running", try env.createUint32(@intCast(ws.running)));
+    try obj.setNamedProperty("freeSlots", try env.createUint32(@intCast(pool.free_count)));
+    return .{ .val = obj };
 }
 
 fn configuredBlsWorkerCount(max_jobs: u32) !u32 {

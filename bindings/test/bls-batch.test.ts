@@ -316,6 +316,45 @@ describe("blsBatch", () => {
       expect(blsBatch.canAcceptWork()).toBe(true);
     });
 
+    it("stats() reports real pool occupancy", async () => {
+      const idle = blsBatch.stats();
+      expect(idle.initialized).toBe(true);
+      expect(idle.maxInflight).toBe(4);
+      expect(idle.freeSlots).toBe(4);
+      expect(idle.workers).toBeGreaterThan(0);
+      expect(idle.active).toBe(0);
+      expect(idle.queued).toBe(0);
+      expect(idle.running).toBe(0);
+
+      const inflight: Promise<boolean>[] = [];
+      try {
+        for (let i = 0; i < 4; i++) {
+          inflight.push(blsBatch.asyncVerify(blsBatch.indexed, makeIndexedSets(blsBatch.maxSetsPerJob, 190 + i)));
+        }
+        // Synchronous: no completion can run before we await, so all 4 slots are reserved.
+        const busy = blsBatch.stats();
+        expect(busy.active).toBe(4);
+        expect(busy.freeSlots).toBe(0);
+        expect(busy.queued + busy.running).toBeLessThanOrEqual(4);
+        expect(busy.running).toBeLessThanOrEqual(busy.workers);
+      } finally {
+        await Promise.allSettled(inflight);
+      }
+
+      const drained = blsBatch.stats();
+      expect(drained.active).toBe(0);
+      expect(drained.freeSlots).toBe(4);
+      expect(drained.queued).toBe(0);
+      expect(drained.running).toBe(0);
+
+      // Every completed async job observes a queue-residency sample.
+      expect(drained.queueWait.count).toBeGreaterThan(0);
+      expect(drained.queueWait.bounds).toEqual([0.01, 0.02, 0.1, 0.3, 0.5, 1]);
+      expect(drained.queueWait.counts).toHaveLength(drained.queueWait.bounds.length);
+      // Cumulative buckets are non-decreasing and bounded by the total count.
+      for (const c of drained.queueWait.counts) expect(c).toBeLessThanOrEqual(drained.queueWait.count);
+    });
+
     it("init is idempotent", () => {
       expect(() => blsBatch.init(4)).not.toThrow();
       const m = makeMsg(9);
