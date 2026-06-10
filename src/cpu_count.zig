@@ -154,7 +154,10 @@ const Subsys = struct {
         var it = std.mem.splitScalar(u8, line, ':');
         _ = it.next() orelse return null; // hierarchy id
         const subsystems = it.next() orelse return null;
-        const base = it.next() orelse return null;
+        // The path may itself contain ':' (containerd cgroupfs naming), so take
+        // the whole remainder rather than the next ':'-field.
+        const base = it.rest();
+        if (base.len == 0) return null;
 
         const version: CgroupVersion = if (subsystems.len == 0) .v2 else .v1;
         if (version == .v1 and !hasCsvItem(subsystems, "cpu")) return null;
@@ -353,6 +356,13 @@ test "Subsys.parseLine" {
     try expectSubsys(Subsys.parseLine("11:cpu,cpuacct:/docker/01abcd"), .v1, "/docker/01abcd");
     try expectSubsys(Subsys.parseLine("0::/foo"), .v2, "/foo");
     try expectSubsys(Subsys.parseLine("5:memory:/foo"), null, ""); // no cpu controller
+    try expectSubsys(Subsys.parseLine("11:cpu,cpuacct:/a:b"), .v1, "/a:b"); // ':' in path
+    try expectSubsys(
+        Subsys.parseLine("0::/kubepods-besteffort-pod1.slice:cri-containerd:abc"),
+        .v2,
+        "/kubepods-besteffort-pod1.slice:cri-containerd:abc",
+    );
+    try expectSubsys(Subsys.parseLine("11:cpu"), null, ""); // no path field
 }
 test "Subsys.load" {
     try expectSubsys(Subsys.load("0::/v2path\n11:cpu,cpuacct:/v1path"), .v1, "/v1path"); // v1 trumps v2
