@@ -366,6 +366,8 @@ const sample_v2_cgroup_multi = "12::/\n11:cpu,cpuacct:/\n3::/user.slice\n";
 const sample_v2_mountinfo = sample_mountinfo_prefix ++
     "5 4 0:4 / /sys/fs/cgroup rw,nosuid,nodev,noexec,relatime shared:5 " ++
     "- cgroup2 cgroup2 rw,nsdelegate,memory_recursiveprot\n";
+// Hybrid hierarchy: the unified cgroup2 mount ordered before the v1 cpu mount.
+const sample_hybrid_mountinfo = mnt_v2 ++ "\n" ++ mnt_v1 ++ "\n";
 // Quota files keep their double trailing newline, to exercise the trimming.
 const sample_v1_good_quota = "600000\n\n";
 const sample_v1_good_period = "100000\n\n";
@@ -477,6 +479,14 @@ test "MountInfo.load" {
         try expectMount(MountInfo.load(content, .v1), .v1, "/", cpu_mount);
     }
     try expectMount(MountInfo.load(sample_v2_mountinfo, .v2), .v2, "/", "/sys/fs/cgroup");
+    // The version filter must pick past the other version's mount in either direction.
+    try expectMount(MountInfo.load(sample_hybrid_mountinfo, .v1), .v1, "/", cpu_mount);
+    try expectMount(MountInfo.load(sample_hybrid_mountinfo, .v2), .v2, "/", "/sys/fs/cgroup");
+}
+test "MountInfo.parseLine: structurally malformed lines" {
+    try expectMount(MountInfo.parseLine("1 2 0:3 / /mnt rw,relatime"), null, "", ""); // no "-"
+    try expectMount(MountInfo.parseLine("1 2 0:3"), null, "", ""); // truncated
+    try expectMount(MountInfo.parseLine("1 2 0:3 / /mnt rw -"), null, "", ""); // ends at "-"
 }
 
 fn expectTranslate(
@@ -520,6 +530,16 @@ test "translate: mount path cases" {
     try expectTranslate("/docker/01abcd", "/sys/fs/cgroup/cpu", "/elsewhere", null);
     try expectTranslate("/docker/01abcd", "/sys/fs/cgroup/cpu", "/docker/01abcd-other-dir", null);
     try expectTranslate("/", "/sys/fs/cgroup", "/../foo", null); // outside cgroupns root
+}
+test "translate: out buffer too small" {
+    var too_small_for_mount: [8]u8 = undefined;
+    try std.testing.expect(translate("/", "/sys/fs/cgroup", "/", &too_small_for_mount) == null);
+
+    var too_small_for_component: [7]u8 = undefined; // "/sys" + "/abc" needs 8
+    try std.testing.expect(translate("/", "/sys", "/abc", &too_small_for_component) == null);
+
+    var exact_fit: [8]u8 = undefined;
+    try std.testing.expectEqualStrings("/sys/abc", translate("/", "/sys", "/abc", &exact_fit).?);
 }
 
 test "cpuQuotaFromDir: v2" {
