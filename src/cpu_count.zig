@@ -3,7 +3,9 @@
 //! `std.Thread.getCpuCount()` only reads the CPU affinity mask and is blind to
 //! the cgroup CFS quota (`cpu.max` / `cpu.cfs_quota_us`), so under
 //! `docker --cpus=N` or k8s `limits.cpu` it reports the host core count. This
-//! returns `min(quota, affinity)` instead, matching `os.availableParallelism()`.
+//! returns `min(quota, affinity)` instead, where the quota is the smallest one
+//! along the cgroup ancestor chain — the kernel enforces every level, but each
+//! level's quota file reports only its own limit.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -39,7 +41,8 @@ fn logicalCpus() !usize {
 }
 
 /// The cgroup CPU quota as an effective core count (Linux only): locate the cpu
-/// controller via `/proc/self/{cgroup,mountinfo}`, then read its quota files.
+/// controller via `/proc/self/{cgroup,mountinfo}`, then read the quota at every
+/// level from the process's cgroup up to the mount point, taking the minimum.
 /// `null` when no quota can be located (non-Linux, no cpu controller, no cgroup
 /// mount, unresolvable path, controller not enabled, unlimited). Errors only on a
 /// broken read of an existing resource (unreadable `/proc` or quota file,
@@ -64,10 +67,7 @@ fn cgroupsNumCpus(gpa: Allocator, io: Io) !?usize {
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const base = translate(mnt.root, mnt.mount_point, subsys.base, &path_buf) orelse return null;
 
-    var dir = try cwd.openDir(io, base, .{});
-    defer dir.close(io);
-
-    return try cpuQuotaFromDir(io, dir, subsys.version);
+    return try cpuQuotaChain(io, cwd, base, mnt.mount_point.len, subsys.version);
 }
 
 /// Read a `/proc` pseudo-file whole; the caller owns the result. `/proc` reports
@@ -111,6 +111,45 @@ fn cpuQuotaFromDir(io: Io, dir: Io.Dir, version: CgroupVersion) !?usize {
             return try parseCpuV1(quota, period);
         },
     }
+}
+
+/// Minimum CPU quota along the cgroup chain from `leaf` up to and including the
+/// mount point. The kernel enforces the smallest limit of the whole ancestor
+/// chain, but a constrained child still reads `max` from its own file, so every
+/// level must be read (LXC/Proxmox `cpulimit` and systemd `CPUQuota=` on a
+/// parent slice live above the leaf). The leaf must open — its failure is a
+/// detection error — while ancestors are best-effort: an unopenable ancestor
+/// ends the walk. Bounded by the component count of `leaf`.
+fn cpuQuotaChain(
+    io: Io,
+    root_dir: Io.Dir,
+    leaf: []const u8,
+    mount_point_len: usize,
+    version: CgroupVersion,
+) !?usize {
+    assert(leaf.len >= mount_point_len);
+
+    var result: ?usize = null;
+    {
+        var dir = try root_dir.openDir(io, leaf, .{});
+        defer dir.close(io);
+        result = try cpuQuotaFromDir(io, dir, version);
+    }
+
+    var path = leaf;
+    while (path.len > mount_point_len) {
+        const parent = std.fs.path.dirnamePosix(path) orelse break;
+        assert(parent.len < path.len);
+        assert(parent.len >= mount_point_len);
+        path = parent;
+
+        var dir = root_dir.openDir(io, path, .{}) catch break;
+        defer dir.close(io);
+        if (try cpuQuotaFromDir(io, dir, version)) |quota| {
+            result = if (result) |r| @min(r, quota) else quota;
+        }
+    }
+    return result;
 }
 
 /// Host path of the cgroup directory: strip the mount's internal `root` from
@@ -469,6 +508,74 @@ test "cpuQuotaFromDir: missing file is no quota" {
     defer tmp.cleanup();
 
     try std.testing.expectEqual(@as(?usize, null), try cpuQuotaFromDir(std.testing.io, tmp.dir, .v2));
+}
+
+test "cpuQuotaChain: ancestor limit wins" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.createDirPath(std.testing.io, "cg/mid/leaf");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "cg/cpu.max", .data = "200000 100000\n" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "cg/mid/cpu.max", .data = "max 100000\n" });
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "cg/mid/leaf/cpu.max",
+        .data = "600000 100000\n",
+    });
+
+    try std.testing.expectEqual(
+        @as(?usize, 2),
+        try cpuQuotaChain(std.testing.io, tmp.dir, "cg/mid/leaf", "cg".len, .v2),
+    );
+}
+test "cpuQuotaChain: leaf limit wins" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.createDirPath(std.testing.io, "cg/leaf");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "cg/cpu.max", .data = "600000 100000\n" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "cg/leaf/cpu.max", .data = "200000 100000\n" });
+
+    try std.testing.expectEqual(
+        @as(?usize, 2),
+        try cpuQuotaChain(std.testing.io, tmp.dir, "cg/leaf", "cg".len, .v2),
+    );
+}
+test "cpuQuotaChain: v1 unlimited leaf, limited ancestor" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.createDirPath(std.testing.io, "cg/leaf");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "cg/cpu.cfs_quota_us", .data = "300000\n" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "cg/cpu.cfs_period_us", .data = "100000\n" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "cg/leaf/cpu.cfs_quota_us", .data = "-1\n" });
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "cg/leaf/cpu.cfs_period_us",
+        .data = "100000\n",
+    });
+
+    try std.testing.expectEqual(
+        @as(?usize, 3),
+        try cpuQuotaChain(std.testing.io, tmp.dir, "cg/leaf", "cg".len, .v1),
+    );
+}
+test "cpuQuotaChain: no quota anywhere is null" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.createDirPath(std.testing.io, "cg/leaf");
+    try std.testing.expectEqual(
+        @as(?usize, null),
+        try cpuQuotaChain(std.testing.io, tmp.dir, "cg/leaf", "cg".len, .v2),
+    );
+}
+test "cpuQuotaChain: missing leaf dir errors" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try std.testing.expectError(
+        error.FileNotFound,
+        cpuQuotaChain(std.testing.io, tmp.dir, "nope", "nope".len, .v2),
+    );
 }
 
 test "readProcFile: streams a size-unknown file fully" {
