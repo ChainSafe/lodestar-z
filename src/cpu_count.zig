@@ -132,6 +132,9 @@ fn translate(root: []const u8, mount_point: []const u8, subsys_base: []const u8,
     var len: usize = mount_point.len;
 
     while (base_it.next()) |bc| {
+        // A ".." component (process outside its cgroupns root, see
+        // cgroup_namespaces(7)) escapes the mount point: unresolvable.
+        if (std.mem.eql(u8, bc, "..")) return null;
         if (len + 1 + bc.len > out.len) return null;
         out[len] = '/';
         len += 1;
@@ -418,6 +421,7 @@ test "translate: mount path cases" {
     try expectTranslate("/docker/01abcd", "/sys/fs/cgroup/cpu", "/docker", null);
     try expectTranslate("/docker/01abcd", "/sys/fs/cgroup/cpu", "/elsewhere", null);
     try expectTranslate("/docker/01abcd", "/sys/fs/cgroup/cpu", "/docker/01abcd-other-dir", null);
+    try expectTranslate("/", "/sys/fs/cgroup", "/../foo", null); // outside cgroupns root
 }
 
 test "cpuQuotaFromDir: v2" {
