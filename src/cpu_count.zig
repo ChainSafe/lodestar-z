@@ -6,6 +6,10 @@
 //! returns `min(quota, affinity)` instead, where the quota is the smallest one
 //! along the cgroup ancestor chain — the kernel enforces every level, but each
 //! level's quota file reports only its own limit.
+//!
+//! Consumed at NAPI thread-pool init (`bindings/napi/root.zig`) to size the BLS
+//! verification thread pool (`src/bls/ThreadPool.zig`) in CPU-limited
+//! (`docker --cpus` / k8s `limits.cpu`) deployments.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -23,21 +27,15 @@ const CgroupVersion = enum { v1, v2 };
 /// or cgroup file, an unopenable cgroup dir, or malformed quota content. `gpa` is
 /// used only for two short-lived `/proc` reads.
 pub fn getNumCpus(gpa: Allocator, io: Io) !usize {
-    const logical = try logicalCpus();
+    const logical = try std.Thread.getCpuCount();
+    assert(logical >= 1);
+
     const quota = try cgroupsNumCpus(gpa, io);
     const result = if (quota) |q| @min(q, logical) else logical;
 
     assert(result >= 1);
     assert(result <= logical);
     return result;
-}
-
-/// Logical CPU count from the affinity mask. Propagates the error rather than
-/// silently degrading — a failed affinity count would size the pool to 1 worker.
-fn logicalCpus() !usize {
-    const n = try std.Thread.getCpuCount();
-    assert(n >= 1);
-    return n;
 }
 
 /// The cgroup CPU quota as an effective core count (Linux only): locate the cpu
@@ -716,8 +714,4 @@ test "readProcFile: missing file errors" {
 test "getNumCpus: at least 1" {
     const n = try getNumCpus(std.testing.allocator, std.testing.io);
     try std.testing.expect(n >= 1);
-}
-test "getNumCpus: never exceeds logical" {
-    const n = try getNumCpus(std.testing.allocator, std.testing.io);
-    try std.testing.expect(n <= try logicalCpus());
 }
