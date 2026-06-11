@@ -224,5 +224,5 @@ pub fn validateDepositSignature(
     try public_key.validate();
     const signature = try bls.Signature.uncompress(&deposit_signature);
     try signature.validate(true);
-    try verify(&signing_root, &public_key, &signature, null, null);
+    try verify(&signing_root, &public_key, &signature, .{});
 }
