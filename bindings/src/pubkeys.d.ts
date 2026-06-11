@@ -13,6 +13,8 @@ export interface PubkeyCache {
   readonly size: number;
   /** Load cache from a PKIX file (clears JS-level cache) */
   load(filepath: string): void;
+  /** Clear native and JS-level cache contents */
+  reset(): void;
   /** Save cache to a PKIX file */
   save(filepath: string): void;
   /** Pre-allocate native capacity */

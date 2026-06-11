@@ -31,6 +31,13 @@ pub const State = struct {
         self.index2pubkey.deinit(allocator);
         self.initialized = false;
     }
+
+    pub fn reset(self: *State) !void {
+        if (!self.initialized) return;
+
+        self.pubkey2index.clearRetainingCapacity();
+        self.index2pubkey.shrinkRetainingCapacity(0);
+    }
 };
 
 pub var state: State = .{};
@@ -149,6 +156,11 @@ pub fn load(file_path: js.String) !void {
     try file_reader.interface.readSliceAll(std.mem.sliceAsBytes(state.index2pubkey.items));
 
     state.initialized = true;
+}
+
+/// JS: pubkeys.reset()
+pub fn reset() !void {
+    try state.reset();
 }
 
 /// JS: pubkeys.getIndex(pubkeyBytes) → number | null

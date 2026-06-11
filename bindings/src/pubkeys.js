@@ -44,6 +44,11 @@ export const pubkeyCache = {
     native.load(filepath);
   },
 
+  reset() {
+    pkCache.clear();
+    native.reset();
+  },
+
   save(filepath) {
     native.save(filepath);
   },
