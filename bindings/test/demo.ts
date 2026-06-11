@@ -115,8 +115,12 @@ printDuration("pendingPartialWithdrawals", () => state.pendingPartialWithdrawals
 printDuration("pendingConsolidations", () => state.pendingConsolidations);
 printDuration("proposerLookahead", () => state.proposerLookahead);
 printDuration("getSingleProof(169)", () => state.getSingleProof(169));
-printDuration("isValidVoluntaryExit", () => state.isValidVoluntaryExit(new Uint8Array(112), false));
-printDuration("getVoluntaryExitValidity", () => state.getVoluntaryExitValidity(new Uint8Array(112), false));
+const invalidVoluntaryExit = {
+  message: {epoch: 0, validatorIndex: 0},
+  signature: new Uint8Array(96),
+};
+printDuration("isValidVoluntaryExit", () => state.isValidVoluntaryExit(invalidVoluntaryExit, false));
+printDuration("getVoluntaryExitValidity", () => state.getVoluntaryExitValidity(invalidVoluntaryExit, false));
 printDuration("createMultiProof(descriptor for gindex 42)", () =>
   state.createMultiProof(Uint8Array.from([0x25, 0xe0]))
 );

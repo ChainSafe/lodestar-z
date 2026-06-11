@@ -15,65 +15,7 @@ const allocator = if (builtin.mode == .Debug)
 else
     std.heap.c_allocator;
 
-/// Parse a JS options object into Zig's TransitionOpts.
-///
-/// Recognized fields:
-/// - verifyStateRoot, verifyProposer, verifySignatures: bool
-/// - dontTransferCache: bool (negated to set transfer_cache)
-/// - executionPayloadStatus: "valid" | "invalid" | "preMerge"
-/// - dataAvailabilityStatus: "Available" | "PreData" | "OutOfRange"
-///
-/// This is the double negative version to conform with production lodestar.
-/// TODO(bing): Eventually rename this to `transferCache` to avoid double negation because its confusing naming.
-fn parseOptions(options: ?js.Value) !st.TransitionOpts {
-    var transition_opts: st.TransitionOpts = .{};
-    if (options) |value| {
-        const raw = value.toValue();
-        if (try raw.typeof() == .object) {
-            if (try raw.hasNamedProperty("verifyStateRoot")) {
-                transition_opts.verify_state_root = try (try raw.getNamedProperty("verifyStateRoot")).getValueBool();
-            }
-            if (try raw.hasNamedProperty("verifyProposer")) {
-                transition_opts.verify_proposer = try (try raw.getNamedProperty("verifyProposer")).getValueBool();
-            }
-            if (try raw.hasNamedProperty("verifySignatures")) {
-                transition_opts.verify_signatures = try (try raw.getNamedProperty("verifySignatures")).getValueBool();
-            }
-            if (try raw.hasNamedProperty("dontTransferCache")) {
-                transition_opts.transfer_cache = !(try (try raw.getNamedProperty("dontTransferCache")).getValueBool());
-            }
-            if (try raw.hasNamedProperty("executionPayloadStatus")) {
-                var buf: [16]u8 = undefined;
-                const execution_payload_status = try (try raw.getNamedProperty("executionPayloadStatus")).getValueStringUtf8(&buf);
-                transition_opts.block_external_data.execution_payload_status =
-                    if (std.mem.eql(u8, execution_payload_status, "valid"))
-                        .valid
-                    else if (std.mem.eql(u8, execution_payload_status, "invalid"))
-                        .invalid
-                    else if (std.mem.eql(u8, execution_payload_status, "preMerge"))
-                        .pre_merge
-                    else
-                        return error.InvalidExecutionPayloadStatus;
-            }
-            if (try raw.hasNamedProperty("dataAvailabilityStatus")) {
-                var buf: [16]u8 = undefined;
-                const da_status = try (try raw.getNamedProperty("dataAvailabilityStatus")).getValueStringUtf8(&buf);
-                transition_opts.block_external_data.data_availability_status =
-                    if (std.mem.eql(u8, da_status, "Available"))
-                        .available
-                    else if (std.mem.eql(u8, da_status, "PreData"))
-                        .pre_data
-                    else if (std.mem.eql(u8, da_status, "OutOfRange"))
-                        .out_of_range
-                        // TODO(bing): uncomment once gloas support is in
-                        // else if (std.mem.eql(u8, da_status, "NotRequired")) .not_required;
-                    else
-                        return error.InvalidDataAvailabilityStatus;
-            }
-        }
-    }
-    return transition_opts;
-}
+const parseOptions = @import("./transition_opts.zig").parseOptions;
 
 /// Perform a state transition given a signed beacon block.
 ///
