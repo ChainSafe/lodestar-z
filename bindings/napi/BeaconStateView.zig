@@ -1265,17 +1265,25 @@ pub fn processSlots(self: *const BeaconStateView, slot_arg: js.Number, options: 
 /// - arg 1: options (optional): parse `TransitionOpts`
 pub fn stateTransition(self: *const BeaconStateView, signed_block_bytes: js.Uint8Array, options: ?js.Value) !BeaconStateView {
     const cached_state = try self.requireState();
-
     const opts = try @import("./transition_opts.zig").parseOptions(options);
 
-    const current_epoch = st.computeEpochAtSlot(try cached_state.state.slot());
-    const fork_seq = cached_state.config.forkSeqAtEpoch(current_epoch);
     const bytes = try signed_block_bytes.toSlice();
+
+    std.debug.assert(bytes.len >= 12);
+    const offset = std.mem.readInt(u32, bytes[0..4], .little);
+    const block_slot = std.mem.readInt(u64, bytes[offset..][0..8], .little);
+    const block_epoch = st.computeEpochAtSlot(block_slot);
+
+    const fork_seq = cached_state.config.forkSeqAtEpoch(block_epoch);
+
     const signed_block = try AnySignedBeaconBlock.deserialize(allocator, .full, fork_seq, bytes);
     defer signed_block.deinit(allocator);
 
     const post_state = try st.stateTransition(allocator, napi_io.get(), cached_state, signed_block, opts);
-    return .{ .cached_state = post_state };
+    return .{
+        .cached_state = post_state,
+        .pool_rc = pool.state.poolRc().ref(),
+    };
 }
 
 /// Compute the anchor checkpoint and block header for the current state.
