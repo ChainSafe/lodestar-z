@@ -5,7 +5,6 @@ pub const pool = @import("./pool.zig");
 pub const shuffle = @import("./shuffle.zig");
 pub const config = @import("./config.zig");
 pub const metrics = @import("./metrics.zig");
-pub const stateTransition = @import("./stateTransition.zig");
 pub const BeaconStateView = @import("./BeaconStateView.zig");
 pub const blst = @import("./blst.zig");
 pub const pubkeys = @import("./pubkeys.zig");
