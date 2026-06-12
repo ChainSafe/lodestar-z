@@ -591,8 +591,8 @@ pub fn FixedListType(comptime ST: type, comptime _limit: comptime_int, comptime 
                 const content_root = try node.getLeft(pool);
                 const chunked_leaf_count = (chunk_count + ChunkedLeaf.K - 1) / ChunkedLeaf.K;
 
-                const chunked_leaf_ids_buf = try pool.page_allocator.alloc(Node.Id, chunked_leaf_count);
-                defer pool.page_allocator.free(chunked_leaf_ids_buf);
+                const chunked_leaf_ids_buf = try pool.allocator.alloc(Node.Id, chunked_leaf_count);
+                defer pool.allocator.free(chunked_leaf_ids_buf);
                 try content_root.getNodesAtDepth(pool, chunked_leaf_depth, 0, chunked_leaf_ids_buf);
 
                 const state_col = pool.nodes.items(.state);

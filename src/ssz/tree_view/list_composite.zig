@@ -68,7 +68,9 @@ pub fn ListCompositeTreeView(comptime ST: type) type {
             try self.chunks.clone(opts, &ptr.chunks);
             ptr.allocator = self.allocator;
             ptr._orig_len = self._orig_len;
-            ptr._len = self._len;
+            // Uncommitted writes are dropped (from the source too on transfer), so length = committed.
+            ptr._len = self._orig_len;
+            if (opts.transfer_cache) self._len = self._orig_len;
             return ptr;
         }
 
@@ -108,7 +110,10 @@ pub fn ListCompositeTreeView(comptime ST: type) type {
             try ST.tree.toValue(allocator, self.chunks.state.root, self.chunks.state.pool, out);
         }
 
-        pub fn setLength(self: *Self, new_length: usize) !void {
+        /// Grows the list; new positions read as zero. Shrinking must go through sliceTo —
+        /// a bare length cut would leave stale chunk data in the merkleized root.
+        pub fn growTo(self: *Self, new_length: usize) !void {
+            std.debug.assert(new_length >= self._len);
             self._len = new_length;
         }
 
@@ -156,8 +161,8 @@ pub fn ListCompositeTreeView(comptime ST: type) type {
         }
 
         /// On success takes ownership of `value` and deinits the element cached for `index`, so any
-        /// earlier get()/getReadonly() of it is now invalid. On error.IndexOutOfBounds the caller
-        /// keeps `value` (ownership only transfers once it reaches the backing chunks).
+        /// earlier get()/getReadonly() of it is now invalid. On any error (IndexOutOfBounds or a
+        /// backing-store OOM) the caller keeps `value` and must free it.
         pub fn set(self: *Self, index: usize, value: Element) !void {
             const list_length = try self.length();
             if (index >= list_length) return error.IndexOutOfBounds;
@@ -176,9 +181,9 @@ pub fn ListCompositeTreeView(comptime ST: type) type {
 
         /// Appends an element to the end of the list.
         ///
-        /// Ownership of the `value` TreeView is transferred to the list view.
-        /// The caller must not deinitialize or otherwise use `value` after calling this method,
-        /// as it is now owned by the list.
+        /// Ownership of the `value` TreeView transfers to the list view on success. After a
+        /// successful call the caller must not deinit or use `value`; on any error the caller keeps
+        /// `value` and must free it.
         pub fn push(self: *Self, value: Element) !void {
             const list_length = try self.length();
             if (list_length >= ST.limit) {
@@ -193,8 +198,6 @@ pub fn ListCompositeTreeView(comptime ST: type) type {
 
         /// Push an SSZ value type, creating a TreeView internally.
         pub fn pushValue(self: *Self, value: *const ST.Element.Type) !void {
-            // Check the limit first. After this, push always takes the view (set frees it on its
-            // own OOM), so adding a cleanup errdefer here would double-free.
             if ((try self.length()) >= ST.limit) return error.LengthOverLimit;
 
             const root = try ST.Element.tree.fromValue(self.chunks.state.pool, value);
@@ -202,6 +205,7 @@ pub fn ListCompositeTreeView(comptime ST: type) type {
                 self.chunks.state.pool.unref(root);
                 return err;
             };
+            errdefer child_view.deinit();
             try self.push(child_view);
         }
 
@@ -384,6 +388,7 @@ pub fn ListCompositeTreeView(comptime ST: type) type {
 
 const FixedContainerType = @import("../type/container.zig").FixedContainerType;
 const VariableContainerType = @import("../type/container.zig").VariableContainerType;
+const StructContainerType = @import("../type/container.zig").StructContainerType;
 const UintType = @import("../type/uint.zig").UintType;
 const ByteVectorType = @import("../type/byte_vector.zig").ByteVectorType;
 const ByteListType = @import("../type/byte_list.zig").ByteListType;
@@ -395,6 +400,37 @@ const Checkpoint = FixedContainerType(struct {
     epoch: UintType(64),
     root: ByteVectorType(32),
 });
+
+test "TreeView composite list iteratorReadonly nextValuePtr walks struct elements" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 512 });
+    defer pool.deinit();
+
+    const StructCheckpoint = StructContainerType(struct {
+        epoch: UintType(64),
+        root: ByteVectorType(32),
+    });
+    const ListType = FixedListType(StructCheckpoint, 16, .{});
+
+    var list: ListType.Type = .empty;
+    defer list.deinit(allocator);
+    for (0..5) |i| try list.append(allocator, .{ .epoch = @intCast(i + 1), .root = [_]u8{@intCast(i)} ** 32 });
+
+    const root = try ListType.tree.fromValue(&pool, &list);
+    var view = try ListType.TreeView.init(allocator, &pool, root);
+    defer view.deinit();
+
+    var it = view.iteratorReadonly(0);
+    for (0..5) |i| {
+        const ptr = try it.nextValuePtr();
+        try std.testing.expectEqual(@as(u64, @intCast(i + 1)), ptr.epoch);
+        try std.testing.expectEqual(@as(u8, @intCast(i)), ptr.root[0]);
+    }
+
+    var it_offset = view.iteratorReadonly(3);
+    try std.testing.expectEqual(@as(u64, 4), (try it_offset.nextValuePtr()).epoch);
+    try std.testing.expectEqual(@as(u64, 5), (try it_offset.nextValuePtr()).epoch);
+}
 
 test "TreeView composite list sliceTo truncates elements" {
     const allocator = std.testing.allocator;
@@ -458,7 +494,7 @@ test "TreeView composite list sliceTo does not leak pool nodes" {
 
 const DoubleFreeDetectAllocator = @import("testing_allocators").DoubleFreeDetectAllocator;
 
-// set takes ownership of the view, so setValue must not deinit it too. Sweep every OOM point.
+// set takes ownership only on success; setValue/push errdefer the view for the OOM path.
 test "TreeView composite list setValue - OOM does not double-free the element view" {
     const ListType = FixedListType(Checkpoint, 16, .{});
 
@@ -514,6 +550,45 @@ test "TreeView composite list push - OOM does not double-free" {
         defer view.deinit();
 
         view.pushValue(&newval) catch {};
+        try std.testing.expect(!oom.double_free);
+    }
+}
+
+test "TreeView composite list set(index, ownedView) - failed set leaves the element view to the caller" {
+    const ListType = FixedListType(Checkpoint, 16, .{});
+
+    var list: ListType.Type = .empty;
+    defer list.deinit(std.testing.allocator);
+    for (0..3) |i| try list.append(std.testing.allocator, .{ .epoch = @intCast(i), .root = [_]u8{@intCast(i)} ** 32 });
+    const newval: Checkpoint.Type = .{ .epoch = 99, .root = [_]u8{0xee} ** 32 };
+
+    var fail_at: usize = 0;
+    while (fail_at < 200) : (fail_at += 1) {
+        var oom = DoubleFreeDetectAllocator.init(std.testing.allocator, fail_at);
+        defer oom.deinit();
+        const alloc = oom.allocator();
+
+        var pool = Node.Pool.init(.{ .page_allocator = alloc, .allocator = alloc, .pool_size = 0 }) catch continue;
+        defer pool.deinit();
+
+        const root = ListType.tree.fromValue(&pool, &list) catch continue;
+        var view = ListType.TreeView.init(alloc, &pool, root) catch {
+            pool.unref(root);
+            continue;
+        };
+        defer view.deinit();
+
+        const elem_node = Checkpoint.tree.fromValue(&pool, &newval) catch continue;
+        var elem_view = Checkpoint.TreeView.init(alloc, &pool, elem_node) catch {
+            pool.unref(elem_node);
+            continue;
+        };
+        const elem_addr = @intFromPtr(elem_view);
+
+        if (view.set(0, elem_view)) |_| {} else |_| {
+            try std.testing.expect(oom.live.contains(elem_addr));
+            elem_view.deinit();
+        }
         try std.testing.expect(!oom.double_free);
     }
 }

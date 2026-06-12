@@ -442,20 +442,16 @@ pub fn CompositeChunks(
             return child_ptr;
         }
 
-        /// Takes ownership of `value` (and deinits it if a reservation fails). Deinits whatever
-        /// child was cached for `index`, so any earlier get()/getReadonly() of it is now invalid.
-        /// Pass a view you own — never a get()/getReadonly() pointer for this same index, or a
-        /// failed set would deinit a view the cache still holds (double-free).
+        /// Takes ownership of `value` only on success; on any error `value` is left untouched for
+        /// the caller to free. Deinits whatever child was cached for `index`, so any earlier
+        /// get()/getReadonly() of it is now invalid. Pass a view you own — never a
+        /// get()/getReadonly() pointer for this same index, or the displaced-old deinit would free a
+        /// view the cache still holds (double-free).
         pub fn set(self: *Self, index: usize, value: ElementPtr) !void {
             const gindex = Gindex.fromDepth(chunk_depth, index);
-            // Reserve before storing so neither store can fail. A failure mid-store would drop
-            // `value` (we own it now, the caller won't free it) or leave `changed` and
-            // `children_data` out of sync.
-            {
-                errdefer value.deinit();
-                try self.state.changed.ensureUnusedCapacity(self.state.allocator, 1);
-                try self.children_data.ensureUnusedCapacity(self.state.allocator, 1);
-            }
+            // Reserve first so the commit below cannot fail.
+            try self.state.changed.ensureUnusedCapacity(self.state.allocator, 1);
+            try self.children_data.ensureUnusedCapacity(self.state.allocator, 1);
             self.state.changed.putAssumeCapacity(gindex, {});
             const opt_old_data = self.children_data.fetchPutAssumeCapacity(gindex, value);
             if (opt_old_data) |old_data_value| {
@@ -505,12 +501,11 @@ pub fn CompositeChunks(
         /// Set a child from an SSZ value type.
         pub fn setValue(self: *Self, index: usize, value: *const Value) !void {
             const root = try ST.Element.tree.fromValue(self.state.pool, value);
-            // Free `root` only if init fails. Once init succeeds, `set` owns `child_view` on every
-            // path, so we must not deinit it here; that would double-free if set later fails.
             const child_view = Element.init(self.state.allocator, self.state.pool, root) catch |err| {
                 self.state.pool.unref(root);
                 return err;
             };
+            errdefer child_view.deinit();
             try self.set(index, child_view);
         }
 

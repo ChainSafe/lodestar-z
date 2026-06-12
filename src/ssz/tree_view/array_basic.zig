@@ -174,6 +174,46 @@ test "TreeView vector element roundtrip" {
     try std.testing.expectEqualSlices(u64, &expected, &roundtrip);
 }
 
+test "TreeView vector chunked_leaf roundtrip across the chunked_leaf boundary" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 4096 });
+    defer pool.deinit();
+
+    const Uint64 = UintType(64);
+    const VectorType = FixedVectorType(Uint64, 276, .{ .chunked_leaf = true });
+
+    var original: VectorType.Type = undefined;
+    for (&original, 0..) |*e, i| e.* = i;
+
+    const root_node = try VectorType.tree.fromValue(&pool, &original);
+    var view = try VectorType.TreeView.init(allocator, &pool, root_node);
+    defer view.deinit();
+
+    try std.testing.expectEqual(@as(u64, 0), try view.get(0));
+    try std.testing.expectEqual(@as(u64, 255), try view.get(255));
+    try std.testing.expectEqual(@as(u64, 256), try view.get(256));
+    try std.testing.expectEqual(@as(u64, 275), try view.get(275));
+
+    try view.set(255, 999);
+    try view.set(256, 1000);
+    try view.commit();
+
+    var expected = original;
+    expected[255] = 999;
+    expected[256] = 1000;
+
+    var expected_root: [32]u8 = undefined;
+    try VectorType.hashTreeRoot(&expected, &expected_root);
+
+    var actual_root: [32]u8 = undefined;
+    try view.hashTreeRootInto(&actual_root);
+    try std.testing.expectEqualSlices(u8, &expected_root, &actual_root);
+
+    var roundtrip: VectorType.Type = undefined;
+    try VectorType.tree.toValue(view.getRoot(), &pool, &roundtrip);
+    try std.testing.expectEqualSlices(u64, &expected, &roundtrip);
+}
+
 test "TreeView vector getAll fills provided buffer" {
     const allocator = std.testing.allocator;
     var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 256 });
