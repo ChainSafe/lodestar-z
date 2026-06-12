@@ -9,6 +9,7 @@ pub const stateTransition = @import("./stateTransition.zig");
 pub const BeaconStateView = @import("./BeaconStateView.zig");
 pub const blst = @import("./blst.zig");
 pub const pubkeys = @import("./pubkeys.zig");
+pub const blsBatch = @import("./bls_batch.zig");
 
 const options = @import("bls_options");
 const napi_io = @import("./io.zig");
@@ -55,6 +56,7 @@ fn detectCpuCount() !usize {
 fn cleanup(new_ref_count: u32) void {
     if (new_ref_count == 0) {
         // Last environment — tear down shared state.
+        blsBatch.deinit(.{});
         blst.deinitThreadPool();
         config.state.deinit();
         pubkeys.state.deinit();
@@ -65,5 +67,11 @@ fn cleanup(new_ref_count: u32) void {
 }
 
 comptime {
-    js.exportModule(@This(), .{ .init = init, .cleanup = cleanup });
+    js.exportModule(@This(), .{
+        .init = init,
+        .cleanup = cleanup,
+        // blsBatch's functions are auto-exported as a DSL namespace; this hook
+        // only adds its integer kind constants, which the DSL can't export.
+        .register = blsBatch.registerConstants,
+    });
 }
