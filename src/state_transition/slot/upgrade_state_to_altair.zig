@@ -31,13 +31,13 @@ pub fn upgradeStateToAltair(
 
     const validators_count = try altair_state.validatorsCount();
     var previous_epoch_participations = try altair_state.previousEpochParticipation();
-    try previous_epoch_participations.setLength(validators_count);
+    try previous_epoch_participations.growTo(validators_count);
 
     var current_epoch_participations = try altair_state.currentEpochParticipation();
-    try current_epoch_participations.setLength(validators_count);
+    try current_epoch_participations.growTo(validators_count);
 
     var inactivity_scores = try altair_state.inactivityScores();
-    try inactivity_scores.setLength(validators_count);
+    try inactivity_scores.growTo(validators_count);
 
     const active_indices = epoch_cache.next_shuffling.get().active_indices;
 

@@ -261,6 +261,9 @@ pub const Pool = struct {
     allocator: Allocator,
     nodes: std.MultiArrayList(Node).Slice,
     next_free_node: Id,
+    // Reused scratch for chunked_leaf root recompute: single-threaded, and chunked_leaf is a leaf
+    // of getRoot's recursion, so at most one computeRoot uses it at a time.
+    chunked_leaf_scratch: [ChunkedLeaf.K / 2][32]u8 align(64),
 
     pub const InitOptions = struct {
         page_allocator: Allocator = std.heap.page_allocator,
@@ -278,6 +281,7 @@ pub const Pool = struct {
             .allocator = opts.allocator,
             .nodes = undefined,
             .next_free_node = @enumFromInt(max_depth),
+            .chunked_leaf_scratch = undefined,
         };
 
         var list = std.MultiArrayList(Node).empty;
@@ -776,7 +780,7 @@ pub const Id = enum(u32) {
                 }
                 const storage = chunkedLeafPtr(pool.nodes.items(.payload), idx);
                 var hash: [32]u8 = undefined;
-                storage.computeRootAllocating(pool.allocator, &hash);
+                storage.computeRoot(&pool.chunked_leaf_scratch, &hash);
                 roots[idx] = hash;
                 return &roots[idx];
             },
@@ -822,6 +826,7 @@ pub const Id = enum(u32) {
     pub fn getChunkedLeafPtr(node_id: Id, pool: *Pool) Error!*ChunkedLeaf {
         const idx = @intFromEnum(node_id);
         if (pool.nodes.items(.state)[idx].kind() != .chunked_leaf) return Error.InvalidNode;
+        std.debug.assert(pool.nodes.items(.state)[idx].refCount() == 0);
         return chunkedLeafPtr(pool.nodes.items(.payload), idx);
     }
 
@@ -1529,92 +1534,6 @@ pub const Id = enum(u32) {
         return node_id;
     }
 };
-
-/// Fill a view to the specified depth, returning the new root node id.
-pub fn fillToDepth(pool: *Pool, bottom: Id, depth: Depth) Error!Id {
-    var d = depth;
-    var node = bottom;
-    while (d > 0) : (d -= 1) {
-        node = try pool.createBranch(node, node);
-    }
-
-    return node;
-}
-
-/// Fill a view to the specified length and depth, returning the new root node id.
-pub fn fillToLength(pool: *Pool, leaf: Id, depth: Depth, length: usize) Error!Id {
-    const max_length = @as(Gindex.Uint, 1) << depth;
-    if (length > max_length) {
-        return Error.InvalidLength;
-    }
-
-    // fill a full view to the specified depth
-    var node_id = try fillToDepth(pool, leaf, depth);
-
-    // if the requested length is the same as the max length, return the node
-    if (length == max_length) {
-        return node_id;
-    }
-
-    // otherwise, traverse down to the specified length
-    const gindex: Gindex = @enumFromInt(max_length | length);
-    const path_len = gindex.pathLen();
-    var path = gindex.toPath();
-
-    var parents_buf: [max_depth]Id = undefined;
-    var lefts_buf: [max_depth]Id = undefined;
-    var rights_buf: [max_depth]Id = undefined;
-
-    const path_parents = parents_buf[0..path_len];
-    const path_lefts = lefts_buf[0..path_len];
-    const path_rights = rights_buf[0..path_len];
-
-    const states = pool.nodes.items(.state);
-    const payloads = pool.nodes.items(.payload);
-
-    for (0..path_len - 1) |i| {
-        const idx = @intFromEnum(node_id);
-        const k = states[idx].kind();
-        if (noChildKind(node_id, k)) {
-            return Error.InvalidNode;
-        }
-        const c = childrenOf(node_id, k, payloads);
-        if (path.left()) {
-            path_lefts[i] = path_parents[i + 1];
-            path_rights[i] = c.right;
-            node_id = c.left;
-        } else {
-            path_lefts[i] = c.left;
-            path_rights[i] = path_parents[i + 1];
-            node_id = c.right;
-        }
-        path.next();
-    }
-
-    // and rebind with zero(0)
-    {
-        const idx = @intFromEnum(node_id);
-        const k = states[idx].kind();
-        if (noChildKind(node_id, k)) return Error.InvalidNode;
-        const c = childrenOf(node_id, k, payloads);
-        if (path.left()) {
-            path_lefts[path_len - 1] = @enumFromInt(0);
-            path_rights[path_len - 1] = c.right;
-        } else {
-            path_lefts[path_len - 1] = c.left;
-            path_rights[path_len - 1] = @enumFromInt(0);
-        }
-    }
-
-    // and rebind with zero(0)
-    try pool.rebind(
-        path_parents,
-        path_lefts,
-        path_rights,
-    );
-
-    return path_parents[0];
-}
 
 /// Fill a view with the specified contents, returning the new root node id.
 ///

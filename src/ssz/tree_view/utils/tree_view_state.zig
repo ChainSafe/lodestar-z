@@ -131,7 +131,10 @@ pub const TreeViewState = struct {
         out.children_nodes = self.children_nodes;
 
         for (self.changed.keys()) |gindex| {
-            _ = out.children_nodes.remove(gindex);
+            if (out.children_nodes.fetchRemove(gindex)) |entry| {
+                const state = entry.value.getState(self.pool);
+                if (!state.isFree() and state.refCount() == 0) self.pool.unref(entry.value);
+            }
         }
 
         self.children_nodes = .empty;

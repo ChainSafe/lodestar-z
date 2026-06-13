@@ -644,27 +644,23 @@ test "loadState scenarios" {
                     break :blk try state_ptr.serialize(allocator);
                 },
                 .trim_struct => |m| {
-                    var validators = try state_ptr.validators();
-                    try validators.setLength(m.new_len);
+                    var trimmed = types.electra.BeaconState.default_value;
+                    try types.electra.BeaconState.deserializeFromBytes(allocator, seed_bytes, &trimmed);
+                    defer types.electra.BeaconState.deinit(allocator, &trimmed);
 
-                    var balances = try state_ptr.balances();
-                    try balances.setLength(m.new_len);
-
-                    var scores = try state_ptr.inactivityScores();
-                    try scores.setLength(m.new_len);
-
-                    var previous_epoch_participation = try state_ptr.previousEpochParticipation();
-                    try previous_epoch_participation.setLength(m.new_len);
-
-                    var current_epoch_participation = try state_ptr.currentEpochParticipation();
-                    try current_epoch_participation.setLength(m.new_len);
-
+                    trimmed.validators.shrinkRetainingCapacity(m.new_len);
+                    trimmed.balances.shrinkRetainingCapacity(m.new_len);
+                    trimmed.inactivity_scores.shrinkRetainingCapacity(m.new_len);
+                    trimmed.previous_epoch_participation.shrinkRetainingCapacity(m.new_len);
+                    trimmed.current_epoch_participation.shrinkRetainingCapacity(m.new_len);
                     if (m.new_len == 0) {
-                        var eth1_data = try state_ptr.eth1Data();
-                        try eth1_data.set("deposit_count", 0);
-                        try state_ptr.setEth1DepositIndex(0);
+                        trimmed.eth1_data.deposit_count = 0;
+                        trimmed.eth1_deposit_index = 0;
                     }
-                    break :blk try state_ptr.serialize(allocator);
+
+                    const out_bytes = try allocator.alloc(u8, types.electra.BeaconState.serializedSize(&trimmed));
+                    _ = types.electra.BeaconState.serializeIntoBytes(&trimmed, out_bytes);
+                    break :blk out_bytes;
                 },
             }
         };
