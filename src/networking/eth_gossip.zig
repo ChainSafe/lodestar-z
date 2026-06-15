@@ -19,9 +19,10 @@ pub const GossipTopicType = gossip_topics.GossipTopicType;
 
 const snappy = @import("snappy").raw;
 const libp2p = @import("zig-libp2p");
-const GossipsubService = libp2p.gossipsub.Service;
-const FrameDecoder = libp2p.gossipsub.FrameDecoder;
-const encodeGossipsubRpc = libp2p.gossipsub.encodeRpc;
+const compat = @import("gossipsub_compat.zig");
+const GossipsubService = compat.Service;
+const FrameDecoder = compat.FrameDecoder;
+const encodeGossipsubRpc = compat.encodeRpc;
 const rpc = libp2p.protobuf.rpc;
 
 const log = std.log.scoped(.eth_gossip);

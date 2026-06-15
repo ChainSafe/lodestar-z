@@ -312,7 +312,18 @@ pub const ResponseChunkStreamReader = struct {
 
     pub fn next(self: *ResponseChunkStreamReader, io: Io, stream: anytype) anyerror!?DecodedResponseChunk {
         var result_byte: [1]u8 = undefined;
-        const n = try stream.read(io, &result_byte);
+        // A chunk boundary: the responder either sends another result-code byte
+        // or closes its write side. Our quic Stream signals a clean close as
+        // error.EndOfStream (not n==0), so treat both as "no more chunks". This
+        // is what terminates a multi-chunk response (e.g. beacon_blocks_by_range)
+        // and what an empty response (0 blocks in range) looks like.
+        const n = stream.read(io, &result_byte, .{}) catch |err| switch (err) {
+            error.EndOfStream => {
+                self.reached_eof = true;
+                return null;
+            },
+            else => return err,
+        };
         if (n == 0) {
             self.reached_eof = true;
             return null;
@@ -404,7 +415,7 @@ fn calcSnappyFrameSize(data: []const u8, expected_uncompressed: usize) !usize {
 fn writeAll(io: Io, stream: anytype, data: []const u8) anyerror!void {
     var total: usize = 0;
     while (total < data.len) {
-        const n = try stream.write(io, data[total..]);
+        const n = try stream.write(io, data[total..], .{});
         if (n == 0) return error.BrokenPipe;
         total += n;
     }
@@ -413,7 +424,7 @@ fn writeAll(io: Io, stream: anytype, data: []const u8) anyerror!void {
 fn readExact(io: Io, stream: anytype, buf: []u8) anyerror!void {
     var offset: usize = 0;
     while (offset < buf.len) {
-        const n = try stream.read(io, buf[offset..]);
+        const n = try stream.read(io, buf[offset..], .{});
         if (n == 0) return error.UnexpectedEof;
         offset += n;
     }
@@ -424,7 +435,7 @@ fn readLengthPrefixFromStream(io: Io, stream: anytype) anyerror!usize {
     var len: usize = 0;
 
     while (len < buf.len) {
-        const n = try stream.read(io, buf[len .. len + 1]);
+        const n = try stream.read(io, buf[len .. len + 1], .{});
         if (n == 0) return error.UnexpectedEof;
         len += 1;
 
@@ -462,7 +473,7 @@ fn readSnappyFrameFromStream(
         }
 
         var scratch: [4096]u8 = undefined;
-        const n = try stream.read(io, &scratch);
+        const n = try stream.read(io, &scratch, .{});
         if (n == 0) return error.UnexpectedEof;
         try buffer.appendSlice(allocator, scratch[0..n]);
     }

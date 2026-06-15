@@ -41,8 +41,8 @@ const MAX_ENR_DECODE_BUF: usize = 512;
 const FAR_FUTURE_EPOCH: u64 = 0xffffffffffffffff;
 const LOOKUP_PARALLELISM: usize = 3;
 const CustodyColumnsBitfield = std.StaticBitSet(@as(usize, custody.NUMBER_OF_COLUMNS));
-const Libp2pPeerId = @TypeOf((@as(libp2p.security.Session1, undefined)).remote_id);
-const Libp2pPublicKey = @TypeOf((@as(libp2p.security.Session1, undefined)).remote_public_key);
+const Libp2pPeerId = @TypeOf((@as(libp2p.security.Session, undefined)).remote_id);
+const Libp2pPublicKey = @TypeOf((@as(libp2p.security.Session, undefined)).remote_public_key);
 
 // ── Configuration ───────────────────────────────────────────────────────────
 

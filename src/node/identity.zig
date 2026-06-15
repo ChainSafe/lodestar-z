@@ -100,10 +100,8 @@ fn derivePeerId(allocator: Allocator, secret_key: [32]u8) ![]const u8 {
         .storage = .{ .secp256k1 = .{ .secret = secret_key } },
     };
     const peer_id = try key_pair.peerId(allocator);
-    const scratch = try allocator.alloc(u8, peer_id.toBase58Len());
-    defer allocator.free(scratch);
-    const encoded = try peer_id.toBase58(scratch);
-    return allocator.dupe(u8, encoded);
+    // base58 peer-id string, caller-owned.
+    return peer_id.toString(allocator);
 }
 
 fn loadOrBuildEnr(

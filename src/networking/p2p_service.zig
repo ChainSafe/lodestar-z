@@ -1,43 +1,44 @@
-//! P2P service integration layer for eth-p2p-z.
+//! P2P service integration layer for eth-p2p-z (quiche/zio runtime API).
 //!
-//! Bridges eth-p2p-z's comptime Switch with lodestar-z's networking stack:
-//! - `P2pService` wraps a Switch configured with all eth2 req/resp protocols
-//!   and a gossipsub handler, plus an EthGossipAdapter for subscribe/publish.
-//! - The Switch is comptime-composed with QUIC transport and the 8 req/resp
-//!   protocol handlers plus gossipsub.
-//! - Inbound gossip events are drained from gossipsub and routed by the node's
-//!   GossipHandler.
+//! Bridges eth-p2p-z's RUNTIME Switch with lodestar-z's networking stack:
+//! - `P2pService` owns a `quic.QuicEndpoint` + a `swarm.Switch`, registers all
+//!   eth2 req/resp protocol handlers + identify + the gossipsub inbound service,
+//!   and holds an `EthGossipAdapter` for subscribe/publish.
+//! - Inbound gossip events are drained from the gossipsub `Service` and routed
+//!   by the node's GossipHandler.
 //! - Req/resp messages are dispatched by each `Eth2Protocol` handler into
 //!   `req_resp_handler`.
 //!
-//! Usage:
-//! ```zig
-//! var svc = try P2pService.init(io, allocator, .{
-//!     .fork_digest = node.getForkDigest(),
-//!     .req_resp_context = &rr_ctx,
-//! });
-//! defer svc.deinit(io);
-//! try svc.start(io, listen_multiaddr);
-//! ```
+//! PORTING NOTE (option B): our eth-p2p-z branch exposes a RUNTIME Switch
+//! (`swarm.Switch.init(alloc, io, *QuicEndpoint)` + `addProtocolService`), not
+//! the comptime `Switch(.{ .transports, .protocols })` generic the ChainSafe
+//! lsquic variant used. This file was rewritten to compose the runtime Switch
+//! directly. The PUBLIC `P2pService` API (what `node/` calls) is preserved; the
+//! internals were swapped. Methods whose full behaviour needs deep per-peer
+//! Switch integration not yet surfaced by our branch (connected-peer snapshot,
+//! per-protocol outbound dial, peer disconnect) are implemented as far as the
+//! runtime API allows and otherwise return conservative defaults — enough to
+//! compile the `networking` module and pass its unit tests. Live dial/listen
+//! and gossip propagation are wired through the real endpoint/switch/service.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
 const libp2p = @import("zig-libp2p");
-const quic_mod = libp2p.quic_new;
-const QuicTransport = quic_mod.QuicTransport;
+const quic_mod = libp2p.quic;
 const identity_mod = libp2p.identity;
 const gossipsub_mod = libp2p.gossipsub;
-const GossipsubHandler = gossipsub_mod.Handler;
-const GossipsubService = gossipsub_mod.Service;
-const GossipsubConfig = gossipsub_mod.Config;
-const GossipsubFrameDecoder = gossipsub_mod.FrameDecoder;
+const compat = @import("gossipsub_compat.zig");
+const GossipsubService = compat.Service;
+const GossipsubConfig = compat.Config;
+const GossipsubFrameDecoder = compat.FrameDecoder;
 const GossipsubRpc = libp2p.protobuf.rpc;
 const swarm_mod = libp2p.swarm;
+const protocols_mod = libp2p.protocols;
 const identify_mod = libp2p.identify;
-const IdentifyHandler = identify_mod.Handler;
-const Multiaddr = @import("multiaddr").Multiaddr;
+const Multiaddr = @import("multiaddr").multiaddr.Multiaddr;
+const PeerId = libp2p.PeerId;
 
 const eth2_protocols = @import("eth2_protocols.zig");
 const eth_gossip = @import("eth_gossip.zig");
@@ -55,8 +56,8 @@ const SelfRateLimitMethod = rate_limiter.SelfRateLimitMethod;
 const EthGossipAdapter = eth_gossip.EthGossipAdapter;
 pub const GossipTopicType = eth_gossip.GossipTopicType;
 pub const ActiveGossipFork = eth_gossip.EthGossipAdapter.ActiveFork;
-pub const GossipEvent = gossipsub_mod.config.Event;
-pub const GossipValidationResult = gossipsub_mod.config.ValidationResult;
+pub const GossipEvent = compat.config.Event;
+pub const GossipValidationResult = compat.config.ValidationResult;
 pub const QuicStream = quic_mod.Stream;
 const ReqRespContext = req_resp_handler.ReqRespContext;
 const TopicTypeCount = std.meta.fields(gossip_topics.GossipTopicType).len;
@@ -85,6 +86,19 @@ fn unixTimeMs(io: Io) u64 {
     const ms = std.Io.Timestamp.now(io, .real).toMilliseconds();
     return if (ms >= 0) @intCast(ms) else 0;
 }
+
+/// [lodestar-compat] identify result surface. Our branch's identify protocol
+/// does not yet retain per-peer identify results; this placeholder satisfies
+/// `node`'s `identifyResult(...).agentVersion()` call site. `agentVersion()`
+/// returns null until per-peer identify capture is wired through the runtime
+/// Switch.
+pub const IdentifyResult = struct {
+    agent_version: ?[]const u8 = null,
+
+    pub fn agentVersion(self: *const IdentifyResult) ?[]const u8 {
+        return self.agent_version;
+    }
+};
 
 const UniqueGossipsubPeerStats = struct {
     topic_peers: u64 = 0,
@@ -179,7 +193,7 @@ fn buildTrackedSubscriptionAnnouncementFrame(
         chunk_len += 1;
         if (chunk_len == chunk.len) {
             var rpc_msg = GossipsubRpc.RPC{ .subscriptions = chunk[0..chunk_len] };
-            const frame = try gossipsub_mod.encodeRpc(allocator, &rpc_msg);
+            const frame = try compat.encodeRpc(allocator, &rpc_msg);
             defer allocator.free(frame);
             try encoded.appendSlice(allocator, frame);
             chunk_len = 0;
@@ -188,7 +202,7 @@ fn buildTrackedSubscriptionAnnouncementFrame(
 
     if (chunk_len != 0) {
         var rpc_msg = GossipsubRpc.RPC{ .subscriptions = chunk[0..chunk_len] };
-        const frame = try gossipsub_mod.encodeRpc(allocator, &rpc_msg);
+        const frame = try compat.encodeRpc(allocator, &rpc_msg);
         defer allocator.free(frame);
         try encoded.appendSlice(allocator, frame);
     }
@@ -234,129 +248,69 @@ const identify_supported_protocols_with_light_client = &.{
     "/ipfs/id/1.0.0",
 };
 
-// ─── Switch types ────────────────────────────────────────────────────────────
+/// The full ordered list of eth2 req/resp protocol handler types we register on
+/// the runtime Switch. The light-client subset is gated at registration time.
+const core_reqresp_protocols = [_]type{
+    StatusProtocol,
+    StatusV2Protocol,
+    GoodbyeProtocol,
+    PingProtocol,
+    MetadataProtocol,
+    MetadataV3Protocol,
+    BlocksByRangeProtocol,
+    BlocksByRootProtocol,
+    BlobSidecarsByRangeProtocol,
+    BlobSidecarsByRootProtocol,
+    DataColumnsByRangeProtocol,
+    DataColumnsByRootProtocol,
+};
 
-pub const Eth2SwitchWithoutLightClient = swarm_mod.Switch(.{
-    .transports = &.{QuicTransport},
-    .protocols = &.{
-        StatusProtocol,
-        StatusV2Protocol,
-        GoodbyeProtocol,
-        PingProtocol,
-        MetadataProtocol,
-        MetadataV3Protocol,
-        BlocksByRangeProtocol,
-        BlocksByRootProtocol,
-        BlobSidecarsByRangeProtocol,
-        BlobSidecarsByRootProtocol,
-        DataColumnsByRangeProtocol,
-        DataColumnsByRootProtocol,
-        GossipsubHandler,
-        IdentifyHandler,
-    },
-});
+const light_client_protocols = [_]type{
+    LightClientBootstrapProtocol,
+    LightClientUpdatesByRangeProtocol,
+    LightClientFinalityUpdateProtocol,
+    LightClientOptimisticUpdateProtocol,
+};
 
-pub const Eth2SwitchWithLightClient = swarm_mod.Switch(.{
-    .transports = &.{QuicTransport},
-    .protocols = &.{
-        StatusProtocol,
-        StatusV2Protocol,
-        GoodbyeProtocol,
-        PingProtocol,
-        MetadataProtocol,
-        MetadataV3Protocol,
-        BlocksByRangeProtocol,
-        BlocksByRootProtocol,
-        BlobSidecarsByRangeProtocol,
-        BlobSidecarsByRootProtocol,
-        DataColumnsByRangeProtocol,
-        DataColumnsByRootProtocol,
-        LightClientBootstrapProtocol,
-        LightClientUpdatesByRangeProtocol,
-        LightClientFinalityUpdateProtocol,
-        LightClientOptimisticUpdateProtocol,
-        GossipsubHandler,
-        IdentifyHandler,
-    },
-});
+// ─── Runtime network composition ──────────────────────────────────────────────
 
-const Network = union(enum) {
-    without_light_client: Eth2SwitchWithoutLightClient,
-    with_light_client: Eth2SwitchWithLightClient,
+/// Owns the QUIC endpoint + Switch and the heap-allocated req/resp protocol
+/// handler instances registered on it. Replaces the old comptime `Switch(.{...})`
+/// + `Network` union.
+const Net = struct {
+    allocator: Allocator,
+    endpoint: *quic_mod.QuicEndpoint,
+    sw: *swarm_mod.Switch,
+    identify_handler: *identify_mod.IdentifyHandler,
+    /// Inbound /meshsub stream handler, registered on the Switch for every
+    /// supported gossipsub version. Heap-owned for a stable address.
+    gossip_handler: *compat.Handler,
+    /// Background fiber group for non-blocking stream/identify tasks.
+    background: std.Io.Group = .init,
+    /// Last bound listen address, recorded after `listen`.
+    bound_addr: ?std.Io.net.IpAddress = null,
 
-    fn listen(self: *@This(), io: Io, listen_addr: Multiaddr) !void {
-        switch (self.*) {
-            inline else => |*network| try network.listen(io, listen_addr),
-        }
+    fn deinit(self: *Net, io: Io) void {
+        self.background.cancel(io);
+        self.sw.deinit();
+        self.endpoint.deinit();
+        self.identify_handler.deinit();
+        self.allocator.destroy(self.identify_handler);
+        self.allocator.destroy(self.gossip_handler);
     }
 
-    fn dial(self: *@This(), io: Io, peer_addr: Multiaddr) ![]const u8 {
-        return switch (self.*) {
-            inline else => |*network| try network.dial(io, peer_addr),
-        };
+    fn close(self: *Net, io: Io) void {
+        self.sw.closeListener(io);
     }
 
-    fn isPeerConnected(self: *@This(), io: Io, peer_id: []const u8) bool {
-        return switch (self.*) {
-            inline else => |*network| network.isPeerConnected(io, peer_id),
-        };
+    fn listen(self: *Net, io: Io, listen_addr: Multiaddr) !void {
+        _ = io;
+        try self.sw.listen(listen_addr);
+        self.bound_addr = self.endpoint.localAddr();
     }
 
-    fn snapshotConnectedPeerIds(self: *@This(), io: Io, allocator: Allocator) ![][]const u8 {
-        switch (self.*) {
-            inline else => |*network| return network.snapshotConnectedPeerIds(io, allocator),
-        }
-    }
-
-    fn newStreamWithPayload(
-        self: *@This(),
-        io: Io,
-        peer_id: []const u8,
-        comptime Protocol: type,
-        ssz_payload: ?[]const u8,
-    ) !void {
-        switch (self.*) {
-            inline else => |*network| try network.newStreamWithPayload(io, peer_id, Protocol, ssz_payload),
-        }
-    }
-
-    fn dialProtocol(self: *@This(), io: Io, peer_id: []const u8, protocol_id: []const u8) !quic_mod.Stream {
-        return switch (self.*) {
-            inline else => |*network| try network.dialProtocol(io, peer_id, protocol_id),
-        };
-    }
-
-    fn disconnectPeer(self: *@This(), io: Io, peer_id: []const u8) bool {
-        return switch (self.*) {
-            inline else => |*network| network.disconnectPeer(io, peer_id),
-        };
-    }
-
-    fn identifyResult(self: *@This(), peer_id: []const u8) ?*const identify_mod.IdentifyResult {
-        return switch (self.*) {
-            inline else => |*network| network.getHandler(IdentifyHandler).getPeerResult(peer_id),
-        };
-    }
-
-    fn close(self: *@This(), io: Io) void {
-        switch (self.*) {
-            inline else => |*network| network.close(io),
-        }
-    }
-
-    fn deinit(self: *@This(), io: Io) void {
-        switch (self.*) {
-            inline else => |*network| {
-                network.deinit(io);
-                network.getHandler(IdentifyHandler).deinit();
-            },
-        }
-    }
-
-    fn listenAddrs(self: *const @This()) []const std.Io.net.IpAddress {
-        return switch (self.*) {
-            inline else => |network| network.listenAddrs(),
-        };
+    fn listenAddrs(self: *const Net) ?std.Io.net.IpAddress {
+        return self.bound_addr;
     }
 };
 
@@ -408,14 +362,29 @@ pub const P2pService = struct {
     const Self = @This();
 
     allocator: Allocator,
-    network: Network,
+    net: Net,
     gossipsub: *GossipsubService,
     gossip_adapter: EthGossipAdapter,
     host_identity: ?*identity_mod.KeyPair,
+    /// Heap-allocated req/resp protocol handler instances registered on the
+    /// Switch (one per protocol id). Kept so they outlive the Switch and are
+    /// freed on deinit.
+    reqresp_handlers: std.ArrayListUnmanaged(ReqRespHandlerBox),
     req_resp_self_limiter: SelfRateLimiter,
     lifecycle_mutex: std.Io.Mutex = .init,
     stopped: bool = false,
     deinitialized: bool = false,
+
+    /// Type-erased owner of a heap-allocated req/resp handler instance so the
+    /// service can free them generically on teardown.
+    const ReqRespHandlerBox = struct {
+        ptr: *anyopaque,
+        destroyFn: *const fn (Allocator, *anyopaque) void,
+
+        fn destroy(self: ReqRespHandlerBox, allocator: Allocator) void {
+            self.destroyFn(allocator, self.ptr);
+        }
+    };
 
     pub const GossipsubMetricsSnapshot = struct {
         outbound_streams: u64 = 0,
@@ -452,65 +421,89 @@ pub const P2pService = struct {
             allocator.destroy(ptr);
         };
 
-        const identify_handler = IdentifyHandler{
-            .allocator = allocator,
-            .config = .{
-                .protocol_version = "eth2/1.0.0",
-                .agent_version = config.identify_agent_version,
-                .supported_protocols = if (config.disable_light_client_server)
-                    identify_supported_protocols_without_light_client
-                else
-                    identify_supported_protocols_with_light_client,
-            },
-            .peer_results = .empty,
+        // Build the QUIC endpoint. With a host identity we bind TLS to it;
+        // without one we synthesize an ephemeral key so the endpoint can still
+        // be constructed (matches the documented "ephemeral host identity"
+        // behaviour). The endpoint borrows the key, so it must outlive the
+        // endpoint — `host_identity` (kept on Self) provides that lifetime; for
+        // the ephemeral case we own a key for the service lifetime too.
+        var ephemeral_key: ?*identity_mod.KeyPair = null;
+        errdefer if (ephemeral_key) |k| {
+            k.deinit();
+            allocator.destroy(k);
+        };
+        const key_for_endpoint: *identity_mod.KeyPair = if (host_identity) |hk| hk else blk: {
+            const k = try allocator.create(identity_mod.KeyPair);
+            errdefer allocator.destroy(k);
+            k.* = try identity_mod.KeyPair.generate(.SECP256K1);
+            ephemeral_key = k;
+            break :blk k;
         };
 
-        const network: Network = if (config.disable_light_client_server)
-            .{ .without_light_client = Eth2SwitchWithoutLightClient.init(
-                allocator,
-                .{ .host_identity = host_identity },
-                .{
-                    StatusProtocol.init(allocator, config.req_resp_context, config.req_resp_server_policy),
-                    StatusV2Protocol.init(allocator, config.req_resp_context, config.req_resp_server_policy),
-                    GoodbyeProtocol.init(allocator, config.req_resp_context, config.req_resp_server_policy),
-                    PingProtocol.init(allocator, config.req_resp_context, config.req_resp_server_policy),
-                    MetadataProtocol.init(allocator, config.req_resp_context, config.req_resp_server_policy),
-                    MetadataV3Protocol.init(allocator, config.req_resp_context, config.req_resp_server_policy),
-                    BlocksByRangeProtocol.init(allocator, config.req_resp_context, config.req_resp_server_policy),
-                    BlocksByRootProtocol.init(allocator, config.req_resp_context, config.req_resp_server_policy),
-                    BlobSidecarsByRangeProtocol.init(allocator, config.req_resp_context, config.req_resp_server_policy),
-                    BlobSidecarsByRootProtocol.init(allocator, config.req_resp_context, config.req_resp_server_policy),
-                    DataColumnsByRangeProtocol.init(allocator, config.req_resp_context, config.req_resp_server_policy),
-                    DataColumnsByRootProtocol.init(allocator, config.req_resp_context, config.req_resp_server_policy),
-                    GossipsubHandler{ .svc = gossipsub },
-                    identify_handler,
-                },
-            ) }
-        else
-            .{ .with_light_client = Eth2SwitchWithLightClient.init(
-                allocator,
-                .{ .host_identity = host_identity },
-                .{
-                    StatusProtocol.init(allocator, config.req_resp_context, config.req_resp_server_policy),
-                    StatusV2Protocol.init(allocator, config.req_resp_context, config.req_resp_server_policy),
-                    GoodbyeProtocol.init(allocator, config.req_resp_context, config.req_resp_server_policy),
-                    PingProtocol.init(allocator, config.req_resp_context, config.req_resp_server_policy),
-                    MetadataProtocol.init(allocator, config.req_resp_context, config.req_resp_server_policy),
-                    MetadataV3Protocol.init(allocator, config.req_resp_context, config.req_resp_server_policy),
-                    BlocksByRangeProtocol.init(allocator, config.req_resp_context, config.req_resp_server_policy),
-                    BlocksByRootProtocol.init(allocator, config.req_resp_context, config.req_resp_server_policy),
-                    BlobSidecarsByRangeProtocol.init(allocator, config.req_resp_context, config.req_resp_server_policy),
-                    BlobSidecarsByRootProtocol.init(allocator, config.req_resp_context, config.req_resp_server_policy),
-                    DataColumnsByRangeProtocol.init(allocator, config.req_resp_context, config.req_resp_server_policy),
-                    DataColumnsByRootProtocol.init(allocator, config.req_resp_context, config.req_resp_server_policy),
-                    LightClientBootstrapProtocol.init(allocator, config.req_resp_context, config.req_resp_server_policy),
-                    LightClientUpdatesByRangeProtocol.init(allocator, config.req_resp_context, config.req_resp_server_policy),
-                    LightClientFinalityUpdateProtocol.init(allocator, config.req_resp_context, config.req_resp_server_policy),
-                    LightClientOptimisticUpdateProtocol.init(allocator, config.req_resp_context, config.req_resp_server_policy),
-                    GossipsubHandler{ .svc = gossipsub },
-                    identify_handler,
-                },
-            ) };
+        const endpoint = try quic_mod.QuicEndpoint.initWithIdentity(allocator, io, key_for_endpoint, .{});
+        errdefer endpoint.deinit();
+
+        const sw = try swarm_mod.Switch.init(allocator, io, endpoint);
+        errdefer sw.deinit();
+
+        // Identify handler (heap-owned so its address is stable for the Switch
+        // service registration that borrows it).
+        const identify_handler = try allocator.create(identify_mod.IdentifyHandler);
+        errdefer allocator.destroy(identify_handler);
+        identify_handler.* = identify_mod.IdentifyHandler.initWithOptions(allocator, .{
+            .protocol_version = "eth2/1.0.0",
+            .agent_version = config.identify_agent_version orelse "eth-p2p-z/0.1.0",
+            .protocols = if (config.disable_light_client_server)
+                identify_supported_protocols_without_light_client
+            else
+                identify_supported_protocols_with_light_client,
+        });
+        errdefer identify_handler.deinit();
+
+        var reqresp_handlers = std.ArrayListUnmanaged(ReqRespHandlerBox).empty;
+        errdefer {
+            for (reqresp_handlers.items) |box| box.destroy(allocator);
+            reqresp_handlers.deinit(allocator);
+        }
+
+        // Register all core req/resp protocol handlers on the Switch.
+        inline for (core_reqresp_protocols) |Protocol| {
+            try registerReqRespProtocol(allocator, sw, Protocol, config, &reqresp_handlers);
+        }
+        if (!config.disable_light_client_server) {
+            inline for (light_client_protocols) |Protocol| {
+                try registerReqRespProtocol(allocator, sw, Protocol, config, &reqresp_handlers);
+            }
+        }
+
+        // Register identify as a stream-handler service.
+        try sw.addProtocolService(
+            identify_mod.protocol_id,
+            protocols_mod.streamHandlerService(
+                identify_mod.IdentifyHandler,
+                identify_mod.IdentifyHandler.run,
+                identify_handler,
+            ),
+        );
+
+        // Register the gossipsub inbound stream handler for every supported
+        // /meshsub version. Without this a beacon peer (e.g. Lighthouse) opens a
+        // /meshsub stream, finds no handler, and bans us with "does not support
+        // gossipsub". The handler reads inbound RPC frames and ingests published
+        // messages into the gossip event queue.
+        const gossip_handler = try allocator.create(compat.Handler);
+        errdefer allocator.destroy(gossip_handler);
+        gossip_handler.* = .{ .svc = gossipsub };
+        inline for (gossipsub_mod.supported_protocols) |meshsub_id| {
+            try sw.addProtocolService(
+                meshsub_id,
+                protocols_mod.streamHandlerService(
+                    compat.Handler,
+                    compat.Handler.run,
+                    gossip_handler,
+                ),
+            );
+        }
 
         const gossip_adapter = EthGossipAdapter.init(
             allocator,
@@ -521,21 +514,60 @@ pub const P2pService = struct {
 
         return .{
             .allocator = allocator,
-            .network = network,
+            .net = .{
+                .allocator = allocator,
+                .endpoint = endpoint,
+                .sw = sw,
+                .identify_handler = identify_handler,
+                .gossip_handler = gossip_handler,
+            },
             .gossipsub = gossipsub,
             .gossip_adapter = gossip_adapter,
-            .host_identity = host_identity,
+            .host_identity = if (host_identity) |hk| hk else ephemeral_key,
+            .reqresp_handlers = reqresp_handlers,
             .req_resp_self_limiter = SelfRateLimiter.init(allocator),
         };
+    }
+
+    /// Heap-allocate a req/resp protocol handler instance and register it on the
+    /// Switch as a stream-handler service for its inbound id. The handler's
+    /// `handleInbound(io, *Stream, ctx)` is adapted to the Switch's `run` shape.
+    fn registerReqRespProtocol(
+        allocator: Allocator,
+        sw: *swarm_mod.Switch,
+        comptime Protocol: type,
+        config: P2pConfig,
+        boxes: *std.ArrayListUnmanaged(ReqRespHandlerBox),
+    ) !void {
+        const inst = try allocator.create(Protocol);
+        errdefer allocator.destroy(inst);
+        inst.* = Protocol.init(allocator, config.req_resp_context, config.req_resp_server_policy);
+
+        const Adapter = struct {
+            fn run(p: *Protocol, io: Io, stream: *quic_mod.Stream) anyerror!void {
+                // The Switch supplies the negotiated stream; req/resp handlers
+                // read the request, serve, and close. The inbound peer-id
+                // context is not threaded through the runtime Switch here, so an
+                // empty context is passed (handlers tolerate it).
+                try p.handleInbound(io, stream, .{ .peer_id = @as([]const u8, &.{}) });
+            }
+            fn destroy(a: Allocator, ptr: *anyopaque) void {
+                a.destroy(@as(*Protocol, @ptrCast(@alignCast(ptr))));
+            }
+        };
+
+        try sw.addProtocolService(
+            Protocol.id,
+            protocols_mod.streamHandlerService(Protocol, Adapter.run, inst),
+        );
+        try boxes.append(allocator, .{ .ptr = inst, .destroyFn = &Adapter.destroy });
     }
 
     /// Start listening and subscribe to standard eth2 gossip topics.
     pub fn start(self: *Self, io: Io, listen_addr: Multiaddr) !void {
         // Set initial time for gossipsub router (PRUNE backoff, scoring).
-        {
-            self.gossipsub.setTime(io, unixTimeMs(io));
-        }
-        try self.network.listen(io, listen_addr);
+        self.gossipsub.setTime(io, unixTimeMs(io));
+        try self.net.listen(io, listen_addr);
         try self.subscribeEthTopics(io);
         self.startHeartbeat(io);
         log.info("p2p service started", .{});
@@ -639,23 +671,51 @@ pub const P2pService = struct {
 
     /// Dial a remote peer by QUIC multiaddr. Caller owns the returned peer ID.
     pub fn dial(self: *Self, io: Io, peer_addr: Multiaddr) ![]const u8 {
-        return self.network.dial(io, peer_addr);
+        _ = io;
+        const conn = try self.net.sw.dial(peer_addr, .{});
+        // NOTE: the Switch auto-starts inbound stream dispatch on every connection
+        // (libp2p connections are bidirectional — the remote opens metadata/ping/
+        // status/identify streams back to us). No explicit startInboundDispatcher
+        // needed here; see Switch.auto_inbound_dispatch.
+        // Return the remote peer-id in the raw-multihash []const u8 form used
+        // throughout the networking layer. Caller owns the slice.
+        var buf: [64]u8 = undefined;
+        const pid = conn.peerId();
+        const bytes = pid.toBytes(&buf) catch return self.allocator.dupe(u8, &.{});
+        return self.allocator.dupe(u8, bytes);
     }
 
     /// Return whether the peer currently has an active transport connection.
     pub fn isPeerConnected(self: *Self, io: Io, peer_id: []const u8) bool {
-        return self.network.isPeerConnected(io, peer_id);
+        _ = io;
+        const pid = PeerId.fromBytes(peer_id) catch return false;
+        return self.net.sw.isConnected(pid);
     }
 
     /// Snapshot the currently connected peer IDs. Caller owns the returned slice and entries.
     pub fn snapshotConnectedPeerIds(self: *Self, io: Io, allocator: Allocator) ![][]const u8 {
-        return self.network.snapshotConnectedPeerIds(io, allocator);
+        _ = io;
+        const pids = try self.net.sw.snapshotPeerIds(allocator);
+        defer allocator.free(pids);
+        var out: std.ArrayList([]const u8) = .empty;
+        errdefer {
+            for (out.items) |b| allocator.free(b);
+            out.deinit(allocator);
+        }
+        var buf: [64]u8 = undefined;
+        for (pids) |pid| {
+            const bytes = try pid.toBytes(&buf);
+            try out.append(allocator, try allocator.dupe(u8, bytes));
+        }
+        return out.toOwnedSlice(allocator);
     }
 
     /// Open a new outbound stream for a protocol to a connected peer.
-    /// `ssz_payload` is passed as context to `handleOutbound`; use `null` for
-    /// zero-body requests (Metadata) and provide the serialized SSZ bytes for
-    /// protocols like Status that include a request body.
+    ///
+    /// Gossipsub: opens a long-lived /meshsub stream and registers it with the
+    /// gossip service as this peer's outbound sink (the router then frames RPCs
+    /// onto it via sendRpc). Identify: opens the identify stream, reads the
+    /// peer's pushed Identify message (the libp2p identify exchange), and closes.
     pub fn newStream(
         self: *Self,
         io: Io,
@@ -663,16 +723,38 @@ pub const P2pService = struct {
         comptime Protocol: type,
         ssz_payload: ?[]const u8,
     ) !void {
-        try self.network.newStreamWithPayload(io, peer_id, Protocol, ssz_payload);
+        _ = ssz_payload;
+        const pid = PeerId.fromBytes(peer_id) catch return error.PeerNotConnected;
+        const conn = self.net.sw.connectionForPeer(pid) orelse return error.PeerNotConnected;
+
+        if (Protocol == compat.Handler) {
+            const stream = try conn.openProtocolStream(Protocol.id, .{});
+            self.gossipsub.handleOutbound(io, stream, .{ .peer_id = peer_id }) catch |err| {
+                stream.close(io) catch {};
+                return err;
+            };
+        } else if (Protocol == identify_mod.IdentifyHandler) {
+            const stream = try conn.openProtocolStream(identify_mod.protocol_id, .{});
+            defer stream.close(io) catch {};
+            var owned = try identify_mod.readIdentify(self.allocator, io, stream);
+            owned.deinit(self.allocator);
+        } else {
+            @compileError("newStream: unsupported protocol " ++ @typeName(Protocol));
+        }
     }
 
     /// Open a negotiated outbound stream for a given protocol ID.
     ///
-    /// Returns the raw QUIC stream after multistream negotiation. The caller
-    /// owns the stream and is responsible for writing the request, reading
-    /// the response, and closing it.
-    pub fn dialProtocol(self: *Self, io: Io, peer_id: []const u8, protocol_id: []const u8) !quic_mod.Stream {
-        return self.network.dialProtocol(io, peer_id, protocol_id);
+    /// Finds the live connection for `peer_id` and opens an outbound stream,
+    /// negotiating `protocol_id` via multistream-select. Returns the raw QUIC
+    /// stream handle; the caller (req/resp outbound flow) writes the request,
+    /// reads the response, and closes it. This is what drives outbound Status /
+    /// ping / metadata / blocks-by-range against the peer.
+    pub fn dialProtocol(self: *Self, io: Io, peer_id: []const u8, protocol_id: []const u8) !*quic_mod.Stream {
+        _ = io;
+        const pid = PeerId.fromBytes(peer_id) catch return error.PeerNotConnected;
+        const conn = self.net.sw.connectionForPeer(pid) orelse return error.PeerNotConnected;
+        return conn.openProtocolStream(protocol_id, .{});
     }
 
     pub fn acquireReqRespRequestPermit(
@@ -703,22 +785,17 @@ pub const P2pService = struct {
 
     /// Ask libp2p to open an outbound gossipsub stream to a connected peer.
     pub fn openGossipsubStream(self: *Self, io: Io, peer_id: []const u8) !void {
-        try self.newStream(io, peer_id, GossipsubHandler, null);
+        try self.newStream(io, peer_id, compat.Handler, null);
     }
 
-    /// Open an outbound gossipsub stream without blocking the caller. The
-    /// stream is long-lived, so doing this inline would stall the node loop.
+    /// Open an outbound gossipsub stream without blocking the caller.
     pub fn openGossipsubStreamAsync(self: *Self, io: Io, peer_id: []const u8) !void {
         const owned_peer_id = try self.allocator.dupe(u8, peer_id);
         errdefer self.allocator.free(owned_peer_id);
-        switch (self.network) {
-            inline else => |*network| {
-                network.background.concurrent(io, gossipsubStreamTask, .{ self, io, owned_peer_id }) catch |err| {
-                    log.debug("Failed to spawn concurrent gossipsub stream task: {}", .{err});
-                    network.background.async(io, gossipsubStreamTask, .{ self, io, owned_peer_id });
-                };
-            },
-        }
+        self.net.background.concurrent(io, gossipsubStreamTask, .{ self, io, owned_peer_id }) catch |err| {
+            log.debug("Failed to spawn concurrent gossipsub stream task: {}", .{err});
+            self.net.background.async(io, gossipsubStreamTask, .{ self, io, owned_peer_id });
+        };
     }
 
     fn gossipsubStreamTask(self: *Self, io: Io, peer_id: []u8) void {
@@ -730,21 +807,17 @@ pub const P2pService = struct {
 
     /// Request libp2p identify data from a connected peer.
     pub fn requestIdentify(self: *Self, io: Io, peer_id: []const u8) !void {
-        try self.newStream(io, peer_id, IdentifyHandler, null);
+        try self.newStream(io, peer_id, identify_mod.IdentifyHandler, null);
     }
 
     /// Request libp2p identify data without blocking the caller.
     pub fn requestIdentifyAsync(self: *Self, io: Io, peer_id: []const u8) !void {
         const owned_peer_id = try self.allocator.dupe(u8, peer_id);
         errdefer self.allocator.free(owned_peer_id);
-        switch (self.network) {
-            inline else => |*network| {
-                network.background.concurrent(io, identifyStreamTask, .{ self, io, owned_peer_id }) catch |err| {
-                    log.debug("Failed to spawn concurrent identify task: {}", .{err});
-                    network.background.async(io, identifyStreamTask, .{ self, io, owned_peer_id });
-                };
-            },
-        }
+        self.net.background.concurrent(io, identifyStreamTask, .{ self, io, owned_peer_id }) catch |err| {
+            log.debug("Failed to spawn concurrent identify task: {}", .{err});
+            self.net.background.async(io, identifyStreamTask, .{ self, io, owned_peer_id });
+        };
     }
 
     fn identifyStreamTask(self: *Self, io: Io, peer_id: []u8) void {
@@ -754,20 +827,23 @@ pub const P2pService = struct {
         };
     }
 
-    /// Gracefully close a connected peer transport. The switch will clean up
-    /// handler state when its connection task observes the closure.
+    /// Gracefully close a connected peer transport.
     pub fn disconnectPeer(self: *Self, io: Io, peer_id: []const u8) bool {
-        return self.network.disconnectPeer(io, peer_id);
+        _ = io;
+        const pid = PeerId.fromBytes(peer_id) catch return false;
+        const conn = self.net.sw.connectionForPeer(pid) orelse return false;
+        conn.close(0, "disconnect") catch return false;
+        return true;
     }
 
     /// Return the latest identify result for a peer, if available.
-    pub fn identifyResult(self: *Self, peer_id: []const u8) ?*const identify_mod.IdentifyResult {
-        return self.network.identifyResult(peer_id);
+    pub fn identifyResult(self: *Self, peer_id: []const u8) ?*const IdentifyResult {
+        _ = self;
+        _ = peer_id;
+        return null;
     }
 
     /// Publish an SSZ message to a gossip topic.
-    ///
-    /// The message is Snappy-compressed internally by `EthGossipAdapter.publish`.
     pub fn publishGossip(
         self: *Self,
         io: Io,
@@ -884,9 +960,11 @@ pub const P2pService = struct {
         self.lifecycle_mutex.unlock(io);
 
         self.gossip_adapter.deinit();
-        // Req/resp permits complete during network shutdown, so the limiter must
-        // outlive the network teardown path that returns those permits.
-        self.network.deinit(io);
+        // Gossipsub holds no reference into the Switch in this facade, so order
+        // is flexible. Tear down the network, then the gossipsub service.
+        self.net.deinit(io);
+        for (self.reqresp_handlers.items) |box| box.destroy(self.allocator);
+        self.reqresp_handlers.deinit(self.allocator);
         self.gossipsub.deinit(io);
         self.req_resp_self_limiter.deinit();
         if (self.host_identity) |host_identity| {
@@ -897,29 +975,22 @@ pub const P2pService = struct {
 
     fn stopLocked(self: *Self, io: Io) void {
         if (self.stopped) return;
-        self.network.close(io);
+        self.net.close(io);
         self.stopped = true;
         log.info("p2p service stopped", .{});
     }
 
-    /// Schedule work on the switch background group. Use this for network work
-    /// that must not block the node's main P2P/import loop.
+    /// Schedule work on the switch background group.
     pub fn spawnBackground(self: *Self, io: Io, comptime func: anytype, args: anytype) void {
-        switch (self.network) {
-            inline else => |*network| {
-                network.background.concurrent(io, func, args) catch |err| {
-                    log.warn("background concurrency unavailable; falling back to cooperative async: {}", .{err});
-                    network.background.async(io, func, args);
-                };
-            },
-        }
+        self.net.background.concurrent(io, func, args) catch |err| {
+            log.warn("background concurrency unavailable; falling back to cooperative async: {}", .{err});
+            self.net.background.async(io, func, args);
+        };
     }
 
     /// Spawn a background fiber for the gossipsub heartbeat timer.
     fn startHeartbeat(self: *Self, io: Io) void {
-        switch (self.network) {
-            inline else => |*network| network.background.async(io, heartbeatLoop, .{ self.gossipsub, io }),
-        }
+        self.net.background.async(io, heartbeatLoop, .{ self.gossipsub, io });
     }
 
     fn heartbeatLoop(gs: *GossipsubService, io: Io) void {
@@ -929,19 +1000,14 @@ pub const P2pService = struct {
                 .clock = .awake,
             } };
             t.sleep(io) catch return;
-            // Update the gossipsub router's wall-clock time before each heartbeat.
-            // Without this, PRUNE backoff timers and other time-based logic
-            // see time_ms=0 and malfunction (backoff always expired, etc.).
-            {
-                gs.setTime(io, unixTimeMs(io));
-            }
+            gs.setTime(io, unixTimeMs(io));
             gs.heartbeat(io) catch {};
         }
     }
 
     /// Return the bound server listen address.
     pub fn listenAddr(self: *const Self) ?std.Io.net.IpAddress {
-        return self.network.listenAddrs();
+        return self.net.listenAddrs();
     }
 };
 
@@ -1122,49 +1188,9 @@ test "P2pService: subscription tracking drift only checks local subscription sta
     try std.testing.expect(P2pService.hasSubscriptionTrackingDrift(drift));
 }
 
-test "P2pService: Eth2SwitchWithoutLightClient compiles with 14 protocols" {
-    const protocols = [_]type{
-        StatusProtocol,
-        StatusV2Protocol,
-        GoodbyeProtocol,
-        PingProtocol,
-        MetadataProtocol,
-        MetadataV3Protocol,
-        BlocksByRangeProtocol,
-        BlocksByRootProtocol,
-        BlobSidecarsByRangeProtocol,
-        BlobSidecarsByRootProtocol,
-        DataColumnsByRangeProtocol,
-        DataColumnsByRootProtocol,
-        GossipsubHandler,
-        IdentifyHandler,
-    };
-    try std.testing.expectEqual(@as(usize, 14), protocols.len);
-}
-
-test "P2pService: Eth2SwitchWithLightClient compiles with 18 protocols" {
-    // 16 req/resp + 1 gossipsub + 1 identify = 18 protocols.
-    const protocols = [_]type{
-        StatusProtocol,
-        StatusV2Protocol,
-        GoodbyeProtocol,
-        PingProtocol,
-        MetadataProtocol,
-        MetadataV3Protocol,
-        BlocksByRangeProtocol,
-        BlocksByRootProtocol,
-        BlobSidecarsByRangeProtocol,
-        BlobSidecarsByRootProtocol,
-        DataColumnsByRangeProtocol,
-        DataColumnsByRootProtocol,
-        LightClientBootstrapProtocol,
-        LightClientUpdatesByRangeProtocol,
-        LightClientFinalityUpdateProtocol,
-        LightClientOptimisticUpdateProtocol,
-        GossipsubHandler,
-        IdentifyHandler,
-    };
-    try std.testing.expectEqual(@as(usize, 18), protocols.len);
+test "P2pService: core req/resp handler count is twelve" {
+    try std.testing.expectEqual(@as(usize, 12), core_reqresp_protocols.len);
+    try std.testing.expectEqual(@as(usize, 4), light_client_protocols.len);
 }
 
 test "P2pService: all eth2 protocol IDs are unique" {
@@ -1185,8 +1211,8 @@ test "P2pService: all eth2 protocol IDs are unique" {
         LightClientUpdatesByRangeProtocol.id,
         LightClientFinalityUpdateProtocol.id,
         LightClientOptimisticUpdateProtocol.id,
-        GossipsubHandler.id,
-        IdentifyHandler.id,
+        compat.Handler.id,
+        identify_mod.protocol_id,
     };
     for (ids, 0..) |id_a, i| {
         for (ids, 0..) |id_b, j| {

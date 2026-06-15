@@ -95,14 +95,21 @@ fn makeProtocolHandler(
             const started_ns = std.Io.Clock.awake.now(io).nanoseconds;
 
             const request_bytes = req_resp_encoding.readRequestFromStream(self.allocator, io, stream) catch |err| blk: {
-                if (method.allowsImplicitEmptyRequest() and err == error.UnexpectedEof) {
+                // Zero-body requests (metadata, light-client updates) arrive as a
+                // bare half-closed stream with no bytes. Depending on the reader,
+                // that surfaces as either UnexpectedEof or EndOfStream — treat both
+                // as a valid empty request, otherwise we wrongly answer "Malformed
+                // request" and the peer scores us down to a disconnect.
+                if (method.allowsImplicitEmptyRequest() and
+                    (err == error.UnexpectedEof or err == error.EndOfStream))
+                {
                     break :blk try self.allocator.alloc(u8, 0);
                 }
 
                 log.debug("{s} request decode error: {}", .{ id, err });
                 try response_writer.writeError(.invalid_request, "Malformed request");
                 notifyRequestCompleted(self.context, io, method, started_ns, .decode_error, 0, response_writer_ctx.payload_bytes, response_writer_ctx.chunk_count);
-                stream.closeWrite(io);
+                stream.closeWrite(io) catch {};
                 return;
             };
             defer self.allocator.free(request_bytes);
@@ -121,7 +128,7 @@ fn makeProtocolHandler(
                             response_writer_ctx.payload_bytes,
                             response_writer_ctx.chunk_count,
                         );
-                        stream.closeWrite(io);
+                        stream.closeWrite(io) catch {};
                         return;
                     },
                     .deny_global => {
@@ -135,7 +142,7 @@ fn makeProtocolHandler(
                             response_writer_ctx.payload_bytes,
                             response_writer_ctx.chunk_count,
                         );
-                        stream.closeWrite(io);
+                        stream.closeWrite(io) catch {};
                         return;
                     },
                 }
@@ -162,7 +169,7 @@ fn makeProtocolHandler(
                     response_writer_ctx.payload_bytes,
                     response_writer_ctx.chunk_count,
                 );
-                stream.closeWrite(io);
+                stream.closeWrite(io) catch {};
                 return;
             };
 
@@ -181,7 +188,7 @@ fn makeProtocolHandler(
                 response_writer_ctx.payload_bytes,
                 response_writer_ctx.chunk_count,
             );
-            stream.closeWrite(io);
+            stream.closeWrite(io) catch {};
         }
 
         pub fn handleOutbound(self: *Self, io: Io, stream: anytype, ctx: anytype) !void {
@@ -191,7 +198,7 @@ fn makeProtocolHandler(
                 &.{};
 
             try req_resp_encoding.writeRequestToStream(self.allocator, io, stream, ssz_payload);
-            stream.closeWrite(io);
+            stream.closeWrite(io) catch {};
 
             var reader = req_resp_encoding.ResponseChunkStreamReader{
                 .allocator = self.allocator,

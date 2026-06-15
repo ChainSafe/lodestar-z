@@ -41,7 +41,7 @@ const ATTESTATION_SUBNET_COUNT = networking.peer_info.ATTESTATION_SUBNET_COUNT;
 const SYNC_COMMITTEE_SUBNET_COUNT = networking.peer_info.SYNC_COMMITTEE_SUBNET_COUNT;
 const discv5 = @import("discv5");
 const libp2p = @import("zig-libp2p");
-const Multiaddr = @import("multiaddr").Multiaddr;
+const Multiaddr = @import("multiaddr").multiaddr.Multiaddr;
 const sync_mod = @import("sync");
 const SyncService = sync_mod.SyncService;
 const BatchBlock = sync_mod.BatchBlock;
@@ -57,8 +57,8 @@ const SyncCallbackCtx = @import("sync_bridge.zig").SyncCallbackCtx;
 const BlobSidecar = types.deneb.BlobSidecar;
 const BlobIdentifier = types.deneb.BlobIdentifier;
 const DataColumnSidecar = types.fulu.DataColumnSidecar;
-const Libp2pPeerId = @TypeOf((@as(libp2p.security.Session1, undefined)).remote_id);
-const Libp2pPublicKey = @TypeOf((@as(libp2p.security.Session1, undefined)).remote_public_key);
+const Libp2pPeerId = @TypeOf((@as(libp2p.security.Session, undefined)).remote_id);
+const Libp2pPublicKey = @TypeOf((@as(libp2p.security.Session, undefined)).remote_public_key);
 
 const BYTES_PER_BLOB = kzg_mod.BYTES_PER_BLOB;
 const MAX_COLUMNS = preset_root.NUMBER_OF_COLUMNS;
@@ -430,10 +430,7 @@ fn discoveryPeerIdTextFromPubkey(
     };
 
     const peer_id = try Libp2pPeerId.fromPublicKey(allocator, &public_key);
-    const text_buf = try allocator.alloc(u8, peer_id.toBase58Len());
-    defer allocator.free(text_buf);
-    const peer_id_text = try peer_id.toBase58(text_buf);
-    return allocator.dupe(u8, peer_id_text);
+    return peer_id.toString(allocator);
 }
 
 test "discovery peer id helpers use raw libp2p peer id bytes" {
@@ -582,8 +579,8 @@ test "shouldRefreshMetadataAfterPing requests metadata when unknown or seq advan
 pub fn start(self: *BeaconNode, io: std.Io, listen_addr: []const u8, port: u16) !void {
     var ma_buf: [160]u8 = undefined;
     const ma_str = try formatListenMultiaddr(&ma_buf, listen_addr, port);
-    const listen_multiaddr = try Multiaddr.fromString(self.allocator, ma_str);
-    defer listen_multiaddr.deinit();
+    var listen_multiaddr = try Multiaddr.fromString(self.allocator, ma_str);
+    defer listen_multiaddr.deinit(self.allocator);
 
     const p2p_req_ctx = try self.allocator.create(reqresp_callbacks_mod.RequestContext);
     errdefer self.allocator.destroy(p2p_req_ctx);
@@ -611,10 +608,8 @@ pub fn start(self: *BeaconNode, io: std.Io, listen_addr: []const u8, port: u16) 
     var host_identity = self.node_identity.libp2pKeyPair();
     {
         const derived_peer_id = try host_identity.peerId(self.allocator);
-        const base58_len = derived_peer_id.toBase58Len();
-        const base58_buf = try self.allocator.alloc(u8, base58_len);
-        defer self.allocator.free(base58_buf);
-        const peer_id_text = try derived_peer_id.toBase58(base58_buf);
+        const peer_id_text = try derived_peer_id.toString(self.allocator);
+        defer self.allocator.free(peer_id_text);
         if (!std.mem.eql(u8, peer_id_text, self.node_identity.peer_id)) {
             return error.PeerIdMismatch;
         }
@@ -1102,7 +1097,9 @@ fn closeOwnedQuicStream(io: std.Io, stream: *networking.QuicStream) void {
 
 const OpenedReqRespRequest = struct {
     permit: networking.ReqRespRequestPermit,
-    stream: networking.QuicStream,
+    // Our eth-p2p-z `quic.Stream` is opaque, so streams are handles (`*Stream`),
+    // never stored by value.
+    stream: *networking.QuicStream,
     metrics: ?*BeaconMetrics,
     method: networking.Method,
     started_ns: i128,
@@ -1137,7 +1134,7 @@ const OpenedReqRespRequest = struct {
 
     fn deinit(self: *OpenedReqRespRequest, io: std.Io) void {
         if (!self.finished) self.finish(io, .transport_error);
-        closeOwnedQuicStream(io, &self.stream);
+        closeOwnedQuicStream(io, self.stream);
         self.permit.deinit(io);
     }
 };
@@ -1333,21 +1330,21 @@ fn directPeerStateByAddr(self: *BeaconNode, addr_str: []const u8) ?*DirectPeerSt
 }
 
 fn parseDirectPeerExpectedPeerId(allocator: std.mem.Allocator, addr_str: []const u8) !?[]const u8 {
-    var ma = try Multiaddr.fromString(allocator, addr_str);
-    defer ma.deinit();
+    // Our eth-p2p-z Multiaddr has no protocol-component iterator, so parse the
+    // trailing "/p2p/<base58>" segment directly. Returns the raw peer-id bytes
+    // in the same encoding as SwitchConnection.peerId().toBytes (so direct-peer
+    // matching against live connections works), or null when there is no p2p
+    // component.
+    const marker = "/p2p/";
+    const idx = std.mem.lastIndexOf(u8, addr_str, marker) orelse return null;
+    var b58 = addr_str[idx + marker.len ..];
+    if (std.mem.indexOfScalar(u8, b58, '/')) |slash| b58 = b58[0..slash];
+    if (b58.len == 0) return null;
 
-    var iter = ma.iterator();
-    while (try iter.next()) |proto| {
-        switch (proto) {
-            .P2P => |peer_id| {
-                var buf: [128]u8 = undefined;
-                const raw_peer_id = peer_id.toBytes(&buf) catch return error.PeerIdEncodeFailed;
-                return try allocator.dupe(u8, raw_peer_id);
-            },
-            else => {},
-        }
-    }
-    return null;
+    const peer_id = Libp2pPeerId.fromString(allocator, b58) catch return error.PeerIdEncodeFailed;
+    var buf: [128]u8 = undefined;
+    const raw_peer_id = peer_id.toBytes(&buf) catch return error.PeerIdEncodeFailed;
+    return try allocator.dupe(u8, raw_peer_id);
 }
 
 fn directPeerStateByPeerId(self: *BeaconNode, peer_id: []const u8) ?*DirectPeerState {
@@ -3116,10 +3113,10 @@ fn outboundDialAttemptTask(
     svc: *networking.P2pService,
     ma_str: []const u8,
 ) OutboundDialAttemptResult {
-    const peer_addr = Multiaddr.fromString(self.allocator, ma_str) catch |err| {
+    var peer_addr = Multiaddr.fromString(self.allocator, ma_str) catch |err| {
         return .{ .failure = err };
     };
-    defer peer_addr.deinit();
+    defer peer_addr.deinit(self.allocator);
 
     const peer_id = svc.dial(io, peer_addr) catch |err| switch (err) {
         error.Canceled => return .canceled,
@@ -3820,7 +3817,8 @@ fn maybeRecordPeerIdentity(
     if (peer.agent_version != null) return false;
 
     const identify_result = svc.identifyResult(peer_id) orelse return false;
-    pm.updateAgentVersion(peer_id, identify_result.agentVersion()) catch |err| {
+    const agent_version = identify_result.agentVersion() orelse return false;
+    pm.updateAgentVersion(peer_id, agent_version) catch |err| {
         log.debug("Failed to record identify result for peer {s}: {}", .{ peer_id, err });
         return false;
     };
@@ -4102,9 +4100,9 @@ fn fetchBlobSidecarsByRangeForMetas(
     };
     var req_ssz: [networking.messages.BlobSidecarsByRangeRequest.fixed_size]u8 = undefined;
     _ = networking.messages.BlobSidecarsByRangeRequest.serializeIntoBytes(&request, &req_ssz);
-    try req_resp_encoding.writeRequestToStream(self.allocator, io, &outbound.stream, &req_ssz);
+    try req_resp_encoding.writeRequestToStream(self.allocator, io, outbound.stream, &req_ssz);
     outbound.noteRequestPayload(req_ssz.len);
-    outbound.stream.closeWrite(io);
+    outbound.stream.closeWrite(io) catch {};
     request_outcome = .malformed_response;
 
     var reader = req_resp_encoding.ResponseChunkStreamReader{
@@ -4113,7 +4111,7 @@ fn fetchBlobSidecarsByRangeForMetas(
     };
     defer reader.deinit();
 
-    while (try reader.next(io, &outbound.stream)) |decoded| {
+    while (try reader.next(io, outbound.stream)) |decoded| {
         outbound.noteResponseChunk(decoded.ssz_bytes.len);
         if (decoded.result != .success) {
             self.allocator.free(decoded.ssz_bytes);
@@ -4238,9 +4236,9 @@ fn fetchBlobSidecarsByRootForMeta(
     const request_bytes = try self.allocator.alloc(u8, networking.messages.BlobSidecarsByRootRequest.serializedSize(&request));
     defer self.allocator.free(request_bytes);
     _ = networking.messages.BlobSidecarsByRootRequest.serializeIntoBytes(&request, request_bytes);
-    try req_resp_encoding.writeRequestToStream(self.allocator, io, &outbound.stream, request_bytes);
+    try req_resp_encoding.writeRequestToStream(self.allocator, io, outbound.stream, request_bytes);
     outbound.noteRequestPayload(request_bytes.len);
-    outbound.stream.closeWrite(io);
+    outbound.stream.closeWrite(io) catch {};
     request_outcome = .malformed_response;
 
     var reader = req_resp_encoding.ResponseChunkStreamReader{
@@ -4249,7 +4247,7 @@ fn fetchBlobSidecarsByRootForMeta(
     };
     defer reader.deinit();
 
-    while (try reader.next(io, &outbound.stream)) |decoded| {
+    while (try reader.next(io, outbound.stream)) |decoded| {
         outbound.noteResponseChunk(decoded.ssz_bytes.len);
         if (decoded.result != .success) {
             self.allocator.free(decoded.ssz_bytes);
@@ -4413,9 +4411,9 @@ fn fetchDataColumnsByRangeOnce(
     const request_bytes = try self.allocator.alloc(u8, networking.messages.DataColumnSidecarsByRangeRequest.serializedSize(&filtered_request));
     defer self.allocator.free(request_bytes);
     _ = networking.messages.DataColumnSidecarsByRangeRequest.serializeIntoBytes(&filtered_request, request_bytes);
-    try req_resp_encoding.writeRequestToStream(self.allocator, io, &outbound.stream, request_bytes);
+    try req_resp_encoding.writeRequestToStream(self.allocator, io, outbound.stream, request_bytes);
     outbound.noteRequestPayload(request_bytes.len);
-    outbound.stream.closeWrite(io);
+    outbound.stream.closeWrite(io) catch {};
     request_outcome = .malformed_response;
 
     var seen_columns = try self.allocator.alloc(std.StaticBitSet(MAX_COLUMNS), metas.len);
@@ -4428,7 +4426,7 @@ fn fetchDataColumnsByRangeOnce(
     };
     defer reader.deinit();
 
-    while (try reader.next(io, &outbound.stream)) |decoded| {
+    while (try reader.next(io, outbound.stream)) |decoded| {
         outbound.noteResponseChunk(decoded.ssz_bytes.len);
         if (decoded.result != .success) {
             self.allocator.free(decoded.ssz_bytes);
@@ -4687,9 +4685,9 @@ fn fetchDataColumnsByRootOnceForMetas(
     var request_outcome: networking.ReqRespRequestOutcome = .transport_error;
     defer outbound.finish(io, request_outcome);
 
-    try req_resp_encoding.writeRequestToStream(self.allocator, io, &outbound.stream, request_bytes);
+    try req_resp_encoding.writeRequestToStream(self.allocator, io, outbound.stream, request_bytes);
     outbound.noteRequestPayload(request_bytes.len);
-    outbound.stream.closeWrite(io);
+    outbound.stream.closeWrite(io) catch {};
     request_outcome = .malformed_response;
 
     var seen_columns = try self.allocator.alloc(std.StaticBitSet(MAX_COLUMNS), metas.len);
@@ -4702,7 +4700,7 @@ fn fetchDataColumnsByRootOnceForMetas(
     };
     defer reader.deinit();
 
-    while (try reader.next(io, &outbound.stream)) |decoded| {
+    while (try reader.next(io, outbound.stream)) |decoded| {
         outbound.noteResponseChunk(decoded.ssz_bytes.len);
         if (decoded.result != .success) {
             self.allocator.free(decoded.ssz_bytes);
@@ -4798,9 +4796,9 @@ fn fetchDataColumnsByRootOnce(
     defer self.allocator.free(request_bytes);
     _ = DataColumnSidecarsByRootRequest.serializeIntoBytes(&request, request_bytes);
 
-    try req_resp_encoding.writeRequestToStream(self.allocator, io, &outbound.stream, request_bytes);
+    try req_resp_encoding.writeRequestToStream(self.allocator, io, outbound.stream, request_bytes);
     outbound.noteRequestPayload(request_bytes.len);
-    outbound.stream.closeWrite(io);
+    outbound.stream.closeWrite(io) catch {};
     request_outcome = .malformed_response;
 
     var seen_columns = std.StaticBitSet(MAX_COLUMNS).initEmpty();
@@ -4812,7 +4810,7 @@ fn fetchDataColumnsByRootOnce(
 
     const blob_commitments = try meta.any_signed.beaconBlock().beaconBlockBody().blobKzgCommitments();
 
-    while (try reader.next(io, &outbound.stream)) |decoded| {
+    while (try reader.next(io, outbound.stream)) |decoded| {
         outbound.noteResponseChunk(decoded.ssz_bytes.len);
         if (decoded.result != .success) {
             self.allocator.free(decoded.ssz_bytes);
@@ -5083,9 +5081,9 @@ fn fetchBlockByRoot(
     var request_outcome: networking.ReqRespRequestOutcome = .transport_error;
     defer outbound.finish(io, request_outcome);
 
-    try req_resp_encoding.writeRequestToStream(self.allocator, io, &outbound.stream, &root);
+    try req_resp_encoding.writeRequestToStream(self.allocator, io, outbound.stream, &root);
     outbound.noteRequestPayload(root.len);
-    outbound.stream.closeWrite(io);
+    outbound.stream.closeWrite(io) catch {};
     request_outcome = .malformed_response;
 
     var reader = req_resp_encoding.ResponseChunkStreamReader{
@@ -5094,7 +5092,7 @@ fn fetchBlockByRoot(
     };
     defer reader.deinit();
 
-    const decoded = (try reader.next(io, &outbound.stream)) orelse return error.NoBlockReturned;
+    const decoded = (try reader.next(io, outbound.stream)) orelse return error.NoBlockReturned;
     outbound.noteResponseChunk(decoded.ssz_bytes.len);
     if (decoded.result != .success) {
         self.allocator.free(decoded.ssz_bytes);
@@ -5129,9 +5127,9 @@ fn fetchRawBlocksByRange(
     };
     var req_ssz: [networking.messages.BeaconBlocksByRangeRequest.fixed_size]u8 = undefined;
     _ = networking.messages.BeaconBlocksByRangeRequest.serializeIntoBytes(&request, &req_ssz);
-    try req_resp_encoding.writeRequestToStream(self.allocator, io, &outbound.stream, &req_ssz);
+    try req_resp_encoding.writeRequestToStream(self.allocator, io, outbound.stream, &req_ssz);
     outbound.noteRequestPayload(req_ssz.len);
-    outbound.stream.closeWrite(io);
+    outbound.stream.closeWrite(io) catch {};
     request_outcome = .malformed_response;
 
     var result: std.ArrayListUnmanaged(BatchBlock) = .empty;
@@ -5149,7 +5147,7 @@ fn fetchRawBlocksByRange(
     var previous_chunk: ?ValidatedBlockRangeChunk = null;
 
     while (blocks_received < count) {
-        const decoded = reader.next(io, &outbound.stream) catch |err| {
+        const decoded = reader.next(io, outbound.stream) catch |err| {
             if (err == error.UnexpectedEof and result.items.len > 0) {
                 log.debug("blocks-by-range from {s}: salvaging {d} block(s) after unexpected EOF", .{
                     peer_id,
@@ -5180,7 +5178,7 @@ fn fetchRawBlocksByRange(
     }
 
     if (blocks_received == count) {
-        const extra = reader.next(io, &outbound.stream) catch |err| {
+        const extra = reader.next(io, outbound.stream) catch |err| {
             if (err == error.UnexpectedEof) return error.MalformedBlockBytes;
             return err;
         };
@@ -5287,15 +5285,15 @@ fn sendStatus(
         };
         var status_ssz: [StatusMessageV2.fixed_size]u8 = undefined;
         _ = StatusMessageV2.serializeIntoBytes(&our_status_v2, &status_ssz);
-        try req_resp_encoding.writeRequestToStream(self.allocator, io, &outbound.stream, &status_ssz);
+        try req_resp_encoding.writeRequestToStream(self.allocator, io, outbound.stream, &status_ssz);
         outbound.noteRequestPayload(status_ssz.len);
     } else {
         var status_ssz: [StatusMessage.fixed_size]u8 = undefined;
         _ = StatusMessage.serializeIntoBytes(&our_status, &status_ssz);
-        try req_resp_encoding.writeRequestToStream(self.allocator, io, &outbound.stream, &status_ssz);
+        try req_resp_encoding.writeRequestToStream(self.allocator, io, outbound.stream, &status_ssz);
         outbound.noteRequestPayload(status_ssz.len);
     }
-    outbound.stream.closeWrite(io);
+    outbound.stream.closeWrite(io) catch {};
     request_outcome = .malformed_response;
 
     var reader = req_resp_encoding.ResponseChunkStreamReader{
@@ -5304,7 +5302,7 @@ fn sendStatus(
     };
     defer reader.deinit();
 
-    const decoded = (try reader.next(io, &outbound.stream)) orelse {
+    const decoded = (try reader.next(io, outbound.stream)) orelse {
         log.debug("Status: peer sent empty response", .{});
         return error.EmptyResponse;
     };
@@ -5392,9 +5390,9 @@ fn requestPeerPing(
     const local_seq: networking.messages.Ping.Type = self.api_node_identity.metadata.seq_number;
     _ = networking.messages.Ping.serializeIntoBytes(&local_seq, &ping_ssz);
 
-    try req_resp_encoding.writeRequestToStream(self.allocator, io, &outbound.stream, &ping_ssz);
+    try req_resp_encoding.writeRequestToStream(self.allocator, io, outbound.stream, &ping_ssz);
     outbound.noteRequestPayload(ping_ssz.len);
-    outbound.stream.closeWrite(io);
+    outbound.stream.closeWrite(io) catch {};
     request_outcome = .malformed_response;
 
     var reader = req_resp_encoding.ResponseChunkStreamReader{
@@ -5403,7 +5401,7 @@ fn requestPeerPing(
     };
     defer reader.deinit();
 
-    const decoded = (try reader.next(io, &outbound.stream)) orelse return error.EmptyResponse;
+    const decoded = (try reader.next(io, outbound.stream)) orelse return error.EmptyResponse;
     outbound.noteResponseChunk(decoded.ssz_bytes.len);
     defer self.allocator.free(decoded.ssz_bytes);
 
@@ -5512,9 +5510,9 @@ fn requestPeerMetadataAttempt(
     var request_outcome: networking.ReqRespRequestOutcome = .transport_error;
     defer outbound.finish(io, request_outcome);
 
-    try req_resp_encoding.writeRequestToStream(self.allocator, io, &outbound.stream, &.{});
+    try req_resp_encoding.writeRequestToStream(self.allocator, io, outbound.stream, &.{});
     outbound.noteRequestPayload(0);
-    outbound.stream.closeWrite(io);
+    outbound.stream.closeWrite(io) catch {};
     request_outcome = .malformed_response;
 
     var reader = req_resp_encoding.ResponseChunkStreamReader{
@@ -5523,7 +5521,7 @@ fn requestPeerMetadataAttempt(
     };
     defer reader.deinit();
 
-    const decoded = (reader.next(io, &outbound.stream) catch |err| {
+    const decoded = (reader.next(io, outbound.stream) catch |err| {
         log.debug(
             "Metadata reader failed for {s}: {} buffered={d} eof={}",
             .{
@@ -5762,9 +5760,9 @@ fn sendGoodbye(
     const reason_code: networking.messages.GoodbyeReason.Type = @intFromEnum(reason);
     _ = networking.messages.GoodbyeReason.serializeIntoBytes(&reason_code, &goodbye_ssz);
 
-    try req_resp_encoding.writeRequestToStream(self.allocator, io, &outbound.stream, &goodbye_ssz);
+    try req_resp_encoding.writeRequestToStream(self.allocator, io, outbound.stream, &goodbye_ssz);
     outbound.noteRequestPayload(goodbye_ssz.len);
-    outbound.stream.closeWrite(io);
+    outbound.stream.closeWrite(io) catch {};
     request_outcome = .success;
 }
 
