@@ -545,13 +545,8 @@ pub fn build(b: *std.Build) void {
         .root_module = module_networking,
         .filters = b.option([][]const u8, "networking.filters", "networking test filters") orelse &[_][]const u8{},
     });
-    // Link eth-p2p-z's C dependencies (lsquic via transitive dep)
-    const lsquic_dep = dep_eth_p2p_z.builder.dependency("lsquic", .{
-        .target = target,
-        .optimize = optimize,
-    });
-    test_networking.root_module.linkLibrary(lsquic_dep.artifact("lsquic"));
-    test_networking.root_module.addIncludePath(lsquic_dep.path("include"));
+    // [quiche-port] our eth-p2p-z (quiche/zio branch) links its own QUIC stack
+    // (quiche) internally — there is no lsquic transitive dep to link here.
     const run_test_networking = b.addRunArtifact(test_networking);
     const tls_run_test_networking = b.step("test:networking", "Run the networking test");
     tls_run_test_networking.dependOn(&run_test_networking.step);
@@ -805,12 +800,10 @@ pub fn build(b: *std.Build) void {
     module_networking.addImport("preset", module_preset);
     module_networking.addImport("constants", module_constants);
     module_networking.addImport("zig-libp2p", dep_eth_p2p_z.module("zig-libp2p"));
-    // Add ssl (boringssl) module so networking can reference ssl.EVP_PKEY for host key.
-    const boringssl_dep = dep_eth_p2p_z.builder.dependency("boringssl", .{ .optimize = optimize, .target = target });
-    module_networking.addImport("ssl", boringssl_dep.module("ssl"));
-    // Add multiaddr module for P2pService listen/dial APIs.
-    const multiaddr_dep2 = dep_eth_p2p_z.builder.dependency("multiaddr", .{ .optimize = optimize, .target = target });
-    module_networking.addImport("multiaddr", multiaddr_dep2.module("multiaddr"));
+    // [quiche-port] our eth-p2p-z exposes the BoringSSL FFI as module "ssl_compat"
+    // and multiaddr as an in-tree module — pull them directly, no transitive deps.
+    module_networking.addImport("ssl", dep_eth_p2p_z.module("ssl_compat"));
+    module_networking.addImport("multiaddr", dep_eth_p2p_z.module("multiaddr"));
 
     module_download_era_files.addImport("download_era_options", options_module_download_era_options);
 
@@ -1029,9 +1022,9 @@ pub fn build(b: *std.Build) void {
     module_node.addImport("fork_choice", module_fork_choice);
     module_node.addImport("execution", module_execution);
     module_node.addImport("metrics", dep_metrics.module("metrics"));
-    module_node.addImport("multiaddr", multiaddr_dep2.module("multiaddr"));
+    module_node.addImport("multiaddr", dep_eth_p2p_z.module("multiaddr"));
     module_node.addImport("zig-libp2p", dep_eth_p2p_z.module("zig-libp2p"));
-    module_node.addImport("ssl", boringssl_dep.module("ssl"));
+    module_node.addImport("ssl", dep_eth_p2p_z.module("ssl_compat"));
     module_node.addImport("sync", module_sync);
     module_node.addImport("snappy", dep_snappy.module("snappy"));
     module_node.addImport("discv5", module_discv5);
