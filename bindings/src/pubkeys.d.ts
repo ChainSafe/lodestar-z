@@ -5,6 +5,8 @@ export interface PubkeyCache {
   get(index: number): PublicKey | undefined;
   /** Same as get(), but throws if the index is not in the cache */
   getOrThrow(index: number): PublicKey;
+  /** Aggregate cached public keys by validator index */
+  aggregate(indices: number[]): PublicKey;
   /** Get validator index by pubkey bytes */
   getIndex(pubkey: Uint8Array): number | null;
   /** Set both directions atomically — impl owns the PublicKey.fromBytes() deserialization */

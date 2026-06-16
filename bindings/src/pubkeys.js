@@ -25,6 +25,11 @@ export const pubkeyCache = {
     return pk;
   },
 
+  aggregate(indices) {
+    if (indices.length === 1) return pubkeyCache.getOrThrow(indices[0]);
+    return native.aggregate(indices);
+  },
+
   getIndex(pubkey) {
     return native.getIndex(pubkey);
   },

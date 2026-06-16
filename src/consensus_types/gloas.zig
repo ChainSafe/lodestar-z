@@ -77,9 +77,34 @@ pub const AggregateAndProof = electra.AggregateAndProof;
 pub const SignedAggregateAndProof = electra.SignedAggregateAndProof;
 pub const SignedBeaconBlockHeader = electra.SignedBeaconBlockHeader;
 
-// Execution payload types remain for envelope usage
-pub const ExecutionPayload = electra.ExecutionPayload;
+// ExecutionPayloadHeader retained for light client usage
 pub const ExecutionPayloadHeader = electra.ExecutionPayloadHeader;
+
+// RLP-encoded block access list (EIP-7928)
+pub const BlockAccessList = ssz.ByteListType(preset.MAX_BYTES_PER_TRANSACTION);
+
+// Gloas ExecutionPayload adds block_access_list (EIP-7928) and slot_number (EIP-7843)
+pub const ExecutionPayload = ssz.VariableContainerType(struct {
+    parent_hash: p.Bytes32,
+    fee_recipient: p.Bytes20,
+    state_root: p.Bytes32,
+    receipts_root: p.Bytes32,
+    logs_bloom: bellatrix.LogsBloom,
+    prev_randao: p.Bytes32,
+    block_number: p.Uint64,
+    gas_limit: p.Uint64,
+    gas_used: p.Uint64,
+    timestamp: p.Uint64,
+    extra_data: bellatrix.ExtraData,
+    base_fee_per_gas: p.Uint256,
+    block_hash: p.Bytes32,
+    transactions: bellatrix.Transactions,
+    withdrawals: capella.Withdrawals,
+    blob_gas_used: p.Uint64,
+    excess_blob_gas: p.Uint64,
+    block_access_list: BlockAccessList,
+    slot_number: p.Uint64,
+});
 
 // Reuse Fulu DAS types
 pub const RowIndex = fulu.RowIndex;
@@ -88,6 +113,13 @@ pub const CustodyIndex = fulu.CustodyIndex;
 pub const Cell = fulu.Cell;
 pub const MatrixEntry = fulu.MatrixEntry;
 pub const ProposerLookahead = fulu.ProposerLookahead;
+
+// Cached payload-timeliness committees for the prev/current epoch window (EIP-7732)
+pub const PtcWindow = ssz.FixedVectorType(
+    ssz.FixedVectorType(p.ValidatorIndex, preset.PTC_SIZE, .{}),
+    (2 + preset.MIN_SEED_LOOKAHEAD) * preset.SLOTS_PER_EPOCH,
+    .{},
+);
 
 // Light client types
 pub const LightClientHeader = electra.LightClientHeader;
@@ -170,6 +202,7 @@ pub const ExecutionPayloadBid = ssz.VariableContainerType(struct {
     value: p.Uint64,
     execution_payment: p.Uint64,
     blob_kzg_commitments: ssz.FixedListType(p.KZGCommitment, preset.MAX_BLOB_COMMITMENTS_PER_BLOCK, .{}),
+    execution_requests_root: p.Root,
 });
 
 pub const SignedExecutionPayloadBid = ssz.VariableContainerType(struct {
@@ -182,8 +215,7 @@ pub const ExecutionPayloadEnvelope = ssz.VariableContainerType(struct {
     execution_requests: ExecutionRequests,
     builder_index: BuilderIndex,
     beacon_block_root: p.Root,
-    slot: p.Slot,
-    state_root: p.Root,
+    parent_beacon_block_root: p.Root,
 });
 
 pub const SignedExecutionPayloadEnvelope = ssz.VariableContainerType(struct {
@@ -209,6 +241,7 @@ pub const BeaconBlockBody = ssz.VariableContainerType(struct {
     // executionRequests removed in Gloas (EIP-7732)
     signed_execution_payload_bid: SignedExecutionPayloadBid,
     payload_attestations: ssz.FixedListType(PayloadAttestation, preset.MAX_PAYLOAD_ATTESTATIONS, .{}),
+    parent_execution_requests: ExecutionRequests,
 });
 
 pub const BeaconBlock = ssz.VariableContainerType(struct {
@@ -260,8 +293,8 @@ pub const BeaconState = ssz.VariableContainerType(struct {
     inactivity_scores: altair.InactivityScores,
     current_sync_committee: SyncCommittee,
     next_sync_committee: SyncCommittee,
-    // latestExecutionPayloadHeader removed in Gloas (EIP-7732)
-    latest_execution_payload_bid: ExecutionPayloadBid,
+    // latestExecutionPayloadHeader replaced by latest_block_hash in Gloas (EIP-7732)
+    latest_block_hash: p.Bytes32,
     next_withdrawal_index: p.WithdrawalIndex,
     next_withdrawal_validator_index: p.ValidatorIndex,
     historical_summaries: ssz.FixedListType(HistoricalSummary, preset.HISTORICAL_ROOTS_LIMIT, .{}),
@@ -281,8 +314,9 @@ pub const BeaconState = ssz.VariableContainerType(struct {
     execution_payload_availability: ssz.BitVectorType(preset.SLOTS_PER_HISTORICAL_ROOT),
     builder_pending_payments: ssz.FixedVectorType(BuilderPendingPayment, 2 * preset.SLOTS_PER_EPOCH, .{}),
     builder_pending_withdrawals: ssz.FixedListType(BuilderPendingWithdrawal, preset.BUILDER_PENDING_WITHDRAWALS_LIMIT, .{}),
-    latest_block_hash: p.Bytes32,
+    latest_execution_payload_bid: ExecutionPayloadBid,
     payload_expected_withdrawals: Withdrawals,
+    ptc_window: PtcWindow,
 });
 
 pub const BlobSidecar = electra.BlobSidecar;
