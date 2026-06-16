@@ -87,6 +87,7 @@ const PresetMainnet = struct {
     pub const MAX_PAYLOAD_ATTESTATIONS = 4;
     pub const BUILDER_REGISTRY_LIMIT = 1_099_511_627_776;
     pub const BUILDER_PENDING_WITHDRAWALS_LIMIT = 1_048_576;
+    pub const MAX_BUILDERS_PER_WITHDRAWALS_SWEEP = 16384;
 };
 
 const PresetMinimal = struct {
@@ -164,6 +165,7 @@ const PresetMinimal = struct {
     pub const MAX_PAYLOAD_ATTESTATIONS = 4;
     pub const BUILDER_REGISTRY_LIMIT = 1_099_511_627_776;
     pub const BUILDER_PENDING_WITHDRAWALS_LIMIT = 1_048_576;
+    pub const MAX_BUILDERS_PER_WITHDRAWALS_SWEEP = 16;
 };
 
 const preset_str = @import("build_options").preset;
