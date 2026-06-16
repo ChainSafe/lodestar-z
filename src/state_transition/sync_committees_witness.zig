@@ -143,36 +143,27 @@ const ProofFixture = struct {
     current_sync_committee: ct.altair.SyncCommittee.Type,
     next_sync_committee: ct.altair.SyncCommittee.Type,
 
-    fn init(fork: ForkSeq) !ProofFixture {
+    fn init(self: *ProofFixture, fork: ForkSeq) !void {
         const allocator = std.testing.allocator;
-        var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 500_000 });
-        errdefer pool.deinit();
+        self.pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 500_000 });
+        errdefer self.pool.deinit();
 
-        var state = switch (fork) {
-            .altair => try AnyBeaconState.fromValue(allocator, &pool, .altair, &ct.altair.BeaconState.default_value),
-            .electra => try AnyBeaconState.fromValue(allocator, &pool, .electra, &ct.electra.BeaconState.default_value),
+        self.state = switch (fork) {
+            .altair => try AnyBeaconState.fromValue(allocator, &self.pool, .altair, &ct.altair.BeaconState.default_value),
+            .electra => try AnyBeaconState.fromValue(allocator, &self.pool, .electra, &ct.electra.BeaconState.default_value),
             else => return error.UnsupportedFork,
         };
-        errdefer state.deinit();
+        errdefer self.state.deinit();
 
-        const current_sync_committee = fillSyncCommittee(0xbb);
-        const next_sync_committee = fillSyncCommittee(0xcc);
-        try state.setCurrentSyncCommittee(&current_sync_committee);
-        try state.setNextSyncCommittee(&next_sync_committee);
+        self.current_sync_committee = fillSyncCommittee(0xbb);
+        self.next_sync_committee = fillSyncCommittee(0xcc);
+        try self.state.setCurrentSyncCommittee(&self.current_sync_committee);
+        try self.state.setNextSyncCommittee(&self.next_sync_committee);
 
-        try state.commit();
-        const state_root = (try state.hashTreeRoot()).*;
-        const root_node = switch (state) {
+        try self.state.commit();
+        self.state_root = (try self.state.hashTreeRoot()).*;
+        self.root_node = switch (self.state) {
             inline else => |view| view.root,
-        };
-
-        return .{
-            .pool = pool,
-            .state = state,
-            .state_root = state_root,
-            .root_node = root_node,
-            .current_sync_committee = current_sync_committee,
-            .next_sync_committee = next_sync_committee,
         };
     }
 
@@ -203,7 +194,8 @@ test "getSyncCommitteesWitness: SyncCommittees proof" {
     };
 
     for (test_cases) |tc| {
-        var fixture = try ProofFixture.init(tc.fork_seq);
+        var fixture: ProofFixture = undefined;
+        try fixture.init(tc.fork_seq);
         defer fixture.deinit();
 
         var witness_data: SyncCommitteeWitness = undefined;
@@ -241,7 +233,8 @@ test "getSyncCommitteesWitness: currentSyncCommittee proof" {
     };
 
     inline for (test_cases) |tc| {
-        var fixture = try ProofFixture.init(tc.fork_seq);
+        var fixture: ProofFixture = undefined;
+        try fixture.init(tc.fork_seq);
         defer fixture.deinit();
 
         var witness_data: SyncCommitteeWitness = undefined;
@@ -284,7 +277,8 @@ test "getSyncCommitteesWitness: nextSyncCommittee proof" {
     };
 
     inline for (test_cases) |tc| {
-        var fixture = try ProofFixture.init(tc.fork_seq);
+        var fixture: ProofFixture = undefined;
+        try fixture.init(tc.fork_seq);
         defer fixture.deinit();
 
         var witness_data: SyncCommitteeWitness = undefined;
