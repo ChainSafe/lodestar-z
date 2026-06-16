@@ -15,7 +15,9 @@ pub fn sszValueToNapiValue(env: napi.Env, comptime ST: type, value: *const ST.Ty
             return try env.getBoolean(value.*);
         },
         .vector => {
-            if (comptime ssz.isByteVectorType(ST)) {
+            if (comptime ssz.isBitVectorType(ST)) {
+                return try bitArrayToNapiValue(env, value.data[0..], ST.length);
+            } else if (comptime ssz.isByteVectorType(ST)) {
                 var bytes: [*]u8 = undefined;
                 const buf = try env.createArrayBuffer(ST.length, &bytes);
                 @memcpy(bytes[0..ST.length], value);
@@ -30,7 +32,9 @@ pub fn sszValueToNapiValue(env: napi.Env, comptime ST: type, value: *const ST.Ty
             }
         },
         .list => {
-            if (comptime ssz.isByteListType(ST)) {
+            if (comptime ssz.isBitListType(ST)) {
+                return try bitArrayToNapiValue(env, value.data.items, value.bit_len);
+            } else if (comptime ssz.isByteListType(ST)) {
                 var bytes: [*]u8 = undefined;
                 const buf = try env.createArrayBuffer(value.items.len, &bytes);
                 @memcpy(bytes[0..value.items.len], value.items);
@@ -54,6 +58,22 @@ pub fn sszValueToNapiValue(env: napi.Env, comptime ST: type, value: *const ST.Ty
             return obj;
         },
     }
+}
+
+/// Converts a bit array into a `napi.Value`.
+///
+/// The napi value matches the shape of `ssz-ts` for interoperability.
+fn bitArrayToNapiValue(env: napi.Env, data: []const u8, bit_len: usize) !napi.Value {
+    std.debug.assert(data.len == (bit_len + 7) / 8);
+    var bytes: [*]u8 = undefined;
+    const buf = try env.createArrayBuffer(data.len, &bytes);
+    @memcpy(bytes[0..data.len], data);
+    const uint8_array = try env.createTypedarray(.uint8, data.len, buf, 0);
+
+    const obj = try env.createObject();
+    try obj.setNamedProperty("uint8Array", uint8_array);
+    try obj.setNamedProperty("bitLen", try env.createInt64(@intCast(bit_len)));
+    return obj;
 }
 
 const NumberSliceOpts = struct {
