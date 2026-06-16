@@ -188,4 +188,3 @@ test "computeWeakSubjectivityPeriodFromConstituentsElectra - mainnet table" {
         try std.testing.expectEqual(c.ws_period, got);
     }
 }
-

@@ -367,9 +367,6 @@ export declare class BeaconStateView {
   hashTreeRoot(): Uint8Array;
   createMultiProof(descriptor: Uint8Array): CompactMultiProof;
 
-  // biome-ignore lint/suspicious/noExplicitAny: Note that signed block bytes are passed as Uint8Array at runtime; signature is loosened so it satisfies `IBeaconStateView.stateTransition(block, opts, modules)` structurally.
-  // TODO(bing): fix types
-  stateTransition(signedBlock: any, options?: any, modules?: any): BeaconStateView;
   processSlots(slot: number, options?: ProcessSlotsOpts): BeaconStateView;
 }
 
