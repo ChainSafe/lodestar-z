@@ -1,3 +1,4 @@
+import {SecretKey} from "@chainsafe/blst";
 import {config} from "@lodestar/config/default";
 import * as era from "@lodestar/era";
 import {computeEpochAtSlot} from "@lodestar/state-transition";
@@ -5,14 +6,11 @@ import {ssz} from "@lodestar/types";
 import {beforeAll, describe, expect, it} from "vitest";
 import bindings from "../src/index.js";
 import {getFirstEraFilePath} from "./eraFiles.ts";
-import {SecretKey} from "@chainsafe/blst";
 
 // TODO(bing): it's kinda annoying to have to do this, i guess we
 // expose the config somehow maybe?
 /* Mainnet preset constants the binding is compiled against. */
-const SLOTS_PER_EPOCH = 32;
 const SYNC_COMMITTEE_SIZE = 512;
-const BELLATRIX_FORK_EPOCH = 144896;
 const FAR_FUTURE_EPOCH = Number.MAX_SAFE_INTEGER;
 const MAX_EFFECTIVE_BALANCE = 32_000_000_000;
 
@@ -34,14 +32,14 @@ function makeValidators(count: number): Validator[] {
     const seed = new Uint8Array(32);
     new DataView(seed.buffer).setUint32(0, i + 1);
     return {
-      pubkey: SecretKey.fromKeygen(seed).toPublicKey().toBytes(),
-      withdrawalCredentials: new Uint8Array(32),
-      effectiveBalance: MAX_EFFECTIVE_BALANCE,
-      slashed: false,
       activationEligibilityEpoch: 0,
       activationEpoch: 0,
+      effectiveBalance: MAX_EFFECTIVE_BALANCE,
       exitEpoch: FAR_FUTURE_EPOCH,
+      pubkey: SecretKey.fromKeygen(seed).toPublicKey().toBytes(),
+      slashed: false,
       withdrawableEpoch: FAR_FUTURE_EPOCH,
+      withdrawalCredentials: new Uint8Array(32),
     };
   });
 }
@@ -331,8 +329,8 @@ describe("BeaconStateView", () => {
       (_, i) => validators[i % VALIDATOR_COUNT].pubkey
     );
     const syncCommittee = {
-      pubkeys: syncCommitteePubkeys,
       aggregatePubkey: validators[0].pubkey,
+      pubkeys: syncCommitteePubkeys,
     };
 
     const phase0State = ssz.phase0.BeaconState.defaultValue();
