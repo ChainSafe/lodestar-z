@@ -347,6 +347,7 @@
                     .config,
                     .fork_types,
                     .state_transition,
+                    .hex,
                     "zapi:zapi",
                 },
             },
