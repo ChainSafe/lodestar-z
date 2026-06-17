@@ -23,32 +23,6 @@ pub fn isExecutionEnabled(comptime fork: ForkSeq, state: *BeaconState(fork), com
     }
 }
 
-pub fn isMergeTransitionBlock(
-    comptime fork: ForkSeq,
-    state: *BeaconState(fork),
-    comptime block_type: BlockType,
-    body: *const BeaconBlockBody(block_type, fork),
-) bool {
-    if (comptime fork != .bellatrix) {
-        return false;
-    }
-
-    if (isMergeTransitionComplete(fork, state)) {
-        return false;
-    }
-
-    return switch (block_type) {
-        .full => !ForkTypes(fork).ExecutionPayload.equals(
-            &body.executionPayload().inner,
-            &ForkTypes(fork).ExecutionPayload.default_value,
-        ),
-        .blinded => !ForkTypes(fork).ExecutionPayloadHeader.equals(
-            &body.executionPayloadHeader().inner,
-            &ForkTypes(fork).ExecutionPayloadHeader.default_value,
-        ),
-    };
-}
-
 pub fn isMergeTransitionComplete(comptime fork: ForkSeq, state: *BeaconState(fork)) bool {
     if (comptime fork.lt(.bellatrix)) {
         return false;
