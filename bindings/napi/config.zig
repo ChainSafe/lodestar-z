@@ -81,7 +81,7 @@ pub fn chainConfigFromObject(env: napi.Env, obj: napi.Value) !ChainConfig {
         };
 
         if (try field_value.typeof() == .undefined) {
-            std.log.warn("missing field value for: {s}, skipping\n", .{field.name});
+            std.log.debug("missing field value for: {s}, skipping\n", .{field.name});
         } else {
             switch (field.type) {
                 Preset => {

@@ -697,15 +697,13 @@ describe("BeaconStateView", () => {
         {dataAvailabilityStatus: "available"}, // TS enum value is "Available"
       ];
       for (const opts of invalidOpts) {
-        expect(() => bindings.stateTransition.stateTransition(state, dummyBlockBytes, opts)).toThrow();
+        expect(() => bindings.stateTransition(state, dummyBlockBytes, opts)).toThrow();
       }
     });
 
     // TODO: remove once Zig models DataAvailabilityStatus.NotRequired
     it("rejects gloas-only NotRequired", () => {
-      expect(() =>
-        bindings.stateTransition.stateTransition(state, dummyBlockBytes, {dataAvailabilityStatus: "NotRequired"})
-      ).toThrow();
+      expect(() => bindings.stateTransition(state, dummyBlockBytes, {dataAvailabilityStatus: "NotRequired"})).toThrow();
     });
   });
 

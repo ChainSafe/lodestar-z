@@ -368,6 +368,7 @@ export declare class BeaconStateView {
   createMultiProof(descriptor: Uint8Array): CompactMultiProof;
 
   processSlots(slot: number, options?: ProcessSlotsOpts): BeaconStateView;
+  stateTransition(signedBlockBytes: Uint8Array, options?: TransitionOpts): BeaconStateView;
 }
 
 declare const bindings: {
@@ -380,13 +381,11 @@ declare const bindings: {
   shuffle: {
     innerShuffleList: (out: Uint32Array, seed: Uint8Array, rounds: number, forwards: boolean) => void;
   };
-  stateTransition: {
-    stateTransition: (
-      preState: BeaconStateView,
-      signedBlockBytes: Uint8Array,
-      options?: TransitionOpts
-    ) => BeaconStateView;
-  };
+  stateTransition: (
+    preState: BeaconStateView,
+    signedBlockBytes: Uint8Array,
+    options?: TransitionOpts
+  ) => BeaconStateView;
   metrics: {
     init: () => void;
     scrapeMetrics: () => string;
