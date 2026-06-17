@@ -85,7 +85,7 @@ const server = http.createServer(async (_req, res) => {
 
       console.time("stateTransition");
       if (signedBlockBytes) {
-        state = bindings.stateTransition.stateTransition(state, signedBlockBytes as Uint8Array);
+        state = bindings.stateTransition(state, signedBlockBytes as Uint8Array);
       } else {
         state = state.processSlots(nextSlot);
       }
