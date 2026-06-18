@@ -13,6 +13,7 @@ const ct = @import("consensus_types");
 const pool = @import("./pool.zig");
 const config = @import("./config.zig");
 const pubkey = @import("./pubkeys.zig");
+const pubkey_cache = @import("./pubkey_cache.zig");
 const js_types = @import("./js_types.zig");
 const sszValueToNapiValue = @import("./to_napi_value.zig").sszValueToNapiValue;
 const numberSliceToNapiValue = @import("./to_napi_value.zig").numberSliceToNapiValue;
@@ -73,6 +74,11 @@ pub const js_meta = js.class(.{ .properties = .{
 
 cached_state: ?*CachedBeaconState = null,
 pool_rc: ?*pool.PoolRc = null,
+/// Pubkey cache owned by this state tree. A root state (`createFromBytes`) holds
+/// a fresh one; regen (`loadState`) and transition descendants share it by ref.
+/// The epoch cache borrows pointers into `pubkey_rc.instance` but does not own
+/// them, so this must outlive `cached_state` (unref AFTER `cached_state.deinit`).
+pubkey_rc: ?*pubkey_cache.PubkeyCacheRc = null,
 const BeaconStateView = @This();
 
 pub fn init() BeaconStateView {
@@ -85,16 +91,50 @@ pub fn deinit(self: *BeaconStateView) void {
         allocator.destroy(cached_state);
         self.cached_state = null;
     }
+    // Unref AFTER cached_state.deinit(): the epoch cache borrows the pubkey maps.
+    if (self.pubkey_rc) |rc| {
+        rc.unref();
+        self.pubkey_rc = null;
+    }
     if (self.pool_rc) |rc| {
         rc.unref();
         self.pool_rc = null;
     }
 }
 
+const PubkeyMapPtrs = struct {
+    index_to_pubkey: *st.Index2PubkeyCache,
+    pubkey_to_index: *st.PubkeyIndexMap,
+};
+
+/// Resolve which pubkey maps to wire into the epoch cache: the state tree's owned
+/// cache when it has one (tests), otherwise the process-global registry (prod).
+fn pubkeyMaps(owned_rc: ?*pubkey_cache.PubkeyCacheRc) PubkeyMapPtrs {
+    if (owned_rc) |rc| {
+        return .{
+            .index_to_pubkey = &rc.instance.index2pubkey,
+            .pubkey_to_index = &rc.instance.pubkey2index,
+        };
+    }
+    return .{
+        .index_to_pubkey = &pubkey.state.index2pubkey,
+        .pubkey_to_index = &pubkey.state.pubkey2index,
+    };
+}
+
+fn boolOrDefault(value: ?js.Boolean, default: bool) !bool {
+    return if (value) |v| try v.toBool() else default;
+}
+
 // -------------------------
 // Class Methods
 // -------------------------
-pub fn createFromBytes(bytes: js.Uint8Array) !BeaconStateView {
+/// `own_pubkey_cache` (default false): production leaves this unset so the state
+/// tree shares the process-global pubkey registry — one per node, correct because
+/// validators are append-only and never reordered. Tests pass `true` to get an
+/// isolated cache so unrelated fixtures loaded in one process can't contaminate
+/// each other. Descendants (loadState/stateTransition) inherit whichever was used.
+pub fn createFromBytes(bytes: js.Uint8Array, own_pubkey_cache: ?js.Boolean) !BeaconStateView {
     const state = try allocator.create(AnyBeaconState);
     errdefer allocator.destroy(state);
 
@@ -107,13 +147,21 @@ pub fn createFromBytes(bytes: js.Uint8Array) !BeaconStateView {
     const cached_state = try allocator.create(CachedBeaconState);
     errdefer allocator.destroy(cached_state);
 
+    // Owned cache only when explicitly requested (tests); otherwise null and the
+    // maps resolve to the global registry below.
+    const owned_rc: ?*pubkey_cache.PubkeyCacheRc =
+        if (try boolOrDefault(own_pubkey_cache, false)) try pubkey_cache.create() else null;
+    errdefer if (owned_rc) |rc| rc.unref();
+
+    const maps = pubkeyMaps(owned_rc);
+
     try cached_state.init(
         allocator,
         state,
         .{
             .config = &config.state.config,
-            .index_to_pubkey = &pubkey.state.index2pubkey,
-            .pubkey_to_index = &pubkey.state.pubkey2index,
+            .index_to_pubkey = maps.index_to_pubkey,
+            .pubkey_to_index = maps.pubkey_to_index,
         },
         null,
     );
@@ -121,6 +169,7 @@ pub fn createFromBytes(bytes: js.Uint8Array) !BeaconStateView {
     return .{
         .cached_state = cached_state,
         .pool_rc = pool.state.poolRc().ref(),
+        .pubkey_rc = owned_rc,
     };
 }
 
@@ -1114,13 +1163,18 @@ pub fn loadOtherState(
     const new_cached_state = try allocator.create(CachedBeaconState);
     errdefer allocator.destroy(new_cached_state);
 
+    // loadState is regen on the same chain as the seed, so the loaded state
+    // inherits the seed's append-only pubkey cache: the global registry in
+    // production, or the seed's owned cache in tests. syncPubkeys only appends.
+    const maps = pubkeyMaps(self.pubkey_rc);
+
     try new_cached_state.init(
         allocator,
         &loaded.state,
         .{
             .config = &config.state.config,
-            .index_to_pubkey = &pubkey.state.index2pubkey,
-            .pubkey_to_index = &pubkey.state.pubkey2index,
+            .index_to_pubkey = maps.index_to_pubkey,
+            .pubkey_to_index = maps.pubkey_to_index,
         },
         null,
     );
@@ -1150,6 +1204,7 @@ pub fn loadOtherState(
     return .{
         .cached_state = new_cached_state,
         .pool_rc = pool.state.poolRc().ref(),
+        .pubkey_rc = if (self.pubkey_rc) |rc| rc.ref() else null,
     };
 }
 
@@ -1254,6 +1309,7 @@ pub fn processSlots(self: *const BeaconStateView, slot_arg: js.Number, options: 
     return .{
         .cached_state = post_state,
         .pool_rc = pool.state.poolRc().ref(),
+        .pubkey_rc = if (self.pubkey_rc) |rc| rc.ref() else null,
     };
 }
 
@@ -1280,9 +1336,13 @@ pub fn stateTransition(self: *const BeaconStateView, signed_block_bytes: js.Uint
     defer signed_block.deinit(allocator);
 
     const post_state = try st.stateTransition(allocator, napi_io.get(), cached_state, signed_block, opts);
+    // Post-state's epoch cache is cloned from the input and shares the same
+    // pubkey maps by reference, so the returned view inherits the same source
+    // (global → null rc; owned → ref the handle to keep it alive).
     return .{
         .cached_state = post_state,
         .pool_rc = pool.state.poolRc().ref(),
+        .pubkey_rc = if (self.pubkey_rc) |rc| rc.ref() else null,
     };
 }
 
