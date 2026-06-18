@@ -118,6 +118,16 @@ const ReusedEpochTransitionCache = struct {
         @memset(self.is_active_prev_epoch.items, true);
         @memset(self.is_active_current_epoch.items, true);
         @memset(self.is_active_next_epoch.items, true);
+        @memset(self.proposer_indices.items, validator_count);
+        @memset(self.inclusion_delays.items, 0);
+        @memset(self.flags.items, 0);
+        @memset(self.next_epoch_shuffling_active_validator_indices.items, 0);
+        @memset(self.is_compounding_validator_arr.items, false);
+        @memset(self.previous_epoch_participation.items, 0);
+        @memset(self.current_epoch_participation.items, 0);
+        @memset(self.rewards.items, 0);
+        @memset(self.penalties.items, 0);
+        @memset(self.slashing_penalties.items, 0);
     }
 
     pub fn deinit(self: *ReusedEpochTransitionCache) void {
@@ -137,6 +147,44 @@ const ReusedEpochTransitionCache = struct {
         self.* = undefined;
     }
 };
+
+test "ReusedEpochTransitionCache.resize clears borrowed buffers" {
+    const allocator = std.testing.allocator;
+    var cache: ReusedEpochTransitionCache = undefined;
+    try cache.init(allocator, 4);
+    defer cache.deinit();
+
+    try cache.resize(4);
+    @memset(cache.is_active_prev_epoch.items, false);
+    @memset(cache.is_active_current_epoch.items, false);
+    @memset(cache.is_active_next_epoch.items, false);
+    @memset(cache.proposer_indices.items, 99);
+    @memset(cache.inclusion_delays.items, 99);
+    @memset(cache.flags.items, 0xff);
+    @memset(cache.next_epoch_shuffling_active_validator_indices.items, 99);
+    @memset(cache.is_compounding_validator_arr.items, true);
+    @memset(cache.previous_epoch_participation.items, 0xff);
+    @memset(cache.current_epoch_participation.items, 0xff);
+    @memset(cache.rewards.items, 99);
+    @memset(cache.penalties.items, 99);
+    @memset(cache.slashing_penalties.items, 99);
+
+    try cache.resize(3);
+
+    for (cache.is_active_prev_epoch.items) |value| try std.testing.expect(value);
+    for (cache.is_active_current_epoch.items) |value| try std.testing.expect(value);
+    for (cache.is_active_next_epoch.items) |value| try std.testing.expect(value);
+    for (cache.proposer_indices.items) |value| try std.testing.expectEqual(@as(usize, 3), value);
+    for (cache.inclusion_delays.items) |value| try std.testing.expectEqual(@as(usize, 0), value);
+    for (cache.flags.items) |value| try std.testing.expectEqual(@as(u8, 0), value);
+    for (cache.next_epoch_shuffling_active_validator_indices.items) |value| try std.testing.expectEqual(@as(ValidatorIndex, 0), value);
+    for (cache.is_compounding_validator_arr.items) |value| try std.testing.expect(!value);
+    for (cache.previous_epoch_participation.items) |value| try std.testing.expectEqual(@as(u8, 0), value);
+    for (cache.current_epoch_participation.items) |value| try std.testing.expectEqual(@as(u8, 0), value);
+    for (cache.rewards.items) |value| try std.testing.expectEqual(@as(u64, 0), value);
+    for (cache.penalties.items) |value| try std.testing.expectEqual(@as(u64, 0), value);
+    for (cache.slashing_penalties.items) |value| try std.testing.expectEqual(@as(u64, 0), value);
+}
 
 var _reused_cache: ?*ReusedEpochTransitionCache = null;
 var _reused_lock: std.Io.Mutex = std.Io.Mutex.init;
