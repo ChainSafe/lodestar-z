@@ -407,7 +407,11 @@ fn dispatchWaiters(self: *EventClock, current_slot: ?Slot) void {
 
 fn abortAllWaiters(self: *EventClock) void {
     while (self.waiters.pop()) |waiter| {
-        waiter.state.aborted = true;
+        // A reached target already satisfied the wait (waitForSlot resolves
+        // once current_slot >= target); stopping only aborts slots that can
+        // no longer be emitted.
+        const reached = if (self.clock.current_slot) |cs| waiter.target <= cs else false;
+        waiter.state.aborted = !reached;
         waiter.state.event.set(waiter.state.io);
     }
 }
@@ -930,6 +934,50 @@ test "reentrancy: callback can stop the clock; no further slots emitted" {
             try testing.expectEqual(@as(usize, 1), ctx.fired_count);
             try testing.expect(clock.stopped);
             try testing.expectEqual(@as(?Slot, 0), clock.clock.current_slot);
+        }
+    }.run);
+}
+
+const StopAtSlotCtx = struct {
+    clock: *EventClock,
+    stop_at: Slot,
+
+    fn stopAt(ctx: ?*anyopaque, slot: Slot) void {
+        const self: *StopAtSlotCtx = @ptrCast(@alignCast(ctx.?));
+        if (slot == self.stop_at) self.clock.stop();
+    }
+};
+
+test "reentrancy: stop() during emit resolves reached waiter, aborts future one" {
+    try runInRuntime(struct {
+        fn run(io_handle: std.Io) !void {
+            var clock: EventClock = undefined;
+            try clock.init(testing.allocator, .{
+                .genesis_time_sec = nowSecAt(io_handle) + 1_000_000,
+                .slot_duration_ms = 1_000,
+                .slots_per_epoch = 4,
+            }, io_handle);
+            defer clock.deinit();
+
+            // Listener calls stop() while slot `target` is being emitted, i.e.
+            // after current_slot reaches `target` but before dispatchWaiters runs.
+            const target: Slot = 3;
+            var ctx = StopAtSlotCtx{ .clock = &clock, .stop_at = target };
+            _ = try clock.onSlot(StopAtSlotCtx.stopAt, &ctx);
+
+            var fut_reached = try clock.waitForSlot(target);
+            errdefer fut_reached.cancel();
+            var fut_future = try clock.waitForSlot(target + 1);
+            errdefer fut_future.cancel();
+
+            clock.advanceAndDispatch(target);
+
+            try testing.expect(clock.stopped);
+            try testing.expectEqual(@as(?Slot, target), clock.clock.current_slot);
+            // Reached slot happened, so the wait must resolve, not abort.
+            try fut_reached.await(io_handle);
+            // Future slot can never be emitted after stop, so it aborts.
+            try testing.expectError(error.Aborted, fut_future.await(io_handle));
         }
     }.run);
 }
