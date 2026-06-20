@@ -18,6 +18,10 @@ pub const RealTime = struct {
 pub const FakeTime = struct {
     ms: u64 = 0,
 
+    pub fn nowMs(self: FakeTime) u64 {
+        return self.ms;
+    }
+
     pub fn setMs(self: *FakeTime, ms: u64) void {
         self.ms = ms;
     }
@@ -32,18 +36,6 @@ pub const FakeTime = struct {
     pub fn advanceSlot(self: *FakeTime, config: slot_math.ClockConfig) void {
         const slot = slot_math.slotAtMs(config, self.ms) orelse 0;
         self.ms += slot_math.slotDurationMsAt(config, slot);
-    }
-};
-
-pub const TimeSource = union(enum) {
-    real: RealTime,
-    fake: *FakeTime,
-
-    pub fn nowMs(self: TimeSource) u64 {
-        return switch (self) {
-            .real => |c| c.nowMs(),
-            .fake => |f| f.ms,
-        };
     }
 };
 

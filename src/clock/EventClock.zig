@@ -32,7 +32,7 @@ const EventClock = @This();
 
 allocator: Allocator,
 io: std.Io,
-clock: SlotClock,
+clock: SlotClock.Clock(time_source.RealTime),
 
 stopped: bool = false,
 loop_future: ?std.Io.Future(void) = null,
@@ -49,7 +49,6 @@ pub const Slot = slot_math.Slot;
 pub const Epoch = slot_math.Epoch;
 pub const ClockConfig = slot_math.ClockConfig;
 pub const ListenerId = u64;
-pub const TimeSource = time_source.TimeSource;
 
 pub const max_slot_listeners: u32 = 16;
 pub const max_epoch_listeners: u32 = 16;
@@ -116,7 +115,10 @@ pub fn init(
         .clock = undefined,
         .waiters = WaiterQueue.initContext({}),
     };
-    self.clock = try SlotClock.init(config, .{ .real = .{ .io = io_handle } });
+    self.clock = try SlotClock.Clock(time_source.RealTime).init(
+        config,
+        .{ .io = io_handle },
+    );
 }
 
 /// Start the auto-advance loop.  Idempotent; second call is a no-op.
