@@ -96,7 +96,6 @@ pub fn currentEpochOrGenesis(self: *const SlotClock) Epoch {
 /// Per phase0/p2p-interface.md, gossip validation rejects future messages with
 /// strict `<` (`current_time + MAXIMUM_GOSSIP_CLOCK_DISPARITY < message_time`),
 /// so the boundary case (exactly equal) is accepted — hence `<=` here.
-///
 pub fn currentSlotWithGossipDisparity(self: *const SlotClock) Slot {
     const now_ms = self.time.nowMs();
     const current = slot_math.slotAtMs(self.config, now_ms) orelse 0;
@@ -316,7 +315,10 @@ test "tolerance helpers" {
     var clock = try SlotClock.init(test_cfg, .{ .fake = &fake });
     try testing.expectEqual(@as(?Slot, 2), clock.slotWithFutureToleranceMs(12_000));
     try testing.expectEqual(@as(?Slot, 0), clock.slotWithPastToleranceMs(12_000));
-    try testing.expectEqual(@as(?Slot, null), clock.slotWithFutureToleranceMs(std.math.maxInt(u64)));
+    try testing.expectEqual(
+        @as(?Slot, null),
+        clock.slotWithFutureToleranceMs(std.math.maxInt(u64)),
+    );
     // Underflow (tolerance > now_ms) returns null, not 0
     try testing.expectEqual(@as(?Slot, null), clock.slotWithPastToleranceMs(112_001));
 }

@@ -29,7 +29,8 @@ pub fn slotAtMs(config: ClockConfig, now_ms: u64) ?Slot {
         const seg_slots = t.from_slot - seg_start_slot;
         const seg_ms_total = std.math.mul(u64, seg_slots, seg_duration) catch {
             // Segment exceeds u64 ms — `now_ms` must lie inside it.
-            return seg_start_slot + (now_ms - seg_start_ms) / seg_duration;
+            const slots_in = (now_ms - seg_start_ms) / seg_duration;
+            return std.math.add(u64, seg_start_slot, slots_in) catch return null;
         };
         if (now_ms - seg_start_ms < seg_ms_total) {
             return seg_start_slot + (now_ms - seg_start_ms) / seg_duration;
@@ -39,7 +40,8 @@ pub fn slotAtMs(config: ClockConfig, now_ms: u64) ?Slot {
         seg_duration = t.new_duration_ms;
     }
 
-    return seg_start_slot + (now_ms - seg_start_ms) / seg_duration;
+    const slots_in = (now_ms - seg_start_ms) / seg_duration;
+    return std.math.add(u64, seg_start_slot, slots_in) catch return null;
 }
 
 /// Returns the slot at the given Unix-second timestamp,
@@ -47,6 +49,17 @@ pub fn slotAtMs(config: ClockConfig, now_ms: u64) ?Slot {
 pub fn slotAtSec(config: ClockConfig, now_sec: u64) ?Slot {
     const now_ms = secToMs(now_sec) orelse return null;
     return slotAtMs(config, now_ms);
+}
+
+/// Slot duration that applies at `slot` — the last transition whose
+/// `from_slot <= slot`, else the base `slot_duration_ms`.
+pub fn slotDurationMsAt(config: ClockConfig, slot: Slot) u64 {
+    var duration = config.slot_duration_ms;
+    for (config.transitions()) |t| {
+        if (t.from_slot > slot) break;
+        duration = t.new_duration_ms;
+    }
+    return duration;
 }
 
 /// Returns the epoch that contains `slot`.
@@ -133,10 +146,13 @@ test "basic slot math" {
     try testing.expectEqual(@as(?u64, mainnet.genesis_time_sec + 24), slotStartSec(mainnet, 2));
 
     try testing.expectEqual(@as(?u64, mainnet.genesis_time_sec * 1000), slotStartMs(mainnet, 0));
-    try testing.expectEqual(@as(?u64, (mainnet.genesis_time_sec + 12) * 1000), slotStartMs(mainnet, 1));
+    try testing.expectEqual(
+        @as(?u64, (mainnet.genesis_time_sec + 12) * 1000),
+        slotStartMs(mainnet, 1),
+    );
 
-    try testing.expectEqual(@as(u64, 12_000), mainnet.slotDurationMsAt(0));
-    try testing.expectEqual(@as(u64, 12_000), mainnet.slotDurationMsAt(1_000_000));
+    try testing.expectEqual(@as(u64, 12_000), slotDurationMsAt(mainnet, 0));
+    try testing.expectEqual(@as(u64, 12_000), slotDurationMsAt(mainnet, 1_000_000));
 }
 
 test "within-slot timing" {
@@ -181,7 +197,10 @@ test "msUntilNextSlot" {
 
     try testing.expectEqual(@as(?u64, slot_ms), msUntilNextSlot(mainnet, genesis_ms));
     try testing.expectEqual(@as(?u64, slot_ms - 1), msUntilNextSlot(mainnet, genesis_ms + 1));
-    try testing.expectEqual(@as(?u64, slot_ms - 6_000), msUntilNextSlot(mainnet, genesis_ms + 6_000));
+    try testing.expectEqual(
+        @as(?u64, slot_ms - 6_000),
+        msUntilNextSlot(mainnet, genesis_ms + 6_000),
+    );
     try testing.expectEqual(@as(?u64, 1), msUntilNextSlot(mainnet, genesis_ms + slot_ms - 1));
     try testing.expectEqual(@as(?u64, slot_ms), msUntilNextSlot(mainnet, genesis_ms + slot_ms));
     try testing.expectEqual(@as(?u64, 1_000), msUntilNextSlot(mainnet, genesis_ms - 1_000));
@@ -257,10 +276,10 @@ const eip7782 = ClockConfig{
 };
 
 test "fork-aware: slotDurationMsAt" {
-    try testing.expectEqual(@as(u64, 12_000), eip7782.slotDurationMsAt(0));
-    try testing.expectEqual(@as(u64, 12_000), eip7782.slotDurationMsAt(1023));
-    try testing.expectEqual(@as(u64, 6_000), eip7782.slotDurationMsAt(1024));
-    try testing.expectEqual(@as(u64, 6_000), eip7782.slotDurationMsAt(2048));
+    try testing.expectEqual(@as(u64, 12_000), slotDurationMsAt(eip7782, 0));
+    try testing.expectEqual(@as(u64, 12_000), slotDurationMsAt(eip7782, 1023));
+    try testing.expectEqual(@as(u64, 6_000), slotDurationMsAt(eip7782, 1024));
+    try testing.expectEqual(@as(u64, 6_000), slotDurationMsAt(eip7782, 2048));
 }
 
 test "fork-aware: slotStartMs at and across the boundary" {
@@ -313,9 +332,9 @@ test "fork-aware: two transitions" {
     // Slots 1024..8191 are 6s each → 7168 slots × 6_000 ms
     const f2_ms = f1_ms + (8192 - 1024) * 6_000; // second fork boundary
 
-    try testing.expectEqual(@as(u64, 12_000), two_fork.slotDurationMsAt(0));
-    try testing.expectEqual(@as(u64, 6_000), two_fork.slotDurationMsAt(1024));
-    try testing.expectEqual(@as(u64, 4_000), two_fork.slotDurationMsAt(8192));
+    try testing.expectEqual(@as(u64, 12_000), slotDurationMsAt(two_fork, 0));
+    try testing.expectEqual(@as(u64, 6_000), slotDurationMsAt(two_fork, 1024));
+    try testing.expectEqual(@as(u64, 4_000), slotDurationMsAt(two_fork, 8192));
 
     // slotStartMs across both boundaries
     try testing.expectEqual(@as(?u64, f1_ms), slotStartMs(two_fork, 1024));

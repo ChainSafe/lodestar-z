@@ -104,7 +104,12 @@ const WaiterQueue = std.PriorityQueue(WaiterEntry, void, struct {
     }
 }.compare);
 
-pub fn init(self: *EventClock, allocator: Allocator, config: ClockConfig, io_handle: std.Io) Error!void {
+pub fn init(
+    self: *EventClock,
+    allocator: Allocator,
+    config: ClockConfig,
+    io_handle: std.Io,
+) Error!void {
     self.* = .{
         .allocator = allocator,
         .io = io_handle,
@@ -206,9 +211,8 @@ pub fn offEpoch(self: *EventClock, id: ListenerId) bool {
     return false;
 }
 
-// Accessors that expose "current" slot/epoch state call catchUp() first so
-// reads emit any pending events before returning.  Pure time-arithmetic
-// helpers (slotWithFutureToleranceMs, secFromSlot, …) do not.
+// "current" accessors call catchUp() first so a read flushes any pending
+// slot/epoch events before returning.
 
 pub fn currentSlot(self: *EventClock) ?Slot {
     self.catchUp();
@@ -240,21 +244,9 @@ pub fn isCurrentSlotGivenGossipDisparity(self: *EventClock, slot: Slot) bool {
     return self.clock.isCurrentSlotGivenGossipDisparity(slot);
 }
 
-pub fn slotWithFutureToleranceMs(self: *EventClock, tolerance_ms: u64) ?Slot {
-    return self.clock.slotWithFutureToleranceMs(tolerance_ms);
-}
-
-pub fn slotWithPastToleranceMs(self: *EventClock, tolerance_ms: u64) ?Slot {
-    return self.clock.slotWithPastToleranceMs(tolerance_ms);
-}
-
-pub fn secFromSlot(self: *EventClock, slot: Slot, to_sec: ?u64) ?i64 {
-    return self.clock.secFromSlot(slot, to_sec);
-}
-
-pub fn msFromSlot(self: *EventClock, slot: Slot, to_ms: ?u64) ?i64 {
-    return self.clock.msFromSlot(slot, to_ms);
-}
+// The stateless tolerance/offset helpers (slotWithFutureToleranceMs,
+// slotWithPastToleranceMs, secFromSlot, msFromSlot) are reached directly
+// on `ec.clock`; they need no catch-up, so EventClock does not re-export them.
 
 /// Return type from `waitForSlot`. The caller MUST either:
 ///   - call `await()` to wait for the target slot and release resources, OR
@@ -275,7 +267,11 @@ pub const WaitForSlotResult = struct {
     /// Create an immediately-resolved result (no async work needed).
     /// Relies on `std.Io.Future.await` returning `.result` when `.any_future == null`.
     fn immediate(result: Error!void) WaitForSlotResult {
-        return .{ .inner = .{ .any_future = null, .result = result }, .state = null, .clock = null };
+        return .{
+            .inner = .{ .any_future = null, .result = result },
+            .state = null,
+            .clock = null,
+        };
     }
 
     pub fn await(self: *WaitForSlotResult, io: std.Io) Error!void {
@@ -343,7 +339,10 @@ pub fn waitForSlot(self: *EventClock, target: Slot) Error!WaitForSlotResult {
         self.allocator.destroy(state);
         return WaitForSlotResult.immediate(error.Aborted);
     }
-    self.waiters.push(self.allocator, .{ .target = target, .state = state }) catch return error.OutOfMemory;
+    self.waiters.push(
+        self.allocator,
+        .{ .target = target, .state = state },
+    ) catch return error.OutOfMemory;
     self.dispatchWaiters(self.clock.current_slot);
 
     const inner = std.Io.concurrent(self.io, waitForSlotFutureAwait, .{state}) catch {
@@ -430,10 +429,8 @@ fn advanceAndDispatch(self: *EventClock, target: Slot) void {
             .epoch => |e| self.emitEpoch(e),
         }
     }
-    // Defensive: handles edge cases where advanceTo yields zero events
-    // (already at target) but waiters were added between loop ticks.
-    // In the normal case, this is a no-op because the last .slot event
-    // already dispatched waiters at the same slot value.
+    // Re-dispatch in case waiters were added since the last .slot event;
+    // a no-op when advanceTo already dispatched at this slot.
     self.dispatchWaiters(self.clock.current_slot);
 }
 
@@ -443,7 +440,10 @@ fn runAutoLoop(self: *EventClock) void {
         // Config validation guarantees sec→ms won't overflow, so null here
         // indicates a logic bug.  Break instead of spinning at 1ms.
         const next_ms = slot_math.msUntilNextSlot(self.clock.config, now_ms) orelse {
-            std.log.err("EventClock: msUntilNextSlot returned null (config overflow?), stopping loop", .{});
+            std.log.err(
+                "EventClock: msUntilNextSlot returned null (config overflow?), stopping loop",
+                .{},
+            );
             self.stop();
             break;
         };
@@ -1276,7 +1276,10 @@ test "property: random op sequences match model" {
             var seed: u64 = 0;
             while (seed < 500) : (seed += 1) {
                 runPropertyScenario(seed, 50, io_handle) catch |err| {
-                    std.debug.print("property scenario failed at seed={d}: {s}\n", .{ seed, @errorName(err) });
+                    std.debug.print(
+                        "property scenario failed at seed={d}: {s}\n",
+                        .{ seed, @errorName(err) },
+                    );
                     return err;
                 };
             }

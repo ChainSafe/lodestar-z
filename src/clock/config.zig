@@ -15,7 +15,8 @@ pub const DurationTransition = struct {
 
 pub const max_duration_transitions: u32 = 4;
 
-pub const DurationTransitions = bounded_array.BoundedArray(DurationTransition, max_duration_transitions);
+pub const DurationTransitions =
+    bounded_array.BoundedArray(DurationTransition, max_duration_transitions);
 
 /// Comptime builder for `ClockConfig.duration_transitions`.
 pub fn forkTransitions(
@@ -54,16 +55,5 @@ pub const ClockConfig = struct {
 
     pub fn transitions(self: *const ClockConfig) []const DurationTransition {
         return self.duration_transitions.constSlice();
-    }
-
-    /// Slot duration applicable at `slot`.  Falls back to `slot_duration_ms`
-    /// if no transition has fired yet.
-    pub fn slotDurationMsAt(self: ClockConfig, slot: Slot) u64 {
-        var duration = self.slot_duration_ms;
-        for (self.transitions()) |t| {
-            if (t.from_slot > slot) break;
-            duration = t.new_duration_ms;
-        }
-        return duration;
     }
 };

@@ -1,8 +1,4 @@
-//! Pluggable time source abstraction.
-//!
-//! Tagged union with two variants:
-//!   `.real` – production: reads wall-clock time from `std.Io`
-//!   `.fake` – testing: reads from a mutable `FakeTime` struct
+//! Pluggable time source so tests can inject deterministic time.
 
 const std = @import("std");
 const slot_math = @import("slot_math.zig");
@@ -35,7 +31,7 @@ pub const FakeTime = struct {
     /// back to the genesis (pre-fork) duration.
     pub fn advanceSlot(self: *FakeTime, config: slot_math.ClockConfig) void {
         const slot = slot_math.slotAtMs(config, self.ms) orelse 0;
-        self.ms += config.slotDurationMsAt(slot);
+        self.ms += slot_math.slotDurationMsAt(config, slot);
     }
 };
 
