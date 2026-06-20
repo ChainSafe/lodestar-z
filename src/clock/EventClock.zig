@@ -236,7 +236,7 @@ pub fn currentEpochOrGenesis(self: *EventClock) Epoch {
     return self.clock.currentEpochOrGenesis();
 }
 
-pub fn currentSlotWithGossipDisparity(self: *EventClock) Slot {
+pub fn currentSlotWithGossipDisparity(self: *EventClock) ?Slot {
     self.catchUp();
     return self.clock.currentSlotWithGossipDisparity();
 }
