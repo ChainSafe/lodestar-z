@@ -244,10 +244,6 @@ pub fn isCurrentSlotGivenGossipDisparity(self: *EventClock, slot: Slot) bool {
     return self.clock.isCurrentSlotGivenGossipDisparity(slot);
 }
 
-// The stateless tolerance/offset helpers (slotWithFutureToleranceMs,
-// slotWithPastToleranceMs, secFromSlot, msFromSlot) are reached directly
-// on `ec.clock`; they need no catch-up, so EventClock does not re-export them.
-
 /// Return type from `waitForSlot`. The caller MUST either:
 ///   - call `await()` to wait for the target slot and release resources, OR
 ///   - call `cancel()` to abort and release resources, OR
@@ -429,8 +425,10 @@ fn advanceAndDispatch(self: *EventClock, target: Slot) void {
             .epoch => |e| self.emitEpoch(e),
         }
     }
-    // Re-dispatch in case waiters were added since the last .slot event;
-    // a no-op when advanceTo already dispatched at this slot.
+    // Defensive: handles edge cases where advanceTo yields zero events
+    // (already at target) but waiters were added between loop ticks.
+    // In the normal case, this is a no-op because the last .slot event
+    // already dispatched waiters at the same slot value.
     self.dispatchWaiters(self.clock.current_slot);
 }
 
