@@ -4,6 +4,7 @@
 //! Run with: zig build run:bench_process_epoch -Doptimize=ReleaseFast
 
 const std = @import("std");
+const builtin = @import("builtin");
 const zbench = @import("zbench");
 const Node = @import("persistent_merkle_tree").Node;
 const state_transition = @import("state_transition");
@@ -333,6 +334,7 @@ const Step = enum {
     participation_record,
     sync_committee_updates,
     proposer_lookahead,
+    state_root,
 };
 
 const step_count = std.enums.values(Step).len;
@@ -398,6 +400,9 @@ fn ProcessEpochBench(comptime fork: ForkSeq) type {
                 BenchState.cloned_cached_state.state.castToFork(fork),
                 &cache,
             ) catch unreachable;
+            // hashTreeRoot, not commit: the re-merkleization runs here — the
+            // real per-epoch cost (state_root is verified each epoch).
+            _ = BenchState.cloned_cached_state.state.hashTreeRoot() catch unreachable;
         }
     };
 }
@@ -568,6 +573,10 @@ fn ProcessEpochSegmentedBench(comptime fork: ForkSeq) type {
                 recordSegment(.proposer_lookahead, @as(u64, @intCast(time.since(io, lookahead_start).nanoseconds)));
             }
 
+            const state_root_start = time.timestampNow(io);
+            _ = BenchState.cloned_cached_state.state.hashTreeRoot() catch unreachable;
+            recordSegment(.state_root, @as(u64, @intCast(time.since(io, state_root_start).nanoseconds)));
+
             recordSegment(.epoch_total, @as(u64, @intCast(time.since(io, epoch_start).nanoseconds)));
         }
     };
@@ -606,16 +615,20 @@ fn loadStateBytesFromConfiguredEraFiles(allocator: std.mem.Allocator, io: std.Io
     return error.NoUsableEraStateFound;
 }
 
-pub fn main(init: std.process.Init) !void {
-    var gpa: std.heap.DebugAllocator(.{}) = .init;
-    defer std.debug.assert(gpa.deinit() == .ok);
+var gpa: std.heap.DebugAllocator(.{}) = .init;
 
-    const allocator = gpa.allocator();
+pub fn main(init: std.process.Init) !void {
+    defer if (builtin.mode == .Debug) std.debug.assert(gpa.deinit() == .ok);
+
+    const allocator = if (builtin.mode == .Debug)
+        gpa.allocator()
+    else
+        std.heap.c_allocator;
     const io = init.io;
     var stdout_buf: [4096]u8 = undefined;
     var stdout_file_writer = std.Io.File.stdout().writer(io, &stdout_buf);
     var stdout = &stdout_file_writer.interface;
-    var pool = try Node.Pool.init(allocator, 10_000_000);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 10_000_000 });
     defer pool.deinit();
 
     const state_bytes = try loadStateBytesFromConfiguredEraFiles(allocator, io, stdout);
@@ -670,7 +683,7 @@ fn runBenchmark(
         allocator.destroy(index_pubkey_cache);
     }
 
-    const validators = try beacon_state.?.validatorsSlice(allocator);
+    const validators = try beacon_state.?.validatorsPtrSlice(allocator);
     defer allocator.free(validators);
 
     try state_transition.syncPubkeys(allocator, validators, &pubkey_index_map, index_pubkey_cache);

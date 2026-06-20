@@ -199,7 +199,11 @@ declare class BeaconStateView {
   isValidVoluntaryExit(signedVoluntaryExitBytes: Uint8Array, verifySignature: boolean): boolean;
 
   getFinalizedRootProof(): Uint8Array[];
-  // getSyncCommitteesWitness(): any;
+  getSyncCommitteesWitness(): {
+    witness: Uint8Array[];
+    currentSyncCommitteeRoot: Uint8Array;
+    nextSyncCommitteeRoot: Uint8Array;
+  };
   /**
    * Compute expected withdrawals for the next payload (capella+).
    *

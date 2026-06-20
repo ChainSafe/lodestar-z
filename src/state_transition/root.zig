@@ -112,6 +112,10 @@ const load_state = @import("load_state.zig");
 pub const loadState = load_state.loadState;
 pub const MigrateStateOutput = load_state.MigrateStateOutput;
 
+const sync_committees_witness = @import("./sync_committees_witness.zig");
+pub const getSyncCommitteesWitness = sync_committees_witness.getSyncCommitteesWitness;
+pub const SyncCommitteeWitness = sync_committees_witness.SyncCommitteeWitness;
+
 const weak_subjectivity = @import("weak_subjectivity.zig");
 pub const getLatestWeakSubjectivityCheckpointEpoch = weak_subjectivity.getLatestWeakSubjectivityCheckpointEpoch;
 
@@ -121,5 +125,6 @@ test {
     testing.refAllDecls(state_transition);
     testing.refAllDecls(EpochShuffling);
     testing.refAllDecls(load_state);
+    testing.refAllDecls(sync_committees_witness);
     testing.refAllDecls(weak_subjectivity);
 }

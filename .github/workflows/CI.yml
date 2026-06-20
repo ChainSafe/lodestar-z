@@ -60,6 +60,9 @@ jobs:
       - name: Run hex tests
         run: |
           zig build test:hex
+      - name: Run cpu_count tests
+        run: |
+          zig build test:cpu_count
       - name: Run config tests
         run: |
           zig build test:config

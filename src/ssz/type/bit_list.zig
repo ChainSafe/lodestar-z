@@ -809,7 +809,7 @@ test "BitListType - tree roundtrip" {
         },
     };
 
-    var pool = try Node.Pool.init(allocator, 1024);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 1024 });
     defer pool.deinit();
 
     for (test_cases) |tc| {
@@ -868,7 +868,7 @@ test "BitListType - tree.deserializeFromBytes" {
         },
     };
 
-    var pool = try Node.Pool.init(allocator, 1024);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 1024 });
     defer pool.deinit();
 
     for (test_cases) |tc| {
@@ -978,7 +978,7 @@ test "BitListType - default_root" {
     try Bits2048.hashTreeRoot(std.testing.allocator, &Bits2048.default_value, &expected_root);
     try std.testing.expectEqualSlices(u8, &expected_root, &Bits2048.default_root);
 
-    var pool = try Node.Pool.init(std.testing.allocator, 1024);
+    var pool = try Node.Pool.init(.{ .page_allocator = std.testing.allocator, .allocator = std.testing.allocator, .pool_size = 1024 });
     defer pool.deinit();
 
     const node = try Bits2048.tree.default(&pool);
@@ -990,7 +990,7 @@ test "BitListType - tree.zeros" {
 
     const Bits257 = BitListType(257);
 
-    var pool = try Node.Pool.init(allocator, 1024);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 1024 });
     defer pool.deinit();
 
     for (Bits257.limit / 2..Bits257.limit) |len| {

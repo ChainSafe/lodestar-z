@@ -747,7 +747,41 @@ pub fn getFinalizedRootProof(self: *const BeaconStateView) !js.Array {
     ));
 }
 
-// pub fn BeaconStateView_getSyncCommitteesWitness
+pub fn getSyncCommitteesWitness(self: *const BeaconStateView) !js_types.SyncCommitteeWitness {
+    const env = js.env();
+    const cached_state = try self.requireState();
+    try cached_state.state.commit();
+
+    const fork_seq = cached_state.state.forkSeq();
+    if (fork_seq.lt(.altair)) {
+        return throwNullAs(
+            js_types.SyncCommitteeWitness,
+            "INVALID_FORK",
+            "getSyncCommitteesWitness only supported altair+",
+        );
+    }
+
+    const root_node = cached_state.state.root();
+    var witness_data: st.SyncCommitteeWitness = undefined;
+    try st.getSyncCommitteesWitness(fork_seq, root_node, cached_state.state.nodePool(), &witness_data);
+
+    const witness_arr = try env.createArrayWithLength(@intCast(witness_data.witness_len));
+    for (witness_data.witness(), 0..) |*w, i| {
+        try witness_arr.setElement(@intCast(i), js.Uint8Array.from(w).toValue());
+    }
+
+    const obj = try env.createObject();
+    try obj.setNamedProperty("witness", witness_arr);
+    try obj.setNamedProperty(
+        "currentSyncCommitteeRoot",
+        js.Uint8Array.from(&witness_data.current_sync_committee_root).toValue(),
+    );
+    try obj.setNamedProperty(
+        "nextSyncCommitteeRoot",
+        js.Uint8Array.from(&witness_data.next_sync_committee_root).toValue(),
+    );
+    return js_types.wrap(js_types.SyncCommitteeWitness, obj);
+}
 
 /// Get a single Merkle proof  for a node at the given generalized index.
 pub fn getSingleProof(self: *const BeaconStateView, gindex_arg: js.Number) !js.Array {
@@ -779,9 +813,7 @@ pub fn createMultiProof(self: *const BeaconStateView, descriptor: js.Uint8Array)
     const descriptor_bytes = try descriptor.toSlice();
 
     try cached_state.state.commit();
-    const root_node = switch (cached_state.state.*) {
-        inline else => |state| state.root,
-    };
+    const root_node = cached_state.state.root();
 
     const proof_input = persistent_merkle_tree.proof.ProofInput{
         .compactMulti = .{ .descriptor = descriptor_bytes },

@@ -14,6 +14,10 @@
             .url = "git+https://github.com/ChainSafe/snappy.zig#713942410426051da6107a955b29f3f152815622",
             .hash = "snappy-0.1.0-n4AaquQ4AADQScvw9-i6SJvZTTagvxmGgGKnat4T_a4e",
         },
+        .hashtree = .{
+            .url = "git+https://github.com/ChainSafe/hashtree-z.git#81b7303f72e202e966f71eedf4be1d8d33e2fcaa",
+            .hash = "hashtree-0.1.0-sBOoviYWAAA1HcTLhxWt0TtrLFXvYM5gOvxpu_Rreiiw",
+        },
     },
     .paths = .{ "build.zig", "build.zig.zon", "src", "tools" },
 }

@@ -16,12 +16,16 @@
     .description = "Zig consensus modules for Lodestar (Ethereum beacon chain client)",
     .dependencies = .{
         .zbuild = .{
-            .url = "git+https://github.com/ChainSafe/zbuild?ref=refactor/comptime-library-rewrite#17c389be7e258dea422f43d5dad996f0f847bd66",
-            .hash = "zbuild-0.4.0-XJFavw5XAgBJ_8U6DHY0D8xHGUAx4Ak4r8pKe2-o_X8Q",
+            .url = "git+https://github.com/chainsafe/zbuild.git#f7d5f19de09f2808e54acf599605f9e18c9bd804",
+            .hash = "zbuild-0.4.0-XJFav-1nAgDmfVY1nVSIIzbkcbuHZj7yMb7Fv8yvznPO",
         },
         .blst = .{
             .url = "git+https://github.com/ChainSafe/blst.zig.git#5d9543be8a7a1a9942c62a097644286751f95dc7",
             .hash = "blst_zig-0.0.0-cnAxzisLAADc_A14MqXu_f_rLBRS6m6ki8zHrUjLXYoo",
+            .args = .{
+                .optimize = .ReleaseFast,
+                .portable = true,
+            },
         },
         .hashtree = .{
             .url = "git+https://github.com/ChainSafe/hashtree-z.git#81b7303f72e202e966f71eedf4be1d8d33e2fcaa",
@@ -143,6 +147,9 @@
             .root_source_file = "src/clock/root.zig",
             .imports = .{ .zio, .consensus_types, .bounded_array },
         },
+        .cpu_count = .{
+            .root_source_file = "src/cpu_count.zig",
+        },
         .testing_allocators = .{
             .root_source_file = "src/testing_allocators.zig",
         },
@@ -192,6 +199,7 @@
                 .hex,
                 .persistent_merkle_tree,
                 .metrics,
+                .hashing,
                 .time,
             },
         },
@@ -276,6 +284,12 @@
                 .imports = .{ .config, .consensus_types, .download_era_options, .era, .ssz, .zbench },
             },
         },
+        .bench_list_chunked_leaf = .{
+            .root_module = .{
+                .root_source_file = "bench/ssz/list_chunked_leaf.zig",
+                .imports = .{ .persistent_merkle_tree, .ssz, .zbench },
+            },
+        },
         .bench_merkle_gindex = .{
             .root_module = .{
                 .root_source_file = "bench/ssz/gindex.zig",
@@ -334,6 +348,7 @@
                 .imports = .{
                     .bls,
                     .bls_options,
+                    .cpu_count,
                     .hex,
                     .persistent_merkle_tree,
                     .ssz,
@@ -356,6 +371,7 @@
         .constants = .{ .root_module = .constants },
         .hex = .{ .root_module = .hex },
         .bounded_array = .{ .root_module = .bounded_array },
+        .cpu_count = .{ .root_module = .cpu_count },
         .hashing = .{ .root_module = .hashing },
         .preset = .{ .root_module = .preset },
         .persistent_merkle_tree = .{ .root_module = .persistent_merkle_tree },

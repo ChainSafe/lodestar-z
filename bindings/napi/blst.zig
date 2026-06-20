@@ -27,6 +27,14 @@ const ThreadPool = bls.ThreadPool;
 const DST = bls.DST;
 const MAX_AGGREGATE_PER_JOB = bls.MAX_AGGREGATE_PER_JOB;
 
+/// In upstream lodestar we split batchable sets into chunks of minimum size 16.
+/// Cost savings after ~16 are not significant.
+/// In metrics, we can observe that sas fleet receives on average ~30 signature sets,
+/// so a safe bound is about 32.
+///
+/// See: packages/beacon-node/src/chain/bls/multithread/worker.ts
+const BATCH_VERIFY_SIZE = 32;
+
 /// Cached thread pool reference for parallel verification.
 /// Initialized lazily on first use, torn down via `deinitThreadPool`.
 var thread_pool: ?*ThreadPool = null;
@@ -172,7 +180,7 @@ pub const Signature = struct {
         const slice = try bytes.toSlice();
         var sig = NativeSignature.deserialize(slice) catch return error.DeserializationFailed;
         if (try boolOrDefault(sig_validate, false)) {
-            try sig.validate(try boolOrDefault(sig_infcheck, false));
+            try sig.validate(try boolOrDefault(sig_infcheck, true));
         }
         return .{ .raw = sig };
     }
@@ -429,17 +437,40 @@ pub fn verifyMultipleAggregateSignatures(sets: js.Array, pks_validate: ?js.Boole
     const n_elems = try sets.length();
     if (n_elems == 0) return js.Boolean.from(false);
 
-    const msgs = try allocator.alloc([32]u8, n_elems);
-    defer allocator.free(msgs);
+    var msgs_stack: [BATCH_VERIFY_SIZE][]const u8 = undefined;
+    var pks_stack: [BATCH_VERIFY_SIZE]*NativePublicKey = undefined;
+    var sigs_stack: [BATCH_VERIFY_SIZE]*NativeSignature = undefined;
+    var rands_stack: [BATCH_VERIFY_SIZE][32]u8 = undefined;
 
-    const pks = try allocator.alloc(*NativePublicKey, n_elems);
-    defer allocator.free(pks);
+    var msgs_heap: ?[][]const u8 = null;
+    defer if (msgs_heap) |buf| allocator.free(buf);
+    var pks_heap: ?[]*NativePublicKey = null;
+    defer if (pks_heap) |buf| allocator.free(buf);
+    var sigs_heap: ?[]*NativeSignature = null;
+    defer if (sigs_heap) |buf| allocator.free(buf);
+    var rands_heap: ?[][32]u8 = null;
+    defer if (rands_heap) |buf| allocator.free(buf);
 
-    const sigs = try allocator.alloc(*NativeSignature, n_elems);
-    defer allocator.free(sigs);
-
-    const rands = try allocator.alloc([32]u8, n_elems);
-    defer allocator.free(rands);
+    const msgs = if (n_elems <= BATCH_VERIFY_SIZE) msgs_stack[0..n_elems] else blk: {
+        const buf = try allocator.alloc([]const u8, n_elems);
+        msgs_heap = buf;
+        break :blk buf;
+    };
+    const pks = if (n_elems <= BATCH_VERIFY_SIZE) pks_stack[0..n_elems] else blk: {
+        const buf = try allocator.alloc(*NativePublicKey, n_elems);
+        pks_heap = buf;
+        break :blk buf;
+    };
+    const sigs = if (n_elems <= BATCH_VERIFY_SIZE) sigs_stack[0..n_elems] else blk: {
+        const buf = try allocator.alloc(*NativeSignature, n_elems);
+        sigs_heap = buf;
+        break :blk buf;
+    };
+    const rands = if (n_elems <= BATCH_VERIFY_SIZE) rands_stack[0..n_elems] else blk: {
+        const buf = try allocator.alloc([32]u8, n_elems);
+        rands_heap = buf;
+        break :blk buf;
+    };
 
     var seed_bytes: [8]u8 = undefined;
     const io = napi_io.get();
@@ -454,7 +485,7 @@ pub fn verifyMultipleAggregateSignatures(sets: js.Array, pks_validate: ?js.Boole
         const msg_napi = try set.getNamedProperty("msg");
         const msg_bytes = try uint8SliceFromValue(.{ .val = msg_napi });
         if (msg_bytes.len != 32) return error.InvalidMessageLength;
-        @memcpy(&msgs[i], msg_bytes[0..32]);
+        msgs[i] = msg_bytes;
 
         const pk_napi = try set.getNamedProperty("pk");
         const wrapped_pk = try e.unwrap(PublicKey, pk_napi);
@@ -464,11 +495,10 @@ pub fn verifyMultipleAggregateSignatures(sets: js.Array, pks_validate: ?js.Boole
         const wrapped_sig = try e.unwrap(Signature, sig_napi);
         sigs[i] = &wrapped_sig.raw;
 
-        rand.bytes(&rands[i]);
-        // Ensure first 8 bytes (RAND_BITS=64) are non-zero
-        while (std.mem.allEqual(u8, rands[i][0..8], 0)) {
-            rand.bytes(rands[i][0..8]);
-        }
+        var scalar = rand.int(u64);
+        while (scalar == 0) scalar = rand.int(u64);
+        std.mem.writeInt(u64, rands[i][0..8], scalar, .little);
+        @memset(rands[i][8..], 0);
     }
 
     const pool = thread_pool orelse return error.ThreadPoolNotInitialized;
@@ -660,11 +690,12 @@ pub fn aggregateWithRandomness(sets: js.Array) !js.Value {
 /// All input data should be copied into this struct so the worker thread doesn't depend on
 /// any JS-managed memory staying alive.
 const AsyncAggRandData = struct {
-    pks: []NativePublicKey,
-    sigs: []NativeSignature,
-    pk_ptrs: []*const NativePublicKey,
-    sig_ptrs: []*const NativeSignature,
-    randomness: []u8,
+    n: usize,
+    pks: [MAX_AGGREGATE_PER_JOB]NativePublicKey,
+    sigs: [MAX_AGGREGATE_PER_JOB]NativeSignature,
+    pk_ptrs: [MAX_AGGREGATE_PER_JOB]*const NativePublicKey,
+    sig_ptrs: [MAX_AGGREGATE_PER_JOB]*const NativeSignature,
+    randomness: [MAX_AGGREGATE_PER_JOB * 32]u8,
     pk_out: NativePublicKey,
     sig_out: NativeSignature,
     err: ?anyerror,
@@ -672,11 +703,6 @@ const AsyncAggRandData = struct {
     work: napi.c.napi_async_work,
 
     fn destroy(self: *AsyncAggRandData) void {
-        allocator.free(self.pks);
-        allocator.free(self.sigs);
-        allocator.free(self.pk_ptrs);
-        allocator.free(self.sig_ptrs);
-        allocator.free(self.randomness);
         allocator.destroy(self);
     }
 };
@@ -695,9 +721,9 @@ fn asyncAggRand_execute(_: napi.Env, data: *AsyncAggRandData) void {
     };
     pool.aggregateWithRandomness(
         napi_io.get(),
-        data.pk_ptrs,
-        data.sig_ptrs,
-        data.randomness,
+        data.pk_ptrs[0..data.n],
+        data.sig_ptrs[0..data.n],
+        data.randomness[0 .. data.n * 32],
         false, // pks already validated implicitly by being deserialized PublicKey instances
         true, // sigs were deserialized but not group-checked on the JS thread
         &data.pk_out,
@@ -784,23 +810,13 @@ pub fn asyncAggregateWithRandomness(sets: js.Array) !js.Value {
     const data = try allocator.create(AsyncAggRandData);
     errdefer allocator.destroy(data);
 
-    data.pks = try allocator.alloc(NativePublicKey, n);
-    errdefer allocator.free(data.pks);
-    data.sigs = try allocator.alloc(NativeSignature, n);
-    errdefer allocator.free(data.sigs);
-    data.pk_ptrs = try allocator.alloc(*const NativePublicKey, n);
-    errdefer allocator.free(data.pk_ptrs);
-    data.sig_ptrs = try allocator.alloc(*const NativeSignature, n);
-    errdefer allocator.free(data.sig_ptrs);
-    data.randomness = try allocator.alloc(u8, n * 32);
-    errdefer allocator.free(data.randomness);
-
+    data.n = n;
     data.pk_out = .{};
     data.sig_out = .{};
     data.err = null;
     data.deferred = undefined;
     data.work = undefined;
-    napi_io.get().random(data.randomness);
+    napi_io.get().random(data.randomness[0 .. n * 32]);
 
     for (0..n) |i| {
         const set = (try sets.get(@intCast(i))).toValue();
