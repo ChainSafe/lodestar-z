@@ -48,9 +48,9 @@ pub fn processPendingDeposits(
     for (0..pending_deposits_len) |_| {
         const deposit = try pending_deposits_it.nextValue(undefined);
         // Do not process deposit requests if Eth1 bridge deposits are not yet applied.
-        if (
-        // Is deposit request
-        deposit.slot > GENESIS_SLOT and
+        if (fork.lt(.fulu) and
+            // Is deposit request
+            deposit.slot > GENESIS_SLOT and
             // There are pending Eth1 bridge deposits
             eth1_deposit_index < deposit_requests_start_index)
         {
