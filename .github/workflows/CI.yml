@@ -123,6 +123,8 @@ jobs:
   spec-test-prep:
     name: spec tests - prepare
     runs-on: ubuntu-latest
+    outputs:
+      spec-test-version: ${{ steps.spec-test-version.outputs.version }}
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -131,11 +133,24 @@ jobs:
         with:
           version: ${{ env.ZIG_VERSION }}
           cache-key: ubuntu-latest-${{ env.ZIG_VERSION }}
+      - name: Read spec test version
+        id: spec-test-version
+        run: |
+          version=$(awk '
+            /\.spec_test_version = \./ {in_block=1}
+            in_block && /\.default = / {
+              match($0, /"[^"]+"/)
+              print substr($0, RSTART + 1, RLENGTH - 2)
+              exit
+            }
+          ' build.zig.zon)
+          test -n "$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
       - name: Restore spec tests cache
         uses: actions/cache@v4
         with:
           path: test/spec/spec_tests
-          key: spec-test-data-${{ hashFiles('build.zig') }} # spec test version is defined in build.zig
+          key: spec-test-data-${{ steps.spec-test-version.outputs.version }}
       - name: Download spec tests
         run: |
           zig build run:download_spec_tests
@@ -179,7 +194,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: test/spec/spec_tests
-          key: spec-test-data-${{ hashFiles('build.zig') }}
+          key: spec-test-data-${{ needs['spec-test-prep'].outputs['spec-test-version'] }}
       - name: Download generated test files
         uses: actions/download-artifact@v4
         with:
@@ -205,7 +220,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: test/spec/spec_tests
-          key: spec-test-data-${{ hashFiles('build.zig') }}
+          key: spec-test-data-${{ needs['spec-test-prep'].outputs['spec-test-version'] }}
       - name: Download generated test files
         uses: actions/download-artifact@v4
         with:
@@ -231,7 +246,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: test/spec/spec_tests
-          key: spec-test-data-${{ hashFiles('build.zig') }}
+          key: spec-test-data-${{ needs['spec-test-prep'].outputs['spec-test-version'] }}
       - name: Download generated test files
         uses: actions/download-artifact@v4
         with:
@@ -257,7 +272,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: test/spec/spec_tests
-          key: spec-test-data-${{ hashFiles('build.zig') }}
+          key: spec-test-data-${{ needs['spec-test-prep'].outputs['spec-test-version'] }}
       - name: Download generated test files
         uses: actions/download-artifact@v4
         with:
@@ -296,7 +311,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: test/spec/spec_tests
-          key: spec-test-data-${{ hashFiles('build.zig') }}
+          key: spec-test-data-${{ needs['spec-test-prep'].outputs['spec-test-version'] }}
       - name: Download generated test files
         uses: actions/download-artifact@v4
         with:
@@ -335,7 +350,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: test/spec/spec_tests
-          key: spec-test-data-${{ hashFiles('build.zig') }}
+          key: spec-test-data-${{ needs['spec-test-prep'].outputs['spec-test-version'] }}
       - name: Download generated test files
         uses: actions/download-artifact@v4
         with:
