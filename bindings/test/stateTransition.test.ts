@@ -1,7 +1,7 @@
 import {describe, expect, it} from "vitest";
 import type {BeaconStateView, TransitionOpts} from "../src/index.js";
 import bindings from "../src/index.js";
-import {stateTransition as subpathStateTransition} from "../src/state-transition.js";
+import {deinitStateTransition, stateTransition} from "../src/state-transition.js";
 
 function stateViewWithTransition(
   stateTransition: (signedBlockBytes: Uint8Array, options?: TransitionOpts) => unknown
@@ -33,6 +33,11 @@ describe("stateTransition export", () => {
       return postState;
     });
 
-    expect(subpathStateTransition(preState, signedBlockBytes, options)).toBe(postState);
+    expect(stateTransition(preState, signedBlockBytes, options)).toBe(postState);
+  });
+
+  it("exposes the state transition cache reset", () => {
+    expect(bindings.stateTransition.deinitStateTransition).toBeTypeOf("function");
+    expect(deinitStateTransition).toBeTypeOf("function");
   });
 });

@@ -14,3 +14,5 @@ export declare function stateTransition(
   signedBlockBytes: Uint8Array,
   options?: TransitionOpts
 ): BeaconStateView;
+
+export declare function deinitStateTransition(): void;

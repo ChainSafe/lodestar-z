@@ -381,11 +381,13 @@ declare const bindings: {
   shuffle: {
     innerShuffleList: (out: Uint32Array, seed: Uint8Array, rounds: number, forwards: boolean) => void;
   };
-  stateTransition: (
+  stateTransition: ((
     preState: BeaconStateView,
     signedBlockBytes: Uint8Array,
     options?: TransitionOpts
-  ) => BeaconStateView;
+  ) => BeaconStateView) & {
+    deinitStateTransition: () => void;
+  };
   metrics: {
     init: () => void;
     scrapeMetrics: () => string;
