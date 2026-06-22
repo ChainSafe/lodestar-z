@@ -6,9 +6,11 @@ const PendingDeposit = types.electra.PendingDeposit.Type;
 const c = @import("constants");
 
 pub fn processDepositRequest(comptime fork: ForkSeq, state: *BeaconState(fork), deposit_request: *const DepositRequest) !void {
-    const deposit_requests_start_index = try state.depositRequestsStartIndex();
-    if (deposit_requests_start_index == c.UNSET_DEPOSIT_REQUESTS_START_INDEX) {
-        try state.setDepositRequestsStartIndex(deposit_request.index);
+    if (comptime fork == .electra) {
+        const deposit_requests_start_index = try state.depositRequestsStartIndex();
+        if (deposit_requests_start_index == c.UNSET_DEPOSIT_REQUESTS_START_INDEX) {
+            try state.setDepositRequestsStartIndex(deposit_request.index);
+        }
     }
 
     const pending_deposit = PendingDeposit{
