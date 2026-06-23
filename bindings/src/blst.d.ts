@@ -1,4 +1,8 @@
 export class PublicKey {
+  /** Size of a compressed public key in bytes (48). */
+  static readonly COMPRESS_SIZE: number;
+  /** Size of an uncompressed public key in bytes (96). */
+  static readonly SERIALIZE_SIZE: number;
   /**
    * Deserialize a public key from a byte array.
    *
@@ -40,6 +44,10 @@ export class SecretKey {
 }
 
 export class Signature {
+  /** Size of a compressed signature in bytes (96). */
+  static readonly COMPRESS_SIZE: number;
+  /** Size of an uncompressed signature in bytes (192). */
+  static readonly SERIALIZE_SIZE: number;
   /**
    * Deserialize a signature from a byte array.
    *
@@ -155,6 +163,12 @@ export function verifyMultipleAggregateSignatures(
  * Aggregate multiple public keys and multiple serialized signatures into a single blinded public key and blinded signature.
  *
  * Signatures are deserialized and validated with infinity and group checks before aggregation.
+ */
+export declare function aggregateWithRandomness(sets: PkAndSerializedSig[]): PkAndSig;
+
+/**
+ * Same as `aggregateWithRandomness`, but the multi-scalar multiplications run on the
+ * native thread pool and the call returns a Promise instead of blocking the JS thread.
  */
 export declare function asyncAggregateWithRandomness(sets: PkAndSerializedSig[]): Promise<PkAndSig>;
 

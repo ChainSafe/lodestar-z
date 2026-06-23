@@ -5,11 +5,32 @@ const Node = @import("persistent_merkle_tree").Node;
 const types = @import("consensus_types");
 const config = @import("config");
 const fork_types = @import("fork_types");
+const CachedBeaconState = @import("state_transition").CachedBeaconState;
 
 const ForkSeq = config.ForkSeq;
 const AnyBeaconState = fork_types.AnyBeaconState;
 const AnySignedBeaconBlock = fork_types.AnySignedBeaconBlock;
 const Slot = types.primitive.Slot.Type;
+
+pub const BenchState = struct {
+    var allocator: std.mem.Allocator = undefined;
+    var cached_state: *CachedBeaconState = undefined;
+    pub var cloned_cached_state: *CachedBeaconState = undefined;
+
+    pub fn init(alloc: std.mem.Allocator, state: *CachedBeaconState) void {
+        allocator = alloc;
+        cached_state = state;
+    }
+
+    pub fn beforeEach() void {
+        cloned_cached_state = cached_state.clone(allocator, .{}) catch unreachable;
+    }
+
+    pub fn afterEach() void {
+        cloned_cached_state.deinit();
+        allocator.destroy(cloned_cached_state);
+    }
+};
 
 /// Read slot from raw BeaconState SSZ bytes (offset 40)
 pub fn slotFromStateBytes(state_bytes: []const u8) Slot {

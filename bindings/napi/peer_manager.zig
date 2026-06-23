@@ -1,6 +1,14 @@
 const std = @import("std");
-const napi = @import("zapi:zapi");
+const napi = @import("zapi:zapi").napi;
+const js = @import("zapi:zapi").js;
 const peer_manager = @import("peer_manager");
+const napi_io = @import("./io.zig");
+
+/// Wall-clock time in Unix milliseconds. Replaces `std.time.milliTimestamp`
+/// (removed in Zig 0.16); the clock now lives behind `std.Io`.
+fn currentMillis() i64 {
+    return std.Io.Timestamp.now(napi_io.get(), .real).toMilliseconds();
+}
 
 const PeerManager = peer_manager.PeerManager;
 const Config = peer_manager.Config;
@@ -26,7 +34,7 @@ pub const State = struct {
         self.manager = try PeerManager.init(
             allocator,
             config,
-            std.time.milliTimestamp,
+            currentMillis,
         );
     }
 
@@ -197,11 +205,16 @@ fn actionToNapiObject(env: napi.Env, action: Action) !napi.Value {
     return obj;
 }
 
-fn readPeerId(value: napi.Value) ![]const u8 {
+/// Reads a JS string argument into allocator-owned `[]u8` peer id memory.
+/// Caller owns the returned memory.
+fn dupePeerId(value: js.String) ![]u8 {
     var buf: [128]u8 = undefined;
-    return try value.getValueStringUtf8(&buf);
+    const peer_id = try value.toSlice(&buf);
+    return allocator.dupe(u8, peer_id);
 }
 
+/// Reads a peer id from a `napi.Value` (e.g. an array element's property) into
+/// allocator-owned memory. Caller owns the returned memory.
 fn readOwnedPeerId(value: napi.Value) ![]u8 {
     var buf: [128]u8 = undefined;
     const peer_id = try value.getValueStringUtf8(&buf);
@@ -232,72 +245,83 @@ fn parseOptionalU32Array(value: napi.Value) !?[]u32 {
 
 // ── Lifecycle ────────────────────────────────────────────────────────
 
-pub fn PeerManager_init(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
-    const config_obj = try cb.arg(0).coerceToObject();
-    const config = try configFromObject(env, config_obj);
+/// JS: peerManager.init(config)
+pub fn init(config_arg: js.Value) !void {
+    const config_obj = try config_arg.toValue().coerceToObject();
+    const config = try configFromObject(js.env(), config_obj);
     try state.init(config);
-    return env.getUndefined();
 }
 
-pub fn PeerManager_close(env: napi.Env, _: napi.CallbackInfo(0)) !napi.Value {
+/// JS: peerManager.close()
+pub fn close() !void {
     state.deinit();
-    return env.getUndefined();
 }
 
 // ── Tick Functions ───────────────────────────────────────────────────
 
-pub fn PeerManager_heartbeat(env: napi.Env, cb: napi.CallbackInfo(2)) !napi.Value {
+/// JS: peerManager.heartbeat(currentSlot, localStatus)
+pub fn heartbeat(current_slot: js.Number, local_status: js.Value) !napi.Value {
     const m = try getManager();
-    const current_slot: u64 = @intCast(try cb.arg(0).getValueInt64());
-    const local_status = try statusFromObject(env, try cb.arg(1).coerceToObject());
-    const actions = try m.heartbeat(current_slot, local_status);
-    return actionsToNapiArray(env, actions);
+    const slot: u64 = @intCast(try current_slot.toI64());
+    const local = try statusFromObject(js.env(), try local_status.toValue().coerceToObject());
+    const actions = try m.heartbeat(slot, local);
+    return actionsToNapiArray(js.env(), actions);
 }
 
-pub fn PeerManager_checkPingAndStatus(env: napi.Env, _: napi.CallbackInfo(0)) !napi.Value {
+/// JS: peerManager.checkPingAndStatus()
+pub fn checkPingAndStatus() !napi.Value {
     const m = try getManager();
     const actions = try m.checkPingAndStatus();
-    return actionsToNapiArray(env, actions);
+    return actionsToNapiArray(js.env(), actions);
 }
 
 // ── Event Handlers ───────────────────────────────────────────────────
 
-pub fn PeerManager_onConnectionOpen(env: napi.Env, cb: napi.CallbackInfo(2)) !napi.Value {
+/// JS: peerManager.onConnectionOpen(peerId, direction)
+pub fn onConnectionOpen(peer_id_arg: js.String, direction_arg: js.String) !napi.Value {
     const m = try getManager();
-    const peer_id = try readOwnedPeerId(cb.arg(0));
+    const peer_id = try dupePeerId(peer_id_arg);
     defer allocator.free(peer_id);
     var dir_buf: [16]u8 = undefined;
-    const dir_str = try cb.arg(1).getValueStringUtf8(&dir_buf);
+    const dir_str = try direction_arg.toSlice(&dir_buf);
     const direction = std.meta.stringToEnum(Direction, dir_str) orelse
         return error.InvalidDirection;
     const actions = try m.onConnectionOpen(peer_id, direction);
-    return actionsToNapiArray(env, actions);
+    return actionsToNapiArray(js.env(), actions);
 }
 
-pub fn PeerManager_onConnectionClose(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
+/// JS: peerManager.onConnectionClose(peerId)
+pub fn onConnectionClose(peer_id_arg: js.String) !napi.Value {
     const m = try getManager();
-    const peer_id = try readOwnedPeerId(cb.arg(0));
+    const peer_id = try dupePeerId(peer_id_arg);
     defer allocator.free(peer_id);
     const actions = try m.onConnectionClose(peer_id);
-    return actionsToNapiArray(env, actions);
+    return actionsToNapiArray(js.env(), actions);
 }
 
-pub fn PeerManager_onStatusReceived(env: napi.Env, cb: napi.CallbackInfo(4)) !napi.Value {
+/// JS: peerManager.onStatusReceived(peerId, remoteStatus, localStatus, currentSlot)
+pub fn onStatusReceived(
+    peer_id_arg: js.String,
+    remote_status: js.Value,
+    local_status: js.Value,
+    current_slot: js.Number,
+) !napi.Value {
     const m = try getManager();
-    const peer_id = try readOwnedPeerId(cb.arg(0));
+    const peer_id = try dupePeerId(peer_id_arg);
     defer allocator.free(peer_id);
-    const remote_status = try statusFromObject(env, try cb.arg(1).coerceToObject());
-    const local_status = try statusFromObject(env, try cb.arg(2).coerceToObject());
-    const current_slot: u64 = @intCast(try cb.arg(3).getValueInt64());
-    const actions = try m.onStatusReceived(peer_id, remote_status, local_status, current_slot);
-    return actionsToNapiArray(env, actions);
+    const remote = try statusFromObject(js.env(), try remote_status.toValue().coerceToObject());
+    const local = try statusFromObject(js.env(), try local_status.toValue().coerceToObject());
+    const slot: u64 = @intCast(try current_slot.toI64());
+    const actions = try m.onStatusReceived(peer_id, remote, local, slot);
+    return actionsToNapiArray(js.env(), actions);
 }
 
-pub fn PeerManager_onMetadataReceived(env: napi.Env, cb: napi.CallbackInfo(2)) !napi.Value {
+/// JS: peerManager.onMetadataReceived(peerId, metadata)
+pub fn onMetadataReceived(peer_id_arg: js.String, metadata_arg: js.Value) !void {
     const m = try getManager();
-    const peer_id = try readOwnedPeerId(cb.arg(0));
+    const peer_id = try dupePeerId(peer_id_arg);
     defer allocator.free(peer_id);
-    const md_obj = try cb.arg(1).coerceToObject();
+    const md_obj = try metadata_arg.toValue().coerceToObject();
 
     var metadata: Metadata = undefined;
     metadata.seq_number = @intCast(try (try md_obj.getNamedProperty("seqNumber")).getValueInt64());
@@ -317,53 +341,55 @@ pub fn PeerManager_onMetadataReceived(env: napi.Env, cb: napi.CallbackInfo(2)) !
     errdefer if (metadata.sampling_groups) |groups| allocator.free(groups);
 
     m.onMetadataReceived(peer_id, metadata);
-    return env.getUndefined();
 }
 
-pub fn PeerManager_onMessageReceived(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
+/// JS: peerManager.onMessageReceived(peerId)
+pub fn onMessageReceived(peer_id_arg: js.String) !void {
     const m = try getManager();
-    const peer_id = try readOwnedPeerId(cb.arg(0));
+    const peer_id = try dupePeerId(peer_id_arg);
     defer allocator.free(peer_id);
     m.onMessageReceived(peer_id);
-    return env.getUndefined();
 }
 
-pub fn PeerManager_onGoodbye(env: napi.Env, cb: napi.CallbackInfo(2)) !napi.Value {
+/// JS: peerManager.onGoodbye(peerId, reason)
+pub fn onGoodbye(peer_id_arg: js.String, reason_arg: js.Number) !napi.Value {
     const m = try getManager();
-    const peer_id = try readOwnedPeerId(cb.arg(0));
+    const peer_id = try dupePeerId(peer_id_arg);
     defer allocator.free(peer_id);
-    const reason_raw: u64 = @intCast(try cb.arg(1).getValueInt64());
+    const reason_raw: u64 = @intCast(try reason_arg.toI64());
     const reason: GoodbyeReasonCode = @enumFromInt(reason_raw);
     const actions = try m.onGoodbye(peer_id, reason);
-    return actionsToNapiArray(env, actions);
+    return actionsToNapiArray(js.env(), actions);
 }
 
-pub fn PeerManager_onPing(env: napi.Env, cb: napi.CallbackInfo(2)) !napi.Value {
+/// JS: peerManager.onPing(peerId, seqNumber)
+pub fn onPing(peer_id_arg: js.String, seq_number_arg: js.Number) !napi.Value {
     const m = try getManager();
-    const peer_id = try readOwnedPeerId(cb.arg(0));
+    const peer_id = try dupePeerId(peer_id_arg);
     defer allocator.free(peer_id);
-    const seq_number: u64 = @intCast(try cb.arg(1).getValueInt64());
+    const seq_number: u64 = @intCast(try seq_number_arg.toI64());
     const actions = try m.onPing(peer_id, seq_number);
-    return actionsToNapiArray(env, actions);
+    return actionsToNapiArray(js.env(), actions);
 }
 
 // ── Score Mutations ──────────────────────────────────────────────────
 
-pub fn PeerManager_reportPeer(env: napi.Env, cb: napi.CallbackInfo(2)) !napi.Value {
+/// JS: peerManager.reportPeer(peerId, action)
+pub fn reportPeer(peer_id_arg: js.String, action_arg: js.String) !void {
     const m = try getManager();
-    const peer_id = try readOwnedPeerId(cb.arg(0));
+    const peer_id = try dupePeerId(peer_id_arg);
     defer allocator.free(peer_id);
     var action_buf: [32]u8 = undefined;
-    const action_str = try cb.arg(1).getValueStringUtf8(&action_buf);
+    const action_str = try action_arg.toSlice(&action_buf);
     const action = parsePeerActionName(action_str) orelse
         return error.InvalidPeerAction;
     m.reportPeer(peer_id, action);
-    return env.getUndefined();
 }
 
-pub fn PeerManager_updateGossipScores(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
+/// JS: peerManager.updateGossipScores(scores)
+pub fn updateGossipScores(scores_arg: js.Value) !void {
     const m = try getManager();
-    const arr = cb.arg(0);
+    const arr = scores_arg.toValue();
     const len = try arr.getArrayLength();
     const scores = try allocator.alloc(GossipScoreUpdate, len);
     defer allocator.free(scores);
@@ -385,15 +411,15 @@ pub fn PeerManager_updateGossipScores(env: napi.Env, cb: napi.CallbackInfo(1)) !
     }
     m.updateGossipScores(scores);
     for (peer_ids) |pid| allocator.free(pid);
-    return env.getUndefined();
 }
 
 // ── Configuration Updates ────────────────────────────────────────────
 
-pub fn PeerManager_setSubnetRequirements(env: napi.Env, cb: napi.CallbackInfo(2)) !napi.Value {
+/// JS: peerManager.setSubnetRequirements(attnets, syncnets)
+pub fn setSubnetRequirements(attnets_arg: js.Value, syncnets_arg: js.Value) !void {
     const m = try getManager();
 
-    const attnets_arr = cb.arg(0);
+    const attnets_arr = attnets_arg.toValue();
     const attnets_len = try attnets_arr.getArrayLength();
     const attnets = try allocator.alloc(RequestedSubnet, attnets_len);
     defer allocator.free(attnets);
@@ -405,7 +431,7 @@ pub fn PeerManager_setSubnetRequirements(env: napi.Env, cb: napi.CallbackInfo(2)
         };
     }
 
-    const syncnets_arr = cb.arg(1);
+    const syncnets_arr = syncnets_arg.toValue();
     const syncnets_len = try syncnets_arr.getArrayLength();
     const syncnets = try allocator.alloc(RequestedSubnet, syncnets_len);
     defer allocator.free(syncnets);
@@ -418,22 +444,22 @@ pub fn PeerManager_setSubnetRequirements(env: napi.Env, cb: napi.CallbackInfo(2)
     }
 
     try m.setSubnetRequirements(attnets, syncnets);
-    return env.getUndefined();
 }
 
-pub fn PeerManager_setForkName(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
+/// JS: peerManager.setForkName(forkName)
+pub fn setForkName(fork_name_arg: js.String) !void {
     const m = try getManager();
     var fork_buf: [32]u8 = undefined;
-    const fork_str = try cb.arg(0).getValueStringUtf8(&fork_buf);
+    const fork_str = try fork_name_arg.toSlice(&fork_buf);
     const fork_name = std.meta.stringToEnum(ForkName, fork_str) orelse
         return error.InvalidForkName;
     m.setForkName(fork_name);
-    return env.getUndefined();
 }
 
-pub fn PeerManager_setSamplingGroups(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
+/// JS: peerManager.setSamplingGroups(groups)
+pub fn setSamplingGroups(groups_arg: js.Value) !void {
     const m = try getManager();
-    const arr = cb.arg(0);
+    const arr = groups_arg.toValue();
     const len = try arr.getArrayLength();
     const groups = try allocator.alloc(u32, len);
     defer allocator.free(groups);
@@ -442,21 +468,23 @@ pub fn PeerManager_setSamplingGroups(env: napi.Env, cb: napi.CallbackInfo(1)) !n
         groups[i] = try elem.getValueUint32();
     }
     try m.setSamplingGroups(groups);
-    return env.getUndefined();
 }
 
 // ── Queries ──────────────────────────────────────────────────────────
 
-pub fn PeerManager_getConnectedPeerCount(env: napi.Env, _: napi.CallbackInfo(0)) !napi.Value {
+/// JS: peerManager.getConnectedPeerCount() → number
+pub fn getConnectedPeerCount() !napi.Value {
     const m = try getManager();
-    return env.createUint32(m.getConnectedPeerCount());
+    return js.env().createUint32(m.getConnectedPeerCount());
 }
 
-pub fn PeerManager_getConnectedPeers(env: napi.Env, _: napi.CallbackInfo(0)) !napi.Value {
+/// JS: peerManager.getConnectedPeers() → string[]
+pub fn getConnectedPeers() !napi.Value {
     const m = try getManager();
     const peers = try m.getConnectedPeers(allocator);
     defer allocator.free(peers);
 
+    const env = js.env();
     const arr = try env.createArrayWithLength(@intCast(peers.len));
     for (peers, 0..) |peer_id, idx| {
         try arr.setElement(@intCast(idx), try env.createStringUtf8(peer_id));
@@ -464,10 +492,12 @@ pub fn PeerManager_getConnectedPeers(env: napi.Env, _: napi.CallbackInfo(0)) !na
     return arr;
 }
 
-pub fn PeerManager_getPeerData(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
+/// JS: peerManager.getPeerData(peerId) → PeerData | null
+pub fn getPeerData(peer_id_arg: js.String) !napi.Value {
     const m = try getManager();
-    const peer_id = try readOwnedPeerId(cb.arg(0));
+    const peer_id = try dupePeerId(peer_id_arg);
     defer allocator.free(peer_id);
+    const env = js.env();
     const peer = m.getPeerData(peer_id) orelse return env.getNull();
 
     const obj = try env.createObject();
@@ -499,78 +529,42 @@ pub fn PeerManager_getPeerData(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Va
     return obj;
 }
 
-pub fn PeerManager_getEncodingPreference(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
+/// JS: peerManager.getEncodingPreference(peerId) → string | null
+pub fn getEncodingPreference(peer_id_arg: js.String) !napi.Value {
     const m = try getManager();
-    const peer_id = try readOwnedPeerId(cb.arg(0));
+    const peer_id = try dupePeerId(peer_id_arg);
     defer allocator.free(peer_id);
+    const env = js.env();
     const encoding = m.getEncodingPreference(peer_id) orelse return env.getNull();
     return env.createStringUtf8(@tagName(encoding));
 }
 
-pub fn PeerManager_getPeerKind(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
+/// JS: peerManager.getPeerKind(peerId) → string | null
+pub fn getPeerKind(peer_id_arg: js.String) !napi.Value {
     const m = try getManager();
-    const peer_id = try readOwnedPeerId(cb.arg(0));
+    const peer_id = try dupePeerId(peer_id_arg);
     defer allocator.free(peer_id);
+    const env = js.env();
     const kind = m.getPeerKind(peer_id) orelse return env.getNull();
     return env.createStringUtf8(@tagName(kind));
 }
 
-pub fn PeerManager_getAgentVersion(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
+/// JS: peerManager.getAgentVersion(peerId) → string | null
+pub fn getAgentVersion(peer_id_arg: js.String) !napi.Value {
     const m = try getManager();
-    const peer_id = try readOwnedPeerId(cb.arg(0));
+    const peer_id = try dupePeerId(peer_id_arg);
     defer allocator.free(peer_id);
+    const env = js.env();
     const av = m.getAgentVersion(peer_id) orelse return env.getNull();
     return env.createStringUtf8(av);
 }
 
-pub fn PeerManager_getPeerScore(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
+/// JS: peerManager.getPeerScore(peerId) → number
+pub fn getPeerScore(peer_id_arg: js.String) !napi.Value {
     const m = try getManager();
-    const peer_id = try readOwnedPeerId(cb.arg(0));
+    const peer_id = try dupePeerId(peer_id_arg);
     defer allocator.free(peer_id);
-    return env.createDouble(m.getPeerScore(peer_id));
-}
-
-// ── Registration ─────────────────────────────────────────────────────
-
-pub fn register(env: napi.Env, exports: napi.Value) !void {
-    const pm_obj = try env.createObject();
-
-    // Lifecycle
-    try pm_obj.setNamedProperty("init", try env.createFunction("init", 1, PeerManager_init, null));
-    try pm_obj.setNamedProperty("close", try env.createFunction("close", 0, PeerManager_close, null));
-
-    // Tick
-    try pm_obj.setNamedProperty("heartbeat", try env.createFunction("heartbeat", 2, PeerManager_heartbeat, null));
-    try pm_obj.setNamedProperty("checkPingAndStatus", try env.createFunction("checkPingAndStatus", 0, PeerManager_checkPingAndStatus, null));
-
-    // Event handlers
-    try pm_obj.setNamedProperty("onConnectionOpen", try env.createFunction("onConnectionOpen", 2, PeerManager_onConnectionOpen, null));
-    try pm_obj.setNamedProperty("onConnectionClose", try env.createFunction("onConnectionClose", 1, PeerManager_onConnectionClose, null));
-    try pm_obj.setNamedProperty("onStatusReceived", try env.createFunction("onStatusReceived", 4, PeerManager_onStatusReceived, null));
-    try pm_obj.setNamedProperty("onMetadataReceived", try env.createFunction("onMetadataReceived", 2, PeerManager_onMetadataReceived, null));
-    try pm_obj.setNamedProperty("onMessageReceived", try env.createFunction("onMessageReceived", 1, PeerManager_onMessageReceived, null));
-    try pm_obj.setNamedProperty("onGoodbye", try env.createFunction("onGoodbye", 2, PeerManager_onGoodbye, null));
-    try pm_obj.setNamedProperty("onPing", try env.createFunction("onPing", 2, PeerManager_onPing, null));
-
-    // Score mutations
-    try pm_obj.setNamedProperty("reportPeer", try env.createFunction("reportPeer", 2, PeerManager_reportPeer, null));
-    try pm_obj.setNamedProperty("updateGossipScores", try env.createFunction("updateGossipScores", 1, PeerManager_updateGossipScores, null));
-
-    // Configuration
-    try pm_obj.setNamedProperty("setSubnetRequirements", try env.createFunction("setSubnetRequirements", 2, PeerManager_setSubnetRequirements, null));
-    try pm_obj.setNamedProperty("setForkName", try env.createFunction("setForkName", 1, PeerManager_setForkName, null));
-    try pm_obj.setNamedProperty("setSamplingGroups", try env.createFunction("setSamplingGroups", 1, PeerManager_setSamplingGroups, null));
-
-    // Queries
-    try pm_obj.setNamedProperty("getConnectedPeerCount", try env.createFunction("getConnectedPeerCount", 0, PeerManager_getConnectedPeerCount, null));
-    try pm_obj.setNamedProperty("getConnectedPeers", try env.createFunction("getConnectedPeers", 0, PeerManager_getConnectedPeers, null));
-    try pm_obj.setNamedProperty("getPeerData", try env.createFunction("getPeerData", 1, PeerManager_getPeerData, null));
-    try pm_obj.setNamedProperty("getEncodingPreference", try env.createFunction("getEncodingPreference", 1, PeerManager_getEncodingPreference, null));
-    try pm_obj.setNamedProperty("getPeerKind", try env.createFunction("getPeerKind", 1, PeerManager_getPeerKind, null));
-    try pm_obj.setNamedProperty("getAgentVersion", try env.createFunction("getAgentVersion", 1, PeerManager_getAgentVersion, null));
-    try pm_obj.setNamedProperty("getPeerScore", try env.createFunction("getPeerScore", 1, PeerManager_getPeerScore, null));
-
-    try exports.setNamedProperty("peerManager", pm_obj);
+    return js.env().createDouble(m.getPeerScore(peer_id));
 }
 
 test "parsePeerActionName accepts Lodestar JS action names" {

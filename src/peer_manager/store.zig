@@ -53,8 +53,11 @@ pub const PeerStore = struct {
         const entry = try self.peers.getOrPut(peer_id); // This will allocate if not exists
         if (entry.found_existing) return error.PeerAlreadyExists;
 
-        const owned_key = entry.key_ptr.*; // getOrPut already assigned the key
+        // getOrPut keys the entry on the borrowed `peer_id`; replace it with an
+        // owned copy so the store owns its keys (freed in deinit/removePeer).
+        const owned_key = try self.allocator.dupe(u8, peer_id);
         errdefer self.allocator.free(owned_key);
+        entry.key_ptr.* = owned_key;
 
         const last_received: i64 = switch (direction) {
             .outbound => 0,

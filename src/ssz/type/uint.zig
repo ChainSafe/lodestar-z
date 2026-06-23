@@ -98,6 +98,21 @@ pub fn UintType(comptime bits: comptime_int) type {
                 return try pool.createLeaf(&new_leaf);
             }
 
+            /// Decode a packed item directly from chunk bytes. Used by chunked_leaf-backed
+            /// containers where the chunk is already in hand and a Node.Id is unavailable.
+            pub fn toValuePackedFromBytes(chunk: *const [32]u8, index: usize, out: *Type) void {
+                const offset = index * fixed_size % 32;
+                out.* = std.mem.readInt(Type, chunk[offset..][0..fixed_size], .little);
+            }
+
+            /// Encode a packed item directly into chunk bytes (mutates `chunk` in place).
+            /// Used by chunked_leaf-backed containers; the caller is responsible for any CoW
+            /// of the chunk before calling.
+            pub fn fromValuePackedIntoChunk(chunk: *[32]u8, index: usize, value: *const Type) void {
+                const offset = (index * bytes) % 32;
+                std.mem.writeInt(Type, chunk[offset..][0..bytes], value.*, .little);
+            }
+
             pub fn serializeIntoBytes(node: Node.Id, pool: *Node.Pool, out: []u8) !usize {
                 const hash = node.getRoot(pool);
                 @memcpy(out[0..fixed_size], hash[0..fixed_size]);
@@ -136,17 +151,18 @@ test "UintType - sanity" {
     try Uint8.deserializeFromJson(&json, &u);
 
     // Serialize u into "255"
-    var output_json = std.ArrayList(u8).init(allocator);
-    defer output_json.deinit();
-    var write_stream = std.json.writeStream(output_json.writer(), .{});
-    defer write_stream.deinit();
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+    var write_stream: std.json.Stringify = .{ .writer = &aw.writer };
     try Uint8.serializeIntoJson(&write_stream, &u);
     var cloned: Uint8.Type = undefined;
     try Uint8.clone(&u, &cloned);
     try expectEqualRoots(Uint8, u, cloned);
     try expectEqualSerialized(Uint8, u, cloned);
 
-    try std.testing.expectEqualSlices(u8, input_json, output_json.items);
+    const output = try aw.toOwnedSlice();
+    defer allocator.free(output);
+    try std.testing.expectEqualSlices(u8, input_json, output);
 }
 
 fn testFixed(
@@ -169,7 +185,7 @@ fn testFixed(
     try ST.deserializeFromBytes(&serialized, &value_from_serialized);
     try std.testing.expectEqual(value, value_from_serialized);
 
-    var pool = try Node.Pool.init(allocator, 1024);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 1024 });
     defer pool.deinit();
 
     const tree_from_value = try ST.tree.fromValue(&pool, &value);

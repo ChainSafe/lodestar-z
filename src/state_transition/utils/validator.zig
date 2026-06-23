@@ -28,7 +28,7 @@ pub fn isSlashableValidator(validator: *const Validator.Type, epoch: Epoch) bool
 }
 
 pub fn getActiveValidatorIndices(allocator: Allocator, validators: *types.phase0.Validators.TreeView, epoch: Epoch) !std.ArrayList(ValidatorIndex) {
-    var indices = std.ArrayList(ValidatorIndex).init(allocator);
+    var indices: std.ArrayList(ValidatorIndex) = .empty;
 
     var validators_it = validators.iteratorReadonly();
     const validators_len = try validators.length();
@@ -37,7 +37,7 @@ pub fn getActiveValidatorIndices(allocator: Allocator, validators: *types.phase0
         defer validator.deinit();
 
         if (try isActiveValidatorView(&validator, epoch)) {
-            try indices.append(@intCast(i));
+            try indices.append(allocator, @intCast(i));
         }
     }
 

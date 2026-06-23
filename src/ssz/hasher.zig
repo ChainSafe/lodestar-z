@@ -64,8 +64,7 @@ pub fn Hasher(comptime ST: type) type {
                     .list => {
                         const chunk_count = ST.chunkCount(value);
                         const hasher_size = if (chunk_count % 2 == 1) chunk_count + 1 else chunk_count;
-                        try scratch.chunks.ensureTotalCapacity(hasher_size);
-                        scratch.chunks.items.len = hasher_size;
+                        try scratch.chunks.resize(scratch.allocator, hasher_size);
                         @memset(scratch.chunks.items, [_]u8{0} ** 32);
                         if (comptime isBitListType(ST)) {
                             const scratch_bytes: []u8 = @ptrCast(scratch.chunks.items[0..chunk_count]);
@@ -111,14 +110,15 @@ pub fn Hasher(comptime ST: type) type {
 }
 
 pub const HasherData = struct {
+    allocator: std.mem.Allocator,
     chunks: std.ArrayList([32]u8),
     children: ?[]HasherData,
 
     pub fn initCapacity(allocator: std.mem.Allocator, capacity: usize, children: ?[]HasherData) !HasherData {
         var chunks = try std.ArrayList([32]u8).initCapacity(allocator, capacity);
-        chunks.expandToCapacity();
-        @memset(chunks.items, [_]u8{0} ** 32);
+        chunks.appendNTimesAssumeCapacity([_]u8{0} ** 32, capacity);
         return HasherData{
+            .allocator = allocator,
             .chunks = chunks,
             .children = children,
         };
@@ -131,6 +131,7 @@ pub const HasherData = struct {
             }
             allocator.free(children);
         }
-        self.chunks.deinit();
+        var chunks = self.chunks;
+        chunks.deinit(allocator);
     }
 };

@@ -37,6 +37,18 @@ pub const TreeViewState = struct {
         self.pool.unref(self.root);
     }
 
+    /// Cleanup for a partially-built view whose `init` failed after this state
+    /// took its `root` ref. Mirrors `deinit` but drops `root`'s ref WITHOUT
+    /// freeing, restoring `root` to its pre-init refcount: on the failure path
+    /// the caller still owns `root` and releases it itself (`unref` here would
+    /// free a freshly-built rc-0 root and double-free with the caller).
+    pub fn deinitAfterInitFailure(self: *TreeViewState) void {
+        self.clearChildrenNodesCache();
+        self.children_nodes.deinit(self.allocator);
+        self.changed.deinit(self.allocator);
+        self.pool.unrefUnsafe(self.root);
+    }
+
     pub fn getChildNode(self: *TreeViewState, gindex: Gindex) !Node.Id {
         const gop = try self.children_nodes.getOrPut(self.allocator, gindex);
         if (gop.found_existing) {
@@ -55,7 +67,7 @@ pub const TreeViewState = struct {
             node,
         );
         if (opt_old_node) |old_node| {
-            if (old_node.value.getState(self.pool).getRefCount() == 0) {
+            if (old_node.value.getState(self.pool).refCount() == 0) {
                 self.pool.unref(old_node.value);
             }
         }
@@ -92,7 +104,12 @@ pub const TreeViewState = struct {
         var value_iter = self.children_nodes.valueIterator();
         while (value_iter.next()) |node_id_ptr| {
             const node_id = node_id_ptr.*;
-            if (node_id.getState(self.pool).getRefCount() == 0) {
+            const state = node_id.getState(self.pool);
+            // A cached child root can already be freed via children_data — a child
+            // view owns the same node — when a failed commit left it here. Skip it
+            // rather than re-unref (which would hit the .free slot).
+            if (state.isFree()) continue;
+            if (state.refCount() == 0) {
                 self.pool.unref(node_id);
             }
         }
@@ -114,7 +131,10 @@ pub const TreeViewState = struct {
         out.children_nodes = self.children_nodes;
 
         for (self.changed.keys()) |gindex| {
-            _ = out.children_nodes.remove(gindex);
+            if (out.children_nodes.fetchRemove(gindex)) |entry| {
+                const state = entry.value.getState(self.pool);
+                if (!state.isFree() and state.refCount() == 0) self.pool.unref(entry.value);
+            }
         }
 
         self.children_nodes = .empty;

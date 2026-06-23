@@ -13,4 +13,5 @@ export const verifyMultipleAggregateSignatures = blst.verifyMultipleAggregateSig
 export const aggregateSignatures = blst.aggregateSignatures;
 export const aggregatePublicKeys = blst.aggregatePublicKeys;
 export const aggregateSerializedPublicKeys = blst.aggregateSerializedPublicKeys;
+export const aggregateWithRandomness = blst.aggregateWithRandomness;
 export const asyncAggregateWithRandomness = blst.asyncAggregateWithRandomness;

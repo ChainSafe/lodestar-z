@@ -13,13 +13,13 @@ test "validate an existing era file" {
     defer allocator.free(era_path);
 
     // First check that the era file exists
-    if (std.fs.cwd().openFile(era_path, .{})) |f| {
-        f.close();
+    if (std.Io.Dir.openFile(.cwd(), std.testing.io, era_path, .{})) |f| {
+        f.close(std.testing.io);
     } else |_| {
         return error.SkipZigTest;
     }
 
-    var reader = try era.Reader.open(allocator, c.mainnet.config, era_path);
+    var reader = try era.Reader.open(allocator, std.testing.io, c.mainnet.config, era_path);
     defer reader.close(allocator);
 
     // Main validation
@@ -34,26 +34,26 @@ test "write an era file from an existing era file" {
     defer allocator.free(era_path);
 
     // First check that the era file exists
-    if (std.fs.cwd().openFile(era_path, .{})) |f| {
-        f.close();
+    if (std.Io.Dir.openFile(.cwd(), std.testing.io, era_path, .{})) |f| {
+        f.close(std.testing.io);
     } else |_| {
         return error.SkipZigTest;
     }
 
     // Read known-good era file
-    var reader = try era.Reader.open(allocator, c.mainnet.config, era_path);
+    var reader = try era.Reader.open(allocator, std.testing.io, c.mainnet.config, era_path);
     defer reader.close(allocator);
 
     var tmp_dir = std.testing.tmpDir(.{});
     defer tmp_dir.cleanup();
 
-    const tmp_dir_path = try tmp_dir.dir.realpathAlloc(allocator, ".");
+    const tmp_dir_path = try tmp_dir.dir.realPathFileAlloc(std.testing.io, ".", allocator);
     defer allocator.free(tmp_dir_path);
     const out_path = try std.fs.path.join(allocator, &[_][]const u8{ tmp_dir_path, "out.era" });
     defer allocator.free(out_path);
 
     // Write known-good era to a new era file
-    var writer = try era.Writer.open(c.mainnet.config, out_path, reader.era_number);
+    var writer = try era.Writer.open(c.mainnet.config, std.testing.io, out_path, reader.era_number);
 
     const blocks_index = reader.group_indices[0].blocks_index orelse return error.NoBlockIndex;
     for (blocks_index.start_slot..blocks_index.start_slot + blocks_index.offsets.len) |slot| {
@@ -67,7 +67,7 @@ test "write an era file from an existing era file" {
 
     try writer.writeState(allocator, state);
 
-    const final_out_path = try writer.finish(allocator);
+    const final_out_path = try writer.finish(allocator, std.testing.io);
     defer allocator.free(final_out_path);
 
     // Now check that the two era files are equivalent
@@ -76,7 +76,7 @@ test "write an era file from an existing era file" {
     if (!std.mem.eql(u8, std.fs.path.basename(final_out_path), std.fs.path.basename(era_path))) {
         return error.IncorrectWrittenEraFileName;
     }
-    var out_reader = try era.Reader.open(allocator, c.mainnet.config, final_out_path);
+    var out_reader = try era.Reader.open(allocator, std.testing.io, c.mainnet.config, final_out_path);
     defer out_reader.close(allocator);
 
     // Compare struct fields
@@ -86,10 +86,6 @@ test "write an era file from an existing era file" {
     if (!std.mem.eql(u8, &reader.short_historical_root, &out_reader.short_historical_root)) {
         return error.IncorrectWrittenShortHistoricalRoot;
     }
-    // We can't directly compare bytes or offsets (snappy compression isn't deterministic across implementations)
-    // if (!std.mem.eql(u8, std.mem.sliceAsBytes(reader.groups), std.mem.sliceAsBytes(out_reader.groups))) {
-    //     return error.IncorrectWrittenEraIndices;
-    // }
 
     // Compare blocks
     for (blocks_index.start_slot..blocks_index.start_slot + blocks_index.offsets.len) |slot| {

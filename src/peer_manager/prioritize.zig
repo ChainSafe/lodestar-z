@@ -44,11 +44,12 @@ pub const PrioritizePeersResult = struct {
     attnet_queries: std.ArrayList(SubnetQuery),
     syncnet_queries: std.ArrayList(SubnetQuery),
     custody_group_queries: std.AutoHashMap(u32, u32),
+    allocator: Allocator,
 
     pub fn deinit(self: *PrioritizePeersResult) void {
-        self.peers_to_disconnect.deinit();
-        self.attnet_queries.deinit();
-        self.syncnet_queries.deinit();
+        self.peers_to_disconnect.deinit(self.allocator);
+        self.attnet_queries.deinit(self.allocator);
+        self.syncnet_queries.deinit(self.allocator);
         self.custody_group_queries.deinit();
     }
 };
@@ -67,8 +68,8 @@ const PeerInfo = struct {
     attnets: [8]u8,
     syncnets: [1]u8,
     sampling_groups: []const u32,
-    attnet_indices: std.BoundedArray(u8, 64),
-    syncnet_indices: std.BoundedArray(u8, 8),
+    attnet_indices: types.BoundedArray(u8, 64),
+    syncnet_indices: types.BoundedArray(u8, 8),
     score: f64,
 };
 
@@ -86,10 +87,11 @@ pub fn prioritizePeers(
 ) !PrioritizePeersResult {
     var result = PrioritizePeersResult{
         .peers_to_connect = 0,
-        .peers_to_disconnect = std.ArrayList(PeerDisconnect).init(allocator),
-        .attnet_queries = std.ArrayList(SubnetQuery).init(allocator),
-        .syncnet_queries = std.ArrayList(SubnetQuery).init(allocator),
+        .peers_to_disconnect = .empty,
+        .attnet_queries = .empty,
+        .syncnet_queries = .empty,
         .custody_group_queries = std.AutoHashMap(u32, u32).init(allocator),
+        .allocator = allocator,
     };
     errdefer result.deinit();
 
@@ -106,6 +108,7 @@ pub fn prioritizePeers(
     defer duties_by_peer.deinit();
 
     try requestAttnetPeers(
+        allocator,
         peers,
         active_attnets,
         opts.target_subnet_peers,
@@ -113,6 +116,7 @@ pub fn prioritizePeers(
         &duties_by_peer,
     );
     try requestSyncnetPeers(
+        allocator,
         peers,
         active_syncnets,
         opts.target_subnet_peers,
@@ -203,6 +207,7 @@ fn computeStatusScore(
 
 /// Port of attnet portion of requestSubnetPeers (TS lines 2770-2793).
 fn requestAttnetPeers(
+    allocator: Allocator,
     peers: []const PeerInfo,
     active_attnets: []const RequestedSubnet,
     target_subnet_peers: u32,
@@ -230,7 +235,7 @@ fn requestAttnetPeers(
     for (active_attnets) |active| {
         const count = peers_per_subnet[active.subnet];
         if (count < target_subnet_peers) {
-            try queries.append(.{
+            try queries.append(allocator, .{
                 .subnet = active.subnet,
                 .to_slot = active.to_slot,
                 .max_peers_to_discover = target_subnet_peers - count,
@@ -241,6 +246,7 @@ fn requestAttnetPeers(
 
 /// Port of syncnet portion of requestSubnetPeers (TS lines 2796-2820).
 fn requestSyncnetPeers(
+    allocator: Allocator,
     peers: []const PeerInfo,
     active_syncnets: []const RequestedSubnet,
     target_subnet_peers: u32,
@@ -268,7 +274,7 @@ fn requestSyncnetPeers(
     for (active_syncnets) |active| {
         const count = peers_per_subnet[active.subnet];
         if (count < target_subnet_peers) {
-            try queries.append(.{
+            try queries.append(allocator, .{
                 .subnet = active.subnet,
                 .to_slot = active.to_slot,
                 .max_peers_to_discover = target_subnet_peers - count,
@@ -344,11 +350,12 @@ fn pruneExcessPeers(
     defer allocator.free(sorted);
 
     // Filter to eligible peers
-    var eligible = std.ArrayList(usize).init(allocator);
-    defer eligible.deinit();
+    var eligible: std.ArrayList(usize) = .empty;
+    defer eligible.deinit(allocator);
     var outbound_eligible: u32 = 0;
 
     try filterEligiblePeers(
+        allocator,
         peers,
         sorted,
         duties_by_peer,
@@ -374,6 +381,7 @@ fn pruneExcessPeers(
 
     // Phase 1: no long-lived subnet peers
     try pruneNoSubnetPeers(
+        allocator,
         peers,
         eligible.items,
         disconnect_target,
@@ -384,6 +392,7 @@ fn pruneExcessPeers(
 
     // Phase 2: low score peers
     try pruneLowScorePeers(
+        allocator,
         peers,
         eligible.items,
         disconnect_target,
@@ -406,6 +415,7 @@ fn pruneExcessPeers(
 
     // Phase 4: find better peers
     try pruneFindBetterPeers(
+        allocator,
         peers,
         sorted,
         disconnect_target,
@@ -416,6 +426,7 @@ fn pruneExcessPeers(
 }
 
 fn filterEligiblePeers(
+    allocator: Allocator,
     peers: []const PeerInfo,
     sorted: []const usize,
     duties_by_peer: *const std.AutoHashMap(usize, u32),
@@ -443,12 +454,13 @@ fn filterEligiblePeers(
             }
         }
 
-        try eligible.append(idx);
+        try eligible.append(allocator, idx);
     }
 }
 
 /// Phase 1: prune peers without long-lived subnets.
 fn pruneNoSubnetPeers(
+    allocator: Allocator,
     peers: []const PeerInfo,
     eligible: []const usize,
     target: u32,
@@ -462,7 +474,7 @@ fn pruneNoSubnetPeers(
         const has_subnet = peer.attnet_indices.len > 0 or
             peer.syncnet_indices.len > 0;
         if (!has_subnet) {
-            try disconnects.append(.{
+            try disconnects.append(allocator, .{
                 .peer_id = peer.id,
                 .reason = .no_long_lived_subnet,
             });
@@ -474,6 +486,7 @@ fn pruneNoSubnetPeers(
 
 /// Phase 2: prune low-score peers.
 fn pruneLowScorePeers(
+    allocator: Allocator,
     peers: []const PeerInfo,
     eligible: []const usize,
     target: u32,
@@ -486,7 +499,7 @@ fn pruneLowScorePeers(
         if (already.contains(idx)) continue;
         const peer = peers[idx];
         if (peer.score < constants.LOW_SCORE_TO_PRUNE_IF_TOO_MANY_PEERS) {
-            try disconnects.append(.{
+            try disconnects.append(allocator, .{
                 .peer_id = peer.id,
                 .reason = .low_score,
             });
@@ -513,7 +526,7 @@ fn pruneTooGroupedPeers(
     var subnet_to_peers = std.AutoHashMap(u32, std.ArrayList(usize)).init(allocator);
     defer {
         var it = subnet_to_peers.valueIterator();
-        while (it.next()) |list| list.deinit();
+        while (it.next()) |list| list.deinit(allocator);
         subnet_to_peers.deinit();
     }
 
@@ -551,7 +564,7 @@ fn pruneTooGroupedPeers(
                 &syncnet_peer_count,
                 peers[idx],
             );
-            try disconnects.append(.{
+            try disconnects.append(allocator, .{
                 .peer_id = peers[idx].id,
                 .reason = .too_grouped_subnet,
             });
@@ -560,7 +573,7 @@ fn pruneTooGroupedPeers(
         } else {
             // No removable peer on this subnet; remove subnet from map
             if (subnet_to_peers.getPtr(max_subnet)) |list| {
-                list.deinit();
+                list.deinit(allocator);
             }
             _ = subnet_to_peers.remove(max_subnet);
         }
@@ -569,6 +582,7 @@ fn pruneTooGroupedPeers(
 
 /// Phase 4: disconnect remaining peers to reach target (TS lines 3007-3029).
 fn pruneFindBetterPeers(
+    allocator: Allocator,
     peers: []const PeerInfo,
     sorted: []const usize,
     target: u32,
@@ -579,7 +593,7 @@ fn pruneFindBetterPeers(
     for (sorted) |idx| {
         if (count.* >= target) break;
         if (already.contains(idx)) continue;
-        try disconnects.append(.{
+        try disconnects.append(allocator, .{
             .peer_id = peers[idx].id,
             .reason = .find_better_peers,
         });
@@ -601,9 +615,9 @@ fn buildSubnetMaps(
         for (peer.attnet_indices.constSlice()) |subnet| {
             const entry = try subnet_to_peers.getOrPut(subnet);
             if (!entry.found_existing) {
-                entry.value_ptr.* = std.ArrayList(usize).init(alloc);
+                entry.value_ptr.* = .empty;
             }
-            try entry.value_ptr.append(idx);
+            try entry.value_ptr.append(alloc, idx);
         }
         for (peer.syncnet_indices.constSlice()) |subnet| {
             const entry = try syncnet_peer_count.getOrPut(subnet);
@@ -861,6 +875,7 @@ fn generatePeerIds(comptime n: u32) [n]PrioritizePeersInput {
 
 // We need stable peer id strings for tests. Use a compile-time table.
 const PEER_NAMES = blk: {
+    @setEvalBranchQuota(2_000_000);
     var names: [200][]const u8 = undefined;
     for (0..200) |i| {
         names[i] = std.fmt.comptimePrint("peer-{d}", .{i});

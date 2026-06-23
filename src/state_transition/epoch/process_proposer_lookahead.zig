@@ -26,7 +26,7 @@ pub fn processProposerLookahead(
     epoch_transition_cache: *const EpochTransitionCache,
 ) !void {
     const proposer_lookahead: *[ssz.fulu.ProposerLookahead.length]u64 = try state.proposerLookaheadSlice(allocator);
-    defer allocator.free(proposer_lookahead);
+    defer allocator.free(@as([]u64, proposer_lookahead));
 
     const lookahead_epochs = preset.MIN_SEED_LOOKAHEAD + 1;
     const last_epoch_start = (lookahead_epochs - 1) * preset.SLOTS_PER_EPOCH;
@@ -69,7 +69,7 @@ const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeacon
 test "processProposerLookahead sanity" {
     const allocator = std.testing.allocator;
     const pool_size = 10_000 * 5;
-    var pool = try Node.Pool.init(allocator, pool_size);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = pool_size });
     defer pool.deinit();
 
     var test_state = try TestCachedBeaconState.init(allocator, &pool, 10_000);

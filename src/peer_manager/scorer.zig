@@ -133,8 +133,8 @@ pub const PeerScorer = struct {
         const now_ms = self.clock_fn();
         var it = self.scores.iterator();
         // Collect keys to remove (cannot remove during iteration).
-        var to_remove = std.ArrayList([]const u8).init(self.allocator);
-        defer to_remove.deinit();
+        var to_remove: std.ArrayList([]const u8) = .empty;
+        defer to_remove.deinit(self.allocator);
 
         while (it.next()) |entry| {
             const data = entry.value_ptr;
@@ -147,7 +147,7 @@ pub const PeerScorer = struct {
                 recomputeScore(data, self.config);
             }
             if (@abs(data.lodestar_score) < constants.SCORE_THRESHOLD) {
-                to_remove.append(entry.key_ptr.*) catch continue;
+                to_remove.append(self.allocator, entry.key_ptr.*) catch continue;
             }
         }
 

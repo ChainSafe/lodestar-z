@@ -140,7 +140,30 @@ pub fn BeaconState(comptime f: ForkSeq) type {
 
         pub fn validatorsSlice(self: *Self, allocator: std.mem.Allocator) ![]ForkTypes(f).Validator.Type {
             var validators_view = try self.inner.getReadonly("validators");
+            try validators_view.commit();
             return validators_view.getAllReadonlyValues(allocator);
+        }
+
+        /// Like `validatorsSlice` but returns a slice of pointers into the
+        /// pool-resident `Validator` values. ~16× lower memory than
+        /// `validatorsSlice` (8 B/elem vs 121 B/elem) and zero per-element
+        /// memcpy.
+        ///
+        /// Pointers are valid only while the underlying validator nodes
+        /// remain unchanged. Any mutation through `tree.set` (or equivalent)
+        /// invalidates pointers to the affected slot — caller must drop the
+        /// slice before mutating, or copy out values needed past mutation.
+        pub fn validatorsPtrSlice(self: *Self, allocator: std.mem.Allocator) ![]*const ForkTypes(f).Validator.Type {
+            var validators_view = try self.inner.getReadonly("validators");
+            try validators_view.commit();
+            const len = try validators_view.length();
+            const out = try allocator.alloc(*const ForkTypes(f).Validator.Type, len);
+            errdefer allocator.free(out);
+            var it = validators_view.iteratorReadonly(0);
+            for (0..len) |i| {
+                out[i] = try it.nextValuePtr();
+            }
+            return out;
         }
 
         pub fn balances(self: *Self) !*ForkTypes(f).Balances.TreeView {
@@ -481,7 +504,8 @@ pub fn BeaconState(comptime f: ForkSeq) type {
             .capella => .deneb,
             .deneb => .electra,
             .electra => .fulu,
-            .fulu => .fulu,
+            .fulu => .gloas,
+            .gloas => .gloas,
         }) {
             const cur = self.inner;
             const allocator = cur.allocator;
@@ -494,7 +518,8 @@ pub fn BeaconState(comptime f: ForkSeq) type {
                 .capella => .{ .inner = try populateFields(ForkTypes(.capella).BeaconState, ForkTypes(.deneb).BeaconState, allocator, pool, cur) },
                 .deneb => .{ .inner = try populateFields(ForkTypes(.deneb).BeaconState, ForkTypes(.electra).BeaconState, allocator, pool, cur) },
                 .electra => .{ .inner = try populateFields(ForkTypes(.electra).BeaconState, ForkTypes(.fulu).BeaconState, allocator, pool, cur) },
-                .fulu => return error.InvalidAtFork,
+                .fulu => .{ .inner = try populateFields(ForkTypes(.fulu).BeaconState, ForkTypes(.gloas).BeaconState, allocator, pool, cur) },
+                .gloas => return error.InvalidAtFork,
             };
         }
     };

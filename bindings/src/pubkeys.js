@@ -25,6 +25,11 @@ export const pubkeyCache = {
     return pk;
   },
 
+  aggregate(indices) {
+    if (indices.length === 1) return pubkeyCache.getOrThrow(indices[0]);
+    return native.aggregate(indices);
+  },
+
   getIndex(pubkey) {
     return native.getIndex(pubkey);
   },
@@ -36,12 +41,17 @@ export const pubkeyCache = {
   },
 
   get size() {
-    return native.size;
+    return native.size();
   },
 
   load(filepath) {
     pkCache.clear();
     native.load(filepath);
+  },
+
+  reset() {
+    pkCache.clear();
+    native.reset();
   },
 
   save(filepath) {

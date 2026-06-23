@@ -63,26 +63,26 @@ pub const PeerManager = struct {
             .clock_fn = clock_fn,
             .current_fork_name = config.initial_fork_name,
             .last_heartbeat_slot = 0,
-            .active_attnets = std.ArrayList(RequestedSubnet).init(allocator),
-            .active_syncnets = std.ArrayList(RequestedSubnet).init(allocator),
+            .active_attnets = .empty,
+            .active_syncnets = .empty,
             .our_sampling_groups = null,
-            .actions = std.ArrayList(Action).init(allocator),
-            .discovery_attnet_queries = std.ArrayList(types.SubnetQuery).init(allocator),
-            .discovery_syncnet_queries = std.ArrayList(types.SubnetQuery).init(allocator),
-            .discovery_custody_group_queries = std.ArrayList(CustodyGroupQuery).init(allocator),
+            .actions = .empty,
+            .discovery_attnet_queries = .empty,
+            .discovery_syncnet_queries = .empty,
+            .discovery_custody_group_queries = .empty,
         };
     }
 
     pub fn deinit(self: *PeerManager) void {
         self.store.deinit();
         self.scorer.deinit();
-        self.active_attnets.deinit();
-        self.active_syncnets.deinit();
+        self.active_attnets.deinit(self.allocator);
+        self.active_syncnets.deinit(self.allocator);
         if (self.our_sampling_groups) |g| self.allocator.free(g);
-        self.actions.deinit();
-        self.discovery_attnet_queries.deinit();
-        self.discovery_syncnet_queries.deinit();
-        self.discovery_custody_group_queries.deinit();
+        self.actions.deinit(self.allocator);
+        self.discovery_attnet_queries.deinit(self.allocator);
+        self.discovery_syncnet_queries.deinit(self.allocator);
+        self.discovery_custody_group_queries.deinit(self.allocator);
     }
 
     // ── Tick Functions ──────────────────────────────────────────────
@@ -133,8 +133,8 @@ pub const PeerManager = struct {
         };
 
         if (direction == .outbound) {
-            try self.actions.append(.{ .send_ping = peer_id });
-            try self.actions.append(.{ .send_status = peer_id });
+            try self.actions.append(self.allocator, .{ .send_ping = peer_id });
+            try self.actions.append(self.allocator, .{ .send_status = peer_id });
         }
         return self.actions.items;
     }
@@ -154,7 +154,7 @@ pub const PeerManager = struct {
             );
         }
         self.store.removePeer(peer_id);
-        try self.actions.append(.{ .emit_peer_disconnected = peer_id });
+        try self.actions.append(self.allocator, .{ .emit_peer_disconnected = peer_id });
         return self.actions.items;
     }
 
@@ -181,15 +181,15 @@ pub const PeerManager = struct {
 
         if (irrelevant != null) {
             peer.relevant_status = .irrelevant;
-            try self.actions.append(.{ .send_goodbye = .{
+            try self.actions.append(self.allocator, .{ .send_goodbye = .{
                 .peer_id = peer_id,
                 .reason = .irrelevant_network,
             } });
-            try self.actions.append(.{ .disconnect_peer = peer_id });
+            try self.actions.append(self.allocator, .{ .disconnect_peer = peer_id });
         } else if (peer.relevant_status != .relevant) {
             peer.relevant_status = .relevant;
-            try self.actions.append(.{ .tag_peer_relevant = peer_id });
-            try self.actions.append(.{ .emit_peer_connected = .{
+            try self.actions.append(self.allocator, .{ .tag_peer_relevant = peer_id });
+            try self.actions.append(self.allocator, .{ .emit_peer_connected = .{
                 .peer_id = peer_id,
                 .direction = peer.direction,
             } });
@@ -219,7 +219,7 @@ pub const PeerManager = struct {
     ) ![]const Action {
         self.resetActionState();
         _ = self.scorer.applyReconnectionCoolDown(peer_id, reason);
-        try self.actions.append(.{ .disconnect_peer = peer_id });
+        try self.actions.append(self.allocator, .{ .disconnect_peer = peer_id });
         return self.actions.items;
     }
 
@@ -238,7 +238,7 @@ pub const PeerManager = struct {
             true;
 
         if (need_metadata) {
-            try self.actions.append(.{ .request_metadata = peer_id });
+            try self.actions.append(self.allocator, .{ .request_metadata = peer_id });
         }
         return self.actions.items;
     }
@@ -268,9 +268,9 @@ pub const PeerManager = struct {
         syncnets: []const RequestedSubnet,
     ) !void {
         self.active_attnets.clearRetainingCapacity();
-        try self.active_attnets.appendSlice(attnets);
+        try self.active_attnets.appendSlice(self.allocator, attnets);
         self.active_syncnets.clearRetainingCapacity();
-        try self.active_syncnets.appendSlice(syncnets);
+        try self.active_syncnets.appendSlice(self.allocator, syncnets);
     }
 
     pub fn setForkName(self: *PeerManager, fork_name: ForkName) void {
@@ -340,20 +340,20 @@ pub const PeerManager = struct {
             const state = self.scorer.getScoreState(peer_id);
             switch (state) {
                 .banned => {
-                    try self.actions.append(.{ .send_goodbye = .{
+                    try self.actions.append(self.allocator, .{ .send_goodbye = .{
                         .peer_id = peer_id,
                         .reason = .banned,
                     } });
-                    try self.actions.append(.{
+                    try self.actions.append(self.allocator, .{
                         .disconnect_peer = peer_id,
                     });
                 },
                 .disconnected => {
-                    try self.actions.append(.{ .send_goodbye = .{
+                    try self.actions.append(self.allocator, .{ .send_goodbye = .{
                         .peer_id = peer_id,
                         .reason = .score_too_low,
                     } });
-                    try self.actions.append(.{
+                    try self.actions.append(self.allocator, .{
                         .disconnect_peer = peer_id,
                     });
                 },
@@ -380,10 +380,8 @@ pub const PeerManager = struct {
         local_status: Status,
         starved: bool,
     ) !void {
-        var inputs = std.ArrayList(PrioritizePeersInput).init(
-            self.allocator,
-        );
-        defer inputs.deinit();
+        var inputs: std.ArrayList(PrioritizePeersInput) = .empty;
+        defer inputs.deinit(self.allocator);
         try self.buildPrioritizeInputs(&inputs);
 
         const opts = PrioritizePeersOpts{
@@ -418,7 +416,7 @@ pub const PeerManager = struct {
         var iter = self.store.iterPeers();
         while (iter.next()) |entry| {
             const peer = entry.value_ptr;
-            try inputs.append(.{
+            try inputs.append(self.allocator, .{
                 .peer_id = peer.peer_id,
                 .direction = peer.direction,
                 .status = peer.status,
@@ -439,20 +437,20 @@ pub const PeerManager = struct {
         result: *prioritize_mod.PrioritizePeersResult,
     ) !void {
         for (result.peers_to_disconnect.items) |disc| {
-            try self.actions.append(.{ .send_goodbye = .{
+            try self.actions.append(self.allocator, .{ .send_goodbye = .{
                 .peer_id = disc.peer_id,
                 .reason = .too_many_peers,
             } });
-            try self.actions.append(.{ .disconnect_peer = disc.peer_id });
+            try self.actions.append(self.allocator, .{ .disconnect_peer = disc.peer_id });
         }
 
         if (result.peers_to_connect > 0) {
-            try self.discovery_attnet_queries.appendSlice(result.attnet_queries.items);
-            try self.discovery_syncnet_queries.appendSlice(result.syncnet_queries.items);
+            try self.discovery_attnet_queries.appendSlice(self.allocator, result.attnet_queries.items);
+            try self.discovery_syncnet_queries.appendSlice(self.allocator, result.syncnet_queries.items);
 
             var custody_iter = result.custody_group_queries.iterator();
             while (custody_iter.next()) |entry| {
-                try self.discovery_custody_group_queries.append(.{
+                try self.discovery_custody_group_queries.append(self.allocator, .{
                     .group = entry.key_ptr.*,
                     .max_peers_to_discover = entry.value_ptr.*,
                 });
@@ -468,7 +466,7 @@ pub const PeerManager = struct {
                 }.lessThan,
             );
 
-            try self.actions.append(.{
+            try self.actions.append(self.allocator, .{
                 .request_discovery = .{
                     .peers_to_connect = result.peers_to_connect,
                     .attnet_queries = self.discovery_attnet_queries.items,
@@ -497,17 +495,17 @@ pub const PeerManager = struct {
             .outbound => self.config.ping_interval_outbound_ms,
         };
         if (now - peer.last_received_msg_unix_ts_ms > ping_interval) {
-            try self.actions.append(.{ .send_ping = peer.peer_id });
+            try self.actions.append(self.allocator, .{ .send_ping = peer.peer_id });
         }
         if (peer.direction == .inbound and
             peer.status == null and
             now - peer.connected_unix_ts_ms > self.config.status_inbound_grace_period_ms)
         {
-            try self.actions.append(.{ .disconnect_peer = peer.peer_id });
+            try self.actions.append(self.allocator, .{ .disconnect_peer = peer.peer_id });
             return;
         }
         if (now - peer.last_status_unix_ts_ms > self.config.status_interval_ms) {
-            try self.actions.append(.{ .send_status = peer.peer_id });
+            try self.actions.append(self.allocator, .{ .send_status = peer.peer_id });
         }
     }
 };

@@ -1,5 +1,6 @@
 const std = @import("std");
-const napi = @import("zapi:zapi");
+const napi = @import("zapi:zapi").napi;
+const js = @import("zapi:zapi").js;
 const c = @import("config");
 const fork_types = @import("fork_types");
 const st = @import("state_transition");
@@ -12,52 +13,99 @@ const ct = @import("consensus_types");
 const pool = @import("./pool.zig");
 const config = @import("./config.zig");
 const pubkey = @import("./pubkeys.zig");
+const js_types = @import("./js_types.zig");
 const sszValueToNapiValue = @import("./to_napi_value.zig").sszValueToNapiValue;
 const numberSliceToNapiValue = @import("./to_napi_value.zig").numberSliceToNapiValue;
-
-const getter = @import("napi_property_descriptor.zig").getter;
-const method = @import("napi_property_descriptor.zig").method;
+const napi_io = @import("./io.zig");
 
 /// Allocator used for all BeaconStateView instances.
 var gpa: std.heap.DebugAllocator(.{}) = .init;
 const allocator = gpa.allocator();
 
-pub fn BeaconStateView_finalize(_: napi.Env, cached_state: *CachedBeaconState, _: ?*anyopaque) void {
-    cached_state.deinit();
-    allocator.destroy(cached_state);
+pub const js_meta = js.class(.{ .properties = .{
+    .slot = js.prop(.{ .get = true, .set = false }),
+    .fork = js.prop(.{ .get = true, .set = false }),
+    .forkName = js.prop(.{ .get = true, .set = false }),
+    .epoch = js.prop(.{ .get = true, .set = false }),
+    .genesisTime = js.prop(.{ .get = true, .set = false }),
+    .genesisValidatorsRoot = js.prop(.{ .get = true, .set = false }),
+    .eth1Data = js.prop(.{ .get = true, .set = false }),
+    .latestBlockHeader = js.prop(.{ .get = true, .set = false }),
+    .previousJustifiedCheckpoint = js.prop(.{ .get = true, .set = false }),
+    .currentJustifiedCheckpoint = js.prop(.{ .get = true, .set = false }),
+    .finalizedCheckpoint = js.prop(.{ .get = true, .set = false }),
+    .previousEpochParticipation = js.prop(.{ .get = true, .set = false }),
+    .currentEpochParticipation = js.prop(.{ .get = true, .set = false }),
+    .latestExecutionPayloadHeader = js.prop(.{ .get = true, .set = false }),
+    .payloadBlockNumber = js.prop(.{ .get = true, .set = false }),
+    .historicalSummaries = js.prop(.{ .get = true, .set = false }),
+    .pendingDeposits = js.prop(.{ .get = true, .set = false }),
+    .pendingDepositsCount = js.prop(.{ .get = true, .set = false }),
+    .pendingPartialWithdrawals = js.prop(.{ .get = true, .set = false }),
+    .pendingPartialWithdrawalsCount = js.prop(.{ .get = true, .set = false }),
+    .pendingConsolidations = js.prop(.{ .get = true, .set = false }),
+    .pendingConsolidationsCount = js.prop(.{ .get = true, .set = false }),
+    .proposerLookahead = js.prop(.{ .get = true, .set = false }),
+    .previousDecisionRoot = js.prop(.{ .get = true, .set = false }),
+    .currentDecisionRoot = js.prop(.{ .get = true, .set = false }),
+    .nextDecisionRoot = js.prop(.{ .get = true, .set = false }),
+    .currentProposers = js.prop(.{ .get = true, .set = false }),
+    .nextProposers = js.prop(.{ .get = true, .set = false }),
+    .previousProposers = js.prop(.{ .get = true, .set = false }),
+    .currentSyncCommittee = js.prop(.{ .get = true, .set = false }),
+    .currentSyncCommitteeIndexed = js.prop(.{ .get = true, .set = false }),
+    .nextSyncCommittee = js.prop(.{ .get = true, .set = false }),
+    .syncProposerReward = js.prop(.{ .get = true, .set = false }),
+    .effectiveBalanceIncrements = js.prop(.{ .get = true, .set = false }),
+    .validatorCount = js.prop(.{ .get = true, .set = false }),
+    .activeValidatorCount = js.prop(.{ .get = true, .set = false }),
+    .isExecutionStateType = js.prop(.{ .get = true, .set = false }),
+    .isMergeTransitionComplete = js.prop(.{ .get = true, .set = false }),
+    .proposerRewards = js.prop(.{ .get = true, .set = false }),
+    .clonedCount = js.prop(.{ .get = true, .set = false }),
+    .clonedCountWithTransferCache = js.prop(.{ .get = true, .set = false }),
+    .createdWithTransferCache = js.prop(.{ .get = true, .set = false }),
+    .latestBlockHash = js.prop(.{ .get = true, .set = false }),
+    .executionPayloadAvailability = js.prop(.{ .get = true, .set = false }),
+    .latestExecutionPayloadBid = js.prop(.{ .get = true, .set = false }),
+    .payloadExpectedWithdrawals = js.prop(.{ .get = true, .set = false }),
+} });
+
+cached_state: ?*CachedBeaconState = null,
+pool_rc: ?*pool.PoolRc = null,
+const BeaconStateView = @This();
+
+pub fn init() BeaconStateView {
+    return .{};
 }
 
-pub fn BeaconStateView_ctor(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
-    const cached_state = try allocator.create(CachedBeaconState);
-    errdefer allocator.destroy(cached_state);
-
-    _ = try env.wrap(
-        cb.this(),
-        CachedBeaconState,
-        cached_state,
-        BeaconStateView_finalize,
-        null,
-        null,
-    );
-
-    return cb.this();
+pub fn deinit(self: *BeaconStateView) void {
+    if (self.cached_state) |cached_state| {
+        cached_state.deinit();
+        allocator.destroy(cached_state);
+        self.cached_state = null;
+    }
+    if (self.pool_rc) |rc| {
+        rc.unref();
+        self.pool_rc = null;
+    }
 }
 
-pub fn BeaconStateView_createFromBytes(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
-    const ctor = cb.this();
-
-    const bytes_info = try cb.arg(0).getTypedarrayInfo();
+// -------------------------
+// Class Methods
+// -------------------------
+pub fn createFromBytes(bytes: js.Uint8Array) !BeaconStateView {
     const state = try allocator.create(AnyBeaconState);
     errdefer allocator.destroy(state);
 
-    const slot = fork_types.readSlotFromAnyBeaconStateBytes(bytes_info.data);
-    const fork = config.state.config.forkSeq(slot);
-    state.* = try AnyBeaconState.deserialize(allocator, &pool.state.pool, fork, bytes_info.data);
+    const byte_slice = try bytes.toSlice();
+    const slot_value = fork_types.readSlotFromAnyBeaconStateBytes(byte_slice);
+    const fork_seq = config.state.config.forkSeq(slot_value);
+    state.* = try AnyBeaconState.deserialize(allocator, pool.state.pool(), fork_seq, byte_slice);
     errdefer state.deinit();
 
-    const cached_state_value = try env.newInstance(ctor, .{});
-
-    const cached_state = try env.unwrap(CachedBeaconState, cached_state_value);
+    const cached_state = try allocator.create(CachedBeaconState);
+    errdefer allocator.destroy(cached_state);
 
     try cached_state.init(
         allocator,
@@ -70,86 +118,171 @@ pub fn BeaconStateView_createFromBytes(env: napi.Env, cb: napi.CallbackInfo(1)) 
         null,
     );
 
-    return cached_state_value;
+    return .{
+        .cached_state = cached_state,
+        .pool_rc = pool.state.poolRc().ref(),
+    };
 }
 
-pub fn BeaconStateView_slot(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
-    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
-    const slot = try cached_state.state.slot();
-    return try env.createInt64(@intCast(slot));
+// -------------------------
+// Getters
+// -------------------------
+pub fn slot(self: *const BeaconStateView) !js.Number {
+    const cached_state = try self.requireState();
+    const slot_value = try cached_state.state.slot();
+    return js.Number.from(slot_value);
 }
 
-pub fn BeaconStateView_fork(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
-    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
+pub fn fork(self: *const BeaconStateView) !js_types.Fork {
+    const env = js.env();
+    const cached_state = try self.requireState();
     var fork_view = try cached_state.state.fork();
-    var fork: ct.phase0.Fork.Type = undefined;
-    try fork_view.toValue(allocator, &fork);
-    return try sszValueToNapiValue(env, ct.phase0.Fork, &fork);
+    var fork_value: ct.phase0.Fork.Type = undefined;
+    try fork_view.toValue(allocator, &fork_value);
+    return js_types.wrap(js_types.Fork, try sszValueToNapiValue(env, ct.phase0.Fork, &fork_value));
 }
 
-pub fn BeaconStateView_epoch(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
-    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
-    const slot = try cached_state.state.slot();
-    return try env.createInt64(@intCast(slot / preset.SLOTS_PER_EPOCH));
+pub fn forkName(self: *const BeaconStateView) !js.String {
+    const cached_state = try self.requireState();
+    return js.String.from(cached_state.state.forkSeq().name());
 }
 
-pub fn BeaconStateView_genesisTime(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
-    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
-    return try env.createInt64(@intCast(try cached_state.state.genesisTime()));
+pub fn epoch(self: *const BeaconStateView) !js.Number {
+    const cached_state = try self.requireState();
+    const slot_value = try cached_state.state.slot();
+    return js.Number.from(slot_value / preset.SLOTS_PER_EPOCH);
 }
 
-pub fn BeaconStateView_genesisValidatorsRoot(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
-    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
-    return sszValueToNapiValue(env, ct.primitive.Root, try cached_state.state.genesisValidatorsRoot());
+pub fn genesisTime(self: *const BeaconStateView) !js.Number {
+    const cached_state = try self.requireState();
+    return js.Number.from(try cached_state.state.genesisTime());
 }
 
-pub fn BeaconStateView_eth1Data(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
-    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
+pub fn genesisValidatorsRoot(self: *const BeaconStateView) !js.Uint8Array {
+    const env = js.env();
+    const cached_state = try self.requireState();
+    return js_types.wrap(js.Uint8Array, try sszValueToNapiValue(env, ct.primitive.Root, try cached_state.state.genesisValidatorsRoot()));
+}
+
+pub fn eth1Data(self: *const BeaconStateView) !js_types.Eth1Data {
+    const env = js.env();
+    const cached_state = try self.requireState();
     var eth1_data_view = try cached_state.state.eth1Data();
     var eth1_data: ct.phase0.Eth1Data.Type = undefined;
     try eth1_data_view.toValue(allocator, &eth1_data);
-    return try sszValueToNapiValue(env, ct.phase0.Eth1Data, &eth1_data);
+    return js_types.wrap(js_types.Eth1Data, try sszValueToNapiValue(env, ct.phase0.Eth1Data, &eth1_data));
 }
 
-pub fn BeaconStateView_latestBlockHeader(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
-    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
+pub fn latestBlockHeader(self: *const BeaconStateView) !js_types.BeaconBlockHeader {
+    const env = js.env();
+    const cached_state = try self.requireState();
     var header_view = try cached_state.state.latestBlockHeader();
     var header: ct.phase0.BeaconBlockHeader.Type = undefined;
     try header_view.toValue(allocator, &header);
-    return try sszValueToNapiValue(env, ct.phase0.BeaconBlockHeader, &header);
+    return js_types.wrap(js_types.BeaconBlockHeader, try sszValueToNapiValue(env, ct.phase0.BeaconBlockHeader, &header));
 }
 
-pub fn BeaconStateView_previousJustifiedCheckpoint(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
-    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
+pub fn previousJustifiedCheckpoint(self: *const BeaconStateView) !js_types.Checkpoint {
+    const env = js.env();
+    const cached_state = try self.requireState();
     var cp: ct.phase0.Checkpoint.Type = undefined;
     try cached_state.state.previousJustifiedCheckpoint(&cp);
-    return try sszValueToNapiValue(env, ct.phase0.Checkpoint, &cp);
+    return js_types.wrap(js_types.Checkpoint, try sszValueToNapiValue(env, ct.phase0.Checkpoint, &cp));
 }
 
-pub fn BeaconStateView_currentJustifiedCheckpoint(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
-    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
+pub fn currentJustifiedCheckpoint(self: *const BeaconStateView) !js_types.Checkpoint {
+    const env = js.env();
+    const cached_state = try self.requireState();
     var cp: ct.phase0.Checkpoint.Type = undefined;
     try cached_state.state.currentJustifiedCheckpoint(&cp);
-    return try sszValueToNapiValue(env, ct.phase0.Checkpoint, &cp);
+    return js_types.wrap(js_types.Checkpoint, try sszValueToNapiValue(env, ct.phase0.Checkpoint, &cp));
 }
 
-pub fn BeaconStateView_finalizedCheckpoint(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
-    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
+pub fn finalizedCheckpoint(self: *const BeaconStateView) !js_types.Checkpoint {
+    const env = js.env();
+    const cached_state = try self.requireState();
     var cp: ct.phase0.Checkpoint.Type = undefined;
     try cached_state.state.finalizedCheckpoint(&cp);
-    return try sszValueToNapiValue(env, ct.phase0.Checkpoint, &cp);
+    return js_types.wrap(js_types.Checkpoint, try sszValueToNapiValue(env, ct.phase0.Checkpoint, &cp));
 }
 
-/// Get the block root at a given slot.
-/// Arguments:
-/// - arg 0: slot (number)
-/// Returns: Root (Uint8Array)
-pub fn BeaconStateView_getBlockRoot(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
-    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
-    const slot: u64 = @intCast(try cb.arg(0).getValueInt64());
+pub fn previousEpochParticipation(self: *const BeaconStateView) !js.Uint8Array {
+    const cached_state = try self.requireState();
+    var view = try cached_state.state.previousEpochParticipation();
+
+    const size = try view.serializedSize();
+    const result = try js.Uint8Array.alloc(size);
+    _ = try view.serializeIntoBytes(try result.toSlice());
+    return result;
+}
+
+pub fn currentEpochParticipation(self: *const BeaconStateView) !js.Uint8Array {
+    const cached_state = try self.requireState();
+    var view = try cached_state.state.currentEpochParticipation();
+
+    const size = try view.serializedSize();
+    const result = try js.Uint8Array.alloc(size);
+    _ = try view.serializeIntoBytes(try result.toSlice());
+    return result;
+}
+
+pub fn getPreviousEpochParticipation(self: *const BeaconStateView, index_arg: js.Number) !js.Number {
+    const cached_state = try self.requireState();
+    const index_value: usize = @intCast(try index_arg.toI64());
+    var view = try cached_state.state.previousEpochParticipation();
+    const flag = view.get(index_value) catch {
+        return throwNullAs(js.Number, "INVALID_INDEX", "Failed to get previous epoch participation");
+    };
+    return js.Number.from(flag);
+}
+
+pub fn getCurrentEpochParticipation(self: *const BeaconStateView, index_arg: js.Number) !js.Number {
+    const cached_state = try self.requireState();
+    const index_value: usize = @intCast(try index_arg.toI64());
+    var view = try cached_state.state.currentEpochParticipation();
+    const flag = view.get(index_value) catch {
+        return throwNullAs(js.Number, "INVALID_INDEX", "Failed to get current epoch participation");
+    };
+    return js.Number.from(flag);
+}
+
+pub fn latestExecutionPayloadHeader(self: *const BeaconStateView) !js.Value {
+    const env = js.env();
+    const cached_state = try self.requireState();
+    var header: AnyExecutionPayloadHeader = undefined;
+    try cached_state.state.latestExecutionPayloadHeader(allocator, &header);
+    defer header.deinit(allocator);
+
+    const value = switch (header) {
+        .bellatrix => |*h| try sszValueToNapiValue(env, ct.bellatrix.ExecutionPayloadHeader, h),
+        .capella => |*h| try sszValueToNapiValue(env, ct.capella.ExecutionPayloadHeader, h),
+        .deneb => |*h| try sszValueToNapiValue(env, ct.deneb.ExecutionPayloadHeader, h),
+    };
+    return js_types.wrap(js.Value, value);
+}
+
+pub fn payloadBlockNumber(self: *const BeaconStateView) !js.Number {
+    const cached_state = try self.requireState();
+    var header: AnyExecutionPayloadHeader = undefined;
+    try cached_state.state.latestExecutionPayloadHeader(allocator, &header);
+    defer header.deinit(allocator);
+
+    return js.Number.from(header.blockNumber());
+}
+
+// -------------------------
+// Instance Methods
+// -------------------------
+
+pub fn getBlockRoot(self: *const BeaconStateView, epoch_arg: js.Number) !js.Uint8Array {
+    const env = js.env();
+    const cached_state = try self.requireState();
+    const epoch_value: u64 = @intCast(try epoch_arg.toI64());
+
+    const slot_ = st.computeStartSlotAtEpoch(epoch_value);
 
     const result = switch (cached_state.state.forkSeq()) {
-        inline else => |f| st.getBlockRootAtSlot(f, cached_state.state.castToFork(f), slot),
+        inline else => |f| st.getBlockRootAtSlot(f, cached_state.state.castToFork(f), slot_),
     };
     const root = result catch |err| {
         const msg = switch (err) {
@@ -157,303 +290,299 @@ pub fn BeaconStateView_getBlockRoot(env: napi.Env, cb: napi.CallbackInfo(1)) !na
             error.SlotTooSmall => "Cannot get block root more than SLOTS_PER_HISTORICAL_ROOT in the past",
             else => "Failed to get block root",
         };
-        try env.throwError("INVALID_SLOT", msg);
-        return env.getNull();
+        return throwNullAs(js.Uint8Array, "INVALID_SLOT", msg);
     };
 
-    return sszValueToNapiValue(env, ct.primitive.Root, root);
+    return js_types.wrap(js.Uint8Array, try sszValueToNapiValue(env, ct.primitive.Root, root));
 }
 
-/// Get the randao mix at a given epoch.
-/// Arguments:
-/// - arg 0: epoch (number)
-/// Returns: Bytes32 (Uint8Array)
-pub fn BeaconStateView_getRandaoMix(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
-    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
-    const epoch: u64 = @intCast(try cb.arg(0).getValueInt64());
+pub fn getBlockRootAtSlot(self: *const BeaconStateView, slot_arg: js.Number) !js.Uint8Array {
+    const env = js.env();
+    const cached_state = try self.requireState();
+    const slot_value: u64 = @intCast(try slot_arg.toI64());
 
     const result = switch (cached_state.state.forkSeq()) {
-        inline else => |f| st.getRandaoMix(f, cached_state.state.castToFork(f), epoch),
+        inline else => |f| st.getBlockRootAtSlot(f, cached_state.state.castToFork(f), slot_value),
+    };
+    const root = result catch |err| {
+        const msg = switch (err) {
+            error.SlotTooBig => "Can only get block root in the past",
+            error.SlotTooSmall => "Cannot get block root more than SLOTS_PER_HISTORICAL_ROOT in the past",
+            else => "Failed to get block root",
+        };
+        return throwNullAs(js.Uint8Array, "INVALID_SLOT", msg);
+    };
+
+    return js_types.wrap(js.Uint8Array, try sszValueToNapiValue(env, ct.primitive.Root, root));
+}
+
+pub fn getBlockRootAtEpoch(self: *const BeaconStateView, epoch_arg: js.Number) !js.Uint8Array {
+    const env = js.env();
+    const cached_state = try self.requireState();
+    const epoch_value: u64 = @intCast(try epoch_arg.toI64());
+    const slot_ = st.computeStartSlotAtEpoch(epoch_value);
+
+    const result = switch (cached_state.state.forkSeq()) {
+        inline else => |f| st.getBlockRootAtSlot(f, cached_state.state.castToFork(f), slot_),
+    };
+    const root = result catch |err| {
+        const msg = switch (err) {
+            error.SlotTooBig => "Can only get block root in the past",
+            error.SlotTooSmall => "Cannot get block root more than SLOTS_PER_HISTORICAL_ROOT in the past",
+            else => "Failed to get block root",
+        };
+        return throwNullAs(js.Uint8Array, "INVALID_EPOCH", msg);
+    };
+
+    return js_types.wrap(js.Uint8Array, try sszValueToNapiValue(env, ct.primitive.Root, root));
+}
+
+pub fn getRandaoMix(self: *const BeaconStateView, epoch_arg: js.Number) !js.Uint8Array {
+    const env = js.env();
+    const cached_state = try self.requireState();
+    const epoch_value: u64 = @intCast(try epoch_arg.toI64());
+
+    const result = switch (cached_state.state.forkSeq()) {
+        inline else => |f| st.getRandaoMix(f, cached_state.state.castToFork(f), epoch_value),
     };
     const mix = result catch {
-        try env.throwError("INVALID_EPOCH", "Failed to get randao mix for epoch");
-        return env.getNull();
+        return throwNullAs(js.Uint8Array, "INVALID_EPOCH", "Failed to get randao mix for epoch");
     };
 
-    return sszValueToNapiValue(env, ct.primitive.Bytes32, mix);
+    return js_types.wrap(js.Uint8Array, try sszValueToNapiValue(env, ct.primitive.Bytes32, mix));
 }
 
-pub fn BeaconStateView_previousEpochParticipation(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
-    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
-    var view = try cached_state.state.previousEpochParticipation();
+pub fn getStateRootAtSlot(self: *const BeaconStateView, slot_arg: js.Number) !js.Uint8Array {
+    const env = js.env();
+    const cached_state = try self.requireState();
 
-    const size = try view.serializedSize();
-    var bytes: [*]u8 = undefined;
-    const buf = try env.createArrayBuffer(size, &bytes);
-    _ = try view.serializeIntoBytes(bytes[0..size]);
-
-    return try env.createTypedarray(.uint8, size, buf, 0);
-}
-
-pub fn BeaconStateView_currentEpochParticipation(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
-    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
-    var view = try cached_state.state.currentEpochParticipation();
-
-    const size = try view.serializedSize();
-    var bytes: [*]u8 = undefined;
-    const buf = try env.createArrayBuffer(size, &bytes);
-    _ = try view.serializeIntoBytes(bytes[0..size]);
-
-    return try env.createTypedarray(.uint8, size, buf, 0);
-}
-
-pub fn BeaconStateView_latestExecutionPayloadHeader(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
-    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
-    var header: AnyExecutionPayloadHeader = undefined;
-    try cached_state.state.latestExecutionPayloadHeader(allocator, &header);
-    defer header.deinit(allocator);
-
-    return switch (header) {
-        .bellatrix => |*h| try sszValueToNapiValue(env, ct.bellatrix.ExecutionPayloadHeader, h),
-        .capella => |*h| try sszValueToNapiValue(env, ct.capella.ExecutionPayloadHeader, h),
-        .deneb => |*h| try sszValueToNapiValue(env, ct.deneb.ExecutionPayloadHeader, h),
+    var state_roots_view = cached_state.state.stateRoots() catch {
+        return throwNullAs(js.Uint8Array, "STATE_ERROR", "Failed to get stateRoots");
     };
+    const slot_: usize = @intCast(try slot_arg.toI64());
+    const root = state_roots_view.getFieldRoot(slot_ % preset.SLOTS_PER_HISTORICAL_ROOT) catch {
+        return throwNullAs(js.Uint8Array, "INVALID_SLOT", "Failed to get state root at slot");
+    };
+    return js_types.wrap(js.Uint8Array, try sszValueToNapiValue(env, ct.primitive.Root, root));
 }
 
 /// Get the historical summaries from the state (Capella+).
 /// Returns: array of {blockSummaryRoot: Uint8Array, stateSummaryRoot: Uint8Array}
-pub fn BeaconStateView_historicalSummaries(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
-    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
-
+pub fn historicalSummaries(self: *const BeaconStateView) !js.Array {
+    const env = js.env();
+    const cached_state = try self.requireState();
     var historical_summaries_view = try cached_state.state.historicalSummaries();
     var historical_summaries = ct.capella.HistoricalSummaries.default_value;
     try historical_summaries_view.toValue(allocator, &historical_summaries);
     defer historical_summaries.deinit(allocator);
-
-    return try sszValueToNapiValue(env, ct.capella.HistoricalSummaries, &historical_summaries);
+    return js_types.wrap(js.Array, try sszValueToNapiValue(env, ct.capella.HistoricalSummaries, &historical_summaries));
 }
 
 /// Get the pending deposits from the state (Electra+).
 /// Returns: Uint8Array of SSZ serialized PendingDeposits list
-pub fn BeaconStateView_pendingDeposits(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
-    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
+pub fn pendingDeposits(self: *const BeaconStateView) !js.Uint8Array {
+    const cached_state = try self.requireState();
 
     var pending_deposits = cached_state.state.pendingDeposits() catch {
-        try env.throwError("STATE_ERROR", "Failed to get pendingDeposits");
-        return env.getNull();
+        return throwNullAs(js.Uint8Array, "STATE_ERROR", "Failed to get pendingDeposits");
     };
 
     const size = pending_deposits.serializedSize() catch {
-        try env.throwError("STATE_ERROR", "Failed to get pendingDeposits size");
-        return env.getNull();
+        return throwNullAs(js.Uint8Array, "STATE_ERROR", "Failed to get pendingDeposits size");
     };
 
-    var bytes: [*]u8 = undefined;
-    const buf = try env.createArrayBuffer(size, &bytes);
-    _ = pending_deposits.serializeIntoBytes(bytes[0..size]) catch {
-        try env.throwError("STATE_ERROR", "Failed to serialize pendingDeposits");
-        return env.getNull();
+    const result = try js.Uint8Array.alloc(size);
+    _ = pending_deposits.serializeIntoBytes(try result.toSlice()) catch {
+        return throwNullAs(js.Uint8Array, "STATE_ERROR", "Failed to serialize pendingDeposits");
     };
 
-    return try env.createTypedarray(.uint8, size, buf, 0);
+    return result;
 }
 
-pub fn BeaconStateView_pendingDepositsCount(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
-    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
+pub fn pendingDepositsCount(self: *const BeaconStateView) !js.Number {
+    const cached_state = try self.requireState();
     var pending_deposits = try cached_state.state.pendingDeposits();
-    return try env.createInt64(@intCast(try pending_deposits.length()));
+    return js.Number.from(try pending_deposits.length());
 }
 
 /// Get the pending partial withdrawals from the state (Electra+).
 /// Returns: Uint8Array of SSZ serialized PendingPartialWithdrawals list
-pub fn BeaconStateView_pendingPartialWithdrawals(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
-    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
+pub fn pendingPartialWithdrawals(self: *const BeaconStateView) !js.Uint8Array {
+    const cached_state = try self.requireState();
 
     var pending_partial_withdrawals = cached_state.state.pendingPartialWithdrawals() catch {
-        try env.throwError("STATE_ERROR", "Failed to get pendingPartialWithdrawals");
-        return env.getNull();
+        return throwNullAs(js.Uint8Array, "STATE_ERROR", "Failed to get pendingPartialWithdrawals");
     };
-
     const size = pending_partial_withdrawals.serializedSize() catch {
-        try env.throwError("STATE_ERROR", "Failed to get pendingPartialWithdrawals size");
-        return env.getNull();
+        return throwNullAs(js.Uint8Array, "STATE_ERROR", "Failed to get pendingPartialWithdrawals size");
     };
 
-    var bytes: [*]u8 = undefined;
-    const buf = try env.createArrayBuffer(size, &bytes);
-    _ = pending_partial_withdrawals.serializeIntoBytes(bytes[0..size]) catch {
-        try env.throwError("STATE_ERROR", "Failed to serialize pendingPartialWithdrawals");
-        return env.getNull();
+    const result = try js.Uint8Array.alloc(size);
+    _ = pending_partial_withdrawals.serializeIntoBytes(try result.toSlice()) catch {
+        return throwNullAs(js.Uint8Array, "STATE_ERROR", "Failed to serialize pendingPartialWithdrawals");
     };
-
-    return try env.createTypedarray(.uint8, size, buf, 0);
+    return result;
 }
 
-pub fn BeaconStateView_pendingPartialWithdrawalsCount(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
-    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
+pub fn pendingPartialWithdrawalsCount(self: *const BeaconStateView) !js.Number {
+    const cached_state = try self.requireState();
     var pending_partial_withdrawals = try cached_state.state.pendingPartialWithdrawals();
-    return try env.createInt64(@intCast(try pending_partial_withdrawals.length()));
+    return js.Number.from(try pending_partial_withdrawals.length());
 }
 
 /// Get the pending consolidations from the state
-pub fn BeaconStateView_pendingConsolidations(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
-    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
+pub fn pendingConsolidations(self: *const BeaconStateView) !js.Uint8Array {
+    const cached_state = try self.requireState();
 
     var pending_consolidations = cached_state.state.pendingConsolidations() catch {
-        try env.throwError("STATE_ERROR", "Failed to get pendingConsolidations");
-        return env.getNull();
+        return throwNullAs(js.Uint8Array, "STATE_ERROR", "Failed to get pendingConsolidations");
     };
-
     const size = pending_consolidations.serializedSize() catch {
-        try env.throwError("STATE_ERROR", "Failed to get pendingConsolidations size");
-        return env.getNull();
+        return throwNullAs(js.Uint8Array, "STATE_ERROR", "Failed to get pendingConsolidations size");
     };
 
-    var bytes: [*]u8 = undefined;
-    const buf = try env.createArrayBuffer(size, &bytes);
-    _ = pending_consolidations.serializeIntoBytes(bytes[0..size]) catch {
-        try env.throwError("STATE_ERROR", "Failed to serialize pendingConsolidations");
-        return env.getNull();
+    const result = try js.Uint8Array.alloc(size);
+    _ = pending_consolidations.serializeIntoBytes(try result.toSlice()) catch {
+        return throwNullAs(js.Uint8Array, "STATE_ERROR", "Failed to serialize pendingConsolidations");
     };
 
-    return try env.createTypedarray(.uint8, size, buf, 0);
+    return result;
 }
 
-pub fn BeaconStateView_pendingConsolidationsCount(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
-    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
+pub fn pendingConsolidationsCount(self: *const BeaconStateView) !js.Number {
+    const cached_state = try self.requireState();
     var pending_consolidations = try cached_state.state.pendingConsolidations();
-    return try env.createInt64(@intCast(try pending_consolidations.length()));
+    return js.Number.from(try pending_consolidations.length());
 }
 
 /// Get the proposer lookahead from the state (Fulu+).
-pub fn BeaconStateView_proposerLookahead(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
-    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
+pub fn proposerLookahead(self: *const BeaconStateView) !js.Uint32Array {
+    const env = js.env();
+    const cached_state = try self.requireState();
 
     var proposer_lookahead = cached_state.state.proposerLookahead() catch {
-        try env.throwError("STATE_ERROR", "Failed to get proposerLookahead");
-        return env.getNull();
+        return throwNullAs(js.Uint32Array, "STATE_ERROR", "Failed to get proposerLookahead");
     };
 
     const lookahead = proposer_lookahead.getAll(allocator) catch {
-        try env.throwError("STATE_ERROR", "Failed to get proposerLookahead values");
-        return env.getNull();
+        return throwNullAs(js.Uint32Array, "STATE_ERROR", "Failed to get proposerLookahead values");
     };
     defer allocator.free(lookahead);
 
-    return try numberSliceToNapiValue(env, u64, lookahead, .{ .typed_array = .uint32 });
+    return .{ .val = try numberSliceToNapiValue(env, u64, lookahead, .{ .typed_array = .uint32 }) };
 }
 
-// pub fn BeaconStateView_executionPayloadAvailability
+fn rootToHexString(root: *const [32]u8) !js.String {
+    const env = js.env();
+    var hex_buf: [66]u8 = undefined;
+    try @import("hex").rootIntoHex(&hex_buf, root);
+    return js_types.wrap(js.String, try env.createStringUtf8(&hex_buf));
+}
 
-// pub fn BeaconStateView_getShufflingAtEpoch
-
-/// Get the previous decision root for the state.
-pub fn BeaconStateView_previousDecisionRoot(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
-    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
+pub fn previousDecisionRoot(self: *const BeaconStateView) !js.String {
+    const cached_state = try self.requireState();
     const root = cached_state.previousDecisionRoot();
-    return sszValueToNapiValue(env, ct.primitive.Root, &root);
+    return rootToHexString(&root);
 }
 
-/// Get the current decision root for the state.
-pub fn BeaconStateView_currentDecisionRoot(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
-    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
+pub fn currentDecisionRoot(self: *const BeaconStateView) !js.String {
+    const cached_state = try self.requireState();
     const root = cached_state.currentDecisionRoot();
-    return sszValueToNapiValue(env, ct.primitive.Root, &root);
+    return rootToHexString(&root);
 }
 
 /// Get the next decision root for the state.
-pub fn BeaconStateView_nextDecisionRoot(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
-    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
+pub fn nextDecisionRoot(self: *const BeaconStateView) !js.String {
+    const cached_state = try self.requireState();
     const root = cached_state.nextDecisionRoot();
-    return sszValueToNapiValue(env, ct.primitive.Root, &root);
+    return rootToHexString(&root);
 }
 
 /// Get the shuffling decision root for a given epoch.
-pub fn BeaconStateView_getShufflingDecisionRoot(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
-    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
-    const epoch: u64 = @intCast(try cb.arg(0).getValueInt64());
-    const root = st.calculateShufflingDecisionRoot(cached_state.state, epoch) catch {
-        try env.throwError("STATE_ERROR", "Failed to calculate shuffling decision root");
-        return env.getNull();
+pub fn getShufflingDecisionRoot(self: *const BeaconStateView, epoch_arg: js.Number) !js.String {
+    const cached_state = try self.requireState();
+    const epoch_value: u64 = @intCast(try epoch_arg.toI64());
+    const root = st.calculateShufflingDecisionRoot(cached_state.state, epoch_value) catch {
+        return throwNullAs(js.String, "STATE_ERROR", "Failed to calculate shuffling decision root");
     };
-    return sszValueToNapiValue(env, ct.primitive.Root, &root);
+    return rootToHexString(&root);
 }
 
-pub fn BeaconStateView_previousProposers(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
-    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
+pub fn previousProposers(self: *const BeaconStateView) !?js.Array {
+    const env = js.env();
+    const cached_state = try self.requireState();
     if (cached_state.epoch_cache.proposers_prev_epoch) |*proposers| {
-        return numberSliceToNapiValue(
-            env,
-            u64,
-            proposers,
-            .{},
-        );
+        return .{ .val = try numberSliceToNapiValue(env, u64, proposers, .{}) };
     }
-    return env.getNull();
-}
-pub fn BeaconStateView_currentProposers(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
-    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
-    return numberSliceToNapiValue(
-        env,
-        u64,
-        &cached_state.epoch_cache.proposers,
-        .{},
-    );
+    return null;
 }
 
-pub fn BeaconStateView_nextProposers(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
-    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
+pub fn currentProposers(self: *const BeaconStateView) !js.Array {
+    const env = js.env();
+    const cached_state = try self.requireState();
+    return .{ .val = try numberSliceToNapiValue(env, u64, &cached_state.epoch_cache.proposers, .{}) };
+}
+
+pub fn nextProposers(self: *const BeaconStateView) !?js.Array {
+    const env = js.env();
+    const cached_state = try self.requireState();
     if (cached_state.epoch_cache.proposers_next_epoch) |*proposers| {
-        return numberSliceToNapiValue(
-            env,
-            u64,
-            proposers,
-            .{},
-        );
+        return .{ .val = try numberSliceToNapiValue(env, u64, proposers, .{}) };
     }
-    return env.getNull();
+    return null;
 }
 
 /// Get the beacon proposer for a given slot.
 /// Arguments:
 /// - arg 0: slot (number)
 /// Returns: validator index of the proposer
-pub fn BeaconStateView_getBeaconProposer(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
-    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
-    const slot: u64 = @intCast(try cb.arg(0).getValueInt64());
-    const proposer = try cached_state.epoch_cache.getBeaconProposer(slot);
-    return try env.createInt64(@intCast(proposer));
+pub fn getBeaconProposer(self: *const BeaconStateView, slot_arg: js.Number) !js.Number {
+    const cached_state = try self.requireState();
+    const slot_value: u64 = @intCast(try slot_arg.toI64());
+    const proposer = try cached_state.epoch_cache.getBeaconProposer(slot_value);
+    return js.Number.from(proposer);
 }
 
-pub fn BeaconStateView_currentSyncCommittee(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
-    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
+pub fn getBeaconProposerOrNull(self: *const BeaconStateView, slot_arg: js.Number) !js.Value {
+    const cached_state = try self.requireState();
+    const slot_value: u64 = @intCast(try slot_arg.toI64());
+    const proposer = cached_state.getBeaconProposer(slot_value) catch return jsNull();
+    return js_types.wrap(js.Value, js.Number.from(proposer).toValue());
+}
+
+pub fn currentSyncCommittee(self: *const BeaconStateView) !js_types.SyncCommittee {
+    const env = js.env();
+    const cached_state = try self.requireState();
     var current_sync_committee = try cached_state.state.currentSyncCommittee();
     var result: ct.altair.SyncCommittee.Type = undefined;
     try current_sync_committee.toValue(allocator, &result);
-    return try sszValueToNapiValue(env, ct.altair.SyncCommittee, &result);
+    return js_types.wrap(js_types.SyncCommittee, try sszValueToNapiValue(env, ct.altair.SyncCommittee, &result));
 }
 
-pub fn BeaconStateView_nextSyncCommittee(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
-    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
+pub fn nextSyncCommittee(self: *const BeaconStateView) !js_types.SyncCommittee {
+    const env = js.env();
+    const cached_state = try self.requireState();
     var next_sync_committee = try cached_state.state.nextSyncCommittee();
     var result: ct.altair.SyncCommittee.Type = undefined;
     try next_sync_committee.toValue(allocator, &result);
-    return try sszValueToNapiValue(env, ct.altair.SyncCommittee, &result);
+    return js_types.wrap(js_types.SyncCommittee, try sszValueToNapiValue(env, ct.altair.SyncCommittee, &result));
 }
 
-pub fn BeaconStateView_currentSyncCommitteeIndexed(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
-    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
+pub fn currentSyncCommitteeIndexed(self: *const BeaconStateView) !js_types.IndexedSyncCommitteeWithMap {
+    const env = js.env();
+    const cached_state = try self.requireState();
     const sync_committee_cache = cached_state.epoch_cache.current_sync_committee_indexed.get();
     const validator_indices = sync_committee_cache.getValidatorIndices();
     const validator_index_map = sync_committee_cache.getValidatorIndexMap();
+
     const obj = try env.createObject();
     try obj.setNamedProperty(
         "validatorIndices",
         try numberSliceToNapiValue(
             env,
-            u32,
-            @as([]const u32, @ptrCast(validator_indices)),
-            .{ .typed_array = null },
+            u64,
+            validator_indices,
+            .{ .typed_array = .uint32 },
         ),
     );
 
@@ -462,216 +591,285 @@ pub fn BeaconStateView_currentSyncCommitteeIndexed(env: napi.Env, cb: napi.Callb
     const map = try env.newInstance(map_ctor, .{});
     const set_fn = try map.getNamedProperty("set");
 
-    // TODO: might need to check the perf here; another way is to send a array instead and convert them in js side.
     var iterator = validator_index_map.iterator();
     while (iterator.next()) |entry| {
         const idx = entry.key_ptr.*;
         const positions = entry.value_ptr;
 
         const key_value_napi = try env.createInt64(@intCast(idx));
-        const positions_napi = try numberSliceToNapiValue(env, u32, @as([]const u32, @ptrCast(positions.items)), .{ .typed_array = .uint32 });
+        const positions_napi = try numberSliceToNapiValue(
+            env,
+            u32,
+            positions.items,
+            .{ .typed_array = .uint32 },
+        );
 
         _ = try env.callFunction(set_fn, map, .{ key_value_napi, positions_napi });
     }
 
     try obj.setNamedProperty("validatorIndexMap", map);
-
-    return obj;
+    return .{ .val = obj };
 }
 
-pub fn BeaconStateView_syncProposerReward(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
-    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
+pub fn syncProposerReward(self: *const BeaconStateView) !js.Number {
+    const cached_state = try self.requireState();
     const sync_proposer_reward = cached_state.epoch_cache.sync_proposer_reward;
-    return try env.createInt64(@intCast(sync_proposer_reward));
+    return js.Number.from(sync_proposer_reward);
 }
 
 /// Get the indexed sync committee at a given epoch.
-/// Arguments:
-/// - arg 0: epoch (number)
-/// Returns: object with validatorIndices (number[])
-pub fn BeaconStateView_getIndexedSyncCommitteeAtEpoch(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
-    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
-    const epoch: u64 = @intCast(try cb.arg(0).getValueInt64());
+/// Returns: object with validatorIndices (Uint32Array)
+pub fn getIndexedSyncCommitteeAtEpoch(self: *const BeaconStateView, epoch_arg: js.Number) !js_types.IndexedSyncCommittee {
+    const env = js.env();
+    const cached_state = try self.requireState();
+    const epoch_value: u64 = @intCast(try epoch_arg.toI64());
 
-    const sync_committee = cached_state.epoch_cache.getIndexedSyncCommitteeAtEpoch(epoch) catch {
-        try env.throwError("NO_SYNC_COMMITTEE", "Sync committee not available for requested epoch");
-        return env.getNull();
+    const sync_committee = cached_state.epoch_cache.getIndexedSyncCommitteeAtEpoch(epoch_value) catch {
+        return throwNullAs(js_types.IndexedSyncCommittee, "NO_SYNC_COMMITTEE", "Sync committee not available for requested epoch");
     };
 
     const obj = try env.createObject();
     try obj.setNamedProperty(
         "validatorIndices",
-        try numberSliceToNapiValue(env, u64, sync_committee.getValidatorIndices(), .{}),
+        try numberSliceToNapiValue(env, u64, sync_committee.getValidatorIndices(), .{ .typed_array = .uint32 }),
     );
-    return obj;
+    return .{ .val = obj };
 }
 
-pub fn BeaconStateView_effectiveBalanceIncrements(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
-    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
+/// Get the indexed sync committee for a given slot (uses slot+1 offset for duty lookups).
+pub fn getIndexedSyncCommittee(self: *const BeaconStateView, slot_arg: js.Number) !js_types.IndexedSyncCommittee {
+    const env = js.env();
+    const cached_state = try self.requireState();
+    const slot_value: u64 = @intCast(try slot_arg.toI64());
+
+    const sync_committee = cached_state.epoch_cache.getIndexedSyncCommittee(slot_value) catch {
+        return throwNullAs(js_types.IndexedSyncCommittee, "NO_SYNC_COMMITTEE", "Sync committee not available for requested slot");
+    };
+
+    const obj = try env.createObject();
+    try obj.setNamedProperty(
+        "validatorIndices",
+        try numberSliceToNapiValue(env, u64, sync_committee.getValidatorIndices(), .{ .typed_array = .uint32 }),
+    );
+    return .{ .val = obj };
+}
+
+pub fn effectiveBalanceIncrements(self: *const BeaconStateView) !js.Uint16Array {
+    const env = js.env();
+    const cached_state = try self.requireState();
     const increments = cached_state.epoch_cache.getEffectiveBalanceIncrements();
-    return try numberSliceToNapiValue(env, u16, increments.items, .{ .typed_array = .uint16 });
+    return .{ .val = try numberSliceToNapiValue(env, u16, increments.items, .{ .typed_array = .uint16 }) };
 }
 
-pub fn BeaconStateView_getEffectiveBalanceIncrementsZeroInactive(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
-    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
-
+pub fn getEffectiveBalanceIncrementsZeroInactive(self: *const BeaconStateView) !js.Uint16Array {
+    const env = js.env();
+    const cached_state = try self.requireState();
     var result = try st.getEffectiveBalanceIncrementsZeroInactive(allocator, cached_state);
-    defer result.deinit();
-
-    return try numberSliceToNapiValue(env, u16, result.items, .{ .typed_array = .uint16 });
+    defer result.deinit(allocator);
+    return .{ .val = try numberSliceToNapiValue(env, u16, result.items, .{ .typed_array = .uint16 }) };
 }
 
-pub fn BeaconStateView_getBalance(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
-    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
-    const index: u64 = @intCast(try cb.arg(0).getValueInt64());
+pub fn getBalance(self: *const BeaconStateView, index_arg: js.Number) !js.Number {
+    const cached_state = try self.requireState();
+    const index_value: u64 = @intCast(try index_arg.toI64());
     var balances = try cached_state.state.balances();
-    const balance = try balances.get(index);
-    return try env.createBigintUint64(balance);
+    const balance = try balances.get(index_value);
+    return js.Number.from(balance);
 }
 
 /// Get a validator by index.
-pub fn BeaconStateView_getValidator(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
-    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
-    const index: u64 = @intCast(try cb.arg(0).getValueInt64());
+pub fn getValidator(self: *const BeaconStateView, index_arg: js.Number) !js_types.Validator {
+    const env = js.env();
+    const cached_state = try self.requireState();
+    const index_value: u64 = @intCast(try index_arg.toI64());
 
     var validators = try cached_state.state.validators();
-    var validator_view = try validators.get(index);
+    var validator_view = try validators.get(index_value);
     var validator: ct.phase0.Validator.Type = undefined;
     try validator_view.toValue(allocator, &validator);
 
-    return try sszValueToNapiValue(env, ct.phase0.Validator, &validator);
+    return js_types.wrap(js_types.Validator, try sszValueToNapiValue(env, ct.phase0.Validator, &validator));
 }
 
 /// Get the status of a validator by index.
-/// Arguments:
-/// - arg 0: validator index (number)
 /// Returns: status string
-pub fn BeaconStateView_getValidatorStatus(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
-    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
-    const index: u64 = @intCast(try cb.arg(0).getValueInt64());
+pub fn getValidatorStatus(self: *const BeaconStateView, index_arg: js.Number) !js.String {
+    const cached_state = try self.requireState();
+    const index_value: u64 = @intCast(try index_arg.toI64());
     const current_epoch = cached_state.epoch_cache.epoch;
 
     var validators = try cached_state.state.validators();
-    var validator_view = try validators.get(index);
+    var validator_view = try validators.get(index_value);
     var validator: ct.phase0.Validator.Type = undefined;
     try validator_view.toValue(allocator, &validator);
 
     const status = st.getValidatorStatus(&validator, current_epoch);
-    return try env.createStringUtf8(status.toString());
+    return js.String.from(status.toString());
+}
+
+/// Get all validators in the registry.
+pub fn getAllValidators(self: *const BeaconStateView) !js.Array {
+    const env = js.env();
+    const cached_state = try self.requireState();
+
+    const validators = try cached_state.state.validatorsSlice(allocator);
+    defer allocator.free(validators);
+
+    const result = try env.createArray();
+    for (validators, 0..) |*validator, i| {
+        const v_napi = try sszValueToNapiValue(env, ct.phase0.Validator, validator);
+        try result.setElement(@intCast(i), v_napi);
+    }
+    return js_types.wrap(js.Array, result);
+}
+
+/// Get all balances in the registry.
+pub fn getAllBalances(self: *const BeaconStateView) !js.Array {
+    const env = js.env();
+    const cached_state = try self.requireState();
+
+    const balances = try cached_state.state.balancesSlice(allocator);
+    defer allocator.free(balances);
+
+    return js_types.wrap(js.Array, try numberSliceToNapiValue(env, u64, balances, .{}));
+}
+
+/// Get validators whose status is in the provided Set<string>.
+/// Arguments:
+/// - statuses: JS Set<string>
+/// - currentEpoch: Epoch (number)
+pub fn getValidatorsByStatus(self: *const BeaconStateView, statuses_set: js.Value, current_epoch_arg: js.Number) !js.Array {
+    const env = js.env();
+    const cached_state = try self.requireState();
+    const current_epoch: u64 = @intCast(try current_epoch_arg.toI64());
+
+    const set_value = statuses_set.toValue();
+    const has_fn = try set_value.getNamedProperty("has");
+
+    const validators = try cached_state.state.validatorsSlice(allocator);
+    defer allocator.free(validators);
+
+    const result = try env.createArray();
+    var out_idx: u32 = 0;
+    for (validators) |*validator| {
+        const status = st.getValidatorStatus(validator, current_epoch);
+        const status_str = try env.createStringUtf8(status.toString());
+        const has_result = try env.callFunction(has_fn, set_value, .{status_str});
+        if (try has_result.getValueBool()) {
+            const v_napi = try sszValueToNapiValue(env, ct.phase0.Validator, validator);
+            try result.setElement(out_idx, v_napi);
+            out_idx += 1;
+        }
+    }
+    return js_types.wrap(js.Array, result);
 }
 
 /// Get the total number of validators in the registry.
-pub fn BeaconStateView_validatorCount(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
-    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
+pub fn validatorCount(self: *const BeaconStateView) !js.Number {
+    const cached_state = try self.requireState();
     const count = try cached_state.state.validatorsCount();
-    return try env.createInt64(@intCast(count));
+    return js.Number.from(count);
 }
 
 /// Get the number of active validators at the current epoch.
-pub fn BeaconStateView_activeValidatorCount(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
-    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
-    const epoch_cache = cached_state.epoch_cache;
-    const count = epoch_cache.current_shuffling.get().active_indices.len;
-    return try env.createInt64(@intCast(count));
+pub fn activeValidatorCount(self: *const BeaconStateView) !js.Number {
+    const cached_state = try self.requireState();
+    const count = cached_state.epoch_cache.current_shuffling.get().active_indices.len;
+    return js.Number.from(count);
 }
 
-pub fn BeaconStateView_isExecutionStateType(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
-    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
+pub fn isExecutionStateType(self: *const BeaconStateView) !js.Boolean {
+    const cached_state = try self.requireState();
     const fork_seq = cached_state.state.forkSeq();
-    return try env.getBoolean(fork_seq.gte(.bellatrix));
+    return js.Boolean.from(fork_seq.gte(.bellatrix));
 }
 
-pub fn BeaconStateView_isExecutionEnabled(env: napi.Env, cb: napi.CallbackInfo(2)) !napi.Value {
-    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
+/// Check whether execution is enabled for the given Lodestar-shaped block object.
+///
+/// For normal post-merge operation this short-circuits from state alone and does
+/// not inspect `block`. The block object is only read for the historical pre-merge
+/// Bellatrix case, where execution is enabled iff the block carries the first
+/// non-default execution payload.
+pub fn isExecutionEnabled(self: *const BeaconStateView, block: js.Value) !js.Boolean {
+    const cached_state = try self.requireState();
+    const fork_seq = cached_state.state.forkSeq();
+    if (fork_seq.lt(.bellatrix)) return js.Boolean.from(false);
 
-    // arg 0: fork name
-    var fork_name_buf: [16]u8 = undefined;
-    const fork_name = try cb.arg(0).getValueStringUtf8(&fork_name_buf);
-    const fork = c.ForkSeq.fromName(fork_name);
-
-    // arg 1: signed block bytes
-    const bytes_info = try cb.arg(1).getTypedarrayInfo();
-
-    // Deserialize the signed block
-    const signed_block = try AnySignedBeaconBlock.deserialize(
-        allocator,
-        .full,
-        fork,
-        bytes_info.data,
-    );
-    defer signed_block.deinit(allocator);
-
-    if (signed_block.forkSeq() != cached_state.state.forkSeq()) {
-        try env.throwError("FORK_MISMATCH", "Fork of signed block does not match state fork");
-        return env.getNull();
-    }
-    const result = switch (cached_state.state.forkSeq()) {
-        inline else => |f| switch (signed_block.blockType()) {
-            inline else => |bt| if (comptime bt == .blinded and f.lt(.bellatrix)) {
-                return error.InvalidBlockTypeForFork;
-            } else st.isExecutionEnabled(
-                f,
-                cached_state.state.castToFork(f),
-                bt,
-                signed_block.beaconBlock().castToFork(bt, f),
-            ),
-        },
+    const merge_complete: bool = switch (fork_seq) {
+        inline .bellatrix, .capella, .deneb, .electra, .fulu => |f| st.isMergeTransitionComplete(f, cached_state.state.castToFork(f)),
+        else => unreachable,
     };
-    return try env.getBoolean(result);
+    if (merge_complete) return js.Boolean.from(true);
+
+    if (fork_seq != .bellatrix) return js.Boolean.from(false);
+
+    // After the above check, we reach the slow path: pre-merge Bellatrix.
+    // Walk the JS block into a native ExecutionPayload to compare against `default_value`.
+    const block_raw = block.toValue();
+    if (try block_raw.typeof() != .object) return error.InvalidBlockObject;
+
+    const body = try (try block_raw.getNamedProperty("body")).coerceToObject();
+
+    // Lodestar treats blinded pre-merge Bellatrix blocks as not-yet-merged: the state's
+    // execution payload header is still default, so the block doesn't kick off the transition.
+    if (try body.hasNamedProperty("executionPayloadHeader")) return js.Boolean.from(false);
+
+    const payload_js = try (try body.getNamedProperty("executionPayload")).coerceToObject();
+    var payload: ct.bellatrix.ExecutionPayload.Type = ct.bellatrix.ExecutionPayload.default_value;
+    defer ct.bellatrix.ExecutionPayload.deinit(allocator, &payload);
+    try executionPayloadFromJs(payload_js, &payload);
+
+    const is_default = ct.bellatrix.ExecutionPayload.equals(&payload, &ct.bellatrix.ExecutionPayload.default_value);
+    return js.Boolean.from(!is_default);
 }
 
 /// Check if the merge transition is complete.
-/// Returns: boolean
-pub fn BeaconStateView_isMergeTransitionComplete(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
-    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
+pub fn isMergeTransitionComplete(self: *const BeaconStateView) !js.Boolean {
+    const cached_state = try self.requireState();
     const result = switch (cached_state.state.forkSeq()) {
         inline else => |f| st.isMergeTransitionComplete(f, cached_state.state.castToFork(f)),
     };
-    return env.getBoolean(result);
+    return js.Boolean.from(result);
 }
 
-// pub fn BeaconStateView_getExpectedWithdrawals
-
 /// Get the proposer rewards for the state.
-pub fn BeaconStateView_proposerRewards(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
-    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
+pub fn proposerRewards(self: *const BeaconStateView) !js_types.ProposerRewards {
+    const env = js.env();
+    const cached_state = try self.requireState();
     const rewards = cached_state.getProposerRewards();
 
     const obj = try env.createObject();
-    try obj.setNamedProperty(
-        "attestations",
-        try env.createBigintUint64(rewards.attestations),
-    );
-    try obj.setNamedProperty(
-        "syncAggregate",
-        try env.createBigintUint64(rewards.sync_aggregate),
-    );
-    try obj.setNamedProperty(
-        "slashing",
-        try env.createBigintUint64(rewards.slashing),
-    );
-    return obj;
+    try obj.setNamedProperty("attestations", try env.createDouble(@floatFromInt(rewards.attestations)));
+    try obj.setNamedProperty("syncAggregate", try env.createDouble(@floatFromInt(rewards.sync_aggregate)));
+    try obj.setNamedProperty("slashing", try env.createDouble(@floatFromInt(rewards.slashing)));
+    return .{ .val = obj };
 }
 
-// pub fn BeaconStateView_computeBlockRewards
+/// Populate a `SignedVoluntaryExit.Type` from a JS object of shape
+/// `{message: {epoch, validatorIndex}, signature: Uint8Array(96)}`. Matches `phase0.SignedVoluntaryExit`
+/// from `@lodestar/types`.
+fn signedVoluntaryExitFromJsValue(value: js.Value, out: *ct.phase0.SignedVoluntaryExit.Type) !void {
+    const raw = value.toValue();
+    const message = try raw.getNamedProperty("message");
+    out.message.epoch = @intCast(try (try message.getNamedProperty("epoch")).getValueInt64());
+    out.message.validator_index = @intCast(try (try message.getNamedProperty("validatorIndex")).getValueInt64());
 
-// pub fn BeaconStateView_computeAttestationRewards
+    const signature = try raw.getNamedProperty("signature");
+    if (!(try signature.isTypedarray())) return error.SignatureNotTypedArray;
+    const info = try signature.getTypedarrayInfo();
+    if (info.array_type != .uint8) return error.SignatureNotUint8Array;
+    if (info.data.len != out.signature.len) return error.InvalidSignatureLength;
+    @memcpy(&out.signature, info.data);
+}
 
-// pub fn BeaconStateView_computeSyncCommitteeRewards
-
-// pub fn BeaconStateView_getLatestWeakSubjectivityCheckpointEpoch
-
-/// Get the validity status of a signed voluntary exit.
-pub fn BeaconStateView_getVoluntaryExitValidity(env: napi.Env, cb: napi.CallbackInfo(2)) !napi.Value {
-    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
-    const verify_signature = try cb.arg(1).getValueBool();
-
-    const bytes_info = try cb.arg(0).getTypedarrayInfo();
+pub fn getVoluntaryExitValidity(self: *const BeaconStateView, signed_exit_value: js.Value, verify_signature_value: js.Boolean) !js.String {
+    const env = js.env();
+    const cached_state = try self.requireState();
+    const verify_signature = verify_signature_value.assertBool();
 
     var signed_voluntary_exit: ct.phase0.SignedVoluntaryExit.Type = ct.phase0.SignedVoluntaryExit.default_value;
-    ct.phase0.SignedVoluntaryExit.deserializeFromBytes(bytes_info.data, &signed_voluntary_exit) catch {
-        try env.throwError("DESERIALIZE_ERROR", "Failed to deserialize SignedVoluntaryExit");
-        return env.getNull();
+    signedVoluntaryExitFromJsValue(signed_exit_value, &signed_voluntary_exit) catch {
+        return throwNullAs(js.String, "INVALID_ARG", "Failed to read SignedVoluntaryExit from JS object");
     };
 
     const result = switch (cached_state.state.forkSeq()) {
@@ -685,24 +883,19 @@ pub fn BeaconStateView_getVoluntaryExitValidity(env: napi.Env, cb: napi.Callback
         ),
     };
     const validity = result catch {
-        try env.throwError("VALIDATION_ERROR", "Failed to get voluntary exit validity");
-        return env.getNull();
+        return throwNullAs(js.String, "VALIDATION_ERROR", "Failed to get voluntary exit validity");
     };
 
-    return env.createStringUtf8(@tagName(validity));
+    return .{ .val = try env.createStringUtf8(@tagName(validity)) };
 }
 
-/// Check if a signed voluntary exit is valid.
-pub fn BeaconStateView_isValidVoluntaryExit(env: napi.Env, cb: napi.CallbackInfo(2)) !napi.Value {
-    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
-    const verify_signature = try cb.arg(1).getValueBool();
-
-    const bytes_info = try cb.arg(0).getTypedarrayInfo();
+pub fn isValidVoluntaryExit(self: *const BeaconStateView, signed_exit_value: js.Value, verify_signature_value: js.Boolean) !js.Boolean {
+    const cached_state = try self.requireState();
+    const verify_signature = verify_signature_value.assertBool();
 
     var signed_voluntary_exit: ct.phase0.SignedVoluntaryExit.Type = ct.phase0.SignedVoluntaryExit.default_value;
-    ct.phase0.SignedVoluntaryExit.deserializeFromBytes(bytes_info.data, &signed_voluntary_exit) catch {
-        try env.throwError("DESERIALIZE_ERROR", "Failed to deserialize SignedVoluntaryExit");
-        return env.getNull();
+    signedVoluntaryExitFromJsValue(signed_exit_value, &signed_voluntary_exit) catch {
+        return throwNullAs(js.Boolean, "INVALID_ARG", "Failed to read SignedVoluntaryExit from JS object");
     };
 
     const result = switch (cached_state.state.forkSeq()) {
@@ -716,128 +909,135 @@ pub fn BeaconStateView_isValidVoluntaryExit(env: napi.Env, cb: napi.CallbackInfo
         ),
     };
     const is_valid = result catch {
-        try env.throwError("VALIDATION_ERROR", "Failed to validate voluntary exit");
-        return env.getNull();
+        return throwNullAs(js.Boolean, "VALIDATION_ERROR", "Failed to validate voluntary exit");
     };
 
-    return env.getBoolean(is_valid);
+    return js.Boolean.from(is_valid);
 }
 
-pub fn BeaconStateView_getFinalizedRootProof(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
-    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
+pub fn getFinalizedRootProof(self: *const BeaconStateView) !js.Array {
+    const env = js.env();
+    const cached_state = try self.requireState();
     var proof = try cached_state.state.getFinalizedRootProof(allocator);
     defer proof.deinit(allocator);
 
     const witnesses = std.ArrayListUnmanaged([32]u8).fromOwnedSlice(proof.witnesses);
-    return try sszValueToNapiValue(
+    return js_types.wrap(js.Array, try sszValueToNapiValue(
         env,
-        // a compatible type for "a list of roots"
         ct.phase0.HistoricalRoots,
         &witnesses,
-    );
+    ));
 }
 
-// pub fn BeaconStateView_getSyncCommitteesWitness
+pub fn getSyncCommitteesWitness(self: *const BeaconStateView) !js_types.SyncCommitteeWitness {
+    const env = js.env();
+    const cached_state = try self.requireState();
+    try cached_state.state.commit();
+
+    const fork_seq = cached_state.state.forkSeq();
+    if (fork_seq.lt(.altair)) {
+        return throwNullAs(
+            js_types.SyncCommitteeWitness,
+            "INVALID_FORK",
+            "getSyncCommitteesWitness only supported altair+",
+        );
+    }
+
+    const root_node = cached_state.state.root();
+    var witness_data: st.SyncCommitteeWitness = undefined;
+    try st.getSyncCommitteesWitness(fork_seq, root_node, cached_state.state.nodePool(), &witness_data);
+
+    const witness_arr = try env.createArrayWithLength(@intCast(witness_data.witness_len));
+    for (witness_data.witness(), 0..) |*w, i| {
+        try witness_arr.setElement(@intCast(i), js.Uint8Array.from(w).toValue());
+    }
+
+    const obj = try env.createObject();
+    try obj.setNamedProperty("witness", witness_arr);
+    try obj.setNamedProperty(
+        "currentSyncCommitteeRoot",
+        js.Uint8Array.from(&witness_data.current_sync_committee_root).toValue(),
+    );
+    try obj.setNamedProperty(
+        "nextSyncCommitteeRoot",
+        js.Uint8Array.from(&witness_data.next_sync_committee_root).toValue(),
+    );
+    return js_types.wrap(js_types.SyncCommitteeWitness, obj);
+}
 
 /// Get a single Merkle proof  for a node at the given generalized index.
-pub fn BeaconStateView_getSingleProof(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
-    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
-    const gindex: u64 = @intCast(try cb.arg(0).getValueInt64());
+pub fn getSingleProof(self: *const BeaconStateView, gindex_arg: js.Number) !js.Array {
+    const env = js.env();
+    const cached_state = try self.requireState();
+    const gindex: u64 = @intCast(try gindex_arg.toI64());
 
     var proof = cached_state.state.getSingleProof(allocator, gindex) catch {
-        try env.throwError("STATE_ERROR", "Failed to get single proof");
-        return env.getNull();
+        return throwNullAs(js.Array, "STATE_ERROR", "Failed to get single proof");
     };
     defer proof.deinit(allocator);
 
     const result = try env.createArray();
     for (proof.witnesses, 0..) |witness, i| {
-        var witness_bytes: [*]u8 = undefined;
-        const witness_buf = try env.createArrayBuffer(32, &witness_bytes);
-        @memcpy(witness_bytes[0..32], &witness);
-        try result.setElement(@intCast(i), try env.createTypedarray(.uint8, 32, witness_buf, 0));
+        try result.setElement(@intCast(i), js.Uint8Array.from(&witness).toValue());
     }
 
-    return result;
+    return .{ .val = result };
 }
 
 /// Create a compact multi-proof from a descriptor.
-/// Arguments:
-/// - arg 0: descriptor (Uint8Array)
 /// Returns: {type: string, leaves: Uint8Array[], descriptor: Uint8Array}
-pub fn BeaconStateView_createMultiProof(env: napi.Env, cb: napi.CallbackInfo(1)) !napi.Value {
+pub fn createMultiProof(self: *const BeaconStateView, descriptor: js.Uint8Array) !js_types.MultiProof {
     const persistent_merkle_tree = @import("persistent_merkle_tree");
-    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
+    const env = js.env();
+    const cached_state = try self.requireState();
+    const descriptor_bytes = try descriptor.toSlice();
 
-    const descriptor_info = try cb.arg(0).getTypedarrayInfo();
-    if (descriptor_info.array_type != .uint8) {
-        try env.throwTypeError("STATE_ERROR", "Expected descriptor to be a Uint8Array");
-        return env.getNull();
-    }
-    const descriptor = descriptor_info.data;
-
-    // Get the root node from the state
     try cached_state.state.commit();
-    const root_node = switch (cached_state.state.*) {
-        inline else => |state| state.root,
-    };
+    const root_node = cached_state.state.root();
 
-    // Create proof input for compact multi-proof
     const proof_input = persistent_merkle_tree.proof.ProofInput{
-        .compactMulti = .{ .descriptor = descriptor },
+        .compactMulti = .{ .descriptor = descriptor_bytes },
     };
 
     var proof = persistent_merkle_tree.proof.createProof(
         allocator,
-        &pool.state.pool,
+        pool.state.pool(),
         root_node,
         proof_input,
     ) catch {
-        try env.throwError("STATE_ERROR", "Failed to create proof");
-        return env.getNull();
+        return throwNullAs(js_types.MultiProof, "STATE_ERROR", "Failed to create proof");
     };
     defer proof.deinit(allocator);
 
-    // Create result object matching Proof interface
     const result = try env.createObject();
-
-    // Add type field
     const proof_type_str = switch (proof) {
         inline else => |_, tag| @tagName(tag),
     };
     try result.setNamedProperty("type", try env.createStringUtf8(proof_type_str));
 
-    // Extract data based on proof type
     switch (proof) {
         .compactMulti => |compact| {
-            // Create leaves array
             const leaves_array = try env.createArray();
             for (compact.leaves, 0..) |leaf, i| {
-                var leaf_bytes: [*]u8 = undefined;
-                const leaf_buf = try env.createArrayBuffer(32, &leaf_bytes);
-                @memcpy(leaf_bytes[0..32], &leaf);
-                try leaves_array.setElement(@intCast(i), try env.createTypedarray(.uint8, 32, leaf_buf, 0));
+                try leaves_array.setElement(@intCast(i), js.Uint8Array.from(&leaf).toValue());
             }
             try result.setNamedProperty("leaves", leaves_array);
 
-            // Create descriptor Uint8Array
-            var descriptor_bytes: [*]u8 = undefined;
-            const descriptor_buf = try env.createArrayBuffer(compact.descriptor.len, &descriptor_bytes);
-            @memcpy(descriptor_bytes[0..compact.descriptor.len], compact.descriptor);
-            try result.setNamedProperty("descriptor", try env.createTypedarray(.uint8, compact.descriptor.len, descriptor_buf, 0));
+            try result.setNamedProperty(
+                "descriptor",
+                js.Uint8Array.from(compact.descriptor).toValue(),
+            );
         },
-        else => {
-            try env.throwError("STATE_ERROR", "Unexpected proof type");
-            return env.getNull();
-        },
+        else => return throwNullAs(js_types.MultiProof, "STATE_ERROR", "Unexpected proof type"),
     }
 
-    return result;
+    return .{ .val = result };
 }
 
-pub fn BeaconStateView_computeUnrealizedCheckpoints(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
-    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
-    const result = try st.computeUnrealizedCheckpoints(cached_state, allocator);
+pub fn computeUnrealizedCheckpoints(self: *const BeaconStateView) !js_types.UnrealizedCheckpoints {
+    const env = js.env();
+    const cached_state = try self.requireState();
+    const result = try st.computeUnrealizedCheckpoints(allocator, napi_io.get(), cached_state);
 
     const obj = try env.createObject();
     try obj.setNamedProperty(
@@ -848,250 +1048,565 @@ pub fn BeaconStateView_computeUnrealizedCheckpoints(env: napi.Env, cb: napi.Call
         "finalizedCheckpoint",
         try sszValueToNapiValue(env, ct.phase0.Checkpoint, &result.finalized_checkpoint),
     );
-    return obj;
+    return .{ .val = obj };
 }
 
-pub fn BeaconStateView_clonedCount(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
-    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
-    return try env.createInt64(@intCast(cached_state.cloned_count));
+pub fn clonedCount(self: *const BeaconStateView) !js.Number {
+    const cached_state = try self.requireState();
+    return js.Number.from(cached_state.cloned_count);
 }
 
-pub fn BeaconStateView_clonedCountWithTransferCache(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
-    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
-    return try env.createInt64(@intCast(cached_state.cloned_count_with_transfer_cache));
+pub fn clonedCountWithTransferCache(self: *const BeaconStateView) !js.Number {
+    const cached_state = try self.requireState();
+    return js.Number.from(cached_state.cloned_count_with_transfer_cache);
 }
 
-pub fn BeaconStateView_createdWithTransferCache(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
-    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
-    return try env.getBoolean(cached_state.created_with_transfer_cache);
+pub fn createdWithTransferCache(self: *const BeaconStateView) !js.Boolean {
+    const cached_state = try self.requireState();
+    return js.Boolean.from(cached_state.created_with_transfer_cache);
 }
 
-// pub fn BeaconStateView_isStateValidatorsNodesPopulated
+/// Bench-only: run loadState end-to-end and tear down. Mirrors what TS's
+/// loadState measures (no CachedBeaconState wrap, no EpochCache build) so
+/// native vs TS comparisons isolate the SSZ tree-rebuild cost.
+pub fn loadOtherStateBench(
+    self: *const BeaconStateView,
+    state_bytes: js.Uint8Array,
+    seed_validators_bytes: ?js.Uint8Array,
+) !void {
+    const cached_state = try self.requireState();
+    const state_bytes_slice = try state_bytes.toSlice();
+    const seed_validators_bytes_slice: ?[]const u8 =
+        if (seed_validators_bytes) |b| try b.toSlice() else null;
 
-// pub fn BeaconStateView_loadOtherState
+    var result = try st.loadState(
+        allocator,
+        cached_state.config,
+        cached_state.state,
+        state_bytes_slice,
+        seed_validators_bytes_slice,
+    );
+    allocator.free(result.modified_validators);
+    result.state.deinit();
+}
 
-pub fn BeaconStateView_serialize(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
-    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
+pub fn loadOtherState(
+    self: *const BeaconStateView,
+    state_bytes: js.Uint8Array,
+    seed_validators_bytes: ?js.Uint8Array,
+    opts: ?js.Value,
+) !BeaconStateView {
+    const old_cached_state = try self.requireState();
+    const state_bytes_slice = try state_bytes.toSlice();
+    const seed_validators_bytes_slice: ?[]const u8 =
+        if (seed_validators_bytes) |b| try b.toSlice() else null;
+
+    var loaded = try st.loadState(
+        allocator,
+        old_cached_state.config,
+        old_cached_state.state,
+        state_bytes_slice,
+        seed_validators_bytes_slice,
+    );
+    errdefer loaded.state.deinit();
+    defer allocator.free(loaded.modified_validators);
+
+    const new_cached_state = try allocator.create(CachedBeaconState);
+    errdefer allocator.destroy(new_cached_state);
+
+    try new_cached_state.init(
+        allocator,
+        &loaded.state,
+        .{
+            .config = &config.state.config,
+            .index_to_pubkey = &pubkey.state.index2pubkey,
+            .pubkey_to_index = &pubkey.state.pubkey2index,
+        },
+        null,
+    );
+
+    if (opts) |value| {
+        const raw = value.toValue();
+        if (try raw.hasNamedProperty("preloadValidatorsAndBalances") and
+            (try (try raw.getNamedProperty("preloadValidatorsAndBalances")).getValueBool()))
+        {
+            //TODO(bing): These unnecessarily allocate and return memory that we throw away.
+            // This doesn't matter for typescript lodestar because GC clears it anyway,
+            // but we're losing some savings here. Consider implementating something like
+            // a `prefetchAll` that only does `populateAllNodes` that returns void
+            var validators_view = try new_cached_state.state.validators();
+            _ = validators_view.getAllReadonlyValues(allocator) catch |err| {
+                try js.env().throwError("STATE_ERROR", "Failed to preload validators");
+                return err;
+            };
+            var balances_view = try new_cached_state.state.balances();
+            _ = balances_view.getAll(allocator) catch |err| {
+                try js.env().throwError("STATE_ERROR", "Failed to preload balances");
+                return err;
+            };
+        }
+    }
+
+    return .{
+        .cached_state = new_cached_state,
+        .pool_rc = pool.state.poolRc().ref(),
+    };
+}
+
+pub fn serialize(self: *const BeaconStateView) !js.Uint8Array {
+    const env = js.env();
+    const cached_state = try self.requireState();
     const result = try cached_state.state.serialize(allocator);
     defer allocator.free(result);
-
-    return try numberSliceToNapiValue(env, u8, result, .{ .typed_array = .uint8 });
+    return .{ .val = try numberSliceToNapiValue(env, u8, result, .{ .typed_array = .uint8 }) };
 }
 
-pub fn BeaconStateView_serializedSize(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
-    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
+pub fn serializedSize(self: *const BeaconStateView) !js.Number {
+    const cached_state = try self.requireState();
     const size = switch (cached_state.state.*) {
         inline else => |state| try state.serializedSize(),
     };
-    return try env.createInt64(@intCast(size));
+    return js.Number.from(size);
 }
 
-/// arg 0: output: preallocated Uint8Array buffer
+/// Extract the writable `uint8Array` slice from a `@chainsafe/ssz` ByteViews object
+/// `{uint8Array: Uint8Array, dataView: DataView}`. The `dataView` is ignored — Zig's
+/// SSZ serializer only needs the raw bytes.
+fn byteViewsToSlice(output: js.Value) ![]u8 {
+    const arr_val = try output.toValue().getNamedProperty("uint8Array");
+    const arr_info = try arr_val.getTypedarrayInfo();
+    if (arr_info.array_type != .uint8) return error.InvalidByteViews;
+    return arr_info.data;
+}
+
+/// arg 0: output: ByteViews `{uint8Array, dataView}` (matches IBeaconStateView contract)
 /// arg 1: offset: offset of buffer where serialization should start
-pub fn BeaconStateView_serializeToBytes(env: napi.Env, cb: napi.CallbackInfo(2)) !napi.Value {
-    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
+///
+/// Returns the number of bytes written.
+pub fn serializeToBytes(self: *const BeaconStateView, output: js.Value, offset: js.Number) !js.Number {
+    const output_slice = try byteViewsToSlice(output);
+    const off: usize = @intCast(try offset.toI64());
+    if (off > output_slice.len) return error.InvalidOffset;
 
-    const output_info = try cb.arg(0).getTypedarrayInfo();
-    if (output_info.array_type != .uint8) {
-        return error.InvalidOutputBufferType;
-    }
-
-    const offset = try cb.arg(1).getValueUint32();
-    if (offset > output_info.length) {
-        return error.InvalidOffset;
-    }
-
-    const output_slice = output_info.data[offset..];
+    const cached_state = try self.requireState();
     const bytes_written = switch (cached_state.state.*) {
-        inline else => |state| try state.serializeIntoBytes(output_slice),
+        inline else => |state| try state.serializeIntoBytes(output_slice[off..]),
     };
 
-    return try env.createInt64(@intCast(bytes_written));
+    return js.Number.from(bytes_written);
 }
 
-pub fn BeaconStateView_serializeValidators(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
-    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
+pub fn serializeValidators(self: *const BeaconStateView) !js.Uint8Array {
+    const cached_state = try self.requireState();
     var validators_view = try cached_state.state.validators();
 
     const size = try validators_view.serializedSize();
-    var arraybuffer_bytes: [*]u8 = undefined;
-    const arraybuffer = try env.createArrayBuffer(size, &arraybuffer_bytes);
-    _ = try validators_view.serializeIntoBytes(arraybuffer_bytes[0..size]);
-    return try env.createTypedarray(.uint8, size, arraybuffer, 0);
+    const result = try js.Uint8Array.alloc(size);
+    _ = try validators_view.serializeIntoBytes(try result.toSlice());
+    return result;
 }
 
-pub fn BeaconStateView_serializedValidatorsSize(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
-    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
+pub fn serializedValidatorsSize(self: *const BeaconStateView) !js.Number {
+    const cached_state = try self.requireState();
     var validators_view = try cached_state.state.validators();
     const size = try validators_view.serializedSize();
-    return try env.createInt64(@intCast(size));
+    return js.Number.from(size);
 }
 
-pub fn BeaconStateView_serializeValidatorsToBytes(env: napi.Env, cb: napi.CallbackInfo(2)) !napi.Value {
-    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
+/// arg 0: output: ByteViews `{uint8Array, dataView}` (matches IBeaconStateView contract)
+/// arg 1: offset: offset of buffer where serialization should start
+///
+/// Returns the number of bytes written.
+pub fn serializeValidatorsToBytes(self: *const BeaconStateView, output: js.Value, offset: js.Number) !js.Number {
+    const output_slice = try byteViewsToSlice(output);
+    const off: usize = @intCast(try offset.toI64());
+    if (off > output_slice.len) return error.InvalidOffset;
 
-    // arg 0: output
-    const output_info = try cb.arg(0).getTypedarrayInfo();
-    if (output_info.array_type != .uint8) {
-        return error.InvalidOutputBufferType;
-    }
-
-    // arg 1: offset
-    const offset = try cb.arg(1).getValueUint32();
-    if (offset > output_info.length) {
-        return error.InvalidOffset;
-    }
-
+    const cached_state = try self.requireState();
     var validators_view = try cached_state.state.validators();
-    const output_slice = output_info.data[offset..];
-    const bytes_written = try validators_view.serializeIntoBytes(output_slice);
-    return try env.createInt64(@intCast(bytes_written));
+    const bytes_written = try validators_view.serializeIntoBytes(output_slice[off..]);
+    return js.Number.from(bytes_written);
 }
 
-pub fn BeaconStateView_hashTreeRoot(env: napi.Env, cb: napi.CallbackInfo(0)) !napi.Value {
-    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
+pub fn hashTreeRoot(self: *const BeaconStateView) !js.Uint8Array {
+    const env = js.env();
+    const cached_state = try self.requireState();
     const root = try cached_state.state.hashTreeRoot();
-    return try numberSliceToNapiValue(env, u8, root, .{ .typed_array = .uint8 });
+    return .{ .val = try numberSliceToNapiValue(env, u8, root, .{ .typed_array = .uint8 }) };
 }
-
-// pub fn BeaconStateView_stateTransition
 
 /// Process slots from current state slot to target slot, returning a new BeaconStateView.
 ///
 /// Arguments:
 /// - arg 0: target slot (number)
 /// - arg 1: options object (optional) with `transferCache` boolean
-pub fn BeaconStateView_processSlots(env: napi.Env, cb: napi.CallbackInfo(2)) !napi.Value {
-    const cached_state = try env.unwrap(CachedBeaconState, cb.this());
-    const slot: u64 = @intCast(try cb.arg(0).getValueInt64());
-
-    var transfer_cache = false;
-    if (cb.getArg(1)) |options_arg| {
-        if (try options_arg.typeof() == .object) {
-            if (try options_arg.hasNamedProperty("transferCache")) {
-                transfer_cache = try (try options_arg.getNamedProperty("transferCache")).getValueBool();
-                std.debug.print("has transferCache: {}\n", .{transfer_cache});
-            }
-        }
-    }
+pub fn processSlots(self: *const BeaconStateView, slot_arg: js.Number, options: ?js.Value) !BeaconStateView {
+    const cached_state = try self.requireState();
+    const slot_value: u64 = @intCast(try slot_arg.toI64());
+    const transfer_cache = try optionalBool(options, "transferCache", false);
     const post_state = try cached_state.clone(allocator, .{ .transfer_cache = transfer_cache });
     errdefer {
         post_state.deinit();
         allocator.destroy(post_state);
     }
 
-    try st.processSlots(allocator, post_state, slot, .{});
-
-    const ctor = try cb.this().getNamedProperty("constructor");
-    const new_state_value = try env.newInstance(ctor, .{});
-    const dummy_state = try env.unwrap(CachedBeaconState, new_state_value);
-    dummy_state.* = post_state.*;
-    allocator.destroy(post_state);
-
-    return new_state_value;
+    try st.processSlots(allocator, napi_io.get(), post_state, slot_value, .{});
+    return .{
+        .cached_state = post_state,
+        .pool_rc = pool.state.poolRc().ref(),
+    };
 }
 
-pub fn register(env: napi.Env, exports: napi.Value) !void {
-    const beacon_state_view_ctor = try env.defineClass(
-        "BeaconStateView",
-        0,
-        BeaconStateView_ctor,
-        null,
-        &[_]napi.c.napi_property_descriptor{
-            getter(BeaconStateView_slot),
-            getter(BeaconStateView_fork),
-            getter(BeaconStateView_epoch),
-            getter(BeaconStateView_genesisTime),
-            getter(BeaconStateView_genesisValidatorsRoot),
-            getter(BeaconStateView_eth1Data),
-            getter(BeaconStateView_latestBlockHeader),
-            getter(BeaconStateView_previousJustifiedCheckpoint),
-            getter(BeaconStateView_currentJustifiedCheckpoint),
-            getter(BeaconStateView_finalizedCheckpoint),
-            method(1, BeaconStateView_getBlockRoot),
-            method(1, BeaconStateView_getRandaoMix),
-            getter(BeaconStateView_previousEpochParticipation),
-            getter(BeaconStateView_currentEpochParticipation),
-            getter(BeaconStateView_latestExecutionPayloadHeader),
-            getter(BeaconStateView_historicalSummaries),
-            getter(BeaconStateView_pendingDeposits),
-            getter(BeaconStateView_pendingDepositsCount),
-            getter(BeaconStateView_pendingPartialWithdrawals),
-            getter(BeaconStateView_pendingPartialWithdrawalsCount),
-            getter(BeaconStateView_pendingConsolidations),
-            getter(BeaconStateView_pendingConsolidationsCount),
-            getter(BeaconStateView_proposerLookahead),
-            // getter(BeaconStateView_executionPayloadAvailability),
+/// Run the state transition on a SSZ-serialized SignedBeaconBlock, returning a new
+/// BeaconStateView wrapping the post-state. Mirrors `IBeaconStateView.stateTransition`.
+///
+/// Arguments:
+/// - arg 0: signed block bytes (Uint8Array)
+/// - arg 1: options (optional): parse `TransitionOpts`
+pub fn stateTransition(self: *const BeaconStateView, signed_block_bytes: js.Uint8Array, options: ?js.Value) !BeaconStateView {
+    const cached_state = try self.requireState();
+    const opts = try @import("./transition_opts.zig").parseOptions(options);
 
-            // method(1, BeaconStateView_getShufflingAtEpoch),
-            getter(BeaconStateView_previousDecisionRoot),
-            getter(BeaconStateView_currentDecisionRoot),
-            getter(BeaconStateView_nextDecisionRoot),
-            method(1, BeaconStateView_getShufflingDecisionRoot),
-            getter(BeaconStateView_currentProposers),
-            getter(BeaconStateView_nextProposers),
-            getter(BeaconStateView_previousProposers),
-            method(1, BeaconStateView_getBeaconProposer),
-            getter(BeaconStateView_currentSyncCommittee),
-            getter(BeaconStateView_nextSyncCommittee),
-            getter(BeaconStateView_currentSyncCommitteeIndexed),
-            getter(BeaconStateView_syncProposerReward),
-            method(1, BeaconStateView_getIndexedSyncCommitteeAtEpoch),
+    const bytes = try signed_block_bytes.toSlice();
 
-            getter(BeaconStateView_effectiveBalanceIncrements),
-            method(0, BeaconStateView_getEffectiveBalanceIncrementsZeroInactive),
-            method(1, BeaconStateView_getBalance),
-            method(1, BeaconStateView_getValidator),
-            method(1, BeaconStateView_getValidatorStatus),
-            getter(BeaconStateView_validatorCount),
-            getter(BeaconStateView_activeValidatorCount),
+    std.debug.assert(bytes.len >= 12);
+    const offset = std.mem.readInt(u32, bytes[0..4], .little);
+    const block_slot = std.mem.readInt(u64, bytes[offset..][0..8], .little);
+    const block_epoch = st.computeEpochAtSlot(block_slot);
 
-            getter(BeaconStateView_isMergeTransitionComplete),
-            getter(BeaconStateView_isExecutionStateType),
-            method(2, BeaconStateView_isExecutionEnabled),
+    const fork_seq = cached_state.config.forkSeqAtEpoch(block_epoch);
 
-            // method(0, BeaconStateView_getExpectedWithdrawals),
+    const signed_block = try AnySignedBeaconBlock.deserialize(allocator, .full, fork_seq, bytes);
+    defer signed_block.deinit(allocator);
 
-            getter(BeaconStateView_proposerRewards),
-            // method(2, BeaconStateView_computeBlockRewards),
-            // method(2, BeaconStateView_computeAttestationRewards),
-            // method(2, BeaconStateView_computeSyncCommitteeRewards),
-            // method(0, BeaconStateView_getLatestWeakSubjectivityCheckpointEpoch),
+    const post_state = try st.stateTransition(allocator, napi_io.get(), cached_state, signed_block, opts);
+    return .{
+        .cached_state = post_state,
+        .pool_rc = pool.state.poolRc().ref(),
+    };
+}
 
-            method(2, BeaconStateView_getVoluntaryExitValidity),
-            method(2, BeaconStateView_isValidVoluntaryExit),
+/// Compute the anchor checkpoint and block header for the current state.
+/// Returns: { checkpoint: { epoch, root }, blockHeader: BeaconBlockHeader }
+pub fn computeAnchorCheckpoint(self: *const BeaconStateView) !js.Value {
+    const env = js.env();
+    const cached_state = try self.requireState();
+    var anchor = try st.AnchorCheckpoint.fromState(cached_state.state);
 
-            method(0, BeaconStateView_getFinalizedRootProof),
-            // method(1, BeaconStateView_getSyncCommitteesWitness),
-            method(1, BeaconStateView_getSingleProof),
-            method(1, BeaconStateView_createMultiProof),
-
-            method(0, BeaconStateView_computeUnrealizedCheckpoints),
-
-            getter(BeaconStateView_clonedCount),
-            getter(BeaconStateView_clonedCountWithTransferCache),
-            getter(BeaconStateView_createdWithTransferCache),
-            // getter(BeaconStateView_isStateValidatorsNodesPopulated),
-
-            // method(2, BeaconStateView_loadOtherState),
-            method(0, BeaconStateView_serialize),
-            method(0, BeaconStateView_serializedSize),
-            method(2, BeaconStateView_serializeToBytes),
-            method(0, BeaconStateView_serializeValidators),
-            method(0, BeaconStateView_serializedValidatorsSize),
-            method(2, BeaconStateView_serializeValidatorsToBytes),
-
-            method(0, BeaconStateView_hashTreeRoot),
-
-            // method(2, BeaconStateView_stateTransition),
-            method(2, BeaconStateView_processSlots),
-        },
+    const obj = try env.createObject();
+    try obj.setNamedProperty(
+        "checkpoint",
+        try sszValueToNapiValue(env, ct.phase0.Checkpoint, &anchor.checkpoint),
     );
-    // Static method on constructor
-    try beacon_state_view_ctor.defineProperties(&[_]napi.c.napi_property_descriptor{.{
-        .utf8name = "createFromBytes",
-        .method = napi.wrapCallback(1, BeaconStateView_createFromBytes),
-    }});
+    try obj.setNamedProperty(
+        "blockHeader",
+        try sszValueToNapiValue(env, ct.phase0.BeaconBlockHeader, &anchor.block_header),
+    );
+    return js_types.wrap(js.Value, obj);
+}
 
-    try exports.setNamedProperty("BeaconStateView", beacon_state_view_ctor);
+fn shufflingToNapi(shuffling: anytype) !napi.Value {
+    const env = js.env();
+    const obj = try env.createObject();
+    try obj.setNamedProperty("epoch", try env.createInt64(@intCast(shuffling.epoch)));
+    try obj.setNamedProperty(
+        "activeIndices",
+        try numberSliceToNapiValue(env, u64, shuffling.active_indices, .{ .typed_array = .uint32 }),
+    );
+    try obj.setNamedProperty(
+        "shuffling",
+        try numberSliceToNapiValue(env, u64, shuffling.shuffling, .{ .typed_array = .uint32 }),
+    );
+
+    const committees_outer = try env.createArray();
+    for (shuffling.committees, 0..) |slot_committees, slot_idx| {
+        const slot_arr = try env.createArray();
+        for (slot_committees, 0..) |committee, committee_idx| {
+            const committee_arr = try numberSliceToNapiValue(env, u64, committee, .{ .typed_array = .uint32 });
+            try slot_arr.setElement(@intCast(committee_idx), committee_arr);
+        }
+        try committees_outer.setElement(@intCast(slot_idx), slot_arr);
+    }
+    try obj.setNamedProperty("committees", committees_outer);
+    try obj.setNamedProperty("committeesPerSlot", try env.createInt64(@intCast(shuffling.committees_per_slot)));
+
+    return obj;
+}
+
+pub fn getPreviousShuffling(self: *const BeaconStateView) !js.Value {
+    const cached_state = try self.requireState();
+    const shuffling = cached_state.epoch_cache.getPreviousShuffling();
+    return js_types.wrap(js.Value, try shufflingToNapi(shuffling));
+}
+
+pub fn getCurrentShuffling(self: *const BeaconStateView) !js.Value {
+    const cached_state = try self.requireState();
+    const shuffling = cached_state.epoch_cache.getCurrentShuffling();
+    return js_types.wrap(js.Value, try shufflingToNapi(shuffling));
+}
+
+pub fn getNextShuffling(self: *const BeaconStateView) !js.Value {
+    const cached_state = try self.requireState();
+    const shuffling = cached_state.epoch_cache.getNextEpochShuffling();
+    return js_types.wrap(js.Value, try shufflingToNapi(shuffling));
+}
+
+pub fn getShufflingAtEpoch(self: *const BeaconStateView, epoch_arg: js.Number) !js.Value {
+    const cached_state = try self.requireState();
+    const epoch_value: u64 = @intCast(try epoch_arg.toI64());
+
+    const shuffling = cached_state.epoch_cache.getShufflingAtEpochOrNull(epoch_value) orelse {
+        return throwNullAs(js.Value, "NO_SHUFFLING", "Shuffling not available for requested epoch");
+    };
+    return js_types.wrap(js.Value, try shufflingToNapi(shuffling));
+}
+
+// -------------------------
+// Throw stubs — IBeaconStateView surface not yet implemented in lodestar-z
+// -------------------------
+
+fn throwNotImpl(comptime T: type, name: [:0]const u8) !T {
+    return throwNullAs(T, "NOT_IMPLEMENTED", name);
+}
+
+// --- Gloas-only fields/methods (no Gloas state in lodestar-z yet) ---
+
+pub fn latestBlockHash(_: *const BeaconStateView) !js.Uint8Array {
+    return throwNotImpl(js.Uint8Array, "latestBlockHash is not available before Gloas");
+}
+
+pub fn executionPayloadAvailability(_: *const BeaconStateView) !js.Value {
+    return throwNotImpl(js.Value, "executionPayloadAvailability is not available before Gloas");
+}
+
+pub fn latestExecutionPayloadBid(_: *const BeaconStateView) !js.Value {
+    return throwNotImpl(js.Value, "latestExecutionPayloadBid is not available before Gloas");
+}
+
+pub fn payloadExpectedWithdrawals(_: *const BeaconStateView) !js.Array {
+    return throwNotImpl(js.Array, "payloadExpectedWithdrawals is not available before Gloas");
+}
+
+pub fn getBuilder(_: *const BeaconStateView, _: js.Number) !js.Value {
+    return throwNotImpl(js.Value, "getBuilder is not available before Gloas");
+}
+
+pub fn canBuilderCoverBid(_: *const BeaconStateView, _: js.Number, _: js.Number) !js.Boolean {
+    return throwNotImpl(js.Boolean, "canBuilderCoverBid is not available before Gloas");
+}
+
+pub fn getEpochPTCs(_: *const BeaconStateView, _: js.Number) !js.Array {
+    return throwNotImpl(js.Array, "getEpochPTCs is not available before Gloas");
+}
+
+pub fn getIndexInPayloadTimelinessCommittee(_: *const BeaconStateView, _: js.Number, _: js.Number) !js.Number {
+    return throwNotImpl(js.Number, "getIndexInPayloadTimelinessCommittee is not available before Gloas");
+}
+
+pub fn getExpectedWithdrawalsForFullParent(_: *const BeaconStateView, _: js.Value) !js.Array {
+    return throwNotImpl(js.Array, "getExpectedWithdrawalsForFullParent is not available before Gloas");
+}
+
+pub fn withParentPayloadApplied(_: *const BeaconStateView, _: js.Value) !BeaconStateView {
+    try js.env().throwError("NOT_IMPLEMENTED", "withParentPayloadApplied is not available before Gloas");
+    return error.NotImplemented;
+}
+
+// --- API-only methods (used by beacon-node rewards endpoints) ---
+
+pub fn computeBlockRewards(_: *const BeaconStateView, _: js.Value, _: ?js.Value) !js.Value {
+    return throwNotImpl(js.Value, "computeBlockRewards not implemented");
+}
+
+pub fn computeAttestationsRewards(_: *const BeaconStateView, _: ?js.Value) !js.Value {
+    return throwNotImpl(js.Value, "computeAttestationsRewards not implemented");
+}
+
+pub fn computeSyncCommitteeRewards(_: *const BeaconStateView, _: js.Value, _: js.Value) !js.Value {
+    return throwNotImpl(js.Value, "computeSyncCommitteeRewards not implemented");
+}
+
+// --- Misc not-yet-implemented ---
+
+pub fn getLatestWeakSubjectivityCheckpointEpoch(self: *const BeaconStateView) !js.Number {
+    const cached_state = try self.requireState();
+    const ws_epoch = st.getLatestWeakSubjectivityCheckpointEpoch(cached_state.epoch_cache);
+    return js.Number.from(ws_epoch);
+}
+
+pub fn isStateValidatorsNodesPopulated(_: *const BeaconStateView) !js.Boolean {
+    // Native state is always fully populated — return true.
+    return js.Boolean.from(true);
+}
+
+pub fn toValue(self: *const BeaconStateView) !js.Value {
+    const env = js.env();
+    const cached_state = try self.requireState();
+    switch (cached_state.state.forkSeq()) {
+        inline else => |f| {
+            const ForkBeaconState = fork_types.ForkTypes(f).BeaconState;
+            var value: ForkBeaconState.Type = ForkBeaconState.default_value;
+            defer ForkBeaconState.deinit(allocator, &value);
+            try cached_state.state.castToFork(f).inner.toValue(allocator, &value);
+            return js_types.wrap(js.Value, try sszValueToNapiValue(env, ForkBeaconState, &value));
+        },
+    }
+}
+
+/// Compute expected withdrawals for the next payload (capella+).
+/// Returns: { expectedWithdrawals: Withdrawal[], processedPartialWithdrawalsCount, processedValidatorSweepCount,
+///           processedBuilderWithdrawalsCount, processedBuildersSweepCount }
+/// The latter two are Gloas-only — always 0 here since Zig STF doesn't process Gloas yet.
+pub fn getExpectedWithdrawals(self: *const BeaconStateView) !js.Value {
+    const env = js.env();
+    const cached_state = try self.requireState();
+    const fork_seq = cached_state.state.forkSeq();
+
+    // We also check this within the native fn itself but this lets us avoid allocating an `AutoHashMap` early.
+    if (fork_seq.lt(.capella)) {
+        return throwNullAs(js.Value, "INVALID_FORK", "getExpectedWithdrawals only supported capella+");
+    }
+
+    var withdrawals_buf: [preset.MAX_WITHDRAWALS_PER_PAYLOAD]ct.capella.Withdrawal.Type = undefined;
+    var withdrawals_result = st.WithdrawalsResult{
+        .withdrawals = ct.capella.Withdrawals.Type.initBuffer(&withdrawals_buf),
+    };
+
+    var withdrawal_balances = std.AutoHashMap(ct.primitive.ValidatorIndex.Type, usize).init(allocator);
+    defer withdrawal_balances.deinit();
+
+    switch (fork_seq) {
+        inline .capella, .deneb, .electra, .fulu => |f| {
+            try st.getExpectedWithdrawals(
+                f,
+                cached_state.epoch_cache,
+                cached_state.state.castToFork(f),
+                &withdrawals_result,
+                &withdrawal_balances,
+            );
+        },
+        else => unreachable,
+    }
+
+    const obj = try env.createObject();
+
+    const withdrawals_arr = try env.createArray();
+    for (withdrawals_result.withdrawals.items, 0..) |*w, i| {
+        const w_value = try sszValueToNapiValue(env, ct.capella.Withdrawal, w);
+        try withdrawals_arr.setElement(@intCast(i), w_value);
+    }
+    try obj.setNamedProperty("expectedWithdrawals", withdrawals_arr);
+    try obj.setNamedProperty("processedPartialWithdrawalsCount", try env.createUint32(@intCast(withdrawals_result.processed_partial_withdrawals_count)));
+    try obj.setNamedProperty("processedValidatorSweepCount", try env.createUint32(@intCast(withdrawals_result.sampled_validators)));
+    // TODO(bing): Implement when we support Gloas.
+    try obj.setNamedProperty("processedBuilderWithdrawalsCount", try env.createUint32(0));
+    try obj.setNamedProperty("processedBuildersSweepCount", try env.createUint32(0));
+
+    return js_types.wrap(js.Value, obj);
+}
+
+fn requireState(self: *const BeaconStateView) !*CachedBeaconState {
+    return self.cached_state orelse error.InvalidState;
+}
+
+fn jsNull() !js.Value {
+    return js_types.wrap(js.Value, try js.env().getNull());
+}
+
+fn jsNullAs(comptime T: type) !T {
+    return js_types.wrap(T, try js.env().getNull());
+}
+
+fn throwNull(code: [:0]const u8, message: [:0]const u8) !js.Value {
+    const env = js.env();
+    try env.throwError(code, message);
+    return jsNull();
+}
+
+fn throwNullAs(comptime T: type, code: [:0]const u8, message: [:0]const u8) !T {
+    const env = js.env();
+    try env.throwError(code, message);
+    return jsNullAs(T);
+}
+
+fn optionalBool(options: ?js.Value, name: [:0]const u8, default_value: bool) !bool {
+    if (options) |value| {
+        const raw = value.toValue();
+        if (try raw.typeof() == .object) {
+            if (try raw.hasNamedProperty(name)) {
+                return try (try raw.getNamedProperty(name)).getValueBool();
+            }
+        }
+    }
+    return default_value;
+}
+
+/// Populate a native Bellatrix `ExecutionPayload.Type` from a JS object with the Lodestar
+/// shape. Caller must `ct.bellatrix.ExecutionPayload.deinit(allocator, out)` to free
+/// `extra_data` and `transactions`.
+fn executionPayloadFromJs(payload: napi.Value, out: *ct.bellatrix.ExecutionPayload.Type) !void {
+    try readByteArrayInto(payload, "parentHash", &out.parent_hash);
+    try readByteArrayInto(payload, "feeRecipient", &out.fee_recipient);
+    try readByteArrayInto(payload, "stateRoot", &out.state_root);
+    try readByteArrayInto(payload, "receiptsRoot", &out.receipts_root);
+    try readByteArrayInto(payload, "logsBloom", &out.logs_bloom);
+    try readByteArrayInto(payload, "prevRandao", &out.prev_randao);
+    try readByteArrayInto(payload, "blockHash", &out.block_hash);
+
+    out.block_number = @intCast(try (try payload.getNamedProperty("blockNumber")).getValueInt64());
+    out.gas_limit = @intCast(try (try payload.getNamedProperty("gasLimit")).getValueInt64());
+    out.gas_used = @intCast(try (try payload.getNamedProperty("gasUsed")).getValueInt64());
+    out.timestamp = @intCast(try (try payload.getNamedProperty("timestamp")).getValueInt64());
+
+    out.base_fee_per_gas = try readBigintU256(try payload.getNamedProperty("baseFeePerGas"));
+
+    const extra_data = try payload.getNamedProperty("extraData");
+    const extra_data_info = try extra_data.getTypedarrayInfo();
+    if (extra_data_info.array_type != .uint8) return error.InvalidExtraData;
+    try out.extra_data.appendSlice(allocator, extra_data_info.data);
+
+    const transactions = try payload.getNamedProperty("transactions");
+    const tx_count = try transactions.getArrayLength();
+    try out.transactions.ensureTotalCapacity(allocator, tx_count);
+    var i: u32 = 0;
+    while (i < tx_count) : (i += 1) {
+        const tx_value = try transactions.getElement(i);
+        const tx_info = try tx_value.getTypedarrayInfo();
+        if (tx_info.array_type != .uint8) return error.InvalidTransaction;
+        var tx: std.ArrayListUnmanaged(u8) = .empty;
+        errdefer tx.deinit(allocator);
+        try tx.appendSlice(allocator, tx_info.data);
+        out.transactions.appendAssumeCapacity(tx);
+    }
+}
+
+fn readByteArrayInto(parent: napi.Value, comptime field: [:0]const u8, out: []u8) !void {
+    const value = try parent.getNamedProperty(field);
+    const info = try value.getTypedarrayInfo();
+    if (info.array_type != .uint8) return error.InvalidByteArrayField;
+    if (info.data.len != out.len) return error.InvalidByteArrayLength;
+    @memcpy(out, info.data);
+}
+
+/// Read a JS bigint into u256.
+///
+/// Throws on negative values; we never store signed u256 in consensus types.
+fn readBigintU256(value: napi.Value) !u256 {
+    var sign_bit: c_int = 0;
+    var word_count: usize = 4;
+    var words: [4]u64 = .{ 0, 0, 0, 0 };
+    try napi.status.check(napi.c.napi_get_value_bigint_words(
+        value.env,
+        value.value,
+        &sign_bit,
+        &word_count,
+        &words,
+    ));
+    if (sign_bit != 0) return error.NegativeBigint;
+    var result: u256 = 0;
+    var i: usize = 0;
+    while (i < @min(word_count, 4)) : (i += 1) {
+        result |= @as(u256, words[i]) << @intCast(i * 64);
+    }
+    return result;
 }

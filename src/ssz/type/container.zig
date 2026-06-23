@@ -9,10 +9,12 @@ const isBasicType = @import("type_kind.zig").isBasicType;
 const merkleize = @import("hashing").merkleize;
 const maxChunksToDepth = @import("hashing").maxChunksToDepth;
 
-const Node = @import("persistent_merkle_tree").Node;
-const Gindex = @import("persistent_merkle_tree").Gindex;
-const Depth = @import("persistent_merkle_tree").Depth;
+const pmt = @import("persistent_merkle_tree");
+const Node = pmt.Node;
+const Gindex = pmt.Gindex;
+const Depth = pmt.Depth;
 const ContainerTreeView = @import("../tree_view/root.zig").ContainerTreeView;
+const StructContainerTreeView = @import("../tree_view/root.zig").StructContainerTreeView;
 
 pub fn FixedContainerType(comptime ST: type) type {
     const ssz_fields = switch (@typeInfo(ST)) {
@@ -20,7 +22,9 @@ pub fn FixedContainerType(comptime ST: type) type {
         else => @compileError("Expected a struct type."),
     };
 
-    comptime var native_fields: [ssz_fields.len]std.builtin.Type.StructField = undefined;
+    comptime var native_names: [ssz_fields.len][:0]const u8 = undefined;
+    comptime var native_types: [ssz_fields.len]type = undefined;
+    comptime var native_attrs: [ssz_fields.len]std.builtin.Type.StructField.Attributes = undefined;
     comptime var _offsets: [ssz_fields.len]usize = undefined;
     comptime var _fixed_size: usize = 0;
     inline for (ssz_fields, 0..) |field, i| {
@@ -28,27 +32,14 @@ pub fn FixedContainerType(comptime ST: type) type {
             @compileError("FixedContainerType must only contain fixed fields");
         }
 
-        native_fields[i] = .{
-            .name = field.name,
-            .type = field.type.Type,
-            .default_value_ptr = null,
-            .is_comptime = false,
-            .alignment = @alignOf(field.type.Type),
-        };
+        native_names[i] = field.name;
+        native_types[i] = field.type.Type;
+        native_attrs[i] = .{};
         _offsets[i] = _fixed_size;
         _fixed_size += field.type.fixed_size;
     }
 
-    const T = @Type(.{
-        .@"struct" = .{
-            .layout = .auto,
-            .backing_integer = null,
-            .fields = native_fields[0..],
-            // TODO: do we need to assign this value?
-            .decls = &[_]std.builtin.Type.Declaration{},
-            .is_tuple = false,
-        },
-    });
+    const T = @Struct(.auto, null, &native_names, &native_types, &native_attrs);
 
     return struct {
         pub const kind = TypeKind.container;
@@ -159,7 +150,8 @@ pub fn FixedContainerType(comptime ST: type) type {
 
         pub const tree = struct {
             pub fn default(pool: *Node.Pool) !Node.Id {
-                var nodes: [chunk_count]Node.Id = undefined;
+                // Zero-filled so a mid-build error's errdefer is a no-op over the unfilled slots.
+                var nodes: [chunk_count]Node.Id = @splat(@as(Node.Id, @enumFromInt(0)));
                 errdefer pool.free(&nodes);
                 inline for (fields, 0..) |field, i| {
                     if (comptime isBasicType(field.type)) {
@@ -176,7 +168,8 @@ pub fn FixedContainerType(comptime ST: type) type {
                     return error.InvalidSize;
                 }
 
-                var nodes: [chunk_count]Node.Id = undefined;
+                // Zero-filled so a mid-build error's errdefer is a no-op over the unfilled slots.
+                var nodes: [chunk_count]Node.Id = @splat(@as(Node.Id, @enumFromInt(0)));
                 errdefer pool.free(&nodes);
                 var offset: usize = 0;
 
@@ -200,7 +193,8 @@ pub fn FixedContainerType(comptime ST: type) type {
             }
 
             pub fn fromValue(pool: *Node.Pool, value: *const Type) !Node.Id {
-                var nodes: [chunk_count]Node.Id = undefined;
+                // Zero-filled so a mid-build error's errdefer is a no-op over the unfilled slots.
+                var nodes: [chunk_count]Node.Id = @splat(@as(Node.Id, @enumFromInt(0)));
                 errdefer pool.free(&nodes);
 
                 inline for (fields, 0..) |field, i| {
@@ -302,13 +296,165 @@ pub fn FixedContainerType(comptime ST: type) type {
     };
 }
 
+/// A fixed-size container whose tree representation is a single
+/// `.container_struct` Node (vtable + cached deserialized struct), instead of a
+/// merkleized subtree of leaf chunks.
+///
+/// This trades a ~50% reduction in struct-decode work (no per-field tree
+/// walk + leaf re-decode) for opaque tree navigation: gindex paths into the
+/// container's interior are not navigable. Use this for hot-path types where
+/// callers consume the whole struct (e.g. `validatorsSlice`).
+///
+/// Wraps an underlying `FixedContainerType(ST)` and re-exports its
+/// merkleization, serialization, JSON, and field metadata. The differences
+/// live entirely in the `tree` namespace, which routes through
+/// `Pool.createContainerStruct` / `Pool.getStructPtr`.
+pub fn StructContainerType(comptime ST: type) type {
+    const FixedCT = FixedContainerType(ST);
+
+    return struct {
+        pub const kind = TypeKind.container;
+        pub const Fields: type = ST;
+        pub const fields: []const std.builtin.Type.StructField = FixedCT.fields;
+        pub const Type: type = FixedCT.Type;
+        pub const TreeView: type = StructContainerTreeView(@This());
+        pub const fixed_size: usize = FixedCT.fixed_size;
+        pub const field_offsets: [fields.len]usize = FixedCT.field_offsets;
+        pub const chunk_count: usize = fields.len;
+        pub const chunk_depth: Depth = maxChunksToDepth(chunk_count);
+        pub const default_value: Type = FixedCT.default_value;
+        pub const default_root: [32]u8 = FixedCT.default_root;
+        pub const serialized = FixedCT.serialized;
+        const Self = @This();
+
+        /// Wrapper that satisfies the ContainerStructRef vtable contract.
+        ///
+        /// `value` is the full deserialized struct (cached at the leaf-Node
+        /// level). The Pool clones via `init` and frees via `deinit`. Root
+        /// computation merkleizes the wrapped value via `FixedCT.hashTreeRoot`.
+        pub const WrappedT = struct {
+            value: Type,
+
+            pub fn getRoot(self: *const WrappedT, out: *[32]u8) void {
+                FixedCT.hashTreeRoot(&self.value, out) catch unreachable;
+            }
+
+            /// Materialize a temporary navigable PMT subtree representing this
+            /// container's full hash-tree. Used by proof traversal — see
+            /// `Pool.materializeContainerStruct`. The returned Id has refcount=0;
+            /// the caller is responsible for `unref`'ing it.
+            pub fn toTree(self: *const WrappedT, pool: *Node.Pool) !Node.Id {
+                return try FixedCT.tree.fromValue(pool, &self.value);
+            }
+
+            pub fn init(allocator: std.mem.Allocator, wrapped: *const WrappedT) !*const WrappedT {
+                const ptr = try allocator.create(WrappedT);
+                errdefer allocator.destroy(ptr);
+                try FixedCT.clone(&wrapped.value, &ptr.value);
+                return ptr;
+            }
+
+            pub fn deinit(self: *WrappedT, allocator: std.mem.Allocator) void {
+                allocator.destroy(self);
+            }
+        };
+
+        pub fn equals(a: *const Type, b: *const Type) bool {
+            return FixedCT.equals(a, b);
+        }
+
+        pub fn clone(value: *const Type, out: anytype) !void {
+            return FixedCT.clone(value, out);
+        }
+
+        pub fn hashTreeRoot(value: *const Type, out: *[32]u8) !void {
+            return FixedCT.hashTreeRoot(value, out);
+        }
+
+        pub fn serializeIntoBytes(value: *const Type, out: []u8) usize {
+            return FixedCT.serializeIntoBytes(value, out);
+        }
+
+        pub fn deserializeFromBytes(data: []const u8, out: *Type) !void {
+            return FixedCT.deserializeFromBytes(data, out);
+        }
+
+        pub const tree = struct {
+            pub fn default(pool: *Node.Pool) !Node.Id {
+                const wrapped = WrappedT{ .value = default_value };
+                return try pool.createContainerStruct(WrappedT, &wrapped);
+            }
+
+            pub fn deserializeFromBytes(pool: *Node.Pool, data: []const u8) !Node.Id {
+                if (data.len != fixed_size) {
+                    return error.InvalidSize;
+                }
+                var wrapped: WrappedT = undefined;
+                try Self.deserializeFromBytes(data, &wrapped.value);
+                return try pool.createContainerStruct(WrappedT, &wrapped);
+            }
+
+            pub fn toValue(node: Node.Id, pool: *Node.Pool, out: *Type) !void {
+                const wrapped = try pool.getStructPtr(node, WrappedT);
+                try Self.clone(&wrapped.value, out);
+            }
+
+            /// Returns a read-only pointer to the value stored in a
+            /// `.container_struct` node, with no copy. The pointer is valid
+            /// as long as the node's refcount is held and the value isn't
+            /// replaced via CoW. Caller must not retain the pointer past
+            /// any mutation of the same validator slot.
+            pub fn getValuePtr(node: Node.Id, pool: *Node.Pool) !*const Type {
+                const wrapped = try pool.getStructPtr(node, WrappedT);
+                return &wrapped.value;
+            }
+
+            pub fn fromValue(pool: *Node.Pool, value: *const Type) !Node.Id {
+                const wrapped = WrappedT{ .value = value.* };
+                return try pool.createContainerStruct(WrappedT, &wrapped);
+            }
+
+            pub fn serializeIntoBytes(node: Node.Id, pool: *Node.Pool, out: []u8) !usize {
+                const wrapped = try pool.getStructPtr(node, WrappedT);
+                return Self.serializeIntoBytes(&wrapped.value, out);
+            }
+        };
+
+        pub fn serializeIntoJson(writer: anytype, in: *const Type) !void {
+            return FixedCT.serializeIntoJson(writer, in);
+        }
+
+        pub fn deserializeFromJson(source: *std.json.Scanner, out: *Type) !void {
+            return FixedCT.deserializeFromJson(source, out);
+        }
+
+        pub fn getFieldIndex(comptime name: []const u8) usize {
+            return FixedCT.getFieldIndex(name);
+        }
+
+        pub fn hasField(comptime name: []const u8) bool {
+            return FixedCT.hasField(name);
+        }
+
+        pub fn getFieldType(comptime name: []const u8) type {
+            return FixedCT.getFieldType(name);
+        }
+
+        pub fn getFieldGindex(comptime name: []const u8) Gindex {
+            return FixedCT.getFieldGindex(name);
+        }
+    };
+}
+
 pub fn VariableContainerType(comptime ST: type) type {
     const ssz_fields = switch (@typeInfo(ST)) {
         .@"struct" => |s| s.fields,
         else => @compileError("Expected a struct type."),
     };
 
-    comptime var native_fields: [ssz_fields.len]std.builtin.Type.StructField = undefined;
+    comptime var native_names: [ssz_fields.len][:0]const u8 = undefined;
+    comptime var native_types: [ssz_fields.len]type = undefined;
+    comptime var native_attrs: [ssz_fields.len]std.builtin.Type.StructField.Attributes = undefined;
     comptime var _offsets: [ssz_fields.len]usize = undefined;
     comptime var _min_size: usize = 0;
     comptime var _max_size: usize = 0;
@@ -327,13 +473,9 @@ pub fn VariableContainerType(comptime ST: type) type {
             _fixed_end += 4;
         }
 
-        native_fields[i] = .{
-            .name = field.name,
-            .type = field.type.Type,
-            .default_value_ptr = null,
-            .is_comptime = false,
-            .alignment = @alignOf(field.type.Type),
-        };
+        native_names[i] = field.name;
+        native_types[i] = field.type.Type;
+        native_attrs[i] = .{};
     }
 
     comptime {
@@ -344,16 +486,7 @@ pub fn VariableContainerType(comptime ST: type) type {
 
     const var_count = ssz_fields.len - _fixed_count;
 
-    const T = @Type(.{
-        .@"struct" = .{
-            .layout = .auto,
-            .backing_integer = null,
-            .fields = native_fields[0..],
-            // TODO: do we need to assign this value?
-            .decls = &[_]std.builtin.Type.Declaration{},
-            .is_tuple = false,
-        },
-    });
+    const T = @Struct(.auto, null, &native_names, &native_types, &native_attrs);
 
     return struct {
         pub const kind = TypeKind.container;
@@ -619,7 +752,8 @@ pub fn VariableContainerType(comptime ST: type) type {
 
         pub const tree = struct {
             pub fn default(pool: *Node.Pool) !Node.Id {
-                var nodes: [chunk_count]Node.Id = undefined;
+                // Zero-filled so a mid-build error's errdefer is a no-op over the unfilled slots.
+                var nodes: [chunk_count]Node.Id = @splat(@as(Node.Id, @enumFromInt(0)));
                 errdefer pool.free(&nodes);
                 inline for (fields, 0..) |field, i| {
                     if (comptime isBasicType(field.type)) {
@@ -637,7 +771,8 @@ pub fn VariableContainerType(comptime ST: type) type {
                 }
 
                 const ranges = try readFieldRanges(data);
-                var nodes: [chunk_count]Node.Id = undefined;
+                // Zero-filled so a mid-build error's errdefer is a no-op over the unfilled slots.
+                var nodes: [chunk_count]Node.Id = @splat(@as(Node.Id, @enumFromInt(0)));
                 errdefer pool.free(&nodes);
 
                 inline for (fields, 0..) |field, i| {
@@ -665,7 +800,8 @@ pub fn VariableContainerType(comptime ST: type) type {
             }
 
             pub fn fromValue(pool: *Node.Pool, value: *const Type) !Node.Id {
-                var nodes: [chunk_count]Node.Id = undefined;
+                // Zero-filled so a mid-build error's errdefer is a no-op over the unfilled slots.
+                var nodes: [chunk_count]Node.Id = @splat(@as(Node.Id, @enumFromInt(0)));
                 errdefer pool.free(&nodes);
 
                 inline for (fields, 0..) |field, i| {
@@ -767,6 +903,8 @@ const UintType = @import("uint.zig").UintType;
 const BoolType = @import("bool.zig").BoolType;
 const ByteVectorType = @import("byte_vector.zig").ByteVectorType;
 const FixedListType = @import("list.zig").FixedListType;
+const FixedVectorType = @import("vector.zig").FixedVectorType;
+const proof = pmt.proof;
 
 const TypeTestCase = @import("test_utils.zig").TypeTestCase;
 
@@ -786,9 +924,9 @@ test "ContainerType - sanity" {
     // create a variable container type and instance and round-trip serialize
     const allocator = std.testing.allocator;
     const Foo = VariableContainerType(struct {
-        a: FixedListType(UintType(8), 32),
-        b: FixedListType(UintType(8), 32),
-        c: FixedListType(UintType(8), 32),
+        a: FixedListType(UintType(8), 32, .{}),
+        b: FixedListType(UintType(8), 32, .{}),
+        c: FixedListType(UintType(8), 32, .{}),
     });
     var f: Foo.Type = undefined;
     f.a = try std.ArrayListUnmanaged(u8).initCapacity(allocator, 10);
@@ -836,8 +974,8 @@ test "clone FixedContainerType" {
 
 test "clone VariableContainerType" {
     const allocator = std.testing.allocator;
-    const FieldA = FixedListType(UintType(8), 32);
-    const FieldB = FixedListType(UintType(8), 32);
+    const FieldA = FixedListType(UintType(8), 32, .{});
+    const FieldB = FixedListType(UintType(8), 32, .{});
     const Foo = VariableContainerType(struct {
         a: FieldA,
         b: FieldB,
@@ -856,7 +994,7 @@ test "clone VariableContainerType" {
     try std.testing.expect(Foo.equals(&cloned_f, &f));
 
     // clone into a larger container
-    const FieldC = FixedListType(UintType(8), 32);
+    const FieldC = FixedListType(UintType(8), 32, .{});
     const Foo2 = VariableContainerType(struct {
         a: FieldA,
         b: FieldB,
@@ -892,7 +1030,7 @@ test "FixedContainerType - serializeIntoBytes (zero)" {
     try Container.hashTreeRoot(&value, &root);
     try std.testing.expectEqualSlices(u8, &expected_root, &root);
 
-    var pool = try Node.Pool.init(allocator, 64);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 64 });
     defer pool.deinit();
     const node = try Container.tree.fromValue(&pool, &value);
     var tree_serialized: [Container.fixed_size]u8 = undefined;
@@ -923,7 +1061,7 @@ test "FixedContainerType - serializeIntoBytes (some value)" {
     try Container.hashTreeRoot(&value, &root);
     try std.testing.expectEqualSlices(u8, &expected_root, &root);
 
-    var pool = try Node.Pool.init(allocator, 64);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 64 });
     defer pool.deinit();
     const node = try Container.tree.fromValue(&pool, &value);
     var tree_serialized: [Container.fixed_size]u8 = undefined;
@@ -944,7 +1082,7 @@ test "FixedContainerType - tree.deserializeFromBytes" {
     const expected_serialized = [_]u8{ 0x40, 0xe2, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0xf1, 0xfb, 0x09, 0x00, 0x00, 0x00, 0x00, 0x00 };
     const expected_root = [_]u8{ 0x53, 0xb3, 0x8a, 0xff, 0x7b, 0xf2, 0xdd, 0x1a, 0x49, 0x90, 0x3d, 0x07, 0xa3, 0x35, 0x09, 0xb9, 0x80, 0xc6, 0xac, 0xc9, 0xf2, 0x23, 0x5a, 0x45, 0xaa, 0xc3, 0x42, 0xb0, 0xa9, 0x52, 0x8c, 0x22 };
 
-    var pool = try Node.Pool.init(allocator, 64);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 64 });
     defer pool.deinit();
 
     const node = try Container.tree.deserializeFromBytes(&pool, &expected_serialized);
@@ -982,7 +1120,7 @@ test "FixedContainerType - serializeIntoBytes (uint64 + ByteVector32)" {
     try Container.hashTreeRoot(&value, &root);
     try std.testing.expectEqualSlices(u8, &expected_root, &root);
 
-    var pool = try Node.Pool.init(allocator, 64);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 64 });
     defer pool.deinit();
     const node = try Container.tree.fromValue(&pool, &value);
     var tree_serialized: [Container.fixed_size]u8 = undefined;
@@ -995,7 +1133,7 @@ test "FixedContainerType - serializeIntoBytes (uint64 + ByteVector32)" {
 test "VariableContainerType - serializeIntoBytes (zero)" {
     const allocator = std.testing.allocator;
     const Container = VariableContainerType(struct {
-        a: FixedListType(UintType(64), 128),
+        a: FixedListType(UintType(64), 128, .{}),
         b: UintType(64),
     });
 
@@ -1017,7 +1155,7 @@ test "VariableContainerType - serializeIntoBytes (zero)" {
     try Container.hashTreeRoot(allocator, &value, &root);
     try std.testing.expectEqualSlices(u8, &expected_root, &root);
 
-    var pool = try Node.Pool.init(allocator, 64);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 64 });
     defer pool.deinit();
     const node = try Container.tree.fromValue(&pool, &value);
     const tree_size = try Container.tree.serializedSize(node, &pool);
@@ -1032,7 +1170,7 @@ test "VariableContainerType - serializeIntoBytes (zero)" {
 test "VariableContainerType - serializeIntoBytes (some value)" {
     const allocator = std.testing.allocator;
     const Container = VariableContainerType(struct {
-        a: FixedListType(UintType(64), 128),
+        a: FixedListType(UintType(64), 128, .{}),
         b: UintType(64),
     });
 
@@ -1066,7 +1204,7 @@ test "VariableContainerType - serializeIntoBytes (some value)" {
     try Container.hashTreeRoot(allocator, &value, &root);
     try std.testing.expectEqualSlices(u8, &expected_root, &root);
 
-    var pool = try Node.Pool.init(allocator, 128);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 128 });
     defer pool.deinit();
     const node = try Container.tree.fromValue(&pool, &value);
     const tree_size = try Container.tree.serializedSize(node, &pool);
@@ -1081,7 +1219,7 @@ test "VariableContainerType - serializeIntoBytes (some value)" {
 test "VariableContainerType - tree.deserializeFromBytes" {
     const allocator = std.testing.allocator;
     const Container = VariableContainerType(struct {
-        a: FixedListType(UintType(64), 128),
+        a: FixedListType(UintType(64), 128, .{}),
         b: UintType(64),
     });
 
@@ -1096,7 +1234,7 @@ test "VariableContainerType - tree.deserializeFromBytes" {
     };
     const expected_root = [_]u8{ 0x5f, 0xf1, 0xb9, 0x2b, 0x2f, 0xa5, 0x5e, 0xea, 0x1a, 0x14, 0xb2, 0x65, 0x47, 0x03, 0x5b, 0x2f, 0x54, 0x37, 0x81, 0x4b, 0x34, 0x36, 0x17, 0x22, 0x05, 0xfa, 0x7d, 0x6a, 0xf4, 0x09, 0x17, 0x48 };
 
-    var pool = try Node.Pool.init(allocator, 128);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 128 });
     defer pool.deinit();
 
     const node = try Container.tree.deserializeFromBytes(&pool, &serialized);
@@ -1147,11 +1285,11 @@ test "ContainerType" {
     }
 }
 
-test "ContainerType with FixedListType(uint64, 128) and uint64" {
+test "ContainerType with FixedListType(uint64, 128, .{}) and uint64" {
     const allocator = std.testing.allocator;
 
     const Container = VariableContainerType(struct {
-        a: FixedListType(UintType(64), 128),
+        a: FixedListType(UintType(64), 128, .{}),
         b: UintType(64),
     });
 
@@ -1213,8 +1351,8 @@ test "FixedContainerType equals" {
 test "VariableContainerType equals" {
     const allocator = std.testing.allocator;
     const Container = VariableContainerType(struct {
-        list1: FixedListType(UintType(8), 32),
-        list2: FixedListType(UintType(8), 32),
+        list1: FixedListType(UintType(8), 32, .{}),
+        list2: FixedListType(UintType(8), 32, .{}),
         value: UintType(64),
     });
 
@@ -1222,16 +1360,16 @@ test "VariableContainerType equals" {
     var b: Container.Type = undefined;
     var c: Container.Type = undefined;
 
-    a.list1 = FixedListType(UintType(8), 32).Type.empty;
-    a.list2 = FixedListType(UintType(8), 32).Type.empty;
+    a.list1 = FixedListType(UintType(8), 32, .{}).Type.empty;
+    a.list2 = FixedListType(UintType(8), 32, .{}).Type.empty;
     a.value = 100;
 
-    b.list1 = FixedListType(UintType(8), 32).Type.empty;
-    b.list2 = FixedListType(UintType(8), 32).Type.empty;
+    b.list1 = FixedListType(UintType(8), 32, .{}).Type.empty;
+    b.list2 = FixedListType(UintType(8), 32, .{}).Type.empty;
     b.value = 100;
 
-    c.list1 = FixedListType(UintType(8), 32).Type.empty;
-    c.list2 = FixedListType(UintType(8), 32).Type.empty;
+    c.list1 = FixedListType(UintType(8), 32, .{}).Type.empty;
+    c.list2 = FixedListType(UintType(8), 32, .{}).Type.empty;
     c.value = 101; // Different value
 
     defer a.list1.deinit(allocator);
@@ -1265,7 +1403,7 @@ test "FixedContainerType - default_root" {
     try Container.hashTreeRoot(&Container.default_value, &expected_root);
     try std.testing.expectEqualSlices(u8, &expected_root, &Container.default_root);
 
-    var pool = try Node.Pool.init(std.testing.allocator, 1024);
+    var pool = try Node.Pool.init(.{ .page_allocator = std.testing.allocator, .allocator = std.testing.allocator, .pool_size = 1024 });
     defer pool.deinit();
 
     const node = try Container.tree.default(&pool);
@@ -1275,16 +1413,120 @@ test "FixedContainerType - default_root" {
 test "VariableContainerType - default_root" {
     var expected_root: [32]u8 = undefined;
     const Container = VariableContainerType(struct {
-        a: FixedListType(UintType(64), 128),
+        a: FixedListType(UintType(64), 128, .{}),
         b: UintType(64),
     });
 
     try Container.hashTreeRoot(std.testing.allocator, &Container.default_value, &expected_root);
     try std.testing.expectEqualSlices(u8, &expected_root, &Container.default_root);
 
-    var pool = try Node.Pool.init(std.testing.allocator, 1024);
+    var pool = try Node.Pool.init(.{ .page_allocator = std.testing.allocator, .allocator = std.testing.allocator, .pool_size = 1024 });
     defer pool.deinit();
 
     const node = try Container.tree.default(&pool);
     try std.testing.expectEqualSlices(u8, &expected_root, node.getRoot(&pool));
+}
+
+// StructContainerType makes the root a `.container_struct` opaque, and
+// FixedVectorType(.{.chunked_leaf=true}) builds the field from `.chunked_leaf`
+// nodes. A single-proof path descending through the chunked vector crosses
+// both opaque kinds — proof traversal materializes each in turn.
+test "createSingleProof through StructContainer with chunked_leaf vector field" {
+    const allocator = std.testing.allocator;
+    const Vec = FixedVectorType(UintType(64), 4096, .{ .chunked_leaf = true });
+    const Outer = StructContainerType(struct {
+        vec: Vec,
+        tag: UintType(64),
+    });
+
+    var value: Outer.Type = .{
+        .vec = Vec.default_value,
+        .tag = 0x1234_5678_9abc_def0,
+    };
+    for (0..16) |i| value.vec[i] = (@as(u64, @intCast(i)) + 1) *% 0x0101_0101_0101_0101;
+
+    var pool = try Node.Pool.init(.{
+        .page_allocator = allocator,
+        .allocator = allocator,
+        .pool_size = 8192,
+    });
+    defer pool.deinit();
+
+    const root = try Outer.tree.fromValue(&pool, &value);
+    defer pool.unref(root);
+
+    // gindex 2048 = outer.vec field (gindex 2 of the materialized container)
+    // → chunk 0 of the chunked vector (relative gindex 1024 in its 1024-chunk
+    // subtree). Traversal crosses the container_struct root and the
+    // chunked_leaf node(s) of the vec field — the nested-opaque case
+    // single-proof traversal must handle.
+    const gindex = Gindex.fromUint(2048);
+
+    var single_proof = try proof.createSingleProof(allocator, &pool, root, gindex);
+    defer single_proof.deinit(allocator);
+
+    var pool2 = try Node.Pool.init(.{
+        .page_allocator = allocator,
+        .allocator = allocator,
+        .pool_size = 256,
+    });
+    defer pool2.deinit();
+
+    const rebuilt = try proof.createNodeFromSingleProof(&pool2, gindex, single_proof.leaf, single_proof.witnesses);
+    defer pool2.unref(rebuilt);
+
+    const original = root.getRoot(&pool).*;
+    const rebuilt_root = rebuilt.getRoot(&pool2).*;
+    try std.testing.expectEqualSlices(u8, &original, &rebuilt_root);
+}
+
+// A 1-field StructContainerType has `chunk_depth = 0`, so its `toTree`
+// returns the single field's tree directly with no enclosing branch. The
+// vector below is sized to exactly one chunked_leaf, so materializing the
+// container hands back another opaque node — `materializeIfOpaque` must
+// keep materializing until the result is navigable.
+test "createSingleProof through single-field StructContainer with chunked_leaf vector" {
+    const allocator = std.testing.allocator;
+    const ChunkedLeaf = pmt.ChunkedLeaf;
+    // Exactly K chunks (4 u64 per chunk) → the vector is one chunked_leaf.
+    const Vec = FixedVectorType(UintType(64), ChunkedLeaf.K * 4, .{ .chunked_leaf = true });
+    const Outer = StructContainerType(struct {
+        only: Vec,
+    });
+
+    var value: Outer.Type = .{ .only = Vec.default_value };
+    for (0..8) |i| value.only[i] = (@as(u64, @intCast(i)) +% 1) *% 0x7777_7777_7777_7777;
+
+    var pool = try Node.Pool.init(.{
+        .page_allocator = allocator,
+        .allocator = allocator,
+        .pool_size = 8192,
+    });
+    defer pool.deinit();
+
+    const root = try Outer.tree.fromValue(&pool, &value);
+    defer pool.unref(root);
+
+    // Single field → the container's tree at gindex 1 IS the field's tree;
+    // the K-chunk vector puts chunk 0 at gindex 1<<k_log2. Traversal crosses
+    // the container_struct, then the chunked_leaf, in back-to-back
+    // materializations.
+    const gindex = Gindex.fromDepth(ChunkedLeaf.k_log2, 0);
+
+    var single_proof = try proof.createSingleProof(allocator, &pool, root, gindex);
+    defer single_proof.deinit(allocator);
+
+    var pool2 = try Node.Pool.init(.{
+        .page_allocator = allocator,
+        .allocator = allocator,
+        .pool_size = 256,
+    });
+    defer pool2.deinit();
+
+    const rebuilt = try proof.createNodeFromSingleProof(&pool2, gindex, single_proof.leaf, single_proof.witnesses);
+    defer pool2.unref(rebuilt);
+
+    const original = root.getRoot(&pool).*;
+    const rebuilt_root = rebuilt.getRoot(&pool2).*;
+    try std.testing.expectEqualSlices(u8, &original, &rebuilt_root);
 }

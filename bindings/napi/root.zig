@@ -1,56 +1,70 @@
 const std = @import("std");
-const napi = @import("zapi:zapi");
-const pool = @import("./pool.zig");
-const pubkeys = @import("./pubkeys.zig");
-const config = @import("./config.zig");
-const shuffle = @import("./shuffle.zig");
-const metrics = @import("./metrics.zig");
-const BeaconStateView = @import("./BeaconStateView.zig");
-const blst = @import("./blst.zig");
-const state_transition = @import("./state_transition.zig");
-const peer_manager_bindings = @import("./peer_manager.zig");
+const builtin = @import("builtin");
+const js = @import("zapi:zapi").js;
+pub const pool = @import("./pool.zig");
+pub const shuffle = @import("./shuffle.zig");
+pub const config = @import("./config.zig");
+pub const metrics = @import("./metrics.zig");
+pub const BeaconStateView = @import("./BeaconStateView.zig");
+pub const blst = @import("./blst.zig");
+pub const pubkeys = @import("./pubkeys.zig");
+pub const peerManager = @import("./peer_manager.zig");
 
-comptime {
-    napi.module.register(register);
-}
+const options = @import("bls_options");
+const napi_io = @import("./io.zig");
 
-/// Tracks how many NAPI environments reference the shared module state.
-/// Shared state (pool, pubkeys, config) is initialized on the first register
-/// and torn down only when the last environment exits.
-var env_refcount: std.atomic.Value(u32) = std.atomic.Value(u32).init(0);
+var gpa: std.heap.DebugAllocator(.{}) = .init;
+const allocator = if (builtin.mode == .Debug) gpa.allocator() else std.heap.c_allocator;
 
-const EnvCleanup = struct {
-    fn hook(_: *EnvCleanup) void {
-        if (env_refcount.fetchSub(1, .acq_rel) == 1) {
-            // Last environment — tear down shared state.
-            peer_manager_bindings.state.deinit();
-            config.state.deinit();
-            pubkeys.state.deinit();
-            pool.state.deinit();
-            metrics.deinit();
+fn init(old_ref_count: u32) !void {
+    if (old_ref_count == 0) {
+        // First environment — initialize shared state in your threadpool init.
+        try napi_io.init();
+        errdefer napi_io.deinit();
+
+        var cpu_count: u64 = options.thread_count;
+        if (options.thread_count == 0) {
+            cpu_count = @max(try detectCpuCount(), 2) - 1;
+            std.debug.print(
+                "Note: no -Dthread-count set, using cgroup-aware CPU count minus 1: {}\n",
+                .{cpu_count},
+            );
         }
-    }
-};
 
-var env_cleanup: EnvCleanup = .{};
-
-fn register(env: napi.Env, exports: napi.Value) !void {
-    if (env_refcount.fetchAdd(1, .monotonic) == 0) {
-        // First environment — initialize shared state.
+        const n_workers = @min(cpu_count, @import("bls").ThreadPool.MAX_WORKERS);
+        try blst.initThreadPool(@intCast(n_workers));
         try pool.state.init();
         try pubkeys.state.init();
         config.state.init();
     }
+}
 
-    try env.addEnvCleanupHook(EnvCleanup, &env_cleanup, EnvCleanup.hook);
+/// cgroup-aware CPU count for sizing the BLS pool. A detection failure must
+/// not prevent the module from loading: warn and fall back to the affinity
+/// count (what `std.Thread.getCpuCount()` reports).
+fn detectCpuCount() !usize {
+    return @import("cpu_count").getNumCpus(allocator, napi_io.get()) catch |err| {
+        std.debug.print(
+            "Warning: cgroup CPU detection failed ({s}), using affinity count\n",
+            .{@errorName(err)},
+        );
+        return std.Thread.getCpuCount();
+    };
+}
 
-    try pool.register(env, exports);
-    try pubkeys.register(env, exports);
-    try config.register(env, exports);
-    try shuffle.register(env, exports);
-    try BeaconStateView.register(env, exports);
-    try blst.register(env, exports);
-    try state_transition.register(env, exports);
-    try metrics.register(env, exports);
-    try peer_manager_bindings.register(env, exports);
+fn cleanup(new_ref_count: u32) void {
+    if (new_ref_count == 0) {
+        // Last environment — tear down shared state.
+        blst.deinitThreadPool();
+        config.state.deinit();
+        pubkeys.state.deinit();
+        pool.state.deinit();
+        peerManager.state.deinit();
+        metrics.deinit();
+        napi_io.deinit();
+    }
+}
+
+comptime {
+    js.exportModule(@This(), .{ .init = init, .cleanup = cleanup });
 }

@@ -53,6 +53,54 @@ pub const SingleProof = struct {
     }
 };
 
+/// Returns true if the node is "opaque" — terminal in our PMT model but
+/// represents a navigable subtree underneath (container_struct = deserialized
+/// container struct; chunked_leaf = K packed chunks). Proof traversal must
+/// materialize a temporary explicit subtree before walking inside.
+inline fn isOpaqueNode(pool: *Node.Pool, node_id: Node.Id) bool {
+    const kind = pool.nodes.items(.state)[@intFromEnum(node_id)].kind();
+    return kind == .container_struct or kind == .chunked_leaf;
+}
+
+/// Materializes a temporary navigable subtree for an opaque node. Caller is
+/// responsible for `unref`'ing the returned Id once the temporary tree is no
+/// longer needed (single-proof and compact-multi-proof both park the Id in
+/// a deferred-unref ArrayList).
+inline fn materializeOpaque(pool: *Node.Pool, node_id: Node.Id) Node.Error!Node.Id {
+    const kind = pool.nodes.items(.state)[@intFromEnum(node_id)].kind();
+    return switch (kind) {
+        .container_struct => try pool.materializeContainerStruct(node_id),
+        .chunked_leaf => try pool.materializeChunkedLeaf(node_id),
+        else => unreachable,
+    };
+}
+
+/// Proof traversal needs real left/right child nodes. For an opaque node
+/// (container_struct or chunked_leaf), materialize a temporary plain tree
+/// and append it to the deferred-unref list so it stays alive until proof
+/// creation finishes.
+///
+/// Materializing one opaque node can yield another. A single-field
+/// StructContainerType has no enclosing branch, so its tree IS its only
+/// field's tree; if that field is also opaque, the result is still opaque.
+/// Loop until the node is navigable.
+fn materializeIfOpaque(
+    allocator: Allocator,
+    pool: *Node.Pool,
+    node_id: Node.Id,
+    temporary_roots: *std.ArrayListUnmanaged(Node.Id),
+) (Node.Error || Error)!Node.Id {
+    var current = node_id;
+    while (isOpaqueNode(pool, current)) {
+        const materialized = try materializeOpaque(pool, current);
+        errdefer pool.unref(materialized);
+
+        try temporary_roots.append(allocator, materialized);
+        current = materialized;
+    }
+    return current;
+}
+
 /// Produces a single Merkle proof for the node at `gindex`.
 pub fn createSingleProof(
     allocator: Allocator,
@@ -68,6 +116,18 @@ pub fn createSingleProof(
     var witnesses = try allocator.alloc([32]u8, path_len);
     errdefer allocator.free(witnesses);
 
+    // Nested opaque (container_struct → chunked_leaf, or any future combination)
+    // is legal: e.g. StructContainerType holding a FixedVectorType with
+    // .chunked_leaf=true. Track every materialized temporary root and unref
+    // them on exit, matching createCompactMultiProof's pattern.
+    var temporary_roots: std.ArrayListUnmanaged(Node.Id) = .empty;
+    defer {
+        for (temporary_roots.items) |temp_root| {
+            pool.unref(temp_root);
+        }
+        temporary_roots.deinit(allocator);
+    }
+
     if (path_len == 0) {
         return SingleProof{
             .leaf = root.getRoot(pool).*,
@@ -80,6 +140,8 @@ pub fn createSingleProof(
 
     for (0..path_len) |depth_idx| {
         const witness_index = path_len - 1 - depth_idx;
+
+        node_id = try materializeIfOpaque(allocator, pool, node_id, &temporary_roots);
 
         if (path.left()) {
             const right_id = try node_id.getRight(pool);
@@ -304,12 +366,12 @@ pub fn computeDescriptor(allocator: Allocator, gindices: []const Gindex) ![]u8 {
     }
 
     // Sort bitstrings lexicographically
-    var sorted_list = std.ArrayList([]const u8).init(allocator);
-    defer sorted_list.deinit();
+    var sorted_list: std.ArrayList([]const u8) = .empty;
+    defer sorted_list.deinit(allocator);
 
     var proof_iter = proof_bitstrings.keyIterator();
     while (proof_iter.next()) |key| {
-        try sorted_list.append(key.*);
+        try sorted_list.append(allocator, key.*);
     }
 
     const bitstringLessThan = struct {
@@ -321,8 +383,8 @@ pub fn computeDescriptor(allocator: Allocator, gindices: []const Gindex) ![]u8 {
     std.sort.pdq([]const u8, sorted_list.items, {}, bitstringLessThan);
 
     // Convert gindex bitstrings into descriptor bitstring
-    var descriptor_bitstring = std.ArrayList(u8).init(allocator);
-    defer descriptor_bitstring.deinit();
+    var descriptor_bitstring: std.ArrayList(u8) = .empty;
+    defer descriptor_bitstring.deinit(allocator);
 
     for (sorted_list.items) |gindex_bitstring| {
         // Find the rightmost '1' bit
@@ -331,9 +393,9 @@ pub fn computeDescriptor(allocator: Allocator, gindices: []const Gindex) ![]u8 {
             const rev_idx = gindex_bitstring.len - 1 - i;
             if (gindex_bitstring[rev_idx] == '1') {
                 for (0..i) |_| {
-                    try descriptor_bitstring.append('0');
+                    try descriptor_bitstring.append(allocator, '0');
                 }
-                try descriptor_bitstring.append('1');
+                try descriptor_bitstring.append(allocator, '1');
                 break;
             }
         }
@@ -344,7 +406,7 @@ pub fn computeDescriptor(allocator: Allocator, gindices: []const Gindex) ![]u8 {
     if (remainder != 0) {
         const padding = 8 - remainder;
         for (0..padding) |_| {
-            try descriptor_bitstring.append('0');
+            try descriptor_bitstring.append(allocator, '0');
         }
     }
 
@@ -377,8 +439,8 @@ fn getBit(bitlist: []const u8, bit_index: usize) bool {
 
 /// Convert descriptor bytes to bitlist
 pub fn descriptorToBitlist(allocator: Allocator, descriptor: []const u8) ![]bool {
-    var bools = std.ArrayList(bool).init(allocator);
-    errdefer bools.deinit();
+    var bools: std.ArrayList(bool) = .empty;
+    errdefer bools.deinit(allocator);
 
     const max_bit_length = descriptor.len * 8;
     var count0: usize = 0;
@@ -387,7 +449,7 @@ pub fn descriptorToBitlist(allocator: Allocator, descriptor: []const u8) ![]bool
     var i: usize = 0;
     while (i < max_bit_length) : (i += 1) {
         const bit = getBit(descriptor, i);
-        try bools.append(bit);
+        try bools.append(allocator, bit);
 
         if (bit) {
             count1 += 1;
@@ -406,7 +468,7 @@ pub fn descriptorToBitlist(allocator: Allocator, descriptor: []const u8) ![]bool
                     return error.InvalidWitnessLength;
                 }
             }
-            return bools.toOwnedSlice();
+            return bools.toOwnedSlice(allocator);
         }
     }
 
@@ -420,6 +482,7 @@ fn nodeToCompactMultiProof(
     node_id: Node.Id,
     bitlist: []const bool,
     bit_index: usize,
+    temporary_roots: *std.ArrayListUnmanaged(Node.Id),
 ) (Node.Error || Error)![][32]u8 {
     // If bit is 1, this node is a leaf in the proof
     if (bitlist[bit_index]) {
@@ -428,13 +491,18 @@ fn nodeToCompactMultiProof(
         return leaves;
     }
 
+    // Materialize opaque (container_struct/chunked_leaf) nodes lazily so we can navigate
+    // into their children. The temporary root is owned by `temporary_roots`
+    // and unref'd when the outer caller exits.
+    const current = try materializeIfOpaque(allocator, pool, node_id, temporary_roots);
+
     // Otherwise, recurse into children
-    const left_id = try node_id.getLeft(pool);
-    const left = try nodeToCompactMultiProof(allocator, pool, left_id, bitlist, bit_index + 1);
+    const left_id = try current.getLeft(pool);
+    const left = try nodeToCompactMultiProof(allocator, pool, left_id, bitlist, bit_index + 1, temporary_roots);
     defer allocator.free(left);
 
-    const right_id = try node_id.getRight(pool);
-    const right = try nodeToCompactMultiProof(allocator, pool, right_id, bitlist, bit_index + left.len * 2);
+    const right_id = try current.getRight(pool);
+    const right = try nodeToCompactMultiProof(allocator, pool, right_id, bitlist, bit_index + left.len * 2, temporary_roots);
     defer allocator.free(right);
 
     const result = try allocator.alloc([32]u8, left.len + right.len);
@@ -453,7 +521,15 @@ pub fn createCompactMultiProof(
     const bitlist = try descriptorToBitlist(allocator, descriptor);
     defer allocator.free(bitlist);
 
-    return nodeToCompactMultiProof(allocator, pool, root, bitlist, 0);
+    var temporary_roots: std.ArrayListUnmanaged(Node.Id) = .empty;
+    defer {
+        for (temporary_roots.items) |temp_root| {
+            pool.unref(temp_root);
+        }
+        temporary_roots.deinit(allocator);
+    }
+
+    return nodeToCompactMultiProof(allocator, pool, root, bitlist, 0, &temporary_roots);
 }
 
 /// Pointer to track position in bitlist and leaves during reconstruction

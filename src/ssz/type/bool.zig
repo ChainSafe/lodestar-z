@@ -94,6 +94,21 @@ pub fn BoolType() type {
                 return try pool.createLeaf(&new_leaf);
             }
 
+            /// Decode a packed item directly from chunk bytes. Used by chunked_leaf-backed
+            /// containers where the chunk is already in hand and a Node.Id is unavailable.
+            pub fn toValuePackedFromBytes(chunk: *const [32]u8, index: usize, out: *Type) void {
+                const offset = index % 32;
+                out.* = if (chunk[offset] == 0) false else true;
+            }
+
+            /// Encode a packed item directly into chunk bytes (mutates `chunk` in place).
+            /// Used by chunked_leaf-backed containers; the caller is responsible for any CoW
+            /// of the chunk before calling.
+            pub fn fromValuePackedIntoChunk(chunk: *[32]u8, index: usize, value: *const Type) void {
+                const offset = index % 32;
+                chunk[offset] = if (value.*) 1 else 0;
+            }
+
             pub fn serializeIntoBytes(node: Node.Id, pool: *Node.Pool, out: []u8) !usize {
                 const hash = node.getRoot(pool);
                 out[0] = hash[0];
@@ -133,17 +148,18 @@ test "BoolType - sanity" {
     try Bool.deserializeFromJson(&json, &b);
 
     // Serialize
-    var output_json = std.ArrayList(u8).init(allocator);
-    defer output_json.deinit();
-    var write_stream = std.json.writeStream(output_json.writer(), .{});
-    defer write_stream.deinit();
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+    var write_stream: std.json.Stringify = .{ .writer = &aw.writer };
     try Bool.serializeIntoJson(&write_stream, &b);
 
     var cloned: Bool.Type = undefined;
     try Bool.clone(&b, &cloned);
 
     try expectEqualRoots(Bool, b, cloned);
-    try std.testing.expectEqualSlices(u8, input_json, output_json.items);
+    const output = try aw.toOwnedSlice();
+    defer allocator.free(output);
+    try std.testing.expectEqualSlices(u8, input_json, output);
     try expectEqualSerialized(Bool, b, cloned);
 }
 
@@ -163,7 +179,7 @@ test "BoolType - serializeIntoBytes (false)" {
     try std.testing.expectEqualSlices(u8, &expected_root, &root);
 
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 32);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 32 });
     defer pool.deinit();
     const tree_node = try Bool.tree.fromValue(&pool, &value);
     var tree_serialized: [1]u8 = undefined;
@@ -186,7 +202,7 @@ test "BoolType - serializeIntoBytes (true)" {
     try std.testing.expectEqualSlices(u8, &expected_root, &root);
 
     const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(allocator, 32);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 32 });
     defer pool.deinit();
     const tree_node = try Bool.tree.fromValue(&pool, &value);
     var tree_serialized: [1]u8 = undefined;
@@ -210,7 +226,7 @@ test "BoolType - tree.deserializeFromBytes" {
         .{ .id = "true", .serialized = [_]u8{0x01}, .expected_value = true, .expected_root = [_]u8{0x01} ++ [_]u8{0x00} ** 31 },
     };
 
-    var pool = try Node.Pool.init(allocator, 32);
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 32 });
     defer pool.deinit();
 
     for (test_cases) |tc| {

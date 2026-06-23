@@ -31,13 +31,13 @@ pub fn upgradeStateToAltair(
 
     const validators_count = try altair_state.validatorsCount();
     var previous_epoch_participations = try altair_state.previousEpochParticipation();
-    try previous_epoch_participations.setLength(validators_count);
+    try previous_epoch_participations.growTo(validators_count);
 
     var current_epoch_participations = try altair_state.currentEpochParticipation();
-    try current_epoch_participations.setLength(validators_count);
+    try current_epoch_participations.growTo(validators_count);
 
     var inactivity_scores = try altair_state.inactivityScores();
-    try inactivity_scores.setLength(validators_count);
+    try inactivity_scores.growTo(validators_count);
 
     const active_indices = epoch_cache.next_shuffling.get().active_indices;
 
@@ -74,7 +74,7 @@ pub fn upgradeStateToAltair(
 
     const previous_epoch = computePreviousEpoch(epoch_cache.epoch);
     try altair_state.commit();
-    const validators = try altair_state.validatorsSlice(allocator);
+    const validators = try altair_state.validatorsPtrSlice(allocator);
     defer allocator.free(validators);
     epoch_cache.previous_target_unslashed_balance_increments = sumTargetUnslashedBalanceIncrements(previous_epoch_participation.items, previous_epoch, validators);
     epoch_cache.current_target_unslashed_balance_increments = sumTargetUnslashedBalanceIncrements(current_epoch_participation.items, epoch_cache.epoch, validators);
@@ -109,8 +109,8 @@ fn translateParticipation(
         const data = &attestation.data;
         const attestation_flag = try getAttestationParticipationStatus(.phase0, data, attestation.inclusion_delay, epoch_cache.epoch, root_cache);
         const committee_indices = try epoch_cache.getBeaconCommittee(data.slot, data.index);
-        const attesting_indices = try attestation.aggregation_bits.intersectValues(ValidatorIndex, allocator, committee_indices);
-        defer attesting_indices.deinit();
+        var attesting_indices = try attestation.aggregation_bits.intersectValues(ValidatorIndex, allocator, committee_indices);
+        defer attesting_indices.deinit(allocator);
         for (attesting_indices.items) |validator_index| {
             epoch_participation.items[validator_index] |= attestation_flag;
         }

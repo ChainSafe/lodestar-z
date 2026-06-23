@@ -256,10 +256,34 @@ pub const Config = struct {
 
 // --- Bitvector Helpers ---
 
+/// Minimal fixed-capacity stack array. Vendored because `std.BoundedArray`
+/// was removed in Zig 0.16; only the small subset used here is implemented.
+pub fn BoundedArray(comptime T: type, comptime capacity: usize) type {
+    return struct {
+        const Self = @This();
+        buffer: [capacity]T = undefined,
+        len: usize = 0,
+
+        pub fn appendAssumeCapacity(self: *Self, item: T) void {
+            std.debug.assert(self.len < capacity);
+            self.buffer[self.len] = item;
+            self.len += 1;
+        }
+
+        pub fn constSlice(self: *const Self) []const T {
+            return self.buffer[0..self.len];
+        }
+
+        pub fn slice(self: *Self) []T {
+            return self.buffer[0..self.len];
+        }
+    };
+}
+
 /// Extract set bit indices from a 64-bit attestation subnet bitvector.
 /// Returns stack-allocated bounded array — no heap allocation.
-pub fn getAttnetsActiveBits(attnets: [8]u8) std.BoundedArray(u8, 64) {
-    var result = std.BoundedArray(u8, 64){};
+pub fn getAttnetsActiveBits(attnets: [8]u8) BoundedArray(u8, 64) {
+    var result = BoundedArray(u8, 64){};
     for (attnets, 0..) |byte, byte_idx| {
         var b = byte;
         var bit_idx: u4 = 0;
@@ -274,8 +298,8 @@ pub fn getAttnetsActiveBits(attnets: [8]u8) std.BoundedArray(u8, 64) {
 }
 
 /// Extract set bit indices from a sync subnet bitvector (up to 8 bits).
-pub fn getSyncnetsActiveBits(syncnets: [1]u8) std.BoundedArray(u8, 8) {
-    var result = std.BoundedArray(u8, 8){};
+pub fn getSyncnetsActiveBits(syncnets: [1]u8) BoundedArray(u8, 8) {
+    var result = BoundedArray(u8, 8){};
     var b = syncnets[0];
     var bit_idx: u4 = 0;
     while (b != 0) : (bit_idx += 1) {

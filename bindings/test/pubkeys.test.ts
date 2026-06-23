@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {afterAll, beforeAll, describe, expect, it} from "vitest";
-import {SecretKey} from "../src/blst.js";
+import {SecretKey, aggregatePublicKeys} from "../src/blst.js";
 import {pubkeyCache} from "../src/pubkeys.js";
 
 // Generate deterministic valid BLS keypairs for testing
@@ -43,6 +43,16 @@ describe("pubkeys", () => {
     expect(pk1).toBe(pk2);
   });
 
+  it("aggregates cached pubkeys by index", () => {
+    const indices = [0, 1, 2];
+    const expected = aggregatePublicKeys(indices.map((index) => pubkeyCache.getOrThrow(index)));
+    expect(pubkeyCache.aggregate(indices).toBytes()).toEqual(expected.toBytes());
+  });
+
+  it("returns the cached pubkey for a single-key aggregate", () => {
+    expect(pubkeyCache.aggregate([1]).toBytes()).toEqual(pubkeyCache.getOrThrow(1).toBytes());
+  });
+
   it("get returns undefined for out-of-range index", () => {
     expect(pubkeyCache.get(0xffffffff)).toBeUndefined();
   });
@@ -79,5 +89,17 @@ describe("pubkeys", () => {
     pubkeyCache.load(tempPkixPath);
     const after = pubkeyCache.get(0);
     expect(before).not.toBe(after);
+  });
+
+  it("reset clears native and JS-level cache", () => {
+    const before = pubkeyCache.get(0);
+    expect(before).toBeDefined();
+    expect(pubkeyCache.getIndex(keypairs[0].pubkeyBytes)).toBeDefined();
+
+    pubkeyCache.reset();
+
+    expect(pubkeyCache.size).toBe(0);
+    expect(pubkeyCache.get(0)).toBeUndefined();
+    expect(pubkeyCache.getIndex(keypairs[0].pubkeyBytes)).toBeNull();
   });
 });

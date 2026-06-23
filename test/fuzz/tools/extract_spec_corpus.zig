@@ -2,7 +2,7 @@ const std = @import("std");
 const snappy = @import("snappy").raw;
 
 const Allocator = std.mem.Allocator;
-const Dir = std.fs.Dir;
+const Dir = std.Io.Dir;
 
 /// Selector byte mapping for each fuzz target.
 /// First byte of corpus file selects which SSZ type to test.
@@ -78,6 +78,7 @@ const buf_len = 4 * 1024 * 1024;
 /// data to prevent aliasing during decompression.
 fn readSnappy(
     dir: Dir,
+    io: std.Io,
     path: []const u8,
     read_buf: []u8,
     decompress_buf: []u8,
@@ -86,6 +87,7 @@ fn readSnappy(
     std.debug.assert(decompress_buf.len > 0);
 
     const compressed = dir.readFile(
+        io,
         path,
         read_buf,
     ) catch {
@@ -111,23 +113,28 @@ fn readSnappy(
 /// Write [selector_byte][ssz_data] to corpus directory.
 fn writeCorpus(
     corpus_dir: Dir,
+    io: std.Io,
     name: []const u8,
     selector: u8,
     ssz_data: []const u8,
 ) !void {
-    const file = corpus_dir.createFile(name, .{}) catch {
+    const file = corpus_dir.createFile(io, name, .{}) catch {
         return error.CreateFailed;
     };
-    defer file.close();
+    defer file.close(io);
 
-    const writer = file.writer();
+    var write_buf: [4096]u8 = undefined;
+    var file_writer = file.writer(io, &write_buf);
+    var writer = &file_writer.interface;
     try writer.writeByte(selector);
     try writer.writeAll(ssz_data);
+    try file_writer.end();
 }
 
 fn extractBasic(
     spec_dir: Dir,
     corpus_dir: Dir,
+    io: std.Io,
     read_buf: []u8,
     decompress_buf: []u8,
     name_buf: []u8,
@@ -136,14 +143,15 @@ fn extractBasic(
 
     // Boolean → selector 0x00.
     if (spec_dir.openDir(
+        io,
         "boolean/valid",
         .{ .iterate = true },
     ) catch null) |dir_obj| {
         var dir = dir_obj;
-        defer dir.close();
+        defer dir.close(io);
 
         var iter = dir.iterate();
-        while (try iter.next()) |entry| {
+        while (try iter.next(io)) |entry| {
             if (entry.kind != .directory) continue;
             if (entry.name[0] == '.') continue;
             const snappy_path = try std.fmt.bufPrint(
@@ -153,6 +161,7 @@ fn extractBasic(
             );
             const ssz = readSnappy(
                 dir,
+                io,
                 snappy_path,
                 read_buf,
                 decompress_buf,
@@ -164,6 +173,7 @@ fn extractBasic(
             );
             try writeCorpus(
                 corpus_dir,
+                io,
                 out_name,
                 0x00,
                 ssz,
@@ -174,14 +184,15 @@ fn extractBasic(
 
     // Uints → selectors 0x01-0x06.
     if (spec_dir.openDir(
+        io,
         "uints/valid",
         .{ .iterate = true },
     ) catch null) |dir_obj| {
         var dir = dir_obj;
-        defer dir.close();
+        defer dir.close(io);
 
         var iter = dir.iterate();
-        while (try iter.next()) |entry| {
+        while (try iter.next(io)) |entry| {
             if (entry.kind != .directory) continue;
             if (entry.name[0] == '.') continue;
 
@@ -197,6 +208,7 @@ fn extractBasic(
             );
             const ssz = readSnappy(
                 dir,
+                io,
                 snappy_path,
                 read_buf,
                 decompress_buf,
@@ -208,6 +220,7 @@ fn extractBasic(
             );
             try writeCorpus(
                 corpus_dir,
+                io,
                 out_name,
                 sel,
                 ssz,
@@ -240,6 +253,7 @@ fn findUintSelector(name: []const u8) ?u8 {
 fn extractBitlist(
     spec_dir: Dir,
     corpus_dir: Dir,
+    io: std.Io,
     read_buf: []u8,
     decompress_buf: []u8,
     name_buf: []u8,
@@ -247,14 +261,15 @@ fn extractBitlist(
     var count: u32 = 0;
 
     const dir_result = spec_dir.openDir(
+        io,
         "bitlist/valid",
         .{ .iterate = true },
     ) catch return 0;
     var dir = dir_result;
-    defer dir.close();
+    defer dir.close(io);
 
     var iter = dir.iterate();
-    while (try iter.next()) |entry| {
+    while (try iter.next(io)) |entry| {
         if (entry.kind != .directory) continue;
         if (entry.name[0] == '.') continue;
 
@@ -272,6 +287,7 @@ fn extractBitlist(
         );
         const ssz = readSnappy(
             dir,
+            io,
             snappy_path,
             read_buf,
             decompress_buf,
@@ -281,7 +297,7 @@ fn extractBitlist(
             "spec-{s}",
             .{entry.name},
         );
-        try writeCorpus(corpus_dir, out_name, sel, ssz);
+        try writeCorpus(corpus_dir, io, out_name, sel, ssz);
         count += 1;
     }
 
@@ -291,6 +307,7 @@ fn extractBitlist(
 fn extractBitvector(
     spec_dir: Dir,
     corpus_dir: Dir,
+    io: std.Io,
     read_buf: []u8,
     decompress_buf: []u8,
     name_buf: []u8,
@@ -298,14 +315,15 @@ fn extractBitvector(
     var count: u32 = 0;
 
     const dir_result = spec_dir.openDir(
+        io,
         "bitvector/valid",
         .{ .iterate = true },
     ) catch return 0;
     var dir = dir_result;
-    defer dir.close();
+    defer dir.close(io);
 
     var iter = dir.iterate();
-    while (try iter.next()) |entry| {
+    while (try iter.next(io)) |entry| {
         if (entry.kind != .directory) continue;
         if (entry.name[0] == '.') continue;
 
@@ -323,6 +341,7 @@ fn extractBitvector(
         );
         const ssz = readSnappy(
             dir,
+            io,
             snappy_path,
             read_buf,
             decompress_buf,
@@ -332,7 +351,7 @@ fn extractBitvector(
             "spec-{s}",
             .{entry.name},
         );
-        try writeCorpus(corpus_dir, out_name, sel, ssz);
+        try writeCorpus(corpus_dir, io, out_name, sel, ssz);
         count += 1;
     }
 
@@ -342,6 +361,7 @@ fn extractBitvector(
 fn extractContainers(
     static_dir: Dir,
     corpus_dir: Dir,
+    io: std.Io,
     read_buf: []u8,
     decompress_buf: []u8,
     name_buf: []u8,
@@ -350,28 +370,30 @@ fn extractContainers(
 
     for (container_selectors) |cs| {
         const type_dir_result = static_dir.openDir(
+            io,
             cs.name,
             .{ .iterate = true },
         ) catch continue;
         var type_dir = type_dir_result;
-        defer type_dir.close();
+        defer type_dir.close(io);
 
         // Iterate categories: ssz_random, ssz_lengthy, etc.
         var cat_iter = type_dir.iterate();
-        while (try cat_iter.next()) |cat| {
+        while (try cat_iter.next(io)) |cat| {
             if (cat.kind != .directory) continue;
             if (cat.name[0] == '.') continue;
 
             const cat_dir_result = type_dir.openDir(
+                io,
                 cat.name,
                 .{ .iterate = true },
             ) catch continue;
             var cat_dir = cat_dir_result;
-            defer cat_dir.close();
+            defer cat_dir.close(io);
 
             // Iterate cases: case_0, case_1, etc.
             var case_iter = cat_dir.iterate();
-            while (try case_iter.next()) |cas| {
+            while (try case_iter.next(io)) |cas| {
                 if (cas.kind != .directory) continue;
                 if (cas.name[0] == '.') continue;
 
@@ -382,6 +404,7 @@ fn extractContainers(
                 );
                 const ssz = readSnappy(
                     cat_dir,
+                    io,
                     snappy_path,
                     read_buf,
                     decompress_buf,
@@ -393,6 +416,7 @@ fn extractContainers(
                 );
                 try writeCorpus(
                     corpus_dir,
+                    io,
                     out_name,
                     cs.sel,
                     ssz,
@@ -429,10 +453,11 @@ fn findPrefixSelector(
     return null;
 }
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer std.debug.assert(gpa.deinit() == .ok);
     const allocator = gpa.allocator();
+    const io = init.io;
 
     const read_buf = try allocator.alloc(u8, buf_len);
     defer allocator.free(read_buf);
@@ -444,7 +469,7 @@ pub fn main() !void {
 
     // Resolve paths relative to this tool's location.
     // Build system places the exe; we use CWD (test/fuzz/).
-    const cwd = std.fs.cwd();
+    const cwd = std.Io.Dir.cwd();
 
     // Spec test base paths
     const generic_path =
@@ -455,6 +480,7 @@ pub fn main() !void {
         "/minimal/tests/minimal/phase0/ssz_static";
 
     var generic_dir = cwd.openDir(
+        io,
         generic_path,
         .{},
     ) catch |err| {
@@ -465,9 +491,10 @@ pub fn main() !void {
         );
         return err;
     };
-    defer generic_dir.close();
+    defer generic_dir.close(io);
 
     var static_dir = cwd.openDir(
+        io,
         static_path,
         .{},
     ) catch |err| {
@@ -478,7 +505,7 @@ pub fn main() !void {
         );
         return err;
     };
-    defer static_dir.close();
+    defer static_dir.close(io);
 
     std.debug.print(
         "Extracting spec test vectors as corpus seeds...\n\n",
@@ -490,14 +517,16 @@ pub fn main() !void {
     // ssz_basic
     {
         var dir = try cwd.openDir(
+            io,
             "corpus/ssz_basic-initial",
             .{},
         );
-        defer dir.close();
+        defer dir.close(io);
 
         const n = try extractBasic(
             generic_dir,
             dir,
+            io,
             read_buf,
             decompress_buf,
             &name_buf,
@@ -509,14 +538,16 @@ pub fn main() !void {
     // ssz_bitlist
     {
         var dir = try cwd.openDir(
+            io,
             "corpus/ssz_bitlist-initial",
             .{},
         );
-        defer dir.close();
+        defer dir.close(io);
 
         const n = try extractBitlist(
             generic_dir,
             dir,
+            io,
             read_buf,
             decompress_buf,
             &name_buf,
@@ -531,14 +562,16 @@ pub fn main() !void {
     // ssz_bitvector
     {
         var dir = try cwd.openDir(
+            io,
             "corpus/ssz_bitvector-initial",
             .{},
         );
-        defer dir.close();
+        defer dir.close(io);
 
         const n = try extractBitvector(
             generic_dir,
             dir,
+            io,
             read_buf,
             decompress_buf,
             &name_buf,
@@ -553,14 +586,16 @@ pub fn main() !void {
     // ssz_containers
     {
         var dir = try cwd.openDir(
+            io,
             "corpus/ssz_containers-initial",
             .{},
         );
-        defer dir.close();
+        defer dir.close(io);
 
         const n = try extractContainers(
             static_dir,
             dir,
+            io,
             read_buf,
             decompress_buf,
             &name_buf,
