@@ -69,7 +69,8 @@ pub const PeerStore = struct {
                 config.status_inbound_grace_period_ms,
         };
 
-        try self.peers.put(owned_key, .{
+        // Write through the entry from getOrPut — no second lookup.
+        entry.value_ptr.* = .{
             .peer_id = owned_key,
             .direction = direction,
             .status = null,
@@ -82,7 +83,7 @@ pub const PeerStore = struct {
             .agent_client = null,
             .node_id = null,
             .encoding_preference = null,
-        });
+        };
     }
 
     pub fn removePeer(self: *PeerStore, peer_id: []const u8) void {

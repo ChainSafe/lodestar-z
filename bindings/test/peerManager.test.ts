@@ -117,4 +117,17 @@ describe("peerManager", () => {
     expect(peers).toContain("peer1");
     expect(peers).toContain("peer2");
   });
+
+  it("onConnectionOpen rejects an unknown direction", () => {
+    expect(() => bindings.peerManager.onConnectionOpen("peer1", "sideways")).toThrow();
+  });
+
+  it("setForkName rejects an unknown fork name", () => {
+    expect(() => bindings.peerManager.setForkName("notafork")).toThrow();
+  });
+
+  it("reportPeer rejects an unknown action", () => {
+    bindings.peerManager.onConnectionOpen("peer1", "outbound");
+    expect(() => bindings.peerManager.reportPeer("peer1", "NotARealAction")).toThrow();
+  });
 });

@@ -205,20 +205,25 @@ fn actionToNapiObject(env: napi.Env, action: Action) !napi.Value {
     return obj;
 }
 
+/// Upper bound on a peer id string. libp2p peer ids are ~46-60 chars; this is a
+/// generous ceiling that lets us reject (rather than silently truncate) anything
+/// unexpectedly long. The +1 in the buffers leaves room for N-API's NUL.
+const max_peer_id_len = 128;
+
 /// Reads a JS string argument into allocator-owned `[]u8` peer id memory.
-/// Caller owns the returned memory.
+/// Returns `error.PeerIdTooLong` rather than truncating. Caller owns the memory.
 fn dupePeerId(value: js.String) ![]u8 {
-    var buf: [128]u8 = undefined;
+    if (try value.len() > max_peer_id_len) return error.PeerIdTooLong;
+    var buf: [max_peer_id_len + 1]u8 = undefined;
     const peer_id = try value.toSlice(&buf);
     return allocator.dupe(u8, peer_id);
 }
 
 /// Reads a peer id from a `napi.Value` (e.g. an array element's property) into
-/// allocator-owned memory. Caller owns the returned memory.
+/// allocator-owned memory. Returns `error.PeerIdTooLong` rather than truncating.
+/// Caller owns the returned memory.
 fn readOwnedPeerId(value: napi.Value) ![]u8 {
-    var buf: [128]u8 = undefined;
-    const peer_id = try value.getValueStringUtf8(&buf);
-    return allocator.dupe(u8, peer_id);
+    return dupePeerId(.{ .val = value });
 }
 
 fn parsePeerActionName(action_name: []const u8) ?PeerAction {
