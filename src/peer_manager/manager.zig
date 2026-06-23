@@ -6,6 +6,7 @@ const store_mod = @import("store.zig");
 const scorer_mod = @import("scorer.zig");
 const relevance_mod = @import("relevance.zig");
 const prioritize_mod = @import("prioritize.zig");
+const metrics = @import("metrics.zig");
 
 const PeerStore = store_mod.PeerStore;
 const PeerScorer = scorer_mod.PeerScorer;
@@ -97,6 +98,7 @@ pub const PeerManager = struct {
         try self.evictBadPeers();
         const starved = self.detectStarvation(current_slot);
         try self.runPrioritization(local_status, starved);
+        metrics.setConnectedPeersMapSize(self.store.getConnectedPeerCount());
         self.last_heartbeat_slot = current_slot;
         return self.actions.items;
     }
@@ -175,6 +177,11 @@ pub const PeerManager = struct {
             local_status,
             current_slot,
         );
+        if (irrelevant) |reason| {
+            metrics.recordRelevanceCheck(metrics.relevanceResultLabel(reason));
+        } else {
+            metrics.recordRelevanceCheck(.relevant);
+        }
 
         const peer = self.store.getPeerData(peer_id) orelse
             return self.actions.items;
@@ -340,6 +347,7 @@ pub const PeerManager = struct {
             const state = self.scorer.getScoreState(peer_id);
             switch (state) {
                 .banned => {
+                    metrics.recordPeerPruned(.banned);
                     try self.actions.append(self.allocator, .{ .send_goodbye = .{
                         .peer_id = peer_id,
                         .reason = .banned,
@@ -349,6 +357,7 @@ pub const PeerManager = struct {
                     });
                 },
                 .disconnected => {
+                    metrics.recordPeerPruned(.score_too_low);
                     try self.actions.append(self.allocator, .{ .send_goodbye = .{
                         .peer_id = peer_id,
                         .reason = .score_too_low,
@@ -395,6 +404,8 @@ pub const PeerManager = struct {
             .number_of_custody_groups = self.config.number_of_custody_groups,
         };
 
+        metrics.observePeersEvaluated(@intCast(inputs.items.len));
+        const prioritize_timer = metrics.startTimer();
         var result = try prioritizePeers(
             self.allocator,
             inputs.items,
@@ -403,6 +414,7 @@ pub const PeerManager = struct {
             self.our_sampling_groups,
             opts,
         );
+        metrics.observePrioritizeDuration(prioritize_timer);
         defer result.deinit();
 
         try self.convertPrioritizeResult(&result);
@@ -437,6 +449,7 @@ pub const PeerManager = struct {
         result: *prioritize_mod.PrioritizePeersResult,
     ) !void {
         for (result.peers_to_disconnect.items) |disc| {
+            metrics.recordPeerPruned(metrics.pruneReasonFromExcess(disc.reason));
             try self.actions.append(self.allocator, .{ .send_goodbye = .{
                 .peer_id = disc.peer_id,
                 .reason = .too_many_peers,

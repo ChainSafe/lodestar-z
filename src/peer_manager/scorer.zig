@@ -2,6 +2,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const constants = @import("constants.zig");
 const types = @import("types.zig");
+const metrics = @import("metrics.zig");
 
 const PeerScoreData = types.PeerScoreData;
 const PeerAction = types.PeerAction;
@@ -70,6 +71,12 @@ pub const PeerScorer = struct {
         if (prev_state != .banned and new_state == .banned) {
             data.last_update_ms = self.clock_fn() + constants.COOL_DOWN_BEFORE_DECAY_MS;
         }
+        if (prev_state != new_state) {
+            metrics.recordScoreStateTransition(
+                metrics.scoreStateLabel(prev_state),
+                metrics.scoreStateLabel(new_state),
+            );
+        }
     }
 
     /// Port of updateGossipsubScores from score/utils.ts (lines 2487-2510).
@@ -128,6 +135,12 @@ pub const PeerScorer = struct {
     pub fn decayScores(self: *PeerScorer) void {
         if (self.config.disable_peer_scoring) return;
 
+        const timer = metrics.startTimer();
+        defer {
+            metrics.observeScoreUpdateDuration(timer);
+            metrics.setScoreMapSize(self.scores.count());
+        }
+
         self.pruneToMax();
 
         const now_ms = self.clock_fn();
@@ -140,11 +153,19 @@ pub const PeerScorer = struct {
             const data = entry.value_ptr;
             const elapsed = now_ms - data.last_update_ms;
             if (elapsed > 0) {
+                const prev_state = scoreToState(data.score);
                 data.last_update_ms = now_ms;
                 const decay = @exp(constants.HALFLIFE_DECAY_MS *
                     @as(f64, @floatFromInt(elapsed)));
                 data.lodestar_score *= decay;
                 recomputeScore(data, self.config);
+                const new_state = scoreToState(data.score);
+                if (prev_state != new_state) {
+                    metrics.recordScoreStateTransition(
+                        metrics.scoreStateLabel(prev_state),
+                        metrics.scoreStateLabel(new_state),
+                    );
+                }
             }
             if (@abs(data.lodestar_score) < constants.SCORE_THRESHOLD) {
                 to_remove.append(self.allocator, entry.key_ptr.*) catch continue;
@@ -246,9 +267,17 @@ pub const PeerScorer = struct {
         const data = self.getOrCreateScore(peer_id);
         // Only update gossip if not cooling down.
         if (data.last_update_ms <= self.clock_fn()) {
+            const prev_state = scoreToState(data.score);
             data.gossip_score = new_score;
             data.ignore_negative_gossip_score = ignore;
             recomputeScore(data, self.config);
+            const new_state = scoreToState(data.score);
+            if (prev_state != new_state) {
+                metrics.recordScoreStateTransition(
+                    metrics.scoreStateLabel(prev_state),
+                    metrics.scoreStateLabel(new_state),
+                );
+            }
         }
     }
 

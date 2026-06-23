@@ -2,6 +2,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const types = @import("types.zig");
 const constants = @import("constants.zig");
+const metrics = @import("metrics.zig");
 
 const PeerIdStr = types.PeerIdStr;
 const Direction = types.Direction;
@@ -102,6 +103,19 @@ pub fn prioritizePeers(
         opts,
     );
     defer allocator.free(peers);
+
+    // Outbound peers invariant: we keep at least OUTBOUND_PEERS_RATIO outbound.
+    var outbound_peer_count: u32 = 0;
+    for (peers) |peer| {
+        if (peer.direction) |dir| {
+            if (dir == .outbound) outbound_peer_count += 1;
+        }
+    }
+    const connected_peer_count: u32 = @intCast(peers.len);
+    metrics.setOutboundPeersRatio(if (connected_peer_count > 0)
+        @as(f64, @floatFromInt(outbound_peer_count)) / @as(f64, @floatFromInt(connected_peer_count))
+    else
+        0);
 
     // Request subnet peers and build duties map
     var duties_by_peer = std.AutoHashMap(usize, u32).init(allocator);
@@ -234,6 +248,7 @@ fn requestAttnetPeers(
 
     for (active_attnets) |active| {
         const count = peers_per_subnet[active.subnet];
+        metrics.observePeersPerSubnet(.attnets, count);
         if (count < target_subnet_peers) {
             try queries.append(allocator, .{
                 .subnet = active.subnet,
@@ -273,6 +288,7 @@ fn requestSyncnetPeers(
 
     for (active_syncnets) |active| {
         const count = peers_per_subnet[active.subnet];
+        metrics.observePeersPerSubnet(.syncnets, count);
         if (count < target_subnet_peers) {
             try queries.append(allocator, .{
                 .subnet = active.subnet,

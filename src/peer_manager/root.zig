@@ -51,6 +51,9 @@ pub const PrioritizePeersOpts = prioritize_.PrioritizePeersOpts;
 // Constants
 pub const constants = @import("constants.zig");
 
+// Metrics
+pub const metrics = @import("metrics.zig");
+
 test {
     @import("std").testing.refAllDecls(@This());
 }
