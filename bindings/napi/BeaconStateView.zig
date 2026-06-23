@@ -1411,6 +1411,13 @@ pub fn getNextShuffling(self: *const BeaconStateView) !js.Value {
     return js_types.wrap(js.Value, try shufflingToNapi(shuffling));
 }
 
+pub fn getBeaconCommitteeCountPerSlot(self: *const BeaconStateView, epoch_arg: js.Number) !js.Number {
+    const cached_state = try self.requireState();
+    const epoch_: u64 = @intCast(try epoch_arg.toI64());
+
+    return js.Number.from(try cached_state.epoch_cache.getCommitteeCountPerSlot(epoch_));
+}
+
 pub fn getShufflingAtEpoch(self: *const BeaconStateView, epoch_arg: js.Number) !js.Value {
     const cached_state = try self.requireState();
     const epoch_value: u64 = @intCast(try epoch_arg.toI64());
