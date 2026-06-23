@@ -31,7 +31,6 @@ const upgradeStateToElectra = @import("slot/upgrade_state_to_electra.zig").upgra
 const upgradeStateToFulu = @import("slot/upgrade_state_to_fulu.zig").upgradeStateToFulu;
 
 pub const ExecutionPayloadStatus = enum(u8) {
-    pre_merge,
     invalid,
     valid,
 };

@@ -90,7 +90,6 @@ pub const AnchorCheckpoint = @import("./AnchorCheckpoint.zig");
 pub const deinitStateTransition = @import("./state_transition.zig").deinitStateTransition;
 pub const isExecutionEnabled = @import("./utils/execution.zig").isExecutionEnabled;
 pub const isMergeTransitionComplete = @import("./utils/execution.zig").isMergeTransitionComplete;
-pub const isMergeTransitionBlock = @import("./utils/execution.zig").isMergeTransitionBlock;
 pub const getRandaoMix = @import("./utils/seed.zig").getRandaoMix;
 pub const getEffectiveBalanceIncrementsZeroInactive = @import("./utils/balance.zig").getEffectiveBalanceIncrementsZeroInactive;
 

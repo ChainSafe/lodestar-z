@@ -339,6 +339,8 @@ describe("BeaconStateView", () => {
     bellatrixState.validators = validators;
     bellatrixState.currentSyncCommittee = syncCommittee;
     bellatrixState.nextSyncCommittee = syncCommittee;
+    bellatrixState.previousEpochParticipation = Array.from({length: VALIDATOR_COUNT}, () => 0);
+    bellatrixState.currentEpochParticipation = Array.from({length: VALIDATOR_COUNT}, () => 0);
 
     const phase0View = bindings.BeaconStateView.createFromBytes(ssz.phase0.BeaconState.serialize(phase0State));
     const bellatrixView = bindings.BeaconStateView.createFromBytes(ssz.bellatrix.BeaconState.serialize(bellatrixState));

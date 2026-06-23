@@ -14,7 +14,7 @@ const st = @import("state_transition");
 /// Recognized fields:
 /// - `verifyStateRoot`, `verifyProposer`, `verifySignatures`: bool
 /// - `dontTransferCache`: bool (negated to set `transfer_cache`)
-/// - `executionPayloadStatus`: "valid" | "invalid" | "preMerge"
+/// - `executionPayloadStatus`: "valid" | "invalid"
 /// - `dataAvailabilityStatus`: "Available" | "PreData" | "OutOfRange"
 ///
 /// Throws `error.InvalidExecutionPayloadStatus` / `error.InvalidDataAvailabilityStatus`
@@ -47,8 +47,6 @@ pub fn parseOptions(options: ?js.Value) !st.TransitionOpts {
                         .valid
                     else if (std.mem.eql(u8, status_str, "invalid"))
                         .invalid
-                    else if (std.mem.eql(u8, status_str, "preMerge"))
-                        .pre_merge
                     else
                         return error.InvalidExecutionPayloadStatus;
             }

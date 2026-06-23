@@ -280,8 +280,6 @@ export declare class BeaconStateView {
 
   isExecutionStateType: boolean;
   isMergeTransitionComplete: boolean;
-  /** True iff state is pre-merge AND the given block carries a non-default execution payload. Bellatrix-only. */
-  isMergeTransitionBlock(signedBlockBytes: Uint8Array): boolean;
   /**
    * Check whether execution is enabled for the given block at this state.
    *
