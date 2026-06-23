@@ -4,8 +4,7 @@ const js = @import("zapi:zapi").js;
 const peer_manager = @import("peer_manager");
 const napi_io = @import("./io.zig");
 
-/// Wall-clock time in Unix milliseconds. Replaces `std.time.milliTimestamp`
-/// (removed in Zig 0.16); the clock now lives behind `std.Io`.
+/// Wall-clock time in Unix milliseconds, sourced from the shared `std.Io`.
 fn currentMillis() i64 {
     return std.Io.Timestamp.now(napi_io.get(), .real).toMilliseconds();
 }

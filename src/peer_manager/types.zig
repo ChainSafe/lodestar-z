@@ -256,8 +256,7 @@ pub const Config = struct {
 
 // --- Bitvector Helpers ---
 
-/// Minimal fixed-capacity stack array. Vendored because `std.BoundedArray`
-/// was removed in Zig 0.16; only the small subset used here is implemented.
+/// Minimal fixed-capacity stack array implementing just the subset used here.
 pub fn BoundedArray(comptime T: type, comptime capacity: usize) type {
     return struct {
         const Self = @This();
