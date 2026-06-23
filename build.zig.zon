@@ -58,8 +58,8 @@
         //     .hash = "httpz-0.0.0-PNVzrC7CBgDSMZNP7chgAczR3FyAz5Eum6Kb1_K9kmYR",
         // },
         .zio = .{
-            .url = "git+https://github.com/lalinsky/zio?ref=v0.13.0#c0382d00beed1b44d2ab412fda23574252a31332",
-            .hash = "zio-0.13.0-xHbVVL0jHQB0ZCuiXhi5YiBl5lKIXwrCjcmWeQfy3Jsh",
+            .url = "git+https://github.com/lalinsky/zio?ref=v0.14.0#aa860381beb42bc077e24ef304827cbdc23fcef9",
+            .hash = "zio-0.14.0-xHbVVPxFHgBCop4CvfF4u360kzWlHD4FS8Ud-RIkPcZ7",
         },
     },
     .options_modules = .{
