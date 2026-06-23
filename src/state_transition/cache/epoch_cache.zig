@@ -653,9 +653,15 @@ pub const EpochCache = struct {
     /// which properly accesses `proposer_lookahead` from the state.
     pub fn getBeaconProposer(self: *const EpochCache, slot: Slot) !ValidatorIndex {
         const epoch = computeEpochAtSlot(slot);
-        if (epoch != self.epoch) return error.NotCurrentEpoch;
+        if (epoch == self.epoch)
+            return self.proposers[slot % preset.SLOTS_PER_EPOCH];
 
-        return self.proposers[slot % preset.SLOTS_PER_EPOCH];
+        if (epoch == self.epoch + 1) {
+            if (self.proposers_next_epoch) |p|
+                return p[slot % preset.SLOTS_PER_EPOCH];
+        }
+
+        return error.ProposerEpochMismatch;
     }
 
     // TODO: getBeaconProposers - can access directly?
