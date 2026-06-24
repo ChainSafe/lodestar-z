@@ -202,7 +202,7 @@
         },
         .log = .{
             .root_source_file = "src/log.zig",
-            .imports = .{ .time },
+            .imports = .{.time},
         },
     },
     .executables = .{
