@@ -40,7 +40,7 @@ interface ExecutionPayloadHeader {
   gasUsed: number;
   timestamp: number;
   extraData: Uint8Array;
-  baseFeePerGas: number;
+  baseFeePerGas: bigint;
   blockHash: Uint8Array;
   transactionsRoot: Uint8Array;
   withdrawalsRoot?: Uint8Array; // capella+
@@ -93,7 +93,7 @@ export enum ForkName {
 }
 
 interface SyncCommittee {
-  pubkeys: Uint8Array;
+  pubkeys: Uint8Array[];
   aggregatePubkey: Uint8Array;
 }
 
@@ -134,7 +134,8 @@ interface ProposerRewards {
 }
 
 interface SyncCommitteeCache {
-  validatorIndices: number[];
+  validatorIndices: Uint32Array;
+  validatorIndexMap: Map<number, number[]>;
 }
 
 interface EpochShuffling {
@@ -326,7 +327,7 @@ export declare class BeaconStateView {
    * and always 0 here since Zig STF doesn't process Gloas yet.
    */
   getExpectedWithdrawals(): {
-    expectedWithdrawals: {index: number; validatorIndex: number; address: Uint8Array; amount: number}[];
+    expectedWithdrawals: {index: number; validatorIndex: number; address: Uint8Array; amount: bigint}[];
     processedBuilderWithdrawalsCount: number;
     processedPartialWithdrawalsCount: number;
     processedBuildersSweepCount: number;
