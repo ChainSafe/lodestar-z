@@ -200,6 +200,10 @@
             .root_source_file = "src/fork_choice/root.zig",
             .imports = .{ .consensus_types, .config, .preset, .state_transition, .fork_types, .hex, .constants, .metrics, .time },
         },
+        .log = .{
+            .root_source_file = "src/log.zig",
+            .imports = .{ .time },
+        },
     },
     .executables = .{
         .download_era_files = .{
@@ -372,6 +376,7 @@
         .state_transition = .{ .root_module = .state_transition },
         .era = .{ .root_module = .era },
         .fork_choice = .{ .root_module = .fork_choice },
+        .log = .{ .root_module = .log },
 
         .int = .{
             .root_module = .{
