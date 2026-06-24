@@ -546,7 +546,7 @@ pub fn getBeaconProposer(self: *const BeaconStateView, slot_arg: js.Number) !js.
 pub fn getBeaconProposerOrNull(self: *const BeaconStateView, slot_arg: js.Number) !js.Value {
     const cached_state = try self.requireState();
     const slot_value: u64 = @intCast(try slot_arg.toI64());
-    const proposer = cached_state.getBeaconProposer(slot_value) catch return jsNull();
+    const proposer = cached_state.epoch_cache.getBeaconProposer(slot_value) catch return jsNull();
     return js_types.wrap(js.Value, js.Number.from(proposer).toValue());
 }
 

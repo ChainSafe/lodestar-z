@@ -299,36 +299,66 @@ pub const EpochCache = struct {
         );
         errdefer next_shuffling_rc.unref();
 
-        // TODO: implement proposerLookahead in fulu
         const fork_seq = config.forkSeqAtEpoch(current_epoch);
-        var current_proposer_seed: [32]u8 = undefined;
-        switch (state.forkSeq()) {
-            inline else => |f| try getSeed(f, state.castToFork(f), current_epoch, c.DOMAIN_BEACON_PROPOSER, &current_proposer_seed),
-        }
         var proposers = [_]ValidatorIndex{0} ** preset.SLOTS_PER_EPOCH;
         var next_proposers: ?[preset.SLOTS_PER_EPOCH]ValidatorIndex = null;
-        if (current_shuffling_rc.get().active_indices.len > 0) {
+
+        // Post-Fulu (EIP-7917): proposer_lookahead is the source of truth for proposers.
+        // Both current and next epoch proposers are read from it directly.
+        if (fork_seq.gte(.fulu)) {
             switch (fork_seq) {
-                inline else => |f| try computeProposers(
-                    f,
-                    allocator,
-                    current_proposer_seed,
-                    current_epoch,
-                    current_shuffling_rc.get().active_indices,
-                    effective_balance_increments,
-                    &proposers,
-                ),
+                inline else => |f| {
+                    var proposer_lookahead = try state.castToFork(f).proposerLookahead();
+                    next_proposers = undefined;
+                    for (0..preset.SLOTS_PER_EPOCH) |i| {
+                        proposers[i] = @intCast(try proposer_lookahead.get(i));
+                        next_proposers.?[i] = @intCast(try proposer_lookahead.get(preset.SLOTS_PER_EPOCH + i));
+                    }
+                },
             }
-            if (fork_seq.gte(.fulu)) {
-                // Post-Fulu, EIP-7917 introduced the `proposer_lookahead`
+        }
+        // Pre-Fulu: compute current and next epoch proposers
+        else {
+            if (current_shuffling_rc.get().active_indices.len > 0) {
+                var current_proposer_seed: [32]u8 = undefined;
+                switch (state.forkSeq()) {
+                    inline else => |f| try getSeed(f, state.castToFork(f), current_epoch, c.DOMAIN_BEACON_PROPOSER, &current_proposer_seed),
+                }
                 switch (fork_seq) {
-                    inline else => |f| {
-                        next_proposers = undefined;
-                        var proposer_lookahead = try state.castToFork(f).proposerLookahead();
-                        for (0..preset.SLOTS_PER_EPOCH) |i| {
-                            next_proposers.?[i] = @intCast(try proposer_lookahead.get(preset.SLOTS_PER_EPOCH + i));
-                        }
-                    },
+                    inline else => |f| try computeProposers(
+                        f,
+                        allocator,
+                        current_proposer_seed,
+                        current_epoch,
+                        current_shuffling_rc.get().active_indices,
+                        effective_balance_increments,
+                        &proposers,
+                    ),
+                }
+            }
+            if (next_shuffling_rc.get().active_indices.len > 0) {
+                var next_proposer_seed: [32]u8 = undefined;
+                switch (state.forkSeq()) {
+                    inline else => |f| try getSeed(
+                        f,
+                        state.castToFork(f),
+                        next_epoch,
+                        c.DOMAIN_BEACON_PROPOSER,
+                        &next_proposer_seed,
+                    ),
+                }
+                next_proposers = undefined;
+                const next_fork_seq = config.forkSeqAtEpoch(next_epoch);
+                switch (next_fork_seq) {
+                    inline else => |f| try computeProposers(
+                        f,
+                        allocator,
+                        next_proposer_seed,
+                        next_epoch,
+                        next_shuffling_rc.get().active_indices,
+                        effective_balance_increments,
+                        &next_proposers.?,
+                    ),
                 }
             }
         }
@@ -610,6 +640,26 @@ pub const EpochCache = struct {
                         self.effective_balance_increments.get(),
                         &self.proposers,
                     );
+                    const next_epoch_indices = self.next_shuffling.get().active_indices;
+                    if (next_epoch_indices.len > 0) {
+                        var next_proposer_seed: [32]u8 = undefined;
+                        try getSeed(fork, fork_state, self.epoch + 1, c.DOMAIN_BEACON_PROPOSER, &next_proposer_seed);
+                        self.proposers_next_epoch = undefined;
+                        const next_fork_seq = self.config.forkSeqAtEpoch(self.epoch + 1);
+                        switch (next_fork_seq) {
+                            inline else => |f| try computeProposers(
+                                f,
+                                self.allocator,
+                                next_proposer_seed,
+                                self.epoch + 1,
+                                next_epoch_indices,
+                                self.effective_balance_increments.get(),
+                                &self.proposers_next_epoch.?,
+                            ),
+                        }
+                    } else {
+                        self.proposers_next_epoch = null;
+                    }
                 }
             },
         }
@@ -648,14 +698,23 @@ pub const EpochCache = struct {
         return @intCast((committees_since_epoch_start + committee_index) % c.ATTESTATION_SUBNET_COUNT);
     }
 
-    /// Gets the beacon proposer for a slot. This is for pre-Fulu forks only.
-    /// NOTE: For the Fulu fork, use `CachedBeaconState.getBeaconProposer()` instead,
-    /// which properly accesses `proposer_lookahead` from the state.
+    /// Gets the beacon proposer for a slot.
+    ///
+    /// Slot should be either part of the current or next epoch.
     pub fn getBeaconProposer(self: *const EpochCache, slot: Slot) !ValidatorIndex {
         const epoch = computeEpochAtSlot(slot);
-        if (epoch != self.epoch) return error.NotCurrentEpoch;
+        if (epoch == self.epoch)
+            return self.proposers[slot % preset.SLOTS_PER_EPOCH];
+        if (epoch == self.epoch + 1) {
+            if (self.proposers_next_epoch) |next_proposers|
+                return next_proposers[slot % preset.SLOTS_PER_EPOCH];
 
-        return self.proposers[slot % preset.SLOTS_PER_EPOCH];
+            // if this is somehow empty at epoch + 1, we return a
+            // less ambiguous error.
+            return error.NullNextProposersPreFulu;
+        }
+
+        return error.EpochTooFar;
     }
 
     // TODO: getBeaconProposers - can access directly?
