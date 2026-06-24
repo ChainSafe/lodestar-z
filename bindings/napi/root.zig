@@ -8,6 +8,7 @@ pub const metrics = @import("./metrics.zig");
 pub const BeaconStateView = @import("./BeaconStateView.zig");
 pub const blst = @import("./blst.zig");
 pub const pubkeys = @import("./pubkeys.zig");
+pub const peerManager = @import("./peer_manager.zig");
 
 const options = @import("bls_options");
 const napi_io = @import("./io.zig");
@@ -58,6 +59,7 @@ fn cleanup(new_ref_count: u32) void {
         config.state.deinit();
         pubkeys.state.deinit();
         pool.state.deinit();
+        peerManager.state.deinit();
         metrics.deinit();
         napi_io.deinit();
     }

@@ -200,6 +200,10 @@
             .root_source_file = "src/fork_choice/root.zig",
             .imports = .{ .consensus_types, .config, .preset, .state_transition, .fork_types, .hex, .constants, .metrics, .time },
         },
+        .peer_manager = .{
+            .root_source_file = "src/peer_manager/root.zig",
+            .imports = .{.metrics},
+        },
     },
     .executables = .{
         .download_era_files = .{
@@ -348,6 +352,7 @@
                     .fork_types,
                     .state_transition,
                     .hex,
+                    .peer_manager,
                     "zapi:zapi",
                 },
             },
@@ -372,6 +377,7 @@
         .state_transition = .{ .root_module = .state_transition },
         .era = .{ .root_module = .era },
         .fork_choice = .{ .root_module = .fork_choice },
+        .peer_manager = .{ .root_module = .peer_manager },
 
         .int = .{
             .root_module = .{
