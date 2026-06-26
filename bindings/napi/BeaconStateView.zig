@@ -1108,15 +1108,30 @@ pub fn loadOtherState(
         state_bytes_slice,
         seed_validators_bytes_slice,
     );
-    errdefer loaded.state.deinit();
+    var loaded_state_moved = false;
+    errdefer if (!loaded_state_moved) loaded.state.deinit();
     defer allocator.free(loaded.modified_validators);
 
+    const new_state = try allocator.create(AnyBeaconState);
+    var new_cached_state_initialized = false;
+    errdefer if (!new_cached_state_initialized) {
+        new_state.deinit();
+        allocator.destroy(new_state);
+    };
+    new_state.* = loaded.state;
+    loaded_state_moved = true;
+
     const new_cached_state = try allocator.create(CachedBeaconState);
-    errdefer allocator.destroy(new_cached_state);
+    errdefer {
+        if (new_cached_state_initialized) {
+            new_cached_state.deinit();
+        }
+        allocator.destroy(new_cached_state);
+    }
 
     try new_cached_state.init(
         allocator,
-        &loaded.state,
+        new_state,
         .{
             .config = &config.state.config,
             .index_to_pubkey = &pubkey.state.index2pubkey,
@@ -1124,6 +1139,7 @@ pub fn loadOtherState(
         },
         null,
     );
+    new_cached_state_initialized = true;
 
     if (opts) |value| {
         const raw = value.toValue();
