@@ -1,3 +1,4 @@
+const std = @import("std");
 const BeaconConfig = @import("config").BeaconConfig;
 const ForkSeq = @import("config").ForkSeq;
 const types = @import("consensus_types");
@@ -31,10 +32,9 @@ pub fn slashValidator(
     var validators = try state.validators();
     var validator = try validators.get(@intCast(slashed_index));
 
-    // TODO: Bellatrix initiateValidatorExit validators.update() with the one below
     try initiateValidatorExit(fork, config, epoch_cache, state, validator);
-
     try validator.set("slashed", true);
+
     var latest_block_header = try state.latestBlockHeader();
     const latest_block_slot = try latest_block_header.get("slot");
     try slashings_cache.recordValidatorSlashing(latest_block_slot, slashed_index);
@@ -45,6 +45,9 @@ pub fn slashValidator(
     );
 
     const effective_balance = try validator.get("effective_balance");
+    try validator.commit();
+    try validators.commit();
+    try state.commit();
 
     // state.slashings is initially a Gwei (BigInt) vector, however since Nov 2023 it's converted to UintNum64 (number) vector in the state transition because:
     //  - state.slashings[nextEpoch % EPOCHS_PER_SLASHINGS_VECTOR] is reset per epoch in processSlashingsReset()
@@ -107,4 +110,68 @@ pub fn slashValidator(
             epoch_cache.current_target_unslashed_balance_increments -= slashed_effective_balance_increments;
         }
     }
+}
+
+test "slashValidator keeps current target unslashed balance consistent" {
+    const test_utils = @import("../test_utils/root.zig");
+    const TestCachedBeaconState = test_utils.TestCachedBeaconState;
+    const Node = @import("persistent_merkle_tree").Node;
+    const EpochTransitionCache = @import("../cache/epoch_transition_cache.zig").EpochTransitionCache;
+
+    const allocator = std.testing.allocator;
+    const num_validators: usize = 256;
+    const pool_size = num_validators * 5;
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = pool_size });
+    defer pool.deinit();
+
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, num_validators);
+    defer test_state.deinit();
+
+    try @import("../cache/slashings_cache.zig").buildFromStateIfNeeded(
+        allocator,
+        test_state.cached_state.state.castToFork(.electra),
+        &test_state.cached_state.slashings_cache,
+    );
+
+    var current_epoch_participation = try test_state.cached_state.state.currentEpochParticipation();
+    try current_epoch_participation.set(0, 0b111);
+    try current_epoch_participation.commit();
+    try test_state.cached_state.state.commit();
+
+    // Slash validator at index 0
+    try slashValidator(
+        .electra,
+        test_state.config,
+        test_state.cached_state.epoch_cache,
+        test_state.cached_state.state.castToFork(.electra),
+        &test_state.cached_state.slashings_cache,
+        0,
+        null,
+    );
+
+    // First validator should be slashed
+    var validators = try test_state.cached_state.state.validators();
+    var validator = try validators.getReadonly(0);
+    try std.testing.expect(try validator.get("slashed"));
+    var validators_it = validators.iteratorReadonly(0);
+    const validator_from_iterator = try validators_it.nextValuePtr();
+    try std.testing.expect(validator_from_iterator.slashed);
+    try std.testing.expectEqual(
+        @as(u64, (num_validators - 1) * test_utils.EFFECTIVE_BALANCE_INCREMENT),
+        test_state.cached_state.epoch_cache.current_target_unslashed_balance_increments,
+    );
+
+    var epoch_transition_cache = try EpochTransitionCache.init(
+        allocator,
+        std.testing.io,
+        test_state.cached_state.config,
+        test_state.cached_state.epoch_cache,
+        test_state.cached_state.state,
+    );
+    // Assert transition cache consistency
+    try std.testing.expectEqual(
+        test_state.cached_state.epoch_cache.current_target_unslashed_balance_increments,
+        epoch_transition_cache.curr_epoch_unslashed_target_stake_by_increment,
+    );
+    epoch_transition_cache.deinit(allocator);
 }
