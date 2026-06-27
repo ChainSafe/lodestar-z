@@ -90,6 +90,9 @@ jobs:
       - name: Run fork-choice tests
         run: |
           zig build test:fork_choice
+      - name: Run beacon-node tests
+        run: |
+          zig build test:beacon_node
 
       - name: Build benchmarks
         run: |
