@@ -580,8 +580,13 @@ pub const EpochCache = struct {
 
         self.previous_shuffling.unref();
         self.previous_shuffling = self.current_shuffling;
+        self.previous_decision_root = self.current_decision_root;
+
         self.current_shuffling = self.next_shuffling;
+        self.current_decision_root = self.next_decision_root;
+
         self.next_shuffling = next_shuffling_rc;
+        self.next_decision_root = try calculateShufflingDecisionRoot(state, epoch_after_upcoming);
 
         self.churn_limit = getChurnLimit(self.config, self.current_shuffling.get().active_indices.len);
         self.activation_churn_limit = getActivationChurnLimit(self.config, self.config.forkSeq(slot), self.current_shuffling.get().active_indices.len);
