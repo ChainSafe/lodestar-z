@@ -26,13 +26,12 @@ const Allocator = std.mem.Allocator;
 const bounded_array = @import("bounded_array");
 const slot_math = @import("slot_math.zig");
 const SlotClock = @import("SlotClock.zig");
-const time_source = @import("time_source.zig");
 
 const EventClock = @This();
 
 allocator: Allocator,
 io: std.Io,
-clock: SlotClock.Clock(time_source.RealTime),
+clock: SlotClock,
 
 stopped: bool = false,
 loop_future: ?std.Io.Future(void) = null,
@@ -115,10 +114,7 @@ pub fn init(
         .clock = undefined,
         .waiters = WaiterQueue.initContext({}),
     };
-    self.clock = try SlotClock.Clock(time_source.RealTime).init(
-        config,
-        .{ .io = io_handle },
-    );
+    self.clock = try SlotClock.init(config, io_handle);
 }
 
 /// Start the auto-advance loop.  Idempotent; second call is a no-op.
@@ -440,7 +436,7 @@ fn advanceAndDispatch(self: *EventClock, target: Slot) void {
 
 fn runAutoLoop(self: *EventClock) void {
     while (!self.stopped) {
-        const now_ms = self.clock.time.nowMs();
+        const now_ms = self.clock.nowMs();
         // Config validation guarantees sec→ms won't overflow, so null here
         // indicates a logic bug.  Break instead of spinning at 1ms.
         const next_ms = slot_math.msUntilNextSlot(self.clock.config, now_ms) orelse {
