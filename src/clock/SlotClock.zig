@@ -112,7 +112,7 @@ pub fn currentSlotWithGossipDisparity(self: *const SlotClock) ?Slot {
         // Pre-genesis the wall slot is conceptually negative, so slot 0 is
         // "current" only once we're within gossip disparity of genesis;
         // null otherwise.
-        const genesis_ms = slot_math.slotStartMs(self.config, 0) orelse return null;
+        const genesis_ms = slot_math.slotStartMs(self.config, 0);
         return if (genesis_ms - now_ms <= self.config.maximum_gossip_clock_disparity_ms)
             0
         else
@@ -120,8 +120,7 @@ pub fn currentSlotWithGossipDisparity(self: *const SlotClock) ?Slot {
     };
     if (current == std.math.maxInt(Slot)) return current;
     const next_slot = current + 1;
-    const next_slot_ms = slot_math.slotStartMs(self.config, next_slot) orelse
-        return current;
+    const next_slot_ms = slot_math.slotStartMs(self.config, next_slot);
     if (next_slot_ms - now_ms <= self.config.maximum_gossip_clock_disparity_ms) {
         return next_slot;
     }
@@ -136,23 +135,21 @@ pub fn isCurrentSlotGivenGossipDisparity(self: *const SlotClock, slot: Slot) boo
         // Pre-genesis the wall slot is conceptually negative, so slot 0 is
         // "current" only once we're within gossip disparity of genesis.
         if (slot != 0) return false;
-        const genesis_ms = slot_math.slotStartMs(self.config, 0) orelse return false;
+        const genesis_ms = slot_math.slotStartMs(self.config, 0);
         return genesis_ms - now_ms <= self.config.maximum_gossip_clock_disparity_ms;
     };
     if (slot == current) return true;
 
     if (current != std.math.maxInt(Slot)) {
         const next_slot = current + 1;
-        const next_slot_ms = slot_math.slotStartMs(self.config, next_slot) orelse
-            return false;
+        const next_slot_ms = slot_math.slotStartMs(self.config, next_slot);
         if (next_slot_ms - now_ms <= self.config.maximum_gossip_clock_disparity_ms) {
             return slot == next_slot;
         }
     }
 
     if (current > 0) {
-        const current_slot_ms = slot_math.slotStartMs(self.config, current) orelse
-            return false;
+        const current_slot_ms = slot_math.slotStartMs(self.config, current);
         if (now_ms - current_slot_ms <= self.config.maximum_gossip_clock_disparity_ms) {
             return slot == current - 1;
         }
@@ -163,30 +160,27 @@ pub fn isCurrentSlotGivenGossipDisparity(self: *const SlotClock, slot: Slot) boo
 
 pub fn slotWithFutureToleranceMs(self: *const SlotClock, tolerance_ms: u64) ?Slot {
     const now_ms = self.nowMs();
-    const shifted_ms = std.math.add(u64, now_ms, tolerance_ms) catch return null;
+    const shifted_ms = now_ms + tolerance_ms;
     return slot_math.slotAtMs(self.config, shifted_ms);
 }
 
-pub fn slotWithPastToleranceMs(self: *const SlotClock, tolerance_ms: u64) ?Slot {
+pub fn slotWithPastToleranceMs(self: *const SlotClock, tolerance_ms: u64) Slot {
     const now_ms = self.nowMs();
-    // Checked sub: underflow (pre-UNIX-epoch) returns null.
-    // Pre-genesis but valid timestamp returns 0.
-    const shifted_ms = std.math.sub(u64, now_ms, tolerance_ms) catch return null;
+    const shifted_ms = now_ms - tolerance_ms;
+    // Pre-genesis → slot 0.
     return slot_math.slotAtMs(self.config, shifted_ms) orelse 0;
 }
 
-pub fn secFromSlot(self: *const SlotClock, slot: Slot, to_sec: ?u64) ?i64 {
-    const from_sec = slot_math.slotStartSec(self.config, slot) orelse return null;
+pub fn secFromSlot(self: *const SlotClock, slot: Slot, to_sec: ?u64) i64 {
+    const from_sec = slot_math.slotStartSec(self.config, slot);
     const end_sec = to_sec orelse @divFloor(self.nowMs(), 1000);
-    const diff = @as(i128, @intCast(end_sec)) - @as(i128, @intCast(from_sec));
-    return std.math.cast(i64, diff);
+    return @as(i64, @intCast(end_sec)) - @as(i64, @intCast(from_sec));
 }
 
-pub fn msFromSlot(self: *const SlotClock, slot: Slot, to_ms: ?u64) ?i64 {
-    const from_ms = slot_math.slotStartMs(self.config, slot) orelse return null;
+pub fn msFromSlot(self: *const SlotClock, slot: Slot, to_ms: ?u64) i64 {
+    const from_ms = slot_math.slotStartMs(self.config, slot);
     const end_ms = to_ms orelse self.nowMs();
-    const diff = @as(i128, @intCast(end_ms)) - @as(i128, @intCast(from_ms));
-    return std.math.cast(i64, diff);
+    return @as(i64, @intCast(end_ms)) - @as(i64, @intCast(from_ms));
 }
 
 /// Advances the clock toward `target` one event at a time.  The caller may
@@ -413,19 +407,15 @@ test "tolerance helpers" {
     var fake = FakeClockIo{ .ms = 112_000 };
     var clock = try SlotClock.init(test_cfg, fake.io());
     try testing.expectEqual(@as(?Slot, 2), clock.slotWithFutureToleranceMs(12_000));
-    try testing.expectEqual(@as(?Slot, 0), clock.slotWithPastToleranceMs(12_000));
-    try testing.expectEqual(
-        @as(?Slot, null),
-        clock.slotWithFutureToleranceMs(std.math.maxInt(u64)),
-    );
-    // Underflow (tolerance > now_ms) returns null, not 0
-    try testing.expectEqual(@as(?Slot, null), clock.slotWithPastToleranceMs(112_001));
+    try testing.expectEqual(@as(Slot, 0), clock.slotWithPastToleranceMs(12_000));
 }
 
 test "secFromSlot and msFromSlot" {
     var fake = FakeClockIo{ .ms = 118_000 };
     var clock = try SlotClock.init(test_cfg, fake.io());
-    try testing.expectEqual(@as(?i64, 6), clock.secFromSlot(1, null));
-    try testing.expectEqual(@as(?i64, 6000), clock.msFromSlot(1, null));
-    try testing.expectEqual(@as(?i64, 0), clock.secFromSlot(1, 112));
+    try testing.expectEqual(@as(i64, 6), clock.secFromSlot(1, null));
+    try testing.expectEqual(@as(i64, 6000), clock.msFromSlot(1, null));
+    try testing.expectEqual(@as(i64, 0), clock.secFromSlot(1, 112));
+    try testing.expectEqual(@as(i64, -12), clock.secFromSlot(1, 100));
+    try testing.expectEqual(@as(i64, -12000), clock.msFromSlot(1, 100_000));
 }

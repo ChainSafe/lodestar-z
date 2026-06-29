@@ -437,17 +437,8 @@ fn advanceAndDispatch(self: *EventClock, target: Slot) void {
 fn runAutoLoop(self: *EventClock) void {
     while (!self.stopped) {
         const now_ms = self.clock.nowMs();
-        // Config validation guarantees sec→ms won't overflow, so null here
-        // indicates a logic bug.  Break instead of spinning at 1ms.
-        const next_ms = slot_math.msUntilNextSlot(self.clock.config, now_ms) orelse {
-            std.log.err(
-                "EventClock: msUntilNextSlot returned null (config overflow?), stopping loop",
-                .{},
-            );
-            self.stop();
-            break;
-        };
-        const sleep_ms = std.math.cast(i64, @max(@as(u64, 1), next_ms)) orelse std.math.maxInt(i64);
+        const next_ms = slot_math.msUntilNextSlot(self.clock.config, now_ms);
+        const sleep_ms: i64 = @intCast(@max(@as(u64, 1), next_ms));
 
         // Sleep failure: cancellation (from join()) exits the loop;
         // other errors re-check the stopped flag.
@@ -470,7 +461,6 @@ fn runAutoLoop(self: *EventClock) void {
     }
     // Non-terminating event loop: exits only when `self.stopped` is set.
     //  - normal stop(): sets flag, next iteration's `!self.stopped` exits
-    //  - overflow path: in-body break after self.stop()
     //  - join(): always calls stop() before cancelling the fiber, so the
     //    `error.Canceled` break also satisfies stopped == true
     std.debug.assert(self.stopped);

@@ -1,7 +1,9 @@
 //! Layer 0 – Pure slot/epoch arithmetic.
 //!
 //! No state, no allocation, no I/O.  Every function is comptime-compatible.
-//! All overflow paths return `null` (`?T`) instead of panicking.
+//! The only `null` is pre-genesis (a `<` comparison); arithmetic uses plain
+//! operators since `now_ms` is the wall clock and slot/config values are
+//! program-controlled — an overflow would be a program error and traps.
 
 const std = @import("std");
 const ct = @import("consensus_types");
@@ -14,11 +16,11 @@ pub const DurationTransitions = @import("config.zig").DurationTransitions;
 pub const forkTransitions = @import("config.zig").forkTransitions;
 
 /// Returns the slot at the given Unix-millisecond timestamp,
-/// or null if pre-genesis or on overflow.
+/// or null if pre-genesis.
 /// Precondition: `validate()` accepted `config` — guarantees all durations > 0.
 pub fn slotAtMs(config: ClockConfig, now_ms: u64) ?Slot {
     std.debug.assert(config.slot_duration_ms != 0);
-    const genesis_ms = secToMs(config.genesis_time_sec) orelse return null;
+    const genesis_ms = secToMs(config.genesis_time_sec);
     if (now_ms < genesis_ms) return null;
 
     var seg_start_slot: Slot = 0;
@@ -27,27 +29,22 @@ pub fn slotAtMs(config: ClockConfig, now_ms: u64) ?Slot {
 
     for (config.transitions()) |t| {
         const seg_slots = t.from_slot - seg_start_slot;
-        const seg_ms_total = std.math.mul(u64, seg_slots, seg_duration) catch {
-            // Segment exceeds u64 ms — `now_ms` must lie inside it.
-            const slots_in = (now_ms - seg_start_ms) / seg_duration;
-            return std.math.add(u64, seg_start_slot, slots_in) catch return null;
-        };
+        const seg_ms_total = seg_slots * seg_duration;
         if (now_ms - seg_start_ms < seg_ms_total) {
             return seg_start_slot + (now_ms - seg_start_ms) / seg_duration;
         }
-        seg_start_ms = std.math.add(u64, seg_start_ms, seg_ms_total) catch return null;
+        seg_start_ms = seg_start_ms + seg_ms_total;
         seg_start_slot = t.from_slot;
         seg_duration = t.new_duration_ms;
     }
 
-    const slots_in = (now_ms - seg_start_ms) / seg_duration;
-    return std.math.add(u64, seg_start_slot, slots_in) catch return null;
+    return seg_start_slot + (now_ms - seg_start_ms) / seg_duration;
 }
 
 /// Returns the slot at the given Unix-second timestamp,
-/// or null if pre-genesis or on overflow.
+/// or null if pre-genesis.
 pub fn slotAtSec(config: ClockConfig, now_sec: u64) ?Slot {
-    const now_ms = secToMs(now_sec) orelse return null;
+    const now_ms = secToMs(now_sec);
     return slotAtMs(config, now_ms);
 }
 
@@ -69,9 +66,9 @@ pub fn epochAtSlot(config: ClockConfig, slot: Slot) Epoch {
     return @divFloor(slot, config.slots_per_epoch);
 }
 
-/// Returns the Unix-millisecond start time of `slot`, or null on overflow.
-pub fn slotStartMs(config: ClockConfig, slot: Slot) ?u64 {
-    const genesis_ms = secToMs(config.genesis_time_sec) orelse return null;
+/// Returns the Unix-millisecond start time of `slot`.
+pub fn slotStartMs(config: ClockConfig, slot: Slot) u64 {
+    const genesis_ms = secToMs(config.genesis_time_sec);
 
     var seg_start_slot: Slot = 0;
     var seg_start_ms: u64 = genesis_ms;
@@ -79,42 +76,37 @@ pub fn slotStartMs(config: ClockConfig, slot: Slot) ?u64 {
 
     for (config.transitions()) |t| {
         if (slot < t.from_slot) {
-            const offset = std.math.mul(u64, slot - seg_start_slot, seg_duration) catch return null;
-            return std.math.add(u64, seg_start_ms, offset) catch null;
+            return seg_start_ms + (slot - seg_start_slot) * seg_duration;
         }
         const seg_slots = t.from_slot - seg_start_slot;
-        const seg_ms_total = std.math.mul(u64, seg_slots, seg_duration) catch return null;
-        seg_start_ms = std.math.add(u64, seg_start_ms, seg_ms_total) catch return null;
+        seg_start_ms = seg_start_ms + seg_slots * seg_duration;
         seg_start_slot = t.from_slot;
         seg_duration = t.new_duration_ms;
     }
 
-    const offset = std.math.mul(u64, slot - seg_start_slot, seg_duration) catch return null;
-    return std.math.add(u64, seg_start_ms, offset) catch null;
+    return seg_start_ms + (slot - seg_start_slot) * seg_duration;
 }
 
-/// Returns the Unix-second start time of `slot`, or null on overflow.
+/// Returns the Unix-second start time of `slot`.
 /// Sub-second slot durations truncate to the floor second.
-pub fn slotStartSec(config: ClockConfig, slot: Slot) ?u64 {
-    const ms = slotStartMs(config, slot) orelse return null;
-    return @divFloor(ms, 1000);
+pub fn slotStartSec(config: ClockConfig, slot: Slot) u64 {
+    return @divFloor(slotStartMs(config, slot), 1000);
 }
 
 /// Milliseconds until the next slot boundary.
 /// Pre-genesis: returns the time until genesis.
-/// Returns null only on arithmetic overflow.
-pub fn msUntilNextSlot(config: ClockConfig, now_ms: u64) ?u64 {
-    const genesis_ms = secToMs(config.genesis_time_sec) orelse return null;
+pub fn msUntilNextSlot(config: ClockConfig, now_ms: u64) u64 {
+    const genesis_ms = secToMs(config.genesis_time_sec);
     if (now_ms < genesis_ms) return genesis_ms - now_ms;
-    const slot = slotAtMs(config, now_ms) orelse return null;
-    // `slot + 1` wraps at u64.maxInt — return null instead of panicking.
-    const next_slot = std.math.add(u64, slot, 1) catch return null;
-    const next_start = slotStartMs(config, next_slot) orelse return null;
+    // now_ms >= genesis_ms here, so slotAtMs is non-null.
+    const slot = slotAtMs(config, now_ms).?;
+    const next_slot = slot + 1;
+    const next_start = slotStartMs(config, next_slot);
     return next_start - now_ms;
 }
 
-fn secToMs(sec: u64) ?u64 {
-    return std.math.mul(u64, sec, 1000) catch return null;
+fn secToMs(sec: u64) u64 {
+    return sec * 1000;
 }
 
 const testing = std.testing;
@@ -141,13 +133,13 @@ test "basic slot math" {
     try testing.expectEqual(@as(Epoch, 1), epochAtSlot(mainnet, 63));
     try testing.expectEqual(@as(Epoch, 2), epochAtSlot(mainnet, 64));
 
-    try testing.expectEqual(@as(?u64, mainnet.genesis_time_sec), slotStartSec(mainnet, 0));
-    try testing.expectEqual(@as(?u64, mainnet.genesis_time_sec + 12), slotStartSec(mainnet, 1));
-    try testing.expectEqual(@as(?u64, mainnet.genesis_time_sec + 24), slotStartSec(mainnet, 2));
+    try testing.expectEqual(@as(u64, mainnet.genesis_time_sec), slotStartSec(mainnet, 0));
+    try testing.expectEqual(@as(u64, mainnet.genesis_time_sec + 12), slotStartSec(mainnet, 1));
+    try testing.expectEqual(@as(u64, mainnet.genesis_time_sec + 24), slotStartSec(mainnet, 2));
 
-    try testing.expectEqual(@as(?u64, mainnet.genesis_time_sec * 1000), slotStartMs(mainnet, 0));
+    try testing.expectEqual(@as(u64, mainnet.genesis_time_sec * 1000), slotStartMs(mainnet, 0));
     try testing.expectEqual(
-        @as(?u64, (mainnet.genesis_time_sec + 12) * 1000),
+        @as(u64, (mainnet.genesis_time_sec + 12) * 1000),
         slotStartMs(mainnet, 1),
     );
 
@@ -171,48 +163,26 @@ test "within-slot timing" {
     try testing.expectEqual(@as(?Slot, 2), slotAtMs(mainnet, genesis_ms + 24_000));
 }
 
-test "overflow safety" {
+test "pre-genesis returns null" {
     try testing.expectEqual(@as(?Slot, null), slotAtSec(mainnet, mainnet.genesis_time_sec - 1));
     try testing.expectEqual(@as(?Slot, null), slotAtSec(mainnet, 0));
     try testing.expectEqual(@as(?Slot, null), slotAtMs(mainnet, 0));
-
-    try testing.expectEqual(@as(?u64, null), slotStartSec(mainnet, std.math.maxInt(u64)));
-    try testing.expectEqual(@as(?u64, null), slotStartMs(mainnet, std.math.maxInt(u64)));
-
-    const extreme = ClockConfig{
-        .genesis_time_sec = std.math.maxInt(u64),
-        .slot_duration_ms = 12_000,
-        .slots_per_epoch = 32,
-    };
-    try testing.expectEqual(@as(?Slot, null), slotAtMs(extreme, 0));
-    try testing.expectEqual(@as(?u64, null), slotStartSec(extreme, 1));
-    try testing.expectEqual(@as(?u64, null), slotStartMs(extreme, 0));
-
-    try testing.expectEqual(@as(?u64, null), msUntilNextSlot(extreme, 0));
 }
 
 test "msUntilNextSlot" {
     const genesis_ms = mainnet.genesis_time_sec * 1000;
     const slot_ms: u64 = 12_000;
 
-    try testing.expectEqual(@as(?u64, slot_ms), msUntilNextSlot(mainnet, genesis_ms));
-    try testing.expectEqual(@as(?u64, slot_ms - 1), msUntilNextSlot(mainnet, genesis_ms + 1));
+    try testing.expectEqual(@as(u64, slot_ms), msUntilNextSlot(mainnet, genesis_ms));
+    try testing.expectEqual(@as(u64, slot_ms - 1), msUntilNextSlot(mainnet, genesis_ms + 1));
     try testing.expectEqual(
-        @as(?u64, slot_ms - 6_000),
+        @as(u64, slot_ms - 6_000),
         msUntilNextSlot(mainnet, genesis_ms + 6_000),
     );
-    try testing.expectEqual(@as(?u64, 1), msUntilNextSlot(mainnet, genesis_ms + slot_ms - 1));
-    try testing.expectEqual(@as(?u64, slot_ms), msUntilNextSlot(mainnet, genesis_ms + slot_ms));
-    try testing.expectEqual(@as(?u64, 1_000), msUntilNextSlot(mainnet, genesis_ms - 1_000));
-    try testing.expectEqual(@as(?u64, genesis_ms), msUntilNextSlot(mainnet, 0));
-
-    // Regression: `slot + 1` overflows at max slot — must return null, not panic.
-    const tight = ClockConfig{
-        .genesis_time_sec = 0,
-        .slot_duration_ms = 1,
-        .slots_per_epoch = 32,
-    };
-    try testing.expectEqual(@as(?u64, null), msUntilNextSlot(tight, std.math.maxInt(u64)));
+    try testing.expectEqual(@as(u64, 1), msUntilNextSlot(mainnet, genesis_ms + slot_ms - 1));
+    try testing.expectEqual(@as(u64, slot_ms), msUntilNextSlot(mainnet, genesis_ms + slot_ms));
+    try testing.expectEqual(@as(u64, 1_000), msUntilNextSlot(mainnet, genesis_ms - 1_000));
+    try testing.expectEqual(@as(u64, genesis_ms), msUntilNextSlot(mainnet, 0));
 }
 
 test "config validate" {
@@ -285,14 +255,14 @@ test "fork-aware: slotDurationMsAt" {
 test "fork-aware: slotStartMs at and across the boundary" {
     const genesis_ms = eip7782.genesis_time_sec * 1000;
 
-    try testing.expectEqual(@as(?u64, genesis_ms), slotStartMs(eip7782, 0));
-    try testing.expectEqual(@as(?u64, genesis_ms + 12_000), slotStartMs(eip7782, 1));
+    try testing.expectEqual(@as(u64, genesis_ms), slotStartMs(eip7782, 0));
+    try testing.expectEqual(@as(u64, genesis_ms + 12_000), slotStartMs(eip7782, 1));
 
     const fork_ms = genesis_ms + 1024 * 12_000;
-    try testing.expectEqual(@as(?u64, fork_ms), slotStartMs(eip7782, 1024));
+    try testing.expectEqual(@as(u64, fork_ms), slotStartMs(eip7782, 1024));
 
-    try testing.expectEqual(@as(?u64, fork_ms + 6_000), slotStartMs(eip7782, 1025));
-    try testing.expectEqual(@as(?u64, fork_ms + 6_000 * 100), slotStartMs(eip7782, 1124));
+    try testing.expectEqual(@as(u64, fork_ms + 6_000), slotStartMs(eip7782, 1025));
+    try testing.expectEqual(@as(u64, fork_ms + 6_000 * 100), slotStartMs(eip7782, 1124));
 }
 
 test "fork-aware: slotAtMs across boundary" {
@@ -311,9 +281,9 @@ test "fork-aware: msUntilNextSlot across boundary" {
     const genesis_ms = eip7782.genesis_time_sec * 1000;
     const fork_ms = genesis_ms + 1024 * 12_000;
 
-    try testing.expectEqual(@as(?u64, 1), msUntilNextSlot(eip7782, fork_ms - 1));
-    try testing.expectEqual(@as(?u64, 6_000), msUntilNextSlot(eip7782, fork_ms));
-    try testing.expectEqual(@as(?u64, 3_000), msUntilNextSlot(eip7782, fork_ms + 3_000));
+    try testing.expectEqual(@as(u64, 1), msUntilNextSlot(eip7782, fork_ms - 1));
+    try testing.expectEqual(@as(u64, 6_000), msUntilNextSlot(eip7782, fork_ms));
+    try testing.expectEqual(@as(u64, 3_000), msUntilNextSlot(eip7782, fork_ms + 3_000));
 }
 
 const two_fork = ClockConfig{
@@ -337,9 +307,9 @@ test "fork-aware: two transitions" {
     try testing.expectEqual(@as(u64, 4_000), slotDurationMsAt(two_fork, 8192));
 
     // slotStartMs across both boundaries
-    try testing.expectEqual(@as(?u64, f1_ms), slotStartMs(two_fork, 1024));
-    try testing.expectEqual(@as(?u64, f2_ms), slotStartMs(two_fork, 8192));
-    try testing.expectEqual(@as(?u64, f2_ms + 4_000), slotStartMs(two_fork, 8193));
+    try testing.expectEqual(@as(u64, f1_ms), slotStartMs(two_fork, 1024));
+    try testing.expectEqual(@as(u64, f2_ms), slotStartMs(two_fork, 8192));
+    try testing.expectEqual(@as(u64, f2_ms + 4_000), slotStartMs(two_fork, 8193));
 
     // slotAtMs across both boundaries
     try testing.expectEqual(@as(?Slot, 1024), slotAtMs(two_fork, f1_ms));
