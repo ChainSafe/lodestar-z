@@ -33,8 +33,9 @@ pub fn processOperations(
     body: *const BeaconBlockBody(block_type, fork),
     opts: ProcessBlockOpts,
 ) !void {
-    // verify that outstanding deposits are processed up to the maximum number of deposits
-    const max_deposits = try getEth1DepositCount(fork, state, null);
+    // verify that outstanding deposits are processed up to the maximum number of deposits.
+    // Fulu removes support for the former (Eth1 bridge) deposit mechanism: `body.deposits` must be empty.
+    const max_deposits: u64 = if (comptime fork.gte(.fulu)) 0 else try getEth1DepositCount(fork, state, null);
     if (body.inner.deposits.items.len != max_deposits) {
         return error.InvalidDepositCount;
     }

@@ -1,36 +1,60 @@
+//! Minimal abstraction around the `bls` module.
+//!
+//! Consumers should use bls within state transition without having to
+//! deal with setting some common defaults for parameters, such as:
+//!
+//! 1) [Domain Separation Tag], or `dst`, which determines a unique hash-to-point
+//! function. This is set to `bls.DST` by functions within the `bls` module.
+//!
+//! 2) [Augmentation], or `aug`, which decides if we sign pubkey || message instead of
+//! just message. Since Ethereum uses proof-of-posession we do not use `aug`.
+//!
+//! [Domain Separation Tag]: https://www.ietf.org/archive/id/draft-irtf-cfrg-bls-signature-06.html#section-4.2.3-3
+//! [Augmentation]: https://www.ietf.org/archive/id/draft-irtf-cfrg-bls-signature-06.html#name-message-augmentation
 const std = @import("std");
 const bls = @import("bls");
 const PublicKey = bls.PublicKey;
 const Signature = bls.Signature;
 const SecretKey = bls.SecretKey;
 
-/// See https://github.com/ethereum/consensus-specs/blob/v1.4.0/specs/phase0/beacon-chain.md#bls-signatures
-const DST: []const u8 = "BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_POP_";
+const BlsOpts = struct {
+    /// Decides whether the signature should be group checked.
+    sig_groupcheck: bool = false,
+    /// Decides if the public key will be infinity checked and group checked.
+    pk_validate: bool = false,
+};
 
-pub fn sign(secret_key: SecretKey, msg: []const u8) Signature {
-    return secret_key.sign(msg, DST, null);
+pub fn sign(sk: SecretKey, msg: []const u8) Signature {
+    return sk.sign(msg, bls.DST, null);
 }
 
 /// Verify a signature against a message and public key.
-///
-/// If `pk_validate` is `true`, the public key will be infinity and group checked.
-///
-/// If `sig_groupcheck` is `true`, the signature will be group checked.
-pub fn verify(msg: []const u8, pk: *const PublicKey, sig: *const Signature, in_pk_validate: ?bool, in_sig_groupcheck: ?bool) bls.BlstError!void {
-    const sig_groupcheck = in_sig_groupcheck orelse false;
-    const pk_validate = in_pk_validate orelse false;
-    try sig.verify(sig_groupcheck, msg, DST, null, pk, pk_validate);
+pub fn verify(
+    msg: []const u8,
+    pk: *const PublicKey,
+    sig: *const Signature,
+    opts: BlsOpts,
+) bls.BlstError!void {
+    try sig.verify(opts.sig_groupcheck, msg, bls.DST, null, pk, opts.pk_validate);
 }
 
-pub fn fastAggregateVerify(msg: []const u8, pks: []const PublicKey, sig: *const Signature, in_pk_validate: ?bool, in_sigs_group_check: ?bool) !bool {
+pub fn fastAggregateVerify(
+    msg: []const u8,
+    pks: []const PublicKey,
+    sig: *const Signature,
+    opts: BlsOpts,
+) !bool {
     var pairing_buf: [bls.Pairing.sizeOf()]u8 align(bls.Pairing.buf_align) = undefined;
-
-    const sigs_groupcheck = in_sigs_group_check orelse false;
-    const pks_validate = in_pk_validate orelse false;
-    return sig.fastAggregateVerify(sigs_groupcheck, &pairing_buf, msg[0..32], DST, pks, pks_validate) catch return false;
+    return sig.fastAggregateVerify(
+        opts.sig_groupcheck,
+        &pairing_buf,
+        msg[0..32],
+        bls.DST,
+        pks,
+        opts.pk_validate,
+    ) catch return false;
 }
 
-// TODO: unit tests
 test "bls - sanity" {
     const ikm: [32]u8 = [_]u8{
         0x93, 0xad, 0x7e, 0x65, 0xde, 0xad, 0x05, 0x2a, 0x08, 0x3a,
@@ -42,10 +66,10 @@ test "bls - sanity" {
     const msg = [_]u8{1} ** 32;
     const sig = sign(sk, &msg);
     const pk = sk.toPublicKey();
-    try verify(&msg, &pk, &sig, null, null);
+    try verify(&msg, &pk, &sig, .{});
 
     var pks = [_]PublicKey{pk};
     var pks_slice: []const PublicKey = pks[0..1];
-    const result = try fastAggregateVerify(&msg, pks_slice[0..], &sig, null, null);
+    const result = try fastAggregateVerify(&msg, pks_slice[0..], &sig, .{});
     try std.testing.expect(result);
 }

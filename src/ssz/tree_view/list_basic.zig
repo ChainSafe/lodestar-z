@@ -73,7 +73,9 @@ pub fn ListBasicTreeView(comptime ST: type) type {
             try self.chunks.clone(opts, &ptr.chunks);
             ptr.allocator = self.allocator;
             ptr._orig_len = self._orig_len;
-            ptr._len = self._len;
+            // Uncommitted writes are dropped (from the source too on transfer), so length = committed.
+            ptr._len = self._orig_len;
+            if (opts.transfer_cache) self._len = self._orig_len;
             return ptr;
         }
 
@@ -86,6 +88,13 @@ pub fn ListBasicTreeView(comptime ST: type) type {
             try self.updateListLength();
             try self.chunks.commit();
             self._orig_len = self._len;
+        }
+
+        /// Grows the list; new positions read as zero. Shrinking must go through sliceTo —
+        /// a bare length cut would leave stale chunk data in the merkleized root.
+        pub fn growTo(self: *Self, new_length: usize) !void {
+            std.debug.assert(new_length >= self._len);
+            self._len = new_length;
         }
 
         pub fn clearCache(self: *Self) void {
@@ -111,10 +120,6 @@ pub fn ListBasicTreeView(comptime ST: type) type {
         pub fn toValue(self: *Self, allocator: Allocator, out: *ST.Type) !void {
             try self.commit();
             try ST.tree.toValue(allocator, self.chunks.state.root, self.chunks.state.pool, out);
-        }
-
-        pub fn setLength(self: *Self, new_length: usize) !void {
-            self._len = new_length;
         }
 
         /// Read-only iterator over committed elements. Pending `set`/`push`
@@ -809,6 +814,54 @@ test "TreeView list basic clone(true) transfers cache and clears source" {
     try std.testing.expect(cloned.chunks.state.children_nodes.count() > 0);
 }
 
+test "TreeView list basic clone(transfer_cache) on a dirty view leaves no orphan pool nodes" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 64 });
+    defer pool.deinit();
+
+    const ListType = FixedListType(UintType(32), 16, .{});
+    var list: ListType.Type = .empty;
+    defer list.deinit(allocator);
+    for (0..4) |i| try list.append(allocator, @as(u32, @intCast(i + 1)));
+
+    const baseline = pool.getNodesInUse();
+    {
+        const root = try ListType.tree.fromValue(&pool, &list);
+        var view = try ListType.TreeView.init(allocator, &pool, root);
+        try view.set(0, @as(u32, 42));
+        var cloned = try view.clone(.{});
+        cloned.deinit();
+        view.deinit();
+    }
+    try std.testing.expectEqual(baseline, pool.getNodesInUse());
+}
+
+test "TreeView list basic clone(transfer_cache) drops an uncommitted push without _len skew" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 256 });
+    defer pool.deinit();
+
+    const ListType = FixedListType(UintType(32), 16, .{});
+    var list: ListType.Type = .empty;
+    defer list.deinit(allocator);
+    for (0..4) |i| try list.append(allocator, @as(u32, @intCast(i + 1)));
+
+    const root = try ListType.tree.fromValue(&pool, &list);
+    var view = try ListType.TreeView.init(allocator, &pool, root);
+    defer view.deinit();
+
+    try view.push(@as(u32, 99));
+
+    var cloned = try view.clone(.{});
+    defer cloned.deinit();
+    try cloned.commit();
+
+    var roundtrip: ListType.Type = .empty;
+    defer roundtrip.deinit(allocator);
+    try ListType.tree.toValue(allocator, cloned.getRoot(), &pool, &roundtrip);
+    try std.testing.expectEqual(@as(usize, 4), roundtrip.items.len);
+}
+
 // Refer to https://github.com/ChainSafe/ssz/blob/7f5580c2ea69f9307300ddb6010a8bc7ce2fc471/packages/ssz/test/unit/byType/listBasic/tree.test.ts#L180-L203
 test "TreeView basic list getAll reflects pushes" {
     const allocator = std.testing.allocator;
@@ -1308,6 +1361,45 @@ test "ListBasicTreeView chunked_leaf: push keeps ChunkedLeaf.len in sync" {
             try std.testing.expectEqualSlices(u8, &zero_chunk, &chunks[c]);
         }
     }
+}
+
+test "ListBasicTreeView chunked_leaf: u8 element width round-trips" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 4096 });
+    defer pool.deinit();
+
+    const ListT = FixedListType(UintType(8), 1 << 20, .{ .chunked_leaf = true });
+    const K: usize = ChunkedLeafType.K;
+    const items_per_chunk: usize = 32;
+    const cl_depth: Depth = ListT.chunk_depth + 1 - ChunkedLeafType.k_log2;
+
+    const item_count: usize = K * items_per_chunk + 2 * items_per_chunk + 5;
+
+    var src: ListT.Type = .empty;
+    defer src.deinit(allocator);
+    const root0 = try ListT.tree.fromValue(&pool, &src);
+    var view = try ListT.TreeView.init(allocator, &pool, root0);
+    defer view.deinit();
+
+    for (0..item_count) |i| try view.push(@as(u8, @intCast(i % 256)));
+    try view.commit();
+
+    const total_chunks = (item_count + items_per_chunk - 1) / items_per_chunk;
+    const chunked_leaf_count = (total_chunks + K - 1) / K;
+    const zero_chunk = [_]u8{0} ** 32;
+    for (0..chunked_leaf_count) |cl_idx| {
+        const cl = try view.chunks.state.root.getNodeAtDepth(&pool, cl_depth, cl_idx);
+        const expected_len: usize = @min(K, total_chunks - cl_idx * K);
+        try std.testing.expectEqual(@as(u16, @intCast(expected_len)), try cl.getChunkedLeafLen(&pool));
+        const chunks = try cl.getChunkedLeafChunks(&pool);
+        for (expected_len..K) |c| try std.testing.expectEqualSlices(u8, &zero_chunk, &chunks[c]);
+    }
+
+    var roundtrip: ListT.Type = .empty;
+    defer roundtrip.deinit(allocator);
+    try ListT.tree.toValue(allocator, view.getRoot(), &pool, &roundtrip);
+    try std.testing.expectEqual(item_count, roundtrip.items.len);
+    for (0..item_count) |i| try std.testing.expectEqual(@as(u8, @intCast(i % 256)), roundtrip.items[i]);
 }
 
 test "ListBasicTreeView chunked_leaf: iteratorReadonly with start_index mid-chunked_leaf" {

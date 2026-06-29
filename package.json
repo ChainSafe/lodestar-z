@@ -19,10 +19,16 @@
     "./pubkeys": {
       "import": "./bindings/src/pubkeys.js",
       "types": "./bindings/src/pubkeys.d.ts"
+    },
+    "./state-transition": {
+      "import": "./bindings/src/state-transition.js",
+      "types": "./bindings/src/state-transition.d.ts"
     }
   },
   "scripts": {
-    "prepare": "zig build build-lib:bindings -Doptimize=ReleaseSafe",
+    "prepare": "pnpm run prepare-${LODESTAR_PRESET:-mainnet}",
+    "prepare-mainnet": "zig build build-lib:bindings -Doptimize=ReleaseSafe -Dpreset=mainnet",
+    "prepare-minimal": "zig build build-lib:bindings -Doptimize=ReleaseSafe -Dpreset=minimal",
     "lint": "biome check",
     "test": "NODE_OPTIONS='--expose-gc' vitest run bindings/test/*.test.ts"
   },

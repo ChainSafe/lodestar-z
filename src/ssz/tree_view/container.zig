@@ -36,6 +36,9 @@ pub fn ContainerTreeView(comptime ST: type) type {
         /// whether the corresponding child node/data has changed since the last update of the root
         changed: std.StaticBitSet(ST.chunk_count),
         original_nodes: [ST.chunk_count]?Node.Id,
+        /// Stable backing store for `getFieldRoot` return pointers on dirty basic fields, so the
+        /// temporary PMT node can be unref'd instead of leaking a Pool slot per call.
+        field_root_cache: [ST.chunk_count][32]u8,
         pub const SszType = ST;
 
         const Self = @This();
@@ -54,6 +57,7 @@ pub fn ContainerTreeView(comptime ST: type) type {
                 .original_nodes = .{null} ** ST.chunk_count,
                 .root = root,
                 .changed = std.StaticBitSet(ST.chunk_count).initEmpty(),
+                .field_root_cache = undefined,
             };
             return ptr;
         }
@@ -290,6 +294,7 @@ pub fn ContainerTreeView(comptime ST: type) type {
 
         pub fn deserialize(allocator: Allocator, pool: *Node.Pool, bytes: []const u8) !*Self {
             const root = try ST.tree.deserializeFromBytes(pool, bytes);
+            errdefer pool.unref(root);
             return try Self.init(allocator, pool, root);
         }
 
@@ -331,12 +336,13 @@ pub fn ContainerTreeView(comptime ST: type) type {
             const field_index = comptime ST.getFieldIndex(field_name);
             const ChildST = ST.getFieldType(field_name);
             if (comptime isBasicType(ChildST)) {
-                // For basic types, get the node at the field's position and return its root
-                const node = if (self.child_data[field_index]) |child_value| blk: {
-                    break :blk try ChildST.tree.fromValue(self.pool, &child_value);
-                } else blk: {
-                    break :blk try self.root.getNodeAtDepth(self.pool, ST.chunk_depth, field_index);
-                };
+                if (self.child_data[field_index]) |child_value| {
+                    const node = try ChildST.tree.fromValue(self.pool, &child_value);
+                    defer self.pool.unref(node);
+                    self.field_root_cache[field_index] = node.getRoot(self.pool).*;
+                    return &self.field_root_cache[field_index];
+                }
+                const node = try self.root.getNodeAtDepth(self.pool, ST.chunk_depth, field_index);
                 return node.getRoot(self.pool);
             } else {
                 // For composite types, if we have a cached view, commit it and return its root
@@ -465,9 +471,9 @@ pub fn StructContainerTreeView(comptime ST: type) type {
             return ptr;
         }
 
+        /// Clones the committed state; uncommitted writes are dropped (from the source too on
+        /// transfer), matching the other tree views.
         pub fn clone(self: *Self, opts: CloneOpts) !*Self {
-            try self.commit();
-
             try self.pool.ref(self.root);
             errdefer self.pool.unref(self.root);
 
@@ -479,10 +485,14 @@ pub fn StructContainerTreeView(comptime ST: type) type {
             ptr.root = self.root;
             ptr.changed = std.StaticBitSet(ST.chunk_count).initEmpty();
 
-            if (opts.transfer_cache) {
+            if (opts.transfer_cache and self.changed.count() == 0) {
                 ptr.value = self.value;
             } else {
                 try ST.tree.toValue(self.root, self.pool, &ptr.value);
+            }
+            if (opts.transfer_cache and self.changed.count() != 0) {
+                self.value = ptr.value;
+                self.changed = std.StaticBitSet(ST.chunk_count).initEmpty();
             }
 
             return ptr;
@@ -798,6 +808,127 @@ test "TreeView container field roundtrip" {
         &htr_from_value,
         &htr_from_tree,
     );
+}
+
+test "StructContainerTreeView clone drops uncommitted changes" {
+    var pool = try Node.Pool.init(.{ .page_allocator = std.testing.allocator, .allocator = std.testing.allocator, .pool_size = 256 });
+    defer pool.deinit();
+
+    const StructCheckpoint = StructContainerType(struct {
+        epoch: UintType(64),
+        root: ByteVectorType(32),
+    });
+    const value: StructCheckpoint.Type = .{ .epoch = 1, .root = [_]u8{1} ** 32 };
+    var view = try StructCheckpoint.TreeView.fromValue(std.testing.allocator, &pool, &value);
+    defer view.deinit();
+    const committed_root = view.getRoot();
+
+    try view.set("epoch", 9);
+    var cloned = try view.clone(.{});
+    defer cloned.deinit();
+
+    try std.testing.expectEqual(@as(u64, 1), try cloned.get("epoch"));
+    try std.testing.expectEqual(@as(u64, 1), try view.get("epoch"));
+    try std.testing.expectEqual(committed_root, cloned.getRoot());
+    try std.testing.expectEqual(committed_root, view.getRoot());
+
+    try view.set("epoch", 5);
+    var kept = try view.clone(.{ .transfer_cache = false });
+    defer kept.deinit();
+    try std.testing.expectEqual(@as(u64, 1), try kept.get("epoch"));
+    try std.testing.expectEqual(@as(u64, 5), try view.get("epoch"));
+}
+
+const DoubleFreeDetectAllocator = @import("testing_allocators").DoubleFreeDetectAllocator;
+
+test "TreeView container setValue/commit - OOM does not double-free" {
+    const new_root_bytes: [32]u8 = [_]u8{0xee} ** 32;
+
+    var fail_at: usize = 0;
+    while (fail_at < 200) : (fail_at += 1) {
+        var oom = DoubleFreeDetectAllocator.init(std.testing.allocator, fail_at);
+        defer oom.deinit();
+        const alloc = oom.allocator();
+
+        var pool = Node.Pool.init(.{ .page_allocator = alloc, .allocator = alloc, .pool_size = 0 }) catch continue;
+        defer pool.deinit();
+
+        const checkpoint: Checkpoint.Type = .{ .epoch = 1, .root = [_]u8{1} ** 32 };
+        const root_node = Checkpoint.tree.fromValue(&pool, &checkpoint) catch continue;
+        var view = Checkpoint.TreeView.init(alloc, &pool, root_node) catch {
+            pool.unref(root_node);
+            continue;
+        };
+        defer view.deinit();
+
+        view.setValue("root", &new_root_bytes) catch {
+            try std.testing.expect(!oom.double_free);
+            continue;
+        };
+        view.commit() catch {};
+        try std.testing.expect(!oom.double_free);
+    }
+}
+
+test "TreeView container fromValue - OOM leaves no orphan pool nodes" {
+    const checkpoint: Checkpoint.Type = .{ .epoch = 7, .root = [_]u8{7} ** 32 };
+
+    var fail_at: usize = 0;
+    while (fail_at < 200) : (fail_at += 1) {
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_at, .resize_fail_index = 0 });
+        var pool = Node.Pool.init(.{ .page_allocator = failing.allocator(), .allocator = failing.allocator(), .pool_size = 0 }) catch continue;
+        defer pool.deinit();
+
+        const baseline = pool.getNodesInUse();
+        const view = Checkpoint.TreeView.fromValue(failing.allocator(), &pool, &checkpoint) catch {
+            try std.testing.expectEqual(baseline, pool.getNodesInUse());
+            continue;
+        };
+        view.deinit();
+        try std.testing.expectEqual(baseline, pool.getNodesInUse());
+    }
+}
+
+test "TreeView container getFieldRoot on a dirty basic field leaves no orphan pool nodes" {
+    var pool = try Node.Pool.init(.{ .page_allocator = std.testing.allocator, .allocator = std.testing.allocator, .pool_size = 256 });
+    defer pool.deinit();
+
+    const checkpoint: Checkpoint.Type = .{ .epoch = 1, .root = [_]u8{1} ** 32 };
+    const root_node = try Checkpoint.tree.fromValue(&pool, &checkpoint);
+    var view = try Checkpoint.TreeView.init(std.testing.allocator, &pool, root_node);
+    defer view.deinit();
+
+    try view.set("epoch", 99);
+    const baseline = pool.getNodesInUse();
+
+    var expected = [_]u8{0} ** 32;
+    std.mem.writeInt(u64, expected[0..8], 99, .little);
+    for (0..10) |_| {
+        const field_root = try view.getFieldRoot("epoch");
+        try std.testing.expectEqualSlices(u8, &expected, field_root);
+    }
+    try std.testing.expectEqual(baseline, pool.getNodesInUse());
+}
+
+test "TreeView container deserialize - OOM leaves no orphan pool nodes" {
+    const value: Checkpoint.Type = .{ .epoch = 7, .root = [_]u8{0x5a} ** 32 };
+    var bytes: [Checkpoint.fixed_size]u8 = undefined;
+    _ = Checkpoint.serializeIntoBytes(&value, &bytes);
+
+    var fail_at: usize = 0;
+    while (fail_at < 200) : (fail_at += 1) {
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_at, .resize_fail_index = 0 });
+        var pool = Node.Pool.init(.{ .page_allocator = failing.allocator(), .allocator = failing.allocator(), .pool_size = 0 }) catch continue;
+        defer pool.deinit();
+
+        const baseline = pool.getNodesInUse();
+        const view = Checkpoint.TreeView.deserialize(failing.allocator(), &pool, &bytes) catch {
+            try std.testing.expectEqual(baseline, pool.getNodesInUse());
+            continue;
+        };
+        view.deinit();
+        try std.testing.expectEqual(baseline, pool.getNodesInUse());
+    }
 }
 
 test "TreeView container nested types set/get/commit" {

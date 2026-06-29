@@ -5,6 +5,7 @@ const Depth = @import("hashing").Depth;
 
 const Node = @import("Node.zig");
 const Gindex = @import("gindex.zig").Gindex;
+const ChunkedLeaf = @import("ChunkedLeaf.zig");
 
 // Allocate until the pool is full, so the next request has to grow (and fail). Returns the filler.
 fn drainPoolToFull(pool: *Node.Pool, out: *std.ArrayList(Node.Id)) !void {
@@ -123,6 +124,22 @@ test "Node.State predicates" {
     try std.testing.expect(!free_state.isBranch());
     // Free slots expose the next-free link via `state.nextFree()`.
     _ = free_state.nextFree();
+}
+
+test "chunked_leaf getRoot recomputes without touching the pool allocator" {
+    var counter = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = std.math.maxInt(usize) });
+    var pool = try Node.Pool.init(.{ .page_allocator = std.testing.allocator, .allocator = counter.allocator(), .pool_size = 16 });
+    defer pool.deinit();
+
+    var chunks: [ChunkedLeaf.K][32]u8 align(64) = undefined;
+    for (&chunks, 0..) |*c, i| c.* = [_]u8{@intCast(i & 0xff)} ** 32;
+
+    const node = try pool.createChunkedLeaf(&chunks, ChunkedLeaf.K);
+    defer pool.unref(node);
+
+    const allocs_before = counter.alloc_index;
+    _ = node.getRoot(&pool); // root starts lazy → this recomputes
+    try std.testing.expectEqual(allocs_before, counter.alloc_index);
 }
 
 test "Pool" {

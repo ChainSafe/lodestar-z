@@ -4,7 +4,6 @@
 //! array + length) referenced by one `.chunked_leaf` Node. Self-contained,
 //! ref-counted via the Pool's Node ref count, copy-on-write on mutation.
 const std = @import("std");
-const Allocator = std.mem.Allocator;
 const hashing = @import("hashing");
 const hash = hashing.hash;
 
@@ -32,13 +31,14 @@ len: u16,
 /// padding. Each reduction is one batched `hash()` call so hashtree's
 /// SIMD lanes stay saturated.
 ///
-/// `scratch` is a caller-supplied K/2-element buffer. `computeRootAllocating`
-/// wraps this with a per-call `allocator.alignedAlloc` + free.
+/// `scratch` is a caller-supplied K/2-element buffer, so root computation is allocation-free
+/// and infallible.
 ///
 /// First round reads `chunks` directly into `scratch` (avoids the
 /// in-place mutation that `hashing.merkleize` would require on `*const
 /// chunks`). Later rounds halve in-place on `scratch`.
 pub fn computeRoot(self: *const ChunkedLeaf, scratch: *align(64) [K / 2][32]u8, out: *[32]u8) void {
+    for (self.chunks[self.len..]) |*chunk| std.debug.assert(std.mem.allEqual(u8, chunk, 0));
     hash(scratch[0..], self.chunks[0..]) catch unreachable;
 
     var width: usize = K / 2;
@@ -47,14 +47,6 @@ pub fn computeRoot(self: *const ChunkedLeaf, scratch: *align(64) [K / 2][32]u8, 
     }
 
     out.* = scratch[0];
-}
-
-/// `computeRoot` wrapper that owns the scratch via `allocator`.
-pub fn computeRootAllocating(self: *const ChunkedLeaf, allocator: Allocator, out: *[32]u8) void {
-    const scratch_slice = allocator.alignedAlloc([32]u8, .@"64", K / 2) catch @panic("OOM");
-    defer allocator.free(scratch_slice);
-    const scratch_arr: *align(64) [K / 2][32]u8 = @ptrCast(scratch_slice.ptr);
-    self.computeRoot(scratch_arr, out);
 }
 
 const Node = @import("Node.zig");
