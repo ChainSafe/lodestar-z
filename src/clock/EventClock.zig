@@ -24,6 +24,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const bounded_array = @import("bounded_array");
+const time = @import("time");
 const slot_math = @import("slot_math.zig");
 const SlotClock = @import("SlotClock.zig");
 
@@ -485,14 +486,6 @@ fn runInRuntime(comptime body: anytype) !void {
     try handle.join();
 }
 
-fn nowSecAt(io_handle: std.Io) u64 {
-    return @intCast(std.Io.Clock.real.now(io_handle).toSeconds());
-}
-
-fn nowMsAt(io_handle: std.Io) u64 {
-    return @intCast(std.Io.Clock.real.now(io_handle).toMilliseconds());
-}
-
 const EventTraceState = struct {
     slots: [64]Slot = undefined,
     slot_len: usize = 0,
@@ -517,7 +510,7 @@ const EventTraceState = struct {
 test "lifecycle: init -> register -> start -> receive events -> stop" {
     try runInRuntime(struct {
         fn run(io_handle: std.Io) !void {
-            const base_now = nowSecAt(io_handle);
+            const base_now = time.nowSec(io_handle);
 
             var clock: EventClock = undefined;
             try clock.init(testing.allocator, .{
@@ -545,7 +538,7 @@ test "lifecycle: init -> register -> start -> receive events -> stop" {
 test "waitForSlot resolves immediately when at target" {
     try runInRuntime(struct {
         fn run(io_handle: std.Io) !void {
-            const base_now = nowSecAt(io_handle);
+            const base_now = time.nowSec(io_handle);
 
             var clock: EventClock = undefined;
             try clock.init(testing.allocator, .{
@@ -568,7 +561,7 @@ test "waitForSlot returns aborted on stop" {
         fn run(io_handle: std.Io) !void {
             var clock: EventClock = undefined;
             try clock.init(testing.allocator, .{
-                .genesis_time_sec = nowSecAt(io_handle) + 2,
+                .genesis_time_sec = time.nowSec(io_handle) + 2,
                 .slot_duration_ms = 2_000,
                 .slots_per_epoch = 8,
             }, io_handle);
@@ -587,7 +580,7 @@ test "offSlot/offEpoch stop event delivery" {
         fn run(io_handle: std.Io) !void {
             var clock: EventClock = undefined;
             try clock.init(testing.allocator, .{
-                .genesis_time_sec = nowSecAt(io_handle) + 2,
+                .genesis_time_sec = time.nowSec(io_handle) + 2,
                 .slot_duration_ms = 1_000,
                 .slots_per_epoch = 4,
             }, io_handle);
@@ -611,7 +604,7 @@ test "stop/join are idempotent" {
         fn run(io_handle: std.Io) !void {
             var clock: EventClock = undefined;
             try clock.init(testing.allocator, .{
-                .genesis_time_sec = nowSecAt(io_handle) + 2,
+                .genesis_time_sec = time.nowSec(io_handle) + 2,
                 .slot_duration_ms = 2_000,
                 .slots_per_epoch = 8,
             }, io_handle);
@@ -630,7 +623,7 @@ test "epoch event is delivered when crossing epoch boundary" {
         fn run(io_handle: std.Io) !void {
             var clock: EventClock = undefined;
             try clock.init(testing.allocator, .{
-                .genesis_time_sec = nowSecAt(io_handle) + 2,
+                .genesis_time_sec = time.nowSec(io_handle) + 2,
                 .slot_duration_ms = 1_000,
                 .slots_per_epoch = 4,
             }, io_handle);
@@ -654,7 +647,7 @@ test "multiple waiters are dispatched in target-slot order" {
         fn run(io_handle: std.Io) !void {
             var clock: EventClock = undefined;
             try clock.init(testing.allocator, .{
-                .genesis_time_sec = nowSecAt(io_handle) + 10,
+                .genesis_time_sec = time.nowSec(io_handle) + 10,
                 .slot_duration_ms = 1_000,
                 .slots_per_epoch = 8,
             }, io_handle);
@@ -685,7 +678,7 @@ test "cancel releases WaitState without awaiting" {
         fn run(io_handle: std.Io) !void {
             var clock: EventClock = undefined;
             try clock.init(testing.allocator, .{
-                .genesis_time_sec = nowSecAt(io_handle) + 10,
+                .genesis_time_sec = time.nowSec(io_handle) + 10,
                 .slot_duration_ms = 1_000,
                 .slots_per_epoch = 8,
             }, io_handle);
@@ -703,7 +696,7 @@ test "real-time: no slot events emitted before genesis" {
         fn run(io_handle: std.Io) !void {
             var clock: EventClock = undefined;
             try clock.init(testing.allocator, .{
-                .genesis_time_sec = nowSecAt(io_handle) + 5,
+                .genesis_time_sec = time.nowSec(io_handle) + 5,
                 .slot_duration_ms = 1_000,
                 .slots_per_epoch = 8,
             }, io_handle);
@@ -724,7 +717,7 @@ test "real-time: no slot events emitted before genesis" {
 test "real-time: slot events fire with correct timing" {
     try runInRuntime(struct {
         fn run(io_handle: std.Io) !void {
-            const base_now = nowSecAt(io_handle);
+            const base_now = time.nowSec(io_handle);
 
             var clock: EventClock = undefined;
             try clock.init(testing.allocator, .{
@@ -740,11 +733,11 @@ test "real-time: slot events fire with correct timing" {
             try clock.start();
 
             const start_slot = clock.currentSlotOrGenesis();
-            const before_ms = nowMsAt(io_handle);
+            const before_ms = time.nowMs(io_handle);
             var fut = try clock.waitForSlot(start_slot + 1);
             errdefer fut.cancel();
             try fut.await(io_handle);
-            const elapsed = nowMsAt(io_handle) - before_ms;
+            const elapsed = time.nowMs(io_handle) - before_ms;
 
             try testing.expect(elapsed < 2000);
             try testing.expect(trace.slot_len > 0);
@@ -756,7 +749,7 @@ test "real-time: slot events fire with correct timing" {
 test "real-time: multi-slot advancement delivers ordered events" {
     try runInRuntime(struct {
         fn run(io_handle: std.Io) !void {
-            const base_now = nowSecAt(io_handle);
+            const base_now = time.nowSec(io_handle);
 
             var clock: EventClock = undefined;
             try clock.init(testing.allocator, .{
@@ -789,7 +782,7 @@ test "real-time: stop+join cancels promptly" {
         fn run(io_handle: std.Io) !void {
             var clock: EventClock = undefined;
             try clock.init(testing.allocator, .{
-                .genesis_time_sec = nowSecAt(io_handle) + 100,
+                .genesis_time_sec = time.nowSec(io_handle) + 100,
                 .slot_duration_ms = 12_000,
                 .slots_per_epoch = 32,
             }, io_handle);
@@ -800,10 +793,10 @@ test "real-time: stop+join cancels promptly" {
             // Give the loop fiber time to enter its sleep.
             std.Io.sleep(io_handle, std.Io.Duration.fromMilliseconds(50), .awake) catch {};
 
-            const before_ms = nowMsAt(io_handle);
+            const before_ms = time.nowMs(io_handle);
             clock.stop();
             clock.join();
-            const elapsed = nowMsAt(io_handle) - before_ms;
+            const elapsed = time.nowMs(io_handle) - before_ms;
 
             // join() cancels the sleeping future directly — should return
             // almost immediately, NOT after the full 12-second slot.
@@ -815,7 +808,7 @@ test "real-time: stop+join cancels promptly" {
 test "real-time: epoch boundary event fires" {
     try runInRuntime(struct {
         fn run(io_handle: std.Io) !void {
-            const base_now = nowSecAt(io_handle);
+            const base_now = time.nowSec(io_handle);
 
             var clock: EventClock = undefined;
             try clock.init(testing.allocator, .{
@@ -876,7 +869,7 @@ test "reentrancy: callback can offSlot itself mid-dispatch" {
         fn run(io_handle: std.Io) !void {
             var clock: EventClock = undefined;
             try clock.init(testing.allocator, .{
-                .genesis_time_sec = nowSecAt(io_handle) + 1_000_000,
+                .genesis_time_sec = time.nowSec(io_handle) + 1_000_000,
                 .slot_duration_ms = 1_000,
                 .slots_per_epoch = 4,
             }, io_handle);
@@ -902,7 +895,7 @@ test "reentrancy: callback can stop the clock; no further slots emitted" {
         fn run(io_handle: std.Io) !void {
             var clock: EventClock = undefined;
             try clock.init(testing.allocator, .{
-                .genesis_time_sec = nowSecAt(io_handle) + 1_000_000,
+                .genesis_time_sec = time.nowSec(io_handle) + 1_000_000,
                 .slot_duration_ms = 1_000,
                 .slots_per_epoch = 4,
             }, io_handle);
@@ -935,7 +928,7 @@ test "reentrancy: stop() during emit resolves reached waiter, aborts future one"
         fn run(io_handle: std.Io) !void {
             var clock: EventClock = undefined;
             try clock.init(testing.allocator, .{
-                .genesis_time_sec = nowSecAt(io_handle) + 1_000_000,
+                .genesis_time_sec = time.nowSec(io_handle) + 1_000_000,
                 .slot_duration_ms = 1_000,
                 .slots_per_epoch = 4,
             }, io_handle);
@@ -969,7 +962,7 @@ test "ListenerLimitReached: onSlot/onEpoch reject the (limit+1)th registration" 
         fn run(io_handle: std.Io) !void {
             var clock: EventClock = undefined;
             try clock.init(testing.allocator, .{
-                .genesis_time_sec = nowSecAt(io_handle) + 1_000_000,
+                .genesis_time_sec = time.nowSec(io_handle) + 1_000_000,
                 .slot_duration_ms = 1_000,
                 .slots_per_epoch = 4,
             }, io_handle);
@@ -993,7 +986,7 @@ test "WaiterLimitReached: waitForSlot rejects the (limit+1)th waiter" {
         fn run(io_handle: std.Io) !void {
             var clock: EventClock = undefined;
             try clock.init(testing.allocator, .{
-                .genesis_time_sec = nowSecAt(io_handle) + 1_000_000,
+                .genesis_time_sec = time.nowSec(io_handle) + 1_000_000,
                 .slot_duration_ms = 1_000,
                 .slots_per_epoch = 4,
             }, io_handle);
@@ -1012,7 +1005,7 @@ test "many waiters at same target slot all resolve on advance" {
         fn run(io_handle: std.Io) !void {
             var clock: EventClock = undefined;
             try clock.init(testing.allocator, .{
-                .genesis_time_sec = nowSecAt(io_handle) + 1_000_000,
+                .genesis_time_sec = time.nowSec(io_handle) + 1_000_000,
                 .slot_duration_ms = 1_000,
                 .slots_per_epoch = 4,
             }, io_handle);
@@ -1278,7 +1271,7 @@ fn runPropertyScenario(seed: u64, op_count: u32, io: std.Io) !void {
     const rng = prng.random();
 
     const spe: u64 = 4;
-    const now_sec = nowSecAt(io);
+    const now_sec = time.nowSec(io);
     var clock: EventClock = undefined;
     // Genesis far in future → wall-clock never advances; advanceAndDispatch owns time.
     try clock.init(testing.allocator, .{

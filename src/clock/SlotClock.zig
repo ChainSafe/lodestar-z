@@ -4,6 +4,7 @@
 //! Pure-read helpers query wall-clock time; only `advanceTo()` mutates the cache.
 
 const std = @import("std");
+const time = @import("time");
 const slot_math = @import("slot_math.zig");
 
 const SlotClock = @This();
@@ -60,7 +61,7 @@ pub const AdvanceIterator = struct {
 };
 
 pub fn nowMs(self: *const SlotClock) u64 {
-    return @intCast(std.Io.Clock.real.now(self.io).toMilliseconds());
+    return time.nowMs(self.io);
 }
 
 pub fn init(config: ClockConfig, io: std.Io) error{InvalidConfig}!SlotClock {
