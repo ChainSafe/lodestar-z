@@ -45,7 +45,6 @@ pub const AdvanceIterator = struct {
 
         const cur = current.?;
         if (cur >= self.target) return null;
-        if (cur == std.math.maxInt(Slot)) return null;
 
         const next_slot = cur + 1;
         self.clock.current_slot = next_slot;
@@ -113,7 +112,6 @@ pub fn currentSlotWithGossipDisparity(self: *const SlotClock) ?Slot {
         else
             null;
     };
-    if (current == std.math.maxInt(Slot)) return current;
     const next_slot = current + 1;
     const next_slot_ms = slot_math.slotStartMs(self.config, next_slot);
     if (next_slot_ms - now_ms <= self.config.maximum_gossip_clock_disparity_ms) {
@@ -135,12 +133,10 @@ pub fn isCurrentSlotGivenGossipDisparity(self: *const SlotClock, slot: Slot) boo
     };
     if (slot == current) return true;
 
-    if (current != std.math.maxInt(Slot)) {
-        const next_slot = current + 1;
-        const next_slot_ms = slot_math.slotStartMs(self.config, next_slot);
-        if (next_slot_ms - now_ms <= self.config.maximum_gossip_clock_disparity_ms) {
-            return slot == next_slot;
-        }
+    const next_slot = current + 1;
+    const next_slot_ms = slot_math.slotStartMs(self.config, next_slot);
+    if (next_slot_ms - now_ms <= self.config.maximum_gossip_clock_disparity_ms) {
+        return slot == next_slot;
     }
 
     if (current > 0) {

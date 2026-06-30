@@ -20,7 +20,7 @@ pub const forkTransitions = @import("config.zig").forkTransitions;
 /// Precondition: `validate()` accepted `config` — guarantees all durations > 0.
 pub fn slotAtMs(config: ClockConfig, now_ms: u64) ?Slot {
     std.debug.assert(config.slot_duration_ms != 0);
-    const genesis_ms = secToMs(config.genesis_time_sec);
+    const genesis_ms = config.genesis_time_sec * 1000;
     if (now_ms < genesis_ms) return null;
 
     var seg_start_slot: Slot = 0;
@@ -44,7 +44,7 @@ pub fn slotAtMs(config: ClockConfig, now_ms: u64) ?Slot {
 /// Returns the slot at the given Unix-second timestamp,
 /// or null if pre-genesis.
 pub fn slotAtSec(config: ClockConfig, now_sec: u64) ?Slot {
-    const now_ms = secToMs(now_sec);
+    const now_ms = now_sec * 1000;
     return slotAtMs(config, now_ms);
 }
 
@@ -68,7 +68,7 @@ pub fn epochAtSlot(config: ClockConfig, slot: Slot) Epoch {
 
 /// Returns the Unix-millisecond start time of `slot`.
 pub fn slotStartMs(config: ClockConfig, slot: Slot) u64 {
-    const genesis_ms = secToMs(config.genesis_time_sec);
+    const genesis_ms = config.genesis_time_sec * 1000;
 
     var seg_start_slot: Slot = 0;
     var seg_start_ms: u64 = genesis_ms;
@@ -96,17 +96,13 @@ pub fn slotStartSec(config: ClockConfig, slot: Slot) u64 {
 /// Milliseconds until the next slot boundary.
 /// Pre-genesis: returns the time until genesis.
 pub fn msUntilNextSlot(config: ClockConfig, now_ms: u64) u64 {
-    const genesis_ms = secToMs(config.genesis_time_sec);
+    const genesis_ms = config.genesis_time_sec * 1000;
     if (now_ms < genesis_ms) return genesis_ms - now_ms;
     // now_ms >= genesis_ms here, so slotAtMs is non-null.
     const slot = slotAtMs(config, now_ms).?;
     const next_slot = slot + 1;
     const next_start = slotStartMs(config, next_slot);
     return next_start - now_ms;
-}
-
-fn secToMs(sec: u64) u64 {
-    return sec * 1000;
 }
 
 const testing = std.testing;
