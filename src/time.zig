@@ -2,13 +2,13 @@ const std = @import("std");
 
 /// Monotonic (`.awake`) timestamp for measuring elapsed durations. Distinct
 /// from the wall-clock `nowMs`/`nowSec` readers below, which are absolute time.
-pub fn timestampNow(io: std.Io) std.Io.Timestamp {
-    return std.Io.Timestamp.now(io, .awake);
+pub fn start(io: std.Io) std.Io.Timestamp {
+    return std.Io.Clock.awake.now(io);
 }
 
 /// Current wall-clock (Unix) time in milliseconds. Uses the `.real` clock —
 /// for absolute time and slot math (anchored to genesis). Distinct from
-/// `timestampNow`, which is monotonic (`.awake`) and for measuring durations.
+/// `start`, which is monotonic (`.awake`) and for measuring durations.
 pub fn nowMs(io: std.Io) u64 {
     return @intCast(std.Io.Clock.real.now(io).toMilliseconds());
 }
@@ -18,8 +18,8 @@ pub fn nowSec(io: std.Io) u64 {
     return @intCast(std.Io.Clock.real.now(io).toSeconds());
 }
 
-pub fn since(io: std.Io, start: std.Io.Timestamp) std.Io.Duration {
-    return start.durationTo(timestampNow(io));
+pub fn since(io: std.Io, from: std.Io.Timestamp) std.Io.Duration {
+    return from.durationTo(start(io));
 }
 
 /// Convert a `Duration` to floating-point seconds. Useful for Prometheus-style

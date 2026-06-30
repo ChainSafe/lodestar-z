@@ -292,9 +292,9 @@ fn ProcessBlockSegmentedBench(comptime fork: ForkSeq) type {
             const io = self.io;
             const state = BenchState.cloned_cached_state.state.castToFork(fork);
             const epoch_cache = BenchState.cloned_cached_state.epoch_cache;
-            const block_start = time.timestampNow(io);
+            const block_start = time.start(io);
 
-            const header_start = time.timestampNow(io);
+            const header_start = time.start(io);
             state_transition.processBlockHeader(
                 fork,
                 allocator,
@@ -306,7 +306,7 @@ fn ProcessBlockSegmentedBench(comptime fork: ForkSeq) type {
             recordSegment(.block_header, @as(u64, @intCast(time.since(io, header_start).nanoseconds)));
 
             if (comptime fork.gte(.capella) and fork.lt(.gloas)) {
-                const withdrawals_start = time.timestampNow(io);
+                const withdrawals_start = time.start(io);
 
                 var withdrawals_buf: [preset.MAX_WITHDRAWALS_PER_PAYLOAD]types.capella.Withdrawal.Type = undefined;
                 var withdrawals_result = WithdrawalsResult{
@@ -335,7 +335,7 @@ fn ProcessBlockSegmentedBench(comptime fork: ForkSeq) type {
             }
 
             if (comptime fork.gte(.bellatrix) and fork.lt(.gloas)) {
-                const exec_start = time.timestampNow(io);
+                const exec_start = time.start(io);
                 const external_data = BlockExternalData{ .execution_payload_status = .valid, .data_availability_status = .available };
                 state_transition.processExecutionPayload(
                     fork,
@@ -350,7 +350,7 @@ fn ProcessBlockSegmentedBench(comptime fork: ForkSeq) type {
                 recordSegment(.execution_payload, @as(u64, @intCast(time.since(io, exec_start).nanoseconds)));
             }
 
-            const randao_start = time.timestampNow(io);
+            const randao_start = time.start(io);
             state_transition.processRandao(
                 fork,
                 BenchState.cloned_cached_state.config,
@@ -363,7 +363,7 @@ fn ProcessBlockSegmentedBench(comptime fork: ForkSeq) type {
             ) catch unreachable;
             recordSegment(.randao, @as(u64, @intCast(time.since(io, randao_start).nanoseconds)));
 
-            const eth1_start = time.timestampNow(io);
+            const eth1_start = time.start(io);
             state_transition.processEth1Data(
                 fork,
                 state,
@@ -371,7 +371,7 @@ fn ProcessBlockSegmentedBench(comptime fork: ForkSeq) type {
             ) catch unreachable;
             recordSegment(.eth1_data, @as(u64, @intCast(time.since(io, eth1_start).nanoseconds)));
 
-            const ops_start = time.timestampNow(io);
+            const ops_start = time.start(io);
             state_transition.processOperations(
                 fork,
                 allocator,
@@ -386,7 +386,7 @@ fn ProcessBlockSegmentedBench(comptime fork: ForkSeq) type {
             recordSegment(.operations, @as(u64, @intCast(time.since(io, ops_start).nanoseconds)));
 
             if (comptime fork.gte(.altair)) {
-                const sync_start = time.timestampNow(io);
+                const sync_start = time.start(io);
                 state_transition.processSyncAggregate(
                     fork,
                     allocator,
@@ -399,11 +399,11 @@ fn ProcessBlockSegmentedBench(comptime fork: ForkSeq) type {
                 recordSegment(.sync_aggregate, @as(u64, @intCast(time.since(io, sync_start).nanoseconds)));
             }
 
-            const commit_start = time.timestampNow(io);
+            const commit_start = time.start(io);
             BenchState.cloned_cached_state.state.commit() catch unreachable;
             recordSegment(.commit, @as(u64, @intCast(time.since(io, commit_start).nanoseconds)));
 
-            const root_start = time.timestampNow(io);
+            const root_start = time.start(io);
             _ = BenchState.cloned_cached_state.state.hashTreeRoot() catch unreachable;
             recordSegment(.state_root, @as(u64, @intCast(time.since(io, root_start).nanoseconds)));
 
