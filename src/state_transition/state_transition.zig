@@ -64,9 +64,9 @@ pub fn processSlots(
 
         const next_slot = try state.slot() + 1;
         if (next_slot % preset.SLOTS_PER_EPOCH == 0) {
-            const epoch_transition_timer = time.timestampNow(io);
+            const epoch_transition_timer = time.start(io);
 
-            var timer = time.timestampNow(io);
+            var timer = time.start(io);
             var epoch_transition_cache = try EpochTransitionCache.init(
                 allocator,
                 io,
@@ -94,7 +94,7 @@ pub fn processSlots(
 
             try state.setSlot(next_slot);
 
-            timer = time.timestampNow(io);
+            timer = time.start(io);
             try epoch_cache.afterProcessEpoch(state, &epoch_transition_cache);
             try observeEpochTransitionStep(.{ .step = .after_process_epoch }, @as(u64, @intCast(time.since(io, timer).nanoseconds)));
             // state.commit
@@ -206,7 +206,7 @@ pub fn stateTransition(
         return error.InvalidBlockForkForState;
     }
     // Note: time only on success
-    var timer = time.timestampNow(io);
+    var timer = time.start(io);
     switch (post_state.forkSeq()) {
         inline else => |f| {
             switch (block.blockType()) {
@@ -243,7 +243,7 @@ pub fn stateTransition(
 
     // Verify state root
     if (opts.verify_state_root) {
-        timer = time.timestampNow(io);
+        timer = time.start(io);
         const post_state_root = try post_state.hashTreeRoot();
         try metrics.state_transition.state_hash_tree_root.observe(.{ .source = .block_transition }, time.durationSeconds(time.since(io, timer)));
 

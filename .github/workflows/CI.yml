@@ -90,6 +90,9 @@ jobs:
       - name: Run fork-choice tests
         run: |
           zig build test:fork_choice
+      - name: Run clock tests
+        run: |
+          zig build test:clock
 
       - name: Build benchmarks
         run: |
