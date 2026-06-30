@@ -60,24 +60,20 @@ pub const AdvanceIterator = struct {
     }
 };
 
-pub fn nowMs(self: *const SlotClock) u64 {
-    return time.nowMs(self.io);
-}
-
 pub fn init(config: ClockConfig, io: std.Io) error{InvalidConfig}!SlotClock {
     try config.validate();
     var self = SlotClock{
         .config = config,
         .io = io,
     };
-    self.current_slot = slot_math.slotAtMs(config, self.nowMs());
+    self.current_slot = slot_math.slotAtMs(config, time.nowMs(self.io));
     return self;
 }
 
 /// Returns the current wall-clock slot. Pure read — does NOT update
 /// the internal `current_slot` cache. Only `advanceTo()` advances the cache.
 pub fn currentSlot(self: *const SlotClock) ?Slot {
-    const now_ms = self.nowMs();
+    const now_ms = time.nowMs(self.io);
     return slot_math.slotAtMs(self.config, now_ms);
 }
 
@@ -106,7 +102,7 @@ pub fn currentEpochOrGenesis(self: *const SlotClock) Epoch {
 /// config where disparity approaches or exceeds the slot duration is not
 /// supported.
 pub fn currentSlotWithGossipDisparity(self: *const SlotClock) ?Slot {
-    const now_ms = self.nowMs();
+    const now_ms = time.nowMs(self.io);
     const current = slot_math.slotAtMs(self.config, now_ms) orelse {
         // Pre-genesis the wall slot is conceptually negative, so slot 0 is
         // "current" only once we're within gossip disparity of genesis;
@@ -129,7 +125,7 @@ pub fn currentSlotWithGossipDisparity(self: *const SlotClock) ?Slot {
 /// See `currentSlotWithGossipDisparity` for the `<=` rationale and the
 /// single-snapshot semantics — both apply here too.
 pub fn isCurrentSlotGivenGossipDisparity(self: *const SlotClock, slot: Slot) bool {
-    const now_ms = self.nowMs();
+    const now_ms = time.nowMs(self.io);
     const current = slot_math.slotAtMs(self.config, now_ms) orelse {
         // Pre-genesis the wall slot is conceptually negative, so slot 0 is
         // "current" only once we're within gossip disparity of genesis.
@@ -158,13 +154,13 @@ pub fn isCurrentSlotGivenGossipDisparity(self: *const SlotClock, slot: Slot) boo
 }
 
 pub fn slotWithFutureToleranceMs(self: *const SlotClock, tolerance_ms: u64) ?Slot {
-    const now_ms = self.nowMs();
+    const now_ms = time.nowMs(self.io);
     const shifted_ms = now_ms + tolerance_ms;
     return slot_math.slotAtMs(self.config, shifted_ms);
 }
 
 pub fn slotWithPastToleranceMs(self: *const SlotClock, tolerance_ms: u64) Slot {
-    const now_ms = self.nowMs();
+    const now_ms = time.nowMs(self.io);
     const shifted_ms = now_ms - tolerance_ms;
     // Pre-genesis → slot 0.
     return slot_math.slotAtMs(self.config, shifted_ms) orelse 0;
@@ -172,13 +168,13 @@ pub fn slotWithPastToleranceMs(self: *const SlotClock, tolerance_ms: u64) Slot {
 
 pub fn secFromSlot(self: *const SlotClock, slot: Slot, to_sec: ?u64) i64 {
     const from_sec = slot_math.slotStartSec(self.config, slot);
-    const end_sec = to_sec orelse @divFloor(self.nowMs(), 1000);
+    const end_sec = to_sec orelse @divFloor(time.nowMs(self.io), 1000);
     return @as(i64, @intCast(end_sec)) - @as(i64, @intCast(from_sec));
 }
 
 pub fn msFromSlot(self: *const SlotClock, slot: Slot, to_ms: ?u64) i64 {
     const from_ms = slot_math.slotStartMs(self.config, slot);
-    const end_ms = to_ms orelse self.nowMs();
+    const end_ms = to_ms orelse time.nowMs(self.io);
     return @as(i64, @intCast(end_ms)) - @as(i64, @intCast(from_ms));
 }
 

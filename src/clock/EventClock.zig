@@ -437,7 +437,7 @@ fn advanceAndDispatch(self: *EventClock, target: Slot) void {
 
 fn runAutoLoop(self: *EventClock) void {
     while (!self.stopped) {
-        const now_ms = self.clock.nowMs();
+        const now_ms = time.nowMs(self.clock.io);
         const next_ms = slot_math.msUntilNextSlot(self.clock.config, now_ms);
         const sleep_ms: i64 = @intCast(@max(@as(u64, 1), next_ms));
 
