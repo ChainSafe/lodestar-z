@@ -428,11 +428,6 @@ fn advanceAndDispatch(self: *EventClock, target: Slot) void {
             .epoch => |e| self.emitEpoch(e),
         }
     }
-    // Defensive: handles edge cases where advanceTo yields zero events
-    // (already at target) but waiters were added between loop ticks.
-    // In the normal case, this is a no-op because the last .slot event
-    // already dispatched waiters at the same slot value.
-    self.dispatchWaiters(self.clock.current_slot);
 }
 
 fn runAutoLoop(self: *EventClock) void {
