@@ -60,9 +60,7 @@ pub const AdvanceIterator = struct {
 };
 
 pub fn nowMs(self: *const SlotClock) u64 {
-    const ms = std.Io.Clock.real.now(self.io).toMilliseconds();
-    std.debug.assert(ms >= 0);
-    return @intCast(ms);
+    return @intCast(std.Io.Clock.real.now(self.io).toMilliseconds());
 }
 
 pub fn init(config: ClockConfig, io: std.Io) error{InvalidConfig}!SlotClock {

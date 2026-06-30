@@ -486,15 +486,11 @@ fn runInRuntime(comptime body: anytype) !void {
 }
 
 fn nowSecAt(io_handle: std.Io) u64 {
-    const sec = std.Io.Clock.real.now(io_handle).toSeconds();
-    std.debug.assert(sec >= 0);
-    return @intCast(sec);
+    return @intCast(std.Io.Clock.real.now(io_handle).toSeconds());
 }
 
 fn nowMsAt(io_handle: std.Io) u64 {
-    const ms = std.Io.Clock.real.now(io_handle).toMilliseconds();
-    std.debug.assert(ms >= 0);
-    return @intCast(ms);
+    return @intCast(std.Io.Clock.real.now(io_handle).toMilliseconds());
 }
 
 const EventTraceState = struct {
