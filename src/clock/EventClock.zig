@@ -477,8 +477,7 @@ fn runInRuntime(comptime body: anytype) !void {
     const rt = try zio.Runtime.init(testing.allocator, .{});
     defer rt.deinit();
 
-    var handle = try rt.spawn(body, .{rt.io()});
-    try handle.join();
+    try body(rt.io());
 }
 
 const EventTraceState = struct {
