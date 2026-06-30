@@ -473,13 +473,6 @@ fn waitForSlotFutureAwait(state: *WaitState) Error!void {
 const testing = std.testing;
 const zio = @import("zio");
 
-fn runInRuntime(comptime body: anytype) !void {
-    const rt = try zio.Runtime.init(testing.allocator, .{});
-    defer rt.deinit();
-
-    try body(rt.io());
-}
-
 const EventTraceState = struct {
     slots: [64]Slot = undefined,
     slot_len: usize = 0,
@@ -502,331 +495,331 @@ const EventTraceState = struct {
 };
 
 test "lifecycle: init -> register -> start -> receive events -> stop" {
-    try runInRuntime(struct {
-        fn run(io_handle: std.Io) !void {
-            const base_now = time.nowSec(io_handle);
+    const rt = try zio.Runtime.init(testing.allocator, .{});
+    defer rt.deinit();
+    const io_handle = rt.io();
 
-            var clock: EventClock = undefined;
-            try clock.init(testing.allocator, .{
-                .genesis_time_sec = base_now,
-                .slot_duration_ms = 1_000,
-                .slots_per_epoch = 8,
-            }, io_handle);
-            defer clock.deinit();
+    const base_now = time.nowSec(io_handle);
 
-            var trace = EventTraceState{};
-            _ = try clock.onSlot(EventTraceState.onSlot, &trace);
+    var clock: EventClock = undefined;
+    try clock.init(testing.allocator, .{
+        .genesis_time_sec = base_now,
+        .slot_duration_ms = 1_000,
+        .slots_per_epoch = 8,
+    }, io_handle);
+    defer clock.deinit();
 
-            try clock.start();
+    var trace = EventTraceState{};
+    _ = try clock.onSlot(EventTraceState.onSlot, &trace);
 
-            const start_slot = clock.currentSlotOrGenesis();
-            var fut = try clock.waitForSlot(start_slot + 1);
-            errdefer fut.cancel();
-            try fut.await(io_handle);
+    try clock.start();
 
-            try testing.expect(trace.slot_len > 0);
-        }
-    }.run);
+    const start_slot = clock.currentSlotOrGenesis();
+    var fut = try clock.waitForSlot(start_slot + 1);
+    errdefer fut.cancel();
+    try fut.await(io_handle);
+
+    try testing.expect(trace.slot_len > 0);
 }
 
 test "waitForSlot resolves immediately when at target" {
-    try runInRuntime(struct {
-        fn run(io_handle: std.Io) !void {
-            const base_now = time.nowSec(io_handle);
+    const rt = try zio.Runtime.init(testing.allocator, .{});
+    defer rt.deinit();
+    const io_handle = rt.io();
 
-            var clock: EventClock = undefined;
-            try clock.init(testing.allocator, .{
-                .genesis_time_sec = base_now,
-                .slot_duration_ms = 1_000,
-                .slots_per_epoch = 8,
-            }, io_handle);
-            defer clock.deinit();
+    const base_now = time.nowSec(io_handle);
 
-            const current = clock.currentSlotOrGenesis();
-            var fut = try clock.waitForSlot(current);
-            errdefer fut.cancel();
-            try fut.await(io_handle);
-        }
-    }.run);
+    var clock: EventClock = undefined;
+    try clock.init(testing.allocator, .{
+        .genesis_time_sec = base_now,
+        .slot_duration_ms = 1_000,
+        .slots_per_epoch = 8,
+    }, io_handle);
+    defer clock.deinit();
+
+    const current = clock.currentSlotOrGenesis();
+    var fut = try clock.waitForSlot(current);
+    errdefer fut.cancel();
+    try fut.await(io_handle);
 }
 
 test "waitForSlot returns aborted on stop" {
-    try runInRuntime(struct {
-        fn run(io_handle: std.Io) !void {
-            var clock: EventClock = undefined;
-            try clock.init(testing.allocator, .{
-                .genesis_time_sec = time.nowSec(io_handle) + 2,
-                .slot_duration_ms = 2_000,
-                .slots_per_epoch = 8,
-            }, io_handle);
-            defer clock.deinit();
+    const rt = try zio.Runtime.init(testing.allocator, .{});
+    defer rt.deinit();
+    const io_handle = rt.io();
 
-            var fut = try clock.waitForSlot(100);
-            errdefer fut.cancel();
-            clock.stop();
-            try testing.expectError(error.Aborted, fut.await(io_handle));
-        }
-    }.run);
+    var clock: EventClock = undefined;
+    try clock.init(testing.allocator, .{
+        .genesis_time_sec = time.nowSec(io_handle) + 2,
+        .slot_duration_ms = 2_000,
+        .slots_per_epoch = 8,
+    }, io_handle);
+    defer clock.deinit();
+
+    var fut = try clock.waitForSlot(100);
+    errdefer fut.cancel();
+    clock.stop();
+    try testing.expectError(error.Aborted, fut.await(io_handle));
 }
 
 test "offSlot/offEpoch stop event delivery" {
-    try runInRuntime(struct {
-        fn run(io_handle: std.Io) !void {
-            var clock: EventClock = undefined;
-            try clock.init(testing.allocator, .{
-                .genesis_time_sec = time.nowSec(io_handle) + 2,
-                .slot_duration_ms = 1_000,
-                .slots_per_epoch = 4,
-            }, io_handle);
-            defer clock.deinit();
+    const rt = try zio.Runtime.init(testing.allocator, .{});
+    defer rt.deinit();
+    const io_handle = rt.io();
 
-            var trace = EventTraceState{};
-            const slot_id = try clock.onSlot(EventTraceState.onSlot, &trace);
-            const epoch_id = try clock.onEpoch(EventTraceState.onEpoch, &trace);
-            try testing.expect(clock.offSlot(slot_id));
-            try testing.expect(clock.offEpoch(epoch_id));
+    var clock: EventClock = undefined;
+    try clock.init(testing.allocator, .{
+        .genesis_time_sec = time.nowSec(io_handle) + 2,
+        .slot_duration_ms = 1_000,
+        .slots_per_epoch = 4,
+    }, io_handle);
+    defer clock.deinit();
 
-            clock.advanceAndDispatch(6);
-            try testing.expectEqual(@as(usize, 0), trace.slot_len);
-            try testing.expectEqual(@as(usize, 0), trace.epoch_len);
-        }
-    }.run);
+    var trace = EventTraceState{};
+    const slot_id = try clock.onSlot(EventTraceState.onSlot, &trace);
+    const epoch_id = try clock.onEpoch(EventTraceState.onEpoch, &trace);
+    try testing.expect(clock.offSlot(slot_id));
+    try testing.expect(clock.offEpoch(epoch_id));
+
+    clock.advanceAndDispatch(6);
+    try testing.expectEqual(@as(usize, 0), trace.slot_len);
+    try testing.expectEqual(@as(usize, 0), trace.epoch_len);
 }
 
 test "stop/join are idempotent" {
-    try runInRuntime(struct {
-        fn run(io_handle: std.Io) !void {
-            var clock: EventClock = undefined;
-            try clock.init(testing.allocator, .{
-                .genesis_time_sec = time.nowSec(io_handle) + 2,
-                .slot_duration_ms = 2_000,
-                .slots_per_epoch = 8,
-            }, io_handle);
-            defer clock.deinit();
+    const rt = try zio.Runtime.init(testing.allocator, .{});
+    defer rt.deinit();
+    const io_handle = rt.io();
 
-            clock.stop();
-            clock.stop();
-            clock.join();
-            clock.join();
-        }
-    }.run);
+    var clock: EventClock = undefined;
+    try clock.init(testing.allocator, .{
+        .genesis_time_sec = time.nowSec(io_handle) + 2,
+        .slot_duration_ms = 2_000,
+        .slots_per_epoch = 8,
+    }, io_handle);
+    defer clock.deinit();
+
+    clock.stop();
+    clock.stop();
+    clock.join();
+    clock.join();
 }
 
 test "epoch event is delivered when crossing epoch boundary" {
-    try runInRuntime(struct {
-        fn run(io_handle: std.Io) !void {
-            var clock: EventClock = undefined;
-            try clock.init(testing.allocator, .{
-                .genesis_time_sec = time.nowSec(io_handle) + 2,
-                .slot_duration_ms = 1_000,
-                .slots_per_epoch = 4,
-            }, io_handle);
-            defer clock.deinit();
+    const rt = try zio.Runtime.init(testing.allocator, .{});
+    defer rt.deinit();
+    const io_handle = rt.io();
 
-            var trace = EventTraceState{};
-            _ = try clock.onSlot(EventTraceState.onSlot, &trace);
-            _ = try clock.onEpoch(EventTraceState.onEpoch, &trace);
+    var clock: EventClock = undefined;
+    try clock.init(testing.allocator, .{
+        .genesis_time_sec = time.nowSec(io_handle) + 2,
+        .slot_duration_ms = 1_000,
+        .slots_per_epoch = 4,
+    }, io_handle);
+    defer clock.deinit();
 
-            clock.advanceAndDispatch(5);
+    var trace = EventTraceState{};
+    _ = try clock.onSlot(EventTraceState.onSlot, &trace);
+    _ = try clock.onEpoch(EventTraceState.onEpoch, &trace);
 
-            try testing.expect(trace.slot_len > 0);
-            try testing.expect(trace.epoch_len > 0);
-            try testing.expectEqual(@as(u64, 1), trace.epochs[0]);
-        }
-    }.run);
+    clock.advanceAndDispatch(5);
+
+    try testing.expect(trace.slot_len > 0);
+    try testing.expect(trace.epoch_len > 0);
+    try testing.expectEqual(@as(u64, 1), trace.epochs[0]);
 }
 
 test "multiple waiters are dispatched in target-slot order" {
-    try runInRuntime(struct {
-        fn run(io_handle: std.Io) !void {
-            var clock: EventClock = undefined;
-            try clock.init(testing.allocator, .{
-                .genesis_time_sec = time.nowSec(io_handle) + 10,
-                .slot_duration_ms = 1_000,
-                .slots_per_epoch = 8,
-            }, io_handle);
-            defer clock.deinit();
+    const rt = try zio.Runtime.init(testing.allocator, .{});
+    defer rt.deinit();
+    const io_handle = rt.io();
 
-            var fut5 = try clock.waitForSlot(5);
-            errdefer fut5.cancel();
+    var clock: EventClock = undefined;
+    try clock.init(testing.allocator, .{
+        .genesis_time_sec = time.nowSec(io_handle) + 10,
+        .slot_duration_ms = 1_000,
+        .slots_per_epoch = 8,
+    }, io_handle);
+    defer clock.deinit();
 
-            var fut3 = try clock.waitForSlot(3);
-            errdefer fut3.cancel();
+    var fut5 = try clock.waitForSlot(5);
+    errdefer fut5.cancel();
 
-            var fut1 = try clock.waitForSlot(1);
-            errdefer fut1.cancel();
+    var fut3 = try clock.waitForSlot(3);
+    errdefer fut3.cancel();
 
-            clock.advanceAndDispatch(3);
+    var fut1 = try clock.waitForSlot(1);
+    errdefer fut1.cancel();
 
-            try fut1.await(io_handle);
-            try fut3.await(io_handle);
+    clock.advanceAndDispatch(3);
 
-            clock.stop();
-            try testing.expectError(error.Aborted, fut5.await(io_handle));
-        }
-    }.run);
+    try fut1.await(io_handle);
+    try fut3.await(io_handle);
+
+    clock.stop();
+    try testing.expectError(error.Aborted, fut5.await(io_handle));
 }
 
 test "cancel releases WaitState without awaiting" {
-    try runInRuntime(struct {
-        fn run(io_handle: std.Io) !void {
-            var clock: EventClock = undefined;
-            try clock.init(testing.allocator, .{
-                .genesis_time_sec = time.nowSec(io_handle) + 10,
-                .slot_duration_ms = 1_000,
-                .slots_per_epoch = 8,
-            }, io_handle);
-            defer clock.deinit();
+    const rt = try zio.Runtime.init(testing.allocator, .{});
+    defer rt.deinit();
+    const io_handle = rt.io();
 
-            // testing.allocator detects a leak if cancel fails to free.
-            var fut = try clock.waitForSlot(999);
-            fut.cancel();
-        }
-    }.run);
+    var clock: EventClock = undefined;
+    try clock.init(testing.allocator, .{
+        .genesis_time_sec = time.nowSec(io_handle) + 10,
+        .slot_duration_ms = 1_000,
+        .slots_per_epoch = 8,
+    }, io_handle);
+    defer clock.deinit();
+
+    // testing.allocator detects a leak if cancel fails to free.
+    var fut = try clock.waitForSlot(999);
+    fut.cancel();
 }
 
 test "real-time: no slot events emitted before genesis" {
-    try runInRuntime(struct {
-        fn run(io_handle: std.Io) !void {
-            var clock: EventClock = undefined;
-            try clock.init(testing.allocator, .{
-                .genesis_time_sec = time.nowSec(io_handle) + 5,
-                .slot_duration_ms = 1_000,
-                .slots_per_epoch = 8,
-            }, io_handle);
-            defer clock.deinit();
+    const rt = try zio.Runtime.init(testing.allocator, .{});
+    defer rt.deinit();
+    const io_handle = rt.io();
 
-            var trace = EventTraceState{};
-            _ = try clock.onSlot(EventTraceState.onSlot, &trace);
+    var clock: EventClock = undefined;
+    try clock.init(testing.allocator, .{
+        .genesis_time_sec = time.nowSec(io_handle) + 5,
+        .slot_duration_ms = 1_000,
+        .slots_per_epoch = 8,
+    }, io_handle);
+    defer clock.deinit();
 
-            try clock.start();
+    var trace = EventTraceState{};
+    _ = try clock.onSlot(EventTraceState.onSlot, &trace);
 
-            std.Io.sleep(io_handle, std.Io.Duration.fromMilliseconds(1500), .awake) catch {};
+    try clock.start();
 
-            try testing.expectEqual(@as(usize, 0), trace.slot_len);
-        }
-    }.run);
+    std.Io.sleep(io_handle, std.Io.Duration.fromMilliseconds(1500), .awake) catch {};
+
+    try testing.expectEqual(@as(usize, 0), trace.slot_len);
 }
 
 test "real-time: slot events fire with correct timing" {
-    try runInRuntime(struct {
-        fn run(io_handle: std.Io) !void {
-            const base_now = time.nowSec(io_handle);
+    const rt = try zio.Runtime.init(testing.allocator, .{});
+    defer rt.deinit();
+    const io_handle = rt.io();
 
-            var clock: EventClock = undefined;
-            try clock.init(testing.allocator, .{
-                .genesis_time_sec = base_now,
-                .slot_duration_ms = 1_000,
-                .slots_per_epoch = 8,
-            }, io_handle);
-            defer clock.deinit();
+    const base_now = time.nowSec(io_handle);
 
-            var trace = EventTraceState{};
-            _ = try clock.onSlot(EventTraceState.onSlot, &trace);
+    var clock: EventClock = undefined;
+    try clock.init(testing.allocator, .{
+        .genesis_time_sec = base_now,
+        .slot_duration_ms = 1_000,
+        .slots_per_epoch = 8,
+    }, io_handle);
+    defer clock.deinit();
 
-            try clock.start();
+    var trace = EventTraceState{};
+    _ = try clock.onSlot(EventTraceState.onSlot, &trace);
 
-            const start_slot = clock.currentSlotOrGenesis();
-            const before_ms = time.nowMs(io_handle);
-            var fut = try clock.waitForSlot(start_slot + 1);
-            errdefer fut.cancel();
-            try fut.await(io_handle);
-            const elapsed = time.nowMs(io_handle) - before_ms;
+    try clock.start();
 
-            try testing.expect(elapsed < 2000);
-            try testing.expect(trace.slot_len > 0);
-            try testing.expect(trace.slots[trace.slot_len - 1] >= start_slot + 1);
-        }
-    }.run);
+    const start_slot = clock.currentSlotOrGenesis();
+    const before_ms = time.nowMs(io_handle);
+    var fut = try clock.waitForSlot(start_slot + 1);
+    errdefer fut.cancel();
+    try fut.await(io_handle);
+    const elapsed = time.nowMs(io_handle) - before_ms;
+
+    try testing.expect(elapsed < 2000);
+    try testing.expect(trace.slot_len > 0);
+    try testing.expect(trace.slots[trace.slot_len - 1] >= start_slot + 1);
 }
 
 test "real-time: multi-slot advancement delivers ordered events" {
-    try runInRuntime(struct {
-        fn run(io_handle: std.Io) !void {
-            const base_now = time.nowSec(io_handle);
+    const rt = try zio.Runtime.init(testing.allocator, .{});
+    defer rt.deinit();
+    const io_handle = rt.io();
 
-            var clock: EventClock = undefined;
-            try clock.init(testing.allocator, .{
-                .genesis_time_sec = base_now,
-                .slot_duration_ms = 1_000,
-                .slots_per_epoch = 8,
-            }, io_handle);
-            defer clock.deinit();
+    const base_now = time.nowSec(io_handle);
 
-            var trace = EventTraceState{};
-            _ = try clock.onSlot(EventTraceState.onSlot, &trace);
+    var clock: EventClock = undefined;
+    try clock.init(testing.allocator, .{
+        .genesis_time_sec = base_now,
+        .slot_duration_ms = 1_000,
+        .slots_per_epoch = 8,
+    }, io_handle);
+    defer clock.deinit();
 
-            try clock.start();
+    var trace = EventTraceState{};
+    _ = try clock.onSlot(EventTraceState.onSlot, &trace);
 
-            const start_slot = clock.currentSlotOrGenesis();
-            var fut = try clock.waitForSlot(start_slot + 2);
-            errdefer fut.cancel();
-            try fut.await(io_handle);
+    try clock.start();
 
-            try testing.expect(trace.slot_len >= 2);
-            for (1..trace.slot_len) |i| {
-                try testing.expect(trace.slots[i] > trace.slots[i - 1]);
-            }
-        }
-    }.run);
+    const start_slot = clock.currentSlotOrGenesis();
+    var fut = try clock.waitForSlot(start_slot + 2);
+    errdefer fut.cancel();
+    try fut.await(io_handle);
+
+    try testing.expect(trace.slot_len >= 2);
+    for (1..trace.slot_len) |i| {
+        try testing.expect(trace.slots[i] > trace.slots[i - 1]);
+    }
 }
 
 test "real-time: stop+join cancels promptly" {
-    try runInRuntime(struct {
-        fn run(io_handle: std.Io) !void {
-            var clock: EventClock = undefined;
-            try clock.init(testing.allocator, .{
-                .genesis_time_sec = time.nowSec(io_handle) + 100,
-                .slot_duration_ms = 12_000,
-                .slots_per_epoch = 32,
-            }, io_handle);
-            defer clock.deinit();
+    const rt = try zio.Runtime.init(testing.allocator, .{});
+    defer rt.deinit();
+    const io_handle = rt.io();
 
-            try clock.start();
+    var clock: EventClock = undefined;
+    try clock.init(testing.allocator, .{
+        .genesis_time_sec = time.nowSec(io_handle) + 100,
+        .slot_duration_ms = 12_000,
+        .slots_per_epoch = 32,
+    }, io_handle);
+    defer clock.deinit();
 
-            // Give the loop fiber time to enter its sleep.
-            std.Io.sleep(io_handle, std.Io.Duration.fromMilliseconds(50), .awake) catch {};
+    try clock.start();
 
-            const before_ms = time.nowMs(io_handle);
-            clock.stop();
-            clock.join();
-            const elapsed = time.nowMs(io_handle) - before_ms;
+    // Give the loop fiber time to enter its sleep.
+    std.Io.sleep(io_handle, std.Io.Duration.fromMilliseconds(50), .awake) catch {};
 
-            // join() cancels the sleeping future directly — should return
-            // almost immediately, NOT after the full 12-second slot.
-            try testing.expect(elapsed < 1500);
-        }
-    }.run);
+    const before_ms = time.nowMs(io_handle);
+    clock.stop();
+    clock.join();
+    const elapsed = time.nowMs(io_handle) - before_ms;
+
+    // join() cancels the sleeping future directly — should return
+    // almost immediately, NOT after the full 12-second slot.
+    try testing.expect(elapsed < 1500);
 }
 
 test "real-time: epoch boundary event fires" {
-    try runInRuntime(struct {
-        fn run(io_handle: std.Io) !void {
-            const base_now = time.nowSec(io_handle);
+    const rt = try zio.Runtime.init(testing.allocator, .{});
+    defer rt.deinit();
+    const io_handle = rt.io();
 
-            var clock: EventClock = undefined;
-            try clock.init(testing.allocator, .{
-                .genesis_time_sec = base_now,
-                .slot_duration_ms = 1_000,
-                .slots_per_epoch = 2,
-            }, io_handle);
-            defer clock.deinit();
+    const base_now = time.nowSec(io_handle);
 
-            var trace = EventTraceState{};
-            _ = try clock.onSlot(EventTraceState.onSlot, &trace);
-            _ = try clock.onEpoch(EventTraceState.onEpoch, &trace);
+    var clock: EventClock = undefined;
+    try clock.init(testing.allocator, .{
+        .genesis_time_sec = base_now,
+        .slot_duration_ms = 1_000,
+        .slots_per_epoch = 2,
+    }, io_handle);
+    defer clock.deinit();
 
-            try clock.start();
+    var trace = EventTraceState{};
+    _ = try clock.onSlot(EventTraceState.onSlot, &trace);
+    _ = try clock.onEpoch(EventTraceState.onEpoch, &trace);
 
-            const start_slot = clock.currentSlotOrGenesis();
-            var fut = try clock.waitForSlot(start_slot + 3);
-            errdefer fut.cancel();
-            try fut.await(io_handle);
+    try clock.start();
 
-            try testing.expect(trace.slot_len >= 3);
-            try testing.expect(trace.epoch_len > 0);
-        }
-    }.run);
+    const start_slot = clock.currentSlotOrGenesis();
+    var fut = try clock.waitForSlot(start_slot + 3);
+    errdefer fut.cancel();
+    try fut.await(io_handle);
+
+    try testing.expect(trace.slot_len >= 3);
+    try testing.expect(trace.epoch_len > 0);
 }
 
 fn nopSlot(_: ?*anyopaque, _: Slot) void {}
@@ -859,52 +852,52 @@ const ReentrancyCtx = struct {
 };
 
 test "reentrancy: callback can offSlot itself mid-dispatch" {
-    try runInRuntime(struct {
-        fn run(io_handle: std.Io) !void {
-            var clock: EventClock = undefined;
-            try clock.init(testing.allocator, .{
-                .genesis_time_sec = time.nowSec(io_handle) + 1_000_000,
-                .slot_duration_ms = 1_000,
-                .slots_per_epoch = 4,
-            }, io_handle);
-            defer clock.deinit();
+    const rt = try zio.Runtime.init(testing.allocator, .{});
+    defer rt.deinit();
+    const io_handle = rt.io();
 
-            var ctx_a = ReentrancyCtx{ .clock = &clock };
-            var ctx_b = ReentrancyCtx{ .clock = &clock };
-            const id_a = try clock.onSlot(ReentrancyCtx.offSelf, &ctx_a);
-            ctx_a.self_id = id_a;
-            _ = try clock.onSlot(ReentrancyCtx.justCount, &ctx_b);
+    var clock: EventClock = undefined;
+    try clock.init(testing.allocator, .{
+        .genesis_time_sec = time.nowSec(io_handle) + 1_000_000,
+        .slot_duration_ms = 1_000,
+        .slots_per_epoch = 4,
+    }, io_handle);
+    defer clock.deinit();
 
-            clock.advanceAndDispatch(0);
-            clock.advanceAndDispatch(2);
+    var ctx_a = ReentrancyCtx{ .clock = &clock };
+    var ctx_b = ReentrancyCtx{ .clock = &clock };
+    const id_a = try clock.onSlot(ReentrancyCtx.offSelf, &ctx_a);
+    ctx_a.self_id = id_a;
+    _ = try clock.onSlot(ReentrancyCtx.justCount, &ctx_b);
 
-            try testing.expectEqual(@as(usize, 1), ctx_a.fired_count);
-            try testing.expectEqual(@as(usize, 3), ctx_b.fired_count);
-        }
-    }.run);
+    clock.advanceAndDispatch(0);
+    clock.advanceAndDispatch(2);
+
+    try testing.expectEqual(@as(usize, 1), ctx_a.fired_count);
+    try testing.expectEqual(@as(usize, 3), ctx_b.fired_count);
 }
 
 test "reentrancy: callback can stop the clock; no further slots emitted" {
-    try runInRuntime(struct {
-        fn run(io_handle: std.Io) !void {
-            var clock: EventClock = undefined;
-            try clock.init(testing.allocator, .{
-                .genesis_time_sec = time.nowSec(io_handle) + 1_000_000,
-                .slot_duration_ms = 1_000,
-                .slots_per_epoch = 4,
-            }, io_handle);
-            defer clock.deinit();
+    const rt = try zio.Runtime.init(testing.allocator, .{});
+    defer rt.deinit();
+    const io_handle = rt.io();
 
-            var ctx = ReentrancyCtx{ .clock = &clock };
-            _ = try clock.onSlot(ReentrancyCtx.stopClock, &ctx);
+    var clock: EventClock = undefined;
+    try clock.init(testing.allocator, .{
+        .genesis_time_sec = time.nowSec(io_handle) + 1_000_000,
+        .slot_duration_ms = 1_000,
+        .slots_per_epoch = 4,
+    }, io_handle);
+    defer clock.deinit();
 
-            clock.advanceAndDispatch(5);
+    var ctx = ReentrancyCtx{ .clock = &clock };
+    _ = try clock.onSlot(ReentrancyCtx.stopClock, &ctx);
 
-            try testing.expectEqual(@as(usize, 1), ctx.fired_count);
-            try testing.expect(clock.stopped);
-            try testing.expectEqual(@as(?Slot, 0), clock.clock.current_slot);
-        }
-    }.run);
+    clock.advanceAndDispatch(5);
+
+    try testing.expectEqual(@as(usize, 1), ctx.fired_count);
+    try testing.expect(clock.stopped);
+    try testing.expectEqual(@as(?Slot, 0), clock.clock.current_slot);
 }
 
 const StopAtSlotCtx = struct {
@@ -918,102 +911,102 @@ const StopAtSlotCtx = struct {
 };
 
 test "reentrancy: stop() during emit resolves reached waiter, aborts future one" {
-    try runInRuntime(struct {
-        fn run(io_handle: std.Io) !void {
-            var clock: EventClock = undefined;
-            try clock.init(testing.allocator, .{
-                .genesis_time_sec = time.nowSec(io_handle) + 1_000_000,
-                .slot_duration_ms = 1_000,
-                .slots_per_epoch = 4,
-            }, io_handle);
-            defer clock.deinit();
+    const rt = try zio.Runtime.init(testing.allocator, .{});
+    defer rt.deinit();
+    const io_handle = rt.io();
 
-            // Listener calls stop() while slot `target` is being emitted, i.e.
-            // after current_slot reaches `target` but before dispatchWaiters runs.
-            const target: Slot = 3;
-            var ctx = StopAtSlotCtx{ .clock = &clock, .stop_at = target };
-            _ = try clock.onSlot(StopAtSlotCtx.stopAt, &ctx);
+    var clock: EventClock = undefined;
+    try clock.init(testing.allocator, .{
+        .genesis_time_sec = time.nowSec(io_handle) + 1_000_000,
+        .slot_duration_ms = 1_000,
+        .slots_per_epoch = 4,
+    }, io_handle);
+    defer clock.deinit();
 
-            var fut_reached = try clock.waitForSlot(target);
-            errdefer fut_reached.cancel();
-            var fut_future = try clock.waitForSlot(target + 1);
-            errdefer fut_future.cancel();
+    // Listener calls stop() while slot `target` is being emitted, i.e.
+    // after current_slot reaches `target` but before dispatchWaiters runs.
+    const target: Slot = 3;
+    var ctx = StopAtSlotCtx{ .clock = &clock, .stop_at = target };
+    _ = try clock.onSlot(StopAtSlotCtx.stopAt, &ctx);
 
-            clock.advanceAndDispatch(target);
+    var fut_reached = try clock.waitForSlot(target);
+    errdefer fut_reached.cancel();
+    var fut_future = try clock.waitForSlot(target + 1);
+    errdefer fut_future.cancel();
 
-            try testing.expect(clock.stopped);
-            try testing.expectEqual(@as(?Slot, target), clock.clock.current_slot);
-            // Reached slot happened, so the wait must resolve, not abort.
-            try fut_reached.await(io_handle);
-            // Future slot can never be emitted after stop, so it aborts.
-            try testing.expectError(error.Aborted, fut_future.await(io_handle));
-        }
-    }.run);
+    clock.advanceAndDispatch(target);
+
+    try testing.expect(clock.stopped);
+    try testing.expectEqual(@as(?Slot, target), clock.clock.current_slot);
+    // Reached slot happened, so the wait must resolve, not abort.
+    try fut_reached.await(io_handle);
+    // Future slot can never be emitted after stop, so it aborts.
+    try testing.expectError(error.Aborted, fut_future.await(io_handle));
 }
 
 test "ListenerLimitReached: onSlot/onEpoch reject the (limit+1)th registration" {
-    try runInRuntime(struct {
-        fn run(io_handle: std.Io) !void {
-            var clock: EventClock = undefined;
-            try clock.init(testing.allocator, .{
-                .genesis_time_sec = time.nowSec(io_handle) + 1_000_000,
-                .slot_duration_ms = 1_000,
-                .slots_per_epoch = 4,
-            }, io_handle);
-            defer clock.deinit();
+    const rt = try zio.Runtime.init(testing.allocator, .{});
+    defer rt.deinit();
+    const io_handle = rt.io();
 
-            for (0..max_slot_listeners) |_| {
-                _ = try clock.onSlot(nopSlot, null);
-            }
-            try testing.expectError(error.ListenerLimitReached, clock.onSlot(nopSlot, null));
+    var clock: EventClock = undefined;
+    try clock.init(testing.allocator, .{
+        .genesis_time_sec = time.nowSec(io_handle) + 1_000_000,
+        .slot_duration_ms = 1_000,
+        .slots_per_epoch = 4,
+    }, io_handle);
+    defer clock.deinit();
 
-            for (0..max_epoch_listeners) |_| {
-                _ = try clock.onEpoch(nopEpoch, null);
-            }
-            try testing.expectError(error.ListenerLimitReached, clock.onEpoch(nopEpoch, null));
-        }
-    }.run);
+    for (0..max_slot_listeners) |_| {
+        _ = try clock.onSlot(nopSlot, null);
+    }
+    try testing.expectError(error.ListenerLimitReached, clock.onSlot(nopSlot, null));
+
+    for (0..max_epoch_listeners) |_| {
+        _ = try clock.onEpoch(nopEpoch, null);
+    }
+    try testing.expectError(error.ListenerLimitReached, clock.onEpoch(nopEpoch, null));
 }
 
 test "WaiterLimitReached: waitForSlot rejects the (limit+1)th waiter" {
-    try runInRuntime(struct {
-        fn run(io_handle: std.Io) !void {
-            var clock: EventClock = undefined;
-            try clock.init(testing.allocator, .{
-                .genesis_time_sec = time.nowSec(io_handle) + 1_000_000,
-                .slot_duration_ms = 1_000,
-                .slots_per_epoch = 4,
-            }, io_handle);
-            defer clock.deinit();
+    const rt = try zio.Runtime.init(testing.allocator, .{});
+    defer rt.deinit();
+    const io_handle = rt.io();
 
-            var futs: [max_waiters]WaitForSlotResult = undefined;
-            for (&futs) |*f| f.* = try clock.waitForSlot(999_999);
-            try testing.expectError(error.WaiterLimitReached, clock.waitForSlot(999_999));
-            for (&futs) |*f| f.cancel();
-        }
-    }.run);
+    var clock: EventClock = undefined;
+    try clock.init(testing.allocator, .{
+        .genesis_time_sec = time.nowSec(io_handle) + 1_000_000,
+        .slot_duration_ms = 1_000,
+        .slots_per_epoch = 4,
+    }, io_handle);
+    defer clock.deinit();
+
+    var futs: [max_waiters]WaitForSlotResult = undefined;
+    for (&futs) |*f| f.* = try clock.waitForSlot(999_999);
+    try testing.expectError(error.WaiterLimitReached, clock.waitForSlot(999_999));
+    for (&futs) |*f| f.cancel();
 }
 
 test "many waiters at same target slot all resolve on advance" {
-    try runInRuntime(struct {
-        fn run(io_handle: std.Io) !void {
-            var clock: EventClock = undefined;
-            try clock.init(testing.allocator, .{
-                .genesis_time_sec = time.nowSec(io_handle) + 1_000_000,
-                .slot_duration_ms = 1_000,
-                .slots_per_epoch = 4,
-            }, io_handle);
-            defer clock.deinit();
+    const rt = try zio.Runtime.init(testing.allocator, .{});
+    defer rt.deinit();
+    const io_handle = rt.io();
 
-            const N = 16;
-            var futs: [N]WaitForSlotResult = undefined;
-            for (&futs) |*f| f.* = try clock.waitForSlot(5);
+    var clock: EventClock = undefined;
+    try clock.init(testing.allocator, .{
+        .genesis_time_sec = time.nowSec(io_handle) + 1_000_000,
+        .slot_duration_ms = 1_000,
+        .slots_per_epoch = 4,
+    }, io_handle);
+    defer clock.deinit();
 
-            clock.advanceAndDispatch(5);
+    const N = 16;
+    var futs: [N]WaitForSlotResult = undefined;
+    for (&futs) |*f| f.* = try clock.waitForSlot(5);
 
-            for (&futs) |*f| try f.await(io_handle);
-        }
-    }.run);
+    clock.advanceAndDispatch(5);
+
+    for (&futs) |*f| try f.await(io_handle);
 }
 
 const PropertyTracker = struct {
@@ -1288,18 +1281,18 @@ fn runPropertyScenario(seed: u64, op_count: u32, io: std.Io) !void {
 }
 
 test "property: random op sequences match model" {
-    try runInRuntime(struct {
-        fn run(io_handle: std.Io) !void {
-            var seed: u64 = 0;
-            while (seed < 500) : (seed += 1) {
-                runPropertyScenario(seed, 50, io_handle) catch |err| {
-                    std.debug.print(
-                        "property scenario failed at seed={d}: {s}\n",
-                        .{ seed, @errorName(err) },
-                    );
-                    return err;
-                };
-            }
-        }
-    }.run);
+    const rt = try zio.Runtime.init(testing.allocator, .{});
+    defer rt.deinit();
+    const io_handle = rt.io();
+
+    var seed: u64 = 0;
+    while (seed < 500) : (seed += 1) {
+        runPropertyScenario(seed, 50, io_handle) catch |err| {
+            std.debug.print(
+                "property scenario failed at seed={d}: {s}\n",
+                .{ seed, @errorName(err) },
+            );
+            return err;
+        };
+    }
 }
