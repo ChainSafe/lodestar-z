@@ -36,42 +36,42 @@ pub fn processEpoch(
     state: *BeaconState(fork),
     cache: *EpochTransitionCache,
 ) !void {
-    var timer = time.timestampNow(io);
+    var timer = time.start(io);
     try processJustificationAndFinalization(fork, state, cache);
     try observeEpochTransitionStep(.{ .step = .process_justification_and_finalization }, @as(u64, @intCast(time.since(io, timer).nanoseconds)));
 
     if (comptime fork.gte(.altair)) {
-        timer = time.timestampNow(io);
+        timer = time.start(io);
         try processInactivityUpdates(fork, allocator, config, epoch_cache, state, cache);
         try observeEpochTransitionStep(.{ .step = .process_inactivity_updates }, @as(u64, @intCast(time.since(io, timer).nanoseconds)));
     }
 
-    timer = time.timestampNow(io);
+    timer = time.start(io);
     try processRegistryUpdates(fork, config, epoch_cache, state, cache);
     try observeEpochTransitionStep(.{ .step = .process_registry_updates }, @as(u64, @intCast(time.since(io, timer).nanoseconds)));
 
-    timer = time.timestampNow(io);
+    timer = time.start(io);
     const slashing_penalties = try processSlashings(fork, allocator, epoch_cache, state, cache, false);
     try observeEpochTransitionStep(.{ .step = .process_slashings }, @as(u64, @intCast(time.since(io, timer).nanoseconds)));
 
-    timer = time.timestampNow(io);
+    timer = time.start(io);
     try processRewardsAndPenalties(fork, allocator, config, epoch_cache, state, cache, slashing_penalties);
     try observeEpochTransitionStep(.{ .step = .process_rewards_and_penalties }, @as(u64, @intCast(time.since(io, timer).nanoseconds)));
 
     try processEth1DataReset(fork, state, cache);
 
     if (comptime fork.gte(.electra)) {
-        timer = time.timestampNow(io);
+        timer = time.start(io);
         try processPendingDeposits(fork, allocator, config, epoch_cache, state, cache);
         try observeEpochTransitionStep(.{ .step = .process_pending_deposits }, @as(u64, @intCast(time.since(io, timer).nanoseconds)));
 
-        timer = time.timestampNow(io);
+        timer = time.start(io);
         try processPendingConsolidations(fork, epoch_cache, state, cache);
         try observeEpochTransitionStep(.{ .step = .process_pending_consolidations }, @as(u64, @intCast(time.since(io, timer).nanoseconds)));
     }
 
     // const numUpdate = processEffectiveBalanceUpdates(fork, state, cache);
-    timer = time.timestampNow(io);
+    timer = time.start(io);
     _ = try processEffectiveBalanceUpdates(fork, allocator, epoch_cache, state, cache);
     try observeEpochTransitionStep(.{ .step = .process_effective_balance_updates }, @as(u64, @intCast(time.since(io, timer).nanoseconds)));
 
@@ -87,19 +87,19 @@ pub fn processEpoch(
     if (comptime fork == .phase0) {
         try processParticipationRecordUpdates(fork, state);
     } else {
-        timer = time.timestampNow(io);
+        timer = time.start(io);
         try processParticipationFlagUpdates(fork, state);
         try observeEpochTransitionStep(.{ .step = .process_participation_flag_updates }, @as(u64, @intCast(time.since(io, timer).nanoseconds)));
     }
 
     if (comptime fork.gte(.altair)) {
-        timer = time.timestampNow(io);
+        timer = time.start(io);
         try processSyncCommitteeUpdates(fork, allocator, epoch_cache, state);
         try observeEpochTransitionStep(.{ .step = .process_sync_committee_updates }, @as(u64, @intCast(time.since(io, timer).nanoseconds)));
     }
 
     if (comptime fork.gte(.fulu)) {
-        timer = time.timestampNow(io);
+        timer = time.start(io);
         try processProposerLookahead(fork, allocator, epoch_cache, state, cache);
         try observeEpochTransitionStep(.{ .step = .process_proposer_lookahead }, @as(u64, @intCast(time.since(io, timer).nanoseconds)));
     }

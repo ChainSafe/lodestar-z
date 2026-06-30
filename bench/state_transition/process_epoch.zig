@@ -413,9 +413,9 @@ fn ProcessEpochSegmentedBench(comptime fork: ForkSeq) type {
 
         pub fn run(self: *@This(), allocator: std.mem.Allocator) void {
             const io = self.io;
-            const epoch_start = time.timestampNow(io);
+            const epoch_start = time.start(io);
 
-            const before_start = time.timestampNow(io);
+            const before_start = time.start(io);
             BenchState.cloned_cached_state.state.commit() catch unreachable;
             var cache_val = EpochTransitionCache.init(
                 allocator,
@@ -431,12 +431,12 @@ fn ProcessEpochSegmentedBench(comptime fork: ForkSeq) type {
             const fork_state = BenchState.cloned_cached_state.state.castToFork(fork);
             const epoch_cache = BenchState.cloned_cached_state.epoch_cache;
 
-            const jf_start = time.timestampNow(io);
+            const jf_start = time.start(io);
             state_transition.processJustificationAndFinalization(fork, fork_state, cache) catch unreachable;
             recordSegment(.justification_finalization, @as(u64, @intCast(time.since(io, jf_start).nanoseconds)));
 
             if (comptime fork.gte(.altair)) {
-                const inactivity_start = time.timestampNow(io);
+                const inactivity_start = time.start(io);
                 state_transition.processInactivityUpdates(
                     fork,
                     allocator,
@@ -448,7 +448,7 @@ fn ProcessEpochSegmentedBench(comptime fork: ForkSeq) type {
                 recordSegment(.inactivity_updates, @as(u64, @intCast(time.since(io, inactivity_start).nanoseconds)));
             }
 
-            const registry_start = time.timestampNow(io);
+            const registry_start = time.start(io);
             state_transition.processRegistryUpdates(
                 fork,
                 BenchState.cloned_cached_state.config,
@@ -458,7 +458,7 @@ fn ProcessEpochSegmentedBench(comptime fork: ForkSeq) type {
             ) catch unreachable;
             recordSegment(.registry_updates, @as(u64, @intCast(time.since(io, registry_start).nanoseconds)));
 
-            const slashings_start = time.timestampNow(io);
+            const slashings_start = time.start(io);
             const slashing_penalties = state_transition.processSlashings(
                 fork,
                 allocator,
@@ -469,7 +469,7 @@ fn ProcessEpochSegmentedBench(comptime fork: ForkSeq) type {
             ) catch unreachable;
             recordSegment(.slashings, @as(u64, @intCast(time.since(io, slashings_start).nanoseconds)));
 
-            const rewards_start = time.timestampNow(io);
+            const rewards_start = time.start(io);
             state_transition.processRewardsAndPenalties(
                 fork,
                 allocator,
@@ -481,12 +481,12 @@ fn ProcessEpochSegmentedBench(comptime fork: ForkSeq) type {
             ) catch unreachable;
             recordSegment(.rewards_and_penalties, @as(u64, @intCast(time.since(io, rewards_start).nanoseconds)));
 
-            const eth1_start = time.timestampNow(io);
+            const eth1_start = time.start(io);
             state_transition.processEth1DataReset(fork, fork_state, cache) catch unreachable;
             recordSegment(.eth1_data_reset, @as(u64, @intCast(time.since(io, eth1_start).nanoseconds)));
 
             if (comptime fork.gte(.electra)) {
-                const pending_deposits_start = time.timestampNow(io);
+                const pending_deposits_start = time.start(io);
                 state_transition.processPendingDeposits(
                     fork,
                     allocator,
@@ -497,7 +497,7 @@ fn ProcessEpochSegmentedBench(comptime fork: ForkSeq) type {
                 ) catch unreachable;
                 recordSegment(.pending_deposits, @as(u64, @intCast(time.since(io, pending_deposits_start).nanoseconds)));
 
-                const pending_consolidations_start = time.timestampNow(io);
+                const pending_consolidations_start = time.start(io);
                 state_transition.processPendingConsolidations(
                     fork,
                     epoch_cache,
@@ -507,7 +507,7 @@ fn ProcessEpochSegmentedBench(comptime fork: ForkSeq) type {
                 recordSegment(.pending_consolidations, @as(u64, @intCast(time.since(io, pending_consolidations_start).nanoseconds)));
             }
 
-            const eb_start = time.timestampNow(io);
+            const eb_start = time.start(io);
             _ = state_transition.processEffectiveBalanceUpdates(
                 fork,
                 allocator,
@@ -517,7 +517,7 @@ fn ProcessEpochSegmentedBench(comptime fork: ForkSeq) type {
             ) catch unreachable;
             recordSegment(.effective_balance_updates, @as(u64, @intCast(time.since(io, eb_start).nanoseconds)));
 
-            const slashings_reset_start = time.timestampNow(io);
+            const slashings_reset_start = time.start(io);
             state_transition.processSlashingsReset(
                 fork,
                 epoch_cache,
@@ -526,32 +526,32 @@ fn ProcessEpochSegmentedBench(comptime fork: ForkSeq) type {
             ) catch unreachable;
             recordSegment(.slashings_reset, @as(u64, @intCast(time.since(io, slashings_reset_start).nanoseconds)));
 
-            const randao_reset_start = time.timestampNow(io);
+            const randao_reset_start = time.start(io);
             state_transition.processRandaoMixesReset(fork, fork_state, cache) catch unreachable;
             recordSegment(.randao_mixes_reset, @as(u64, @intCast(time.since(io, randao_reset_start).nanoseconds)));
 
             if (comptime fork.gte(.capella)) {
-                const historical_summaries_start = time.timestampNow(io);
+                const historical_summaries_start = time.start(io);
                 state_transition.processHistoricalSummariesUpdate(fork, fork_state, cache) catch unreachable;
                 recordSegment(.historical_summaries, @as(u64, @intCast(time.since(io, historical_summaries_start).nanoseconds)));
             } else {
-                const historical_roots_start = time.timestampNow(io);
+                const historical_roots_start = time.start(io);
                 state_transition.processHistoricalRootsUpdate(fork, fork_state, cache) catch unreachable;
                 recordSegment(.historical_roots, @as(u64, @intCast(time.since(io, historical_roots_start).nanoseconds)));
             }
 
             if (comptime fork == .phase0) {
-                const participation_record_start = time.timestampNow(io);
+                const participation_record_start = time.start(io);
                 state_transition.processParticipationRecordUpdates(fork, fork_state) catch unreachable;
                 recordSegment(.participation_record, @as(u64, @intCast(time.since(io, participation_record_start).nanoseconds)));
             } else {
-                const participation_flag_start = time.timestampNow(io);
+                const participation_flag_start = time.start(io);
                 state_transition.processParticipationFlagUpdates(fork, fork_state) catch unreachable;
                 recordSegment(.participation_flags, @as(u64, @intCast(time.since(io, participation_flag_start).nanoseconds)));
             }
 
             if (comptime fork.gte(.altair)) {
-                const sync_updates_start = time.timestampNow(io);
+                const sync_updates_start = time.start(io);
                 state_transition.processSyncCommitteeUpdates(
                     fork,
                     allocator,
@@ -562,7 +562,7 @@ fn ProcessEpochSegmentedBench(comptime fork: ForkSeq) type {
             }
 
             if (comptime fork == .fulu) {
-                const lookahead_start = time.timestampNow(io);
+                const lookahead_start = time.start(io);
                 state_transition.processProposerLookahead(
                     fork,
                     allocator,
@@ -573,7 +573,7 @@ fn ProcessEpochSegmentedBench(comptime fork: ForkSeq) type {
                 recordSegment(.proposer_lookahead, @as(u64, @intCast(time.since(io, lookahead_start).nanoseconds)));
             }
 
-            const state_root_start = time.timestampNow(io);
+            const state_root_start = time.start(io);
             _ = BenchState.cloned_cached_state.state.hashTreeRoot() catch unreachable;
             recordSegment(.state_root, @as(u64, @intCast(time.since(io, state_root_start).nanoseconds)));
 

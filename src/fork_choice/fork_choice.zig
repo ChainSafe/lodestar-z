@@ -1201,7 +1201,7 @@ pub const ForkChoice = struct {
         const canonical_head: ProtoBlock = switch (opt) {
             .get_predicted_proposer_head => self.head,
             else => blk: {
-                const compute_deltas_timer = time.timestampNow(io);
+                const compute_deltas_timer = time.start(io);
                 const result = try self.updateHead(allocator);
                 observeComputeDeltasMetrics(io, compute_deltas_timer, result);
                 break :blk self.head;
