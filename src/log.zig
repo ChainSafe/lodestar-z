@@ -78,7 +78,7 @@ pub const LoggerConfig = struct {
     pub fn init(active_level: LogLevel) LoggerConfig {
         return .{
             .active_level = active_level,
-            .start = time.timestampNow(defaultIo()),
+            .start = time.start(defaultIo()),
         };
     }
 

@@ -93,6 +93,9 @@ jobs:
       - name: Run clock tests
         run: |
           zig build test:clock
+      - name: Run log tests
+        run: |
+          zig build test:log
 
       - name: Build benchmarks
         run: |
