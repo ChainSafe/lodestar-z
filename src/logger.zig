@@ -60,15 +60,10 @@ fn formatLine(buf: []u8, module: ?[]const u8, secs: f64, level: LogLevel, compti
 }
 
 fn writeStderr(bytes: []const u8) void {
-    const io = defaultIo();
-    _ = std.debug.lockStderr(&.{});
+    var buf: [4096]u8 = undefined;
+    const stderr = std.debug.lockStderr(&buf);
     defer std.debug.unlockStderr();
-    const stdErr = std.Io.File.stderr();
-
-    var stdErrWriteBuffer: [4096]u8 = undefined;
-    var stdErrWriter = stdErr.writer(io, &stdErrWriteBuffer);
-    nosuspend stdErrWriter.interface.writeAll(bytes) catch return;
-    nosuspend stdErrWriter.interface.flush() catch return;
+    nosuspend stderr.file_writer.interface.writeAll(bytes) catch {};
 }
 
 pub const LoggerConfig = struct {
