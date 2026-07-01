@@ -1,6 +1,7 @@
 //! Zig beacon clock – slot/epoch timing for Ethereum consensus.
 //!
 //! Public surface:
+//!   `config`    – `ClockConfig`
 //!   `slot_math` – pure arithmetic, comptime-compatible
 //!   `Clock`     – event-driven beacon clock with listeners and waiters
 //! Internally `Clock` layers on `SlotClock`, a stateful slot clock reading

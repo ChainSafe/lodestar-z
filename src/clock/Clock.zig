@@ -18,7 +18,8 @@
 //!      completion inside an emit. Safe from a callback: onSlot, offSlot,
 //!      onEpoch, offEpoch, stop, all current*/isCurrent* accessors, and
 //!      calling waitForSlot (awaiting or cancelling its result falls under
-//!      the no-yield rule).
+//!      the no-yield rule); the pure-read helpers below them are trivially
+//!      safe (no catch-up, no yield).
 //!      A query while the cached slot is behind the wall (a backlog)
 //!      triggers a NESTED dispatch: later slots/epochs reach all listeners
 //!      before the in-flight event's remaining deliveries complete, yet every
@@ -233,36 +234,49 @@ pub fn currentEpochOrGenesis(self: *Clock) Epoch {
 }
 
 pub fn currentSlotWithGossipDisparity(self: *Clock) ?Slot {
-    return self.clock.currentSlotWithGossipDisparity(self.catchUp());
+    return slot_math.slotWithGossipDisparity(self.clock.config, self.catchUp());
 }
 
 pub fn isCurrentSlotGivenGossipDisparity(self: *Clock, slot: Slot) bool {
-    return self.clock.isCurrentSlotGivenGossipDisparity(
+    return slot_math.isCurrentSlotGivenGossipDisparity(
+        self.clock.config,
         .{ .slot = slot, .now_ms = self.catchUp() },
     );
 }
 
-// Unlike the catchUp-backed accessors above, the four helpers below are pure
+// Unlike the catchUp-backed accessors above, the helpers below are pure
 // reads: they never advance the cache and never emit events.
 
 /// Returns the slot if the internal clock were advanced by `tolerance_ms`.
 pub fn slotWithFutureToleranceMs(self: *const Clock, tolerance_ms: u64) ?Slot {
-    return self.clock.slotWithFutureToleranceMs(tolerance_ms);
+    return slot_math.slotWithFutureToleranceMs(
+        self.clock.config,
+        .{ .now_ms = time.nowMs(self.io), .tolerance_ms = tolerance_ms },
+    );
 }
 
 /// Returns the slot if the internal clock were reversed by `tolerance_ms`.
 pub fn slotWithPastToleranceMs(self: *const Clock, tolerance_ms: u64) Slot {
-    return self.clock.slotWithPastToleranceMs(tolerance_ms);
+    return slot_math.slotWithPastToleranceMs(
+        self.clock.config,
+        .{ .now_ms = time.nowMs(self.io), .tolerance_ms = tolerance_ms },
+    );
 }
 
 /// Returns the seconds from the start of `slot` to `to_sec` (or now).
 pub fn secFromSlot(self: *const Clock, slot: Slot, to_sec: ?u64) i64 {
-    return self.clock.secFromSlot(slot, to_sec);
+    return slot_math.secFromSlot(self.clock.config, .{
+        .slot = slot,
+        .to_sec = to_sec orelse @divFloor(time.nowMs(self.io), 1000),
+    });
 }
 
 /// Returns the milliseconds from the start of `slot` to `to_ms` (or now).
 pub fn msFromSlot(self: *const Clock, slot: Slot, to_ms: ?u64) i64 {
-    return self.clock.msFromSlot(slot, to_ms);
+    return slot_math.msFromSlot(self.clock.config, .{
+        .slot = slot,
+        .to_ms = to_ms orelse time.nowMs(self.io),
+    });
 }
 
 /// Return type from `waitForSlot`. The caller MUST either:

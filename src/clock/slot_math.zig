@@ -1,9 +1,10 @@
-//! Layer 0 – Pure slot/epoch arithmetic.
+//! Pure slot/epoch arithmetic and policy helpers.
 //!
 //! No state, no allocation, no I/O.  Every function is comptime-compatible.
 //! The only `null` is pre-genesis (a `<` comparison); arithmetic uses plain
 //! operators since `now_ms` is the wall clock and slot/config values are
 //! program-controlled — an overflow would be a program error and traps.
+//! `slotWithPastToleranceMs` alone takes caller-supplied data and saturates.
 
 const std = @import("std");
 const ct = @import("consensus_types");
@@ -103,6 +104,102 @@ pub fn msUntilNextSlot(config: ClockConfig, now_ms: u64) u64 {
     const next_slot = slot + 1;
     const next_start = slotStartMs(config, next_slot);
     return next_start - now_ms;
+}
+
+/// Returns the slot the network may be advancing to, accounting for gossip
+/// clock disparity, or null pre-genesis when no slot is current yet.
+///
+/// Single-snapshot semantics: the base slot and the disparity window both
+/// derive from the caller's one `now_ms` reading, so the two can never
+/// disagree (a second read could put `now_ms` past the boundary it is
+/// being compared against).
+///
+/// Per phase0/p2p-interface.md, gossip validation rejects future messages with
+/// strict `<` (`current_time + MAXIMUM_GOSSIP_CLOCK_DISPARITY < message_time`),
+/// so the boundary case (exactly equal) is accepted — hence `<=` here.
+///
+/// Assumes the disparity window reaches at most the adjacent slot — true
+/// for every real config (500 ms disparity vs seconds-long slots). A
+/// config where disparity approaches or exceeds the slot duration is not
+/// supported.
+pub fn slotWithGossipDisparity(config: ClockConfig, now_ms: u64) ?Slot {
+    const current = slotAtMs(config, now_ms) orelse {
+        // Pre-genesis the wall slot is conceptually negative, so slot 0 is
+        // "current" only once we're within gossip disparity of genesis;
+        // null otherwise.
+        const genesis_ms = slotStartMs(config, 0);
+        return if (genesis_ms - now_ms <= config.maximum_gossip_clock_disparity_ms)
+            0
+        else
+            null;
+    };
+    const next_slot = current + 1;
+    const next_slot_ms = slotStartMs(config, next_slot);
+    if (next_slot_ms - now_ms <= config.maximum_gossip_clock_disparity_ms) {
+        return next_slot;
+    }
+    return current;
+}
+
+/// See `slotWithGossipDisparity` for the `<=` rationale and the
+/// single-snapshot semantics — both apply here too.
+pub fn isCurrentSlotGivenGossipDisparity(
+    config: ClockConfig,
+    options: struct { slot: Slot, now_ms: u64 },
+) bool {
+    const slot = options.slot;
+    const now_ms = options.now_ms;
+    const current = slotAtMs(config, now_ms) orelse {
+        // Pre-genesis the wall slot is conceptually negative, so slot 0 is
+        // "current" only once we're within gossip disparity of genesis.
+        if (slot != 0) return false;
+        const genesis_ms = slotStartMs(config, 0);
+        return genesis_ms - now_ms <= config.maximum_gossip_clock_disparity_ms;
+    };
+    if (slot == current) return true;
+
+    const next_slot = current + 1;
+    const next_slot_ms = slotStartMs(config, next_slot);
+    if (next_slot_ms - now_ms <= config.maximum_gossip_clock_disparity_ms) {
+        return slot == next_slot;
+    }
+
+    if (current > 0) {
+        const current_slot_ms = slotStartMs(config, current);
+        if (now_ms - current_slot_ms <= config.maximum_gossip_clock_disparity_ms) {
+            return slot == current - 1;
+        }
+    }
+
+    return false;
+}
+
+pub fn slotWithFutureToleranceMs(
+    config: ClockConfig,
+    options: struct { now_ms: u64, tolerance_ms: u64 },
+) ?Slot {
+    const shifted_ms = options.now_ms + options.tolerance_ms;
+    return slotAtMs(config, shifted_ms);
+}
+
+/// Saturating `-|`: `tolerance_ms` is caller data, not program-controlled — clamp, don't trap.
+pub fn slotWithPastToleranceMs(
+    config: ClockConfig,
+    options: struct { now_ms: u64, tolerance_ms: u64 },
+) Slot {
+    const shifted_ms = options.now_ms -| options.tolerance_ms;
+    // Pre-genesis → slot 0.
+    return slotAtMs(config, shifted_ms) orelse 0;
+}
+
+pub fn secFromSlot(config: ClockConfig, options: struct { slot: Slot, to_sec: u64 }) i64 {
+    const from_sec = slotStartSec(config, options.slot);
+    return @as(i64, @intCast(options.to_sec)) - @as(i64, @intCast(from_sec));
+}
+
+pub fn msFromSlot(config: ClockConfig, options: struct { slot: Slot, to_ms: u64 }) i64 {
+    const from_ms = slotStartMs(config, options.slot);
+    return @as(i64, @intCast(options.to_ms)) - @as(i64, @intCast(from_ms));
 }
 
 const testing = std.testing;
@@ -312,4 +409,135 @@ test "fork-aware: two transitions" {
     try testing.expectEqual(@as(?Slot, 8191), slotAtMs(two_fork, f2_ms - 1));
     try testing.expectEqual(@as(?Slot, 8192), slotAtMs(two_fork, f2_ms));
     try testing.expectEqual(@as(?Slot, 8193), slotAtMs(two_fork, f2_ms + 4_000));
+}
+
+const test_cfg = ClockConfig{
+    .genesis_time_sec = 100,
+    .slot_duration_ms = 12_000,
+    .slots_per_epoch = 32,
+    .maximum_gossip_clock_disparity_ms = 500,
+};
+
+test "gossip disparity: far from boundary" {
+    try testing.expectEqual(@as(?Slot, 0), slotWithGossipDisparity(test_cfg, 103_000));
+    try testing.expect(
+        isCurrentSlotGivenGossipDisparity(test_cfg, .{ .slot = 0, .now_ms = 103_000 }),
+    );
+    try testing.expect(
+        !isCurrentSlotGivenGossipDisparity(test_cfg, .{ .slot = 1, .now_ms = 103_000 }),
+    );
+}
+
+test "gossip disparity: near next slot boundary" {
+    try testing.expectEqual(@as(?Slot, 1), slotWithGossipDisparity(test_cfg, 111_600));
+    try testing.expect(
+        isCurrentSlotGivenGossipDisparity(test_cfg, .{ .slot = 1, .now_ms = 111_600 }),
+    );
+}
+
+test "gossip disparity: just after slot boundary" {
+    try testing.expect(
+        isCurrentSlotGivenGossipDisparity(test_cfg, .{ .slot = 0, .now_ms = 112_300 }),
+    );
+}
+
+test "gossip disparity: exact threshold (500ms) applies inclusively" {
+    // next_slot_ms - now_ms == 500 → 500 <= 500, disparity applies.
+    // Slot 1 starts at 112_000ms. 500ms before = 111_500ms.
+    try testing.expectEqual(@as(?Slot, 1), slotWithGossipDisparity(test_cfg, 111_500));
+    try testing.expect(
+        isCurrentSlotGivenGossipDisparity(test_cfg, .{ .slot = 1, .now_ms = 111_500 }),
+    );
+
+    // 1ms further out (111_499): 112_000 - 111_499 = 501 > 500, disparity does NOT apply.
+    try testing.expectEqual(@as(?Slot, 0), slotWithGossipDisparity(test_cfg, 111_499));
+    try testing.expect(
+        !isCurrentSlotGivenGossipDisparity(test_cfg, .{ .slot = 1, .now_ms = 111_499 }),
+    );
+}
+
+test "gossip disparity: pre-genesis slot 0 only within disparity of genesis" {
+    // Genesis is 100_000ms; disparity is 500ms.
+    // 1000ms before genesis: slot 0 is not yet "current".
+    try testing.expectEqual(@as(?Slot, null), slotWithGossipDisparity(test_cfg, 99_000));
+    try testing.expect(
+        !isCurrentSlotGivenGossipDisparity(test_cfg, .{ .slot = 0, .now_ms = 99_000 }),
+    );
+    try testing.expect(
+        !isCurrentSlotGivenGossipDisparity(test_cfg, .{ .slot = 1, .now_ms = 99_000 }),
+    );
+
+    // 300ms before genesis: within disparity, slot 0 is "current".
+    try testing.expectEqual(@as(?Slot, 0), slotWithGossipDisparity(test_cfg, 99_700));
+    try testing.expect(
+        isCurrentSlotGivenGossipDisparity(test_cfg, .{ .slot = 0, .now_ms = 99_700 }),
+    );
+    try testing.expect(
+        !isCurrentSlotGivenGossipDisparity(test_cfg, .{ .slot = 1, .now_ms = 99_700 }),
+    );
+
+    // Exact threshold: 500ms before genesis is inclusive.
+    try testing.expectEqual(@as(?Slot, 0), slotWithGossipDisparity(test_cfg, 99_500));
+    try testing.expect(
+        isCurrentSlotGivenGossipDisparity(test_cfg, .{ .slot = 0, .now_ms = 99_500 }),
+    );
+
+    // 1ms further out (501ms before genesis): not "current".
+    try testing.expectEqual(@as(?Slot, null), slotWithGossipDisparity(test_cfg, 99_499));
+    try testing.expect(
+        !isCurrentSlotGivenGossipDisparity(test_cfg, .{ .slot = 0, .now_ms = 99_499 }),
+    );
+}
+
+test "gossip disparity: pre-genesis with sub-disparity slot duration never advances past 0" {
+    // Degenerate config: slot_duration (400ms) <= disparity (500ms). With `slotAtMs
+    // orelse 0`, pre-genesis would clamp to slot 0, see next_slot 1 start within
+    // disparity, and spuriously report slot 1; null/0 semantics must hold instead.
+    const cfg = ClockConfig{
+        .genesis_time_sec = 100, // genesis_ms = 100_000
+        .slot_duration_ms = 400,
+        .slots_per_epoch = 8,
+        .maximum_gossip_clock_disparity_ms = 500,
+    };
+
+    // 1ms before genesis (within disparity): slot 0, never slot 1.
+    try testing.expectEqual(@as(?Slot, 0), slotWithGossipDisparity(cfg, 99_999));
+    try testing.expect(!isCurrentSlotGivenGossipDisparity(cfg, .{ .slot = 1, .now_ms = 99_999 }));
+
+    // 501ms before genesis (just outside disparity): no slot is current.
+    try testing.expectEqual(@as(?Slot, null), slotWithGossipDisparity(cfg, 99_499));
+}
+
+test "tolerance helpers" {
+    try testing.expectEqual(
+        @as(?Slot, 2),
+        slotWithFutureToleranceMs(test_cfg, .{ .now_ms = 112_000, .tolerance_ms = 12_000 }),
+    );
+    try testing.expectEqual(
+        @as(Slot, 0),
+        slotWithPastToleranceMs(test_cfg, .{ .now_ms = 112_000, .tolerance_ms = 12_000 }),
+    );
+}
+
+test "slotWithPastToleranceMs saturates when tolerance exceeds now" {
+    // 50_000 -| 60_000 saturates to 0 ms, which is pre-genesis → the orelse-0
+    // path → slot 0 (a wrapping subtraction would trap here instead).
+    try testing.expectEqual(
+        @as(Slot, 0),
+        slotWithPastToleranceMs(test_cfg, .{ .now_ms = 50_000, .tolerance_ms = 60_000 }),
+    );
+}
+
+test "secFromSlot and msFromSlot" {
+    try testing.expectEqual(@as(i64, 6), secFromSlot(test_cfg, .{ .slot = 1, .to_sec = 118 }));
+    try testing.expectEqual(
+        @as(i64, 6000),
+        msFromSlot(test_cfg, .{ .slot = 1, .to_ms = 118_000 }),
+    );
+    try testing.expectEqual(@as(i64, 0), secFromSlot(test_cfg, .{ .slot = 1, .to_sec = 112 }));
+    try testing.expectEqual(@as(i64, -12), secFromSlot(test_cfg, .{ .slot = 1, .to_sec = 100 }));
+    try testing.expectEqual(
+        @as(i64, -12000),
+        msFromSlot(test_cfg, .{ .slot = 1, .to_ms = 100_000 }),
+    );
 }
