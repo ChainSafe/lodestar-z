@@ -212,10 +212,9 @@ pub fn offEpoch(self: *Clock, id: ListenerId) bool {
     return false;
 }
 
-// "current" accessors derive their result from catchUp()'s single wall
-// reading: while the clock is running, the base reading never runs ahead of
-// the events it flushed (the disparity window may still report one slot
-// ahead, and after stop() nothing is emitted at all).
+// The "current" accessors read the clock only through catchUp(), so each
+// derives from its single wall reading rather than a second, possibly
+// skewed clock read.
 
 pub fn currentSlot(self: *Clock) ?Slot {
     return slot_math.slotAtMs(self.config, self.catchUp());
@@ -383,14 +382,12 @@ pub fn waitForSlot(self: *Clock, target: Slot) Error!WaitForSlotResult {
     };
 }
 
-/// Catch event-clock state up to wall-clock time, emitting any intermediate
-/// slot/epoch events to listeners, and return the wall reading used.
-/// Emits nothing if already caught up or pre-genesis.
+/// Advance to wall-clock time, emitting any pending slot/epoch events, and
+/// return the reading used. Emits nothing if already caught up or pre-genesis.
 ///
-/// The returned reading is the only wall read an accessor may use — deriving
-/// any current* result from a second read would let the result run ahead of
-/// the events this read flushed (listener callbacks can burn wall time
-/// across a slot boundary mid-dispatch).
+/// Accessors must derive from this reading, not a fresh clock read: a slow
+/// callback can cross a slot boundary mid-dispatch, so a second read could
+/// name a slot the just-emitted events haven't reached.
 fn catchUp(self: *Clock) u64 {
     const now_ms = time.nowMs(self.io);
     if (slot_math.slotAtMs(self.config, now_ms)) |wall_slot| {

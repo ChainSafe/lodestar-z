@@ -111,10 +111,8 @@ pub fn msUntilNextSlot(config: ClockConfig, now_ms: u64) u64 {
 /// Returns the slot the network may be advancing to, accounting for gossip
 /// clock disparity, or null pre-genesis when no slot is current yet.
 ///
-/// Single-snapshot semantics: the base slot and the disparity window both
-/// derive from the caller's one `now_ms` reading, so the two can never
-/// disagree (a second read could put `now_ms` past the boundary it is
-/// being compared against).
+/// Base slot and disparity window come from the same `now_ms`, so they can't
+/// disagree — a fresh read could sit past the boundary being compared.
 ///
 /// Per phase0/p2p-interface.md, gossip validation rejects future messages with
 /// strict `<` (`current_time + MAXIMUM_GOSSIP_CLOCK_DISPARITY < message_time`),
