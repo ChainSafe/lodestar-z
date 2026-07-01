@@ -684,7 +684,7 @@ describe("BeaconStateView", () => {
       const newState = state.processSlots(originalSlot + 1, {dontTransferCache: false});
 
       expect(newState.slot).toBe(originalSlot + 1);
-      expect(newState.createdWithTransferCache).toBe(false);
+      expect(newState.createdWithTransferCache).toBe(true);
     });
   });
 
