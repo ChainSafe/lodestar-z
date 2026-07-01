@@ -235,7 +235,9 @@ pub fn stateTransition(
     }
     metrics.state_transition.process_block.observe(time.durationSeconds(time.since(io, timer)));
 
+    timer = time.start(io);
     try post_state.commit();
+    metrics.state_transition.process_block_commit.observe(time.durationSeconds(time.since(io, timer)));
 
     try metrics.state_transition.onPostState(post_cached_state);
 
@@ -243,7 +245,7 @@ pub fn stateTransition(
     if (opts.verify_state_root) {
         timer = time.start(io);
         const post_state_root = try post_state.hashTreeRoot();
-        try metrics.state_transition.state_hash_tree_root.observe(.{ .source = .block_transition }, time.durationSeconds(time.since(io, timer)));
+        try metrics.state_transition.state_hash_tree_root.observe(.{ .source = .state_transition }, time.durationSeconds(time.since(io, timer)));
 
         const block_state_root = block.stateRoot();
         if (!std.mem.eql(u8, post_state_root, block_state_root)) {
