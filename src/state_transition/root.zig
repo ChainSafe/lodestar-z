@@ -110,6 +110,8 @@ const EpochShuffling = @import("./utils/epoch_shuffling.zig");
 pub const calculateShufflingDecisionRoot = EpochShuffling.calculateShufflingDecisionRoot;
 pub const processProposerLookahead = @import("./epoch/process_proposer_lookahead.zig").processProposerLookahead;
 pub const processExecutionPayloadEnvelope = @import("./block/process_execution_payload_envelope.zig").processExecutionPayloadEnvelope;
+pub const processExecutionPayloadBid = @import("./block/process_execution_payload_bid.zig").processExecutionPayloadBid;
+pub const processPtcWindow = @import("./epoch/process_ptc_window.zig").processPtcWindow;
 pub const processParentExecutionPayload = @import("./block/process_parent_execution_payload.zig").processParentExecutionPayload;
 pub const applyParentExecutionPayload = @import("./block/process_parent_execution_payload.zig").applyParentExecutionPayload;
 
