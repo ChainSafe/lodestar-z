@@ -27,6 +27,7 @@ const getExpectedWithdrawals = @import("./process_withdrawals.zig").getExpectedW
 const processExecutionPayloadBid = @import("./process_execution_payload_bid.zig").processExecutionPayloadBid;
 const processParentExecutionPayload = @import("./process_parent_execution_payload.zig").processParentExecutionPayload;
 const isExecutionEnabled = @import("../utils/execution.zig").isExecutionEnabled;
+const isParentBlockFull = @import("../utils/gloas.zig").isParentBlockFull;
 // TODO: proposer reward api
 // const ProposerRewardType = @import("../types/proposer_reward.zig").ProposerRewardType;
 
@@ -59,6 +60,30 @@ pub fn processBlock(
     const body = block.body();
     const current_epoch = epoch_cache.epoch;
 
+    if (comptime fork.gte(.gloas)) {
+        if (try isParentBlockFull(state)) {
+            var withdrawals_result = WithdrawalsResult{ .withdrawals = try Withdrawals.initCapacity(
+                allocator,
+                preset.MAX_WITHDRAWALS_PER_PAYLOAD,
+            ) };
+            defer withdrawals_result.withdrawals.deinit(allocator);
+            var withdrawal_balances = std.AutoHashMap(ValidatorIndex, usize).init(allocator);
+            defer withdrawal_balances.deinit();
+
+            try getExpectedWithdrawals(
+                fork,
+                allocator,
+                epoch_cache,
+                state,
+                &withdrawals_result,
+                &withdrawal_balances,
+            );
+
+            const empty_root: Root = .{0} ** 32;
+            try processWithdrawals(fork, allocator, state, withdrawals_result, empty_root);
+        }
+    }
+
     // The call to the process_execution_payload must happen before the call to the process_randao as the former depends
     // on the randao_mix computed with the reveal of the previous block.
     // Gloas (ePBS): execution payload is decoupled from the block, processed via ExecutionPayloadEnvelope
@@ -67,13 +92,17 @@ pub fn processBlock(
             // TODO Deneb: Allow to disable withdrawals for interop testing
             // https://github.com/ethereum/consensus-specs/blob/b62c9e877990242d63aa17a2a59a49bc649a2f2e/specs/eip4844/beacon-chain.md#disabling-withdrawals
             if (comptime fork.gte(.capella)) {
-                var withdrawals_buf: [preset.MAX_WITHDRAWALS_PER_PAYLOAD]types.capella.Withdrawal.Type = undefined;
-                var withdrawals_result = WithdrawalsResult{ .withdrawals = Withdrawals.initBuffer(&withdrawals_buf) };
+                var withdrawals_result = WithdrawalsResult{ .withdrawals = try Withdrawals.initCapacity(
+                    allocator,
+                    preset.MAX_WITHDRAWALS_PER_PAYLOAD,
+                ) };
+                defer withdrawals_result.withdrawals.deinit(allocator);
                 var withdrawal_balances = std.AutoHashMap(ValidatorIndex, usize).init(allocator);
                 defer withdrawal_balances.deinit();
 
                 try getExpectedWithdrawals(
                     fork,
+                    allocator,
                     epoch_cache,
                     state,
                     &withdrawals_result,
