@@ -377,11 +377,7 @@ declare const bindings: {
     innerShuffleList: (out: Uint32Array, seed: Uint8Array, rounds: number, forwards: boolean) => void;
   };
   stateTransition: {
-    stateTransition: (
-      preState: BeaconStateView,
-      signedBlockBytes: Uint8Array,
-      options?: TransitionOpts
-    ) => BeaconStateView;
+    deinitReusedEpochTransitionCache: () => void;
   };
   metrics: {
     init: () => void;
