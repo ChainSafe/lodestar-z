@@ -138,6 +138,8 @@ pub fn processSlots(
             try state.setSlot(next_slot);
         }
     }
+
+    try state.commit();
 }
 
 pub const TransitionOpts = struct {
@@ -236,6 +238,7 @@ pub fn stateTransition(
     timer = time.start(io);
     try post_state.commit();
     metrics.state_transition.process_block_commit.observe(time.durationSeconds(time.since(io, timer)));
+
 
     try metrics.state_transition.onPostState(post_cached_state);
 

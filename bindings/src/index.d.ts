@@ -152,11 +152,6 @@ interface HistoricalSummary {
   stateSummaryRoot: Uint8Array;
 }
 
-interface PendingConsolidation {
-  sourceIndex: number;
-  targetIndex: number;
-}
-
 interface Validator {
   pubkey: Uint8Array;
   withdrawalCredentials: Uint8Array;
@@ -218,7 +213,7 @@ export declare class BeaconStateView {
   pendingDepositsCount: number;
   pendingPartialWithdrawals: Uint8Array;
   pendingPartialWithdrawalsCount: number;
-  pendingConsolidations: PendingConsolidation[];
+  pendingConsolidations: Uint8Array;
   pendingConsolidationsCount: number;
   proposerLookahead: Uint32Array;
   // executionPayloadAvailability: boolean[];
