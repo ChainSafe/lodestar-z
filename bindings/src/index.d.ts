@@ -383,7 +383,7 @@ declare const bindings: {
     innerShuffleList: (out: Uint32Array, seed: Uint8Array, rounds: number, forwards: boolean) => void;
   };
   stateTransition: {
-    deinitStateTransition: () => void;
+    deinitReusedEpochTransitionCache: () => void;
   };
   metrics: {
     init: () => void;

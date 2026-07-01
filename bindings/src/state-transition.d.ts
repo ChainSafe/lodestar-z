@@ -7,4 +7,4 @@ export type {
   VoluntaryExitValidity,
 } from "./index.js";
 
-export declare function deinitStateTransition(): void;
+export declare function deinitReusedEpochTransitionCache(): void;
