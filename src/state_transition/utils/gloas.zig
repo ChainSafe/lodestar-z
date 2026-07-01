@@ -60,10 +60,25 @@ pub fn isActiveBuilder(builder: *const ct.gloas.Builder.Type, finalized_epoch: u
     return builder.deposit_epoch < finalized_epoch and builder.withdrawable_epoch == c.FAR_FUTURE_EPOCH;
 }
 
+pub fn getExpectedGasLimit(parent_gas_limit: u64, target_gas_limit: u64) u64 {
+    const max_gas_limit_difference = @max(parent_gas_limit / 1024, 1) - 1;
+
+    if (target_gas_limit > parent_gas_limit) {
+        return parent_gas_limit + @min(target_gas_limit - parent_gas_limit, max_gas_limit_difference);
+    }
+
+    return parent_gas_limit - @min(parent_gas_limit - target_gas_limit, max_gas_limit_difference);
+}
+
+pub fn isGasLimitTargetCompatible(parent_gas_limit: u64, gas_limit: u64, target_gas_limit: u64) bool {
+    return gas_limit == getExpectedGasLimit(parent_gas_limit, target_gas_limit);
+}
+
 pub fn getPendingBalanceToWithdrawForBuilder(allocator: Allocator, state: *BeaconState(.gloas), builder_index: u64) !u64 {
     var pending_balance: u64 = 0;
 
     var withdrawals = try state.inner.get("builder_pending_withdrawals");
+    try withdrawals.commit();
     const withdrawals_len = try withdrawals.length();
     var w_it = withdrawals.iteratorReadonly(0);
     for (0..withdrawals_len) |_| {
