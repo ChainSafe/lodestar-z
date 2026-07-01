@@ -210,37 +210,36 @@ pub fn offEpoch(self: *EventClock, id: ListenerId) bool {
     return false;
 }
 
-// "current" accessors call catchUp() first so a read flushes any pending
-// slot/epoch events before returning.
+// "current" accessors derive their result from catchUp()'s single wall
+// reading: while the clock is running, the base reading never runs ahead of
+// the events it flushed (the disparity window may still report one slot
+// ahead, and after stop() nothing is emitted at all).
 
 pub fn currentSlot(self: *EventClock) ?Slot {
-    self.catchUp();
-    return self.clock.currentSlot();
+    return slot_math.slotAtMs(self.clock.config, self.catchUp());
 }
 
 pub fn currentEpoch(self: *EventClock) ?Epoch {
-    self.catchUp();
-    return self.clock.currentEpoch();
+    const slot = slot_math.slotAtMs(self.clock.config, self.catchUp()) orelse return null;
+    return slot_math.epochAtSlot(self.clock.config, slot);
 }
 
 pub fn currentSlotOrGenesis(self: *EventClock) Slot {
-    self.catchUp();
-    return self.clock.currentSlotOrGenesis();
+    return self.currentSlot() orelse 0;
 }
 
 pub fn currentEpochOrGenesis(self: *EventClock) Epoch {
-    self.catchUp();
-    return self.clock.currentEpochOrGenesis();
+    return self.currentEpoch() orelse 0;
 }
 
 pub fn currentSlotWithGossipDisparity(self: *EventClock) ?Slot {
-    self.catchUp();
-    return self.clock.currentSlotWithGossipDisparity();
+    return self.clock.currentSlotWithGossipDisparity(self.catchUp());
 }
 
 pub fn isCurrentSlotGivenGossipDisparity(self: *EventClock, slot: Slot) bool {
-    self.catchUp();
-    return self.clock.isCurrentSlotGivenGossipDisparity(slot);
+    return self.clock.isCurrentSlotGivenGossipDisparity(
+        .{ .slot = slot, .now_ms = self.catchUp() },
+    );
 }
 
 /// Return type from `waitForSlot`. The caller MUST either:
@@ -312,7 +311,7 @@ pub fn waitForSlot(self: *EventClock, target: Slot) Error!WaitForSlotResult {
     if (self.stopped) {
         return WaitForSlotResult.immediate(error.Aborted);
     }
-    self.catchUp();
+    _ = self.catchUp();
     if (self.clock.current_slot) |slot| {
         if (slot >= target) {
             return WaitForSlotResult.immediate({});
@@ -357,13 +356,20 @@ pub fn waitForSlot(self: *EventClock, target: Slot) Error!WaitForSlotResult {
     };
 }
 
-/// Ensure event-clock state is caught up to wall-clock time.
-/// Emits any intermediate slot/epoch events to listeners.
-/// No-op if already caught up or pre-genesis (currentSlot() returns null).
-fn catchUp(self: *EventClock) void {
-    if (self.clock.currentSlot()) |wall_slot| {
+/// Catch event-clock state up to wall-clock time, emitting any intermediate
+/// slot/epoch events to listeners, and return the wall reading used.
+/// Emits nothing if already caught up or pre-genesis.
+///
+/// The returned reading is the only wall read an accessor may use — deriving
+/// any current* result from a second read would let the result run ahead of
+/// the events this read flushed (listener callbacks can burn wall time
+/// across a slot boundary mid-dispatch).
+fn catchUp(self: *EventClock) u64 {
+    const now_ms = time.nowMs(self.io);
+    if (slot_math.slotAtMs(self.clock.config, now_ms)) |wall_slot| {
         self.advanceAndDispatch(wall_slot);
     }
+    return now_ms;
 }
 
 fn emitSlot(self: *EventClock, slot: Slot) void {
@@ -449,11 +455,7 @@ fn runAutoLoop(self: *EventClock) void {
         };
 
         if (self.stopped) break;
-        // Only advance after genesis.  Before genesis currentSlot() returns
-        // null — skipping here prevents emitting slot 0 prematurely.
-        if (self.clock.currentSlot()) |slot| {
-            self.advanceAndDispatch(slot);
-        }
+        _ = self.catchUp();
     }
     // Non-terminating event loop: exits only when `self.stopped` is set.
     //  - normal stop(): sets flag, next iteration's `!self.stopped` exits
@@ -1007,6 +1009,131 @@ test "many waiters at same target slot all resolve on advance" {
     clock.advanceAndDispatch(5);
 
     for (&futs) |*f| try f.await(io_handle);
+}
+
+// Drives accessor tests without start(): only the `now` vtable entry is
+// exercised, and deinit is safe with no pending waiters.
+const FakeClockIo = struct {
+    ms: u64 = 0,
+    fn vtableNow(userdata: ?*anyopaque, clock: std.Io.Clock) std.Io.Timestamp {
+        _ = clock;
+        const self: *const FakeClockIo = @ptrCast(@alignCast(userdata.?));
+        return std.Io.Timestamp.fromNanoseconds(@as(i96, @intCast(self.ms)) * std.time.ns_per_ms);
+    }
+    const vtable: std.Io.VTable = blk: {
+        var vt: std.Io.VTable = undefined;
+        vt.now = vtableNow;
+        break :blk vt;
+    };
+    fn io(self: *const FakeClockIo) std.Io {
+        return .{ .userdata = @constCast(self), .vtable = &vtable };
+    }
+};
+
+const SlowCallbackCtx = struct {
+    fake: *FakeClockIo,
+    advance_ms: u64,
+    last_emitted: ?Slot = null,
+
+    fn onSlot(ctx: ?*anyopaque, slot: Slot) void {
+        const self: *SlowCallbackCtx = @ptrCast(@alignCast(ctx.?));
+        self.last_emitted = slot;
+        self.fake.ms += self.advance_ms;
+    }
+};
+
+test "currentSlot returns the reading its catch-up flushed to" {
+    var fake = FakeClockIo{ .ms = 100_000 };
+
+    var clock: EventClock = undefined;
+    try clock.init(testing.allocator, .{
+        .genesis_time_sec = 100,
+        .slot_duration_ms = 1_000,
+        .slots_per_epoch = 8,
+    }, fake.io());
+    defer clock.deinit();
+
+    // Each emit burns 5 slots of wall time, simulating a slow callback.
+    var ctx = SlowCallbackCtx{ .fake = &fake, .advance_ms = 5_000 };
+    _ = try clock.onSlot(SlowCallbackCtx.onSlot, &ctx);
+
+    // Wall slot 2: catch-up emits slots 1 and 2, burning the wall to
+    // 112_000 ms (slot 12). The result must stay at the flushed reading.
+    fake.ms = 102_000;
+    const returned = clock.currentSlot();
+
+    try testing.expectEqual(@as(?Slot, 2), returned);
+    try testing.expectEqual(@as(?Slot, 2), ctx.last_emitted);
+    try testing.expect(ctx.last_emitted.? <= returned.?);
+}
+
+test "currentSlotWithGossipDisparity bases its slot on the caught-up reading" {
+    var fake = FakeClockIo{ .ms = 100_000 };
+
+    var clock: EventClock = undefined;
+    try clock.init(testing.allocator, .{
+        .genesis_time_sec = 100,
+        .slot_duration_ms = 1_000,
+        .slots_per_epoch = 8,
+    }, fake.io());
+    defer clock.deinit();
+
+    var ctx = SlowCallbackCtx{ .fake = &fake, .advance_ms = 5_000 };
+    _ = try clock.onSlot(SlowCallbackCtx.onSlot, &ctx);
+
+    // 300 ms into slot 2 — outside the 500 ms disparity window — while the
+    // slow callbacks burn the wall to 112_300 ms (slot 12). The base slot
+    // must come from the caught-up reading, not a fresh read.
+    fake.ms = 102_300;
+    const returned = clock.currentSlotWithGossipDisparity();
+
+    try testing.expectEqual(@as(?Slot, 2), returned);
+    try testing.expectEqual(@as(?Slot, 2), ctx.last_emitted);
+}
+
+test "currentEpoch returns the epoch of the reading its catch-up flushed to" {
+    var fake = FakeClockIo{ .ms = 100_000 };
+
+    var clock: EventClock = undefined;
+    try clock.init(testing.allocator, .{
+        .genesis_time_sec = 100,
+        .slot_duration_ms = 1_000,
+        .slots_per_epoch = 2,
+    }, fake.io());
+    defer clock.deinit();
+
+    // Each emit burns 5 slots (2.5 epochs) of wall time.
+    var ctx = SlowCallbackCtx{ .fake = &fake, .advance_ms = 5_000 };
+    _ = try clock.onSlot(SlowCallbackCtx.onSlot, &ctx);
+
+    // Wall slot 2 (epoch 1): catch-up emits slots 1 and 2, burning the wall
+    // to 112_000 ms (slot 12, epoch 6). The result must stay at epoch 1.
+    fake.ms = 102_000;
+    const returned = clock.currentEpoch();
+
+    try testing.expectEqual(@as(?Epoch, 1), returned);
+    try testing.expectEqual(@as(?Slot, 2), ctx.last_emitted);
+}
+
+test "isCurrentSlotGivenGossipDisparity judges the caught-up reading" {
+    var fake = FakeClockIo{ .ms = 100_000 };
+
+    var clock: EventClock = undefined;
+    try clock.init(testing.allocator, .{
+        .genesis_time_sec = 100,
+        .slot_duration_ms = 1_000,
+        .slots_per_epoch = 8,
+    }, fake.io());
+    defer clock.deinit();
+
+    var ctx = SlowCallbackCtx{ .fake = &fake, .advance_ms = 5_000 };
+    _ = try clock.onSlot(SlowCallbackCtx.onSlot, &ctx);
+
+    // 300 ms into slot 2 while the slow callbacks burn the wall to
+    // 112_300 ms (slot 12); a fresh second read would judge slot 2 stale.
+    fake.ms = 102_300;
+    try testing.expect(clock.isCurrentSlotGivenGossipDisparity(2));
+    try testing.expectEqual(@as(?Slot, 2), ctx.last_emitted);
 }
 
 const PropertyTracker = struct {

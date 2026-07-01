@@ -92,6 +92,11 @@ pub fn currentEpochOrGenesis(self: *const SlotClock) Epoch {
 /// Returns the slot the network may be advancing to, accounting for gossip
 /// clock disparity, or null pre-genesis when no slot is current yet.
 ///
+/// Single-snapshot semantics: the base slot and the disparity window both
+/// derive from the caller's one `now_ms` reading, so the two can never
+/// disagree (a second read could put `now_ms` past the boundary it is
+/// being compared against).
+///
 /// Per phase0/p2p-interface.md, gossip validation rejects future messages with
 /// strict `<` (`current_time + MAXIMUM_GOSSIP_CLOCK_DISPARITY < message_time`),
 /// so the boundary case (exactly equal) is accepted — hence `<=` here.
@@ -100,8 +105,7 @@ pub fn currentEpochOrGenesis(self: *const SlotClock) Epoch {
 /// for every real config (500 ms disparity vs seconds-long slots). A
 /// config where disparity approaches or exceeds the slot duration is not
 /// supported.
-pub fn currentSlotWithGossipDisparity(self: *const SlotClock) ?Slot {
-    const now_ms = time.nowMs(self.io);
+pub fn currentSlotWithGossipDisparity(self: *const SlotClock, now_ms: u64) ?Slot {
     const current = slot_math.slotAtMs(self.config, now_ms) orelse {
         // Pre-genesis the wall slot is conceptually negative, so slot 0 is
         // "current" only once we're within gossip disparity of genesis;
@@ -122,8 +126,12 @@ pub fn currentSlotWithGossipDisparity(self: *const SlotClock) ?Slot {
 
 /// See `currentSlotWithGossipDisparity` for the `<=` rationale and the
 /// single-snapshot semantics — both apply here too.
-pub fn isCurrentSlotGivenGossipDisparity(self: *const SlotClock, slot: Slot) bool {
-    const now_ms = time.nowMs(self.io);
+pub fn isCurrentSlotGivenGossipDisparity(
+    self: *const SlotClock,
+    options: struct { slot: Slot, now_ms: u64 },
+) bool {
+    const slot = options.slot;
+    const now_ms = options.now_ms;
     const current = slot_math.slotAtMs(self.config, now_ms) orelse {
         // Pre-genesis the wall slot is conceptually negative, so slot 0 is
         // "current" only once we're within gossip disparity of genesis.
@@ -309,22 +317,22 @@ test "advanceTo already at target returns nothing" {
 test "gossip disparity: far from boundary" {
     var fake = FakeClockIo{ .ms = 103_000 };
     var clock = try SlotClock.init(test_cfg, fake.io());
-    try testing.expectEqual(@as(?Slot, 0), clock.currentSlotWithGossipDisparity());
-    try testing.expect(clock.isCurrentSlotGivenGossipDisparity(0));
-    try testing.expect(!clock.isCurrentSlotGivenGossipDisparity(1));
+    try testing.expectEqual(@as(?Slot, 0), clock.currentSlotWithGossipDisparity(fake.ms));
+    try testing.expect(clock.isCurrentSlotGivenGossipDisparity(.{ .slot = 0, .now_ms = fake.ms }));
+    try testing.expect(!clock.isCurrentSlotGivenGossipDisparity(.{ .slot = 1, .now_ms = fake.ms }));
 }
 
 test "gossip disparity: near next slot boundary" {
     var fake = FakeClockIo{ .ms = 111_600 };
     var clock = try SlotClock.init(test_cfg, fake.io());
-    try testing.expectEqual(@as(?Slot, 1), clock.currentSlotWithGossipDisparity());
-    try testing.expect(clock.isCurrentSlotGivenGossipDisparity(1));
+    try testing.expectEqual(@as(?Slot, 1), clock.currentSlotWithGossipDisparity(fake.ms));
+    try testing.expect(clock.isCurrentSlotGivenGossipDisparity(.{ .slot = 1, .now_ms = fake.ms }));
 }
 
 test "gossip disparity: just after slot boundary" {
     var fake = FakeClockIo{ .ms = 112_300 };
     var clock = try SlotClock.init(test_cfg, fake.io());
-    try testing.expect(clock.isCurrentSlotGivenGossipDisparity(0));
+    try testing.expect(clock.isCurrentSlotGivenGossipDisparity(.{ .slot = 0, .now_ms = fake.ms }));
 }
 
 test "gossip disparity: exact threshold (500ms) applies inclusively" {
@@ -332,14 +340,14 @@ test "gossip disparity: exact threshold (500ms) applies inclusively" {
     // Slot 1 starts at 112_000ms. 500ms before = 111_500ms.
     var fake = FakeClockIo{ .ms = 111_500 };
     var clock = try SlotClock.init(test_cfg, fake.io());
-    try testing.expectEqual(@as(?Slot, 1), clock.currentSlotWithGossipDisparity());
-    try testing.expect(clock.isCurrentSlotGivenGossipDisparity(1));
+    try testing.expectEqual(@as(?Slot, 1), clock.currentSlotWithGossipDisparity(fake.ms));
+    try testing.expect(clock.isCurrentSlotGivenGossipDisparity(.{ .slot = 1, .now_ms = fake.ms }));
 
     // 1ms further out (111_499): 112_000 - 111_499 = 501 > 500, disparity does NOT apply.
     fake.ms = 111_499;
     clock = try SlotClock.init(test_cfg, fake.io());
-    try testing.expectEqual(@as(?Slot, 0), clock.currentSlotWithGossipDisparity());
-    try testing.expect(!clock.isCurrentSlotGivenGossipDisparity(1));
+    try testing.expectEqual(@as(?Slot, 0), clock.currentSlotWithGossipDisparity(fake.ms));
+    try testing.expect(!clock.isCurrentSlotGivenGossipDisparity(.{ .slot = 1, .now_ms = fake.ms }));
 }
 
 test "gossip disparity: pre-genesis slot 0 only within disparity of genesis" {
@@ -347,28 +355,28 @@ test "gossip disparity: pre-genesis slot 0 only within disparity of genesis" {
     // 1000ms before genesis: slot 0 is not yet "current".
     var fake = FakeClockIo{ .ms = 99_000 };
     var clock = try SlotClock.init(test_cfg, fake.io());
-    try testing.expectEqual(@as(?Slot, null), clock.currentSlotWithGossipDisparity());
-    try testing.expect(!clock.isCurrentSlotGivenGossipDisparity(0));
-    try testing.expect(!clock.isCurrentSlotGivenGossipDisparity(1));
+    try testing.expectEqual(@as(?Slot, null), clock.currentSlotWithGossipDisparity(fake.ms));
+    try testing.expect(!clock.isCurrentSlotGivenGossipDisparity(.{ .slot = 0, .now_ms = fake.ms }));
+    try testing.expect(!clock.isCurrentSlotGivenGossipDisparity(.{ .slot = 1, .now_ms = fake.ms }));
 
     // 300ms before genesis: within disparity, slot 0 is "current".
     fake.ms = 99_700;
     clock = try SlotClock.init(test_cfg, fake.io());
-    try testing.expectEqual(@as(?Slot, 0), clock.currentSlotWithGossipDisparity());
-    try testing.expect(clock.isCurrentSlotGivenGossipDisparity(0));
-    try testing.expect(!clock.isCurrentSlotGivenGossipDisparity(1));
+    try testing.expectEqual(@as(?Slot, 0), clock.currentSlotWithGossipDisparity(fake.ms));
+    try testing.expect(clock.isCurrentSlotGivenGossipDisparity(.{ .slot = 0, .now_ms = fake.ms }));
+    try testing.expect(!clock.isCurrentSlotGivenGossipDisparity(.{ .slot = 1, .now_ms = fake.ms }));
 
     // Exact threshold: 500ms before genesis is inclusive.
     fake.ms = 99_500;
     clock = try SlotClock.init(test_cfg, fake.io());
-    try testing.expectEqual(@as(?Slot, 0), clock.currentSlotWithGossipDisparity());
-    try testing.expect(clock.isCurrentSlotGivenGossipDisparity(0));
+    try testing.expectEqual(@as(?Slot, 0), clock.currentSlotWithGossipDisparity(fake.ms));
+    try testing.expect(clock.isCurrentSlotGivenGossipDisparity(.{ .slot = 0, .now_ms = fake.ms }));
 
     // 1ms further out (501ms before genesis): not "current".
     fake.ms = 99_499;
     clock = try SlotClock.init(test_cfg, fake.io());
-    try testing.expectEqual(@as(?Slot, null), clock.currentSlotWithGossipDisparity());
-    try testing.expect(!clock.isCurrentSlotGivenGossipDisparity(0));
+    try testing.expectEqual(@as(?Slot, null), clock.currentSlotWithGossipDisparity(fake.ms));
+    try testing.expect(!clock.isCurrentSlotGivenGossipDisparity(.{ .slot = 0, .now_ms = fake.ms }));
 }
 
 test "gossip disparity: pre-genesis with sub-disparity slot duration never advances past 0" {
@@ -385,13 +393,13 @@ test "gossip disparity: pre-genesis with sub-disparity slot duration never advan
     // 1ms before genesis (within disparity): slot 0, never slot 1.
     var fake = FakeClockIo{ .ms = 99_999 };
     var clock = try SlotClock.init(cfg, fake.io());
-    try testing.expectEqual(@as(?Slot, 0), clock.currentSlotWithGossipDisparity());
-    try testing.expect(!clock.isCurrentSlotGivenGossipDisparity(1));
+    try testing.expectEqual(@as(?Slot, 0), clock.currentSlotWithGossipDisparity(fake.ms));
+    try testing.expect(!clock.isCurrentSlotGivenGossipDisparity(.{ .slot = 1, .now_ms = fake.ms }));
 
     // 501ms before genesis (just outside disparity): no slot is current.
     fake.ms = 99_499;
     clock = try SlotClock.init(cfg, fake.io());
-    try testing.expectEqual(@as(?Slot, null), clock.currentSlotWithGossipDisparity());
+    try testing.expectEqual(@as(?Slot, null), clock.currentSlotWithGossipDisparity(fake.ms));
 }
 
 test "tolerance helpers" {
