@@ -40,8 +40,6 @@ loop_future: ?std.Io.Future(void) = null,
 next_listener_id: ListenerId = 1,
 slot_listeners: bounded_array.BoundedArray(SlotListenerEntry, max_slot_listeners) = .{},
 epoch_listeners: bounded_array.BoundedArray(EpochListenerEntry, max_epoch_listeners) = .{},
-slot_snapshot: bounded_array.BoundedArray(SlotSnapshot, max_slot_listeners) = .{},
-epoch_snapshot: bounded_array.BoundedArray(EpochSnapshot, max_epoch_listeners) = .{},
 
 waiters: WaiterQueue,
 
@@ -83,16 +81,6 @@ const SlotListenerEntry = struct {
 
 const EpochListenerEntry = struct {
     id: ListenerId,
-    callback: *const fn (ctx: ?*anyopaque, epoch: Epoch) void,
-    ctx: ?*anyopaque,
-};
-
-const SlotSnapshot = struct {
-    callback: *const fn (ctx: ?*anyopaque, slot: Slot) void,
-    ctx: ?*anyopaque,
-};
-
-const EpochSnapshot = struct {
     callback: *const fn (ctx: ?*anyopaque, epoch: Epoch) void,
     ctx: ?*anyopaque,
 };
@@ -151,8 +139,9 @@ pub fn deinit(self: *EventClock) void {
     self.* = undefined;
 }
 
-// Inside a callback, `offSlot` / `offEpoch` are safe; `onSlot` / `onEpoch`
-// are not — they may overwrite the snapshot iterated by the active emit.
+// Inside a callback, `onSlot` / `offSlot` / `onEpoch` / `offEpoch` are all
+// safe — each emit iterates its own stack snapshot. A listener added
+// mid-dispatch does not receive the event being emitted.
 
 /// Register a slot listener.  Returns an ID for later removal via `offSlot`.
 pub fn onSlot(
@@ -373,27 +362,18 @@ fn catchUp(self: *EventClock) u64 {
 }
 
 fn emitSlot(self: *EventClock, slot: Slot) void {
-    self.slot_snapshot.clear();
-    for (self.slot_listeners.slice()) |listener| {
-        self.slot_snapshot.push(.{
-            .callback = listener.callback,
-            .ctx = listener.ctx,
-        });
-    }
-    for (self.slot_snapshot.slice()) |listener| {
+    // By-value stack copy: a reentrant callback may add/remove listeners or
+    // trigger a nested emit; those mutate only the member list, never the
+    // snapshot this frame is iterating.
+    var snapshot = self.slot_listeners;
+    for (snapshot.slice()) |listener| {
         listener.callback(listener.ctx, slot);
     }
 }
 
 fn emitEpoch(self: *EventClock, epoch: Epoch) void {
-    self.epoch_snapshot.clear();
-    for (self.epoch_listeners.slice()) |listener| {
-        self.epoch_snapshot.push(.{
-            .callback = listener.callback,
-            .ctx = listener.ctx,
-        });
-    }
-    for (self.epoch_snapshot.slice()) |listener| {
+    var snapshot = self.epoch_listeners;
+    for (snapshot.slice()) |listener| {
         listener.callback(listener.ctx, epoch);
     }
 }
@@ -1134,6 +1114,62 @@ test "isCurrentSlotGivenGossipDisparity judges the caught-up reading" {
     fake.ms = 102_300;
     try testing.expect(clock.isCurrentSlotGivenGossipDisparity(2));
     try testing.expectEqual(@as(?Slot, 2), ctx.last_emitted);
+}
+
+const NestedDispatchCtx = struct {
+    clock: *EventClock,
+    fake: *FakeClockIo,
+    add_ctx: *EventTraceState,
+    remove_id: ListenerId = 0,
+    fired_once: bool = false,
+    slots: [4]Slot = undefined,
+    slot_len: usize = 0,
+
+    fn onSlot(ctx: ?*anyopaque, slot: Slot) void {
+        const self: *NestedDispatchCtx = @ptrCast(@alignCast(ctx.?));
+        self.slots[self.slot_len] = slot;
+        self.slot_len += 1;
+        if (self.fired_once) return;
+        self.fired_once = true;
+        self.fake.ms += 1_000;
+        _ = self.clock.offSlot(self.remove_id);
+        _ = self.clock.onSlot(EventTraceState.onSlot, self.add_ctx) catch unreachable;
+        _ = self.clock.currentSlot();
+    }
+};
+
+test "nested dispatch during emit preserves the outer snapshot" {
+    var fake = FakeClockIo{ .ms = 100_000 };
+
+    var clock: EventClock = undefined;
+    try clock.init(testing.allocator, .{
+        .genesis_time_sec = 100,
+        .slot_duration_ms = 1_000,
+        .slots_per_epoch = 8,
+    }, fake.io());
+    defer clock.deinit();
+
+    var ctx_l2 = EventTraceState{};
+    var ctx_l3 = EventTraceState{};
+    var ctx_l4 = EventTraceState{};
+    var ctx_l1 = NestedDispatchCtx{ .clock = &clock, .fake = &fake, .add_ctx = &ctx_l4 };
+    _ = try clock.onSlot(NestedDispatchCtx.onSlot, &ctx_l1);
+    const id_l2 = try clock.onSlot(EventTraceState.onSlot, &ctx_l2);
+    _ = try clock.onSlot(EventTraceState.onSlot, &ctx_l3);
+    ctx_l1.remove_id = id_l2;
+
+    // Wall slot 1: the outer emit of slot 1 snapshots [L1, L2, L3]. L1 burns
+    // the wall into slot 2, removes L2, registers L4, and queries the clock —
+    // the nested emit of slot 2 snapshots [L1, L3, L4]. The outer emit then
+    // resumes: L2 still gets slot 1, L3 gets it exactly once, and L4 (absent
+    // from the outer snapshot) records only slot 2.
+    fake.ms = 101_000;
+    try testing.expectEqual(@as(?Slot, 1), clock.currentSlot());
+
+    try expectEqualSlices(Slot, &.{ 1, 2 }, ctx_l1.slots[0..ctx_l1.slot_len]);
+    try expectEqualSlices(Slot, &.{1}, ctx_l2.slots[0..ctx_l2.slot_len]);
+    try expectEqualSlices(Slot, &.{ 2, 1 }, ctx_l3.slots[0..ctx_l3.slot_len]);
+    try expectEqualSlices(Slot, &.{2}, ctx_l4.slots[0..ctx_l4.slot_len]);
 }
 
 const PropertyTracker = struct {
