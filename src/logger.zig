@@ -53,7 +53,7 @@ const Colors = struct {
 
 fn formatLine(buf: []u8, module: ?[]const u8, secs: f64, level: LogLevel, comptime fmt: []const u8, args: anytype) ![]const u8 {
     const marker = "…[trunc]\n";
-    var w = std.Io.Writer.fixed(buf[0 .. buf.len - marker.len ]);
+    var w = std.Io.Writer.fixed(buf[0 .. buf.len - marker.len]);
     const write_result = if (module) |m|
         w.print("[{d:.3}s] [{s}] {s}{s:>7}:{s} " ++ fmt ++ "\n", .{ secs, m, level.color(), level.asText(), Colors.reset } ++ args)
     else
