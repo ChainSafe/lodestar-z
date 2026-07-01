@@ -138,8 +138,8 @@ test "formatLine" {
     const secs = 2.347;
     const line = try formatLine(&buf, "test-module", secs, .info, "hello {s} {d}", .{ "world", 42 });
     try std.testing.expectEqualStrings("[2.347s] [test-module] " ++ Colors.green ++ "[info]" ++ Colors.reset ++ " hello world 42\n", line);
-    const lineNoModule = try formatLine(&buf, null, secs, .info, "hello {s} {d}", .{ "world", 42 });
-    try std.testing.expectEqualStrings("[2.347s] " ++ Colors.green ++ "[info]" ++ Colors.reset ++ " hello world 42\n", lineNoModule);
+    const line_no_module = try formatLine(&buf, null, secs, .info, "hello {s} {d}", .{ "world", 42 });
+    try std.testing.expectEqualStrings("[2.347s] " ++ Colors.green ++ "[info]" ++ Colors.reset ++ " hello world 42\n", line_no_module);
 }
 
 test "log smoke" {
