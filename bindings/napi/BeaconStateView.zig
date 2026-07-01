@@ -1255,11 +1255,25 @@ pub fn hashTreeRoot(self: *const BeaconStateView) !js.Uint8Array {
 ///
 /// Arguments:
 /// - arg 0: target slot (number)
-/// - arg 1: options object (optional) with `transferCache` boolean
+/// - arg 1: options object (optional) with Lodestar's `dontTransferCache` boolean
 pub fn processSlots(self: *const BeaconStateView, slot_arg: js.Number, options: ?js.Value) !BeaconStateView {
     const cached_state = try self.requireState();
     const slot_value: u64 = @intCast(try slot_arg.toI64());
-    const transfer_cache = try optionalBool(options, "transferCache", false);
+
+    var transfer_cache = true;
+    if (options) |value| {
+        const raw = value.toValue();
+        if (try raw.typeof() == .object) {
+            // TODO(bing): we should rename dontTransferCache to transferCache on TS-side to
+            // avoid double negative, it's harder to read dontTransferCache = true versus
+            // transferCache = false
+            if (try raw.hasNamedProperty("dontTransferCache")) {
+                transfer_cache = !(try (try raw.getNamedProperty("dontTransferCache")).getValueBool());
+            } else if (try raw.hasNamedProperty("transferCache")) {
+                transfer_cache = try (try raw.getNamedProperty("transferCache")).getValueBool();
+            }
+        }
+    }
     const post_state = try cached_state.clone(allocator, .{ .transfer_cache = transfer_cache });
     errdefer {
         post_state.deinit();
