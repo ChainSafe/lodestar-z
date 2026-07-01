@@ -55,9 +55,9 @@ fn formatLine(buf: []u8, module: ?[]const u8, secs: f64, level: LogLevel, compti
     const marker = "…[trunc]\n";
     var w = std.Io.Writer.fixed(buf[0 .. buf.len - marker.len ]);
     const write_result = if (module) |m|
-        w.print("[{d:.3}s] [{s}] {s}[{s}]{s} " ++ fmt ++ "\n", .{ secs, m, level.color(), level.asText(), Colors.reset } ++ args)
+        w.print("[{d:.3}s] [{s}] {s}{s:>7}:{s} " ++ fmt ++ "\n", .{ secs, m, level.color(), level.asText(), Colors.reset } ++ args)
     else
-        w.print("[{d:.3}s] {s}[{s}]{s} " ++ fmt ++ "\n", .{ secs, level.color(), level.asText(), Colors.reset } ++ args);
+        w.print("[{d:.3}s] [] {s}{s:>7}:{s} " ++ fmt ++ "\n", .{ secs, level.color(), level.asText(), Colors.reset } ++ args);
 
     write_result catch |err| {
         std.debug.assert(err == error.WriteFailed);
@@ -145,9 +145,9 @@ test "formatLine" {
     var buf: [256]u8 = undefined;
     const secs = 2.347;
     const line = try formatLine(&buf, "test-module", secs, .info, "hello {s} {d}", .{ "world", 42 });
-    try std.testing.expectEqualStrings("[2.347s] [test-module] " ++ Colors.green ++ "[info]" ++ Colors.reset ++ " hello world 42\n", line);
+    try std.testing.expectEqualStrings("[2.347s] [test-module] " ++ Colors.green ++ "   info:" ++ Colors.reset ++ " hello world 42\n", line);
     const line_no_module = try formatLine(&buf, null, secs, .info, "hello {s} {d}", .{ "world", 42 });
-    try std.testing.expectEqualStrings("[2.347s] " ++ Colors.green ++ "[info]" ++ Colors.reset ++ " hello world 42\n", line_no_module);
+    try std.testing.expectEqualStrings("[2.347s] [] " ++ Colors.green ++ "   info:" ++ Colors.reset ++ " hello world 42\n", line_no_module);
 }
 
 test "formatLine truncates" {
