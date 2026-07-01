@@ -14,8 +14,16 @@
 //! (listeners, waiter queue, `stopped`) completes synchronously between yields.
 //! Two invariants make this safe:
 //!   1. Listener callbacks must NOT yield (no `await`/`sleep`); they run to
-//!      completion inside an emit so the listener/waiter state can't be mutated
-//!      mid-emit. The snapshot copy further decouples iteration from `offSlot`.
+//!      completion inside an emit. Safe from a callback: onSlot, offSlot,
+//!      onEpoch, offEpoch, stop, all current* accessors, and calling
+//!      waitForSlot (awaiting its result falls under the no-yield rule).
+//!      A query while the cached slot is behind the wall (a backlog)
+//!      triggers a NESTED dispatch: later slots/epochs reach all listeners
+//!      before the in-flight event's remaining deliveries complete, yet every
+//!      (listener, event) pair is delivered exactly once. Each nested level
+//!      consumes at least one slot of the pre-existing backlog, so nesting
+//!      depth is bounded by the backlog size; levels beyond that require the
+//!      wall to cross another slot boundary mid-cascade.
 //!   2. `cancel()` removes its waiter from the queue *before* it yields, so a
 //!      concurrent `dispatchWaiters` can no longer observe it.
 //! A multi-executor backend (zio with `executors > 1`, or `std.Io.Threaded`)
@@ -139,9 +147,9 @@ pub fn deinit(self: *EventClock) void {
     self.* = undefined;
 }
 
-// Inside a callback, `onSlot` / `offSlot` / `onEpoch` / `offEpoch` are all
-// safe — each emit iterates its own stack snapshot. A listener added
-// mid-dispatch does not receive the event being emitted.
+// Each emit iterates its own stack snapshot, so callbacks may mutate the
+// listener lists mid-dispatch: a listener added does not receive the event
+// being emitted; one removed still receives it.
 
 /// Register a slot listener.  Returns an ID for later removal via `offSlot`.
 pub fn onSlot(
@@ -172,6 +180,7 @@ pub fn offSlot(self: *EventClock, id: ListenerId) bool {
 }
 
 /// Register an epoch listener.  Returns an ID for later removal via `offEpoch`.
+/// An epoch event fires once when the epoch of the advancing slot increases.
 pub fn onEpoch(
     self: *EventClock,
     callback: *const fn (ctx: ?*anyopaque, epoch: Epoch) void,
@@ -926,6 +935,43 @@ test "reentrancy: stop() during emit resolves reached waiter, aborts future one"
     try testing.expectError(error.Aborted, fut_future.await(io_handle));
 }
 
+const WaitFromCallbackCtx = struct {
+    clock: *EventClock,
+    fut: ?WaitForSlotResult = null,
+
+    fn onSlot(ctx: ?*anyopaque, slot: Slot) void {
+        const self: *WaitFromCallbackCtx = @ptrCast(@alignCast(ctx.?));
+        if (slot != 1) return;
+        self.fut = self.clock.waitForSlot(2) catch unreachable;
+    }
+};
+
+test "reentrancy: waitForSlot from a callback resolves via the ongoing dispatch" {
+    const rt = try zio.Runtime.init(testing.allocator, .{});
+    defer rt.deinit();
+    const io_handle = rt.io();
+
+    var clock: EventClock = undefined;
+    try clock.init(testing.allocator, .{
+        .genesis_time_sec = time.nowSec(io_handle) + 1_000_000,
+        .slot_duration_ms = 1_000,
+        .slots_per_epoch = 4,
+    }, io_handle);
+    defer clock.deinit();
+
+    var ctx = WaitFromCallbackCtx{ .clock = &clock };
+    _ = try clock.onSlot(WaitFromCallbackCtx.onSlot, &ctx);
+
+    // The slot-1 callback registers a waiter for slot 2 and returns without
+    // awaiting; the same dispatch's emit of slot 2 then resolves it, so the
+    // await after advanceAndDispatch must succeed rather than abort.
+    clock.advanceAndDispatch(2);
+
+    try testing.expect(ctx.fut != null);
+    errdefer ctx.fut.?.cancel();
+    try ctx.fut.?.await(io_handle);
+}
+
 test "ListenerLimitReached: onSlot/onEpoch reject the (limit+1)th registration" {
     const rt = try zio.Runtime.init(testing.allocator, .{});
     defer rt.deinit();
@@ -1170,6 +1216,163 @@ test "nested dispatch during emit preserves the outer snapshot" {
     try expectEqualSlices(Slot, &.{1}, ctx_l2.slots[0..ctx_l2.slot_len]);
     try expectEqualSlices(Slot, &.{ 2, 1 }, ctx_l3.slots[0..ctx_l3.slot_len]);
     try expectEqualSlices(Slot, &.{2}, ctx_l4.slots[0..ctx_l4.slot_len]);
+}
+
+const EpochMutateCtx = struct {
+    clock: *EventClock,
+    add_ctx: *EventTraceState,
+    remove_id: ListenerId = 0,
+    fired_once: bool = false,
+    epochs: [4]Epoch = undefined,
+    epoch_len: usize = 0,
+
+    fn onEpoch(ctx: ?*anyopaque, epoch: Epoch) void {
+        const self: *EpochMutateCtx = @ptrCast(@alignCast(ctx.?));
+        self.epochs[self.epoch_len] = epoch;
+        self.epoch_len += 1;
+        if (self.fired_once) return;
+        self.fired_once = true;
+        _ = self.clock.offEpoch(self.remove_id);
+        _ = self.clock.onEpoch(EventTraceState.onEpoch, self.add_ctx) catch unreachable;
+    }
+};
+
+test "epoch listener mutations mid-emit preserve the epoch snapshot" {
+    var fake = FakeClockIo{ .ms = 100_000 };
+
+    var clock: EventClock = undefined;
+    try clock.init(testing.allocator, .{
+        .genesis_time_sec = 100,
+        .slot_duration_ms = 1_000,
+        .slots_per_epoch = 2,
+    }, fake.io());
+    defer clock.deinit();
+
+    var ctx_e2 = EventTraceState{};
+    var ctx_e3 = EventTraceState{};
+    var ctx_e1 = EpochMutateCtx{ .clock = &clock, .add_ctx = &ctx_e3 };
+    _ = try clock.onEpoch(EpochMutateCtx.onEpoch, &ctx_e1);
+    const id_e2 = try clock.onEpoch(EventTraceState.onEpoch, &ctx_e2);
+    ctx_e1.remove_id = id_e2;
+
+    // Wall slot 4 crosses two epoch boundaries. The epoch-1 emit snapshots
+    // [E1, E2]; E1 removes E2 and registers E3 mid-emit, so E2 (in the
+    // snapshot) still receives epoch 1 but misses epoch 2, while E3 (absent
+    // from the snapshot) misses epoch 1 and receives epoch 2.
+    fake.ms = 104_000;
+    try testing.expectEqual(@as(?Slot, 4), clock.currentSlot());
+
+    try expectEqualSlices(Epoch, &.{ 1, 2 }, ctx_e1.epochs[0..ctx_e1.epoch_len]);
+    try expectEqualSlices(Epoch, &.{1}, ctx_e2.epochs[0..ctx_e2.epoch_len]);
+    try expectEqualSlices(Epoch, &.{2}, ctx_e3.epochs[0..ctx_e3.epoch_len]);
+}
+
+const QueryAtSlotCtx = struct {
+    clock: *EventClock,
+    fake: *FakeClockIo,
+    query_at: Slot,
+    burn_to_ms: ?u64 = null,
+    queried_slot: ?Slot = null,
+    slots: [8]Slot = undefined,
+    slot_len: usize = 0,
+
+    fn onSlot(ctx: ?*anyopaque, slot: Slot) void {
+        const self: *QueryAtSlotCtx = @ptrCast(@alignCast(ctx.?));
+        self.slots[self.slot_len] = slot;
+        self.slot_len += 1;
+        if (slot != self.query_at) return;
+        if (self.burn_to_ms) |ms| self.fake.ms = ms;
+        self.queried_slot = self.clock.currentSlot();
+    }
+};
+
+test "backlog query-from-callback delivers every (listener, slot) exactly once" {
+    var fake = FakeClockIo{ .ms = 100_000 };
+
+    var clock: EventClock = undefined;
+    try clock.init(testing.allocator, .{
+        .genesis_time_sec = 100,
+        .slot_duration_ms = 1_000,
+        .slots_per_epoch = 8,
+    }, fake.io());
+    defer clock.deinit();
+
+    var ctx_q = QueryAtSlotCtx{ .clock = &clock, .fake = &fake, .query_at = 1 };
+    var ctx_r = EventTraceState{};
+    _ = try clock.onSlot(QueryAtSlotCtx.onSlot, &ctx_q);
+    _ = try clock.onSlot(EventTraceState.onSlot, &ctx_r);
+
+    // Wall slot 3 with the cache at 0: the outer emit of slot 1 reaches Q
+    // first; its query drains the remaining backlog (slots 2, 3) to both
+    // listeners before the outer emit resumes and delivers slot 1 to R.
+    fake.ms = 103_000;
+    try testing.expectEqual(@as(?Slot, 3), clock.currentSlot());
+
+    try expectEqualSlices(Slot, &.{ 1, 2, 3 }, ctx_q.slots[0..ctx_q.slot_len]);
+    try expectEqualSlices(Slot, &.{ 2, 3, 1 }, ctx_r.slots[0..ctx_r.slot_len]);
+    try testing.expectEqual(@as(?Slot, 3), ctx_q.queried_slot);
+}
+
+test "non-backlog query-from-callback is a no-op" {
+    var fake = FakeClockIo{ .ms = 100_000 };
+
+    var clock: EventClock = undefined;
+    try clock.init(testing.allocator, .{
+        .genesis_time_sec = 100,
+        .slot_duration_ms = 1_000,
+        .slots_per_epoch = 8,
+    }, fake.io());
+    defer clock.deinit();
+
+    var ctx_q = QueryAtSlotCtx{ .clock = &clock, .fake = &fake, .query_at = 1 };
+    var ctx_r = EventTraceState{};
+    _ = try clock.onSlot(QueryAtSlotCtx.onSlot, &ctx_q);
+    _ = try clock.onSlot(EventTraceState.onSlot, &ctx_r);
+
+    // The cache is already at the wall slot when Q queries, so the nested
+    // catch-up has nothing to drain: plain single-slot delivery, and the
+    // query returns exactly the slot being emitted.
+    fake.ms = 101_000;
+    try testing.expectEqual(@as(?Slot, 1), clock.currentSlot());
+
+    try expectEqualSlices(Slot, &.{1}, ctx_q.slots[0..ctx_q.slot_len]);
+    try expectEqualSlices(Slot, &.{1}, ctx_r.slots[0..ctx_r.slot_len]);
+    try testing.expectEqual(@as(?Slot, 1), ctx_q.queried_slot);
+}
+
+test "epoch events under nested dispatch arrive out of order but exactly once" {
+    var fake = FakeClockIo{ .ms = 102_000 };
+
+    var clock: EventClock = undefined;
+    try clock.init(testing.allocator, .{
+        .genesis_time_sec = 100,
+        .slot_duration_ms = 1_000,
+        .slots_per_epoch = 4,
+    }, fake.io());
+    defer clock.deinit();
+
+    var ctx_q = QueryAtSlotCtx{
+        .clock = &clock,
+        .fake = &fake,
+        .query_at = 4,
+        .burn_to_ms = 108_000,
+    };
+    var trace = EventTraceState{};
+    _ = try clock.onSlot(QueryAtSlotCtx.onSlot, &ctx_q);
+    _ = try clock.onEpoch(EventTraceState.onEpoch, &trace);
+
+    // Wall slot 4 with the cache at 2: the outer iterator emits slot 3, then
+    // slot 4 — setting pending epoch 1, drained only on its NEXT next(). The
+    // slot-4 callback burns the wall to slot 8 (epoch 2) and queries; the
+    // nested iterator starts with no pending state, so it emits slots 5
+    // through 8 and epoch 2 before the outer iterator resumes and drains
+    // epoch 1.
+    fake.ms = 104_000;
+    try testing.expectEqual(@as(?Slot, 4), clock.currentSlot());
+
+    try expectEqualSlices(Slot, &.{ 3, 4, 5, 6, 7, 8 }, ctx_q.slots[0..ctx_q.slot_len]);
+    try expectEqualSlices(Epoch, &.{ 2, 1 }, trace.epochs[0..trace.epoch_len]);
+    try testing.expectEqual(@as(?Slot, 8), ctx_q.queried_slot);
 }
 
 const PropertyTracker = struct {
