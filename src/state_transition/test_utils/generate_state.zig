@@ -24,7 +24,6 @@ const EffectiveBalanceIncrements = state_transition.EffectiveBalanceIncrements;
 const getNextSyncCommitteeIndices = state_transition.getNextSyncCommitteeIndices;
 const syncPubkeys = state_transition.syncPubkeys;
 const interopPubkeysCached = @import("./interop_pubkeys.zig").interopPubkeysCached;
-const EFFECTIVE_BALANCE_INCREMENT = 32;
 const EFFECTIVE_BALANCE = 32 * 1e9;
 const active_chain_config = if (active_preset == .mainnet) mainnet_chain_config else minimal_chain_config;
 
@@ -43,14 +42,16 @@ pub fn generateElectraState(allocator: Allocator, pool: *Node.Pool, chain_config
     electra_state.genesis_time = 1596546008;
     electra_state.genesis_validators_root = try hex.hexToRoot("0x8a8b3f1f1e2d3c4b5a697887766554433221100ffeeddccbbaa9988776655443");
     // set the slot to be ready for the next epoch transition
-    electra_state.slot = chain_config.ELECTRA_FORK_EPOCH * preset.SLOTS_PER_EPOCH + 2025 * preset.SLOTS_PER_EPOCH - 1;
+    const electra_fork_epoch = if (chain_config.ELECTRA_FORK_EPOCH > std.math.maxInt(Epoch) - 2025) 0 else chain_config.ELECTRA_FORK_EPOCH;
+    const test_epoch = electra_fork_epoch + 2025;
+    electra_state.slot = test_epoch * preset.SLOTS_PER_EPOCH - 1;
     const current_epoch = @divFloor(electra_state.slot, preset.SLOTS_PER_EPOCH);
     var version: [4]u8 = undefined;
     _ = try hex.hexToBytes(&version, "0x00000001");
     electra_state.fork = .{
         .previous_version = version,
         .current_version = version,
-        .epoch = chain_config.ELECTRA_FORK_EPOCH,
+        .epoch = electra_fork_epoch,
     };
     electra_state.latest_block_header = .{
         .slot = electra_state.slot - 1,
@@ -80,8 +81,8 @@ pub fn generateElectraState(allocator: Allocator, pool: *Node.Pool, chain_config
         try electra_state.validators.append(allocator, validator);
         try electra_state.balances.append(allocator, EFFECTIVE_BALANCE);
         try electra_state.inactivity_scores.append(allocator, 0);
-        try electra_state.previous_epoch_participation.append(allocator, 0b11111111);
-        try electra_state.current_epoch_participation.append(allocator, 0b11111111);
+        try electra_state.previous_epoch_participation.append(allocator, 0b111);
+        try electra_state.current_epoch_participation.append(allocator, 0b111);
     }
 
     electra_state.eth1_data = .{
@@ -97,7 +98,7 @@ pub fn generateElectraState(allocator: Allocator, pool: *Node.Pool, chain_config
     defer effective_balance_increments.deinit(allocator);
     for (0..validator_count) |i| {
         try active_validator_indices.append(allocator, @intCast(i));
-        try effective_balance_increments.append(allocator, EFFECTIVE_BALANCE_INCREMENT);
+        try effective_balance_increments.append(allocator, @import("./root.zig").EFFECTIVE_BALANCE_INCREMENT);
     }
 
     // no need to populate eth1_data_votes

@@ -6,6 +6,9 @@ pub const TestCachedBeaconState = @import("./generate_state.zig").TestCachedBeac
 pub const generateElectraBlock = @import("./generate_block.zig").generateElectraBlock;
 pub const interopSign = @import("./interop_pubkeys.zig").interopSign;
 
+/// Normally set in preset. Mock a small value for testing.
+pub const EFFECTIVE_BALANCE_INCREMENT = 32;
+
 test {
     testing.refAllDecls(@This());
 }
