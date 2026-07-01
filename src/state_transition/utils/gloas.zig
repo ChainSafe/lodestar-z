@@ -19,7 +19,7 @@ const isActiveValidator = @import("./validator.zig").isActiveValidator;
 const computeStartSlotAtEpoch = @import("./epoch.zig").computeStartSlotAtEpoch;
 const RootCache = @import("../cache/root_cache.zig").RootCache;
 const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
-const isValidDepositSignature = @import("../block/process_deposit.zig").isValidDepositSignature;
+const PendingDepositsLookup = @import("./pending_deposits_lookup.zig").PendingDepositsLookup;
 const computeDomain = @import("./domain.zig").computeDomain;
 const computeSigningRoot = @import("./signing_root.zig").computeSigningRoot;
 const bls = @import("bls");
@@ -256,28 +256,9 @@ pub fn isPendingValidator(
     state: *BeaconState(fork),
     pubkey: *const BLSPubkey,
 ) !bool {
-    var pending_deposits = try state.pendingDeposits();
-    const pending_deposits_len = try pending_deposits.length();
-    var pending_it = pending_deposits.iteratorReadonly(0);
-
-    for (0..pending_deposits_len) |_| {
-        const pending_deposit = try pending_it.nextValue(allocator);
-        if (!std.mem.eql(u8, &pending_deposit.pubkey, pubkey)) {
-            continue;
-        }
-
-        if (isValidDepositSignature(
-            config,
-            &pending_deposit.pubkey,
-            &pending_deposit.withdrawal_credentials,
-            pending_deposit.amount,
-            pending_deposit.signature,
-        )) {
-            return true;
-        }
-    }
-
-    return false;
+    var lookup = try PendingDepositsLookup.build(fork, allocator, state);
+    defer lookup.deinit();
+    return try lookup.hasPendingValidator(config, pubkey);
 }
 
 pub fn computePtc(
