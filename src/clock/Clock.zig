@@ -1,8 +1,9 @@
-//! Layer 2 – Event-driven beacon clock.
+//! Event-driven beacon clock — the clock module's public clock type.
 //!
-//! Combines `SlotClock` with an async I/O loop to emit slot/epoch events
-//! and dispatch waiters.  All public methods are safe to call from the
-//! main thread; the internal loop runs as a single cooperative fiber.
+//! Combines the internal `SlotClock` with an async I/O loop to emit
+//! slot/epoch events and dispatch waiters.  All public methods are safe to
+//! call from the main thread; the internal loop runs as a single cooperative
+//! fiber.
 //!
 //! Designed for a cooperative single-fiber `std.Io` backend (e.g. zio).
 //! `start()` and `waitForSlot()` use `std.Io.concurrent` so a backend
@@ -15,8 +16,9 @@
 //! Two invariants make this safe:
 //!   1. Listener callbacks must NOT yield (no `await`/`sleep`); they run to
 //!      completion inside an emit. Safe from a callback: onSlot, offSlot,
-//!      onEpoch, offEpoch, stop, all current* accessors, and calling
-//!      waitForSlot (awaiting its result falls under the no-yield rule).
+//!      onEpoch, offEpoch, stop, all current*/isCurrent* accessors, and
+//!      calling waitForSlot (awaiting or cancelling its result falls under
+//!      the no-yield rule).
 //!      A query while the cached slot is behind the wall (a backlog)
 //!      triggers a NESTED dispatch: later slots/epochs reach all listeners
 //!      before the in-flight event's remaining deliveries complete, yet every
@@ -36,7 +38,7 @@ const time = @import("time");
 const slot_math = @import("slot_math.zig");
 const SlotClock = @import("SlotClock.zig");
 
-const EventClock = @This();
+const Clock = @This();
 
 allocator: Allocator,
 io: std.Io,
@@ -100,7 +102,7 @@ const WaiterQueue = std.PriorityQueue(WaiterEntry, void, struct {
 }.compare);
 
 pub fn init(
-    self: *EventClock,
+    self: *Clock,
     allocator: Allocator,
     config: ClockConfig,
     io_handle: std.Io,
@@ -115,21 +117,21 @@ pub fn init(
 }
 
 /// Start the auto-advance loop.  Idempotent; second call is a no-op.
-pub fn start(self: *EventClock) Error!void {
+pub fn start(self: *Clock) Error!void {
     if (self.loop_future != null) return;
-    self.loop_future = std.Io.concurrent(self.io, EventClock.runAutoLoop, .{self}) catch
+    self.loop_future = std.Io.concurrent(self.io, Clock.runAutoLoop, .{self}) catch
         return error.ConcurrencyUnavailable;
 }
 
 /// Signal the loop to stop and abort all pending waiters.  Idempotent.
-pub fn stop(self: *EventClock) void {
+pub fn stop(self: *Clock) void {
     if (self.stopped) return;
     self.stopped = true;
     self.abortAllWaiters();
 }
 
 /// Signal the loop to stop, cancel the fiber, and wait for it to finish.
-pub fn join(self: *EventClock) void {
+pub fn join(self: *Clock) void {
     self.stop();
     var maybe_future = self.loop_future;
     self.loop_future = null;
@@ -140,7 +142,7 @@ pub fn join(self: *EventClock) void {
 }
 
 /// Release all resources.  Calls `stop()` + `join()` internally.
-pub fn deinit(self: *EventClock) void {
+pub fn deinit(self: *Clock) void {
     self.stop();
     self.join();
     self.waiters.deinit(self.allocator);
@@ -153,7 +155,7 @@ pub fn deinit(self: *EventClock) void {
 
 /// Register a slot listener.  Returns an ID for later removal via `offSlot`.
 pub fn onSlot(
-    self: *EventClock,
+    self: *Clock,
     callback: *const fn (ctx: ?*anyopaque, slot: Slot) void,
     ctx: ?*anyopaque,
 ) Error!ListenerId {
@@ -169,7 +171,7 @@ pub fn onSlot(
 }
 
 /// Unregister a slot listener.  Returns `true` if found and removed.
-pub fn offSlot(self: *EventClock, id: ListenerId) bool {
+pub fn offSlot(self: *Clock, id: ListenerId) bool {
     for (self.slot_listeners.slice(), 0..) |listener, i| {
         if (listener.id == id) {
             self.slot_listeners.orderedRemove(@intCast(i));
@@ -182,7 +184,7 @@ pub fn offSlot(self: *EventClock, id: ListenerId) bool {
 /// Register an epoch listener.  Returns an ID for later removal via `offEpoch`.
 /// An epoch event fires once when the epoch of the advancing slot increases.
 pub fn onEpoch(
-    self: *EventClock,
+    self: *Clock,
     callback: *const fn (ctx: ?*anyopaque, epoch: Epoch) void,
     ctx: ?*anyopaque,
 ) Error!ListenerId {
@@ -198,7 +200,7 @@ pub fn onEpoch(
 }
 
 /// Unregister an epoch listener.  Returns `true` if found and removed.
-pub fn offEpoch(self: *EventClock, id: ListenerId) bool {
+pub fn offEpoch(self: *Clock, id: ListenerId) bool {
     for (self.epoch_listeners.slice(), 0..) |listener, i| {
         if (listener.id == id) {
             self.epoch_listeners.orderedRemove(@intCast(i));
@@ -213,48 +215,71 @@ pub fn offEpoch(self: *EventClock, id: ListenerId) bool {
 // the events it flushed (the disparity window may still report one slot
 // ahead, and after stop() nothing is emitted at all).
 
-pub fn currentSlot(self: *EventClock) ?Slot {
+pub fn currentSlot(self: *Clock) ?Slot {
     return slot_math.slotAtMs(self.clock.config, self.catchUp());
 }
 
-pub fn currentEpoch(self: *EventClock) ?Epoch {
+pub fn currentEpoch(self: *Clock) ?Epoch {
     const slot = slot_math.slotAtMs(self.clock.config, self.catchUp()) orelse return null;
     return slot_math.epochAtSlot(self.clock.config, slot);
 }
 
-pub fn currentSlotOrGenesis(self: *EventClock) Slot {
+pub fn currentSlotOrGenesis(self: *Clock) Slot {
     return self.currentSlot() orelse 0;
 }
 
-pub fn currentEpochOrGenesis(self: *EventClock) Epoch {
+pub fn currentEpochOrGenesis(self: *Clock) Epoch {
     return self.currentEpoch() orelse 0;
 }
 
-pub fn currentSlotWithGossipDisparity(self: *EventClock) ?Slot {
+pub fn currentSlotWithGossipDisparity(self: *Clock) ?Slot {
     return self.clock.currentSlotWithGossipDisparity(self.catchUp());
 }
 
-pub fn isCurrentSlotGivenGossipDisparity(self: *EventClock, slot: Slot) bool {
+pub fn isCurrentSlotGivenGossipDisparity(self: *Clock, slot: Slot) bool {
     return self.clock.isCurrentSlotGivenGossipDisparity(
         .{ .slot = slot, .now_ms = self.catchUp() },
     );
 }
 
+// Unlike the catchUp-backed accessors above, the four helpers below are pure
+// reads: they never advance the cache and never emit events.
+
+/// Returns the slot if the internal clock were advanced by `tolerance_ms`.
+pub fn slotWithFutureToleranceMs(self: *const Clock, tolerance_ms: u64) ?Slot {
+    return self.clock.slotWithFutureToleranceMs(tolerance_ms);
+}
+
+/// Returns the slot if the internal clock were reversed by `tolerance_ms`.
+pub fn slotWithPastToleranceMs(self: *const Clock, tolerance_ms: u64) Slot {
+    return self.clock.slotWithPastToleranceMs(tolerance_ms);
+}
+
+/// Returns the seconds from the start of `slot` to `to_sec` (or now).
+pub fn secFromSlot(self: *const Clock, slot: Slot, to_sec: ?u64) i64 {
+    return self.clock.secFromSlot(slot, to_sec);
+}
+
+/// Returns the milliseconds from the start of `slot` to `to_ms` (or now).
+pub fn msFromSlot(self: *const Clock, slot: Slot, to_ms: ?u64) i64 {
+    return self.clock.msFromSlot(slot, to_ms);
+}
+
 /// Return type from `waitForSlot`. The caller MUST either:
 ///   - call `await()` to wait for the target slot and release resources, OR
 ///   - call `cancel()` to abort and release resources, OR
-///   - call `stop()` on the EventClock and THEN `await()` to get `error.Aborted`.
+///   - call `stop()` on the Clock and THEN `await()` to get `error.Aborted`.
 /// Dropping a WaitForSlotResult without calling `await` or `cancel` leaks
 /// the internal WaitState.
 ///
 /// Idiomatic usage with `errdefer`:
-///   var fut = try ec.waitForSlot(target);
+///   var fut = try clock.waitForSlot(target);
 ///   errdefer fut.cancel();
 ///   try fut.await(io);
 pub const WaitForSlotResult = struct {
     inner: std.Io.Future(Error!void),
     state: ?*WaitState,
-    clock: ?*EventClock,
+    clock: ?*Clock,
 
     /// Create an immediately-resolved result (no async work needed).
     /// Relies on `std.Io.Future.await` returning `.result` when `.any_future == null`.
@@ -305,7 +330,7 @@ pub const WaitForSlotResult = struct {
 
 /// Return a future that resolves when the clock reaches `target`.
 /// See `WaitForSlotResult` for the caller's obligations.
-pub fn waitForSlot(self: *EventClock, target: Slot) Error!WaitForSlotResult {
+pub fn waitForSlot(self: *Clock, target: Slot) Error!WaitForSlotResult {
     if (self.stopped) {
         return WaitForSlotResult.immediate(error.Aborted);
     }
@@ -362,7 +387,7 @@ pub fn waitForSlot(self: *EventClock, target: Slot) Error!WaitForSlotResult {
 /// any current* result from a second read would let the result run ahead of
 /// the events this read flushed (listener callbacks can burn wall time
 /// across a slot boundary mid-dispatch).
-fn catchUp(self: *EventClock) u64 {
+fn catchUp(self: *Clock) u64 {
     const now_ms = time.nowMs(self.io);
     if (slot_math.slotAtMs(self.clock.config, now_ms)) |wall_slot| {
         self.advanceAndDispatch(wall_slot);
@@ -370,7 +395,7 @@ fn catchUp(self: *EventClock) u64 {
     return now_ms;
 }
 
-fn emitSlot(self: *EventClock, slot: Slot) void {
+fn emitSlot(self: *Clock, slot: Slot) void {
     // By-value stack copy: a reentrant callback may add/remove listeners or
     // trigger a nested emit; those mutate only the member list, never the
     // snapshot this frame is iterating.
@@ -380,14 +405,14 @@ fn emitSlot(self: *EventClock, slot: Slot) void {
     }
 }
 
-fn emitEpoch(self: *EventClock, epoch: Epoch) void {
+fn emitEpoch(self: *Clock, epoch: Epoch) void {
     var snapshot = self.epoch_listeners;
     for (snapshot.slice()) |listener| {
         listener.callback(listener.ctx, epoch);
     }
 }
 
-fn dispatchWaiters(self: *EventClock, current_slot: ?Slot) void {
+fn dispatchWaiters(self: *Clock, current_slot: ?Slot) void {
     const slot = current_slot orelse return;
     while (self.waiters.peek()) |head| {
         if (head.target > slot) break;
@@ -397,7 +422,7 @@ fn dispatchWaiters(self: *EventClock, current_slot: ?Slot) void {
     }
 }
 
-fn abortAllWaiters(self: *EventClock) void {
+fn abortAllWaiters(self: *Clock) void {
     while (self.waiters.pop()) |waiter| {
         // A reached target already satisfied the wait (waitForSlot resolves
         // once current_slot >= target); stopping only aborts slots that can
@@ -408,7 +433,7 @@ fn abortAllWaiters(self: *EventClock) void {
     }
 }
 
-fn advanceAndDispatch(self: *EventClock, target: Slot) void {
+fn advanceAndDispatch(self: *Clock, target: Slot) void {
     var iter = self.clock.advanceTo(target);
     // Check `stopped` *before* iter.next() so a callback that calls stop()
     // can't leave current_slot one ahead of the last-emitted slot.
@@ -425,7 +450,7 @@ fn advanceAndDispatch(self: *EventClock, target: Slot) void {
     }
 }
 
-fn runAutoLoop(self: *EventClock) void {
+fn runAutoLoop(self: *Clock) void {
     while (!self.stopped) {
         const now_ms = time.nowMs(self.clock.io);
         const next_ms = slot_math.msUntilNextSlot(self.clock.config, now_ms);
@@ -439,7 +464,7 @@ fn runAutoLoop(self: *EventClock) void {
             .awake,
         ) catch |err| {
             if (err == error.Canceled) break;
-            std.log.debug("EventClock: sleep failed ({s}), retrying", .{@errorName(err)});
+            std.log.debug("Clock: sleep failed ({s}), retrying", .{@errorName(err)});
             continue;
         };
 
@@ -492,7 +517,7 @@ test "lifecycle: init -> register -> start -> receive events -> stop" {
 
     const base_now = time.nowSec(io_handle);
 
-    var clock: EventClock = undefined;
+    var clock: Clock = undefined;
     try clock.init(testing.allocator, .{
         .genesis_time_sec = base_now,
         .slot_duration_ms = 1_000,
@@ -520,7 +545,7 @@ test "waitForSlot resolves immediately when at target" {
 
     const base_now = time.nowSec(io_handle);
 
-    var clock: EventClock = undefined;
+    var clock: Clock = undefined;
     try clock.init(testing.allocator, .{
         .genesis_time_sec = base_now,
         .slot_duration_ms = 1_000,
@@ -539,7 +564,7 @@ test "waitForSlot returns aborted on stop" {
     defer rt.deinit();
     const io_handle = rt.io();
 
-    var clock: EventClock = undefined;
+    var clock: Clock = undefined;
     try clock.init(testing.allocator, .{
         .genesis_time_sec = time.nowSec(io_handle) + 2,
         .slot_duration_ms = 2_000,
@@ -558,7 +583,7 @@ test "offSlot/offEpoch stop event delivery" {
     defer rt.deinit();
     const io_handle = rt.io();
 
-    var clock: EventClock = undefined;
+    var clock: Clock = undefined;
     try clock.init(testing.allocator, .{
         .genesis_time_sec = time.nowSec(io_handle) + 2,
         .slot_duration_ms = 1_000,
@@ -582,7 +607,7 @@ test "stop/join are idempotent" {
     defer rt.deinit();
     const io_handle = rt.io();
 
-    var clock: EventClock = undefined;
+    var clock: Clock = undefined;
     try clock.init(testing.allocator, .{
         .genesis_time_sec = time.nowSec(io_handle) + 2,
         .slot_duration_ms = 2_000,
@@ -601,7 +626,7 @@ test "epoch event is delivered when crossing epoch boundary" {
     defer rt.deinit();
     const io_handle = rt.io();
 
-    var clock: EventClock = undefined;
+    var clock: Clock = undefined;
     try clock.init(testing.allocator, .{
         .genesis_time_sec = time.nowSec(io_handle) + 2,
         .slot_duration_ms = 1_000,
@@ -625,7 +650,7 @@ test "multiple waiters are dispatched in target-slot order" {
     defer rt.deinit();
     const io_handle = rt.io();
 
-    var clock: EventClock = undefined;
+    var clock: Clock = undefined;
     try clock.init(testing.allocator, .{
         .genesis_time_sec = time.nowSec(io_handle) + 10,
         .slot_duration_ms = 1_000,
@@ -656,7 +681,7 @@ test "cancel releases WaitState without awaiting" {
     defer rt.deinit();
     const io_handle = rt.io();
 
-    var clock: EventClock = undefined;
+    var clock: Clock = undefined;
     try clock.init(testing.allocator, .{
         .genesis_time_sec = time.nowSec(io_handle) + 10,
         .slot_duration_ms = 1_000,
@@ -674,7 +699,7 @@ test "real-time: no slot events emitted before genesis" {
     defer rt.deinit();
     const io_handle = rt.io();
 
-    var clock: EventClock = undefined;
+    var clock: Clock = undefined;
     try clock.init(testing.allocator, .{
         .genesis_time_sec = time.nowSec(io_handle) + 5,
         .slot_duration_ms = 1_000,
@@ -699,7 +724,7 @@ test "real-time: slot events fire with correct timing" {
 
     const base_now = time.nowSec(io_handle);
 
-    var clock: EventClock = undefined;
+    var clock: Clock = undefined;
     try clock.init(testing.allocator, .{
         .genesis_time_sec = base_now,
         .slot_duration_ms = 1_000,
@@ -731,7 +756,7 @@ test "real-time: multi-slot advancement delivers ordered events" {
 
     const base_now = time.nowSec(io_handle);
 
-    var clock: EventClock = undefined;
+    var clock: Clock = undefined;
     try clock.init(testing.allocator, .{
         .genesis_time_sec = base_now,
         .slot_duration_ms = 1_000,
@@ -760,7 +785,7 @@ test "real-time: stop+join cancels promptly" {
     defer rt.deinit();
     const io_handle = rt.io();
 
-    var clock: EventClock = undefined;
+    var clock: Clock = undefined;
     try clock.init(testing.allocator, .{
         .genesis_time_sec = time.nowSec(io_handle) + 100,
         .slot_duration_ms = 12_000,
@@ -790,7 +815,7 @@ test "real-time: epoch boundary event fires" {
 
     const base_now = time.nowSec(io_handle);
 
-    var clock: EventClock = undefined;
+    var clock: Clock = undefined;
     try clock.init(testing.allocator, .{
         .genesis_time_sec = base_now,
         .slot_duration_ms = 1_000,
@@ -817,7 +842,7 @@ fn nopSlot(_: ?*anyopaque, _: Slot) void {}
 fn nopEpoch(_: ?*anyopaque, _: Epoch) void {}
 
 const ReentrancyCtx = struct {
-    clock: *EventClock,
+    clock: *Clock,
     self_id: ?ListenerId = null,
     fired_count: usize = 0,
 
@@ -847,7 +872,7 @@ test "reentrancy: callback can offSlot itself mid-dispatch" {
     defer rt.deinit();
     const io_handle = rt.io();
 
-    var clock: EventClock = undefined;
+    var clock: Clock = undefined;
     try clock.init(testing.allocator, .{
         .genesis_time_sec = time.nowSec(io_handle) + 1_000_000,
         .slot_duration_ms = 1_000,
@@ -873,7 +898,7 @@ test "reentrancy: callback can stop the clock; no further slots emitted" {
     defer rt.deinit();
     const io_handle = rt.io();
 
-    var clock: EventClock = undefined;
+    var clock: Clock = undefined;
     try clock.init(testing.allocator, .{
         .genesis_time_sec = time.nowSec(io_handle) + 1_000_000,
         .slot_duration_ms = 1_000,
@@ -892,7 +917,7 @@ test "reentrancy: callback can stop the clock; no further slots emitted" {
 }
 
 const StopAtSlotCtx = struct {
-    clock: *EventClock,
+    clock: *Clock,
     stop_at: Slot,
 
     fn stopAt(ctx: ?*anyopaque, slot: Slot) void {
@@ -906,7 +931,7 @@ test "reentrancy: stop() during emit resolves reached waiter, aborts future one"
     defer rt.deinit();
     const io_handle = rt.io();
 
-    var clock: EventClock = undefined;
+    var clock: Clock = undefined;
     try clock.init(testing.allocator, .{
         .genesis_time_sec = time.nowSec(io_handle) + 1_000_000,
         .slot_duration_ms = 1_000,
@@ -936,7 +961,7 @@ test "reentrancy: stop() during emit resolves reached waiter, aborts future one"
 }
 
 const WaitFromCallbackCtx = struct {
-    clock: *EventClock,
+    clock: *Clock,
     fut: ?WaitForSlotResult = null,
 
     fn onSlot(ctx: ?*anyopaque, slot: Slot) void {
@@ -951,7 +976,7 @@ test "reentrancy: waitForSlot from a callback resolves via the ongoing dispatch"
     defer rt.deinit();
     const io_handle = rt.io();
 
-    var clock: EventClock = undefined;
+    var clock: Clock = undefined;
     try clock.init(testing.allocator, .{
         .genesis_time_sec = time.nowSec(io_handle) + 1_000_000,
         .slot_duration_ms = 1_000,
@@ -977,7 +1002,7 @@ test "ListenerLimitReached: onSlot/onEpoch reject the (limit+1)th registration" 
     defer rt.deinit();
     const io_handle = rt.io();
 
-    var clock: EventClock = undefined;
+    var clock: Clock = undefined;
     try clock.init(testing.allocator, .{
         .genesis_time_sec = time.nowSec(io_handle) + 1_000_000,
         .slot_duration_ms = 1_000,
@@ -1001,7 +1026,7 @@ test "WaiterLimitReached: waitForSlot rejects the (limit+1)th waiter" {
     defer rt.deinit();
     const io_handle = rt.io();
 
-    var clock: EventClock = undefined;
+    var clock: Clock = undefined;
     try clock.init(testing.allocator, .{
         .genesis_time_sec = time.nowSec(io_handle) + 1_000_000,
         .slot_duration_ms = 1_000,
@@ -1020,7 +1045,7 @@ test "many waiters at same target slot all resolve on advance" {
     defer rt.deinit();
     const io_handle = rt.io();
 
-    var clock: EventClock = undefined;
+    var clock: Clock = undefined;
     try clock.init(testing.allocator, .{
         .genesis_time_sec = time.nowSec(io_handle) + 1_000_000,
         .slot_duration_ms = 1_000,
@@ -1071,7 +1096,7 @@ const SlowCallbackCtx = struct {
 test "currentSlot returns the reading its catch-up flushed to" {
     var fake = FakeClockIo{ .ms = 100_000 };
 
-    var clock: EventClock = undefined;
+    var clock: Clock = undefined;
     try clock.init(testing.allocator, .{
         .genesis_time_sec = 100,
         .slot_duration_ms = 1_000,
@@ -1096,7 +1121,7 @@ test "currentSlot returns the reading its catch-up flushed to" {
 test "currentSlotWithGossipDisparity bases its slot on the caught-up reading" {
     var fake = FakeClockIo{ .ms = 100_000 };
 
-    var clock: EventClock = undefined;
+    var clock: Clock = undefined;
     try clock.init(testing.allocator, .{
         .genesis_time_sec = 100,
         .slot_duration_ms = 1_000,
@@ -1120,7 +1145,7 @@ test "currentSlotWithGossipDisparity bases its slot on the caught-up reading" {
 test "currentEpoch returns the epoch of the reading its catch-up flushed to" {
     var fake = FakeClockIo{ .ms = 100_000 };
 
-    var clock: EventClock = undefined;
+    var clock: Clock = undefined;
     try clock.init(testing.allocator, .{
         .genesis_time_sec = 100,
         .slot_duration_ms = 1_000,
@@ -1144,7 +1169,7 @@ test "currentEpoch returns the epoch of the reading its catch-up flushed to" {
 test "isCurrentSlotGivenGossipDisparity judges the caught-up reading" {
     var fake = FakeClockIo{ .ms = 100_000 };
 
-    var clock: EventClock = undefined;
+    var clock: Clock = undefined;
     try clock.init(testing.allocator, .{
         .genesis_time_sec = 100,
         .slot_duration_ms = 1_000,
@@ -1162,8 +1187,39 @@ test "isCurrentSlotGivenGossipDisparity judges the caught-up reading" {
     try testing.expectEqual(@as(?Slot, 2), ctx.last_emitted);
 }
 
+test "tolerance and from-slot forwards are pure reads: no catch-up" {
+    var fake = FakeClockIo{ .ms = 100_000 };
+
+    var clock: Clock = undefined;
+    try clock.init(testing.allocator, .{
+        .genesis_time_sec = 100,
+        .slot_duration_ms = 12_000,
+        .slots_per_epoch = 32,
+    }, fake.io());
+    defer clock.deinit();
+
+    var trace = EventTraceState{};
+    _ = try clock.onSlot(EventTraceState.onSlot, &trace);
+
+    // Wall slot 1 with the cache at 0: a catchUp-backed accessor would flush
+    // this backlog to the listener; the four forwards must not.
+    fake.ms = 112_000;
+    try testing.expectEqual(@as(?Slot, 2), clock.slotWithFutureToleranceMs(12_000));
+    try testing.expectEqual(@as(Slot, 0), clock.slotWithPastToleranceMs(12_000));
+
+    fake.ms = 118_000;
+    try testing.expectEqual(@as(i64, 6), clock.secFromSlot(1, null));
+    try testing.expectEqual(@as(i64, 6_000), clock.msFromSlot(1, null));
+    try testing.expectEqual(@as(i64, 0), clock.secFromSlot(1, 112));
+    try testing.expectEqual(@as(i64, -12), clock.secFromSlot(1, 100));
+    try testing.expectEqual(@as(i64, -12_000), clock.msFromSlot(1, 100_000));
+
+    try testing.expectEqual(@as(usize, 0), trace.slot_len);
+    try testing.expectEqual(@as(?Slot, 0), clock.clock.current_slot);
+}
+
 const NestedDispatchCtx = struct {
-    clock: *EventClock,
+    clock: *Clock,
     fake: *FakeClockIo,
     add_ctx: *EventTraceState,
     remove_id: ListenerId = 0,
@@ -1187,7 +1243,7 @@ const NestedDispatchCtx = struct {
 test "nested dispatch during emit preserves the outer snapshot" {
     var fake = FakeClockIo{ .ms = 100_000 };
 
-    var clock: EventClock = undefined;
+    var clock: Clock = undefined;
     try clock.init(testing.allocator, .{
         .genesis_time_sec = 100,
         .slot_duration_ms = 1_000,
@@ -1219,7 +1275,7 @@ test "nested dispatch during emit preserves the outer snapshot" {
 }
 
 const EpochMutateCtx = struct {
-    clock: *EventClock,
+    clock: *Clock,
     add_ctx: *EventTraceState,
     remove_id: ListenerId = 0,
     fired_once: bool = false,
@@ -1240,7 +1296,7 @@ const EpochMutateCtx = struct {
 test "epoch listener mutations mid-emit preserve the epoch snapshot" {
     var fake = FakeClockIo{ .ms = 100_000 };
 
-    var clock: EventClock = undefined;
+    var clock: Clock = undefined;
     try clock.init(testing.allocator, .{
         .genesis_time_sec = 100,
         .slot_duration_ms = 1_000,
@@ -1268,7 +1324,7 @@ test "epoch listener mutations mid-emit preserve the epoch snapshot" {
 }
 
 const QueryAtSlotCtx = struct {
-    clock: *EventClock,
+    clock: *Clock,
     fake: *FakeClockIo,
     query_at: Slot,
     burn_to_ms: ?u64 = null,
@@ -1289,7 +1345,7 @@ const QueryAtSlotCtx = struct {
 test "backlog query-from-callback delivers every (listener, slot) exactly once" {
     var fake = FakeClockIo{ .ms = 100_000 };
 
-    var clock: EventClock = undefined;
+    var clock: Clock = undefined;
     try clock.init(testing.allocator, .{
         .genesis_time_sec = 100,
         .slot_duration_ms = 1_000,
@@ -1316,7 +1372,7 @@ test "backlog query-from-callback delivers every (listener, slot) exactly once" 
 test "non-backlog query-from-callback is a no-op" {
     var fake = FakeClockIo{ .ms = 100_000 };
 
-    var clock: EventClock = undefined;
+    var clock: Clock = undefined;
     try clock.init(testing.allocator, .{
         .genesis_time_sec = 100,
         .slot_duration_ms = 1_000,
@@ -1343,7 +1399,7 @@ test "non-backlog query-from-callback is a no-op" {
 test "epoch events under nested dispatch arrive out of order but exactly once" {
     var fake = FakeClockIo{ .ms = 102_000 };
 
-    var clock: EventClock = undefined;
+    var clock: Clock = undefined;
     try clock.init(testing.allocator, .{
         .genesis_time_sec = 100,
         .slot_duration_ms = 1_000,
@@ -1416,7 +1472,7 @@ const PropertyState = struct {
     spe: u64,
     model_current_slot: ?Slot = null,
     model_stopped: bool = false,
-    clock: *EventClock,
+    clock: *Clock,
 
     slot_listener_ids: std.ArrayListUnmanaged(ListenerId) = .empty,
     slot_trackers: std.ArrayListUnmanaged(*PropertyTracker) = .empty,
@@ -1625,7 +1681,7 @@ fn runPropertyScenario(seed: u64, op_count: u32, io: std.Io) !void {
 
     const spe: u64 = 4;
     const now_sec = time.nowSec(io);
-    var clock: EventClock = undefined;
+    var clock: Clock = undefined;
     // Genesis far in future → wall-clock never advances; advanceAndDispatch owns time.
     try clock.init(testing.allocator, .{
         .genesis_time_sec = now_sec + 1_000_000,

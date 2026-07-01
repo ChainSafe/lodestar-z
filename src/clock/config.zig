@@ -1,6 +1,6 @@
 //! Clock configuration: genesis, slot duration (with fork-aware transitions),
 //! epoch length, and gossip-disparity tolerance.  Shared by `slot_math`
-//! (pure arithmetic) and the stateful `SlotClock` / `EventClock` layers.
+//! (pure arithmetic) and the stateful `SlotClock` / `Clock` layers.
 
 const std = @import("std");
 const ct = @import("consensus_types");
