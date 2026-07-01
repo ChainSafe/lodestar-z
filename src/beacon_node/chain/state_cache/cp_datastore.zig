@@ -15,8 +15,10 @@ const Epoch = types.primitive.Epoch.Type;
 
 const state_transition = @import("state_transition");
 const computeStartSlotAtEpoch = state_transition.computeStartSlotAtEpoch;
+const computeEpochAtSlot = state_transition.computeEpochAtSlot;
 const getStateSlotFromBytes = state_transition.getStateSlotFromBytes;
 const getLastProcessedSlotFromStateBytes = state_transition.getLastProcessedSlotFromStateBytes;
+const STATE_SLOTS_PREFIX_LEN = state_transition.STATE_SLOTS_PREFIX_LEN;
 const testing = std.testing;
 
 /// On-disk store for serialized checkpoint states. The backend is chosen at construction at RUNTIME
@@ -36,6 +38,9 @@ pub const CPStateDatastore = struct {
         removeMany: *const fn (ctx: *anyopaque, io: std.Io, allocator: Allocator, keys: []const DatastoreKey) anyerror!void,
         /// Read the state bytes at `key` (allocated with `allocator`, caller frees), or null if absent.
         read: *const fn (ctx: *anyopaque, io: std.Io, allocator: Allocator, dk: DatastoreKey) anyerror!?[]u8,
+        /// Read up to `buf.len` leading bytes of the state at `dk` into `buf`, returning the count
+        /// read, or null if absent.
+        readPrefix: *const fn (ctx: *anyopaque, io: std.Io, dk: DatastoreKey, buf: []u8) anyerror!?usize,
         /// All persisted keys. Caller frees the returned slice with `allocator`.
         readKeys: *const fn (ctx: *anyopaque, io: std.Io, allocator: Allocator) anyerror![]DatastoreKey,
         /// Optional one-time backend setup (e.g. ensure the directory exists).
@@ -56,6 +61,10 @@ pub const CPStateDatastore = struct {
 
     pub fn read(self: CPStateDatastore, io: std.Io, allocator: Allocator, dk: DatastoreKey) !?[]u8 {
         return self.vtable.read(self.ptr, io, allocator, dk);
+    }
+
+    pub fn readPrefix(self: CPStateDatastore, io: std.Io, dk: DatastoreKey, buf: []u8) !?usize {
+        return self.vtable.readPrefix(self.ptr, io, dk, buf);
     }
 
     pub fn readKeys(self: CPStateDatastore, io: std.Io, allocator: Allocator) ![]DatastoreKey {
@@ -87,6 +96,7 @@ pub const CPStateDatastore = struct {
             }
         }.desc);
 
+        var prefix: [STATE_SLOTS_PREFIX_LEN]u8 = undefined;
         var i: usize = 0;
         while (i < keys.len) : (i += 1) {
             const epoch = datastoreKeyEpoch(keys[i]);
@@ -96,9 +106,9 @@ pub const CPStateDatastore = struct {
             const next_dup = i + 1 < keys.len and datastoreKeyEpoch(keys[i + 1]) == epoch;
             if (prev_dup or next_dup) continue;
 
-            const bytes = (try self.read(io, allocator, keys[i])) orelse continue;
-            if (isSafeCheckpointState(bytes, epoch)) return bytes;
-            allocator.free(bytes);
+            const n = (try self.readPrefix(io, keys[i], &prefix)) orelse continue;
+            if (!isSafeCheckpointState(prefix[0..n], epoch)) continue;
+            return (try self.read(io, allocator, keys[i])) orelse continue;
         }
         return null;
     }
@@ -113,6 +123,8 @@ fn isSafeCheckpointState(state_bytes: []const u8, epoch: Epoch) bool {
     const is_crcs = last_processed == state_slot;
     const is_prcs = state_slot > 0 and last_processed == state_slot - 1;
     if (!is_crcs and !is_prcs) return false;
+    // Division first: a huge on-disk epoch must read unsafe, not overflow the multiply below.
+    if (computeEpochAtSlot(state_slot) != epoch) return false;
     // at epoch boundary (subsumes the slot % SLOTS_PER_EPOCH == 0 check).
     return state_slot == computeStartSlotAtEpoch(epoch);
 }
@@ -143,6 +155,7 @@ pub const InMemoryCPStateDatastore = struct {
         .remove = removeImpl,
         .removeMany = removeManyImpl,
         .read = readImpl,
+        .readPrefix = readPrefixImpl,
         .readKeys = readKeysImpl,
         .init = null,
     };
@@ -183,6 +196,15 @@ pub const InMemoryCPStateDatastore = struct {
         return try allocator.dupe(u8, bytes);
     }
 
+    fn readPrefixImpl(ctx: *anyopaque, io: std.Io, dk: DatastoreKey, buf: []u8) anyerror!?usize {
+        _ = io;
+        const self: *InMemoryCPStateDatastore = @ptrCast(@alignCast(ctx));
+        const bytes = self.states.get(dk) orelse return null;
+        const n = @min(bytes.len, buf.len);
+        @memcpy(buf[0..n], bytes[0..n]);
+        return n;
+    }
+
     fn readKeysImpl(ctx: *anyopaque, io: std.Io, allocator: Allocator) anyerror![]DatastoreKey {
         _ = io;
         const self: *InMemoryCPStateDatastore = @ptrCast(@alignCast(ctx));
@@ -197,6 +219,7 @@ pub const FileCPStateDatastore = struct {
     /// "0x" + 2 hex chars per `DatastoreKey` byte (82 for a 40-byte key).
     const FILE_NAME_LEN: usize = 2 + 2 * DATASTORE_KEY_LEN;
     const SUBDIR = "checkpoint_states";
+    const TMP_SUFFIX = ".tmp";
 
     allocator: Allocator,
     /// `<data_dir>/checkpoint_states` (service deployment: `/beacon/...`, docker: `/data/...`).
@@ -223,6 +246,7 @@ pub const FileCPStateDatastore = struct {
         .remove = removeImpl,
         .removeMany = removeManyImpl,
         .read = readImpl,
+        .readPrefix = readPrefixImpl,
         .readKeys = readKeysImpl,
         .init = initImpl,
     };
@@ -236,7 +260,20 @@ pub const FileCPStateDatastore = struct {
 
     fn initImpl(ctx: *anyopaque, io: std.Io) anyerror!void {
         const self: *FileCPStateDatastore = @ptrCast(@alignCast(ctx));
+        if (self.dir) |dir| {
+            dir.close(io);
+            self.dir = null;
+        }
         self.dir = try std.Io.Dir.cwd().createDirPathOpen(io, self.dir_path, .{ .open_options = .{ .iterate = true } });
+
+        var it = self.dir.?.iterate();
+        while (try it.next(io)) |entry| {
+            if (!std.mem.endsWith(u8, entry.name, TMP_SUFFIX)) continue;
+            self.dir.?.deleteFile(io, entry.name) catch |err| switch (err) {
+                error.IsDir, error.FileNotFound => {},
+                else => return err,
+            };
+        }
     }
 
     fn writeImpl(ctx: *anyopaque, io: std.Io, key: Checkpoint, state_bytes: []const u8) anyerror!DatastoreKey {
@@ -245,11 +282,20 @@ pub const FileCPStateDatastore = struct {
         const dk = datastoreKey(key);
 
         const name = fileName(dk);
-        // Create only if absent — re-persisting an existing checkpoint is skipped (same bytes).
-        dir.writeFile(io, .{ .sub_path = &name, .data = state_bytes, .flags = .{ .exclusive = true } }) catch |err| switch (err) {
-            error.PathAlreadyExists => return dk,
-            else => return err,
+        const exists = blk: {
+            dir.access(io, &name, .{}) catch |err| switch (err) {
+                error.FileNotFound => break :blk false,
+                else => return err,
+            };
+            break :blk true;
         };
+        if (exists) return dk;
+
+        var tmp_name: [FILE_NAME_LEN + TMP_SUFFIX.len]u8 = undefined;
+        @memcpy(tmp_name[0..FILE_NAME_LEN], &name);
+        @memcpy(tmp_name[FILE_NAME_LEN..], TMP_SUFFIX);
+        try dir.writeFile(io, .{ .sub_path = &tmp_name, .data = state_bytes });
+        try dir.rename(&tmp_name, dir, &name, io);
         return dk;
     }
 
@@ -291,7 +337,24 @@ pub const FileCPStateDatastore = struct {
         const name = fileName(dk);
         return dir.readFileAlloc(io, &name, allocator, .unlimited) catch |err| switch (err) {
             error.FileNotFound => null,
+            error.IsDir => null,
             else => err,
+        };
+    }
+
+    fn readPrefixImpl(ctx: *anyopaque, io: std.Io, dk: DatastoreKey, buf: []u8) anyerror!?usize {
+        const self: *FileCPStateDatastore = @ptrCast(@alignCast(ctx));
+        const dir = self.dir orelse return error.DatastoreNotInitialized;
+
+        const name = fileName(dk);
+        const file = dir.openFile(io, &name, .{}) catch |err| switch (err) {
+            error.FileNotFound, error.IsDir => return null,
+            else => return err,
+        };
+        defer file.close(io);
+        return file.readPositionalAll(io, buf, 0) catch |err| switch (err) {
+            error.IsDir => return null,
+            else => return err,
         };
     }
 
@@ -304,7 +367,7 @@ pub const FileCPStateDatastore = struct {
 
         var it = dir.iterate();
         while (try it.next(io)) |entry| {
-            if (entry.kind != .file) continue;
+            if (entry.kind != .file and entry.kind != .unknown) continue;
             if (entry.name.len != FILE_NAME_LEN) continue;
             if (!hex.hasOxPrefix(entry.name)) continue;
 
@@ -435,7 +498,7 @@ test "FileCPStateDatastore write/read/remove/readKeys round-trip" {
     const key_a = Checkpoint{ .root = [_]u8{0xc3} ** 32, .epoch = 9 };
     const dk_a = try ds.write(io, key_a, "gamma-bytes");
 
-    // Create-exclusive: a second write of the same key is a no-op.
+    // A second write of the same key is a no-op (the existing final file is kept).
     _ = try ds.write(io, key_a, "ignored");
 
     const read_a = (try ds.read(io, allocator, dk_a)).?;
@@ -451,6 +514,94 @@ test "FileCPStateDatastore write/read/remove/readKeys round-trip" {
     try testing.expect((try ds.read(io, allocator, dk_a)) == null);
     // Removing an absent key is a no-op.
     try ds.remove(io, dk_a);
+}
+
+test "FileCPStateDatastore readLatestSafe returns the winner's full bytes" {
+    const allocator = testing.allocator;
+    const io = std.testing.io;
+
+    var fx = try FileStoreFixture.init(allocator);
+    defer fx.deinit(allocator, io);
+    const ds = fx.datastore();
+    try ds.initStore(io);
+
+    const slot = computeStartSlotAtEpoch(10);
+    const head = try makeStateBytes(allocator, slot, slot);
+    defer allocator.free(head);
+    // A tail beyond the prefix length, so a prefix-only return fails the comparison.
+    const bytes = try std.mem.concat(allocator, u8, &.{ head, "tail-beyond-the-prefix" });
+    defer allocator.free(bytes);
+    _ = try ds.write(io, .{ .root = [_]u8{0x22} ** 32, .epoch = 10 }, bytes);
+
+    const got = (try ds.readLatestSafe(io, allocator)).?;
+    defer allocator.free(got);
+    try testing.expectEqualSlices(u8, bytes, got);
+}
+
+test "FileCPStateDatastore readLatestSafe skips a huge-epoch foreign key" {
+    const allocator = testing.allocator;
+    const io = std.testing.io;
+
+    var fx = try FileStoreFixture.init(allocator);
+    defer fx.deinit(allocator, io);
+    const ds = fx.datastore();
+    try ds.initStore(io);
+
+    const bytes = try makeStateBytes(allocator, 320, 320);
+    defer allocator.free(bytes);
+    _ = try ds.write(io, .{ .root = [_]u8{0xab} ** 32, .epoch = std.math.maxInt(u64) }, bytes);
+
+    try testing.expect((try ds.readLatestSafe(io, allocator)) == null);
+}
+
+test "FileCPStateDatastore initStore sweeps temp debris and write leaves none" {
+    const allocator = testing.allocator;
+    const io = std.testing.io;
+
+    var fx = try FileStoreFixture.init(allocator);
+    defer fx.deinit(allocator, io);
+    const ds = fx.datastore();
+    try ds.initStore(io);
+
+    // Plant torn debris; it is not a key (wrong name shape), so readKeys ignores it.
+    const dir = fx.store.dir.?;
+    try dir.writeFile(io, .{ .sub_path = "0xdead.tmp", .data = &[_]u8{ 1, 2, 3 } });
+    const empty = try ds.readKeys(io, allocator);
+    defer allocator.free(empty);
+    try testing.expectEqual(@as(usize, 0), empty.len);
+
+    // A restart (fresh store on the same dir) sweeps the debris at initStore.
+    var store2 = try FileCPStateDatastore.init(allocator, fx.base);
+    defer store2.deinit(io);
+    const ds2 = store2.datastore();
+    try ds2.initStore(io);
+    try testing.expectError(error.FileNotFound, dir.access(io, "0xdead.tmp", .{}));
+
+    // A completed write renames its temp into place: the final file is the only entry left.
+    const dk = try ds2.write(io, .{ .root = [_]u8{0xcd} ** 32, .epoch = 3 }, "full-state-bytes");
+    const read_back = (try ds2.read(io, allocator, dk)).?;
+    defer allocator.free(read_back);
+    try testing.expectEqualStrings("full-state-bytes", read_back);
+    var it = dir.iterate();
+    var count: usize = 0;
+    while (try it.next(io)) |_| count += 1;
+    try testing.expectEqual(@as(usize, 1), count);
+}
+
+test "FileCPStateDatastore initStore is repeatable" {
+    const allocator = testing.allocator;
+    const io = std.testing.io;
+
+    var fx = try FileStoreFixture.init(allocator);
+    defer fx.deinit(allocator, io);
+    const ds = fx.datastore();
+    try ds.initStore(io);
+    try ds.initStore(io);
+
+    const dk = try ds.write(io, .{ .root = [_]u8{0x11} ** 32, .epoch = 1 }, "bytes");
+    const back = (try ds.read(io, allocator, dk)).?;
+    defer allocator.free(back);
+    try testing.expectEqualStrings("bytes", back);
 }
 
 test "FileCPStateDatastore initStore opens an existing dir without clobbering" {

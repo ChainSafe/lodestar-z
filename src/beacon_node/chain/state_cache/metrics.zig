@@ -164,6 +164,7 @@ pub fn setBlockReads(reads: AvgMinMax, secs: AvgMinMax) void {
 
 test "init compiles end-to-end" {
     init(.{});
+    defer cache_metrics = m.initializeNoop(BlockStateCacheMetrics);
     setBlockSize(5);
     setBlockReads(
         .{ .sum = 4, .avg = 2, .min = 1, .max = 3 },
