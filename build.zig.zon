@@ -211,6 +211,10 @@
             .root_source_file = "src/fork_choice/root.zig",
             .imports = .{ .consensus_types, .config, .preset, .state_transition, .fork_types, .hex, .constants, .metrics, .time },
         },
+        .beacon_node = .{
+            .root_source_file = "src/beacon_node/root.zig",
+            .imports = .{ .consensus_types, .state_transition, .persistent_merkle_tree, .testing_allocators, .config, .fork_types, .metrics, .hex },
+        },
     },
     .executables = .{
         .download_era_files = .{
@@ -385,6 +389,7 @@
         .era = .{ .root_module = .era },
         .fork_choice = .{ .root_module = .fork_choice },
         .clock = .{ .root_module = .clock },
+        .beacon_node = .{ .root_module = .beacon_node },
 
         .int = .{
             .root_module = .{
