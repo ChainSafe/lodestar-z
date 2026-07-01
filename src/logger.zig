@@ -52,11 +52,19 @@ const Colors = struct {
 };
 
 fn formatLine(buf: []u8, module: ?[]const u8, secs: f64, level: LogLevel, comptime fmt: []const u8, args: anytype) ![]const u8 {
-    if (module) |m| {
-        return std.fmt.bufPrint(buf, "[{d:.3}s] [{s}] {s}[{s}]{s} " ++ fmt ++ "\n", .{ secs, m, level.color(), level.asText(), Colors.reset } ++ args);
-    } else {
-        return std.fmt.bufPrint(buf, "[{d:.3}s] {s}[{s}]{s} " ++ fmt ++ "\n", .{ secs, level.color(), level.asText(), Colors.reset } ++ args);
-    }
+    const marker = "…[trunc]\n";
+    var w = std.Io.Writer.fixed(buf[0 .. buf.len - marker.len ]);
+    const write_result = if (module) |m|
+        w.print("[{d:.3}s] [{s}] {s}[{s}]{s} " ++ fmt ++ "\n", .{ secs, m, level.color(), level.asText(), Colors.reset } ++ args)
+    else
+        w.print("[{d:.3}s] {s}[{s}]{s} " ++ fmt ++ "\n", .{ secs, level.color(), level.asText(), Colors.reset } ++ args);
+
+    write_result catch |err| {
+        std.debug.assert(err == error.WriteFailed);
+        @memcpy(buf[w.end..][0..marker.len], marker);
+        return buf[0 .. w.end + marker.len];
+    };
+    return buf[0..w.end];
 }
 
 fn writeStderr(bytes: []const u8) void {
@@ -140,6 +148,13 @@ test "formatLine" {
     try std.testing.expectEqualStrings("[2.347s] [test-module] " ++ Colors.green ++ "[info]" ++ Colors.reset ++ " hello world 42\n", line);
     const line_no_module = try formatLine(&buf, null, secs, .info, "hello {s} {d}", .{ "world", 42 });
     try std.testing.expectEqualStrings("[2.347s] " ++ Colors.green ++ "[info]" ++ Colors.reset ++ " hello world 42\n", line_no_module);
+}
+
+test "formatLine truncates" {
+    var buf: [64]u8 = undefined;
+    const line = try formatLine(&buf, null, 2.347, .info, "{s}", .{"x" ** 200});
+    try std.testing.expect(std.mem.endsWith(u8, line, "…[trunc]\n"));
+    try std.testing.expect(line.len <= buf.len);
 }
 
 test "log smoke" {
