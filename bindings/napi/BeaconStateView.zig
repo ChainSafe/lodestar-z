@@ -1151,15 +1151,17 @@ pub fn loadOtherState(
             // but we're losing some savings here. Consider implementating something like
             // a `prefetchAll` that only does `populateAllNodes` that returns void
             var validators_view = try new_cached_state.state.validators();
-            _ = validators_view.getAllReadonlyValues(allocator) catch |err| {
+            const validators = validators_view.getAllReadonlyValues(allocator) catch |err| {
                 try js.env().throwError("STATE_ERROR", "Failed to preload validators");
                 return err;
             };
+            defer validators.deinit();
             var balances_view = try new_cached_state.state.balances();
-            _ = balances_view.getAll(allocator) catch |err| {
+            const balances = balances_view.getAll(allocator) catch |err| {
                 try js.env().throwError("STATE_ERROR", "Failed to preload balances");
                 return err;
             };
+            defer balances.deinit();
         }
     }
 
