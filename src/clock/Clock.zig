@@ -1,9 +1,9 @@
 //! Event-driven beacon clock — the clock module's public clock type.
 //!
-//! Combines the internal `SlotClock` with an async I/O loop to emit
-//! slot/epoch events and dispatch waiters.  All public methods are safe to
-//! call from the main thread; the internal loop runs as a single cooperative
-//! fiber.
+//! Owns the stateful slot cursor (a cached `current_slot` over `slot_math`)
+//! and an async I/O loop to emit slot/epoch events and dispatch waiters.
+//! All public methods are safe to call from the main thread; the internal
+//! loop runs as a single cooperative fiber.
 //!
 //! Designed for a cooperative single-fiber `std.Io` backend (e.g. zio).
 //! `start()` and `waitForSlot()` use `std.Io.concurrent` so a backend
@@ -37,13 +37,13 @@ const Allocator = std.mem.Allocator;
 const bounded_array = @import("bounded_array");
 const time = @import("time");
 const slot_math = @import("slot_math.zig");
-const SlotClock = @import("SlotClock.zig");
 
 const Clock = @This();
 
 allocator: Allocator,
 io: std.Io,
-clock: SlotClock,
+config: ClockConfig,
+current_slot: ?Slot = null,
 
 stopped: bool = false,
 loop_future: ?std.Io.Future(void) = null,
@@ -108,13 +108,14 @@ pub fn init(
     config: ClockConfig,
     io_handle: std.Io,
 ) Error!void {
+    try config.validate();
     self.* = .{
         .allocator = allocator,
         .io = io_handle,
-        .clock = undefined,
+        .config = config,
+        .current_slot = slot_math.slotAtMs(config, time.nowMs(io_handle)),
         .waiters = WaiterQueue.initContext({}),
     };
-    self.clock = try SlotClock.init(config, io_handle);
 }
 
 /// Start the auto-advance loop.  Idempotent; second call is a no-op.
@@ -217,12 +218,12 @@ pub fn offEpoch(self: *Clock, id: ListenerId) bool {
 // ahead, and after stop() nothing is emitted at all).
 
 pub fn currentSlot(self: *Clock) ?Slot {
-    return slot_math.slotAtMs(self.clock.config, self.catchUp());
+    return slot_math.slotAtMs(self.config, self.catchUp());
 }
 
 pub fn currentEpoch(self: *Clock) ?Epoch {
-    const slot = slot_math.slotAtMs(self.clock.config, self.catchUp()) orelse return null;
-    return slot_math.epochAtSlot(self.clock.config, slot);
+    const slot = slot_math.slotAtMs(self.config, self.catchUp()) orelse return null;
+    return slot_math.epochAtSlot(self.config, slot);
 }
 
 pub fn currentSlotOrGenesis(self: *Clock) Slot {
@@ -234,12 +235,12 @@ pub fn currentEpochOrGenesis(self: *Clock) Epoch {
 }
 
 pub fn currentSlotWithGossipDisparity(self: *Clock) ?Slot {
-    return slot_math.slotWithGossipDisparity(self.clock.config, self.catchUp());
+    return slot_math.slotWithGossipDisparity(self.config, self.catchUp());
 }
 
 pub fn isCurrentSlotGivenGossipDisparity(self: *Clock, slot: Slot) bool {
     return slot_math.isCurrentSlotGivenGossipDisparity(
-        self.clock.config,
+        self.config,
         .{ .slot = slot, .now_ms = self.catchUp() },
     );
 }
@@ -250,7 +251,7 @@ pub fn isCurrentSlotGivenGossipDisparity(self: *Clock, slot: Slot) bool {
 /// Returns the slot if the internal clock were advanced by `tolerance_ms`.
 pub fn slotWithFutureToleranceMs(self: *const Clock, tolerance_ms: u64) ?Slot {
     return slot_math.slotWithFutureToleranceMs(
-        self.clock.config,
+        self.config,
         .{ .now_ms = time.nowMs(self.io), .tolerance_ms = tolerance_ms },
     );
 }
@@ -258,14 +259,14 @@ pub fn slotWithFutureToleranceMs(self: *const Clock, tolerance_ms: u64) ?Slot {
 /// Returns the slot if the internal clock were reversed by `tolerance_ms`.
 pub fn slotWithPastToleranceMs(self: *const Clock, tolerance_ms: u64) Slot {
     return slot_math.slotWithPastToleranceMs(
-        self.clock.config,
+        self.config,
         .{ .now_ms = time.nowMs(self.io), .tolerance_ms = tolerance_ms },
     );
 }
 
 /// Returns the seconds from the start of `slot` to `to_sec` (or now).
 pub fn secFromSlot(self: *const Clock, slot: Slot, to_sec: ?u64) i64 {
-    return slot_math.secFromSlot(self.clock.config, .{
+    return slot_math.secFromSlot(self.config, .{
         .slot = slot,
         .to_sec = to_sec orelse @divFloor(time.nowMs(self.io), 1000),
     });
@@ -273,7 +274,7 @@ pub fn secFromSlot(self: *const Clock, slot: Slot, to_sec: ?u64) i64 {
 
 /// Returns the milliseconds from the start of `slot` to `to_ms` (or now).
 pub fn msFromSlot(self: *const Clock, slot: Slot, to_ms: ?u64) i64 {
-    return slot_math.msFromSlot(self.clock.config, .{
+    return slot_math.msFromSlot(self.config, .{
         .slot = slot,
         .to_ms = to_ms orelse time.nowMs(self.io),
     });
@@ -349,7 +350,7 @@ pub fn waitForSlot(self: *Clock, target: Slot) Error!WaitForSlotResult {
         return WaitForSlotResult.immediate(error.Aborted);
     }
     _ = self.catchUp();
-    if (self.clock.current_slot) |slot| {
+    if (self.current_slot) |slot| {
         if (slot >= target) {
             return WaitForSlotResult.immediate({});
         }
@@ -374,7 +375,7 @@ pub fn waitForSlot(self: *Clock, target: Slot) Error!WaitForSlotResult {
         self.allocator,
         .{ .target = target, .state = state },
     ) catch return error.OutOfMemory;
-    self.dispatchWaiters(self.clock.current_slot);
+    self.dispatchWaiters(self.current_slot);
 
     const inner = std.Io.concurrent(self.io, waitForSlotFutureAwait, .{state}) catch {
         for (self.waiters.items, 0..) |entry, i| {
@@ -403,7 +404,7 @@ pub fn waitForSlot(self: *Clock, target: Slot) Error!WaitForSlotResult {
 /// across a slot boundary mid-dispatch).
 fn catchUp(self: *Clock) u64 {
     const now_ms = time.nowMs(self.io);
-    if (slot_math.slotAtMs(self.clock.config, now_ms)) |wall_slot| {
+    if (slot_math.slotAtMs(self.config, now_ms)) |wall_slot| {
         self.advanceAndDispatch(wall_slot);
     }
     return now_ms;
@@ -441,14 +442,70 @@ fn abortAllWaiters(self: *Clock) void {
         // A reached target already satisfied the wait (waitForSlot resolves
         // once current_slot >= target); stopping only aborts slots that can
         // no longer be emitted.
-        const reached = if (self.clock.current_slot) |cs| waiter.target <= cs else false;
+        const reached = if (self.current_slot) |cs| waiter.target <= cs else false;
         waiter.state.aborted = !reached;
         waiter.state.event.set(waiter.state.io);
     }
 }
 
+const Event = union(enum) {
+    slot: Slot,
+    epoch: Epoch,
+};
+
+// Holds only what advancing needs — config and the slot cursor — so the
+// iterator cannot dispatch (no listeners, waiters, or io in reach).
+const AdvanceIterator = struct {
+    config: ClockConfig,
+    current_slot: *?Slot,
+    target: Slot,
+    pending_epoch: ?Epoch = null,
+
+    /// Advances the clock one step at a time, yielding slot and epoch events.
+    /// For each slot advancement: yields .slot first, then .epoch if an epoch
+    /// boundary was crossed.
+    /// Returns null when caught up to target.
+    fn next(self: *AdvanceIterator) ?Event {
+        if (self.pending_epoch) |epoch| {
+            self.pending_epoch = null;
+            return .{ .epoch = epoch };
+        }
+
+        const current = self.current_slot.*;
+        if (current == null) {
+            self.current_slot.* = 0;
+            return .{ .slot = 0 };
+        }
+
+        const cur = current.?;
+        if (cur >= self.target) return null;
+
+        const next_slot = cur + 1;
+        self.current_slot.* = next_slot;
+
+        const prev_epoch = slot_math.epochAtSlot(self.config, cur);
+        const new_epoch = slot_math.epochAtSlot(self.config, next_slot);
+        if (prev_epoch < new_epoch) {
+            self.pending_epoch = new_epoch;
+        }
+
+        return .{ .slot = next_slot };
+    }
+};
+
+/// Advances the clock toward `target` one event at a time.  The caller may
+/// drop the iterator mid-walk; the clock is then left at the last slot the
+/// iterator returned (i.e. partial advancement is observable).
+fn advanceTo(self: *Clock, target: Slot) AdvanceIterator {
+    return .{
+        .config = self.config,
+        .current_slot = &self.current_slot,
+        .target = target,
+    };
+}
+
 fn advanceAndDispatch(self: *Clock, target: Slot) void {
-    var iter = self.clock.advanceTo(target);
+    var iter = self.advanceTo(target);
     // Check `stopped` *before* iter.next() so a callback that calls stop()
     // can't leave current_slot one ahead of the last-emitted slot.
     while (true) {
@@ -466,8 +523,8 @@ fn advanceAndDispatch(self: *Clock, target: Slot) void {
 
 fn runAutoLoop(self: *Clock) void {
     while (!self.stopped) {
-        const now_ms = time.nowMs(self.clock.io);
-        const next_ms = slot_math.msUntilNextSlot(self.clock.config, now_ms);
+        const now_ms = time.nowMs(self.io);
+        const next_ms = slot_math.msUntilNextSlot(self.config, now_ms);
         const sleep_ms: i64 = @intCast(@max(@as(u64, 1), next_ms));
 
         // Sleep failure: cancellation (from join()) exits the loop;
@@ -927,7 +984,7 @@ test "reentrancy: callback can stop the clock; no further slots emitted" {
 
     try testing.expectEqual(@as(usize, 1), ctx.fired_count);
     try testing.expect(clock.stopped);
-    try testing.expectEqual(@as(?Slot, 0), clock.clock.current_slot);
+    try testing.expectEqual(@as(?Slot, 0), clock.current_slot);
 }
 
 const StopAtSlotCtx = struct {
@@ -967,7 +1024,7 @@ test "reentrancy: stop() during emit resolves reached waiter, aborts future one"
     clock.advanceAndDispatch(target);
 
     try testing.expect(clock.stopped);
-    try testing.expectEqual(@as(?Slot, target), clock.clock.current_slot);
+    try testing.expectEqual(@as(?Slot, target), clock.current_slot);
     // Reached slot happened, so the wait must resolve, not abort.
     try fut_reached.await(io_handle);
     // Future slot can never be emitted after stop, so it aborts.
@@ -1076,8 +1133,8 @@ test "many waiters at same target slot all resolve on advance" {
     for (&futs) |*f| try f.await(io_handle);
 }
 
-// Drives accessor tests without start(): only the `now` vtable entry is
-// exercised, and deinit is safe with no pending waiters.
+// Drives accessor and advance tests without start(): only the `now` vtable
+// entry is exercised, and deinit is safe with no pending waiters.
 const FakeClockIo = struct {
     ms: u64 = 0,
     fn vtableNow(userdata: ?*anyopaque, clock: std.Io.Clock) std.Io.Timestamp {
@@ -1094,6 +1151,124 @@ const FakeClockIo = struct {
         return .{ .userdata = @constCast(self), .vtable = &vtable };
     }
 };
+
+const test_cfg = ClockConfig{
+    .genesis_time_sec = 100,
+    .slot_duration_ms = 12_000,
+    .slots_per_epoch = 32,
+    .maximum_gossip_clock_disparity_ms = 500,
+};
+
+test "pre-genesis returns null, genesis fallback returns zero" {
+    var fake = FakeClockIo{ .ms = 99_000 };
+    var clock: Clock = undefined;
+    try clock.init(testing.allocator, test_cfg, fake.io());
+    defer clock.deinit();
+
+    try testing.expectEqual(@as(?Slot, null), clock.currentSlot());
+    try testing.expectEqual(@as(?Epoch, null), clock.currentEpoch());
+    try testing.expectEqual(@as(Slot, 0), clock.currentSlotOrGenesis());
+    try testing.expectEqual(@as(Epoch, 0), clock.currentEpochOrGenesis());
+}
+
+test "currentSlot at genesis and advancing" {
+    var fake = FakeClockIo{ .ms = 100_000 };
+    var clock: Clock = undefined;
+    try clock.init(testing.allocator, test_cfg, fake.io());
+    defer clock.deinit();
+
+    try testing.expectEqual(@as(?Slot, 0), clock.currentSlot());
+
+    fake.ms = 112_000;
+    try testing.expectEqual(@as(?Slot, 1), clock.currentSlot());
+
+    fake.ms = 124_000;
+    try testing.expectEqual(@as(?Slot, 2), clock.currentSlot());
+}
+
+test "currentEpoch" {
+    var fake = FakeClockIo{ .ms = 100_000 + 32 * 12 * 1000 };
+    var clock: Clock = undefined;
+    try clock.init(testing.allocator, test_cfg, fake.io());
+    defer clock.deinit();
+
+    try testing.expectEqual(@as(?Epoch, 1), clock.currentEpoch());
+}
+
+test "advanceTo produces correct slot events" {
+    var fake = FakeClockIo{ .ms = 100_000 };
+    var clock: Clock = undefined;
+    try clock.init(testing.allocator, test_cfg, fake.io());
+    defer clock.deinit();
+
+    var events: [16]Event = undefined;
+    var count: usize = 0;
+    var iter = clock.advanceTo(3);
+    while (iter.next()) |e| {
+        events[count] = e;
+        count += 1;
+    }
+
+    try testing.expectEqual(@as(usize, 3), count);
+    try testing.expect(events[0] == .slot and events[0].slot == 1);
+    try testing.expect(events[1] == .slot and events[1].slot == 2);
+    try testing.expect(events[2] == .slot and events[2].slot == 3);
+    try testing.expectEqual(@as(?Slot, 3), clock.current_slot);
+}
+
+test "advanceTo across epoch boundary emits slot then epoch" {
+    var fake = FakeClockIo{ .ms = 100_000 };
+    var clock: Clock = undefined;
+    try clock.init(testing.allocator, test_cfg, fake.io());
+    defer clock.deinit();
+    clock.current_slot = 31;
+
+    var events: [16]Event = undefined;
+    var count: usize = 0;
+    var iter = clock.advanceTo(33);
+    while (iter.next()) |e| {
+        events[count] = e;
+        count += 1;
+    }
+
+    try testing.expectEqual(@as(usize, 3), count);
+    try testing.expect(events[0] == .slot and events[0].slot == 32);
+    try testing.expect(events[1] == .epoch and events[1].epoch == 1);
+    try testing.expect(events[2] == .slot and events[2].slot == 33);
+}
+
+test "advanceTo from null (pre-genesis)" {
+    var fake = FakeClockIo{ .ms = 99_000 };
+    var clock: Clock = undefined;
+    try clock.init(testing.allocator, test_cfg, fake.io());
+    defer clock.deinit();
+    try testing.expectEqual(@as(?Slot, null), clock.current_slot);
+
+    var events: [16]Event = undefined;
+    var count: usize = 0;
+    var iter = clock.advanceTo(2);
+    while (iter.next()) |e| {
+        events[count] = e;
+        count += 1;
+    }
+
+    try testing.expectEqual(@as(usize, 3), count);
+    try testing.expect(events[0] == .slot and events[0].slot == 0);
+    try testing.expect(events[1] == .slot and events[1].slot == 1);
+    try testing.expect(events[2] == .slot and events[2].slot == 2);
+}
+
+test "advanceTo already at target returns nothing" {
+    var fake = FakeClockIo{ .ms = 112_000 };
+    var clock: Clock = undefined;
+    try clock.init(testing.allocator, test_cfg, fake.io());
+    defer clock.deinit();
+
+    var count: usize = 0;
+    var iter = clock.advanceTo(1);
+    while (iter.next()) |_| count += 1;
+    try testing.expectEqual(@as(usize, 0), count);
+}
 
 const SlowCallbackCtx = struct {
     fake: *FakeClockIo,
@@ -1216,7 +1391,7 @@ test "tolerance and from-slot forwards are pure reads: no catch-up" {
     _ = try clock.onSlot(EventTraceState.onSlot, &trace);
 
     // Wall slot 1 with the cache at 0: a catchUp-backed accessor would flush
-    // this backlog to the listener; the four forwards must not.
+    // this backlog to the listener; the forwards must not.
     fake.ms = 112_000;
     try testing.expectEqual(@as(?Slot, 2), clock.slotWithFutureToleranceMs(12_000));
     try testing.expectEqual(@as(Slot, 0), clock.slotWithPastToleranceMs(12_000));
@@ -1229,7 +1404,7 @@ test "tolerance and from-slot forwards are pure reads: no catch-up" {
     try testing.expectEqual(@as(i64, -12_000), clock.msFromSlot(1, 100_000));
 
     try testing.expectEqual(@as(usize, 0), trace.slot_len);
-    try testing.expectEqual(@as(?Slot, 0), clock.clock.current_slot);
+    try testing.expectEqual(@as(?Slot, 0), clock.current_slot);
 }
 
 const NestedDispatchCtx = struct {

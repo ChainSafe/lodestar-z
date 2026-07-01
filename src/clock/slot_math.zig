@@ -4,7 +4,9 @@
 //! The only `null` is pre-genesis (a `<` comparison); arithmetic uses plain
 //! operators since `now_ms` is the wall clock and slot/config values are
 //! program-controlled — an overflow would be a program error and traps.
-//! `slotWithPastToleranceMs` alone takes caller-supplied data and saturates.
+//! `slotWithPastToleranceMs` alone saturates — its underflow is reachable
+//! with valid caller data; the rest treat out-of-range values as program
+//! errors.
 
 const std = @import("std");
 const ct = @import("consensus_types");
@@ -521,7 +523,7 @@ test "tolerance helpers" {
 
 test "slotWithPastToleranceMs saturates when tolerance exceeds now" {
     // 50_000 -| 60_000 saturates to 0 ms, which is pre-genesis → the orelse-0
-    // path → slot 0 (a wrapping subtraction would trap here instead).
+    // path → slot 0 (a plain `-` would trap here instead).
     try testing.expectEqual(
         @as(Slot, 0),
         slotWithPastToleranceMs(test_cfg, .{ .now_ms = 50_000, .tolerance_ms = 60_000 }),

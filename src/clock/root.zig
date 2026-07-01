@@ -4,8 +4,8 @@
 //!   `config`    – `ClockConfig`
 //!   `slot_math` – pure arithmetic, comptime-compatible
 //!   `Clock`     – event-driven beacon clock with listeners and waiters
-//! Internally `Clock` layers on `SlotClock`, a stateful slot clock reading
-//! wall-clock time via `std.Io`.
+//! Internally `Clock` owns the stateful slot cursor, reading wall-clock time
+//! via `std.Io`; `slot_math` holds the pure functions.
 
 pub const config = @import("config.zig");
 pub const slot_math = @import("slot_math.zig");
@@ -21,7 +21,5 @@ pub const Error = Clock.Error;
 test {
     _ = config;
     _ = slot_math;
-    // Clock's transitive import compiles SlotClock but does not run its tests.
-    _ = @import("SlotClock.zig");
     _ = Clock;
 }
