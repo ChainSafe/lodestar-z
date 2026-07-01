@@ -1155,11 +1155,13 @@ pub fn loadOtherState(
                 try js.env().throwError("STATE_ERROR", "Failed to preload validators");
                 return err;
             };
+            defer validators_view.deinit();
             var balances_view = try new_cached_state.state.balances();
             _ = balances_view.getAll(allocator) catch |err| {
                 try js.env().throwError("STATE_ERROR", "Failed to preload balances");
                 return err;
             };
+            defer balances_view.deinit();
         }
     }
 
