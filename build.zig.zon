@@ -211,8 +211,8 @@
             .root_source_file = "src/fork_choice/root.zig",
             .imports = .{ .consensus_types, .config, .preset, .state_transition, .fork_types, .hex, .constants, .metrics, .time },
         },
-        .log = .{
-            .root_source_file = "src/log.zig",
+        .logger = .{
+            .root_source_file = "src/logger.zig",
             .imports = .{.time},
         },
     },
@@ -389,7 +389,7 @@
         .era = .{ .root_module = .era },
         .fork_choice = .{ .root_module = .fork_choice },
         .clock = .{ .root_module = .clock },
-        .log = .{ .root_module = .log },
+        .logger = .{ .root_module = .logger },
 
         .int = .{
             .root_module = .{
