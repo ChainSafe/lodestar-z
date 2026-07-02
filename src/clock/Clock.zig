@@ -14,19 +14,16 @@
 //! are at `await`/`sleep` yield points, and every read-modify of shared state
 //! (listeners, waiter queue, `stopped`) completes synchronously between yields.
 //! Two invariants make this safe:
-//!   1. Listener callbacks must NOT yield (no `await`/`sleep`); they run to
-//!      completion inside an emit. Safe from a callback: onSlot, offSlot,
-//!      onEpoch, offEpoch, stop, all current*/isCurrent* accessors, and
-//!      calling waitForSlot (awaiting or cancelling its result falls under
-//!      the no-yield rule); the pure-read helpers below them are trivially
-//!      safe (no catch-up, no yield).
-//!      A query while the cached slot is behind the wall (a backlog)
-//!      triggers a NESTED dispatch: later slots/epochs reach all listeners
-//!      before the in-flight event's remaining deliveries complete, yet every
-//!      (listener, event) pair is delivered exactly once. Each nested level
-//!      consumes at least one slot of the pre-existing backlog, so nesting
-//!      depth is bounded by the backlog size; levels beyond that require the
-//!      wall to cross another slot boundary mid-cascade.
+//!   1. Listener callbacks run to completion inside an emit and must NOT
+//!      yield (no `await`/`sleep`). Safe to call from a callback:
+//!        - onSlot / offSlot / onEpoch / offEpoch and stop;
+//!        - any current* / isCurrent* accessor and the pure-read helpers;
+//!        - waitForSlot, though awaiting or cancelling its result would yield.
+//!      A query while the cache lags the wall (a backlog) nests a
+//!      dispatch: later slots/epochs reach every listener before the in-flight
+//!      event finishes, yet each (listener, event) fires exactly once. Depth is
+//!      bounded by the backlog: each level drains at least one backlogged slot;
+//!      deeper needs the wall to cross another boundary mid-cascade.
 //!   2. `cancel()` removes its waiter from the queue *before* it yields, so a
 //!      concurrent `dispatchWaiters` can no longer observe it.
 //! A multi-executor backend (zio with `executors > 1`, or `std.Io.Threaded`)
@@ -150,10 +147,6 @@ pub fn deinit(self: *Clock) void {
     self.waiters.deinit(self.allocator);
     self.* = undefined;
 }
-
-// Each emit iterates its own stack snapshot, so callbacks may mutate the
-// listener lists mid-dispatch: a listener added does not receive the event
-// being emitted; one removed still receives it.
 
 /// Register a slot listener.  Returns an ID for later removal via `offSlot`.
 pub fn onSlot(
@@ -397,9 +390,7 @@ fn catchUp(self: *Clock) u64 {
 }
 
 fn emitSlot(self: *Clock, slot: Slot) void {
-    // By-value stack copy: a reentrant callback may add/remove listeners or
-    // trigger a nested emit; those mutate only the member list, never the
-    // snapshot this frame is iterating.
+    // Copy, not &: reentrant on-off / nested emit mutates the member list, not this snapshot.
     var snapshot = self.slot_listeners;
     for (snapshot.slice()) |listener| {
         listener.callback(listener.ctx, slot);
@@ -1044,9 +1035,6 @@ test "reentrancy: waitForSlot from a callback resolves via the ongoing dispatch"
     var ctx = WaitFromCallbackCtx{ .clock = &clock };
     _ = try clock.onSlot(WaitFromCallbackCtx.onSlot, &ctx);
 
-    // The slot-1 callback registers a waiter for slot 2 and returns without
-    // awaiting; the same dispatch's emit of slot 2 then resolves it, so the
-    // await after advanceAndDispatch must succeed rather than abort.
     clock.advanceAndDispatch(2);
 
     try testing.expect(ctx.fut != null);
@@ -1486,10 +1474,6 @@ test "epoch listener mutations mid-emit preserve the epoch snapshot" {
     const id_e2 = try clock.onEpoch(EventTraceState.onEpoch, &ctx_e2);
     ctx_e1.remove_id = id_e2;
 
-    // Wall slot 4 crosses two epoch boundaries. The epoch-1 emit snapshots
-    // [E1, E2]; E1 removes E2 and registers E3 mid-emit, so E2 (in the
-    // snapshot) still receives epoch 1 but misses epoch 2, while E3 (absent
-    // from the snapshot) misses epoch 1 and receives epoch 2.
     fake.ms = 104_000;
     try testing.expectEqual(@as(?Slot, 4), clock.currentSlot());
 
@@ -1533,9 +1517,6 @@ test "backlog query-from-callback delivers every (listener, slot) exactly once" 
     _ = try clock.onSlot(QueryAtSlotCtx.onSlot, &ctx_q);
     _ = try clock.onSlot(EventTraceState.onSlot, &ctx_r);
 
-    // Wall slot 3 with the cache at 0: the outer emit of slot 1 reaches Q
-    // first; its query drains the remaining backlog (slots 2, 3) to both
-    // listeners before the outer emit resumes and delivers slot 1 to R.
     fake.ms = 103_000;
     try testing.expectEqual(@as(?Slot, 3), clock.currentSlot());
 
@@ -1560,9 +1541,6 @@ test "non-backlog query-from-callback is a no-op" {
     _ = try clock.onSlot(QueryAtSlotCtx.onSlot, &ctx_q);
     _ = try clock.onSlot(EventTraceState.onSlot, &ctx_r);
 
-    // The cache is already at the wall slot when Q queries, so the nested
-    // catch-up has nothing to drain: plain single-slot delivery, and the
-    // query returns exactly the slot being emitted.
     fake.ms = 101_000;
     try testing.expectEqual(@as(?Slot, 1), clock.currentSlot());
 
@@ -1592,12 +1570,6 @@ test "epoch events under nested dispatch arrive out of order but exactly once" {
     _ = try clock.onSlot(QueryAtSlotCtx.onSlot, &ctx_q);
     _ = try clock.onEpoch(EventTraceState.onEpoch, &trace);
 
-    // Wall slot 4 with the cache at 2: the outer iterator emits slot 3, then
-    // slot 4 — setting pending epoch 1, drained only on its NEXT next(). The
-    // slot-4 callback burns the wall to slot 8 (epoch 2) and queries; the
-    // nested iterator starts with no pending state, so it emits slots 5
-    // through 8 and epoch 2 before the outer iterator resumes and drains
-    // epoch 1.
     fake.ms = 104_000;
     try testing.expectEqual(@as(?Slot, 4), clock.currentSlot());
 
