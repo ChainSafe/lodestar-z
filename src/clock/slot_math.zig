@@ -431,57 +431,34 @@ test "gossip disparity: just after slot boundary" {
 }
 
 test "gossip disparity: exact threshold (500ms) applies inclusively" {
-    // next_slot_ms - now_ms == 500 → 500 <= 500, disparity applies.
-    // Slot 1 starts at 112_000ms. 500ms before = 111_500ms.
+    // 111_500 is 500 ms before slot 1's 112_000 start — inclusive edge; 111_499 is 1 ms past.
     try testing.expectEqual(@as(?Slot, 1), slotWithGossipDisparity(test_cfg, 111_500));
-    try testing.expect(
-        isCurrentSlotGivenGossipDisparity(test_cfg, 1, 111_500),
-    );
+    try testing.expect(isCurrentSlotGivenGossipDisparity(test_cfg, 1, 111_500));
 
-    // 1ms further out (111_499): 112_000 - 111_499 = 501 > 500, disparity does NOT apply.
     try testing.expectEqual(@as(?Slot, 0), slotWithGossipDisparity(test_cfg, 111_499));
-    try testing.expect(
-        !isCurrentSlotGivenGossipDisparity(test_cfg, 1, 111_499),
-    );
+    try testing.expect(!isCurrentSlotGivenGossipDisparity(test_cfg, 1, 111_499));
 }
 
 test "gossip disparity: pre-genesis slot 0 only within disparity of genesis" {
-    // Genesis is 100_000ms; disparity is 500ms.
-    // 1000ms before genesis: slot 0 is not yet "current".
+    // Genesis 100_000, disparity 500: pre-genesis, only slot 0 is current, and only within 500 ms.
     try testing.expectEqual(@as(?Slot, null), slotWithGossipDisparity(test_cfg, 99_000));
-    try testing.expect(
-        !isCurrentSlotGivenGossipDisparity(test_cfg, 0, 99_000),
-    );
-    try testing.expect(
-        !isCurrentSlotGivenGossipDisparity(test_cfg, 1, 99_000),
-    );
+    try testing.expect(!isCurrentSlotGivenGossipDisparity(test_cfg, 0, 99_000));
+    try testing.expect(!isCurrentSlotGivenGossipDisparity(test_cfg, 1, 99_000));
 
-    // 300ms before genesis: within disparity, slot 0 is "current".
     try testing.expectEqual(@as(?Slot, 0), slotWithGossipDisparity(test_cfg, 99_700));
-    try testing.expect(
-        isCurrentSlotGivenGossipDisparity(test_cfg, 0, 99_700),
-    );
-    try testing.expect(
-        !isCurrentSlotGivenGossipDisparity(test_cfg, 1, 99_700),
-    );
+    try testing.expect(isCurrentSlotGivenGossipDisparity(test_cfg, 0, 99_700));
+    try testing.expect(!isCurrentSlotGivenGossipDisparity(test_cfg, 1, 99_700));
 
-    // Exact threshold: 500ms before genesis is inclusive.
     try testing.expectEqual(@as(?Slot, 0), slotWithGossipDisparity(test_cfg, 99_500));
-    try testing.expect(
-        isCurrentSlotGivenGossipDisparity(test_cfg, 0, 99_500),
-    );
+    try testing.expect(isCurrentSlotGivenGossipDisparity(test_cfg, 0, 99_500));
 
-    // 1ms further out (501ms before genesis): not "current".
     try testing.expectEqual(@as(?Slot, null), slotWithGossipDisparity(test_cfg, 99_499));
-    try testing.expect(
-        !isCurrentSlotGivenGossipDisparity(test_cfg, 0, 99_499),
-    );
+    try testing.expect(!isCurrentSlotGivenGossipDisparity(test_cfg, 0, 99_499));
 }
 
 test "gossip disparity: pre-genesis with sub-disparity slot duration never advances past 0" {
-    // Degenerate config: slot_duration (400ms) <= disparity (500ms). With `slotAtMs
-    // orelse 0`, pre-genesis would clamp to slot 0, see next_slot 1 start within
-    // disparity, and spuriously report slot 1; null/0 semantics must hold instead.
+    // Degenerate config: slot_duration (400 ms) <= disparity (500 ms) guards against `slotAtMs
+    // orelse 0` clamping pre-genesis to slot 0 and spuriously reporting slot 1.
     const cfg = ClockConfig{
         .genesis_time_sec = 100, // genesis_ms = 100_000
         .slot_duration_ms = 400,
@@ -489,11 +466,9 @@ test "gossip disparity: pre-genesis with sub-disparity slot duration never advan
         .maximum_gossip_clock_disparity_ms = 500,
     };
 
-    // 1ms before genesis (within disparity): slot 0, never slot 1.
     try testing.expectEqual(@as(?Slot, 0), slotWithGossipDisparity(cfg, 99_999));
     try testing.expect(!isCurrentSlotGivenGossipDisparity(cfg, 1, 99_999));
 
-    // 501ms before genesis (just outside disparity): no slot is current.
     try testing.expectEqual(@as(?Slot, null), slotWithGossipDisparity(cfg, 99_499));
 }
 
