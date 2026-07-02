@@ -67,6 +67,7 @@ fn ProcessWithdrawalsBench(comptime fork: ForkSeq) type {
             const state = BenchState.cloned_cached_state.state.castToFork(fork);
             state_transition.getExpectedWithdrawals(
                 fork,
+                allocator,
                 BenchState.cloned_cached_state.epoch_cache,
                 state,
                 &withdrawals_result,
@@ -316,6 +317,7 @@ fn ProcessBlockSegmentedBench(comptime fork: ForkSeq) type {
                 defer withdrawal_balances.deinit();
                 state_transition.getExpectedWithdrawals(
                     fork,
+                    allocator,
                     epoch_cache,
                     state,
                     &withdrawals_result,

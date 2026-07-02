@@ -18,6 +18,9 @@ const getBeaconProposer = @import("../cache/get_beacon_proposer.zig").getBeaconP
 const Checkpoint = types.phase0.Checkpoint.Type;
 const isTimelyTarget = @import("./process_attestation_phase0.zig").isTimelyTarget;
 const increaseBalance = @import("../utils/balance.zig").increaseBalance;
+const gloas_utils = @import("../utils/gloas.zig");
+const isAttestationSameSlot = gloas_utils.isAttestationSameSlot;
+const isAttestationSameSlotRootCache = gloas_utils.isAttestationSameSlotRootCache;
 
 const PROPOSER_REWARD_DOMINATOR = ((c.WEIGHT_DENOMINATOR - c.PROPOSER_WEIGHT) * c.WEIGHT_DENOMINATOR) / c.PROPOSER_WEIGHT;
 
@@ -49,10 +52,18 @@ pub fn processAttestationsAltair(
     defer root_cache.deinit();
 
     // Process all attestations first and then increase the balance of the proposer once
-    // let newSeenAttesters = 0;
-    // let newSeenAttestersEffectiveBalance = 0;
-
+    // TODO: metrics — newSeenAttesters, newSeenAttestersEffectiveBalance, attestationsPerBlock
     var proposer_reward: u64 = 0;
+
+    var builder_weight_map = std.AutoHashMap(u64, u64).init(allocator);
+    defer builder_weight_map.deinit();
+
+    // Get executionPayloadAvailability for gloas
+    const execution_payload_availability = if (fork.gte(.gloas))
+        try state.inner.get("execution_payload_availability")
+    else
+        @as(?void, null);
+
     for (attestations) |*attestation| {
         const data = &attestation.data;
         try validateAttestation(fork, epoch_cache, state, attestation);
@@ -81,7 +92,17 @@ pub fn processAttestationsAltair(
 
         const in_current_epoch = data.target.epoch == current_epoch;
         var epoch_participation = if (in_current_epoch) try state.currentEpochParticipation() else try state.previousEpochParticipation();
-        const flags_attestation = try getAttestationParticipationStatus(fork, data, state_slot - data.slot, current_epoch, root_cache);
+        // Count how much additional weight added to current or previous epoch's builder pending payment (in ETH increment)
+        var payment_weight_to_add: u64 = 0;
+
+        const flags_attestation = try getAttestationParticipationStatus(
+            fork,
+            data,
+            state_slot - data.slot,
+            current_epoch,
+            root_cache,
+            execution_payload_availability,
+        );
 
         // For each participant, update their participation
         // In epoch processing, this participation info is used to calculate balance updates
@@ -122,13 +143,50 @@ pub fn processAttestationsAltair(
                     }
                 }
             }
+
+            if (fork.gte(.gloas) and flags_new_set != 0 and (try isAttestationSameSlot(state, data))) {
+                payment_weight_to_add += effective_balance_increments[validator_index];
+            }
         }
+
         // Do the discrete math inside the loop to ensure a deterministic result
         const total_increments = total_balance_increments_with_weight;
         const proposer_reward_numerator = total_increments * epoch_cache.base_reward_per_increment;
         proposer_reward += @divFloor(proposer_reward_numerator, PROPOSER_REWARD_DOMINATOR);
+
+        if (fork.gte(.gloas)) {
+            const builder_pending_payment_index: u64 = if (in_current_epoch)
+                preset.SLOTS_PER_EPOCH + (data.slot % preset.SLOTS_PER_EPOCH)
+            else
+                data.slot % preset.SLOTS_PER_EPOCH;
+
+            var builder_pending_payments = try state.inner.get("builder_pending_payments");
+            const existing_weight = builder_weight_map.get(builder_pending_payment_index) orelse blk: {
+                var payment: types.gloas.BuilderPendingPayment.Type = undefined;
+                try builder_pending_payments.getValue(allocator, builder_pending_payment_index, &payment);
+                break :blk payment.weight;
+            };
+            const updated_weight = existing_weight + payment_weight_to_add * preset.EFFECTIVE_BALANCE_INCREMENT;
+            try builder_weight_map.put(builder_pending_payment_index, updated_weight);
+        }
     }
+
+    // Batch write builder weights after all attestations
+    if (fork.gte(.gloas)) {
+        var builder_pending_payments = try state.inner.get("builder_pending_payments");
+        var it = builder_weight_map.iterator();
+        while (it.next()) |entry| {
+            var payment: types.gloas.BuilderPendingPayment.Type = undefined;
+            try builder_pending_payments.getValue(allocator, entry.key_ptr.*, &payment);
+            if (payment.withdrawal.amount > 0) {
+                payment.weight = entry.value_ptr.*;
+                try builder_pending_payments.setValue(entry.key_ptr.*, &payment);
+            }
+        }
+    }
+
     try increaseBalance(fork, state, try getBeaconProposer(fork, epoch_cache, state, state_slot), proposer_reward);
+    // TODO: state.proposerRewards.attestations = proposerReward and metrics
 }
 
 pub fn getAttestationParticipationStatus(
@@ -136,7 +194,8 @@ pub fn getAttestationParticipationStatus(
     data: *const types.phase0.AttestationData.Type,
     inclusion_delay: u64,
     current_epoch: Epoch,
-    root_cache: *RootCache(fork),
+    root_cache: anytype,
+    execution_payload_availability: anytype,
 ) !u8 {
     const justified_checkpoint = if (data.target.epoch == current_epoch)
         &root_cache.current_justified_checkpoint
@@ -148,8 +207,28 @@ pub fn getAttestationParticipationStatus(
     const is_matching_target = std.mem.eql(u8, &data.target.root, try root_cache.getBlockRoot(data.target.epoch));
 
     // a timely head is only be set if the target is _also_ matching
-    const is_matching_head =
+    var is_matching_head =
         is_matching_target and std.mem.eql(u8, &data.beacon_block_root, try root_cache.getBlockRootAtSlot(data.slot));
+
+    if (fork.gte(.gloas)) {
+        var is_matching_payload = false;
+
+        if (try isAttestationSameSlotRootCache(root_cache, data)) {
+            if (data.index != 0) {
+                return error.AttestingSameSlotMustIndicateEmptyPayload;
+            }
+            is_matching_payload = true;
+        } else {
+            if (data.index != 0 and data.index != 1) {
+                return error.DataIndexMustBe0Or1;
+            }
+
+            is_matching_payload =
+                (data.index != 0) == try execution_payload_availability.get(data.slot % preset.SLOTS_PER_HISTORICAL_ROOT);
+        }
+
+        is_matching_head = is_matching_head and is_matching_payload;
+    }
 
     var flags: u8 = 0;
     if (is_matching_source and inclusion_delay <= SLOTS_PER_EPOCH_SQRT) flags |= TIMELY_SOURCE;

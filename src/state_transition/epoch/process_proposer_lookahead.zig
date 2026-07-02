@@ -8,6 +8,7 @@ const BeaconState = @import("fork_types").BeaconState;
 const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
 const EpochTransitionCache = @import("../cache/epoch_transition_cache.zig").EpochTransitionCache;
 const upgradeStateToFulu = @import("../slot/upgrade_state_to_fulu.zig").upgradeStateToFulu;
+const FLAG_UNSLASHED = @import("../utils/attester_status.zig").FLAG_UNSLASHED;
 const ValidatorIndex = ssz.primitive.ValidatorIndex.Type;
 const computeEpochAtSlot = @import("../utils/epoch.zig").computeEpochAtSlot;
 const seed_utils = @import("../utils/seed.zig");
@@ -45,7 +46,19 @@ pub fn processProposerLookahead(
 
     // Active indices for the new epoch come from the epoch transition cache
     // (computed during beforeProcessEpoch for current_epoch + 2)
-    const active_indices = epoch_transition_cache.next_shuffling_active_indices;
+    const shuffling_active_indices = epoch_transition_cache.next_shuffling_active_indices;
+    var unslashed_active_indices: std.ArrayList(ValidatorIndex) = .empty;
+    defer unslashed_active_indices.deinit(allocator);
+
+    const active_indices = if (comptime fork.gte(.gloas)) blk: {
+        try unslashed_active_indices.ensureTotalCapacity(allocator, shuffling_active_indices.len);
+        for (shuffling_active_indices) |index| {
+            if ((epoch_transition_cache.flags[@intCast(index)] & FLAG_UNSLASHED) != 0) {
+                unslashed_active_indices.appendAssumeCapacity(index);
+            }
+        }
+        break :blk unslashed_active_indices.items;
+    } else shuffling_active_indices;
     const effective_balance_increments = epoch_cache.getEffectiveBalanceIncrements();
 
     var seed: [32]u8 = undefined;

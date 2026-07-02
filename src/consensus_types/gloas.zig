@@ -58,6 +58,9 @@ pub const HistoricalSummary = capella.HistoricalSummary;
 
 pub const BlobIdentifier = deneb.BlobIdentifier;
 pub const BlobKzgCommitments = deneb.BlobKzgCommitments;
+pub const LogsBloom = bellatrix.LogsBloom;
+pub const ExtraData = bellatrix.ExtraData;
+pub const Transactions = bellatrix.Transactions;
 
 // Reuse Electra types
 pub const PendingDeposit = electra.PendingDeposit;
@@ -66,7 +69,6 @@ pub const PendingConsolidation = electra.PendingConsolidation;
 pub const DepositRequest = electra.DepositRequest;
 pub const WithdrawalRequest = electra.WithdrawalRequest;
 pub const ConsolidationRequest = electra.ConsolidationRequest;
-pub const ExecutionRequests = electra.ExecutionRequests;
 pub const SingleAttestation = electra.SingleAttestation;
 pub const Attestation = electra.Attestation;
 pub const Attestations = electra.Attestations;
@@ -151,6 +153,39 @@ pub const BuilderPendingWithdrawal = ssz.FixedContainerType(struct {
 pub const BuilderPendingPayment = ssz.FixedContainerType(struct {
     weight: p.Uint64,
     withdrawal: BuilderPendingWithdrawal,
+    proposer_index: p.ValidatorIndex,
+});
+
+pub const BuilderDepositRequest = ssz.FixedContainerType(struct {
+    pubkey: p.BLSPubkey,
+    withdrawal_credentials: p.Bytes32,
+    amount: p.Gwei,
+    signature: p.BLSSignature,
+});
+
+pub const BuilderDepositRequests = ssz.FixedListType(
+    BuilderDepositRequest,
+    preset.MAX_BUILDER_DEPOSIT_REQUESTS_PER_PAYLOAD,
+    .{},
+);
+
+pub const BuilderExitRequest = ssz.FixedContainerType(struct {
+    source_address: p.ExecutionAddress,
+    pubkey: p.BLSPubkey,
+});
+
+pub const BuilderExitRequests = ssz.FixedListType(
+    BuilderExitRequest,
+    preset.MAX_BUILDER_EXIT_REQUESTS_PER_PAYLOAD,
+    .{},
+);
+
+pub const ExecutionRequests = ssz.VariableContainerType(struct {
+    deposits: ssz.FixedListType(DepositRequest, preset.MAX_DEPOSIT_REQUESTS_PER_PAYLOAD, .{}),
+    withdrawals: ssz.FixedListType(WithdrawalRequest, preset.MAX_WITHDRAWAL_REQUESTS_PER_PAYLOAD, .{}),
+    consolidations: ssz.FixedListType(ConsolidationRequest, preset.MAX_CONSOLIDATION_REQUESTS_PER_PAYLOAD, .{}),
+    builder_deposits: BuilderDepositRequests,
+    builder_exits: BuilderExitRequests,
 });
 
 pub const PayloadAttestationData = ssz.FixedContainerType(struct {
@@ -179,10 +214,11 @@ pub const IndexedPayloadAttestation = ssz.VariableContainerType(struct {
 });
 
 pub const ProposerPreferences = ssz.FixedContainerType(struct {
+    dependent_root: p.Root,
     proposal_slot: p.Slot,
     validator_index: p.ValidatorIndex,
     fee_recipient: p.ExecutionAddress,
-    gas_limit: p.Uint64,
+    target_gas_limit: p.Uint64,
 });
 
 pub const SignedProposerPreferences = ssz.FixedContainerType(struct {

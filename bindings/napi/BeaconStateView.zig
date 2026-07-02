@@ -1512,6 +1512,7 @@ pub fn getExpectedWithdrawals(self: *const BeaconStateView) !js.Value {
         inline .capella, .deneb, .electra, .fulu => |f| {
             try st.getExpectedWithdrawals(
                 f,
+                allocator,
                 cached_state.epoch_cache,
                 cached_state.state.castToFork(f),
                 &withdrawals_result,

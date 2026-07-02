@@ -25,6 +25,8 @@ const processParticipationRecordUpdates = @import("./process_participation_recor
 const processParticipationFlagUpdates = @import("./process_participation_flag_updates.zig").processParticipationFlagUpdates;
 const processSyncCommitteeUpdates = @import("./process_sync_committee_updates.zig").processSyncCommitteeUpdates;
 const processProposerLookahead = @import("./process_proposer_lookahead.zig").processProposerLookahead;
+const processBuilderPendingPayments = @import("./process_builder_pending_payments.zig").processBuilderPendingPayments;
+const processPtcWindow = @import("./process_ptc_window.zig").processPtcWindow;
 const Node = @import("persistent_merkle_tree").Node;
 
 pub fn processEpoch(
@@ -70,6 +72,12 @@ pub fn processEpoch(
         try observeEpochTransitionStep(.{ .step = .process_pending_consolidations }, @as(u64, @intCast(time.since(io, timer).nanoseconds)));
     }
 
+    if (comptime fork.gte(.gloas)) {
+        timer = time.start(io);
+        try processBuilderPendingPayments(allocator, state, epoch_cache);
+        try observeEpochTransitionStep(.{ .step = .process_builder_pending_payments }, @as(u64, @intCast(time.since(io, timer).nanoseconds)));
+    }
+
     // const numUpdate = processEffectiveBalanceUpdates(fork, state, cache);
     timer = time.start(io);
     _ = try processEffectiveBalanceUpdates(fork, allocator, epoch_cache, state, cache);
@@ -102,6 +110,12 @@ pub fn processEpoch(
         timer = time.start(io);
         try processProposerLookahead(fork, allocator, epoch_cache, state, cache);
         try observeEpochTransitionStep(.{ .step = .process_proposer_lookahead }, @as(u64, @intCast(time.since(io, timer).nanoseconds)));
+    }
+
+    if (comptime fork.gte(.gloas)) {
+        timer = time.start(io);
+        try processPtcWindow(allocator, epoch_cache, state);
+        try observeEpochTransitionStep(.{ .step = .process_ptc_window }, @as(u64, @intCast(time.since(io, timer).nanoseconds)));
     }
 }
 

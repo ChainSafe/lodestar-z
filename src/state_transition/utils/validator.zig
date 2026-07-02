@@ -12,6 +12,8 @@ const ForkSeq = @import("config").ForkSeq;
 const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
 const WithdrawalCredentials = types.primitive.Root.Type;
 const hasCompoundingWithdrawalCredential = @import("./electra.zig").hasCompoundingWithdrawalCredential;
+const hasExecutionWithdrawalCredential = @import("./electra.zig").hasExecutionWithdrawalCredential;
+const hasEth1WithdrawalCredential = @import("./capella.zig").hasEth1WithdrawalCredential;
 
 pub fn isActiveValidator(validator: *const Validator.Type, epoch: Epoch) bool {
     return validator.activation_epoch <= epoch and epoch < validator.exit_epoch;
@@ -72,7 +74,32 @@ pub fn getActivationExitChurnLimit(epoch_cache: *const EpochCache) u64 {
     return @min(epoch_cache.config.chain.MAX_PER_EPOCH_ACTIVATION_EXIT_CHURN_LIMIT, getBalanceChurnLimitFromCache(epoch_cache));
 }
 
-pub fn getConsolidationChurnLimit(epoch_cache: *const EpochCache) u64 {
+pub fn getGloasActivationChurnLimit(epoch_cache: *const EpochCache) u64 {
+    const churn = getBalanceChurnLimit(
+        epoch_cache.total_active_balance_increments,
+        epoch_cache.config.chain.CHURN_LIMIT_QUOTIENT_GLOAS,
+        epoch_cache.config.chain.MIN_PER_EPOCH_CHURN_LIMIT_ELECTRA,
+    );
+    return @min(epoch_cache.config.chain.MAX_PER_EPOCH_ACTIVATION_CHURN_LIMIT_GLOAS, churn);
+}
+
+pub fn getGloasExitChurnLimit(epoch_cache: *const EpochCache) u64 {
+    return getBalanceChurnLimit(
+        epoch_cache.total_active_balance_increments,
+        epoch_cache.config.chain.CHURN_LIMIT_QUOTIENT_GLOAS,
+        epoch_cache.config.chain.MIN_PER_EPOCH_CHURN_LIMIT_ELECTRA,
+    );
+}
+
+pub fn getConsolidationChurnLimit(comptime fork: ForkSeq, epoch_cache: *const EpochCache) u64 {
+    if (comptime fork.gte(.gloas)) {
+        return getBalanceChurnLimit(
+            epoch_cache.total_active_balance_increments,
+            epoch_cache.config.chain.CONSOLIDATION_CHURN_LIMIT_QUOTIENT,
+            0,
+        );
+    }
+
     return getBalanceChurnLimitFromCache(epoch_cache) - getActivationExitChurnLimit(epoch_cache);
 }
 
@@ -82,6 +109,39 @@ pub fn getMaxEffectiveBalance(withdrawal_credentials: *const WithdrawalCredentia
         return preset.MAX_EFFECTIVE_BALANCE_ELECTRA;
     }
     return preset.MIN_ACTIVATION_BALANCE;
+}
+
+pub fn isFullyWithdrawableValidator(comptime fork: ForkSeq, withdrawal_credentials: *const WithdrawalCredentials, balance: u64, withdrawable_epoch: u64, epoch: u64) bool {
+    const has_withdrawable_credentials = if (comptime fork.gte(.electra))
+        hasExecutionWithdrawalCredential(withdrawal_credentials)
+    else
+        hasEth1WithdrawalCredential(withdrawal_credentials);
+
+    return has_withdrawable_credentials and withdrawable_epoch <= epoch and balance > 0;
+}
+
+pub fn isPartiallyWithdrawableValidator(comptime fork: ForkSeq, withdrawal_credentials: *const WithdrawalCredentials, effective_balance: u64, balance: u64) bool {
+    // Check withdrawal credentials
+    const has_withdrawable_credentials = if (comptime fork.gte(.electra))
+        hasExecutionWithdrawalCredential(withdrawal_credentials)
+    else
+        hasEth1WithdrawalCredential(withdrawal_credentials);
+
+    if (!has_withdrawable_credentials) {
+        return false;
+    }
+
+    // Get max effective balance based on fork
+    const max_effective_balance = if (comptime fork.gte(.electra))
+        getMaxEffectiveBalance(withdrawal_credentials)
+    else
+        preset.MAX_EFFECTIVE_BALANCE;
+
+    // Check if at max effective balance and has excess balance
+    const has_max_effective_balance = effective_balance == max_effective_balance;
+    const has_excess_balance = balance > max_effective_balance;
+
+    return has_max_effective_balance and has_excess_balance;
 }
 
 pub fn getPendingBalanceToWithdraw(comptime fork: ForkSeq, state: *BeaconState(fork), validator_index: ValidatorIndex) !u64 {
