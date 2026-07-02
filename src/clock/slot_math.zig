@@ -512,11 +512,7 @@ test "tolerance helpers" {
         @as(Slot, 3),
         slotWithPastToleranceMs(test_cfg, 148_000, 12_000),
     );
-}
-
-test "slotWithPastToleranceMs saturates when tolerance exceeds now" {
-    // 50_000 -| 60_000 saturates to 0 ms, which is pre-genesis → the orelse-0
-    // path → slot 0 (a plain `-` would trap here instead).
+    // tolerance > now saturates to 0 ms (pre-genesis → slot 0); a plain `-` would trap.
     try testing.expectEqual(
         @as(Slot, 0),
         slotWithPastToleranceMs(test_cfg, 50_000, 60_000),
