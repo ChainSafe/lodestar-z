@@ -239,10 +239,7 @@ pub fn currentSlotWithGossipDisparity(self: *Clock) ?Slot {
 }
 
 pub fn isCurrentSlotGivenGossipDisparity(self: *Clock, slot: Slot) bool {
-    return slot_math.isCurrentSlotGivenGossipDisparity(
-        self.config,
-        .{ .slot = slot, .now_ms = self.catchUp() },
-    );
+    return slot_math.isCurrentSlotGivenGossipDisparity(self.config, slot, self.catchUp());
 }
 
 // Unlike the catchUp-backed accessors above, the helpers below are pure
@@ -250,34 +247,26 @@ pub fn isCurrentSlotGivenGossipDisparity(self: *Clock, slot: Slot) bool {
 
 /// Returns the slot if the internal clock were advanced by `tolerance_ms`.
 pub fn slotWithFutureToleranceMs(self: *const Clock, tolerance_ms: u64) ?Slot {
-    return slot_math.slotWithFutureToleranceMs(
-        self.config,
-        .{ .now_ms = time.nowMs(self.io), .tolerance_ms = tolerance_ms },
-    );
+    return slot_math.slotWithFutureToleranceMs(self.config, time.nowMs(self.io), tolerance_ms);
 }
 
 /// Returns the slot if the internal clock were reversed by `tolerance_ms`.
 pub fn slotWithPastToleranceMs(self: *const Clock, tolerance_ms: u64) Slot {
-    return slot_math.slotWithPastToleranceMs(
-        self.config,
-        .{ .now_ms = time.nowMs(self.io), .tolerance_ms = tolerance_ms },
-    );
+    return slot_math.slotWithPastToleranceMs(self.config, time.nowMs(self.io), tolerance_ms);
 }
 
 /// Returns the seconds from the start of `slot` to `to_sec` (or now).
 pub fn secFromSlot(self: *const Clock, slot: Slot, to_sec: ?u64) i64 {
-    return slot_math.secFromSlot(self.config, .{
-        .slot = slot,
-        .to_sec = to_sec orelse @divFloor(time.nowMs(self.io), 1000),
-    });
+    return slot_math.secFromSlot(
+        self.config,
+        slot,
+        to_sec orelse @divFloor(time.nowMs(self.io), 1000),
+    );
 }
 
 /// Returns the milliseconds from the start of `slot` to `to_ms` (or now).
 pub fn msFromSlot(self: *const Clock, slot: Slot, to_ms: ?u64) i64 {
-    return slot_math.msFromSlot(self.config, .{
-        .slot = slot,
-        .to_ms = to_ms orelse time.nowMs(self.io),
-    });
+    return slot_math.msFromSlot(self.config, slot, to_ms orelse time.nowMs(self.io));
 }
 
 /// Return type from `waitForSlot`. The caller MUST either:
