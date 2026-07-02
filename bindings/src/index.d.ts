@@ -364,6 +364,7 @@ export declare class BeaconStateView {
   createMultiProof(descriptor: Uint8Array): CompactMultiProof;
 
   processSlots(slot: number, options?: ProcessSlotsOpts): BeaconStateView;
+  stateTransition(signedBlockBytes: Uint8Array, options?: TransitionOpts): BeaconStateView;
 }
 
 declare const bindings: {
