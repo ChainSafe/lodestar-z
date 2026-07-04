@@ -19,7 +19,6 @@ const isActiveValidator = @import("./validator.zig").isActiveValidator;
 const computeStartSlotAtEpoch = @import("./epoch.zig").computeStartSlotAtEpoch;
 const RootCache = @import("../cache/root_cache.zig").RootCache;
 const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
-const PendingDepositsLookup = @import("./pending_deposits_lookup.zig").PendingDepositsLookup;
 const computeDomain = @import("./domain.zig").computeDomain;
 const computeSigningRoot = @import("./signing_root.zig").computeSigningRoot;
 const bls = @import("bls");
@@ -227,53 +226,11 @@ pub fn isAttestationSameSlotRootCache(root_cache: *RootCache(.gloas), data: *con
     return is_matching and is_current;
 }
 
-// TODO: Need to check if these are used at all
-/// computePayloadTimelinessCommitteeIndices uses the optimized increments-based check instead.
-pub fn isBalanceWeightedAcceptance(effective_balance: u64, random_value: u64) bool {
-    const MAX_RANDOM_VALUE: u64 = 0xFFFF;
-    return effective_balance * MAX_RANDOM_VALUE >= preset.MAX_EFFECTIVE_BALANCE_ELECTRA * random_value;
-}
-
-// TODO: Need to check if these are used at all
-/// computePayloadTimelinessCommitteeIndices inlines this logic with increments instead of full Gwei balances.
-pub fn computeBalanceWeightedAcceptance(effective_balance: u64, seed: *const [32]u8, i: u64) bool {
-    var hash_input: [40]u8 = undefined;
-    @memcpy(hash_input[0..32], seed);
-    std.mem.writeInt(u64, hash_input[32..][0..8], i / 16, .little);
-
-    var random_bytes: [32]u8 = undefined;
-    Sha256.hash(&hash_input, &random_bytes, .{});
-
-    const offset: usize = @intCast((i % 16) * 2);
-    const random_value: u64 = std.mem.readInt(u16, random_bytes[offset..][0..2], .little);
-
-    return isBalanceWeightedAcceptance(effective_balance, random_value);
-}
-
 pub fn isParentBlockFull(state: *BeaconState(.gloas)) !bool {
     var bid = try state.inner.get("latest_execution_payload_bid");
     const bid_block_hash = try bid.getFieldRoot("block_hash");
     const latest_block_hash = try state.inner.getFieldRoot("latest_block_hash");
     return std.mem.eql(u8, bid_block_hash, latest_block_hash);
-}
-
-pub fn isPubkeyInList(list: []const BLSPubkey, pubkey: *const BLSPubkey) bool {
-    for (list) |p| {
-        if (std.mem.eql(u8, &p, pubkey)) return true;
-    }
-    return false;
-}
-
-pub fn isPendingValidator(
-    comptime fork: ForkSeq,
-    allocator: Allocator,
-    config: *const BeaconConfig,
-    state: *BeaconState(fork),
-    pubkey: *const BLSPubkey,
-) !bool {
-    var lookup = try PendingDepositsLookup.build(fork, allocator, state);
-    defer lookup.deinit();
-    return try lookup.hasPendingValidator(config, pubkey);
 }
 
 pub fn computePtc(
