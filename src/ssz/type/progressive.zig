@@ -10,19 +10,15 @@ const scaling_factor = 4;
 
 pub fn chunkGindex(chunk_i: usize) Gindex {
     const subtree_i = subtreeIndex(chunk_i);
-    var i = subtree_i;
     var gindex: Gindex.Uint = 1;
     var subtree_starting_index = 0;
-    while (i > 0) {
-        i -= 1;
-        gindex *= 2;
+    for (0..subtree_i) |i| {
+        gindex = gindex * 2 + 1;
         subtree_starting_index += subtreeLength(i);
     }
 
-    gindex += 1;
-
+    gindex *= 2;
     gindex *= try std.math.powi(usize, 2, subtreeDepth(subtree_i));
-
     gindex += chunk_i - subtree_starting_index;
     return @enumFromInt(gindex);
 }
@@ -89,7 +85,7 @@ pub fn merkleizeChunksComptime(comptime chunk_count: usize, chunks: *const [chun
     comptime var st_i = subtree_count;
     inline while (st_i > 0) {
         st_i -= 1;
-        hashOne(out, out, &subtree_roots[st_i]);
+        hashOne(out, &subtree_roots[st_i], out);
     }
 }
 
@@ -137,8 +133,8 @@ pub fn merkleizeChunks(allocator: std.mem.Allocator, chunks: [][32]u8, out: *[32
         subtree_i -= 1;
         hashOne(
             out,
-            out,
             &subtree_roots[subtree_i],
+            out,
         );
     }
 }
@@ -150,7 +146,7 @@ pub fn getNodes(pool: *Node.Pool, root: Node.Id, out: []Node.Id) !void {
     for (0..subtree_count) |subtree_i| {
         const subtree_length = @min(subtreeLength(subtree_i), out.len - l);
         const subtree_depth = subtreeDepth(subtree_i);
-        const subtree_root = n.getRight(pool) catch |err| {
+        const subtree_root = n.getLeft(pool) catch |err| {
             if (@intFromEnum(n) == 0) {
                 for (l..l + subtree_length) |pos| {
                     if (pos < out.len) {
@@ -172,7 +168,7 @@ pub fn getNodes(pool: *Node.Pool, root: Node.Id, out: []Node.Id) !void {
             try subtree_root.getNodesAtDepth(pool, subtree_depth, 0, out[l .. l + subtree_length]);
         }
         l += subtree_length;
-        n = try n.getLeft(pool);
+        n = try n.getRight(pool);
     }
 
     if (!std.mem.eql(u8, &n.getRoot(pool).*, &[_]u8{0} ** 32)) {
@@ -203,7 +199,7 @@ pub fn fillWithContentsComptime(comptime node_count: usize, pool: *Node.Pool, no
         const st_length = comptime @min(subtreeLength(subtree_i), node_count - l);
 
         const subtree_root = try Node.fillWithContents(pool, @constCast(nodes[l..][0..st_length]), st_depth);
-        n = try pool.createBranch(n, subtree_root);
+        n = try pool.createBranch(subtree_root, n);
     }
 
     return n;
@@ -228,7 +224,7 @@ pub fn fillWithContents(allocator: std.mem.Allocator, pool: *Node.Pool, nodes: [
         const subtree_length = @min(subtreeLength(subtree_i), nodes.len - l);
 
         const subtree_root = try Node.fillWithContents(pool, nodes[l .. l + subtree_length], subtree_depth);
-        n = try pool.createBranch(n, subtree_root);
+        n = try pool.createBranch(subtree_root, n);
     }
 
     return n;
