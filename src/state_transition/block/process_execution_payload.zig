@@ -38,7 +38,12 @@ pub fn processExecutionPayload(
 
     // Verify consistency of the parent hash, block number, base fee per gas and gas limit
     // with respect to the previous execution payload header
-    if (isMergeTransitionComplete(fork, state)) {
+    if (comptime fork.gte(.capella)) {
+        const latest_block_hash = try state.latestExecutionPayloadHeaderBlockHash();
+        if (!std.mem.eql(u8, parent_hash, latest_block_hash)) {
+            return error.InvalidExecutionPayloadParentHash;
+        }
+    } else if (isMergeTransitionComplete(fork, state)) {
         const latest_block_hash = try state.latestExecutionPayloadHeaderBlockHash();
         if (!std.mem.eql(u8, parent_hash, latest_block_hash)) {
             return error.InvalidExecutionPayloadParentHash;
