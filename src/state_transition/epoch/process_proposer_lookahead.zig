@@ -24,7 +24,7 @@ pub fn processProposerLookahead(
     allocator: Allocator,
     epoch_cache: *EpochCache,
     state: *BeaconState(fork),
-    epoch_transition_cache: *const EpochTransitionCache,
+    epoch_transition_cache: *EpochTransitionCache,
 ) !void {
     const proposer_lookahead: *[ssz.fulu.ProposerLookahead.length]u64 = try state.proposerLookaheadSlice(allocator);
     defer allocator.free(@as([]u64, proposer_lookahead));
@@ -44,9 +44,9 @@ pub fn processProposerLookahead(
     const current_epoch = computeEpochAtSlot(try state.slot());
     const new_epoch = current_epoch + preset.MIN_SEED_LOOKAHEAD + 1;
 
-    // Active indices for the new epoch come from the epoch transition cache
-    // (computed during beforeProcessEpoch for current_epoch + 2)
-    const shuffling_active_indices = epoch_transition_cache.next_shuffling_active_indices;
+    // Share the N+2 shuffling with processPtcWindow and afterProcessEpoch.
+    const next_shuffling = try epoch_transition_cache.getNextShuffling(allocator, fork, state);
+    const shuffling_active_indices = next_shuffling.active_indices;
     var unslashed_active_indices: std.ArrayList(ValidatorIndex) = .empty;
     defer unslashed_active_indices.deinit(allocator);
 

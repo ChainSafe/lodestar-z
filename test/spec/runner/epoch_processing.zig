@@ -139,7 +139,7 @@ pub fn TestCase(comptime fork: ForkSeq, comptime epoch_process_fn: EpochProcessi
                     try state_transition.processBuilderPendingPayments(allocator, fork_state, epoch_cache);
                 },
                 .ptc_window => {
-                    try state_transition.processPtcWindow(allocator, epoch_cache, fork_state);
+                    try state_transition.processPtcWindow(allocator, epoch_cache, fork_state, &epoch_transition_cache);
                 },
             }
         }

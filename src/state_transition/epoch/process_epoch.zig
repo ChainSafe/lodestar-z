@@ -114,7 +114,7 @@ pub fn processEpoch(
 
     if (comptime fork.gte(.gloas)) {
         timer = time.start(io);
-        try processPtcWindow(allocator, epoch_cache, state);
+        try processPtcWindow(allocator, epoch_cache, state, cache);
         try observeEpochTransitionStep(.{ .step = .process_ptc_window }, @as(u64, @intCast(time.since(io, timer).nanoseconds)));
     }
 }

@@ -10,6 +10,8 @@ const BeaconConfig = @import("config").BeaconConfig;
 const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
 const AnyBeaconState = @import("fork_types").AnyBeaconState;
 const BeaconState = @import("fork_types").BeaconState;
+const EpochShuffling = @import("../utils/epoch_shuffling.zig").EpochShuffling;
+const computeEpochShuffling = @import("../utils/epoch_shuffling.zig").computeEpochShuffling;
 
 const TestCachedBeaconState = @import("../test_utils/root.zig").TestCachedBeaconState;
 const upgradeStateToFulu = @import("../slot/upgrade_state_to_fulu.zig").upgradeStateToFulu;
@@ -39,6 +41,7 @@ const BoolArray = std.ArrayList(bool);
 const UsizeArray = std.ArrayList(usize);
 const U8Array = std.ArrayList(u8);
 const U64Array = std.ArrayList(u64);
+const PtcCommittees = [preset.SLOTS_PER_EPOCH][preset.PTC_SIZE]ValidatorIndex;
 
 const ValidatorActivation = struct {
     validator_index: ValidatorIndex,
@@ -204,8 +207,10 @@ pub const EpochTransitionCache = struct {
     slashing_penalties: []u64,
     balances: ?U64Array,
     next_shuffling_active_indices: []const ValidatorIndex,
+    next_shuffling: ?*EpochShuffling,
     // TODO: nextShufflingDecisionRoot may not needed as we don't use ShufflingCache
     next_epoch_total_active_balance_by_increment: u64,
+    next_epoch_payload_timeliness_committees: ?PtcCommittees,
     // TODO: asyncShufflingCalculation may not needed as we don't use ShufflingCache
     // these are borrowed from ReusedEpochTransitionCache
     is_active_prev_epoch: []const bool,
@@ -533,8 +538,10 @@ pub const EpochTransitionCache = struct {
             .indices_eligible_for_activation = indices_eligible_for_activation,
             .indices_to_eject = indices_to_eject,
             .next_shuffling_active_indices = next_shuffling_active_indices,
+            .next_shuffling = null,
             // to be updated in processEffectiveBalanceUpdates
             .next_epoch_total_active_balance_by_increment = 0,
+            .next_epoch_payload_timeliness_committees = null,
             .is_active_prev_epoch = reused_cache.is_active_prev_epoch.items,
             .is_active_curr_epoch = reused_cache.is_active_current_epoch.items,
             .is_active_next_epoch = reused_cache.is_active_next_epoch.items,
@@ -566,6 +573,49 @@ pub const EpochTransitionCache = struct {
         if (self.balances) |*balances| {
             balances.deinit(allocator);
         }
+        if (self.next_shuffling) |next_shuffling| {
+            next_shuffling.deinit();
+        }
+    }
+
+    pub fn getNextShuffling(
+        self: *EpochTransitionCache,
+        allocator: Allocator,
+        comptime fork: ForkSeq,
+        state: *BeaconState(fork),
+    ) !*EpochShuffling {
+        var any_state = @unionInit(AnyBeaconState, @tagName(fork), state.inner);
+        return self.getNextShufflingFromAnyState(allocator, &any_state);
+    }
+
+    pub fn getNextShufflingFromAnyState(
+        self: *EpochTransitionCache,
+        allocator: Allocator,
+        state: *AnyBeaconState,
+    ) !*EpochShuffling {
+        if (self.next_shuffling) |next_shuffling| return next_shuffling;
+
+        const active_indices = try allocator.alloc(ValidatorIndex, self.next_shuffling_active_indices.len);
+        errdefer allocator.free(active_indices);
+        std.mem.copyForwards(ValidatorIndex, active_indices, self.next_shuffling_active_indices);
+
+        self.next_shuffling = try computeEpochShuffling(
+            allocator,
+            state,
+            active_indices,
+            self.current_epoch + preset.MIN_SEED_LOOKAHEAD + 1,
+        );
+        return self.next_shuffling.?;
+    }
+
+    pub fn takeNextShuffling(
+        self: *EpochTransitionCache,
+        allocator: Allocator,
+        state: *AnyBeaconState,
+    ) !*EpochShuffling {
+        const next_shuffling = try self.getNextShufflingFromAnyState(allocator, state);
+        self.next_shuffling = null;
+        return next_shuffling;
     }
 
     /// Ensure rewards/penalties arrays match the current validator count.
@@ -600,7 +650,7 @@ test "EpochTransitionCache - finalProcessEpoch" {
     test_state.cached_state.state.* = .{ .fulu = fulu_state.inner };
 
     const epoch_cache = test_state.cached_state.epoch_cache;
-    try epoch_cache.finalProcessEpoch(test_state.cached_state.state);
+    try epoch_cache.finalProcessEpoch(test_state.cached_state.state, null);
 }
 
 test "EpochTransitionCache.beforeProcessEpoch" {

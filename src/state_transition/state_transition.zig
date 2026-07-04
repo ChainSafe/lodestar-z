@@ -138,7 +138,7 @@ pub fn processSlots(
                 state.* = .{ .gloas = upgraded.inner };
             }
 
-            try epoch_cache.finalProcessEpoch(state);
+            try epoch_cache.finalProcessEpoch(state, &epoch_transition_cache);
             metrics.state_transition.epoch_transition.observe(time.durationSeconds(time.since(io, epoch_transition_timer)));
         } else {
             try state.setSlot(next_slot);
