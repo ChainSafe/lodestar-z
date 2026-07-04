@@ -29,6 +29,7 @@ const upgradeStateToCapella = @import("slot/upgrade_state_to_capella.zig").upgra
 const upgradeStateToDeneb = @import("slot/upgrade_state_to_deneb.zig").upgradeStateToDeneb;
 const upgradeStateToElectra = @import("slot/upgrade_state_to_electra.zig").upgradeStateToElectra;
 const upgradeStateToFulu = @import("slot/upgrade_state_to_fulu.zig").upgradeStateToFulu;
+const upgradeStateToGloas = @import("slot/upgrade_state_to_gloas.zig").upgradeStateToGloas;
 
 pub const ExecutionPayloadStatus = enum(u8) {
     invalid,
@@ -131,8 +132,13 @@ pub fn processSlots(
                 const upgraded = try upgradeStateToFulu(allocator, config, epoch_cache, electra_state);
                 state.* = .{ .fulu = upgraded.inner };
             }
+            if (state_epoch == config.chain.GLOAS_FORK_EPOCH) {
+                const fulu_state = try state.tryCastToFork(.fulu);
+                const upgraded = try upgradeStateToGloas(allocator, config, epoch_cache, fulu_state);
+                state.* = .{ .gloas = upgraded.inner };
+            }
 
-            try epoch_cache.finalProcessEpoch(state);
+            try epoch_cache.finalProcessEpoch(state, &epoch_transition_cache);
             metrics.state_transition.epoch_transition.observe(time.durationSeconds(time.since(io, epoch_transition_timer)));
         } else {
             try state.setSlot(next_slot);

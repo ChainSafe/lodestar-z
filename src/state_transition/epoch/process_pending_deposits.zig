@@ -6,7 +6,9 @@ const BeaconConfig = @import("config").BeaconConfig;
 const BeaconState = @import("fork_types").BeaconState;
 const EpochCache = @import("../cache/epoch_cache.zig").EpochCache;
 const EpochTransitionCache = @import("../cache/epoch_transition_cache.zig").EpochTransitionCache;
-const getActivationExitChurnLimit = @import("../utils/validator.zig").getActivationExitChurnLimit;
+const validator_utils = @import("../utils/validator.zig");
+const getActivationExitChurnLimit = validator_utils.getActivationExitChurnLimit;
+const getGloasActivationChurnLimit = validator_utils.getGloasActivationChurnLimit;
 const preset = @import("preset").preset;
 const isValidatorKnown = @import("../utils/electra.zig").isValidatorKnown;
 const validateDepositSignature = @import("../block/process_deposit.zig").validateDepositSignature;
@@ -30,7 +32,11 @@ pub fn processPendingDeposits(
 ) !void {
     const next_epoch = epoch_cache.epoch + 1;
     const deposit_balance_to_consume = try state.depositBalanceToConsume();
-    const available_for_processing = deposit_balance_to_consume + getActivationExitChurnLimit(epoch_cache);
+    const churn_limit = if (comptime fork.gte(.gloas))
+        getGloasActivationChurnLimit(epoch_cache)
+    else
+        getActivationExitChurnLimit(epoch_cache);
+    const available_for_processing = deposit_balance_to_consume + churn_limit;
     const finalized_slot = computeStartSlotAtEpoch(try state.finalizedEpoch());
 
     var processed_amount: u64 = 0;

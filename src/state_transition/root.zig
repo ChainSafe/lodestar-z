@@ -54,6 +54,7 @@ pub const upgradeStateToCapella = @import("./slot/upgrade_state_to_capella.zig")
 pub const upgradeStateToDeneb = @import("./slot/upgrade_state_to_deneb.zig").upgradeStateToDeneb;
 pub const upgradeStateToElectra = @import("./slot/upgrade_state_to_electra.zig").upgradeStateToElectra;
 pub const upgradeStateToFulu = @import("./slot/upgrade_state_to_fulu.zig").upgradeStateToFulu;
+pub const upgradeStateToGloas = @import("./slot/upgrade_state_to_gloas.zig").upgradeStateToGloas;
 
 // Block
 pub const processBlockHeader = @import("./block/process_block_header.zig").processBlockHeader;
@@ -78,6 +79,8 @@ pub const processBlsToExecutionChange = @import("./block/process_bls_to_executio
 pub const processDepositRequest = @import("./block/process_deposit_request.zig").processDepositRequest;
 pub const processWithdrawalRequest = @import("./block/process_withdrawal_request.zig").processWithdrawalRequest;
 pub const processConsolidationRequest = @import("./block/process_consolidation_request.zig").processConsolidationRequest;
+pub const processBuilderDepositRequest = @import("./block/process_builder_deposit_request.zig").processBuilderDepositRequest;
+pub const processBuilderExitRequest = @import("./block/process_builder_exit_request.zig").processBuilderExitRequest;
 
 // utils
 pub const validator_status = @import("./utils/validator_status.zig");
@@ -92,6 +95,7 @@ pub const isExecutionEnabled = @import("./utils/execution.zig").isExecutionEnabl
 pub const isMergeTransitionComplete = @import("./utils/execution.zig").isMergeTransitionComplete;
 pub const getRandaoMix = @import("./utils/seed.zig").getRandaoMix;
 pub const getEffectiveBalanceIncrementsZeroInactive = @import("./utils/balance.zig").getEffectiveBalanceIncrementsZeroInactive;
+pub const PendingDepositsLookup = @import("./utils/pending_deposits_lookup.zig").PendingDepositsLookup;
 
 pub const WithdrawalsResult = @import("./block/process_withdrawals.zig").WithdrawalsResult;
 
@@ -107,6 +111,12 @@ pub const preset = @import("preset").preset;
 const EpochShuffling = @import("./utils/epoch_shuffling.zig");
 pub const calculateShufflingDecisionRoot = EpochShuffling.calculateShufflingDecisionRoot;
 pub const processProposerLookahead = @import("./epoch/process_proposer_lookahead.zig").processProposerLookahead;
+pub const processBuilderPendingPayments = @import("./epoch/process_builder_pending_payments.zig").processBuilderPendingPayments;
+pub const processExecutionPayloadBid = @import("./block/process_execution_payload_bid.zig").processExecutionPayloadBid;
+pub const processPayloadAttestation = @import("./block/process_payload_attestation.zig").processPayloadAttestation;
+pub const processPtcWindow = @import("./epoch/process_ptc_window.zig").processPtcWindow;
+pub const processParentExecutionPayload = @import("./block/process_parent_execution_payload.zig").processParentExecutionPayload;
+pub const applyParentExecutionPayload = @import("./block/process_parent_execution_payload.zig").applyParentExecutionPayload;
 
 const load_state = @import("load_state.zig");
 pub const loadState = load_state.loadState;
