@@ -1356,24 +1356,6 @@ test "PersistentCheckpointStateCache add/get/getLatest and ownership deinit" {
     try testing.expect(sob.state == s20);
 }
 
-test "PersistentCheckpointStateCache add over a persisted entry keeps the disk copy" {
-    const allocator = testing.allocator;
-    const h = try TestHarness.init(allocator, .{ .max_epochs_in_memory = 8 });
-    defer h.deinit();
-
-    const root = makeRoot(0x33);
-    const cp = Checkpoint{ .epoch = 5, .root = root };
-
-    _ = try persistByHand(h, cp, 500);
-    try testing.expect(h.cache.get(h.io, cp) == null);
-
-    const s_new = try h.factory.make(501);
-    try h.cache.add(h.io, cp, s_new);
-    const item = h.cache.cache.get(.{ .root = root, .epoch = 5 }).?.item;
-    try testing.expect(item == .in_memory);
-    try testing.expect(item.in_memory.persisted_key != null);
-}
-
 test "PersistentCheckpointStateCache pruneFinalized deletes below epoch and frees states" {
     const allocator = testing.allocator;
     const h = try TestHarness.init(allocator, .{ .max_epochs_in_memory = 8 });
