@@ -96,6 +96,9 @@ jobs:
       - name: Run beacon-node tests
         run: |
           zig build test:beacon_node
+      - name: Run beacon-engine tests
+        run: |
+          zig build test:beacon_engine
 
       - name: Build benchmarks
         run: |

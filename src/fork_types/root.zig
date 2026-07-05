@@ -18,6 +18,8 @@ pub const AnyExecutionPayload = @import("./any_execution_payload.zig").AnyExecut
 pub const AnyExecutionPayloadHeader = @import("./any_execution_payload.zig").AnyExecutionPayloadHeader;
 pub const AnyIndexedAttestation = @import("./any_indexed_attestation.zig").AnyIndexedAttestation;
 pub const AnyAttesterSlashing = @import("./any_attester_slashing.zig").AnyAttesterSlashing;
+pub const AnyAttesterSlashings = @import("./any_attester_slashing.zig").AnyAttesterSlashings;
+pub const AnyAttesterSlashingItems = @import("./any_attester_slashing.zig").AnyAttesterSlashingItems;
 
 const testing = @import("std").testing;
 test {

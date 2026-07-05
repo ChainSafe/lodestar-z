@@ -65,29 +65,29 @@ pub fn getIndexedAttestationSignatureSet(
     );
 }
 
-/// Appends to out all the AggregatedSignatureSet for each attestation in the signed_block
-/// Consumer need to free the pubkeys arrays in each AggregatedSignatureSet in out
-/// TODO: consume in https://github.com/ChainSafe/state-transition-z/issues/72
+/// Appends to `out` one `AggregatedSignatureSet` per attestation in `signed_block`.
+/// The caller owns each set's `pubkeys` slice; free them via `allocator.free`.
 pub fn attestationsSignatureSets(allocator: Allocator, cached_state: *const CachedBeaconState, signed_block: *const AnySignedBeaconBlock, out: *std.ArrayList(AggregatedSignatureSet)) !void {
+    const config = cached_state.config;
     const epoch_cache = cached_state.epoch_cache;
     const attestation_items = signed_block.beaconBlock().beaconBlockBody().attestations().items();
 
     switch (attestation_items) {
         .phase0 => |phase0_attestations| {
             for (phase0_attestations) |*attestation| {
-                const indexed_attestation = try epoch_cache.computeIndexedAttestationPhase0(attestation);
-                var attesting_indices = indexed_attestation.attesting_indices;
-                defer attesting_indices.deinit(allocator);
-                const signature_set = try getIndexedAttestationSignatureSet(allocator, cached_state, indexed_attestation);
+                var indexed_attestation: types.phase0.IndexedAttestation.Type = types.phase0.IndexedAttestation.default_value;
+                try epoch_cache.computeIndexedAttestationPhase0(attestation, &indexed_attestation);
+                defer indexed_attestation.attesting_indices.deinit(allocator);
+                const signature_set = try getIndexedAttestationSignatureSet(.phase0, allocator, config, epoch_cache, &indexed_attestation);
                 try out.append(allocator, signature_set);
             }
         },
         .electra => |electra_attestations| {
             for (electra_attestations) |*attestation| {
-                const indexed_attestation = try epoch_cache.computeIndexedAttestationElectra(attestation);
-                var attesting_indices = indexed_attestation.attesting_indices;
-                defer attesting_indices.deinit(allocator);
-                const signature_set = try getIndexedAttestationSignatureSet(allocator, cached_state, indexed_attestation);
+                var indexed_attestation: types.electra.IndexedAttestation.Type = types.electra.IndexedAttestation.default_value;
+                try epoch_cache.computeIndexedAttestationElectra(attestation, &indexed_attestation);
+                defer indexed_attestation.attesting_indices.deinit(allocator);
+                const signature_set = try getIndexedAttestationSignatureSet(.electra, allocator, config, epoch_cache, &indexed_attestation);
                 try out.append(allocator, signature_set);
             }
         },

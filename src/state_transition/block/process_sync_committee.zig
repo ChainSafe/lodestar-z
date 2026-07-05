@@ -123,9 +123,12 @@ pub fn getSyncCommitteeSignatureSet(
 ) !?AggregatedSignatureSet {
     const signature = sync_aggregate.sync_committee_signature;
 
+    var owned_participants: std.ArrayList(ValidatorIndex) = .empty;
+    defer owned_participants.deinit(allocator);
     const participant_indices_ = if (participant_indices) |pi| pi else blk: {
         const committee_indices = @as(*const [preset.SYNC_COMMITTEE_SIZE]u64, @ptrCast(epoch_cache.current_sync_committee_indexed.get().getValidatorIndices()));
-        break :blk (try sync_aggregate.sync_committee_bits.intersectValues(ValidatorIndex, allocator, committee_indices)).items;
+        owned_participants = try sync_aggregate.sync_committee_bits.intersectValues(ValidatorIndex, allocator, committee_indices);
+        break :blk owned_participants.items;
     };
     // When there's no participation we consider the signature valid and just ignore it
     if (participant_indices_.len == 0) {
@@ -163,7 +166,7 @@ pub fn getSyncCommitteeSignatureSet(
         pubkeys[i] = epoch_cache.index_to_pubkey.items[participant_indices_[i]];
     }
     var signing_root: Root = undefined;
-    try computeSigningRoot(types.primitive.Root, &root_signed, domain, &signing_root);
+    try computeSigningRoot(types.primitive.Root, root_signed, domain, &signing_root);
 
     return .{
         .pubkeys = pubkeys,

@@ -2,6 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const js = @import("zapi:zapi").js;
 const state_transition = @import("state_transition");
+const beacon_engine = @import("beacon_engine");
 const napi_io = @import("./io.zig");
 
 var gpa: std.heap.DebugAllocator(.{}) = .init;
@@ -16,6 +17,7 @@ var initialized: bool = false;
 pub fn init() !void {
     if (initialized) return;
     try state_transition.metrics.init(allocator, napi_io.get(), .{});
+    try beacon_engine.metrics.init(allocator, napi_io.get(), .{});
     initialized = true;
 }
 
@@ -23,6 +25,7 @@ pub fn init() !void {
 pub fn scrapeMetrics() !js.String {
     var aw: std.Io.Writer.Allocating = .init(allocator);
     try state_transition.metrics.write(&aw.writer);
+    try beacon_engine.metrics.write(&aw.writer);
     var list = aw.toArrayList();
     defer list.deinit(allocator);
     return js.String.from(list.items);

@@ -9,6 +9,7 @@ pub const metrics = @import("metrics.zig");
 
 pub const RefCount = @import("./utils/ref_count.zig").RefCount;
 pub const computeSigningRoot = @import("./utils/signing_root.zig").computeSigningRoot;
+pub const computeBlockSigningRoot = @import("./utils/signing_root.zig").computeBlockSigningRoot;
 pub const computeEpochAtSlot = @import("./utils/epoch.zig").computeEpochAtSlot;
 pub const CachedBeaconState = @import("./cache/state_cache.zig").CachedBeaconState;
 pub const EffectiveBalanceIncrements = @import("./cache/effective_balance_increments.zig").EffectiveBalanceIncrements;
@@ -101,6 +102,15 @@ pub const WithdrawalsResult = @import("./block/process_withdrawals.zig").Withdra
 pub const test_utils = @import("test_utils/root.zig");
 
 pub const bls = @import("utils/bls.zig");
+pub const get_block_signature_sets = @import("./utils/get_block_signature_sets.zig");
+pub const getBlockSignatureSets = get_block_signature_sets.getBlockSignatureSets;
+pub const BlockSignatureSets = get_block_signature_sets.BlockSignatureSets;
+pub const GetBlockSignatureSetsOpts = get_block_signature_sets.GetBlockSignatureSetsOpts;
+pub const signature_sets_utils = @import("./utils/signature_sets.zig");
+pub const SingleSignatureSet = signature_sets_utils.SingleSignatureSet;
+pub const AggregatedSignatureSet = signature_sets_utils.AggregatedSignatureSet;
+pub const verifySingleSignatureSet = signature_sets_utils.verifySingleSignatureSet;
+pub const verifyAggregatedSignatureSet = signature_sets_utils.verifyAggregatedSignatureSet;
 const seed = @import("./utils/seed.zig");
 pub const state_transition = @import("./state_transition.zig");
 pub const BlockExternalData = state_transition.BlockExternalData;
