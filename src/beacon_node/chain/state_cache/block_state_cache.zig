@@ -381,7 +381,7 @@ const TestStateFactory = struct {
     helper: TestCachedBeaconState,
 
     fn init(allocator: Allocator, pool: *Node.Pool) !TestStateFactory {
-        const helper = try TestCachedBeaconState.init(allocator, pool, 8);
+        const helper = try TestCachedBeaconState.init(allocator, pool, 8, .{});
         return .{ .allocator = allocator, .helper = helper };
     }
 

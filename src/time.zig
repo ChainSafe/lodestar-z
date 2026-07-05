@@ -27,3 +27,8 @@ pub fn since(io: std.Io, from: std.Io.Timestamp) std.Io.Duration {
 pub fn durationSeconds(d: std.Io.Duration) f64 {
     return @as(f64, @floatFromInt(d.nanoseconds)) / std.time.ns_per_s;
 }
+
+/// Seconds elapsed since the `from` timestamp, for histogram observations.
+pub fn secondsSince(io: std.Io, from: std.Io.Timestamp) f64 {
+    return durationSeconds(since(io, from));
+}

@@ -173,8 +173,17 @@ pub const TestCachedBeaconState = struct {
     cached_state: *CachedBeaconState,
     epoch_transition_cache: *state_transition.EpochTransitionCache,
 
-    pub fn init(allocator: Allocator, pool: *Node.Pool, validator_count: usize) !TestCachedBeaconState {
-        var state = try generateElectraState(allocator, pool, active_chain_config, validator_count);
+    pub const Options = struct {
+        /// Electra activation epoch for the generated schedule; null keeps the active chain config's.
+        /// 0 puts every slot in electra, so low-slot persisted states reload as electra.
+        electra_fork_epoch: ?Epoch = null,
+    };
+
+    pub fn init(allocator: Allocator, pool: *Node.Pool, validator_count: usize, options: Options) !TestCachedBeaconState {
+        const chain_config = active_chain_config.merge(.{
+            .ELECTRA_FORK_EPOCH = options.electra_fork_epoch orelse active_chain_config.ELECTRA_FORK_EPOCH,
+        });
+        var state = try generateElectraState(allocator, pool, chain_config, validator_count);
         errdefer {
             state.deinit();
             allocator.destroy(state);
@@ -306,6 +315,6 @@ test TestCachedBeaconState {
     var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 500_000 });
     defer pool.deinit();
 
-    var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 256, .{});
     defer test_state.deinit();
 }

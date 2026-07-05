@@ -588,7 +588,7 @@ test "EpochTransitionCache - finalProcessEpoch" {
     var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = pool_size });
     defer pool.deinit();
 
-    var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 256, .{});
     defer test_state.deinit();
 
     const fulu_state = try upgradeStateToFulu(
@@ -612,7 +612,7 @@ test "EpochTransitionCache.beforeProcessEpoch" {
         var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = pool_size });
         defer pool.deinit();
 
-        var test_state = try TestCachedBeaconState.init(allocator, &pool, validator_count);
+        var test_state = try TestCachedBeaconState.init(allocator, &pool, validator_count, .{});
         defer test_state.deinit();
 
         var epoch_transition_cache = try EpochTransitionCache.init(

@@ -55,7 +55,7 @@ test "process attestations - sanity" {
     var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = pool_size });
     defer pool.deinit();
 
-    var test_state = try TestCachedBeaconState.init(allocator, &pool, 16);
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 16, .{});
     defer test_state.deinit();
 
     var electra: std.ArrayListUnmanaged(types.electra.Attestation.Type) = .empty;

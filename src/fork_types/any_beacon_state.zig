@@ -14,10 +14,13 @@ const constants = @import("constants");
 const BeaconState = @import("./beacon_state.zig").BeaconState;
 const AnyExecutionPayloadHeader = @import("./any_execution_payload.zig").AnyExecutionPayloadHeader;
 
+/// Byte offset of the `slot` field in any serialized beacon state: 8 (genesisTime) + 32
+/// (genesisValidatorsRoot).
+pub const ANY_BEACON_STATE_SLOT_OFFSET = 40;
+
 pub fn readSlotFromAnyBeaconStateBytes(bytes: []const u8) u64 {
-    // slot is at offset 40: 8 (genesisTime) + 32 (genesisValidatorsRoot)
-    std.debug.assert(bytes.len >= 48);
-    return std.mem.readInt(u64, bytes[40..][0..8], .little);
+    std.debug.assert(bytes.len >= ANY_BEACON_STATE_SLOT_OFFSET + @sizeOf(u64));
+    return std.mem.readInt(u64, bytes[ANY_BEACON_STATE_SLOT_OFFSET..][0..8], .little);
 }
 
 /// wrapper for all AnyBeaconState types across forks so that we don't have to do switch/case for all methods
@@ -89,58 +92,26 @@ pub const AnyBeaconState = union(ForkSeq) {
         };
     }
 
-    pub fn serialize(self: AnyBeaconState, allocator: Allocator) ![]u8 {
-        const s = self;
-        switch (s) {
-            .phase0 => |state| {
-                const out = try allocator.alloc(u8, try state.serializedSize());
-                errdefer allocator.free(out);
-                _ = try state.serializeIntoBytes(out);
-                return out;
-            },
-            .altair => |state| {
-                const out = try allocator.alloc(u8, try state.serializedSize());
-                errdefer allocator.free(out);
-                _ = try state.serializeIntoBytes(out);
-                return out;
-            },
-            .bellatrix => |state| {
-                const out = try allocator.alloc(u8, try state.serializedSize());
-                errdefer allocator.free(out);
-                _ = try state.serializeIntoBytes(out);
-                return out;
-            },
-            .capella => |state| {
-                const out = try allocator.alloc(u8, try state.serializedSize());
-                errdefer allocator.free(out);
-                _ = try state.serializeIntoBytes(out);
-                return out;
-            },
-            .deneb => |state| {
-                const out = try allocator.alloc(u8, try state.serializedSize());
-                errdefer allocator.free(out);
-                _ = try state.serializeIntoBytes(out);
-                return out;
-            },
-            .electra => |state| {
-                const out = try allocator.alloc(u8, try state.serializedSize());
-                errdefer allocator.free(out);
-                _ = try state.serializeIntoBytes(out);
-                return out;
-            },
-            .fulu => |state| {
-                const out = try allocator.alloc(u8, try state.serializedSize());
-                errdefer allocator.free(out);
-                _ = try state.serializeIntoBytes(out);
-                return out;
-            },
-            .gloas => |state| {
-                const out = try allocator.alloc(u8, try state.serializedSize());
-                errdefer allocator.free(out);
-                _ = try state.serializeIntoBytes(out);
-                return out;
-            },
+    /// Serialized byte length of the whole state.
+    pub fn serializedSize(self: AnyBeaconState) !usize {
+        switch (self) {
+            inline else => |state| return state.serializedSize(),
         }
+    }
+
+    /// Serialize the whole state into `out` (which must be `serializedSize()` bytes). Returns the
+    /// number of bytes written.
+    pub fn serializeIntoBytes(self: AnyBeaconState, out: []u8) !usize {
+        switch (self) {
+            inline else => |state| return state.serializeIntoBytes(out),
+        }
+    }
+
+    pub fn serialize(self: AnyBeaconState, allocator: Allocator) ![]u8 {
+        const out = try allocator.alloc(u8, try self.serializedSize());
+        errdefer allocator.free(out);
+        _ = try self.serializeIntoBytes(out);
+        return out;
     }
 
     pub fn format(
@@ -429,6 +400,36 @@ pub const AnyBeaconState = union(ForkSeq) {
                 return out;
             },
         };
+    }
+
+    /// Serialized byte length of the `validators` list.
+    pub fn validatorsSerializedSize(self: *AnyBeaconState) !usize {
+        switch (self.*) {
+            inline else => |state| {
+                var validators_view = try state.getReadonly("validators");
+                return validators_view.serializedSize();
+            },
+        }
+    }
+
+    /// Serialize the `validators` list into `out` (which must be `validatorsSerializedSize()` bytes;
+    /// read-only, changes are not reflected back to the state). Returns the number of bytes written.
+    pub fn serializeValidatorsIntoBytes(self: *AnyBeaconState, out: []u8) !usize {
+        switch (self.*) {
+            inline else => |state| {
+                var validators_view = try state.getReadonly("validators");
+                return validators_view.serializeIntoBytes(out);
+            },
+        }
+    }
+
+    /// Serialize the `validators` list to SSZ bytes (read-only; changes are not reflected back to the
+    /// state). Caller owns the returned slice and frees it with the same allocator.
+    pub fn serializeValidators(self: *AnyBeaconState, allocator: Allocator) ![]u8 {
+        const out = try allocator.alloc(u8, try self.validatorsSerializedSize());
+        errdefer allocator.free(out);
+        _ = try self.serializeValidatorsIntoBytes(out);
+        return out;
     }
 
     pub fn balances(self: *AnyBeaconState) !*ct.phase0.Balances.TreeView {

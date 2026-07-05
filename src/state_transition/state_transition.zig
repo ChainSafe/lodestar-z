@@ -288,7 +288,7 @@ test "state transition - electra block" {
         var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = pool_size });
         defer pool.deinit();
 
-        var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
+        var test_state = try TestCachedBeaconState.init(allocator, &pool, 256, .{});
         defer test_state.deinit();
 
         var electra_block = types.electra.SignedBeaconBlock.default_value;
@@ -332,7 +332,7 @@ test "state transition - a rejected block leaves the pre-state unchanged" {
     defer pool.deinit();
     defer deinitStateTransition(std.testing.io);
 
-    var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 256, .{});
     defer test_state.deinit();
 
     var electra_block = types.electra.SignedBeaconBlock.default_value;

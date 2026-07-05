@@ -13,6 +13,8 @@ const Index2PubkeyCache = @import("pubkey_cache.zig").Index2PubkeyCache;
 const CloneOpts = @import("ssz").CloneOpts;
 const SlashingsCache = @import("./slashings_cache.zig").SlashingsCache;
 const Node = @import("persistent_merkle_tree").Node;
+const loadState = @import("../load_state.zig").loadState;
+const getBlockRootAtSlotFn = @import("../utils/block_root.zig").getBlockRootAtSlot;
 
 pub const ProposerRewards = struct {
     attestations: u64 = 0,
@@ -95,6 +97,71 @@ pub const CachedBeaconState = struct {
         return cached_state;
     }
 
+    pub const LoadOtherStateOpts = struct {
+        /// Eagerly materialize the validator + balance views (warms each view's cache) so a state
+        /// consumed immediately afterward (e.g. block replay) doesn't pay the lazy per-access cost.
+        preload_validators_and_balances: bool = false,
+    };
+
+    /// Reload `state_bytes` against this state into a new `*CachedBeaconState`, reusing this state's
+    /// node pool and the SHARED pubkey maps (seed-diff: unchanged validator/inactivity subtrees are
+    /// reused, not re-deserialized). `seed_validators_bytes` (pre-serialized validators) lets the diff
+    /// skip re-serializing; null serializes internally. Caller owns the result.
+    pub fn loadOtherState(self: *CachedBeaconState, allocator: Allocator, config: *const BeaconConfig, state_bytes: []const u8, seed_validators_bytes: ?[]const u8, opts: LoadOtherStateOpts) !*CachedBeaconState {
+        // Seed-diff reload: reuse the seed's unchanged validator/inactivity-score subtrees instead of
+        // a full re-deserialize, saving the ~500ms re-hash of those large lists on each disk fault-in.
+        const migrate = try loadState(allocator, config, self.state, state_bytes, seed_validators_bytes);
+        // `modified_validators` is owned regardless of later failures and unused here; free it first.
+        allocator.free(migrate.modified_validators);
+
+        // Own the loaded state by-value until it is moved onto the heap below; `null` once moved.
+        var loaded_state: ?AnyBeaconState = migrate.state;
+        errdefer if (loaded_state) |*s| s.deinit();
+
+        // Move the loaded state onto the heap; own the slot + contents until `createCachedBeaconState`
+        // takes them — `null` once transferred, then `destroyState` reclaims it.
+        const any_state = try allocator.create(AnyBeaconState);
+        any_state.* = loaded_state.?;
+        loaded_state = null;
+        var heap_state: ?*AnyBeaconState = any_state;
+        errdefer if (heap_state) |s| {
+            s.deinit();
+            allocator.destroy(s);
+        };
+
+        const fork = any_state.forkSeq();
+
+        const immutable = EpochCacheImmutableData{
+            .config = config,
+            .pubkey_to_index = self.epoch_cache.pubkey_to_index,
+            .index_to_pubkey = self.epoch_cache.index_to_pubkey,
+        };
+
+        const new_cached = try createCachedBeaconState(allocator, any_state, immutable, .{
+            .skip_sync_committee_cache = fork == .phase0,
+            // The pubkey maps borrowed above are shared and already populated, so syncing the loaded
+            // state's validators into them would just redundantly re-scan all of them.
+            .skip_sync_pubkeys = true,
+        });
+        heap_state = null;
+        errdefer {
+            new_cached.deinit();
+            allocator.destroy(new_cached);
+        }
+
+        if (opts.preload_validators_and_balances) {
+            const validators_view = try new_cached.state.validators();
+            const validator_views = try validators_view.getAllReadonly(allocator);
+            allocator.free(validator_views);
+
+            const balances_view = try new_cached.state.balances();
+            const balance_values = try balances_view.getAll(allocator);
+            allocator.free(balance_values);
+        }
+
+        return new_cached;
+    }
+
     pub fn deinit(self: *CachedBeaconState) void {
         // should not deinit config since we don't take ownership of it, it's singleton across applications
         self.epoch_cache.deinit();
@@ -155,6 +222,15 @@ pub const CachedBeaconState = struct {
         return self.epoch_cache.getBeaconProposer(slot);
     }
 
+    /// Get the block root at `slot` regardless of fork. The underlying `getBlockRootAtSlot` is
+    /// fork-comptime, so dispatch on the runtime tag once here rather than scattering the switch
+    /// across callers. Propagates SlotTooBig/SlotTooSmall.
+    pub fn getBlockRootAtSlot(self: *CachedBeaconState, slot: types.primitive.Slot.Type) !*const [32]u8 {
+        return switch (self.state.forkSeq()) {
+            inline else => |f| getBlockRootAtSlotFn(f, self.state.castToFork(f), slot),
+        };
+    }
+
     /// Get the previous decision root for the state from the epoch cache.
     pub fn previousDecisionRoot(self: *CachedBeaconState) [32]u8 {
         return self.epoch_cache.previous_decision_root;
@@ -177,7 +253,7 @@ test "CachedBeaconState.clone()" {
     var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = pool_size });
     defer pool.deinit();
 
-    var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 256, .{});
     defer test_state.deinit();
     // test clone() api works fine with no memory leak
     const cloned_cached_state = try test_state.cached_state.clone(allocator, .{});
@@ -193,7 +269,7 @@ test "CachedBeaconState.clone() epoch cache isolation" {
     var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = pool_size });
     defer pool.deinit();
 
-    var test_state = try TestCachedBeaconState.init(allocator, &pool, 256);
+    var test_state = try TestCachedBeaconState.init(allocator, &pool, 256, .{});
     defer test_state.deinit();
 
     const original = test_state.cached_state;
