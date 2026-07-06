@@ -16,7 +16,7 @@ pub fn processRewardsAndPenalties(
     config: *const BeaconConfig,
     epoch_cache: *const EpochCache,
     state: *BeaconState(fork),
-    cache: *const EpochTransitionCache,
+    cache: *EpochTransitionCache,
     slashing_penalties: ?[]const u64,
 ) !void {
     // No rewards are applied at the end of `GENESIS_EPOCH` because rewards are for work done in the previous epoch
@@ -41,6 +41,10 @@ pub fn processRewardsAndPenalties(
             balance.* = (try std.math.add(u64, balance.*, reward)) -| penalty;
         }
     }
+
+    // Populate cache.balances for reuse by processEffectiveBalanceUpdates() and the
+    // validator monitor. Prevents recomputation.
+    cache.balances = .fromOwnedSlice(try allocator.dupe(u64, balances));
 
     var balances_arraylist: std.ArrayListUnmanaged(u64) = .fromOwnedSlice(balances);
     try state.setBalances(&balances_arraylist);
