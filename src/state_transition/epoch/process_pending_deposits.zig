@@ -44,7 +44,7 @@ pub fn processPendingDeposits(
     const pending_deposits_len = try pending_deposits.length();
 
     for (0..pending_deposits_len) |_| {
-        const deposit = try pending_deposits_it.nextValue(undefined);
+        const deposit = try pending_deposits_it.nextValue();
         // Pre-fulu: do not process deposit requests if Eth1 bridge deposits are not yet applied.
         // Fulu removes this guard along with the former (Eth1 bridge) deposit mechanism.
         if (comptime fork.lt(.fulu)) {
