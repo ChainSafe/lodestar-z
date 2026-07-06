@@ -179,6 +179,12 @@ pub fn ListCompositeTreeView(comptime ST: type) type {
             return self.chunks.getAllValues(allocator, list_length);
         }
 
+        /// Warm the element-view cache for every element without allocating a result slice.
+        /// Read-only: does not mark any index changed.
+        pub fn prefetchAll(self: *Self) !void {
+            try self.chunks.prefetchAll(try self.length());
+        }
+
         /// Appends an element to the end of the list.
         ///
         /// Ownership of the `value` TreeView transfers to the list view on success. After a
@@ -1057,6 +1063,39 @@ test "TreeView composite list clone(true) transfers cache and clears source" {
 
     try std.testing.expectEqual(@as(usize, 0), view.chunks.children_data.count());
     try std.testing.expect(cloned.chunks.children_data.count() > 0);
+}
+
+test "TreeView composite list prefetchAll warms element-view cache" {
+    const allocator = std.testing.allocator;
+    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 512 });
+    defer pool.deinit();
+
+    const ListType = FixedListType(Checkpoint, 16, .{});
+
+    var list: ListType.Type = .empty;
+    defer list.deinit(allocator);
+    for (0..5) |i| try list.append(allocator, .{ .epoch = @intCast(i + 1), .root = [_]u8{@intCast(i)} ** 32 });
+
+    const root_node = try ListType.tree.fromValue(&pool, &list);
+    var view = try ListType.TreeView.init(allocator, &pool, root_node);
+    defer view.deinit();
+
+    try std.testing.expectEqual(@as(usize, 0), view.chunks.children_data.count());
+
+    try view.prefetchAll();
+
+    // One cached element view per list element.
+    try std.testing.expectEqual(@as(usize, 5), view.chunks.children_data.count());
+
+    // A subsequent read returns the very pointer prefetch cached, and values are intact.
+    for (0..5) |i| {
+        const elem = try view.getReadonly(i);
+        var value: Checkpoint.Type = undefined;
+        try Checkpoint.tree.toValue(elem.getRoot(), &pool, &value);
+        try std.testing.expectEqual(@as(u64, @intCast(i + 1)), value.epoch);
+    }
+    // getReadonly did not grow the cache — every index was already warm.
+    try std.testing.expectEqual(@as(usize, 5), view.chunks.children_data.count());
 }
 
 test "TreeView list of list commits inner length updates" {

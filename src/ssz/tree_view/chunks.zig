@@ -191,6 +191,16 @@ pub fn BasicPackedChunks(
             return try self.getAllInto(len, values);
         }
 
+        /// Warm the chunk-node cache for a bulk read without allocating or decoding:
+        /// `getAllInto`'s node population minus the per-element decode. On chunked_leaf
+        /// layouts `populateAllNodes` is a comptime no-op — those bulk reads walk chunked
+        /// leaves directly and cache nothing persistent, so there is nothing to warm.
+        pub fn prefetchAll(self: *Self, len: usize) !void {
+            if (len == 0) return;
+            const chunk_count = (len + items_per_chunk - 1) / items_per_chunk;
+            try self.populateAllNodes(chunk_count);
+        }
+
         pub fn getAllInto(
             self: *Self,
             len: usize,
@@ -474,6 +484,15 @@ pub fn CompositeChunks(
             try self.children_data.put(self.state.allocator, gindex, child_ptr);
             // Do NOT add to self.state.changed (read-only)
             return child_ptr;
+        }
+
+        /// Warm the child-view cache for a bulk read without allocating the result slice:
+        /// the `getAllReadonly` loop minus the output array. Each `getReadonly` caches its
+        /// child view, so a later per-element read is a cache hit.
+        pub fn prefetchAll(self: *Self, len: usize) !void {
+            for (0..len) |i| {
+                _ = try self.getReadonly(i);
+            }
         }
 
         /// Get all child views without tracking changes (read-only).

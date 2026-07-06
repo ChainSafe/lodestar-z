@@ -98,8 +98,10 @@ pub const CachedBeaconState = struct {
     }
 
     pub const LoadOtherStateOpts = struct {
-        /// Eagerly materialize the validator + balance views (warms each view's cache) so a state
-        /// consumed immediately afterward (e.g. block replay) doesn't pay the lazy per-access cost.
+        /// Warm the validator view's per-element cache so a state consumed immediately afterward
+        /// (e.g. block replay) doesn't pay the lazy per-access cost. The balance list is
+        /// chunked_leaf-backed and caches nothing on a bulk read, so its prefetch is a no-op today;
+        /// it is still called so the warming stays correct if that layout ever changes.
         preload_validators_and_balances: bool = false,
     };
 
@@ -151,12 +153,10 @@ pub const CachedBeaconState = struct {
 
         if (opts.preload_validators_and_balances) {
             const validators_view = try new_cached.state.validators();
-            const validator_views = try validators_view.getAllReadonly(allocator);
-            allocator.free(validator_views);
+            try validators_view.prefetchAll();
 
             const balances_view = try new_cached.state.balances();
-            const balance_values = try balances_view.getAll(allocator);
-            allocator.free(balance_values);
+            try balances_view.prefetchAll();
         }
 
         return new_cached;
