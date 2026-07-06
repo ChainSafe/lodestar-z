@@ -1130,20 +1130,19 @@ pub fn loadOtherState(
         if (try raw.hasNamedProperty("preloadValidatorsAndBalances") and
             (try (try raw.getNamedProperty("preloadValidatorsAndBalances")).getValueBool()))
         {
-            //TODO(bing): These unnecessarily allocate and return memory that we throw away.
-            // This doesn't matter for typescript lodestar because GC clears it anyway,
-            // but we're losing some savings here. Consider implementating something like
-            // a `prefetchAll` that only does `populateAllNodes` that returns void
+            // Warm the view caches only; the returned slices are scratch and freed immediately.
             var validators_view = try new_cached_state.state.validators();
-            _ = validators_view.getAllReadonlyValues(allocator) catch |err| {
+            const validator_views = validators_view.getAllReadonly(allocator) catch |err| {
                 try js.env().throwError("STATE_ERROR", "Failed to preload validators");
                 return err;
             };
+            allocator.free(validator_views);
             var balances_view = try new_cached_state.state.balances();
-            _ = balances_view.getAll(allocator) catch |err| {
+            const balance_values = balances_view.getAll(allocator) catch |err| {
                 try js.env().throwError("STATE_ERROR", "Failed to preload balances");
                 return err;
             };
+            allocator.free(balance_values);
         }
     }
 
