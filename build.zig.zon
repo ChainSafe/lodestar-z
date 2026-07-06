@@ -284,6 +284,12 @@
                 .imports = .{ .config, .consensus_types, .download_era_options, .era, .ssz, .zbench },
             },
         },
+        .bench_ssz_libssz_compare = .{
+            .root_module = .{
+                .root_source_file = "bench/ssz/libssz_compare.zig",
+                .imports = .{ .consensus_types, .ssz, .zbench },
+            },
+        },
         .bench_list_chunked_leaf = .{
             .root_module = .{
                 .root_source_file = "bench/ssz/list_chunked_leaf.zig",
