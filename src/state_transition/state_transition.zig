@@ -30,6 +30,7 @@ const upgradeStateToElectra = @import("slot/upgrade_state_to_electra.zig").upgra
 const upgradeStateToFulu = @import("slot/upgrade_state_to_fulu.zig").upgradeStateToFulu;
 
 pub const deinitReusedEpochTransitionCache = @import("cache/epoch_transition_cache.zig").deinitReusedEpochTransitionCache;
+pub const ValidatorMonitor = @import("ValidatorMonitor.zig");
 
 pub const ExecutionPayloadStatus = enum(u8) {
     invalid,
@@ -53,6 +54,7 @@ pub fn processSlots(
     cached_state: *CachedBeaconState,
     slot: Slot,
     _: EpochTransitionCacheOpts,
+    validator_monitor: ?*ValidatorMonitor,
 ) !void {
     const config = cached_state.config;
     const epoch_cache = cached_state.epoch_cache;
@@ -91,7 +93,13 @@ pub fn processSlots(
                     );
                 },
             }
-            // TODO(bing): registerValidatorStatuses
+            if (validator_monitor) |monitor| {
+                monitor.registerValidatorStatuses(
+                    epoch_transition_cache.current_epoch,
+                    epoch_transition_cache.flags,
+                    if (epoch_transition_cache.balances) |balances| balances.items else null,
+                );
+            }
 
             try state.setSlot(next_slot);
 
@@ -168,6 +176,7 @@ pub fn stateTransition(
     cached_state: *CachedBeaconState,
     signed_block: AnySignedBeaconBlock,
     opts: TransitionOpts,
+    validator_monitor: ?*ValidatorMonitor,
 ) !*CachedBeaconState {
     const block = signed_block.beaconBlock();
     const block_slot = block.slot();
@@ -189,6 +198,7 @@ pub fn stateTransition(
         post_cached_state,
         block_slot,
         .{},
+        validator_monitor,
     );
 
     const config = post_cached_state.config;
@@ -300,6 +310,7 @@ test "state transition - electra block" {
             test_state.cached_state,
             signed_beacon_block,
             tc.transition_opt,
+            null,
         );
         if (tc.expect_error) {
             if (res) |_| {
@@ -343,7 +354,7 @@ test "state transition - a rejected block leaves the pre-state unchanged" {
     // and mutates a clone, then discards it on error — so the original state must come out
     // untouched: same root, same slot. (This is the invariant behind the "mutate then reject"
     // findings; the mutations only ever land on the thrown-away clone.)
-    const res = stateTransition(allocator, std.testing.io, test_state.cached_state, signed_beacon_block, .{});
+    const res = stateTransition(allocator, std.testing.io, test_state.cached_state, signed_beacon_block, .{}, null);
     if (res) |post| {
         post.deinit();
         allocator.destroy(post);

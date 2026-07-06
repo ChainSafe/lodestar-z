@@ -12,11 +12,21 @@ else
 
 var initialized: bool = false;
 
+const validator_monitor = @import("./validator_monitor.zig");
+
 /// JS: metrics.init() → void
 pub fn init() !void {
     if (initialized) return;
     try state_transition.metrics.init(allocator, napi_io.get(), .{});
     initialized = true;
+}
+
+/// JS: metrics.registerLocalValidator(index) → void
+///
+/// Adds a validator index to the process-wide validator monitor so that
+/// metrics are recorded for it on every epoch transition.
+pub fn registerLocalValidator(index: js.Number) !void {
+    try validator_monitor.get().registerLocalValidator(@intCast(try index.toI64()));
 }
 
 /// JS: metrics.scrapeMetrics() → string
@@ -29,7 +39,8 @@ pub fn scrapeMetrics() !js.String {
 }
 
 pub fn deinit() void {
+    validator_monitor.deinit();
     if (!initialized) return;
-    state_transition.metrics.state_transition.deinit();
+    state_transition.metrics.deinit();
     initialized = false;
 }

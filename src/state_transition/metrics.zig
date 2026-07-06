@@ -7,6 +7,11 @@ const CachedBeaconState = @import("cache/state_cache.zig").CachedBeaconState;
 /// Defaults to noop metrics, making this safe to use whether or not `metrics.init` is called.
 pub var state_transition = m.initializeNoop(Metrics);
 
+/// Validator monitor metrics.
+///
+/// Defaults to noop metrics, making this safe to use whether or not `metrics.init` is called.
+pub var validator_monitor = m.initializeNoop(ValidatorMonitorMetrics);
+
 pub const StateCloneSource = enum {
     state_transition,
     process_slots,
@@ -100,6 +105,19 @@ const Metrics = struct {
         self.pre_state_validators_nodes_populated_hit.deinit();
         self.proposer_rewards.deinit();
     }
+};
+
+/// Metrics recorded once per epoch transition for validators monitored by the `ValidatorMonitor`.
+const ValidatorMonitorMetrics = struct {
+    prev_epoch_on_chain_balance: CountGauge,
+    prev_epoch_on_chain_source_attester_hit: CountGauge,
+    prev_epoch_on_chain_source_attester_miss: CountGauge,
+    prev_epoch_on_chain_head_attester_hit: CountGauge,
+    prev_epoch_on_chain_head_attester_miss: CountGauge,
+    prev_epoch_on_chain_target_attester_hit: CountGauge,
+    prev_epoch_on_chain_target_attester_miss: CountGauge,
+
+    const CountGauge = m.Gauge(u64);
 };
 
 /// Initializes all metrics for state transition. Requires an allocator for `GaugeVec` and `HistogramVec` metrics.
@@ -252,6 +270,46 @@ pub fn init(allocator: Allocator, io: std.Io, comptime opts: m.RegistryOpts) !vo
         ),
         .proposer_rewards = proposer_rewards,
     };
+
+    // Validator monitor metric names match lodestar-ts exactly, so they are registered
+    // with the caller-provided registry options (no `lodestar_` prefix is forced).
+    validator_monitor = .{
+        .prev_epoch_on_chain_balance = ValidatorMonitorMetrics.CountGauge.init(
+            "validator_monitor_prev_epoch_on_chain_balance",
+            .{ .help = "Total balance of all monitored validators after an epoch" },
+            opts,
+        ),
+        .prev_epoch_on_chain_source_attester_hit = ValidatorMonitorMetrics.CountGauge.init(
+            "validator_monitor_prev_epoch_on_chain_source_attester_hit_total",
+            .{ .help = "Incremented if the validator is flagged as a previous epoch source attester during per epoch processing" },
+            opts,
+        ),
+        .prev_epoch_on_chain_source_attester_miss = ValidatorMonitorMetrics.CountGauge.init(
+            "validator_monitor_prev_epoch_on_chain_source_attester_miss_total",
+            .{ .help = "Incremented if the validator is not flagged as a previous epoch source attester during per epoch processing" },
+            opts,
+        ),
+        .prev_epoch_on_chain_head_attester_hit = ValidatorMonitorMetrics.CountGauge.init(
+            "validator_monitor_prev_epoch_on_chain_head_attester_hit_total",
+            .{ .help = "Incremented if the validator is flagged as a previous epoch head attester during per epoch processing" },
+            opts,
+        ),
+        .prev_epoch_on_chain_head_attester_miss = ValidatorMonitorMetrics.CountGauge.init(
+            "validator_monitor_prev_epoch_on_chain_head_attester_miss_total",
+            .{ .help = "Incremented if the validator is not flagged as a previous epoch head attester during per epoch processing" },
+            opts,
+        ),
+        .prev_epoch_on_chain_target_attester_hit = ValidatorMonitorMetrics.CountGauge.init(
+            "validator_monitor_prev_epoch_on_chain_target_attester_hit_total",
+            .{ .help = "Incremented if the validator is flagged as a previous epoch target attester during per epoch processing" },
+            opts,
+        ),
+        .prev_epoch_on_chain_target_attester_miss = ValidatorMonitorMetrics.CountGauge.init(
+            "validator_monitor_prev_epoch_on_chain_target_attester_miss_total",
+            .{ .help = "Incremented if the validator is not flagged as a previous epoch target attester during per epoch processing" },
+            opts,
+        ),
+    };
 }
 
 /// Observe a value in ns for the `epoch_transition_step` labelled histogram.
@@ -268,4 +326,13 @@ pub fn observeEpochTransitionStep(
 /// Writes all metrics to `writer`.
 pub fn write(writer: *std.Io.Writer) !void {
     try m.write(&state_transition, writer);
+    try m.write(&validator_monitor, writer);
+}
+
+/// Deinitializes all metrics and resets them to noop, making it safe to keep
+/// recording metrics (or call `init` again) afterwards.
+pub fn deinit() void {
+    state_transition.deinit();
+    state_transition = m.initializeNoop(Metrics);
+    validator_monitor = m.initializeNoop(ValidatorMonitorMetrics);
 }
