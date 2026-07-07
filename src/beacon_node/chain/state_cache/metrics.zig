@@ -120,8 +120,8 @@ pub const BlockStateCacheMetrics = struct {
 
 /// `initializeNoop` default: metrics always emit (no `enabled()` gate), so the cache is safe to use
 /// whether or not `init` is called.
-pub var block_metrics = m.initializeNoop(BlockStateCacheMetrics);
-pub var checkpoint_metrics = m.initializeNoop(CpStateCacheMetrics);
+pub var block_cache_metrics = m.initializeNoop(BlockStateCacheMetrics);
+pub var checkpoint_cache_metrics = m.initializeNoop(CpStateCacheMetrics);
 
 /// Call once on startup. `io` is needed for the Vec metrics.
 pub fn init(allocator: Allocator, io: std.Io, comptime opts: m.RegistryOpts) !void {
@@ -144,9 +144,9 @@ pub fn init(allocator: Allocator, io: std.Io, comptime opts: m.RegistryOpts) !vo
     errdefer cp_epoch_size.deinit();
 
     // Free the prior GaugeVecs before overwriting on re-init; harmless on the initial noop value.
-    checkpoint_metrics.deinit();
+    checkpoint_cache_metrics.deinit();
 
-    checkpoint_metrics = .{
+    checkpoint_cache_metrics = .{
         .lookups = CpStateCacheMetrics.Count.init(
             "lodestar_cp_state_cache_lookups_total",
             .{ .help = "Checkpoint state cache lookups" },
@@ -261,7 +261,7 @@ pub fn init(allocator: Allocator, io: std.Io, comptime opts: m.RegistryOpts) !vo
         ),
     };
 
-    block_metrics = .{
+    block_cache_metrics = .{
         .lookups = BlockStateCacheMetrics.Count.init(
             "lodestar_state_cache_lookups_total",
             .{ .help = "Block state cache lookups" },
@@ -334,24 +334,24 @@ pub fn init(allocator: Allocator, io: std.Io, comptime opts: m.RegistryOpts) !vo
 /// noop default so a later use of a deinit'd global (e.g. across tests sharing this process-global) is a
 /// safe no-op rather than a use-after-free on the freed `GaugeVec` hash maps.
 pub fn deinit() void {
-    checkpoint_metrics.deinit();
-    checkpoint_metrics = m.initializeNoop(CpStateCacheMetrics);
-    block_metrics = m.initializeNoop(BlockStateCacheMetrics);
+    checkpoint_cache_metrics.deinit();
+    checkpoint_cache_metrics = m.initializeNoop(CpStateCacheMetrics);
+    block_cache_metrics = m.initializeNoop(BlockStateCacheMetrics);
 }
 
 pub fn checkpoint() *CpStateCacheMetrics {
-    return &checkpoint_metrics;
+    return &checkpoint_cache_metrics;
 }
 
 pub fn block() *BlockStateCacheMetrics {
-    return &block_metrics;
+    return &block_cache_metrics;
 }
 
 /// Caller must refresh the PULL gauges (see `CpStateCacheMetrics`) before calling, so the scrape
 /// reflects current state.
 pub fn write(writer: anytype) !void {
-    try m.write(&block_metrics, writer);
-    try m.write(&checkpoint_metrics, writer);
+    try m.write(&block_cache_metrics, writer);
+    try m.write(&checkpoint_cache_metrics, writer);
 }
 
 /// The state-cache module's own scrape: refresh ALL PULL gauges from the live caches, then serialize.
@@ -373,11 +373,11 @@ pub fn scrape(writer: anytype, block_cache: anytype, cp_cache: anytype, io: std.
 }
 
 pub fn setCpSize(counts: SizeCounts) !void {
-    return setSizeGauge(&checkpoint_metrics.size, counts);
+    return setSizeGauge(&checkpoint_cache_metrics.size, counts);
 }
 
 pub fn setCpEpochSize(counts: SizeCounts) !void {
-    return setSizeGauge(&checkpoint_metrics.epoch_size, counts);
+    return setSizeGauge(&checkpoint_cache_metrics.epoch_size, counts);
 }
 
 fn setSizeGauge(gauge: *CpStateCacheMetrics.SizeGauge, counts: SizeCounts) !void {
@@ -386,29 +386,29 @@ fn setSizeGauge(gauge: *CpStateCacheMetrics.SizeGauge, counts: SizeCounts) !void
 }
 
 pub fn setCpReads(reads: AvgMinMax, secs: AvgMinMax) void {
-    checkpoint_metrics.reads_sum.set(reads.sum);
-    checkpoint_metrics.reads_avg.set(reads.avg);
-    checkpoint_metrics.reads_min.set(reads.min);
-    checkpoint_metrics.reads_max.set(reads.max);
-    checkpoint_metrics.seconds_since_last_read_sum.set(secs.sum);
-    checkpoint_metrics.seconds_since_last_read_avg.set(secs.avg);
-    checkpoint_metrics.seconds_since_last_read_min.set(secs.min);
-    checkpoint_metrics.seconds_since_last_read_max.set(secs.max);
+    checkpoint_cache_metrics.reads_sum.set(reads.sum);
+    checkpoint_cache_metrics.reads_avg.set(reads.avg);
+    checkpoint_cache_metrics.reads_min.set(reads.min);
+    checkpoint_cache_metrics.reads_max.set(reads.max);
+    checkpoint_cache_metrics.seconds_since_last_read_sum.set(secs.sum);
+    checkpoint_cache_metrics.seconds_since_last_read_avg.set(secs.avg);
+    checkpoint_cache_metrics.seconds_since_last_read_min.set(secs.min);
+    checkpoint_cache_metrics.seconds_since_last_read_max.set(secs.max);
 }
 
 pub fn setBlockSize(value: u64) void {
-    block_metrics.size.set(value);
+    block_cache_metrics.size.set(value);
 }
 
 pub fn setBlockReads(reads: AvgMinMax, secs: AvgMinMax) void {
-    block_metrics.reads_sum.set(reads.sum);
-    block_metrics.reads_avg.set(reads.avg);
-    block_metrics.reads_min.set(reads.min);
-    block_metrics.reads_max.set(reads.max);
-    block_metrics.seconds_since_last_read_sum.set(secs.sum);
-    block_metrics.seconds_since_last_read_avg.set(secs.avg);
-    block_metrics.seconds_since_last_read_min.set(secs.min);
-    block_metrics.seconds_since_last_read_max.set(secs.max);
+    block_cache_metrics.reads_sum.set(reads.sum);
+    block_cache_metrics.reads_avg.set(reads.avg);
+    block_cache_metrics.reads_min.set(reads.min);
+    block_cache_metrics.reads_max.set(reads.max);
+    block_cache_metrics.seconds_since_last_read_sum.set(secs.sum);
+    block_cache_metrics.seconds_since_last_read_avg.set(secs.avg);
+    block_cache_metrics.seconds_since_last_read_min.set(secs.min);
+    block_cache_metrics.seconds_since_last_read_max.set(secs.max);
 }
 
 test "init compiles end-to-end" {

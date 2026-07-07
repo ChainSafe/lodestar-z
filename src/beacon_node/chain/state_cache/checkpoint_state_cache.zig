@@ -2255,13 +2255,13 @@ test "PersistentCheckpointStateCache and BlockStateCache metric hooks increment 
     const allocator = testing.allocator;
     // Restore the process-global metrics after the test so the real `.impl` counters/gauges do not
     // leak into sibling tests sharing this binary.
-    const saved_checkpoint = metrics.checkpoint_metrics;
-    const saved_block = metrics.block_metrics;
+    const saved_checkpoint = metrics.checkpoint_cache_metrics;
+    const saved_block = metrics.block_cache_metrics;
     try metrics.init(allocator, std.testing.io, .{});
     defer {
         metrics.deinit();
-        metrics.checkpoint_metrics = saved_checkpoint;
-        metrics.block_metrics = saved_block;
+        metrics.checkpoint_cache_metrics = saved_checkpoint;
+        metrics.block_cache_metrics = saved_block;
     }
 
     const h = try TestHarness.init(allocator, .{ .max_epochs_in_memory = 8 });
