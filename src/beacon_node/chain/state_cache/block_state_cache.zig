@@ -55,9 +55,16 @@ pub const BlockStateCache = struct {
 
     allocator: Allocator,
     max_states: usize,
-    /// O(1) lookup. Insertion order is NOT tracked here; the insertion list owns that, so a plain hash
-    /// map suffices.
-    map: std.AutoHashMapUnmanaged(Root, *Entry),
+    /// O(1) lookup. Insertion order is NOT tracked here (the insertion list owns that) and map
+    /// iteration order is never used, so eviction may `swapRemove`.
+    ///
+    /// `ArrayHashMap` rather than `HashMap` deliberately: this cache holds its size flat (every
+    /// `add` evicts once full), so `HashMap.grow()` — the only point that clears tombstones —
+    /// would never fire, and its tombstone-based deletion then degrades every probe permanently
+    /// under the add/evict churn (https://github.com/ziglang/zig/issues/17851; the std `rehash()`
+    /// doc names exactly this long-lived insert+delete pattern). `ArrayHashMap`'s index deletes
+    /// by backward shift and cannot accumulate tombstones.
+    map: std.AutoArrayHashMapUnmanaged(Root, *Entry),
 
     /// Stable-address backing storage for every `Entry`; sized `max_states + 2` because `insertItem`
     /// pushes before `prune` trims, so the peak resident count is `max_states + 2`. Allocated once in
@@ -82,9 +89,9 @@ pub const BlockStateCache = struct {
 
         const capacity = opts.max_states + 2;
 
-        var map: std.AutoHashMapUnmanaged(Root, *Entry) = .empty;
+        var map: std.AutoArrayHashMapUnmanaged(Root, *Entry) = .empty;
         errdefer map.deinit(allocator);
-        try map.ensureTotalCapacity(allocator, @intCast(capacity));
+        try map.ensureTotalCapacity(allocator, capacity);
 
         const slab = try allocator.alloc(Entry, capacity);
         errdefer allocator.free(slab);
@@ -107,9 +114,8 @@ pub const BlockStateCache = struct {
     }
 
     pub fn deinit(self: *Self) void {
-        var it = self.map.valueIterator();
-        while (it.next()) |entry| {
-            destroyState(entry.*.state);
+        for (self.map.values()) |entry| {
+            destroyState(entry.state);
         }
         self.map.deinit(self.allocator);
         self.allocator.free(self.slab);
@@ -227,9 +233,8 @@ pub const BlockStateCache = struct {
     /// ONLY FOR DEBUGGING PURPOSES. For lodestar debug API. Removes and deinits every state (the cache
     /// owns them).
     pub fn clear(self: *Self) void {
-        var it = self.map.valueIterator();
-        while (it.next()) |entry| {
-            destroyState(entry.*.state);
+        for (self.map.values()) |entry| {
+            destroyState(entry.state);
         }
         self.map.clearRetainingCapacity();
         self.ev_list = .{};
@@ -345,7 +350,7 @@ pub const BlockStateCache = struct {
         self.ev_list.remove(&entry.ev_node);
         self.in_list.remove(&entry.in_node);
 
-        assert(self.map.remove(entry.key));
+        assert(self.map.swapRemove(entry.key));
         assert(self.free_len < self.free.len);
         self.free[self.free_len] = entry;
         self.free_len += 1;
