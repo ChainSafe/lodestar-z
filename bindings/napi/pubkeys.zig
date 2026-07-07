@@ -4,7 +4,6 @@ const bls = @import("bls");
 const blst_bindings = @import("./blst.zig");
 const PubkeyIndexMap = @import("state_transition").PubkeyIndexMap;
 const Index2PubkeyCache = @import("state_transition").Index2PubkeyCache;
-const napi_io = @import("./io.zig");
 
 /// Uses page allocator for internal allocations.
 /// It's recommended to never reallocate the pubkey2index after initialization.
@@ -13,7 +12,7 @@ const allocator = std.heap.page_allocator;
 const default_initial_capacity: u32 = 0;
 const max_stack_aggregate_pubkeys = 512;
 
-pub const State = struct {
+const State = struct {
     pubkey2index: PubkeyIndexMap = undefined,
     index2pubkey: Index2PubkeyCache = undefined,
     initialized: bool = false,
@@ -81,7 +80,7 @@ fn pubkey2indexWrittenSize() usize {
 pub fn save(file_path: js.String) !void {
     var file_path_buf: [1024]u8 = undefined;
     const path = try file_path.toSlice(&file_path_buf);
-    const io = napi_io.get();
+    const io = js.io();
     const file = try std.Io.Dir.createFile(.cwd(), io, path, .{});
     defer file.close(io);
 
@@ -110,7 +109,7 @@ pub fn save(file_path: js.String) !void {
 pub fn load(file_path: js.String) !void {
     var file_path_buf: [1024]u8 = undefined;
     const path = try file_path.toSlice(&file_path_buf);
-    const io = napi_io.get();
+    const io = js.io();
     const file = try std.Io.Dir.openFile(.cwd(), io, path, .{});
     defer file.close(io);
 

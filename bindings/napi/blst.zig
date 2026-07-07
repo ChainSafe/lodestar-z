@@ -15,7 +15,6 @@ const zapi = @import("zapi:zapi");
 const js = zapi.js;
 const napi = zapi.napi;
 const bls = @import("bls");
-const napi_io = @import("./io.zig");
 
 const NativePublicKey = bls.PublicKey;
 const NativeSignature = bls.Signature;
@@ -39,25 +38,32 @@ const BATCH_VERIFY_SIZE = 32;
 /// Initialized lazily on first use, torn down via `deinitThreadPool`.
 var thread_pool: ?*ThreadPool = null;
 
-pub fn initThreadPool(n_workers: u16) !void {
-    if (thread_pool != null) return error.PoolExists;
-    thread_pool = try ThreadPool.init(std.heap.page_allocator, napi_io.get(), .{ .n_workers = n_workers });
-}
-
-/// Closes the `ThreadPool` used for blst operations.
-///
-/// Note: this can invalidate any inflight verification requests. Consumer is responsible
-/// for the lifecycle of their program and should only call this when all work is done.
-///
-/// This note is however application dependent. For the use case of lodestar,
-/// it's likely that this would not be called at all.
-/// Same goes for any other long-lived processes.
-pub fn deinitThreadPool() void {
-    if (thread_pool) |p| {
-        p.deinit(napi_io.get());
-        thread_pool = null;
+/// Native-only thread pool lifecycle, reached from `root.zig` through the pub
+/// `lifecycle` var. Not a pub type: zapi's `exportModule` walks pub type decls
+/// and rejects their non-DSL pub fns, while pub vars are skipped.
+const Lifecycle = struct {
+    pub fn initThreadPool(_: *Lifecycle, n_workers: u16) !void {
+        if (thread_pool != null) return error.PoolExists;
+        thread_pool = try ThreadPool.init(std.heap.page_allocator, js.io(), .{ .n_workers = n_workers });
     }
-}
+
+    /// Closes the `ThreadPool` used for blst operations.
+    ///
+    /// Note: this can invalidate any inflight verification requests. Consumer is responsible
+    /// for the lifecycle of their program and should only call this when all work is done.
+    ///
+    /// This note is however application dependent. For the use case of lodestar,
+    /// it's likely that this would not be called at all.
+    /// Same goes for any other long-lived processes.
+    pub fn deinitThreadPool(_: *Lifecycle) void {
+        if (thread_pool) |p| {
+            p.deinit(js.io());
+            thread_pool = null;
+        }
+    }
+};
+
+pub var lifecycle: Lifecycle = .{};
 
 var gpa: std.heap.DebugAllocator(.{}) = .init;
 const allocator = if (builtin.mode == .Debug)
@@ -375,7 +381,7 @@ pub fn aggregateVerify(msgs: js.Array, pks: js.Array, sig: Signature, pks_valida
 
     const pool = thread_pool orelse return error.ThreadPoolNotInitialized;
     const result = pool.aggregateVerify(
-        napi_io.get(),
+        js.io(),
         &sig.raw,
         try boolOrDefault(sig_groupcheck, false),
         msg_bufs,
@@ -473,7 +479,7 @@ pub fn verifyMultipleAggregateSignatures(sets: js.Array, pks_validate: ?js.Boole
     };
 
     var seed_bytes: [8]u8 = undefined;
-    const io = napi_io.get();
+    const io = js.io();
     io.random(&seed_bytes);
     var prng = std.Random.DefaultPrng.init(std.mem.readInt(u64, &seed_bytes, .little));
     const rand = prng.random();
@@ -503,7 +509,7 @@ pub fn verifyMultipleAggregateSignatures(sets: js.Array, pks_validate: ?js.Boole
 
     const pool = thread_pool orelse return error.ThreadPoolNotInitialized;
     const result = pool.verifyMultipleAggregateSignatures(
-        napi_io.get(),
+        js.io(),
         n_elems,
         msgs,
         DST,
@@ -613,7 +619,7 @@ pub fn aggregateWithRandomness(sets: js.Array) !js.Value {
     var sig_ptrs: [MAX_AGGREGATE_PER_JOB]*const NativeSignature = undefined;
 
     var seed_bytes: [8]u8 = undefined;
-    const io = napi_io.get();
+    const io = js.io();
     io.random(&seed_bytes);
     var prng = std.Random.DefaultPrng.init(std.mem.readInt(u64, &seed_bytes, .little));
     const rand = prng.random();
@@ -720,7 +726,7 @@ fn asyncAggRand_execute(_: napi.Env, data: *AsyncAggRandData) void {
         return;
     };
     pool.aggregateWithRandomness(
-        napi_io.get(),
+        js.io(),
         data.pk_ptrs[0..data.n],
         data.sig_ptrs[0..data.n],
         data.randomness[0 .. data.n * 32],
@@ -816,7 +822,7 @@ pub fn asyncAggregateWithRandomness(sets: js.Array) !js.Value {
     data.err = null;
     data.deferred = undefined;
     data.work = undefined;
-    napi_io.get().random(data.randomness[0 .. n * 32]);
+    js.io().random(data.randomness[0 .. n * 32]);
 
     for (0..n) |i| {
         const set = (try sets.get(@intCast(i))).toValue();
