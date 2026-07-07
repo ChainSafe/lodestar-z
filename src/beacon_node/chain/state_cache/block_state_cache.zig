@@ -123,8 +123,8 @@ pub const BlockStateCache = struct {
     ///
     /// Returns the canonical resident state — `state` on a fresh insert, the resident on the
     /// duplicate path (the incoming duplicate is deinit'd). Use the return value afterwards, not
-    /// the passed pointer. Takes `state` only on success; on `hashTreeRoot` failure the caller
-    /// frees it.
+    /// the passed pointer. Ownership of `state` transfers to the cache only on success; on
+    /// `hashTreeRoot` failure ownership stays with the caller, which frees it.
     pub fn add(
         self: *Self,
         io: std.Io,
