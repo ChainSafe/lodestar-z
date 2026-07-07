@@ -160,11 +160,11 @@ pub const EpochCache = struct {
 
     epoch: Epoch,
 
-    /// PTC for current epoch, computed eagerly at epoch transition.
-    payload_timeliness_committees: ?[preset.SLOTS_PER_EPOCH][preset.PTC_SIZE]ValidatorIndex,
-
     /// PTC for previous epoch, required for slot N block validating slot N-1 attestations.
     previous_payload_timeliness_committees: ?[preset.SLOTS_PER_EPOCH][preset.PTC_SIZE]ValidatorIndex,
+
+    /// PTC for current epoch, computed eagerly at epoch transition.
+    payload_timeliness_committees: ?[preset.SLOTS_PER_EPOCH][preset.PTC_SIZE]ValidatorIndex,
 
     /// PTC for next epoch, sourced from state.ptc_window or the epoch transition stash.
     next_payload_timeliness_committees: ?[preset.SLOTS_PER_EPOCH][preset.PTC_SIZE]ValidatorIndex,
