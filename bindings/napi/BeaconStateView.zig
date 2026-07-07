@@ -723,6 +723,13 @@ pub fn getAllValidators(self: *const BeaconStateView) !js.Array {
     return js_types.wrap(js.Array, result);
 }
 
+/// Get the number of builders in the registry (Gloas+). Throws on pre-Gloas states.
+pub fn getBuildersLength(self: *const BeaconStateView) !js.Number {
+    const cached_state = try self.requireState();
+    const count = try cached_state.state.buildersLength();
+    return js.Number.from(count);
+}
+
 /// Get all balances in the registry.
 pub fn getAllBalances(self: *const BeaconStateView) !js.Array {
     const env = js.env();

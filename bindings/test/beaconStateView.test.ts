@@ -450,6 +450,12 @@ describe("BeaconStateView", () => {
     });
   });
 
+  describe("gloas+ fields", () => {
+    it("getBuildersLength should throw on a pre-Gloas state", () => {
+      expect(() => state.getBuildersLength()).toThrow();
+    });
+  });
+
   describe("block and state roots", () => {
     it("getBlockRoot should return 32 bytes", () => {
       const blockRoot = state.getBlockRoot(state.epoch - 1);

@@ -269,6 +269,7 @@ export declare class BeaconStateView {
   getBalance(index: number): number;
   getValidator(index: number): Validator;
   getAllValidators(): Validator[];
+  getBuildersLength(): number;
   getAllBalances(): number[];
   getValidatorsByStatus(statuses: Set<string>, currentEpoch: number): Validator[];
   // TODO wrong function
