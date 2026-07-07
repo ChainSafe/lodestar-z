@@ -83,7 +83,7 @@ test "write an era file from an existing era file" {
     if (out_reader.era_number != reader.era_number) {
         return error.IncorrectWrittenEraNumber;
     }
-    if (!std.mem.eql(u8, &reader.short_historical_root, &out_reader.short_historical_root)) {
+    if (!std.mem.eql(u8, &reader.short_era_root, &out_reader.short_era_root)) {
         return error.IncorrectWrittenShortHistoricalRoot;
     }
 

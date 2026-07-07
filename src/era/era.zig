@@ -4,11 +4,11 @@ const fork_types = @import("fork_types");
 const e2s = @import("e2s.zig");
 
 /// Parsed components of an .era file name.
-/// Format: <config-name>-<era-number>-<short-historical-root>.era
+/// Format: <config-name>-<era-number>-<short-era-root>.era
 pub const EraFileName = struct {
     config_name: []const u8,
     era_number: u64,
-    short_historical_root: [8]u8,
+    short_era_root: [8]u8,
 
     pub fn parse(path: []const u8) (error{InvalidEraFileName} || std.fmt.ParseIntError)!EraFileName {
         if (!std.mem.endsWith(u8, path, ".era")) {
@@ -17,16 +17,16 @@ pub const EraFileName = struct {
         var it = std.mem.splitScalar(u8, std.fs.path.stem(path), '-');
         const config_name = it.next() orelse return error.InvalidEraFileName;
         const era_number = try std.fmt.parseUnsigned(u64, it.next() orelse return error.InvalidEraFileName, 10);
-        var short_historical_root: [8]u8 = undefined;
-        const maybe_short_historical_root = it.next() orelse return error.InvalidEraFileName;
-        if (maybe_short_historical_root.len != 8) {
+        var short_era_root: [8]u8 = undefined;
+        const maybe_short_era_root = it.next() orelse return error.InvalidEraFileName;
+        if (maybe_short_era_root.len != 8) {
             return error.InvalidEraFileName;
         }
-        @memcpy(&short_historical_root, maybe_short_historical_root);
+        @memcpy(&short_era_root, maybe_short_era_root);
         return .{
             .config_name = config_name,
             .era_number = era_number,
-            .short_historical_root = short_historical_root,
+            .short_era_root = short_era_root,
         };
     }
 };
@@ -121,29 +121,29 @@ pub fn computeStartBlockSlotFromEraNumber(era_number: u64) !u64 {
     return (try std.math.sub(u64, era_number, 1)) * preset.SLOTS_PER_HISTORICAL_ROOT;
 }
 
-pub fn getShortHistoricalRoot(state: fork_types.AnyBeaconState) ![8]u8 {
+pub fn getShortEraRoot(state: fork_types.AnyBeaconState) ![8]u8 {
     const allocator = std.heap.page_allocator;
-    var short_historical_root: [8]u8 = undefined;
+    var short_era_root: [8]u8 = undefined;
     var s = state;
-    var historical_root: [32]u8 = undefined;
+    var era_root: [32]u8 = undefined;
     if (try s.slot() == 0) {
-        historical_root = (try s.genesisValidatorsRoot()).*;
+        era_root = (try s.genesisValidatorsRoot()).*;
     } else if (s.forkSeq().gte(.capella)) {
         var summaries = try s.historicalSummaries();
         const len = try summaries.length();
         if (len == 0) return error.EmptyHistoricalSummaries;
         var last = try summaries.get(len - 1);
-        historical_root = (try last.hashTreeRoot()).*;
+        era_root = (try last.hashTreeRoot()).*;
     } else {
         var roots = try s.historicalRoots();
         const len = try roots.length();
         if (len == 0) return error.EmptyHistoricalRoots;
         var last = try roots.get(len - 1);
-        try last.toValue(allocator, &historical_root);
+        try last.toValue(allocator, &era_root);
     }
 
-    _ = try std.fmt.bufPrint(&short_historical_root, "{x}", .{historical_root[0..4]});
-    return short_historical_root;
+    _ = try std.fmt.bufPrint(&short_era_root, "{x}", .{era_root[0..4]});
+    return short_era_root;
 }
 
 // ── Unit tests ──────────────────────────────────────────────────────────
@@ -152,13 +152,13 @@ test "EraFileName.parse - valid filename" {
     const result = try EraFileName.parse("mainnet-00001-a1b2c3d4.era");
     try std.testing.expectEqualStrings("mainnet", result.config_name);
     try std.testing.expectEqual(@as(u64, 1), result.era_number);
-    try std.testing.expectEqualStrings("a1b2c3d4", &result.short_historical_root);
+    try std.testing.expectEqualStrings("a1b2c3d4", &result.short_era_root);
 }
 
 test "EraFileName.parse - large era number" {
     const result = try EraFileName.parse("mainnet-99999-deadbeef.era");
     try std.testing.expectEqual(@as(u64, 99999), result.era_number);
-    try std.testing.expectEqualStrings("deadbeef", &result.short_historical_root);
+    try std.testing.expectEqualStrings("deadbeef", &result.short_era_root);
 }
 
 test "EraFileName.parse - different config names" {

@@ -16,8 +16,8 @@ file: std.Io.File,
 io: std.Io,
 /// The era number retrieved from the file name
 era_number: u64,
-/// The short historical root retrieved from the file name
-short_historical_root: [8]u8,
+/// The short era root retrieved from the file name
+short_era_root: [8]u8,
 /// An array of state and block indices, one per group
 group_indices: []era.GroupIndex,
 /// Persistent merkle tree pool used by TreeViews (must outlive returned views)
@@ -49,7 +49,7 @@ pub fn open(allocator: std.mem.Allocator, io: std.Io, config: c.BeaconConfig, pa
         .file = file,
         .io = io,
         .era_number = era_file_name.era_number,
-        .short_historical_root = era_file_name.short_historical_root,
+        .short_era_root = era_file_name.short_era_root,
         .group_indices = group_indices,
         .pool = pool,
     };
