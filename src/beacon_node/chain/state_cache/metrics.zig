@@ -64,11 +64,11 @@ pub const BlockStateCacheMetrics = struct {
 
 /// `initializeNoop` default: metrics always emit (no `enabled()` gate), so the cache is safe to use
 /// whether or not `init` is called.
-pub var cache_metrics = m.initializeNoop(BlockStateCacheMetrics);
+pub var block_metrics = m.initializeNoop(BlockStateCacheMetrics);
 
 /// Call once on startup.
 pub fn init(comptime opts: m.RegistryOpts) void {
-    cache_metrics = .{
+    block_metrics = .{
         .lookups = BlockStateCacheMetrics.Count.init(
             "lodestar_state_cache_lookups_total",
             .{ .help = "Block state cache lookups" },
@@ -138,33 +138,33 @@ pub fn init(comptime opts: m.RegistryOpts) void {
 }
 
 pub fn block() *BlockStateCacheMetrics {
-    return &cache_metrics;
+    return &block_metrics;
 }
 
 /// Caller must refresh the PULL gauges (see `BlockStateCacheMetrics`) before calling, so the scrape
 /// reflects current state.
 pub fn write(writer: anytype) !void {
-    try m.write(&cache_metrics, writer);
+    try m.write(&block_metrics, writer);
 }
 
 pub fn setBlockSize(value: u64) void {
-    cache_metrics.size.set(value);
+    block_metrics.size.set(value);
 }
 
 pub fn setBlockReads(reads: AvgMinMax, secs: AvgMinMax) void {
-    cache_metrics.reads_sum.set(reads.sum);
-    cache_metrics.reads_avg.set(reads.avg);
-    cache_metrics.reads_min.set(reads.min);
-    cache_metrics.reads_max.set(reads.max);
-    cache_metrics.seconds_since_last_read_sum.set(secs.sum);
-    cache_metrics.seconds_since_last_read_avg.set(secs.avg);
-    cache_metrics.seconds_since_last_read_min.set(secs.min);
-    cache_metrics.seconds_since_last_read_max.set(secs.max);
+    block_metrics.reads_sum.set(reads.sum);
+    block_metrics.reads_avg.set(reads.avg);
+    block_metrics.reads_min.set(reads.min);
+    block_metrics.reads_max.set(reads.max);
+    block_metrics.seconds_since_last_read_sum.set(secs.sum);
+    block_metrics.seconds_since_last_read_avg.set(secs.avg);
+    block_metrics.seconds_since_last_read_min.set(secs.min);
+    block_metrics.seconds_since_last_read_max.set(secs.max);
 }
 
 test "init compiles end-to-end" {
     init(.{});
-    defer cache_metrics = m.initializeNoop(BlockStateCacheMetrics);
+    defer block_metrics = m.initializeNoop(BlockStateCacheMetrics);
     setBlockSize(5);
     setBlockReads(
         .{ .sum = 4, .avg = 2, .min = 1, .max = 3 },
