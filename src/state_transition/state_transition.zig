@@ -22,13 +22,14 @@ const EpochTransitionCache = @import("cache/epoch_transition_cache.zig").EpochTr
 const processEpoch = @import("epoch/process_epoch.zig").processEpoch;
 const computeEpochAtSlot = @import("utils/epoch.zig").computeEpochAtSlot;
 const processSlot = @import("slot/process_slot.zig").processSlot;
-const deinitReusedEpochTransitionCache = @import("cache/epoch_transition_cache.zig").deinitReusedEpochTransitionCache;
 const upgradeStateToAltair = @import("slot/upgrade_state_to_altair.zig").upgradeStateToAltair;
 const upgradeStateToBellatrix = @import("slot/upgrade_state_to_bellatrix.zig").upgradeStateToBellatrix;
 const upgradeStateToCapella = @import("slot/upgrade_state_to_capella.zig").upgradeStateToCapella;
 const upgradeStateToDeneb = @import("slot/upgrade_state_to_deneb.zig").upgradeStateToDeneb;
 const upgradeStateToElectra = @import("slot/upgrade_state_to_electra.zig").upgradeStateToElectra;
 const upgradeStateToFulu = @import("slot/upgrade_state_to_fulu.zig").upgradeStateToFulu;
+
+pub const deinitReusedEpochTransitionCache = @import("cache/epoch_transition_cache.zig").deinitReusedEpochTransitionCache;
 
 pub const ExecutionPayloadStatus = enum(u8) {
     invalid,
@@ -256,10 +257,6 @@ pub fn stateTransition(
     return post_cached_state;
 }
 
-pub fn deinitStateTransition(io: std.Io) void {
-    deinitReusedEpochTransitionCache(io);
-}
-
 const TestCase = struct {
     transition_opt: TransitionOpts,
     expect_error: bool,
@@ -320,14 +317,14 @@ test "state transition - electra block" {
         }
     }
 
-    defer deinitStateTransition(std.testing.io);
+    deinitReusedEpochTransitionCache(std.testing.io);
 }
 
 test "state transition - a rejected block leaves the pre-state unchanged" {
     const allocator = std.testing.allocator;
     var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 256 * 5 });
     defer pool.deinit();
-    defer deinitStateTransition(std.testing.io);
+    defer deinitReusedEpochTransitionCache(std.testing.io);
 
     var test_state = try TestCachedBeaconState.init(allocator, &pool, 256, .{});
     defer test_state.deinit();
