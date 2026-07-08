@@ -537,6 +537,9 @@ pub const PersistentCheckpointStateCache = struct {
     ///
     /// A per-epoch fault (view error, datastore IO) is logged + skipped; only OOM propagates.
     /// Idempotent — it re-runs each slot — so a missed epoch is re-attempted later.
+    ///
+    /// `state` is borrowed and read after an internal throttle suspension; the caller must keep it
+    /// alive until this returns.
     pub fn processState(self: *Self, io: std.Io, block_root: Root, state: *CachedBeaconState) !usize {
         // Prune finalized-below checkpoints first, in this same flow, so a finalized cp state is pruned
         // and never persisted.
