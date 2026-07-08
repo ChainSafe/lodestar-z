@@ -1078,7 +1078,7 @@ const TestStateFactory = struct {
     fn init(allocator: Allocator, pool: *Node.Pool) !TestStateFactory {
         // ELECTRA_FORK_EPOCH = 0 so the whole slot range resolves to electra: reload tests can persist
         // and fault back low-slot (epoch 20-23) states without the blob's fork mismatching.
-        const helper = try TestCachedBeaconState.init(allocator, pool, 8, .{ .electra_fork_epoch = 0 });
+        const helper = try TestCachedBeaconState.init(allocator, pool, 8, .{ .fork_epoch = 0 });
         return .{ .allocator = allocator, .helper = helper };
     }
 

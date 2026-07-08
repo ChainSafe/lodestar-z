@@ -28,39 +28,71 @@ const EFFECTIVE_BALANCE_INCREMENT = 32;
 const EFFECTIVE_BALANCE = 32 * 1e9;
 const active_chain_config = if (active_preset == .mainnet) mainnet_chain_config else minimal_chain_config;
 
-/// generate, allocate BeaconState
-/// consumer has responsibility to deinit and destroy it
-pub fn generateElectraState(allocator: Allocator, pool: *Node.Pool, chain_config: ChainConfig, validator_count: usize) !*AnyBeaconState {
+/// The SSZ BeaconState type for `fork`.
+fn beaconStateSsz(comptime fork: ForkSeq) type {
+    return switch (fork) {
+        .phase0 => types.phase0.BeaconState,
+        .altair => types.altair.BeaconState,
+        .bellatrix => types.bellatrix.BeaconState,
+        .capella => types.capella.BeaconState,
+        .deneb => types.deneb.BeaconState,
+        .electra => types.electra.BeaconState,
+        .fulu => types.fulu.BeaconState,
+        .gloas => types.gloas.BeaconState,
+    };
+}
+
+/// `fork`'s activation epoch in `config`.
+fn forkActivationEpoch(config: ChainConfig, comptime fork: ForkSeq) Epoch {
+    return switch (fork) {
+        .phase0 => 0,
+        .altair => config.ALTAIR_FORK_EPOCH,
+        .bellatrix => config.BELLATRIX_FORK_EPOCH,
+        .capella => config.CAPELLA_FORK_EPOCH,
+        .deneb => config.DENEB_FORK_EPOCH,
+        .electra => config.ELECTRA_FORK_EPOCH,
+        .fulu => config.FULU_FORK_EPOCH,
+        .gloas => config.GLOAS_FORK_EPOCH,
+    };
+}
+
+/// Generate + allocate a BeaconState of `fork`; the consumer deinits and destroys it. Fork-generic
+/// port of TS `generateState` — common fields for all forks, then the altair+ additions
+/// (participation, inactivity scores, sync committees) under a comptime fork guard.
+pub fn generateState(comptime fork: ForkSeq, allocator: Allocator, pool: *Node.Pool, chain_config: ChainConfig, validator_count: usize) !*AnyBeaconState {
+    const StateSsz = beaconStateSsz(fork);
+
     const beacon_state = try allocator.create(AnyBeaconState);
     errdefer allocator.destroy(beacon_state);
 
-    const electra_state = try allocator.create(ElectraBeaconState);
+    const fork_state = try allocator.create(StateSsz.Type);
     defer {
-        types.electra.BeaconState.deinit(allocator, electra_state);
-        allocator.destroy(electra_state);
+        StateSsz.deinit(allocator, fork_state);
+        allocator.destroy(fork_state);
     }
-    electra_state.* = types.electra.BeaconState.default_value;
-    electra_state.genesis_time = 1596546008;
-    electra_state.genesis_validators_root = try hex.hexToRoot("0x8a8b3f1f1e2d3c4b5a697887766554433221100ffeeddccbbaa9988776655443");
+    fork_state.* = StateSsz.default_value;
+    fork_state.genesis_time = 1596546008;
+    fork_state.genesis_validators_root = try hex.hexToRoot("0x8a8b3f1f1e2d3c4b5a697887766554433221100ffeeddccbbaa9988776655443");
+    const activation_epoch = forkActivationEpoch(chain_config, fork);
     // set the slot to be ready for the next epoch transition
-    electra_state.slot = chain_config.ELECTRA_FORK_EPOCH * preset.SLOTS_PER_EPOCH + 2025 * preset.SLOTS_PER_EPOCH - 1;
-    const current_epoch = @divFloor(electra_state.slot, preset.SLOTS_PER_EPOCH);
+    fork_state.slot = activation_epoch * preset.SLOTS_PER_EPOCH + 2025 * preset.SLOTS_PER_EPOCH - 1;
+    const current_epoch = @divFloor(fork_state.slot, preset.SLOTS_PER_EPOCH);
     var version: [4]u8 = undefined;
     _ = try hex.hexToBytes(&version, "0x00000001");
-    electra_state.fork = .{
+    fork_state.fork = .{
         .previous_version = version,
         .current_version = version,
-        .epoch = chain_config.ELECTRA_FORK_EPOCH,
+        .epoch = activation_epoch,
     };
-    electra_state.latest_block_header = .{
-        .slot = electra_state.slot - 1,
+    fork_state.latest_block_header = .{
+        .slot = fork_state.slot - 1,
         .proposer_index = 80882,
         .parent_root = try hex.hexToRoot("0x5b83c3078e474b86af60043eda82a34c3c2e5ebf83146b14d9d909aea4163ef2"),
         .state_root = try hex.hexToRoot("0x2761ae355e8a53c11e0e37d5e417f8984db0c53fa83f1bc65f89c6af35a196a7"),
         .body_root = try hex.hexToRoot("0x249a1962eef90e122fa2447040bfac102798b1dba9c73e5593bc5aa32eb92bfd"),
     };
-    electra_state.block_roots = [_][32]u8{[_]u8{1} ** 32} ** preset.SLOTS_PER_HISTORICAL_ROOT;
-    electra_state.state_roots = [_][32]u8{[_]u8{2} ** 32} ** preset.SLOTS_PER_HISTORICAL_ROOT;
+    fork_state.block_roots = [_][32]u8{[_]u8{1} ** 32} ** preset.SLOTS_PER_HISTORICAL_ROOT;
+    fork_state.state_roots = [_][32]u8{[_]u8{2} ** 32} ** preset.SLOTS_PER_HISTORICAL_ROOT;
 
     const pubkeys = try allocator.alloc(BLSPubkey, validator_count);
     defer allocator.free(pubkeys);
@@ -77,91 +109,99 @@ pub fn generateElectraState(allocator: Allocator, pool: *Node.Pool, chain_config
             .exit_epoch = 0xFFFFFFFFFFFFFFFF,
             .withdrawable_epoch = 0xFFFFFFFFFFFFFFFF,
         };
-        try electra_state.validators.append(allocator, validator);
-        try electra_state.balances.append(allocator, EFFECTIVE_BALANCE);
-        try electra_state.inactivity_scores.append(allocator, 0);
-        try electra_state.previous_epoch_participation.append(allocator, 0b11111111);
-        try electra_state.current_epoch_participation.append(allocator, 0b11111111);
+        try fork_state.validators.append(allocator, validator);
+        try fork_state.balances.append(allocator, EFFECTIVE_BALANCE);
+        if (comptime fork.gte(.altair)) {
+            try fork_state.inactivity_scores.append(allocator, 0);
+            try fork_state.previous_epoch_participation.append(allocator, 0b11111111);
+            try fork_state.current_epoch_participation.append(allocator, 0b11111111);
+        }
     }
 
-    electra_state.eth1_data = .{
+    fork_state.eth1_data = .{
         .deposit_root = try hex.hexToRoot("0xcb1f89a924cfd31224823db5a41b1643f10faa7aedf231f1e28887f6ee98c047"),
         .deposit_count = pubkeys.len,
         .block_hash = try hex.hexToRoot("0x701fb2869ce16d0f1d14f6705725adb0dec6799da29006dfc6fff83960298f21"),
     };
 
-    // populate sync committee
-    var active_validator_indices = try std.ArrayList(ValidatorIndex).initCapacity(allocator, validator_count);
-    defer active_validator_indices.deinit(allocator);
-    var effective_balance_increments = try EffectiveBalanceIncrements.initCapacity(allocator, validator_count);
-    defer effective_balance_increments.deinit(allocator);
-    for (0..validator_count) |i| {
-        try active_validator_indices.append(allocator, @intCast(i));
-        try effective_balance_increments.append(allocator, EFFECTIVE_BALANCE_INCREMENT);
-    }
-
     // no need to populate eth1_data_votes
-    electra_state.eth1_deposit_index = pubkeys.len;
+    fork_state.eth1_deposit_index = pubkeys.len;
     // enable this will cause some tests failed
-    // electra_state.randao_mixes = [_][32]u8{[_]u8{4} ** 32} ** preset.EPOCHS_PER_HISTORICAL_VECTOR;
+    // fork_state.randao_mixes = [_][32]u8{[_]u8{4} ** 32} ** preset.EPOCHS_PER_HISTORICAL_VECTOR;
     // no need to populate slashings
     // finality
-    electra_state.justification_bits = types.phase0.JustificationBits.default_value;
+    fork_state.justification_bits = types.phase0.JustificationBits.default_value;
     for (0..4) |i| {
-        try electra_state.justification_bits.set(i, true);
+        try fork_state.justification_bits.set(i, true);
     }
-    electra_state.previous_justified_checkpoint = .{
+    fork_state.previous_justified_checkpoint = .{
         .epoch = current_epoch - 2,
         .root = try hex.hexToRoot("0x3fe60bf06a57b0956cd1f8181d26649cf8bf79e48bf82f55562e04b33d4785d4"),
     };
-    electra_state.current_justified_checkpoint = .{
+    fork_state.current_justified_checkpoint = .{
         .epoch = current_epoch - 1,
         .root = try hex.hexToRoot("0x3ba0913d2fb5e4cbcfb0d39eb15803157c1e769d63b8619285d8fdabbd8181c7"),
     };
-    electra_state.finalized_checkpoint = .{
+    fork_state.finalized_checkpoint = .{
         .epoch = current_epoch - 3,
         .root = try hex.hexToRoot("0x122b8ff579d0c8f8a8b66326bdfec3f685007d2842f01615a0768870961ccc17"),
     };
 
-    // the same logic to processSyncCommitteeUpdates
-    beacon_state.* = try AnyBeaconState.fromValue(allocator, pool, .electra, electra_state);
+    beacon_state.* = try AnyBeaconState.fromValue(allocator, pool, fork, fork_state);
     errdefer beacon_state.deinit();
 
-    var next_sync_committee_indices: [preset.SYNC_COMMITTEE_SIZE]ValidatorIndex = undefined;
-    try getNextSyncCommitteeIndices(
-        .electra,
-        allocator,
-        beacon_state.castToFork(.electra),
-        active_validator_indices.items,
-        effective_balance_increments,
-        &next_sync_committee_indices,
-    );
+    // Sync committees exist altair+. Same logic as processSyncCommitteeUpdates.
+    if (comptime fork.gte(.altair)) {
+        var active_validator_indices = try std.ArrayList(ValidatorIndex).initCapacity(allocator, validator_count);
+        defer active_validator_indices.deinit(allocator);
+        var effective_balance_increments = try EffectiveBalanceIncrements.initCapacity(allocator, validator_count);
+        defer effective_balance_increments.deinit(allocator);
+        for (0..validator_count) |i| {
+            try active_validator_indices.append(allocator, @intCast(i));
+            try effective_balance_increments.append(allocator, EFFECTIVE_BALANCE_INCREMENT);
+        }
 
-    var next_sync_committee_pubkeys: [preset.SYNC_COMMITTEE_SIZE]BLSPubkey = undefined;
-    var next_sync_committee_pubkeys_slices: [preset.SYNC_COMMITTEE_SIZE]bls.PublicKey = undefined;
-    var validators = try beacon_state.validators();
-    for (next_sync_committee_indices, 0..next_sync_committee_indices.len) |index, i| {
-        var validator = try validators.get(@intCast(index));
-        // Validator is now a StructContainerType — `get("pubkey")` returns the
-        // value directly (a `[48]u8` array), not a child TreeView.
-        next_sync_committee_pubkeys[i] = try validator.get("pubkey");
-        next_sync_committee_pubkeys_slices[i] = try bls.PublicKey.uncompress(&next_sync_committee_pubkeys[i]);
+        var next_sync_committee_indices: [preset.SYNC_COMMITTEE_SIZE]ValidatorIndex = undefined;
+        try getNextSyncCommitteeIndices(
+            fork,
+            allocator,
+            beacon_state.castToFork(fork),
+            active_validator_indices.items,
+            effective_balance_increments,
+            &next_sync_committee_indices,
+        );
+
+        var next_sync_committee_pubkeys: [preset.SYNC_COMMITTEE_SIZE]BLSPubkey = undefined;
+        var next_sync_committee_pubkeys_slices: [preset.SYNC_COMMITTEE_SIZE]bls.PublicKey = undefined;
+        var validators = try beacon_state.validators();
+        for (next_sync_committee_indices, 0..next_sync_committee_indices.len) |index, i| {
+            var validator = try validators.get(@intCast(index));
+            // Validator is now a StructContainerType — `get("pubkey")` returns the
+            // value directly (a `[48]u8` array), not a child TreeView.
+            next_sync_committee_pubkeys[i] = try validator.get("pubkey");
+            next_sync_committee_pubkeys_slices[i] = try bls.PublicKey.uncompress(&next_sync_committee_pubkeys[i]);
+        }
+
+        var current_sync_committee = try beacon_state.currentSyncCommittee();
+        var next_sync_committee = try beacon_state.nextSyncCommittee();
+        // Rotate syncCommittee in state
+        const aggregate_pubkey = (try bls.AggregatePublicKey.aggregate(&next_sync_committee_pubkeys_slices, false)).toPublicKey().compress();
+        try next_sync_committee.setValue("pubkeys", &next_sync_committee_pubkeys);
+        try next_sync_committee.setValue("aggregate_pubkey", &aggregate_pubkey);
+
+        // initialize current sync committee to be the same as next sync committee
+        try current_sync_committee.setValue("pubkeys", &next_sync_committee_pubkeys);
+        try current_sync_committee.setValue("aggregate_pubkey", &aggregate_pubkey);
     }
-
-    var current_sync_committee = try beacon_state.currentSyncCommittee();
-    var next_sync_committee = try beacon_state.nextSyncCommittee();
-    // Rotate syncCommittee in state
-    const aggregate_pubkey = (try bls.AggregatePublicKey.aggregate(&next_sync_committee_pubkeys_slices, false)).toPublicKey().compress();
-    try next_sync_committee.setValue("pubkeys", &next_sync_committee_pubkeys);
-    try next_sync_committee.setValue("aggregate_pubkey", &aggregate_pubkey);
-
-    // initialize current sync committee to be the same as next sync committee
-    try current_sync_committee.setValue("pubkeys", &next_sync_committee_pubkeys);
-    try current_sync_committee.setValue("aggregate_pubkey", &aggregate_pubkey);
 
     try beacon_state.commit();
 
     return beacon_state;
+}
+
+/// Electra-fork convenience wrapper over `generateState`.
+pub fn generateElectraState(allocator: Allocator, pool: *Node.Pool, chain_config: ChainConfig, validator_count: usize) !*AnyBeaconState {
+    return generateState(.electra, allocator, pool, chain_config, validator_count);
 }
 
 pub const TestCachedBeaconState = struct {
@@ -174,24 +214,29 @@ pub const TestCachedBeaconState = struct {
     epoch_transition_cache: *state_transition.EpochTransitionCache,
 
     pub const Options = struct {
-        /// Electra activation epoch for the generated schedule; null keeps the active chain config's.
-        /// 0 puts every slot in electra, so low-slot persisted states reload as electra.
-        electra_fork_epoch: ?Epoch = null,
+        /// The fork of the generated state. Mirrors TS `generateState(opts, getConfig(fork, ...))`.
+        fork: ForkSeq = .electra,
+        /// `fork`'s activation epoch; null keeps the active chain config's. 0 activates `fork` (and
+        /// all priors) at genesis so low-slot persisted states resolve as `fork`.
+        fork_epoch: ?Epoch = null,
     };
 
     pub fn init(allocator: Allocator, pool: *Node.Pool, validator_count: usize, options: Options) !TestCachedBeaconState {
-        const chain_config = active_chain_config.merge(.{
-            .ELECTRA_FORK_EPOCH = options.electra_fork_epoch orelse active_chain_config.ELECTRA_FORK_EPOCH,
-        });
-        var state = try generateElectraState(allocator, pool, chain_config, validator_count);
+        return switch (options.fork) {
+            inline else => |f| initForFork(f, allocator, pool, validator_count, options.fork_epoch),
+        };
+    }
+
+    fn initForFork(comptime fork: ForkSeq, allocator: Allocator, pool: *Node.Pool, validator_count: usize, fork_epoch_opt: ?Epoch) !TestCachedBeaconState {
+        const fork_epoch = fork_epoch_opt orelse forkActivationEpoch(active_chain_config, fork);
+        const chain_config = getConfig(active_chain_config, fork, fork_epoch);
+        var state = try generateState(fork, allocator, pool, chain_config, validator_count);
         errdefer {
             state.deinit();
             allocator.destroy(state);
         }
 
-        var fork_view = try state.fork();
-        const fork_epoch = try fork_view.get("epoch");
-        return initFromState(allocator, pool, state, ForkSeq.electra, fork_epoch);
+        return initFromState(allocator, pool, state, fork, fork_epoch);
     }
 
     pub fn initFromState(allocator: Allocator, pool: *Node.Pool, state: *AnyBeaconState, fork: ForkSeq, fork_epoch: Epoch) !TestCachedBeaconState {
