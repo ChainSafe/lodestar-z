@@ -225,7 +225,6 @@ pub const PersistentCheckpointStateCache = struct {
 
         // all checkpoint states from the last run are not trusted, remove them; otherwise if we have a
         // bad checkpoint state from the last run, the node get stucked.
-        // this was found during mekong devnet, see https://github.com/ChainSafe/lodestar/pull/7255
         try self.datastore.removeMany(io, self.allocator, keys);
     }
 
@@ -663,7 +662,7 @@ pub const PersistentCheckpointStateCache = struct {
         self.epoch_index.clearRetainingCapacity();
     }
 
-    /// ONLY FOR DEBUGGING PURPOSES. For lodestar debug API. Per-key summary across BOTH tiers; caller
+    /// ONLY FOR DEBUGGING PURPOSES. For the debug API. Per-key summary across BOTH tiers; caller
     /// frees the slice. Reads the per-entry counters directly (no read bump). `slot` is the epoch's
     /// start slot and `root` the raw checkpoint root (hexing belongs to the route layer).
     pub fn dumpSummary(self: *Self, allocator: Allocator) ![]StateCacheItem {
@@ -685,7 +684,7 @@ pub const PersistentCheckpointStateCache = struct {
         return out;
     }
 
-    /// ONLY FOR DEBUGGING PURPOSES. For lodestar debug API. In-memory states only (BORROWED — the cache
+    /// ONLY FOR DEBUGGING PURPOSES. For the debug API. In-memory states only (BORROWED — the cache
     /// owns them, do NOT deinit; valid until the next cache mutation); caller frees the returned slice.
     pub fn getStates(self: *Self, allocator: Allocator) ![]*CachedBeaconState {
         var out: std.ArrayListUnmanaged(*CachedBeaconState) = .empty;
@@ -1972,7 +1971,7 @@ test "PersistentCheckpointStateCache processState persists each checkpoint's own
     const spe = preset.SLOTS_PER_EPOCH;
     const root = makeRoot(0xC1);
 
-    // Three consecutive checkpoint epochs on the TS axis; the driver sits one epoch above them.
+    // Three consecutive checkpoint epochs; the driver sits one epoch above them.
     const driver_epoch: Epoch = 23;
     const e1 = driver_epoch - 3;
     const e2 = driver_epoch - 2;
@@ -2124,7 +2123,7 @@ test "PersistentCheckpointStateCache findSeedStateToReload selects the same-view
     defer h.deinit();
 
     // findSeedStateToReload never deserializes persisted bytes, so its states are fork-agnostic and
-    // sit on the absolute TS axis: the band epoch is 21, the reloaded cp an epoch below at 20.
+    // use arbitrary absolute epochs: the band epoch is 21, the reloaded cp an epoch below at 20.
     const band_epoch: Epoch = 21;
     const band_slot = computeStartSlotAtEpoch(band_epoch);
 
@@ -2166,7 +2165,7 @@ test "PersistentCheckpointStateCache findSeedStateToReload returns a middle band
     const h = try TestHarness.init(allocator, .{ .max_epochs_in_memory = 8 });
     defer h.deinit();
 
-    // findSeedStateToReload never deserializes, so its states sit on the absolute TS axis: two band
+    // findSeedStateToReload never deserializes, so its states use arbitrary absolute epochs: two band
     // epochs 21 (`lower`) and 22 (`higher`), with the reloaded cp an epoch below at 20. `lower` sits
     // below the max band epoch `higher`, so the scan reaches it first.
     const higher: Epoch = 22;

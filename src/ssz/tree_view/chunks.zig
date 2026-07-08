@@ -191,7 +191,6 @@ pub fn BasicPackedChunks(
             return try self.getAllInto(len, values);
         }
 
-        /// Warm the chunk-node cache for a bulk read without allocating or decoding:
         /// Warm the `children_nodes` navigation cache for every leaf so a later per-element
         /// `get`/`set` skips the O(depth) walk from the root. No-op for chunked_leaf layouts (see
         /// `populateAllNodes`): their access patterns don't amortize a full-list warm.
