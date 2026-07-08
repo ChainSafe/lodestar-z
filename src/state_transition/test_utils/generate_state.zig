@@ -7,6 +7,7 @@ const minimal_chain_config = @import("config").minimal.chain_config;
 const types = @import("consensus_types");
 const hex = @import("hex");
 const Epoch = types.primitive.Epoch.Type;
+const FAR_FUTURE_EPOCH = @import("constants").FAR_FUTURE_EPOCH;
 const BLSPubkey = types.primitive.BLSPubkey.Type;
 const ValidatorIndex = types.primitive.ValidatorIndex.Type;
 const preset = @import("preset").preset;
@@ -227,7 +228,10 @@ pub const TestCachedBeaconState = struct {
     }
 
     fn initForFork(comptime fork: ForkSeq, allocator: Allocator, pool: *Node.Pool, validator_count: usize, fork_epoch_opt: ?Epoch) !TestCachedBeaconState {
-        const fork_epoch = fork_epoch_opt orelse forkActivationEpoch(active_chain_config, fork);
+        const scheduled = forkActivationEpoch(active_chain_config, fork);
+        // A fork the active preset leaves unscheduled (minimal parks post-altair forks at
+        // FAR_FUTURE_EPOCH) would overflow the slot math in generateState; generate it at genesis.
+        const fork_epoch = fork_epoch_opt orelse if (scheduled == FAR_FUTURE_EPOCH) 0 else scheduled;
         const chain_config = getConfig(active_chain_config, fork, fork_epoch);
         // initFromState takes ownership of `state`, freeing it on any failure.
         const state = try generateState(fork, allocator, pool, chain_config, validator_count);
