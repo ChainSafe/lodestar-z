@@ -42,8 +42,9 @@ pub fn processRewardsAndPenalties(
         }
     }
 
-    // Populate cache.balances for reuse by processEffectiveBalanceUpdates() and the
-    // validator monitor. Prevents recomputation.
+    // Populate cache.balances for reuse by the validator monitor and
+    // more importantly processEffectiveBalanceUpdates() doesn't need to
+    // get from tree view state which has to commit.
     cache.balances = .fromOwnedSlice(try allocator.dupe(u64, balances));
 
     var balances_arraylist: std.ArrayListUnmanaged(u64) = .fromOwnedSlice(balances);
