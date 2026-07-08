@@ -98,9 +98,11 @@ pub const CachedBeaconState = struct {
     }
 
     pub const LoadOtherStateOpts = struct {
-        /// Warm the validator and balance views' navigation caches so a state consumed immediately
-        /// afterward doesn't pay the lazy per-access cost — both are read/written per-element during
-        /// block replay (validators via epoch updates, balances via increase/decreaseBalance).
+        /// Warm the validator view's per-element cache so a state consumed immediately afterward
+        /// (e.g. block replay / epoch updates that read every validator) doesn't pay the lazy
+        /// per-access cost. Balances are NOT prefetched: their bulk read (`getAllInto`) ignores this
+        /// cache and their per-element access touches too small a subset to amortize a full-list warm
+        /// (measured — bench/beacon_node/prefetch_effect.zig).
         preload_validators_and_balances: bool = false,
     };
 
@@ -153,9 +155,6 @@ pub const CachedBeaconState = struct {
         if (opts.preload_validators_and_balances) {
             const validators_view = try new_cached.state.validators();
             try validators_view.prefetchAll();
-
-            const balances_view = try new_cached.state.balances();
-            try balances_view.prefetchAll();
         }
 
         return new_cached;

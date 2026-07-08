@@ -630,7 +630,7 @@ test "TreeView basic list prefetchAll warms chunk-node cache (non-chunked_leaf)"
     }
 }
 
-test "TreeView basic list prefetchAll warms the chunked_leaf navigation cache" {
+test "TreeView basic list prefetchAll is a no-op for chunked_leaf layouts" {
     const allocator = std.testing.allocator;
     var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 1024 });
     defer pool.deinit();
@@ -647,17 +647,15 @@ test "TreeView basic list prefetchAll warms the chunked_leaf navigation cache" {
     var view = try ListType.TreeView.init(allocator, &pool, root_node);
     defer view.deinit();
 
-    // 10 u64 fit in one chunked leaf (K * items_per_chunk elements per leaf), so prefetch caches
-    // exactly one chunked-leaf node id; a subsequent per-element get then hits it. Reads stay correct.
+    // Chunked_leaf prefetch is a deliberate no-op (its access patterns don't amortize a full-list
+    // warm — see populateAllNodes): it must succeed, add no entries, and leave reads correct.
     const before = view.chunks.state.children_nodes.count();
     try view.prefetchAll();
-    try std.testing.expectEqual(before + 1, view.chunks.state.children_nodes.count());
+    try std.testing.expectEqual(before, view.chunks.state.children_nodes.count());
 
     for (values, 0..) |v, idx| {
         try std.testing.expectEqual(v, try view.get(idx));
     }
-    // No new navigation entry: the get(i) above reused the prefetched chunked-leaf id.
-    try std.testing.expectEqual(before + 1, view.chunks.state.children_nodes.count());
 }
 
 test "TreeView list push batches before commit" {

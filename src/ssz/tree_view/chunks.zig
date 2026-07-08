@@ -193,10 +193,8 @@ pub fn BasicPackedChunks(
 
         /// Warm the chunk-node cache for a bulk read without allocating or decoding:
         /// Warm the `children_nodes` navigation cache for every leaf so a later per-element
-        /// `get`/`set` skips the O(depth) walk from the root. For chunked_leaf layouts this warms
-        /// one entry per chunked leaf (each serving `K * items_per_chunk` elements). It does NOT
-        /// speed up `getAllInto` (that batches its own walk) — the consumer is per-element access,
-        /// e.g. increase/decreaseBalance during block processing on a reloaded state.
+        /// `get`/`set` skips the O(depth) walk from the root. No-op for chunked_leaf layouts (see
+        /// `populateAllNodes`): their access patterns don't amortize a full-list warm.
         pub fn prefetchAll(self: *Self, len: usize) !void {
             if (len == 0) return;
             const chunk_count = (len + items_per_chunk - 1) / items_per_chunk;
@@ -300,27 +298,23 @@ pub fn BasicPackedChunks(
         }
 
         fn populateAllNodes(self: *Self, chunk_count: usize) !void {
+            // No-op for chunked_leaf. Its consumers don't benefit from an eager full-list warm:
+            // `getAllInto` batches its own `getNodesAtDepth` and ignores this cache, and per-element
+            // access (increase/decreaseBalance during block processing) touches only a small subset,
+            // below the crossover where warming all leaves pays off — measured ~1024 leaves vs a
+            // realistic block's ~540 (bench/beacon_node/prefetch_effect.zig). Non-chunked_leaf lists
+            // keep the warm; the getter reads this cache per chunk.
+            if (comptime use_chunked_leaf) return;
+
             if (chunk_count == 0) return;
 
-            // Warm `children_nodes` at the level a per-element `get`/`set` navigates to, so the
-            // first access to each leaf skips the O(depth) walk from the root. `getAllInto` does
-            // not read this cache (it batches its own `getNodesAtDepth`); the consumer is
-            // per-element access on the reloaded state — e.g. increase/decreaseBalance during
-            // block processing. One batch walk + one entry per node, keyed by the same gindex the
-            // getter uses.
-            const depth = if (comptime use_chunked_leaf) chunked_leaf_depth else chunk_depth;
-            const node_count = if (comptime use_chunked_leaf)
-                (chunk_count + ChunkedLeaf.K - 1) / ChunkedLeaf.K
-            else
-                chunk_count;
-
-            const nodes = try self.state.allocator.alloc(Node.Id, node_count);
+            const nodes = try self.state.allocator.alloc(Node.Id, chunk_count);
             defer self.state.allocator.free(nodes);
 
-            try self.state.root.getNodesAtDepth(self.state.pool, depth, 0, nodes);
+            try self.state.root.getNodesAtDepth(self.state.pool, chunk_depth, 0, nodes);
 
-            for (nodes, 0..) |node, i| {
-                const gindex = Gindex.fromDepth(depth, i);
+            for (nodes, 0..) |node, chunk_idx| {
+                const gindex = Gindex.fromDepth(chunk_depth, chunk_idx);
                 const gop = try self.state.children_nodes.getOrPut(self.state.allocator, gindex);
                 if (!gop.found_existing) {
                     gop.value_ptr.* = node;
