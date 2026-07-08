@@ -115,7 +115,7 @@ pub fn getExpectedWithdrawals(
         const pending_partial_withdrawals_len = try pending_partial_withdrawals.length();
 
         for (0..pending_partial_withdrawals_len) |_| {
-            const withdrawal = try pending_partial_withdrawals_it.nextValue(undefined);
+            const withdrawal = try pending_partial_withdrawals_it.nextValue();
             if (withdrawal.withdrawable_epoch > epoch or withdrawals_result.withdrawals.items.len == preset.MAX_PENDING_PARTIALS_PER_WITHDRAWALS_SWEEP) {
                 break;
             }

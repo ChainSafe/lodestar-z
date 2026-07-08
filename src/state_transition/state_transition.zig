@@ -138,6 +138,8 @@ pub fn processSlots(
             try state.setSlot(next_slot);
         }
     }
+
+    try state.commit();
 }
 
 pub const TransitionOpts = struct {
@@ -233,11 +235,9 @@ pub fn stateTransition(
     }
     metrics.state_transition.process_block.observe(time.durationSeconds(time.since(io, timer)));
 
-    //
-    // TODO(bing): commit
-    //  const processBlockCommitTimer = metrics?.processBlockCommitTime.startTimer();
-    //  postState.commit();
-    //  processBlockCommitTimer?.();
+    timer = time.start(io);
+    try post_state.commit();
+    metrics.state_transition.process_block_commit.observe(time.durationSeconds(time.since(io, timer)));
 
     try metrics.state_transition.onPostState(post_cached_state);
 
@@ -245,15 +245,12 @@ pub fn stateTransition(
     if (opts.verify_state_root) {
         timer = time.start(io);
         const post_state_root = try post_state.hashTreeRoot();
-        try metrics.state_transition.state_hash_tree_root.observe(.{ .source = .block_transition }, time.durationSeconds(time.since(io, timer)));
+        try metrics.state_transition.state_hash_tree_root.observe(.{ .source = .state_transition }, time.durationSeconds(time.since(io, timer)));
 
         const block_state_root = block.stateRoot();
         if (!std.mem.eql(u8, post_state_root, block_state_root)) {
             return error.InvalidStateRoot;
         }
-    } else {
-        // Even if we don't verify the state_root, commit the tree changes
-        try post_state.commit();
     }
 
     return post_cached_state;
