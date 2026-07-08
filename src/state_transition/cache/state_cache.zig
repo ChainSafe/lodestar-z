@@ -106,23 +106,16 @@ pub const CachedBeaconState = struct {
         preload_validators_and_balances: bool = false,
     };
 
-    /// Reload `state_bytes` against this state into a new `*CachedBeaconState`, reusing this state's
-    /// node pool and the SHARED pubkey maps (seed-diff: unchanged validator/inactivity subtrees are
-    /// reused, not re-deserialized). `seed_validators_bytes` (pre-serialized validators) lets the diff
-    /// skip re-serializing; null serializes internally. Caller owns the result.
+    /// Reload `state_bytes` into a new `*CachedBeaconState`, using this state as the seed (unchanged
+    /// validator/inactivity subtrees are reused, not re-deserialized). `seed_validators_bytes` is the
+    /// seed's pre-serialized validators (null serializes internally). Caller owns the result.
     pub fn loadOtherState(self: *CachedBeaconState, allocator: Allocator, config: *const BeaconConfig, state_bytes: []const u8, seed_validators_bytes: ?[]const u8, opts: LoadOtherStateOpts) !*CachedBeaconState {
-        // Seed-diff reload: reuse the seed's unchanged validator/inactivity-score subtrees instead of
-        // a full re-deserialize, saving the ~500ms re-hash of those large lists on each disk fault-in.
         const migrate = try loadState(allocator, config, self.state, state_bytes, seed_validators_bytes);
-        // `modified_validators` is owned regardless of later failures and unused here; free it first.
         allocator.free(migrate.modified_validators);
 
-        // Own the loaded state by-value until it is moved onto the heap below; `null` once moved.
         var loaded_state: ?AnyBeaconState = migrate.state;
         errdefer if (loaded_state) |*s| s.deinit();
 
-        // Move the loaded state onto the heap; own the slot + contents until `createCachedBeaconState`
-        // takes them — `null` once transferred, then `destroyState` reclaims it.
         const any_state = try allocator.create(AnyBeaconState);
         any_state.* = loaded_state.?;
         loaded_state = null;
@@ -142,8 +135,7 @@ pub const CachedBeaconState = struct {
 
         const new_cached = try createCachedBeaconState(allocator, any_state, immutable, .{
             .skip_sync_committee_cache = fork == .phase0,
-            // The pubkey maps borrowed above are shared and already populated, so syncing the loaded
-            // state's validators into them would just redundantly re-scan all of them.
+            // Pubkey maps are shared + already populated; re-syncing would just re-scan them.
             .skip_sync_pubkeys = true,
         });
         heap_state = null;

@@ -7,7 +7,6 @@ const minimal_chain_config = @import("config").minimal.chain_config;
 const types = @import("consensus_types");
 const hex = @import("hex");
 const Epoch = types.primitive.Epoch.Type;
-const ElectraBeaconState = types.electra.BeaconState.Type;
 const BLSPubkey = types.primitive.BLSPubkey.Type;
 const ValidatorIndex = types.primitive.ValidatorIndex.Type;
 const preset = @import("preset").preset;
@@ -56,9 +55,9 @@ fn forkActivationEpoch(config: ChainConfig, comptime fork: ForkSeq) Epoch {
     };
 }
 
-/// Generate + allocate a BeaconState of `fork`; the consumer deinits and destroys it. Fork-generic
-/// port of TS `generateState` — common fields for all forks, then the altair+ additions
-/// (participation, inactivity scores, sync committees) under a comptime fork guard.
+/// Generate + allocate a BeaconState of `fork`; the consumer deinits and destroys it. Common
+/// fields for all forks, then the altair+ additions (participation, inactivity scores, sync
+/// committees) under a comptime fork guard.
 pub fn generateState(comptime fork: ForkSeq, allocator: Allocator, pool: *Node.Pool, chain_config: ChainConfig, validator_count: usize) !*AnyBeaconState {
     const StateSsz = beaconStateSsz(fork);
 
@@ -214,7 +213,7 @@ pub const TestCachedBeaconState = struct {
     epoch_transition_cache: *state_transition.EpochTransitionCache,
 
     pub const Options = struct {
-        /// The fork of the generated state. Mirrors TS `generateState(opts, getConfig(fork, ...))`.
+        /// The fork of the generated state.
         fork: ForkSeq = .electra,
         /// `fork`'s activation epoch; null keeps the active chain config's. 0 activates `fork` (and
         /// all priors) at genesis so low-slot persisted states resolve as `fork`.
@@ -306,7 +305,8 @@ pub const TestCachedBeaconState = struct {
     }
 };
 
-/// get a ChainConfig for spec test, refer to https://github.com/ChainSafe/lodestar/blob/v1.35.0/packages/beacon-node/test/utils/config.ts#L9
+/// A ChainConfig that activates `fork` at `fork_epoch` and every prior fork at genesis, so a state
+/// at any slot in `fork`'s range resolves to `fork`.
 pub fn getConfig(config: ChainConfig, fork: ForkSeq, fork_epoch: Epoch) ChainConfig {
     switch (fork) {
         .phase0 => return config,
