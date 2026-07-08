@@ -229,16 +229,19 @@ pub const TestCachedBeaconState = struct {
     fn initForFork(comptime fork: ForkSeq, allocator: Allocator, pool: *Node.Pool, validator_count: usize, fork_epoch_opt: ?Epoch) !TestCachedBeaconState {
         const fork_epoch = fork_epoch_opt orelse forkActivationEpoch(active_chain_config, fork);
         const chain_config = getConfig(active_chain_config, fork, fork_epoch);
-        var state = try generateState(fork, allocator, pool, chain_config, validator_count);
-        errdefer {
-            state.deinit();
-            allocator.destroy(state);
-        }
-
+        // initFromState takes ownership of `state`, freeing it on any failure.
+        const state = try generateState(fork, allocator, pool, chain_config, validator_count);
         return initFromState(allocator, pool, state, fork, fork_epoch);
     }
 
     pub fn initFromState(allocator: Allocator, pool: *Node.Pool, state: *AnyBeaconState, fork: ForkSeq, fork_epoch: Epoch) !TestCachedBeaconState {
+        // Owns `state` until createCachedBeaconState takes it over; `null` once transferred.
+        var owned_state: ?*AnyBeaconState = state;
+        errdefer if (owned_state) |s| {
+            s.deinit();
+            allocator.destroy(s);
+        };
+
         const pubkey_index_map = try allocator.create(PubkeyIndexMap);
         pubkey_index_map.* = PubkeyIndexMap.init(allocator);
         errdefer {
@@ -269,6 +272,11 @@ pub const TestCachedBeaconState = struct {
             .skip_sync_committee_cache = state.forkSeq() == .phase0,
             .skip_sync_pubkeys = false,
         });
+        owned_state = null;
+        errdefer {
+            cached_state.deinit();
+            allocator.destroy(cached_state);
+        }
 
         const epoch_transition_cache = try allocator.create(state_transition.EpochTransitionCache);
         errdefer allocator.destroy(epoch_transition_cache);
