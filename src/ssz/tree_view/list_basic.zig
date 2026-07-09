@@ -268,12 +268,6 @@ pub fn ListBasicTreeView(comptime ST: type) type {
             return self.chunks.getAllInto(list_length, values);
         }
 
-        /// Warm the chunk-node cache for every element without allocating or decoding.
-        /// A no-op for chunked_leaf layouts, which cache nothing on bulk read.
-        pub fn prefetchAll(self: *Self) !void {
-            try self.chunks.prefetchAll(try self.length());
-        }
-
         pub fn push(self: *Self, value: Element) !void {
             const list_length = try self.length();
             if (list_length >= ST.limit) {
@@ -596,66 +590,6 @@ test "TreeView list getAllAlloc spans multiple chunks" {
     defer allocator.free(filled);
 
     try std.testing.expectEqualSlices(u16, values[0..], filled);
-}
-
-test "TreeView basic list prefetchAll warms chunk-node cache (non-chunked_leaf)" {
-    const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 512 });
-    defer pool.deinit();
-
-    const Uint32 = UintType(32);
-    // 32 / 4 = 8 items per chunk; 20 items => 3 chunks.
-    const ListType = FixedListType(Uint32, 64, .{});
-
-    var list: ListType.Type = .empty;
-    defer list.deinit(allocator);
-    var values: [20]u32 = undefined;
-    for (&values, 0..) |*val, idx| val.* = @intCast(idx * 7 + 1);
-    try list.appendSlice(allocator, &values);
-
-    const root_node = try ListType.tree.fromValue(&pool, &list);
-    var view = try ListType.TreeView.init(allocator, &pool, root_node);
-    defer view.deinit();
-
-    // init() already staged the length node; measure the prefetch delta from there.
-    const before = view.chunks.state.children_nodes.count();
-
-    try view.prefetchAll();
-
-    // One staged chunk node per populated chunk (20 items / 8 per chunk = 3).
-    try std.testing.expectEqual(before + 3, view.chunks.state.children_nodes.count());
-
-    for (values, 0..) |v, idx| {
-        try std.testing.expectEqual(v, try view.get(idx));
-    }
-}
-
-test "TreeView basic list prefetchAll is a no-op for chunked_leaf layouts" {
-    const allocator = std.testing.allocator;
-    var pool = try Node.Pool.init(.{ .page_allocator = allocator, .allocator = allocator, .pool_size = 1024 });
-    defer pool.deinit();
-
-    const ListType = FixedListType(UintType(64), 1 << 20, .{ .chunked_leaf = true });
-
-    var list: ListType.Type = .empty;
-    defer list.deinit(allocator);
-    var values: [10]u64 = undefined;
-    for (&values, 0..) |*val, idx| val.* = @intCast(idx * 11 + 3);
-    try list.appendSlice(allocator, &values);
-
-    const root_node = try ListType.tree.fromValue(&pool, &list);
-    var view = try ListType.TreeView.init(allocator, &pool, root_node);
-    defer view.deinit();
-
-    // Chunked_leaf prefetch is a deliberate no-op (its access patterns don't amortize a full-list
-    // warm — see populateAllNodes): it must succeed, add no entries, and leave reads correct.
-    const before = view.chunks.state.children_nodes.count();
-    try view.prefetchAll();
-    try std.testing.expectEqual(before, view.chunks.state.children_nodes.count());
-
-    for (values, 0..) |v, idx| {
-        try std.testing.expectEqual(v, try view.get(idx));
-    }
 }
 
 test "TreeView list push batches before commit" {

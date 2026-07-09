@@ -97,19 +97,10 @@ pub const CachedBeaconState = struct {
         return cached_state;
     }
 
-    pub const LoadOtherStateOpts = struct {
-        /// Warm the validator view's per-element cache so a state consumed immediately afterward
-        /// (e.g. block replay / epoch updates that read every validator) doesn't pay the lazy
-        /// per-access cost. Balances are NOT prefetched: their bulk read (`getAllInto`) ignores this
-        /// cache and their per-element access touches too small a subset to amortize a full-list warm
-        /// (measured — bench/beacon_node/prefetch_effect.zig).
-        preload_validators_and_balances: bool = false,
-    };
-
     /// Reload `state_bytes` into a new `*CachedBeaconState`, using this state as the seed (unchanged
     /// validator/inactivity subtrees are reused, not re-deserialized). `seed_validators_bytes` is the
     /// seed's pre-serialized validators (null serializes internally). Caller owns the result.
-    pub fn loadOtherState(self: *CachedBeaconState, allocator: Allocator, config: *const BeaconConfig, state_bytes: []const u8, seed_validators_bytes: ?[]const u8, opts: LoadOtherStateOpts) !*CachedBeaconState {
+    pub fn loadOtherState(self: *CachedBeaconState, allocator: Allocator, config: *const BeaconConfig, state_bytes: []const u8, seed_validators_bytes: ?[]const u8) !*CachedBeaconState {
         const migrate = try loadState(allocator, config, self.state, state_bytes, seed_validators_bytes);
         allocator.free(migrate.modified_validators);
 
@@ -139,15 +130,6 @@ pub const CachedBeaconState = struct {
             .skip_sync_pubkeys = true,
         });
         heap_state = null;
-        errdefer {
-            new_cached.deinit();
-            allocator.destroy(new_cached);
-        }
-
-        if (opts.preload_validators_and_balances) {
-            const validators_view = try new_cached.state.validators();
-            try validators_view.prefetchAll();
-        }
 
         return new_cached;
     }

@@ -191,15 +191,6 @@ pub fn BasicPackedChunks(
             return try self.getAllInto(len, values);
         }
 
-        /// Warm the `children_nodes` navigation cache for every leaf so a later per-element
-        /// `get`/`set` skips the O(depth) walk from the root. No-op for chunked_leaf layouts (see
-        /// `populateAllNodes`): their access patterns don't amortize a full-list warm.
-        pub fn prefetchAll(self: *Self, len: usize) !void {
-            if (len == 0) return;
-            const chunk_count = (len + items_per_chunk - 1) / items_per_chunk;
-            try self.populateAllNodes(chunk_count);
-        }
-
         pub fn getAllInto(
             self: *Self,
             len: usize,
@@ -297,12 +288,8 @@ pub fn BasicPackedChunks(
         }
 
         fn populateAllNodes(self: *Self, chunk_count: usize) !void {
-            // No-op for chunked_leaf. Its consumers don't benefit from an eager full-list warm:
-            // `getAllInto` batches its own `getNodesAtDepth` and ignores this cache, and per-element
-            // access (increase/decreaseBalance during block processing) touches only a small subset,
-            // below the crossover where warming all leaves pays off — measured ~1024 leaves vs a
-            // realistic block's ~540 (bench/beacon_node/prefetch_effect.zig). Non-chunked_leaf lists
-            // keep the warm; the getter reads this cache per chunk.
+            // ChunkedLeaf path doesn't pre-populate per-chunk Ids; getAllInto walks chunked leaves
+            // directly. No-op to keep external API stable.
             if (comptime use_chunked_leaf) return;
 
             if (chunk_count == 0) return;
@@ -487,15 +474,6 @@ pub fn CompositeChunks(
             try self.children_data.put(self.state.allocator, gindex, child_ptr);
             // Do NOT add to self.state.changed (read-only)
             return child_ptr;
-        }
-
-        /// Warm the child-view cache for a bulk read without allocating the result slice:
-        /// the `getAllReadonly` loop minus the output array. Each `getReadonly` caches its
-        /// child view, so a later per-element read is a cache hit.
-        pub fn prefetchAll(self: *Self, len: usize) !void {
-            for (0..len) |i| {
-                _ = try self.getReadonly(i);
-            }
         }
 
         /// Get all child views without tracking changes (read-only).

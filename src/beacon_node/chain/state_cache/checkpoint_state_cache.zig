@@ -413,7 +413,7 @@ pub const PersistentCheckpointStateCache = struct {
         }
 
         const reload_start = time.start(io);
-        const new_cached = try seed.loadOtherState(self.allocator, self.config, state_bytes, seed_validators_bytes, .{ .preload_validators_and_balances = true });
+        const new_cached = try seed.loadOtherState(self.allocator, self.config, state_bytes, seed_validators_bytes);
 
         var owned_cached: ?*CachedBeaconState = new_cached;
         errdefer if (owned_cached) |s| destroyState(s);
