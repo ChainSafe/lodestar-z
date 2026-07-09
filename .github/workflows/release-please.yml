@@ -14,13 +14,23 @@ jobs:
     name: release please
     runs-on: ubuntu-latest
     steps:
-      # Prefer a fine-grained PAT or GitHub App token over the default GITHUB_TOKEN:
-      # PRs and releases created with GITHUB_TOKEN do not trigger other workflows,
-      # so CI would not run on release PRs and publish-bindings would not fire on
-      # release publication. Falls back to GITHUB_TOKEN if the secret is unset.
+      # A fine-grained PAT or GitHub App token is required, not optional:
+      # events created with the default GITHUB_TOKEN do not trigger other
+      # workflows, so CI would not run on release PRs and publish-bindings
+      # would never fire on release publication. Publishing has no manual
+      # trigger, so a missing token must fail loudly here rather than
+      # produce releases that silently never reach npm.
+      - name: Require RELEASE_PLEASE_TOKEN
+        env:
+          RELEASE_PLEASE_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+        run: |
+          if [[ -z "${RELEASE_PLEASE_TOKEN}" ]]; then
+            echo "::error::RELEASE_PLEASE_TOKEN secret is not set. Add a fine-grained PAT or GitHub App token with contents:write and pull-requests:write. See RELEASING.md."
+            exit 1
+          fi
       - name: Run release-please
         uses: googleapis/release-please-action@v4
         with:
-          token: ${{ secrets.RELEASE_PLEASE_TOKEN || secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json

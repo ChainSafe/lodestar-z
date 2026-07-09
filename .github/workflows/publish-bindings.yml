@@ -1,9 +1,10 @@
 name: Publish NAPI Bindings
 on:
-  workflow_dispatch:
-  # Publish automatically when release-please publishes a GitHub release.
-  # The checkout below resolves to the release tag, so the published package
-  # matches the tagged commit exactly.
+  # Publishing happens exclusively when release-please publishes a GitHub
+  # release — there is deliberately no manual trigger. The checkout below
+  # resolves to the release tag, so the published package matches the tagged
+  # commit exactly. To retry a failed publish, rerun the failed workflow run
+  # (`gh run rerun`); it re-executes against the same tag.
   release:
     types: [published]
 
@@ -38,6 +39,14 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
           registry-url: "https://registry.npmjs.org"
           cache: pnpm
+      - name: Verify release tag matches package version
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          TAG="${{ github.event.release.tag_name }}"
+          if [[ "v${VERSION}" != "${TAG}" ]]; then
+            echo "::error::Release tag ${TAG} does not match package.json version v${VERSION}. Releases must be cut via release-please."
+            exit 1
+          fi
       - name: Install Zig
         uses: mlugg/setup-zig@v2
         with:

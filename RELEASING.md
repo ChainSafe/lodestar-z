@@ -16,8 +16,12 @@ into release PRs, changelogs, tags, and GitHub releases.
 4. **Publishing to npm happens automatically.** `publish-bindings.yml` triggers on
    release publication and checks out the release tag, so the published package matches
    the tagged commit exactly. The npm dist-tag is derived from the version
-   (`0.1.2-rc.11` → `rc`, `0.1.2` → `latest`). Manual `workflow_dispatch` remains
-   available as a fallback.
+   (`0.1.2-rc.11` → `rc`, `0.1.2` → `latest`).
+
+There is deliberately no manual publish trigger: the only path to npm is a reviewed
+release PR. The publish workflow additionally refuses to run if the release tag does
+not match `package.json`. If a publish run fails (flaky runner, npm outage), rerun the
+failed run — `gh run rerun <run-id>` — which re-executes against the same tag.
 
 The version in `.release-please-manifest.json` is the source of truth for the last
 released version. Do not hand-edit `package.json` versions in regular PRs.
@@ -57,11 +61,10 @@ every future changelog collect commits all the way back to `v0.1.2-rc.9`.
 
 ## Repository secrets
 
-`RELEASE_PLEASE_TOKEN` (optional but recommended): a fine-grained PAT or GitHub App
-token with `contents: write` and `pull-requests: write` on this repo. GitHub Actions
-does not trigger workflows for events created with the default `GITHUB_TOKEN`, so
-without this secret:
-
-- CI does not run on release PRs (close/reopen the PR to trigger it manually), and
-- `publish-bindings.yml` does not fire when the release is published (run it via
-  `workflow_dispatch` instead).
+`RELEASE_PLEASE_TOKEN` (required): a fine-grained PAT or GitHub App token with
+`contents: write` and `pull-requests: write` on this repo. GitHub Actions does not
+trigger workflows for events created with the default `GITHUB_TOKEN`, so without this
+secret CI would not run on release PRs and `publish-bindings.yml` would never fire on
+release publication. Since publishing has no manual trigger, the release-please
+workflow fails fast if the secret is missing rather than creating releases that
+silently never reach npm.
