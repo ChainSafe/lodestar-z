@@ -24,7 +24,7 @@ jobs:
       # workflow run, gated on the release-please output. One known limitation
       # of the default token: CI does not trigger on the release PR it creates,
       # so its required checks stay pending until a maintainer closes and
-      # reopens the PR (see RELEASING.md).
+      # reopens the PR.
       - name: Run release-please
         id: release
         uses: googleapis/release-please-action@v4
