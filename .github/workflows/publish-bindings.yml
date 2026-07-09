@@ -1,20 +1,47 @@
-name: Publish NAPI Bindings
+name: Release
 on:
-  # Publishing happens exclusively when release-please publishes a GitHub
-  # release — there is deliberately no manual trigger. The checkout below
-  # resolves to the release tag, so the published package matches the tagged
-  # commit exactly. To retry a failed publish, rerun the failed workflow run
-  # (`gh run rerun`); it re-executes against the same tag.
-  release:
-    types: [published]
+  push:
+    branches:
+      - main
 
 env:
   ZIG_VERSION: "0.16.0"
   NODE_VERSION: "24"
 
 jobs:
+  release-please:
+    name: release please
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+    steps:
+      # Runs with the default GITHUB_TOKEN — no PAT required. Publishing does
+      # not depend on event chaining: it runs as the next job in this same
+      # workflow run, gated on the release-please output. One known limitation
+      # of the default token: CI does not trigger on the release PR it creates,
+      # so its required checks stay pending until a maintainer closes and
+      # reopens the PR (see RELEASING.md).
+      - name: Run release-please
+        id: release
+        uses: googleapis/release-please-action@v4
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
   publish-bindings:
     name: publish bindings
+    needs: release-please
+    # Publishes only in the workflow run where release-please created the
+    # release, i.e. the push of the release PR merge commit — the exact commit
+    # that was tagged. There is deliberately no manual publish trigger, and
+    # hand-created GitHub releases trigger nothing. To retry a failed publish,
+    # rerun the failed job (`gh run rerun --failed`); it re-executes against
+    # the same commit.
+    if: ${{ needs.release-please.outputs.release_created == 'true' }}
     # [Lodestar CI] still runs on Ubuntu 22.04, which ships an incompatible GLIBC version
     # compared to ubuntu-latest runners.
     # This [incompatibility] causes DLOPEN to fail when loading bindings on those runners.
@@ -39,14 +66,6 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
           registry-url: "https://registry.npmjs.org"
           cache: pnpm
-      - name: Verify release tag matches package version
-        run: |
-          VERSION=$(node -p "require('./package.json').version")
-          TAG="${{ github.event.release.tag_name }}"
-          if [[ "v${VERSION}" != "${TAG}" ]]; then
-            echo "::error::Release tag ${TAG} does not match package.json version v${VERSION}. Releases must be cut via release-please."
-            exit 1
-          fi
       - name: Install Zig
         uses: mlugg/setup-zig@v2
         with:
@@ -59,7 +78,7 @@ jobs:
         run: |
           pnpm biome ci
       - name: Determine npm dist tag
-        id: detect_dist_tag 
+        id: detect_dist_tag
         run: |
           VERSION=$(node -p "require('./package.json').version")
           if [[ "$VERSION" == *-* ]]; then
@@ -78,4 +97,3 @@ jobs:
           pnpm zapi prepublish
           rm -rf zig-out/lib
           pnpm zapi publish --access public -- --ignore-scripts --provenance ${{ steps.detect_dist_tag.outputs.tag_flag }}
-

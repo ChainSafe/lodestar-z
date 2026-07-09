@@ -13,15 +13,17 @@ into release PRs, changelogs, tags, and GitHub releases.
    version in `package.json`, `build.zig.zon`, and `.release-please-manifest.json`.
 3. **Merging the release PR cuts the release.** Release-please creates the git tag
    (`vX.Y.Z-rc.N`), a GitHub release with the changelog, and updates `CHANGELOG.md`.
-4. **Publishing to npm happens automatically.** `publish-bindings.yml` triggers on
-   release publication and checks out the release tag, so the published package matches
-   the tagged commit exactly. The npm dist-tag is derived from the version
-   (`0.1.2-rc.11` → `rc`, `0.1.2` → `latest`).
+4. **Publishing to npm happens automatically.** When release-please reports that it
+   created a release, the `publish bindings` job in the same workflow run builds and
+   publishes — from the release PR's merge commit, which is exactly the commit that
+   was tagged. The npm dist-tag is derived from the version (`0.1.2-rc.11` → `rc`,
+   `0.1.2` → `latest`).
 
 There is deliberately no manual publish trigger: the only path to npm is a reviewed
-release PR. The publish workflow additionally refuses to run if the release tag does
-not match `package.json`. If a publish run fails (flaky runner, npm outage), rerun the
-failed run — `gh run rerun <run-id>` — which re-executes against the same tag.
+release PR. Because publishing is gated on release-please's own output in the same
+workflow run (not on a `release` event), a hand-created GitHub release triggers
+nothing. If the publish job fails (flaky runner, npm outage), rerun it —
+`gh run rerun <run-id> --failed` — which re-executes against the same commit.
 
 The version in `.release-please-manifest.json` is the source of truth for the last
 released version. Do not hand-edit `package.json` versions in regular PRs.
@@ -59,12 +61,18 @@ its own. **Remove the `last-release-sha` line once the first release-please rele
 is merged** — it is never ignored automatically, and leaving it in place would make
 every future changelog collect commits all the way back to `v0.1.2-rc.9`.
 
-## Repository secrets
+## CI on release PRs
 
-`RELEASE_PLEASE_TOKEN` (required): a fine-grained PAT or GitHub App token with
-`contents: write` and `pull-requests: write` on this repo. GitHub Actions does not
-trigger workflows for events created with the default `GITHUB_TOKEN`, so without this
-secret CI would not run on release PRs and `publish-bindings.yml` would never fire on
-release publication. Since publishing has no manual trigger, the release-please
-workflow fails fast if the secret is missing rather than creating releases that
-silently never reach npm.
+No token or secret is required — release-please and publishing run in one workflow
+with the default `GITHUB_TOKEN` (same pattern as
+[js-libp2p-quic](https://github.com/ChainSafe/js-libp2p-quic)).
+
+The one limitation of the default token: GitHub does not trigger workflows for events
+it creates, so CI does not run automatically on the release PR, and `main`'s required
+`build & test` checks stay pending. **Close and reopen the release PR** to trigger CI
+(a human-initiated event runs workflows normally). This is low-stakes — the release PR
+only contains machine-generated version bumps and the changelog; the code it releases
+already passed CI when it was merged, and the publish job rebuilds everything anyway.
+
+If the close/reopen dance ever gets annoying, pass a fine-grained PAT via the
+`token` input of the release-please action and release PRs will get CI automatically.
