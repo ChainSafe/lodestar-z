@@ -399,98 +399,104 @@ const test_cfg = ClockConfig{
     .slots_per_epoch = 32,
     .maximum_gossip_clock_disparity_ms = 500,
 };
+const test_genesis_ms: u64 = test_cfg.genesis_time_sec * 1000;
+const test_disparity_ms: u64 = test_cfg.maximum_gossip_clock_disparity_ms;
+const test_slot_1_start_ms: u64 = test_genesis_ms + test_cfg.slot_duration_ms;
 
 test "gossip disparity: far from boundary" {
-    try testing.expectEqual(@as(?Slot, 0), slotWithGossipDisparity(test_cfg, 103_000));
-    try testing.expect(
-        isCurrentSlotGivenGossipDisparity(test_cfg, 0, 103_000),
-    );
-    try testing.expect(
-        !isCurrentSlotGivenGossipDisparity(test_cfg, 1, 103_000),
-    );
+    const now = test_genesis_ms + 3_000;
+    try testing.expectEqual(@as(?Slot, 0), slotWithGossipDisparity(test_cfg, now));
+    try testing.expect(isCurrentSlotGivenGossipDisparity(test_cfg, 0, now));
+    try testing.expect(!isCurrentSlotGivenGossipDisparity(test_cfg, 1, now));
 }
 
 test "gossip disparity: near next slot boundary" {
-    try testing.expectEqual(@as(?Slot, 1), slotWithGossipDisparity(test_cfg, 111_600));
-    try testing.expect(
-        isCurrentSlotGivenGossipDisparity(test_cfg, 1, 111_600),
-    );
+    const now = test_slot_1_start_ms - 400;
+    try testing.expectEqual(@as(?Slot, 1), slotWithGossipDisparity(test_cfg, now));
+    try testing.expect(isCurrentSlotGivenGossipDisparity(test_cfg, 1, now));
 }
 
 test "gossip disparity: just after slot boundary" {
     try testing.expect(
-        isCurrentSlotGivenGossipDisparity(test_cfg, 0, 112_300),
+        isCurrentSlotGivenGossipDisparity(test_cfg, 0, test_slot_1_start_ms + 300),
     );
 }
 
-test "gossip disparity: exact threshold (500ms) applies inclusively" {
-    // 111_500 is 500 ms before slot 1's 112_000 start — inclusive edge; 111_499 is 1 ms past.
-    try testing.expectEqual(@as(?Slot, 1), slotWithGossipDisparity(test_cfg, 111_500));
-    try testing.expect(isCurrentSlotGivenGossipDisparity(test_cfg, 1, 111_500));
+test "gossip disparity: exact threshold applies inclusively" {
+    const edge = test_slot_1_start_ms - test_disparity_ms;
+    try testing.expectEqual(@as(?Slot, 1), slotWithGossipDisparity(test_cfg, edge));
+    try testing.expect(isCurrentSlotGivenGossipDisparity(test_cfg, 1, edge));
 
-    try testing.expectEqual(@as(?Slot, 0), slotWithGossipDisparity(test_cfg, 111_499));
-    try testing.expect(!isCurrentSlotGivenGossipDisparity(test_cfg, 1, 111_499));
+    try testing.expectEqual(@as(?Slot, 0), slotWithGossipDisparity(test_cfg, edge - 1));
+    try testing.expect(!isCurrentSlotGivenGossipDisparity(test_cfg, 1, edge - 1));
 }
 
 test "gossip disparity: pre-genesis slot 0 only within disparity of genesis" {
-    // Genesis 100_000, disparity 500: pre-genesis, only slot 0 is current, and only within 500 ms.
-    try testing.expectEqual(@as(?Slot, null), slotWithGossipDisparity(test_cfg, 99_000));
-    try testing.expect(!isCurrentSlotGivenGossipDisparity(test_cfg, 0, 99_000));
-    try testing.expect(!isCurrentSlotGivenGossipDisparity(test_cfg, 1, 99_000));
+    const far_before = test_genesis_ms - 1_000;
+    try testing.expectEqual(@as(?Slot, null), slotWithGossipDisparity(test_cfg, far_before));
+    try testing.expect(!isCurrentSlotGivenGossipDisparity(test_cfg, 0, far_before));
+    try testing.expect(!isCurrentSlotGivenGossipDisparity(test_cfg, 1, far_before));
 
-    try testing.expectEqual(@as(?Slot, 0), slotWithGossipDisparity(test_cfg, 99_700));
-    try testing.expect(isCurrentSlotGivenGossipDisparity(test_cfg, 0, 99_700));
-    try testing.expect(!isCurrentSlotGivenGossipDisparity(test_cfg, 1, 99_700));
+    const within = test_genesis_ms - 300;
+    try testing.expectEqual(@as(?Slot, 0), slotWithGossipDisparity(test_cfg, within));
+    try testing.expect(isCurrentSlotGivenGossipDisparity(test_cfg, 0, within));
+    try testing.expect(!isCurrentSlotGivenGossipDisparity(test_cfg, 1, within));
 
-    try testing.expectEqual(@as(?Slot, 0), slotWithGossipDisparity(test_cfg, 99_500));
-    try testing.expect(isCurrentSlotGivenGossipDisparity(test_cfg, 0, 99_500));
+    const edge = test_genesis_ms - test_disparity_ms;
+    try testing.expectEqual(@as(?Slot, 0), slotWithGossipDisparity(test_cfg, edge));
+    try testing.expect(isCurrentSlotGivenGossipDisparity(test_cfg, 0, edge));
 
-    try testing.expectEqual(@as(?Slot, null), slotWithGossipDisparity(test_cfg, 99_499));
-    try testing.expect(!isCurrentSlotGivenGossipDisparity(test_cfg, 0, 99_499));
+    try testing.expectEqual(@as(?Slot, null), slotWithGossipDisparity(test_cfg, edge - 1));
+    try testing.expect(!isCurrentSlotGivenGossipDisparity(test_cfg, 0, edge - 1));
 }
 
 test "gossip disparity: pre-genesis with sub-disparity slot duration never advances past 0" {
     // Degenerate config: slot_duration (400 ms) <= disparity (500 ms) guards against `slotAtMs
     // orelse 0` clamping pre-genesis to slot 0 and spuriously reporting slot 1.
     const cfg = ClockConfig{
-        .genesis_time_sec = 100, // genesis_ms = 100_000
+        .genesis_time_sec = 100,
         .slot_duration_ms = 400,
         .slots_per_epoch = 8,
         .maximum_gossip_clock_disparity_ms = 500,
     };
+    const cfg_genesis_ms: u64 = cfg.genesis_time_sec * 1000;
 
-    try testing.expectEqual(@as(?Slot, 0), slotWithGossipDisparity(cfg, 99_999));
-    try testing.expect(!isCurrentSlotGivenGossipDisparity(cfg, 1, 99_999));
+    try testing.expectEqual(@as(?Slot, 0), slotWithGossipDisparity(cfg, cfg_genesis_ms - 1));
+    try testing.expect(!isCurrentSlotGivenGossipDisparity(cfg, 1, cfg_genesis_ms - 1));
 
-    try testing.expectEqual(@as(?Slot, null), slotWithGossipDisparity(cfg, 99_499));
+    try testing.expectEqual(
+        @as(?Slot, null),
+        slotWithGossipDisparity(cfg, cfg_genesis_ms - cfg.maximum_gossip_clock_disparity_ms - 1),
+    );
 }
 
 test "tolerance helpers" {
+    const one_slot = test_cfg.slot_duration_ms;
     try testing.expectEqual(
         @as(?Slot, 2),
-        slotWithFutureToleranceMs(test_cfg, 112_000, 12_000),
+        slotWithFutureToleranceMs(test_cfg, test_slot_1_start_ms, one_slot),
     );
     try testing.expectEqual(
         @as(Slot, 0),
-        slotWithPastToleranceMs(test_cfg, 112_000, 12_000),
+        slotWithPastToleranceMs(test_cfg, test_slot_1_start_ms, one_slot),
     );
-    // Pins operand order: now_ms - tolerance_ms = 136_000ms → slot 3, whereas a
-    // swapped tolerance_ms - now_ms saturates pre-genesis → slot 0.
+    // Pins operand order: a swapped `tolerance_ms - now_ms` saturates pre-genesis → slot 0.
     try testing.expectEqual(
         @as(Slot, 3),
-        slotWithPastToleranceMs(test_cfg, 148_000, 12_000),
+        slotWithPastToleranceMs(test_cfg, test_genesis_ms + 4 * one_slot, one_slot),
     );
     // tolerance > now saturates to 0 ms (pre-genesis → slot 0); a plain `-` would trap.
     try testing.expectEqual(
         @as(Slot, 0),
-        slotWithPastToleranceMs(test_cfg, 50_000, 60_000),
+        slotWithPastToleranceMs(test_cfg, test_genesis_ms, test_genesis_ms + 1),
     );
 }
 
 test "secFromSlot and msFromSlot" {
-    try testing.expectEqual(@as(i64, 6), secFromSlot(test_cfg, 1, 118));
-    try testing.expectEqual(@as(i64, 6000), msFromSlot(test_cfg, 1, 118_000));
-    try testing.expectEqual(@as(i64, 0), secFromSlot(test_cfg, 1, 112));
-    try testing.expectEqual(@as(i64, -12), secFromSlot(test_cfg, 1, 100));
-    try testing.expectEqual(@as(i64, -12000), msFromSlot(test_cfg, 1, 100_000));
+    const slot_1_start_sec = test_slot_1_start_ms / 1000;
+    try testing.expectEqual(@as(i64, 6), secFromSlot(test_cfg, 1, slot_1_start_sec + 6));
+    try testing.expectEqual(@as(i64, 6000), msFromSlot(test_cfg, 1, test_slot_1_start_ms + 6_000));
+    try testing.expectEqual(@as(i64, 0), secFromSlot(test_cfg, 1, slot_1_start_sec));
+    try testing.expectEqual(@as(i64, -12), secFromSlot(test_cfg, 1, test_cfg.genesis_time_sec));
+    try testing.expectEqual(@as(i64, -12000), msFromSlot(test_cfg, 1, test_genesis_ms));
 }
