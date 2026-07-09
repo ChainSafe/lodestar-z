@@ -46,6 +46,15 @@ When ready to ship `0.1.2` (dropping the `-rc.N` suffix), set `"prerelease": fal
 `release-please-config.json`. The next release PR will propose the stable version.
 Set it back to `true` (and the next rc train starts) after the stable release is cut.
 
+## One-time cleanup after the first release
+
+`release-please-config.json` currently pins `"last-release-sha"` to the `v0.1.2-rc.9`
+release commit. This is a bootstrap workaround: the `v0.1.2-rc.10` tag points to a
+commit that is not on `main`, so release-please cannot anchor the changelog range on
+its own. **Remove the `last-release-sha` line once the first release-please release
+is merged** — it is never ignored automatically, and leaving it in place would make
+every future changelog collect commits all the way back to `v0.1.2-rc.9`.
+
 ## Repository secrets
 
 `RELEASE_PLEASE_TOKEN` (optional but recommended): a fine-grained PAT or GitHub App
