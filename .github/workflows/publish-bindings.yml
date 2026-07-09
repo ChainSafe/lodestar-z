@@ -21,10 +21,7 @@ jobs:
     steps:
       # Runs with the default GITHUB_TOKEN — no PAT required. Publishing does
       # not depend on event chaining: it runs as the next job in this same
-      # workflow run, gated on the release-please output. One known limitation
-      # of the default token: CI does not trigger on the release PR it creates,
-      # so its required checks stay pending until a maintainer closes and
-      # reopens the PR.
+      # workflow run, gated on the release-please output.
       - name: Run release-please
         id: release
         uses: googleapis/release-please-action@v4
