@@ -90,4 +90,16 @@ describe("pubkeys", () => {
     const after = pubkeyCache.get(0);
     expect(before).not.toBe(after);
   });
+
+  it("reset clears native and JS-level cache", () => {
+    const before = pubkeyCache.get(0);
+    expect(before).toBeDefined();
+    expect(pubkeyCache.getIndex(keypairs[0].pubkeyBytes)).toBeDefined();
+
+    pubkeyCache.reset();
+
+    expect(pubkeyCache.size).toBe(0);
+    expect(pubkeyCache.get(0)).toBeUndefined();
+    expect(pubkeyCache.getIndex(keypairs[0].pubkeyBytes)).toBeNull();
+  });
 });
