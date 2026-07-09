@@ -19,9 +19,6 @@ jobs:
       release_created: ${{ steps.release.outputs.release_created }}
       tag_name: ${{ steps.release.outputs.tag_name }}
     steps:
-      # Runs with the default GITHUB_TOKEN — no PAT required. Publishing does
-      # not depend on event chaining: it runs as the next job in this same
-      # workflow run, gated on the release-please output.
       - name: Run release-please
         id: release
         uses: googleapis/release-please-action@v4
@@ -32,12 +29,6 @@ jobs:
   publish-bindings:
     name: publish bindings
     needs: release-please
-    # Publishes only in the workflow run where release-please created the
-    # release, i.e. the push of the release PR merge commit — the exact commit
-    # that was tagged. There is deliberately no manual publish trigger, and
-    # hand-created GitHub releases trigger nothing. To retry a failed publish,
-    # rerun the failed job (`gh run rerun --failed`); it re-executes against
-    # the same commit.
     if: ${{ needs.release-please.outputs.release_created == 'true' }}
     # [Lodestar CI] still runs on Ubuntu 22.04, which ships an incompatible GLIBC version
     # compared to ubuntu-latest runners.
