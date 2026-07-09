@@ -1,4 +1,4 @@
-//! Pure slot/epoch arithmetic and policy helpers.
+//! Pure slot/epoch arithmetic and gossip-disparity/tolerance helpers.
 //!
 //! No state, no allocation, no I/O.  Every function is comptime-compatible.
 //! The only `null` is pre-genesis (a `<` comparison); arithmetic uses plain
@@ -111,17 +111,11 @@ pub fn msUntilNextSlot(config: ClockConfig, now_ms: u64) u64 {
 /// Returns the slot the network may be advancing to, accounting for gossip
 /// clock disparity, or null pre-genesis when no slot is current yet.
 ///
-/// Base slot and disparity window come from the same `now_ms`, so they can't
-/// disagree — a fresh read could sit past the boundary being compared.
-///
 /// Per phase0/p2p-interface.md, gossip validation rejects future messages with
-/// strict `<` (`current_time + MAXIMUM_GOSSIP_CLOCK_DISPARITY < message_time`),
-/// so the boundary case (exactly equal) is accepted — hence `<=` here.
+/// strict `<`, hence `<=` here.
 ///
 /// Assumes the disparity window reaches at most the adjacent slot — true
-/// for every real config (500 ms disparity vs seconds-long slots). A
-/// config where disparity approaches or exceeds the slot duration is not
-/// supported.
+/// for every real config (500 ms disparity vs seconds-long slots).
 pub fn slotWithGossipDisparity(config: ClockConfig, now_ms: u64) ?Slot {
     const current = slotAtMs(config, now_ms) orelse {
         // Pre-genesis the wall slot is conceptually negative, so slot 0 is
@@ -141,8 +135,7 @@ pub fn slotWithGossipDisparity(config: ClockConfig, now_ms: u64) ?Slot {
     return current;
 }
 
-/// See `slotWithGossipDisparity` for the `<=` rationale and the
-/// single-snapshot semantics — both apply here too.
+/// See `slotWithGossipDisparity` for the `<=` rationale.
 pub fn isCurrentSlotGivenGossipDisparity(config: ClockConfig, slot: Slot, now_ms: u64) bool {
     const current = slotAtMs(config, now_ms) orelse {
         // Pre-genesis the wall slot is conceptually negative, so slot 0 is

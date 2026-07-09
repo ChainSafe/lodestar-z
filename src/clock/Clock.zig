@@ -367,8 +367,6 @@ const Event = union(enum) {
     epoch: Epoch,
 };
 
-// Holds only what advancing needs — config and the slot cursor — so the
-// iterator cannot dispatch (no listeners, waiters, or io in reach).
 const AdvanceIterator = struct {
     config: ClockConfig,
     current_slot: *?Slot,
