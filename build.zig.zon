@@ -1,6 +1,6 @@
 .{
     .name = .state_transition_z,
-    .version = "0.0.0",
+    .version = "0.1.2-rc.9", // x-release-please-version
     .fingerprint = 0xd1ddb6abe067ee04,
     .minimum_zig_version = "0.16.0",
     .paths = .{

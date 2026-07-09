@@ -1,6 +1,11 @@
 name: Publish NAPI Bindings
 on:
   workflow_dispatch:
+  # Publish automatically when release-please publishes a GitHub release.
+  # The checkout below resolves to the release tag, so the published package
+  # matches the tagged commit exactly.
+  release:
+    types: [published]
 
 env:
   ZIG_VERSION: "0.16.0"
