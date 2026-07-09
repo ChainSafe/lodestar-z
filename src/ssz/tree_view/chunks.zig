@@ -519,6 +519,11 @@ pub fn CompositeChunks(
 
         /// Fills `values` with all element values.
         pub fn getAllValuesInto(self: *Self, allocator: Allocator, values: []Value) ![]Value {
+            return self.getValuesByRangeInto(allocator, 0, values);
+        }
+
+        /// Fills `values` with element values starting at `start_index`.
+        pub fn getValuesByRangeInto(self: *Self, allocator: Allocator, start_index: usize, values: []Value) ![]Value {
             const len = values.len;
             if (len == 0) return values;
 
@@ -526,10 +531,10 @@ pub fn CompositeChunks(
                 return error.MustCommitBeforeBulkRead;
             }
 
-            const nodes = try allocator.alloc(Node.Id, len);
-            defer allocator.free(nodes);
+            const nodes = try self.state.allocator.alloc(Node.Id, len);
+            defer self.state.allocator.free(nodes);
 
-            try self.state.root.getNodesAtDepth(self.state.pool, chunk_depth, 0, nodes);
+            try self.state.root.getNodesAtDepth(self.state.pool, chunk_depth, start_index, nodes);
 
             for (nodes, 0..) |node, i| {
                 if (comptime @hasDecl(ST.Element, "deinit")) {
