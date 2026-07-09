@@ -6,9 +6,9 @@
 //! loop runs as a single cooperative fiber.
 //!
 //! Designed for a cooperative single-fiber `std.Io` backend (e.g. zio).
-//! `start()` and `waitForSlot()` use `std.Io.concurrent` so a backend
-//! that can't guarantee concurrent execution surfaces as
-//! `error.ConcurrencyUnavailable` rather than deadlocking.
+//! `start()` uses `std.Io.concurrent` so a backend that can't guarantee
+//! concurrent execution surfaces as `error.ConcurrencyUnavailable` rather
+//! than deadlocking.
 //!
 //! No mutex is used: under a single-fiber backend the only context switches
 //! are at `await`/`sleep` yield points, and every read-modify of shared state
@@ -17,15 +17,16 @@
 //!   1. Listener callbacks run to completion inside an emit and must NOT
 //!      yield (no `await`/`sleep`). Safe to call from a callback:
 //!        - onSlot / offSlot / onEpoch / offEpoch and stop;
-//!        - any current* / isCurrent* accessor and the pure-read helpers;
-//!        - waitForSlot, though awaiting or cancelling its result would yield.
+//!        - any current* / isCurrent* accessor and the pure-read helpers.
+//!      `waitForSlot` suspends the caller, so it must NEVER be called from a
+//!      listener callback.
 //!      A query while the cache lags the wall (a backlog) nests a
 //!      dispatch: later slots/epochs reach every listener before the in-flight
 //!      event finishes, yet each (listener, event) fires exactly once. Depth is
 //!      bounded by the backlog: each level drains at least one backlogged slot;
 //!      deeper needs the wall to cross another boundary mid-cascade.
-//!   2. `cancel()` removes its waiter from the queue *before* it yields, so a
-//!      concurrent `dispatchWaiters` can no longer observe it.
+//!   2. A wake-up pops its waiter from the queue *before* setting the event, so
+//!      a resuming `waitForSlot` frame is never still referenced by the queue.
 //! A multi-executor backend (zio with `executors > 1`, or `std.Io.Threaded`)
 //! would break both and require real locking.
 
@@ -70,8 +71,6 @@ pub const Error = error{
 };
 
 const WaitState = struct {
-    io: std.Io,
-    allocator: Allocator,
     event: std.Io.Event = .unset,
     aborted: bool = false,
 };
@@ -113,6 +112,10 @@ pub fn init(
         .current_slot = slot_math.slotAtMs(config, time.nowMs(io_handle)),
         .waiters = WaiterQueue.initContext({}),
     };
+    // Reserve the full waiter capacity up front so enqueuing a waiter in
+    // waitForSlot cannot allocate — once WaiterLimitReached is ruled out the
+    // push is infallible, keeping the suspend path off the error track.
+    try self.waiters.ensureTotalCapacity(allocator, max_waiters);
 }
 
 /// Start the auto-advance loop.  Idempotent; second call is a no-op.
@@ -261,118 +264,39 @@ pub fn msFromSlot(self: *const Clock, slot: Slot, to_ms: ?u64) i64 {
     return slot_math.msFromSlot(self.config, slot, to_ms orelse time.nowMs(self.io));
 }
 
-/// Return type from `waitForSlot`. The caller MUST either:
-///   - call `await()` to wait for the target slot and release resources, OR
-///   - call `cancel()` to abort and release resources, OR
-///   - call `stop()` on the Clock and THEN `await()` to get `error.Aborted`.
-/// Dropping a WaitForSlotResult without calling `await` or `cancel` leaks
-/// the internal WaitState.
+/// Suspend the calling fiber until the clock reaches `target`, then return.
+/// Returns immediately if `target` has already been reached, and
+/// `error.Aborted` if the clock is stopped before or during the wait.
 ///
-/// Idiomatic usage with `errdefer`:
-///   var fut = try clock.waitForSlot(target);
-///   errdefer fut.cancel();
-///   try fut.await(io);
-pub const WaitForSlotResult = struct {
-    inner: std.Io.Future(Error!void),
-    state: ?*WaitState,
-    clock: ?*Clock,
-
-    /// Create an immediately-resolved result (no async work needed).
-    /// Relies on `std.Io.Future.await` returning `.result` when `.any_future == null`.
-    fn immediate(result: Error!void) WaitForSlotResult {
-        return .{
-            .inner = .{ .any_future = null, .result = result },
-            .state = null,
-            .clock = null,
-        };
-    }
-
-    pub fn await(self: *WaitForSlotResult, io: std.Io) Error!void {
-        const result = self.inner.await(io);
-        // Free state only AFTER the fiber returns, so it can't observe a
-        // freed `state.aborted` between event-wake and its own return.
-        if (self.state) |s| s.allocator.destroy(s);
-        self.state = null;
-        self.clock = null;
-        return result;
-    }
-
-    /// Abort a pending wait and release its resources.  Idempotent — safe
-    /// to call on an already-awaited, already-cancelled, or immediate result.
-    pub fn cancel(self: *WaitForSlotResult) void {
-        const state = self.state orelse return;
-        // Remove from waiter queue before freeing, so abortAllWaiters
-        // won't dereference the freed state pointer.
-        if (self.clock) |clock| {
-            for (clock.waiters.items, 0..) |entry, i| {
-                if (entry.state == state) {
-                    _ = clock.waiters.popIndex(i);
-                    break;
-                }
-            }
-        }
-        state.aborted = true;
-        state.event.set(state.io);
-        // Must await the fiber so it finishes before we free its state.
-        // The fiber returns error.Aborted (expected) or {} (already dispatched).
-        _ = self.inner.await(state.io) catch |err| {
-            std.debug.assert(err == error.Aborted);
-        };
-        state.allocator.destroy(state);
-        self.state = null;
-        self.clock = null;
-    }
-};
-
-/// Return a future that resolves when the clock reaches `target`.
-/// See `WaitForSlotResult` for the caller's obligations.
-pub fn waitForSlot(self: *Clock, target: Slot) Error!WaitForSlotResult {
-    if (self.stopped) {
-        return WaitForSlotResult.immediate(error.Aborted);
-    }
+/// Reachable errors: {Aborted, WaiterLimitReached}.
+///
+/// The wait is not a cancellation point: an external fiber-cancel takes effect
+/// only once the wait resolves via dispatch or stop(). A wait on a clock that
+/// is never started and never read blocks until stop().
+///
+/// Must NEVER be called from a listener callback.
+pub fn waitForSlot(self: *Clock, target: Slot) Error!void {
+    if (self.stopped) return error.Aborted;
     _ = self.catchUp();
     if (self.current_slot) |slot| {
-        if (slot >= target) {
-            return WaitForSlotResult.immediate({});
-        }
+        if (slot >= target) return;
     }
-    if (self.waiters.count() >= max_waiters) {
-        return error.WaiterLimitReached;
-    }
+    if (self.waiters.count() >= max_waiters) return error.WaiterLimitReached;
+    // catchUp ran listener callbacks that may have called stop(); re-check
+    // after the reached-check so a callback that both advanced past target and
+    // stopped still resolves, while anything still pending here aborts.
+    if (self.stopped) return error.Aborted;
 
-    const state = self.allocator.create(WaitState) catch return error.OutOfMemory;
-    errdefer self.allocator.destroy(state);
+    var waiter: WaitState = .{};
+    // Capacity was reserved at init and count < max_waiters here, so the push
+    // neither allocates nor fails.
+    self.waiters.push(self.allocator, .{ .target = target, .state = &waiter }) catch unreachable;
+    // Partial tripwire for the forbidden waitForSlot-from-callback: outside a
+    // dispatch the queue head must still be ahead of the cursor.
+    if (self.current_slot) |cs| std.debug.assert(self.waiters.peek().?.target > cs);
 
-    state.* = .{
-        .io = self.io,
-        .allocator = self.allocator,
-    };
-
-    if (self.stopped) {
-        self.allocator.destroy(state);
-        return WaitForSlotResult.immediate(error.Aborted);
-    }
-    self.waiters.push(
-        self.allocator,
-        .{ .target = target, .state = state },
-    ) catch return error.OutOfMemory;
-    self.dispatchWaiters(self.current_slot);
-
-    const inner = std.Io.concurrent(self.io, waitForSlotFutureAwait, .{state}) catch {
-        for (self.waiters.items, 0..) |entry, i| {
-            if (entry.state == state) {
-                _ = self.waiters.popIndex(i);
-                break;
-            }
-        }
-        return error.ConcurrencyUnavailable;
-    };
-
-    return .{
-        .inner = inner,
-        .state = state,
-        .clock = self,
-    };
+    waiter.event.waitUncancelable(self.io);
+    return if (waiter.aborted) error.Aborted else {};
 }
 
 /// Advance to wall-clock time, emitting any pending slot/epoch events, and
@@ -409,8 +333,10 @@ fn dispatchWaiters(self: *Clock, current_slot: ?Slot) void {
     while (self.waiters.peek()) |head| {
         if (head.target > slot) break;
         const waiter = self.waiters.pop().?;
-        waiter.state.aborted = false;
-        waiter.state.event.set(waiter.state.io);
+        // The stack WaitState is single-use and starts false; only
+        // abortAllWaiters sets aborted, and only after popping.
+        std.debug.assert(!waiter.state.aborted);
+        waiter.state.event.set(self.io);
     }
 }
 
@@ -421,7 +347,7 @@ fn abortAllWaiters(self: *Clock) void {
         // no longer be emitted.
         const reached = if (self.current_slot) |cs| waiter.target <= cs else false;
         waiter.state.aborted = !reached;
-        waiter.state.event.set(waiter.state.io);
+        waiter.state.event.set(self.io);
     }
 }
 
@@ -526,16 +452,19 @@ fn runAutoLoop(self: *Clock) void {
     std.debug.assert(self.stopped);
 }
 
-fn waitForSlotFutureAwait(state: *WaitState) Error!void {
-    // Do NOT free state here — `state.aborted` is read after the wake,
-    // and the caller (`WaitForSlotResult.await`) frees only once this fiber
-    // has fully returned.
-    state.event.waitUncancelable(state.io);
-    if (state.aborted) return error.Aborted;
-}
-
 const testing = std.testing;
 const zio = @import("zio");
+
+/// Poll until `expected` waiter fibers have suspended inside waitForSlot.
+/// Deterministic under a single-executor zio runtime: sleeping yields to the
+/// spawned fibers, each of which pushes one queue entry then suspends.
+fn rendezvousWaiters(clock: *Clock, io: std.Io, expected: usize) !void {
+    var polls: usize = 0;
+    while (clock.waiters.count() < expected) : (polls += 1) {
+        if (polls >= 10_000) return error.RendezvousTimeout;
+        std.Io.sleep(io, std.Io.Duration.fromMilliseconds(1), .awake) catch {};
+    }
+}
 
 const EventTraceState = struct {
     slots: [64]Slot = undefined,
@@ -579,9 +508,9 @@ test "lifecycle: init -> register -> start -> receive events -> stop" {
     try clock.start();
 
     const start_slot = clock.currentSlotOrGenesis();
-    var fut = try clock.waitForSlot(start_slot + 1);
-    errdefer fut.cancel();
-    try fut.await(io_handle);
+    // The auto-loop advances the clock on its own fiber, so this direct wait
+    // suspends the main fiber and is woken by the loop's dispatch.
+    try clock.waitForSlot(start_slot + 1);
 
     try testing.expect(trace.slot_len > 0);
 }
@@ -602,9 +531,8 @@ test "waitForSlot resolves immediately when at target" {
     defer clock.deinit();
 
     const current = clock.currentSlotOrGenesis();
-    var fut = try clock.waitForSlot(current);
-    errdefer fut.cancel();
-    try fut.await(io_handle);
+    // Already at target: waitForSlot resolves synchronously, no suspend.
+    try clock.waitForSlot(current);
 }
 
 test "waitForSlot returns aborted on stop" {
@@ -620,10 +548,28 @@ test "waitForSlot returns aborted on stop" {
     }, io_handle);
     defer clock.deinit();
 
-    var fut = try clock.waitForSlot(100);
-    errdefer fut.cancel();
+    var fut = try std.Io.concurrent(io_handle, Clock.waitForSlot, .{ &clock, 100 });
+    try rendezvousWaiters(&clock, io_handle, 1);
     clock.stop();
     try testing.expectError(error.Aborted, fut.await(io_handle));
+}
+
+test "waitForSlot on a stopped clock returns error.Aborted" {
+    const rt = try zio.Runtime.init(testing.allocator, .{});
+    defer rt.deinit();
+    const io_handle = rt.io();
+
+    var clock: Clock = undefined;
+    try clock.init(testing.allocator, .{
+        .genesis_time_sec = time.nowSec(io_handle) + 1_000_000,
+        .slot_duration_ms = 1_000,
+        .slots_per_epoch = 4,
+    }, io_handle);
+    defer clock.deinit();
+
+    clock.stop();
+    // The stopped pre-check errors synchronously, before any enqueue or suspend.
+    try testing.expectError(error.Aborted, clock.waitForSlot(1));
 }
 
 test "offSlot/offEpoch stop event delivery" {
@@ -706,14 +652,12 @@ test "multiple waiters are dispatched in target-slot order" {
     }, io_handle);
     defer clock.deinit();
 
-    var fut5 = try clock.waitForSlot(5);
-    errdefer fut5.cancel();
-
-    var fut3 = try clock.waitForSlot(3);
-    errdefer fut3.cancel();
-
-    var fut1 = try clock.waitForSlot(1);
-    errdefer fut1.cancel();
+    // Spawn the waiters as fibers (targets out of order) and rendezvous so all
+    // three have suspended before the clock advances.
+    var fut5 = try std.Io.concurrent(io_handle, Clock.waitForSlot, .{ &clock, 5 });
+    var fut3 = try std.Io.concurrent(io_handle, Clock.waitForSlot, .{ &clock, 3 });
+    var fut1 = try std.Io.concurrent(io_handle, Clock.waitForSlot, .{ &clock, 1 });
+    try rendezvousWaiters(&clock, io_handle, 3);
 
     clock.advanceAndDispatch(3);
 
@@ -722,24 +666,6 @@ test "multiple waiters are dispatched in target-slot order" {
 
     clock.stop();
     try testing.expectError(error.Aborted, fut5.await(io_handle));
-}
-
-test "cancel releases WaitState without awaiting" {
-    const rt = try zio.Runtime.init(testing.allocator, .{});
-    defer rt.deinit();
-    const io_handle = rt.io();
-
-    var clock: Clock = undefined;
-    try clock.init(testing.allocator, .{
-        .genesis_time_sec = time.nowSec(io_handle) + 10,
-        .slot_duration_ms = 1_000,
-        .slots_per_epoch = 8,
-    }, io_handle);
-    defer clock.deinit();
-
-    // testing.allocator detects a leak if cancel fails to free.
-    var fut = try clock.waitForSlot(999);
-    fut.cancel();
 }
 
 test "real-time: no slot events emitted before genesis" {
@@ -787,9 +713,7 @@ test "real-time: slot events fire with correct timing" {
 
     const start_slot = clock.currentSlotOrGenesis();
     const before_ms = time.nowMs(io_handle);
-    var fut = try clock.waitForSlot(start_slot + 1);
-    errdefer fut.cancel();
-    try fut.await(io_handle);
+    try clock.waitForSlot(start_slot + 1);
     const elapsed = time.nowMs(io_handle) - before_ms;
 
     try testing.expect(elapsed < 2000);
@@ -818,9 +742,7 @@ test "real-time: multi-slot advancement delivers ordered events" {
     try clock.start();
 
     const start_slot = clock.currentSlotOrGenesis();
-    var fut = try clock.waitForSlot(start_slot + 2);
-    errdefer fut.cancel();
-    try fut.await(io_handle);
+    try clock.waitForSlot(start_slot + 2);
 
     try testing.expect(trace.slot_len >= 2);
     for (1..trace.slot_len) |i| {
@@ -878,9 +800,7 @@ test "real-time: epoch boundary event fires" {
     try clock.start();
 
     const start_slot = clock.currentSlotOrGenesis();
-    var fut = try clock.waitForSlot(start_slot + 3);
-    errdefer fut.cancel();
-    try fut.await(io_handle);
+    try clock.waitForSlot(start_slot + 3);
 
     try testing.expect(trace.slot_len >= 3);
     try testing.expect(trace.epoch_len > 0);
@@ -993,10 +913,9 @@ test "reentrancy: stop() during emit resolves reached waiter, aborts future one"
     var ctx = StopAtSlotCtx{ .clock = &clock, .stop_at = target };
     _ = try clock.onSlot(StopAtSlotCtx.stopAt, &ctx);
 
-    var fut_reached = try clock.waitForSlot(target);
-    errdefer fut_reached.cancel();
-    var fut_future = try clock.waitForSlot(target + 1);
-    errdefer fut_future.cancel();
+    var fut_reached = try std.Io.concurrent(io_handle, Clock.waitForSlot, .{ &clock, target });
+    var fut_future = try std.Io.concurrent(io_handle, Clock.waitForSlot, .{ &clock, target + 1 });
+    try rendezvousWaiters(&clock, io_handle, 2);
 
     clock.advanceAndDispatch(target);
 
@@ -1006,40 +925,6 @@ test "reentrancy: stop() during emit resolves reached waiter, aborts future one"
     try fut_reached.await(io_handle);
     // Future slot can never be emitted after stop, so it aborts.
     try testing.expectError(error.Aborted, fut_future.await(io_handle));
-}
-
-const WaitFromCallbackCtx = struct {
-    clock: *Clock,
-    fut: ?WaitForSlotResult = null,
-
-    fn onSlot(ctx: ?*anyopaque, slot: Slot) void {
-        const self: *WaitFromCallbackCtx = @ptrCast(@alignCast(ctx.?));
-        if (slot != 1) return;
-        self.fut = self.clock.waitForSlot(2) catch unreachable;
-    }
-};
-
-test "reentrancy: waitForSlot from a callback resolves via the ongoing dispatch" {
-    const rt = try zio.Runtime.init(testing.allocator, .{});
-    defer rt.deinit();
-    const io_handle = rt.io();
-
-    var clock: Clock = undefined;
-    try clock.init(testing.allocator, .{
-        .genesis_time_sec = time.nowSec(io_handle) + 1_000_000,
-        .slot_duration_ms = 1_000,
-        .slots_per_epoch = 4,
-    }, io_handle);
-    defer clock.deinit();
-
-    var ctx = WaitFromCallbackCtx{ .clock = &clock };
-    _ = try clock.onSlot(WaitFromCallbackCtx.onSlot, &ctx);
-
-    clock.advanceAndDispatch(2);
-
-    try testing.expect(ctx.fut != null);
-    errdefer ctx.fut.?.cancel();
-    try ctx.fut.?.await(io_handle);
 }
 
 test "ListenerLimitReached: onSlot/onEpoch reject the (limit+1)th registration" {
@@ -1079,10 +964,16 @@ test "WaiterLimitReached: waitForSlot rejects the (limit+1)th waiter" {
     }, io_handle);
     defer clock.deinit();
 
-    var futs: [max_waiters]WaitForSlotResult = undefined;
-    for (&futs) |*f| f.* = try clock.waitForSlot(999_999);
+    // Seed the queue to its limit directly rather than spawning 1024 fibers:
+    // waitForSlot rejects synchronously once the queue is full, before any
+    // suspend. deinit's abortAllWaiters then sets each dummy event harmlessly
+    // on the real zio io.
+    var dummies = [_]WaitState{.{}} ** max_waiters;
+    for (&dummies) |*d| {
+        clock.waiters.push(testing.allocator, .{ .target = 999_999, .state = d }) catch unreachable;
+    }
+
     try testing.expectError(error.WaiterLimitReached, clock.waitForSlot(999_999));
-    for (&futs) |*f| f.cancel();
 }
 
 test "many waiters at same target slot all resolve on advance" {
@@ -1099,8 +990,9 @@ test "many waiters at same target slot all resolve on advance" {
     defer clock.deinit();
 
     const N = 16;
-    var futs: [N]WaitForSlotResult = undefined;
-    for (&futs) |*f| f.* = try clock.waitForSlot(5);
+    var futs: [N]std.Io.Future(Error!void) = undefined;
+    for (&futs) |*f| f.* = try std.Io.concurrent(io_handle, Clock.waitForSlot, .{ &clock, 5 });
+    try rendezvousWaiters(&clock, io_handle, N);
 
     clock.advanceAndDispatch(5);
 
@@ -1381,6 +1273,54 @@ test "tolerance and from-slot forwards are pure reads: no catch-up" {
     try testing.expectEqual(@as(?Slot, 0), clock.current_slot);
 }
 
+test "stop() from a catchUp callback aborts the wait before enqueue" {
+    var fake = FakeClockIo{ .ms = 100_000 };
+
+    var clock: Clock = undefined;
+    try clock.init(testing.allocator, .{
+        .genesis_time_sec = 100,
+        .slot_duration_ms = 1_000,
+        .slots_per_epoch = 8,
+    }, fake.io());
+    defer clock.deinit();
+
+    // A slot listener stops the clock mid-catchUp, after current_slot has
+    // advanced but before it reaches `target`. The post-catchUp re-check must
+    // abort synchronously: reaching the enqueue+suspend would call
+    // waitUncancelable through FakeClockIo's undefined futex vtable.
+    var ctx = StopAtSlotCtx{ .clock = &clock, .stop_at = 1 };
+    _ = try clock.onSlot(StopAtSlotCtx.stopAt, &ctx);
+
+    // Backlog slots 1..5 so catchUp fires the listener while short of target 10.
+    fake.ms = 105_000;
+    try testing.expectError(error.Aborted, clock.waitForSlot(10));
+    try testing.expect(clock.stopped);
+    try testing.expectEqual(@as(?Slot, 1), clock.current_slot);
+}
+
+test "stop() from a catchUp callback still resolves a reached wait" {
+    var fake = FakeClockIo{ .ms = 100_000 };
+
+    var clock: Clock = undefined;
+    try clock.init(testing.allocator, .{
+        .genesis_time_sec = 100,
+        .slot_duration_ms = 1_000,
+        .slots_per_epoch = 8,
+    }, fake.io());
+    defer clock.deinit();
+
+    // The listener stops the clock while slot 1 — the wait target — is being
+    // emitted. The reached-check runs before the stopped re-check, so the wait
+    // must return success synchronously, never suspending.
+    var ctx = StopAtSlotCtx{ .clock = &clock, .stop_at = 1 };
+    _ = try clock.onSlot(StopAtSlotCtx.stopAt, &ctx);
+
+    fake.ms = 101_000;
+    try clock.waitForSlot(1);
+    try testing.expect(clock.stopped);
+    try testing.expectEqual(@as(?Slot, 1), clock.current_slot);
+}
+
 const NestedDispatchCtx = struct {
     clock: *Clock,
     fake: *FakeClockIo,
@@ -1605,18 +1545,18 @@ const PropertyOp = union(enum) {
     off_epoch: usize,
     advance_by: u8,
     wait_for_slot_at_offset: i32,
-    cancel_waiter: usize,
     stop,
 };
 
 const PropertyWaiter = struct {
     target: Slot,
-    fut: WaitForSlotResult,
+    fut: std.Io.Future(Error!void),
     expected_aborted: bool,
 };
 
 const PropertyState = struct {
     spe: u64,
+    io: std.Io,
     model_current_slot: ?Slot = null,
     model_stopped: bool = false,
     clock: *Clock,
@@ -1743,23 +1683,38 @@ const PropertyState = struct {
                 }
             },
             .wait_for_slot_at_offset => |offset| {
-                if (self.model_stopped) return;
                 const base: i64 = if (self.model_current_slot) |c| @intCast(c) else -1;
                 const target_signed = base + offset;
                 if (target_signed < 0) return;
                 const target: Slot = @intCast(target_signed);
-                const fut = try self.clock.waitForSlot(target);
+
+                if (self.model_stopped) {
+                    // Stopped clock: waitForSlot rejects synchronously, no suspend.
+                    try testing.expectError(error.Aborted, self.clock.waitForSlot(target));
+                    return;
+                }
                 const resolved_now = if (self.model_current_slot) |c| c >= target else false;
+                if (resolved_now) {
+                    // Already reached: resolves synchronously with success.
+                    try self.clock.waitForSlot(target);
+                    return;
+                }
+                // Future target: the call would suspend, so run it on its own
+                // fiber and rendezvous so the queue entry lands before the next
+                // model step (without it the push races an unpredictable yield).
+                // It aborts at finalize unless a later advance reaches it.
+                const target_count = self.clock.waiters.count() + 1;
+                const fut = try std.Io.concurrent(
+                    self.io,
+                    Clock.waitForSlot,
+                    .{ self.clock, target },
+                );
+                try rendezvousWaiters(self.clock, self.io, target_count);
                 try self.waiters.append(a, .{
                     .target = target,
                     .fut = fut,
-                    .expected_aborted = !resolved_now,
+                    .expected_aborted = true,
                 });
-            },
-            .cancel_waiter => |idx| {
-                if (idx >= self.waiters.items.len) return;
-                var w = self.waiters.orderedRemove(idx);
-                w.fut.cancel();
             },
             .stop => {
                 if (self.model_stopped) return;
@@ -1769,7 +1724,7 @@ const PropertyState = struct {
         }
     }
 
-    fn finalize(self: *PropertyState, io: std.Io) !void {
+    fn finalize(self: *PropertyState) !void {
         if (!self.model_stopped) {
             self.model_stopped = true;
             self.clock.stop();
@@ -1783,7 +1738,7 @@ const PropertyState = struct {
         }
 
         for (self.waiters.items) |*w| {
-            const result = w.fut.await(io);
+            const result = w.fut.await(self.io);
             if (w.expected_aborted) {
                 try testing.expectError(error.Aborted, result);
             } else {
@@ -1810,13 +1765,9 @@ fn genPropertyOp(rng: std.Random, state: *const PropertyState) PropertyOp {
             return .{ .off_epoch = rng.uintLessThan(usize, state.epoch_listener_ids.items.len) };
         }
         if (r < 80) return .{ .advance_by = @intCast(rng.uintLessThan(u32, 8) + 1) };
-        if (r < 92) {
+        if (r < 98) {
             const off: i32 = @as(i32, @intCast(rng.uintLessThan(u32, 12))) - 4;
             return .{ .wait_for_slot_at_offset = off };
-        }
-        if (r < 98) {
-            if (state.waiters.items.len == 0) continue;
-            return .{ .cancel_waiter = rng.uintLessThan(usize, state.waiters.items.len) };
         }
         return .stop;
     }
@@ -1837,7 +1788,7 @@ fn runPropertyScenario(seed: u64, op_count: u32, io: std.Io) !void {
     }, io);
     defer clock.deinit();
 
-    var state = PropertyState{ .spe = spe, .clock = &clock };
+    var state = PropertyState{ .spe = spe, .io = io, .clock = &clock };
     defer state.deinit();
 
     var i: u32 = 0;
@@ -1846,7 +1797,7 @@ fn runPropertyScenario(seed: u64, op_count: u32, io: std.Io) !void {
         try state.applyOp(op);
     }
 
-    try state.finalize(io);
+    try state.finalize();
 }
 
 test "property: random op sequences match model" {
