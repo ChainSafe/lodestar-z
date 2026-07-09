@@ -37,14 +37,14 @@ pub fn deinit(self: *ValidatorMonitor) void {
 /// Adds a validator to the list of monitored validators.
 ///
 /// Registering an already-monitored validator is a no-op.
-pub fn registerLocalValidator(self: *ValidatorMonitor, io: std.Io, index: ValidatorIndex) !void {
+pub fn registerLocalValidator(self: *ValidatorMonitor, index: ValidatorIndex) !void {
     try self.validators.put(self.allocator, index, {});
 }
 
 /// Prunes a validator from the list of monitored validators.
 ///
 /// Unregistering an unknown validator is a no-op.
-pub fn unregisterLocalValidator(self: *ValidatorMonitor, io: std.Io, index: ValidatorIndex) void {
+pub fn unregisterLocalValidator(self: *ValidatorMonitor, index: ValidatorIndex) void {
     _ = self.validators.swapRemove(index);
 }
 
@@ -120,8 +120,8 @@ test "registerValidatorStatuses records metrics" {
 
     var monitor = ValidatorMonitor.init(allocator);
     defer monitor.deinit();
-    try monitor.registerLocalValidator(std.testing.io, 0);
-    try monitor.registerLocalValidator(std.testing.io, 1);
+    try monitor.registerLocalValidator(0);
+    try monitor.registerLocalValidator(1);
 
     const flags = [_]u8{
         attester_status.FLAG_PREV_SOURCE_ATTESTER |
@@ -182,13 +182,13 @@ test "registerValidatorStatuses guards" {
     const balances = [_]u64{ 32_000_000_000, 31_000_000_000, 33_000_000_000 };
 
     // epoch 0 is registered but has no previous epoch activity
-    monitor.registerValidatorStatuses(std.testing.io, 0, &flags, &balances);
+    monitor.registerValidatorStatuses(0, &flags, &balances);
     try std.testing.expectEqual(@as(?Epoch, 0), monitor.last_registered_status_epoch);
 
-    monitor.registerValidatorStatuses(std.testing.io, 1, &flags, &balances);
+    monitor.registerValidatorStatuses(1, &flags, &balances);
     try std.testing.expectEqual(@as(?Epoch, 1), monitor.last_registered_status_epoch);
 
     // same epoch twice is a no-op
-    monitor.registerValidatorStatuses(std.testing.io, 1, &flags, &balances);
+    monitor.registerValidatorStatuses(1, &flags, &balances);
     try std.testing.expectEqual(@as(?Epoch, 1), monitor.last_registered_status_epoch);
 }

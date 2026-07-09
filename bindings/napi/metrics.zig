@@ -28,7 +28,7 @@ pub fn init() !void {
 pub fn registerLocalValidator(index: js.Number) !void {
     const value = try index.toI64();
     if (value < 0) return error.InvalidValidatorIndex;
-    try validator_monitor.get().registerLocalValidator(napi_io.get(), @intCast(value));
+    try validator_monitor.get().registerLocalValidator(@intCast(value));
 }
 
 /// JS: metrics.unregisterLocalValidator(index) → void
@@ -37,7 +37,7 @@ pub fn registerLocalValidator(index: js.Number) !void {
 pub fn unregisterLocalValidator(index: js.Number) !void {
     const value = try index.toI64();
     if (value < 0) return error.InvalidValidatorIndex;
-    validator_monitor.get().unregisterLocalValidator(napi_io.get(), @intCast(value));
+    validator_monitor.get().unregisterLocalValidator(@intCast(value));
 }
 
 /// JS: metrics.scrapeMetrics() → string
