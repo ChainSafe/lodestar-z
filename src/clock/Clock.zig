@@ -1,4 +1,4 @@
-//! Event-driven beacon clock — the clock module's public clock type.
+//! Event-driven beacon clock.
 //!
 //! Owns the stateful slot cursor (a cached `current_slot` over `slot_math`)
 //! and an async I/O loop to emit slot/epoch events and dispatch waiters.
@@ -21,10 +21,10 @@
 //!      `waitForSlot` suspends the caller, so it must NEVER be called from a
 //!      listener callback.
 //!      A query while the cache lags the wall (a backlog) does not nest a
-//!      dispatch: it records the furthest wall target and returns a fresh
-//!      reading (which may run ahead of the events delivered so far). The
-//!      draining frame then delivers the remaining events in order, exactly
-//!      once per (listener, event); the stack stays O(1) regardless of backlog.
+//!      dispatch: it returns a fresh reading (which may run ahead of the
+//!      events delivered so far), and the dispatch already on the stack
+//!      delivers the rest in order, exactly once per (listener, event), on
+//!      O(1) stack.
 //!   2. A wake-up pops its waiter from the queue *before* setting the event, so
 //!      a resuming `waitForSlot` frame is never still referenced by the queue.
 //! A multi-executor backend (zio with `executors > 1`, or `std.Io.Threaded`)
@@ -48,6 +48,7 @@ dispatching: bool = false,
 pending_target: ?Slot = null,
 loop_future: ?std.Io.Future(void) = null,
 
+// IDs start at 1 so callers can use 0 as an unset sentinel.
 next_listener_id: ListenerId = 1,
 slot_listeners: bounded_array.BoundedArray(SlotListenerEntry, max_slot_listeners) = .{},
 epoch_listeners: bounded_array.BoundedArray(EpochListenerEntry, max_epoch_listeners) = .{},
@@ -61,6 +62,7 @@ pub const ListenerId = u64;
 
 pub const max_slot_listeners: u32 = 16;
 pub const max_epoch_listeners: u32 = 16;
+/// Headroom bet, not a derived limit: bounds fibers suspended in waitForSlot.
 pub const max_waiters: u32 = 1024;
 
 pub const Error = error{
@@ -114,13 +116,12 @@ pub fn init(
         .current_slot = slot_math.slotAtMs(config, time.nowMs(io_handle)),
         .waiters = WaiterQueue.initContext({}),
     };
-    // Reserve the full waiter capacity up front so enqueuing a waiter in
-    // waitForSlot cannot allocate — once WaiterLimitReached is ruled out the
-    // push is infallible, keeping the suspend path off the error track.
+    // Reserve full waiter capacity up front so waitForSlot's push after the
+    // limit check can neither allocate nor fail.
     try self.waiters.ensureTotalCapacity(allocator, max_waiters);
 }
 
-/// Start the auto-advance loop.  Idempotent; second call is a no-op.
+/// Start the auto-advance loop.  Idempotent.
 pub fn start(self: *Clock) Error!void {
     if (self.loop_future != null) return;
     self.loop_future = std.Io.concurrent(self.io, Clock.runAutoLoop, .{self}) catch
@@ -210,9 +211,8 @@ pub fn offEpoch(self: *Clock, id: ListenerId) bool {
     return false;
 }
 
-// The "current" accessors read the clock only through catchUp(), so each
-// derives from its single wall reading rather than a second, possibly
-// skewed clock read.
+// Each "current" accessor derives from catchUp()'s single wall reading;
+// see catchUp for why a second read is unsafe.
 
 pub fn currentSlot(self: *Clock) ?Slot {
     return self.catchUp().slot;
@@ -293,8 +293,8 @@ pub fn waitForSlot(self: *Clock, target: Slot) Error!void {
     // Capacity was reserved at init and count < max_waiters here, so the push
     // neither allocates nor fails.
     self.waiters.push(self.allocator, .{ .target = target, .state = &waiter }) catch unreachable;
-    // Partial tripwire for the forbidden waitForSlot-from-callback: outside a
-    // dispatch the queue head must still be ahead of the cursor.
+    // Best-effort tripwire for the forbidden waitForSlot-from-callback:
+    // outside a dispatch the queue head must still be ahead of the cursor.
     if (self.current_slot) |cs| std.debug.assert(self.waiters.peek().?.target > cs);
 
     waiter.event.waitUncancelable(self.io);
@@ -310,8 +310,8 @@ const Reading = struct { now_ms: u64, slot: ?Slot };
 /// callback can cross a slot boundary mid-dispatch, so a second read could
 /// name a slot the just-emitted events haven't reached. At top level the
 /// reading names the slot the events reached; inside a callback it may run
-/// ahead of the events delivered so far, which the draining frame delivers
-/// after the callback returns. waitForSlot's reached-check consults the
+/// ahead of the events delivered so far, which the in-progress dispatch
+/// delivers after the callback returns. waitForSlot's reached-check consults the
 /// cursor, not this reading, so a stop mid-drain never resolves a wait for a
 /// slot whose events were suppressed.
 fn catchUp(self: *Clock) Reading {
@@ -418,8 +418,9 @@ fn advanceTo(self: *Clock, target: Slot) AdvanceIterator {
 
 fn advanceAndDispatch(self: *Clock, target: Slot) void {
     if (self.dispatching) {
-        // A reentrant query only records the target; the owning frame drains
-        // it. @max: a wall step-back (NTP) must not regress a recorded target.
+        // A reentrant query only records the target; the frame that set
+        // `dispatching` drains it. @max: a wall step-back (NTP) must not
+        // regress a recorded target.
         self.pending_target = @max(self.pending_target orelse target, target);
         return;
     }
@@ -457,8 +458,7 @@ fn runAutoLoop(self: *Clock) void {
         const next_ms = slot_math.msUntilNextSlot(self.config, now_ms);
         const sleep_ms: i64 = @intCast(@max(@as(u64, 1), next_ms));
 
-        // Sleep failure: cancellation (from join()) exits the loop;
-        // other errors re-check the stopped flag.
+        // error.Canceled comes from join()'s fiber-cancel.
         std.Io.sleep(
             self.io,
             std.Io.Duration.fromMilliseconds(sleep_ms),
@@ -472,10 +472,8 @@ fn runAutoLoop(self: *Clock) void {
         if (self.stopped) break;
         _ = self.catchUp();
     }
-    // Non-terminating event loop: exits only when `self.stopped` is set.
-    //  - normal stop(): sets flag, next iteration's `!self.stopped` exits
-    //  - join(): always calls stop() before cancelling the fiber, so the
-    //    `error.Canceled` break also satisfies stopped == true
+    // join() calls stop() before cancelling the fiber, so the Canceled break
+    // also exits with stopped set.
     std.debug.assert(self.stopped);
 }
 
@@ -558,7 +556,6 @@ test "waitForSlot resolves immediately when at target" {
     defer clock.deinit();
 
     const current = clock.currentSlotOrGenesis();
-    // Already at target: waitForSlot resolves synchronously, no suspend.
     try clock.waitForSlot(current);
 }
 
@@ -1284,7 +1281,7 @@ test "tolerance and from-slot forwards are pure reads: no catch-up" {
     _ = try clock.onSlot(EventTraceState.onSlot, &trace);
 
     // Wall slot 1 with the cache at 0: a catchUp-backed accessor would flush
-    // this backlog to the listener; the forwards must not.
+    // this backlog to the listener; these pure-read helpers must not.
     fake.ms = 112_000;
     try testing.expectEqual(@as(?Slot, 2), clock.slotWithFutureToleranceMs(12_000));
     try testing.expectEqual(@as(Slot, 0), clock.slotWithPastToleranceMs(12_000));
@@ -1414,13 +1411,10 @@ test "listener mutations mid-emit preserve the per-emit snapshot; a query defers
     _ = try clock.onSlot(EventTraceState.onSlot, &ctx_l3);
     ctx_l1.remove_id = id_l2;
 
-    // Wall slot 1: the outer emit of slot 1 snapshots [L1, L2, L3]. L1 burns
-    // the wall into slot 2, removes L2, registers L4, and queries the clock —
-    // the query records target 2 and returns a fresh reading without nesting a
-    // dispatch. The outer emit of slot 1 finishes against its snapshot: L2 and
-    // L3 each get slot 1 exactly once. The draining frame then emits slot 2 to
-    // the current listeners [L1, L3, L4]: L2 (removed) never sees slot 2; L4
-    // (added) sees only slot 2.
+    // Wall slot 1: the emit snapshots [L1, L2, L3]. L1 burns the wall to
+    // slot 2, removes L2, adds L4, and queries — recording target 2 without
+    // nesting a dispatch. The drain then emits slot 2 to the post-mutation
+    // list [L1, L3, L4].
     fake.ms = 101_000;
     try testing.expectEqual(@as(?Slot, 1), clock.currentSlot());
 
@@ -1729,13 +1723,9 @@ test "successive mid-emit queries coalesce to the furthest pending target" {
     _ = try clock.onSlot(QueryAtSlotCtx.onSlot, &ctx_l2);
     _ = try clock.onSlot(QueryAtSlotCtx.onSlot, &ctx_l3);
 
-    // Wall slot 1: emitting slot 1, L1 burns the wall to slot 3 and queries
-    // (pending 3, reading 3), L2 burns to slot 5 and queries (pending 5,
-    // reading 5), then L3 steps the wall BACK to slot 4 and queries (reading
-    // 4). @max holds pending at 5: keeping the first target would stall the
-    // drain at 3, and a plain overwrite would regress it to 4. The drain
-    // delivers 2..5 to all three exactly once; the top-level read keeps its
-    // own slot-1 reading.
+    // Emitting slot 1, the three queries burn the wall to slots 3, 5, then
+    // BACK to 4. @max holds pending at 5: keeping the first target would
+    // stall the drain at 3, and a plain overwrite would regress it to 4.
     fake.ms = 101_000;
     try testing.expectEqual(@as(?Slot, 1), clock.currentSlot());
 
@@ -1779,15 +1769,15 @@ test "stop() after a mid-emit query leaves no pending target behind" {
     _ = try clock.onSlot(QueryThenStopCtx.onSlot, &ctx);
 
     // Backlog 1..3: at slot 1 the callback queries (recording pending target
-    // 3, reading 3) and then stops. The drain exits stopped with the pending
-    // recorded; the exit backstop must clear it or the next accessor's guard
-    // acquisition would find a stale pending.
+    // 3, reading 3) and then stops. The exit backstop must clear the recorded
+    // pending or the next accessor's advanceAndDispatch would trip the
+    // `pending_target == null` assert.
     fake.ms = 103_000;
     try testing.expectEqual(@as(?Slot, 3), clock.currentSlot());
     try testing.expectEqual(@as(?Slot, 3), ctx.queried_slot);
 
-    // The post-stop accessor acquires the guard cleanly and stays a pure
-    // reading: cursor unchanged, suppressed slots 2..3 never delivered.
+    // The post-stop accessor dispatches nothing and stays a pure reading:
+    // cursor unchanged, suppressed slots 2..3 never delivered.
     try testing.expectEqual(@as(?Slot, 3), clock.currentSlot());
     try testing.expectEqual(@as(?Slot, 1), clock.current_slot);
     try expectEqualSlices(Slot, &.{1}, ctx.slots[0..ctx.slot_len]);

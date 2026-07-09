@@ -1,12 +1,9 @@
 //! Pure slot/epoch arithmetic and gossip-disparity/tolerance helpers.
+//! No state, no allocation, no I/O; every function is comptime-compatible.
 //!
-//! No state, no allocation, no I/O.  Every function is comptime-compatible.
-//! The only `null` is pre-genesis (a `<` comparison); arithmetic uses plain
-//! operators since `now_ms` is the wall clock and slot/config values are
-//! program-controlled — an overflow would be a program error and traps.
-//! `slotWithPastToleranceMs` alone saturates — its underflow is reachable
-//! with valid caller data; the rest treat out-of-range values as program
-//! errors.
+//! Arithmetic uses plain operators — out-of-range values are program errors
+//! and trap. `slotWithPastToleranceMs` alone saturates: its underflow is
+//! reachable with valid caller data.
 
 const std = @import("std");
 const ct = @import("consensus_types");
@@ -119,8 +116,7 @@ pub fn msUntilNextSlot(config: ClockConfig, now_ms: u64) u64 {
 pub fn slotWithGossipDisparity(config: ClockConfig, now_ms: u64) ?Slot {
     const current = slotAtMs(config, now_ms) orelse {
         // Pre-genesis the wall slot is conceptually negative, so slot 0 is
-        // "current" only once we're within gossip disparity of genesis;
-        // null otherwise.
+        // "current" only once we're within gossip disparity of genesis.
         const genesis_ms = slotStartMs(config, 0);
         return if (genesis_ms - now_ms <= config.maximum_gossip_clock_disparity_ms)
             0
@@ -138,8 +134,7 @@ pub fn slotWithGossipDisparity(config: ClockConfig, now_ms: u64) ?Slot {
 /// See `slotWithGossipDisparity` for the `<=` rationale.
 pub fn isCurrentSlotGivenGossipDisparity(config: ClockConfig, slot: Slot, now_ms: u64) bool {
     const current = slotAtMs(config, now_ms) orelse {
-        // Pre-genesis the wall slot is conceptually negative, so slot 0 is
-        // "current" only once we're within gossip disparity of genesis.
+        // Slot 0 pre-genesis rule: see slotWithGossipDisparity.
         if (slot != 0) return false;
         const genesis_ms = slotStartMs(config, 0);
         return genesis_ms - now_ms <= config.maximum_gossip_clock_disparity_ms;
@@ -170,7 +165,6 @@ pub fn slotWithFutureToleranceMs(config: ClockConfig, now_ms: u64, tolerance_ms:
 /// Saturating `-|`: `tolerance_ms` is caller data, not program-controlled — clamp, don't trap.
 pub fn slotWithPastToleranceMs(config: ClockConfig, now_ms: u64, tolerance_ms: u64) Slot {
     const shifted_ms = now_ms -| tolerance_ms;
-    // Pre-genesis → slot 0.
     return slotAtMs(config, shifted_ms) orelse 0;
 }
 
@@ -193,7 +187,6 @@ const mainnet = ClockConfig{
 };
 
 test "basic slot math" {
-    // slotAtSec: genesis is slot 0
     try testing.expectEqual(@as(?Slot, 0), slotAtSec(mainnet, mainnet.genesis_time_sec));
     try testing.expectEqual(@as(?Slot, 1), slotAtSec(mainnet, mainnet.genesis_time_sec + 12));
     try testing.expectEqual(@as(?Slot, 2), slotAtSec(mainnet, mainnet.genesis_time_sec + 24));
@@ -381,12 +374,10 @@ test "fork-aware: two transitions" {
     try testing.expectEqual(@as(u64, 6_000), slotDurationMsAt(two_fork, 1024));
     try testing.expectEqual(@as(u64, 4_000), slotDurationMsAt(two_fork, 8192));
 
-    // slotStartMs across both boundaries
     try testing.expectEqual(@as(u64, f1_ms), slotStartMs(two_fork, 1024));
     try testing.expectEqual(@as(u64, f2_ms), slotStartMs(two_fork, 8192));
     try testing.expectEqual(@as(u64, f2_ms + 4_000), slotStartMs(two_fork, 8193));
 
-    // slotAtMs across both boundaries
     try testing.expectEqual(@as(?Slot, 1024), slotAtMs(two_fork, f1_ms));
     try testing.expectEqual(@as(?Slot, 8191), slotAtMs(two_fork, f2_ms - 1));
     try testing.expectEqual(@as(?Slot, 8192), slotAtMs(two_fork, f2_ms));
@@ -451,8 +442,8 @@ test "gossip disparity: pre-genesis slot 0 only within disparity of genesis" {
 }
 
 test "gossip disparity: pre-genesis with sub-disparity slot duration never advances past 0" {
-    // Degenerate config: slot_duration (400 ms) <= disparity (500 ms) guards against `slotAtMs
-    // orelse 0` clamping pre-genesis to slot 0 and spuriously reporting slot 1.
+    // Degenerate config (slot_duration 400 ms < disparity 500 ms): a
+    // pre-genesis clamp to slot 0 must not spuriously report slot 1.
     const cfg = ClockConfig{
         .genesis_time_sec = 100,
         .slot_duration_ms = 400,

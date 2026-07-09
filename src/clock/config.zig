@@ -13,6 +13,8 @@ pub const DurationTransition = struct {
     new_duration_ms: u64,
 };
 
+/// Headroom, not a protocol limit: duration-changing forks are rare
+/// (EIP-7782 is the first proposed); raise if a network schedules more.
 pub const max_duration_transitions: u32 = 4;
 
 pub const DurationTransitions =
