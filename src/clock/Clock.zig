@@ -62,7 +62,7 @@ pub const ListenerId = u64;
 
 pub const max_slot_listeners: u32 = 16;
 pub const max_epoch_listeners: u32 = 16;
-/// Headroom bet, not a derived limit: bounds fibers suspended in waitForSlot.
+/// Generous cap on concurrently suspended waitForSlot callers.
 pub const max_waiters: u32 = 1024;
 
 pub const Error = error{
