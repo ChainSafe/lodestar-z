@@ -275,3 +275,9 @@ pub fn ensureCapacity(new_size: js.Number) !void {
     try state.pubkey2index.ensureTotalCapacity(requested);
     try state.index2pubkey.ensureTotalCapacity(allocator, requested);
 }
+
+/// JS: pubkeys.reset()
+pub fn reset() !void {
+    if (!state.initialized) return error.PubkeyIndexNotInitialized;
+    try state.reset();
+}

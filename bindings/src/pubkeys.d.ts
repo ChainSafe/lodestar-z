@@ -1,5 +1,9 @@
 import type {PublicKey} from "./blst.js";
 
+export type PubkeyLike = {
+  pubkey: Uint8Array;
+};
+
 export interface PubkeyCache {
   /** Get deserialized PublicKey by validator index (cached at JS level) */
   get(index: number): PublicKey | undefined;
@@ -11,6 +15,8 @@ export interface PubkeyCache {
   getIndex(pubkey: Uint8Array): number | null;
   /** Set both directions atomically — impl owns the PublicKey.fromBytes() deserialization */
   set(index: number, pubkey: Uint8Array): void;
+  /** Sync missing validator pubkeys into the cache */
+  syncPubkeys(validators: ArrayLike<PubkeyLike>): void;
   /** Number of entries */
   readonly size: number;
   /** Load cache from a PKIX file (clears JS-level cache) */

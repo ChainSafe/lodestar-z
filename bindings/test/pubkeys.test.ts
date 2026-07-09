@@ -72,7 +72,21 @@ describe("pubkeys", () => {
     expect(before).not.toBe(after);
   });
 
+  it("syncPubkeys populates missing validator pubkeys", () => {
+    pubkeyCache.reset();
+    pubkeyCache.syncPubkeys(keypairs.map(({pubkeyBytes}) => ({pubkey: pubkeyBytes})));
+
+    expect(pubkeyCache.size).toBe(keypairs.length);
+    for (const {index, pubkeyBytes} of keypairs) {
+      expect(pubkeyCache.get(index)).toBeDefined();
+      expect(pubkeyCache.getIndex(pubkeyBytes)).toBe(index);
+    }
+  });
+
   it("save/load roundtrips cache contents", () => {
+    for (const {index, pubkeyBytes} of keypairs) {
+      pubkeyCache.set(index, pubkeyBytes);
+    }
     pubkeyCache.save(tempPkixPath);
     pubkeyCache.load(tempPkixPath);
 

@@ -40,6 +40,13 @@ export const pubkeyCache = {
     pkCache.delete(index);
   },
 
+  syncPubkeys(validators) {
+    const newCount = validators.length;
+    for (let i = pubkeyCache.size; i < newCount; i++) {
+      pubkeyCache.set(i, validators[i].pubkey);
+    }
+  },
+
   get size() {
     return native.size();
   },
