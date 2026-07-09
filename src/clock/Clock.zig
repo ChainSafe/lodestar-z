@@ -20,11 +20,11 @@
 //!        - any current* / isCurrent* accessor and the pure-read helpers.
 //!      `waitForSlot` suspends the caller, so it must NEVER be called from a
 //!      listener callback.
-//!      A query while the cache lags the wall (a backlog) nests a
-//!      dispatch: later slots/epochs reach every listener before the in-flight
-//!      event finishes, yet each (listener, event) fires exactly once. Depth is
-//!      bounded by the backlog: each level drains at least one backlogged slot;
-//!      deeper needs the wall to cross another boundary mid-cascade.
+//!      A query while the cache lags the wall (a backlog) does not nest a
+//!      dispatch: it records the furthest wall target and returns a fresh
+//!      reading (which may run ahead of the events delivered so far). The
+//!      draining frame then delivers the remaining events in order, exactly
+//!      once per (listener, event); the stack stays O(1) regardless of backlog.
 //!   2. A wake-up pops its waiter from the queue *before* setting the event, so
 //!      a resuming `waitForSlot` frame is never still referenced by the queue.
 //! A multi-executor backend (zio with `executors > 1`, or `std.Io.Threaded`)
@@ -44,6 +44,8 @@ config: ClockConfig,
 current_slot: ?Slot = null,
 
 stopped: bool = false,
+dispatching: bool = false,
+pending_target: ?Slot = null,
 loop_future: ?std.Io.Future(void) = null,
 
 next_listener_id: ListenerId = 1,
@@ -213,11 +215,11 @@ pub fn offEpoch(self: *Clock, id: ListenerId) bool {
 // skewed clock read.
 
 pub fn currentSlot(self: *Clock) ?Slot {
-    return slot_math.slotAtMs(self.config, self.catchUp());
+    return self.catchUp().slot;
 }
 
 pub fn currentEpoch(self: *Clock) ?Epoch {
-    const slot = slot_math.slotAtMs(self.config, self.catchUp()) orelse return null;
+    const slot = self.catchUp().slot orelse return null;
     return slot_math.epochAtSlot(self.config, slot);
 }
 
@@ -230,11 +232,11 @@ pub fn currentEpochOrGenesis(self: *Clock) Epoch {
 }
 
 pub fn currentSlotWithGossipDisparity(self: *Clock) ?Slot {
-    return slot_math.slotWithGossipDisparity(self.config, self.catchUp());
+    return slot_math.slotWithGossipDisparity(self.config, self.catchUp().now_ms);
 }
 
 pub fn isCurrentSlotGivenGossipDisparity(self: *Clock, slot: Slot) bool {
-    return slot_math.isCurrentSlotGivenGossipDisparity(self.config, slot, self.catchUp());
+    return slot_math.isCurrentSlotGivenGossipDisparity(self.config, slot, self.catchUp().now_ms);
 }
 
 // Unlike the catchUp-backed accessors above, the helpers below are pure
@@ -299,22 +301,29 @@ pub fn waitForSlot(self: *Clock, target: Slot) Error!void {
     return if (waiter.aborted) error.Aborted else {};
 }
 
+const Reading = struct { now_ms: u64, slot: ?Slot };
+
 /// Advance to wall-clock time, emitting any pending slot/epoch events, and
 /// return the reading used. Emits nothing if already caught up or pre-genesis.
 ///
 /// Accessors must derive from this reading, not a fresh clock read: a slow
 /// callback can cross a slot boundary mid-dispatch, so a second read could
-/// name a slot the just-emitted events haven't reached.
-fn catchUp(self: *Clock) u64 {
+/// name a slot the just-emitted events haven't reached. At top level the
+/// reading names the slot the events reached; inside a callback it may run
+/// ahead of the events delivered so far, which the draining frame delivers
+/// after the callback returns. waitForSlot's reached-check consults the
+/// cursor, not this reading, so a stop mid-drain never resolves a wait for a
+/// slot whose events were suppressed.
+fn catchUp(self: *Clock) Reading {
     const now_ms = time.nowMs(self.io);
-    if (slot_math.slotAtMs(self.config, now_ms)) |wall_slot| {
-        self.advanceAndDispatch(wall_slot);
-    }
-    return now_ms;
+    const slot = slot_math.slotAtMs(self.config, now_ms);
+    if (slot) |wall_slot| self.advanceAndDispatch(wall_slot);
+    return .{ .now_ms = now_ms, .slot = slot };
 }
 
 fn emitSlot(self: *Clock, slot: Slot) void {
-    // Copy, not &: reentrant on-off / nested emit mutates the member list, not this snapshot.
+    std.debug.assert(self.dispatching);
+    // Copy, not &: a callback's on/off mutates the member list, not this snapshot.
     var snapshot = self.slot_listeners;
     for (snapshot.slice()) |listener| {
         listener.callback(listener.ctx, slot);
@@ -322,6 +331,7 @@ fn emitSlot(self: *Clock, slot: Slot) void {
 }
 
 fn emitEpoch(self: *Clock, epoch: Epoch) void {
+    std.debug.assert(self.dispatching);
     var snapshot = self.epoch_listeners;
     for (snapshot.slice()) |listener| {
         listener.callback(listener.ctx, epoch);
@@ -329,6 +339,7 @@ fn emitEpoch(self: *Clock, epoch: Epoch) void {
 }
 
 fn dispatchWaiters(self: *Clock, current_slot: ?Slot) void {
+    std.debug.assert(self.dispatching);
     const slot = current_slot orelse return;
     while (self.waiters.peek()) |head| {
         if (head.target > slot) break;
@@ -408,18 +419,36 @@ fn advanceTo(self: *Clock, target: Slot) AdvanceIterator {
 }
 
 fn advanceAndDispatch(self: *Clock, target: Slot) void {
-    var iter = self.advanceTo(target);
-    // Check `stopped` *before* iter.next() so a callback that calls stop()
-    // can't leave current_slot one ahead of the last-emitted slot.
-    while (true) {
-        if (self.stopped) break;
-        const event = iter.next() orelse break;
-        switch (event) {
-            .slot => |s| {
-                self.emitSlot(s);
-                self.dispatchWaiters(s);
-            },
-            .epoch => |e| self.emitEpoch(e),
+    if (self.dispatching) {
+        // A reentrant query only records the target; the owning frame drains
+        // it. @max: a wall step-back (NTP) must not regress a recorded target.
+        self.pending_target = @max(self.pending_target orelse target, target);
+        return;
+    }
+    self.dispatching = true;
+    defer self.dispatching = false;
+    // The pending defer runs before the dispatching defer, so pending is null
+    // whenever dispatching is false.
+    std.debug.assert(self.pending_target == null);
+    self.pending_target = target;
+    // Backstop: a stopped exit leaves the loop with pending still set.
+    defer self.pending_target = null;
+    while (!self.stopped) {
+        const drain_target = self.pending_target orelse break;
+        self.pending_target = null;
+        var iter = self.advanceTo(drain_target);
+        // Check `stopped` *before* iter.next() so a callback that calls stop()
+        // can't leave current_slot one ahead of the last-emitted slot.
+        while (true) {
+            if (self.stopped) break;
+            const event = iter.next() orelse break;
+            switch (event) {
+                .slot => |s| {
+                    self.emitSlot(s);
+                    self.dispatchWaiters(s);
+                },
+                .epoch => |e| self.emitEpoch(e),
+            }
         }
     }
 }
@@ -1321,7 +1350,31 @@ test "stop() from a catchUp callback still resolves a reached wait" {
     try testing.expectEqual(@as(?Slot, 1), clock.current_slot);
 }
 
-const NestedDispatchCtx = struct {
+test "waitForSlot reached-check consults the cursor, not the catch-up reading" {
+    var fake = FakeClockIo{ .ms = 100_000 };
+
+    var clock: Clock = undefined;
+    try clock.init(testing.allocator, .{
+        .genesis_time_sec = 100,
+        .slot_duration_ms = 1_000,
+        .slots_per_epoch = 8,
+    }, fake.io());
+    defer clock.deinit();
+
+    var ctx = StopAtSlotCtx{ .clock = &clock, .stop_at = 1 };
+    _ = try clock.onSlot(StopAtSlotCtx.stopAt, &ctx);
+
+    // Backlog to slot 3 with the listener stopping the clock at slot 1: the
+    // catch-up reading (3) reaches the target but the cursor stops at 1, and
+    // slot 2's event is suppressed. The reached-check must consult the cursor,
+    // so the wait aborts synchronously instead of resolving.
+    fake.ms = 103_000;
+    try testing.expectError(error.Aborted, clock.waitForSlot(2));
+    try testing.expect(clock.stopped);
+    try testing.expectEqual(@as(?Slot, 1), clock.current_slot);
+}
+
+const MutateAndQueryCtx = struct {
     clock: *Clock,
     fake: *FakeClockIo,
     add_ctx: *EventTraceState,
@@ -1331,7 +1384,7 @@ const NestedDispatchCtx = struct {
     slot_len: usize = 0,
 
     fn onSlot(ctx: ?*anyopaque, slot: Slot) void {
-        const self: *NestedDispatchCtx = @ptrCast(@alignCast(ctx.?));
+        const self: *MutateAndQueryCtx = @ptrCast(@alignCast(ctx.?));
         self.slots[self.slot_len] = slot;
         self.slot_len += 1;
         if (self.fired_once) return;
@@ -1343,7 +1396,7 @@ const NestedDispatchCtx = struct {
     }
 };
 
-test "nested dispatch during emit preserves the outer snapshot" {
+test "listener mutations mid-emit preserve the per-emit snapshot; a query defers delivery" {
     var fake = FakeClockIo{ .ms = 100_000 };
 
     var clock: Clock = undefined;
@@ -1357,23 +1410,25 @@ test "nested dispatch during emit preserves the outer snapshot" {
     var ctx_l2 = EventTraceState{};
     var ctx_l3 = EventTraceState{};
     var ctx_l4 = EventTraceState{};
-    var ctx_l1 = NestedDispatchCtx{ .clock = &clock, .fake = &fake, .add_ctx = &ctx_l4 };
-    _ = try clock.onSlot(NestedDispatchCtx.onSlot, &ctx_l1);
+    var ctx_l1 = MutateAndQueryCtx{ .clock = &clock, .fake = &fake, .add_ctx = &ctx_l4 };
+    _ = try clock.onSlot(MutateAndQueryCtx.onSlot, &ctx_l1);
     const id_l2 = try clock.onSlot(EventTraceState.onSlot, &ctx_l2);
     _ = try clock.onSlot(EventTraceState.onSlot, &ctx_l3);
     ctx_l1.remove_id = id_l2;
 
     // Wall slot 1: the outer emit of slot 1 snapshots [L1, L2, L3]. L1 burns
     // the wall into slot 2, removes L2, registers L4, and queries the clock —
-    // the nested emit of slot 2 snapshots [L1, L3, L4]. The outer emit then
-    // resumes: L2 still gets slot 1, L3 gets it exactly once, and L4 (absent
-    // from the outer snapshot) records only slot 2.
+    // the query records target 2 and returns a fresh reading without nesting a
+    // dispatch. The outer emit of slot 1 finishes against its snapshot: L2 and
+    // L3 each get slot 1 exactly once. The draining frame then emits slot 2 to
+    // the current listeners [L1, L3, L4]: L2 (removed) never sees slot 2; L4
+    // (added) sees only slot 2.
     fake.ms = 101_000;
     try testing.expectEqual(@as(?Slot, 1), clock.currentSlot());
 
     try expectEqualSlices(Slot, &.{ 1, 2 }, ctx_l1.slots[0..ctx_l1.slot_len]);
     try expectEqualSlices(Slot, &.{1}, ctx_l2.slots[0..ctx_l2.slot_len]);
-    try expectEqualSlices(Slot, &.{ 2, 1 }, ctx_l3.slots[0..ctx_l3.slot_len]);
+    try expectEqualSlices(Slot, &.{ 1, 2 }, ctx_l3.slots[0..ctx_l3.slot_len]);
     try expectEqualSlices(Slot, &.{2}, ctx_l4.slots[0..ctx_l4.slot_len]);
 }
 
@@ -1441,7 +1496,7 @@ const QueryAtSlotCtx = struct {
     }
 };
 
-test "backlog query-from-callback delivers every (listener, slot) exactly once" {
+test "backlog query-from-callback delivers every (listener, slot) exactly once in order" {
     var fake = FakeClockIo{ .ms = 100_000 };
 
     var clock: Clock = undefined;
@@ -1457,11 +1512,14 @@ test "backlog query-from-callback delivers every (listener, slot) exactly once" 
     _ = try clock.onSlot(QueryAtSlotCtx.onSlot, &ctx_q);
     _ = try clock.onSlot(EventTraceState.onSlot, &ctx_r);
 
+    // Q queries at slot 1 while slots 1..3 are backlogged; the query records
+    // target 3 (and returns 3) but defers delivery. The drain then delivers 2
+    // and 3 to every listener in order, so R sees 1, 2, 3.
     fake.ms = 103_000;
     try testing.expectEqual(@as(?Slot, 3), clock.currentSlot());
 
     try expectEqualSlices(Slot, &.{ 1, 2, 3 }, ctx_q.slots[0..ctx_q.slot_len]);
-    try expectEqualSlices(Slot, &.{ 2, 3, 1 }, ctx_r.slots[0..ctx_r.slot_len]);
+    try expectEqualSlices(Slot, &.{ 1, 2, 3 }, ctx_r.slots[0..ctx_r.slot_len]);
     try testing.expectEqual(@as(?Slot, 3), ctx_q.queried_slot);
 }
 
@@ -1489,7 +1547,7 @@ test "non-backlog query-from-callback is a no-op" {
     try testing.expectEqual(@as(?Slot, 1), ctx_q.queried_slot);
 }
 
-test "epoch events under nested dispatch arrive out of order but exactly once" {
+test "epoch events under deferred dispatch arrive in order exactly once" {
     var fake = FakeClockIo{ .ms = 102_000 };
 
     var clock: Clock = undefined;
@@ -1510,12 +1568,231 @@ test "epoch events under nested dispatch arrive out of order but exactly once" {
     _ = try clock.onSlot(QueryAtSlotCtx.onSlot, &ctx_q);
     _ = try clock.onEpoch(EventTraceState.onEpoch, &trace);
 
+    // Emitting slot 4 crosses into epoch 1; Q's query then burns to slot 8
+    // (epoch 2), recording target 8. The epoch-1 event is delivered as the
+    // outer emit finishes, and epoch 2 by the drain — so epochs arrive 1, 2.
     fake.ms = 104_000;
     try testing.expectEqual(@as(?Slot, 4), clock.currentSlot());
 
     try expectEqualSlices(Slot, &.{ 3, 4, 5, 6, 7, 8 }, ctx_q.slots[0..ctx_q.slot_len]);
-    try expectEqualSlices(Epoch, &.{ 2, 1 }, trace.epochs[0..trace.epoch_len]);
+    try expectEqualSlices(Epoch, &.{ 1, 2 }, trace.epochs[0..trace.epoch_len]);
     try testing.expectEqual(@as(?Slot, 8), ctx_q.queried_slot);
+}
+
+const BacklogWitnessCtx = struct {
+    clock: *Clock,
+    last_slot: Slot = 0,
+    slot_count: u64 = 0,
+    epoch_count: u64 = 0,
+    order_ok: bool = true,
+
+    fn onSlot(ctx: ?*anyopaque, slot: Slot) void {
+        const self: *BacklogWitnessCtx = @ptrCast(@alignCast(ctx.?));
+        if (slot != self.last_slot + 1) self.order_ok = false;
+        self.last_slot = slot;
+        self.slot_count += 1;
+        _ = self.clock.currentSlot();
+    }
+
+    fn onEpoch(ctx: ?*anyopaque, _: Epoch) void {
+        const self: *BacklogWitnessCtx = @ptrCast(@alignCast(ctx.?));
+        self.epoch_count += 1;
+    }
+};
+
+test "big backlog drains in a flat loop without per-slot nesting" {
+    var fake = FakeClockIo{ .ms = 100_000 };
+
+    var clock: Clock = undefined;
+    try clock.init(testing.allocator, .{
+        .genesis_time_sec = 100,
+        .slot_duration_ms = 1_000,
+        .slots_per_epoch = 32,
+    }, fake.io());
+    defer clock.deinit();
+
+    var ctx = BacklogWitnessCtx{ .clock = &clock };
+    _ = try clock.onSlot(BacklogWitnessCtx.onSlot, &ctx);
+    _ = try clock.onEpoch(BacklogWitnessCtx.onEpoch, &ctx);
+
+    // A 32_768-slot backlog with a query on every callback: per-slot dispatch
+    // recursion would overflow the fiber stack, so the drain must stay a flat
+    // loop, delivering each slot once.
+    const backlog: u64 = 32_768;
+    fake.ms = 100_000 + backlog * 1_000;
+    try testing.expectEqual(@as(?Slot, 32_768), clock.currentSlot());
+
+    try testing.expect(ctx.order_ok);
+    try testing.expectEqual(@as(u64, 32_768), ctx.slot_count);
+    try testing.expectEqual(@as(u64, 1_024), ctx.epoch_count);
+    try testing.expectEqual(@as(?Slot, 32_768), clock.current_slot);
+}
+
+const RunAheadLog = struct {
+    const Tag = enum { a_slot, b_slot, a_query };
+    const Entry = struct { tag: Tag, value: u64 };
+
+    entries: [16]Entry = undefined,
+    len: usize = 0,
+
+    fn record(self: *RunAheadLog, tag: Tag, value: u64) void {
+        if (self.len >= self.entries.len) return;
+        self.entries[self.len] = .{ .tag = tag, .value = value };
+        self.len += 1;
+    }
+};
+
+const RunAheadA = struct {
+    clock: *Clock,
+    log: *RunAheadLog,
+
+    fn onSlot(ctx: ?*anyopaque, slot: Slot) void {
+        const self: *RunAheadA = @ptrCast(@alignCast(ctx.?));
+        self.log.record(.a_slot, slot);
+        if (slot != 1) return;
+        self.log.record(.a_query, self.clock.currentSlot().?);
+    }
+};
+
+const RunAheadB = struct {
+    log: *RunAheadLog,
+
+    fn onSlot(ctx: ?*anyopaque, slot: Slot) void {
+        const self: *RunAheadB = @ptrCast(@alignCast(ctx.?));
+        self.log.record(.b_slot, slot);
+    }
+};
+
+test "a mid-emit query returns a reading ahead of deferred delivery" {
+    var fake = FakeClockIo{ .ms = 100_000 };
+
+    var clock: Clock = undefined;
+    try clock.init(testing.allocator, .{
+        .genesis_time_sec = 100,
+        .slot_duration_ms = 1_000,
+        .slots_per_epoch = 8,
+    }, fake.io());
+    defer clock.deinit();
+
+    var log = RunAheadLog{};
+    var ctx_a = RunAheadA{ .clock = &clock, .log = &log };
+    var ctx_b = RunAheadB{ .log = &log };
+    _ = try clock.onSlot(RunAheadA.onSlot, &ctx_a);
+    _ = try clock.onSlot(RunAheadB.onSlot, &ctx_b);
+
+    // Backlog 1..3. While emitting slot 1, A queries: the reading returns 3
+    // (the wall) though only slot 1 has been delivered. B then gets slot 1, and
+    // the drain delivers 2 and 3 to both after A's callback returns.
+    fake.ms = 103_000;
+    try testing.expectEqual(@as(?Slot, 3), clock.currentSlot());
+
+    const E = RunAheadLog.Entry;
+    try expectEqualSlices(E, &.{
+        .{ .tag = .a_slot, .value = 1 },
+        .{ .tag = .a_query, .value = 3 },
+        .{ .tag = .b_slot, .value = 1 },
+        .{ .tag = .a_slot, .value = 2 },
+        .{ .tag = .b_slot, .value = 2 },
+        .{ .tag = .a_slot, .value = 3 },
+        .{ .tag = .b_slot, .value = 3 },
+    }, log.entries[0..log.len]);
+}
+
+test "successive mid-emit queries coalesce to the furthest pending target" {
+    var fake = FakeClockIo{ .ms = 100_000 };
+
+    var clock: Clock = undefined;
+    try clock.init(testing.allocator, .{
+        .genesis_time_sec = 100,
+        .slot_duration_ms = 1_000,
+        .slots_per_epoch = 8,
+    }, fake.io());
+    defer clock.deinit();
+
+    var ctx_l1 = QueryAtSlotCtx{
+        .clock = &clock,
+        .fake = &fake,
+        .query_at = 1,
+        .burn_to_ms = 103_000,
+    };
+    var ctx_l2 = QueryAtSlotCtx{
+        .clock = &clock,
+        .fake = &fake,
+        .query_at = 1,
+        .burn_to_ms = 105_000,
+    };
+    var ctx_l3 = QueryAtSlotCtx{
+        .clock = &clock,
+        .fake = &fake,
+        .query_at = 1,
+        .burn_to_ms = 104_000,
+    };
+    _ = try clock.onSlot(QueryAtSlotCtx.onSlot, &ctx_l1);
+    _ = try clock.onSlot(QueryAtSlotCtx.onSlot, &ctx_l2);
+    _ = try clock.onSlot(QueryAtSlotCtx.onSlot, &ctx_l3);
+
+    // Wall slot 1: emitting slot 1, L1 burns the wall to slot 3 and queries
+    // (pending 3, reading 3), L2 burns to slot 5 and queries (pending 5,
+    // reading 5), then L3 steps the wall BACK to slot 4 and queries (reading
+    // 4). @max holds pending at 5: keeping the first target would stall the
+    // drain at 3, and a plain overwrite would regress it to 4. The drain
+    // delivers 2..5 to all three exactly once; the top-level read keeps its
+    // own slot-1 reading.
+    fake.ms = 101_000;
+    try testing.expectEqual(@as(?Slot, 1), clock.currentSlot());
+
+    try expectEqualSlices(Slot, &.{ 1, 2, 3, 4, 5 }, ctx_l1.slots[0..ctx_l1.slot_len]);
+    try expectEqualSlices(Slot, &.{ 1, 2, 3, 4, 5 }, ctx_l2.slots[0..ctx_l2.slot_len]);
+    try expectEqualSlices(Slot, &.{ 1, 2, 3, 4, 5 }, ctx_l3.slots[0..ctx_l3.slot_len]);
+    try testing.expectEqual(@as(?Slot, 3), ctx_l1.queried_slot);
+    try testing.expectEqual(@as(?Slot, 5), ctx_l2.queried_slot);
+    try testing.expectEqual(@as(?Slot, 4), ctx_l3.queried_slot);
+    try testing.expectEqual(@as(?Slot, 5), clock.current_slot);
+}
+
+const QueryThenStopCtx = struct {
+    clock: *Clock,
+    queried_slot: ?Slot = null,
+    slots: [8]Slot = undefined,
+    slot_len: usize = 0,
+
+    fn onSlot(ctx: ?*anyopaque, slot: Slot) void {
+        const self: *QueryThenStopCtx = @ptrCast(@alignCast(ctx.?));
+        self.slots[self.slot_len] = slot;
+        self.slot_len += 1;
+        if (slot != 1) return;
+        self.queried_slot = self.clock.currentSlot();
+        self.clock.stop();
+    }
+};
+
+test "stop() after a mid-emit query leaves no pending target behind" {
+    var fake = FakeClockIo{ .ms = 100_000 };
+
+    var clock: Clock = undefined;
+    try clock.init(testing.allocator, .{
+        .genesis_time_sec = 100,
+        .slot_duration_ms = 1_000,
+        .slots_per_epoch = 8,
+    }, fake.io());
+    defer clock.deinit();
+
+    var ctx = QueryThenStopCtx{ .clock = &clock };
+    _ = try clock.onSlot(QueryThenStopCtx.onSlot, &ctx);
+
+    // Backlog 1..3: at slot 1 the callback queries (recording pending target
+    // 3, reading 3) and then stops. The drain exits stopped with the pending
+    // recorded; the exit backstop must clear it or the next accessor's guard
+    // acquisition would find a stale pending.
+    fake.ms = 103_000;
+    try testing.expectEqual(@as(?Slot, 3), clock.currentSlot());
+    try testing.expectEqual(@as(?Slot, 3), ctx.queried_slot);
+
+    // The post-stop accessor acquires the guard cleanly and stays a pure
+    // reading: cursor unchanged, suppressed slots 2..3 never delivered.
+    try testing.expectEqual(@as(?Slot, 3), clock.currentSlot());
+    try testing.expectEqual(@as(?Slot, 1), clock.current_slot);
+    try expectEqualSlices(Slot, &.{1}, ctx.slots[0..ctx.slot_len]);
 }
 
 const PropertyTracker = struct {
