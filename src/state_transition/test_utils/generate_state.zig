@@ -56,9 +56,7 @@ fn forkActivationEpoch(config: ChainConfig, comptime fork: ForkSeq) Epoch {
     };
 }
 
-/// Generate + allocate a BeaconState of `fork`; the consumer deinits and destroys it. Common
-/// fields for all forks, then the altair+ additions (participation, inactivity scores, sync
-/// committees) under a comptime fork guard.
+/// Generate + allocate a BeaconState of `fork`; the consumer deinits and destroys it.
 pub fn generateState(comptime fork: ForkSeq, allocator: Allocator, pool: *Node.Pool, chain_config: ChainConfig, validator_count: usize) !*AnyBeaconState {
     const StateSsz = beaconStateSsz(fork);
 
@@ -126,8 +124,6 @@ pub fn generateState(comptime fork: ForkSeq, allocator: Allocator, pool: *Node.P
 
     // no need to populate eth1_data_votes
     fork_state.eth1_deposit_index = pubkeys.len;
-    // enable this will cause some tests failed
-    // fork_state.randao_mixes = [_][32]u8{[_]u8{4} ** 32} ** preset.EPOCHS_PER_HISTORICAL_VECTOR;
     // no need to populate slashings
     // finality
     fork_state.justification_bits = types.phase0.JustificationBits.default_value;
@@ -199,7 +195,6 @@ pub fn generateState(comptime fork: ForkSeq, allocator: Allocator, pool: *Node.P
     return beacon_state;
 }
 
-/// Electra-fork convenience wrapper over `generateState`.
 pub fn generateElectraState(allocator: Allocator, pool: *Node.Pool, chain_config: ChainConfig, validator_count: usize) !*AnyBeaconState {
     return generateState(.electra, allocator, pool, chain_config, validator_count);
 }
@@ -214,7 +209,6 @@ pub const TestCachedBeaconState = struct {
     epoch_transition_cache: *state_transition.EpochTransitionCache,
 
     pub const Options = struct {
-        /// The fork of the generated state.
         fork: ForkSeq = .electra,
         /// `fork`'s activation epoch; null keeps the active chain config's. 0 activates `fork` (and
         /// all priors) at genesis so low-slot persisted states resolve as `fork`.

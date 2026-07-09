@@ -137,8 +137,8 @@ const ScratchBytes = union(enum) {
 ///   on the view of the block.
 /// - Once a chain gets finalized we'll prune all states from memory and disk for epochs <
 ///   finalized_epoch.
-/// - In get*() apis if shouldReload is true, it will reload from disk. The reload() api is expensive
-///   and should only be called in some important flows: get state for block processing, updateHeadState.
+/// - The getOrReload*() apis reload from disk; reloads are expensive and reserved for important
+///   flows: getting a state for block processing or head update.
 /// - Each time we process a state, we only persist exactly 1 checkpoint state per epoch based on the
 ///   view of block and prune all others. The persisted checkpoint state could be finalized and used
 ///   later in archive task, it's also used to regen states.
@@ -210,8 +210,6 @@ pub const PersistentCheckpointStateCache = struct {
     /// Deinit every in-memory state and the cache structures (not the borrowed datastore / block-state
     /// cache / config).
     pub fn deinit(self: *Self) void {
-        // clear() frees every in-memory state and every epoch list, leaving both containers empty (but
-        // capacity-retaining); deinit then releases that retained capacity.
         self.clear();
         self.cache.deinit(self.allocator);
         self.epoch_index.deinit(self.allocator);
@@ -557,10 +555,9 @@ pub const PersistentCheckpointStateCache = struct {
 
         const state_slot = try state.state.slot();
 
-        // Defer the disk-heavy persist below to ~67% of the slot — the most idle part — so it doesn't
-        // contend with block processing at slot start. At syncing time blocks arrive late, so we're
-        // usually already past that point and persist immediately (critical to avoid OOM during
-        // unfinality). With no clock (e.g. tests) there is no wait.
+        // At syncing time blocks arrive late, so we're usually already past the throttle point and
+        // persist immediately (critical to avoid OOM during unfinality). With no clock (e.g. tests)
+        // there is no wait.
         if (self.slot_clock) |clock| {
             const process_cp_states_ms: i64 = @intCast(self.config.getSlotComponentDurationMs(PROCESS_CHECKPOINT_STATES_BPS));
             const ms_to_wait = process_cp_states_ms - clock.msFromSlot(state_slot, null);
@@ -574,8 +571,7 @@ pub const PersistentCheckpointStateCache = struct {
         for (epochs[0 .. epochs.len - self.max_epochs_in_memory]) |lowest_epoch| {
             // there is no checkpoint states of epochs newer than this state.
             if (state_slot < computeStartSlotAtEpoch(lowest_epoch)) break;
-            // usually there is only 0 or 1 epoch to persist in this loop. Any per-epoch fault is
-            // skip-and-continue (retried next slot); only OOM propagates.
+            // usually there is only 0 or 1 epoch to persist in this loop.
             persist_count += self.processPastEpoch(io, block_root, state, lowest_epoch) catch |err| switch (err) {
                 error.OutOfMemory => return err,
                 error.SlotTooBig, error.SlotTooSmall => {
@@ -604,7 +600,7 @@ pub const PersistentCheckpointStateCache = struct {
 
         if (max_epoch) |max_e| {
             const reloaded_cp_slot = computeStartSlotAtEpoch(cp.epoch);
-            // no need to check epochs before `max_epoch - max_epochs_in_memory + 1` before they are all
+            // no need to check epochs before `max_epoch - max_epochs_in_memory + 1` because they are all
             // persisted.
             const band_start = if (max_e + 1 > self.max_epochs_in_memory)
                 max_e + 1 - self.max_epochs_in_memory
@@ -621,7 +617,6 @@ pub const PersistentCheckpointStateCache = struct {
                 // if there's at least 1 state in memory in an earlier epoch, just return the 1st one.
                 if (first_state) |fs| return fs;
 
-                // An untracked epoch has no list, skipping the inner loop.
                 const roots = if (self.epoch_index.getPtr(epoch)) |l| l.items else &[_]Root{};
                 for (roots) |root| {
                     const entry = self.cache.getPtr(.{ .root = root, .epoch = epoch }) orelse continue;
@@ -780,13 +775,13 @@ pub const PersistentCheckpointStateCache = struct {
         return .{ .reads = reads.result(), .secs = secs.result() };
     }
 
-    /// Insert/overwrite a cache entry AND track its root in the spine. With `removeEntry`, the ONLY
-    /// writers of `cache` + `epoch_index`, kept coherent.
+    /// Insert/overwrite a cache entry AND track its root in `epoch_index`. With `removeEntry`, the
+    /// ONLY writers of `cache` + `epoch_index`, kept coherent.
     ///
     /// Last-writer-wins ownership: a successful overwrite of an `.in_memory` entry destroys the
     /// displaced state, so the map holds exactly one owned state per key. The same-pointer case (the
     /// incoming item re-installs the state already resident here) skips the destroy and only updates
-    /// metadata. On any failure the incoming state is untouched (caller retains — Model B) and the
+    /// metadata. On any failure the incoming state is untouched (the caller retains ownership) and the
     /// existing entry stays intact and tracked. No raw state borrow may cross a suspension: callers
     /// re-lookup by key after suspending before inserting here.
     fn insertEntry(self: *Self, cp_key: Checkpoint, item: CacheItem) !void {
@@ -838,7 +833,7 @@ pub const PersistentCheckpointStateCache = struct {
         for (roots.items) |r| assert(self.cache.contains(.{ .root = r, .epoch = cp_key.epoch }));
     }
 
-    /// Remove a cache entry AND untrack its root from the spine. With `insertEntry`, the ONLY writers
+    /// Remove a cache entry AND untrack its root from `epoch_index`. With `insertEntry`, the ONLY writers
     /// of `cache` + `epoch_index`, kept coherent. Frees the in-memory state if any.
     fn removeEntry(self: *Self, cp_key: Checkpoint) void {
         if (self.cache.fetchRemove(cp_key)) |kv| {
@@ -1030,7 +1025,7 @@ pub const PersistentCheckpointStateCache = struct {
     /// max_epochs_in_memory`; the oldest excess epochs are deleted.
     fn prunePersistedStates(self: *Self, io: std.Io) error{OutOfMemory}!void {
         const max_epochs_on_disk = self.max_epochs_on_disk orelse return;
-        //                epochsOnDisk                                   epochsInMemory
+        //              max_epochs_on_disk                             max_epochs_in_memory
         // |----------------------------------------------------------|----------------------|
         const max_tracked = max_epochs_on_disk + self.max_epochs_in_memory;
         const count = self.epoch_index.count();
@@ -1098,8 +1093,7 @@ const TestStateFactory = struct {
     /// a no-op, isolating the band logic. Tests that exercise finality set it explicitly per state.
     const zero_finalized = types.phase0.Checkpoint.Type{ .epoch = 0, .root = @splat(0) };
 
-    /// Produce an owned state at `slot` with `root` written at `slot - 1`'s block-roots position, so
-    /// `getBlockRootAtSlot(slot - 1)` returns `root`.
+    /// Produce an owned committed state at `slot` with a zeroed finalized checkpoint.
     fn make(self: *TestStateFactory, slot: u64) !*CachedBeaconState {
         const state = try self.helper.cached_state.clone(self.allocator, .{});
         errdefer destroyTestState(self.allocator, state);
@@ -1218,8 +1212,8 @@ const TestHarness = struct {
 const RootAt = struct { target_slot: u64, root: Root };
 
 /// Build a committed driver state at `slot` whose block-roots view places each `RootAt`'s root at its
-/// target slot. Replaces the `make → blockRoots → setValue×N → commit` dance. The caller owns the
-/// returned driver and must `destroyTestState` it.
+/// target slot. The caller owns the returned driver
+/// and must `destroyTestState` it.
 fn buildDriver(h: *TestHarness, slot: u64, roots: []const RootAt) !*CachedBeaconState {
     const driver = try h.factory.make(slot);
     errdefer destroyTestState(h.allocator, driver);
@@ -1278,7 +1272,7 @@ fn serializeFresh(h: *TestHarness, slot: u64) ![]u8 {
     return s.state.serialize(h.allocator);
 }
 
-// A malformed persisted blob must fault in as a graceful cache MISS (the anti-wedge swallow), not panic
+// A malformed persisted blob must fault in as a graceful cache MISS, not panic
 // in the slot read or OOB-slice a torn offset — which holds only if the short-blob path returns a
 // catchable error. Adds a resident seed (so the reload reaches loadOtherState), persists a truncated
 // blob, and asserts getOrReload is a null miss.
@@ -1326,7 +1320,7 @@ test "metrics.scrape composes block + cp refresh over both live caches" {
 
     var aw: std.Io.Writer.Allocating = .init(allocator);
     defer aw.deinit();
-    // Default (noop) metrics: scrape must compose block+cp refresh + write over both live caches.
+    // Metrics stay the noop defaults here (no metrics.init).
     try metrics.scrape(&aw.writer, &h.block_cache, &h.cache, h.io);
 }
 
@@ -1378,7 +1372,7 @@ test "PersistentCheckpointStateCache pruneFinalized deletes below epoch and free
     try testing.expect(h.cache.get(h.io, .{ .root = root_a, .epoch = 4 }) != null);
 }
 
-test "PersistentCheckpointStateCache clear frees states and resets spine" {
+test "PersistentCheckpointStateCache clear frees states and resets epoch index" {
     const allocator = testing.allocator;
     const h = try TestHarness.init(allocator, .{ .max_epochs_in_memory = 8 });
     defer h.deinit();
@@ -1844,8 +1838,8 @@ test "PersistentCheckpointStateCache processState finality-prunes below-finalize
     try driver.state.setFinalizedCheckpoint(&finalized);
     try driver.state.commit();
 
-    // No band persist (the band keeps epochs 22 and 23 in memory), so the only effect is the finality
-    // prune: epochs 20 and 21 are gone from memory and disk; epochs 22 and 23 stay resident.
+    // No band persist (the band keeps epochs 22 and 23 in memory), so the only effect is the
+    // finality prune.
     try testing.expectEqual(@as(usize, 0), try h.cache.processState(h.io, makeRoot(0xFF), driver));
 
     try testing.expect(h.cache.get(h.io, .{ .root = root_a, .epoch = 20 }) == null);
@@ -2639,7 +2633,7 @@ test "PersistentCheckpointStateCache processState at max=0 persists a single tra
     const spe = preset.SLOTS_PER_EPOCH;
     const root = makeRoot(0xC7);
 
-    // A single tracked epoch — the minimal trigger for the zero-length-top_k floor read.
+    // A single tracked epoch — the minimal input for the max=0 persist sweep.
     try h.cache.add(h.io, .{ .epoch = 1, .root = root }, try h.factory.make(1 * spe));
     try testing.expectEqual(@as(u64, 1), h.cache.epoch_index.count());
 
@@ -2973,7 +2967,7 @@ test "PersistentCheckpointStateCache getOrReload at max=0 seeds from the block s
 
     _ = try persistByHand(h, cp, persisted_slot);
 
-    // get is memory-blind; getOrReload faults it in via the block-cache seed.
+    // get is disk-blind; getOrReload faults it in via the block-cache seed.
     try testing.expect(h.cache.get(h.io, cp) == null);
     const reloaded = (try h.cache.getOrReload(h.io, cp)).?;
     try testing.expectEqual(persisted_slot, try reloaded.state.slot());
@@ -3150,13 +3144,10 @@ test "PersistentCheckpointStateCache getOrReload owns the reloaded state and fre
     try testing.expectEqual(persisted_slot, try reloaded.state.slot());
     try testing.expect(h.cache.cache.get(.{ .root = root, .epoch = cp_epoch }).?.item == .in_memory);
 
-    // clear() must free the reloaded state exactly once (a double-armed transfer errdefer would
-    // double-free the underlying AnyBeaconState here).
+    // clear() must free the reloaded state exactly once.
     h.cache.clear();
     try testing.expectEqual(@as(usize, 0), h.cache.size());
 
-    // Second cycle: re-seed, re-persist, fault the same cp in again, then clear again — pinning the
-    // own-then-free path a second time.
     const seed2 = try h.factory.makeWithBlockRoot(seed_slot, persisted_slot, root);
     try h.cache.add(h.io, .{ .epoch = seed_epoch, .root = root }, seed2);
     _ = try persistByHand(h, cp, persisted_slot);
@@ -3251,7 +3242,7 @@ test "PersistentCheckpointStateCache insertEntry overwrite of a different state 
 test "PersistentCheckpointStateCache add OOM sweep leaves no garbage entry (dynamic path)" {
     const base_alloc = testing.allocator;
 
-    // Default opts → unbounded disk → single dynamic path, fallible epoch-index track on each fresh epoch.
+    // Default opts → unbounded disk → every fresh epoch takes the fallible epoch-index track.
     const h = try TestHarness.init(base_alloc, .{ .max_epochs_in_memory = 64 });
     defer h.deinit();
 
@@ -3262,7 +3253,7 @@ test "PersistentCheckpointStateCache add OOM sweep leaves no garbage entry (dyna
         var fail_index: usize = 0;
         while (true) : (fail_index += 1) {
             const s = try h.factory.make(@as(u64, epoch) * 100);
-            // Model B: `add` takes ownership of `s` only on success. Arm a free via `base_alloc` (the
+            // `add` takes ownership of `s` only on success. Arm a free via `base_alloc` (the
             // `make` allocator, NOT the swapped failing allocator) so a failing `add` cannot leak `s`;
             // disarm once the cache owns it. This catches BOTH a leak (forgotten free) and a double-free
             // (if `add` wrongly freed `s` AND the test frees) via testing.allocator.
@@ -3296,9 +3287,9 @@ test "PersistentCheckpointStateCache add OOM sweep leaves no garbage entry (dyna
     // Every epoch ended up coherently tracked; full deinit must not OOB or double-free.
     try testing.expectEqual(@as(u64, 6), h.cache.epoch_index.count());
 
-    // A FAILED re-add of an EXISTING (epoch,root) must leave the pre-existing entry intact: the spine
-    // put's OOM rollback only undoes the edge it was adding, so it must NOT remove epoch 6's entry
-    // here. (A too-broad rollback would make these assertions fail.)
+    // A FAILED re-add of an EXISTING (epoch,root) must leave the pre-existing entry intact: the
+    // epoch-index put's OOM rollback only undoes the edge it was adding, so it must NOT remove
+    // epoch 6's entry here.
     {
         const s = try h.factory.make(600);
         var s_owned = true;
@@ -3312,8 +3303,8 @@ test "PersistentCheckpointStateCache add OOM sweep leaves no garbage entry (dyna
         try testing.expectError(error.OutOfMemory, result);
         try testing.expect(h.cache.epoch_index.contains(6));
         try testing.expect(h.cache.get(h.io, .{ .root = root, .epoch = 6 }) != null);
-        // Model B: the failed re-add left `s` untouched (the pre-existing resident is the one kept), so
-        // the test owns and frees `s`.
+        // The failed re-add left `s` untouched (the pre-existing resident is the one kept), so the
+        // test owns and frees `s`.
         destroyTestState(base_alloc, s);
         s_owned = false;
     }
@@ -3727,8 +3718,7 @@ fn gatedBusyPoolReloadTask(rv: *Rendezvous, h: *TestHarness, io: std.Io, pool: *
 test "PersistentCheckpointStateCache processState survives an add during the persist write" {
     const allocator = testing.allocator;
 
-    // Single executor = the calling thread, zero worker threads: cooperative, deterministic interleave
-    // (the cache is not thread-safe). `rt.io()` is the same std.Io adapter the clock module drives.
+    // Single executor = the calling thread, zero worker threads: cooperative, deterministic interleave.
     const rt = try zio.Runtime.init(allocator, .{ .executors = .exact(1) });
     defer rt.deinit();
     const io = rt.io();
@@ -3745,7 +3735,7 @@ test "PersistentCheckpointStateCache processState survives an add during the per
     const root_a = makeRoot(0xA7);
     const cp = Checkpoint{ .epoch = 1, .root = root_a };
 
-    // Fiber A persists cp epoch 1; it parks mid-write. Fiber B adds a fresh S1 for cp during that park,
+    // Fiber A persists cp epoch 1; it parks mid-write. Fiber B adds a fresh state for cp during that park,
     // then releases A. Await both before asserting so neither coroutine is leaked on a failure.
     var fut_a = try std.Io.concurrent(io, gatedProcessStateTask, .{ h, io, cp, root_a });
     var fut_b = try std.Io.concurrent(io, gatedAddTask, .{ &rv, h, io, cp, @as(u64, 101) });
@@ -3795,7 +3785,7 @@ test "PersistentCheckpointStateCache getOrReload frees a resident added during t
     const persisted_slot = computeStartSlotAtEpoch(cp_epoch);
 
     // Fiber A seeds the band + persists cp, then getOrReload parks in the gated read. Fiber B adds a
-    // fresh S1 for the same cp during that park, then releases A.
+    // fresh state for the same cp during that park, then releases A.
     var fut_a = try std.Io.concurrent(io, gatedReloadTask, .{ h, io, &store, cp, seed_cp, seed_slot, persisted_slot });
     var fut_b = try std.Io.concurrent(io, gatedAddTask, .{ &rv, h, io, cp, seed_slot });
     const res_a = fut_a.await(io);
@@ -3808,7 +3798,7 @@ test "PersistentCheckpointStateCache getOrReload frees a resident added during t
     try testing.expect(rv.b_done_at.? < rv.resumed_at.?);
 
     // Last writer wins: A's reload insertEntry landed AFTER B's add → the reloaded state wins and the
-    // interleaved S1 was destroyed by the overwrite (leak-checked). `rv.added` is now freed — not deref'd.
+    // interleaved add's state was destroyed by the overwrite (leak-checked). `rv.added` is now freed — not deref'd.
     try testing.expectEqual(persisted_slot, try reloaded.state.slot());
     try testing.expect(rv.added != null);
     const item = h.cache.cache.get(cp).?.item;
@@ -3842,7 +3832,7 @@ test "PersistentCheckpointStateCache processState removes the orphan blob when t
     var fut_b = try std.Io.concurrent(io, gatedPruneTask, .{ &rv, h, io, @as(Epoch, 2) });
     const res_a = fut_a.await(io);
     try fut_b.await(io);
-    // persist_count is bumped before the vanish re-resolve, so its value is not load-bearing here.
+    // persist_count is bumped before the post-write re-lookup, so its exact value is not asserted.
     _ = try res_a;
 
     // Proof the interleave was real: B's prune completed strictly between A parking and A resuming.
@@ -3895,8 +3885,8 @@ test "PersistentCheckpointStateCache busy pool falls back to fresh alloc during 
     try testing.expect(rv.parked_at.? < rv.b_done_at.?);
     try testing.expect(rv.b_done_at.? < rv.resumed_at.?);
 
-    // Non-vacuous guard: the pool WAS busy (A held its lease across the parked write) when B reloaded,
-    // forcing the fresh-alloc fallback.
+    // The pool WAS busy (A held its lease across the parked write) when B reloaded, forcing the
+    // fresh-alloc fallback.
     try testing.expect(rv.pool_busy);
 
     try testing.expect(h.cache.cache.get(cp).?.item == .persisted);

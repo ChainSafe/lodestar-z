@@ -49,8 +49,7 @@ pub const AvgMinMaxAccumulator = struct {
     }
 };
 
-/// `size`/`epoch_size` are PULL gauges: the metrics module serializes whatever the gauge holds at
-/// scrape time, so the cache refreshes them before `write()` (the module has no push collect-callback).
+/// `size`/`epoch_size` are PULL gauges — same contract as `BlockStateCacheMetrics`'s.
 pub const CpStateCacheMetrics = struct {
     lookups: Count,
     hits: Count,
@@ -354,11 +353,8 @@ pub fn write(writer: anytype) !void {
     try m.write(&checkpoint_cache_metrics, writer);
 }
 
-/// The state-cache module's own scrape: refresh ALL PULL gauges from the live caches, then serialize.
-/// This module has no binding of its own, so any Zig caller — the NAPI binding or a standalone metrics
-/// endpoint — calls this once per scrape to refresh the PULL gauges before serializing. The caches
-/// are taken as `anytype` (`*BlockStateCache` / `*PersistentCheckpointStateCache`) to avoid a
-/// metrics↔cache cycle.
+/// Refresh ALL PULL gauges from the live caches, then serialize. The caches are taken as `anytype`
+/// (`*BlockStateCache` / `*PersistentCheckpointStateCache`) to avoid a metrics↔cache cycle.
 pub fn scrape(writer: anytype, block_cache: anytype, cp_cache: anytype, io: std.Io) !void {
     setBlockSize(@intCast(block_cache.size()));
     const brs = block_cache.scanReadStats(io);

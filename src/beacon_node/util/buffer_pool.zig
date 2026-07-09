@@ -153,7 +153,7 @@ pub fn deinitMetrics() void {
     buffer_pool_metrics = m.initializeNoop(BufferPoolMetrics);
 }
 
-/// Pull-refresh `length` from live capacity; for the (deferred) scrape wiring.
+/// Pull-refresh `length` from the pool's live capacity before serializing metrics.
 pub fn refreshMetrics(pool: *const BufferPool) void {
     buffer_pool_metrics.length.set(pool.capacity());
 }

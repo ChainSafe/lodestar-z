@@ -422,8 +422,8 @@ pub const AnyBeaconState = union(ForkSeq) {
         }
     }
 
-    /// Serialize the `validators` list into `out` (which must be `validatorsSerializedSize()` bytes;
-    /// read-only, changes are not reflected back to the state). Returns the number of bytes written.
+    /// Serialize the `validators` list into `out` (which must be `validatorsSerializedSize()` bytes).
+    /// Returns the number of bytes written.
     pub fn serializeValidatorsIntoBytes(self: *AnyBeaconState, out: []u8) !usize {
         switch (self.*) {
             inline else => |state| {
@@ -433,8 +433,8 @@ pub const AnyBeaconState = union(ForkSeq) {
         }
     }
 
-    /// Serialize the `validators` list to SSZ bytes (read-only; changes are not reflected back to the
-    /// state). Caller owns the returned slice and frees it with the same allocator.
+    /// Serialize the `validators` list to SSZ bytes. Caller owns the returned slice and frees it with
+    /// the same allocator.
     pub fn serializeValidators(self: *AnyBeaconState, allocator: Allocator) ![]u8 {
         const out = try allocator.alloc(u8, try self.validatorsSerializedSize());
         errdefer allocator.free(out);
