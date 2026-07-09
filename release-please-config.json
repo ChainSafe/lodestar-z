@@ -5,7 +5,7 @@
   "include-component-in-tag": false,
   "include-v-in-tag": true,
   "versioning": "prerelease",
-  "prerelease": true,
+  "prerelease": false,
   "prerelease-type": "rc",
   "bump-minor-pre-major": true,
   "bump-patch-for-minor-pre-major": true,
