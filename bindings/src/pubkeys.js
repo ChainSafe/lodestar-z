@@ -62,7 +62,7 @@ export const pubkeyCache = {
     native.save(filepath);
   },
 
-  ensureCapacity(capacity, growthStep) {
-    native.ensureCapacity(capacity, growthStep);
+  ensureCapacity(capacity) {
+    native.ensureCapacity(capacity);
   },
 };

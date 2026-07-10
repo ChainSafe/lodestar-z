@@ -22,10 +22,10 @@ export interface PubkeyCache {
   /** Save cache to a PKIX file */
   save(filepath: string): void;
   /**
-   * Pre-allocate native capacity. `growthStep` sets how much extra capacity is reserved
-   * when a set() outgrows the current capacity, capacity doubles if never configured.
+   * Pre-allocate native capacity. When a set() outgrows the current capacity, it grows
+   * by a fixed step covering ~3 months of worst-case validator registry growth.
    */
-  ensureCapacity(capacity: number, growthStep?: number): void;
+  ensureCapacity(capacity: number): void;
 }
 
 export declare const pubkeyCache: PubkeyCache;

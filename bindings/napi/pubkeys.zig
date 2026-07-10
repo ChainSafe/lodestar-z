@@ -5,6 +5,7 @@ const blst_bindings = @import("./blst.zig");
 const PubkeyIndexMap = @import("state_transition").PubkeyIndexMap;
 const Index2PubkeyCache = @import("state_transition").Index2PubkeyCache;
 const napi_io = @import("./io.zig");
+const preset = @import("preset").preset;
 
 /// Uses page allocator for internal allocations.
 /// It's recommended to never reallocate the pubkey2index after initialization.
@@ -13,11 +14,14 @@ const allocator = std.heap.page_allocator;
 const default_initial_capacity: u32 = 0;
 const max_stack_aggregate_pubkeys = 512;
 
+/// Capacity added when a set() outgrows the current capacity. Covers ~3 months of
+/// worst-case validator registry growth (MAX_PENDING_DEPOSITS_PER_EPOCH new validators
+/// per epoch at 12s slots), so growth stays proportionate at any network scale.
+const growth_step: u32 = preset.MAX_PENDING_DEPOSITS_PER_EPOCH * ((90 * 24 * 60 * 60) / (12 * preset.SLOTS_PER_EPOCH));
+
 pub const State = struct {
     pubkey2index: PubkeyIndexMap = undefined,
     index2pubkey: Index2PubkeyCache = undefined,
-    /// Capacity added when a set() outgrows the current capacity, doubles when 0
-    growth_step: u32 = 0,
     initialized: bool = false,
 
     pub fn init(self: *State) !void {
@@ -242,9 +246,7 @@ pub fn set(index: js.Number, pubkey: js.Uint8Array) !void {
 
     // Ensure capacity if needed
     if (idx >= state.index2pubkey.capacity) {
-        const current = state.index2pubkey.capacity;
-        const grown = if (state.growth_step > 0) current + state.growth_step else current * 2;
-        const new_cap: u32 = @intCast(@max(idx + 1, grown));
+        const new_cap: u32 = @intCast(@max(idx + 1, state.index2pubkey.capacity + growth_step));
         try state.pubkey2index.ensureTotalCapacity(new_cap);
         try state.index2pubkey.ensureTotalCapacityPrecise(allocator, new_cap);
     }
@@ -268,13 +270,9 @@ pub fn size() !js.Number {
     return js.Number.from(@as(u32, @intCast(state.index2pubkey.items.len)));
 }
 
-/// JS: pubkeys.ensureCapacity(newSize, growthStep?)
-pub fn ensureCapacity(new_size: js.Number, growth_step: ?js.Number) !void {
+/// JS: pubkeys.ensureCapacity(newSize)
+pub fn ensureCapacity(new_size: js.Number) !void {
     if (!state.initialized) return error.PubkeyIndexNotInitialized;
-
-    if (growth_step) |step| {
-        state.growth_step = try step.toU32();
-    }
 
     const requested = try new_size.toU32();
     const old_size = state.index2pubkey.capacity;

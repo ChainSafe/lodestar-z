@@ -107,14 +107,15 @@ describe("pubkeys", () => {
     expect(pubkeyCache.capacity).toBe(1_000);
   });
 
-  it("doubles capacity on growth when no growth step is configured", () => {
-    pubkeyCache.set(1_000, keypairs[0].pubkeyBytes);
-    expect(pubkeyCache.capacity).toBe(2_000);
-  });
+  it("grows capacity by a fixed step instead of doubling", () => {
+    const cap0 = pubkeyCache.capacity;
+    pubkeyCache.set(cap0, keypairs[0].pubkeyBytes);
+    const cap1 = pubkeyCache.capacity;
+    const step = cap1 - cap0;
+    expect(step).toBeGreaterThan(0);
 
-  it("grows capacity by the configured growth step", () => {
-    pubkeyCache.ensureCapacity(pubkeyCache.capacity, 8);
-    pubkeyCache.set(2_000, keypairs[1].pubkeyBytes);
-    expect(pubkeyCache.capacity).toBe(2_008);
+    pubkeyCache.set(cap1, keypairs[1].pubkeyBytes);
+    const cap2 = pubkeyCache.capacity;
+    expect(cap2 - cap1).toBe(step);
   });
 });
