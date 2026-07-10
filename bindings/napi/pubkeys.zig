@@ -236,7 +236,7 @@ pub fn set(index: js.Number, pubkey: js.Uint8Array) !void {
 
     // Since the cache is append only, if the index is less than
     // the cache's items length, we assume it already exists
-    if (idx < state.index2pubkey.items)
+    if (idx < state.index2pubkey.items.len)
         return;
 
     const pubkey_slice = try pubkey.toSlice();
