@@ -279,7 +279,10 @@ pub fn ensureCapacity(new_size: js.Number) !void {
     if (requested <= old_size) return;
 
     try state.pubkey2index.ensureTotalCapacity(requested);
-    try state.index2pubkey.ensureTotalCapacityPrecise(allocator, requested);
+    // Not precise on purpose, the growth curve overshoot leaves slack for states with
+    // slightly more validators than reserved, which the zig-side syncPubkeys cannot
+    // grow safely (it does not own the backing allocator)
+    try state.index2pubkey.ensureTotalCapacity(allocator, requested);
 }
 
 /// JS: pubkeys.capacity() → number

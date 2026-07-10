@@ -104,7 +104,7 @@ describe("pubkeys", () => {
   });
 
   it("exposes native capacity", () => {
-    expect(pubkeyCache.capacity).toBe(1_000);
+    expect(pubkeyCache.capacity).toBeGreaterThanOrEqual(1_000);
   });
 
   it("grows capacity by a fixed step instead of doubling", () => {
