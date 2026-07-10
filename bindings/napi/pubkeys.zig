@@ -233,6 +233,12 @@ pub fn set(index: js.Number, pubkey: js.Uint8Array) !void {
     if (!state.initialized) return error.PubkeyIndexNotInitialized;
 
     const idx = try index.toU32();
+
+    // Since the cache is append only, if the index is less than
+    // the cache's items length, we assume it already exists
+    if (idx < state.index2pubkey.items.len)
+        return;
+
     const pubkey_slice = try pubkey.toSlice();
     if (pubkey_slice.len != 48) return error.InvalidPubkeyLength;
 
