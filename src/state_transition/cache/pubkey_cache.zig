@@ -1,6 +1,6 @@
 const std = @import("std");
 const bls = @import("bls");
-const preset = @import("preset");
+const preset = @import("preset").preset;
 const types = @import("consensus_types");
 const Validator = types.phase0.Validator.Type;
 
