@@ -472,13 +472,13 @@ pub const PersistentCheckpointStateCache = struct {
 
     /// Prune all checkpoint states (memory AND disk) before the provided finalized epoch. A per-epoch
     /// `deleteAllEpochItems` failure is logged + skipped, retried on the next finalization; only OOM
-    /// propagates. Walks backwards: a successful delete swapRemoves the epoch key, moving an
-    /// already-visited tail key into the slot, so `i` always just decrements.
+    /// propagates. Iterates an owned snapshot: `deleteAllEpochItems` suspends in the datastore, and a
+    /// concurrent prune may shrink `epoch_index` under the loop (a stale epoch no-ops there).
     fn pruneFinalized(self: *Self, io: std.Io, finalized_epoch: Epoch) error{OutOfMemory}!void {
-        var i: usize = self.epoch_index.count();
-        while (i > 0) {
-            i -= 1;
-            const epoch = self.epoch_index.keys()[i];
+        const epochs = try self.allocator.dupe(Epoch, self.epoch_index.keys());
+        defer self.allocator.free(epochs);
+
+        for (epochs) |epoch| {
             if (epoch >= finalized_epoch) continue;
             self.deleteAllEpochItems(io, epoch) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
@@ -1048,7 +1048,8 @@ pub const PersistentCheckpointStateCache = struct {
     /// A pool lease when a pool is wired and free, else a fresh allocation. Caller `deinit`s it.
     fn acquireScratch(self: *Self, len: usize, source: buffer_pool.AllocSource) !ScratchBytes {
         if (self.buffer_pool) |pool| {
-            if (try pool.alloc(len, source)) |lease| return .{ .leased = lease };
+            // Callers immediately overwrite the full lease, so skip alloc's zeroing pass.
+            if (try pool.allocUnsafe(len, source)) |lease| return .{ .leased = lease };
         }
         return .{ .owned = try self.allocator.alloc(u8, len) };
     }

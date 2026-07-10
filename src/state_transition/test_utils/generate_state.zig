@@ -18,6 +18,7 @@ const Node = @import("persistent_merkle_tree").Node;
 const state_transition = @import("../root.zig");
 const CachedBeaconState = state_transition.CachedBeaconState;
 const AnyBeaconState = @import("fork_types").AnyBeaconState;
+const ForkTypes = @import("fork_types").ForkTypes;
 const PubkeyIndexMap = state_transition.PubkeyIndexMap;
 const Index2PubkeyCache = state_transition.Index2PubkeyCache;
 const EffectiveBalanceIncrements = state_transition.EffectiveBalanceIncrements;
@@ -27,20 +28,6 @@ const interopPubkeysCached = @import("./interop_pubkeys.zig").interopPubkeysCach
 const EFFECTIVE_BALANCE_INCREMENT = 32;
 const EFFECTIVE_BALANCE = 32 * 1e9;
 const active_chain_config = if (active_preset == .mainnet) mainnet_chain_config else minimal_chain_config;
-
-/// The SSZ BeaconState type for `fork`.
-fn beaconStateSsz(comptime fork: ForkSeq) type {
-    return switch (fork) {
-        .phase0 => types.phase0.BeaconState,
-        .altair => types.altair.BeaconState,
-        .bellatrix => types.bellatrix.BeaconState,
-        .capella => types.capella.BeaconState,
-        .deneb => types.deneb.BeaconState,
-        .electra => types.electra.BeaconState,
-        .fulu => types.fulu.BeaconState,
-        .gloas => types.gloas.BeaconState,
-    };
-}
 
 /// `fork`'s activation epoch in `config`.
 fn forkActivationEpoch(config: ChainConfig, comptime fork: ForkSeq) Epoch {
@@ -58,7 +45,7 @@ fn forkActivationEpoch(config: ChainConfig, comptime fork: ForkSeq) Epoch {
 
 /// Generate + allocate a BeaconState of `fork`; the consumer deinits and destroys it.
 pub fn generateState(comptime fork: ForkSeq, allocator: Allocator, pool: *Node.Pool, chain_config: ChainConfig, validator_count: usize) !*AnyBeaconState {
-    const StateSsz = beaconStateSsz(fork);
+    const StateSsz = ForkTypes(fork).BeaconState;
 
     const beacon_state = try allocator.create(AnyBeaconState);
     errdefer allocator.destroy(beacon_state);
@@ -172,8 +159,7 @@ pub fn generateState(comptime fork: ForkSeq, allocator: Allocator, pool: *Node.P
         var validators = try beacon_state.validators();
         for (next_sync_committee_indices, 0..next_sync_committee_indices.len) |index, i| {
             var validator = try validators.get(@intCast(index));
-            // Validator is now a StructContainerType — `get("pubkey")` returns the
-            // value directly (a `[48]u8` array), not a child TreeView.
+            // Validator is a StructContainerType: `get("pubkey")` returns the `[48]u8` value directly.
             next_sync_committee_pubkeys[i] = try validator.get("pubkey");
             next_sync_committee_pubkeys_slices[i] = try bls.PublicKey.uncompress(&next_sync_committee_pubkeys[i]);
         }
@@ -227,19 +213,16 @@ pub const TestCachedBeaconState = struct {
         // FAR_FUTURE_EPOCH) would overflow the slot math in generateState; generate it at genesis.
         const fork_epoch = fork_epoch_opt orelse if (scheduled == FAR_FUTURE_EPOCH) 0 else scheduled;
         const chain_config = getConfig(active_chain_config, fork, fork_epoch);
-        // initFromState takes ownership of `state`, freeing it on any failure.
         const state = try generateState(fork, allocator, pool, chain_config, validator_count);
+        errdefer {
+            state.deinit();
+            allocator.destroy(state);
+        }
         return initFromState(allocator, pool, state, fork, fork_epoch);
     }
 
+    /// Ownership of `state` transfers only on success; on any failure the caller still owns it.
     pub fn initFromState(allocator: Allocator, pool: *Node.Pool, state: *AnyBeaconState, fork: ForkSeq, fork_epoch: Epoch) !TestCachedBeaconState {
-        // Owns `state` until createCachedBeaconState takes it over; `null` once transferred.
-        var owned_state: ?*AnyBeaconState = state;
-        errdefer if (owned_state) |s| {
-            s.deinit();
-            allocator.destroy(s);
-        };
-
         const pubkey_index_map = try allocator.create(PubkeyIndexMap);
         pubkey_index_map.* = PubkeyIndexMap.init(allocator);
         errdefer {
@@ -265,14 +248,15 @@ pub const TestCachedBeaconState = struct {
             .index_to_pubkey = index_pubkey_cache,
             .pubkey_to_index = pubkey_index_map,
         };
-        // cached_state takes ownership of state and will deinit there
         const cached_state = try CachedBeaconState.createCachedBeaconState(allocator, state, immutable_data, .{
             .skip_sync_committee_cache = state.forkSeq() == .phase0,
             .skip_sync_pubkeys = false,
         });
-        owned_state = null;
+        // A later failure must leave `state` to the caller, so tear down everything
+        // cached_state owns except it (CachedBeaconState.deinit minus the state).
         errdefer {
-            cached_state.deinit();
+            cached_state.epoch_cache.deinit();
+            cached_state.slashings_cache.deinit();
             allocator.destroy(cached_state);
         }
 

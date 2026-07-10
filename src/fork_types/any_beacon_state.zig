@@ -433,15 +433,6 @@ pub const AnyBeaconState = union(ForkSeq) {
         }
     }
 
-    /// Serialize the `validators` list to SSZ bytes. Caller owns the returned slice and frees it with
-    /// the same allocator.
-    pub fn serializeValidators(self: *AnyBeaconState, allocator: Allocator) ![]u8 {
-        const out = try allocator.alloc(u8, try self.validatorsSerializedSize());
-        errdefer allocator.free(out);
-        _ = try self.serializeValidatorsIntoBytes(out);
-        return out;
-    }
-
     pub fn balances(self: *AnyBeaconState) !*ct.phase0.Balances.TreeView {
         return switch (self.*) {
             inline else => |state| try state.get("balances"),

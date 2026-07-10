@@ -1,6 +1,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const m = @import("metrics");
+const buffer_pool = @import("../../util/buffer_pool.zig");
 
 /// Per-tier counts, shared by the item-level `size` and epoch-level `epoch_size` gauges. An epoch
 /// holding both an in-memory and a persisted entry counts toward both tiers.
@@ -351,6 +352,7 @@ pub fn block() *BlockStateCacheMetrics {
 pub fn write(writer: anytype) !void {
     try m.write(&block_cache_metrics, writer);
     try m.write(&checkpoint_cache_metrics, writer);
+    try m.write(&buffer_pool.buffer_pool_metrics, writer);
 }
 
 /// Refresh ALL PULL gauges from the live caches, then serialize. The caches are taken as `anytype`
@@ -364,6 +366,7 @@ pub fn scrape(writer: anytype, block_cache: anytype, cp_cache: anytype, io: std.
     try setCpEpochSize(cp_cache.collectEpochSizeCounts());
     const crs = cp_cache.scanCpReadStats(io);
     setCpReads(crs.reads, crs.secs);
+    if (cp_cache.buffer_pool) |pool| buffer_pool.refreshMetrics(pool);
 
     try write(writer);
 }
