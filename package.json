@@ -57,8 +57,11 @@
     ]
   },
   "dependencies": {
-    "@chainsafe/zapi": "2.x.0"
+    "@chainsafe/zapi": "2.0.0"
   },
+  "bundleDependencies": [
+    "@chainsafe/zapi"
+  ],
   "devDependencies": {
     "@biomejs/biome": "^2.3.11",
     "@chainsafe/benchmark": "^2.0.1",

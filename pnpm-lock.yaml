@@ -4,13 +4,18 @@ settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
 
+patchedDependencies:
+  '@chainsafe/zapi@2.0.0':
+    hash: 1ee3098b9add420cabbd80ab4b1eaf4e386f79ac45ec68e3bbfcdcaa969d870a
+    path: patches/@chainsafe__zapi@2.0.0.patch
+
 importers:
 
   .:
     dependencies:
       '@chainsafe/zapi':
         specifier: 2.0.0
-        version: 2.0.0
+        version: 2.0.0(patch_hash=1ee3098b9add420cabbd80ab4b1eaf4e386f79ac45ec68e3bbfcdcaa969d870a)
     devDependencies:
       '@biomejs/biome':
         specifier: ^2.3.11
@@ -2442,7 +2447,7 @@ snapshots:
       '@chainsafe/swap-or-not-shuffle-win32-arm64-msvc': 1.2.1
       '@chainsafe/swap-or-not-shuffle-win32-x64-msvc': 1.2.1
 
-  '@chainsafe/zapi@2.0.0': {}
+  '@chainsafe/zapi@2.0.0(patch_hash=1ee3098b9add420cabbd80ab4b1eaf4e386f79ac45ec68e3bbfcdcaa969d870a)': {}
 
   '@colors/colors@1.5.0':
     optional: true
