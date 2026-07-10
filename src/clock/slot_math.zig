@@ -191,7 +191,9 @@ const mainnet = ClockConfig{
     .slots_per_epoch = 32,
 };
 
-test "basic slot math" {
+test "basic slot math anchors slot 0 at genesis" {
+    // Genesis starts slot 0, every 12 s step is one slot, and 32 slots make
+    // an epoch; slot starts convert back to the same instants.
     try testing.expectEqual(@as(?Slot, 0), slotAtSec(mainnet, mainnet.genesis_time_sec));
     try testing.expectEqual(@as(?Slot, 1), slotAtSec(mainnet, mainnet.genesis_time_sec + 12));
     try testing.expectEqual(@as(?Slot, 2), slotAtSec(mainnet, mainnet.genesis_time_sec + 24));
@@ -220,7 +222,9 @@ test "basic slot math" {
     try testing.expectEqual(@as(u64, 12_000), slotDurationMsAt(mainnet, 1_000_000));
 }
 
-test "within-slot timing" {
+test "within-slot times floor to the slot's start" {
+    // Every instant inside [start, start + 12 s) is the same slot; the exact
+    // boundary begins the next one.
     try testing.expectEqual(@as(?Slot, 0), slotAtSec(mainnet, mainnet.genesis_time_sec + 0));
     try testing.expectEqual(@as(?Slot, 0), slotAtSec(mainnet, mainnet.genesis_time_sec + 6));
     try testing.expectEqual(@as(?Slot, 0), slotAtSec(mainnet, mainnet.genesis_time_sec + 11));
@@ -242,7 +246,9 @@ test "pre-genesis returns null" {
     try testing.expectEqual(@as(?Slot, null), slotAtMs(mainnet, 0));
 }
 
-test "msUntilNextSlot" {
+test "msUntilNextSlot counts down to the next boundary" {
+    // A full slot remains at a boundary, the remainder mid-slot, and
+    // pre-genesis it is the time until genesis itself.
     const genesis_ms = mainnet.genesis_time_sec * 1000;
     const slot_ms: u64 = 12_000;
 
@@ -318,7 +324,8 @@ const eip7782 = ClockConfig{
     .slots_per_epoch = 32,
 };
 
-test "fork-aware: slotDurationMsAt" {
+test "fork-aware: slotDurationMsAt selects the duration in force at the slot" {
+    // 12 s slots before the fork at slot 1024, 6 s slots from it onward.
     try testing.expectEqual(@as(u64, 12_000), slotDurationMsAt(eip7782, 0));
     try testing.expectEqual(@as(u64, 12_000), slotDurationMsAt(eip7782, 1023));
     try testing.expectEqual(@as(u64, 6_000), slotDurationMsAt(eip7782, 1024));
@@ -399,20 +406,25 @@ const test_genesis_ms: u64 = test_cfg.genesis_time_sec * 1000;
 const test_disparity_ms: u64 = test_cfg.maximum_gossip_clock_disparity_ms;
 const test_slot_1_start_ms: u64 = test_genesis_ms + test_cfg.slot_duration_ms;
 
-test "gossip disparity: far from boundary" {
+test "gossip disparity: far from boundary only the current slot is accepted" {
+    // 3 s into slot 0: more than 500 ms from either boundary, so neither the
+    // forward nor the backward tolerance applies.
     const now = test_genesis_ms + 3_000;
     try testing.expectEqual(@as(?Slot, 0), slotWithGossipDisparity(test_cfg, now));
     try testing.expect(isCurrentSlotGivenGossipDisparity(test_cfg, 0, now));
     try testing.expect(!isCurrentSlotGivenGossipDisparity(test_cfg, 1, now));
 }
 
-test "gossip disparity: just after slot boundary" {
+test "gossip disparity: just after a boundary the previous slot is accepted" {
+    // 300 ms into slot 1 is within the 500 ms window, so slot 0 still counts.
     try testing.expect(
         isCurrentSlotGivenGossipDisparity(test_cfg, 0, test_slot_1_start_ms + 300),
     );
 }
 
 test "gossip disparity: forward window inside, at, and past the threshold" {
+    // 400 ms before slot 1's start is inside the 500 ms window, exactly
+    // 500 ms is the inclusive edge, and 1 ms further is past it.
     const inside = test_slot_1_start_ms - 400;
     try testing.expectEqual(@as(?Slot, 1), slotWithGossipDisparity(test_cfg, inside));
     try testing.expect(isCurrentSlotGivenGossipDisparity(test_cfg, 1, inside));
@@ -426,6 +438,9 @@ test "gossip disparity: forward window inside, at, and past the threshold" {
 }
 
 test "gossip disparity: pre-genesis slot 0 only within disparity of genesis" {
+    // Before genesis only slot 0 can be current, and only within 500 ms of
+    // genesis: 1 s out is too early, 300 ms and the 500 ms edge are in,
+    // 501 ms is out again.
     const far_before = test_genesis_ms - 1_000;
     try testing.expectEqual(@as(?Slot, null), slotWithGossipDisparity(test_cfg, far_before));
     try testing.expect(!isCurrentSlotGivenGossipDisparity(test_cfg, 0, far_before));
@@ -464,7 +479,9 @@ test "gossip disparity: pre-genesis with sub-disparity slot duration never advan
     );
 }
 
-test "tolerance helpers" {
+test "tolerance helpers shift the read forward and backward one slot" {
+    // From slot 1's start, one slot of future tolerance reads slot 2 and one
+    // slot of past tolerance reads slot 0.
     const one_slot = test_cfg.slot_duration_ms;
     try testing.expectEqual(
         @as(?Slot, 2),
@@ -486,7 +503,9 @@ test "tolerance helpers" {
     );
 }
 
-test "secFromSlot and msFromSlot" {
+test "secFromSlot and msFromSlot measure signed offsets from a slot's start" {
+    // From slot 1's start: +6 s ahead, zero at the start itself, and -12 s
+    // (one full slot) back at genesis.
     const slot_1_start_sec = test_slot_1_start_ms / 1000;
     try testing.expectEqual(@as(i64, 6), secFromSlot(test_cfg, 1, slot_1_start_sec + 6));
     try testing.expectEqual(@as(i64, 6000), msFromSlot(test_cfg, 1, test_slot_1_start_ms + 6_000));
