@@ -32,8 +32,6 @@ pub fn processPendingDeposits(
     const deposit_balance_to_consume = try state.depositBalanceToConsume();
     const available_for_processing = deposit_balance_to_consume + getActivationExitChurnLimit(epoch_cache);
     const finalized_slot = computeStartSlotAtEpoch(try state.finalizedEpoch());
-    const eth1_deposit_index = try state.eth1DepositIndex();
-    const deposit_requests_start_index = try state.depositRequestsStartIndex();
 
     var processed_amount: u64 = 0;
     var next_deposit_index: u64 = 0;
@@ -46,15 +44,20 @@ pub fn processPendingDeposits(
     const pending_deposits_len = try pending_deposits.length();
 
     for (0..pending_deposits_len) |_| {
-        const deposit = try pending_deposits_it.nextValue(undefined);
-        // Do not process deposit requests if Eth1 bridge deposits are not yet applied.
-        if (
-        // Is deposit request
-        deposit.slot > GENESIS_SLOT and
-            // There are pending Eth1 bridge deposits
-            eth1_deposit_index < deposit_requests_start_index)
-        {
-            break;
+        const deposit = try pending_deposits_it.nextValue();
+        // Pre-fulu: do not process deposit requests if Eth1 bridge deposits are not yet applied.
+        // Fulu removes this guard along with the former (Eth1 bridge) deposit mechanism.
+        if (comptime fork.lt(.fulu)) {
+            const eth1_deposit_index = try state.eth1DepositIndex();
+            const deposit_requests_start_index = try state.depositRequestsStartIndex();
+            if (
+            // Is deposit request
+            deposit.slot > GENESIS_SLOT and
+                // There are pending Eth1 bridge deposits
+                eth1_deposit_index < deposit_requests_start_index)
+            {
+                break;
+            }
         }
 
         // Check if deposit has been finalized, otherwise, stop processing.

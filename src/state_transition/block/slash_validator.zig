@@ -10,8 +10,6 @@ const SlashingsCache = @import("../cache/slashings_cache.zig").SlashingsCache;
 const decreaseBalance = @import("../utils/balance.zig").decreaseBalance;
 const increaseBalance = @import("../utils/balance.zig").increaseBalance;
 const initiateValidatorExit = @import("./initiate_validator_exit.zig").initiateValidatorExit;
-const computePreviousEpoch = @import("../utils/epoch.zig").computePreviousEpoch;
-const isActiveValidatorView = @import("../utils/validator.zig").isActiveValidatorView;
 const getBeaconProposer = @import("../cache/get_beacon_proposer.zig").getBeaconProposer;
 
 /// Same to https://github.com/ethereum/eth2.0-specs/blob/v1.1.0-alpha.5/specs/altair/beacon-chain.md#has_flag
@@ -93,12 +91,8 @@ pub fn slashValidator(
     }
 
     if (fork.gte(.altair)) {
-        const previous_epoch = computePreviousEpoch(epoch);
-        const is_active_previous_epoch = try isActiveValidatorView(validator, previous_epoch);
-        const is_active_current_epoch = try isActiveValidatorView(validator, epoch);
-
         var previous_participation = try state.previousEpochParticipation();
-        if (is_active_previous_epoch and (try previous_participation.get(@intCast(slashed_index))) & TIMELY_TARGET == TIMELY_TARGET) {
+        if ((try previous_participation.get(@intCast(slashed_index))) & TIMELY_TARGET == TIMELY_TARGET) {
             if (epoch_cache.previous_target_unslashed_balance_increments < slashed_effective_balance_increments) {
                 return error.PreviousTargetUnslashedBalanceUnderflow;
             }
@@ -106,7 +100,7 @@ pub fn slashValidator(
         }
 
         var current_participation = try state.currentEpochParticipation();
-        if (is_active_current_epoch and (try current_participation.get(@intCast(slashed_index))) & TIMELY_TARGET == TIMELY_TARGET) {
+        if ((try current_participation.get(@intCast(slashed_index))) & TIMELY_TARGET == TIMELY_TARGET) {
             if (epoch_cache.current_target_unslashed_balance_increments < slashed_effective_balance_increments) {
                 return error.CurrentTargetUnslashedBalanceUnderflow;
             }

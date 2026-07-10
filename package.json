@@ -23,6 +23,10 @@
     "./state-transition": {
       "import": "./bindings/src/state-transition.js",
       "types": "./bindings/src/state-transition.d.ts"
+    },
+    "./metrics": {
+      "import": "./bindings/src/metrics.js",
+      "types": "./bindings/src/metrics.d.ts"
     }
   },
   "scripts": {

@@ -57,6 +57,10 @@
         //     .url = "git+https://github.com/karlseguin/http.zig.git#2924ead41db9e1986db3b4909a82185c576f6361",
         //     .hash = "httpz-0.0.0-PNVzrC7CBgDSMZNP7chgAczR3FyAz5Eum6Kb1_K9kmYR",
         // },
+        .zio = .{
+            .url = "git+https://github.com/lalinsky/zio?ref=v0.14.0#aa860381beb42bc077e24ef304827cbdc23fcef9",
+            .hash = "zio-0.14.0-xHbVVPxFHgBCop4CvfF4u360kzWlHD4FS8Ud-RIkPcZ7",
+        },
     },
     .options_modules = .{
         .build_options = .{
@@ -105,7 +109,7 @@
             },
             .spec_test_version = .{
                 .type = .string,
-                .default = "v1.6.0-beta.2",
+                .default = "v1.7.0-alpha.11",
                 .description = "Consensus spec tests version tag.",
             },
             .spec_test_out_dir = .{
@@ -135,6 +139,13 @@
         },
         .time = .{
             .root_source_file = "src/time.zig",
+        },
+        .bounded_array = .{
+            .root_source_file = "src/bounded_array.zig",
+        },
+        .clock = .{
+            .root_source_file = "src/clock/root.zig",
+            .imports = .{ .zio, .consensus_types, .bounded_array, .time },
         },
         .cpu_count = .{
             .root_source_file = "src/cpu_count.zig",
@@ -203,6 +214,10 @@
         .peer_manager = .{
             .root_source_file = "src/peer_manager/root.zig",
             .imports = .{.metrics},
+        },
+        .beacon_node = .{
+            .root_source_file = "src/beacon_node/root.zig",
+            .imports = .{ .consensus_types, .state_transition, .persistent_merkle_tree, .testing_allocators, .metrics, .hex, .time },
         },
     },
     .executables = .{
@@ -365,6 +380,7 @@
         // Per-module unit tests (mirror the old auto-generated `test:<module>` steps).
         .constants = .{ .root_module = .constants },
         .hex = .{ .root_module = .hex },
+        .bounded_array = .{ .root_module = .bounded_array },
         .cpu_count = .{ .root_module = .cpu_count },
         .hashing = .{ .root_module = .hashing },
         .preset = .{ .root_module = .preset },
@@ -378,6 +394,8 @@
         .era = .{ .root_module = .era },
         .fork_choice = .{ .root_module = .fork_choice },
         .peer_manager = .{ .root_module = .peer_manager },
+        .clock = .{ .root_module = .clock },
+        .beacon_node = .{ .root_module = .beacon_node },
 
         .int = .{
             .root_module = .{

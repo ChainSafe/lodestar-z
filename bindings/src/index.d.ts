@@ -40,7 +40,7 @@ interface ExecutionPayloadHeader {
   gasUsed: number;
   timestamp: number;
   extraData: Uint8Array;
-  baseFeePerGas: number;
+  baseFeePerGas: bigint;
   blockHash: Uint8Array;
   transactionsRoot: Uint8Array;
   withdrawalsRoot?: Uint8Array; // capella+
@@ -93,7 +93,7 @@ export enum ForkName {
 }
 
 interface SyncCommittee {
-  pubkeys: Uint8Array;
+  pubkeys: Uint8Array[];
   aggregatePubkey: Uint8Array;
 }
 
@@ -278,7 +278,8 @@ interface ProposerRewards {
 }
 
 interface SyncCommitteeCache {
-  validatorIndices: number[];
+  validatorIndices: Uint32Array;
+  validatorIndexMap: Map<number, number[]>;
 }
 
 interface EpochShuffling {
@@ -293,11 +294,6 @@ interface EpochShuffling {
 interface HistoricalSummary {
   blockSummaryRoot: Uint8Array;
   stateSummaryRoot: Uint8Array;
-}
-
-interface PendingConsolidation {
-  sourceIndex: number;
-  targetIndex: number;
 }
 
 interface Validator {
@@ -361,7 +357,7 @@ export declare class BeaconStateView {
   pendingDepositsCount: number;
   pendingPartialWithdrawals: Uint8Array;
   pendingPartialWithdrawalsCount: number;
-  pendingConsolidations: PendingConsolidation[];
+  pendingConsolidations: Uint8Array;
   pendingConsolidationsCount: number;
   proposerLookahead: Uint32Array;
   // executionPayloadAvailability: boolean[];
@@ -394,6 +390,8 @@ export declare class BeaconStateView {
   getPreviousShuffling(): EpochShuffling;
   getCurrentShuffling(): EpochShuffling;
   getNextShuffling(): EpochShuffling;
+  getBeaconCommittee(): number[];
+  getBeaconCommitteeCountPerSlot(): number;
   previousDecisionRoot: string;
   currentDecisionRoot: string;
   nextDecisionRoot: string;
@@ -415,6 +413,7 @@ export declare class BeaconStateView {
   getBalance(index: number): number;
   getValidator(index: number): Validator;
   getAllValidators(): Validator[];
+  getBuildersLength(): number;
   getAllBalances(): number[];
   getValidatorsByStatus(statuses: Set<string>, currentEpoch: number): Validator[];
   // TODO wrong function
@@ -468,7 +467,7 @@ export declare class BeaconStateView {
    * and always 0 here since Zig STF doesn't process Gloas yet.
    */
   getExpectedWithdrawals(): {
-    expectedWithdrawals: {index: number; validatorIndex: number; address: Uint8Array; amount: number}[];
+    expectedWithdrawals: {index: number; validatorIndex: number; address: Uint8Array; amount: bigint}[];
     processedBuilderWithdrawalsCount: number;
     processedPartialWithdrawalsCount: number;
     processedBuildersSweepCount: number;
@@ -510,6 +509,7 @@ export declare class BeaconStateView {
   createMultiProof(descriptor: Uint8Array): CompactMultiProof;
 
   processSlots(slot: number, options?: ProcessSlotsOpts): BeaconStateView;
+  stateTransition(signedBlockBytes: Uint8Array, options?: TransitionOpts): BeaconStateView;
 }
 
 declare const bindings: {
@@ -523,11 +523,7 @@ declare const bindings: {
     innerShuffleList: (out: Uint32Array, seed: Uint8Array, rounds: number, forwards: boolean) => void;
   };
   stateTransition: {
-    stateTransition: (
-      preState: BeaconStateView,
-      signedBlockBytes: Uint8Array,
-      options?: TransitionOpts
-    ) => BeaconStateView;
+    deinitReusedEpochTransitionCache: () => void;
   };
   metrics: {
     init: () => void;
