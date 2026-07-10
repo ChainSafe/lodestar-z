@@ -4,6 +4,7 @@ const bls = @import("bls");
 const blst_bindings = @import("./blst.zig");
 const PubkeyIndexMap = @import("state_transition").PubkeyIndexMap;
 const Index2PubkeyCache = @import("state_transition").Index2PubkeyCache;
+const pubkey_cache_headroom = @import("state_transition").pubkey_cache_headroom;
 const napi_io = @import("./io.zig");
 
 /// Uses page allocator for internal allocations.
@@ -240,7 +241,7 @@ pub fn set(index: js.Number, pubkey: js.Uint8Array) !void {
 
     // Ensure capacity if needed
     if (idx >= state.index2pubkey.capacity) {
-        const new_cap: u32 = @intCast(@max(idx + 1, state.index2pubkey.capacity * 2));
+        const new_cap: u32 = @intCast(@max(idx + 1, state.index2pubkey.capacity + pubkey_cache_headroom));
         try state.pubkey2index.ensureTotalCapacity(new_cap);
         try state.index2pubkey.ensureTotalCapacity(allocator, new_cap);
     }

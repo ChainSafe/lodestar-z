@@ -1,5 +1,6 @@
 const std = @import("std");
 const bls = @import("bls");
+const preset = @import("preset");
 const types = @import("consensus_types");
 const Validator = types.phase0.Validator.Type;
 
@@ -8,6 +9,14 @@ pub const PubkeyIndexMap = std.AutoHashMap([48]u8, u64);
 
 /// Map from validator index to pubkey
 pub const Index2PubkeyCache = std.ArrayList(bls.PublicKey);
+
+const headroom_epochs = (90 * 24 * 60 * 60) / (preset.SECONDS_PER_SLOT * preset.SLOTS_PER_EPOCH);
+
+// Reserve headroom so the native cache does not realloc on growth. Reallocs are unsafe
+/// while the historical state worker reads the cache, until lodestar-z adds locking.
+/// Registry growth is capped at MAX_PENDING_DEPOSITS_PER_EPOCH new validators per epoch,
+/// reserve 3 months of worst-case growth, over a year at organic rates
+pub const pubkey_cache_headroom = preset.MAX_PENDING_DEPOSITS_PER_EPOCH * headroom_epochs;
 
 /// Populate `pubkey_to_index` and `index_to_pubkey` caches from validators list.
 ///

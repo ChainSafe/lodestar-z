@@ -24,6 +24,7 @@ pub const PubkeyIndexMap = @import("./cache/pubkey_cache.zig").PubkeyIndexMap;
 pub const Index2PubkeyCache = @import("./cache/pubkey_cache.zig").Index2PubkeyCache;
 pub const syncPubkeys = @import("./cache/pubkey_cache.zig").syncPubkeys;
 pub const syncPubkeysParallel = @import("./cache/pubkey_cache.zig").syncPubkeysParallel;
+pub const pubkey_cache_headroom = @import("./cache/pubkey_cache.zig").pubkey_cache_headroom;
 
 pub const EpochTransitionCache = @import("./cache/epoch_transition_cache.zig").EpochTransitionCache;
 pub const processEpoch = @import("./epoch/process_epoch.zig").processEpoch;
