@@ -421,6 +421,10 @@ pub const PeerManager = struct {
     }
 
     /// Populate the input array from store + scorer data.
+    ///
+    /// Only healthy peers are evaluated by prioritization; banned/disconnected
+    /// peers are already handled by `evictBadPeers` this heartbeat. Mirrors the
+    /// TS `connectedHealthyPeers` set passed to `prioritizePeers`.
     fn buildPrioritizeInputs(
         self: *PeerManager,
         inputs: *std.ArrayList(PrioritizePeersInput),
@@ -428,6 +432,7 @@ pub const PeerManager = struct {
         var iter = self.store.iterPeers();
         while (iter.next()) |entry| {
             const peer = entry.value_ptr;
+            if (self.scorer.getScoreState(peer.peer_id) != .healthy) continue;
             try inputs.append(self.allocator, .{
                 .peer_id = peer.peer_id,
                 .direction = peer.direction,
