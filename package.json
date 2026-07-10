@@ -57,7 +57,7 @@
     ]
   },
   "dependencies": {
-    "@chainsafe/zapi": "2.0.0"
+    "@chainsafe/zapi": "github:ChainSafe/zapi#6649cef91b19bcd9854aa1ffa4d0c1aed7270f55"
   },
   "bundleDependencies": [
     "@chainsafe/zapi"

@@ -4,18 +4,13 @@ settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
 
-patchedDependencies:
-  '@chainsafe/zapi@2.0.0':
-    hash: 1ee3098b9add420cabbd80ab4b1eaf4e386f79ac45ec68e3bbfcdcaa969d870a
-    path: patches/@chainsafe__zapi@2.0.0.patch
-
 importers:
 
   .:
     dependencies:
       '@chainsafe/zapi':
-        specifier: 2.0.0
-        version: 2.0.0(patch_hash=1ee3098b9add420cabbd80ab4b1eaf4e386f79ac45ec68e3bbfcdcaa969d870a)
+        specifier: github:ChainSafe/zapi#6649cef91b19bcd9854aa1ffa4d0c1aed7270f55
+        version: https://codeload.github.com/ChainSafe/zapi/tar.gz/6649cef91b19bcd9854aa1ffa4d0c1aed7270f55
     devDependencies:
       '@biomejs/biome':
         specifier: ^2.3.11
@@ -406,8 +401,9 @@ packages:
     resolution: {integrity: sha512-H8YdEoXXv2Hw17gDWGOJEya4LHlBbpChJP3jDQRfIk9hhwr0c/zbBemBRmjADowZhArL+ymkO+j5hGaYySjdpw==}
     engines: {node: '>= 18'}
 
-  '@chainsafe/zapi@2.0.0':
-    resolution: {integrity: sha512-5HXO76Ep4tYU5NngsBSgE5t/xMQQZnap+Q9PKDXOa1Oe3VaP0hU2+visNlaxW7RrVK1plF0cGMIamLubpNdefw==}
+  '@chainsafe/zapi@https://codeload.github.com/ChainSafe/zapi/tar.gz/6649cef91b19bcd9854aa1ffa4d0c1aed7270f55':
+    resolution: {tarball: https://codeload.github.com/ChainSafe/zapi/tar.gz/6649cef91b19bcd9854aa1ffa4d0c1aed7270f55}
+    version: 2.2.0
     hasBin: true
 
   '@colors/colors@1.5.0':
@@ -2447,7 +2443,7 @@ snapshots:
       '@chainsafe/swap-or-not-shuffle-win32-arm64-msvc': 1.2.1
       '@chainsafe/swap-or-not-shuffle-win32-x64-msvc': 1.2.1
 
-  '@chainsafe/zapi@2.0.0(patch_hash=1ee3098b9add420cabbd80ab4b1eaf4e386f79ac45ec68e3bbfcdcaa969d870a)': {}
+  '@chainsafe/zapi@https://codeload.github.com/ChainSafe/zapi/tar.gz/6649cef91b19bcd9854aa1ffa4d0c1aed7270f55': {}
 
   '@colors/colors@1.5.0':
     optional: true
