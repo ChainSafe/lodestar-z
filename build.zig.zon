@@ -28,7 +28,7 @@
             },
         },
         .hashtree = .{
-            .url = "git+https://github.com/ChainSafe/hashtree-z.git#e233879d64fc9390f0bc9f27781eff9ae2795ce6",
+            .url = "git+https://github.com/ChainSafe/hashtree-z.git#f5c1b81da167f84376fb94aef29a57fc6c08dc28",
             .hash = "hashtree-0.1.0-sBOovj8WAAAGCN62cybnffy7b4ITTQsog2oOG2AQZl9L",
         },
         .snappy = .{
